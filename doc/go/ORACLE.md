@@ -78,7 +78,7 @@ in ordinary fns, deftypes, records and reifys handed over to them, overloads cho
 through each interface, `reduce` on an `IReduceInit` alone, RT's default imports, deftypes nested
 in handed-over code, the `:inline` operators' results on any operands, untyped interop's results
 and errors on many receivers and arguments, the virtual-thread executor of `send-off`; one
-namespace per test file, `native.*`; doc/STANDALONE-NOTES.md, "S4: the JVM removed").
+namespace per test file, `native.*`; doc/STANDALONE-NOTES.md, "S4: the JVM removed"). And `go` (goi's cross-dialect cases, GR5: recorded by goi, "Adding cases" below).
 
 Class scripts (`classes/`): `PersistentVector` (across the 32 and 1,056 element boundaries,
 transients, chunked seqs), `PersistentHashMap` (collisions, nil key, transients),
@@ -152,10 +152,11 @@ and messages) and `cross` (30 common patterns × 18 inputs × 2 flag sets).
   `-j` the concurrent runs (default 16), `--timeout` the seconds allowed to one run (default
   300).
 - **The box's subset** (BOX-NOTES.md, S1, S5): every corpus but those of the host's files
-  and processes, which the box has not; the sockets' with the box's network on the host's
+  and processes, which the box has not, and goi's crossings (`forms/go`, since GR5: GOI-SPEC.md
+  GC25); the sockets' with the box's network on the host's
   loopback (S5): `ARBACE_BOX_NET=loopback bin/oracle check
   'target/arbace-go/box-amd64/arbace-box -' --timeout 900 --exclude forms/files. --exclude
-  forms/processes. --expected test/oracle/known-go-box-amd64.edn`
+  forms/processes. --exclude forms/go. --expected test/oracle/known-go-box-amd64.edn`
   (21,825 of the 22,278 cases since S5, 21,742 before; the native build's 46 known mismatches; until S2 one more, the
   reducers case whose 4.9 GB heap did not fit the guest's 3 GiB, its run incomplete: since S2
   the evaluator's tail calls clear the method's object and the case runs in constant memory,
@@ -336,6 +337,13 @@ not compile. Positions are in UTF-16 units.
   file together.
 - Class scripts and regex: the same, under `classes/` and `regex/`; a class step that cannot be
   resolved is recorded as `:error` and fails `record`.
+- Go forms (goi, doc/go/GOI-SPEC.md GR5, S54): the frozen jar has no Go forms, so a corpus file
+  whose first line is `;; oracle: recorded by goi ...` (`forms/go.ae`, the cross-dialect cases:
+  Arbace, Go forms, Java forms and compiled Go calling each other) is recorded from the Go build,
+  `bin/oracle record --goi 'target/arbace-go/amd64/arbace -' forms/go`, its expected file saying
+  so in its header, and reviewed by hand before it is committed. `bin/oracle record` without
+  `--goi` skips such files (it names them), and `check jvm` leaves them out; `check IMPL` of the
+  Go build checks them as any other.
 - The harvest: `bin/clojure-tests` in rename mode (since S4 the Go run, `CLOJURE_TESTS_GO`, run
   by `bin/gate`) leaves the renamed suite in `.tmp/clojure-tests/go/suite`; `bin/oracle
   harvest [SUITE]` then rewrites `forms/harvest/` (about 5 minutes), and `bin/oracle record

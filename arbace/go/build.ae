@@ -889,6 +889,16 @@ that a type with methods goes in as a proxy (§5.3)."
   [m]
   ((:method-cell *ctx*) m))
 
+(defn method-callable
+  "The Callable of interpreted method object m (its cell) as Arbace calls it, the receiver
+  first: the var T.M's (§2.1, §7.1; GR5)."
+  [m cell nm]
+  (let [rty (recv-type-of m)
+        sig (e/o m :type)
+        {:keys [recv]} (slot-layout sig rty)]
+    (op "InterpMethodCallable" cell (long (int (first (name (first recv))))) (long (second recv))
+        (desc rty) (desc sig) nm)))
+
 (defn- path-derefs
   "The implicit dereferences of a field selection along path from type ty (the checker's)."
   [ty path]
@@ -1529,13 +1539,21 @@ that a type with methods goes in as a proxy (§5.3)."
 
 (defn- block-stmts [n] (stmt-list (:stmts n)))
 
+(defn- stmt-line
+  "A statement's line (S51), or 0."
+  [s]
+  (long (or (:line s) (when (= :label (:op s)) (some-> (:stmt s) :line)) 0)))
+
 (defn- body-node
-  "A statement list's node (a Seq with its labels' goto codes)."
+  "A statement list's node (a SeqL with its labels' goto codes and its statements' lines, which
+  the frame keeps for traces: §10.6, GR5)."
   [stmts]
   (let [ss (vec stmts)
         built (mapv stmt ss)
-        labels (mapv (fn [s] (if (= :label (:op s)) (label-code! (:label s)) 0)) ss)]
-    (op "Seq" (oa built) (oa (map long (if (some pos? labels) labels []))))))
+        labels (mapv (fn [s] (if (= :label (:op s)) (label-code! (:label s)) 0)) ss)
+        lines (mapv stmt-line ss)]
+    (op "SeqL" (oa built) (oa (map long (if (some pos? labels) labels [])))
+        (oa (if (some pos? lines) lines [])))))
 
 (defn stmt-list [stmts] (body-node stmts))
 
@@ -1953,8 +1971,10 @@ that a type with methods goes in as a proxy (§5.3)."
   (let [sig (or (:sig tree) (sig-of (:type tree)))
         rty (or (:recv-type tree) (when (and (:obj tree) (e/o (:obj tree) :method)) (recv-type-of (:obj tree))))
         {:keys [params results counts recv]} (slot-layout sig rty)
+        src (or (when-let [o (:obj tree)] (when-let [sf (:source *ctx*)] (sf (e/o o :file)))) (:src *fn*))
         f {:slots (volatile! (assoc counts :C 0)) :locs (IdentityHashMap.) :code (volatile! 2)
-           :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name fname}]
+           :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name fname
+           :src src}]
     (binding [*fn* f]
       ;; the captured cells, the first C slots
       (doseq [x captures]
@@ -2001,6 +2021,7 @@ that a type with methods goes in as a proxy (§5.3)."
   (let [caps (free-locals n)
         nm (str (:name *fn*) ".func" (swap! (:lit-count *ctx*) inc))
         cell (op "FuncCell" nm (:name *ctx*) nil)
+        _ (when-let [[ns f] (:src *fn*)] (op "FuncSource" cell ns f))
         code (build-code n nm caps)]
     (op "SetCode" cell code nil)
     (op "MakeClosure" cell (oa (map #(long (nth (loc %) 1)) caps)))))

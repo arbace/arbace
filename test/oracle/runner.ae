@@ -340,9 +340,18 @@
       (oracle.driver/emit-to k sb) (.append sb " ") (oracle.driver/emit-to (get m k) sb))
     (str (.append sb "}"))))
 
+(defn goi-source?
+  "Whether corpus file f's cases are recorded by goi, not by the frozen jar (its first line says
+  so): Go forms, which the frozen JVM Arbace does not have (doc/go/GOI-SPEC.md S54)."
+  [^File f]
+  (with-open [r (io/reader f)]
+    (boolean (some-> (first (line-seq r)) (str/includes? ";; oracle: recorded by goi")))))
+
 (defn expected-text [part ^File src cases]
   (binding [oracle.driver/*ascii* false]
     (str ";; Written by bin/oracle record from " (rel src) " (doc/go/ORACLE.md); do not edit.\n"
+         (when (goi-source? src)
+           ";; Recorded by goi (bin/oracle record --goi IMPL), reviewed: the frozen jar has no Go forms (doc/go/GOI-SPEC.md S54).\n")
          "{:part :" part " :source " (emit (rel src)) " :count " (count cases) "\n :cases\n ["
          (str/join "\n  " (map emit-ordered cases))
          "]}\n")))
@@ -384,12 +393,17 @@
                       "echo 'ARBACE_ORACLE_JVM is not set: the reference runs through bin/oracle' >&2; exit 1"))
 
 (defn record
-  "Regenerates the expected files of the selected parts (or files) from the frozen JVM Arbace."
-  [jobs timeout sel]
-  (let [work (for [part parts f (source-files part) :when (selected sel part f)] [part f])
+  "Regenerates the expected files of the selected parts (or files) from the frozen JVM Arbace; the
+  files recorded by goi (goi-source?) from goi-impl, the Go build's command (--goi IMPL), or
+  not at all without it."
+  [jobs timeout sel goi-impl]
+  (let [work (for [part parts f (source-files part) :when (selected sel part f)
+                   :when (or goi-impl (not (goi-source? f))
+                             (do (println "skipped" (rel f) ": recorded by goi (S54), bin/oracle record --goi IMPL") false))]
+               [part f])
         rs (pool-map jobs (fn [[part f]]
                             (let [t0 (System/nanoTime)
-                                  r (run-file default-impl part f (source-cases part f) timeout)]
+                                  r (run-file (if (goi-source? f) goi-impl default-impl) part f (source-cases part f) timeout)]
                               (assoc r :ms (quot (- (System/nanoTime) t0) 1000000))))
                      work)
         ok (atom true)]
@@ -431,7 +445,9 @@
                                 (sort-by #(.getPath ^File %)))
                    :let [e (read-expected f)
                          src (io/file root (:source e))]
-                   :when (selected sel part src)]
+                   :when (selected sel part src)
+                   ;; the reference has no Go forms: goi's cases are the Go build's (S54)
+                   :when (not (and (= cmd default-impl) (goi-source? src)))]
                [part src e])
         rs (pool-map jobs (fn [[part src e]]
                             (let [ks (result-keys part)
@@ -570,9 +586,10 @@
                  (= "--expected" (first args)) (recur (nnext args) (assoc o :expected (second args)))
                  (= "--write-expected" (first args)) (recur (nnext args) (assoc o :write-expected (second args)))
                  (= "--exclude" (first args)) (do (swap! excluded conj (second args)) (recur (nnext args) o))
+                 (= "--goi" (first args)) (recur (nnext args) (assoc o :goi (second args)))
                  :else (recur (next args) (update o :sel conj (first args)))))
         ok (case cmd
-             "record" (record (:jobs opts) (:timeout opts) (:sel opts))
+             "record" (record (:jobs opts) (:timeout opts) (:sel opts) (:goi opts))
              "check" (let [[impl & sel] (:sel opts)
                            impl (if (= impl "jvm") default-impl impl)]
                        (let [r (check impl (:jobs opts) (:timeout opts) (vec sel))]

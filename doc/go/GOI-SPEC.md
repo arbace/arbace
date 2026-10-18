@@ -2314,3 +2314,103 @@ three, amd64, the machine shared): fib 22 2.46 ms, sumSq 1e6 19.9 ms, sieve 1e6 
   reflect (`CallProxy`: simple, about a microsecond a call, enough for `sort.Interface` and
   `io.Reader` in the check); (b) typed adapters per signature, as §6.4's invokers (GR5's adapters).
   *Recommended: (a)* until GR5 measures them.
+
+## As built: GR5 (2026-10-18)
+
+GR5, the crossings and the REPL, is built on branch `goi-gr5` (from main `ec47d8af`, which merges
+GR4 and F7, seed `910b4b8f`). Where building it found otherwise than this text, the text below is
+the record; proposals for the user are GC23-GC26.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| Arbace fns as Go funcs (§7.5) | `go/arbace/goi/adapt.ae`, `convert.ae` | an Arbace `IFn` given for a parameter of func type (of an interpreted function, of compiled Go, a `GoType`'s conversion) is a real Go func of that type (`FromArbace`): each call converts its arguments to Arbace by their types, applies the fn through the bridge and converts its results back (§5.6; several results: the elements of the sequential the fn returns) |
+| typed adapters (§6.4, GC22) | `go/arbace/goi/adapt.ae`, `arbace/go/table.ae` | a **target** (`goi.Target`: an interpreted closure, an interpreted method value, an Arbace fn) is entered as a frame of its signature's layout (`Enter`, `RunCall`, `Leave`, `SetArgR`, `ResR`); the table writes a typed adapter (`adaptN`, registered by `RegisterAdapter`) per unnamed function type of its members' parameters and results and a fixed list of common ones (§6.4's "fixed list": 14 types), 22 for linux/amd64; a closure or method value stored in Go memory (§4.6, S29) and an Arbace fn given to Go use it, else `reflect.MakeFunc`. The wrappers' methods (§5.3 rule 3) are the same typed calls through the proxy's interpreted method (`EnterMethod`), not `CallProxy` by reflect (GC22 (b), as the user decided) |
+| the bridge to Arbace | `arbace/lang/GoInterp.ae` (`GoBridge`) | goi cannot import `arbace/lang` (§1.3): GoInterp's initialization gives goi an instance of `GoBridge` (a new native, `init1`), whose methods goi calls through an interface of its own with j2g's names (`Apply_O_O1_I__O1`, `IsFn_O__Z`, `Keyword_String__O` ...): applying an Arbace fn (a GoPanic goi made coming back as its Go value, S50; a `GoExit` as os.Exit's panic), keywords, symbols, vars, deref, numbers, truth, seqs, `Reflector`'s calls |
+| the package `arbace` (§7.3) | `go/arbace.ae`, `go/arbace/api.ae`; listed in `go/arbace/gotable.edn` | §7.3's functions (`Call`, `Invoke`, `Str`, `GoStr`, `Kw`, `Sym`, `Var`, `Deref`, `Fn`, `Long`, `Float64`, `Bool`, `Seq`), Go values given to them converted to Arbace by their dynamic types; it imports std only and calls Arbace through `arbace.Hooks` (an interface it declares, `Bridge`; goi sets it), not `arbace/lang` and `arbace/jrt` (amendment 3, GC24). j2g copies it into the program beside goi; the table's generator reads it from `go/` (its other packages from the configuration's root) |
+| `GoPanic` (§10.4) | `arbace/lang/GoInterp.ae`, `go/arbace/goi/call.ae`, `trace.ae` | its message gc's text after `panic: ` (`PanicText`: gc's `printpanicval`, `+2.500000e+000`, `panics.Celsius(+3.660000e+001)`, an interpreted `Error`'s or `String`'s result); `ex-data` `{:go/value :go/type :go/trace}`, the trace the interpreted frames innermost first as `[go.demo/Div "REPL" 1]`; a run-time error's Java exception (jrt's `FromRuntimeError`) as its cause (GS11 (a)); its stack trace begins with the interpreted frames; the Go value itself kept (`goValue`) for S50. The thread's stacks are restored when a panic leaves (`guarded`) |
+| traces (§10.6) | `go/arbace/goi/stmt.ae` (`SeqL`), `func.ae` (`FuncSource`), `trace.ae`; `go/arbace/jrt/throwable.ae` (`GoiTrace`) | statements store their lines in the frame (S51; amendment 1); a function's cell knows its namespace and file (the Go file, the forms' source for the REPL's implicit file, `REPL` at the REPL); jrt captures the interpreted frames when an exception is made (`jrt.GoiTrace`, goi's) and puts each in place of the Go frame of goi's `run` that ran it, leaving goi's and the table's other frames out |
+| the REPL's report | `arbace/main.ae` (hand change 28, doc/VENDOR-NOTES.md) | `ex-triage` reports a `GoPanic` of the cause chain, at its innermost interpreted frame, rather than its cause (GC23): `Execution error (GoPanic) at go.demo/Div (REPL:1).` |
+| printing (§5.7) | `go/arbace/goi/value.ae` (`GoString`), `method.ae` (`Proxy.Format`) | `%#v` with interpreted types named by their descriptors (`demo.Point{X:3, Y:0}`; the tagged RTs of §5.2 replaced by their names), `#n` after an old generation's name (`cross.P#1{X:5, Y:6}`), a proxy's `T(v)` or `T{...}`, its `GoString` method when it has one; `Proxy.Format`'s `%#v` the same, so interpreted code's `fmt.Printf("%#v")` of a proxy prints gc's names |
+| methods as vars (§2.1) | `arbace/go/repl.ae`, `arbace/go/build.ae` (`method-callable`) | `go/method` defines the var `T.M` (for `(*T).M` too), a `GoFn` of the receiver first (`InterpMethodCallable`): GR3 and GR4 had the method cells but no vars, and `go/method` returned `nil` |
+| GS10: interop on Go values | `arbace/lang/Reflector.ae` (hand change 28), `GoInterp` | `(.M v)`: an interpreted type's method (its method set, else its var `T.M`), a compiled type's from the table by the value's reflect type and `T.M` (S39: no lookup by reflect); `(.-F v)` and `(.F v)` without a method: an exported field |
+| GS7: collection protocols | `arbace/lang/RT.ae` (hand change 28), `GoInterp` | read-only: `count`, `nth` (slices, arrays), `get` and keyword lookup (structs' exported fields by keyword, maps by key converted by the key type), `seq` (elements; a map's entries as `MapEntry`s), so `vec`, `into` and the sequence functions work; elements converted by their types (§5.6) |
+| `go/run-compiled` (G15) | `arbace/go.ae`, `arbace/go/repl.ae` | the package and the interpreted packages it imports written as a forms root (their files' forms with their metadata), built by `arbace.build.go` (embedded) with `ARBACE_GOROOT`'s toolchain (default `/root/tamago-go`) in a temporary directory, the executable run with the arguments (`arbace.java.shell/sh`): `{:out :err :exit}`. Not in the box (no toolchain there) |
+| `go/eval`, `go/run-main` | `arbace/go/repl.ae` | GR3's, now with GR5's conversions, traces and `GoPanic` |
+| the oracle (S54) | `test/oracle/forms/go.ae`, `test/oracle/expected/forms/go.edn`; `test/oracle/runner.ae`, `bin/oracle record --goi IMPL` | 112 cross-dialect cases (§1.4's session first; Arbace calling Go forms and compiled Go, Go forms calling Arbace through `arbace`, Arbace fns as Go funcs, Java forms calling Go forms through vars and Go forms calling Java forms' objects, panics, printing, GS7, GS10); a corpus file whose first line says `;; oracle: recorded by goi` is recorded from the Go build with `--goi` and reviewed (ORACLE.md, "Adding cases"), skipped by `record` without it and by `check jvm`; the Go build's check runs it as any other |
+| tests | `test/goi/repl.ae` (63 checks, 30 of them GR5's), `test/goi/session.in`, `.expected` | GR5's crossings in `bin/goi test` and the smoke test; §1.4's session typed at the REPL against its transcript, in both |
+
+**§1.4's session** runs as written, its transcript `test/goi/session.expected`: but for the line
+numbers, which are the REPL's (Arbace's REPL numbers each input's lines from 1, so `Div`'s panic
+is at `(REPL:1)`, not §1.4's illustrative `(REPL:7)`).
+
+**The check (§11).** No regression: `bin/goi check` over the 1,051 run programs and the 127
+directory tests, against `test/goi/check-linux-amd64.edn`: 832 pass, 0 fail or error, 51 known, 280
+unsupported, 15 skipped, as at GR4 (the reference unchanged; 280 s with 16 jobs on the loaded machine).
+
+**Measurements.** `bin/goi run test/goi/run go.t.fib bench` (best of three, amd64, the machine
+shared): fib 22 2.57-2.64 ms, sumSq 1e6 20.1-20.8 ms, sieve 1e6 68.6-69.0 ms (GR4: 2.46, 19.9, 62; another
+agent's builds sharing the machine): the lines
+statements store cost a few percent (a store per statement, and a closure for a list of one
+statement whose line it sets). The executable is 133,836,960 bytes against 133,308,576 built from
+main `ec47d8af` (+528,384, 0.4%: the bridge, the adapters, the package `arbace`, the typed
+wrappers). The table: 45 packages, 808 signatures, 255 invokers, 22 adapters.
+
+**Amendments (as built).**
+
+1. **Lines** (§10.6, S51): a statement list's node (`SeqL`, the builder's `body-node`) stores each
+   statement's line in the frame before it runs; a frame's line is reset when a call enters it,
+   so a frame whose body has not started (its arguments being evaluated) is not in a trace.
+   `Frame.Line` is GR5's (GR3's amendment 2 left it).
+2. **Traces' files**: the namespace and file of a frame come from its function's cell
+   (`FuncSource`); a function literal's are its enclosing function's; a method thunk's (GR4) the
+   package's namespace, without a file.
+3. **The package `arbace`** imports std only (§1.3 and §7.3 have it import `arbace/lang` and
+   `arbace/jrt`): its declarations' digest and checking then need no Go forms of `lang` (which
+   are j2g's output, not tracked forms); its `Hooks` (an interface value of its type `Bridge`,
+   excluded from the table) are goi's, which holds the bridge (GC24). `Call` also takes a String
+   naming a var; `Long` and `Float64` take Go numbers too (each argument goes to Arbace by its
+   dynamic type first).
+4. **The bridge** (§1.3): goi reaches Arbace only through `arbace.lang.GoBridge`, given at
+   GoInterp's initialization; an Arbace exception thrown into Go code is a Go panic whose value is
+   the `Throwable` (§10.5), a `GoPanic` goi made is its Go value again (S50).
+5. **`GoPanic`'s report** (§1.4, GS11): with the cause GS11 (a) gives it, `arbace.main`'s report
+   would name the cause (`ArithmeticException`, `/ by zero`); `ex-triage` names the `GoPanic`
+   instead (hand change 28; GC23).
+6. **Typed adapters** (§6.4): one per unnamed function type the table's members take or return,
+   and 14 common ones (`func()`, `func(int, int) bool`, `func(rune) rune` ...); a named function
+   type (`http.HandlerFunc`) and the others get `reflect.MakeFunc`. An adapter's frame is the
+   target's own (an interpreted closure's at the thread's next depth; an Arbace fn's a frame of
+   its own), so the adapters serve every target alike.
+7. **Methods' vars** (§2.1): `go/method` returns the var `T.M` and Arbace calls it with the
+   receiver first; a pointer receiver's method given a value from Arbace is an error, a value
+   receiver's given a pointer dereferences it (Go's implicit `*`).
+8. **GS9 not built**: the check finds `%T` of interpreted values in 1 of 1,178 programs (a known
+   difference, `fixedbugs/issue15528.go`), which GS9's condition ("if the check finds it frequent")
+   does not meet; `%T` stays a known difference (G8).
+9. **The box's oracle** leaves `forms/go.ae` out (`bin/gate --full`'s box-oracle step,
+   `--exclude forms/go.`): `go/run-compiled` has no toolchain in the box, and goi's crossings
+   there are not checked yet (GC25).
+10. **The differential check** (`bin/diffcheck`, Futamura F2) leaves `forms/go.ae` out of Clojure's
+   pair (`test/diffcheck/gen.ae`): its Go forms are calls of `arbace.go.repl` at run time whether
+   evaluated or compiled by c2j, and its `go.*` namespaces are not the pair's corpus namespaces;
+   goi's own pair is the check (§11).
+
+**Proposals for the user** (each built as recommended):
+
+- **GC23 The report of a Go panic.** (a) as built, `arbace.main` reports the `GoPanic` (its
+  message gc's text) at its innermost interpreted frame, its cause the run-time error's Java
+  exception (GS11 (a)) for those who catch it; (b) report the root cause, as for any exception
+  (`Execution error (ArithmeticException) ... / by zero`). *Recommended: (a)*: §1.4's report, and
+  gc's message is the one a Go programmer knows.
+- **GC24 The package `arbace`'s imports.** (a) as built, std only, its calls through `Hooks`
+  (goi's bridge); (b) §7.3's `arbace/lang` and `arbace/jrt` imports, which would need `lang`'s Go
+  forms (j2g's output) for the table's checker. *Recommended: (a)*.
+- **GC25 goi's crossings in the box.** (a) as built, `forms/go.ae` left out of the box's oracle
+  until checked there (with the check in the box, GS13); (b) in the box's oracle now, but for
+  `go/run-compiled`. *Recommended: (a)*.
+- **GC26 Lines in frames.** (a) as built, every statement stores its line (a few percent on
+  fib, sumSq and sieve); (b) only statements that can panic or call (fewer stores, a statement
+  without a call or a check shows its predecessor's line). *Recommended: (a)*: exact traces,
+  within GR3's speed criterion.

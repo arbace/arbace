@@ -3,14 +3,90 @@
 (in-ns 'go.arbace.goi)
 
 (go/file "value.go"
-  :imports [[fmt "fmt"] [maphash "hash/maphash"] [reflect "reflect"] [jrt "arbace/jrt"]])
+  :imports [[fmt "fmt"] [maphash "hash/maphash"] [reflect "reflect"] [strings "strings"] [jrt "arbace/jrt"]])
 
 (go/var ^{:tag maphash/Seed :doc "hashSeed is the process's one seed of GoValue's hash codes (S41).\n"}
   hashSeed (maphash/MakeSeed))
 
-(go/func GoString "GoString is a Go value's toString: its %#v, as gc prints it (§5.5, §5.7).\n"
+(go/func GoString
+  "GoString is a Go value's toString: its %#v, as gc prints it (§5.5, §5.7), interpreted types
+named by their descriptors (pkgname.Name), a generation that is not its type's newest after the
+name (demo.Point#1{X:1, Y:2}).\n"
   ^string [^any x]
-  (fmt/Sprintf "%#v" x))
+  (let [(values p ok) (proxyOf x)]
+    (when ok
+      (return (proxyGoSyntax p))))
+  (renameTypes (fmt/Sprintf "%#v" x)))
+
+(go/var ^{:tag (map string (* Type)) :doc "tagTypes are the interpreted named struct types by their RT's tag (path.Name#gen), guarded by typesMu (§5.7).\n"}
+  tagTypes (make (map string (* Type))))
+
+(go/var ^{:tag (map string int) :doc "newestGen is the newest generation of each interpreted named type (path name), guarded by typesMu.\n"}
+  newestGen (make (map string int)))
+
+(go/func noteType "noteType records interpreted named type t for printing: its tag key (a struct's), its generation.\n"
+  [^{:tag (* Type)} t ^string tagKey]
+  (.Lock typesMu)
+  (when (!= tagKey "")
+    (aset tagTypes tagKey t))
+  (let [k (+ (.-Pkg t) " " (.-Name t))]
+    (when (> (.-Gen t) (aget newestGen k))
+      (aset newestGen k (.-Gen t))))
+  (.Unlock typesMu))
+
+(go/func displayName "displayName is interpreted named type t's name as goi prints it: #gen after an old generation's.\n"
+  ^string [^{:tag (* Type)} t]
+  (.Lock typesMu)
+  (let [n (aget newestGen (+ (.-Pkg t) " " (.-Name t)))]
+    (.Unlock typesMu)
+    (when (and (> (.-Gen t) 0) (< (.-Gen t) n))
+      (return (fmt/Sprintf "%s#%d" (.-Name t) (.-Gen t))))
+    (.-Name t)))
+
+(go/func renameTypes
+  "renameTypes replaces, in fmt's %#v text s, each interpreted named struct type's RT (its
+tagged struct type: §5.2, S37) by the type's name.\n"
+  ^string [^string s]
+  (let [mark "goi:\\\""]
+    (while true
+      (let [i (strings/Index s mark)]
+        (when (< i 0)
+          (break))
+        (let [rest (subslice s (+ i (len mark)))
+              j (strings/Index rest "\\\"")]
+          (when (< j 0)
+            (break))
+          (let [key (subslice rest _ j)]
+            (.Lock typesMu)
+            (let [t (aget tagTypes key)]
+              (.Unlock typesMu)
+              (when (or (== t nil) (not (strings/Contains s (.String (.-RT t)))))
+                (break))
+              (set! s (strings/ReplaceAll s (.String (.-RT t)) (displayName t))))))))
+    s))
+
+(go/func proxyGoSyntax
+  "proxyGoSyntax is proxy p's %#v: its GoString method's, else the value's with the type's name
+(T(v) for a basic kind, T{...} for a composite, (*T)(0x...) for a pointer).\n"
+  ^string [^Proxy p]
+  (let [m (aget (.-Methods (.-T p)) "GoString")]
+    (when (stringSig m)
+      (return (.String (aget (callMethodValues m (.-V p) nil) 0)))))
+  (let [t (.-T p)
+        name (displayName t)]
+    (when (== (.-Name t) "")
+      (set! name (typeName t)))
+    (when (== (.-GK t) reflect/Pointer)
+      (return (fmt/Sprintf "(%s)(%p)" name (.-V p))))
+    (let [inner (renameTypes (fmt/Sprintf "%#v" (.-V p)))]
+      (switch (.-GK t)
+        (case [reflect/Struct reflect/Slice reflect/Array reflect/Map]
+          (when (strings/HasSuffix inner "(nil)")
+            (return (+ name "(nil)")))
+          (let [i (strings/IndexByte inner \{)]
+            (when (>= i 0)
+              (return (+ name (subslice inner i)))))))
+      (+ name "(" inner ")"))))
 
 (go/func comparableEqual
   "comparableEqual is Go's == on two values of one comparable type; false when it panics (an

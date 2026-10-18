@@ -1,0 +1,167 @@
+;; goi: traces and panics leaving Go (GOI-SPEC.md §10.4, §10.6; GR5): the interpreted frames of a
+;; goroutine's thread as jrt's stack traces show them (jrt.GoiTrace: each Go frame of goi's call
+;; body, run, is the interpreted frame it ran), the frames of a panic that leaves Go into Arbace
+;; (a GoPanic's trace), and a panic's text as gc prints it after "panic: " (printpanicval).
+(in-ns 'go.arbace.goi)
+
+(go/file "trace.go"
+  :imports [[fmt "fmt"] [math "math"] [reflect "reflect"] [runtime "runtime"] [strconv "strconv"] [strings "strings"]
+            [jrt "arbace/jrt"]])
+
+(go/method trace
+  "trace is the thread's interpreted frames above depth base, innermost first: each frame's
+namespace, function, file and line (S51). A frame entered whose body has not started (its
+line still 0: a call's arguments being evaluated) is not one yet.\n"
+  ^{:tag (slice jrt/GoiFrame)} [^{:tag (* Thread)} th ^int32 base]
+  (let [^{:tag (slice jrt/GoiFrame)} out nil
+        top true]
+    (for [d (.-depth th)] (> d base) (dec! d)
+      (when (< (conv int d) (len (.-frames th)))
+        (let [f (aget (.-frames th) d)]
+          (when (and (!= (.-Fn f) nil) (not (and top (== (.-Line f) 0))))
+            (set! top false)
+            (set! out (append out (frameInfo f)))))))
+    out))
+
+(go/func frameInfo "frameInfo is frame f as a trace's element.\n" ^{:tag jrt/GoiFrame} [^{:tag (* Frame)} f]
+  (let [fn (.-Fn f)
+        ns (.-NS fn)
+        file (.-File fn)]
+    (when (== ns "")
+      (set! ns (+ "go." (.-Pkg fn))))
+    (when (== file "")
+      (set! file "NO_SOURCE_FILE"))
+    (lit jrt/GoiFrame :NS ns :Name (.-Name fn) :File file :Line (conv int (.-Line f)))))
+
+(go/func currentTrace "currentTrace is the current goroutine's interpreted frames (jrt.GoiTrace), or nil.\n"
+  ^{:tag (slice jrt/GoiFrame)} []
+  (let [x (.-Interp (jrt/CurrentThread))]
+    (when (== x nil)
+      (return nil))
+    (.trace (assert (* Thread) x) 0)))
+
+(go/func init []
+  (set! jrt/GoiTrace currentTrace))
+
+(go/func traceElements "traceElements is a trace as an Object[] of StackTraceElement.\n"
+  ^{:tag (* jrt/RefArray)} [^{:tag (slice jrt/GoiFrame)} tr]
+  (let [a (jrt/NewRefArray jrt/StackTraceElement_class (conv int32 (len tr)))]
+    (range [i f tr]
+      (aset (.-A a) i (jrt/StackTraceElement_New_String_String_String_I (jrt/Str (.-NS f)) (jrt/Str (.-Name f))
+                                                                        (jrt/Str (.-File f)) (conv int32 (.-Line f)))))
+    a))
+
+;; ---------------------------------------------------------------------------------------
+;; A panic's text and cause (§10.4)
+
+(go/func PanicText
+  "PanicText is panic value p as gc prints it after \"panic: \" (printpanics, printpanicval): an
+error's Error(), a Stringer's String() (a proxy's interpreted ones), a value of a basic kind as
+print prints it (a named type's as T(v)), else (T) address.\n"
+  ^string [^any p]
+  (let [b (lit strings/Builder)]
+    (panicValText (addr b) (panicArg p))
+    (.String b)))
+
+(go/func printFloat
+  "printFloat is runtime.printfloat's format: +d.dddddde+ddd, NaN, +Inf, -Inf.\n"
+  ^string [^float64 v]
+  (cond
+    (math/IsNaN v) (return "NaN")
+    (math/IsInf v 1) (return "+Inf")
+    (math/IsInf v -1) (return "-Inf"))
+  (let [s (strconv/FormatFloat v \e 6 64)
+        sign "+"]
+    (when (or (< v 0) (and (== v 0) (math/Signbit v)))
+      (set! sign "-"))
+    (set! s (strings/TrimPrefix s "-"))
+    (let [i (strings/IndexByte s \e)
+          mant (subslice s _ i)
+          es (aget s (+ i 1))
+          digits (subslice s (+ i 2))]
+      (while (< (len digits) 3)
+        (set! digits (+ "0" digits)))
+      (+ sign mant "e" (conv string (conv rune es)) digits))))
+
+(go/func panicValText "panicValText writes v as gc's printpanicval does.\n" [^{:tag (* strings/Builder)} b ^any v]
+  (type-switch [x v]
+    (case [nil] (.WriteString b "nil"))
+    (case [bool] (.WriteString b (strconv/FormatBool x)))
+    (case [int] (.WriteString b (strconv/FormatInt (conv int64 x) 10)))
+    (case [int8] (.WriteString b (strconv/FormatInt (conv int64 x) 10)))
+    (case [int16] (.WriteString b (strconv/FormatInt (conv int64 x) 10)))
+    (case [int32] (.WriteString b (strconv/FormatInt (conv int64 x) 10)))
+    (case [int64] (.WriteString b (strconv/FormatInt x 10)))
+    (case [uint] (.WriteString b (strconv/FormatUint (conv uint64 x) 10)))
+    (case [uint8] (.WriteString b (strconv/FormatUint (conv uint64 x) 10)))
+    (case [uint16] (.WriteString b (strconv/FormatUint (conv uint64 x) 10)))
+    (case [uint32] (.WriteString b (strconv/FormatUint (conv uint64 x) 10)))
+    (case [uint64] (.WriteString b (strconv/FormatUint x 10)))
+    (case [uintptr] (.WriteString b (strconv/FormatUint (conv uint64 x) 10)))
+    (case [float32] (.WriteString b (printFloat (conv float64 x))))
+    (case [float64] (.WriteString b (printFloat x)))
+    (case [complex64] (.WriteString b (+ "(" (printFloat (conv float64 (real x))) (printFloat (conv float64 (imag x))) "i)")))
+    (case [complex128] (.WriteString b (+ "(" (printFloat (real x)) (printFloat (imag x)) "i)")))
+    (case [string] (.WriteString b x))
+    (case [Proxy]
+      (.WriteString b (.String (.-T x)))
+      (if (== (.-K (.-T x)) \S)
+        (do (.WriteString b "(\"") (.WriteString b (assert string (.-V x))) (.WriteString b "\")"))
+        (if (== (.-GK (.-T x)) reflect/Complex128)
+          (panicValText b (.-V x))
+          (do (.WriteString b "(") (panicValText b (.-V x)) (.WriteString b ")")))))
+    (default
+      (let [rt (reflect/TypeOf v)
+            name (.String rt)]
+        (.Lock typesMu)
+        (let [d (aget interp rt)]
+          (.Unlock typesMu)
+          (when (!= d nil)
+            (set! name (.String d))))
+        ;; a value of a named basic type: T(v), as gc's printanycustomtype
+        (when (and (!= (.PkgPath rt) "") (<= (.Kind rt) reflect/Complex128))
+          (let [rv (reflect/ValueOf v)
+                u (.Convert rv (basicOfKind (.Kind rt)))]
+            (.WriteString b name)
+            (.WriteString b "(")
+            (panicValText b (.Interface u))
+            (.WriteString b ")")
+            (return)))
+        (when (and (!= (.PkgPath rt) "") (== (.Kind rt) reflect/String))
+          (.WriteString b (+ name "(\"" (.String (reflect/ValueOf v)) "\")"))
+          (return))
+        (.WriteString b (fmt/Sprintf "(%s) %p" name (efaceData v)))))))
+
+(go/func basicOfKind "basicOfKind is the basic type of reflect kind k (a boolean, numeric or string kind).\n"
+  ^{:tag reflect/Type} [^{:tag reflect/Kind} k]
+  (switch k
+    (case [reflect/Bool] (return ((inst reflect/TypeFor bool))))
+    (case [reflect/Int] (return ((inst reflect/TypeFor int))))
+    (case [reflect/Int8] (return ((inst reflect/TypeFor int8))))
+    (case [reflect/Int16] (return ((inst reflect/TypeFor int16))))
+    (case [reflect/Int32] (return ((inst reflect/TypeFor int32))))
+    (case [reflect/Int64] (return ((inst reflect/TypeFor int64))))
+    (case [reflect/Uint] (return ((inst reflect/TypeFor uint))))
+    (case [reflect/Uint8] (return ((inst reflect/TypeFor uint8))))
+    (case [reflect/Uint16] (return ((inst reflect/TypeFor uint16))))
+    (case [reflect/Uint32] (return ((inst reflect/TypeFor uint32))))
+    (case [reflect/Uint64] (return ((inst reflect/TypeFor uint64))))
+    (case [reflect/Uintptr] (return ((inst reflect/TypeFor uintptr))))
+    (case [reflect/Float32] (return ((inst reflect/TypeFor float32))))
+    (case [reflect/Float64] (return ((inst reflect/TypeFor float64))))
+    (case [reflect/Complex64] (return ((inst reflect/TypeFor complex64))))
+    (case [reflect/Complex128] (return ((inst reflect/TypeFor complex128)))))
+  ((inst reflect/TypeFor string)))
+
+(go/func panicCause
+  "panicCause is the Java exception jrt maps a run-time error to (ArithmeticException,
+NullPointerException, ArrayIndexOutOfBoundsException: J2G-SPEC §7.9.5), a GoPanic's cause
+(GS11), or nil.\n"
+  ^any [^any p]
+  (let [(values re ok) (assert runtime/Error p)]
+    (when (not ok)
+      (return nil))
+    (let [t (jrt/FromRuntimeError re)]
+      (when (== t nil)
+        (return nil))
+      t)))
