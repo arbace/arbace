@@ -10272,24 +10272,30 @@
           (if (some? cm) cm (CodeRun/cmethod m (.-nie em) false)))))
 
     ;; method m of objx compiled (cached on the method); in compat mode when it holds a node
-    ;; kind the compiler does not know
+    ;; kind the compiler does not know. Once, under m's lock: threads that first call the same
+    ;; fn at once (j2g's par-mapv) compiled it side by side, reading the analyzed tree's lazily
+    ;; made state together (a CaseExpr's HashMaps' entrySet, a two-word field on Go: one
+    ;; thread saw it torn, a nil EntrySet, and threw NullPointerException in
+    ;; HashMap$EntrySet.iterator; the fixpoint's G1 at 02e2b9d7, 2026-10-18)
     (method ^:public ^:static cmethod ^CMethod [^ObjMethod m ^ObjExpr objx ^boolean isFn]
-      ;; in the namespace the fn or type was analyzed in (ObjExpr.evalNs): the analyzer's types
-      ;; (getJavaClass, maybePrimitiveType) resolve tags lazily, against *ns*'s imports, and
-      ;; the method may first be called from another namespace
-      (let [^:mutable ^CMethod cm nil
-            ns (.-evalNs objx)]
-        (when (some? ns)
-          (Var/pushThreadBindings (^[Object/1] RT/map RT/CURRENT_NS ns)))
-        (try
-          (try
-            (set! cm (.compileMethod (CodeCompiler. objx m isFn false)))
-            (catch CodeFallback e
-              (set! cm (.compileMethod (CodeCompiler. objx m isFn true)))))
-          (finally
-            (when (some? ns) (Var/popThreadBindings))))
-        (set! (.-evalCM m) cm)
-        cm))
+      (locking m
+        (when (nil? (.-evalCM m))
+          ;; in the namespace the fn or type was analyzed in (ObjExpr.evalNs): the analyzer's
+          ;; types (getJavaClass, maybePrimitiveType) resolve tags lazily, against *ns*'s
+          ;; imports, and the method may first be called from another namespace
+          (let [^:mutable ^CMethod cm nil
+                ns (.-evalNs objx)]
+            (when (some? ns)
+              (Var/pushThreadBindings (^[Object/1] RT/map RT/CURRENT_NS ns)))
+            (try
+              (try
+                (set! cm (.compileMethod (CodeCompiler. objx m isFn false)))
+                (catch CodeFallback e
+                  (set! cm (.compileMethod (CodeCompiler. objx m isFn true)))))
+              (finally
+                (when (some? ns) (Var/popThreadBindings))))
+            (set! (.-evalCM m) cm))))
+      (.-evalCM m))
 
     ;; parameter i of frame f's method bound to v
     (method ^:public ^:static bind ^void [^Frame f ^CMethod cm ^int i v]
