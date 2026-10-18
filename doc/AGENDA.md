@@ -93,8 +93,9 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Decided (the user, 2026-10-17): F5 after the j2g fix, then F6, then F7; the re-seed after GR1
-  and the j2g fix; `repr/clojure print` and `repr/java`'s `:full` read mode next, as slots free.
+- Done (2026-10-18): F5 (guarded direct linking, geometric mean 1.10), `repr/clojure print`, `repr/java`'s
+  `:full` mode, the evaluator's compile race fixed. Next: `multimethod`'s slowdown (F5.2), then F6,
+  F7; repr/clojure's `read --full` (CP1); the re-seed.
 
 - The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
   Arbace and Java forms; the three dialects at the same level there "when it is appropriate";

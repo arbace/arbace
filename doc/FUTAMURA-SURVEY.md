@@ -1354,3 +1354,6 @@ holds both calls and the guard. The shipped executable is 119,226,528 bytes (G1 
   size matters.
 - **F5.2 `multimethod`'s 6%.** (a) Investigated with gc's `-m` and a profile before F6; (b)
   accepted as layout. *Recommended: (a)*, small, with F6's measurements.
+
+**Decided (2026-10-18, the user):** F5.1 (a), every known call linked (as built); F5.2 (a), the
+`multimethod` slowdown investigated before F6.

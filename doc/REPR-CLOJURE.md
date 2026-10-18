@@ -315,3 +315,6 @@ What repr/clojure cannot translate mechanically:
   `arbace.lang.Main`. The rename makes it `arbace.main`, the namespace's name.
 - **Other platforms' code.** `.cljs` files are copied, not translated. Arbace's features are
   `#{:clj}`, so `:cljs`, `:cljr` and other branches are dropped.
+
+**Decided (2026-10-18, the user):** CP1 against the recommendation: a `read --full` mode to record
+a `.cljc`'s reader conditionals, so `.cljc` → `.ae` → `.cljc` is byte for byte too (to build).

@@ -1133,3 +1133,41 @@ as agent slots free.
   other files), with fixes the corpus exposed; `bin/gate --full`'s step about 10 minutes.
   HR17-HR20 as built (the user). Its gate had failed only in diffcheck, by the j2g
   nondeterminism now fixed.
+
+## 2026-10-18: the fixpoint's race, repr/clojure print, repr/java :full, F5
+
+- The fixpoint failure at `02e2b9d` (branch `fixpoint-npe`, `2d06ce6`): not the merges, a race in
+  the evaluator. The evaluator's `Compiler$CodeRun.cmethod` compiled a method on its first call
+  without a lock; j2g, evaluated by stage 0, first calls `out/kind-sym` (a `case`) from 16
+  threads at once in `registrations`' `par-mapv`, and compiling the `case` iterates a HashMap
+  whose lazily made `entrySet` field (two words on Go) one thread could read half-written. Fixed
+  in the runtime (`cmethod` compiles once under its own lock) and, for hosts built before,
+  in j2g (`par-mapv` runs the order's last element alone first, compiling the fns on its path).
+  Reproduced on stage 0 (6 failures in 400 fns of 400 `case` forms first called by 16
+  threads), none on the fixed G3; the fixpoint hosted by stage 0 of `cf89f8a8` held (G1 = G2 =
+  G3). Old stage 0 runs its compiled `arbace.classes` under the checkout's j2g, harmless here
+  (`:clj-consts` read as pairs either way).
+- repr/clojure print (branch `repr-clojure-print`, `245d8d8`; doc/REPR-CLOJURE.md, "Print"):
+  Arbace text back to Clojure by reversing each rule, reversible or documented one way (a
+  `.cljc` read into `.ae` comes back as its `:clj` reading); `bin/repr-clojure print`, `check
+  --roundtrip`: Clojure → Arbace → Clojure byte for byte over the frozen `clojure/` (231 files),
+  the suite (103), its libraries (33) with `--keep-ext`, the `.cljc` files read into `.ae` back as
+  exactly their `:clj` readings; a `read` bug fixed (a `#?@` nested in a spliced branch). In
+  `bin/gate --full` (51 s). CP1 (the user, against "not now"): a `read --full` recording a
+  `.cljc`'s conditionals, to build.
+- repr/java's `:full` (branch `repr-java-full`, `f8d03c7`; doc/classes/PRINTER-NOTES.md, "Mode
+  :full as built"): `read --full` adds `:java/at [start end hash]` (javac's positions) on each
+  declaration and the file's text; `print --layout full` prints an unedited declaration as its
+  recorded text and an edited one anew. Every Java file of the three corpora prints back byte for
+  byte and compiles to the original's class files (Clojure's Java 183, samples 14, the JDK 838);
+  `:lines` unchanged (`jdk/forms` byte for byte). `bin/gate --full`'s repr-java step about 13
+  minutes. JF1-JF5 as built (the user).
+- F5, guarded direct linking (branch `f5-linking`, `a192048`; FUTAMURA-SURVEY.md, "F5 as
+  built"): a call of a var whose root after the prepare run is a compiled fn calls its code
+  directly when the root's fn class is that code's (one pointer compare), else the generic call;
+  dynamic, `^:redef`, macro and protocol vars and variadic calls excluded; cross-namespace calls
+  linked when they add no import cycle (42,852 of 46,345 sites). Benchmarks: geometric mean 1.10
+  (fib 1.42 → 0.96 ms, lazy-walk 1.38, seq-ops 1.29), `multimethod` 6-7% slower; the measurement
+  program +12%. Redefinition checked (20 cases: a `defn` at run time, `with-redefs`,
+  `alter-var-root`, a compiled `fib` redefined sees its new self). diffcheck 23 known, 0 new.
+  F5.1 (a), F5.2 (a): `multimethod` investigated before F6 (the user).

@@ -381,3 +381,8 @@ All as recommended:
   (`dimAnnotations`); `test/repr/java/expected` and the samples' references updated (`TypeAnns`'
   classes now javac's: samples 12 of 14).
 
+
+**Decided (2026-10-18, the user): JF1-JF5** as built: unedited declarations printed as their
+recorded text, edited ones anew (JF1); the declaration the unit printed anew (JF2); source choices
+held as text only (JF3); the text level in `bin/gate --full` (JF4); a 32-bit `String.hashCode` of
+a canonical text for edits (JF5).
