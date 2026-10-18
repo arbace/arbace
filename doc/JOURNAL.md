@@ -1171,3 +1171,25 @@ as agent slots free.
   program +12%. Redefinition checked (20 cases: a `defn` at run time, `with-redefs`,
   `alter-var-root`, a compiled `fib` redefined sees its new self). diffcheck 23 known, 0 new.
   F5.1 (a), F5.2 (a): `multimethod` investigated before F6 (the user).
+
+## 2026-10-18: the seed remade; F5.2 found; CP1
+
+The essential gate passed at `662426e` (13:48), the fixpoint held, and the seed was remade from
+its G3: `910b4b8f...` (was `cf89f8a8...`), verified by `bin/seed --verify` (the same archive;
+stage 0 = G1 = G2 = G3, `3d199da1...`). It carries goi's GR1 and GR2, F5, j2g's deterministic
+second round, the evaluator's compile lock, repr/clojure print and repr/java's `:full`.
+
+F5.2 (branch `f5-multimethod`; FUTAMURA-SURVEY.md, "F5.2 as found"): `multimethod`'s 6-7% loss
+under F5 is code layout. Its call is not linked (the var's root is a MultiFn), the hot functions'
+machine code is the same instruction for instruction, and F5's two new functions only shift
+`lang`'s text by 0x520 bytes, moving `MultiFn.invoke`, `getMethod` and `Var.deref` from 32 to 0
+mod 64. Relinked with `-funcalign=64` or `128`, the loss becomes a 4-5% gain, F5's geometric
+mean staying 1.10 under every layout. Accepted as layout (the agent's recommendation (b); the
+user's (a) asked for the investigation); profile-guided builds, not alignment, are the tool if
+layout matters.
+
+CP1 (branch `repr-clojure-full`, `0489c42`; REPR-CLOJURE.md, "Read --full"): `read --full` appends
+a comment block after the file's last form recording each reader conditional's place and its
+original text, verbatim; the forms Arbace reads, `:line` and `:column` included, are the same
+as plain `read`'s; `print` restores the conditionals and fails on an edited reading. All 13
+`.cljc` files of the corpora (94 conditionals) go `.cljc` → `.ae` → `.cljc` byte for byte.

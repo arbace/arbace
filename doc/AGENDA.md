@@ -7,7 +7,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`cf89f8a8…`), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`910b4b8f…`), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
@@ -94,8 +94,8 @@ The current state of the work. This file is rewritten as things change. For the 
 ## Next
 
 - Done (2026-10-18): F5 (guarded direct linking, geometric mean 1.10), `repr/clojure print`, `repr/java`'s
-  `:full` mode, the evaluator's compile race fixed. Next: `multimethod`'s slowdown (F5.2), then F6,
-  F7; repr/clojure's `read --full` (CP1); the re-seed.
+  `:full` mode, the evaluator's compile race fixed. F5.2 found (code layout), CP1 built, the seed
+  remade (`910b4b8f…`). Next: F6, then F7.
 
 - The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
   Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
