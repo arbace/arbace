@@ -47,17 +47,18 @@
       (set! _ (aget z i)))))
 
 (go/func checkSlice
-  "checkSlice panics as gc for slice bounds lo, hi, max (-1: absent) of a slice of length n and
-capacity c (a real bounds error, from gc's own checks of a slice of empty structs).\n"
-  [^int64 lo ^int64 hi ^int64 mx ^int n ^int c]
+  "checkSlice panics as gc for slice bounds lo, hi, max (each present or not: hasLo, hasHi,
+hasMax) of a slice of length n and capacity c (a real bounds error, from gc's own checks of a
+slice of empty structs).\n"
+  [^int64 lo ^bool hasLo ^int64 hi ^bool hasHi ^int64 mx ^bool hasMax ^int n ^int c]
   (let [z (make (slice (struct)) n c)]
     (cond
-      (>= mx 0) (let [l lo]
-                   (when (< l 0) (set! l 0))
-                   (set! _ (subslice z l hi mx)))
-      (and (>= lo 0) (>= hi 0)) (set! _ (subslice z lo hi))
-      (>= lo 0) (set! _ (subslice z lo))
-      (>= hi 0) (set! _ (subslice z _ hi)))))
+      hasMax (let [l lo]
+               (when (not hasLo) (set! l 0))
+               (set! _ (subslice z l hi mx)))
+      (and hasLo hasHi) (set! _ (subslice z lo hi))
+      hasLo (set! _ (subslice z lo))
+      hasHi (set! _ (subslice z _ hi)))))
 
 (go/type RuntimeError "RuntimeError is a runtime error goi raises with gc's message (a runtime.Error).\n"
   (struct ^string msg))
@@ -344,10 +345,8 @@ offs, each of type ts.\n"
         (when (!= lo nil) (set! l (lo fr)))
         (when (!= hi nil) (set! h (hi fr)))
         (when (!= mx nil) (set! k (mx fr)))
-        (let [hd (sliceOf v)
-              l0 l]
-          (when (== lo nil) (set! l0 -1))
-          (checkSlice l0 h k (.-Len hd) (.-Cap hd))
+        (let [hd (sliceOf v)]
+          (checkSlice l (!= lo nil) h (!= hi nil) k (!= mx nil) (.-Len hd) (.-Cap hd))
           (let [rv (reflect/ValueOf v)]
             (when (< h 0) (set! h (conv int64 (.-Len hd))))
             (when (>= k 0)
@@ -364,9 +363,7 @@ offs, each of type ts.\n"
         (when (!= lo nil) (set! l (lo fr)))
         (when (!= hi nil) (set! h (hi fr)))
         (when (!= mx nil) (set! k (mx fr)))
-        (let [l0 l]
-          (when (== lo nil) (set! l0 -1))
-          (checkSlice l0 h k n n))
+        (checkSlice l (!= lo nil) h (!= hi nil) k (!= mx nil) n n)
         (when (< h 0) (set! h (conv int64 n)))
         (let [rv (.Elem (reflect/NewAt m b))]
           (when (>= k 0)
@@ -721,3 +718,42 @@ offs, each of type ts.\n"
 (go/func ThenR ^R [^T t ^R x] (fn ^any [^{:tag (* Frame)} fr] (t fr) (x fr)))
 (go/func ThenB ^B [^T t ^B x] (fn ^bool [^{:tag (* Frame)} fr] (t fr) (x fr)))
 (go/func StmtT "StmtT is statement s as a node without value.\n" ^T [^Stmt s] (fn [^{:tag (* Frame)} fr] (s fr)))
+
+;; unsafe's builtins (§5.4: Add, Slice, String, SliceData, StringData)
+
+(go/func UnsafeAdd "UnsafeAdd is unsafe.Add(p, n).\n" ^R [^R p ^I n]
+  (fn ^any [^{:tag (* Frame)} fr]
+    (let [q (assert unsafe/Pointer (p fr))]
+      (unsafe/Add q (n fr)))))
+
+(go/func UnsafeSlice "UnsafeSlice is unsafe.Slice(p, n) of slice type st (gc's checks).\n" ^R [^R p ^I n ^{:tag (* Type)} st]
+  (let [et (.mem (.elem st))
+        m (.mem st)]
+    (fn ^any [^{:tag (* Frame)} fr]
+      (let [q (efaceData (p fr))
+            l (n fr)]
+        (when (< l 0)
+          (panic (lit RuntimeError "unsafe.Slice: len out of range")))
+        (when (== q nil)
+          (when (!= l 0)
+            (panic (lit RuntimeError "unsafe.Slice: ptr is nil and len is not zero")))
+          (return (.Interface (reflect/Zero m))))
+        (.Interface (.Convert (reflect/SliceAt et q (conv int l)) m))))))
+
+(go/func UnsafeSliceData "UnsafeSliceData is unsafe.SliceData(s) (a pointer of type pt).\n" ^R [^R s ^{:tag (* Type)} pt]
+  (let [et (.mem (.elem pt))]
+    (fn ^any [^{:tag (* Frame)} fr]
+      (.Interface (reflect/NewAt et (.-Data (sliceOf (s fr))))))))
+
+(go/func UnsafeString "UnsafeString is unsafe.String(p, n).\n" ^S [^R p ^I n]
+  (fn ^string [^{:tag (* Frame)} fr]
+    (let [q (efaceData (p fr))
+          l (n fr)]
+      (when (< l 0)
+        (panic (lit RuntimeError "unsafe.String: len out of range")))
+      (when (and (== q nil) (!= l 0))
+        (panic (lit RuntimeError "unsafe.String: ptr is nil and len is not zero")))
+      (unsafe/String (conv (* byte) q) (conv int l)))))
+
+(go/func UnsafeStringData "UnsafeStringData is unsafe.StringData(s).\n" ^R [^S s]
+  (fn ^any [^{:tag (* Frame)} fr] (unsafe/StringData (s fr))))

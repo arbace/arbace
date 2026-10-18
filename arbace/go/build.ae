@@ -136,7 +136,14 @@
         (.put types ty nd)
         (let [u (t/under ty)]
           (when (= :invalid u) (unsupported! (str "the type " (:name i)) "an invalid type"))
-          (let [ud (desc u)]
+          (when (and erased (t/pointer? u))
+            (unsupported! (str "the recursive pointer type " (:name i)) "as built: GR3"))
+          (let [ud (try (desc u)
+                        (catch Exception ex
+                          (if (some-> (ex-message ex) (str/includes? "used before it is complete"))
+                            (unsupported! (str "the type " (:name i) ", recursive through a slice, an array, a map or a function")
+                                          "as built: GR3")
+                            (throw ex))))]
             (if (and (vector? u) (= :struct (nth u 0)))
               (let [[ns ds ts ps es] (struct-parts u)]
                 (op "TSetUnder" nd ud ns ds ts ps es))
@@ -288,7 +295,7 @@
 (defn- expr-stmt-of [[k n]]
   (op (case k :I "ExprI" :F "ExprF" :S "ExprS" :R "ExprR" :B "ExprB" :T "ExprT") n))
 
-(declare ex ex-as place lit-place call-node call-results build-fn-lit builtin expr-or-stmt stmt stmt-list rhs-nodes)
+(declare ex ex-as place lit-place lit-node call-node call-results build-fn-lit builtin expr-or-stmt stmt stmt-list rhs-nodes)
 
 (defn exk [n k] (as-kind (ex n) k))
 
@@ -359,10 +366,20 @@
       :S [:S (op "ConcatS" (as-kind xk :S) (as-kind yk :S))]
       :R [:R (op (str (arith-name op*) (if (= :complex64 (basic-of ty)) "C64" "C128")) (as-kind xk :R) (as-kind yk :R))])))
 
+(defn- count-node
+  "A shift count's node: an I (a constant count of any numeric kind as its integer)."
+  [yn]
+  (if-let [{:keys [val]} (const-of yn)]
+    (op "ConstI" (int-bits (cond
+                             (integer? val) val
+                             (c/complex? val) (c/int-val (c/re-part val))
+                             :else (c/int-val val))))
+    (exk yn :I)))
+
 (defn- shift-node [op* ty xn yn]
   (let [sfx (int-sfx (basic-of ty))]
-    (op (str (if (= op* "<<") "Shl" "Shr") (if (unsigned? (:type yn)) "U" "") sfx)
-        (exk xn :I) (exk yn :I))))
+    (op (str (if (= op* "<<") "Shl" "Shr") (if (or (const-of yn) (unsigned? (:type yn))) "U" "") sfx)
+        (exk xn :I) (count-node yn))))
 
 (defn- nil-node? [n] (or (= :nil (:op n)) (= :untyped-nil (:type n))))
 
@@ -435,7 +452,9 @@
         fb (basic-of F) tb (basic-of T)
         uF (t/under F) uT (t/under T)]
     (cond
-      (iface? T) (if (iface? F) (ex x) [:R (iface-content (ex x) F)])
+      (iface? T) (cond (nil-node? x) [:R (op "ConstR" nil)]
+                       (iface? F) (ex x)
+                       :else [:R (iface-content (ex x) F)])
       (and (= fk :I) (= tk :I)) [:I (if (wide? T) (exk x :I) (op (str "Cv" (int-sfx tb)) (exk x :I)))]
       (and (= fk :I) (= tk :F)) [:F (op (str (if (and (unsigned? F) (wide? F)) "Uto" "Ito") (if (= tb :float32) "F32" "F64")) (exk x :I))]
       (and (= fk :F) (= tk :I)) [:I (op (str "Fto" (int-sfx tb)) (exk x :F))]
@@ -541,7 +560,8 @@
   [n]
   (let [T (:type n) d (desc T) u (t/under T)]
     (case (:kind n)
-      :struct (let [fs (:fields n)
+      :struct (let [;; a blank field keeps its zero value (its constant value is not stored)
+                    fs (remove #(and (= "_" (:name (:field %))) (const-of (:value %))) (:fields n))
                     offs (for [f fs]
                            (loop [ty T path (:path f) off 0]
                              (let [i (first path)
@@ -560,7 +580,8 @@
                (op "LitP" d (oa (map #(* (long (:index %)) (long size)) (:elems n)))
                    (oa (map #(elem-node (:value %) el) (:elems n)))
                    (oa (repeat (count (:elems n)) (desc el)))))
-      (unsupported! "the address of this literal" "GR3"))))
+      ;; a slice's or a map's literal: a new variable holding it
+      (op "LitP" d (oa [0]) (oa [(second (lit-node n))]) (oa [d])))))
 
 (defn- lit-node [n]
   (let [T (:type n) u (t/under T)]
@@ -646,7 +667,9 @@
          :method-expr (unsupported! "method expressions" "GR4")
          :assert (unsupported! "type assertions" "GR4")
          :recv (unsupported! "channel receives" "GR4")
-         :invalid (throw (ex-info "goi's builder: an invalid operand" {}))
+         ;; an operand the checker left invalid without an error: its type comes from a package
+         ;; the table does not hold (a digest's declaration naming an unlisted package's type)
+         :invalid (unsupported! (str "a type of a package not in the table, in " (pr-str (:form n))) "GR5")
          (unsupported! (str "the expression " (name (:op n))) "GR3"))))))
 
 (defn ex-as [n k] (as-kind (ex n) k))
@@ -857,6 +880,12 @@
                           :F [:F (op "MinMaxF" (oa (map #(exk % :F) args)) mx (= :float32 (basic-of ty)))]
                           :S [:S (op "MinMaxS" (oa (map #(exk % :S) args)) mx)])))
       "close" (unsupported! "channels" "GR4")
+      ;; package unsafe's (§5.4)
+      "Add" (value [:R (op "UnsafeAdd" (exk (first args) :R) (exk (second args) :I))])
+      "Slice" (value [:R (op "UnsafeSlice" (exk (first args) :R) (exk (second args) :I) (desc ty))])
+      "SliceData" (value [:R (op "UnsafeSliceData" (exk (first args) :R) (desc ty))])
+      "String" (value [:S (op "UnsafeString" (exk (first args) :R) (exk (second args) :I))])
+      "StringData" (value [:R (op "UnsafeStringData" (exk (first args) :S))])
       (unsupported! (str "the builtin " (when (:unsafe (:callee n)) "unsafe.") nm) "GR3"))))
 
 (defn- expr-or-stmt [mode s] (if (= mode :stmt) s [:T (op "StmtT" s)]))
@@ -875,6 +904,8 @@
   [p kn]
   (cond
     (= :blank p) (expr-stmt-of kn)
+    (= ::map-temp (:op p)) (op "MapSet" (:m p) (:k p) (as-kind kn (kind (:vtype p))) (desc (:mt p)))
+    (= ::p-temp (:op p)) (store-p (op "CellP" (long (:c p))) kn (:type p))
     (slot-of-place p) (let [[k s] (slot-of-place p)] (set-slot k s (as-kind kn k)))
     (= :place-map (:op p)) (let [m (:x p) mt (:type m) [_ K V] (t/under mt)]
                              (op "MapSet" (exk m :R) (elem-node (:key p) K) (as-kind kn (kind V)) (desc mt)))
@@ -903,13 +934,51 @@
         :recv (unsupported! "channel receives" "GR4")))
     (mapv (fn [n ty] (ex n ty)) nodes (concat tys (repeat nil)))))
 
+(defn- prepare-place
+  "[statements place]: the operands of place p evaluated into temporaries now (an assignment's
+  first phase, §4.5: Go evaluates the places' index and pointer operands, then the values)."
+  [p]
+  (cond
+    (or (= :blank p) (slot-of-place p)) [[] p]
+    (and (#{:place-local :local} (:op p)) (= :cell (nth (loc (:obj p)) 0))) [[] p]
+    (= :place-map (:op p))
+    (let [m (:x p) mt (:type m) [_ K V] (t/under mt)
+          tm (temp! :R) kk (kind K) tk (temp! kk)]
+      [[(set-slot :R tm (exk m :R)) (set-slot kk tk (as-kind (ex (:key p) K) kk))]
+       {:op ::map-temp :m (local-node :R tm) :k (local-node kk tk) :mt mt :vtype V}])
+    :else
+    ;; the place's pointer and index operands frozen into temporaries; its address, with Go's
+    ;; nil and bounds checks, is made when it is assigned
+    (let [pre (volatile! [])
+          freeze (fn [x]
+                   (if (or (nil? x) (const-of x))
+                     x
+                     (let [kn (ex x) k (if (= :B (first kn)) :I (first kn)) s (temp! k)]
+                       (vswap! pre conj (set-slot k s (as-kind kn k)))
+                       {:op ::node :k k :node (local-node k s) :type (:type x) :mode :value})))
+          u (when (:x p) (t/under (:type (:x p))))
+          ;; a selection's chain down to the pointer it indirects (x.f.g's x when x.f is not one)
+          chain (fn chain [x]
+                  (if (#{:field :place-field} (:op x))
+                    (if (first (:derefs x)) (assoc x :x (freeze (:x x))) (assoc x :x (chain (:x x))))
+                    x))
+          p2 (case (:op p)
+               :place-deref (assoc p :x (freeze (:x p)))
+               :place-index (if (and (vector? u) (#{:slice :pointer} (nth u 0)))
+                              (assoc p :x (freeze (:x p)) :index (freeze (:index p)))
+                              (assoc p :x (chain (:x p)) :index (freeze (:index p))))
+               :place-field (chain p)
+               p)]
+      [@pre p2])))
+
 (defn assign-stmt [n]
-  (let [ps (:lhs n)
-        vals (rhs-nodes (:rhs n) (map #(when (map? %) (:type %)) ps))]
+  (let [ps (:lhs n)]
     (if (= 1 (count ps))
-      (assign-to (first ps) (first vals))
-      (let [[evals ts] (temps-of vals)]
-        (op "Assign" (oa evals) (oa (map assign-to ps ts)))))))
+      (assign-to (first ps) (first (rhs-nodes (:rhs n) [(when (map? (first ps)) (:type (first ps)))])))
+      (let [prepared (mapv prepare-place ps)
+            vals (rhs-nodes (:rhs n) (map #(when (map? %) (:type %)) ps))
+            [evals ts] (temps-of vals)]
+        (op "Assign" (oa (concat (mapcat first prepared) evals)) (oa (map assign-to (map second prepared) ts)))))))
 
 (defn op-assign-stmt [n]
   (let [p (:place n) op* (:go/op n) ty (:type p) v (:value n)]
@@ -1095,12 +1164,19 @@
       :slice (let [xn (exk x :R) et (nth u 1)
                    ks (idx-setter kt new? :int) vs (at-setter vt new? et)]
                (mk #(op "RangeSlice" xn (desc et) ks vs % brk cont iter)))
-      :array (let [p (value-place x) et (nth u 2)
-                   ks (idx-setter kt new? :int) vs (at-setter vt new? et)]
-               (mk #(op "RangeArray" p (desc xt) ks vs % brk cont iter)))
-      :ptr-array (let [xn (exk x :R) at (nth u 1) et (nth (t/under at) 2)
-                       ks (idx-setter kt new? :int) vs (at-setter vt new? et)]
-                   (mk #(op "RangePtrArray" xn (desc at) ks vs % brk cont iter)))
+      ;; with at most the index, an array's length is constant and the range expression is not
+      ;; evaluated (the specification's exception)
+      (:array :ptr-array) (if (nil? vt)
+                            (let [n (if (= :array (:over n)) (nth u 1) (nth (t/under (nth u 1)) 1))
+                                  ks (idx-setter kt new? :int)]
+                              (mk #(op "RangeInt" (op "ConstI" (long n)) ks % brk cont iter)))
+                            (if (= :array (:over n))
+                              (let [p (value-place x) et (nth u 2)
+                                    ks (idx-setter kt new? :int) vs (at-setter vt new? et)]
+                                (mk #(op "RangeArray" p (desc xt) ks vs % brk cont iter)))
+                              (let [xn (exk x :R) at (nth u 1) et (nth (t/under at) 2)
+                                    ks (idx-setter kt new? :int) vs (at-setter vt new? et)]
+                                (mk #(op "RangePtrArray" xn (desc at) ks vs % brk cont iter)))))
       :string (let [xn (exk x :S)
                     ks (idx-setter kt new? :int) vs (idx-setter vt new? :int32)]
                 (mk #(op "RangeString" xn ks vs % brk cont iter)))
@@ -1129,9 +1205,9 @@
                         (op "NewCase"
                             (oa (doall
                                   (for [v (:values cl)]
-                                    (if tagless
+                                    (if (and tagless (t/boolean-type? (:type v)))
                                       (exk v :B)
-                                      (as-kind (compare-nodes "==" tag-node v) :B)))))
+                                      (as-kind (compare-nodes "==" (or tag-node tag) v) :B)))))
                             (push-target tg #(stmt-list (:body cl)))
                             (boolean (:default cl)))))))]
     (op "Switch" pre cases (long brk) (long fall))))
@@ -1181,7 +1257,7 @@
                            recv)
                       rm (to-mini rn)]
                   (assoc call :callee (assoc callee :recv rm :recv-adjust nil) :args (mapv to-mini (:args call))))
-                :else (unsupported! "deferring this call" "GR4"))
+                :else (unsupported! (str "deferring a call of kind " (name (:kind call))) "GR4"))
         ;; the call runs with the deferred call's frame as its caller: its temporaries there
         t (binding [*fn* (assoc *fn* :slots mini)] (op "StmtT" (call-stmt call*)))
         {:keys [I F S R]} @mini]
@@ -1201,8 +1277,9 @@
     :op-assign (op-assign-stmt n)
     :incdec (incdec-stmt n)
     :return (return-stmt n)
-    :if (let [s (op "If" (exk (:cond n) :B) (stmt (:then n)) (when (:else n) (stmt (:else n))))]
-          (if (:init n) (op "Seq" (oa [(stmt (:init n)) s]) (oa [])) s))
+    :if (let [init (when (:init n) (stmt (:init n)))
+              s (op "If" (exk (:cond n) :B) (stmt (:then n)) (when (:else n) (stmt (:else n))))]
+          (if init (op "Seq" (oa [init s]) (oa [])) s))
     :for (for-stmt n)
     :range (range-stmt n)
     :switch (switch-stmt n)
@@ -1274,11 +1351,11 @@
 (defn build-code
   "The *goi.Code of a function node (:func, :fn, :body) with its signature sig; captures, the
   cells it receives first (a literal's)."
-  [tree name captures]
+  [tree fname captures]
   (let [sig (or (:sig tree) (sig-of (:type tree)))
         {:keys [params results counts]} (slot-layout sig)
         f {:slots (volatile! (assoc counts :C 0)) :locs (IdentityHashMap.) :code (volatile! 2)
-           :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name name}]
+           :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name fname}]
     (binding [*fn* f]
       ;; the captured cells, the first C slots
       (doseq [x captures]

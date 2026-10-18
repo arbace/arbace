@@ -164,8 +164,15 @@
 
 ;;; Checking (§3)
 
-(defn- error-text [errs]
-  (str/join "\n" (for [er (take 10 errs)] (str (:file er) ":" (:line er) ": " (:msg er)))))
+(defn- error-text
+  "Errors as go/types words them (§3.8): FILE:LINE: MESSAGE, at most ten; the REPL's implicit
+  file is the forms' source (REPL for typed forms)."
+  ([errs] (error-text errs nil))
+  ([errs src]
+   (str/join "\n" (for [er (take 10 errs)]
+                    (str (if (and src (= "repl.go" (:file er))) src (:file er)) ":" (:line er) ": " (:msg er))))))
+
+(defn- repl-source [] (let [f (str *file*)] (if (or (= f "NO_SOURCE_PATH") (= f "NO_SOURCE_FILE")) "REPL" f)))
 
 (defn source-of
   "The checker's source of package state st (its files as they stand)."
@@ -253,15 +260,16 @@
   call, S18, or now when eager), variables' cells, types' generations; with vars?, the
   namespace's vars (§2.1). Returns {:inits (the initializers' code in order, a *goi.Func) :init-funcs
   (init cells in order) :main (cell or nil) :new-vars (names of variables made anew)}."
-  [st r {:keys [vars? eager only]}]
+  [st r {:keys [vars? eager only kept-names init-names]}]
   (let [ctx (build-context st)
         decls (:decls r)
         old @st
         gen-of (fn [nt] (let [i (t/info nt)] (when (= (:pkg i) (:path old)) (get-in old [:types (:name i) :gen]))))
-        unsupported (some #(when (:unsupported %) %) decls)]
+        unsupported (some #(when (or (:unsupported %) (:generic %)) %) decls)]
+    ;; generic code is GR6's (§9): a declaration that uses generics is not run
     (when unsupported
-      (throw (ex-info (str "not supported by goi yet: " (:unsupported unsupported) " (GR6)")
-                      {:goi/unsupported (str (:unsupported unsupported) " (GR6)")})))
+      (let [what (str (or (:unsupported unsupported) "generics") " (GR6)")]
+        (throw (ex-info (str "not supported by goi yet: " what) {:goi/unsupported what}))))
     (binding [b/*ctx* ctx]
       ;; types: a new generation when the underlying type changed (§2.5)
       (let [type-decls (filter #(and (= :type (:kind %)) (not (e/o (:obj %) :alias))) decls)
@@ -281,7 +289,9 @@
                                         k (type-key (e/o x :type) (:gen ctx))
                                         prev (get-in old [:funcs nm])
                                         cell (if (and prev (= k (:key prev))) (:cell prev) (b/op "FuncCell" nm (:name old) nil))]]
-                              [nm {:cell cell :key k :tree (:tree d) :obj x}]))
+                              (if (and prev (contains? kept-names nm))
+                                [nm (assoc prev :kept true)]
+                                [nm {:cell cell :key k :tree (:tree d) :obj x}])))
             init-cells (vec (for [x (:inits r)]
                               (let [d (some #(when (identical? (:obj %) x) %) decls)]
                                 {:cell (b/op "FuncCell" "init" (:name old) nil) :tree (:tree d)})))]
@@ -300,7 +310,8 @@
                                     [nm {:ptr (b/op "NewGlobal" (b/desc (e/o x :type))) :key k :obj x :type (e/o x :type)}]))))]
           (swap! st assoc :globals globals)
           ;; the functions' code: built on first call (S18), or now
-          (doseq [[nm {:keys [cell tree]}] new-funcs
+          (doseq [[nm {:keys [cell tree kept]}] new-funcs
+                  :when (not kept)
                   :when (or (nil? only) (contains? only nm))]
             (if eager
               (b/op "SetCode" cell (binding [b/*ctx* ctx] (b/build-func tree)) nil)
@@ -314,8 +325,8 @@
                                      [(first (:lhs (:tree d))) (:tree d)]))
                 ordered (keep #(get var-trees (first %)) (:order r))
                 inits (b/op "FuncCell" "init.vars" (:name old) nil)
-                ordered (if only
-                          (filter #(some (fn [x] (contains? only (e/o x :name))) (:lhs %)) ordered)
+                ordered (if-let [names (or init-names only)]
+                          (filter #(some (fn [x] (contains? names (e/o x :name))) (:lhs %)) ordered)
                           ordered)]
             (b/op "SetCode" inits (b/build-inits ordered) nil)
             ;; the namespace's vars (§2.1)
@@ -422,14 +433,28 @@
             _ (swap! st assoc :files files)
             r (try (check-source (source-of st) nil)
                    (catch Throwable ex (swap! st assoc :files (:files old)) (throw ex)))
-            errs (remove #(= :UnusedImport (:code %)) (:errors r))]
-        (when (seq errs)
+            errs (remove #(= :UnusedImport (:code %)) (:errors r))
+            ;; the new declaration's own errors reject it; a dependent's (§2.5 item 6) leave the
+            ;; dependent its old definition, with a warning
+            spec-of (into {} (map (juxt :id :spec) (:decls r)))
+            own? (fn [er] (or (nil? (:decl er)) (identical? form (spec-of (:decl er)))))
+            own (filter own? errs)
+            others (remove own? errs)
+            broken (set (mapcat decl-names (distinct (keep #(spec-of (:decl %)) others))))]
+        (when (seq own)
           (swap! st assoc :files (:files old))
-          (throw (ex-info (str "Go check errors:\n" (error-text errs)) {:go/errors (vec errs)})))
-        (let [{:keys [inits new-vars init-funcs]} (try (define! st r {:vars? true})
+          (throw (ex-info (str "Go check errors:\n" (error-text own (repl-source))) {:go/errors (vec own)})))
+        (when (seq others)
+          (binding [*out* *err*]
+            (println (str "goi: warning: " (str/join ", " (sort broken))
+                          " no longer check and keep their definitions:\n" (error-text others (repl-source))))))
+        (let [var? (= "go/var" (code/head-name form))
+              {:keys [inits new-vars init-funcs]} (try (define! st r {:vars? true :kept-names broken
+                                                                      :init-names (when var? names)})
                                                        (catch Throwable ex (swap! st assoc :files (:files old)) (throw ex)))]
           ;; a variable defined anew is initialized now, an init runs now (S11)
-          (when (and (= "go/var" (code/head-name form)) (seq new-vars))
+          ;; a variable defined (again) runs its initializer now (S10, S11)
+          (when var?
             (call0 inits "init"))
           (when (and (= "go/func" (code/head-name form)) (= "init" (rp/name-text (second form))))
             (call0 (last init-funcs) "init"))
@@ -448,7 +473,11 @@
         ns-sym (if (str/starts-with? (str ns-sym) "go.") ns-sym 'go.user)
         st (package-state ns-sym)
         nm (str "goi_eval" (swap! eval-count inc))
-        last-f (last stmts)
+        ;; the last statement, looking through let bodies (the implicit return's rule: SPEC §6.4)
+        last-f (loop [f (last stmts)]
+                 (if (and (seq? f) (#{"let" "let-type"} (code/head-name f)) (> (count f) 2))
+                   (recur (last f))
+                   f))
         stmt? (and (seq? last-f) (contains? code/statement-heads (code/head-name last-f)))
         attempt (fn [results]
                   (let [form (apply list 'go/func (symbol nm) (concat (cond
@@ -476,7 +505,7 @@
                    :else [r form])
         errs (remove #(= :UnusedImport (:code %)) (:errors r))]
     (when (seq errs)
-      (throw (ex-info (str "Go check errors:\n" (error-text errs)) {:go/errors (vec errs)})))
+      (throw (ex-info (str "Go check errors:\n" (error-text errs (repl-source))) {:go/errors (vec errs)})))
     (let [old @st]
       (swap! st assoc :files (mapv #(if (= (:current old) (:name %)) (update % :decls conj form) %) (:files old)))
       (try
