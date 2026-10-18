@@ -830,6 +830,11 @@
                   (t/string-type? (:type x)) [:I (op "LenS" (exk x :S))]
                   (and (vector? u) (= :slice (nth u 0))) [:I (op "LenSlice" (exk x :R))]
                   (and (vector? u) (= :map (nth u 0))) [:I (op "LenMap" (exk x :R))]
+                  ;; an array's (a pointer to one's) length, its operand evaluated for its calls
+                  (and (vector? u) (= :pointer (nth u 0)) (let [b (t/under (nth u 1))] (and (vector? b) (= :array (nth b 0)))))
+                  [:I (op "ThenI" (op "StmtT" (expr-stmt-of (ex x))) (op "ConstI" (long (nth (t/under (nth u 1)) 1))))]
+                  (and (vector? u) (= :array (nth u 0)))
+                  [:I (op "ThenI" (op "StmtT" (expr-stmt-of (ex x))) (op "ConstI" (long (nth u 1))))]
                   :else (unsupported! (str "len of " (t/type-str (:type x))) "GR4"))))
       "cap" (let [x (first args) u (t/under (:type x))]
               (value
@@ -861,7 +866,9 @@
                    :map [:R (op "MakeMap" (desc T) (when (first sizes) (exk (first sizes) :I)))]
                    :chan (unsupported! "channels" "GR4"))))
       "new" (if (:new-value n)
-              (unsupported! "new of a value" "GR3")
+              ;; new(v) (go1.26): a new variable holding v
+              (let [vt (:type (first args)) d (desc vt)]
+                (value [:R (op "AddrOf" (op "LitP" d (oa [0]) (oa [(elem-node (first args) vt)]) (oa [d])) d)]))
               (value [:R (op "NewR" (desc (:type (first args))))]))
       "panic" (let [s (op "Panic" (exk (first args) :R))]
                 (if stmt? s [:T (op "StmtT" s)]))
@@ -1124,6 +1131,7 @@
 (defn- idx-setter [t new? ty]
   (cond
     (nil? t) nil
+    (::temp t) (op "IdxSlot" (long (second (::temp t))))
     new? (let [l (new-loc! t)]
            (case (nth l 0)
              :slot (op "IdxSlot" (long (nth l 2)))
@@ -1134,6 +1142,7 @@
 (defn- at-setter [t new? ty]
   (cond
     (nil? t) nil
+    (::temp t) (let [[k s] (::temp t)] (op "AtSlot" (int (first (name k))) (long s) (desc (:type t))))
     new? (let [l (new-loc! t)]
            (case (nth l 0)
              :slot (op "AtSlot" (int (first (name (nth l 1)))) (long (nth l 2)) (desc ty))
@@ -1144,6 +1153,7 @@
 (defn- any-setter [t new? ty]
   (cond
     (nil? t) nil
+    (::temp t) (let [[k s] (::temp t)] (op "AnySlot" (int (first (name k))) (long s)))
     new? (let [l (new-loc! t)]
            (case (nth l 0)
              :slot (op "AnySlot" (int (first (name (nth l 1)))) (long (nth l 2)))
@@ -1151,13 +1161,37 @@
     (slot-of-place t) (let [[k s] (slot-of-place t)] (op "AnySlot" (int (first (name k))) (long s)))
     :else (op "AnyPlace" (place t) (desc (:type t)))))
 
+(defn- has-call?
+  "Whether checked node n has a call (not of a constant) or a receive in it (an array's length is
+  then not constant: the specification's len and range rules)."
+  [n]
+  (cond
+    (map? n) (or (and (= :call (:op n)) (not= :constant (:mode n)))
+                 (= :recv (:op n))
+                 (some has-call? (vals (dissoc n :form :type :obj :method :field :val :to :recv-type :iface))))
+    (vector? n) (some has-call? n)
+    :else false))
+
 (defn- range-stmt [n]
   (let [x (:x n) xt (:type x) u (t/under xt)
         [[kt vt] new?] (range-targets n)
+        ;; a map element target is assigned at each iteration from a temporary (its operands
+        ;; evaluated then, as Go's assignment)
+        pre (volatile! [])
+        retarget (fn [t]
+                   (if (and t (not new?) (= :place-map (:op t)))
+                     (let [k (kind (:type t)) s (temp! k)]
+                       (vswap! pre conj (assign-to t [k (local-node k s)]))
+                       {::temp [k s] :type (:type t)})
+                     t))
+        kt (retarget kt)
+        vt (retarget vt)
         tg (loop-target n)
         brk (long (:brk tg)) cont (long (:cont tg))
         iter (when new? (per-iteration-cells []))
-        mk (fn [f] (let [body (push-target tg #(stmt-list (:body n)))] (f body)))]
+        mk (fn [f] (let [body (push-target tg #(stmt-list (:body n)))
+                         body (if (seq @pre) (op "Seq" (oa (conj @pre body)) (oa [])) body)]
+                     (f body)))]
     (case (:over n)
       :int (let [xn (exk x :I) ks (idx-setter kt new? (:type x))]
              (mk #(op "RangeInt" xn ks % brk cont iter)))
@@ -1168,8 +1202,11 @@
       ;; evaluated (the specification's exception)
       (:array :ptr-array) (if (nil? vt)
                             (let [n (if (= :array (:over n)) (nth u 1) (nth (t/under (nth u 1)) 1))
-                                  ks (idx-setter kt new? :int)]
-                              (mk #(op "RangeInt" (op "ConstI" (long n)) ks % brk cont iter)))
+                                  ks (idx-setter kt new? :int)
+                                  ;; with a call in it, the range expression is evaluated
+                                  pre (when (has-call? x) (op "StmtT" (expr-stmt-of (ex x))))
+                                  cn (op "ConstI" (long n))]
+                              (mk #(op "RangeInt" (if pre (op "ThenI" pre cn) cn) ks % brk cont iter)))
                             (if (= :array (:over n))
                               (let [p (value-place x) et (nth u 2)
                                     ks (idx-setter kt new? :int) vs (at-setter vt new? et)]
