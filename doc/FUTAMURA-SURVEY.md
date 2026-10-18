@@ -1235,3 +1235,122 @@ and F4 merge. j2g asks nothing new of the JVM, so `jdk/edge.edn` does not change
 
 **Decided (2026-10-17, the user):** F4.1 (a) the 82 classes, as built; F4.2 (a) re-measured with F3
 before deciding; F4.3 (a) recorded as a deviation of J2G-SPEC §6.2.
+
+## F5 as built (2026-10-18)
+
+F5 (a), guarded direct linking, as decided after F3 and F4; on the branch `f5-linking` (from main
+`02e2b9d7`), in `arbace.c2j` (`arbace/c2j/emit.ae`, `main.ae`), the runtime's compiled fns
+(`test/c2j/gen_fns.ae`, `arbace/lang/go/CompilerAOTFn.ae`) and one rule of j2g (`code.ae`).
+
+### The design
+
+- **Which sites.** A call `(f x ...)` of a var `f` with at most 20 arguments (more go through
+  `applyTo`, as before) whose root at the end of the prepare run is a fn whose code the tree
+  compiles: an evaluated fn (`Compiler$EvalFn`, whose `fe` is the `FnExpr` the back end makes a
+  code class of) or, for the back end's own namespaces (which `compiled-back-end` loads compiled
+  before it runs), a compiled one (`Compiler$AOTFn`, `$AOTRestFn`, named by its code class). Not
+  linked: a var dynamic when compiled, `^:dynamic`, `^:redef` or a macro, a protocol's fn (its
+  call site is `emitProto`'s), and a call of an arity the code has no fixed method for (a
+  variadic call stays the generic one).
+- **The guard.** `Compiler$AOTFn/linked r C/fn-class` (`$AOTRestFn`'s for variadic code): the
+  body of root `r` when `r` is a compiled fn whose class is the code class's fn class, else nil;
+  then `(.invoke (cast C body) r x ...)`, the code's method called directly with the fn as `self`,
+  as `AOTFn.invoke` calls it; else the generic call T1 made. The root is read once, the generic
+  path casts it to `IFn` before the arguments, as before. The compare is a pointer compare of the
+  fn's class: `Compiler$AOT/fnClass` makes one `Class` per code class, by name, so the compare
+  holds exactly for the fns of that code (every closure of it, `with-meta`'s copies) and for no
+  other, needs no state published by the defining code, and cannot hold falsely: a fn evaluated
+  at the REPL is no `AOTFn`, a fn of another code has another class. This is the pointer compare
+  of the proposal ("the var's root against the fn the compiled code expects") made per code
+  rather than per object, which is the same test for a top-level `defn` and stays exact for the
+  rest. j2g casts to a fn's code (no `C_Cast`, SA159) by Go's assertion (J2G-SPEC's code-class
+  paragraph).
+- **Across namespaces.** A direct call names the code's Go type, so its package imports the
+  code's, and the compiled namespaces' Go packages must not import each other in a cycle
+  (`arbace.core` names `arbace.core.protocols`' interfaces, whose fns call `arbace.core`'s). The
+  back end resolves the sites after every class is made (`link-plan`): the packages' graph from
+  the classes each top-level Java form names (symbols, tags, param-tags), then the sites in the
+  order emitted, a site in another package linked only when the graph does not reach the
+  caller's package from the code's, its edge then added. In the shipped tree 42,852 of 46,345
+  sites are linked, 3,493 generic (13,304 when only sites within a package were linked, the
+  first version measured below).
+- **Redefinition.** Nothing is assumed after the prepare run: a `defn` evaluated at run time, a
+  `with-redefs`, `alter-var-root`, a `def` the loader runs again with another fn, a `binding` of
+  a `^:dynamic` var (never linked) all leave a root the compare rejects or that is the code's
+  own, and the generic path runs. Unlike Clojure's direct linking (F5 (b)), callers see it.
+
+### Measured
+
+As F3 and F4 were (SA139's way): `test/bench/eval-bench.ae` as `bench.eval` (and
+`test/c2j/link_redef.ae`), compiled with the runtime's namespaces into a measurement program by
+one executable (the branch's gate executable, for both), with each tree's c2j, j2g and
+`bin/build-go`; before: main `02e2b9d7`, after: the branch; ms, the best of five interleaved
+rounds, each the benchmark's best over at least 1 s and 3 runs; amd64, the machine shared (load
+2-20):
+
+| benchmark | before | after | speed-up |
+|---|---:|---:|---:|
+| `fib` | 1.42 | 0.96 | 1.48 |
+| `fib-prim` | 1.99 | 1.49 | 1.34 |
+| `loop-long` | 3.74 | 3.73 | 1.00 |
+| `loop-double` | 0.54 | 0.55 | 0.98 |
+| `dotimes-array` | 9.03 | 8.98 | 1.01 |
+| `reduce-range` | 38.22 | 37.27 | 1.03 |
+| `reduce-fn` | 11.14 | 10.84 | 1.03 |
+| `vector-conj` | 17.57 | 16.64 | 1.06 |
+| `map-assoc-get` | 19.01 | 18.47 | 1.03 |
+| `keyword-map` | 5.96 | 6.11 | 0.98 |
+| `str-build` | 5.98 | 6.08 | 0.98 |
+| `seq-ops` | 39.97 | 31.00 | 1.29 |
+| `lazy-walk` | 23.99 | 17.36 | 1.38 |
+| `transduce` | 14.82 | 13.00 | 1.14 |
+| `into-xform` | 13.61 | 11.26 | 1.21 |
+| `protocol` | 4.90 | 4.71 | 1.04 |
+| `multimethod` | 7.22 | 7.71 | 0.94 |
+| `destructure` | 22.26 | 19.08 | 1.17 |
+| `closures` | 16.45 | 16.64 | 0.99 |
+| geometric mean | 8.66 | 7.89 | 1.10 |
+
+`fib` 1.42 → 0.96 (§5's experiment: 1.44 → 0.78 with the call itself inlined; gc inlines no
+recursive call, and the generic path stays beside it). The sequence benchmarks gain through
+`arbace.core`'s own calls (`seq`, `first`, `next`, `cons` inside `map`, `filter`, `reduce`).
+`multimethod` is 6-7% slower in every round (7.2 against 7.7), not investigated (its dispatch is
+`MultiFn`'s, which has no linked site; code layout is the likely cause, F5.2). Earlier variants,
+measured the same way in rounds of their own: sites within a package only, with an inline guard
+(geometric mean 8.28 against 8.72, the program 168.3 MB); all sites, the guard inline (7.88,
+186.0 MB); all sites, the guard in `linked` as built (7.97 in the same rounds, 176.1 MB).
+
+**Size.** The measurement program 157,147,572 → 176,139,366 bytes (+12.1%): each linked site
+holds both calls and the guard. The shipped executable is 119,226,528 bytes (G1 = G2 = G3).
+
+### Checks
+
+- **Redefinition** (`test/c2j/link_redef.ae`, run in the measurement program compiled and,
+  `ARBACE_NO_AOT` set, evaluated: the same 20 lines, all `ok`): a linked call and `fib`; the
+  fixed arities of a variadic fn; a `def` the loader runs again (the first call sees the first
+  fn, the second the second); a closure's code; `with-redefs` to an evaluated fn and to another
+  compiled fn, and back; `with-redefs` of `arbace.core/vec` seen by a caller in another
+  namespace; `binding` of a `^:dynamic` var and its root; `alter-var-root` of a `^:redef` var;
+  an arity the code lacks (the generic path's `ArityException`); `alter-var-root` to `with-meta`
+  (the same code, still direct) and to other fns; a `defn` evaluated at run time in the namespace
+  (the REPL's); and the compiled `fib` after `fib` is redefined at run time, whose own recursive
+  calls then reach the new definition (`[8 8]`: Clojure's direct linking would answer 5).
+- **`bin/diffcheck`** (in the essential gate): 12,731 of 12,754 cases agree, 23 disagree, all
+  recorded, 0 new (the corpora's redefinition cases, `state_errors.ae`'s `with-redefs`,
+  `alter-var-root` and `eval`'d `defn`, among the agreeing).
+- **The essential gate** passed: the smoke test; Clojure's suite, no regressions; the oracle, 53
+  known mismatches, 0 new; diffcheck as above. **`bin/arbace-go --fixpoint`** holds: G1 = G2 =
+  G3 byte for byte (119,226,528 bytes, sha256 `6000241f...`), stage 0 different from G1 as
+  expected until the re-seed. No re-seed here: the back end, j2g and `CompilerAOTFn.ae` are the
+  program's, the re-seed is the lead's.
+
+### Proposals (the user's to decide)
+
+- **F5.1 Code size.** (a) As built: every site whose code is known linked, +12% of the program;
+  (b) only sites within a Go package (a third of the sites, about a third of the growth, the
+  geometric mean 1.06 instead of 1.10); (c) a site linked only when its code is small or hot (a
+  profile, as `--pgo` takes one). *Recommended: (a)*: the gain is spread over `arbace.core`'s
+  own calls, which (b) keeps and (c) needs a profile for; revisit with SA156 (c)'s closures if
+  size matters.
+- **F5.2 `multimethod`'s 6%.** (a) Investigated with gc's `-m` and a profile before F6; (b)
+  accepted as layout. *Recommended: (a)*, small, with F6's measurements.
