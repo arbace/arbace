@@ -1409,3 +1409,173 @@ layout only. Nothing to fix; *recommended: accept it* (F5.2 (b)).
   (`--pgo`, which orders and inlines by the hot paths) is the tool if they matter, with F6.
 
 Scratch: `.tmp/f5-multimethod/` (the profiles, the rebuilt programs, the rounds `r-*.txt`).
+
+## F6 as built (2026-10-18)
+
+F6 (a) as decided: primitive fns first, then speculative unboxed workers, since `fib` still showed
+the gap; on the branch `f6-prim` (from main `80294e9a`), in `arbace.c2j` (`arbace/c2j/emit.ae`,
+`main.ae`), the compiled fns' run-time classes (`test/c2j/gen_fns.ae`,
+`arbace/lang/go/CompilerAOTFn.ae`) and one rule of j2g (`code.ae`). The analysis is not changed:
+`FnMethod.primInterface` still answers nil (EVAL-PLAN Q1), no call site is an `.invokePrim` and
+an evaluated fn is no `IFn$LL`; everything below is the back end's, below the analysis, and
+answers only what the boxed path answers.
+
+### Step 1: primitive fns' unboxed entries
+
+- **The entry.** A fn method with `^long` or `^double` parameters or return, at most 4
+  parameters and not variadic (the JVM's `primInterface`: the signatures `IFn$LL`, `IFn$DD`,
+  `IFn$OL`, `IFn$LO` ...), gets `invokePrim(self, long/double/Object...)` returning its return's
+  class: the body as the boxed method had it, its primitive parameters taken as they are, its
+  return unboxed (`ret-body`). Its boxed `invoke` converts the arguments as before
+  (`RT.longCast`, `doubleCast`) and boxes the entry's value as before (`Long.valueOf`,
+  `Double.valueOf`), so generic callers, evaluated code and `apply` see the same fn. The code
+  class records its entries' signatures (`:prims`).
+- **Which code a site expects** is read from the analysis: the fn of the var's last top-level
+  `def` in the recorded units (`var-fns`), not the root's `.-fe`, so that the back end decides
+  the same when its own namespaces and `arbace.core` run compiled (their roots `AOTFn`s,
+  SA164's `compiled-back-end`: the fixpoint's G2) as when they run evaluated (G1); a fn a `def`
+  makes inside a `let` (a closure) gets its entries, and its calls stay F5's (the boxed
+  `invoke` called directly). The link plan still checks the code class's own `:prims` (and `:specs`).
+- **A linked call (F5) of it** binds its arguments first, each once and in order: an argument
+  of the parameter's primitive class that is a local or a resolved static call, unboxed (boxed
+  for the generic call as `emit` boxes it); a constant, the literal (the pool's object for the
+  generic call); anything else boxed and converted by the boxed invoke's own conversion
+  (`RT.longCast`) after all are evaluated, where the boxed invoke would convert it. Then under
+  the guard the entry is called directly. Its value is boxed as the boxed invoke boxes it, or,
+  where the consumer converts the call's value to the return's class (an argument of a
+  primitive parameter: `typed-args`; a primitive return: `ret-body`), left unboxed, the generic
+  path converting what it gets as before (so a redefinition to a fn of a double, a ratio, a
+  string still answers 2, 3, `ClassCastException` as it did).
+
+`fib-prim`'s body becomes one Go function on `int64`s, its recursive calls
+`linked.(*A_bench_eval_fib_prim_A).InvokePrim_O_J__J(root, n-1)` under the guard.
+
+### Step 2: speculative workers
+
+- **Which fns.** A fixed-arity fn method without primitive hints (at most 4 parameters, not
+  variadic, no recur to its parameters) whose parameters an F3 operation of `Numbers` takes as
+  Object operands, and which passes one of them, or such an operation of them, to a call of a
+  var (`spec-mask`; a fn whose parameters only meet operations, `arbace.core`'s `+`, would pay
+  the dispatch for nothing: measured, `reduce-range` 5% slower with every such fn given one).
+- **The worker**, `invokeSpec(self, long n, Object nbox ...)`, takes those parameters as longs,
+  each with its box: the caller's object when it had one, else nil and made once when the body
+  needs it (`Long.valueOf`, the same box the generic call would have passed), so a parameter
+  returned, stored or compared by `identical?` is the caller's object, and one box per
+  parameter. In its body an F3 operation on such a parameter takes the long with no test; any
+  other use takes the box. Entered from the boxed `invoke` when those arguments are `Long`s
+  (else the boxed body, unchanged), and from linked calls under the guard plus the arguments'
+  type tests; an argument that is the calling worker's own long parameter, a primitive long, or
+  an F3 operation of such parameters (`spec-intrinsic`: its `Long` case computed as a long, not
+  boxed; Numbers' own answer otherwise) needs no test. It returns the boxed value, so a failed
+  guard needs no deoptimization: there is no unboxed state to hand over (§4 (g)'s risk), the
+  generic call is T1's.
+- **The guard inlined.** `Compiler$AOTFn/linked` was a call at every site (gc would not inline
+  it: the `Cast` it makes may throw). The calls of entries and workers use `linkedFast`, the same
+  test written so that j2g binds `if-instance`'s pattern by Go's assertion for the compiled fns'
+  classes (`assert-classes`: the value is known non-nil and of the type, so `C_Cast` could
+  neither answer nil nor throw), which gc inlines; F5's other sites keep the out-of-line `linked`
+  (inlined at all 44,600 sites the program grew by 4%).
+
+### Measured
+
+As F5 was (SA139's way): `test/bench/eval-bench.ae` as `bench.eval` (with
+`test/c2j/link_redef.ae` and `test/c2j/prim_fns.ae`) compiled with the runtime's namespaces into
+a measurement program by stage 0 (the seed's runtime is main's), with each tree's c2j, j2g and
+`bin/build-go`; before: main `80294e9a`; step 1: the unboxed entries alone, as first built (the
+guard `linked`, out of line); F6: the branch; run compiled
+(`(Compiler$AOT/load "bench/eval" ...)`); ms, the best of five interleaved rounds, each the
+benchmark's best over at least 1 s and 3 runs; amd64, the machine shared (load 5-20):
+
+| benchmark | before | step 1 | F6 | speed-up |
+|---|---:|---:|---:|---:|
+| `fib` | 0.98 | 0.98 | 0.53 | 1.85 |
+| `fib-prim` | 1.51 | 0.47 | 0.36 | 4.19 |
+| `loop-long` | 3.74 | 3.74 | 3.74 | 1.00 |
+| `loop-double` | 0.53 | 0.54 | 0.54 | 0.98 |
+| `dotimes-array` | 8.98 | 8.96 | 8.96 | 1.00 |
+| `reduce-range` | 38.16 | 37.72 | 37.48 | 1.02 |
+| `reduce-fn` | 10.97 | 10.91 | 10.94 | 1.00 |
+| `vector-conj` | 16.57 | 16.20 | 16.33 | 1.01 |
+| `map-assoc-get` | 18.23 | 18.20 | 18.36 | 0.99 |
+| `keyword-map` | 6.11 | 6.12 | 6.10 | 1.00 |
+| `str-build` | 6.02 | 6.16 | 6.08 | 0.99 |
+| `seq-ops` | 30.49 | 31.37 | 31.31 | 0.97 |
+| `lazy-walk` | 17.42 | 17.63 | 17.60 | 0.99 |
+| `transduce` | 12.69 | 12.99 | 13.01 | 0.98 |
+| `into-xform` | 10.92 | 11.33 | 11.23 | 0.97 |
+| `protocol` | 4.72 | 4.69 | 4.73 | 1.00 |
+| `multimethod` | 7.44 | 7.35 | 7.30 | 1.02 |
+| `destructure` | 19.20 | 20.41 | 20.29 | 0.95 |
+| `closures` | 15.74 | 15.34 | 14.95 | 1.05 |
+| geometric mean | 7.83 | 7.41 | 7.06 | 1.11 |
+
+- `fib-prim` 1.51 → 0.36 (the JVM 0.16): 0.47 with the entries alone, 0.35-0.36 once the guard
+  is inlined. `fib` 0.98 → 0.53: with the worker alone 0.88, the guard inlined 0.78-0.82, the
+  arguments `(- n 1)` passed unboxed 0.53; what is left is the boxed return (a worker answers an
+  Object; fib's values are small, so `Long.valueOf` mostly hits its cache) and the call itself
+  (a root read, the guard, a method call per call: gc inlines no recursion, where HotSpot
+  inlines a few levels).
+- The rest is unchanged within the noise and layout (F5.2): the runtime has 78 unboxed entries
+  (`arbace.math`'s 43, `j2g.zlib`'s 8, `repr.go`'s text, `arbace.core`'s few) and 51 workers
+  (mostly `repr.go`'s printer), none on these benchmarks' paths. `destructure` and `seq-ops`
+  moved by as much in step 1, whose code on their paths is the same.
+- **Variants measured and not built** (rounds of their own): the worker for every fn whose
+  parameters meet an F3 operation (420 linked worker calls, `reduce-range` 40.0 against 38.0);
+  j2g's assertion binding for every translated class (F6.1): `fib` 0.54, `fib-prim` 0.35 as
+  built, but `loop-long` 3.74 → 4.37 with byte-identical code (layout) and 3-5% on four sequence
+  benchmarks, the program +0.6%; and with `linked` itself inlined everywhere, +3.8% (185.9 MB).
+- **Size.** The measurement program 177,447,903 → 178,880,946 bytes (+0.8%).
+
+### Checks
+
+- `test/c2j/prim_fns.ae` (new; 72 checks), run in the measurement program compiled
+  (`Compiler$AOT/load`) and evaluated (`ARBACE_NO_AOT`): the same lines, all `ok`, and the same
+  in main's program (the 52 checks of the primitive fns as first written): hints honored (a double, a ratio,
+  an int, a bigint in and out of range, a string, nil as a `^long` argument; returns of a ratio
+  and of a bigint), overflow (thrown by `inc` and `*`, wrapped by `unchecked-inc`, promoted by
+  `inc'` and `*'`), `^double` fns, `IFn$LO`- and `$OL`-shaped fns, 4 and 5 parameters, a
+  multi-arity fn with primitive arities and a variadic one, recur on primitive parameters, a
+  primitive closure, callers in primitive and boxed contexts, boxing identity; a primitive fn
+  redefined by `with-redefs` (to evaluated fns of a long, a double, a ratio, a string; to
+  another compiled primitive fn), `alter-var-root` and a `defn` evaluated at run time, seen by
+  its compiled callers, `fib-prim`'s own recursion included; the workers: a parameter returned
+  is the caller's object, one box per parameter, a fresh argument, overflow, promotion, ratios,
+  doubles, bigints, ints, nil and strings through the boxed path, two parameters, a closure over
+  a parameter, a worker calling a redefined fn, `fib` redefined at run time.
+- `test/c2j/link_redef.ae`: all 20 `ok`, compiled and evaluated.
+- **`bin/diffcheck`** (in the essential gate): 12,731 of 12,754 cases agree, 23 disagree, all
+  recorded, 0 new.
+- **The essential gate** passed on `HEAD` before this record (the smoke test; Clojure's suite,
+  20,506 of 20,520, no regressions; the oracle, 53 known mismatches, 0 new; diffcheck as above).
+  **`bin/arbace-go --fixpoint`** holds: G1 = G2 = G3 byte for byte (120,578,208 bytes, sha256
+  `5a6a8f30...`), stage 0 different from G1 as expected until a re-seed (the back end, j2g and
+  `CompilerAOTFn.ae` are the program's). A first version decided from the root (`.-fe` of an
+  evaluated fn, nothing for a compiled one) gave G1 ≠ G2 (G2 = G3): the reason for `var-fns`.
+  The shipped executable 119,660,704 → 120,578,208 bytes (+0.8%). No re-seed here.
+
+### Proposals (the user's to decide)
+
+- **F6.1 j2g's assertion binding for every class.** `if-instance` binds by Go's assertion for
+  the compiled fns' classes only (as built); for every translated class that is no interface
+  it is as exact and lets gc inline more (measured: the geometric mean 7.33 against 7.45 for the
+  rest equal, `protocol` and `destructure` 5-6% faster, but `loop-long` 16% and four sequence
+  benchmarks 3-5% slower on the same machine code, layout; the program +0.6%). (a) As built,
+  the two classes; (b) every class. *Recommended: (a)*; (b) with a profile (`--pgo`) that
+  settles the layout, if it is ever measured so.
+- **F6.2 A worker's unboxed return.** A worker answers a box (`fib`'s 0.53 against
+  `fib-prim`'s 0.36 is mostly that, and the type tests on it); answering a long needs a second
+  result for the cases that are no long (a promotion, a redefined callee's value): a long and a
+  box in a holder the caller passes, or a sentinel with the object kept per thread. (a) Left
+  as built; (b) a two-result worker for fns whose every return is an F3 operation, a long
+  parameter or a worker's call. *Recommended: (a)* until a workload beyond `fib` asks for it;
+  the call itself (a root read, the guard, a method call per call) is what is left of the gap to
+  the JVM's 0.16 for both, which inlining recursion would take, and gc does not.
+- **F6.3 Workers' reach.** (a) As built: a worker only for a fn passing a parameter, or an
+  operation of one, to a call of a var (51 in the runtime); (b) also fns whose parameters only
+  meet operations (measured: `reduce-range` 5% slower, nothing faster); (c) also the
+  parameters' loops (a recur to them, with a fallback to the boxed method at the recur when a
+  new value is no `Long`). *Recommended: (a)*; (c) when a benchmark of loops over boxed
+  parameters asks for it.
+
+Scratch: `.tmp/f6-prim/` (`bench.bash` and `rounds.bash`, the programs `b-*`, the rounds
+`rounds*/` and `r-*.txt`, `table-final.md`).
