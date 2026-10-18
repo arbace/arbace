@@ -1282,3 +1282,36 @@ test case only (`libraries/` has none outside `cabal-testsuite`); HR22, `:hsc2hs
 HR24, the bird-track printing. HR25, recommended as a follow-up and not built: HR23's
 positions for R5's alex output `Distribution.Fields.Lexer`, likely removing its known
 difference.
+
+## 2026-10-18: F6 merged
+
+F6 (a) (doc/FUTAMURA-SURVEY.md, "F6 as built"; branch `f6-prim`, `ea676188`, `ceb21100`),
+both steps in c2j (`arbace/c2j/emit.ae`, `main.ae`), one j2g rule (`arbace/j2g/code.ae`) and
+`linkedFast` (`test/c2j/gen_fns.ae` → `arbace/lang/go/CompilerAOTFn.ae`). The evaluator and
+the analysis (`primInterface` still nil, EVAL-PLAN Q1) are unchanged.
+
+- Step 1: a fn method with `^long`/`^double` parameters or return (at most 4, not variadic,
+  as on the JVM) gets an unboxed `invokePrim`. F5's linked calls bind its arguments once, in
+  order, and call it under the guard; the result stays unboxed where the consumer converts it.
+- Step 2: a fn without hints whose parameters are operands of F3's `Numbers` ops and flow to a
+  var call (no `recur` to them) gets a worker `invokeSpec(long, box ...)`. The box is the
+  caller's own object, or one made lazily, so identity is kept. It is entered from `invoke`
+  when the arguments are `Long`s and from linked calls under type guards; a failed guard falls
+  back to the generic call, so nothing needs deoptimizing.
+- At these sites the guard is `linkedFast`, which j2g binds with Go's type assertion for
+  `Compiler$AOTFn`/`$AOTRestFn` only, so gc inlines it. Inlining F5's other 44,600 sites would
+  cost 3.8% of size.
+- The code a call site expects is read from the analysis (each var's last `def`, `var-fns`).
+  Deciding from the run-time root gave G1 ≠ G2, because SA164 loads the back end and core
+  compiled in G2.
+
+Measured (best of 5 interleaved rounds, ms; before = `80294e9a`): `fib` 0.98 → 0.53,
+`fib-prim` 1.51 → 0.36 (the JVM 0.16 for both), geometric mean of 19 7.83 → 7.06 (1.11×);
+the others within ±3%, but `destructure` +5% and `closures` −5%. The shipped executable is 0.8%
+larger. Checks on the branch: `test/c2j/prim_fns.ae` (72 checks, compiled = evaluated),
+`link_redef.ae` 20 of 20, diffcheck 0 new, the essential gate, `--fixpoint` G1 = G2 = G3.
+The essential gate passed on main after the merge (`e09a98ac`, 11m52s).
+
+Open proposals, recommended to keep as built: F6.1, j2g's assertion rule for every class
+(mixed, layout-driven results); F6.2, workers returning an unboxed long (a second result);
+F6.3, workers for more fns (one wider variant made `reduce-range` 5% slower; loops later).

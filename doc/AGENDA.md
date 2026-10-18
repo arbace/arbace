@@ -93,8 +93,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Running (the user, 2026-10-18: "start all 5"): F6 (primitive fns, then unboxed workers;
-  branch `f6-prim`), goi's GR3 (the interpreter's core; `goi-gr3`); repr/rust RR4 (the rest of `library/`, the compiler, a crate set; `repr-rust-rr4`).
+- Running (the user, 2026-10-18: "start all 5"): goi's GR3 (the interpreter's core; `goi-gr3`); repr/rust RR4 (the rest of `library/`, the compiler, a crate set; `repr-rust-rr4`).
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
@@ -108,7 +107,8 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - Done (2026-10-18): F5 (guarded direct linking, geometric mean 1.10), `repr/clojure print`, `repr/java`'s
   `:full` mode, the evaluator's compile race fixed. F5.2 found (code layout), CP1 built, the seed
-  remade (`910b4b8f…`). Next: F6, then F7.
+  remade (`910b4b8f…`). F6 done (2026-10-18: primitive fns and speculative workers, `fib` 0.98 →
+  0.53 ms, geometric mean 1.11×; F6.1-F6.3 open). Next: a re-seed, then F7.
 
 - The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
   Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
