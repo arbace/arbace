@@ -125,7 +125,7 @@ repr-clojure-check: ## repr/clojure's unit tests; Clojure's suite translated aga
 	bin/repr-clojure check --suite
 repr-clojure-roundtrip: ## Clojure -> Arbace -> Clojure over the frozen clojure/, the suite, its libraries (.cljc back whole with --full); Arbace -> Clojure -> Arbace over arbace/ (bin/repr-clojure check --roundtrip)
 	bin/repr-clojure check --roundtrip
-repr-haskell-roundtrip: ## Haskell -> forms -> Haskell over GHC 9.14.1's boot libraries (41 packages): GHC's trees and lines (bin/repr-haskell roundtrip)
+repr-haskell-roundtrip: ## Haskell -> forms -> Haskell over GHC 9.14.1's boot libraries (41 packages, their .hsc, boot and Setup.lhs files): GHC's trees and lines (bin/repr-haskell roundtrip)
 	bin/repr-haskell roundtrip
 repr-haskell-iface: ## the same, then GHC's interfaces of the originals and the printed modules compiled, compared (bin/repr-haskell roundtrip --iface)
 	bin/repr-haskell roundtrip --iface
@@ -133,7 +133,7 @@ repr-haskell-text: ## the same in mode :full: each module printed back byte for 
 	bin/repr-haskell roundtrip --text-only
 repr-haskell-layout: ## the same forms printed by Haskell's layout rule, as a person writes them: GHC's trees and lines, then interfaces (bin/repr-haskell roundtrip --layout-only --iface)
 	bin/repr-haskell roundtrip --layout-only --iface
-repr-haskell-test: ## repr/haskell's cases: the reader's samples, the spec's worked example, mode :full, the layout layout (bin/repr-haskell test)
+repr-haskell-test: ## repr/haskell's cases: the reader's samples, the spec's worked example, mode :full, the layout layout, R5's and R6's cases (bin/repr-haskell test)
 	bin/repr-haskell test
 repr-rust-roundtrip: ## Rust -> forms -> Rust over std's five crates of rustc 1.99.1: rustc's trees and lines (bin/repr-rust roundtrip)
 	bin/repr-rust roundtrip

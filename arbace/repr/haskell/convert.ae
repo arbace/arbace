@@ -1622,12 +1622,21 @@
           (concat (:extensions config)
                   (mapcat (fn [[k _ v]] (when (= k 'language) v)) pragmas))))
 
+(defn module-kind
+  "The kind of a module's file (SPEC §2.4's :kind; R6): :boot for a boot file (.hs-boot,
+  .lhs-boot), :sig for a Backpack signature (.hsig, .lhsig), nil for a module"
+  [file]
+  (cond
+    (re-find #"\.l?hs-boot$" file) :boot
+    (re-find #"\.l?hsig$" file) :sig
+    :else nil))
+
 (defn module-name
   "The namespace of a module (SPEC §2.1): hs.M; hs.main.PATH for a module without a header or
-  Main; .boot for a boot file"
+  Main; .boot for a boot file, .sig for a signature (R6)"
   [mname file]
   (if (and mname (not= mname "Main"))
-    (symbol (str "hs." mname))
+    (symbol (str "hs." mname (case (module-kind file) :boot ".boot" :sig ".sig" "")))
     (symbol (str "hs.main." (-> file
                                 (str/replace #"\.[^./]+$" "")
                                 (str/replace #"[.-]" "_")
@@ -1653,15 +1662,20 @@
             [_ _ _ deprec header] (un ext)
             mn (when-let [n (just mname)] (second (un n)))
             ns-name (module-name mn file)
-            prag-forms (for [[k line v] pragmas]
-                         (attach (case k
+            ;; a pragma in another file (R6: after hsc2hs's first {-# LINE #-}) with its file
+            prag-forms (for [[k line v pf] pragmas]
+                         (cond-> (attach (case k
                                    language (apply list 'hs/language (map symbol v))
                                    options-ghc (apply list 'hs/options-ghc v)
                                    options (apply list 'hs/options v)
                                    options-haddock (list 'hs/options-haddock v)
                                    include (list 'hs/include v))
-                                 line))
-            hdr (when-let [h (just header)] [(doc-form 'hs/doc h)])
+                                 line)
+                           (and pf (:hsc2hs config)) (vary-meta assoc ::file pf)))
+            ;; R6: an .hsc module's header documentation with its file (hsc2hs's)
+            hdr (when-let [h (just header)]
+                  [(cond-> (doc-form 'hs/doc h)
+                     (and (:hsc2hs config) (file-of h)) (vary-meta assoc ::file (file-of h)))])
             cfg (cond-> {:ghc (:ghc config) :ghc-unit (:ghc-unit config) :target (:target config)
                          :os (:os config) :arch (:arch config) :language (:language config)}
                   (seq (:extensions config)) (assoc :extensions (:extensions config))
@@ -1670,20 +1684,32 @@
                   (:corpus config) (assoc :corpus (:corpus config)))
             exp-v (when-let [e (just exports)] (at (vec (mapcat ie-forms (un e))) e))
             modf (apply list 'hs/module
-                        (concat [(if mname (at (symbol mn) (just mname)) nil)]
+                        ;; a module without a header (R6: a Setup script): nil (Nothing in the dump)
+                        (concat [(if (just mname) (at (symbol mn) (just mname)) nil)]
                                 (when-let [w (just deprec)]
                                   (let [[k cat msg] (warning-txt w)]
                                     [(at (apply list k (concat (when cat [cat]) [msg])) w)]))
                                 (when exp-v [exp-v])
-                                [:file file :positions (if *full* :full :lines) :config cfg]
-                                (when-let [c (:cpp config)] [:cpp c])))
+                                [:file file]
+                                (when-let [k (module-kind file)] [:kind k])
+                                [:positions (if *full* :full :lines) :config cfg]
+                                (when-let [c (:cpp config)] [:cpp c])
+                                ;; R6: an .hsc module's hsc2hs run, a literate module's unlit
+                                (when-let [h (:hsc2hs config)] [:hsc2hs h])
+                                (when (:unlit config) [:unlit true])))
             modf (attach modf (or (some-> (just mname) line-of) 1))
             ;; the file of the module's name (R5: a module whose text is another file's)
-            modf (if mname (vary-meta modf assoc ::file (or (file-of (just mname)) "")) modf)
+            modf (if (just mname) (vary-meta modf assoc ::file (or (file-of (just mname)) "")) modf)
             body (concat (map import-form imports)
                          (mapcat #(decl-forms % true :top) decls))]
         {:ns ns-name
-         :forms (with-files (vec (concat [(list 'ns ns-name (list :require ['arbace.haskell :as 'hs]))]
-                                         prag-forms hdr [modf] body))
-                            file)
+         :forms (cond->> (with-files (vec (concat [(list 'ns ns-name (list :require ['arbace.haskell :as 'hs]))]
+                                                  prag-forms hdr [modf] body))
+                                     file)
+                  ;; R6: the module's span in another file than its own (hsc2hs's output, whose
+                  ;; {-# LINE #-} pragmas name the .hsc from its first line): :hs/module-file on
+                  ;; hs/module, the file the printer begins and ends the text in
+                  (file-of tree) (mapv (fn [f] (if (and (seq? f) (= 'hs/module (first f)))
+                                                 (vary-meta f assoc :hs/module-file (file-of tree))
+                                                 f))))
          :warnings @warnings}))))

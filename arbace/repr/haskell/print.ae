@@ -1534,18 +1534,28 @@
         [pre more] (split-with #(not= 'hs/module (lv (first (lv %)))) body)
         m (first more)
         decls (rest more)]
-    ;; the header pragmas and the module's documentation, in their source order
-    (doseq [p (sort-by #(or (line-of %) 0) pre)]
+    ;; the header pragmas and the module's documentation, in their source order; each in the
+    ;; file of the form before it in the forms' order where it names none (R6: an .hsc module's
+    ;; documentation after a pragma in its .hsc, the forms' order Haskell's after the pragmas)
+    (doseq [p (sort-by #(or (line-of %) 0)
+                       (loop [ps pre cur nil acc []]
+                         (if-let [p (first ps)]
+                           (let [f (when (instance? arbace.lang.IObj p) (:hs/file (meta p)))]
+                             (recur (rest ps) (or f cur)
+                                    (conj acc (if (and cur (not f)) (vary-meta p assoc :hs/file cur) p))))
+                           acc)))]
       (if (doc-form? p) (doc! p) (pragma! p)))
     (when m
       (let [mv (lv m)
             [_ mname & mrest] mv
             exports (first (filter #(vector? (lv %)) (take-while #(not (keyword? (lv %))) mrest)))
-            warn (first (filter #(seq? (lv %)) (take-while #(not (keyword? (lv %))) mrest)))]
+            warn (first (filter #(seq? (lv %)) (take-while #(not (keyword? (lv %))) mrest)))
+            opts (apply hash-map (map lv (drop-while #(not (keyword? (lv %))) mrest)))]
         (at! m)
         (when mname
           (binding [*indent* (if (layout?) 2 0)]
-          (t! "module") (at! mname) (t! (str (lv mname)))
+          ;; a Backpack signature's header (R6)
+          (t! (if (= :sig (:kind opts)) "signature" "module")) (at! mname) (t! (str (lv mname)))
           (when warn
             (let [w (lv warn)]
               (at! warn)
@@ -1707,10 +1717,17 @@
     {:file (lv (get (module-options forms) :file))
      :text (layout (full-elements (print-tokens forms) d) space (:tail d))}))
 
+(defn bird-tracks
+  "A literate module's text (R6, SPEC §8.5): every line that is not blank a code line, > before
+  it (GHC's unlit writes a space in its place, so that the lines are the text's and the columns
+  one further, the same for every line)"
+  [^String text]
+  (str/join "\n" (map #(if (str/blank? %) % (str ">" %)) (str/split text #"\n" -1))))
+
 (defn print-module
   "Haskell forms (as read from a forms file) to Haskell source: {:file :text}; forms of mode
   :full in the full layout, the original text, unless layout is :braces or :layout; layout
-  :layout: the layout layout (SPEC §7.4, 2)"
+  :layout: the layout layout (SPEC §7.4, 2); a literate module's (:unlit) with bird tracks (R6)"
   [forms & [layout]]
   (when (and (= layout :full) (not (full-forms? forms)))
     (throw (ex-info "repr-haskell: the full layout needs forms of mode :full (bin/repr-haskell read of a dump --full)" {})))
@@ -1718,12 +1735,16 @@
     (print-module-full forms)
     (let [forms (mapv lift-all forms)]
       (binding [*o* (out-of forms false (= layout :layout))]
-        (print-body! forms)
-        ;; the text ends in the module's file, as the original's (GHC's span of the module is in
-        ;; the file it ends in; R5: a module whose text is another file's)
-        (when-let [cur @(:cur-file *o*)]
-          (when (not= cur (:file *o*))
-            (when-not @(:bol *o*) (raw! "\n"))
-            (raw! (str "{-# LINE " (inc @(:main-line *o*)) " \"" (:file *o*) "\" #-}"))))
+        ;; R6: a module whose span is in another file (:hs/module-file, hsc2hs's output) ends
+        ;; there
+        (let [mf (some #(when (= 'hs/module (lv (first (lv %)))) (:hs/module-file (meta %))) forms)]
+          (print-body! forms)
+          ;; the text ends in the module's file, as the original's (GHC's span of the module is in
+          ;; the file it ends in; R5: a module whose text is another file's)
+          (when-let [cur @(:cur-file *o*)]
+            (when (and (not mf) (not= cur (:file *o*)))
+              (when-not @(:bol *o*) (raw! "\n"))
+              (raw! (str "{-# LINE " (inc @(:main-line *o*)) " \"" (:file *o*) "\" #-}")))))
         (raw! "\n")
-        {:file (:file *o*) :text (str (:sb *o*))}))))
+        {:file (:file *o*)
+         :text (cond-> (str (:sb *o*)) (lv (get (module-options forms) :unlit)) bird-tracks)}))))

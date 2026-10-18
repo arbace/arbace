@@ -15,7 +15,10 @@ of them with GHC's trees of mode `:full` equal (§10.6). Milestone R4, the layou
 the same day too: all 483 modules printed by Haskell's layout rule parse to the original's trees
 and lines and compile to equal interfaces (§10.7). Milestone R5, the other boot libraries, was
 built the same day too: 41 packages, 1,226 modules equal at the tree and interface levels in both
-layouts, 1,214 printed back byte for byte (§10.8). The experiments that
+layouts, 1,214 printed back byte for byte (§10.8). Milestone R6, the `.hsc` modules (through
+hsc2hs), the literate modules (through unlit), the boot files and signatures, was built on
+2026-10-18: 1,345 modules equal at the tree and interface levels in both layouts, 1,333 printed
+back byte for byte (§10.9). The experiments that
 validate the spec's choices (Appendix A) were run on the host's GHC 9.14.1 (Alpine's
 `ghc-9.14.1-r2`) and the stage 0 of main at `f0d7fc2f` (`target/seed/amd64/arbace`, amd64);
 their scripts and inputs are `test/haskell/`.
@@ -271,6 +274,7 @@ preprocessed text (§2.8; unlike ghc-lisp's D11, S4). Pragmas GHC does not recog
 | `:positions` | `:lines` (the default) or `:full` (§7) |
 | `:config` | the configuration (§2.7) |
 | `:cpp` | the preprocessing record, when the module was preprocessed (§2.8) |
+| `:hsc2hs` | the hsc2hs run of an `.hsc` module, whose output is the module (§8.5; as built, §10.9) |
 | `:unlit` | `true` for a literate module (`.lhs`), whose code GHC's `unlit` extracted (§8.5) |
 | `:hs/comments`, `:hs/space`, `:hs/tail`, `:hs/unicode` | in mode `:full` only: the text the tree does not hold (§7.2; as built, §10.6: metadata of the `hs/module` form, `:hs/unicode` folded into `:hs/text`) |
 
@@ -1046,7 +1050,8 @@ reading the included files' names from the output's line markers.
 `.hsc` modules (`hsc2hs`'s input: C constants for the FFI) are not GHC's driver's business: the
 corpus step runs the host's `hsc2hs` (Alpine's, with GHC) and converts its `.hs` output, recording
 the tool's version and the input's and output's SHA-256 in `:cpp` (HS5). There are 7 in `base`, 27
-in `ghc-internal`, 50 in `unix`.
+in `ghc-internal`, 50 in `unix`. (As built, §10.9: the helper runs `hsc2hs`, and `:hsc2hs` records
+it; 90 in the corpus.)
 
 ## 9. The round trip and its corpus
 
@@ -1171,7 +1176,7 @@ bin/repr-haskell test                       the spec's cases (test/haskell/)
 | R3 | `:full`: the helper's annotations and comments, the converter's metadata, the full printer (built 2026-10-17: 483 of 483 modules byte-identical, 480 with equal trees of mode `:full`, §10.6) | text level, tree level in `:full` |
 | R4 | the layout printer (built 2026-10-17: 483 of 483 modules at the tree and interface levels, §10.7) | tree and interface levels |
 | R5 | the other boot libraries (built 2026-10-17: 37 packages, 743 modules, all at the tree and interface levels in both layouts, 731 at the text level, §10.8) | all of the above |
-| R6 | `.hsc` (hsc2hs), `.lhs` (unlit), boot files and signatures in the corpus | all of the above |
+| R6 | `.hsc` (hsc2hs), `.lhs` (unlit), boot files and signatures in the corpus (built 2026-10-18: 90 `.hsc` modules, 25 boot files, 4 literate modules, all at the tree and interface levels in both layouts, all byte-identical at the text level, §10.9) | all of the above |
 | later | Core and code levels; behaviour over GHC's testsuite; a Stackage subset | |
 
 By the survey's estimate (§5.3), R1-R3 over `base` and the boot libraries are about 6-9 working days.
@@ -1427,6 +1432,60 @@ survey's E3).
 - **The levels (§9.6)**: the trees of both sides are parsed as one job list over the corpus, the
   packages compiled four at a time at the interface level (`REPR_HASKELL_PACKAGES`), the interfaces
   shown in one job list; `bin/gate --full`'s step over the whole corpus, about 10 minutes (HR20).
+
+### 10.9 As built: R6 (2026-10-18)
+
+[HASKELL-NOTES.md](HASKELL-NOTES.md), "R6", records the build; what it changes in this text
+(HR21-HR24 built as recommended, HR25 a follow-up; for the user's decision):
+
+- **The corpus (§9.4)**: the 90 `.hsc` modules of R1's and R5's packages (26 of `base` and
+  `ghc-internal`, 64 of the others) and their 25 boot files (24 of `ghc-internal`, `filepath`'s
+  `System.OsPath`) are converted, and the literate modules of `libraries/`: the `Setup.lhs`
+  scripts of `binary`, `exceptions`, `terminfo` and `text`, Main modules (`hs.main.Setup` under
+  their package), four entries `PKG-Setup` parsed and compiled as cabal-install compiles a Setup
+  script, against the installed `Cabal` (HR21). `libraries/` holds no signature (`.hsig` files
+  are only in `Cabal`'s testsuite): `test/haskell/r6/Str.hsig` is the one, with R6's other
+  cases. 1,345 modules in all.
+- **`.hsc` (§8.5, HS5; HR22)**: the helper runs the host's `hsc2hs` (0.68.10, in Alpine's `ghc`)
+  on `X.hsc` with the package's `:hsc-flags`, writes its output `X.hs` beside it (where a Cabal
+  build's `dist` would hold it) and converts `X.hs`: the module's `:file` is `X.hs`, and
+  `hs/module`'s `:hsc2hs {:command ["hsc2hs" ARG...] :version "0.68.10" :file "X.hsc" :input
+  "sha256:..." :output "sha256:..."}` records the run, beside `:cpp` (28 of the 90 outputs are
+  preprocessed by CPP again) rather than in it. hsc2hs's `{-# LINE n "X.hsc" #-}` pragmas put
+  GHC's positions in the `.hsc`. In mode `:lines` the nodes are another file's (§10.8's
+  `:hs/file`, HR18), printed with `{-# LINE #-}`; the module's own span is in the `.hsc` too, so
+  `hs/module` carries `:hs/module-file "X.hsc"` and the printed text ends there, and the header
+  pragmas and the module's documentation carry their file. In mode `:full` (HR23) every position
+  is the place in the module's own text (the output, or a CPP module's module view, whose
+  `{-# LINE #-}` pragmas are text, not markers) and the pragmas are comments, so that the
+  positions GHC gives follow from them: an expanded `#{enum}` makes more lines than it takes, and
+  GHC's positions then repeat (in `GHC.Internal.Event.EPoll` and `Poll`), which places do not.
+  GHC's lexer's raw token stream has the places; each span gets the places of the tokens its
+  positions name, the nearest pair. The text level compares the printed module with the output
+  (or its module view).
+- **`.lhs` (§8.5, HS5; HR24)**: through GHC's driver (`preprocess`: unlit, then CPP when on),
+  `:unlit true` on `hs/module`. unlit keeps every line and column (a bird track's `>` becomes a
+  space), so the lines of mode `:lines` are the `.lhs`'s. The braces and the layout layouts write a
+  literate module with bird tracks: `>` before every line that is not blank, every column one
+  further. Mode `:full` keeps the literate text as comments, HS5's "literate text kept": a line unlit
+  leaves blank (prose, `\begin{code}`, a `#!` line) whole, and each bird track's `>`; the text
+  level compares the printed module with the `.lhs` itself.
+- **Boot files and signatures (§2.1, §2.4)**: `:kind :boot` (namespace `hs.M.boot`, file
+  `hs/M/boot.ae`) and `:kind :sig` (`hs.M.sig`, `hs/M/sig.ae`), from the file's extension; a
+  signature parsed by GHC's `parseSignature`, its header printed `signature`. The interface level
+  compares a boot file's `.hi-boot`, its printed copy compiled in the `.hs-boot`'s place; the
+  signature's `.hi` is compiled as an indefinite unit's (`-this-unit-id p -this-component-id p
+  -instantiated-with Str=<Str>`) in `bin/repr-haskell test`'s step 8.
+- **Results**: 1,345 modules equal at the tree level in both layouts (2,078,725 located nodes) and at
+  the interface level (3,701,019 lines of `--show-iface`); at the text level 1,333 byte-identical
+  (11,703,634 bytes), 1,327 with equal trees of mode `:full`. Of R6's 119, all are byte-identical
+  and 116 have equal trees of mode `:full`: the 3 `.hsc` modules whose output keeps a CPP directive
+  (an `#include`, an `#if`) are known differences of that tree (after the directive CPP's line
+  markers name the output's own lines; the module view has no directive, S5, as HR12's `CTypes.h`
+  modules). R1-R5's forms of both modes and their printed modules in the three layouts are byte
+  for byte main's.
+- **The gate**: `bin/gate --full`'s step is unchanged, `roundtrip --iface --text --layout && test`,
+  542 s over the 1,345 modules (R5's 585 s for 1,226).
 
 ## 11. Decisions and open questions
 

@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP, BangPatterns, ScopedTypeVariables, RankNTypes, LambdaCase, TypeApplications, GADTs #-}
 -- repr/haskell's helper (doc/haskell/SPEC.md §8, doc/haskell/HASKELL-NOTES.md): GHC's parsed tree
--- of a Haskell module (HsModule GhcPs, after GHC's driver preprocessed it: unlit, CPP) written
+-- of a Haskell module (HsModule GhcPs, after GHC's driver preprocessed it: unlit, CPP; an .hsc
+-- module through hsc2hs first, R6) written
 -- generically through Data as Clojure-reader forms, for the converter arbace.repr.haskell.convert.
 -- It decides nothing about forms. Arbace's own code, written anew; GHC's utils/check-ppr (its
 -- eraseEpLayout and the showAstData comparison) is its model (SPEC HS8).
@@ -20,7 +21,10 @@
 --       OUTDIR/FILE.lines: the start line of every located node (hsdump lines)
 --   hsdump lines [--libdir DIR] [--ghc FLAG... --files] FILE...   the lines, to standard output
 -- FILE is relative to the current directory (the package's directory: it is the file name of
--- every span). The GHC flags between --ghc and --files are the conversion's configuration (SPEC §2.7):
+-- every span). R6: an .hsc FILE is run through the host's hsc2hs first (--hsc2hs-arg A, repeated:
+-- its arguments; the output X.hs written beside X.hsc, as Cabal's build writes it, recorded in
+-- :hsc2hs) and X.hs is the module (its outputs are named after X.hs); a literate FILE (.lhs) goes
+-- through GHC's unlit (:unlit); an .hsig is parsed as a signature, an .hs-boot as a boot file. The GHC flags between --ghc and --files are the conversion's configuration (SPEC §2.7):
 -- -X (the language and extensions), -D and -I (CPP), -haddock, -this-unit-id, -package...
 -- The exit status is 1 when a module fails (its output is (hsdump/error "...")).
 module Main (main) where
@@ -67,7 +71,7 @@ import Data.Data
 import Data.IORef
 import Data.List (isPrefixOf, isSuffixOf, sortOn, intercalate, nub)
 import qualified Data.List.NonEmpty as NE
-import Data.Maybe (fromMaybe, mapMaybe, catMaybes)
+import Data.Maybe (fromMaybe, mapMaybe, catMaybes, isJust)
 import Data.Ratio (numerator, denominator)
 import Data.Word (Word8, Word32, Word64)
 import qualified Data.ByteString as B
@@ -77,12 +81,14 @@ import qualified Data.ByteString.Char8 as BC
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, makeAbsolute)
 import System.Environment (getArgs)
 import System.Exit (exitWith, ExitCode(..))
-import System.FilePath (takeDirectory, (</>), makeRelative, normalise)
+import System.Process (readProcessWithExitCode)
+import System.Directory (renameFile, removeFile)
+import System.FilePath (takeDirectory, takeFileName, (</>), makeRelative, normalise)
 import System.IO
 
 -- The helper's version: bumped when its output changes (recorded in every dump's config).
 helperVersion :: Int
-helperVersion = 2
+helperVersion = 3
 
 -- The GHC this helper was written against (tools/hsdump/GHC_VERSION, passed by the build as
 -- -DGHC_PIN); the helper refuses to run on another (SPEC §8.4, H11).
@@ -95,10 +101,11 @@ pinnedGhc = "unset"
 
 data Opts = Opts
   { oVerb :: String, oFull :: Bool, oOut :: Maybe FilePath, oLibdir :: Maybe FilePath
-  , oCorpus :: Maybe String, oSrcHash :: Maybe String, oFiles :: [FilePath], oGhc :: [String] }
+  , oCorpus :: Maybe String, oSrcHash :: Maybe String, oFiles :: [FilePath], oGhc :: [String]
+  , oHscArgs :: [String], oRepo :: Maybe FilePath }
 
 parseOpts :: [String] -> Either String Opts
-parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing [] []) rest
+parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing [] [] [] Nothing) rest
   where
     go o ("--ghc" : fs) = let (gs, r) = break (== "--files") fs in go o { oGhc = oGhc o ++ gs } (drop 1 r)
     go o ("--full" : xs) = go o { oFull = True } xs
@@ -106,6 +113,8 @@ parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing []
     go o ("--libdir" : d : xs) = go o { oLibdir = Just d } xs
     go o ("--corpus" : c : xs) = go o { oCorpus = Just c } xs
     go o ("--helper-hash" : h : xs) = go o { oSrcHash = Just h } xs
+    go o ("--hsc2hs-arg" : a : xs) = go o { oHscArgs = oHscArgs o ++ [a] } xs
+    go o ("--repo" : d : xs) = go o { oRepo = Just d } xs
     go o (x : xs) | "-" `isPrefixOf` x = Left ("hsdump: unknown option " ++ x)
                   | otherwise = go o { oFiles = x : oFiles o } xs
     go o [] = Right o { oFiles = reverse (oFiles o) }
@@ -137,8 +146,10 @@ main = do
     let dflags2 = (if oFull o then (`gopt_set` Opt_KeepRawTokenStream) else id) dflags1
     _ <- setSessionDynFlags dflags2
     hsc_env <- getSession
-    forM_ (oFiles o) $ \file -> do
-      r <- liftIO (try (parseOne hsc_env o file) :: IO (Either SomeException (Either String ModP)))
+    forM_ (oFiles o) $ \file0 -> do
+      -- R6: an .hsc module through hsc2hs, its output X.hs the module
+      let file = if ".hsc" `isSuffixOf` file0 then take (length file0 - 1) file0 else file0
+      r <- liftIO (try (withHsc o file0 (parseOne hsc_env o file)) :: IO (Either SomeException (Either String ModP)))
       let failed msg = liftIO $ do
             modifyIORef' failures (+ 1)
             hPutStrLn stderr ("hsdump: " ++ file ++ ": " ++ firstLine msg)
@@ -155,11 +166,13 @@ main = do
             Right p -> do
               cfg <- configOf o libdir (fromMaybe "" ghcUnit) dflags2 p
               hPutBuilder' h (cfg <> BB.char7 '\n')
-              hPutBuilder' h (pragmasOf p <> BB.char7 '\n')
-              hPutBuilder' h (gen (oFull o) (mkFastString file) (pModule p) <> BB.char7 '\n')
+              hPutBuilder' h (pragmasOf file p <> BB.char7 '\n')
+              let mf = mkFastString file
+                  phys = if oFull o then physOf mf p else Nothing
+              hPutBuilder' h (gen (oFull o) mf (maybe Nothing (Just . fst) phys) (pModule p) <> BB.char7 '\n')
               when (oFull o) $ do
                 hPutBuilder' h (BB.string7 "(hsdump/text " <> str (pView p) <> BB.string7 ")\n")
-                hPutBuilder' h (tokensOf (mkFastString file) (pTokens p) <> BB.char7 '\n')
+                hPutBuilder' h (tokensOf mf (fullTokens mf p phys) <> BB.char7 '\n')
           -- a CPP module's module view, the text level's reference (SPEC §2.8, §9.1)
           when (oFull o) $ case res of
             Right p | Just _ <- pCpp p -> do
@@ -216,26 +229,80 @@ data ModP = ModP
   { pModule :: Located (HsModule GhcPs)
   , pSource :: B.ByteString         -- the original file
   , pText :: B.ByteString           -- the text parsed (the CPP output, or the original)
-  , pPragmas :: [(String, Int, Either String [String])]  -- header pragmas: kind, line, value
+  , pPragmas :: [(String, (Int, String), Either String [String])]  -- header pragmas: kind, line and file, value
   , pCpp :: Maybe CppRecord
   , pDflags :: DynFlags
   , pTokens :: Either String [Located Token]  -- GHC's lexer's tokens, comments included (mode :full)
-  , pView :: String }               -- the text the positions refer to: the source, or CPP's module view
+  , pView :: String                 -- the text the positions refer to: the source, or CPP's module view
+  , pLit :: Bool                    -- a literate module, through unlit (R6)
+  , pHsc :: Maybe HscRecord }       -- an .hsc module's hsc2hs run (R6)
+
+-- an .hsc module's hsc2hs run (R6, SPEC §8.5, HS5): its arguments (paths under GHC's libdir and
+-- the checkout written from $libdir, $repo), hsc2hs's version, the .hsc and the SHA-256 of it and
+-- of the output
+data HscRecord = HscRecord
+  { hArgs :: [String], hVersion :: String, hFile :: FilePath, hInput :: String, hOutput :: String }
+
+-- R6: FILE.hsc through the host's hsc2hs (the arguments --hsc2hs-arg), its output FILE.hs
+-- written beside it (to a temporary name, then renamed: concurrent readers see a whole file),
+-- then k with the record; any other FILE: k without
+withHsc :: Opts -> FilePath -> (Maybe HscRecord -> IO (Either String ModP)) -> IO (Either String ModP)
+withHsc o file0 k
+  | ".hsc" `isSuffixOf` file0 = do
+      let out = take (length file0 - 1) file0
+      (tmp, th) <- openTempFile (takeDirectory out) (takeFileName out)
+      hClose th
+      (ec, _, err) <- readProcessWithExitCode "hsc2hs" (oHscArgs o ++ [file0, "-o", tmp]) ""
+      case ec of
+        ExitFailure _ -> do
+          e <- doesFileExist tmp
+          when e (removeFile tmp)
+          return (Left ("hsc2hs failed: " ++ err))
+        ExitSuccess -> do
+          renameFile tmp out
+          (_, v, _) <- readProcessWithExitCode "hsc2hs" ["--version"] ""
+          input <- B.readFile file0
+          output <- B.readFile out
+          k (Just HscRecord
+               { hArgs = map (relRepo (oRepo o) . relLibdirArg (oLibdir o)) (oHscArgs o)
+               , hVersion = case words v of ws@(_ : _) -> last ws; [] -> ""
+               , hFile = file0
+               , hInput = "sha256:" ++ sha256Hex input
+               , hOutput = "sha256:" ++ sha256Hex output })
+  | otherwise = k Nothing
+  where
+    relLibdirArg l a
+      | Just r <- stripPrefix' "-I" a = "-I" ++ relLibdir l r
+      | Just r <- stripPrefix' "--cflag=" a = "--cflag=" ++ relLibdir l r
+      | otherwise = relLibdir l a
+    relRepo (Just d) a | Just i <- findSub d a = take i a ++ "$repo" ++ drop (i + length d) a
+    relRepo _ a = a
+    stripPrefix' p a = if p `isPrefixOf` a then Just (drop (length p) a) else Nothing
+    findSub d a = case [i | i <- [0 .. length a - length d], d `isPrefixOf` drop i a] of (i : _) -> Just i; [] -> Nothing
+
+-- a literate module's file (GHC's driver runs unlit on it)
+isLiterate :: FilePath -> Bool
+isLiterate f = any (`isSuffixOf` f) [".lhs", ".lhs-boot", ".lhsig"]
+
+-- a Backpack signature's file (parsed by GHC's parseSignature)
+isSignature :: FilePath -> Bool
+isSignature f = any (`isSuffixOf` f) [".hsig", ".lhsig"]
 
 data CppRecord = CppRecord
   { cCommand :: [String], cArgs :: [String], cFiles :: [(String, String)]
   , cMacros :: Maybe String, cOutput :: String }
 
-parseOne :: HscEnv -> Opts -> FilePath -> IO (Either String ModP)
-parseOne hsc_env o file = do
+parseOne :: HscEnv -> Opts -> FilePath -> Maybe HscRecord -> IO (Either String ModP)
+parseOne hsc_env o file hsc = do
   src <- B.readFile file
   let dflags0 = hsc_dflags hsc_env
   -- the file's own pragmas (before CPP), as GHC's driver reads them
   buf0 <- hGetStringBuffer file
   let popts0 = initParserOpts dflags0
       cppOn0 = xopt LangExt.Cpp dflags0
+      lit = isLiterate file
   (dflagsP, _, _) <- parseDynamicFilePragma (hsc_logger' hsc_env) dflags0 (snd (headerOptions popts0 dflags0 buf0 file))
-  if xopt LangExt.Cpp dflagsP || cppOn0
+  if xopt LangExt.Cpp dflagsP || cppOn0 || lit
     then do
       -- through GHC's driver, as it preprocesses before parsing (SPEC §2.8, §8.5); the command
       -- line traced at verbosity 3
@@ -270,8 +337,13 @@ parseOne hsc_env o file = do
                 , cFiles = fileHashes
                 , cMacros = fmap ("sha256:" ++) (case macros of (Just m : _) -> Just m; _ -> Nothing)
                 , cOutput = "sha256:" ++ sha256Hex (foldr (\m t -> replaceBS (BC.pack m) (BC.pack "<macros>") t) out macrosFile) }
-          parseText hsc_env dflagsC file src out (Just record) (moduleView file (decodeUtf8 out))
-    else parseText hsc_env dflagsP file src src Nothing (decodeUtf8 src)
+              -- a literate module without CPP went through unlit alone (R6): no CPP record
+              cpp = if lit && null cmdLines then Nothing else Just record
+              -- the text of a literate module is its source (unlit keeps its lines and columns;
+              -- R6); an .hsc module's {-# LINE #-} pragmas are hsc2hs's text, not markers
+              view = if lit then decodeUtf8 src else moduleView (isJust hsc) file (decodeUtf8 out)
+          parseText hsc_env dflagsC file src out cpp view lit hsc
+    else parseText hsc_env dflagsP file src src Nothing (decodeUtf8 src) lit hsc
   where
     dropPrefix (p : ps) (x : xs) | p == x = dropPrefix ps xs
     dropPrefix _ xs = xs
@@ -327,8 +399,8 @@ relLibdir :: Maybe FilePath -> FilePath -> FilePath
 relLibdir (Just d) f | d `isPrefixOf` f = "$libdir" ++ drop (length d) f
 relLibdir _ f = f
 
-parseText :: HscEnv -> DynFlags -> FilePath -> B.ByteString -> B.ByteString -> Maybe CppRecord -> String -> IO (Either String ModP)
-parseText hsc_env dflagsIn file src text cpp view = do
+parseText :: HscEnv -> DynFlags -> FilePath -> B.ByteString -> B.ByteString -> Maybe CppRecord -> String -> Bool -> Maybe HscRecord -> IO (Either String ModP)
+parseText hsc_env dflagsIn file src text cpp view lit hsc = do
   let buf = bufferOf text
       popts = initParserOpts dflagsIn
       (prags, opts) = headerOptions popts dflagsIn buf file
@@ -338,8 +410,9 @@ parseText hsc_env dflagsIn file src text cpp view = do
       toks = case lexTokenStream (initParserOpts dflags) buf (mkRealSrcLoc (mkFastString file) 1 1) of
         POk _ ts -> Right ts
         PFailed _ -> Left "the lexer's token stream failed"
-  case unP P.parseModule st of
-    POk _ m -> return (Right (ModP m src text prags cpp dflags toks view))
+  -- a signature by GHC's parseSignature (R6), any other module by parseModule
+  case unP (if isSignature file then P.parseSignature else P.parseModule) st of
+    POk _ m -> return (Right (ModP m src text prags cpp dflags toks view lit hsc))
     PFailed pst -> return (Left ("parse failed: " ++ showSDocUnsafe (pprMessages (defaultDiagnosticOpts @PsMessage) (getPsErrorMessages pst))))
 
 bufferOf :: B.ByteString -> StringBuffer
@@ -359,7 +432,7 @@ decodeUtf8 = go . B.unpack
 
 -- The header pragmas (GHC.Parser.Header's getOptions, its loop kept with each pragma's kind and
 -- line), and the options GHC derives from them
-headerOptions :: ParserOpts -> DynFlags -> StringBuffer -> FilePath -> ([(String, Int, Either String [String])], [Located String])
+headerOptions :: ParserOpts -> DynFlags -> StringBuffer -> FilePath -> ([(String, (Int, String), Either String [String])], [Located String])
 headerOptions popts dflags buf file = (prags, concatMap optsOf prags')
   where
     toks = lexAll (initPragState popts buf (mkRealSrcLoc (mkFastString file) 1 1))
@@ -370,7 +443,7 @@ headerOptions popts dflags buf file = (prags, concatMap optsOf prags')
     prags' = scan toks
     prags = [(k, l, v) | (k, l, v, _) <- prags']
     optsOf (_, _, _, os) = os
-    lineOf t = case getLoc t of RealSrcSpan r _ -> srcSpanStartLine r; _ -> 0
+    lineOf t = case getLoc t of RealSrcSpan r _ -> (srcSpanStartLine r, unpackFS (srcSpanFile r)); _ -> (0, file)
     scan (open : close : xs)
       | IToptions_prag s <- unLoc open, ITclose_prag <- unLoc close
       = let args = either (const []) id (toArgs (startOf open) s)
@@ -433,6 +506,11 @@ configOf o libdir ghcUnit dflags0 p = do
                     <> kv ":files" (BB.char7 '{' <> mconcat (sepBy (BB.char7 ' ') [str a <> BB.char7 ' ' <> str b | (a, b) <- cFiles c]) <> BB.char7 '}')
                     <> maybe mempty (kv ":macros" . str) (cMacros c)
                     <> kv ":output" (str (cOutput c)) <> BB.char7 '}')
+  let hscB = case pHsc p of
+        Nothing -> mempty
+        Just h -> kv ":hsc2hs" (BB.char7 '{' <> BB.string7 ":command " <> strs ("hsc2hs" : hArgs h)
+                    <> kv ":version" (str (hVersion h)) <> kv ":file" (str (hFile h))
+                    <> kv ":input" (str (hInput h)) <> kv ":output" (str (hOutput h)) <> BB.char7 '}')
   return $ BB.string7 "(hsdump/config {:ghc " <> str cProjectVersion
     <> kv ":ghc-unit" (str ghcUnit)
     <> kv ":target" (str (sTargetPlatformString (settings dflags0)))
@@ -446,13 +524,18 @@ configOf o libdir ghcUnit dflags0 p = do
     <> kv ":positions" (BB.string7 (if oFull o then ":full" else ":lines"))
     <> kv ":source" (str ("sha256:" ++ sha256Hex (pSource p)))
     <> cppB
+    <> hscB
+    <> (if pLit p then kv ":unlit" (BB.string7 "true") else mempty)
     <> BB.string7 "})"
 
-pragmasOf :: ModP -> BB.Builder
-pragmasOf p = BB.string7 "(hsdump/pragmas [" <> mconcat (sepBy (BB.char7 ' ') (map one (pPragmas p))) <> BB.string7 "])"
+pragmasOf :: String -> ModP -> BB.Builder
+pragmasOf modFile p = BB.string7 "(hsdump/pragmas [" <> mconcat (sepBy (BB.char7 ' ') (map one (pPragmas p))) <> BB.string7 "])"
   where
-    one (k, l, v) = BB.char7 '(' <> BB.string7 k <> BB.char7 ' ' <> BB.intDec l <> BB.char7 ' '
-      <> either str (\ws -> BB.char7 '[' <> mconcat (sepBy (BB.char7 ' ') (map str ws)) <> BB.char7 ']') v <> BB.char7 ')'
+    -- a pragma in another file than the module's (R6: after hsc2hs's first {-# LINE #-}) with
+    -- that file last
+    one (k, (l, f), v) = BB.char7 '(' <> BB.string7 k <> BB.char7 ' ' <> BB.intDec l <> BB.char7 ' '
+      <> either str (\ws -> BB.char7 '[' <> mconcat (sepBy (BB.char7 ' ') (map str ws)) <> BB.char7 ']') v
+      <> (if f /= modFile then BB.char7 ' ' <> str f else mempty) <> BB.char7 ')'
 
 sepBy :: a -> [a] -> [a]
 sepBy _ [] = []
@@ -490,8 +573,8 @@ isAnnType tn =
 tyName :: Data d => d -> String
 tyName x = tyConName (typeRepTyCon (typeOf x))
 
-gen :: forall d. Data d => Bool -> FastString -> d -> BB.Builder
-gen full modFile = go False
+gen :: forall d. Data d => Bool -> FastString -> Maybe (RealSrcSpan -> Maybe (Int, Int, Int, Int)) -> d -> BB.Builder
+gen full modFile remap = go False
   where
     -- inAnn: inside an exact-print annotation written whole (mode :full), where nothing is
     -- discarded again
@@ -508,8 +591,8 @@ gen full modFile = go False
       | Just (st :: SourceText) <- cast x = case st of
           SourceText t -> BB.string7 "(src " <> str (unpackFS t) <> BB.char7 ')'
           NoSourceText -> BB.string7 "nil"
-      | Just (sp :: SrcSpan) <- cast x = spanB modFile sp
-      | Just (sp :: RealSrcSpan) <- cast x = spanB modFile (RealSrcSpan sp mempty')
+      | Just (sp :: SrcSpan) <- cast x = spanR sp
+      | Just (sp :: RealSrcSpan) <- cast x = spanR (RealSrcSpan sp mempty')
       | Just (b :: Bool) <- cast x = if b then BB.string7 "true" else BB.string7 "false"
       | Just (i :: Int) <- cast x = BB.intDec i
       | Just (i :: Integer) <- cast x = BB.integerDec i
@@ -543,7 +626,7 @@ gen full modFile = go False
       | otherwise = []
     loc :: forall e. Data e => e -> BB.Builder
     loc l
-      | Just (sp :: SrcSpan) <- cast l = spanB modFile sp
+      | Just (sp :: SrcSpan) <- cast l = spanR sp
       | tyName l == "EpaLocation'" = gmapQi 0 loc l
       | tyName l == "EpAnn" = gmapQi 0 loc l
       | otherwise = BB.string7 "nil"
@@ -556,25 +639,137 @@ gen full modFile = go False
       ":|" -> "nonempty"
       _ -> c
     mempty' = GHC.Data.Strict.Nothing
+    -- an .hsc module's spans in mode :full at their places in the text (physOf; R6)
+    spanR sp@(RealSrcSpan r _) | Just f <- remap, Just (a, b, c, d) <- f r =
+      BB.char7 '[' <> BB.intDec a <> BB.char7 ' ' <> BB.intDec b <> BB.char7 ' ' <> BB.intDec c <> BB.char7 ' ' <> BB.intDec d <> BB.char7 ']'
+      where _ = sp
+    spanR sp = spanB modFile sp
 
 -- mode :full: GHC's lexer's tokens in the module's file (SPEC §8.2), [l1 c1 l2 c2], a comment
 -- [l1 c1 l2 c2 :c]; the layout algorithm's virtual braces and semicolons (zero-width) left out
-tokensOf :: FastString -> Either String [Located Token] -> BB.Builder
+tokensOf :: FastString -> Either String [(Int, Int, Int, Int, Bool)] -> BB.Builder
 tokensOf _ (Left e) = BB.string7 "(hsdump/tokens-error " <> str e <> BB.char7 ')'
-tokensOf modFile (Right ts) =
-  BB.string7 "(hsdump/tokens [" <> mconcat (sepBy (BB.char7 ' ') [one r t | L (RealSrcSpan r _) t <- ts, keep r]) <> BB.string7 "])"
+tokensOf _ (Right ts) =
+  BB.string7 "(hsdump/tokens [" <> mconcat (sepBy (BB.char7 ' ') (map one ts)) <> BB.string7 "])"
   where
-    keep r = srcSpanFile r == modFile && (srcSpanStartLine r, srcSpanStartCol r) /= (srcSpanEndLine r, srcSpanEndCol r)
-    one r t = BB.char7 '[' <> BB.intDec (srcSpanStartLine r) <> BB.char7 ' ' <> BB.intDec (srcSpanStartCol r) <> BB.char7 ' '
-      <> BB.intDec (srcSpanEndLine r) <> BB.char7 ' ' <> BB.intDec (srcSpanEndCol r)
-      <> (if isCommentTok t then BB.string7 " :c" else mempty) <> BB.char7 ']'
-    isCommentTok = \case ITlineComment {} -> True; ITblockComment {} -> True; ITdocComment {} -> True; ITdocOptions {} -> True; _ -> False
+    one (l1, c1, l2, c2, c) = BB.char7 '[' <> BB.intDec l1 <> BB.char7 ' ' <> BB.intDec c1 <> BB.char7 ' '
+      <> BB.intDec l2 <> BB.char7 ' ' <> BB.intDec c2 <> (if c then BB.string7 " :c" else mempty) <> BB.char7 ']'
+
+isCommentTok :: Token -> Bool
+isCommentTok = \case ITlineComment {} -> True; ITblockComment {} -> True; ITdocComment {} -> True; ITdocOptions {} -> True; _ -> False
+
+-- every token but the layout algorithm's (zero-width): its file, its span, whether a comment;
+-- dropPrags: not the {-# LINE #-} pragmas' own (R6, physOf)
+virtualTokens :: Bool -> [Located Token] -> [(FastString, Int, Int, Int, Int, Bool)]
+virtualTokens dropPrags ts =
+  [ (srcSpanFile r, srcSpanStartLine r, srcSpanStartCol r, srcSpanEndLine r, srcSpanEndCol r, isCommentTok t)
+  | L (RealSrcSpan r _) t <- ts, (srcSpanStartLine r, srcSpanStartCol r) /= (srcSpanEndLine r, srcSpanEndCol r), not (dropPrags && linePrag t) ]
+  where
+    -- a {-# LINE #-} or {-# COLUMN #-} pragma's own token (an .hsc module's pragmas are its
+    -- text's comments, physOf)
+    linePrag = \case ITline_prag {} -> True; ITcolumn_prag {} -> True; _ -> False
+
+-- The tokens a dump of mode :full writes: the module's file's; an .hsc module's at their
+-- positions in its text (physOf); a literate module's with the literate text as comments (R6)
+fullTokens :: FastString -> ModP -> Maybe (RealSrcSpan -> Maybe (Int, Int, Int, Int), Either String [(Int, Int, Int, Int, Bool)])
+           -> Either String [(Int, Int, Int, Int, Bool)]
+fullTokens _ _ (Just (_, ts)) = ts
+fullTokens modFile p Nothing = do
+  ts <- pTokens p
+  let own = [(a, b, c, d, k) | (f, a, b, c, d, k) <- virtualTokens False ts, f == modFile]
+  return (if pLit p then sortOn (\(a, b, _, _, _) -> (a, b)) (own ++ literateTokens (pSource p) (pText p)) else own)
+
+-- R6: a literate module's text that unlit leaves out, as comments: a line whose unlit output is
+-- blank (prose, \begin{code}, a #! line) whole, and the bird track > of a code line (unlit
+-- writes a space in its place, so every position is the source's)
+literateTokens :: B.ByteString -> B.ByteString -> [(Int, Int, Int, Int, Bool)]
+literateTokens src out =
+  [ t | (n, l) <- zip [1 ..] (lines (decodeUtf8 src)), let u = Map.findWithDefault "" n outLines, Just t <- [lit n l u] ]
+  where
+    outLines = unlitLines (decodeUtf8 out)
+    lit n l u
+      | all isSpace l = Nothing
+      | all isSpace u = Just (n, 1, n, 1 + width l, True)
+      | ('>' : _, ' ' : _) <- (l, u) = Just (n, 1, n, 2, True)
+      | otherwise = Nothing
+
+-- unlit's output by line: its #line markers followed
+unlitLines :: String -> Map.Map Int String
+unlitLines out = go (lines out) 1 Map.empty
+  where
+    go [] _ m = m
+    go (l : ls) n m = case l of
+      '#' : r | Just n' <- lineNum (dropWhile (== ' ') (if "line" `isPrefixOf` r then drop 4 r else r)) -> go ls n' m
+      _ -> go ls (n + 1) (Map.insert n l m)
+    lineNum r = case span isDigit r of (ds@(_ : _), ' ' : '"' : _) -> Just (read ds); _ -> Nothing
+
+-- a line's width in GHC's columns (code points, tab stops of 8)
+width :: String -> Int
+width = go 1
+  where
+    go c [] = c - 1
+    go c ('\t' : r) = go (1 + 8 * ((c + 7) `div` 8)) r
+    go c (_ : r) = go (c + 1) r
+
+-- R6: an .hsc module's positions in mode :full. hsc2hs's {-# LINE n "X.hsc" #-} pragmas give
+-- GHC's positions (the tree's spans) in the .hsc, where an expanded construct (#{enum ...}) makes
+-- more lines than it had, so that two places of the text can have one position; mode :full keeps
+-- every position as the place in the module's own text (the output, or a CPP module's module
+-- view), the pragmas as comments. GHC's lexer's raw token stream has those places already (it
+-- returns the pragmas as tokens); a span's start and end are the places of the tokens GHC's
+-- positions name there (of the places the pragmas give a line, when no token's), the nearest
+-- pair. Nothing for any other module.
+physOf :: FastString -> ModP -> Maybe (RealSrcSpan -> Maybe (Int, Int, Int, Int), Either String [(Int, Int, Int, Int, Bool)])
+physOf modFile p = case pHsc p of
+  Nothing -> Nothing
+  Just _ -> Just (remap, toks)
+  where
+    textLines = lines (pView p)
+    prags = [(n, mkFastString f, v, width l) | (n, l) <- zip [1 :: Int ..] textLines, Just (v, f) <- [linePragma l]]
+    -- segments: (the place's first line, the file and line GHC gives it, the last line)
+    starts = (1, modFile, 1) : [(n + 1, f, v) | (n, f, v, _) <- prags]
+    segs = zipWith (\(ps, f, v) lastP -> (ps, f, v, lastP)) starts (map (\(ps, _, _) -> ps - 2) (drop 1 starts) ++ [maxBound])
+    -- GHC's position of a place's line
+    fwd :: Int -> (String, Int)
+    fwd l = case [(unpackFS f, v + (l - ps)) | (ps, f, v, lastP) <- segs, l >= ps, l <= lastP] of
+      (x : _) -> x
+      [] -> (unpackFS modFile, l)
+    -- the places of GHC's line v of file f
+    back f v = [ps + (v - v0) | (ps, f0, v0, lastP) <- segs, unpackFS f0 == f, v >= v0, ps + (v - v0) <= lastP]
+    own = case pTokens p of
+      Left _ -> []
+      Right ts -> [(a, b, c, d, k) | (f, a, b, c, d, k) <- virtualTokens True ts, f == modFile, not (Map.member a pragLines)]
+    pragLines = Map.fromList [(n, ()) | (n, _, _, _) <- prags]
+    toks = fmap (const (sortOn (\(a, b, _, _, _) -> (a, b)) (own ++ [(n, 1, n, 1 + w, True) | (n, _, _, w) <- prags]))) (pTokens p)
+    starts' = Map.fromListWith (++) [((f, v, b), [(a, b)]) | (a, b, _, _, _) <- own, let (f, v) = fwd a]
+    ends' = Map.fromListWith (++) [((f, v, d), [(c, d)]) | (_, _, c, d, _) <- own, let (f, v) = fwd c]
+    places m f l c = case Map.lookup (f, l, c) m of
+      Just xs -> nub xs
+      Nothing -> [(l', c) | l' <- nub (back f l)] ++ (if f == unpackFS modFile && null (back f l) then [(l, c)] else [])
+    remap r =
+      let f = unpackFS (srcSpanFile r)
+          ss = places starts' f (srcSpanStartLine r) (srcSpanStartCol r)
+          es = places ends' f (srcSpanEndLine r) (srcSpanEndCol r)
+          pairs = [(dist s e, s, e) | s <- ss, e <- es, s <= e]
+      in case sortOn (\(d, _, _) -> d) pairs of
+           ((_, (a, b), (c, d)) : _) -> Just (a, b, c, d)
+           [] -> Nothing
+    dist (a, b) (c, d) = (c - a, d - b)
+
+-- {-# LINE n "file" #-} -> (n, file)
+linePragma :: String -> Maybe (Int, String)
+linePragma l = case l of
+  '{' : '-' : '#' : r | (w, r') <- span (not . isSpace) (dropWhile isSpace r), map toUpper w == "LINE" ->
+    case span isDigit (dropWhile isSpace r') of
+      (ds@(_ : _), ' ' : '"' : q) -> Just (read ds, takeWhile (/= '"') q)
+      _ -> Nothing
+  _ -> Nothing
 
 -- CPP's module view (SPEC §2.8, S5): for each line of the module, the output line the line
 -- markers (# N "file", #line N "file", {-# LINE N "file" #-}) attribute to it; the markers and
 -- the lines of other files dropped
-moduleView :: FilePath -> String -> String
-moduleView file out = concatMap (\n -> Map.findWithDefault "" n m ++ "\n") [1 .. maxL]
+moduleView :: Bool -> FilePath -> String -> String
+moduleView pragmasText file out = concatMap (\n -> Map.findWithDefault "" n m ++ "\n") [1 .. maxL]
   where
     (m, maxL) = walk (lines out) file 1 Map.empty 0
     walk [] _ _ acc mx = (acc, mx)
@@ -584,7 +779,7 @@ moduleView file out = concatMap (\n -> Map.findWithDefault "" n m ++ "\n") [1 ..
               | otherwise -> walk ls cur (n + 1) acc mx
     marker l = case l of
       '#' : r -> let r' = dropWhile (== ' ') (if "line" `isPrefixOf` r then drop 4 r else r) in num r'
-      '{' : '-' : '#' : r | (w, r') <- span (not . isSpace) (dropWhile isSpace r), map toUpper w == "LINE" -> num (dropWhile isSpace r')
+      '{' : '-' : '#' : r | not pragmasText, (w, r') <- span (not . isSpace) (dropWhile isSpace r), map toUpper w == "LINE" -> num (dropWhile isSpace r')
       _ -> Nothing
     num r = case span isDigit r of
       (ds@(_ : _), ' ' : '"' : q) -> Just (read ds, unq q)
