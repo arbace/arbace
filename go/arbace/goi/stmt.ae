@@ -1,0 +1,485 @@
+;; goi: statements and control flow (GOI-SPEC.md §4.5, §4.8): a statement returns a Ctl, 0 to go
+;; on, 1 for a return, 2 + k for the jump code k; no Go panic is used for control flow.
+(in-ns 'go.arbace.goi)
+
+(go/file "stmt.go"
+  :imports [[reflect "reflect"] [utf8 "unicode/utf8"] [unsafe "unsafe"]])
+
+(go/func Nop "Nop is the empty statement.\n" ^Stmt []
+  (fn ^Ctl [^{:tag (* Frame)} fr] 0))
+
+(go/func Seq
+  "Seq runs a statement list, returning the first code that is not 0 (S26); goto codes of the
+list's own labels (labels: the code of each statement's label, or 0) resume it there.\n"
+  ^Stmt [^{:tag (slice Stmt)} ss ^{:tag (slice Ctl)} labels]
+  (when (== (len labels) 0)
+    (switch (len ss)
+      (case [0] (return (Nop)))
+      (case [1] (return (aget ss 0)))
+      (case [2] (let [a (aget ss 0) b (aget ss 1)]
+                  (return (fn ^Ctl [^{:tag (* Frame)} fr]
+                            (let [c (a fr)]
+                              (when (!= c 0)
+                                (return c)))
+                            (b fr)))))
+      (case [3] (let [a (aget ss 0) b (aget ss 1) c3 (aget ss 2)]
+                  (return (fn ^Ctl [^{:tag (* Frame)} fr]
+                            (let [c (a fr)]
+                              (when (!= c 0)
+                                (return c)))
+                            (let [c (b fr)]
+                              (when (!= c 0)
+                                (return c)))
+                            (c3 fr))))))
+    (return (fn ^Ctl [^{:tag (* Frame)} fr]
+              (range [_ s ss]
+                (let [c (s fr)]
+                  (when (!= c 0)
+                    (return c))))
+              0)))
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (let [i 0]
+      (while (< i (len ss))
+        (let [c ((aget ss i) fr)]
+          (if (== c 0)
+            (inc! i)
+            (let [j -1]
+              (range [k l labels]
+                (when (== l c)
+                  (set! j k)
+                  (break)))
+              (when (< j 0)
+                (return c))
+              (set! i j)))))
+      0)))
+
+(go/func ExprI "ExprI is an expression statement of an I node (its value dropped).\n" ^Stmt [^I x]
+  (fn ^Ctl [^{:tag (* Frame)} fr] (x fr) 0))
+(go/func ExprF ^Stmt [^F x] (fn ^Ctl [^{:tag (* Frame)} fr] (x fr) 0))
+(go/func ExprS ^Stmt [^S x] (fn ^Ctl [^{:tag (* Frame)} fr] (x fr) 0))
+(go/func ExprR ^Stmt [^R x] (fn ^Ctl [^{:tag (* Frame)} fr] (x fr) 0))
+(go/func ExprT ^Stmt [^T x] (fn ^Ctl [^{:tag (* Frame)} fr] (x fr) 0))
+(go/func ExprB ^Stmt [^B x] (fn ^Ctl [^{:tag (* Frame)} fr] (x fr) 0))
+
+(go/func Jump "Jump returns code c (a break, continue or goto).\n" ^Stmt [^Ctl c]
+  (fn ^Ctl [^{:tag (* Frame)} fr] c))
+
+(go/func If "If is if (els may be nil).\n" ^Stmt [^B test ^Stmt then ^Stmt els]
+  (when (== els nil)
+    (return (fn ^Ctl [^{:tag (* Frame)} fr]
+              (when (test fr)
+                (return (then fr)))
+              0)))
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (when (test fr)
+      (return (then fr)))
+    (els fr)))
+
+;; Locals' slots
+
+(go/func SetI "SetI writes I slot s.\n" ^Stmt [^int32 s ^I x]
+  (fn ^Ctl [^{:tag (* Frame)} fr] (aset (.-I fr) s (x fr)) 0))
+(go/func SetF ^Stmt [^int32 s ^F x] (fn ^Ctl [^{:tag (* Frame)} fr] (aset (.-F fr) s (x fr)) 0))
+(go/func SetS ^Stmt [^int32 s ^S x] (fn ^Ctl [^{:tag (* Frame)} fr] (aset (.-S fr) s (x fr)) 0))
+(go/func SetR ^Stmt [^int32 s ^R x] (fn ^Ctl [^{:tag (* Frame)} fr] (aset (.-R fr) s (x fr)) 0))
+
+(go/func NewCell "NewCell makes C slot c a new zero variable of type t (a declaration of a cell variable).\n"
+  ^Stmt [^int32 c ^{:tag (* Type)} t]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (aset (.-C fr) c (.newCell t))
+    0))
+
+(go/func CellP "CellP is the address held in C slot c.\n" ^P [^int32 c]
+  (fn ^unsafe/Pointer [^{:tag (* Frame)} fr] (aget (.-C fr) c)))
+
+(go/func GlobalP "GlobalP is a package variable's (fixed) address.\n" ^P [^unsafe/Pointer p]
+  (fn ^unsafe/Pointer [^{:tag (* Frame)} fr] p))
+
+;; Loads and stores through places (§4.4)
+
+(go/func LoadI "LoadI is the integer or bool at place p of type t.\n" ^I [^P p ^{:tag (* Type)} t]
+  (switch (.-GK t)
+    (case [reflect/Bool] (return (fn ^int64 [^{:tag (* Frame)} fr] (B2I @(conv (* bool) (p fr))))))
+    (case [reflect/Int8] (return (fn ^int64 [^{:tag (* Frame)} fr] (conv int64 @(conv (* int8) (p fr))))))
+    (case [reflect/Int16] (return (fn ^int64 [^{:tag (* Frame)} fr] (conv int64 @(conv (* int16) (p fr))))))
+    (case [reflect/Int32] (return (fn ^int64 [^{:tag (* Frame)} fr] (conv int64 @(conv (* int32) (p fr))))))
+    (case [reflect/Uint8] (return (fn ^int64 [^{:tag (* Frame)} fr] (conv int64 @(conv (* uint8) (p fr))))))
+    (case [reflect/Uint16] (return (fn ^int64 [^{:tag (* Frame)} fr] (conv int64 @(conv (* uint16) (p fr))))))
+    (case [reflect/Uint32] (return (fn ^int64 [^{:tag (* Frame)} fr] (conv int64 @(conv (* uint32) (p fr)))))))
+  (fn ^int64 [^{:tag (* Frame)} fr] @(conv (* int64) (p fr))))
+
+(go/func LoadF ^F [^P p ^{:tag (* Type)} t]
+  (when (== (.-GK t) reflect/Float32)
+    (return (fn ^float64 [^{:tag (* Frame)} fr] (conv float64 @(conv (* float32) (p fr))))))
+  (fn ^float64 [^{:tag (* Frame)} fr] @(conv (* float64) (p fr))))
+
+(go/func LoadS ^S [^P p]
+  (fn ^string [^{:tag (* Frame)} fr] @(conv (* string) (p fr))))
+
+(go/func LoadR "LoadR is the value at place p of type t (a struct or array: a copy, a box).\n" ^R [^P p ^{:tag (* Type)} t]
+  (when (and (.-Iface t) (== (.mem t) anyType))
+    (return (fn ^any [^{:tag (* Frame)} fr] @(conv (* any) (p fr)))))
+  (fn ^any [^{:tag (* Frame)} fr] (.load t (p fr))))
+
+(go/func StoreI "StoreI writes x at place p of type t (the place's operands evaluated first, then x: §4.5).\n"
+  ^Stmt [^P p ^I x ^{:tag (* Type)} t]
+  (switch (.-GK t)
+    (case [reflect/Bool] (return (fn ^Ctl [^{:tag (* Frame)} fr] (let [a (p fr)] (set! @(conv (* bool) a) (!= (x fr) 0))) 0)))
+    (case [reflect/Int8 reflect/Uint8] (return (fn ^Ctl [^{:tag (* Frame)} fr] (let [a (p fr)] (set! @(conv (* uint8) a) (conv uint8 (x fr)))) 0)))
+    (case [reflect/Int16 reflect/Uint16] (return (fn ^Ctl [^{:tag (* Frame)} fr] (let [a (p fr)] (set! @(conv (* uint16) a) (conv uint16 (x fr)))) 0)))
+    (case [reflect/Int32 reflect/Uint32] (return (fn ^Ctl [^{:tag (* Frame)} fr] (let [a (p fr)] (set! @(conv (* uint32) a) (conv uint32 (x fr)))) 0))))
+  (fn ^Ctl [^{:tag (* Frame)} fr] (let [a (p fr)] (set! @(conv (* int64) a) (x fr))) 0))
+
+(go/func StoreF ^Stmt [^P p ^F x ^{:tag (* Type)} t]
+  (when (== (.-GK t) reflect/Float32)
+    (return (fn ^Ctl [^{:tag (* Frame)} fr] (let [a (p fr)] (set! @(conv (* float32) a) (conv float32 (x fr)))) 0)))
+  (fn ^Ctl [^{:tag (* Frame)} fr] (let [a (p fr)] (set! @(conv (* float64) a) (x fr))) 0))
+
+(go/func StoreS ^Stmt [^P p ^S x]
+  (fn ^Ctl [^{:tag (* Frame)} fr] (let [a (p fr)] (set! @(conv (* string) a) (x fr))) 0))
+
+(go/func StoreR "StoreR writes x at place p of type t (a typed copy, S25).\n" ^Stmt [^P p ^R x ^{:tag (* Type)} t]
+  (when (and (.-Iface t) (== (.mem t) anyType))
+    (return (fn ^Ctl [^{:tag (* Frame)} fr] (let [a (p fr)] (set! @(conv (* any) a) (x fr))) 0)))
+  (fn ^Ctl [^{:tag (* Frame)} fr] (let [a (p fr)] (.store t a (x fr))) 0))
+
+(go/func CopyP "CopyP copies the value of type t at place src to place dst (struct and array assignment).\n"
+  ^Stmt [^P dst ^P src ^{:tag (* Type)} t]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (let [d (dst fr)]
+      (.copyAt t d (src fr)))
+    0))
+
+(go/func ZeroP "ZeroP makes the value of type t at place p its zero value.\n" ^Stmt [^P p ^{:tag (* Type)} t]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (.Set (.Elem (reflect/NewAt (.mem t) (p fr))) (reflect/Zero (.mem t)))
+    0))
+
+;; Assignments of several values (§4.5): every right-hand value first, then the stores
+
+(go/func Assign "Assign runs the evaluations of every right-hand value into temporaries, then the stores, in order.\n"
+  ^Stmt [^{:tag (slice Stmt)} evals ^{:tag (slice Stmt)} stores]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (range [_ e evals] (e fr))
+    (range [_ s stores] (s fr))
+    0))
+
+;; Loops
+
+(go/func loopCtl
+  "loopCtl is what a loop does with its body's code c: 0 go on (or continue), 1 leave the loop, 2
+return c from it.\n"
+  ^int [^Ctl c ^Ctl brk ^Ctl cont]
+  (when (or (== c 0) (== c cont))
+    (return 0))
+  (when (== c brk)
+    (return 1))
+  2)
+
+(go/func For
+  "For is for init; cond; post { body } (init, cond, post may be nil), brk and cont its codes;
+iter renews the per-iteration cells before post (S20).\n"
+  ^Stmt [^Stmt init ^B test ^Stmt post ^Stmt body ^Ctl brk ^Ctl cont ^Stmt iter]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (when (!= init nil)
+      (let [c (init fr)]
+        (when (!= c 0)
+          (return c))))
+    (while true
+      (when (and (!= test nil) (not (test fr)))
+        (return 0))
+      (let [c (body fr)]
+        (when (!= c 0)
+          (switch (loopCtl c brk cont)
+            (case [1] (return 0))
+            (case [2] (return c)))))
+      (when (!= iter nil)
+        (iter fr))
+      (when (!= post nil)
+        (post fr)))
+    0))
+
+(go/func RenewCells "RenewCells gives each per-iteration cell variable a new cell holding its value (S20).\n"
+  ^Stmt [^{:tag (slice int32)} cs ^{:tag (slice (* Type))} ts]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (range [i c cs]
+      (let [t (aget ts i)
+            n (.newCell t)]
+        (.copyAt t n (aget (.-C fr) c))
+        (aset (.-C fr) c n)))
+    0))
+
+(go/type SetIdx "SetIdx writes an iteration's index (or an integer) to its variable.\n" (func [(* Frame) int64]))
+(go/type SetAt "SetAt copies an iteration's element (of the variable's type) from address p to its variable.\n" (func [(* Frame) unsafe/Pointer]))
+(go/type SetAny "SetAny writes an iteration's value (a frame value) to its variable.\n" (func [(* Frame) any]))
+
+(go/func IdxSlot "IdxSlot writes I slot s.\n" ^SetIdx [^int32 s]
+  (fn [^{:tag (* Frame)} fr ^int64 v] (aset (.-I fr) s v)))
+
+(go/func IdxStore "IdxStore writes place p (an integer of type t).\n" ^SetIdx [^P p ^{:tag (* Type)} t]
+  (let [k (.-GK t)]
+    (fn [^{:tag (* Frame)} fr ^int64 v] (storeI k (p fr) v))))
+
+(go/func AtSlot "AtSlot copies the element at an address into slot s of kind k (type t).\n" ^SetAt [^byte k ^int32 s ^{:tag (* Type)} t]
+  (let [gk (.-GK t)]
+    (switch k
+      (case [\I] (return (fn [^{:tag (* Frame)} fr ^unsafe/Pointer p] (aset (.-I fr) s (loadI gk p)))))
+      (case [\F] (return (fn [^{:tag (* Frame)} fr ^unsafe/Pointer p] (aset (.-F fr) s (loadF gk p)))))
+      (case [\S] (return (fn [^{:tag (* Frame)} fr ^unsafe/Pointer p] (aset (.-S fr) s @(conv (* string) p))))))
+    (fn [^{:tag (* Frame)} fr ^unsafe/Pointer p] (aset (.-R fr) s (.load t p)))))
+
+(go/func AtCell "AtCell copies the element at an address into the cell of C slot c.\n" ^SetAt [^int32 c ^{:tag (* Type)} t]
+  (fn [^{:tag (* Frame)} fr ^unsafe/Pointer p] (.copyAt t (aget (.-C fr) c) p)))
+
+(go/func AtPlace "AtPlace copies the element at an address to place q.\n" ^SetAt [^P q ^{:tag (* Type)} t]
+  (fn [^{:tag (* Frame)} fr ^unsafe/Pointer p] (.copyAt t (q fr) p)))
+
+(go/func AnySlot "AnySlot writes a frame value to slot s of kind k.\n" ^SetAny [^byte k ^int32 s]
+  (switch k
+    (case [\I] (return (fn [^{:tag (* Frame)} fr ^any v] (aset (.-I fr) s (assert int64 v)))))
+    (case [\F] (return (fn [^{:tag (* Frame)} fr ^any v] (aset (.-F fr) s (assert float64 v)))))
+    (case [\S] (return (fn [^{:tag (* Frame)} fr ^any v] (aset (.-S fr) s (assert string v))))))
+  (fn [^{:tag (* Frame)} fr ^any v] (aset (.-R fr) s v)))
+
+(go/func AnyCell "AnyCell writes a frame value into the cell of C slot c (type t).\n" ^SetAny [^int32 c ^{:tag (* Type)} t]
+  (fn [^{:tag (* Frame)} fr ^any v] (storeFrameValue t (aget (.-C fr) c) v)))
+
+(go/func AnyPlace "AnyPlace writes a frame value to place q (type t).\n" ^SetAny [^P q ^{:tag (* Type)} t]
+  (fn [^{:tag (* Frame)} fr ^any v] (storeFrameValue t (q fr) v)))
+
+(go/func storeFrameValue "storeFrameValue writes a frame value of any kind (I as int64, F as float64) at p of type t.\n"
+  [^{:tag (* Type)} t ^unsafe/Pointer p ^any v]
+  (switch (.-K t)
+    (case [\I] (storeI (.-GK t) p (assert int64 v)))
+    (case [\F] (storeF (.-GK t) p (assert float64 v)))
+    (case [\S] (set! @(conv (* string) p) (assert string v)))
+    (default (.store t p v))))
+
+(go/func RangeInt "RangeInt is range over an integer n: k the key's variable (nil: none).\n"
+  ^Stmt [^I n ^SetIdx k ^Stmt body ^Ctl brk ^Ctl cont ^Stmt iter]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (let [m (n fr)]
+      (for [i (conv int64 0)] (< i m) (inc! i)
+        (when (!= k nil)
+          (k fr i))
+        (let [c (body fr)]
+          (when (!= c 0)
+            (switch (loopCtl c brk cont)
+              (case [1] (return 0))
+              (case [2] (return c)))))
+        (when (!= iter nil)
+          (iter fr))))
+    0))
+
+(go/func RangeSlice
+  "RangeSlice is range over a slice x of element type et (evaluated once, its header kept): k,
+v the variables (nil: none).\n"
+  ^Stmt [^R x ^{:tag (* Type)} et ^SetIdx k ^SetAt v ^Stmt body ^Ctl brk ^Ctl cont ^Stmt iter]
+  (let [size (.Size (.mem et))]
+    (fn ^Ctl [^{:tag (* Frame)} fr]
+      (let [h @(conv (* sliceHeader) (efaceData (x fr)))
+            n (.-Len h)]
+        (for [i 0] (< i n) (inc! i)
+          (when (!= k nil)
+            (k fr (conv int64 i)))
+          (when (!= v nil)
+            (v fr (unsafe/Add (.-Data h) (* (conv uintptr i) size))))
+          (let [c (body fr)]
+            (when (!= c 0)
+              (switch (loopCtl c brk cont)
+                (case [1] (return 0))
+                (case [2] (return c)))))
+          (when (!= iter nil)
+            (iter fr))))
+      0)))
+
+(go/func RangeArray
+  "RangeArray is range over an array at place a (len n, element type et; copied first when its
+values are used, as Go evaluates the range expression once).\n"
+  ^Stmt [^P a ^{:tag (* Type)} at ^SetIdx k ^SetAt v ^Stmt body ^Ctl brk ^Ctl cont ^Stmt iter]
+  (let [et (.elem at)
+        size (.Size (.mem et))
+        n (.-Len at)]
+    (fn ^Ctl [^{:tag (* Frame)} fr]
+      (let [base (a fr)]
+        (when (!= v nil)
+          (let [cp (.newCell at)]
+            (.copyAt at cp base)
+            (set! base cp)))
+        (for [i 0] (< i n) (inc! i)
+          (when (!= k nil)
+            (k fr (conv int64 i)))
+          (when (!= v nil)
+            (v fr (unsafe/Add base (* (conv uintptr i) size))))
+          (let [c (body fr)]
+            (when (!= c 0)
+              (switch (loopCtl c brk cont)
+                (case [1] (return 0))
+                (case [2] (return c)))))
+          (when (!= iter nil)
+            (iter fr))))
+      0)))
+
+(go/func RangePtrArray
+  "RangePtrArray is range over a pointer to an array (nil: a panic when its values are used).\n"
+  ^Stmt [^R x ^{:tag (* Type)} at ^SetIdx k ^SetAt v ^Stmt body ^Ctl brk ^Ctl cont ^Stmt iter]
+  (let [et (.elem at)
+        size (.Size (.mem et))
+        n (.-Len at)]
+    (fn ^Ctl [^{:tag (* Frame)} fr]
+      (let [base (efaceData (x fr))]
+        (when (and (== base nil) (!= v nil))
+          (nilDeref))
+        (for [i 0] (< i n) (inc! i)
+          (when (!= k nil)
+            (k fr (conv int64 i)))
+          (when (!= v nil)
+            (v fr (unsafe/Add base (* (conv uintptr i) size))))
+          (let [c (body fr)]
+            (when (!= c 0)
+              (switch (loopCtl c brk cont)
+                (case [1] (return 0))
+                (case [2] (return c)))))
+          (when (!= iter nil)
+            (iter fr))))
+      0)))
+
+(go/func RangeString "RangeString is range over a string: the byte index and the rune.\n"
+  ^Stmt [^S x ^SetIdx k ^SetIdx v ^Stmt body ^Ctl brk ^Ctl cont ^Stmt iter]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (let [s (x fr)]
+      (for [i 0] (< i (len s)) _
+        (let [(values r w) (utf8/DecodeRuneInString (subslice s i))]
+          (when (!= k nil)
+            (k fr (conv int64 i)))
+          (when (!= v nil)
+            (v fr (conv int64 r)))
+          (set! i + w)
+          (let [c (body fr)]
+            (when (!= c 0)
+              (switch (loopCtl c brk cont)
+                (case [1] (return 0))
+                (case [2] (return c)))))
+          (when (!= iter nil)
+            (iter fr)))))
+    0))
+
+(go/func RangeMap "RangeMap is range over a map (reflect's MapRange: Go's order and rules).\n"
+  ^Stmt [^R x ^{:tag (* Type)} mt ^SetAny k ^SetAny v ^Stmt body ^Ctl brk ^Ctl cont ^Stmt iter]
+  (let [kt (.key mt)
+        vt (.elem mt)]
+    (fn ^Ctl [^{:tag (* Frame)} fr]
+      (let [it (.MapRange (reflect/ValueOf (x fr)))]
+        (while (.Next it)
+          (when (!= k nil)
+            (k fr (anyFrameValue kt (.Key it))))
+          (when (!= v nil)
+            (v fr (anyFrameValue vt (.Value it))))
+          (let [c (body fr)]
+            (when (!= c 0)
+              (switch (loopCtl c brk cont)
+                (case [1] (return 0))
+                (case [2] (return c)))))
+          (when (!= iter nil)
+            (iter fr))))
+      0)))
+
+(go/func anyFrameValue "anyFrameValue is reflect.Value v of type t as a frame value of any kind (I as int64, F as float64).\n"
+  ^any [^{:tag (* Type)} t ^{:tag reflect/Value} v]
+  (switch (.-K t)
+    (case [\I] (return (intOfValue v)))
+    (case [\F] (return (.Float v)))
+    (case [\S] (return (.String v))))
+  (.fromValue t v))
+
+;; Switch (§4.5)
+
+(go/type Case
+  "Case is a switch clause: its tests (each true when the clause's value matches), its body, and
+whether it is the default.\n"
+  (struct ^{:tag (slice B)} Tests ^Stmt Body ^bool Default))
+
+(go/func NewCase ^Case [^{:tag (slice any)} tests ^Stmt body ^bool def]
+  (let [ts (make (slice B) (len tests))]
+    (range [i t tests] (aset ts i (assert B t)))
+    (lit Case ts body def)))
+
+(go/func Switch
+  "Switch is a switch whose clauses test in source order (init and the tag's evaluation into its
+temporary are pre); fallthrough is the code that runs the next clause's body, brk the
+switch's break code.\n"
+  ^Stmt [^Stmt pre ^{:tag (slice Case)} cases ^Ctl brk ^Ctl fall]
+  (let [def -1]
+    (range [i c cases]
+      (when (.-Default c)
+        (set! def i)))
+    (fn ^Ctl [^{:tag (* Frame)} fr]
+      (when (!= pre nil)
+        (let [c (pre fr)]
+          (when (!= c 0)
+            (return c))))
+      (let [chosen def]
+        (label :find
+          (range [i c cases]
+            (range [_ t (.-Tests c)]
+              (when (t fr)
+                (set! chosen i)
+                (break :find)))))
+        (when (< chosen 0)
+          (return 0))
+        (for [i chosen] (< i (len cases)) (inc! i)
+          (let [c ((.-Body (aget cases i)) fr)]
+            (when (!= c fall)
+              (when (== c brk)
+                (return 0))
+              (return c))))
+        0))))
+
+(go/type sliceHeader "sliceHeader is a slice's header.\n"
+  (struct ^unsafe/Pointer Data ^int Len ^int Cap))
+
+(go/func IdxNewCell "IdxNewCell writes an iteration's integer to a new cell of C slot c (a per-iteration variable).\n"
+  ^SetIdx [^int32 c ^{:tag (* Type)} t]
+  (let [k (.-GK t)]
+    (fn [^{:tag (* Frame)} fr ^int64 v]
+      (let [p (.newCell t)]
+        (storeI k p v)
+        (aset (.-C fr) c p)))))
+
+(go/func AtNewCell "AtNewCell copies an iteration's element to a new cell of C slot c (a per-iteration variable).\n"
+  ^SetAt [^int32 c ^{:tag (* Type)} t]
+  (fn [^{:tag (* Frame)} fr ^unsafe/Pointer p]
+    (let [n (.newCell t)]
+      (.copyAt t n p)
+      (aset (.-C fr) c n))))
+
+(go/func AnyNewCell "AnyNewCell writes an iteration's value to a new cell of C slot c (a per-iteration variable).\n"
+  ^SetAny [^int32 c ^{:tag (* Type)} t]
+  (fn [^{:tag (* Frame)} fr ^any v]
+    (let [n (.newCell t)]
+      (storeFrameValue t n v)
+      (aset (.-C fr) c n))))
+
+(go/func SetC "SetC writes C slot c: the address of a place, evaluated once (an op= statement's place).\n"
+  ^Stmt [^int32 c ^P p]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (aset (.-C fr) c (p fr))
+    0))
+
+(go/func NewCellInit "NewCellInit makes C slot c a new variable of type t holding x (of t's kind: a node).\n"
+  ^Stmt [^int32 c ^{:tag (* Type)} t ^any x]
+  (let [init (elemInit x t)]
+    (fn ^Ctl [^{:tag (* Frame)} fr]
+      (let [p (.newCell t)]
+        (init fr p)
+        (aset (.-C fr) c p))
+      0)))
+
+(go/func NewCellCopy "NewCellCopy makes C slot c a new variable of type t, a copy of the value at place src.\n"
+  ^Stmt [^int32 c ^{:tag (* Type)} t ^P src]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (let [s (src fr)
+          p (.newCell t)]
+      (.copyAt t p s)
+      (aset (.-C fr) c p))
+    0))

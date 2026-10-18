@@ -1,0 +1,692 @@
+;; goi: functions, calls, closures, cells (GOI-SPEC.md §4.6), defer, panic and recover (§4.7),
+;; the threads of goroutines (§4.3, S22), and running a program (§2.7, §10.7).
+(in-ns 'go.arbace.goi)
+
+(go/file "func.go"
+  :imports [[fmt "fmt"] [os "os"] [reflect "reflect"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"]
+            [unsafe "unsafe"] [jrt "arbace/jrt"]])
+
+;; ---------------------------------------------------------------------------------------
+;; Functions and their code
+
+(go/type Code
+  "Code is a function's built body (§4.6): its slot counts per kind, its prologue (parameters
+moved into cells, named results made zero), its body (run inside a Go defer of unwind when it
+defers: S30) and its epilogue (named results held in cells copied to their result slots).\n"
+  (struct ^int32 NI ^int32 NF ^int32 NS ^int32 NR ^int32 NC
+          ^{:tag (slice (func [(* Frame)]))} Pro ^Stmt Body ^bool HasDefer
+          ^{:tag (slice (func [(* Frame)]))} Epi))
+
+(go/type Func
+  "Func is a function's cell (§4.6): its code, replaced when the function is defined again (G9)
+and built on its first call (S18) by build.\n"
+  (struct ^string Name ^string Pkg
+          ^{:tag (atomic/Pointer Code)} code
+          ^{:tag (func [] [(* Code)])} build
+          ^{:tag sync/Mutex} mu))
+
+(go/func NewFunc "NewFunc is a new function cell named name of package pkg, built by build.\n"
+  ^{:tag (* Func)} [^string name ^string pkg ^{:tag (func [] [(* Code)])} build]
+  (addr (lit Func :Name name :Pkg pkg :build build)))
+
+(go/method Code "Code is f's code, built now when it has none (S18).\n" ^{:tag (* Code)} [^{:tag (* Func)} f]
+  (let [c (.Load (.-code f))]
+    (when (!= c nil)
+      (return c))
+    (.Lock (.-mu f))
+    (defer (.Unlock (.-mu f)))
+    (set! c (.Load (.-code f)))
+    (when (== c nil)
+      (when (== (.-build f) nil)
+        (panic (jrt/IllegalStateException_New_String (jrt/Str (+ "goi: " (.-Name f) " has no code")))))
+      (set! c ((.-build f)))
+      (.Store (.-code f) c))
+    c))
+
+(go/method SetCode "SetCode gives f its code (or a builder of it), as a redefinition does (G9).\n"
+  [^{:tag (* Func)} f ^{:tag (* Code)} c ^{:tag (func [] [(* Code)])} build]
+  (.Lock (.-mu f))
+  (set! (.-build f) build)
+  (.Store (.-code f) c)
+  (.Unlock (.-mu f)))
+
+;; ---------------------------------------------------------------------------------------
+;; Entering and leaving a call
+
+(go/method enter
+  "enter takes the frame of a call of code c of function fn at the thread's next depth, with
+its windows (the depth and the stacks' tops move up before the arguments are evaluated, so that
+calls in them take frames above it).\n"
+  ^{:tag (* Frame)} [^{:tag (* Thread)} th ^{:tag (* Code)} c ^{:tag (* Func)} fn]
+  (let [d (+ (.-depth th) 1)
+        nf (.frameAt th d)]
+    (set! (.-depth th) d)
+    (set! (.-depth nf) d)
+    (set! (.-Fn nf) fn)
+    (set! (.-rec nf) nil)
+    (when (> (.-NI c) 0) (set! (.-I nf) (.takeI th (.-NI c))))
+    (when (> (.-NF c) 0) (set! (.-F nf) (.takeF th (.-NF c))))
+    (when (> (.-NS c) 0) (set! (.-S nf) (.takeS th (.-NS c))))
+    (when (> (.-NR c) 0) (set! (.-R nf) (.takeR th (.-NR c))))
+    (when (> (.-NC c) 0) (set! (.-C nf) (.takeC th (.-NC c))))
+    nf))
+
+(go/func run "run runs code c in frame nf: prologue, body (deferring: inside unwind's Go defer), epilogue.\n"
+  [^{:tag (* Code)} c ^{:tag (* Frame)} nf]
+  (range [_ p (.-Pro c)]
+    (p nf))
+  (if (.-HasDefer c)
+    (runDeferring c nf)
+    ((.-Body c) nf))
+  (range [_ e (.-Epi c)]
+    (e nf)))
+
+(go/type Setter "Setter writes one argument, evaluated in the caller's frame fr, into the callee's frame nf.\n"
+  (func [(* Frame) (* Frame)]))
+
+(go/func ArgI ^Setter [^I x ^int32 s] (fn [^{:tag (* Frame)} fr ^{:tag (* Frame)} nf] (aset (.-I nf) s (x fr))))
+(go/func ArgF ^Setter [^F x ^int32 s] (fn [^{:tag (* Frame)} fr ^{:tag (* Frame)} nf] (aset (.-F nf) s (x fr))))
+(go/func ArgS ^Setter [^S x ^int32 s] (fn [^{:tag (* Frame)} fr ^{:tag (* Frame)} nf] (aset (.-S nf) s (x fr))))
+(go/func ArgR ^Setter [^R x ^int32 s] (fn [^{:tag (* Frame)} fr ^{:tag (* Frame)} nf] (aset (.-R nf) s (x fr))))
+
+(go/func ArgSlice
+  "ArgSlice is a variadic parameter's argument: the slice of the trailing arguments xs (R nodes
+of the element type, in its slot kind) of slice type st.\n"
+  ^Setter [^{:tag (* Type)} st ^{:tag (slice any)} xs ^int32 s]
+  (let [mk (MakeSliceOf st xs)]
+    (fn [^{:tag (* Frame)} fr ^{:tag (* Frame)} nf] (aset (.-R nf) s (mk fr)))))
+
+(go/type resCopy "resCopy copies a callee's result slot to the caller's slot of one kind.\n"
+  (struct ^byte K ^int32 From ^int32 To))
+
+(go/func copyResults [^{:tag (* Frame)} fr ^{:tag (* Frame)} nf ^{:tag (slice resCopy)} rs]
+  (range [_ r rs]
+    (switch (.-K r)
+      (case [\I] (aset (.-I fr) (.-To r) (aget (.-I nf) (.-From r))))
+      (case [\F] (aset (.-F fr) (.-To r) (aget (.-F nf) (.-From r))))
+      (case [\S] (aset (.-S fr) (.-To r) (aget (.-S nf) (.-From r))))
+      (default (aset (.-R fr) (.-To r) (aget (.-R nf) (.-From r)))))))
+
+(go/func resCopies "resCopies are the result copies of kinds ks, from callee slots from to caller slots to.\n"
+  ^{:tag (slice resCopy)} [^string ks ^{:tag (slice int32)} from ^{:tag (slice int32)} to]
+  (let [rs (make (slice resCopy) (len ks))]
+    (for [i 0] (< i (len ks)) (inc! i)
+      (aset rs i (lit resCopy (aget ks i) (aget from i) (aget to i))))
+    rs))
+
+;; Static calls (§4.6, S27): the callee's cell, its code loaded at each call
+
+(go/func CallI "CallI is a static call of fn with one I result in callee slot res.\n" ^I [^{:tag (* Func)} f ^{:tag (slice Setter)} args ^int32 res]
+  (fn ^int64 [^{:tag (* Frame)} fr]
+    (let [th (.-Th fr)
+          c (.Code f)
+          m (.save th)
+          nf (.enter th c f)]
+      (set! (.-rec nf) (.-passRec fr))
+      (range [_ a args] (a fr nf))
+      (run c nf)
+      (let [r (aget (.-I nf) res)]
+        (.restore th m)
+        r))))
+
+(go/func CallF ^F [^{:tag (* Func)} f ^{:tag (slice Setter)} args ^int32 res]
+  (fn ^float64 [^{:tag (* Frame)} fr]
+    (let [th (.-Th fr) c (.Code f) m (.save th) nf (.enter th c f)]
+      (set! (.-rec nf) (.-passRec fr))
+      (range [_ a args] (a fr nf))
+      (run c nf)
+      (let [r (aget (.-F nf) res)]
+        (.restore th m)
+        r))))
+
+(go/func CallS ^S [^{:tag (* Func)} f ^{:tag (slice Setter)} args ^int32 res]
+  (fn ^string [^{:tag (* Frame)} fr]
+    (let [th (.-Th fr) c (.Code f) m (.save th) nf (.enter th c f)]
+      (set! (.-rec nf) (.-passRec fr))
+      (range [_ a args] (a fr nf))
+      (run c nf)
+      (let [r (aget (.-S nf) res)]
+        (.restore th m)
+        r))))
+
+(go/func CallR ^R [^{:tag (* Func)} f ^{:tag (slice Setter)} args ^int32 res]
+  (fn ^any [^{:tag (* Frame)} fr]
+    (let [th (.-Th fr) c (.Code f) m (.save th) nf (.enter th c f)]
+      (set! (.-rec nf) (.-passRec fr))
+      (range [_ a args] (a fr nf))
+      (run c nf)
+      (let [r (aget (.-R nf) res)]
+        (.restore th m)
+        r))))
+
+(go/func CallT "CallT is a static call of no result, or of several copied to the caller's slots (S28).\n"
+  ^T [^{:tag (* Func)} f ^{:tag (slice Setter)} args ^{:tag (slice resCopy)} rs]
+  (fn [^{:tag (* Frame)} fr]
+    (let [th (.-Th fr) c (.Code f) m (.save th) nf (.enter th c f)]
+      (set! (.-rec nf) (.-passRec fr))
+      (range [_ a args] (a fr nf))
+      (run c nf)
+      (copyResults fr nf rs)
+      (.restore th m))))
+
+;; ---------------------------------------------------------------------------------------
+;; Closures and function values (§4.6, S29)
+
+(go/type Closure
+  "Closure is an interpreted function value: its function and the cells it captured (copied
+into the first C slots of its frame at entry). gofns are its Go funcs by type (adapters).\n"
+  (struct ^{:tag (* Func)} F ^{:tag (slice unsafe/Pointer)} Cells
+          ^{:tag sync/Mutex} mu ^{:tag (map reflect/Type any)} gofns))
+
+(go/func MakeClosure "MakeClosure makes a function literal's closure over the cells of slots cs of the frame.\n"
+  ^R [^{:tag (* Func)} f ^{:tag (slice int32)} cs]
+  (fn ^any [^{:tag (* Frame)} fr]
+    (let [cells (make (slice unsafe/Pointer) (len cs))]
+      (range [i s cs]
+        (aset cells i (aget (.-C fr) s)))
+      (addr (lit Closure :F f :Cells cells)))))
+
+(go/func FuncValue "FuncValue is a package function as a value (one closure, without cells).\n"
+  ^R [^{:tag (* Func)} f]
+  (let [c (addr (lit Closure :F f))]
+    (fn ^any [^{:tag (* Frame)} fr] c)))
+
+(go/var ^{:tag sync/Map :doc "adapters maps the Go funcs made from closures (their funcval) back to the closures (S29).\n"}
+  adapters)
+
+(go/method goFunc
+  "goFunc is the closure as a real Go func of type t (reflect.MakeFunc: as built, GR3, the
+table's typed adapters come with GR5), made once per type and recorded.\n"
+  ^any [^{:tag (* Closure)} c ^{:tag (* Type)} t]
+  (.Lock (.-mu c))
+  (defer (.Unlock (.-mu c)))
+  (let [rt (.mem t)
+        g (aget (.-gofns c) rt)]
+    (when (!= g nil)
+      (return g))
+    (set! g (.Interface (reflect/MakeFunc rt (fn ^{:tag (slice reflect/Value)} [^{:tag (slice reflect/Value)} in]
+                                                 (.callValues c t in)))))
+    (when (== (.-gofns c) nil)
+      (set! (.-gofns c) (make (map reflect/Type any))))
+    (aset (.-gofns c) rt g)
+    (.Store adapters (efaceData g) c)
+    g))
+
+(go/func closureOf "closureOf is a Go func from Go memory as a frame holds it: the closure it was made from, else itself; nil for a nil func.\n"
+  ^any [^any g]
+  (when (== g nil)
+    (return nil))
+  (let [p (efaceData g)]
+    (when (== p nil)
+      (return nil))
+    (let [(values c ok) (.Load adapters p)]
+      (when ok
+        (return c))))
+  g)
+
+(go/func slotCounts
+  "slotCounts are the slots of a signature's parameters and results per kind, and each one's slot.\n"
+  [^{:tag (* Type)} ft] :results [^{:tag (array 4 int32)} n ^{:tag (slice int32)} ps ^{:tag (slice int32)} rs]
+  (let [next (fn ^int32 [^byte k]
+               (let [i 3]
+                 (switch k (case [\I] (set! i 0)) (case [\F] (set! i 1)) (case [\S] (set! i 2)))
+                 (let [s (aget n i)]
+                   (aset n i (+ s 1))
+                   s)))]
+    (range [i p (.-Ins ft)]
+      (if (and (.-Variadic ft) (== i (- (len (.-Ins ft)) 1)))
+        (set! ps (append ps (next \R)))
+        (set! ps (append ps (next (.-K p))))))
+    (range [_ r (.-Outs ft)]
+      (set! rs (append rs (next (.-K r)))))
+    (return n ps rs)))
+
+(go/method callValues
+  "callValues calls the closure with reflect.Values of its parameters (a Go func made from it,
+called by compiled code), its results as reflect.Values.\n"
+  ^{:tag (slice reflect/Value)} [^{:tag (* Closure)} c ^{:tag (* Type)} t ^{:tag (slice reflect/Value)} in]
+  (let [th (CurrentThread)
+        code (.Code (.-F c))
+        m (.save th)
+        nf (.enter th code (.-F c))
+        (values _ ps rs) (slotCounts t)]
+    (copy (.-C nf) (.-Cells c))
+    (range [i v in]
+      (let [pt (aget (.-Ins t) i)]
+        (when (and (.-Variadic t) (== i (- (len (.-Ins t)) 1)))
+          (set! pt (TypeOf (.Type v))))
+        (setSlotValue nf (.-K pt) (aget ps i) pt v)))
+    (run code nf)
+    (let [out (make (slice reflect/Value) (len rs))]
+      (range [i s rs]
+        (aset out i (slotValue nf (aget (.-Outs t) i) s)))
+      (.restore th m)
+      out)))
+
+(go/func setSlotValue "setSlotValue writes reflect.Value v of type t into slot s of kind k (an invalid v: the zero value).\n"
+  [^{:tag (* Frame)} fr ^byte k ^int32 s ^{:tag (* Type)} t ^{:tag reflect/Value} v]
+  (when (not (.IsValid v))
+    (switch k
+      (case [\I] (aset (.-I fr) s 0))
+      (case [\F] (aset (.-F fr) s 0))
+      (case [\S] (aset (.-S fr) s ""))
+      (default (aset (.-R fr) s (.Zero t))))
+    (return))
+  (switch k
+    (case [\I] (aset (.-I fr) s (intOfValue v)))
+    (case [\F] (aset (.-F fr) s (.Float v)))
+    (case [\S] (aset (.-S fr) s (.String v)))
+    (default (aset (.-R fr) s (.fromValue t v)))))
+
+(go/func slotValue "slotValue is slot s of type t's kind as a reflect.Value of t's Go memory type.\n"
+  ^{:tag reflect/Value} [^{:tag (* Frame)} fr ^{:tag (* Type)} t ^int32 s]
+  (switch (.-K t)
+    (case [\I] (return (valueI (.mem t) (aget (.-I fr) s))))
+    (case [\F] (let [x (.Elem (reflect/New (.mem t)))] (.SetFloat x (aget (.-F fr) s)) (return x)))
+    (case [\S] (let [x (.Elem (reflect/New (.mem t)))] (.SetString x (aget (.-S fr) s)) (return x))))
+  (.valueOf t (aget (.-R fr) s)))
+
+(go/func nilFunc "nilFunc is the call of a nil func: gc's nil dereference.\n" []
+  (let [p (conv (* int) nil)]
+    (set! @p 0)))
+
+(go/func callValue
+  "callValue calls function value f (a closure, a compiled Go func, nil) of type ft, its
+arguments written by args into a frame of the signature's layout, its results in that frame
+(callee result slots rs): the callee's frame, to read and restore with mark m.\n"
+  [^{:tag (* Frame)} fr ^any f ^{:tag (* Type)} ft ^{:tag (slice Setter)} args]
+  :results [^{:tag (* Frame)} nf ^mark m]
+  (let [th (.-Th fr)]
+    (set! m (.save th))
+    (type-switch [c f]
+      (case [(* Closure)]
+        (let [code (.Code (.-F c))]
+          (set! nf (.enter th code (.-F c)))
+          (set! (.-rec nf) (.-passRec fr))
+          (copy (.-C nf) (.-Cells c))
+          (range [_ a args] (a fr nf))
+          (run code nf)
+          (return)))
+      (case [nil]
+        (nilFunc)))
+    ;; a compiled Go func: its arguments in a frame of the signature's layout, reflect's call
+    (let [(values n ps rs) (slotCounts ft)
+          d (+ (.-depth th) 1)]
+      (set! nf (.frameAt th d))
+      (set! (.-depth th) d)
+      (set! (.-I nf) (.takeI th (aget n 0)))
+      (set! (.-F nf) (.takeF th (aget n 1)))
+      (set! (.-S nf) (.takeS th (aget n 2)))
+      (set! (.-R nf) (.takeR th (aget n 3)))
+      (range [_ a args] (a fr nf))
+      (let [in (make (slice reflect/Value) (len ps))
+            fv (reflect/ValueOf f)]
+        (range [i s ps]
+          (if (and (.-Variadic ft) (== i (- (len ps) 1)))
+            (aset in i (.valueOf (aget (.-Ins ft) i) (aget (.-R nf) s)))
+            (aset in i (slotValue nf (aget (.-Ins ft) i) s))))
+        (let [^{:tag (slice reflect/Value)} out nil]
+          (if (.-Variadic ft)
+            (set! out (.CallSlice fv in))
+            (set! out (.Call fv in)))
+          (range [i v out]
+            (let [t (aget (.-Outs ft) i)]
+              (setSlotValue nf (.-K t) (aget rs i) t v)))))
+      (return))))
+
+(go/func CallValueI "CallValueI calls function value callee (of type ft) with one I result in its slot res.\n"
+  ^I [^R callee ^{:tag (* Type)} ft ^{:tag (slice Setter)} args ^int32 res]
+  (fn ^int64 [^{:tag (* Frame)} fr]
+    (let [(values nf m) (callValue fr (callee fr) ft args)
+          r (aget (.-I nf) res)]
+      (.restore (.-Th fr) m)
+      r)))
+
+(go/func CallValueF ^F [^R callee ^{:tag (* Type)} ft ^{:tag (slice Setter)} args ^int32 res]
+  (fn ^float64 [^{:tag (* Frame)} fr]
+    (let [(values nf m) (callValue fr (callee fr) ft args)
+          r (aget (.-F nf) res)]
+      (.restore (.-Th fr) m)
+      r)))
+
+(go/func CallValueS ^S [^R callee ^{:tag (* Type)} ft ^{:tag (slice Setter)} args ^int32 res]
+  (fn ^string [^{:tag (* Frame)} fr]
+    (let [(values nf m) (callValue fr (callee fr) ft args)
+          r (aget (.-S nf) res)]
+      (.restore (.-Th fr) m)
+      r)))
+
+(go/func CallValueR ^R [^R callee ^{:tag (* Type)} ft ^{:tag (slice Setter)} args ^int32 res]
+  (fn ^any [^{:tag (* Frame)} fr]
+    (let [(values nf m) (callValue fr (callee fr) ft args)
+          r (aget (.-R nf) res)]
+      (.restore (.-Th fr) m)
+      r)))
+
+(go/func CallValueT ^T [^R callee ^{:tag (* Type)} ft ^{:tag (slice Setter)} args ^{:tag (slice resCopy)} rs]
+  (fn [^{:tag (* Frame)} fr]
+    (let [(values nf m) (callValue fr (callee fr) ft args)]
+      (copyResults fr nf rs)
+      (.restore (.-Th fr) m))))
+
+;; ---------------------------------------------------------------------------------------
+;; Prologues and epilogues
+
+(go/func ProCellI "ProCellI moves I parameter slot s into a new cell (C slot c) of type t.\n"
+  ^{:tag (func [(* Frame)])} [^int32 s ^int32 c ^{:tag (* Type)} t]
+  (let [k (.-GK t)]
+    (fn [^{:tag (* Frame)} fr]
+      (let [p (.newCell t)]
+        (storeI k p (aget (.-I fr) s))
+        (aset (.-C fr) c p)))))
+
+(go/func ProCellF ^{:tag (func [(* Frame)])} [^int32 s ^int32 c ^{:tag (* Type)} t]
+  (let [k (.-GK t)]
+    (fn [^{:tag (* Frame)} fr]
+      (let [p (.newCell t)]
+        (storeF k p (aget (.-F fr) s))
+        (aset (.-C fr) c p)))))
+
+(go/func ProCellS ^{:tag (func [(* Frame)])} [^int32 s ^int32 c ^{:tag (* Type)} t]
+  (fn [^{:tag (* Frame)} fr]
+    (let [p (.newCell t)]
+      (set! @(conv (* string) p) (aget (.-S fr) s))
+      (aset (.-C fr) c p))))
+
+(go/func ProCellR "ProCellR moves R parameter slot s (its value, a struct or array's box too) into a new cell.\n"
+  ^{:tag (func [(* Frame)])} [^int32 s ^int32 c ^{:tag (* Type)} t]
+  (fn [^{:tag (* Frame)} fr]
+    (let [p (.newCell t)]
+      (.store t p (aget (.-R fr) s))
+      (aset (.-C fr) c p))))
+
+(go/func ProNewCell "ProNewCell makes C slot c a new zero cell of type t (a named result that is a cell).\n"
+  ^{:tag (func [(* Frame)])} [^int32 c ^{:tag (* Type)} t]
+  (fn [^{:tag (* Frame)} fr]
+    (aset (.-C fr) c (.newCell t))))
+
+(go/func ProZeroR "ProZeroR makes R slot s the zero value of t (a named result).\n"
+  ^{:tag (func [(* Frame)])} [^int32 s ^{:tag (* Type)} t]
+  (let [z (.Zero t)]
+    (fn [^{:tag (* Frame)} fr]
+      (aset (.-R fr) s z))))
+
+(go/func EpiCell "EpiCell copies cell c (a named result of type t) to its result slot s (§4.5).\n"
+  ^{:tag (func [(* Frame)])} [^int32 c ^int32 s ^{:tag (* Type)} t]
+  (switch (.-K t)
+    (case [\I] (let [k (.-GK t)] (return (fn [^{:tag (* Frame)} fr] (aset (.-I fr) s (loadI k (aget (.-C fr) c)))))))
+    (case [\F] (let [k (.-GK t)] (return (fn [^{:tag (* Frame)} fr] (aset (.-F fr) s (loadF k (aget (.-C fr) c)))))))
+    (case [\S] (return (fn [^{:tag (* Frame)} fr] (aset (.-S fr) s @(conv (* string) (aget (.-C fr) c)))))))
+  (fn [^{:tag (* Frame)} fr] (aset (.-R fr) s (.load t (aget (.-C fr) c)))))
+
+(go/func NewCode "NewCode is a function's code.\n"
+  ^{:tag (* Code)} [^int32 ni ^int32 nf ^int32 ns ^int32 nr ^int32 nc ^{:tag (slice any)} pro ^Stmt body ^bool deferring ^{:tag (slice any)} epi]
+  (let [c (addr (lit Code :NI ni :NF nf :NS ns :NR nr :NC nc :Body body :HasDefer deferring))]
+    (range [_ p pro] (set! (.-Pro c) (append (.-Pro c) (assert (func [(* Frame)]) p))))
+    (range [_ e epi] (set! (.-Epi c) (append (.-Epi c) (assert (func [(* Frame)]) e))))
+    c))
+
+;; ---------------------------------------------------------------------------------------
+;; defer, panic, recover (§4.7)
+
+(go/type deferred "deferred is a deferred call: its arguments evaluated into its frame (mini), its call reading them.\n"
+  (struct ^{:tag (* Frame)} mini ^T call))
+
+(go/type panicState
+  "panicState is the panic a function's deferred calls run in: its value (nil when none), whether a
+recover stopped it, whether it is os.Exit's at the REPL (which recover does not stop, S12).\n"
+  (struct ^any val ^bool recovered ^bool exit))
+
+(go/type chainEntry "chainEntry is a panic replaced by a later one, for gc's report (printpanics).\n"
+  (struct ^any val ^bool recovered))
+
+(go/func Defer
+  "Defer is (defer call): its arguments evaluated now by args into a frame of their own (counts
+n), the call made by unwind (§4.7).\n"
+  ^Stmt [^{:tag (slice Setter)} args ^T call ^int32 ni ^int32 nf ^int32 ns ^int32 nr]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (let [mini (addr (lit Frame :Th (.-Th fr) :Fn (.-Fn fr)
+                          :I (make (slice int64) ni) :F (make (slice float64) nf)
+                          :S (make (slice string) ns) :R (make (slice any) nr)))]
+      (range [_ a args] (a fr mini))
+      (set! (.-defers fr) (append (.-defers fr) (lit deferred mini call)))
+      0)))
+
+(go/func runDeferring "runDeferring runs a body that defers, unwind deferred by Go (S30).\n"
+  [^{:tag (* Code)} c ^{:tag (* Frame)} nf]
+  (set! (.-defers nf) (subslice (.-defers nf) _ 0))
+  (defer (unwind nf))
+  ((.-Body c) nf))
+
+(go/func unwind
+  "unwind runs a frame's deferred calls, last in first out (§4.7): in a panic (Go's recover gives
+it), each with the panic in its frame (rec), so that its recover can stop it; a deferred call
+that panics replaces the panic in progress. A panic not recovered goes on.\n"
+  [^{:tag (* Frame)} fr]
+  (when (== (len (.-defers fr)) 0)
+    (return))
+  (let [p (recover)
+        ps (addr (lit panicState :val p))]
+    (let [(values _ ok) (assert exitPanic p)]
+      (set! (.-exit ps) ok))
+    (while (> (len (.-defers fr)) 0)
+      (let [i (- (len (.-defers fr)) 1)
+            d (aget (.-defers fr) i)]
+        (aset (.-defers fr) i (lit deferred))
+        (set! (.-defers fr) (subslice (.-defers fr) _ i))
+        (runRecord (.-Th fr) d ps)))
+    (when (and (!= (.-val ps) nil) (or (not (.-recovered ps)) (.-exit ps)))
+      (panic (.-val ps)))
+    (when (.-recovered ps)
+      (set! (.-chain (.-Th fr)) nil))))
+
+(go/func runRecord "runRecord makes one deferred call, guarded: its panic replaces the one in progress.\n"
+  [^{:tag (* Thread)} th ^deferred d ^{:tag (* panicState)} ps]
+  (defer ((fn []
+            (let [q (recover)]
+              (when (!= q nil)
+                (when (!= (.-val ps) nil)
+                  (set! (.-chain th) (append (.-chain th) (lit chainEntry (.-val ps) (.-recovered ps)))))
+                (set! (.-val ps) q)
+                (set! (.-recovered ps) false)
+                (let [(values _ ok) (assert exitPanic q)]
+                  (set! (.-exit ps) ok)))))))
+  (set! (.-passRec (.-mini d)) ps)
+  ((.-call d) (.-mini d)))
+
+(go/func Recover "Recover is (recover): the panic's value when its frame is a deferred call's in a panic not yet recovered.\n"
+  ^R []
+  (fn ^any [^{:tag (* Frame)} fr]
+    (let [ps (.-rec fr)]
+      (when (or (== ps nil) (.-recovered ps) (.-exit ps) (== (.-val ps) nil))
+        (return nil))
+      (set! (.-recovered ps) true)
+      (.-val ps))))
+
+(go/func Panic "Panic is (panic v): Go's panic (G12).\n" ^Stmt [^R v]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (panic (v fr))))
+
+;; ---------------------------------------------------------------------------------------
+;; os.Exit (§2.7, §6.7) and the two modes
+
+(go/var ^{:tag bool :doc "ProgramMode is goi's mode: true in bin/goi run and the check (os.Exit exits, uncaught panics end the process), false at the REPL.\n"}
+  ProgramMode false)
+
+(go/type exitPanic "exitPanic is os.Exit's panic at the REPL (S12): the deferred calls run.\n"
+  (struct ^int Code))
+
+(go/func Exit
+  "Exit is the table's os.Exit (§6.7): at the REPL it ends the goi call with GoExit, the
+deferred calls run (S12); in program mode the process exits, as gc's.\n"
+  [^int code]
+  (when ProgramMode
+    (os/Exit code))
+  (panic (lit exitPanic code)))
+
+;; ---------------------------------------------------------------------------------------
+;; Threads of goroutines (S22): jrt's Thread holds goi's
+
+(go/func CurrentThread "CurrentThread is the current goroutine's goi thread (made on its first interpreted call).\n"
+  ^{:tag (* Thread)} []
+  (let [jt (jrt/CurrentThread)
+        x (.-Interp jt)]
+    (when (!= x nil)
+      (return (assert (* Thread) x)))
+    (let [th (NewThread)]
+      (set! (.-Interp jt) th)
+      th)))
+
+;; ---------------------------------------------------------------------------------------
+;; Running a program (§2.7, §10.7)
+
+(go/func printValue "printValue prints v as gc's printpanicval (the runtime's print).\n" [^any v]
+  (type-switch [x v]
+    (case [nil] (print "nil"))
+    (case [bool] (print x))
+    (case [int] (print x))
+    (case [int8] (print x))
+    (case [int16] (print x))
+    (case [int32] (print x))
+    (case [int64] (print x))
+    (case [uint] (print x))
+    (case [uint8] (print x))
+    (case [uint16] (print x))
+    (case [uint32] (print x))
+    (case [uint64] (print x))
+    (case [uintptr] (print x))
+    (case [float32] (print x))
+    (case [float64] (print x))
+    (case [complex64] (print x))
+    (case [complex128] (print x))
+    (case [string] (print (strings/ReplaceAll x "\n" "\n\t")))
+    (case [Proxy]
+      (let [k (.-K (.-T x))]
+        (if (== k \S)
+          (print (.String (.-T x)) "(\"" (strings/ReplaceAll (assert string (.-V x)) "\n" "\n\t") "\")")
+          (if (== (.-GK (.-T x)) reflect/Complex128)
+            (do (print (.String (.-T x)))
+                (printValue (.-V x)))
+            (do (print (.String (.-T x)) "(")
+                (printValue (.-V x))
+                (print ")"))))))
+    (default
+      (let [rt (reflect/TypeOf v)
+            name (.String rt)]
+        (.Lock typesMu)
+        (let [d (aget interp rt)]
+          (.Unlock typesMu)
+          (when (!= d nil)
+            (set! name (.String d))))
+        (print "(" name ") " (efaceData v))))))
+
+(go/func panicArg "panicArg is gc's preprintpanics of v: an error's Error(), a Stringer's String().\n" ^any [^any v]
+  (type-switch [x v]
+    (case [error] (return (.Error x)))
+    (case [fmt/Stringer] (return (.String x))))
+  v)
+
+(go/func sameValue "sameValue says whether two panic values are the same interface value (gc's efaceOf ==).\n"
+  ^bool [^any a ^any b]
+  (== @(conv (* (array 2 unsafe/Pointer)) (conv unsafe/Pointer (addr a)))
+      @(conv (* (array 2 unsafe/Pointer)) (conv unsafe/Pointer (addr b)))))
+
+(go/func Report
+  "Report prints an uncaught panic as gc's runtime does (§10.7): the chain of panics replaced
+(printpanics), the signal line of a nil dereference, then the goroutine's header; the traces
+are goi's frames' names.\n"
+  [^{:tag (* Thread)} th ^any p]
+  (let [chain (append (lit (slice chainEntry)) (spread (.-chain th)))]
+    (set! chain (append chain (lit chainEntry p false)))
+    (let [rep (make (slice bool) (len chain))]
+      (for [i 0] (< (+ i 1) (len chain)) (inc! i)
+        (when (sameValue (.-val (aget chain i)) (.-val (aget chain (+ i 1))))
+          (aset rep i true)))
+      (label :entries
+        (range [i e chain]
+          (when (> i 0)
+            (when (aget rep (- i 1))
+              (break :entries))
+            (print "\t"))
+          (print "panic: ")
+          (printValue (panicArg (.-val e)))
+          (cond
+            (and (.-recovered e) (aget rep i)) (print " [recovered, repanicked]")
+            (.-recovered e) (print " [recovered]"))
+          (print "\n")))))
+  (let [(values err ok) (assert error p)]
+    (when (and ok (== (.Error err) "runtime error: invalid memory address or nil pointer dereference"))
+      (print "[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x0]\n")))
+  (print "\ngoroutine 1 [running]:\n")
+  (for [d (.-depth th)] (>= d 1) (dec! d)
+    (when (< (conv int d) (len (.-frames th)))
+      (let [f (aget (.-frames th) d)]
+        (when (!= (.-Fn f) nil)
+          (print (.-Pkg (.-Fn f)) "." (.-Name (.-Fn f)) "(...)\n\t?:0 +0x0\n"))))))
+
+(go/func RunProgram
+  "RunProgram runs a program in program mode (§2.7): its packages' initializations (inits, in
+order), then main; returns the exit status: 0, or 2 after an uncaught panic reported as gc's.\n"
+  ^int [^{:tag (slice (* Func))} inits ^{:tag (* Func)} main]
+  (set! ProgramMode true)
+  (let [th (CurrentThread)]
+    (let [status (runReporting th (fn []
+                                    (range [_ f inits] (runTop th f))
+                                    (when (!= main nil)
+                                      (runTop th main))))]
+      status)))
+
+(go/func runReporting "runReporting runs f; an uncaught panic is reported (status 2).\n"
+  ^int [^{:tag (* Thread)} th ^{:tag (func [])} f] :results [^int status]
+  (defer ((fn []
+            (let [p (recover)]
+              (when (!= p nil)
+                (let [(values se ok) (assert stackOverflowError p)]
+                  (when ok
+                    (print (.Error se) "\nfatal error: stack overflow\n\ngoroutine 1 [running]:\n")
+                    (set! status 2)
+                    (return)))
+                (Report th p)
+                (set! status 2))))))
+  (f)
+  0)
+
+(go/func runTop "runTop calls function f of no parameters and no results at the thread's top.\n"
+  [^{:tag (* Thread)} th ^{:tag (* Func)} f]
+  (let [c (.Code f)
+        m (.save th)
+        nf (.enter th c f)]
+    (run c nf)
+    (.restore th m)))
+
+(go/func CallFunc
+  "CallFunc calls interpreted function f of type ft from Arbace (§7.1): args converted by the
+parameters' types (§5.6), its results back; the call guarded as compiled calls are.\n"
+  ^{:tag (slice any)} [^{:tag (* Func)} f ^{:tag (* Type)} ft ^{:tag (slice any)} args ^string name]
+  (let [np (len (.-Ins ft))]
+    (when (or (and (not (.-Variadic ft)) (!= (len args) np)) (and (.-Variadic ft) (< (len args) (- np 1))))
+      (panic (jrt/IllegalArgumentException_New_String
+               (jrt/Str (fmt/Sprintf "%s takes %d arguments (%s), got %d" name np (.String ft) (len args))))))
+    (let [th (CurrentThread)
+          (values _ ps rs) (slotCounts ft)
+          c (.Code f)
+          m (.save th)
+          nf (.enter th c f)]
+      (range [i pt (.-Ins ft)]
+        (let [what (fmt/Sprintf "argument %d of %s" (+ i 1) name)]
+          (if (and (.-Variadic ft) (== i (- np 1)))
+            (let [rest (subslice args i)
+                  sv (reflect/MakeSlice (.mem pt) (len rest) (len rest))]
+              (range [j x rest]
+                (.Set (.Index sv j) (FromArbace x (.mem (.elem pt)) what)))
+              (aset (.-R nf) (aget ps i) (.Interface sv)))
+            (setSlotValue nf (.-K pt) (aget ps i) pt (FromArbace (aget args i) (.mem pt) what)))))
+      (run c nf)
+      (let [out (make (slice any) (len rs))]
+        (range [i s rs]
+          (aset out i (ToArbace (slotValue nf (aget (.-Outs ft) i) s))))
+        (.restore th m)
+        out))))
+
+(go/func SetOSArgs "SetOSArgs makes os.Args the program's arguments (program mode, §6.7).\n" [^{:tag (slice string)} args]
+  (set! os/Args args))

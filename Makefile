@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle diffcheck verify jdk-verify edge-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
-  repr-java-roundtrip repr-java-text repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-test goi-annotations goi-test alpine-check clean \
+  repr-java-roundtrip repr-java-text repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-test goi-annotations goi-test goi-check alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -145,8 +145,10 @@ repr-rust-test: ## repr/rust's cases: the reader's samples, the spec's worked ex
 	bin/repr-rust test
 goi-annotations: ## goi's checker over tamago/goroot, linux std, GOROOT/test: no error, every annotation verified (bin/goi annotations)
 	bin/goi annotations
-goi-test: ## goi's checker's tests: invalid forms with gc's messages, checked trees (bin/goi test --gc)
+goi-test: ## goi's tests: the checker's (invalid forms with gc's messages, checked trees), the interpreter's programs against gc, Go forms at the REPL (bin/goi test --gc; after `make build`)
 	bin/goi test --gc
+goi-check: ## goi's check: GOROOT/test's run programs interpreted against gc, against test/goi/check-linux-amd64.edn (bin/goi check; after `make build`)
+	bin/goi check
 
 ## The host and housekeeping
 alpine-check: ## one minimal apk add line reinstalls exactly the host's packages (bin/alpine-env check)

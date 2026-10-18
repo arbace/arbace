@@ -1,0 +1,276 @@
+;; goi's generated node factories (doc/go/GOI-SPEC.md §4.2, S19): the operator and type variants
+;; of the nodes (go/arbace/goi/ops.ae), and the registry by which the builder makes every node
+;; (go/arbace/goi/registry.ae: each factory's adapter from the native's arguments). Run from the
+;; checkout's root:
+;;
+;;   ARBACE_PATH=. target/seed/amd64/arbace test/goi/gen_nodes.ae
+;;
+;; It writes both files; they are committed, and regenerated when this table changes.
+(ns goi.gen-nodes
+  (:require [arbace.string :as str]))
+
+;;; The integer types: suffix, Go type, unsigned?, 64-bit?
+
+(def int-types
+  [["I8" "int8" false false] ["I16" "int16" false false] ["I32" "int32" false false]
+   ["I64" "int64" false true] ["I" "int" false true]
+   ["U8" "uint8" true false] ["U16" "uint16" true false] ["U32" "uint32" true false]
+   ["U64" "uint64" true true] ["U" "uint" true true] ["UP" "uintptr" true true]])
+
+(def int-binops
+  [["Add" "+"] ["Sub" "-"] ["Mul" "*"] ["Div" "/"] ["Rem" "%"] ["And" "bit-and"] ["Or" "bit-or"]
+   ["Xor" "bit-xor"] ["AndNot" "bit-and-not"]])
+
+(def cmpops [["Eq" "=="] ["Ne" "!="] ["Lt" "<"] ["Le" "<="] ["Gt" ">"] ["Ge" ">="]])
+
+(def fr "^{:tag (* Frame)} fr")
+
+(defn- at [t x] (if (= t "int64") x (str "(conv " t " " x ")")))
+(defn- norm [t x] (if (= t "int64") x (str "(conv int64 " x ")")))
+
+(def factories
+  "Every factory the registry adapts: [name result param-kinds...], filled by the generated ones
+  and the hand-written ones below."
+  (atom []))
+
+(defn- reg! [name & kinds] (swap! factories conj (vec (cons name kinds))))
+
+(defn int-ops []
+  (concat
+    (for [[sfx t u w] int-types
+          [nm op] int-binops]
+      (do (reg! (str nm sfx) :I :I :I)
+          (reg! (str nm "K" sfx) :I :I :int64)
+          (str "(go/func " nm sfx " ^I [^I x ^I y]\n"
+               "  (fn ^int64 [" fr "] " (norm t (str "(" op " " (at t "(x fr)") " " (at t "(y fr)") ")")) "))\n"
+               "(go/func " nm "K" sfx " ^I [^I x ^int64 k]\n"
+               "  (let [c " (at t "k") "]\n"
+               "    (fn ^int64 [" fr "] " (norm t (str "(" op " " (at t "(x fr)") " c)")) ")))\n")))
+    (for [[sfx t u w] int-types
+          [nm op] [["Shl" "<<"] ["Shr" ">>"]]]
+      (do (reg! (str nm sfx) :I :I :I)
+          (reg! (str nm "U" sfx) :I :I :I)
+          (str "(go/func " nm sfx " ^I [^I x ^I y]\n"
+               "  (fn ^int64 [" fr "] (let [a " (at t "(x fr)") " s (y fr)] " (norm t (str "(" op " a s)")) ")))\n"
+               "(go/func " nm "U" sfx " ^I [^I x ^I y]\n"
+               "  (fn ^int64 [" fr "] (let [a " (at t "(x fr)") " s (conv uint64 (y fr))] " (norm t (str "(" op " a s)")) ")))\n")))
+    (for [[sfx t u w] int-types]
+      (do (reg! (str "Neg" sfx) :I :I)
+          (reg! (str "Compl" sfx) :I :I)
+          (reg! (str "Cv" sfx) :I :I)
+          (reg! (str "Fto" sfx) :I :F)
+          (str "(go/func Neg" sfx " ^I [^I x] (fn ^int64 [" fr "] " (norm t (str "(- " (at t "(x fr)") ")")) "))\n"
+               "(go/func Compl" sfx " ^I [^I x] (fn ^int64 [" fr "] " (norm t (str "(bit-not " (at t "(x fr)") ")")) "))\n"
+               "(go/func Cv" sfx " ^I [^I x] (fn ^int64 [" fr "] " (norm t (at t "(x fr)")) "))\n"
+               "(go/func Fto" sfx " ^I [^F x] (fn ^int64 [" fr "] " (norm t (str "(conv " t " (x fr))")) "))\n")))
+    ;; comparisons: signed (I) and unsigned (U) classes
+    (for [[cls u] [["I" false] ["U" true]]
+          [nm op] cmpops]
+      (let [cv (fn [x] (if u (str "(conv uint64 " x ")") x))]
+        (reg! (str nm cls) :B :I :I)
+        (reg! (str nm "K" cls) :B :I :int64)
+        (reg! (str nm "LK" cls) :B :int32 :int64)
+        (reg! (str nm "LL" cls) :B :int32 :int32)
+        (str "(go/func " nm cls " ^B [^I x ^I y] (fn ^bool [" fr "] (" op " " (cv "(x fr)") " " (cv "(y fr)") ")))\n"
+             "(go/func " nm "K" cls " ^B [^I x ^int64 k] (let [c " (cv "k") "] (fn ^bool [" fr "] (" op " " (cv "(x fr)") " c))))\n"
+             "(go/func " nm "LK" cls " ^B [^int32 s ^int64 k] (let [c " (cv "k") "] (fn ^bool [" fr "] (" op " " (cv "(aget (.-I fr) s)") " c))))\n"
+             "(go/func " nm "LL" cls " ^B [^int32 s ^int32 r] (fn ^bool [" fr "] (" op " " (cv "(aget (.-I fr) s)") " " (cv "(aget (.-I fr) r)") ")))\n")))
+    ;; the local-operand variants of 64-bit arithmetic (fib's n - 1, i + 1)
+    (for [[nm op] [["Add" "+"] ["Sub" "-"] ["Mul" "*"]]]
+      (do (reg! (str nm "LK64") :I :int32 :int64)
+          (reg! (str nm "LL64") :I :int32 :int32)
+          (str "(go/func " nm "LK64 ^I [^int32 s ^int64 k] (fn ^int64 [" fr "] (" op " (aget (.-I fr) s) k)))\n"
+               "(go/func " nm "LL64 ^I [^int32 s ^int32 r] (fn ^int64 [" fr "] (" op " (aget (.-I fr) s) (aget (.-I fr) r))))\n")))
+    ;; integers to floats
+    (do (reg! "ItoF64" :F :I) (reg! "UtoF64" :F :I) (reg! "ItoF32" :F :I) (reg! "UtoF32" :F :I)
+        ["(go/func ItoF64 ^F [^I x] (fn ^float64 [" fr "] (conv float64 (x fr))))\n"
+         "(go/func UtoF64 ^F [^I x] (fn ^float64 [" fr "] (conv float64 (conv uint64 (x fr)))))\n"
+         "(go/func ItoF32 ^F [^I x] (fn ^float64 [" fr "] (conv float64 (conv float32 (x fr)))))\n"
+         "(go/func UtoF32 ^F [^I x] (fn ^float64 [" fr "] (conv float64 (conv float32 (conv uint64 (x fr))))))\n"])))
+
+(defn float-ops []
+  (concat
+    (for [[sfx t] [["F64" "float64"] ["F32" "float32"]]
+          [nm op] [["Add" "+"] ["Sub" "-"] ["Mul" "*"] ["Div" "/"]]]
+      (let [at (fn [x] (if (= t "float64") x (str "(conv float32 " x ")")))
+            nm* (fn [x] (if (= t "float64") x (str "(conv float64 " x ")")))]
+        (reg! (str nm sfx) :F :F :F)
+        (reg! (str nm "K" sfx) :F :F :float64)
+        (str "(go/func " nm sfx " ^F [^F x ^F y] (fn ^float64 [" fr "] " (nm* (str "(" op " " (at "(x fr)") " " (at "(y fr)") ")")) "))\n"
+             "(go/func " nm "K" sfx " ^F [^F x ^float64 k] (let [c " (at "k") "] (fn ^float64 [" fr "] " (nm* (str "(" op " " (at "(x fr)") " c)")) ")))\n")))
+    (do (reg! "NegF" :F :F) (reg! "CvF32" :F :F)
+        ["(go/func NegF ^F [^F x] (fn ^float64 [" fr "] (- (x fr))))\n"
+         "(go/func CvF32 ^F [^F x] (fn ^float64 [" fr "] (conv float64 (conv float32 (x fr)))))\n"])
+    (for [[nm op] cmpops]
+      (do (reg! (str nm "F") :B :F :F)
+          (str "(go/func " nm "F ^B [^F x ^F y] (fn ^bool [" fr "] (" op " (x fr) (y fr))))\n")))
+    (for [[nm op] cmpops]
+      (do (reg! (str nm "S") :B :S :S)
+          (str "(go/func " nm "S ^B [^S x ^S y] (fn ^bool [" fr "] (" op " (x fr) (y fr))))\n")))
+    (do (reg! "ConcatS" :S :S :S)
+        ["(go/func ConcatS ^S [^S x ^S y] (fn ^string [" fr "] (+ (x fr) (y fr))))\n"])
+    ;; complex values, held in R at their own type
+    (for [[sfx t] [["C128" "complex128"] ["C64" "complex64"]]
+          [nm op] [["Add" "+"] ["Sub" "-"] ["Mul" "*"] ["Div" "/"]]]
+      (do (reg! (str nm sfx) :R :R :R)
+          (str "(go/func " nm sfx " ^R [^R x ^R y] (fn ^any [" fr "] (let [a (assert " t " (x fr)) b (assert " t " (y fr))] (" op " a b))))\n")))
+    (do (reg! "NegC128" :R :R) (reg! "NegC64" :R :R) (reg! "CvC64" :R :R) (reg! "CvC128" :R :R)
+        ["(go/func NegC128 ^R [^R x] (fn ^any [" fr "] (- (assert complex128 (x fr)))))\n"
+         "(go/func NegC64 ^R [^R x] (fn ^any [" fr "] (- (assert complex64 (x fr)))))\n"
+         "(go/func CvC64 ^R [^R x] (fn ^any [" fr "] (type-switch [c (x fr)] (case [complex64] (return c))) (conv complex64 (assert complex128 (x fr)))))\n"
+         "(go/func CvC128 ^R [^R x] (fn ^any [" fr "] (type-switch [c (x fr)] (case [complex64] (return (conv complex128 c)))) (x fr)))\n"])))
+
+;;; The hand-written factories (frame.ae, func.ae, stmt.ae, expr.ae): name, result, params
+
+(def hand
+  [["LocalI" :I :int32] ["LocalF" :F :int32] ["LocalS" :S :int32] ["LocalR" :R :int32]
+   ;; func.ae
+   ["ArgI" :Setter :I :int32] ["ArgF" :Setter :F :int32] ["ArgS" :Setter :S :int32] ["ArgR" :Setter :R :int32]
+   ["ArgSlice" :Setter :type :anys :int32]
+   ["resCopies" :any :string :int32s :int32s]
+   ["CallI" :I :func :setters :int32] ["CallF" :F :func :setters :int32] ["CallS" :S :func :setters :int32]
+   ["CallR" :R :func :setters :int32] ["CallT" :T :func :setters :rescopies]
+   ["MakeClosure" :R :func :int32s] ["FuncValue" :R :func]
+   ["CallValueI" :I :R :type :setters :int32] ["CallValueF" :F :R :type :setters :int32]
+   ["CallValueS" :S :R :type :setters :int32] ["CallValueR" :R :R :type :setters :int32]
+   ["CallValueT" :T :R :type :setters :rescopies]
+   ["ProCellI" :pro :int32 :int32 :type] ["ProCellF" :pro :int32 :int32 :type] ["ProCellS" :pro :int32 :int32 :type]
+   ["ProCellR" :pro :int32 :int32 :type] ["ProNewCell" :pro :int32 :type] ["ProZeroR" :pro :int32 :type]
+   ["EpiCell" :pro :int32 :int32 :type]
+   ["NewCode" :any :int32 :int32 :int32 :int32 :int32 :anys :Stmt :bool :anys]
+   ["Defer" :Stmt :setters :T :int32 :int32 :int32 :int32]
+   ["Recover" :R] ["Panic" :Stmt :R]
+   ;; stmt.ae
+   ["Nop" :Stmt] ["Seq" :Stmt :stmts :ctls]
+   ["ExprI" :Stmt :I] ["ExprF" :Stmt :F] ["ExprS" :Stmt :S] ["ExprR" :Stmt :R] ["ExprT" :Stmt :T] ["ExprB" :Stmt :B]
+   ["Jump" :Stmt :Ctl] ["If" :Stmt :B :Stmt :Stmt]
+   ["SetI" :Stmt :int32 :I] ["SetF" :Stmt :int32 :F] ["SetS" :Stmt :int32 :S] ["SetR" :Stmt :int32 :R]
+   ["NewCell" :Stmt :int32 :type] ["CellP" :P :int32] ["GlobalP" :P :ptr]
+   ["LoadI" :I :P :type] ["LoadF" :F :P :type] ["LoadS" :S :P] ["LoadR" :R :P :type]
+   ["StoreI" :Stmt :P :I :type] ["StoreF" :Stmt :P :F :type] ["StoreS" :Stmt :P :S] ["StoreR" :Stmt :P :R :type]
+   ["CopyP" :Stmt :P :P :type] ["ZeroP" :Stmt :P :type]
+   ["Assign" :Stmt :stmts :stmts]
+   ["For" :Stmt :Stmt :B :Stmt :Stmt :Ctl :Ctl :Stmt] ["RenewCells" :Stmt :int32s :types]
+   ["IdxSlot" :SetIdx :int32] ["IdxStore" :SetIdx :P :type]
+   ["AtSlot" :SetAt :byte :int32 :type] ["AtCell" :SetAt :int32 :type] ["AtPlace" :SetAt :P :type]
+   ["AnySlot" :SetAny :byte :int32] ["AnyCell" :SetAny :int32 :type] ["AnyPlace" :SetAny :P :type]
+   ["RangeInt" :Stmt :I :SetIdx :Stmt :Ctl :Ctl :Stmt]
+   ["RangeSlice" :Stmt :R :type :SetIdx :SetAt :Stmt :Ctl :Ctl :Stmt]
+   ["RangeArray" :Stmt :P :type :SetIdx :SetAt :Stmt :Ctl :Ctl :Stmt]
+   ["RangePtrArray" :Stmt :R :type :SetIdx :SetAt :Stmt :Ctl :Ctl :Stmt]
+   ["RangeString" :Stmt :S :SetIdx :SetIdx :Stmt :Ctl :Ctl :Stmt]
+   ["RangeMap" :Stmt :R :type :SetAny :SetAny :Stmt :Ctl :Ctl :Stmt]
+   ["NewCase" :any :anys :Stmt :bool] ["Switch" :Stmt :Stmt :cases :Ctl :Ctl]
+   ;; expr.ae
+   ["ConstI" :I :int64] ["ConstF" :F :float64] ["ConstS" :S :string] ["ConstR" :R :any] ["ConstB" :B :bool]
+   ["ZeroR" :R :type] ["BI" :I :B] ["IB" :B :I] ["LocalB" :B :int32]
+   ["NotB" :B :B] ["AndB" :B :B :B] ["OrB" :B :B :B]
+   ["FieldP" :P :P :uintptr] ["DerefP" :P :R] ["BoxP" :P :R :type] ["AddrOf" :R :P :type] ["NewR" :R :type]
+   ["SliceElemP" :P :R :I :type] ["ArrayElemP" :P :P :I :type] ["IndexS" :I :S :I]
+   ["MapGetI" :I :R :any :type] ["MapGetF" :F :R :any :type] ["MapGetS" :S :R :any :type] ["MapGetR" :R :R :any :type]
+   ["MapGet2" :T :R :any :type :int32 :int32] ["MapSet" :Stmt :R :any :any :type] ["Delete" :Stmt :R :any :type]
+   ["LenMap" :I :R] ["MakeMap" :R :type :I] ["ClearMap" :Stmt :R] ["LitMap" :R :type :anys :anys]
+   ["LenSlice" :I :R] ["CapSlice" :I :R] ["LenS" :I :S]
+   ["MakeSlice" :R :type :I :I] ["MakeSliceOf" :R :type :anys] ["LitSlice" :R :type :int :ints :anys]
+   ["LitP" :P :type :uintptrs :anys :types]
+   ["SliceSlice" :R :R :I :I :I :type] ["SliceArray" :R :P :I :I :I :type] ["SliceString" :S :S :I :I]
+   ["Append" :R :type :R :anys] ["AppendSpread" :R :type :R :R] ["AppendString" :R :type :R :S]
+   ["Copy" :I :R :R] ["CopyString" :I :R :S] ["ClearSlice" :Stmt :R]
+   ["StrFromRune" :S :I :bool] ["StrFromBytes" :S :R] ["StrFromRunes" :S :R]
+   ["BytesFromStr" :R :S :type] ["RunesFromStr" :R :S :type] ["ConvR" :R :R :type]
+   ["SliceToArray" :R :R :type] ["SliceToArrayPtr" :R :R :type]
+   ["PtrToUnsafe" :R :R] ["UnsafeToPtr" :R :R :type] ["UnsafeToUintptr" :I :R] ["UintptrToUnsafe" :R :I]
+   ["IfaceI" :R :I :type] ["IfaceF" :R :F :type] ["IfaceS" :R :S :type] ["IfaceR" :R :R :type]
+   ["EqR" :B :R :R] ["NeR" :B :R :R] ["IsNilR" :B :R :type]
+   ["ComplexR" :R :F :F :type] ["RealF" :F :R] ["ImagF" :F :R]
+   ["MinMaxI" :I :Is :bool :bool] ["MinMaxF" :F :Fs :bool :bool] ["MinMaxS" :S :Ss :bool]
+   ["PrintArg" :any :any :type] ["Print" :Stmt :printargs :bool]
+   ;; types.ae
+   ["TBasic" :type :string] ["TIface" :type :string] ["TPtr" :type :type] ["TSlice" :type :type]
+   ["TArray" :type :int :type] ["TMap" :type :type :type] ["TChan" :type :int :type]
+   ["TFunc" :type :types :types :bool] ["TStruct" :type :strings :types :strings :strings :bools]
+   ["TNamed" :type :string :string :int :bool] ["TSetUnder" :void :type :type :strings :types :strings :strings :bools]
+   ;; natives.ae
+   ["TCompiled" :type :string :string] ["MemberValue" :any :string :string] ["CallCompiled" :any :string :string :anys :int32s]
+   ["CallCompiledValue" :any :any :anys :int32s] ["VarP" :P :string :string]
+   ["NewGlobal" :ptr :type] ["FuncCell" :func :string :string :any] ["SetCode" :void :func :any :any]
+   ["RunProgram" :int :funcs :func] ["CallInterp" :any :func :type :anys :string]
+   ["MemR" :R :R :type] ["FromMemR" :R :R :type] ["GlobalPtr" :any :type :ptr]
+   ["InterpCallable" :any :func :type :string]
+   ["IdxNewCell" :SetIdx :int32 :type] ["AtNewCell" :SetAt :int32 :type] ["AnyNewCell" :SetAny :int32 :type]
+   ["SetC" :Stmt :int32 :P] ["NewCellInit" :Stmt :int32 :type :any] ["NewCellCopy" :Stmt :int32 :type :P]
+   ["FieldOff" :int :type :int] ["FieldType" :type :type :int] ["ElemSize" :int :type] ["ElemType" :type :type]
+   ["ConstSB" :S :bytes]
+   ["ThenI" :I :T :I] ["ThenF" :F :T :F] ["ThenS" :S :T :S] ["ThenR" :R :T :R] ["ThenB" :B :T :B] ["StmtT" :T :Stmt]
+   ["SetOSArgs" :void :strings]
+   ["UnsafeAdd" :R :R :I] ["UnsafeSlice" :R :R :I :type] ["UnsafeSliceData" :R :R :type]
+   ["UnsafeString" :S :R :I] ["UnsafeStringData" :R :S]])
+
+(defn- arg-expr
+  "The adapter's expression of argument i of kind k."
+  [k i]
+  (let [a (str "(aget a " i ")")]
+    (case k
+      (:I :F :S :R :B :T :P :Stmt :Setter :SetIdx :SetAt :SetAny) (str "((inst As " (name k) ") " a ")")
+      :int64 (str "(argInt " a ")")
+      :int32 (str "(conv int32 (argInt " a "))")
+      :int (str "(conv int (argInt " a "))")
+      :uintptr (str "(conv uintptr (argInt " a "))")
+      :byte (str "(conv byte (argInt " a "))")
+      :Ctl (str "(conv Ctl (argInt " a "))")
+      :bool (str "(argBool " a ")")
+      :string (str "(argStr " a ")")
+      :float64 (str "(argFloat " a ")")
+      :type (str "((inst As (* Type)) " a ")")
+      :func (str "((inst As (* Func)) " a ")")
+      :ptr (str "((inst As unsafe/Pointer) " a ")")
+      :any (str "(argAny " a ")")
+      :anys (str "(argSlice " a ")")
+      :stmts (str "((inst argSliceOf Stmt) " a ")")
+      :setters (str "((inst argSliceOf Setter) " a ")")
+      :types (str "((inst argSliceOf (* Type)) " a ")")
+      :funcs (str "((inst argSliceOf (* Func)) " a ")")
+      :cases (str "((inst argSliceOf Case) " a ")")
+      :printargs (str "((inst argSliceOf printArg) " a ")")
+      :rescopies (str "((inst As (slice resCopy)) " a ")")
+      :Is (str "((inst argSliceOf I) " a ")")
+      :Fs (str "((inst argSliceOf F) " a ")")
+      :Ss (str "((inst argSliceOf S) " a ")")
+      :int32s (str "(argInt32s " a ")")
+      :ctls (str "(argCtls " a ")")
+      :ints (str "(argInts " a ")")
+      :uintptrs (str "(argUintptrs " a ")")
+      :strings (str "(argStrings " a ")")
+      :bools (str "(argBools " a ")")
+      :bytes (str "(argBytes " a ")"))))
+
+(defn registry-text []
+  (let [fs (concat @factories hand)]
+    (str ";; goi's registry of node factories (GOI-SPEC.md §4.1, §4.11): GoInterp's op native makes every\n"
+         ";; node and descriptor by a factory's name, the arguments adapted. Generated by\n"
+         ";; test/goi/gen_nodes.ae: do not edit.\n"
+         "(in-ns 'go.arbace.goi)\n\n"
+         "(go/file \"registry.go\"\n  :imports [[unsafe \"unsafe\"]])\n\n"
+         "(go/var ^{:tag (map string (func [(slice any)] [any])) :doc \"ops are the factories by name.\\n\"} ops\n"
+         "  (make (map string (func [(slice any)] [any]))))\n\n"
+         "(go/func init []\n"
+         (str/join
+           (for [[nm res & ks] fs]
+             (let [call (str "(" nm (str/join (map-indexed (fn [i k] (str " " (arg-expr k i))) ks)) ")")]
+               (str "  (aset ops " (pr-str nm) " (fn ^any [^{:tag (slice any)} a] "
+                    (if (= res :void) (str call " nil") call) "))\n"))))
+         ")\n")))
+
+(defn ops-text []
+  (reset! factories [])
+  (let [body (str/join (concat (int-ops) (float-ops)))]
+    (str ";; goi's operator nodes (GOI-SPEC.md §4.2, §4.4, S19): per operator and type, Go's operation at\n"
+         ";; the type (normalized I values: §4.2). Generated by test/goi/gen_nodes.ae: do not edit.\n"
+         "(in-ns 'go.arbace.goi)\n\n"
+         "(go/file \"ops.go\"\n  :imports [])\n\n"
+         body)))
+
+(let [ops (ops-text)]
+  (spit "go/arbace/goi/ops.ae" ops)
+  (spit "go/arbace/goi/registry.ae" (registry-text))
+  (println "gen_nodes:" (count @factories) "generated factories," (count hand) "hand-written"))

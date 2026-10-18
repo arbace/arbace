@@ -1,6 +1,6 @@
-;; goi: frames and nodes (GOI-SPEC.md §4.2, §4.3). GR1 has the nodes the table's invokers
-;; take and make: slot reads (LocalI ...) of a small frame, and the call nodes the invokers
-;; return. GR3 adds the rest, the threads' stacks of slots and cells.
+;; goi: frames, threads and the node types (GOI-SPEC.md §4.2, §4.3). A node is a typed Go closure
+;; over one frame; a frame is one call's slots per kind, windows of its goroutine's thread's
+;; stacks (S21); cells are the addresses of Go variables (C slots).
 (in-ns 'go.arbace.goi)
 
 (go/file "frame.go"
@@ -8,19 +8,29 @@
 nodes as typed Go closures over frames, the table of compiled packages (arbace/gotable
 registers it), the conversions between Arbace's values and Go's, and the natives of
 arbace.lang.GoInterp. It imports jrt and std, never arbace/lang.\n"
-  :imports [])
+  :imports [[unsafe "unsafe"]])
 
 (go/type Frame
   "Frame is one call's slots, per kind (§4.3): I for the integer kinds and bool (normalized:
 signed values sign-extended, unsigned zero-extended, uint64 its bits, bool 0 or 1), F for the
-floats (float32 rounded), S for strings, R for every other type (its Go value).\n"
-  (struct ^{:tag (slice int64)} I ^{:tag (slice float64)} F ^{:tag (slice string)} S ^{:tag (slice any)} R))
+floats (float32 rounded), S for strings, R for every other type (its Go value), C for cells
+(the addresses of the variables that live in Go memory). Th is the frame's thread, Fn its
+function; defers its deferred calls, rec the panic its deferred call may recover (the frame of
+a deferred function), passRec the panic its call gives the callee (a deferred call's frame).\n"
+  (struct ^{:tag (slice int64)} I ^{:tag (slice float64)} F ^{:tag (slice string)} S ^{:tag (slice any)} R
+          ^{:tag (slice unsafe/Pointer)} C
+          ^{:tag (* Thread)} Th ^{:tag (* Func)} Fn ^int32 Line ^int32 depth
+          ^{:tag (slice deferred)} defers ^{:tag (* panicState)} rec ^{:tag (* panicState)} passRec))
 
 (go/type I "I is a node of an integer kind or bool.\n" (func [(* Frame)] [int64]))
 (go/type F "F is a node of a float kind.\n" (func [(* Frame)] [float64]))
 (go/type S "S is a node of a string kind.\n" (func [(* Frame)] [string]))
 (go/type R "R is a node of any other type: its Go value.\n" (func [(* Frame)] [any]))
 (go/type T "T is a node without a value: a call of no result, or of several written to the frame's result slots.\n" (func [(* Frame)]))
+(go/type B "B is a condition.\n" (func [(* Frame)] [bool]))
+(go/type P "P is a place: the address of a variable, a field or an element.\n" (func [(* Frame)] [unsafe/Pointer]))
+(go/type Ctl "Ctl is what a statement returns: 0 to go on, 1 for a return, 2 + k the jump code k (§4.5).\n" int32)
+(go/type Stmt "Stmt is a statement node.\n" (func [(* Frame)] [Ctl]))
 
 (go/func LocalI "LocalI reads I slot i.\n" ^I [^int32 i]
   (fn ^int64 [^{:tag (* Frame)} fr] (aget (.-I fr) i)))
@@ -44,3 +54,111 @@ floats (float32 rounded), S for strings, R for every other type (its Go value).\
   :type-params [X] ^X [^any v]
   (let [(values x _) (assert X v)]
     x))
+
+;; ---------------------------------------------------------------------------------------
+;; Threads (§4.3, S21, S22): one per goroutine running interpreted code, its stacks of slots
+
+(go/type Thread
+  "Thread is goi's state of one goroutine: a stack per slot kind (a call's frame takes a window of
+each, popped when the call returns normally; a panic leaves them), the frames by depth (reused),
+and the depth limit (§4.3, S23).\n"
+  (struct ^{:tag (slice int64)} I ^{:tag (slice float64)} F ^{:tag (slice string)} S ^{:tag (slice any)} R
+          ^{:tag (slice unsafe/Pointer)} C
+          ^{:tag (slice (* Frame))} frames ^int32 depth ^int32 limit
+          ^{:tag (slice chainEntry)} chain))
+
+(go/var ^{:tag int32 :doc "DepthLimit is the interpreted call depth at which a call panics (ARBACE_GOI_DEPTH, S23).\n"}
+  DepthLimit 100000)
+
+(go/func NewThread "NewThread is a new thread with its first frame (depth 0).\n" ^{:tag (* Thread)} []
+  (let [th (addr (lit Thread :I (make (slice int64) 0 256) :F (make (slice float64) 0 32) :S (make (slice string) 0 64)
+                      :R (make (slice any) 0 128) :C (make (slice unsafe/Pointer) 0 64) :limit DepthLimit))]
+    (set! (.-frames th) (lit (slice (* Frame)) (addr (lit Frame :Th th))))
+    th))
+
+(go/func stackOverflow "stackOverflow is goi's depth limit reached: gc's text as a panic (S23).\n" []
+  (panic (lit stackOverflowError)))
+
+(go/type stackOverflowError "stackOverflowError is the panic of goi's depth limit (S23).\n" (struct))
+
+(go/method Error ^string [^stackOverflowError e] "runtime: goroutine stack exceeds 1000000000-byte limit")
+
+(go/method frameAt "frameAt is the thread's frame for depth d (made on first use; the limit checked then).\n"
+  ^{:tag (* Frame)} [^{:tag (* Thread)} th ^int32 d]
+  (when (>= (conv int d) (len (.-frames th)))
+    (when (> d (.-limit th))
+      (stackOverflow))
+    (while (<= (len (.-frames th)) (conv int d))
+      (set! (.-frames th) (append (.-frames th) (addr (lit Frame :Th th))))))
+  (aget (.-frames th) d))
+
+(go/method takeI "takeI is a cleared window of n I slots on the thread's stack.\n"
+  ^{:tag (slice int64)} [^{:tag (* Thread)} th ^int32 n]
+  (let [b (len (.-I th))
+        e (+ b (conv int n))]
+    (when (> e (cap (.-I th)))
+      ;; a new array; the frames below keep their windows of the old one (S21)
+      (set! (.-I th) (make (slice int64) b (+ (* 2 (cap (.-I th))) (conv int n)))))
+    (set! (.-I th) (subslice (.-I th) _ e))
+    (let [w (subslice (.-I th) b e e)]
+      (clear w)
+      w)))
+
+(go/method takeF "takeF is a cleared window of n F slots.\n"
+  ^{:tag (slice float64)} [^{:tag (* Thread)} th ^int32 n]
+  (let [b (len (.-F th))
+        e (+ b (conv int n))]
+    (when (> e (cap (.-F th)))
+      (set! (.-F th) (make (slice float64) b (+ (* 2 (cap (.-F th))) (conv int n)))))
+    (set! (.-F th) (subslice (.-F th) _ e))
+    (let [w (subslice (.-F th) b e e)]
+      (clear w)
+      w)))
+
+(go/method takeS "takeS is a cleared window of n S slots.\n"
+  ^{:tag (slice string)} [^{:tag (* Thread)} th ^int32 n]
+  (let [b (len (.-S th))
+        e (+ b (conv int n))]
+    (when (> e (cap (.-S th)))
+      (set! (.-S th) (make (slice string) b (+ (* 2 (cap (.-S th))) (conv int n)))))
+    (set! (.-S th) (subslice (.-S th) _ e))
+    (let [w (subslice (.-S th) b e e)]
+      (clear w)
+      w)))
+
+(go/method takeR "takeR is a cleared window of n R slots.\n"
+  ^{:tag (slice any)} [^{:tag (* Thread)} th ^int32 n]
+  (let [b (len (.-R th))
+        e (+ b (conv int n))]
+    (when (> e (cap (.-R th)))
+      (set! (.-R th) (make (slice any) b (+ (* 2 (cap (.-R th))) (conv int n)))))
+    (set! (.-R th) (subslice (.-R th) _ e))
+    (let [w (subslice (.-R th) b e e)]
+      (clear w)
+      w)))
+
+(go/method takeC "takeC is a cleared window of n C slots.\n"
+  ^{:tag (slice unsafe/Pointer)} [^{:tag (* Thread)} th ^int32 n]
+  (let [b (len (.-C th))
+        e (+ b (conv int n))]
+    (when (> e (cap (.-C th)))
+      (set! (.-C th) (make (slice unsafe/Pointer) b (+ (* 2 (cap (.-C th))) (conv int n)))))
+    (set! (.-C th) (subslice (.-C th) _ e))
+    (let [w (subslice (.-C th) b e e)]
+      (clear w)
+      w)))
+
+(go/type mark "mark is a thread's stack tops and depth, saved by a call and restored when it returns.\n"
+  (struct ^int i ^int f ^int s ^int r ^int c ^int32 d))
+
+(go/method save ^mark [^{:tag (* Thread)} th]
+  (lit mark (len (.-I th)) (len (.-F th)) (len (.-S th)) (len (.-R th)) (len (.-C th)) (.-depth th)))
+
+(go/method restore "restore pops the thread's stacks to m.\n"
+  [^{:tag (* Thread)} th ^mark m]
+  (set! (.-I th) (subslice (.-I th) _ (.-i m)))
+  (set! (.-F th) (subslice (.-F th) _ (.-f m)))
+  (set! (.-S th) (subslice (.-S th) _ (.-s m)))
+  (set! (.-R th) (subslice (.-R th) _ (.-r m)))
+  (set! (.-C th) (subslice (.-C th) _ (.-c m)))
+  (set! (.-depth th) (.-d m)))

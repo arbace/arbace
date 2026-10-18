@@ -1,32 +1,13 @@
 ;; goi: the natives of arbace.lang.GoInterp (GOI-SPEC.md §4.11, S32): j2g translates a native
 ;; method of GoInterp into a call of goi's GoInterp_<name>_native, an extension of J2G-SPEC
 ;; §9.1's rule. GR1's: the table's namespaces, calls, variables, types and the values that
-;; cross. They take and return what goi can name: primitives, *jrt.String, any, *jrt.RefArray,
-;; *jrt.Class.
+;; cross; GR3's: op, the factories of nodes, descriptors and functions by name (registry.ae),
+;; and what the builder asks of the table. They take and return what goi can name: primitives,
+;; *jrt.String, any, *jrt.RefArray, *jrt.Class.
 (in-ns 'go.arbace.goi)
 
 (go/file "natives.go"
-  :imports [[fmt "fmt"] [reflect "reflect"] [strconv "strconv"] [sync "sync"] [jrt "arbace/jrt"]])
-
-;; ---------------------------------------------------------------------------------------
-;; Types (§5.2; GR1: compiled types, the descriptor its reflect.Type)
-
-(go/type Type
-  "Type is a Go type's descriptor (§5.2). GR1 has compiled types only: RT is the type itself.\n"
-  (struct ^{:tag reflect/Type} RT))
-
-(go/var ^{:tag sync/Mutex} typesMu)
-
-(go/var ^{:tag (map reflect/Type (* Type))} types (make (map reflect/Type (* Type))))
-
-(go/func TypeOf "TypeOf is the descriptor of t, one per type.\n" ^{:tag (* Type)} [^{:tag reflect/Type} t]
-  (.Lock typesMu)
-  (defer (.Unlock typesMu))
-  (let [d (aget types t)]
-    (when (== d nil)
-      (set! d (addr (lit Type t)))
-      (aset types t d))
-    d))
+  :imports [[fmt "fmt"] [reflect "reflect"] [strconv "strconv"] [sync "sync"] [unsafe "unsafe"] [jrt "arbace/jrt"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; Helpers
@@ -236,3 +217,270 @@ its values, the map.\n"
 (go/func GoInterp_Complex0_D_D__O_native "GoInterp_Complex0_D_D__O_native is complex(re, im), a Go value.\n"
   ^any [^float64 re ^float64 im]
   (complex re im))
+
+;; ---------------------------------------------------------------------------------------
+;; GR3: the builder's op (§4.1, §4.11): a factory by name, its arguments adapted (registry.ae)
+
+(go/func GoInterp_Op0_String_O1__O_native
+  "GoInterp_Op0_String_O1__O_native makes what factory name makes of args (nodes, descriptors,
+codes, slots as Long, constants); a Go panic of a factory (not a Java exception) is an
+IllegalStateException naming it.\n"
+  ^any [^{:tag (* jrt/String)} name ^{:tag (* jrt/RefArray)} args] :results [^any out]
+  (let [n (gostr name)
+        f (aget ops n)]
+    (when (== f nil)
+      (panic (jrt/IllegalArgumentException_New_String (jrt/Str (+ "goi: no factory " n)))))
+    (defer ((fn []
+              (let [p (recover)]
+                (when (!= p nil)
+                  (let [(values t ok) (assert jrt/Throwable_I p)]
+                    (when ok
+                      (panic t)))
+                  (panic (jrt/IllegalStateException_New_String (jrt/Str (fmt/Sprintf "goi: %s: %v" n p)))))))))
+    (let [as (make (slice any) 0)]
+      (when (!= args nil)
+        (set! as (.-A args)))
+      (return (javaResult (f as))))))
+
+(go/func javaResult "javaResult is a factory's result as Arbace takes it: Go's scalars and strings as Java objects.\n"
+  ^any [^any x]
+  (type-switch [v x]
+    (case [int] (return (jrt/Box (conv int64 v))))
+    (case [int64] (return (jrt/Box v)))
+    (case [int32] (return (jrt/Box v)))
+    (case [bool] (return (jrt/Box v)))
+    (case [string] (return (jrt/Str v))))
+  x)
+
+(go/func argInt "argInt is an Arbace integer (Long ...) as int64.\n" ^int64 [^any x]
+  (let [(values n ok) (intOf x)]
+    (when ok
+      (return n)))
+  (type-switch [v x]
+    (case [int64] (return v))
+    (case [int32] (return (conv int64 v)))
+    (case [int] (return (conv int64 v)))
+    (case [nil] (return 0)))
+  (panic (jrt/IllegalArgumentException_New_String (jrt/Str (fmt/Sprintf "goi: not an integer: %s" (arbaceType x))))))
+
+(go/func argBool ^bool [^any x]
+  (type-switch [v x]
+    (case [(* jrt/Boolean)] (return (.-F_value v)))
+    (case [bool] (return v)))
+  false)
+
+(go/func argStr ^string [^any x]
+  (type-switch [v x]
+    (case [(* jrt/String)] (return (.String v)))
+    (case [string] (return v)))
+  "")
+
+(go/func argFloat ^float64 [^any x]
+  (type-switch [v x]
+    (case [(* jrt/Double)] (return (.-F_value v)))
+    (case [(* jrt/Float)] (return (conv float64 (.-F_value v))))
+    (case [float64] (return v)))
+  (conv float64 (argInt x)))
+
+(go/func argAny "argAny is an argument passed as it is (a node, a Go value).\n" ^any [^any x] x)
+
+(go/func argSlice ^{:tag (slice any)} [^any x]
+  (when (== x nil)
+    (return nil))
+  (let [(values a ok) (assert (* jrt/RefArray) x)]
+    (when ok
+      (return (.-A a))))
+  (assert (slice any) x))
+
+(go/func argSliceOf :type-params [X] ^{:tag (slice X)} [^any x]
+  (let [xs (argSlice x)
+        out (make (slice X) (len xs))]
+    (range [i v xs]
+      (aset out i ((inst As X) v)))
+    out))
+
+(go/func argBytes "argBytes is a Java byte array's bytes as a Go string.\n" ^string [^any x]
+  (let [b (assert (* jrt/ByteArray) x)
+        n (len (.-A b))
+        out (make (slice byte) n)]
+    (range [i v (.-A b)]
+      (aset out i (conv byte v)))
+    (conv string out)))
+
+(go/func argInt32s ^{:tag (slice int32)} [^any x]
+  (let [xs (argSlice x)
+        out (make (slice int32) (len xs))]
+    (range [i v xs] (aset out i (conv int32 (argInt v))))
+    out))
+
+(go/func argCtls ^{:tag (slice Ctl)} [^any x]
+  (let [xs (argSlice x)
+        out (make (slice Ctl) (len xs))]
+    (range [i v xs] (aset out i (conv Ctl (argInt v))))
+    out))
+
+(go/func argInts ^{:tag (slice int)} [^any x]
+  (let [xs (argSlice x)
+        out (make (slice int) (len xs))]
+    (range [i v xs] (aset out i (conv int (argInt v))))
+    out))
+
+(go/func argUintptrs ^{:tag (slice uintptr)} [^any x]
+  (let [xs (argSlice x)
+        out (make (slice uintptr) (len xs))]
+    (range [i v xs] (aset out i (conv uintptr (argInt v))))
+    out))
+
+(go/func argStrings ^{:tag (slice string)} [^any x]
+  (let [xs (argSlice x)
+        out (make (slice string) (len xs))]
+    (range [i v xs] (aset out i (argStr v)))
+    out))
+
+(go/func argBools ^{:tag (slice bool)} [^any x]
+  (let [xs (argSlice x)
+        out (make (slice bool) (len xs))]
+    (range [i v xs] (aset out i (argBool v)))
+    out))
+
+;; What the builder asks of the table (§6, §7.4)
+
+(go/var ^{:tag sync/Mutex} membersMu)
+
+(go/var ^{:tag (map string Member) :doc "memberIndex is the table's functions, methods (T.M) and variables by path and name.\n"}
+  memberIndex)
+
+(go/func member "member is listed package path's member name (a function, a method T.M, a variable), or false.\n"
+  [^string path ^string name] :results [^Member m ^bool ok]
+  (.Lock membersMu)
+  (defer (.Unlock membersMu))
+  (when (== memberIndex nil)
+    (set! memberIndex (make (map string Member)))
+    (range [p pk packages]
+      (range [_ x (.-Funcs pk)] (aset memberIndex (+ p " " (.-Name x)) x))
+      (range [_ x (.-Methods pk)] (aset memberIndex (+ p " " (.-Name x)) x))
+      (range [_ x (.-Vars pk)] (aset memberIndex (+ p " " (.-Name x)) x))))
+  (set! (values m ok) (aget memberIndex (+ path " " name)))
+  (return))
+
+(go/func MemberValue "MemberValue is listed member path.name's value (a func, a method expression, a variable's address), or nil.\n"
+  ^any [^string path ^string name]
+  (let [(values m ok) (member path name)]
+    (when (not ok)
+      (return nil))
+    (.-Value m)))
+
+(go/func TCompiled "TCompiled is the descriptor of listed package path's named type name.\n" ^{:tag (* Type)} [^string path ^string name]
+  (let [p (Lookup path)]
+    (when (!= p nil)
+      (range [_ t (.-Types p)]
+        (when (== (.-Name t) name)
+          (return (TypeOf (.-Type t)))))))
+  (panic (jrt/IllegalArgumentException_New_String
+           (jrt/Str (fmt/Sprintf "not supported by goi yet: the type %s.%s is not in the table of compiled packages (GR5)" path name)))))
+
+(go/func VarP "VarP is the place of listed package path's variable name.\n" ^P [^string path ^string name]
+  (let [v (MemberValue path name)]
+    (when (== v nil)
+      (panic (jrt/IllegalArgumentException_New_String (jrt/Str (fmt/Sprintf "goi: no variable %s.%s in the table" path name)))))
+    (GlobalP (efaceData v))))
+
+(go/func CallCompiled
+  "CallCompiled is the call node of listed function or method path.name (§7.4): its typed invoker
+over the argument nodes args (a method's receiver first; the variadic parameter's slice last)
+and result slots rs; without one, reflect.Value.Call.\n"
+  ^any [^string path ^string name ^{:tag (slice any)} args ^{:tag (slice int32)} rs]
+  (let [(values m ok) (member path name)]
+    (when (not ok)
+      (panic (jrt/IllegalArgumentException_New_String
+               (jrt/Str (fmt/Sprintf "not supported by goi yet: %s.%s is not in the table of compiled packages (GR5)" path name)))))
+    (when (!= (.-Inv m) nil)
+      (return ((.-Inv m) (.-Value m) args rs)))
+    (CallCompiledValue (.-Value m) args rs)))
+
+(go/func CallCompiledValue
+  "CallCompiledValue is the call node of compiled func f by reflect.Value.Call: the arguments'
+nodes by the parameters' kinds, one result as a node of its kind, several written to slots rs.\n"
+  ^any [^any f ^{:tag (slice any)} args ^{:tag (slice int32)} rs]
+  (let [fv (reflect/ValueOf f)
+        ft (.Type fv)
+        n (.NumIn ft)
+        va (.IsVariadic ft)
+        cvs (make (slice (func [(* Frame)] [reflect/Value])) n)]
+    (for [i 0] (< i n) (inc! i)
+      (let [pt (.In ft i)
+            x (aget args i)]
+        (if (and va (== i (- n 1)))
+          (let [r (assert R x)]
+            (aset cvs i (fn ^{:tag reflect/Value} [^{:tag (* Frame)} fr] (reflect/ValueOf (r fr)))))
+          (switch (slotKindOf (.Kind pt))
+            (case [\I] (let [a (assert I x)] (aset cvs i (fn ^{:tag reflect/Value} [^{:tag (* Frame)} fr] (valueI pt (a fr))))))
+            (case [\F] (let [a (assert F x)] (aset cvs i (fn ^{:tag reflect/Value} [^{:tag (* Frame)} fr]
+                                                            (let [v (.Elem (reflect/New pt))] (.SetFloat v (a fr)) v)))))
+            (case [\S] (let [a (assert S x)] (aset cvs i (fn ^{:tag reflect/Value} [^{:tag (* Frame)} fr]
+                                                            (let [v (.Elem (reflect/New pt))] (.SetString v (a fr)) v)))))
+            (default (let [a (assert R x)
+                           d (TypeOf pt)]
+                       (aset cvs i (fn ^{:tag reflect/Value} [^{:tag (* Frame)} fr] (.valueOf d (a fr))))))))))
+    (let [call (fn ^{:tag (slice reflect/Value)} [^{:tag (* Frame)} fr]
+                 (let [in (make (slice reflect/Value) n)]
+                   (range [i c cvs] (aset in i (c fr)))
+                   (when va
+                     (return (.CallSlice fv in)))
+                   (.Call fv in)))
+          nout (.NumOut ft)]
+      (when (== nout 1)
+        (let [ot (.Out ft 0)]
+          (switch (slotKindOf (.Kind ot))
+            (case [\I] (return (conv I (fn ^int64 [^{:tag (* Frame)} fr] (intOfValue (aget (call fr) 0))))))
+            (case [\F] (return (conv F (fn ^float64 [^{:tag (* Frame)} fr] (.Float (aget (call fr) 0))))))
+            (case [\S] (return (conv S (fn ^string [^{:tag (* Frame)} fr] (.String (aget (call fr) 0)))))))
+          (let [d (TypeOf ot)]
+            (return (conv R (fn ^any [^{:tag (* Frame)} fr] (.fromValue d (aget (call fr) 0))))))))
+      (conv T (fn [^{:tag (* Frame)} fr]
+                (let [out (call fr)]
+                  (range [i v out]
+                    (setSlotValue fr (slotKindOf (.Kind (.Out ft i))) (aget rs i) (TypeOf (.Out ft i)) v))))))))
+
+(go/func MemR "MemR is x of type t as Go memory holds it (a closure given to compiled code as a Go func).\n" ^R [^R x ^{:tag (* Type)} t]
+  (fn ^any [^{:tag (* Frame)} fr] (toMem t (x fr))))
+
+(go/func FromMemR "FromMemR is compiled code's value x of type t as a frame holds it.\n" ^R [^R x ^{:tag (* Type)} t]
+  (fn ^any [^{:tag (* Frame)} fr] (fromMem t (x fr))))
+
+(go/func NewGlobal "NewGlobal is a new package variable of type t: its address (a cell, §4.3).\n" ^unsafe/Pointer [^{:tag (* Type)} t]
+  (.newCell t))
+
+(go/func GlobalPtr "GlobalPtr is variable p of type t as a typed pointer (a GoVar's cell).\n" ^any [^{:tag (* Type)} t ^unsafe/Pointer p]
+  (.ptrTo t p))
+
+(go/func FuncCell
+  "FuncCell is a new function cell named name of package pkg whose code builder (an Arbace fn, a
+jrt.Callable) makes on its first call (S18).\n"
+  ^{:tag (* Func)} [^string name ^string pkg ^any builder]
+  (let [f (NewFunc name pkg nil)]
+    (SetCode f nil builder)
+    f))
+
+(go/func SetCode
+  "SetCode gives function cell f code c (a *Code, or nil: built by builder, an Arbace fn) (G9).\n"
+  [^{:tag (* Func)} f ^any c ^any builder]
+  (let [^{:tag (func [] [(* Code)])} b nil]
+    (when (!= builder nil)
+      (let [cb (assert jrt/Callable builder)]
+        (set! b (fn ^{:tag (* Code)} [] ((inst As (* Code)) (.Call__O cb))))))
+    (.SetCode f ((inst As (* Code)) c) b)))
+
+(go/func CallInterp
+  "CallInterp is Arbace calling interpreted function f of type ft (§7.1) with Arbace's args:
+the outcome as call0's ([0 results...], [1 message type value], [2 status]).\n"
+  ^any [^{:tag (* Func)} f ^{:tag (* Type)} ft ^{:tag (slice any)} args ^string name]
+  (objects (guarded (fn ^{:tag (slice any)} [] (CallFunc f ft args name)))))
+
+(go/func InterpCallable "InterpCallable is interpreted function f of type ft as a Callable (a GoFn's handle).\n"
+  ^any [^{:tag (* Func)} f ^{:tag (* Type)} ft ^string name]
+  (addr (lit Callable :Name name :interp f :ft ft)))
+
+(go/func OpForTest "OpForTest is op for goi's Go tests (the factories by name, Go arguments).\n"
+  ^any [^string name ^{:tag (slice any)} args]
+  ((aget ops name) args))

@@ -2013,3 +2013,157 @@ exact, with GR2, as built (its tests' expected value corrected: `float32(0.1)` i
 `0.10000000149011612`). GC3 (a), now rather than later: the converter writes `(go/id "...")`
 for these names everywhere a bare symbol would read as a literal, the printer and the checker
 read it, and the checker accepts no literal there (above).
+
+## As built: GR3 (2026-10-18)
+
+GR3, the interpreter's core, is built on branch `goi-gr3` (from main `80294e9a`, seed `910b4b8f`).
+Where building it found otherwise than this text, the text below is the record; proposals for the
+user are GC15-GC18.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the macros | `arbace/go.ae` | `go/package`, `go/file`, `go/func`, `go/method`, `go/type`, `go/var`, `go/const`, `go/directive`, `go/import`, `go/eval`; the functions `run-main`, `check` (with GR1's `new`, `zero`, `str`, `spread`, `assign!`). Each macro hands its form, quoted, to `arbace.go.repl`, required on first use (`requiring-resolve`) |
+| the REPL's state | `arbace/go/repl.ae` (`arbace.go.repl`) | packages by import path (atoms: files, declarations, cells, generations), checking against the digest and the interpreted packages, `define!`, loading (§2.3), declaring at the REPL (§2.5), `go/eval`, `go/run-main`, `go/check` |
+| the builder | `arbace/go/build.ae` (`arbace.go.build`) | the checked tree to nodes: descriptors, slots, cells, jump codes, calls (§4.1) |
+| program mode | `arbace/go/run.ae` (`arbace.go.run`), `bin/goi run` | §2.7: checked, built eagerly, initialized, run; `goi: unsupported: ...` (status 125), `goi: error: ...` (126) |
+| the back end | `go/arbace/goi/{frame,func,stmt,expr,types}.ae` | threads and frames, functions and calls, closures, defer, panic, recover, the program's runner and gc's report; statements; expressions, builtins, conversions; descriptors, RT, loads and stores |
+| generated | `go/arbace/goi/{ops,registry}.ae` by `test/goi/gen_nodes.ae` | 387 operator factories (per operator and type: §4.2, S19); the registry of the 588 factories the builder calls by name |
+| the natives | `arbace/lang/GoInterp.ae` | GR1's and `op` (amendment 1) |
+| jrt | `go/arbace/jrt/thread.ae` | `Thread.Interp`, the goroutine's goi thread (S22) |
+| the core | `arbace/lang/RT.ae`, `arbace/core.ae`, `arbace/lang/Compiler.ae` | VENDOR-NOTES.md, hand change 27: the after-load hooks (S6), `toolSource` takes `arbace/go/`, S4's alias |
+| embedded | `arbace/j2g/embed.ae` | the checker, the builder, the REPL and the runner are embedded and compiled (c2j); the table's generator stays a tool of the build |
+| the check | `bin/goi check`, `test/goi/check-linux-amd64.edn`, `test/goi/check-known.edn`, `test/goi/essential.txt` | §11 (below) |
+| tests | `test/goi/run/go/t/*.ae` (10 programs and gc's outputs: `.out`, `.err`, `.exit`), `test/goi/repl.ae` (33 checks; its package in `test/goi/repl-pkgs/`) | in `bin/goi test` (`--gc`: the expected outputs are gc's run of the printed forms; `--regen`) and `bin/arbace-go --smoke` |
+| the gate | `bin/gate` | the essential gate runs `bin/goi check --essential` (GS12); `--full` adds `bin/goi test --gc` and `bin/goi check` on the gate's executable |
+
+**The check (§11, the GR3 exit criterion).** Over the 1,051 programs of `$GOROOT/test` whose action
+is `run` (repr/go's corpus `linux-test`; gc's references are the forms printed by repr/go, built
+by gc and run, cached in `.tmp/goi-check/ref/`), recorded in `test/goi/check-linux-amd64.edn`:
+
+| result | programs |
+|---|---:|
+| pass | 532 |
+| fail | 0 |
+| error | 0 |
+| known (`test/goi/check-known.edn`, each with its reason) | 24 |
+| unsupported: GR4's (methods, interface methods, type switches and assertions, goroutines, channels, select, method values and expressions, range over functions) | 280 |
+| unsupported: GR6's (generics: every declaration that uses them) | 164 |
+| unsupported: an import neither listed nor interpreted (syscall, regexp, testing, text/tabwriter, runtime/trace, math/big, maps, iter, html/template, runtime/pprof) | 29 |
+| unsupported: recursive types reflect cannot make (amendment 3) | 6 |
+| unsupported: a type the table does not hold (GR5's growth: `encoding/binary`'s unexported `bigEndian`, `hash.Hash` of an unlisted package) | 3 |
+| skipped: the action asks for gc's flags (as the round trip leaves them out) | 13 |
+
+So every program within GR3's subset passes or is known, and the rest is unsupported with its
+reason. The known differences are by design: `runtime.Caller`, `Callers` and `FuncForPC` name
+goi's nodes (12 programs), the collector's and the compiler's own behaviour (stack objects'
+liveness, finalizers: 3), an interpreter's speed beyond the check's 10 s (fib-like recursion of
+hundreds of millions of calls: 4), unsafe arithmetic over gc's layout (2), `reflect` seeing a
+proxy (§5.3: 1), programs that run the go command (2). The whole check takes 37 s with 16 jobs
+(gc's references cached; their first build about 4 minutes), the essential subset, 266 programs
+(the passing ones outside `fixedbugs/` and every third of `fixedbugs/`), 17 s with 8 jobs.
+
+**Measurements (GR3's criterion: within twice X2's sketch).** `test/goi/run/go/t/fib.ae`, run by
+`bin/goi run test/goi/run go.t.fib bench` (best of 5, amd64, the machine shared), through the real
+checker and builder:
+
+| | goi | X2's sketch | criterion | gc |
+|---|---:|---:|---:|---:|
+| fib 22 | 2.41-2.54 ms | 2.87 ms | 5.74 ms | 0.23 ms |
+| sumSq 1e6 | 19.1-20.2 ms | 22 ms | 44 ms | 0.33 ms |
+| sieve 1e6 | 66 ms | 55 ms (the survey's sketch) | | 2.6-2.9 ms |
+
+The call path: a static call loads the callee's code from its cell (S27), takes the next frame of
+the thread (frames are reused by depth) and its windows of the thread's stacks before the
+arguments are evaluated (amendment 2), and restores the stacks' tops after the body. The builder
+picks the variants of a local and a constant operand (`n - 1`, `n < 2` read the slot directly:
+`SubLK64`, `LtLKI`). A run of a small program costs about 0.5 s, mostly loading the checker and
+checking the digest's packages the program imports.
+
+**The executable (GS4, GS5).** 119,775,392 bytes before GR3 (main `80294e9a`), 129,949,856 after
+(+10,174,464, 8.5%): almost all of it the compiled checker, builder and REPL (c2j's Go of their 8,300
+lines of Arbace: GC15) and the back end; the table grows by 90,112 bytes to 3,575,808
+(`bin/goi table --size`: GR1's 3,485,696) with GR3's three packages (amendment 13), its invokers
+to 905,216.
+
+**Amendments (as built).**
+
+1. **The natives** (§4.11): one native, `GoInterp.op(name, args)`, makes every node, descriptor
+   and function by a factory's name (`registry.ae`), its arguments adapted (Longs, Strings,
+   Booleans, Doubles, byte and Object arrays, nodes as Go values); scalar results come back as
+   Java objects. The spec's `node`, `func`, `setCode`, `defineType`, `newVar`, `call` are factories
+   (`FuncCell`, `SetCode`, `TNamed`/`TSetUnder`, `NewGlobal`, `CallInterp` ...); an interpreted
+   function's `GoFn` is GR1's over a `Callable` that calls it (§7.1).
+2. **Frames** (§4.3): the thread keeps a frame per depth, reused; a call takes the next depth and
+   its windows (only of the kinds the callee uses) before evaluating the arguments, so that calls
+   in them take frames above it, and restores the thread's depth and tops after a normal return
+   (a panic leaves them; the frame that recovers restores its own). The depth limit is checked
+   only when the frames grow. `Frame.Line` is not kept yet (traces' lines are GR5's).
+3. **Two representations** (§5.1, §5.2): a value is held as Go memory holds it, but for two kinds
+   of types: a function type, whose frame value may be an interpreted closure (in Go memory a
+   `reflect.MakeFunc` adapter of its type, made once and mapped back to the closure: GR5's typed
+   adapters come later), and a pointer to a recursive named type, erased in Go memory to an
+   `unsafe.Pointer` inside composites and variables (reflect has no recursive types: `type node
+   struct{v int; next *node}` and `[]*node` work, their %v gc's). Recursion through a slice, an
+   array, a map or a function (`type F func() F`, `type S []S`) and recursive named pointer types
+   are unsupported.
+4. **Calls of several results** write the caller's temporaries (S28); a deferred call (§4.7) runs
+   with a frame of its own holding its evaluated arguments and its temporaries.
+5. **Assignments** (§4.5): the places' pointer, slice and index operands are evaluated into
+   temporaries first, then the values, then each assignment with Go's nil and bounds checks
+   (`fixedbugs/issue23017.go`); a map element assigned by a range is assigned at each iteration.
+6. **Runtime errors** (§10.3) are made by the operation gc would make wherever goi can: bounds
+   by indexing and slicing a slice of empty structs of the right length and capacity, nil
+   dereferences by a real one, division by Go's division at the type; `goi.RuntimeError` only for
+   `makeslice`, `makemap`, the conversion of a slice to an array and unsafe's builtins.
+7. **Program mode's report** (§10.7): gc's `printpanics` over goi's chain of replaced panics
+   (`[recovered]`, `[recovered, repanicked]`), the signal line of a nil dereference, then
+   `goroutine 1 [running]:` and the interpreted frames' names. `print` and `println` are Go's own
+   builtins at the operand's kind (S24).
+8. **Interfaces** (§5.3, GR3's part): an interface's content is the value of its Go type, or a
+   `goi.Proxy` (its descriptor and value, `fmt.Formatter` delegating to the value) for a named type
+   without an RT of its own; no method calls on interfaces (GR4). Methods of compiled types are
+   called through the table's method expressions (§7.4), the receiver an R (its address for a
+   pointer method on an addressable value).
+9. **The REPL** (§2.5): a declaration checks the whole package with it in place of its names'
+   earlier declarations; its own errors reject it, nothing changed; a dependent that no longer
+   checks keeps its definition, with a warning naming it (`goi: warning: ...`). A function keeps
+   its cell while its signature is the same, else gets a new one; every function's code is built
+   again on its next call. A variable defined again runs its initializer (S10, S11). Unused
+   imports are not errors at the REPL (GC16). Check errors are an `ExceptionInfo` with
+   `:go/errors` (data, §3.8), not a `CompilerException`; their file is the forms' source, `REPL`
+   for typed forms.
+10. **`go/eval`** (§2.4): the statements become `(go/func goi_evalN ^any [] ...)` in the package
+    (`:results [any ...]` for a call of several results, no result for a statement, looking
+    through `let` bodies), checked, built, called; the value goes to Arbace by its dynamic type.
+11. **The digest's constants** (§6.5, GR2's checker): a constant of the digest has its `:val` and
+    no init; the checker gives it its `:tag` (else the untyped kind its `:val`'s representation
+    says) and that value, trusted. Without it every constant of a listed package was invalid.
+12. **The checked tree's result** (§3.7): `check-package` with `:keep-trees` also returns the
+    declarations (`:decl-infos`: their forms, objects, trees, generics' marks), the initializers'
+    order (`:order`) and the `init` functions (`:inits`), which the REPL and the runner define from.
+13. **The listed set** (§6.6, GS5): `io/ioutil`, `log` and `math/rand`, which 28 programs of the
+    check imported (+90,112 bytes). The check's other missing imports are packages goi could only
+    interpret with GR4 (methods) or not at all (syscall, testing, runtime/trace).
+14. **Generics** (§9): a declaration that uses generics (a generic declaration, an instance, a
+    type parameter, `:inst`) is not built: its program is unsupported (GR6), as the annotation
+    check counts it apart (S53).
+
+**Proposals for the user** (each built as recommended):
+
+- **GC15 The checker in the program.** The REPL needs the checker (§3.1), which is about 6,000
+  lines of Arbace; compiled by c2j with the builder and the REPL it costs about 10 MB of the
+  executable. (a) as built, compiled into the program as the other embedded namespaces are; (b)
+  embedded as source and evaluated on first use (the executable smaller by most of that, the
+  first check of a session seconds slower). *Recommended: (a)*: a REPL whose first Go form takes
+  seconds is not the REPL the survey asked for; revisit with the program's size budget.
+- **GC16 Unused imports at the REPL.** (a) as built, not errors at the REPL (the REPL's file
+  collects imports for declarations still to come; package loads report them as gc does); (b)
+  gc's error everywhere. *Recommended: (a)*.
+- **GC17 The listed set's growth.** (a) as built, `io/ioutil`, `log` and `math/rand` (+90 KB),
+  asked for by the check; (b) GR1's 41 only. *Recommended: (a)*.
+- **GC18 The check in the essential gate.** (a) as built, the 266 programs of
+  `test/goi/essential.txt` (17 s with 8 jobs); (b) the whole check (37 s with 16 jobs, gc's
+  references cached); (c) `--full` only. *Recommended: (a)*, GS12's subset; (b) costs little more
+  and may replace it once GR4 grows the passing set.

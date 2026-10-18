@@ -1017,6 +1017,18 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `arbace.lang` (Arbace's, no upstream counterpart): `GoInterp.ae`'s classes `GoInterp`,
     `GoFn`, `GoVar`, `GoType`, `GoValue`, `GoPanic`, `GoExit`; and the namespace `arbace.go`
     (`arbace/go.ae`) with the table's generator `arbace.go.table` (`arbace/go/table.ae`).
+27. **goi's GR3: Go forms at the REPL** (2026-10-18; doc/go/GOI-SPEC.md §2.2, §2.3, S4, S6,
+    "As built: GR3"). `arbace/lang/RT.ae`: the after-load hooks, `AFTER_LOAD` (an atom of a
+    vector of fns of a resource's path and whether its load ended normally) and `afterLoad`;
+    `toolSource` takes `arbace/go/` too (goi's checker, builder and REPL loaded from
+    `ARBACE_PATH`'s checkout when it differs from the embedded source, as the tools are).
+    `arbace/core.ae`: `load` calls `RT/afterLoad` when the load of each path ends, normally or
+    not (in a `finally`); goi's REPL completes a Go package whose package file's load ended
+    there. `arbace/lang/Compiler.ae`: `namespaceFor` of a symbol qualified `go` in a namespace
+    named `go.*` that has no alias `go` requires `arbace.go` and aliases it `go` there (as
+    `classForms` loads `arbace.classes` on the first Java form). New in `arbace.go`: the macros
+    of Go forms (`go/package`, `go/file`, `go/func` ...); new namespaces `arbace.go.repl`,
+    `arbace.go.build`, `arbace.go.run` (`arbace/go/`).
 
 ## Dialect divergences
 
