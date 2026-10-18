@@ -1,0 +1,130 @@
+
+
+;; What the kernel measures of a process (doc/go/PROCESS-SPEC.md §10, the KU2 row: a process's start
+;; time and its memory; the survey §5.3), and RunSelf, this program run as a process of itself (the
+;; KU2 check: its output as a process against its output as a guest).
+(in-ns 'go.arbace.box.kernel) (go/file "stats.go" :build ["//go:build amd64"] :doc "What the kernel measures of a process (doc/go/PROCESS-SPEC.md §10, the KU2 row: a process's start\ntime and its memory; the survey §5.3), and RunSelf, this program run as a process of itself (the\nKU2 check: its output as a process against its output as a guest).\n" :imports [
+
+
+    ^{:line 9} [runtime "runtime"]
+    ^{:line 10} [strings "strings"]
+    ^{:line 11} [time "time"]
+
+    ^{:line 13} [abi "arbace/box/abi"]
+    ^{:line 14} [board "arbace/box/board"]])
+
+
+
+(go/type Stats "Stats is a process's run as the kernel saw it.\n" (struct
+
+
+    ^{:line 21 :tag time/Duration :doc "Load is New's time: the page tables built, the data image copied, the window allocated\n(LoadWindow, of it: a fresh window cleared whole by the kernel's runtime, or one used again).\n"} Load ^{:tag time/Duration :doc "Load is New's time: the page tables built, the data image copied, the window allocated\n(LoadWindow, of it: a fresh window cleared whole by the kernel's runtime, or one used again).\n"} LoadWindow
+
+
+    ^{:line 24 :tag time/Duration :doc "From the first entry: FirstCall the process's first call by block (its runtime's, at start),\nFirstIO its first call to the console (its main at work), Exit its ProcExit, Run the whole.\n"} FirstCall ^{:tag time/Duration :doc "From the first entry: FirstCall the process's first call by block (its runtime's, at start),\nFirstIO its first call to the console (its main at work), Exit its ProcExit, Run the whole.\n"} FirstIO ^{:tag time/Duration :doc "From the first entry: FirstCall the process's first call by block (its runtime's, at start),\nFirstIO its first call to the console (its main at work), Exit its ProcExit, Run the whole.\n"} Exit ^{:tag time/Duration :doc "From the first entry: FirstCall the process's first call by block (its runtime's, at start),\nFirstIO its first call to the console (its main at work), Exit its ProcExit, Run the whole.\n"} Run
+
+
+    ^{:line 27 :tag uint64 :doc "Crossings is how many times it left the CPU to the kernel (calls, settls' arch_prctl,\nfaults), Calls how many of them were calls by block.\n"} Crossings ^{:tag uint64 :doc "Crossings is how many times it left the CPU to the kernel (calls, settls' arch_prctl,\nfaults), Calls how many of them were calls by block.\n"} Calls))
+
+
+
+
+
+
+(go/type Memory "Memory is a process's memory, in 4 KiB pages, read from its page tables' accessed and dirty\nbits (the CPU's): Private its own pages it touched (data, bss, heap, stacks: its resident set),\nof them Dirty written; Shared the image's text and rodata pages it touched, the kernel's own\nphysical pages (§2.1); Tables its page tables' pages; Window and Data what it was given.\n" (struct
+    ^{:line 35 :tag int} Private ^int Dirty ^int Shared ^int Tables ^int Window ^int Data))
+
+
+
+
+^{:go/end 68} (go/method Memory "Memory reads the process's page tables (after its run, or during: the CPU sets the bits as it\ngoes).\n" ^Memory [^{:tag (* Proc)} p]
+  (let [m (lit Memory :Tables (len (.-pages (.-tables p))) :Window (/ (len (.-window p)) page) :Data (/ (len (.-data p)) page))
+      ^{:line 42} count ^{:go/end 45} (fn [^uint64 va] :results [^bool a ^bool d]
+        (let [e (.leaf (.-tables p) va)]
+          (return (!= (bit-and e ptA) 0) (!= (bit-and e ptD) 0))))]
+
+    (for [off (conv uint64 0)] (< off (conv uint64 (len (.-window p)))) (set! off + page)
+      (when [(values a d) (count (+ (conv uint64 (.-winVA p)) off))] a
+        (inc! (.-Private m))
+        (when d
+          (inc! (.-Dirty m)))))
+
+
+
+    (for [va (conv uint64 imageBase)] (< va (conv uint64 (.-imageEnd (.-b p)))) (set! va + page)
+      (let [(values a d) (count va)]
+        (switch
+          (case [(not a)])
+          (case [(>= va (conv uint64 (.-rwStart (.-b p))))]
+            (inc! (.-Private m))
+            (when d
+              (inc! (.-Dirty m))))
+
+          (default
+            (inc! (.-Shared m))))))
+
+
+    ^{:line 67} m))
+
+
+
+^{:go/end 71} (go/func KiB "KiB is n pages in KiB.\n" ^int [^int pages] (/ (* pages page) 1024))
+
+
+^{:go/end 83} (go/method Report "Report is the process's Stats and Memory as one line for a log.\n" ^string [^{:tag (* Proc)} p]
+  (let [us ^{:go/end 75} (fn ^string [^time/Duration d] (+ (itoa (conv uint64 (.Microseconds d))) "us"))
+      ^{:line 76} m (.Memory p)]
+    ^{:go/breaks [9 13 17 22 27]} (+ "load " (us (.-Load (.-Stats p))) " (window " (us (.-LoadWindow (.-Stats p))) ") first-call " (us (.-FirstCall (.-Stats p))) " first-io " (us (.-FirstIO (.-Stats p)))
+      " exit " (us (.-Exit (.-Stats p))) " run " (us (.-Run (.-Stats p)))
+      " crossings " (itoa (.-Crossings (.-Stats p))) " calls " (itoa (.-Calls (.-Stats p)))
+      " private " (itoa (conv uint64 (KiB (.-Private m)))) "KiB dirty " (itoa (conv uint64 (KiB (.-Dirty m)))) "KiB"
+      " shared " (itoa (conv uint64 (KiB (.-Shared m)))) "KiB tables " (itoa (conv uint64 (KiB (.-Tables m)))) "KiB"
+      " window " (itoa (conv uint64 (KiB (.-Window m)))) "KiB data " (itoa (conv uint64 (KiB (.-Data m)))) "KiB")))
+
+
+
+
+(go/const ^{:val "BOX_KERNEL" :doc "KernelEnv is the environment variable that makes a box program its own kernel (RunSelf): 1, or\nstats to report the process's Stats and Memory on the kernel's stderr after its run.\n"} KernelEnv "BOX_KERNEL")
+
+
+
+
+
+
+
+^{:go/end 125} (go/func RunSelf "RunSelf runs this program -- the kernel's own image (b1) -- as a process of itself with the\nkernel's command line and environment (but KernelEnv) and the box's console (Config.Console),\nand returns its exit code: what the program would have written and returned as the guest, now\nfrom ring 3 through the kernel's call handler (the KU2 check, §9). A fault ends it with the\nfault's report on stderr and the code 1 for the run's; with stats, the report's line follows.\nThe caller is the kernel (not board.Process()), on its boot goroutine.\n" ^int32 [^{:tag (slice string)} args ^{:tag (slice string)} env ^bool stats]
+  (runtime/LockOSThread)
+  (when [err (board/UserSetup)] (!= err nil)
+    (say (+ "kernel: " (.Error err) "\n"))
+    (return 1))
+
+  (let [^{:tag (slice string)} penv (zero (slice string))]
+    (range [_ e env]
+      (when (not (strings/HasPrefix e (+ KernelEnv "=")))
+        (set! penv (append penv e))))
+
+
+    (let [(values p err) (New (lit Config :Args args :Env penv :Console true))]
+      (when (!= err nil)
+        (say (+ "kernel: " (.Error err) "\n"))
+        (return 1))
+
+      (when [err (.Run p)] (!= err nil)
+        (say (+ "kernel: " (.Error err) "\n"))
+        (return 1))
+
+      (let [code (.-ExitCode p)]
+        (when (!= (.-Fault p) nil)
+          (say (+ "kernel: " (.Error (.-Fault p)) "\n"))
+          (set! code 1))
+
+        (when stats
+          (say (+ "kernel: process " (.Report p) "\n")))
+
+        ^{:line 124} code))))
+
+
+
+^{:go/end 131} (go/func say "say is a line on the kernel's own stderr (abi.Message), a process's console aside.\n" [^string s]
+  (let [b (conv (slice byte) s)]
+    (board/Call abi/Message (board/Addr b) (conv int64 (len b)) 1 0 0)))

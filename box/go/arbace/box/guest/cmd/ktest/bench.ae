@@ -1,0 +1,97 @@
+
+
+(in-ns 'go.arbace.box.guest.cmd.ktest) (go/file "bench.go" :build ["//go:build amd64"] :imports [
+
+
+    ^{:line 6} [time "time"]
+    ^{:line 7} [unsafe "unsafe"]
+
+    ^{:line 9} [abi "arbace/box/abi"]
+    ^{:line 10} [board "arbace/box/board"]
+    ^{:line 11} [kernel "arbace/box/kernel"]])
+
+
+
+
+
+
+^{:go/end 55} (go/func bench "bench is the kernel's side of KU2's measurements (doc/go/PROCESS-SPEC.md, \"As built: KU2\"; KS13):\na doorbell call of the kernel's own for scale, then a process that times its crossings (the\nmeasuring SYSCALL entry on, board.BenchEntry), then processes started one after another, the\nfirst with a fresh window and the rest with one used again (kernel.Proc.Free). A line each.\n" []
+  (let [^:const ^{:val 2000} n 2000
+      ^{:line 20} best (conv int64 (<< 1 62))]
+    (for [r 0] (< r 5) (inc! r)
+      (let [t (time/Now)]
+        (for [i 0] (< i n) (inc! i)
+          (board/Call abi/CPUSelf 0 0 0 0 0))
+
+        (set! best (min best (conv int64 (time/Since t))))))
+
+    (println "bench: PCIDs" (board/PCIDs))
+    (println "bench: kernel doorbell call (CPUSelf, a VM exit)" (tenths best n) "ns")
+
+    (board/BenchEntry true)
+    (let [p (run "crossings")]
+      (board/BenchEntry false)
+      (when (or (== p nil) (not (.-Exited p)) (!= (.-Fault p) nil))
+        (println "bench: crossings FAIL" (detailOf p) (faultOf p))
+        (board/Exit 1))
+
+      (print (conv string (.-Output p)))
+      (.Free p)
+
+      (for [i 0] (< i 6) (inc! i)
+        (let [(values p err) (kernel/NewProc (lit (slice string) "ktest" "write") 0)]
+          (when (!= err nil)
+            (println "bench: NewProc:" (.Error err))
+            (board/Exit 1))
+
+          (when [err (.Run p)] (or (!= err nil) (!= (.-ExitCode p) 7))
+            (println "bench: start FAIL" (detailOf p))
+            (board/Exit 1))
+
+          (println "bench: start" i (.Report p))
+          (.Free p)))
+
+      (println "bench: done"))))
+
+
+
+
+(go/var ^{:tag (array (* 2 abi/BlockSize) byte) :doc "benchBlock is a call block for the whole call as the kernel serves it (crossings): Yield with no\nwait, which the kernel answers at once, in the process's own data.\n"} benchBlock)
+
+
+^{:go/end 92} (go/func crossings "crossings is the process's side (ring 3): n SYSCALLs of each kind, best of five, as ns per call.\n" []
+  (let [^:const ^{:val 100000} n 100000
+      ^{:line 64} blk (bit-and-not (- (+ (conv uintptr (conv unsafe/Pointer (addr (aget benchBlock 0)))) abi/BlockSize) 1) (- abi/BlockSize 1))]
+    (set! @(conv (* uint64) (conv unsafe/Pointer (+ blk abi/BlockNr))) abi/Yield)
+    (range [_ c (lit (slice (struct
+              ^{:line 67 :tag string} what
+              ^{:line 68 :tag uint64} ax
+              ^{:line 69 :tag int} n))
+
+          (lit _ "bare SYSCALL+SYSRETQ" board/BenchBare n)
+          (lit _ "SYSCALL, CR3 to the kernel's and back (TLB kept), SYSRETQ" board/BenchCR3 n)
+          (lit _ "SYSCALL, CR3 to the kernel's and back (the process's TLB flushed), SYSRETQ" board/BenchCR3Flush n)
+          (lit _ "SYSCALL, CR3, the FPU states and the FS base as built (no Go), SYSRETQ" board/BenchState n)
+          (lit _ "a call served as built (Yield: the entry, CR3, FPU, FS, Go's Run loop, the block)" (conv uint64 blk) (/ n 10)))]
+
+      (let [best (conv int64 (<< 1 62))]
+        (for [r 0] (< r 5) (inc! r)
+          (set! best (min best (board/BenchCalls (.-ax c) (.-n c)))))
+
+        (println "bench: crossing" (.-what c) (tenths best (conv int64 (.-n c))) "ns")))
+
+    (let [best (conv int64 (<< 1 62))]
+      (for [r 0] (< r 5) (inc! r)
+        (let [t (board/Ticks)]
+          (for [i 0] (< i (/ n 10)) (inc! i)
+            (board/Call abi/Yield 0 0 0 0 0))
+
+          (set! best (min best (conv int64 (/ (* (- (board/Ticks) t) 1000000) (board/TickKHz)))))))
+
+      (println "bench: crossing board.Call(Yield) from Go, served as built" (tenths best (/ n 10)) "ns"))))
+
+
+
+^{:go/end 98} (go/func tenths "tenths is total/n with one decimal, as text.\n" ^string [^int64 total ^int64 n]
+  (let [v (/ (* total 10) n)]
+    (+ (itoa (conv int (/ v 10))) "." (itoa (conv int (% v 10))))))

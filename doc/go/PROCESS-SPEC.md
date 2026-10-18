@@ -37,7 +37,8 @@ Words used throughout:
   to the kernel what a tool guest is to the monitor ([BOX-NOTES.md](BOX-NOTES.md), S7): untrusted,
   budgeted, ended on a fault, reachable only through a narrow ABI.
 - **the user board** (`arbace/box/uboard`): the TamaGo board a process runs on, the counterpart of
-  `arbace/box/board` for a guest. It answers the runtime's goos hooks (§3.4) by system calls
+  `arbace/box/board` for a guest. As built (KU1, KU2): not a package of its own but the process
+  mode of `arbace/box/board`, one two-mode board (the goos hooks link once per image). It answers the runtime's goos hooks (§3.4) by system calls
   instead of the doorbell, without patching Go's runtime (S1).
 - **a crossing**: a transition between levels — a process's system call (ring 3 → 0 or EL0 → EL1
   and back) or a fault taken into the kernel. Measured in Appendix A: 24-31 ns for SYSCALL+SYSRET,
@@ -350,7 +351,7 @@ Linux calls (S1, §3.4). Four points of care, all in the board, none in the runt
 
 ### 3.4 The user board's hooks
 
-`arbace/box/uboard` implements the goos hooks for a process (the survey §4.2's "the whole board a
+`arbace/box/uboard` (as built: `arbace/box/board` in its process mode, KU1, KU2) implements the goos hooks for a process (the survey §4.2's "the whole board a
 TamaGo runtime needs at ring 3"):
 
 | hook | a guest (`board`) | a process (`uboard`) |
@@ -684,7 +685,7 @@ KU6 changes the board's interrupt policy (§7.2).
 | milestone | content | exit criteria | effort (days) |
 |---|---|---|---:|
 | **KU1** amd64 mechanics | in a kernel test guest (`box/guest/cmd/`): per-process page tables (text/rodata shared, data/bss/heap/stacks private, the kernel's mappings EL1-only, §2.1, §2.2); GDT/TSS/MSRs, the SYSCALL entry and `IRETQ`/`SYSRETQ` (§3.2); the context and `Exec` (§3.1); a page fault and a nil dereference at ring 3 (§8); a CR3 switch between two processes of one image | the test on /dev/kvm: a SYSCALL served (a `Write`), a page fault ends the process, a nil → the process's panic, two processes with distinct data; no change to the monitor | 2-3 |
-| **KU2** the user board, a process | `arbace/box/uboard` (the goos hooks as SYSCALL/SVC, `whim_uentry`, §3.3, §3.4); the kernel's call handler for a process (validate, policy, forward, §4); the console/stdio handles (§5.3); the demo guest built on the user board and run as a process inside a kernel test guest | the demo's output as a process **equal byte for byte** to its output as a guest; a process's start time and RSS measured (the survey §5.3) | 2-3 |
+| **KU2** the user board, a process | `arbace/box/uboard` (as built: the board's process mode) (the goos hooks as SYSCALL/SVC, `whim_uentry`, §3.3, §3.4); the kernel's call handler for a process (validate, policy, forward, §4); the console/stdio handles (§5.3); the demo guest built on the user board and run as a process inside a kernel test guest | the demo's output as a process **equal byte for byte** to its output as a guest; a process's start time and RSS measured (the survey §5.3) | 2-3 |
 | **KU3** arm64 | the same on arm64: lower-EL vectors, `ERET`, SP_EL0 handling, CNTKCTL (EL0VCTEN), PAN, AP (§2.3, §3.6); the ring-3 experiment ported to arm64 (K10) | the emulated VM's KVM/arm64 and the Mac bundle's checklist: the demo as a process equal to as a guest; the port confirms HVF gives EL0 | 2-3 |
 | **KU4** the process manager and tools | the kernel's process manager (load, spawn, wait, kill, §6); the handle table and store view (§5.2); S7's tool images as processes; `arbace.box/spawn`'s `:where` (§6.4) | `bin/box-tools`' actions as processes byte for byte as guests; the in-box rebuild with processes; a spawn check in `bin/box-smoke` | 3-5 |
 | **KU5** SMP processes | `Task`/`Park`/`Wake` as calls, vCPUs per process (§7.1) | a multi-vCPU guest test (`TestGoGuestSMP`) as a process gives the same result | 3-5 |
@@ -767,6 +768,135 @@ the TLB, and the measured cost is small; the KU2 numbers decide whether it matte
 built); (b) a KPTI-like split or a per-process kernel alias at distinct addresses, to let a
 same-process call avoid the CR3 write, at the cost of a second set of kernel mappings. Recommend (a),
 revisit at KU2 with the numbers.
+
+### As built: KU2 (2026-10-17)
+
+KU2 is done, on amd64, on /dev/kvm. The KU2 row's exit criteria are met: **the demo guest's own
+image, run as a process under a kernel, gives byte for byte what it gives as a guest**, and a
+process's start time and memory are measured (below). The work is in `box/` only; no runtime patch,
+no change to the monitor (S1, S2, S31).
+
+What was built:
+
+- **The user board** is the board's process mode (KU1's departure, followed: the goos hooks link
+  once per image, so `arbace/box/uboard` is not a package; §2.5, §3.4 read "the board in its process
+  mode"). KU2 completes §3.4's table: every call is a SYSCALL to the kernel when a process (KU1's
+  `doorbell`); `Exit` is now `ProcExit` (§4.2) and `Idle` is `Yield` — to near the deadline, then a
+  spin, as a guest's park (`board.idleProcess`); `Printk` stays `Message`, which is the box ABI's
+  stderr (§3.4's "`Write` on handle 2": the box's console calls carry no handle, so stderr is
+  `Message`'s stream and stdout `Write`'s); `Nanotime` reads the TSC at ring 3; `Task`/`Wake`/`ProcID`
+  are the same calls (KU5 gives them meaning).
+- **The call handler** (`box/go/arbace/box/kernel/calls.ae`, §4.3's five steps): the block read
+  through the kernel alias, which must lie in the process's RAM and be aligned; every buffer a call
+  names checked against the process's RAM (the window or its private data); the policy applied
+  (`kernel.Config`); the call answered by the kernel or **forwarded to the monitor as the kernel's
+  own call with the buffers' addresses translated to the kernel alias** — the monitor reads and
+  writes the process's pages in place, no copy — and the answer copied back (ret, the event, the
+  out-arguments but the buffers' addresses). The event is copied too, so a deadly signal the monitor
+  catches during a forwarded wait reaches the process's own deathtrap. Served: `NilHandler`,
+  `ProcExit`/`Exit`, `Yield` and a process's `CPUPark` (the kernel goroutine sleeps), `SetFSBase`,
+  settls' `arch_prctl`, `CPUSelf`/`CPUWake` (one vCPU, the process's 0), `CPUStart` refused (-1:
+  no such vCPU until KU5). Forwarded: `Random`, `NowMs`, `Time`, and the console's calls under the
+  console grant. Refused by policy (S26): the store (`StoreRefused`), the network (-1, "no
+  network"), `EventArea` (-1), the spawns (`SpawnRefused`) — KU4 grants them. Ending the process
+  (S25): a block or buffer outside its RAM, an empty `WaitRead` buffer, `Fault`, `Alloc`, `Free`,
+  any number neither the guest's nor a process's. A zero-length buffer is forwarded pointing at a
+  kernel byte, so no process can make the monitor fault the kernel.
+- **The console and stdio** (§5.3, KS10): stdout (`Write`) and stderr (`Message`) are always captured,
+  bounded, into `Proc.Output`; with `Config.Console` they are also the kernel's own (forwarded), stdin
+  is the box's (`WaitRead`, `ReadInput`, `WaitForInput` forwarded), and the terminal's calls
+  (`HostInit`, `Suspend`, the tty's, `Raise`, `Delay`) are made on the process's behalf. Without the
+  grant stdin is at its end, `Delay` is the kernel's sleep, and the terminal's calls answer 0
+  (refused). This refines §4.2's list of numbers a process "may not use" (KS14 below).
+- **The kernel** also: `kernel.New(Config)` (args *and* environment written as the monitor writes a
+  guest's; the RAM window `Config.RAM`, default 64 MiB); the image's page-by-page region generalised
+  from one 2 MiB block to all the image's blocks (the demo with the kernel linked in reaches
+  `0x3fdc50`, and the box's program is ~100 MB, KU4); the window mapped a leaf table per 2 MiB in one
+  go; **the PCID kept after a process's first entry** (KU1 flushed the process's TLB entries on every
+  entry: its CR3 never had bit 63; now the first entry flushes, the later ones keep); `Proc.Free`
+  and a pool of windows (below); `Proc.Stats` and `Proc.Memory` (the start and the resident set from
+  the page tables' accessed and dirty bits); `kernel.RunSelf`, a program run as a process of itself.
+- **The check** (`TestKernelKU2`, `box/guest/ku2_test.ae`, in `bin/box-vendor kvm-tests`): the demo
+  guest (`box/guest/cmd/demo`) is its own kernel when booted with `BOX_KERNEL=1` in its environment
+  (`cmd/demo/kernel_amd64.ae`; on arm64 the guest as always): it runs itself as a process with the
+  same command line and the console grant. On the same host with the same script, as a guest and as a
+  process, five sessions — `TestGoGuest`'s (`demo work hello`), `TestGoGuestSMP`'s keys on one vCPU,
+  and `TestReadAheadGo`'s three (keys read ahead across a suspension, a pending SIGWINCH, a deadly
+  signal during the merged wait) — give **the same bytes, the same exit code and the same host log**
+  (the reads, the suspension, the signal). This is stronger than §9's letter ("built on the user
+  board and run as a process inside a kernel test guest"): the image is the demo's own, not the demo
+  linked into ktest, and the comparison includes the console's input side and a signal's event.
+  `ktest bench` (`box/guest/cmd/ktest/bench.ae`, `TestKernelKU2Crossings`) and
+  `TestKernelKU2Measure` make the measurements; `board.BenchEntry` installs a measuring SYSCALL
+  entry for them (dead code in every other image). `guest.TestImages` leaves the amd64-only ktest out
+  for arm64 (since KU1 it failed to build there).
+
+Measurements (TamaGo go1.27.1, amd64, a guest on /dev/kvm, the machine shared; PCIDs on; best of
+five runs of 100,000 crossings; ns per round trip from ring 3):
+
+| crossing | ns |
+|---|---:|
+| bare SYSCALL+SYSRETQ | 24-32 |
+| SYSCALL, CR3 to the kernel's and back (TLB kept, PCIDs), SYSRETQ | 143-173 |
+| the same with the process's TLB entries flushed (KU1's every entry) | 228-266 |
+| SYSCALL, CR3, both FPU states swapped (FXSAVE64/FXRSTOR64 each way), the FS base, SYSRETQ: all the crossing's machine state as built, no Go | 385 |
+| a call served as built (block address in RAX: the entry, CR3, FPU, FS, `Run`'s loop, the block decoded and answered) | 444-575 |
+| the same through `board.Call(abi.Yield)` from Go | 510-646 |
+| for scale: the kernel's own doorbell call (`CPUSelf`, a VM exit) | 16,400-21,400 |
+
+So a call back to the same process costs about 0.45 µs as built, of which the two CR3 writes are
+about 120 ns (~27%) and the FPU swap about 240 ns (~55%); the Go side (entersyscall/exitsyscall, the
+loop, the decode) is about 60 ns. A call the kernel forwards adds a VM exit, 16-21 µs, 35-45 times a
+served call.
+
+A process's start (the ktest "write" process: prints a line and exits; and the demo):
+
+| | fresh window | window used again (`Free`) |
+|---|---:|---:|
+| `New` (tables, the data copy, the window) | 17-72 ms (of it the window: all but 0.3 ms) | 0.09-0.15 ms |
+| from the first entry to its first call (its runtime's start) | 0.4-0.7 ms | 0.2-0.6 ms |
+| to its main's first console call (the demo's `HostInit`) | 1.4-2.3 ms | — |
+| to its exit (the trivial process) | — | 0.7-1.9 ms |
+| the demo guest, for comparison: `vmm.Run` to main's first call (a VM made, the image loaded, the runtime started) | 10-40 ms | |
+
+The fresh window's cost is TamaGo's `sbrk`, which clears the memory its heap grows into: the
+kernel's runtime clears the 64 MiB window it allocates (and the host commits every page of it) before
+the process runs. A window freed by an ended process is cleared of only the pages its tables say it
+wrote (dirty bits) and those the kernel handed out as buffers, and used again: then a process starts
+in about 0.1 ms plus its runtime's start, **about a millisecond to a trivial exit**, against a
+guest's 10-40 ms to main (§6.3's estimate holds once the window is reused).
+
+A process's memory (its tables' accessed and dirty bits, 4 KiB pages): private resident 12.4 MB
+(dirty 12.4 MB) of a 64 MiB window — the process's runtime clears what its heap grows into, so its
+initial arenas are resident at once — plus 0.4 MB of private data+bss, 160 KiB of page tables, and
+0.5-0.9 MB of shared text/rodata touched (the kernel's own pages). The same for the trivial process
+and the demo (whose `work` allocates little). Host side, the demo run added 17-18 MB of RSS as a guest
+and 88 MB as a process (the kernel's 64 MiB fresh window, cleared whole, plus its own heap); with a
+window used again the process's own share is its 12.4 MB.
+
+Deviations from the spec's letter, each sound: the user board is the board's process mode (above);
+§3.4's stderr is `Message`, not `Write` on a handle 2; the demo is its own kernel (`BOX_KERNEL`)
+rather than run inside ktest, which makes the check stronger; the terminal's calls are allowed under
+the console grant (KS14); a process's SMP calls on one vCPU are served (`CPUSelf` 0, `CPUPark` as
+`Yield`) rather than refused, being "the same calls, one level down" (§3.4).
+
+**KS13, decided again with the numbers.** The CR3 written on every crossing costs about 120 ns of a
+0.45 µs served call (with PCIDs kept, which KU2 fixed; KU1's per-entry flush cost another 85-95 ns)
+and nothing measurable next to a forwarded call (16-21 µs). The larger share is the FPU swap (~240
+ns): Go's ABI makes the vector registers caller-saved at the kernel's `enterUser` call and at the
+process's `doorbell`, so a SYSCALL crossing could restore only MXCSR and the x87 control word,
+keeping the full save for faults (and KU6's preemption) — the next lever if crossings ever matter
+(an estimated 0.45 → ~0.2 µs), before (b)'s second set of kernel mappings. *Recommended: keep (a).*
+
+New proposal for the user: **KS14 the console grant.** §4.2 lists `Suspend` and "the terminal calls
+that are the embedding host's" among the numbers a process may not use, while §5.3 and KS10 bridge a
+process's stdio to the box's console. Options: (a) a grant: a process given the console
+(`Config.Console`; for `arbace.box/spawn`, the REPL's foreground process at KU7) has its stdio and
+the terminal's calls (`HostInit`, `Suspend`, the tty's, `Raise`, `Delay`) made on its behalf; without
+it its stdout and stderr are only captured, its stdin is at its end, the terminal's calls answer 0
+(*recommended*, built: the demo as a process needs `HostInit` and `Suspend`, and a process with no
+grant is still isolated from the terminal); (b) never: the terminal's calls end the process, as §4.2
+says, and a process's console is only ever captured.
 
 ## 11. Decisions and open questions
 

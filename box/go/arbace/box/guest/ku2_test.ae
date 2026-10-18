@@ -1,0 +1,138 @@
+(in-ns 'go.arbace.box.guest) (go/file "ku2_test.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [fmt "fmt"]
+    ^{:line 6} [os "os"]
+    ^{:line 7} [runtime "runtime"]
+    ^{:line 8} [strconv "strconv"]
+    ^{:line 9} [strings "strings"]
+    ^{:line 10} [testing "testing"]
+    ^{:line 11} [time "time"]
+
+    ^{:line 13} [demo "arbace/box/guest/demo"]
+    ^{:line 14} [vmm "arbace/box/vmm"]])
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 68} (go/func TestKernelKU2 "TestKernelKU2 is the KU2 check (doc/go/PROCESS-SPEC.md §9, the KU2 row, \"As built: KU2\"): the\ndemo guest's own image, booted with BOX_KERNEL=1, is its own kernel and runs itself as a process\nat ring 3 -- every call of its board a SYSCALL its kernel validates and forwards to the monitor\n(cmd/demo's kernel_amd64.go, kernel.RunSelf). On the same host, with the same command line and\nthe same script, the run as a process gives byte for byte what the run as a guest gives: the\noutput, the exit code, and the host's log of what it was asked (the reads, the suspension, the\nsignals). The sessions are TestGoGuest's, TestGoGuestSMP's on one vCPU, and TestReadAheadGo's\nthree (a read ahead across a suspension, a pending SIGWINCH, a deadly signal during the merged\nwait: the event comes back through the kernel into the process's own deathtrap). amd64 only (K9).\n" [^{:tag (* testing/T)} t]
+  (when (!= runtime/GOARCH "amd64")
+    ^{:go/via [common]} (.Skip t "KU2 is amd64 only (arm64 is KU3)"))
+
+  (let [img (image t "demo")]
+    (let-type [session (struct
+          ^{:line 32 :tag string} name
+          ^{:line 33 :tag (slice string)} args
+          ^{:line 34 :tag (func [] [(* scripted)])} mk)]
+
+      (range [_ s (lit (slice session)
+            (lit _ "args" (lit (slice string) "demo" "work" "hello") ^{:go/end 37} (fn ^{:tag (* scripted)} [] (newScripted)))
+            (lit _ "smp-keys" (lit (slice string) "demo") ^{:go/end 38} (fn ^{:tag (* scripted)} [] (newScripted (spread smpKeys))))
+            (lit _ "suspend" (lit (slice string) "demo") ^{:go/end 39} (fn ^{:tag (* scripted)} [] (.gated (newScripted (spread aheadKeys)) 1 demo/Marker)))
+            (lit _ "winch" (lit (slice string) "demo") ^{:go/end 44} (fn ^{:tag (* scripted)} []
+                (let [s (.gated (newScripted (spread aheadKeys)) 1 demo/Marker)]
+                  (set! (.-winchAfter s) 1)
+                  ^{:line 43} s)))
+
+            (lit _ "term" (lit (slice string) "demo") ^{:go/end 49} (fn ^{:tag (* scripted)} []
+                (let [s (newScripted (spread aheadKeys))]
+                  (set! (.-deadAt s) 1)
+                  ^{:line 48} s))))]
+
+
+        (let [g ((.-mk s))
+            (values gcode err) (vmm/Run (lit vmm/Config :Image img :Host g :Args (.-args s) :Watchdog (* 30 time/Second)))]
+          (when (!= err nil)
+            ^{:go/via [common]} (.Fatalf t "%s as a guest: %v" (.-name s) err))
+
+          (let [p ((.-mk s))
+              (values pcode ^:assign err) (vmm/Run ^{:go/breaks [10]} (lit vmm/Config :Image img :Host p :Args (.-args s) :Env (lit (slice string) "BOX_KERNEL=1")
+                  :Watchdog (* 30 time/Second)))]
+            (when (!= err nil)
+              ^{:go/via [common]} (.Fatalf t "%s as a process: %v\n%s" (.-name s) err (.String ^{:go/via [recorder]} (.-out p))))
+
+            (when (or (!= pcode gcode) (not (bytes/Equal (.Bytes ^{:go/via [recorder]} (.-out p)) (.Bytes ^{:go/via [recorder]} (.-out g)))) (!= (fmt/Sprint (.-log p)) (fmt/Sprint (.-log g))))
+              ^{:go/via [common]} (.Fatalf t "%s: as a process exit %d, %q, log %v; as a guest exit %d, %q, log %v"
+                (.-name s) pcode (.String ^{:go/via [recorder]} (.-out p)) (.-log p) gcode (.String ^{:go/via [recorder]} (.-out g)) (.-log g)))
+
+            ^{:go/via [common]} (.Logf t "%s: exit %d, %d bytes, log %v: the same as a guest and as a process" (.-name s) gcode (.Len ^{:go/via [recorder]} (.-out g)) (.-log g))))))))
+
+
+
+
+
+
+(go/type timed "timed is a recorder that notes when the program's main first asks its host (its Init: the\ndemo's first call) and the host's resident memory then and at the exit (VmRSS, the test's\nwhole process: the guest's touched RAM is most of what it adds during a run).\n" (struct
+    ^{:line 74} recorder
+    ^{:line 75 :tag time/Time} start
+    ^{:line 76 :tag time/Duration} init
+    ^{:line 77 :tag int64} rssInit ^int64 rssEx))
+
+
+^{:go/end 85} (go/method Init [^{:tag (* timed)} h (func [int32])]
+  (when (== (.-init h) 0)
+    (set! (.-init h) (time/Since (.-start h)))
+    (set! (.-rssInit h) (vmRSS))))
+
+
+
+^{:go/end 90} (go/method Exit [^{:tag (* timed)} h ^int32 code]
+  (set! (.-rssEx h) (vmRSS))
+  (.Exit (.-recorder h) code))
+
+
+
+^{:go/end 105} (go/func vmRSS "vmRSS is this process's resident set in KiB (/proc/self/status), or -1.\n" ^int64 []
+  ^{:go/breaks [[4 104]]} (let [(values b err) (os/ReadFile "/proc/self/status")]
+    (when (!= err nil)
+      (return -1))
+
+    (range [_ l (strings/Split (conv string b) "\n")]
+      (when [f (strings/Fields l)] (and (>= (len f) 2) (== (aget f 0) "VmRSS:"))
+        (let [(values n _) (strconv/ParseInt (aget f 1) 10 64)]
+          (return n))))
+
+
+    -1))
+
+
+
+
+
+
+
+
+^{:go/end 143} (go/func TestKernelKU2Measure "TestKernelKU2Measure measures what the KU2 row asks (doc/go/PROCESS-SPEC.md §10, \"As built: KU2\";\nthe survey §5.3): a process's start and memory against a guest's, on TestGoGuest's session. The\nguest's from the host: the time from vmm.Run to the program's first call and the host's resident\nmemory it added; the process's from its kernel (BOX_KERNEL=stats: its load, its first call and\nfirst console call from its entry, the pages its tables say it touched), and from the host the\nsame as the guest's. It holds nothing but that both runs succeed; the figures are its log.\n" [^{:tag (* testing/T)} t]
+  (when (!= runtime/GOARCH "amd64")
+    ^{:go/via [common]} (.Skip t "KU2 is amd64 only (arm64 is KU3)"))
+
+  (let [img (image t "demo")
+      ^{:line 118} args (lit (slice string) "demo" "work" "hello")]
+    (for [round 0] (< round 3) (inc! round)
+      (range [_ env (lit (slice (slice string)) nil (lit _ "BOX_KERNEL=stats"))]
+        (runtime/GC)
+        (let [h (addr (lit timed))
+            ^{:line 123} base (vmRSS)]
+          (set! (.-start h) (time/Now))
+          (let [(values code err) (vmm/Run (lit vmm/Config :Image img :Host h :Args args :Env env :Watchdog (* 30 time/Second)))
+              ^{:line 126} total (time/Since (.-start h))]
+            (when (or (!= err nil) (!= code 3))
+              ^{:go/via [common]} (.Fatalf t "%v: exit %d, %v\n%s" env code err (.String ^{:go/via [recorder]} (.-out h))))
+
+            (let [what "guest"]
+              (when (!= env nil)
+                (set! what "process"))
+
+              ^{:go/via [common]} (.Logf t "round %d %s: host: main's first call %dus, run %dus, RSS added %d KiB at main, %d KiB at exit"
+                ^{:line 135} round what (.Microseconds (.-init h)) (.Microseconds total) (- (.-rssInit h) base) (- (.-rssEx h) base))
+              (range [_ l (strings/Split (.String ^{:go/via [recorder]} (.-out h)) "\n")]
+                (when (strings/HasPrefix l "kernel: process ")
+                  ^{:go/via [common]} (.Logf t "round %d %s: %s" round what l))))))))))
