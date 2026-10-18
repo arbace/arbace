@@ -424,22 +424,56 @@
             ;; local or anonymous classes, whose numbering is the nest's), the top-level ones
             ;; (holders, deftypes, loaders) after them; each task in an id space of its own
             ;; starting at the same value (RT.ID_SPACE: the gensyms that name temporaries depend
-            ;; on the class alone; standalone S6, SA143)
+            ;; on the class alone; standalone S6, SA143). The groups by height in the nest: the
+            ;; classes without member classes first, then each holder in the group after its
+            ;; members' highest, so that no task analyzes another's class: a member class that
+            ;; is a holder too (c2j's fn in a fn in a top-level form) was a task beside its own
+            ;; members, which it analyzed in place when it came first, in its id space and with
+            ;; their failure as its own, else found analyzed (2026-10-17, F2.2)
             tops? (fn [^String n] (not (str/includes? n "$")))
-            holder? (fn [n] (and (tops? n) (seq (:member-classes (a/decl n)))))
-            groups (vec (concat (for [n names2 :when (and (tops? n) (not (holder? n)))] [n])
-                                (for [n names2 :when (not (tops? n))] [n])))
-            top-groups (vec (for [n names2 :when (holder? n)] [n]))]
+            heights (atom {})
+            height (fn height [n]
+                     (or (get @heights n)
+                         (let [ms (keep #(when (a/decl %) %) (vals (:member-classes (a/decl n))))
+                               h (if (seq ms) (inc (apply max (map height ms))) 0)]
+                           (swap! heights assoc n h)
+                           h)))
+            levels (group-by height names2)
+            groups (vec (concat (for [n names2 :when (and (tops? n) (zero? (height n)))] [n])
+                                (for [n names2 :when (and (not (tops? n)) (zero? (height n)))] [n])))
+            top-groups (for [h (sort (remove zero? (keys levels)))]
+                         (vec (concat (for [n (get levels h) :when (not (tops? n))] [n])
+                                      (for [n (get levels h) :when (tops? n)] [n]))))]
+        ;; arbace.classes.native, which arbace.lang.Compiler loads on first use (classForms:
+        ;; a deftype* whose methods use Java forms), loaded before the tasks start, in an id
+        ;; space of its own: the tasks that first used it found it being loaded by another
+        ;; (its namespace there, compile-deftype not yet bound) or loaded it in their own id
+        ;; space (2026-10-17, F2.2)
+        (when (seq names2)
+          (let [^ThreadLocal space (id-space)
+                prev (some-> space .get)]
+            (some-> space (.set (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base))))
+            (try (require 'arbace.classes.native)
+                 (finally (when space (if prev (.set space prev) (.remove space)))))))
         (if-let [^ThreadLocal space (id-space)]
-          (doseq [gs [groups top-groups]]
+          (doseq [gs (cons groups top-groups)]
             (let [t0 (System/nanoTime)
+                  ;; each task with an order of its own, as the first round's thread: the local
+                  ;; and anonymous classes its analysis declares are the ones it processes
+                  ;; (process-classes! takes the order's tail from where it stood); with the
+                  ;; unit's order shared, a task processed another's class declared meanwhile
+                  ;; (its members made before that task gave it its constructor: the F2.2 case
+                  ;; again, by chance; 2026-10-17). Appended to the unit's in the tasks' order
                   rs (m/par-mapv (m/jobs)
                                  (fn [g]
-                                   (let [s (System/nanoTime)]
+                                   (let [s (System/nanoTime)
+                                         order (atom [])]
                                      (.set space (java.util.concurrent.atomic.AtomicInteger. (int analysis-id-base)))
-                                     (try (run! analyze! g) (finally (.remove space)))
-                                     [(first g) (/ (- (System/nanoTime) s) 1e9)]))
-                                 gs)]
+                                     (try (binding [a/*unit* (assoc unit :order order)] (run! analyze! g))
+                                          (finally (.remove space)))
+                                     [(first g) (/ (- (System/nanoTime) s) 1e9) @order]))
+                                 gs)
+                  _ (swap! (:order unit) into (mapcat #(nth % 2) rs))]
               ;; J2G_ANALYSIS_TIMES=1: each group's wall time, its tasks' total, the longest ten
               (when (System/getenv "J2G_ANALYSIS_TIMES")
                 (println (format "j2g: analysis group: %d tasks in %.2f s, the tasks %.2f s" (count rs)
@@ -452,9 +486,10 @@
         (some-> runtime deref)
         ;; the unit's order as one round made it: the first round's classes, the second's, the
         ;; classes the first round's analysis declared, then any the second's did
-        (let [main @(:order unit)]
-          (reset! (:order unit) (vec (concat names1 names2 (drop (count names1) @rt-order)
-                                             (drop (+ (count names1) (count names2)) main)))))
+        (let [main @(:order unit)
+              late (drop (+ (count names1) (count names2)) main)]
+          (println (str "j2g: " (count late) " local and anonymous classes declared by the second round's analysis"))
+          (reset! (:order unit) (vec (concat names1 names2 (drop (count names1) @rt-order) late))))
         (when-let [^ThreadLocal space (id-space)] (.remove space))
         (lap :analysis-runtime)
         (println (str "j2g: load (s): " (str/join ", " (for [[k v] @laps] (str (name k) " " v)))))))
