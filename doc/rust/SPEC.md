@@ -1377,6 +1377,80 @@ What it changes in this text (RR-P6-RR-P8 there, open, built as recommended):
   `bin/repr-rust roundtrip --iface --text && bin/repr-rust test` is the step `repr-rust` of
   `bin/gate --full`.
 
+### 12.7 As built: RR4 (2026-10-18)
+
+[RUST-NOTES.md](RUST-NOTES.md), "RR4", records the build: three new corpora, the rest of
+`library/` (1,902 files), the compiler (2,167) and a pinned crate set (402 crates, 8,254 files,
+editions 2015-2024), each at the tree, text and interface levels, and the pretty layout, judged at
+the tree level over all four corpora; RR1-RR3's levels over std unchanged. What it changes in this
+text (RR-P9-RR-P12 there, open, built as recommended):
+
+- **The corpora (§11.4)**: `test/rust/corpus-rustc-1.99.1-library.edn` (every Cargo package of
+  `rust-src`'s `library/` but the first corpus's files, and `rtstartup`'s two files, which no
+  package holds), `corpus-rustc-1.99.1-compiler.edn` (every package of `usr/src/rustc/compiler`),
+  both from the pinned `rust-src` apk; `corpus-crates-2026-10-18.edn`, the newest version of each
+  of the 402 crates in the host's Cargo cache on 2026-10-18 (E9's 518 less the older versions:
+  one namespace per crate), each `.crate` pinned by its SHA-256 in
+  `test/rust/crates-2026-10-18.sha256` (crates.io's own checksums, checked against the index),
+  copied from the host's cache (`REPR_RUST_CRATES`, else crates.io) into `.tmp/repr-rust/crates/`
+  and extracted there. A crate of a corpus is a Cargo package: its name Cargo's, its edition its
+  manifest's (2015 when none), its files those under its directory in no nested package; all
+  made by `test/rust/corpus_make.ae` (`std`, `library`, `compiler`, `crates`).
+- **Namespaces (§2.1; RR-P9)**: under `src/`, `lib` and `main` are dropped only as the crate's
+  roots (`src/lib.rs`, `src/main.rs`) and a final `mod` only below them (`src/x/mod.rs` is `x`,
+  `src/mod.rs` `mod`); `src/main.rs` beside a `src/lib.rs` keeps `main` (the binary is another
+  crate of the package); `build.rs` is `build_script_build`, Cargo's name of the build script; a
+  package nested in another package's directory, outside its workspace, has its namespaces under
+  the enclosing crate's (`rs.rustc_codegen_cranelift.y`: the corpus's `:ns-crate`). Std's 1,074
+  namespaces are unchanged; the rule as written made 11 clashes (`core_arch`'s and `core_simd`'s
+  `src/mod.rs` against their `src/lib.rs`, `object`'s `build.rs` against `src/build/mod.rs`, the
+  two codegen backends' build systems both named `y`...).
+- **Editions (§12.2)**: 2015-2021 need nothing new in the forms: anonymous parameters, bare trait
+  objects and `dyn`, `async`, `try` or `gen` as names print from the forms as they are; a struct
+  literal whose path is a special head (`gen { .. }`, `async { .. }` before 2024 and 2018) is
+  `((:path gen) (:braces ...))` as calls are; a lifetime whose name only a raw lifetime can write
+  in the file's edition (`'r#mod`: the tree's `Lifetime` holds no rawness) is `(:lifetime
+  "r#mod")`.
+- **The helper (§10.3)**: a macro call whose arguments' parse leaves a delayed bug or raises a
+  fatal error has no `rsdump/mac-exprs` entry (two files crashed the helper).
+- **Lines (§9.1)**: `:rs/close` also on a closure's parameters (its closing `|`), a parenthesized
+  argument list (`FnMut(A,\n)`), an empty module's body (its `}`) and `rs/file` (a file of no item:
+  the line of its end), each before an empty span or the end; a missing `where` clause of a
+  `const` item marks the type, which its empty span follows; the lifetime that ends a bound list
+  gets the line of the empty span after it; `.await`'s head has its line; a parameter's pattern
+  with attributes has its own span's line; an implicit parenthesis whose `(` is on an earlier line
+  than its expression keeps that line (a binary operator before it stands there).
+- **Macro arguments (§7.1)**: the printer's tokens of a call are compared after the lexer's
+  floats too: `x.0 .0` prints `x.0.0`, which lexes `0.0`, so such a call is `(:tt ...)`.
+- **The pretty layout (§9.4, 2; RR-P11)**: `bin/repr-rust print --layout pretty`, of any forms,
+  whose positions it ignores: every item, statement, arm, field, variant, attribute and `where`
+  predicate on a line of its own, indented by nesting, a `}` that closes them on a line of its own,
+  then each line over 100 columns broken at its first delimited group that reaches past the limit
+  (else its widest), the group's elements one per line, one level deeper (consistent breaking,
+  rustfmt's vertical style). It is not `-Zunpretty=normal` byte for byte: §9.4's "as
+  -Zunpretty=normal prints" is its model; its judge is the tree level, the printed files' trees
+  equal to the originals' (their lines are the layout's own).
+- **The interface level (§11.3; RR-P12)**: for the library, `core` and `std` documented again
+  with the files `#[path]` reaches outside them printed (`core_arch`, `core_simd`, `std_float`,
+  `backtrace`), and every other library crate against the host's sysroot (its dependencies but
+  the optional ones, no features); for the compiler, each crate against `rustc-dev`'s builds of its
+  dependencies (`:libdir "rustc-dev"`, each extern by its file, `-L dependency=` that directory),
+  its default features, and the `env!` values rust's build sets; for the crate set, Cargo:
+  `cargo doc` in a workspace of its own, every crate without its default features (two with one
+  feature each), its dependencies locked by `test/rust/crates-2026-10-18.lock` and read from a
+  directory source of their `.crate` files checked by the lock's SHA-256 (no index, none of the
+  host's Cargo state); each crate's rustdoc command as `cargo -vv` prints it, run on the originals
+  and on the mirror. The crates no level can document are named, with the reason, in the corpus
+  files (`;; not documented: ...`). Known differences: one file of the crate set rustc's parser
+  rejects alone (all levels) and `nom`'s interface (an attribute's token spacing, which rustdoc
+  writes for the impls a derive copies it to: N3).
+- **Commands (§11.6)**: `bin/repr-rust roundtrip [...] [--pretty | --pretty-only] [CORPUS... |
+  all]`, `corpus fetch CORPUS` (the crate set's `.crate` files too), `print --layout pretty`;
+  `make repr-rust-pretty`, `make repr-rust-all`; known differences per corpus and level
+  (`roundtrip-CORPUS-known.edn`, `-iface-known`, `-text-known`, `-pretty-known`). The gate's step
+  `repr-rust` is `bin/repr-rust roundtrip --iface --text --pretty && bin/repr-rust test` (std);
+  `REPR_RUST_CORPORA=all` adds RR4's corpora (RR-P10).
+
 ## 13. Decisions and open proposals
 
 ### 13.1 Decisions taken while writing (S1-S34)

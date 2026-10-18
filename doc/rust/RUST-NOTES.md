@@ -7,7 +7,8 @@ departs from or adds to the spec, with the reasons. RR1 was built on 2026-10-17 
 and `rust-src-1.99.1-r0` fetched as apks, and stage 0 of that commit; RR2 on the same day (branch
 `repr-rust-rr2`, from main at `10c7b293`), on the same rustc, its `rustdoc` and the host's
 sysroot; RR3 on 2026-10-18 (branch `repr-rust-rr3`, from main at `80294e9a`), on the same rustc
-and the stage 0 of that commit.
+and the stage 0 of that commit; RR4 on 2026-10-18 (branch `repr-rust-rr4`, from main at
+`96d7bafe`), on the same rustc, the host's `cargo` and the stage 0 of that commit.
 
 ## Decided (2026-10-17, the user): RR-P1-RR-P3
 
@@ -503,3 +504,219 @@ with its counts in the log (`warning :full-tokens` ...).
   text after its `//` (`// x` is `; x`), a block comment's lines trimmed after a space; (b) the
   Rust text verbatim (`; // x`), unambiguous about the comment's kind. *Recommended: (a)*, as
   repr/go.
+
+## RR4: the rest of `library/`, the compiler, a pinned crate set; the pretty layout
+
+SPEC §11.4 (the corpus), §12.1 (RR4), §12.2 (editions) and §9.4 (2, the pretty layout) define it;
+SPEC §12.7 records what the build changes in the spec. Built on 2026-10-18 (branch
+`repr-rust-rr4`, from main at `96d7bafe`), on the same rustc, `rustc-dev` and `rust-src` as
+RR1-RR3, the host's `cargo` 1.99.1 (the crate set's interface level) and the stage 0 of that
+commit.
+
+### What was built
+
+| part | file | what |
+|---|---|---|
+| corpora | `test/rust/corpus-rustc-1.99.1-library.edn`, `corpus-rustc-1.99.1-compiler.edn`, `corpus-crates-2026-10-18.edn` (made by `test/rust/corpus_make.ae library`, `compiler`, `crates`) | the rest of `library/` (74 crates, 1,902 files), the compiler (82 crates, 2,167 files), the crate set (402 crates, 8,254 files); each crate's edition, roots, `#[path]`, `include!` and text files, namespace root, interface configuration |
+| pins | `test/rust/crates-2026-10-18.sha256`, `test/rust/crates-2026-10-18.lock` | the crate set's 402 `.crate` files; the interface level's Cargo workspace locked (459 packages, their checksums) |
+| helper | `tools/rsdump/rsdump.rs` | macro arguments whose parse leaves a delayed bug or raises a fatal error: none |
+| converter | `arbace/repr/rust/convert.ae`, `full.ae`, `syntax.ae` | namespaces, raw lifetimes, special struct heads, seven line cases, the lexer's floats in the macro check, a dropped comma before skipped punctuation in mode `:full` |
+| printer | `arbace/repr/rust/print.ae` (`print-pretty`, `break-lines`, `brk!`) | the pretty layout; an arm whose body is an `if`; a `const` parameter's default `false` |
+| command | `bin/repr-rust` (`--pretty`, `--pretty-only`, several corpora and `all`, `crates_fetch`, `crates_docs`, `edition_plan`, `prune_dumps`), `arbace.repr.rust` (`print --layout pretty`, `compare --trees-only`), `make repr-rust-pretty`, `make repr-rust-all` | |
+| known differences | `test/rust/roundtrip-crates-2026-10-18-known.edn` (and `-pretty-`, `-text-`, `-iface-known.edn`); none for the library and the compiler | one file the parser rejects alone; `nom`'s interface (attribute spacing) |
+| cases | `bin/lib/repr-rust/test` cases 7 and 8, `test/rust/sample/edition2015.rs` | edition 2015, the pretty layout |
+| gate | `bin/gate --full`'s `repr-rust` step: `roundtrip --iface --text --pretty ${REPR_RUST_CORPORA:-} && test` | |
+
+### Results
+
+`bin/repr-rust roundtrip --iface --text --pretty all` (also `make repr-rust-all`), every level
+over the four corpora, in one run of 52 minutes on this host (64 cores, shared with other builds):
+
+| corpus | files | tree level (trees and lines) | pretty layout (trees) | text level (byte for byte) | interface level (crates) |
+|---|---|---|---|---|---|
+| std's five crates (RR1-RR3) | 1,074 | 1,074 (1,660,638 spans) | 1,074 | 1,074 (14.3 MB) | 5 of 5 (79,371 items) |
+| the rest of `library/` | 1,902 | 1,902 (6,448,553) | 1,902 | 1,902 (41.0 MB) | 46 of 46 (142,204 items) |
+| the compiler | 2,167 | 2,167 (4,013,953) | 2,167 | 2,167 (33.9 MB) | 66 of 66 (129,433 items) |
+| the crate set | 8,254 | 8,253 (17,320,391) | 8,253 | 8,253 (117.9 MB) | 394 of 395 (286,161 items) |
+| total | 13,397 | 13,396 | 13,396 | 13,396 | 511 of 512 |
+
+Two known differences, each with its cause in its known file: `erased-serde`'s
+`src/features_check/error.rs`, a module whose text is one string literal, which rustc's parser
+rejects alone (rust-lisp D20; at the tree, pretty and text levels), and `nom`'s interface (token
+spacing, N3: rustdoc writes the attribute `#[allow(deprecated,missing_docs)]`, which the derived
+impls copy, with its tokens' spacing; mode `:lines` prints its own). The mode `:full` printed
+files' trees and lines are equal too (13,396). The crates no level documents are listed with the
+reason in the corpus files: of the library's 74 crates 46 have a library rustdoc documents against
+the sysroot, of the compiler's 82 66 against rustc-dev, of the crate set's 402 395 through Cargo.
+
+Times by corpus (seconds; dumps, conversion, printing, rustc's trees): the library's tree level
+12, 113, 15, 38, its text level's conversion 278 (stdarch's generated files); the compiler's 3, 30,
+7, 6 and 78; the crate set's 88, 122, 26, 182 and 309, its interface level's `cargo doc` and
+rustdoc runs 74 (the dependencies built once into `.tmp/repr-rust/cargo/target`, kept for the next run). The helper
+runs once per edition over all its files (`edition_plan`), not once per crate. The dumps are
+removed after their conversion but the failing files' (`prune_dumps`: the crate set's are 1.5 GB,
+1.9 GB with `--full`). Std's levels alone, the gate's step: about 3 minutes (RR3's 145 s and the
+pretty layout's half minute).
+
+`bin/repr-rust test` adds case 7 (edition 2015's sample, trees and lines, and mode `:full` byte for
+byte; edition 2018 rejects it) and case 8 (the five samples' forms in the pretty layout: their
+trees).
+
+The forms of the new corpora (mode `:lines`): 105,591 and 105,232 attributes with meta forms in
+the library and the crate set, 38,664 and 83,072 macro calls with their arguments as forms,
+6,668 and 78,447 as `(:tt ...)`.
+
+### The corpora
+
+- **The rest of `library/`** (`rustc-1.99.1-library`): `rust-src`'s `usr/src/rust/library/` but the
+  first corpus's 1,074 files: every Cargo package (a `Cargo.toml` with a `[package]`) a crate,
+  `stdarch`'s, `portable-simd`'s, `compiler-builtins`'s, `vendor/`'s 30 crates, `backtrace`,
+  `alloctests` and `coretests`, std's tests and benches...; `rtstartup`'s two files, in no package
+  (rust's bootstrap compiles them with rustc itself), a crate of library/'s edition 2024. Editions
+  2015 (3 crates), 2018 (7), 2021 (19), 2024 (the rest).
+- **The compiler** (`rustc-1.99.1-compiler`): every package of `usr/src/rustc/compiler`, paths
+  relative to `usr/src/rustc` as rust's build gives them; `usr/src/rustc/library/proc_macro`
+  (`rustc_proc_macro`'s `[lib] path`) is the first corpus's `proc_macro` (identical) and left out.
+  The codegen backends' build systems are packages of their own, both named `y`.
+- **The crate set** (`crates-2026-10-18`): the host's Cargo cache served the survey's E9 (518
+  crates); the corpus pins the newest version of each name, 402 crates (E9's other 116 are older
+  versions of the same crates: one namespace per crate, §2.1), 31 of edition 2015, 102 of 2018,
+  164 of 2021, 105 of 2024. `test/rust/crates-2026-10-18.sha256` holds each `.crate`'s SHA-256,
+  all 402 checked equal to crates.io's index checksums (the cache's index); `bin/repr-rust corpus
+  fetch crates-2026-10-18` copies them from `REPR_RUST_CRATES`, else the host's Cargo cache, else
+  crates.io, checks them and extracts each into `.tmp/repr-rust/crates/src/NAME-VERSION/`
+  (checked in this worktree: 15 s, 53 MB of `.crate` files, 260 MB extracted). Nothing of the
+  cache's state is read after that.
+- `test/rust/corpus_make.ae` makes all four (`std`, `library`, `compiler`, `crates`; `std`'s output
+  is RR1's corpus file byte for byte): a minimal reader of Cargo manifests (sections, keys, strings,
+  inline tables, arrays over several lines, `edition.workspace`), the target's `cfg(...)` for
+  target-specific dependencies (x86_64-alpine-linux-musl), each crate's roots (`src/lib.rs`,
+  `src/main.rs`, `src/bin/`, `build.rs`, `tests/`, `benches/`, `examples/`, every target's `path`),
+  `#[path]`, `include!` and text files (`include_str!`/`include_bytes!` of a `.rs` by the
+  library's own files, its tests left out), `:ns-crate` for a package nested in another's
+  directory, and each crate's `:iface` or the reason it has none (`;; not documented: ...`).
+
+### Namespaces (SPEC §2.1; RR-P9)
+
+The rule as written mapped 11 pairs of files to one namespace over the new corpora (none in std):
+`stdarch`'s `core_arch` and `portable-simd`'s `core_simd` have a `src/mod.rs` (the module `core`
+includes by `#[path]`) beside their `src/lib.rs`; `object`'s `build.rs` and `src/build/mod.rs` (in
+`vendor/` and in the crate set); `pulldown-cmark` and `minifier` have `src/lib.rs` and
+`src/main.rs`; `gix-credentials` has `src/program/main.rs` beside `src/program/mod.rs`; the two
+codegen backends' build systems are both crates `y`. As built: `lib` and `main` are dropped only as
+`src/`'s own files, a final `mod` only below `src/`; `src/main.rs` keeps `main` when the package has
+a `src/lib.rs`; `build.rs` is `build_script_build`; a package nested in another package's directory
+has its namespaces under the enclosing crate's (`rs.rustc_codegen_cranelift.y.prepare`). Std's
+namespaces are unchanged (checked: no std file is affected).
+
+### What the new corpora needed
+
+- **The helper**: `vendor/memchr`'s `x86_64/memchr.rs` crashed it (a delayed bug left in the
+  silent context of a macro call's argument parse panics when the context drops), and
+  `serde_derive`'s `de.rs` and `de/struct_.rs` (a fatal error raised by such a parse): both now
+  leave the call without parsed arguments, `(:tt ...)`.
+- **Editions 2015-2021**: nothing in the forms; a struct literal named `gen` or `async` (names
+  before 2024 and 2018) is `((:path gen) (:braces ...))`, as a call is; a raw lifetime `'r#mod`
+  (`yoke-derive`'s example) is `(:lifetime "r#mod")`: rustc's `Lifetime` keeps the name without
+  its rawness, and a name rustc reserves in the file's edition can be written only raw
+  (`Ident::is_reserved_lifetime`). `test/rust/sample/edition2015.rs` (anonymous parameters, bare
+  trait objects, `dyn`, `async`, `await`, `try`, `gen` as names, `...` ranges, 2015 paths), which
+  edition 2018 rejects, round-trips in both modes (`bin/repr-rust test` case 7).
+- **Lines** (mode `:lines`, all first found at RR4): a closure's `|` and a parenthesized
+  argument list's `)` before the empty span of a missing return type (`:rs/close`), an empty
+  module's `}` (`:rs/close` on `(:braces)`: its inner span begins there), a file of no item
+  (`linux-raw-sys`'s 38 generated files of one comment: `:rs/close` on `rs/file`, the line of its
+  end), a `const` item's missing `where` (its empty span follows the type, so the type carries the
+  mark), a lifetime ending a bound list before such a span (its own line), `.await` (the head's
+  line, its `.` with it), a parameter with attributes (its pattern at its own span, not the
+  parameter's, which begins at the attributes), QSelf's trait path (its `path_span`), an implicit
+  parenthesis whose `(` is on an earlier line than its expression (the line kept, and a binary
+  operator before it stands there).
+- **Macro arguments**: `syn`'s tests and `zerovec` write `x.0 .0` in macro arguments; the forms
+  print `x.0.0`, which rustc's lexer makes `x . 0.0`: the check now merges an integer, `.` and an
+  integer printed together into the lexer's float, so such calls are `(:tt ...)`.
+- **The printer**: an arm whose body is an `if` (`'"' => if let ... {}`, `shlex`) was printed as a
+  guard (a guard is always followed by the body or `:_`); a `const` parameter's default `false`
+  was dropped (`object`); `-9223372036854775808` (`stdarch`'s tests) overflowed the negation, and
+  its form is now the long it reads back as.
+- **Mode `:full`**: two compiler files close a block arm with no comma before a next arm with a
+  leading `|`: the aligner now weighs a printed comma dropped together with source punctuation
+  skipped.
+
+### The pretty layout (SPEC §9.4, 2; RR-P11)
+
+`print-pretty` strips every form's metadata, then prints with `*pretty*` bound: `brk!` begins a
+line before every item, statement, arm, field, variant, attribute and `where` predicate (indented
+one level) and before a `}` that closes any of them; the rest is mode `:lines`' printer with no
+lines. `break-lines` then breaks every line over 100 columns but those a token of several lines
+touches (a `(:tt ...)` text, a block doc comment): its first delimited group (`(` `[` `{`, matched
+on the line, or open to its end) that reaches past column 100, else its widest, is broken
+consistently, the open delimiter ending the line, each element (split at the group's commas) on a
+line of its own one level deeper, the close delimiter beginning the next line, each new line
+broken again. Comments are not printed (forms without positions have none but doc comments, which
+are attributes). It is no copy of rustc's `pp.rs`: §9.4 names `-Zunpretty=normal` as its model;
+the judge is the tree level (`roundtrip --pretty`: the forms of mode `:lines`, positions stripped,
+printed into `.tmp/repr-rust/cand/CORPUS-pretty/`, rustc's trees compared without the lines).
+
+### The interface level of the new corpora (SPEC §11.3; RR-P12)
+
+- **Library**: `core` and `std` documented again exactly as RR2 does, but in this corpus's mirror,
+  where the files `#[path]` reaches outside them are printed: `stdarch`'s `core_arch` (core's
+  `arch`), `portable-simd`'s `core_simd` (core's `simd`) and `std_float`, `backtrace` (std's
+  `backtrace_rs`); then every other library crate against the host's sysroot: its dependencies but
+  the optional ones (a renamed one, `core = rustc-std-workspace-core`, by its file), no features.
+  Not documented (in the corpus file): crates with no library, proc macros (their dependencies
+  are host builds the sysroot lacks), crates with a dependency the sysroot lacks (rand_core,
+  wit-bindgen, ...), `windows-sys` (a `compile_error!` placeholder).
+- **Compiler**: each crate against `rustc-dev`'s builds of its dependencies, the build of these
+  very sources (`:libdir "rustc-dev"`: each extern by its file, `-L dependency=` rustc-dev's
+  directory for the rest; of two builds of one crate, `rustc_hash`, `object`, `libloading`,
+  `twox_hash`, the one the crate's own metadata names first), its default features (`nightly`),
+  `-Zforce-unstable-if-unmarked`, and the environment rust's build sets (`CFG_RELEASE`,
+  `CFG_VERSION`, ... from `rustc -vV`; macros of other crates expand them in every crate). rustdoc's
+  JSON of a compiler crate takes about a second. Not documented: the crates rustc-dev lacks
+  (`rustc_main`, `rustc_driver`'s own, the codegen backends, `rustc_public`, `rustc_windows_rc`, the
+  build systems), the proc macros (`proc-macro2`, `quote`, `syn` are host builds rustc-dev
+  lacks), `rustc_driver_impl` (needs `rustc_public`), `rustc_expand` (rustdoc's synthesis of
+  auto-trait impls overflows, E0275).
+- **Crate set**: rustdoc needs each crate's dependencies built, which only Cargo resolves.
+  `crates_docs` writes a workspace (`.tmp/repr-rust/cargo/ws`): one package depending on each
+  documented crate `=VERSION`, without default features (with them, offline resolution needs
+  crates the cache lacks), `gix-hash` with `sha1` and `http` with `std` (which build with none);
+  its `Cargo.lock` is `test/rust/crates-2026-10-18.lock` (made once from the host cache's index,
+  459 packages with their checksums); the registry replaced by a directory source of the lock's
+  `.crate` files (the corpus's extractions as links, the others fetched like the corpus's and
+  checked by the lock's SHA-256; a `.cargo-checksum.json` each), so no index and none of the host's
+  Cargo state. `cargo doc --no-deps` runs rustdoc through a wrapper (`RUSTDOC`), which runs each
+  corpus crate's command twice more, its paths in the directory source made the corpus's
+  extraction and the mirror (flags, features, build-script cfgs, `OUT_DIR`, dependencies' metadata:
+  cargo's). A library's text files (examples its docs `include_str!`: `clap`, `winnow`,
+  `annotate-snippets`, `wit-bindgen`) stay the originals in the mirror, as RR2's Markdown. Not
+  documented: the two yanked crates (Cargo resolves no `=VERSION` of `chacha20` 0.10.1 and
+  `libssh2-sys` 0.3.2), `openssl-sys` (its build script needs an OpenSSL installation) and the
+  four that depend on it.
+
+### Choices for the user (RR-P9-RR-P12; open, built as recommended)
+
+- **RR-P9 Namespaces of the new corpora** (SPEC §2.1). (a) As built: `lib`/`main` dropped only as
+  `src/`'s roots, `mod` only below them, `src/main.rs` beside a library keeps `main`, `build.rs` is
+  `build_script_build`, a nested package under its enclosing crate; (b) a clash resolved by the
+  corpus file naming one of the two files' namespace; (c) the crate set's older versions kept, the
+  crate's version in its namespace (`rs.syn_2.`). *Recommended: (a)*: unconditional rules, std
+  unchanged, 11 clashes gone.
+- **RR-P10 The gate** (`bin/gate --full`'s `repr-rust`). (a) As built: std's five crates at every
+  level (`--iface --text --pretty`, about 3 minutes), RR4's corpora opt-in, `REPR_RUST_CORPORA=all`
+  (about 40 minutes more), and `make repr-rust-all`, at a milestone or after a change to
+  repr/rust; (b) all four corpora always; (c) the new corpora at the tree level only (about 12
+  minutes). *Recommended: (a).*
+- **RR-P11 The pretty layout** (SPEC §9.4, 2). (a) As built: rustc's printer's line structure
+  (one item, statement, arm, field per line), lines broken at 100 columns by consistent breaking
+  of a delimited group, judged at the tree level; (b) a port of `rustc_ast_pretty`'s `pp.rs`
+  (Oppen's algorithm with its boxes), judged against `-Zunpretty=normal` byte for byte.
+  *Recommended: (a)* until a consumer needs rustc's exact text: (b) is a larger printer to keep in
+  step with rustc.
+- **RR-P12 The crate set's interface configuration** (SPEC §11.3). (a) As built: each crate without
+  its default features, through Cargo with a pinned lock and a directory source; (b) default
+  features, which needs crates the host cache lacks (fetched from crates.io, then pinned in the
+  lock): more of each crate documented. *Recommended: (a)* for a corpus reproducible from the
+  pinned files alone; (b) when more coverage is wanted.

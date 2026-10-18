@@ -411,7 +411,8 @@
   (if-let [q (opt qself)]
     (let [segs (vec (fld p :segments))
           pos (fld q :position)
-          tr (when (pos? pos) (path-form (list 'Path :span (span-of p) :segments (subvec segs 0 pos)) :type))
+          ;; the trait's path at its own span (QSelf's path_span: from the token after as)
+          tr (when (pos? pos) (path-form (list 'Path :span (fld q :path_span) :segments (subvec segs 0 pos)) :type))
           rest-segs (subvec segs pos)
           rest-f (cond
                    (every? #(nil? (seg-args %)) rest-segs) (path-sym-form (mapv seg-name rest-segs))
@@ -423,11 +424,18 @@
       (at (lst :qself (ty-form (fld q :ty) :plain) tr rest-f) (span-of p)))
     (path-form p ctx)))
 
+(def ^:dynamic *edition*
+  "The edition of the file being converted"
+  nil)
+
 (defn lifetime-form
-  "'a for a lifetime (lifetime \"'a\") or a label (label (id \"'a\" 0))"
+  "'a for a lifetime (lifetime \"'a\") or a label (label (id \"'a\" 0)); a lifetime's tree
+  holds no rawness ('r#mod is \"'mod\"), so a name only a raw lifetime can write is (:lifetime
+  \"r#mod\")"
   [x]
   (let [t (case (hd x)
-            lifetime (second x)
+            lifetime (let [t (second x)]
+                       (if (sx/reserved-lifetime? (subs t 1) *edition*) (str "'r#" (subs t 1)) t))
             label (ident (second x))
             id (second x)
             (fail! "a lifetime" x))
@@ -474,7 +482,8 @@
           out (fld pa :output)]
       (if (= 'Ty (hd out))
         [ins '-> (ty-form (arg out 1) :fnret)]
-        [ins]))
+        ;; the ) before the empty span of the missing return type, on a line of its own
+        [(with-meta-line ins :rs/close (spos (arg out 1)))]))
     ParenthesizedElided [(at ['..] (arg ga 1))]
     (fail! "generic arguments" ga)))
 
@@ -619,6 +628,8 @@
   (let [v (sx/lv f)]
     (cond
       (vector? v) (vary-meta f assoc :rs/close l)
+      ;; a lifetime, the last bound: printed at its own line
+      (and (seq? v) (= 'quote (first v)) (= 2 (count v))) (vary-meta f assoc :line l)
       (and (seq? v) (seq v))
       (let [h (sx/lv (first v))
             xs (vec v)
@@ -859,8 +870,9 @@
             Unary (let [op (arg k 1) x (arg k 2) xk (fld x :kind)]
                     (if (and (= 'Neg op) (empty? (fld x :attrs)) (= 'Lit (hd xk))
                              (let [v (lit-of (arg xk 1))] (and (number? v) (not (zero? v)))))
-                      (let [v (lit-of (arg xk 1))]
-                        (if (double? v) (- v) (- v)))
+                      (let [v (lit-of (arg xk 1)) n (-' v)]
+                        ;; a negation that fits a long is one: the forms text reads it back as one
+                        (if (and (not (double? v)) (<= Long/MIN_VALUE n Long/MAX_VALUE)) (long n) n))
                       (list (case (str op) "Neg" '- "Not" '! "Deref" '*) (expr-form x :plain))))
             AddrOf (let [bk (arg k 1) m (mutbl (arg k 2)) x (expr-form (arg k 3) :plain)]
                      (case (str bk)
@@ -898,7 +910,7 @@
                   (ls (concat (case (str gk) "Async" ['async] "Gen" ['gen] "AsyncGen" ['async 'gen])
                               (case (hd cap) Value [(at 'move (fld cap :move_kw))] Use [(at 'use (fld cap :use_kw))] [])
                               (block-of b inner))))
-            Await (list (symbol ".await") (expr-form (arg k 1) :plain))
+            Await (list (head-line (symbol ".await") (arg k 2) nil false) (expr-form (arg k 1) :plain))
             Use (list (symbol ".use") (expr-form (arg k 1) :plain))
             TryBlock (let [b (arg k 1) t (opt (arg k 2))]
                        (ls (concat ['try] (when t [:bikeshed (ty-form t :plain)]) (block-of b inner))))
@@ -928,6 +940,8 @@
             MacCall (mac-call-form (arg k 1) s)
             Struct (let [se (arg k 1)
                          head (qpath-form (fld se :qself) (fld se :path) :expr)
+                         ;; a struct named as a special head reads (gen, async: names before 2024 and 2018)
+                         head (let [c (sx/lv head)] (if (and (symbol? c) (pr/special-expr-head? (str c))) (attach (list :path c) (form-line head)) head))
                          fields (mapcat (fn [ef]
                                           (let [nm (with-attrs (at (keyword (ident (fld ef :ident))) (span-of ef)) (outer-attrs (fld ef :attrs)))]
                                             (if (fld ef :is_shorthand) [nm] [nm (expr-form (fld ef :expr) :plain)])))
@@ -1018,6 +1032,8 @@
                                  AsyncGen [(at 'async (fld ck :span)) 'gen]))
                       (case (hd cap) Value [(at 'move (fld cap :move_kw))] Use [(at 'use (fld cap :use_kw))] []))
         params (at (closure-params decl) (fld c :fn_decl_span))
+        ;; the closing | before the empty span of a missing return type, on a line of its own
+        params (if (= 'Default (hd out)) (with-meta-line params :rs/close (spos (arg out 1))) params)
         block-body? (and (= 'Block (hd bk)) (empty? (fld body :attrs)) (= 'None (arg bk 2)) (= 'Default (fld (arg bk 1) :rules)))]
     (if (= 'Ty (hd out))
       (do (when-not block-body? (fail! "a closure with a return type and no block" c))
@@ -1069,7 +1085,17 @@
   (let [singles (mapcat (fn [[t l j tt]] (if (and (not tt) (sx/punct? t) (> (count t) 1))
                                            (map-indexed (fn [i c] [(str c) l (if (zero? i) j true) false]) t)
                                            [[t l j tt]]))
-                        printed)]
+                        printed)
+        ;; the lexer's float: an integer, . and digits written together (x.0.0's tuple indices
+        ;; print so; rustc's lexer makes 0.0 of them)
+        int? (fn [t] (and (string? t) (re-matches #"[0-9][0-9_]*" t)))
+        singles (loop [ts (vec singles) i 0 out (transient [])]
+                  (if (>= i (count ts))
+                    (persistent! out)
+                    (let [[a l ja] (nth ts i) [b _ jb] (nth ts (inc i) nil) [c _ jc] (nth ts (+ i 2) nil)]
+                      (if (and (int? a) (= "." b) jb jc (int? c))
+                        (recur ts (+ i 3) (conj! out [(str a "." c) l ja false]))
+                        (recur ts (inc i) (conj! out (nth ts i)))))))]
     (loop [ts (seq singles) prev nil out (transient [])]
       (if (empty? ts)
         (persistent! (if prev (conj! out prev) out))
@@ -1291,7 +1317,9 @@
                     (and (= 'CVarArgs (fld t :kind)) (= 'Missing (fld pat :kind)))
                     [(with-attrs (at '... (span-of p)) attrs)]
                     :else
-                    [(with-attrs (if (= 'Missing (fld pat :kind)) (at :_ (span-of p)) (at (pat-form pat :param) (span-of p))) attrs)
+                    ;; the pattern at the parameter's span, which begins at its attributes: with
+                    ;; attributes, at its own
+                    [(with-attrs (if (= 'Missing (fld pat :kind)) (at :_ (span-of p)) (at (pat-form pat :param) (if (seq attrs) (span-of pat) (span-of p)))) attrs)
                      (ty-form t :plain)])))
               (range) (fld decl :inputs))))
 
@@ -1409,10 +1437,15 @@
       Const (let [c (arg k 1)
                   g (fld c :generics)]
               (when (not= 'Body (fld c :kind)) (throw (ex-info "type const" {::rust true})))
-              (ls (concat vis (defaultness-words (fld c :defaultness)) ['const
-                           (generic-name (ident (fld c :ident)) g) (ty-form (fld c :ty) :plain)]
-                          (when-let [e (opt (fld c :body))] [(expr-form e :plain)])
-                          (where-mark (fld g :where_clause)))))
+              ;; a missing where clause's empty span follows the type (rustc parses it there),
+              ;; a where clause follows the body
+              (let [w (where-mark (fld g :where_clause))
+                    marker? (and (seq w) (= ::where (first (first w))))]
+                (ls (concat vis (defaultness-words (fld c :defaultness)) ['const
+                             (generic-name (ident (fld c :ident)) g) (ty-form (fld c :ty) :plain)]
+                            (when marker? w)
+                            (when-let [e (opt (fld c :body))] [(expr-form e :plain)])
+                            (when-not marker? w)))))
       ConstBlock (let [cb (arg k 1) b (fld cb :block)]
                    (ls (concat vis ['const (at (ls (cons 'do (block-of b inner))) (span-of b))])))
       Fn (fn-item (arg k 1) vis inner)
@@ -1421,7 +1454,8 @@
                         (when (= 'Loaded (hd mk))
                           (let [items (mapcat #(item-forms % :body) (arg mk 1))
                                 els (concat (map #(attr-form % false) inner) items)]
-                            (if (empty? els) [(list :braces)] els))))))
+                            ;; an empty body: its } where the inner span begins
+                            (if (empty? els) [(with-meta-line (list :braces) :rs/close (spos (fld (arg mk 3) :inner_span)))] els))))))
       ForeignMod (let [fm (arg k 1) abi (opt (fld fm :abi))]
                    (ls (concat vis (safety-words (fld fm :safety)) [(at 'extern (fld fm :extern_span))]
                                (when abi [(attach (sx/lit-form (if (= 'Cooked (fld abi :style)) 'Str (list 'StrRaw (arg (fld abi :style) 1)))
@@ -1539,14 +1573,23 @@
 ;;; Files (SPEC §2)
 
 (defn ns-of
-  "The namespace of a file (SPEC §2.1, S3): rs. + the crate + the path in the crate's directory
-  (path relative to the crate's directory)"
-  [crate ^String rel]
+  "The namespace of a file (SPEC §2.1, S3, as built at RR4): rs. + the crate + the path in the
+  crate's directory (path relative to the crate's directory): under src/, src/lib.rs and
+  src/main.rs (the crate roots; src/main.rs keeps main beside a src/lib.rs, has-lib, the binary
+  being another crate of the package) are the crate's namespace, a final mod below src/ is
+  dropped (src/x/mod.rs is x, src/mod.rs mod); build.rs, Cargo's build script, is the crate Cargo
+  names build-script-build"
+  [crate ^String rel & [has-lib]]
   (let [segs (vec (str/split (str/replace rel #"\.rs$" "") #"/"))
-        segs (if (= "src" (first segs))
+        segs (cond
+               (= "src" (first segs))
                (let [s (subvec segs 1)]
-                 (if (contains? #{"mod" "lib" "main"} (peek s)) (pop s) s))
-               segs)
+                 (cond
+                   (and (= 1 (count s)) (or (= "lib" (peek s)) (and (= "main" (peek s)) (not has-lib)))) (pop s)
+                   (and (> (count s) 1) (= "mod" (peek s))) (pop s)
+                   :else s))
+               (= ["build"] segs) ["build-script-build"]
+               :else segs)
         segs (map #(str/replace % #"[.-]" "_") segs)]
     (symbol (str/join "." (concat ["rs" (str crate)] segs)))))
 
@@ -1587,7 +1630,7 @@
   forms: {:ns sym :forms [...] :comments {line [[col text]...]} :warnings {...}}; with :full (a
   dump of rsdump dump --full, src the file's text as full/source gives it), mode :full's forms
   (arbace.repr.rust.full)"
-  [dump {:keys [crate crate-type kind rel corpus src-lines pin full src]}]
+  [dump {:keys [crate crate-type kind rel corpus src-lines pin full src ns-crate has-lib]}]
   (let [cfg (dumped dump 'rsdump/config)
         err (dumped dump 'rsdump/error)
         tree (first (filter #(and (seq? %) (= 'Crate (first %))) dump))
@@ -1599,12 +1642,13 @@
     (when (and full (not (dumped dump 'rsdump/tokens)))
       (throw (ex-info "mode :full needs a dump of rsdump dump --full (its tokens)" {})))
     (binding [*src* src-lines
+              *edition* (:edition cfg)
               *full* (boolean full)
               *texts* (java.util.ArrayList.)
               *starts* (collect-starts tree)
               *mac* (into {} (for [[sp k es] (dumped dump 'rsdump/mac-exprs)] [(spos sp) [k es]]))
               *warnings* warnings]
-      (let [ns-name (ns-of crate rel)
+      (let [ns-name (ns-of (or ns-crate crate) rel has-lib)
             attrs (fld tree :attrs)
             file-form (list 'rs/file :path (:file cfg) :crate (symbol (str crate)) :edition (:edition cfg)
                             :kind kind :positions :lines
@@ -1626,6 +1670,9 @@
             body (concat (map #(attr-form % true) (inner-attrs attrs))
                          (mapcat #(item-forms % :top) (fld tree :items)))
             body (pr/implicit-parens (vec body))
+            ;; a file of no item or attribute: its inner span (the end of the file) at its line
+            el (when (empty? body) (sline (fld (fld tree :spans) :inner_span)))
+            file-form (if (and el (> el 1)) (vary-meta file-form assoc :rs/close el) file-form)
             forms (vec (concat [(list 'ns ns-name (list :require ['arbace.rust :as 'rs])) file-form] body))
             lexed (dumped dump 'rsdump/tokens)
             plain (if lexed
