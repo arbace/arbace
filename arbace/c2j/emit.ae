@@ -438,7 +438,7 @@
 ;; ---------------------------------------------------------------------------------------
 ;; expressions
 
-(declare emit emit-unboxed emit-fn-class! emit-deftype-class! emit-body)
+(declare emit emit-unboxed emit-fn-class! emit-deftype-class! emit-body jrt-lacks? prim-call spec-intrinsic)
 
 (defn- prim [e] (:prim (node e)))
 
@@ -497,12 +497,15 @@
               (and (= pc Float/TYPE) (= p Double/TYPE)) (emit-unboxed ctx e)
               (and (= pc Double/TYPE) (= p Float/TYPE)) (list 'unchecked-float (emit-unboxed ctx e))
               :else
-              (let [f (emit ctx e)
+              (or
+                ;; a call of a primitive fn returning p: its unboxed value (F6)
+                (prim-call ctx e p #(unbox-arg ctx % p))
+                (let [f (emit ctx e)
                     jc (:class n)]
                 (if (and (fi? p) (not (and jc (.isAssignableFrom p jc))))
                   ;; Clojure 1.12: a fn passed where a functional interface is expected
                   (unbox-arg ctx (list 'arbace.lang.Compiler$Evaluator/fiAdapt (constant ctx p) f) p)
-                  (unbox-arg ctx f p))))))
+                  (unbox-arg ctx f p)))))))
         ps es))
 
 (defn- param-tags [ps] {:param-tags (mapv type-sym ps)})
@@ -519,6 +522,14 @@
     (vary-meta f assoc :c2j/line (:line n))
     f))
 
+(defn- spec-local
+  "The worker's long and box of parameter lb (F6, spec-mask: {:l :b}), or nil."
+  [ctx lb]
+  (when-let [^IdentityHashMap m (:spec-locals ctx)]
+    (.get m lb)))
+
+(defn- long-box* [f] (list (with-meta 'java.lang.Long/valueOf {:param-tags '[long]}) f))
+
 (defn- emit-local [ctx n unboxed?]
   (let [lb (:b n)
         b (node lb)]
@@ -529,6 +540,9 @@
           (list 'let ['t- r] (list 'set! r nil) 't-)
           r))
       (and (zero? (:idx b)) (not (:isArg b))) (or (:self-sym ctx) 'this)
+      ;; a parameter a worker takes as a long (F6, spec-mask): its box, made once, when needed
+      (spec-local ctx lb) (let [{:keys [l b]} (spec-local ctx lb)]
+                            (list 'if (list 'nil? b) (list 'set! b (long-box* l)) b))
       :else (local-sym b))))
 
 ;; ---------------------------------------------------------------------------------------
@@ -556,22 +570,184 @@
 
 (declare deep)
 
+;; primitive fns (Futamura F6 (a), doc/FUTAMURA-SURVEY.md, "F6 as built"): a fn method with
+;; ^long or ^double parameters or return (at most 4 parameters, not variadic: the JVM's
+;; FnMethod.primInterface) has an unboxed entry, invokePrim, beside its boxed invoke, which
+;; converts and calls it; a linked call of it calls invokePrim directly. The analysis is not
+;; changed (no fn has a primitive interface in the Go build, EVAL-PLAN Q1): callers still see an
+;; invoke, whose value the consumers convert as before.
+
+(defn- psig
+  "The primitive signature of FnMethod mn (its node): {:params [Class...] :ret Class}, each
+  long, double or Object; nil when the method has no unboxed entry."
+  [mn]
+  (when (and (= "fn-method" (:op mn)) (not (:restParm mn)) (<= (count (:reqParms mn)) 4))
+    (let [ps (mapv #(let [p (:bindingPrim (node %))] (if (#{Long/TYPE Double/TYPE} p) p Object)) (:reqParms mn))
+          r (let [r (:retClass mn)] (if (#{Long/TYPE Double/TYPE} r) r Object))]
+      (when (or (not= r Object) (some #(not= % Object) ps))
+        {:params ps :ret r}))))
+
+(declare intrinsic-probe)
+
+(defn- walk-nodes
+  "Calls f on the node (map) of each Expr of the tree of e, not inside the methods of nested
+  fns, reifys and deftypes."
+  [e f]
+  (letfn [(w [x]
+            (cond
+              (or (instance? arbace.lang.Compiler$Expr x) (instance? arbace.lang.Compiler$BindingInit x))
+              (let [n (node x)]
+                (f n)
+                (when-not (#{"fn" "new-instance"} (:op n))
+                  (doseq [[k v] n :when (not= k :self)] (w v))))
+              (instance? java.util.Map x) (doseq [v (.values ^java.util.Map x)] (w v))
+              (instance? java.util.Collection x) (doseq [v x] (w v))
+              :else nil))]
+    (w e)))
+
+(defn- spec-mask
+  "Futamura F6, step 2: which parameters of FnMethod mn (its node) a speculative worker takes as
+  longs: those an operation of Numbers with fast paths takes as an Object operand (F3); nil when
+  none, or when the method has an unboxed entry (psig), is variadic, has more than 4 parameters,
+  or recurs to its parameters (a recur would rebind them to values of any type)."
+  [mn]
+  (when (and (= "fn-method" (:op mn)) (not (:restParm mn)) (<= 1 (count (:reqParms mn)) 4) (not (psig mn)))
+    (let [ps (vec (:reqParms mn))
+          used (atom #{})
+          recurs (atom false)]
+      (walk-nodes (:body mn)
+                  (fn [n]
+                    (case (:op n)
+                      "recur" (when (and (= (count (:loopLocals n)) (count ps))
+                                         (every? true? (map identical? (:loopLocals n) ps)))
+                                (reset! recurs true))
+                      "static-method"
+                      (when-let [sig (when-let [m (:method n)] (intrinsic-probe m))]
+                        (doseq [[s a] (map vector sig (:args n))
+                                :let [an (node a)]
+                                :when (and (= s :o) (= "local" (:op an)))
+                                [i lb] (map-indexed vector ps)
+                                :when (identical? lb (:b an))]
+                          (swap! used conj i)))
+                      nil)))
+      (when (and (seq @used) (not @recurs))
+        (mapv #(contains? @used %) (range (count ps)))))))
+
+(defn- site-spec
+  "The worker's mask (spec-mask) of the fixed arity nargs of the code link key k names, or nil."
+  [k nargs]
+  (when (and k (not (string? k)))
+    (some (fn [m] (let [mn (node m)]
+                    (when (and (not (:isVariadic mn)) (= nargs (count (:reqParms mn))))
+                      (spec-mask mn))))
+          (:methods (node k)))))
+
+(defn- site-psig
+  "The primitive signature of the fixed arity nargs of the code link key k names (an evaluated
+  fn's FnExpr: link-key), or nil."
+  [k nargs]
+  (when (and k (not (string? k)))
+    (some (fn [m] (let [mn (node m)]
+                    (when (and (not (:isVariadic mn)) (= nargs (count (:reqParms mn))))
+                      (psig mn))))
+          (:methods (node k)))))
+
+(defn- prim-arg
+  "Argument e of a call of an unboxed entry, for its parameter of class p: {:binds (the
+  temporary of its value, evaluated once, in order), :gen (its boxed value, as the generic call
+  passes it), :pri (its value as the entry takes it: the boxed invoke's own conversion of the
+  boxed value, RT.longCast or doubleCast, unless the argument is of p already)}."
+  [ctx e ^Class p t]
+  (let [n (node e)
+        pc (:prim n)
+        conv (fn [f] (list (with-meta (if (= p Double/TYPE) 'arbace.lang.RT/doubleCast 'arbace.lang.RT/longCast)
+                                {:param-tags '[java.lang.Object]})
+                              f))
+        m (:method n)]
+    (cond
+      (= p Object) {:binds [(tagged t Object) (deep (emit ctx e))] :gen t :pri t}
+      ;; a constant: the boxed constant as emit makes it for the generic call, the literal (or
+      ;; the constant converted) for the entry
+      (= "number" (:op n))
+      (let [v (:n n)
+            g (deep (emit ctx e))]
+        {:binds [] :gen g
+         :pri (cond (and (= p Long/TYPE) (instance? Long v)) (long v)
+                    (and (= p Double/TYPE) (instance? Double v)) (double-form v)
+                    :else (conv g))})
+      ;; a primitive expression whose boxed code is its unboxed code boxed (a local; a resolved
+      ;; public static call): its value unboxed, boxed for the generic call as emit boxes it
+      (and (= pc p) (can-prim? n)
+           (or (= "local" (:op n))
+               (and (= "static-method" (:op n)) m (public? (.getDeclaringClass ^java.lang.reflect.Method m))
+                    (not (runtime-class? (.getDeclaringClass ^java.lang.reflect.Method m) ctx))
+                    (not (jrt-lacks? m)))))
+      {:binds [(tagged t p) (deep (emit-unboxed ctx e))] :gen (box t p) :pri t}
+      :else {:binds [(tagged t Object) (deep (emit ctx e))] :gen t :pri (conv t)})))
+
+(defn- spec-arg
+  "Argument e of a call of a worker (F6, spec-mask), for its parameter taken as a long when k:
+  {:binds (its temporary, evaluated once, in order), :gen (its boxed value, for the generic
+  call), :pass (what the worker takes: the long and the box, or nil for a box the worker makes
+  when needed; the value for a parameter not taken as a long), :guard (the test that it is a
+  Long, nil when it is one by its type)}."
+  [ctx e k t]
+  (let [n (node e)
+        m (:method n)
+        sl (when (= "local" (:op n)) (spec-local ctx (:b n)))]
+    (cond
+      (not k) {:binds [(tagged t Object) (deep (emit ctx e))] :gen t :pass [t]}
+      ;; the calling worker's own long parameter
+      sl {:binds [] :gen (deep (emit ctx e)) :pass [(:l sl) (:b sl)]}
+      (and (= "number" (:op n)) (instance? Long (:n n)))
+      (let [g (deep (emit ctx e))] {:binds [] :gen g :pass [(long (:n n)) g]})
+      (and (= Long/TYPE (:prim n)) (can-prim? n)
+           (or (= "local" (:op n))
+               (and (= "static-method" (:op n)) m (public? (.getDeclaringClass ^java.lang.reflect.Method m))
+                    (not (runtime-class? (.getDeclaringClass ^java.lang.reflect.Method m) ctx))
+                    (not (jrt-lacks? m)))))
+      {:binds [(tagged t Long/TYPE) (deep (emit-unboxed ctx e))] :gen (box t Long/TYPE) :pass [t nil]}
+      :else (or (some-> (spec-intrinsic ctx e t) deep)
+                {:binds [(tagged t Object) (deep (emit ctx e))] :gen t
+                 :guard (list 'instance? 'java.lang.Long t)
+                 :pass [(list '.longValue (list 'cast 'java.lang.Long t)) t]}))))
+
 (defn- emit-link-site
   "A call of var fexpr (its node fnode) with args (at most 20), linked when its root's code is
   known (link-key): a marker (c2j/link {...}) holding the emitted root, arguments and
-  temporaries, which link-form resolves into the guarded direct call or the generic one."
-  [ctx fnode args key]
-  (let [root (deep (var-value ctx (:var fnode)))
-        as (mapv #(deep (emit ctx %)) args)
-        site {:id (count @*link*)
-              :key key
-              :caller (top-name (:name @(:cls ctx)))
-              :root root
-              :args as
-              :syms {:r (gsym ctx "root-") :w (gsym ctx "linked-") :f (gsym ctx "ifn-")
-                     :as (mapv (fn [_] (gsym ctx "arg-")) as)}}]
-    (swap! *link* conj site)
-    (list 'c2j/link site)))
+  temporaries, which link-form resolves into the guarded direct call or the generic one. With
+  out, the class a consumer converts the call's value to (long, double: the code's primitive
+  return), and conv, the consumer's conversion of the generic call's value."
+  ([ctx fnode args key] (emit-link-site ctx fnode args key nil nil))
+  ([ctx fnode args key out conv]
+   (let [root (deep (var-value ctx (:var fnode)))
+         sig (site-psig key (count args))
+         syms {:r (gsym ctx "root-") :w (gsym ctx "linked-") :f (gsym ctx "ifn-")
+               :as (mapv (fn [_] (gsym ctx "arg-")) args)}
+         mask (when-not sig (site-spec key (count args)))
+         pargs (cond
+                 sig (mapv (fn [e p t] (prim-arg ctx e p t)) args (:params sig) (:as syms))
+                 mask (mapv (fn [e k t] (spec-arg ctx e k t)) args mask (:as syms)))
+         as (if pargs (mapv :gen pargs) (mapv #(deep (emit ctx %)) args))
+         site {:id (count @*link*)
+               :key key
+               :caller (top-name (:name @(:cls ctx)))
+               :root root
+               :args as
+               :syms syms}
+         site (cond
+                sig (assoc site :psig sig :out out :conv conv
+                           :binds (vec (mapcat :binds pargs)) :pri (mapv :pri pargs)
+                           :parts [(vec (mapcat :binds pargs)) (mapv :pri pargs)])
+                mask (let [guards (keep :guard pargs)
+                           spass (vec (mapcat :pass pargs))]
+                       (assoc site :smask mask
+                              :binds (vec (mapcat :binds pargs)) :spass spass
+                              :guard (when (seq guards) (if (next guards) (cons 'and guards) (first guards)))
+                              :parts [(vec (mapcat :binds pargs)) spass (vec guards)]))
+                :else site)]
+     (swap! *link* conj site)
+     (list 'c2j/link site))))
 
 (defn link-form
   "The code of link marker m (emit-link-site): with cname, the code class of the fn the site
@@ -581,21 +757,56 @@
   class's fn class (fn-class, one Class per code: Compiler$AOT/fnClass), one pointer compare
   (Compiler$AOTFn/linked, which answers the fn's body or nil); then the code's invoke is called
   directly with the fn as self, as the fn's invoke would call it. The root is read once, and
-  cast to IFn before the arguments when the guard fails, as the generic call casts it."
-  [m cname variadic]
-  (let [{:keys [root args syms]} (second m)]
-    (if (nil? cname)
-      (list* '.invoke (list 'cast 'arbace.lang.IFn root) args)
-      (let [{:keys [r w f as]} syms
-            wt (if variadic 'arbace.lang.Compiler$AOTRestFn 'arbace.lang.Compiler$AOTFn)]
-        (list 'let (vec (concat
-                          [(tagged r Object) root
-                           (tagged w Object) (list (symbol (str wt) "linked") r (symbol cname "fn-class"))
-                           (tagged f 'arbace.lang.IFn) (list 'if (list 'nil? w) (list 'cast 'arbace.lang.IFn r) nil)]
-                          (mapcat (fn [s a] [(tagged s Object) a]) as args)))
-              (list 'if (list 'nil? w)
-                    (list* '.invoke f as)
-                    (list* '.invoke (list 'cast (symbol cname) w) r as)))))))
+  cast to IFn before the arguments when the guard fails, as the generic call casts it.
+
+  A call of a primitive fn's arity (:psig, F6) or of an arity with a worker (:smask, F6 step 2):
+  its arguments bound first, each once (unboxed when the entry takes it so and it is of that
+  type). For a primitive fn the direct call is of the code's unboxed entry, invokePrim (prims:
+  the code's signatures by arity), its value boxed as the boxed invoke boxes it, or left unboxed
+  for a consumer converting to the return's class (:out); for a worker it is of the code's
+  invokeSpec (specs: the code's masks by arity) when the arguments it takes as longs are Longs
+  (:guard), else of its invoke. The generic call is given the boxed arguments, its value
+  converted as the consumer converts it."
+  ([m cname variadic] (link-form m cname variadic nil nil))
+  ([m cname variadic prims specs]
+   (let [{:keys [root args syms psig smask out conv binds pri spass guard]} (second m)
+         {:keys [r w f as]} syms
+         conv (or conv identity)]
+     (cond
+       (and (or psig smask) (nil? cname))
+       (list 'let (vec (concat [(tagged f 'arbace.lang.IFn) (list 'cast 'arbace.lang.IFn root)] binds))
+             (conv (list* '.invoke f args)))
+       (nil? cname)
+       (list* '.invoke (list 'cast 'arbace.lang.IFn root) args)
+       (or psig smask)
+       (let [boxed (conv (list* '.invoke (list 'cast (symbol cname) w) r args))
+             direct (cond
+                      (and psig (= psig (get prims (count args))))
+                      (let [c (list* '.invokePrim (list 'cast (symbol cname) w) r pri)]
+                        (if out c (box c (:ret psig))))
+                      (and smask (= smask (get specs (count args))))
+                      (let [c (list* '.invokeSpec (list 'cast (symbol cname) w) r spass)]
+                        (if guard (list 'if guard c boxed) c))
+                      :else boxed)]
+         (list 'let (vec (concat
+                           [(tagged r Object) root
+                            (tagged w Object) (list (if variadic 'arbace.lang.Compiler$AOTRestFn/linked 'arbace.lang.Compiler$AOTFn/linkedFast)
+                                                    r (symbol cname "fn-class"))
+                            (tagged f 'arbace.lang.IFn) (list 'if (list 'nil? w) (list 'cast 'arbace.lang.IFn r) nil)]
+                           binds))
+               (list 'if (list 'nil? w)
+                     (conv (list* '.invoke f args))
+                     direct)))
+       :else
+       (let [wt (if variadic 'arbace.lang.Compiler$AOTRestFn 'arbace.lang.Compiler$AOTFn)]
+         (list 'let (vec (concat
+                           [(tagged r Object) root
+                            (tagged w Object) (list (symbol (str wt) "linked") r (symbol cname "fn-class"))
+                            (tagged f 'arbace.lang.IFn) (list 'if (list 'nil? w) (list 'cast 'arbace.lang.IFn r) nil)]
+                           (mapcat (fn [s a] [(tagged s Object) a]) as args)))
+               (list 'if (list 'nil? w)
+                     (list* '.invoke f as)
+                     (list* '.invoke (list 'cast (symbol cname) w) r as))))))))
 
 (defn link-target
   "The class name and record of the code class link key k names (link-key), given the classes
@@ -605,13 +816,30 @@
         rec (when cname (get classes cname))]
     (when (= :fn (:kind rec)) [cname rec])))
 
+(defn- site-key
+  "The link key of invoke node n (link-key) when its call may be linked, else nil."
+  [n]
+  (let [fnode (node (:fexpr n))]
+    (when (and *link* (= "var" (:op fnode)) (<= (count (:args n)) 20)
+               (not (and (:isProtocol n) (:protocolOn n))))
+      (link-key (:var fnode)))))
+
+(defn- prim-call
+  "The code of e, an invoke whose value a consumer converts to primitive class p by conv (a fn
+  of the boxed value's form), when it is a call of a primitive fn's arity returning p (F6):
+  its direct call's value left unboxed; else nil."
+  [ctx e ^Class p conv]
+  (let [n (node e)]
+    (when (and (= "invoke" (:op n)) (#{Long/TYPE Double/TYPE} p))
+      (when-let [key (site-key n)]
+        (when (= p (:ret (site-psig key (count (:args n)))))
+          (line-meta (emit-link-site ctx (node (:fexpr n)) (:args n) key p conv) n))))))
+
 (defn- emit-invoke [ctx n]
   (let [args (:args n)
         fexpr (:fexpr n)
         fnode (node fexpr)
-        key (when (and *link* (= "var" (:op fnode)) (<= (count args) 20)
-                       (not (and (:isProtocol n) (:protocolOn n))))
-              (link-key (:var fnode)))
+        key (site-key n)
         call (fn [f]
                (if (> (count args) 20)
                  (list '.applyTo (list 'cast 'arbace.lang.IFn f)
@@ -735,7 +963,12 @@
 (def ^:private long-min 'java.lang.Long/MIN_VALUE)
 (def ^:private long-max 'java.lang.Long/MAX_VALUE)
 
-(defn- long-box [f] (list (with-meta 'java.lang.Long/valueOf {:param-tags '[long]}) f))
+(def ^:private ^:dynamic *lbox*
+  "While set, how the Long case's result is given (spec-intrinsic: as the long itself), in
+  place of its box."
+  nil)
+
+(defn- long-box [f] (if *lbox* (*lbox* f) (list (with-meta 'java.lang.Long/valueOf {:param-tags '[long]}) f)))
 (defn- double-box [f] (list (with-meta 'java.lang.Double/valueOf {:param-tags '[double]}) f))
 
 (defn- long-op2
@@ -816,10 +1049,10 @@
     "isNeg" (list '< x 0.0)
     nil))
 
-(defn- numbers-intrinsic
-  "The call of Numbers' static method m on args with its fast paths, or nil when m is not one
-  of the boxed operations above."
-  [ctx ^java.lang.reflect.Method m args]
+(defn- intrinsic-probe
+  "Is Numbers' static method m one of the boxed operations with fast paths? Its signature
+  ([:o :j ...]) when it is, else nil."
+  [^java.lang.reflect.Method m]
   (when (= (.getDeclaringClass m) arbace.lang.Numbers)
     (let [ps (vec (.getParameterTypes m))
           sig (mapv #(cond (= % Object) :o (= % Long/TYPE) :j :else :x) ps)
@@ -828,28 +1061,85 @@
                   1 (when (= sig [:o]) (long-op1 op 'x 'slow))
                   2 (when (and (some #{:o} sig) (every? #{:o :j} sig)) (long-op2 op 'x 'y 'slow 'r))
                   nil)]
-      (when probe
-        (let [temps (mapv (fn [_] (gsym ctx "na-")) ps)
-              binds (vec (mapcat (fn [t p f] [(tagged t p) f]) temps ps (typed-args ctx ps args)))
-              slow (list* (with-meta (symbol "arbace.lang.Numbers" op) (param-tags ps)) temps)
-              lv (fn [t] (list '.longValue (list 'cast 'java.lang.Long t)))
-              dv (fn [t] (list '.doubleValue (list 'cast 'java.lang.Double t)))
-              objs (keep (fn [[t s]] (when (= s :o) t)) (map vector temps sig))
-              is (fn [c] (let [ts (map #(list 'instance? c %) objs)]
-                           (if (next ts) (cons 'and ts) (first ts))))
-              xs (mapv (fn [k] (gsym ctx (str "n" k "-"))) (range (count ps)))
-              ;; the operands as longs: an Object one unboxed, a long one as is
-              lbinds (vec (mapcat (fn [x t s] [(tagged x Long/TYPE) (if (= s :o) (lv t) t)]) xs temps sig))
-              lfast (if (= 1 (count ps)) (long-op1 op (xs 0) slow) (long-op2 op (xs 0) (xs 1) slow (gsym ctx "nr-")))
-              dfast (when (every? #{:o} sig)
-                      (if (= 1 (count ps)) (double-op1 op (xs 0)) (double-op2 op (xs 0) (xs 1))))
-              dbinds (vec (mapcat (fn [x t] [(tagged x Double/TYPE) (dv t)]) xs temps))]
-          (list 'let binds
-                (list 'if (is 'java.lang.Long)
-                      (list 'let lbinds lfast)
-                      (if dfast
-                        (list 'if (is 'java.lang.Double) (list 'let dbinds dfast) slow)
-                        slow))))))))
+      (when probe sig))))
+
+(defn- numbers-intrinsic
+  "The call of Numbers' static method m on args with its fast paths, or nil when m is not one
+  of the boxed operations above. An Object operand that is a worker's long parameter (F6,
+  spec-local) is a Long: no test, its long as is, its box for the slow path."
+  [ctx ^java.lang.reflect.Method m args]
+  (when-let [sig (intrinsic-probe m)]
+    (let [ps (vec (.getParameterTypes m))
+          op (.getName m)
+          specs (mapv (fn [s e] (when (= s :o)
+                                  (let [n (node e)]
+                                    (when (= "local" (:op n)) (spec-local ctx (:b n))))))
+                      sig args)
+          temps (mapv (fn [sp] (when-not sp (gsym ctx "na-"))) specs)
+          targs (typed-args ctx ps args)
+          binds (vec (mapcat (fn [t p f] (when t [(tagged t p) f])) temps ps targs))
+          boxes (mapv (fn [t sp] (if sp (list 'if (list 'nil? (:b sp)) (list 'set! (:b sp) (long-box* (:l sp))) (:b sp)) t))
+                      temps specs)
+          slow (list* (with-meta (symbol "arbace.lang.Numbers" op) (param-tags ps)) boxes)
+          lv (fn [t] (list '.longValue (list 'cast 'java.lang.Long t)))
+          dv (fn [t] (list '.doubleValue (list 'cast 'java.lang.Double t)))
+          objs (keep (fn [[t s sp]] (when (and (= s :o) (not sp)) t)) (map vector temps sig specs))
+          is (fn [c] (let [ts (map #(list 'instance? c %) objs)]
+                       (if (next ts) (cons 'and ts) (first ts))))
+          xs (mapv (fn [k] (gsym ctx (str "n" k "-"))) (range (count ps)))
+          ;; the operands as longs: an Object one unboxed, a long one as is
+          lbinds (vec (mapcat (fn [x t s sp] [(tagged x Long/TYPE) (cond sp (:l sp) (= s :o) (lv t) :else t)])
+                              xs temps sig specs))
+          lfast (if (= 1 (count ps)) (long-op1 op (xs 0) slow) (long-op2 op (xs 0) (xs 1) slow (gsym ctx "nr-")))
+          dfast (when (and (every? #{:o} sig) (not-any? some? specs))
+                  (if (= 1 (count ps)) (double-op1 op (xs 0)) (double-op2 op (xs 0) (xs 1))))
+          dbinds (vec (mapcat (fn [x t] [(tagged x Double/TYPE) (dv t)]) xs temps))]
+      (list 'let binds
+            (if (empty? objs)
+              (list 'let lbinds lfast)
+              (list 'if (is 'java.lang.Long)
+                    (list 'let lbinds lfast)
+                    (if dfast
+                      (list 'if (is 'java.lang.Double) (list 'let dbinds dfast) slow)
+                      slow)))))))
+
+(def ^:private long-valued-ops
+  #{"add" "addP" "minus" "minusP" "multiply" "multiplyP" "unchecked_add" "unchecked_minus"
+    "unchecked_multiply" "inc" "incP" "dec" "decP" "unchecked_inc" "unchecked_dec" "quotient"
+    "remainder"})
+
+(defn- spec-intrinsic
+  "Argument e of a worker's call for a parameter it takes as a long (F6, spec-arg), when e is an
+  operation of Numbers with fast paths whose Object operands are all the calling worker's long
+  parameters: its Long case computed as a long, not boxed (the worker boxes it if it needs to,
+  as the generic call's argument would have been boxed, once); its other case's value (Numbers'
+  own: an overflow promoted, a ratio) in temporary t, nil in the Long case. As spec-arg's
+  result, or nil."
+  [ctx e t]
+  (let [n (node e)
+        ^java.lang.reflect.Method m (:method n)
+        sig (when (and (= "static-method" (:op n)) m) (intrinsic-probe m))]
+    (when (and sig (contains? long-valued-ops (.getName m)) (not (.isPrimitive (.getReturnType m))))
+      (let [args (:args n)
+            specs (mapv (fn [s a] (when (= s :o) (let [an (node a)] (when (= "local" (:op an)) (spec-local ctx (:b an))))))
+                        sig args)]
+        (when (every? identity (map (fn [s sp] (or (= s :j) sp)) sig specs))
+          (let [ps (vec (.getParameterTypes m))
+                op (.getName m)
+                tl (symbol (str t "_l"))
+                xs (mapv (fn [k] (gsym ctx (str "n" k "-"))) (range (count ps)))
+                xbinds (vec (mapcat (fn [x s sp a] [(tagged x Long/TYPE) (if sp (:l sp) (first (typed-args ctx [Long/TYPE] [a])))])
+                                    xs sig specs args))
+                boxes (mapv (fn [x s sp] (if sp (list 'if (list 'nil? (:b sp)) (list 'set! (:b sp) (long-box* (:l sp))) (:b sp)) x))
+                            xs sig specs)
+                slow (list 'do (list 'set! t (list* (with-meta (symbol "arbace.lang.Numbers" op) (param-tags ps)) boxes)) 0)
+                fast (binding [*lbox* identity]
+                       (if (= 1 (count ps)) (long-op1 op (xs 0) slow) (long-op2 op (xs 0) (xs 1) slow (gsym ctx "nr-"))))]
+            {:binds [(vary-meta (tagged t Object) assoc :mutable true) nil
+                     (tagged tl Long/TYPE) (list 'let xbinds fast)]
+             :gen (list 'if (list 'nil? t) (long-box* tl) t)
+             :guard (list 'or (list 'nil? t) (list 'instance? 'java.lang.Long t))
+             :pass [(list 'if (list 'nil? t) tl (list '.longValue (list 'cast 'java.lang.Long t))) t]}))))))
 
 (defn- emit-static-method [ctx n unboxed?]
   (let [^java.lang.reflect.Method m (:method n)]
@@ -1259,21 +1549,27 @@
         (list (with-meta 'arbace.lang.RT/intCast {:param-tags '[long]}) (emit-unboxed ctx body))
         (and (= ret Float/TYPE) (= bc Double/TYPE)) (list 'unchecked-float (emit-unboxed ctx body))
         :else (fail (str "mismatched primitive return, expected " ret ", had " bc)))
-      (let [f (emit ctx body)]
+      (let [num (fn [f] (list (symbol (str "." (.getName ret) "Value")) (list 'cast 'java.lang.Number f)))]
+       (or
+        ;; a call of a primitive fn returning ret: its unboxed value (F6)
+        (and (#{Long/TYPE Double/TYPE} ret) (prim-call ctx body ret num))
+        (let [f (emit ctx body)]
         (cond
           (throws? body) f
           (= ret Void/TYPE) f
           (= ret Object) f
           (= ret Boolean/TYPE) (list '.booleanValue (list 'cast 'java.lang.Boolean f))
           (= ret Character/TYPE) (list '.charValue (list 'cast 'java.lang.Character f))
-          (.isPrimitive ret) (list (symbol (str "." (.getName ret) "Value")) (list 'cast 'java.lang.Number f))
+          (.isPrimitive ret) (num f)
           (or (runtime-class? ret ctx) (not (public? ret))) f
-          :else (list 'cast (type-sym ret) f))))))
+          :else (list 'cast (type-sym ret) f))))))))
 
 (defn- method-body
   "The body of FnMethod or NewInstanceMethod m (its node), in the method's context: wrapped in
-  a loop over its parameters when a recur targets them."
-  [ctx mn params]
+  a loop over its parameters when a recur targets them. With entry, the body of a fn method's
+  unboxed entry (F6, psig): its primitive parameters taken as they are, its value of the
+  signature's return class."
+  [ctx mn params & [entry]]
   (let [rec (atom false)
         locals (vec (concat (:reqParms mn) (when (:restParm mn) [(:restParm mn)])
                             (when-not (:reqParms mn) (:argLocals mn))))
@@ -1281,18 +1577,22 @@
         ;; ^long and ^double parameters of a fn that is not primitive: converted on entry, as
         ;; the evaluator's invokeFn does (RT.longCast, doubleCast)
         fn-method? (= "fn-method" (:op mn))
-        prims (when fn-method?
+        prims (when (and fn-method? (not entry))
                 (for [lb locals
                       :let [b (node lb)]
                       :when (:bindingPrim b)]
                   b))
         ret (:retClass mn)
         body (cond
+               ;; the unboxed entry's: the return as its class
+               (and entry (#{Long/TYPE Double/TYPE} ret)) (ret-body ctx' (:body mn) ret)
                ;; a fn's ^long or ^double return: converted on exit, as the evaluator's
                ;; Evaluator.result (the Go build makes no fn primitive)
                (and fn-method? (#{Long/TYPE Double/TYPE} ret)) (box (ret-body ctx' (:body mn) ret) ret)
                fn-method? (emit ctx' (:body mn))
                :else (ret-body ctx' (:body mn) ret))
+        _ (when (and (= entry :spec) (do (deep body) @rec))
+            (fail (str "a worker's body recurs to its parameters: " (:name (:objx ctx)))))
         body (if @rec
                (list 'loop (vec (mapcat (fn [lb] (let [b (node lb)] [(tagged (local-sym b) (or (:bindingPrim b) Object)) (local-sym b)]))
                                         locals))
@@ -1362,7 +1662,7 @@
       (let [cls (pool ctx cname)
             fields (vec (keys (:closes ox)))
             ;; its methods' this is this, also when the deftype is in a fn's code (self there)
-            ctx' (assoc ctx :cls cls :objx ox :once false :closed (identity-set fields) :self-sym 'this)
+            ctx' (assoc (dissoc ctx :spec-locals) :cls cls :objx ox :once false :closed (identity-set fields) :self-sym 'this)
             fbs (mapv node fields)
             ftype (fn [b] (or (:bindingPrim b) Object))
             fsym (fn [b] (symbol (:name b)))
@@ -1438,7 +1738,7 @@
       (swap! (:classes ctx) assoc cname ::pending)
       (let [cls (pool ctx (top-name cname))
             fn? (= "fn" (:op ox))
-            ctx' (assoc ctx :cls cls :objx ox :once (:onceOnly ox) :closed (identity-set (keys (:closes ox)))
+            ctx' (assoc (dissoc ctx :spec-locals) :cls cls :objx ox :once (:onceOnly ox) :closed (identity-set (keys (:closes ox)))
                         :self-sym (if fn? 'self 'this))
             closes (keys (:closes ox))
             ;; a reify's metadata is its object's (__meta); a fn's is its Compiler$AOTFn's
@@ -1462,11 +1762,61 @@
                     :let [mn (node m)
                           req (:reqParms mn)
                           ps (vec (concat ['this 'self] (map param-sym req)
-                                          (when (:restParm mn) [(param-sym (:restParm mn))])))]]
-                (vary-meta
-                  (list 'method (with-meta (if (:isVariadic mn) 'doInvoke 'invoke) {:public true}) ps
-                        (method-body ctx' mn ps))
-                  assoc :c2j/line (:line mn)))
+                                          (when (:restParm mn) [(param-sym (:restParm mn))])))
+                          sig (psig mn)
+                          mask (when-not sig (spec-mask mn))]
+                    f (cond
+                        mask
+                        ;; F6, step 2: a speculative worker, invokeSpec, taking the parameters
+                        ;; of the mask as longs (with their boxes, nil when the caller had none:
+                        ;; made once, when needed), entered from the boxed invoke and from linked
+                        ;; calls when those arguments are Longs; else the boxed body
+                        (let [infos (mapv (fn [lb k] (when k (let [ls (local-sym (node lb))]
+                                                               {:l (symbol (str ls "_l")) :b (symbol (str ls "_b"))})))
+                                          req mask)
+                              sl (IdentityHashMap.)
+                              _ (doseq [[lb i] (map vector req infos) :when i] (.put sl lb i))
+                              wps (vec (concat ['this 'self]
+                                               (mapcat (fn [lb i] (if i
+                                                                    [(tagged (:l i) Long/TYPE) (vary-meta (tagged (:b i) Object) assoc :mutable true)]
+                                                                    [(param-sym lb)]))
+                                                       req infos)))
+                              generic (deep (method-body ctx' mn ps))
+                              worker (deep (method-body (assoc ctx' :spec-locals sl) mn wps :spec))
+                              guards (for [[lb i] (map vector req infos) :when i]
+                                       (list 'instance? 'java.lang.Long (param-sym lb)))
+                              guard (if (next guards) (cons 'and guards) (first guards))]
+                          [(list 'method (with-meta 'invoke {:public true}) ps
+                                 (list 'if guard
+                                       (list* '.invokeSpec 'this 'self
+                                              (mapcat (fn [lb i] (if i
+                                                                   [(list '.longValue (list 'cast 'java.lang.Long (param-sym lb))) (param-sym lb)]
+                                                                   [(param-sym lb)]))
+                                                      req infos))
+                                       generic))
+                           (list 'method (with-meta 'invokeSpec {:public true}) wps worker)])
+                        sig
+                        ;; a primitive fn's arity (F6): its unboxed entry, and the boxed invoke
+                        ;; converting its arguments (RT.longCast, doubleCast) and boxing the
+                        ;; entry's value, as the boxed method converts and boxes
+                        (let [eps (vec (concat ['this 'self]
+                                               (map (fn [lb p] (tagged (local-sym (node lb)) p)) req (:params sig))))]
+                          [(list 'method (with-meta 'invokePrim {:public true}) (tagged eps (:ret sig))
+                                 (method-body ctx' mn eps true))
+                           (list 'method (with-meta 'invoke {:public true}) ps
+                                 (box (list* '.invokePrim 'this 'self
+                                             (map (fn [lb p]
+                                                    (if (= p Object)
+                                                      (param-sym lb)
+                                                      (list (with-meta (if (= p Double/TYPE) 'arbace.lang.RT/doubleCast 'arbace.lang.RT/longCast)
+                                                              {:param-tags '[java.lang.Object]})
+                                                            (param-sym lb))))
+                                                  req (:params sig)))
+                                      (:ret sig)))])
+                        :else
+                        [(list 'method (with-meta (if (:isVariadic mn) 'doInvoke 'invoke) {:public true}) ps
+                               (method-body ctx' mn ps))])]
+                (vary-meta f assoc :c2j/line (:line mn)))
               (for [m (:methods ox)
                     :let [mn (node m)
                           als (:argLocals mn)
@@ -1500,6 +1850,16 @@
                 :super 'java.lang.Object
                 :interfaces interfaces
                 :variadic (when variadic (count (:reqParms variadic)))
+                ;; the unboxed entries' signatures by arity (F6)
+                :prims (when fn? (not-empty (into {} (for [m (:methods ox)
+                                                          :let [mn (node m) sig (psig mn)]
+                                                          :when sig]
+                                                      [(count (:reqParms mn)) sig]))))
+                ;; the workers' masks by arity (F6, step 2)
+                :specs (when fn? (not-empty (into {} (for [m (:methods ox)
+                                                          :let [mn (node m) mask (spec-mask mn)]
+                                                          :when mask]
+                                                      [(count (:reqParms mn)) mask]))))
                 :line (:line ox)}))))
     cname))
 
