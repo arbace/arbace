@@ -93,6 +93,11 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
+- Running (the user, 2026-10-18: "start all 5"): F6 (primitive fns, then unboxed workers;
+  branch `f6-prim`), goi's GR3 (the interpreter's core; `goi-gr3`), KU3 (processes on arm64;
+  `ku3`), repr/haskell R6 (.hsc, .lhs, boot files; `repr-haskell-r6`), repr/rust RR3 (`:full`
+  and the text level; `repr-rust-rr3`).
+
 - Done (2026-10-18): F5 (guarded direct linking, geometric mean 1.10), `repr/clojure print`, `repr/java`'s
   `:full` mode, the evaluator's compile race fixed. F5.2 found (code layout), CP1 built, the seed
   remade (`910b4b8f…`). Next: F6, then F7.
