@@ -1,0 +1,582 @@
+(ns arbace.c2j.node
+  "Futamura F7 (doc/FUTAMURA-SURVEY.md, \"F7 as built\"): node kinds defined once and staged.
+  A definition (defnode) is read twice: as the back end's emitter of the kind (defnode's
+  expansion, a fn emit-KIND of the namespace using it, arbace.c2j.emit) and as the evaluator's
+  Code classes of the kind with their construction (code-file, run by test/c2j/gen_nodes.ae,
+  which writes arbace/lang/go/CompilerNodes.ae). The two halves of the kind are then one text.
+
+  (defnode KIND doc opts bindings template)
+
+  opts: :exprs, the analyzed node's classes (Compiler$IfExpr ...; the evaluator's dispatch);
+  :fields, the node's fields the static forms read (besides the children's); :chans, the
+  evaluator's channels (:o run, :j runLong, :d runDouble, :z runBool; all four by default);
+  :class, the evaluator's class name (CodeKIND); :emit-first, a fn of [ctx n unboxed?] the
+  emitter tries first (a refinement of the back end's own: F5's linked calls), nil when it does
+  not apply; :domain {:index form}, a static of finite domain (a method): the evaluator makes one
+  class per arity with a switch over the domain (generation's :domains), the index form its
+  case (arity * 10000 + case, or -1: not this kind).
+
+  bindings, [sym spec ...], in order:
+  - (child F): the child node in field F (the emitter: its Expr; the evaluator: its Code);
+  - (children F max & {:convert ps}): the children in field F (a vector); the evaluator makes a
+    class per count up to max, and one holding an array past it; :convert, the evaluator's
+    children converted to the parameter classes ps (CodeCompiler.convert);
+  - (static T form): a value made when the node is (both halves, the same form: a Java form
+    the evaluator's construction runs, a Clojure form the emitter runs, over the fields, the
+    node e and earlier statics), of class T; in the template's dynamic code a field of the
+    evaluator's node and a literal or constant of the emitted code (lift);
+  - (eval-static T form): the evaluator's alone (the CodeCompiler cc in scope); nil emitting;
+  - (place): where a local lives, each half's own (the evaluator: eval-places; the emitter: its
+    local-place).
+
+  The template is a Java form, the node's value in channel ch, with these staged parts:
+  (run CH x) a child's value in channel CH (ch: the channel being made); (run-all :o xs) the
+  children's values, (run-args m xs) as method m's arguments, both spliced by (splice s) or
+  made an array by (array-of s); (call-site line [s init ...] body ...) a call: its operands
+  bound in order, then (the evaluator's) the frame's line, then the body; (eval-only form) the
+  evaluator's alone; (static-if c a b) chosen when the node is made (the evaluator: a class per
+  case, for a static boolean, (many? xs), (clears? at)); (static-case ch :o a :j b ...);
+  (box-as ch m form) a method's value boxed in channel :o; (call-static m as) the direct call
+  (with F3's fast paths for Numbers' boxed operations: one builder for both halves);
+  (get-place at CH), (set-place at x); let. Any other form is copied: the emitter quotes it,
+  the evaluator runs it."
+  (:require [arbace.string :as str]))
+
+;; ---------------------------------------------------------------------------------------
+;; definitions
+
+(def registry
+  "The node kinds defined, in order of definition: [{:kind :doc :opts :binds :template}]."
+  (atom []))
+
+(defn register!
+  "Records definition d (a kind defined again replaces its earlier definition)."
+  [d]
+  (swap! registry (fn [ds] (let [i (first (keep-indexed (fn [i x] (when (= (:kind x) (:kind d)) i)) ds))]
+                             (if i (assoc ds i d) (conj ds d))))))
+
+(defn parse
+  "defnode's arguments as a definition."
+  [kind doc opts bindings template]
+  {:kind kind :doc doc :opts opts
+   :binds (mapv (fn [[s spec]] {:sym s :k (first spec) :args (vec (rest spec))}) (partition 2 bindings))
+   :template template})
+
+(defn- field-names
+  "The node fields the definition reads: its children's and :fields."
+  [d]
+  (vec (distinct (concat (keep (fn [b] (when (#{'child 'children} (:k b)) (first (:args b)))) (:binds d))
+                         (:fields (:opts d))))))
+
+(defn- children-bind [d] (first (filter #(= 'children (:k %)) (:binds d))))
+
+(defn- walk-syms
+  "Form f with each symbol s replaced by (r s) when r has it."
+  [r f]
+  (cond
+    (symbol? f) (if (contains? r f) (r f) f)
+    (seq? f) (with-meta (apply list (map #(walk-syms r %) f)) (meta f))
+    (vector? f) (with-meta (mapv #(walk-syms r %) f) (meta f))
+    (map? f) (into {} (map (fn [[k v]] [(walk-syms r k) (walk-syms r v)]) f))
+    :else f))
+
+(defn- head [f] (when (and (seq? f) (symbol? (first f))) (first f)))
+
+(defn- runs-children?
+  "Does template t run a child (code of another node inside it)?"
+  [t]
+  (cond
+    (seq? t) (or (contains? '#{run run-all run-args} (head t)) (some runs-children? t))
+    (vector? t) (some runs-children? t)
+    :else false))
+
+;; ---------------------------------------------------------------------------------------
+;; the emitter: the template as code making Java forms (defnode's expansion)
+;;
+;; The expansion is a fn of [ctx n unboxed?] in the namespace using defnode, which provides:
+;; emit, emit-unboxed, typed-args, box, call-static, lift, prim-chan, gsym. Its values are
+;; made in the order the template has them, as the hand-written emitters made them (the
+;; constants' and temporaries' numbering follows that order).
+
+(declare q)
+
+(defn- q-elems
+  "Code making the elements xs of a list or vector, (splice s) spliced: [fixed tail], the
+  fixed elements' codes and the code of the spliced tail (nil: none). A splice must be last."
+  [env xs]
+  (let [lst (last xs)]
+    (if (and (seq? lst) (= 'splice (head lst)))
+      (let [b (env (second lst))]
+        [(mapv #(q env %) (butlast xs))
+         (case (:k b)
+           :cs-delay (list 'deref (:v b))
+           (:v b))])
+      [(mapv #(q env %) xs) nil])))
+
+(defn- q-drop? [x] (= x ::drop))
+
+(defn- q-body
+  "Code making body forms bs as one form (the forms the emitter drops left out)."
+  [env bs]
+  (let [cs (remove q-drop? (map #(q env %) bs))]
+    (cond
+      (empty? cs) nil
+      (= 1 (count cs)) (first cs)
+      :else (list* 'list ''do cs))))
+
+(defn- qs
+  "Static form f as emit-time code: the template's names replaced by the emitter's locals."
+  [env f]
+  (cond
+    (= f 'ch) (:v (env 'ch))
+    (and (seq? f) (= 'many? (head f))) (list '> (list 'count (:v (env (second f)))) (:max (env (second f))))
+    (and (seq? f) (= 'clears? (head f))) (list :clears (:v (env (second f))))
+    :else (walk-syms (into {} (keep (fn [[s b]] (when (and (symbol? s) (#{:static :child :children :field :e :place} (:k b))) [s (:v b)]))) env) f)))
+
+(defn- q-seq [env t]
+  (let [[h & as] t]
+    (case h
+      run (let [[c x] as
+                xv (:v (env x))]
+            (case c
+              :o (list 'emit 'ctx xv)
+              (:j :d :z) (list 'emit-unboxed 'ctx xv)
+              ch (list 'if 'unboxed? (list 'emit-unboxed 'ctx xv) (list 'emit 'ctx xv))))
+      run-all (let [[_ xs] as] (list 'map (list 'fn '[x] (list 'emit 'ctx 'x)) (:v (env xs))))
+      run-args (let [[m xs] as]
+                 (list 'delay (list 'typed-args 'ctx (list '.getParameterTypes (qs env m)) (:v (env xs)))))
+      call-site (let [[_ bv & body] as
+                      [env binds] (reduce (fn [[env binds] [s init]]
+                                            (let [v (gensym (str s "_"))
+                                                  k (if (= 'run-args (head init)) :cs-delay :cs)]
+                                              [(assoc env s {:k k :v v :children (when (= k :cs-delay) (:v (env (nth init 2))))})
+                                               (conj binds v (q env init))]))
+                                          [env []] (partition 2 bv))]
+                  (list 'let binds (q-body env body)))
+      eval-only ::drop
+      do (q-body env as)
+      static-if (let [[c a b] as] (list 'if (qs env c) (q env a) (q env b)))
+      static-case (let [[sel & cls] as]
+                    (concat (list 'case (qs env sel)) (mapcat (fn [[k f]] [k (q env f)]) (partition 2 cls))))
+      box-as (let [[c m f] as
+                   fv (gensym "f_")]
+               (list 'let [fv (q env f)]
+                     (list 'if (list '= (qs env c) :o) (list 'box fv (list '.getReturnType (qs env m))) fv)))
+      call-static (let [[m a] as
+                        b (env a)]
+                    (list 'call-static 'ctx (qs env m) (:v b) (:children b)))
+      array-of (let [[s] as
+                     b (env s)]
+                 (list 'list ''new ''java.lang.Object/1 (list 'vec (if (= :cs-delay (:k b)) (list 'deref (:v b)) (:v b)))))
+      get-place (let [[at _] as] (list :form (:v (env at))))
+      set-place (let [[at x] as] (list 'list ''set! (list :form (:v (env at))) (q env x)))
+      let (let [[bv & body] as
+                fresh (runs-children? (cons 'do body))
+                [env binds lets] (reduce (fn [[env binds lets] [s init]]
+                                           (let [v (gensym (str s "_"))]
+                                             [(assoc env s {:k :tlocal :v v})
+                                              (conj binds v (if fresh (list 'gsym 'ctx (str s "-")) (list 'quote (symbol (str s "-")))))
+                                              (conj lets v (q env init))]))
+                                         [env [] []] (partition 2 bv))]
+            (list 'let binds (list* 'list ''let (list* 'vector lets) (remove q-drop? (map #(q env %) body)))))
+      (let [[fixed tail] (q-elems env t)]
+        (if tail
+          (concat (list 'list*) fixed [tail])
+          (cons 'list fixed))))))
+
+(defn- q
+  "Code making template t's Java form (env: the template's names)."
+  [env t]
+  (cond
+    (symbol? t) (if-let [b (env t)]
+                  (case (:k b)
+                    :static (list 'lift 'ctx (:v b) (list 'quote (:t b)))
+                    (:cs :tlocal) (:v b)
+                    (throw (ex-info (str "defnode: " t " is not a value of the emitted code") {})))
+                  (list 'quote t))
+    (seq? t) (q-seq env t)
+    (vector? t) (let [[fixed tail] (q-elems env t)]
+                  (if tail (list 'vec (list 'concat (vec fixed) tail)) fixed))
+    :else t))
+
+(defn emit-fn
+  "The emitter of definition d: (defn emit-KIND [ctx n unboxed?] ...)."
+  [d]
+  (let [fields (field-names d)
+        ev (gensym "e_")
+        chv (gensym "ch_")
+        env0 (into {'ch {:k :ch :v chv} 'e {:k :e :v ev}}
+                   (map (fn [f] [f {:k :field :v (gensym (str f "_"))}]) fields))
+        [env binds] (reduce (fn [[env binds] {:keys [sym k args]}]
+                              (let [v (gensym (str sym "_"))]
+                                (case k
+                                  child [(assoc env sym {:k :child :v v}) (conj binds v (:v (env (first args))))]
+                                  children [(assoc env sym {:k :children :v v :max (second args)}) (conj binds v (:v (env (first args))))]
+                                  static [(assoc env sym {:k :static :v v :t (first args)}) (conj binds v (qs env (second args)))]
+                                  eval-static [(assoc env sym {:k :static :v v :t (first args)}) (conj binds v nil)]
+                                  place [(assoc env sym {:k :place :v v}) (conj binds v (list 'local-place 'ctx 'n))])))
+                            [env0 []] (:binds d))
+        body (list 'let (vec (concat [(with-meta ev {:tag 'arbace.lang.Compiler$Expr}) (list :self 'n)]
+                                     (mapcat (fn [f] [(:v (env0 f)) (list (keyword (str f)) 'n)]) fields)
+                                     [chv (list 'if 'unboxed? (list 'prim-chan 'n) :o)]
+                                     binds))
+                   (q env (:template d)))]
+    (list 'defn (symbol (str "emit-" (:kind d))) ['ctx 'n 'unboxed?]
+          (if-let [r (:emit-first (:opts d))]
+            (list 'or (list r 'ctx 'n 'unboxed?) body)
+            body))))
+
+(defmacro defnode
+  "Defines node kind KIND once (this namespace's doc): the emitter emit-KIND, and the
+  definition kept for the evaluator's half (registry, code-file)."
+  [kind doc opts bindings template]
+  (let [d (parse kind doc opts bindings template)]
+    (list 'do
+          (list 'arbace.c2j.node/register! (list 'quote d))
+          (emit-fn d))))
+
+;; ---------------------------------------------------------------------------------------
+;; the evaluator: the template as Code classes (Java forms of Compiler's Go build)
+
+(def eval-places
+  "The evaluator's places of a local (CodeCompiler.local and localUse choose them): its node's
+  class, fields, read by channel and write (% the value; none: never cleared)."
+  (array-map
+    :slot {:class "CodeLocal" :fields '[^int i] :get '{:o (aget (.-slots f) i)} :set '(aset (.-slots f) i %)}
+    :long {:class "CodeLocalLong" :fields '[^int i]
+           :get '{:o (Long/valueOf (aget (.-prims f) i)) :j (aget (.-prims f) i)}}
+    :double {:class "CodeLocalDouble" :fields '[^int i]
+             :get '{:o (Double/valueOf (Double/longBitsToDouble (aget (.-prims f) i)))
+                    :d (Double/longBitsToDouble (aget (.-prims f) i))}}
+    :boxed {:class "CodeLocalBoxed" :fields '[^int i ^int k] :get '{:o (Compiler$CodeRun/rebox k (aget (.-slots f) i))}}
+    :closed {:class "CodeClosed" :fields '[^int j ^int k]
+             :get '{:o (Compiler$CodeRun/rebox k (aget (.-closed (.-fn f)) j))
+                    :j (.longValue (cast Number (aget (.-closed (.-fn f)) j)))
+                    :d (.doubleValue (cast Number (aget (.-closed (.-fn f)) j)))}
+             :set '(aset (.-closed (.-fn f)) j %)}
+    :field {:class "CodeField" :fields '[^int j ^int k]
+            :get '{:o (Compiler$CodeRun/rebox k (Dyn/getField (.-self f) j))
+                   :j (.longValue (cast Number (Dyn/getField (.-self f) j)))
+                   :d (.doubleValue (cast Number (Dyn/getField (.-self f) j)))}}))
+
+(def ^:private chan-methods
+  {:o ['run nil] :j ['runLong 'long] :d ['runDouble 'double] :z ['runBool 'boolean]})
+
+(defn- invalid [] (throw (ex-info "defnode: no such channel" {::invalid true})))
+
+(defn- realize
+  "Form f realized throughout (lazy parts made now, inside the try that drops an invalid
+  channel), metadata kept."
+  [f]
+  (cond
+    (seq? f) (with-meta (apply list (map realize f)) (meta f))
+    (vector? f) (with-meta (mapv realize f) (meta f))
+    :else f))
+
+(defn- arg-kind
+  "The evaluator's channel of a parameter of class c (:i an int, through runLong)."
+  [^Class c]
+  (cond (= c Long/TYPE) :j (= c Integer/TYPE) :i (= c Double/TYPE) :d (= c Boolean/TYPE) :z :else :o))
+
+(defn- ret-chans
+  "The channels a method returning class c is made in: :o, and its primitive's."
+  [^Class c]
+  (cond (or (= c Long/TYPE) (= c Integer/TYPE)) #{:o :j} (= c Double/TYPE) #{:o :d} (= c Boolean/TYPE) #{:o :z} :else #{:o}))
+
+(declare qe)
+
+(defn- qe-elems [env v xs]
+  (vec (mapcat (fn [x]
+                 (if (and (seq? x) (= 'splice (head x)))
+                   (let [b (env (second x))] (if (= :cs-array (:k b)) (invalid) (:temps b)))
+                   [(qe env v x)]))
+               xs)))
+
+(defn- qe-seq [env v t]
+  (let [[h & as] t
+        h* (fn [] (with-meta (apply list (qe-elems env v t)) (meta t)))]
+    (case h
+      run (let [[c x] as
+                c (if (= c 'ch) (:ch v) c)]
+            (list (symbol (str "." (first (chan-methods c)))) (:field (env x)) 'f))
+      run-all (let [[_ xs] as
+                    b (env xs)]
+                (if (= :many (:count v))
+                  {:array (list 'Compiler$CodeRun/runAll (:field b) 'f)}
+                  {:multi (mapv (fn [i] (list '.run (symbol (str (:field b) i)) 'f)) (range (:count v)))}))
+      run-args (let [[_ xs] as
+                     b (env xs)
+                     ^java.lang.reflect.Method m (:m v)
+                     ts (:type-sym (:helpers v))]
+                 {:multi (vec (map-indexed
+                                (fn [i ^Class p]
+                                  (let [a (symbol (str (:field b) i))]
+                                    (case (arg-kind p)
+                                      :j (list '.runLong a 'f)
+                                      :i (list 'unchecked-int (list '.runLong a 'f))
+                                      :d (list '.runDouble a 'f)
+                                      :z (list '.runBool a 'f)
+                                      :o (if (= p Object) (list '.run a 'f) (list 'cast (ts p) (list '.run a 'f))))))
+                                (.getParameterTypes m)))})
+      call-site (let [[line bv & body] as
+                      n (atom -1)
+                      tmp (fn [] (symbol (str "x" (swap! n inc))))
+                      [env binds] (reduce (fn [[env binds] [s init]]
+                                            (let [r (qe env v init)]
+                                              (cond
+                                                (and (map? r) (:multi r))
+                                                (let [ts (mapv (fn [_] (tmp)) (:multi r))]
+                                                  [(assoc env s {:k :cs-multi :temps ts}) (into binds (interleave ts (:multi r)))])
+                                                (and (map? r) (:array r))
+                                                (let [t (tmp)] [(assoc env s {:k :cs-array :temp t}) (conj binds t (:array r))])
+                                                :else (let [t (tmp)] [(assoc env s {:k :cs :temp t}) (conj binds t r)]))))
+                                          [env []] (partition 2 bv))]
+                  (concat (list 'let binds (list 'set! '(.-line f) (qe env v line)))
+                          (remove nil? (map #(qe env v %) body))))
+      eval-only (qe env v (first as))
+      do (cons 'do (remove nil? (map #(qe env v %) as)))
+      static-if (let [[c a b] as
+                      yes (cond
+                            (symbol? c) (get (:splits v) c)
+                            (= 'many? (head c)) (= :many (:count v))
+                            (= 'clears? (head c)) (:clears v)
+                            :else (throw (ex-info (str "defnode: not a split: " c) {})))]
+                  (qe env v (if yes a b)))
+      static-case (let [[_ & cls] as
+                        m (apply hash-map cls)]
+                    (if (contains? m (:ch v)) (qe env v (m (:ch v))) (invalid)))
+      box-as (let [[_ _ f] as
+                   ^java.lang.reflect.Method m (:m v)
+                   r (.getReturnType m)]
+               (cond
+                 (not (contains? (ret-chans r) (:ch v))) (invalid)
+                 (= :o (:ch v)) ((:box (:helpers v)) (qe env v f) r)
+                 :else (qe env v f)))
+      call-static (let [[_ a] as
+                        b (env a)
+                        g (atom 0)]
+                    ((:call-static (:helpers v)) (:m v) (:temps b) (fn [base] (symbol (str base (swap! g inc))))))
+      array-of (let [b (env (first as))]
+                 (case (:k b)
+                   :cs-array (:temp b)
+                   :cs-multi (list 'new 'Object/1 (:temps b))))
+      get-place (let [[_ c] as
+                      c (if (= c 'ch) (:ch v) c)
+                      g (get (:get (:place v)) c)]
+                  (or g (invalid)))
+      set-place (let [[_ x] as]
+                  (walk-syms {'% (qe env v x)} (:set (:place v))))
+      let (let [[bv & body] as]
+            (list* 'let (vec (mapcat (fn [[s init]] [s (qe env v init)]) (partition 2 bv)))
+                   (map #(qe env v %) body)))
+      (h*))))
+
+(defn- qe
+  "Template t's Java form in variant v (env: the template's names)."
+  [env v t]
+  (cond
+    (symbol? t) (if-let [b (env t)]
+                  (case (:k b)
+                    :static (if (contains? (:splits v) t) (get (:splits v) t) (:field b))
+                    :cs (:temp b)
+                    :cs-array (:temp b)
+                    t)
+                  t)
+    (seq? t) (qe-seq env v t)
+    (vector? t) (with-meta (qe-elems env v t) (meta t))
+    :else t))
+
+(defn- splits
+  "The static booleans the template's static-ifs test, in binding order."
+  [d]
+  (let [tested (atom #{})]
+    (letfn [(w [t] (cond (seq? t) (do (when (and (= 'static-if (head t)) (symbol? (second t))) (swap! tested conj (second t)))
+                                      (run! w t))
+                         (vector? t) (run! w t)))]
+      (w (:template d)))
+    (vec (keep (fn [b] (when (contains? @tested (:sym b)) (:sym b))) (:binds d)))))
+
+(defn- uses-many? [d]
+  (let [r (atom false)]
+    (letfn [(w [t] (cond (seq? t) (do (when (= 'many? (head t)) (reset! r true)) (run! w t))
+                         (vector? t) (run! w t)))]
+      (w (:template d)))
+    @r))
+
+(defn- camel [s] (str (str/upper-case (subs (str s) 0 1)) (subs (str s) 1)))
+
+(defn- sym-occurs? [s f]
+  (cond (symbol? f) (= s f)
+        (or (seq? f) (vector? f)) (some #(sym-occurs? s %) f)
+        :else false))
+
+(defn- tag-sym [s t] (if (or (nil? t) (= t 'Object)) s (vary-meta s assoc :tag t)))
+
+(defn- variant-class
+  "[class fields] of variant v of definition d: the Java form of the evaluator's class, and its
+  fields in the order its constructor takes them, [{:s field :val the clause's value}]."
+  [d v]
+  (let [env (into {} (map (fn [b] [(:sym b) (case (:k b)
+                                               child {:k :child :field (:sym b)}
+                                               children {:k :children :field (:sym b)}
+                                               (static eval-static) {:k :static :field (:sym b) :t (first (:args b))}
+                                               place {:k :place}
+                                               nil)])
+                          (:binds d)))
+        chans (if (:place v)
+                (if (:clears v) [:o] (vec (keys (:get (:place v)))))
+                (or (:chans (:opts d)) [:o :j :d :z]))
+        domain (:domain-ms v)
+        method (fn [c]
+                 (let [[mn rt] (chan-methods c)
+                       params ['this (with-meta 'f {:tag 'Compiler$Frame})]
+                       try-qe (fn [v] (try (realize (qe env v (:template d)))
+                                           (catch Exception x (when-not (::invalid (ex-data x)) (throw x)))))
+                       body (if domain
+                              (let [cases (keep (fn [[i m]] (when-let [b (try-qe (assoc v :ch c :m m))] [i b])) domain)]
+                                (when (seq cases)
+                                  (concat (list 'switch 'op) (mapcat identity cases)
+                                          [(list 'throw (list 'IllegalStateException. (str (:name v) ": not of this kind")))])))
+                              (try-qe (assoc v :ch c)))]
+                   (when body
+                     (list 'method (with-meta mn {:public true}) (if rt (with-meta params {:tag rt}) params) body))))
+        methods (vec (keep method chans))
+        cb (children-bind d)
+        conv (when cb (:convert (apply hash-map (drop 2 (:args cb)))))
+        ;; the fields: the domain's case, the children, the place's, the statics the methods read
+        fields (vec (concat
+                      (when domain [{:s (with-meta 'op {:tag 'int}) :val 'o}])
+                      (mapcat (fn [b]
+                                (case (:k b)
+                                  child [{:s (tag-sym (:sym b) 'Compiler$Code) :val (:sym b)}]
+                                  children (let [fld (first (:args b))]
+                                             (if (= :many (:count v))
+                                               [{:s (tag-sym (:sym b) 'Compiler$Code/1) :val (list '.compileAll 'cc fld)}]
+                                               (map (fn [i]
+                                                      (let [x (list 'cast 'Compiler$Expr (list '.nth fld i))]
+                                                        {:s (tag-sym (symbol (str (:sym b) i)) 'Compiler$Code)
+                                                         :val (if conv (list '.convert 'cc (list 'aget 'ps i) x) (list '.compile 'cc x))}))
+                                                    (range (:count v)))))
+                                  place (map (fn [s] {:s s}) (:fields (:place v)))
+                                  (static eval-static) (when (and (not (contains? (:splits v) (:sym b)))
+                                                                  (sym-occurs? (:sym b) methods))
+                                                         [{:s (tag-sym (:sym b) (first (:args b))) :val (:sym b)}])
+                                  nil))
+                              (:binds d))))
+        bare (fn [s] (with-meta s nil))]
+    [(concat
+       (list 'defclass (with-meta (symbol (:name v)) {:public true :static true})
+             :extends 'Compiler$Code)
+       (map (fn [{fs :s}] (list 'field (vary-meta fs assoc :public true :final true))) fields)
+       [(list* 'constructor (with-meta (vec (cons 'this (map :s fields))) {:public true})
+               (map (fn [{fs :s}] (list 'set! (list (symbol (str ".-" (bare fs))) 'this) (bare fs))) fields))]
+       methods)
+     fields]))
+
+(defn- variants
+  "The variants of definition d's evaluator classes: [{:name :splits :count :place :clears
+  :domain-ms}]."
+  [d domains]
+  (let [base (or (:class (:opts d)) (str "Code" (camel (:kind d))))
+        ss (splits d)
+        cb (children-bind d)
+        counts (if cb
+                 (concat (range (inc (second (:args cb)))) (when (uses-many? d) [:many]))
+                 [nil])
+        split-sets (reduce (fn [acc s] (for [m acc x [false true]] (assoc m s x))) [{}] ss)
+        dom (when (:domain (:opts d)) (domains (:kind d)))]
+    (if (some #(= 'place (:k %)) (:binds d))
+      (for [[k p] eval-places, c (if (:set p) [false true] [false])]
+        {:name (str (:class p) (when c "Clear")) :place p :place-kind k :clears c :splits {}})
+      (for [c counts, sp split-sets]
+        {:name (str base (cond (= :many c) "N" (some? c) c :else "")
+                    (apply str (keep (fn [s] (when (sp s) (camel s))) ss)))
+         :splits sp :count c
+         :domain-ms (when dom (vec (map-indexed vector (get dom c))))}))))
+
+(defn- clause
+  "The evaluator's construction of definition d's node: [test expr] of CodeNodes/compile's
+  cond; vs, its variants with their fields ([v fields])."
+  [d vs]
+  (let [exprs (:exprs (:opts d))
+        one (when (= 1 (count exprs)) (first exprs))
+        test (if one
+               (list 'instance? (symbol (str "Compiler$" one)) 'e)
+               (cons 'or (map #(list 'instance? (symbol (str "Compiler$" %)) 'e) exprs)))
+        fields (field-names d)
+        fbinds (mapcat (fn [f] [f (list (symbol (str ".-" f)) 'x)]) fields)
+        cb (children-bind d)
+        conv (when cb (:convert (apply hash-map (drop 2 (:args cb)))))
+        binds (vec (concat
+                     (when one ['x (list 'cast (symbol (str "Compiler$" one)) 'e)])
+                     fbinds
+                     (mapcat (fn [b]
+                               (case (:k b)
+                                 child [(:sym b) (list '.compile 'cc (first (:args b)))]
+                                 (static eval-static) [(:sym b) (second (:args b))]
+                                 nil))
+                             (:binds d))
+                     (when conv ['ps conv])))
+        ss (splits d)
+        construct (fn [[v fields]] (list* 'new (symbol (str "Compiler$" (:name v))) (map :val fields)))
+        pick (fn [vfs]
+               ;; the split statics' cases, nested in binding order
+               (letfn [(go [ss vfs]
+                         (if (empty? ss)
+                           (construct (first vfs))
+                           (let [s (first ss)]
+                             (list 'if s
+                                   (go (rest ss) (filter #(get (:splits (first %)) s) vfs))
+                                   (go (rest ss) (remove #(get (:splits (first %)) s) vfs))))))]
+                 (go ss vfs)))
+        by-count (group-by (comp :count first) vs)
+        counted (sort-by key (filter (comp number? key) by-count))
+        body (cond
+               (:domain (:opts d))
+               (list 'let ['k (list 'unchecked-divide-int 'op 10000)
+                           'o (list 'unchecked-subtract-int 'op (list 'unchecked-multiply-int 'k 10000))]
+                     (concat (list 'cond) (mapcat (fn [[c vfs]] [(list '== 'k c) (pick vfs)]) counted) [:else nil]))
+               cb
+               (list 'let ['nc (list '.count (first (:args cb)))]
+                     (concat (list 'cond) (mapcat (fn [[c vfs]] [(list '== 'nc c) (pick vfs)]) counted)
+                             [:else (when-let [m (by-count :many)] (pick m))]))
+               :else (pick vs))]
+    [test (if-let [ix (:index (:domain (:opts d)))]
+            (list 'let (vec (concat ['x (list 'cast (symbol (str "Compiler$" one)) 'e)] fbinds ['op ix]))
+                  (list 'if (list '< 'op 0) nil (list 'let (vec (drop (+ 2 (count fbinds)) binds)) body)))
+            (list 'let binds body))]))
+
+(defn code-forms
+  "The evaluator's half of every definition, as Java forms of Compiler: the Code classes, and
+  CodeNodes (compile, the nodes' construction for CodeCompiler.compile, nil when the node is
+  not of these kinds; table, the domains' cases by key). helpers: {:box :call-static
+  :type-sym}, the back end's builders the two halves share; domains: {kind {arity [Method
+  ...]}}; keys: {kind (fn [Method] key)}. Returns [[comment class-form] ...]."
+  [helpers domains keys]
+  (let [per (for [d @registry]
+              {:d d :vs (mapv (fn [v] (let [v (assoc v :helpers helpers)
+                                            [cf fields] (variant-class d v)]
+                                        {:v v :cf cf :fields fields}))
+                              (variants d domains))})
+        clauses (mapcat (fn [{:keys [d vs]}] (when (seq (:exprs (:opts d))) (clause d (map (juxt :v :fields) vs)))) per)
+        table (for [{:keys [d]} per :when (:domain (:opts d))
+                    [k ms] (sort-by key (domains (:kind d)))
+                    [i m] (map-indexed vector ms)]
+                [((keys (:kind d)) m) (+ (* k 10000) i)])]
+    (concat
+      (for [{:keys [d vs]} per, {:keys [v cf]} vs]
+        [(str (:name v) ": the evaluator's node of " (:kind d)
+              (when-let [s (seq (keep (fn [[k x]] (when x (name k))) (:splits v)))] (str ", " (str/join ", " s)))
+              (when (some? (:count v)) (str ", " (if (= :many (:count v)) "more children" (str (:count v) " children"))))
+              (when (:place v) (str ", " (name (:place-kind v)) (when (:clears v) ", cleared"))))
+         cf])
+      [["CodeNodes: the nodes of these kinds made (CodeCompiler.compile), the domains' cases"
+        (list 'defclass (with-meta 'CodeNodes {:public true :static true})
+              (list 'method (with-meta 'compile {:public true :static true})
+                    (with-meta [(with-meta 'cc {:tag 'Compiler$CodeCompiler}) (with-meta 'e {:tag 'Compiler$Expr})] {:tag 'Compiler$Code})
+                    (concat (list 'cond) clauses [:else nil]))
+              (list 'method (with-meta 'table {:public true :static true})
+                    (with-meta [] {:tag 'java.util.HashMap})
+                    (concat (list 'let ['m '(java.util.HashMap.)])
+                            (map (fn [[k i]] (list '.put 'm k (list 'Integer/valueOf i))) table)
+                            ['m])))]])))

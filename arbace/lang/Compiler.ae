@@ -9798,6 +9798,11 @@
             (catch Throwable t nil))
           nil))
 
+    ;; a literal's value (a LiteralExpr's, a TheVarExpr's: its evalIn), what the const node kind
+    ;; holds (Futamura F7: the static forms both halves of a node kind run see a node through AST)
+    (method ^:public ^:static literal [x]
+      (.evalIn (cast Expr x) nil))
+
     (method ^:public ^:static primType ^Class [x]
       (if (instance? Expr x)
           (try (arbace.lang.Compiler/maybePrimitiveType (cast Expr x)) (catch Throwable t nil))
@@ -10185,14 +10190,18 @@
   ;; once, not at every evaluation. Locals are slot indexes; long and double locals live unboxed in
   ;; the frame's prims (a double as its raw bits); constants are made once; Var and keyword nodes
   ;; hold their Var and Keyword; resolved static methods of Numbers, RT, Util and Math are called
-  ;; directly with their arguments in their primitive types (CodeOpN, generated:
-  ;; CompilerOps.ae), other resolved methods and constructors through their member table's
+  ;; directly with their arguments in their primitive types (CodeOpN), other resolved methods and constructors through their member table's
   ;; invoker without Reflector; a node whose type the analysis knows to be long, int, double or
   ;; boolean also answers runLong, runDouble or runBool, so that primitive arithmetic and tests do
   ;; not box (the bytecode's emitUnboxed); recur stores its values and sets the frame's recur flag,
   ;; which its loop clears. Calls of a fixed arity reach the compiled method without a seq
   ;; (EvalFn.invoke). The semantics are the evaluator's (doc/go/EVAL-NOTES.md: the bytecode's
   ;; conversions and casts), which evalIn keeps for top-level forms.
+  ;;
+  ;; The nodes of the kinds defined once (Futamura F7, doc/FUTAMURA-SURVEY.md, "F7 as built"):
+  ;; constants, locals, if, the listed static calls (CodeOpN) and invoke are generated from the
+  ;; back end's definitions (arbace.c2j.emit's defnodes) by test/c2j/gen_nodes.ae, as
+  ;; arbace/lang/go/CompilerNodes.ae; CodeCompiler's local and localUse choose the local's.
   ;;
   ;; A method holding a node kind the compiler does not know is compiled in compat mode: its long
   ;; and double locals stay boxed in the slots, and the unknown node is evaluated by its evalIn.
@@ -10361,6 +10370,15 @@
                 (do (set! (.-recur f) false) (CodeRun/tick) (recur))
                 r)))))
 
+    ;; a local's value kept boxed as primitive kind k (2 long, 3 double; CodeCompiler.primKind)
+    ;; made a Long or a Double (the nodes of the local kind, CompilerNodes.ae)
+    (method ^:public ^:static rebox [^int k v]
+      (cond
+        (nil? v) v
+        (== k 2) (Long/valueOf (.longValue (cast Number v)))
+        (== k 3) (Double/valueOf (.doubleValue (cast Number v)))
+        :else v))
+
     ;; a long parameter or recur value from a boxed one (Evaluator.prim of long)
     (method ^:public ^:static toLong ^long [v]
       (cond
@@ -10433,7 +10451,7 @@
     (method ^:public ^:static op ^int [^java.lang.reflect.Method m]
       (let [^:mutable t OPS]
         (when (nil? t)
-          (set! t (CodeOps/table))
+          (set! t (CodeNodes/table))
           (set! OPS t))
         (let [k (.get t (java-str (.getName (.getDeclaringClass m)) "." (.getName m)
                                   (Evaluator/signature (.getParameterTypes m) (.getReturnType m))))]
@@ -10578,20 +10596,17 @@
           (identical? k Double/TYPE) 2
           :else 0)))
 
+    ;; the node kinds defined once (Futamura F7: arbace.c2j.emit's defnodes) are made by
+    ;; CodeNodes/compile (CompilerNodes.ae, generated): constants, if, the static calls of the
+    ;; listed methods, invoke; the others here
     (method ^:public compile ^Code [this ^Expr e]
+      (let [c (CodeNodes/compile this e)]
+        (if (some? c) c (.compileOther this e))))
+
+    (method compileOther ^Code [this ^Expr e]
       (cond
         (instance? LocalBindingExpr e) (.localUse this (cast LocalBindingExpr e))
-        (or (instance? NumberExpr e) (instance? ConstantExpr e) (instance? StringExpr e)
-            (instance? KeywordExpr e) (instance? NilExpr e) (instance? BooleanExpr e)
-            (instance? EmptyExpr e) (instance? TheVarExpr e))
-          (CodeConst. (.evalIn e nil))
         (instance? VarExpr e) (CodeVar. (.-var (cast VarExpr e)))
-        (instance? IfExpr e)
-          (let [ie (cast IfExpr e)]
-            (CodeIf. (.compile this (.-testExpr ie))
-                     (identical? (arbace.lang.Compiler/maybePrimitiveType (.-testExpr ie)) Boolean/TYPE)
-                     (.compile this (.-thenExpr ie))
-                     (.compile this (.-elseExpr ie))))
         (instance? BodyExpr e)
           (let [es (.-exprs (cast BodyExpr e))
                 n (.count es)]
@@ -10607,10 +10622,6 @@
                           (.add cs (.compile this x))))
                       (recur (unchecked-inc-int i))))
                   (CodeCompiler/chain (cast Code/1 (.toArray cs (new Code/1 (.size cs)))) 0))))
-        (instance? InvokeExpr e)
-          (let [ie (cast InvokeExpr e)]
-            (CodeInvoke. (.compile this (.-fexpr ie)) (.compileAll this (.-args ie)) (.-line ie)
-                         (and (.-tailPosition ie) (not (.-canBeDirect objx)))))
         (instance? KeywordInvokeExpr e)
           (let [ke (cast KeywordInvokeExpr e)]
             (CodeKeywordInvoke. (.-k (.-kw ke)) (.compile this (.-target ke)) (.-line ke)))
@@ -10677,25 +10688,13 @@
         compat (CodeEval. e)
         :else (throw (CodeFallback. (.getName (.getClass e))))))
 
+    ;; a static call CodeNodes does not make (a method not listed: CodeRun/op), through its
+    ;; invoker, or by reflection
     (method staticMethod ^Code [this ^StaticMethodExpr se]
       (let [m (.-method se)]
         (if (nil? m)
             (CodeHostStaticReflect. (.-c se) (.-methodName se) (.compileAll this (.-args se)) (.-line se))
-            (let [op (CodeRun/op m)
-                  ps (.getParameterTypes m)
-                  as (.-args se)]
-              (if (< op 0)
-                  (CodeHostStatic. m (.compileAll this as) (.-line se))
-                  (let [k (unchecked-divide-int op 10000)
-                        o (unchecked-subtract-int op (unchecked-multiply-int k 10000))]
-                    (cond
-                      (== k 0) (CodeOp0. o (.-line se))
-                      (== k 1) (CodeOp1. o (.-line se) (.convert this (aget ps 0) (cast Expr (.nth as 0))))
-                      (== k 2) (CodeOp2. o (.-line se) (.convert this (aget ps 0) (cast Expr (.nth as 0)))
-                                         (.convert this (aget ps 1) (cast Expr (.nth as 1))))
-                      :else (CodeOp3. o (.-line se) (.convert this (aget ps 0) (cast Expr (.nth as 0)))
-                                      (.convert this (aget ps 1) (cast Expr (.nth as 1)))
-                                      (.convert this (aget ps 2) (cast Expr (.nth as 2)))))))))))
+            (CodeHostStatic. m (.compileAll this (.-args se)) (.-line se)))))
 
     (method compileLet ^Code [this ^LetExpr le]
       (let [bis (.-bindingInits le)
@@ -10791,7 +10790,7 @@
             (let [j (.closedIndex this lb)]
               (cond
                 (< j 0) (CodeLocalClear. (.-idx lb))
-                (and isFn (.-onceOnly objx)) (CodeClosedClear. j)
+                (and isFn (.-onceOnly objx)) (CodeClosedClear. j 0)
                 :else (.local this lb)))
             (.local this lb))))
 
@@ -10877,24 +10876,6 @@
           ;; another assignable expression: its evalAssign of the value expression
           :else (CodeAssign. 6 target v nil -1 (.-val ae))))))
 
-  (defclass ^:public ^:static CodeConst
-    :extends Code
-    (field ^:public ^:final v)
-    ;; a number's long and double values, made once
-    (field ^:public ^:final ^long lv)
-    (field ^:public ^:final ^double dv)
-    (field ^:public ^:final ^boolean num)
-    (constructor ^:public [this v]
-      (set! (.-v this) v)
-      (set! (.-num this) (instance? Number v))
-      (set! (.-lv this) (if (instance? Number v) (.longValue (cast Number v)) 0))
-      (set! (.-dv this) (if (instance? Number v) (.doubleValue (cast Number v)) 0.0)))
-    (method ^:public run [this ^Frame f] v)
-    (method ^:public runLong ^long [this ^Frame f]
-      (if num lv (.longValue (cast Number v))))
-    (method ^:public runDouble ^double [this ^Frame f]
-      (if num dv (.doubleValue (cast Number v)))))
-
   (defclass ^:public ^:static CodeEval
     :extends Code
     ;; a node evaluated by its evalIn (without locals, or compat mode)
@@ -10931,89 +10912,6 @@
     (constructor ^:public [this ^Var v] (set! (.-v this) v))
     (method ^:public run [this ^Frame f] (.deref v)))
 
-  (defclass ^:public ^:static CodeLocal
-    :extends Code
-    (field ^:public ^:final ^int i)
-    (constructor ^:public [this ^int i] (set! (.-i this) i))
-    (method ^:public run [this ^Frame f] (aget (.-slots f) i)))
-
-  (defclass ^:public ^:static CodeLocalClear
-    :extends Code
-    ;; a slot local read for the last time on its path: cleared (CodeCompiler.localUse)
-    (field ^:public ^:final ^int i)
-    (constructor ^:public [this ^int i] (set! (.-i this) i))
-    (method ^:public run [this ^Frame f]
-      (let [slots (.-slots f)
-            v (aget slots i)]
-        (aset slots i nil)
-        v)))
-
-  (defclass ^:public ^:static CodeClosedClear
-    :extends Code
-    ;; a ^:once fn's closed-over value read for the last time on its path: cleared
-    (field ^:public ^:final ^int j)
-    (constructor ^:public [this ^int j] (set! (.-j this) j))
-    (method ^:public run [this ^Frame f]
-      (let [cl (.-closed (.-fn f))
-            v (aget cl j)]
-        (aset cl j nil)
-        v)))
-
-  (defclass ^:public ^:static CodeLocalLong
-    :extends Code
-    (field ^:public ^:final ^int i)
-    (constructor ^:public [this ^int i] (set! (.-i this) i))
-    (method ^:public run [this ^Frame f] (Long/valueOf (aget (.-prims f) i)))
-    (method ^:public runLong ^long [this ^Frame f] (aget (.-prims f) i)))
-
-  (defclass ^:public ^:static CodeLocalDouble
-    :extends Code
-    (field ^:public ^:final ^int i)
-    (constructor ^:public [this ^int i] (set! (.-i this) i))
-    (method ^:public run [this ^Frame f]
-      (Double/valueOf (Double/longBitsToDouble (aget (.-prims f) i))))
-    (method ^:public runDouble ^double [this ^Frame f]
-      (Double/longBitsToDouble (aget (.-prims f) i))))
-
-  (defclass ^:public ^:static CodeLocalBoxed
-    :extends Code
-    ;; k: 2 long, 3 double
-    (field ^:public ^:final ^int i)
-    (field ^:public ^:final ^int k)
-    (constructor ^:public [this ^int i ^int k] (set! (.-i this) i) (set! (.-k this) k))
-    (method ^:public run [this ^Frame f]
-      (CodeLocalBoxed/rebox k (aget (.-slots f) i)))
-    (method ^:public ^:static rebox [^int k v]
-      (cond
-        (nil? v) v
-        (== k 2) (Long/valueOf (.longValue (cast Number v)))
-        (== k 3) (Double/valueOf (.doubleValue (cast Number v)))
-        :else v)))
-
-  (defclass ^:public ^:static CodeClosed
-    :extends Code
-    (field ^:public ^:final ^int j)
-    (field ^:public ^:final ^int k)
-    (constructor ^:public [this ^int j ^int k] (set! (.-j this) j) (set! (.-k this) k))
-    (method ^:public run [this ^Frame f]
-      (CodeLocalBoxed/rebox k (aget (.-closed (.-fn f)) j)))
-    (method ^:public runLong ^long [this ^Frame f]
-      (.longValue (cast Number (aget (.-closed (.-fn f)) j))))
-    (method ^:public runDouble ^double [this ^Frame f]
-      (.doubleValue (cast Number (aget (.-closed (.-fn f)) j)))))
-
-  (defclass ^:public ^:static CodeField
-    :extends Code
-    (field ^:public ^:final ^int j)
-    (field ^:public ^:final ^int k)
-    (constructor ^:public [this ^int j ^int k] (set! (.-j this) j) (set! (.-k this) k))
-    (method ^:public run [this ^Frame f]
-      (CodeLocalBoxed/rebox k (Dyn/getField (.-self f) j)))
-    (method ^:public runLong ^long [this ^Frame f]
-      (.longValue (cast Number (Dyn/getField (.-self f) j))))
-    (method ^:public runDouble ^double [this ^Frame f]
-      (.doubleValue (cast Number (Dyn/getField (.-self f) j)))))
-
   (defclass ^:public ^:static CodeUnbox
     :extends Code
     (field ^:public ^:final ^Code c)
@@ -11040,32 +10938,6 @@
     (constructor ^:public [this ^Code c] (set! (.-c this) c))
     (method ^:public run [this ^Frame f] (Double/valueOf (double (.runLong c f))))
     (method ^:public runDouble ^double [this ^Frame f] (double (.runLong c f))))
-
-  (defclass ^:public ^:static CodeIf
-    :extends Code
-    (field ^:public ^:final ^Code test)
-    ;; the test is a boolean (runBool), else its value is tested for nil and false
-    (field ^:public ^:final ^boolean z)
-    (field ^:public ^:final ^Code thn)
-    (field ^:public ^:final ^Code els)
-    (constructor ^:public [this ^Code test ^boolean z ^Code thn ^Code els]
-      (set! (.-test this) test)
-      (set! (.-z this) z)
-      (set! (.-thn this) thn)
-      (set! (.-els this) els))
-    (method holds ^boolean [this ^Frame f]
-      (if z
-          (.runBool test f)
-          (let [t (.run test f)]
-            (and (some? t) (not (identical? t Boolean/FALSE))))))
-    (method ^:public run [this ^Frame f]
-      (if (.holds this f) (.run thn f) (.run els f)))
-    (method ^:public runLong ^long [this ^Frame f]
-      (if (.holds this f) (.runLong thn f) (.runLong els f)))
-    (method ^:public runDouble ^double [this ^Frame f]
-      (if (.holds this f) (.runDouble thn f) (.runDouble els f)))
-    (method ^:public runBool ^boolean [this ^Frame f]
-      (if (.holds this f) (.runBool thn f) (.runBool els f))))
 
   (defclass ^:public ^:static CodeSeq
     :extends Code
@@ -11507,76 +11379,6 @@
           (let [sfe (cast StaticFieldExpr target)]
             (Reflector/setStaticField (.-c sfe) (.-fieldName sfe) (.run v f)))
         :else (.evalAssign (cast AssignableExpr target) ve))))
-
-  (defclass ^:public ^:static CodeInvoke
-    :extends Code
-    ;; a call of a fn value: up to six arguments in fields (CodeSeq), more in args
-    ;; clearThis: a call in tail position clears the frame's object (the fn or the deftype's
-    ;; or reify's object, and slot 0, this) once its arguments are evaluated, as the compiled
-    ;; call does (InvokeExpr.emitArgsAndCall, ObjMethod.emitClearThis): what the object
-    ;; closes over is not kept by the frame for the call's time (a reducer's collection, the
-    ;; suite's test-closed-over-clearing; doc/go/BOX-NOTES.md, S2)
-    (field ^:public ^:final ^Code fexpr)
-    (field ^:public ^:final ^Code/1 args)
-    (field ^:public ^:final ^int n)
-    (field ^:public ^:final ^int line)
-    (field ^:public ^:final ^Code a0)
-    (field ^:public ^:final ^Code a1)
-    (field ^:public ^:final ^Code a2)
-    (field ^:public ^:final ^Code a3)
-    (field ^:public ^:final ^Code a4)
-    (field ^:public ^:final ^Code a5)
-    (field ^:public ^:final ^boolean clearThis)
-    (constructor ^:public [this ^Code fexpr ^Code/1 args ^int line ^boolean clearThis]
-      (set! (.-clearThis this) clearThis)
-      (set! (.-fexpr this) fexpr)
-      (set! (.-args this) args)
-      (set! (.-n this) (alength args))
-      (set! (.-line this) line)
-      (set! (.-a0 this) (when (> (alength args) 0) (aget args 0)))
-      (set! (.-a1 this) (when (> (alength args) 1) (aget args 1)))
-      (set! (.-a2 this) (when (> (alength args) 2) (aget args 2)))
-      (set! (.-a3 this) (when (> (alength args) 3) (aget args 3)))
-      (set! (.-a4 this) (when (> (alength args) 4) (aget args 4)))
-      (set! (.-a5 this) (when (> (alength args) 5) (aget args 5))))
-    (method ^:public run [this ^Frame f]
-      (let [fv (cast IFn (.run fexpr f))]
-        (switch n
-          0 (do (set! (.-line f) line) (when clearThis (CodeRun/clearThis f)) (.invoke fv))
-          1 (let [x0 (.run a0 f)]
-              (set! (.-line f) line)
-              (when clearThis (CodeRun/clearThis f))
-              (.invoke fv x0))
-          2 (let [x0 (.run a0 f) x1 (.run a1 f)]
-              (set! (.-line f) line)
-              (when clearThis (CodeRun/clearThis f))
-              (.invoke fv x0 x1))
-          3 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f)]
-              (set! (.-line f) line)
-              (when clearThis (CodeRun/clearThis f))
-              (.invoke fv x0 x1 x2))
-          4 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f) x3 (.run a3 f)]
-              (set! (.-line f) line)
-              (when clearThis (CodeRun/clearThis f))
-              (.invoke fv x0 x1 x2 x3))
-          5 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f) x3 (.run a3 f) x4 (.run a4 f)]
-              (set! (.-line f) line)
-              (when clearThis (CodeRun/clearThis f))
-              (.invoke fv x0 x1 x2 x3 x4))
-          6 (let [x0 (.run a0 f) x1 (.run a1 f) x2 (.run a2 f) x3 (.run a3 f) x4 (.run a4 f)
-                  x5 (.run a5 f)]
-              (set! (.-line f) line)
-              (when clearThis (CodeRun/clearThis f))
-              (.invoke fv x0 x1 x2 x3 x4 x5))
-          (let [vs (CodeRun/runAll args f)]
-            (set! (.-line f) line)
-            (when clearThis (CodeRun/clearThis f))
-            (switch n
-              7 (.invoke fv (aget vs 0) (aget vs 1) (aget vs 2) (aget vs 3) (aget vs 4) (aget vs 5)
-                         (aget vs 6))
-              8 (.invoke fv (aget vs 0) (aget vs 1) (aget vs 2) (aget vs 3) (aget vs 4) (aget vs 5)
-                         (aget vs 6) (aget vs 7))
-              (.applyTo fv (RT/seq vs))))))))
 
   (defclass ^:public ^:static CodeKeywordInvoke
     :extends Code
