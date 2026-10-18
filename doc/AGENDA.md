@@ -94,7 +94,7 @@ The current state of the work. This file is rewritten as things change. For the 
 ## Next
 
 - Running (the user, 2026-10-18: "start all 4"): goi's GR4 (methods, interfaces, concurrency;
-  `goi-gr4`), F7 (the `defnode` prototype; `f7-defnode`). The seed remade (`ed8a4720…`, F6 and GR3) and verified.
+  `goi-gr4`), repr/rust RR5 (the behaviour level; `repr-rust-rr5`). The seed remade (`ed8a4720…`, F6 and GR3) and verified.
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
@@ -109,7 +109,9 @@ The current state of the work. This file is rewritten as things change. For the 
 - Done (2026-10-18): F5 (guarded direct linking, geometric mean 1.10), `repr/clojure print`, `repr/java`'s
   `:full` mode, the evaluator's compile race fixed. F5.2 found (code layout), CP1 built, the seed
   remade (`910b4b8f…`). F6 done (2026-10-18: primitive fns and speculative workers, `fib` 0.98 →
-  0.53 ms, geometric mean 1.11×; F6.1-F6.3 decided as built). The seed remade (`ed8a4720…`); F7 running.
+  0.53 ms, geometric mean 1.11×; F6.1-F6.3 decided as built). The seed remade (`ed8a4720…`). F7 done (2026-10-18: `defnode` for five kinds, the evaluator 14%
+  faster; F7.1-F7.4 decided as recommended: F1 (a) for expressions, (c) for storage and control,
+  F8 (b); `bin/generated-check` in the essential gate). Next: a re-seed after GR4.
 
 - The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
   Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
@@ -155,7 +157,7 @@ The current state of the work. This file is rewritten as things change. For the 
   recommended); RR1 and RR2 done (the tree and lines levels, 1,074 of 1,074; the interface level,
   5 of 5 crates); RR3 done (2026-10-18: `:full`, the text level, 1,074 of 1,074 byte for byte;
   RR-P6-RR-P8 decided as built); RR4 done (2026-10-18: the rest of `library/`, the compiler, a
-  pinned crate set, the pretty layout: 13,397 files; RR-P9-RR-P12 open); next RR5-RR6.
+  pinned crate set, the pretty layout: 13,397 files; RR-P9-RR-P12 decided as built); RR5 running; next RR6.
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
