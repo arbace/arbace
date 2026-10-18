@@ -93,8 +93,9 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Running (the user, 2026-10-18: "start all 4"): goi's GR4 (methods, interfaces, concurrency;
-  `goi-gr4`), repr/rust RR5 (the behaviour level; `repr-rust-rr5`). The seed remade (`ed8a4720…`, F6 and GR3) and verified.
+- Running (the user, 2026-10-18: "start all 4"): goi's GR5 (the crossings and the REPL;
+  `goi-gr5`), repr/rust RR5 (the behaviour level; `repr-rust-rr5`). The seed remade (`982e071c…`,
+  F7 and GR4) and verified.
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
@@ -111,7 +112,7 @@ The current state of the work. This file is rewritten as things change. For the 
   remade (`910b4b8f…`). F6 done (2026-10-18: primitive fns and speculative workers, `fib` 0.98 →
   0.53 ms, geometric mean 1.11×; F6.1-F6.3 decided as built). The seed remade (`ed8a4720…`). F7 done (2026-10-18: `defnode` for five kinds, the evaluator 14%
   faster; F7.1-F7.4 decided as recommended: F1 (a) for expressions, (c) for storage and control,
-  F8 (b); `bin/generated-check` in the essential gate). Next: a re-seed after GR4.
+  F8 (b); `bin/generated-check` in the essential gate). The seed remade (`982e071c…`).
 
 - The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
   Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
@@ -121,7 +122,8 @@ The current state of the work. This file is rewritten as things change. For the 
   after F3, F4 and the renames. G1-G17 decided as recommended (2026-10-17); GR0 done (doc/go/GOI-SPEC.md,
   GS1-GS15 decided as recommended); GR1 and GR2 done (the compiled-packages table,
   GoValue; the checker); GR3 done (2026-10-18: the interpreter's core, 532 of `$GOROOT/test`'s
-  run programs pass, none fail; GC15-GC18 decided as built); next GR4-GR6.
+  run programs pass, none fail; GC15-GC18 decided as built); GR4 done (2026-10-18: methods, interfaces, concurrency; 832 pass;
+  GC19-GC22 decided as built); GR5 running, then GR6.
 
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),

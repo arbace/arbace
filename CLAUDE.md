@@ -239,7 +239,7 @@ Prior art:
   front end, repr/java, repr/go, j2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or repr/java, `bin/jrt-convert update` first; after a change to what j2g asks of the JVM,
   `bin/j2g-edge update`). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`
-  first trims Go's build cache of entries unused for three hours (`bin/lib/gocache.bash`,
+  first trims Go's build cache of entries unused for 90 minutes (`bin/lib/gocache.bash`,
   `ARBACE_GOCACHE_KEEP_MIN`). No build may use the host's `go`: only TamaGo's (`ARBACE_GOROOT`).
 
 ## Records

@@ -1522,3 +1522,69 @@ generator writes it. Those edits, made by the lead, are a fix of `bin/repr-rust 
 `bin/repr-haskell test`: they now build the tools' host first, so stage 0's build messages
 (after a seed change) no longer reach the reader samples' compared output. That failure had
 come up falsely at RR3's and RR4's merges.
+
+## 2026-10-18: goi GR4 merged
+
+GR4 (doc/go/GOI-SPEC.md, "As built: GR4", 14 amendments; branch `goi-gr4`, `70e332de`) adds
+methods, interfaces and concurrency to goi.
+- `go/arbace/goi/method.ae`: method sets, interface dispatch, assertions and type switches with
+  gc's messages, method values, and wrappers for `error` and `Stringer`.
+- `go/arbace/goi/chan.ae`: goroutines, channels, `select`, and `range` over channels and
+  functions.
+- The builder: promotion through embedded fields, thunks for method-set entries and method
+  expressions.
+- The REPL: a cell per method.
+- Program runs load and initialize a directory test's packages in Go's order.
+- The table generates wrappers for 63 listed interfaces.
+
+The main amendments:
+- a receiver laid out after the parameters and results;
+- type descriptors made once per type, so they compare by identity across packages;
+- values of types with methods put into interfaces as proxies, and runtime's and reflect's
+  functions given the plain value;
+- no fast paths yet for channels and `select`.
+
+The check exposed GR3 bugs, now fixed: `(switch false ...)`, the order of range targets like
+`x[i]`, struct `==` comparing blank fields, channel conversions, and gc's makeslice messages.
+
+`bin/goi check` now includes the 127 directory tests (rundir, buildrundir, runindir).
+- 832 programs pass (GR3: 532), 58 of them directory tests; none fail or error, and none regress.
+- 51 known, each with a reason. The new ones are runtime.Caller and stack traces (7); finalizers,
+  allocations and profiling (10); two past the 10 s timeout; and what compiled reflect sees of
+  interpreted types (9).
+- 280 unsupported: 217 generics (GR6), 30 imports, 17 reflect lookups missing from the table,
+  9 assembly or go:linkname, 7 recursive types.
+- Of GR4's 280 programs, 241 now pass.
+
+The essential subset grew from 266 to 376 programs (23-30 s). GR3's speed figures are unchanged
+(fib 22 in 2.46 ms), and the executable grows by 1.25 MB (1.0%). Checks on the branch: `bin/goi
+test` (13 programs, 3 new; the REPL's 33), `annotations`, the essential gate, and `--fixpoint`
+G1 = G2 = G3. Merged after F7 without conflicts.
+
+Open proposals, built as recommended:
+- GC19: directory tests checked against Go's golden `.out` files.
+- GC20: compiled code sees an interpreted value with methods as its proxy, so fmt honours
+  Stringer and error.
+- GC21: the 376-program essential subset.
+- GC22: wrapper methods call by reflection (`CallProxy`), with typed adapters left to GR5.
+
+## 2026-10-18: GC19-GC22 decided; GR5 next
+
+The user decided GC19-GC22 as built, so the spec stands amended by "As built: GR4". goi goes on
+with GR5 (the crossings and the REPL, with GC22's typed adapters) before GR6 (generics), after
+the re-seed.
+
+## 2026-10-18: the seed remade (F7, GR4); Go's cache trimmed at 90 minutes
+
+The essential gate passed on main after GR4's merge (`ec47d8af`, 15m01s). The seed was remade
+from the fixpoint there (G1 = G2 = G3), with `ARBACE_SEED_GO_BUILD` naming G3: `982e071c…`
+(9,502,008 bytes, 1,862 files), committed as `703facc0`. `bin/seed --verify` printed it again
+from its own stage 0 and gave the same tree and archive, with stage 0 = G1 = G2 = G3
+(`d529e975…`), in 839 s.
+
+The disk reached 84% and then 79% with four or five agents building. The lead removed merged
+branches' worktrees and scratch, and trimmed Go's build cache once by hand at 90 minutes (34 GB →
+18.5 GB; the disk 79% → 59%). It had grown by about 16 GB in a few hours. The user then lowered
+`ARBACE_GOCACHE_KEEP_MIN`'s default from 180 to 90 minutes (`bin/lib/gocache.bash`, `bin/gate`,
+CLAUDE.md). Go refreshes an entry's time at most hourly, so 90 minutes still keeps what running
+builds use.
