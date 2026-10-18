@@ -87,7 +87,11 @@
     (map? x) (str "{" (str/join " " (mapcat (fn [[k v]] [(form-text-flat k) (form-text-flat v)]) x)) "}")
     :else (atom-text x)))
 
-(defn- mk-w [line] {:sb (StringBuilder.) :line (volatile! line)})
+(defn- mk-w
+  "A writer at line; hl, shared with the writer it is inside, the Haskell line of the last form
+  written with a line"
+  [line & [hl]]
+  {:sb (StringBuilder.) :line (volatile! line) :hl (or hl (volatile! line))})
 (defn- wline [w] @(:line w))
 (defn- wtext [w] (str (:sb w)))
 
@@ -124,10 +128,18 @@
         (write-form w x depth began)))
     (persistent! breaks)))
 
+(defn- displaced-line
+  "For a list or vector without a line written where the file's line is not the Haskell line of
+  the form before it (a form placed after its line, or another file's: R5), that Haskell line,
+  which the reader would not give it"
+  [w]
+  (let [h @(:hl w)] (when (not= h (wline w)) h)))
+
 (defn- write-form
   "Writes x; began: whether x begins a line (a symbol or vector then gets ^{:line N})"
   [w x depth began]
-  (let [l (line-of x)]
+  (let [l (line-of x)
+        _ (when l (vreset! (:hl w) l))]
     (cond
       (cv/lit? x) (emit w (atom-text x))
       (and (seq? x) (= 2 (count x)) (contains? #{'arbace.core/deref 'quote} (first x)) (nil? (extra-meta x)))
@@ -137,7 +149,8 @@
         (emit w (if (= 'quote (first x)) "'" "@"))
         (write-form w inner depth began))
       (seq? x)
-      (let [sub (mk-w (wline w))
+      (let [l (or l (displaced-line w))
+            sub (mk-w (wline w) (:hl w))
             breaks (write-elems sub (seq x) (inc depth) true)
             m (cond-> (or (extra-meta x) {})
                 (seq breaks) (assoc :hs/breaks breaks)
@@ -148,7 +161,8 @@
         (emit w (wtext sub))
         (emit w ")"))
       (vector? x)
-      (let [sub (mk-w (wline w))
+      (let [l (or l (displaced-line w))
+            sub (mk-w (wline w) (:hl w))
             breaks (write-elems sub (seq x) (inc depth) false)
             m (cond-> (or (extra-meta x) {})
                 (seq breaks) (assoc :hs/breaks breaks)
@@ -170,14 +184,20 @@
   form on its line"
   [forms]
   (let [w (mk-w 1)]
-    (doseq [[i f] (map-indexed vector forms)]
-      (let [l (line-of f)]
-        (cond
-          (zero? i) nil
-          (and l (> l (wline w))) (goto-line w l 0)
-          (= i 1) (emit w " ")
-          :else (emit w "\n"))
-        (write-form w f 0 false)))
+    (loop [i 0 fs (seq forms) placed-after nil]
+      (when fs
+        (let [f (first fs) l (line-of f)]
+          (cond
+            (zero? i) nil
+            (and l (> l (wline w))) (goto-line w l 0)
+            (= i 1) (emit w " ")
+            ;; after a form placed after its line (a module's documentation before its LANGUAGE
+            ;; pragma, R5): a form of the current line stays on it, its elements on their lines
+            (and l placed-after (= l (wline w))) (emit w " ")
+            :else (emit w "\n"))
+          (let [after (and l (< l (wline w)))]
+            (write-form w f 0 false)
+            (recur (inc i) (next fs) after)))))
     (emit w "\n")
     (wtext w)))
 

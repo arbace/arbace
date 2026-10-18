@@ -11,7 +11,8 @@
 #   bin/repr-haskell corpus fetch [CORPUS]
 #                                 the corpus's tarball into .tmp/repr-haskell/corpus/ (downloaded
 #                                 once when missing, checked by its SHA-256), its packages
-#                                 extracted (default CORPUS ghc-9.14.1: test/haskell/corpus-ghc-9.14.1.edn)
+#                                 extracted, their configure scripts run where the corpus says
+#                                 (:configure; default CORPUS ghc-9.14.1: test/haskell/corpus-ghc-9.14.1.edn)
 #   bin/repr-haskell corpus list [CORPUS]
 #                                 the corpus's modules, one per line: modules|hsc|boot, package, file
 #                                 (R1's, then R6's .hsc and boot files)
@@ -90,7 +91,8 @@
 #                                 worked example in mode :full printed back byte for byte
 #
 # Environment: REPR_HASKELL_JOBS (parallel helper and converter runs, default the cores, at most
-# 32); ARBACE_HOST_EXE (the Arbace executable, bin/lib/host.bash; default stage 0).
+# 32); REPR_HASKELL_PACKAGES (the packages the interface level compiles at once, default 4);
+# ARBACE_HOST_EXE (the Arbace executable, bin/lib/host.bash; default stage 0).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tools.bash"
@@ -182,7 +184,9 @@ corpus_fetch() {
       exit 1
     fi
     local dirs
-    dirs=$(corpus_plan "$c" modules | cut -f2 | sed "s|^|$name/|" | tr '\n' ' ')
+    # each package's :dir, or its :extract when the tarball hard-links its files from a sibling
+    # (containers/containers' from containers/containers-tests)
+    dirs=$(arbace_tool -e "(doseq [p (:packages (read-string (slurp \"$f\")))] (println (or (:extract p) (:dir p))))" | sed "s|^|$name/|" | tr '\n' ' ')
     # what the interface level needs of the tarball besides the packages (genprimopcode)
     dirs="$dirs $(iface_conf "$c" :extract | tr ' ' '\n' | sed "s|^|$name/|" | tr '\n' ' ')"
     if [ "$(cat "$dir/$name.extracted" 2>/dev/null)" != "$sha $dirs" ]; then
@@ -191,8 +195,29 @@ corpus_fetch() {
       tar -xJf "$tb" -C "$dir" $dirs
       echo "$sha $dirs" > "$dir/$name.extracted"
     fi
+    # the headers a package's configure script makes (Cabal's build-type Configure: unix,
+    # directory, process, time; R5), made once in the extracted tree, as Cabal makes them
+    local pname pdir pfiles f need
+    while IFS=$'\t' read -r pname pdir pfiles; do
+      need=""
+      for f in $pfiles; do [ -f "$dir/$name/$pdir/$f" ] || need=1; done
+      [ -n "$need" ] || continue
+      echo "== repr-haskell: $pname: configure" >&2
+      (cd "$dir/$name/$pdir" && sh ./configure > configure.log 2>&1) ||
+        { tail -20 "$dir/$name/$pdir/configure.log" >&2; echo "repr-haskell: $pname: configure failed" >&2; exit 1; }
+    done < <(corpus_configure "$c")
   ) 8> "$dir/fetch.lock"
   srcroot=$dir/$name
+}
+
+# corpus_configure CORPUS: one line per package with a :configure, tab-separated: name, directory,
+# the files its configure script makes
+corpus_configure() {
+  local f
+  f=$(corpus_file "$1")
+  arbace_tool -e "(let [c (read-string (slurp \"$f\"))]
+    (doseq [p (:packages c) :when (seq (:configure p))]
+      (println (str (:name p) \"\t\" (:dir p) \"\t\" (apply str (interpose \" \" (:configure p)))))))"
 }
 
 # dump_corpus CORPUS OUT: every module of the corpus dumped into OUT/PKG/FILE.edn (a module the
@@ -211,11 +236,40 @@ dump_corpus() {
   done < <(corpus_plan "$c" modules)
 }
 
+# tree_jobs MODE ORIG CAND CANDOUT [reuse]: the helper's trees (hsdump tree, MODE "" or --full)
+# of the originals (in the corpus's tree, into ORIG/PKG) unless reuse, and of the printed modules
+# (in CAND/PKG, under the original's relative paths, so that spans name the same files, into
+# CANDOUT(PKG)), each parsed under its package's configuration: one job list over the whole corpus,
+# 8 modules a job, JOBS at a time (R5: package by package, the corpus's 37 small packages left the
+# cores idle); the helper's messages in each output's .err
+tree_jobs() {
+  local mode=$1 o=$2 k=$3 kout=$4 reuse=${5:-} name dir flags files jl
+  jl=$(mktemp "$rh/tree-jobs.XXXXXX")
+  while IFS=$'\t' read -r name dir flags files; do
+    [ -n "$files" ] || continue
+    printf '%s\n' "$flags" > "$jl.$name.flags"
+    if [ -z "$reuse" ]; then
+      # shellcheck disable=SC2086
+      printf '%s\n' $files | xargs -n 8 echo | while read -r fs; do
+        printf '%s\x1f%s\x1f%s\x1f%s\n' "$srcroot/$dir" "$o/$name" "$jl.$name.flags" "$fs"; done >> "$jl"
+    fi
+    if [ -d "$k/$name" ]; then
+      # shellcheck disable=SC2086
+      (cd "$k/$name" && printf '%s\n' $files | while read -r f; do [ -f "$f" ] && echo "$f"; done) | xargs -r -n 8 echo |
+        while read -r fs; do
+          printf '%s\x1f%s\x1f%s\x1f%s\n' "$k/$name" "${kout//PKG/$name}" "$jl.$name.flags" "$fs"; done >> "$jl"
+    fi
+  done < <(corpus_plan "$c" modules)
+  xargs -P "$jobs" -d '\n' -n 1 "$root/bin/lib/repr-haskell/tree-job" "$helper" "$mode" "$libdir" < "$jl" || true
+  rm -f "$jl" "$jl".*.flags
+}
+
 read_files() {
   arbace_tool -m arbace.repr.haskell read "$@"
 }
 
-# iface_plan CORPUS: one line per package, tab-separated: name, directory, the GHC flags of the
+# iface_plan CORPUS: one line per package, its fields separated by US (\x1f, so that an empty
+# field stays one; a tab is white space to read): name, directory, the GHC flags of the
 # parse (as corpus_plan's), the module names ghc --make builds (the converted, the .hsc, the
 # generated), the converted modules as NAME=FILE, the .hsc files, hsc2hs's flags, the generated
 # files as FILE=FLAG (genprimopcode's); $libdir expanded
@@ -224,15 +278,16 @@ iface_plan() {
   f=$(corpus_file "$1")
   arbace_tool -e "(let [c (read-string (slurp \"$f\")) j (fn [xs] (apply str (interpose \" \" xs)))]
     (doseq [p (:packages c)]
-      (println (str (:name p) \"\t\" (:dir p) \"\t\"
+      (println (str (:name p) \"\u001f\" (:dir p) \"\u001f\"
         (j (concat [(str \"-X\" (:language p))] (map #(str \"-X\" %) (:extensions p)) [\"-haddock\"] (:ghc-flags p)
              (distinct (for [[m f] (:modules p)] (let [n (- (count f) (count (str m)) 3)] (if (pos? n) (str \"-i\" (subs f 0 (dec n))) \"-i.\"))))))
-        \"\t\" (j (concat (map first (:modules p)) (map first (:hsc p)) (:generated p)))
-        \"\t\" (j (map (fn [[m f]] (str m \"=\" f)) (:modules p)))
-        \"\t\" (j (map second (:hsc p)))
-        \"\t\" (j (:hsc-flags p))
-        \"\t\" (j (map (fn [[f g]] (str f \"=\" g)) (:genprimopcode p)))))))" |
-    sed "s|\\\$libdir|$libdir|g"
+        \"\u001f\" (j (concat (map first (:modules p)) (map first (:hsc p)) (:generated p)))
+        \"\u001f\" (j (map (fn [[m f]] (str m \"=\" f)) (:modules p)))
+        \"\u001f\" (j (map second (:hsc p)))
+        \"\u001f\" (j (:hsc-flags p))
+        \"\u001f\" (j (map (fn [[f g]] (str f \"=\" g)) (:genprimopcode p)))
+        \"\u001f\" (j (map (fn [[f g]] (str f \"=\" g)) (:generated-files p)))))))" |
+    sed -e "s|\\\$libdir|$libdir|g" -e "s|\\\$repo|$root|g"
 }
 
 # iface_conf CORPUS KEY...: a value of the corpus's :iface, space-separated when a vector
@@ -274,7 +329,7 @@ genprimopcode_build() {
 # {orig,SIDE}.ifaces/PKG/M.iface, the objects removed, and each printed side compared with the
 # originals (arbace.repr.haskell compare-iface)
 iface_level() {
-  local c=$1 ib=$rh/iface/$1 opt t0 t1 t2 t3 name dir flags mods files hscs hflags gens
+  local c=$1 ib=$rh/iface/$1 opt t0 t1 t2 t3 name dir flags mods files hscs hflags gens gfiles
   shift
   local sides=() cands=()
   while [ $# -gt 0 ]; do sides+=("$1"); cands+=("$2"); shift 2; done
@@ -283,10 +338,11 @@ iface_level() {
   opt=$(iface_conf "$c" :opt)
   rm -rf "${ib:?}"; mkdir -p "$ib/orig"
   t0=$(date +%s)
-  while IFS=$'\t' read -r name dir flags mods files hscs hflags gens; do
+  while IFS=$'\x1f' read -r name dir flags mods files hscs hflags gens gfiles; do
     local o=$ib/orig/$name h g mf i k
     mkdir -p "$o"
     (cd "$srcroot/$dir" && tar --exclude=./tests -cf - .) | tar -xf - -C "$o"
+    for g in $gfiles; do mkdir -p "$(dirname "$o/${g%%=*}")"; cp "$root/${g#*=}" "$o/${g%%=*}"; done
     for h in $hscs; do
       # shellcheck disable=SC2086
       (cd "$o" && hsc2hs $hflags "$h" -o "${h%.hsc}.hs") > "$o.hsc2hs.log" 2>&1 ||
@@ -305,28 +361,37 @@ iface_level() {
   done < <(iface_plan "$c")
   t1=$(date +%s)
   echo "== repr-haskell roundtrip $c: interfaces: compile ($opt; orig ${sides[*]}; $((t1 - t0)) s preparing)" >&2
-  # all sides of each package concurrently, the packages in the corpus's order
-  while IFS=$'\t' read -r name dir flags mods files hscs hflags gens; do
+  # all sides of each package concurrently, and up to REPR_HASKELL_PACKAGES packages at once (each
+  # compiles against the installed packages alone, so the packages are independent; R5's 37,
+  # most of them small, left the cores idle one by one), in the corpus's order
+  local np=${REPR_HASKELL_PACKAGES:-4}
+  while IFS=$'\x1f' read -r name dir flags mods files hscs hflags gens gfiles; do
+    while [ "$(jobs -rp | wc -l)" -ge $((np * (1 + ${#sides[@]}))) ]; do wait -n || true; done
     local side
     for side in orig "${sides[@]}"; do
       # shellcheck disable=SC2086
       (cd "$ib/$side/$name" && ghc --make $flags $opt -j"$jobs" -fkeep-going -no-link \
         -outputdir "../$name.out" $mods) > "$ib/$side/$name.build.log" 2>&1 &
     done
-    wait || true
   done < <(iface_plan "$c")
+  wait || true
   t2=$(date +%s)
   echo "== repr-haskell roundtrip $c: interfaces: show and compare ($((t2 - t1)) s compiling)" >&2
-  while IFS=$'\t' read -r name dir flags mods files hscs hflags gens; do
+  # one ghc --show-iface per converted module, over every package and side at once (R5); a
+  # missing .hi leaves no .iface (reported)
+  while IFS=$'\x1f' read -r name dir flags mods files hscs hflags gens gfiles; do
     local side
     for side in orig "${sides[@]}"; do
-      # one ghc --show-iface per converted module; a missing .hi leaves no .iface (reported)
-      printf '%s\n' $files | sed 's/=.*//' | xargs -P "$jobs" -I{} sh -c \
-        'm={}; hi=$1/$(echo "$m" | tr . /).hi; out=$2/$m.iface; mkdir -p "$2"
-         [ -f "$hi" ] && ghc --show-iface "$hi" > "$out.part" 2>&1 && mv "$out.part" "$out"; rm -f "$out.part"; :' \
-        _ "$ib/$side/$name.out" "$ib/$side.ifaces/$name"
-      rm -rf "${ib:?}/$side/$name.out" "${ib:?}/$side/${name:?}"
+      mkdir -p "$ib/$side.ifaces/$name"
+      # shellcheck disable=SC2086
+      printf '%s\n' $files | sed 's/=.*//' | while read -r m; do
+        printf '%s %s\n' "$ib/$side/$name.out/$(echo "$m" | tr . /).hi" "$ib/$side.ifaces/$name/$m.iface"; done
     done
+  done < <(iface_plan "$c") | xargs -P "$jobs" -n 2 sh -c \
+    '[ -f "$1" ] && ghc --show-iface "$1" > "$2.part" 2>&1 && mv "$2.part" "$2"; rm -f "$2.part"; :' _
+  while IFS=$'\x1f' read -r name dir flags mods files hscs hflags gens gfiles; do
+    local side
+    for side in orig "${sides[@]}"; do rm -rf "${ib:?}/$side/$name.out" "${ib:?}/$side/${name:?}"; done
   done < <(iface_plan "$c")
   t3=$(date +%s)
   local st=0 n=${#sides[@]} keep
@@ -407,19 +472,7 @@ text_level() {
   t3=$(date +%s)
   echo "== repr-haskell roundtrip $c: text level: trees in mode :full ($((t3 - t2)) s printing)" >&2
   rm -rf "$trees"; mkdir -p "$trees/orig" "$trees/cand"
-  local name dir flags files
-  while IFS=$'\t' read -r name dir flags files; do
-    [ -n "$files" ] || continue
-    # shellcheck disable=SC2086
-    (cd "$srcroot/$dir" && printf '%s\n' $files | xargs -P "$jobs" -n 8 \
-      "$helper" tree --full -o "$trees/orig/$name" --libdir "$libdir" --ghc $flags --files) 2> "$trees/orig/$name.err" || true
-    if [ -d "$cand/$name" ]; then
-      # shellcheck disable=SC2086
-      (cd "$cand/$name" && printf '%s\n' $files | while read -r f; do [ -f "$f" ] && echo "$f"; done |
-        xargs -r -P "$jobs" -n 8 "$helper" tree --full -o "$trees/cand/$name" --libdir "$libdir" --ghc $flags --files) \
-        2> "$trees/cand/$name.err" || true
-    fi
-  done < <(corpus_plan "$c" modules)
+  tree_jobs --full "$trees/orig" "$cand" "$trees/cand/PKG"
   t4=$(date +%s)
   echo "== repr-haskell roundtrip $c: text level: compare ($((t4 - t3)) s parsing)" >&2
   arbace_tool -m arbace.repr.haskell compare-text --corpus "$(corpus_file "$c")" --src "$srcroot" --views "$dumps" \
@@ -463,22 +516,7 @@ tree_level() {
   # the trees: of the originals (in the corpus's tree) and of the printed modules (in the
   # candidate's), each parsed by the helper under its package's configuration
   if [ -z "$reuse" ]; then rm -rf "${orig:?}"; mkdir -p "$orig"; fi
-  local name dir flags files
-  while IFS=$'\t' read -r name dir flags files; do
-    [ -n "$files" ] || continue
-    if [ -z "$reuse" ]; then
-      # shellcheck disable=SC2086
-      (cd "$srcroot/$dir" && printf '%s\n' $files | xargs -P "$jobs" -n 8 \
-        "$helper" tree -o "$orig/$name" --libdir "$libdir" --ghc $flags --files) 2> "$orig/$name.err" || true
-    fi
-    if [ -d "$cand/$name" ]; then
-      # the printed modules under the original's relative paths, so that spans name the same files
-      # shellcheck disable=SC2086
-      (cd "$cand/$name" && printf '%s\n' $files | while read -r f; do [ -f "$f" ] && echo "$f"; done |
-        xargs -r -P "$jobs" -n 8 "$helper" tree -o "$cand/$name.trees" --libdir "$libdir" --ghc $flags --files) \
-        2> "$cand/$name.trees.err" || true
-    fi
-  done < <(corpus_plan "$c" modules)
+  tree_jobs "" "$orig" "$cand" "$cand/PKG.trees" $reuse
   t4=$(date +%s)
   echo "== repr-haskell roundtrip $c$what: compare ($((t4 - t3)) s parsing)" >&2
   arbace_tool -m arbace.repr.haskell compare --corpus "$(corpus_file "$c")" --orig "$orig" --cand "$cand" \
