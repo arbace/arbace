@@ -1,0 +1,894 @@
+;; goi: methods and interfaces at run time (GOI-SPEC.md §4.6, §5.3; GR4): the method sets of
+;; interpreted types (each entry the method's function, or a thunk the builder makes for a method
+;; reached through embedded fields or a pointer), the dynamic dispatch of interface method calls
+;; on proxies (an inline cache per call site) and on compiled values (the table's method
+;; expressions), method values, type assertions and type switches with gc's messages, proxies
+;; as fmt formats them (§5.3: Format, GoString, Error, String), and the wrappers of the compiled
+;; interfaces error and fmt.Stringer, which give compiled code an interpreted value.
+(in-ns 'go.arbace.goi)
+
+(go/file "method.go"
+  :imports [[fmt "fmt"] [reflect "reflect"] [strings "strings"] [sync "sync"] [atomic "sync/atomic"] [unsafe "unsafe"]])
+
+;; ---------------------------------------------------------------------------------------
+;; Method sets
+
+(go/type Method
+  "Method is an entry of an interpreted type's method set (§5.3): Fn the function called (the
+method itself, or the builder's thunk reaching it through embedded fields or a pointer), its
+receiver parameter's slot (kind RK, slot RS, of type RT; laid after the parameters and results,
+so that the arguments' slots are the signature's), its key and signature Sig.\n"
+  (struct ^string Name ^{:tag (* Func)} Fn ^byte RK ^int32 RS ^{:tag (* Type)} RT ^{:tag (* Type)} Sig))
+
+(go/type IMethod "IMethod is an interface type's method: its key (a name, path.name when unexported) and signature.\n"
+  (struct ^string Key ^{:tag (* Type)} Sig))
+
+(go/func TSetMethods
+  "TSetMethods gives type t its method set: keys, functions, receiver slots (kinds rks, slots
+rss, types rts) and signatures. A type with methods goes into interfaces as a proxy (§5.3).\n"
+  [^{:tag (* Type)} t ^{:tag (slice string)} keys ^{:tag (slice (* Func))} fns ^{:tag (slice int32)} rks
+   ^{:tag (slice int32)} rss ^{:tag (slice (* Type))} rts ^{:tag (slice (* Type))} sigs]
+  (let [ms (make (map string (* Method)) (len keys))]
+    (range [i k keys]
+      (aset ms k (addr (lit Method :Name k :Fn (aget fns i) :RK (conv byte (aget rks i)) :RS (aget rss i)
+                            :RT (aget rts i) :Sig (aget sigs i)))))
+    (.Lock internMu)
+    (set! (.-wrap t) 0)
+    (cond
+      (stringSig (aget ms "Error")) (set! (.-wrap t) \e)
+      (stringSig (aget ms "String")) (set! (.-wrap t) \s))
+    (set! (.-Methods t) ms)
+    (set! (.-methodsSet t) true)
+    (when (and (> (len keys) 0) (not (.-Iface t)))
+      (set! (.-Proxy t) true))
+    (.Unlock internMu)))
+
+(go/func TMethodsSet "TMethodsSet says whether t's method set was given (TSetMethods).\n" ^bool [^{:tag (* Type)} t]
+  (.Lock internMu)
+  (defer (.Unlock internMu))
+  (.-methodsSet t))
+
+(go/func TSetIfaceMethods "TSetIfaceMethods gives interface type t its methods (keys and signatures).\n"
+  [^{:tag (* Type)} t ^{:tag (slice string)} keys ^{:tag (slice (* Type))} sigs]
+  (let [ms (make (slice IMethod) (len keys))]
+    (range [i k keys]
+      (aset ms i (lit IMethod k (aget sigs i))))
+    (.Lock internMu)
+    (set! (.-IMethods t) ms)
+    (.Unlock internMu)))
+
+;; ---------------------------------------------------------------------------------------
+;; Receivers
+
+(go/func goIntOf "goIntOf is Go value v of an integer kind or bool as an I value.\n" ^int64 [^any v]
+  (type-switch [x v]
+    (case [int] (return (conv int64 x)))
+    (case [int64] (return x))
+    (case [int32] (return (conv int64 x)))
+    (case [uint8] (return (conv int64 x)))
+    (case [bool] (return (B2I x)))
+    (case [uint] (return (conv int64 x)))
+    (case [uint64] (return (conv int64 x))))
+  (intOfValue (reflect/ValueOf v)))
+
+(go/func floatOf "floatOf is Go value v of a float kind as an F value.\n" ^float64 [^any v]
+  (type-switch [x v]
+    (case [float64] (return x))
+    (case [float32] (return (conv float64 x))))
+  (.Float (reflect/ValueOf v)))
+
+(go/func stringOf "stringOf is Go value v of a string kind as an S value.\n" ^string [^any v]
+  (let [(values s ok) (assert string v)]
+    (when ok
+      (return s)))
+  (.String (reflect/ValueOf v)))
+
+(go/func setRecv
+  "setRecv writes receiver v, a Go value of type t (an interface's content's value), to slot s
+of kind k of frame nf.\n"
+  [^{:tag (* Frame)} nf ^byte k ^int32 s ^{:tag (* Type)} t ^any v]
+  (switch k
+    (case [\I] (aset (.-I nf) s (goIntOf v)))
+    (case [\F] (aset (.-F nf) s (floatOf v)))
+    (case [\S] (aset (.-S nf) s (stringOf v)))
+    (default (aset (.-R nf) s (fromMem t v)))))
+
+(go/func setFrameSlot "setFrameSlot writes frame value v (int64, float64, string or an R value) to slot s of kind k.\n"
+  [^{:tag (* Frame)} nf ^byte k ^int32 s ^any v]
+  (switch k
+    (case [\I] (aset (.-I nf) s (assert int64 v)))
+    (case [\F] (aset (.-F nf) s (assert float64 v)))
+    (case [\S] (aset (.-S nf) s (assert string v)))
+    (default (aset (.-R nf) s v))))
+
+;; ---------------------------------------------------------------------------------------
+;; Dynamic dispatch (§5.3): proxies' methods, cached per call site
+
+(go/type icache "icache is a call site's last dispatch: the dynamic type and its method.\n"
+  (struct ^{:tag (* Type)} t ^{:tag (* Method)} m))
+
+(go/type proxied "proxied is a wrapper of a proxy (a compiled interface's value made from an interpreted one).\n"
+  (interface (GoiProxy ^Proxy [])))
+
+(go/func contentOf
+  "contentOf is proxy p as an interface's content (§5.3): of a type with an Error() string
+method its error wrapper, else with a String() string method its fmt.Stringer wrapper (so that
+compiled code given it as an any sees an error, a Stringer), else p.\n"
+  ^any [^Proxy p]
+  (switch (.-wrap (.-T p))
+    (case [\e] (return (lit errorWrapper p)))
+    (case [\s] (return (lit stringerWrapper p))))
+  p)
+
+(go/func lookupMethod "lookupMethod is t's method key, cached in c.\n"
+  ^{:tag (* Method)} [^{:tag (* Type)} t ^string key ^{:tag (* (atomic/Pointer icache))} c]
+  (let [e (.Load c)]
+    (when (and (!= e nil) (== (.-t e) t))
+      (return (.-m e))))
+  (let [m (aget (.-Methods t) key)]
+    (when (== m nil)
+      (panic (fmt/Sprintf "goi: the type %s has no method %s" (typeName t) key)))
+    (.Store c (addr (lit icache t m)))
+    m))
+
+(go/func enterMethod
+  "enterMethod takes the frame of a call of method m from frame fr (the thread's stacks saved by
+the caller), writes the arguments (args) and the receiver v (a Go value of m's receiver type)
+and runs it: the callee's frame, to read its results from.\n"
+  ^{:tag (* Frame)} [^{:tag (* Frame)} fr ^{:tag (* Method)} m ^any v ^{:tag (slice Setter)} args]
+  (let [th (.-Th fr)
+        c (.Code (.-Fn m))
+        nf (.enter th c (.-Fn m))]
+    (set! (.-rec nf) (.-passRec fr))
+    (range [_ a args] (a fr nf))
+    (setRecv nf (.-RK m) (.-RS m) (.-RT m) v)
+    (run c nf)
+    nf))
+
+(go/func proxyOf
+  "proxyOf is content v as a proxy (a wrapper's; a raw value of an interpreted faithful type with
+methods, which compiled code gave back, by its RT), or false.\n"
+  [^any v] :results [^Proxy p ^bool ok]
+  (set! (values p ok) (assert Proxy v))
+  (when (or ok (== v nil))
+    (return))
+  (let [(values w isw) (assert proxied v)]
+    (when isw
+      (return (.GoiProxy w) true)))
+  (let [d (interpOf (reflect/TypeOf v))]
+    (when (and (!= d nil) (> (len (.-Methods d)) 0))
+      (return (lit Proxy d v) true)))
+  (return))
+
+(go/func interpOf
+  "interpOf is the descriptor of reflect type rt when it is an interpreted named struct type's
+RT or a pointer to one, else nil.\n"
+  ^{:tag (* Type)} [^{:tag reflect/Type} rt]
+  (switch (.Kind rt)
+    (case [reflect/Struct]
+      (let [(values d ok) (.Load interpRT rt)]
+        (when ok
+          (return (assert (* Type) d)))))
+    (case [reflect/Pointer]
+      (let [(values d ok) (.Load interpRT (.Elem rt))]
+        (when ok
+          (return (TPtr (assert (* Type) d)))))))
+  nil)
+
+(go/func NonNilR "NonNilR is interface content x, gc's nil dereference when it is nil (a deferred interface method call's receiver).\n" ^R [^R x]
+  (fn ^any [^{:tag (* Frame)} fr]
+    (let [v (x fr)]
+      (when (== v nil)
+        (nilDeref))
+      v)))
+
+(go/func DerefWrapP
+  "DerefWrapP is the variable pointer x points to, for a value method called through it by an
+interface: a nil x panics with gc's panicwrap message msg.\n"
+  ^P [^R x ^string msg]
+  (fn ^unsafe/Pointer [^{:tag (* Frame)} fr]
+    (let [p (efaceData (x fr))]
+      (when (== p nil)
+        (panic (lit plainError msg)))
+      p)))
+
+(go/func RawR
+  "RawR is content x as compiled code that looks at representations takes it (runtime's,
+reflect's functions): a proxy's value itself.\n"
+  ^R [^R x]
+  (fn ^any [^{:tag (* Frame)} fr] (assertedGo (x fr))))
+
+(go/func CallIfaceI
+  "CallIfaceI is a call of interface method key on content x (§5.3) of one I result in the
+callee's slot res: a proxy's interpreted method, else fb (the compiled method's call, reading x).\n"
+  ^I [^R x ^string key ^{:tag (slice Setter)} args ^int32 res ^any fb]
+  (let [c (new (inst atomic/Pointer icache))
+        f (assert I fb)]
+    (fn ^int64 [^{:tag (* Frame)} fr]
+      (let [(values p ok) (proxyOf (x fr))]
+        (when (not ok)
+          (return (f fr)))
+        (let [th (.-Th fr)
+              mk (.save th)
+              nf (enterMethod fr (lookupMethod (.-T p) key c) (.-V p) args)
+              r (aget (.-I nf) res)]
+          (.restore th mk)
+          r)))))
+
+(go/func CallIfaceF ^F [^R x ^string key ^{:tag (slice Setter)} args ^int32 res ^any fb]
+  (let [c (new (inst atomic/Pointer icache))
+        f (assert F fb)]
+    (fn ^float64 [^{:tag (* Frame)} fr]
+      (let [(values p ok) (proxyOf (x fr))]
+        (when (not ok)
+          (return (f fr)))
+        (let [th (.-Th fr)
+              mk (.save th)
+              nf (enterMethod fr (lookupMethod (.-T p) key c) (.-V p) args)
+              r (aget (.-F nf) res)]
+          (.restore th mk)
+          r)))))
+
+(go/func CallIfaceS ^S [^R x ^string key ^{:tag (slice Setter)} args ^int32 res ^any fb]
+  (let [c (new (inst atomic/Pointer icache))
+        f (assert S fb)]
+    (fn ^string [^{:tag (* Frame)} fr]
+      (let [(values p ok) (proxyOf (x fr))]
+        (when (not ok)
+          (return (f fr)))
+        (let [th (.-Th fr)
+              mk (.save th)
+              nf (enterMethod fr (lookupMethod (.-T p) key c) (.-V p) args)
+              r (aget (.-S nf) res)]
+          (.restore th mk)
+          r)))))
+
+(go/func CallIfaceR ^R [^R x ^string key ^{:tag (slice Setter)} args ^int32 res ^any fb]
+  (let [c (new (inst atomic/Pointer icache))
+        f (assert R fb)]
+    (fn ^any [^{:tag (* Frame)} fr]
+      (let [(values p ok) (proxyOf (x fr))]
+        (when (not ok)
+          (return (f fr)))
+        (let [th (.-Th fr)
+              mk (.save th)
+              nf (enterMethod fr (lookupMethod (.-T p) key c) (.-V p) args)
+              r (aget (.-R nf) res)]
+          (.restore th mk)
+          r)))))
+
+(go/func CallIfaceT "CallIfaceT is a call of interface method key of no result, or of several copied by rs.\n"
+  ^T [^R x ^string key ^{:tag (slice Setter)} args ^{:tag (slice resCopy)} rs ^any fb]
+  (let [c (new (inst atomic/Pointer icache))
+        f (assert T fb)]
+    (fn [^{:tag (* Frame)} fr]
+      (let [(values p ok) (proxyOf (x fr))]
+        (when (not ok)
+          (f fr)
+          (return))
+        (let [th (.-Th fr)
+              mk (.save th)
+              nf (enterMethod fr (lookupMethod (.-T p) key c) (.-V p) args)]
+          (copyResults fr nf rs)
+          (.restore th mk))))))
+
+;; Compiled dynamic types (§5.3): the table's method of the type, by its reflect type
+
+(go/var ^{:tag sync/Once} typeIndexOnce)
+
+(go/type typeRef "typeRef is a listed package's named type: its package's path and name.\n"
+  (struct ^string path ^string name))
+
+(go/var ^{:tag (map reflect/Type typeRef)} typeIndex)
+
+(go/func tableTypeOf
+  "tableTypeOf is the listed named type of reflect type rt (or of its element, for a pointer):
+its package's path and name.\n"
+  [^{:tag reflect/Type} rt] :results [^string path ^string name ^bool ok]
+  (.Do typeIndexOnce
+       (fn []
+         (set! typeIndex (make (map reflect/Type typeRef)))
+         (range [p pk packages]
+           (range [_ t (.-Types pk)]
+             (aset typeIndex (.-Type t) (lit typeRef p (.-Name t)))))))
+  (let [(values r found) (aget typeIndex rt)]
+    (when (and (not found) (== (.Kind rt) reflect/Pointer))
+      (set! (values r found) (aget typeIndex (.Elem rt))))
+    (return (.-path r) (.-name r) found)))
+
+(go/func DerefR "DerefR is the value pointer x points to (a value method's receiver reached through a pointer).\n" ^R [^R x]
+  (fn ^any [^{:tag (* Frame)} fr]
+    (let [v (reflect/ValueOf (x fr))]
+      (when (.IsNil v)
+        (nilDeref))
+      (.Interface (.Elem v)))))
+
+(go/var errorType ((inst reflect/TypeFor error)))
+(go/var stringerType ((inst reflect/TypeFor fmt/Stringer)))
+
+(go/func compiledMethodCall
+  "compiledMethodCall is the call node of method name of compiled type rt, its receiver node x
+and argument nodes args (compiled calls' kinds), results to rs: the table's method expression,
+else error's Error and fmt.Stringer's String.\n"
+  ^any [^{:tag reflect/Type} rt ^string name ^R x ^{:tag (slice any)} args ^{:tag (slice int32)} rs]
+  (let [(values path tname ok) (tableTypeOf rt)]
+    (when ok
+      (let [(values m ok2) (member path (+ tname "." name))]
+        (when ok2
+          (let [recv (conv any x)]
+            (when (and (== (.Kind rt) reflect/Pointer) (!= (.In (reflect/TypeOf (.-Value m)) 0) rt))
+              (set! recv (DerefR x)))
+            (return (CallCompiled path (+ tname "." name) (append (lit (slice any) recv) (spread args)) rs)))))))
+  (when (and (== name "Error") (.Implements rt errorType))
+    (return (conv S (fn ^string [^{:tag (* Frame)} fr] (.Error (assert error (x fr)))))))
+  (when (and (== name "String") (.Implements rt stringerType))
+    (return (conv S (fn ^string [^{:tag (* Frame)} fr] (.String (assert fmt/Stringer (x fr)))))))
+  (panic (fmt/Sprintf "goi cannot call %s on %s: the type is not in the table" name (.String rt))))
+
+(go/type cdispatch "cdispatch is a call site's compiled method calls by dynamic type.\n"
+  (struct ^R x ^string name ^{:tag (slice any)} args ^{:tag (slice int32)} rs ^{:tag sync/Map} nodes))
+
+(go/method node "node is the call node for content v's dynamic type (made on first use).\n"
+  ^any [^{:tag (* cdispatch)} d ^any v]
+  (when (== v nil)
+    (nilDeref))
+  (let [rt (reflect/TypeOf v)
+        (values n ok) (.Load (.-nodes d) rt)]
+    (when ok
+      (return n))
+    (let [made (compiledMethodCall rt (.-name d) (.-x d) (.-args d) (.-rs d))]
+      (.Store (.-nodes d) rt made)
+      made)))
+
+(go/func CompiledDispatchI
+  "CompiledDispatchI is the call of method name on the compiled value of content x (an
+interpreted interface's: the table's method of its dynamic type), of one I result.\n"
+  ^I [^R x ^string name ^{:tag (slice any)} args]
+  (let [d (addr (lit cdispatch :x x :name name :args args))]
+    (fn ^int64 [^{:tag (* Frame)} fr] ((assert I (.node d (x fr))) fr))))
+
+(go/func CompiledDispatchF ^F [^R x ^string name ^{:tag (slice any)} args]
+  (let [d (addr (lit cdispatch :x x :name name :args args))]
+    (fn ^float64 [^{:tag (* Frame)} fr] ((assert F (.node d (x fr))) fr))))
+
+(go/func CompiledDispatchS ^S [^R x ^string name ^{:tag (slice any)} args]
+  (let [d (addr (lit cdispatch :x x :name name :args args))]
+    (fn ^string [^{:tag (* Frame)} fr] ((assert S (.node d (x fr))) fr))))
+
+(go/func CompiledDispatchR ^R [^R x ^string name ^{:tag (slice any)} args]
+  (let [d (addr (lit cdispatch :x x :name name :args args))]
+    (fn ^any [^{:tag (* Frame)} fr] ((assert R (.node d (x fr))) fr))))
+
+(go/func CompiledDispatchT ^T [^R x ^string name ^{:tag (slice any)} args ^{:tag (slice int32)} rs]
+  (let [d (addr (lit cdispatch :x x :name name :args args :rs rs))]
+    (fn [^{:tag (* Frame)} fr] ((assert T (.node d (x fr))) fr))))
+
+(go/func ErrorCall "ErrorCall is x.Error() of a compiled value of type error.\n" ^S [^R x]
+  (fn ^string [^{:tag (* Frame)} fr]
+    (let [v (x fr)]
+      (when (== v nil)
+        (nilDeref))
+      (.Error (assert error v)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Method values (§4.6): a method bound to its receiver
+
+(go/type Bound
+  "Bound is a method value: method M with its receiver Recv (a frame value of M's receiver kind
+when Frame, else a Go value of its type); or a compiled method expression Gofn with the receiver
+Recv first. gofns are its Go funcs by type (adapters, as a closure's).\n"
+  (struct ^{:tag (* Method)} M ^any Recv ^bool Frame ^any Gofn
+          ^{:tag sync/Mutex} mu ^{:tag (map reflect/Type any)} gofns))
+
+(go/method setRecvOf "setRecvOf writes the bound receiver to its slot of nf.\n" [^{:tag (* Bound)} b ^{:tag (* Frame)} nf]
+  (if (.-Frame b)
+    (setFrameSlot nf (.-RK (.-M b)) (.-RS (.-M b)) (.-Recv b))
+    (setRecv nf (.-RK (.-M b)) (.-RS (.-M b)) (.-RT (.-M b)) (.-Recv b))))
+
+(go/func MethodValue
+  "MethodValue is x.M of a concrete type: method fn (its receiver slot rk, rs of type rt,
+signature sig) bound to the receiver node recv's value, evaluated now (Go's rule).\n"
+  ^R [^{:tag (* Func)} fn ^int32 rk ^int32 rs ^{:tag (* Type)} rt ^{:tag (* Type)} sig ^any recv]
+  (let [m (addr (lit Method :Name (.-Name fn) :Fn fn :RK (conv byte rk) :RS rs :RT rt :Sig sig))]
+    (switch (conv byte rk)
+      (case [\I] (let [n (assert I recv)] (return (fn ^any [^{:tag (* Frame)} fr] (addr (lit Bound :M m :Recv (n fr) :Frame true))))))
+      (case [\F] (let [n (assert F recv)] (return (fn ^any [^{:tag (* Frame)} fr] (addr (lit Bound :M m :Recv (n fr) :Frame true))))))
+      (case [\S] (let [n (assert S recv)] (return (fn ^any [^{:tag (* Frame)} fr] (addr (lit Bound :M m :Recv (n fr) :Frame true)))))))
+    (let [n (assert R recv)]
+      (fn ^any [^{:tag (* Frame)} fr] (addr (lit Bound :M m :Recv (n fr) :Frame true))))))
+
+(go/func BoundCompiled
+  "BoundCompiled is x.M of a compiled type: its method expression gofn bound to the receiver
+node recv's value (a Go value of the method expression's receiver type), evaluated now.\n"
+  ^R [^any gofn ^R recv]
+  (fn ^any [^{:tag (* Frame)} fr] (addr (lit Bound :Gofn gofn :Recv (recv fr)))))
+
+(go/func IfaceMethodValue
+  "IfaceMethodValue is x.M of an interface content x: a proxy's method bound to its value, else
+the compiled method expression gofn (the static interface's, or the table's of the dynamic
+type when nil) bound to the content.\n"
+  ^R [^R x ^string key ^string name ^any gofn]
+  (let [c (new (inst atomic/Pointer icache))]
+    (fn ^any [^{:tag (* Frame)} fr]
+      (let [v (x fr)
+            (values p ok) (proxyOf v)]
+        (when ok
+          (return (addr (lit Bound :M (lookupMethod (.-T p) key c) :Recv (.-V p)))))
+        (when (== v nil)
+          (nilDeref))
+        (let [g gofn]
+          (when (== g nil)
+            (let [rt (reflect/TypeOf v)
+                  (values path tname found) (tableTypeOf rt)]
+              (when found
+                (let [(values m ok2) (member path (+ tname "." name))]
+                  (when ok2
+                    (set! g (.-Value m))
+                    (when (and (== (.Kind rt) reflect/Pointer) (!= (.In (reflect/TypeOf g) 0) rt))
+                      (set! v (.Interface (.Elem (reflect/ValueOf v))))))))
+              (when (== g nil)
+                (cond
+                  (== name "Error") (set! g (method-expr error Error))
+                  (== name "String") (set! g (method-expr fmt/Stringer String))
+                  :else (panic (fmt/Sprintf "goi cannot take the method value %s of %s: the type is not in the table" name (.String rt)))))))
+          (addr (lit Bound :Gofn g :Recv v)))))))
+
+(go/method callValues
+  "callValues calls the method value with reflect.Values of its parameters (a Go func made from
+it, called by compiled code; t its type), its results as reflect.Values.\n"
+  ^{:tag (slice reflect/Value)} [^{:tag (* Bound)} b ^{:tag (* Type)} t ^{:tag (slice reflect/Value)} in]
+  (when (!= (.-Gofn b) nil)
+    (let [all (append (lit (slice reflect/Value) (reflect/ValueOf (.-Recv b))) (spread in))
+          fv (reflect/ValueOf (.-Gofn b))]
+      (when (.-Variadic t)
+        (return (.CallSlice fv all)))
+      (return (.Call fv all))))
+  (let [th (CurrentThread)
+        fn (.-Fn (.-M b))
+        code (.Code fn)
+        m (.save th)
+        nf (.enter th code fn)
+        (values _ ps rs) (slotCounts t)]
+    (range [i v in]
+      (let [pt (aget (.-Ins t) i)]
+        (when (and (.-Variadic t) (== i (- (len (.-Ins t)) 1)))
+          (set! pt (TypeOf (.Type v))))
+        (setSlotValue nf (.-K pt) (aget ps i) pt v)))
+    (.setRecvOf b nf)
+    (run code nf)
+    (let [out (make (slice reflect/Value) (len rs))]
+      (range [i s rs]
+        (aset out i (slotValue nf (aget (.-Outs t) i) s)))
+      (.restore th m)
+      out)))
+
+(go/method goFunc "goFunc is the method value as a real Go func of type t (reflect.MakeFunc), made once per type.\n"
+  ^any [^{:tag (* Bound)} b ^{:tag (* Type)} t]
+  (.Lock (.-mu b))
+  (defer (.Unlock (.-mu b)))
+  (let [rt (.mem t)
+        g (aget (.-gofns b) rt)]
+    (when (!= g nil)
+      (return g))
+    (set! g (.Interface (reflect/MakeFunc rt (fn ^{:tag (slice reflect/Value)} [^{:tag (slice reflect/Value)} in]
+                                                 (.callValues b t in)))))
+    (when (== (.-gofns b) nil)
+      (set! (.-gofns b) (make (map reflect/Type any))))
+    (aset (.-gofns b) rt g)
+    (.Store adapters (efaceData g) b)
+    g))
+
+;; ---------------------------------------------------------------------------------------
+;; Interpreted methods called from Go (fmt's, the wrappers', Report's)
+
+(go/func callMethodValues
+  "callMethodValues calls method m on receiver v (a Go value of its receiver type) with
+reflect.Values of its parameters, on the current goroutine's thread: its results.\n"
+  ^{:tag (slice reflect/Value)} [^{:tag (* Method)} mt ^any v ^{:tag (slice reflect/Value)} in]
+  (let [b (addr (lit Bound :M mt :Recv v))]
+    (.callValues b (.-Sig mt) in)))
+
+(go/func stringSig "stringSig says whether method m's signature is func() string.\n" ^bool [^{:tag (* Method)} m]
+  (and (!= m nil) (== (len (.-Ins (.-Sig m))) 0) (== (len (.-Outs (.-Sig m))) 1) (== (.-GK (aget (.-Outs (.-Sig m)) 0)) reflect/String)))
+
+(go/func callString "callString is proxy p's method name of signature func() string, called.\n" ^string [^Proxy p ^string name]
+  (let [m (aget (.-Methods (.-T p)) name)]
+    (when (not (stringSig m))
+      (panic (fmt/Sprintf "goi: %s has no method %s() string" (typeName (.-T p)) name)))
+    (.String (aget (callMethodValues m (.-V p) nil) 0))))
+
+(go/var stateType ((inst reflect/TypeFor fmt/State)))
+
+(go/method Format
+  "Format formats the proxy as fmt's handleMethods does for its dynamic type (§5.3): its
+interpreted Format; GoString for %#v; Error, then String for %v %s %x %X %q; else the value, with
+the same verb and flags. A method that panics prints as fmt's catchPanic does.\n"
+  [^Proxy p ^{:tag fmt/State} f ^rune verb]
+  (let [ms (.-Methods (.-T p))]
+    (when (> (len ms) 0)
+      (let [m (aget ms "Format")]
+        (when (and (!= m nil) (== (len (.-Ins (.-Sig m))) 2) (== (len (.-Outs (.-Sig m))) 0))
+          (formatGuarded p f verb "Format" (fn [] (callMethodValues m (.-V p) (lit (slice reflect/Value) (reflect/ValueOf f) (reflect/ValueOf verb)))))
+          (return)))
+      (if (and (== verb \v) (.Flag f \#))
+        (let [m (aget ms "GoString")]
+          (when (stringSig m)
+            (formatGuarded p f verb "GoString" (fn [] (fmt/Fprint f (.String (aget (callMethodValues m (.-V p) nil) 0)))))
+            (return)))
+        (when (strings/ContainsRune "vsxXq" verb)
+          (range [_ nm (lit (slice string) "Error" "String")]
+            (let [m (aget ms nm)]
+              (when (stringSig m)
+                (formatGuarded p f verb nm (fn [] (fmt/Fprintf f (fmt/FormatString f verb) (.String (aget (callMethodValues m (.-V p) nil) 0)))))
+                (return))))))))
+  (fmt/Fprintf f (fmt/FormatString f verb) (.-V p)))
+
+(go/func formatGuarded
+  "formatGuarded runs a method's formatting of proxy p; a panic prints as fmt's catchPanic: <nil>
+for a nil pointer receiver, else %!v(PANIC=M method: value).\n"
+  [^Proxy p ^{:tag fmt/State} f ^rune verb ^string method ^{:tag (func [])} run]
+  (defer ((fn []
+            (let [r (recover)]
+              (when (== r nil)
+                (return))
+              (let [(values _ isExit) (assert exitPanic r)]
+                (when isExit
+                  (panic r)))
+              (let [v (reflect/ValueOf (.-V p))]
+                (when (and (== (.Kind v) reflect/Pointer) (.IsNil v))
+                  (fmt/Fprint f "<nil>")
+                  (return)))
+              (fmt/Fprintf f "%%!%c(PANIC=%s method: %v)" verb method r)))))
+  (run))
+
+;; The wrappers of error and fmt.Stringer (§5.3 rule 3)
+
+(go/type errorWrapper "errorWrapper is a proxy as Go memory of type error holds it.\n" (struct Proxy))
+
+(go/method Error ^string [^errorWrapper w] (callString (.-Proxy w) "Error"))
+(go/method GoiProxy "GoiProxy is the wrapper's proxy.\n" ^Proxy [^errorWrapper w] (.-Proxy w))
+
+(go/type stringerWrapper "stringerWrapper is a proxy as Go memory of type fmt.Stringer holds it.\n" (struct Proxy))
+
+(go/method String ^string [^stringerWrapper w] (callString (.-Proxy w) "String"))
+(go/method GoiProxy "GoiProxy is the wrapper's proxy.\n" ^Proxy [^stringerWrapper w] (.-Proxy w))
+
+(go/func CallProxy
+  "CallProxy calls proxy p's method key with Go values args (a wrapper's method, the table's,
+§6.4): its results as Go values.\n"
+  ^{:tag (slice any)} [^Proxy p ^string key ^{:tag (slice any)} args]
+  (let [m (aget (.-Methods (.-T p)) key)]
+    (when (== m nil)
+      (panic (fmt/Sprintf "goi: the type %s has no method %s" (typeName (.-T p)) key)))
+    (let [in (make (slice reflect/Value) (len args))]
+      (range [i a args]
+        (aset in i (reflect/ValueOf a)))
+      (let [out (callMethodValues m (.-V p) in)
+            rs (make (slice any) (len out))]
+        (range [i v out]
+          (when (.IsValid v)
+            (aset rs i (.Interface v))))
+        rs))))
+
+(go/var ^{:tag sync/Map :doc "wrappers are the table's wrappers of compiled interfaces by their reflect type (func(Proxy) any).\n"}
+  wrappers)
+
+(go/func RegisterWrapper "RegisterWrapper records the wrapper constructor of compiled interface type rt (the table's).\n"
+  [^{:tag reflect/Type} rt ^{:tag (func [Proxy] [any])} mk]
+  (.Store wrappers rt mk))
+
+(go/func wrapProxy
+  "wrapProxy is proxy p as Go memory of compiled interface type rt holds it: its wrapper.\n"
+  ^any [^{:tag reflect/Type} rt ^Proxy p]
+  (cond
+    (== rt errorType) (return (lit errorWrapper p))
+    (== rt stringerType) (return (lit stringerWrapper p)))
+  (let [(values mk ok) (.Load wrappers rt)]
+    (when ok
+      (return ((assert (func [Proxy] [any]) mk) p))))
+  (panic (fmt/Sprintf "goi cannot give compiled code an interpreted %s as %s: the interface has no wrapper in the table"
+                      (typeName (.-T p)) (.String rt))))
+
+;; ---------------------------------------------------------------------------------------
+;; Type assertions and type switches (§5.3, §10.3)
+
+(go/func dynType
+  "dynType is the descriptor of content v's dynamic type: a proxy's, an interpreted faithful
+type's by its RT, else the compiled type's; nil for nil.\n"
+  ^{:tag (* Type)} [^any v]
+  (when (== v nil)
+    (return nil))
+  (let [(values p ok) (proxyOf v)]
+    (when ok
+      (return (.-T p))))
+  (let [rt (reflect/TypeOf v)]
+    (.Lock typesMu)
+    (let [d (aget interp rt)]
+      (.Unlock typesMu)
+      (when (!= d nil)
+        (return d)))
+    (TypeOf rt)))
+
+(go/func hasType "hasType says whether content v's dynamic type is concrete type t.\n" ^bool [^any v ^{:tag (* Type)} t]
+  (when (== v nil)
+    (return false))
+  (let [(values p ok) (proxyOf v)]
+    (when ok
+      (return (== (.-T p) t))))
+  (and (not (.-Proxy t)) (== (reflect/TypeOf v) (.mem t))))
+
+(go/func compiledHas
+  "compiledHas says whether compiled type rt has method m (the table's method of that name and
+signature; Error and String by the compiled interfaces).\n"
+  ^bool [^{:tag reflect/Type} rt ^IMethod m]
+  (let [sig (.mem (.-Sig m))]
+    (when (and (== (.NumIn sig) 0) (== (.NumOut sig) 1) (== (.Out sig 0) ((inst reflect/TypeFor string))))
+      (cond
+        (== (.-Key m) "Error") (return (.Implements rt errorType))
+        (== (.-Key m) "String") (return (.Implements rt stringerType))))
+    (let [(values path tname ok) (tableTypeOf rt)]
+      (when (not ok)
+        (return false))
+      (let [(values mb ok2) (member path (+ tname "." (.-Key m)))]
+        (when (not ok2)
+          (return false))
+        (let [mt (reflect/TypeOf (.-Value mb))
+              r0 (.In mt 0)]
+          (when (and (!= r0 rt) (not (and (== (.Kind rt) reflect/Pointer) (== r0 (.Elem rt)))))
+            (return false))
+          (when (or (!= (.NumIn mt) (+ (.NumIn sig) 1)) (!= (.NumOut mt) (.NumOut sig)) (!= (.IsVariadic mt) (.IsVariadic sig)))
+            (return false))
+          (for [i 0] (< i (.NumIn sig)) (inc! i)
+            (when (!= (.In mt (+ i 1)) (.In sig i))
+              (return false)))
+          (for [i 0] (< i (.NumOut sig)) (inc! i)
+            (when (!= (.Out mt i) (.Out sig i))
+              (return false)))
+          true)))))
+
+(go/func missingMethod
+  "missingMethod is the first method of interface type it that content v's dynamic type lacks
+(\"\" when it implements it; v not nil).\n"
+  ^string [^any v ^{:tag (* Type)} it]
+  (let [(values p ok) (proxyOf v)]
+    (when ok
+      (range [_ m (.-IMethods it)]
+        (let [e (aget (.-Methods (.-T p)) (.-Key m))]
+          (when (or (== e nil) (!= (.-Sig e) (.-Sig m)))
+            (return (methodName (.-Key m))))))
+      (return "")))
+  (let [rt (reflect/TypeOf v)]
+    (when (and (.-Compiled it) (!= (.-RT it) anyType))
+      (when (.Implements rt (.-RT it))
+        (return ""))
+      (range [_ m (.-IMethods it)]
+        (when (not (compiledHas rt m))
+          (return (methodName (.-Key m)))))
+      (return "?"))
+    (range [_ m (.-IMethods it)]
+      (when (not (compiledHas rt m))
+        (return (methodName (.-Key m)))))
+    ""))
+
+(go/func methodName "methodName is a method key's name (path.name: name).\n" ^string [^string k]
+  (lastName k))
+
+(go/func implements "implements says whether content v's dynamic type implements interface type it.\n"
+  ^bool [^any v ^{:tag (* Type)} it]
+  (when (== v nil)
+    (return false))
+  (== (missingMethod v it) ""))
+
+(go/func matches "matches says whether content v asserts to type t (an interface or a concrete type).\n"
+  ^bool [^any v ^{:tag (* Type)} t]
+  (when (.-Iface t)
+    (return (implements v t)))
+  (hasType v t))
+
+(go/func assertedValue "assertedValue is content v asserted to t, as a frame value of an R kind.\n"
+  ^any [^any v ^{:tag (* Type)} t]
+  (when (.-Iface t)
+    (return v))
+  (let [(values p ok) (proxyOf v)]
+    (when ok
+      (return (fromMem t (.-V p)))))
+  (fromMem t v))
+
+(go/func assertedGo "assertedGo is content v's Go value (a proxy's V).\n" ^any [^any v]
+  (let [(values p ok) (proxyOf v)]
+    (when ok
+      (return (.-V p))))
+  v)
+
+(go/type TypeAssertionError
+  "TypeAssertionError is a failed type assertion, with gc's message (runtime.TypeAssertionError's;
+a runtime.Error).\n"
+  (struct ^string iface ^string concrete ^string asserted ^string missing ^bool samePkg))
+
+(go/method Error ^string [^{:tag (* TypeAssertionError)} e]
+  (let [inter "interface"]
+    (when (!= (.-iface e) "")
+      (set! inter (.-iface e)))
+    (when (== (.-concrete e) "")
+      (return (+ "interface conversion: " inter " is nil, not " (.-asserted e))))
+    (when (== (.-missing e) "")
+      (let [msg (+ "interface conversion: " inter " is " (.-concrete e) ", not " (.-asserted e))]
+        (when (== (.-concrete e) (.-asserted e))
+          (if (.-samePkg e)
+            (set! msg (+ msg " (types from different scopes)"))
+            (set! msg (+ msg " (types from different packages)"))))
+        (return msg)))
+    (+ "interface conversion: " (.-concrete e) " is not " (.-asserted e) ": missing method " (.-missing e))))
+
+(go/method RuntimeError [^{:tag (* TypeAssertionError)} e])
+
+(go/func assertFail "assertFail panics as gc for content v that does not assert to t (static interface iname).\n"
+  [^any v ^{:tag (* Type)} t ^string iname]
+  (let [e (addr (lit TypeAssertionError :iface iname :asserted (typeName t)))]
+    (when (!= v nil)
+      (set! (.-concrete e) (typeName (dynType v)))
+      (set! (.-samePkg e) (== (typePkg (dynType v)) (typePkg t)))
+      (when (.-Iface t)
+        (set! (.-missing e) (missingMethod v t))))
+    (panic e)))
+
+(go/func typePkg "typePkg is t's package path as gc's runtime has it (a named type's; a struct's unexported fields').\n"
+  ^string [^{:tag (* Type)} t]
+  (when (== t nil)
+    (return ""))
+  (when (!= (.-Pkg t) "")
+    (return (.-Pkg t)))
+  (when (and (!= (.-RT t) nil) (== (.Kind (.-RT t)) reflect/Struct))
+    (for [i 0] (< i (.NumField (.-RT t))) (inc! i)
+      (when (!= (.-PkgPath (.Field (.-RT t) i)) "")
+        (return (.-PkgPath (.Field (.-RT t) i))))))
+  (when (!= (.-RT t) nil)
+    (return (.PkgPath (.-RT t))))
+  "")
+
+(go/func AssertI "AssertI is x.(T) of an integer or bool type T.\n" ^I [^R x ^{:tag (* Type)} t ^string iname]
+  (fn ^int64 [^{:tag (* Frame)} fr]
+    (let [v (x fr)]
+      (when (not (hasType v t))
+        (assertFail v t iname))
+      (goIntOf (assertedGo v)))))
+
+(go/func AssertF ^F [^R x ^{:tag (* Type)} t ^string iname]
+  (fn ^float64 [^{:tag (* Frame)} fr]
+    (let [v (x fr)]
+      (when (not (hasType v t))
+        (assertFail v t iname))
+      (floatOf (assertedGo v)))))
+
+(go/func AssertS ^S [^R x ^{:tag (* Type)} t ^string iname]
+  (fn ^string [^{:tag (* Frame)} fr]
+    (let [v (x fr)]
+      (when (not (hasType v t))
+        (assertFail v t iname))
+      (stringOf (assertedGo v)))))
+
+(go/func AssertR "AssertR is x.(T) of an R type T (a concrete type, or an interface: the content itself).\n"
+  ^R [^R x ^{:tag (* Type)} t ^string iname]
+  (fn ^any [^{:tag (* Frame)} fr]
+    (let [v (x fr)]
+      (when (not (matches v t))
+        (assertFail v t iname))
+      (assertedValue v t))))
+
+(go/func Assert2
+  "Assert2 is v, ok := x.(T): the value (the zero value when it fails) to slot vs of kind k, ok
+to I slot oks.\n"
+  ^T [^R x ^{:tag (* Type)} t ^int32 k ^int32 vs ^int32 oks]
+  (let [kk (conv byte k)]
+    (fn [^{:tag (* Frame)} fr]
+      (let [v (x fr)
+            ok (matches v t)]
+        (aset (.-I fr) oks (B2I ok))
+        (if ok
+          (switch kk
+            (case [\I] (aset (.-I fr) vs (goIntOf (assertedGo v))))
+            (case [\F] (aset (.-F fr) vs (floatOf (assertedGo v))))
+            (case [\S] (aset (.-S fr) vs (stringOf (assertedGo v))))
+            (default (aset (.-R fr) vs (assertedValue v t))))
+          (switch kk
+            (case [\I] (aset (.-I fr) vs 0))
+            (case [\F] (aset (.-F fr) vs 0))
+            (case [\S] (aset (.-S fr) vs ""))
+            (default (aset (.-R fr) vs (.Zero t)))))))))
+
+(go/type TCase
+  "TCase is a type switch's clause: its types (Nil: the case nil too), whether it is the
+default, its body (binding the clause's variable first).\n"
+  (struct ^{:tag (slice (* Type))} Types ^bool Nil ^bool Default ^Stmt Body))
+
+(go/func NewTCase ^TCase [^{:tag (slice (* Type))} ts ^bool hasNil ^bool def ^Stmt body]
+  (lit TCase ts hasNil def body))
+
+(go/func TypeSwitch
+  "TypeSwitch is a type switch over content x (pre: its init and the guard's evaluation), its
+clauses tested in source order, brk its break code.\n"
+  ^Stmt [^Stmt pre ^R x ^{:tag (slice TCase)} cases ^Ctl brk]
+  (let [def -1]
+    (range [i c cases]
+      (when (.-Default c)
+        (set! def i)))
+    (fn ^Ctl [^{:tag (* Frame)} fr]
+      (when (!= pre nil)
+        (let [c (pre fr)]
+          (when (!= c 0)
+            (return c))))
+      (let [v (x fr)
+            chosen def]
+        (label :find
+          (range [i c cases]
+            (when (and (.-Nil c) (== v nil))
+              (set! chosen i)
+              (break :find))
+            (range [_ t (.-Types c)]
+              (when (matches v t)
+                (set! chosen i)
+                (break :find)))))
+        (when (< chosen 0)
+          (return 0))
+        (let [c ((.-Body (aget cases chosen)) fr)]
+          (when (== c brk)
+            (return 0))
+          c)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Types' names as gc writes them (messages)
+
+(go/func typeName "typeName is t's name as gc's runtime writes it (interpreted named types by their descriptors).\n"
+  ^string [^{:tag (* Type)} t]
+  (when (== t nil)
+    (return "nil"))
+  (when (!= (.-Name t) "")
+    (return (.-Name t)))
+  (when (.-Compiled t)
+    (when (== (.-RT t) anyType)
+      (return "interface {}"))
+    (return (.String (.-RT t))))
+  (switch (.-GK t)
+    (case [reflect/Pointer] (return (+ "*" (typeName (.-Elem t)))))
+    (case [reflect/Slice] (return (+ "[]" (typeName (.-Elem t)))))
+    (case [reflect/Array] (return (fmt/Sprintf "[%d]%s" (.-Len t) (typeName (.-Elem t)))))
+    (case [reflect/Map] (return (+ "map[" (typeName (.-Key t)) "]" (typeName (.-Elem t)))))
+    (case [reflect/Chan]
+      (switch (.-ChanDir t)
+        (case [1] (return (+ "<-chan " (typeName (.-Elem t)))))
+        (case [2] (return (+ "chan<- " (typeName (.-Elem t))))))
+      (return (+ "chan " (typeName (.-Elem t)))))
+    (case [reflect/Func]
+      (let [b (lit strings/Builder)]
+        (.WriteString (addr b) "func(")
+        (range [i x (.-Ins t)]
+          (when (> i 0) (.WriteString (addr b) ", "))
+          (if (and (.-Variadic t) (== i (- (len (.-Ins t)) 1)))
+            (.WriteString (addr b) (+ "..." (typeName (.-Elem x))))
+            (.WriteString (addr b) (typeName x))))
+        (.WriteString (addr b) ")")
+        (when (== (len (.-Outs t)) 1)
+          (.WriteString (addr b) (+ " " (typeName (aget (.-Outs t) 0)))))
+        (when (> (len (.-Outs t)) 1)
+          (.WriteString (addr b) " (")
+          (range [i x (.-Outs t)]
+            (when (> i 0) (.WriteString (addr b) ", "))
+            (.WriteString (addr b) (typeName x)))
+          (.WriteString (addr b) ")"))
+        (return (.String (addr b)))))
+    (case [reflect/Struct]
+      (when (== (len (.-Fields t)) 0)
+        (return "struct {}"))
+      (let [b (lit strings/Builder)]
+        (.WriteString (addr b) "struct { ")
+        (range [i f (.-Fields t)]
+          (when (> i 0) (.WriteString (addr b) "; "))
+          (if (.-Embedded f)
+            (.WriteString (addr b) (typeName (.-T f)))
+            (.WriteString (addr b) (+ (.-Name f) " " (typeName (.-T f))))))
+        (.WriteString (addr b) " }")
+        (return (.String (addr b))))))
+  (when (.-Iface t)
+    (when (== (len (.-IMethods t)) 0)
+      (return "interface {}")))
+  (.String t))

@@ -10,10 +10,13 @@
 
   GR3 builds the interpreter's core: scalars, strings, slices, arrays, maps, structs, pointers,
   functions and closures, all control flow with labels and goto, defer, panic and recover,
-  interface values without methods (§5.3 rules 1 and 2), the calls of compiled Go. Methods,
-  interfaces' methods, type switches and assertions, goroutines, channels and select are GR4's:
-  a form that needs them is \"not supported by goi yet\" (§3.4), an ex-info with
-  :goi/unsupported."
+  interface values without methods (§5.3 rules 1 and 2), the calls of compiled Go. GR4 adds
+  methods (their receiver laid after the parameters and results), method values and
+  expressions, the method sets of the types that go into interfaces (each entry the method or a
+  thunk: §5.3), interface method calls, type assertions and switches, embedding and promotion,
+  goroutines, channels, select and range over functions and channels. Generics are GR6's: a
+  form that needs what goi does not run is \"not supported by goi yet\" (§3.4), an ex-info
+  with :goi/unsupported."
   (:require [arbace.string :as str]
             [arbace.go.check.types :as t]
             [arbace.go.check.const :as c]
@@ -42,6 +45,22 @@
   descriptors by checker type) :gen (named type -> its generation) :func-cell (function object
   -> its *goi.Func) :global (variable object -> {:ptr :type}) :local-gen (an atom)}."
   nil)
+
+(defonce ^{:doc "The generations of local named types: one counter for every build, so that their
+  descriptors (interned by package, name and generation) stay distinct."} local-gen (atom 1000000))
+
+(defn method-data
+  "The checker's method data of method object m (its declaration checked): t/*method-obj*
+  while building."
+  [m]
+  {:name (e/o m :name) :pkg (when-not (t/exported? (e/o m :name)) (e/o m :pkg))
+   :type (or (e/o m :type) [:func [] [] false]) :ptr-recv (e/o m :ptr-recv) :obj m})
+
+(defn with-ctx
+  "Calls f with the package's build context ctx bound (and the checker's method data)."
+  [ctx f]
+  (binding [*ctx* ctx t/*method-obj* method-data]
+    (f)))
 
 (def ^:dynamic *fn*
   "The function being built: {:slots (volatile counts per kind) :locs (an IdentityHashMap of
@@ -116,20 +135,48 @@
   [u]
   (let [fs (nth u 1)]
     [(oa (map :name fs)) (oa (map #(desc (:type %)) fs)) (oa (map #(tag-text (:tag %)) fs))
-     (oa (map #(or (when-not (t/exported? (:name %)) (or (:pkg %) (:path *ctx*))) "") fs))
+     ;; the path gc's linker gives a main package's names: main
+     (oa (map #(or (when-not (t/exported? (:name %)) (let [p (or (:pkg %) (:path *ctx*))] (if (= p "command-line-arguments") "main" p))) "") fs))
      (oa (map #(boolean (:embedded %)) fs))]))
+
+(defn method-key
+  "A method's key in method sets (§5.3): its name, path.name when unexported."
+  [nm pkg]
+  (if (or (t/exported? nm) (nil? pkg)) nm (str pkg "." nm)))
+
+(defn- set-iface-methods!
+  "Gives interface descriptor d of type ty its methods (keys and signatures' descriptors)."
+  [d ty]
+  (let [ms (nth (t/under ty) 1)
+        ;; a compiled interface's method may name a type the digest does not hold: never matched
+        sig (fn [m] (try (desc (:type m)) (catch Exception ex (if (:goi/unsupported (ex-data ex)) nil (throw ex)))))]
+    (op "TSetIfaceMethods" d (oa (map #(method-key (:name %) (:pkg %)) ms)) (oa (map sig ms)))))
+
+(defn- local-gen-of [ty]
+  (let [i (t/info ty)]
+    (or (:goi/gen i) (let [g (swap! local-gen inc)] (t/update-info! ty assoc :goi/gen g) g))))
 
 (defn- named-desc [ty]
   (let [i (t/info ty)
-        pkg (:pkg i)]
+        pkg (:pkg i)
+        ^HashMap types (:types *ctx*)]
     (cond
-      (nil? pkg) (if (= "error" (:name i)) (op "TBasic" "error") (unsupported! (str "the type " (:name i)) "GR6"))
+      (nil? pkg) (if (= "error" (:name i))
+                   (let [d (op "TBasic" "error")] (.put types ty d) (set-iface-methods! d ty) d)
+                   (unsupported! (str "the type " (:name i)) "GR6"))
       (seq (:targs i)) (unsupported! (str "the generic type " (t/type-str ty)) "GR6")
-      (compiled? pkg) (op "TCompiled" pkg (:name i))
+      (compiled? pkg) (let [d (op "TCompiled" pkg (:name i))]
+                        (.put types ty d)
+                        (when (t/interface? ty) (set-iface-methods! d ty))
+                        d)
+      (t/interface? ty)
+      (let [gen (if (:local i) (local-gen-of ty) ((:gen *ctx*) ty))
+            d (op "TNamedIface" (str (:pkg-name i) "." (:name i)) pkg (long gen))]
+        (.put types ty d)
+        (set-iface-methods! d ty)
+        d)
       :else
-      (let [gen (if (:local i)
-                  (or (:goi/gen i) (let [g (swap! (:local-gen *ctx*) inc)] (t/update-info! ty assoc :goi/gen g) g))
-                  ((:gen *ctx*) ty))
+      (let [gen (if (:local i) (local-gen-of ty) ((:gen *ctx*) ty))
             erased (recursive? ty)
             nd (op "TNamed" (str (:pkg-name i) "." (:name i)) pkg (long gen) erased)
             ^HashMap types (:types *ctx*)]
@@ -174,7 +221,12 @@
                     :chan (op "TChan" (case (nth ty 1) :both 0 :recv 1 :send 2) (desc (nth ty 2)))
                     :func (op "TFunc" (oa (map desc (nth ty 1))) (oa (map desc (nth ty 2))) (boolean (nth ty 3)))
                     :struct (let [[ns ds ts ps es] (struct-parts ty)] (op "TStruct" ns ds ts ps es))
-                    :interface (if (and (empty? (nth ty 1)) (nil? (nth ty 2))) (op "TBasic" "any") (op "TIface" ""))
+                    :interface (if (and (empty? (nth ty 1)) (nil? (nth ty 2)))
+                                 (op "TBasic" "any")
+                                 (let [d (op "TIface" (t/type-str ty))]
+                                   (.put types ty d)
+                                   (set-iface-methods! d ty)
+                                   d))
                     (unsupported! (str "the type " (t/type-str ty)) "GR6")))]
           (.put types ty d)
           d))))
@@ -295,18 +347,23 @@
 (defn- expr-stmt-of [[k n]]
   (op (case k :I "ExprI" :F "ExprF" :S "ExprS" :R "ExprR" :B "ExprB" :T "ExprT") n))
 
-(declare ex ex-as place lit-place lit-node call-node call-results build-fn-lit builtin expr-or-stmt stmt stmt-list rhs-nodes)
+(declare ex ex-as place lit-place lit-node call-node call-results build-fn-lit builtin expr-or-stmt stmt stmt-list rhs-nodes
+         method-value-node iface-method-value-node method-expr-node assert-kn elem-type)
 
 (defn exk [n k] (as-kind (ex n) k))
 
 ;;; Interfaces' contents (§5.3)
 
+(declare ensure-methods!)
+
 (defn- iface-content
-  "Node [k n] of type ty as an interface's content (an R node)."
+  "Node [k n] of type ty as an interface's content (an R node): its method set given first, so
+that a type with methods goes in as a proxy (§5.3)."
   [[k n] ty]
   (if (iface? ty)
     n
     (let [d (desc ty)]
+      (ensure-methods! ty d)
       (case k
         :I (op "IfaceI" n d)
         :B (op "IfaceI" (op "BI" n) d)
@@ -393,6 +450,19 @@
       ;; an interface against a value of another type: the value as an interface's content
       (and (iface? tx) (not (iface? ty))) [:B (op (str (cmp-name op*) "R") (exk xn :R) (iface-content (ex yn) ty))]
       (and (iface? ty) (not (iface? tx))) [:B (op (str (cmp-name op*) "R") (iface-content (ex xn) tx) (exk yn :R))]
+      ;; structs with blank fields: Go's == ignores them
+      (let [u (t/under tx)] (and (vector? u) (= :struct (nth u 0)) (some #(= "_" (:name %)) (nth u 1))))
+      (let [d (desc tx)
+            sx (temp! :R) sy (temp! :R)
+            fs (nth (t/under tx) 1)
+            field (fn [s i] (let [fty (:type (nth fs i))]
+                              (let [[k n] (load-p (op "FieldP" (op "BoxP" (local-node :R s) d) (GoInterp/op "FieldOff" (oa [d (long i)]))) fty)]
+                                {:op ::node :k k :node n :type fty :mode :value})))
+            eqs (for [i (range (count fs)) :when (not= "_" (:name (nth fs i)))]
+                  (as-kind (compare-nodes "==" (field sx i) (field sy i)) :B))
+            all (reduce (fn [a b] (op "AndB" a b)) (op "ConstB" true) eqs)
+            b (op "ThenB" (op "StmtT" (op "Seq" (oa [(set-slot :R sx (exk xn :R)) (set-slot :R sy (exk yn :R))]) (oa []))) all)]
+        [:B (if (= op* "==") b (op "NotB" b))])
       :else
       (let [k (kind tx)]
         (case k
@@ -455,7 +525,7 @@
       (iface? T) (cond (nil-node? x) [:R (op "ConstR" nil)]
                        (iface? F) (ex x)
                        :else [:R (iface-content (ex x) F)])
-      (and (= fk :I) (= tk :I)) [:I (if (wide? T) (exk x :I) (op (str "Cv" (int-sfx tb)) (exk x :I)))]
+      (and (= fk :I) (= tk :I)) [:I (if (or (wide? T) (= :bool tb)) (exk x :I) (op (str "Cv" (int-sfx tb)) (exk x :I)))]
       (and (= fk :I) (= tk :F)) [:F (op (str (if (and (unsigned? F) (wide? F)) "Uto" "Ito") (if (= tb :float32) "F32" "F64")) (exk x :I))]
       (and (= fk :F) (= tk :I)) [:I (op (str "Fto" (int-sfx tb)) (exk x :F))]
       (and (= fk :F) (= tk :F)) [:F (if (= tb :float32) (op "CvF32" (exk x :F)) (exk x :F))]
@@ -477,6 +547,9 @@
       [:R (op "SliceToArray" (exk x :R) (desc T))]
       (and (vector? uF) (= :slice (nth uF 0)) (vector? uT) (= :pointer (nth uT 0)))
       [:R (op "SliceToArrayPtr" (exk x :R) (desc T))]
+      ;; between function types: the frame's value (a closure or a Go func) unchanged; between
+      ;; channel types too (a channel's frame value is its channel, of any direction: §8.2)
+      (and (vector? uF) (#{:func :chan} (nth uF 0))) [:R (exk x :R)]
       (= fk :R) [:R (op "ConvR" (exk x :R) (desc T))]
       :else (unsupported! (str "the conversion " (t/type-str F) " to " (t/type-str T)) "GR3"))))
 
@@ -662,11 +735,13 @@
                    [k (if (zero? (:index n))
                         (op (case k :I "ThenI" :F "ThenF" :S "ThenS" :R "ThenR") t r)
                         r)])
-         :method (unsupported! "method values" "GR4")
-         :iface-method (unsupported! "interface methods" "GR4")
-         :method-expr (unsupported! "method expressions" "GR4")
-         :assert (unsupported! "type assertions" "GR4")
-         :recv (unsupported! "channel receives" "GR4")
+         :method (method-value-node n)
+         :iface-method (iface-method-value-node n)
+         :method-expr (method-expr-node n)
+         :assert (assert-kn (exk (:x n) :R) (:to n) (:type (:x n)))
+         :recv (let [ch (:x n) ct (:type ch) et (elem-type ct) k (kind et)]
+                 [k (op (str "Recv" (name k)) (exk ch :R) (desc ct))])
+         ::selrecv [(:k n) (local-node (:k n) (:vs n))]
          ;; an operand the checker left invalid without an error: its type comes from a package
          ;; the table does not hold (a digest's declaration naming an unlisted package's type)
          :invalid (unsupported! (str "a type of a package not in the table, in " (pr-str (:form n))) "GR5")
@@ -678,24 +753,46 @@
 
 (defn- slot-layout
   "The callee's slots of a signature [:func ps rs variadic]: the parameters', then the results',
-  numbered per kind in order (the variadic parameter an R)."
-  [[_ ps rs variadic]]
-  (let [cnt (volatile! {:I 0 :F 0 :S 0 :R 0})
-        take! (fn [k] (let [n (get @cnt k)] (vswap! cnt update k inc) [k n]))
-        pk (vec (map-indexed (fn [i p] (take! (if (and variadic (= i (dec (count ps)))) :R (kind p)))) ps))
-        rk (mapv #(take! (kind %)) rs)]
-    {:params pk :results rk :counts @cnt}))
+  numbered per kind in order (the variadic parameter an R); a method's receiver (of type recv)
+  after them (GR4), so that the arguments' slots are the signature's whatever the receiver."
+  ([sig] (slot-layout sig nil))
+  ([[_ ps rs variadic] recv]
+   (let [cnt (volatile! {:I 0 :F 0 :S 0 :R 0})
+         take! (fn [k] (let [n (get @cnt k)] (vswap! cnt update k inc) [k n]))
+         pk (vec (map-indexed (fn [i p] (take! (if (and variadic (= i (dec (count ps)))) :R (kind p)))) ps))
+         rk (mapv #(take! (kind %)) rs)
+         rv (when recv (take! (kind recv)))]
+     {:params pk :results rk :recv rv :counts @cnt})))
 
 (defn- arg-setter [[k s] node]
   (op (case k :I "ArgI" :F "ArgF" :S "ArgS" :R "ArgR") node (long s)))
 
+(declare error-type? compiled-iface?)
+
+(defn- mem-converted?
+  "Whether a value of type ty differs in Go memory from a frame: a function (a closure as a Go
+  func), a compiled non-empty interface (a proxy as its wrapper, §5.3)."
+  [ty]
+  (and (= :R (kind ty))
+       (or (let [u (t/under ty)] (and (vector? u) (= :func (nth u 0))))
+           (error-type? ty) (and (compiled-iface? ty) (not (t/empty-interface? ty))))))
+
+(def ^:private ^:dynamic *raw-any*
+  "Whether the compiled callee being built looks at representations (runtime's and reflect's
+  functions): its empty interface arguments are given a proxy's value itself."
+  false)
+
+(def ^:private raw-packages #{"runtime" "reflect"})
+
 (defn- mem-node
-  "Node [k n] of type ty as compiled Go takes it (a closure as a Go func: MemR)."
+  "Node [k n] of type ty as compiled Go takes it (a closure as a Go func, a proxy as its wrapper:
+  MemR; for runtime's and reflect's functions an empty interface's proxy as its value: RawR)."
   [kn ty]
   (let [n (as-kind kn (kind ty))]
-    (if (and (= :R (kind ty)) (let [u (t/under ty)] (and (vector? u) (= :func (nth u 0)))))
-      (op "MemR" n (desc ty))
-      n)))
+    (cond
+      (mem-converted? ty) (op "MemR" n (desc ty))
+      (and *raw-any* (iface? ty) (t/empty-interface? ty)) (op "RawR" n)
+      :else n)))
 
 (defn- arg-nodes
   "The argument nodes of a call to signature sig: fixed parameters', then the variadic slice's
@@ -726,18 +823,23 @@
 
 (defn- sig-of [ty] (let [u (t/under ty)] (when (and (vector? u) (= :func (nth u 0))) u)))
 
+(defn- cell-call
+  "A call of function cell cell with setters, the callee's results in slots results: [k node] of
+  one result, else {:t T :temps}."
+  [cell setters results mode]
+  (if (and (not= mode :multi) (= 1 (count results)))
+    (let [[k s] (first results)]
+      [k (op (str "Call" (name k)) cell setters (long s))])
+    (let [temps (mapv (fn [[k _]] [k (temp! k)]) results)
+          rs (op "resCopies" (apply str (map (comp name first) results)) (oa (map (comp long second) results))
+                 (oa (map (comp long second) temps)))]
+      {:t (op "CallT" cell setters rs) :temps temps})))
+
 (defn- static-call [f sig args mode]
   (let [{:keys [params results]} (slot-layout sig)
         nodes (arg-nodes sig args false)
-        setters (oa (map arg-setter params nodes))
-        cell ((:func-cell *ctx*) f)]
-    (if (and (not= mode :multi) (= 1 (count results)))
-      (let [[k s] (first results)]
-        [k (op (str "Call" (name k)) cell setters (long s))])
-      (let [temps (mapv (fn [[k _]] [k (temp! k)]) results)
-            rs (op "resCopies" (apply str (map (comp name first) results)) (oa (map (comp long second) results))
-                   (oa (map (comp long second) temps)))]
-        {:t (op "CallT" cell setters rs) :temps temps}))))
+        setters (oa (map arg-setter params nodes))]
+    (cell-call ((:func-cell *ctx*) f) setters results mode)))
 
 (defn- value-call [callee sig args mode]
   (let [{:keys [params results]} (slot-layout sig)
@@ -754,36 +856,357 @@
         {:t (op "CallValueT" cn ft setters rs) :temps temps}))))
 
 (defn- from-mem [[k n] ty]
-  (if (and (= k :R) (let [u (t/under ty)] (and (vector? u) (= :func (nth u 0)))))
+  (if (and (= k :R) (mem-converted? ty))
     [:R (op "FromMemR" n (desc ty))]
     [k n]))
 
-(defn- compiled-call [path nm sig args recv mode]
-  (let [rs (nth sig 2)
-        nodes (vec (concat (when recv [recv]) (arg-nodes sig args true)))]
-    (if (and (not= mode :multi) (= 1 (count rs)))
+(defn- compiled-call-node
+  "A compiled call of listed member path.nm of signature sig on argument nodes (a method's
+  receiver first): [k node], or {:t :temps} writing temps (made when nil)."
+  [path nm sig nodes mode temps]
+  (let [rs (nth sig 2)]
+    (if (and (not= mode :multi) (= 1 (count rs)) (nil? temps))
       (from-mem [(kind (first rs)) (op "CallCompiled" path nm (oa nodes) (oa []))] (first rs))
-      (let [temps (mapv (fn [r] [(kind r) (temp! (kind r))]) rs)]
+      (let [temps (or temps (mapv (fn [r] [(kind r) (temp! (kind r))]) rs))]
         {:t (op "CallCompiled" path nm (oa nodes) (oa (map (comp long second) temps))) :temps temps}))))
+
+(defn- compiled-call [path nm sig args recv mode]
+  (compiled-call-node path nm sig (vec (concat (when recv [recv]) (binding [*raw-any* (contains? raw-packages path)] (arg-nodes sig args true))))
+                      mode nil))
+
+;;; Methods (§4.6, GR4)
+
+(defn- recv-type-of
+  "The receiver type of method object m: its base named type, or a pointer to it."
+  [m]
+  (let [nt (e/o m :recv-named)]
+    (when-not nt
+      (throw (ex-info (str "goi's builder: no receiver type for the method " (e/o m :name)) {})))
+    (if (e/o m :ptr-recv) [:pointer nt] nt)))
+
+(defn- method-cell
+  "The *goi.Func of interpreted method object m."
+  [m]
+  ((:method-cell *ctx*) m))
+
+(defn- path-derefs
+  "The implicit dereferences of a field selection along path from type ty (the checker's)."
+  [ty path]
+  (loop [t ty path path acc []]
+    (if (empty? path)
+      acc
+      (let [p (t/pointer? t)
+            t (if p (nth (t/under t) 1) t)
+            u (t/under t)
+            fd (when (and (vector? u) (= :struct (nth u 0))) (get (nth u 1) (first path)))]
+        (if fd
+          (recur (:type fd) (rest path) (conj acc p))
+          (conj acc p))))))
+
+(defn- field-sel
+  "The selection of the embedded fields fpath from node x: a :field node."
+  [x fpath]
+  (let [fty (loop [t (:type x) path fpath]
+              (if (empty? path)
+                t
+                (let [t (if (t/pointer? t) (nth (t/under t) 1) t)]
+                  (recur (:type (nth (nth (t/under t) 1) (first path))) (rest path)))))
+        derefs (path-derefs (:type x) fpath)]
+    {:op :field :x x :path (vec fpath) :derefs derefs :type fty
+     :mode (if (or (some true? derefs) (addressable? x)) :variable :value)}))
+
+(defn recv-node
+  "The receiver of method selection sel ({:op :method :recv :path :recv-adjust}) as the method
+  takes it: the embedded fields of its path selected, then its address or the value it points
+  to as the method's receiver asks: [k node]."
+  [sel]
+  (let [x (:recv sel) m (:method sel)
+        fpath (pop (vec (:path sel)))
+        ptr (e/o m :ptr-recv)]
+    (if (empty? fpath)
+      (case (:recv-adjust sel)
+        :addr [:R (op "AddrOf" (place x) (desc (:type x)))]
+        :deref (load-p (if-let [msg (:panicwrap sel)] (op "DerefWrapP" (exk x :R) msg) (op "DerefP" (exk x :R)))
+                       (nth (t/under (:type x)) 1))
+        (ex x))
+      (let [fsel (field-sel x fpath)
+            FT (:type fsel)]
+        (cond
+          (and ptr (t/pointer? FT)) (ex fsel)
+          ptr [:R (op "AddrOf" (field-place fsel) (desc FT))]
+          (t/pointer? FT) (load-p (op "DerefP" (exk fsel :R)) (nth (t/under FT) 1))
+          :else (ex fsel))))))
+
+(defn- interp-method-call
+  "A call of interpreted method selection callee: its cell, the receiver laid after the
+  arguments (evaluated first, as Go does)."
+  [callee args mode]
+  (let [m (:method callee)
+        sig (sig-of (:type callee))
+        rty (recv-type-of m)
+        {:keys [params results recv]} (slot-layout sig rty)
+        rn (recv-node callee)
+        nodes (arg-nodes sig args false)
+        setters (oa (cons (arg-setter recv (as-kind rn (first recv))) (map arg-setter params nodes)))]
+    (cell-call (method-cell m) setters results mode)))
 
 (defn- method-call [callee args mode]
   (let [m (:method callee)
-        pkg (e/o m :pkg)
-        recv (:recv callee)
-        [base] (t/deref-type (:type recv))]
-    (when-not (compiled? pkg)
-      (unsupported! "methods" "GR4"))
-    (when (seq (:path callee))
-      (when (> (count (:path callee)) 1) (unsupported! "promoted methods" "GR4")))
-    (let [tname (:name (t/info base))
-          rn (case (:recv-adjust callee)
-               :addr [:R (op "AddrOf" (place recv) (desc (:type recv)))]
-               :deref (load-p (op "DerefP" (exk recv :R)) base)
-               (ex recv))]
-      ;; the receiver as the method expression takes it: an R holding its Go value
-      (compiled-call pkg (str tname "." (e/o m :name)) (sig-of (:type callee)) args
-                     (if (= :R (first rn)) (second rn) (iface-content rn (if (= :addr (:recv-adjust callee)) [:pointer (:type recv)] base)))
-                     mode))))
+        pkg (e/o m :pkg)]
+    (when (e/o m :generic) (unsupported! "methods of generic types" "GR6"))
+    (if (compiled? pkg)
+      (let [rty (recv-type-of m)
+            [nt] (t/deref-type rty)
+            rn (recv-node callee)]
+        ;; the receiver as the method expression takes it: an R holding its Go value
+        (compiled-call pkg (str (:name (t/info nt)) "." (e/o m :name)) (sig-of (:type callee)) args
+                       (if (= :R (first rn)) (second rn) (iface-content rn rty))
+                       mode))
+      (interp-method-call callee args mode))))
+
+(defn- error-type? [ty] (and (t/named? ty) (nil? (:pkg (t/info ty))) (= "error" (:name (t/info ty)))))
+
+(defn- compiled-iface? [ty] (and (t/named? ty) (compiled? (:pkg (t/info ty)))))
+
+(defn- iface-recv-node
+  "The interface content an interface method selection is called on (its embedded fields
+  selected): an R node."
+  [callee]
+  (let [x (:recv callee) fpath (pop (vec (:path callee)))]
+    (if (empty? fpath) (exk x :R) (exk (field-sel x fpath) :R))))
+
+(defn- iface-call
+  "A call of interface method selection callee (§5.3): the content evaluated into a temporary,
+  then a proxy's interpreted method (its type's method set, an inline cache), else the compiled
+  value's method (the static compiled interface's method expression, error's Error, or the
+  table's method of the dynamic type)."
+  [callee args mode]
+  (let [m (:method callee)
+        key (method-key (:name m) (:pkg m))
+        sig (sig-of (:type callee))
+        tmp (temp! :R)
+        pre (op "StmtT" (set-slot :R tmp (iface-recv-node callee)))
+        xr (local-node :R tmp)
+        {:keys [params results]} (slot-layout sig)
+        setters (oa (map arg-setter params (arg-nodes sig args false)))
+        IT (:iface callee)
+        multi (or (= mode :multi) (not= 1 (count results)))
+        temps (when multi (mapv (fn [[k _]] [k (temp! k)]) results))
+        cargs (arg-nodes sig args true)
+        fb (cond
+             (error-type? IT) [:S (op "ErrorCall" xr)]
+             (compiled-iface? IT)
+             (let [r (compiled-call-node (:pkg (t/info IT)) (str (:name (t/info IT)) "." (:name m)) sig (vec (cons xr cargs))
+                                         mode temps)]
+               (if (map? r) [:T (:t r)] r))
+             multi [:T (op "CompiledDispatchT" xr (:name m) (oa cargs) (oa (map (comp long second) temps)))]
+             :else (let [k (first (first results))]
+                     [k (op (str "CompiledDispatch" (name k)) xr (:name m) (oa cargs))]))]
+    (if multi
+      (let [rs (op "resCopies" (apply str (map (comp name first) results)) (oa (map (comp long second) results))
+                   (oa (map (comp long second) temps)))]
+        {:t (op "ThenT" pre (op "CallIfaceT" xr key setters rs (second fb))) :temps temps})
+      (let [[k s] (first results)
+            fbn (as-kind fb k)]
+        [k (op (str "Then" (name k)) pre (op (str "CallIface" (name k)) xr key setters (long s) fbn))]))))
+
+(defn- method-value-node
+  "x.M of a concrete type (a method value): the receiver evaluated now, bound (§4.6)."
+  [n]
+  (let [m (:method n)
+        pkg (e/o m :pkg)]
+    (when (e/o m :generic) (unsupported! "methods of generic types" "GR6"))
+    (let [rty (recv-type-of m)
+          rn (recv-node n)
+          sig (:type n)]
+      (if (compiled? pkg)
+        (let [[nt] (t/deref-type rty)]
+          [:R (op "BoundCompiled" (op "MemberValue" pkg (str (:name (t/info nt)) "." (e/o m :name)))
+                  (if (= :R (first rn)) (second rn) (iface-content rn rty)))])
+        (let [{:keys [recv]} (slot-layout (sig-of sig) rty)]
+          [:R (op "MethodValue" (method-cell m) (long (int (first (name (first recv))))) (long (second recv))
+                  (desc rty) (desc sig) (as-kind rn (first recv)))])))))
+
+(defn- iface-method-value-node
+  "x.M of an interface (a method value): the content's method bound to it (§4.6)."
+  [n]
+  (let [m (:method n)
+        IT (:iface n)
+        gofn (cond
+               (compiled-iface? IT) (op "MemberValue" (:pkg (t/info IT)) (str (:name (t/info IT)) "." (:name m)))
+               :else nil)]
+    [:R (op "IfaceMethodValue" (iface-recv-node n) (method-key (:name m) (:pkg m)) (:name m) gofn)]))
+
+(declare build-code)
+
+(defn- local-obj [nm ty] (e/obj {:kind :var :name nm :type ty :local? true}))
+
+(defn- local-ref [x] {:op :local :obj x :type (e/o x :type) :mode :variable})
+
+(defn- selection
+  "The checker's selection node of lookup result r ({:kind :method|:iface-method ...}) on node x
+  (code_call.ae's select-expr)."
+  [x r]
+  (case (:kind r)
+    :method (let [m (:obj r) ptr (e/o m :ptr-recv)
+                  adj (cond
+                        (and ptr (not (:indirect r))) :addr
+                        (and (not ptr) (:indirect r) (empty? (:via r)) (t/pointer? (:type x))) :deref
+                        :else nil)]
+              {:op :method :method m :recv x :recv-adjust adj :path (:index r) :via (:via r)
+               :type (e/o m :type) :mode :value})
+    :iface-method {:op :iface-method :method (:obj r) :iface (:iface r) :recv x :path (:index r)
+                   :type (:type (:obj r)) :mode :value}))
+
+(defn- thunk-body
+  "The body of a thunk calling selection sel with parameters params (of signature sig)."
+  [sel params sig]
+  (let [[_ _ rs v] sig
+        args (vec (map-indexed (fn [i x] (cond-> (local-ref x) (and v (= i (dec (count params)))) (assoc :spread true))) params))
+        call {:op :call :kind (if (= :method (:op sel)) :method :iface) :callee sel :args args :mode :value
+              :type (if (= 1 (count rs)) (first rs) (into [:tuple] rs))}]
+    {:op :block
+     :stmts [(cond
+               (empty? rs) {:op :expr :x call}
+               (= 1 (count rs)) {:op :return :values [call]}
+               :else {:op :return :values (vec (map-indexed (fn [i t] {:op :result :index i :call call :mode :value :type t}) rs))})]}))
+
+(defn- build-method-thunk
+  "The code of the method set entry of type D for lookup result r (signature sig): a method of
+  receiver D (laid last) calling the method through the embedded fields and pointers of its
+  path (§5.3)."
+  [D r sig nm]
+  (let [rcv (local-obj "r" D)
+        params (vec (map-indexed (fn [i p] (local-obj (str "p" i) p)) (nth sig 1)))
+        sel (selection (local-ref rcv) r)
+        ;; a value method through a nil pointer: gc's panicwrap
+        sel (if (= :deref (:recv-adjust sel))
+              (let [nt (e/o (:obj r) :recv-named) i (t/info nt)]
+                (assoc sel :panicwrap (str "value method " (:pkg-name i) "." (:name i) "." (e/o (:obj r) :name)
+                                           " called using nil *" (:name i) " pointer")))
+              sel)]
+    (build-code {:op :func :recv rcv :recv-type D :params params :results (mapv (fn [t] {:type t}) (nth sig 2))
+                 :sig sig :body (thunk-body sel params sig)}
+                nm [])))
+
+(defn- method-expr-node
+  "T.M (a method expression): a function of the receiver first, a thunk (§4.6)."
+  [n]
+  (let [T (:recv-type n)
+        m (:method n)
+        md (t/method-data m)
+        r (t/lookup-impl T false (:name md) (or (:pkg md) (:path *ctx*)))
+        sig (:type n)
+        rcv (local-obj "r" T)
+        msig (:type md)
+        params (vec (map-indexed (fn [i p] (local-obj (str "p" i) p)) (nth msig 1)))
+        sel (selection (local-ref rcv) r)
+        nm (str (t/type-str T) "." (:name md) "-fm")
+        cell (op "FuncCell" nm (:name *ctx*) nil)
+        code (build-code {:op :func :params (into [rcv] params) :results (mapv (fn [t] {:type t}) (nth sig 2))
+                          :sig sig :body (thunk-body sel params msig)}
+                         nm [])]
+    (op "SetCode" cell code nil)
+    [:R (op "FuncValue" cell)]))
+
+(defn- method-candidates
+  "[name pkg] of the methods that may be in type ty's method set: its named types' declared
+  methods, its embedded fields' and embedded interfaces', in order."
+  [ty]
+  (let [out (java.util.LinkedHashSet.)
+        seen (IdentityHashMap.)]
+    (letfn [(walk [t]
+              (let [[b _] (t/deref-type t)]
+                (when-not (and (t/named? b) (.containsKey seen (nth b 1)))
+                  (when (t/named? b)
+                    (.put seen (nth b 1) true)
+                    (doseq [m (t/methods-of b)] (.add out [(e/o m :name) (e/o m :pkg)])))
+                  (let [u (t/under b)]
+                    (cond
+                      (and (vector? u) (= :struct (nth u 0)))
+                      (doseq [f (nth u 1) :when (:embedded f)] (walk (:type f)))
+                      (and (vector? u) (= :interface (nth u 0)) (not (identical? t ty)))
+                      (doseq [m (nth u 1)] (.add out [(:name m) (:pkg m)])))))))]
+      (walk ty))
+    (vec out)))
+
+(defn- may-have-methods?
+  "Whether type ty (concrete) may have an interpreted method set: an interpreted named type, a
+  pointer to one, a struct with embedded fields."
+  [ty]
+  (let [[b _] (t/deref-type ty)]
+    (if (t/named? b)
+      (interpreted-named? b)
+      (let [u (t/under b)] (and (vector? u) (= :struct (nth u 0)) (some :embedded (nth u 1)))))))
+
+(defn ensure-methods!
+  "Gives the descriptor d of concrete type ty its method set (once per build context, §5.3):
+  each method of ty's method set the method itself (its receiver is ty) or a thunk."
+  [ty d]
+  (let [^IdentityHashMap done (:methods-done *ctx*)]
+    (when (and (not (iface? ty)) (not (.containsKey done d)) (may-have-methods? ty))
+      (.put done d true)
+      (let [entries (for [[nm pkg] (method-candidates ty)
+                          :let [r (t/lookup-impl ty false nm pkg)]
+                          :when (and r (#{:method :iface-method} (:kind r)) (not (:ptr-recv r)) (not (:ambiguous r))
+                                     ;; the table holds compiled types' exported methods only
+                                     (or (t/exported? nm) (not (compiled? pkg))))]
+                      (let [m (:obj r)
+                            key (method-key nm pkg)
+                            sig (if (= :method (:kind r)) (e/o m :type) (:type m))
+                            direct (and (= :method (:kind r)) (= 1 (count (:index r)))
+                                        (not (compiled? (e/o m :pkg)))
+                                        (= ty (recv-type-of m)))]
+                        (when (and (= :method (:kind r)) (e/o m :generic))
+                          (unsupported! "methods of generic types" "GR6"))
+                        (if direct
+                          (let [{:keys [recv]} (slot-layout sig ty)]
+                            [key (method-cell m) recv d sig])
+                          (let [ctx *ctx*
+                                tnm (str (t/type-str ty) "." nm)
+                                cell (op "FuncCell" tnm (:name *ctx*) nil)
+                                {:keys [recv]} (slot-layout sig ty)]
+                            (if-let [code (when (:eager *ctx*)
+                                            (try (build-method-thunk ty r sig tnm)
+                                                 (catch Exception ex (when-not (:goi/unsupported (ex-data ex)) (throw ex)))))]
+                              (op "SetCode" cell code nil)
+                              (op "SetCode" cell nil (fn [] (with-ctx ctx #(build-method-thunk ty r sig tnm)))))
+                            [key cell recv d sig]))))
+            ;; an entry whose signature names a type the digest does not hold is left out
+            es (vec (keep (fn [e] (try (desc (nth e 4)) e
+                                        (catch Exception ex (when-not (:goi/unsupported (ex-data ex)) (throw ex)))))
+                          entries))]
+        (op "TSetMethods" d (oa (map first es)) (oa (map second es))
+            (oa (map #(long (int (first (name (first (nth % 2)))))) es))
+            (oa (map #(long (second (nth % 2))) es))
+            (oa (map #(nth % 3) es))
+            (oa (map #(desc (nth % 4)) es)))))))
+
+;;; Type assertions and switches (§5.3)
+
+(defn- iface-name
+  "The name gc's runtime gives static interface type ty in a failed assertion's message."
+  [ty]
+  (cond
+    (t/empty-interface? ty) (if (t/named? ty) (let [i (t/info ty)] (if (:pkg i) (str (:pkg-name i) "." (:name i)) (:name i))) "interface {}")
+    (t/named? ty) (let [i (t/info ty)] (if (:pkg i) (str (:pkg-name i) "." (:name i)) (:name i)))
+    :else (t/type-str ty)))
+
+(defn- assert-desc [T]
+  (let [d (desc T)]
+    (when-not (iface? T) (ensure-methods! T d))
+    d))
+
+(defn- assert-kn
+  "[k node] of content node xr asserted to type T (the static interface type st)."
+  [xr T st]
+  (let [d (assert-desc T)
+        iname (iface-name st)]
+    (case (kind T)
+      :I [:I (op "AssertI" xr d iname)]
+      :F [:F (op "AssertF" xr d iname)]
+      :S [:S (op "AssertS" xr d iname)]
+      :R [:R (op "AssertR" xr d iname)])))
 
 (defn call-node
   "[kind node] of a call of one result (mode :multi, or no result: {:t T :temps})."
@@ -800,7 +1223,7 @@
                   (compiled-call (e/o (:obj callee) :pkg) (e/o (:obj callee) :name) (sig-of (:type callee)) args nil mode)
                   (value-call callee (sig-of (:type callee)) args mode))
        :method (method-call callee args mode)
-       :iface (unsupported! "calls of interface methods" "GR4")
+       :iface (iface-call callee args mode)
        (unsupported! (str "the call kind " (:kind n)) "GR3")))))
 
 (defn- call-stmt
@@ -815,7 +1238,7 @@
 
 ;;; Builtins
 
-(defn- elem-type [ty] (let [u (t/under ty)] (case (nth u 0) (:slice :array :pointer :chan) (nth u 1) :map (nth u 2))))
+(defn- elem-type [ty] (let [u (t/under ty)] (case (nth u 0) (:slice :pointer) (nth u 1) (:array :chan :map) (nth u 2))))
 
 (defn builtin
   "A builtin's call: [k node], {:t ...} for mode :multi, a statement for mode :stmt."
@@ -830,6 +1253,7 @@
                   (t/string-type? (:type x)) [:I (op "LenS" (exk x :S))]
                   (and (vector? u) (= :slice (nth u 0))) [:I (op "LenSlice" (exk x :R))]
                   (and (vector? u) (= :map (nth u 0))) [:I (op "LenMap" (exk x :R))]
+                  (and (vector? u) (= :chan (nth u 0))) [:I (op "LenChan" (exk x :R))]
                   ;; an array's (a pointer to one's) length, its operand evaluated for its calls
                   (and (vector? u) (= :pointer (nth u 0)) (let [b (t/under (nth u 1))] (and (vector? b) (= :array (nth b 0)))))
                   [:I (op "ThenI" (op "StmtT" (expr-stmt-of (ex x))) (op "ConstI" (long (nth (t/under (nth u 1)) 1))))]
@@ -838,9 +1262,15 @@
                   :else (unsupported! (str "len of " (t/type-str (:type x))) "GR4"))))
       "cap" (let [x (first args) u (t/under (:type x))]
               (value
-                (if (and (vector? u) (= :slice (nth u 0)))
-                  [:I (op "CapSlice" (exk x :R))]
-                  (unsupported! (str "cap of " (t/type-str (:type x))) "GR4"))))
+                (cond
+                  (and (vector? u) (= :slice (nth u 0))) [:I (op "CapSlice" (exk x :R))]
+                  (and (vector? u) (= :chan (nth u 0))) [:I (op "CapChan" (exk x :R))]
+                  ;; an array's (a pointer to one's) capacity, its operand evaluated for its calls
+                  (and (vector? u) (= :pointer (nth u 0)) (let [b (t/under (nth u 1))] (and (vector? b) (= :array (nth b 0)))))
+                  [:I (op "ThenI" (op "StmtT" (expr-stmt-of (ex x))) (op "ConstI" (long (nth (t/under (nth u 1)) 1))))]
+                  (and (vector? u) (= :array (nth u 0)))
+                  [:I (op "ThenI" (op "StmtT" (expr-stmt-of (ex x))) (op "ConstI" (long (nth u 1))))]
+                  :else (unsupported! (str "cap of " (t/type-str (:type x))) "GR4"))))
       "append" (let [[s & more] args
                      st (:type n)
                      el (nth (t/under st) 1)]
@@ -864,7 +1294,7 @@
                  (case (nth u 0)
                    :slice [:R (op "MakeSlice" (desc T) (exk (first sizes) :I) (when (second sizes) (exk (second sizes) :I)))]
                    :map [:R (op "MakeMap" (desc T) (when (first sizes) (exk (first sizes) :I)))]
-                   :chan (unsupported! "channels" "GR4"))))
+                   :chan [:R (op "MakeChan" (desc T) (when (first sizes) (exk (first sizes) :I)))])))
       "new" (if (:new-value n)
               ;; new(v) (go1.26): a new variable holding v
               (let [vt (:type (first args)) d (desc vt)]
@@ -875,7 +1305,7 @@
       ("print" "println") (let [s (op "Print" (oa (for [a args] (op "PrintArg" (as-kind (ex a) (kind (:type a))) (desc (:type a)))))
                                     (= nm "println"))]
                             (if stmt? s [:T (op "StmtT" s)]))
-      "recover" (value [:R (op "Recover")])
+      "recover" (value [:R (op (if (:deferred n) "DeferredRecover" "Recover"))])
       "complex" (let [[re im] args]
                   (value [:R (op "ComplexR" (exk re :F) (exk im :F) (desc ty))]))
       "real" (value [:F (op "RealF" (exk (first args) :R))])
@@ -886,7 +1316,7 @@
                           :I [:I (op "MinMaxI" (oa (map #(exk % :I) args)) mx (boolean (unsigned? ty)))]
                           :F [:F (op "MinMaxF" (oa (map #(exk % :F) args)) mx (= :float32 (basic-of ty)))]
                           :S [:S (op "MinMaxS" (oa (map #(exk % :S) args)) mx)])))
-      "close" (unsupported! "channels" "GR4")
+      "close" (let [x (first args)] (expr-or-stmt mode (op "Close" (exk x :R) (desc (:type x)))))
       ;; package unsafe's (§5.4)
       "Add" (value [:R (op "UnsafeAdd" (exk (first args) :R) (exk (second args) :I))])
       "Slice" (value [:R (op "UnsafeSlice" (exk (first args) :R) (exk (second args) :I) (desc ty))])
@@ -929,6 +1359,16 @@
   "The [k node]s of the right-hand values of an assignment or declaration (comma-ok forms as
   two), for targets of types tys (a nil's type)."
   [nodes tys]
+  (cond
+    ;; comma-ok values converted to the targets' interface types
+    (and (= 2 (count nodes)) (some #(= :convert-iface (:op %)) nodes)
+         (let [[a b] (map #(if (= :convert-iface (:op %)) (:x %) %) nodes)]
+           (and (:comma-ok a) (= :ok (:op b)))))
+    (let [un (mapv #(if (= :convert-iface (:op %)) (:x %) %) nodes)
+          kns (rhs-nodes un [nil nil])]
+      (mapv (fn [n u kn] (if (= :convert-iface (:op n)) [:R (iface-content kn (if (= :ok (:op u)) :bool (:type u)))] kn))
+            nodes un kns))
+    :else
   (if (and (= 2 (count nodes)) (:comma-ok (first nodes)) (= :ok (:op (second nodes))))
     (let [v (first nodes)]
       (case (:op v)
@@ -937,9 +1377,18 @@
                          t (op "MapGet2" (exk m :R) (elem-node (:key v) K) (desc mt) (long vs) (long oks))]
                      [[(kind V) (op (str "Then" (name (kind V))) t (local-node (kind V) vs))]
                       [:I (local-node :I oks)]])
-        :assert (unsupported! "type assertions" "GR4")
-        :recv (unsupported! "channel receives" "GR4")))
-    (mapv (fn [n ty] (ex n ty)) nodes (concat tys (repeat nil)))))
+        :assert (let [x (:x v) T (:to v) d (assert-desc T) k (kind T)
+                      vs (temp! k) oks (temp! :I)
+                      t (op "Assert2" (exk x :R) d (long (int (first (name k)))) (long vs) (long oks))]
+                  [[k (op (str "Then" (name k)) t (local-node k vs))]
+                   [:I (local-node :I oks)]])
+        :recv (let [ch (:x v) ct (:type ch) et (elem-type ct) k (kind et)
+                    vs (temp! k) oks (temp! :I)
+                    t (op "Recv2" (exk ch :R) (desc ct) (long (int (first (name k)))) (long vs) (long oks))]
+                [[k (op (str "Then" (name k)) t (local-node k vs))]
+                 [:I (local-node :I oks)]])
+        ::selrecv [[(:k v) (local-node (:k v) (:vs v))] [:I (local-node :I (:oks v))]]))
+    (mapv (fn [n ty] (ex n ty)) nodes (concat tys (repeat nil))))))
 
 (defn- prepare-place
   "[statements place]: the operands of place p evaluated into temporaries now (an assignment's
@@ -1020,7 +1469,7 @@
 (defn- one-of [ty]
   (case (kind ty)
     :I 1
-    :F 1.0
+    :F 1
     :R [:c 1 0]))
 
 (defn incdec-stmt [n]
@@ -1178,14 +1627,17 @@
         ;; a map element target is assigned at each iteration from a temporary (its operands
         ;; evaluated then, as Go's assignment)
         pre (volatile! [])
-        retarget (fn [t]
-                   (if (and t (not new?) (= :place-map (:op t)))
-                     (let [k (kind (:type t)) s (temp! k)]
-                       (vswap! pre conj (assign-to t [k (local-node k s)]))
-                       {::temp [k s] :type (:type t)})
-                     t))
-        kt (retarget kt)
-        vt (retarget vt)
+        ;; targets that are not plain variables (x[i], *p, m[k]) are assigned at each iteration
+        ;; from temporaries, as one assignment: their operands evaluated first (§4.5)
+        complex (and (not new?) (some #(and % (not (slot-of-place %))) [kt vt]))
+        temps (when complex
+                (mapv (fn [t] (when t (let [k (kind (:type t))] [k (temp! k)]))) [kt vt]))
+        _ (when complex
+            (let [ps (filterv some? (map (fn [t ks] (when t [t ks])) [kt vt] temps))]
+              (vswap! pre conj (assign-stmt {:lhs (mapv first ps)
+                                             :rhs (mapv (fn [[t [k s]]] {:op ::node :k k :node (local-node k s) :type (:type t) :mode :value}) ps)}))))
+        kt (if complex (when kt {::temp (first temps) :type (:type kt)}) kt)
+        vt (if complex (when vt {::temp (second temps) :type (:type vt)}) vt)
         tg (loop-target n)
         brk (long (:brk tg)) cont (long (:cont tg))
         iter (when new? (per-iteration-cells []))
@@ -1220,8 +1672,27 @@
       :map (let [xn (exk x :R) [_ K V] u
                  ks (any-setter kt new? K) vs (any-setter vt new? V)]
              (mk #(op "RangeMap" xn (desc xt) ks vs % brk cont iter)))
-      :chan (unsupported! "range over channels" "GR4")
-      :func (unsupported! "range over functions" "GR4"))))
+      :chan (let [xn (exk x :R) et (nth u 2)
+                  vs (any-setter kt new? et)]
+              (mk #(op "RangeChan" xn (desc xt) vs % brk cont iter)))
+      :func (let [[_ [yt]] u
+                  yps (nth (t/under yt) 1)
+                  ts (mapv (fn [p] (let [k (kind p)] [k (temp! k)])) yps)
+                  ;; the iteration's values, given by the yield in temporaries, bound to the
+                  ;; targets (new variables: new cells each iteration)
+                  bind (op "Seq" (oa (keep identity
+                                           (map (fn [target p [k s]]
+                                                  (when target
+                                                    (let [kn [k (local-node k s)]]
+                                                      (cond
+                                                        (::temp target) (set-slot (first (::temp target)) (second (::temp target)) (as-kind kn (first (::temp target))))
+                                                        new? (init-var target kn)
+                                                        :else (assign-to target kn)))))
+                                                [kt vt] yps ts)))
+                           (oa []))
+                  body (push-target tg #(stmt-list (:body n)))
+                  body (if (seq @pre) (op "Seq" (oa (conj @pre body)) (oa [])) body)]
+              (op "RangeFunc" (exk x :R) (desc xt) (desc yt) (oa (map (comp long second) ts)) bind body brk cont)))))
 
 (defn- switch-stmt [n]
   (let [brk (next-code!) fall (next-code!)
@@ -1265,10 +1736,12 @@
           (let [[evals ts] (temps-of kns)]
             (op "Seq" (oa (concat evals (map store rs ts) [(jump 1)])) (oa []))))))))
 
-(defn- defer-stmt [n]
-  (vreset! (:defer *fn*) true)
-  (let [call (:call n)
-        mini (volatile! {:I 0 :F 0 :S 0 :R 0})
+(defn- deferred-call
+  "The parts of a deferred or go statement's call n (SPEC.md §7.9, §8.1): its callee and
+  arguments evaluated now into a frame of their own, the call made later from it: [setters T
+  counts]."
+  [call]
+  (let [mini (volatile! {:I 0 :F 0 :S 0 :R 0})
         setters (volatile! [])
         to-mini (fn [an]
                   (if (and (= :constant (:mode an)) (not= :unknown (:val an)))
@@ -1282,23 +1755,110 @@
                       (assoc an :op ::mini :k k :slot s))))
         callee (:callee call)
         call* (cond
-                (= :builtin (:kind call)) (assoc call :args (mapv (fn [a] (if (= :type (:op a)) a (to-mini a))) (:args call)))
+                (= :builtin (:kind call)) (assoc call :deferred true :args (mapv (fn [a] (if (= :type (:op a)) a (to-mini a))) (:args call)))
                 (= :static (:kind call)) (assoc call :args (mapv to-mini (:args call)))
                 (= :closure (:kind call)) (assoc call :callee (to-mini callee) :args (mapv to-mini (:args call)))
                 (= :method (:kind call))
-                (let [recv (:recv callee)
-                      [base] (t/deref-type (:type recv))
-                      rn (case (:recv-adjust callee)
-                           :addr {:op :addr :x recv :type [:pointer (:type recv)] :mode :value}
-                           :deref {:op :deref :x recv :type base :mode :variable}
-                           recv)
-                      rm (to-mini rn)]
-                  (assoc call :callee (assoc callee :recv rm :recv-adjust nil) :args (mapv to-mini (:args call))))
+                ;; the receiver evaluated now: its embedded fields selected, its address taken
+                (let [m (:method callee)
+                      [k node] (recv-node callee)
+                      rm (to-mini {:op ::node :k k :node node :type (recv-type-of m) :mode :value})]
+                  (assoc call :callee (assoc callee :recv rm :recv-adjust nil :path [(last (:path callee))])
+                         :args (mapv to-mini (:args call))))
+                (= :iface (:kind call))
+                (let [rm (to-mini {:op ::node :k :R :node (op "NonNilR" (iface-recv-node callee)) :type (:iface callee) :mode :value})]
+                  (assoc call :callee (assoc callee :recv rm :path [(last (:path callee))])
+                         :args (mapv to-mini (:args call))))
                 :else (unsupported! (str "deferring a call of kind " (name (:kind call))) "GR4"))
         ;; the call runs with the deferred call's frame as its caller: its temporaries there
         t (binding [*fn* (assoc *fn* :slots mini)] (op "StmtT" (call-stmt call*)))
         {:keys [I F S R]} @mini]
-    (op "Defer" (oa @setters) t (long I) (long F) (long S) (long R))))
+    [(oa @setters) t [(long I) (long F) (long S) (long R)]]))
+
+(defn- defer-stmt [n]
+  (vreset! (:defer *fn*) true)
+  (let [[setters t [I F S R]] (deferred-call (:call n))]
+    (op "Defer" setters t I F S R)))
+
+(defn- go-stmt [n]
+  (let [[setters t [I F S R]] (deferred-call (:call n))]
+    (op "GoStmt" setters t I F S R)))
+
+(defn- send-stmt [n]
+  (let [ch (:ch n) ct (:type ch)]
+    (op "Send" (exk ch :R) (elem-node (:value n) (elem-type ct)) (desc ct))))
+
+(defn- type-switch-stmt [n]
+  (let [brk (next-code!)
+        lbl (:goi/label n)
+        _ (when lbl (vswap! (label-entry lbl) assoc :brk brk))
+        tg {:kind :switch :brk brk :id (:id n)}
+        init (when (:init n) (stmt (:init n)))
+        x (:x n)
+        tmp (temp! :R)
+        pre (op "Seq" (oa (remove nil? [init (set-slot :R tmp (exk x :R))])) (oa []))
+        xr (local-node :R tmp)
+        st (:type x)
+        cases (doall
+                (for [cl (:clauses n)]
+                  (let [types (:types cl)
+                        has-nil (boolean (some #(= :untyped-nil %) types))
+                        ts (remove #(= :untyped-nil %) types)
+                        ds (mapv assert-desc ts)
+                        v (:var cl)
+                        bind (when (and v (not= "_" (e/o v :name)))
+                               (init-var v (if (and (= 1 (count types)) (not has-nil))
+                                             (assert-kn xr (first ts) st)
+                                             [:R xr])))
+                        body (push-target tg #(stmt-list (:body cl)))
+                        body (if bind (op "Seq" (oa [bind body]) (oa [])) body)]
+                    (op "NewTCase" (oa ds) has-nil (boolean (:default cl)) body))))]
+    (op "TypeSwitch" pre xr (oa cases) (long brk))))
+
+(defn- select-recv
+  "A receive clause's communication c (an expression statement, a declaration or an
+  assignment of a receive): [the receive node, the statement binding its values (nil: none)]
+  with the receive replaced by the select's temporaries."
+  [c]
+  (let [;; the receive, maybe under the conversion of its assignment
+        find-recv (fn find-recv [n] (cond (= :recv (:op n)) n (map? (:x n)) (find-recv (:x n))))
+        replace-recv (fn replace-recv [n m] (if (= :recv (:op n)) m (assoc n :x (replace-recv (:x n) m))))
+        r0 (case (:op c)
+             :expr (:x c)
+             :decl (first (:init c))
+             :assign (first (:rhs c)))
+        r (find-recv r0)
+        ch (:x r) ct (:type ch) et (elem-type ct) k (kind et)
+        comma (:comma-ok r0)
+        vs (temp! k)
+        oks (if comma (temp! :I) -1)
+        marker (replace-recv r0 (assoc r :op ::selrecv :k k :vs vs :oks oks))
+        bind (case (:op c)
+               :expr nil
+               :decl (decl-stmt (assoc c :init (assoc (vec (:init c)) 0 marker)))
+               :assign (assign-stmt (assoc c :rhs (assoc (vec (:rhs c)) 0 marker))))]
+    {:ch ch :ct ct :k k :vs vs :oks oks :bind bind}))
+
+(defn- select-stmt [n]
+  (let [brk (next-code!)
+        lbl (:goi/label n)
+        _ (when lbl (vswap! (label-entry lbl) assoc :brk brk))
+        tg {:kind :switch :brk brk :id (:id n)}
+        defcl (first (filter :default (:clauses n)))
+        cases (doall
+                (for [cl (:clauses n) :when (not (:default cl))]
+                  (let [c (:comm cl)]
+                    (if (= :send (:op c))
+                      (let [ch (:ch c) ct (:type ch)
+                            v (elem-node (:value c) (elem-type ct))
+                            body (push-target tg #(stmt-list (:body cl)))]
+                        (op "NewSelCase" true (exk ch :R) (desc ct) v 0 -1 -1 nil body))
+                      (let [{:keys [ch ct k vs oks bind]} (select-recv c)
+                            body (push-target tg #(stmt-list (:body cl)))]
+                        (op "NewSelCase" false (exk ch :R) (desc ct) nil (long (int (first (name k)))) (long vs) (long oks)
+                            bind body))))))
+        def (when defcl (push-target tg #(stmt-list (:body defcl))))]
+    (op "Select" (oa cases) (boolean defcl) def (long brk))))
 
 (defn stmt
   "The node of statement n."
@@ -1334,10 +1894,10 @@
     :defer (defer-stmt n)
     :directive (op "Nop")
     :local-type (op "Nop")
-    :go (unsupported! "goroutines" "GR4")
-    :send (unsupported! "channels" "GR4")
-    :select (unsupported! "select" "GR4")
-    :type-switch (unsupported! "type switches" "GR4")
+    :go (go-stmt n)
+    :send (send-stmt n)
+    :select (select-stmt n)
+    :type-switch (type-switch-stmt n)
     (unsupported! (str "the statement " (name (:op n))) "GR3")))
 
 ;;; Functions (§4.6)
@@ -1376,7 +1936,7 @@
                   (when (and (#{:local :place-local} (:op x)) (:obj x) (e/o (:obj x) :local?))
                     (when-not (.containsKey declared (:obj x))
                       (.put out (:obj x) true)))
-                  (doseq [[k v] x :when (not (#{:form :type :obj :method :field :val :to :recv-type :iface :sig :tag-type :refs :params :results :recv :var :objs} k))]
+                  (doseq [[k v] x :when (not (#{:form :type :obj :method :field :val :to :recv-type :iface :sig :tag-type :refs :params :results :var :objs} k))]
                     (walk v)))
                 (vector? x) (doseq [y x] (walk y))
                 :else nil))]
@@ -1387,10 +1947,12 @@
 
 (defn build-code
   "The *goi.Code of a function node (:func, :fn, :body) with its signature sig; captures, the
-  cells it receives first (a literal's)."
+  cells it receives first (a literal's); a method's receiver (:recv, of type :recv-type or its
+  method object's) laid after the parameters and results."
   [tree fname captures]
   (let [sig (or (:sig tree) (sig-of (:type tree)))
-        {:keys [params results counts]} (slot-layout sig)
+        rty (or (:recv-type tree) (when (and (:obj tree) (e/o (:obj tree) :method)) (recv-type-of (:obj tree))))
+        {:keys [params results counts recv]} (slot-layout sig rty)
         f {:slots (volatile! (assoc counts :C 0)) :locs (IdentityHashMap.) :code (volatile! 2)
            :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name fname}]
     (binding [*fn* f]
@@ -1402,6 +1964,13 @@
             pobjs (:params tree)]
         (doseq [[x [k s]] (map vector pobjs params)]
           (when x
+            (if (cell-var? x)
+              (let [c (new-slot! :C)]
+                (vswap! pro conj (op (str "ProCell" (name k)) (long s) (long c) (desc (e/o x :type))))
+                (.put ^IdentityHashMap (:locs *fn*) x [:cell c]))
+              (.put ^IdentityHashMap (:locs *fn*) x [:slot k s]))))
+        (when-let [x (:recv tree)]
+          (let [[k s] recv]
             (if (cell-var? x)
               (let [c (new-slot! :C)]
                 (vswap! pro conj (op (str "ProCell" (name k)) (long s) (long c) (desc (e/o x :type))))
@@ -1439,6 +2008,8 @@
 (defn build-func
   "The code of a package-level function's checked tree (built on its first call, S18)."
   [tree]
+  (when (nil? tree)
+    (unsupported! "a function without a body (assembly)" "out of scope: §1.1"))
   (build-code tree (e/o (:obj tree) :name) []))
 
 (defn build-inits

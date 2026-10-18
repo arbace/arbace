@@ -4,7 +4,7 @@
 (in-ns 'go.arbace.goi)
 
 (go/file "expr.go"
-  :imports [[fmt "fmt"] [reflect "reflect"] [unsafe "unsafe"]])
+  :imports [[fmt "fmt"] [bits "math/bits"] [reflect "reflect"] [unsafe "unsafe"]])
 
 (go/func ConstI ^I [^int64 v] (fn ^int64 [^{:tag (* Frame)} fr] v))
 (go/func ConstF ^F [^float64 v] (fn ^float64 [^{:tag (* Frame)} fr] v))
@@ -271,16 +271,27 @@ slice of empty structs).\n"
   ^any [^{:tag reflect/Type} st ^int n ^int c]
   (.Interface (reflect/MakeSlice st n c)))
 
+(go/const [^{:tag uint64 :doc "maxAlloc is gc's largest allocation on 64-bit linux (runtime.maxAlloc).\n"} maxAlloc (<< 1 48)])
+
+(go/func tooBig "tooBig says whether n elements of size size exceed gc's largest allocation (or overflow).\n" ^bool [^int64 n ^uintptr size]
+  (when (< n 0)
+    (return true))
+  (when (== size 0)
+    (return false))
+  (let [(values hi lo) (bits/Mul64 (conv uint64 n) (conv uint64 size))]
+    (or (!= hi 0) (> lo maxAlloc))))
+
 (go/func MakeSlice "MakeSlice is make([]T, n, c) (c nil: n), with gc's checks.\n" ^R [^{:tag (* Type)} st ^I n ^I c]
-  (let [m (.mem st)]
+  (let [m (.mem st)
+        size (.Size (.Elem m))]
     (fn ^any [^{:tag (* Frame)} fr]
       (let [l (n fr)
             k l]
         (when (!= c nil)
           (set! k (c fr)))
-        (when (< l 0)
-          (panic (lit RuntimeError "makeslice: len out of range")))
-        (when (< k l)
+        (when (or (tooBig k size) (< l 0) (< k l))
+          (when (tooBig l size)
+            (panic (lit RuntimeError "makeslice: len out of range")))
           (panic (lit RuntimeError "makeslice: cap out of range")))
         (makeSliceValue m (conv int l) (conv int k))))))
 
@@ -409,6 +420,7 @@ offs, each of type ts.\n"
       (let [v (s fr)]
         (when (== n 0)
           (return v))
+        (growCheck v n size)
         (let [tmp (makeSliceValue m n n)
               base (.-Data (sliceOf tmp))]
           (range [i f inits]
@@ -420,7 +432,15 @@ offs, each of type ts.\n"
   (fn ^any [^{:tag (* Frame)} fr]
     (let [a (reflect/ValueOf (s fr))
           b (reflect/ValueOf (t fr))]
+      (growCheck (s fr) (.Len b) (.Size (.Elem (.mem st))))
       (.Interface (reflect/AppendSlice a b)))))
+
+(go/func growCheck "growCheck panics as gc's growslice when appending n elements of size size to slice v overflows.\n"
+  [^any v ^int n ^uintptr size]
+  (let [l (.-Len (sliceOf v))
+        nl (+ l n)]
+    (when (or (< nl l) (and (> nl (.-Cap (sliceOf v))) (tooBig (conv int64 nl) size)))
+      (panic (lit RuntimeError "growslice: len out of range")))))
 
 (go/func AppendString "AppendString is append(b, s...) of a byte slice b and a string s.\n" ^R [^{:tag (* Type)} st ^R b ^S s]
   (let [m (.mem st)]
@@ -499,6 +519,8 @@ offs, each of type ts.\n"
             h (sliceOf v)]
         (when (< (.-Len h) n)
           (panic (lit RuntimeError (fmt/Sprintf "cannot convert slice with length %d to array or pointer to array with length %d" (.-Len h) n))))
+        (when (== n 0)
+          (return (.Zero at)))
         (.Interface (.Elem (reflect/NewAt m (.-Data h))))))))
 
 (go/func SliceToArrayPtr "SliceToArrayPtr is (*[N]T)(s), gc's check (a nil slice gives a nil pointer).\n" ^R [^R x ^{:tag (* Type)} pt]
@@ -533,7 +555,7 @@ offs, each of type ts.\n"
   ^any [^{:tag (* Type)} t ^any v]
   (set! v (toMem t v))
   (when (.-Proxy t)
-    (return (lit Proxy t v)))
+    (return (contentOf (lit Proxy t v))))
   v)
 
 (go/func intValue "intValue is I value v of Go kind k as a Go value of that kind (RT rt).\n" ^any [^{:tag reflect/Type} rt ^int64 v]
@@ -555,7 +577,7 @@ offs, each of type ts.\n"
 (go/func IfaceI "IfaceI is integer or bool x of type t as an interface's content.\n" ^R [^I x ^{:tag (* Type)} t]
   (let [rt (.mem t)]
     (when (.-Proxy t)
-      (return (fn ^any [^{:tag (* Frame)} fr] (lit Proxy t (intValue rt (x fr))))))
+      (return (fn ^any [^{:tag (* Frame)} fr] (contentOf (lit Proxy t (intValue rt (x fr)))))))
     (when (!= (.PkgPath rt) "")
       (return (fn ^any [^{:tag (* Frame)} fr] (.Interface (valueI rt (x fr))))))
     (fn ^any [^{:tag (* Frame)} fr] (intValue rt (x fr)))))
@@ -569,7 +591,7 @@ offs, each of type ts.\n"
           (== (.Kind rt) reflect/Float32) (set! c (conv float32 v))
           (!= (.PkgPath rt) "") (let [z (.Elem (reflect/New rt))] (.SetFloat z v) (set! c (.Interface z))))
         (when (.-Proxy t)
-          (return (lit Proxy t c)))
+          (return (contentOf (lit Proxy t c))))
         c))))
 
 (go/func IfaceS ^R [^S x ^{:tag (* Type)} t]
@@ -579,25 +601,64 @@ offs, each of type ts.\n"
         (when (!= (.PkgPath rt) "")
           (let [z (.Elem (reflect/New rt))] (.SetString z (assert string c)) (set! c (.Interface z))))
         (when (.-Proxy t)
-          (return (lit Proxy t c)))
+          (return (contentOf (lit Proxy t c))))
         c))))
 
 (go/func IfaceR ^R [^R x ^{:tag (* Type)} t]
   (when (.-Iface t)
     (return x))
+  (when (== (.-GK t) reflect/Chan)
+    ;; a channel's frame value may be of another direction: its own type here
+    (let [m (.mem t)]
+      (return (fn ^any [^{:tag (* Frame)} fr]
+                (let [v (x fr)]
+                  (when (== v nil)
+                    (return (.Interface (reflect/Zero m))))
+                  (let [rv (reflect/ValueOf v)]
+                    (when (!= (.Type rv) m)
+                      (return (ifaceValue t (.Interface (.Convert rv m)))))
+                    (ifaceValue t v)))))))
   (fn ^any [^{:tag (* Frame)} fr] (ifaceValue t (x fr))))
 
 (go/func EqR "EqR is Go's == on two values of one comparable type (interfaces: dynamic types and values).\n" ^B [^R x ^R y]
   (fn ^bool [^{:tag (* Frame)} fr]
     (let [a (x fr)
           b (y fr)]
-      (== a b))))
+      (goEq a b))))
 
 (go/func NeR ^B [^R x ^R y]
   (fn ^bool [^{:tag (* Frame)} fr]
     (let [a (x fr)
           b (y fr)]
-      (!= a b))))
+      (not (goEq a b)))))
+
+(go/func goEq
+  "goEq is Go's == on two contents or values: a struct's blank fields (the RT's _, _1 ...) are
+not compared.\n"
+  ^bool [^any a ^any b]
+  (when (== a b)
+    (return true))
+  (when (or (== a nil) (== b nil))
+    (return false))
+  (let [ta (reflect/TypeOf a)]
+    (when (or (!= ta (reflect/TypeOf b)) (!= (.Kind ta) reflect/Struct))
+      (return false))
+    (let [va (reflect/ValueOf a)
+          vb (reflect/ValueOf b)
+          blank false]
+      (for [i 0] (< i (.NumField ta)) (inc! i)
+        (let [n (.-Name (.Field ta i))]
+          (if (and (> (len n) 0) (== (aget n 0) \_) (or (== (len n) 1) (and (>= (aget n 1) \0) (<= (aget n 1) \9))))
+            (set! blank true)
+            (when (not (goEq (fieldIface va i) (fieldIface vb i)))
+              (return false)))))
+      blank)))
+
+(go/func fieldIface "fieldIface is field i of struct value v as an any (unexported fields too).\n" ^any [^{:tag reflect/Value} v ^int i]
+  (let [c (reflect/New (.Type v))]
+    (.Set (.Elem c) v)
+    (let [f (.Field (.Elem c) i)]
+      (.Interface (.Elem (reflect/NewAt (.Type f) (unsafe/Pointer (.UnsafeAddr f))))))))
 
 (go/func IsNilR "IsNilR is x == nil for a pointer, slice, map, func, channel or interface (by its kind k).\n" ^B [^R x ^{:tag (* Type)} t]
   (switch (.-GK t)
@@ -717,6 +778,7 @@ offs, each of type ts.\n"
 (go/func ThenS ^S [^T t ^S x] (fn ^string [^{:tag (* Frame)} fr] (t fr) (x fr)))
 (go/func ThenR ^R [^T t ^R x] (fn ^any [^{:tag (* Frame)} fr] (t fr) (x fr)))
 (go/func ThenB ^B [^T t ^B x] (fn ^bool [^{:tag (* Frame)} fr] (t fr) (x fr)))
+(go/func ThenT ^T [^T t ^T x] (fn [^{:tag (* Frame)} fr] (t fr) (x fr)))
 (go/func StmtT "StmtT is statement s as a node without value.\n" ^T [^Stmt s] (fn [^{:tag (* Frame)} fr] (s fr)))
 
 ;; unsafe's builtins (§5.4: Add, Slice, String, SliceData, StringData)

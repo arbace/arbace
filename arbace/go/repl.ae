@@ -224,13 +224,20 @@
 
 (defn- state-of-path [p] (get @packages p))
 
+(defn method-name
+  "Method object m's name as gc names it: T.M, or (*T).M for a pointer receiver."
+  [m]
+  (let [base (:name (t/info (e/o m :recv-named)))]
+    (if (e/o m :ptr-recv) (str "(*" base ")." (e/o m :name)) (str base "." (e/o m :name)))))
+
 (defn build-context
   "The builder's context for the package of state st."
   [st]
   {:path (:path @st) :name (:name @st)
    :compiled? listed?
    :types (java.util.HashMap.)
-   :lit-count (atom 0) :local-gen (atom 1000000)
+   :methods-done (java.util.IdentityHashMap.)
+   :lit-count (atom 0)
    :gen (fn [nt]
           (let [i (t/info nt)]
             (or (when-let [ps (state-of-path (:pkg i))] (get-in @ps [:types (:name i) :gen])) 1)))
@@ -238,6 +245,11 @@
                 (let [ps (state-of-path (e/o x :pkg))]
                   (or (and ps (get-in @ps [:funcs (e/o x :name) :cell]))
                       (throw (ex-info (str "goi: no function " (e/o x :pkg) "." (e/o x :name)) {})))))
+   :method-cell (fn [m]
+                  (let [ps (state-of-path (e/o m :pkg))
+                        k (method-name m)]
+                    (or (and ps (get-in @ps [:methods k :cell]))
+                        (throw (ex-info (str "goi: no method " (e/o m :pkg) "." k) {})))))
    :global (fn [x]
              (let [ps (state-of-path (e/o x :pkg))]
                (or (and ps (get-in @ps [:globals (e/o x :name)]))
@@ -261,7 +273,7 @@
   namespace's vars (§2.1). Returns {:inits (the initializers' code in order, a *goi.Func) :init-funcs
   (init cells in order) :main (cell or nil) :new-vars (names of variables made anew)}."
   [st r {:keys [vars? eager only kept-names init-names]}]
-  (let [ctx (build-context st)
+  (let [ctx (assoc (build-context st) :eager eager)
         decls (:decl-infos r)
         old @st
         gen-of (fn [nt] (let [i (t/info nt)] (when (= (:pkg i) (:path old)) (get-in old [:types (:name i) :gen]))))
@@ -270,7 +282,7 @@
     (when unsupported
       (let [what (str (or (:unsupported unsupported) "generics") " (GR6)")]
         (throw (ex-info (str "not supported by goi yet: " what) {:goi/unsupported what}))))
-    (binding [b/*ctx* ctx]
+    (binding [b/*ctx* ctx t/*method-obj* b/method-data]
       ;; types: a new generation when the underlying type changed (§2.5)
       (let [type-decls (filter #(and (= :type (:kind %)) (not (e/o (:obj %) :alias))) decls)
             types (into {}
@@ -296,6 +308,17 @@
                               (let [d (some #(when (identical? (:obj %) x) %) decls)]
                                 {:cell (b/op "FuncCell" "init" (:name old) nil) :tree (:tree d)})))]
         (swap! st assoc :funcs new-funcs)
+        ;; methods: a cell per T.M, kept while its signature is (G9)
+        (let [new-methods (into {}
+                                (for [d methods
+                                      :let [m (:obj d)]
+                                      :when (and (not= "_" (e/o m :name)) (e/o m :recv-named))
+                                      :let [nm (method-name m)
+                                            k (type-key (e/o m :type) (:gen ctx))
+                                            prev (get-in old [:methods nm])
+                                            cell (if (and prev (= k (:key prev))) (:cell prev) (b/op "FuncCell" nm (:name old) nil))]]
+                                  [nm {:cell cell :key k :tree (:tree d) :obj m :generic (:generic d)}]))]
+          (swap! st assoc :methods new-methods))
         ;; variables: a cell per name, kept while its type is (S10)
         (let [var-objs (for [d decls :when (= :var (:kind d)) x (or (:lhs d) [(:obj d)]) :when (not= "_" (e/o x :name))] x)
               new-vars (volatile! [])
@@ -314,12 +337,17 @@
                   :when (not kept)
                   :when (or (nil? only) (contains? only nm))]
             (if eager
-              (b/op "SetCode" cell (binding [b/*ctx* ctx] (b/build-func tree)) nil)
-              (b/op "SetCode" cell nil (fn [] (binding [b/*ctx* ctx] (b/build-func tree))))))
+              (b/op "SetCode" cell (b/with-ctx ctx #(b/build-func tree)) nil)
+              (b/op "SetCode" cell nil (fn [] (b/with-ctx ctx #(b/build-func tree))))))
+          ;; the methods' code: as the functions'
+          (doseq [[nm {:keys [cell tree generic]}] (:methods @st)
+                  :when tree]
+            (cond
+              generic (b/op "SetCode" cell nil (fn [] (b/unsupported! "methods of generic types" "GR6")))
+              eager (b/op "SetCode" cell (b/with-ctx ctx #(b/build-func tree)) nil)
+              :else (b/op "SetCode" cell nil (fn [] (b/with-ctx ctx #(b/build-func tree))))))
           (doseq [{:keys [cell tree]} init-cells]
-            (b/op "SetCode" cell (binding [b/*ctx* ctx] (b/build-func tree)) nil))
-          (when (and eager (seq methods))
-            (b/unsupported! "methods" "GR4"))
+            (b/op "SetCode" cell (b/with-ctx ctx #(b/build-func tree)) nil))
           ;; the initializers (in initialization order)
           (let [var-trees (into {} (for [d decls :when (= :var (:kind d)) :when (= :var-init (:op (:tree d)))]
                                      [(first (:lhs (:tree d))) (:tree d)]))

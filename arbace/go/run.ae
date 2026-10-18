@@ -22,25 +22,116 @@
     (flush))
   (System/exit status))
 
-(defn run
-  "Runs the program of package file pf (forms root root) with args: its exit status."
-  [root ^File pf args]
-  (let [src (load/package-source {:dir root} nil @repl/config pf)
-        _ (when (empty? (:files src)) (fail 125 "unsupported" "no Go files for the configuration"))
-        r (repl/check-source src nil)
+(defn- package-file? [^File f]
+  (and (.isFile f) (str/ends-with? (.getName f) ".ae")
+       (with-open [r (java.io.BufferedReader. (java.io.FileReader. f))]
+         (let [l (first (remove #(or (str/blank? %) (str/starts-with? % ";")) (line-seq r)))]
+           (boolean (and l (str/starts-with? l "(ns ")))))))
+
+(defn- dir-test-root
+  "The directory of a directory test's packages (GOI-SPEC.md §11.2) that package file pf belongs
+  to: its nearest ancestor named *_dir, or its sibling STEM_dir for STEM_dir.ae; else nil."
+  ^File [^File pf]
+  (let [n (.getName pf)
+        sib (File. (.getParentFile pf) (str/replace n #"\.ae$" ""))]
+    (if (and (str/ends-with? n "_dir.ae") (.isDirectory sib))
+      sib
+      (loop [d (.getParentFile pf)]
+        (cond
+          (nil? d) nil
+          (str/ends-with? (.getName d) "_dir") d
+          :else (recur (.getParentFile d)))))))
+
+(defn- dir-test-index
+  "The packages of a directory test: import path -> package file (pf's own and those under its
+  test's directory)."
+  [^File pf]
+  (if-let [d (dir-test-root pf)]
+    (into {}
+          (for [^File f (cons pf (file-seq d))
+                :when (package-file? f)
+                :let [p (load/package-path-of f)]
+                :when p]
+            [p f]))
+    {}))
+
+(defn- no-assembly! [src]
+  (when-let [s (some #(when (str/ends-with? (str %) ".s") %) (get-in src [:opts :other-files]))]
+    (fail 125 "unsupported" (str "assembly (" (:path src) ": " s "): out of scope (§1.1)"))))
+
+(defn- no-linkname! [src]
+  (doseq [fi (:files src) d (:decls fi)
+          x (tree-seq coll? seq d)
+          :when (and (instance? arbace.lang.IObj x) (:go/linkname (meta x)))]
+    (fail 125 "unsupported" (str "go:linkname (" (:path src) ": " (:go/linkname (meta x)) "): out of scope (§1.1)"))))
+
+(defn- check! [src extra]
+  (no-assembly! src)
+  (no-linkname! src)
+  (let [r (repl/check-source src extra)
         errs (:errors r)]
     (when-let [bi (some #(when (= :BrokenImport (:code %)) %) errs)]
       (fail 125 "unsupported" (str "an import neither in the table nor interpreted: " (:msg bi))))
     (when (seq errs)
-      (fail 126 "error" (str "check: " (:file (first errs)) ":" (:line (first errs)) ": " (:msg (first errs)))))
-    (let [st (atom {:path (:path src) :name (:name src) :ns (symbol (str "goi.run." (:name src))) :config (:config src)
-                    :files [] :funcs {} :globals {} :types {}})]
-      (swap! repl/packages assoc (:path src) st)
-      (let [{:keys [inits init-funcs main]} (repl/define! st r {:vars? false :eager true})]
-        (when-not main
-          (fail 126 "error" "no main function"))
-        (b/op "SetOSArgs" (object-array (cons (str (.getName pf)) args)))
-        (b/op "RunProgram" (object-array (cons inits init-funcs)) main)))))
+      (fail 126 "error" (str "check: " (:path src) ": " (:file (first errs)) ":" (:line (first errs)) ": " (:msg (first errs)))))
+    r))
+
+(defn- imports-of
+  "The import paths package source src names (its local imports resolved)."
+  [src]
+  (let [li (get-in src [:opts :local-imports])]
+    (distinct
+      (for [fi (:files src)
+            spec (get-in fi [:opts :imports])
+            :let [p (if (vector? spec) (second spec) spec)]
+            :when (string? p)]
+        (get li p p)))))
+
+(defn run
+  "Runs the program of package file pf (forms root root) with args: its exit status. The
+  interpreted packages it imports (a directory test's) are checked, defined and initialized
+  first, in dependency order."
+  [root ^File pf args]
+  (let [src (load/package-source {:dir root} nil @repl/config pf)
+        _ (when (empty? (:files src)) (fail 125 "unsupported" "no Go files for the configuration"))
+        index (delay (dir-test-index pf))
+        srcs (atom {})
+        inits (volatile! {})
+        deps (volatile! {})
+        extra (fn [path] (get @srcs path))
+        define (fn [src r]
+                 (let [st (atom {:path (:path src) :name (:name src) :ns (symbol (str "goi.run." (:name src))) :config (:config src)
+                                 :files [] :funcs {} :globals {} :types {}})]
+                   (swap! repl/packages assoc (:path src) st)
+                   (let [d (repl/define! st r {:vars? false :eager true})]
+                     (vswap! inits assoc (:path src) (cons (:inits d) (:init-funcs d)))
+                     (vswap! deps assoc (:path src) (set (filter #(contains? @srcs %) (imports-of src))))
+                     d)))
+        ;; Go's order (go1.21): the first package by import path whose imports are initialized
+        init-order (fn []
+                     (loop [done [] left (set (keys @inits))]
+                       (if (empty? left)
+                         done
+                         (let [p (first (sort (filter #(every? (set done) (get @deps %)) left)))]
+                           (recur (conj done (or p (first (sort left)))) (disj left (or p (first (sort left)))))))))]
+    ;; the interpreted imports: each loaded once, its own imports first
+    (letfn [(load! [path seen]
+              (when-not (or (contains? @srcs path) (repl/listed? path) (contains? seen path))
+                (when-let [^File f (get @index path)]
+                  (let [s (load/package-source {:dir root} path @repl/config f)]
+                    (doseq [p (imports-of s)] (load! p (conj seen path)))
+                    (when-not (contains? @srcs path)
+                      (let [r (check! s extra)]
+                        (swap! srcs assoc path s)
+                        (define s r)))))))]
+      (doseq [p (imports-of src)] (load! p #{(:path src)})))
+    (let [r (check! src extra)
+          _ (swap! srcs assoc (:path src) src)
+          {:keys [main]} (define src r)]
+      (when-not main
+        (fail 126 "error" "no main function"))
+      (b/op "SetOSArgs" (object-array (cons (str (.getName pf)) args)))
+      (b/op "RunProgram" (object-array (mapcat @inits (init-order))) main))))
 
 (defn -main
   "bin/goi run's Arbace side: ROOT NS [ARG...]."

@@ -1,0 +1,265 @@
+;; goi: goroutines, channels, select and range over functions (GOI-SPEC.md §8, §4.9, §4.10;
+;; GR4). Goroutines are Go's own, each with its goi thread; channels are real Go channels of
+;; their RT, operated by reflect (Go's own rules and messages: a send on a closed channel, a nil
+;; channel blocking); select is reflect.Select; a range over a function calls it with a yield
+;; closure that runs the loop's body in the enclosing frame.
+(in-ns 'go.arbace.goi)
+
+(go/file "chan.go"
+  :imports [[os "os"] [reflect "reflect"]])
+
+;; ---------------------------------------------------------------------------------------
+;; Goroutines (§8.1)
+
+(go/func GoStmt
+  "GoStmt is (go call): the callee and its arguments evaluated now by args into a frame of their
+own (counts ni, nf, ns, nr), the call made by a new goroutine with a goi thread of its own. Its
+uncaught panic is reported as gc's; in program mode the process then exits with status 2, at the
+REPL the goroutine ends.\n"
+  ^Stmt [^{:tag (slice Setter)} args ^T call ^int32 ni ^int32 nf ^int32 ns ^int32 nr]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (let [mini (addr (lit Frame :Fn (.-Fn fr)
+                          :I (make (slice int64) ni) :F (make (slice float64) nf)
+                          :S (make (slice string) ns) :R (make (slice any) nr)))]
+      (range [_ a args] (a fr mini))
+      (go ((fn []
+             (let [th (CurrentThread)]
+               (set! (.-Th mini) th)
+               (defer ((fn []
+                         (let [p (recover)]
+                           (when (!= p nil)
+                             (let [(values se ok) (assert stackOverflowError p)]
+                               (if ok
+                                 (print (.Error se) "\nfatal error: stack overflow\n\ngoroutine 1 [running]:\n")
+                                 (Report th p)))
+                             (when ProgramMode
+                               (os/Exit 2)))))))
+               (call mini)))))
+      0)))
+
+;; ---------------------------------------------------------------------------------------
+;; Channels (§8.2)
+
+(go/func chanOf "chanOf is a channel frame value as a reflect.Value.\n" ^{:tag reflect/Value} [^any c ^{:tag (* Type)} ct]
+  (when (== c nil)
+    (return (reflect/Zero (.mem ct))))
+  (reflect/ValueOf c))
+
+(go/func MakeChan "MakeChan is make(chan T, n) of channel type ct (n nil: 0), gc's check of the size.\n"
+  ^R [^{:tag (* Type)} ct ^I n]
+  (let [m (.mem ct)
+        both (reflect/ChanOf reflect/BothDir (.Elem m))]
+    (fn ^any [^{:tag (* Frame)} fr]
+      (let [size (conv int64 0)]
+        (when (!= n nil)
+          (set! size (n fr)))
+        (when (or (< size 0) (> size (conv int64 (<< 1 40))))
+          (panic (lit RuntimeError "makechan: size out of range")))
+        (let [c (reflect/MakeChan both (conv int size))]
+          (when (!= both m)
+            (set! c (.Convert c m)))
+          (.Interface c))))))
+
+(go/func Send "Send is (>! ch v): v (a node of the element's kind) sent, Go's rules (§8.2).\n"
+  ^Stmt [^R ch ^any v ^{:tag (* Type)} ct]
+  (let [et (.elem ct)
+        vf (keyFn v et)]
+    (fn ^Ctl [^{:tag (* Frame)} fr]
+      (let [c (chanOf (ch fr) ct)
+            x (vf fr)]
+        (.Send c x))
+      0)))
+
+(go/func recvValue "recvValue receives from channel c: the value as a reflect.Value and ok.\n"
+  [^{:tag reflect/Value} c] :results [^{:tag reflect/Value} v ^bool ok]
+  (set! (values v ok) (.Recv c))
+  (return))
+
+(go/func RecvI "RecvI is (<! ch) of an integer or bool element.\n" ^I [^R ch ^{:tag (* Type)} ct]
+  (fn ^int64 [^{:tag (* Frame)} fr]
+    (let [(values v _) (recvValue (chanOf (ch fr) ct))]
+      (intOfValue v))))
+
+(go/func RecvF ^F [^R ch ^{:tag (* Type)} ct]
+  (fn ^float64 [^{:tag (* Frame)} fr]
+    (let [(values v ok) (recvValue (chanOf (ch fr) ct))]
+      (when (not ok)
+        (return 0))
+      (.Float v))))
+
+(go/func RecvS ^S [^R ch ^{:tag (* Type)} ct]
+  (fn ^string [^{:tag (* Frame)} fr]
+    (let [(values v ok) (recvValue (chanOf (ch fr) ct))]
+      (when (not ok)
+        (return ""))
+      (.String v))))
+
+(go/func RecvR ^R [^R ch ^{:tag (* Type)} ct]
+  (let [et (.elem ct)]
+    (fn ^any [^{:tag (* Frame)} fr]
+      (let [(values v ok) (recvValue (chanOf (ch fr) ct))]
+        (when (not ok)
+          (return (.Zero et)))
+        (.fromValue et v)))))
+
+(go/func Recv2 "Recv2 is v, ok := (<! ch): the value to slot vs of kind k, ok to I slot oks.\n"
+  ^T [^R ch ^{:tag (* Type)} ct ^int32 k ^int32 vs ^int32 oks]
+  (let [et (.elem ct)
+        kk (conv byte k)]
+    (fn [^{:tag (* Frame)} fr]
+      (let [(values v ok) (recvValue (chanOf (ch fr) ct))]
+        (aset (.-I fr) oks (B2I ok))
+        (setSlotValue fr kk vs et v)))))
+
+(go/func Close "Close is close(ch).\n" ^Stmt [^R ch ^{:tag (* Type)} ct]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (let [v (ch fr)]
+      (when (== v nil)
+        (panic (lit plainError "close of nil channel")))
+      (.Close (reflect/ValueOf v)))
+    0))
+
+(go/type plainError "plainError is a runtime error without the runtime error: prefix (gc's runtime.plainError).\n"
+  (struct ^string msg))
+
+(go/method Error ^string [^plainError e] (.-msg e))
+(go/method RuntimeError [^plainError e])
+
+(go/func LenChan ^I [^R ch]
+  (fn ^int64 [^{:tag (* Frame)} fr]
+    (let [v (ch fr)]
+      (when (== v nil)
+        (return 0))
+      (conv int64 (.Len (reflect/ValueOf v))))))
+
+(go/func CapChan ^I [^R ch]
+  (fn ^int64 [^{:tag (* Frame)} fr]
+    (let [v (ch fr)]
+      (when (== v nil)
+        (return 0))
+      (conv int64 (.Cap (reflect/ValueOf v))))))
+
+(go/func RangeChan "RangeChan is range over a channel: each value received until it is closed.\n"
+  ^Stmt [^R ch ^{:tag (* Type)} ct ^SetAny v ^Stmt body ^Ctl brk ^Ctl cont ^Stmt iter]
+  (let [et (.elem ct)]
+    (fn ^Ctl [^{:tag (* Frame)} fr]
+      (let [c (chanOf (ch fr) ct)]
+        (while true
+          (let [(values x ok) (recvValue c)]
+            (when (not ok)
+              (return 0))
+            (when (!= v nil)
+              (v fr (anyFrameValue et x)))
+            (let [r (body fr)]
+              (when (!= r 0)
+                (switch (loopCtl r brk cont)
+                  (case [1] (return 0))
+                  (case [2] (return r)))))
+            (when (!= iter nil)
+              (iter fr))))))))
+
+;; ---------------------------------------------------------------------------------------
+;; select (§4.9): reflect.Select
+
+(go/type SelCase
+  "SelCase is a communication clause of select: a send of v (Send true) or a receive (its value
+to slot vs of kind k, ok to I slot oks, then Bind), on channel ch of type ct; then Body.\n"
+  (struct ^bool Send ^R Ch ^{:tag (* Type)} CT ^KeyFn V ^byte K ^int32 VS ^int32 OKS ^Stmt Bind ^Stmt Body))
+
+(go/func NewSelCase
+  "NewSelCase is a communication clause: send (v a node of the element's kind) or receive
+(vs, oks: -1 when not bound; bind the assignment or declaration of the received value).\n"
+  ^SelCase [^bool send ^R ch ^{:tag (* Type)} ct ^any v ^int32 k ^int32 vs ^int32 oks ^Stmt bind ^Stmt body]
+  (let [c (lit SelCase :Send send :Ch ch :CT ct :K (conv byte k) :VS vs :OKS oks :Bind bind :Body body)]
+    (when send
+      (set! (.-V c) (keyFn v (.elem ct))))
+    c))
+
+(go/func Select
+  "Select is select: its channels and the values to send evaluated in source order, then Go's
+choice (reflect.Select; with a default clause, non-blocking), the chosen clause's received value
+bound, its body run. brk is its break code; no clause blocks forever.\n"
+  ^Stmt [^{:tag (slice SelCase)} cases ^bool hasDefault ^Stmt def ^Ctl brk]
+  (fn ^Ctl [^{:tag (* Frame)} fr]
+    (let [rc (make (slice reflect/SelectCase) (len cases) (+ (len cases) 1))]
+      (range [i c cases]
+        (let [ch (chanOf ((.-Ch c) fr) (.-CT c))]
+          (if (.-Send c)
+            (aset rc i (lit reflect/SelectCase :Dir reflect/SelectSend :Chan ch :Send ((.-V c) fr)))
+            (aset rc i (lit reflect/SelectCase :Dir reflect/SelectRecv :Chan ch)))))
+      (when hasDefault
+        (set! rc (append rc (lit reflect/SelectCase :Dir reflect/SelectDefault))))
+      (when (== (len rc) 0)
+        (select))
+      (let [(values chosen v ok) (reflect/Select rc)
+            body def]
+        (when (< chosen (len cases))
+          (let [c (aget cases chosen)]
+            (when (not (.-Send c))
+              (when (>= (.-VS c) 0)
+                (let [et (.elem (.-CT c))]
+                  (if ok
+                    (setSlotValue fr (.-K c) (.-VS c) et v)
+                    (setSlotValue fr (.-K c) (.-VS c) et (lit reflect/Value)))))
+              (when (>= (.-OKS c) 0)
+                (aset (.-I fr) (.-OKS c) (B2I ok)))
+              (when (!= (.-Bind c) nil)
+                ((.-Bind c) fr)))
+            (set! body (.-Body c))))
+        (when (== body nil)
+          (return 0))
+        (let [r (body fr)]
+          (when (== r brk)
+            (return 0))
+          r)))))
+
+;; ---------------------------------------------------------------------------------------
+;; range over functions (§4.10)
+
+(go/func RangeFunc
+  "RangeFunc is range over function f (of type ft) with a yield of type yt: the yield closure
+runs the loop's body in the enclosing frame (bind assigning the iteration's values, given in
+temporaries ts, by the yield's parameters' kinds), true to go on; a break, return or outer jump
+ends the loop (the yield then false), done when f returns. A yield called after it returned
+false panics with gc's message.\n"
+  ^Stmt [^R f ^{:tag (* Type)} ft ^{:tag (* Type)} yt ^{:tag (slice int32)} ts ^Stmt bind ^Stmt body ^Ctl brk ^Ctl cont]
+  (let [(values n ps rs) (slotCounts yt)]
+    (fn ^Ctl [^{:tag (* Frame)} fr]
+      (let [done false
+            exited false
+            pending (conv Ctl 0)
+            yf (NewFunc "range-func" "" nil)
+            code (addr (lit Code :NI (aget n 0) :NF (aget n 1) :NS (aget n 2) :NR (aget n 3)))]
+        (set! (.-Body code)
+              (fn ^Ctl [^{:tag (* Frame)} nf]
+                (when done
+                  (if exited
+                    (panic (lit RuntimeError "range function continued iteration after whole loop exit"))
+                    (panic (lit RuntimeError "range function continued iteration after function for loop body returned false"))))
+                (range [i p (.-Ins yt)]
+                  (switch (.-K p)
+                    (case [\I] (aset (.-I fr) (aget ts i) (aget (.-I nf) (aget ps i))))
+                    (case [\F] (aset (.-F fr) (aget ts i) (aget (.-F nf) (aget ps i))))
+                    (case [\S] (aset (.-S fr) (aget ts i) (aget (.-S nf) (aget ps i))))
+                    (default (aset (.-R fr) (aget ts i) (aget (.-R nf) (aget ps i))))))
+                (when (!= bind nil)
+                  (bind fr))
+                (let [c (body fr)
+                      more true]
+                  (when (and (!= c 0) (!= c cont))
+                    (set! done true)
+                    (set! more false)
+                    (when (!= c brk)
+                      (set! pending c)))
+                  (aset (.-I nf) (aget rs 0) (B2I more)))
+                1))
+        (.Store (.-code yf) code)
+        (let [yc (addr (lit Closure :F yf))
+              arg (fn [^{:tag (* Frame)} cfr ^{:tag (* Frame)} nf] (aset (.-R nf) 0 yc))
+              (values nf m) (callValue fr (f fr) ft (lit (slice Setter) arg))]
+          (set! _ nf)
+          (.restore (.-Th fr) m))
+        (set! done true)
+        (set! exited true)
+        pending))))
+

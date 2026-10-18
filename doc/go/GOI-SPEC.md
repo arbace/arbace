@@ -2167,3 +2167,150 @@ to 905,216.
   `test/goi/essential.txt` (17 s with 8 jobs); (b) the whole check (37 s with 16 jobs, gc's
   references cached); (c) `--full` only. *Recommended: (a)*, GS12's subset; (b) costs little more
   and may replace it once GR4 grows the passing set.
+
+## As built: GR4 (2026-10-18)
+
+GR4, methods, interfaces and concurrency, is built on branch `goi-gr4` (from main `7fb90fc8`, which
+merges GR3, seed `910b4b8f`). Where building it found otherwise than this text, the text below is
+the record; proposals for the user are GC19-GC22.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| methods and interfaces at run time | `go/arbace/goi/method.ae` | method sets (`TSetMethods`), interfaces' methods (`TSetIfaceMethods`), dispatch with an inline cache per call site (`CallIface*`), compiled values' methods (`CompiledDispatch*`, `ErrorCall`), method values (`Bound`: `MethodValue`, `IfaceMethodValue`, `BoundCompiled`), type assertions and switches with gc's messages (`TypeAssertionError`), fmt's handling of proxies (`Proxy.Format`), the wrappers of `error` and `fmt.Stringer`, `CallProxy` and `RegisterWrapper` for the table's wrappers |
+| goroutines, channels, select, range over functions | `go/arbace/goi/chan.ae` | `GoStmt`, channel operations by reflect, `Select` by `reflect.Select`, `RangeChan`, `RangeFunc` (§4.10) |
+| descriptors | `go/arbace/goi/types.ae` | interned (amendment 3); wrappers in and out of Go memory (§5.3 rule 3) |
+| the builder | `arbace/go/build.ae` | methods and their receivers, promotion through embedded fields, method sets and their thunks, interface calls, method values and expressions, assertions, type switches, `go`, send, receive, `select`, `close`, `make` of channels, range over channels and functions |
+| the REPL's state | `arbace/go/repl.ae` | a cell per method `T.M` or `(*T).M` (gc's names), kept while its signature is, built on first call or eagerly as the functions |
+| program runs | `arbace/go/run.ae` | a directory test's packages loaded, checked and defined in dependency order, initialized in Go's order (amendment 12); assembly and `go:linkname` reported unsupported (§1.1) |
+| the table | `arbace/go/table.ae` | the wrappers of the listed interfaces (§6.4): 63 for linux/amd64 |
+| the check | `bin/goi check` | the directory tests (rundir, buildrundir, runindir: repr/go's corpus `linux-dirtest`), amendment 12 |
+| tests | `test/goi/run/go/t/{methods,ifaces,chans}.ae` | 13 programs in `bin/goi test` (GR3's 10 and these three, gc's outputs recorded) |
+
+**The check (§11, the GR4 exit criterion).** Over the 1,051 run programs of `$GOROOT/test` and the
+127 directory tests of `linux-dirtest`, recorded in `test/goi/check-linux-amd64.edn`:
+
+| result | programs (directory tests among them) |
+|---|---:|
+| pass | 832 (58) |
+| fail, error | 0 |
+| known (`test/goi/check-known.edn`, each with its reason) | 51 (2) |
+| unsupported: GR6's (generics) | 217 |
+| unsupported: an import neither listed nor interpreted (syscall, regexp, testing, runtime/trace, math/big, ...) | 30 |
+| unsupported: reflect's method lookups, not in the table (S39), and types the table does not hold | 17 |
+| unsupported: assembly, `go:linkname` (§1.1) | 9 |
+| unsupported: GR3's recursive types (its amendment 3) | 7 |
+| skipped: the action asks for gc's flags | 15 |
+
+Of the 280 programs GR3 left unsupported for GR4, 241 pass, 26 are known and 13 are unsupported
+for the reasons above (none GR4's); no program passing at GR3 regresses. The new known
+differences are by design: `runtime.Caller`, `Callers` and the traces of panics (7 programs), the
+collector's and the compiler's own behaviour (finalizers' timing, allocations, `uintptrescapes`,
+profiling: 10), an interpreter's speed beyond the check's 10 s (2: 41 s and 32 s), and what
+compiled `reflect` and the runtime see of interpreted types (§5.2, §5.3, G8: 9). The whole check
+takes 38-46 s with 16 jobs. The essential subset (`test/goi/essential.txt`, GC21) is 376 programs:
+the passing ones outside `fixedbugs/` (directory tests among them) and every fourth passing one of
+`fixedbugs/`, 23-30 s with 8 jobs on the shared machine.
+
+**Measurements.** GR3's figures are unchanged (`bin/goi run test/goi/run go.t.fib bench`, best of
+three, amd64, the machine shared): fib 22 2.46 ms, sumSq 1e6 19.9 ms, sieve 1e6 62 ms (GR3: 2.41-2.54,
+19.1-20.2, 66). The executable is 132,137,120 bytes against 130,883,744 built from main `7fb90fc8`
+(+1,253,376, 1.0%: the back end's new files and the table's wrappers).
+
+**Amendments (as built).**
+
+1. **Receivers** (§4.6): a method's receiver is laid after its parameters and results, so the
+   arguments of a call through an interface (§5.3) take the signature's slots whatever the
+   dynamic type's receiver kind; a static call writes the receiver last but evaluates it first.
+2. **Method sets** (§5.3): when a type goes into an interface (`iface-content`), and when it is an
+   assertion's or a type switch's target, the builder gives its descriptor its method set once
+   per build context: for each method of the set (go/types' lookup with the checker's objects) its
+   key (the name, `path.name` unexported), its function and the receiver's slot. The function is
+   the method's own cell when the receiver is the type itself, else a **thunk** the builder makes
+   from a checked tree of its own (a method of receiver D calling the method through its path of
+   embedded fields, pointers and embedded interfaces), built eagerly in program mode. Compiled
+   types never get one; an entry whose signature names a type the digest does not hold is left
+   out.
+3. **Descriptors are interned** (§5.2): one per type (composites by their parts' descriptors, named
+   types by path, name and generation, local types by a counter shared by every build), so that
+   type identity is descriptor identity across build contexts and packages (a proxy made in one
+   package, asserted in another).
+4. **Proxies** (§5.3 rule 2): a value of a type with methods goes into an interface as its proxy;
+   an unfaithful composite (`[]Celsius`) does not (GR3's representation: compiled `reflect` sees
+   its RT). The content of a proxy whose type has `Error() string` is its `error` wrapper, else with
+   `String() string` its `fmt.Stringer` wrapper (`contentOf`), so that compiled code given it as
+   an `any` sees an error or a Stringer (`fmt.Errorf`'s `%w`, `errors.Is`); every operation finds
+   the proxy through its wrapper (`proxyOf`).
+5. **Raw values** (GC20): runtime's and reflect's compiled functions are given a proxy's value
+   itself for their empty-interface parameters (`runtime.SetFinalizer`, `reflect.ValueOf`), and a
+   raw value of an interpreted faithful type with methods that compiled code gives back (a
+   `reflect.Value`'s `Interface`) is dispatched and asserted through the registry by its RT.
+6. **Interface calls** (§5.3): the content is evaluated into a temporary; a proxy calls its type's
+   entry (an inline cache keyed by the descriptor); any other content calls the compiled method:
+   the static compiled interface's method expression from the table, `error`'s `Error`, or for an
+   interpreted interface the table's method of the dynamic type, found by its reflect type among
+   the table's types (`Error` and `String` by the compiled interfaces when the type is not
+   listed). A value method called through a nil pointer panics with gc's panicwrap message.
+7. **Method values and expressions** (§4.6): `x.M` binds the receiver evaluated at once (a
+   `goi.Bound`, called as a closure, a real Go func in Go memory by `reflect.MakeFunc`); `T.M` and
+   `(*T).M` are thunks of the receiver first.
+8. **Assertions and type switches** (§5.3, §10.3): concrete targets compare descriptors (a proxy's)
+   or RTs (a faithful type's value); interface targets check the method set (keys and the
+   signatures' descriptors), compiled values by `reflect.Type.Implements` or the table; failures
+   are gc's `TypeAssertionError` messages (`interface conversion: interface {} is string, not
+   int`, `missing method M`, `(types from different packages)`). No inline cache per node yet.
+9. **Wrappers** (§6.4): the table generates one per listed interface whose methods it can write
+   (63 for linux/amd64), each method calling `goi.CallProxy` by reflect (GC22); `error` and
+   `fmt.Stringer`'s are goi's own. A proxy stored in Go memory of a compiled interface type is
+   wrapped, loaded back unwrapped (`toMem`, `fromMem`); a compiled call's arguments and results of
+   such types are converted (`MemR`, `FromMemR`).
+10. **Goroutines and channels** (§8): `GoStmt` evaluates the call as a deferred one is (its own
+    frame) and runs it on a new goroutine and goi thread; an uncaught panic is reported as gc's
+    and, in program mode, exits with status 2. Channels' operations, `close`, `len` and `cap` are
+    reflect's (Go's own rules and messages); the fast paths of §4.9 and §8.2 (S31) are not built:
+    the check needs no speed there. A deferred or `go` interface call evaluates its receiver at
+    once, nil a nil dereference as gc. A channel's frame value keeps its channel's type through a
+    conversion between channel types; it goes into an interface as its own type.
+11. **range over functions** (§4.10): the yield is a closure of goi whose code copies its
+    parameters into temporaries of the enclosing frame, binds the iteration's variables (new cells
+    each iteration) and runs the body there; a break, return or outer jump makes it return false
+    and is performed when the function returns; a call after that panics with gc's messages.
+12. **Directory tests** (§11.1, §11.2; GC19): `bin/goi run` of a directory test's main package
+    loads the packages of its directory by their import paths (`:local-imports`, module paths),
+    each checked and defined before its importers, and initializes them in Go's order (go1.21: the
+    first package by import path whose imports are initialized). The check compares goi's
+    standard output and error combined, and status 0, with the test's golden `.out` (empty when
+    there is none), as Go's test driver does, rather than with gc's run of the printed forms
+    (repr/go's round trip at its level `run` checks that they give it).
+13. **`recover`** (§4.7): a deferred call of `recover` itself recovers the panic its deferring
+    function runs in (that function a deferred call), unless that function's own deferred calls
+    run for a panic not yet recovered, as gc (`recover1.go`).
+14. **Fixes of GR3's core found by the check**: the checker took `(switch false ...)` for a tagless
+    switch (`code_stmt.ae`); range targets that are places (`x[i]`) are assigned as one assignment
+    (their operands first, §4.5); `==` of structs with blank fields compares the others; a
+    conversion between function types keeps the closure; `[0]T(s)` of a nil slice; gc's
+    `makeslice` and `growslice` messages for sizes beyond its largest allocation; the main
+    package's names in RTs have gc's path `main`; `bin/goi`'s reports no longer end the script at
+    their first `head` (pipefail).
+
+**Proposals for the user** (each built as recommended):
+
+- **GC19 The directory tests' reference.** (a) as built, the golden output (the driver's own
+  criterion), the round trip having checked the printed forms against it; (b) gc's run of the
+  printed forms packaged as the driver does (gocmp's `-dirtest` layout), as for single-file
+  programs. *Recommended: (a)*: no second build of 127 tests, and the same verdict where the round
+  trip passes.
+- **GC20 What compiled code sees of an interpreted value with methods.** (a) as built, its proxy
+  (fmt honours its methods; `%T` and `reflect` see the proxy, but runtime's and reflect's
+  functions get the value itself, amendment 5); (b) the value itself everywhere (reflect exact,
+  fmt's `Stringer` and `error` of interpreted types lost). *Recommended: (a)*: the check's programs
+  print their errors and Stringers far more often than they reflect on them (9 known against
+  dozens passing by fmt).
+- **GC21 The essential subset.** (a) as built, 376 programs (every fourth passing `fixedbugs/`
+  program, the directory tests in), about 25 s; (b) GR3's rule, every third, 426 programs, about 30
+  s; (c) the whole check, 38-46 s with 16 jobs. *Recommended: (a)*.
+- **GC22 The wrappers' calls.** (a) as built, each wrapper method calls the interpreted method by
+  reflect (`CallProxy`: simple, about a microsecond a call, enough for `sort.Interface` and
+  `io.Reader` in the check); (b) typed adapters per signature, as §6.4's invokers (GR5's adapters).
+  *Recommended: (a)* until GR5 measures them.

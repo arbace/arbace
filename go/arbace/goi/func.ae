@@ -307,6 +307,16 @@ arguments written by args into a frame of the signature's layout, its results in
           (range [_ a args] (a fr nf))
           (run code nf)
           (return)))
+      (case [(* Bound)]
+        (when (!= (.-M c) nil)
+          (let [fn (.-Fn (.-M c))
+                code (.Code fn)]
+            (set! nf (.enter th code fn))
+            (set! (.-rec nf) (.-passRec fr))
+            (range [_ a args] (a fr nf))
+            (.setRecvOf c nf)
+            (run code nf)
+            (return))))
       (case [nil]
         (nilFunc)))
     ;; a compiled Go func: its arguments in a frame of the signature's layout, reflect's call
@@ -326,6 +336,11 @@ arguments written by args into a frame of the signature's layout, its results in
             (aset in i (.valueOf (aget (.-Ins ft) i) (aget (.-R nf) s)))
             (aset in i (slotValue nf (aget (.-Ins ft) i) s))))
         (let [^{:tag (slice reflect/Value)} out nil]
+          ;; a compiled method value: its method expression, the receiver first
+          (let [(values b ok) (assert (* Bound) f)]
+            (when ok
+              (set! fv (reflect/ValueOf (.-Gofn b)))
+              (set! in (append (lit (slice reflect/Value) (reflect/ValueOf (.-Recv b))) (spread in)))))
           (if (.-Variadic ft)
             (set! out (.CallSlice fv in))
             (set! out (.Call fv in)))
@@ -447,7 +462,9 @@ n), the call made by unwind (§4.7).\n"
   (fn ^Ctl [^{:tag (* Frame)} fr]
     (let [mini (addr (lit Frame :Th (.-Th fr) :Fn (.-Fn fr)
                           :I (make (slice int64) ni) :F (make (slice float64) nf)
-                          :S (make (slice string) ns) :R (make (slice any) nr)))]
+                          :S (make (slice string) ns) :R (make (slice any) nr)
+                          ;; the deferring frame's panic: a deferred recover() recovers it (DeferredRecover)
+                          :rec (.-rec fr)))]
       (range [_ a args] (a fr mini))
       (set! (.-defers fr) (append (.-defers fr) (lit deferred mini call)))
       0)))
@@ -502,6 +519,17 @@ that panics replaces the panic in progress. A panic not recovered goes on.\n"
         (return nil))
       (set! (.-recovered ps) true)
       (.-val ps))))
+
+(go/func DeferredRecover
+  "DeferredRecover is (defer (recover)) run: as gc, it recovers the panic its deferring function
+(itself a deferred call) runs in, unless that function's own deferred calls run for a panic not
+yet recovered.\n"
+  ^R []
+  (let [r (Recover)]
+    (fn ^any [^{:tag (* Frame)} fr]
+      (when (and (!= (.-passRec fr) nil) (!= (.-val (.-passRec fr)) nil) (not (.-recovered (.-passRec fr))))
+        (return nil))
+      (r fr))))
 
 (go/func Panic "Panic is (panic v): Go's panic (G12).\n" ^Stmt [^R v]
   (fn ^Ctl [^{:tag (* Frame)} fr]
@@ -580,7 +608,13 @@ deferred calls run (S12); in program mode the process exits, as gc's.\n"
             (set! name (.String d))))
         (print "(" name ") " (efaceData v))))))
 
-(go/func panicArg "panicArg is gc's preprintpanics of v: an error's Error(), a Stringer's String().\n" ^any [^any v]
+(go/func panicArg "panicArg is gc's preprintpanics of v: an error's Error(), a Stringer's String() (a proxy's interpreted ones).\n" ^any [^any v]
+  (let [(values p ok) (proxyOf v)]
+    (when ok
+      (cond
+        (stringSig (aget (.-Methods (.-T p)) "Error")) (return (callString p "Error"))
+        (stringSig (aget (.-Methods (.-T p)) "String")) (return (callString p "String")))
+      (return p)))
   (type-switch [x v]
     (case [error] (return (.Error x)))
     (case [fmt/Stringer] (return (.String x))))
