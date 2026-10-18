@@ -1382,3 +1382,64 @@ unused imports allowed at the REPL, the three added table packages, the 266-prog
 the essential gate. HR21-HR24 as built; HR25 (the `.hsc` positions applied to the alex output
 `Distribution.Fields.Lexer`) is a follow-up for when an agent is free. RR-P6-RR-P8 as built:
 the spec stands amended by "As built: RR3". KS15 stays open until KU3 resumes.
+
+## 2026-10-18: the seed remade (F6, GR3)
+
+The seed was remade from the fixpoint at `9879a1ba` (F6 and goi GR3 merged). `bin/arbace-go
+--fixpoint` gave G1 = G2 = G3. `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed
+--make` packed G3 as `ed8a4720…` (9,325,560 bytes, 1,854 files), committed as `6af404df`.
+`bin/seed --verify` printed it again from its own stage 0 and gave the same tree and archive,
+with stage 0 = G1 = G2 = G3 (`2a814316…`, 130,883,744 bytes), in 867 s.
+
+A first packing without `ARBACE_SEED_GO_BUILD` took the plain build (`target/arbace-go`), so
+SEED.edn's `:printed-by` named `bin/arbace-go --build`, and `--verify` failed on that one line.
+That packing was never pushed: it was repacked from G3 and the commit amended. A re-seed must
+set the variable, as the earlier ones did.
+
+## 2026-10-18: repr/rust RR4 merged
+
+RR4 (doc/rust/SPEC.md §12.7, "As built: RR4"; doc/rust/RUST-NOTES.md, "RR4"; branch
+`repr-rust-rr4`, `5812f47e`): RR4 adds three corpora. The rest of `library/` (74 crates, 1,902
+files) and the compiler (82 crates, 2,167 files) come from the pinned rust-src apk. A crate set
+(402 crates, 8,254 files) takes the newest version of each crate in the host's Cargo cache,
+editions 2015-2021. Each `.crate` is pinned by SHA-256 (`test/rust/crates-2026-10-18.sha256`;
+all 402 matched crates.io's index checksums), with the dependency graph pinned by
+`test/rust/crates-2026-10-18.lock` (459 packages). Cargo reads them from a local directory, so
+nothing depends on the host's Cargo state. RR4 also adds `print --layout pretty`: one item,
+statement, arm or field per line, with lines over 100 columns broken at their first delimited
+group.
+
+`bin/repr-rust roundtrip --iface --text --pretty all` (52 minutes) gave equal results:
+- std's 1,074 files at every level, and 5 of 5 interfaces, unchanged from RR1-RR3;
+- the rest of `library/`: 1,902 files at every level, 46 of 46 interfaces;
+- the compiler: 2,167 files at every level, 66 of 66 interfaces;
+- the crate set: 8,253 of 8,254 files at every level, and 394 of 395 interfaces.
+
+The two known differences:
+- `erased-serde`'s `src/features_check/error.rs` is one string literal, which rustc's parser
+  rejects on its own;
+- `nom`'s interface differs on attribute spacing in derived impls.
+
+The crates without an interface are listed in the corpus files with their reasons: proc macros,
+missing dependencies, yanked crates, `openssl-sys` and its dependents (no OpenSSL), and
+`rustc_expand` (rustdoc's E0275).
+
+Other changes: two crash fixes in `tools/rsdump` and about fifteen fixes to the converter and
+printer. The helper now runs once per edition, and dumps are pruned after conversion (scratch
+peaked at about 10 GB). `bin/gate --full`'s step is `roundtrip --iface --text --pretty
+${REPR_RUST_CORPORA:-} && test`: std only, about 3 minutes; `REPR_RUST_CORPORA=all` adds about
+40. The essential gate passed on the branch. The merge conflicted only in CLAUDE.md and the
+Makefile, and after it `bin/repr-rust test` passed, on its second run. The first run's failure
+was stage 0's build messages, written into the reader samples' output when the seed had changed.
+
+Open proposals, built as recommended:
+- RR-P9: the namespace rule amended, since it gave 11 pairs of files one namespace in the new
+  corpora. `src/mod.rs` keeps `mod`; `src/main.rs` keeps `main` beside a `src/lib.rs`;
+  `build.rs` becomes `build_script_build`; a nested package goes under its parent crate's
+  namespace.
+- RR-P10: the new corpora opt-in at the gate.
+- RR-P11: the pretty layout is consistent breaking judged by trees, not rustc's
+  `-Zunpretty=normal` byte for byte.
+- RR-P12: the crate set documented without default features.
+
+Slips: one /dev/null redirect and one `pgrep -f` in a wait loop, both harmless.
