@@ -361,3 +361,8 @@ differs. `bin/repr-rust roundtrip --iface && bin/repr-rust test`, the step `repr
   items, 53,176 spans in attributes' texts removed; its ten runs took 18 s on their own).
   *Recommended: (a)*: the tree level already compares every item of every file, and the
   interface level checks what other crates see; (b) is a flag away if wanted.
+
+## Decided (2026-10-18, the user): RR-P4, RR-P5
+
+As built: spans written inside attribute texts blanked by the interface level's normalization
+(RR-P4, SPEC §11.3 amended); public items only (RR-P5).

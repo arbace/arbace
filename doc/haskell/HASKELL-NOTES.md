@@ -832,3 +832,9 @@ macros, `:extract`, `:configure`, `:generated-files` and the `:hsc-flags`' heade
   minutes); (b) a split: R1's four packages in `--full`, the rest by hand or weekly (a
   `--packages` selection). *Recommended: (a)* while under about 15 minutes.
 
+
+## Decided (2026-10-18, the user): HR17-HR20
+
+As built: `libraries/` only (HR17); `:hs/file` for nodes in other files, the 12 such modules not
+covered by `:full` (HR18); packages configured by Cabal's view plus hadrian's flags (HR19); the
+whole corpus in `bin/gate --full`, about 10 minutes (HR20).

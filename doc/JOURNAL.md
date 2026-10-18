@@ -1093,3 +1093,43 @@ re-seed after goi's GR1 and the j2g fix, one for both; `repr/clojure print` (Arb
 a text round trip) and `repr/java`'s `:full` read mode (comments, layout and Java's type arguments
 recorded, so Java prints back byte for byte and the 39 rejected JDK files compile) both next,
 as agent slots free.
+
+## 2026-10-18: five branches merged (the j2g fix, KU2, GR1, RR2, R5)
+
+- The j2g nondeterminism (branch `j2g-flake`, `26b82df`; doc/FUTAMURA-SURVEY.md, F2.2's entry):
+  five causes in the second round's parallel analysis, all fixed by construction: the tasks
+  sharing the unit's order (an anonymous class taken mid-declaration); `arbace.classes.lower`'s
+  names from one counter (now `RT/nextID`, the thread's id space); a class's Clojure constants in
+  a map iterated in hash order (now a vector in the order made, `:clj-consts`); a holder of
+  member classes analyzed beside its members (tasks now grouped by height in the nest);
+  `arbace.classes.native` loaded on first use by racing tasks (now required before them). 29
+  runs over diffcheck's tree, at default jobs, `J2G_JOBS` 1, 2 and 32, and two at a time, gave
+  one hash; diffcheck, the gate and the fixpoint passed. The shipped program's translation does
+  not change (its second round declares no classes). The agent once used `pgrep -f`
+  read-only.
+- KU2 (branch `ku2`, `ee9bf13`; PROCESS-SPEC.md, "As built: KU2"): the kernel's call handler
+  (validate, policy, serve, refuse or forward with the buffers translated), stdout and stderr
+  captured, the console grant (KS14), a window pool, `RunSelf`; PCID entry no longer flushing
+  every time; the demo guest booted with `BOX_KERNEL=1` runs itself at ring 3 and gives, over
+  five sessions, the same bytes, exit codes and host logs as a guest. Measured: a bare SYSCALL
+  round trip 24 ns, a call back to the same process as built 444 ns (CR3 120 ns, the FPU swap 240
+  ns), a forwarded call 16-21 µs; a process starts in 0.09-0.15 ms from the window pool
+  (17-72 ms with a fresh 64 MiB window), its main at about 1.4 ms (a guest 10-40 ms); 12.4 MB
+  private resident. KS13 (a) kept and KS14 (a), the user.
+- goi's GR1 (branch `goi-gr1`, `b2a7542`; GOI-SPEC.md, "As built: GR1"): the table of 41 listed
+  packages for the four configurations (`go/arbace/gotable.edn`, `arbace.go.table` on the
+  checker's declaration layer since GC14), the GoValue protocol in jrt and `arbace.lang`, goi's
+  call path, `arbace.go`'s namespaces made on demand; 289 calls into 31 packages pass; the
+  executable 104.8 → 108.8 MB (the table 3.5 MB, its invokers 864 KB for signatures shared by 2
+  or more, GS4's threshold; reflect's method iterators excluded, else the table cost 21.5 MB).
+  The embed exclusions: the checker and the table's generator out, `arbace.go` in. GC10-GC14 as
+  decided. The agent once redirected a diff's output to /dev/null.
+- repr/rust RR2 (branch `repr-rust-rr2`, `f3b2736`; RUST-NOTES's RR2): rustdoc's JSON of the five
+  crates, originals against printed files, equal for all (79,371 items) once spans are removed,
+  including the 50,757 written inside attribute texts (RR-P4); public items (RR-P5).
+- repr/haskell R5 (branch `repr-haskell-r5`, `4562f5d`; HASKELL-NOTES's R5): the other 37 packages
+  of the tarball's `libraries/` (1,226 modules over 41 packages): tree and interface levels
+  1,226 of 1,226 in both layouts, text 1,214 (the 3 CTypes.h modules and 12 whose nodes come from
+  other files), with fixes the corpus exposed; `bin/gate --full`'s step about 10 minutes.
+  HR17-HR20 as built (the user). Its gate had failed only in diffcheck, by the j2g
+  nondeterminism now fixed.

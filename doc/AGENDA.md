@@ -102,7 +102,8 @@ The current state of the work. This file is rewritten as things change. For the 
   Arbace's own interpreter of Go forms (a type checker in Arbace, typed closures, a table of the
   program's compiled packages), milestones GR0-GR6, 22-33 days; proposals G1-G17 open; the build
   after F3, F4 and the renames. G1-G17 decided as recommended (2026-10-17); GR0 done (doc/go/GOI-SPEC.md,
-  GS1-GS15 decided as recommended); GR1-GR6 after the coming re-seed, 24-34 days.
+  GS1-GS15 decided as recommended); GR1 and GR2 done (the compiled-packages table,
+  GoValue; the checker); next GR3-GR6.
 
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),
@@ -114,9 +115,8 @@ The current state of the work. This file is rewritten as things change. For the 
 - `repr/haskell`'s spec written (doc/haskell/SPEC.md; S1-S36; HS1-HS12 decided as recommended).
   R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
   modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); R3 done (`:full`, the
-  text level, 483 of 483 byte for byte; HR9-HR13); R4 done (the layout printer, 483
-  of 483 at the tree and interface levels; HR14-HR16); next R5-R6 (the other boot libraries,
-  .hsc/.lhs/boot files). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
+  text level, 483 of 483 byte for byte; HR9-HR13); R4 and R5 done (the layout
+  printer; the other boot libraries: 1,226 modules, HR14-HR20); next R6 (.hsc, .lhs, boot files). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
   JP1-JP4); running: (Java forms → Java,
   with a round trip; branch `repr-java-print`).
 - Done (2026-10-17): repr/java print. Formerly planned: after the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
@@ -136,8 +136,8 @@ The current state of the work. This file is rewritten as things change. For the 
 - `repr/rust`: the survey written (doc/REPR-RUST-SURVEY.md, 2026-10-17; ../rust-lisp as prior
   art): recommended a bridge only, rust-lisp's grammar respelled, a helper on the host's rustc
   with its `rustc-dev` pinned; RS1-RS17 decided; its spec written (doc/rust/SPEC.md, RSS1-RSS10 decided as
-  recommended); RR1 done (the tree and lines levels over std's five crates, 1,074 of 1,074;
-  RR-P1-RR-P3); next RR2-RR6.
+  recommended); RR1 and RR2 done (the tree and lines levels, 1,074 of 1,074; the interface level,
+  5 of 5 crates); next RR3-RR6.
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
@@ -160,8 +160,9 @@ The current state of the work. This file is rewritten as things change. For the 
   process), language isolation inside processes, S7's guests where virtualization exists, one
   spawn request; SYSCALL round trip 24.5 ns measured at ring 3; plan KU0-KU6, 17-27 days;
   K1-K12 decided as recommended; KU0 done (doc/go/PROCESS-SPEC.md; KS1-KS12 decided as
-  recommended); KU1 done (amd64 processes at ring 3; KS13 (a)); next KU2-KU6. To watch: a
-  diffcheck failure seen once (j2g build error in `jf_cfcorpus_c50`), not reproduced.
+  recommended); KU1 and KU2 done (amd64 processes at ring 3, a process on the user board equal to
+  a guest byte for byte; KS13 (a), KS14 (a)); next KU3-KU6. The diffcheck flakes' cause, j2g's
+  second round, fixed (2026-10-18).
 - The mapped start measured without nested KVM.
 - A note from the user (2026-10-13): the tooling of the Mac GUI app Moshi Go may be useful for
   Arbace, to study when Arbace's REPL gets a user interface beyond the terminal. Its build info

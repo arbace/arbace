@@ -1096,3 +1096,7 @@ no KPTI-like split (KS7); spawn's `:where :auto`, with a guest-only switch while
 **Decided (2026-10-17, the user):** KS13 (a): CR3 written on every crossing (one image puts a
 process's data at the kernel's addresses; with PCIDs the TLB is kept), decided again with KU2's
 numbers.
+
+**Decided (2026-10-18, the user), with KU2's numbers:** KS13 (a) again: the CR3 write on every
+crossing kept (about 120 ns of a 444 ns call back to the same process; the FPU swap's 240 ns the
+bigger lever, recorded, not built); KS14 (a): the console grant as built.
