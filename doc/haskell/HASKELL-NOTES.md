@@ -7,7 +7,9 @@ its `ghc` library `ghc-9.14.1-f453`) and stage 0 of that commit. R2, the interfa
 the same day (branch `repr-haskell-r2`, from main at `f515a959`; "R2" below), and R3, mode `:full`
 and the text level, too (branch `repr-haskell-r3`, from main at `73e35434`; "R3" below), and R4,
 the layout printer, too (branch `repr-haskell-r4`, from main at `80530da7`; "R4" below), and R5,
-the other boot libraries, too (branch `repr-haskell-r5`, from main at `10c7b293`; "R5" below).
+the other boot libraries, too (branch `repr-haskell-r5`, from main at `10c7b293`; "R5" below). R6,
+the `.hsc` modules, the literate modules, the boot files and signatures, was built on 2026-10-18
+(branch `repr-haskell-r6`, from main at `80294e9a`; "R6" below).
 
 ## Decided (2026-10-17, the user)
 
@@ -838,3 +840,178 @@ macros, `:extract`, `:configure`, `:generated-files` and the `:hsc-flags`' heade
 As built: `libraries/` only (HR17); `:hs/file` for nodes in other files, the 12 such modules not
 covered by `:full` (HR18); packages configured by Cabal's view plus hadrian's flags (HR19); the
 whole corpus in `bin/gate --full`, about 10 minutes (HR20).
+
+## R6: `.hsc` modules, literate modules, boot files and signatures
+
+Built on 2026-10-18 (branch `repr-haskell-r6`, from main at `80294e9a`), on the same GHC (and its
+`hsc2hs` 0.68.10, which Alpine's `ghc-9.14.1-r2` ships) and the stage 0 of that commit. SPEC
+§10.1 (R6: "`.hsc` (hsc2hs), `.lhs` (unlit), boot files and signatures in the corpus", judged at
+all the levels) and HS5 define it; §10.9 records what the build changes in the spec.
+
+### What was built
+
+| part | file | what |
+|---|---|---|
+| helper | `tools/hsdump/HsDump.hs` (version 3: `withHsc`, `physOf`, `literateTokens`; `parseOne`, `parseText`, `moduleView`, `headerOptions`) | an `.hsc` through `hsc2hs` (`--hsc2hs-arg`, `--repo`), `:hsc2hs`; a literate module through GHC's driver (unlit), `:unlit`; a signature by `parseSignature`; mode `:full`'s positions of an `.hsc` module and the literate text as comments; a header pragma's file |
+| converter | `arbace/repr/haskell/convert.ae` (`module-kind`, `module-name`, `convert-module`) | `:kind :boot`/`:sig`, namespaces `hs.M.boot`, `hs.M.sig`; `:hsc2hs`, `:unlit`; `:hs/module-file`; an `.hsc` module's pragmas and header documentation with their file; a module without a header |
+| writer | `arbace/repr/haskell/write.ae` (`write-form`) | a vector on the line of a form placed after its line gets its line |
+| printer | `arbace/repr/haskell/print.ae` (`bird-tracks`, `print-module`, `print-body!`) | `signature`; bird tracks; the text ending in `:hs/module-file`; the header forms' files in the forms' order |
+| command | `bin/repr-haskell` (`corpus_plan ... all`, `dump_corpus`, `tree_jobs`, `iface_plan`, `iface_level`), `bin/lib/repr-haskell/tree-job`; `arbace/repr/haskell.ae` (`corpus-modules`) | every module of the corpus at every level; a boot file's `.hi-boot`, a Main module's file as `ghc --make`'s target |
+| corpus | `test/haskell/corpus-ghc-9.14.1.edn` | the four `PKG-Setup` entries; `:hsc` and `:boot` converted |
+| known differences | `test/haskell/roundtrip-ghc-9.14.1-text-known.edn` | 3 `.hsc` modules at the tree of mode `:full` (below) |
+| cases | `test/haskell/r6/` (`Str.hsig`, `Boot.hs-boot` with `Boot.hs` and `User.hs`, `Bird.lhs`, `Latex.lhs`, `Codes.hsc`), `bin/repr-haskell test`'s step 8 | every level of each kind, the signature's and the boot file's interfaces |
+
+### The corpus
+
+R5's corpus left 64 `.hsc` modules of its packages and one boot file (`filepath`'s
+`System.OsPath`), and R1's 26 `.hsc` modules of `base` and `ghc-internal` and 24 boot files of
+`ghc-internal`, which the interface level compiled on both sides unconverted. R6 converts them:
+the corpus file's `:hsc` and `:boot` lists, and `bin/repr-haskell corpus list` lists them as
+before. The tarball's `libraries/` has literate files only in `Setup.lhs` scripts (`binary`,
+`exceptions`, `terminfo`, `text`) and in tests and examples (`base`'s and `time`'s tests, `Win32`'s
+example, 3 in `Cabal`'s `cabal-testsuite`), and signatures only in `cabal-testsuite` (21 `.hsig`
+files, not a library's). The four Setup scripts are entries `PKG-Setup` (HR21): the package's directory, Main
+modules (`hs.main.Setup` under the package's forms), parsed under GHC's default language and
+compiled at the interface level as cabal-install compiles a Setup script (`ghc --make Setup.lhs`,
+`-package Cabal`); the signature is a case of the test (`test/haskell/r6/Str.hsig`).
+
+| kind | modules | of them through CPP | located nodes | bytes |
+|---|---|---|---|---|
+| `.hsc` (through hsc2hs) | 90 (ghc-internal 22, base 4, unix 48, ghc-heap 5, directory 3, ghci 3, haskeline 2, time, process, hpc 1) | 28 | 91,077 | 638,473 (the outputs) |
+| boot files | 25 | 1 | 1,808 | 15,355 |
+| literate (`Setup.lhs`) | 4 | 0 | 59 | 395 |
+| R6 total | 119 | 29 | 92,944 | 654,223 |
+
+### `.hsc` modules (HR22, HR23)
+
+- **The run.** The helper, given `X.hsc`, runs `hsc2hs ARG... X.hsc -o TMP` (the package's
+  `:hsc-flags`, passed as `--hsc2hs-arg`, the interface level's since R2), renames the output to
+  `X.hs` beside the `.hsc` in the extracted corpus (where a Cabal build's `dist` would have it; a
+  temporary name first, so that a concurrent reader sees a whole file) and parses `X.hs` as any
+  module, with CPP when on (28). Its outputs are named after `X.hs` (the dump `X.hs.edn`, the
+  trees `X.hs.tree`), the forms' `:file` is `X.hs`, and the printed module is `X.hs`, which the
+  interface level puts in place of hsc2hs's output. `:hsc2hs` records the run: the command with
+  `$libdir` and `$repo` for the paths, hsc2hs's version, the `.hsc`, the SHA-256 of the `.hsc` and
+  of the output; the C headers hsc2hs's program includes are not recorded (hsc2hs gives no list of
+  them, as CPP's line markers do).
+- **Mode `:lines`.** hsc2hs's first line is `{-# LINE 1 "X.hsc" #-}`, and its later pragmas put
+  each part of the output at its `.hsc` lines (1,933 pragmas in the 90 outputs), so that GHC's
+  positions are the `.hsc`'s: every node is another file's for R5's mechanism (`:hs/file`, HR18),
+  and the printer writes the pragmas back. Three things R5's twelve modules did not need: GHC's
+  span of the module is in the `.hsc` (its text ends there), which `:hs/module-file` on `hs/module`
+  records and the printer follows (the text ends in that file, no pragma back to `X.hs`); a header
+  pragma before the first `{-# LINE #-}` (hsc2hs writes `{-# OPTIONS_GHC -optc-DPROFILING #-}`
+  for a `#define`, `GHC.Internal.Stack.ConstantsProf` and `Heap.InfoTableProf`) is in `X.hs` and
+  the ones after it in the `.hsc`, so an `.hsc` module's pragmas carry their file (the helper's
+  `hsdump/pragmas` entry names a file other than the module's, the converter keeps it for `.hsc`
+  modules only); the module's documentation before a later pragma in the forms takes the file of
+  the form before it in the forms' order (`GHC.Internal.ExecutionStack.Internal`). And a writer's
+  rule: a vector on the file's line inside a form placed after its line (the module header after
+  that pragma, `GHC.Internal.Heap.InfoTableProf`'s export list) gets its line, which the reader
+  does not give a vector; no other module's text changes.
+- **Mode `:full`.** The positions GHC gives repeat where an expanded construct makes more lines
+  than it takes: `#{enum T, C, a = A, b = B ...}` is one line per constant and its two lines per
+  constant, and the pragma after it goes back, so that in `GHC.Internal.Event.EPoll` the doc comment
+  after `#{enum EventType ...}` and `epollOneShot :: EventType` are both at the `.hsc`'s line 177
+  (3 lines in 2 modules, `EPoll` and `Poll`). The full layout puts each token at its position, so
+  the positions of mode `:full` are the places in the module's own text: GHC's lexer's raw token
+  stream (`lexTokenStream`, which returns a `{-# LINE #-}` pragma as a token instead of following
+  it) has them, the pragmas are comments of the text, and a span gets the places of the tokens whose
+  GHC positions its start and end are (else the places the pragmas give that line), the nearest
+  pair. The forms then hold every position GHC gives through the pragmas, and the printed text is
+  the output byte for byte; a CPP module's module view keeps the pragmas as text. The test's
+  `Codes.hsc` makes positions repeat on a code line.
+- **Known differences.** Three outputs keep a CPP directive hsc2hs passes on (`unix`'s
+  `System.Posix.Directory.Common`'s `#include "HsUnixConfig.h"`, an `#if` in `ghc-internal`'s
+  `GHC.Internal.System.Environment.ExecutablePath` and `process`'s
+  `System.Process.CommunicationHandle.Internal`): after the directive CPP's line markers name the
+  output's own lines, so GHC's positions there are `X.hs`'s, whereas the module view (SPEC §2.8,
+  S5) has no directive and stays in the `.hsc`. Their texts are byte-identical, their trees of mode
+  `:lines` equal; the trees of mode `:full` differ, as the `CTypes.h` modules' (HR12).
+
+### Literate modules (HR24)
+
+GHC's driver runs unlit on a literate module before CPP (`preprocess`); the helper now preprocesses
+a literate module through it with CPP off too, and records `:unlit true`. unlit writes a code line
+with its bird track's `>` as a space and every other line blank (with a `#line 1` marker), so the
+positions are the `.lhs`'s. Mode `:full`'s text is the `.lhs` itself: the helper adds to the tokens,
+as comments, each line unlit leaves blank that is not (prose, `\begin{code}`, `\end{code}`, a `#!`
+line) and each bird track's `>`, and the printer's full layout writes them back. The braces and the
+layout layouts write a literate module with bird tracks, `>` before every line that is not blank:
+the columns one further, the same for every line, so that the layout's relations hold (the module's
+items at column 2, unlit's output of the printed module).
+
+### Boot files and signatures
+
+GHC parses a boot file as a module (`parseModule`; the source's kind is the driver's) and a
+signature by `parseSignature` (`signature M where`), which the helper now uses for `.hsig`. The
+forms' `hs/module` has `:kind :boot` or `:kind :sig` (SPEC §2.4), the namespace `.boot` or `.sig`
+(§2.1), from the file's extension; the printer writes a signature's header with `signature`. The
+interface level compares a boot file's `M.hi-boot` (`ghc --make` writes it beside `M.hi`), the
+printed `.hs-boot` in the original's place, named `M@boot` in the comparison. A signature compiles
+only as part of an indefinite unit: the test compiles `Str.hsig` with `-this-unit-id p
+-this-component-id p -instantiated-with Str=<Str>` (`-fno-code -fwrite-interface`) and compares its
+`.hi` (`interface Str [hsig]`).
+
+### Results
+
+`bin/repr-haskell roundtrip --iface --text --layout` over the corpus:
+
+| level | R1-R5 | R6 | total |
+|---|---|---|---|
+| tree (trees and lines), the braces layout | 1,226 | 119 | 1,345 (73,722 forms, 2,078,725 located nodes) |
+| tree, the layout layout | 1,226 | 119 | 1,345 |
+| interface (mode `:lines`), both layouts | 1,226 | 119 | 1,345 (3,701,019 lines of `--show-iface` text) |
+| text, byte-identical | 1,214 | 119 | 1,333 (11,703,634 bytes) |
+| text, trees and lines of mode `:full` equal | 1,211 | 116 | 1,327 |
+
+No known differences at the tree and interface levels; the text level's 18: R3's three `CTypes.h`
+modules, R5's twelve, R6's three `.hsc` modules. R1-R5's results are R5's, and their forms (modes
+`:lines` and `:full`) and printed modules (the braces, the layout and the full layouts) are byte
+for byte those of main's converter and printer at `80294e9a` (the corpus's 1,226 compared).
+`bin/repr-haskell test`'s step 8: R6's five cases equal at the tree level in both layouts, printed
+back byte for byte with equal trees of mode `:full`, and compiled to equal interfaces (the
+signature's `.hi`, `Boot`'s `.hi-boot`, the literate and the `.hsc` modules').
+
+Times on this host (64 cores, shared, through the slot for heavy commands): the tree level about
+a minute (dumps 15 s, conversion 13 s, printing 7 s, parses 22 s), the layout layout's 20 s; the
+interface level about 3.5 minutes (compiling 145 s); the text level about 2 minutes (dumps 23 s,
+conversion 48 s, printing 11 s, parses 36 s). The gate step (`roundtrip --iface --text --layout &&
+test`) took 542 s, about 9 minutes (R5's 585 s for 1,226 modules); the test 37 s.
+
+### Checks and how to reproduce
+
+```sh
+bin/repr-haskell corpus fetch        # the tarball's packages (the Setup scripts are in them)
+bin/repr-haskell roundtrip --iface --text --layout
+bin/repr-haskell test                # step 8: test/haskell/r6/
+```
+
+### Choices for the user (HR21-HR25; built as recommended)
+
+- **HR21 The literate modules of the corpus.** (a) As built: the four `Setup.lhs` scripts of
+  `libraries/` as entries `PKG-Setup`, Main modules compiled against the installed `Cabal`, and
+  the signature (none in `libraries/`) a test case; (b) no literate module in the corpus (the
+  Setup scripts are not library modules), `.lhs` and `.hsig` judged by the test's cases only; (c)
+  also `cabal-testsuite`'s 21 signatures and 3 `.lhs` (test packages of their own, Backpack's
+  instantiation at the interface level). *Recommended: (a)*: the corpus then has every kind of
+  file `libraries/` has, and the scripts cost a second.
+- **HR22 `.hsc` as built.** (a) The helper runs `hsc2hs` (the output beside the `.hsc` in the
+  extracted corpus), the module is its output (`:file X.hs`), `:hsc2hs` records the run beside
+  `:cpp`; (b) SPEC §8.5's words: the corpus step runs `hsc2hs`, the record inside `:cpp`.
+  *Recommended: (a)*: the conversion is then one helper run for every kind, and `:cpp` keeps its
+  meaning (an output that CPP preprocesses again has both).
+- **HR23 Mode `:full`'s positions of an `.hsc` module.** (a) As built: the places in the output's
+  text, its `{-# LINE #-}` pragmas comments, the text level against the output; (b) GHC's positions,
+  the module view of the `.hsc`'s lines as for CPP: the positions that repeat (2 modules) cannot be
+  laid out, and the printed text would not be what GHC compiles. *Recommended: (a).*
+- **HR24 Printing a literate module.** (a) As built: bird tracks in the braces and the layout
+  layouts (`>` before every line that is not blank), the literate text as comments in mode `:full`;
+  (b) `\begin{code}` blocks (lines added, so `{-# LINE #-}` pragmas); (c) a plain `.hs` with
+  `{-# LINE 1 "X.lhs" #-}` (another file name than the original's at the interface level).
+  *Recommended: (a).*
+- **HR25 R5's alex output in mode `:full`.** `Cabal-syntax`'s `Distribution.Fields.Lexer` is a known
+  difference of the text level since R5 (its `{-# LINE #-}` pragmas name `Lexer.x`): HR23's
+  positions would convert it in mode `:full` too. (a) Keep R5's result (as built; R6 changes no
+  R1-R5 result); (b) mode `:full`'s places for every module whose text has `{-# LINE #-}` pragmas,
+  the known difference then expected to go. *Recommended: (b)*, as a follow-up, with its own run.

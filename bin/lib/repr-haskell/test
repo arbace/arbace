@@ -26,7 +26,17 @@
 #      own line, a GADT's forall on a later line, documentation before the LANGUAGE pragma) and
 #      Incl.hs (its text another file's, Incl/Body.hs, a CPP inclusion, then its own again)
 #      converted, printed in the braces and the layout layouts, parsed by GHC to the same trees
-#      and lines; Incl's forms name the other file (:hs/file).
+#      and lines; Incl's forms name the other file (:hs/file);
+#   8. R6's cases (test/haskell/r6/, copied into the scratch: the helper writes hsc2hs's output
+#      beside the .hsc): a Backpack signature (Str.hsig), a boot file (Boot.hs-boot, with Boot.hs
+#      and User.hs, which imports it {-# SOURCE #-}), two literate modules (Bird.lhs: bird tracks,
+#      a #! line, prose with a tab and trailing blanks; Latex.lhs: \begin{code} blocks), an .hsc
+#      module (Codes.hsc: an #{enum} that makes more lines than it takes, so that GHC's positions
+#      repeat, #{size}, #if) converted, printed in the braces and the layout layouts and parsed by
+#      GHC to the same trees and lines; in mode :full printed back byte for byte (the .lhs, the
+#      .hsig, the .hs-boot themselves, the .hsc's hsc2hs output's module view) with the same trees
+#      of mode :full; and compiled to interfaces equal to the originals' (the signature's .hi, the
+#      boot file's .hi-boot).
 # Usage: bin/lib/repr-haskell/test (from bin/repr-haskell test). Scratch in .tmp/repr-haskell/test.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -172,4 +182,78 @@ if grep -q ':hs/file "Incl/Body.hs"' "$work/r5/forms/hs/Incl.ae" && grep -q ':hs
 else
   echo "FAIL: Incl's forms do not name the files of their nodes ($work/r5/forms/hs/Incl.ae)"; fail=1
 fi
+
+echo "== 8. R6's cases (test/haskell/r6/)"
+w8=$work/r6
+mkdir -p "$w8/src"
+cp -a "$root/test/haskell/r6/." "$w8/src/"
+r6in="Str.hsig Boot.hs-boot Bird.lhs Latex.lhs Codes.hsc"
+# the files the helper names its outputs after and the printer writes (an .hsc's: X.hs)
+r6out="Str.hsig Boot.hs-boot Bird.lhs Latex.lhs Codes.hs"
+# shellcheck disable=SC2086
+(cd "$w8/src" && "$helper" dump -o "$w8/dumps" --libdir "$libdir" --ghc -haddock --files $r6in &&
+   "$helper" dump --full -o "$w8/dumps-full" --libdir "$libdir" --ghc -haddock --files $r6in &&
+   "$helper" tree -o "$w8/orig" --libdir "$libdir" --ghc -haddock --files $r6in &&
+   "$helper" tree --full -o "$w8/orig-full" --libdir "$libdir" --ghc -haddock --files $r6in) || fail=1
+# shellcheck disable=SC2046
+(cd "$root" && arbace_tool -m arbace.repr.haskell read -o "$w8/forms" $(for f in $r6out; do echo "$w8/dumps/$f.edn"; done) &&
+   arbace_tool -m arbace.repr.haskell read -o "$w8/forms-full" $(for f in $r6out; do echo "$w8/dumps-full/$f.edn"; done)) > "$w8/read.log" || fail=1
+for lay in braces layout full; do
+  fs=$w8/forms; [ $lay = full ] && fs=$w8/forms-full
+  # shellcheck disable=SC2046
+  (cd "$root" && arbace_tool -m arbace.repr.haskell print --layout $lay -o "$w8/$lay" $(find "$fs" -name '*.ae' | sort)) > "$w8/print-$lay.log" || fail=1
+done
+for lay in braces layout; do
+  # shellcheck disable=SC2086
+  (cd "$w8/$lay" && "$helper" tree -o "$w8/cand-$lay" --libdir "$libdir" --ghc -haddock --files $r6out) || fail=1
+  for f in $r6out; do
+    if cmp -s "$w8/orig/$f.tree" "$w8/cand-$lay/$f.tree" && cmp -s "$w8/orig/$f.lines" "$w8/cand-$lay/$f.lines"; then
+      echo "ok: $f printed in the $lay layout, the same tree and lines ($(wc -l < "$w8/orig/$f.lines") located nodes)"
+    else
+      echo "FAIL: $f printed in the $lay layout parses to another tree or other lines ($w8/$lay/$f)"; fail=1
+    fi
+  done
+done
+# shellcheck disable=SC2086
+(cd "$w8/full" && "$helper" tree --full -o "$w8/cand-full" --libdir "$libdir" --ghc -haddock --files $r6out) || fail=1
+for f in $r6out; do
+  ref=$w8/src/$f; [ -f "$w8/dumps-full/$f.view" ] && ref=$w8/dumps-full/$f.view
+  if ! cmp -s "$ref" "$w8/full/$f"; then
+    echo "FAIL: $f in mode :full is not printed back byte for byte ($w8/full/$f against $ref)"; fail=1
+  elif ! cmp -s "$w8/orig-full/$f.tree" "$w8/cand-full/$f.tree" || ! cmp -s "$w8/orig-full/$f.lines" "$w8/cand-full/$f.lines"; then
+    echo "FAIL: $f printed in mode :full parses to another tree of mode :full ($w8/full/$f)"; fail=1
+  else
+    echo "ok: $f in mode :full printed back byte for byte ($(wc -c < "$ref") bytes), the same tree of mode :full"
+  fi
+done
+if grep -q ':kind :sig' "$w8/forms/hs/Str/sig.ae" && grep -q ':kind :boot' "$w8/forms/hs/Boot/boot.ae" &&
+   grep -q ':unlit true' "$w8/forms/hs/Bird.ae" && grep -q ':hsc2hs {' "$w8/forms/hs/Codes.ae"; then
+  echo "ok: the forms name their kinds (hs.Str.sig, hs.Boot.boot: :kind), unlit and hsc2hs (:unlit, :hsc2hs)"
+else
+  echo "FAIL: the forms of R6's cases do not record their kinds, unlit or hsc2hs ($w8/forms)"; fail=1
+fi
+# the interfaces: each original and its printed module (the braces layout's) compiled the same way;
+# the signature as an indefinite unit's (-instantiated-with), the boot file with Boot.hs and
+# User.hs (its .hi-boot)
+for side in orig cand; do
+  d=$w8/iface-$side; mkdir -p "$d/src"
+  cp "$w8/src/"*.hs "$w8/src/"*.hsig "$w8/src/"*.hs-boot "$w8/src/"*.lhs "$d/src/"
+  [ $side = cand ] && cp "$w8/braces/"* "$d/src/"
+  (cd "$d/src" && ghc --make -this-unit-id p -this-component-id p -instantiated-with 'Str=<Str>' -fno-code -fwrite-interface \
+       -haddock -outputdir "$d/sig" Str.hsig > "$d/build.log" 2>&1 &&
+     ghc --make -O1 -haddock -no-link -outputdir "$d/o" User.hs Boot.hs Bird.lhs Latex.lhs Codes.hs >> "$d/build.log" 2>&1 &&
+     ghc --show-iface "$d/sig/Str.hi" > "$d/Str.iface" && ghc --show-iface "$d/o/Boot.hi-boot" > "$d/Boot.iface" &&
+     for m in Bird Latex Codes; do ghc --show-iface "$d/o/$m.hi" > "$d/$m.iface"; done) ||
+    { echo "FAIL: R6's cases ($side) did not compile ($d/build.log)"; fail=1; }
+done
+(cd "$root" && arbace_tool -e '
+(require (quote arbace.repr.haskell))
+(let [w "'"$w8"'/"
+      n (fn [side m] (arbace.repr.haskell/iface-units (arbace.repr.haskell/normalize-iface (slurp (str w "iface-" side "/" m ".iface")) :lines) :lines))
+      ms ["Str" "Boot" "Bird" "Latex" "Codes"]
+      bad (remove #(= (n "orig" %) (n "cand" %)) ms)]
+  (doseq [m bad] (println "FAIL: the interface of" m "differs from the original'"'"'s"))
+  (if (empty? bad)
+    (println "ok:" (count ms) "interfaces equal (the signature'"'"'s, the boot file'"'"'s .hi-boot, the literate and the .hsc modules'"'"')")
+    (System/exit 1)))') || fail=1
 exit $fail
