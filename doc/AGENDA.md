@@ -94,8 +94,7 @@ The current state of the work. This file is rewritten as things change. For the 
 ## Next
 
 - Running (the user, 2026-10-18: "start all 4"): goi's GR4 (methods, interfaces, concurrency;
-  `goi-gr4`), F7 (the `defnode` prototype; `f7-defnode`), repr/haskell's HR25
-  (`repr-haskell-hr25`). The seed remade (`ed8a4720…`, F6 and GR3) and verified.
+  `goi-gr4`), F7 (the `defnode` prototype; `f7-defnode`). The seed remade (`ed8a4720…`, F6 and GR3) and verified.
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
@@ -133,7 +132,7 @@ The current state of the work. This file is rewritten as things change. For the 
   R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
   modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); R3 done (`:full`, the
   text level, 483 of 483 byte for byte; HR9-HR13); R4 and R5 done (the layout
-  printer; the other boot libraries: 1,226 modules, HR14-HR20); R6 done (2026-10-18: .hsc, .lhs, boot files; 1,345 modules; HR21-HR24 decided as built, HR25 running). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
+  printer; the other boot libraries: 1,226 modules, HR14-HR20); R6 done (2026-10-18: .hsc, .lhs, boot files; 1,345 modules; HR21-HR24 decided as built); HR25 done in part (Lexer.hs byte for byte, its :full trees still differ). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
   JP1-JP4); running: (Java forms → Java,
   with a round trip; branch `repr-java-print`).
 - Done (2026-10-17): repr/java print. Formerly planned: after the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):

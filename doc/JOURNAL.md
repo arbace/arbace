@@ -1443,3 +1443,25 @@ Open proposals, built as recommended:
 - RR-P12: the crate set documented without default features.
 
 Slips: one /dev/null redirect and one `pgrep -f` in a wait loop, both harmless.
+
+## 2026-10-18: repr/haskell HR25 merged
+
+HR25 (doc/haskell/SPEC.md §10.10, "HR25 as built"; doc/haskell/HASKELL-NOTES.md, "HR25: alex's
+output in mode `:full`"; branch `repr-haskell-hr25`, `02b90977`) met its exit only in part.
+HR23's places now apply to any module whose text has `{-# LINE #-}` pragmas as well as to
+`.hsc` modules; in the corpus that is only alex's output `Distribution.Fields.Lexer`. Such a
+module's view keeps the pragmas as text, and the mapping of GHC's positions also follows CPP's
+line markers naming the module's own file (`cppEvents` in `tools/hsdump/HsDump.hs`).
+
+`Lexer.hs` now converts in mode `:full` and prints back byte for byte, but its `:full` trees
+still differ. CPP's line markers after its directives (`#include "ghcconfig.h"`, the `#if`s)
+put the original's positions back at `Lexer.hs`'s lines. The directive-free module view
+follows the `{-# LINE #-}` pragmas into `Lexer.x`. This is the cause of R6's three known `.hsc`
+modules, and removing it would need a text reference other than the module view, against
+S5/HR12. The known entry stays, its reason now "the tree in mode :full only". The text level
+has 1,334 modules byte-identical (was 1,333) and 18 known differences (7 trees, 11
+conversions).
+
+All the other modules' forms and printed modules are byte for byte as before. The essential
+gate passed on the branch, and `bin/repr-haskell test`, with two new cases (`Alex.hs`,
+`AlexCpp.hs`), passed after the merge.
