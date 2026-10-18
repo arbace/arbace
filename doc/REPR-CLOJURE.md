@@ -28,19 +28,22 @@ repr/clojure.
 bin/repr-clojure read -o OUT SRC...                # translate files and trees into the directory OUT
 bin/repr-clojure read --in-place SRC...            # translate them where they are (x.clj becomes x.ae)
 bin/repr-clojure read --in-place --keep-ext SRC... # rename in place, names kept (bin/clojure-tests' mode)
+bin/repr-clojure read --full -o OUT SRC...         # a .cljc's conditionals recorded in its .ae (below, "Read --full")
 bin/repr-clojure read --stdin [--kind cljc --ae]   # standard input to standard output
 bin/repr-clojure read --rules                      # the rules, what print cannot restore, the divergences
 bin/repr-clojure print -o OUT SRC...               # print Arbace files and trees back as Clojure into OUT
 bin/repr-clojure print --in-place SRC...           # print them where they are (x.ae becomes x.clj)
 bin/repr-clojure print --stdin [--kind cljc --ae]  # standard input to standard output
-bin/repr-clojure roundtrip [--keep-ext] SRC...     # read then print in memory, each file back byte for byte
+bin/repr-clojure roundtrip [--keep-ext | --full] SRC... # read then print in memory, each file back byte for byte
 bin/repr-clojure roundtrip --from-arbace SRC...    # print then read
 ```
 
 - A directory `SRC` is translated with its relative paths: its contents land in `OUT`, so
   `bin/repr-clojure read -o lib/ae jar-a/ jar-b/` merges two libraries' trees.
 - `.clj` and `.cljc` files become `.ae` files. A `.cljc` file's reader conditionals are
-  resolved, since the reader reads a `.ae` file without them. When `x.clj` and `x.cljc` are
+  resolved, since the reader reads a `.ae` file without them. With `--full` they are also
+  recorded, in a comment block at the `.ae`'s end, and `print` gives the `.cljc` back byte for
+  byte (below, "Read --full"). When `x.clj` and `x.cljc` are
   both there, `x.clj` is translated, as Clojure's reader prefers it, and `x.cljc` is skipped
   with a message. An `x.ae` that is already there is kept, and `x.clj` is skipped, since
   Arbace's loader takes the `.ae` first.
@@ -71,8 +74,10 @@ bin/repr-clojure roundtrip --from-arbace SRC...    # print then read
   (`load-file`, then marked loaded: `repr_clojure_sources`), so the checked-out repr/clojure runs, not the one
   the executable was built with.
 - `print` takes `read`'s options (`--keep-ext` aside: it keeps the names `read` kept) and its
-  plan reversed (below, "Print"). `roundtrip` takes `--known EDN --corpus NAME` (the
-  differences expected, `{corpus {path reason}}`), `--from-arbace` and `-v`.
+  plan reversed (below, "Print"); a `.ae` ending with `read --full`'s record is printed as its
+  `.cljc`, whatever the options. `roundtrip` takes `--keep-ext` or `--full` (read so),
+  `--known EDN --corpus NAME` (the differences expected, `{corpus {path reason}}`),
+  `--from-arbace` and `-v`.
 - The namespaces are `arbace.repr.clojure` (the command line, its verbs `read`, `print` and
   `roundtrip`, and the trees), `arbace.repr.clojure.rules`
   (the table, each rule with its reversal), `arbace.repr.clojure.text` (the lexical reader) and `arbace.repr.clojure.rename` (the rename's
@@ -88,7 +93,7 @@ and `:loss` (what `print` cannot restore; below, "Print").
 
 | rule | applies to | what it rewrites |
 |---|---|---|
-| `:reader-conditionals` | a `.cljc` file becoming `.ae` | Each `#?(...)` becomes the text of the branch the reader selects on Arbace: the first whose feature is `:clj` or `:default`, as LispReader chooses. A `#?@(...)` becomes the contents of that branch's list or vector. With no branch selected, the conditional becomes nothing. The branch's text is kept verbatim, nested conditionals resolved. The rule fails as the reader does on a splice at top level, an odd number of forms or a feature that is not a keyword. |
+| `:reader-conditionals` | a `.cljc` file becoming `.ae` | Each `#?(...)` becomes the text of the branch the reader selects on Arbace: the first whose feature is `:clj` or `:default`, as LispReader chooses. A `#?@(...)` becomes the contents of that branch's list or vector. With no branch selected, the conditional becomes nothing. The branch's text is kept verbatim, nested conditionals resolved. The rule fails as the reader does on a splice at top level, an odd number of forms or a feature that is not a keyword. With `read --full`, the conditionals are recorded at the `.ae`'s end (below, "Read --full"). |
 | `:rename` | every file | The names of the vendored Clojure, as `arbace.repr.clojure.rename` renames them (VENDOR-NOTES.md, "What is renamed"): its namespaces exactly (`clojure.core` and the files loaded into it, `clojure.string`, ..., spec), the Java packages `clojure.lang`, `clojure.asm` (with `commons`, `signature`) and `clojure.java.api`, the keyword namespace `clojure.error`, the system properties `clojure.*` and the source paths `clojure/<ns>.clj`, which become `arbace/<ns>.ae`. These are written dotted, as paths, in descriptors, in regex literals, as qualified symbols and keywords, as munged class names, and in strings and comments too. Left alone: other libraries' names (`clojure.test.check`, `clojure.tools.*`, `clojure.core.async`), `refer-clojure`, `*clojure-version*`, prose and URLs. |
 | `:proxy-methods` | every file | The methods every proxy class has and its field: `__initClojureFnMappings`, `__updateClojureFnMappings` and `__getClojureFnMappings` become `__initArbaceFnMappings` and the rest; `__clojureFnMap` becomes `__arbaceFnMap` (VENDOR-NOTES.md, hand change 2). This applies in strings too, where code names them for reflection. |
 | `:core-names` | `.clj`, `.cljc` | Names `arbace.core` has and `clojure.core` has not are those marked `{:added "arbace"}`: the Java forms' macros and operators, such as `return`, `switch`, `label`, `lambda` and `bit-and-int`. When a file defines one of them (`def`, `defn`, `defmacro`, ... at any depth), the name joins its `ns` form's `(:refer-clojure :exclude [...])`, as a library does for a core name it redefines. The name is added to an `:exclude` already there. If there is none, `:exclude [...]` is added to the `:refer-clojure`, or `(:refer-clojure :exclude [...])` to the `ns` form. Without the rule the library still works, but every load warns `return already refers to: #'arbace.core/return` (test.check's `generators` defines `return`). A file with `:only`, or without an `ns` form, is left as it is. |
@@ -153,7 +158,7 @@ else; the rules' `:print` functions apply in the reverse order of their `:rewrit
 
 | rule | way | `print` |
 |---|---|---|
-| `:reader-conditionals` | one way | Nothing to undo: the branches not selected are gone. A `.ae` made from a `.cljc` is printed as a `.clj` holding the `.cljc`'s `:clj` reading. |
+| `:reader-conditionals` | one way | Nothing to undo: the branches not selected are gone. A `.ae` made from a `.cljc` is printed as a `.clj` holding the `.cljc`'s `:clj` reading; one made by `read --full` is printed as the `.cljc`, byte for byte, its conditionals put back from the record (below, "Read --full"). |
 | `:rename` | reversible | `arbace.repr.clojure.rename/unrename`: the same patterns, in the same contexts, finding `arbace` instead of `clojure` (`arbace.core` → `clojure.core`, `arbace.lang.RT`, `Larbace/lang/Var;`, `:arbace.error/phase`, ...), and the source paths `arbace/<ns>.ae` → `clojure/<ns>.clj`. |
 | `:proxy-methods` | reversible | `__initArbaceFnMappings` and the rest, `__arbaceFnMap`, back to Clojure's names. |
 | `:core-names` | reversible | `uncore-names`: what `core-names` added is one of three texts, by what the `ns` form had (a `(:refer-clojure :exclude [...])` at its end, an `:exclude [...]` at its `:refer-clojure`'s end, the names at its `:exclude`'s end). Each is tried, and kept only when `core-names` gives the text back from what is left, so `print` inverts `read` exactly; with none, the text is left as it is (Arbace source that excludes the names itself). |
@@ -162,6 +167,8 @@ else; the rules' `:print` functions apply in the reverse order of their `:rewrit
 ### The one-way rules
 
 Decided here (the brief left it to this work): **the losses are documented, not recorded.**
+For the conditionals the user then decided otherwise (CP1, 2026-10-18): `read --full` records
+them (below, "Read --full"); without it, the paragraph below holds.
 
 - `:reader-conditionals`. Recording what `read` drops would mean keeping the whole conditional
   (every branch's text, and where it stood) beside the `.ae`: as metadata the `.ae` would no
@@ -172,7 +179,7 @@ Decided here (the brief left it to this work): **the losses are documented, not 
   it back whole. What a `.ae` loses is exactly the other platforms' code, which Arbace cannot
   run. The round trip checks the loss is only that: a `.cljc` read into a `.ae` must come back
   as a `.clj` whose text is the `.cljc` with its conditionals resolved, byte for byte. A
-  `--full` mode recording the conditionals is proposal CP1 (below), if wanted.
+  `--full` mode recording the conditionals was proposal CP1 (below), built as "Read --full".
 - `:security-manager`. Which uses were written qualified is lost, and nothing in the source of
   Clojure's sources, suite or libraries writes `SecurityManager` at all. `print` writes the
   short name, which is what Clojure code writes and means the same.
@@ -181,15 +188,68 @@ Decided here (the brief left it to this work): **the losses are documented, not 
 
 | Arbace file | becomes |
 |---|---|
-| `x.ae` | `x.clj` (as `read` cannot tell, a `.ae` made from a `.cljc` too) |
-| `data_readers.ae` | `data_readers.clj`; `data_readers.cljc` when a `data_readers.clj` is beside it (Clojure merges the two); left out when both are |
+| `x.ae` | `x.clj` (as `read` cannot tell, a `.ae` made from a `.cljc` too); `x.cljc` when it ends with `read --full`'s record (left out when an `x.cljc` is beside it) |
+| `data_readers.ae` | `data_readers.clj`; `data_readers.cljc` when a `data_readers.clj` is beside it (Clojure merges the two), or when it ends with `read --full`'s record; left out when both are |
 | `x.clj`, `x.cljc` | printed, keeping their names (read kept them: `--keep-ext`, `data_readers` files, `project.clj`); left out beside an `x.ae`, which is printed instead, as `read` left a `.cljc` beside a `.clj` (in place it stays as it was) |
 | `.java`, `--text` files | printed, keeping their names |
 | class files | left out |
 | anything else | copied (with `-o`) |
 
 A directory's names are taken before any of its files is renamed (`run`'s listing, for `read`
-too), so the plan does not depend on the order files are written in place.
+too), so the plan does not depend on the order files are written in place. The record is the
+one thing print's plan reads from a file's text (`print-refine`).
+
+### Read --full
+
+Built 2026-10-18, as the user decided (CP1, against "not now": `--keep-ext` was the lossless
+path already). `bin/repr-clojure read --full` (and `roundtrip --full`) records what
+`:reader-conditionals` drops, so that `.cljc` → `.ae` → `.cljc` is byte for byte too. The
+other bridges' `:full` modes record what their reading drops as metadata keys of the forms
+([go/PRINTER-NOTES.md](go/PRINTER-NOTES.md), [haskell/HASKELL-NOTES.md](haskell/HASKELL-NOTES.md)
+"R3", [classes/PRINTER-NOTES.md](classes/PRINTER-NOTES.md) "Mode :full as built"); repr/clojure
+works on text, so its record is text: **a comment block at the `.ae`'s end**.
+
+```clojure
+(ns a.b
+  (:require [arbace.string :as s]
+            ))
+
+(defn f [] (s/join [1 2 3]))
+
+;; repr/clojure read --full: this file was a .cljc; its reader conditionals, which print restores:
+;;@ 55 0
+;;|#?(:cljs [goog.string])
+;;@ 70 16
+;;|#?(:clj (s/join [1 #?@(:clj [2 3] :cljs [4])])
+;;|              :cljs "x")
+```
+
+- The `.ae` is exactly what `read` makes without `--full` (the `:clj` reading, renamed), then
+  the block: a newline, the header line, and for each of the `.cljc`'s conditionals, in order,
+  `;;@ AT LENGTH` (where its reading stands in the `.cljc`'s resolved text, before the other
+  rules, and how long it is: offsets in UTF-16 units, as the String's) and its own text, each
+  line as `;;|LINE`, verbatim: the dropped branches as Clojure wrote them, not renamed (a
+  `:cljs` branch's `clojure.string` is ClojureScript's), nested conditionals as they were.
+  A `.cljc` without conditionals gets the header alone, which says it was a `.cljc`.
+- Its meaning is unchanged: the block is comments after the last form, so Arbace's reader
+  reads the same forms with the same `:line` and `:column` as from the `.ae` of a plain `read`
+  (`print_test.ae`'s `read-full` reads both), and it loads the same.
+- `print` finds the block (the last header line, then only its lines; a header followed by
+  anything else fails as malformed), prints the text before it as a `.cljc`'s (each rule's
+  `:print`), which gives the resolved Clojure text, and puts each conditional back in place of
+  its reading. Each reading must still be what its conditional reads as, or `print` fails:
+  the record holds for the text `read` wrote, and a `.ae` edited where a conditional stood (or
+  before it, which moves the offsets) is no longer that text. `read --full` checks the record
+  gives the `.cljc` back before writing it.
+- The file comes back under its name: `x.ae` with the record prints as `x.cljc`,
+  `data_readers.ae` as `data_readers.cljc` (`print-refine`).
+
+The alternatives: metadata on the forms cannot hold a conditional that reads as nothing (no
+form to carry it), and it would change the forms read; comments beside each conditional would
+add lines and move every later form's `:line`; a side file (`x.cljc.ae-conditionals`) or the
+`.cljc` kept beside the `.ae` is a second file to keep in step and to plan (and the `.cljc`
+beside a `.ae` is what the plans leave out). The block at the end keeps one file, its forms
+and lines as they were, and is readable.
 
 ### Where print is not read's inverse
 
@@ -216,9 +276,13 @@ its name, byte for byte, except the known differences, `test/repr/clojure/roundt
 | the suite into `.ae` files | Clojure → Arbace → Clojure | 103 | 102 | 1 `.cljc` (`reader.cljc`) back as its `:clj` reading |
 | the suite's six test libraries (the jars of `--libs`), `--keep-ext` | Clojure → Arbace → Clojure | 33 | 33 | |
 | the libraries into `.ae` files | Clojure → Arbace → Clojure | 33 | 21 | 12 `.cljc` (test.check, tools.reader) back as their `:clj` readings |
-| `arbace/` | Arbace → Clojure → Arbace | 283 | 133 | 150 outside `read`'s image (they name `clojure.*` themselves: the Java forms' provenance lines, "Converted from clojure/lang/Var.java", spec's "Vendored from" lines, code and docstrings naming both dialects, as repr/clojure's own; `core.ae` defines `return` without excluding it), each printed text making the round trip from Clojure |
+| the suite into `.ae` files, `--full` | Clojure → Arbace → Clojure | 103 | 103 | |
+| the libraries into `.ae` files, `--full` | Clojure → Arbace → Clojure | 33 | 33 | |
+| `arbace/` | Arbace → Clojure → Arbace | 284 | 134 | 150 outside `read`'s image (they name `clojure.*` themselves: the Java forms' provenance lines, "Converted from clojure/lang/Var.java", spec's "Vendored from" lines, code and docstrings naming both dialects, as repr/clojure's own; `core.ae` defines `return` without excluding it), each printed text making the round trip from Clojure |
 
-0 differences in all. `bin/repr-clojure check --suite` also prints the translated suite back in
+0 differences in all. With `--full` the 13 `.cljc` files (the suite's `reader.cljc`, the
+libraries' 12; the frozen `clojure/` has none) come back whole, 94 conditionals recorded, and
+each `.ae`'s text before the record is the plain `read`'s byte for byte. `bin/repr-clojure check --suite` also prints the translated suite back in
 place with the command (`print --in-place`) and compares the tree with Clojure's, byte for byte;
 `bin/repr-clojure check` holds `print`'s unit tests (`test/repr/clojure/print_test.ae`: each
 rule reversed, the samples of `read`'s tests read and printed back byte for byte, the plans, a
@@ -235,9 +299,9 @@ image; the 133 that are not come back byte for byte.
 
 ### Proposals
 
-- **CP1** A `read --full` mode keeping a `.cljc`'s conditionals for `print` (a side file
-  `x.cljc.ae-conditionals`, or the original `.cljc` kept beside the `.ae`), so that `.cljc` →
-  `.ae` → `.cljc` is byte for byte too; not built, as `--keep-ext` is that path already.
+- **CP1** A `read --full` mode keeping a `.cljc`'s conditionals for `print`, so that `.cljc` →
+  `.ae` → `.cljc` is byte for byte too; decided by the user (2026-10-18) and built: "Read
+  --full", above, as a comment block at the `.ae`'s end rather than the side file proposed.
 
 Until the next re-seed the executable embeds the repr/clojure before `print`: `bin/repr-clojure`
 loads the checkout's namespaces (`repr_clojure_sources`), so `print` runs on today's stage 0.
@@ -252,7 +316,7 @@ bin/repr-clojure check --libs      # the suite's test libraries as .ae, run on t
 ```
 
 `bin/gate --full` runs the first three (its step `repr-clojure`, about 1 minute on the tools'
-host: 51 s on 2026-10-18).
+host: 51 s on 2026-10-18; 58 s with `--full`'s two round trips).
 
 - `--suite`: the suite at the revision `bin/clojure-tests` pins (`98d735f`: `test/`,
   `src/script/` and the top-level files) is translated in place with `--keep-ext`. Its digest
@@ -314,7 +378,9 @@ What repr/clojure cannot translate mechanically:
 - **The `clojure.main` class.** Java that calls `clojure.main.main(...)` (a launcher) needs
   `arbace.lang.Main`. The rename makes it `arbace.main`, the namespace's name.
 - **Other platforms' code.** `.cljs` files are copied, not translated. Arbace's features are
-  `#{:clj}`, so `:cljs`, `:cljr` and other branches are dropped.
+  `#{:clj}`, so `:cljs`, `:cljr` and other branches are dropped (recorded, not run, with
+  `--full`).
 
 **Decided (2026-10-18, the user):** CP1 against the recommendation: a `read --full` mode to record
 a `.cljc`'s reader conditionals, so `.cljc` → `.ae` → `.cljc` is byte for byte too (to build).
+Built the same day ("Read --full", above).

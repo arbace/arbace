@@ -123,7 +123,7 @@ repr-java-text: ## the same in mode :full: each Java file printed back byte for 
 repr-clojure-check: ## repr/clojure's unit tests; Clojure's suite translated against its digest and printed back (bin/repr-clojure check [--suite])
 	bin/repr-clojure check
 	bin/repr-clojure check --suite
-repr-clojure-roundtrip: ## Clojure -> Arbace -> Clojure over the frozen clojure/, the suite, its libraries; Arbace -> Clojure -> Arbace over arbace/ (bin/repr-clojure check --roundtrip)
+repr-clojure-roundtrip: ## Clojure -> Arbace -> Clojure over the frozen clojure/, the suite, its libraries (.cljc back whole with --full); Arbace -> Clojure -> Arbace over arbace/ (bin/repr-clojure check --roundtrip)
 	bin/repr-clojure check --roundtrip
 repr-haskell-roundtrip: ## Haskell -> forms -> Haskell over GHC 9.14.1's boot libraries (41 packages): GHC's trees and lines (bin/repr-haskell roundtrip)
 	bin/repr-haskell roundtrip

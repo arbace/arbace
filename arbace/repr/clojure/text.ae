@@ -10,7 +10,8 @@
   - `form-end`: the end of the form beginning at an index;
   - `resolve-conditionals`: reader conditionals (`#?`, `#?@`) replaced by their selected
     branch's text, for a .cljc file becoming a .ae file (which the reader reads without
-    conditionals);
+    conditionals); `record-conditionals` and `restore-conditionals`, the same with a record of
+    what it drops and that record put back (read --full);
   - `code-tokens`: the spans of the tokens outside strings, comments and character literals,
     for rules that rewrite symbols; `list-spans`: the spans of the lists a token heads."
   (:require [arbace.string :as str]))
@@ -167,35 +168,74 @@
           (#{\( \[} (at s v)) (resolve-conditionals (subs s (inc v) (dec ve)) features depth)
           :else (fail s v "Spliced form list in read-conditional must implement java.util.List"))))
 
+(defn- resolve*
+  "resolve-conditionals' work: [text records], records (when record? is true) the reader
+  conditionals of s at its own level, in order, each {:at :length :text}: where its reading
+  stands in the text made and how long it is, and its own text in s (nested conditionals in it
+  as they were)."
+  [^String s features depth0 record?]
+  (if-not (str/includes? s "#?")
+    [s []]
+    (let [n (count s) sb (StringBuilder.)]
+      (loop [i 0 depth depth0 recs (transient [])]
+        (if (>= i n)
+          [(str sb) (persistent! recs)]
+          (let [c (.charAt s (int i))
+                copy (fn [j] (.append sb s (int i) (int j)) j)]
+            (case c
+              \" (recur (copy (string-end s i)) depth recs)
+              \; (recur (copy (line-end s i)) depth recs)
+              \\ (recur (copy (char-end s i)) depth recs)
+              (\( \[ \{) (recur (copy (inc i)) (inc depth) recs)
+              (\) \] \}) (recur (copy (inc i)) (max 0 (dec depth)) recs)
+              \# (case (at s (inc i))
+                   \" (recur (copy (string-end s (inc i))) depth recs)
+                   \! (recur (copy (line-end s i)) depth recs)
+                   \? (let [e (form-end s i)
+                            at0 (.length sb)
+                            ^String r (selected s i features depth)]
+                        (.append sb r)
+                        (recur e depth (if record?
+                                         (conj! recs {:at at0 :length (count r) :text (subs s i e)})
+                                         recs)))
+                   (recur (copy (inc i)) depth recs))
+              (recur (copy (if (terminating? c) (inc i) (token-end s i))) depth recs))))))))
+
 (defn resolve-conditionals
   "Source text s with each reader conditional replaced by the text it reads as on a platform
   with the features (a set of keywords, Arbace's #{:clj}): its selected branch, verbatim
   (spliced: the contents of its list), or nothing. Everything else is kept as it is."
   ([s] (resolve-conditionals s #{:clj}))
   ([s features] (resolve-conditionals s features 0))
-  ([^String s features depth0]
-   (if-not (str/includes? s "#?")
-     s
-     (let [n (count s) sb (StringBuilder.)]
-       (loop [i 0 depth depth0]
-         (if (>= i n)
-           (str sb)
-           (let [c (.charAt s (int i))
-                 copy (fn [j] (.append sb s (int i) (int j)) j)]
-             (case c
-               \" (recur (copy (string-end s i)) depth)
-               \; (recur (copy (line-end s i)) depth)
-               \\ (recur (copy (char-end s i)) depth)
-               (\( \[ \{) (recur (copy (inc i)) (inc depth))
-               (\) \] \}) (recur (copy (inc i)) (max 0 (dec depth)))
-               \# (case (at s (inc i))
-                    \" (recur (copy (string-end s (inc i))) depth)
-                    \! (recur (copy (line-end s i)) depth)
-                    \? (let [e (form-end s i)]
-                         (.append sb ^String (selected s i features depth))
-                         (recur e depth))
-                    (recur (copy (inc i)) depth))
-               (recur (copy (if (terminating? c) (inc i) (token-end s i))) depth)))))))))
+  ([^String s features depth0] (first (resolve* s features depth0 false))))
+
+(defn record-conditionals
+  "resolve-conditionals with a record of what it dropped, for read --full (doc/REPR-CLOJURE.md,
+  \"Read --full\"): {:text the text resolved, :conditionals [{:at :length :text} ...]}, each of
+  s's reader conditionals in order: its reading's offset and length in :text, and its own text,
+  so that restore-conditionals gives s back from :text."
+  [^String s features]
+  (let [[t recs] (resolve* s features 0 true)] {:text t :conditionals recs}))
+
+(defn restore-conditionals
+  "record-conditionals reversed: the text t (resolved) with each recorded conditional put back
+  in place of its reading. Each reading must still be what its conditional reads as (the
+  features'; a splice as within a collection), else it fails (t is not the text recorded)."
+  [^String t conditionals features]
+  (let [sb (StringBuilder.)
+        end (reduce (fn [pos {:keys [at length text]}]
+                      (when (or (< at pos) (> (+ at length) (count t))
+                                (not= (subs t at (+ at length))
+                                      (resolve-conditionals text features 1)))
+                        (throw (ex-info (str "the reader conditional recorded at offset " at
+                                             " does not match the text (edited since read --full?)")
+                                        {:at at})))
+                      (.append sb t (int pos) (int at))
+                      (.append sb ^String text)
+                      (+ at length))
+                    0 conditionals)]
+    (.append sb t (int end) (count t))
+    (str sb)))
 
 ;; Tokens
 

@@ -105,6 +105,58 @@
   (testing "one way: a .cljc file read as .ae is printed as its :clj reading"
     (is (= "(f 1)" (back (rules/translate "(f #?(:cljs 2 :clj 1))" {:kind :cljc :to-ae true :features #{:clj}}))))))
 
+(def ^:private full-samples
+  "Clojure texts of .cljc files, read into .ae files with --full and printed back."
+  ["(f #?(:cljs 2 :clj 1))"
+   "(ns a (:require [clojure.string :as s] #?(:cljs [goog.string])))\n"
+   "[a #?@(:clj [b c] :cljs [x]) d]\n#?(:cljs (def x 1))\n"
+   "[#?@(:clj [:a #?@(:clj [:b #?@(:clj [:c]) :d]) :e])]"
+   "(x #?(:clj (y\n   ;; c\n   #?(:clj z :cljs w)) :cljs v))\n;; #?(:cljs 2)\n\"#?(:cljs 1)\""
+   "(f #?(:cljs 2\r\n     :default clojure.core/str))\r\n"
+   "(ns a)\n(def b 1)\n"
+   ""
+   "(f #?(:clj 1)) ; no newline at the end"])
+
+(def ^:private cljc-full {:kind :cljc :to-ae true :full true :features #{:clj}})
+(def ^:private cljc-ae {:kind :cljc :to-ae true :features #{:clj}})
+
+(defn- read-all
+  "The forms of the text s with their metadata (:line, :column), as Arbace's loader reads them."
+  [^String s]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. s))]
+    (binding [*read-eval* false]
+      (loop [out []]
+        (let [x (read {:eof ::eof :read-cond :allow} r)]
+          (if (= ::eof x) out (recur (conj out [x (meta x)]))))))))
+
+(deftest read-full
+  (testing "a .cljc read with --full and printed back, byte for byte"
+    (doseq [s full-samples]
+      (let [a (rules/translate s cljc-full)]
+        (is (rules/full? a) s)
+        (is (= s (rules/print-text a ae)) s))))
+  (testing "the .ae is read's without --full, and the record after it: the same forms, lines"
+    (doseq [s full-samples]
+      (let [plain (rules/translate s cljc-ae) a (rules/translate s cljc-full)]
+        (is (str/starts-with? a plain) s)
+        (is (= (read-all plain) (read-all a)) s))))
+  (testing "the record: each conditional's offset and length in the text read, its text"
+    (is (= (str "(ns a (:require [arbace.string :as s] ))\n"
+                "\n" rules/full-header "\n"
+                ";;@ 39 0\n;;|#?(:cljs [goog.string])\n")
+           (rules/translate (full-samples 1) cljc-full)))
+    (is (= (str "(ns a)\n(def b 1)\n\n" rules/full-header "\n")
+           (rules/translate (full-samples 6) cljc-full))))
+  (testing "a .clj, or a .cljc kept .cljc, records nothing"
+    (is (not (rules/full? (rules/translate "(f)" (assoc cljc-full :kind :clj)))))
+    (is (not (rules/full? (rules/translate "#?(:clj 1)" (assoc cljc-full :to-ae false))))))
+  (testing "a record that no longer matches the text fails"
+    (let [a (rules/translate "(f #?(:cljs 2 :clj 1))" cljc-full)]
+      (is (thrown-with-msg? Exception #"does not match"
+                            (rules/print-text (str/replace-first a "(f 1)" "(f 7)") ae)))
+      (is (thrown-with-msg? Exception #"malformed"
+                            (rules/print-text (str a "x\n") ae))))))
+
 (deftest the-table
   (is (every? #(and (#{:reversible :one-way} (:way %)) (string? (:loss %)) (fn? (:print %))) rules/rules))
   (is (= [:reader-conditionals :security-manager] (map :id (filter #(= :one-way (:way %)) rules/rules))))
@@ -127,7 +179,14 @@
     (is (= {:kind :clj :to-ae false :out "project.clj"} (p "project.clj" [] {})))
     (is (= {:kind :java :to-ae false :out "A.java"} (p "A.java" [] {})))
     (is (= {:copy true} (p "deps.edn" [] {})))
-    (is (= {:kind :text :to-ae false :out "deps.edn"} (p "deps.edn" [] {:text [".edn"]})))))
+    (is (= {:kind :text :to-ae false :out "deps.edn"} (p "deps.edn" [] {:text [".edn"]})))
+    (testing "a .ae read with --full is printed as its .cljc"
+      (let [full (rules/translate "(f #?(:clj 1))" cljc-full)
+            r (fn [n sibs s] (main/print-refine (p n sibs {}) n (set sibs) s))]
+        (is (= {:kind :cljc :to-ae true :out "a.cljc"} (r "a.ae" ["a.ae"] full)))
+        (is (= {:kind :clj :to-ae true :out "a.clj"} (r "a.ae" ["a.ae"] "(f 1)")))
+        (is (= {:kind :cljc :to-ae true :out "data_readers.cljc"} (r "data_readers.ae" ["data_readers.ae"] full)))
+        (is (:skip (r "data_readers.ae" ["data_readers.ae" "data_readers.cljc"] full)))))))
 
 (defn- temp-dir []
   (let [d (io/file (System/getProperty "repr.clojure.work" ".tmp/repr-clojure-check"))]
@@ -161,4 +220,15 @@
       (put "a/d.cljc" "(f #?(:cljs 2 :clj 1))\n")
       (is (= {:why :one-way}
              (get-in (main/roundtrip [(str src)] {:text []}) [:differ "a/d.cljc"])))
-      (is (= 0 (count (:differ (main/roundtrip [(str src)] {:text [] :keep-ext true}))))))))
+      (is (= 0 (count (:differ (main/roundtrip [(str src)] {:text [] :keep-ext true})))))
+      (testing "with --full, a .cljc comes back whole"
+        (.delete (io/file src "data_readers.clj"))
+        (is (= {:files 5 :equal 5 :differ {}} (main/roundtrip [(str src)] {:text [] :full true})))))
+    (testing "read --full and print, a tree"
+      (let [fa (io/file d "full-ae") fo (io/file d "full-out")]
+        (main/run :read [(str src)] (str fa) {:text [] :full true})
+        (is (rules/full? (slurp (io/file fa "a/d.ae"))))
+        (is (rules/full? (slurp (io/file fa "data_readers.ae"))))
+        (main/run :print [(str fa)] (str fo) {:text []})
+        (doseq [path ["a/d.cljc" "data_readers.cljc" "a/b.clj"]]
+          (is (= (slurp (io/file src path)) (slurp (io/file fo path))) path))))))

@@ -125,9 +125,11 @@ Prior art:
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
     divergences, and back (`print`, each rule reversed; its two one-way rules documented: a
-    `.cljc`'s conditionals resolved, `SecurityManager`'s spelling), Clojure → Arbace → Clojure
-    byte for byte over the frozen `clojure/`, the suite and its libraries (`check --roundtrip`,
-    `test/repr/clojure/roundtrip-known.edn`); `bin/clojure-tests` translates Clojure's suite with it.
+    `.cljc`'s conditionals resolved, `SecurityManager`'s spelling; `read --full` records a
+    `.cljc`'s conditionals in a comment block at the `.ae`'s end, printed back as the `.cljc`),
+    Clojure → Arbace → Clojure byte for byte over the frozen `clojure/`, the suite and its
+    libraries (`check --roundtrip`, `test/repr/clojure/roundtrip-known.edn`); `bin/clojure-tests`
+    translates Clojure's suite with it.
   - `arbace/build/`: `arbace.build.go`, the build of a program held as Go forms: printed by
     repr/go into a module with its overlay, then `go build` (`bin/build-go`, `doc/go/BUILD.md`).
   - `arbace/go/`: goi's checker, `arbace.go.check` (spec `doc/go/GOI-SPEC.md` §3, GR2; `bin/goi

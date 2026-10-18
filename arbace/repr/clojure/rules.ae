@@ -216,7 +216,9 @@
     :way :one-way
     :loss "The branches not selected, and the conditional around the one selected: print
           writes the .ae as a .clj file, the :clj reading of the .cljc (a file kept .cljc,
-          --keep-ext, keeps its conditionals and goes back whole)."
+          --keep-ext, keeps its conditionals and goes back whole). Recorded by read --full:
+          the conditionals as a comment block at the .ae's end, from which print gives the
+          .cljc back byte for byte."
     :print (fn [s _] s)}
    {:id :rename
     :doc "The names of the vendored Clojure: clojure.* -> arbace.* for its namespaces, the
@@ -293,17 +295,85 @@
   [ctx skip]
   (filter #(and (not (contains? skip (:id %))) ((:applies %) ctx)) rules))
 
+;; read --full: a .cljc's reader conditionals recorded at the .ae's end (doc/REPR-CLOJURE.md,
+;; "Read --full")
+
+(def full-header
+  "The first line of read --full's record, the comment block at the end of a .ae read from a
+  .cljc file."
+  ";; repr/clojure read --full: this file was a .cljc; its reader conditionals, which print restores:")
+
+(def ^:private full-marker (str "\n" full-header "\n"))
+
+(defn- full-block
+  "The comment block recording the conditionals ({:at :length :text}, offsets in the resolved
+  Clojure text): a newline, the header, then for each `;;@ AT LENGTH` and its text, each line
+  of it as `;;|LINE`."
+  [conditionals]
+  (let [sb (StringBuilder. ^String full-marker)]
+    (doseq [{:keys [at length text]} conditionals]
+      (.append sb (str ";;@ " at " " length "\n"))
+      (doseq [l (str/split text #"\n" -1)] (.append sb (str ";;|" l "\n"))))
+    (str sb)))
+
+(defn full-split
+  "A .ae text's body and read --full's record: [body conditionals] when the text ends with the
+  record (the last header line, then only its lines), else nil. A header followed by anything
+  else fails."
+  [^String s]
+  (let [i (.lastIndexOf s ^String full-marker)]
+    (when-not (neg? i)
+      (let [rest (subs s (+ i (count full-marker)))
+            bad #(throw (ex-info (str "read --full's record at the end is malformed: " %) {}))
+            _ (when-not (or (= "" rest) (str/ends-with? rest "\n")) (bad "no final newline"))
+            lines (if (= "" rest) [] (str/split (subs rest 0 (dec (count rest))) #"\n" -1))
+            recs (loop [ls lines out []]
+                   (if (empty? ls)
+                     out
+                     (let [[h & more] ls
+                           [_ a n] (or (re-matches #";;@ (\d+) (\d+)" h) (bad h))
+                           [body more] (split-with #(str/starts-with? % ";;|") more)]
+                       (when (empty? body) (bad h))
+                       (recur more (conj out {:at (Long/parseLong a) :length (Long/parseLong n)
+                                              :text (str/join "\n" (map #(subs % 3) body))})))))]
+        [(subs s 0 i) recs]))))
+
+(defn full?
+  "Whether the .ae text s ends with read --full's record."
+  [^String s]
+  (boolean (full-split s)))
+
+(defn- full-ctx? [ctx] (and (:full ctx) (= :cljc (:kind ctx)) (:to-ae ctx)))
+
 (defn print-text
   "Arbace text s printed back as Clojure: each rule that applies (ctx as translate's, for the
   Clojure file the Arbace one stands for) reversed by its :print, in the reverse order, minus
-  the skipped ones (doc/REPR-CLOJURE.md, \"Print\")."
+  the skipped ones (doc/REPR-CLOJURE.md, \"Print\"). A text ending with read --full's record
+  is printed as the .cljc it was read from: its body printed (ctx's :kind :cljc), then the
+  conditionals put back."
   ([s ctx] (print-text s ctx #{}))
   ([s ctx skip]
-   (reduce (fn [s r] ((:print r) s ctx)) s (reverse (applicable ctx skip)))))
+   (if-let [[body recs] (when (:to-ae ctx) (full-split s))]
+     (let [ctx (assoc ctx :kind :cljc :to-ae true)
+           t (reduce (fn [s r] ((:print r) s ctx)) body (reverse (applicable ctx skip)))]
+       (text/restore-conditionals t recs (:features ctx #{:clj})))
+     (reduce (fn [s r] ((:print r) s ctx)) s (reverse (applicable ctx skip))))))
 
 (defn translate
   "Text s of a file translated by the rules that apply (ctx: see the namespace's doc), minus
-  the skipped ones."
+  the skipped ones. With ctx's :full, a .cljc becoming a .ae ends with a record of its reader
+  conditionals (read --full), a comment block after the text translated, the .cljc's own text
+  (not translated), checked to give s back."
   ([s ctx] (translate s ctx #{}))
   ([s ctx skip]
-   (reduce (fn [s r] ((:rewrite r) s ctx)) s (applicable ctx skip))))
+   (let [t (reduce (fn [s r] ((:rewrite r) s ctx)) s (applicable ctx skip))]
+     (if-not (full-ctx? ctx)
+       t
+       (let [features (:features ctx #{:clj})
+             {resolved :text recs :conditionals}
+             (if (contains? skip :reader-conditionals)
+               {:text s :conditionals []}
+               (text/record-conditionals s features))]
+         (when-not (= s (text/restore-conditionals resolved recs features))
+           (throw (ex-info "read --full: the record does not give the .cljc back" {})))
+         (str t (full-block recs)))))))

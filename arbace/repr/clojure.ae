@@ -29,17 +29,22 @@
   data_readers.cljc beside a data_readers.clj); .clj and .cljc files are printed keeping their
   names, but one beside a .ae of its name is left out; .java and --text files as read's. What
   print cannot restore (the one-way rules, :reader-conditionals and :security-manager) is
-  listed by read --rules.
+  listed by read --rules; a .ae that read --full made from a .cljc (its conditionals recorded
+  in a comment block at its end) is printed as that .cljc, byte for byte.
 
   Options:
     --keep-ext       read: .clj and .cljc files keep their names (and so a .cljc its
                      conditionals, which Arbace's reader resolves with the feature :clj), as
                      bin/clojure-tests translates Clojure's test suite; roundtrip: read so
+    --full           read: a .cljc file becoming a .ae records its reader conditionals in a
+                     comment block at the .ae's end (the .ae reads as without it), from which
+                     print gives the .cljc back byte for byte; roundtrip: read so
     --text EXT       files ending in EXT are renamed as text (rule :rename and the like) too,
                      keeping their names (repeatable; e.g. --text .edn)
     --skip ID,...    leave these rules out
     --kind K         --stdin's kind: clj (default), cljc, java or text (the Clojure file's)
-    --ae             --stdin: the Clojure text is a .ae file's (a .cljc's conditionals resolved)
+    --ae             --stdin: the Clojure text is a .ae file's (a .cljc's conditionals resolved;
+                     print: a record of read --full's restored)
     -q               quiet: no summary
     roundtrip's: --from-arbace; --known EDN --corpus NAME, the known differences ({corpus {path
     reason}}; exit status 1 on another, or on one that no longer differs); -v, each
@@ -61,30 +66,33 @@
 (defn plan
   "What becomes of the file named name, among its siblings (a set of names), with the options:
   {:kind K :to-ae BOOL :out NAME} for a file translated, {:copy true} for one copied (or left
-  in place), {:skip REASON} for one left out."
-  [^String name siblings {:keys [keep-ext text]}]
-  (let [e (ext name)]
-    (cond
-      (contains? keep-names name) {:kind (if (= e ".cljc") :cljc :clj) :to-ae false :out name}
-      (#{".clj" ".cljc"} e)
-      (cond
-        keep-ext {:kind (keyword (subs e 1)) :to-ae false :out name}
-        ;; data_readers: Arbace reads data_readers.ae, .clj and .cljc and merges them, so one
-        ;; that would collide keeps its name rather than being left out
-        (= "data_readers" (base name))
-        (if (or (contains? siblings "data_readers.ae")
-                (and (= e ".cljc") (contains? siblings "data_readers.clj")))
-          {:kind (keyword (subs e 1)) :to-ae false :out name}
-          {:kind (keyword (subs e 1)) :to-ae true :out "data_readers.ae"})
-        (contains? siblings (str (base name) ".ae"))
-        {:skip (str (base name) ".ae exists, which Arbace's reader prefers")}
-        (and (= e ".cljc") (contains? siblings (str (base name) ".clj")))
-        {:skip (str (base name) ".clj is translated instead, as the reader prefers it")}
-        :else {:kind (keyword (subs e 1)) :to-ae true :out (str (base name) ".ae")})
-      (= e ".java") {:kind :java :to-ae false :out name}
-      (some #(str/ends-with? name %) text) {:kind :text :to-ae false :out name}
-      (= e ".class") {:skip "a class file (AOT output) cannot be translated"}
-      :else {:copy true})))
+  in place), {:skip REASON} for one left out; :full true for a .cljc becoming a .ae under
+  read --full (its conditionals recorded)."
+  [^String name siblings {:keys [keep-ext text full]}]
+  (let [e (ext name)
+        p (cond
+          (contains? keep-names name) {:kind (if (= e ".cljc") :cljc :clj) :to-ae false :out name}
+          (#{".clj" ".cljc"} e)
+          (cond
+            keep-ext {:kind (keyword (subs e 1)) :to-ae false :out name}
+            ;; data_readers: Arbace reads data_readers.ae, .clj and .cljc and merges them, so one
+            ;; that would collide keeps its name rather than being left out
+            (= "data_readers" (base name))
+            (if (or (contains? siblings "data_readers.ae")
+                    (and (= e ".cljc") (contains? siblings "data_readers.clj")))
+              {:kind (keyword (subs e 1)) :to-ae false :out name}
+              {:kind (keyword (subs e 1)) :to-ae true :out "data_readers.ae"})
+            (contains? siblings (str (base name) ".ae"))
+            {:skip (str (base name) ".ae exists, which Arbace's reader prefers")}
+            (and (= e ".cljc") (contains? siblings (str (base name) ".clj")))
+            {:skip (str (base name) ".clj is translated instead, as the reader prefers it")}
+            :else {:kind (keyword (subs e 1)) :to-ae true :out (str (base name) ".ae")})
+          (= e ".java") {:kind :java :to-ae false :out name}
+          (some #(str/ends-with? name %) text) {:kind :text :to-ae false :out name}
+          (= e ".class") {:skip "a class file (AOT output) cannot be translated"}
+          :else {:copy true})]
+    ;; read --full: a .cljc becoming a .ae records its conditionals
+    (if (and full (= :cljc (:kind p)) (:to-ae p)) (assoc p :full true) p)))
 
 (defn print-plan
   "What becomes of the Arbace file named name when printed back as Clojure, among its siblings
@@ -116,10 +124,22 @@
       (= e ".class") {:skip "a class file cannot be printed"}
       :else {:copy true})))
 
+(defn print-refine
+  "The print plan p of the Arbace file named name, among its siblings, once its text s is known:
+  a .ae ending with read --full's record becomes the .cljc it was read from (x.cljc,
+  data_readers.cljc), unless a file of that name is beside it."
+  [p ^String name siblings ^String s]
+  (if (and (:to-ae p) (= ".ae" (ext name)) (rules/full? s))
+    (let [out (str (base name) ".cljc")]
+      (if (contains? siblings out)
+        {:skip (str out " is there, which this .ae read with --full would be printed as")}
+        (assoc p :kind :cljc :out out)))
+    p))
+
 (defn translate-text
   "Text s translated as a file of the plan p."
   [s p path skip]
-  (rules/translate s {:kind (:kind p) :to-ae (:to-ae p) :features #{:clj} :path path} skip))
+  (rules/translate s {:kind (:kind p) :to-ae (:to-ae p) :full (:full p) :features #{:clj} :path path} skip))
 
 (defn print-text
   "Arbace text s printed back as Clojure, as a file of the print plan p."
@@ -127,8 +147,8 @@
   (rules/print-text s {:kind (:kind p) :to-ae (:to-ae p) :features #{:clj} :path path} skip))
 
 (def ^:private verbs
-  {:read {:plan plan :text translate-text}
-   :print {:plan print-plan :text print-text}})
+  {:read {:plan plan :text translate-text :refine (fn [p _ _ _] p)}
+   :print {:plan print-plan :text print-text :refine print-refine}})
 
 (defn- files
   "[root-dir relative-path] of every file under src (a file: its directory and its name)."
@@ -149,7 +169,7 @@
   ([sources out opts] (run :read sources out opts))
   ([verb sources out opts]
    (let [skip (:skip opts #{})
-         {plan :plan translate-text :text} (verbs verb)
+         {plan :plan translate-text :text refine :refine} (verbs verb)
          listing (memoize (fn [^File d] (set (.list d))))
          stats (atom {:translated 0 :to-ae 0 :copied 0 :skipped 0 :unchanged 0 :errors 0})]
      (doseq [src sources
@@ -158,7 +178,9 @@
              :let [f (io/file dir rel)
                    parent (.getParentFile f)
                    siblings (listing parent)
-                   p (plan (.getName f) siblings opts)
+                   p0 (plan (.getName f) siblings opts)
+                   s (when (:kind p0) (slurp f))
+                   p (if s (refine p0 (.getName f) siblings s) p0)
                    rel-out (let [d (.getParent (io/file rel))] (if d (str d "/" (:out p)) (:out p)))]]
        (cond
          (:skip p)
@@ -171,8 +193,7 @@
                  (io/copy f t)))
              (swap! stats update :copied inc))
          :else
-         (let [s (slurp f)
-               r (try (translate-text s p (str f) skip)
+         (let [r (try (translate-text s p (str f) skip)
                       (catch Exception e
                         (swap! stats update :errors inc)
                         (binding [*out* *err*] (println "repr-clojure: error in" (str f) "-" (ex-message e)))
@@ -207,7 +228,7 @@
   file it was made from and (:plans) its plan; :errors {rel message}, the files it could not
   translate."
   [verb t opts]
-  (let [{plan :plan translate-text :text} (verbs verb)
+  (let [{plan :plan translate-text :text refine :refine} (verbs verb)
         dirs (reduce (fn [m rel] (update m (parent-of rel) (fnil conj #{}) (name-of rel))) {} (keys t))]
     (reduce (fn [acc [rel x p r]]
               (cond (:skip p) acc
@@ -220,9 +241,12 @@
             {:tree (sorted-map) :from {} :plans {} :errors {}}
             ;; the files translated in parallel, the tree made in order
             (pmap (fn [[rel x]]
-                    (let [p (plan (name-of rel) (dirs (parent-of rel)) opts)]
+                    (let [sibs (dirs (parent-of rel))
+                          p0 (plan (name-of rel) sibs opts)
+                          s (when (:kind p0) (if (string? x) x (slurp x)))
+                          p (if s (refine p0 (name-of rel) sibs s) p0)]
                       [rel x p (when (:kind p)
-                                 (try (translate-text (if (string? x) x (slurp x)) p rel (:skip opts #{}))
+                                 (try (translate-text s p rel (:skip opts #{}))
                                       (catch Exception e {:error (ex-message e)})))]))
                   t))))
 
@@ -262,7 +286,8 @@
                             p (get-in a [:plans out])]]
                   [rel (cond (nil? out2) {:why :missing}
                              ;; a .cljc read into a .ae: its :clj reading comes back, as a .clj
-                             (and (= :cljc (:kind p)) (:to-ae p) (not= :arbace (:from opts)))
+                             (and (= :cljc (:kind p)) (:to-ae p) (not (:full p))
+                                  (not= :arbace (:from opts)))
                              (let [want (under (parent-of rel) (str (base (name-of rel)) ".clj"))
                                    resolved (text/resolve-conditionals orig #{:clj})]
                                (cond (not= out2 want) {:why :name :as out2}
@@ -298,6 +323,7 @@
       (= a "--stdin") (recur more (assoc o :stdin true))
       (= a "--rules") (recur more (assoc o :rules true))
       (= a "--keep-ext") (recur more (assoc o :keep-ext true))
+      (= a "--full") (recur more (assoc o :full true))
       (= a "--ae") (recur more (assoc o :ae true))
       (= a "-q") (recur more (assoc o :quiet true))
       (= a "-v") (recur more (assoc o :verbose true))
@@ -378,7 +404,8 @@
       (throw (ex-info (str "unknown rules: " (str/join ", " (map name bad))) {})))
     (cond
       (:rules o) (print-rules)
-      (:stdin o) (let [p {:kind (:kind o) :to-ae (boolean (:ae o))}]
+      (:stdin o) (let [p {:kind (:kind o) :to-ae (boolean (:ae o))
+                          :full (and (:full o) (= :cljc (:kind o)) (boolean (:ae o)))}]
                    (print ((:text (verbs verb)) (slurp *in*) p "<stdin>" (:skip o)))
                    (flush))
       (empty? (:sources o)) (usage)
