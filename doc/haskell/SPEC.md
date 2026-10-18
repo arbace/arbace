@@ -1436,7 +1436,7 @@ survey's E3).
 ### 10.9 As built: R6 (2026-10-18)
 
 [HASKELL-NOTES.md](HASKELL-NOTES.md), "R6", records the build; what it changes in this text
-(HR21-HR25, built as recommended, for the user's decision):
+(HR21-HR24 built as recommended, HR25 a follow-up; for the user's decision):
 
 - **The corpus (§9.4)**: the 90 `.hsc` modules of R1's and R5's packages (26 of `base` and
   `ghc-internal`, 64 of the others) and their 25 boot files (24 of `ghc-internal`, `filepath`'s

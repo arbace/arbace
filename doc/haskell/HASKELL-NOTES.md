@@ -987,7 +987,7 @@ bin/repr-haskell roundtrip --iface --text --layout
 bin/repr-haskell test                # step 8: test/haskell/r6/
 ```
 
-### Choices for the user (HR21-HR25; built as recommended)
+### Choices for the user (HR21-HR24 built as recommended; HR25 a follow-up)
 
 - **HR21 The literate modules of the corpus.** (a) As built: the four `Setup.lhs` scripts of
   `libraries/` as entries `PKG-Setup`, Main modules compiled against the installed `Cabal`, and
