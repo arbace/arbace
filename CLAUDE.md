@@ -119,9 +119,11 @@ Prior art:
     against `rustc-dev` fetched as an apk into `.tmp/` and pinned by `tools/rsdump/apks.sha256`;
     `bin/repr-rust read`, `print`, `roundtrip` (rustc's trees and lines; `--iface`: rustdoc's JSON
     of the crates, without spans; `--text`: mode `:full` printed back to the original text, byte
-    for byte), `test`; corpus std's five
-    crates of `rust-src` 1.99.1, `test/rust/corpus-rustc-1.99.1.edn`), evaluated from the checkout,
-    not embedded.
+    for byte; `--pretty`: the forms without positions in the pretty layout, their trees), `test`;
+    corpus std's five crates of `rust-src` 1.99.1, `test/rust/corpus-rustc-1.99.1.edn`, and since
+    RR4 the rest of `library/`, the compiler and a pinned crate set (`-library`, `-compiler`,
+    `corpus-crates-2026-10-18.edn`, its `.crate` files pinned by `test/rust/crates-2026-10-18.sha256`;
+    `roundtrip ... all`)), evaluated from the checkout, not embedded.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
@@ -217,9 +219,10 @@ Prior art:
   (`bin/repr-haskell roundtrip --iface --text --layout`: GHC's trees and lines over GHC 9.14.1's
   boot libraries, in the braces and the layout layouts, then their interfaces compiled at `-O1`,
   then mode `:full` printed back byte for byte, and `test`; on the host's GHC), repr/clojure's
-  (`bin/repr-clojure check`, `--suite`, `--roundtrip`), repr/rust's (`bin/repr-rust roundtrip --iface --text`: rustc's trees and
-  lines over std's five crates, then rustdoc's JSON of the crates without spans, then mode `:full`
-  printed back byte for byte, and `test`; on the host's rustc), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
+  (`bin/repr-clojure check`, `--suite`, `--roundtrip`), repr/rust's (`bin/repr-rust roundtrip --iface --text --pretty`: rustc's trees and
+  lines over std's five crates, then rustdoc's JSON of the crates without spans, then the pretty
+  layout's trees, then mode `:full` printed back byte for byte, and `test`; on the host's rustc;
+  `REPR_RUST_CORPORA=all` adds RR4's corpora), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; goi's checker (`bin/goi
   annotations`, `test --gc`, after repr/go's round trips); Go's toolchain as forms
   (`bin/toolchain-vendor verify`, `check`). Run it when the Java forms'
