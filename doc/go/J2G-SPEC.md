@@ -1533,7 +1533,9 @@ protocol:
 - **A compiled fn's code** (`:c2j/code`, standalone SA156, SA158, SA159): not a Java object in
   Go (a header word, its arities' methods, none of `Object`'s protocol, no member table, no
   instance check, registered by the package's static `jrt.CodeDecl` table); its `C_New`
-  initializes its nest's top-level class, whose statics its methods then read unguarded.
+  initializes its nest's top-level class, whose statics its methods then read unguarded. A cast
+  to it (a call of a var linked to its code, Futamura F5, doc/FUTAMURA-SURVEY.md, "F5 as built",
+  after the fn's class was compared) is Go's assertion, `jrt.As[*C]`.
 
 - **Classes initialized at start** (Futamura F4, 2026-10-17; doc/FUTAMURA-SURVEY.md, "F4 and
   F2's j2g fixes as built"). `arbace.j2g.start/classes` lists, by their Go names, the classes
