@@ -1580,3 +1580,208 @@ benchmark's best over at least 1 s and 3 runs; amd64, the machine shared (load 5
 
 Scratch: `.tmp/f6-prim/` (`bench.bash` and `rounds.bash`, the programs `b-*`, the rounds
 `rounds*/` and `r-*.txt`, `table-final.md`).
+
+## F7 as built (2026-10-18)
+
+F7 (a) as decided, the test of F1 (a): on the branch `f7-defnode` (from main `7fb90fc8`), a
+`defnode` form for the five kinds the proposal named, each defined once and generating both the
+evaluator's `Code` nodes and c2j's emitter, which replace the hand-written pairs of those kinds.
+
+### The design
+
+- **Where it lives.** `arbace/c2j/node.ae` (`arbace.c2j.node`): the `defnode` macro and the two
+  readings of a definition. The definitions themselves are in `arbace/c2j/emit.ae`, where the
+  emitters were (a section "node kinds defined once"). The emitter's reading is the macro's
+  expansion: `emit-KIND`, an ordinary fn of the back end, compiled with it. The evaluator's
+  reading is `node/code-forms`, run by `test/c2j/gen_nodes.ae`, which writes
+  `arbace/lang/go/CompilerNodes.ae` (a Go-build variant of `Compiler`, as `CompilerOps.ae` and
+  `CompilerAOTFn.ae` were): the kinds' `Code` classes and `CodeNodes/compile`, their
+  construction, which `CodeCompiler.compile` asks first. The evaluator half has to be generated
+  text: the runtime's Java forms are read by j2g, not evaluated, so a macro cannot run inside
+  `Compiler.ae`. The back end is the right owner: its namespace is evaluated (macros run), and
+  it already held the templates the two halves now share (F3's fast paths). `gen_nodes.ae`
+  replaces `test/j2g/eval_ops.ae` (its method listing kept), and `CompilerNodes.ae`
+  `CompilerOps.ae`.
+- **A definition** is a binding vector and a template. The bindings are the node's children
+  (`child`, `children` with the largest count the evaluator makes a class for) and its statics
+  (`static T form`: made when the node is, by the same form in both halves: a Java form in the
+  evaluator's construction, a Clojure form in the emitter, over the node's fields; it sees a node
+  through `Compiler$AST`, the analysis' public face, since `Compiler$Expr` is not public:
+  `AST/literal` was added for it). The template is a Java form, the node's value in channel
+  `ch`, with a few staged forms: `(run CH x)`, `(static-if s a b)`, `(static-case ch ...)`,
+  `(call-site line [s init ...] body)`, `(eval-only ...)`, `run-all`/`run-args` with `splice`
+  and `array-of`, `box-as`, `call-static`, `get-place`/`set-place`, `let`. The emitter quotes
+  the template (children become `emit`/`emit-unboxed` of them, statics `lift`ed into literals or
+  pool constants); the evaluator runs it (children become `(.run x f)`, `.runLong` ..., statics
+  fields; a `static-if` on a static boolean, `many?` or a place's clearing becomes one class per
+  case, Truffle's specializations; the channels become `run`, `runLong`, `runDouble`, `runBool`).
+  This works without translating anything because both halves are Java forms: the evaluator is
+  written in them and c2j emits them, so the template is literally the code of both.
+- **The five kinds** (66 lines with their docstrings):
+
+| kind | definition | the evaluator's classes | the emitter's own |
+|---|---|---|---|
+| `const` (8 literal Exprs) | `v`, its long and double statics; `(static-case ch :o v :j (static-if num lv ...) ...)` | `CodeConst`, `CodeConstNum` | `lift` (Java forms' spelling of nil, strings, booleans, empty collections) |
+| `local` | `(static-if (clears? at) (let [t (get-place at :o)] (set-place at nil) t) (get-place at ch))` | 8 (`CodeLocal`, `CodeLocalClear`, `CodeLocalLong` ...): the template over `eval-places`, a table of the frame's places | `local-place` (fields, `this`, F6's workers' boxes, locals) |
+| `if` | `(if (static-if z (run :z test) (run :o test)) (run ch thn) (run ch els))` | `CodeIf`, `CodeIfZ` | none |
+| `static-call` | the arguments bound in order, the line, then `(box-as ch m (call-static m as))` | `CodeOp0`-`3`: a switch per arity over the 579 listed methods (a static of finite domain, enumerated: "the trick") | `direct-static?` (which methods), `typed-args` (conversions) |
+| `invoke` | `(call-site line [g (cast IFn (run :o fx)) as (run-all :o xs)] (eval-only (when clear (CodeRun/clearThis f))) (static-if (many? xs) (.applyTo ...) (.invoke g (splice as))))` | `CodeInvoke0`-`20`, `CodeInvokeN` | `invoke-linked` (protocol calls, F5/F6's linked calls), tried first |
+
+`call-static` is one builder for both halves: `numbers-fast`, F3's fast paths, now called by the
+generator too, so the evaluator's calls of `Numbers`' boxed operations got them by construction.
+
+### Checks
+
+- **The emitted code.** The shipped namespaces' tree compiled by main's c2j and by the branch's,
+  on the same executable: the same byte for byte but for c2j's own namespaces (their source
+  changed) and the constant pools of five namespaces of j2g (`dyn`, `dyncf`, `embed`, `main`,
+  `out`): a quoted form inside a macro that copies its body (`for`'s chunked and plain paths)
+  was one constant object for both copies, and is now one per copy, as the evaluator always had
+  it. The shared static showed the halves held different constants: c2j emitted the analyzer's
+  form (`ConstantExpr.v`), the evaluator `Evaluator/constant` of it (rebuilt as the JVM's
+  `emitValue` makes it), each copy its own; they are now the evaluator's in both (F7.4). The
+  benchmarks' and the F5/F6 corpora's code (`bench.eval`, `prim_fns.ae`, `link_redef.ae`, and a
+  corpus of the five kinds' shapes) is the same byte for byte.
+- **The evaluator** changes by what the shared definitions brought: F3's fast paths in
+  `CodeOp1`/`CodeOp2`, direct `invoke` for 9 to 20 arguments (was `applyTo` past 8), one class
+  per arity, `if` and constant variants without the run-time flags, `RT.afterLoad` listed (the
+  committed `CompilerOps.ae` predated it), booleans boxed by `Boolean/valueOf`.
+- `bin/diffcheck` (in the essential gate): 12,731 of 12,754 cases agree, 23 disagree, all
+  recorded, 0 new, 0 now passing; the essential gate passed (the smoke test; Clojure's suite
+  20,506 of 20,520, no regressions; the oracle, 53 known mismatches, 0 new; goi's 266 programs).
+  `bin/arbace-go --fixpoint`: G1 = G2 = G3 byte for byte (132,059,296 bytes, sha256
+  `77c5703f...`), stage 0 different from G1 until a re-seed.
+- One bug found on the way, by the first build: the static call's domain index asked
+  `CodeRun/op` of an unresolved method (nil): the evaluator's NullPointerException in the
+  closure compiler, at the compile of the first reflective static call.
+
+### Measured
+
+As F6 (SA139's way, `.tmp/f7-defnode/bench.bash`): `test/bench/eval-bench.ae` as `bench.eval`
+with the F5/F6 corpora compiled with the runtime's namespaces into a measurement program by one
+executable (the branch's), with each tree's c2j, j2g and `bin/build-go`; before: main
+`7fb90fc8`, after: the branch; ms, the best of five interleaved rounds (two sets, the same to
+1-2%), amd64, the machine shared (load 6-19). Compiled (`Compiler$AOT/load`), and evaluated
+(`load-file` of the source: the closure compiler's `Code` nodes), the best of three rounds:
+
+| benchmark | compiled before | after | | evaluated before | after | speed-up |
+|---|---:|---:|---|---:|---:|---:|
+| `fib` | 0.56 | 0.59 | 0.95 | 13.88 | 7.66 | 1.81 |
+| `fib-prim` | 0.35 | 0.35 | 1.00 | 8.90 | 8.46 | 1.05 |
+| `loop-long` | 4.37 | 4.37 | 1.00 | 71.31 | 66.34 | 1.07 |
+| `loop-double` | 0.53 | 0.53 | 1.00 | 13.63 | 11.94 | 1.14 |
+| `dotimes-array` | 9.07 | 9.03 | 1.00 | 24.04 | 23.38 | 1.03 |
+| `reduce-range` | 37.81 | 37.66 | 1.00 | 37.87 | 38.15 | 0.99 |
+| `reduce-fn` | 11.53 | 11.08 | 1.04 | 42.66 | 29.89 | 1.43 |
+| `vector-conj` | 16.95 | 16.61 | 1.02 | 26.36 | 26.48 | 1.00 |
+| `map-assoc-get` | 18.49 | 18.42 | 1.00 | 23.87 | 22.68 | 1.05 |
+| `keyword-map` | 7.15 | 6.23 | 1.15 | 25.86 | 18.26 | 1.42 |
+| `str-build` | 6.01 | 6.01 | 1.00 | 11.90 | 11.79 | 1.01 |
+| `seq-ops` | 32.29 | 32.39 | 1.00 | 34.25 | 35.03 | 0.98 |
+| `lazy-walk` | 17.96 | 17.75 | 1.01 | 25.22 | 22.89 | 1.10 |
+| `transduce` | 14.14 | 13.17 | 1.07 | 21.42 | 17.70 | 1.21 |
+| `into-xform` | 11.82 | 11.17 | 1.06 | 11.91 | 11.09 | 1.07 |
+| `protocol` | 4.86 | 4.76 | 1.02 | 131.21 | 123.14 | 1.07 |
+| `multimethod` | 7.73 | 7.59 | 1.02 | 20.13 | 18.69 | 1.08 |
+| `destructure` | 20.28 | 20.07 | 1.01 | 68.03 | 56.65 | 1.20 |
+| `closures` | 15.85 | 17.07 | 0.93 | 54.65 | 47.08 | 1.16 |
+| geometric mean | 7.34 | 7.24 | 1.01 | 27.31 | 24.03 | 1.14 |
+
+Compiled: the benchmarks' and `arbace.core`'s Java forms and Go are the same in both programs
+(the Go differs in the runtime's `lang` package, j2g's temporaries' numbering and c2j's own
+packages), so `fib`'s 5% and `closures`' 7% (both sets) and `keyword-map`'s 15% the other way
+are layout, as in F5.2. Evaluated: 14% faster in the geometric mean, `fib` 1.8 times (F3's fast
+paths), nothing slower. The measurement program 194,981,934 → 196,764,393 bytes (+0.9%: the
+switch cases' fast paths, 22 invoke classes, `arbace.c2j.node` compiled).
+
+### Lines
+
+| | before | after |
+|---|---:|---:|
+| the five kinds, both halves, by hand: their `Code` classes and construction (`Compiler.ae`), `eval_ops.ae`'s templates, their emitters (`emit.ae`) | about 370 | |
+| the definitions (`defnode`s) | | 66 |
+| each half's own parts the definitions name (`lift`, `prim-chan`, `local-place`, `direct-static?`, `call-static`; `eval-places`) | | about 90 |
+| the machinery: `arbace.c2j.node` but its place table (the macro, the evaluator's reading), and `gen_nodes.ae`'s printer | | about 610 |
+
+In all `git diff --numstat` counts 961 lines added and 489 removed by hand (generated files
+apart: `CompilerOps.ae` 1,670 lines out, `CompilerNodes.ae` 7,230 in, pretty-printed): 472
+more. The machinery is a fixed cost; per kind a definition is 8-16 lines where the pair was 30
+to 110. It would pay back after some 10 more kinds of the size of these.
+
+### What was awkward
+
+- **Byte-identical emitted code** (the cheapest proof of the emitter half) constrains the
+  expansion: values made in the hand-written order (the pool's constants and the temporaries are
+  numbered in order of creation), laziness where the hand-written code was lazy (`invoke`'s
+  arguments), and `run-args` delayed so that F3's temporaries are named before the operands are
+  emitted. A definition free of that history would not need it.
+- **Locals** are the binding-time boundary itself: where a local lives is each half's own (the
+  frame's slots, prims, closed-over arrays and `Dyn` fields; Java locals, fields, `this`, F6's
+  boxes). The definition shares four lines (read, or read and clear); the rest is two tables,
+  as long as the classes were. The choice of a place stays hand-written in `CodeCompiler.local`
+  and `localUse`, because fns' closed-over values (`fetchers`) need it without an Expr.
+- **What only one half does** needs escapes: `eval-static` and `eval-only` (the evaluator's
+  frame line and tail-call clearing), `:emit-first` (c2j's linked and protocol calls, F5/F6:
+  speculation the evaluator does not have, still checked by F2 only), per-half statics (which
+  static methods are direct: every public one for c2j, a finite listed domain for the evaluator,
+  which cannot call a method it has no case for).
+- **The static forms** must be the common subset of Clojure and Java forms, and see the node
+  through `Compiler$AST` (`Expr` is not public): `AST/literal`.
+- **The generated file** has to be regenerated by hand after a definition changes, on an
+  executable with the checkout's `Numbers`, `RT`, `Util`, `Math` (the committed `CompilerOps.ae`
+  had gone stale that way: `RT.afterLoad`); nothing checks it (F7.3).
+
+### The remaining kinds
+
+- **Expressions without storage or control** (about 15): var reads, `the-var`, keyword
+  invokes, `with-meta`, the collection literals, `instance?`, `throw`, monitors, `str` concat,
+  static fields, `import`, `new`, instance fields and methods. They go as `if` and `invoke` did,
+  10-15 lines each, the hand-written pairs some 450 lines. Two would change a half: a var read
+  (c2j decides dynamic or not when compiling, SA138; the evaluator at each read: one definition
+  makes the evaluator decide it when the node is made, as the compiled code does), and the
+  instance calls (the evaluator calls through member tables' invokers, not directly: a per-half
+  `call-method` like `call-static`'s domain).
+- **Storage and control** (`let`, `loop`, `recur`, `letfn`, `fn`, `reify`, `deftype`, `try`,
+  `case`, `def`, `set!`): the evaluator's frames, recur flag and jump-free loops against Java
+  forms' locals, `loop`/`recur` and exceptions. Like locals, each would be a few shared lines
+  over per-half primitives, and the shapes differ for good reasons (the survey's §4 (f) risk):
+  little gained by construction.
+
+### Recommendation
+
+- **F1: (a) for the expression kinds, (c) for storage and control.** The evidence: the
+  definitions made the two halves of five kinds one text, checked as equal by diffcheck,
+  the suite and the oracle; the emitted code stayed byte for byte (but for the constants'
+  identity the shared static exposed); the evaluator gained what one half had (F3's fast paths:
+  evaluated `fib` 1.8 times, the geometric mean 14%) with nothing slower, and a divergence
+  between the halves came to light (the constants). Against it: the machinery costs more lines
+  than five kinds save, locals did not stage, and what is half-specific (speculation, frames)
+  stays hand-written behind escapes, with F2 as its only check. Staging pays where the halves
+  compute the same thing in the same shape; F2 remains the check for the rest.
+- **F8: (b), the Java forms' pair kept as two implementations with F2's check.** F7 worked
+  because the evaluator and c2j's output are the same language (Java forms), so a template is
+  the code of both. In the Java forms' pair the interpreter (`CF`, Java forms) and j2g's output
+  (Go forms) are not: a shared template would need j2g to translate it, which makes j2g's code
+  translation derived from the interpreter through j2g itself, the second projection's shape,
+  a design study rather than a defnode (F8 (a) stays later, as decided).
+
+### Proposals (the user's to decide)
+
+- **F7.1 Merge.** (a) Merge the branch (the five kinds staged, the evaluator's gains), and
+  convert the expression kinds above as their code is touched; (b) merge and convert them all
+  now; (c) keep the branch as the experiment, main's pairs hand-written. *Recommended: (a)*.
+- **F7.2 The evaluator's changes that came with it** (F3's fast paths, direct `invoke` to 20
+  arguments, `RT.afterLoad` listed, `CompilerOps.ae`'s generator replaced). (a) Kept with the
+  merge; (b) the evaluator's half restricted to what it did before. *Recommended: (a)*: they are
+  the point of one definition.
+- **F7.3 A check that `CompilerNodes.ae` is current.** (a) `gen_nodes.ae` run by the essential
+  gate on the gate's executable (seconds) and compared with the committed file; (b) by hand, as
+  `CompilerOps.ae` was. *Recommended: (a)*.
+- **F7.4 Constants' identity.** (a) As built: each constant node's value the evaluator's
+  (`Evaluator/constant`), so a quoted form a macro copies is one object per copy, compiled and
+  evaluated alike; (b) the analyzer's form shared by the copies in both halves (the evaluator
+  would no longer rebuild constants as `emitValue` makes them). *Recommended: (a)*.
+
+Scratch: `.tmp/f7-defnode/` (`bench.bash`, `rounds.bash`, `rounds-eval.bash`, `table.py`,
+`emitcmp.bash` and `tree.bash` for the emitted code's comparison, the rounds `r-*`, `re-*`,
+`r1/`).
