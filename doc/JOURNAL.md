@@ -1256,3 +1256,29 @@ Open proposals, built as recommended: RR-P6, positions as unnamed `:toks` paired
 Haskell's HR9/HR10), not SPEC §9.2's named keys per node; RR-P7, only the commas that differ
 from the printer's recorded as data (`:rs/punct`, `:rs/drop`); RR-P8, the `;` comments' text as
 repr/go's (the text after `//`, block comments' lines trimmed).
+
+## 2026-10-18: repr/haskell R6 merged
+
+R6 (doc/haskell/SPEC.md §10.9, "As built: R6"; doc/haskell/HASKELL-NOTES.md, "R6"; branch
+`repr-haskell-r6`, `da3f92d4`, `539bb1b6`): `.hsc`, `.lhs`, `.hsig` and boot files. Version 3 of
+`tools/hsdump` runs hsc2hs on a `.hsc` and takes its output as the module (`:hsc2hs`). It runs
+unlit through GHC's driver for `.lhs`, and parses `.hsig` with `parseSignature`. In `:full`, a
+`.hsc` module's positions are the places in its own text, because GHC's repeat in EPoll and Poll.
+A `.lhs`'s literate lines and bird tracks are kept as comments. The converter has
+`:kind :boot`/`:sig` (namespaces `hs.M.boot`, `hs.M.sig`); the printer writes `signature` and
+bird tracks; the interface level compares `.hi-boot`.
+
+The corpus grew from 1,226 to 1,345 modules (90 `.hsc`, 25 boot files, 4 `Setup.lhs`): tree
+and interface levels in both layouts equal for all 1,345. The text level is byte-identical for
+1,333, all 119 of R6's included; the `:full` trees are equal for 1,327. There are 3 new known
+differences: `.hsc` modules whose hsc2hs output keeps a CPP directive, with the same cause as
+HR12's; 18 in all. R1-R5's forms and printed modules are byte for byte as before. `bin/gate
+--full`'s step is unchanged (542 s). The essential gate passed on the branch; `bin/repr-haskell
+test` (31 of 31) passed after the merge.
+
+Open proposals, built as recommended: HR21, the four `Setup.lhs` in the corpus, signatures by a
+test case only (`libraries/` has none outside `cabal-testsuite`); HR22, `:hsc2hs` apart from
+`:cpp` (SPEC §8.5 had it inside); HR23, `:full` positions as places in the text for `.hsc`;
+HR24, the bird-track printing. HR25, recommended as a follow-up and not built: HR23's
+positions for R5's alex output `Distribution.Fields.Lexer`, likely removing its known
+difference.
