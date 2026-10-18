@@ -48,6 +48,7 @@
 
 (def path-pat #"(?m)^\s*(?:#\[\s*path\s*=|(?:[^/\n]*\bcfg_attr\([^\n]*,\s*)?path\s*=)\s*\"([^\"]+\.rs)\"")
 (def include-pat #"(?m)^\s*include!\(\s*\"([^\"]+\.rs)\"\s*\)")
+(def text-pat #"\binclude_(?:str|bytes)!\(\s*\"([^\"]+\.rs)\"\s*\)")
 
 (defn named
   "The files of every (the set) that a pattern names in the files fs (relative to base)"
@@ -75,6 +76,13 @@
           (if-let [[_ k v] (re-find #"^([A-Za-z0-9_.\-\"]+)\s*=\s*(.*)$" l)]
             (let [k (s/replace k "\"" "")
                   v (s/trim v)
+                  ;; an array over several lines, joined
+                  [v ls] (if (and (s/starts-with? v "[") (not (s/includes? v "]")))
+                           (loop [v v ls (rest ls)]
+                             (if (or (empty? ls) (s/includes? (first ls) "]"))
+                               [(str v " " (s/trim (or (first ls) ""))) ls]
+                               (recur (str v " " (s/trim (first ls))) (rest ls))))
+                           [v ls])
                   v (cond
                       (re-find #"^\"([^\"]*)\"" v) (second (re-find #"^\"([^\"]*)\"" v))
                       (re-find #"^\{\s*workspace\s*=\s*true\s*\}" v) :workspace
@@ -161,7 +169,14 @@
                      roots (vec (sort (distinct (concat (filter std-root fs) (filter (set fs) (:targets p))))))]]
            (assoc p :files fs :roots roots :ns-crate ns-crate
                     :path-files (vec (named base fs every path-pat))
-                    :include-files (vec (named base fs every include-pat)))))))
+                    :include-files (vec (named base fs every include-pat))
+                    ;; .rs files the library reads as text (a doc of include_str!: an example),
+                    ;; named by its files under src/ but its tests: the interface level's printed
+                    ;; side keeps them as they are
+                    :text-files (vec (named base (filter #(and (s/starts-with? % (if (= d "") "src/" (str d "/src/")))
+                                                               (not (re-find #"(^|/)tests(\.rs$|/)" %)))
+                                                         fs)
+                                            every text-pat)))))))
 
 ;;; The interface level of RR4's corpora (SPEC §11.3): each crate's dependencies from its
 ;;; Cargo.toml, for this target (x86_64-alpine-linux-musl)
@@ -294,7 +309,10 @@
                                     cands)]]
                   (if (= 1 (count cands)) (str ext "=" (first cands)) {:missing (:package d) :cands cands}))
             bad (filter map? res)
-            envs (sort (distinct (for [f (:files c) [_ e] (re-seq #"\benv!\(\s*\"([A-Z_0-9]+)\"" (slurp (str base "/" f)))] e)))
+            ;; the crate's own env!(...), and rust's build's for every crate (macros of other
+            ;; crates expand env!("CFG_RELEASE") in theirs)
+            envs (sort (distinct (concat (keys env-values)
+                                         (for [f (:files c) [_ e] (re-seq #"\benv!\(\s*\"([A-Z_0-9]+)\"" (slurp (str base "/" f)))] e))))
             root (or (first (filter #(contains? #{(str (:dir c) "/src/lib.rs") (str (:dir c) "/lib.rs")} %) (:roots c)))
                      (first (filter #(s/ends-with? % "/lib.rs") (:roots c))))]
         (cond
@@ -312,6 +330,7 @@
   (println (str "   :roots " (pr-str (:roots c))))
   (println (str "   :path-files " (pr-str (:path-files c))))
   (println (str "   :include-files " (pr-str (:include-files c))))
+  (when (seq (:text-files c)) (println (str "   :text-files " (pr-str (:text-files c)))))
   (when-let [i (:cargo (:iface c))]
     (println (str "   :iface {:cargo " (pr-str i) (when-let [fs (:features (:iface c))] (str " :features " (pr-str fs))) "}")))
   (when-let [i (when-not (:cargo (:iface c)) (:iface c))]
@@ -486,7 +505,8 @@
                                :files (mapv #(str f "/" %) (:files c))
                                :roots (mapv #(str f "/" %) (:roots c))
                                :path-files (mapv #(str f "/" %) (:path-files c))
-                               :include-files (mapv #(str f "/" %) (:include-files c)))))]
+                               :include-files (mapv #(str f "/" %) (:include-files c))
+                               :text-files (mapv #(str f "/" %) (:text-files c)))))]
     (header "crates-2026-10-18"
             ["repr/rust's pinned crate set (doc/rust/SPEC.md §11.4; doc/rust/RUST-NOTES.md, \"RR4\"; the survey's"
              "E9): the newest version of each of the 402 crates in the host's Cargo cache on 2026-10-18, each"

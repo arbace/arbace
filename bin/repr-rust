@@ -14,7 +14,12 @@
 #                                 the apks rustc-dev and rust-src into .tmp/repr-rust/apks/ (apk fetch
 #                                 once when missing, checked by their SHA-256), each extracted into a
 #                                 directory of its own (default CORPUS rustc-1.99.1:
-#                                 test/rust/corpus-rustc-1.99.1.edn, std's five crates in rust-src)
+#                                 test/rust/corpus-rustc-1.99.1.edn, std's five crates in rust-src);
+#                                 for a crate set (RR4: crates-2026-10-18), its .crate files, pinned
+#                                 by SHA-256 (test/rust/crates-2026-10-18.sha256), into
+#                                 .tmp/repr-rust/crates/ and extracted there. The corpora: rustc-1.99.1,
+#                                 rustc-1.99.1-library (the rest of library/), rustc-1.99.1-compiler
+#                                 (usr/src/rustc/compiler), crates-2026-10-18 (the pinned crate set)
 #   bin/repr-rust corpus list [CORPUS]
 #                                 the corpus's files, one per line: crate, file
 #   bin/repr-rust dump [--full] --corpus [CORPUS]
@@ -32,11 +37,13 @@
 #   bin/repr-rust read [--full] --corpus [CORPUS]
 #                                 dump the corpus and convert it into .tmp/repr-rust/forms/CORPUS/
 #                                 (CORPUS-full/; SPEC §2.1); report .tmp/repr-rust/forms/CORPUS.report.edn
-#   bin/repr-rust print [--layout lines|full] [-o DIR] FORMS.ae...
+#   bin/repr-rust print [--layout lines|pretty|full] [-o DIR] FORMS.ae...
 #                                 the printer (SPEC §9.4): one .rs per forms file into DIR (default
 #                                 .tmp/repr-rust/printed), at its rs/file's :path; mode :lines' layout,
-#                                 or the full layout of forms of mode :full (the original text)
-#   bin/repr-rust roundtrip [--only REGEX | --iface] [--text | --text-only] [CORPUS]
+#                                 the pretty layout (any forms, their positions ignored: RR4), or the
+#                                 full layout of forms of mode :full (the original text)
+#   bin/repr-rust roundtrip [--only REGEX | --iface] [--text | --text-only] [--pretty | --pretty-only]
+#                           [CORPUS... | all]
 #                                 the round trip's tree level (SPEC §11.1, §11.2; RR1) over the
 #                                 corpus: dump, read, print into .tmp/repr-rust/cand/CORPUS/, and
 #                                 compare rustc's trees (rsdump tree: the parsed tree's Debug text
@@ -58,13 +65,23 @@
 #                                 mode :full, printed in the full layout into
 #                                 .tmp/repr-rust/cand/CORPUS-full/ and compared byte for byte with the
 #                                 originals (test/rust/roundtrip-CORPUS-text-known.edn), then those
-#                                 printed files' trees and lines; --text-only: that level alone
+#                                 printed files' trees and lines; --text-only: that level alone.
+#                                 With --pretty (RR4), the forms of mode :lines without their
+#                                 positions printed in the pretty layout into
+#                                 .tmp/repr-rust/cand/CORPUS-pretty/, their trees compared with the
+#                                 originals' (test/rust/roundtrip-CORPUS-pretty-known.edn);
+#                                 --pretty-only: that level alone. Several corpora one after the
+#                                 other, all: the four. A crate set's interface level is Cargo's
+#                                 (crates_docs: the lock test/rust/CORPUS.lock, a directory source
+#                                 of the pinned .crate files)
 #   bin/repr-rust test            the spec's cases (test/rust/; bin/lib/repr-rust/test): the reader's
 #                                 samples, the worked example converted and its round trip, the
-#                                 interface level's cases, mode :full's cases
+#                                 interface level's cases, mode :full's cases, edition 2015's, the
+#                                 pretty layout's
 #
 # Environment: REPR_RUST_APKS (a directory of apks to take the pinned ones from, checked by their
-# SHA-256, before apk fetch); REPR_RUST_JOBS (parallel helper and converter runs, default the cores, at most
+# SHA-256, before apk fetch); REPR_RUST_CRATES (a directory of .crate files to take the pinned ones
+# from, before the host's Cargo cache and crates.io); REPR_RUST_JOBS (parallel helper and converter runs, default the cores, at most
 # 32); ARBACE_HOST_EXE (the Arbace executable, bin/lib/host.bash; default stage 0).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -266,6 +283,15 @@ dump_corpus() {
   done < <(edition_plan "$c")
 }
 
+# prune_dumps DUMPS LOG: the dumps of the files the conversion's log names no error or misread for
+# removed (RR4's corpora dump to gigabytes: the crate set's 1.5 GB, 1.9 GB with --full); the
+# failing files' stay, for bin/repr-rust read
+prune_dumps() {
+  local keep
+  keep=$(sed -n 's/^\(error\|misread\) \([^ ]*\.edn\) .*/\2/p' "$2")
+  find "$1" -name '*.edn' -type f | grep -vxF -e "${keep:-/nothing/}" | xargs -r rm -f
+}
+
 read_files() {
   arbace_tool -m arbace.repr.rust read --pin "$root/tools/rsdump/RUSTC_VERSION" "$@"
 }
@@ -314,6 +340,7 @@ roundtrip_one() {
   read_files --jobs "$jobs" -o "$forms" --report "$forms.report.edn" --root "$dumps" --corpus "$(corpus_file "$c")" \
     ${only:+--only "$only"} > "$forms.log" 2>&1 ||
     { grep -v '^error\|^misread' "$forms.log" | tail -5 >&2; grep -c '^error\|^misread' "$forms.log" | sed 's/$/ files failed to convert (see the report)/' >&2; }
+  prune_dumps "$dumps" "$forms.log"
   t2=$(date +%s)
   echo "== repr-rust roundtrip $c: print ($((t2 - t1)) s converting)" >&2
   rm -rf "$cand" "$cand.trees" "$cand.trees.err"; mkdir -p "$cand"
@@ -404,6 +431,7 @@ text_level() {
   read_files --full --jobs "$jobs" -o "$forms" --report "$forms.report.edn" --root "$dumps" --corpus "$(corpus_file "$c")" \
     ${only:+--only "$only"} > "$forms.log" 2>&1 ||
     { grep -v '^error\|^misread' "$forms.log" | tail -5 >&2; grep -c '^error\|^misread' "$forms.log" | sed 's/$/ files failed to convert (see the report)/' >&2; }
+  prune_dumps "$dumps" "$forms.log"
   t2=$(date +%s)
   echo "== repr-rust roundtrip $c: text level: print, the full layout ($((t2 - t1)) s converting)" >&2
   rm -rf "$cand" "$cand.trees" "$cand.trees.err"; mkdir -p "$cand"
@@ -485,10 +513,13 @@ iface_level() {
   echo "== repr-rust roundtrip $c: interface level (rustdoc's JSON of the originals and of the printed files)" >&2
   rm -rf "$ib" "$ib.report.edn"; mkdir -p "$ib"
   cp -rs "$srcroot/." "$ib/src"
+  # each corpus file a link to its printed file, but the .rs files a library reads as text
+  # (the corpus's :text-files: examples a doc include_str!s), which stay the originals
   while read -r _ f; do
     rm -f "$ib/src/$f"
     if [ -f "$cand/$f" ]; then ln -s "$cand/$f" "$ib/src/$f"; fi
-  done < <(corpus_plan "$c" | while IFS=$'\t' read -r n _ fs; do for f in $fs; do echo "$n $f"; done; done)
+  done < <(arbace_tool -e "(let [c (read-string (slurp \"$(corpus_file "$c")\"))]
+    (doseq [k (:crates c) :let [t (set (:text-files k))] f (:files k) :when (not (t f))] (println (:name k) f)))")
   if [ "$corpus_kind" = crates ]; then
     crates_docs "$c" "$ib" || return 1
   else
@@ -549,36 +580,50 @@ crates_docs() {
   cp "$lock" "$cw/ws/Cargo.lock"
   printf '[source.crates-io]\nreplace-with = "pinned"\n[source.pinned]\ndirectory = "%s"\n' "$cw/vendor" > "$cw/ws/.cargo/config.toml"
   while read -r f; do specs+=(-p "$f"); done < <(sed -n 's/^c[0-9]* = { package = "\([^"]*\)", version = "=\([^"]*\)".*/\1@\2/p' "$cw/ws/Cargo.toml")
-  rm -rf "$cw/target/doc"
-  (cd "$cw/ws" && CARGO_HOME=$cw/home CARGO_TARGET_DIR=$cw/target RUSTC_BOOTSTRAP=1 \
-     RUSTDOCFLAGS="-Zunstable-options --output-format json" \
-     cargo doc --offline --locked --no-deps --keep-going -j "$jobs" -vv "${specs[@]}") > "$cw/doc.log" 2>&1 || true
-  # each crate's rustdoc command, as cargo -vv prints it (`ENV=... rustdoc ...`, maybe on several lines)
-  rm -rf "$cw/cmds"; mkdir -p "$cw/cmds"
-  awk -v out="$cw/cmds" '
-    { if (!q) { if (index($0, "     Running `") != 1) next; b = substr($0, 15); q = 1 } else b = b "\n" $0 }
-    q && substr(b, length(b), 1) == "`" { q = 0; x = substr(b, 1, length(b) - 1)
-      if (x ~ / rustdoc --edition/ && match(x, /--crate-name [A-Za-z0-9_]+/)) { f = out "/" substr(x, RSTART + 13, RLENGTH - 13) ".sh"; print x > f; close(f) } }' "$cw/doc.log"
-  echo "== repr-rust roundtrip $c: interface level: $(ls "$cw/cmds" | wc -l) crates documented by cargo, again from the originals and the printed files" >&2
-  local pids=() k
-  while read -r name d; do
-    for k in orig cand; do
-      while [ "$(jobs -rp | wc -l)" -ge 32 ]; do wait -n || true; done
-      mkdir -p "$ib/$k/$name"
-      if [ ! -f "$cw/cmds/$name.sh" ]; then
-        echo "repr-rust: cargo did not document $name ($cw/doc.log)" > "$ib/$k/$name/$name.log"; continue
-      fi
-      cmd=$(cat "$cw/cmds/$name.sh")
-      if [ $k = orig ]; then cmd=${cmd//"$cw/vendor/$d"/"$srcroot/$d"}; else cmd=${cmd//"$cw/vendor/$d"/"$ib/src/$d"}; fi
-      cmd=${cmd//"-o $cw/target/doc"/"-o $ib/$k/$name.part"}
-      ( rm -rf "$ib/$k/$name.part"
-        if (cd "$cw/ws" && RUSTC_BOOTSTRAP=1 bash -c "$cmd") > "$ib/$k/$name/$name.log" 2>&1 && [ -f "$ib/$k/$name.part/$name.json" ]; then
-          mv "$ib/$k/$name.part/$name.json" "$ib/$k/$name/$name.json"
+  # cargo runs rustdoc through this wrapper: for a crate of the corpus (its manifest in the
+  # directory source), the same command twice more, its paths in the directory source made the
+  # corpus's extraction (orig/) and the mirror (cand/), its output IB/K/C/C.json and its log beside
+  cat > "$cw/rustdoc" <<'EOF'
+#!/bin/bash
+# written by bin/repr-rust (crates_docs): cargo's rustdoc, which runs each crate's documentation
+# again on the originals and on the printed files
+v=$REPR_RUST_VENDOR/
+case ${CARGO_MANIFEST_DIR:-} in
+  "$v"*)
+    d=${CARGO_MANIFEST_DIR#"$v"}; d=${d%%/*}; n=""; prev=""
+    for a in "$@"; do [ "$prev" = --crate-name ] && n=$a; prev=$a; done
+    if [ -n "$n" ] && [ -n "$d" ]; then
+      for k in orig cand; do
+        if [ $k = orig ]; then to=$REPR_RUST_ORIG/$d; else to=$REPR_RUST_CAND/$d; fi
+        out=$REPR_RUST_DOCS/$k/$n; args=(); prev=""
+        for a in "$@"; do
+          if [ "$prev" = -o ]; then args+=("$out.part"); else args+=("${a//"$v$d"/"$to"}"); fi
+          prev=$a
+        done
+        rm -rf "$out" "$out.part"; mkdir -p "$out"
+        if CARGO_MANIFEST_DIR=$to CARGO_MANIFEST_PATH=$to/Cargo.toml rustdoc "${args[@]}" > "$out/$n.log" 2>&1 &&
+           [ -f "$out.part/$n.json" ]; then
+          mv "$out.part/$n.json" "$out/$n.json"
         fi
-        rm -rf "$ib/$k/$name.part" ) & pids+=($!)
+        rm -rf "$out.part"
+      done
+    fi ;;
+esac
+exec rustdoc "$@"
+EOF
+  chmod +x "$cw/rustdoc"
+  rm -rf "$cw/target/doc" "$ib/orig" "$ib/cand"; mkdir -p "$ib/orig" "$ib/cand"
+  (cd "$cw/ws" && CARGO_HOME=$cw/home CARGO_TARGET_DIR=$cw/target RUSTC_BOOTSTRAP=1 RUSTDOC=$cw/rustdoc \
+     REPR_RUST_VENDOR=$cw/vendor REPR_RUST_ORIG=$srcroot REPR_RUST_CAND=$ib/src REPR_RUST_DOCS=$ib \
+     RUSTDOCFLAGS="-Zunstable-options --output-format json" \
+     cargo doc --offline --locked --no-deps --keep-going -j "$jobs" "${specs[@]}") > "$cw/doc.log" 2>&1 || true
+  echo "== repr-rust roundtrip $c: interface level: $(ls "$ib/orig" | wc -l) crates documented by cargo, from the originals and the printed files" >&2
+  # a crate cargo did not document: a log that says so
+  while read -r name; do
+    for k in orig cand; do
+      [ -d "$ib/$k/$name" ] || { mkdir -p "$ib/$k/$name"; echo "repr-rust: cargo did not document $name ($cw/doc.log)" > "$ib/$k/$name/$name.log"; }
     done
-  done < <(arbace_tool -e "(doseq [k (:crates (read-string (slurp \"$(corpus_file "$c")\"))) :when (:cargo (:iface k))] (println (:name k) (:dir k)))")
-  for k in "${pids[@]}"; do wait "$k" || true; done
+  done < <(arbace_tool -e "(doseq [k (:crates (read-string (slurp \"$(corpus_file "$c")\"))) :when (:cargo (:iface k))] (println (:name k)))")
 }
 
 cmd=${1:-}
