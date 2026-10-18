@@ -93,7 +93,10 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Running (the user, 2026-10-18: "start all 5"): goi's GR3 (the interpreter's core; `goi-gr3`); repr/rust RR4 (the rest of `library/`, the compiler, a crate set; `repr-rust-rr4`).
+- Running (the user, 2026-10-18: "start all 4"): goi's GR4 (methods, interfaces, concurrency;
+  `goi-gr4`), F7 (the `defnode` prototype; `f7-defnode`), repr/haskell's HR25
+  (`repr-haskell-hr25`), repr/rust RR4 (the rest of `library/`, the compiler, a crate set;
+  `repr-rust-rr4`; resumed after the weekly limit). Next on main: the re-seed (F6, GR3).
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
@@ -108,7 +111,7 @@ The current state of the work. This file is rewritten as things change. For the 
 - Done (2026-10-18): F5 (guarded direct linking, geometric mean 1.10), `repr/clojure print`, `repr/java`'s
   `:full` mode, the evaluator's compile race fixed. F5.2 found (code layout), CP1 built, the seed
   remade (`910b4b8f…`). F6 done (2026-10-18: primitive fns and speculative workers, `fib` 0.98 →
-  0.53 ms, geometric mean 1.11×; F6.1-F6.3 open). Next: a re-seed, then F7.
+  0.53 ms, geometric mean 1.11×; F6.1-F6.3 decided as built). Next: a re-seed; F7 running.
 
 - The direction (the user, 2026-10-17): Go forms first-class at the REPL, interpreted like
   Arbace and Java forms; the three dialects at the same level there "when it is appropriate";
@@ -117,7 +120,8 @@ The current state of the work. This file is rewritten as things change. For the 
   program's compiled packages), milestones GR0-GR6, 22-33 days; proposals G1-G17 open; the build
   after F3, F4 and the renames. G1-G17 decided as recommended (2026-10-17); GR0 done (doc/go/GOI-SPEC.md,
   GS1-GS15 decided as recommended); GR1 and GR2 done (the compiled-packages table,
-  GoValue; the checker); next GR3-GR6.
+  GoValue; the checker); GR3 done (2026-10-18: the interpreter's core, 532 of `$GOROOT/test`'s
+  run programs pass, none fail; GC15-GC18 decided as built); next GR4-GR6.
 
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),
@@ -130,7 +134,7 @@ The current state of the work. This file is rewritten as things change. For the 
   R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
   modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); R3 done (`:full`, the
   text level, 483 of 483 byte for byte; HR9-HR13); R4 and R5 done (the layout
-  printer; the other boot libraries: 1,226 modules, HR14-HR20); R6 done (2026-10-18: .hsc, .lhs, boot files; 1,345 modules; HR21-HR25 open, HR25 a follow-up). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
+  printer; the other boot libraries: 1,226 modules, HR14-HR20); R6 done (2026-10-18: .hsc, .lhs, boot files; 1,345 modules; HR21-HR24 decided as built, HR25 running). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
   JP1-JP4); running: (Java forms → Java,
   with a round trip; branch `repr-java-print`).
 - Done (2026-10-17): repr/java print. Formerly planned: after the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):
@@ -152,7 +156,7 @@ The current state of the work. This file is rewritten as things change. For the 
   with its `rustc-dev` pinned; RS1-RS17 decided; its spec written (doc/rust/SPEC.md, RSS1-RSS10 decided as
   recommended); RR1 and RR2 done (the tree and lines levels, 1,074 of 1,074; the interface level,
   5 of 5 crates); RR3 done (2026-10-18: `:full`, the text level, 1,074 of 1,074 byte for byte;
-  RR-P6-RR-P8 open, built as recommended); next RR4-RR6.
+  RR-P6-RR-P8 decided as built); next RR4-RR6.
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
