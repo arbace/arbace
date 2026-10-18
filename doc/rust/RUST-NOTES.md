@@ -8,7 +8,9 @@ and `rust-src-1.99.1-r0` fetched as apks, and stage 0 of that commit; RR2 on the
 `repr-rust-rr2`, from main at `10c7b293`), on the same rustc, its `rustdoc` and the host's
 sysroot; RR3 on 2026-10-18 (branch `repr-rust-rr3`, from main at `80294e9a`), on the same rustc
 and the stage 0 of that commit; RR4 on 2026-10-18 (branch `repr-rust-rr4`, from main at
-`96d7bafe`), on the same rustc, the host's `cargo` and the stage 0 of that commit.
+`96d7bafe`), on the same rustc, the host's `cargo` and the stage 0 of that commit; RR5 on
+2026-10-18 (branch `repr-rust-rr5`, from main at `f6ca94b2`), on the same rustc and `cargo`,
+`rustc-1.99.1-src.tar.xz` and the stage 0 of that commit.
 
 ## Decided (2026-10-17, the user): RR-P1-RR-P3
 
@@ -720,3 +722,207 @@ printed into `.tmp/repr-rust/cand/CORPUS-pretty/`, rustc's trees compared withou
   features, which needs crates the host cache lacks (fetched from crates.io, then pinned in the
   lock): more of each crate documented. *Recommended: (a)* for a corpus reproducible from the
   pinned files alone; (b) when more coverage is wanted.
+
+## RR5: the behaviour level; rustc's UI suite
+
+SPEC §11.1 (5, the behaviour level), §11.4 (the corpus) and §12.2 ("Later (RR5): what the UI suite
+adds") define it; SPEC §12.8 records what the build changes in the spec. Built on 2026-10-18
+(branch `repr-rust-rr5`, from main at `f6ca94b2`), on the same rustc, `rustc-dev` and `rust-src`
+as RR1-RR4, the host's `cargo` 1.99.1 (`-Zbuild-std`) and `cc` (the programs' linker), rustc's
+source tarball and the stage 0 of that commit.
+
+### What was built
+
+| part | file | what |
+|---|---|---|
+| corpus | `test/rust/corpus-rustc-1.99.1-ui.edn` (made by `bin/repr-rust corpus make-ui`: `test/rust/corpus_make.ae ui-editions`, the helper's dumps, `ui`) | `tests/ui` of `rustc-1.99.1-src.tar.xz` (SHA-256 `6451598a99e77f07571960f6b21d577399d3a30f33e80cbd2e3a4aae6535d265`, rust-lang's own `.sha256`): 19,942 files at the syntax levels, one crate per edition; `:rejected` (1,162 files rustc's parser rejects alone), `:clash` (4); `:programs`, 3,718 run-pass programs (each revision of a test) with their directives; the 574 revisions left out, by reason, in its header |
+| command | `bin/repr-rust` (`tarball_fetch`, `corpus make-ui`, `--run`, `--run-only`, `--std`, `run_level`, `mirror`, `native_helpers`, `build_std`, `std_level`), `bin/lib/repr-rust/run-program` (one program: build, run, compare), `arbace.repr.rust` (`run-plan`, `compare-run`), `make repr-rust-behaviour`, `make repr-rust-all` | |
+| converter | `arbace/repr/rust/convert.ae`, `full.ae` | what the UI suite adds (below) |
+| printer | `arbace/repr/rust/print.ae` | attributes at fixed places (`attrs-moved`, `leading-attrs`), the rest below |
+| helper | `tools/rsdump/rsdump.rs` | a guarded string's prefix before edition 2024 (`#"`: `#`, then lexed again, as rustc's lexer does) |
+| known differences | `test/rust/roundtrip-rustc-1.99.1-ui-known.edn` (and `-pretty-`, `-text-`), `-ui-run-lines-known.edn`, `-ui-run-pretty-known.edn` | three files nested deeper than the host evaluates; programs that compare their own columns, lines, token spacing or text |
+| cases | `bin/lib/repr-rust/test` case 9, `test/rust/sample/behaviour.rs` | the behaviour level on the sample |
+
+### Results
+
+`bin/repr-rust roundtrip --iface --text --pretty --run --std all` (also `make repr-rust-all`), every
+level over the five corpora, then the behaviour level and std built from its printed files: in
+two runs on this host (64 cores, shared), 21 and 33 minutes (the first lost the crate set and the
+UI suite to a stage 0 rebuilt under it, run again).
+
+| corpus | files | tree level (trees and lines) | pretty layout (trees) | text level (byte for byte) | interface level (crates) |
+|---|---|---|---|---|---|
+| std's five crates, the rest of `library/`, the compiler, the crate set (RR1-RR4) | 13,397 | 13,396 | 13,396 | 13,396 | 511 of 512 |
+| rustc's UI suite (`tests/ui`) | 19,942 | 19,939 (2,438,508 spans) | 19,939 | 19,939 (14.9 MB) | none (no library) |
+
+RR1-RR4's numbers are RR4's, span for span and byte for byte. The behaviour level (3,718
+programs; a program not judged when its baseline does not build or times out):
+
+| printed side | the same | of them, once the locations are normalized | nondeterministic | differ (all known) | not judged |
+|---|---|---|---|---|---|
+| mode `:lines` | 3,685 | 10 (columns) | 27 | 5 | 1 |
+| mode `:full` | 3,690 | 0 | 27 | 0 | 1 |
+| the pretty layout | 3,666 | 274 (lines and columns) | 26 | 25 | 1 |
+| std built from its printed files (mode `:lines`), against std built from the originals | 3,683 | 8 (columns) | 25 | 0 | 10 |
+
+The UI suite's levels take: the tree level 70 s (dumps 11, conversion 33, printing 8, rustc's
+trees 18), the pretty layout 25 s, the text level 95 s (its conversion 53), the behaviour level
+of the three layouts 127 s, std's two builds 48 s each and the programs against them 67 s (and
+the tree levels of std's five crates and the rest of `library/`, about 3 minutes, which `--std`
+needs printed). The one program no side judges is `process/nofile-limit.rs` (its static link,
+`-Ctarget-feature=+crt-static -Crelocation-model=static`, which the host's linker refuses); std's nine more are built with `-C panic=abort`. The scratch's peak: about
+8 GB (`.tmp/repr-rust`; the UI suite's dumps 0.2 GB, its mirrors 35,479 links each, a program's
+build removed after its run).
+
+`bin/repr-rust test` adds case 9 (`test/rust/sample/behaviour.rs`: its round trip, mode `:full`
+byte for byte, then `run-program` on the original and its printed file: the same once its panic's
+column is normalized, and not the same raw).
+
+### The corpus (SPEC §11.4)
+
+`tests/ui` holds 21,108 `.rs` files; the corpus is every one the helper dumps without error with
+its edition (compiletest's `//@ edition:` for all revisions, the first of a range `2015..2021`,
+else its first revision's, else 2015, compiletest's default): 1,162 are left out as `:rejected`
+(they test parse errors) and 4 as `:clash` (`trivial-casts.rs` and `trivial_casts.rs`, two
+`stability-cfg2` auxiliaries: one namespace each pair). Each file is a crate root of its own,
+`:name ui` and `:dir "tests/ui"` (one crate per edition), its namespace `rs.ui.` and its path
+(`crate-of` finds a file's crate by its `:files` first: the editions' crates share a directory).
+The tarball is fetched from `static.rust-lang.org` (or `REPR_RUST_SRC`) into
+`.tmp/repr-rust/src/`, checked by the SHA-256 the corpus file pins, and its `tests/ui` and
+`tests/auxiliary` (compiletest's C helper) extracted (14 s, 67 MB).
+
+The programs (`:programs`): each revision of a test outside `auxiliary/` and outside
+compiletest's ignored directories (`compiletest-ignore-dir`: a test's modules) whose mode is
+`run-pass`, `run-fail` or `run-crash`, with its edition, compile flags (`--cfg REV` first, `-` made
+`_`), run flags, `exec-env` and `rustc-env`. Left out, by the directives (574 revisions): an
+auxiliary crate (`aux-build`, `aux-crate`, `aux-bin`, `proc-macro`: 411), another target
+(`only-*`, 62; `ignore-*` naming the host, 4), what the host lacks (`needs-sanitizer-*` and the
+like, 45), `ignore-test` (10), compile flags no single build gives (`--extern`, `-l`, `-Zsanitizer`,
+`-Clink-arg`: 6), incremental and compiletest's own tests, channels (`only-nightly`).
+
+### How a program is run (`bin/lib/repr-rust/run-program`)
+
+Each side builds the program from its source root under the same relative path (`file!()` and
+the paths panics print are the same): `RUSTC_BOOTSTRAP=1 rustc --edition E FILE -A unused -A
+internal_features -Cdebuginfo=0 --remap-path-prefix ROOT=/src -L native=...` and the program's
+flags (compiletest's lint flags; the UI suite's programs use unstable features, which
+compiletest's stage compiler allows: the confinement of `RUSTC_BOOTSTRAP` of SPEC §10.4 extended
+to these builds, RR-P16); compiletest's `rust_test_helpers.c` is built by `cc` into
+`librust_test_helpers.a` once. The executables run as `./t` in one directory (argv[0], the current
+directory and the executable's path the same), with an environment of `PATH`, `HOME` and the
+program's `exec-env`, stdin empty, at most 60 s; a `--test` harness with `--test-threads=1`.
+Compared: stdout, stderr, the exit status, after the normalizations compiletest makes too (the
+thread ids panics print, `thread 'main' (1234)`, as `($TID)`; a harness's `finished in 0.01s`).
+When they differ, the baseline runs twice more: if its runs differ among themselves, or the side's
+second run is the baseline's, the program is nondeterministic (counted, not judged); a program
+whose baseline does not build or times out is not judged either.
+
+Mode :lines keeps a file's lines, not its columns, and the pretty layout neither: a side of mode
+`:lines` whose outputs differ is compared again with the column of every source location in them
+(`FILE.rs:L:C`, as panics print them) written `_`, the pretty layout's with the line and column
+(`same-cols`, `same-pos`, counted apart: RR-P13). Mode `:full`'s printed files are the originals
+byte for byte, so its behaviour is the original's by construction; it is run all the same.
+
+The printed side is a mirror of the source tree (`.tmp/repr-rust/run/CORPUS/LAYOUT/`, 35,479
+links), every corpus file a link to its printed file, so a test's out-of-line modules are printed
+too, and the files it `include!`s or reads are the originals.
+
+### std built from its printed files (`--std`)
+
+rust-lisp's `std-from-lisp.sh` method: `rust-src`'s `library/` mirrored as links
+(`.tmp/repr-rust/std/library`), std built by Cargo from a scratch crate
+(`__CARGO_TESTS_ONLY_SRC_ROOT`, `-Zbuild-std=std,panic_unwind,panic_abort,proc_macro,test`,
+`--release`, `-Cembed-bitcode=yes` for the programs built with `-C lto`, offline: the library's
+vendored crates through a source replacement, their `.cargo-checksum.json` without file sums on
+both sides) into a sysroot (`.tmp/repr-rust/std/orig`: the built crates, the host sysroot's other
+files linked), then every file of std's five crates and of the rest of `library/` (2,976 files,
+the vendored crates' too: none left original) made a link to its printed file of mode `:lines` and
+std built again in the same directory (`.tmp/repr-rust/std/printed`: the paths std's panics
+print are the same). The UI suite's programs are built from their originals against each sysroot
+and compared as above. Not judged: 9 programs built with `-C panic=abort` (Cargo's build of
+`panic_abort` keeps the unwind strategy, which rust's own build changes) and the tests that are
+modules.
+
+### What the UI suite needed (SPEC §12.2, "Later (RR5)")
+
+The forms needed nothing new for delegation, contracts, unsafe binders, guard patterns or `&pin`
+(the syntax RR1-RR4 already wrote: delegation as `(:rust ...)`, SPEC §4.10). What failed at
+first (150 of the 19,942 files at the tree level, then 14 more at the text level) and how:
+
+- **Attributes in fixed places** (SPEC §8.2): an attribute before a call's callee, an index, a
+  field, a cast or a binary operator's first operand (`#[a] x * 2`), a paren's content
+  (`(#[a] || x)()`), a guard, a constant's or static's value, an array type's length, a variant's
+  discriminant was dropped by the converter (forms built with `list`, not `lst`, which splices
+  attributes) or not printed. The converter splices them now, and the printer prints an attribute
+  form before the element after it wherever an operator's elements stand at fixed places
+  (`attrs-moved`), skips them in its shape questions (`strip-attrs`), and prints the attributes of
+  a statement's leftmost operand before the statement's line, which rustc's statement span begins
+  after (`leading-attrs`).
+- **Paths**: generic arguments on a pattern's non-final segment need `::` (`Enum::<N>::Foo`, and
+  after a qualified self type); the `<` and `>` of generic arguments on later lines than the path
+  (`:rs/open`, `:rs/close` on the application); the `>` of a qualified path (`:rs/close`); `::` of
+  a global path in a use group; a macro path with generic arguments (`foo::<T>!()`, which rustc
+  parses to reject later: `(:turbofish foo! T)`).
+- **Lines**: an item's name on a later line than its keyword (the generics' span); a module of
+  inner attributes and no item (its `}` at the `inject_use_span`); the `{` of `gen`, `async`,
+  `try`, `unsafe` and labeled blocks on a later line (`:rs/brace`); an empty span at the file's
+  first byte, rustc's dummy span (N1: the comparison takes `-` for any line).
+- **Items and names**: `reuse impl Trait for T { ... }` (the parser's impl of one glob delegation
+  at the impl's span) as `(:rust ...)`; a type the parser's recovery made (`impl Trait for .. {}`)
+  likewise; `extern crate r#trait as t` (the tree holds the crate's name without its rawness);
+  `const async: u32` and `static async: u32` in edition 2015 (constants named `async`, not
+  closures); a struct literal named `union` (`((:path union) (:braces))`, as `gen`); a pattern
+  named `await` in `for await in` (edition 2015); `async use { }` (no `use` item); `static ||`
+  closures (their movability was read from a symbol, not a list); `fn(self)`, `fn(mut self)` in a
+  function pointer type; attributes on a binder's parameters (`for<#[cfg(a)] 'a>`); `.. ..`, two
+  range tokens the printer glued into `....`.
+- **Text level**: `for<>`, an empty binder, which no tree holds (the span's text); `|x: _|`, an
+  inferred type written out (its span after the pattern's); a front matter after blank lines or
+  with an infostring with hyphens, an indented `---` inside it; files mixing `\r\n` and `\n` line
+  ends (`:rs/crlf` the lines that end in `\r\n`); a bare `\r` in a plain comment, written `\r` in
+  mode `:lines`' `;` comment; a guarded string prefix before edition 2024 (the helper).
+- **Namespaces** (SPEC §2.1): a path segment's characters a name cannot hold made `_` (
+  `impl[t]-foreign[local]-for-t.rs`, 32 files; RR-P17).
+
+### Known differences
+
+At the syntax levels three files, each nested deeper than the converter, evaluated by the tools'
+host, can recurse (10,000 nested evaluated calls, Compiler's `MAX_DEPTH`: Go's stack overflow is
+fatal): `associated-consts/issue-93775.rs` (964 nested generic applications),
+`expr/if/expr-stack-overflow.rs` (5,204 `else if`s), `parser/survive-peano-lesson-queue.rs`
+(8 MB of extracted code). At the behaviour level, mode `:lines` (5): the columns
+`Location::caller()` gives, compared by `call-chain.rs` (two revisions); `stringify!`'s output,
+which shows the tokens' spacing (N3), compared by `stringify.rs` and
+`syntax-extension-source-utils.rs`; `lexer-crlf-line-endings-string-literal-doc-comment.rs`, which
+reads its own text for its `\r\n` line ends. The pretty layout (25): those and the programs that
+compare the lines `Location::caller()`, `line!()` and backtraces give, and two that print their
+panics' positions without a file name (`-Zlocation-detail=line,column`). Mode `:full` and std
+built from its printed files: none.
+
+### Choices for the user (RR-P13-RR-P17; open, built as recommended)
+
+- **RR-P13 The behaviour level's normalizations.** (a) As built: compiletest's (thread ids, a
+  harness's time), and the columns (mode `:lines`), the lines and columns (the pretty layout) of
+  the source locations in the outputs, applied only when the raw outputs differ and counted apart;
+  (b) none but compiletest's: every program whose panics print a location different in the
+  layout a known difference (about 10 for `:lines`, 275 for the pretty layout); (c) the behaviour
+  level of mode `:full` only. *Recommended: (a).*
+- **RR-P14 The gate** (`bin/gate --full`'s `repr-rust`). (a) As built: unchanged by default (std's
+  five crates, about 3 minutes); `REPR_RUST_CORPORA=all` adds the UI suite's syntax levels with
+  RR4's corpora, and `REPR_RUST_CORPORA='all --run --std'` the behaviour level, as `make
+  repr-rust-all`; (b) the behaviour level always (the UI suite's syntax levels and both runs, about
+  15 minutes more than std alone). *Recommended: (a)*, the behaviour level at a milestone or after a change to the
+  printer.
+- **RR-P15 The UI corpus** (SPEC §11.4). (a) As built: every file of `tests/ui` the parser takes
+  at the syntax levels, the run-pass programs without auxiliary crates at the behaviour level;
+  (b) the programs with auxiliary crates too (411 revisions), their crates built first from their
+  originals and printed files (compiletest's `aux-build` rules: crate types, `no-prefer-dynamic`);
+  (c) only the run-pass programs at every level. *Recommended: (a)* now, (b) when the behaviour
+  level grows (RR6).
+- **RR-P16 `RUSTC_BOOTSTRAP=1` for the programs' builds** (SPEC §10.4). (a) As built: the UI
+  suite's programs and the std builds with it, as compiletest builds them with its stage
+  compiler; (b) only the programs that use no unstable feature (stable rustc), fewer of them.
+  *Recommended: (a).*
+- **RR-P17 Namespaces of paths with other characters** (SPEC §2.1). (a) As built: every
+  character a name cannot hold made `_` (as `.` and `-` were), a clash left out of the corpus
+  (`:clash`); (b) the characters escaped (`munge`'s spelling). *Recommended: (a).*
