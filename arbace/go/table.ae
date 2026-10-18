@@ -742,15 +742,55 @@
                          goos
                          (str "(" goos " && " (str/join " || " (map :goarch (sort-by :goarch cs))) ")"))))))))
 
+(defn- wrapper-forms
+  "The wrappers of package p's interfaces (§5.3 rule 3, §6.4): for each exported interface type
+  whose methods the table can write (members m in env), a struct embedding goi.Proxy whose
+  methods call the proxy's interpreted methods (goi.CallProxy), registered at init."
+  [p m al env]
+  (let [a (al p)
+        by-type (group-by :type (filter :iface (:methods m)))]
+    (for [[tn ms] (sort-by key by-type)
+          :let [w (symbol (str "W_" (str/replace p #"[/.-]" "_") "_" tn))
+                sigs (for [mm ms]
+                       (let [[_ ps rs va] (:sig mm)
+                             tps (mapv #(emit-type env al %) ps)
+                             trs (mapv #(emit-type env al %) rs)]
+                         (when (and (every? some? tps) (every? some? trs))
+                           [mm tps trs va])))]
+          :when (every? some? sigs)
+          f (concat
+              [(list 'go/type w (list 'struct 'goi/Proxy))
+               (list 'go/method 'GoiProxy (with-meta [(with-meta 'w {:tag w})] {:tag 'goi/Proxy}) '(.-Proxy w))]
+              (for [[mm tps trs va] sigs]
+                (let [args (vec (for [i (range (count tps))] (symbol (str "a" i))))
+                      params (vec (concat [(with-meta 'w {:tag w})]
+                                          (mapcat (fn [i t] (if (and va (= i (dec (count tps))))
+                                                              ['& (with-meta (nth args i) {:tag t})]
+                                                              [(with-meta (nth args i) {:tag t})]))
+                                                  (range) tps)))
+                      call (list 'goi/CallProxy '(.-Proxy w) (:mname mm) (apply list 'lit '(slice any) args))]
+                  (case (count trs)
+                    0 (list 'go/method (symbol (:mname mm)) params call)
+                    1 (list 'go/method (symbol (:mname mm)) (with-meta params {:tag (first trs)})
+                            (list (list 'inst 'goi/As (first trs)) (list 'aget call 0)))
+                    (list 'go/method (symbol (:mname mm)) params :results (vec trs)
+                          (list 'let ['r call]
+                                (apply list 'return (for [i (range (count trs))] (list (list 'inst 'goi/As (nth trs i)) (list 'aget 'r i)))))))))
+              [(list 'go/func 'init []
+                     (list 'goi/RegisterWrapper (list (list 'inst 'reflect/TypeFor (symbol a tn)))
+                           (list 'fn (with-meta [(with-meta 'p {:tag 'goi/Proxy})] {:tag 'any}) (list 'lit w 'p))))])]
+      f)))
+
 (defn package-table-forms
   "One package's table in one configuration: the var holding its goi.Package (members m,
-  the package's import name (al p), the invokers' names inv-name by signature key)."
+  the package's import name (al p), the invokers' names inv-name by signature key), and the
+  wrappers of its interfaces (GR4)."
   [p m al inv-name]
   (let [a (al p)
         gv (fn [nm] (symbol (str (str/replace p #"[/.-]" "_") "_" nm)))
         mem (fn [n value k] (list 'lit '_ n value (if-let [i (and k (inv-name k))] i 'nil)))
         recv (fn [mm] (if (:pointer mm) (list '* (symbol a (:type mm))) (symbol a (:type mm))))]
-    [(list 'go/var (with-meta (gv "pkg") {:tag 'goi/Package})
+    (let [forms [(list 'go/var (with-meta (gv "pkg") {:tag 'goi/Package})
            (list 'lit 'goi/Package
                  :Path p :Name (str (:pkg-name m))
                  :Funcs (apply list 'lit '(slice goi/Member)
@@ -765,7 +805,8 @@
                                    (let [r (recv mm)
                                          i (inv-name (:key mm))]
                                      (list 'lit '_ (:name mm) (list 'method-expr r (symbol (:mname mm)))
-                                           (if i (list 'inst i r) 'nil)))))))]))
+                                           (if i (list 'inst i r) 'nil)))))))]]
+    (vec (concat [(first forms)] (wrapper-forms p m al (:env m)))))))
 
 (defn- set-tag
   "A file name's tag for a set of configurations: s and the bits of its configurations in the
@@ -824,6 +865,10 @@
         alias-of (fn [p] (vswap! all-paths conj p) p)
         _ (doseq [[k e] invoked] (let [[_ ps rs] (:ftype e)] (doseq [t (concat ps rs)] (emit-type (:env e) alias-of t))))
         _ (doseq [pd pkg-data [p _] pd] (alias-of p))
+        ;; the wrappers' method types (GR4)
+        _ (doseq [[env pd] (map vector envs pkg-data) [_ m] pd mm (:methods m) :when (:iface mm)
+                  :let [[_ ps rs] (:sig mm)] t (concat ps rs)]
+            (emit-type env alias-of t))
         aliases (alias-table (concat @all-paths ["arbace/goi" "reflect"]))
         al #(get aliases %)
         ;; the invokers' forms, grouped by the configurations that need them
@@ -844,7 +889,7 @@
         _ (doseq [p (:packages list-cfg)]
             (let [by-text (group-by second
                                     (for [[env pd] (map vector envs pkg-data)]
-                                      [(:cfg env) (package-table-forms p (assoc (get pd p) :pkg-name (:name (pkg-of env p))) al inv-name)]))]
+                                      [(:cfg env) (package-table-forms p (assoc (get pd p) :pkg-name (:name (pkg-of env p)) :env env) al inv-name)]))]
               (doseq [[forms entries] by-text]
                 (add-file! (str (str/replace p #"[/.-]" "_")) (map first entries) forms))))
         _ (doseq [[cfgs fs] (group-by first inv-forms)]

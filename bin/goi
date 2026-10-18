@@ -63,7 +63,11 @@
 #                                 linux-test when missing) each interpreted by bin/goi run against
 #                                 gc's run of the same forms printed (cached in .tmp/goi-check/ref,
 #                                 by the forms' and the toolchain's hashes): exit status, standard
-#                                 output, standard error to the goroutines' traces. Each is pass,
+#                                 output, standard error to the goroutines' traces; and its
+#                                 directory tests (rundir, buildrundir, runindir: the corpus
+#                                 linux-dirtest), the main package interpreted with the packages it
+#                                 imports, against the test's golden output (standard output and
+#                                 error combined, status 0). Each is pass,
 #                                 fail, error, unsupported (the reason), known
 #                                 (test/goi/check-known.edn, with the reason) or skip (an action
 #                                 with gc's flags); the results against
@@ -247,8 +251,8 @@ run_tests() {
     else
       failn=$((failn + 1))
       echo "goi test: $n differs (status $st, expected $(cat "${f%.ae}.exit")):" >&2
-      diff "${f%.ae}.out" "$t/$n.out" | head -20 >&2
-      diff "${f%.ae}.err" "$t/$n.err" | head -10 >&2
+      diff "${f%.ae}.out" "$t/$n.out" | head -20 >&2 || true
+      diff "${f%.ae}.err" "$t/$n.err" | head -10 >&2 || true
     fi
   done
   echo "goi test: the interpreter's programs (test/goi/run): $pass passed, $failn failed"
@@ -320,6 +324,47 @@ check_one() {
   fi
 }
 
+# check_dir PROGRAM: one directory test of the check (§11.2, GR4): its action rundir,
+# buildrundir or runindir, its packages the forms of PROGRAM's directory (repr/go's corpus
+# linux-dirtest), the main package's run by bin/goi run against the test's golden output (the
+# driver's: standard output and error combined, status 0; the round trip's level run checks that
+# the printed forms give it under gc). Prints PROGRAM<TAB>RESULT<TAB>REASON.
+check_dir() {
+  local p=$1 g=$goroot/test/$1 base f c act ns st tmo=10 r want
+  act=$(action_of "$g")
+  set -- $act
+  shift
+  while [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do
+    case $1 in
+      -t) tmo=$2; shift 2 ;;
+      -gomodversion) shift 2 ;;
+      *) printf '%s\tskip\tthe action needs gc flags: %s\n' "$p" "$act"; return ;;
+    esac
+  done
+  base=$dforms/go/test/${p%.go}_dir
+  f=""
+  for c in "$base.ae" "$base"/*.ae; do
+    if [ -f "$c" ] && grep -q '^(go/package main' "$c"; then f=$c; break; fi
+  done
+  [ -n "$f" ] || { printf '%s\terror\tno forms of a main package (%s)\n' "$p" "${base#$root/}"; return; }
+  ns=$(sed -n '1s/^(ns \([^ )]*\).*/\1/p' "$f")
+  r=$cwork/run/$p
+  mkdir -p "$(dirname "$r")"
+  st=0; (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run "$dforms" "$ns" > "$r.out" 2>&1 < /dev/null) || st=$?
+  case $st in
+    125) printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.out" | head -1)"; return ;;
+    126) printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.out" | head -1 | cut -c1-300)"; return ;;
+    124) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
+  esac
+  want=$goroot/test/${p%.go}.out
+  if [ "$st" = 0 ] && { if [ -f "$want" ]; then cmp -s "$r.out" "$want"; else [ ! -s "$r.out" ]; fi; }; then
+    printf '%s\tpass\t\n' "$p"
+  else
+    printf '%s\tfail\tstatus %s, output differs from the golden %s: %s\n' "$p" "$st" "${want#$goroot/}" \
+      "$( { if [ -f "$want" ]; then diff "$want" "$r.out"; else cat "$r.out"; fi; } | grep -v '^[0-9]' | head -2 | tr '\n' ' ' | cut -c1-200)"
+  fi
+}
+
 # check [--record] [--jobs N] [--essential] [--only REGEX]: the check (§11): every run program of
 # $GOROOT/test (the corpus linux-test, repr/go's conversion: bin/repr-go read --corpus linux-test,
 # run first when missing) interpreted against gc; results in .tmp/goi-check/results.tsv, against
@@ -340,24 +385,33 @@ check() {
   . "$root/bin/lib/host.bash"
   hexe=$(arbace_host_exe) || return 1
   cforms=$root/.tmp/repr-go/forms/linux-test
+  dforms=$root/.tmp/repr-go/forms/linux-dirtest
   cwork=$root/.tmp/goi-check
   mkdir -p "$cwork/ref" "$cwork/run"
   if [ ! -d "$cforms" ]; then
     echo "== bin/repr-go read --corpus linux-test (.tmp/goi-check/read.log)" >&2
     "$root/bin/repr-go" read --corpus linux-test > "$cwork/read.log" 2>&1 || { tail "$cwork/read.log" >&2; return 1; }
   fi
+  if [ ! -d "$dforms" ]; then
+    echo "== bin/repr-go read --corpus linux-dirtest (.tmp/goi-check/read-dirtest.log)" >&2
+    "$root/bin/repr-go" read --corpus linux-dirtest > "$cwork/read-dirtest.log" 2>&1 || { tail "$cwork/read-dirtest.log" >&2; return 1; }
+  fi
   local list=$cwork/programs.txt
   (cd "$goroot/test" && find . -name '*.go' | sed 's|^\./||' | LC_ALL=C sort) | while read -r p; do
-    [ -f "$cforms/go/test/${p%.go}.ae" ] || continue
-    case $(action_of "$goroot/test/$p") in run|"run "*) echo "$p" ;; esac
+    case $(action_of "$goroot/test/$p") in
+      run|"run "*) [ -f "$cforms/go/test/${p%.go}.ae" ] && echo "$p" ;;
+      rundir|"rundir "*|buildrundir|"buildrundir "*|runindir|"runindir "*)
+        { [ -d "$dforms/go/test/${p%.go}_dir" ] || [ -f "$dforms/go/test/${p%.go}_dir.ae" ]; } && echo "$p" ;;
+    esac
   done > "$list"
   [ -n "$essential" ] && grep -v '^#' "$root/test/goi/essential.txt" | grep . > "$list.ess" && mv "$list.ess" "$list"
   [ -n "$only" ] && { grep -E "$only" "$list" > "$list.only" || true; mv "$list.only" "$list"; }
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
-  export -f check_one action_of stderr_head gc_env
-  export root goroot rexe hexe cforms cwork
+  export -f check_one check_dir action_of stderr_head gc_env
+  export root goroot rexe hexe cforms dforms cwork
   local t0=$SECONDS
-  xargs -a "$list" -P "$jobs" -I{} bash -c 'check_one "$1"' _ {} | LC_ALL=C sort > "$cwork/results.tsv"
+  xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in *dir|*"dir "*) check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
+    | LC_ALL=C sort > "$cwork/results.tsv"
   # the known differences: a program listed there is known, with its reason, unless it passes
   if [ -f "$known" ]; then
     sed -n 's/^ *\["\([^"]*\)" "\(.*\)"\]$/\1\t\2/p' "$known" > "$cwork/known.tsv"
@@ -371,7 +425,7 @@ check() {
   err=$(awk -F'\t' '$2=="error"' "$cwork/results.tsv" | wc -l); uns=$(awk -F'\t' '$2=="unsupported"' "$cwork/results.tsv" | wc -l)
   kn=$(awk -F'\t' '$2=="known"' "$cwork/results.tsv" | wc -l); skip=$(awk -F'\t' '$2=="skip"' "$cwork/results.tsv" | wc -l)
   echo "goi check: $total programs: $pass pass, $fail fail, $err error, $uns unsupported, $kn known, $skip skipped; $((SECONDS - t0)) s"
-  awk -F'\t' '$2=="fail" || $2=="error"' "$cwork/results.tsv" | head -30 | sed 's/^/   /'
+  { awk -F'\t' '$2=="fail" || $2=="error"' "$cwork/results.tsv" | head -30 | sed 's/^/   /'; } || true
   if [ -n "$record" ]; then
     { echo ";; goi's check (doc/go/GOI-SPEC.md §11.3): every run program of \$GOROOT/test (linux/amd64) and its"
       echo ";; result, pass, fail, error, unsupported (with the reason), known or skip. bin/goi check --record"

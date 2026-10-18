@@ -1,0 +1,76 @@
+;; goi's interpreter tests (GR4): goroutines, buffered and unbuffered channels, close and range,
+;; comma-ok receives, select with default and timeouts, sync.WaitGroup and Mutex, range over
+;; functions (break, continue, return from inside).
+(ns go.t.chans (:require [arbace.go :as go]))
+(go/package main :path "main")
+(go/file "chans.go" :imports [[fmt "fmt"] [sync "sync"] [time "time"]])
+
+(go/func producer [^{:tag (chan :send int)} ch ^int n]
+  (for [i 0] (< i n) (inc! i)
+    (>! ch (* i i)))
+  (close ch))
+
+(go/func seq3 ^{:tag (func [(func [int string] [bool])])} []
+  (fn [^{:tag (func [int string] [bool])} yield]
+    (range [i (lit (slice string) "a" "b" "c")]
+      (when (not (yield i (aget (lit (slice string) "a" "b" "c") i)))
+        (return)))))
+
+(go/func firstB ^int []
+  (range [i s (seq3)]
+    (when (== s "b") (return i)))
+  -1)
+
+(go/type Acc (struct ^{:tag sync/Mutex} mu ^int n))
+(go/method Add [^{:tag (* Acc)} a ^int k]
+  (.Lock (.-mu a))
+  (defer (.Unlock (.-mu a)))
+  (set! (.-n a) + k))
+
+(go/func main []
+  (let [ch (make (chan int))]
+    (go (producer ch 5))
+    (let [sum 0]
+      (range [v ch] (set! sum + v))
+      (fmt/Println "sum" sum))
+    (let [(values v ok) (<! ch)]
+      (fmt/Println v ok)))
+  (let [b (make (chan string) 2)]
+    (>! b "x") (>! b "y")
+    (fmt/Println (len b) (cap b) (<! b) (<! b)))
+  (let [done (make (chan (struct)))
+        res (make (chan int) 10)
+        wg (lit sync/WaitGroup)]
+    (for [i 0] (< i 4) (inc! i)
+      (.Add (addr wg) 1)
+      (go ((fn [^int k] (defer (.Done (addr wg))) (>! res (* k 10))) i)))
+    (go ((fn [] (.Wait (addr wg)) (close done))))
+    (<! done)
+    (close res)
+    (let [total 0] (range [v res] (set! total + v)) (fmt/Println "total" total)))
+  (let [c (make (chan int) 1)]
+    (select
+      (case [v (<! c)] (fmt/Println "got" v))
+      (default (fmt/Println "empty")))
+    (>! c 7)
+    (select
+      (case [(values v ok) (<! c)] (fmt/Println "got" v ok))
+      (default (fmt/Println "empty")))
+    (select
+      (case (<! (time/After (* 10 time/Millisecond))) (fmt/Println "timeout"))
+      (case (>! c 1) (fmt/Println "sent"))))
+  (let [a (lit Acc) wg (lit sync/WaitGroup)]
+    (for [i 0] (< i 50) (inc! i)
+      (.Add (addr wg) 1)
+      (go ((fn [] (defer (.Done (addr wg))) (.Add (addr a) 2)))))
+    (.Wait (addr wg))
+    (fmt/Println "acc" (.-n a)))
+  (range [i s (seq3)]
+    (when (== i 1) (continue))
+    (fmt/Println i s))
+  (fmt/Println "first b" (firstB))
+  (range [i 3]
+    (range [j s (seq3)]
+      (when (== j 1) (break))
+      (fmt/Print i j s " "))
+    (fmt/Println)))
