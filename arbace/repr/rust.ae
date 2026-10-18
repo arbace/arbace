@@ -17,7 +17,14 @@
         the round trip's tree level (SPEC §11.2): for each file of the corpus, the helper's tree and
         lines of the original (ORIG/FILE.tree, .lines) against the printed file's
         (CAND.trees/FILE.tree, .lines); the known differences FILE (a map from FILE to its reason)
-        excuse a file, and a listed file that no longer differs is a failure."
+        excuse a file, and a listed file that no longer differs is a failure.
+    compare-iface (--corpus FILE | --crates C,...) --orig DIR --cand DIR [--known FILE]
+                  [--report FILE] [--only REGEX] [--prune] [--times TEXT]
+        the round trip's interface level (SPEC §11.1, §11.3; RR2): for each crate C of the corpus,
+        rustdoc's JSON of the originals (ORIG/C/C.json) against the printed files' (CAND/C/C.json),
+        compared as text once every span is removed (span fields, and the spans rustc's Debug writes
+        in attributes' texts); the known differences FILE (a map from the crate's name to its
+        reason) excuse a crate, and a listed crate found equal is a failure."
   (:require [arbace.repr.rust.convert :as cv]
             [arbace.repr.rust.write :as wr]
             [arbace.repr.rust.print :as pr]
@@ -278,6 +285,167 @@
                         :results (into (sorted-map) (for [[k r] results] [k (dissoc r :detail :cand)]))}))))
     (if (and (empty? unexpected) (empty? fixed)) 0 1)))
 
+;;; The interface level (SPEC §11.1, §11.3; RR2)
+
+(defn- string-end
+  "The index of the quote that closes the JSON string whose text begins at p"
+  [^String s p]
+  (loop [k (.indexOf s "\"" (int p))]
+    (if (neg? k)
+      (count s)
+      (let [bs (loop [b 0] (if (= \\ (.charAt s (int (- k b 1)))) (recur (inc b)) b))]
+        (if (even? bs) k (recur (.indexOf s "\"" (int (inc k)))))))))
+
+(defn- digits-back
+  "The index of the first of the digits that end just before i (i when none)"
+  [^String s i]
+  (loop [j i] (if (and (pos? j) (Character/isDigit (.charAt s (int (dec j))))) (recur (dec j)) j)))
+
+(defn- span-text-start
+  "The start of the span rustc's Debug writes, PATH:L:C: L:C, that ends just before i, or nil"
+  [^String s i]
+  (let [at (fn [j c] (and (pos? j) (= c (.charAt s (int (dec j))))))
+        num (fn [j] (let [k (digits-back s j)] (when (< k j) k)))]
+    (when-let [a (num i)]
+      (when (at a \:)
+        (when-let [b (num (dec a))]
+          (when (and (at b \space) (at (dec b) \:))
+            (when-let [c (num (- b 2))]
+              (when (at c \:)
+                (when-let [d (num (dec c))]
+                  (when (at d \:)
+                    (let [p (loop [j (dec d)]
+                              (if (and (pos? j) (not (contains? #{\space \" \( \[ \{ \, \\} (.charAt s (int (dec j))))))
+                                (recur (dec j)) j))]
+                      (when (< p (dec d)) p))))))))))))
+
+(defn strip-debug-spans
+  "The spans rustc's Debug writes inside the texts of attributes (\"other\":\"#[attr = CfgTrace(...
+  span: core/src/os/mod.rs:18:5: 18:8 (#0) ...)]\"): each PATH:L:C: L:C (#N) written _. [text n]"
+  [^String s]
+  (let [sb (StringBuilder. (count s)) n (count s)]
+    (loop [from 0 cnt 0 i (.indexOf s " (#" (int 0))]
+      (if (neg? i)
+        (do (.append sb s (int from) (int n)) [(str sb) cnt])
+        (let [q (loop [q (+ i 3)] (if (and (< q n) (Character/isDigit (.charAt s (int q)))) (recur (inc q)) q))
+              p (when (and (> q (+ i 3)) (< q n) (= \) (.charAt s (int q)))) (span-text-start s i))]
+          (if (and p (>= p from))
+            (do (.append sb s (int from) (int p)) (.append sb "_")
+                (recur (inc q) (inc cnt) (.indexOf s " (#" (int (inc q)))))
+            (recur from cnt (.indexOf s " (#" (int (inc i))))))))))
+
+(defn strip-spans
+  "rustdoc's JSON without its span fields (SPEC §11.3, E4): every member \"span\":null or
+  \"span\":{\"filename\":\"...\",\"begin\":[l,c],\"end\":[l,c]} (a key: after { or ,) removed with
+  the comma after it; then the spans inside attributes' texts (strip-debug-spans). {:text :spans
+  :debug-spans :items}, :items the index's items ({\"id\":N,\"crate_id\":...)"
+  [^String s]
+  (let [sb (StringBuilder. (count s))
+        k "\"span\":"
+        n (count s)]
+    (loop [from 0 spans 0]
+      (let [i (.indexOf s k (int from))]
+        (if (neg? i)
+          (do (.append sb s (int from) (int n))
+              (let [[t debug] (strip-debug-spans (str sb))
+                    items (loop [p 0 c 0]
+                            (let [j (.indexOf t "{\"id\":" (int p))]
+                              (if (neg? j)
+                                c
+                                (let [q (loop [q (+ j 6)] (if (and (< q (count t)) (Character/isDigit (.charAt t (int q)))) (recur (inc q)) q))]
+                                  (recur (inc j) (if (.startsWith t ",\"crate_id\":" (int q)) (inc c) c))))))]
+                {:text t :spans spans :debug-spans debug :items items}))
+          (let [j (+ i (count k))
+                key? (and (pos? i) (contains? #{\{ \,} (.charAt s (int (dec i)))))
+                end (when key?
+                      (cond
+                        (.startsWith s "null" (int j)) (+ j 4)
+                        (.startsWith s "{\"filename\":\"" (int j))
+                        (let [e (.indexOf s "}" (int (string-end s (+ j 13))))]
+                          (when-not (neg? e) (inc e)))
+                        :else nil))]
+            (if end
+              (let [end (if (and (< end n) (= \, (.charAt s (int end)))) (inc end) end)]
+                (.append sb s (int from) (int i))
+                (recur end (inc spans)))
+              (do (.append sb s (int from) (int j))
+                  (recur j spans)))))))))
+
+(defn- first-diff-at [^String a ^String b]
+  (let [n (min (count a) (count b))]
+    (loop [i 0] (cond (= i n) (when (not= (count a) (count b)) n)
+                      (= (.charAt a (int i)) (.charAt b (int i))) (recur (inc i))
+                      :else i))))
+
+(defn- item-at
+  "The index's item a position of the normalized JSON falls in: its id, and the text around"
+  [^String t i]
+  (let [j (.lastIndexOf t "{\"id\":" (int i))]
+    {:id (when-not (neg? j) (second (re-find #"^\{\"id\":(\d+)" (subs t j (min (count t) (+ j 24))))))
+     :text (subs t (max 0 (- i 200)) (min (count t) (+ i 200)))}))
+
+(defn compare-crate
+  "The interface level of one crate: ORIG/C/C.json against CAND/C/C.json (rustdoc's logs
+  C.log beside them), spans removed"
+  [orig cand c]
+  (let [jf (fn [d] (File. (str d "/" c "/" c ".json")))
+        log (fn [d] (let [f (File. (str d "/" c "/" c ".log"))]
+                      (when (.exists f) (let [ls (str/split-lines (slurp f))] (str/join "\n" (take 12 ls))))))
+        o (jf orig) k (jf cand)]
+    (cond
+      (not (.exists o)) {:status :original-fails :detail (log orig)}
+      (not (.exists k)) {:status :printed-fails :detail (log cand)}
+      :else
+      (let [a (strip-spans (slurp o))
+            b (strip-spans (slurp k))]
+        (if (= (:text a) (:text b))
+          {:status :ok :items (:items a) :spans (:spans a) :debug-spans (:debug-spans a) :bytes (count (:text a))}
+          (let [i (first-diff-at (:text a) (:text b))]
+            {:status :differs :at i :items [(:items a) (:items b)] :spans [(:spans a) (:spans b)]
+             :debug-spans [(:debug-spans a) (:debug-spans b)]
+             :orig (item-at (:text a) i) :cand (item-at (:text b) i)}))))))
+
+(defn- cmd-compare-iface [args]
+  (let [{:keys [opts]} (parse-args args #{"--corpus" "--crates" "--orig" "--cand" "--known" "--report" "--only" "--times"})
+        corpus (if-let [f (get opts "--corpus")]
+                 (read-string (slurp f))
+                 {:crates (for [n (str/split (get opts "--crates" "") #",")] {:name n})})
+        orig (get opts "--orig")
+        cand (get opts "--cand")
+        known-file (get opts "--known")
+        known (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
+        only (some-> (get opts "--only") re-pattern)
+        crates (for [c (:crates corpus) :let [n (str (:name c))] :when (or (nil? only) (re-find only n))] n)
+        results (pmap-jobs 5 (fn [c] [c (compare-crate orig cand c)]) crates)
+        ok (filter #(= :ok (:status (second %))) results)
+        failing (remove #(= :ok (:status (second %))) results)
+        unexpected (remove #(contains? known (first %)) failing)
+        fixed (filter #(and (contains? known (first %)) (= :ok (:status (second %)))) results)]
+    (when (get opts "--prune")
+      (doseq [[c _] ok d [orig cand]] (.delete (File. (str d "/" c "/" c ".json")))))
+    (doseq [[c r] results :when (= :ok (:status r))]
+      (println (format "ok %s: %d items, %d span fields and %d spans in attributes' texts removed, %d bytes equal"
+                       c (:items r) (:spans r) (:debug-spans r) (:bytes r))))
+    (doseq [[c r] unexpected]
+      (println "DIFFERS" c (pr-str (dissoc r :detail :orig :cand)))
+      (when (:detail r) (println " " (:detail r)))
+      (when (:orig r) (println "  original, item" (:id (:orig r)) ":\n" (:text (:orig r))))
+      (when (:cand r) (println "  printed, item" (:id (:cand r)) ":\n" (:text (:cand r)))))
+    (doseq [[c _] fixed] (println "FIXED (listed as known, no longer differs)" c))
+    (doseq [[c r] failing :when (contains? known c)] (println "known" c (pr-str (select-keys r [:status])) "--" (get known c)))
+    (println (format "repr-rust roundtrip (interface level): %d crates, %d equal (%d items; rustdoc's JSON without spans), %d differ, %d known, %d unexpected, %d fixed%s"
+                     (count results) (count ok) (reduce + (keep (comp :items second) ok)) (count failing)
+                     (count (filter #(contains? known (first %)) failing)) (count unexpected) (count fixed)
+                     (if-let [t (get opts "--times")] (str "; seconds: " t) "")))
+    (when-let [rep (get opts "--report")]
+      (spit rep (with-out-str
+                  (prn {:crates (count results) :equal (count ok) :differ (count failing)
+                        :items (reduce + (keep (comp :items second) ok))
+                        :unexpected (mapv first unexpected) :fixed (mapv first fixed)
+                        :times (get opts "--times")
+                        :results (into (sorted-map) results)}))))
+    (if (and (empty? unexpected) (empty? fixed)) 0 1)))
+
 (defn -main [& args]
   (let [[verb & more] args
         status (try
@@ -285,7 +453,8 @@
                    "read" (cmd-read more)
                    "print" (cmd-print more)
                    "compare" (cmd-compare more)
-                   (do (println "usage: -m arbace.repr.rust read|print|compare ...") 2))
+                   "compare-iface" (cmd-compare-iface more)
+                   (do (println "usage: -m arbace.repr.rust read|print|compare|compare-iface ...") 2))
                  (catch Throwable e
                    (.printStackTrace e)
                    1))]

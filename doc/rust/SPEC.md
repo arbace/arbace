@@ -3,9 +3,9 @@
 Status: milestone RS0 of repr/rust ([REPR-RUST-SURVEY.md](../REPR-RUST-SURVEY.md) §5.3), written
 2026-10-17 at the user's decision RS16 (b) ("the spec now, the build after"). It is bound by the
 survey's decisions RS1-RS17 (its section "Decided (2026-10-17, the user)"); the choices made while
-writing it are S1-S34 (§13.1), the proposals RSS1-RSS10 (§13.2), decided as recommended. RR1 is
-built (2026-10-17): §12.4 says what the build changes in this text, and
-[RUST-NOTES.md](RUST-NOTES.md) records it. The experiments that validate its choices (Appendix A) were run on the host's
+writing it are S1-S34 (§13.1), the proposals RSS1-RSS10 (§13.2), decided as recommended. RR1 and RR2
+are built (2026-10-17): §12.4 and §12.5 say what the builds change in this text, and
+[RUST-NOTES.md](RUST-NOTES.md) records them. The experiments that validate its choices (Appendix A) were run on the host's
 rustc 1.99.1 (Alpine's `rust-1.99.1-r0`), the survey's helper (`rsdump`, built against
 `rustc-dev-1.99.1-r0`) and the stage 0 of main at `73e35434` (`target/seed/amd64/arbace`, amd64);
 their scripts and inputs are `test/rust/`.
@@ -1296,6 +1296,43 @@ about 45 s. What it changes in this text (RR-P1-RR-P3 there, decided as recommen
   `roundtrip`, `test` as sketched, without `--iface` and `--text` (RR2, RR3) and the pretty layout
   (RR4); `bin/repr-rust roundtrip && bin/repr-rust test` is the step `repr-rust` of `bin/gate
   --full`.
+
+### 12.5 As built: RR2 (2026-10-17)
+
+[RUST-NOTES.md](RUST-NOTES.md), "RR2", records the build: the interface level over RR1's corpus,
+rustdoc's JSON (format version 61) of `core`, `alloc`, `std`, `proc_macro` and `test` from the
+originals and from the printed files equal for all five crates, 79,371 items, without spans, with
+no known difference; with the tree level, about 80 s. What it changes in this text (RR-P4 and RR-P5
+there, open, built as recommended):
+
+- **The normalization (§11.3)**: every `span` member removed (`"span":null` and
+  `"span":{"filename":..,"begin":[l,c],"end":[l,c]}`, as keys), and also the spans rustc's `Debug`
+  writes inside the texts of attributes (`"attrs":[{"other":"#[attr = CfgTrace([... span:
+  core/src/os/mod.rs:18:5: 18:8 (#0) ...])]"}]`, from every `#[cfg]` that stays), each `PATH:L:C:
+  L:C (#N)` written `_` (RR-P4): 50,757 of them over the five crates, whose columns the printer's
+  layout changes. Nothing else is normalized: ids need none (rustdoc's JSON of the same sources is
+  byte-identical run to run, and the printed files give the same items in the same order, so the
+  same ids), and the external crates' paths are the same sysroot's.
+- **The configuration (§11.3, §11.4)**: each crate's `:iface` in the corpus file: its root
+  (`src/lib.rs`), the crates it takes from the host's sysroot as `--extern NAME=` their `.rmeta`
+  (the direct dependencies of its `Cargo.toml` for the target; the sysroot's `.rlib`s are metadata
+  stubs), its `--cfg` flags (std's `backtrace_in_libstd` of its `build.rs`; the features of rust's
+  bootstrap for this target: std's `backtrace` and `panic-unwind`, proc_macro's default
+  `rustc-dep-of-std`; test's `enable_unstable_features` is set by its `build.rs` only on a nightly
+  or dev rustc) and environment (std's `STD_ENV_ARCH`); and `-Zforce-unstable-if-unmarked`, as rust's bootstrap
+  documents the library (without it std's calls to its dependencies' `const fn`s are rejected).
+- **The printed side (§11.3)**: the library tree mirrored as symbolic links, each corpus file a
+  link to its printed file (a file not printed is missing, and its crate fails), so that the files
+  `#[path]` reaches outside the corpus (`stdarch`, `portable-simd`, `backtrace`: RR4) and the
+  Markdown that `include_str!` reads are the originals'.
+- **The public items (§11.1)**: rustdoc's default, as §11.1 says; with `--document-private-items`
+  all five are equal too (104,991 items; its ten runs 18 s on their own): RR-P5.
+- **Commands (§11.6)**: `bin/repr-rust roundtrip --iface` (the tree level, then the interface
+  level; not with `--only`), `make repr-rust-iface`; known differences
+  `test/rust/roundtrip-rustc-1.99.1-iface-known.edn`, keyed by crate; `bin/repr-rust roundtrip
+  --iface && bin/repr-rust test` is the step `repr-rust` of `bin/gate --full`, and `bin/repr-rust
+  test` checks the normalization on the worked example and `test/rust/sample/attrs.rs`, and that a
+  changed doc comment is found.
 
 ## 13. Decisions and open proposals
 
