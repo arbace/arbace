@@ -11,6 +11,7 @@
   (SPEC §9.1, S22: :rs/brace, :rs/close, :rs/open, :rs/paren and the head lines)."
   (:require [arbace.repr.rust.syntax :as sx]
             [arbace.repr.rust.print :as pr]
+            [arbace.repr.rust.full :as fu]
             [arbace.string :as str])
   (:import [java.lang StringBuilder]))
 
@@ -29,6 +30,19 @@
   {})
 
 (def ^:dynamic *warnings* nil)
+
+(def ^:dynamic *full*
+  "Whether the conversion is of mode :full (SPEC §9.2): each form that stands for a node with a
+  span carries it (::span) until the positions are distributed (arbace.repr.rust.full)"
+  false)
+
+(def ^:dynamic *texts*
+  "When bound to an ArrayList, the ranges [[l c] [l2 c2]] of the source text forms hold as text
+  ((:tt ...), (:rust ...)): the plain comments inside them are theirs (SPEC §9.3)"
+  nil)
+
+(defn- text-range! [p e]
+  (when *texts* (.add ^java.util.ArrayList *texts* [p e])))
 
 (defn- warn! [what]
   (when *warnings* (swap! *warnings* update what (fnil inc 0))))
@@ -90,9 +104,13 @@
     :else (sx/->Lit form l)))
 
 (defn at
-  "form with the line of span s"
+  "form with the line of span s (and in mode :full the span itself, ::span, on a list, vector or
+  symbol)"
   [form s]
-  (attach form (sline s)))
+  (let [f (attach form (sline s))]
+    (if (and *full* (span? s) (not (sx/lit? f)) (instance? arbace.lang.IObj f))
+      (vary-meta f assoc ::span s)
+      f)))
 
 (defn form-line [f]
   (cond (sx/lit? f) (:line f) (instance? arbace.lang.IObj f) (:line (meta f)) :else nil))
@@ -171,6 +189,7 @@
 (defn tt-form
   "(:tt \"text\") for a delimited token tree, at its open delimiter's line"
   [dspan]
+  (text-range! (spos (fld dspan :open)) (s-end (fld dspan :close)))
   (attach (list :tt (delim-text dspan)) (sline (fld dspan :open))))
 
 ;;; Attributes (SPEC §8)
@@ -755,6 +774,7 @@
   the end of the span"
   [s nm]
   (let [text (src-text (spos s) (s-end s))
+        _ (text-range! (spos s) (s-end s))
         i (.indexOf ^String text "(" (int (+ (.indexOf ^String text ^String nm) (count nm))))]
     (when (neg? i) (fail! "a builtin form without (" text))
     (list :tt (subs text i))))
@@ -1510,6 +1530,7 @@
             (catch arbace.lang.ExceptionInfo ex
               (if (::rust (ex-data ex))
                 (do (warn! [:rust-escape (.getMessage ex)])
+                    (text-range! (spos s) (s-end s))
                     (list (if top 'rs/rust :rust) (src-text (spos s) (s-end s))))
                 (throw ex))))
         f (if (and top (sx/lit? (first f))) f f)]
@@ -1532,10 +1553,41 @@
 (defn- dumped [dump sym]
   (some #(when (and (seq? %) (= sym (first %))) (second %)) dump))
 
+(defn line-comments
+  "The plain comments (the helper's [[l c l2 c2]...]) outside the text that forms hold (the
+  ranges texts), as the writer's ; comments (SPEC §9.3, RR-P1): {line [[col text]...]}, a block
+  comment's lines each on its line"
+  [comments texts]
+  (let [rs (sort-by first (map (fn [[p e]] [(fu/pack p) (fu/pack e)]) texts))
+        ;; the ranges merged
+        rs (reduce (fn [acc [a b]]
+                     (if (and (seq acc) (<= a (second (peek acc))))
+                       (conj (pop acc) [(first (peek acc)) (max b (second (peek acc)))])
+                       (conj acc [a b])))
+                   [] rs)
+        n (count rs)
+        inside? (fn [k] (loop [lo 0 hi n]
+                          (if (< lo hi)
+                            (let [m (quot (+ lo hi) 2) [a b] (nth rs m)]
+                              (cond (< k a) (recur lo m) (>= k b) (recur (inc m) hi) :else true))
+                            false)))]
+    (reduce (fn [acc [l c el ec]]
+              (if (inside? (fu/pack [l c]))
+                acc
+                (let [^String t (src-text [l c] [el ec])
+                      ls (if (str/starts-with? t "//")
+                           [(subs t 2)]
+                           (map #(str " " (str/trim %)) (str/split t #"\n")))]
+                  (reduce (fn [acc [i x]] (update acc (+ l i) (fnil conj []) [c x]))
+                          acc (map-indexed vector ls)))))
+            (sorted-map) comments)))
+
 (defn convert-file
   "A dump (its forms) and the file's configuration {:crate :crate-type :kind :rel :corpus} to Rust
-  forms: {:ns sym :forms [...] :warnings {...}}"
-  [dump {:keys [crate crate-type kind rel corpus src-lines pin]}]
+  forms: {:ns sym :forms [...] :comments {line [[col text]...]} :warnings {...}}; with :full (a
+  dump of rsdump dump --full, src the file's text as full/source gives it), mode :full's forms
+  (arbace.repr.rust.full)"
+  [dump {:keys [crate crate-type kind rel corpus src-lines pin full src]}]
   (let [cfg (dumped dump 'rsdump/config)
         err (dumped dump 'rsdump/error)
         tree (first (filter #(and (seq? %) (= 'Crate (first %))) dump))
@@ -1544,7 +1596,11 @@
     (when-not cfg (throw (ex-info "not a dump of tools/rsdump" {})))
     (when (and pin (not= (:rustc pin) (:rustc cfg)))
       (throw (ex-info (str "the dump's rustc is " (:rustc cfg) ", the converter's " (:rustc pin) " (tools/rsdump/RUSTC_VERSION)") {})))
+    (when (and full (not (dumped dump 'rsdump/tokens)))
+      (throw (ex-info "mode :full needs a dump of rsdump dump --full (its tokens)" {})))
     (binding [*src* src-lines
+              *full* (boolean full)
+              *texts* (java.util.ArrayList.)
               *starts* (collect-starts tree)
               *mac* (into {} (for [[sp k es] (dumped dump 'rsdump/mac-exprs)] [(spos sp) [k es]]))
               *warnings* warnings]
@@ -1569,7 +1625,16 @@
                                           (when frontmatter [:frontmatter frontmatter])))
             body (concat (map #(attr-form % true) (inner-attrs attrs))
                          (mapcat #(item-forms % :top) (fld tree :items)))
-            body (pr/implicit-parens (vec body))]
+            body (pr/implicit-parens (vec body))
+            forms (vec (concat [(list 'ns ns-name (list :require ['arbace.rust :as 'rs])) file-form] body))
+            lexed (dumped dump 'rsdump/tokens)
+            plain (if lexed
+                    (vec (for [[k l c el ec] lexed :when (= k :c)] [l c el ec]))
+                    (vec (dumped dump 'rsdump/comments)))
+            comments (line-comments plain (vec *texts*))
+            fullr (when full (fu/full-forms forms src lexed (pr/print-pieces forms)))]
+        (when fullr (doseq [[k n] (:stats fullr)] (swap! warnings update k (fnil + 0) n)))
         {:ns ns-name
-         :forms (vec (concat [(list 'ns ns-name (list :require ['arbace.rust :as 'rs])) file-form] body))
+         :forms (if fullr (:forms fullr) forms)
+         :comments comments
          :warnings @warnings}))))

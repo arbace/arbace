@@ -2054,14 +2054,10 @@
       (with-meta (apply list (with-meta (symbol (name (lv h))) (meta h)) (rest v)) (meta f))
       f)))
 
-(defn print-file
-  "A forms file's forms (read) to Rust text: {:path :text}"
-  [forms]
-  (let [forms (mapv internalize forms)
-        file (first (filter #(and (seq? %) (= 'rs/file (first %))) forms))
-        opts (apply hash-map (rest file))
-        body (remove #(and (seq? %) (contains? #{'ns 'rs/file} (first %))) forms)
-        p (mk-printer 1)]
+(defn- print-forms!
+  "Prints a file's forms (internalized) after its rs/file's options opts"
+  [p forms opts]
+  (let [body (remove #(and (seq? %) (contains? #{'ns 'rs/file} (first %))) forms)]
     (when-let [sb (:shebang opts)] (emit! p sb 1))
     (when-let [fm (:frontmatter opts)] (emit! p fm (if (:shebang opts) 2 1)) (vreset! (:nl p) true))
     (doseq [f body]
@@ -2075,9 +2071,106 @@
             (when (not= :brace (mac-delim m)) (emit! p ";" nil true false)))
           (= 'rs/rust h) (emit! p (lv (second f)) (line-of f))
           (and (symbol? h) (= "rs" (namespace h))) (print-item p (unqualify f) :top)
-          :else (fail! "a top-level form" f))))
+          :else (fail! "a top-level form" f))))))
+
+(defn- file-opts [forms]
+  (apply hash-map (rest (first (filter #(and (seq? %) (= 'rs/file (first %))) forms)))))
+
+(defn print-file
+  "A forms file's forms (read) to Rust text, mode :lines' layout: {:path :text}"
+  [forms]
+  (let [forms (mapv internalize forms)
+        opts (file-opts forms)
+        p (mk-printer 1)]
+    (print-forms! p forms opts)
     (.append ^StringBuilder (:sb p) "\n")
     {:path (:path opts) :text (str (:sb p))}))
+
+(defn print-pieces
+  "The texts of the tokens the printer prints for a file's forms, in order (the full layout's,
+  and the converter's pairing in mode :full)"
+  [forms]
+  (let [forms (mapv internalize forms)
+        toks (java.util.ArrayList.)]
+    (binding [*tokens* toks]
+      (print-forms! (mk-printer 1) forms (file-opts forms)))
+    (mapv first toks)))
+
+;;; The full layout (SPEC §9.2, §9.4, 3)
+
+(defn- full-entries
+  "The positions the forms of mode :full carry, as entries [key kind value] sorted by key (the
+  position packed, a dropped token before a token at its position): kind :tok (a printed
+  token), :drop (a printed token not written), :text (written text: punctuation, comments)"
+  [forms]
+  (let [acc (java.util.ArrayList.)
+        k (fn [[l c] o] (+ (* 2 (+ (* (long l) 1048576) (long c))) o))
+        spell (java.util.HashMap.)]
+    (letfn [(walk [x]
+              (when (and (not (sx/lit? x)) (instance? arbace.lang.IObj x))
+                (let [m (meta x)]
+                  (doseq [p (:toks (:rs/pos m))] (.add acc [(k p 1) :tok p]))
+                  (doseq [p (:rs/drop m)] (.add acc [(k p 0) :drop p]))
+                  (doseq [[l c t] (:rs/punct m)] (.add acc [(k [l c] 1) :text [l c t]]))
+                  (doseq [[p t] (:rs/text m)] (.put spell p t))))
+              (cond
+                (sx/lit? x) nil
+                (seq? x) (doseq [y x] (walk y))
+                (vector? x) (doseq [y x] (walk y))
+                :else nil))]
+      (doseq [f forms] (walk f)))
+    (doseq [[l c _ _ t] (:rs/comments (file-opts forms))] (.add acc [(k [l c] 1) :text [l c t]]))
+    {:entries (sort-by first (vec acc)) :spell spell}))
+
+(defn- advance
+  "The position after text written at [l c]"
+  [[l c] ^String t]
+  (let [i (.lastIndexOf t "\n")]
+    (if (neg? i)
+      [l (+ c (.codePointCount t 0 (count t)))]
+      [(+ l (sx/count-newlines t)) (inc (.codePointCount t (int (inc i)) (count t)))])))
+
+(defn print-full
+  "A forms file's forms of mode :full (read) to Rust text, the full layout: the printer's tokens
+  at the forms' positions, in order, with the punctuation, comments and white space rs/file
+  records (SPEC §9.2, §9.4, 3): {:path :text}"
+  [forms]
+  (let [opts (file-opts forms)
+        _ (when (not= :full (:positions opts))
+            (throw (ex-info "repr-rust print: the full layout needs forms of mode :full (read --full)" {})))
+        pieces (print-pieces forms)
+        {:keys [entries spell]} (full-entries forms)
+        space (into {} (map (fn [[l c w]] [[l c] w])) (:rs/space opts))
+        sb (StringBuilder.)
+        np (count pieces)]
+    (loop [es (seq entries) k 0 at [1 1]]
+      (if es
+        (let [[_ kind v] (first es)]
+          (case kind
+            :drop (recur (next es) (inc k) at)
+            (let [[l c t] (if (= kind :tok)
+                            (do (when (>= k np)
+                                  (throw (ex-info (str "repr-rust print: the forms have more positions than the printer has tokens (" np ")") {})))
+                                (conj v (or (.get ^java.util.HashMap spell v) (nth pieces k))))
+                            v)
+                  [al ac] at
+                  gap (or (get space at)
+                          (cond
+                            (= l al) (if (>= c ac)
+                                       (apply str (repeat (- c ac) " "))
+                                       (throw (ex-info (str "repr-rust print: a token at " [l c] " before the end of the one before it, " at) {})))
+                            (> l al) (str (apply str (repeat (- l al) "\n")) (apply str (repeat (dec c) " ")))
+                            :else (throw (ex-info (str "repr-rust print: a token at " [l c] " before the end of the one before it, " at) {}))))]
+              (.append sb ^String gap)
+              (.append sb ^String t)
+              (recur (next es) (if (= kind :tok) (inc k) k) (advance [l c] t)))))
+        (when (not= k np)
+          (throw (ex-info (str "repr-rust print: the printer has " np " tokens, the forms " k " positions") {})))))
+    (.append sb ^String (or (:rs/tail opts) "\n"))
+    (let [t (str sb)
+          t (if (:rs/crlf opts) (str/replace t "\n" "\r\n") t)
+          t (if (:rs/bom opts) (str "\uFEFF" t) t)]
+      {:path (:path opts) :text t})))
 
 ;;; The converter's uses
 

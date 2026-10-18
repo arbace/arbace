@@ -4,7 +4,7 @@ Status: milestone RS0 of repr/rust ([REPR-RUST-SURVEY.md](../REPR-RUST-SURVEY.md
 2026-10-17 at the user's decision RS16 (b) ("the spec now, the build after"). It is bound by the
 survey's decisions RS1-RS17 (its section "Decided (2026-10-17, the user)"); the choices made while
 writing it are S1-S34 (§13.1), the proposals RSS1-RSS10 (§13.2), decided as recommended. RR1 and RR2
-are built (2026-10-17): §12.4 and §12.5 say what the builds change in this text, and
+are built (2026-10-17), RR3 (2026-10-18): §12.4-§12.6 say what the builds change in this text, and
 [RUST-NOTES.md](RUST-NOTES.md) records them. The experiments that validate its choices (Appendix A) were run on the host's
 rustc 1.99.1 (Alpine's `rust-1.99.1-r0`), the survey's helper (`rsdump`, built against
 `rustc-dev-1.99.1-r0`) and the stage 0 of main at `73e35434` (`target/seed/amd64/arbace`, amd64);
@@ -1333,6 +1333,49 @@ there, open, built as recommended):
   --iface && bin/repr-rust test` is the step `repr-rust` of `bin/gate --full`, and `bin/repr-rust
   test` checks the normalization on the worked example and `test/rust/sample/attrs.rs`, and that a
   changed doc comment is found.
+
+### 12.6 As built: RR3 (2026-10-18)
+
+[RUST-NOTES.md](RUST-NOTES.md), "RR3", records the build: mode `:full` over RR1's corpus, each of
+the 1,074 files printed back byte for byte (14,276,761 bytes), with no known difference, and the
+printed files' trees and lines equal; about 55 s on its own, the gate's step `repr-rust` 145 s.
+What it changes in this text (RR-P6-RR-P8 there, open, built as recommended):
+
+- **The helper (§10.2, §10.3)**: `rsdump dump --full` adds `(rsdump/tokens [[KIND L C L2 C2]
+  ...])`, `rustc_lexer`'s tokens of the file (after rustc's source map's normalization: a byte
+  order mark removed, `\r\n` made `\n`) without white space, columns as spans count them, KIND
+  `:c` (a plain comment), `:doc`, `:id`, `:lt`, `:lit`, `:p` (one punctuation character),
+  `:shebang`, `:fm`, `:x`; positions, not byte ranges. Every dump (without `--full`) has
+  `(rsdump/comments [[L C L2 C2] ...])`, the plain comments, for mode `:lines`' `;` comments.
+- **The metadata (§9.2; RR-P6)**: not §9.2's named keys but, as Haskell forms' HR9/HR10,
+  `:rs/pos {:span [l1 c1 l2 c2] :toks [[l c] ...]}` on every list, vector and symbol that stands
+  for a node with a span: its span and the start of every printed token inside it and not inside
+  an element's span, in order (a literal's and a keyword's are their parent's; the tokens of no
+  span's on `rs/file`'s metadata); `:rs/text {[l c] "text"}`, the source's spelling of a printed
+  token; `:rs/punct [[l c ","] ...]`, source punctuation the printer does not print;
+  `:rs/drop [[l c] ...]`, a printed punctuation token the source does not have (RR-P7). No
+  `:rs/apos` and no `:rs/paren` (parentheses are tokens like any other). On `rs/file`,
+  `:positions :full`, `:rs/comments`, `:rs/space`, `:rs/tail`, `:rs/crlf`, `:rs/bom` as §9.2
+  says; `:rs/space` holds the white space after the token ending at `[l c]` (or before the
+  first, at `[1 1]`) only when it is not the gap rule's: spaces to the next token on its line,
+  else newlines and spaces to its column.
+- **The converter (§9.2)** pairs the printer's tokens (the same printing code, its tokens
+  collected) with the source's in order and fails a file where they do not pair (as HR11); the
+  forms are mode `:lines`' forms with that metadata: as data, all 1,074 files' forms equal
+  mode `:lines`' but for `rs/file`.
+- **The full layout (§9.4, 3)**: `bin/repr-rust print --layout full`, the printer's tokens at the
+  forms' positions, a recorded spelling in place of the printer's text, the punctuation and the
+  comments added, the white space from `:rs/space` or the gap rule, then the tail.
+- **Comments in `:lines` (§9.3, RR-P1)**: every plain comment outside the text of `(:tt ...)`,
+  `builtin #` and `(:rust ...)` forms is written in the forms text at its Rust line, `;text` at
+  the end of a line with forms (a line comment's text after its `//`, each line of a block
+  comment trimmed after a space), else `;;text` indented by half its column (RR-P8). The forms
+  as data and their lines are RR1's, and the printed files RR1's byte for byte.
+- **Commands (§11.6)**: `dump --full`, `read --full`, `print --layout lines|full`, `roundtrip
+  --text` (after the tree level and, with `--iface`, the interface level) and `--text-only`,
+  `make repr-rust-text`; known differences `test/rust/roundtrip-rustc-1.99.1-text-known.edn`;
+  `bin/repr-rust roundtrip --iface --text && bin/repr-rust test` is the step `repr-rust` of
+  `bin/gate --full`.
 
 ## 13. Decisions and open proposals
 

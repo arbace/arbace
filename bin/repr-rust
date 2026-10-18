@@ -17,21 +17,26 @@
 #                                 test/rust/corpus-rustc-1.99.1.edn, std's five crates in rust-src)
 #   bin/repr-rust corpus list [CORPUS]
 #                                 the corpus's files, one per line: crate, file
-#   bin/repr-rust dump --corpus [CORPUS]   dump the corpus into .tmp/repr-rust/dumps/CORPUS/FILE.edn
-#   bin/repr-rust dump [-o DIR] [--edition E] FILE...
+#   bin/repr-rust dump [--full] --corpus [CORPUS]
+#                                 dump the corpus into .tmp/repr-rust/dumps/CORPUS/FILE.edn
+#                                 (CORPUS-full/ with --full: rustc_lexer's tokens and comments too)
+#   bin/repr-rust dump [--full] [-o DIR] [--edition E] FILE...
 #                                 run the helper on files (relative to the current directory; their
 #                                 path is the name of every span): DIR/FILE.edn each (default
 #                                 .tmp/repr-rust/out), edition 2024 by default
-#   bin/repr-rust read [-o DIR] [--crate NAME --crate-type T --ns-root NS] DUMP.edn...
+#   bin/repr-rust read [--full] [-o DIR] [--crate NAME --crate-type T --ns-root NS] DUMP.edn...
 #                                 convert dumps to Rust forms: one .ae per file under DIR (default
-#                                 .tmp/repr-rust/forms/files), each read back and compared
-#   bin/repr-rust read --corpus [CORPUS]
+#                                 .tmp/repr-rust/forms/files), each read back and compared; plain
+#                                 comments as ; comments; with --full (dumps of dump --full) mode
+#                                 :full, every position of the text (SPEC §9.2)
+#   bin/repr-rust read [--full] --corpus [CORPUS]
 #                                 dump the corpus and convert it into .tmp/repr-rust/forms/CORPUS/
-#                                 (SPEC §2.1); report .tmp/repr-rust/forms/CORPUS.report.edn
-#   bin/repr-rust print [-o DIR] FORMS.ae...
+#                                 (CORPUS-full/; SPEC §2.1); report .tmp/repr-rust/forms/CORPUS.report.edn
+#   bin/repr-rust print [--layout lines|full] [-o DIR] FORMS.ae...
 #                                 the printer (SPEC §9.4): one .rs per forms file into DIR (default
-#                                 .tmp/repr-rust/printed), at its rs/file's :path; mode :lines' layout
-#   bin/repr-rust roundtrip [--only REGEX | --iface] [CORPUS]
+#                                 .tmp/repr-rust/printed), at its rs/file's :path; mode :lines' layout,
+#                                 or the full layout of forms of mode :full (the original text)
+#   bin/repr-rust roundtrip [--only REGEX | --iface] [--text | --text-only] [CORPUS]
 #                                 the round trip's tree level (SPEC §11.1, §11.2; RR1) over the
 #                                 corpus: dump, read, print into .tmp/repr-rust/cand/CORPUS/, and
 #                                 compare rustc's trees (rsdump tree: the parsed tree's Debug text
@@ -48,9 +53,15 @@
 #                                 file printed in its place (.tmp/repr-rust/iface/CORPUS/), compared
 #                                 without spans; fails on a difference
 #                                 test/rust/roundtrip-CORPUS-iface-known.edn does not list. Report
-#                                 .tmp/repr-rust/iface/CORPUS.report.edn
+#                                 .tmp/repr-rust/iface/CORPUS.report.edn. With --text, then the text
+#                                 level (SPEC §11.1; RR3): the corpus dumped with --full, converted in
+#                                 mode :full, printed in the full layout into
+#                                 .tmp/repr-rust/cand/CORPUS-full/ and compared byte for byte with the
+#                                 originals (test/rust/roundtrip-CORPUS-text-known.edn), then those
+#                                 printed files' trees and lines; --text-only: that level alone
 #   bin/repr-rust test            the spec's cases (test/rust/; bin/lib/repr-rust/test): the reader's
-#                                 samples, the worked example converted and its round trip
+#                                 samples, the worked example converted and its round trip, the
+#                                 interface level's cases, mode :full's cases
 #
 # Environment: REPR_RUST_APKS (a directory of apks to take the pinned ones from, checked by their
 # SHA-256, before apk fetch); REPR_RUST_JOBS (parallel helper and converter runs, default the cores, at most
@@ -173,13 +184,16 @@ corpus_root() {
 # run_helper VERB OUT EDITION FILE...: the helper over files in parallel (relative to the current
 # directory); a file it fails on is written as (rsdump/error ...), which the steps after report
 run_helper() {
-  local verb=$1 out=$2 ed=$3; shift 3
-  printf '%s\n' "$@" | xargs -r -P "$jobs" -n 8 "$helper" "$verb" -o "$out" --edition "$ed" --helper-hash "sha256:$(helper_hash)"
+  local verb=$1 out=$2 ed=$3 flags=(); shift 3
+  [ "$verb" = dump ] && [ "${dump_full:-0}" = 1 ] && flags=(--full)
+  printf '%s\n' "$@" | xargs -r -P "$jobs" -n 8 "$helper" "$verb" "${flags[@]}" -o "$out" --edition "$ed" --helper-hash "sha256:$(helper_hash)"
 }
 
-# dump_corpus CORPUS OUT
+# dump_corpus CORPUS OUT [--full]: the helper's dumps of the corpus (with --full, its tokens and
+# comments too: mode :full, SPEC §9.2)
 dump_corpus() {
-  local c=$1 out=$2 name ed files
+  local c=$1 out=$2 name ed files dump_full=0
+  [ "${3:-}" = --full ] && dump_full=1
   rm -rf "$out" "$out.err"; mkdir -p "$out"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
@@ -192,17 +206,20 @@ read_files() {
 }
 
 roundtrip() {
-  local c=rustc-1.99.1 only="" iface=0 st=0
+  local c=rustc-1.99.1 only="" iface=0 text=0 text_only=0 st=0
   while [ $# -gt 0 ]; do
     case $1 in
       --only) only=$2; shift 2 ;;
       --iface) iface=1; shift ;;
+      --text) text=1; shift ;;
+      --text-only) text=1; text_only=1; shift ;;
       *) c=$1; shift ;;
     esac
   done
   if [ "$iface" = 1 ] && [ -n "$only" ]; then echo "repr-rust: --iface documents whole crates: not with --only" >&2; return 2; fi
   build
   corpus_root "$c"
+  if [ "$text_only" = 1 ]; then text_level "$c" "$only"; return; fi
   local dumps=$work/dumps/$c forms=$work/forms/$c cand=$work/cand/$c orig=$work/orig/$c t0 t1 t2 t3 t4
   t0=$(date +%s)
   echo "== repr-rust roundtrip $c: dump" >&2
@@ -240,6 +257,52 @@ roundtrip() {
   if [ "$iface" = 1 ]; then
     iface_level "$c" || st=1
   fi
+  if [ "$text" = 1 ]; then
+    text_level "$c" "$only" || st=1
+  fi
+  return $st
+}
+
+# text_level CORPUS [ONLY]: the round trip's text level (SPEC §11.1, §11.3; RR3): the corpus dumped
+# with --full, converted in mode :full into $work/forms/CORPUS-full/, printed in the full layout
+# into $work/cand/CORPUS-full/ and compared byte for byte with the originals (arbace.repr.rust
+# compare-text, known differences test/rust/roundtrip-CORPUS-text-known.edn), then the tree level
+# of those printed files (rustc's trees and lines, as mode :lines'); reports
+# $work/cand/CORPUS-full.text.edn and .report.edn
+text_level() {
+  local c=$1 only=${2:-} dumps=$work/dumps/$1-full forms=$work/forms/$1-full cand=$work/cand/$1-full orig=$work/orig/$1-full
+  local t0 t1 t2 t3 t4 st=0 name ed files f
+  t0=$(date +%s)
+  echo "== repr-rust roundtrip $c: text level: dump --full" >&2
+  dump_corpus "$c" "$dumps" --full
+  t1=$(date +%s)
+  echo "== repr-rust roundtrip $c: text level: convert in mode :full ($((t1 - t0)) s dumping)" >&2
+  rm -rf "$forms"; mkdir -p "$(dirname "$forms")"
+  read_files --full --jobs "$jobs" -o "$forms" --report "$forms.report.edn" --root "$dumps" --corpus "$(corpus_file "$c")" \
+    ${only:+--only "$only"} > "$forms.log" 2>&1 ||
+    { grep -v '^error\|^misread' "$forms.log" | tail -5 >&2; grep -c '^error\|^misread' "$forms.log" | sed 's/$/ files failed to convert (see the report)/' >&2; }
+  t2=$(date +%s)
+  echo "== repr-rust roundtrip $c: text level: print, the full layout ($((t2 - t1)) s converting)" >&2
+  rm -rf "$cand" "$cand.trees" "$cand.trees.err"; mkdir -p "$cand"
+  arbace_tool -m arbace.repr.rust print --layout full --jobs "$jobs" -o "$cand" --root "$forms" > "$cand.print.log" 2>&1 ||
+    grep -v '^error' "$cand.print.log" | tail -3 >&2
+  t3=$(date +%s)
+  arbace_tool -m arbace.repr.rust compare-text --corpus "$(corpus_file "$c")" --orig "$srcroot" --cand "$cand" \
+    --forms-report "$forms.report.edn" --known "$root/test/rust/roundtrip-$c-text-known.edn" \
+    --report "$cand.text.edn" ${only:+--only "$only"} \
+    --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2))" || st=1
+  echo "== repr-rust roundtrip $c: text level: the tree level of mode :full's printed files" >&2
+  rm -rf "$orig" "$orig.err"; mkdir -p "$orig" "$cand.trees"
+  while IFS=$'\t' read -r name ed files; do
+    # shellcheck disable=SC2086
+    (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
+    # shellcheck disable=SC2086
+    (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
+  done < <(corpus_plan "$c")
+  t4=$(date +%s)
+  arbace_tool -m arbace.repr.rust compare --corpus "$(corpus_file "$c")" --orig "$orig" --cand "$cand" \
+    --forms-report "$forms.report.edn" --known "$root/test/rust/roundtrip-$c-known.edn" \
+    --report "$cand.report.edn" ${only:+--only "$only"} --prune --times "parse $((t4 - t3))" | sed 's/(tree level)/(tree level, mode :full)/' || st=1
   return $st
 }
 
@@ -319,9 +382,13 @@ case $cmd in
     esac ;;
   dump)
     build
+    full=()
+    if [ "${1:-}" = --full ]; then full=(--full); shift; fi
     if [ "${1:-}" = --corpus ]; then
-      c=${2:-rustc-1.99.1}; corpus_root "$c"; dump_corpus "$c" "$work/dumps/$c"
-      cat "$work/dumps/$c.err" >&2; exit 0
+      c=${2:-rustc-1.99.1}; corpus_root "$c"
+      if [ ${#full[@]} -gt 0 ]; then dump_corpus "$c" "$work/dumps/$c-full" --full; cat "$work/dumps/$c-full.err" >&2
+      else dump_corpus "$c" "$work/dumps/$c"; cat "$work/dumps/$c.err" >&2; fi
+      exit 0
     fi
     out=$work/out; ed=2024; files=()
     while [ $# -gt 0 ]; do
@@ -331,15 +398,17 @@ case $cmd in
         *) files+=("$1"); shift ;;
       esac
     done
-    "$helper" dump -o "$out" --edition "$ed" --helper-hash "sha256:$(helper_hash)" "${files[@]}" ;;
+    "$helper" dump "${full[@]}" -o "$out" --edition "$ed" --helper-hash "sha256:$(helper_hash)" "${files[@]}" ;;
   read)
+    full=(); sfx=""
+    if [ "${1:-}" = --full ] && [ "${2:-}" = --corpus ]; then full=(--full); sfx=-full; shift; fi
     if [ "${1:-}" = --corpus ]; then
       shift; c=${1:-rustc-1.99.1}
       build; corpus_root "$c"
-      dump_corpus "$c" "$work/dumps/$c"
-      out=$work/forms/$c
+      dump_corpus "$c" "$work/dumps/$c$sfx" "${full[@]}"
+      out=$work/forms/$c$sfx
       rm -rf "$out"
-      read_files --jobs "$jobs" -o "$out" --report "$out.report.edn" --root "$work/dumps/$c" --corpus "$(corpus_file "$c")"
+      read_files "${full[@]}" --jobs "$jobs" -o "$out" --report "$out.report.edn" --root "$work/dumps/$c$sfx" --corpus "$(corpus_file "$c")"
     else
       read_files --jobs "$jobs" "$@"
     fi ;;

@@ -6,7 +6,8 @@ departs from or adds to the spec, with the reasons. RR1 was built on 2026-10-17 
 `rustc 1.99.1 (58cf8f9c3 2026-10-13)`, `librustc_driver-61690d3e4c729118.so`), `rustc-dev-1.99.1-r0`
 and `rust-src-1.99.1-r0` fetched as apks, and stage 0 of that commit; RR2 on the same day (branch
 `repr-rust-rr2`, from main at `10c7b293`), on the same rustc, its `rustdoc` and the host's
-sysroot.
+sysroot; RR3 on 2026-10-18 (branch `repr-rust-rr3`, from main at `80294e9a`), on the same rustc
+and the stage 0 of that commit.
 
 ## Decided (2026-10-17, the user): RR-P1-RR-P3
 
@@ -366,3 +367,139 @@ differs. `bin/repr-rust roundtrip --iface && bin/repr-rust test`, the step `repr
 
 As built: spans written inside attribute texts blanked by the interface level's normalization
 (RR-P4, SPEC §11.3 amended); public items only (RR-P5).
+
+## RR3: mode `:full`, the text level
+
+SPEC §9.2 (mode `:full`), §9.3 (comments), §9.4 (3, the full layout) and §11.1 (the text level)
+define it; SPEC §12.6 records what the build changes in the spec.
+
+### What was built
+
+| part | file | what |
+|---|---|---|
+| helper | `tools/rsdump/rsdump.rs` | `dump --full`: `(rsdump/tokens [[KIND L C L2 C2]...])`, `rustc_lexer`'s tokens and comments of the file but white space; every dump: `(rsdump/comments [[L C L2 C2]...])`, the plain comments |
+| converter | `arbace/repr/rust/full.ae`; `convert.ae`'s `*full*`, `*texts*`, `line-comments` | mode `:full`'s forms: mode `:lines`' forms with every form's span and the positions of the printer's tokens paired with the source's; the plain comments of mode `:lines` |
+| writer | `arbace/repr/rust/write.ae` (`with-comments`) | the plain comments as `;` comments at their lines (RR-P1) |
+| printer | `arbace/repr/rust/print.ae` (`print-pieces`, `print-full`) | the full layout: the printer's tokens at the forms' positions |
+| command | `bin/repr-rust roundtrip --text`, `--text-only`, `dump --full`, `read --full`, `print --layout full`; `arbace.repr.rust compare-text`; `make repr-rust-text` | the text level, then the tree level of the printed files |
+| known differences | `test/rust/roundtrip-rustc-1.99.1-text-known.edn` | none (`{}`) |
+| cases | `bin/lib/repr-rust/test` case 6, `test/rust/sample/space.rs` (`-text` in `.gitattributes`) | the samples byte for byte, a byte order mark and CRLF, a name changed in the forms, `;` comments in mode `:lines` |
+| gate | `bin/gate --full`'s `repr-rust` step: `roundtrip --iface --text && test` | |
+
+### The helper
+
+`rustc_lexer::tokenize` (with `FrontmatterAllowed::Yes`, after `strip_shebang`) over the file's
+text as rustc's source map holds it (a UTF-8 byte order mark removed, `\r\n` made `\n`), white
+space left out, each token `[KIND L C L2 C2]` with rustc's columns (characters from 1, the end
+exclusive): `:c` a plain comment (line or block), `:doc` a doc comment, `:id` an identifier
+(raw or not), `:lt` a lifetime, `:lit` a literal, `:p` one punctuation character (the lexer does
+not glue: `::` is two), `:shebang`, `:fm` a front matter, `:x` anything else. Positions rather
+than SPEC §10.3's byte ranges: the converter works on the text's characters. Without `--full`
+the dump carries the plain comments alone, `[L C L2 C2]` each (the full dumps are 181 MB, the
+others 146 MB).
+
+### The converter (SPEC §9.2 as built)
+
+A dump of `dump --full` is converted as in mode `:lines` with `*full*` bound: `at` puts on each
+list, vector and symbol it gives a line the node's span too. Then (`arbace.repr.rust.full`):
+
+1. The printer prints the forms with its tokens collected (`print-pieces`: the texts it emits, the
+   same code as mode `:lines`' layout), and they are paired in order with the file's text
+   (`align`): each printed token is the text at the next lexer token's start (a printed token may
+   cover several of the lexer's, `::`, `..=`, a `(:tt ...)` text, or part of one, `x.0.1`'s `0`
+   in the lexer's float `0.1`); plain comments before it are recorded. Where it is not, the
+   alternatives are weighed by how many printed tokens then match in a row (up to 4): the
+   source's punctuation before it (1 to 3 tokens, no delimiter) recorded as `:rs/punct`, or a
+   printed punctuation token (no delimiter) the source lacks recorded as `:rs/drop`; else the
+   source's tokens without their white space (`> >` for a printed `>>`), or one identifier,
+   lifetime or literal spelled otherwise, as `:rs/text`; else the file fails to convert, with the
+   position, the token and the printed tokens before it (as Haskell forms' HR11). The first corpus
+   run failed 3 files, where a `}` was taken for skipped punctuation: delimiters are never
+   skipped or dropped since.
+2. The positions are given to the forms by span (`distribute`: the innermost span that holds the
+   position, by a sweep over the spans sorted by start, the longer first, and the positions):
+   `:rs/pos {:span :toks}`, `:rs/text`, `:rs/punct`, `:rs/drop` on the owner, the spans of every
+   other spanned form as `:rs/pos {:span}`; positions no span holds go to `rs/file`'s metadata
+   (none in std).
+3. On `rs/file`: `:positions :full`, `:rs/comments [[l1 c1 l2 c2 "text"]...]` (the plain comments
+   outside the text forms hold), `:rs/space [[l c "ws"]...]` (a gap between two tokens, or before
+   the first, that is not `\n*` then spaces), `:rs/tail` (the text after the last token when it
+   is not one newline), `:rs/crlf`, `:rs/bom`.
+
+The forms of mode `:lines` are unchanged as data and lines (all 1,074 files compared with RR1's,
+read back; the printed files byte-identical to RR1's), with the plain comments now in their text;
+the forms of mode `:full` are, as data, mode `:lines`' but for `rs/file`.
+
+### The printer's full layout (SPEC §9.4, 3)
+
+`print-full`: the printer's tokens (`print-pieces` of the read forms), the positions of every
+form's `:toks` and `:rs/drop` sorted (a dropped token before a token at its position), each
+`:toks` position taking the next printed token (its `:rs/text` in its place), each `:rs/drop` one
+written nowhere, the punctuation and the comments added at their positions; between two written
+texts the recorded white space, else the gap rule; then `:rs/tail` (else a newline), `\r\n` for
+`:rs/crlf`, the mark for `:rs/bom`. A count of positions other than the printer's tokens, or a
+token before the end of the one before it, is an error. The printer resolves nothing: case 6 of
+`bin/repr-rust test` prints the worked example's forms with `largest` renamed `highest` and gets
+the original with the name changed.
+
+### Results
+
+`bin/repr-rust roundtrip --text` (also `make repr-rust-text`, `--text-only` for the level alone)
+over RR1's corpus:
+
+| crate | files | byte-identical | trees and lines of the printed files equal |
+|---|---|---|---|
+| `core` | 288 | 288 | 288 |
+| `alloc` | 93 | 93 | 93 |
+| `std` | 646 | 646 | 646 |
+| `proc_macro` | 17 | 17 | 17 |
+| `test` | 30 | 30 | 30 |
+| total | 1,074 | 1,074 (14,276,761 bytes) | 1,074 (1,660,638 spans) |
+
+No known differences. What the forms hold for it: 1,651,504 token positions, 20,248 plain comments
+(of the lexer's 22,182; the other 1,934 are inside `(:tt ...)` texts), 3,495 punctuation tokens
+(all commas: trailing commas the printer does not print), 975 dropped tokens (the commas the
+printer prints after a block-bodied arm and a last field where the source has none), no spelling
+(std writes no raw identifier that is no keyword, nor `> >`), no white space other than the gap
+rule's (std has no tab, no trailing blank outside comments and literals, no CR, no byte order
+mark) and no tail (every file ends in one newline). The forms of mode `:full` are 59 MB (mode
+`:lines`' 16 MB): 3.8 times. `test/rust/sample/space.rs` adds what the corpus lacks: tabs,
+trailing blanks, a form feed, raw identifiers, an identifier not in NFC (spellings), a leading
+`|`, trailing commas, nested and non-BMP comments, no final newline; the test also prints a copy
+with a byte order mark and CRLF line ends.
+
+Mode `:lines` writes 20,390 lines of `;` comments over the corpus. Times on this host (64 cores,
+shared with other builds): the text level about 55 s (the dumps 2 s, the conversion 28 s, the
+printing 7 s, the trees of the printed files 7 s, the rest the tools' start); the gate's step
+(`roundtrip --iface --text && test`) 145 s (RR2's about 90-150 s), `bin/repr-rust test` 24 s.
+
+### Checks and how to reproduce
+
+```sh
+bin/repr-rust roundtrip --text-only   # dump --full, read --full, print --layout full, cmp, trees
+bin/repr-rust roundtrip --iface --text   # the gate's: all three levels
+bin/repr-rust test                    # case 6: mode :full's cases
+bin/repr-rust read --full --corpus    # the forms only: .tmp/repr-rust/forms/rustc-1.99.1-full/
+```
+
+Reports: `.tmp/repr-rust/cand/rustc-1.99.1-full.text.edn` (the text level) and `.report.edn`
+(the tree level of the printed files), the conversion's `.tmp/repr-rust/forms/rustc-1.99.1-full.report.edn`
+with its counts in the log (`warning :full-tokens` ...).
+
+### Choices for the user (RR-P6-RR-P8; open, built as recommended)
+
+- **RR-P6 Mode `:full`'s positions.** (a) As built, Haskell forms' HR9/HR10: the lexer's tokens
+  paired in order with the printer's, `:rs/pos {:span :toks}` unnamed on the innermost spanned
+  form, `:rs/text`, `:rs/punct`, `:rs/drop`, the white space by the gap rule; (b) SPEC §9.2's
+  named keys (`:fn`, `:comma`, `:lbrace`...) per node, `:rs/apos`, `:rs/paren`, a table per node
+  kept with the rustc version (S22). *Recommended: (a)*: every token by construction, no table to
+  keep, one mechanism for literals, keywords and parentheses; (b) names what (a) pairs by order.
+- **RR-P7 Commas the printer decides otherwise.** (a) As built: the printer keeps mode `:lines`'
+  commas, and the source's differences are data, `:rs/punct` (3,495 trailing commas) and
+  `:rs/drop` (975 printed commas the source lacks); (b) commas always data in mode `:full` (as
+  Haskell forms' punctuation), the printer printing none in the full layout: 1.6% more data, and
+  a form edited by hand then has no commas. *Recommended: (a).*
+- **RR-P8 The text of `;` comments in mode `:lines`.** (a) As built, Go forms': a line comment's
+  text after its `//` (`// x` is `; x`), a block comment's lines trimmed after a space; (b) the
+  Rust text verbatim (`; // x`), unambiguous about the comment's kind. *Recommended: (a)*, as
+  repr/go.
