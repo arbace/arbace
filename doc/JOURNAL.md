@@ -1625,3 +1625,27 @@ builds use.
   auxiliary crates left out for now, 411 revisions; `RUSTC_BOOTSTRAP=1`; `_` for characters a
   namespace's name cannot hold). After the merge: `make check-makefile`, `bin/repr-rust test`
   (case 9 the behaviour level) and the essential gate (13.5 min) passed.
+
+## 2026-10-19: goi GR5.1 merged (GC26 (b)); GC27 decided; the seed 1d5c35b4
+
+(The entry before this one is headed `###` by mistake; it is an entry like the others.)
+
+- goi GR5.1 (branch `goi-gr5-1`, `1149d5b3`, from `8ed8d6cb`; doc/go/GOI-SPEC.md, "As built: GR5.1")
+  merged as `841c0b3c`: the user's GC26 (b). When the builder (`arbace/go/build.ae`) makes a
+  statement list's node, it marks each statement whose own part (its nested lists left out) can
+  panic or call. Only those store their line. An expression counts as quiet only if it is on a
+  whitelist and its operands are quiet. The whitelist: constants, variables, function literals;
+  arithmetic but integer `/` and `%` by a non-constant and shifts by a non-constant signed count;
+  comparisons of basic types, pointers or channels; pointer-free fields; an array indexed by a
+  constant; a map read by a basic key; `len`, `cap` and the like. Anything else stores its line,
+  every call, `go`, `defer` and crossing included, and so does `return` in a function that defers.
+  Beyond (b)'s letter, a loop with a quiet header and one simple statement as its body stores that
+  statement's line once, before the loop (GC27). A 17-case probe of raising points gives the same
+  `:go/trace` on GR5's and GR5.1's executables. fib 2.56-2.58 ms (GR5 2.57-2.60), sumSq
+  17.99-18.76 ms (GR5 20.96-21.29; GR4 19.9), sieve 65.02-66.26 ms (GR5 67.95-70.54; without the
+  hoisting 69.3-70.8). The executable +114,688 bytes. `bin/goi check` passed 833: `gc2.go`, a known
+  case timed by memory stats and a 10 s limit, passed once; the reference is left unchanged.
+- The user decided GC27 as built: the hoisted line kept.
+- In main: the essential gate passed (9 min), the fixpoint held, and the seed was remade from G3:
+  `1d5c35b4…` (was `215d3a1b…`), committed as `82182df2` and verified (the same tar printed again at
+  `841c0b3c`, stage 0 = G1 = G2 = G3, `6538698a…`).

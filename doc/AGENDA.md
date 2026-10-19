@@ -93,8 +93,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Running (the user, 2026-10-19): goi's GR5.1 (`goi-gr5-1`): GC26 (b), an interpreted statement's
-  line stored only where it can panic or call. The seed remade (`215d3a1b…`, GR5) and verified.
+- Nothing running. The seed remade (`1d5c35b4…`, GR5.1) and verified. Next: goi GR6, repr/rust RR6.
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
@@ -124,7 +123,7 @@ The current state of the work. This file is rewritten as things change. For the 
   run programs pass, none fail; GC15-GC18 decided as built); GR4 done (2026-10-18: methods, interfaces, concurrency; 832 pass;
   GC19-GC22 decided as built); GR5 done (the crossings, the package `arbace`, GoPanic, traces,
   printing, GS7, GS10, `go/run-compiled`, the oracle's `forms/go`; GC23-GC25 as built, GC26 (b));
-  GR5.1 running, then GR6.
+  GR5.1 done (GC26 (b): lines stored only where a statement can panic or call; GC27 as built); next GR6.
 
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),
