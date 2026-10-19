@@ -1687,3 +1687,46 @@ builds use.
 - After the merge: `make check-makefile`, `bin/repr-rust test` (28 ok, case 10 the code levels) and
   the essential gate (10.5 min) passed. RR6 changes no part of the program, so there is no re-seed.
   SPEC §12.1's milestones RR1-RR6 are all built.
+
+## 2026-10-19: goi GR6 merged; GC28-GC34 decided; the seed 34d68b82; GR7a, GR7b and HR25's rest started
+
+- goi GR6, generics (branch `goi-gr6`: `288cbcc6`, `4205aac4`, `428eae90`, `59a9d6da`, the check's
+  reference, `669932e7`, from `a1a50c4c`; doc/go/GOI-SPEC.md "As built: GR6"), merged as `90ec844d`.
+  - **The checker:** type parameters, constraints and type sets ported from go/types; operations by
+    type sets; constraint satisfaction; generic types, aliases, local types and methods (go1.27).
+    `arbace/go/check/infer.ae` ports go1.27.1's `unify.go` and `infer.go`. `:inst` is verified, and
+    S53 ends: every declaration is checked.
+  - **Execution:** one instance per type-argument list, built from the checked tree with the types
+    substituted (`inst-tree`). Instances of generic types are interpreted named types
+    (`pkg.T[args]`). Compiled packages' generics run from the digest's kept trees.
+  - **The interpretable packages:** `cmp`, `iter`, `maps`, `slices` and `internal/race`, as
+    `:interpret` in `gotable.edn`. A `:replace` entry writes `maps.Clone` (`go:linkname` in the
+    original) in Go forms.
+  - **Fixes outside generics:** `((.M x))`; a receiver checked as a parameter; range and select
+    values assigned to interface targets; unnamed interfaces in assertions' panic messages.
+  - **Results:** `bin/goi check` 1,036 pass (832 before), 0 fail, 59 known (8 new, by design:
+    finalizer timing, `%T` and reflect's names of interpreted instances), 68 unsupported. 186 of
+    `typeparam`'s 200 run programs pass; 7 hit GR3's limit on recursive types. `bin/goi
+    annotations` is clean, `:inst` verified (tamago 1,061 on amd64 and arm64, linux std 1,091).
+    The essential subset grows from 379 to 566 programs.
+  - **Speed:** fib 2.55, sumSq 17.87 and sieve 65.52 ms, the same as GR5.1. The executable
+    +1,552,384 bytes (1.2%).
+- The user decided GC28-GC34 as built:
+  - GC28: the subset grown by the same rule;
+  - GC29: `:replace` for runtime-implemented declarations;
+  - GC30: unexported compiled types in instances as interpreted named types;
+  - GC31: gc's runtime names for instances;
+  - GC32: generics needing internal packages unsupported when called, with overrides once a
+    program needs one;
+  - GC33: code found unsupported late ends the run with status 125;
+  - GC34: no REPL var for generic functions, an inferring var to reconsider later.
+- In main: the essential gate passed (14.5 min), the fixpoint held, the seed was remade from G3
+  (`34d68b82…`, was `1d5c35b4…`), committed as `606fd0ed` and verified (printed again at
+  `90ec844d`, stage 0 = G1 = G2 = G3, `5cd0f56a…`).
+- Started (the user, 2026-10-19), all from `90ec844d`:
+  - goi GR7a (`goi-gr7a`): the check in the box (GS13) and `forms/go` in the box's oracle (GC25
+    lifted); GR3's limit on recursive types.
+  - goi GR7b (`goi-gr7b`): the errorcheck programs; `reify` of listed Go interfaces (G13).
+  - repr/haskell HR25's rest (`repr-haskell-hr25`): the `{-# LINE #-}` modules equal at the trees
+    of mode `:full`, without changing S5 or HR12 unless the user decides so.
+  - Also offered: a `bin/gate --full` milestone. Not chosen now.
