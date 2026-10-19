@@ -169,30 +169,33 @@
     (loop [specs specs iota 0 prev nil]
       (when (seq specs)
         (let [[tf init] (first specs)
+              ;; an init written nil is an init (const x = nil)
+              has-init (> (count (first specs)) 1)
               _ (when-let [l (code/fline (first specs))] (set! e/*line* l))
               names (target-list tf)
               tag (some #(:tag (meta %)) names)
               ;; a digest's constant (§6.5) has its :val and no init (a spec of its own, not an
               ;; implicit repetition of the previous spec of a group)
-              valued (and (nil? init) (nil? prev) (contains? (meta (first names)) :val))
+              valued (and (not has-init) (nil? prev) (contains? (meta (first names)) :val))
               [tag inits inherited] (cond
-                                      (some? init) [tag (init-list init) false]
+                                      has-init [tag (init-list init) false]
                                       valued [tag nil false]
                                       :else [(:tag prev) (:inits prev) true])]
-          (when (and (nil? init) (nil? prev) (not valued))
+          (when (and (not has-init) (nil? prev) (not valued))
             (err! tf :MissingInitExpr "missing init expr for const declaration"))
           (doseq [[i nf] (map-indexed vector names)]
             (let [nm (code/ident-name nf)
                   d (new-decl {:kind :const :file fi :form nf :spec f :iota iota :tag tag
-                               :init (get inits i) :ninits (count inits) :nnames (count names) :inherited inherited})
+                               :init (get inits i) :nil-init (and (< i (count inits)) (nil? (get inits i)))
+                               :ninits (count inits) :nnames (count names) :inherited inherited})
                   x (pkg-obj :const nm nf fi d)]
               (vswap! d assoc :obj x)
               (declare-pkg! x nm nf)))
-          (when (and (some? init) (< (count inits) (count names)))
+          (when (and has-init (< (count inits) (count names)))
             (err! tf :WrongAssignCount "missing init expr for %s" (code/ident-name (nth names (count inits)))))
-          (when (and (some? init) (> (count inits) (count names)))
+          (when (and has-init (> (count inits) (count names)))
             (err! tf :WrongAssignCount "extra init expr"))
-          (recur (rest specs) (inc iota) (if (some? init) {:tag tag :inits inits} prev)))))))
+          (recur (rest specs) (inc iota) (if has-init {:tag tag :inits inits} prev)))))))
 
 (defn- collect-var [f fi]
   (let [args (rest f)
@@ -227,7 +230,9 @@
                 [(let [[nf & more] args
                        more (if (string? (first more)) (rest more) more)]
                    (into [nf] more))])]
-    (doseq [[nf & more] specs]
+    (doseq [[[nf & more] sv] (map vector specs (if (group? args) (group-specs args) [nil]))]
+      ;; a group's spec at its line (the objects' lines, their errors')
+      (code/with-line sv
       (let [[tps tf] (if (= :type-params (first more)) [(second more) (nth more 2)] [nil (first more)])
             nm (code/ident-name nf)
             d (new-decl {:kind :type :file fi :form nf :spec f :type-form tf :tparams tps :alias (:alias (meta nf))})
@@ -237,7 +242,7 @@
         ;; Named), so that references to it never wait for its declaration
         (when-not (:alias (meta nf))
           (oset! x :type (t/new-named {:obj x :name nm :pkg (o e/*pkg* :path) :pkg-name (o e/*pkg* :name)})))
-        (declare-pkg! x nm nf)))))
+        (declare-pkg! x nm nf))))))
 
 (defn- recv-base
   "The receiver base type name of a method's receiver form, and whether the receiver type
@@ -386,6 +391,9 @@
       (if-let [[ty v] (code/val-const (:val (meta form)) (when (and T (t/valid? T)) T))]
         (do (oset! x :type ty) (oset! x :val v))
         (oset! x :type :invalid))
+      ;; const x = nil
+      (and (nil? init) (:nil-init @d))
+      (do (e/error! (or (o x :line) e/*line*) :InvalidConstInit "nil is not constant") (oset! x :type :invalid))
       (nil? init) (oset! x :type :invalid)
       :else
       (let [n (code/expr cx init)]

@@ -124,7 +124,8 @@
 
 (defn resolve-name
   "The object a name denotes in cx's scopes (locals, the package, the file's imports, the
-  universe), declared and marked used; nil when undefined."
+  universe), declared; nil when undefined. A package name used alone is no use of its
+  import (go/types: \"use of package fmt not in selector\", the import unused)."
   [cx ^String n]
   (when-let [x (or (e/scope-lookup (:scope cx) n)
                    (when-let [[x imp] (some-> (:file cx) :dots (.get n))]
@@ -133,7 +134,6 @@
                    (e/scope-get e/universe n))]
     (when (and (package-level? x) *obj-decl* (not (and (= :type (o x :kind)) (not (o x :alias)))))
       (*obj-decl* x))
-    (when (= :pkg (o x :kind)) (oset! x :used true))
     x))
 
 (defn package-by-qualifier
@@ -200,7 +200,9 @@
     (cond
       (nil? x) :invalid
       (not= :type (o x :kind))
-      (do (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)
+      ;; go/types' ident: a variable named is used, even where a type was expected
+      (do (when (= :var (o x :kind)) (use-var! cx x))
+          (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)
       :else
       (do (note-ref! x)
           (when (o x :generic-invalid) (e/generic!))
@@ -232,6 +234,7 @@
   (let [p (pkg-path)
         fields (vec
                 (for [[i x] (map-indexed vector (rest f))]
+                  (with-line x
                   (if (struct-field-type? x)
                     ;; an embedded field
                     (let [ty (typexpr cx x)
@@ -255,15 +258,16 @@
                        :embedded true :pkg (when-not (t/exported? n) p) :line (fline x)})
                     (let [n (ident-name x)]
                       {:name n :type (tag-type cx x) :tag (when-let [tg (:go/tag (meta x))] (when (seq tg) (c/utf8-value tg)))
-                       :embedded false :pkg (when-not (t/exported? n) p) :line (or (fline x) (e/child-line f (inc i)))}))))]
-    ;; duplicate field names
-    (reduce (fn [seen fd]
-              (let [n (:name fd)]
-                (if (and (not= "_" n) (contains? seen n))
-                  (do (error! (or (:line fd) (e/current-line)) :DuplicateDecl (format "%s redeclared" n)) seen)
-                  (conj seen n))))
-            #{} fields)
-    [:struct (mapv #(dissoc % :line) fields)]))
+                       :embedded false :pkg (when-not (t/exported? n) p) :line (or (fline x) (e/child-line f (inc i)))})))))]
+    ;; duplicate field names: an error, the field not added (go/types' declareInSet)
+    (let [fields (second
+                  (reduce (fn [[seen acc] fd]
+                            (let [n (:name fd)]
+                              (if (and (not= "_" n) (contains? seen n))
+                                (do (error! (or (:line fd) (e/current-line)) :DuplicateDecl (format "%s redeclared" n)) [seen acc])
+                                [(conj seen n) (conj acc fd)])))
+                          [#{} []] fields))]
+      [:struct (mapv #(dissoc % :line) fields)])))
 
 (declare signature dup-params!)
 
@@ -350,7 +354,10 @@
 (defn array-length
   "The length of an array type: a constant expression of integer value, representable as int."
   [cx n]
-  (let [x (const-expr cx n)]
+  (let [x (const-expr cx n)
+        ;; go/constant's ToInt: a complex constant with a zero imaginary part is its real part
+        x (let [v (:val x)]
+            (if (and (c/complex? v) (c/fzero? (c/float-val (c/im-part v)))) (assoc x :val (c/re-part v)) x))]
     (cond
       (= :invalid (:mode x)) -1
       (not= :constant (:mode x))

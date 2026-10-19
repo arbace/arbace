@@ -65,7 +65,13 @@
   [f nl rhs-forms nodes call?]
   (if call?
     (err! f :WrongAssignCount "assignment mismatch: %s but %s returns %s" (count-str nl "variable")
-          (let [cf (first rhs-forms)] (expr-str (if (seq? cf) (if (= "go/call" (head-name cf)) (second cf) (first cf)) cf)))
+          (let [cf (first rhs-forms)
+                h (head-name cf)]
+            (cond
+              ;; x.M(...): its callee x.M
+              (and h (str/starts-with? h ".") (not (str/starts-with? h ".-")) (> (count h) 1))
+              (str (expr-str (second cf)) h)
+              :else (expr-str (if (seq? cf) (if (= "go/call" h) (second cf) (first cf)) cf))))
           (count-str (count nodes) "value"))
     (err! f :WrongAssignCount "assignment mismatch: %s but %s" (count-str nl "variable")
           (count-str (count rhs-forms) "value"))))
@@ -456,12 +462,15 @@
 
 (defn type-switch-stmt [cx f tail label]
   (let [args (vec (rest f))
-        [init guard clauses] (if (and (vector? (first args)) (not (clause? (second args))))
+        ;; [init] guard clause...; a vector alone is the guard [t x] of a switch without clauses
+        [init guard clauses] (if (and (vector? (first args)) (> (count args) 1) (not (clause? (second args))))
                                [(first args) (second args) (nnext args)]
                                [nil (first args) (next args)])
         icx (block-cx cx)
         in (when init (init-stmt icx init))
         [bind gf] (if (vector? guard) [(first guard) (second guard)] [nil guard])
+        _ (when (and bind (= "_" (ident-name bind)))
+            (err! bind :NoNewVar "no new variable on left side of :="))
         x (expr icx gf)
         ok (and (not (invalid? x)) (t/interface? (:type x)) (not (t/tparam? (:type x))))
         _ (when (and (not (invalid? x)) (not ok))
@@ -511,6 +520,7 @@
         scx (assoc cx :breakable id :switch-label label)
         cls (vec
              (for [cl (rest f)]
+               (with-line cl
                (let [default (= 'default (first cl))
                      bcx (block-cx scx)
                      comm (when-not default (second cl))
@@ -529,7 +539,7 @@
                                  (assign-stmt bcx comm))
                              :else (do (err! comm :InvalidSelectCase "select case must be send or receive (possibly with assignment)") nil))
                      body (if default (rest cl) (nnext cl))]
-                 {:op :comm :default default :comm cnode :body (stmt-list bcx body tail) :line (fline cl)})))]
+                 {:op :comm :default default :comm cnode :body (stmt-list bcx body tail) :line (fline cl)}))))]
     {:op :select :id id :label-id (:id label) :clauses cls :line (fline f)}))
 
 (defn- per-iteration! [cx objs]
@@ -704,7 +714,9 @@
              :values (vec (map (fn [n r] (assignment cx n (:type r) "return statement")) nodes rs))}))))))
 
 (def ^:private discarding-builtins
-  #{"append" "cap" "complex" "imag" "len" "make" "new" "real" "min" "max"})
+  "The built-in functions of kind expression (go/types' predeclaredFuncs), unsafe's among them."
+  #{"append" "cap" "complex" "imag" "len" "make" "new" "real" "min" "max"
+    "Add" "Alignof" "Offsetof" "Sizeof" "Slice" "SliceData" "String" "StringData"})
 
 (defn go-defer-stmt [cx f kw]
   (let [cf (second f)

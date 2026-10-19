@@ -559,6 +559,9 @@
             (if (nil? mm) [true nil nil] [false :InvalidIfaceAssign mm]))
           (and (vector? Vu) (= :interface (nth Vu 0)) (not Vp) (not Tp))
           [false :IncompatibleAssign (when (and (vector? Tu) (nil? (t/missing-method T V false))) :need-assert)]
+          ;; go/types: a pointer to an interface, for implements' cause
+          (and (vector? Tu) (= :pointer (nth Tu 0)) (t/interface? (nth Tu 1)) (not (t/tparam? (nth Tu 1))) (not Vp))
+          [false :InvalidIfaceAssign :iface-ptr]
           (and (vector? Vu) (= :chan (nth Vu 0)) (= :both (nth Vu 1))
                (vector? Tu) (= :chan (nth Tu 0)) (= (nth Vu 2) (nth Tu 2)))
           [(or (not (t/has-name? V)) (not (t/has-name? T))) :InvalidChanAssign nil]
@@ -575,13 +578,17 @@
 (defn missing-cause
   "The text of a missing-method cause (go/types' missingMethodCause, abridged)."
   [V T mm]
-  (let [m (:method mm)]
+  (let [m (:method mm)
+        Vu (t/under V)]
+    (if (and (vector? Vu) (= :pointer (nth Vu 0)) (t/interface? (nth Vu 1)) (not (t/tparam? (nth Vu 1))))
+      ;; go/types' interfacePtrError
+      (format "(type %s is pointer to interface, not interface)" (t/type-str V))
     (case (:cause mm)
       :ptr-recv (format "(method %s has pointer receiver)" (:name m))
       :field (format "(%s.%s is a field, not a method)" (t/type-str V) (:name m))
       :wrong-type (format "(wrong type for method %s)\n\t\thave %s%s\n\t\twant %s%s"
                           (:name m) (:name m) (t/sig-str (:type (:have mm))) (:name m) (t/sig-str (:type m)))
-      (format "(missing method %s)" (:name m)))))
+      (format "(missing method %s)" (:name m))))))
 
 (defn implements? [V T] (nil? (t/missing-method V T false)))
 
@@ -653,6 +660,8 @@
                              (map? cause) (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T) " "
                                                (missing-cause (:type n) T cause))
                              (= :need-assert cause) (str ": need type assertion")
+                             (= :iface-ptr cause) (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T)
+                                                      " (type " (t/type-str T) " is pointer to interface, not interface)")
                              :else "")))
                 (assoc n :mode :invalid :type :invalid))))))))
 
@@ -743,8 +752,14 @@
                 n)]
         {:op :conv :to T :x n :mode :value :type T :form f :line (fline f)})
       :else
-      (do (err! (if (fline (:form n)) (:form n) f) :InvalidConversion "cannot convert %s to type %s" (operand-str n) (t/type-str T))
-          (invalid f)))))
+      ;; go/types' convertibleTo's cause: an interface the operand does not implement
+      (let [mm (when (and (t/interface? T) (not (t/tparam? T)) (not (t/interface? (:type n))))
+                 (t/missing-method (:type n) T false))]
+        (err! (if (fline (:form n)) (:form n) f) :InvalidConversion "cannot convert %s to type %s%s" (operand-str n) (t/type-str T)
+              (if mm
+                (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T) " " (missing-cause (:type n) T mm))
+                ""))
+        (invalid f)))))
 
 ;;; Unary and binary operators (expr.go)
 

@@ -40,7 +40,7 @@
                   :else {:op :func :obj x :mode :value :type ty :form f :line (fline f)})))
     :builtin {:op :builtin :builtin (o x :name) :unsafe (o x :unsafe) :mode :builtin :type :invalid :form f :line (fline f)}
     :nil {:op :nil :mode :value :type :untyped-nil :form f :line (fline f)}
-    :pkg (do (err! f :InvalidPkgUse "use of package %s without selector" (o x :name)) (invalid f))
+    :pkg (do (err! f :InvalidPkgUse "use of package %s not in selector" (o x :name)) (invalid f))
     (invalid f)))
 
 (defn ident
@@ -562,9 +562,20 @@
               (let [fields (nth u 1)
                     ;; keys written [name value] (a literal whose type the converter saw as a type
                     ;; parameter's) are field names
-                    elems (if (and (seq elems) (every? #(and (vector? %) (= 2 (count %)) (go-ident? (first %))) elems))
+                    kv? #(and (vector? %) (= 2 (count %)) (go-ident? (first %)))
+                    elems (cond
+                            (and (seq elems) (every? kv? elems))
                             (vec (mapcat (fn [[k v]] [(keyword (ident-name k)) v]) elems))
-                            elems)
+                            ;; keys :k v among which the converter wrote [k v] (a key it found no
+                            ;; field for: an invalid program's)
+                            (and (keyword? (first elems)) (some kv? elems))
+                            (loop [es elems acc []]
+                              (cond
+                                (empty? es) acc
+                                (keyword? (first es)) (recur (nnext es) (conj acc (first es) (second es)))
+                                (kv? (first es)) (recur (next es) (conj acc (keyword (ident-name (first (first es)))) (second (first es))))
+                                :else (recur (next es) (conj acc (first es)))))
+                            :else elems)
                     keyed (and (seq elems) (keyword? (first elems)))]
                 (if keyed
                   (let [pairs (partition 2 elems)
@@ -612,6 +623,11 @@
                     (let [nodes (vec (map-indexed
                                       (fn [i vf]
                                         (with-elem fv (+ 2 i)
+                                        (cond
+                                          ;; a key: value among values (go/types: an error, skipped)
+                                          (and (vector? vf) (= 2 (count vf)))
+                                          (do (err! vf :MixedStructLit "mixture of field:value and value elements in struct literal") nil)
+                                          :else
                                         (if-let [fd (get fields i)]
                                           (do (when (and (:pkg fd) (not= (:pkg fd) (pkg-path)))
                                                 (err! vf :UnexportedLitField "implicit assignment to unexported field %s in struct literal of type %s"
@@ -621,7 +637,7 @@
                                           (let [n (expr cx vf)]
                                             (when (= i (count fields))
                                               (err! vf :InvalidStructLit "too many values in struct literal of type %s" (t/type-str T)))
-                                            nil))))
+                                            nil)))))
                                       (take (inc (count fields)) elems)))]
                       ;; go/types: at the closing brace, whose line the forms do not keep
                       (when (and (seq elems) (< (count elems) (count fields)))
@@ -739,14 +755,19 @@
   (let [[_ ps rs variadic] sig
         last-spread (and (seq arg-forms) (spread? (last arg-forms)))
         arg-forms (vec arg-forms)
+        ;; the arguments' indexes in the call form (their lines: with-elem)
+        fv (when (seq? f) (with-meta (vec f) (meta f)))
+        off (when fv (let [o (- (count fv) (count arg-forms))]
+                       (when (and (>= o 0) (seq arg-forms) (identical? (nth fv o) (first arg-forms))) o)))
+        at (fn [i g] (if off (with-elem fv (+ off i) (g)) (g)))
         ;; f(g()) with g of several results
         [args spread]
         (if (and (= 1 (count arg-forms)) (not last-spread))
-          (let [[ns] (multi-expr cx (first arg-forms) false)] [ns false])
+          (let [[ns] (at 0 #(multi-expr cx (first arg-forms) false))] [ns false])
           [(vec (map-indexed (fn [i a]
-                               (if (and last-spread (= i (dec (count arg-forms))))
-                                 (expr cx (second a))
-                                 (expr cx a)))
+                               (at i #(if (and last-spread (= i (dec (count arg-forms))))
+                                        (expr cx (second a))
+                                        (expr cx a))))
                              arg-forms))
            last-spread])
         nargs (count args)
@@ -772,7 +793,8 @@
                       (vec ps)))
         assign (fn [args ps]
                  (vec (map-indexed (fn [i a]
-                                     (let [n (assignment cx a (nth ps i) (str "argument to " callee-str))]
+                                     (let [n (at (if (= 1 (count arg-forms)) 0 i)
+                                                 #(assignment cx a (nth ps i) (str "argument to " callee-str)))]
                                        (if (and spread (= i (dec nargs))) (assoc n :spread true) n)))
                                    args)))]
     (cond
@@ -993,13 +1015,14 @@
                 s (expr cx (if (spread? s0) (second s0) s0))]
             (cond
               (invalid? s) (do (doseq [a (rest arg-forms)] (expr cx (if (spread? a) (second a) a))) (invalid f))
-              (= :untyped-nil (:type s)) (bad "invalid argument: %s (untyped nil) is not a slice" (expr-str (first arg-forms)))
+              ;; go/types' sliceElem
+              (= :untyped-nil (:type s)) (bad "invalid append: argument must be a slice; have untyped nil")
               :else
               (let [S (:type s)
                     el (slice-elem S)]
                 (cond
                   (nil? el)
-                  (bad "invalid argument: %s is not a slice" (operand-str s))
+                  (bad "invalid append: argument must be a slice; have %s" (operand-str s))
                   :else
                   (let [more (rest arg-forms)
                         last-spread (and (seq more) (spread? (last more)))]
@@ -1027,16 +1050,20 @@
             (if (or (invalid? d) (invalid? s))
               (invalid f)
               (let [de (slice-elem (:type d))
-                    se (or (slice-elem (:type s)) (when (t/all-string? (:type s)) :uint8))]
+                    se (or (slice-elem (:type s)) (when (t/all-string? (:type s)) :uint8))
+                    ;; go/types' sliceElem's error
+                    not-slice (fn [x] (if (= :untyped-nil (:type x))
+                                        "invalid copy: argument must be a slice; have untyped nil"
+                                        (str "invalid copy: argument must be a slice; have " (operand-str x))))]
                 (cond
                   (nil? de)
-                  (bad "invalid argument: copy expects slice arguments; found %s and %s" (operand-str d) (operand-str s))
+                  (do (err! (:form d) :InvalidCopy "%s" (not-slice d)) (invalid f))
                   (and (first (assignable? d [:slice :uint8])) (string-or-bytes? (:type s)))
                   (node {:args [d (default-final s)] :mode :value :type :int})
                   (nil? se)
-                  (bad "invalid argument: copy expects slice arguments; found %s and %s" (operand-str d) (operand-str s))
+                  (do (err! (:form s) :InvalidCopy "%s" (not-slice s)) (invalid f))
                   (not= de se)
-                  (bad "invalid argument: arguments to copy %s and %s have different element types %s and %s"
+                  (bad "invalid copy: arguments %s and %s have different element types %s and %s"
                        (operand-str d) (operand-str s) (t/type-str de) (t/type-str se))
                   :else (node {:args [d s] :mode :value :type :int}))))))
         "delete"
@@ -1136,7 +1163,7 @@
               (or (< nargs lo) (> nargs hi))
               (bad "invalid operation: %s expects %d or %d arguments; found %d" (expr-str f) lo hi nargs)
               :else
-              (let [sizes (mapv (fn [a] (first (index-value cx a nil "argument"))) (rest arg-forms))
+              (let [sizes (mapv (fn [a] (first (index-value cx a nil "index"))) (rest arg-forms))
                     vals (mapv #(when (and % (= :constant (:mode %))) (:val %)) sizes)]
                 (cond
                   (some invalid? sizes) (invalid f)
@@ -1147,7 +1174,7 @@
         "new"
         (if-not (need 1 1)
           (invalid f)
-          (let [x (expr-or-type cx (first arg-forms))]
+          (let [x (exclude (expr-or-type cx (first arg-forms)) #{:novalue :builtin})]
             (cond
               (invalid? x) (invalid f)
               (= :typexpr (:mode x)) (node {:args [x] :mode :value :type [:pointer (:type x)]})
