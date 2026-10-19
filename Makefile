@@ -157,7 +157,7 @@ goi-annotations: ## goi's checker over tamago/goroot, linux std, GOROOT/test: no
 	bin/goi annotations
 goi-test: ## goi's tests: the checker's (invalid forms with gc's messages, checked trees), the interpreter's programs against gc, Go forms at the REPL (bin/goi test --gc; after `make build`)
 	bin/goi test --gc
-goi-check: ## goi's check: GOROOT/test's run programs interpreted against gc, against test/goi/check-linux-amd64.edn (bin/goi check; after `make build`)
+goi-check: ## goi's check: GOROOT/test's run programs interpreted against gc, its errorcheck programs' errors judged as Go's test driver does, against test/goi/check-linux-amd64.edn (bin/goi check; after `make build`)
 	bin/goi check
 
 ## The host and housekeeping
