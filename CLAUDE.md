@@ -125,7 +125,11 @@ Prior art:
     corpus std's five crates of `rust-src` 1.99.1, `test/rust/corpus-rustc-1.99.1.edn`, and since
     RR4 the rest of `library/`, the compiler and a pinned crate set (`-library`, `-compiler`,
     `corpus-crates-2026-10-18.edn`, its `.crate` files pinned by `test/rust/crates-2026-10-18.sha256`;
-    `roundtrip ... all`)), evaluated from the checkout, not embedded.
+    `roundtrip ... all`), and since RR5 rustc's UI suite (`corpus-rustc-1.99.1-ui.edn`, from
+    `rustc-1.99.1-src.tar.xz` pinned by SHA-256); `--run`: the behaviour level, the UI suite's
+    run-pass programs built and run from the originals and from the printed files; `--std`: std
+    built from its printed files, the same programs run against it), evaluated from the checkout,
+    not embedded.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
@@ -234,7 +238,7 @@ Prior art:
   (`bin/repr-clojure check`, `--suite`, `--roundtrip`), repr/rust's (`bin/repr-rust roundtrip --iface --text --pretty`: rustc's trees and
   lines over std's five crates, then rustdoc's JSON of the crates without spans, then the pretty
   layout's trees, then mode `:full` printed back byte for byte, and `test`; on the host's rustc;
-  `REPR_RUST_CORPORA=all` adds RR4's corpora), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
+  `REPR_RUST_CORPORA=all` adds RR4's corpora and the UI suite, `'all --run --std'` the behaviour level), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; goi (`bin/goi
   annotations`, `test --gc`, `check`, after repr/go's round trips); Go's toolchain as forms
   (`bin/toolchain-vendor verify`, `check`). Run it when the Java forms'

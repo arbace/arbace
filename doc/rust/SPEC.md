@@ -258,7 +258,7 @@ Rust position and is written on one line.
 | `:kind` | how the crate reaches the file: `:root` (the crate root), `:module` (a `mod m;` file found by Rust's rules), `:path` (named by a `#[path]` attribute), `:include` (an `include!`d file of items); omitted for `:module` |
 | `:positions` | `:lines` (the default) or `:full` (§9) |
 | `:config` | the configuration (§2.4) |
-| `:shebang`, `:frontmatter` | the text of a first `#!` line, of a `---` front matter: rustc's lexer strips both before parsing, so they are in no tree; kept in both modes |
+| `:shebang`, `:frontmatter` | the text of a first `#!` line, of a `---` front matter: rustc's lexer strips both before parsing, so they are in no tree; kept in both modes (`:frontmatter-line`, the front matter's line when blank lines precede it: RR5) |
 | `:rs/comments`, `:rs/space`, `:rs/tail`, `:rs/crlf`, `:rs/bom` | in mode `:full` only: the text the tree does not hold (§9.2) |
 
 ### 2.4 The configuration record
@@ -1115,7 +1115,7 @@ equivalent when:
 4. **Code** (later). MIR (`-Zunpretty=mir`), then object code symbol by symbol, as repr/go's code
    level; columns reach code through panic locations, so this level needs `:full` or a
    normalization of `Location` constants.
-5. **Behaviour** (later). rust-lisp's `run-corpus.sh` method over rustc's UI run-pass programs, and
+5. **Behaviour** (RR5, §12.8). rust-lisp's `run-corpus.sh` method over rustc's UI run-pass programs, and
    its `std-from-lisp.sh` method: std built from the printed files (`-Zbuild-std`), the same
    programs run against it.
 
@@ -1169,7 +1169,7 @@ from rustc's source tarball for the behaviour level.
 | the rest of `library/` (`stdarch` 209, `vendor` 926, `compiler-builtins` 280, `portable-simd`, `backtrace`, the `*tests` crates) | 1,902 | RR4 |
 | the compiler (`usr/src/rustc/compiler`) | 2,167 | RR4 |
 | a pinned crate set (the host's Cargo cache served the survey's E9: 518 crates, 12,144 files, editions 2015-2024) | | RR4 |
-| rustc's test suite (`rustc-1.99.1-src.tar.xz`, pinned by SHA-256) | `tests/ui` run-pass programs | RR5 |
+| rustc's test suite (`rustc-1.99.1-src.tar.xz`, pinned by SHA-256) | `tests/ui`: 19,942 files (21,108 but the 1,162 the parser rejects and 4 whose namespaces clash), 3,718 run-pass programs | RR5 |
 
 Each crate is converted under its own configuration, written once in a corpus file
 (`test/rust/corpus-rustc-1.99.1.edn`): its directory, name, edition, crate root and type, the files
@@ -1450,6 +1450,63 @@ text (RR-P9-RR-P12 there, open, built as recommended):
   (`roundtrip-CORPUS-known.edn`, `-iface-known`, `-text-known`, `-pretty-known`). The gate's step
   `repr-rust` is `bin/repr-rust roundtrip --iface --text --pretty && bin/repr-rust test` (std);
   `REPR_RUST_CORPORA=all` adds RR4's corpora (RR-P10).
+
+### 12.8 As built: RR5 (2026-10-18)
+
+[RUST-NOTES.md](RUST-NOTES.md), "RR5", records the build: the behaviour level, rustc's UI suite as
+a fifth corpus (19,942 files of `tests/ui`) at the tree, text and pretty levels, its 3,718 run-pass
+programs built and run from their originals and from their printed files in the three layouts,
+and std (with core, alloc and the rest of `library/`, 2,976 files) built from its printed files,
+the same programs run against it; RR1-RR4's levels unchanged. Every file of the suite but three is equal at the tree, pretty and
+text levels (19,939; the three nest deeper than the tools' host evaluates); the programs behave the
+same in mode `:full` (3,690, 27 nondeterministic, 1 not judged), in mode `:lines` (3,685, 10 of them
+once columns are normalized; 5 known differences) and in the pretty layout (3,666; 25 known), and
+against std built from its printed files (3,683, 0 differ). What it changes in this
+text (RR-P13-RR-P17 there, open, built as recommended):
+
+- **The corpus (§11.4)**: `test/rust/corpus-rustc-1.99.1-ui.edn`, made by `bin/repr-rust corpus
+  make-ui` from `rustc-1.99.1-src.tar.xz` (`:tarball`: its URL, SHA-256, the directories
+  extracted): every file of `tests/ui` but those rustc's parser rejects alone (`:rejected`) and
+  those whose namespaces clash (`:clash`), one crate per edition (a file's crate is the one whose
+  `:files` hold it, else by directory), every file a root (`:crate-type bin`); `:programs`, each
+  revision of a run-pass, run-fail or run-crash test with its directives (compiletest's `//@`
+  lines: edition, compile and run flags, `exec-env`, `rustc-env`), those left out counted by
+  reason (RR-P15).
+- **The behaviour level (§11.1, 5; §11.3)**: `bin/repr-rust roundtrip --run`: each program built
+  (`RUSTC_BOOTSTRAP=1`, RR-P16; compiletest's lint flags; its source root remapped) and run from
+  the original and, in a mirror of the source tree, from every layout the run printed; stdout,
+  stderr and exit status compared, after compiletest's normalizations (thread ids, a test
+  harness's time) and, when they differ, the columns (mode `:lines`) or lines and columns (the
+  pretty layout) of the source locations they print (RR-P13); a program whose baseline varies
+  between runs is nondeterministic, counted and not judged. `--std`: std built by Cargo's
+  `-Zbuild-std` from `rust-src`'s library and from its printed files of mode `:lines`, the programs
+  built from their originals against each. Known differences
+  `test/rust/roundtrip-CORPUS-run-LAYOUT-known.edn`, `roundtrip-rustc-1.99.1-std-std-known.edn`
+  (none).
+- **Namespaces (§2.1; RR-P17)**: every character of a path segment a name cannot hold is `_`, as
+  `.` and `-` were (std's and RR4's namespaces unchanged).
+- **Attributes (§8.2)**: an attribute form before an element at a fixed place (a callee, a
+  receiver, an operator's operand, an index, a guard's condition, a constant's value, an array
+  type's length, a discriminant) attaches to that element, as in a sequence; a statement's
+  attributes before its leftmost operand stand on their own lines before the statement's.
+- **Lines (§9.1)**: `:rs/open` (the `<` of generic arguments on a later line), `:rs/close` also on
+  generic arguments, a qualified path's `>` and a module of inner attributes and no item (its
+  `}`), `:rs/brace` on `gen`, `async`, `try`, `unsafe` and labeled blocks; a name on a later line
+  than its item's keyword has its line; in the lines' comparison a dummy span against a real one
+  is N1's (§11.2).
+- **The forms**: a macro path with generic arguments is `(:turbofish m! T...)`; `union` is a
+  special head in expressions (`((:path union) (:braces))`); `reuse impl Trait for T {...}` and
+  items of a type the parser's recovery made are `(:rust ...)` (§4.10); `for<>`, an empty binder,
+  is `(for [] ...)`; a closure parameter's `_` type written out is `(:has x _)`; `rs/file`'s
+  `:frontmatter-line` (§2.3); `:rs/crlf` the vector of the lines that end in `\r\n` in a file of
+  both line ends (§9.2).
+- **The helper (§10.3)**: `rsdump/tokens` and `rsdump/comments` lex a guarded string's prefix
+  `#"` before edition 2024 as `#` and what follows, as rustc's lexer does.
+- **Commands (§11.6)**: `bin/repr-rust corpus make-ui`, `corpus fetch rustc-1.99.1-ui`,
+  `roundtrip [...] [--run | --run-only] [--std]`, `all` the five corpora; `make
+  repr-rust-behaviour`, `make repr-rust-all`. The gate's step `repr-rust` is unchanged;
+  `REPR_RUST_CORPORA=all` adds RR4's corpora and the UI suite, `REPR_RUST_CORPORA='all --run
+  --std'` the behaviour level too (RR-P14).
 
 ## 13. Decisions and open proposals
 

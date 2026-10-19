@@ -25,7 +25,12 @@
 #      objects, dyn, async, await, try and gen as names, ... ranges), which edition 2018 rejects,
 #      round-tripped at --edition 2015: trees and lines, and mode :full byte for byte;
 #   8. the pretty layout (SPEC §9.4, 2; RR4): the samples' forms of mode :lines without their
-#      positions printed in the pretty layout, parsed by rustc to the original's tree.
+#      positions printed in the pretty layout, parsed by rustc to the original's tree;
+#   9. the behaviour level (RR5): test/rust/sample/behaviour.rs (attributes on operands and in
+#      fixed places, an empty binder, a closure's _ type, a struct named union, a panic), its trees
+#      and lines and mode :full byte for byte, then built and run by bin/lib/repr-rust/run-program
+#      from the original and from its printed file of mode :lines: the same stdout and exit status,
+#      its stderr the same once the panic's column is normalized (same-cols), not before.
 # Usage: bin/lib/repr-rust/test (from bin/repr-rust test). Scratch in .tmp/repr-rust/test.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -205,4 +210,30 @@ for f in shapes constructs attrs space edition2015; do
     echo "FAIL: $f.rs in the pretty layout parses to another tree ($work/pretty/printed/$f.rs)"; fail=1
   fi
 done
+echo "== 9. the behaviour level (test/rust/sample/behaviour.rs): built and run from the original and the printed file"
+b9=$work/behaviour
+mkdir -p "$b9/src"
+cp "$root/test/rust/sample/behaviour.rs" "$b9/src/"
+(cd "$b9/src" && "$helper" dump -o "$b9/dumps" --edition 2021 behaviour.rs && "$helper" dump --full -o "$b9/full-dumps" --edition 2021 behaviour.rs) || fail=1
+(cd "$root" && arbace_tool -m arbace.repr.rust read --pin "$root/tools/rsdump/RUSTC_VERSION" -o "$b9/forms" "$b9/dumps/behaviour.rs.edn" &&
+   arbace_tool -m arbace.repr.rust read --full --pin "$root/tools/rsdump/RUSTC_VERSION" -o "$b9/full-forms" "$b9/full-dumps/behaviour.rs.edn" &&
+   arbace_tool -m arbace.repr.rust print -o "$b9/printed" "$b9/forms/rs/main/behaviour.ae" &&
+   arbace_tool -m arbace.repr.rust print --layout full -o "$b9/full-printed" "$b9/full-forms/rs/main/behaviour.ae") > "$b9/log" 2>&1 ||
+  { cat "$b9/log"; fail=1; }
+(cd "$b9/src" && "$helper" tree -o "$b9/orig" --edition 2021 behaviour.rs)
+(cd "$b9/printed" && "$helper" tree -o "$b9/cand" --edition 2021 behaviour.rs) || true
+if cmp -s "$b9/orig/behaviour.rs.tree" "$b9/cand/behaviour.rs.tree" && cmp -s "$b9/orig/behaviour.rs.lines" "$b9/cand/behaviour.rs.lines" &&
+   cmp -s "$b9/src/behaviour.rs" "$b9/full-printed/behaviour.rs"; then
+  echo "ok: behaviour.rs's trees and lines equal, and mode :full byte for byte"
+else
+  echo "FAIL: behaviour.rs's round trip ($b9/printed, $b9/full-printed)"; fail=1
+fi
+printf 'behaviour.rs\x1fbehaviour.rs\x1f2021\x1f\x1f\x1f\x1f\n' > "$b9/plan.tsv"
+: > "$b9/empty"
+"$root/bin/lib/repr-rust/run-program" "$b9/plan.tsv" 1 "$b9/jobs" "$b9/empty" "orig:$b9/src:" "lines:$b9/printed::cols" "raw:$b9/printed:" > "$b9/results.tsv"
+if [ "$(cut -f1 "$b9/results.tsv" | tr '\n' ' ')" = "same-cols differs " ]; then
+  echo "ok: behaviour.rs behaves the same printed, once its panic's column is normalized ($(cut -f1,2 "$b9/results.tsv" | tr '\t\n' ': '))"
+else
+  echo "FAIL: behaviour.rs's runs: $(tr '\t\n' ' ;' < "$b9/results.tsv") ($b9)"; fail=1
+fi
 exit $fail

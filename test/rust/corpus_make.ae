@@ -325,7 +325,7 @@
 
 (defn print-crate [c]
   (println (str "  {:name " (:name c) " :dir " (pr-str (:dir c)) (when (:version c) (str " :version " (pr-str (:version c))))
-                " :edition " (:edition c) " :crate-type " (if (:proc-macro c) "proc-macro" "lib")))
+                " :edition " (:edition c) " :crate-type " (or (:crate-type c) (if (:proc-macro c) "proc-macro" "lib"))))
   (when-let [n (:ns-crate c)] (println (str "   :ns-crate " (pr-str n))))
   (println (str "   :roots " (pr-str (:roots c))))
   (println (str "   :path-files " (pr-str (:path-files c))))
@@ -385,7 +385,7 @@
 
 (defn header [name lines]
   (doseq [l lines] (println (str ";; " l)))
-  (println (str "{:name " (pr-str name))))
+  (when name (println (str "{:name " (pr-str name)))))
 
 (defn sysroot-iface
   "A library crate's :iface against the host's sysroot (the build of library/): its root, its
@@ -523,10 +523,184 @@
     (doseq [c crates] (print-crate c))
     (println " ]}")))
 
+
+;;; rustc's UI suite (RR5): tests/ui of rustc-1.99.1-src.tar.xz (SPEC §11.4), its files for the
+;;; syntax levels and its run-pass programs for the behaviour level, with compiletest's directives
+;;; (src/tools/compiletest's `//@ name: value` lines, `//@[rev] ...` for a revision)
+
+(def ui-tarball
+  {:file "rustc-1.99.1-src.tar.xz" :sha256 "6451598a99e77f07571960f6b21d577399d3a30f33e80cbd2e3a4aae6535d265"
+   :url "https://static.rust-lang.org/dist/rustc-1.99.1-src.tar.xz" :root "rustc-1.99.1-src" :extract ["tests/ui" "tests/auxiliary"]})
+
+(defn directives
+  "A test's directives, in order: [[rev name value]...], rev nil for all revisions, value nil for
+  a directive without one"
+  [^String text]
+  (vec (for [l (s/split-lines text)
+             :let [m (re-matches #"^//@\s*(?:\[([^\]]+)\])?\s*([A-Za-z0-9_.-]+)(?:\s*:\s*(.*?)|\s+.*)?\s*$" l)]
+             :when m
+             :let [[_ revs n v] m]
+             r (if revs (map s/trim (s/split revs #",")) [nil])]
+         [r n v])))
+
+(defn- edition-of [v]
+  (when v (when-let [[_ y] (re-find #"^(\d{4})" (s/trim v))] (Long/parseLong y))))
+
+(defn ui-edition
+  "The edition the tree level parses a file with: its edition directive's for all revisions (the
+  first of a range 2015..2021), else its first revision's, else 2015, compiletest's default"
+  [ds]
+  (or (some (fn [[r n v]] (when (and (nil? r) (= n "edition")) (edition-of v))) ds)
+      (some (fn [[r n v]] (when (= n "edition") (edition-of v))) ds)
+      2015))
+
+;; the host: x86_64-alpine-linux-musl (target-cfg above), LLVM 23, rustc 1.99.1 (a stable rustc,
+;; its tests' unstable features under RUSTC_BOOTSTRAP=1)
+(def host-names #{"x86_64" "linux" "unix" "64bit" "elf" "musl" "endian-little" "little-endian" "x86_64-alpine-linux-musl"})
+(def run-modes #{"run-pass" "run-fail" "run-crash" "run-fail-or-crash"})
+(def host-needs #{"subprocess" "unwind" "threads" "asm-support" "dynamic-linking" "run-enabled"
+                  "relocation-model-pic" "deterministic-layouts" "crate-type" "symlink" "target-has-atomic"})
+(def not-run-names
+  "Directives whose tests the behaviour level leaves out, and why"
+  {"aux-build" "an auxiliary crate" "aux-crate" "an auxiliary crate" "aux-bin" "an auxiliary crate"
+   "aux-codegen-backend" "an auxiliary crate" "proc-macro" "an auxiliary crate"
+   "incremental" "an incremental test" "should-fail" "a test of compiletest" "check-fail" "not run"
+   "build-fail" "not run" "ignore-test" "ignored" "only-nightly" "a channel's test" "ignore-nightly" "a channel's test"
+   "only-dist" "a dist build's test" "only-stable" "a channel's test" "only-beta" "a channel's test"})
+
+(defn- llvm-ok? [n v]
+  (let [x (some-> v (s/trim) (#(re-find #"^\d+" %)) Long/parseLong)]
+    (cond (nil? x) false
+          (s/starts-with? n "min-") (<= x 23)
+          (s/starts-with? n "max-") (>= x 23)
+          :else false)))
+
+(defn not-run
+  "Why a revision's directives leave its program out of the behaviour level, or nil"
+  [ds]
+  (some (fn [[_ n v]]
+          (cond
+            (contains? not-run-names n) (get not-run-names n)
+            (and (= n "edition") (nil? (edition-of v))) (str "edition " v)
+            (= n "ignore-backends") (when (re-find #"llvm" (str v)) "ignored for LLVM")
+            (= n "only-backends") (when-not (re-find #"llvm" (str v)) "not for LLVM")
+            (= n "ignore-auxiliary") "not a test (a file another test uses)"
+            (re-find #"^ignore-(compare-mode|parallel-frontend|remote|cross-compile|backends)" n) nil
+            (re-find #"^ignore-(llvm-version|std-debug-assertions|debug|rustc-debug-assertions|coverage)" n) (str "the directive " n)
+            (s/starts-with? n "ignore-") (when (contains? host-names (subs n 7)) (str "ignored on the host: " n))
+            (s/starts-with? n "only-") (when-not (contains? host-names (subs n 5)) (str "not for the host: " n))
+            (s/starts-with? n "needs-") (when-not (contains? host-needs (subs n 6)) (str "needs what the host lacks: " n))
+            (re-find #"^(min|max)-(system-)?llvm-version" n) (when-not (llvm-ok? n v) (str n " " v))
+            (= n "compile-flags")
+            (when-let [t (some #(when (re-find #"^(-L|-l|--extern|--target|--crate-type|-Zsanitizer|-Z\s*sanitizer|-Clink-arg|-C\s*link-arg|--emit|-o$|--out-dir)" %) %)
+                               (s/split (s/trim (str v)) #"\s+"))]
+              (str "a compile flag the run cannot give: " t))
+            :else nil))
+        ds))
+
+(defn- env-pair [^String v]
+  (let [i (.indexOf v "=")] (if (neg? i) [(s/trim v) ""] [(s/trim (subs v 0 i)) (s/trim (subs v (inc i)))])))
+
+(defn ui-programs
+  "A test's programs: one per revision (one when it has none) whose mode is run-pass or another
+  run mode, each {:file :rev :edition :mode :flags :run-flags :exec-env :unset-exec-env :rustc-env
+  :unset-rustc-env}, or {:file :rev :not-run reason}"
+  [f ds]
+  (let [revs (some (fn [[r n v]] (when (and (nil? r) (= n "revisions")) (vec (remove s/blank? (s/split (s/trim (str v)) #"\s+"))))) ds)]
+    (vec (for [rev (or (seq revs) [nil])
+               :let [mine (filter (fn [[r]] (or (nil? r) (= r rev))) ds)
+                     mode (last (keep (fn [[_ n]] (when (or (contains? run-modes n) (contains? #{"check-pass" "build-pass" "check-fail" "build-fail"} n)) n)) mine))]
+               :when (contains? run-modes mode)
+               :let [why (not-run mine)
+                     vals (fn [k] (keep (fn [[_ n v]] (when (= n k) v)) mine))
+                     words (fn [k] (vec (mapcat #(remove s/blank? (s/split (s/trim (str %)) #"\s+")) (vals k))))]]
+           (if why
+             {:file f :rev rev :not-run why}
+             (cond-> {:file f :edition (or (some edition-of (reverse (vals "edition"))) 2015) :mode (keyword mode)}
+               rev (assoc :rev rev)
+               true (assoc :flags (into (if rev ["--cfg" (s/replace rev "-" "_")] []) (words "compile-flags")))
+               (seq (vals "run-flags")) (assoc :run-flags (words "run-flags"))
+               (seq (vals "exec-env")) (assoc :exec-env (mapv env-pair (vals "exec-env")))
+               (seq (vals "unset-exec-env")) (assoc :unset-exec-env (mapv s/trim (vals "unset-exec-env")))
+               (seq (vals "rustc-env")) (assoc :rustc-env (mapv env-pair (vals "rustc-env")))
+               (seq (vals "unset-rustc-env")) (assoc :unset-rustc-env (mapv s/trim (vals "unset-rustc-env")))))))))
+
+(defn ui-files [^String root]
+  (mapv #(subs % (inc (count root))) (rs-files (File. (str root "/tests/ui")))))
+
+(defn ui-editions
+  "EDITION FILE per line: each tests/ui file's edition for the helper (corpus_make's step 1)"
+  [^String root]
+  (doseq [f (ui-files root)] (println (ui-edition (directives (slurp (str root "/" f)))) f)))
+
+(defn ui-corpus
+  "The UI suite's corpus: every .rs file of tests/ui but those the helper rejects (DUMPS, its dumps
+  of every file with its edition: step 1), one crate per edition; the programs of the behaviour
+  level"
+  [^String root ^String dumps]
+  (let [fs (ui-files root)
+        rejected (set (filter #(let [d (File. (str dumps "/" % ".edn"))]
+                                 (or (not (.exists d)) (s/includes? (slurp d) "(rsdump/error")))
+                              fs))
+        info (into {} (for [f fs] (let [ds (directives (slurp (str root "/" f)))] [f {:ds ds :edition (ui-edition ds)}])))
+        ok (remove rejected fs)
+        ;; the namespaces the files map to (SPEC §2.1: rs.ui + the path below tests/ui), each once
+        nss (group-by #(s/replace (s/replace (subs % 9) #"\.rs$" "") #"[^\p{L}\p{N}_/]" "_") ok)
+        clash (set (for [[_ g] nss :when (> (count g) 1) f g] f))
+        ok (remove clash ok)
+        ;; compiletest's directories of no tests (a compiletest-ignore-dir file: a test's modules)
+        ignored-dir? (fn [^String f] (loop [d (dir-of f)]
+                                       (cond (.exists (File. (str root "/" d "/compiletest-ignore-dir"))) true
+                                             (or (= d "tests/ui") (= d "")) false
+                                             :else (recur (dir-of d)))))
+        progs (vec (for [f ok
+                         :when (not (re-find #"(^|/)auxiliary/" f))
+                         p (let [ps (ui-programs f (:ds (get info f)))]
+                             (if (and (seq ps) (ignored-dir? f))
+                               [{:file f :not-run "a test's module (compiletest-ignore-dir)"}]
+                               ps))]
+                     p))
+        run (remove :not-run progs)
+        not-run (filter :not-run progs)]
+    (header nil
+            ["repr/rust's corpus of rustc's UI suite (doc/rust/SPEC.md §11.4; doc/rust/RUST-NOTES.md, \"RR5\"):"
+             "tests/ui of rustc-1.99.1-src.tar.xz (its SHA-256 below), extracted into .tmp/repr-rust/src/;"
+             "paths relative to its rustc-1.99.1-src/. Every .rs file under tests/ui but those rustc's"
+             (str "parser rejects alone (rust-lisp D20; " (count rejected) ", :rejected) and those whose namespaces clash ("
+                  (count clash) ", :clash), one crate per edition, each file's the edition its")
+             "directives give (the first of a range; its first revision's; else 2015). The behaviour level's"
+             "programs (:programs): each revision of a test outside auxiliary/ whose mode is run-pass,"
+             "run-fail or run-crash, with its compile flags, run flags and environments; those it leaves"
+             (str "out, by reason (" (count not-run) " revisions):")])
+    (doseq [[r n] (sort-by (comp - val) (frequencies (map #(s/replace (:not-run %) #": .*" "") not-run)))]
+      (println (str ";;   " r ": " n)))
+    (header nil
+            ["Made by test/rust/corpus_make.ae ui-editions ROOT (the helper's editions), bin/repr-rust's dumps"
+             "of every file, then test/rust/corpus_make.ae ui ROOT DUMPS (bin/repr-rust corpus make-ui)."])
+    (println "{:name \"rustc-1.99.1-ui\"")
+    (println (str " :tarball " (pr-str ui-tarball)))
+    (println (str " :rejected ;; " (count rejected)))
+    (println " [")
+    (doseq [f (sort rejected)] (println (str "  " (pr-str f))))
+    (println " ]")
+    (println (str " :clash " (pr-str (vec (sort clash)))))
+    (println " :crates")
+    (println " [")
+    (doseq [[ed fs] (sort-by key (group-by #(:edition (get info %)) ok))]
+      (print-crate {:name 'ui :dir "tests/ui" :edition ed :crate-type "bin" :roots []
+                    :path-files [] :include-files [] :no-iface "the UI suite's programs: no library" :files (vec fs)}))
+    (println " ]")
+    (println (str " :programs ;; " (count run)))
+    (println " [")
+    (doseq [p run] (println (str "  " (pr-str p))))
+    (println " ]}")))
+
 (let [[mode & more] *command-line-args*]
   (case mode
     "std" (std-corpus (first more))
     "library" (library-corpus (first more) (second more))
     "compiler" (compiler-corpus (first more) (second more))
     "crates" (crates-corpus (first more) (second more))
+    "ui-editions" (ui-editions (first more))
+    "ui" (ui-corpus (first more) (second more))
     (std-corpus mode)))
