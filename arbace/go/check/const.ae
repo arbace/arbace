@@ -65,16 +65,27 @@
             [q sh] (if (> (.bitLength q) p) [(.shiftRight q 1) (inc sh)] [q sh])]
         [(if neg (.negate q) q) sh]))))
 
+(def ^:private min-exp
+  "big.Float's MinExp and MaxExp: the range of its exponent (0.5 <= |mantissa| < 1)."
+  (long Integer/MIN_VALUE))
+(def ^:private max-exp-bf (long Integer/MAX_VALUE))
+
 (defn- bf-norm
-  "M·2^E rounded to prec bits, as [:bf M E] with M odd, or 0."
+  "M·2^E rounded to prec bits, as [:bf M E] with M odd, or 0; beyond big.Float's exponent
+  range (MinExp, MaxExp: GR7c, go.dev/issue/20227) 0 when it underflows, :unknown (go/constant's
+  Unknown of an infinite big.Float) when it overflows."
   ([m e] (bf-norm m e false))
   ([^BigInteger m e sticky]
    (if (zero? (.signum m))
      0
      (let [[^BigInteger m sh] (round-int m sticky prec)
            e (+ (long e) (long sh))
-           z (.getLowestSetBit m)]
-       [:bf (.shiftRight m (int z)) (+ e z)]))))
+           z (.getLowestSetBit m)
+           x (+ e (.bitLength (.abs m)))]
+       (cond
+         (< x min-exp) 0
+         (> x max-exp-bf) :unknown
+         :else [:bf (.shiftRight m (int z)) (+ e z)])))))
 
 (defn- rat-num-den [r]
   (if (ratio? r) [(bi (numerator r)) (bi (denominator r))] [(bi r) BigInteger/ONE]))
@@ -117,23 +128,23 @@
 (defn- bf-sign ^long [x] (if (bf? x) (long (.signum ^BigInteger (nth x 1))) (long (compare x 0))))
 
 (defn- bf-add [x y]
-  (let [[_ ^BigInteger m1 e1] (to-bf x) [_ ^BigInteger m2 e2] (to-bf y)]
-    (cond
-      (= 0 x) (to-bf y)
-      (= 0 y) (to-bf x)
-      :else
-      (let [e1 (long e1) e2 (long e2)
-            [hi-m hi-e lo-m lo-e] (if (>= (+ e1 (.bitLength (.abs m1))) (+ e2 (.bitLength (.abs m2))))
-                                    [m1 e1 m2 e2] [m2 e2 m1 e1])
-            ^BigInteger hi-m hi-m ^BigInteger lo-m lo-m
-            hi-top (+ (long hi-e) (.bitLength (.abs hi-m)))
-            lo-top (+ (long lo-e) (.bitLength (.abs lo-m)))]
-        (if (> (- hi-top lo-top) (+ prec 8))
-          ;; the smaller is below half an ulp of the larger: the sum rounds to the larger (exact)
-          (bf-norm hi-m hi-e)
-          (let [e (min e1 e2)
-                s (.add (.shiftLeft m1 (int (- e1 e))) (.shiftLeft m2 (int (- e2 e))))]
-            (bf-norm s e)))))))
+  (cond
+    (= 0 x) (to-bf y)
+    (= 0 y) (to-bf x)
+    :else
+    (let [[_ ^BigInteger m1 e1] (to-bf x) [_ ^BigInteger m2 e2] (to-bf y)
+          e1 (long e1) e2 (long e2)
+          [hi-m hi-e lo-m lo-e] (if (>= (+ e1 (.bitLength (.abs m1))) (+ e2 (.bitLength (.abs m2))))
+                                  [m1 e1 m2 e2] [m2 e2 m1 e1])
+          ^BigInteger hi-m hi-m ^BigInteger lo-m lo-m
+          hi-top (+ (long hi-e) (.bitLength (.abs hi-m)))
+          lo-top (+ (long lo-e) (.bitLength (.abs lo-m)))]
+      (if (> (- hi-top lo-top) (+ prec 8))
+        ;; the smaller is below half an ulp of the larger: the sum rounds to the larger (exact)
+        (bf-norm hi-m hi-e)
+        (let [e (min e1 e2)
+              s (.add (.shiftLeft m1 (int (- e1 e))) (.shiftLeft m2 (int (- e2 e))))]
+          (bf-norm s e))))))
 
 (defn- bf-neg [x] (if (bf? x) [:bf (.negate ^BigInteger (nth x 1)) (nth x 2)] (- x)))
 
@@ -166,11 +177,12 @@
     (integer? x) (make-rat x)
     :else x))
 
-(defn fadd [x y] (if (or (bf? x) (bf? y)) (bf-add x y) (make-rat (+ x y))))
-(defn fsub [x y] (if (or (bf? x) (bf? y)) (bf-add x (bf-neg y)) (make-rat (- x y))))
-(defn fmul [x y] (if (or (bf? x) (bf? y)) (bf-mul x y) (make-rat (* x y))))
-(defn fquo [x y] (if (or (bf? x) (bf? y)) (bf-quo x y) (make-rat (/ x y))))
-(defn fneg [x] (bf-neg x))
+;; an operand :unknown (an overflow) makes the result :unknown (go/constant's BinaryOp)
+(defn fadd [x y] (cond (or (= :unknown x) (= :unknown y)) :unknown (or (bf? x) (bf? y)) (bf-add x y) :else (make-rat (+ x y))))
+(defn fsub [x y] (cond (or (= :unknown x) (= :unknown y)) :unknown (or (bf? x) (bf? y)) (bf-add x (bf-neg y)) :else (make-rat (- x y))))
+(defn fmul [x y] (cond (or (= :unknown x) (= :unknown y)) :unknown (or (bf? x) (bf? y)) (bf-mul x y) :else (make-rat (* x y))))
+(defn fquo [x y] (cond (or (= :unknown x) (= :unknown y)) :unknown (or (bf? x) (bf? y)) (bf-quo x y) :else (make-rat (/ x y))))
+(defn fneg [x] (if (= :unknown x) :unknown (bf-neg x)))
 (defn fsign ^long [x] (bf-sign x))
 (defn fcmp ^long [x y] (if (or (bf? x) (bf? y)) (bf-cmp x y) (long (compare x y))))
 (defn fzero? [x] (zero? (fsign x)))

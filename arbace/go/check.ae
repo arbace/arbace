@@ -174,19 +174,31 @@
                                               (try (resolve q) (catch arbace.lang.ArityException _ nil))))
               code/*instantiate* decl/instantiate
               code/*subst* decl/subst
-              code/*verify-later* decl/verify-later!]
+              code/*verify-later* decl/verify-later!
+              code/*valid-types* (volatile! [])
+              decl/*mono* (volatile! {:vertices [] :edges [] :canon {} :idx {}})
+              code/*anon-ifaces* (volatile! [])]
       (doseq [fi fis] (decl/declare-imports! fi resolve))
       (doseq [fi fis] (decl/collect-file! fi))
       (doseq [fi fis] (decl/file-scope-conflicts! fi))
       (decl/resolve-method-bases!)
       (let [objs @(:objs ctx)]
         (doseq [[i x] (map-indexed vector objs)] (oset! x :decl-order i))
+        ;; go/types' directCycles (go1.27): cycles of type names
+        (decl/direct-cycles! objs)
         ;; go/types' packageObjects: non-alias types, aliases, the rest
         (doseq [x objs :when (and (= :type (o x :kind)) (not (o x :alias)))] (decl/obj-decl! x))
         (doseq [x objs :when (and (= :type (o x :kind)) (o x :alias))] (decl/obj-decl! x))
         (doseq [x objs :when (not= :type (o x :kind))] (decl/obj-decl! x))
         ;; the bodies, then what each declaration left for later
         (doseq [x @(:bodies ctx)] (decl/check-body! x))
+        ;; validType of the type declarations, in the order they began (GR7c)
+        (loop []
+          (let [vs @code/*valid-types*]
+            (when (seq vs)
+              (vreset! code/*valid-types* [])
+              (doseq [v vs] (v))
+              (recur))))
         (let [decls (distinct (map #(o % :decl) objs))]
           (doseq [d decls]
             (loop []
@@ -207,6 +219,10 @@
           (doseq [fi fis] (decl/unused-imports! fi))
           ;; initialization order
           (let [order (decl/init-order objs)
+                ;; go/types' monomorph, when no error was found (GR7c)
+                _ (when (empty? @errors) (decl/monomorph!))
+                ;; gc's noder after type checking without errors: anonymous interface cycles
+                _ (when (empty? @errors) (code/anon-iface-cycles!))
                 say (get-in src [:opts :init-order])
                 init-entry (fn [lhs]
                              (let [one (fn [v] (if (= "_" (o v :name)) [(o v :file) (o v :line)] (arbace.repr.go.types/name-form (o v :name))))]
