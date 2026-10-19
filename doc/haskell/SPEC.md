@@ -349,7 +349,12 @@ pragmas, so every span is in the module's own file and its lines are the origina
 E3). Columns after an expanded macro are the output's (`z = __GLASGOW_HASKELL__` becomes
 `z = 914`). The text level of a CPP module (§9.1) compares the printed module with the
 **module view** of the preprocessed text: for each line of the module, the output line the
-markers attribute to it, the lines of other files dropped (S5). The `#if` structure itself is
+markers attribute to it, the lines of other files dropped (S5). In a module whose text has `{-# LINE #-}` pragmas
+(alex's and hsc2hs's outputs), a line marker naming the module's file that gives its line a
+position the pragmas do not is written as `{-# LINE n "file" #-}` on the line before it, the
+directive's blank line, unless only blank lines follow up to the next pragma; `:cpp`'s
+`:view-markers` lists those lines (mode `:full`; HR26-HR28), so that GHC parses the module view
+to the original's positions. The `#if` structure itself is
 not in the forms: a module converted under two configurations has two sets of forms (H9 (c), a
 form for conditional compilation, was not chosen).
 
@@ -1499,23 +1504,17 @@ for byte (1,334 modules byte-identical); its trees of mode `:full` still differ,
 lines, which the module view (§2.8, S5) does not keep. Every other module's forms and printed
 modules are unchanged.
 
-### 10.11 Surveyed and built as an opt-in: HR26-HR28 (2026-10-19)
+### 10.11 As built: HR26-HR28 (2026-10-19)
 
-[HASKELL-NOTES.md](HASKELL-NOTES.md), "HR26-HR28", records the survey and the build. HR25's four
-modules (§10.10, §10.9) differ at the trees of mode `:full` because a CPP line marker after a
-directive sets GHC's positions back to the module's own lines where the module's `{-# LINE #-}`
-pragmas put them in another file, and the module view (§2.8) drops the marker. HR26 recommends
-(b): the module view writes such a marker as `{-# LINE n "X.hs" #-}` on the directive's blank line
-before it (only in a module whose text has pragmas, only where they disagree and a line that is
-not blank follows before the next pragma), recorded as `:cpp`'s `:view-markers` (HR27). That
-changes §2.8's module view, S5's reference, so this text is unchanged and the option is built as
-an opt-in for the user's decision: the helper's `dump --full --view-markers`, `bin/repr-haskell
-roundtrip --text --view-markers`. Measured over the corpus: five lines in the four modules' views,
-the four then equal at the trees of mode `:full` (1,331 modules; the known differences of the text
-level 3 trees, HR12's, and 11 conversions); without the option every result is §10.10's. If HR26
-(b) and HR28 (a) are decided, §2.8 gains the sentence: "In a module whose text has `{-# LINE #-}`
-pragmas, a line marker naming the module's file that gives its line a position the pragmas do not
-is written as `{-# LINE n "file" #-}` on the line before it (`:cpp`'s `:view-markers`)."
+[HASKELL-NOTES.md](HASKELL-NOTES.md), "HR26-HR28", records the survey and the build, decided by
+the user on 2026-10-19 (HR26 (b), HR27 (a), HR28 (a)). HR25's four modules (§10.10, §10.9)
+differed at the trees of mode `:full` because a CPP line marker after a directive sets GHC's
+positions back to the module's own lines where the module's `{-# LINE #-}` pragmas put them in
+another file, and the module view dropped the marker. The module view now writes such a marker as
+a pragma (§2.8), recorded as `:cpp`'s `:view-markers` (in mode `:full` only): five lines in the
+four modules' views, the four then equal at the trees of mode `:full` (1,331 modules); the known
+differences of the text level are HR12's 3 trees and the 11 conversions. Every other module's forms,
+module view and printed modules are unchanged.
 
 ## 11. Decisions and open questions
 

@@ -1110,7 +1110,7 @@ original's tree holds the header's comments, not other positions.
   its own if mode `:full` is ever to print back the CPP source. *Recommended: (b)*: the only option
   that makes the printed module what GHC compiles with the original's positions, at a cost of five
   lines in four views. It changes the module view (§2.8), S5's reference, of those four modules, so
-  it is not the default: built as an opt-in that measures it (below), for the user's decision.
+  it was first built as an opt-in that measured it, for the user's decision.
 - **HR27 The record of HR26 (b).** (a) As built: `:cpp`'s `:view-markers [LINE...]`, the view's
   lines given a pragma (in mode `:full` only), so that the view is reproducible from CPP's output
   and the record; (b) none, the pragmas being in the forms' text as comments. *Recommended: (a)*:
@@ -1123,39 +1123,43 @@ original's tree holds the header's comments, not other positions.
   module view of §2.8 as now. *Recommended: (a)* if HR26 (b) is decided: one reference, checked by
   the gate; (b) keeps two texts of the same module side by side.
 
-### What was built (HR26 (b) as an opt-in)
+## Decided (2026-10-19, the user): HR26-HR28
+
+HR26 (b), HR27 (a) as built, HR28 (a): the module view writes CPP's line markers that a module's
+`{-# LINE #-}` pragmas disagree with as pragmas, recorded as `:cpp`'s `:view-markers`, and this is
+the text level's only reference (SPEC §2.8 amended): the opt-in (`--view-markers`, its entries
+file `test/haskell/roundtrip-ghc-9.14.1-text-view-markers.edn`, `make repr-haskell-text-markers`,
+`compare-text --fixed`) removed, the four entries dropped from the known differences.
+
+### What was built
 
 | part | file | what |
 |---|---|---|
-| helper | `tools/hsdump/HsDump.hs` (`moduleView`, `--view-markers`, `CppRecord`'s `cViewMarkers`) | with `dump --full --view-markers`, a module view whose module has `{-# LINE #-}` pragmas gets CPP's disagreeing markers as pragmas; `:cpp`'s `:view-markers`; without the option the view, the dumps and everything after them as before |
-| command | `bin/repr-haskell` (`roundtrip --text --view-markers`, `dump --full --view-markers`; `text_level`) | the text level with the opt-in, the entries it fixes required equal |
-| comparison | `arbace/repr/haskell.ae` (`cmd-compare-text`, `--fixed FILE`) | the entries of FILE dropped from the known differences, the count of them equal printed |
-| entries | `test/haskell/roundtrip-ghc-9.14.1-text-view-markers.edn` | the four modules the opt-in fixes |
-| case | `test/haskell/hr26/AlexDir.hs`, `AlexDir.h`; `bin/repr-haskell test`'s step 9 | a pragma into `AlexDir.x`, then an `#include`: without the option printed back byte for byte with trees of mode `:full` that differ; with it `{-# LINE 11 "AlexDir.hs" #-}` at line 10, printed back byte for byte with equal trees and lines of mode `:full`; its forms of mode `:lines` the same either way |
-| target | `Makefile` (`repr-haskell-text-markers`) | the text level with the opt-in |
+| helper | `tools/hsdump/HsDump.hs` (version 4: `moduleView`, `CppRecord`'s `cViewMarkers`) | in mode `:full`, a module view whose module has `{-# LINE #-}` pragmas gets CPP's disagreeing markers as pragmas; `:cpp`'s `:view-markers`; mode `:lines`'s dumps as before |
+| known differences | `test/haskell/roundtrip-ghc-9.14.1-text-known.edn` | the four entries dropped (14 left) |
+| case | `test/haskell/hr26/AlexDir.hs`, `AlexDir.h`; `bin/repr-haskell test`'s step 9 | a pragma into `AlexDir.x`, then an `#include`: the view has `{-# LINE 11 "AlexDir.hs" #-}` at line 10 (`:view-markers [10]`), printed back byte for byte with equal trees and lines of mode `:full`; its forms of mode `:lines` record no `:view-markers` |
 
 ### Results
 
-| level | HR25 (the default, unchanged) | with `--view-markers` |
+| level | HR25 | HR26-HR28 |
 |---|---|---|
 | text, byte-identical | 1,334 (11,738,768 bytes) | 1,334 (11,739,055 bytes: the four views 287 bytes longer) |
 | text, trees and lines of mode `:full` equal | 1,327 | 1,331 |
 | known differences of the text level | 18 (7 trees, 11 conversions) | 14 (3 trees, HR12's; 11 conversions) |
 
-With the option, only the four modules' views, forms of mode `:full` and printed modules differ
-from the default's (five lines, `Lexer.hs` at 44 and 554, `ExecutablePath` at 36,
-`CommunicationHandle.Internal` at 149, `Directory.Common` at 20). Without it, every module's forms
+Only the four modules' views, forms of mode `:full` and printed modules of the full layout differ
+from HR25's (five lines, `Lexer.hs` at 44 and 554, `ExecutablePath` at 36,
+`CommunicationHandle.Internal` at 149, `Directory.Common` at 20). Every other module's forms
 (modes `:lines` and `:full`), module view and printed module (the braces, the layout and the full
-layouts) are byte for byte those of main's helper at `90ec844d` (the corpus's 1,345 compared; the
-dumps differ only in the helper's source hash); the tree level (1,345 in both layouts) and the
-interface level (1,345 in both layouts, 3,701,019 lines) are R6's. The run of `roundtrip --iface
---text --layout`: tree 54 s, layout 17 s, interfaces 190 s, text 131 s; `--text-only
---view-markers` about 2 minutes.
+layouts) are byte for byte those of main's helper at `90ec844d` (the corpus's 1,345 compared, with
+the opt-in of the first build; the dumps differ only in the helper's version and source hash); the
+tree level (1,345 in both layouts) and the interface level (1,345 in both layouts, 3,701,019 lines)
+are R6's. The run of `roundtrip --iface --text --layout`: 616 s through the slot for heavy commands
+(tree 65 s, layout 19 s, interfaces 254 s, text 141 s; the host shared).
 
 ### Checks and how to reproduce
 
 ```sh
-bin/repr-haskell roundtrip --iface --text --layout   # the default: HR25's results
-bin/repr-haskell roundtrip --text-only --view-markers  # HR26 (b) measured: the four equal
+bin/repr-haskell roundtrip --iface --text --layout
 bin/repr-haskell test                                # step 9: test/haskell/hr26/
 ```

@@ -88,7 +88,7 @@ import System.IO
 
 -- The helper's version: bumped when its output changes (recorded in every dump's config).
 helperVersion :: Int
-helperVersion = 3
+helperVersion = 4
 
 -- The GHC this helper was written against (tools/hsdump/GHC_VERSION, passed by the build as
 -- -DGHC_PIN); the helper refuses to run on another (SPEC §8.4, H11).
@@ -102,10 +102,10 @@ pinnedGhc = "unset"
 data Opts = Opts
   { oVerb :: String, oFull :: Bool, oOut :: Maybe FilePath, oLibdir :: Maybe FilePath
   , oCorpus :: Maybe String, oSrcHash :: Maybe String, oFiles :: [FilePath], oGhc :: [String]
-  , oHscArgs :: [String], oRepo :: Maybe FilePath, oViewMarkers :: Bool }
+  , oHscArgs :: [String], oRepo :: Maybe FilePath }
 
 parseOpts :: [String] -> Either String Opts
-parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing [] [] [] Nothing False) rest
+parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing [] [] [] Nothing) rest
   where
     go o ("--ghc" : fs) = let (gs, r) = break (== "--files") fs in go o { oGhc = oGhc o ++ gs } (drop 1 r)
     go o ("--full" : xs) = go o { oFull = True } xs
@@ -115,7 +115,6 @@ parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing []
     go o ("--helper-hash" : h : xs) = go o { oSrcHash = Just h } xs
     go o ("--hsc2hs-arg" : a : xs) = go o { oHscArgs = oHscArgs o ++ [a] } xs
     go o ("--repo" : d : xs) = go o { oRepo = Just d } xs
-    go o ("--view-markers" : xs) = go o { oViewMarkers = True } xs
     go o (x : xs) | "-" `isPrefixOf` x = Left ("hsdump: unknown option " ++ x)
                   | otherwise = go o { oFiles = x : oFiles o } xs
     go o [] = Right o { oFiles = reverse (oFiles o) }
@@ -292,7 +291,7 @@ isSignature f = any (`isSuffixOf` f) [".hsig", ".lhsig"]
 data CppRecord = CppRecord
   { cCommand :: [String], cArgs :: [String], cFiles :: [(String, String)]
   , cMacros :: Maybe String, cOutput :: String
-  , cViewMarkers :: [Int] }  -- HR26's opt-in (--view-markers): the module view's lines given a pragma
+  , cViewMarkers :: [Int] }  -- HR26, HR27: the module view's lines given a pragma (mode :full)
 
 parseOne :: HscEnv -> Opts -> FilePath -> Maybe HscRecord -> IO (Either String ModP)
 parseOne hsc_env o file hsc = do
@@ -345,10 +344,10 @@ parseOne hsc_env o file hsc = do
               -- the text of a literate module is its source (unlit keeps its lines and columns;
               -- R6); an .hsc module's {-# LINE #-} pragmas are hsc2hs's text, not markers
               -- (HR25: also any module whose text has them, alex's output)
-              -- HR26's opt-in (--view-markers): CPP's line markers that the pragmas disagree with
-              -- written into the module view as {-# LINE #-} pragmas (mode :full's; the view is its text)
+              -- HR26 (b), HR28 (a): CPP's line markers that the pragmas disagree with written into
+              -- the module view as {-# LINE #-} pragmas (mode :full's; the view is its text)
               (view, viewMarks) = if lit then (decodeUtf8 src, [])
-                                  else moduleView (oFull o && oViewMarkers o) (isJust hsc || hasLinePragmas src) file (decodeUtf8 out)
+                                  else moduleView (oFull o) (isJust hsc || hasLinePragmas src) file (decodeUtf8 out)
           parseText hsc_env dflagsC file src out cpp view lit hsc
     else parseText hsc_env dflagsP file src src Nothing (decodeUtf8 src) lit hsc
   where
@@ -814,14 +813,13 @@ hasLinePragmas = any (isJust . linePragma) . lines . decodeUtf8
 
 -- CPP's module view (SPEC §2.8, S5): for each line of the module, the output line the line
 -- markers (# N "file", #line N "file", {-# LINE N "file" #-}) attribute to it; the markers and
--- the lines of other files dropped. HR26's opt-in (markers, --view-markers; a module whose text
--- has {-# LINE #-} pragmas, pragmasText, only): where a line marker naming the module's file sets
--- GHC's position of its line n to the file's line n and the pragmas before it give that line
+-- the lines of other files dropped. HR26 (b), decided (markers: mode :full; a module whose
+-- text has {-# LINE #-} pragmas, pragmasText, only): where a line marker naming the module's file
+-- sets GHC's position of its line n to the file's line n and the pragmas before it give that line
 -- another (after a directive, alex's and hsc2hs's outputs), the blank line before it (the
 -- directive's) gets {-# LINE n "file" #-}, so that GHC's positions in the view are the
 -- original's; not where only blank lines follow up to the next pragma (no position there differs:
--- hsc2hs's pragma after an #include); the lines so written returned. Without markers, the view as
--- before (R6, HR25).
+-- hsc2hs's pragma after an #include); the lines so written returned (:cpp's :view-markers, HR27).
 moduleView :: Bool -> Bool -> FilePath -> String -> (String, [Int])
 moduleView markers pragmasText file out = (concatMap (\n -> Map.findWithDefault "" n m ++ "\n") [1 .. maxL], marks)
   where
