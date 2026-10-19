@@ -3058,7 +3058,24 @@ match).
   +18.8 MB; the methods' names and types now come from the table (GC54's note).
 - **The annotation check** (§11.4): every corpus as recorded, in 44.6, 37.7, 41.9, 29.9 and 23.9 s
   (GR6's 35-42 s, 26-29 s, 22 s, at a lower load).
-- **Speed** (GR3's criterion): TBD-SPEED
+- **Speed** (GR3's criterion): `bin/goi run test/goi/run go.t.fib bench`, best of five per run,
+  three runs alternating main's executable (GR7a merged) and GR7b's, load about 5:
+
+  | | main (GR7a) | GR7b |
+  |---|---|---|
+  | fib 22 | 2.56-2.62 ms | 2.55-2.65 ms |
+  | sumSq 1e6 | 19.47-21.17 ms | 19.84-21.34 ms |
+  | sieve 1e6 | 69.74-71.10 ms | 66.71-67.50 ms |
+
+  against GR6's 2.55, 17.9 and 65.5 ms (at load 16-18): within the runs' noise; the interpreter's
+  core is unchanged.
+
+**Checks** (this branch, amd64, after GR7a's merge): the essential `bin/gate` passed (7 m 21 s;
+goi's essential check 699 of 699); `bin/arbace-go --fixpoint`: G1 = G2 = G3 (136,446,112 bytes);
+`bin/goi check` as recorded, `--essential`, `bin/goi test` (the checker's tests, 15 programs, 78 REPL
+checks, §1.4's session), `bin/goi annotations`, `make check-makefile`, `bin/generated-check`, and
+the oracle's `forms/go.ae` (129 of 129). Not run: `bin/gate --full` (its box oracle now has the
+17 reify cases too: GR7a recorded 111 of 112 matching in the box).
 
 ### Proposals for the user (each built as recommended)
 
