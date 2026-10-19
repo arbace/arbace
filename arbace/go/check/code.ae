@@ -264,15 +264,38 @@
   "The object a name denotes in cx's scopes (locals, the package, the file's imports, the
   universe), declared; nil when undefined. A package name used alone is no use of its
   import (go/types: \"use of package fmt not in selector\", the import unused)."
-  [cx ^String n]
-  (when-let [x (or (e/scope-lookup (:scope cx) n)
-                   (when-let [[x imp] (some-> (:file cx) :dots (.get n))]
-                     (oset! imp :used true)
-                     x)
-                   (e/scope-get e/universe n))]
-    (when (and (package-level? x) *obj-decl* (not (and (= :type (o x :kind)) (not (o x :alias)))))
-      (*obj-decl* x))
-    x))
+  ([cx n] (resolve-name cx n false))
+  ([cx ^String n want-type]
+   (when-let [x (or (e/scope-lookup (:scope cx) n)
+                    (when-let [[x imp] (some-> (:file cx) :dots (.get n))]
+                      (oset! imp :used true)
+                      x)
+                    (e/scope-get e/universe n))]
+     ;; go/types' ident (go1.27): where a type is wanted, an object that is no type name is
+     ;; not declared (its error says what it is)
+     (when (and (package-level? x) *obj-decl* (not (and (= :type (o x :kind)) (not (o x :alias))))
+                (not (and want-type (not= :type (o x :kind)))))
+       (*obj-decl* x))
+     x)))
+
+(defn object-kind
+  "go/types' objectKind: what an object is, for messages."
+  [x]
+  (case (o x :kind)
+    :pkg "package name"
+    :const "constant"
+    :type (cond (o x :alias) "type alias" (o x :tparam) "type parameter" :else "defined type")
+    :var (cond
+           (o x :pkg-level) "package-level variable"
+           (o x :recv?) "receiver"
+           (o x :param?) "parameter"
+           (o x :result?) "result variable"
+           :else "local variable")
+    :func (if (o x :method) "method" "function")
+    :label "label"
+    :builtin "built-in function"
+    :nil "untyped nil"
+    "object"))
 
 (defn package-by-qualifier
   "The package a qualifier names: the file's import name, or a namespace (go.x.y) in the
@@ -334,13 +357,17 @@
             (let [n (ident-name f)]
               (if (= "_" n)
                 (do (err! f :InvalidBlank "cannot use _ as value or type") nil)
-                (or (resolve-name cx n) (do (err! f :UndeclaredName "undefined: %s" n) nil)))))]
+                (or (resolve-name cx n true) (do (err! f :UndeclaredName "undefined: %s" n) nil)))))]
     (cond
       (nil? x) :invalid
       (not= :type (o x :kind))
-      ;; go/types' ident: a variable named is used, even where a type was expected
+      ;; go/types' ident: a variable named is used, even where a type was expected; the
+      ;; object's kind said (go1.27), a qualified name's selector without it
       (do (when (= :var (o x :kind)) (use-var! cx x))
-          (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)
+          (if (and (symbol? f) (namespace f))
+            (err! f :NotAType "%s is not a type" (expr-str f))
+            (err! f :NotAType "%s (%s) is not a type" (o x :name) (object-kind x)))
+          :invalid)
       ;; a local alias named in its own declaration (go/types' objPath: a cycle of one alias)
       (o x :in-decl)
       (do (cycle-error! [(obj-entry x)] 0 true) :invalid)
