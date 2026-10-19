@@ -12,10 +12,9 @@
 
 (go/type StubSlot
   "StubSlot is what a stub calls: the method key of type T's method set (T the receiver's type:
-the word the stub is given is a value of T when T is pointer-shaped, else a pointer to one);
-NilMsg, when set, is gc's panicwrap message for a nil pointer (a value method's slot shared by
-T's and *T's method tables).\n"
-  (struct ^{:tag (* Type)} T ^string Key ^string NilMsg))
+the word the stub is given is a value of T when T is pointer-shaped, else a pointer to one), typ
+T's RT's type word; m the entry last found, in T's method set of version ver.\n"
+  (struct ^{:tag (* Type)} T ^string Key ^unsafe/Pointer typ ^{:tag (* Method)} m ^int ver))
 
 (go/type stubFamily "stubFamily is a signature's stubs: their slots and code, the next one free, the method names compiled code calls with that signature.\n"
   (struct ^{:tag (slice StubSlot)} slots ^{:tag (slice unsafe/Pointer)} codes ^int next ^string sig
@@ -60,11 +59,11 @@ passed is ignored) and panics.\n"
 
 (go/func takeStub
   "takeStub is the code of a new slot of method type sig's family, its slot reaching method
-key of type t (nilMsg: a shared slot's panicwrap message), or the panic stub when the signature
+key of type t, or the panic stub when the signature
 has no family, the family no method of that name (no compiled code can call it: it takes no
 slot) or no slot left (GC67: then goi warns once at the REPL, naming the
 method; a program's run, whose output is the program's, does not).\n"
-  ^unsafe/Pointer [^{:tag reflect/Type} sig ^{:tag (* Type)} t ^string key ^string nilMsg]
+  ^unsafe/Pointer [^{:tag reflect/Type} sig ^{:tag (* Type)} t ^string key]
   (.Lock stubsMu)
   (defer (.Unlock stubsMu))
   (let [f (aget stubFamilies sig)]
@@ -79,7 +78,8 @@ method; a program's run, whose output is the program's, does not).\n"
       (return panicStubCode))
     (let [i (.-next f)]
       (set! (.-next f) (+ i 1))
-      (aset (.-slots f) i (lit StubSlot t key nilMsg))
+      (let [rt (.-RT t)]
+        (aset (.-slots f) i (lit StubSlot :T t :Key key :typ (aget @(conv (* (array 2 unsafe/Pointer)) (conv unsafe/Pointer (addr rt))) 1))))
       (aget (.-codes f) i))))
 
 (go/func methodPkg
@@ -97,10 +97,8 @@ for an exported method.\n"
 (go/func setStubs
   "setStubs gives t's RT its method table, once (GC68: cached itabs, failed ones too, fix what
 an interface sees), when t's RT is its own (an interpreted named type's, or the pointer type
-made with it): each method of t's set its signature's FuncOf type and a stub. A value method of
-a type that is not pointer-shaped has one slot for its type's table and the pointer type's (both
-receive a pointer to the value); the pointer type's entry then shares it, with gc's panicwrap
-message for a nil pointer.\n"
+made with it): each method of t's set its signature's FuncOf type and a stub of a slot of its
+own (GC130: the pointer type's table has its own slots, its entries the builder's thunks).\n"
   [^{:tag (* Type)} t ^{:tag (slice string)} keys]
   (.Lock internMu)
   (when (or (.-stubbed t) (not (.-roomed t)))
@@ -109,22 +107,15 @@ message for a nil pointer.\n"
   (set! (.-stubbed t) true)
   (let [ms (.-Methods t)]
     (.Unlock internMu)
-    (let [out (make (slice reflect/ArbaceMethod) 0 (len keys))
-          elem (.-Elem t)
-          shared (and (== (.-GK t) reflect/Pointer) (!= elem nil) (.-own elem) (!= (.-Name elem) "") (not (.-direct elem)))]
-      (set! (.-stubs t) (make (map string unsafe/Pointer) (len keys)))
+    (let [out (make (slice reflect/ArbaceMethod) 0 (len keys))]
       (range [_ k keys]
         (let [m (aget ms k)
               sig (.rt (.-Sig m))
-              code panicStubCode]
-          (if (and shared (!= (.-stubs elem) nil) (!= (aget (.-stubs elem) k) nil))
-            (set! code (aget (.-stubs elem) k))
-            (set! code (takeStub sig t k "")))
-          (aset (.-stubs t) k code)
-          (let [am (lit reflect/ArbaceMethod :Name (methodName k) :PkgPath (methodPkg k) :Type sig :Ifn code)]
-            (when (.-direct t)
-              (set! (.-Tfn am) code))
-            (set! out (append out am)))))
+              code (takeStub sig t k)
+              am (lit reflect/ArbaceMethod :Name (methodName k) :PkgPath (methodPkg k) :Type sig :Ifn code)]
+          (when (.-direct t)
+            (set! (.-Tfn am) code))
+          (set! out (append out am))))
       (when (> (len out) (.-room t))
         (panic (fmt/Sprintf "goi: the method set of %s has %d methods, its runtime type room for %d" (typeName t) (len out) (.-room t))))
       (reflect/ArbaceSetMethods (.-RT t) out))))
@@ -132,32 +123,31 @@ message for a nil pointer.\n"
 (go/func EnterSlot
   "EnterSlot is a stub's call of the method its slot s names, receiver word p (§2.3 of the GR9
 survey): its frame, the receiver in its slot, the arguments' slots the signature's (as a typed
-adapter's, GC22).\n"
+adapter's, GC22). The receiver is the interface value the itab's call is of: s's type and p
+(the value of a pointer-shaped type, else a pointer to the interface's own copy, which nothing
+writes: no copy is made). The method's entry is cached in the slot while the type's method set
+is the one it was found in (Ver).\n"
   ^{:tag (* Frame)} [^{:tag (* StubSlot)} s ^unsafe/Pointer p]
   (let [t (.-T s)
-        m (aget (.-Methods t) (.-Key s))]
-    (when (== m nil)
-      (panic (fmt/Sprintf "goi: the type %s has no method %s" (typeName t) (.-Key s))))
-    (when (and (== p nil) (not (.-direct t)))
-      ;; a value method called through a nil pointer by the pointer type's table
-      (panic (lit plainError (fmt/Sprintf "value method %s.%s called using nil *%s pointer" (.-Name t) (methodName (.-Key s)) (lastName (.-Name t))))))
+        m (.-m s)]
+    (when (or (== m nil) (!= (.-ver s) (.-mver t)))
+      (set! m (aget (.-Methods t) (.-Key s)))
+      (when (== m nil)
+        (panic (fmt/Sprintf "goi: the type %s has no method %s" (typeName t) (.-Key s))))
+      (set! (.-m s) m)
+      (set! (.-ver s) (.-mver t)))
     (let [th (CurrentThread)
           mk (.save th)
           code (.Code (.-Fn m))
           nf (.enter th code (.-Fn m))]
-      (if (.-direct t)
-        (setRecvAt nf m t (conv unsafe/Pointer (addr p)))
-        (setRecvAt nf m t p))
+      (switch (.-RK m)
+        (case [\I] (aset (.-I nf) (.-RS m) (loadI (.-GK t) p)))
+        (case [\F] (aset (.-F nf) (.-RS m) (loadF (.-GK t) p)))
+        (case [\S] (aset (.-S nf) (.-RS m) @(conv (* string) p)))
+        (default
+          (let [e (lit (array 2 unsafe/Pointer) (.-typ s) p)]
+            (aset (.-R nf) (.-RS m) (fromMem t @(conv (* any) (conv unsafe/Pointer (addr e))))))))
       (set! (.-saved nf) mk)
       (set! (.-sig nf) (.-Sig m))
       (set! (.-ifn nf) nil)
       nf)))
-
-(go/func setRecvAt
-  "setRecvAt writes the receiver of method m, the value of type t at a, to its slot of frame nf.\n"
-  [^{:tag (* Frame)} nf ^{:tag (* Method)} m ^{:tag (* Type)} t ^unsafe/Pointer a]
-  (switch (.-RK m)
-    (case [\I] (aset (.-I nf) (.-RS m) (loadI (.-GK t) a)))
-    (case [\F] (aset (.-F nf) (.-RS m) (loadF (.-GK t) a)))
-    (case [\S] (aset (.-S nf) (.-RS m) @(conv (* string) a)))
-    (default (aset (.-R nf) (.-RS m) (.load t a)))))
