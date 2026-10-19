@@ -11,7 +11,7 @@
 
 (in-ns 'arbace.lang)
 
-(import '(java.math BigInteger) '(java.util Map$Entry))
+(import '(java.math BigInteger BigDecimal) '(java.util Map$Entry))
 
 ;; The class of Go values in Arbace (GOI-SPEC.md §5.5): every non-nil value that is no Java
 ;; object; jrt's Object protocol gives them goi's toString (their %#v), equals and hashCode. No
@@ -120,6 +120,112 @@
         (if (nil? (.next args))
             (.invoke this (.first args))
             (.throwArity this (RT/count args))))))
+
+;; A generic Go function (or a generic type's method, its receiver first) as an Arbace fn
+;; (GOI-SPEC.md "As built: GR9d", GC72-GC74): a call keys its arguments by their types for
+;; inference (keyOf: a Go value its descriptor, an Arbace scalar its untyped kind, a fn or a
+;; collection none), finds the instance's GoFn for the key (the last key's inline, else the
+;; map), else asks resolve (arbace.go.generic's: inference, the instance's cell, its GoFn) and
+;; keeps it; data is arbace.go.generic's description of the function.
+(defclass ^:public ^:final GoGenericFn
+  :extends AFn
+  (field ^:public ^:final ^String name)
+  (field ^:public ^:final data)
+  (field ^:public ^:final ^IFn resolve)
+  (field ^:private ^:final ^java.util.concurrent.ConcurrentHashMap cache)
+  ;; the last key and its instance: [key GoFn]
+  (field ^:private ^:volatile last)
+  (constructor ^:public [this ^String n d ^IFn r]
+    (set! name n) (set! data d) (set! resolve r) (set! cache (java.util.concurrent.ConcurrentHashMap.)))
+  (method ^:public toString ^String [this] (java-str "#go/generic " name))
+
+  (field ^:private ^:static ^:final K_INT (Keyword/intern "untyped-int"))
+  (field ^:private ^:static ^:final K_FLOAT (Keyword/intern "untyped-float"))
+  (field ^:private ^:static ^:final K_RUNE (Keyword/intern "untyped-rune"))
+  (field ^:private ^:static ^:final K_BOOL (Keyword/intern "untyped-bool"))
+  (field ^:private ^:static ^:final K_STRING (Keyword/intern "untyped-string"))
+  (field ^:private ^:static ^:final K_NIL (Keyword/intern "untyped-nil"))
+  (field ^:private ^:static ^:final K_FN (Keyword/intern "fn"))
+  (field ^:private ^:static ^:final K_COLL (Keyword/intern "coll"))
+  (field ^:private ^:static ^:final K_ANY (Keyword/intern "any"))
+
+  ;; an argument's element of the key (§4.3 of doc/go/GR9-SURVEY.md, GC72 (a))
+  (method ^:public ^:static keyOf [x]
+    (cond
+      (nil? x) GoGenericFn/K_NIL
+      (instance? GoValue x) (let [d (GoInterp/valueType x)] (if (nil? d) GoGenericFn/K_ANY d))
+      (or (instance? Long x) (instance? Integer x) (instance? Short x) (instance? Byte x)
+          (instance? BigInt x) (instance? BigInteger x)) GoGenericFn/K_INT
+      (or (instance? Double x) (instance? Float x) (instance? Ratio x) (instance? BigDecimal x)) GoGenericFn/K_FLOAT
+      (instance? Character x) GoGenericFn/K_RUNE
+      (instance? Boolean x) GoGenericFn/K_BOOL
+      (instance? String x) GoGenericFn/K_STRING
+      (instance? IPersistentCollection x) GoGenericFn/K_COLL
+      (instance? Keyword x) GoGenericFn/K_ANY
+      (instance? Symbol x) GoGenericFn/K_ANY
+      (instance? IFn x) GoGenericFn/K_FN
+      :else GoGenericFn/K_ANY))
+
+  (method ^:private ^:static sameKey ^boolean [^Object/1 a ^Object/1 b]
+    (if (== (alength a) (alength b))
+        (loop [^int i 0]
+          (if (< i (alength a))
+              (if (identical? (aget a i) (aget b i)) (recur (unchecked-inc-int i)) false)
+              true))
+        false))
+
+  ;; the instance's GoFn for args (GC74 (a))
+  (method ^:public instanceFor [this ^Object/1 args]
+    (let [n (alength args)
+          k (new Object/1 n)]
+      (loop [^int i 0]
+        (when (< i n)
+          (aset k i (GoGenericFn/keyOf (aget args i)))
+          (recur (unchecked-inc-int i))))
+      (let [l (cast Object/1 last)]
+        (if (and (some? l) (GoGenericFn/sameKey (cast Object/1 (aget l 0)) k))
+            (aget l 1)
+            (let [kv (LazilyPersistentVector/createOwning k)
+                  f0 (.get cache kv)
+                  f (if (some? f0)
+                        f0
+                        (let [r (.invoke resolve this k args)]
+                          (.put cache kv r)
+                          r))]
+              (set! last (new Object/1 [k f]))
+              f)))))
+
+  (method ^:public callWith [this ^Object/1 args]
+    (let [f (.instanceFor this args)]
+      (if (instance? GoFn f)
+          (GoInterp/call (.-handle (cast GoFn f)) args)
+          (.applyTo (cast IFn f) (RT/seq args)))))
+
+  ;; the number of instances made (tests, measurements)
+  (method ^:public instanceCount ^int [this] (.size cache))
+
+  (method ^:public invoke [this] (.callWith this (new Object/1 0)))
+  (method ^:public invoke [this a1] (.callWith this (new Object/1 [a1])))
+  (method ^:public invoke [this a1 a2] (.callWith this (new Object/1 [a1 a2])))
+  (method ^:public invoke [this a1 a2 a3] (.callWith this (new Object/1 [a1 a2 a3])))
+  (method ^:public invoke [this a1 a2 a3 a4] (.callWith this (new Object/1 [a1 a2 a3 a4])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5] (.callWith this (new Object/1 [a1 a2 a3 a4 a5])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19])))
+  (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20] (.callWith this (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20])))
+  (method ^:public applyTo [this ^ISeq args] (.callWith this (RT/seqToArray args))))
 
 ;; An Arbace object implementing Go interfaces (G13; GOI-SPEC.md "As built: GR7b"): what reify
 ;; makes of a reify naming Go interfaces of the table. goiReify is [T f0 f1 ...]: T the reify type
@@ -238,6 +344,13 @@
   (method ^:private ^:static ^:native method0 [v ^String name])
   (method ^:private ^:static ^:native interpType0 ^Object/1 [v])
   (method ^:private ^:static ^:native reifyType0 ^Object/1 [^Object/1 types])
+  (method ^:private ^:static ^:native valueType0 [v])
+  (method ^:private ^:static ^:native typeInfo0 ^Object/1 [t])
+
+  ;; GR9d: the descriptor of a Go value's type as inference sees it (a proxy's type, an
+  ;; interpreted struct's by its RT), or null; a descriptor's parts (arbace.go.generic)
+  (method ^:public ^:static valueType [v] (GoInterp/valueType0 v))
+  (method ^:public ^:static typeInfo ^Object/1 [t] (GoInterp/typeInfo0 t))
 
   ;; the reify type of Go interface types (their GoTypes, G13): [T key...], T goi's descriptor
   (method ^:public ^:static reifyType ^Object/1 [^Object/1 types]
@@ -254,6 +367,10 @@
   (method ^:public ^:static loadTable ^boolean [^String scriptbase]
     (let [path (GoInterp/packagePath0 scriptbase)]
       (when (nil? path)
+        ;; GR9d: an interpretable package of the digest (go/slices: §9.3), loaded by goi
+        (when (== (.indexOf scriptbase "/" 3) -1)
+          (.invoke (RT/var "arbace.core" "require") (Symbol/intern "arbace.go"))
+          (return (.equals Boolean/TRUE (.invoke (RT/var "arbace.go" "interpretable-ns!") (.substring scriptbase 3)))))
         (return false))
       (.invoke (RT/var "arbace.core" "require") (Symbol/intern "arbace.go"))
       (.invoke (RT/var "arbace.go" "table-ns!") path)
@@ -453,8 +570,11 @@
         (let [ns (.invoke (RT/var "arbace.go" "path->ns") (aget tp 0))
               v (Namespace/find (cast Symbol ns))]
           (when (some? v)
-            (let [x (.findInternedVar (cast Namespace v) (Symbol/intern (java-str (aget tp 1) "." name)))]
-              (when (and (some? x) (instance? GoFn (.deref (cast Var x))))
+            ;; a generic type's instance (List[int]): its methods' vars are List.M (GR9d)
+            (let [tn (cast String (aget tp 1))
+                  b (.indexOf tn "[")
+                  x (.findInternedVar (cast Namespace v) (Symbol/intern (java-str (if (>= b 0) (.substring tn 0 b) tn) "." name)))]
+              (when (and (some? x) (or (instance? GoFn (.deref (cast Var x))) (instance? GoGenericFn (.deref (cast Var x)))))
                 (.deref (cast Var x)))))))))
 
   (method ^:public ^:static hasMethod ^boolean [target ^String name]

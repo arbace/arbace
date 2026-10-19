@@ -93,13 +93,20 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Running (the user, 2026-10-19), all from `90ec844d`: goi GR7b (`goi-gr7b`: `$GOROOT/test`'s errorcheck programs; `reify` of listed Go interfaces, G13;
-  GC45 onward). The seed
-  `34d68b82…` (GR6), verified.
+- Running, under the user's goal (2026-10-19: "reach arbace-interprets-go-v1, that is the next
+  milestone"), each in its own worktree:
+  - goi GR7c (`goi-gr7c`): the 23 errorcheck fails and 2 checker crashes;
+  - GR8a (`goi-gr8a`): std at the REPL, starting with the label-on-`:=` bug;
+  - GR9a-c (`goi-gr9a`): real runtime types for interpreted named types;
+  - GR9d (`goi-gr9d`): REPL vars for generic functions;
+  - the arm64 box check (`goi-box-arm64`).
+  The seed `0af285f7…` (GR7a, GR7b), verified. The surveys doc/go/GR8-SURVEY.md and GR9-SURVEY.md
+  are merged. Their proposals GC55-GC74 are built as recommended under the goal and recorded so
+  the user can revisit them.
 - **The plan to the milestone `arbace-interprets-go-v1`** (the user, 2026-10-19: the full plan; the
   name to confirm at the tag). The milestone claims goi a complete interpreter of Go forms at the
   REPL. The steps:
-  1. **GR7b** (running): `$GOROOT/test`'s errorcheck programs judged by Go's test driver, with the
+  1. **GR7b** (done 2026-10-19, GC45-GC54 as built; GR7c, the rest of its fails, running): `$GOROOT/test`'s errorcheck programs judged by Go's test driver, with the
      checker's errors equal to gc's; `reify` of listed Go interfaces from Arbace (G13). After it,
      main's gate, the fixpoint and one re-seed for GR7a and GR7b; GC45-GC54 for the user.
   2. **GR8, std at the REPL and reflect's methods.** Today about 30 of the check's 54 unsupported

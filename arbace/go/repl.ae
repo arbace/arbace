@@ -17,8 +17,9 @@
             [arbace.go.check.code :as code]
             [arbace.go.check.load :as load]
             [arbace.go.build :as b]
+            [arbace.go.generic :as gen]
             [arbace.repr.go.print :as rp])
-  (:import (arbace.lang GoInterp GoFn GoVar GoType Namespace)
+  (:import (arbace.lang GoInterp GoFn GoGenericFn GoVar GoType Namespace)
            (java.io File)))
 
 ;;; The table and the digest (§6)
@@ -294,6 +295,23 @@
     (or (:ctx @st) (build-context st))
     (compiled-context path)))
 
+(defn named-type
+  "GR9d: the checker's type of package path's named type nm as the package stands: an
+  interpreted package's last check, a listed package's digest; or nil."
+  [path nm]
+  (if-let [st (get @packages path)]
+    (when-let [r (:checked @st)]
+      (some (fn [d] (when (and (= :type (:kind d)) (= nm (e/o (:obj d) :name))) (e/o (:obj d) :type)))
+            (:decl-infos r)))
+    (when (listed? path)
+      (when-let [p (ck/ensure-package @digest-session path nil [])]
+        (when-let [x (e/scope-get (e/o p :scope) nm)]
+          (when (= :type (e/o x :kind)) (e/o x :type)))))))
+
+(def ^:private generic-env
+  "What arbace.go.generic asks of the REPL's state."
+  {:ctx-of (fn [path] (ctx-of path)) :named (fn [path nm] (named-type path nm))})
+
 (defn- const-arbace
   "A constant's value as Arbace takes it (§5.6)."
   [ty v]
@@ -319,6 +337,8 @@
         unsupported (some #(when (:unsupported %) %) decls)
         ;; a generic function or method has no cell: its instances have (§9.2, b/instance-cell)
         generic? (fn [d] (and (= :func (:kind d)) (or (seq (e/o (:obj d) :tparams)) (seq (e/o (:obj d) :rtparams)))))
+        ;; GR9d: their vars hold GoGenericFns (arbace.go.generic)
+        generics (filter generic? decls)
         decls (remove generic? decls)]
     (when unsupported
       (let [what (str (:unsupported unsupported))]
@@ -444,6 +464,20 @@
                                                         :private (not (and (t/exported? (e/o obj :name))
                                                                            (t/exported? (:name (t/info (e/o obj :recv-named))))))})
                           (GoFn. c full)))
+                ;; generic functions and generic types' methods (GR9d, GC34 (b)): GoGenericFns
+                (doseq [d generics
+                        :let [x (:obj d)
+                              m? (:method d)]
+                        :when (and (not= "_" (e/o x :name)) (or (not m?) (e/o x :recv-named)))
+                        :let [vname (if m? (str (:name (t/info (e/o x :recv-named))) "." (e/o x :name)) (e/o x :name))
+                              full (str (:path old) "." vname)
+                              doc (when-not m? (let [spec (:spec d)] (when (and (seq? spec) (string? (nth spec 2 nil))) (nth spec 2))))]]
+                  (intern ns (with-meta (symbol vname) (cond-> {:go/kind (if m? :method :func) :go/generic true :go/package (:path old)
+                                                                :line (e/o x :line) :file (e/o x :file)
+                                                                :private (not (and (t/exported? (e/o x :name))
+                                                                                   (or (not m?) (t/exported? (:name (t/info (e/o x :recv-named)))))))}
+                                                         doc (assoc :doc doc)))
+                          (gen/generic-fn x full generic-env)))
                 (doseq [[nm {:keys [ptr obj]}] globals]
                   (intern ns (with-meta (symbol nm) {:go/kind :var :go/package (:path old) :private (not (t/exported? nm))})
                           (GoVar. (b/op "GlobalPtr" (b/desc (e/o obj :type)) ptr) (str (:path old) "." nm))))
@@ -670,6 +704,84 @@
   [ns-sym]
   (let [st (package-state ns-sym false)]
     (:errors (check-source (source-of st) nil))))
+
+;;; Generic functions from Arbace (GR9d): go/inst, the listed packages' generics
+
+(defn- resolve-types
+  "Go type forms tforms resolved in the package of namespace ns-sym (go.user outside go.*), as
+  go/eval resolves names: the checker's types (of a check of the package with a struct type of
+  fields of those types added)."
+  [ns-sym tforms]
+  (let [ns-sym (if (str/starts-with? (str ns-sym) "go.") ns-sym 'go.user)
+        st (package-state ns-sym)
+        nm (str "goi_inst" (swap! eval-count inc))
+        form (list 'go/type (symbol nm)
+                   (apply list 'struct (map-indexed (fn [i tf] (with-meta (symbol (str "F" i)) {:tag tf})) tforms)))
+        old @st
+        files (mapv #(if (= (:current old) (:name %)) (update % :decls conj form) %)
+                    (if (some #(= (:current old) (:name %)) (:files old))
+                      (:files old)
+                      (conj (:files old) {:name (:current old) :opts {} :imports [] :decls []})))]
+    (swap! st assoc :files files)
+    (try
+      (let [r (check-source (source-of st) nil)
+            errs (remove #(= :UnusedImport (:code %)) (:errors r))]
+        (when (seq errs)
+          (throw (ex-info (str "Go check errors:\n" (error-text errs (repl-source))) {:go/errors (vec errs)})))
+        (let [d (some #(when (and (= :type (:kind %)) (= nm (e/o (:obj %) :name))) %) (:decl-infos r))]
+          (mapv :type (nth (t/under (e/o (:obj d) :type)) 1))))
+      (finally (swap! st assoc :files (:files old))))))
+
+(defn inst!
+  "(go/inst f T...) in namespace ns-sym (GR9d, GC73): f a generic function's var (a GoGenericFn)
+  or a generic type of an interpreted or listed package (go.main/List); the instance (a GoFn, a
+  GoType) or, with fewer type arguments, a GoGenericFn inferring the rest. Kept per GoGenericFn
+  and forms."
+  [ns-sym f tforms]
+  (let [ns (the-ns ns-sym)
+        v (when (symbol? f) (try (ns-resolve ns f) (catch Exception _ nil)))
+        root (when (var? v) @v)]
+    (cond
+      (instance? GoGenericFn root)
+      (let [^GoGenericFn g root
+            insts (:insts (.-data g))
+            k [ns-sym tforms]]
+        (or (get @insts k)
+            (let [r (gen/instantiate g (resolve-types ns-sym tforms))]
+              (swap! insts assoc k r)
+              r)))
+      :else
+      (let [q (when (symbol? f) (namespace f))
+            ;; a namespace alias, else the namespace's own package
+            nsn (cond (nil? q) (str ns-sym)
+                      (get (ns-aliases ns) (symbol q)) (str (ns-name (get (ns-aliases ns) (symbol q))))
+                      :else q)
+            path (when (str/starts-with? nsn "go.") (ns->path nsn))
+            g (when path
+                (when (or (get @packages path) (listed? path) (interpretable? path))
+                  (when-not (or (get @packages path) (listed? path)) (load-import path))
+                  (named-type path (name f))))]
+        (if (and g (t/named? g) (seq (:tparams (t/info g))))
+          (gen/type-instance g (resolve-types ns-sym tforms) generic-env)
+          (throw (ex-info (str "go/inst: " f " is no generic function or type") {:form f})))))))
+
+(defn listed-generic!
+  "GR9d: the var of listed package path's generic function or generic type's method n (T.M),
+  interned in ns (arbace.go/table-ns!'s, made on demand as the package's other vars, S9): a
+  GoGenericFn over the digest's declaration (§9.3), or nil."
+  [ns path ^String n info]
+  (when-let [p (ck/ensure-package @digest-session path nil [])]
+    (let [[tn mn] (if (str/includes? n ".") (str/split n #"\." 2) [n nil])
+          x (e/scope-get (e/o p :scope) tn)
+          x (if mn
+              (when (and x (= :type (e/o x :kind)) (t/named? (e/o x :type)))
+                (some #(when (= mn (e/o % :name)) %) (:methods (t/info (e/o x :type)))))
+              x)]
+      (when (and x (= :func (e/o x :kind)) (or (seq (e/o x :tparams)) (seq (e/o x :rtparams))))
+        (intern ns (with-meta (symbol n) (cond-> {:go/kind (if mn :method :func) :go/generic true :go/package path}
+                                           (:doc info) (assoc :doc (:doc info))
+                                           (:arglists info) (assoc :arglists (:arglists info))))
+                (gen/generic-fn x (str path "." n) generic-env))))))
 
 ;;; go/run-compiled (G15)
 
