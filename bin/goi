@@ -87,6 +87,22 @@
 #                                 errors (repr/go reads parsed Go only), an invalid program repr/go
 #                                 cannot convert, line directives, or errors go/types does not
 #                                 report either (gc's phases after type checking)
+#   bin/goi check --box [--record] [--jobs N] [--only REGEX]
+#                                 the check in the box (GS13, GR7a): the programs of
+#                                 test/goi/box.txt run by the TamaGo guest (GOI_BOX_EXE, else
+#                                 target/arbace-go/box-amd64/arbace-box, bin/arbace-go --build
+#                                 --box) on /dev/kvm, each in a box of its own: its forms written
+#                                 into the guest's in-memory file system by the guest's standard
+#                                 input, then arbace.go.run; against gc's run on linux/amd64 (the
+#                                 check's reference, .tmp/goi-check/ref) as the check does, but
+#                                 the box's console one stream (GC35: TamaGo writes a program's
+#                                 standard output and error to it), against gc's standard
+#                                 output then error; test/goi/check-known.edn's and
+#                                 test/goi/check-box-known.edn's programs known; the results
+#                                 against test/goi/check-box-amd64.edn (a program passing there
+#                                 and not now fails; --record writes it); default 8 jobs, each box
+#                                 the launcher's vCPUs (ARBACE_BOX_CPUS, 4); GOI_BOX_TIMEOUT, the
+#                                 seconds added to each program's timeout for the box (default 60)
 #
 # Environment: ARBACE_HOST_EXE (the tools' host, bin/lib/host.bash; GOI_EXE runs the table's
 # generator instead), ARBACE_GOROOT (TamaGo's Go tree, for --gc and the linux corpora's
@@ -329,13 +345,32 @@ check_one() {
   fi
   r=$cwork/run/$p
   mkdir -p "$(dirname "$r")"
-  st=0; (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" "${args[@]}" > "$r.out" 2> "$r.err.raw" < /dev/null) || st=$?
+  st=0
+  if [ -n "${box:-}" ]; then
+    box_run "$cforms" "$tmo" "$ns" "${f#$cforms/}" "${args[@]}" > "$r.out" 2> "$r.err.raw" || st=$?
+  else
+    (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" "${args[@]}" > "$r.out" 2> "$r.err.raw" < /dev/null) || st=$?
+  fi
   stderr_head "$r.err.raw" > "$r.err"
   case $st in
     125) printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.err.raw" | head -1)"; return ;;
     126) printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.err.raw" | head -1 | cut -c1-300)"; return ;;
     124) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
   esac
+  if [ -n "${box:-}" ]; then
+    # the box's console: TamaGo writes a Go program's file descriptors 1 and 2 to it, and the
+    # board sends it to the launcher's standard error (GC35): the streams compared as one, gc's
+    # standard output then its standard error
+    cat "$r.out" "$r.err.raw" > "$r.all.raw"; stderr_head "$r.all.raw" > "$r.all"
+    cat "$ref/out" "$ref/err" > "$r.gc-all"
+    if [ "$st" = "$(cat "$ref/exit")" ] && cmp -s "$r.all" "$r.gc-all"; then
+      printf '%s\tpass\t\n' "$p"
+    else
+      printf '%s\tfail\tstatus %s (gc %s)%s\n' "$p" "$st" "$(cat "$ref/exit")" \
+        "$(cmp -s "$r.all" "$r.gc-all" || printf ', the console differs: %s' "$(diff "$r.gc-all" "$r.all" | grep '^[<>]' | head -2 | tr '\n' ' ' | cut -c1-200)")"
+    fi
+    return
+  fi
   if [ "$st" = "$(cat "$ref/exit")" ] && cmp -s "$r.out" "$ref/out" && cmp -s "$r.err" "$ref/err"; then
     printf '%s\tpass\t\n' "$p"
   else
@@ -372,7 +407,12 @@ check_dir() {
   ns=$(sed -n '1s/^(ns \([^ )]*\).*/\1/p' "$f")
   r=$cwork/run/$p
   mkdir -p "$(dirname "$r")"
-  st=0; (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run "$dforms" "$ns" > "$r.out" 2>&1 < /dev/null) || st=$?
+  st=0
+  if [ -n "${box:-}" ]; then
+    box_run "$dforms" "$tmo" "$ns" "${f#$dforms/}" "${base#$dforms/}" "${base#$dforms/}.ae" > "$r.out" 2>&1 || st=$?
+  else
+    (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run "$dforms" "$ns" > "$r.out" 2>&1 < /dev/null) || st=$?
+  fi
   case $st in
     125) printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.out" | head -1)"; return ;;
     126) printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.out" | head -1 | cut -c1-300)"; return ;;
@@ -478,6 +518,44 @@ check_err() {
   printf '%s\tfail\t%s\n' "$p" "$(sed -n 2,3p "$r.judge" | tr '\t\n' '  ' | cut -c1-240)"
 }
 
+# box_run ROOT TMO NS FILE [PATH...] [-- ARG...]: program NS in the box (GS13, GR7a): the guest's
+# standard input writes FILE and the PATHs (files or directories, relative to the forms root
+# ROOT; a directory test's) into its in-memory file system under /goi, then runs arbace.go.run
+# on /goi with ARGs; its standard output, error and status are the program's. For check_one the
+# arguments after FILE are the program's (a single-file program has no PATHs)
+box_run() {
+  local froot=$1 tmo=$2 ns=$3 file=$4; shift 4
+  local paths=() pargs=()
+  if [ -n "${dirtest:-}" ]; then paths=("$@"); else pargs=("$@"); fi
+  python3 -c '
+import json, os, sys
+root, ns, f = sys.argv[1:4]
+n = int(sys.argv[4])
+paths = sys.argv[5:5 + n]
+args = sys.argv[5 + n:]
+lit = lambda s: json.dumps(s, ensure_ascii=False)
+out = []
+def put(rel):
+    out.append("(let [f (java.io.File. %s)] (.mkdirs (.getParentFile f)) (spit f %s))"
+               % (lit("/goi/" + rel), lit(open(os.path.join(root, rel), encoding="utf-8").read())))
+seen = set()
+for rel in [f] + paths + ([f[:-3]] if f.endswith(".ae") else []):
+    p = os.path.join(root, rel)
+    if os.path.isdir(p):
+        for d, _, fs in os.walk(p):
+            for x in sorted(fs):
+                if x.endswith(".ae"):
+                    r = os.path.relpath(os.path.join(d, x), root)
+                    if r not in seen: seen.add(r); put(r)
+    elif os.path.isfile(p) and rel not in seen:
+        seen.add(rel); put(rel)
+out.append("(require (quote arbace.go.run))")
+out.append("(arbace.go.run/-main %s)" % " ".join(lit(x) for x in ["/goi", ns] + args))
+print("\n".join(out))
+' "$froot" "$ns" "$file" "${#paths[@]}" ${paths[@]+"${paths[@]}"} ${pargs[@]+"${pargs[@]}"} \
+    | timeout $((tmo + ${GOI_BOX_TIMEOUT:-60})) "$rexe" -
+}
+
 # check [--record] [--jobs N] [--essential] [--only REGEX]: the check (§11): every run program of
 # $GOROOT/test (the corpus linux-test, repr/go's conversion: bin/repr-go read --corpus linux-test,
 # run first when missing) interpreted against gc; results in .tmp/goi-check/results.tsv, against
@@ -485,16 +563,27 @@ check_err() {
 # check; --record writes it) and the known differences test/goi/check-known.edn
 check() {
   local record="" jobs=16 only="" essential="" ref=$root/test/goi/check-linux-amd64.edn known=$root/test/goi/check-known.edn
+  box=""
   while [ $# -gt 0 ]; do
     case $1 in
       --record) record=1; shift ;;
       --jobs) jobs=$2; shift 2 ;;
       --only) only=$2; shift 2 ;;
       --essential) essential=1; shift ;;
+      --box) box=1; shift ;;
       *) echo "bin/goi check: unknown option $1" >&2; return 2 ;;
     esac
   done
-  rexe=$(run_exe) || return 1
+  if [ -n "$box" ]; then
+    # the check in the box (GS13): its own reference and the box's results apart
+    rexe=${GOI_BOX_EXE:-$root/target/arbace-go/box-amd64/arbace-box}
+    [ -x "$rexe" ] || { echo "bin/goi check --box: no $rexe (bin/arbace-go --build --box)" >&2; return 1; }
+    [ -w /dev/kvm ] || { echo "bin/goi check --box: no /dev/kvm" >&2; return 1; }
+    ref=$root/test/goi/check-box-amd64.edn
+    [ "$jobs" = 16 ] && jobs=8
+  else
+    rexe=$(run_exe) || return 1
+  fi
   . "$root/bin/lib/host.bash"
   hexe=$(arbace_host_exe) || return 1
   cforms=$root/.tmp/repr-go/forms/linux-test
@@ -504,6 +593,11 @@ check() {
   edumps=$root/.tmp/godump/corpus/linux-errtest
   etsv=$edumps.tsv
   mkdir -p "$cwork/ref" "$cwork/run" "$cwork/bin"
+  # the box's runs apart from the native ones (gc's reference shared)
+  if [ -n "$box" ]; then
+    mkdir -p "$cwork/box"; ln -sfn ../ref "$cwork/box/ref"; cwork=$cwork/box
+  fi
+  mkdir -p "$cwork/bin"
   if [ ! -d "$cforms" ]; then
     echo "== bin/repr-go read --corpus linux-test (.tmp/goi-check/read.log)" >&2
     "$root/bin/repr-go" read --corpus linux-test > "$cwork/read.log" 2>&1 || { tail "$cwork/read.log" >&2; return 1; }
@@ -538,16 +632,18 @@ check() {
   LC_ALL=C sort -u "$edumps-programs.txt" "$list.run" > "$list"
   rm -f "$list.run"
   [ -n "$essential" ] && grep -v '^#' "$root/test/goi/essential.txt" | grep . > "$list.ess" && mv "$list.ess" "$list"
+  [ -n "$box" ] && grep -v '^#' "$root/test/goi/box.txt" | grep . > "$list.box" && mv "$list.box" "$list"
   [ -n "$only" ] && { grep -E "$only" "$list" > "$list.only" || true; mv "$list.only" "$list"; }
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
-  export -f check_one check_dir check_err action_of stderr_head gc_env
-  export root goroot rexe hexe cforms dforms cwork eforms edumps etsv gocmp
+  export -f check_one check_dir check_err action_of stderr_head gc_env box_run
+  export root goroot rexe hexe cforms dforms cwork box eforms edumps etsv gocmp
   local t0=$SECONDS
-  xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) check_err "$1" ;; *dir|*"dir "*) check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
+  xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) check_err "$1" ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
     | LC_ALL=C sort > "$cwork/results.tsv"
   # the known differences: a program listed there is known, with its reason, unless it passes
   if [ -f "$known" ]; then
-    sed -n 's/^ *\["\([^"]*\)" "\(.*\)"\]$/\1\t\2/p' "$known" > "$cwork/known.tsv"
+    # in the box, the box's own known differences too (test/goi/check-box-known.edn)
+    cat "$known" ${box:+"$root/test/goi/check-box-known.edn"} | sed -n 's/^ *\["\([^"]*\)" "\(.*\)"\]$/\1\t\2/p' > "$cwork/known.tsv"
     awk -F'\t' 'NR==FNR { k[$1] = $2; next }
                  ($1 in k) && $2 != "pass" { $2 = "known"; $3 = k[$1] } { print $1 "\t" $2 "\t" $3 }' "$cwork/known.tsv" "$cwork/results.tsv" > "$cwork/results.k" \
       && mv "$cwork/results.k" "$cwork/results.tsv"
@@ -560,8 +656,14 @@ check() {
   echo "goi check: $total programs: $pass pass, $fail fail, $err error, $uns unsupported, $kn known, $skip skipped; $((SECONDS - t0)) s"
   { awk -F'\t' '$2=="fail" || $2=="error"' "$cwork/results.tsv" | head -30 | sed 's/^/   /'; } || true
   if [ -n "$record" ]; then
-    { echo ";; goi's check (doc/go/GOI-SPEC.md §11.3): every run program of \$GOROOT/test (linux/amd64) and its"
-      echo ";; result, pass, fail, error, unsupported (with the reason), known or skip. bin/goi check --record"
+    { if [ -n "$box" ]; then
+        echo ";; goi's check in the box (doc/go/GOI-SPEC.md \"As built: GR7a\", GS13): the programs of test/goi/box.txt"
+        echo ";; run by the TamaGo guest on /dev/kvm (amd64) against gc's on linux/amd64, and their result, pass,"
+        echo ";; fail, error, unsupported (with the reason), known or skip. bin/goi check --box --record"
+      else
+        echo ";; goi's check (doc/go/GOI-SPEC.md §11.3): every run program of \$GOROOT/test (linux/amd64) and its"
+        echo ";; result, pass, fail, error, unsupported (with the reason), known or skip. bin/goi check --record"
+      fi
       echo "["
       awk -F'\t' '{ gsub(/\\/, "\\\\", $3); gsub(/"/, "\\\"", $3); printf " [\"%s\" :%s \"%s\"]\n", $1, $2, $3 }' "$cwork/results.tsv"
       echo "]"; } > "$ref"

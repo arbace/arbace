@@ -2673,3 +2673,193 @@ bytes compressed against 324,205: +12,510).
   cannot name its type arguments; Go functions calling it are the way); (b) a var whose `GoFn`
   infers the type arguments from its arguments' Go types at each call. *Recommended: (a)*, (b) to
   reconsider with GS2's auto-import after GR6.
+
+## As built: GR7a (2026-10-19)
+
+GR7a, a part of GR7 (§12's row "GR7 (later)"), is built on branch `goi-gr7a` (from main `90ec844d`,
+which has GR1 to GR6): the check in the box (GS13 as decided: a subset run by the TamaGo guest in
+`bin/gate --full`), GC25's exclusion lifted (goi's crossings in the box's oracle), and GR3's limit
+on recursive types lifted. GR7b (errorcheck programs, `reify`) is built beside it and numbers its
+proposals from GC45; GR7a's are GC35-GC42. Where building it found otherwise than this text, the
+text below is the record.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the check in the box | `bin/goi check --box`, `test/goi/box.txt`, `test/goi/check-box-amd64.edn`, `test/goi/check-box-known.edn` | the programs of `box.txt` (GC36) each run by the amd64 guest (`target/arbace-go/box-amd64/arbace-box`, `GOI_BOX_EXE`) in a box of its own on /dev/kvm: the guest's standard input writes the program's forms (a directory test's packages too) into its in-memory file system under `/goi`, then calls `arbace.go.run/-main` on `/goi`; the result against gc's run on linux/amd64 (the check's reference, `.tmp/goi-check/ref`, shared), the box's console one stream (GC35); `check-known.edn`'s and `check-box-known.edn`'s programs known; the results against the box's own reference, as the check's (a program passing there and not now fails). 8 boxes at a time, each of the launcher's 4 vCPUs |
+| the gate | `bin/gate --full` (`box-goi`), `Makefile` (`box-goi`) | after every chain (it reads repr-go's fresh conversions of `$GOROOT/test`, and gc's reference the `goi` step shares), when the box was built |
+| goi's crossings in the box's oracle | `bin/gate --full`'s box-oracle step, `Makefile`'s `box-oracle`, `test/oracle/known-go-box-amd64.edn` | `forms/go.ae` no longer left out (GC25 (a) ended); it holds no `go/run-compiled` case (that is `test/goi/repl.ae`'s, natively), so nothing of it is excluded: 111 of its 112 cases match, the other the box's nil dereference (GC40) |
+| shaped types | `arbace/go/build.ae` (`shaped?`, `shape-type`), `go/arbace/goi/types.ae` (`TShape`, `reshape`, `Shaped`) | a named type recursive other than through pointers is held in Go memory at its shape (GC38, amendment 1) |
+| interfaces' methods | `arbace/go/build.ae` (`*iface-pending*`, `desc`) | given once the outermost descriptor is built (GC41, amendment 2) |
+| tests | `test/goi/run/go/t/recursive.ae` | 16 lines of output against gc's (converted by repr/go from Go source): a slice, a function, a channel and a map recursive through themselves, a struct through a slice of itself with methods in interfaces and a type assertion, mutual recursion (`A` through `[]B`, `B` through a field `A`), a pointer type recursive through its element (`type Peano *Peano`) and through an array (`T19`), generic ones (`Src[T] func() (T, Src[T])`, `GChan[T] chan GChan[T]`), and an interface naming a struct that names it (`typeparam/cons.go`'s `List[T]`, `Cons[T]`) |
+
+**The check in the box (GS13, the exit criterion).** `bin/goi check --box`, on the box's guest of
+this branch (amd64, /dev/kvm, nested KVM):
+
+| | programs | pass | fail, error | unsupported | known | time (8 boxes) |
+|---|---:|---:|---:|---:|---:|---:|
+| the essential subset as GR6 left it (the first run comparing the console as one stream) | 566 | 555 | 9 | 2 | 0 | 262 s |
+| `box.txt` at GR6's programs (recorded on GR6's program) | 556 | 555 | 0 | 0 | 1 | 263 s |
+| `box.txt` with GR7a's ten (GC37), GR7a's program | 566 | 565 | 0 | 0 | 1 | 279-284 s |
+
+Eight of that run's nine failures are the box's by design and are left out of `box.txt` (GC36):
+seven run the go command or gc's tools (`const7.go`, `linkmain_run.go`, `linkx_run.go`,
+`fixedbugs/issue14636.go`, `issue21576.go`, `issue22662b.go`, `issue52127.go`: the box has no
+processes and no toolchain), `env.go` reads `PATH` (the box's environment holds none); the two
+unsupported are `chanlinear.go` and `maplinear.go`, whose build constraints (`darwin || linux`)
+leave out `GOOS=tamago`. The ninth failure is known (`check-box-known.edn`): `typeparam/issue50109.go`: its output ends without a
+newline, and the box's console ends the last line with one (the board's line buffer). Compared
+stream by stream (before GC35), 25 more failed only because a Go program's standard output reaches the launcher's standard
+error in the box; and with 2 vCPUs `mallocfin.go` ends with the board's `fatal error: task: no
+idle vCPU` (it sets `GOMAXPROCS(4)`: TamaGo's runtime asks the board for an M per P, and the board
+has one per vCPU), so each box has the launcher's 4.
+
+**The check (§11).** `bin/goi check` over the 1,051 run programs and 127 directory tests, against
+`test/goi/check-linux-amd64.edn` (recorded):
+
+| result | GR6 | GR7a |
+|---|---:|---:|
+| pass | 1,036 | 1,049 |
+| fail, error | 0 | 0 |
+| known | 59 | 60 |
+| unsupported | 68 | 54 |
+| skipped (gc's flags) | 15 | 15 |
+
+The 14 programs GR6 left unsupported for GR3's recursive types (its amendment 3) run: 13 pass
+(`ddd.go`, `reorder2.go`, `fixedbugs/bug294.go`, `bug336.go`, `issue17039.go`, `issue4316.go`,
+`issue72063.go`, and of `typeparam/` `cons.go`, `issue47901.go`, `issue48030.go`, `issue48137.go`,
+`issue48185b.go`, `issue48617.go`), and `peano.go` is known: its `fact(9)` in Peano numbers
+recurses 362,880 interpreted calls deep, past goi's depth limit (S23, 100,000; GC42). No program
+recurses through a type goi cannot make now. `$GOROOT/test/typeparam`'s 200 run programs: 192 pass
+(GR6: 186), 6 known, 2 unsupported (`encoding/json` and `encoding/xml`, not listed: GS5). No
+program passing at GR6 regresses. 125 s with 16 jobs on a loaded machine (51 s on the second run).
+
+**The essential subset** (`test/goi/essential.txt`): GR6's 566 and the ten GR7a made pass by GC28's
+rule (every one outside `fixedbugs/`, every fourth new one of `fixedbugs/`: `bug294.go` and
+`issue72063.go`, the first and the fifth of five): 576 (GC37).
+
+**Measurements (GR3's criterion).** `bin/goi run test/goi/run go.t.fib bench`, best of five per run,
+seven runs alternating GR6's executable (main `90ec844d`'s, 135,504,032 bytes) and GR7a's on the
+shared machine (load 7-19):
+
+| | GR6 (its record) | GR6, this session | GR7a |
+|---|---|---|---|
+| fib 22 | 2.55-3.01 ms (best 2.55) | 2.52-4.42 ms (best 2.52) | 2.55-3.09 ms (best 2.55) |
+| sumSq 1e6 | 17.87-21.07 ms (best 17.87) | 18.85-19.29 ms (best 18.85) | 19.46-21.32 ms (best 19.46) |
+| sieve 1e6 | 65.52-71.17 ms (best 65.52) | 65.03-68.25 ms (best 65.03) | 68.50-71.36 ms (best 68.50) |
+
+None of the three programs reaches GR7a's code (I and slice nodes, no shaped type, no interface):
+`perf` shows the same hot functions, placed 2,976 bytes further in the executable; the 3-5% on
+sumSq and sieve is that placement's, within GR3's criterion (twice X2's sketch: fib 22 2.87 ms,
+sumSq 1e6 22 ms) and GR6's own spread. The executable is 135,557,280 bytes against GR6's
+135,504,032 (+53,248): the builder's shapes and the deferred interfaces, `TShape` and `reshape`.
+
+**Amendments (as built).**
+
+1. **Shaped types** (§5.1, §5.2; GR3's amendment 3 amended). A named type that reaches itself
+   other than as a pointer's element (`shaped?`: through a slice, an array, a map, a channel, a
+   function's parameter or result, or a struct field of another named type) is *shaped*: before
+   its underlying type is built (whose descriptor asks for the type's Go memory type), it gets its
+   shape as its Go memory type (`TShape`): the checker type of its layout and pointer words
+   (`shape-type`: every pointer, map, channel and function an `unsafe.Pointer`, a slice a
+   `[]unsafe.Pointer`, an array and a struct their elements' shapes, a recursive interpreted
+   named type its underlying type's shape, another named type itself), a struct's shape with goi's
+   tag of its own on its first field (`goi:"path.Name#gen shape"`) so that shapes of different
+   types differ. Its RT, the frame's type, is made after as any named type's, from its parts' Go
+   memory types (the shape where it recurses): `type S []S` is `[][]unsafe.Pointer` in frames and
+   `[]unsafe.Pointer` in Go memory, `type F func(int) F` `func(int) unsafe.Pointer` and an
+   `unsafe.Pointer`, `type Tree struct{Name string; Kids []Tree}` the tagged struct of a string and
+   a `[]struct{...}` of the shape. The two are the same bytes: `toMem` and `fromMem` reinterpret one
+   as the other (`reshape`, a copy through `reflect.NewAt`) after and before their other
+   conversions (an interpreted closure is its Go func first, then that func's word), and both are
+   the identity on a value already of the target type. An interface's content of a shaped type is
+   its Go memory value, as an erased pointer's is (so `hasType`'s Go memory type stays the test);
+   a shaped struct's shape is registered beside its RT (`interpOf`). A type that reaches itself
+   only through pointers keeps GR3's erasure; a named pointer type recursive through its element
+   (`type Peano *Peano`) is that erasure too, its Go memory type set before its RT (`*Mem`), so GR3's
+   "recursive pointer type" is no longer unsupported. Where a frame value of a composite type is
+   made or converted, the type's RT is used, no longer its Go memory type (they differ only for
+   shaped and erased types): `make` of slices, maps and channels, literals, `append`, conversions,
+   `unsafe.Slice`, slicing an array, a closure's or method value's Go func (`goFunc`,
+   `adaptTarget`), a variadic call's slice from Arbace. Allocations stay at the parts' Go memory
+   types, so the collector sees every pointer word: a shape's slice header is a `[]unsafe.Pointer`
+   whose array was allocated at its real element type.
+2. **Interfaces' methods after the types they name** (§5.3). An interface descriptor's methods'
+   signatures (`TSetIfaceMethods`) are given when the outermost `desc` call returns, not while its
+   types are being built: `typeparam/cons.go`'s `Cons[a]` has a field `List[a]` whose method names
+   `Function[Cons[a], any]`, whose method names `Cons[a]` before it is complete (its Go func type
+   cannot be made yet). `desc` keeps the pending interfaces (`*iface-pending*`) and gives each its
+   methods once the type that started it is complete; a signature built then may add more.
+3. **What compiled code sees of shaped values** (§5.7, G8): a shaped value given to compiled code
+   is its RT, its recursive parts their shapes: `fmt`'s `%v` of a `Tree` prints by its `String`
+   method as gc's, but of a `[]S`'s inner elements their shapes' words (no program of the check
+   prints one; GC39).
+4. **The box's console** (§11.5): TamaGo's runtime writes a program's file descriptors 1 and 2 to
+   the board's console (`write1`, `goos.Printk`), which the board sends to the launcher's standard
+   error (`abi.Message`), so in the box a Go program's standard output and error are one stream on
+   the launcher's standard error; jrt's own streams (Arbace's `*out*`) are the launcher's two. The
+   check in the box compares that stream with gc's standard output followed by its standard error
+   (exact for a program writing one stream, as almost all do; GC35).
+5. **A nil dereference in the box** is the board's `sigpanic` (TamaGo has none of its own), whose
+   run-time error is `board.memoryError`, gc's message; on Linux it is a `runtime.errorString`.
+   Interpreted code sees the same message and `recover`s it the same; `%T` and a `GoPanic`'s
+   `:go/type` name the board's type (the box oracle's one known case of `forms/go.ae`; GC40).
+
+**Proposals for the user** (each built as recommended):
+
+- **GC35 Go's standard output in the box.** (a) as built, the check compares the box's console as
+  one stream against gc's standard output then error (amendment 4); (b) the box's runtime overlay
+  (`bin/lib/box-overlay.bash`, as it patches `syscall/fs_tamago.go`) patches TamaGo's `write1` to
+  send file descriptor 1 to the launcher's standard output, through a hook the box's jrt host sets
+  (the board's `Printk` has no descriptor), so that the box's Go programs' streams are Linux's.
+  *Recommended: (a)*: the box runs no Go program but Arbace, whose streams are right; (b) when one
+  does (a tool guest's output, goi's programs at the box's REPL).
+- **GC36 The box's subset.** (a) as built, `test/goi/box.txt`: the essential subset but the
+  programs the box cannot run by design (processes, the toolchain, the host's environment, a
+  build constraint without tamago), 566 programs, about 5 minutes with 8 boxes; (b) every program
+  of the check but the same exclusions (about 1,100, about 10 minutes); (c) a part of the
+  essential subset (about 200, 2 minutes). *Recommended: (a)*: the essential subset's rule, every
+  milestone's new programs with it, at the cost of the box's oracle and suite together.
+- **GC37 The essential subset with GR7a's programs.** (a) as built, GC28's rule applied to the ten
+  GR7a made pass (576 programs); (b) unchanged (566). *Recommended: (a)*.
+- **GC38 Recursive types' representation.** (a) as built, shapes: the type's Go memory type its
+  shape, its frames' type its RT, the bytes reinterpreted where values cross (amendment 1); (b)
+  GR3's erasure at the container (a `[]T` held as an opaque header, its RT made when first
+  asked, as an erased pointer's): every operation allocating through the container's type would
+  need the element's RT, and the elements of `type S []S` have none; (c) frames hold shapes too (no
+  reinterpretation): `append`, `copy` and conversions by reflect would see a slice's elements at
+  the shape's element type (`unsafe.Pointer`) and refuse or misplace them. *Recommended: (a)*.
+- **GC39 Shaped values in compiled code.** (a) as built, compiled code sees a shaped value's RT,
+  its recursive parts at their shapes (amendment 3: `%v` of nested elements prints their words), a
+  known difference no program of the check meets; (b) G8's runtime overlay for named types (GS8),
+  when built, gives them their own `rtype`s. *Recommended: (a)*, (b) with GS8.
+- **GC40 The box's nil dereference.** (a) as built, the box oracle's known case (amendment 5); (b)
+  the board's `sigpanic` panics with the runtime's own error (`runtime.panicmem`'s, by a
+  linkname), so `%T` is `runtime.errorString` in the box too. *Recommended: (a)*: a box change,
+  for the box's work; goi's programs and Arbace's catch see the same message and class.
+- **GC41 Interfaces naming types being built.** (a) as built, interfaces' methods given after the
+  outermost descriptor (amendment 2); (b) every function descriptor's Go type made when first
+  asked (a lazy `TFunc`, as an erased pointer's RT): more checks on every call path.
+  *Recommended: (a)*.
+- **GC42 Deep recursion.** (a) as built, `peano.go` known (S23's limit of 100,000 interpreted
+  calls, `ARBACE_GOI_DEPTH`); (b) a higher default in program mode (a million: gc's 1 GB stack
+  holds `fact(9)`'s 362,880 frames; goi's Go stack per interpreted call is larger, so a run that
+  deep would need `debug.SetMaxStack` raised too). *Recommended: (a)*: one program of 1,178.
+
+**Checks** (this branch, amd64): the essential `bin/gate` passed (14 m 58 s; goi's essential
+check 576 of 576, the suite, the oracle 22,620 of 22,673 against its 53 known, the differential
+check, the generated variants); `bin/arbace-go --fixpoint` holds (G1 = G2 = G3, 135,557,280
+bytes); `bin/goi check`, `bin/goi test --gc` (15 programs, 68 REPL checks, §1.4's session, the
+checker's 19 assertions and its 10 files of invalid forms, 68 messages, gc's), `bin/goi annotations` (the five corpora as GR6's:
+zero errors, every declaration checked); the box: `bin/goi check --box` (565 of 566, one known),
+the box's oracle (22,166 of 22,220, its 54 known: GR6's 53 and GC40's), its smoke test (113
+checks).
+
+**Remaining** (for GR7's other parts, or the box's): the check in the arm64 box (KVM/arm64 in the
+emulated aarch64 VM, `bin/box-arm64-vm`, and Hypervisor.framework on the Mac: out of GR7a's
+scope; `bin/goi check --box` takes `GOI_BOX_EXE`, but the VM's runs would need its own driver and
+the emulation's time, about 30 times the host's); GC35 (b) if a box Go program's output matters;
+the board's `task: no idle vCPU` when a program sets `GOMAXPROCS` above the box's vCPUs (a box
+limit: TamaGo's runtime asks for an M per P); GR7b's errorcheck programs and `reify`; staging
+(G16), the runtime overlay for named types (G8, GS8) and speed (F10) as §12 lists.

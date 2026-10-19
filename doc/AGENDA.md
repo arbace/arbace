@@ -93,8 +93,12 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Running (the user, 2026-10-19: "Start both"): goi GR6 (generics; `goi-gr6`, from `a1a50c4c`).
-  repr/rust RR6 done and merged (2026-10-19). The seed `1d5c35b4…` (GR5.1), verified.
+- Running (the user, 2026-10-19), all from `90ec844d`: goi GR7a (`goi-gr7a`: goi checked in the box,
+  GS13, then `forms/go` in the box's oracle, GC25 lifted; GR3's limit on recursive types; GC35-GC44),
+  goi GR7b (`goi-gr7b`: `$GOROOT/test`'s errorcheck programs; `reify` of listed Go interfaces, G13;
+  GC45 onward), repr/haskell HR25's rest (`repr-haskell-hr25`: the `{-# LINE #-}` modules at the
+  trees of mode `:full`; HR26 onward, a change to S5 or HR12 left for the user). The seed
+  `34d68b82…` (GR6), verified.
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
@@ -124,7 +128,9 @@ The current state of the work. This file is rewritten as things change. For the 
   run programs pass, none fail; GC15-GC18 decided as built); GR4 done (2026-10-18: methods, interfaces, concurrency; 832 pass;
   GC19-GC22 decided as built); GR5 done (the crossings, the package `arbace`, GoPanic, traces,
   printing, GS7, GS10, `go/run-compiled`, the oracle's `forms/go`; GC23-GC25 as built, GC26 (b));
-  GR5.1 done (GC26 (b): lines stored only where a statement can panic or call; GC27 as built); GR6 running.
+  GR5.1 done (GC26 (b): lines stored only where a statement can panic or call; GC27 as built); GR6 done (generics: 186 of typeparam's 200 run
+  programs, `bin/goi check` 1,036 pass, the annotation check over every declaration; GC28-GC34 as
+  built); GR7a and GR7b running.
 
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),

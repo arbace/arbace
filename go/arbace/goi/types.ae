@@ -4,7 +4,9 @@
 ;; type, whose frame value may be an interpreted closure (*Closure) while Go memory holds a real
 ;; Go func (an adapter, §4.6); and a pointer to a recursive named type (erased: its RT cannot be
 ;; made by reflect, which has no recursive types), held in Go memory inside composites and
-;; variables as an unsafe.Pointer (as built: GR3).
+;; variables as an unsafe.Pointer (as built: GR3); and a named type recursive other than through
+;; pointers (shaped: `type S []S`, `type F func() F`), held in Go memory at its shape, a type of
+;; the same layout and pointer words, and in frames at its RT (GR7a).
 (in-ns 'go.arbace.goi)
 
 (go/file "types.go"
@@ -20,7 +22,8 @@
 
 (go/type Type
   "Type is a Go type's descriptor (§5.2). RT is the Go type of its values in frames, Mem in Go
-memory (they differ for erased pointers only: Conv convPtr); Conv convFunc marks function types,
+memory (they differ for erased pointers, Conv convPtr, and shaped named types, Shaped: Mem is
+the shape, its bytes reinterpreted as RT, GR7a); Conv convFunc marks function types,
 whose frame values may be closures. K is the slot kind (I, F, S or R), GK the Go kind. Name and
 Pkg name an interpreted named type (Gen its generation; Proxy: its values go into interfaces as
 proxies, its RT not being its own, §5.3), Under its underlying type's descriptor; Elem, Key, Len,
@@ -37,6 +40,7 @@ values Arbace objects, its methods calling their fns.\n"
           ^{:tag (slice Field)} Fields ^{:tag (slice (* Type))} Ins ^{:tag (slice (* Type))} Outs ^bool Variadic
           ^int ChanDir
           ^{:tag (map string (* Method))} Methods ^{:tag (slice IMethod)} IMethods
+          ^bool Shaped ^bool complete
           ^bool unfaithful ^bool methodsSet ^byte wrap ^bool Reify
           ^bool direct ^bool zeroDone ^any zero))
 
@@ -362,8 +366,9 @@ into interfaces as a proxy (§5.3). For a struct, u's fields (names, types, tags
 paths, embedded) are given again.\n"
   [^{:tag (* Type)} t ^{:tag (* Type)} u ^{:tag (slice string)} names ^{:tag (slice (* Type))} ts ^{:tag (slice string)} tags
    ^{:tag (slice string)} pkgs ^{:tag (slice bool)} emb]
-  (when (and (== (.-Under t) u) (!= (.-Mem t) nil))
+  (when (and (== (.-Under t) u) (.-complete t))
     (return))
+  (set! (.-complete t) true)
   (set! (.-Under t) u)
   (set! (.-GK t) (.-GK u))
   (set! (.-K t) (.-K u))
@@ -381,22 +386,50 @@ paths, embedded) are given again.\n"
     (let [tag0 (fmt/Sprintf "goi:%q" (fmt/Sprintf "%s.%s#%d" (.-Pkg t) (lastName (.-Name t)) (.-Gen t)))
           rt (reflect/StructOf (structFields names ts tags pkgs tag0))]
       (set! (.-RT t) rt)
-      (set! (.-Mem t) rt)
+      (when (not (.-Shaped t))
+        (set! (.-Mem t) rt))
       (set! (.-direct t) (isDirect rt))
       (fillFields t names ts emb)
       (.Lock typesMu)
       (aset interp rt t)
       (.Store interpRT rt t)
+      (when (.-Shaped t)
+        ;; its shape too: an interface's content of a shaped struct is the shape (GR7a)
+        (aset interp (.-Mem t) t)
+        (.Store interpRT (.-Mem t) t))
       (.Unlock typesMu)
       (noteType t (fmt/Sprintf "%s.%s#%d" (.-Pkg t) (lastName (.-Name t)) (.-Gen t))))
     (do
       (noteType t "")
-      (set! (.-RT t) (.-RT u))
-      (set! (.-Mem t) (.-Mem u))
+      (when (== (.-Conv u) convPtr)
+        ;; a named pointer type recursive through its element (type Peano *Peano): erased as
+        ;; its underlying pointer type, its Mem first (its RT is *Mem)
+        (set! (.-Shaped t) false))
+      (when (not (.-Shaped t))
+        (set! (.-Mem t) (.-Mem u)))
+      (set! (.-RT t) (.rt u))
       (set! (.-direct t) (.-direct u))
       (set! (.-Fields t) (.-Fields u))
       (set! (.-unfaithful t) (not (.-Iface u)))
       (set! (.-Proxy t) (not (.-Iface u))))))
+
+(go/func TShape
+  "TShape gives named type t, recursive other than through pointers, its shape's Go type as its
+Go memory type before its underlying type is built (GR7a): a struct's shape with goi's tag of
+its own on its first field, so that shapes of different types differ.\n"
+  [^{:tag (* Type)} t ^{:tag (* Type)} shape]
+  (when (.-complete t)
+    (return))
+  (let [m (.mem shape)]
+    (when (and (== (.Kind m) reflect/Struct) (> (.NumField m) 0))
+      (let [fs (make (slice reflect/StructField) (.NumField m))]
+        (for [i 0] (< i (len fs)) (inc! i)
+          (let [f (.Field m i)]
+            (aset fs i (lit reflect/StructField :Name (.-Name f) :PkgPath (.-PkgPath f) :Type (.-Type f) :Tag (.-Tag f)))))
+        (set! (.-Tag (aget fs 0)) (conv reflect/StructTag (fmt/Sprintf "goi:%q" (fmt/Sprintf "%s.%s#%d shape" (.-Pkg t) (lastName (.-Name t)) (.-Gen t)))))
+        (set! m (reflect/StructOf fs))))
+    (set! (.-Mem t) m)
+    (set! (.-Shaped t) true)))
 
 (go/func TNamedIface
   "TNamedIface is interpreted named interface type pkg.name of generation gen, complete at once
@@ -404,7 +437,8 @@ paths, embedded) are given again.\n"
 TSetIfaceMethods.\n"
   ^{:tag (* Type)} [^string name ^string pkg ^int gen]
   (let [t (TNamed name pkg gen false)]
-    (when (== (.-Mem t) nil)
+    (when (not (.-complete t))
+      (set! (.-complete t) true)
       (set! (.-RT t) anyType)
       (set! (.-Mem t) anyType)
       (set! (.-K t) \R)
@@ -450,15 +484,35 @@ an R box): its data word, or for a pointer-shaped type a new variable holding it
 
 (go/func toMem
   "toMem is frame value v of type t as Go memory holds it: an erased pointer as unsafe.Pointer,
-an interpreted closure as a real Go func of t (§4.6).\n"
+an interpreted closure as a real Go func of t (§4.6), a shaped type's value at its shape.\n"
   ^any [^{:tag (* Type)} t ^any v]
+  (when (.-Shaped t)
+    (return (reshape (toMem1 t v) (.-Mem t))))
+  (toMem1 t v))
+
+(go/func reshape
+  "reshape is value v as a value of type to of the same size: its bytes reinterpreted (a shaped
+type's RT and shape, GR7a); v itself when of type to.\n"
+  ^any [^any v ^{:tag reflect/Type} to]
+  (when (== v nil)
+    (return (.Interface (reflect/Zero to))))
+  (let [rv (reflect/ValueOf v)]
+    (when (== (.Type rv) to)
+      (return v))
+    (when (!= (.Size (.Type rv)) (.Size to))
+      (panic (fmt/Sprintf "goi: reshaping a %s (%d bytes) as a %s (%d)" (.Type rv) (.Size (.Type rv)) to (.Size to))))
+    (let [p (reflect/New (.Type rv))]
+      (.Set (.Elem p) rv)
+      (.Interface (.Elem (reflect/NewAt to (.UnsafePointer p)))))))
+
+(go/func toMem1 "toMem1 is toMem but for a shaped type's reshaping.\n" ^any [^{:tag (* Type)} t ^any v]
   (switch (.-Conv t)
     (case [convPtr]
       (return (efaceData v)))
     (case [convFunc]
       (when (== v nil)
         ;; a nil func in Go memory, an interface's content: typed
-        (return (.Interface (reflect/Zero (.mem t)))))
+        (return (.Interface (reflect/Zero (.rt t)))))
       (type-switch [c v]
         (case [(* Closure)] (return (.goFunc c t)))
         (case [(* Bound)] (return (.goFunc c t))))))
@@ -473,6 +527,8 @@ an interpreted closure as a real Go func of t (§4.6).\n"
   "fromMem is Go memory's value v of type t as a frame holds it: an erased pointer typed again,
 a Go func made from an interpreted closure the closure again, a nil func nil.\n"
   ^any [^{:tag (* Type)} t ^any v]
+  (when (.-Shaped t)
+    (set! v (reshape v (.-RT t))))
   (switch (.-Conv t)
     (case [convPtr]
       (return (.Interface (reflect/NewAt (.mem (.-Elem t)) (assert unsafe/Pointer v)))))
