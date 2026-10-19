@@ -1937,3 +1937,30 @@ v1's divergences by design are listed there. Staging (G16) and speed (F10) come 
   fields; `issue16037_run` is marked known for it.
 - GR7c and GR9a-c were told to merge main (GR8a's checker and builder changes) before their final
   checks.
+
+## 2026-10-19: goi GR7c merged (the rest of GR7b's errorcheck fails)
+
+- **What:** branch `goi-gr7c` (from `0ca375c8`, with main's GR8a and GR9d merged in at
+  `2fda8588`) merged as `6295e93b`. Of GR7b's 23 failing errorcheck programs and 2 checker
+  crashes, 20 now pass and 5 are known.
+  - **The checker's changes:** cycles as types2 reports them (cycleError, directCycles,
+    validType, init cycles); constants and sizes without overflow, following go/constant; the
+    instantiation cycles of go/types' mono.go; gc's noder check of anonymous interface cycles;
+    go1.27's "not a type" message; rune literals quoted as `strconv.QuoteRune` does.
+  - **Known (GC94):** bug217, issue11614, issue75022, issue8183 and goto.go. Each needs what
+    mode `:full` keeps and the converted forms do not: two receivers, parentheses, aliases,
+    `byte`, an else brace's line. issue43762's known entry was removed: it passes.
+  - **Also:** issue16369, issue49368 and issue56103, unsupported before, now pass.
+- **GC144 (b):** a constraint's terms are listed in their written order in messages for digest
+  packages too (`terms-union`, `terms-intersect`). The oracle case `cmp.Compare(true, false)` was
+  re-recorded; it was the only change, reviewed.
+- **Measured:**
+  - `bin/goi check`: 1,438 pass, 2 fail (GR8a's issue30116 and issue30116u, GC95), 0 error, 296
+    unsupported, 83 known, 18 skipped. It was recorded with `--jobs 8`: under load bug358 (about
+    8 s alone) and nosplit reach the 10 s limit at 16 jobs.
+  - Essential: 721 programs.
+  - Speed and size are within noise: +0.5 MB.
+- **Checks on main after the merge:** the essential `bin/gate` passed (25m00s); `bin/goi test`
+  passed (22 checker assertions, the REPL 101, std 183).
+- **Decisions:** GC85-GC94, each built as recommended, as recommended, under the user's goal of
+  2026-10-19.
