@@ -5,8 +5,8 @@
   GR2, built before GR1 (the user's choice, 2026-10-17): an imported package is checked from its
   forms (the forms root's, tamago/goroot's or a corpus's); in the program (GR3, the REPL and
   bin/goi run: arbace.go.repl) a listed package is checked from GR1's digest, whose constants
-  have their :val and no init (§6.5: trusted). Generic code is GR6's: a declaration that uses
-  generics is checked as far as its types go, counted apart and its errors not counted (S53).
+  have their :val and no init (§6.5: trusted). Generic code is checked since GR6 (§9.1): type
+  parameters and constraints, instantiation, inference after go/types' infer.go and unify.go.
 
   Parts: arbace.go.check.types (types), .const (constants), .env (objects, scopes, errors),
   .code (type expressions, expressions, statements), .decl (a package's declarations, init
@@ -170,8 +170,11 @@
               t/*qualify* (:path src)
               t/*subst-method* decl/subst-method
               code/*obj-decl* decl/obj-decl!
+              code/*package-of-ns* (fn [q] (if (= q (load/path->ns (:path src))) pkg
+                                              (try (resolve q) (catch arbace.lang.ArityException _ nil))))
               code/*instantiate* decl/instantiate
-              code/*subst* decl/subst]
+              code/*subst* decl/subst
+              code/*verify-later* decl/verify-later!]
       (doseq [fi fis] (decl/declare-imports! fi resolve))
       (doseq [fi fis] (decl/collect-file! fi))
       (decl/resolve-method-bases!)
@@ -197,8 +200,8 @@
           (doseq [d decls :when (:tree @d)]
             (binding [e/*decl* d e/*gofile* (:file @d)]
               (verify-tags! (:tree @d))))
-          ;; skipped declarations: their imports used, their dependencies by name
-          (doseq [d decls :when (or (:generic @d) (:unsupported @d))]
+          ;; skipped declarations (what the checker does not check): their imports used
+          (doseq [d decls :when (:unsupported @d)]
             (mark-qualifiers-used! (:file @d) (:spec @d)))
           (doseq [fi fis] (decl/unused-imports! fi))
           ;; initialization order
@@ -223,7 +226,7 @@
                                                       (:path src) (pr-str say) (pr-str have)))
                                     {:verified false})))
                 ;; the results by declaration
-                generic-ids (set (keep #(when (or (:generic @%) (:unsupported @%)) (:id @%)) decls))
+                generic-ids (set (keep #(when (:unsupported @%) (:id @%)) decls))
                 errs @errors
                 counted (remove #(contains? generic-ids (:decl %)) errs)
                 ;; grouped by the identity of the form (forms equal but for metadata are two)
@@ -236,18 +239,21 @@
                         (mapv (fn [f] [f (.get m f)]) order))
                 stats (reduce
                        (fn [acc [form ds]]
-                         (let [gen (some #(or (:generic @%) (:unsupported @%)) ds)
+                         (let [gen (some #(:unsupported @%) ds)
+                               uses-generics (some #(:generic @%) ds)
                                present (annotations-present form)
-                               verified (apply merge-with + (map #(:verified @%) ds))]
+                               verified (apply merge-with + (map #(:verified @%) ds))
+                               acc (if uses-generics
+                                     (-> acc (update :generic-forms inc) (update :generic-decls + (count ds)))
+                                     acc)]
                            (if gen
                              (-> acc
-                                 (update :generic-forms inc)
-                                 (update :generic-decls + (count ds))
+                                 (update :unsupported-forms (fnil inc 0))
                                  (update :generic-present #(merge-with + % present))
                                  (update :unsupported #(reduce (fn [m d] (if-let [u (:unsupported @d)] (update m u (fnil inc 0)) m)) % ds)))
                              (let [unver (into {} (for [[k n] present
                                                          :let [v (get verified k 0)]
-                                                         :when (and (not= k :inst) (not= n v))]
+                                                         :when (not= n v)]
                                                      [k (- n v)]))]
                                (-> acc
                                    (update :forms inc)
@@ -259,8 +265,13 @@
                        {:forms 0 :decls 0 :generic-forms 0 :generic-decls 0 :present {} :verified {} :unverified {}
                         :generic-present {} :unsupported {} :unverified-at []}
                        forms)]
+            ;; a generic declaration keeps its tree: goi builds its instances from it (§9.2,
+            ;; §9.3: a compiled package's from its digest)
             (when-not keep-trees
-              (doseq [d decls] (vswap! d dissoc :tree :cx :body :sig-forms)))
+              (doseq [d decls]
+                (if (and (= :func (:kind @d)) (or (seq (o (:obj @d) :tparams)) (seq (o (:obj @d) :rtparams))))
+                  (vswap! d dissoc :cx :body :sig-forms)
+                  (vswap! d dissoc :tree :cx :body :sig-forms))))
             (vswap! pkg assoc :result
                     (assoc stats
                            :path (:path src)
@@ -285,23 +296,35 @@
   "A checking session over roots: resolve-src is path, importer-src -> the source of an imported
   package (or nil)."
   [resolve-src]
-  {:resolve-src resolve-src :cache (java.util.concurrent.ConcurrentHashMap.)})
+  {:resolve-src resolve-src :cache (java.util.concurrent.ConcurrentHashMap.) :ns-index (atom {})})
 
 (declare ensure-package)
 
+(defn- ns-package
+  "The package of session s (or its delegate's) whose namespace is ns-name (the forms' qualified
+  names in annotations, SPEC.md §4.4), when checked, or nil."
+  [s ^String ns-name]
+  (or (when-let [path (get @(:ns-index s) ns-name)]
+        (let [p (.get ^java.util.concurrent.ConcurrentHashMap (:cache s) path)]
+          (when (and p (realized? p)) @p)))
+      (when-let [d (:delegate s)] (ns-package d ns-name))))
+
 (defn- resolver
-  "The import resolver of a package being checked in session s (chain: the import path)."
+  "The import resolver of a package being checked in session s (chain: the import path); with
+  one argument, a namespace's package (ns-package)."
   [s src chain]
   (let [deps (java.util.HashMap.)]
-    (fn [path fi]
-      (if (= "unsafe" path)
-        e/unsafe-package
-        (let [lp (get-in src [:opts :local-imports path] path)
-              ;; the standard library's vendored packages
-              p (or (ensure-package s lp src chain)
-                    (when (and (not (str/includes? (first (str/split lp #"/")) ".")) false) nil)
-                    (ensure-package s (str "vendor/" lp) src chain))]
-          p)))))
+    (fn
+      ([ns-name] (ns-package s ns-name))
+      ([path fi]
+       (if (= "unsafe" path)
+         e/unsafe-package
+         (let [lp (get-in src [:opts :local-imports path] path)
+               ;; the standard library's vendored packages
+               p (or (ensure-package s lp src chain)
+                     (when (and (not (str/includes? (first (str/split lp #"/")) ".")) false) nil)
+                     (ensure-package s (str "vendor/" lp) src chain))]
+           p))))))
 
 (defn ensure-package
   "The checked package of import path in session s (checked on first use), or nil."
@@ -324,6 +347,7 @@
                       (deliver p nil)
                       (throw (ex-info (str "checking " path ": " (.getMessage ex)) {:path path} ex)))))]
         (when pkg (vswap! pkg assoc :scope-entries (into {} (:names (o pkg :scope)))))
+        (swap! (:ns-index s) assoc (load/path->ns path) path)
         (deliver p pkg)
         pkg)))))
 
@@ -449,16 +473,19 @@
         msum (fn [k] (apply merge-with + {} (map k rs)))]
     {:corpus corpus
      :packages (count rs)
+     ;; every declaration is checked since GR6 (S53 ends): :generic counts those that use
+     ;; generics among them, :unsupported those whose code goi's checker does not check
      :declarations {:checked (sum :decls) :forms (sum :forms)
-                    :generic (sum :generic-decls) :generic-forms (sum :generic-forms)}
+                    :generic (sum :generic-decls) :generic-forms (sum :generic-forms)
+                    :unsupported (sum :unsupported-forms)}
      :errors (sum #(count (:errors %)))
-     :generic-errors (sum :generic-errors)
+     :unsupported-errors (sum :generic-errors)
      :crashes (count (filter #(or (:crash %) (nil? (:decls %))) rs))
      :crashed (vec (keep #(when (or (:crash %) (nil? (:decls %))) (:path %)) rs))
      :annotations {:verified (into (sorted-map) (msum :verified))
                    :present (into (sorted-map) (msum :present))
                    :unverified (into (sorted-map) (msum :unverified))
-                   :in-generic (into (sorted-map) (msum :generic-present))
+                   :in-unsupported (into (sorted-map) (msum :generic-present))
                    :init-order {:packages (count (filter #(get-in % [:init-order :verified]) rs))
                                 :initializers (sum #(get-in % [:init-order :count] 0))
                                 :mismatches (count (filter #(false? (get-in % [:init-order :verified])) rs))}}
@@ -527,8 +554,8 @@
 (defn annotations
   "Checks a corpus, writes its report under work, compares its counts with the reference
   (test/goi/annotations-CORPUS.edn; record: writes it). True when it passes: no error, no
-  crash, every annotation of a declaration without generics verified, :init-order verified in
-  every package that has one, and the counts as recorded."
+  crash, no declaration left unchecked, every annotation verified (:inst included, GR6),
+  :init-order verified in every package that has one, and the counts as recorded."
   [corpus {:keys [jobs record work]}]
   (let [t0 (System/nanoTime)
         rs (check-corpus corpus jobs)
@@ -537,19 +564,23 @@
         ref-file (File. (reference-path corpus))
         ref (when (.isFile ref-file) (read-string (slurp ref-file)))
         clean (and (zero? (:errors sm)) (zero? (:crashes sm)) (empty? (get-in sm [:annotations :unverified]))
+                   (zero? (get-in sm [:declarations :unsupported]))
                    (zero? (get-in sm [:annotations :init-order :mismatches])))
         same (= (dissoc ref :note) (dissoc sm :crashed))]
     (write-edn (str work "/annotations-" corpus ".report.edn")
                {:summary sm :seconds secs
                 :errors (vec (report-errors rs))
                 :unverified (vec (for [r rs u (:unverified-at r)] [(:path r) u]))})
-    (println (format "goi annotations %s: %d packages, %d declarations checked (%d using generics, counted apart), %d errors; verified %s; init-order %d packages, %d initializers; %.1f s"
+    (println (format "goi annotations %s: %d packages, %d declarations checked (%d of them using generics; %d not checked), %d errors; verified %s; init-order %d packages, %d initializers; %.1f s"
                      corpus (:packages sm) (get-in sm [:declarations :checked]) (get-in sm [:declarations :generic])
+                     (get-in sm [:declarations :unsupported])
                      (:errors sm) (pr-str (get-in sm [:annotations :verified]))
                      (get-in sm [:annotations :init-order :packages]) (get-in sm [:annotations :init-order :initializers]) secs))
     (doseq [l (take 20 (report-errors rs))] (println "  " l))
     (when (seq (get-in sm [:annotations :unverified]))
       (println "   annotations not verified:" (pr-str (get-in sm [:annotations :unverified]))))
+    (when (seq (:unsupported sm))
+      (println "   not checked:" (pr-str (:unsupported sm))))
     (cond
       record (do (write-edn (reference-path corpus) (assoc (dissoc sm :crashed) :note "bin/goi annotations --record"))
                  (println "   recorded" (reference-path corpus))

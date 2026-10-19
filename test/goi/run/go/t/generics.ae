@@ -1,0 +1,131 @@
+;; goi's interpreter tests (GR6): generics, written by hand (no :inst: the checker infers every
+;; type argument). Generic functions, inference from arguments, constraints and untyped
+;; constants, reverse inference, explicit and partial instantiation; generic types and their
+;; methods, an instance in an interface and a type switch; a generic method (go1.27); type sets
+;; and operations on type parameters; the interpretable packages slices, maps and cmp (§9.3); a
+;; compiled package's generics from the digest (atomic.Pointer, sync.OnceValue).
+(ns go.t.generics (:require [arbace.go :as go]))
+(go/package main :path "main" :lang "go1.27")
+(go/file "generics.go" :imports [[cmp "cmp"] [fmt "fmt"] [maps "maps"] [slices "slices"] [strings "strings"]
+                                 [sync "sync"] [atomic "sync/atomic"] [unsafe "unsafe"]])
+
+(go/type Number (interface (| (tilde int) (tilde int8) (tilde int64) (tilde float64))))
+
+(go/func Max :type-params [^cmp/Ordered T] ^T [^T a ^:go/grouped ^T b]
+  (if (> a b) (return a) (return b)))
+
+(go/func Sum :type-params [^Number T] ^T [& ^{:tag (slice T)} xs]
+  (let [^T s (zero T)]
+    (range [_ x xs] (set! s + x))
+    s))
+
+(go/func Map :type-params [T U] ^{:tag (slice U)} [^{:tag (slice T)} xs ^{:tag (func [T] [U])} f]
+  (let [out (make (slice U) 0 (len xs))]
+    (range [_ x xs] (set! out (append out (f x))))
+    out))
+
+(go/func Filter :type-params [^{:tag (tilde (slice E))} S E] ^S [^S s ^{:tag (func [E] [bool])} keep]
+  (let [^S out (zero S)]
+    (range [_ x s] (when (keep x) (set! out (append out x))))
+    out))
+
+(go/func Id :type-params [T] ^T [^T x] x)
+
+(go/func Pair2 :type-params [A B] [^A a ^B b] :results [B A] (return b a))
+
+(go/type Stack :type-params [T] (struct ^{:tag (slice T)} items))
+(go/method Push [^{:tag (* (Stack T))} s ^T x] (set! (.-items s) (append (.-items s) x)))
+(go/method Pop [^{:tag (* (Stack T))} s] :results [^T v ^bool ok]
+  (when (== (len (.-items s)) 0) (return v false))
+  (set! v (aget (.-items s) (- (len (.-items s)) 1)))
+  (set! (.-items s) (subslice (.-items s) _ (- (len (.-items s)) 1)))
+  (return v true))
+(go/method Len ^int [^{:tag (* (Stack T))} s] (len (.-items s)))
+
+(go/type List :type-params [T] (struct ^T head ^{:tag (* (List T))} tail))
+(go/func Cons :type-params [T] ^{:tag (* (List T))} [^T x ^{:tag (* (List T))} l] (addr (lit (List T) x l)))
+(go/method String ^string [^{:tag (* (List T))} l]
+  (let [^{:tag strings/Builder} b (zero strings/Builder)]
+    (.WriteString (addr b) "[")
+    (let [^{:tag (* (List T))} p l]
+      (while (!= p nil)
+        (when (!= p l) (.WriteString (addr b) " "))
+        (fmt/Fprint (addr b) (.-head p))
+        (set! p (.-tail p))))
+    (.WriteString (addr b) "]")
+    (.String (addr b))))
+
+(go/type Box :type-params [T] (struct ^T V))
+(go/method Get ^T [^{:tag (Box T)} b] (.-V b))
+;; a generic method (go1.27)
+(go/method Apply :type-params [U] ^{:tag (Box U)} [^{:tag (Box T)} b ^{:tag (func [T] [U])} f] (lit (Box U) (f (.-V b))))
+
+(go/type Shower (interface (Show ^string [])))
+(go/type Celsius float64)
+(go/method Show ^string [^Celsius c] (fmt/Sprintf "%.1fC" (conv float64 c)))
+(go/func ShowAll :type-params [^Shower T] ^string [^{:tag (slice T)} xs]
+  (let [parts (make (slice string) 0)]
+    (range [_ x xs] (set! parts (append parts (.Show x))))
+    (strings/Join parts ",")))
+
+(go/func Keys :type-params [^comparable K V] ^{:tag (slice K)} [^{:tag (map K V)} m]
+  (let [ks (make (slice K) 0 (len m))]
+    (range [k _ m] (set! ks (append ks k)))
+    ks))
+
+(go/func SizeOf :type-params [T] ^uintptr [^T x] (unsafe/Sizeof x))
+
+(go/func Describe :type-params [T] ^string [^T x]
+  (type-switch [v (conv any x)]
+    (case [int] (return (fmt/Sprintf "int %d" v)))
+    (case [string] (return (fmt/Sprintf "string %q" v)))
+    (case [(Box int)] (return (fmt/Sprintf "Box[int] %d" (.-V v))))
+    (default (return (fmt/Sprintf "other %v" v)))))
+
+(go/func Counter :type-params [^Number T] ^{:tag (func [] [T])} []
+  (let [^T n (zero T)]
+    (fn ^T [] (set! n + 1) n)))
+
+(go/func main []
+  (fmt/Println (Max 3 7) (Max 2.5 1.5) (Max "a" "b"))
+  (fmt/Println (Sum 1 2 3) (Sum 1.5 2.5) (Sum (conv int8 100) 27))
+  (fmt/Println (Map (lit (slice int) 1 2 3) (fn ^string [^int x] (strings/Repeat "x" x))))
+  (fmt/Println (Filter (lit (slice int) 1 2 3 4 5 6) (fn ^bool [^int x] (== (% x 2) 0))))
+  (let [^{:tag (func [int] [int])} f Id
+        g (inst Id string)]
+    (fmt/Println (f 42) (g "s"))
+    ;; partial instantiation: B inferred from the arguments
+    (let [(values b a) ((inst Pair2 int) 1 "one")] (fmt/Println b a)))
+  (let [^{:tag (Stack string)} s (zero (Stack string))]
+    (.Push (addr s) "a")
+    (.Push (addr s) "b")
+    (let [(values v ok) (.Pop (addr s))]
+      (fmt/Println v ok (.Len (addr s)))))
+  (fmt/Println (Cons 1 (Cons 2 (Cons 3 nil))))
+  (fmt/Println (.String (Cons "x" nil)))
+  (let [b (lit (Box int) 21)
+        c (.Apply b (fn ^string [^int x] (fmt/Sprint (* 2 x))))]
+    (fmt/Println (.Get b) (.Get c)))
+  (fmt/Println (ShowAll (lit (slice Celsius) 1.5 20)))
+  (let [ks (Keys (lit (map string int) ["b" 2] ["a" 1] ["c" 3]))]
+    (slices/Sort ks)
+    (fmt/Println ks (slices/Index ks "c") (slices/Contains ks "z")))
+  (fmt/Println (slices/Sorted (maps/Keys (lit (map int bool) [3 true] [1 false] [2 true]))))
+  (fmt/Println (cmp/Compare 1 2) (cmp/Compare "b" "a") (slices/Max (lit (slice float64) 1.5 -2 9)))
+  (fmt/Println (SizeOf (conv int32 1)) (SizeOf "s") (SizeOf (lit (Box (array 3 int64)))))
+  (fmt/Println (Describe 7) (Describe "q") (Describe (lit (Box int) 5)) (Describe 1.5))
+  (let [next ((inst Counter float64))
+        nexti ((inst Counter int))]
+    (next) (next)
+    (nexti)
+    (fmt/Println (next) (nexti)))
+  (let [^{:tag (atomic/Pointer string)} p (zero (atomic/Pointer string))
+        s "stored"]
+    (fmt/Println (== (.Load (addr p)) nil))
+    (.Store (addr p) (addr s))
+    (fmt/Println @(.Load (addr p))))
+  (let [n 0
+        once (sync/OnceValue (fn ^int [] (inc! n) (* n 10)))]
+    (fmt/Println (once) (once) n))
+  (let [^any v (lit (Box string) "in an interface")]
+    (fmt/Printf "%v %+v\n" v v)))

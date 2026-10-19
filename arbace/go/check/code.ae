@@ -13,7 +13,7 @@
             [arbace.go.check.const :as c]
             [arbace.go.check.env :as e :refer [o oset! err! error!]]))
 
-(declare check-branches! mark-addressed! call-form? expr expr-or-type multi-expr typexpr typexpr-generic byte-string-value literal const-node invalid-conversion! finish-comparison composite-lit builtin-call val-equal? val-form-str key-val stmt terminating? missing-cause implements? invalid invalid? signature rhs-values init-var assignment func-body check-fn-lit const-expr
+(declare check-branches! inst-say record-inst! instantiate-fn slice-elem tparam-index generic-fn? func-inst-target call-sig rename-tparams infer instance-type mark-addressed! call-form? expr expr-or-type multi-expr typexpr typexpr-generic byte-string-value literal const-node invalid-conversion! finish-comparison composite-lit builtin-call val-equal? val-form-str key-val stmt terminating? missing-cause implements? invalid invalid? signature rhs-values init-var assignment func-body check-fn-lit const-expr
          convert-untyped update-type operand-str expr-str stmt-list)
 
 ;;; Hooks set by arbace.go.check.decl
@@ -33,6 +33,11 @@
 
 (def ^:dynamic *subst*
   "A function [type {tparam type}] -> the type substituted, bound by the checker."
+  nil)
+
+(def ^:dynamic *verify-later*
+  "A function [form tparams targs] verifying (later) that the type arguments satisfy their
+  constraints (go/types' verify), bound by the checker."
   nil)
 
 ;;; Forms
@@ -164,8 +169,15 @@
   (let [ty (o x :type)]
     (cond
       (nil? ty) :invalid
-      (and (t/named? ty) (or (seq (:tparams (t/info ty))) (o x :tparams-count)) (not (:targs (t/info ty))))
-      (do (err! f :WrongTypeArgCount "cannot use generic type %s without instantiation" (o x :name)) :invalid)
+      (or (and (t/named? ty) (seq (:tparams (t/info ty))) (not (:targs (t/info ty)))) (o x :tparams-count))
+      (let [tps (or (when (t/named? ty) (:tparams (t/info ty))) (o x :tparams))
+            bound-str (fn [b] (if (or (nil? b) (= b [:interface [] nil])) "any" (t/type-str b)))]
+        ;; types2 names the type with its type parameters: List[T any]
+        (err! f :WrongTypeArgCount "cannot use generic type %s without instantiation"
+              (if (seq tps)
+                (str (o x :name) "[" (str/join ", " (for [tp tps] (str (:name (t/info tp)) " " (bound-str (:bound (t/info tp)))))) "]")
+                (o x :name)))
+        :invalid)
       :else ty)))
 
 (defn ident-type
@@ -244,25 +256,65 @@
 
 (defn- method-elem? [x] (and (seq? x) (or (and (symbol? (first x)) (nil? (namespace (first x)))) (go-id? (first x))) (vector? (second x))))
 
+(defn union-type
+  "A union or a term of a constraint ((| A (tilde B) ...), (tilde B)): [:union terms], the terms
+  normalized (go/types' parseUnion, computeUnionTypeSet): an interface term contributes its type
+  set's terms."
+  [cx f]
+  (let [elems (if (= '| (first f)) (rest f) [f])
+        terms (for [x elems]
+                (with-line x
+                  (if (and (seq? x) (= 'tilde (first x)))
+                    (let [ty (typexpr cx (second x))]
+                      (cond
+                        (not (t/valid? ty)) nil
+                        (t/interface? ty)
+                        (do (err! x :InvalidUnion "invalid use of ~ (%s is an interface)" (t/type-str ty)) nil)
+                        (not= ty (t/under ty))
+                        (do (err! x :InvalidUnion "invalid use of ~ (underlying type of %s is %s)" (t/type-str ty) (t/type-str (t/under ty))) nil)
+                        :else #{[true ty]}))
+                    (let [ty (typexpr cx x)
+                          u (t/under ty)]
+                      (cond
+                        (not (t/valid? ty)) nil
+                        (t/tparam? ty) (do (err! x :MisplacedTypeParam "term cannot be a type parameter") nil)
+                        (and (vector? u) (= :interface (nth u 0))) (:terms (t/iface-tset u))
+                        (t/union? u) (nth u 1)
+                        :else #{[false ty]})))))]
+    [:union (reduce t/terms-union #{} (remove nil? terms))]))
+
+(defn- intersect-term-lists
+  "go/types' intersectTermLists: [terms comparable] of two type set elements."
+  [xt xc yt yc]
+  (let [terms (t/terms-intersect xt yt)
+        comp (or xc yc)]
+    (if (and comp (not= :all terms))
+      [(set (filter (fn [[_ ty]] (t/strictly-comparable? ty)) terms)) false]
+      [terms comp])))
+
 (defn interface-type
-  "An interface type form (interface element*): its methods, embedded interfaces flattened."
+  "An interface type form (interface element*): its methods, embedded interfaces flattened, and
+  its type set (go/types' computeInterfaceTypeSet): the intersection of its elements' terms."
   [cx f]
   (let [p (pkg-path)
         own (for [x (rest f) :when (method-elem? x)]
               (let [n (ident-name (first x))
                     [sig] (signature cx (rest x) nil)]
                 {:name n :pkg (when-not (t/exported? n) p) :type sig :line (fline x)}))
-        embedded (for [x (rest f) :when (not (method-elem? x))]
-                   (if (or (symbol? x) (and (seq? x) (not (#{'| 'tilde} (first x)))))
-                     (let [ty (typexpr cx x)
-                           u (t/under ty)]
-                       (cond
-                         (not (t/valid? ty)) nil
-                         (and (vector? u) (= :interface (nth u 0)))
-                         (do (when (nth u 2) (e/unsupported! "constraint interfaces"))
-                             (nth u 1))
-                         :else (e/unsupported! "type set terms")))
-                     (e/unsupported! "type set terms")))
+        elems (vec (for [x (rest f) :when (not (method-elem? x))]
+                     (with-line x
+                       (let [ty (if (and (seq? x) (#{'| 'tilde} (first x))) (union-type cx x) (typexpr cx x))
+                             u (t/under ty)]
+                         (cond
+                           (not (t/valid? ty)) nil
+                           (t/union? u) {:terms (nth u 1)}
+                           (t/tparam? ty) (do (err! x :MisplacedTypeParam "cannot embed a type parameter") nil)
+                           (and (vector? u) (= :interface (nth u 0)))
+                           (let [ts (t/iface-tset u)] {:methods (:methods ts) :terms (:terms ts) :comparable (:comparable ts)})
+                           :else {:terms #{[false ty]}})))))
+        embedded (keep :methods elems)
+        [terms comp] (reduce (fn [[xt xc] el] (if el (intersect-term-lists xt xc (:terms el) (:comparable el)) [xt xc]))
+                             [:all false] elems)
         ms (reduce (fn [acc m]
                      (let [k [(:name m) (:pkg m)]]
                        (if-let [prev (get acc k)]
@@ -273,8 +325,8 @@
                              acc)
                          (assoc acc k m))))
                    {}
-                   (concat (map #(assoc % :own true) own) (apply concat (remove nil? embedded))))]
-    [:interface (t/sort-methods (map #(dissoc % :own :line) (vals ms))) nil]))
+                   (concat (map #(assoc % :own true) own) (apply concat embedded)))]
+    [:interface (t/sort-methods (map #(dissoc % :own :line) (vals ms))) (t/make-tset terms comp)]))
 
 (defn array-length
   "The length of an array type: a constant expression of integer value, representable as int."
@@ -334,28 +386,89 @@
                         sig)
           (= 'struct h) (struct-type cx f)
           (= 'interface h) (interface-type cx f)
-          (= 'inst h) (do (e/generic!)
-                          (let [g (typexpr-generic cx (second f))]
-                            (*instantiate* f g (mapv #(typexpr cx %) (nnext f)))))
-          (#{'| 'tilde} h) (do (e/unsupported! "type set terms") :invalid)
+          (= 'inst h) (do (e/generic!) (instance-type cx f (second f) (nnext f)))
+          (#{'| 'tilde} h) (union-type cx f)
           (symbol? h)
           ;; a generic type's instance (G T...)
-          (do (e/generic!)
-              (let [g (typexpr-generic cx h)]
-                (*instantiate* f g (mapv #(typexpr cx %) (rest f)))))
+          (do (e/generic!) (instance-type cx f h (rest f)))
           :else (do (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)))
       :else (do (err! f :NotAType "%s is not a type" (expr-str f)) :invalid))))
 
-(defn typexpr-generic
-  "The generic named type a name denotes (for an instantiation)."
+(defn generic-type-obj
+  "The type name object a generic type's name denotes (for an instantiation), or nil."
   [cx f]
   (let [x (if (and (symbol? f) (namespace f))
             (qualified-obj cx f)
             (resolve-name cx (ident-name f)))]
     (cond
-      (nil? x) (do (err! f :UndeclaredName "undefined: %s" (expr-str f)) :invalid)
-      (not= :type (o x :kind)) (do (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)
-      :else (do (note-ref! x) (o x :type)))))
+      (nil? x) (do (err! f :UndeclaredName "undefined: %s" (expr-str f)) nil)
+      (not= :type (o x :kind)) (do (err! f :NotAType "%s is not a type" (expr-str f)) nil)
+      :else (do (note-ref! x) x))))
+
+(defn typexpr-generic
+  "The generic named type a name denotes (for an instantiation)."
+  [cx f]
+  (if-let [x (generic-type-obj cx f)] (o x :type) :invalid))
+
+(defn instance-type
+  "The instance gf[targ-forms...] of a generic type, or of a generic alias (go1.24: its type
+  with the type arguments substituted)."
+  [cx f gf targ-forms]
+  (let [x (generic-type-obj cx gf)
+        targs (mapv #(typexpr cx %) targ-forms)]
+    (cond
+      (nil? x) :invalid
+      (some #(not (t/valid? %)) targs) :invalid
+      (o x :alias)
+      (let [_ (when (and (o x :pkg-level) *obj-decl*) (*obj-decl* x))
+            tps (o x :tparams)]
+        (cond
+          (empty? tps) (do (err! f :NotAGenericType "%s is not a generic type" (o x :name)) :invalid)
+          (not= (count tps) (count targs))
+          (do (err! f :WrongTypeArgCount "%s type arguments for type %s: have %d, want %d"
+                    (if (< (count targs) (count tps)) "not enough" "too many") (o x :name) (count targs) (count tps))
+              :invalid)
+          :else (do (*verify-later* f tps targs nil)
+                    (*subst* (or (o x :type) :invalid) (zipmap tps targs)))))
+      :else (*instantiate* f (o x :type) targs))))
+
+(defn tparam-scope
+  "A scope binding a generic declaration's type parameters to new type parameter types, their
+  constraints (the forms' tags, any when untagged; bounds, when given, the receiver's: the
+  generic type's constraints for a method's receiver type parameters) set once all are declared
+  (go/types' collectTypeParams): [scope tparam-types]."
+  ([cx tps] (tparam-scope cx tps nil nil))
+  ([cx tps bounds] (tparam-scope cx tps bounds nil))
+  ([cx tps bounds declared]
+   (let [s (e/scope (:scope cx) :block)
+         tys (vec (map-indexed
+                   (fn [i p]
+                     (let [nm (ident-name p)
+                           tp (t/new-tparam {:name nm :index i})
+                           x (e/obj {:kind :type :name nm :type tp :tparam true :line (fline p) :file (:name e/*gofile*)})]
+                       (t/update-info! tp assoc :obj x)
+                       (when (not= "_" nm)
+                         (if (e/scope-get s nm)
+                           (err! p :DuplicateDecl "%s redeclared in this block" nm)
+                           (e/scope-put! s nm x)))
+                       tp))
+                   tps))
+         bcx (assoc cx :scope s)]
+     ;; the generic type itself knows its type parameters before their constraints, which may
+     ;; refer to it
+     (when declared (declared tys))
+     (doseq [[i p tp] (map vector (range) tps tys)]
+       (let [b (cond
+                 bounds (nth bounds i [:interface [] nil])
+                 (and (instance? arbace.lang.IMeta p) (:tag (meta p)))
+                 (with-line p
+                   (let [b (typexpr bcx (:tag (meta p)))]
+                     (if (t/tparam? b)
+                       (do (err! p :MisplacedTypeParam "cannot use a type parameter as constraint") :invalid)
+                       b)))
+                 :else [:interface [] nil])]
+         (t/update-info! tp assoc :bound b)))
+     [s tys])))
 
 ;;; Signatures (§5.3)
 
@@ -379,12 +492,12 @@
   (:results [...])? ...: [[:func params results variadic?] param-specs result-specs rest-forms
   results-named?]. recv, when given, is the receiver's form (the first parameter of a method)."
   [cx forms recv]
-  (let [forms (if (= :type-params (first forms)) (do (e/unsupported! "generic functions") (drop 2 forms)) forms)
+  (let [forms (if (= :type-params (first forms)) (do (err! forms :InvalidSyntaxTree "a function type cannot have type parameters") (drop 2 forms)) forms)
         pv (first forms)
         more (rest forms)
         [results-v more] (if (= :results (first more)) [(second more) (nnext more)] [nil more])
-        [ps variadic] (params-of cx pv)
-        ps (if recv (vec (rest ps)) ps)
+        ;; a method's receiver is not a parameter (its type is the declaration's: func-sig!)
+        [ps variadic] (params-of cx (if recv (vec (rest pv)) pv))
         rs (cond
              results-v (first (params-of cx results-v))
              (:tag (meta pv)) [{:name nil :type (typexpr cx (:tag (meta pv))) :form nil}]
@@ -396,6 +509,7 @@
     [[:func (mapv :type ps) (mapv :type rs) variadic] ps rs more (boolean (and results-v (some :name rs)))]))
 
 (load "code_expr")
+(load "infer")
 (load "code_call")
 (load "code_stmt")
 (load "code_branch")

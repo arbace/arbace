@@ -113,8 +113,12 @@
             (let [s (val-str (:val n) ty)] (when (not= s ex) (.append sb " ") (.append sb s))))
           (when has-type
             (if (t/valid? ty)
-              (let [ck (when (t/named? ty) (composite-kind ty))]
-                (.append sb (str " of " (when ck (str ck " ")) "type " (t/type-str ty))))
+              (let [ck (when (t/named? ty) (or (composite-kind ty) (let [u (t/under ty)] (when (keyword? u) (get t/basic-names u)))))]
+                (.append sb (str " of " (when ck (str ck " ")) "type " (t/type-str ty)))
+                ;; a type parameter: its constraint (go/types' operandString)
+                (when (t/tparam? ty)
+                  (.append sb (str " constrained by " (let [b (or (:bound (t/info ty)) [:interface [] nil])]
+                                                         (if (= b [:interface [] nil]) "any" (t/type-str b)))))))
               (.append sb " with invalid type"))))
         (when ex (.append sb ")"))
         (str sb)))))
@@ -288,6 +292,11 @@
       (or (invalid? n) (t/typed? ty) (not (t/valid? target))) [ty nil nil]
       (t/untyped? target)
       (if-let [m (max-type ty target)] [m nil nil] [nil nil :InvalidUntypedConversion])
+      ;; a type parameter: representable by every type of its type set (go/types keeps nil untyped)
+      (t/tparam? target)
+      (if (t/under-is target (fn [u] (and (some? u) (some? (first (implicit-type n u))))))
+        (if (= :untyped-nil ty) [:untyped-nil nil nil] [target nil nil])
+        [nil nil :InvalidUntypedConversion])
       :else
       (let [u (t/under target)]
         (cond
@@ -445,27 +454,41 @@
 
 (declare implements?)
 
+(defn- tparam-terms
+  "The specific types of type parameter tp's type set, or nil when it has none."
+  [tp]
+  (let [ts (t/tparam-tset tp)] (when (t/has-terms? ts) (map second (:terms ts)))))
+
 (defn assignable?
   "go/types' assignableTo: [ok code cause] of node n to type T."
   [n T]
   (let [V (:type n)]
     (if (= V T)
       [true nil nil]
-      (let [Vu (t/under V) Tu (t/under T)]
+      (let [Vu (t/under V) Tu (t/under T)
+            Vp (t/tparam? V) Tp (t/tparam? T)]
         (cond
           (t/untyped? Vu)
           (let [[nt] (implicit-type n T)] [(some? nt) :IncompatibleAssign nil])
-          (and (= Vu Tu) (or (not (t/has-name? V)) (not (t/has-name? T)))
-               (not (t/tparam? V)) (not (t/tparam? T)))
+          (and (= Vu Tu) (or (not (t/has-name? V)) (not (t/has-name? T))) (not Vp) (not Tp))
           [true nil nil]
-          (and (vector? Tu) (= :interface (nth Tu 0)) (not (t/tparam? T)))
+          (and (vector? Tu) (= :interface (nth Tu 0)) (not Tp)
+               (or (nil? (t/missing-method V T false)) (not Vp)))
           (let [mm (t/missing-method V T false)]
             (if (nil? mm) [true nil nil] [false :InvalidIfaceAssign mm]))
-          (and (vector? Vu) (= :interface (nth Vu 0)) (not (t/tparam? V)))
+          (and (vector? Vu) (= :interface (nth Vu 0)) (not Vp) (not Tp))
           [false :IncompatibleAssign (when (and (vector? Tu) (nil? (t/missing-method T V false))) :need-assert)]
           (and (vector? Vu) (= :chan (nth Vu 0)) (= :both (nth Vu 1))
                (vector? Tu) (= :chan (nth Tu 0)) (= (nth Vu 2) (nth Tu 2)))
           [(or (not (t/has-name? V)) (not (t/has-name? T))) :InvalidChanAssign nil]
+          ;; a value of an unnamed type to a type parameter: assignable to each of its types
+          (and (not (t/has-name? V)) Tp)
+          (let [ts (tparam-terms T)]
+            [(boolean (and ts (every? #(first (assignable? n %)) ts))) :IncompatibleAssign nil])
+          ;; a type parameter's value to an unnamed type: each of its types assignable
+          (and Vp (not (t/has-name? T)))
+          (let [ts (tparam-terms V)]
+            [(boolean (and ts (every? #(first (assignable? (assoc n :type %) T)) ts))) :IncompatibleAssign nil])
           :else [false :IncompatibleAssign nil])))))
 
 (defn missing-cause
@@ -482,16 +505,33 @@
 (defn implements? [V T] (nil? (t/missing-method V T false)))
 
 (defn wrap-iface
-  "n converted implicitly to interface type T when its type is not an interface (§3.7)."
+  "n converted implicitly to interface type T when its type is not an interface (§3.7): a type
+  parameter's value is converted (its instances' types may not be interfaces)."
   [n T]
-  (if (and (t/interface? T) (not (invalid? n)) (not= :untyped-nil (:type n)) (not (t/interface? (:type n))))
+  (if (and (t/interface? T) (not (t/tparam? T)) (not (invalid? n)) (not= :untyped-nil (:type n))
+           (or (t/tparam? (:type n)) (not (t/interface? (:type n)))))
     {:op :convert-iface :to T :x n :mode :value :type T :form (:form n) :line (:line n)}
     n))
+
+(declare assignment*)
 
 (defn assignment
   "go/types' assignment: n assigned to a variable of type T (nil: the blank identifier) in
   context (a string for messages); the converted node or invalid."
   [cx n T context]
+  (let [n (if (generic-fn? n)
+            ;; go/types' nonGeneric and funcInst: inferred from the target's signature, a partial
+            ;; instantiation from its constraints alone
+            (let [sig (when T (call-sig T))]
+              (cond
+                sig (func-inst-target cx n sig context)
+                (:ptargs n) (func-inst-target cx n nil context)
+                :else (do (err! (:form n) :WrongTypeArgCount "cannot use generic function %s without instantiation" (expr-str (:form n)))
+                          (assoc n :mode :invalid :type :invalid))))
+            n)]
+    (assignment* cx n T context)))
+
+(defn- assignment* [cx n T context]
   (cond
     (invalid? n) n
     (#{:typexpr :builtin :novalue} (:mode n))
@@ -543,14 +583,23 @@
          (#{:uint8 :int32} (t/under (nth u 1))))))
 
 (defn convertible?
-  "go/types' convertibleTo of node n to type T (non-constant rules)."
+  "go/types' convertibleTo of node n to type T (non-constant rules; a type parameter's: each
+  of its specific types)."
   [cx n T]
-  (let [V (:type n)]
+  (let [V (:type n)
+        Vp (t/tparam? V) Tp (t/tparam? T)]
     (or (first (assignable? n T))
         (let [Vu (t/under V) Tu (t/under T)]
-          (or (and (t/identical-ignore-tags? Vu Tu) (not (t/tparam? V)) (not (t/tparam? T)))
+          (or (and (t/identical-ignore-tags? Vu Tu) (not Vp) (not Tp))
               (and (vector? V) (= :pointer (nth V 0)) (vector? T) (= :pointer (nth T 0))
+                   (not (t/tparam? (nth V 1))) (not (t/tparam? (nth T 1)))
                    (t/identical-ignore-tags? (t/under (nth V 1)) (t/under (nth T 1))))
+              (and Vp Tp (let [vs (tparam-terms V) ts (tparam-terms T)]
+                           (boolean (and vs ts (every? (fn [v] (every? (fn [t] (convertible? cx (assoc n :type v) t)) ts)) vs)))))
+              (and Vp (not Tp) (let [vs (tparam-terms V)]
+                                 (boolean (and vs (every? #(convertible? cx (assoc n :type %) T) vs)))))
+              (and Tp (not Vp) (let [ts (tparam-terms T)]
+                                 (boolean (and ts (every? #(convertible? cx n %) ts)))))
               (and (t/integer-or-float? Vu) (t/integer-or-float? Tu))
               (and (t/complex-type? Vu) (t/complex-type? Tu))
               (and (or (t/integer-type? Vu) (bytes-or-runes? Vu)) (t/string-type? Tu))
@@ -591,6 +640,17 @@
           (do (err! f :InvalidConversion "cannot convert %s to type %s%s" (operand-str n) (t/type-str T)
                     (if (and (t/float-type? (:type n)) (t/integer-type? T)) " (truncated)" ""))
               (invalid f))))
+      ;; a constant to a type parameter: convertible to each of its types, not a constant
+      (and const-arg (t/tparam? T))
+      (if (t/under-is T (fn [u] (and (some? u)
+                                     (or (and (t/string-type? (:type n)) (bytes-or-runes? u))
+                                         (and (keyword? u) (t/const-type? u)
+                                              (or (nil? (second (representation (:val n) (:type n) u)))
+                                                  (and (t/integer-type? (:type n)) (t/string-type? u))))))))
+        (let [n (if (t/untyped? (:type n)) (update-type n (t/default-type (:type n)) true) n)]
+          {:op :conv :to T :x n :mode :value :type T :form f :line (fline f)})
+        (do (err! f :InvalidConversion "cannot convert %s to type %s" (operand-str n) (t/type-str T))
+            (invalid f)))
       (convertible? cx n T)
       (let [n (if (t/untyped? (:type n))
                 (update-type n (if (or (and (t/interface? T) (not (t/tparam? T))) (and const-arg (not (t/const-type? T)))
@@ -611,15 +671,15 @@
   [op ty unary]
   (if unary
     (case op
-      ("+" "-") (t/numeric? ty)
-      "bit-not" (t/integer-type? ty)
-      "not" (t/boolean-type? ty)
+      ("+" "-") (t/all-numeric? ty)
+      "bit-not" (t/all-integer? ty)
+      "not" (t/all-boolean? ty)
       true)
     (case op
-      "+" (or (t/numeric? ty) (t/string-type? ty))
-      ("-" "*" "/") (t/numeric? ty)
-      ("%" "bit-and" "bit-or" "bit-xor" "bit-and-not") (t/integer-type? ty)
-      ("and" "or") (t/boolean-type? ty)
+      "+" (t/all-numeric-or-string? ty)
+      ("-" "*" "/") (t/all-numeric? ty)
+      ("%" "bit-and" "bit-or" "bit-xor" "bit-and-not") (t/all-integer? ty)
+      ("and" "or") (t/all-boolean? ty)
       true)))
 
 (def ^:private op-go
@@ -677,10 +737,10 @@
   (let [tx (:type x) ty (:type y)]
     (cond
       (and (t/typed? tx) (t/typed? ty)) false
-      (not= (t/numeric? tx) (t/numeric? ty)) false
+      (not= (t/all-numeric? tx) (t/all-numeric? ty)) false
       (or (and (t/interface? tx) (not (t/tparam? tx))) (and (t/interface? ty) (not (t/tparam? ty)))) true
-      (not= (t/boolean-type? tx) (t/boolean-type? ty)) false
-      (not= (t/string-type? tx) (t/string-type? ty)) false
+      (not= (t/all-boolean? tx) (t/all-boolean? ty)) false
+      (not= (t/all-string? tx) (t/all-string? ty)) false
       (= :untyped-nil tx) (t/has-nil? ty)
       (= :untyped-nil ty) (t/has-nil? tx)
       (or (t/pointer? tx) (t/pointer? ty)) false
@@ -729,8 +789,8 @@
           :else (finish-comparison f op x y))
         :else
         (cond
-          (not (t/ordered? (:type x))) (fail x nil)
-          (not (t/ordered? (:type y))) (fail y nil)
+          (not (t/all-ordered? (:type x))) (fail x nil)
+          (not (t/all-ordered? (:type y))) (fail y nil)
           :else (finish-comparison f op x y))))))
 
 (defn finish-comparison [f op x y]
@@ -746,7 +806,7 @@
   [cx f op x y]
   (let [xval (when (= :constant (:mode x)) (int-of (:val x) (:type x)))]
     (cond
-      (not (or (t/integer-type? (:type x)) (and (t/untyped? (:type x)) (some? xval))))
+      (not (or (t/all-integer? (:type x)) (and (t/untyped? (:type x)) (some? xval))))
       (do (err! (:form x) :InvalidShiftOperand "invalid operation: shifted operand %s must be integer" (operand-str x))
           (invalid f))
       :else
@@ -763,8 +823,8 @@
                       (do (invalid-conversion! code y :uint) (assoc y :mode :invalid))
                       y))
                   :else y)
-                (t/integer-type? (:type y))
-                (if (and (not (t/unsigned? (:type y))) (not (allow-version? cx 13)))
+                (t/all-integer? (:type y))
+                (if (and (not (t/all-unsigned? (:type y))) (not (allow-version? cx 13)))
                   (do (err! (:form y) :UnsupportedFeature "invalid operation: signed shift count %s requires go1.13 or later" (operand-str y))
                       (assoc y :mode :invalid))
                   y)
@@ -793,7 +853,7 @@
               {:op :binary :go/op op :x (assoc x :shift-lhs true) :y y :mode :value :type (:type x)
                :form f :line (fline f)}
               {:op :binary :go/op op :x x :y y :mode :value :type (:type x) :form f :line (fline f)}))
-          (not (t/integer-type? (:type x)))
+          (not (t/all-integer? (:type x)))
           (do (err! (:form x) :InvalidShiftOperand "invalid operation: shifted operand %s must be integer" (operand-str x))
               (invalid f))
           :else {:op :binary :go/op op :x x :y y :mode :value :type (:type x) :form f :line (fline f)})))))
@@ -818,7 +878,7 @@
         (not (op-allowed? op (:type x) false))
         (do (err! f :UndefinedOp "invalid operation: operator %s not defined on %s" (op-go op) (operand-str x))
             (invalid f))
-        (and (#{"/" "%"} op) (or (= :constant (:mode x)) (t/integer-type? (:type x)))
+        (and (#{"/" "%"} op) (or (= :constant (:mode x)) (t/all-integer? (:type x)))
              (= :constant (:mode y)) (zero? (val-sign (:val y) (:type y))))
         (do (err! (:form y) :DivByZero "invalid operation: division by zero") (invalid f))
         (and (= :constant (:mode x)) (= :constant (:mode y)))

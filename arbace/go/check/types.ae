@@ -60,14 +60,17 @@
   [data]
   [:named (volatile! (assoc data :id (next-id) :methods []))])
 
-(defn new-tparam [data] [:tparam (volatile! (assoc data :id (next-id)))])
+(defn new-tparam
+  "A new type parameter: data {:name :index :bound (its constraint, set when declared) :obj}."
+  [data]
+  [:tparam (volatile! (assoc data :id (next-id)))])
 
 (def ^:dynamic *resolve-named*
   "A function called with a named type whose underlying type is not known yet (its declaration
   not checked), which checks its declaration; bound by the checker."
   nil)
 
-(declare under)
+(declare under tparam-iface)
 
 (defn- named-under [t]
   (loop [t t seen #{}]
@@ -90,7 +93,7 @@
   (cond
     (keyword? t) t
     (identical? :named (nth t 0)) (named-under t)
-    (identical? :tparam (nth t 0)) (or (:core (info t)) [:interface [] nil])
+    (identical? :tparam (nth t 0)) (tparam-iface t)
     :else t))
 
 ;;; Predicates
@@ -120,13 +123,17 @@
 (defn has-name? [t] (or (keyword? t) (named? t) (tparam? t)))
 (defn integer-or-float? [t] (or (integer-type? t) (float-type? t)))
 
+(declare under-is)
+
 (defn has-nil?
   "Whether t's values include nil: pointers, slices, maps, channels, funcs, interfaces,
-  unsafe.Pointer."
+  unsafe.Pointer; a type parameter's when every type of its type set has."
   [t]
-  (let [u (under t)]
-    (or (= :unsafe-pointer u) (= :untyped-nil u)
-        (and (vector? u) (contains? #{:pointer :slice :map :chan :func :interface} (nth u 0))))))
+  (if (tparam? t)
+    (under-is t (fn [u] (and (some? u) (has-nil? u))))
+    (let [u (under t)]
+      (or (= :unsafe-pointer u) (= :untyped-nil u)
+          (and (vector? u) (contains? #{:pointer :slice :map :chan :func :interface} (nth u 0)))))))
 
 (defn empty-interface? [t]
   (let [u (under t)] (and (vector? u) (= :interface (nth u 0)) (empty? (nth u 1)) (nil? (nth u 2)))))
@@ -159,21 +166,238 @@
 
 (declare comparable?)
 
+(declare tparam-tset strictly-comparable? iface-tset)
+
+(defn- tset-comparable?
+  "go/types' _TypeSet.IsComparable: every type of a type set comparable (strictly)."
+  [ts seen]
+  (if (= :all (:terms ts))
+    (:comparable ts)
+    (and (seq (:terms ts)) (every? (fn [[_ ty]] (strictly-comparable? ty seen)) (:terms ts)))))
+
+(defn comparable-type?
+  "go/types' comparableType: whether values of t can be compared with ==; dynamic: the
+  specification's comparability (ordinary interfaces are comparable), else strict (an
+  interface only when its type set is)."
+  [t dynamic seen]
+  (if (contains? seen t)
+    true
+    (let [seen (conj seen t)]
+      (if (tparam? t)
+        (boolean (tset-comparable? (tparam-tset t) seen))
+        (let [u (under t)]
+          (cond
+            (keyword? u) (not= u :untyped-nil)
+            :else
+            (case (nth u 0)
+              (:pointer :chan) true
+              :interface (or dynamic (boolean (tset-comparable? (iface-tset u) seen)))
+              :struct (every? #(comparable-type? (:type %) dynamic seen) (nth u 1))
+              :array (comparable-type? (nth u 2) dynamic seen)
+              false)))))))
+
+(defn strictly-comparable? ([t] (comparable-type? t false #{})) ([t seen] (comparable-type? t false seen)))
+
 (defn comparable?
-  "Go's Comparable: whether values of t can be compared with == (interfaces are)."
-  ([t] (comparable? t #{}))
-  ([t seen]
-   (if (contains? seen t)
-     true
-     (let [u (under t) seen (conj seen t)]
-       (cond
-         (keyword? u) (not= u :untyped-nil)
-         :else
-         (case (nth u 0)
-           (:pointer :chan :interface) true
-           :struct (every? #(comparable? (:type %) seen) (nth u 1))
-           :array (comparable? (nth u 2) seen)
-           false))))))
+  "Go's Comparable: whether values of t can be compared with == (interfaces are; a type
+  parameter when its type set is)."
+  ([t] (comparable-type? t true #{}))
+  ([t seen] (comparable-type? t true seen)))
+
+;;; Type parameters and type sets (GR6: go/types' typeparam.go, typeset.go, termlist.go,
+;;; typeterm.go, under.go, predicates.go)
+;;
+;; An interface type's third element is its type set beyond its methods: nil (every type: the
+;; interface is its method set), or {:terms terms :comparable bool}, terms :all or a set of
+;; terms [tilde? T] (normalized: no two of them overlap; #{} is the empty set), comparable only
+;; with :all (go/types' invariant). A union (A | ~B, an element of a constraint) is
+;; [:union terms], a type only constraints hold. A type parameter's info holds its :bound (the
+;; constraint's type, set when it is declared) and, once known, its :iface (go/types' iface:
+;; the bound's underlying interface, or the implicit interface of a non-interface bound).
+
+(defn union? [t] (and (vector? t) (identical? :union (nth t 0))))
+
+(defn- term-disjoint? [[xt x] [yt y]]
+  (not= (if yt (under x) x) (if xt (under y) y)))
+
+(defn- term-union [x y]
+  (cond
+    (term-disjoint? x y) [x y]
+    (or (first x) (not (first y))) [x]
+    :else [y]))
+
+(defn- term-intersect [x y]
+  (cond
+    (term-disjoint? x y) nil
+    (or (not (first x)) (first y)) x
+    :else y))
+
+(defn- term-includes? [[tilde ty] t] (= ty (if tilde (under t) t)))
+
+(defn- term-subset? [x y] (and (not (term-disjoint? x y)) (or (not (first x)) (first y))))
+
+(defn terms-norm
+  "go/types' termlist.norm: the terms with the overlapping ones merged, as a set."
+  [ts]
+  (let [ts (vec ts) n (count ts) used (boolean-array n)]
+    (loop [i 0 rl []]
+      (if (= i n)
+        ;; a set (type sets compare as sets), its order kept for messages
+        (with-meta (set rl) {:order rl})
+        (if (aget used i)
+          (recur (inc i) rl)
+          (let [xi (loop [j (inc i) xi (nth ts i)]
+                     (cond
+                       (= j n) xi
+                       (aget used j) (recur (inc j) xi)
+                       :else (let [u (term-union xi (nth ts j))]
+                               (if (= 1 (count u))
+                                 (do (aset used j true) (recur (inc j) (first u)))
+                                 (recur (inc j) xi)))))]
+            (recur (inc i) (conj rl xi))))))))
+
+(defn terms-union [x y] (if (or (= :all x) (= :all y)) :all (terms-norm (concat x y))))
+
+(defn terms-intersect [x y]
+  (cond
+    (= :all x) y
+    (= :all y) x
+    (or (empty? x) (empty? y)) #{}
+    :else (terms-norm (for [a x b y :let [r (term-intersect a b)] :when r] r))))
+
+(defn terms-includes? [xl t] (or (= :all xl) (boolean (some #(term-includes? % t) xl))))
+
+(defn- terms-superset-of? [xl y] (or (= :all xl) (boolean (some #(term-subset? y %) xl))))
+
+(defn terms-subset?
+  "Whether term set xl is a subset of yl."
+  [xl yl]
+  (cond
+    (= :all yl) true
+    (= :all xl) false
+    (empty? yl) (empty? xl)
+    :else (every? #(terms-superset-of? yl %) xl)))
+
+(defn make-tset
+  "An interface's type set element: nil for every type."
+  [terms comparable]
+  (if (and (= :all terms) (not comparable)) nil {:terms terms :comparable (boolean (and comparable (= :all terms)))}))
+
+(defn iface-tset
+  "The type set of interface type u (an underlying [:interface ms ts]): {:methods :terms
+  :comparable}."
+  [u]
+  (let [ts (nth u 2)]
+    {:methods (nth u 1)
+     :terms (if (map? ts) (:terms ts) :all)
+     :comparable (boolean (and (map? ts) (:comparable ts)))}))
+
+(defn has-terms?
+  "Whether a type set has specific terms (neither every type nor none)."
+  [ts]
+  (let [terms (:terms ts)] (and (not= :all terms) (seq terms))))
+
+(defn tset-empty? [ts] (and (not= :all (:terms ts)) (empty? (:terms ts))))
+
+(defn method-set-iface?
+  "go/types' IsMethodSet: whether interface type u is described by its methods alone (it may be
+  used as a value's type)."
+  [u]
+  (nil? (nth u 2)))
+
+(defn bound-iface
+  "The interface a constraint b denotes: its underlying interface, or the implicit interface of
+  a union or a non-interface type (go/types' implicit interfaces); nil when invalid."
+  [b]
+  (when (and b (not= :invalid b))
+    (let [u (under b)]
+      (cond
+        (= :invalid u) nil
+        (and (vector? u) (= :interface (nth u 0))) u
+        (union? u) [:interface [] (make-tset (nth u 1) false)]
+        :else [:interface [] (make-tset #{[false b]} false)]))))
+
+(defn tparam-iface
+  "go/types' TypeParam.iface: the interface of type parameter tp's constraint."
+  [tp]
+  (let [i (info tp)]
+    (or (:iface i)
+        (if-let [r (bound-iface (:bound i))]
+          (do (update-info! tp assoc :iface r) r)
+          [:interface [] nil]))))
+
+(defn tparam-tset [tp] (iface-tset (tparam-iface tp)))
+
+(defn typeset-pairs
+  "The (type, underlying type) pairs of t's type set (go/types' typeset): a type parameter's
+  specific terms ([[nil nil]] when it has none), else [[t (under t)]]."
+  [t]
+  (if (tparam? t)
+    (let [ts (tparam-tset t)]
+      (if (has-terms? ts)
+        (for [[tilde ty] (:terms ts)] [ty (if tilde ty (under ty))])
+        [[nil nil]]))
+    [[t (under t)]]))
+
+(defn typeset-all
+  "go/types' all: whether (f t u) holds for every type of t's type set."
+  [t f]
+  (every? (fn [[ty u]] (f ty u)) (typeset-pairs t)))
+
+(defn under-is
+  "go/types' underIs: whether (f u) holds for the underlying type u of every type of t's type
+  set (u nil: a type parameter without specific types)."
+  [t f]
+  (typeset-all t (fn [_ u] (f u))))
+
+(defn all-basic
+  "go/types' allBasic: whether every type of t's type set satisfies pred (a type parameter
+  without specific types: no)."
+  [t pred]
+  (if (tparam? t)
+    (let [ts (tparam-tset t)]
+      (boolean (and (has-terms? ts) (every? (fn [[_ ty]] (pred ty)) (:terms ts)))))
+    (pred t)))
+
+(defn all-integer? [t] (all-basic t integer-type?))
+(defn all-unsigned? [t] (all-basic t unsigned?))
+(defn all-numeric? [t] (all-basic t numeric?))
+(defn all-string? [t] (all-basic t string-type?))
+(defn all-boolean? [t] (all-basic t boolean-type?))
+(defn all-ordered? [t] (all-basic t ordered?))
+(defn all-numeric-or-string? [t] (all-basic t #(or (numeric? %) (string-type? %))))
+(defn all-float? [t] (all-basic t float-type?))
+(defn all-complex? [t] (all-basic t complex-type?))
+
+(defn common-under
+  "go/types' commonUnder: [u nil], u the underlying type every type of t's type set shares
+  (channels: the most restricted direction), or [nil cause]; cnd, when given, a function of
+  (t, u) returning a cause to fail with."
+  ([t] (common-under t nil))
+  ([t cnd]
+   (loop [ps (typeset-pairs t) ct nil cu nil]
+     (if (empty? ps)
+       [cu nil]
+       (let [[ty u] (first ps)
+             e (when cnd (cnd ty u))]
+         (cond
+           e [nil e]
+           (nil? u) [nil "no specific type"]
+           (nil? cu) (recur (rest ps) ty u)
+           (and (vector? cu) (= :chan (nth cu 0)) (vector? u) (= :chan (nth u 0)))
+           (cond
+             (not= (nth cu 2) (nth u 2)) [nil (str "channels " (pr-str ct) " and " (pr-str ty) " have different element types")]
+             (= (nth cu 1) (nth u 1)) (recur (rest ps) ct cu)
+             (= :both (nth cu 1)) (recur (rest ps) ty u)
+             (not= :both (nth u 1)) [nil "conflicting channel directions"]
+             :else (recur (rest ps) ct cu))
+           (not= cu u) [nil "different underlying types"]
+           :else (recur (rest ps) ct cu)))))))
+
+(defn core-type
+  "The common underlying type of t's type set, or nil."
+  [t]
+  (first (common-under t)))
 
 ;;; Printing (go/types' TypeString)
 
@@ -183,6 +407,12 @@
   nil)
 
 (declare type-str)
+
+(defn terms-str [terms]
+  (if (empty? terms)
+    "∅"
+    (let [ts (or (:order (meta terms)) (sort-by pr-str terms))]
+      (str/join " | " (for [[tilde ty] ts] (str (when tilde "~") (type-str ty)))))))
 
 (defn- params-str [ps variadic]
   (str "("
@@ -235,10 +465,16 @@
               (case (nth t 1) :both (str "chan " es) :send (str "chan<- " es) :recv (str "<-chan " es)))
       :func (str "func" (sig-str t))
       :struct (str "struct{" (str/join "; " (map field-str (nth t 1))) "}")
-      :interface (let [ms (nth t 1)]
-                   (if (and (empty? ms) (nil? (nth t 2)))
+      :interface (let [ms (nth t 1) ts (nth t 2)]
+                   (if (and (empty? ms) (nil? ts))
                      "interface {}"
-                     (str "interface {" (str/join "; " (for [m ms] (str (:name m) (sig-str (:type m))))) "}")))
+                     (str "interface {"
+                          (str/join "; " (concat (when (:comparable ts) ["comparable"])
+                                                 (for [m ms] (str (:name m) (sig-str (:type m))))
+                                                 (when (and (map? ts) (not= :all (:terms ts)))
+                                                   [(terms-str (:terms ts))])))
+                          "}")))
+      :union (terms-str (nth t 1))
       :tuple (str "(" (str/join ", " (map type-str (rest t))) ")")
       (pr-str t))))
 
@@ -474,25 +710,68 @@
   "go/types' missingMethod: nil when V implements interface type T (u its underlying), else
   {:method m :cause kw}: :missing, :ptr-recv (found with a pointer receiver), :wrong-type
   (with :have), :field (a field of that name), :unexported (other package's)."
-  [V T static]
-  (let [tu (under T)
-        vu (under V)]
-    (some
-     (fn [m]
-       (if (and (vector? vu) (= :interface (nth vu 0)))
-         (let [f (iface-method vu (:name m) (:pkg m))]
-           (cond
-             (nil? f) (when static {:method m :cause :missing})
-             (not= (:type (second f)) (:type m)) {:method m :cause :wrong-type :have (second f)}))
-         (let [r (lookup-impl V false (:name m) (:pkg m))]
-           (cond
-             (:ptr-recv r) {:method m :cause :ptr-recv}
-             (nil? r) {:method m :cause :missing}
-             (:ambiguous r) {:method m :cause :missing}
-             (= :field (:kind r)) {:method m :cause :field}
-             :else
-             (let [d (method-data (:obj r))
-                   d (if (and *subst-method* (= :method (:kind r))) (*subst-method* (:recv-type r) d) d)]
-               (when (not= (:type d) (:type m))
-                 {:method m :cause :wrong-type :have d}))))))
-     (nth tu 1))))
+  ([V T static] (missing-method V T static =))
+  ([V T static same?]
+   (let [tu (under T)
+         vu (under V)]
+     (some
+      (fn [m]
+        (if (and (vector? vu) (= :interface (nth vu 0)))
+          (let [f (iface-method vu (:name m) (:pkg m))]
+            (cond
+              (nil? f) (when static {:method m :cause :missing})
+              (not (same? (:type (second f)) (:type m))) {:method m :cause :wrong-type :have (second f)}))
+          (let [r (lookup-impl V false (:name m) (:pkg m))]
+            (cond
+              (:ptr-recv r) {:method m :cause :ptr-recv}
+              (nil? r) {:method m :cause :missing}
+              (:ambiguous r) {:method m :cause :missing}
+              (= :field (:kind r)) {:method m :cause :field}
+              :else
+              (let [d (method-data (:obj r))
+                    d (if (and *subst-method* (= :method (:kind r))) (*subst-method* (:recv-type r) d) d)]
+                ;; a generic method never satisfies an interface method (go1.27)
+                (when (or (seq (:tparams d)) (not (same? (:type d) (:type m))))
+                  {:method m :cause :wrong-type :have d}))))))
+      (nth tu 1)))))
+
+;;; Constraint satisfaction (go/types' implements, constraint = true)
+
+(defn satisfies-cause
+  "nil when type V satisfies constraint b (go/types' implements with constraint set), else the
+  cause, as go/types words it."
+  [V b]
+  (let [Ti (bound-iface b)
+        Vu (under V)]
+    (if (or (nil? Ti) (= :invalid Vu)
+            (and (vector? Vu) (= :pointer (nth Vu 0)) (= :invalid (under (nth Vu 1)))))
+      nil
+      (let [Tts (iface-tset Ti)
+            Vi (when (and (vector? Vu) (= :interface (nth Vu 0))) Vu)
+            Vts (when Vi (iface-tset Vi))
+            T-str (type-str b)]
+        (cond
+          (and (empty? (nth Ti 1)) (nil? (nth Ti 2))) nil
+          (and Vts (tset-empty? Vts)) nil
+          (tset-empty? Tts) (str "cannot satisfy " T-str " (empty type set)")
+          :else
+          (if-let [mm (missing-method V Ti true)]
+            (str (type-str V) " does not satisfy " T-str " (missing method " (:name (:method mm)) ")")
+            (let [comparability
+                  (fn []
+                    (cond
+                      (not (if (= :all (:terms Tts))
+                             (:comparable Tts)
+                             (every? (fn [[_ ty]] (strictly-comparable? ty)) (:terms Tts))))
+                      nil
+                      (strictly-comparable? V) nil
+                      (comparable? V) nil
+                      :else (str (type-str V) " does not satisfy comparable")))]
+              (cond
+                (not (has-terms? Tts)) (comparability)
+                Vts (if (terms-subset? (:terms Vts) (:terms Tts))
+                      (comparability)
+                      (str (type-str V) " does not satisfy " T-str))
+                (terms-includes? (:terms Tts) V) (comparability)
+                :else (str (type-str V) " does not satisfy " T-str " (" (type-str V) " missing in "
+                           (terms-str (:terms Tts)) ")")))))))))

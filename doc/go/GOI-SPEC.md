@@ -2494,3 +2494,182 @@ hoisting, sieve was 69.3-70.8 ms against GR5's 68.8-71.4 in the same session. Th
   one simple statement that can panic or call stores that line once before the loop (the same
   traces; sieve 65-66 ms against 69-71); (b) GC26 (b)'s letter: the body's statement stores its
   line at each iteration. *Recommended: (a)*.
+
+## As built: GR6 (2026-10-19)
+
+GR6, generics, is built on branch `goi-gr6` (from main `a1a50c4c`, seed `1d5c35b4`, which has GR5
+and GR5.1: GC26 (b), GC27 as built). Where building it found otherwise than this text, the text
+below is the record; proposals for the user are GC28-GC34.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| type parameters, type sets | `arbace/go/check/types.ae` | a type parameter's `:bound` (its constraint's type, set once its list is declared) and `:iface` (`tparam-iface`, go/types' `iface`: the bound's interface, else an implicit one); an interface's third element its type set, `{:terms :comparable}` (terms a set of `[tilde? T]`, normalized after `termlist.go`, their order kept for messages); unions `[:union terms]`; `typeset-pairs`, `under-is`, `all-*` (go/types' `allInteger` ...), `common-under`; comparability strict and dynamic (`comparableType`); `satisfies-cause` (go/types' `implements` of a constraint) |
+| constraints, declarations | `arbace/go/check/code.ae`, `decl.ae`, `code_stmt.ae` | `tparam-scope` (go/types' `collectTypeParams`), unions and `~T` terms (`union-type`), interfaces' type sets (`computeInterfaceTypeSet`); generic types (their type parameters known before their constraints, which may name them), generic aliases (go1.24), local generic types, a generic type's methods (the receiver's type parameters constrained as the type's, the receiver the instance by them, `_` allowed), generic methods (go1.27: a method's own `:tparams`, the receiver's `:rtparams`) |
+| inference | `arbace/go/check/infer.ae` (new, 387 lines) | go1.27.1's `unify.go` (`nify`, joined handles, inexact and assign modes, interface inference) and `infer.go` (function arguments, constraints' core terms and methods while they make progress, untyped constants' default types, simplification, cycles killed), `renameTParams`, `isParameterized` |
+| instantiation, calls | `arbace/go/check/code_call.ae`, `code_expr.ae` | a generic function's value (`:generic-fn`, `:gtype`, `:tparams`, partial `:ptargs`) instantiated by its call (`call-args`: the callee's and the generic arguments' type parameters inferred together, go/types' `arguments`), by its assignment to a function type (reverse inference, go1.21: `func-inst-target`), or by `(inst F T...)` (partial: its constraints then infer the rest); instances' signatures substituted and their type arguments verified after the declaration (`verify-later!`); operations on type parameters by their type sets (operators, comparisons, shifts, conversions, assignability, indexing, slicing, composite literals by the common underlying type, `len`, `cap`, `append`, `copy`, `delete`, `clear`, `close`, `make`, `min`, `max`, receive, send, `*p`, `range`, calls of a type parameter of function type); method selections on type parameters (their constraints' methods); unsafe's sizes of types depending on type parameters not constant |
+| `:inst` | `code_call.ae` (`inst-say`, `record-inst!`) | the converter's `:inst` read as types and compared with the type arguments the checker computed (§3.6): verified or an error; in annotated forms an inferred instance without `:inst` is an error |
+| the annotation check | `arbace/go/check.ae` | S53 ends: every declaration checked, counted and its annotations verified, `:inst` included (amendment 6) |
+| instances | `arbace/go/build.ae` (`inst-tree`, `instance-cell`, `build-instance`, `isubst`) | §9.2 (amendments 1-4) |
+| generic types' descriptors | `arbace/go/build.ae` (`named-desc`, `inst-gen`, `inst-type-name`) | an instance is an interpreted named type `pkg.T[args]` (gc's runtime name, type arguments named by package path), a generation of its own per origin and type arguments' descriptors; a compiled package's generic type's instance too (§9.3: `atomic.Pointer[T]`) |
+| the interpretable packages | `go/arbace/gotable.edn` (`:interpret`, `:replace`), `arbace/go/table.ae` (`interpret-forms`), `arbace/go/repl.ae` (`interpretable?`, `load-digest-package!`) | §9.3 (amendment 5) |
+| the REPL | `arbace/go/repl.ae` | a generic function or method has no cell and no var (its instances have cells, made by their callers' builds); every other declaration defined as before, those that use generics included |
+| tests | `test/goi/run/go/t/generics.ae`, `test/goi/repl.ae`, `test/goi/errors/generics.ae` | 21 lines of output against gc's (written by hand: no `:inst`, the checker infers every type argument): generic functions, inference, reverse and partial instantiation, generic types and methods, a generic method, type sets, slices, maps, cmp, `atomic.Pointer`, `sync.OnceValue`; five checks of generics at the REPL (a generic function redefined, its instances' callers seeing the new code; `go/eval` inferring); seven errors of generic code with gc's messages (`bin/goi test --gc`) |
+
+**The annotation check (§11.4, the GR6 exit criterion).** `bin/goi annotations`: zero errors in
+every package of the five corpora, every declaration checked (none left unchecked), every
+annotation verified, `:inst` among them:
+
+| corpus | declarations checked (using generics among them) | `:inst` verified | `:val` | `:tag` | `:go/via` | `^:assign` | `conv` | time |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `tamago-amd64` | 35,783 (1,258) | 1,061 | 9,084 | 269 | 4,969 | 757 | 22,534 | 35-40 s |
+| `tamago-arm64` | 35,700 (1,258) | 1,061 | 8,989 | 270 | 4,956 | 757 | 22,515 | 32-38 s |
+| `linux-amd64` | 38,366 (1,289) | 1,091 | 10,972 | 282 | 4,909 | 793 | 24,185 | 39-42 s |
+| `linux-test` | 9,770 (1,234) | 422 | 633 | 48 | 163 | 37 | 3,555 | 26-29 s |
+| `linux-dirtest` | 1,726 (478) | 218 | 30 | 0 | 12 | 0 | 198 | 22 s |
+
+The declarations counted apart at GR5.1 (1,263, 1,263, 1,294, 1,290, 498) are now checked and
+counted (`tamago-amd64` 34,520 + 1,263 = 35,783); their annotations (`:val` 63, `:tag` 26, `:go/via`
+1,125, `^:assign` 86, `conv` 1,416 in `tamago-amd64`) verified with the rest. A declaration "uses
+generics" when checking it meets a generic declaration, an instance or a type parameter (5 fewer
+than GR2 marked in `tamago-amd64`: GR2 also marked a declaration whose operand a generic one left
+invalid).
+
+**The check (§11, the GR6 exit criterion).** `bin/goi check` over the 1,051 run programs of
+`$GOROOT/test` and the 127 directory tests, against `test/goi/check-linux-amd64.edn` (recorded):
+
+| result | GR5.1 | GR6 |
+|---|---:|---:|
+| pass | 832 (833) | 1,036 |
+| fail, error | 0 | 0 |
+| known (`test/goi/check-known.edn`) | 51 | 59 |
+| unsupported | 280 | 68 |
+| skipped (gc's flags) | 15 | 15 |
+
+Of the 217 programs GR5.1 left unsupported for GR6, 202 pass, 8 are known and 7 are unsupported for
+GR3's recursive types (a type recursive through a slice, a map or a function: `typeparam/cons.go`,
+`issue47901.go`, `issue48030.go`, `issue48137.go`, `issue48185b.go`, `issue48617.go`,
+`fixedbugs/issue72063.go`); the two that imported `maps` and `iter` pass (§9.3). Of
+`$GOROOT/test/typeparam`'s 200 run programs (directory tests among them), 186 pass, 6 are known, 8
+unsupported (the 6 recursive types above, and `encoding/json` and `encoding/xml`, not listed: GS5).
+The new known differences are by design: a finalizer's timing (`fixedbugs/issue54343.go`,
+`typeparam/chans.go`, `chansimp.go`: their `_Ranger` waits for one), `%T` of interpreted values
+(`genmeth1.go`, `typeparam/issue49547.go`: G8, GS9 not built, amendment 9) and reflect's names
+and identities of interpreted instances (`typeparam/issue54456.go`, `mdempsky/17.go`, `nested.go`:
+G8). No program passing at GR5.1 regresses. The whole check takes 42-48 s with 16 jobs on the
+compiled executable (88 s with the namespaces evaluated from the checkout). The essential
+subset, `test/goi/essential.txt`, is 566 programs (GC28), 30 s with 8 jobs.
+
+**Measurements (GR3's criterion).** `bin/goi run test/goi/run go.t.fib bench`, best of five per run,
+three runs alternating GR5.1's executable (stage 0 of seed `1d5c35b4`) and GR6's on the shared
+machine (load about 16-18):
+
+| | GR5.1 (its record) | GR5.1, this session | GR6 |
+|---|---|---|---|
+| fib 22 | 2.56-2.58 ms | 2.55-2.72 ms | 2.55-3.01 ms (best 2.55) |
+| sumSq 1e6 | 17.99-18.76 ms | 18.91-20.74 ms | 17.87-21.07 ms (best 17.87) |
+| sieve 1e6 | 65.02-66.26 ms | 63.55-90.56 ms | 65.52-71.17 ms (best 65.52) |
+
+An instance runs as fast as the function written for its type arguments (its nodes are typed by
+them, G7 (a)): a generic `fib[T ~int | ~int32 | ~int64]` instantiated with `int`, 2.50-2.61 ms
+against `fib`'s 2.48-2.67 in the same runs. The executable is 135,504,032 bytes against GR5.1's
+133,951,648 (+1,552,384, 1.2%): the checker's generics and inference, the builder's instances
+(c2j's Go of their Arbace), and the digest's interpretable packages (linux/amd64's digest 336,715
+bytes compressed against 324,205: +12,510).
+
+**Amendments (as built).**
+
+1. **Instances are built from checked trees substituted** (§9.2). An instance's code is built from
+   its generic declaration's checked tree with every type substituted (`inst-tree`): its local
+   variables and local named types copied per instance (gc makes a local type per instance), each
+   node copied once (a call of several results is shared by its results' nodes), method selections
+   on a type parameter resolved for the instance's type (an interface method of the constraint
+   becomes the type's method, its call a method call), constants represented at their instance
+   types (a `float32`'s rounded; a constant converted to a type parameter constant again),
+   unsafe's `Sizeof`, `Alignof` and `Offsetof` that depended on type parameters constant. So the
+   builder builds an instance as any function, its nodes typed by the type arguments; it never
+   sees a type parameter. The checker keeps a generic declaration's tree for this, also of the
+   digest's packages (§9.3), which it checks whole.
+2. **Instances' cells** (§9.2): one per generic function or method object and type arguments'
+   descriptors (interned, so equal across build contexts), built by the build context of the
+   generic declaration's package (an interpreted package's last, a compiled package's made for its
+   digest's declarations: `ctx-of`), on first call or at once when building eagerly (program
+   mode), named as gc names them in traces (`F[...]`, `(*List[...]).Push`). A redefinition at the
+   REPL checks the package again: the callers' code, built again on their next call, reaches new
+   instances.
+3. **A generic type's instance** is an interpreted named type of the instance's name and a
+   generation of its own (the interning key of §5.2 per instance; its RT's tag
+   `goi:"main.List[int]#N"`), its methods instantiated per instance: a method's cell for a
+   selection on an instance is its instance's (`method-target`), in method sets too (an instance
+   in an interface: §5.3). A generic method has no method set entry (go1.27: it implements no
+   interface method).
+4. **What the checker makes explicit for instances** (§3.7): a type parameter's value assigned to an
+   interface is a `:convert-iface` (an instance's type may not be an interface); method selections
+   carry their receiver's `:recv-type` (the instance), generic function values their `:targs`.
+5. **The interpretable packages** (§9.3): `cmp`, `iter`, `maps`, `slices` and `internal/race`
+   (which `iter` imports; its functions are empty but in race builds), their forms whole in each
+   configuration's digest (`:interpret`), loaded by goi as interpreted packages of their std paths
+   when first imported (`load-digest-package!`, as a package from `ARBACE_PATH`: checked, defined,
+   initialized). A declaration naming a package neither listed nor interpretable is left out of
+   the digest with that import (`internal/race`'s two functions of `internal/abi`'s types). The
+   list's `:replace` gives declarations in Go forms for those the runtime implements through
+   `go:linkname`: `maps.Clone` (through `maps.clone`), a copy by `range` (GC29). `iter.Pull` stays
+   unsupported (its coroutines are the runtime's).
+6. **The annotation check's records** (§11.4): `test/goi/annotations-CORPUS.edn`'s `:declarations`
+   gains `:unsupported` (declarations whose code goi's checker does not check: none) and `:generic`
+   counts the declarations using generics among those checked; `:generic-errors` became
+   `:unsupported-errors`, `:in-generic` `:in-unsupported`, both zero; a corpus passes only with no
+   declaration unchecked.
+7. **A compiled package's unexported type** met in an instance of its generic type
+   (`sync/atomic.noCopy` in `atomic.Pointer[T]`) is described as an interpreted named type: the
+   table holds exported types only (GC30).
+8. **Program mode** (§2.7): a function built on its first call (an instance, a method thunk) that
+   goi does not support ends the run as `goi: unsupported: REASON`, status 125, as one found
+   before the run does (GC33).
+9. **`%T`, reflect** (§9.4, G8): an interpreted instance's value in an interface is its proxy, or for
+   a struct its RT; `%T` and reflect's names show those, not gc's `main.T[int]` (GS9 not built: 3
+   programs of 1,178).
+10. **Fixes found by the check**, outside generics: `((.M x))` calls the method's result (GR2 made
+    the callee invalid); a method's receiver is not checked as a parameter (its type is the
+    declaration's); a range over values assigned to interface targets converts them; a select's
+    comma-ok receive into interface targets; assertion messages name unnamed interfaces as gc's
+    runtime does (`interface { T() main.T }`); a struct literal keyed `[name value]` (the
+    converter's form for a literal of a type parameter's type).
+11. **Errors** (§3.8): an operand of a type parameter's type is written with its constraint
+    (`variable of type T constrained by any`), a named basic type's with its kind (`int type
+    Celsius`), a generic type used without instantiation with its type parameters (`List[T any]`),
+    type set terms in their written order, as types2 writes them; "cannot infer" names the type
+    parameter's file and line (gc adds its column).
+
+**Proposals for the user** (each built as recommended):
+
+- **GC28 The essential subset with generics.** (a) as built, GR5.1's 379 programs and the programs
+  GR6 made pass by the same rule (every one outside `fixedbugs/`, every fourth new one of
+  `fixedbugs/`): 566, 30 s with 8 jobs; (b) GC21's rule applied anew to the new reference (565,
+  its `fixedbugs/` selection shifting by the new passes); (c) GR5.1's 379 (no generic program in
+  the essential gate). *Recommended: (a)*: the rule's subset, stable.
+- **GC29 Declarations the runtime implements for an interpretable package.** (a) as built, the
+  list's `:replace` writes them in Go forms (`maps.Clone`); (b) §9.3's letter: unsupported (any
+  program calling `maps.Clone` unsupported). *Recommended: (a)*: one short declaration, and
+  `maps.Clone` is common.
+- **GC30 Unexported types of compiled packages in instances.** (a) as built, described as
+  interpreted named types (their values made by interpreted code only); (b) listed in the table
+  (their RTs compiled; the table grows by every unexported type a listed generic type names).
+  *Recommended: (a)*.
+- **GC31 Instances' names.** (a) as built, gc's runtime names (`main.List[int]`, type arguments by
+  package path) for `%#v`'s printing and traces; (b) go/types' type strings (`List[int]`, package
+  names). *Recommended: (a)*: what a Go programmer sees from gc.
+- **GC32 Listed packages' generic functions over internal packages.** `reflect.TypeFor`,
+  `reflect.TypeAssert`, `runtime.AddCleanup` and `math/rand/v2`'s `N` reach `internal/abi` or
+  unexported functions the table does not hold. (a) as built, unsupported when called; (b) goi's
+  overrides for them (`reflect.TypeFor[T]` the RT of `T`'s descriptor). *Recommended: (a)* now,
+  (b) when a program of the check needs one.
+- **GC33 Code built late in program mode.** (a) as built, an unsupported form met by a function
+  built on its first call ends the run as unsupported (status 125); (b) build every instance of
+  the program before it runs (instances found by a closure over the call graph: not their
+  arguments' types computed at run time, so impossible in general). *Recommended: (a)*.
+- **GC34 Generic functions at the REPL.** (a) as built, a generic function has no var (Arbace
+  cannot name its type arguments; Go functions calling it are the way); (b) a var whose `GoFn`
+  infers the type arguments from its arguments' Go types at each call. *Recommended: (a)*, (b) to
+  reconsider with GS2's auto-import after GR6.

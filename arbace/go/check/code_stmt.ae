@@ -98,9 +98,16 @@
           nil)
       (mapv #(expr cx %) rhs-forms))))
 
+(declare init-var*)
+
 (defn init-var
   "go/types' initVar: the value n for variable x (its type inferred from n when nil)."
   [cx x n context]
+  (let [;; a generic function's value: instantiated by the variable's type, or its constraints
+        n (if (and (generic-fn? n) (nil? (o x :type))) (assignment cx n nil context) n)]
+    (init-var* cx x n context)))
+
+(defn- init-var* [cx x n context]
   (if (invalid? n)
     (do (when (nil? (o x :type)) (oset! x :type :invalid)) n)
     (do
@@ -158,7 +165,7 @@
       (or (= :blank place) (invalid? place))
       (do (when (= :blank place) (err! f :InvalidBlank "cannot use _ as value"))
           {:op :incdec :inc inc :place place :line (fline f)})
-      (not (t/numeric? (:type place)))
+      (not (t/all-numeric? (:type place)))
       (do (err! f :NonNumericIncDec "invalid operation: %s%s (non-numeric type %s)" (expr-str pf) (if inc "++" "--") (t/type-str (:type place)))
           {:op :incdec :inc inc :place place :line (fline f)})
       :else {:op :incdec :inc inc :place place :line (fline f)})))
@@ -267,19 +274,26 @@
 (defn local-type
   "A local type declaration Name T (let-type)."
   [cx nf tf]
-  (when (:type-params (meta nf)) (e/unsupported! "local generic types"))
   (let [nm (ident-name nf)
-        alias (:alias (meta nf))]
+        alias (:alias (meta nf))
+        tps (:type-params (meta nf))]
+    (when tps (e/generic!))
     (if alias
-      (let [ty (typexpr cx tf)
-            x (e/obj {:kind :type :name nm :type ty :alias true :local? true :line (fline nf)})]
+      (let [x (e/obj {:kind :type :name nm :type :invalid :alias true :local? true :line (fline nf)
+                      :tparams-count (when tps (count tps))})
+            [tcx tys] (if tps (tparam-scope cx tps) [cx nil])
+            _ (when tys (oset! x :tparams tys))
+            ty (typexpr (if tys (assoc cx :scope tcx) cx) tf)]
+        (oset! x :type ty)
         (declare! cx nm x nf)
         {:op :local-type :obj x :type ty :line (fline nf)})
       (let [nt (t/new-named {:name nm :pkg (pkg-path) :pkg-name (o e/*pkg* :name) :local true})
-            x (e/obj {:kind :type :name nm :type nt :local? true :line (fline nf)})
+            x (e/obj {:kind :type :name nm :type nt :local? true :line (fline nf)
+                      :tparams-count (when tps (count tps))})
             _ (t/update-info! nt assoc :obj x :resolving true)
             _ (declare! cx nm x nf)
-            u (typexpr cx tf)]
+            [tcx tys] (if tps (tparam-scope cx tps nil #(t/update-info! nt assoc :tparams %)) [cx nil])
+            u (typexpr (if tys (assoc cx :scope tcx) cx) tf)]
         (t/update-info! nt assoc :underlying (if (t/named? u) u u) :resolving false)
         {:op :local-type :obj x :type nt :underlying u :line (fline nf)}))))
 
@@ -335,7 +349,7 @@
   (let [c (expr cx f)]
     (cond
       (invalid? c) c
-      (not (t/boolean-type? (:type c)))
+      (not (t/all-boolean? (:type c)))
       (do (err! f :InvalidCond "non-boolean condition in %s statement" what) c)
       :else (default-final c))))
 
@@ -541,12 +555,13 @@
   "[kind key-type value-type] of ranging over node x, or nil (cannot range)."
   [cx x]
   (let [ty (:type x)
-        u (t/under ty)
+        ;; a type parameter's: the common underlying type of its type set (go/types' rangeStmt)
+        u (if (t/tparam? ty) (t/core-type ty) (t/under ty))
         u (if (and (vector? u) (= :pointer (nth u 0)) (let [b (t/under (nth u 1))] (and (vector? b) (= :array (nth b 0)))))
             [:ptr-array (t/under (nth u 1))]
             u)]
     (cond
-      (t/tparam? ty) (e/unsupported! "range over type parameters")
+      (nil? u) nil
       (t/string-type? u) [:string :int :int32]
       (t/integer-type? u) (when (allow-version? cx 22) [:int (if (t/untyped? ty) :int ty) nil])
       (not (vector? u)) nil
@@ -673,7 +688,7 @@
         v (expr cx vf)]
     (if (or (invalid? ch) (invalid? v))
       {:op :send :ch ch :value v :line (fline f)}
-      (let [u (t/under (:type ch))]
+      (let [u (if (t/tparam? (:type ch)) (t/core-type (:type ch)) (t/under (:type ch)))]
         (cond
           (not (and (vector? u) (= :chan (nth u 0))))
           (do (err! f :InvalidSend "invalid operation: cannot send to non-channel %s" (operand-str ch))
