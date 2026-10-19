@@ -297,6 +297,28 @@ types.\n"
 ;; proxy of T (§5.3): in an interface of a listed compiled type, that interface's wrapper; in an
 ;; any, the proxy; T's methods are interpreted functions whose code calls the fns.
 
+(go/type ifaceSigs "ifaceSigs are a compiled interface's methods: their names and func types.\n"
+  (struct ^{:tag (slice string)} names ^{:tag (slice reflect/Type)} sigs))
+
+(go/var ^{:tag sync/Map :doc "ifaceMethods are the listed interfaces' methods by reflect type (ifaceSigs), the table's.\n"}
+  ifaceMethods)
+
+(go/func RegisterIfaceMethods
+  "RegisterIfaceMethods records compiled interface type rt's methods (names, func types), the
+table's: goi asks reflect for no type's methods (reflect.Type.Method would keep every exported
+method of the program, S39).\n"
+  [^{:tag reflect/Type} rt ^{:tag (slice string)} names ^{:tag (slice reflect/Type)} sigs]
+  (.Store ifaceMethods rt (lit ifaceSigs names sigs)))
+
+(go/func ifaceMethodsOf "ifaceMethodsOf is compiled interface type rt's methods, or false.\n"
+  [^{:tag reflect/Type} rt] :results [^ifaceSigs m ^bool ok]
+  (when (== rt errorType)
+    (return (lit ifaceSigs (lit (slice string) "Error") (lit (slice reflect/Type) ((inst reflect/TypeFor (func [] [string]))))) true))
+  (let [(values v found) (.Load ifaceMethods rt)]
+    (when (not found)
+      (return))
+    (return (assert ifaceSigs v) true)))
+
 (go/var ^{:tag sync/Mutex} reifyMu)
 
 (go/var ^{:tag (map string (* Type)) :doc "reifyTypes are the reify types by their interfaces' names.
@@ -310,7 +332,7 @@ types.\n"
   (when (or (== x nil) (== bridge nil))
     (return nil))
   ;; Arbace's scalars and strings are never one (no call of the bridge for them)
-  (type-switch [_ x]
+  (type-switch x
     (case [(* jrt/String) (* jrt/Long) (* jrt/Double) (* jrt/Boolean) (* jrt/Character) (* jrt/Integer)]
       (return nil)))
   (let [(values _ ok) (assert jrt/Object_I x)]
@@ -373,14 +395,17 @@ an error (§6.4).
             (when (or (not (.-Compiled it)) (!= (.Kind rt) reflect/Interface))
               (panic (jrt/IllegalArgumentException_New_String
                        (jrt/Str (fmt/Sprintf "reify: %s is not an interface of a listed package" (.String it))))))
-            (for [i 0] (< i (.NumMethod rt)) (inc! i)
-              (let [m (.Method rt i)
-                    sg (sigOf (.-Type m))
-                    o (aget sigs (.-Name m))]
-                (when (and (!= o nil) (!= o sg))
-                  (panic (jrt/IllegalArgumentException_New_String
-                           (jrt/Str (fmt/Sprintf "reify: method %s of %s has another signature in another interface" (.-Name m) (.String it))))))
-                (aset sigs (.-Name m) sg)))))
+            (let [(values ms ok) (ifaceMethodsOf rt)]
+              (when (not ok)
+                (panic (jrt/IllegalArgumentException_New_String
+                         (jrt/Str (fmt/Sprintf "reify: the interface %s has no wrapper in the table" (.String it))))))
+              (range [i nm (.-names ms)]
+                (let [sg (sigOf (aget (.-sigs ms) i))
+                      o (aget sigs nm)]
+                  (when (and (!= o nil) (!= o sg))
+                    (panic (jrt/IllegalArgumentException_New_String
+                             (jrt/Str (fmt/Sprintf "reify: method %s of %s has another signature in another interface" nm (.String it))))))
+                  (aset sigs nm sg))))))
         (set! keys (make (slice string) 0 (len sigs)))
         (range [k _ sigs] (set! keys (append keys k)))
         (sort/Strings keys)
@@ -422,11 +447,14 @@ its proxy in an any, its wrapper in an interface it implements; ok false when x 
           p (lit Proxy t x)]
       (when (== (.NumMethod rt) 0)
         (return (contentOf p) true))
-      (for [i 0] (< i (.NumMethod rt)) (inc! i)
-        (let [m (.Method rt i)
-              e (aget (.-Methods t) (.-Name m))]
-          (when (or (== e nil) (!= (.mem (.-Sig e)) (.-Type m)))
-            (panic (castError what rt x)))))
+      (let [(values ms known) (ifaceMethodsOf rt)]
+        (when (not known)
+          (panic (jrt/IllegalArgumentException_New_String
+                   (jrt/Str (fmt/Sprintf "%s: goi cannot give compiled code an Arbace reify as %s: the interface has no wrapper in the table" what (.String rt))))))
+        (range [i nm (.-names ms)]
+          (let [e (aget (.-Methods t) nm)]
+            (when (or (== e nil) (!= (.mem (.-Sig e)) (aget (.-sigs ms) i)))
+              (panic (castError what rt x))))))
       (cond
         (== rt errorType) (return (lit errorWrapper p) true)
         (== rt stringerType) (return (lit stringerWrapper p) true))
