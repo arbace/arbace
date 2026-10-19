@@ -98,9 +98,11 @@ The current state of the work. This file is rewritten as things change. For the 
   - goi GR7c (`goi-gr7c`): the 23 errorcheck fails and 2 checker crashes;
   - GR8a (`goi-gr8a`): std at the REPL, starting with the label-on-`:=` bug;
   - GR9a-c (`goi-gr9a`): real runtime types for interpreted named types;
-  - GR9d (`goi-gr9d`): REPL vars for generic functions;
   - the arm64 box check (`goi-box-arm64`).
-  The seed `0af285f7…` (GR7a, GR7b), verified. The surveys doc/go/GR8-SURVEY.md and GR9-SURVEY.md
+  Done: GR9d (merged 2026-10-19 as `e4621b5d`): REPL vars for generic functions (GoGenericFn,
+  `go/inst`, the instance cache; GC135-GC144 built as recommended under the goal, GC144 (b), the
+  checker's constraint-term order for digest packages, still to build). The seed `0af285f7…` (GR7a,
+  GR7b), verified; the next re-seed comes after the next merges, not one per merge. The surveys doc/go/GR8-SURVEY.md and GR9-SURVEY.md
   are merged. Their proposals GC55-GC74 are built as recommended under the goal and recorded so
   the user can revisit them.
 - **The plan to the milestone `arbace-interprets-go-v1`** (the user, 2026-10-19: the full plan; the

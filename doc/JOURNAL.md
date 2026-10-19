@@ -1869,3 +1869,33 @@ v1's divergences by design are listed there. Staging (G16) and speed (F10) come 
   GR8a, GR9a-c, GR9d. Before them, from `0ca375c8`: GR7c (the 23 errorcheck fails and 2 crashes);
   from `77370a70`: the arm64 box check. Two shell tasks left over from RR4's agent were stopped; their
   worktree had been removed.
+
+## 2026-10-19: goi GR9d merged (REPL vars for generic functions)
+
+- **What:** branch `goi-gr9d` (from `7149fea8`, `04ac458b` with the two surveys) merged as
+  `e4621b5d`. It builds GC34 (b) and the GR9 survey's GC72-GC74:
+  - each generic function, generic type's method and go1.27 generic method gets a var whose root
+    is `arbace.lang.GoGenericFn`. It infers the type arguments from the Arbace values of each call
+    with the checker's own inference, `arbace/go/generic.ae`. A Go value gives its type
+    descriptor, an Arbace scalar its untyped kind. Instances are cached: the last key first, then
+    a map;
+  - `go/inst` instantiates explicitly; with fewer type arguments it gives a partial GoGenericFn;
+  - `slices`, `cmp`, `iter` and `maps` load from Arbace's `require`; the listed packages' generics
+    are made on first use.
+- **Measured** (linux/amd64): a cached generic call costs 1.45-1.79 µs, against 1.46-1.49 µs for a
+  plain function var; a cache miss costs 1.7-1.9 ms. The executable grows by 598,016 bytes (0.44%).
+- **Checks:**
+  - the branch's own: `bin/goi check` 1,386 of 1,837 pass, no regression; essential 699/699;
+    `bin/goi test` (the REPL 101/101, with 25 new checks); annotations unchanged; 21 new oracle
+    cases recorded by goi; the fixpoint held.
+  - main after the merge: the essential `bin/gate` passed (15m57s). The oracle had 53 known
+    mismatches, none new; the diffcheck 23 known; goi's essential check 699/699.
+- **Decisions:** GC135-GC144, each built as (a), the recommendation, as recommended, under the
+  user's goal of 2026-10-19. For GC144 the recommendation is (b): order a digest package's
+  constraint terms as written in the checker's messages (`cmp.Ordered`'s "missing in"). It is
+  outside GR9d and is left for after the merges.
+- **The re-seed** is deferred until GR7c, GR8a and GR9a-c are merged, so there is one re-seed rather
+  than one per merge. Stage 0 builds main either way, and the gate builds from the checkout.
+- **Overlap with GR9a-c:** `methodVar`, the `valueType` native's use of the proxies and the
+  `desc-types` registry. GR9a-c was told to merge main into its branch and keep them working.
+- **A rule slip:** one of the agent's wait loops redirected `2>/dev/null`. It changed no file.
