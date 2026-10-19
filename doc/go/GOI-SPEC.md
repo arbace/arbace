@@ -3262,6 +3262,15 @@ command): 712 programs.
   `strings` against main's 1.09 s (GC99); `os` against main's 0.32 s (`syscall` listed, checked).
   `test/goi/std.ae` imports the 169 in 29-32 s in one process (each package checked once, GC104).
 
+**Checks** (this branch, amd64): the essential `bin/gate` passed (14 m 42 s: the smoke test, Clojure's
+suite as recorded, the oracle 22,637 of 22,690 against its 53 known, the differential check
+12,731 of 12,754 against its known, goi's essential check 712 of 712, the generated variants);
+`bin/arbace-go --fixpoint`: G1 = G2 = G3 (141,906,080 bytes); `bin/goi check` as recorded (above),
+`--essential` (712 of 712); `bin/goi test` and `--gc` (the checker's 19 assertions and its invalid
+forms, 17 programs, 78 REPL checks, 183 std checks, §1.4's session); `bin/goi annotations` (the
+five corpora as GR6's: zero errors, every declaration checked, the same counts); `make
+check-makefile`; `bin/generated-check`. Not run: `bin/gate --full` and the box (GC102).
+
 **Proposals for the user (GC95-GC104; each built as recommended).**
 
 - **GC95 The programs GR8a's packages reach that fail by goi's core.** `issue30116`,
