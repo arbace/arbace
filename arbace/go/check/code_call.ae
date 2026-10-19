@@ -390,7 +390,7 @@
                 [(if (t/untyped? ty) :string ty) (when (= :constant (:mode x)) (count (:val x)))])
               (and (vector? u) (= :array (nth u 0)))
               (if (not= :variable (:mode x))
-                (do (err! f :NonSliceableOperand "invalid operation: %s (slice of unaddressable value)" (expr-str xf)) [nil nil])
+                (do (err! f :NonSliceableOperand "cannot slice unaddressable value %s" (operand-str x)) [nil nil])
                 [[:slice (nth u 2)] (nth u 1)])
               (and (vector? u) (= :pointer (nth u 0)) (let [b (t/under (nth u 1))] (and (vector? b) (= :array (nth b 0)))))
               (let [b (t/under (nth u 1))] [[:slice (nth b 2)] (nth b 1)])
@@ -507,27 +507,29 @@
 (defn- indexed-elements
   "The elements of an array or slice literal: [nodes max-index] (go/types' indexedElts)."
   [cx f elems elem-type length]
-  (loop [es elems idx 0 mx 0 seen #{} acc []]
+  (loop [es elems idx 0 mx 0 seen #{} acc [] pos 2]
     (if (empty? es)
       [acc mx]
-      (let [el (first es)
-            [kf vf] (if (vector? el) el [nil el])
-            [k ki] (if kf
-                     (let [[k kv] (index-value cx kf length "index")]
-                       (if (and k (not (invalid? k)) (nil? kv))
-                         (do (err! kf :IndexMustBeConstant "index %s must be integer constant" (expr-str kf)) [k nil])
-                         [k kv]))
-                     [nil idx])
-            ki (if (and kf (nil? ki)) idx ki)
-            ki (long ki)
-            dup (contains? seen ki)
-            _ (when (and dup (or (nil? kf) (not (invalid? k))))
-                (err! (or kf vf) :DuplicateLitKey "duplicate index %d in array or slice literal" ki))
-            _ (when (and length (>= ki length) (nil? kf))
-                (err! vf :OversizeArrayLit "index %d is out of bounds (>= %d)" ki length))
-            v (element-value cx vf elem-type)]
-        (recur (rest es) (inc ki) (max mx (inc ki)) (conj seen ki)
-               (conj acc (cond-> {:index ki :value v} k (assoc :key k))))))))
+      (let [[ki node]
+            (with-elem f pos
+              (let [el (first es)
+                    [kf vf] (if (vector? el) el [nil el])
+                    [k ki] (if kf
+                             (let [[k kv] (index-value cx kf length "index")]
+                               (if (and k (not (invalid? k)) (nil? kv))
+                                 (do (err! kf :IndexMustBeConstant "index %s must be integer constant" (expr-str kf)) [k nil])
+                                 [k kv]))
+                             [nil idx])
+                    ki (if (and kf (nil? ki)) idx ki)
+                    ki (long ki)
+                    dup (contains? seen ki)
+                    _ (when (and dup (or (nil? kf) (not (invalid? k))))
+                        (err! (or kf vf) :DuplicateLitKey "duplicate index %d in array or slice literal" ki))
+                    _ (when (and length (>= ki length) (nil? kf))
+                        (err! vf :OversizeArrayLit "index %d is out of bounds (>= %d)" ki length))
+                    v (element-value cx vf elem-type)]
+                [ki (cond-> {:index ki :value v} k (assoc :key k))]))]
+        (recur (rest es) (inc ki) (max mx (inc ki)) (conj seen ki) (conj acc node) (inc pos))))))
 
 (declare composite-lit)
 
@@ -535,9 +537,14 @@
   "(lit T element*), T a type form or _ (elided: hint, the element type of the outer literal)."
   [cx f hint]
   (let [[_ tf & elems] f
-        elems (vec elems)]
+        elems (vec elems)
+        ;; the form as a vector (its metadata kept): its elements' lines in constant time
+        fv (if (vector? f) f (with-meta (vec f) (meta f)))]
     (if (and (elided? tf) (nil? hint))
-      (do (err! f :UntypedLit "invalid composite literal type: missing type") (invalid f))
+      (do (err! f :UntypedLit "missing type in composite literal")
+          ;; go/types goes on: the elements are used (go.dev/issue/69092)
+          (doseq [el (nnext f)] (if (vector? el) (expr-internal cx (peek el) nil) (when-not (keyword? el) (expr-internal cx el nil))))
+          (invalid f))
       (let [T (cond
                 (elided? tf) hint
                 (and (seq? tf) (= 'array (first tf)) (= '... (second tf)))
@@ -563,10 +570,13 @@
                   (let [pairs (partition 2 elems)
                         via-map (:go/via (meta f))
                         nodes (vec
-                               (for [[k vf] pairs]
+                               (for [[j [k vf]] (map-indexed vector pairs)]
+                                 (with-elem fv (+ 3 (* 2 j))
                                  (let [nm (name k)
                                        r (t/lookup (if (t/tparam? T) u T) false nm (pkg-path))
-                                       direct (some (fn [[i fd]] (when (and (= nm (:name fd))) i)) (map-indexed vector fields))]
+                                       ;; a blank field is never found (go/types' lookup)
+                                       r (when (not= "_" nm) r)
+                                       direct (when (not= "_" nm) (some (fn [[i fd]] (when (and (= nm (:name fd))) i)) (map-indexed vector fields)))]
                                    (cond
                                      (and (nil? direct) (or (nil? r) (not= :field (:kind r))))
                                      (do (err! vf :MissingLitField "unknown field %s in struct literal of type %s" nm (t/type-str T))
@@ -586,59 +596,76 @@
                                                                 (pr-str (vec (or say []))) (pr-str (mapv symbol have)))))
                                        (when (and (:pkg fd) (not= (:pkg fd) (pkg-path)))
                                          (err! vf :UnexportedLitField "cannot refer to unexported field %s in struct literal of type %s" nm (t/type-str T)))
-                                       {:field fd :path (:index r) :via have
-                                        :value (assignment cx (expr cx vf (:type fd)) (:type fd) "struct literal")}))))) ]
-                    ;; duplicate keys
-                    (reduce (fn [seen [k]] (if (contains? seen k)
-                                             (do (err! f :DuplicateLitField "duplicate field name %s in struct literal" (name k)) seen)
-                                             (conj seen k)))
-                            #{} pairs)
-                    {:op :lit :kind :struct :to T :fields (vec (remove nil? nodes)) :mode :value :type T :form f :line (fline f)})
+                                       {:field fd :path (:index r) :via have :pos (+ 3 (* 2 j))
+                                        :value (assignment cx (expr cx vf) (:type fd) "struct literal")})))))) ]
+                    ;; duplicate keys (of fields found)
+                    (reduce (fn [seen n]
+                              (let [k (:field n)]
+                                (if (contains? seen k)
+                                  (do (with-elem fv (dec (:pos n))
+                                        (err! nil :DuplicateLitField "duplicate field name %s in struct literal" (:name k)))
+                                      seen)
+                                  (conj seen k))))
+                            #{} (remove nil? nodes))
+                    {:op :lit :kind :struct :to T :fields (vec (map #(dissoc % :pos) (remove nil? nodes))) :mode :value :type T :form f :line (fline f)})
                   (do
-                    (when (and (seq elems) (not= (count elems) (count fields)))
-                      (err! f (if (< (count elems) (count fields)) :InvalidStructLit :InvalidStructLit)
-                            (if (< (count elems) (count fields)) "too few values in struct literal of type %s" "too many values in struct literal of type %s")
-                            (t/type-str T)))
                     (let [nodes (vec (map-indexed
                                       (fn [i vf]
+                                        (with-elem fv (+ 2 i)
                                         (if-let [fd (get fields i)]
                                           (do (when (and (:pkg fd) (not= (:pkg fd) (pkg-path)))
                                                 (err! vf :UnexportedLitField "implicit assignment to unexported field %s in struct literal of type %s"
                                                       (:name fd) (t/type-str T)))
-                                              {:field fd :path [i] :value (assignment cx (expr cx vf (:type fd)) (:type fd) "struct literal")})
-                                          (do (expr cx vf) nil)))
-                                      elems))]
+                                              {:field fd :path [i] :value (assignment cx (expr cx vf) (:type fd) "struct literal")})
+                                          ;; go/types: at the first value too many, after checking it
+                                          (let [n (expr cx vf)]
+                                            (when (= i (count fields))
+                                              (err! vf :InvalidStructLit "too many values in struct literal of type %s" (t/type-str T)))
+                                            nil))))
+                                      (take (inc (count fields)) elems)))]
+                      ;; go/types: at the closing brace, whose line the forms do not keep
+                      (when (and (seq elems) (< (count elems) (count fields)))
+                        (err! f :InvalidStructLit "too few values in struct literal of type %s%s" (t/type-str T)
+                              (if (some #(and (:pkg %) (not= (:pkg %) (pkg-path))) fields)
+                                " (type has unexported fields - use key:value pairs)" "")))
                       {:op :lit :kind :struct :to T :fields (vec (remove nil? nodes)) :mode :value :type T :form f :line (fline f)}))))
               (and (vector? u) (#{:array :array-open} (nth u 0)))
               (let [el (if open (nth u 1) (nth u 2))
-                    [nodes mx] (indexed-elements cx f elems el (when-not open (nth u 1)))
+                    [nodes mx] (indexed-elements cx fv elems el (when-not open (nth u 1)))
                     T (if open [:array mx el] T)]
                 {:op :lit :kind :array :to T :elems nodes :mode :value :type T :form f :line (fline f)})
               (and (vector? u) (= :slice (nth u 0)))
-              (let [[nodes] (indexed-elements cx f elems (nth u 1) nil)]
+              (let [[nodes] (indexed-elements cx fv elems (nth u 1) nil)]
                 {:op :lit :kind :slice :to T :elems nodes :mode :value :type T :form f :line (fline f)})
               (and (vector? u) (= :map (nth u 0)))
               (let [[_ K V] u
-                    nodes (vec (for [el elems]
-                                 (if-not (vector? el)
-                                   (do (err! el :MissingLitKey "missing key in map literal") nil)
-                                   (let [[kf vf] el
-                                         k (if (and (= "lit" (head-name kf)) (elided? (second kf)))
-                                             (element-value cx kf K)
-                                             (assignment cx (expr cx kf K) K "map literal"))
-                                         v (element-value cx vf V)]
-                                     {:key k :value v}))))
+                    nodes (vec (map-indexed
+                                (fn [i el]
+                                  (with-elem fv (+ 2 i)
+                                    (if-not (vector? el)
+                                      (do (err! el :MissingLitKey "missing key in map literal") nil)
+                                      (let [[kf vf] el
+                                            k (if (and (= "lit" (head-name kf)) (elided? (second kf)))
+                                                (element-value cx kf K)
+                                                (assignment cx (expr cx kf K) K "map literal"))
+                                            v (element-value cx vf V)]
+                                        {:key k :value v :pos (+ 2 i)}))))
+                                elems))
                     nodes (vec (remove nil? nodes))]
                 ;; duplicate constant keys (go/types: of keys of a non-interface type ... or constants)
-                (reduce (fn [seen {:keys [key]}]
-                          (if-let [kv (when (and key (= :constant (:mode key)) (not (t/interface? K))) (key-val key))]
-                            (let [kk [(t/type-str (:type key)) kv]]
+                (reduce (fn [seen {:keys [key pos]}]
+                          ;; go/types: a constant key, of an interface key type by its own type too
+                          (if-let [kv (let [key (if (= :convert-iface (:op key)) (:x key) key)]
+                                        (when (and key (= :constant (:mode key))) (key-val key)))]
+                            (let [kk [(t/type-str (:type (if (= :convert-iface (:op key)) (:x key) key))) kv]]
                               (if (contains? seen kk)
-                                (do (err! (:form key) :DuplicateLitKey "duplicate key %s in map literal" (expr-str (:form key))) seen)
+                                (do (with-elem fv pos
+                                      (err! (:form key) :DuplicateLitKey "duplicate key %s in map literal" (expr-str (:form key))))
+                                    seen)
                                 (conj seen kk)))
                             seen))
                         #{} nodes)
-                {:op :lit :kind :map :to T :entries nodes :mode :value :type T :form f :line (fline f)})
+                {:op :lit :kind :map :to T :entries (mapv #(dissoc % :pos) nodes) :mode :value :type T :form f :line (fline f)})
               :else
               (do (err! f :InvalidLit "invalid composite literal type %s" (t/type-str T)) (invalid f)))))))))
 
@@ -914,13 +941,22 @@
         node (fn [m] (merge {:op :call :kind :builtin :builtin nm :form f :line (fline f)} m))
         nargs (count arg-forms)
         cname (if unsafe (str "unsafe." nm) nm)
+        ;; go/types: the arguments checked first (but make's, new's, Offsetof's), an invalid one
+        ;; ending the call without more errors; then their count
         need (fn [lo hi]
-               (cond
-                 (< nargs lo) (do (err! f :WrongArgCount "not enough arguments for %s (expected %d, found %d)" (expr-str f) lo nargs) false)
-                 (and hi (> nargs hi)) (do (err! f :WrongArgCount "too many arguments for %s (expected %d, found %d)" (expr-str f) hi nargs) false)
-                 :else true))
+               (if (or (< nargs lo) (and hi (> nargs hi)))
+                 (do (when-not (some (fn [a] (invalid? (expr-internal cx (if (spread? a) (second a) a) nil)))
+                                     (when-not (#{"make" "new" "Offsetof"} nm) arg-forms))
+                       (if (< nargs lo)
+                         (err! f :WrongArgCount "invalid operation: not enough arguments for %s (expected %d, found %d)" (expr-str f) lo nargs)
+                         (err! f :WrongArgCount "invalid operation: too many arguments for %s (expected %d, found %d)" (expr-str f) hi nargs)))
+                     false)
+                 true))
         spread-bad (fn [] (when (and (not= nm "append") (some spread? arg-forms))
-                            (err! f :InvalidDotDotDot "invalid use of ... with built-in %s" cname) true))]
+                            (err! f :InvalidDotDotDot "invalid operation: invalid use of ... with built-in %s" nm)
+                            ;; go/types' use: the arguments checked, their variables used
+                            (doseq [a arg-forms] (expr-internal cx (if (spread? a) (second a) a) nil))
+                            true))]
     (if (spread-bad)
       (invalid f)
       (case nm
@@ -952,8 +988,9 @@
                   :else (bad "invalid argument: %s for built-in %s" (operand-str x) nm))))))
         "append"
         (if (zero? nargs)
-          (bad "not enough arguments for %s (expected 1, found 0)" (expr-str f))
-          (let [s (expr cx (first arg-forms))]
+          (bad "invalid operation: not enough arguments for %s (expected 1, found 0)" (expr-str f))
+          (let [s0 (first arg-forms)
+                s (expr cx (if (spread? s0) (second s0) s0))]
             (cond
               (invalid? s) (do (doseq [a (rest arg-forms)] (expr cx (if (spread? a) (second a) a))) (invalid f))
               (= :untyped-nil (:type s)) (bad "invalid argument: %s (untyped nil) is not a slice" (expr-str (first arg-forms)))
@@ -966,7 +1003,7 @@
                   :else
                   (let [more (rest arg-forms)
                         last-spread (and (seq more) (spread? (last more)))]
-                    (if (and last-spread (= 1 (count more)))
+                    (if (and last-spread (= 1 (count more)) (not (spread? s0)))
                       ;; append(s, t...): t assignable to S, or a string for []byte
                       (let [x (expr cx (second (first more)))]
                         (cond
@@ -977,8 +1014,10 @@
                           (let [x (assignment cx x [:slice el] "argument to append")]
                             (if (invalid? x) (invalid f)
                                 (node {:args [s (assoc x :spread true)] :mode :value :type S})))))
-                      (if last-spread
-                        (bad "can only use ... with final argument in list")
+                      (if (or last-spread (spread? (first arg-forms)))
+                        ;; go/types: the arguments of a signature func(S, ...E) S
+                        (do (call-args cx f "append" nil [:func [S [:slice el]] [S] true] arg-forms)
+                            (invalid f))
                         (let [xs (mapv (fn [a] (assignment cx (expr cx a el) el "argument to append")) more)]
                           (node {:args (into [s] xs) :mode :value :type S}))))))))))
         "copy"
@@ -1081,7 +1120,7 @@
                   (node {:args [x] :mode :value :type rt}))))))
         "make"
         (if (zero? nargs)
-          (bad "not enough arguments for %s (expected 1, found 0)" (expr-str f))
+          (bad "invalid operation: not enough arguments for %s (expected 1, found 0)" (expr-str f))
           (let [T (typexpr cx (first arg-forms))
                 u (if (t/tparam? T)
                     (let [[cu] (t/common-under T (fn [_ u] (when-not (and (vector? u) (#{:slice :map :chan} (nth u 0))) "no")))] (or cu :none))

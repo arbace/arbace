@@ -376,6 +376,91 @@ check_dir() {
   fi
 }
 
+# check_err PROGRAM: one errorcheck program of the check (GR7b, GOI-SPEC.md "As built: GR7b"):
+# its action's flags judged first (those of gc's phases goi does not have make it unsupported);
+# gc's reference (the original compiled as Go's test driver compiles an errorcheck test, its
+# errors judged; cached by the file's and the toolchain's hashes) must pass the judge, else the
+# program is skipped; then goi's checker over the forms (arbace.go.run --errorcheck, repr/go's
+# conversion, the corpus linux-errtest), its errors judged by `gocmp errorcheck` (Go's test
+# driver's judge: every // ERROR line matched, no error unmatched, at least one error when the
+# test expects the compilation to fail). A program goi fails whose expected errors go/types does
+# not report either (godump's :errors empty: they come from gc's phases after type checking) is
+# unsupported. Prints PROGRAM<TAB>RESULT<TAB>REASON.
+check_err() {
+  local p=$1 g=$goroot/test/$1 f act fl tmo=10 want=1 auto="" lang="" goflags=() why="" ns key ref st r types dump reason
+  act=$(action_of "$g")
+  set -- $act
+  [ "$1" = errorcheckwithauto ] && auto=-auto
+  shift
+  while [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do
+    fl=$1; shift
+    case $fl in
+      -t) tmo=$1; shift ;;
+      -0) want="" ;;
+      -1) want=1 ;;
+      -e|-d=panic) goflags+=("$fl") ;;
+      -lang=*) lang=${fl#-lang=}; goflags+=("$fl") ;;
+      -m|-m=*|-l|-l=*|-live|-wb=*|-N|-smallframes) why=${why:-"$fl: gc's escape analysis, inlining and liveness, which goi does not have"} ;;
+      -d=*) why=${why:-"$fl: gc's debug flags (its SSA back end's passes), which goi does not have"} ;;
+      -race) why=${why:-"-race: gc's race instrumentation, which goi does not have"} ;;
+      -std|-+|-complete|-asmhdr*|-spectre*) why=${why:-"$fl: gc compiling the standard library or the runtime, out of goi's scope"} ;;
+      -goexperiment) why=${why:-"-goexperiment: another GOEXPERIMENT"}; shift ;;
+      *) why=${why:-"$fl: a flag of gc's"} ;;
+    esac
+  done
+  [ -n "$why" ] && { printf '%s\tunsupported\t%s\n' "$p" "$why"; return; }
+  # gc's reference: the errors of the original, judged
+  key=$( { cat "$goroot/VERSION"; cat "$g"; printf '%s\n' "${goflags[@]}"; } | sha256sum | cut -c1-24)
+  ref=$cwork/eref/$key
+  if [ ! -f "$ref/judge" ]; then
+    rm -rf "$ref.tmp"; mkdir -p "$ref.tmp"
+    st=0; (cd "$ref.tmp" && env $(gc_env) timeout $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
+            -importcfg="$cwork/importcfg" -o a.o ${goflags[@]+"${goflags[@]}"} -d=ssa/check/on "$g" > out 2>&1 < /dev/null) || st=$?
+    rm -f "$ref.tmp/a.o"
+    echo $st > "$ref.tmp/exit"
+    "$gocmp" errorcheck $auto "$g" "$ref.tmp/out" > "$ref.tmp/judge" 2>&1 || true
+    if [ -n "$want" ] && [ "$st" = 0 ]; then echo "fail: compilation succeeded unexpectedly" > "$ref.tmp/judge"; fi
+    rm -rf "$ref"; mv "$ref.tmp" "$ref"
+  fi
+  if [ "$(head -1 "$ref/judge")" != pass ]; then
+    printf '%s\tskip\tgc'"'"'s own errorcheck does not pass here: %s\n' "$p" "$(sed -n 2,3p "$ref/judge" | tr '\t\n' '  ' | cut -c1-200)"; return
+  fi
+  f=$eforms/go/test/${p%.go}.ae
+  if [ ! -f "$f" ]; then
+    reason=$(awk -F'\t' -v k="$p" '$2 == k { print $1 "\t" $7; exit }' "$etsv")
+    case $reason in
+      fail*) printf '%s\tunsupported\tsyntax errors: repr/go converts only what go/parser parses (%s)\n' "$p" "$(printf '%s' "${reason#fail?}" | cut -c1-160)" ;;
+      "") printf '%s\terror\tno forms (%s)\n' "$p" "${f#$root/}" ;;
+      *) printf '%s\tunsupported\trepr/go cannot convert the invalid program: %s\n' "$p" \
+           "$(grep -F "/linux-errtest/$p.edn " "$cwork/read-errtest.log" 2>/dev/null | head -1 | sed 's/^FAIL [^ ]* //' | cut -c1-160)" ;;
+    esac
+    return
+  fi
+  ns=$(sed -n '1s/^(ns \([^ )]*\).*/\1/p' "$f")
+  r=$cwork/erun/$p
+  mkdir -p "$(dirname "$r")"
+  st=0; (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} "$eforms" "$ns" > "$r.out" 2> "$r.err" < /dev/null) || st=$?
+  case $st in
+    125) printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.err" | head -1)"; return ;;
+    126) printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.err" | head -1 | cut -c1-300)"; return ;;
+    124) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
+    0|1) ;;
+    *) printf '%s\terror\tstatus %s: %s\n' "$p" "$st" "$(head -1 "$r.err" | cut -c1-200)"; return ;;
+  esac
+  if "$gocmp" errorcheck $auto "$g" "$r.out" > "$r.judge" 2>&1 && { [ -z "$want" ] || [ "$st" = 1 ]; }; then
+    printf '%s\tpass\t\n' "$p"; return
+  fi
+  [ -n "$want" ] && [ "$st" = 0 ] && echo "fail: no error (the compilation must fail)" > "$r.judge"
+  # go/types' errors (godump's): none where gc reports some means gc's later phases
+  dump=$edumps/$p.edn
+  types=0
+  [ -f "$dump" ] && types=$("$gocmp" errorcheck -dump-errors "$dump" 2> "$r.types.err" | grep -c . || true)
+  if [ "$types" = 0 ] && [ "$st" = 0 ]; then
+    printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none)\n' "$p"; return
+  fi
+  printf '%s\tfail\t%s\n' "$p" "$(sed -n 2,3p "$r.judge" | tr '\t\n' '  ' | cut -c1-240)"
+}
+
 # check [--record] [--jobs N] [--essential] [--only REGEX]: the check (§11): every run program of
 # $GOROOT/test (the corpus linux-test, repr/go's conversion: bin/repr-go read --corpus linux-test,
 # run first when missing) interpreted against gc; results in .tmp/goi-check/results.tsv, against
@@ -398,7 +483,10 @@ check() {
   cforms=$root/.tmp/repr-go/forms/linux-test
   dforms=$root/.tmp/repr-go/forms/linux-dirtest
   cwork=$root/.tmp/goi-check
-  mkdir -p "$cwork/ref" "$cwork/run"
+  eforms=$root/.tmp/repr-go/forms/linux-errtest
+  edumps=$root/.tmp/godump/corpus/linux-errtest
+  etsv=$edumps.tsv
+  mkdir -p "$cwork/ref" "$cwork/run" "$cwork/bin"
   if [ ! -d "$cforms" ]; then
     echo "== bin/repr-go read --corpus linux-test (.tmp/goi-check/read.log)" >&2
     "$root/bin/repr-go" read --corpus linux-test > "$cwork/read.log" 2>&1 || { tail "$cwork/read.log" >&2; return 1; }
@@ -407,6 +495,20 @@ check() {
     echo "== bin/repr-go read --corpus linux-dirtest (.tmp/goi-check/read-dirtest.log)" >&2
     "$root/bin/repr-go" read --corpus linux-dirtest > "$cwork/read-dirtest.log" 2>&1 || { tail "$cwork/read-dirtest.log" >&2; return 1; }
   fi
+  if [ ! -d "$eforms" ] || [ ! -f "$etsv" ]; then
+    echo "== bin/repr-go read --corpus linux-errtest (.tmp/goi-check/read-errtest.log)" >&2
+    "$root/bin/repr-go" read --corpus linux-errtest > "$cwork/read-errtest.log" 2>&1 || { tail "$cwork/read-errtest.log" >&2; return 1; }
+  fi
+  # the errorcheck programs' judge (tools/gocmp: Go's test driver's) and gc's standard library
+  # for their references (the test driver's importcfg)
+  gocmp=$cwork/bin/gocmp
+  (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= CGO_ENABLED=0 \
+     "$goroot/bin/go" build -o "$gocmp.new" . && mv -f "$gocmp.new" "$gocmp") || { echo "bin/goi check: cannot build tools/gocmp" >&2; return 1; }
+  if [ ! -s "$cwork/importcfg" ] || [ "$(cat "$cwork/importcfg.version" 2>/dev/null)" != "$(cat "$goroot/VERSION")" ]; then
+    env $(gc_env) "$goroot/bin/go" list -export -f '{{if .Export}}packagefile {{.ImportPath}}={{.Export}}{{end}}' std > "$cwork/importcfg.new" \
+      && mv "$cwork/importcfg.new" "$cwork/importcfg" && cat "$goroot/VERSION" > "$cwork/importcfg.version" \
+      || { echo "bin/goi check: go list std failed" >&2; return 1; }
+  fi
   local list=$cwork/programs.txt
   (cd "$goroot/test" && find . -name '*.go' | sed 's|^\./||' | LC_ALL=C sort) | while read -r p; do
     case $(action_of "$goroot/test/$p") in
@@ -414,14 +516,17 @@ check() {
       rundir|"rundir "*|buildrundir|"buildrundir "*|runindir|"runindir "*)
         { [ -d "$dforms/go/test/${p%.go}_dir" ] || [ -f "$dforms/go/test/${p%.go}_dir.ae" ]; } && echo "$p" ;;
     esac
-  done > "$list"
+  done > "$list.run"
+  # the errorcheck programs (GR7b): the corpus linux-errtest's list
+  LC_ALL=C sort -u "$edumps-programs.txt" "$list.run" > "$list"
+  rm -f "$list.run"
   [ -n "$essential" ] && grep -v '^#' "$root/test/goi/essential.txt" | grep . > "$list.ess" && mv "$list.ess" "$list"
   [ -n "$only" ] && { grep -E "$only" "$list" > "$list.only" || true; mv "$list.only" "$list"; }
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
-  export -f check_one check_dir action_of stderr_head gc_env
-  export root goroot rexe hexe cforms dforms cwork
+  export -f check_one check_dir check_err action_of stderr_head gc_env
+  export root goroot rexe hexe cforms dforms cwork eforms edumps etsv gocmp
   local t0=$SECONDS
-  xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in *dir|*"dir "*) check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
+  xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) check_err "$1" ;; *dir|*"dir "*) check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
     | LC_ALL=C sort > "$cwork/results.tsv"
   # the known differences: a program listed there is known, with its reason, unless it passes
   if [ -f "$known" ]; then

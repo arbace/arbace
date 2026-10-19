@@ -25,7 +25,12 @@ var testDirs = []string{".", "ken", "chan", "interface", "internal/runtime/sys",
 var programActions = map[string]bool{"run": true, "runoutput": true, "build": true,
 	"buildrun": true, "compile": true, "asmcheck": true}
 
-const testsUsage = `usage: gocmp tests [-v] [-dirs] TESTDIR
+// errorcheckActions are the error tests' actions of one program (-errorcheck, goi's check of
+// errorcheck programs, doc/go/GOI-SPEC.md "As built: GR7b"): gc must reject the program with
+// the errors its // ERROR comments name.
+var errorcheckActions = map[string]bool{"errorcheck": true, "errorcheckwithauto": true}
+
+const testsUsage = `usage: gocmp tests [-v] [-dirs|-errorcheck] TESTDIR
 Prints the single-file programs of TESTDIR (GOROOT/test) for the configuration
 in the environment (GOOS, GOARCH), one per line, relative to TESTDIR:
 FILE, or FILE,EXTRA.go,... when the action line names more files of the
@@ -36,13 +41,16 @@ GOEXPERIMENT (-goexperiment), and go/build matches it for the configuration
 (build constraints and file name, cgo off). -v prints the files left out and
 why on stderr. -dirs lists the directory tests instead: FILE.go whose action is
 compiledir, rundir, builddir or buildrundir (FILE.dir holding its packages), with
-no other GOEXPERIMENT, matched by go/build.
+no other GOEXPERIMENT, matched by go/build. -errorcheck lists the error tests
+of one program instead: FILE.go whose action is errorcheck or errorcheckwithauto
+(whatever its flags), with no other GOEXPERIMENT, matched by go/build.
 `
 
 func mainTests(args []string) int {
 	fs := flag.NewFlagSet("gocmp tests", flag.ExitOnError)
 	verbose := fs.Bool("v", false, "print the files left out, and why, on stderr")
 	dirs := fs.Bool("dirs", false, "list the directory tests instead (dirtest.go): FILE.go per line, its action compiledir, rundir, builddir or buildrundir")
+	errorcheck := fs.Bool("errorcheck", false, "list the error tests of one program instead: FILE.go per line, its action errorcheck or errorcheckwithauto")
 	fs.Usage = usage(fs, testsUsage)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
@@ -74,7 +82,11 @@ func mainTests(args []string) int {
 		for _, name := range names {
 			rel, _ := filepath.Rel(root, name)
 			rel = filepath.ToSlash(rel)
-			entry, why, err := testProgram(&ctxt, root, rel)
+			actions := programActions
+			if *errorcheck {
+				actions = errorcheckActions
+			}
+			entry, why, err := testProgram(&ctxt, root, rel, actions)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				return 2
@@ -95,7 +107,7 @@ func mainTests(args []string) int {
 }
 
 // testProgram decides on one file: its entry, or "" and why not.
-func testProgram(ctxt *build.Context, root, rel string) (entry, why string, err error) {
+func testProgram(ctxt *build.Context, root, rel string, actions map[string]bool) (entry, why string, err error) {
 	src, err := os.ReadFile(filepath.Join(root, rel))
 	if err != nil {
 		return "", "", err
@@ -110,7 +122,7 @@ func testProgram(ctxt *build.Context, root, rel string) (entry, why string, err 
 		action = strings.TrimSpace(strings.TrimPrefix(line, "//"))
 	}
 	f := strings.Fields(action)
-	if len(f) == 0 || !programActions[f[0]] {
+	if len(f) == 0 || !actions[f[0]] {
 		return "", "", nil // not a single-program test: no reason worth printing
 	}
 	var extra []string

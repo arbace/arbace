@@ -6,7 +6,9 @@
 //	gocmp [-go CMD] [-levels tree,export,code] [-keep-positions] A B
 //	gocmp reprint [-canon] SRCROOT DSTROOT
 //	gocmp mutate -op swap|const|drop [-seed N] A OUTDIR
-//	gocmp tests [-v] [-dirs] TESTDIR
+//	gocmp tests [-v] [-dirs|-errorcheck] TESTDIR
+//	gocmp errorcheck [-auto] FILE.go OUTPUT
+//	gocmp errorcheck -dump-errors DUMP.edn
 //	gocmp -dirtest [-levels tree,export,code,run] [-keep-positions] FILE.go B
 //
 // A is the original: a package directory, or a program of .go files of one
@@ -91,6 +93,8 @@ func main() {
 			os.Exit(mainMutate(os.Args[2:]))
 		case "tests":
 			os.Exit(mainTests(os.Args[2:]))
+		case "errorcheck":
+			os.Exit(mainErrorcheck(os.Args[2:]))
 		}
 	}
 	os.Exit(mainCompare(os.Args[1:]))

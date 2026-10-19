@@ -49,10 +49,16 @@
             (goto-target [b nm]
               (when-let [l (get @labels nm)]
                 (when (ancestor? (:block l) b) l)))
+            ;; gc's enclosingTarget: a label defined is used even when it is not a valid target
+            ;; (test/fixedbugs/bug136.go); :invalid when it labels no enclosing statement
             (enclosing-target [b nm]
-              (loop [x b]
-                (when x
-                  (if (and (:lstmt x) (= nm (:name (:lstmt x)))) (:lstmt x) (recur (:parent x))))))
+              (when-let [l (get @labels nm)]
+                (vreset! (:used l) true)
+                (loop [x b]
+                  (cond
+                    (nil? x) :invalid
+                    (and (:lstmt x) (identical? l (:lstmt x))) l
+                    :else (recur (:parent x))))))
             (block-branches [parent ctxt lstmt start forms]
               (let [b {:parent parent :start start :lstmt lstmt :id (Object.)}
                     var-pos (volatile! nil)
@@ -100,13 +106,11 @@
                                       (let [nm (name lbl)]
                                         (case h
                                           "break" (if-let [t (enclosing-target b nm)]
-                                                    (if (#{:for :switch :select} (:kind t))
-                                                      (vreset! (:used t) true)
+                                                    (when-not (and (map? t) (#{:for :switch :select} (:kind t)))
                                                       (errf line "invalid break label %s" nm))
                                                     (errf line "break label not defined: %s" nm))
                                           "continue" (if-let [t (enclosing-target b nm)]
-                                                       (if (= :for (:kind t))
-                                                         (vreset! (:used t) true)
+                                                       (when-not (and (map? t) (= :for (:kind t)))
                                                          (errf line "invalid continue label %s" nm))
                                                        (errf line "continue label not defined: %s" nm))
                                           "goto" (if-let [t (goto-target b nm)]
@@ -122,18 +126,40 @@
                                     (if (= "when" h)
                                       (inner ictx line (rest args) nil)
                                       (do (inner ictx line (branch (second args)) nil)
-                                          (when (> (count args) 2) (inner ictx line [(nth args 2)] nil)))))
+                                          ;; the else block starts on the line of its brace (gc:
+                                          ;; s.Else.Pos()), which the forms keep for a do; for a
+                                          ;; single statement, the line before it (} else {)
+                                          (when (> (count args) 2)
+                                            (let [el (nth args 2)
+                                                  l (fline el)]
+                                              (inner ictx (cond (nil? l) line
+                                                                (= "do" (head-name el)) l
+                                                                (> l (inc line)) (dec l)
+                                                                :else line)
+                                                     (branch el) nil))))))
                                   "cond" (let [ictx (assoc ctxt :case-index -1)
                                                branch (fn [x] (if (= "do" (head-name x)) (rest x) [x]))
-                                               pairs (partition 2 (rest s))]
-                                           ;; if a {} else if b {} else {}: each else is a block holding the rest
-                                           (letfn [(chain [ps]
-                                                     (when (seq ps)
-                                                       (let [[t br] (first ps)]
-                                                         (inner ictx line (branch br) nil)
-                                                         (when (seq (rest ps))
-                                                           (chain (rest ps))))))]
-                                             (chain pairs)))
+                                               pairs (vec (partition 2 (rest s)))
+                                               ;; a nested else if's form is the rest of its chain: its
+                                               ;; children's lines are the original's (::chain)
+                                               [src off] (or (::chain (meta s)) [s 0])
+                                               tline (fn [i] (or (e/child-line src (+ off 1 (* 2 i))) line))
+                                               bline (fn [i] (or (e/child-line src (+ off 2 (* 2 i))) line))
+                                               [t0 b0] (first pairs)]
+                                           ;; if a {} else if b {} else {}: the else of an if is a block
+                                           ;; of its own (gc: s.Else.Pos()), an else if one holding the
+                                           ;; next if and the rest of the chain
+                                           (if (= :else t0)
+                                             (inner ictx (bline 0) (branch b0) nil)
+                                             (do (inner ictx line (branch b0) nil)
+                                                 (when (< 1 (count pairs))
+                                                   (let [[t1 b1] (nth pairs 1)]
+                                                     (if (= :else t1)
+                                                       (inner ictx (bline 1) (branch b1) nil)
+                                                       (inner ictx (tline 1)
+                                                              [(with-meta (cons 'cond (drop 3 s))
+                                                                 {:line (tline 1) ::chain [src (+ off 2)]})]
+                                                              nil)))))))
                                   ("for" "while" "range")
                                   (let [body (case h "for" (drop 4 s) "while" (nnext s) "range" (nnext s))]
                                     (inner {:breaks :for :continues true :case-index -1} line body lstmt))

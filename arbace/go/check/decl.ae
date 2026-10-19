@@ -141,7 +141,13 @@
                 more)))
 
 (defn- declare-pkg! [x nm form]
-  (when (not= "_" nm)
+  (cond
+    ;; go/types' declarePkgObj: init and main (of package main) only functions
+    (and (= "init" nm) (not= :func (o x :kind)))
+    (err! form :InvalidInitDecl "cannot declare init - must be func")
+    (and (= "main" nm) (not= :func (o x :kind)) (= "main" (o e/*pkg* :name)))
+    (err! form :InvalidMainDecl "cannot declare main - must be func")
+    (not= "_" nm)
     (let [s (o e/*pkg* :scope)]
       (if-let [alt (e/scope-get s nm)]
         (err! form :DuplicateDecl "%s redeclared in this block" nm)
@@ -270,7 +276,8 @@
           (= "init" nm)
           (do (vswap! (:objs *ctx*) conj x)
               (vswap! (:inits *ctx*) conj x)
-              (when tps (err! nf :InvalidInitDecl "func init must have no type parameters")))
+              (when tps (err! nf :InvalidInitDecl "func init must have no type parameters"))
+              (when (:extern (meta nf)) (err! nf :MissingInitBody "func init must have a body")))
           (and (= "main" nm) (= "main" (o e/*pkg* :name)))
           (do (when tps (err! nf :InvalidMainDecl "func main must have no type parameters"))
               (declare-pkg! x nm nf))
@@ -538,11 +545,11 @@
         [sig ps rs body named] (code/signature cx sig-forms method)]
     (when method
       (let [[b] (t/deref-type (:type recv))]
+        ;; go/types' validRecv
         (when (and (t/valid? b) (not (and (t/named? b) (= (:pkg (t/info b)) (o e/*pkg* :path)))))
-          (if (and (t/named? b) (:pkg (t/info b)))
+          (if (or (t/named? b) (keyword? b))
             (err! recv-form :InvalidRecv "cannot define new methods on non-local type %s" (t/type-str b))
-            (when (t/valid? b)
-              (err! recv-form :InvalidRecv "cannot define new methods on non-local type %s" (t/type-str b)))))))
+            (err! recv-form :InvalidRecv "invalid receiver type %s" (t/type-str (:type recv)))))))
     (when (and (= "init" (o x :name)) (not method) (or (seq (nth sig 1)) (seq (nth sig 2))))
       (err! form :InvalidInitSig "func init must have no arguments and no return values"))
     (when (and (= "main" (o x :name)) (not method) (= "main" (o e/*pkg* :name)) (or (seq (nth sig 1)) (seq (nth sig 2))))
@@ -693,6 +700,7 @@
             (cond
               (nil? p) (err! spec :BrokenImport "could not import %s (no forms)" path)
               (= "_" nm) nil
+              (= "init" nm) (err! spec :InvalidInitDecl "cannot import package as init - init must be a func")
               (= "." nm)
               (let [imp (e/obj {:kind :pkg :name "." :imported p :path path :line (or (code/fline spec) (:line fi)) :file (:name fi) :dot true})]
                 (vswap! (:dot-imports fi) conj imp)
@@ -706,6 +714,23 @@
                   (err! spec :DuplicateDecl "%s redeclared in this block" nm)
                   (e/scope-put! (:scope fi) nm imp))
                 (vswap! (:import-objs fi) conj imp)))))))))
+
+(defn file-scope-conflicts!
+  "go/types' resolver: a package-level object named as one of file fi's imports (or names a
+  dot import brings in) is an error, at the object."
+  [fi]
+  (let [ps (o e/*pkg* :scope)
+        pkg-str (fn [p path] (format "package %s (\"%s\")" (o p :name) path))
+        hits (concat
+              (for [[nm x] (:names (:scope fi))
+                    :when (= :pkg (o x :kind))
+                    :let [alt (e/scope-get ps nm)] :when alt]
+                [alt (format "%s already declared through import of %s" nm (pkg-str (o x :imported) (o x :path)))])
+              (for [[nm [_ imp]] (:dots fi)
+                    :let [alt (e/scope-get ps nm)] :when alt]
+                [alt (format "%s already declared through dot-import of %s" nm (pkg-str (o imp :imported) (o imp :path)))]))]
+    (doseq [[alt msg] (sort-by (fn [[alt]] [(str (o alt :file)) (or (o alt :line) 0)]) hits)]
+      (e/error! (o alt :file) (o alt :line) :DuplicateDecl msg))))
 
 (defn unused-imports! [fi]
   (binding [e/*gofile* fi]

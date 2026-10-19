@@ -18,7 +18,9 @@
   [cx nm x f]
   (when (not= "_" nm)
     (if-let [alt (e/scope-get (:scope cx) nm)]
-      (err! f :DuplicateDecl "%s redeclared in this block" nm)
+      ;; go/types does not declare it: never reported unused
+      (do (err! f :DuplicateDecl "%s redeclared in this block" nm)
+          (when (e/obj? x) (oset! x :used true)))
       (e/scope-put! (:scope cx) nm x))))
 
 (defn block-cx [cx] (assoc cx :scope (e/scope (:scope cx) :block)))
@@ -231,6 +233,8 @@
                          (or say (:annotated cx-flags))
                          (e/annotation-error! x "^:assign" nm (if say "assigned" "declared") (if alt "assigned" "declared")))
                        (cond
+                         ;; go/types: a repeated name is a dummy variable, not declared
+                         rep {:obj (new-local cx "_" nil x) :form x :err true}
                          (and alt (= :var (o alt :kind))) {:obj alt :reused true :form x}
                          alt (do (err! x :UnassignableOperand "cannot assign to %s" (expr-str x)) {:obj nil :form x})
                          :else {:obj (new-local cx nm nil x) :new true :form x})))))
@@ -246,7 +250,7 @@
                               :else (init-var cx (:obj l) v "assignment")))
                           lhs vals)))
         new-vars (filter #(and (:new %) (not= "_" (o (:obj %) :name))) lhs)]
-    (when (and (empty? new-vars) (every? some? lhs) (every? :obj lhs))
+    (when (and (empty? new-vars) (every? some? lhs) (every? :obj lhs) (not-any? :err lhs))
       (err! f :NoNewVar "no new variables on left side of :="))
     (doseq [l new-vars] (declare! cx (o (:obj l) :name) (:obj l) (:form l)))
     {:op :decl :short true :objs (mapv :obj lhs) :init nodes :line (fline f)}))
@@ -408,9 +412,11 @@
         tag (if (some? tag-f)
               (let [x (expr icx tag-f)
                     x (assignment icx x nil "switch expression")]
-                (when (and (not (invalid? x)) (not (t/comparable? (:type x))) (not (t/has-nil? (:type x))))
-                  (err! tag-f :InvalidExprSwitch "cannot switch on %s (%s is not comparable)" (operand-str x) (t/type-str (:type x))))
-                x)
+                (if (and (not (invalid? x)) (not (t/comparable? (:type x))) (not (t/has-nil? (:type x))))
+                  ;; go/types: the tag invalid, its cases not compared
+                  (do (err! tag-f :InvalidExprSwitch "cannot switch on %s (%s is not comparable)" (operand-str x) (t/type-str (:type x)))
+                      (invalid tag-f))
+                  x))
               (assoc (const-node true :bool true) :form 'true))
         id (Object.)
         scx (assoc icx :breakable id :switch-label label)
@@ -577,10 +583,39 @@
                   ;; func(yield func(K, V) bool)
                   (when (and (= 1 (count ps)) (empty? rs))
                     (let [yu (t/under (first ps))]
-                      (when (and (vector? yu) (= :func (nth yu 0)) (= [:bool] (mapv t/under (nth yu 2))) (<= (count (nth yu 1)) 2))
+                      (when (and (vector? yu) (= :func (nth yu 0)) (= [:bool] (vec (nth yu 2))) (<= (count (nth yu 1)) 2) (not (nth yu 3)))
                         (let [yps (nth yu 1)]
                           [:func (first yps) (second yps) (count yps)]))))))
         nil))))
+
+(defn- range-cause
+  "Why x cannot be ranged over (go/types' rangeKeyVal's cause), or nil."
+  [cx x]
+  (let [ty (:type x)
+        u (if (t/tparam? ty) (t/core-type ty) (t/under ty))]
+    (cond
+      (nil? u) nil
+      (and (vector? u) (= :chan (nth u 0)) (= :send (nth u 1)))
+      (str "receive from send-only channel " (t/type-str ty))
+      (and (keyword? u) (t/integer-type? u) (not (allow-version? cx 22))) "requires go1.22 or later"
+      (and (vector? u) (= :func (nth u 0)))
+      (let [[_ ps rs] u]
+        (cond
+          (not (allow-version? cx 23)) "requires go1.23 or later"
+          (not= 1 (count ps)) "func must be func(yield func(...) bool): wrong argument count"
+          (seq rs) "func must be func(yield func(...) bool): unexpected results"
+          :else
+          (let [yu (t/under (first ps))]
+            (cond
+              (not (and (vector? yu) (= :func (nth yu 0)))) "func must be func(yield func(...) bool): argument is not func"
+              (> (count (nth yu 1)) 2) "func must be func(yield func(...) bool): yield func has too many parameters"
+              (not= [:bool] (vec (nth yu 2)))
+              (if (and (= 1 (count (nth yu 2))) (= :bool (t/under (first (nth yu 2)))))
+                "func must be func(yield func(...) bool): yield func returns user-defined boolean, not bool"
+                "func must be func(yield func(...) bool): yield func does not return bool")
+              (nth yu 3) (str "yield func of type " (t/type-str (first ps)) " cannot be variadic")
+              :else nil))))
+      :else nil)))
 
 (defn range-stmt [cx f label]
   (let [[_ bv & body] f
@@ -594,7 +629,9 @@
         id (Object.)
         bcx0 (fn [] (assoc (block-cx lcx) :breakable id :continuable id :loop-label label))]
     (when (and (not (invalid? x)) (nil? rt))
-      (err! xf :InvalidRangeExpr "cannot range over %s" (operand-str x)))
+      (if-let [cause (range-cause lcx x)]
+        (err! xf :InvalidRangeExpr "cannot range over %s: %s" (operand-str x) cause)
+        (err! xf :InvalidRangeExpr "cannot range over %s" (operand-str x))))
     (let [[kind kt vt nyield] rt
           ;; how many iteration variables the kind permits
           maxv (cond (= kind :func) (or nyield 0) (#{:chan :int} kind) 1 :else 2)
@@ -748,6 +785,11 @@
     "fallthrough" "label" "do" "if" "when" "cond" "switch" "type-switch" "select" "for" "while" "range"
     "go/directive"})
 
+(def ^:dynamic *stmt-parent*
+  "The statement form (or function form) whose children stmt-list checks: a literal statement's
+  line is its child line (e/child-line)."
+  nil)
+
 (defn stmt
   "A statement form (tail: the function's last statement position; last: the last of its
   list)."
@@ -762,6 +804,7 @@
 
 (defn stmt*
   [cx f tail last]
+  (binding [*stmt-parent* (when (seq? f) f)]
   (with-line f
     (let [h (head-name f)
           label (:pending-label cx)
@@ -796,19 +839,28 @@
         (if (and tail last (seq (:results cx)) (not (panic-call? f)))
           ;; the implicit return of the body's last expression (SPEC §6.4)
           (assoc (return-stmt cx (with-meta (list 'return f) (meta f))) :implicit true)
-          (expr-stmt cx f))))))
+          (expr-stmt cx f)))))))
 
 (defn stmt-list
   "The statements of a list (tail: whether the list ends the function body)."
   [cx forms tail]
   (let [forms (vec forms)
-        n (count forms)]
+        n (count forms)
+        ;; forms is the tail of the parent form: their indexes in it (a vector, its metadata
+        ;; kept, for e/child-line's constant-time children)
+        parent (when-let [p *stmt-parent*] (with-meta (vec p) (meta p)))
+        off (when (and parent (pos? n)) (- (count parent) n))
+        off (when (and off (>= off 0) (identical? (nth parent off) (first forms))) off)]
     (vec (keep-indexed (fn [i f]
-                         (let [last (= i (dec n))]
-                           (if (and (not last) (#{"let" "let-type"} (head-name f)))
-                             ;; a let not last in its list is a block of its own (as the printer prints it)
-                             (assoc (stmt (block-cx cx) f false false) :nested true)
-                             (stmt cx f (and tail last) last))))
+                         (let [last (= i (dec n))
+                               one (fn []
+                                     (if (and (not last) (#{"let" "let-type"} (head-name f)))
+                                       ;; a let not last in its list is a block of its own (as the printer prints it)
+                                       (assoc (stmt (block-cx cx) f false false) :nested true)
+                                       (stmt cx f (and tail last) last)))]
+                           (if (and off (not (fline f)))
+                             (e/with-child-line parent (+ off i) (one))
+                             (one))))
                        forms))))
 
 ;;; Terminating statements (return.go)
@@ -881,7 +933,7 @@
                     :fallthrough-ok false)
          [recv-obj pobjs robjs] (declare-params! fcx ps rs recv)
          fcx (assoc fcx :results robjs :named-results named)
-         stmts (stmt-list fcx body true)]
+         stmts (binding [*stmt-parent* (when (seq? f) f)] (stmt-list fcx body true))]
      (when (and (seq rs) (not (:extern cx)))
        (when-not (binding [*term-cx* fcx] (list-terminating? stmts))
          (e/error! (or (:go/end (meta f)) (fline f) e/*line*) :MissingReturn "missing return")))
