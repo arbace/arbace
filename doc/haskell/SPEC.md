@@ -1499,6 +1499,24 @@ for byte (1,334 modules byte-identical); its trees of mode `:full` still differ,
 lines, which the module view (§2.8, S5) does not keep. Every other module's forms and printed
 modules are unchanged.
 
+### 10.11 Surveyed and built as an opt-in: HR26-HR28 (2026-10-19)
+
+[HASKELL-NOTES.md](HASKELL-NOTES.md), "HR26-HR28", records the survey and the build. HR25's four
+modules (§10.10, §10.9) differ at the trees of mode `:full` because a CPP line marker after a
+directive sets GHC's positions back to the module's own lines where the module's `{-# LINE #-}`
+pragmas put them in another file, and the module view (§2.8) drops the marker. HR26 recommends
+(b): the module view writes such a marker as `{-# LINE n "X.hs" #-}` on the directive's blank line
+before it (only in a module whose text has pragmas, only where they disagree and a line that is
+not blank follows before the next pragma), recorded as `:cpp`'s `:view-markers` (HR27). That
+changes §2.8's module view, S5's reference, so this text is unchanged and the option is built as
+an opt-in for the user's decision: the helper's `dump --full --view-markers`, `bin/repr-haskell
+roundtrip --text --view-markers`. Measured over the corpus: five lines in the four modules' views,
+the four then equal at the trees of mode `:full` (1,331 modules; the known differences of the text
+level 3 trees, HR12's, and 11 conversions); without the option every result is §10.10's. If HR26
+(b) and HR28 (a) are decided, §2.8 gains the sentence: "In a module whose text has `{-# LINE #-}`
+pragmas, a line marker naming the module's file that gives its line a position the pragmas do not
+is written as `{-# LINE n "file" #-}` on the line before it (`:cpp`'s `:view-markers`)."
+
 ## 11. Decisions and open questions
 
 ### 11.1 Decisions taken while writing (S1-S36)

@@ -38,6 +38,12 @@
 #      .hsig, the .hs-boot themselves, the .hsc's hsc2hs output's module view) with the same trees
 #      of mode :full; and compiled to interfaces equal to the originals' (the signature's .hi, the
 #      boot file's .hi-boot).
+#   9. HR26's opt-in (test/haskell/hr26/AlexDir.hs: a {-# LINE #-} pragma into AlexDir.x, then an
+#      #include, after which CPP's line marker names the module's own lines): in mode :full printed
+#      back byte for byte to its module view, whose trees of mode :full differ from the original's
+#      (the known difference of HR25); with the helper's --view-markers the module view gets the
+#      marker as a pragma (:cpp's :view-markers), printed back byte for byte with the same trees and
+#      lines of mode :full; the forms of mode :lines are unchanged by the option.
 # Usage: bin/lib/repr-haskell/test (from bin/repr-haskell test). Scratch in .tmp/repr-haskell/test.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -261,4 +267,43 @@ done
   (if (empty? bad)
     (println "ok:" (count ms) "interfaces equal (the signature'"'"'s, the boot file'"'"'s .hi-boot, the literate, the .hsc and the generated modules'"'"')")
     (System/exit 1)))') || fail=1
+
+echo "== 9. HR26's opt-in (test/haskell/hr26/)"
+w9=$work/hr26
+mkdir -p "$w9/src"
+cp -a "$root/test/haskell/hr26/." "$w9/src/"
+for v in plain markers; do
+  vm=""; [ $v = markers ] && vm=--view-markers
+  # shellcheck disable=SC2086
+  (cd "$w9/src" && "$helper" dump --full $vm -o "$w9/$v/dumps" --libdir "$libdir" --ghc -haddock --files AlexDir.hs &&
+     "$helper" dump $vm -o "$w9/$v/dumps-lines" --libdir "$libdir" --ghc -haddock --files AlexDir.hs) || fail=1
+  (cd "$root" && arbace_tool -m arbace.repr.haskell read -o "$w9/$v/forms" "$w9/$v/dumps/AlexDir.hs.edn" &&
+     arbace_tool -m arbace.repr.haskell read -o "$w9/$v/forms-lines" "$w9/$v/dumps-lines/AlexDir.hs.edn" &&
+     arbace_tool -m arbace.repr.haskell print --layout full -o "$w9/$v/full" "$w9/$v/forms/hs/AlexDir.ae") > "$w9/$v.log" || fail=1
+  cp "$w9/src/AlexDir.h" "$w9/$v/full/"
+  (cd "$w9/$v/full" && "$helper" tree --full -o "$w9/$v/cand" --libdir "$libdir" --ghc -haddock --files AlexDir.hs) || fail=1
+done
+(cd "$w9/src" && "$helper" tree --full -o "$w9/orig" --libdir "$libdir" --ghc -haddock --files AlexDir.hs) || fail=1
+same_full() { cmp -s "$w9/orig/AlexDir.hs.tree" "$w9/$1/cand/AlexDir.hs.tree" && cmp -s "$w9/orig/AlexDir.hs.lines" "$w9/$1/cand/AlexDir.hs.lines"; }
+if ! cmp -s "$w9/plain/dumps/AlexDir.hs.view" "$w9/plain/full/AlexDir.hs"; then
+  echo "FAIL: AlexDir.hs in mode :full is not printed back byte for byte to its module view ($w9/plain/full/AlexDir.hs)"; fail=1
+elif same_full plain; then
+  echo "FAIL: AlexDir.hs's module view without --view-markers has the original's trees of mode :full (HR25's difference expected)"; fail=1
+else
+  echo "ok: AlexDir.hs printed back byte for byte to its module view, its trees of mode :full differing (HR25)"
+fi
+if ! cmp -s "$w9/markers/dumps/AlexDir.hs.view" "$w9/markers/full/AlexDir.hs"; then
+  echo "FAIL: AlexDir.hs with --view-markers is not printed back byte for byte to its module view ($w9/markers/full/AlexDir.hs)"; fail=1
+elif ! grep -q ':view-markers \[10\]' "$w9/markers/forms/hs/AlexDir.ae" || ! grep -qx '{-# LINE 11 "AlexDir.hs" #-}' "$w9/markers/full/AlexDir.hs"; then
+  echo "FAIL: AlexDir.hs's module view with --view-markers has no pragma at line 10 (:cpp's :view-markers; $w9/markers)"; fail=1
+elif ! same_full markers; then
+  echo "FAIL: AlexDir.hs with --view-markers parses to another tree of mode :full ($w9/markers/full/AlexDir.hs)"; fail=1
+else
+  echo "ok: AlexDir.hs with --view-markers ({-# LINE 11 \"AlexDir.hs\" #-} at line 10) printed back byte for byte, the same trees and lines of mode :full"
+fi
+if cmp -s "$w9/plain/forms-lines/hs/AlexDir.ae" "$w9/markers/forms-lines/hs/AlexDir.ae"; then
+  echo "ok: AlexDir.hs's forms of mode :lines the same with --view-markers"
+else
+  echo "FAIL: --view-markers changes AlexDir.hs's forms of mode :lines ($w9/markers/forms-lines)"; fail=1
+fi
 exit $fail

@@ -18,7 +18,7 @@
 #                                 (the modules, R6's .hsc modules and boot files; every one converted)
 #   bin/repr-haskell dump --corpus [CORPUS]   dump the corpus into .tmp/repr-haskell/dumps/CORPUS/PKG/
 #   bin/repr-haskell dump [--full] --corpus [CORPUS]   the same with --full into dumps/CORPUS-full/
-#   bin/repr-haskell dump [--full] [-o DIR] FILE... [--ghc FLAG...]
+#   bin/repr-haskell dump [--full [--view-markers]] [-o DIR] FILE... [--ghc FLAG...]
 #                                 run the helper on modules (relative to the current directory) with
 #                                 GHC flags; one DIR/FILE.edn each (default .tmp/hsdump/out); --full
 #                                 (mode :full, SPEC §7.2, §8.2) adds the exact-print annotations (as
@@ -74,7 +74,12 @@
 #                                 test/haskell/roundtrip-CORPUS-text-known.edn does not list, and on a
 #                                 listed one that no longer occurs. Report
 #                                 .tmp/repr-haskell/cand-text/CORPUS.report.edn. --text-only: the text
-#                                 level alone. With --iface too: tree, interface, text
+#                                 level alone. With --iface too: tree, interface, text.
+#                                 --view-markers: HR26's opt-in (doc/haskell/HASKELL-NOTES.md, "HR26"):
+#                                 a module view whose {-# LINE #-} pragmas disagree with CPP's line
+#                                 markers gets the markers as pragmas (the helper's --view-markers), and
+#                                 the known differences it fixes
+#                                 (test/haskell/roundtrip-CORPUS-text-view-markers.edn) must be equal
 #   bin/repr-haskell roundtrip --layout [CORPUS]
 #                                 then the tree level of the layout layout (SPEC §7.4, 2; R4): the
 #                                 same forms printed by Haskell's layout rule into
@@ -431,7 +436,7 @@ iface_level() {
 }
 
 roundtrip() {
-  local c=ghc-9.14.1 only="" iface="" tree=1 text="" layout="" st=0
+  local c=ghc-9.14.1 only="" iface="" tree=1 text="" layout="" vm="" st=0
   while [ $# -gt 0 ]; do
     case $1 in
       --only) only=$2; shift 2 ;;
@@ -441,6 +446,7 @@ roundtrip() {
       --text-only) text=1; tree=""; shift ;;
       --layout) layout=1; shift ;;
       --layout-only) layout=1; tree=""; shift ;;
+      --view-markers) vm=--view-markers; shift ;;
       *) c=$1; shift ;;
     esac
   done
@@ -462,7 +468,8 @@ roundtrip() {
     fi
     iface_level "$c" "${sides[@]}" || st=1
   fi
-  if [ -n "$text" ]; then text_level "$c" "$only" || st=1; fi
+  [ -z "$vm" ] || [ -n "$text" ] || { echo "repr-haskell: --view-markers is the text level's (--text)" >&2; return 2; }
+  if [ -n "$text" ]; then text_level "$c" "$only" "$vm" || st=1; fi
   return $st
 }
 
@@ -472,13 +479,16 @@ roundtrip() {
 # (.tmp/repr-haskell/cand-text/CORPUS/PKG/), each printed module compared byte for byte with its
 # original (a CPP module: its module view), then GHC's trees in mode :full (hsdump tree --full:
 # showAstData NoBlankSrcSpan NoBlankEpAnnotations, comments kept) and lines of both
-# (.tmp/repr-haskell/trees-full/CORPUS/{orig,cand}/PKG/)
+# (.tmp/repr-haskell/trees-full/CORPUS/{orig,cand}/PKG/). VM --view-markers: HR26's opt-in, the
+# module views with CPP's line markers that the {-# LINE #-} pragmas disagree with written as
+# pragmas (the helper's --view-markers), the known differences it fixes
+# (test/haskell/roundtrip-CORPUS-text-view-markers.edn) then required equal
 text_level() {
-  local c=$1 only=$2
+  local c=$1 only=$2 vm=${3:-}
   local dumps=$rh/dumps/$c-full forms=$rh/forms/$c-full cand=$rh/cand-text/$c trees=$rh/trees-full/$c t0 t1 t2 t3 t4
   t0=$(date +%s)
   echo "== repr-haskell roundtrip $c: text level: dump (--full)" >&2
-  dump_corpus "$c" "$dumps" --full
+  dump_corpus "$c" "$dumps" "--full${vm:+ $vm}"
   t1=$(date +%s)
   echo "== repr-haskell roundtrip $c: text level: convert (mode :full; $((t1 - t0)) s dumping)" >&2
   rm -rf "$forms"; mkdir -p "$(dirname "$forms")"
@@ -498,6 +508,7 @@ text_level() {
   arbace_tool -m arbace.repr.haskell compare-text --corpus "$(corpus_file "$c")" --src "$srcroot" --views "$dumps" \
     --cand "$cand" --trees "$trees" --forms-report "$forms.report.edn" \
     --known "$root/test/haskell/roundtrip-$c-text-known.edn" --report "$cand.report.edn" ${only:+--only "$only"} \
+    ${vm:+--fixed "$root/test/haskell/roundtrip-$c-text-view-markers.edn"} \
     --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2)) parse $((t4 - t3))"
 }
 
@@ -571,16 +582,17 @@ case $cmd in
       c=${2:-ghc-9.14.1}; corpus_fetch "$c"; dump_corpus "$c" "$rh/dumps/$c"
       cat "$rh/dumps/$c"/*.err >&2; exit 0
     fi
-    out=$work/out; full=""; files=(); gflags=()
+    out=$work/out; full=""; vm=""; files=(); gflags=()
     while [ $# -gt 0 ]; do
       case $1 in
         -o) out=$2; shift 2 ;;
         --full) full=--full; shift ;;
+        --view-markers) vm=--view-markers; shift ;;
         --ghc) shift; gflags=("$@"); break ;;
         *) files+=("$1"); shift ;;
       esac
     done
-    hsdump dump $full -o "$out" --ghc "${gflags[@]}" --files "${files[@]}" ;;
+    hsdump dump $full $vm -o "$out" --ghc "${gflags[@]}" --files "${files[@]}" ;;
   read)
     full=""
     if [ "${1:-}" = --full ] && [ "${2:-}" = --corpus ]; then full=--full; shift; fi

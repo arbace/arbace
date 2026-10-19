@@ -1055,3 +1055,107 @@ module whose text has `{-# LINE #-}` pragmas, not only an `.hsc` module's.
 
 The run (`roundtrip --iface --text --layout`): the text level about 2 minutes (dumps 26 s, conversion 46 s,
 printing 11 s, parses 36 s), the rest as R6's.
+
+## HR26-HR28: the trees of mode `:full` after a directive (HR25's rest)
+
+Surveyed and built on 2026-10-19 (branch `repr-haskell-hr25`, from main at `90ec844d`), on the
+same GHC and the stage 0 of that commit. HR25 left four modules converted in mode `:full`,
+printed back byte for byte and different at the trees of mode `:full`: `Cabal-syntax`'s alex
+output `Distribution.Fields.Lexer` and R6's three `.hsc` modules whose hsc2hs output keeps a CPP
+directive (`unix`'s `System.Posix.Directory.Common`, `ghc-internal`'s
+`GHC.Internal.System.Environment.ExecutablePath`, `process`'s
+`System.Process.CommunicationHandle.Internal`).
+
+### What the difference is
+
+A `{-# LINE #-}` pragma of the module's text (alex's at `Lexer.hs`'s line 4, hsc2hs's) puts GHC's
+positions in another file (`Lexer.x`, the `.hsc`). Traditional CPP passes a short skipped region on
+as blank lines, but after an `#include` (and a longer skip) it writes a line marker, `# 45
+"src/Distribution/Fields/Lexer.hs" 2`, and GHC's lexer takes the marker as a line pragma: from that
+line on the original's positions are the module's own lines. The module view (§2.8, S5) drops the
+markers, so the printed module, which is the module view byte for byte, has nothing there to undo
+the pragma: GHC parses it with the positions still in `Lexer.x` (or the `.hsc`) up to the next
+pragma. Every span after the directive differs (in `Lexer.hs` 1,864 of its 2,641 located nodes' lines),
+nothing else does. In the corpus, five markers in the four modules disagree with the pragmas before
+them (`Lexer.hs` at its lines 45 and 555, after `#include "ghcconfig.h"` and an `#ifdef`'s skipped branch; the three
+`.hsc` outputs at one each, after their `#include` or `#if`). Two more, in `unix`'s
+`System.Posix.Signals` and `Signals.Exts`, are followed only by blank lines before hsc2hs's next
+pragma, so no position differs there. HR12's three `CTypes.h` modules are another case: their
+original's tree holds the header's comments, not other positions.
+
+### Choices for the user (HR26-HR28)
+
+- **HR26 The reference where the pragmas and CPP's markers disagree** (the four modules). (a) As
+  built (R6, HR25): the module view as §2.8 defines it, the four known differences of the tree of
+  mode `:full`. (b) The module view writes such a marker as a pragma: where a marker that names
+  the module's file gives its line `n` a position the module's own pragmas do not give it, the line
+  before it (the directive's, blank in the view) becomes `{-# LINE n "X.hs" #-}`, unless only blank
+  lines follow up to the next pragma; `:cpp` records the lines (HR27). The printed module is that
+  view byte for byte and GHC parses it to the original's positions, so the trees of mode `:full`
+  are equal with nothing normalized; the printed module compiled names the lines the original's
+  compilation names. Only a module whose text has `{-# LINE #-}` pragmas can change, and in the
+  corpus only the four do (five lines). (c) A normalization of the text level's tree comparison:
+  in the regions where the two disagree (the dump's segments give them), the printed module's
+  spans moved to the original's positions. The reference stays; but §9.2 compares everything in
+  mode `:full`, so this is a new normalization of the text level (as HR6's of the interface
+  level), and it hides a difference GHC sees: the printed module's error messages, `HasCallStack`
+  `SrcLoc`s in unfoldings and HPC's ticks name `Lexer.x`'s lines where the original's name
+  `Lexer.hs`'s, so even its interface in mode `:full` would differ. (d) The helper maps the printed
+  module's positions through the original's segments (`hsdump tree --full` given the original's
+  dump): (c) inside the helper, with the same objections, and a tree that depends on another
+  module's dump. (e) A reference that keeps the directives: mode `:full` keeps CPP's directives
+  and the lines of the branches not taken as text, the printed module is the original itself and
+  CPP preprocesses it as the original. That reopens S5 and H9 (one configuration, the `#if`
+  structure not in the forms) for all 376 CPP modules, far more than the four need; a milestone of
+  its own if mode `:full` is ever to print back the CPP source. *Recommended: (b)*: the only option
+  that makes the printed module what GHC compiles with the original's positions, at a cost of five
+  lines in four views. It changes the module view (§2.8), S5's reference, of those four modules, so
+  it is not the default: built as an opt-in that measures it (below), for the user's decision.
+- **HR27 The record of HR26 (b).** (a) As built: `:cpp`'s `:view-markers [LINE...]`, the view's
+  lines given a pragma (in mode `:full` only), so that the view is reproducible from CPP's output
+  and the record; (b) none, the pragmas being in the forms' text as comments. *Recommended: (a)*:
+  `:cpp`'s other keys say what the text depended on, and this is such a fact; it costs nothing
+  where no marker disagrees (the key is left out).
+- **HR28 The default after HR26 (b).** (a) The text level's only reference: the option
+  (`--view-markers`) and `test/haskell/roundtrip-ghc-9.14.1-text-view-markers.edn` removed, the
+  four entries dropped from the known differences (3 trees, HR12's `CTypes.h`, and 11 conversions
+  left), SPEC §2.8's module view amended, the gate checking it; (b) kept an option, the default the
+  module view of §2.8 as now. *Recommended: (a)* if HR26 (b) is decided: one reference, checked by
+  the gate; (b) keeps two texts of the same module side by side.
+
+### What was built (HR26 (b) as an opt-in)
+
+| part | file | what |
+|---|---|---|
+| helper | `tools/hsdump/HsDump.hs` (`moduleView`, `--view-markers`, `CppRecord`'s `cViewMarkers`) | with `dump --full --view-markers`, a module view whose module has `{-# LINE #-}` pragmas gets CPP's disagreeing markers as pragmas; `:cpp`'s `:view-markers`; without the option the view, the dumps and everything after them as before |
+| command | `bin/repr-haskell` (`roundtrip --text --view-markers`, `dump --full --view-markers`; `text_level`) | the text level with the opt-in, the entries it fixes required equal |
+| comparison | `arbace/repr/haskell.ae` (`cmd-compare-text`, `--fixed FILE`) | the entries of FILE dropped from the known differences, the count of them equal printed |
+| entries | `test/haskell/roundtrip-ghc-9.14.1-text-view-markers.edn` | the four modules the opt-in fixes |
+| case | `test/haskell/hr26/AlexDir.hs`, `AlexDir.h`; `bin/repr-haskell test`'s step 9 | a pragma into `AlexDir.x`, then an `#include`: without the option printed back byte for byte with trees of mode `:full` that differ; with it `{-# LINE 11 "AlexDir.hs" #-}` at line 10, printed back byte for byte with equal trees and lines of mode `:full`; its forms of mode `:lines` the same either way |
+| target | `Makefile` (`repr-haskell-text-markers`) | the text level with the opt-in |
+
+### Results
+
+| level | HR25 (the default, unchanged) | with `--view-markers` |
+|---|---|---|
+| text, byte-identical | 1,334 (11,738,768 bytes) | 1,334 (11,739,055 bytes: the four views 287 bytes longer) |
+| text, trees and lines of mode `:full` equal | 1,327 | 1,331 |
+| known differences of the text level | 18 (7 trees, 11 conversions) | 14 (3 trees, HR12's; 11 conversions) |
+
+With the option, only the four modules' views, forms of mode `:full` and printed modules differ
+from the default's (five lines, `Lexer.hs` at 44 and 554, `ExecutablePath` at 36,
+`CommunicationHandle.Internal` at 149, `Directory.Common` at 20). Without it, every module's forms
+(modes `:lines` and `:full`), module view and printed module (the braces, the layout and the full
+layouts) are byte for byte those of main's helper at `90ec844d` (the corpus's 1,345 compared; the
+dumps differ only in the helper's source hash); the tree level (1,345 in both layouts) and the
+interface level (1,345 in both layouts, 3,701,019 lines) are R6's. The run of `roundtrip --iface
+--text --layout`: tree 54 s, layout 17 s, interfaces 190 s, text 131 s; `--text-only
+--view-markers` about 2 minutes.
+
+### Checks and how to reproduce
+
+```sh
+bin/repr-haskell roundtrip --iface --text --layout   # the default: HR25's results
+bin/repr-haskell roundtrip --text-only --view-markers  # HR26 (b) measured: the four equal
+bin/repr-haskell test                                # step 9: test/haskell/hr26/
+```

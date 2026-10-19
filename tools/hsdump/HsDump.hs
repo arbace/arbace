@@ -102,10 +102,10 @@ pinnedGhc = "unset"
 data Opts = Opts
   { oVerb :: String, oFull :: Bool, oOut :: Maybe FilePath, oLibdir :: Maybe FilePath
   , oCorpus :: Maybe String, oSrcHash :: Maybe String, oFiles :: [FilePath], oGhc :: [String]
-  , oHscArgs :: [String], oRepo :: Maybe FilePath }
+  , oHscArgs :: [String], oRepo :: Maybe FilePath, oViewMarkers :: Bool }
 
 parseOpts :: [String] -> Either String Opts
-parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing [] [] [] Nothing) rest
+parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing [] [] [] Nothing False) rest
   where
     go o ("--ghc" : fs) = let (gs, r) = break (== "--files") fs in go o { oGhc = oGhc o ++ gs } (drop 1 r)
     go o ("--full" : xs) = go o { oFull = True } xs
@@ -115,6 +115,7 @@ parseOpts (verb : rest) = go (Opts verb False Nothing Nothing Nothing Nothing []
     go o ("--helper-hash" : h : xs) = go o { oSrcHash = Just h } xs
     go o ("--hsc2hs-arg" : a : xs) = go o { oHscArgs = oHscArgs o ++ [a] } xs
     go o ("--repo" : d : xs) = go o { oRepo = Just d } xs
+    go o ("--view-markers" : xs) = go o { oViewMarkers = True } xs
     go o (x : xs) | "-" `isPrefixOf` x = Left ("hsdump: unknown option " ++ x)
                   | otherwise = go o { oFiles = x : oFiles o } xs
     go o [] = Right o { oFiles = reverse (oFiles o) }
@@ -290,7 +291,8 @@ isSignature f = any (`isSuffixOf` f) [".hsig", ".lhsig"]
 
 data CppRecord = CppRecord
   { cCommand :: [String], cArgs :: [String], cFiles :: [(String, String)]
-  , cMacros :: Maybe String, cOutput :: String }
+  , cMacros :: Maybe String, cOutput :: String
+  , cViewMarkers :: [Int] }  -- HR26's opt-in (--view-markers): the module view's lines given a pragma
 
 parseOne :: HscEnv -> Opts -> FilePath -> Maybe HscRecord -> IO (Either String ModP)
 parseOne hsc_env o file hsc = do
@@ -336,13 +338,17 @@ parseOne hsc_env o file hsc = do
                 , cArgs = map (roleOf (oLibdir o) outFn file macrosFile) (dropPrefix configured (drop 1 cmdWords))
                 , cFiles = fileHashes
                 , cMacros = fmap ("sha256:" ++) (case macros of (Just m : _) -> Just m; _ -> Nothing)
-                , cOutput = "sha256:" ++ sha256Hex (foldr (\m t -> replaceBS (BC.pack m) (BC.pack "<macros>") t) out macrosFile) }
+                , cOutput = "sha256:" ++ sha256Hex (foldr (\m t -> replaceBS (BC.pack m) (BC.pack "<macros>") t) out macrosFile)
+                , cViewMarkers = viewMarks }
               -- a literate module without CPP went through unlit alone (R6): no CPP record
               cpp = if lit && null cmdLines then Nothing else Just record
               -- the text of a literate module is its source (unlit keeps its lines and columns;
               -- R6); an .hsc module's {-# LINE #-} pragmas are hsc2hs's text, not markers
               -- (HR25: also any module whose text has them, alex's output)
-              view = if lit then decodeUtf8 src else moduleView (isJust hsc || hasLinePragmas src) file (decodeUtf8 out)
+              -- HR26's opt-in (--view-markers): CPP's line markers that the pragmas disagree with
+              -- written into the module view as {-# LINE #-} pragmas (mode :full's; the view is its text)
+              (view, viewMarks) = if lit then (decodeUtf8 src, [])
+                                  else moduleView (oFull o && oViewMarkers o) (isJust hsc || hasLinePragmas src) file (decodeUtf8 out)
           parseText hsc_env dflagsC file src out cpp view lit hsc
     else parseText hsc_env dflagsP file src src Nothing (decodeUtf8 src) lit hsc
   where
@@ -506,7 +512,9 @@ configOf o libdir ghcUnit dflags0 p = do
                     <> kv ":include-dirs" (strs (map (relLibdir (oLibdir o)) incs))
                     <> kv ":files" (BB.char7 '{' <> mconcat (sepBy (BB.char7 ' ') [str a <> BB.char7 ' ' <> str b | (a, b) <- cFiles c]) <> BB.char7 '}')
                     <> maybe mempty (kv ":macros" . str) (cMacros c)
-                    <> kv ":output" (str (cOutput c)) <> BB.char7 '}')
+                    <> kv ":output" (str (cOutput c))
+                    <> (if null (cViewMarkers c) then mempty else kv ":view-markers" (BB.char7 '[' <> mconcat (sepBy (BB.char7 ' ') (map BB.intDec (cViewMarkers c))) <> BB.char7 ']'))
+                    <> BB.char7 '}')
   let hscB = case pHsc p of
         Nothing -> mempty
         Just h -> kv ":hsc2hs" (BB.char7 '{' <> BB.string7 ":command " <> strs ("hsc2hs" : hArgs h)
@@ -806,16 +814,45 @@ hasLinePragmas = any (isJust . linePragma) . lines . decodeUtf8
 
 -- CPP's module view (SPEC §2.8, S5): for each line of the module, the output line the line
 -- markers (# N "file", #line N "file", {-# LINE N "file" #-}) attribute to it; the markers and
--- the lines of other files dropped
-moduleView :: Bool -> FilePath -> String -> String
-moduleView pragmasText file out = concatMap (\n -> Map.findWithDefault "" n m ++ "\n") [1 .. maxL]
+-- the lines of other files dropped. HR26's opt-in (markers, --view-markers; a module whose text
+-- has {-# LINE #-} pragmas, pragmasText, only): where a line marker naming the module's file sets
+-- GHC's position of its line n to the file's line n and the pragmas before it give that line
+-- another (after a directive, alex's and hsc2hs's outputs), the blank line before it (the
+-- directive's) gets {-# LINE n "file" #-}, so that GHC's positions in the view are the
+-- original's; not where only blank lines follow up to the next pragma (no position there differs:
+-- hsc2hs's pragma after an #include); the lines so written returned. Without markers, the view as
+-- before (R6, HR25).
+moduleView :: Bool -> Bool -> FilePath -> String -> (String, [Int])
+moduleView markers pragmasText file out = (concatMap (\n -> Map.findWithDefault "" n m ++ "\n") [1 .. maxL], marks)
   where
-    (m, maxL) = walk (lines out) file 1 Map.empty 0
-    walk [] _ _ acc mx = (acc, mx)
-    walk (l : ls) cur n acc mx = case marker l of
-      Just (n', f') -> walk ls f' n' acc mx
-      Nothing | cur == file -> walk ls cur (n + 1) (Map.insert n l acc) (max mx n)
-              | otherwise -> walk ls cur (n + 1) acc mx
+    (m0, _, marks0) = walk (lines out) file 1 Map.empty 0 Nothing []
+    maxL0 = maybe 0 fst (Map.lookupMax m0)
+    at j = Map.findWithDefault "" j m0
+    idle k = all (all isSpace . at) (takeWhile (not . isJust . linePragma . at) [k + 1 .. maxL0])
+    marks = [k | (k, _) <- reverse marks0, not (idle k)]
+    -- an idle line's pragma taken back: the line as it was
+    m = foldr (\(k, was) acc -> Map.alter (const was) k acc) m0 [x | x@(k, _) <- marks0, idle k]
+    maxL = maybe 0 fst (Map.lookupMax m)
+    -- st: GHC's position by the view's own pragmas, (view line, file, GHC line), from the
+    -- module's first marker on (GHC's driver's {-# LINE 1 #-} before it overwritten)
+    walk [] _ _ acc mx _ ms = (acc, mx, ms)
+    walk (l : ls) cur n acc mx st ms = case marker l of
+      Just (n', f')
+        | markers && pragmasText && f' == file -> case st of
+            Just (vn, vf, vl) | (vf, vl + (n' - vn)) /= (file, n'), n' > 1
+                              , all isSpace (Map.findWithDefault "" (n' - 1) acc) ->
+              walk ls f' n' (Map.insert (n' - 1) (pragmaText n') acc) (max mx (n' - 1)) (Just (n', file, n')) ((n' - 1, Map.lookup (n' - 1) acc) : ms)
+            Just _ -> walk ls f' n' acc mx st ms
+            Nothing -> walk ls f' n' acc mx (Just (n', file, n')) ms
+        | otherwise -> walk ls f' n' acc mx st ms
+      Nothing | cur == file ->
+                  let st' = case (st, linePragma l) of
+                        (Just _, Just (v, f)) -> Just (n + 1, f, v)
+                        _ -> st
+                  in walk ls cur (n + 1) (Map.insert n l acc) (max mx n) st' ms
+              | otherwise -> walk ls cur (n + 1) acc mx st ms
+    pragmaText n' = "{-# LINE " ++ show n' ++ " " ++ show' file ++ " #-}"
+    show' f = '"' : concatMap (\c -> if c == '"' || c == '\\' then ['\\', c] else [c]) f ++ "\""
     marker l = case l of
       '#' : r -> let r' = dropWhile (== ' ') (if "line" `isPrefixOf` r then drop 4 r else r) in num r'
       '{' : '-' : '#' : r | not pragmasText, (w, r') <- span (not . isSpace) (dropWhile isSpace r), map toUpper w == "LINE" -> num (dropWhile isSpace r')
