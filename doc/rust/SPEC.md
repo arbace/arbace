@@ -255,7 +255,7 @@ Rust position and is written on one line.
 | `:path` | the file's path as rustc was given it, relative to the directory rustc ran in (`"core/src/option.rs"` for std's corpus, run in `library/`): it is the file name of every span, which reaches panic messages, `file!()` and debuginfo (§9) |
 | `:crate` | the crate's name, a symbol |
 | `:edition` | `2015`, `2018`, `2021` or `2024`: the crate's edition, which the helper parsed with (RS13) |
-| `:kind` | how the crate reaches the file: `:root` (the crate root), `:module` (a `mod m;` file found by Rust's rules), `:path` (named by a `#[path]` attribute), `:include` (an `include!`d file of items); omitted for `:module` |
+| `:kind` | how the crate reaches the file: `:root` (the crate root), `:module` (a `mod m;` file found by Rust's rules), `:path` (named by a `#[path]` attribute), `:include` (an `include!`d file of items), `:include-expr` (an `include!`d file that is one expression: RR6, §2.5); omitted for `:module` |
 | `:positions` | `:lines` (the default) or `:full` (§9) |
 | `:config` | the configuration (§2.4) |
 | `:shebang`, `:frontmatter` | the text of a first `#!` line, of a `---` front matter: rustc's lexer strips both before parsing, so they are in no tree; kept in both modes (`:frontmatter-line`, the front matter's line when blank lines precede it: RR5) |
@@ -284,7 +284,10 @@ loaded (the survey's `after_crate_root_parsing`; rust-lisp's check runs per file
 a module file and a crate root have the same form, and a file reached through `#[path = "..."]`
 (std's `sys/` tree uses it, in `cfg_select!` arms too) or `include!` is converted as a file of its
 own with the edition of the crate that includes it (RS13), its `:kind` recording how it is reached.
-An `include!`d file that is an expression, not items, is out of the first milestones (§12.2, RSS6).
+An `include!`d file that is an expression, not items (`include!` in an expression's place, which
+parses the file as one expression with nothing stripped: a `#!` line and `---` fences are tokens
+there), is `(rs/file ... :kind :include-expr)` and one form `(rs/expr e)`, the expression (RSS6,
+built at RR6: §12.9).
 
 ## 3. Lexical syntax
 
@@ -1109,12 +1112,15 @@ equivalent when:
 2. **Interface.** rustdoc's JSON of the two crates (`rustdoc -Zunstable-options --output-format
    json`), without its `span` fields, equal (§11.3): the public items, their signatures, generics,
    trait impls, attributes, docs.
-3. **Lowered** (optional, later). `-Zunpretty=hir` of the two crates, after expansion, resolution
-   and lowering, printed without spans: it catches nothing the tree level misses for a pure printer,
-   but checks a writer other than the converter.
-4. **Code** (later). MIR (`-Zunpretty=mir`), then object code symbol by symbol, as repr/go's code
-   level; columns reach code through panic locations, so this level needs `:full` or a
-   normalization of `Location` constants.
+3. **Lowered** (RR6, §12.9). The HIR of the two crates, after expansion, resolution and lowering,
+   as `-Zunpretty=hir` prints it, without the root file's comments, positions normalized as the
+   layout keeps them: it catches nothing the tree level misses for a pure printer, but checks a
+   writer other than the converter, and what expansion makes of the printed tokens.
+4. **Code** (RR6, §12.9). The MIR (`-Zunpretty=mir`'s text, positions normalized as for the HIR),
+   then the objects byte for byte (an rlib's members but its metadata, which holds every span);
+   columns reach code through panic locations, so the code of mode `:lines` is built with
+   `-Zlocation-detail=file,line` (`Location` constants without columns), of the pretty layout
+   with `-Zlocation-detail=file`.
 5. **Behaviour** (RR5, §12.8). rust-lisp's `run-corpus.sh` method over rustc's UI run-pass programs, and
    its `std-from-lisp.sh` method: std built from the printed files (`-Zbuild-std`), the same
    programs run against it.
@@ -1150,7 +1156,7 @@ real one on the other is N1's (the survey's E6 met three).
 | tree | `rsdump tree` of the original and of the printed file, compared as text; `rsdump lines` of both in `:lines` | §11.2 |
 | interface | each crate documented as its build compiles it, once from the originals and once with all the crate's printed files in their places (Haskell forms' HR8), under the same relative paths: `RUSTC_BOOTSTRAP=1 rustdoc --edition E --crate-name C --crate-type lib -Zunstable-options --output-format json`, the crate's `--cfg` and feature flags, its dependencies the host sysroot's (the same build as `rust-src`); the two JSON files compared after removing every `span` | every `span` field removed (E4: a file reprinted with other lines and layout gives equal JSON without them); in `:full` everything must be equal |
 | text | the printed file against the original, byte for byte | none |
-| lowered, code (later) | `-Zunpretty=hir`, `-Zunpretty=mir` of both, then objects | spans removed; columns of `Location` constants in `:lines` |
+| lowered, code (RR6) | each crate built from the originals and from the printed files by the helper as rustc (`rsdump rustc`, §12.9): its HIR and MIR written after analysis, then its rlib or object | the positions rustc writes in the texts (`FILE:L1:C1: L2:C2`) kept to their start lines in `:lines`, removed in the pretty layout; the objects built with `-Zlocation-detail` as the layout keeps positions; in `:full` nothing |
 
 rustc's own pretty printer (`-Zunpretty=normal`) is a ready candidate maker for proving the
 checker, as `gocmp reprint` proved repr/go's oracle: it gives the same tree for 1,069 of std's 1,074
@@ -1194,6 +1200,7 @@ bin/repr-rust dump [--full] FILE...        run the helper
 bin/repr-rust read [--full] FILE...|--corpus C   convert into .tmp/repr-rust/forms/
 bin/repr-rust print [--layout lines|pretty|full] FILE.ae...
 bin/repr-rust roundtrip [--iface] [--text] CORPUS
+bin/repr-rust roundtrip --code CORPUS      the lowered and code levels (RR6)
 bin/repr-rust test                         the spec's cases (test/rust/)
 ```
 

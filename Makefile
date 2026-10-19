@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle diffcheck generated-check verify jdk-verify edge-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
-  repr-java-roundtrip repr-java-text repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-all repr-rust-test goi-annotations goi-test goi-check alpine-check clean \
+  repr-java-roundtrip repr-java-text repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -147,9 +147,11 @@ repr-rust-pretty: ## std's five crates' forms without positions printed in the p
 	bin/repr-rust roundtrip --pretty-only
 repr-rust-behaviour: ## rustc's UI suite's run-pass programs run from their originals and their printed files in every layout, and against std built from its printed files (bin/repr-rust roundtrip --text --pretty --run --std rustc-1.99.1-ui)
 	bin/repr-rust roundtrip --text --pretty --run --std rustc-1.99.1-ui
-repr-rust-all: ## every level over all five corpora: std, the rest of library/, the compiler, the pinned crate set, rustc's UI suite; then the behaviour level (bin/repr-rust roundtrip --iface --text --pretty --run --std all)
-	bin/repr-rust roundtrip --iface --text --pretty --run --std all
-repr-rust-test: ## repr/rust's cases: the reader's samples, the spec's worked example and its round trip, the interface level's cases, mode :full's (bin/repr-rust test)
+repr-rust-code: ## the lowered and code levels: std's five crates' HIR, MIR and objects built from the originals and from the printed files of every layout (bin/repr-rust roundtrip --text --pretty --code)
+	bin/repr-rust roundtrip --text --pretty --code
+repr-rust-all: ## every level over all five corpora: std, the rest of library/, the compiler, the pinned crate set, rustc's UI suite; then the behaviour level, the lowered and code levels (bin/repr-rust roundtrip --iface --text --pretty --run --code --std all)
+	bin/repr-rust roundtrip --iface --text --pretty --run --code --std all
+repr-rust-test: ## repr/rust's cases: the reader's samples, the spec's worked example and its round trip, the interface level's cases, mode :full's, the behaviour and code levels' (bin/repr-rust test)
 	bin/repr-rust test
 goi-annotations: ## goi's checker over tamago/goroot, linux std, GOROOT/test: no error, every annotation verified (bin/goi annotations)
 	bin/goi annotations

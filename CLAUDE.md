@@ -128,7 +128,10 @@ Prior art:
     `roundtrip ... all`), and since RR5 rustc's UI suite (`corpus-rustc-1.99.1-ui.edn`, from
     `rustc-1.99.1-src.tar.xz` pinned by SHA-256); `--run`: the behaviour level, the UI suite's
     run-pass programs built and run from the originals and from the printed files; `--std`: std
-    built from its printed files, the same programs run against it), evaluated from the checkout,
+    built from its printed files, the same programs run against it; since RR6 `--code`: the
+    lowered and code levels, the HIR, MIR and objects of the library corpora's crates and of the UI
+    suite's programs built by the helper as rustc from the originals and from the printed files;
+    `include!`'s expression files as `(rs/expr e)` forms), evaluated from the checkout,
     not embedded.
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
@@ -238,7 +241,7 @@ Prior art:
   (`bin/repr-clojure check`, `--suite`, `--roundtrip`), repr/rust's (`bin/repr-rust roundtrip --iface --text --pretty`: rustc's trees and
   lines over std's five crates, then rustdoc's JSON of the crates without spans, then the pretty
   layout's trees, then mode `:full` printed back byte for byte, and `test`; on the host's rustc;
-  `REPR_RUST_CORPORA=all` adds RR4's corpora and the UI suite, `'all --run --std'` the behaviour level), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
+  `REPR_RUST_CORPORA=all` adds RR4's corpora and the UI suite, `'all --run --std'` the behaviour level, `'all --code'` the lowered and code levels), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; goi (`bin/goi
   annotations`, `test --gc`, `check`, after repr/go's round trips); Go's toolchain as forms
   (`bin/toolchain-vendor verify`, `check`). Run it when the Java forms'
