@@ -3278,3 +3278,344 @@ CHECKS-PLACEHOLDER
   (the forms of mode `:lines`, `byte` and aliases in goi's types); (b) errorcheck over mode
   `:full`'s forms and `byte`, `rune` and aliases as types of their own (GC49 (b)), a later step.
   *Recommended: (a)*.
+
+## Decided (2026-10-19): GR9d, generic functions at the REPL
+
+GC34 is amended from (a) to (b): a generic function has a var, whose fn infers its type
+arguments at each call. GC72 (a), GC73 (a) and GC74 (a) of doc/go/GR9-SURVEY.md are decided as
+recommended, under the user's goal of 2026-10-19 (the milestone `arbace-interprets-go-v1`,
+doc/AGENDA.md's plan): Arbace scalars are untyped constants of their kinds and Go values keep
+their Go types for inference (GC72); `(go/inst f T...)` gives explicit type arguments, partial
+instantiation allowed (GC73); instances are cached per var, by the arguments' types, and shared
+with the builder's instance cells (GC74).
+
+## As built: GR9d (2026-10-19)
+
+GR9d, the survey's Part 2 (doc/go/GR9-SURVEY.md §4), is built on branch `goi-gr9d` (from main
+`04ac458b`, with the GR8 and GR9 surveys). GR9a (runtime types of interpreted named types) and
+GR8a are built at the same time from the same base; GR9d keeps to the var, inference from Arbace
+values and the cache. Where building it found otherwise than the survey, the text below is the
+record; proposals for the user are GC135-GC144.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the var's fn | `arbace/lang/GoInterp.ae` (`GoGenericFn`) | an `AFn` holding the function's name, its description (`data`) and `resolve`; `keyOf` keys each argument (a `GoValue` its descriptor, `GoInterp/valueType`; a `Long`, `Integer`, `Short`, `Byte`, `BigInt` or `BigInteger` `:untyped-int`; a `Double`, `Float`, `Ratio` or `BigDecimal` `:untyped-float`; a `Character` `:untyped-rune`; a `Boolean` `:untyped-bool`; a `String` `:untyped-string`; `nil` `:untyped-nil`; a collection `:coll`; a keyword or a symbol `:any`; another fn, a `GoFn` among them, `:fn`; any other Java object `:any`); `instanceFor`: the last key's instance (compared element by identity: descriptors are interned), else a `ConcurrentHashMap` by the key as a vector, else `resolve`, kept; the call is the instance `GoFn`'s (`GoInterp/call`, its arguments converted by the instance's parameter types, §5.6); `instanceCount` |
+| inference | `arbace/go/generic.ae` (`arbace.go.generic`, new) | `resolve-instance`: the key's operands (`operand`: an untyped kind an untyped constant, `:fn`, `:coll` and nil an untyped nil, which inference skips, `:any` the type `any`, a descriptor its checker type), the parameters for the arguments (a variadic one's elements expanded; an arity error in types2's words), the checker's `rename-tparams` and `infer` (go1.27.1's `infer.go`, GR6) with go/inst's type arguments, `verify!` of the constraints; errors thrown as the REPL's check errors (`Go check errors:` and `:go/errors`, each message `REPL: ...`); then the instance's `GoFn` over `instance-callable` |
+| descriptors as checker types | `arbace/go/generic.ae` (`desc->type`, `rehome`), `arbace/go/build.ae` (`desc-types`), `go/arbace/goi/natives.ae` (`GoInterp_ValueType0`, `GoInterp_TypeInfo0`) | a Go value's descriptor: a proxy's type, an interpreted struct's by its RT, else the compiled type's (`descOfRT`); a descriptor's parts (`typeInfo`: kind, named, name, package, element, key, length, parameters, results, variadic, direction, fields, method count); an interpreted named type's checker type is the builder's registry's (`desc-types`: descriptor to the type it was last made for, filled by `named-desc`), taken to its package's last check by `rehome` (a named type by package and name, an instance instantiated again), so that a value made under an older check unifies with the generic declaration's types; a compiled named type the digest's; composites by their parts |
+| instances | `arbace/go/build.ae` (`instance-callable`) | the `Callable` of a generic function's or method's instance: `instance-cell` (the cell interpreted callers reach, GR6's amendment 2), its signature substituted, `InterpCallable` or, for a method, `InterpMethodCallable` with the receiver's instance type |
+| the vars | `arbace/go/repl.ae` (`define!`, `named-type`, `generic-env`) | every generic function `F` and generic type's method `T.M` (and a generic method of go1.27) of an interpreted package gets a var whose root is a new `GoGenericFn` at each definition of the package (metadata `:go/kind`, `:go/generic true`, `:go/package`, `:line`, `:file`, `:doc`); a method's var takes the receiver first and infers the type's arguments from the receiver's instance type (`List[int]`: `T = int`), its own type parameters from the rest |
+| `go/inst` | `arbace/go.ae` (`inst`), `arbace/go/repl.ae` (`inst!`, `resolve-types`), `arbace/go/generic.ae` (`instantiate`, `type-instance`) | `(go/inst f T...)`: `f` a generic function's or method's var, or a generic type of an interpreted or listed package by name (`go.main/List`: a generic type has no var); the type forms resolved by a check of the namespace's package (go.user's outside go.*) with a struct type of fields of those types added (`resolve-types`, as go/eval does), then rehomed; all type arguments: the instance's `GoFn` (a function, a method with its receiver first) or `GoType` (a type); fewer: a `GoGenericFn` with those fixed (Go's partial instantiation); kept per `GoGenericFn` and forms (`:insts`) |
+| the interpretable packages from Arbace | `arbace/lang/GoInterp.ae` (`loadTable`), `arbace/go.ae` (`interpretable-ns!`) | `(require '[go.slices :as slices])` loads `slices` (`cmp`, `iter`, `maps`) from the digest as goi does for an import (§9.3), so that its vars exist: RT.load's hook asks `arbace.go` for a `go/` resource of one element that is no listed package |
+| the listed packages' generics | `arbace/go.ae` (`digest-info`, `table-ns!`), `arbace/go/repl.ae` (`listed-generic!`) | a listed package's generic function or generic type's method (`sync.OnceValue`, `atomic.Pointer.Load`) gets its var on first use (S9) as a `GoGenericFn` over the digest's declaration, its instances interpreted from the digest's forms (§9.3); not among the vars `ns-publics` makes |
+| interop | `arbace/lang/GoInterp.ae` (`methodVar`) | `(.Push l 3)` on an instance's value finds the var `List.Push` (the instance's name without its type arguments), a `GoGenericFn` |
+| tests | `test/goi/repl.ae`, `test/oracle/forms/go.ae` | the survey's §4.7 at the REPL (below); 21 oracle cases recorded by goi |
+
+**Arbace values as operands (§4.3 of the survey, as built).** As the survey's table, with three
+differences: a keyword or a symbol is typed `any` (a Java object); a `GoFn` (a Go func value in
+Arbace) infers nothing, as an Arbace fn (its Go type is in its `Callable`, not asked: GC137);
+`(go/spread xs)` is not recognized as a variadic spread (GC138). Values matter only through
+conversion: `((go/inst go.cmp/Compare int8) 300 1)` throws §5.6's error
+`argument 1 of cmp.Compare[int8]: 300 overflows int8`.
+
+**The REPL's checks** (`test/goi/repl.ae`, the section "generic functions' vars"): the var is a
+`GoGenericFn`; `slices.Index` over a Go `[]int` and a `[]int64` (the untyped argument takes the
+element type), `slices.Contains`, `slices.Max`; `cmp.Compare` of `Long`s (`int`), of a `Long`
+and a `Double` (`float64`), of strings, and `int64` by go/inst; `slices.SortFunc` with an Arbace
+fn; the program's own `Map[T, U any]` with go/inst (its `U` cannot be inferred from a fn);
+partial instantiation `(go/inst go.slices/Index (slice int64))`; the cache (three calls of two
+types, two instances); a generic type's methods by their vars (`List.Push`, `List.Len`), by
+interop (`.Push`) and by go/inst (`List.Push string`), the instances shared with an interpreted
+caller's; go/inst of a generic type (its zero value); a listed package's generic,
+`sync.OnceValue`; a redefinition seen by the var (a new `GoGenericFn`); the errors in the
+checker's words: `in call to gvar.Map, cannot infer U (declared at repl.go:?)`, `bool does not
+satisfy cmp.Ordered (bool missing in ...)`, `in call to slices.Index, S (type []string) does
+not satisfy ~[]E`, `not enough arguments in call to slices.Index` with types2's have and want,
+and the overflow above.
+
+**Amendments (as built).**
+
+1. **§9, GR6's REPL row and GC34.** A generic function or method still has no cell (its instances
+   have); it now has a var, a `GoGenericFn` (GC34 (b)). §2.1's table of vars gains it: `(F a b)`
+   infers, `(go/inst F T...)` instantiates.
+2. **A generic type has no var** (GC135): `go/inst` finds it by its namespace and name in its
+   package's last check (`named-type`). `(go.main/List int)` stays meaningless, as the survey
+   wanted; the survey's "a generic type's var" is not built.
+3. **Types of older checks** (GC136). The survey keyed inference by descriptors and assumed their
+   checker types. A package is checked anew at every declaration, so the type a descriptor was
+   made for may belong to an older check than the generic declaration's: `rehome` takes every
+   interpreted named type to its package's last check by package and name, instances
+   instantiated again (the checker's instances are interned by origin and type arguments).
+4. **The var is made anew at each definition of its package** (GC139), as GR3's function vars
+   are: its cache starts empty after any declaration in the package, and the instances it then
+   makes are new cells (the instance cells are keyed by the generic object, which a check makes
+   anew). The survey's "a redefinition of F" is any definition of F's package.
+5. **The interpretable packages from Arbace** (GC142): the survey's
+   `(require '[go.slices :as slices])` needed RT.load's hook to know them; it asks `arbace.go`
+   for any `go/X` resource of one element that is no listed package.
+6. **Messages** (GC140): the checker's words (`cannot infer U`, `S (type []string) does not
+   satisfy ~[]E`, types2's arity message), each as `REPL: ...`, an argument named by its literal
+   for a scalar, else `argument N`. Their positions are the checker's: `declared at repl.go:?`
+   for a type parameter typed at the REPL, whose forms carry no line. cmp.Ordered's terms are
+   listed in the checker's set order, not as written (GC144): GR6's amendment 11 holds for
+   interpreted constraints, not for the digest's.
+
+**Measurements** (linux/amd64, the executable of this branch, best of five runs of 10^5 calls
+after 2 * 10^4 warm-up calls, two runs; the machine shared, load about 6):
+
+| | value |
+|---|---|
+| a function var's call (`GoFn`): `IndexInts(xs, 5)`, a Go function calling `slices.Index[[]int,int]` | 1.46-1.49 µs |
+| a generic var's call, cached: `(slices/Index xs 5)` | 1.66-1.79 µs |
+| a generic var's call, cached: `(cmp/Compare 1 2)` | 1.45-1.53 µs |
+| the instance by go/inst: `((go/inst go.slices/Index (slice int) int) xs 5)` | 1.34-1.36 µs |
+| a miss (a new key: operands, `infer`, verification, the instance's cell and `GoFn`; its code built on its first call) | 1.7-1.9 ms |
+| the executable (linux/amd64) | 137,044,128 bytes against 136,446,112 at `04ac458b` (+598,016, 0.44%: `arbace.go.generic`, the class, the natives) |
+
+The survey's target, about 1.5 µs per call once cached, holds: a cached call costs its key (one
+native call per Go value argument, `instanceof` tests for the rest) and one identity comparison
+over the instance `GoFn`'s call, 0.0-0.3 µs above a function var's.
+
+**Checks** (in the worktree, before the merge): `bin/goi check` 1,837 programs, 1,386 pass,
+23 fail, 2 error, 335 unsupported, 73 known, 18 skipped, no regression against
+`test/goi/check-linux-amd64.edn` (the fails and errors are errorcheck programs of the reference);
+`--essential` 699 of 699; `bin/goi test` the checker's tests (3 tests, 19 assertions), 15 of 15
+programs, the REPL's 101 of 101 checks, §1.4's session as its transcript; `bin/goi annotations`
+zero errors in the five corpora (counts unchanged: GR9d does not touch the checker);
+`make check-makefile`; `bin/generated-check`; the oracle's `forms/go.ae` 150 cases (21 new)
+recorded by goi and reviewed; the essential `bin/gate` passed (9m45s: the smoke test, Clojure's suite on the test build, the oracle 22,658 of 22,711 cases with its 53 known mismatches as recorded, the differential check, goi's essential check, the generated variants); `bin/arbace-go --fixpoint` holds (G1 = G2 = G3 byte for byte).
+
+**Proposals for the user** (each built as recommended):
+
+- **GC135 Generic types from Arbace.** (a) as built, no var: `go/inst` names a generic type by
+  namespace and name; (b) a var per generic type holding a generic type object whose `go/inst`
+  is its instance. *Recommended: (a)*: a value nothing but go/inst can use.
+- **GC136 Values of types checked before the generic declaration.** (a) as built, interpreted
+  named types rehomed to their packages' last check by package and name; (b) the builder's
+  registry's type as it is (an inference after any later declaration in the type's package
+  fails: `type *List[int] of argument 1 does not match`). *Recommended: (a)*.
+- **GC137 A `GoFn` argument.** (a) as built, it infers nothing, as an Arbace fn; (b) typed by its
+  `Callable`'s func type (`slices.SortFunc(xs, strings.Compare)` would infer from it).
+  *Recommended: (a)* now, (b) when asked for.
+- **GC138 `(go/spread xs)` in a generic call.** (a) as built, not recognized (the spread value
+  is typed as a Go value, inference fails); (b) the last argument spread as `call-args` does.
+  *Recommended: (a)* now: rare at the REPL.
+- **GC139 The cache's lifetime.** (a) as built, a new `GoGenericFn` at each definition of the
+  package (as GR3's function vars); (b) kept while the generic declaration's signature is, its
+  instances rebuilt. *Recommended: (a)*: one rule for every var.
+- **GC140 Errors of Arbace's calls.** (a) as built, the checker's messages as `REPL: ...`,
+  arguments named by their literal or `argument N`; (b) with the caller's file and line from the
+  Arbace frame. *Recommended: (a)*.
+- **GC141 Resolving go/inst's type forms.** (a) as built, a check of the namespace's package
+  with a struct type of those fields (about one go/eval's cost, once per forms and var); (b) an
+  entry of the checker resolving type expressions in a file's scope without a package check.
+  *Recommended: (a)* now, (b) if go/inst is found in loops with changing forms.
+- **GC142 Interpretable packages required from Arbace.** (a) as built, RT.load's hook loads
+  `cmp`, `iter`, `maps`, `slices` from the digest; (b) only once interpreted code imports them.
+  *Recommended: (a)*: the survey's `(require '[go.slices :as slices])`.
+- **GC143 The listed packages' generics and `ns-publics`.** (a) as built, their vars are made
+  on first use only (S9), not by `ns-publics` or `refer :all` (which would check the package's
+  digest); (b) made with the others. *Recommended: (a)*.
+- **GC144 Constraint terms in messages of digest packages.** (a) as built, unchanged by GR9d (the
+  checker's set order: `bool missing in ~float64 | ~uintptr | ...`); (b) the written order, as
+  GR6's amendment 11 does for interpreted constraints, a fix of the checker. *Recommended: (b)*,
+  outside GR9d (GR8's or a later step).
+
+## As built: GR8a (2026-10-19)
+
+GR8a, std at the REPL (doc/go/GR8-SURVEY.md §6.1-§6.3, its milestone GR8a; step 2 of the plan to
+the milestone `arbace-interprets-go-v1`, doc/AGENDA.md), is built on branch `goi-gr8a` (from main
+`04ac458b`, GR1 to GR7b, with the GR8 and GR9 surveys merged in). GR8b (reflect's methods: GC60)
+and GR9 (GC61, the runtime types of interpreted named types, generic vars) are other branches'.
+Where building it found otherwise than the survey, the text below is the record; proposals for
+the user are GC95-GC104.
+
+**Decided as recommended, under the user's goal of 2026-10-19** (reaching
+`arbace-interprets-go-v1`), each built so, for the user to revisit: **GC55 (a)** the interpretable
+packages' forms in each configuration's digest (lines kept, docs kept); **GC56 (a)** the 34
+packages that must be compiled added to the table; **GC57 (a)** `math/big` compiled; **GC58 (a)**
+the internal packages interpreted std needs interpreted, their runtime hooks `:replace`d; **GC59
+(a)** `go:linkname` pulls between interpreted packages bound by goi, bad-linkname aliases
+`:drop`ped; **GC62 (a)** `reflect.TypeFor` (go1.21's body) and the reflect-driven encoders
+`encoding/json`, `encoding/xml`, `encoding/gob` compiled; **GC63 (a)** the table's members over
+`iter.Seq` typed by the interpreted `iter`; **GC64 (a)** the speed set compiled (`regexp`,
+`bufio`, `compress/gzip`, `encoding/base64`, `encoding/csv`).
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the list | `go/arbace/gotable.edn` | `:packages` 89 (45 at GR7b): GC56's 34, GC62's three encoders and `encoding/json/jsontext`, `encoding/json/v2` with them (GC98), GC64's five; `:interpret` no longer a hand list (computed, below); `:out` the 10 user packages out of scope with their reasons; `:replace` grown by `internal/godebug`'s 4 hooks (with an `:imports` map: `os`), `internal/cpu`'s 7 (amd64's 3, arm64's 4), `internal/abi`'s 2, `reflect.TypeFor` and its `goiNilType` (GC97); `:drop` (bad-linkname aliases of `go/types` and `net/http`; `internal/race`'s two functions of `internal/abi`'s types, so that `iter`, `slices` and `maps` do not import `internal/abi`); `:bodyless` (`iter`'s `newcoro`, `coroswitch`: `iter.Pull` unsupported, GR6's); `:api-interpreted` (GC96) |
+| the classification | `arbace/go/table.ae` (`classify`) | per configuration, from the forms (not checked by the generator: goi checks a package when a program imports it): every package of the configuration's std but the listed ones, `:out`'s, `unsafe` and `cmd/`'s, whose body-less declarations are all `:replace`d, `:drop`ped, `:bodyless` or `go:linkname` pulls of an interpretable package's function (GC59), and whose imports (std's vendored ones by `vendor/`) are listed, interpretable or `unsafe`, to a fixpoint; then the user packages among them, `:api-interpreted`'s, and what they import and pull, transitively. The report (`report.edn`): `:interpret` (134 per configuration, 81 user packages), `:refused` (user packages neither listed, interpretable nor out: none in the four configurations), `:api-interpreted` |
+| the digest | `arbace/go/table.ae` (`interpret-forms`, `digest-forms`) | the interpretable packages whole (GR6's), lines kept (`:line`, for traces: GC55), docs kept (GC12), `:drop`ped declarations left out, `:replace`d ones replaced with their `:imports`, imports no declaration of the file uses left out; the listed packages' digests: a generic function's `:replace` (`reflect.TypeFor`), replace forms naming no declaration added to the package's first file (`goiNilType`), a package without kept declarations keeps its first file (`time/tzdata`), an untagged variable typed by the checker and its initializer dropped (GC99), an interpretable package not imported but `:api-interpreted`'s (GC96); a last chunk `goi:out`, the out-of-scope packages' reasons; the members: an exported variable's unexported named type of the package described by the variable (`(.Elem (reflect/TypeOf (addr binary/LittleEndian)))`) |
+| the REPL | `arbace/go/repl.ae` | the digest's session checks the interpretable packages too, with their trees, once per process (GC104); an interpreted package's session delegates them to it (`:local`), so a listed member naming `iter.Seq[string]` is the type interpreted code names (GC63); goi defines an interpretable package from that check (`load-digest-package!`), its interpretable imports first, after the importer's check (`define-digest-imports!`; not in errorcheck); `refusal` (GC101): an out-of-scope package (`goi: embed: go:embed is out of scope (GS14)`), an internal or vendored std package imported outside std (`use of internal package internal/godebug not allowed`, `package golang.org/x/net/idna is std's vendored copy, not importable`); `linkname-cell` (GC59); `intern-go` (a Go name shadows a class or a core var without a warning: `go/ast.Package`, `regexp/syntax.Error`); the build contexts' `:table-type?` and `:pkg-scope` |
+| the builder | `arbace/go/build.ae` | F1 (a labeled declaration a goto target); F4 (`free-locals`: a type switch clause's variable is declared by its clause); a method of an unexported compiled type through a listed interface of its package with that method and signature, which the type implements (`via-iface`: `binary.LittleEndian.Uint32` as `ByteOrder.Uint32`); a compiled package's unexported type the table describes is compiled (`TCompiled`); `reflect.TypeFor` of an interpreted interface (named, or unnamed with methods) is `goiNilType`'s instance (nil, GC97) |
+| the checker | `arbace/go/check/code_stmt.ae`, `check.ae`, `check/decl.ae`, `check/code_call.ae` | F1's `:decl-label`; a session's `:refuse` (the import's error `could not import embed (goi: embed: ...)`) and `:keep-trees` (a predicate); the initialization order by a heap (GC100); `lookup-error`'s local `o` shadowed the function `o` (a crash on a misspelled selection of a package-level object) |
+| tests | `test/goi/run/go/t/labels.ae`, `stdlib.ae`, `test/goi/std.ae`; `bin/goi test` | `labels.ae` (F1; goi printed `0 0 0`, `0`, `0 0`, `[]` before the fix); `stdlib.ae`, 41 lines of gc's output: the compiled `regexp`, `math/big`, `encoding/json` over an interpreted struct, `bufio`, `compress/gzip`, `encoding/base64`, `encoding/csv`, `hash.Hash32`, `net/url`; the interpreted `regexp/syntax`, `container/*` over the program's own types, `hash/fnv`, `text/tabwriter`, `text/template` (parsed), `flag` with an interpreted `flag.Value`, `go/parser`, `go/ast`, `go/format`, `html`; `encoding/binary`'s byte orders; `reflect.TypeFor`; `strings.SplitSeq` and `strings.Lines` ranged; `std.ae` (183 checks, about 30 s, not in the smoke test: GC103): every user std package of the configuration imported at the REPL in a package of its own and a member named by Go code (88 compiled, 81 interpreted), the 10 out of scope refused with their reasons, internal and vendored packages refused outside std |
+
+**The exit criteria (the survey's §6.2).**
+
+- **No program of `bin/goi check` unsupported for lack of a std package**: the run programs and
+  directory tests unsupported are 22, all GR8b's or out of scope: 13 for reflect's method lookups
+  (`reflectmethod1`, `4`-`7`, `recover`, `bug424`, `issue16331`, `issue19028`, `issue25897b`,
+  `issue27695`, `issue27695b`, `issue27695c`: GR8b, 8 of them GR9's, GC61) and 9 assembly or
+  `go:linkname` (§1.1). The survey's 29 std-package programs: 22 pass, 5 known (`issue7690`,
+  `issue8606b`, `issue4618`, `issue16037_run`, `typeparam/issue48318`, below), 2 fail by goi's core
+  (`issue30116`, `issue30116u`: GC95); the 3 `encoding/binary` programs: 2 pass (`issue19201`,
+  `issue44823`), `issue11656` known.
+- **Every user std package importable**: `test/goi/std.ae` on linux/amd64, 169 of the 180 user
+  packages imported (88 compiled, 81 interpreted), `unsafe` the checker's, the other 10 refused with
+  their reasons. The four configurations classify alike (134 interpretable, none refused); the box
+  was not built or checked on this branch (GC102's note).
+- No program passing at GR7b regresses; the essential gate and the fixpoint (below).
+
+**The check (§11).** `bin/goi check` over the 1,178 run programs and directory tests and the 659
+errorcheck programs, against `test/goi/check-linux-amd64.edn` (recorded):
+
+| result | GR7b | GR8a |
+|---|---:|---:|
+| pass | 1,386 | 1,414 |
+| fail | 23 | 25 |
+| error | 2 | 2 |
+| known | 73 | 79 |
+| unsupported | 335 | 299 |
+| skip | 18 | 18 |
+
+Of the 36 that leave unsupported: 28 pass (among them `regexp`'s `issue26411`, `issue36437`,
+`issue9355`, `syscall`'s `issue15002`, `issue79874`, `recover4`, `sigchld`, `testing`'s `bug295`,
+`issue4667`, `issue56990`, `math/big`'s `abi/idata`, `issue62360`, `runtime/trace`'s `issue73748a`,
+`b`, `runtime/pprof`'s `issue9321`, `flag`'s `chan/doubleselect`, `container/heap`'s `chan/sieve2`,
+`go/ast`'s `bug206`, `go/build`'s `alias3`, `hash`'s `bug257`, `encoding/json`'s
+`typeparam/issue48317`, `encoding/binary`'s `issue19201`, `issue44823`, `nosplit`, and the
+errorcheck programs `bug358` (`net/http`), `import1`, `issue5089`, `issue6428`); 6 are known by design (`test/goi/check-known.edn`): runtime.Stack's
+frames (`issue7690`), runtime.Callers and FuncForPC (`issue11656`), the order of an interface
+comparison of structs over protected memory (`issue8606b`), `testing.AllocsPerRun`
+(`issue4618`), `encoding/xml` of an interpreted generic type's unnamed struct RT (`issue48318`:
+G8, GR9), `html/template`'s Execute asking `reflect.Value.MethodByName` (`issue16037_run`:
+GR8b); 2 fail, recorded so (GC95): `issue30116` and `issue30116u`, goi's bounds messages for
+slicing an array (`with capacity 3` where gc says `with length 3`) and for unsigned indices beyond
+2^63 (`[-1]` where gc says `[18446744073709551615] with length 3`). The unsupported errorcheck
+programs change only in their reasons (`embed`'s refusal). `bug385_64` is no longer over the
+check's 10 s (GC100). The whole check takes 79-83 s with 12 jobs on the loaded machine (GR7b: 54 s
+with 16). The essential subset (`test/goi/essential.txt`) gains 13 by GC28's rule (every one
+outside `fixedbugs/`, every fourth new one of `fixedbugs/`; `nosplit.go` left out, it runs the go
+command): 712 programs.
+
+**Found while building.**
+
+- **`text/template`'s Execute needs `reflect.Value.MethodByName`** even for fields
+  (`evalField` asks a method of the field's name first): over a map or a struct it panics with the
+  table's `not supported by goi yet: reflect.Value.MethodByName is not in the table` (the survey's
+  §2.5 had it working). Parsing works. GR8b's (GC60).
+- **go1.27's `encoding/json` is `encoding/json/v2`'s** (GOEXPERIMENT `jsonv2`, a default
+  experiment): `json.Marshaler` is an alias of `jsonv2.Marshaler`, `json.RawMessage` of
+  `jsontext.Value`. Interpreted, those would be other types than the compiled `encoding/json`'s
+  (`reflect.TypeFor[json.Marshaler]()` was `interface {}`): so jsontext and v2 are compiled with it
+  (GC98), and their options' internal interface `jsonopts.Options` interpreted for their API
+  (GC96).
+- **A listed package's digest naming an interpretable package** (the survey's §5.1): 8 on
+  linux/amd64, mostly unexported declarations (`regexp`'s fields of `regexp/syntax`'s types,
+  `runtime`'s and `reflect`'s of `internal/abi`). Resolved, they would type compiled members by
+  the interpreted twin's types, and every import of `regexp` would check `regexp/syntax` (1.2 s):
+  so their imports are left out of the listed digests but `:api-interpreted`'s (GC96).
+- **The checker's initialization order was quadratic** (the minimum of the pending objects by a
+  scan): `syscall`'s digest, 1,880 constants, took 1.1 s to check, now listed (`os` imports it).
+  A heap as go/types' (GC100): 0.2 s; `bin/goi annotations` unchanged (2,560 initializers of
+  `linux-amd64` in the same order).
+- **The digest's untagged variables kept their initializers** for their types (GR1's
+  `:go/digest-init`): `unicode`'s range tables took 0.9 s to check at every first import of
+  `strings` or `unicode`; typed by the generator's checker now (GC99): 0.14 s.
+- **Unexported compiled types.** `binary.LittleEndian`'s type was described as an interpreted named
+  type (its compiled value not its RT); the table now describes it by its variable's type, and a
+  method call on it goes through `ByteOrder` (the survey's §4.4, no size).
+
+**Measurements.**
+
+- **Speed** (GR3's criterion): `bin/goi run test/goi/run go.t.fib bench`, best of five per run,
+  five runs alternating main's executable (`04ac458b`, GR7b, 136,446,112 bytes) and GR8a's on the
+  shared machine (load 12-15):
+
+  | | main (GR7b) | GR8a |
+  |---|---|---|
+  | fib 22 | 2.52-3.19 ms (best 2.52) | 2.61-3.19 ms (best 2.61) |
+  | sumSq 1e6 | 19.46-24.82 ms (best 19.46) | 18.81-22.10 ms (best 18.81) |
+  | sieve 1e6 | 66.26-85.25 ms (best 66.26) | 62.17-80.75 ms (best 62.17) |
+
+  The interpreter's core is unchanged; the runs' noise. The speed set runs compiled (GC64): the
+  survey's 150-430× of interpreted `regexp`, `math/big`, `bufio` becomes a compiled call each.
+- **Size.** The executable is 141,906,080 bytes against main's 136,446,112: **+5,459,968
+  (4.0%)**, within the survey's expected +3-5 MB plus GR8a's code. `bin/goi table --size`: the
+  table 9,170,944 bytes (GR7b's about 3.7 MB), of which the invokers 1,519,616 (389, above GS4's
+  1 MB: GC11's threshold is 2 sharing members; GC102), 89 packages, 1,307 signatures, 28 adapters;
+  linux/amd64's members 1,391 functions, 391 variables, 510 types, 1,685 methods (GR7b's 886, 348,
+  249, 1,035). The digest: 10,394,893 bytes, **2,489,120 compressed** (GR7b's 1,404,911 and
+  336,715): +2.15 MB, the survey's 1.4-2.4 MB.
+- **Load time at the REPL** (a fresh process, the first Go form, `math`'s, made before: 0.09 s, GR7b
+  0.03 s; then the import and a member named, as `test/goi/std.ae` does), on the loaded machine:
+
+  | package | GR8a | survey (interpreted) |
+  |---|---:|---:|
+  | `container/list`, `math/big` (compiled), `text/tabwriter`, `hash/fnv` | 0.03-0.15 s | 0.17-0.5 s |
+  | `syscall`, `regexp` (compiled), `strings` | 0.27-0.42 s | `regexp` 3.1 s |
+  | `encoding/json` (compiled), `os`, `go/token`, `image/png` | 0.59-0.71 s | |
+  | `log/slog`, `flag`, `regexp/syntax`, `archive/zip`, `database/sql`, `testing`, `text/template` | 1.05-1.76 s | `flag` 2.0-2.9 s |
+  | `go/parser`, `html/template` | 2.28, 2.75 s | |
+  | `go/types`, `net/http` | 4.85, 8.48 s | |
+
+  `strings` against main's 1.09 s (GC99); `os` against main's 0.32 s (`syscall` listed, checked).
+  `test/goi/std.ae` imports the 169 in 29-32 s in one process (each package checked once, GC104).
+
+**Checks** (this branch, amd64): the essential `bin/gate` passed (14 m 42 s: the smoke test, Clojure's
+suite as recorded, the oracle 22,637 of 22,690 against its 53 known, the differential check
+12,731 of 12,754 against its known, goi's essential check 712 of 712, the generated variants);
+`bin/arbace-go --fixpoint`: G1 = G2 = G3 (141,906,080 bytes); `bin/goi check` as recorded (above),
+`--essential` (712 of 712); `bin/goi test` and `--gc` (the checker's 19 assertions and its invalid
+forms, 17 programs, 78 REPL checks, 183 std checks, §1.4's session); `bin/goi annotations` (the
+five corpora as GR6's: zero errors, every declaration checked, the same counts); `make
+check-makefile`; `bin/generated-check`. Not run: `bin/gate --full` and the box (GC102).
+
+**Proposals for the user (GC95-GC104; each built as recommended).**
+
+- **GC95 The programs GR8a's packages reach that fail by goi's core.** `issue30116`,
+  `issue30116u`: goi's bounds messages of slicing an array and of unsigned indices (above). (a) as
+  built, recorded as failures in the reference, the essential subset by GC28's rule without them;
+  (b) fixed in goi's back end now (an index check at the index's unsigned type, an array's slice
+  bounds checked as a string's, gc's `panicSliceAlen`), a change of the back end that GR9a and
+  GR9d share. *Recommended: (a)* now, (b) with the next change of the back end.
+- **GC96 The listed digests' imports of interpretable packages.** (a) as built, left out but the
+  list's `:api-interpreted` (`iter`, `encoding/json/internal/jsonopts`): the members naming the
+  others are unusable, as before GR8a; (b) all resolved: compiled members typed by interpreted
+  twins (the survey's one-type-twice), and slower imports of compiled packages. *Recommended:
+  (a)*.
+- **GC97 `reflect.TypeFor` of an interpreted interface.** (a) as built, nil (`goiNilType`):
+  `Implements(nil)` panics where it is asked (`database/sql/driver`'s `valuerReflectType`,
+  `html/template`'s), so those packages import and work but for that check; (b) unsupported at the
+  instance's build: `database/sql`, `database/sql/driver`, `net/rpc` and their importers
+  unimportable (they ask it at initialization). *Recommended: (a)*, until G8 (GR9) gives
+  interpreted interfaces reflect types.
+- **GC98 `encoding/json`'s v2 packages.** (a) as built, `encoding/json/jsontext` and
+  `encoding/json/v2` compiled with `encoding/json` (their types are in its API; linked already);
+  (b) interpreted (the survey's class): `json.RawMessage`, `json.Marshaler` of interpreted code
+  other types than compiled `encoding/json`'s. *Recommended: (a)*.
+- **GC99 The digest's untagged variables.** (a) as built, typed by the generator's checker, their
+  initializers dropped, when the type names only the file's imports (`unicode`'s tables: 0.9 s →
+  0.14 s at each first import); (b) GR1's initializer kept for typing. *Recommended: (a)*.
+- **GC100 The checker's initialization order.** (a) as built, go/types' heap (`syscall`'s
+  digest 1.1 s → 0.2 s, the order unchanged); (b) the scan, with `syscall`'s cost on every
+  program importing `os`. *Recommended: (a)*.
+- **GC101 What the REPL refuses.** (a) as built, the out-of-scope packages with their reasons
+  (`unsafe` the checker's, importable), internal and vendored std packages outside std (Go's
+  rule), as a check error of the import; (b) the internal ones importable at the REPL (a
+  programmer's exploration). *Recommended: (a)*: Go's rule.
+- **GC102 The box and the invokers' threshold.** The four configurations' tables and digests are
+  generated (the classification alike); the box's executable (tamago's digests, 2.46-2.47 MB
+  compressed) was not built or checked here. (a) `bin/goi check --box` and the box's smoke test at
+  the merge, `bin/gate --full` (the agenda's next full gate); (b) now on this branch.
+  The invokers cost 1.52 MB (GS4's 1 MB): (a) `:min-sharing 2` kept; (b) 3. *Recommended: (a)*
+  both.
+- **GC103 `test/goi/std.ae` where.** (a) as built, in `bin/goi test` (about 30 s), not in the smoke
+  test; (b) in `bin/arbace-go --smoke` too. *Recommended: (a)*.
+- **GC104 Interpretable packages checked once per process.** (a) as built, in the digest's
+  session (GR6 checked `slices` again for each importer's session); (b) GR6's per importer.
+  *Recommended: (a)*.

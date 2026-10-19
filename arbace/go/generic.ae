@@ -1,0 +1,285 @@
+(ns arbace.go.generic
+  "goi's generic functions at the REPL (doc/go/GOI-SPEC.md \"As built: GR9d\"; GR9-SURVEY.md
+  §4; GC34 (b), GC72-GC74): the var of a generic function (and of a generic type's method T.M,
+  its receiver first) holds an arbace.lang.GoGenericFn. A call keys its arguments by their
+  types (GoGenericFn/keyOf: a Go value its descriptor, an Arbace scalar its untyped kind, a fn
+  or a collection none); on the first call of a key, resolve here types them as the checker's
+  operands (an Arbace scalar an untyped constant of its kind, a Go value its Go type: GC72 (a)),
+  runs the checker's infer with the explicit type arguments (go/inst, GC73), verifies the
+  constraints, and makes the instance's GoFn over the builder's instance-cell (shared with the
+  instances interpreted code makes); the GoGenericFn keeps it by the key (GC74 (a)).
+
+  A Go value's type is the checker's type of its descriptor (GoInterp/typeInfo): an interpreted
+  named type's the builder's registry (arbace.go.build/desc-types) gives, taken to its
+  package's last check (rehome: a named type of an older check is the same type as the
+  generic declaration's), a compiled named type's the digest's, composites by their parts."
+  (:require [arbace.string :as str]
+            [arbace.go.check.env :as e]
+            [arbace.go.check.types :as t]
+            [arbace.go.check.code :as code]
+            [arbace.go.check.decl :as decl]
+            [arbace.go.build :as b])
+  (:import (arbace.lang GoInterp GoFn GoGenericFn GoType)))
+
+;;; The checker's state for inference outside a package's check
+
+(defmacro ^:private with-checker
+  "Runs body with the checker's hooks bound as the builder binds them (define!), errors
+  collected; ctx is the build context of the generic declaration's package."
+  [ctx & body]
+  `(binding [b/*ctx* ~ctx
+             e/*errors* (volatile! [])
+             e/*decl* nil
+             e/*line* nil
+             t/*method-obj* b/method-data
+             t/*subst-method* decl/subst-method
+             t/*resolve-named* b/complete-instance!
+             code/*subst* decl/subst
+             code/*instantiate* decl/instantiate
+             code/*verify-later* (fn [& _#] nil)]
+     ~@body))
+
+(defn- check-errors!
+  "Throws the errors collected (as the REPL's check errors: their messages, :go/errors)."
+  []
+  (when-let [errs (seq @e/*errors*)]
+    (throw (ex-info (str "Go check errors:\n" (str/join "\n" (for [er (take 10 errs)] (str "REPL: " (:msg er)))))
+                    {:go/errors (vec (for [er errs] (assoc er :file "REPL")))}))))
+
+(defn- error!
+  "Records a check error with message msg."
+  [msg]
+  (e/error! "REPL" nil :GoGenericCall msg))
+
+;;; Types of the checker for descriptors (GC72 (a))
+
+(defn rehome
+  "Type ty with its interpreted named types taken to their packages' last check (env's :named:
+  path, name -> the type, or nil), its instances instantiated again from those."
+  [ty env]
+  (let [r #(rehome % env)]
+    (cond
+      (keyword? ty) ty
+      (t/named? ty)
+      (let [i (t/info ty)]
+        (cond
+          (seq (:targs i)) (let [o (r (:origin i))
+                                 ts (mapv r (:targs i))]
+                             (if (and (= o (:origin i)) (= ts (:targs i))) ty (decl/instantiate nil o ts)))
+          (or (nil? (:pkg i)) (:local i)) ty
+          :else (or ((:named env) (:pkg i) (:name i)) ty)))
+      (t/tparam? ty) ty
+      :else
+      (case (nth ty 0)
+        :pointer [:pointer (r (nth ty 1))]
+        :slice [:slice (r (nth ty 1))]
+        :array [:array (nth ty 1) (r (nth ty 2))]
+        :map [:map (r (nth ty 1)) (r (nth ty 2))]
+        :chan [:chan (nth ty 1) (r (nth ty 2))]
+        :func [:func (mapv r (nth ty 1)) (mapv r (nth ty 2)) (nth ty 3)]
+        :struct [:struct (mapv #(update % :type r) (nth ty 1))]
+        :tuple (into [:tuple] (map r (rest ty)))
+        ty))))
+
+(def ^:private basic-kinds
+  #{"bool" "int" "int8" "int16" "int32" "int64" "uint" "uint8" "uint16" "uint32" "uint64" "uintptr"
+    "float32" "float64" "complex64" "complex128" "string"})
+
+(defn desc->type
+  "The checker's type of descriptor d (a Go value's, GoInterp/valueType), in env's universe."
+  [d env]
+  (let [[kind named nm pkg elem key n ins outs variadic dir fnames ftypes femb fpkgs nmeth] (vec (GoInterp/typeInfo d))
+        sub #(desc->type % env)
+        unknown (fn [] (throw (ex-info (str "goi: a Go value of type " (GoInterp/typeName d)
+                                            " cannot be typed for a generic function's inference")
+                                       {:goi/unsupported "inference from this type"})))]
+    (case named
+      "interp" (if-let [ty (.get ^java.util.concurrent.ConcurrentHashMap b/desc-types d)] (rehome ty env) (unknown))
+      "compiled" (or ((:named env) pkg nm) (unknown))
+      (cond
+        (contains? basic-kinds kind) (keyword kind)
+        (= "unsafe.Pointer" kind) :unsafe-pointer
+        :else
+        (case kind
+          "ptr" [:pointer (sub elem)]
+          "slice" [:slice (sub elem)]
+          "array" [:array (long n) (sub elem)]
+          "map" [:map (sub key) (sub elem)]
+          "chan" [:chan (case (long dir) 1 :recv 2 :send :both) (sub elem)]
+          "func" [:func (mapv sub ins) (mapv sub outs) (boolean variadic)]
+          "struct" [:struct (vec (map (fn [fnm fty emb fp]
+                                        (cond-> {:name fnm :type (sub fty)}
+                                          emb (assoc :embedded true)
+                                          (seq fp) (assoc :pkg fp)))
+                                      fnames ftypes femb fpkgs))]
+          "interface" (cond (= "error" nm) e/error-type
+                            (zero? (long nmeth)) [:interface [] nil]
+                            :else (unknown))
+          (unknown))))))
+
+(defn- arg-form
+  "The form an argument is named by in messages: a scalar its literal, else argument N."
+  [k v i]
+  (if (and (keyword? k) (#{:untyped-int :untyped-float :untyped-bool :untyped-string :untyped-rune} k))
+    v
+    (symbol (str "argument " (inc i)))))
+
+(defn operand
+  "Argument v (its key element k, index i) as the checker's operand for inference (§4.3)."
+  [k v i env]
+  (let [f (arg-form k v i)]
+    (if (keyword? k)
+      (case k
+        (:untyped-int :untyped-float :untyped-rune :untyped-bool :untyped-string)
+        {:type k :mode :constant :val (if (char? v) (long (int v)) v) :form f}
+        ;; a fn, a collection or nil: no type to infer from (skipped as an untyped nil is)
+        (:untyped-nil :fn :coll) {:type :untyped-nil :mode :value :form f}
+        :any {:type [:interface [] nil] :mode :value :form f})
+      {:type (desc->type k env) :mode :value :form f})))
+
+;;; Calls
+
+(defn- tparams-of [x] (vec (concat (e/o x :rtparams) (e/o x :tparams))))
+
+(defn- callee-name
+  "The generic function's name in messages: pkg.F, T.M for a method."
+  [x]
+  (if (e/o x :method)
+    (str (:name (t/info (e/o x :recv-named))) "." (e/o x :name))
+    (str (or (e/o x :pkg-name) (last (str/split (str (e/o x :pkg)) #"/"))) "." (e/o x :name))))
+
+(defn- type-summary [ty]
+  (cond
+    (#{:untyped-int :untyped-float :untyped-rune} ty) "number"
+    (= :untyped-string ty) "string"
+    (= :untyped-bool ty) "bool"
+    (= :untyped-nil ty) "nil"
+    :else (t/type-str ty)))
+
+(defn- params-for
+  "Signature sig's parameters for nargs arguments (a variadic one's elements expanded), or nil
+  after an arity error."
+  [cname [_ ps _ variadic] ops]
+  (let [np (count ps) na (count ops)]
+    (if (or (and variadic (>= na (dec np))) (= na np))
+      (if variadic
+        (vec (concat (take (dec np) ps) (repeat (- na (dec np)) (nth (peek ps) 1))))
+        (vec ps))
+      (do (error! (format "%s arguments in call to %s\n\thave (%s)\n\twant (%s)"
+                          (if (< na np) "not enough" "too many") cname
+                          (str/join ", " (map #(type-summary (:type %)) ops))
+                          (str/join ", " (map-indexed (fn [i p] (if (and variadic (= i (dec np))) (str "..." (t/type-str (nth p 1))) (t/type-str p))) ps))))
+          nil))))
+
+(defn- infer-targs
+  "The type arguments of tps (known: those given, nil the unknown) from operands ops for the
+  parameters params, verified against their constraints (extra: a method's receiver's), or nil
+  after errors."
+  [cname tps known params ops extra]
+  (let [[tps2 sp] (code/rename-tparams tps (into [:tuple] params))
+        targs (code/infer tps2 (vec known) (vec (rest sp)) ops false
+                          (fn [_ msg] (error! (str "in call to " cname ", " msg))))]
+    (when targs
+      (decl/verify! nil tps targs extra)
+      (when (empty? @e/*errors*) targs))))
+
+(defn- instance-fn
+  "The GoFn of generic x's instance for targs (rt: a method's receiver's instance type)."
+  [x targs rt]
+  (let [nm (str (callee-name x) "[" (str/join "," (map b/rt-name targs)) "]")
+        [c _] (b/instance-callable x targs rt nm)]
+    (GoFn. c nm)))
+
+(defn- receiver-targs
+  "The type arguments of method x's receiver's generic type from the receiver's operand, or nil
+  after an error."
+  [x cname op]
+  (let [g (e/o x :recv-named)
+        gi (t/info g)
+        [ty] (t/deref-type (:type op))]
+    (if (and (t/named? ty) (seq (:targs (t/info ty)))
+             (let [o (t/info (:origin (t/info ty)))] (and (= (:pkg o) (:pkg gi)) (= (:name o) (:name gi)))))
+      (:targs (t/info ty))
+      (do (error! (format "in call to %s, the receiver (%s) is not of type %s" cname
+                          (type-summary (:type op)) (t/type-str g)))
+          nil))))
+
+(defn resolve-instance
+  "GoGenericFn's resolve: the instance's GoFn for a call's key k and arguments args (§4.2-§4.4)."
+  [^GoGenericFn g ^objects k ^objects args]
+  (let [{:keys [obj ptargs env]} (.-data g)
+        x obj
+        ctx ((:ctx-of env) (e/o x :pkg))
+        cname (callee-name x)]
+    (with-checker ctx
+      (let [ops (vec (map-indexed (fn [i v] (operand (aget k i) v i env)) args))
+            sig (e/o x :type)
+            r (if (e/o x :method)
+                ;; a method: the receiver's type arguments from the receiver (or go/inst's),
+                ;; then the method's own (go1.27) from the rest
+                (let [rtps (vec (e/o x :rtparams))
+                      mtps (vec (e/o x :tparams))
+                      given (vec ptargs)
+                      rtargs (cond
+                               (>= (count given) (count rtps)) (subvec given 0 (count rtps))
+                               (empty? ops) (do (error! (str "not enough arguments in call to " cname)) nil)
+                               :else (receiver-targs x cname (first ops)))]
+                  (when rtargs
+                    (let [rt (decl/instantiate nil (e/o x :recv-named) rtargs)
+                          msig (decl/subst sig (zipmap rtps rtargs))
+                          rest-ops (vec (rest ops))
+                          mtargs (if (empty? mtps)
+                                   []
+                                   (when-let [ps (params-for cname msig rest-ops)]
+                                     (infer-targs cname mtps (drop (count rtps) given) ps rest-ops (zipmap rtps rtargs))))]
+                      (when mtargs
+                        (instance-fn x (vec (concat rtargs mtargs)) rt)))))
+                (let [tps (vec (e/o x :tparams))]
+                  (when-let [ps (params-for cname sig ops)]
+                    (when-let [targs (infer-targs cname tps ptargs ps ops nil)]
+                      (instance-fn x targs nil)))))]
+        (check-errors!)
+        r))))
+
+(defn generic-fn
+  "The GoGenericFn of generic function or method object x, named full (pkg.F, pkg.T.M), its
+  explicit type arguments ptargs (go/inst's, partial; nil: none), env {:ctx-of :named}."
+  ([x full env] (generic-fn x full env nil))
+  ([x full env ptargs]
+   (GoGenericFn. full {:obj x :ptargs ptargs :env env :insts (atom {})} resolve-instance)))
+
+(defn instantiate
+  "(go/inst g T...) of GoGenericFn g with the checker types targs (resolved): every type
+  argument given, the instance's GoFn (a method's: its receiver first); fewer, a GoGenericFn
+  inferring the rest (§4.5)."
+  [^GoGenericFn g targs]
+  (let [{:keys [obj env ptargs]} (.-data g)
+        x obj
+        all (vec (concat ptargs targs))
+        tps (tparams-of x)
+        cname (callee-name x)]
+    (with-checker ((:ctx-of env) (e/o x :pkg))
+      (let [all (mapv #(rehome % env) all)]
+        (cond
+          (> (count all) (count tps))
+          (do (error! (format "got %d type arguments but %s has %d type parameters" (count all) cname (count tps)))
+              (check-errors!))
+          (= (count all) (count tps))
+          (let [rtps (vec (e/o x :rtparams))]
+            (decl/verify! nil tps all nil)
+            (check-errors!)
+            (instance-fn x all (when (e/o x :method) (decl/instantiate nil (e/o x :recv-named) (subvec all 0 (count rtps))))))
+          :else (generic-fn x (.-name g) env all))))))
+
+(defn type-instance
+  "(go/inst T A...) of generic named type g (the checker's, its package's last check) with the
+  checker types targs: the instance's GoType."
+  [g targs env]
+  (let [i (t/info g)]
+    (with-checker ((:ctx-of env) (:pkg i))
+      (let [targs (mapv #(rehome % env) targs)
+            inst (decl/instantiate nil g targs)]
+        (when (= :invalid inst) (check-errors!))
+        (decl/verify! nil (:tparams i) targs nil)
+        (check-errors!)
+        (GoType. (b/desc inst))))))

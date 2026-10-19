@@ -250,7 +250,20 @@
 
 (declare inst-gen inst-type-name)
 
+(defonce ^{:doc "The checker types of interpreted named types' descriptors (GR9d): descriptor ->
+  the type it was last made for, by which arbace.go.generic types Go values for inference."}
+  desc-types (java.util.concurrent.ConcurrentHashMap.))
+
+(declare named-desc1)
+
 (defn- named-desc [ty]
+  (let [d (named-desc1 ty)]
+    (when-not (and (t/named? ty) (compiled? (:pkg (t/info ty))) (not (inst-type? ty)) (t/exported? (:name (t/info ty))))
+      (when (and d (:pkg (t/info ty)))
+        (.put ^java.util.concurrent.ConcurrentHashMap desc-types d ty)))
+    d))
+
+(defn- named-desc1 [ty]
   (let [i (t/info ty)
         pkg (:pkg i)
         ^HashMap types (:types *ctx*)
@@ -261,7 +274,11 @@
                    (unsupported! (str "the type " (:name i)) "GR6"))
       ;; a compiled package's type (the table holds its exported ones; an unexported one, met in
       ;; a generic type's instance from the digest, is described as interpreted: §9.3)
-      (and (compiled? pkg) (not inst) (t/exported? (:name i)))
+      (and (compiled? pkg) (not inst)
+           (or (t/exported? (:name i))
+               ;; an unexported type the table describes by its variable (GR8a:
+               ;; encoding/binary's littleEndian)
+               (when-let [tt (:table-type? *ctx*)] (tt pkg (:name i)))))
       (let [d (op "TCompiled" pkg (:name i))]
         (.put types ty d)
         (when (t/interface? ty) (set-iface-methods! d ty))
@@ -1039,6 +1056,23 @@ that a type with methods goes in as a proxy (§5.3)."
     (op "InterpMethodCallable" cell (long (int (first (name (first recv))))) (long (second recv))
         (desc rty) (desc sig) nm)))
 
+(defn instance-callable
+  "GR9d: the Callable of generic function or method x's instance for targs (its receiver's type
+  arguments first) as Arbace calls it (a method: the receiver first, rt its instance type),
+  and the instance's signature: [callable sig]."
+  [x targs rt nm]
+  (let [tps (vec (concat (e/o x :rtparams) (e/o x :tparams)))
+        m (zipmap tps targs)
+        sig (decl/subst (e/o x :type) m)
+        cell (instance-cell x targs)]
+    (if (e/o x :method)
+      (let [rty (if (e/o x :ptr-recv) [:pointer rt] rt)
+            {:keys [recv]} (slot-layout sig rty)]
+        [(op "InterpMethodCallable" cell (long (int (first (name (first recv))))) (long (second recv))
+             (desc rty) (desc sig) nm)
+         sig])
+      [(op "InterpCallable" cell (desc sig) nm) sig])))
+
 (defn- path-derefs
   "The implicit dereferences of a field selection along path from type ty (the checker's)."
   [ty path]
@@ -1100,15 +1134,37 @@ that a type with methods goes in as a proxy (§5.3)."
         setters (oa (cons (arg-setter recv (as-kind rn (first recv))) (map arg-setter params nodes)))]
     (cell-call cell setters results mode)))
 
+(defn- via-iface
+  "The listed interface method I.name of compiled package pkg that type rty implements, its
+  signature identical to sig's (GR8a), as the table names it, or nil: the interfaces by name."
+  [pkg rty mname sig]
+  (when-let [scope (some-> (:pkg-scope *ctx*) (apply [pkg]))]
+    (first (for [[n x] (sort-by key scope)
+                 :when (and (t/exported? n) (= :type (e/o x :kind)) (not (e/o x :alias)))
+                 :let [it (e/o x :type)]
+                 :when (and (t/interface? it) (not (e/o x :tparams-count)))
+                 :when (some #(and (= mname (:name %)) (t/identical-ignore-tags? (:type %) sig)) (nth (t/under it) 1))
+                 :when (nil? (t/missing-method rty it false))]
+             (str n "." mname)))))
+
 (defn- method-call [callee args mode]
   (let [m (:method callee)
         pkg (e/o m :pkg)]
     (if (and (compiled? pkg) (not (generic-method? m)))
       (let [rty (recv-type-of m)
             [nt] (t/deref-type rty)
-            rn (recv-node callee)]
+            rn (recv-node callee)
+            tname (:name (t/info nt))
+            ;; a method of an unexported compiled type, through a listed interface of its
+            ;; package that the type implements and that has the method (GR8a, the survey's
+            ;; §4.4: binary.LittleEndian.Uint32 as ByteOrder.Uint32)
+            mname (if (t/exported? tname)
+                    (str tname "." (e/o m :name))
+                    (or (via-iface pkg rty (e/o m :name) (:type callee))
+                        (unsupported! (str "the method " tname "." (e/o m :name) " of an unexported compiled type: no listed interface of "
+                                           pkg " has it") "GR8a")))]
         ;; the receiver as the method expression takes it: an R holding its Go value
-        (compiled-call pkg (str (:name (t/info nt)) "." (e/o m :name)) (sig-of (:type callee)) args
+        (compiled-call pkg mname (sig-of (:type callee)) args
                        (if (= :R (first rn)) (second rn) (iface-content rn rty))
                        mode))
       (interp-method-call callee args mode))))
@@ -1858,7 +1914,13 @@ that a type with methods goes in as a proxy (§5.3)."
   [stmts]
   (let [ss (vec stmts)
         built (mapv stmt ss)
-        labels (mapv (fn [s] (if (= :label (:op s)) (label-code! (:label s)) 0)) ss)
+        labels (mapv (fn [s] (cond
+                               (= :label (:op s)) (label-code! (:label s))
+                               ;; a let's block whose first declaration is labeled (F1)
+                               (and (= :block (:op s)) (:let s))
+                               (if-let [l (:decl-label (first (:decls s)))] (label-code! l) 0)
+                               :else 0))
+                     ss)
         lines (mapv stored-line ss)]
     (op "SeqL" (oa built) (oa (map long (if (some pos? labels) labels [])))
         (oa (if (some pos? lines) lines [])))))
@@ -1870,8 +1932,12 @@ that a type with methods goes in as a proxy (§5.3)."
   [n]
   (if (or (:let n) (:let-type n))
     (let [ds (if (:let-type n) [] (mapv decl-stmt (:decls n)))
-          rest (body-node (:stmts n))]
-      (op "Seq" (oa (conj ds rest)) (oa [])))
+          rest (body-node (:stmts n))
+          ;; labeled declarations (L: x := e) resume the block there (GR8a, F1): a goto from
+          ;; the block's body to any of them; one from before the block reaches the first
+          ;; through the enclosing list's label (body-node)
+          labels (if (:let-type n) [] (mapv #(if-let [l (:decl-label %)] (label-code! l) 0) (:decls n)))]
+      (op "Seq" (oa (conj ds rest)) (oa (map long (if (some pos? labels) (conj labels 0) [])))))
     (body-node (:stmts n))))
 
 (defn- loop-target [n]
@@ -2281,6 +2347,9 @@ that a type with methods goes in as a proxy (§5.3)."
                   (case (:op x)
                     :decl (doseq [o (:objs x)] (when o (.put declared o true)))
                     :range (doseq [o (:objs x)] (when o (.put declared o true)))
+                    ;; a type switch clause's variable (GR8a, F4: json/v2's (type-switch [src src])
+                    ;; in a literal whose parameter is src too)
+                    :case (when-let [o (:var x)] (.put declared o true))
                     :fn (do (doseq [p (:params x)] (when p (.put declared p true)))
                             (doseq [r (:results x)] (when-let [o (:obj r)] (.put declared o true))))
                     nil)
@@ -2619,11 +2688,37 @@ that a type with methods goes in as a proxy (§5.3)."
         tree (if (e/o x :method) (assoc tree :recv-type (isubst (:type (:recv @d)) m)) tree)]
     (build-code tree nm [])))
 
+(declare instance-cell*)
+
 (defn instance-cell
   "The *goi.Func of generic function or method x instantiated with targs: one per type-argument
   list (by their descriptors, G7 (a): no body shared between lists), its code built by its
-  package's build context (:ctx-of) on its first call, or now when building eagerly."
+  package's build context (:ctx-of) on its first call, or now when building eagerly. GR8a:
+  reflect.TypeFor of an interpreted interface is reflect's goiNilType (nil, GC62 (a))."
   [x targs]
+  (try (instance-cell* x targs)
+       (catch arbace.lang.ExceptionInfo ex
+         (if-let [nx (::nil-type (ex-data ex))]
+           (instance-cell* nx targs)
+           (throw ex)))))
+
+(defn- instance-cell*
+  [x targs]
+  ;; reflect.TypeFor of an interpreted interface (GR8a, GC62 (a)): its reflect type would be any
+  ;; (§5.2), so Implements would hold for every type
+  (when (and (= "reflect" (e/o x :pkg)) (= "TypeFor" (e/o x :name)))
+    (let [ty (first targs)]
+      (when (and (t/interface? ty)
+                 (not (and (t/named? ty) (let [i (t/info ty)]
+                                           (or (and (nil? (:pkg i)) (= "error" (:name i)))
+                                               (and (compiled? (:pkg i)) (t/exported? (:name i)) (not (inst-type? ty)))))))
+                 (seq (nth (t/under ty) 1)))
+        ;; nil: Implements(nil) panics where it is asked, never true for every type; the
+        ;; reflect forms' goiNilType (the list's :replace) of the same signature
+        (if-let [nx (some-> (:pkg-scope *ctx*) (apply ["reflect"]) (get "goiNilType"))]
+          (throw (ex-info "goi: TypeFor of an interpreted interface" {::nil-type nx}))
+          (unsupported! (str "reflect.TypeFor of the interpreted interface " (t/type-str ty)
+                             ": its reflect type is any (§5.2)") "G8")))))
   (let [k [x (mapv desc targs)]
         ^java.util.concurrent.ConcurrentHashMap reg instances]
     (or (.get reg k)

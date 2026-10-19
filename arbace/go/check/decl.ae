@@ -806,22 +806,31 @@
     (let [G (remove #(= :func (o % :kind)) nodes)
           ndeps (java.util.HashMap.)]
       (doseq [x G] (.put ndeps x (count (.get succ x))))
-      (loop [pending (set G) acc [] emitted #{}]
-        (if (empty? pending)
-          acc
-          (let [n (apply min-key (fn [x] (+ (if (= :const (o x :kind)) 0 (bit-shift-left 1 40))
-                                            (* (long (.get ndeps x)) (bit-shift-left 1 20))
-                                            (long (order x))))
-                         pending)]
-            (when (pos? (long (.get ndeps n)))
-              (cycle-report! n succ))
-            (doseq [p (.get pred n)]
-              (when (contains? pending p) (.put ndeps p (dec (long (.get ndeps p))))))
-            (let [d (o n :decl)
-                  init? (and (= :var (o n :kind)) (:has-init @d))]
-              (if (and init? (not (contains? emitted d)))
-                (recur (disj pending n) (conj acc (or (:lhs @d) [n])) (conj emitted d))
-                (recur (disj pending n) acc emitted)))))))))
+      ;; go/types' priority queue (a heap, GR8a: the minimum by a scan was quadratic, 1.1 s for
+      ;; syscall's 1,880 constants), entries made stale by a decrement skipped
+      (let [key (fn [x] (+ (if (= :const (o x :kind)) 0 (bit-shift-left 1 40))
+                           (* (long (.get ndeps x)) (bit-shift-left 1 20))
+                           (long (order x))))
+            heap (java.util.PriorityQueue. (max 1 (count G)) (comparator (fn [a b] (< (long (first a)) (long (first b))))))
+            _ (doseq [x G] (.add heap [(key x) x]))]
+        (loop [pending (set G) acc [] emitted #{}]
+          (if (empty? pending)
+            acc
+            (let [[k n] (.poll heap)]
+              (if (or (not (contains? pending n)) (not= (long k) (long (key n))))
+                (recur pending acc emitted)
+                (do
+                  (when (pos? (long (.get ndeps n)))
+                    (cycle-report! n succ))
+                  (doseq [p (.get pred n)]
+                    (when (contains? pending p)
+                      (.put ndeps p (dec (long (.get ndeps p))))
+                      (.add heap [(key p) p])))
+                  (let [d (o n :decl)
+                        init? (and (= :var (o n :kind)) (:has-init @d))]
+                    (if (and init? (not (contains? emitted d)))
+                      (recur (disj pending n) (conj acc (or (:lhs @d) [n])) (conj emitted d))
+                      (recur (disj pending n) acc emitted))))))))))))
 
 (defn- find-path
   "go/types' findPath (initorder.go): a path of dependencies from object from to object to,
@@ -866,6 +875,7 @@
           (code/with-line spec
             (cond
               (nil? p) (err! spec :BrokenImport "could not import %s (no forms)" path)
+              (string? p) (err! spec :BrokenImport "could not import %s (%s)" path p)
               (= "_" nm) nil
               (= "init" nm) (err! spec :InvalidInitDecl "cannot import package as init - init must be a func")
               (= "." nm)
