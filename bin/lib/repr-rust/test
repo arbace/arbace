@@ -30,7 +30,15 @@
 #      fixed places, an empty binder, a closure's _ type, a struct named union, a panic), its trees
 #      and lines and mode :full byte for byte, then built and run by bin/lib/repr-rust/run-program
 #      from the original and from its printed file of mode :lines: the same stdout and exit status,
-#      its stderr the same once the panic's column is normalized (same-cols), not before.
+#      its stderr the same once the panic's column is normalized (same-cols), not before;
+#  10. the lowered and code levels and an expression file of include! (RR6):
+#      test/rust/sample/lowered_table.rs, an expression over lines, dumped with --expr, converted
+#      to one (rs/expr ...) form, its trees and lines equal printed in the three layouts and mode
+#      :full byte for byte; test/rust/sample/lowered.rs (a closure, an impl, a cfg'd item, a panic,
+#      a box dropped at a closing brace of its own, the include!) built by bin/lib/repr-rust/
+#      code-unit from the originals and from the printed files of each layout: its HIR, MIR and
+#      objects the same (mode :lines' objects once the locations' lines are left out), and a copy
+#      with one literal changed found different at the three levels.
 # Usage: bin/lib/repr-rust/test (from bin/repr-rust test). Scratch in .tmp/repr-rust/test.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -235,5 +243,60 @@ if [ "$(cut -f1 "$b9/results.tsv" | tr '\n' ' ')" = "same-cols differs " ]; then
   echo "ok: behaviour.rs behaves the same printed, once its panic's column is normalized ($(cut -f1,2 "$b9/results.tsv" | tr '\t\n' ': '))"
 else
   echo "FAIL: behaviour.rs's runs: $(tr '\t\n' ' ;' < "$b9/results.tsv") ($b9)"; fail=1
+fi
+echo "== 10. the lowered and code levels, an expression file (test/rust/sample/lowered.rs, lowered_table.rs)"
+b10=$work/code
+mkdir -p "$b10/src"
+cp "$root/test/rust/sample/lowered.rs" "$root/test/rust/sample/lowered_table.rs" "$b10/src/"
+# the expression file: dumped as one expression (--expr), converted in both modes, printed in the
+# three layouts; its trees and lines equal, mode :full byte for byte
+(cd "$b10/src" && "$helper" dump --expr -o "$b10/dumps" --edition 2024 lowered_table.rs && "$helper" dump -o "$b10/dumps" --edition 2024 lowered.rs &&
+   "$helper" dump --full --expr -o "$b10/full-dumps" --edition 2024 lowered_table.rs && "$helper" dump --full -o "$b10/full-dumps" --edition 2024 lowered.rs) || fail=1
+(cd "$root" && arbace_tool -m arbace.repr.rust read --pin "$root/tools/rsdump/RUSTC_VERSION" -o "$b10/forms" "$b10"/dumps/*.edn &&
+   arbace_tool -m arbace.repr.rust read --full --pin "$root/tools/rsdump/RUSTC_VERSION" -o "$b10/full-forms" "$b10"/full-dumps/*.edn &&
+   arbace_tool -m arbace.repr.rust print -o "$b10/lines" "$b10"/forms/rs/main/*.ae &&
+   arbace_tool -m arbace.repr.rust print --layout pretty -o "$b10/pretty" "$b10"/forms/rs/main/*.ae &&
+   arbace_tool -m arbace.repr.rust print --layout full -o "$b10/full" "$b10"/full-forms/rs/main/*.ae) > "$b10/log" 2>&1 ||
+  { cat "$b10/log"; fail=1; }
+if grep -q '^(rs/expr ' "$b10/forms/rs/main/lowered_table.ae" && grep -q ':kind :include-expr' "$b10/forms/rs/main/lowered_table.ae"; then
+  echo "ok: lowered_table.rs is (rs/file ... :kind :include-expr) and one (rs/expr ...) form"
+else
+  echo "FAIL: lowered_table.rs's forms ($b10/forms/rs/main/lowered_table.ae)"; fail=1
+fi
+(cd "$b10/src" && "$helper" tree --expr -o "$b10/orig" --edition 2024 lowered_table.rs)
+ok=1
+for l in lines pretty full; do
+  (cd "$b10/$l" && "$helper" tree --expr -o "$b10/$l.trees" --edition 2024 lowered_table.rs) || true
+  cmp -s "$b10/orig/lowered_table.rs.tree" "$b10/$l.trees/lowered_table.rs.tree" || ok=0
+  if [ $l != pretty ]; then cmp -s "$b10/orig/lowered_table.rs.lines" "$b10/$l.trees/lowered_table.rs.lines" || ok=0; fi
+done
+cmp -s "$b10/src/lowered_table.rs" "$b10/full/lowered_table.rs" || ok=0
+if [ $ok = 1 ]; then
+  echo "ok: lowered_table.rs's trees equal in the three layouts, its lines in mode :lines and :full, mode :full byte for byte"
+else
+  echo "FAIL: lowered_table.rs's round trip ($b10)"; fail=1
+fi
+# the crate built by bin/lib/repr-rust/code-unit from the originals and from each layout's printed
+# files: its HIR and MIR the same (positions as the layout keeps them), its objects the same (mode
+# :lines: once the locations' lines are left out, a box dropped at a closing brace of its own)
+printf 'lowered\x1flowered.rs\x1flib\x1f--edition 2024 --crate-name lowered --crate-type lib lowered.rs\x1f\n' > "$b10/plan.tsv"
+"$root/bin/lib/repr-rust/code-unit" "$b10/plan.tsv" 1 "$b10/jobs" "orig:$b10/src" "lines:$b10/lines:lines" "full:$b10/full:exact" \
+  "pretty:$b10/pretty:pos" > "$b10/results.tsv"
+want="same lines hir|same lines mir|same-lines lines obj|same full hir|same full mir|same full obj|same pretty hir|same pretty mir|same pretty obj"
+got=$(awk -F'\t' '{ printf "%s%s %s %s", (NR > 1 ? "|" : ""), $1, $2, $4 }' "$b10/results.tsv")
+if [ "$got" = "$want" ]; then
+  echo "ok: lowered.rs's HIR, MIR and objects the same in the three layouts (mode :lines' objects once the locations' lines are left out)"
+else
+  echo "FAIL: lowered.rs's code levels: $got ($b10/results.tsv)"; fail=1
+fi
+# a printed file with one literal changed: found at the three levels
+mkdir -p "$b10/mutated"
+cp "$b10/lines/lowered_table.rs" "$b10/mutated/"
+sed 's/v\[i\] + 1/v[i] + 2/' "$b10/lines/lowered.rs" > "$b10/mutated/lowered.rs"
+"$root/bin/lib/repr-rust/code-unit" "$b10/plan.tsv" 1 "$b10/jobs" "orig:$b10/src" "mutated:$b10/mutated:lines" > "$b10/mutated.tsv"
+if [ "$(cut -f1 "$b10/mutated.tsv" | tr '\n' ' ')" = "differs differs differs " ]; then
+  echo "ok: a changed literal is found in the HIR, the MIR and the objects"
+else
+  echo "FAIL: the changed copy: $(tr '\t\n' ' ;' < "$b10/mutated.tsv")"; fail=1
 fi
 exit $fail

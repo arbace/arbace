@@ -10,7 +10,9 @@ sysroot; RR3 on 2026-10-18 (branch `repr-rust-rr3`, from main at `80294e9a`), on
 and the stage 0 of that commit; RR4 on 2026-10-18 (branch `repr-rust-rr4`, from main at
 `96d7bafe`), on the same rustc, the host's `cargo` and the stage 0 of that commit; RR5 on
 2026-10-18 (branch `repr-rust-rr5`, from main at `f6ca94b2`), on the same rustc and `cargo`,
-`rustc-1.99.1-src.tar.xz` and the stage 0 of that commit.
+`rustc-1.99.1-src.tar.xz` and the stage 0 of that commit; RR6 on 2026-10-19 (branch
+`repr-rust-rr6`, from main at `a1a50c4c`), on the same rustc, `rustc-dev`, `rust-src` and tarball,
+the host's `objcopy` (binutils) and the stage 0 of that commit.
 
 ## Decided (2026-10-17, the user): RR-P1-RR-P3
 
@@ -507,6 +509,10 @@ with its counts in the log (`warning :full-tokens` ...).
   Rust text verbatim (`; // x`), unambiguous about the comment's kind. *Recommended: (a)*, as
   repr/go.
 
+## Decided (2026-10-18, the user): RR-P6-RR-P8
+
+RR-P6-RR-P8 as built.
+
 ## RR4: the rest of `library/`, the compiler, a pinned crate set; the pretty layout
 
 SPEC §11.4 (the corpus), §12.1 (RR4), §12.2 (editions) and §9.4 (2, the pretty layout) define it;
@@ -723,6 +729,10 @@ printed into `.tmp/repr-rust/cand/CORPUS-pretty/`, rustc's trees compared withou
   lock): more of each crate documented. *Recommended: (a)* for a corpus reproducible from the
   pinned files alone; (b) when more coverage is wanted.
 
+## Decided (2026-10-18, the user): RR-P9-RR-P12
+
+RR-P9-RR-P12 as built.
+
 ## RR5: the behaviour level; rustc's UI suite
 
 SPEC §11.1 (5, the behaviour level), §11.4 (the corpus) and §12.2 ("Later (RR5): what the UI suite
@@ -926,3 +936,192 @@ built from its printed files: none.
 - **RR-P17 Namespaces of paths with other characters** (SPEC §2.1). (a) As built: every
   character a name cannot hold made `_` (as `.` and `-` were), a clash left out of the corpus
   (`:clash`); (b) the characters escaped (`munge`'s spelling). *Recommended: (a).*
+
+## Decided (2026-10-19, the user): RR-P13-RR-P17
+
+RR-P13-RR-P17 as built.
+
+## RR6: the lowered and code levels; `include!`'s expression files
+
+SPEC §11.1 (3, the lowered level; 4, the code level), §2.5 and RSS6 (the expression files) define
+it; SPEC §12.9 records what the build changes in the spec. Built on 2026-10-19 (branch
+`repr-rust-rr6`, from main at `a1a50c4c`), on the same rustc, `rustc-dev`, `rust-src` and
+`rustc-1.99.1-src.tar.xz` as RR1-RR5, the host's `objcopy` and the stage 0 of that commit (the
+worktree's own).
+
+### What was built
+
+| part | file | what |
+|---|---|---|
+| helper | `tools/rsdump/rsdump.rs` | `rsdump rustc [--hir FILE] [--mir FILE] -- ARGS...`: rustc as a driver (`rustc_driver::run_compiler`), after analysis the crate's HIR and MIR written, then its code generated as ARGS say; `--expr` for `dump`, `tree`, `lines`: the file parsed as one expression |
+| command | `bin/repr-rust` (`--code`, `--code-only`, `code_plan`, `code_level`; `edition_plan`'s `E+expr` lines, `run_helper --expr`; `corpus make-ui`'s expression files), `bin/lib/repr-rust/code-unit` (one unit: build, compare), `arbace.repr.rust` (`compare-code`), `make repr-rust-code`, `make repr-rust-all` | |
+| converter, printer | `arbace/repr/rust/convert.ae`, `print.ae` | `(rs/file ... :kind :include-expr)` and `(rs/expr e)`; a negation and its literal on two lines stay `(- lit)` |
+| corpora | `test/rust/corpus_make.ae` (`ui-expr-candidates`, `ui ROOT DUMPS EXPRS`, the crates' `include-expr-pat`), `corpus-rustc-1.99.1-ui.edn`, `corpus-crates-2026-10-18.edn` | `:include-expr-files`: the UI suite's 6, the crate set's 1; RR1-RR4's library and compiler corpus files made again byte for byte |
+| known differences | `test/rust/roundtrip-rustc-1.99.1-ui-code-lines-known.edn`, `-ui-code-pretty-known.edn`, `-compiler-code-pretty-known.edn` | 5, 70 and 42 units, each level with its cause |
+| cases | `bin/lib/repr-rust/test` case 10, `test/rust/sample/lowered.rs`, `lowered_table.rs` | |
+
+### Results
+
+`bin/repr-rust roundtrip --text --pretty --code` over std's five crates, the rest of `library/`,
+the compiler and the UI suite (the crate set has no unit: below); each unit built from the
+originals and from the printed files of the three layouts. A unit is a crate of the corpus with an
+interface configuration (`:iface`: its root, edition, `--cfg` flags, environment and externs, an
+rlib) or a program of the UI suite (`:programs`, as the behaviour level builds it, one object).
+
+| corpus | units | judged | layout | HIR the same | MIR the same | objects the same (of them: but the bitcode; once the locations' lines are left out) | known |
+|---|---|---|---|---|---|---|---|
+| std's five crates | 5 | 5 | `:lines`, pretty | 5 | 5 | 5 (2; 0) | 0 |
+| | | | `:full` | 5 | 5 | 5 (0; 0) | 0 |
+| the rest of `library/` | 46 | 46 | `:lines`, pretty | 46 | 46 | 46 (2; 0) | 0 |
+| | | | `:full` | 46 | 46 | 46 | 0 |
+| the compiler | 66 | 65 | `:lines` | 65 | 65 | 65 (19; 0) | 0 |
+| | | | `:full` | 65 | 65 | 65 | 0 |
+| | | | pretty | 23 | 23 | 23 (1; 0) | 42 (32 differ, 10 do not build) |
+| the UI suite's programs | 3,718 | 3,715 | `:lines` | 3,711 | 3,710 | 3,711 (0; 14) | 5 |
+| | | | `:full` | 3,715 | 3,715 | 3,715 | 0 |
+| | | | pretty | 3,657 | 3,645 | 3,654 | 70 |
+
+Not judged: `rustc_codegen_llvm` (its build needs the native `llvm-wrapper` library, which
+rust's bootstrap builds with LLVM's headers), and three programs (`simd/shuffle.rs` both
+revisions, `simd/intrinsic/inlining-issue67557-ice.rs`) whose MIR, written for every body,
+fails rustc's MIR validation (`-Zunpretty=mir` fails the same way; they build without it). The
+times on this host (64 cores, shared with another agent's work): std's five crates 140 s (core
+and std the longest, about 25 s per build, four builds each), the rest of `library/` 144 s, the
+compiler 374 s (eight crates at a time), the UI suite's programs 100 s; with the syntax levels
+the corpora need printed first. The gate's step is unchanged (RR-P21). The syntax levels over
+RR1-RR5's corpora are unchanged: std's 1,074 files, the rest of `library/` (1,902) and the
+compiler (2,167) equal at the tree, pretty and text levels and std's interface level; the UI suite
+19,945 of 19,948 (the six expression files added, all equal, the three known as before), and its
+behaviour level as RR5's (one program, `threads-sendsync/yield.rs`, differed once in mode
+`:lines` while two runs shared the host and was the same in three runs alone: its threads'
+interleaving); the crate set below.
+
+### How a unit is built and compared (`bin/lib/repr-rust/code-unit`)
+
+Each side is built by the helper from its source root under the same relative path, with
+`RUSTC_BOOTSTRAP=1`, `-Cdebuginfo=0`, the root remapped to `/src`, the unit's arguments, and
+`--emit=link` (a library's rlib) or `--emit=obj` (a program's object). The printed side is a
+mirror of the source tree, every corpus file but the text files a link to its printed file, as the
+behaviour level's (`.tmp/repr-rust/code/CORPUS/LAYOUT/`). Three judges:
+
+- **HIR** (the lowered level): `rustc_hir_pretty::print_crate`, which `-Zunpretty=hir` calls, given
+  no source text: `-Zunpretty=hir` interleaves the root file's comments by their positions, and
+  mode `:lines` prints no plain comment (core's HIR differs only there: RR-P18). The text compared
+  after the positions rustc writes in it (`#[attr = CfgTrace([... span: FILE:L:C: L:C (#0)])]`,
+  the RR2 kind) are normalized as the layout keeps them: mode `:full` none; mode `:lines` each
+  kept to its start line (`FILE:L:_: _:_`: the lines where spans end are not kept, a coroutine's
+  closing brace in core); the pretty layout to its file.
+- **MIR** (the code level): `write_mir_pretty`'s text, which `-Zunpretty=mir` writes, normalized
+  as the HIR (closures and impls are named by their positions, `{closure@FILE:L:C: L:C}`,
+  `<impl at FILE:L:C: L:C>`). Written by the helper's copy of `write_mir_pretty` for two reasons:
+  1.99.1's asks `optimized_mir` of core's `#[rustc_comptime]` functions (`intrinsics::needs_drop`),
+  which panics, so the helper takes their `mir_for_ctfe`; and the paths are printed in full, not
+  trimmed as rustc's own callbacks do, which rustc's check refuses when no diagnostic follows
+  (`proc_macro`, `test`).
+- **Objects** (the code level): every member of the rlib (its objects, `lib.rmeta-link`) or the
+  object, byte for byte; the metadata (`lib.rmeta`, which holds every span and each file's hash)
+  only in mode `:full`. The code of mode `:lines` is built with `-Zlocation-detail=file,line` on
+  both sides (`Location` constants without their columns), the pretty layout's with
+  `-Zlocation-detail=file`. Two differences that are positions are set aside, counted apart
+  (RR-P20): an object that differs only in the LLVM bitcode an rlib embeds (`.llvmbc`, compared
+  again with `objcopy -R .llvmbc`), where inline assembly's `!srcloc` holds its span's byte
+  positions in the session's source map (std and test; `std_detect` and the library corpus's
+  `std`; 19 crates of the compiler: of std's LLVM IR one line differs, an `asm!`'s `!srcloc`); and in mode `:lines` objects
+  that differ and are the same once both sides are built again with `-Zlocation-detail=file`: a
+  location at a block's closing brace (the debug assertions' pointer checks of boxes freed at the
+  end of a scope), whose line mode `:lines` does not keep (the printer puts a `}` on its last
+  token's line), 14 programs.
+
+The HIR and MIR are written in `after_analysis`, and code generation goes on in the same run: one
+build per side and location detail (the baseline twice when the pretty layout is judged, mode
+`:lines`' objects a third time when they differ). rustc is deterministic here: the same sources
+built twice give the same bytes, the metadata included (mode `:full`'s rlibs are the originals'
+byte for byte).
+
+### The known differences
+
+All are positions that reach values, or text the layout respells:
+
+- mode `:lines` (5 programs of the UI suite): `stringify!` (`stringify.rs`,
+  `syntax-extension-source-utils.rs`) and `assert!`'s message (`half-open-range-pats-semantics.rs`)
+  show the tokens' spacing (N3); `lexer-crlf-line-endings-string-literal-doc-comment.rs` reads its
+  own text; `nested_uneval_unification-2.rs`'s MIR prints an unevaluated constant by its source
+  snippet (`{{ N }}`, printed `{ { N } }`). The first four are the behaviour level's known
+  differences too.
+- the pretty layout (70 programs, 42 crates of the compiler): the test harness's descriptors
+  (each `#[test]`'s `start_line`, `start_col`: 38 programs), `line!()` and `column!()` values (15),
+  `dbg!`'s `[file:line:col]` (4), unevaluated constants' snippets (9, the printer's line breaks
+  inside them), the four of mode `:lines`; in the compiler, `tracing`'s events, which record their
+  `line!()` and `file:line` (32 crates), and `rustc_macros`' `derive(Diagnostic)`, which reads
+  the columns of a message's string literal over lines and refuses the pretty layout's
+  indentation (10 crates do not build).
+
+### The crate set
+
+The crate set's crates are built by Cargo (their build scripts, features and dependencies: RR4's
+interface level runs Cargo's rustdoc commands through a wrapper); `code_plan` builds a corpus's
+units from its `:iface` roots and externs, so the crate set has none (RR-P21). Its syntax levels
+with the expression file (`askama`'s `benches/strings.inc`), in this build: 8,255 files, 8,254
+equal at the tree, pretty and text levels (the one known since RR4), 394 of 395 crates at the
+interface level (`nom`, known), 26 minutes with std's five crates' levels on the shared host.
+
+### The expression files of `include!` (SPEC RSS6)
+
+`include!` in an expression's place (`ExpandInclude::make_expr`, also a statement's place) parses
+the file with `StripTokens::Nothing` and `parse_expr`, and lints a file not ended by the
+expression. The helper's `--expr` gives rustc an empty crate root (`Config::input` an empty
+string), then parses the file so with the session's parser and dumps the `Expr`; its lexer's
+tokens (`--full`) keep a `#!` line and `---` fences as tokens. The converter writes `(rs/file
+... :kind :include-expr)`, no `:shebang` or `:frontmatter`, and `(rs/expr e)`; the printer prints
+the expression at the form's line. Which files are expression files is the corpus's
+(`:include-expr-files`, in `:files`): for the UI suite, the files the helper rejects as items, or
+not `.rs`, that an `include!` call of the suite names (its literal, over lines too, or its file
+name on the call's line: `include!(concat!(..))`) and the helper parses as one expression, with
+the edition of the first test that names it: `frontmatter/auxiliary/expr.rs` (`---\n-\n---\n1`,
+seven negations), `macros/auxiliary/macro-comma-support.rs`, `macro-include-items-expr.rs`,
+`include-single-expr-helper-1.rs`, `parser/issues/auxiliary/issue-21146-inc.rs` and
+`macros/syntax-extension-source-utils-files/includeme.fragment` (1,157 files rejected, 1,162
+before); for the crate sets, an `include!("...")` after `=`, `(` or `,`, the named file in the
+package (`askama`'s `benches/strings.inc`). `expr.rs` needed one converter change: a negation
+whose literal is on a later line is no negative literal (`(- 1)` with the literal's line).
+
+### Checks and how to reproduce
+
+`bin/repr-rust roundtrip --text --pretty --code [CORPUS... | all]` (`--code-only` with the
+printed files already there; `make repr-rust-code` for std's five crates), `bin/repr-rust test`
+(case 10), `bin/repr-rust corpus make-ui` (the UI corpus with its expression files, byte for byte
+as committed). The scratch's peak: about 8.5 GB (`.tmp/repr-rust`; the UI suite's dumps and
+mirrors, the crate set's extraction; a unit's builds removed after their comparison).
+
+### Choices for the user (RR-P18-RR-P22; open, built as recommended)
+
+- **RR-P18 The lowered level's text.** (a) As built: the helper's HIR, `rustc_hir_pretty`'s text
+  without the root file's comments, in the run that builds the code; (b) rustc's `-Zunpretty=hir`
+  as it is, a separate run per crate and side, its comments removed by a normalization (they are
+  interleaved by position, trailing ones inside lines); (c) `-Zunpretty=hir-tree` (HIR's `Debug`,
+  every span in it, normalized). *Recommended: (a)*: rustc's own printer, no text normalization
+  but positions, one build for three judges.
+- **RR-P19 The MIR.** (a) As built: `write_mir_pretty`'s text by the helper (a comptime
+  function's body from `mir_for_ctfe`, paths in full); (b) `-Zdump-mir=PreCodegen`, one file per
+  function as codegen asks them (no ICE on the three programs; positions in comments, many files);
+  (c) objects only. *Recommended: (a)*, the three programs not judged.
+- **RR-P20 Objects and positions.** (a) As built: every member but the metadata byte for byte,
+  `-Zlocation-detail` as the layout keeps positions, the bitcode's `!srcloc` and mode `:lines`'
+  closing braces set aside only when they alone differ, counted apart; (b) both counted as known
+  differences, unit by unit (21 crates, 14 programs); (c) mode `:lines` extended to keep a block's
+  closing brace's line (`:rs/close` on a body whose `}` stands on a later line than its last
+  token: most blocks), its objects then equal at `file,line`. *Recommended: (a)*: (c) changes
+  SPEC §9.1's forms for most blocks of every file, for a check the rebuild makes.
+- **RR-P21 The corpora and the gate.** (a) As built: `--code` opt-in, over the library corpora's
+  crates with an interface configuration and the UI suite's programs; `REPR_RUST_CORPORA='all
+  --code'` (about 13 minutes more), `make repr-rust-code` (std's five, about 2.5 minutes); the
+  crate set not built; (b) the crate set too, through a `RUSTC_WRAPPER` as its interface level's
+  rustdoc wrapper (Cargo builds every crate and its dependencies, the wrapper builds each corpus
+  crate again on both sides); (c) std's five crates' code levels in the gate's default step
+  (about 2.5 minutes more). *Recommended: (a)*, (b) when a consumer of the crate set's code needs
+  it.
+- **RR-P22 The expression files.** (a) As built: found by `corpus_make` (the UI suite's rejected
+  or non-`.rs` files an `include!` names and the helper parses as an expression; the crate set's
+  `include!` after `=`, `(`, `,`), non-`.rs` files included, `(rs/expr e)`; (b) `.rs` files only;
+  (c) found by expansion (the helper records the files `include!` loads in an expression's place,
+  which needs each crate expanded). *Recommended: (a).*

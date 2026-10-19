@@ -1,0 +1,171 @@
+#!/bin/bash
+# The lowered and code levels' build of one unit (doc/rust/SPEC.md §11.1, 3 and 4; doc/rust/
+# RUST-NOTES.md, "RR6"), from bin/repr-rust's code_level: a crate of a library corpus or a program
+# of the UI suite, built by the helper (rsdump rustc: rustc as a driver, which writes the crate's
+# HIR and MIR after analysis, then generates its code) from the baseline's sources and from each
+# side's, and the three compared: the HIR's text, the MIR's text, the objects byte for byte.
+#
+#   code-unit PLAN N JOBS BASE SIDE...
+#
+# PLAN: one unit per line, its fields separated by 0x1f: id, the file that must exist on a side
+# (its root), the kind (lib: an rlib, --emit=link; obj: one object, --emit=obj), rustc's arguments,
+# the compiler's environment (NAME=VALUE) (items space-separated, a space inside an item written
+# \x20); N: the line; JOBS: this run's scratch (JOBS/N, removed after, but the excerpts of what
+# differs: JOBS/../diffs/N); BASE: NAME:SOURCE-ROOT; SIDE: NAME:SOURCE-ROOT:NORM, NORM one of
+#   exact  the texts and the objects compared as they are, the rlib's metadata (lib.rmeta) too
+#          (mode :full: the printed files are the originals byte for byte);
+#   lines  every position rustc writes in the texts (FILE.rs:L1:C1: L2:C2, in a closure's or an
+#          impl's name and in attributes' Debug texts) kept to its start line, and the code built
+#          with -Zlocation-detail=file,line, on both sides (mode :lines keeps a file's lines, not
+#          its columns, SPEC §9.1), the metadata left out (it holds every span, SPEC §11.1);
+#   pos    the same with no line either, -Zlocation-detail=file (the pretty layout).
+# The baseline is built once per location detail its sides need (exact and lines: file,line;
+# pos: file). Every build: RUSTC_BOOTSTRAP=1, -Cdebuginfo=0, the source root remapped to /src,
+# from the source root under the same relative path (the file names of the spans are the same).
+#
+# Prints one line per side and level, tab-separated: STATUS SIDE ID LEVEL DETAIL, LEVEL hir, mir
+# or obj; STATUS one of same, same-code (obj: the objects that differ are the same without the
+# LLVM bitcode an rlib embeds, .llvmbc, where inline assembly's !srcloc holds its span's byte
+# positions), same-lines (obj, NORM lines: the objects differ, and are the same once both sides
+# are built again with -Zlocation-detail=file: a location at a span's end, a block's closing
+# brace, whose line mode :lines does not keep), differs (DETAIL: the first difference, or the
+# objects that differ),
+# build-fail (LEVEL -: the side does not build, where the baseline does), missing (LEVEL -: the
+# side has no root), skip (SIDE and LEVEL -: the baseline does not build).
+set -u
+plan=$1 n=$2 jobs=$3; shift 3
+helper=$(cd "$(dirname "$0")/../../.." && pwd)/.tmp/repr-rust/rsdump
+IFS=$'\x1f' read -r id file kind args renv < <(sed -n "${n}p" "$plan")
+d=$jobs/$n
+rm -rf "$d"; mkdir -p "$d"
+words() { local w out=(); for w in $1; do out+=("$(printf '%b' "$w")"); done; printf '%s\0' "${out[@]}"; }
+ra=(); re=()
+[ -n "$args" ] && mapfile -d '' ra < <(words "$args")
+[ -n "$renv" ] && mapfile -d '' re < <(words "$renv")
+detail_of() { case $1 in pos) echo file ;; *) echo file,line ;; esac; }
+
+# build NAME SRC DETAIL: $d/NAME/ (u.hir, u.mir, the rlib or u.o, build.log)
+build() {
+  local o=$d/$1 emit
+  mkdir -p "$o/out"
+  case $kind in lib) emit=(--emit=link --out-dir "$o/out") ;; *) emit=(--emit=obj -o "$o/out/u.o") ;; esac
+  (cd "$2" && env RUSTC_BOOTSTRAP=1 "${re[@]}" timeout 900 "$helper" rustc --hir "$o/u.hir" --mir "$o/u.mir" -- \
+     "${ra[@]}" -Cdebuginfo=0 "-Zlocation-detail=$3" --remap-path-prefix "$(cd "$2" && pwd -P)=/src" "${emit[@]}") > "$o/build.log" 2>&1 &&
+    [ -f "$o/u.hir" ] && [ -f "$o/u.mir" ] || return 1
+  # the objects: an rlib's members, extracted (a proc-macro crate's shared library as it is)
+  if [ "$kind" = lib ]; then
+    local r
+    mkdir -p "$o/obj"
+    for r in "$o/out"/*; do
+      case $r in
+        *.rlib) (cd "$o/obj" && ar x "$r") || return 1 ;;
+        *) [ -f "$r" ] && mv "$r" "$o/obj/" ;;
+      esac
+    done
+    rm -rf "$o/out"
+  else
+    mkdir -p "$o/obj" && mv "$o/out/u.o" "$o/obj/u.o" && rm -rf "$o/out"
+  fi
+  [ -d "$o/obj" ]
+}
+# normalize NORM FROM TO: a text's positions as NORM says
+normalize() {
+  case $1 in
+    lines) sed -E -e 's/(\.rs):([0-9]+):[0-9]+: [0-9]+:[0-9]+/\1:\2:_: _:_/g' -e 's/(\.rs):([0-9]+):[0-9]+/\1:\2:_/g' "$2" > "$3" ;;
+    pos) sed -E -e 's/(\.rs):[0-9]+:[0-9]+: [0-9]+:[0-9]+/\1:_:_: _:_/g' -e 's/(\.rs):[0-9]+:[0-9]+/\1:_:_/g' "$2" > "$3" ;;
+    *) cp "$2" "$3" ;;
+  esac
+}
+first_error() { grep -m1 '^error\|panicked' "$1" | cut -c1-200; }
+# first_diff A B: the first differing line of two texts, both sides', cut
+first_diff() { diff "$1" "$2" | grep -m2 '^[<>]' | cut -c1-160 | tr '\n\t' '  '; }
+
+# objects BASE SIDE NORM: the objects of two builds (their obj/ directories), every member byte
+# for byte, but the metadata (lib.rmeta: the crate's spans and its files' hashes) when NORM is not
+# exact; an object that differs only in the LLVM bitcode an rlib embeds (.llvmbc, for LTO: inline
+# assembly's !srcloc holds its span's byte positions in the session's source map) is same-code;
+# sets ost (same, same-code, differs) and odet
+objects() {
+  local f dif=() bc=() nobj=0 bytes=0 rmeta=""
+  for f in $( (cd "$1" && ls; cd "$2" && ls) | sort -u); do
+    if [ "$f" = lib.rmeta ] && [ "$3" != exact ]; then
+      if cmp -s "$1/$f" "$2/$f"; then rmeta=", lib.rmeta equal"; else rmeta=", lib.rmeta differs (not judged)"; fi
+      continue
+    fi
+    nobj=$((nobj + 1))
+    if cmp -s "$1/$f" "$2/$f"; then bytes=$((bytes + $(wc -c < "$2/$f"))); else dif+=("$f"); fi
+  done
+  for f in "${dif[@]}"; do
+    objcopy -R .llvmbc -R .llvmcmd "$1/$f" "$d/b.o" 2> "$d/objcopy.log" &&
+      objcopy -R .llvmbc -R .llvmcmd "$2/$f" "$d/c.o" 2>> "$d/objcopy.log" &&
+      cmp -s "$d/b.o" "$d/c.o" && bc+=("$f")
+  done
+  rm -f "$d/b.o" "$d/c.o"
+  if [ ${#dif[@]} = 0 ]; then
+    ost=same odet="$nobj files, $bytes bytes$rmeta"
+  elif [ ${#bc[@]} = ${#dif[@]} ]; then
+    ost=same-code odet="$nobj files, $((nobj - ${#bc[@]})) byte for byte, ${#bc[@]} but their embedded bitcode (.llvmbc)$rmeta"
+  else
+    ost=differs odet="${#dif[@]} of $nobj files differ: ${dif[*]:0:5}$rmeta"
+  fi
+}
+
+IFS=: read -r bname bsrc <<< "$1"; shift
+declare -A based=()
+keep=0
+for side in "$@"; do
+  IFS=: read -r name src norm <<< "$side"
+  det=$(detail_of "$norm")
+  base=$bname.$det
+  if [ -z "${based[$det]:-}" ]; then
+    if build "$base" "$bsrc" "$det"; then based[$det]=ok; else based[$det]=fail; fi
+  fi
+  if [ "${based[$det]}" = fail ]; then
+    printf 'skip\t-\t%s\t-\tthe baseline (%s, -Zlocation-detail=%s) does not build: %s\n' "$id" "$bname" "$det" "$(first_error "$d/$base/build.log")"
+    continue
+  fi
+  if [ ! -e "$src/$file" ]; then
+    printf 'missing\t%s\t%s\t-\tnot printed\n' "$name" "$id"; continue
+  fi
+  if ! build "$name" "$src" "$det"; then
+    printf 'build-fail\t%s\t%s\t-\t%s\n' "$name" "$id" "$(first_error "$d/$name/build.log")"; keep=1; continue
+  fi
+  for t in hir mir; do
+    normalize "$norm" "$d/$base/u.$t" "$d/$name/b.$t"; normalize "$norm" "$d/$name/u.$t" "$d/$name/c.$t"
+    if cmp -s "$d/$name/b.$t" "$d/$name/c.$t"; then
+      printf 'same\t%s\t%s\t%s\t%s\n' "$name" "$id" "$t" "$(wc -c < "$d/$name/c.$t") bytes"
+    else
+      printf 'differs\t%s\t%s\t%s\t%s\n' "$name" "$id" "$t" "$(first_diff "$d/$name/b.$t" "$d/$name/c.$t")"; keep=1
+      mkdir -p "$jobs/../diffs/$n"; diff "$d/$name/b.$t" "$d/$name/c.$t" | head -200 > "$jobs/../diffs/$n/$name.$t.diff"; echo "$id" > "$jobs/../diffs/$n/id"
+    fi
+    rm -f "$d/$name/b.$t" "$d/$name/c.$t" "$d/$name/u.$t"
+  done
+  objects "$d/$base/obj" "$d/$name/obj" "$norm"
+  if [ "$ost" = differs ] && [ "$norm" = lines ]; then
+    # mode :lines keeps the lines where spans start, not where they end: a drop at a block's end
+    # is located at its closing brace (the unsafe preconditions' checks of drop glue), which the
+    # printer puts on its last token's line; the objects built again without the locations' lines
+    if [ -z "${based[file]:-}" ]; then
+      if build "$bname.file" "$bsrc" file; then based[file]=ok; else based[file]=fail; fi
+    fi
+    if [ "${based[file]}" = ok ] && build "$name.file" "$src" file; then
+      sst=$ost sdet=$odet
+      objects "$d/$bname.file/obj" "$d/$name.file/obj" pos
+      if [ "$ost" = same ] || [ "$ost" = same-code ]; then
+        ost=same-lines odet="$sdet; the same without the locations' lines ($odet)"
+      else
+        ost=$sst odet=$sdet
+      fi
+      rm -rf "${d:?}/$name.file"
+    fi
+  fi
+  printf '%s\t%s\t%s\tobj\t%s\n' "$ost" "$name" "$id" "$odet"
+  [ "$ost" = differs ] && keep=1
+  rm -rf "${d:?}/$name"
+done
+if [ "$keep" = 1 ]; then
+  k=$jobs/../diffs/$n
+  mkdir -p "$k"; echo "$id" > "$k/id"
+  for x in "$d"/*/build.log; do [ -f "$x" ] && cp "$x" "$k/$(basename "$(dirname "$x")").build.log"; done
+fi
+rm -rf "$d"

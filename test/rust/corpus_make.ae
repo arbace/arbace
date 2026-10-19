@@ -48,6 +48,8 @@
 
 (def path-pat #"(?m)^\s*(?:#\[\s*path\s*=|(?:[^/\n]*\bcfg_attr\([^\n]*,\s*)?path\s*=)\s*\"([^\"]+\.rs)\"")
 (def include-pat #"(?m)^\s*include!\(\s*\"([^\"]+\.rs)\"\s*\)")
+;; include! in an expression's place (after =, ( or ,): the file is one expression (RR6, SPEC RSS6)
+(def include-expr-pat #"[=(,]\s*include!\(\s*\"([^\"]+)\"\s*\)")
 (def text-pat #"\binclude_(?:str|bytes)!\(\s*\"([^\"]+\.rs)\"\s*\)")
 
 (defn named
@@ -153,6 +155,12 @@
                :let [fs (vec (sort (get by (:dir p))))]
                :when (seq fs)
                :let [d (:dir p)
+                     ;; the expression files of include! (any extension), in the package
+                     xfs (vec (sort (distinct (for [f fs m (re-seq include-expr-pat (slurp (str base "/" f)))
+                                                    :let [t (norm (str (dir-of f) "/" (second m)))]
+                                                    :when (and (= (:dir p) (owner t)) (.isFile (File. (str base "/" t))))]
+                                                t))))
+                     fs (vec (sort (distinct (concat fs xfs))))
                      ;; a package nested in another's directory (not a member of its workspace:
                      ;; the codegen backends' build systems, both named y): its namespaces under
                      ;; the enclosing crate's (SPEC §2.1 as built at RR4)
@@ -170,6 +178,7 @@
            (assoc p :files fs :roots roots :ns-crate ns-crate
                     :path-files (vec (named base fs every path-pat))
                     :include-files (vec (named base fs every include-pat))
+                    :include-expr-files xfs
                     ;; .rs files the library reads as text (a doc of include_str!: an example),
                     ;; named by its files under src/ but its tests: the interface level's printed
                     ;; side keeps them as they are
@@ -330,6 +339,7 @@
   (println (str "   :roots " (pr-str (:roots c))))
   (println (str "   :path-files " (pr-str (:path-files c))))
   (println (str "   :include-files " (pr-str (:include-files c))))
+  (when (seq (:include-expr-files c)) (println (str "   :include-expr-files " (pr-str (:include-expr-files c)))))
   (when (seq (:text-files c)) (println (str "   :text-files " (pr-str (:text-files c)))))
   (when-let [i (:cargo (:iface c))]
     (println (str "   :iface {:cargo " (pr-str i) (when-let [fs (:features (:iface c))] (str " :features " (pr-str fs))) "}")))
@@ -510,6 +520,7 @@
                                :roots (mapv #(str f "/" %) (:roots c))
                                :path-files (mapv #(str f "/" %) (:path-files c))
                                :include-files (mapv #(str f "/" %) (:include-files c))
+                               :include-expr-files (mapv #(str f "/" %) (:include-expr-files c))
                                :text-files (mapv #(str f "/" %) (:text-files c)))))]
     (header "crates-2026-10-18"
             ["repr/rust's pinned crate set (doc/rust/SPEC.md §11.4; doc/rust/RUST-NOTES.md, \"RR4\"; the survey's"
@@ -633,19 +644,51 @@
   [^String root]
   (doseq [f (ui-files root)] (println (ui-edition (directives (slurp (str root "/" f)))) f)))
 
-(defn ui-corpus
-  "The UI suite's corpus: every .rs file of tests/ui but those the helper rejects (DUMPS, its dumps
-  of every file with its edition: step 1), one crate per edition; the programs of the behaviour
-  level"
+(defn- dumped-ok? [^String dumps ^String f]
+  (let [d (File. (str dumps "/" f ".edn"))]
+    (and (.exists d) (not (s/includes? (slurp d) "(rsdump/error")))))
+
+(defn ui-expr-candidates
+  "EDITION FILE per line: the files of tests/ui that may be expression files of include! (RR6,
+  SPEC RSS6; corpus_make's step 2): the .rs files the helper rejects as items (DUMPS: step 1's
+  dumps) and the other files an include!(\"PATH\") names (relative to the naming file's directory),
+  each named by an include! call of the suite (its file name on the call's line: include!(concat!(
+  ...)) too), with the edition of the first file that names it"
   [^String root ^String dumps]
   (let [fs (ui-files root)
-        rejected (set (filter #(let [d (File. (str dumps "/" % ".edn"))]
-                                 (or (not (.exists d)) (s/includes? (slurp d) "(rsdump/error")))
-                              fs))
-        info (into {} (for [f fs] (let [ds (directives (slurp (str root "/" f)))] [f {:ds ds :edition (ui-edition ds)}])))
+        texts (into {} (for [f fs] [f (slurp (str root "/" f))]))
+        calls (vec (for [f fs l (s/split-lines (get texts f)) :when (s/includes? l "include!(")] [f l]))
+        ;; a literal over lines (a \ at a line's end continues it)
+        lits (into {} (for [f fs m (re-seq #"(?s)include!\(\s*\"((?:[^\"\\]|\\.)*)\"" (get texts f))
+                             :let [p (norm (str (dir-of f) "/" (s/replace (second m) #"\\\n\s*" "")))]
+                             :when (and (not (s/ends-with? p ".rs")) (s/starts-with? p "tests/ui/") (.isFile (File. (str root "/" p))))]
+                         [p f]))
+        named-by (fn [^String p]
+                   (let [b (last (s/split p #"/"))
+                         re (re-pattern (str "include!\\(.*" (java.util.regex.Pattern/quote b)))]
+                     (first (keep (fn [[f l]] (when (and (not= f p) (re-find re l)) f)) calls))))]
+    (doseq [c (concat (remove #(dumped-ok? dumps %) fs) (sort (keys lits)))
+            :let [by (or (get lits c) (named-by c))] :when by]
+      (println (ui-edition (directives (get texts by))) c))))
+
+(defn ui-corpus
+  "The UI suite's corpus: every .rs file of tests/ui but those the helper rejects (DUMPS, its dumps
+  of every file with its edition: step 1), one crate per edition, and the expression files of
+  include! (EXPRS, the helper's dumps --expr of step 2's candidates: those it takes, RR6); the
+  programs of the behaviour level"
+  [^String root ^String dumps ^String exprs]
+  (let [xfs (when exprs
+              (into {} (for [^File d (file-seq (File. exprs)) :when (and (.isFile d) (s/ends-with? (.getName d) ".edn"))
+                             :let [t (slurp d)] :when (not (s/includes? t "(rsdump/error"))
+                             :let [f (s/replace (subs (.getPath d) (inc (count exprs))) #"\.edn$" "")]]
+                         [f (Long/parseLong (second (re-find #":edition (\d+)" t)))])))
+        fs (vec (sort (distinct (concat (ui-files root) (keys xfs)))))
+        rejected (set (filter #(and (not (contains? xfs %)) (not (dumped-ok? dumps %))) fs))
+        info (into {} (for [f fs] (let [ds (directives (slurp (str root "/" f)))] [f {:ds ds :edition (or (get xfs f) (ui-edition ds))}])))
         ok (remove rejected fs)
         ;; the namespaces the files map to (SPEC §2.1: rs.ui + the path below tests/ui), each once
         nss (group-by #(s/replace (s/replace (subs % 9) #"\.rs$" "") #"[^\p{L}\p{N}_/]" "_") ok)
+        ;; an expression file is no program
         clash (set (for [[_ g] nss :when (> (count g) 1) f g] f))
         ok (remove clash ok)
         ;; compiletest's directories of no tests (a compiletest-ignore-dir file: a test's modules)
@@ -654,7 +697,7 @@
                                              (or (= d "tests/ui") (= d "")) false
                                              :else (recur (dir-of d)))))
         progs (vec (for [f ok
-                         :when (not (re-find #"(^|/)auxiliary/" f))
+                         :when (and (not (re-find #"(^|/)auxiliary/" f)) (not (contains? xfs f)))
                          p (let [ps (ui-programs f (:ds (get info f)))]
                              (if (and (seq ps) (ignored-dir? f))
                                [{:file f :not-run "a test's module (compiletest-ignore-dir)"}]
@@ -675,8 +718,12 @@
     (doseq [[r n] (sort-by (comp - val) (frequencies (map #(s/replace (:not-run %) #": .*" "") not-run)))]
       (println (str ";;   " r ": " n)))
     (header nil
-            ["Made by test/rust/corpus_make.ae ui-editions ROOT (the helper's editions), bin/repr-rust's dumps"
-             "of every file, then test/rust/corpus_make.ae ui ROOT DUMPS (bin/repr-rust corpus make-ui)."])
+            [(str "The expression files of include! (RR6; " (count xfs) ", :include-expr-files, in :files): the files the helper")
+             "rejects as items, or not .rs, that an include! call names and the helper parses as one expression"
+             "(rsdump --expr), each with the edition of the first test that names it."
+             "Made by test/rust/corpus_make.ae ui-editions ROOT (the helper's editions), bin/repr-rust's dumps"
+             "of every file, test/rust/corpus_make.ae ui-expr-candidates ROOT DUMPS, the helper's dumps --expr"
+             "of those, then test/rust/corpus_make.ae ui ROOT DUMPS EXPRS (bin/repr-rust corpus make-ui)."])
     (println "{:name \"rustc-1.99.1-ui\"")
     (println (str " :tarball " (pr-str ui-tarball)))
     (println (str " :rejected ;; " (count rejected)))
@@ -688,7 +735,8 @@
     (println " [")
     (doseq [[ed fs] (sort-by key (group-by #(:edition (get info %)) ok))]
       (print-crate {:name 'ui :dir "tests/ui" :edition ed :crate-type "bin" :roots []
-                    :path-files [] :include-files [] :no-iface "the UI suite's programs: no library" :files (vec fs)}))
+                    :path-files [] :include-files [] :include-expr-files (vec (filter #(contains? xfs %) fs))
+                    :no-iface "the UI suite's programs: no library" :files (vec fs)}))
     (println " ]")
     (println (str " :programs ;; " (count run)))
     (println " [")
@@ -702,5 +750,6 @@
     "compiler" (compiler-corpus (first more) (second more))
     "crates" (crates-corpus (first more) (second more))
     "ui-editions" (ui-editions (first more))
-    "ui" (ui-corpus (first more) (second more))
+    "ui-expr-candidates" (ui-expr-candidates (first more) (second more))
+    "ui" (ui-corpus (first more) (second more) (nth more 2 nil))
     (std-corpus mode)))
