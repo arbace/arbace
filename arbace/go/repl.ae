@@ -250,7 +250,7 @@
    :lit-count (atom 0)
    :gen (fn [nt]
           (let [i (t/info nt)]
-            (or (when-let [ps (state-of-path (:pkg i))] (get-in @ps [:types (:name i) :gen])) 1)))
+            (or (:goi/gen i) (when-let [ps (state-of-path (:pkg i))] (get-in @ps [:types (:name i) :gen])) 1)))
    :func-cell (fn [x]
                 (let [ps (state-of-path (e/o x :pkg))]
                   (or (and ps (get-in @ps [:funcs (e/o x :name) :cell]))
@@ -326,14 +326,31 @@
     (swap! st assoc :ctx ctx)
     (binding [b/*ctx* ctx t/*method-obj* b/method-data t/*subst-method* arbace.go.check.decl/subst-method
               t/*resolve-named* b/complete-instance!]
-      ;; types: a new generation when the underlying type changed (§2.5)
+      ;; types: a new generation when the underlying type changed, or its method set's names or
+      ;; signatures (§2.5, GC68: its runtime type's method table is fixed once set), or a type of
+      ;; the package it names got a new one (to a fixpoint)
       (let [type-decls (filter #(and (= :type (:kind %)) (not (e/o (:obj %) :alias))) decls)
-            types (into {}
-                        (for [d type-decls
-                              :let [x (:obj d) nm (e/o x :name) nt (e/o x :type)
-                                    k (type-key (t/under nt) gen-of)
-                                    prev (get-in old [:types nm])]]
-                          [nm {:key k :gen (cond (nil? prev) 1 (= k (:key prev)) (:gen prev) :else (inc (:gen prev)))}]))]
+            mdecls (group-by #(:name (t/info (e/o (:obj %) :recv-named)))
+                             (filter #(and (= :func (:kind %)) (:method %) (e/o (:obj %) :recv-named)) (:decl-infos r)))
+            keys-with (fn [gens]
+                        (let [gen-of (fn [nt] (let [i (t/info nt)]
+                                                (when (= (:pkg i) (:path old)) (get gens (:name i)))))]
+                          (into {}
+                                (for [d type-decls
+                                      :let [x (:obj d) nm (e/o x :name) nt (e/o x :type)
+                                            ms (sort (for [md (get mdecls nm) :let [m (:obj md)]]
+                                                       (pr-str [(e/o m :name) (boolean (e/o m :ptr-recv)) (type-key (e/o m :type) gen-of)])))
+                                            k [(type-key (t/under nt) gen-of) (vec ms)]
+                                            prev (get-in old [:types nm])]]
+                                  [nm {:key k :gen (cond (nil? prev) 1 (= k (:key prev)) (:gen prev) :else (inc (:gen prev)))}]))))
+            types (loop [gens (into {} (for [[nm v] (:types old)] [nm (:gen v)])) n 0]
+                    (let [ts (keys-with gens)
+                          gens' (merge gens (into {} (for [[nm v] ts] [nm (:gen v)])))]
+                      (if (or (= gens' gens) (>= n 8)) ts (recur gens' (inc n)))))]
+        ;; each checked type object knows its generation: a dependent kept with its old
+        ;; definition (§2.5 item 6) builds with the old type's (its descriptor's RT is fixed)
+        (doseq [d type-decls]
+          (t/update-info! (e/o (:obj d) :type) assoc :goi/gen (get-in types [(e/o (:obj d) :name) :gen])))
         (swap! st assoc :types types))
       ;; functions: a cell per name, kept while the signature is (G9)
       (let [funcs (filter #(and (= :func (:kind %)) (not (:method %)) (not= "init" (e/o (:obj %) :name))) decls)

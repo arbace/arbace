@@ -509,6 +509,9 @@ offs, each of type ts.\n"
         (let [rv (reflect/ValueOf v)]
           (when (== (.Type rv) m)
             (return v))
+          (when (not (.ConvertibleTo (.Type rv) m))
+            ;; an unnamed struct type of plain fields to a named one whose fields are embedded
+            (return (retype v m)))
           (.Interface (.Convert rv m)))))))
 
 (go/func SliceToArray "SliceToArray is [N]T(s) (at the array type), gc's check.\n" ^R [^R x ^{:tag (* Type)} at]
@@ -547,16 +550,13 @@ offs, each of type ts.\n"
 
 (go/func UintptrToUnsafe ^R [^I x] (fn ^any [^{:tag (* Frame)} fr] (unsafe/Pointer (conv uintptr (x fr)))))
 
-;; Interfaces' contents (§5.3; GR3: rule 1 and the proxies of rule 2)
+;; Interfaces' contents (§5.3): the values themselves (GR9a-c)
 
 (go/func ifaceValue
   "ifaceValue is frame value v of type t as an interface's content: the value of its Go type
-(an integer at its own kind, a closure as a Go func), or a proxy for a type without an RT of its own.\n"
+(an integer at its own kind, a closure as a Go func).\n"
   ^any [^{:tag (* Type)} t ^any v]
-  (set! v (toMem t v))
-  (when (.-Proxy t)
-    (return (contentOf (lit Proxy t v))))
-  v)
+  (toMem t v))
 
 (go/func intValue "intValue is I value v of Go kind k as a Go value of that kind (RT rt).\n" ^any [^{:tag reflect/Type} rt ^int64 v]
   (switch (.Kind rt)
@@ -576,33 +576,29 @@ offs, each of type ts.\n"
 
 (go/func IfaceI "IfaceI is integer or bool x of type t as an interface's content.\n" ^R [^I x ^{:tag (* Type)} t]
   (let [rt (.mem t)]
-    (when (.-Proxy t)
-      (return (fn ^any [^{:tag (* Frame)} fr] (contentOf (lit Proxy t (intValue rt (x fr)))))))
     (when (!= (.PkgPath rt) "")
       (return (fn ^any [^{:tag (* Frame)} fr] (.Interface (valueI rt (x fr))))))
     (fn ^any [^{:tag (* Frame)} fr] (intValue rt (x fr)))))
 
 (go/func IfaceF ^R [^F x ^{:tag (* Type)} t]
   (let [rt (.mem t)]
-    (fn ^any [^{:tag (* Frame)} fr]
-      (let [v (x fr)
-            c (conv any v)]
-        (cond
-          (== (.Kind rt) reflect/Float32) (set! c (conv float32 v))
-          (!= (.PkgPath rt) "") (let [z (.Elem (reflect/New rt))] (.SetFloat z v) (set! c (.Interface z))))
-        (when (.-Proxy t)
-          (return (contentOf (lit Proxy t c))))
-        c))))
+    (when (!= (.PkgPath rt) "")
+      (return (fn ^any [^{:tag (* Frame)} fr]
+                (let [z (.Elem (reflect/New rt))]
+                  (.SetFloat z (x fr))
+                  (.Interface z)))))
+    (when (== (.Kind rt) reflect/Float32)
+      (return (fn ^any [^{:tag (* Frame)} fr] (conv float32 (x fr)))))
+    (fn ^any [^{:tag (* Frame)} fr] (x fr))))
 
 (go/func IfaceS ^R [^S x ^{:tag (* Type)} t]
   (let [rt (.mem t)]
-    (fn ^any [^{:tag (* Frame)} fr]
-      (let [c (conv any (x fr))]
-        (when (!= (.PkgPath rt) "")
-          (let [z (.Elem (reflect/New rt))] (.SetString z (assert string c)) (set! c (.Interface z))))
-        (when (.-Proxy t)
-          (return (contentOf (lit Proxy t c))))
-        c))))
+    (when (!= (.PkgPath rt) "")
+      (return (fn ^any [^{:tag (* Frame)} fr]
+                (let [z (.Elem (reflect/New rt))]
+                  (.SetString z (x fr))
+                  (.Interface z)))))
+    (fn ^any [^{:tag (* Frame)} fr] (conv any (x fr)))))
 
 (go/func IfaceR ^R [^R x ^{:tag (* Type)} t]
   (when (.-Iface t)
@@ -633,8 +629,8 @@ offs, each of type ts.\n"
       (not (goEq a b)))))
 
 (go/func goEq
-  "goEq is Go's == on two contents or values: a struct's blank fields (the RT's _, _1 ...) are
-not compared.\n"
+  "goEq is Go's == on two contents or values: a struct's blank fields are not compared (an
+unnamed struct type's == reflect made compares them; a named one's does not: GR9c).\n"
   ^bool [^any a ^any b]
   (when (== a b)
     (return true))
@@ -648,7 +644,7 @@ not compared.\n"
           blank false]
       (for [i 0] (< i (.NumField ta)) (inc! i)
         (let [n (.-Name (.Field ta i))]
-          (if (and (> (len n) 0) (== (aget n 0) \_) (or (== (len n) 1) (and (>= (aget n 1) \0) (<= (aget n 1) \9))))
+          (if (== n "_")
             (set! blank true)
             (when (not (goEq (fieldIface va i) (fieldIface vb i)))
               (return false)))))

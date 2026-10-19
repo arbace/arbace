@@ -539,6 +539,67 @@ making a Go func of that type that calls its target through goi's frame."
     (list 'go/func nm (with-meta [(with-meta 't {:tag 'goi/Target}) (with-meta 'sig {:tag '(* goi/Type)})] {:tag 'any})
           lit)))
 
+;; ---------------------------------------------------------------------------------------
+;; The methods' stubs (GR9a; GOI-SPEC.md, "As built: GR9a-c"; GC66 (a), GC67 (a)): for each
+;; method signature compiled code may call an interpreted method of (the listed interfaces'
+;; methods' and the list's :stubs :common), K Go functions of that signature with the receiver
+;; word first, each entering the method its slot names (goi.EnterSlot); an interpreted named
+;; type's runtime type takes one per method (goi's setStubs)
+
+(defn- data-type
+  "The checker's type of the table's data d (the list's :stubs :common) in env: basic keywords,
+  [:named \"\" n] the universe's (error, any), [:named path n] a package's type, composites."
+  [env d]
+  (if (keyword? d)
+    d
+    (case (nth d 0)
+      :named (let [[_ p n] d]
+               (cond
+                 (and (= p "") (= n "error")) e/error-type
+                 (and (= p "") (= n "any")) [:interface [] nil]
+                 :else (or (some-> (chk-obj env p n) (e/o :type))
+                           (throw (ex-info (str "goi table: no type " p "." n " for :stubs") {})))))
+      :pointer [:pointer (data-type env (nth d 1))]
+      :slice [:slice (data-type env (nth d 1))]
+      :array [:array (nth d 1) (data-type env (nth d 2))]
+      :map [:map (data-type env (nth d 1)) (data-type env (nth d 2))]
+      :func [:func (mapv #(data-type env %) (nth d 1)) (mapv #(data-type env %) (nth d 2)) (boolean (nth d 3))]
+      :interface (if (empty? (nth d 1)) [:interface [] nil]
+                     (throw (ex-info (str "goi table: :stubs names a non-empty interface " (pr-str d)) {})))
+      (throw (ex-info (str "goi table: :stubs cannot name " (pr-str d)) {})))))
+
+(defn stub-forms
+  "The stubs of one method signature (cft, written types tps, trs): the family's K slots
+  (stubSlotsN), its typed call (stubCallN: the receiver word and the arguments to the method's
+  frame, goi.EnterSlot, as an adapter's), and K stubs stubN_k calling it with their slot; with
+  the family's registration (the method type and the stubs) for init."
+  [n k cft tps trs]
+  (let [va (nth cft 3)
+        slots (symbol (str "stubSlots" n))
+        callf (symbol (str "stubCall" n))
+        args (vec (for [i (range (count tps))] (symbol (str "a" i))))
+        plain (vec (map-indexed (fn [i t] (with-meta (nth args i) {:tag t})) tps))
+        p (with-meta 'p {:tag 'unsafe/Pointer})
+        sl (with-meta 'sl {:tag '(* goi/StubSlot)})
+        body (frame-call-body '(goi/EnterSlot sl p) args tps trs cft)
+        fdef (fn [nm params body]
+               (case (count trs)
+                 0 (list 'go/func nm params body)
+                 1 (list 'go/func nm (with-meta params {:tag (first trs)}) body)
+                 (list 'go/func nm params :results (vec trs) body)))
+        stub (fn [j]
+               (let [call (apply list callf (list 'addr (list 'aget slots j)) 'p args)
+                     params (vec (cons p (fn-params args tps va)))]
+                 (fdef (symbol (str "stub" n "_" j)) params
+                       (if (> (count trs) 1) (list 'return call) call))))]
+    {:forms (concat [(list 'go/var (with-meta slots {:tag (list 'array k 'goi/StubSlot)}))
+                     (fdef callf (vec (concat [sl p] plain)) body)]
+                    (map stub (range k)))
+     :register (list 'goi/RegisterStubs
+                     (list (list 'inst 'reflect/TypeFor (list 'func (vec (if va (concat (butlast tps) ['& (last tps)]) tps)) (vec trs))))
+                     (list 'subslice slots)
+                     (apply list 'lit '(slice any) (for [j (range k)] (symbol (str "stub" n "_" j)))))}))
+
 (def common-func-types
   "Function types every configuration's table adapts (§6.4, besides its members'): the common
 callbacks of sort, strings, slices and Arbace's own fns given to Go."
@@ -879,56 +940,34 @@ of function types, elements of composites), each with its data."
                          goos
                          (str "(" goos " && " (str/join " || " (map :goarch (sort-by :goarch cs))) ")"))))))))
 
-(defn- wrapper-forms
-  "The wrappers of package p's interfaces (§5.3 rule 3, §6.4): for each exported interface type
-  whose methods the table can write (members m in env), a struct embedding goi.Proxy whose
-  methods call the proxy's interpreted methods (a typed call through goi's frame, GC22),
-  registered at init."
+(defn- iface-forms
+  "The listed interfaces' methods of package p (members m in env): for each exported interface
+  type whose methods the table can write, their names and func types registered at init, for
+  reify (G13, GR7b): goi never asks reflect for a type's methods (S39). (Its wrappers, GR4's,
+  ended at GR9b: an interpreted value is itself in a compiled interface, GC69.)"
   [p m al env]
   (let [a (al p)
         by-type (group-by :type (filter :iface (:methods m)))]
     (for [[tn ms] (sort-by key by-type)
-          :let [w (symbol (str "W_" (str/replace p #"[/.-]" "_") "_" tn))
-                sigs (for [mm ms]
+          :let [sigs (for [mm ms]
                        (let [[_ ps rs va] (:sig mm)
                              tps (mapv #(emit-type env al %) ps)
                              trs (mapv #(emit-type env al %) rs)]
                          (when (and (every? some? tps) (every? some? trs))
                            [mm tps trs va])))]
-          :when (every? some? sigs)
-          f (concat
-              [(list 'go/type w (list 'struct 'goi/Proxy))
-               (list 'go/method 'GoiProxy (with-meta [(with-meta 'w {:tag w})] {:tag 'goi/Proxy}) '(.-Proxy w))]
-              (for [[mm tps trs va] sigs]
-                (let [args (vec (for [i (range (count tps))] (symbol (str "a" i))))
-                      params (vec (concat [(with-meta 'w {:tag w})]
-                                          (mapcat (fn [i t] (if (and va (= i (dec (count tps))))
-                                                              ['& (with-meta (nth args i) {:tag t})]
-                                                              [(with-meta (nth args i) {:tag t})]))
-                                                  (range) tps)))
-                      ;; a typed call of the interpreted method through goi's frame (GC22)
-                      body (frame-call-body (list 'goi/EnterMethod '(.-Proxy w) (:mname mm)) args tps trs (:cft mm))]
-                  (case (count trs)
-                    0 (list 'go/method (symbol (:mname mm)) params body)
-                    1 (list 'go/method (symbol (:mname mm)) (with-meta params {:tag (first trs)}) body)
-                    (list 'go/method (symbol (:mname mm)) params :results (vec trs) body))))
-              [(list 'go/func 'init []
-                     (list 'goi/RegisterWrapper (list (list 'inst 'reflect/TypeFor (symbol a tn)))
-                           (list 'fn (with-meta [(with-meta 'p {:tag 'goi/Proxy})] {:tag 'any}) (list 'lit w 'p)))
-                     ;; the interface's methods' names and signatures, for reify (G13, GR7b):
-                     ;; goi never asks reflect for a type's methods (S39)
-                     (list 'goi/RegisterIfaceMethods (list (list 'inst 'reflect/TypeFor (symbol a tn)))
-                           (apply list 'lit '(slice string) (map (fn [[mm]] (:mname mm)) sigs))
-                           (apply list 'lit '(slice reflect/Type)
-                                  (for [[_ tps trs va] sigs]
-                                    (list (list 'inst 'reflect/TypeFor
-                                                (list 'func (vec (if va (concat (butlast tps) ['& (last tps)]) tps)) (vec trs))))))))])]
-      f)))
+          :when (every? some? sigs)]
+      (list 'go/func 'init []
+            (list 'goi/RegisterIfaceMethods (list (list 'inst 'reflect/TypeFor (symbol a tn)))
+                  (apply list 'lit '(slice string) (map (fn [[mm]] (:mname mm)) sigs))
+                  (apply list 'lit '(slice reflect/Type)
+                         (for [[_ tps trs va] sigs]
+                           (list (list 'inst 'reflect/TypeFor
+                                       (list 'func (vec (if va (concat (butlast tps) ['& (last tps)]) tps)) (vec trs)))))))))))
 
 (defn package-table-forms
   "One package's table in one configuration: the var holding its goi.Package (members m,
   the package's import name (al p), the invokers' names inv-name by signature key), and the
-  wrappers of its interfaces (GR4)."
+  registration of its interfaces' methods."
   [p m al inv-name]
   (let [a (al p)
         gv (fn [nm] (symbol (str (str/replace p #"[/.-]" "_") "_" nm)))
@@ -950,7 +989,7 @@ of function types, elements of composites), each with its data."
                                          i (inv-name (:key mm))]
                                      (list 'lit '_ (:name mm) (list 'method-expr r (symbol (:mname mm)))
                                            (if i (list 'inst i r) 'nil)))))))]]
-    (vec (concat [(first forms)] (wrapper-forms p m al (:env m)))))))
+    (vec (concat [(first forms)] (iface-forms p m al (:env m)))))))
 
 (defn- set-tag
   "A file name's tag for a set of configurations: s and the bits of its configurations in the
@@ -1022,11 +1061,30 @@ of function types, elements of composites), each with its data."
                                               (update :cfgs (fnil conj #{}) (:cfg env))))))
                         @acc)
         adapt-name (into {} (map-indexed (fn [i k] [k (symbol (str "adapt" i))]) (keys adapt-entries)))
+        ;; the methods' stubs (GR9a): the listed interfaces' method signatures and the list's
+        ;; common ones, each writable one in the configurations that have it
+        stub-cfg (:stubs list-cfg)
+        stub-entries (let [acc (volatile! (sorted-map))]
+                       (doseq [[env pd] (map vector envs pkg-data)
+                               :let [cts (concat (for [d (:common stub-cfg)] (data-type env d))
+                                                 (for [[_ m] pd mm (:methods m) :when (:iface mm)
+                                                       :let [cft (:cft mm)] :when (vector? cft)] cft))]
+                               ct cts
+                               :let [d (data ct) [_ ps rs] d
+                                     a (fn [q] (str "P" (Math/abs (hash q))))]
+                               :when (and (every? some? (map #(emit-type env a %) (concat ps rs)))
+                                          (sig-kinds ct))]
+                         (vswap! acc update (pr-str d)
+                                 (fn [e] (-> (or e {:data d :ct ct :env env})
+                                             (update :cfgs (fnil conj #{}) (:cfg env))))))
+                       @acc)
+        stub-count (fn [d] (get (:slots-of stub-cfg) d (:slots stub-cfg 16)))
         ;; the paths the table's files import
         all-paths (volatile! #{})
         alias-of (fn [p] (vswap! all-paths conj p) p)
         _ (doseq [[k e] invoked] (let [[_ ps rs] (:ftype e)] (doseq [t (concat ps rs)] (emit-type (:env e) alias-of t))))
         _ (doseq [[_ e] adapt-entries] (let [[_ ps rs] (:data e)] (doseq [t (concat ps rs)] (emit-type (:env e) alias-of t))))
+        _ (doseq [[_ e] stub-entries] (let [[_ ps rs] (:data e)] (doseq [t (concat ps rs)] (emit-type (:env e) alias-of t))))
         _ (doseq [pd pkg-data [p _] pd] (alias-of p))
         ;; the wrappers' method types (GR4)
         _ (doseq [[env pd] (map vector envs pkg-data) [_ m] pd mm (:methods m) :when (:iface mm)
@@ -1052,6 +1110,13 @@ of function types, elements of composites), each with its data."
                             trs (mapv #(emit-type env al %) rs)
                             ftype (emit-type env al (:data e))]
                         [(:cfgs e) (adapter-form (adapt-name k) (:ct e) tps trs) ftype (adapt-name k)]))
+        ;; the stubs' forms and their registration, grouped by the configurations that have them
+        stub-forms* (for [[i [_ e]] (map-indexed vector stub-entries)]
+                      (let [[_ ps rs] (:data e)
+                            env (:env e)
+                            tps (mapv #(emit-type env al %) ps)
+                            trs (mapv #(emit-type env al %) rs)]
+                        [(:cfgs e) (stub-forms i (stub-count (:data e)) (:ct e) tps trs)]))
         ;; (configuration set, file stem) -> forms; the packages' tables grouped by identical text
         files (volatile! (sorted-map))
         add-file! (fn [stem cfgs forms]
@@ -1071,6 +1136,10 @@ of function types, elements of composites), each with its data."
                                [(apply list 'go/func 'init []
                                        (for [[_ _ ftype nm] fs]
                                          (list 'goi/RegisterAdapter (list (list 'inst 'reflect/TypeFor ftype)) nm)))])))
+        _ (doseq [[cfgs fs] (group-by first stub-forms*)]
+            (add-file! "stubs" cfgs
+                       (concat (mapcat (comp :forms second) fs)
+                               [(apply list 'go/func 'init [] (map (comp :register second) fs))])))
         ;; the digests, one per configuration, embedded by its own file
         digests (vec (for [env envs]
                        (let [chunks (concat
@@ -1157,6 +1226,7 @@ of function types, elements of composites), each with its data."
                   :invokers-functions (count (remove (comp :method val) invoked))
                   :invokers-methods (count (filter (comp :method val) invoked))
                   :adapters (count adapt-entries)
+                  :stubs (into (sorted-map) (for [[k e] stub-entries] [k (stub-count (:data e))]))
                   :files (count all-texts)
                   :members (into (sorted-map)
                                  (for [[env pd] (map vector envs pkg-data)]
@@ -1171,7 +1241,8 @@ of function types, elements of composites), each with its data."
                   :seconds (quot (- (System/currentTimeMillis) t0) 1000)}]
       (write! (io/file out "report.edn") (str (form-text (dissoc report :seconds)) "\n"))
       (println (str "goi table: " (:packages report) " packages, " (:signatures report) " signatures, "
-                    (:invokers report) " invokers, " (:adapters report) " adapters, " (:files report) " files; digests "
+                    (:invokers report) " invokers, " (:adapters report) " adapters, " (count (:stubs report)) " stub families ("
+                    (reduce + (vals (:stubs report))) " stubs), " (:files report) " files; digests "
                     (str/join ", " (for [d digest-files] (str (cfg-name (:cfg d)) " " (:bytes d) " bytes (" (:compressed d) " compressed)")))
                     "; " (:seconds report) " s"))
       report)))
