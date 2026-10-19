@@ -1090,7 +1090,7 @@ whose literal is on a later line is no negative literal (`(- 1)` with the litera
 `bin/repr-rust roundtrip --text --pretty --code [CORPUS... | all]` (`--code-only` with the
 printed files already there; `make repr-rust-code` for std's five crates), `bin/repr-rust test`
 (case 10), `bin/repr-rust corpus make-ui` (the UI corpus with its expression files, byte for byte
-as committed). The scratch's peak: about 7 GB (`.tmp/repr-rust`; the UI suite's dumps and
+as committed). The scratch's peak: about 8.5 GB (`.tmp/repr-rust`; the UI suite's dumps and
 mirrors, the crate set's extraction; a unit's builds removed after their comparison).
 
 ### Choices for the user (RR-P18-RR-P22; open, built as recommended)
