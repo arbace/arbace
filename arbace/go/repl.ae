@@ -360,7 +360,7 @@
                                             k (type-key (e/o m :type) (:gen ctx))
                                             prev (get-in old [:methods nm])
                                             cell (if (and prev (= k (:key prev))) (:cell prev) (b/op "FuncCell" nm (:name old) nil))]]
-                                  [nm {:cell cell :key k :tree (:tree d) :obj m :generic (:generic d)}]))]
+                                  [nm {:cell cell :key k :tree (:tree d) :obj m}]))]
           (swap! st assoc :methods new-methods)
           ;; the functions' sources in traces (§10.6)
           (let [fsrc (fn [cell x] (let [[ns f] ((:source ctx) (when x (e/o x :file)))] (b/op "FuncSource" cell ns f)))]
@@ -388,10 +388,9 @@
               (b/op "SetCode" cell (b/with-ctx ctx #(b/build-func tree)) nil)
               (b/op "SetCode" cell nil (fn [] (b/with-ctx ctx #(b/build-func tree))))))
           ;; the methods' code: as the functions'
-          (doseq [[nm {:keys [cell tree generic]}] (:methods @st)
+          (doseq [[nm {:keys [cell tree]}] (:methods @st)
                   :when tree]
             (cond
-              generic (b/op "SetCode" cell nil (fn [] (b/unsupported! "methods of generic types" "GR6")))
               eager (b/op "SetCode" cell (b/with-ctx ctx #(b/build-func tree)) nil)
               :else (b/op "SetCode" cell nil (fn [] (b/with-ctx ctx #(b/build-func tree))))))
           (doseq [{:keys [cell tree]} init-cells]
@@ -417,8 +416,7 @@
                           (GoFn. (b/op "InterpCallable" cell (b/desc (e/o obj :type)) (str (:path old) "." nm))
                                  (str (:path old) "." nm))))
                 ;; methods: T.M, the receiver first (§2.1), (*T).M's var T.M too
-                (doseq [[_ {:keys [cell obj generic]}] (:methods @st)
-                        :when (not generic)
+                (doseq [[_ {:keys [cell obj]}] (:methods @st)
                         :let [vname (str (:name (t/info (e/o obj :recv-named))) "." (e/o obj :name))
                               full (str (:path old) "." vname)
                               c (try (b/method-callable obj cell full)
@@ -490,11 +488,42 @@
 (defonce ^:private hook-registered
   (do (swap! arbace.lang.RT/AFTER_LOAD conj #'after-load) true))
 
+(defn interpretable?
+  "Whether import path p is an interpretable package of the digest (§9.3): its forms there
+  whole, goi's to interpret under its std path."
+  [p]
+  (boolean (and (not (listed? p)) (some-> @digest-index :index (contains? p)))))
+
+(defn- load-digest-package!
+  "Defines interpretable package path from the digest's forms (§9.3): its state made, then
+  checked, defined and initialized as a loaded package's (§2.3)."
+  [path]
+  (let [fs (digest-forms path)
+        gp (first (filter #(and (seq? %) (= 'go/package (first %))) fs))
+        opts (apply hash-map (nnext gp))
+        nm (rp/name-text (second gp))
+        files (loop [fs fs cur nil acc []]
+                (if (empty? fs)
+                  (if cur (conj acc cur) acc)
+                  (let [f (first fs)]
+                    (if (and (seq? f) (= 'go/file (first f)))
+                      (let [o (apply hash-map (nnext f))]
+                        (recur (rest fs) {:name (second f) :opts (dissoc o :doc) :imports (vec (:imports o)) :decls []}
+                               (if cur (conj acc cur) acc)))
+                      (recur (rest fs) (if (and cur (seq? f) (not (#{'in-ns 'go/package} (first f)))) (update cur :decls conj f) cur) acc)))))
+        st (new-state path nm (path->ns path))]
+    (swap! st assoc :opts (dissoc opts :files) :package-path path :files files
+           :config (merge @config (:config opts)) :loading true)
+    (swap! packages assoc path st)
+    (try (complete! st)
+         (catch Throwable ex (swap! packages dissoc path) (throw ex)))))
+
 (defn load-import
   "The state of interpreted package path, loaded from ARBACE_PATH (its namespace) when it is
-  not yet (§2.3), or nil."
+  not yet (§2.3), or from the digest for an interpretable package (§9.3), or nil."
   [path]
   (or (when-let [st (get @packages path)] (when-not (:loading @st) st))
+      (when (interpretable? path) (load-digest-package! path))
       (when-not (listed? path)
         (let [ns-sym (path->ns path)]
           (try

@@ -111,13 +111,13 @@
 
 (declare desc)
 
-(defn- instance? [ty] (and (t/named? ty) (seq (:targs (t/info ty)))))
+(defn- inst-type? [ty] (and (t/named? ty) (seq (:targs (t/info ty)))))
 
 (defn- interpreted-named?
   "Whether named type ty is interpreted: of an interpreted package, or a generic type's instance
   (a compiled package's too: gc compiled none of them for goi, §9.3)."
   [ty]
-  (and (t/named? ty) (:pkg (t/info ty)) (or (instance? ty) (not (compiled? (:pkg (t/info ty)))))))
+  (and (t/named? ty) (:pkg (t/info ty)) (or (inst-type? ty) (not (compiled? (:pkg (t/info ty)))))))
 
 (defn- recursive?
   "Whether named type nt is reachable from its own underlying type (so that reflect cannot make
@@ -178,12 +178,14 @@
   (let [i (t/info ty)
         pkg (:pkg i)
         ^HashMap types (:types *ctx*)
-        inst (instance? ty)]
+        inst (inst-type? ty)]
     (cond
       (nil? pkg) (if (= "error" (:name i))
                    (let [d (op "TBasic" "error")] (.put types ty d) (set-iface-methods! d ty) d)
                    (unsupported! (str "the type " (:name i)) "GR6"))
-      (and (compiled? pkg) (not inst))
+      ;; a compiled package's type (the table holds its exported ones; an unexported one, met in
+      ;; a generic type's instance from the digest, is described as interpreted: §9.3)
+      (and (compiled? pkg) (not inst) (t/exported? (:name i)))
       (let [d (op "TCompiled" pkg (:name i))]
         (.put types ty d)
         (when (t/interface? ty) (set-iface-methods! d ty))
@@ -699,7 +701,7 @@ that a type with methods goes in as a proxy (§5.3)."
 (defn- global-node [n]
   (load-p (place n) (:type n)))
 
-(declare instance-cell)
+(declare instance-cell isubst)
 
 (defn- func-value-node
   "The value of function node n: a generic function's instance (§9.2), a compiled member, an
@@ -1018,7 +1020,7 @@ that a type with methods goes in as a proxy (§5.3)."
 
 (defn- error-type? [ty] (and (t/named? ty) (nil? (:pkg (t/info ty))) (= "error" (:name (t/info ty)))))
 
-(defn- compiled-iface? [ty] (and (t/named? ty) (compiled? (:pkg (t/info ty))) (not (instance? ty))))
+(defn- compiled-iface? [ty] (and (t/named? ty) (compiled? (:pkg (t/info ty))) (not (inst-type? ty))))
 
 (defn- iface-recv-node
   "The interface content an interface method selection is called on (its embedded fields
@@ -1151,11 +1153,13 @@ that a type with methods goes in as a proxy (§5.3)."
         md0 (t/method-data m)
         r (t/lookup-impl T false (:name md0) (or (:pkg md0) (:path *ctx*)))
         md (if (= :method (:kind r)) (t/*subst-method* (:recv-type r) md0) md0)
+        ;; a generic method's (go1.27): its own type arguments
+        md (if (seq (:targs n)) (update md :type isubst (zipmap (:tparams md) (:targs n))) md)
         sig (:type n)
         rcv (local-obj "r" T)
         msig (:type md)
         params (vec (map-indexed (fn [i p] (local-obj (str "p" i) p)) (nth msig 1)))
-        sel (selection (local-ref rcv) r)
+        sel (cond-> (selection (local-ref rcv) r) (seq (:targs n)) (assoc :targs (:targs n) :type msig))
         nm (str (t/type-str T) "." (:name md) "-fm")
         cell (op "FuncCell" nm (:name *ctx*) nil)
         code (build-code {:op :func :params (into [rcv] params) :results (mapv (fn [t] {:type t}) (nth sig 2))
@@ -1241,13 +1245,15 @@ that a type with methods goes in as a proxy (§5.3)."
 
 ;;; Type assertions and switches (§5.3)
 
+(declare rt-name)
+
 (defn- iface-name
   "The name gc's runtime gives static interface type ty in a failed assertion's message."
   [ty]
   (cond
     (t/empty-interface? ty) (if (t/named? ty) (let [i (t/info ty)] (if (:pkg i) (str (:pkg-name i) "." (:name i)) (:name i))) "interface {}")
     (t/named? ty) (let [i (t/info ty)] (if (:pkg i) (str (:pkg-name i) "." (:name i)) (:name i)))
-    :else (t/type-str ty)))
+    :else (rt-name ty)))
 
 (defn- assert-desc [T]
   (let [d (desc T)]
@@ -1846,23 +1852,45 @@ that a type with methods goes in as a proxy (§5.3)."
     (vector? n) (some has-call? n)
     :else false))
 
+(defn- range-elem-types
+  "The types of a range's iteration values: [key value] (nil: none)."
+  [n]
+  (let [x (:x n) xt (:type x) u (t/under xt)]
+    (case (:over n)
+      :int [xt nil]
+      :slice [:int (nth u 1)]
+      :array [:int (nth u 2)]
+      :ptr-array [:int (nth (t/under (nth u 1)) 2)]
+      :string [:int :int32]
+      :map [(nth u 1) (nth u 2)]
+      :chan [(nth u 2) nil]
+      :func (let [yps (nth (t/under (first (nth u 1))) 1)] [(first yps) (second yps)])
+      [nil nil])))
+
 (defn- range-stmt [n]
   (let [x (:x n) xt (:type x) u (t/under xt)
         [[kt vt] new?] (range-targets n)
+        ets (range-elem-types n)
         ;; a map element target is assigned at each iteration from a temporary (its operands
         ;; evaluated then, as Go's assignment)
         pre (volatile! [])
+        ;; an interface target of a value that is not one: converted (its assignment's implicit
+        ;; conversion)
+        conv? (fn [t et] (and t et (iface? (:type t)) (not (iface? et))))
         ;; targets that are not plain variables (x[i], *p, m[k]) are assigned at each iteration
         ;; from temporaries, as one assignment: their operands evaluated first (§4.5)
-        complex (and (not new?) (some #(and % (not (slot-of-place %))) [kt vt]))
+        complex (and (not new?) (some (fn [[t et]] (and t (or (not (slot-of-place t)) (conv? t et)))) (map vector [kt vt] ets)))
         temps (when complex
-                (mapv (fn [t] (when t (let [k (kind (:type t))] [k (temp! k)]))) [kt vt]))
+                (mapv (fn [t et] (when t (let [k (kind (or et (:type t)))] [k (temp! k)]))) [kt vt] ets))
         _ (when complex
-            (let [ps (filterv some? (map (fn [t ks] (when t [t ks])) [kt vt] temps))]
+            (let [ps (filterv some? (map (fn [t ks et] (when t [t ks et])) [kt vt] temps ets))]
               (vswap! pre conj (assign-stmt {:lhs (mapv first ps)
-                                             :rhs (mapv (fn [[t [k s]]] {:op ::node :k k :node (local-node k s) :type (:type t) :mode :value}) ps)}))))
-        kt (if complex (when kt {::temp (first temps) :type (:type kt)}) kt)
-        vt (if complex (when vt {::temp (second temps) :type (:type vt)}) vt)
+                                             :rhs (mapv (fn [[t [k s] et]]
+                                                          (let [v {:op ::node :k k :node (local-node k s) :type (or et (:type t)) :mode :value}]
+                                                            (if (conv? t et) {:op :convert-iface :x v :to (:type t) :type (:type t) :mode :value} v)))
+                                                        ps)}))))
+        kt (if complex (when kt {::temp (first temps) :type (or (first ets) (:type kt))}) kt)
+        vt (if complex (when vt {::temp (second temps) :type (or (second ets) (:type vt))}) vt)
         tg (loop-target n)
         brk (long (:brk tg)) cont (long (:cont tg))
         iter (when new? (per-iteration-cells []))
@@ -2057,7 +2085,7 @@ that a type with methods goes in as a proxy (§5.3)."
              :assign (first (:rhs c)))
         r (find-recv r0)
         ch (:x r) ct (:type ch) et (elem-type ct) k (kind et)
-        comma (:comma-ok r0)
+        comma (or (:comma-ok r0) (:comma-ok r))
         vs (temp! k)
         oks (if comma (temp! :I) -1)
         marker (replace-recv r0 (assoc r :op ::selrecv :k k :vs vs :oks oks))
@@ -2333,7 +2361,10 @@ that a type with methods goes in as a proxy (§5.3)."
   their types (a float32's rounded), the sizes that depended on type parameters constant."
   [tree m]
   (let [m (volatile! m)
-        objs (IdentityHashMap.)]
+        objs (IdentityHashMap.)
+        ;; nodes copied once each: a node of several references (a call of several results)
+        ;; keeps one copy
+        copies (IdentityHashMap.)]
     ;; the local named types first: one each per instance
     (doseq [lt (local-types tree)]
       (let [i (t/info lt)
@@ -2356,8 +2387,10 @@ that a type with methods goes in as a proxy (§5.3)."
                 n))
             (node [x]
               (cond
+                (and (map? x) (.containsKey copies x)) (.get copies x)
                 (map? x)
-                (let [tp-recv (and (#{:iface-method} (:op x)) (t/tparam? (:iface x)))
+                (let [_ (.put copies x x)
+                      tp-recv (and (#{:iface-method} (:op x)) (t/tparam? (:iface x)))
                       n (persistent!
                          (reduce-kv
                           (fn [acc k v]
@@ -2376,12 +2409,24 @@ that a type with methods goes in as a proxy (§5.3)."
                           (assoc n :kind (if (= :method (:op (:callee n))) :method :iface))
                           n)
                       ;; unsafe's sizes of types that depended on type parameters
-                      n (if (and (= :call (:op n)) (= :builtin (:kind n)) (#{"Sizeof" "Alignof"} (:builtin n))
+                      n (if (and (= :call (:op n)) (= :builtin (:kind n)) (#{"Sizeof" "Alignof" "Offsetof"} (:builtin n))
                                  (not= :constant (:mode n)))
-                          (let [at (:type (first (:args n)))]
-                            (assoc n :mode :constant :val (if (= "Sizeof" (:builtin n)) (t/sizeof at) (t/alignof at))))
-                          n)]
-                  (const-fix n))
+                          (let [a (first (:args n)) at (:type a)]
+                            (assoc n :mode :constant
+                                   :val (case (:builtin n)
+                                          "Sizeof" (t/sizeof at)
+                                          "Alignof" (t/alignof at)
+                                          "Offsetof" (code/offsetof-value (first (t/deref-type (:type (:x a)))) (:path a)))))
+                          n)
+                      ;; a constant's conversion to a type parameter: constant in the instance
+                      n (if (and (= :conv (:op n)) (not= :constant (:mode n)) (= :constant (:mode (:x n)))
+                                 (t/const-type? (:to n)))
+                          (let [r (code/conversion {} (:form n) (:x n) (:to n))]
+                            (if (= :constant (:mode r)) (merge n (select-keys r [:mode :val])) n))
+                          n)
+                      n (const-fix n)]
+                  (.put copies x n)
+                  n)
                 (vector? x) (mapv node x)
                 :else x))]
       (node tree))))
@@ -2391,8 +2436,11 @@ that a type with methods goes in as a proxy (§5.3)."
 
 (defonce ^:private inst-gens (java.util.concurrent.ConcurrentHashMap.))
 
-(defn- rt-name
-  "A type's name as gc's runtime writes it in an instance's name: named types by package path."
+(declare rt-sig)
+
+(defn rt-name
+  "A type's name as gc's runtime writes it (in an instance's name, an assertion's message):
+  named types by package path."
   [ty]
   (cond
     (keyword? ty) (case ty :uint8 "uint8" :int32 "int32" (get t/basic-names ty (name ty)))
@@ -2410,7 +2458,28 @@ that a type with methods goes in as a proxy (§5.3)."
       :array (str "[" (nth ty 1) "]" (rt-name (nth ty 2)))
       :map (str "map[" (rt-name (nth ty 1)) "]" (rt-name (nth ty 2)))
       :chan (str (case (nth ty 1) :both "chan " :send "chan<- " :recv "<-chan ") (rt-name (nth ty 2)))
+      :func (str "func" (rt-sig ty))
+      :interface (let [ms (nth ty 1)]
+                   (if (empty? ms)
+                     "interface {}"
+                     (str "interface { " (str/join "; " (for [m ms] (str (:name m) (rt-sig (:type m))))) " }")))
+      :struct (let [fs (nth ty 1)]
+                (if (empty? fs)
+                  "struct {}"
+                  (str "struct { " (str/join "; " (for [f fs]
+                                                    (str (if (:embedded f) "" (str (:name f) " ")) (rt-name (:type f))
+                                                         (when (:tag f) (str " " (pr-str (c/value-text (:tag f))))))))
+                       " }")))
       (t/type-str ty))))
+
+(defn- rt-sig
+  "A signature's text as gc's runtime writes it: (params) results."
+  [[_ ps rs variadic]]
+  (str "(" (str/join ", " (map-indexed (fn [i p] (if (and variadic (= i (dec (count ps)))) (str "..." (rt-name (nth p 1))) (rt-name p))) ps)) ")"
+       (case (count rs)
+         0 ""
+         1 (str " " (rt-name (first rs)))
+         (str " (" (str/join ", " (map rt-name rs)) ")"))))
 
 (defn inst-type-name
   "A generic type's instance's name, as gc's runtime names it: pkg.T[args]."

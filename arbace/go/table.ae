@@ -741,6 +741,29 @@ of function types, elements of composites), each with its data."
                 (cons (list 'go/file (:name file) :imports specs) decls)))))
         (:files pk)))))
 
+(defn interpret-forms
+  "The digest of interpretable package p (§9.3, GR6): its forms whole, positions dropped, its
+  go/package marked :interpret; goi defines it as an interpreted package of its std path. A
+  declaration naming a package neither listed nor interpretable is left out, and that import
+  (internal/race's functions of internal/abi's types)."
+  [env p docs? available]
+  (let [pk (pkg-of env p)
+        cfg (:cfg env)]
+    (concat
+      [(list 'in-ns (list 'quote (symbol (path->ns p))))
+       (list 'go/package (symbol (:name pk)) :path p
+             :config {:goos (:goos cfg) :goarch (:goarch cfg)}
+             :files (vec (map :name (:files pk)))
+             :interpret true)]
+      (mapcat
+        (fn [file]
+          (let [gone (set (for [[n path] (:specs file) :when (not (available path))] n))]
+            (cons (list 'go/file (:name file)
+                        :imports (vec (for [[n path] (:specs file) :when (available path)] [(symbol n) path])))
+                  (for [f (:forms file) :when (empty? (filter gone (used-quals f)))]
+                    (clean f docs?)))))
+        (:files pk)))))
+
 ;; ---------------------------------------------------------------------------------------
 ;; Writing forms
 
@@ -808,7 +831,7 @@ of function types, elements of composites), each with its data."
   (let [config (merge {:goos (:goos cfg) :goarch (:goarch cfg)}
                       (if (= "amd64" (:goarch cfg)) {:goamd64 "v1"} {:goarm64 "v8.0"}))
         session (ck/session (fn [path _] (source-of root path config)))
-        paths (vec (distinct (concat (:packages list-cfg) (:resolve list-cfg))))
+        paths (vec (distinct (concat (:packages list-cfg) (:resolve list-cfg) (:interpret list-cfg))))
         ;; the packages checked in parallel, each its imports first (the session's cache)
         checked (with-checker (doall (pmap #(ck/ensure-package session % nil []) paths)))
         pkgs (into {} (for [[p cp] (map vector paths checked)
@@ -1041,8 +1064,14 @@ of function types, elements of composites), each with its data."
                                          (list 'goi/RegisterAdapter (list (list 'inst 'reflect/TypeFor ftype)) nm)))])))
         ;; the digests, one per configuration, embedded by its own file
         digests (vec (for [env envs]
-                       (let [chunks (for [p (:packages list-cfg)]
-                                      [p (str (str/join "\n" (map form-text (digest-forms env p (not no-docs)))) "\n")])
+                       (let [chunks (concat
+                                      (for [p (:packages list-cfg)]
+                                        [p (str (str/join "\n" (map form-text (digest-forms env p (not no-docs)))) "\n")])
+                                      ;; the interpretable packages, whole (§9.3)
+                                      (for [p (:interpret list-cfg)]
+                                        [p (str (str/join "\n" (map form-text (interpret-forms env p (not no-docs)
+                                                                                               (set (concat ["unsafe"] (:packages list-cfg) (:interpret list-cfg))))))
+                                                "\n")]))
                              index (loop [cs chunks at 0 idx (sorted-map)]
                                      (if-let [[p c] (first cs)]
                                        (recur (rest cs) (+ at (count c)) (assoc idx p [at (+ at (count c))]))

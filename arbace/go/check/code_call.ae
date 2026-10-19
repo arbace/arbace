@@ -885,6 +885,22 @@
             :struct (boolean (some #(has-var-size? (:type %)) (nth ty 1)))
             false)))
 
+(defn offsetof-value
+  "unsafe.Offsetof's value of the field at path (an embedded path, field indexes) of struct type
+  base, or nil when the path crosses a pointer."
+  [base path]
+  (loop [ty base path path off 0]
+    (if (empty? path)
+      off
+      (let [u (t/under ty)
+            fs (nth u 1)
+            i (first path)
+            fd (nth fs i)
+            o (nth (t/offsetsof fs) i)]
+        (if (and (next path) (t/pointer? (:type fd)))
+          nil
+          (recur (:type fd) (rest path) (+ off (long o))))))))
+
 (defn builtin-call
   "A call of builtin nm (unsafe: one of package unsafe's)."
   [cx f nm arg-forms unsafe]
@@ -1171,19 +1187,13 @@
                   (not= :field (:op x)) (bad "invalid argument: %s is a method value" (expr-str af))
                   :else
                   ;; the offset along the embedded path, without crossing a pointer
-                  (let [base (:type (:x x))
-                        [base ptr] (t/deref-type base)]
-                    (loop [ty base path (:path x) off 0]
-                      (if (empty? path)
-                        (node {:args [x] :mode :constant :type :uintptr :val off})
-                        (let [u (t/under ty)
-                              fs (nth u 1)
-                              i (first path)
-                              fd (nth fs i)
-                              o (nth (t/offsetsof fs) i)]
-                          (if (and (next path) (t/pointer? (:type fd)))
-                            (bad "invalid argument: field %s is embedded via a pointer in %s" (subs h 2) (expr-str (second af)))
-                            (recur (:type fd) (rest path) (+ off (long o)))))))))))))
+                  (let [base (first (t/deref-type (:type (:x x))))
+                        off (offsetof-value base (:path x))]
+                    (cond
+                      (nil? off) (bad "invalid argument: field %s is embedded via a pointer in %s" (subs h 2) (expr-str (second af)))
+                      ;; a size depending on type parameters: not constant (each instance's)
+                      (has-var-size? base) (node {:args [x] :mode :value :type :uintptr})
+                      :else (node {:args [x] :mode :constant :type :uintptr :val off}))))))))
         "Add"
         (if-not (need 2 2)
           (invalid f)
