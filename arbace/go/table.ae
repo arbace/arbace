@@ -601,11 +601,12 @@ making a Go func of that type that calls its target through goi's frame."
       (throw (ex-info (str "goi table: :stubs cannot name " (pr-str d)) {})))))
 
 (defn stub-forms
-  "The stubs of one method signature (cft, written types tps, trs): the family's K slots
+  "The stubs of one method signature (cft, written types tps, trs; the methods' names compiled
+  code calls with it, names): the family's K slots
   (stubSlotsN), its typed call (stubCallN: the receiver word and the arguments to the method's
   frame, goi.EnterSlot, as an adapter's), and K stubs stubN_k calling it with their slot; with
   the family's registration (the method type and the stubs) for init."
-  [n k cft tps trs]
+  [n k cft tps trs names]
   (let [va (nth cft 3)
         slots (symbol (str "stubSlots" n))
         callf (symbol (str "stubCall" n))
@@ -629,6 +630,7 @@ making a Go func of that type that calls its target through goi's frame."
                     (map stub (range k)))
      :register (list 'goi/RegisterStubs
                      (list (list 'inst 'reflect/TypeFor (list 'func (vec (if va (concat (butlast tps) ['& (last tps)]) tps)) (vec trs))))
+                     (apply list 'lit '(slice string) names)
                      (list 'subslice slots)
                      (apply list 'lit '(slice any) (for [j (range k)] (symbol (str "stub" n "_" j)))))}))
 
@@ -1266,17 +1268,18 @@ of function types, elements of composites), each with its data."
         stub-cfg (:stubs list-cfg)
         stub-entries (let [acc (volatile! (sorted-map))]
                        (doseq [[env pd] (map vector envs pkg-data)
-                               :let [cts (concat (for [d (:common stub-cfg)] (data-type env d))
+                               :let [cts (concat (for [[names d] (:common stub-cfg)] [names (data-type env d)])
                                                  (for [[_ m] pd mm (:methods m) :when (:iface mm)
-                                                       :let [cft (:cft mm)] :when (vector? cft)] cft))]
-                               ct cts
+                                                       :let [cft (:cft mm)] :when (vector? cft)] [[(:mname mm)] cft]))]
+                               [names ct] cts
                                :let [d (data ct) [_ ps rs] d
                                      a (fn [q] (str "P" (Math/abs (hash q))))]
                                :when (and (every? some? (map #(emit-type env a %) (concat ps rs)))
                                           (sig-kinds ct))]
                          (vswap! acc update (pr-str d)
                                  (fn [e] (-> (or e {:data d :ct ct :env env})
-                                             (update :cfgs (fnil conj #{}) (:cfg env))))))
+                                             (update :cfgs (fnil conj #{}) (:cfg env))
+                                             (update :names (fnil into (sorted-set)) names)))))
                        @acc)
         stub-count (fn [d] (get (:slots-of stub-cfg) d (:slots stub-cfg 16)))
         ;; the paths the table's files import
@@ -1316,7 +1319,7 @@ of function types, elements of composites), each with its data."
                             env (:env e)
                             tps (mapv #(emit-type env al %) ps)
                             trs (mapv #(emit-type env al %) rs)]
-                        [(:cfgs e) (stub-forms i (stub-count (:data e)) (:ct e) tps trs)]))
+                        [(:cfgs e) (stub-forms i (stub-count (:data e)) (:ct e) tps trs (:names e))]))
         ;; (configuration set, file stem) -> forms; the packages' tables grouped by identical text
         files (volatile! (sorted-map))
         add-file! (fn [stem cfgs forms]

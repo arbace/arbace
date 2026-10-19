@@ -17,8 +17,9 @@ NilMsg, when set, is gc's panicwrap message for a nil pointer (a value method's 
 T's and *T's method tables).\n"
   (struct ^{:tag (* Type)} T ^string Key ^string NilMsg))
 
-(go/type stubFamily "stubFamily is a signature's stubs: their slots and code, the next one free.\n"
-  (struct ^{:tag (slice StubSlot)} slots ^{:tag (slice unsafe/Pointer)} codes ^int next ^string sig))
+(go/type stubFamily "stubFamily is a signature's stubs: their slots and code, the next one free, the method names compiled code calls with that signature.\n"
+  (struct ^{:tag (slice StubSlot)} slots ^{:tag (slice unsafe/Pointer)} codes ^int next ^string sig
+          ^{:tag (map string bool)} names))
 
 (go/var ^{:tag sync/Mutex} stubsMu)
 
@@ -26,14 +27,18 @@ T's and *T's method tables).\n"
   stubFamilies (make (map reflect/Type (* stubFamily))))
 
 (go/func RegisterStubs
-  "RegisterStubs records the table's stubs of method type sig: their slots and the stubs (Go
-funcs; their code is a method's Ifn).\n"
-  [^{:tag reflect/Type} sig ^{:tag (slice StubSlot)} slots ^{:tag (slice any)} fns]
-  (let [codes (make (slice unsafe/Pointer) (len fns))]
+  "RegisterStubs records the table's stubs of method type sig: the method names compiled code
+calls with it (a listed interface's methods', the list's common ones), their slots and the stubs
+(Go funcs; their code is a method's Ifn).\n"
+  [^{:tag reflect/Type} sig ^{:tag (slice string)} names ^{:tag (slice StubSlot)} slots ^{:tag (slice any)} fns]
+  (let [codes (make (slice unsafe/Pointer) (len fns))
+        nm (make (map string bool) (len names))]
+    (range [_ n names]
+      (aset nm n true))
     (range [i f fns]
       (aset codes i (conv unsafe/Pointer (.Pointer (reflect/ValueOf f)))))
     (.Lock stubsMu)
-    (aset stubFamilies sig (addr (lit stubFamily :slots slots :codes codes :sig (.String sig))))
+    (aset stubFamilies sig (addr (lit stubFamily :slots slots :codes codes :sig (.String sig) :names nm)))
     (.Unlock stubsMu)))
 
 (go/type stubError "stubError is the panic of a method called by compiled code that has no stub (a runtime.Error).\n"
@@ -56,13 +61,15 @@ passed is ignored) and panics.\n"
 (go/func takeStub
   "takeStub is the code of a new slot of method type sig's family, its slot reaching method
 key of type t (nilMsg: a shared slot's panicwrap message), or the panic stub when the signature
-has no family or the family no slot left (GC67: then goi warns once at the REPL, naming the
+has no family, the family no method of that name (no compiled code can call it: it takes no
+slot) or no slot left (GC67: then goi warns once at the REPL, naming the
 method; a program's run, whose output is the program's, does not).\n"
   ^unsafe/Pointer [^{:tag reflect/Type} sig ^{:tag (* Type)} t ^string key ^string nilMsg]
   (.Lock stubsMu)
   (defer (.Unlock stubsMu))
   (let [f (aget stubFamilies sig)]
-    (when (== f nil)
+    (when (or (== f nil) (not (aget (.-names f) (methodName key))))
+      ;; no compiled code calls a method of that name and signature (an unexported one included)
       (return panicStubCode))
     (when (>= (.-next f) (len (.-slots f)))
       (when (and (not ProgramMode) (not (aget stubWarned (.-sig f))))
