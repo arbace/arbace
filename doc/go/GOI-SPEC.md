@@ -2863,3 +2863,240 @@ the emulation's time, about 30 times the host's); GC35 (b) if a box Go program's
 the board's `task: no idle vCPU` when a program sets `GOMAXPROCS` above the box's vCPUs (a box
 limit: TamaGo's runtime asks for an M per P); GR7b's errorcheck programs and `reify`; staging
 (G16), the runtime overlay for named types (G8, GS8) and speed (F10) as §12 lists.
+
+## As built: GR7b (2026-10-19)
+
+GR7b, part of GR7 (§12: `errorcheck` programs; `reify` of listed Go interfaces, G13), is built on
+branch `goi-gr7b` (from main `90ec844d`, seed `1d5c35b4`, which has GR1 to GR6; GR7a merged in at
+`81cd54ed`). GR7a (goi in the box, recursive types) was built beside it; its proposals are GC35-GC42,
+this part's GC45-GC54.
+Where building it found otherwise than this text, the text below is the record.
+
+### Errorcheck programs (§11.6)
+
+**The corpus.** `$GOROOT/test`'s error tests of one program, `linux-errtest`: the files of Go's
+test driver's directories whose action is `errorcheck` or `errorcheckwithauto` (whatever their
+flags), with no other GOEXPERIMENT and matched by go/build (`gocmp tests -errorcheck`, `bin/repr-go
+check --list-errorchecks`): 659 programs. `bin/repr-go read --corpus linux-errtest` dumps them
+(`godump -files`: a program with type errors is dumped with them, its go/types errors in the
+dump's `:errors`) and converts them in mode `:lines`: 586 dumped (139 without type errors, 447
+with), 73 that go/parser rejects not dumped, 522 converted, 64 that the converter cannot convert
+(an invalid program: a selection without an object, a conversion's arity, `x.(type)` outside a
+type switch, a constant without a value). godump's change: an import path the go command cannot
+list (`test/import6.go`'s `"\x00"`, `""`) is not given to `go list` (`listablePath`).
+
+**Checking.** `arbace.go.run --errorcheck [--lang goV] ROOT NS` checks the package as program
+mode does (`repl/check-source`, the table's digest for listed packages) without building or
+running it, and prints its errors as gc does with `-C` (`base.FlushErrors`): `FILE:LINE: MESSAGE`,
+by position, an error equal to the one before it once; a language-version error with the version's
+origin as gc's noder adds it (`(file declares //go:build go1.21)`, `(-lang was set to go1.12;
+check go.mod)`). Status 1 with errors, 0 without; 125 unsupported, 126 goi's error, as a run's.
+
+**The judge (GC45).** `tools/gocmp errorcheck [-auto] FILE.go OUTPUT` is Go's test driver's
+judge, vendored from TamaGo's go1.27.1 `src/cmd/internal/testdir/testdir_test.go` (`splitOutput`,
+`errorCheck`, `wantedErrors`, `matchPrefix`, `partitionStrings`, `replacePrefix`, the `// ERROR`
+and `// ERRORAUTO` regexps; Go's BSD license, LICENSE.md): line by line, the errors of each
+`// ERROR "re"...` line must match each regexp (Go's `regexp`, on the message after
+`FILE:LINE: `), and no error may be left unmatched; a test that expects the compilation to fail
+must have an error. `-dump-errors DUMP` prints a dump's go/types errors in the same format.
+
+**Per program** (`bin/goi check`'s `check_err`):
+
+1. the action's flags: `-t N`, `-e`, `-d=panic` and `-lang=goV` (given to the checker) are taken;
+   one of gc's later phases makes the program unsupported with its reason: `-m`, `-l`, `-live`,
+   `-wb`, `-N`, `-smallframes` (escape analysis, inlining, liveness), `-d=...` (the SSA back end's
+   debug flags), `-race`, `-std`, `-+`, `-complete`, `-asmhdr`, `-spectre`, `-goexperiment`;
+2. a file with line directives (`//line`, `/*line`) is unsupported: gc's positions follow them;
+3. gc's reference: the original compiled as the test driver compiles an errorcheck test (`go tool
+   compile -p=p -d=panic -C -e -importcfg=STD FLAGS -d=ssa/check/on FILE`, the standard library's
+   importcfg from `go list -export std`), judged; cached by the file's and the toolchain's hashes
+   (`.tmp/goi-check/eref/`). A program gc's own errors do not pass is skipped (3: their messages
+   changed since);
+4. no forms: unsupported, syntax errors (go/parser's) or the converter's failure, with its message;
+5. goi's checker (`--errorcheck`), judged: pass; else, when go/types (the dump's `:errors`)
+   reports no error either, unsupported: the expected errors are gc's phases' after type checking
+   (its noder's, the SSA back end's: `stack frame too large`, `misplaced compiler directive`),
+   which goi does not have (GC46); else fail.
+
+**Results** (`bin/goi check`, the 659 errorcheck programs with the 1,178 run programs and
+directory tests; the reference `test/goi/check-linux-amd64.edn` recorded):
+
+| result | errorcheck programs (659) |
+|---|---:|
+| pass | 337 |
+| unsupported | 281: 109 a flag of gc's later phases (`-m` 59, `-d=...` 20, `-l` 9, `-race` 5, `-live` 5, `-std` 3, `-N` 3, `-+` 3, `-e=0`, `-complete`), 70 syntax errors, 64 repr/go cannot convert the invalid program, 24 errors of gc's phases after type checking, 7 line directives, 7 an import neither listed nor interpretable |
+| known | 13 |
+| fail | 23 |
+| error | 2 |
+| skip | 3 (gc's own errors no longer pass the judge) |
+
+The run programs and directory tests are unchanged (1,049 pass, 60 known, 54 unsupported, 15
+skipped, as GR7a recorded them); the reference gains the 659 errorcheck programs and nothing else.
+The whole check takes 54 s with 16 jobs on the compiled executable. `test/goi/essential.txt`
+(GC50) gains 123 errorcheck programs: 699 programs with GR7a's, 39 s with 8 jobs.
+`bin/goi run`'s action line now skips blank lines before it, as Go's test driver does (a
+`//go:build` line followed by a blank line and the action).
+
+**What the corpus made the checker do** (types2's behaviour and messages, as gc prints them):
+
+- **Lines of literals** (SPEC.md §10.1): a literal that begins a Go line carries no `:line`; its
+  line is its parent's `:go/breaks` (`e/child-line`: the line after its predecessor's last, or
+  the line recorded), computed only when an error needs it (`e/*child-at*`, `with-elem`): for
+  statements of a list (an implicit return's value), composite literals' elements, keys and
+  fields, call arguments; struct fields, type specs of a group and select clauses at their own
+  lines.
+- **Follow-on errors** (types2's `report`): after a first error, one whose message names an
+  invalid operand or an invalid type (not at its beginning) is not reported.
+- **Declarations**: a name repeated on the left of `:=` is a dummy, not declared; a redeclared
+  local is not reported unused; `init` and `main` (of package main) that are not functions,
+  `import init "fmt"`, a bodiless `func init`; a package-level object named as a file's import or
+  a dot-imported name (`already declared through import of package fmt ("fmt")`); duplicate
+  parameters of function types and interface methods; a blank interface method; duplicate
+  methods through embedding (at the interface); a duplicate struct field not added; `const x =
+  nil`.
+- **Expressions**: conversion errors at the operand, with the interface's missing-method cause;
+  a pointer to an interface's cause; incomparable causes (`struct containing []int cannot be
+  compared`); `nil == nil`; a switch on an incomparable tag invalidates it; struct literals
+  (`too many values` at the value, `mixture of field:value and value elements`, blank fields
+  never found, unknown keys the converter wrote as `[k v]`, duplicate keys only of fields found,
+  no hint for a field's elided type: `missing type in composite literal`, its elements used);
+  duplicate constant keys of an interface key type by their types; complex array lengths with a
+  zero imaginary part; `append` with `...` through the arguments' check (`not enough arguments
+  in call to append`), `copy`'s and `append`'s go1.27 messages (`invalid copy: argument must be
+  a slice; have untyped nil`); a builtin's arguments checked before their count, `invalid
+  operation: ` prefixed; unsafe's builtins discard results (`is not used`, `defer discards
+  result of`); `new(len)`; a package used alone (`use of package fmt not in selector`, the import
+  then unused); a variable named where a type is expected is used; `range` causes (`receive from
+  send-only channel`, `requires go1.22 or later`, `func must be func(yield func(...) bool):
+  ...`, a variadic yield); method expressions `(*T).M`, `struct{}`, `(*T)(x)` printed as gc
+  does; go/constant's float strings (`1e+200`, `0.9999999`, beyond float64 `1e+646456992`).
+- **Branches** (gc's `syntax.checkBranches`): a label named by `break` or `continue` is used even
+  when not a valid target; `invalid break label` for a label not enclosing; the block of an
+  `else` (and of an `else if`, holding the rest of the chain) starts at its own line.
+- **Type switches**: `(type-switch [t x])` without clauses is a guard, not an init; `_ :=` is
+  `no new variable on left side of :=`.
+
+None of these changes the run programs' results or the annotation check (§11.4, every count as
+recorded).
+
+**Known differences (GC49)**, in `test/goi/check-known.edn` with their reasons: `byte` and `rune`
+named `uint8` and `int32` (goi's types identify them; 3 programs), aliases named by the type they
+denote (1), literals' spellings, which mode `:lines` does not keep (`1e200` is read as `1.0E200`;
+4), a position's column in a message (1), the line of a composite literal's closing brace (1), a
+type spanning lines in a tag (1), a function's final expression statement, which the forms write
+as its return (SPEC.md §6.4; `test/return.go`), repr/go dropping a conversion's `...` (1).
+
+**Remaining failures**, recorded as such in the reference (a regression is a program passing
+there and not now): invalid recursive types and cycles goi's checker does not detect or words
+otherwise (`bug195`, `bug224`, `bug251`, `bug256`, `bug398`, `bug464`, `issue21273`, `issue23823`,
+`issue41575`, `issue48301`, `issue75022`, `initloop.go`'s cycle detail, `typeparam/issue48711.go`'s
+instantiation cycle); interfaces with type constraints used as types (`issue10975`, `issue11614`);
+`bug217`'s receiver errors, `issue28079b`, `issue28079c` (a shift in `complex`), `issue48471`
+(missing-method causes with `have`/`want` of a differently cased method), `issue8183` (errors of
+an implicitly repeated constant at its spec, go/types' `errpos`), `goto.go`'s last case (an else
+block's line the forms do not keep), `interface/explicit.go`, `typeparam/issue51232.go`; and two
+crashes of the checker on huge constants and sizes (`issue20227`: a complex division by
+1e-600000000; `issue59190`: sizes overflowing int64, go/types' `too large`).
+
+### reify of Go interfaces (G13)
+
+G13 (a), decided at the survey: `reify` of a listed Go interface through its wrapper, after GR5.
+
+**From Arbace.** `reify` (`arbace.core`, hand change 29 of doc/VENDOR-NOTES.md) takes among its
+specs a Go interface of goi's table: a symbol naming a `GoType`'s var, its namespace required
+(`go.io/Reader`, `io/Reader` with an alias):
+
+```clojure
+(require '[go.io] '[go.sort])
+(defn chunks [cs]
+  (let [left (atom cs)]
+    (reify go.io/Reader
+      (Read [_ p] (if-let [c (first @left)]
+                    (do (swap! left rest) [(go.demo/Put p c) nil])
+                    [0 @go.io/EOF])))))
+(go.demo/ReadAllString (chunks ["ab" "cd"]))          ;=> "abcd"
+(go.sort/Sort (reify go.sort/Interface (Len [_] ...) (Less [_ i j] ...) (Swap [_ i j] ...)))
+```
+
+Such a spec's methods are fns of the object and the Go arguments (converted to Arbace by their
+Go types, §5.6), their results converted back by the result types (several as a vector); in a
+method's body `recur` passes the arguments, as for a Java method. Other specs (Java
+interfaces, `Object`, protocols) are reify's as before, and `this` is the same object for all.
+The object also implements `arbace.lang.GoReify`, whose `goiReify` is `[T f0 f1 ...]`: T the
+reify type of its Go interfaces (`arbace.go/reify-type`, one per list) and fi the fn of T's
+method i (`arbace.go/reify-data`, which requires every method of the interfaces and none
+else: `reify: method Less of sort.Interface is missing`).
+
+**In Go.** The reify type (`arbace/goi` `ReifyType`) is an interpreted named type
+`arbace.reify[I, ...]` (`Reify` set) whose method set is the interfaces' methods (by name, one
+signature each), each an interpreted function whose code (`reifyMethodCode`) reads the receiver
+(the Arbace object) and the arguments from its frame, asks the bridge for the object's fns
+(`GoBridge.reifyOf`), calls fn i with the object and the arguments converted to Arbace
+(`callArbace`), and writes its results. So every path that calls an interpreted method works
+unchanged: compiled code through the interface's wrapper (`EnterMethod`, GC22), interpreted
+code's method calls, method values, type assertions and switches (the method set). At the
+boundary (`FromArbace`, §5.6) an Arbace reify for a parameter or variable of a compiled interface
+type I is a proxy of T: in an `any`, the proxy (`contentOf`: fmt sees a `Stringer`, an `error`);
+in I, I's wrapper of the table (the object must have I's methods, by name and signature;
+`error` and `fmt.Stringer` goi's own); an interface without a wrapper is an error. A proxy of a
+reify type going to Arbace is the object itself (`ContentToArbace`), so `(identical? r (Id r))`.
+
+**Tests.** `test/goi/repl.ae`, 8 checks (78 in all pass): a `Stringer` through `fmt.Sprint`, an
+interpreted function taking a `fmt.Stringer`, an assertion in interpreted code, the object back
+as itself, `this` with an Arbace interface too, an `io.Reader` read by compiled `io.ReadAll` (the fn
+writing the Go slice through a Go forms function), `sort.Sort` of an Arbace vector, a missing
+method's error; oracle cases at the end of `test/oracle/forms/go.ae`
+(17, recorded by `bin/oracle record --goi 'target/arbace-go/amd64/arbace -'`, reviewed: 129 of 129
+match).
+
+### Measurements
+
+- **Size.** The executable is 136,446,112 bytes against main's 135,557,280 (with GR7a): +888,832
+  (0.66%): the checker's additions (c2j's Go of their Arbace), goi's reify code, the table's
+  `RegisterIfaceMethods` calls. A first version asked reflect for the interfaces' methods
+  (`reflect.Type.Method`), which made the linker keep every exported method of the program (S39):
+  +18.8 MB; the methods' names and types now come from the table (GC54's note).
+- **The annotation check** (§11.4): every corpus as recorded, in 44.6, 37.7, 41.9, 29.9 and 23.9 s
+  (GR6's 35-42 s, 26-29 s, 22 s, at a lower load).
+- **Speed** (GR3's criterion): TBD-SPEED
+
+### Proposals for the user (each built as recommended)
+
+- **GC45 The errorcheck judge.** (a) as built, Go's test driver's own code vendored in
+  `tools/gocmp` (Go's regexp, its partition by line, its unmatched errors), goi printing its
+  errors as gc does with `-C`, gc's own run the reference; (b) a judge in Arbace
+  (`java.util.regex`, not RE2: a few of the patterns differ). *Recommended: (a)*.
+- **GC46 Errors of gc's phases goi does not have.** (a) as built, unsupported: an action flag of
+  those phases, or errors go/types does not report either (decided per program from the dump's
+  go/types errors); (b) emulate gc's noder checks (directives, `go:linkname`, import paths) in
+  goi's checker. *Recommended: (a)*, (b) when goi needs them for its own programs.
+- **GC47 Invalid programs repr/go cannot convert** (64, and 73 with syntax errors). (a) as built,
+  unsupported with the converter's or the parser's message; (b) teach the converter forms for
+  invalid code (a selection with no object, a conversion of several arguments). *Recommended:
+  (a)*: the forms are for valid Go.
+- **GC48 The converter's annotations in an invalid program.** (a) as built, their disagreements
+  are not errors in errorcheck mode (they are go/types' types of an invalid program); (b)
+  reported. *Recommended: (a)*; `bin/goi annotations` keeps verifying them on valid programs.
+- **GC49 What the forms of mode `:lines` and goi's types cannot say** (spellings, columns,
+  closing braces, `byte`, aliases). (a) as built, known, with reasons; (b) errorcheck over mode
+  `:full`'s forms (spellings, columns) and `byte`/`rune`/aliases as types of their own in the
+  checker, a later step. *Recommended: (a)* now.
+- **GC50 The essential subset with errorcheck programs.** (a) as built, the passing errorcheck
+  programs by GC28's rule (every one outside `fixedbugs/`, every fourth of `fixedbugs/`); (b)
+  none. *Recommended: (a)*.
+- **GC51 The spelling of a Go reify.** (a) as built, Arbace's `reify` takes Go interfaces among
+  its specs (the survey's `(reify go.io/Reader (Read [_ p] ...))`); (b) a macro of its own,
+  `go/reify`, leaving the vendored `reify` as upstream's. *Recommended: (a)*: one reify, mixing
+  Go and Java interfaces.
+- **GC52 What a reify is in Go.** (a) as built, a proxy of a reify type per list of interfaces,
+  the object as its value, its methods interpreted functions calling the object's fns (every
+  path of interpreted methods unchanged, the object back to Arbace as itself); (b) a Go value made
+  when the reify is (a GoValue of the interface): Arbace would hold a Go value, not its object.
+  *Recommended: (a)*.
+- **GC53 Interfaces of Go forms (interpreted).** (a) as built, only listed compiled interfaces
+  (G13's letter; a signature naming an interpreted type has no reflect type); (b) interpreted
+  interfaces through their descriptors. *Recommended: (a)*, (b) when asked for.
+- **GC54 Method calls of a reify cross the bridge.** (a) as built, each call of a reify's method
+  asks the bridge for the object's fns (one Java interface call) and converts the arguments by
+  their Go types; (b) the fns cached in the proxy. *Recommended: (a)*: a proxy's value must stay
+  the object itself for Go's `==` and for the way back to Arbace.
