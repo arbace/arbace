@@ -160,6 +160,50 @@
                         false)))]
       (boolean (walk (t/under nt))))))
 
+(defn- shaped?
+  "Whether recursive named type nt reaches itself other than as a pointer's element: as an
+  element of a slice, an array, a map or a channel, a function's parameter or result, a struct's
+  field (through another named type). Building its descriptor then asks for its Go memory type
+  before it is complete, so it is held in Go memory as a shape (GR7a: `shape-type`); a type
+  reaching itself only through pointers has its pointers erased instead (GR3)."
+  [nt]
+  (let [seen (IdentityHashMap.)]
+    (letfn [(walk [ty via-ptr]
+              (cond
+                (keyword? ty) false
+                (t/named? ty) (cond
+                                (identical? (nth ty 1) (nth nt 1)) (not via-ptr)
+                                (not (interpreted-named? ty)) false
+                                (.containsKey seen (nth ty 1)) false
+                                :else (do (.put seen (nth ty 1) true) (walk (t/under ty) false)))
+                (t/tparam? ty) false
+                :else (case (nth ty 0)
+                        :pointer (walk (nth ty 1) true)
+                        :slice (walk (nth ty 1) false)
+                        :array (walk (nth ty 2) false)
+                        :map (or (walk (nth ty 1) false) (walk (nth ty 2) false))
+                        :chan (walk (nth ty 2) false)
+                        :func (or (some #(walk % false) (nth ty 1)) (some #(walk % false) (nth ty 2)))
+                        :struct (some #(walk (:type %) false) (nth ty 1))
+                        false)))]
+      (boolean (walk (t/under nt) false)))))
+
+(defn- shape-type
+  "The shape of type ty (GR7a): a checker type of its layout and pointer words, every pointer,
+  map, channel and function an unsafe.Pointer, every slice a []unsafe.Pointer, a recursive
+  interpreted named type its underlying type's shape; other named types themselves. A shaped
+  type's values are held in Go memory at its shape and in frames at its RT, the same bytes."
+  [ty]
+  (cond
+    (keyword? ty) ty
+    (t/named? ty) (if (and (interpreted-named? ty) (recursive? ty)) (shape-type (t/under ty)) ty)
+    :else (case (nth ty 0)
+            (:pointer :map :chan :func) :unsafe-pointer
+            :slice [:slice :unsafe-pointer]
+            :array [:array (nth ty 1) (shape-type (nth ty 2))]
+            :struct [:struct (mapv #(assoc % :type (shape-type (:type %)) :tag nil :embedded false) (nth ty 1))]
+            ty)))
+
 (defn- tag-text [tag] (if tag (c/value-text tag) ""))
 
 (defn- struct-parts
@@ -177,7 +221,22 @@
   [nm pkg]
   (if (or (t/exported? nm) (nil? pkg)) nm (str pkg "." nm)))
 
+(def ^:dynamic ^:private *iface-pending*
+  "The interface descriptors whose methods wait for the outermost `desc` (GR7a): their
+  signatures may name a type still being built (`type Cons[a] struct{Tail List[a]}`, `List[a]`'s
+  method naming `Cons[a]`)."
+  nil)
+
+(declare set-iface-methods-now!)
+
 (defn- set-iface-methods!
+  "Gives interface descriptor d of type ty its methods, once the outermost descriptor is built."
+  [d ty]
+  (if-let [^java.util.ArrayList q *iface-pending*]
+    (.add q [d ty])
+    (set-iface-methods-now! d ty)))
+
+(defn- set-iface-methods-now!
   "Gives interface descriptor d of type ty its methods (keys and signatures' descriptors)."
   [d ty]
   (let [ms (nth (t/under ty) 1)
@@ -221,13 +280,15 @@
         (.put types ty nd)
         (let [u (t/under ty)]
           (when (= :invalid u) (unsupported! (str "the type " (:name i)) "an invalid type"))
-          (when (and erased (t/pointer? u))
-            (unsupported! (str "the recursive pointer type " (:name i)) "as built: GR3"))
+          ;; recursive other than through pointers: its Go memory type is its shape (GR7a)
+          (when (and erased (shaped? ty))
+            (op "TShape" nd (desc (shape-type u))))
           (let [ud (try (desc u)
                         (catch Exception ex
                           (if (some-> (ex-message ex) (str/includes? "used before it is complete"))
-                            (unsupported! (str "the type " (:name i) ", recursive through a slice, an array, a map or a function")
-                                          "as built: GR3")
+                            ;; a shape not given where one was needed (none in the check: GR7a)
+                            (unsupported! (str "the type " (:name i) ", recursive, used before it is complete")
+                                          "as built: GR7a")
                             (throw ex))))]
             (if (and (vector? u) (= :struct (nth u 0)))
               (let [[ns ds ts ps es] (struct-parts u)]
@@ -235,9 +296,26 @@
               (op "TSetUnder" nd ud (oa []) (oa []) (oa []) (oa []) (oa [])))))
         nd))))
 
+(declare desc1)
+
 (defn desc
   "The descriptor (a *goi.Type) of checker type ty, one per type in the build."
   [ty]
+  (let [^HashMap types (:types *ctx*)]
+    (or (.get types ty)
+        (if *iface-pending*
+          (desc1 ty)
+          ;; the outermost: interfaces' methods given once the types they name are complete
+          (let [q (java.util.ArrayList.)
+                d (binding [*iface-pending* q] (desc1 ty))]
+            (loop []
+              (when-not (.isEmpty q)
+                (let [[id ity] (.remove q (int (dec (.size q))))]
+                  (binding [*iface-pending* q] (set-iface-methods-now! id ity))
+                  (recur))))
+            d)))))
+
+(defn- desc1 [ty]
   (let [^HashMap types (:types *ctx*)]
     (or (.get types ty)
         (let [d (cond
