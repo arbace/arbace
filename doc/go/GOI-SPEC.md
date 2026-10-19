@@ -3172,3 +3172,91 @@ checker's words: `in call to gvar.Map, cannot infer U (declared at repl.go:?)`, 
 satisfy cmp.Ordered (bool missing in ...)`, `in call to slices.Index, S (type []string) does
 not satisfy ~[]E`, `not enough arguments in call to slices.Index` with types2's have and want,
 and the overflow above.
+
+**Amendments (as built).**
+
+1. **§9, GR6's REPL row and GC34.** A generic function or method still has no cell (its instances
+   have); it now has a var, a `GoGenericFn` (GC34 (b)). §2.1's table of vars gains it: `(F a b)`
+   infers, `(go/inst F T...)` instantiates.
+2. **A generic type has no var** (GC135): `go/inst` finds it by its namespace and name in its
+   package's last check (`named-type`). `(go.main/List int)` stays meaningless, as the survey
+   wanted; the survey's "a generic type's var" is not built.
+3. **Types of older checks** (GC136). The survey keyed inference by descriptors and assumed their
+   checker types. A package is checked anew at every declaration, so the type a descriptor was
+   made for may belong to an older check than the generic declaration's: `rehome` takes every
+   interpreted named type to its package's last check by package and name, instances
+   instantiated again (the checker's instances are interned by origin and type arguments).
+4. **The var is made anew at each definition of its package** (GC139), as GR3's function vars
+   are: its cache starts empty after any declaration in the package, and the instances it then
+   makes are new cells (the instance cells are keyed by the generic object, which a check makes
+   anew). The survey's "a redefinition of F" is any definition of F's package.
+5. **The interpretable packages from Arbace** (GC142): the survey's
+   `(require '[go.slices :as slices])` needed RT.load's hook to know them; it asks `arbace.go`
+   for any `go/X` resource of one element that is no listed package.
+6. **Messages** (GC140): the checker's words (`cannot infer U`, `S (type []string) does not
+   satisfy ~[]E`, types2's arity message), each as `REPL: ...`, an argument named by its literal
+   for a scalar, else `argument N`. Their positions are the checker's: `declared at repl.go:?`
+   for a type parameter typed at the REPL, whose forms carry no line. cmp.Ordered's terms are
+   listed in the checker's set order, not as written (GC144): GR6's amendment 11 holds for
+   interpreted constraints, not for the digest's.
+
+**Measurements** (linux/amd64, the executable of this branch, best of five runs of 10^5 calls
+after 2 * 10^4 warm-up calls, two runs; the machine shared, load about 6):
+
+| | value |
+|---|---|
+| a function var's call (`GoFn`): `IndexInts(xs, 5)`, a Go function calling `slices.Index[[]int,int]` | 1.46-1.49 µs |
+| a generic var's call, cached: `(slices/Index xs 5)` | 1.66-1.79 µs |
+| a generic var's call, cached: `(cmp/Compare 1 2)` | 1.45-1.53 µs |
+| the instance by go/inst: `((go/inst go.slices/Index (slice int) int) xs 5)` | 1.34-1.36 µs |
+| a miss (a new key: operands, `infer`, verification, the instance's cell and `GoFn`; its code built on its first call) | 1.7-1.9 ms |
+| the executable (linux/amd64) | 137,044,128 bytes against 136,446,112 at `04ac458b` (+598,016, 0.44%: `arbace.go.generic`, the class, the natives) |
+
+The survey's target, about 1.5 µs per call once cached, holds: a cached call costs its key (one
+native call per Go value argument, `instanceof` tests for the rest) and one identity comparison
+over the instance `GoFn`'s call, 0.0-0.3 µs above a function var's.
+
+**Checks** (in the worktree, before the merge): `bin/goi check` 1,837 programs, 1,386 pass,
+23 fail, 2 error, 335 unsupported, 73 known, 18 skipped, no regression against
+`test/goi/check-linux-amd64.edn` (the fails and errors are errorcheck programs of the reference);
+`--essential` 699 of 699; `bin/goi test` the checker's tests (3 tests, 19 assertions), 15 of 15
+programs, the REPL's 101 of 101 checks, §1.4's session as its transcript; `bin/goi annotations`
+zero errors in the five corpora (counts unchanged: GR9d does not touch the checker);
+`make check-makefile`; `bin/generated-check`; the oracle's `forms/go.ae` 150 cases (21 new)
+recorded by goi and reviewed.
+
+**Proposals for the user** (each built as recommended):
+
+- **GC135 Generic types from Arbace.** (a) as built, no var: `go/inst` names a generic type by
+  namespace and name; (b) a var per generic type holding a generic type object whose `go/inst`
+  is its instance. *Recommended: (a)*: a value nothing but go/inst can use.
+- **GC136 Values of types checked before the generic declaration.** (a) as built, interpreted
+  named types rehomed to their packages' last check by package and name; (b) the builder's
+  registry's type as it is (an inference after any later declaration in the type's package
+  fails: `type *List[int] of argument 1 does not match`). *Recommended: (a)*.
+- **GC137 A `GoFn` argument.** (a) as built, it infers nothing, as an Arbace fn; (b) typed by its
+  `Callable`'s func type (`slices.SortFunc(xs, strings.Compare)` would infer from it).
+  *Recommended: (a)* now, (b) when asked for.
+- **GC138 `(go/spread xs)` in a generic call.** (a) as built, not recognized (the spread value
+  is typed as a Go value, inference fails); (b) the last argument spread as `call-args` does.
+  *Recommended: (a)* now: rare at the REPL.
+- **GC139 The cache's lifetime.** (a) as built, a new `GoGenericFn` at each definition of the
+  package (as GR3's function vars); (b) kept while the generic declaration's signature is, its
+  instances rebuilt. *Recommended: (a)*: one rule for every var.
+- **GC140 Errors of Arbace's calls.** (a) as built, the checker's messages as `REPL: ...`,
+  arguments named by their literal or `argument N`; (b) with the caller's file and line from the
+  Arbace frame. *Recommended: (a)*.
+- **GC141 Resolving go/inst's type forms.** (a) as built, a check of the namespace's package
+  with a struct type of those fields (about one go/eval's cost, once per forms and var); (b) an
+  entry of the checker resolving type expressions in a file's scope without a package check.
+  *Recommended: (a)* now, (b) if go/inst is found in loops with changing forms.
+- **GC142 Interpretable packages required from Arbace.** (a) as built, RT.load's hook loads
+  `cmp`, `iter`, `maps`, `slices` from the digest; (b) only once interpreted code imports them.
+  *Recommended: (a)*: the survey's `(require '[go.slices :as slices])`.
+- **GC143 The listed packages' generics and `ns-publics`.** (a) as built, their vars are made
+  on first use only (S9), not by `ns-publics` or `refer :all` (which would check the package's
+  digest); (b) made with the others. *Recommended: (a)*.
+- **GC144 Constraint terms in messages of digest packages.** (a) as built, unchanged by GR9d (the
+  checker's set order: `bool missing in ~float64 | ~uintptr | ...`); (b) the written order, as
+  GR6's amendment 11 does for interpreted constraints, a fix of the checker. *Recommended: (b)*,
+  outside GR9d (GR8's or a later step).
