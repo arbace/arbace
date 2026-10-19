@@ -3216,21 +3216,30 @@ names: `alias`, `convert1`, `copy1`, `alias2`; spellings mode `:lines` does not 
 closing brace's line: `issue23732`; a type spanning lines in a tag: `funcdup2`; the forms of
 an invalid program: `return.go`, `ddd1.go`).
 
-**The check** (`bin/goi check`, 1,837 programs; the reference `test/goi/check-linux-amd64.edn`
-recorded, its diff 29 programs: the 25, `issue43762`, the 3 unsupported): 1,410 pass, 0 fail,
-0 error, 332 unsupported, 77 known, 18 skipped (GR7b: 1,386, 23, 2, 335, 73, 18), 55 s with 16
-jobs. The run programs and directory tests are unchanged. `test/goi/essential.txt` gains, by
-GC50's rule, the 9 errorcheck programs GR7c made pass outside `fixedbugs/` (4) and every fourth
-of `fixedbugs/` (5): 708 programs, 708 pass, 19 s. The checker's tests gain
-`test/goi/errors/cycles.ae` and `mono.ae` (gc agrees, `bin/goi test --gc`); a message's lines of
-positions are left out of their comparison, as `gc_errors.ae` leaves gc's out.
+**The check** (`bin/goi check`, 1,837 programs), before main's GR8a and GR9d were merged in:
+1,410 pass, 0 fail, 0 error, 332 unsupported, 77 known, 18 skipped (GR7b: 1,386, 23, 2, 335, 73,
+18), 55 s with 16 jobs. After the merge (`2fda8588`), recorded from a fresh run
+(`test/goi/check-linux-amd64.edn`, its diff against main's exactly the 29 programs above: the
+25, `issue43762`, the 3 unsupported): 1,438 pass, 2 fail, 0 error, 296 unsupported, 83 known, 18
+skipped; the 2 fails are GR8a's, recorded as such there (`issue30116`, `issue30116u`, goi's
+bounds messages of run programs, not the checker's). With 16 jobs on a loaded machine (load
+20-40) `fixedbugs/bug358.go` (an errorcheck program importing interpreted std packages, about
+8 s alone, main's executable as GR7c's) and `nosplit.go` exceeded the check's 10 s; the
+reference was recorded with `--jobs 8` (119 s). `test/goi/essential.txt` gains, by GC50's rule,
+the 9 errorcheck programs GR7c made pass outside `fixedbugs/` (4) and every fourth of
+`fixedbugs/` (5): 721 programs with GR8a's, 721 pass. The checker's tests gain
+`test/goi/errors/cycles.ae`, `mono.ae` and `ordered.ae` (gc agrees, `bin/goi test --gc`); a
+message's lines of positions are left out of their comparison, as `gc_errors.ae` leaves gc's
+out. The oracle's `forms/go.ae` case of `cmp.Compare(true, false)` is recorded again (GC144 (b),
+reviewed: the only change, 150 cases).
 
 ### Measurements
 
-- **Size.** The executable is 136,941,728 bytes against main's 136,446,112: +495,616 (0.36%),
-  the checker's additions.
-- **The annotation check** (§11.4): every corpus as recorded, 0 errors, in 39.4, 35.9, 42.0,
-  29.4 and 25.1 s.
+- **Size.** Before the merge the executable was 136,941,728 bytes against main's 136,446,112
+  (`0ca375c8`): +495,616 (0.36%), the checker's additions; after it 143,007,904 against main's
+  142,508,192: +499,712.
+- **The annotation check** (§11.4): every corpus as recorded, 0 errors, in 42.7, 37.2, 43.3,
+  28.2 and 27.0 s (after the merge).
 - **Speed** (GR3's criterion): `bin/goi run test/goi/run go.t.fib bench`, three runs
   alternating main's executable (`0ca375c8`) and GR7c's, load 11-18:
 
@@ -3242,7 +3251,11 @@ positions are left out of their comparison, as `gc_errors.ae` leaves gc's out.
 
   within the runs' noise; the interpreter's core is unchanged.
 
-CHECKS-PLACEHOLDER
+**Checks** (this branch after the merge, amd64): the essential `bin/gate` passed (4 m 19 s, its
+build cached; goi's essential check 721 of 721, the oracle as recorded, `bin/generated-check`,
+`make check-makefile`); `bin/arbace-go --fixpoint`: G1 = G2 = G3 (143,007,904 bytes); `bin/goi
+check` as recorded, `--essential`, `bin/goi test` (22 checker assertions, 17 programs, 101 REPL
+checks, std's 183, §1.4's session) and `--gc`, `bin/goi annotations`. Not run: `bin/gate --full`.
 
 ### Proposals for the user (each built as recommended)
 
