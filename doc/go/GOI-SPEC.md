@@ -3117,3 +3117,58 @@ the oracle's `forms/go.ae` (129 of 129). Not run: `bin/gate --full` (its box ora
   asks the bridge for the object's fns (one Java interface call) and converts the arguments by
   their Go types; (b) the fns cached in the proxy. *Recommended: (a)*: a proxy's value must stay
   the object itself for Go's `==` and for the way back to Arbace.
+
+## Decided (2026-10-19): GR9d, generic functions at the REPL
+
+GC34 is amended from (a) to (b): a generic function has a var, whose fn infers its type
+arguments at each call. GC72 (a), GC73 (a) and GC74 (a) of doc/go/GR9-SURVEY.md are decided as
+recommended, under the user's goal of 2026-10-19 (the milestone `arbace-interprets-go-v1`,
+doc/AGENDA.md's plan): Arbace scalars are untyped constants of their kinds and Go values keep
+their Go types for inference (GC72); `(go/inst f T...)` gives explicit type arguments, partial
+instantiation allowed (GC73); instances are cached per var, by the arguments' types, and shared
+with the builder's instance cells (GC74).
+
+## As built: GR9d (2026-10-19)
+
+GR9d, the survey's Part 2 (doc/go/GR9-SURVEY.md §4), is built on branch `goi-gr9d` (from main
+`04ac458b`, with the GR8 and GR9 surveys). GR9a (runtime types of interpreted named types) and
+GR8a are built at the same time from the same base; GR9d keeps to the var, inference from Arbace
+values and the cache. Where building it found otherwise than the survey, the text below is the
+record; proposals for the user are GC135-GC144.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the var's fn | `arbace/lang/GoInterp.ae` (`GoGenericFn`) | an `AFn` holding the function's name, its description (`data`) and `resolve`; `keyOf` keys each argument (a `GoValue` its descriptor, `GoInterp/valueType`; a `Long`, `Integer`, `Short`, `Byte`, `BigInt` or `BigInteger` `:untyped-int`; a `Double`, `Float`, `Ratio` or `BigDecimal` `:untyped-float`; a `Character` `:untyped-rune`; a `Boolean` `:untyped-bool`; a `String` `:untyped-string`; `nil` `:untyped-nil`; a collection `:coll`; a keyword or a symbol `:any`; another fn, a `GoFn` among them, `:fn`; any other Java object `:any`); `instanceFor`: the last key's instance (compared element by identity: descriptors are interned), else a `ConcurrentHashMap` by the key as a vector, else `resolve`, kept; the call is the instance `GoFn`'s (`GoInterp/call`, its arguments converted by the instance's parameter types, §5.6); `instanceCount` |
+| inference | `arbace/go/generic.ae` (`arbace.go.generic`, new) | `resolve-instance`: the key's operands (`operand`: an untyped kind an untyped constant, `:fn`, `:coll` and nil an untyped nil, which inference skips, `:any` the type `any`, a descriptor its checker type), the parameters for the arguments (a variadic one's elements expanded; an arity error in types2's words), the checker's `rename-tparams` and `infer` (go1.27.1's `infer.go`, GR6) with go/inst's type arguments, `verify!` of the constraints; errors thrown as the REPL's check errors (`Go check errors:` and `:go/errors`, each message `REPL: ...`); then the instance's `GoFn` over `instance-callable` |
+| descriptors as checker types | `arbace/go/generic.ae` (`desc->type`, `rehome`), `arbace/go/build.ae` (`desc-types`), `go/arbace/goi/natives.ae` (`GoInterp_ValueType0`, `GoInterp_TypeInfo0`) | a Go value's descriptor: a proxy's type, an interpreted struct's by its RT, else the compiled type's (`descOfRT`); a descriptor's parts (`typeInfo`: kind, named, name, package, element, key, length, parameters, results, variadic, direction, fields, method count); an interpreted named type's checker type is the builder's registry's (`desc-types`: descriptor to the type it was last made for, filled by `named-desc`), taken to its package's last check by `rehome` (a named type by package and name, an instance instantiated again), so that a value made under an older check unifies with the generic declaration's types; a compiled named type the digest's; composites by their parts |
+| instances | `arbace/go/build.ae` (`instance-callable`) | the `Callable` of a generic function's or method's instance: `instance-cell` (the cell interpreted callers reach, GR6's amendment 2), its signature substituted, `InterpCallable` or, for a method, `InterpMethodCallable` with the receiver's instance type |
+| the vars | `arbace/go/repl.ae` (`define!`, `named-type`, `generic-env`) | every generic function `F` and generic type's method `T.M` (and a generic method of go1.27) of an interpreted package gets a var whose root is a new `GoGenericFn` at each definition of the package (metadata `:go/kind`, `:go/generic true`, `:go/package`, `:line`, `:file`, `:doc`); a method's var takes the receiver first and infers the type's arguments from the receiver's instance type (`List[int]`: `T = int`), its own type parameters from the rest |
+| `go/inst` | `arbace/go.ae` (`inst`), `arbace/go/repl.ae` (`inst!`, `resolve-types`), `arbace/go/generic.ae` (`instantiate`, `type-instance`) | `(go/inst f T...)`: `f` a generic function's or method's var, or a generic type of an interpreted or listed package by name (`go.main/List`: a generic type has no var); the type forms resolved by a check of the namespace's package (go.user's outside go.*) with a struct type of fields of those types added (`resolve-types`, as go/eval does), then rehomed; all type arguments: the instance's `GoFn` (a function, a method with its receiver first) or `GoType` (a type); fewer: a `GoGenericFn` with those fixed (Go's partial instantiation); kept per `GoGenericFn` and forms (`:insts`) |
+| the interpretable packages from Arbace | `arbace/lang/GoInterp.ae` (`loadTable`), `arbace/go.ae` (`interpretable-ns!`) | `(require '[go.slices :as slices])` loads `slices` (`cmp`, `iter`, `maps`) from the digest as goi does for an import (§9.3), so that its vars exist: RT.load's hook asks `arbace.go` for a `go/` resource of one element that is no listed package |
+| the listed packages' generics | `arbace/go.ae` (`digest-info`, `table-ns!`), `arbace/go/repl.ae` (`listed-generic!`) | a listed package's generic function or generic type's method (`sync.OnceValue`, `atomic.Pointer.Load`) gets its var on first use (S9) as a `GoGenericFn` over the digest's declaration, its instances interpreted from the digest's forms (§9.3); not among the vars `ns-publics` makes |
+| interop | `arbace/lang/GoInterp.ae` (`methodVar`) | `(.Push l 3)` on an instance's value finds the var `List.Push` (the instance's name without its type arguments), a `GoGenericFn` |
+| tests | `test/goi/repl.ae`, `test/oracle/forms/go.ae` | the survey's §4.7 at the REPL (below); 14 oracle cases recorded by goi |
+
+**Arbace values as operands (§4.3 of the survey, as built).** As the survey's table, with three
+differences: a keyword or a symbol is typed `any` (a Java object); a `GoFn` (a Go func value in
+Arbace) infers nothing, as an Arbace fn (its Go type is in its `Callable`, not asked: GC137);
+`(go/spread xs)` is not recognized as a variadic spread (GC138). Values matter only through
+conversion: `((go/inst go.cmp/Compare int8) 300 1)` throws §5.6's error
+`argument 1 of cmp.Compare[int8]: 300 overflows int8`.
+
+**The REPL's checks** (`test/goi/repl.ae`, the section "generic functions' vars"): the var is a
+`GoGenericFn`; `slices.Index` over a Go `[]int` and a `[]int64` (the untyped argument takes the
+element type), `slices.Contains`, `slices.Max`; `cmp.Compare` of `Long`s (`int`), of a `Long`
+and a `Double` (`float64`), of strings, and `int64` by go/inst; `slices.SortFunc` with an Arbace
+fn; the program's own `Map[T, U any]` with go/inst (its `U` cannot be inferred from a fn);
+partial instantiation `(go/inst go.slices/Index (slice int64))`; the cache (three calls of two
+types, two instances); a generic type's methods by their vars (`List.Push`, `List.Len`), by
+interop (`.Push`) and by go/inst (`List.Push string`), the instances shared with an interpreted
+caller's; go/inst of a generic type (its zero value); a listed package's generic,
+`sync.OnceValue`; a redefinition seen by the var (a new `GoGenericFn`); the errors in the
+checker's words: `in call to gvar.Map, cannot infer U (declared at repl.go:?)`, `bool does not
+satisfy cmp.Ordered (bool missing in ...)`, `in call to slices.Index, S (type []string) does
+not satisfy ~[]E`, `not enough arguments in call to slices.Index` with types2's have and want,
+and the overflow above.
