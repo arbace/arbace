@@ -1544,14 +1544,169 @@ that a type with methods goes in as a proxy (§5.3)."
   [s]
   (long (or (:line s) (when (= :label (:op s)) (some-> (:stmt s) :line)) 0)))
 
+;; Which statements store their lines (GC26 (b), GR5.1): a statement whose own part (not its
+;; nested statement lists, which store their own) can panic or call stores its line before it
+;; runs; one that can do neither leaves the frame's line its predecessor's, which no trace can
+;; see, since only a panic or a call makes one. Decided here statically, conservatively: an
+;; expression is quiet only when it is one of the kinds below that cannot panic (a constant, a
+;; variable, arithmetic but integer division and signed shifts, comparisons of basic types, a
+;; field without a pointer on its path, an array's constant index, a conversion between basic
+;; types, a map read by a basic key, a literal of quiet elements, a function literal, len, cap,
+;; min, max ...); any other kind, and any kind not listed, can panic or call.
+
+(declare quiet-header?)
+
+(defn- quiet-basic? [ty] (let [u (t/under ty)] (and (keyword? u) (not= :invalid u))))
+
+(defn- quiet-const? [n] (and (= :constant (:mode n)) (not= :unknown (:val n))))
+
+(def ^:private quiet-builtins #{"len" "cap" "min" "max" "real" "imag" "complex" "new"})
+
+(defn- quiet-cmp-type? [ty]
+  (or (quiet-basic? ty) (t/pointer? ty)
+      (let [u (t/under ty)] (and (vector? u) (= :chan (nth u 0))))))
+
+(defn- quiet-expr?
+  "Whether checked expression n can neither panic nor call (conservative: unknown kinds can)."
+  [n]
+  (cond
+    (nil? n) true
+    (not (map? n)) false
+    (quiet-const? n) true
+    :else
+    (case (:op n)
+      (:local :global :func :nil :method-expr :ok :type ::mini :fn) true
+      (:paren :convert-iface) (quiet-expr? (:x n))
+      :unary (and (#{"+" "-" "not" "bit-not"} (:go/op n)) (quiet-expr? (:x n)))
+      :binary (let [op* (:go/op n) x (:x n) y (:y n)]
+                (and (quiet-expr? x) (quiet-expr? y)
+                     (cond
+                       (#{"and" "or"} op*) true
+                       (cmp-name op*) (or (nil-node? x) (nil-node? y)
+                                          (and (quiet-cmp-type? (:type x)) (quiet-cmp-type? (:type y))))
+                       (#{"<<" ">>"} op*) (or (quiet-const? y) (and (quiet-basic? (:type y)) (t/unsigned? (:type y))))
+                       (#{"/" "%"} op*) (or (quiet-const? y)
+                                            (and (quiet-basic? (:type n)) (contains? #{:F :R} (kind (:type n)))))
+                       :else (quiet-basic? (:type n)))))
+      ;; a conversion between basic types (no slice to array), or a string's to and from bytes or runes
+      :conv (let [T (:type n) S (:type (:x n))]
+              (and (quiet-expr? (:x n))
+                   (or (and (quiet-basic? T) (quiet-basic? S))
+                       (and (quiet-basic? T) (or (bytes-type? S) (runes-type? S)))
+                       (and (quiet-basic? S) (or (bytes-type? T) (runes-type? T))))))
+      :field (and (not-any? true? (:derefs n)) (quiet-expr? (:x n)))
+      :index (let [u (t/under (:type (:x n)))]
+               (and (vector? u) (= :array (nth u 0)) (quiet-const? (:index n)) (quiet-expr? (:x n))))
+      :map-index (let [[_ K] (t/under (:type (:x n)))]
+                   (and (quiet-basic? K) (quiet-expr? (:x n)) (quiet-expr? (:key n))))
+      :addr (quiet-expr? (:x n))
+      :lit (case (:kind n)
+             :struct (every? #(quiet-expr? (:value %)) (:fields n))
+             (:array :slice) (every? #(quiet-expr? (:value %)) (:elems n))
+             :map (let [[_ K] (t/under (:type n))]
+                    (and (quiet-basic? K) (every? #(and (quiet-expr? (:key %)) (quiet-expr? (:value %))) (:entries n))))
+             false)
+      :call (and (= :builtin (:kind n)) (not (:unsafe n)) (contains? quiet-builtins (:builtin n))
+                 (vector? (:args n)) (every? quiet-expr? (:args n)))
+      false)))
+
+(defn- quiet-place?
+  "Whether assigning to place p can neither panic nor call."
+  [p]
+  (cond
+    (= :blank p) true
+    (not (map? p)) false
+    :else
+    (case (:op p)
+      (:place-local :place-global) true
+      :place-field (and (not-any? true? (:derefs p)) (quiet-expr? (:x p)))
+      :place-index (quiet-expr? (assoc p :op :index))
+      false)))
+
+(defn- quiet-block-header? [b]
+  (or (nil? b) (not= :block (:op b))
+      (not (or (:let b) (:let-type b)))
+      (every? quiet-header? (:decls b))))
+
+(defn- quiet-header?
+  "Whether statement n's own part (its nested statement lists left out: they store their own
+  lines) can neither panic nor call (GC26 (b))."
+  [n]
+  (cond
+    (nil? n) true
+    (not (map? n)) false
+    :else
+    (case (:op n)
+      (:break :continue :goto :fallthrough :directive :local-type) true
+      :block (quiet-block-header? n)
+      :label (quiet-header? (:stmt n))
+      :expr (quiet-expr? (:x n))
+      :decl (or (boolean (:const n)) (every? quiet-expr? (:init n)))
+      :assign (and (every? quiet-place? (:lhs n)) (every? quiet-expr? (:rhs n)))
+      :op-assign (let [op* (:go/op n) y (:value n) ty (or (:type n) (:type (:place n)))]
+                   (and (quiet-place? (:place n)) (quiet-expr? y)
+                        (quiet-basic? ty)
+                        (cond
+                          (#{"<<" ">>"} op*) (or (quiet-const? y) (and (quiet-basic? (:type y)) (t/unsigned? (:type y))))
+                          (#{"/" "%"} op*) (or (quiet-const? y) (contains? #{:F :R} (kind ty)))
+                          :else true)))
+      :incdec (quiet-place? (:place n))
+      ;; a return runs the deferred calls of a function that defers: it stores its line there
+      :return (and (not (get *fn* :has-defer true)) (every? quiet-expr? (:values n)))
+      :if (and (quiet-header? (:init n)) (quiet-expr? (:cond n))
+               (quiet-block-header? (:then n))
+               (if (= :block (:op (:else n))) (quiet-block-header? (:else n)) (quiet-header? (:else n))))
+      :for (and (quiet-header? (:init n)) (quiet-expr? (:cond n)) (quiet-header? (:post n)))
+      :range (and (contains? #{:int :slice :array :string :map} (:over n))
+                  (quiet-expr? (:x n))
+                  (every? quiet-place? (remove nil? (:places n))))
+      :switch (and (quiet-header? (:init n))
+                   (or (nil? (:tag n)) (quiet-basic? (:type (:tag n))))
+                   (quiet-expr? (:tag n))
+                   (every? (fn [cl] (every? quiet-expr? (:values cl))) (:clauses n)))
+      :type-switch (and (quiet-header? (:init n)) (quiet-expr? (:x n)))
+      false)))
+
+(defn- hoisted-line
+  "A loop's hoisted line (GR5.1): a for or range statement whose own part is quiet and whose
+  body is one statement without statement lists of its own that can panic or call stores that
+  statement's line once, before the loop, rather than at each iteration (the frame's line is
+  then the same at every point that can raise); else nil."
+  [n]
+  (if (= :label (:op n))
+    (some-> (:stmt n) hoisted-line)
+    (when (and (#{:for :range} (:op n)) (quiet-header? n))
+      (let [b (:body n)]
+        (when (and (= 1 (count b))
+                   (contains? #{:expr :assign :op-assign :incdec :decl :send :go :defer} (:op (first b)))
+                   (not (quiet-header? (first b))))
+          (let [l (stmt-line (first b))] (when (pos? l) l)))))))
+
+(defn- stored-line
+  "The line statement s stores in the frame before it runs (0: none, it can neither panic nor
+  call; GC26 (b)); a loop's hoisted line (GR5.1)."
+  [s]
+  (cond
+    (hoisted-line s) (hoisted-line s)
+    (quiet-header? s) 0
+    :else (stmt-line s)))
+
+(defn- loop-body
+  "A for or range statement's body: a statement list storing its lines, or a hoisted line's
+  one statement without its line (GR5.1)."
+  [n]
+  (if (hoisted-line n)
+    (stmt (first (:body n)))
+    (stmt-list (:body n))))
+
 (defn- body-node
-  "A statement list's node (a SeqL with its labels' goto codes and its statements' lines, which
-  the frame keeps for traces: §10.6, GR5)."
+  "A statement list's node (a SeqL with its labels' goto codes and the lines its statements that
+  can panic or call store in the frame, for traces: §10.6, GR5, GR5.1)."
   [stmts]
   (let [ss (vec stmts)
         built (mapv stmt ss)
         labels (mapv (fn [s] (if (= :label (:op s)) (label-code! (:label s)) 0)) ss)
-        lines (mapv stmt-line ss)]
+        lines (mapv stored-line ss)]
     (op "SeqL" (oa built) (oa (map long (if (some pos? labels) labels [])))
         (oa (if (some pos? lines) lines [])))))
 
@@ -1585,7 +1740,7 @@ that a type with methods goes in as a proxy (§5.3)."
         objs (when (= :decl (:op (:init n))) (:objs (:init n)))
         iter (per-iteration-cells objs)
         post (when (:post n) (stmt (:post n)))
-        body (push-target tg #(stmt-list (:body n)))]
+        body (push-target tg #(loop-body n))]
     (op "For" init cnd post body (long brk) (long cont) iter)))
 
 (defn- range-targets
@@ -1659,7 +1814,7 @@ that a type with methods goes in as a proxy (§5.3)."
         tg (loop-target n)
         brk (long (:brk tg)) cont (long (:cont tg))
         iter (when new? (per-iteration-cells []))
-        mk (fn [f] (let [body (push-target tg #(stmt-list (:body n)))
+        mk (fn [f] (let [body (push-target tg #(loop-body n))
                          body (if (seq @pre) (op "Seq" (oa (conj @pre body)) (oa [])) body)]
                      (f body)))]
     (case (:over n)
@@ -1708,7 +1863,7 @@ that a type with methods goes in as a proxy (§5.3)."
                                                         :else (assign-to target kn)))))
                                                 [kt vt] yps ts)))
                            (oa []))
-                  body (push-target tg #(stmt-list (:body n)))
+                  body (push-target tg #(loop-body n))
                   body (if (seq @pre) (op "Seq" (oa (conj @pre body)) (oa [])) body)]
               (op "RangeFunc" (exk x :R) (desc xt) (desc yt) (oa (map (comp long second) ts)) bind body brk cont)))))
 
@@ -1974,7 +2129,7 @@ that a type with methods goes in as a proxy (§5.3)."
         src (or (when-let [o (:obj tree)] (when-let [sf (:source *ctx*)] (sf (e/o o :file)))) (:src *fn*))
         f {:slots (volatile! (assoc counts :C 0)) :locs (IdentityHashMap.) :code (volatile! 2)
            :defer (volatile! false) :targets [] :labels (HashMap.) :calls (IdentityHashMap.) :name fname
-           :src src}]
+           :src src :has-defer (has-defer? (:body tree))}]
     (binding [*fn* f]
       ;; the captured cells, the first C slots
       (doseq [x captures]

@@ -1357,7 +1357,8 @@ They are Go panics whose value is the `Throwable`; deferred calls run, `recover`
 - **Interpreted frames.** Each goi thread keeps its chain of frames (`Top`, each frame's `Fn` and
   `Line`); a statement node that starts a new line stores it (S51: lines are statements' lines; gc
   attributes an expression spread over lines to its operator's line, which `:lines` forms do not
-  keep, SPEC.md §10.1). A panic leaves the chain as it was (§4.3), so it is the panic's trace.
+  keep, SPEC.md §10.1). As built (GR5.1, GC26 (b)): only a statement that can panic or call
+  stores it; one that can do neither leaves its predecessor's line, which no trace sees. A panic leaves the chain as it was (§4.3), so it is the panic's trace.
 - **In Java's traces.** jrt's frame mapping asks the evaluator for evaluated frames through the
   hook `jrt.EvalTrace` (J2G-SPEC §10.7); goi registers a second hook, and jrt replaces each Go
   frame of goi's call body (`goi.(*Code).run`) by the interpreted frame it ran, innermost first,
@@ -2414,3 +2415,82 @@ wrappers). The table: 45 packages, 808 signatures, 255 invokers, 22 adapters.
   fib, sumSq and sieve); (b) only statements that can panic or call (fewer stores, a statement
   without a call or a check shows its predecessor's line). *Recommended: (a)*: exact traces,
   within GR3's speed criterion.
+  *Decided: (b)*, by the user on 2026-10-19 (not the recommended (a)); built as GR5.1, below.
+
+## As built: GR5.1 (2026-10-19)
+
+GR5.1 builds the user's decision on GC26, (b), on branch `goi-gr5-1` (from main `8ed8d6cb`, seed
+`215d3a1b`, which has GR5). Proposals for the user are GC27.
+
+**The rule.** goi's builder (`arbace/go/build.ae`: `quiet-expr?`, `quiet-place?`,
+`quiet-header?`, `stored-line`, `hoisted-line`) decides statically, as it builds a statement
+list's node (`body-node`, the `SeqL` and its lines), whether each statement's own part can
+panic or call; only such a statement stores its line in the frame before it runs (§10.6, S51).
+A statement's own part is the statement without its nested statement lists, which store their
+own: an `if`'s init, condition and else-if chain (its blocks' `let` declarations too), a `for`'s
+init, condition and post, a `range`'s operand and targets, a switch's init, tag and case values,
+a type switch's init and operand. The decision is conservative: an expression is **quiet** only
+when it is one of these kinds, its operands quiet:
+
+- a constant, a variable, a function, `nil`, a method expression, a function literal (its body
+  is its own frame's), a comma-ok's `ok`, a type (`new`'s argument);
+- `+ - not bit-not`; `and`, `or`; arithmetic of basic types but integer `/` and `%` by a
+  non-constant (floats' and complex numbers' are quiet), shifts but by a non-constant signed
+  count; comparisons of basic types, pointers and channels, or with `nil`;
+- a conversion between basic types, or between a string and bytes or runes (not a slice to an
+  array, not of a type parameter), a conversion to an interface;
+- a field selection with no pointer on its path (the checker's `:derefs`), an array's index by a
+  constant (checked statically), a map read by a key of a basic type (no hash of an interface), a
+  composite literal of quiet elements (a map's keys basic), `&x` of a quiet `x`;
+- the builtins `len`, `cap`, `min`, `max`, `real`, `imag`, `complex`, `new`.
+
+Every other kind can panic or call: any call and method call, `go`, `defer`, a crossing into
+Arbace (a call), slice and string indexing, slicing, a dereference, a type assertion (but
+comma-ok), a receive, a send, `select`, a map write, `append`, `make`, `copy`, `delete`,
+`panic`, `print`, a method value, a range over a function, a channel or a pointer to an array,
+a switch on a tag not of a basic type, and any kind not listed. Places: a local or global variable
+is quiet, a field without a pointer on its path and an array element by a constant are quiet,
+the rest not. A `return` stores its line in a function that defers (its deferred calls run
+there). `break`, `continue`, `goto`, `fallthrough`, local types and directives are quiet.
+
+**Loops' hoisted line** (amendment, GC27): a `for` or `range` whose own part is quiet and whose
+body is one statement without statement lists of its own (an expression, an assignment, a
+declaration, a send, `go`, `defer`) that can panic or call stores that statement's line once,
+before the loop, and the body stores nothing at each iteration: the frame's line is the same at
+every point that can raise (sieve's inner loop `composite[j] = true`).
+
+**Traces.** Correct wherever a statement can raise: such a statement stores its line, and
+whatever ran after it stored a subset of what GR5 stored. A probe of 17 panics (in a callee and
+its caller, in a loop, an else-if, a switch's clause, a deferring function's return, a function
+literal, a nil dereference, a nil map's write, a slice-to-array conversion, a negative shift, a
+failed assertion, an uncomparable comparison, an explicit panic, hoisted loops, a labeled one, a
+range) gives the same `:go/trace` on GR5's executable and GR5.1's. `test/goi/repl.ae` (63 checks)
+and §1.4's session (`test/goi/session.in`) pass unchanged.
+
+**The check (§11).** `bin/goi check`: 833 pass, 0 fail or error, 50 known, 280 unsupported, 15
+skipped, no regression against `test/goi/check-linux-amd64.edn` (271 s, 16 jobs): the one more
+pass is `gc2.go`, known for `runtime.ReadMemStats` and the check's 10 s, which depends on the
+collector and the machine's load (the reference is left as it is).
+
+**Measurements.** `bin/goi run test/goi/run go.t.fib bench`, best of five per run, three runs
+alternating GR5's executable (stage 0 of seed `215d3a1b`) and GR5.1's on the shared machine
+(load about 12):
+
+| | GR4 | GR5 (its record) | GR5, this session | GR5.1 |
+|---|---|---|---|---|
+| fib 22 | 2.46 ms | 2.57-2.64 ms | 2.57-2.60 ms | 2.56-2.58 ms |
+| sumSq 1e6 | 19.9 ms | 20.1-20.8 ms | 20.96-21.29 ms | 17.99-18.76 ms |
+| sieve 1e6 | 62 ms | 68.6-69.0 ms | 67.95-70.54 ms | 65.02-66.26 ms |
+
+sumSq's loop is all quiet (no store: faster than GR4); sieve keeps a store for `!composite[i]`
+and the inner loop's hoisted one; fib's `if n < 2 { return n }` is quiet, but its call's
+statement stores (GR5's remaining cost there is the frame's entry, not the lines). Without the
+hoisting, sieve was 69.3-70.8 ms against GR5's 68.8-71.4 in the same session. The executable is
+133,951,648 bytes (+114,688 against GR5's 133,836,960: the builder's predicates, compiled).
+
+**Proposals for the user** (built as recommended):
+
+- **GC27 Loops' hoisted line.** (a) as built, a loop whose own part is quiet and whose body is
+  one simple statement that can panic or call stores that line once before the loop (the same
+  traces; sieve 65-66 ms against 69-71); (b) GC26 (b)'s letter: the body's statement stores its
+  line at each iteration. *Recommended: (a)*.
