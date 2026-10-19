@@ -65,6 +65,12 @@ covers what.
   (doc/go/JRT-NOTES.md, phase 2a): Copyright 2009 The Go Authors, under Go's BSD 3-Clause
   License (text below). `overlay/go/runtime/arbace_local.ae` and `overlay/go/runtime.ae` are
   Arbace's own.
+- `overlay/go/reflect/arbace_named.ae` (goi's run-time named types, doc/go/GOI-SPEC.md "As built:
+  GR9a-c"): Arbace's addition to Go's package `reflect`, written after the GR9 survey's prototype
+  (doc/go/GR9-SURVEY.md, Appendix B) on reflect's own types and helpers of TamaGo's go1.27.1
+  tree (`src/reflect/type.go`; its blank-field `Equal` after `StructOf`'s), converted to Go
+  forms by `bin/repr-go read`: Copyright 2009 The Go Authors (the parts it adapts) and Arbace,
+  under Go's BSD 3-Clause License (text below). `overlay/go/reflect.ae` is Arbace's own.
 - `overlay/go/syscall/fs_tamago.ae`: TamaGo's simulated file system, the file
   `src/syscall/fs_tamago.go` of the same TamaGo go1.27.1 tree (itself adapted from Go's
   `fs_nacl.go`), patched and converted to Go forms by `bin/repr-go read` (doc/go/BOX-NOTES.md,
