@@ -1796,3 +1796,26 @@ builds use.
   views change, by five pragma lines; every other module is byte for byte main's.
 - **After the merge:** `make check-makefile`, `bin/repr-haskell test` (39 ok, step 9 the case
   `test/haskell/hr26/AlexDir.hs`) and the essential gate (11.6 min) passed.
+
+## 2026-10-19: the plan to `arbace-interprets-go-v1`
+
+The user intends to declare the next milestone `arbace-interprets-go-v1` or similar: goi a
+complete interpreter of Go forms at the REPL. Asked what is missing, I surveyed `bin/goi check`'s
+reference. 1,049 programs pass, 54 are unsupported and 60 known. The unsupported programs need:
+- about 30, std packages neither in the table nor interpretable;
+- about 15, reflect's method lookups and `encoding/binary`'s byte orders;
+- the rest, assembly and `go:linkname` (out of scope).
+
+The known programs are divergences by design (frames, the collector, speed), plus about 10 that
+come from interpreted types seen as proxies by compiled code and reflect (G8/GS8).
+
+The user chose the full plan over a leaner tag. The leaner tag would have declared GS8 a
+divergence of v1 and left the arm64 box out. The plan, in doc/AGENDA.md:
+1. GR7b (running);
+2. GR8: std interpreted from Go forms, a compiled core in the table, reflect's methods by a
+   targeted entry;
+3. GR9: the runtime overlay for named types (GS8) and REPL vars for generic functions (GC34 (b));
+4. the check in the arm64 box (the emulated VM and the Mac);
+5. the milestone run: `bin/gate --full`, the fixpoint, a re-seed, the tag.
+
+v1's divergences by design are listed there. Staging (G16) and speed (F10) come after v1.

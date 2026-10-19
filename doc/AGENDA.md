@@ -96,6 +96,53 @@ The current state of the work. This file is rewritten as things change. For the 
 - Running (the user, 2026-10-19), all from `90ec844d`: goi GR7b (`goi-gr7b`: `$GOROOT/test`'s errorcheck programs; `reify` of listed Go interfaces, G13;
   GC45 onward). The seed
   `34d68b82…` (GR6), verified.
+- **The plan to the milestone `arbace-interprets-go-v1`** (the user, 2026-10-19: the full plan; the
+  name to confirm at the tag). The milestone claims goi a complete interpreter of Go forms at the
+  REPL. The steps:
+  1. **GR7b** (running): `$GOROOT/test`'s errorcheck programs judged by Go's test driver, with the
+     checker's errors equal to gc's; `reify` of listed Go interfaces from Arbace (G13). After it,
+     main's gate, the fixpoint and one re-seed for GR7a and GR7b; GC45-GC54 for the user.
+  2. **GR8, std at the REPL and reflect's methods.** Today about 30 of the check's 54 unsupported
+     programs import a package neither in the table nor interpretable (`regexp`, `testing`, `flag`,
+     `math/big`, `encoding/json`, `encoding/xml`, `text/tabwriter`, `container/heap`, `go/ast`,
+     `html/template`, `syscall`, `runtime/trace`, `runtime/pprof`, ...). goi will interpret pure-Go
+     std packages from their Go forms (`tamago/goroot`, the linux std forms), as GR6 does `cmp`,
+     `iter`, `maps` and `slices`, and keep a compiled core in the table. Which packages fall to
+     each side, and at what cost in speed and size, is the survey's first question. About 15
+     programs need `reflect.Value.Method`, `MethodByName`, `Type.Method` and `encoding/binary`'s
+     byte orders. These come through a targeted entry, not reflect's whole method set: that made
+     the linker keep every exported method, +18.8 MB, GR7b. Exit: no program unsupported for lack
+     of a std package or a reflect member; every std package importable at the REPL.
+  3. **GR9, interpreted types as the runtime sees them, and generics at the REPL.**
+     - G8/GS8, the runtime overlay for named types: compiled code and reflect see an interpreted
+       named type as its own runtime type, not a proxy, wrapper or RT. That covers `%T` (GS9),
+       `StructField.Anonymous`, `AssignableTo`, `MakeFunc` to a named func type and reflect's names
+       of interpreted instances (about 10 known programs).
+     - GC34 (b): a REPL var for a generic function that infers its type arguments from each call,
+       so that `slices.Index` and the program's own generic functions are called directly.
+     - Exit: those known entries pass.
+  4. **The arm64 box.** `bin/goi check --box` on tamago/arm64: in the emulated aarch64 VM
+     (`bin/box-arm64-vm`) and on the Mac (`bin/box-mac-bundle`'s checklist), as the box's
+     milestones were declared on both architectures. Also the board's crash when a program sets
+     GOMAXPROCS above the box's vCPUs, and GC35 (b) if a program's stdout must be told from its
+     stderr.
+  5. **The milestone run.**
+     - `bin/goi check` (run and errorcheck programs): every program passes or is a recorded
+       divergence with its reason.
+     - The essential subset in the gate; the box check on amd64 and arm64.
+     - `bin/gate --full`, the fixpoint, a re-seed and `bin/seed --verify`; the tag.
+     - The divergences recorded in GOI-SPEC and the journal at the tag.
+  - **v1's divergences, by design (§1.1), recorded rather than built:**
+    - assembly, cgo, `go:linkname`;
+    - package tests (S45);
+    - `go:embed` (GS14);
+    - `runtime.Caller`, `Callers` and traces naming goi's frames;
+    - finalizer timing, escape analysis, memory statistics and heap profiles;
+    - unsafe layout that gc decides;
+    - speed: programs beyond the check's 10 s;
+    - S23's call depth: `peano.go`.
+  - **After v1** (GR7's rest): staging shared with Futamura's F7 (G16); speed (F10's inline
+    caches, specialization), which would bring the speed-bound programs back.
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
