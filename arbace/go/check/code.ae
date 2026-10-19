@@ -14,7 +14,7 @@
             [arbace.go.check.env :as e :refer [o oset! err! error!]]))
 
 (declare check-branches! inst-say record-inst! instantiate-fn slice-elem tparam-index generic-fn? func-inst-target call-sig rename-tparams infer instance-type mark-addressed! call-form? expr expr-or-type multi-expr typexpr typexpr-generic byte-string-value literal const-node invalid-conversion! finish-comparison composite-lit builtin-call val-equal? val-form-str key-val stmt terminating? missing-cause implements? invalid invalid? signature rhs-values init-var assignment func-body check-fn-lit const-expr
-         convert-untyped update-type operand-str expr-str stmt-list expr-internal)
+         convert-untyped update-type operand-str expr-str stmt-list expr-internal pkg-path)
 
 ;;; Hooks set by arbace.go.check.decl
 
@@ -39,6 +39,95 @@
   "A function [form tparams targs] verifying (later) that the type arguments satisfy their
   constraints (go/types' verify), bound by the checker."
   nil)
+
+;;; Cycles (GR7c: decl.go's cycleError, validtype.go)
+
+(defn cycle-error!
+  "go/types' cycleError (decl.go): the cycle of entries [{:name :line :file} ...] reported at
+  entry start, a type's (type?) or a value's. A cycle of one is said concisely; a longer one
+  adds a line per reference, as types2 does (\"\\n\\tFILE:LINE: a refers to b\", from start
+  around), each at its entry's position (gc's columns are not in the forms: FILE:LINE)."
+  [entries start type?]
+  (let [n (count entries)
+        x (nth entries start)
+        msg (if (= 1 n)
+              (str (if type? "invalid recursive type: " "invalid cycle in declaration: ") (:name x) " refers to itself")
+              (apply str (if type? "invalid recursive type " "invalid cycle in declaration of ") (:name x)
+                     (for [i (range n)
+                           :let [y (nth entries (mod (+ start i) n))
+                                 z (nth entries (mod (+ start i 1) n))]]
+                       (str "\n\t" (:file y) ":" (:line y) ": " (:name y) " refers to " (:name z)))))]
+    (e/error! (:file x) (:line x) :InvalidDeclCycle msg)))
+
+(defn obj-entry
+  "A cycle's entry of object x: its name and position."
+  [x]
+  {:name (o x :name) :line (o x :line) :file (or (o x :file) (:name e/*gofile*))})
+
+(defn- named-entry
+  "A cycle's entry of named type nt: a declared type's name and position, an instance's
+  string (T[A]) and the position of its first instantiation."
+  [nt]
+  (let [i (t/info nt)
+        x (:obj i)]
+    (if (:origin i)
+      {:name (t/type-str nt) :line (or (:line i) (some-> x (o :line))) :file (or (:file i) (some-> x (o :file)) (:name e/*gofile*))}
+      {:name (:name i) :line (some-> x (o :line)) :file (or (some-> x (o :file)) (:name e/*gofile*))})))
+
+(defn valid-type!
+  "go/types' validType (validtype.go): reports named type nt when it contains itself without
+  an indirection, through array elements, struct fields, union terms, embedded interfaces
+  (an interface type's :embeddeds, its metadata) and the type arguments of instances (nest,
+  the instances entered, and path, the named types: go/types' own). The cycle is reported by
+  cycle-error! from its first type, which is made invalid (its RHS, go/types' fromRHS). The RHS
+  of a named type is its :underlying as declared (a named type or a type literal); an
+  instance's, its origin's."
+  [nt]
+  (letfn [(walk [ty nest path]
+            (cond
+              (keyword? ty) true
+              (t/named? ty)
+              (let [i (t/info ty)]
+                (cond
+                  (some #(= % ty) nest)
+                  (let [start (.indexOf ^java.util.List path ty)]
+                    (t/update-info! (or (:origin i) ty) assoc :underlying :invalid)
+                    (cycle-error! (mapv named-entry (subvec path start)) 0 true)
+                    false)
+                  ;; another package's types are complete (an instance may have this package's
+                  ;; type arguments: go.dev/issue/50788)
+                  (and (nil? (:origin i)) (not= (:pkg i) (pkg-path))) true
+                  :else
+                  (let [rhs (if (:origin i) (:underlying (t/info (:origin i))) (:underlying i))]
+                    (or (nil? rhs) (walk rhs (conj nest ty) (conj path ty))))))
+              (t/tparam? ty)
+              ;; a type parameter of the innermost instance entered: its type argument
+              (let [inst (peek nest)
+                    ii (some-> inst t/info)
+                    tps (some-> ii :origin t/info :tparams)
+                    k (if tps (.indexOf ^java.util.List tps ty) -1)]
+                (if (and (>= k 0) (< k (count (:targs ii))))
+                  (walk (nth (:targs ii) k) (pop nest) path)
+                  true))
+              :else
+              (case (nth ty 0)
+                :array (walk (nth ty 2) nest path)
+                :struct (every? #(walk (:type %) nest path) (nth ty 1))
+                :union (let [ts (nth ty 1)] (or (= :all ts) (every? #(walk (nth % 1) nest path) ts)))
+                :interface (every? #(walk % nest path) (:embeddeds (meta ty)))
+                true)))]
+    (walk nt [] [])))
+
+;; go/types' later of validType, in the order the type declarations began (at the start of
+;; typeDecl), run after the bodies (before the declarations' other laters)
+(def ^:dynamic *valid-types* "The package's queue of validType checks (a volatile vector of fns)." nil)
+
+(defn valid-type-later!
+  "Queues validType of named type nt (a declaration of the package or a local one)."
+  [nt]
+  (when-let [v *valid-types*]
+    (let [d e/*decl* fi e/*gofile*]
+      (vswap! v conj (fn [] (binding [e/*decl* d e/*gofile* fi] (valid-type! nt)))))))
 
 ;;; Forms
 
@@ -209,6 +298,9 @@
       ;; go/types' ident: a variable named is used, even where a type was expected
       (do (when (= :var (o x :kind)) (use-var! cx x))
           (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)
+      ;; a local alias named in its own declaration (go/types' objPath: a cycle of one alias)
+      (o x :in-decl)
+      (do (cycle-error! [(obj-entry x)] 0 true) :invalid)
       :else
       (do (note-ref! x)
           (when (o x :generic-invalid) (e/generic!))
@@ -331,16 +423,26 @@
                    (do (e/error! (or line (e/current-line)) :BlankIfaceMethod "methods must have a unique non-blank name") nil)
                    {:name n :pkg (when-not (t/exported? n) p) :type sig :line line}))))
         own (remove nil? own)
-        elems (vec (for [x (rest f) :when (not (method-elem? x))]
+        etys (vec (for [x (rest f) :when (not (method-elem? x))]
+                    (with-line x
+                      [x (if (and (seq? x) (#{'| 'tilde} (first x))) (union-type cx x) (typexpr cx x))])))
+        elems (vec (for [[x ty] etys]
                      (with-line x
-                       (let [ty (if (and (seq? x) (#{'| 'tilde} (first x))) (union-type cx x) (typexpr cx x))
-                             u (t/under ty)]
+                       (let [u (t/under ty)]
                          (cond
                            (not (t/valid? ty)) nil
-                           (t/union? u) {:terms (nth u 1)}
                            (t/tparam? ty) (do (err! x :MisplacedTypeParam "cannot embed a type parameter") nil)
+                           ;; go/types' computeInterfaceTypeSet: an element of an invalid type (a
+                           ;; type whose declaration is in progress: a cycle) is ignored
+                           (not (t/valid? u)) nil
+                           (t/union? u)
+                           (if (allow-version? cx 18)
+                             {:terms (nth u 1)}
+                             (do (err! x :UnsupportedFeature "embedding interface element %s requires go1.18 or later" (t/type-str u)) nil))
                            (and (vector? u) (= :interface (nth u 0)))
                            (let [ts (t/iface-tset u)] {:methods (:methods ts) :terms (:terms ts) :comparable (:comparable ts)})
+                           (not (allow-version? cx 18))
+                           (do (err! x :UnsupportedFeature "embedding non-interface type %s requires go1.18 or later" (t/type-str ty)) nil)
                            :else {:terms #{[false ty]}})))))
         embedded (keep :methods elems)
         [terms comp] (reduce (fn [[xt xc] el] (if el (intersect-term-lists xt xc (:terms el) (:comparable el)) [xt xc]))
@@ -355,7 +457,9 @@
                          (assoc acc k m))))
                    {}
                    (concat (map #(assoc % :own true) own) (apply concat embedded)))]
-    [:interface (t/sort-methods (map #(dissoc % :own :line) (vals ms))) (t/make-tset terms comp)]))
+    ;; the embedded types for validType (GR7c), as metadata: types are compared by value
+    (with-meta [:interface (t/sort-methods (map #(dissoc % :own :line) (vals ms))) (t/make-tset terms comp)]
+               (when (seq etys) {:embeddeds (mapv second etys)}))))
 
 (defn array-length
   "The length of an array type: a constant expression of integer value, representable as int."
