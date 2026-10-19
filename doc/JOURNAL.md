@@ -1649,3 +1649,41 @@ builds use.
 - In main: the essential gate passed (9 min), the fixpoint held, and the seed was remade from G3:
   `1d5c35b4…` (was `215d3a1b…`), committed as `82182df2` and verified (the same tar printed again at
   `841c0b3c`, stage 0 = G1 = G2 = G3, `6538698a…`).
+
+## 2026-10-19: repr/rust RR6 merged; RR-P18-RR-P22 decided
+
+- repr/rust RR6 (branch `repr-rust-rr6`: `9e7cf440`, `c5e17004`, `fc9e2104`, `1751ae43`, from
+  `a1a50c4c`; doc/rust/SPEC.md §12.9, doc/rust/RUST-NOTES.md "RR6") merged as `092da8f4`: the
+  lowered and code levels. The helper gains `rsdump rustc [--hir F] [--mir F] -- ARGS`, rustc run as
+  a driver. It writes the HIR by rustc's printer without the root file's comments (`-Zunpretty=hir`
+  interleaves them by position), and the MIR by its own copy of `write_mir_pretty`, since rustc
+  1.99.1's crashes on core (`#[rustc_comptime]`, `intrinsics::needs_drop`). Then rustc generates code.
+  `bin/repr-rust roundtrip --code` (`--code-only`) builds each library crate (its rlib) and each UI
+  program (its object), from the originals and from mirrors of each layout's printed files
+  (`bin/lib/repr-rust/code-unit`). It compares HIR and MIR texts with positions normalized as far as
+  the layout keeps them, and objects byte for byte (`lib.rmeta` only in `:full`;
+  `-Zlocation-detail` reduced for `:lines` and pretty). `include!`'s expression files become
+  `(rs/file … :kind :include-expr)` with one `(rs/expr e)` (RSS6): 6 in the UI suite, 1 in the crate
+  set. A converter fix: a negation whose literal is on a later line stays `(- lit)`.
+- Results (HIR / MIR / objects the same):
+  - `:full`: every judged unit is the same.
+  - `:lines`: std 5/5/5, the rest of `library/` 46/46/46, the compiler 65/65/65 (one not judged,
+    `rustc_codegen_llvm`, which needs the native `llvm-wrapper`), UI 3,711/3,710/3,711 of 3,715
+    judged, with 5 known: `stringify!` and `assert!` spacing, one CRLF reader, one constant MIR
+    prints from its source text.
+  - Pretty: the compiler 23 crates the same, 42 known (`rustc_macros`' `derive(Diagnostic)` reads
+    columns, so 10 crates do not build re-indented); UI 70 known (line values: `line!()`, `dbg!`,
+    the test harness's positions).
+  - Bitcode-only and closing-brace differences are set aside and counted apart (RR-P20).
+  - The earlier levels are unchanged on every corpus.
+  - About 13 minutes for `all --code`, opt-in (`REPR_RUST_CORPORA='all --code'`, `make
+    repr-rust-code`); the gate's default step is unchanged.
+- The user decided RR-P18-RR-P22 as built:
+  - RR-P18: the helper's HIR without comments;
+  - RR-P19: its `write_mir_pretty`;
+  - RR-P20: the two set-aside differences counted apart;
+  - RR-P21: opt-in, library crates and UI programs, no crate set;
+  - RR-P22: expression files found by heuristics, non-`.rs` files included.
+- After the merge: `make check-makefile`, `bin/repr-rust test` (28 ok, case 10 the code levels) and
+  the essential gate (10.5 min) passed. RR6 changes no part of the program, so there is no re-seed.
+  SPEC §12.1's milestones RR1-RR6 are all built.

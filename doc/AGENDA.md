@@ -93,9 +93,8 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Running (the user, 2026-10-19: "Start both"): goi GR6 (generics; `goi-gr6`), repr/rust RR6 (the
-  lowered and code levels, HIR, MIR, objects, and `include!`'s expression files; `repr-rust-rr6`), both
-  from `a1a50c4c`. The seed `1d5c35b4…` (GR5.1), verified.
+- Running (the user, 2026-10-19: "Start both"): goi GR6 (generics; `goi-gr6`, from `a1a50c4c`).
+  repr/rust RR6 done and merged (2026-10-19). The seed `1d5c35b4…` (GR5.1), verified.
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
@@ -162,7 +161,9 @@ The current state of the work. This file is rewritten as things change. For the 
   5 of 5 crates); RR3 done (2026-10-18: `:full`, the text level, 1,074 of 1,074 byte for byte;
   RR-P6-RR-P8 decided as built); RR4 done (2026-10-18: the rest of `library/`, the compiler, a
   pinned crate set, the pretty layout: 13,397 files; RR-P9-RR-P12 decided as built); RR5 done (the UI suite as a fifth corpus, the behaviour level
-  `roundtrip --run`, std from printed files `--std`; RR-P13-RR-P17 as built); RR6 running.
+  `roundtrip --run`, std from printed files `--std`; RR-P13-RR-P17 as built); RR6 done (HIR, MIR and objects from the printed files,
+  `roundtrip --code`, opt-in; `include!`'s expression files; RR-P18-RR-P22 as built). The
+  milestones of SPEC §12.1 are all built.
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
