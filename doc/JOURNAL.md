@@ -1588,3 +1588,40 @@ branches' worktrees and scratch, and trimmed Go's build cache once by hand at 90
 `ARBACE_GOCACHE_KEEP_MIN`'s default from 180 to 90 minutes (`bin/lib/gocache.bash`, `bin/gate`,
 CLAUDE.md). Go refreshes an entry's time at most hourly, so 90 minutes still keeps what running
 builds use.
+
+### 2026-10-19: goi GR5 and repr/rust RR5 merged; GC23-GC26 and RR-P13-RR-P17 decided; the seed 215d3a1b
+
+- goi GR5 (branch `goi-gr5`, `747ace2f`, `18479f76`, from `ec47d8af`; doc/go/GOI-SPEC.md, "As built:
+  GR5", amendments 1-10) merged as `f2fddb57`. It adds: Arbace fns as Go funcs (§7.5); GC22's typed
+  adapters, 22 on linux/amd64, the wrappers' methods calling through goi's frame; the bridge
+  `arbace.lang.GoBridge`; the package `arbace` (`go/arbace.ae`, `go/arbace/api.ae`, §7.3); `GoPanic`
+  with gc's text, its cause and interpreted frames (§10.4, GS11); traces (§10.6); printing with goi's
+  type names (§5.7); `go/method` returning the var `T.M`; interop on Go values (GS10); Go values in
+  the read-only collection protocols (GS7, hand change 28 to `RT`, `Reflector`, `main`, in
+  VENDOR-NOTES); `go/run-compiled` (G15); 112 cross-dialect oracle cases `test/oracle/forms/go.ae`,
+  recorded by goi (`bin/oracle record --goi IMPL`), left out of diffcheck's pair. GS9 not built
+  (`%T` in 1 of 1,178 programs). The executable +528,384 bytes; fib, sumSq and sieve 2.57, 20.1 and
+  68.6 ms (GR4: 2.46, 19.9, 62), the cost of every statement storing its line.
+- The user decided GC23 (the REPL's report names the GoPanic), GC24 (the package `arbace` imports
+  std only, through `Hooks`) and GC25 (`forms/go` out of the box's oracle until goi is checked in the
+  box) as built. For GC26 the user chose (b), against the recommended (a): a statement stores its line
+  only where it can panic or call. GR5.1 builds it (`goi-gr5-1`, from `8ed8d6cb`), the user preferring
+  a small follow-up before GR6 to folding it into GR6.
+- In main the essential gate passed after the merge (16 min), the fixpoint held, and the seed was
+  remade from G3 (`ARBACE_SEED_GO_BUILD=…/fixpoint/g3 bin/seed --make`): `215d3a1b…` (was
+  `982e071c…`), committed as `8ed8d6cb` and verified (`bin/seed --verify`: the same tar printed again
+  at `f2fddb57`, stage 0 = G1 = G2 = G3, `bbfac252…`).
+- repr/rust RR5 (branch `repr-rust-rr5`, last `82e18bd9`, from `f6ca94b2`; doc/rust/SPEC.md §12.8,
+  doc/rust/RUST-NOTES.md "RR5") merged as `89c0b837`. It adds: `tests/ui` of
+  `rustc-1.99.1-src.tar.xz` (pinned `6451598a…`, fetched into `.tmp/`) as a fifth corpus, 19,942
+  files, 19,939 equal at the tree, pretty and text levels (3 nest deeper than the host's 10,000
+  calls); the behaviour level `roundtrip --run`, 3,718 run-pass programs built and run from the
+  original and the printed files (`:full` 3,690 the same, 0 known; `:lines` 5 known; pretty 25
+  known; causes `column!()`, `Location::caller()`, `stringify!`, `line!()`, one CRLF reader); std
+  printed in `:lines` and built with `-Zbuild-std` (`--std`), 3,683 the same, 0 differ. RR1-RR4
+  unchanged. The behaviour level is opt-in (`REPR_RUST_CORPORA='all --run --std'`); new target
+  `make repr-rust-behaviour`. The user decided RR-P13-RR-P17 as built (columns and lines normalized
+  only when the raw outputs differ, counted apart; the behaviour level opt-in; programs with
+  auxiliary crates left out for now, 411 revisions; `RUSTC_BOOTSTRAP=1`; `_` for characters a
+  namespace's name cannot hold). After the merge: `make check-makefile`, `bin/repr-rust test`
+  (case 9 the behaviour level) and the essential gate (13.5 min) passed.

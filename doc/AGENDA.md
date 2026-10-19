@@ -93,9 +93,8 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Running (the user, 2026-10-18: "start all 4"): goi's GR5 (the crossings and the REPL;
-  `goi-gr5`), repr/rust RR5 (the behaviour level; `repr-rust-rr5`). The seed remade (`982e071c…`,
-  F7 and GR4) and verified.
+- Running (the user, 2026-10-19): goi's GR5.1 (`goi-gr5-1`): GC26 (b), an interpreted statement's
+  line stored only where it can panic or call. The seed remade (`215d3a1b…`, GR5) and verified.
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and
@@ -123,7 +122,9 @@ The current state of the work. This file is rewritten as things change. For the 
   GS1-GS15 decided as recommended); GR1 and GR2 done (the compiled-packages table,
   GoValue; the checker); GR3 done (2026-10-18: the interpreter's core, 532 of `$GOROOT/test`'s
   run programs pass, none fail; GC15-GC18 decided as built); GR4 done (2026-10-18: methods, interfaces, concurrency; 832 pass;
-  GC19-GC22 decided as built); GR5 running, then GR6.
+  GC19-GC22 decided as built); GR5 done (the crossings, the package `arbace`, GoPanic, traces,
+  printing, GS7, GS10, `go/run-compiled`, the oracle's `forms/go`; GC23-GC25 as built, GC26 (b));
+  GR5.1 running, then GR6.
 
 - Done (2026-10-17): the rename (doc/NAMING-SURVEY.md, "The rename as built"): j2a → `repr/java`
   (`bin/repr-java`), g2a → `repr/go` (`bin/repr-go`), its build → `build/go` (`bin/build-go`),
@@ -159,7 +160,8 @@ The current state of the work. This file is rewritten as things change. For the 
   recommended); RR1 and RR2 done (the tree and lines levels, 1,074 of 1,074; the interface level,
   5 of 5 crates); RR3 done (2026-10-18: `:full`, the text level, 1,074 of 1,074 byte for byte;
   RR-P6-RR-P8 decided as built); RR4 done (2026-10-18: the rest of `library/`, the compiler, a
-  pinned crate set, the pretty layout: 13,397 files; RR-P9-RR-P12 decided as built); RR5 running; next RR6.
+  pinned crate set, the pretty layout: 13,397 files; RR-P9-RR-P12 decided as built); RR5 done (the UI suite as a fifth corpus, the behaviour level
+  `roundtrip --run`, std from printed files `--std`; RR-P13-RR-P17 as built); next RR6.
 
 - The standalone Arbace: no Java binary compatibility, with Java at the source level through repr/java.
   The language is Clojure plus class forms, and later forms for Go. The goal is a
