@@ -52,13 +52,46 @@
           cfg (:config (apply hash-map (nnext gp)))]
       (merge {:goos "linux" :goarch "amd64" :lang "go1.27"} cfg))))
 
+(defn interpretable?
+  "Whether import path p is an interpretable package of the digest (§9.3, GR8a): its forms there
+  whole, goi's to interpret under its std path."
+  [p]
+  (boolean (and (not (listed? p)) (not= p "goi:out") (some-> @digest-index :index (contains? p)))))
+
+(def ^:private out-of-scope
+  "The std packages out of scope (GR8a): path -> the reason they are refused at the import."
+  (delay (or (when (some-> @digest-index :index (contains? "goi:out"))
+               (first (digest-forms "goi:out")))
+             {})))
+
+(defn refusal
+  "Why package importer-path may not import path at the REPL (GR8a), or nil: a std package out of
+  scope (its reason), or an internal or vendored std package imported from outside std (Go's
+  rule)."
+  [^String path ^String importer-path]
+  (cond
+    (contains? @out-of-scope path) (str "goi: " path ": " (get @out-of-scope path))
+    (and (or (listed? path) (interpretable? path) (interpretable? (str "vendor/" path)))
+         (some #{"internal" "vendor"} (str/split path #"/"))
+         (not (or (nil? importer-path) (listed? importer-path) (interpretable? importer-path))))
+    (str "use of internal package " path " not allowed")
+    ;; std's vendored packages by their own paths: std's imports only
+    (and (not (or (listed? path) (interpretable? path))) (interpretable? (str "vendor/" path))
+         (not (or (nil? importer-path) (listed? importer-path) (interpretable? importer-path))))
+    (str "package " path " is std's vendored copy, not importable")
+    :else nil))
+
 (def ^:private digest-session
-  "The checking session of the table's packages, read from the digest (one per process)."
+  "The checking session of the digest's packages (one per process): the table's packages and the
+  interpretable ones (GR8a: so that a listed member's type naming an interpretable package's,
+  iter.Seq[string], is the type interpreted code names, GC63), the latter with their trees, for
+  goi to define them (load-digest-package!)."
   (delay
-    (ck/session (fn [path importer]
-                  (when (listed? path)
-                    (when-let [fs (digest-forms path)]
-                      (ck/forms-source fs @config)))))))
+    (assoc (ck/session (fn [path importer]
+                         (when (or (listed? path) (interpretable? path))
+                           (when-let [fs (digest-forms path)]
+                             (ck/forms-source fs @config)))))
+           :keep-trees interpretable?)))
 
 ;;; Packages
 
@@ -195,14 +228,33 @@
                            (when-let [st (load-import path)]
                              (source-of st)))))
          :delegate @digest-session
-         :local (fn [path] (not (listed? path)))))
+         :local (fn [path] (not (or (listed? path) (interpretable? path))))
+         :refuse refusal))
+
+(declare load-digest-package!)
+
+(defn- define-digest-imports!
+  "Defines the interpretable packages src imports (GR8a), each once, its own imports first."
+  [src]
+  (doseq [fi (:files src)
+          spec (or (:imports fi) (get-in fi [:opts :imports]))
+          :let [p (if (vector? spec) (second spec) spec)]
+          :when (string? p)
+          :let [p (if (and (not (interpretable? p)) (interpretable? (str "vendor/" p))) (str "vendor/" p) p)]
+          :when (and (interpretable? p) (not (get @packages p)))]
+    (load-digest-package! p)))
 
 (defn check-source
-  "Checks src: the package's result (with its trees), its errors included."
-  [src extra-src]
-  (let [s (session-for extra-src)
-        pkg (ck/check-package src (#'ck/resolver s src []) :keep-trees true)]
-    (e/o pkg :result)))
+  "Checks src: the package's result (with its trees), its errors included; then defines the
+  interpretable packages it imports (GR8a; not when define? is false: errorcheck)."
+  ([src extra-src] (check-source src extra-src true))
+  ([src extra-src define?]
+   (let [s (session-for extra-src)
+         pkg (ck/check-package src (#'ck/resolver s src []) :keep-trees true)
+         r (e/o pkg :result)]
+     (when (and define? (empty? (:errors r)))
+       (define-digest-imports! src))
+     r)))
 
 ;;; Defining a checked package: cells, descriptors, vars
 
@@ -239,6 +291,23 @@
 
 (declare ctx-of)
 
+(def ^:private table-types (atom {}))
+
+(defn- table-type?
+  "Whether the table describes listed package path's named type nm (its exported types, and the
+  unexported ones of its exported variables: GR8a)."
+  [path nm]
+  (contains? (or (get @table-types path)
+                 (let [ts (set (for [[k n _] (partition 3 (GoInterp/members path)) :when (= "type" k)] n))]
+                   (swap! table-types assoc path ts)
+                   ts))
+             nm))
+
+(defn- digest-scope
+  "The package-level objects of listed package path, as the digest's session checked it (GR8a)."
+  [path]
+  (some-> (ck/ensure-package @digest-session path nil []) deref :scope-entries))
+
 (defn build-context
   "The builder's context for the package of state st."
   [st]
@@ -246,6 +315,8 @@
    :ctx-of ctx-of
    :source (let [ns (str (:ns @st))] (fn [fname] [ns (display-file fname)]))
    :compiled? listed?
+   :table-type? table-type?
+   :pkg-scope digest-scope
    :types (java.util.HashMap.)
    :methods-done (java.util.IdentityHashMap.)
    :lit-count (atom 0)
@@ -278,6 +349,8 @@
             ctx {:path path :name nm :ctx-of ctx-of
                  :source (let [ns (str (path->ns path))] (fn [fname] [ns (or fname "")]))
                  :compiled? listed?
+                 :table-type? table-type?
+                 :pkg-scope digest-scope
                  :types (java.util.HashMap.)
                  :methods-done (java.util.IdentityHashMap.)
                  :lit-count (atom 0)
@@ -323,6 +396,34 @@
       (and (keyword? b) (#{:float32 :untyped-float :float64} b)) (if (= :float32 b) (float (c/to-double v)) (c/to-double v))
       (integer? v) v
       :else (c/to-double v))))
+
+(declare load-import)
+
+(defn- linkname-cell
+  "The cell a body-less function declaration's go:linkname pull names (spec, its form), when its
+  target is a function of an interpreted package (GR8a, GC59: net/textproto.readMIMEHeader for
+  mime/multipart and net/http), or nil."
+  [spec]
+  (when-let [^String ln (and (seq? spec) (:go/linkname (meta (second spec))))]
+    (let [parts (str/split (str/trim ln) #"\s+")]
+      (when (= 2 (count parts))
+        (let [^String t (second parts)
+              slash (.lastIndexOf t "/")
+              dot (.indexOf t "." (int (max 0 slash)))]
+          (when (pos? dot)
+            (let [tp (subs t 0 dot) tn (subs t (inc dot))]
+              (when (interpretable? tp)
+                (when-let [ts (or (get @packages tp) (load-import tp))]
+                  (get-in @ts [:funcs tn :cell]))))))))))
+
+(defn- intern-go
+  "intern, a name that maps a class or another namespace's var (Package, Error of java.lang, a
+  core fn) unmapped first: a Go name shadows it without a warning (GR8a: std's packages)."
+  [ns sym v]
+  (let [m (get (ns-map ns) sym)]
+    (when (and m (not (and (var? m) (= ns (.-ns ^arbace.lang.Var m)))))
+      (ns-unmap ns sym)))
+  (intern ns sym v))
 
 (defn define!
   "Defines the checked package result r in state st: function cells (their code built on first
@@ -380,10 +481,16 @@
                                   :let [x (:obj d) nm (e/o x :name)
                                         k (type-key (e/o x :type) (:gen ctx))
                                         prev (get-in old [:funcs nm])
-                                        cell (if (and prev (= k (:key prev))) (:cell prev) (b/op "FuncCell" nm (:name old) nil))]]
-                              (if (and prev (contains? kept-names nm))
-                                [nm (assoc prev :kept true)]
-                                [nm {:cell cell :key k :tree (:tree d) :obj x}])))
+                                        alias (when (nil? (:tree d)) (linkname-cell (:spec d)))
+                                        cell (cond alias alias
+                                                   (and prev (= k (:key prev))) (:cell prev)
+                                                   :else (b/op "FuncCell" nm (:name old) nil))]]
+                              (cond
+                                (and prev (contains? kept-names nm)) [nm (assoc prev :kept true)]
+                                ;; a go:linkname pull of an interpreted package's function: its
+                                ;; cell (GR8a, GC59)
+                                alias [nm {:cell cell :key k :obj x :kept true :alias true}]
+                                :else [nm {:cell cell :key k :tree (:tree d) :obj x}])))
             init-cells (vec (for [x (:inits r)]
                               (let [d (some #(when (identical? (:obj %) x) %) decls)]
                                 {:cell (b/op "FuncCell" "init" (:name old) nil) :tree (:tree d) :obj x})))]
@@ -447,7 +554,7 @@
                 (doseq [[nm {:keys [cell obj]}] new-funcs
                         :let [spec (some #(when (identical? (:obj %) obj) (:spec %)) decls)
                               doc (when (and (seq? spec) (string? (nth spec 2 nil))) (nth spec 2))]]
-                  (intern ns (with-meta (symbol nm) (cond-> {:go/kind :func :go/package (:path old) :line (e/o obj :line)
+                  (intern-go ns (with-meta (symbol nm) (cond-> {:go/kind :func :go/package (:path old) :line (e/o obj :line)
                                                              :file (e/o obj :file) :private (not (t/exported? nm))}
                                                       doc (assoc :doc doc)))
                           (GoFn. (b/op "InterpCallable" cell (b/desc (e/o obj :type)) (str (:path old) "." nm))
@@ -459,7 +566,7 @@
                               c (try (b/method-callable obj cell full)
                                      (catch Exception ex (when-not (:goi/unsupported (ex-data ex)) (throw ex))))]
                         :when c]
-                  (intern ns (with-meta (symbol vname) {:go/kind :method :go/package (:path old) :line (e/o obj :line)
+                  (intern-go ns (with-meta (symbol vname) {:go/kind :method :go/package (:path old) :line (e/o obj :line)
                                                         :file (e/o obj :file)
                                                         :private (not (and (t/exported? (e/o obj :name))
                                                                            (t/exported? (:name (t/info (e/o obj :recv-named))))))})
@@ -479,18 +586,18 @@
                                                          doc (assoc :doc doc)))
                           (gen/generic-fn x full generic-env)))
                 (doseq [[nm {:keys [ptr obj]}] globals]
-                  (intern ns (with-meta (symbol nm) {:go/kind :var :go/package (:path old) :private (not (t/exported? nm))})
+                  (intern-go ns (with-meta (symbol nm) {:go/kind :var :go/package (:path old) :private (not (t/exported? nm))})
                           (GoVar. (b/op "GlobalPtr" (b/desc (e/o obj :type)) ptr) (str (:path old) "." nm))))
                 (doseq [d decls :when (= :const (:kind d))
                         :let [x (:obj d)] :when (not= "_" (e/o x :name))
                         :when (t/valid? (e/o x :type))]
-                  (intern ns (with-meta (symbol (e/o x :name)) {:go/kind :const :go/package (:path old)
+                  (intern-go ns (with-meta (symbol (e/o x :name)) {:go/kind :const :go/package (:path old)
                                                                  :private (not (t/exported? (e/o x :name)))})
                           (const-arbace (e/o x :type) (e/o x :val))))
                 (doseq [d decls :when (= :type (:kind d))
                         :let [x (:obj d)] :when (not (e/o x :tparams-count))]
                   (try
-                    (intern ns (with-meta (symbol (e/o x :name)) {:go/kind :type :go/package (:path old)
+                    (intern-go ns (with-meta (symbol (e/o x :name)) {:go/kind :type :go/package (:path old)
                                                                    :private (not (t/exported? (e/o x :name)))})
                             (GoType. (b/desc (e/o x :type))))
                     (catch Exception _ nil)))))
@@ -539,17 +646,19 @@
 (defonce ^:private hook-registered
   (do (swap! arbace.lang.RT/AFTER_LOAD conj #'after-load) true))
 
-(defn interpretable?
-  "Whether import path p is an interpretable package of the digest (§9.3): its forms there
-  whole, goi's to interpret under its std path."
-  [p]
-  (boolean (and (not (listed? p)) (some-> @digest-index :index (contains? p)))))
-
 (defn- load-digest-package!
   "Defines interpretable package path from the digest's forms (§9.3): its state made, then
-  checked, defined and initialized as a loaded package's (§2.3)."
+  defined and initialized as a loaded package's (§2.3). GR8a: checked once per process, in the
+  digest's session (its imports' types are the ones the table's members name), its interpretable
+  imports defined and initialized first."
   [path]
-  (let [fs (digest-forms path)
+  (let [cp (ck/ensure-package @digest-session path nil [])
+        _ (when-not cp (throw (ex-info (str "goi: no forms of " path " in the digest") {:path path})))
+        r (e/o cp :result)
+        _ (when (seq (:errors r))
+            (throw (ex-info (str "Go check errors in package " path ":\n" (error-text (:errors r)))
+                            {:go/errors (:errors r)})))
+        fs (digest-forms path)
         gp (first (filter #(and (seq? %) (= 'go/package (first %))) fs))
         opts (apply hash-map (nnext gp))
         nm (rp/name-text (second gp))
@@ -563,11 +672,18 @@
                                (if cur (conj acc cur) acc)))
                       (recur (rest fs) (if (and cur (seq? f) (not (#{'in-ns 'go/package} (first f)))) (update cur :decls conj f) cur) acc)))))
         st (new-state path nm (path->ns path))]
-    (swap! st assoc :opts (dissoc opts :files) :package-path path :files files
-           :config (merge @config (:config opts)) :loading true)
-    (swap! packages assoc path st)
-    (try (complete! st)
-         (catch Throwable ex (swap! packages dissoc path) (throw ex)))))
+    (define-digest-imports! {:files files})
+    (or (get @packages path)
+        (do
+          (swap! st assoc :opts (dissoc opts :files) :package-path path :files files
+                 :config (merge @config (:config opts)))
+          (swap! packages assoc path st)
+          (try (let [{:keys [inits init-funcs]} (define! st r {:vars? true})]
+                 (call0 inits "init")
+                 (doseq [f init-funcs]
+                   (call0 f "init"))
+                 st)
+               (catch Throwable ex (swap! packages dissoc path) (throw ex)))))))
 
 (defn load-import
   "The state of interpreted package path, loaded from ARBACE_PATH (its namespace) when it is
