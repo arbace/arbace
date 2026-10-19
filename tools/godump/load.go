@@ -294,7 +294,9 @@ func fileJobs(c *config, files []string) ([]*job, []result, *exportMap, error) {
 				break
 			}
 			for _, s := range f.Imports {
-				if p, err := strconv.Unquote(s.Path.Value); err == nil && p != "unsafe" && p != "C" && !build.IsLocalImport(p) {
+				// an invalid path of an error test (test/import6.go's "\x00") is the
+				// type checker's to report, not the go command's to list
+				if p, err := strconv.Unquote(s.Path.Value); err == nil && p != "unsafe" && p != "C" && !build.IsLocalImport(p) && listablePath(p) {
 					imports[p] = true
 				}
 			}
@@ -344,4 +346,22 @@ func relDir(c *config, dir string) string {
 
 func langTooNew(v string) bool {
 	return v != "" && version.Compare(v, pinnedLang) > 0
+}
+
+// listablePath reports whether the go command can list import path p: not empty, its runes
+// ASCII letters, digits and -._~+/ (the go command's importPathOK), not starting or ending
+// with a slash. Error tests import others (test/import6.go), which the type checker rejects.
+func listablePath(p string) bool {
+	if p == "" || p[0] == '/' || p[len(p)-1] == '/' {
+		return false
+	}
+	for _, r := range p {
+		switch {
+		case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9':
+		case strings.ContainsRune("-._~+/", r):
+		default:
+			return false
+		}
+	}
+	return true
 }

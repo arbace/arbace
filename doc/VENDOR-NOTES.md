@@ -1041,6 +1041,14 @@ step 4 (2026-10-07); the others came with later work, as each says:
     GS10). `arbace/main.ae`: `ex-triage` reports a `GoPanic` in the cause chain as the error,
     at its innermost interpreted frame, not its cause (a run-time error's Java exception, GS11),
     so the REPL prints `Execution error (GoPanic) at go.demo/Div (REPL:8).` as §1.4 shows.
+29. **goi's GR7b: `reify` of Go interfaces** (2026-10-19; doc/go/GOI-SPEC.md G13, "As built:
+    GR7b"). `arbace/core_deftype.ae`: `reify` takes, among its specs, a Go interface of goi's
+    table (a symbol naming a `GoType`'s var, `go.io/Reader`, `io/Reader` with an alias): such a
+    spec's methods become fns of the object and the arguments (in a method's body, `recur`
+    passes the arguments, not the object, as for a Java method), and the object implements
+    `arbace.lang.GoReify` (new in `GoInterp.ae`), whose `goiReify` gives goi the reify type and
+    the fns (`arbace.go/reify-type`, `reify-data`); `GoBridge` gains `reifyOf`. Without a Go
+    spec, `reify` expands as upstream's.
 
 ## Dialect divergences
 
@@ -1091,6 +1099,8 @@ the runtime-visible renames are listed once, as repr/clojure's mechanical part.
 - **Runtime-visible names** (hand change 2, step 4's cleanups): agent, socket server and process
   thread names, the error report files' prefix and the proxy methods (`__initArbaceFnMappings`
   and the rest, the field `__arbaceFnMap`) say `arbace`, not `clojure`.
+- **`reify` of Go interfaces** (hand change 29): `reify` accepts a Go interface of goi's table
+  among its specs (upstream has no Go); its object is also an `arbace.lang.GoReify`.
 - **Without the JVM** (hand change 23, D13): `gen-class` does nothing and `ns`'s `:gen-class`
   is ignored; `compile` writes no class files; interfaces, protocols' interfaces, proxies and
   deftypes are made at run time with no class file, so annotations in their metadata are carried

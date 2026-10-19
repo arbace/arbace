@@ -141,7 +141,13 @@
                 more)))
 
 (defn- declare-pkg! [x nm form]
-  (when (not= "_" nm)
+  (cond
+    ;; go/types' declarePkgObj: init and main (of package main) only functions
+    (and (= "init" nm) (not= :func (o x :kind)))
+    (err! form :InvalidInitDecl "cannot declare init - must be func")
+    (and (= "main" nm) (not= :func (o x :kind)) (= "main" (o e/*pkg* :name)))
+    (err! form :InvalidMainDecl "cannot declare main - must be func")
+    (not= "_" nm)
     (let [s (o e/*pkg* :scope)]
       (if-let [alt (e/scope-get s nm)]
         (err! form :DuplicateDecl "%s redeclared in this block" nm)
@@ -163,30 +169,33 @@
     (loop [specs specs iota 0 prev nil]
       (when (seq specs)
         (let [[tf init] (first specs)
+              ;; an init written nil is an init (const x = nil)
+              has-init (> (count (first specs)) 1)
               _ (when-let [l (code/fline (first specs))] (set! e/*line* l))
               names (target-list tf)
               tag (some #(:tag (meta %)) names)
               ;; a digest's constant (§6.5) has its :val and no init (a spec of its own, not an
               ;; implicit repetition of the previous spec of a group)
-              valued (and (nil? init) (nil? prev) (contains? (meta (first names)) :val))
+              valued (and (not has-init) (nil? prev) (contains? (meta (first names)) :val))
               [tag inits inherited] (cond
-                                      (some? init) [tag (init-list init) false]
+                                      has-init [tag (init-list init) false]
                                       valued [tag nil false]
                                       :else [(:tag prev) (:inits prev) true])]
-          (when (and (nil? init) (nil? prev) (not valued))
+          (when (and (not has-init) (nil? prev) (not valued))
             (err! tf :MissingInitExpr "missing init expr for const declaration"))
           (doseq [[i nf] (map-indexed vector names)]
             (let [nm (code/ident-name nf)
                   d (new-decl {:kind :const :file fi :form nf :spec f :iota iota :tag tag
-                               :init (get inits i) :ninits (count inits) :nnames (count names) :inherited inherited})
+                               :init (get inits i) :nil-init (and (< i (count inits)) (nil? (get inits i)))
+                               :ninits (count inits) :nnames (count names) :inherited inherited})
                   x (pkg-obj :const nm nf fi d)]
               (vswap! d assoc :obj x)
               (declare-pkg! x nm nf)))
-          (when (and (some? init) (< (count inits) (count names)))
+          (when (and has-init (< (count inits) (count names)))
             (err! tf :WrongAssignCount "missing init expr for %s" (code/ident-name (nth names (count inits)))))
-          (when (and (some? init) (> (count inits) (count names)))
+          (when (and has-init (> (count inits) (count names)))
             (err! tf :WrongAssignCount "extra init expr"))
-          (recur (rest specs) (inc iota) (if (some? init) {:tag tag :inits inits} prev)))))))
+          (recur (rest specs) (inc iota) (if has-init {:tag tag :inits inits} prev)))))))
 
 (defn- collect-var [f fi]
   (let [args (rest f)
@@ -221,7 +230,9 @@
                 [(let [[nf & more] args
                        more (if (string? (first more)) (rest more) more)]
                    (into [nf] more))])]
-    (doseq [[nf & more] specs]
+    (doseq [[[nf & more] sv] (map vector specs (if (group? args) (group-specs args) [nil]))]
+      ;; a group's spec at its line (the objects' lines, their errors')
+      (code/with-line sv
       (let [[tps tf] (if (= :type-params (first more)) [(second more) (nth more 2)] [nil (first more)])
             nm (code/ident-name nf)
             d (new-decl {:kind :type :file fi :form nf :spec f :type-form tf :tparams tps :alias (:alias (meta nf))})
@@ -231,7 +242,7 @@
         ;; Named), so that references to it never wait for its declaration
         (when-not (:alias (meta nf))
           (oset! x :type (t/new-named {:obj x :name nm :pkg (o e/*pkg* :path) :pkg-name (o e/*pkg* :name)})))
-        (declare-pkg! x nm nf)))))
+        (declare-pkg! x nm nf))))))
 
 (defn- recv-base
   "The receiver base type name of a method's receiver form, and whether the receiver type
@@ -270,7 +281,8 @@
           (= "init" nm)
           (do (vswap! (:objs *ctx*) conj x)
               (vswap! (:inits *ctx*) conj x)
-              (when tps (err! nf :InvalidInitDecl "func init must have no type parameters")))
+              (when tps (err! nf :InvalidInitDecl "func init must have no type parameters"))
+              (when (:extern (meta nf)) (err! nf :MissingInitBody "func init must have a body")))
           (and (= "main" nm) (= "main" (o e/*pkg* :name)))
           (do (when tps (err! nf :InvalidMainDecl "func main must have no type parameters"))
               (declare-pkg! x nm nf))
@@ -379,6 +391,9 @@
       (if-let [[ty v] (code/val-const (:val (meta form)) (when (and T (t/valid? T)) T))]
         (do (oset! x :type ty) (oset! x :val v))
         (oset! x :type :invalid))
+      ;; const x = nil
+      (and (nil? init) (:nil-init @d))
+      (do (e/error! (or (o x :line) e/*line*) :InvalidConstInit "nil is not constant") (oset! x :type :invalid))
       (nil? init) (oset! x :type :invalid)
       :else
       (let [n (code/expr cx init)]
@@ -538,11 +553,11 @@
         [sig ps rs body named] (code/signature cx sig-forms method)]
     (when method
       (let [[b] (t/deref-type (:type recv))]
+        ;; go/types' validRecv
         (when (and (t/valid? b) (not (and (t/named? b) (= (:pkg (t/info b)) (o e/*pkg* :path)))))
-          (if (and (t/named? b) (:pkg (t/info b)))
+          (if (or (t/named? b) (keyword? b))
             (err! recv-form :InvalidRecv "cannot define new methods on non-local type %s" (t/type-str b))
-            (when (t/valid? b)
-              (err! recv-form :InvalidRecv "cannot define new methods on non-local type %s" (t/type-str b)))))))
+            (err! recv-form :InvalidRecv "invalid receiver type %s" (t/type-str (:type recv)))))))
     (when (and (= "init" (o x :name)) (not method) (or (seq (nth sig 1)) (seq (nth sig 2))))
       (err! form :InvalidInitSig "func init must have no arguments and no return values"))
     (when (and (= "main" (o x :name)) (not method) (= "main" (o e/*pkg* :name)) (or (seq (nth sig 1)) (seq (nth sig 2))))
@@ -693,6 +708,7 @@
             (cond
               (nil? p) (err! spec :BrokenImport "could not import %s (no forms)" path)
               (= "_" nm) nil
+              (= "init" nm) (err! spec :InvalidInitDecl "cannot import package as init - init must be a func")
               (= "." nm)
               (let [imp (e/obj {:kind :pkg :name "." :imported p :path path :line (or (code/fline spec) (:line fi)) :file (:name fi) :dot true})]
                 (vswap! (:dot-imports fi) conj imp)
@@ -706,6 +722,23 @@
                   (err! spec :DuplicateDecl "%s redeclared in this block" nm)
                   (e/scope-put! (:scope fi) nm imp))
                 (vswap! (:import-objs fi) conj imp)))))))))
+
+(defn file-scope-conflicts!
+  "go/types' resolver: a package-level object named as one of file fi's imports (or names a
+  dot import brings in) is an error, at the object."
+  [fi]
+  (let [ps (o e/*pkg* :scope)
+        pkg-str (fn [p path] (format "package %s (\"%s\")" (o p :name) path))
+        hits (concat
+              (for [[nm x] (:names (:scope fi))
+                    :when (= :pkg (o x :kind))
+                    :let [alt (e/scope-get ps nm)] :when alt]
+                [alt (format "%s already declared through import of %s" nm (pkg-str (o x :imported) (o x :path)))])
+              (for [[nm [_ imp]] (:dots fi)
+                    :let [alt (e/scope-get ps nm)] :when alt]
+                [alt (format "%s already declared through dot-import of %s" nm (pkg-str (o imp :imported) (o imp :path)))]))]
+    (doseq [[alt msg] (sort-by (fn [[alt]] [(str (o alt :file)) (or (o alt :line) 0)]) hits)]
+      (e/error! (o alt :file) (o alt :line) :DuplicateDecl msg))))
 
 (defn unused-imports! [fi]
   (binding [e/*gofile* fi]

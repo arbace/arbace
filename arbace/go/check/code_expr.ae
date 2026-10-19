@@ -39,7 +39,12 @@
         (= h "addr") (str "&" (expr-str (first args)))
         (= h "deref") (str "*" (expr-str (first args)))
         (= h "<!") (str "<-" (expr-str (first args)))
-        (= h "conv") (str (expr-str (first args)) "(" (expr-str (second args)) ")")
+        (= h "conv") (str (let [t (first args)]
+                            ;; (*T)(x), (func())(x): the parentheses the source needs
+                            (if (and (seq? t) (#{"*" "func" "chan"} (head-name t)))
+                              (str "(" (expr-str t) ")")
+                              (expr-str t)))
+                          "(" (expr-str (second args)) ")")
         (= h "assert") (str (expr-str (second args)) ".(" (expr-str (first args)) ")")
         (= h "aget") (str (expr-str (first args)) "[" (expr-str (second args)) "]")
         (= h "subslice") (str (expr-str (first args)) "[" (str/join ":" (map #(if (= '_ %) "" (expr-str %)) (rest args)))
@@ -52,10 +57,12 @@
         (= h "map") (str "map[" (expr-str (first args)) "]" (expr-str (second args)))
         (= h "chan") (str "chan " (expr-str (last args)))
         (= h "func") "func(…)"
-        (= h "struct") "struct{…}"
-        (= h "interface") "interface{…}"
+        (= h "struct") (if (seq args) "struct{…}" "struct{}")
+        (= h "interface") (if (seq args) "interface{…}" "interface{}")
         (= h "spread") (str (expr-str (first args)) "...")
-        (= h "method-expr") (str (expr-str (first args)) "." (expr-str (second args)))
+        (= h "method-expr") (str (let [t (first args)]
+                                   (if (and (seq? t) (= "*" (head-name t))) (str "(" (expr-str t) ")") (expr-str t)))
+                                 "." (expr-str (second args)))
         (= h "rune") (str (second f))
         (= h "imaginary") (str (expr-str (second f)) "i")
         (= h "byte-string") "\"…\""
@@ -66,6 +73,83 @@
                                                              (str/join ", " (map expr-str (rest args))) ")")
         :else (str (expr-str (first f)) "(" (str/join ", " (map expr-str args)) ")")))))
 
+(defn- exact-decimal
+  "A float value (an integer, a ratio, a [:bf M E]) as a BigDecimal: exact, or to 40 digits."
+  ^java.math.BigDecimal [v]
+  (cond
+    (c/bf? v) (let [^java.math.BigInteger m (nth v 1) e (long (nth v 2))]
+                (if (neg? e)
+                  (.divide (java.math.BigDecimal. m) (java.math.BigDecimal. (.shiftLeft java.math.BigInteger/ONE (int (- e))))
+                           (java.math.MathContext. 40))
+                  (java.math.BigDecimal. (.shiftLeft m (int e)))))
+    (ratio? v) (.divide (java.math.BigDecimal. (biginteger (numerator v))) (java.math.BigDecimal. (biginteger (denominator v)))
+                        (java.math.MathContext. 40))
+    :else (java.math.BigDecimal. (biginteger v))))
+
+(defn- g-format
+  "Go's %g of a non-zero decimal d rounded to its digits ds (a string of significant digits,
+  trailing zeros dropped) with decimal exponent dp (d = 0.ds × 10^dp): %e when the exponent is
+  below -4 or at least 6 (strconv's rule for %g, shortest or of precision 6), else %f."
+  [neg ^String ds dp]
+  (let [ex (dec dp)
+        sgn (if neg "-" "")]
+    (if (or (< ex -4) (>= ex 6))
+      (str sgn (subs ds 0 1) (when (> (count ds) 1) (str "." (subs ds 1)))
+           "e" (if (neg? ex) "-" "+") (let [a (Math/abs (long ex))] (if (< a 10) (str "0" a) (str a))))
+      (str sgn
+           (cond
+             (<= dp 0) (str "0." (apply str (repeat (- dp) "0")) ds)
+             (>= dp (count ds)) (str ds (apply str (repeat (- dp (count ds)) "0")))
+             :else (str (subs ds 0 dp) "." (subs ds dp)))))))
+
+(defn- digits-of
+  "The significant digits and decimal exponent of a non-zero BigDecimal's magnitude: [ds dp]."
+  [^java.math.BigDecimal d]
+  (let [d (.stripTrailingZeros (.abs d))
+        ds (.toString (.unscaledValue d))]
+    [ds (- (count ds) (.scale d))]))
+
+(defn float-str
+  "go/constant's String of a float value v: %.6g of the nearest float64 (%g when that hides a
+  fraction), or beyond float64's range a mantissa of six digits and a decimal exponent."
+  [v]
+  (let [d (c/to-double v)]
+    (cond
+      (c/fzero? v) "0"
+      (and (not (Double/isInfinite d)) (not (zero? d)))
+      (let [neg (neg? d)
+            [ds dp] (digits-of (.round (java.math.BigDecimal. d) (java.math.MathContext. 6 java.math.RoundingMode/HALF_EVEN)))
+            s (g-format neg ds dp)
+            integral (zero? (.signum (.remainder (exact-decimal v) java.math.BigDecimal/ONE)))]
+        (if (and (not integral) (not (str/includes? s ".")))
+          (let [[ds dp] (digits-of (java.math.BigDecimal. (Double/toString d)))] (g-format neg ds dp))
+          s))
+      :else
+      ;; go/constant: f = mant·2^exp (0.5 <= |mant| < 1), its decimal exponent approximated
+      (let [[^java.math.BigInteger M E] (cond (c/bf? v) [(nth v 1) (long (nth v 2))]
+                                              (ratio? v) [nil 0]
+                                              :else [(biginteger v) 0])
+            [m ex] (if M
+                     (let [bl (.bitLength (.abs M))
+                           top (if (> bl 62) (.shiftRight M (int (- bl 62))) (.shiftLeft M (int (- 62 bl))))]
+                       [(/ (.doubleValue top) (Math/pow 2.0 62)) (+ E bl)])
+                     (let [n (biginteger (numerator v)) d (biginteger (denominator v))
+                           ex (- (.bitLength (.abs n)) (.bitLength d))
+                           q (.doubleValue (.divide (java.math.BigDecimal. (if (pos? ex) n (.shiftLeft n (int (- ex)))))
+                                                    (java.math.BigDecimal. (if (pos? ex) (.shiftLeft d (int ex)) d))
+                                                    (java.math.MathContext. 20)))
+                           [q ex] (cond (>= (Math/abs q) 1.0) [(/ q 2) (inc ex)] (< (Math/abs q) 0.5) [(* q 2) (dec ex)] :else [q ex])]
+                       [q ex]))
+            d (* (double ex) (/ (Math/log 2.0) (Math/log 10.0)))
+            e (long d)
+            m (* m (Math/pow 10.0 (- d (double e))))
+            [m e] (let [am (Math/abs m)]
+                    (cond (< am (- 1 0.5e-6)) [(* m 10) (dec e)]
+                          (>= am 10) [(/ m 10) (inc e)]
+                          :else [m e]))
+            [ds dp] (digits-of (.round (java.math.BigDecimal. (double m)) (java.math.MathContext. 6 java.math.RoundingMode/HALF_EVEN)))]
+        (str (g-format (neg? m) ds dp) "e" (if (neg? e) "-" "+") (Math/abs (long e)))))))
+
 (defn val-str
   "go/constant's String of a value at type t (for messages)."
   [v ty]
@@ -73,12 +157,9 @@
     (= :unknown v) "unknown"
     (boolean? v) (str v)
     (string? v) (let [s (pr-str (c/value-text v))] (if (> (count s) 72) (str (subs s 0 70) "...\"") s))
-    (c/complex? v) (str "(" (val-str (nth v 1) :untyped-float) " + " (val-str (nth v 2) :untyped-float) "i)")
-    (c/bf? v) (let [d (c/to-double v)] (if (Double/isInfinite d) "1e+huge" (str d)))
-    (and (t/float-type? ty) (ratio? v))
-    (let [d (c/to-double v)
-          s (format "%.6g" d)]
-      (str/replace s #"(\.\d*?)0+(e|$)" "$1$2"))
+    (c/complex? v) (str "(" (float-str (nth v 1)) " + " (float-str (nth v 2)) "i)")
+    (c/bf? v) (float-str v)
+    (and (t/float-type? ty) (or (ratio? v) (integer? v))) (float-str v)
     (and (t/integer-type? ty) (= :untyped-rune ty) (integer? v)) (str v)
     :else (str v)))
 
@@ -478,6 +559,9 @@
             (if (nil? mm) [true nil nil] [false :InvalidIfaceAssign mm]))
           (and (vector? Vu) (= :interface (nth Vu 0)) (not Vp) (not Tp))
           [false :IncompatibleAssign (when (and (vector? Tu) (nil? (t/missing-method T V false))) :need-assert)]
+          ;; go/types: a pointer to an interface, for implements' cause
+          (and (vector? Tu) (= :pointer (nth Tu 0)) (t/interface? (nth Tu 1)) (not (t/tparam? (nth Tu 1))) (not Vp))
+          [false :InvalidIfaceAssign :iface-ptr]
           (and (vector? Vu) (= :chan (nth Vu 0)) (= :both (nth Vu 1))
                (vector? Tu) (= :chan (nth Tu 0)) (= (nth Vu 2) (nth Tu 2)))
           [(or (not (t/has-name? V)) (not (t/has-name? T))) :InvalidChanAssign nil]
@@ -494,13 +578,17 @@
 (defn missing-cause
   "The text of a missing-method cause (go/types' missingMethodCause, abridged)."
   [V T mm]
-  (let [m (:method mm)]
+  (let [m (:method mm)
+        Vu (t/under V)]
+    (if (and (vector? Vu) (= :pointer (nth Vu 0)) (t/interface? (nth Vu 1)) (not (t/tparam? (nth Vu 1))))
+      ;; go/types' interfacePtrError
+      (format "(type %s is pointer to interface, not interface)" (t/type-str V))
     (case (:cause mm)
       :ptr-recv (format "(method %s has pointer receiver)" (:name m))
       :field (format "(%s.%s is a field, not a method)" (t/type-str V) (:name m))
       :wrong-type (format "(wrong type for method %s)\n\t\thave %s%s\n\t\twant %s%s"
                           (:name m) (:name m) (t/sig-str (:type (:have mm))) (:name m) (t/sig-str (:type m)))
-      (format "(missing method %s)" (:name m)))))
+      (format "(missing method %s)" (:name m))))))
 
 (defn implements? [V T] (nil? (t/missing-method V T false)))
 
@@ -572,6 +660,8 @@
                              (map? cause) (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T) " "
                                                (missing-cause (:type n) T cause))
                              (= :need-assert cause) (str ": need type assertion")
+                             (= :iface-ptr cause) (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T)
+                                                      " (type " (t/type-str T) " is pointer to interface, not interface)")
                              :else "")))
                 (assoc n :mode :invalid :type :invalid))))))))
 
@@ -614,7 +704,8 @@
                             (allow-version? cx 17)))))))))
 
 (defn conversion
-  "T(x): node n converted to type T (go/types' conversion)."
+  "T(x): node n converted to type T (go/types' conversion; its errors at x, as go/types reports
+  them)."
   [cx f n T]
   (let [const-arg (= :constant (:mode n))
         u (t/basic T)]
@@ -634,10 +725,10 @@
                     n)]
             {:op :conv :to T :x n :mode :constant :type T :val v :form f :line (fline f)})
           (and (t/integer-type? (:type n)) (t/integer-type? T))
-          (do (err! f :InvalidConversion "constant %s overflows %s" (val-str (:val n) (:type n)) (t/type-str T))
+          (do (err! (if (fline (:form n)) (:form n) f) :InvalidConversion "constant %s overflows %s" (val-str (:val n) (:type n)) (t/type-str T))
               (invalid f))
           :else
-          (do (err! f :InvalidConversion "cannot convert %s to type %s%s" (operand-str n) (t/type-str T)
+          (do (err! (if (fline (:form n)) (:form n) f) :InvalidConversion "cannot convert %s to type %s%s" (operand-str n) (t/type-str T)
                     (if (and (t/float-type? (:type n)) (t/integer-type? T)) " (truncated)" ""))
               (invalid f))))
       ;; a constant to a type parameter: convertible to each of its types, not a constant
@@ -649,7 +740,7 @@
                                                   (and (t/integer-type? (:type n)) (t/string-type? u))))))))
         (let [n (if (t/untyped? (:type n)) (update-type n (t/default-type (:type n)) true) n)]
           {:op :conv :to T :x n :mode :value :type T :form f :line (fline f)})
-        (do (err! f :InvalidConversion "cannot convert %s to type %s" (operand-str n) (t/type-str T))
+        (do (err! (if (fline (:form n)) (:form n) f) :InvalidConversion "cannot convert %s to type %s" (operand-str n) (t/type-str T))
             (invalid f)))
       (convertible? cx n T)
       (let [n (if (t/untyped? (:type n))
@@ -661,8 +752,14 @@
                 n)]
         {:op :conv :to T :x n :mode :value :type T :form f :line (fline f)})
       :else
-      (do (err! f :InvalidConversion "cannot convert %s to type %s" (operand-str n) (t/type-str T))
-          (invalid f)))))
+      ;; go/types' convertibleTo's cause: an interface the operand does not implement
+      (let [mm (when (and (t/interface? T) (not (t/tparam? T)) (not (t/interface? (:type n))))
+                 (t/missing-method (:type n) T false))]
+        (err! (if (fline (:form n)) (:form n) f) :InvalidConversion "cannot convert %s to type %s%s" (operand-str n) (t/type-str T)
+              (if mm
+                (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T) " " (missing-cause (:type n) T mm))
+                ""))
+        (invalid f)))))
 
 ;;; Unary and binary operators (expr.go)
 
@@ -775,15 +872,18 @@
                    (invalid f)))
           incomparable (fn [ty]
                          (let [u (t/under ty)]
-                           (when (and (vector? u) (#{:slice :func :map} (nth u 0)))
-                             (str (composite-kind ty) " can only be compared to nil"))))]
+                           (if (and (vector? u) (#{:slice :func :map} (nth u 0)))
+                             (str (composite-kind ty) " can only be compared to nil")
+                             ;; go/types' comparableType's cause
+                             (let [c (t/incomparable-cause ty)] (when (seq c) c)))))]
       (cond
         (not ok) (fail y (format "mismatched types %s and %s" (t/type-str (:type x)) (t/type-str (:type y))))
         (#{"==" "!="} opx)
         (cond
           (or (= :untyped-nil (:type x)) (= :untyped-nil (:type y)))
           (let [ty (if (= :untyped-nil (:type x)) (:type y) (:type x))]
-            (if (t/has-nil? ty) (finish-comparison f op x y) (fail y nil)))
+            ;; go/types' hasNil: not of untyped nil itself (nil == nil)
+            (if (and (t/has-nil? ty) (not= :untyped-nil ty)) (finish-comparison f op x y) (fail y nil)))
           (not (t/comparable? (:type x))) (fail x (incomparable (:type x)))
           (not (t/comparable? (:type y))) (fail y (incomparable (:type y)))
           :else (finish-comparison f op x y))

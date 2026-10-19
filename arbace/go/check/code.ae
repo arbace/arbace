@@ -14,7 +14,7 @@
             [arbace.go.check.env :as e :refer [o oset! err! error!]]))
 
 (declare check-branches! inst-say record-inst! instantiate-fn slice-elem tparam-index generic-fn? func-inst-target call-sig rename-tparams infer instance-type mark-addressed! call-form? expr expr-or-type multi-expr typexpr typexpr-generic byte-string-value literal const-node invalid-conversion! finish-comparison composite-lit builtin-call val-equal? val-form-str key-val stmt terminating? missing-cause implements? invalid invalid? signature rhs-values init-var assignment func-body check-fn-lit const-expr
-         convert-untyped update-type operand-str expr-str stmt-list)
+         convert-untyped update-type operand-str expr-str stmt-list expr-internal)
 
 ;;; Hooks set by arbace.go.check.decl
 
@@ -70,7 +70,21 @@
   "Binds the current line to form f's line (when it has one) for errors."
   [f & body]
   `(let [l# (fline ~f)]
-     (if l# (binding [e/*line* l#] ~@body) (do ~@body))))
+     (if l# (binding [e/*line* l# e/*child-at* nil] ~@body) (do ~@body))))
+
+(defmacro with-elem
+  "Checks body as child i of form parent (an element of a literal, a statement of a list, a
+  value): errors at the child's line, its own or, for a literal, by parent's :go/breaks."
+  [parent i & body]
+  `(let [p# ~parent i# ~i
+         c# (nth p# i# nil)
+         ;; the body once (its code is not repeated per branch)
+         f# (fn [] ~@body)
+         l# (fline c#)]
+     (cond
+       l# (binding [e/*line* l# e/*child-at* nil] (f#))
+       (e/line-of p#) (binding [e/*child-at* [p# i#]] (f#))
+       :else (f#))))
 
 (def reserved-expr-heads
   #{"+" "-" "*" "/" "%" "<<" ">>" "==" "!=" "<" "<=" ">" ">=" "and" "or" "not" "bit-and" "bit-or"
@@ -116,7 +130,8 @@
 
 (defn resolve-name
   "The object a name denotes in cx's scopes (locals, the package, the file's imports, the
-  universe), declared and marked used; nil when undefined."
+  universe), declared; nil when undefined. A package name used alone is no use of its
+  import (go/types: \"use of package fmt not in selector\", the import unused)."
   [cx ^String n]
   (when-let [x (or (e/scope-lookup (:scope cx) n)
                    (when-let [[x imp] (some-> (:file cx) :dots (.get n))]
@@ -125,7 +140,6 @@
                    (e/scope-get e/universe n))]
     (when (and (package-level? x) *obj-decl* (not (and (= :type (o x :kind)) (not (o x :alias)))))
       (*obj-decl* x))
-    (when (= :pkg (o x :kind)) (oset! x :used true))
     x))
 
 (defn package-by-qualifier
@@ -192,7 +206,9 @@
     (cond
       (nil? x) :invalid
       (not= :type (o x :kind))
-      (do (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)
+      ;; go/types' ident: a variable named is used, even where a type was expected
+      (do (when (= :var (o x :kind)) (use-var! cx x))
+          (err! f :NotAType "%s is not a type" (expr-str f)) :invalid)
       :else
       (do (note-ref! x)
           (when (o x :generic-invalid) (e/generic!))
@@ -223,36 +239,43 @@
   [cx f]
   (let [p (pkg-path)
         fields (vec
-                (for [x (rest f)]
+                (for [[i x] (map-indexed vector (rest f))]
+                  (with-line x
                   (if (struct-field-type? x)
                     ;; an embedded field
                     (let [ty (typexpr cx x)
                           n (embedded-name x)]
                       ;; embedded: a type name or a pointer to a non-interface type name
-                      (let [[base ptr] (t/deref-type ty)]
-                        (when (t/valid? ty)
-                          (cond
-                            (and ptr (t/interface? base))
-                            (err! x :InvalidPtrEmbed "embedded field type cannot be a pointer to an interface")
-                            (and ptr (t/pointer? base))
-                            (err! x :InvalidPtrEmbed "embedded field type cannot be a pointer")
-                            (= :unsafe-pointer base)
-                            (err! x :InvalidPtrEmbed "embedded field type cannot be unsafe.Pointer"))))
+                      ;; go/types: checked later (the embedded type may not be complete yet)
+                      (let [line (or (fline x) (e/current-line))
+                            chk (fn []
+                                  (let [[base ptr] (t/deref-type ty)
+                                        u (t/under base)]
+                                    (when (t/valid? ty)
+                                      (cond
+                                        (= :unsafe-pointer u)
+                                        (e/error! line :InvalidPtrEmbed "embedded field type cannot be unsafe.Pointer")
+                                        (t/pointer? u)
+                                        (e/error! line :InvalidPtrEmbed "embedded field type cannot be a pointer")
+                                        (and ptr (t/interface? u))
+                                        (e/error! line :InvalidPtrEmbed "embedded field type cannot be a pointer to an interface")))))]
+                        (if e/*decl* (vswap! e/*decl* update :later (fnil conj []) chk) (chk)))
                       {:name n :type ty :tag (when-let [tg (:go/tag (meta x))] (when (seq tg) (c/utf8-value tg)))
                        :embedded true :pkg (when-not (t/exported? n) p) :line (fline x)})
                     (let [n (ident-name x)]
                       {:name n :type (tag-type cx x) :tag (when-let [tg (:go/tag (meta x))] (when (seq tg) (c/utf8-value tg)))
-                       :embedded false :pkg (when-not (t/exported? n) p) :line (fline x)}))))]
-    ;; duplicate field names
-    (reduce (fn [seen fd]
-              (let [n (:name fd)]
-                (if (and (not= "_" n) (contains? seen n))
-                  (do (error! (:line fd) :DuplicateDecl (format "%s redeclared" n)) seen)
-                  (conj seen n))))
-            #{} fields)
-    [:struct (mapv #(dissoc % :line) fields)]))
+                       :embedded false :pkg (when-not (t/exported? n) p) :line (or (fline x) (e/child-line f (inc i)))})))))]
+    ;; duplicate field names: an error, the field not added (go/types' declareInSet)
+    (let [fields (second
+                  (reduce (fn [[seen acc] fd]
+                            (let [n (:name fd)]
+                              (if (and (not= "_" n) (contains? seen n))
+                                (do (error! (or (:line fd) (e/current-line)) :DuplicateDecl (format "%s redeclared" n)) [seen acc])
+                                [(conj seen n) (conj acc fd)])))
+                          [#{} []] fields))]
+      [:struct (mapv #(dissoc % :line) fields)])))
 
-(declare signature)
+(declare signature dup-params!)
 
 (defn- method-elem? [x] (and (seq? x) (or (and (symbol? (first x)) (nil? (namespace (first x)))) (go-id? (first x))) (vector? (second x))))
 
@@ -297,10 +320,17 @@
   its type set (go/types' computeInterfaceTypeSet): the intersection of its elements' terms."
   [cx f]
   (let [p (pkg-path)
-        own (for [x (rest f) :when (method-elem? x)]
-              (let [n (ident-name (first x))
-                    [sig] (signature cx (rest x) nil)]
-                {:name n :pkg (when-not (t/exported? n) p) :type sig :line (fline x)}))
+        own (doall
+             (for [[i x] (map-indexed vector (rest f)) :when (method-elem? x)]
+               (let [n (ident-name (first x))
+                     line (or (fline x) (e/child-line f (inc i)))
+                     [sig ps rs] (with-line x (signature cx (rest x) nil))]
+                 (with-line x (dup-params! ps rs))
+                 (if (= "_" n)
+                   ;; go/types: an error, the method ignored
+                   (do (e/error! (or line (e/current-line)) :BlankIfaceMethod "methods must have a unique non-blank name") nil)
+                   {:name n :pkg (when-not (t/exported? n) p) :type sig :line line}))))
+        own (remove nil? own)
         elems (vec (for [x (rest f) :when (not (method-elem? x))]
                      (with-line x
                        (let [ty (if (and (seq? x) (#{'| 'tilde} (first x))) (union-type cx x) (typexpr cx x))
@@ -318,10 +348,9 @@
         ms (reduce (fn [acc m]
                      (let [k [(:name m) (:pkg m)]]
                        (if-let [prev (get acc k)]
-                         (do (when (and (not= (:type prev) (:type m)) (:line m))
-                               (error! (:line m) :DuplicateDecl (format "duplicate method %s" (:name m))))
-                             (when (and (:own prev) (:own m))
-                               (error! (:line m) :DuplicateDecl (format "duplicate method %s" (:name m))))
+                         (do (when (or (and (:own prev) (:own m)) (not= (:type prev) (:type m)))
+                               ;; an embedded interface's method: at the interface (its embedding)
+                               (error! (or (:line m) (e/current-line)) :DuplicateDecl (format "duplicate method %s" (:name m))))
                              acc)
                          (assoc acc k m))))
                    {}
@@ -331,7 +360,10 @@
 (defn array-length
   "The length of an array type: a constant expression of integer value, representable as int."
   [cx n]
-  (let [x (const-expr cx n)]
+  (let [x (const-expr cx n)
+        ;; go/constant's ToInt: a complex constant with a zero imaginary part is its real part
+        x (let [v (:val x)]
+            (if (and (c/complex? v) (c/fzero? (c/float-val (c/im-part v)))) (assoc x :val (c/re-part v)) x))]
     (cond
       (= :invalid (:mode x)) -1
       (not= :constant (:mode x))
@@ -382,7 +414,8 @@
                        [:map k v])
           (= 'chan h) (chan-type cx f)
           (= 'func h) (let [[_ ps rs] f
-                            [sig] (signature cx (if rs [ps :results rs] [ps]) nil)]
+                            [sig pss rss] (signature cx (if rs [ps :results rs] [ps]) nil)]
+                        (dup-params! pss rss)
                         sig)
           (= 'struct h) (struct-type cx f)
           (= 'interface h) (interface-type cx f)
@@ -486,6 +519,18 @@
               {:name (ident-name x) :type (tag-type cx x) :form x}
               {:name nil :type (typexpr cx x) :form x})))
      variadic]))
+
+(defn dup-params!
+  "go/types' collectParams over a signature type's parameters and results (specs of
+  signature): a name declared twice is an error."
+  [ps rs]
+  (reduce (fn [seen {:keys [name form]}]
+            (if (and name (not= "_" name))
+              (if (contains? seen name)
+                (do (err! form :DuplicateDecl "%s redeclared in this block" name) seen)
+                (conj seen name))
+              seen))
+          #{} (concat ps rs)))
 
 (defn signature
   "The signature of the forms after a function's name or a fn head: [type-params?] ^R? [params]
