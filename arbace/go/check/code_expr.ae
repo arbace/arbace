@@ -7,10 +7,24 @@
    "bit-xor" "^" "bit-and-not" "&^" "and" "&&" "or" "||" "==" "==" "!=" "!=" "<" "<" "<=" "<="
    ">" ">" ">=" ">="})
 
+(defn- rune-quote
+  "strconv.QuoteRune's text of rune c (a char), the spelling of a rune literal whose own the
+  forms do not keep (GR7c)."
+  [c]
+  (let [r (int c)]
+    (str "'"
+         (case (long r)
+           7 "\\a" 8 "\\b" 12 "\\f" 10 "\\n" 13 "\\r" 9 "\\t" 11 "\\v" 92 "\\\\" 39 "\\'"
+           (cond
+             (or (< r 0x20) (= r 0x7f)) (format "\\x%02x" r)
+             (or (Character/isISOControl r) (not (Character/isDefined r)) (Character/isSurrogate (char r))) (format "\\u%04x" r)
+             :else (str c)))
+         "'")))
+
 (defn- lit-str [v]
   (cond
     (string? v) (pr-str v)
-    (char? v) (str "'" v "'")
+    (char? v) (rune-quote v)
     (nil? v) "nil"
     (instance? Double v) (str v)
     (instance? java.math.BigDecimal v) (str v)
@@ -49,7 +63,15 @@
         (= h "aget") (str (expr-str (first args)) "[" (expr-str (second args)) "]")
         (= h "subslice") (str (expr-str (first args)) "[" (str/join ":" (map #(if (= '_ %) "" (expr-str %)) (rest args)))
                               (when (= 1 (count (rest args))) ":") (when (empty? (rest args)) ":") "]")
-        (= h "lit") (str (if (= '_ (first args)) "" (expr-str (first args))) (if (next args) "{…}" "{}"))
+        (= h "lit") (str (let [t (first args)]
+                           (cond
+                             (= '_ t) ""
+                             ;; a generic type's instance (G T...): G[T...]
+                             (and (seq? t) (symbol? (first t))
+                                  (not (#{"*" "slice" "array" "map" "chan" "func" "struct" "interface" "inst" "|" "tilde"} (head-name t))))
+                             (str (expr-str (first t)) "[" (str/join ", " (map expr-str (rest t))) "]")
+                             :else (expr-str t)))
+                         (if (next args) "{…}" "{}"))
         (= h "fn") "func literal"
         (= h "*") (if (= 1 (count args)) (str "*" (expr-str (first args))) (str/join " * " (map expr-str args)))
         (= h "slice") (str "[]" (expr-str (first args)))
@@ -553,12 +575,13 @@
           (let [[nt] (implicit-type n T)] [(some? nt) :IncompatibleAssign nil])
           (and (= Vu Tu) (or (not (t/has-name? V)) (not (t/has-name? T))) (not Vp) (not Tp))
           [true nil nil]
+          ;; go/types' implements: static (an interface V must have T's methods too)
           (and (vector? Tu) (= :interface (nth Tu 0)) (not Tp)
-               (or (nil? (t/missing-method V T false)) (not Vp)))
-          (let [mm (t/missing-method V T false)]
+               (or (nil? (t/missing-method V T true)) (not Vp)))
+          (let [mm (t/missing-method V T true)]
             (if (nil? mm) [true nil nil] [false :InvalidIfaceAssign mm]))
           (and (vector? Vu) (= :interface (nth Vu 0)) (not Vp) (not Tp))
-          [false :IncompatibleAssign (when (and (vector? Tu) (nil? (t/missing-method T V false))) :need-assert)]
+          [false :IncompatibleAssign (when (and (vector? Tu) (nil? (t/missing-method T V true))) :need-assert)]
           ;; go/types: a pointer to an interface, for implements' cause
           (and (vector? Tu) (= :pointer (nth Tu 0)) (t/interface? (nth Tu 1)) (not (t/tparam? (nth Tu 1))) (not Vp))
           [false :InvalidIfaceAssign :iface-ptr]
@@ -588,6 +611,9 @@
       :field (format "(%s.%s is a field, not a method)" (t/type-str V) (:name m))
       :wrong-type (format "(wrong type for method %s)\n\t\thave %s%s\n\t\twant %s%s"
                           (:name m) (:name m) (t/sig-str (:type (:have mm))) (:name m) (t/sig-str (:type m)))
+      :wrong-name (format "(missing method %s)\n\t\thave %s%s\n\t\twant %s%s"
+                          (:name m) (:name (:have mm)) (t/sig-str (:type (:have mm))) (:name m) (t/sig-str (:type m)))
+      :unexported (format "(unexported method %s)" (:name m))
       (format "(missing method %s)" (:name m))))))
 
 (defn implements? [V T] (nil? (t/missing-method V T false)))
@@ -602,6 +628,17 @@
     n))
 
 (declare assignment*)
+
+(defn assign-cause-str
+  "The cause of assignable?'s failure, as go/types' assignableTo words it (\": cause\"), or \"\"."
+  [n T cause]
+  (cond
+    (map? cause) (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T) " "
+                      (missing-cause (:type n) T cause))
+    (= :need-assert cause) (str ": need type assertion")
+    (= :iface-ptr cause) (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T)
+                             " (type " (t/type-str T) " is pointer to interface, not interface)")
+    :else ""))
 
 (defn assignment
   "go/types' assignment: n assigned to a variable of type T (nil: the blank identifier) in
@@ -656,13 +693,7 @@
             (wrap-iface n T)
             (do (err! (:form n) (or code :IncompatibleAssign)
                       (str (format "cannot use %s as %s value in %s" (operand-str n) (t/type-str T) context)
-                           (cond
-                             (map? cause) (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T) " "
-                                               (missing-cause (:type n) T cause))
-                             (= :need-assert cause) (str ": need type assertion")
-                             (= :iface-ptr cause) (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T)
-                                                      " (type " (t/type-str T) " is pointer to interface, not interface)")
-                             :else "")))
+                           (assign-cause-str n T cause)))
                 (assoc n :mode :invalid :type :invalid))))))))
 
 ;;; Conversions (conversions.go)
@@ -752,13 +783,11 @@
                 n)]
         {:op :conv :to T :x n :mode :value :type T :form f :line (fline f)})
       :else
-      ;; go/types' convertibleTo's cause: an interface the operand does not implement
-      (let [mm (when (and (t/interface? T) (not (t/tparam? T)) (not (t/interface? (:type n))))
-                 (t/missing-method (:type n) T false))]
+      ;; go/types' convertibleTo's cause: assignableTo's (an interface the operand does not
+      ;; implement, a type assertion needed)
+      (let [[_ _ cause] (assignable? n T)]
         (err! (if (fline (:form n)) (:form n) f) :InvalidConversion "cannot convert %s to type %s%s" (operand-str n) (t/type-str T)
-              (if mm
-                (str ": " (t/type-str (:type n)) " does not implement " (t/type-str T) " " (missing-cause (:type n) T mm))
-                ""))
+              (assign-cause-str n T cause))
         (invalid f)))))
 
 ;;; Unary and binary operators (expr.go)
@@ -980,6 +1009,13 @@
             (invalid f))
         (and (#{"/" "%"} op) (or (= :constant (:mode x)) (t/all-integer? (:type x)))
              (= :constant (:mode y)) (zero? (val-sign (:val y) (:type y))))
+        (do (err! (:form y) :DivByZero "invalid operation: division by zero") (invalid f))
+        ;; go/types: a complex divisor whose parts' squares underflow (go.dev/issue/20227)
+        (and (#{"/" "%"} op) (= :constant (:mode x)) (= :constant (:mode y)) (t/complex-type? (:type x))
+             (let [z (c/complex-val (:val y))
+                   re2 (c/fmul (nth z 1) (nth z 1))
+                   im2 (c/fmul (nth z 2) (nth z 2))]
+               (and (not= :unknown re2) (not= :unknown im2) (c/fzero? re2) (c/fzero? im2))))
         (do (err! (:form y) :DivByZero "invalid operation: division by zero") (invalid f))
         (and (= :constant (:mode x)) (= :constant (:mode y)))
         (let [v (const-binary op (:val x) (:val y) (:type x))]
