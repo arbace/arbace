@@ -1730,3 +1730,41 @@ builds use.
   - repr/haskell HR25's rest (`repr-haskell-hr25`): the `{-# LINE #-}` modules equal at the trees
     of mode `:full`, without changing S5 or HR12 unless the user decides so.
   - Also offered: a `bin/gate --full` milestone. Not chosen now.
+
+## 2026-10-19: goi GR7a merged; GC35-GC42 decided
+
+- goi GR7a (branch `goi-gr7a`: `af03d95e`, `59450c31`, `7da17684`, from `90ec844d`; doc/go/GOI-SPEC.md
+  "As built: GR7a") merged as `81cd54ed`.
+  - **The check in the box (GS13):** `bin/goi check --box` runs each program in its own amd64
+    TamaGo guest on /dev/kvm. The forms are written into the guest's in-memory file system through
+    its standard input, and the output is compared with gc's reference.
+    - The subset is `test/goi/box.txt`, 566 programs: the essential subset less 10 the box cannot
+      run (the go command, `PATH`, build constraints).
+    - 565 pass, 1 known (the board's line buffer ends a last line); about 280 s.
+    - The references are `test/goi/check-box-amd64.edn` and `check-box-known.edn`.
+    - `bin/gate --full` gains a `box-goi` step after its chains, and `make box-goi`.
+  - **GC25 lifted:** `forms/go` is in the box's oracle, 22,166 of 22,220. The one new known case:
+    a nil dereference panics with the board's `memoryError`.
+  - **GR3's limit on recursive types lifted:** a type recursive other than through a pointer is held
+    in memory at its shape (`TShape`, `reshape`). Interfaces' methods are given after the outermost
+    descriptor, which fixes `typeparam/cons.go`. 13 of the 14 programs pass. `peano.go` goes past
+    S23's depth limit and is known.
+  - **Results:** `bin/goi check` 1,049 pass (GR6 1,036), 54 unsupported, 60 known; `typeparam/` 192
+    pass. The essential subset 576 programs.
+  - **Cost:** sumSq and sieve 3-5% slower (19.46 and 68.50 ms against 18.85 and 65.03 in the same
+    runs), with none of the change on their path; perf shows the hot functions moved by 2,976 bytes.
+    The executable +53,248 bytes.
+- The user decided GC35-GC42 as built:
+  - GC35: the box's console compared as one stream;
+  - GC36: the box subset;
+  - GC37: the essential subset with GR7a's 10 programs;
+  - GC38: shapes for recursive types;
+  - GC39: compiled code's view of shaped values a known difference;
+  - GC40: the box's nil-dereference type a known oracle case;
+  - GC41: interfaces' methods after the outermost descriptor;
+  - GC42: `peano.go` known under S23.
+- After the merge, main's essential gate passed (15.8 min). The re-seed waits for GR7b, which
+  merged `81cd54ed` into its branch (`3e5361d2`), so that one re-seed takes both.
+- The user decided HR26 (b), HR27 (a) and HR28 (a) for HR25's rest: the module view writes
+  CPP's disagreeing line markers as `{-# LINE #-}` pragmas, and this is the only reference.
+  The branch `repr-haskell-hr25` makes it the default.
