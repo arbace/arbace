@@ -1,0 +1,111 @@
+;; goi's milestone GR8a (doc/go/GOI-SPEC.md "As built: GR8a"): every user package of the
+;; configuration's standard library importable at the REPL, compiled (the table's) or
+;; interpreted (the digest's forms): each imported in a package of its own and one of its
+;; members named by Go code (an exported function, else a variable, a constant or a type; a
+;; package without one, time/tzdata, imported alone); the packages out of scope refused at the
+;; import with their reasons; internal packages refused outside std (Go's rule). Run by bin/goi
+;; test: it prints each failure, then "goi std: N passed, M failed", and exits 1 when one failed.
+(ns goi.std-test
+  (:require [arbace.go :as go]
+            [arbace.go.repl :as repl]
+            [arbace.string :as str])
+  (:import (arbace.lang GoInterp)))
+
+(def passed (atom 0))
+(def failed (atom []))
+(def counts (atom {}))
+
+(defn- user? [^String p] (not (some #{"internal" "vendor"} (str/split p #"/"))))
+
+(def index (:index @@#'repl/digest-index))
+(def out-of-scope @@#'repl/out-of-scope)
+(def listed (vec (sort (remove #{"arbace"} (GoInterp/paths)))))
+(def interpreted (vec (sort (filter #(and (user? %) (repl/interpretable? %)) (keys index)))))
+
+(defn- exported? [s] (let [s (str s)] (and (seq s) (Character/isUpperCase (.charAt ^String s 0)))))
+
+(defn- member-stmts
+  "Go statements naming one exported member of package p (import name x), the last true."
+  [p]
+  (let [fs (repl/digest-forms p)
+        named (fn [h] (for [f fs :when (and (seq? f) (= h (first f)))] f))
+        nm (fn [f] (let [n (second f)] (if (seq? n) (second n) n)))
+        func (first (for [f (named 'go/func)
+                          :let [n (nm f)]
+                          :when (and (symbol? n) (exported? n) (not (some #{:type-params} f)))]
+                      n))
+        single (fn [h] (first (for [f (named h)
+                                    :let [n (second f)]
+                                    :when (and (symbol? n) (exported? n))]
+                                n)))
+        v (single 'go/var)
+        c (single 'go/const)
+        ty (first (for [f (named 'go/type)
+                        :let [n (second f)]
+                        :when (and (symbol? n) (exported? n) (not (some #{:type-params} f)))]
+                    n))
+        q (fn [n] (symbol "x" (str n)))]
+    (cond
+      func [(list '!= (q func) nil)]
+      v [(list 'set! '_ (q v)) true]
+      c [(list 'set! '_ (q c)) true]
+      ty [(list 'let [(with-meta '_v {:tag (q ty)}) (list 'zero (q ty))] (list 'set! '_ '_v)) true]
+      :else [true])))
+
+(defn- ns-of [i] (symbol (str "go.stdtest.p" i)))
+
+(defn- check [what i p f]
+  (let [r (try (f) (catch Throwable e [:threw (.getName (class e)) (ex-message e)]))]
+    (if (true? r)
+      (do (swap! passed inc) (swap! counts update what (fnil inc 0)))
+      (swap! failed conj [what p r]))))
+
+(def t0 (System/currentTimeMillis))
+
+(doseq [[i p] (map-indexed vector (concat listed interpreted))]
+  (let [ns (ns-of i)
+        what (if (contains? (set listed) p) :compiled :interpreted)]
+    (check what i p
+           (fn []
+             (repl/import! ns [['x p]])
+             (repl/eval! (member-stmts p) {:ns ns})))))
+
+(def t1 (System/currentTimeMillis))
+
+;; out of scope: refused with the reason
+(doseq [[i [p why]] (map-indexed vector (sort out-of-scope))]
+  (let [ns (ns-of (+ 1000 i))]
+    (check :out i p
+           (fn []
+             (repl/import! ns [['x p]])
+             (try (repl/eval! [true] {:ns ns}) [:imported p]
+                  (catch Throwable e
+                    (or (str/includes? (str (ex-message e)) (str "goi: " p ": " why))
+                        [:message (ex-message e)])))))))
+
+;; internal packages: std's own, refused outside std; std's vendored packages by their own paths
+(check :internal 0 "golang.org/x/net/idna"
+       (fn []
+         (repl/import! 'go.stdtest.v0 [['x "golang.org/x/net/idna"]])
+         (try (repl/eval! [true] {:ns 'go.stdtest.v0}) [:imported]
+              (catch Throwable e
+                (or (str/includes? (str (ex-message e)) "package golang.org/x/net/idna is std's vendored copy, not importable")
+                    [:message (ex-message e)])))))
+;; internal packages: std's own, refused outside std
+(doseq [[i p] (map-indexed vector ["internal/godebug" "net/http/internal/ascii" "vendor/golang.org/x/net/idna"])]
+  (let [ns (ns-of (+ 2000 i))]
+    (check :internal i p
+           (fn []
+             (repl/import! ns [['x p]])
+             (try (repl/eval! [true] {:ns ns}) [:imported p]
+                  (catch Throwable e
+                    (or (str/includes? (str (ex-message e)) (str "use of internal package " p " not allowed"))
+                        [:message (ex-message e)])))))))
+
+(doseq [[what p r] @failed]
+  (println "FAIL" what p)
+  (println "  got:" (pr-str r)))
+(println (str "goi std: " @passed " passed, " (count @failed) " failed (" (pr-str (into (sorted-map) @counts))
+              "; " (count listed) " compiled and " (count interpreted) " interpreted imported in "
+              (- t1 t0) " ms)"))
+(when (seq @failed) (System/exit 1))
