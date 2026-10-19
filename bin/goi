@@ -92,6 +92,23 @@
 #                                 and not now fails; --record writes it); default 8 jobs, each box
 #                                 the launcher's vCPUs (ARBACE_BOX_CPUS, 4); GOI_BOX_TIMEOUT, the
 #                                 seconds added to each program's timeout for the box (default 60)
+#   bin/goi check --box --arch arm64 [...]
+#                                 the same in the arm64 box (GOI-SPEC.md "As built: the arm64 box
+#                                 check"): the launcher GOI_BOX_EXE runs, a candidate that runs
+#                                 the arm64 launcher where KVM/arm64 is (bin/box-arm64-vm goi sets
+#                                 it, the emulated aarch64 VM: GOI_BOX_TMO, the program's seconds,
+#                                 exported to it); the programs of test/goi/box-arm64.txt (GC75),
+#                                 against test/goi/check-box-arm64.edn, test/goi/check-box-known-arm64.edn's
+#                                 programs known too; the runs in .tmp/goi-check/box-arm64
+#   bin/goi check --box --bundle DIR [--arch arm64] [--only REGEX]
+#                                 test/goi/box.txt's runs written for a box elsewhere (the Mac's,
+#                                 bin/box-mac-bundle; GC76), nothing run: DIR/in/PROGRAM.in, the
+#                                 guest's standard input box_run writes, DIR/want/PROGRAM.want,
+#                                 the console expected (gc's standard output then error, or a
+#                                 directory test's golden output), and DIR/programs.tsv: PROGRAM,
+#                                 the timeout's seconds, the status expected, and how to compare
+#                                 (one: the console up to the goroutines' traces; dir: as is);
+#                                 DIR/known.tsv, the known programs and their reasons
 #
 # Environment: ARBACE_HOST_EXE (the tools' host, bin/lib/host.bash; GOI_EXE runs the table's
 # generator instead), ARBACE_GOROOT (TamaGo's Go tree, for --gc and the linux corpora's
@@ -335,6 +352,13 @@ check_one() {
   r=$cwork/run/$p
   mkdir -p "$(dirname "$r")"
   st=0
+  if [ -n "${bundle:-}" ]; then
+    # the run written for a box elsewhere (GC76): its input and gc's console
+    mkdir -p "$(dirname "$bundle/in/$p")" "$(dirname "$bundle/want/$p")"
+    box_input "$cforms" "$ns" "${f#$cforms/}" "${args[@]}" > "$bundle/in/$p.in"
+    cat "$ref/out" "$ref/err" > "$bundle/want/$p.want"
+    printf '%s\tbundled\t%s %s one\n' "$p" "$((tmo + ${GOI_BOX_TIMEOUT:-60}))" "$(cat "$ref/exit")"; return
+  fi
   if [ -n "${box:-}" ]; then
     box_run "$cforms" "$tmo" "$ns" "${f#$cforms/}" "${args[@]}" > "$r.out" 2> "$r.err.raw" || st=$?
   else
@@ -397,6 +421,13 @@ check_dir() {
   r=$cwork/run/$p
   mkdir -p "$(dirname "$r")"
   st=0
+  want=$goroot/test/${p%.go}.out
+  if [ -n "${bundle:-}" ]; then
+    mkdir -p "$(dirname "$bundle/in/$p")" "$(dirname "$bundle/want/$p")"
+    box_input "$dforms" "$ns" "${f#$dforms/}" "${base#$dforms/}" "${base#$dforms/}.ae" > "$bundle/in/$p.in"
+    if [ -f "$want" ]; then cp "$want" "$bundle/want/$p.want"; else : > "$bundle/want/$p.want"; fi
+    printf '%s\tbundled\t%s 0 dir\n' "$p" "$((tmo + ${GOI_BOX_TIMEOUT:-60}))"; return
+  fi
   if [ -n "${box:-}" ]; then
     box_run "$dforms" "$tmo" "$ns" "${f#$dforms/}" "${base#$dforms/}" "${base#$dforms/}.ae" > "$r.out" 2>&1 || st=$?
   else
@@ -407,7 +438,6 @@ check_dir() {
     126) printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.out" | head -1 | cut -c1-300)"; return ;;
     124) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
   esac
-  want=$goroot/test/${p%.go}.out
   if [ "$st" = 0 ] && { if [ -f "$want" ]; then cmp -s "$r.out" "$want"; else [ ! -s "$r.out" ]; fi; }; then
     printf '%s\tpass\t\n' "$p"
   else
@@ -417,12 +447,21 @@ check_dir() {
 }
 
 # box_run ROOT TMO NS FILE [PATH...] [-- ARG...]: program NS in the box (GS13, GR7a): the guest's
-# standard input writes FILE and the PATHs (files or directories, relative to the forms root
-# ROOT; a directory test's) into its in-memory file system under /goi, then runs arbace.go.run
-# on /goi with ARGs; its standard output, error and status are the program's. For check_one the
-# arguments after FILE are the program's (a single-file program has no PATHs)
+# standard input (box_input's) writes FILE and the PATHs (files or directories, relative to the
+# forms root ROOT; a directory test's) into its in-memory file system under /goi, then runs
+# arbace.go.run on /goi with ARGs; its standard output, error and status are the program's. For
+# check_one the arguments after FILE are the program's (a single-file program has no PATHs).
+# GOI_BOX_TMO, the seconds the launcher is given, is exported to it (a candidate that runs it
+# elsewhere ends it there: bin/box-arm64-vm goi)
 box_run() {
   local froot=$1 tmo=$2 ns=$3 file=$4; shift 4
+  export GOI_BOX_TMO=$((tmo + ${GOI_BOX_TIMEOUT:-60}))
+  box_input "$froot" "$ns" "$file" "$@" | timeout "$GOI_BOX_TMO" "$rexe" -
+}
+
+# box_input ROOT NS FILE [PATH...] [-- ARG...]: the guest's standard input for box_run
+box_input() {
+  local froot=$1 ns=$2 file=$3; shift 3
   local paths=() pargs=()
   if [ -n "${dirtest:-}" ]; then paths=("$@"); else pargs=("$@"); fi
   python3 -c '
@@ -450,8 +489,7 @@ for rel in [f] + paths + ([f[:-3]] if f.endswith(".ae") else []):
 out.append("(require (quote arbace.go.run))")
 out.append("(arbace.go.run/-main %s)" % " ".join(lit(x) for x in ["/goi", ns] + args))
 print("\n".join(out))
-' "$froot" "$ns" "$file" "${#paths[@]}" ${paths[@]+"${paths[@]}"} ${pargs[@]+"${pargs[@]}"} \
-    | timeout $((tmo + ${GOI_BOX_TIMEOUT:-60})) "$rexe" -
+' "$froot" "$ns" "$file" "${#paths[@]}" ${paths[@]+"${paths[@]}"} ${pargs[@]+"${pargs[@]}"}
 }
 
 # check [--record] [--jobs N] [--essential] [--only REGEX]: the check (§11): every run program of
@@ -461,7 +499,8 @@ print("\n".join(out))
 # check; --record writes it) and the known differences test/goi/check-known.edn
 check() {
   local record="" jobs=16 only="" essential="" ref=$root/test/goi/check-linux-amd64.edn known=$root/test/goi/check-known.edn
-  box=""
+  local barch=amd64 bknown=""
+  box="" bundle=""
   while [ $# -gt 0 ]; do
     case $1 in
       --record) record=1; shift ;;
@@ -469,15 +508,28 @@ check() {
       --only) only=$2; shift 2 ;;
       --essential) essential=1; shift ;;
       --box) box=1; shift ;;
+      --arch) barch=$2; shift 2 ;;
+      --bundle) bundle=$2; shift 2 ;;
       *) echo "bin/goi check: unknown option $1" >&2; return 2 ;;
     esac
   done
+  if [ -n "$bundle" ] && [ -z "$box" ]; then echo "bin/goi check: --bundle needs --box" >&2; return 2; fi
   if [ -n "$box" ]; then
     # the check in the box (GS13): its own reference and the box's results apart
-    rexe=${GOI_BOX_EXE:-$root/target/arbace-go/box-amd64/arbace-box}
-    [ -x "$rexe" ] || { echo "bin/goi check --box: no $rexe (bin/arbace-go --build --box)" >&2; return 1; }
-    [ -w /dev/kvm ] || { echo "bin/goi check --box: no /dev/kvm" >&2; return 1; }
-    ref=$root/test/goi/check-box-amd64.edn
+    bknown=$root/test/goi/check-box-known.edn
+    case $barch in
+      amd64)
+        rexe=${GOI_BOX_EXE:-$root/target/arbace-go/box-amd64/arbace-box}
+        [ -n "$bundle" ] || [ -w /dev/kvm ] || { echo "bin/goi check --box: no /dev/kvm" >&2; return 1; } ;;
+      arm64)
+        # where KVM/arm64 is: the candidate GOI_BOX_EXE (bin/box-arm64-vm goi), or the bundle's
+        rexe=${GOI_BOX_EXE:-}
+        [ -n "$rexe" ] || [ -n "$bundle" ] || { echo "bin/goi check --box --arch arm64: no GOI_BOX_EXE (bin/box-arm64-vm goi)" >&2; return 1; }
+        [ -f "$root/test/goi/check-box-known-arm64.edn" ] && bknown="$bknown $root/test/goi/check-box-known-arm64.edn" ;;
+      *) echo "bin/goi check --box: --arch amd64 or arm64" >&2; return 2 ;;
+    esac
+    [ -n "$bundle" ] || [ -x "$rexe" ] || { echo "bin/goi check --box: no $rexe (bin/arbace-go --build --box)" >&2; return 1; }
+    ref=$root/test/goi/check-box-$barch.edn
     [ "$jobs" = 16 ] && jobs=8
   else
     rexe=$(run_exe) || return 1
@@ -490,7 +542,11 @@ check() {
   mkdir -p "$cwork/ref" "$cwork/run"
   # the box's runs apart from the native ones (gc's reference shared)
   if [ -n "$box" ]; then
-    mkdir -p "$cwork/box"; ln -sfn ../ref "$cwork/box/ref"; cwork=$cwork/box
+    local bw=box; [ "$barch" = amd64 ] || bw=box-$barch
+    mkdir -p "$cwork/$bw"; ln -sfn ../ref "$cwork/$bw/ref"; cwork=$cwork/$bw
+  fi
+  if [ -n "$bundle" ]; then
+    mkdir -p "$bundle"; bundle=$(cd "$bundle" && pwd); rm -rf "$bundle/in" "$bundle/want"
   fi
   if [ ! -d "$cforms" ]; then
     echo "== bin/repr-go read --corpus linux-test (.tmp/goi-check/read.log)" >&2
@@ -509,18 +565,29 @@ check() {
     esac
   done > "$list"
   [ -n "$essential" ] && grep -v '^#' "$root/test/goi/essential.txt" | grep . > "$list.ess" && mv "$list.ess" "$list"
-  [ -n "$box" ] && grep -v '^#' "$root/test/goi/box.txt" | grep . > "$list.box" && mv "$list.box" "$list"
+  # the box's subset: test/goi/box.txt, on arm64 test/goi/box-arm64.txt (GC75)
+  local blist=$root/test/goi/box.txt
+  [ -n "$box" ] && [ -z "$bundle" ] && [ "$barch" != amd64 ] && [ -f "$root/test/goi/box-$barch.txt" ] && blist=$root/test/goi/box-$barch.txt
+  [ -n "$box" ] && grep -v '^#' "$blist" | grep . > "$list.box" && mv "$list.box" "$list"
   [ -n "$only" ] && { grep -E "$only" "$list" > "$list.only" || true; mv "$list.only" "$list"; }
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
-  export -f check_one check_dir action_of stderr_head gc_env box_run
-  export root goroot rexe hexe cforms dforms cwork box
+  export -f check_one check_dir action_of stderr_head gc_env box_run box_input
+  export root goroot rexe hexe cforms dforms cwork box bundle
   local t0=$SECONDS
   xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \
     | LC_ALL=C sort > "$cwork/results.tsv"
+  if [ -n "$bundle" ]; then
+    # the bundle's list: PROGRAM, the timeout, the status expected, the comparison
+    awk -F'\t' '$2=="bundled" { split($3, a, " "); print $1 "\t" a[1] "\t" a[2] "\t" a[3] }' "$cwork/results.tsv" > "$bundle/programs.tsv"
+    awk -F'\t' '$2!="bundled"' "$cwork/results.tsv" | sed 's/^/   not bundled: /'
+    cat "$known" $bknown | sed -n 's/^ *\["\([^"]*\)" "\(.*\)"\]$/\1\t\2/p' > "$bundle/known.tsv"
+    echo "goi check --box --bundle: $(wc -l < "$bundle/programs.tsv") programs in $bundle; $((SECONDS - t0)) s"
+    return 0
+  fi
   # the known differences: a program listed there is known, with its reason, unless it passes
   if [ -f "$known" ]; then
     # in the box, the box's own known differences too (test/goi/check-box-known.edn)
-    cat "$known" ${box:+"$root/test/goi/check-box-known.edn"} | sed -n 's/^ *\["\([^"]*\)" "\(.*\)"\]$/\1\t\2/p' > "$cwork/known.tsv"
+    cat "$known" $bknown | sed -n 's/^ *\["\([^"]*\)" "\(.*\)"\]$/\1\t\2/p' > "$cwork/known.tsv"
     awk -F'\t' 'NR==FNR { k[$1] = $2; next }
                  ($1 in k) && $2 != "pass" { $2 = "known"; $3 = k[$1] } { print $1 "\t" $2 "\t" $3 }' "$cwork/known.tsv" "$cwork/results.tsv" > "$cwork/results.k" \
       && mv "$cwork/results.k" "$cwork/results.tsv"
@@ -535,8 +602,14 @@ check() {
   if [ -n "$record" ]; then
     { if [ -n "$box" ]; then
         echo ";; goi's check in the box (doc/go/GOI-SPEC.md \"As built: GR7a\", GS13): the programs of test/goi/box.txt"
-        echo ";; run by the TamaGo guest on /dev/kvm (amd64) against gc's on linux/amd64, and their result, pass,"
-        echo ";; fail, error, unsupported (with the reason), known or skip. bin/goi check --box --record"
+        if [ "$barch" = amd64 ]; then
+          echo ";; run by the TamaGo guest on /dev/kvm (amd64) against gc's on linux/amd64, and their result, pass,"
+          echo ";; fail, error, unsupported (with the reason), known or skip. bin/goi check --box --record"
+        else
+          echo ";; (test/goi/box-$barch.txt's, GC75) run by the $barch guest on KVM/$barch (the emulated aarch64 VM,"
+          echo ";; bin/box-arm64-vm goi) against gc's on linux/amd64, and their result, pass, fail, error,"
+          echo ";; unsupported (with the reason), known or skip. bin/box-arm64-vm goi --record"
+        fi
       else
         echo ";; goi's check (doc/go/GOI-SPEC.md §11.3): every run program of \$GOROOT/test (linux/amd64) and its"
         echo ";; result, pass, fail, error, unsupported (with the reason), known or skip. bin/goi check --record"

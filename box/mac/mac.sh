@@ -15,6 +15,13 @@
 #                        the store (the launcher's tool, a script by ref), the network on loopback
 #                        (a connection within the box, a socket REPL from the host by nc), the idle
 #                        CPU at the prompt (20 s), and times (the start, three evaluations)
+#   ./mac.sh goi         goi's check in the box (doc/go/GOI-SPEC.md, "As built: the arm64 box check",
+#                        GC76): the programs of goi/programs.tsv ($GOROOT/test's, test/goi/box.txt's),
+#                        each in a box of its own (4 vCPUs, GOI_JOBS at a time, default 4): its forms
+#                        written into the guest's in-memory file system by its standard input
+#                        (goi/in/PROGRAM.in), then interpreted by goi; the console against gc's on
+#                        Linux (goi/want/PROGRAM.want) and the status against gc's; goi/known.tsv's
+#                        programs known; results in mac-results/goi-results.tsv
 #   ./mac.sh rebuild     S8 (doc/go/BOX-NOTES.md, "S8: the rebuild in the box"): Arbace's arm64
 #                        guest image rebuilt inside the box from the sources in rebuild/store
 #                        (j2g and repr/go in Arbace's guest, Go's compile, asm and link in tool guests,
@@ -22,7 +29,7 @@
 #                        Linux by the host's tools (rebuild/expected.txt), byte for byte; then booted
 #                        by its ref
 #   ./mac.sh clock       HV6: an idle box's wall clock against the Mac's, once a minute for an hour
-#   ./mac.sh all         check, sign, hv, checklist, rebuild, with clock running beside them (an
+#   ./mac.sh all         check, sign, hv, checklist, goi, rebuild, with clock running beside them (an
 #                        hour from its start), then mac-results.tar.gz
 #   ./mac.sh run [ARG...]  the box: the REPL (under rlwrap when it is installed), or arbace's ARGs
 set -u
@@ -190,6 +197,59 @@ do_checklist() {
   [ $fails -eq 0 ]
 }
 
+# goi_one PROGRAM TIMEOUT STATUS MODE: one program of goi's check (bin/goi check --box's check_one
+# and check_dir): its input on the box's standard input, the box's console (TamaGo writes a Go
+# program's standard output and error to it: the launcher's standard error) and status against
+# gc's; MODE one compares up to the goroutines' traces, the addresses of a [signal ...] line
+# normalized, as bin/goi's stderr_head; dir as is (a directory test's golden output). Prints
+# PROGRAM<TAB>RESULT<TAB>REASON<TAB>MS
+goi_one() {
+  local p=$1 tmo=$2 want=$3 mode=$4 o st=0 d0 d
+  o=$TMPDIR/goi/$p
+  mkdir -p "$(dirname "$o")"
+  d0=$(ms)
+  ARBACE_BOX_CPUS=4 t "$tmo" "$B" - < "goi/in/$p.in" > "$o.out" 2> "$o.err" || st=$?
+  d=$(ms)
+  if [ "$mode" = one ]; then
+    cat "$o.out" "$o.err" | awk '/^goroutine /{exit} {print}' \
+      | sed -E 's/^\[signal ([A-Z]+): (.*) code=0x[0-9a-f]+ addr=0x[0-9a-f]+ pc=0x[0-9a-f]+\]$/[signal \1: \2 code=X addr=X pc=X]/' > "$o.all"
+  else
+    cat "$o.out" "$o.err" > "$o.all"
+  fi
+  case $st in
+    125) printf '%s\tunsupported\t%s\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$o.all" | head -1)" $((d - d0)); return ;;
+    126) printf '%s\terror\t%s\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$o.all" | head -1 | cut -c1-300)" $((d - d0)); return ;;
+    124) printf '%s\terror\ttimeout (%s s)\t%s\n' "$p" "$tmo" $((d - d0)); return ;;
+  esac
+  if [ "$st" = "$want" ] && cmp -s "$o.all" "goi/want/$p.want"; then
+    printf '%s\tpass\t\t%s\n' "$p" $((d - d0))
+  else
+    printf '%s\tfail\tstatus %s (gc %s)%s\t%s\n' "$p" "$st" "$want" \
+      "$(cmp -s "$o.all" "goi/want/$p.want" || printf ', the console differs: %s' "$(diff "goi/want/$p.want" "$o.all" | grep '^[<>]' | head -2 | tr '\n' ' ' | cut -c1-200)")" $((d - d0))
+  fi
+}
+
+do_goi() {
+  local d0 d r=$res/goi-results.tsv n pass known bad
+  [ -f goi/programs.tsv ] || { echo "no goi/programs.tsv in the bundle"; return 1; }
+  rm -rf "$TMPDIR/goi"
+  n=$(wc -l < goi/programs.tsv | tr -d ' ')
+  echo "== goi's check in the box: $n programs, ${GOI_JOBS:-4} boxes of 4 vCPUs at a time"
+  d0=$(ms)
+  tr '\t' ' ' < goi/programs.tsv | xargs -P "${GOI_JOBS:-4}" -L 1 ./mac.sh goi-one | LC_ALL=C sort > "$r.raw"
+  d=$(ms)
+  # the known differences: a program listed there is known, with its reason, unless it passes
+  awk -F'\t' 'NR==FNR { k[$1] = $2; next } ($1 in k) && $2 != "pass" { $2 = "known"; $3 = k[$1] } { print $1 "\t" $2 "\t" $3 "\t" $4 }' \
+    goi/known.tsv "$r.raw" > "$r" && rm -f "$r.raw"
+  pass=$(awk -F'\t' '$2=="pass"' "$r" | wc -l | tr -d ' ')
+  known=$(awk -F'\t' '$2=="known"' "$r" | wc -l | tr -d ' ')
+  bad=$(awk -F'\t' '$2!="pass" && $2!="known"' "$r" | wc -l | tr -d ' ')
+  echo "goi: $n programs: $pass pass, $known known, $bad other; $(( (d - d0) / 1000 )) s" | tee -a "$res/measures.txt"
+  awk -F'\t' '$2!="pass"' "$r" | head -40 | sed 's/^/   /'
+  awk -F'\t' '{ s += $4 } END { printf "goi: the boxes, summed: %d s\n", s / 1000 }' "$r" | tee -a "$res/measures.txt"
+  [ "$bad" = 0 ]
+}
+
 # the rebuild (S8): the store rebuild/store holds the sources (the ref src: the commit's
 # directories the build reads, VERSION filled), the arm64 tool guests and the toolchain's facts
 # (tool.*.arm64, tool.config.arm64) and the image that runs j2g and repr/go (arbace.arm64, the
@@ -251,7 +311,8 @@ step() { # NAME: the step, its output saved and shown, its status recorded
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
-  check|sign|hv|checklist|rebuild|clock) step "$cmd" ;;
+  check|sign|hv|checklist|goi|rebuild|clock) step "$cmd" ;;
+  goi-one) goi_one "$@" ;;
   all)
     rm -rf "$res"; mkdir -p "$res"
     s=0
@@ -262,6 +323,7 @@ case $cmd in
     clock=$!
     step hv || s=1
     step checklist || s=1
+    step goi || s=1
     step rebuild || s=1
     echo "mac.sh: waiting for the clock's hour (mac-results/clock.log)" >&2
     wait $clock
