@@ -3223,7 +3223,7 @@ over the instance `GoFn`'s call, 0.0-0.3 µs above a function var's.
 programs, the REPL's 101 of 101 checks, §1.4's session as its transcript; `bin/goi annotations`
 zero errors in the five corpora (counts unchanged: GR9d does not touch the checker);
 `make check-makefile`; `bin/generated-check`; the oracle's `forms/go.ae` 150 cases (21 new)
-recorded by goi and reviewed.
+recorded by goi and reviewed; the essential `bin/gate` passed (9m45s: the smoke test, Clojure's suite on the test build, the oracle 22,658 of 22,711 cases with its 53 known mismatches as recorded, the differential check, goi's essential check, the generated variants); `bin/arbace-go --fixpoint` holds (G1 = G2 = G3 byte for byte).
 
 **Proposals for the user** (each built as recommended):
 
