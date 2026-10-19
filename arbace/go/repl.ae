@@ -236,10 +236,13 @@
   [fname]
   (if (or (nil? fname) (= "repl.go" fname)) (repl-source) fname))
 
+(declare ctx-of)
+
 (defn build-context
   "The builder's context for the package of state st."
   [st]
   {:path (:path @st) :name (:name @st)
+   :ctx-of ctx-of
    :source (let [ns (str (:ns @st))] (fn [fname] [ns (display-file fname)]))
    :compiled? listed?
    :types (java.util.HashMap.)
@@ -261,6 +264,35 @@
              (let [ps (state-of-path (e/o x :pkg))]
                (or (and ps (get-in @ps [:globals (e/o x :name)]))
                    (throw (ex-info (str "goi: no variable " (e/o x :pkg) "." (e/o x :name)) {})))))})
+
+(defonce ^{:private true :doc "The build contexts of compiled packages, for the instances of their
+  generic declarations (§9.3): path -> context."} compiled-contexts (atom {}))
+
+(defn compiled-context
+  "The build context of listed (compiled) package path: its members compiled, its generic
+  declarations' instances interpreted from the digest's forms (§9.3)."
+  [path]
+  (or (get @compiled-contexts path)
+      (let [nm (last (str/split path #"/"))
+            ctx {:path path :name nm :ctx-of ctx-of
+                 :source (let [ns (str (path->ns path))] (fn [fname] [ns (or fname "")]))
+                 :compiled? listed?
+                 :types (java.util.HashMap.)
+                 :methods-done (java.util.IdentityHashMap.)
+                 :lit-count (atom 0)
+                 :gen (fn [nt] 1)
+                 :func-cell (fn [x] (throw (ex-info (str "goi: no function " (e/o x :pkg) "." (e/o x :name)) {})))
+                 :method-cell (fn [m] (throw (ex-info (str "goi: no method " (e/o m :pkg) "." (e/o m :name)) {})))
+                 :global (fn [x] (throw (ex-info (str "goi: no variable " (e/o x :pkg) "." (e/o x :name)) {})))}]
+        (swap! compiled-contexts assoc path ctx)
+        ctx)))
+
+(defn ctx-of
+  "The build context of package path (an interpreted package's last, else a compiled one's)."
+  [path]
+  (if-let [st (get @packages path)]
+    (or (:ctx @st) (build-context st))
+    (compiled-context path)))
 
 (defn- const-arbace
   "A constant's value as Arbace takes it (§5.6)."
@@ -284,12 +316,16 @@
         decls (:decl-infos r)
         old @st
         gen-of (fn [nt] (let [i (t/info nt)] (when (= (:pkg i) (:path old)) (get-in old [:types (:name i) :gen]))))
-        unsupported (some #(when (or (:unsupported %) (:generic %)) %) decls)]
-    ;; generic code is GR6's (§9): a declaration that uses generics is not run
+        unsupported (some #(when (:unsupported %) %) decls)
+        ;; a generic function or method has no cell: its instances have (§9.2, b/instance-cell)
+        generic? (fn [d] (and (= :func (:kind d)) (or (seq (e/o (:obj d) :tparams)) (seq (e/o (:obj d) :rtparams)))))
+        decls (remove generic? decls)]
     (when unsupported
-      (let [what (str (or (:unsupported unsupported) "generics") " (GR6)")]
+      (let [what (str (:unsupported unsupported))]
         (throw (ex-info (str "not supported by goi yet: " what) {:goi/unsupported what}))))
-    (binding [b/*ctx* ctx t/*method-obj* b/method-data]
+    (swap! st assoc :ctx ctx)
+    (binding [b/*ctx* ctx t/*method-obj* b/method-data t/*subst-method* arbace.go.check.decl/subst-method
+              t/*resolve-named* b/complete-instance!]
       ;; types: a new generation when the underlying type changed (§2.5)
       (let [type-decls (filter #(and (= :type (:kind %)) (not (e/o (:obj %) :alias))) decls)
             types (into {}
