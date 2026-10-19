@@ -3278,6 +3278,10 @@ CHECKS-PLACEHOLDER
   (the forms of mode `:lines`, `byte` and aliases in goi's types); (b) errorcheck over mode
   `:full`'s forms and `byte`, `rune` and aliases as types of their own (GC49 (b)), a later step.
   *Recommended: (a)*.
+- **GC144 (b), decided (GR9d's proposal, built here).** A constraint's terms in messages in their
+  written order for the digest's packages too: `terms-union` and `terms-intersect` go through
+  terms-norm's `:order`, not their set's (`bool missing in ~int | ~int8 | ... | ~string`, as
+  types2 writes cmp.Ordered's); `test/goi/errors/ordered.ae` compares the message with types2's.
 
 ## Decided (2026-10-19): GR9d, generic functions at the REPL
 
