@@ -1899,3 +1899,41 @@ v1's divergences by design are listed there. Staging (G16) and speed (F10) come 
 - **Overlap with GR9a-c:** `methodVar`, the `valueType` native's use of the proxies and the
   `desc-types` registry. GR9a-c was told to merge main into its branch and keep them working.
 - **A rule slip:** one of the agent's wait loops redirected `2>/dev/null`. It changed no file.
+
+## 2026-10-19: goi GR8a merged (std at the REPL)
+
+- **What:** branch `goi-gr8a` (from `b267cf43`: `04ac458b` with the two surveys) merged as
+  `104d2827`, after GR9d. It builds GR8-SURVEY's GR8a:
+  - **F1 fixed:** a label on a short variable declaration is a goto target. Before, interpreted
+    `regexp` matched nothing.
+  - **The table** lists 89 packages (45 before): the survey's 34, the encoders,
+    `encoding/json/jsontext` and `encoding/json/v2` (GC98), and the speed set.
+  - **Interpretation:** the generator now decides which packages are interpreted (`classify`):
+    134 per configuration, 81 of them user packages, none refused.
+  - **New table keys:** `:replace` hooks for internal/godebug, cpu and abi; `:drop`, `:bodyless`,
+    `:api-interpreted`.
+  - **The REPL:** interpretable packages are checked once per process (GC104). goi binds the
+    linkname pulls between them (GC59) and refuses the out-of-scope and internal packages (GC101).
+  - **The checker:** the initialization order is built with a heap (GC100), and a crash in
+    `lookup-error` is fixed.
+  - **Tests:** test/goi/std.ae, 183 checks.
+- **Measured:** `bin/goi check` 1,414 pass, 25 fail, 79 known, 299 unsupported (GR7b: 1,386, 23,
+  73, 335).
+  - The 2 new fails are `issue30116` and `issue30116u`: goi's bounds messages (GC95), kept until
+    the next back-end change.
+  - The run programs still unsupported: 13 wait for reflect's methods (GR8b), 9 are assembly or
+    linkname.
+  - The executable is +5.46 MB (4.0%). REPL loads take 0.03 s (`container/list`) to 8.5 s
+    (`net/http`).
+- **The merge:** doc/go/GOI-SPEC.md was the only conflict. Both branches had appended their "As
+  built" sections; the result keeps GR9d's, then GR8a's. On main the essential `bin/gate` passed
+  (21m18s): the oracle and diffcheck as recorded, goi essential 712/712. `bin/goi test` passed:
+  the REPL 101/101, with GR9d's checks; std 183/183.
+- **Decisions:** GC55-GC59, GC62-GC64 and GC95-GC104 are as recommended, under the user's goal of
+  2026-10-19. GC102 asks for the box check and `bin/gate --full` at the merge. By the gate policy
+  (`--full` only at milestones) both are done at the milestone run, with the amd64 and arm64 box
+  checks.
+- **Left for GR8b:** `text/template`'s Execute needs `reflect.Value.MethodByName`, even for
+  fields; `issue16037_run` is marked known for it.
+- GR7c and GR9a-c were told to merge main (GR8a's checker and builder changes) before their final
+  checks.
