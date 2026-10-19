@@ -82,6 +82,12 @@ covers what.
   ("Copyright 20XX The Go Authors. All rights reserved. Use of this source code is governed by
   a BSD-style license that can be found in the LICENSE file."), the forms as `;;` lines; SPEC.md's
   excerpts are covered by this entry.
+- `tools/gocmp/errorcheck.go`'s judge of errorcheck programs (goi's check, doc/go/GOI-SPEC.md
+  "As built: GR7b"): the functions `splitOutput`, `errorCheck`, `wantedErrors`, `matchPrefix`,
+  `partitionStrings`, `replacePrefix` and the regexps of `// ERROR` comments, from TamaGo's
+  go1.27.1 tree's `src/cmd/internal/testdir/testdir_test.go`, Copyright 2012 The Go Authors,
+  under Go's BSD 3-Clause License (text below); the file carries Go's notice. The rest of
+  `tools/gocmp/` is Arbace's own.
 - `go/`: jrt's hand-written Go forms (`go/arbace/jrt.ae`, `go/arbace/jrt/`) and the Go
   build's main package (`go/arbace/cmd/arbace/`): Arbace's own, under the Eclipse Public License
   1.0, except the parts of `go/arbace/jrt/` listed below.
