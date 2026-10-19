@@ -4,8 +4,8 @@ Status: milestone RS0 of repr/rust ([REPR-RUST-SURVEY.md](../REPR-RUST-SURVEY.md
 2026-10-17 at the user's decision RS16 (b) ("the spec now, the build after"). It is bound by the
 survey's decisions RS1-RS17 (its section "Decided (2026-10-17, the user)"); the choices made while
 writing it are S1-S34 (§13.1), the proposals RSS1-RSS10 (§13.2), decided as recommended. RR1 and RR2
-are built (2026-10-17), RR3 (2026-10-18): §12.4-§12.6 say what the builds change in this text, and
-[RUST-NOTES.md](RUST-NOTES.md) records them. The experiments that validate its choices (Appendix A) were run on the host's
+are built (2026-10-17), RR3-RR5 (2026-10-18), RR6 (2026-10-19): §12.4-§12.9 say what the builds
+change in this text, and [RUST-NOTES.md](RUST-NOTES.md) records them. The experiments that validate its choices (Appendix A) were run on the host's
 rustc 1.99.1 (Alpine's `rust-1.99.1-r0`), the survey's helper (`rsdump`, built against
 `rustc-dev-1.99.1-r0`) and the stage 0 of main at `73e35434` (`target/seed/amd64/arbace`, amd64);
 their scripts and inputs are `test/rust/`.
@@ -1175,7 +1175,7 @@ from rustc's source tarball for the behaviour level.
 | the rest of `library/` (`stdarch` 209, `vendor` 926, `compiler-builtins` 280, `portable-simd`, `backtrace`, the `*tests` crates) | 1,902 | RR4 |
 | the compiler (`usr/src/rustc/compiler`) | 2,167 | RR4 |
 | a pinned crate set (the host's Cargo cache served the survey's E9: 518 crates, 12,144 files, editions 2015-2024) | | RR4 |
-| rustc's test suite (`rustc-1.99.1-src.tar.xz`, pinned by SHA-256) | `tests/ui`: 19,942 files (21,108 but the 1,162 the parser rejects and 4 whose namespaces clash), 3,718 run-pass programs | RR5 |
+| rustc's test suite (`rustc-1.99.1-src.tar.xz`, pinned by SHA-256) | `tests/ui`: 19,942 files (21,108 but the 1,162 the parser rejects and 4 whose namespaces clash), 3,718 run-pass programs; since RR6 19,948 (6 expression files of `include!`, 1,157 rejected) | RR5 |
 
 Each crate is converted under its own configuration, written once in a corpus file
 (`test/rust/corpus-rustc-1.99.1.edn`): its directory, name, edition, crate root and type, the files
@@ -1514,6 +1514,53 @@ text (RR-P13-RR-P17 there, open, built as recommended):
   repr-rust-behaviour`, `make repr-rust-all`. The gate's step `repr-rust` is unchanged;
   `REPR_RUST_CORPORA=all` adds RR4's corpora and the UI suite, `REPR_RUST_CORPORA='all --run
   --std'` the behaviour level too (RR-P14).
+
+### 12.9 As built: RR6 (2026-10-19)
+
+[RUST-NOTES.md](RUST-NOTES.md), "RR6", records the build: the lowered and code levels over std's
+five crates, the rest of `library/` (46 crates), the compiler (66) and the UI suite's programs
+(3,718), each built from the originals and from the printed files of the three layouts: in mode
+`:full` every judged unit's HIR, MIR and objects (the metadata too) the same; in mode `:lines`
+all crates the same, the programs but 5 (known: token spacing, a program reading its own text, a
+constant printed by its source snippet); in the pretty layout the libraries the same, 42 of the
+compiler's crates and 70 programs known (line values: `line!()`, the test harness's descriptors,
+`tracing`'s events; a proc macro reading columns); 4 units not judged. `include!`'s expression
+files (RSS6) are built: the UI suite's 6 and the crate set's 1, equal at the syntax levels.
+RR1-RR5's levels unchanged. What it changes in this text (RR-P18-RR-P22 there, open, built as
+recommended):
+
+- **The helper (§10.2)**: `rsdump rustc [--hir FILE] [--mir FILE] -- ARGS...`, rustc as a driver:
+  after analysis the crate's HIR (`rustc_hir_pretty`, as `-Zunpretty=hir`, without the source's
+  comments: RR-P18) and MIR (`write_mir_pretty`, as `-Zunpretty=mir`, a `#[rustc_comptime]`
+  function's body from `mir_for_ctfe`, paths in full: RR-P19), then the code as ARGS say;
+  `dump`, `tree` and `lines` take `--expr`: each file parsed as one expression, as `include!` in an
+  expression's place parses it (nothing stripped), the dump's tree its `Expr`, its config
+  `:expr true`.
+- **The lowered and code levels (§11.1, 3 and 4; §11.3)**: `bin/repr-rust roundtrip --code`: a
+  corpus's units, each crate with an interface configuration (its rlib) and each program of its
+  `:programs` (its object), built by the helper from the originals and from a mirror of the source
+  tree with every corpus file a link to its printed file, with `RUSTC_BOOTSTRAP=1`,
+  `-Cdebuginfo=0` and the root remapped; compared: the HIR's and MIR's texts with the positions
+  rustc writes in them (`FILE:L1:C1: L2:C2`) kept as the layout keeps positions (mode `:lines`
+  the start line, the pretty layout none, mode `:full` all), and the objects byte for byte
+  (an rlib's members, its metadata only in mode `:full`), the code built with
+  `-Zlocation-detail=file,line` for mode `:lines` and `file` for the pretty layout; set aside
+  when they alone differ, counted apart: the LLVM bitcode an rlib embeds (inline assembly's
+  `!srcloc`, byte positions), and in mode `:lines` locations at a block's closing brace (the
+  objects built again with `-Zlocation-detail=file`) (RR-P20). Known differences
+  `test/rust/roundtrip-CORPUS-code-LAYOUT-known.edn`, a unit's id to a map from a level (`:hir`,
+  `:mir`, `:obj`, `:build`) to its reason. The crate set has no unit (RR-P21).
+- **Expression files (§2.3, §2.5; RSS6, RR-P22)**: `(rs/file ... :kind :include-expr)`, no
+  `:shebang` or `:frontmatter` (rustc strips neither there), then one form `(rs/expr e)`, printed
+  at its line; a crate's `:include-expr-files` (in its `:files`, of any extension) in the corpus
+  file, found by `test/rust/corpus_make.ae`; the helper runs on them with `--expr` (the corpus's
+  edition plan's `E+expr` lines).
+- **The forms (§5.2)**: a negation whose literal is on a later line is `(- lit)`, not a negative
+  literal (the literal keeps its line).
+- **Commands (§11.6)**: `roundtrip [...] [--code | --code-only]`, `dump|tree|lines --expr` of
+  the helper, `corpus make-ui` (with the expression files); `make repr-rust-code`, `make
+  repr-rust-all` (with `--code`). The gate's step `repr-rust` is unchanged;
+  `REPR_RUST_CORPORA='all --code'` adds the lowered and code levels (RR-P21).
 
 ## 13. Decisions and open proposals
 
@@ -1897,3 +1944,8 @@ RR-P1-RR-P3 ([RUST-NOTES.md](RUST-NOTES.md)) as recommended: plain comments in m
 at RR3 from the helper's lexer (RR-P1); mode `:lines`' metadata keys and defaults as built at RR1
 adopted into §9.1 proper (RR-P2); §7.1 amended, named format arguments stay forms when the printed
 tokens match (RR-P3).
+
+## Decided (2026-10-18 and 2026-10-19, the user): RR-P4-RR-P17
+
+RR-P4-RR-P17 ([RUST-NOTES.md](RUST-NOTES.md)) as built: RR-P4, RR-P5 (2026-10-18), RR-P6-RR-P8,
+RR-P9-RR-P12 (2026-10-18), RR-P13-RR-P17 (2026-10-19); §12.5-§12.8 record what they adopted.
