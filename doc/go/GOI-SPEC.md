@@ -3149,7 +3149,7 @@ record; proposals for the user are GC135-GC144.
 | the interpretable packages from Arbace | `arbace/lang/GoInterp.ae` (`loadTable`), `arbace/go.ae` (`interpretable-ns!`) | `(require '[go.slices :as slices])` loads `slices` (`cmp`, `iter`, `maps`) from the digest as goi does for an import (§9.3), so that its vars exist: RT.load's hook asks `arbace.go` for a `go/` resource of one element that is no listed package |
 | the listed packages' generics | `arbace/go.ae` (`digest-info`, `table-ns!`), `arbace/go/repl.ae` (`listed-generic!`) | a listed package's generic function or generic type's method (`sync.OnceValue`, `atomic.Pointer.Load`) gets its var on first use (S9) as a `GoGenericFn` over the digest's declaration, its instances interpreted from the digest's forms (§9.3); not among the vars `ns-publics` makes |
 | interop | `arbace/lang/GoInterp.ae` (`methodVar`) | `(.Push l 3)` on an instance's value finds the var `List.Push` (the instance's name without its type arguments), a `GoGenericFn` |
-| tests | `test/goi/repl.ae`, `test/oracle/forms/go.ae` | the survey's §4.7 at the REPL (below); 14 oracle cases recorded by goi |
+| tests | `test/goi/repl.ae`, `test/oracle/forms/go.ae` | the survey's §4.7 at the REPL (below); 21 oracle cases recorded by goi |
 
 **Arbace values as operands (§4.3 of the survey, as built).** As the survey's table, with three
 differences: a keyword or a symbol is typed `any` (a Java object); a `GoFn` (a Go func value in
