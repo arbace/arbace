@@ -11,7 +11,7 @@ SHELL := /bin/bash
 CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests smoke repl fixpoint goi-table goi-table-size \
-  box box-smoke box-oracle box-suite box-tools box-rebuild mac-bundle arm64-vm-check \
+  box box-smoke box-oracle box-suite box-goi box-tools box-rebuild mac-bundle arm64-vm-check \
   gate gate-full suite oracle diffcheck generated-check verify jdk-verify edge-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text \
   repr-java-roundtrip repr-java-text repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check alpine-check clean \
@@ -55,10 +55,12 @@ box-smoke: ## the box's smoke test on /dev/kvm (bin/arbace-go --smoke --box)
 	bin/arbace-go --smoke --box
 box-oracle: ## the oracle's subset in the box, against its known mismatches (as bin/gate --full)
 	ARBACE_BOX_NET=loopback bin/oracle check 'target/arbace-go/box-amd64/arbace-box -' -j 8 \
-	  --timeout 900 --exclude forms/files. --exclude forms/processes. --exclude forms/go. \
+	  --timeout 900 --exclude forms/files. --exclude forms/processes. \
 	  --expected test/oracle/known-go-box-amd64.edn
 box-suite: ## Clojure's suite's subset in the box (bin/box-suite; after `make suite`)
 	bin/box-suite
+box-goi: ## goi's check in the box: test/goi/box.txt's programs in the guest against gc (bin/goi check --box, as bin/gate --full)
+	bin/goi check --box
 box-tools: ## the tool guests (gc, the linker, the assembler) from tamago/cmd (bin/box-tools build)
 	bin/box-tools build
 box-rebuild: ## Arbace rebuilt inside the box, compared byte for byte; stops on stale executables (bin/box-rebuild)
