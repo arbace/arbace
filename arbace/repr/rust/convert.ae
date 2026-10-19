@@ -914,7 +914,10 @@
                        (lst head l r)))
             Unary (let [op (arg k 1) x (arg k 2) xk (fld x :kind)]
                     (if (and (= 'Neg op) (empty? (fld x :attrs)) (= 'Lit (hd xk))
-                             (let [v (lit-of (arg xk 1))] (and (number? v) (not (zero? v)))))
+                             (let [v (lit-of (arg xk 1))] (and (number? v) (not (zero? v))))
+                             ;; the literal on the - line (an expression file of -'s on lines of
+                             ;; their own: RR6)
+                             (= (line-of x) (sline s)))
                       (let [v (lit-of (arg xk 1)) n (-' v)]
                         ;; a negation that fits a long is one: the forms text reads it back as one
                         (if (and (not (double? v)) (<= Long/MIN_VALUE n Long/MAX_VALUE)) (long n) n))
@@ -1727,7 +1730,10 @@
   [dump {:keys [crate crate-type kind rel corpus src-lines pin full src ns-crate has-lib]}]
   (let [cfg (dumped dump 'rsdump/config)
         err (dumped dump 'rsdump/error)
-        tree (first (filter #(and (seq? %) (= 'Crate (first %))) dump))
+        tree (first (filter #(and (seq? %) (contains? #{'Crate 'Expr} (first %))) dump))
+        ;; an expression file of include! (RR6, SPEC RSS6): its tree an Expr (rsdump dump --expr)
+        expr? (= 'Expr (first tree))
+        kind (if expr? :include-expr kind)
         warnings (atom {})]
     (when err (throw (ex-info (str "the helper failed: " err) {})))
     (when-not cfg (throw (ex-info "not a dump of tools/rsdump" {})))
@@ -1755,12 +1761,12 @@
             l0 (first src-lines)
             ;; rustc_lexer's strip_shebang: #! not followed by [, white space and comments
             ;; between (#!\n[attr] is an inner attribute: RR5)
-            shebang (when (and l0 (str/starts-with? l0 "#!")
+            shebang (when (and (not expr?) l0 (str/starts-with? l0 "#!")
                                (not (str/starts-with? (skip-blank (subs (str/join "\n" src-lines) 2)) "[")))
                       l0)
             fm-start (if shebang 1 0)
             ;; the opening fence after blank lines, an infostring after it (RR5)
-            fm-open (first (drop-while #(str/blank? (nth src-lines %)) (range fm-start (count src-lines))))
+            fm-open (when-not expr? (first (drop-while #(str/blank? (nth src-lines %)) (range fm-start (count src-lines)))))
             fence (some->> (when fm-open (nth src-lines fm-open)) (re-find #"^(-{3,})") second)
             ;; the closing fence at the start of its line (an indented one is text: RR5)
             fm-end (when fence (some (fn [i] (when (= fence (str/trimr (nth src-lines i))) i)) (range (inc fm-open) (count src-lines))))
@@ -1770,11 +1776,14 @@
                                           (when frontmatter [:frontmatter frontmatter])
                                           ;; its line, when blank lines precede it
                                           (when (and frontmatter (> fm-open fm-start)) [:frontmatter-line (inc fm-open)])))
-            body (concat (map #(attr-form % true) (inner-attrs attrs))
-                         (mapcat #(item-forms % :top) (fld tree :items)))
+            body (if expr?
+                   ;; one form, the expression (no inner attributes: an expression has none)
+                   [(attach (list 'rs/expr (expr-form tree :plain)) (line-of tree))]
+                   (concat (map #(attr-form % true) (inner-attrs attrs))
+                           (mapcat #(item-forms % :top) (fld tree :items))))
             body (pr/implicit-parens (vec body))
             ;; a file of no item or attribute: its inner span (the end of the file) at its line
-            el (when (empty? body) (sline (fld (fld tree :spans) :inner_span)))
+            el (when (and (empty? body) (not expr?)) (sline (fld (fld tree :spans) :inner_span)))
             file-form (if (and el (> el 1)) (vary-meta file-form assoc :rs/close el) file-form)
             forms (vec (concat [(list 'ns ns-name (list :require ['arbace.rust :as 'rs])) file-form] body))
             lexed (dumped dump 'rsdump/tokens)

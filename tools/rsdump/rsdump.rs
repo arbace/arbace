@@ -6,9 +6,15 @@
 // rustc's `-Zunpretty=ast-tree` and rust-lisp's `check.rs` its models. A `rustc_private` driver on
 // the host's rustc, linked dynamically to its `librustc_driver`; built by `bin/repr-rust helper`.
 //
-//   rsdump dump  [--full] -o DIR --edition E [--helper-hash H] FILE...   DIR/FILE.edn per file
-//   rsdump tree  -o DIR --edition E FILE...                      DIR/FILE.tree, DIR/FILE.lines
-//   rsdump lines --edition E FILE                                the lines on standard output
+//   rsdump dump  [--full] [--expr] -o DIR --edition E [--helper-hash H] FILE...   DIR/FILE.edn per file
+//   rsdump tree  [--expr] -o DIR --edition E FILE...             DIR/FILE.tree, DIR/FILE.lines
+//   rsdump lines [--expr] --edition E FILE                       the lines on standard output
+//   rsdump rustc [--hir FILE] [--mir FILE] -- RUSTC-ARGS...      rustc, the crate's HIR and MIR
+//                                                                written after analysis (RR6)
+//
+// With --expr each FILE is an expression file of include! (RR6, SPEC RSS6): parsed as one
+// expression, as include! in an expression's place parses it (nothing stripped), the dump's tree
+// the expression's `Expr` (its config :expr true).
 //
 // FILE is the path rustc is given (relative to the directory it runs in): the file name of every
 // span. A dump is `(rsdump/config {...})`, the tree, then the facts the tree does not give
@@ -36,8 +42,11 @@
 extern crate rustc_ast;
 extern crate rustc_driver;
 extern crate rustc_errors;
+extern crate rustc_hir;
+extern crate rustc_hir_pretty;
 extern crate rustc_interface;
 extern crate rustc_lexer;
+extern crate rustc_middle;
 extern crate rustc_parse;
 extern crate rustc_session;
 extern crate rustc_span;
@@ -717,7 +726,7 @@ fn normalized(raw: &str) -> String {
 /// `:fm` a front matter, `:x` anything else; with comments_only, the plain comments alone. Before
 /// edition 2024 a guarded string's prefix `#"` is a `#` and what follows lexed again, as rustc's
 /// own lexer does (rustc_parse::lexer, `GuardedStrPrefix`: RR5)
-fn lex(raw: &str, comments_only: bool, ed2024: bool) -> String {
+fn lex(raw: &str, comments_only: bool, ed2024: bool, expr: bool) -> String {
     use rustc_lexer::TokenKind as K;
     let src = normalized(raw);
     let mut out = Vec::new();
@@ -735,13 +744,15 @@ fn lex(raw: &str, comments_only: bool, ed2024: bool) -> String {
         *pos = to;
     };
     let mut start = 0usize;
-    if let Some(n) = rustc_lexer::strip_shebang(&src) {
+    // an expression file of include! (RR6): parsed with nothing stripped (StripTokens::Nothing),
+    // a #! line and --- fences are tokens
+    if let Some(n) = rustc_lexer::strip_shebang(&src).filter(|_| !expr) {
         if !comments_only {
             out.push(format!("[:shebang 1 1 1 {}]", src[..n].chars().count() + 1));
         }
         start = n;
     }
-    let mut fm = rustc_lexer::FrontmatterAllowed::Yes;
+    let mut fm = if expr { rustc_lexer::FrontmatterAllowed::No } else { rustc_lexer::FrontmatterAllowed::Yes };
     loop {
     let mut restart = false;
     for t in rustc_lexer::tokenize(&src[start..], fm) {
@@ -799,29 +810,76 @@ enum Verb {
 struct Run {
     verb: Verb,
     full: bool,
+    /// the file is an expression, as include! in an expression's place parses it (RR6, SPEC
+    /// RSS6): rustc is given an empty crate root, and the file is parsed by rustc's parser as one
+    /// expression with nothing stripped, which must end the file
+    expr: bool,
     file: String,
     /// dump: the dump's text; tree: (tree, lines); lines: the lines
     out: Option<Result<Vec<String>, String>>,
 }
 
 impl Callbacks for Run {
+    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        if self.expr {
+            config.input = rustc_session::config::Input::Str {
+                name: rustc_span::FileName::Custom("rsdump-empty-root".into()),
+                input: String::new(),
+            };
+        }
+    }
+
     fn after_crate_root_parsing(&mut self, compiler: &Compiler, krate: &mut rustc_ast::Crate) -> Compilation {
         if compiler.sess.dcx().has_errors().is_some() {
             self.out = Some(Err("rustc's parser reported errors".into()));
             return Compilation::Stop;
         }
-        let text = format!("{:?}", krate);
+        let parsed_expr = if self.expr {
+            let psess = &compiler.sess.psess;
+            let mut p = match rustc_parse::new_parser_from_file(psess, std::path::Path::new(&self.file), rustc_parse::lexer::StripTokens::Nothing, None) {
+                Ok(p) => p,
+                Err(es) => {
+                    for e in es {
+                        e.cancel();
+                    }
+                    self.out = Some(Err("rustc's lexer rejects the file".into()));
+                    return Compilation::Stop;
+                }
+            };
+            let e = match p.parse_expr() {
+                Ok(e) => e,
+                Err(e) => {
+                    e.cancel();
+                    self.out = Some(Err("rustc's parser does not parse the file as an expression".into()));
+                    return Compilation::Stop;
+                }
+            };
+            if p.token.kind != TokenKind::Eof || compiler.sess.dcx().has_errors_or_delayed_bugs().is_some() {
+                self.out = Some(Err("the file is not one expression (include!'s incomplete_include)".into()));
+                return Compilation::Stop;
+            }
+            Some(e)
+        } else {
+            None
+        };
+        let text = match &parsed_expr {
+            Some(e) => format!("{:?}", e),
+            None => format!("{:?}", krate),
+        };
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match self.verb {
             Verb::Dump => {
                 let tree = transcode(&text, &self.file, Mode::Dump);
                 let psess = ParseSess::with_dcx(DiagCtxt::new(Box::new(SilentEmitter)), compiler.sess.psess.clone_source_map());
                 let mut f = Facts { psess: &psess, file: self.file.clone(), mac: Vec::new(), meta: Vec::new() };
-                f.visit_crate(krate);
+                match &parsed_expr {
+                    Some(e) => f.visit_expr(e),
+                    None => f.visit_crate(krate),
+                }
                 let raw = std::fs::read_to_string(&self.file).unwrap_or_default();
                 let lexed = if self.full {
-                    format!("(rsdump/tokens [{}])", lex(&raw, false, compiler.sess.edition().at_least_rust_2024()))
+                    format!("(rsdump/tokens [{}])", lex(&raw, false, compiler.sess.edition().at_least_rust_2024(), self.expr))
                 } else {
-                    format!("(rsdump/comments [{}])", lex(&raw, true, compiler.sess.edition().at_least_rust_2024()))
+                    format!("(rsdump/comments [{}])", lex(&raw, true, compiler.sess.edition().at_least_rust_2024(), self.expr))
                 };
                 vec![tree, format!("(rsdump/mac-exprs [{}])", f.mac.join("\n ")), format!("(rsdump/meta [{}])", f.meta.join("\n ")), lexed]
             }
@@ -862,8 +920,118 @@ fn write_file(path: &str, text: &str) {
     std::fs::write(path, text).unwrap_or_else(|e| panic!("rsdump: cannot write {path}: {e}"));
 }
 
+// ---- the lowered and code levels (SPEC §11.1, 3 and 4; RR6): rustc run as a driver, writing the
+// crate's HIR and MIR after analysis, then going on to code generation as rustc would
+
+/// `rsdump rustc [--hir FILE] [--mir FILE] -- ARGS...`: rustc with ARGS (its own outputs, an rlib,
+/// objects, as ARGS say), and after analysis the crate's HIR as `-Zunpretty=hir` prints it but
+/// without the root file's comments (`rustc_hir_pretty::print_crate` given no source text: the
+/// comments it interleaves are the source's, which mode :lines does not print), and its MIR as
+/// `-Zunpretty=mir` prints it (`write_mir_pretty`), but a `#[rustc_comptime]` function's body
+/// taken from `mir_for_ctfe`, which 1.99.1's `write_mir_pretty` asks of `optimized_mir` and
+/// panics (core's `intrinsics::needs_drop`); paths printed in full (rustc's own callbacks trim
+/// them, which its diagnostics' check refuses when no diagnostic follows)
+struct Compile {
+    hir: Option<String>,
+    mir: Option<String>,
+}
+
+fn write_mir<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, w: &mut dyn std::io::Write) -> std::io::Result<()> {
+    use rustc_hir::ConstContext;
+    use rustc_hir::def::DefKind;
+    use rustc_middle::mir::Const;
+    use rustc_middle::mir::pretty::MirWriter;
+    use rustc_middle::ty::InstanceKind;
+    let writer = MirWriter::new(tcx);
+    writeln!(w, "// WARNING: This output format is intended for human consumers only")?;
+    writeln!(w, "// and is subject to change without notice. Knock yourself out.")?;
+    writeln!(w, "// HINT: See also -Z dump-mir for MIR at specific points during compilation.")?;
+    let mut first = true;
+    for &def_id in tcx.mir_keys(()) {
+        if first {
+            first = false;
+        } else {
+            writeln!(w)?;
+        }
+        let render_body = |w: &mut dyn std::io::Write, body| -> std::io::Result<()> {
+            writer.write_mir_fn(body, w)?;
+            for body in tcx.promoted_mir(def_id) {
+                writeln!(w)?;
+                writer.write_mir_fn(body, w)?;
+            }
+            Ok(())
+        };
+        if matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn)
+            && matches!(tcx.hir_body_const_context(def_id), Some(ConstContext::Const { .. }))
+        {
+            // a `#[rustc_comptime]` function: only its MIR for CTFE
+            writeln!(w, "// MIR FOR CTFE")?;
+            render_body(w, tcx.mir_for_ctfe(def_id))?;
+        } else if tcx.is_const_fn(def_id) {
+            render_body(w, tcx.optimized_mir(def_id))?;
+            writeln!(w)?;
+            writeln!(w, "// MIR FOR CTFE")?;
+            writer.write_mir_fn(tcx.mir_for_ctfe(def_id), w)?;
+        } else if let Some((val, ty)) = tcx.trivial_const(def_id) {
+            let name = {
+                let _g = rustc_middle::ty::print::ForcedImplGuard::new();
+                tcx.def_path_str(def_id)
+            };
+            writeln!(w, "const {}: {} = const {};", name, ty, Const::Val(val, ty))?;
+        } else {
+            render_body(w, tcx.instance_mir(InstanceKind::Item(def_id.to_def_id())))?;
+        }
+    }
+    Ok(())
+}
+
+impl Callbacks for Compile {
+    fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: rustc_middle::ty::TyCtxt<'tcx>) -> Compilation {
+        if let Some(p) = &self.hir {
+            let sm = tcx.sess.source_map();
+            let attrs = |id| tcx.hir_attrs(id);
+            let name = tcx.sess.io.input.file_name(tcx.sess);
+            let ann = &tcx as &dyn rustc_hir::intravisit::HirTyCtxt<'_>;
+            let text = rustc_hir_pretty::print_crate(sm, tcx.hir_root_module(), name, String::new(), &attrs, &ann as &dyn rustc_hir_pretty::PpAnn);
+            write_file(p, &text);
+        }
+        if let Some(p) = &self.mir {
+            let mut out = Vec::new();
+            write_mir(tcx, &mut out).unwrap_or_else(|e| panic!("rsdump: MIR of {p}: {e}"));
+            write_file(p, &String::from_utf8_lossy(&out));
+        }
+        Compilation::Continue
+    }
+}
+
+fn compile(args: &[String]) -> ! {
+    let mut c = Compile { hir: None, mir: None };
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--hir" => {
+                c.hir = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--mir" => {
+                c.mir = args.get(i + 1).cloned();
+                i += 2
+            }
+            "--" => {
+                i += 1;
+                break;
+            }
+            _ => usage(),
+        }
+    }
+    let mut rargs: Vec<String> = vec!["rustc".into()];
+    rargs.extend_from_slice(&args[i..]);
+    let code = rustc_driver::catch_with_exit_code(|| rustc_driver::run_compiler(&rargs, &mut c));
+    std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 })
+}
+
 fn usage() -> ! {
-    eprintln!("usage: rsdump dump [--full] -o DIR --edition E [--helper-hash H] FILE...\n       rsdump tree -o DIR --edition E FILE...\n       rsdump lines --edition E FILE");
+    eprintln!("usage: rsdump dump [--full] [--expr] -o DIR --edition E [--helper-hash H] FILE...\n       rsdump tree [--expr] -o DIR --edition E FILE...\n       rsdump lines [--expr] --edition E FILE\n       rsdump rustc [--hir FILE] [--mir FILE] -- RUSTC-ARGS...");
     std::process::exit(2)
 }
 
@@ -877,6 +1045,9 @@ fn main() {
         std::process::exit(2);
     }
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("rustc") {
+        compile(&args);
+    }
     let verb = match args.get(1).map(|s| s.as_str()) {
         Some("dump") => Verb::Dump,
         Some("tree") => Verb::Tree,
@@ -887,6 +1058,7 @@ fn main() {
     let mut edition = String::from("2024");
     let mut helper_hash = String::new();
     let mut full = false;
+    let mut expr = false;
     let mut files = Vec::new();
     let mut i = 2;
     while i < args.len() {
@@ -901,6 +1073,10 @@ fn main() {
             }
             "--full" => {
                 full = true;
+                i += 1
+            }
+            "--expr" => {
+                expr = true;
                 i += 1
             }
             "--helper-hash" => {
@@ -918,7 +1094,7 @@ fn main() {
     }
     let mut status = 0;
     for file in &files {
-        let mut run = Run { verb, full, file: file.clone(), out: None };
+        let mut run = Run { verb, full, expr, file: file.clone(), out: None };
         let rargs: Vec<String> = vec!["rsdump".into(), "--edition".into(), edition.clone(), file.clone()];
         let caught = rustc_span::fatal_error::catch_fatal_errors(|| rustc_driver::run_compiler(&rargs, &mut run));
         let res = match (caught, run.out.take()) {
@@ -935,9 +1111,9 @@ fn main() {
                 let src = std::fs::read(file).unwrap_or_default();
                 let abs = std::fs::canonicalize(file).map(|p| p.display().to_string()).unwrap_or_default();
                 let config = format!(
-                    "(rsdump/config {{:rustc {} :rustc-commit {} :rustc-driver {} :edition {} :file {} :abs {} :sha256 {} :helper {}}})",
+                    "(rsdump/config {{:rustc {} :rustc-commit {} :rustc-driver {} :edition {} :file {} :abs {} :sha256 {} :helper {}{}}})",
                     clj_str(&version), clj_str(&commit), clj_str(&driver), edition, clj_str(file), clj_str(&abs),
-                    clj_str(&sha256(&src)), clj_str(&helper_hash)
+                    clj_str(&sha256(&src)), clj_str(&helper_hash), if expr { " :expr true" } else { "" }
                 );
                 let body = match &res {
                     Ok(v) => v.join("\n"),

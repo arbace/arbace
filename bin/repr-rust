@@ -205,13 +205,16 @@ corpus_file() {
 }
 
 # edition_plan CORPUS: as corpus_plan, one line per edition (its name the edition): the helper
-# runs over all the files of an edition at once
+# runs over all the files of an edition at once; the expression files of include! (a crate's
+# :include-expr-files, RR6) on a line of their own, their edition E+expr (run_helper's --expr)
 edition_plan() {
   local f
   f=$(corpus_file "$1")
   arbace_tool -e "(let [c (read-string (slurp \"$f\"))]
-    (doseq [[ed ks] (sort-by key (group-by :edition (:crates c))) :let [fs (mapcat :files ks)] :when (seq fs)]
-      (println (str ed \"\t\" ed \"\t\" (apply str (interpose \" \" fs))))))"
+    (doseq [[ed ks] (sort-by key (group-by :edition (:crates c)))
+            :let [xs (set (mapcat :include-expr-files ks)) fs (remove xs (mapcat :files ks))]
+            [e fs] [[ed fs] [(str ed \"+expr\") (filter xs (mapcat :files ks))]] :when (seq fs)]
+      (println (str ed \"\t\" e \"\t\" (apply str (interpose \" \" fs))))))"
 }
 
 # corpus_plan CORPUS: one line per crate, tab-separated: name, edition, the files (space-separated)
@@ -323,10 +326,12 @@ crates_fetch() {
 }
 
 # run_helper VERB OUT EDITION FILE...: the helper over files in parallel (relative to the current
-# directory); a file it fails on is written as (rsdump/error ...), which the steps after report
+# directory); a file it fails on is written as (rsdump/error ...), which the steps after report;
+# EDITION E+expr: the files are expression files of include! (rsdump --expr, RR6)
 run_helper() {
   local verb=$1 out=$2 ed=$3 flags=(); shift 3
   [ "$verb" = dump ] && [ "${dump_full:-0}" = 1 ] && flags=(--full)
+  case $ed in *+expr) ed=${ed%+expr}; flags+=(--expr) ;; esac
   printf '%s\n' "$@" | xargs -r -P "$jobs" -n 8 "$helper" "$verb" "${flags[@]}" -o "$out" --edition "$ed" --helper-hash "sha256:$(helper_hash)"
 }
 
@@ -360,9 +365,11 @@ all_corpora="rustc-1.99.1 rustc-1.99.1-library rustc-1.99.1-compiler crates-2026
 
 roundtrip() {
   local cs=() only="" iface=0 text=0 text_only=0 pretty=0 pretty_only=0 st=0 c
-  run=0; run_only=0; std=0
+  run=0; run_only=0; std=0; code=0; code_only=0
   while [ $# -gt 0 ]; do
     case $1 in
+      --code) code=1; shift ;;
+      --code-only) code=1; code_only=1; shift ;;
       --only) only=$2; shift 2 ;;
       --run) run=1; shift ;;
       --run-only) run=1; run_only=1; shift ;;
@@ -398,8 +405,9 @@ roundtrip() {
 roundtrip_one() {
   local c=$1 st=0
   corpus_root "$c"
-  if [ "${run_only:-0}" = 1 ]; then
-    run_level "$c" "$only" || st=1
+  if [ "${run_only:-0}" = 1 ] || [ "${code_only:-0}" = 1 ]; then
+    if [ "${run_only:-0}" = 1 ]; then run_level "$c" "$only" || st=1; fi
+    if [ "${code_only:-0}" = 1 ]; then code_level "$c" "$only" || st=1; fi
     return $st
   fi
   if [ "$text_only" = 1 ] || [ "$pretty_only" = 1 ]; then
@@ -453,6 +461,9 @@ roundtrip_one() {
   fi
   if [ "${run:-0}" = 1 ]; then
     run_level "$c" "$only" || st=1
+  fi
+  if [ "${code:-0}" = 1 ]; then
+    code_level "$c" "$only" || st=1
   fi
   return $st
 }
@@ -516,6 +527,76 @@ run_level() {
   rm -rf "$rb/jobs" "${names[@]/#/$rb/}"
   arbace_tool -m arbace.repr.rust compare-run --results "$rb/results.tsv" --known "$root/test/rust/roundtrip-$c-run" \
     --sides "$(IFS=,; echo "${names[*]}")" --report "$rb.report.edn" --times "build and run $((t1 - t0))"
+}
+
+# code_plan CORPUS [ONLY]: the lowered and code levels' units (bin/lib/repr-rust/code-unit's
+# PLAN, fields separated by 0x1f: id, root, kind, rustc's arguments, the environment): each crate
+# of the corpus with an :iface (its root, edition, type, --cfg flags, environment, the externs of
+# the interface level, an rlib each: kind lib), and each program of its :programs (the UI suite's,
+# built as the behaviour level builds them, its object: kind obj)
+code_plan() {
+  local c=$1 only=${2:-} name ed type croot externs cfgs envs libdir lib a m n e
+  if [ "$corpus_kind" != crates ]; then
+    while IFS='|' read -r name ed type croot externs cfgs envs libdir; do
+      if [ -n "$only" ] && ! [[ $name =~ $only ]]; then continue; fi
+      lib=$host_sysroot/lib/rustlib/$target/lib
+      a="--edition $ed --crate-name $name --crate-type $type -Zforce-unstable-if-unmarked $croot"
+      if [ "$libdir" = rustc-dev ]; then lib=$apks/rustc-dev/usr/lib/rustlib/$target/lib; a+=" -L dependency=$lib"; fi
+      for n in $externs; do
+        case $n in
+          *=*) a+=" --extern ${n%%=*}=$lib/${n#*=}" ;;
+          *) m=("$lib/lib$n"-*.rmeta); a+=" --extern $n=${m[0]}" ;;
+        esac
+      done
+      for n in $cfgs; do a+=" --cfg ${n//\"/\\x22}"; done
+      printf '%s\x1f%s\x1flib\x1f%s\x1f%s\n' "$name" "$croot" "$a" "$envs"
+    done < <(iface_plan "$c")
+  fi
+  arbace_tool -m arbace.repr.rust run-plan --corpus "$(corpus_file "$c")" -o "$work/code/$c.programs" ${only:+--only "$only"}
+  while IFS=$'\x1f' read -r n f ed a _ _ e; do
+    printf '%s\x1f%s\x1fobj\x1f%s\x1f%s\n' "$n" "$f" "--edition $ed $f -A unused -A internal_features${a:+ $a}" "$e"
+  done < "$work/code/$c.programs"
+  rm -f "$work/code/$c.programs"
+}
+
+# code_level CORPUS [ONLY]: the lowered and code levels (SPEC §11.1, 3 and 4; RR6): each unit of
+# code_plan built by the helper (rsdump rustc: the crate's HIR and MIR written after analysis,
+# then its code generated) from the originals and from the printed files of each layout this run
+# printed (mode :lines' $work/cand/CORPUS/, the full layout's CORPUS-full/ with --text, the pretty
+# layout's CORPUS-pretty/ with --pretty), each a mirror of the source tree with every corpus file
+# (but the .rs files a library reads as text) a link to its printed file ($work/code/CORPUS/LAYOUT/),
+# by bin/lib/repr-rust/code-unit: the HIR's and the MIR's texts and the objects compared, positions
+# normalized as the layout keeps them (mode :full none, mode :lines their columns, the pretty
+# layout their lines and columns too), the rlibs' metadata compared only in mode :full; known
+# differences test/rust/roundtrip-CORPUS-code-LAYOUT-known.edn; report $work/code/CORPUS.report.edn.
+# REPR_RUST_CODE_JOBS units at a time (default 8, a crate's build holds gigabytes; the UI suite's
+# programs: REPR_RUST_JOBS)
+code_level() {
+  local c=$1 only=${2:-} cb=$work/code/$1 t0 t1 n l sides=() names=() cand norm cj
+  t0=$(date +%s)
+  rm -rf "$cb" "$cb.report.edn"; mkdir -p "$cb"
+  code_plan "$c" "$only" > "$cb/plan.tsv"
+  n=$(wc -l < "$cb/plan.tsv")
+  if [ "$n" = 0 ]; then echo "== repr-rust roundtrip $c: lowered and code levels: nothing to build" >&2; return 0; fi
+  arbace_tool -e "(doseq [k (:crates (read-string (slurp \"$(corpus_file "$c")\"))) :let [t (set (:text-files k))] f (:files k) :when (not (t f))] (println f))" > "$cb/files.txt"
+  for l in lines full pretty; do
+    case $l in
+      lines) cand=$work/cand/$c; norm=lines ;;
+      full) [ "$text" = 1 ] || continue; cand=$work/cand/$c-full; norm=exact ;;
+      pretty) [ "$pretty" = 1 ] || continue; cand=$work/cand/$c-pretty; norm=pos ;;
+    esac
+    [ -d "$cand" ] || { echo "repr-rust: no $cand (the level that prints it first)" >&2; return 1; }
+    mirror "$srcroot" "$cand" "$cb/$l" "$cb/files.txt"
+    sides+=("$l:$cb/$l:$norm"); names+=("$l")
+  done
+  cj=${REPR_RUST_CODE_JOBS:-8}
+  grep -q $'\x1flib\x1f' "$cb/plan.tsv" || cj=$jobs
+  echo "== repr-rust roundtrip $c: lowered and code levels: $n units, HIR, MIR and objects of the originals and of the printed files (${names[*]}), $cj at a time" >&2
+  seq 1 "$n" | xargs -P "$cj" -I{} "$root/bin/lib/repr-rust/code-unit" "$cb/plan.tsv" {} "$cb/jobs" "orig:$srcroot" "${sides[@]}" > "$cb/results.tsv"
+  t1=$(date +%s)
+  rm -rf "$cb/jobs" "${names[@]/#/$cb/}"
+  arbace_tool -m arbace.repr.rust compare-code --results "$cb/results.tsv" --known "$root/test/rust/roundtrip-$c-code" \
+    --sides "$(IFS=,; echo "${names[*]}")" --report "$cb.report.edn" --times "build $((t1 - t0))"
 }
 
 # build_std LIB DEST: std built from the library tree LIB by Cargo's -Zbuild-std (a scratch
@@ -871,9 +952,16 @@ case $cmd in
           # shellcheck disable=SC2046
           (cd "$srcroot" && run_helper dump "$d" "$e" $(awk -v e="$e" '$1 == e { print $2 }' "$d.editions")) 2>> "$d.err" || true
         done
-        arbace_tool "$root/test/rust/corpus_make.ae" ui "$srcroot" "$d" > "$root/test/rust/corpus-rustc-1.99.1-ui.edn.new" &&
+        # the expression files of include! (RR6): the candidates dumped as expressions
+        arbace_tool "$root/test/rust/corpus_make.ae" ui-expr-candidates "$srcroot" "$d" > "$d.candidates"
+        rm -rf "$d-expr"; mkdir -p "$d-expr"
+        for e in $(cut -d' ' -f1 "$d.candidates" | sort -u); do
+          # shellcheck disable=SC2046
+          (cd "$srcroot" && run_helper dump "$d-expr" "$e+expr" $(awk -v e="$e" '$1 == e { print $2 }' "$d.candidates")) 2>> "$d.err" || true
+        done
+        arbace_tool "$root/test/rust/corpus_make.ae" ui "$srcroot" "$d" "$d-expr" > "$root/test/rust/corpus-rustc-1.99.1-ui.edn.new" &&
           mv "$root/test/rust/corpus-rustc-1.99.1-ui.edn.new" "$root/test/rust/corpus-rustc-1.99.1-ui.edn"
-        rm -rf "$d"
+        rm -rf "$d" "$d-expr"
         echo "test/rust/corpus-rustc-1.99.1-ui.edn" ;;
       *) echo "usage: bin/repr-rust corpus fetch|list [CORPUS] | corpus make-ui" >&2; exit 2 ;;
     esac ;;
