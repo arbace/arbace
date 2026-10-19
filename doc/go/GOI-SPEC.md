@@ -2847,6 +2847,15 @@ sumSq 1e6 22 ms) and GR6's own spread. The executable is 135,557,280 bytes again
   holds `fact(9)`'s 362,880 frames; goi's Go stack per interpreted call is larger, so a run that
   deep would need `debug.SetMaxStack` raised too). *Recommended: (a)*: one program of 1,178.
 
+**Checks** (this branch, amd64): the essential `bin/gate` passed (14 m 58 s; goi's essential
+check 576 of 576, the suite, the oracle 22,620 of 22,673 against its 53 known, the differential
+check, the generated variants); `bin/arbace-go --fixpoint` holds (G1 = G2 = G3, 135,557,280
+bytes); `bin/goi check`, `bin/goi test --gc` (15 programs, 68 REPL checks, §1.4's session, the
+checker's 19 assertions and its 10 files of invalid forms, 68 messages, gc's), `bin/goi annotations` (the five corpora as GR6's:
+zero errors, every declaration checked); the box: `bin/goi check --box` (565 of 566, one known),
+the box's oracle (22,166 of 22,220, its 54 known: GR6's 53 and GC40's), its smoke test (113
+checks).
+
 **Remaining** (for GR7's other parts, or the box's): the check in the arm64 box (KVM/arm64 in the
 emulated aarch64 VM, `bin/box-arm64-vm`, and Hypervisor.framework on the Mac: out of GR7a's
 scope; `bin/goi check --box` takes `GOI_BOX_EXE`, but the VM's runs would need its own driver and
