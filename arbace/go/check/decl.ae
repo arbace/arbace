@@ -50,26 +50,148 @@
   (when e/*decl* (vswap! e/*decl* update :later (fnil conj []) f)))
 
 (defn verify!
-  "go/types' verify: an error at form f for the first type argument of targs that does not
+  "go/types' verify, true when the type arguments satisfy their constraints: else false, with
+  an error at form f for the first type argument of targs that does not
   satisfy its type parameter's constraint (the constraints with the type arguments substituted,
   and extra's: a generic method's receiver type parameters)."
   [f tps targs extra]
   (let [m (merge extra (zipmap tps targs))]
+    ;; true when satisfied
     (loop [i 0]
-      (when (< i (count tps))
+      (if (< i (count tps))
         (let [tp (nth tps i)
               b (subst (or (:bound (t/info tp)) [:interface [] nil]) m)]
           (if-let [cause (t/satisfies-cause (nth targs i) b)]
-            (err! f :InvalidTypeArg "%s" cause)
-            (recur (inc i))))))))
+            (do (err! f :InvalidTypeArg "%s" cause) false)
+            (recur (inc i))))
+        true))))
+
+;;; Instantiation cycles (mono.go: the monomorphization check)
+
+(def ^:dynamic *mono*
+  "The package's graph of type parameters' flows (go/types' monoGraph), a volatile
+  {:vertices [{:weight :pre :len :obj :named}] :edges [{:dst :src :weight :line :file :type}]
+  :canon {tparam tparam} :idx {object index}}."
+  nil)
+
+(defn mono-canon!
+  "go/types' recordCanon: a method's receiver type parameter stands for its type's."
+  [mpar tpar]
+  (when *mono* (vswap! *mono* assoc-in [:canon mpar] tpar)))
+
+(defn- mono-vertex! [k obj named]
+  (let [g *mono*]
+    (or (get (:idx @g) k)
+        (let [i (count (:vertices @g))]
+          (vswap! g #(-> % (update :vertices conj {:weight 0 :pre -1 :len 0 :obj obj :named named}) (assoc-in [:idx k] i)))
+          i))))
+
+(defn- mono-edge! [dst src w line ty]
+  (vswap! *mono* update :edges conj {:dst dst :src src :weight w :line line :file (:name e/*gofile*) :type ty}))
+
+(defn- tparam-vertex! [tp]
+  (let [tp (get (:canon @*mono*) tp tp)
+        x (:obj (t/info tp))]
+    (mono-vertex! (or x tp) x false)))
+
+(defn- local-named-vertex!
+  "go/types' localNamedVertex: a type declared in a generic function, parameterized by the type
+  parameters in scope where it is declared (:ambient), or -1."
+  [nt]
+  (let [i (t/info nt) x (:obj i)]
+    (cond
+      (or (not (:local i)) (nil? x) (not= (:pkg i) (code/pkg-path))) -1
+      (contains? (:idx @*mono*) x) (get (:idx @*mono*) x)
+      (empty? (:ambient i)) (do (vswap! *mono* assoc-in [:idx x] -1) -1)
+      :else
+      (let [v (mono-vertex! x x true)]
+        (doseq [tp (:ambient i)] (mono-edge! v (tparam-vertex! tp) 1 (o x :line) tp))
+        v))))
+
+(defn- mono-assign!
+  "go/types' assign: type argument targ flowing into type parameter tpar at line."
+  [line tpar targ]
+  (when (= (some-> (:obj (t/info tpar)) (o :pkg)) (code/pkg-path))
+    (let [flow (fn [src ty] (mono-edge! (tparam-vertex! tpar) src (if (= ty targ) 0 1) line targ))]
+      (letfn [(walk [ty]
+                (cond
+                  (keyword? ty) nil
+                  (t/tparam? ty) (when (= (some-> (:obj (t/info ty)) (o :pkg)) (code/pkg-path)) (flow (tparam-vertex! ty) ty))
+                  (t/named? ty) (let [i (t/info ty)
+                                      src (local-named-vertex! (or (:origin i) ty))]
+                                  (when (>= src 0) (flow src ty))
+                                  (doseq [a (:targs i)] (walk a)))
+                  :else
+                  (case (nth ty 0)
+                    (:array) (walk (nth ty 2))
+                    (:chan) (walk (nth ty 2))
+                    (:slice :pointer) (walk (nth ty 1))
+                    :map (do (walk (nth ty 1)) (walk (nth ty 2)))
+                    :interface (doseq [m (nth ty 1)] (walk (:type m)))
+                    :func (do (doseq [p (nth ty 1)] (walk p)) (doseq [r (nth ty 2)] (walk r)))
+                    :struct (doseq [fd (nth ty 1)] (walk (:type fd)))
+                    nil)))]
+        (walk targ)))))
+
+(defn- mono-record!
+  "go/types' recordInstance: the type arguments of an instantiation (form f; its explicit type
+  arguments' lines, else f's) flowing into its type parameters."
+  [f tps targs]
+  (when *mono*
+    (let [xs (when (seq? f) (cond (= 'inst (first f)) (vec (nnext f)) (symbol? (first f)) (vec (rest f))))
+          l (or (code/fline f) (e/current-line))]
+      (doseq [[i tp] (map-indexed vector tps)]
+        (mono-assign! (or (code/fline (get xs i)) l) tp (nth targs i))))))
+
+(defn monomorph!
+  "go/types' monomorph: an instantiation cycle (a path of flows through every vertex) reported
+  at its type parameter: \"instantiation cycle:\" and a line per flow."
+  []
+  (when-let [g *mono*]
+    (let [{:keys [edges]} @g
+          vs (java.util.ArrayList. ^java.util.Collection (:vertices @g))
+          n (count vs)
+          report! (fn [v]
+                    (let [stack (loop [v v stack [] seen #{}]
+                                  (if (contains? seen v)
+                                    (vec (drop-while #(not= % v) stack))
+                                    (recur (:src (nth edges (:pre (.get vs v)))) (conj stack v) (conj seen v))))
+                          v0 (first stack)
+                          obj0 (:obj (.get vs v0))]
+                      (e/error! (or (o obj0 :file) (:name e/*gofile*)) (o obj0 :line) :InvalidInstanceCycle
+                                (apply str "instantiation cycle:"
+                                       (for [v stack
+                                             :let [ed (nth edges (:pre (.get vs v)))
+                                                   d (.get vs (:dst ed))]]
+                                         (str "\n\t" (:file ed) ":" (:line ed) ": " (o (:obj d) :name)
+                                              (if (:named d) " implicitly parameterized by " " instantiated as ")
+                                              (t/type-str (:type ed))))))))]
+      (loop []
+        (let [r (reduce (fn [again [i ed]]
+                          (let [src (.get vs (:src ed))
+                                dst (.get vs (:dst ed))
+                                w (+ (long (:weight src)) (long (:weight ed)))]
+                            (if (<= w (long (:weight dst)))
+                              again
+                              (let [len (inc (long (:len src)))]
+                                (.set vs (:dst ed) (assoc dst :pre i :len len :weight w))
+                                (if (= len n)
+                                  (reduced [:loop (:dst ed)])
+                                  true)))))
+                        false (map-indexed vector edges))]
+          (cond
+            (vector? r) (report! (second r))
+            r (recur)))))))
 
 (defn verify-later!
-  "Verifies the type arguments of an instantiation after the current declaration."
+  "Verifies the type arguments of an instantiation after the current declaration; satisfied, they
+  are recorded for the monomorphization check."
   ([f tps targs] (verify-later! f tps targs nil))
   ([f tps targs extra]
    (when (and f (seq tps) (every? t/valid? targs))
      (let [l e/*line* fi e/*gofile*]
-       (later! (fn [] (binding [e/*line* (or (code/fline f) l) e/*gofile* (or e/*gofile* fi)] (verify! f tps targs extra))))))))
+       (later! (fn [] (binding [e/*line* (or (code/fline f) l) e/*gofile* (or e/*gofile* fi)]
+                        (when (verify! f tps targs extra) (mono-record! f tps targs)))))))))
 
 (def ^:private instances (java.util.concurrent.ConcurrentHashMap.))
 
@@ -521,6 +643,7 @@
                           [s tys] (code/tparam-scope cx rnames (vec (repeat (count rnames) nil)))]
                       ;; the bounds: the type's, its type parameters renamed to the receiver's
                       (when (= (count gtps) (count tys))
+                        (doseq [[g r] (map vector gtps tys)] (mono-canon! r g))
                         (let [m (zipmap gtps tys)]
                           (doseq [[g r] (map vector gtps tys)]
                             (t/update-info! r assoc :bound (subst (or (:bound (t/info g)) [:interface [] nil]) m)))))

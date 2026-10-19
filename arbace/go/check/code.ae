@@ -129,6 +129,49 @@
     (let [d e/*decl* fi e/*gofile*]
       (vswap! v conj (fn [] (binding [e/*decl* d e/*gofile* fi] (valid-type! nt)))))))
 
+;; gc's noder (cmd/compile/internal/noder/irgen.go, cycleFinder): after type checking without
+;; errors, an anonymous interface that embeds a type whose declaration is in progress and is
+;; reached again from that type's methods is an infinite type (go.dev/issue/56103)
+(def ^:dynamic *anon-ifaces*
+  "The package's anonymous interfaces embedding a type in progress: a volatile vector of
+  {:named :line :file}, the line of the outermost interface literal holding each."
+  nil)
+
+(def ^:dynamic *iface-outer* "[line file] of the outermost interface literal being checked." nil)
+
+(defn- anon-cycle?
+  "Whether named type nt's methods reach, through types without names, an interface that
+  embeds nt (cycleFinder's hasCycle)."
+  [nt]
+  (let [seen (java.util.HashSet.)]
+    (letfn [(visit [ty]
+              (cond
+                (or (keyword? ty) (t/named? ty) (t/tparam? ty)) false
+                :else
+                (case (nth ty 0)
+                  (:pointer :slice) (visit (nth ty 1))
+                  (:array :chan) (visit (nth ty 2))
+                  :map (or (visit (nth ty 1)) (visit (nth ty 2)))
+                  :struct (boolean (some #(visit (:type %)) (nth ty 1)))
+                  :func (boolean (or (some visit (nth ty 1)) (some visit (nth ty 2))))
+                  :interface (cond
+                               (some #(= % nt) (:embeddeds (meta ty))) true
+                               (not (.add seen ty)) false
+                               :else (boolean (some #(visit (:type %)) (nth ty 1))))
+                  false)))]
+      (let [u (t/under nt)]
+        (and (vector? u) (= :interface (nth u 0))
+             (boolean (some #(visit (:type %)) (nth u 1))))))))
+
+(defn anon-iface-cycles!
+  "Reports gc's noder's anonymous interface cycles, once per outermost interface literal."
+  []
+  (when-let [v *anon-ifaces*]
+    (doseq [[[file line] es] (sort-by (fn [[[f l]]] [(str f) (or l 0)]) (group-by (juxt :file :line) @v))]
+      (when (some #(anon-cycle? (:named %)) es)
+        (e/error! file line :InvalidTypeCycle
+                  "invalid recursive type: anonymous interface refers to itself (see https://go.dev/issue/56103)")))))
+
 ;;; Forms
 
 (defn head-name
@@ -407,11 +450,21 @@
       [(set (filter (fn [[_ ty]] (t/strictly-comparable? ty)) terms)) false]
       [terms comp])))
 
+(declare interface-type*)
+
 (defn interface-type
   "An interface type form (interface element*): its methods, embedded interfaces flattened, and
   its type set (go/types' computeInterfaceTypeSet): the intersection of its elements' terms."
   [cx f]
+  (if *iface-outer*
+    (interface-type* cx f)
+    (binding [*iface-outer* [(or (fline f) (e/current-line)) (:name e/*gofile*)]]
+      (interface-type* cx f))))
+
+(defn- interface-type* [cx f]
   (let [p (pkg-path)
+        ;; an embedded type in progress (a cycle) left out: the method set is incomplete
+        incomplete (volatile! false)
         own (doall
              (for [[i x] (map-indexed vector (rest f)) :when (method-elem? x)]
                (let [n (ident-name (first x))
@@ -433,8 +486,14 @@
                            (not (t/valid? ty)) nil
                            (t/tparam? ty) (do (err! x :MisplacedTypeParam "cannot embed a type parameter") nil)
                            ;; go/types' computeInterfaceTypeSet: an element of an invalid type (a
-                           ;; type whose declaration is in progress: a cycle) is ignored
-                           (not (t/valid? u)) nil
+                           ;; type whose declaration is in progress: a cycle) is ignored; one in
+                           ;; progress noted for gc's anonymous interface cycles
+                           (not (t/valid? u))
+                           (do (when (and (t/named? ty) (:resolving (t/info ty)))
+                                 (vreset! incomplete true)
+                                 (when *anon-ifaces*
+                                   (vswap! *anon-ifaces* conj {:named ty :line (first *iface-outer*) :file (second *iface-outer*)})))
+                               nil)
                            (t/union? u)
                            (if (allow-version? cx 18)
                              {:terms (nth u 1)}
@@ -459,7 +518,9 @@
                    (concat (map #(assoc % :own true) own) (apply concat embedded)))]
     ;; the embedded types for validType (GR7c), as metadata: types are compared by value
     (with-meta [:interface (t/sort-methods (map #(dissoc % :own :line) (vals ms))) (t/make-tset terms comp)]
-               (when (seq etys) {:embeddeds (mapv second etys)}))))
+               (cond-> nil
+                 (seq etys) (assoc :embeddeds (mapv second etys))
+                 @incomplete (assoc :incomplete true)))))
 
 (defn array-length
   "The length of an array type: a constant expression of integer value, representable as int."
@@ -582,7 +643,8 @@
                    (fn [i p]
                      (let [nm (ident-name p)
                            tp (t/new-tparam {:name nm :index i})
-                           x (e/obj {:kind :type :name nm :type tp :tparam true :line (fline p) :file (:name e/*gofile*)})]
+                           x (e/obj {:kind :type :name nm :type tp :tparam true :line (or (fline p) (e/current-line)) :file (:name e/*gofile*)
+                                     :pkg (pkg-path)})]
                        (t/update-info! tp assoc :obj x)
                        (when (not= "_" nm)
                          (if (e/scope-get s nm)
