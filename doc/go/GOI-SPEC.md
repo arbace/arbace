@@ -3117,3 +3117,164 @@ the oracle's `forms/go.ae` (129 of 129). Not run: `bin/gate --full` (its box ora
   asks the bridge for the object's fns (one Java interface call) and converts the arguments by
   their Go types; (b) the fns cached in the proxy. *Recommended: (a)*: a proxy's value must stay
   the object itself for Go's `==` and for the way back to Arbace.
+
+## As built: GR7c (2026-10-19)
+
+GR7c, part of the plan to the milestone `arbace-interprets-go-v1` (doc/AGENDA.md: every program
+of `bin/goi check` passes or is a divergence by design with its reason), is built on branch
+`goi-gr7c` (from main `0ca375c8`, GR7a and GR7b merged). Its proposals are GC85-GC94. GR7b left
+23 errorcheck programs failing and 2 crashing the checker; GR7c ports go/types' (types2's, go1.27.1)
+behaviour and messages for them, from TamaGo's go1.27.1 `src/cmd/compile/internal/types2`
+(`decl.go`, `cycles.go`, `validtype.go`, `initorder.go`, `mono.go`, `gcsizes.go`,
+`builtins.go`, `lookup.go`, `typexpr.go`, `typeset.go`, `literals.go`, `errors.go`) and gc's
+noder (`cmd/compile/internal/noder/irgen.go`, cycleFinder). Where building it found otherwise
+than this text, the text below is the record.
+
+### Cycles
+
+- **cycleError** (`code/cycle-error!`): a cycle of one is `invalid recursive type: T refers to
+  itself` (`invalid cycle in declaration: x refers to itself` for values); a longer one is
+  `invalid recursive type T` with a line per reference, from the cycle's first object in the
+  source around: `\n\tFILE:LINE: T refers to U` (types2's `addf` lines; gc prints
+  `FILE:LINE:COL`, the forms keep lines: GC85).
+- **directCycles** (go1.27's `cycles.go`, `decl/direct-cycles!`): before the declarations are
+  checked, package-level type declarations whose RHS is a type name of the package scope are
+  followed; a cycle (`type a b; type b c; type c b`, `type T T`) is reported and its closing type
+  made invalid (its object black, never declared).
+- **validType** (`code/valid-type!`): a named type containing itself without indirection,
+  through array elements, struct fields, union terms, embedded interfaces and instances' type
+  arguments (`nest` and `path` as go/types keeps them: `A refers to T[A]`), for package-level
+  and local types; the first type of the cycle made invalid. The checks are queued in the order
+  the type declarations began (go/types' `later` at the start of `typeDecl`) and run after the
+  bodies, before the declarations' other laters (GC86). An interface type carries its embedded
+  types as metadata, `:embeddeds`, types being compared by value (GC87). An instance records
+  the position of its first instantiation, for its line in a cycle.
+- **Initialization cycles**: `findPath` and `reportCycle` (initorder.go): `initialization cycle
+  for a` with `a refers to b` lines.
+- **Locals and functions**: a local alias is in scope at its name (`type T = T`: invalid
+  recursive type); a function named while its signature is checked is no cycle (types2 sets
+  the signature first as a guard); where a type is wanted, an object that is no type name is
+  not declared and named with its kind (go1.27: `foo (function) is not a type`).
+- **Interfaces embedding a type in progress** (a cycle): the element is left out (go/types'
+  `computeInterfaceTypeSet` ignores an invalid element) and the interface is marked
+  `:incomplete`, which implements and is implemented (go/types' `hasAllMethods` with invalid
+  embedded fields), so the cycle's error is the only one (`bug251`; GC88).
+- **Anonymous interface cycles** (gc's noder, go.dev/issue/56103): after a check without
+  errors, an anonymous interface embedding a type in progress whose methods reach it again
+  through unnamed types is `invalid recursive type: anonymous interface refers to itself (see
+  https://go.dev/issue/56103)`, once per outermost interface literal (GC89).
+- **Instantiation cycles** (mono.go, `decl/monomorph!`): the graph of type parameters' flows,
+  recorded by every satisfied instantiation (its explicit type arguments' lines), receivers'
+  type parameters canonical to their type's, local types parameterized by the type parameters
+  in scope; checked when no error was found: `instantiation cycle:` with `T instantiated as
+  []T` lines (GC90).
+
+### Constants, sizes and the rest
+
+- **Constants** (GC91): a binary float's exponent is big.Float's (MinExp, MaxExp: int32):
+  below, the value underflows to 0; above, it is go/constant's Unknown (an infinite
+  big.Float); an Unknown operand makes an operation Unknown. go/types' check of a complex
+  divisor whose parts' squares underflow: `division by zero` (`issue20227`, which crashed).
+- **Sizes** (GC92): gcSizes' -1 for sizes and offsets beyond int64 (`Sizeof`, `Offsetsof`,
+  `align` overflowing), `unsafe.Sizeof` and `Offsetof`'s `X is too large` (`issue59190`, which
+  crashed).
+- **Assignability** is go/types' static `implements`: an interface value assigned to an
+  interface whose methods it lacks is an error (GR2's check let it pass); a conversion's cause
+  is assignableTo's (`: need type assertion`, `: I does not implement I2 (missing method N)`);
+  a method found with another case is the `missing method M` cause with `have m(int)` and
+  `want M(int)` (`wrongName`), `unexported method M` when the name is the same.
+- **errpos**: the errors of a constant with an inherited initializer are at its name's line.
+- **An instance with a wrong count of type arguments** is still an instance, its underlying
+  invalid (go/types' `expandUnderlying`; GC93), so further messages name it (`cannot use
+  &concreteF[RCT]{…} (value of type *concreteF[RCT]) as F[RCT] value`); a composite literal of an
+  invalid underlying type uses its elements and is a value of the type; `G[T]{…}` in messages.
+- `complex()` of untyped arguments one of which is not constant converts both to float64 (the
+  shift's `shifted operand 1 (type float64) must be integer`); `array length X must be
+  constant` with the operand once; the version errors of embedding a non-interface type or an
+  interface element before go1.18; a method without a receiver is an error and a function;
+  rune literals print as `strconv.QuoteRune` does (`'\\'`, `'\n'`).
+
+### Results
+
+GR7b's 25 programs:
+
+| program | GR7c |
+|---|---|
+| `bug195`, `bug224`, `bug251`, `bug256`, `bug398`, `bug464`, `issue10975`, `issue20227`, `issue21273`, `issue23823`, `issue28079b`, `issue28079c`, `issue41575`, `issue48301`, `issue48471`, `issue59190`, `initloop.go`, `interface/explicit.go`, `typeparam/issue48711.go`, `typeparam/issue51232.go` | pass (20) |
+| `bug217` | known: two receivers `(a b, c d)` are written `[^b a ^d c]`, a receiver and a parameter (SPEC.md §6.4): the forms say another program (its line 12, a method without a receiver, passes) |
+| `issue11614` | known: `(interface{int})`'s parentheses, which mode `:lines` does not keep (and goi abridges a type literal in an expression as go/types' ExprString does) |
+| `issue75022` | known: an alias named by the type it denotes in an instance (`T[B]` printed `T[C]`), GC49's class; its three other cycles pass |
+| `issue8183` | known: `byte` named `uint8`, GC49's class; its lines (errpos) pass |
+| `goto.go` | known: the line of an else block's brace (`} else {`, a line without a statement), which mode `:lines` does not keep |
+
+Three programs that were unsupported pass: `issue16369`, `issue49368` and `issue56103` (the
+anonymous interface cycles). GR7b's 13 known errorcheck programs were reviewed: `issue43762`
+(rune literals' spelling) now passes, its entry removed; the 12 others stay known for the
+reasons GC49 decided, each checked to fail only for its reason (`byte`, `rune` and aliases'
+names: `alias`, `convert1`, `copy1`, `alias2`; spellings mode `:lines` does not keep:
+`issue19947`, `issue56220` (also its parentheses), `issue31747`; a column: `issue68292`; a
+closing brace's line: `issue23732`; a type spanning lines in a tag: `funcdup2`; the forms of
+an invalid program: `return.go`, `ddd1.go`).
+
+**The check** (`bin/goi check`, 1,837 programs; the reference `test/goi/check-linux-amd64.edn`
+recorded, its diff 29 programs: the 25, `issue43762`, the 3 unsupported): 1,410 pass, 0 fail,
+0 error, 332 unsupported, 77 known, 18 skipped (GR7b: 1,386, 23, 2, 335, 73, 18), 55 s with 16
+jobs. The run programs and directory tests are unchanged. `test/goi/essential.txt` gains, by
+GC50's rule, the 9 errorcheck programs GR7c made pass outside `fixedbugs/` (4) and every fourth
+of `fixedbugs/` (5): 708 programs, 708 pass, 19 s. The checker's tests gain
+`test/goi/errors/cycles.ae` and `mono.ae` (gc agrees, `bin/goi test --gc`); a message's lines of
+positions are left out of their comparison, as `gc_errors.ae` leaves gc's out.
+
+### Measurements
+
+- **Size.** The executable is 136,941,728 bytes against main's 136,446,112: +495,616 (0.36%),
+  the checker's additions.
+- **The annotation check** (§11.4): every corpus as recorded, 0 errors, in 39.4, 35.9, 42.0,
+  29.4 and 25.1 s.
+- **Speed** (GR3's criterion): `bin/goi run test/goi/run go.t.fib bench`, three runs
+  alternating main's executable (`0ca375c8`) and GR7c's, load 11-18:
+
+  | | main | GR7c |
+  |---|---|---|
+  | fib 22 | 2.58-2.91 ms | 2.54-2.84 ms |
+  | sumSq 1e6 | 19.47-22.24 ms | 20.33-21.31 ms |
+  | sieve 1e6 | 69.92-70.32 ms | 69.52-70.10 ms |
+
+  within the runs' noise; the interpreter's core is unchanged.
+
+CHECKS-PLACEHOLDER
+
+### Proposals for the user (each built as recommended)
+
+- **GC85 Positions in a cycle's lines.** (a) as built, `FILE:LINE:` (the forms keep lines; the
+  judge's patterns accept them); (b) columns from mode `:full`'s forms. *Recommended: (a)*.
+- **GC86 When validType runs.** (a) as built, go1.27's directCycles first, then validType queued
+  in the order the type declarations began, after the bodies (which cycle is reported, and from
+  which type, as types2); (b) a later of each declaration in source order (GR7b's: another type
+  of the cycle may be reported). *Recommended: (a)*.
+- **GC87 Embedded types for validType.** (a) as built, an interface type's `:embeddeds` as
+  metadata (types still compared by value, nothing else changes); (b) a fourth element of the
+  interface vector, every match of interface types changed. *Recommended: (a)*.
+- **GC88 An interface embedding a type in progress.** (a) as built, the element left out, the
+  interface `:incomplete` and implementing both ways (only cycles, all reported, lead there);
+  (b) lazy type sets as go/types computes them, a larger change of goi's types. *Recommended:
+  (a)*, (b) when a valid program needs it.
+- **GC89 gc's anonymous interface cycles.** (a) as built, the noder's cycleFinder ported, after
+  a check without errors as gc runs it (three programs pass, `issue56103` among them, which
+  GC46 had made unsupported); (b) unsupported, GC46's rule. *Recommended: (a)*: goi's
+  structural types cannot represent such an infinite type; GC46 stays for gc's other phases.
+- **GC90 The monomorphization check.** (a) as built, mono.go ported, when no error was found;
+  (b) none: an instantiation cycle accepted, and goi's interpreter, which instantiates at run
+  time, would instantiate without end. *Recommended: (a)*.
+- **GC91 Constants beyond big.Float's range.** (a) as built, go/constant's (underflow to 0,
+  overflow Unknown); (b) unbounded exponents (GR7b's; the complex divisor underflows to no zero
+  and the check differs from gc's). *Recommended: (a)*.
+- **GC92 Sizes beyond int64.** (a) as built, gcSizes' -1 and go/types' `is too large`; (b)
+  arbitrary-precision sizes. *Recommended: (a)*: gc's sizes are int64.
+- **GC93 An instance with a wrong count of type arguments.** (a) as built, an instance with an
+  invalid underlying type, as go/types; (b) an invalid type (GR6's: fewer follow-on errors than
+  gc, `issue51232` fails). *Recommended: (a)*.
+- **GC94 The five programs left.** (a) as built, known with their reasons, GC49's classes
+  (the forms of mode `:lines`, `byte` and aliases in goi's types); (b) errorcheck over mode
+  `:full`'s forms and `byte`, `rune` and aliases as types of their own (GC49 (b)), a later step.
+  *Recommended: (a)*.
