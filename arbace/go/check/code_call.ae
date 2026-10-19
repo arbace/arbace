@@ -32,15 +32,11 @@
                     tps (o x :tparams)]
                 (cond
                   (not (t/valid? ty)) (invalid f)
+                  ;; a generic function: instantiated by its call, its assignment or (inst F T...)
                   (seq tps)
-                  (if-let [inst (:inst (meta f))]
-                    (let [targs (mapv #(typexpr cx %) inst)]
-                      (e/generic!)
-                      (if (= (count targs) (count tps))
-                        {:op :func :obj x :mode :value :type (*subst* ty (zipmap tps targs)) :targs targs :form f :line (fline f)}
-                        (invalid f)))
-                    (do (e/unsupported! "type inference")
-                        {:op :func :obj x :mode :value :type ty :form f :line (fline f)}))
+                  (do (e/generic!)
+                      {:op :func :obj x :mode :value :type ty :gtype ty :tparams tps :generic-fn true
+                       :inst-say (inst-say cx f) :inst-form f :form f :line (fline f)})
                   :else {:op :func :obj x :mode :value :type ty :form f :line (fline f)})))
     :builtin {:op :builtin :builtin (o x :name) :unsafe (o x :unsafe) :mode :builtin :type :invalid :form f :line (fline f)}
     :nil {:op :nil :mode :value :type :untyped-nil :form f :line (fline f)}
@@ -165,7 +161,7 @@
           (invalid f))
       :else
       (let [ty (:type x)
-            _ (when (t/tparam? ty) (e/unsupported! "selectors on type parameters"))
+            _ (when (t/tparam? ty) (e/generic!))
             r (t/lookup ty (= :variable (:mode x)) nm (pkg-path))]
         (cond
           (nil? r)
@@ -205,8 +201,16 @@
                 (when (o m :generic) (e/generic!))
                 ;; &x taken implicitly: x's variable is addressed (for the builder: a cell)
                 (when (= :addr adj) (mark-addressed! x))
-                {:op :method :method m :recv x :recv-adjust adj :path (:index r) :via (via-names r)
-                 :mode :value :type (:type d) :form f :line (fline f)})
+                (cond-> {:op :method :method m :recv x :recv-adjust adj :path (:index r) :via (via-names r)
+                         :recv-type (:recv-type r)
+                         :mode :value :type (:type d) :form f :line (fline f)}
+                  ;; a generic method (go1.27): instantiated by its call or (inst x.M T...)
+                  (seq (:tparams d))
+                  (assoc :gtype (:type d) :tparams (:tparams d) :generic-fn true
+                         :rmap (let [[rb] (t/deref-type (:recv-type r))]
+                                 (when (t/named? rb)
+                                   (zipmap (or (o m :rtparams) []) (or (:targs (t/info rb)) []))))
+                         :inst-say (inst-say cx (if (seq? f) (first f) f)) :inst-form (if (seq? f) (first f) f))))
               :iface-method
               (let [m (:obj r)]
                 {:op :iface-method :method m :iface (:iface r) :recv x :path (:index r) :via (via-names r)
@@ -232,12 +236,21 @@
               (invalid f))
           :else
           (let [d (if (= :method (:kind r)) (method-data-of (:obj r)) (:obj r))
-                [_ ps rs v] (:type d)]
+                ;; a generic type's instance: its method's signature with the type arguments
+                d (if (= :method (:kind r)) (t/*subst-method* (:recv-type r) d) d)
+                [_ ps rs v] (:type d)
+                ty [:func (into [T] ps) rs v]]
             ;; the converter writes no :go/via on method expressions
             (when (:go/via (meta f)) (verify-via! f r))
             (when (= :method (:kind r)) (note-ref! (:obj r)) (when (o (:obj r) :generic) (e/generic!)))
-            {:op :method-expr :recv-type T :method (:obj r) :path (:index r)
-             :mode :value :type [:func (into [T] ps) rs v] :form f :line (fline f)}))))))
+            (cond-> {:op :method-expr :recv-type T :method (:obj r) :path (:index r)
+                     :mode :value :type ty :form f :line (fline f)}
+              ;; a generic method's expression (go1.27): instantiated by (inst ...) or its use
+              (seq (:tparams d))
+              (assoc :gtype ty :tparams (:tparams d) :generic-fn true
+                     :rmap (let [[rb] (t/deref-type (:recv-type r))]
+                             (when (t/named? rb) (zipmap (or (o (:obj r) :rtparams) []) (or (:targs (t/info rb)) []))))
+                     :inst-say (inst-say cx mf) :inst-form mf))))))))
 
 ;;; Index and slice expressions (index.go)
 
@@ -262,7 +275,7 @@
       (let [x (if (t/untyped? (:type x)) (convert-untyped x :int) x)]
         (cond
           (invalid? x) [x nil]
-          (not (t/integer-type? (:type x)))
+          (not (t/all-integer? (:type x)))
           (do (err! f :InvalidIndex "invalid argument: %s %s must be integer" what (operand-str x)) [(invalid f) nil])
           (= :constant (:mode x))
           (let [v (:val x)]
@@ -276,6 +289,35 @@
               :else [x v]))
           :else [x nil])))))
 
+(defn- tparam-index
+  "x[i] of a type parameter's value (go/types' indexExpr): every type of its type set indexable
+  alike, the same element type (and maps' key types)."
+  [cx f x if*]
+  (let [ty (:type x)
+        infos (for [[_ u] (t/typeset-pairs ty)]
+                (let [pa (when (and (vector? u) (= :pointer (nth u 0)))
+                           (let [b (t/under (nth u 1))] (when (and (vector? b) (= :array (nth b 0))) b)))]
+                  (cond
+                    (nil? u) nil
+                    (t/string-type? u) {:e :uint8 :l -1 :mode :value}
+                    (and (vector? u) (= :array (nth u 0))) {:e (nth u 2) :l (nth u 1) :mode (if (= :variable (:mode x)) :variable :value)}
+                    pa {:e (nth pa 2) :l (nth pa 1) :mode :variable}
+                    (and (vector? u) (= :slice (nth u 0))) {:e (nth u 1) :l -1 :mode :variable}
+                    (and (vector? u) (= :map (nth u 0))) {:k (nth u 1) :e (nth u 2) :l -1}
+                    :else nil)))]
+    (if (or (empty? infos) (some nil? infos) (not (apply = (map :k infos))) (not (apply = (map :e infos))))
+      (do (err! f :NonIndexableOperand "cannot index %s" (operand-str x)) (invalid f))
+      (let [{:keys [k e]} (first infos)
+            mode (if (some #(= :value (:mode %)) infos) :value :variable)
+            ls (filter #(>= % 0) (map :l infos))]
+        (if k
+          (let [kn (assignment cx (expr cx if*) k "map index")]
+            (if (invalid? kn) (invalid f)
+                {:op :map-index :x x :key kn :mode :mapindex :type e :form f :line (fline f)}))
+          (let [[i] (index-value cx if* (when (seq ls) (apply min ls)) "index")]
+            (if (invalid? i) (invalid f)
+                {:op :index :x x :index i :mode mode :type e :form f :line (fline f)})))))))
+
 (defn index-expr
   "(aget x i)."
   [cx f]
@@ -284,16 +326,16 @@
     (cond
       (invalid? x) (invalid f)
       (= :typexpr (:mode x))
-      (do (e/unsupported! "generic instantiation by aget") (invalid f))
+      (do (err! f :NotAnExpr "%s is not an expression (an instantiation is (inst %s ...))" (expr-str xf) (expr-str xf)) (invalid f))
       (= :func (:op x))
-      (if (o (:obj x) :tparams-count) (do (e/unsupported! "generic functions") (invalid f)) (do (err! f :NonIndexableOperand "cannot index %s" (operand-str x)) (invalid f)))
+      (do (err! f :NonIndexableOperand "cannot index %s" (operand-str x)) (invalid f))
       :else
       (let [ty (:type x)
             u (t/under ty)
             [u ptr] (if (and (vector? u) (= :pointer (nth u 0)) (let [b (t/under (nth u 1))] (and (vector? b) (= :array (nth b 0)))))
                       [(t/under (nth u 1)) true] [u false])]
         (cond
-          (t/tparam? ty) (do (e/unsupported! "indexing type parameters") (invalid f))
+          (t/tparam? ty) (tparam-index cx f x if*)
           (t/string-type? u)
           (let [len (when (= :constant (:mode x)) (count (:val x)))
                 [i iv] (index-value cx if* len "index")]
@@ -327,11 +369,21 @@
     (if (invalid? x)
       (invalid f)
       (let [ty (:type x)
-            u (t/under ty)
+            ;; a type parameter's: the common underlying type of its type set, strings as []byte
+            u (if (t/tparam? ty)
+                (let [us (map second (t/typeset-pairs ty))
+                      str? (some #(and % (t/string-type? %)) us)
+                      us (map #(if (and % (t/string-type? %)) [:slice :uint8] %) us)]
+                  (cond
+                    (some nil? us) nil
+                    (not (apply = us)) nil
+                    str? :string
+                    :else (first us)))
+                (t/under ty))
             three (= 3 (count idx))
             [res length]
             (cond
-              (t/tparam? ty) (e/unsupported! "slicing type parameters")
+              (nil? u) (do (err! f :NonSliceableOperand "cannot slice %s" (operand-str x)) [nil nil])
               (t/string-type? u)
               (if three
                 (do (err! f :InvalidSliceExpr "invalid operation: 3-index slice of string") [nil nil])
@@ -343,7 +395,8 @@
               (and (vector? u) (= :pointer (nth u 0)) (let [b (t/under (nth u 1))] (and (vector? b) (= :array (nth b 0)))))
               (let [b (t/under (nth u 1))] [[:slice (nth b 2)] (nth b 1)])
               (and (vector? u) (= :slice (nth u 0))) [ty nil]
-              :else (do (err! f :NonSliceableOperand "cannot slice %s" (operand-str x)) [nil nil]))]
+              :else (do (err! f :NonSliceableOperand "cannot slice %s" (operand-str x)) [nil nil]))
+            [res length] (if (and (t/tparam? ty) (= :string u)) [ty nil] [res length])]
         (if (nil? res)
           (invalid f)
           (let [ixs (mapv (fn [i] (if (= '_ i) [nil nil] (index-value cx i (when length (inc length)) "index"))) idx)]
@@ -383,7 +436,7 @@
   (let [x (expr cx (second f))]
     (if (invalid? x)
       (invalid f)
-      (let [u (t/under (:type x))]
+      (let [u (if (t/tparam? (:type x)) (t/core-type (:type x)) (t/under (:type x)))]
         (cond
           (not (and (vector? u) (= :chan (nth u 0))))
           (do (err! f :InvalidReceive "invalid operation: cannot receive from non-channel %s" (operand-str x)) (invalid f))
@@ -419,7 +472,7 @@
       (= :untyped-nil (:type x))
       (do (err! f :InvalidIndirection "invalid operation: cannot indirect nil") (invalid f))
       :else
-      (let [u (t/under (:type x))]
+      (let [u (if (t/tparam? (:type x)) (t/core-type (:type x)) (t/under (:type x)))]
         (if (and (vector? u) (= :pointer (nth u 0)))
           {:op :deref :x x :mode :variable :type (nth u 1) :form f :line (fline f)}
           (do (err! f :InvalidIndirection "invalid operation: cannot indirect %s" (operand-str x)) (invalid f)))))))
@@ -430,10 +483,10 @@
 
 (defn- element-value
   "An element of a composite literal: elided literal types take the element type (pointer
-  element types make &T{})."
+  element types make &T{}; a type parameter's by its core type)."
   [cx vf elem-type]
   (if (and (= "lit" (head-name vf)) (elided? (second vf)))
-    (let [[base ptr] (t/deref-type (t/under elem-type))
+    (let [[base ptr] (t/deref-type (if (t/tparam? elem-type) (or (t/core-type elem-type) :invalid) (t/under elem-type)))
           base (if ptr base elem-type)]
       (let [n (composite-lit cx vf base)]
         (if ptr
@@ -495,11 +548,16 @@
         (if-not (t/valid? T)
           (invalid f)
           (let [open (and (vector? T) (= :array-open (nth T 0)))
-                u (if open T (t/under T))]
+                u (cond open T (t/tparam? T) (or (t/core-type T) :none) :else (t/under T))]
             (cond
-              (t/tparam? T) (do (e/unsupported! "composite literals of type parameters") (invalid f))
+              (= :none u) (do (err! f :InvalidLit "invalid composite literal type %s: no common underlying type" (t/type-str T)) (invalid f))
               (and (vector? u) (= :struct (nth u 0)))
               (let [fields (nth u 1)
+                    ;; keys written [name value] (a literal whose type the converter saw as a type
+                    ;; parameter's) are field names
+                    elems (if (and (seq elems) (every? #(and (vector? %) (= 2 (count %)) (go-ident? (first %))) elems))
+                            (vec (mapcat (fn [[k v]] [(keyword (ident-name k)) v]) elems))
+                            elems)
                     keyed (and (seq elems) (keyword? (first elems)))]
                 (if keyed
                   (let [pairs (partition 2 elems)
@@ -507,7 +565,7 @@
                         nodes (vec
                                (for [[k vf] pairs]
                                  (let [nm (name k)
-                                       r (t/lookup T false nm (pkg-path))
+                                       r (t/lookup (if (t/tparam? T) u T) false nm (pkg-path))
                                        direct (some (fn [[i fd]] (when (and (= nm (:name fd))) i)) (map-indexed vector fields))]
                                    (cond
                                      (and (nil? direct) (or (nil? r) (not= :field (:kind r))))
@@ -593,10 +651,64 @@
 
 (defn- spread? [a] (= "spread" (head-name a)))
 
+(defn generic-fn?
+  "Whether node n is a generic function's (or method's) value not instantiated yet."
+  [n]
+  (boolean (:generic-fn n)))
+
+(defn- types-str [tys] (str "[" (str/join " " (map t/type-str tys)) "]"))
+
+(defn inst-say
+  "The type arguments the converter's :inst on form f says (§3.6, SPEC.md §5.5), checked, or nil."
+  [cx f]
+  (when-let [inst (and (instance? arbace.lang.IMeta f) (:inst (meta f)))]
+    (mapv #(typexpr cx %) inst)))
+
+(defn- record-inst!
+  "Compares the converter's :inst of a generic function's instance with its type arguments the
+  checker computed (inferred?: some of them inferred, which the converter always annotates)."
+  [n targs inferred?]
+  (let [say (:inst-say n) f (:inst-form n)]
+    (cond
+      say (if (= say targs)
+            (e/verified! :inst f)
+            (e/annotation-error! f ":inst" (expr-str f) (types-str say) (types-str targs)))
+      (and inferred? (:annotated cx-flags))
+      (e/annotation-error! f ":inst" (expr-str f) "none" (types-str targs)))))
+
+(defn instantiate-fn
+  "Generic function (or method) node n instantiated with targs (one per type parameter): its
+  signature substituted, the instantiation verified after the declaration (go/types'
+  instantiateSignature), the converter's :inst compared."
+  [n targs inferred?]
+  (let [tps (:tparams n)
+        m (merge (:rmap n) (zipmap tps targs))]
+    (*verify-later* (:form n) tps targs (:rmap n))
+    (record-inst! n targs inferred?)
+    (-> n (assoc :type (*subst* (:gtype n) m) :targs targs) (dissoc :generic-fn :ptargs :inst-say))))
+
+(defn func-inst-target
+  "go/types' funcInst with a target: generic function node n assigned to a variable of function
+  type sig (reverse inference, go1.21), instantiated, or invalid after an error."
+  [cx n sig context]
+  (let [tps (:tparams n)
+        [_ ps rs v] (:gtype n)
+        [tps2 params] (rename-tparams tps (into [:tuple] (when sig [[:func ps rs v]])))
+        targs (infer tps2 (vec (:ptargs n)) (vec (rest params))
+                     (if sig [{:op :target :type sig :mode :value :form (symbol (str context))}] []) (some? sig)
+                     (fn [ef msg] (err! (or ef (:form n)) :CannotInferTypeArgs "%s" msg)))]
+    (if targs
+      (instantiate-fn n targs true)
+      (assoc n :mode :invalid :type :invalid))))
+
+(defn- spread? [a] (= "spread" (head-name a)))
+
 (defn call-args
-  "The arguments of a call to signature sig ([:func ps rs variadic]): the checked nodes,
-  assigned to their parameters (go/types' arguments)."
-  [cx f callee-str sig arg-forms]
+  "The arguments of a call of callee node (its signature sig: [:func ps rs variadic]), checked
+  and assigned to its parameters (go/types' genericExprList and arguments): {:args :callee},
+  the callee and generic function arguments instantiated, their missing type arguments
+  inferred; nil after an error."
+  [cx f callee-str callee sig arg-forms]
   (let [[_ ps rs variadic] sig
         last-spread (and (seq arg-forms) (spread? (last arg-forms)))
         arg-forms (vec arg-forms)
@@ -617,29 +729,59 @@
                      (if few? "not enough" "too many") callee-str
                      (str/join ", " (map #(type-summary (:type %)) args))
                      (t/sig-str [:func ps [] variadic]))
-               nil)]
-    (if (some invalid? args)
-      (mapv (fn [a] a) args)
-      (cond
-        spread
-        (cond
-          (not variadic)
-          (do (err! f :NonVariadicDotDotDot "cannot use ... in call to non-variadic %s" callee-str) nil)
-          (not= nargs nparams) (fail (< nargs nparams))
-          :else (vec (map-indexed (fn [i a] (let [n (assignment cx a (nth ps i) (str "argument to " callee-str))]
-                                              (if (= i (dec nargs)) (assoc n :spread true) n)))
-                                  args)))
-        variadic
-        (if (< nargs (dec nparams))
-          (fail true)
-          (let [elem (nth (peek ps) 1)]
-            (vec (map-indexed (fn [i a]
-                                (assignment cx a (if (< i (dec nparams)) (nth ps i) elem) (str "argument to " callee-str)))
-                              args))))
-        :else
-        (if (not= nargs nparams)
-          (fail (< nargs nparams))
-          (vec (map-indexed (fn [i a] (assignment cx a (nth ps i) (str "argument to " callee-str))) args)))))))
+               nil)
+        ok (cond
+             (some invalid? args) :invalid
+             spread (cond
+                      (not variadic) (do (err! f :NonVariadicDotDotDot "cannot use ... in call to non-variadic %s" callee-str) nil)
+                      (not= nargs nparams) (fail (< nargs nparams))
+                      :else true)
+             variadic (if (< nargs (dec nparams)) (fail true) true)
+             :else (if (not= nargs nparams) (fail (< nargs nparams)) true))
+        ;; the parameters, adjusted to the arguments of a variadic call
+        params-of (fn [ps]
+                    (if (and variadic (not spread))
+                      (vec (concat (take (dec nparams) ps) (repeat (- nargs (dec nparams)) (nth (peek ps) 1))))
+                      (vec ps)))
+        assign (fn [args ps]
+                 (vec (map-indexed (fn [i a]
+                                     (let [n (assignment cx a (nth ps i) (str "argument to " callee-str))]
+                                       (if (and spread (= i (dec nargs))) (assoc n :spread true) n)))
+                                   args)))]
+    (cond
+      (= :invalid ok) {:args args :callee callee}
+      (not ok) nil
+      :else
+      (let [ctps (when (generic-fn? callee) (:tparams callee))
+            gen (vec (keep-indexed (fn [i a] (when (generic-fn? a) i)) args))]
+        (if (and (empty? ctps) (empty? gen))
+          {:args (assign args (params-of ps)) :callee callee}
+          ;; inference: the callee's type parameters and the generic arguments', renamed
+          (let [[tps0 sp] (rename-tparams (vec ctps) (into [:tuple] (params-of ps)))
+                sparams (vec (rest sp))
+                cpt (vec (:ptargs callee))
+                ctargs (vec (take (count ctps) (concat cpt (repeat nil))))
+                ginfo (vec (for [i gen]
+                             (let [a (nth args i)
+                                   [atps aty] (rename-tparams (vec (:tparams a)) (:gtype a))]
+                               {:i i :tps atps :type aty
+                                :targs (vec (take (count atps) (concat (:ptargs a) (repeat nil))))})))
+                all-tps (vec (concat tps0 (mapcat :tps ginfo)))
+                all-targs (vec (concat ctargs (mapcat :targs ginfo)))
+                iargs (reduce (fn [v g] (assoc v (:i g) (assoc (nth v (:i g)) :type (:type g)))) args ginfo)
+                targs (infer all-tps all-targs sparams iargs false
+                             (fn [ef msg] (err! (or ef f) :CannotInferTypeArgs "in call to %s, %s" callee-str msg)))]
+            (when targs
+              (let [n (count ctps)
+                    callee (if (seq ctps) (instantiate-fn callee (subvec targs 0 n) (< (count cpt) n)) callee)
+                    [args _] (reduce (fn [[args j] g]
+                                       (let [k (+ j (count (:tps g)))
+                                             a (nth args (:i g))]
+                                         [(assoc args (:i g) (instantiate-fn a (subvec targs j k) (< (count (:ptargs a)) (count (:tps g)))))
+                                          k]))
+                                     [args n] ginfo)]
+                {:args (assign args (params-of (if (seq ctps) (nth (call-sig (:type callee)) 1) ps)))
+                 :callee callee}))))))))
 
 (defn call-kind
   "The kind of a call by its callee node (§3.7)."
@@ -654,12 +796,25 @@
 
 (declare builtin-call)
 
+(defn call-sig
+  "The signature a callee of type ty has: its underlying function type (a type parameter's
+  common one), or nil."
+  [ty]
+  (let [u (if (t/tparam? ty) (t/core-type ty) (t/under ty))]
+    (when (and (vector? u) (= :func (nth u 0))) u)))
+
+(defn- finish-call
+  "The call node of callee (instantiated) and args."
+  [f callee args]
+  (let [u (call-sig (:type callee))
+        rt (results-type (nth u 2))]
+    {:op :call :kind (call-kind callee) :callee callee :args args
+     :mode (if rt :value :novalue) :type (or rt :invalid) :form f :line (fline f)}))
+
 (defn call
   "A call form: callee form cf, arguments arg-forms."
   [cx f cf arg-forms]
-  (let [callee (if (and (seq? cf) (let [h (head-name cf)] (and h (str/starts-with? h ".") (not (str/starts-with? h ".-")))))
-                 (invalid cf)
-                 (expr-or-type cx cf))]
+  (let [callee (expr-or-type cx cf)]
     (cond
       (invalid? callee) (do (doseq [a arg-forms] (when-not (spread? a) (expr cx a))) (invalid f))
       (= :typexpr (:mode callee))
@@ -669,17 +824,15 @@
             (invalid f)))
       (= :builtin (:mode callee)) (builtin-call cx f (:builtin callee) arg-forms (:unsafe callee))
       :else
-      (let [u (t/under (:type callee))]
-        (if-not (and (vector? u) (= :func (nth u 0)))
+      (let [u (call-sig (:type callee))]
+        (if-not u
           (do (err! f :InvalidCall "invalid operation: cannot call %s: %s is not a function" (operand-str callee) (t/type-str (:type callee)))
               (doseq [a arg-forms] (when-not (spread? a) (expr cx a)))
               (invalid f))
-          (let [args (call-args cx f (expr-str cf) u arg-forms)
-                rt (results-type (nth u 2))]
-            (if (nil? args)
+          (let [r (call-args cx f (expr-str cf) callee u arg-forms)]
+            (if (or (nil? r) (generic-fn? (:callee r)))
               (invalid f)
-              {:op :call :kind (call-kind callee) :callee callee :args args
-               :mode (if rt :value :novalue) :type (or rt :invalid) :form f :line (fline f)})))))))
+              (finish-call f (:callee r) (:args r)))))))))
 
 (defn method-call
   "(.M x args...)."
@@ -687,16 +840,14 @@
   (let [callee (select-expr cx f xf nm true)]
     (if (invalid? callee)
       (do (doseq [a arg-forms] (when-not (spread? a) (expr cx a))) (invalid f))
-      (let [u (t/under (:type callee))]
-        (if-not (and (vector? u) (= :func (nth u 0)))
+      (let [u (call-sig (:type callee))]
+        (if-not u
           (do (err! f :InvalidCall "invalid operation: cannot call non-function %s" (expr-str (list (symbol (str ".-" nm)) xf)))
               (invalid f))
-          (let [args (call-args cx f (str (expr-str xf) "." nm) u arg-forms)
-                rt (results-type (nth u 2))]
-            (if (nil? args)
+          (let [r (call-args cx f (str (expr-str xf) "." nm) callee u arg-forms)]
+            (if (or (nil? r) (generic-fn? (:callee r)))
               (invalid f)
-              {:op :call :kind (call-kind callee) :callee callee :args args
-               :mode (if rt :value :novalue) :type (or rt :invalid) :form f :line (fline f)})))))))
+              (finish-call f (:callee r) (:args r)))))))))
 
 ;;; Builtins (builtins.go)
 
@@ -706,6 +857,33 @@
   (if (and (vector? u) (= :pointer (nth u 0)))
     (let [b (t/under (nth u 1))] (if (and (vector? b) (= :array (nth b 0))) b u))
     u))
+
+(defn- slice-elem
+  "go/types' sliceElem: the element type every type of ty's type set shares as a slice, or nil."
+  [ty]
+  (let [us (map second (t/typeset-pairs ty))]
+    (when (every? #(and (vector? %) (= :slice (nth % 0))) us)
+      (let [es (map #(nth % 1) us)]
+        (when (apply = es) (first es))))))
+
+(defn- string-or-bytes?
+  "Whether every type of ty's type set is a string or []byte, one at least a string."
+  [ty]
+  (let [us (map second (t/typeset-pairs ty))]
+    (and (every? #(or (and (some? %) (t/string-type? %)) (and (vector? %) (= :slice (nth % 0)) (= :uint8 (t/under (nth % 1))))) us)
+         (some #(and (some? %) (t/string-type? %)) us))))
+
+(defn has-var-size?
+  "go/types' hasVarSize: whether the size of ty depends on type parameters."
+  [ty]
+  (cond
+    (keyword? ty) false
+    (t/tparam? ty) true
+    (t/named? ty) (has-var-size? (t/under ty))
+    :else (case (nth ty 0)
+            :array (has-var-size? (nth ty 2))
+            :struct (boolean (some #(has-var-size? (:type %)) (nth ty 1)))
+            false)))
 
 (defn builtin-call
   "A call of builtin nm (unsafe: one of package unsafe's)."
@@ -738,7 +916,13 @@
               (invalid f)
               (let [u (array-ptr-deref (t/under (:type x)))]
                 (cond
-                  (t/tparam? (:type x)) (do (e/unsupported! "len of type parameters") (invalid f))
+                  (t/tparam? (:type x))
+                  (if (t/under-is (:type x) (fn [u] (let [u (array-ptr-deref u)]
+                                                      (or (and (some? u) (t/string-type? u) (= nm "len"))
+                                                          (and (vector? u) (#{:array :slice :chan} (nth u 0)))
+                                                          (and (vector? u) (= :map (nth u 0)) (= nm "len"))))))
+                    (node {:args [x] :mode :value :type :int})
+                    (bad "invalid argument: %s for built-in %s" (operand-str x) nm))
                   (and (t/string-type? u) (= nm "len"))
                   (if (= :constant (:mode x))
                     (node {:args [x] :mode :constant :type :int :val (long (count (:val x)))})
@@ -759,21 +943,19 @@
               (= :untyped-nil (:type s)) (bad "invalid argument: %s (untyped nil) is not a slice" (expr-str (first arg-forms)))
               :else
               (let [S (:type s)
-                    u (t/under S)]
+                    el (slice-elem S)]
                 (cond
-                  (t/tparam? S) (do (e/unsupported! "append to type parameters") (invalid f))
-                  (not (and (vector? u) (= :slice (nth u 0))))
+                  (nil? el)
                   (bad "invalid argument: %s is not a slice" (operand-str s))
                   :else
-                  (let [el (nth u 1)
-                        more (rest arg-forms)
+                  (let [more (rest arg-forms)
                         last-spread (and (seq more) (spread? (last more)))]
                     (if (and last-spread (= 1 (count more)))
                       ;; append(s, t...): t assignable to S, or a string for []byte
                       (let [x (expr cx (second (first more)))]
                         (cond
                           (invalid? x) (invalid f)
-                          (and (= :uint8 (t/under el)) (t/string-type? (:type x)))
+                          (and (first (assignable? s [:slice :uint8])) (string-or-bytes? (:type x)))
                           (node {:args [s (assoc (default-final x) :spread true)] :mode :value :type S})
                           :else
                           (let [x (assignment cx x [:slice el] "argument to append")]
@@ -789,17 +971,18 @@
           (let [[d s] (arg-nodes cx arg-forms)]
             (if (or (invalid? d) (invalid? s))
               (invalid f)
-              (let [du (t/under (:type d)) su (t/under (:type s))]
+              (let [de (slice-elem (:type d))
+                    se (or (slice-elem (:type s)) (when (t/all-string? (:type s)) :uint8))]
                 (cond
-                  (not (and (vector? du) (= :slice (nth du 0))))
+                  (nil? de)
                   (bad "invalid argument: copy expects slice arguments; found %s and %s" (operand-str d) (operand-str s))
-                  (and (t/string-type? su) (= :uint8 (t/under (nth du 1))))
+                  (and (first (assignable? d [:slice :uint8])) (string-or-bytes? (:type s)))
                   (node {:args [d (default-final s)] :mode :value :type :int})
-                  (not (and (vector? su) (= :slice (nth su 0))))
+                  (nil? se)
                   (bad "invalid argument: copy expects slice arguments; found %s and %s" (operand-str d) (operand-str s))
-                  (not= (nth du 1) (nth su 1))
+                  (not= de se)
                   (bad "invalid argument: arguments to copy %s and %s have different element types %s and %s"
-                       (operand-str d) (operand-str s) (t/type-str (nth du 1)) (t/type-str (nth su 1)))
+                       (operand-str d) (operand-str s) (t/type-str de) (t/type-str se))
                   :else (node {:args [d s] :mode :value :type :int}))))))
         "delete"
         (if-not (need 2 2)
@@ -807,8 +990,9 @@
           (let [m (expr cx (first arg-forms))]
             (if (invalid? m)
               (do (expr cx (second arg-forms)) (invalid f))
-              (let [u (t/under (:type m))]
-                (if-not (and (vector? u) (= :map (nth u 0)))
+              (let [us (map second (t/typeset-pairs (:type m)))
+                    u (when (and (every? #(and (vector? %) (= :map (nth % 0))) us) (apply = (map #(nth % 1) us))) (first us))]
+                (if-not u
                   (do (expr cx (second arg-forms)) (bad "invalid argument: %s is not a map" (operand-str m)))
                   (let [k (assignment cx (expr cx (second arg-forms)) (nth u 1) "argument to delete")]
                     (if (invalid? k) (invalid f) (node {:args [m k] :mode :novalue :type :invalid}))))))))
@@ -819,7 +1003,7 @@
             (cond
               (invalid? x) (invalid f)
               (not (allow-version? cx 21)) (bad "clear requires go1.21 or later")
-              (let [u (t/under (:type x))] (and (vector? u) (#{:map :slice} (nth u 0))))
+              (t/under-is (:type x) (fn [u] (and (vector? u) (#{:map :slice} (nth u 0)))))
               (node {:args [x] :mode :novalue :type :invalid})
               :else (bad "invalid argument: %s cannot be cleared: argument must be (or constrained by) map or slice" (operand-str x)))))
         "close"
@@ -828,10 +1012,10 @@
           (let [x (expr cx (first arg-forms))]
             (if (invalid? x)
               (invalid f)
-              (let [u (t/under (:type x))]
+              (let [us (map second (t/typeset-pairs (:type x)))]
                 (cond
-                  (not (and (vector? u) (= :chan (nth u 0)))) (bad "invalid operation: cannot close non-channel %s" (operand-str x))
-                  (= :recv (nth u 1)) (bad "invalid operation: cannot close receive-only channel %s" (operand-str x))
+                  (not (every? #(and (vector? %) (= :chan (nth % 0))) us)) (bad "invalid operation: cannot close non-channel %s" (operand-str x))
+                  (some #(= :recv (nth % 1)) us) (bad "invalid operation: cannot close receive-only channel %s" (operand-str x))
                   :else (node {:args [x] :mode :novalue :type :invalid}))))))
         "complex"
         (if-not (need 2 2)
@@ -883,7 +1067,9 @@
         (if (zero? nargs)
           (bad "not enough arguments for %s (expected 1, found 0)" (expr-str f))
           (let [T (typexpr cx (first arg-forms))
-                u (t/under T)
+                u (if (t/tparam? T)
+                    (let [[cu] (t/common-under T (fn [_ u] (when-not (and (vector? u) (#{:slice :map :chan} (nth u 0))) "no")))] (or cu :none))
+                    (t/under T))
                 [lo hi] (cond
                           (not (vector? u)) [0 0]
                           (= :slice (nth u 0)) [2 3]
@@ -891,7 +1077,6 @@
                           :else [0 0])]
             (cond
               (not (t/valid? T)) (do (doseq [a (rest arg-forms)] (expr cx a)) (invalid f))
-              (t/tparam? T) (do (e/unsupported! "make of type parameters") (invalid f))
               (zero? hi) (bad "invalid argument: cannot make %s; type must be slice, map, or channel" (expr-str (first arg-forms)))
               (or (< nargs lo) (> nargs hi))
               (bad "invalid operation: %s expects %d or %d arguments; found %d" (expr-str f) lo hi nargs)
@@ -946,7 +1131,7 @@
                                       (do (err! f :MismatchedTypes "invalid argument: mismatched types %s (previous argument) and %s (type of %s)"
                                                 (t/type-str (:type x)) (t/type-str (:type y)) (expr-str (:form y)))
                                           (invalid f))
-                                      (not (t/ordered? (:type x)))
+                                      (not (t/all-ordered? (:type x)))
                                       (do (err! f :InvalidMinMaxOperand "invalid argument: %s cannot be ordered" (operand-str x)) (invalid f))
                                       (and (= :constant (:mode x)) (= :constant (:mode y)))
                                       (let [pick (if (const-compare (if (= nm "min") "<" ">") (:val y) (:val x) (:type x)) y x)]
@@ -955,7 +1140,7 @@
                               (first xs) (rest xs))]
                 (cond
                   (invalid? x) (invalid f)
-                  (not (t/ordered? (:type x)))
+                  (not (t/all-ordered? (:type x)))
                   (bad "invalid argument: %s cannot be ordered" (operand-str (first xs)))
                   (= :constant (:mode x))
                   (node {:args xs :mode :constant :type (:type x) :val (:val x)})
@@ -970,6 +1155,7 @@
           (let [x (assignment cx (expr cx (first arg-forms)) nil (str "argument to unsafe." nm))]
             (cond
               (invalid? x) (invalid f)
+              (has-var-size? (:type x)) (node {:args [x] :mode :value :type :uintptr})
               :else (node {:args [x] :mode :constant :type :uintptr
                            :val (if (= nm "Sizeof") (t/sizeof (:type x)) (t/alignof (:type x)))}))))
         "Offsetof"
@@ -1036,30 +1222,32 @@
             (if (invalid? s) (invalid f) (node {:args [s] :mode :value :type [:pointer :uint8]}))))
         (bad "unknown builtin %s" nm)))))
 
-;;; Explicit instantiation (GR6 checks it; GR2 computes its type)
+;;; Explicit instantiation
 
 (defn inst-expr
-  "(inst F T...): a generic function's instance (or a type's)."
+  "(inst F T...): a generic function's instance, partial when it lacks type arguments (inferred
+  at its call or assignment), or a generic type's."
   [cx f]
   (let [[_ gf & tfs] f
         x (when (or (symbol? gf) (go-id? gf))
-            (if (and (symbol? gf) (namespace gf)) (qualified-obj cx gf) (resolve-name cx (ident-name gf))))
-        g (if (and x (= :func (o x :kind)))
-            (do (note-ref! x) {:op :func :obj x :mode :value :type (o x :type) :form gf :line (fline gf)})
-            (expr-or-type cx gf))]
+            (if (and (symbol? gf) (namespace gf)) (qualified-obj cx gf) (resolve-name cx (ident-name gf))))]
     (e/generic!)
-    (cond
-      (invalid? g) (invalid f)
-      (= :typexpr (:mode g)) {:op :type :mode :typexpr :type (typexpr cx f) :form f}
-      (= :func (:op g))
-      (let [x (:obj g)
-            tps (o x :tparams)
-            inst (or (:inst (meta gf)) tfs)
-            targs (mapv #(typexpr cx %) inst)]
-        (if (= (count tps) (count targs))
-          (assoc g :type (*subst* (o x :type) (zipmap tps targs)) :targs targs :form f)
-          (do (e/unsupported! "partial instantiation") (invalid f))))
-      :else (do (e/unsupported! "explicit instantiation") (invalid f)))))
+    (if (and x (= :type (o x :kind)))
+      (let [T (typexpr cx f)] (if (t/valid? T) {:op :type :mode :typexpr :type T :form f} (invalid f)))
+      (let [g (expr-or-type cx gf)]
+        (cond
+          (invalid? g) (invalid f)
+          (= :typexpr (:mode g)) {:op :type :mode :typexpr :type (typexpr cx f) :form f}
+          (generic-fn? g)
+          (let [tps (:tparams g)
+                targs (mapv #(typexpr cx %) tfs)]
+            (cond
+              (some #(not (t/valid? %)) targs) (invalid f)
+              (> (count targs) (count tps))
+              (do (err! f :WrongTypeArgCount "got %d type arguments but want %d" (count targs) (count tps)) (invalid f))
+              (= (count targs) (count tps)) (assoc (instantiate-fn g targs false) :form f :line (fline f))
+              :else (assoc g :ptargs targs :form f :line (fline f))))
+          :else (do (err! f :NotAGenericType "invalid operation: cannot index %s" (operand-str g)) (invalid f)))))))
 
 ;;; Function literals
 

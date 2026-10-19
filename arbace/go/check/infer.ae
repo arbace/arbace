@@ -1,0 +1,387 @@
+(in-ns 'arbace.go.check.code)
+
+;;; Type inference (GR6, doc/go/GOI-SPEC.md §9.1): go/types' unify.go and infer.go, go1.27.1.
+;;; Types are the checker's (types.ae); a unifier's handles map each type parameter being inferred
+;;; to a cell shared by the parameters joined with it.
+
+(declare unify nify-structure)
+
+(def ^:private depth-limit 50)
+
+(defn- new-unifier
+  "go/types' newUnifier: tparams' handles, the known targs (nil: unknown); iface: whether
+  interfaces' methods inform inference (go1.21)."
+  [tparams targs iface]
+  {:handles (volatile! (into {} (map-indexed (fn [i tp] [tp (volatile! (get targs i))]) tparams)))
+   :depth (volatile! 0)
+   :iface iface})
+
+(defn- u-at [u x] @(get @(:handles u) x))
+(defn- u-set! [u x ty] (vreset! (get @(:handles u) x) ty))
+
+(defn- u-bound
+  "x when it is one of the type parameters being inferred, else nil."
+  [u x]
+  (when (and (t/tparam? x) (contains? @(:handles u) x)) x))
+
+(defn- set-handle! [u x h]
+  (let [hx (get @(:handles u) x)]
+    (vswap! (:handles u) (fn [hs] (into {} (map (fn [[y hy]] [y (if (identical? hy hx) h hy)]) hs))))))
+
+(defn- u-join! [u x y]
+  (let [hs @(:handles u) hx (get hs x) hy (get hs y)]
+    (cond
+      (identical? hx hy) true
+      (and (some? @hx) (some? @hy)) false
+      (some? @hx) (do (set-handle! u y hx) true)
+      :else (do (set-handle! u x hy) true))))
+
+(defn- u-unknowns [u] (count (filter #(nil? @%) (vals @(:handles u)))))
+
+(defn- u-inferred [u tparams] (mapv #(u-at u %) tparams))
+
+(defn- as-iface
+  "go/types' asInterface: x's underlying interface when x is not a type parameter."
+  [x]
+  (when-not (t/tparam? x)
+    (let [u (t/under x)] (when (and (vector? u) (= :interface (nth u 0))) u))))
+
+(defn- type-lit? [x] (not (or (t/named? x) (t/tparam? x))))
+
+(defn- method-type-of
+  "The signature of y's method m (an interface method's data) as LookupFieldOrMethod finds it,
+  or nil (none, a field, a generic method)."
+  [y m]
+  (let [r (t/lookup y false (:name m) (:pkg m))]
+    (case (:kind r)
+      :method (let [d (t/method-data (:obj r))
+                    d (if t/*subst-method* (t/*subst-method* (:recv-type r) d) d)]
+                (when-not (seq (:tparams d)) (:type d)))
+      :iface-method (:type (:obj r))
+      nil)))
+
+(defn- nify
+  "go/types' unifier.nify: whether x and y unify (mode: #{:assign :exact})."
+  [u x y mode p]
+  (vswap! (:depth u) inc)
+  (try
+    (if (= x y)
+      true
+      (do
+        (when (> @(:depth u) depth-limit)
+          (throw (ex-info "goi's checker: unification reached its recursion depth limit" {})))
+        (let [[x y] (if (or (t/named? x) (u-bound u y)) [y x] [x y])
+              ;; an inexact unification of a named type against a type literal: its underlying type
+              y (if (and (not (:exact mode)) (t/named? y) (type-lit? x)
+                         (not (and (:iface u) (t/interface? x))))
+                  (t/under y)
+                  y)]
+          (if (= x y)
+            true
+            (let [px (u-bound u x) py (u-bound u y)]
+              (cond
+                (and px py) (if (u-join! u px py) true (nify u (u-at u px) (u-at u py) mode p))
+                px (if-let [xv (u-at u px)]
+                     (if (nify u xv y mode p)
+                       (let [xi (as-iface xv) yi (as-iface y)
+                             xn (t/named? xv) yn (t/named? y)]
+                         (cond
+                           (and xi yi (or (and xn yn (not= xv y))
+                                          (and (not (and xn yn))
+                                               (not= (count (nth xi 1)) (count (nth yi 1))))))
+                           false
+                           (and (or xi yi) (not (and xi yi))) false
+                           :else
+                           (do (when-not (:exact mode)
+                                 (cond
+                                   xn nil
+                                   yn (u-set! u px y)
+                                   :else (let [yu (t/under y)]
+                                           (when (and (vector? yu) (= :chan (nth yu 0)) (not= :both (nth yu 1)))
+                                             (u-set! u px y)))))
+                               true)))
+                       false)
+                     (do (u-set! u px y) true))
+                :else (nify-structure u x y mode p)))))))
+    (finally (vswap! (:depth u) dec))))
+
+(defn- ifaces-unify?
+  "Whether interfaces xi and yi unify: equal type sets, and the methods of the one with fewer
+  shared and unified exactly (go1.21's interface inference), or all of them (exact)."
+  [u xi yi p exact]
+  (let [xs (t/iface-tset xi) ys (t/iface-tset yi)]
+    (cond
+      (not= (:comparable xs) (:comparable ys)) false
+      (not (and (t/terms-subset? (:terms xs) (:terms ys)) (t/terms-subset? (:terms ys) (:terms xs)))) false
+      (some #(= % [xi yi]) p) true
+      :else
+      (let [p (conj p [xi yi])
+            [a b] (if (> (count (nth xi 1)) (count (nth yi 1))) [(nth yi 1) (nth xi 1)] [(nth xi 1) (nth yi 1)])]
+        (if exact
+          (and (= (count a) (count b))
+               (every? true? (map (fn [f g] (and (= (:name f) (:name g)) (= (:pkg f) (:pkg g))
+                                                (nify u (:type f) (:type g) #{:exact} p)))
+                                  a b)))
+          (let [bm (into {} (map (fn [m] [[(:name m) (:pkg m)] m]) b))]
+            (every? (fn [m] (let [g (get bm [(:name m) (:pkg m)])]
+                              (and g (nify u (:type m) (:type g) #{:exact} p))))
+                    a)))))))
+
+(defn- nify-structure [u x y mode p]
+  (let [xi (when (and (:iface u) (not (:exact mode))) (as-iface x))
+        yi (when (and (:iface u) (not (:exact mode))) (as-iface y))]
+    (cond
+      (and xi yi) (ifaces-unify? u xi yi p false)
+      (or xi yi)
+      (let [[ii other] (if yi [yi x] [xi y])]
+        (every? (fn [m] (let [mt (method-type-of other m)]
+                          (and mt (nify u (:type m) mt #{:exact} p))))
+                (nth ii 1)))
+      :else
+      (let [[x y] (if (t/tparam? y) [y x] [x y])
+            emode (if (:assign mode) (conj mode :exact) mode)]
+        (cond
+          (keyword? x) false
+          (t/named? x)
+          (and (t/named? y)
+               (let [xi (t/info x) yi (t/info y)
+                     xa (:targs xi) ya (:targs yi)]
+                 (and (seq xa) (= (count xa) (count ya))
+                      (every? true? (map #(nify u %1 %2 mode p) xa ya))
+                      (identical? (nth (:origin xi) 1) (nth (:origin yi) 1)))))
+          (t/tparam? x)
+          ;; a type parameter not being inferred: its core type, if any
+          (if-let [cx (t/core-type x)]
+            (nify u cx y #{:assign} p)
+            false)
+          (not (vector? y)) false
+          :else
+          (case (nth x 0)
+            :array (and (= :array (nth y 0)) (= (nth x 1) (nth y 1)) (nify u (nth x 2) (nth y 2) emode p))
+            :slice (and (= :slice (nth y 0)) (nify u (nth x 1) (nth y 1) emode p))
+            :pointer (and (= :pointer (nth y 0)) (nify u (nth x 1) (nth y 1) emode p))
+            :map (and (= :map (nth y 0)) (nify u (nth x 1) (nth y 1) emode p) (nify u (nth x 2) (nth y 2) emode p))
+            :chan (and (= :chan (nth y 0)) (or (not (:exact mode)) (= (nth x 1) (nth y 1)))
+                       (nify u (nth x 2) (nth y 2) emode p))
+            :struct (and (= :struct (nth y 0))
+                         (= (count (nth x 1)) (count (nth y 1)))
+                         (every? true? (map (fn [f g] (and (= (boolean (:embedded f)) (boolean (:embedded g)))
+                                                          (= (:tag f) (:tag g)) (= (:name f) (:name g)) (= (:pkg f) (:pkg g))
+                                                          (nify u (:type f) (:type g) emode p)))
+                                            (nth x 1) (nth y 1))))
+            :tuple (and (= :tuple (nth y 0)) (= (count x) (count y))
+                        (every? true? (map #(nify u %1 %2 mode p) (rest x) (rest y))))
+            :func (and (= :func (nth y 0)) (= (boolean (nth x 3)) (boolean (nth y 3)))
+                       (= (count (nth x 1)) (count (nth y 1))) (= (count (nth x 2)) (count (nth y 2)))
+                       (every? true? (map #(nify u %1 %2 emode p) (nth x 1) (nth y 1)))
+                       (every? true? (map #(nify u %1 %2 emode p) (nth x 2) (nth y 2))))
+            :interface (and (= :interface (nth y 0)) (ifaces-unify? u x y p true))
+            false))))))
+
+(defn unify
+  "go/types' unifier.unify."
+  [u x y mode]
+  (nify u x y (case mode :assign #{:assign} :exact #{:exact} #{}) []))
+
+;;; Parameterized types
+
+(defn parameterized?
+  "go/types' isParameterized: whether ty mentions one of tparams (a set)."
+  [tps ty]
+  (let [seen (java.util.IdentityHashMap.)]
+    (letfn [(walk [ty]
+              (cond
+                (nil? ty) false
+                (keyword? ty) false
+                (t/tparam? ty) (contains? tps ty)
+                (t/named? ty) (boolean (some walk (:targs (t/info ty))))
+                :else
+                (case (nth ty 0)
+                  (:pointer :slice) (walk (nth ty 1))
+                  :array (walk (nth ty 2))
+                  :map (or (walk (nth ty 1)) (walk (nth ty 2)))
+                  :chan (walk (nth ty 2))
+                  :func (boolean (or (some walk (nth ty 1)) (some walk (nth ty 2))))
+                  :struct (boolean (some #(walk (:type %)) (nth ty 1)))
+                  :tuple (boolean (some walk (rest ty)))
+                  :interface (let [ts (t/iface-tset ty)]
+                               (boolean (or (some #(walk (:type %)) (nth ty 1))
+                                            (and (not= :all (:terms ts)) (some (fn [[_ x]] (walk x)) (:terms ts))))))
+                  :union (boolean (some (fn [[_ x]] (walk x)) (nth ty 1)))
+                  false)))]
+      (walk ty))))
+
+(defn rename-tparams
+  "go/types' renameTParams: [new type parameters, ty with them] (the bounds renamed too), so
+  that recursive instantiations do not confuse inference."
+  [tparams ty]
+  (if (empty? tparams)
+    [tparams ty]
+    (let [tps2 (mapv (fn [tp] (let [i (t/info tp)] (t/new-tparam (select-keys i [:name :index :obj])))) tparams)
+          m (zipmap tparams tps2)]
+      (doseq [[tp tp2] (map vector tparams tps2)]
+        (t/update-info! tp2 assoc :bound (*subst* (:bound (t/info tp)) m) :renamed-from tp))
+      [tps2 (*subst* ty m)])))
+
+(defn- core-term
+  "go/types' coreTerm: [term single?] of type parameter tp's constraint."
+  [tp]
+  (let [ts (t/tparam-tset tp)]
+    (if (and (t/has-terms? ts) (= 1 (count (:terms ts))))
+      [(first (:terms ts)) true]
+      (if-let [c (t/core-type tp)]
+        [[(boolean (and (t/has-terms? ts) (some first (:terms ts)))) c] false]
+        [nil false]))))
+
+(defn- kill-cycles!
+  "go/types' killCycles: the inferred types (a volatile vector) whose substitution would not end
+  set to nil."
+  [tparams inferred]
+  (let [idx (into {} (map-indexed (fn [i tp] [tp i]) tparams))
+        seen (java.util.HashSet.)]
+    (letfn [(walk [ty]
+              (cond
+                (nil? ty) nil
+                (keyword? ty) nil
+                (.contains seen ty) (when-let [i (and (t/tparam? ty) (idx ty))] (vswap! inferred assoc i nil))
+                :else
+                (do (.add seen ty)
+                    (try
+                      (cond
+                        (t/named? ty) (doseq [a (:targs (t/info ty))] (walk a))
+                        (t/tparam? ty) (when-let [i (idx ty)] (when-let [x (nth @inferred i)] (walk x)))
+                        :else
+                        (case (nth ty 0)
+                          (:pointer :slice) (walk (nth ty 1))
+                          :array (walk (nth ty 2))
+                          :map (do (walk (nth ty 1)) (walk (nth ty 2)))
+                          :chan (walk (nth ty 2))
+                          :func (do (doseq [x (nth ty 1)] (walk x)) (doseq [x (nth ty 2)] (walk x)))
+                          :struct (doseq [f (nth ty 1)] (walk (:type f)))
+                          :tuple (doseq [x (rest ty)] (walk x))
+                          :interface (let [ts (t/iface-tset ty)]
+                                       (doseq [m (nth ty 1)] (walk (:type m)))
+                                       (when (not= :all (:terms ts)) (doseq [[_ x] (:terms ts)] (walk x))))
+                          :union (doseq [[_ x] (nth ty 1)] (walk x))
+                          nil))
+                      (finally (.remove seen ty))))))]
+      (doseq [tp tparams] (walk tp)))))
+
+(defn- tparam-names [tps]
+  (let [ns (map #(:name (t/info %)) tps)]
+    (case (count ns)
+      0 ""
+      1 (first ns)
+      2 (str (first ns) " and " (second ns))
+      (str (str/join ", " (butlast ns)) ", and " (last ns)))))
+
+(defn infer
+  "go/types' infer: the type arguments of tparams (targs: those known, nil the unknown), from
+  the function parameters' types params and the arguments' nodes args (each {:type :mode
+  :form}), or nil after reporting through err (a function of a form and a message); reverse: a
+  reverse inference's wording."
+  [tparams targs params args reverse err]
+  (let [n (count tparams)
+        targs (vec (take n (concat targs (repeat nil))))]
+    (cond
+      (not-any? nil? targs) targs
+      (some invalid? args) nil
+      :else
+      (let [known (into {} (keep (fn [[tp ta]] (when ta [tp ta])) (map vector tparams targs)))
+            params (if (seq known) (mapv #(*subst* % known) params) params)
+            tps (set tparams)
+            u (new-unifier tparams targs true)
+            fail (fn [tpar targ arg]
+                   (let [inf (u-inferred u tparams)]
+                     (if (and (nil? (first inf)) (every? nil? inf))
+                       (err (:form arg) (format "type %s of %s does not match %s (cannot infer %s)"
+                                                (t/type-str targ) (expr-str (:form arg)) (t/type-str tpar) (tparam-names tparams)))
+                       (let [m (into {} (keep (fn [[tp ta]] (when ta [tp ta])) (map vector tparams inf)))
+                             inferred (*subst* tpar m)]
+                         (err (:form arg)
+                              (if (not= inferred tpar)
+                                (if reverse
+                                  (format "inferred type %s for %s does not match type %s of %s" (t/type-str inferred) (t/type-str tpar) (t/type-str targ) (expr-str (:form arg)))
+                                  (format "type %s of %s does not match inferred type %s for %s" (t/type-str targ) (expr-str (:form arg)) (t/type-str inferred) (t/type-str tpar)))
+                                (format "type %s of %s does not match %s" (t/type-str targ) (expr-str (:form arg)) (t/type-str tpar))))))
+                     nil))
+            ;; 1: the arguments
+            untyped (loop [i 0 untyped []]
+                      (if (>= i (count args))
+                        untyped
+                        (let [arg (nth args i) par (nth params i)]
+                          (if (or (parameterized? tps par) (parameterized? tps (:type arg)))
+                            (cond
+                              (t/typed? (:type arg))
+                              (if (unify u par (:type arg) :assign)
+                                (recur (inc i) untyped)
+                                (do (fail par (:type arg) arg) ::failed))
+                              (and (t/tparam? par) (not= :untyped-nil (:type arg))) (recur (inc i) (conj untyped i))
+                              :else (recur (inc i) untyped))
+                            (recur (inc i) untyped)))))]
+        (when-not (= ::failed untyped)
+          ;; 2: the constraints, while they make progress
+          (when
+              (loop []
+                (let [nn (u-unknowns u)
+                      ok (every? (fn [tpar]
+                                   (let [tx (u-at u tpar)
+                                         [core single] (core-term tpar)
+                                         ok (cond
+                                              (nil? core) true
+                                              (some? tx) (or (unify u tx (second core) :inexact)
+                                                             (do (err nil (format "%s (type %s) does not satisfy %s" (t/type-str tpar) (t/type-str tx)
+                                                                                  (t/type-str (:bound (t/info tpar)))))
+                                                                 false))
+                                              (and single (not (first core))) (do (u-set! u tpar (second core)) true)
+                                              :else true)]
+                                     (and ok
+                                          (or (nil? tx) (parameterized? tps tx)
+                                              (let [ci (t/tparam-iface tpar)]
+                                                (if (t/missing-method tx ci true (fn [a b] (unify u a b :exact)))
+                                                  (do (err nil (format "%s (type %s) does not satisfy %s" (t/type-str tpar) (t/type-str tx)
+                                                                       (t/type-str (:bound (t/info tpar)))))
+                                                      false)
+                                                  true))))))
+                                 tparams)]
+                  (cond
+                    (not ok) false
+                    (= nn (u-unknowns u)) true
+                    :else (recur))))
+            ;; 3: the untyped arguments' default types
+            (when
+                (let [maxu (reduce (fn [m i]
+                                     (if (= ::failed m)
+                                       m
+                                       (let [tpar (nth params i) arg (nth args i)]
+                                         (if (some? (u-at u tpar))
+                                           m
+                                           (let [mx (get m tpar)
+                                                 nm (if mx (max-type mx (:type arg)) (:type arg))]
+                                             (if (nil? nm)
+                                               (do (err (:form arg) (format "mismatched types %s and %s (cannot infer %s)"
+                                                                            (t/type-str mx) (t/type-str (:type arg)) (t/type-str tpar)))
+                                                   ::failed)
+                                               (assoc m tpar nm)))))))
+                                   {} untyped)]
+                  (when-not (= ::failed maxu)
+                    (doseq [[tpar ty] maxu] (u-set! u tpar (t/default-type ty)))
+                    true))
+              ;; simplify
+              (let [inferred (volatile! (u-inferred u tparams))]
+                (kill-cycles! tparams inferred)
+                (loop [dirty (vec (keep-indexed (fn [i ty] (when (and ty (nil? (nth targs i))) i)) @inferred))]
+                  (when (seq dirty)
+                    (let [m (into {} (keep (fn [[tp ta]] (when ta [tp ta])) (map vector tparams @inferred)))
+                          dirty (vec (filter (fn [i]
+                                               (let [t0 (nth @inferred i) t1 (*subst* t0 m)]
+                                                 (when (not= t0 t1) (vswap! inferred assoc i t1) true)))
+                                             dirty))]
+                      (recur dirty))))
+                (if-let [bad (some (fn [i] (let [ty (nth @inferred i)] (when (or (nil? ty) (parameterized? tps ty)) i)))
+                                   (range n))]
+                  (let [tp (nth tparams bad) x (:obj (t/info tp))]
+                    (err nil (format "cannot infer %s (declared at %s:%s)" (:name (t/info tp)) (or (some-> x (o :file)) (:name e/*gofile*))
+                                     (or (some-> x (o :line)) "?")))
+                    nil)
+                  @inferred)))))))))

@@ -10,7 +10,7 @@
 
 ;;; Generic instantiation by substitution (GR2 computes types through it; GR6 checks generics)
 
-(declare subst instantiate cycle-report! obj-decl!)
+(declare subst subst-terms subst-tset instantiate cycle-report! obj-decl! verify-later!)
 
 (defn subst
   "Type ty with the type parameters of map m replaced."
@@ -33,9 +33,43 @@
       :chan [:chan (nth ty 1) (subst (nth ty 2) m)]
       :func [:func (mapv #(subst % m) (nth ty 1)) (mapv #(subst % m) (nth ty 2)) (nth ty 3)]
       :struct [:struct (mapv #(update % :type subst m) (nth ty 1))]
-      :interface [:interface (t/sort-methods (map #(update % :type subst m) (nth ty 1))) (nth ty 2)]
+      :interface [:interface (t/sort-methods (map #(update % :type subst m) (nth ty 1))) (subst-tset (nth ty 2) m)]
+      :union [:union (subst-terms (nth ty 1) m)]
       :tuple (into [:tuple] (map #(subst % m) (rest ty)))
       ty)))
+
+(defn- subst-terms [terms m]
+  (if (= :all terms) :all (t/terms-norm (map (fn [[tl ty]] [tl (subst ty m)]) terms))))
+
+(defn- subst-tset [ts m]
+  (if (map? ts) (t/make-tset (subst-terms (:terms ts) m) (:comparable ts)) ts))
+
+(defn later!
+  "Queues f for after the current declaration (go/types' later)."
+  [f]
+  (when e/*decl* (vswap! e/*decl* update :later (fnil conj []) f)))
+
+(defn verify!
+  "go/types' verify: an error at form f for the first type argument of targs that does not
+  satisfy its type parameter's constraint (the constraints with the type arguments substituted,
+  and extra's: a generic method's receiver type parameters)."
+  [f tps targs extra]
+  (let [m (merge extra (zipmap tps targs))]
+    (loop [i 0]
+      (when (< i (count tps))
+        (let [tp (nth tps i)
+              b (subst (or (:bound (t/info tp)) [:interface [] nil]) m)]
+          (if-let [cause (t/satisfies-cause (nth targs i) b)]
+            (err! f :InvalidTypeArg "%s" cause)
+            (recur (inc i))))))))
+
+(defn verify-later!
+  "Verifies the type arguments of an instantiation after the current declaration."
+  ([f tps targs] (verify-later! f tps targs nil))
+  ([f tps targs extra]
+   (when (and f (seq tps) (every? t/valid? targs))
+     (let [l e/*line* fi e/*gofile*]
+       (later! (fn [] (binding [e/*line* (or (code/fline f) l) e/*gofile* (or e/*gofile* fi)] (verify! f tps targs extra))))))))
 
 (def ^:private instances (java.util.concurrent.ConcurrentHashMap.))
 
@@ -56,8 +90,9 @@
             :invalid)
         :else
         (let [k [g targs]]
+          (verify-later! f tps targs)
           (or (.get instances k)
-              (let [nt (t/new-named (assoc (select-keys i [:obj :name :pkg :pkg-name]) :origin g :targs targs))
+              (let [nt (t/new-named (assoc (select-keys i [:obj :name :pkg :pkg-name :local]) :origin g :targs targs))
                     m (zipmap tps targs)]
                 (t/update-info! nt assoc :subst m :lazy-under (fn [] (subst (t/under g) m)))
                 (or (.putIfAbsent instances k nt) nt))))))))
@@ -77,7 +112,7 @@
   [recv d]
   (let [[recv] (t/deref-type recv)]
     (if (and (t/named? recv) (seq (:targs (t/info recv))) (:obj d))
-      (let [tps (o (:obj d) :tparams)
+      (let [tps (o (:obj d) :rtparams)
             targs (:targs (t/info recv))]
         (if (= (count tps) (count targs))
           (assoc d :type (subst (:type d) (zipmap tps targs)))
@@ -319,21 +354,6 @@
         (with-decl d (fn [] (doseq [l ls] (l))))
         (recur)))))
 
-(defn- tparam-scope
-  "A scope binding a generic declaration's type parameters to new type parameter types:
-  [scope tparam-types]."
-  [cx tps]
-  (let [s (e/scope (:scope cx) :block)
-        tys (vec (map-indexed
-                  (fn [i p]
-                    (let [nm (code/ident-name p)
-                          tp (t/new-tparam {:name nm :index i})
-                          x (e/obj {:kind :type :name nm :type tp :tparam true})]
-                      (e/scope-put! s nm x)
-                      tp))
-                  tps))]
-    [s tys]))
-
 (defn- verify-val!
   "Compares a package constant's value with its :val (§3.6)."
   [nf x n]
@@ -424,14 +444,18 @@
     (if alias
       (do (oset! x :type :invalid)
           (if tparams
-            (do (e/generic!) (oset! x :generic-invalid true))
+            ;; a generic alias (go1.24): its type over its type parameters
+            (let [[sc tys] (code/tparam-scope cx tparams)]
+              (e/generic!)
+              (oset! x :tparams tys)
+              (oset! x :type (code/typexpr (assoc cx :scope sc) type-form)))
             (let [ty (code/typexpr cx type-form)]
               (oset! x :type ty))))
       (let [nt (o x :type)
             [cx tps] (if tparams
-                       (let [[s tys] (tparam-scope cx tparams)] [(assoc cx :scope s) tys])
+                       (let [[s tys] (code/tparam-scope cx tparams nil #(t/update-info! nt assoc :tparams %))] [(assoc cx :scope s) tys])
                        [cx nil])
-            _ (when tps (e/generic!) (t/update-info! nt assoc :tparams tps))
+            _ (when tps (e/generic!))
             _ (t/update-info! nt assoc :resolving true)
             rhs (code/typexpr cx type-form)]
         (t/update-info! nt assoc :underlying (if (t/named? rhs) rhs rhs) :resolving false)
@@ -472,27 +496,42 @@
 (defn- func-sig!
   "A function's or method's signature (funcDecl): its type set, the body queued."
   [x d]
-  (let [{:keys [file form sig-forms tparams method recv-form base generic-recv]} @d
+  (let [{:keys [file form sig-forms tparams method recv-form base generic-recv ptr]} @d
         cx (file-cx file)
-        [cx tps] (cond
-                   tparams (let [[s tys] (tparam-scope cx tparams)] [(assoc cx :scope s) tys])
-                   generic-recv
-                   ;; the receiver's type parameters: named by the receiver type's arguments
-                   (let [ty (or (:tag (meta recv-form)) recv-form)
-                         ty (if (and (seq? ty) (= '* (first ty))) (second ty) ty)]
-                     (let [[s tys] (tparam-scope cx (rest ty))] [(assoc cx :scope s) tys]))
-                   :else [cx nil])
-        _ (when tps (e/generic!) (oset! x :tparams tps))
+        bx (when (and generic-recv base) (e/scope-get (o e/*pkg* :scope) base))
+        _ (when (and bx (= :type (o bx :kind))) (obj-decl! bx))
+        bt (when (and bx (= :type (o bx :kind))) (o bx :type))
+        gtps (when (t/named? bt) (:tparams (t/info bt)))
+        ;; a generic type's method: the receiver's type parameters, named by the receiver type's
+        ;; arguments, constrained as the type's (go/types' collectRecv)
+        [cx rtps] (if generic-recv
+                    (let [ty (or (:tag (meta recv-form)) recv-form)
+                          ty (if (and (seq? ty) (= '* (first ty))) (second ty) ty)
+                          rnames (vec (rest ty))
+                          [s tys] (code/tparam-scope cx rnames (vec (repeat (count rnames) nil)))]
+                      ;; the bounds: the type's, its type parameters renamed to the receiver's
+                      (when (= (count gtps) (count tys))
+                        (let [m (zipmap gtps tys)]
+                          (doseq [[g r] (map vector gtps tys)]
+                            (t/update-info! r assoc :bound (subst (or (:bound (t/info g)) [:interface [] nil]) m)))))
+                      [(assoc cx :scope s) tys])
+                    [cx nil])
+        ;; its own type parameters (a generic function, a generic method: go1.27)
+        [cx tps] (if tparams
+                   (let [[s tys] (code/tparam-scope cx tparams)] [(assoc cx :scope s) tys])
+                   [cx nil])
+        _ (when (or tps rtps) (e/generic!))
+        _ (when tps (oset! x :tparams tps))
+        _ (when rtps (oset! x :rtparams rtps))
         recv (when method
-               (let [rt (if (and (or (symbol? recv-form) (code/go-id? recv-form)) (:tag (meta recv-form)))
-                          (code/typexpr cx (:tag (meta recv-form)))
-                          (code/typexpr cx recv-form))
-                     rt (if (and generic-recv (t/valid? rt))
-                          ;; T[P...] stands for the generic type itself in its methods
-                          (let [[b p] (t/deref-type rt)
-                                g (if (t/named? b) (or (:origin (t/info b)) b) b)]
-                            (if p [:pointer g] g))
-                          rt)]
+               (let [tf (if (and (or (symbol? recv-form) (code/go-id? recv-form)) (:tag (meta recv-form)))
+                          (:tag (meta recv-form))
+                          recv-form)
+                     rt (if (and rtps (t/named? bt) (= (count gtps) (count rtps)))
+                          ;; the instance by the receiver's own type parameters (some may be _)
+                          (let [inst (instantiate tf bt rtps)] (if ptr [:pointer inst] inst))
+                          (code/typexpr cx tf))]
+                 ;; T[P...]: the generic type's instance by the receiver's type parameters
                  {:name (when (and (or (symbol? recv-form) (code/go-id? recv-form)) (:tag (meta recv-form)))
                           (code/ident-name recv-form))
                   :type rt :form recv-form}))
@@ -510,9 +549,7 @@
       (err! form :InvalidMainDecl "func main must have no arguments and no return values"))
     (oset! x :type sig)
     (vswap! d assoc :sig sig :params ps :results rs :body body :named named :recv recv :cx cx)
-    (when (and (empty? body) (not (:extern (meta form))) (not tparams))
-      ;; no body forms and not extern: the empty body
-      nil)
+
     (vswap! (:bodies *ctx*) conj x)))
 
 (defn obj-decl!
@@ -561,7 +598,7 @@
   [m]
   (obj-decl! m)
   {:name (o m :name) :pkg (when-not (t/exported? (o m :name)) (o m :pkg)) :type (or (o m :type) [:func [] [] false])
-   :ptr-recv (o m :ptr-recv) :obj m})
+   :ptr-recv (o m :ptr-recv) :obj m :tparams (o m :tparams)})
 
 ;;; Bodies
 
