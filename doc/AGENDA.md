@@ -94,8 +94,7 @@ The current state of the work. This file is rewritten as things change. For the 
 ## Next
 
 - Running (the user, 2026-10-19), all from `90ec844d`: goi GR7b (`goi-gr7b`: `$GOROOT/test`'s errorcheck programs; `reify` of listed Go interfaces, G13;
-  GC45 onward), repr/haskell HR25's rest (`repr-haskell-hr25`: the `{-# LINE #-}` modules at the
-  trees of mode `:full`; HR26 onward, a change to S5 or HR12 left for the user). The seed
+  GC45 onward). The seed
   `34d68b82…` (GR6), verified.
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
@@ -143,7 +142,8 @@ The current state of the work. This file is rewritten as things change. For the 
   R1 done (2026-10-17: the tree and lines levels over GHC 9.14.1's base libraries, 483 of 483
   modules; HR1-HR5); R2 done (the interface level, 483 of 483; HR6-HR8); R3 done (`:full`, the
   text level, 483 of 483 byte for byte; HR9-HR13); R4 and R5 done (the layout
-  printer; the other boot libraries: 1,226 modules, HR14-HR20); R6 done (2026-10-18: .hsc, .lhs, boot files; 1,345 modules; HR21-HR24 decided as built); HR25 done in part (Lexer.hs byte for byte, its :full trees still differ). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
+  printer; the other boot libraries: 1,226 modules, HR14-HR20); R6 done (2026-10-18: .hsc, .lhs, boot files; 1,345 modules; HR21-HR24 decided as built); HR25 done (2026-10-19: HR26 (b), HR27 (a), HR28 (a), the user: the module view writes CPP's
+  disagreeing markers as `{-# LINE #-}`; 1,331 of 1,345 modules with equal trees of mode `:full`, 14 known). Done: `repr/java print` (the round trip over Clojure's Java, the samples and the JDK;
   JP1-JP4); running: (Java forms → Java,
   with a round trip; branch `repr-java-print`).
 - Done (2026-10-17): repr/java print. Formerly planned: after the rename (the user, 2026-10-17: "Create jaf print after the naming debate settled"):

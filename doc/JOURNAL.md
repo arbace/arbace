@@ -1768,3 +1768,31 @@ builds use.
 - The user decided HR26 (b), HR27 (a) and HR28 (a) for HR25's rest: the module view writes
   CPP's disagreeing line markers as `{-# LINE #-}` pragmas, and this is the only reference.
   The branch `repr-haskell-hr25` makes it the default.
+
+## 2026-10-19: repr/haskell HR25's rest merged (HR26-HR28)
+
+- Branch `repr-haskell-hr25` (`6aed661a`, `65784a44`, from `90ec844d`; doc/haskell/SPEC.md §2.8 and
+  §10.11, doc/haskell/HASKELL-NOTES.md "HR26-HR28") merged as `5a37da1a`.
+  - **The cause:** after an `#include` or a long skipped branch, CPP writes a line marker that sets
+    GHC's positions back to the module's own lines. The module view (S5's reference) dropped it, so
+    the printed module's positions kept following the earlier `{-# LINE #-}` pragma into `Lexer.x`
+    or the `.hsc`. Five markers in four modules disagree with their pragmas: Cabal-syntax's
+    `Distribution.Fields.Lexer` and R6's three `.hsc` modules.
+  - **The options surveyed:**
+    - (a) keep the four as known;
+    - (b) the module view writes each disagreeing marker as `{-# LINE n "X.hs" #-}` on the
+      directive's blank line;
+    - (c), (d) normalizations in the comparison or in the helper, which would hide a difference
+      GHC sees;
+    - (e) a reference keeping the directives, which would reopen S5 for all 376 CPP modules.
+  - **The user decided HR26 (b), HR27 (a) and HR28 (a):**
+    - the markers are written in the module view;
+    - they are recorded as `:cpp`'s `:view-markers` in mode `:full`;
+    - this is the text level's only reference; S5's §2.8 is amended.
+  - **The helper:** `tools/hsdump/HsDump.hs`, version 4.
+- **Results:** the tree level is 1,345 of 1,345 in both layouts, and so is the interface level. At
+  the text level, 1,334 modules are byte-identical and 1,331 have equal trees of mode `:full` (was
+  1,327). 14 known differences remain (HR12's 3 trees, 11 conversions). Only the four modules'
+  views change, by five pragma lines; every other module is byte for byte main's.
+- **After the merge:** `make check-makefile`, `bin/repr-haskell test` (39 ok, step 9 the case
+  `test/haskell/hr26/AlexDir.hs`) and the essential gate (11.6 min) passed.
