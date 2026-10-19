@@ -508,7 +508,10 @@
 
 (declare sizeof)
 
-(defn- align-up ^long [^long x ^long a] (* a (quot (+ x (dec a)) a)))
+(defn- align-up
+  "The smallest y >= x with y % a = 0 (a a power of 2): gcSizes' align, overflowing to < 0."
+  ^long [^long x ^long a]
+  (bit-and-not (unchecked-add x (dec a)) (dec a)))
 
 (defn sync-atomic-align64?
   "Whether t is sync/atomic's align64 (or internal/runtime/atomic's), the empty struct gc
@@ -535,31 +538,51 @@
             a (if (complex-type? t) (quot a 2) a)]
         (min a max-align)))))
 
-(defn offsetsof [fields]
+(defn offsetsof
+  "gcSizes' Offsetsof: the fields' offsets, -1 from a field on whose offset or size is too
+  large (int64 overflow, GR7c)."
+  [fields]
   (loop [fs fields offs 0 acc []]
     (if (empty? fs)
       acc
-      (let [f (first fs)
-            o (align-up offs (alignof (:type f)))]
-        (recur (rest fs) (+ o (sizeof (:type f))) (conj acc o))))))
+      (let [f (first fs)]
+        (if (neg? offs)
+          (recur (rest fs) offs (conj acc -1))
+          (let [o (align-up offs (alignof (:type f)))
+                d (sizeof (:type f))]
+            (recur (rest fs)
+                   (if (and (>= d 0) (>= o 0)) (unchecked-add o d) -1)
+                   (conj acc o))))))))
 
-(defn sizeof ^long [t]
+(defn sizeof
+  "gcSizes' Sizeof: the size of t, -1 when it is too large (int64 overflow, GR7c)."
+  ^long [t]
   (let [u (under t)]
     (cond
       (keyword? u) (case u :string (* 2 word-size) (:size (basic-info u) word-size))
       :else
       (case (nth u 0)
         :array (let [n (long (nth u 1))]
-                 (if (<= n 0) 0 (* n (sizeof (nth u 2)))))
+                 (if (<= n 0)
+                   0
+                   (let [es (sizeof (nth u 2))]
+                     (cond
+                       (neg? es) -1
+                       (zero? es) 0
+                       (> es (quot Long/MAX_VALUE n)) -1
+                       :else (* es n)))))
         :slice (* 3 word-size)
         :struct (let [fs (nth u 1)]
                   (if (empty? fs)
                     0
                     (let [offs (offsetsof fs)
                           o (long (peek offs))
-                          s (sizeof (:type (peek fs)))
-                          s (if (and (pos? o) (zero? s)) 1 s)]
-                      (align-up (+ o s) (alignof t)))))
+                          s (sizeof (:type (peek fs)))]
+                      (if (or (neg? o) (neg? s))
+                        -1
+                        (let [s (if (and (pos? o) (zero? s)) 1 s)]
+                          ;; may overflow to < 0, which is too large
+                          (align-up (unchecked-add o s) (alignof t)))))))
         :interface (* 2 word-size)
         word-size))))
 
@@ -747,7 +770,13 @@
           (let [r (lookup-impl V false (:name m) (:pkg m))]
             (cond
               (:ptr-recv r) {:method m :cause :ptr-recv}
-              (nil? r) {:method m :cause :missing}
+              ;; go/types: a method found with another case is the cause (wrongName, or
+              ;; unexported when its name is the same: another package's)
+              (nil? r) (let [fr (binding [*fold-case* true] (lookup-impl V false (:name m) (:pkg m)))]
+                         (if (and (= :method (:kind fr)) (not (:ambiguous fr)))
+                           (let [d (method-data (:obj fr))]
+                             {:method m :cause (if (= (:name d) (:name m)) :unexported :wrong-name) :have d})
+                           {:method m :cause :missing}))
               (:ambiguous r) {:method m :cause :missing}
               (= :field (:kind r)) {:method m :cause :field}
               :else

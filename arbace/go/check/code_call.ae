@@ -682,6 +682,11 @@
                             seen))
                         #{} nodes)
                 {:op :lit :kind :map :to T :entries (mapv #(dissoc % :pos) nodes) :mode :value :type T :form f :line (fline f)})
+              ;; go/types: an invalid underlying type (an instance with a wrong count of type
+              ;; arguments): its error reported, the elements used, a value of the type
+              (= :invalid u)
+              (do (doseq [el (nnext f)] (if (vector? el) (expr-internal cx (peek el) nil) (when-not (keyword? el) (expr-internal cx el nil))))
+                  {:op :lit :kind :invalid :to T :mode :value :type T :form f :line (fline f)})
               :else
               (do (err! f :InvalidLit "invalid composite literal type %s" (t/type-str T)) (invalid f)))))))))
 
@@ -941,7 +946,8 @@
 
 (defn offsetof-value
   "unsafe.Offsetof's value of the field at path (an embedded path, field indexes) of struct type
-  base, or nil when the path crosses a pointer."
+  base, or nil when the path crosses a pointer, -1 when the offset is too large (go/types'
+  offsetof)."
   [base path]
   (loop [ty base path path off 0]
     (if (empty? path)
@@ -950,10 +956,12 @@
             fs (nth u 1)
             i (first path)
             fd (nth fs i)
-            o (nth (t/offsetsof fs) i)]
-        (if (and (next path) (t/pointer? (:type fd)))
-          nil
-          (recur (:type fd) (rest path) (+ off (long o))))))))
+            o (long (nth (t/offsetsof fs) i))
+            off2 (unchecked-add (long off) o)]
+        (cond
+          (and (next path) (t/pointer? (:type fd))) nil
+          (or (neg? o) (neg? off2)) -1
+          :else (recur (:type fd) (rest path) off2))))))
 
 (defn builtin-call
   "A call of builtin nm (unsafe: one of package unsafe's)."
@@ -1115,8 +1123,12 @@
                                        (let [v (float-of (:val n) (:type n))]
                                          (if (nil? v) n (assoc n :type :untyped-float :val v)))
                                        n))
+                    ;; go/types: both untyped constants to floats; when one is not constant (an
+                    ;; untyped shift), both to float64 (the shift's error then)
                     [x y] (if (and (t/untyped? (:type x)) (t/untyped? (:type y)))
-                            [(to-float x) (to-float y)]
+                            (if (and (= :constant (:mode x)) (= :constant (:mode y)))
+                              [(to-float x) (to-float y)]
+                              [(convert-untyped x :float64) (convert-untyped y :float64)])
                             [x y])
                     [x y] (cond
                             (and (t/untyped? (:type x)) (t/typed? (:type y))) [(convert-untyped x (:type y)) y]
@@ -1243,6 +1255,9 @@
             (cond
               (invalid? x) (invalid f)
               (has-var-size? (:type x)) (node {:args [x] :mode :value :type :uintptr})
+              ;; go/types: a size beyond int64 (GR7c)
+              (and (= nm "Sizeof") (neg? (t/sizeof (:type x))))
+              (do (err! (first arg-forms) :TypeTooLarge "%s is too large" (operand-str x)) (invalid f))
               :else (node {:args [x] :mode :constant :type :uintptr
                            :val (if (= nm "Sizeof") (t/sizeof (:type x)) (t/alignof (:type x)))}))))
         "Offsetof"
@@ -1264,6 +1279,7 @@
                       (nil? off) (bad "invalid argument: field %s is embedded via a pointer in %s" (subs h 2) (expr-str (second af)))
                       ;; a size depending on type parameters: not constant (each instance's)
                       (has-var-size? base) (node {:args [x] :mode :value :type :uintptr})
+                      (neg? (long off)) (do (err! (second af) :TypeTooLarge "%s is too large" (operand-str (:x x))) (invalid f))
                       :else (node {:args [x] :mode :constant :type :uintptr :val off}))))))))
         "Add"
         (if-not (need 2 2)
