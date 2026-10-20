@@ -1,6 +1,6 @@
 # Arbace
 
-Arbace is a Clojure derivative written entirely in Clojure.
+Arbace is a Clojure derivative written entirely in symbolic expressions.
 
 - **Extended to represent its own implementation.** Clojure gained the Java forms
   ([spec](doc/classes/SPEC.md)): every construct of a Java class file as idiomatic Clojure

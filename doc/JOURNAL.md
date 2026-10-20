@@ -84,3 +84,11 @@ git history:
   doc/rust/SPEC.md) name the forks by repository, branch and commit. Those commits are now
   reachable only by applying arbace/forks' patches to the upstream bases: golang/go `f043823a`,
   GHC `c35096f5`, rust-lang/rust `602727f2`. The citations are left as written, a dated record.
+
+## 2026-10-20: "written entirely in symbolic expressions"
+
+The user found the one-line description imprecise, "a Clojure derivative written entirely in
+Clojure", and chose "Arbace is a Clojure derivative written entirely in symbolic expressions". It is
+more precise because Arbace's own code is Clojure plus the Java forms and the Go forms (jrt, goi,
+`tamago/`, `box/`), all s-expressions but not all Clojure. The sentence changed in three places:
+GitHub's repository description, README's first line and CLAUDE.md's.
