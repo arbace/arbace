@@ -273,3 +273,14 @@ GPS12-GPS15 (doc/go/GO-PARSER-SURVEY.md, "As built: GP1"), each (a), as built:
 - the dumper generated at each load until GP7;
 - file lists from the helper's headers until GP2;
 - `native-check --fresh` after the round trips.
+
+## 2026-10-20: GP2 started (the user)
+
+GP2, the loader (branch `go-parser-gp2`, from `c8287cf1`):
+- `arbace.box.plan` generalized from the store's trees to directories as well: std and cmd,
+  modules, test variants, the directory tests (`dirs.go`'s rules ported), embed globs, language
+  versions. No export data is needed.
+- The native reader takes its file lists and the dump's header from the loader, which ends
+  GPS14's interim.
+- Exit: E-tree's header equal to the helper's over every corpus; `tamago/goroot`'s and
+  `tamago/cmd`'s lists equal to go list's; the box's planner kept working.
