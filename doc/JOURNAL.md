@@ -265,3 +265,11 @@ GitHub's repository description, README's first line and CLAUDE.md's.
 - **CLAUDE.md:** repr/go's verbs and `--full`'s list now name the native reader.
 - **A rule slip:** `bin/repr-go` was edited while a run of it was executing. Its dumps were
   complete; the run's last line then failed.
+
+## 2026-10-20: GPS12-GPS15 decided as built (the user)
+
+GPS12-GPS15 (doc/go/GO-PARSER-SURVEY.md, "As built: GP1"), each (a), as built:
+- the digest's forms of go/parser, checked against `tamago/goroot`'s;
+- the dumper generated at each load until GP7;
+- file lists from the helper's headers until GP2;
+- `native-check --fresh` after the round trips.

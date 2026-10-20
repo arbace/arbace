@@ -967,3 +967,11 @@ executable as the other tools' are (`arbace.j2g.embed`); stage 0 loads it from t
     possibly stale).
 
   *Recommended: (a)*.
+
+## Decided (2026-10-20): GPS12-GPS15
+
+The user decided GPS12-GPS15 as built (a):
+- GPS12: go/parser's forms from the digest, checked against `tamago/goroot`'s.
+- GPS13: the dumper generated in memory at each load, a committed and checked file at GP7.
+- GPS14: file lists from the helper's headers until GP2.
+- GPS15: `native-check --fresh` after the round trips in `--full`'s repr-go chain.
