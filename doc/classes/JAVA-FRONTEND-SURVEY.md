@@ -10,7 +10,8 @@ at `9a6a36e9`: the committed `jdk/forms` (911 files), the conversion reports of 
 prior-art clones (§3). The measuring scripts and the clones are in the survey's scratch
 (`.tmp/jfs/`, `.tmp/prior/`, not tracked); Appendix A says what each computes. No JVM was run for
 this survey and no Go build was made. Decided on 2026-10-20 ("Decided", at the end); JN1, the
-spike, as built: "As built: JN1 (2026-10-20)", after it.
+spike, as built: "As built: JN1 (2026-10-20)", after it; JN2, javac's forms vendored: "As built:
+JN2 (2026-10-20)", at the end, with JFS18-JFS22.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -1053,3 +1054,200 @@ The user decided JFS12-JFS17 as recommended:
   corpora.
 - JFS17 (a): javac's internal packages rooted in the tool for JN4, measured; (b) if the tool grows
   by more than about a third.
+
+## As built: JN2 (2026-10-20)
+
+JN2, javac's forms vendored, on the branch `java-frontend-jn2` from main `52d8c504`, with main
+merged in at `58806d78` (GP2) before the final checks. javac is committed as Java forms, jdk26u's
+text converted with no patch in it (JFS12 (c)); what JN1 patched into javac is now jrt's, j2g's or
+the analysis's. javac's world translates with no class failing its analysis, and JN1's driver,
+run on the tool executable built from the committed forms, gives javac on the frozen JVM's
+output, as in JN1. The JVM ran only the frozen v4 jar (through `bin/repr-java`,
+`bin/lib/frozen.bash`); Go only TamaGo's go1.27.1, without cgo; the tools' host was the worktree's
+stage 0, and, for j2g's analysis of javac's world, the program built from the checkout (below).
+
+### JN2.1 javac's forms: `jdk/javac/` and `bin/javac-vendor`
+
+`bin/javac-vendor` (modelled on `bin/toolchain-vendor` and `bin/jrt-convert`):
+
+- `convert`: the sources copied from jdk26u (`JDK`, pinned: its commit must be `baf63fb`), read by
+  `bin/repr-java read-jdk --check --origins` on the frozen JVM module by module, merged into
+  `jdk/javac/forms`, with `sources.txt` (`MODULE KIND PATH`: `share`, `gensrc`, `overlay`),
+  `provenance.edn` (jdk26u's commit and cleanliness, the build tree's gensrc, the JDK, repr/java's
+  reader hash and the frozen host, jdk/edge.edn's hash, the counts), then the edge;
+- `edge`: javac's edge alone (JFS14 (b)): `bin/j2g --program --record-edge` on the frozen JVM over
+  the program and javac's forms with the tool's variants, less what `jdk/edge.edn` answers alike
+  (`arbace.j2g.edge`'s new `subtract`), into `jdk/javac/edge.edn`;
+- `verify`: `convert` into `.tmp/javac-vendor/fresh`, `diff -r` with `jdk/javac`;
+- `check`: j2g translates javac's world (`--program`, javac's forms, the variants, both edges):
+  status 0 and no class failing its analysis;
+- `build`: `bin/arbace-go --build-java` (below).
+
+Makefile: `javac-verify` (`verify`, `check`, in `make verify`) and `build-java`.
+
+| | files | bytes |
+|---|---:|---:|
+| sources (`sources.txt`) | 524: jdk.compiler 368 (347 of `share/classes`, 21 of the build's `support/gensrc/jdk.compiler`), java.compiler 135, jdk.internal.opt 1 (`CommandLine`), java.base 20 (19 of jdk26u, 1 of `overlay/jdk/javac`) | |
+| `jdk/javac/forms` | 561 | 6,684,582 |
+| `jdk/javac/edge.edn` | 35 classes beyond `jdk/edge.edn`'s | 77,522 |
+
+The conversion takes 77-84 s (repr/java 16 s for jdk.compiler, 2 s java.compiler, the edge's
+recording 33-41 s). `module-info.java` and java.compiler's javadoc `snippet-files` are left out, as
+`read-jdk` leaves them. The generated sources are copied from the build tree (JFS20).
+
+### JN2.2 What javac's world needs of the JDK, and where it lives (JFS18, JFS19)
+
+JN1 patched javac in 11 files. JN2 patches none; each patch became:
+
+| JN1's patch | JN2 |
+|---|---|
+| `JN1Bundles` for `ResourceBundle.getBundle` (JavacMessages, JavaCompiler.version, JRTIndex) | jrt (shipped): `overlay/jdk/java.base/java/util/ResourceBundle.java`'s `getBundle(String)` and `getBundle(String, Locale)`, the JDK's search with the default Control (candidate and fallback locales, the parents chained, a base bundle alone last), each bundle made by `Class.forName` and the public no-argument constructor; j2g roots every concrete `ResourceBundle` subclass's constructor (`main.ae`, `bundle-roots`); javac's messages are found as on the JVM |
+| `SourceVersion`: `Runtime.version()` | jrt (shipped): `java.lang.Runtime$Version`, hand-written (`go/arbace/jrt/system.ae`: feature 26, `interim`, `update`, `patch`, `compareTo`, `equals`, `hashCode` and `toString` as the JDK's), `Runtime.version()`; the manifest, its test and the member tables regenerated (`bin/jrt manifest`); a jrt test |
+| `JavacTaskImpl`'s crash report: `printStackTrace(PrintWriter)` | j2g (shipped): calls of `Throwable.printStackTrace(PrintWriter)` and `(PrintStream)` are j2g's support functions `J2g_PrintStackTraceWriter`, `Stream` (which existed for the REPL's reflection; `model.ae`, `throwable-print-helper`) |
+| `DocLint.newDocLint`, `BasicJavacTask.initPlugins`: no `ServiceLoader` | javac's world: `overlay/jdk/javac/java.base/java/util/ServiceLoader.java`, a ServiceLoader that finds no provider, converted into `jdk/javac/forms` |
+| `PathFileObject.openReader`: `InputStreamReader(InputStream, CharsetDecoder)` | javac's world: a j2g variant, `overlay/jdk/javac/variants/InputStreamReader.ae` |
+| the copies of jrt's `Files` and `Path` with the members javac's file package names | javac's world: variants `Files.ae` (`list`, `walk` x2, `find`, `walkFileTree` x2, `readAttributes`, `isSymbolicLink`, `readSymbolicLink`, `getLastModifiedTime`: they throw) and `Path.ae` (`getFileSystem`) |
+| the 19 java.base classes of JN1.2 (`add-tree`) | javac's world: converted from jdk26u by `bin/javac-vendor` (module java.base in `sources.txt`) |
+| the four workarounds of the analysis's and j2g's bugs (Attr, Types, Resolve x2) | fixes (JN2.3) |
+
+The split is JFS18's: what javac alone needs, and whose types are outside the shipped world
+(`FileSystem`, `CharsetDecoder`, `FileVisitor`, `BasicFileAttributes`, `ServiceLoader$Provider`),
+is in javac's world, because in the shipped closure it would change `jdk/edge.edn` (the classes the
+shipped world's j2g asks the JVM about) and root unused classes in every shipped build. The tool
+build reads it: `bin/j2g`'s new `--variants DIR` (more Go-build variant files) and repeatable
+`--edge` (the union of the edges). jrt's shipped additions still change `jdk/edge.edn` in two
+entries (JFS19): `Runtime$Version` is no longer a cut class (its `:cut` entry left), and the
+three-argument `getBundle` that `sun.util.resources.LocaleData` calls, which jrt lacks, is now
+looked up among `getBundle` overloads in the forms (HotSpot's method order recorded:
+`:method-order`). `bin/j2g-edge update` recorded them; `jdk/edge.edn` otherwise holds no answer of
+javac's world.
+
+The runtime key (`bin/lib/version.bash`) leaves out `jdk/javac` and `overlay/jdk/javac`, and
+`test/jrt/jrt_sources.ae`'s overlay sources leave out `overlay/jdk/javac`: they are the tool's.
+
+### JN2.3 j2g's and the analysis's fixes, with their regression forms
+
+Each has a case in j2g's fixtures, `test/j2g/fixtures/FxJavac.ae` (recorded on the frozen JVM into
+`test/j2g/fixtures.edn`) and `FxJavacShapes.ae` (the two shapes the frozen jar's own analysis does
+not take: their results are kept by hand in `test/j2g/record_fixtures.ae`, JFS21), which
+`bin/diffcheck` runs interpreted against translated:
+
+| fix | where | regression case |
+|---|---|---|
+| binary names `Jv_...` for the tool's modules (JFS13 (a)): the packages of jdk.compiler, java.compiler and jdk.internal.opt; `--qualify PREFIX` adds a driver's | `names.ae` (`tool-module-prefixes`, `qualified?`); the rename `java/nio/file/FileSystem` → `Nio_FileSystem` | the tool build (0 name collisions); the shipped names are unchanged (JN2.5) |
+| a cast to a class outside the closed world (an `instanceof` pattern's binding): an operation-level stub | `code.ae` `cast-val` | none in the fixtures: the interpreted half cannot name a class outside the program (its import fails); javac's world is its test (`bin/javac-vendor check`) |
+| `Object.wait(long)` on an Object-typed receiver: jrt's `WaitTimeout` takes the nanoseconds too; `wait(long, int)` in the helpers | `code.ae` | `tWaitLong`; the shipped `TimeUnit.timedWait` |
+| a bound method reference to a private method reached directly, not as a virtual call; the interpreter calls it so too (it threw `AbstractMethodError`) | `reach.ae`; `interp.ae` | `tPrivateMethodRef` |
+| `Throwable.printStackTrace(PrintWriter\|PrintStream)` | `code.ae`, `reach.ae`, `model.ae` | `tPrintStackTrace` |
+| a lambda's null-typed body value (j2g's temporary of type `any`, which no other interface takes): a statement, then nil of the target type | `code.ae` `expr-as`, `convert-ref-or-prim` | `tLambdaTemp` |
+| an anonymous class's superclass outer instance reached through a non-leaf class's interface (`Self_`) | `decls.ae` (`super-outer-path` through `c/outer-field`) | `tOuterThroughInterface` |
+| analysis: a local or anonymous class in a constructor's prologue reads an outer instance through the constructor's outer instance parameter, captured as a local (as for lambdas); j2g names that capture the constructor's `this_0`, the interpreter reads it as the receiver's `this$0` | `analyze.ae` (`prologue-class?`, `outer-this-node`), `decls.ae`, `interp.ae` | `FxJShapes/tPrologueAnon` |
+| analysis: a lambda's return tag naming the anonymous class its body creates (not declared yet) is the functional interface method's return type | `analyze.ae` (`lambda-ret-desc`) | `FxJShapes/tLambdaAnonType` |
+| `Runtime.version()` | jrt | `tRuntimeVersion`; jrt's `TestRuntimeVersion` |
+
+No javac patch remains.
+
+### JN2.4 javac's world translated, the tool, and JN1's driver
+
+`bin/arbace-go --build-java [DIR...]` is the tool build (JFS4 (b)), the test build's recipe with
+javac's forms, the variants, both edges and the DIRs' Java forms (a driver), into
+`target/arbace-go/<arch>/arbace-javac`. j2g's analysis is its host's own (`bin/j2g`), so the analysis
+fixes take effect on a host built from the checkout: `bin/javac-vendor check` and the tool build
+run j2g on `target/arbace-go/amd64/arbace` (JFS22).
+
+| | JN1 (patched javac) | JN2 |
+|---|---:|---:|
+| classes analyzed, failing (with the driver) | 16,241, 2 | 16,668, **0** |
+| classes translated, methods reached, with missing parts | 16,128, 82,648, 363 | 16,565, 84,078, 349 |
+| tool executable (stripped) | 183,373,984 bytes | 186,527,904 bytes |
+| tool build (j2g 79-151 s, build-go 184 s; 135 s with Go's cache warm) | about 5 minutes | 343 s |
+
+JN1's driver (`jn1.Main`, `jn1.Files`, JN1's converted forms, named with `--qualify jn1/`) on the
+tool, against JN1's outputs of the same driver on the frozen JVM's javac (`.tmp/jn1/jvm-*.txt`):
+
+| run | javac on Arbace (wall) | equal to the JVM's |
+|---|---:|---|
+| parse javac's own sources (482 files, 160,225 lines printed) | 1.3 s | **yes** |
+| parse java.base's closure (838 files, 380,024 lines) | 2.9 s | **yes** |
+| analyze `Reduced.java` with the baseline as source path | 3.8 s | **yes** |
+| analyze the samples (2,173 lines of facts) | 0.3 s | yes, but capture numbers |
+| analyze the baseline (183 files, 217,098 lines of facts) | 4.9 s (javac's own: 3.7 s) | yes, but capture numbers |
+
+As in JN1, "capture numbers" are javac's names of captured types, from identity hashes; normalized,
+every output is equal. javac's messages now come from its bundles through `getBundle`.
+
+### JN2.5 The shipped program's change
+
+j2g's program tree (`target/arbace-go/j2g`) of a build of main `58806d78` against the branch's,
+function by function (string literals' numbers and gensym suffixes normalized,
+`.tmp/scripts/fndiff.py`):
+
+- the translated JDK and runtime, package `jrt`: the same 3,117 classes translated. Changed:
+  `java.util.concurrent.TimeUnit.timedWait` (translated instead of a "not translated" stub: j2g's
+  `wait(long)`), `java.util.ResourceBundle` (`getBundle` x2, `newBundle` added; the class's other
+  functions differ in their temporaries' numbering only), `j2g_classes` (ResourceBundle's member
+  table and its reflective invoker), `j2g_cut` (`Runtime$Version` no longer a cut class: jrt's own),
+  `java.lang.ProcessImpl`'s `onExit` lambda (its null value returned as `nil` instead of through a
+  temporary of type `any`: the fix of `expr-as`, the same code); jrt's hand-written
+  `Runtime_Version` and `Runtime.version()`. Nothing else; the bundle classes' constructors were all
+  reached before.
+- the compiled namespaces: those whose sources changed (`arbace.j2g.*`, `arbace.classes.analyze`),
+  and three unchanged ones (`arbace.box.plan`, `arbace.box.rebuild`, `arbace.repr.go.load`) whose
+  compiled code differs by the build's mode: main's was compiled by the host, the branch's (its
+  runtime changed) by a first build of the program, which links a namespace's own fns directly
+  (Futamura F5); the fixpoint's G2 = G3 (JN2.6) holds for the branch.
+
+### JN2.6 The checks
+
+- `bin/javac-vendor verify`: `jdk/javac` is the conversion and the recording, byte for byte (564 files, 86 s)
+- `bin/javac-vendor check`: j2g translates javac's world, no failures (45 s)
+- `bin/gate` (essential, on the merged tree, `ef1b91d6`): passes (go-build, go-smoke, suite-go 777 tests, oracle-go, diffcheck, goi-check 740 of 740, generated)
+- `bin/diffcheck` (in the gate), with FxJavac's 7 and FxJavacShapes' 2 cases: 12,741 of 12,764 cases agree, the 23 known disagreements as recorded (`test/diffcheck/known.edn`: FxVarHandles' known case renumbered from `fixtures:7` to `fixtures:9`, the two new fixture files coming before it)
+- `bin/arbace-go --fixpoint`: holds, G1 = G2 = G3 byte for byte (`a3534827...`, 146,354,336 bytes; j2g's trees equal); the host (stage 0 of the unchanged seed) differs from G1, as for any change to the program
+- `bin/j2g-edge verify` after `update`: the edge is the JVM's answer
+- `bin/jrt-convert update`: one form file changed (`jdk/forms/java/util/ResourceBundle.ae`); `bin/jrt test`: passes
+
+No re-seed (batched).
+
+### JN2.7 Proposals
+
+- **JFS18 Where the JDK API that only javac's world needs lives.**
+  - Options: (a) the shipped closure (jrt-convert's closure, `overlay/jdk/java.base`), and
+    `jdk/edge.edn` updated for the classes outside the shipped world their types name; (b)
+    javac's world: jdk26u's classes converted into `jdk/javac` (module java.base), jrt's own Java
+    for it in `overlay/jdk/javac/java.base`, members of shipped classes as j2g variants in
+    `overlay/jdk/javac/variants`; (c) a second jrt-convert closure for the tool.
+  - *Recommended: (b), built*: the shipped program and its edge hold nothing only javac uses, and
+    the tool's input stays beside javac's forms (JFS14's reason). jrt's general API (getBundle,
+    Runtime.version, printStackTrace) is shipped.
+- **JFS19 jdk/edge.edn after jrt's shipped additions.**
+  - Options: (a) the two entries recorded (`bin/j2g-edge update`); (b) getBundle and
+    Runtime.version moved into javac's world too, `jdk/edge.edn` byte for byte main's.
+  - *Recommended: (a), built*: the edge stays the JVM's answer for the shipped world, as
+    `bin/j2g-edge verify` requires; (b) would keep a JDK API javac merely happens to use out of the
+    program.
+- **JFS20 jdk.compiler's generated sources.**
+  - Options: (a) copied from the JDK build tree's `support/gensrc/jdk.compiler` (built; the forms
+    are committed, the provenance names the tree); (b) generated by `bin/javac-vendor` with the
+    JDK build's tools (`compileproperties`, `propertiesparser`, `flagsgenerator`) and compared with
+    the build's, as `bin/jrt-convert generate` does.
+  - *Recommended: (a) now, (b) with JN7* (the generators on Arbace).
+- **JFS21 Regression cases the frozen jar cannot record.**
+  - Options: (a) their results kept by hand in `test/j2g/record_fixtures.ae` (built); (b) record
+    them on the program built from the checkout.
+  - *Recommended: (a)* until the reference moves off the frozen jar; the cases are few and their
+    results Java's.
+- **JFS22 The Java forms' analysis of the tool's j2g.**
+  - Options: (a) j2g on the program built from the checkout (`target/arbace-go/amd64/arbace`, built);
+    (b) `bin/j2g` loads `arbace.classes.*` from the checkout when it differs from the host's, as
+    it loads j2g.
+  - *Recommended: (a)*; (b) if analysis changes become frequent before a re-seed.
+
+### JN2.8 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`): `src/jdk.compiler`,
+  `src/java.compiler`, `src/jdk.internal.opt/.../CommandLine.java`, 19 files of `src/java.base`, and
+  the build tree's `support/gensrc/jdk.compiler`.
+- The worktree's `.tmp/`: `javac-vendor/` (the conversion's work and logs), `driver/` (JN1's driver,
+  its commands and outputs), `base/` (main's export and build for JN2.5), `shipped-fndiff.txt`,
+  `scripts/fndiff.py`.

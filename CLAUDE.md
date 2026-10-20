@@ -169,7 +169,14 @@ Prior art:
   resource data committed (repr/java's output from jdk26u and `overlay/jdk/java.base`, provenance in
   `jdk/provenance.edn`; `bin/jrt-convert update` regenerates them, `verify` checks them; standalone
   S1); `jdk/edge.edn`, the JVM's answers j2g needs, so j2g uses no JVM reflection or ASM
-  (`bin/j2g-edge update`, `verify`, `trace`; S2, doc/STANDALONE-NOTES.md); `bin/jrt`); `overlay/go/` patches Go's runtime. `bin/arbace-go` builds
+  (`bin/j2g-edge update`, `verify`, `trace`; S2, doc/STANDALONE-NOTES.md); `bin/jrt`); `overlay/go/` patches Go's runtime.
+  `jdk/javac/`: javac's Java forms (jdk26u's jdk.compiler with its generated sources,
+  java.compiler, `CommandLine` and the java.base classes javac's world needs, unpatched; jrt's
+  own Java and j2g variants for that world in `overlay/jdk/javac/`), its source list, provenance
+  and edge (`jdk/javac/edge.edn`: what javac's world asks beyond `jdk/edge.edn`), made by
+  `bin/javac-vendor convert` on the frozen JVM (`verify` byte for byte, `check`: j2g translates
+  javac's world; doc/classes/JAVA-FRONTEND-SURVEY.md, JN2); the input of javac's tool build,
+  `bin/arbace-go --build-java` (`target/arbace-go/<arch>/arbace-javac`, not shipped). `bin/arbace-go` builds
   (`--build`, `--build-tests`, `--pgo`, by the tools' host; the test build's Java
   fixtures committed as forms in `test/java-fixtures/`, `bin/clojure-tests --java-fixtures update`,
   `verify`), smoke-tests and runs it. Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
