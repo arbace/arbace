@@ -384,7 +384,7 @@ positions, so the checker's answers are keyed by position.
 | decision (SPEC §11.1) | final forms | raw forms | kind |
 |---|---|---|---|
 | a call, a conversion, a builtin call, a method call | `(conv T x)`, `(len x)`, `(.M x a)`, `(f a)`, `(go/call h a)` | `(F a ...)`, F the callee's raw form; `(go/call h a ...)` only when `h` is a head of the forms' syntax that is not a builtin's name (`raw-reserved-heads`): a raw call is never classified, so `(len x)` calls the identifier `len` | `:call` |
-| field, method value, method expression, package member | `(.-f x)`, `(method-expr T M)`, `pkg/Name`, the head of `(.M x ...)` | `(go/select x f)`: x the operand's raw form, f the selected name (a symbol with its position) | `:select` |
+| field, method value, method expression, package member | `(.-f x)`, `(method-expr T M)`, `pkg/Name`, the head of `(.M x ...)` | `(go/select x f)`: x the operand's raw form, f the selected name (a symbol with its position; `(go/id "true")` for a name the reader would read as a literal, `r.true`) | `:select` |
 | index or instantiation | `(aget x i)`, `(inst F T ...)`, `(G T ...)` (a generic type) | `(go/index x i ...)`, for `x[i]` and `x[A, B]` | `:index` |
 | indirection or pointer type | `@x`, `(* T)` | `(go/star x)` | `:star` |
 | universe names | `true`, `false`, `nil`, or `(go/id "true")` when declared | `(go/id "true")` always: a name the checker looks up | `:id` |

@@ -1149,8 +1149,8 @@ host was the worktree's stage 0 (`target/seed/amd64/arbace`, 143,749,280 bytes, 
 | part | where | as built |
 |---|---|---|
 | the raw mode | `arbace/repr/go/convert.ae` (`*raw*`, option `:raw` of `convert-package`) | `an` reads no annotation in raw mode; at each decision of SPEC §11.1 that needs types the converter writes an open form instead (`raw-call`, `raw-select`, `go/index`, `go/star`, `go/id`, `^:go/define`, `^:go/key`, no `:val`, `:tag`, `:inst`, `:go/via`, implicit import name or `:init-order`), marked in memory with the private `::open` (its kind); `open-counts` counts them; mode `:full`'s positions always. Invalid programs' constructs: `go/type-guard`, `go/define`, `go/literal`, a non-name where a name is required as its expression |
-| the shape | doc/go/CONVERTER-NOTES.md, "Raw forms" | what is open and how each decision is marked (13 kinds), what stays decided from the syntax, the invalid programs' marks |
-| the commands | `arbace/repr/go/raw.ae`, `arbace.repr.go.raw` (new, 420 lines); `bin/repr-go` | `read --reader native --raw [--corpus C \| PKG ...]`: the loader's jobs, the native dumps, the raw forms written as `.ae` (`arbace.repr.go/convert-data`, the read-back check against the forms in memory), the open decisions counted per kind; `raw-check [--fresh] [CORPUS ...]` (`make repr-go-raw-check`): the raw forms against the final ones (below), known differences `test/repr/go/raw-known.edn` (empty) |
+| the shape | doc/go/CONVERTER-NOTES.md, "Raw forms" | what is open and how each decision is marked (12 kinds), what stays decided from the syntax, the invalid programs' marks |
+| the commands | `arbace/repr/go/raw.ae`, `arbace.repr.go.raw` (new, 535 lines); `bin/repr-go` | `read --reader native --raw [--corpus C \| PKG ...]`: the loader's jobs, the native dumps, the raw forms written as `.ae` (`arbace.repr.go/convert-data`, the read-back check against the forms in memory), the open decisions counted per kind; `raw-check [--fresh] [CORPUS ...]` (`make repr-go-raw-check`): the raw forms against the final ones (below), known differences `test/repr/go/raw-known.edn` (empty) |
 | `arbace.repr.go` | `arbace/repr/go.ae` | `convert-dump` split into `dump-context` (a dump's namespace, its directory test's namespaces, its source directory and text) and `convert-data` (a dump in memory converted, written and read back), so that the native reader's dumps convert as the helper's do; the output unchanged |
 | the statement lists | `convert.ae`, `stmts-forms` | a loop over the statements that do not declare, recurring only into a `let`'s body (GPS24): the recursion per statement overflowed the stack on `fixedbugs/bug385_64.go` (16,480 statements) when the converter is evaluated, as it is until a re-seed |
 
@@ -1189,8 +1189,8 @@ The kinds are CONVERTER-NOTES' table's: `:call` calls of unknown kind, `:select`
 `:index` index or instantiation, `:star` indirection or pointer type, `:id` the names `true`,
 `false`, `nil`, `:define` names of `:=`, `:key` identifier keys of composite literals, `:val`
 constant names, `:shift` shifts, `:any` constraints `any`, `:import` implicit import names; the
-last three columns are the invalid programs' (`x.(type)` outside a type switch, `:=` in a post
-statement, a malformed literal), all three in `linux-errtest`.
+column invalid counts the invalid programs' marks, all in `linux-errtest`: 2 `x.(type)` outside a
+type switch, 1 `:=` in a post statement, 1 malformed literal.
 
 **Invalid programs (GPS9 (b)).** Of `linux-errtest`'s 659 error tests, the loader gives 586
 programs that go/parser accepts and 73 it rejects (GP6's, by gc's syntax). All 586 get raw forms,
