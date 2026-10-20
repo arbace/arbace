@@ -69,3 +69,18 @@ git history:
 - **Removed:** `/root/go-lisp`, `/root/ghc-lisp` and `/root/rust-lisp` (about 3.6 GB), at the
   user's word. The forks themselves stay on GitHub (go-lisp and ghc-lisp public, rust-lisp
   private). The specs' citations keep their commits; their local paths now name what was there.
+
+## 2026-10-20: the forks deleted from GitHub; their record is arbace/forks
+
+- The user deleted github.com/arbace/go-lisp, arbace/ghc-lisp and arbace/rust-lisp. They had no
+  watchers, forks or stars. In the user's words, these projects were pathfinders for Arbace's
+  forms: Go, Haskell and Rust written as s-expressions and compiled beside their ordinary source,
+  the prior art of repr/go, repr/haskell and repr/rust.
+- Their contributions are kept in the private repository github.com/arbace/forks (`a21d047`; the
+  entry above): each fork's patch series on its upstream base, checked to give the fork head's
+  tree exactly. Its README says how to restore a fork.
+- The citations in Arbace's surveys and specs (doc/G2C-SURVEY.md, doc/REPR-HASKELL-SURVEY.md,
+  doc/REPR-RUST-SURVEY.md, doc/go/SPEC.md, doc/go/ROUNDTRIP.md, doc/haskell/SPEC.md,
+  doc/rust/SPEC.md) name the forks by repository, branch and commit. Those commits are now
+  reachable only by applying arbace/forks' patches to the upstream bases: golang/go `f043823a`,
+  GHC `c35096f5`, rust-lang/rust `602727f2`. The citations are left as written, a dated record.
