@@ -1,0 +1,395 @@
+;; goi: reflect's method members as interpreted code calls them (GOI-SPEC.md, "As built: GR8b";
+;; GC60 (a)): the table's overrides of reflect.Value's Method, MethodByName and NumMethod and of
+;; reflect.Type's Method, MethodByName and NumMethod. An interpreted type's methods are served from
+;; its descriptor's method set (its exported methods sorted by name, reflect's order), a method
+;; bound to its receiver as a method value (Bound) and a method as a function of its receiver first
+;; (MethodExpr); a compiled type's from the table's method expressions, which keep their code
+;; (reflect's own would call a method the linker dropped: runtime.unreachableMethod, a fatal
+;; error). Nothing here calls reflect.Type's Method or MethodByName, or reflect.Value's with a
+;; name that is not a constant: such a call makes the linker keep every exported method of every
+;; reachable type (cmd/compile's usemethod, cmd/link's ReflectMethod: +17.7 MB, GR8-SURVEY.md §4.2).
+(in-ns 'go.arbace.goi)
+
+(go/file "reflect.go"
+  :imports [[fmt "fmt"] [reflect "reflect"] [sort "sort"] [strings "strings"] [sync "sync"] [jrt "arbace/jrt"]])
+
+;; reflect's own Value.MethodByName, by its method expression's value: a call through a func
+;; variable is no call of the method the compiler marks (only whether a compiled value has a method
+;; of a name is asked of it, never its call)
+(go/var valueMethodByName (method-expr reflect/Value MethodByName))
+
+(go/func notInTable
+  "notInTable panics for reflect's member what asked of compiled type t whose methods the table
+does not hold (goi's unsupported).\n"
+  [^string what ^{:tag reflect/Type} t]
+  (panic (jrt/IllegalArgumentException_New_String
+           (jrt/Str (fmt/Sprintf "not supported by goi yet: %s of %s: its methods are not in the table of compiled packages (GR8b)"
+                                 what (.String t))))))
+
+(go/func methodIndexPanic "methodIndexPanic is reflect's panic for a method index out of range.\n" []
+  (panic "reflect: Method index out of range"))
+
+;; ---------------------------------------------------------------------------------------
+;; Interpreted types
+
+(go/func interpType
+  "interpType is the descriptor of reflect type rt when goi interprets its methods (an
+interpreted type, not an interface: GC71's are any), else nil.\n"
+  ^{:tag (* Type)} [^{:tag reflect/Type} rt]
+  (when (== rt nil)
+    (return nil))
+  (let [d (descOfRT rt)]
+    (when (or (.-Compiled d) (.-Iface d))
+      (return nil))
+    d))
+
+(go/type methodList "methodList is a descriptor's exported method names sorted (reflect's order), for its method set's version mver.\n"
+  (struct ^int mver ^{:tag (slice string)} names ^{:tag (map string (* Method))} ms))
+
+(go/var ^{:tag sync/Map :doc "methodLists are the interpreted descriptors' methodLists.\n"} methodLists)
+
+(go/func exportedMethods
+  "exportedMethods are interpreted descriptor d's exported methods: their names sorted as
+reflect sorts them, and the method set.\n"
+  [^{:tag (* Type)} d] :results [^{:tag (slice string)} names ^{:tag (map string (* Method))} ms]
+  (.Lock internMu)
+  (let [all (.-Methods d)
+        v (.-mver d)]
+    (.Unlock internMu)
+    (let [(values x ok) (.Load methodLists d)]
+      (when ok
+        (let [l (assert (* methodList) x)]
+          (when (== (.-mver l) v)
+            (return (.-names l) (.-ms l))))))
+    (set! names (make (slice string) 0 (len all)))
+    (range [k all]
+      ;; a key is the name of an exported method, path.name of an unexported one
+      (when (not (strings/Contains k "."))
+        (set! names (append names k))))
+    (sort/Strings names)
+    (.Store methodLists d (addr (lit methodList v names all)))
+    (return names all)))
+
+(go/func interpMethodValue
+  "interpMethodValue is interpreted method m bound to receiver v (a value of m's receiver type),
+as a Go func of m's signature (a method value's).\n"
+  ^{:tag reflect/Value} [^{:tag reflect/Value} v ^{:tag (* Method)} m]
+  (when (not (.CanInterface v))
+    (panic "reflect: goi cannot take a method of a value obtained using an unexported field"))
+  (let [b (addr (lit Bound :M m :Recv (.Interface v)))]
+    (reflect/ValueOf (.goFunc b (.-Sig m)))))
+
+(go/type MethodExpr
+  "MethodExpr is an interpreted method as a function of its receiver first (reflect.Type.Method's
+Func, GR8b): M the method set's entry. An interpreted call of it runs the method in its own frame
+(a deferred one may recover); gofns are its Go funcs by type.\n"
+  (struct ^{:tag (* Method)} M ^{:tag sync/Mutex} mu ^{:tag (map reflect/Type any)} gofns))
+
+(go/method goFuncRT "goFuncRT is the method expression as a real Go func of type rt (reflect.MakeFunc), made once per type and recorded.\n"
+  ^any [^{:tag (* MethodExpr)} e ^{:tag reflect/Type} rt]
+  (.Lock (.-mu e))
+  (defer (.Unlock (.-mu e)))
+  (let [g (aget (.-gofns e) rt)]
+    (when (!= g nil)
+      (return g))
+    (set! g (.Interface (reflect/MakeFunc rt (fn ^{:tag (slice reflect/Value)} [^{:tag (slice reflect/Value)} in]
+                                                 (callMethodValues (.-M e) (.Interface (aget in 0)) (subslice in 1))))))
+    (when (== (.-gofns e) nil)
+      (set! (.-gofns e) (make (map reflect/Type any))))
+    (aset (.-gofns e) rt g)
+    (.Store adapters (efaceData g) e)
+    g))
+
+(go/method goFunc "goFunc is the method expression as a real Go func of type t.\n"
+  ^any [^{:tag (* MethodExpr)} e ^{:tag (* Type)} t]
+  (.goFuncRT e (.rt t)))
+
+(go/func frameSlot "frameSlot is slot s of kind k of frame fr as a frame value (int64, float64, string or an R value).\n"
+  ^any [^{:tag (* Frame)} fr ^byte k ^int32 s]
+  (switch k
+    (case [\I] (return (aget (.-I fr) s)))
+    (case [\F] (return (aget (.-F fr) s)))
+    (case [\S] (return (aget (.-S fr) s))))
+  (aget (.-R fr) s))
+
+(go/func paramKind "paramKind is the slot kind of parameter i of function type ft (the variadic one's slice: R).\n"
+  ^byte [^{:tag (* Type)} ft ^int i]
+  (when (and (.-Variadic ft) (== i (- (len (.-Ins ft)) 1)))
+    (return \R))
+  (.-K (aget (.-Ins ft) i)))
+
+(go/method call
+  "call is an interpreted call of the method expression (its type ft) from frame fr, its
+arguments written by args in ft's layout: the method's frame nf on the thread th, the receiver
+moved to its slot and the parameters to theirs, run, its results moved to ft's result slots.\n"
+  ^{:tag (* Frame)} [^{:tag (* MethodExpr)} e ^{:tag (* Thread)} th ^{:tag (* Frame)} fr ^{:tag (* Type)} ft ^{:tag (slice Setter)} args]
+  (let [mt (.-M e)
+        f (.-Fn mt)
+        code (.Code f)
+        (values n ps rs) (slotCounts ft)
+        af (addr (lit Frame :I (make (slice int64) (aget n 0)) :F (make (slice float64) (aget n 1))
+                      :S (make (slice string) (aget n 2)) :R (make (slice any) (aget n 3))))]
+    (range [_ a args] (a fr af))
+    (let [nf (.enter th code f)
+          (values _ mps mrs) (slotCounts (.-Sig mt))]
+      (set! (.-rec nf) (.-passRec fr))
+      (setFrameSlot nf (.-RK mt) (.-RS mt) (frameSlot af (paramKind ft 0) (aget ps 0)))
+      (for [i 1] (< i (len ps)) (inc! i)
+        (let [k (paramKind ft i)]
+          (setFrameSlot nf k (aget mps (- i 1)) (frameSlot af k (aget ps i)))))
+      (run code nf)
+      (let [outs (make (slice any) (len rs))]
+        (range [j s mrs]
+          (aset outs j (frameSlot nf (.-K (aget (.-Outs ft) j)) s)))
+        (range [j s rs]
+          (setFrameSlot nf (.-K (aget (.-Outs ft) j)) s (aget outs j))))
+      nf)))
+
+(go/func interpTypeMethod
+  "interpTypeMethod is reflect.Type.Method of interpreted type t (descriptor d): its exported
+method name, index i, of type func(t, params...) results, its Func the method expression.\n"
+  ^{:tag reflect/Method} [^{:tag reflect/Type} t ^int i ^string name ^{:tag (* Method)} m]
+  (let [sig (.-Sig m)
+        ins (make (slice reflect/Type) 0 (+ 1 (len (.-Ins sig))))
+        outs (make (slice reflect/Type) 0 (len (.-Outs sig)))]
+    (set! ins (append ins t))
+    (range [_ p (.-Ins sig)]
+      (set! ins (append ins (.rt p))))
+    (range [_ r (.-Outs sig)]
+      (set! outs (append outs (.rt r))))
+    (let [ft (reflect/FuncOf ins outs (.-Variadic sig))
+          e (addr (lit MethodExpr :M m))]
+      (lit reflect/Method :Name name :Type ft :Func (reflect/ValueOf (.goFuncRT e ft)) :Index i))))
+
+;; ---------------------------------------------------------------------------------------
+;; Compiled types: the table's method expressions
+
+(go/type cmethod
+  "cmethod is a compiled type's exported method as the table holds it: its name, its method
+expression expr (the receiver first: the type itself, the interface, or for a value method of a
+pointer type the element, deref).\n"
+  (struct ^string name ^{:tag reflect/Value} expr ^bool deref))
+
+(go/var ^{:tag sync/Once} cmethodsOnce)
+
+(go/var ^{:tag (map reflect/Type (slice cmethod)) :doc "cmethodsByRecv are the table's method expressions by their receiver type.\n"}
+  cmethodsByRecv)
+
+(go/type cmethodList "cmethodList is a compiled type's methods the table holds, sorted by name, and whether they are all its exported methods.\n"
+  (struct ^{:tag (slice cmethod)} ms ^bool all))
+
+(go/var ^{:tag sync/Map :doc "cmethodLists are the compiled types' cmethodLists by reflect type.\n"} cmethodLists)
+
+(go/func tableMethods
+  "tableMethods are compiled type rt's exported methods the table holds, sorted by name
+(reflect's order), and whether they are all its exported methods (their count its NumMethod).\n"
+  [^{:tag reflect/Type} rt] :results [^{:tag (slice cmethod)} ms ^bool all]
+  (let [(values x ok) (.Load cmethodLists rt)]
+    (when ok
+      (let [l (assert (* cmethodList) x)]
+        (return (.-ms l) (.-all l)))))
+  (.Do cmethodsOnce
+       (fn []
+         (set! cmethodsByRecv (make (map reflect/Type (slice cmethod))))
+         (range [_ pk packages]
+           (range [_ m (.-Methods pk)]
+             (let [fv (reflect/ValueOf (.-Value m))]
+               (when (and (.IsValid fv) (== (.Kind fv) reflect/Func) (> (.NumIn (.Type fv)) 0))
+                 (let [r (.In (.Type fv) 0)
+                       nm (subslice (.-Name m) (+ (strings/LastIndex (.-Name m) ".") 1))]
+                   (aset cmethodsByRecv r (append (aget cmethodsByRecv r) (lit cmethod nm fv false))))))))))
+  (set! ms (append (make (slice cmethod) 0 8) (spread (aget cmethodsByRecv rt))))
+  (when (== (.Kind rt) reflect/Pointer)
+    (range [_ m (aget cmethodsByRecv (.Elem rt))]
+      (set! ms (append ms (lit cmethod (.-name m) (.-expr m) true)))))
+  (sort/Slice ms (fn ^bool [^int a ^int b] (< (.-name (aget ms a)) (.-name (aget ms b)))))
+  (set! all (== (len ms) (.NumMethod rt)))
+  (.Store cmethodLists rt (addr (lit cmethodList ms all)))
+  (return ms all))
+
+(go/func findMethod "findMethod is the index of the method name in ms (sorted by name), or -1.\n"
+  ^int [^{:tag (slice cmethod)} ms ^string name]
+  (let [i (sort/Search (len ms) (fn ^bool [^int j] (>= (.-name (aget ms j)) name)))]
+    (when (and (< i (len ms)) (== (.-name (aget ms i)) name))
+      (return i))
+    -1))
+
+(go/func methodType "methodType is method expression type ft without its receiver (a method value's type).\n"
+  ^{:tag reflect/Type} [^{:tag reflect/Type} ft]
+  (let [ins (make (slice reflect/Type) 0 (.NumIn ft))
+        outs (make (slice reflect/Type) 0 (.NumOut ft))]
+    (for [i 1] (< i (.NumIn ft)) (inc! i)
+      (set! ins (append ins (.In ft i))))
+    (for [i 0] (< i (.NumOut ft)) (inc! i)
+      (set! outs (append outs (.Out ft i))))
+    (reflect/FuncOf ins outs (.IsVariadic ft))))
+
+(go/func derefRecv
+  "derefRecv is receiver p (a pointer) dereferenced for value method name of type t, gc's
+panicwrap when it is nil.\n"
+  ^{:tag reflect/Value} [^{:tag reflect/Value} p ^string name]
+  (when (.IsNil p)
+    (let [et (.Elem (.Type p))]
+      (panic (lit plainError (+ "value method " (.String et) "." name " called using nil *" (.Name et) " pointer")))))
+  (.Elem p))
+
+(go/func callExpr "callExpr calls method expression f with the receiver and the arguments in (its variadic parameter's slice last).\n"
+  ^{:tag (slice reflect/Value)} [^{:tag reflect/Value} f ^{:tag (slice reflect/Value)} in]
+  (when (.IsVariadic (.Type f))
+    (return (.CallSlice f in)))
+  (.Call f in))
+
+(go/func compiledMethodValue
+  "compiledMethodValue is compiled method m (the table's) bound to receiver v, as a Go func of
+the method's type (reflect.MakeFunc).\n"
+  ^{:tag reflect/Value} [^{:tag reflect/Value} v ^cmethod m]
+  (let [f (.-expr m)
+        deref (.-deref m)
+        name (.-name m)]
+    (reflect/MakeFunc (methodType (.Type f))
+                      (fn ^{:tag (slice reflect/Value)} [^{:tag (slice reflect/Value)} in]
+                        (let [r v]
+                          (when deref
+                            (set! r (derefRecv v name)))
+                          (callExpr f (append (lit (slice reflect/Value) r) (spread in))))))))
+
+(go/func compiledTypeMethod
+  "compiledTypeMethod is reflect.Type.Method of compiled type t: method m (the table's), index
+i; an interface's without Func, as reflect's.\n"
+  ^{:tag reflect/Method} [^{:tag reflect/Type} t ^int i ^cmethod m]
+  (let [f (.-expr m)
+        ft (.Type f)]
+    (when (== (.Kind t) reflect/Interface)
+      (return (lit reflect/Method :Name (.-name m) :Type (methodType ft) :Index i)))
+    (when (not (.-deref m))
+      (return (lit reflect/Method :Name (.-name m) :Type ft :Func f :Index i)))
+    (let [ins (make (slice reflect/Type) 0 (.NumIn ft))
+          outs (make (slice reflect/Type) 0 (.NumOut ft))
+          name (.-name m)]
+      (set! ins (append ins t))
+      (for [j 1] (< j (.NumIn ft)) (inc! j)
+        (set! ins (append ins (.In ft j))))
+      (for [j 0] (< j (.NumOut ft)) (inc! j)
+        (set! outs (append outs (.Out ft j))))
+      (let [mt (reflect/FuncOf ins outs (.IsVariadic ft))
+            g (reflect/MakeFunc mt (fn ^{:tag (slice reflect/Value)} [^{:tag (slice reflect/Value)} in]
+                                     (let [all (append (lit (slice reflect/Value) (derefRecv (aget in 0) name)) (spread (subslice in 1)))]
+                                       (callExpr f all))))]
+        (lit reflect/Method :Name name :Type mt :Func g :Index i)))))
+
+;; ---------------------------------------------------------------------------------------
+;; The overrides (go/arbace/gotable.edn's :overrides)
+
+(go/func ValueMethod
+  "ValueMethod is reflect.Value.Method for interpreted code (GC60 (a)): v's exported method i
+(reflect's order, by name) bound to v: an interpreted type's from its method set, a compiled
+type's from the table, an interface's of its dynamic value.\n"
+  ^{:tag reflect/Value} [^{:tag reflect/Value} v ^int i]
+  (when (not (.IsValid v))
+    (panic (addr (lit reflect/ValueError :Method "reflect.Value.Method" :Kind reflect/Invalid))))
+  (let [rt (.Type v)
+        d (interpType rt)]
+    (when (!= d nil)
+      (let [(values names ms) (exportedMethods d)]
+        (when (or (< i 0) (>= i (len names)))
+          (methodIndexPanic))
+        (return (interpMethodValue v (aget ms (aget names i))))))
+    (when (and (== (.Kind v) reflect/Interface) (.IsNil v))
+      (panic "reflect: Method on nil interface value"))
+    (let [(values cms all) (tableMethods rt)]
+      (when (not all)
+        (notInTable "reflect.Value.Method" rt))
+      (when (or (< i 0) (>= i (len cms)))
+        (methodIndexPanic))
+      (when (== (.Kind v) reflect/Interface)
+        (return (ValueMethodByName (.Elem v) (.-name (aget cms i)))))
+      (compiledMethodValue v (aget cms i)))))
+
+(go/func ValueMethodByName
+  "ValueMethodByName is reflect.Value.MethodByName for interpreted code (GC60 (a)): v's exported
+method name bound to v, the zero Value when it has none.\n"
+  ^{:tag reflect/Value} [^{:tag reflect/Value} v ^string name]
+  (when (not (.IsValid v))
+    (panic (addr (lit reflect/ValueError :Method "reflect.Value.MethodByName" :Kind reflect/Invalid))))
+  (let [rt (.Type v)
+        d (interpType rt)]
+    (when (!= d nil)
+      (when (strings/Contains name ".")
+        (return (lit reflect/Value)))
+      (let [(values _ ms) (exportedMethods d)
+            m (aget ms name)]
+        (when (== m nil)
+          (return (lit reflect/Value)))
+        (return (interpMethodValue v m))))
+    (when (and (== (.Kind v) reflect/Interface) (.IsNil v))
+      (panic "reflect: MethodByName on nil interface value"))
+    (let [(values cms all) (tableMethods rt)
+          i (findMethod cms name)]
+      (when (>= i 0)
+        (when (== (.Kind v) reflect/Interface)
+          (return (ValueMethodByName (.Elem v) name)))
+        (return (compiledMethodValue v (aget cms i))))
+      ;; not in the table: reflect's own says whether it is a method (its call is never made)
+      (when (or all (not (.IsValid (valueMethodByName v name))))
+        (return (lit reflect/Value)))
+      (notInTable "reflect.Value.MethodByName" rt)
+      (lit reflect/Value))))
+
+(go/func ValueNumMethod
+  "ValueNumMethod is reflect.Value.NumMethod for interpreted code: an interpreted type's
+exported methods from its method set, else reflect's.\n"
+  ^int [^{:tag reflect/Value} v]
+  (when (.IsValid v)
+    (let [d (interpType (.Type v))]
+      (when (!= d nil)
+        (let [(values names _) (exportedMethods d)]
+          (return (len names))))))
+  (.NumMethod v))
+
+(go/func TypeMethod
+  "TypeMethod is reflect.Type.Method for interpreted code (GC60 (a); listed, it would make the
+linker keep every exported method: §4.2): t's exported method i, reflect's order.\n"
+  ^{:tag reflect/Method} [^{:tag reflect/Type} t ^int i]
+  (let [d (interpType t)]
+    (when (!= d nil)
+      (let [(values names ms) (exportedMethods d)]
+        (when (or (< i 0) (>= i (len names)))
+          (methodIndexPanic))
+        (return (interpTypeMethod t i (aget names i) (aget ms (aget names i)))))))
+  (let [(values cms all) (tableMethods t)]
+    (when (not all)
+      (notInTable "reflect.Type.Method" t))
+    (when (or (< i 0) (>= i (len cms)))
+      (methodIndexPanic))
+    (compiledTypeMethod t i (aget cms i))))
+
+(go/func TypeMethodByName
+  "TypeMethodByName is reflect.Type.MethodByName for interpreted code (GC60 (a)).\n"
+  [^{:tag reflect/Type} t ^string name] :results [^{:tag reflect/Method} m ^bool ok]
+  (let [d (interpType t)]
+    (when (!= d nil)
+      (when (strings/Contains name ".")
+        (return m false))
+      (let [(values names ms) (exportedMethods d)
+            i (sort/SearchStrings names name)]
+        (when (or (>= i (len names)) (!= (aget names i) name))
+          (return m false))
+        (return (interpTypeMethod t i name (aget ms name)) true))))
+  (let [(values cms all) (tableMethods t)
+        i (findMethod cms name)]
+    (when (>= i 0)
+      (return (compiledTypeMethod t i (aget cms i)) true))
+    (when (or all (== (.Kind t) reflect/Interface) (not (.IsValid (valueMethodByName (reflect/Zero t) name))))
+      (return m false))
+    (notInTable "reflect.Type.MethodByName" t)
+    (return m false)))
+
+(go/func TypeNumMethod
+  "TypeNumMethod is reflect.Type.NumMethod for interpreted code: an interpreted type's exported
+methods from its method set, else reflect's.\n"
+  ^int [^{:tag reflect/Type} t]
+  (let [d (interpType t)]
+    (when (!= d nil)
+      (let [(values names _) (exportedMethods d)]
+        (return (len names)))))
+  (.NumMethod t))
