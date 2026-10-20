@@ -108,8 +108,8 @@ The current state of the work. This file is rewritten as things change. For the 
     `fcc37393…` (`fca6d187`) verified (stage 0 `199e126b…`).
   - The Mac (the user, 2026-10-20): `./mac.sh goi`, all 584 programs, 582 pass, 2 known (in
     classes), 46 s.
-  - **Tagged** `arbace-interprets-go1.27.1-v1` (2026-10-20, on main). Running: the emulated arm64
-    check over all of box.txt (`GOI_BOX_ALL=1`), to be recorded.
+  - **Tagged** `arbace-interprets-go1.27.1-v1` (2026-10-20, on main). After it, the emulated arm64
+    check over all of box.txt: 582 of 584, 2 known, as the Mac's.
 - **Running (2026-10-20, the user: "make plans"):** two surveys, each in its own worktree. The
   results are plans to decide, not builds.
   - `go-parser-survey`: an Arbace-native Go parser (doc/go/GO-PARSER-SURVEY.md), so repr/go reads
@@ -120,7 +120,6 @@ The current state of the work. This file is rewritten as things change. For the 
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);
   - speed (F10's inline caches, specialization), which would bring the speed-bound programs back;
-  - the arm64 goi check over all of box.txt (`GOI_BOX_ALL=1`, about 4 hours emulated).
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and

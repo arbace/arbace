@@ -114,3 +114,21 @@ GitHub's repository description, README's first line and CLAUDE.md's.
     over Java forms;
   - the forms' equality with today's readers over every corpus, as the check of the switch;
   - milestones and effort.
+
+## 2026-10-20: goi's check in the emulated arm64 box over all of box.txt
+
+- **What:** `GOI_BOX_ALL=1 bin/box-arm64-vm goi` (no `--record`) in a detached worktree at
+  `ab8a41dc`, with the program of the seed `fcc37393…`. It was started while the Mac run was
+  awaited and was left out of the tag's claim, which counted the half: 291 of 292.
+- **Result:** 584 programs: 582 pass, 0 fail, 0 error, 2 known. 9,690 s (2 h 41 min), 8 boxes of 2
+  vCPUs, host load about 14. One program, `copy.go`, timed out in the parallel round and passed
+  alone (`babde67d`'s retry).
+- **Against the references:**
+  - all 292 programs of the recorded half (`test/goi/check-box-arm64.edn`) as recorded;
+  - against amd64's box reference, one difference: `fixedbugs/issue15277.go`, known on arm64
+    because its build constraint is amd64.
+  - The 2 known are in classes of `test/goi/divergences.edn`: `typeparam/issue50109.go` (the box's
+    console) and issue15277 (another architecture's program).
+  - It is the first emulated run to include issue15277. The Mac's run of all 584 gave the same 582
+    and 2.
+- **No file changed:** the half stays the recorded reference (GC75).
