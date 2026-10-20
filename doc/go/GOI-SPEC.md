@@ -4077,47 +4077,6 @@ GC78.
   check`, by hand at the box's changes and the milestone, not in `bin/gate --full`; (b) a `--full`
   step (the VM's two hours and a heavy slot it holds while it runs). *Recommended: (a)*, and the
   arm64 guest's build kept in `--full` (it is: box-forms).
-
-**Checks** (this branch, on the merged tree `22efdcf7`, but where noted): the essential `bin/gate`
-passed (15 m 50 s; goi's essential check 729 of 729, the suite, the oracle 22,658 of 22,711
-against its 53 known, the differential check, the generated variants; before the merge, at
-`3f50a94f`, 20 m 07 s); `bin/goi check --box` on amd64 573 of 574, one known (before the merge
-565 of 566); the box's smoke test on amd64 (113 checks), `bin/box-suite` (67 namespaces, 19,647
-assertions, no failure), `bin/box-vendor kvm-tests` (34 passed); `bin/goi check --box --arch arm64`
-as above; `bin/box-arm64-vm check` (the smoke test on KVM/arm64 113 of 113 after GC82, before it 112 and the future's check; `box/`'s KVM tests, 27 passed; 42 minutes); `bin/box-mac-bundle` built at `3934b40d` (before the
-merge: 65,841,315 bytes), not on the merged tree (GC81); `mac.sh goi` on Linux with the amd64
-launcher (565 of 566, one known, before the merge); `bin/jrt overlay --check` (proc.go's forms the
-conversion plus the patch); `make check-makefile`.
-
-
-- **GC82 The smoke test's future in the emulation.** `bin/box-arm64-vm check`'s smoke test failed
-  one check, twice, on the merged tree as before it: "a future while the REPL waits for input" (R3),
-  whose future prints `late` 300 ms after it starts; in the VM the REPL's printing of the future
-  (`#object[...]`) takes longer, and `late` came within that line, which the check's filter drops
-  (shown with a sleep of 5,000 ms instead: `late` on a line of its own). (a) as built, the sleep
-  scaled by `--slow` as the check's other waits are (`$((300 * slow))` ms: 300 natively, 9 s in the
-  VM); (b) the filter keeps a line's `late` (a REPL's output and the future's interleaved by
-  design). *Recommended: (a)*.
-
-**Checks** (this branch, on the merged tree `22efdcf7`, but where noted): the essential `bin/gate`
-passed (15 m 50 s; goi's essential check 729 of 729, the suite, the oracle 22,658 of 22,711
-against its 53 known, the differential check, the generated variants; before the merge, at
-`3f50a94f`, 20 m 07 s); `bin/goi check --box` on amd64 573 of 574, one known (before the merge
-565 of 566); the box's smoke test on amd64 (113 checks), `bin/box-suite` (67 namespaces, 19,647
-assertions, no failure), `bin/box-vendor kvm-tests` (34 passed); `bin/goi check --box --arch arm64`
-as above; `bin/box-arm64-vm check` (the smoke test on KVM/arm64 113 of 113 after GC82, before it 112 and the future's check; `box/`'s KVM tests, 27 passed; 42 minutes); `bin/box-mac-bundle` built at `3934b40d` (before the
-merge: 65,841,315 bytes), not on the merged tree (GC81); `mac.sh goi` on Linux with the amd64
-launcher (565 of 566, one known, before the merge); `bin/jrt overlay --check` (proc.go's forms the
-conversion plus the patch); `make check-makefile`.
-
-- **GC82 The smoke test's future in the emulation.** `bin/box-arm64-vm check`'s smoke test failed
-  one check, twice, on the merged tree as before it: "a future while the REPL waits for input" (R3),
-  whose future prints `late` 300 ms after it starts; in the VM the REPL's printing of the future
-  (`#object[...]`) takes longer, and `late` came within that line, which the check's filter drops
-  (shown with a sleep of 5,000 ms instead: `late` on a line of its own). (a) as built, the sleep
-  scaled by `--slow` as the check's other waits are (`$((300 * slow))` ms: 300 natively, 9 s in the
-  VM); (b) the filter keeps a line's `late` (a REPL's output and the future's interleaved by
-  design). *Recommended: (a)*.
 - **GC81 The rebuild in the box after GR9a-c (S8; found here, not built).** `bin/box-rebuild --arch
   arm64 prepare host` (which `bin/box-mac-bundle` requires) fails on the merged tree: its host step
   compiles `arbace/goi` against a GOROOT without GR9a-c's reflect overlay (`undefined:
@@ -4131,5 +4090,24 @@ conversion plus the patch); `make check-makefile`.
   (`overlay_pkgs`) from the tree, so that a next overlay package needs no change there.
   *Recommended: (a)* now, (b) with S8's next change. Until then the Mac's bundle builds at a
   commit before GR9a-c only: it was built here at `3934b40d` (before the merge).
+- **GC82 The smoke test's future in the emulation.** `bin/box-arm64-vm check`'s smoke test failed
+  one check, twice, on the merged tree as before it: "a future while the REPL waits for input" (R3),
+  whose future prints `late` 300 ms after it starts; in the VM the REPL's printing of the future
+  (`#object[...]`) takes longer, and `late` came within that line, which the check's filter drops
+  (shown with a sleep of 5,000 ms instead: `late` on a line of its own). (a) as built, the sleep
+  scaled by `--slow` as the check's other waits are (`$((300 * slow))` ms: 300 natively, 9 s in the
+  VM); (b) the filter keeps a line's `late` (a REPL's output and the future's interleaved by
+  design). *Recommended: (a)*.
+
+**Checks** (this branch, on the merged tree `22efdcf7`, but where noted): the essential `bin/gate`
+passed (15 m 50 s; goi's essential check 729 of 729, the suite, the oracle 22,658 of 22,711
+against its 53 known, the differential check, the generated variants; before the merge, at
+`3f50a94f`, 20 m 07 s); `bin/goi check --box` on amd64 573 of 574, one known (before the merge
+565 of 566); the box's smoke test on amd64 (113 checks), `bin/box-suite` (67 namespaces, 19,647
+assertions, no failure), `bin/box-vendor kvm-tests` (34 passed); `bin/goi check --box --arch arm64`
+as above; `bin/box-arm64-vm check` (the smoke test on KVM/arm64 113 of 113 after GC82, before it 112 and the future's check; `box/`'s KVM tests, 27 passed; 42 minutes); `bin/box-mac-bundle` built at `3934b40d` (before the
+merge: 65,841,315 bytes), not on the merged tree (GC81); `mac.sh goi` on Linux with the amd64
+launcher (565 of 566, one known, before the merge); `bin/jrt overlay --check` (proc.go's forms the
+conversion plus the patch); `make check-makefile`.
 
 **Remaining**: the Mac's run (the steps above) and its reference; GC35 (b) and GR7a's others.
