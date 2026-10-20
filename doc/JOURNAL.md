@@ -217,3 +217,16 @@ GitHub's repository description, README's first line and CLAUDE.md's.
   The milestones are renamed JN1-JN9 (JFS11), since JF1-JF5 name PRINTER-NOTES' decided printer
   choices.
 - Neither has started: the decisions record the plans.
+
+## 2026-10-20: GP1 and JN1 started (the user)
+
+- **GP1, the tree** (branch `go-parser-gp1`, from `26816f48`). Go's go/parser from
+  `tamago/goroot`'s forms, run by goi in the tools' host; a dumper generated from go/ast's forms,
+  building the dump's tree in the helper's shape; `bin/repr-go read --reader native` and a first
+  `native-check`. Exit: E-tree (trees, comments, directives) equal to the helper's over every
+  corpus; times over std.
+- **JN1, the spike** (branch `java-frontend-jn1`, from `26816f48`). javac's sources (jdk26u
+  `baf63fb`) read by repr/java into scratch; their closure in jrt measured, giving the real list of
+  gaps and cuts; a minimal javac program translated by j2g into a tool executable; the platform's
+  options tried. Exit: the samples parsed on Go equal the JVM's, as `Pretty` prints them; the
+  tool's size and times.
