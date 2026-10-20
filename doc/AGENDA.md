@@ -93,8 +93,8 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- **The milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name, the
-  user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):
+- **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,
+  the user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):
   - goi is complete at the REPL for Go 1.27.1: GR7a-GR7c, GR8a-GR8b, GR9a-GR9d, GR10, the arm64
     box check and GC81, each merged, their proposals (GC35-GC165) built as recommended and recorded
     for the user to revisit.
@@ -104,8 +104,10 @@ The current state of the work. This file is rewritten as things change. For the 
     740; the box on amd64 583 of 584, in the emulated arm64 VM 291 of 292 (the half, GC75).
   - `bin/gate --full` (its goi step run again alone after `babde67d`), the fixpoint, the seed
     `fcc37393…` (`fca6d187`) verified (stage 0 `199e126b…`).
-  - **Left:** the check on the Mac (`./mac.sh goi`, with the bundle built at `f1e107e0`, kept
-    outside the repository), the user's to run; the tag.
+  - The Mac (the user, 2026-10-20): `./mac.sh goi`, all 584 programs, 582 pass, 2 known (in
+    classes), 46 s.
+  - **Tagged** `arbace-interprets-go1.27.1-v1` (2026-10-20, on main). Running: the emulated arm64
+    check over all of box.txt (`GOI_BOX_ALL=1`), to be recorded.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

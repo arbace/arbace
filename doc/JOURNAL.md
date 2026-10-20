@@ -2178,3 +2178,27 @@ Alternatives considered: `arbace-go-at-the-repl-v1` (undersells programs, the bo
   = G2 = G3 byte for byte (`199e126b…`).
 - **README and CLAUDE.md:** the milestone's lines. README has a new section, "Go forms at the
   REPL".
+
+## 2026-10-20: goi's check on the Mac; the tag `arbace-interprets-go1.27.1-v1`
+
+- **The Mac:** the user ran the bundle built at `f1e107e0` (sha256 `8761116c…`) on the M2 Max:
+  `./mac.sh check`, `sign` and `goi`, each with status 0.
+  - The bundle's own record matches what was built: the launcher `91e848bd…`, the guest
+    `arbace-box.elf` `d75e2756…`, `hv.test` `0ac13dbf…`.
+  - `./mac.sh goi` ran all 584 programs of box.txt in 4 boxes of 4 vCPUs under
+    Hypervisor.framework: 582 pass, 2 known, 0 other, in 46 s (170 s summed over the boxes).
+  - The 2 known are both in recorded classes (`bin/goi divergences`): `fixedbugs/issue15277.go`,
+    whose build constraint is amd64 (another architecture's program), and
+    `typeparam/issue50109.go` (the box's console).
+  - The results came back as mac-results.tar.gz, kept outside the repository, like the bundle.
+- **The tag:** `arbace-interprets-go1.27.1-v1`, on main, at this entry's commit, by the user's
+  decision to tag after the Mac run. The program is the one the seed `fcc37393…` holds; the
+  commits since `f1e107e0` change data and scripts, not the program.
+- **The milestone's claim:** goi, Arbace's interpreter of Go forms, is complete at the REPL for Go
+  1.27.1.
+  - `$GOROOT/test` against gc on linux/amd64: 1,471 of 1,837 programs pass, none fail; the other
+    366 are in 17 recorded classes, 358 by design and 8 deferred (GOI-SPEC, "v1's divergences").
+  - The same check in the box: on amd64 (583 of 584), in the emulated arm64 VM (291 of the half's
+    292), and on the Mac (582 of all 584).
+- **Still running:** the emulated arm64 check over all of box.txt (`GOI_BOX_ALL=1`), started while
+  the Mac run was awaited. Its result will be recorded after the tag, as a check of its own.
