@@ -3061,6 +3061,12 @@ the byte-for-byte run is redone cheaply after it.
   2.4 s natively, 3 s in the box. tools/goplan now reports embedded files (`:embed-patterns`,
   `:embed-files`) instead of refusing them, and the driver refuses to build such a package
   from a plan that does not say how (`:embed`).
+  Since GP2 (doc/go/GO-PARSER-SURVEY.md, "As built: GP2", 2026-10-20) the same namespace is
+  also the go list of repr/go's native reader: its trees may be directories, and go/build's
+  `Import` (every list go list gives, `// +build` lines, test files), cmd/go's `resolveEmbed`
+  (globs) and pattern matching (`std`, `cmd`, `P/...`) are ported; `plan` keeps its output
+  byte for byte (checked on the seed's program with `box/` printed: 325 and 324 packages,
+  equal to the planner before GP2 and to tools/goplan).
 - **The toolchain's facts** (`bin/box-tools put`; BX113): beside the tool guests, the ref
   `tool.config.<arch>`, `{:tool-tags [...] :release-tags [...] :include TREE :goversion
   "go1.27.1"}`: go list's `context.ToolTags` and `ReleaseTags` for tamago/<arch> (the default
