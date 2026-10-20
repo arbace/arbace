@@ -43,3 +43,29 @@ git history:
   `test/goi/box.txt` (`GOI_BOX_ALL=1`, 584 programs), in a detached worktree at `ab8a41dc`.
   - It was started while the Mac run was awaited; the tag's claim counted the half, 291 of 292.
   - Its result is recorded here when it ends.
+
+## 2026-10-20: the go-lisp, ghc-lisp and rust-lisp checkouts removed; their patches kept
+
+- **Why:** Arbace's surveys and specs cite the three forks as prior art for repr/go, repr/haskell
+  and repr/rust (G2C-SURVEY, REPR-HASKELL-SURVEY, REPR-RUST-SURVEY, doc/go/SPEC.md,
+  doc/haskell/SPEC.md, doc/rust/SPEC.md). No script, build or check of Arbace reads them.
+- **Checked first:** each local checkout equalled its GitHub origin (every branch, a clean tree, no
+  tags or stashes), checked with `git ls-remote` without writing to them.
+- **The patches** are kept in a new private repository, github.com/arbace/forks (`a21d047`), by the
+  user's choice. Each fork's own commits are there as `git format-patch BASE..HEAD`:
+  - go-lisp: 27 patches on golang/go `f043823a`, head `2483a496`;
+  - ghc-lisp: 25 on GHC's `c35096f5`, head `db7adf93`;
+  - rust-lisp: 11 on rust-lang/rust `602727f2`, head `f28e0de8`.
+  It has no merges or binary files, about 1.4 MB.
+  - Each series applied to its base (with `git apply --cached` in a throwaway bare clone) gives
+    the head's tree exactly.
+  - Each base is a commit of its upstream (GitHub's and GHC's GitLab's APIs).
+  - A fresh clone of arbace/forks equals the local files byte for byte.
+  The repository's README says how to restore a fork and under which upstream license each
+  series is.
+  - Alternatives considered: a release asset on GitHub (rejected: it lives only on GitHub's
+    servers, outside any clone) and the patches inside Arbace (rejected: three more upstream
+    licenses for files Arbace does not use).
+- **Removed:** `/root/go-lisp`, `/root/ghc-lisp` and `/root/rust-lisp` (about 3.6 GB), at the
+  user's word. The forks themselves stay on GitHub (go-lisp and ghc-lisp public, rust-lisp
+  private). The specs' citations keep their commits; their local paths now name what was there.
