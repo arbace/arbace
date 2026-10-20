@@ -1819,3 +1819,148 @@ divergence of v1 and left the arm64 box out. The plan, in doc/AGENDA.md:
 5. the milestone run: `bin/gate --full`, the fixpoint, a re-seed, the tag.
 
 v1's divergences by design are listed there. Staging (G16) and speed (F10) come after v1.
+
+## 2026-10-19: goi GR7b merged; GC45-GC54 decided; the seed 0af285f7; the goal; the GR8 and GR9 surveys
+
+- **goi GR7b** (branch `goi-gr7b`, from `90ec844d`, with GR7a merged in at `3e5361d2`; doc/go/GOI-SPEC.md
+  "As built: GR7b") merged as `0ca375c8`. It adds `$GOROOT/test`'s errorcheck programs to `bin/goi
+  check`, judged by Go's test driver's code vendored in `tools/gocmp/errorcheck.go` (LICENSE.md).
+  - **Corpus:** `linux-errtest`, 659 programs: 337 pass, 281 unsupported, 23 fail, 13 known, 3 skip,
+    2 error. The unsupported: gc's later phases' flags, syntax errors, invalid programs repr/go cannot
+    convert, errors only gc's later phases report, line directives.
+  - **`reify` of listed Go interfaces from Arbace** (G13, hand change 29 to `core_deftype`). The
+    interfaces' methods are registered by the table, since `reflect.Type.Method` made the linker keep
+    every exported method (+18.8 MB).
+  - **Results:** `bin/goi check` 1,837 programs, 1,386 pass; the essential subset 699 programs. The
+    oracle's `forms/go` has 129 cases. The executable +888,832 bytes.
+  - **The user decided GC45-GC54 as built:** the judge vendored; later phases', invalid programs' and
+    `:lines`-inexpressible differences unsupported or known; the subset with errorcheck programs;
+    `reify` in Arbace's own `reify`, a proxy of a per-list type, listed interfaces only, every call
+    through the bridge.
+- **Main's gate failed after the merge**, in goi's essential check. A fresh `bin/repr-go read
+  --corpus linux-errtest` exits non-zero because 64 programs are inconvertible by design (GC47). GR7b's
+  own gate had passed because it reused forms it had already read. Fixed in `04ac458b`: such a read
+  succeeds when every other program converted and read back. Two `2>/dev/null` redirects GR7b added
+  were removed (a rule slip). The gate then passed and the fixpoint held. The seed was remade:
+  `0af285f7…` (was `34d68b82…`), committed as `fe8de785` and verified (stage 0 = G1 = G2 = G3,
+  `b8d14c5c…`).
+- **The goal:** the user set it on 2026-10-19: "reach arbace-interprets-go-v1, that is the next
+  milestone". I work through the plan without stopping to ask. At each decision I build the
+  recommended option, recorded as "as recommended, under the user's goal" so the user can revisit it.
+- **The surveys** (branches `goi-gr8-survey`, `1a656868`; `goi-gr9-survey`, `bcfead9d`; from `77370a70`)
+  are merged.
+  - **GR8 (doc/go/GR8-SURVEY.md, doc/go/GR8-STD.edn).**
+    - Std's 180 user packages: 44 in the table, 4 interpreted, 85 interpretable as they are, 2 with a
+      linkname pull, 34 to compile, 11 out of scope. 53 internal packages are interpreted alongside.
+    - Interpreted std runs 36-430 times slower than gc. A REPL load takes a median of 2.0 s.
+    - Compiling every user package would cost +31.2 MB; the templates alone +18-19 MB, by `MethodByName`.
+    - A builder bug was found: a label on a short variable declaration is ignored, so a `goto` to it
+      never arrives (interpreted `regexp` matches nothing).
+    - The design: GR8a, std, about +3.1 MB of table; GR8b, reflect's method lookups served by goi.
+      GC55-GC64.
+  - **GR9 (doc/go/GR9-SURVEY.md).**
+    - A reflect overlay gives interpreted named types real runtime types, with typed method stubs.
+      The prototype passed 34 checks on linux amd64 and arm64.
+    - Prior art: reflectx v1.8.3 (`683669fe`) and ixgo v1.2.3 (`a761e605`), yaegi v0.16.1, goloader.
+    - About 325 KB of stubs. It removes the proxies and wrappers, which fixes 12 known programs.
+    - Generic functions get REPL vars inferring from each call: 1.5 µs against `go/eval`'s 140 ms.
+    - GC65-GC74.
+- **Started** from `04ac458b` with both surveys merged in, each building its survey's recommendations:
+  GR8a, GR9a-c, GR9d. Before them, from `0ca375c8`: GR7c (the 23 errorcheck fails and 2 crashes);
+  from `77370a70`: the arm64 box check. Two shell tasks left over from RR4's agent were stopped; their
+  worktree had been removed.
+
+## 2026-10-19: goi GR9d merged (REPL vars for generic functions)
+
+- **What:** branch `goi-gr9d` (from `7149fea8`, `04ac458b` with the two surveys) merged as
+  `e4621b5d`. It builds GC34 (b) and the GR9 survey's GC72-GC74:
+  - each generic function, generic type's method and go1.27 generic method gets a var whose root
+    is `arbace.lang.GoGenericFn`. It infers the type arguments from the Arbace values of each call
+    with the checker's own inference, `arbace/go/generic.ae`. A Go value gives its type
+    descriptor, an Arbace scalar its untyped kind. Instances are cached: the last key first, then
+    a map;
+  - `go/inst` instantiates explicitly; with fewer type arguments it gives a partial GoGenericFn;
+  - `slices`, `cmp`, `iter` and `maps` load from Arbace's `require`; the listed packages' generics
+    are made on first use.
+- **Measured** (linux/amd64): a cached generic call costs 1.45-1.79 µs, against 1.46-1.49 µs for a
+  plain function var; a cache miss costs 1.7-1.9 ms. The executable grows by 598,016 bytes (0.44%).
+- **Checks:**
+  - the branch's own: `bin/goi check` 1,386 of 1,837 pass, no regression; essential 699/699;
+    `bin/goi test` (the REPL 101/101, with 25 new checks); annotations unchanged; 21 new oracle
+    cases recorded by goi; the fixpoint held.
+  - main after the merge: the essential `bin/gate` passed (15m57s). The oracle had 53 known
+    mismatches, none new; the diffcheck 23 known; goi's essential check 699/699.
+- **Decisions:** GC135-GC144, each built as (a), the recommendation, as recommended, under the
+  user's goal of 2026-10-19. For GC144 the recommendation is (b): order a digest package's
+  constraint terms as written in the checker's messages (`cmp.Ordered`'s "missing in"). It is
+  outside GR9d and is left for after the merges.
+- **The re-seed** is deferred until GR7c, GR8a and GR9a-c are merged, so there is one re-seed rather
+  than one per merge. Stage 0 builds main either way, and the gate builds from the checkout.
+- **Overlap with GR9a-c:** `methodVar`, the `valueType` native's use of the proxies and the
+  `desc-types` registry. GR9a-c was told to merge main into its branch and keep them working.
+- **A rule slip:** one of the agent's wait loops redirected `2>/dev/null`. It changed no file.
+
+## 2026-10-19: goi GR8a merged (std at the REPL)
+
+- **What:** branch `goi-gr8a` (from `b267cf43`: `04ac458b` with the two surveys) merged as
+  `104d2827`, after GR9d. It builds GR8-SURVEY's GR8a:
+  - **F1 fixed:** a label on a short variable declaration is a goto target. Before, interpreted
+    `regexp` matched nothing.
+  - **The table** lists 89 packages (45 before): the survey's 34, the encoders,
+    `encoding/json/jsontext` and `encoding/json/v2` (GC98), and the speed set.
+  - **Interpretation:** the generator now decides which packages are interpreted (`classify`):
+    134 per configuration, 81 of them user packages, none refused.
+  - **New table keys:** `:replace` hooks for internal/godebug, cpu and abi; `:drop`, `:bodyless`,
+    `:api-interpreted`.
+  - **The REPL:** interpretable packages are checked once per process (GC104). goi binds the
+    linkname pulls between them (GC59) and refuses the out-of-scope and internal packages (GC101).
+  - **The checker:** the initialization order is built with a heap (GC100), and a crash in
+    `lookup-error` is fixed.
+  - **Tests:** test/goi/std.ae, 183 checks.
+- **Measured:** `bin/goi check` 1,414 pass, 25 fail, 79 known, 299 unsupported (GR7b: 1,386, 23,
+  73, 335).
+  - The 2 new fails are `issue30116` and `issue30116u`: goi's bounds messages (GC95), kept until
+    the next back-end change.
+  - The run programs still unsupported: 13 wait for reflect's methods (GR8b), 9 are assembly or
+    linkname.
+  - The executable is +5.46 MB (4.0%). REPL loads take 0.03 s (`container/list`) to 8.5 s
+    (`net/http`).
+- **The merge:** doc/go/GOI-SPEC.md was the only conflict. Both branches had appended their "As
+  built" sections; the result keeps GR9d's, then GR8a's. On main the essential `bin/gate` passed
+  (21m18s): the oracle and diffcheck as recorded, goi essential 712/712. `bin/goi test` passed:
+  the REPL 101/101, with GR9d's checks; std 183/183.
+- **Decisions:** GC55-GC59, GC62-GC64 and GC95-GC104 are as recommended, under the user's goal of
+  2026-10-19. GC102 asks for the box check and `bin/gate --full` at the merge. By the gate policy
+  (`--full` only at milestones) both are done at the milestone run, with the amd64 and arm64 box
+  checks.
+- **Left for GR8b:** `text/template`'s Execute needs `reflect.Value.MethodByName`, even for
+  fields; `issue16037_run` is marked known for it.
+- GR7c and GR9a-c were told to merge main (GR8a's checker and builder changes) before their final
+  checks.
+
+## 2026-10-19: goi GR7c merged (the rest of GR7b's errorcheck fails)
+
+- **What:** branch `goi-gr7c` (from `0ca375c8`, with main's GR8a and GR9d merged in at
+  `2fda8588`) merged as `6295e93b`. Of GR7b's 23 failing errorcheck programs and 2 checker
+  crashes, 20 now pass and 5 are known.
+  - **The checker's changes:** cycles as types2 reports them (cycleError, directCycles,
+    validType, init cycles); constants and sizes without overflow, following go/constant; the
+    instantiation cycles of go/types' mono.go; gc's noder check of anonymous interface cycles;
+    go1.27's "not a type" message; rune literals quoted as `strconv.QuoteRune` does.
+  - **Known (GC94):** bug217, issue11614, issue75022, issue8183 and goto.go. Each needs what
+    mode `:full` keeps and the converted forms do not: two receivers, parentheses, aliases,
+    `byte`, an else brace's line. issue43762's known entry was removed: it passes.
+  - **Also:** issue16369, issue49368 and issue56103, unsupported before, now pass.
+- **GC144 (b):** a constraint's terms are listed in their written order in messages for digest
+  packages too (`terms-union`, `terms-intersect`). The oracle case `cmp.Compare(true, false)` was
+  re-recorded; it was the only change, reviewed.
+- **Measured:**
+  - `bin/goi check`: 1,438 pass, 2 fail (GR8a's issue30116 and issue30116u, GC95), 0 error, 296
+    unsupported, 83 known, 18 skipped. It was recorded with `--jobs 8`: under load bug358 (about
+    8 s alone) and nosplit reach the 10 s limit at 16 jobs.
+  - Essential: 721 programs.
+  - Speed and size are within noise: +0.5 MB.
+- **Checks on main after the merge:** the essential `bin/gate` passed (25m00s); `bin/goi test`
+  passed (22 checker assertions, the REPL 101, std 183).
+- **Decisions:** GC85-GC94, each built as recommended, as recommended, under the user's goal of
+  2026-10-19.

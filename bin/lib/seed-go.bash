@@ -23,8 +23,10 @@
 #                    hand-written Go and the JDK's classes j2g translated, with their data files),
 #                    arbace/x509roots; cmd/arbace/image.bin empty (SA3: the image is prepared by
 #                    the built executable, not carried)
-#   overlay/runtime/ the Go runtime's files patched by overlay/go (bin/jrt overlay), given to
-#                    go build through an overlay file written for the toolchain's GOROOT
+#   overlay/runtime/ the Go runtime's files patched by overlay/go (bin/jrt overlay), and
+#   overlay/reflect/ reflect's file added by it (goi's run-time named types, GR9a; seeds before it
+#                    have none), given to go build through an overlay file written for the
+#                    toolchain's GOROOT: overlay/PKG/F.go is GOROOT/src/PKG/F.go
 #   namespaces.txt   the embedded namespaces the image prepares (j2g's prog/namespaces.txt)
 
 seed_go_top=arbace-seed-go
@@ -102,6 +104,7 @@ seed_go_make() {
   ovl=$(cd "$root" && ARBACE_HOST_EXE=${ARBACE_HOST_EXE:-$dir/$host/arbace} bin/jrt overlay | tail -1) || return 1
   rt=$(dirname "$ovl")/runtime
   [ -d "$rt" ] || { echo "bin/seed: no patched runtime in $rt" >&2; return 1; }
+  [ -d "$(dirname "$ovl")/reflect" ] || { echo "bin/seed: no reflect overlay in $(dirname "$ovl")/reflect" >&2; return 1; }
   . "$root/bin/lib/version.bash"
   version=$(arbace_version "$root") || return 1
   case $version in *':dirty true'*) echo "bin/seed: warning: the checkout is dirty; the seed records it" >&2 ;; esac
@@ -115,6 +118,7 @@ seed_go_make() {
   # the image is not carried (SA3): the executable built from the seed prepares it
   : > "$t/$seed_go_top/mod/cmd/arbace/image.bin"
   cp -r "$rt" "$t/$seed_go_top/overlay/runtime"
+  cp -r "$(dirname "$ovl")/reflect" "$t/$seed_go_top/overlay/reflect"
   cp "$nss" "$t/$seed_go_top/namespaces.txt"
   files=$(find "$t/$seed_go_top" -type f | wc -l)
   bytes=$(find "$t/$seed_go_top" -type f -printf '%s\n' | awk '{s+=$1} END {print s}')
@@ -135,7 +139,7 @@ seed_go_make() {
  :env {"CGO_ENABLED" "0" "GOAMD64" "v1" "GOARM64" "v8.0" "GOEXPERIMENT" ""}
  :build ["-trimpath" "-buildvcs=false"]
  :ldflags "-s -w -X 'main.arbaceVersion=<:version>'"
- :overlay "overlay/runtime/*.go replace GOROOT/src/runtime/*.go"
+ :overlay "overlay/PKG/*.go replace or add GOROOT/src/PKG/*.go (runtime, reflect)"
  :image "prepared by the executable built without it: ARBACE_PREPARE, requiring namespaces.txt"
  :printed-by "$printedby"
  :files $files
@@ -162,14 +166,18 @@ seed_go_build() {
   [ "$(seed_go_field "$s" format)" = "$seed_go_format" ] || { echo "bin/seed: $archive: format $(seed_go_field "$s" format), not $seed_go_format" >&2; return 1; }
   seed_go_toolchain_check "$s" > /dev/null || return 1
   version=$(seed_go_field "$s" version)
-  # the overlay file for this GOROOT (bin/jrt overlay's, with the seed's runtime files)
+  # the overlay file for this GOROOT (bin/jrt overlay's, with the seed's files: overlay/PKG/F.go
+  # for GOROOT/src/PKG/F.go; a seed before GR9a has overlay/runtime/ only)
   ovl=$src/overlay/overlay.json
   {
     printf '{"Replace": {'
-    local sep=
-    for f in "$src"/overlay/runtime/*.go; do
-      printf '%s\n "%s": "%s"' "$sep" "$goroot/src/runtime/$(basename "$f")" "$f"
-      sep=,
+    local sep= pd
+    for pd in "$src"/overlay/*/; do
+      for f in "$pd"*.go; do
+        [ -f "$f" ] || continue
+        printf '%s\n "%s": "%s"' "$sep" "$goroot/src/$(basename "$pd")/$(basename "$f")" "$f"
+        sep=,
+      done
     done
     printf '}}\n'
   } > "$ovl"

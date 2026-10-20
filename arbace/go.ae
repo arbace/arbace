@@ -110,16 +110,22 @@
         acc
         (case (name (first f))
           "func" (let [[doc xs] (strip-doc (drop 2 f))
-                       xs (if (= :type-params (first xs)) (drop 2 xs) xs)]
-                   (assoc acc (arbace.core/str (second f)) {:doc doc :arglists (list (params-of (first xs)))}))
+                       gen (= :type-params (first xs))
+                       xs (if gen (drop 2 xs) xs)]
+                   (assoc acc (arbace.core/str (second f)) (cond-> {:doc doc :arglists (list (params-of (first xs)))}
+                                                             gen (assoc :generic true))))
           "method" (let [[doc xs] (strip-doc (drop 2 f))
-                         xs (if (= :type-params (first xs)) (drop 2 xs) xs)
+                         gen (= :type-params (first xs))
+                         xs (if gen (drop 2 xs) xs)
                          pv (first xs)
                          r (first pv)
                          rt (if (and (symbol? r) (:tag (meta r))) (:tag (meta r)) r)
-                         rt (if (seq? rt) (second rt) rt)]
+                         rt (if (and (seq? rt) (= '* (first rt))) (second rt) rt)
+                         ;; a generic type's method (GR9d): (List T)
+                         [rt gen] (if (seq? rt) [(first rt) true] [rt gen])]
                      (if (symbol? rt)
-                       (assoc acc (arbace.core/str rt "." (second f)) {:doc doc :arglists (list (params-of pv))})
+                       (assoc acc (arbace.core/str rt "." (second f)) (cond-> {:doc doc :arglists (list (params-of pv))}
+                                                                         gen (assoc :generic true)))
                        acc))
           "const" (let [n (second f) m (meta n)]
                     (assoc acc (arbace.core/str n) {:doc (:doc m) :const (const-value (:val m) (:go/underlying m))}))
@@ -131,6 +137,8 @@
 
 ;; ---------------------------------------------------------------------------------------
 ;; The namespaces of the table's packages (§2.1, §7.2)
+
+(declare repl-fn)
 
 (defn- member-var
   "Interns the var of member name (kind, handle, digest info) in ns."
@@ -159,8 +167,12 @@
         make (fn [^String n]
                (if-let [[kind h] (get members n)]
                  (member-var ns p n kind h (get @info n))
-                 (when-let [i (get @consts n)]
-                   (member-var ns p n :const nil i))))
+                 (if-let [i (get @consts n)]
+                   (member-var ns p n :const nil i)
+                   ;; a generic function or a generic type's method (GR9d): a GoGenericFn
+                   ;; over the digest's declaration (§9.3)
+                   (when (:generic (get @info n))
+                     ((repl-fn "listed-generic!") ns p n (get @info n))))))
         resolver (fn
                    ([_]
                     (doseq [n (sort (concat (keys members) (keys @consts)))]
@@ -169,6 +181,16 @@
                     (make (name sym))))]
     (.setResolver ^Namespace ns resolver)
     ns))
+
+(defn interpretable-ns!
+  "arbace.lang.GoInterp's loadTable for a go/ resource of one element that is no listed
+  package (GR9d): an interpretable package of the digest (go/slices, §9.3) is loaded by goi,
+  its namespace and vars made (generic functions' GoGenericFns among them); true then, else
+  false."
+  [^String p]
+  (boolean (when ((repl-fn "interpretable?") p)
+             ((repl-fn "load-import") p)
+             true)))
 
 (defn packages
   "The import paths of the table's packages (go/arbace/gotable.edn, §6.6)."
@@ -210,6 +232,39 @@
   [^GoVar v x]
   (GoInterp/store (.-cell v) x)
   x)
+
+;; ---------------------------------------------------------------------------------------
+;; Arbace objects implementing Go interfaces (G13, GR7b): what reify makes of a reify naming Go
+;; interfaces of the table (arbace.core/reify, its Go specs)
+
+(def ^:private reify-types (atom {}))
+
+(defn- type-names [ts] (apply arbace.core/str (interpose ", " (map #(.getName ^GoType %) ts))))
+
+(defn reify-type
+  "The reify type of Go interface types ts (GoTypes of listed packages' interfaces) and its
+  methods' names in order: [T name...], made once per list."
+  [ts]
+  (or (get @reify-types ts)
+      (let [r (vec (GoInterp/reifyType (object-array ts)))]
+        (swap! reify-types assoc ts r)
+        r)))
+
+(defn reify-data
+  "The data of a reify of Go interfaces (arbace.lang.GoReify's goiReify): rt its reify-type,
+  fns its methods' fns by name (each taking the object first), as an Object[] [T f...] in rt's
+  order; every method of the interfaces must be given."
+  [rt ts fns]
+  (let [[t & names] rt]
+    (doseq [k (keys fns)]
+      (when-not (some #{k} names)
+        (throw (IllegalArgumentException.
+                (arbace.core/str "reify: " k " is no method of " (type-names ts))))))
+    (object-array
+     (cons t (for [n names]
+               (or (get fns n)
+                   (throw (IllegalArgumentException.
+                           (arbace.core/str "reify: method " n " of " (type-names ts) " is missing")))))))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; The macros of Go forms (§2.2, GR3): each hands its form to arbace.go.repl, loaded on first use
@@ -254,6 +309,16 @@
   "go/import: import specs [name \"path\"] for the current REPL file (S5)."
   [& specs]
   `((repl-fn "import!") '~(ns-name *ns*) '~(vec specs)))
+
+(defmacro inst
+  "(go/inst f T...): explicit type arguments (GR9d, GC73): f names a generic function's var
+  (a GoGenericFn, a generic type's method T.M too) or a generic type of an interpreted package
+  (go.main/List), each T a Go type form resolved in the namespace's package (go.user's outside
+  go.*). Every type argument given: the instance's GoFn (a function, a method: its receiver
+  first) or GoType (a type); fewer: a GoGenericFn inferring the rest, those given fixed (Go's
+  partial instantiation)."
+  [f & types]
+  `((repl-fn "inst!") '~(ns-name *ns*) '~f '~(vec types)))
 
 (defmacro eval
   "go/eval: Go statements run in the namespace's package (go.user outside go.*), the last one's

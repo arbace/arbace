@@ -184,7 +184,8 @@
 (def old-p (MkP 5 6))
 (go/type P (struct ^int X ^int Y ^int Z))
 (go/func MkP ^P [^int x ^int y] (lit P x y 0))
-(goi.repl-test/is ["cross.P#1{X:5, Y:6}" "cross.P{X:1, Y:2, Z:0}"] [(str old-p) (str (MkP 1 2))])
+;; P's generation 3: its method set changed twice (Sum, Scale) before old-p was made (GC68)
+(goi.repl-test/is ["cross.P#3{X:5, Y:6}" "cross.P{X:1, Y:2, Z:0}"] [(str old-p) (str (MkP 1 2))])
 
 ;; interop on Go values (GS10): methods (the table's for compiled types), fields
 (goi.repl-test/is [2 "ab"] (let [b (go/new go.strings/Builder)] (.WriteString b "ab") [(.Len b) (.String b)]))
@@ -255,6 +256,142 @@
 (goi.repl-test/is 4 (Fill 4))
 (go/func SortedDemo ^string [] (let [ys (lit (slice int) 3 1 2)] (slices/Sort ys) (fmt/Sprint ys (slices/Index ys 3))))
 (goi.repl-test/is "[1 2 3] 2" (SortedDemo))
+
+;; generic functions' vars (GR9d, GC34 (b), GC72-GC74): a generic function's var is a
+;; GoGenericFn, its type arguments inferred from each call's arguments (an Arbace scalar an
+;; untyped constant, a Go value its Go type, a fn none), its instances kept by the arguments'
+;; types; go/inst for explicit (partial) type arguments; the interpretable packages (slices,
+;; cmp), a listed package's generic (sync.OnceValue), a generic type's methods
+(ns go.rt.gvar (:require [arbace.go :as go]))
+(go/import [fmt "fmt"])
+(go/func Ints ^{:tag (slice int)} [] (lit (slice int) 1 2 3))
+(go/func Int64s ^{:tag (slice int64)} [] (lit (slice int64) 5 6 7))
+(go/func Strs ^{:tag (slice string)} [] (lit (slice string) "b" "c" "a"))
+(go/func Map :type-params [T U] ^{:tag (slice U)} [^{:tag (slice T)} xs ^{:tag (func [T] [U])} f]
+  (let [out (make (slice U) 0 (len xs))]
+    (range [_ x xs] (set! out (append out (f x))))
+    out))
+(go/func Twice :type-params [^{:tag (interface (| int float64))} T] ^T [^T x] (+ x x))
+(go/type List :type-params [T] (struct ^{:tag (slice T)} items))
+(go/method Push [^{:tag (* (List T))} l ^T x] (set! (.-items l) (append (.-items l) x)))
+(go/method Len ^int [^{:tag (* (List T))} l] (len (.-items l)))
+(go/func NewList :type-params [T] ^{:tag (* (List T))} [] (addr (lit (List T))))
+(go/func UseList ^int [] (let [l ((inst NewList int))] (.Push l 1) (.Len l)))
+(in-ns 'goi.repl-test)
+(require '[go.slices :as slices] '[go.cmp :as gocmp] '[go.sync])
+(is true (instance? arbace.lang.GoGenericFn go.rt.gvar/Map))
+(is true (:go/generic (meta #'go.rt.gvar/Map)))
+;; slices.Index over a Go []int and a []int64: the untyped 2 takes the element type
+(is [1 2 -1] [(slices/Index (go.rt.gvar/Ints) 2) (slices/Index (go.rt.gvar/Int64s) 7) (slices/Index (go.rt.gvar/Int64s) 1)])
+(is true (slices/Contains (go.rt.gvar/Strs) "a"))
+(is 3 (slices/Max (go.rt.gvar/Ints)))
+;; cmp.Compare: Longs infer int, a Long and a Double float64 (Go's rule), int64 by go/inst
+(is [-1 1 1 0] [(gocmp/Compare 1 2) (gocmp/Compare 2.5 1) (gocmp/Compare 3 2.5) (gocmp/Compare "a" "a")])
+(is 1 ((go/inst go.cmp/Compare int64) 3 2))
+;; an Arbace fn infers nothing: slices.SortFunc's S from the slice, the fn adapted
+(is ["a" "b" "c"] (let [xs (go.rt.gvar/Strs)] (slices/SortFunc xs (fn [a b] (compare a b))) (vec xs)))
+;; the program's own Map[T, U any]: U cannot be inferred from a fn; go/inst gives it
+(is ["1" "2" "3"] (vec ((go/inst go.rt.gvar/Map int string) (go.rt.gvar/Ints) str)))
+;; partial instantiation: S given, E inferred (Go's slices.Index[[]int64])
+(is 1 ((go/inst go.slices/Index (slice int64)) (go.rt.gvar/Int64s) 6))
+;; instances kept per argument types: a second call of the same types makes none
+(is 2 (let [_ (go.rt.gvar/Twice 2) _ (go.rt.gvar/Twice 2.5) _ (go.rt.gvar/Twice 7)] (.instanceCount ^arbace.lang.GoGenericFn go.rt.gvar/Twice)))
+(is [8 5.0] [(go.rt.gvar/Twice 4) (go.rt.gvar/Twice 2.5)])
+;; a generic type's methods: the var List.Push infers T from the receiver's instance; the
+;; instances shared with interpreted code's (UseList)
+(is [2 1] (let [l ((go/inst go.rt.gvar/NewList int))]
+            (go.rt.gvar/List.Push l 3)
+            (go.rt.gvar/List.Push l 4)
+            [(go.rt.gvar/List.Len l) (go.rt.gvar/UseList)]))
+(is 1 (let [l ((go/inst go.rt.gvar/NewList string))] (.Push l "x") (.Len l)))
+(is "{[]}" (go/str ((go/inst go.rt.gvar/List int))))
+(is 1 (let [l ((go/inst go.rt.gvar/NewList string))] ((go/inst go.rt.gvar/List.Push string) l "a") (go.rt.gvar/List.Len l)))
+;; a listed package's generic function (§9.3): sync.OnceValue
+(is [42 42 1] (let [n (atom 0) f ((go/inst go.sync/OnceValue int) (fn [] (swap! n inc) 42))] [(f) (f) @n]))
+;; a redefinition is seen by the var: a new GoGenericFn, new instances
+(in-ns 'go.rt.gvar)
+(go/func Twice :type-params [^{:tag (interface (| int float64))} T] ^T [^T x] (* x 3))
+(in-ns 'goi.repl-test)
+(is [12 0] [(go.rt.gvar/Twice 4) (- (.instanceCount ^arbace.lang.GoGenericFn go.rt.gvar/Twice) 1)])
+;; the errors: gc's words
+(defn- go-errors [f] (try (f) nil (catch Exception e (mapv :msg (:go/errors (ex-data e))))))
+(is ["in call to gvar.Map, cannot infer U (declared at repl.go:?)"] (go-errors #(go.rt.gvar/Map (go.rt.gvar/Ints) str)))
+(is true (arbace.string/starts-with? (first (go-errors #(gocmp/Compare true false))) "bool does not satisfy cmp.Ordered (bool missing in "))
+(is ["in call to slices.Index, S (type []string) does not satisfy ~[]E"] (go-errors #(slices/Index (go.rt.gvar/Strs) (go.rt.gvar/Ints))))
+(is ["not enough arguments in call to slices.Index\n\thave (number)\n\twant (S, E)"] (go-errors #(slices/Index 1)))
+(is [:threw "argument 1 of cmp.Compare[int8]: 300 overflows int8"] (try ((go/inst go.cmp/Compare int8) 300 1) (catch Exception e [:threw (ex-message e)])))
+
+;; reify of Go interfaces (G13, GR7b): an Arbace reify naming interfaces of goi's table is a Go
+;; value of each where compiled and interpreted Go code takes one (the interface's wrapper, a
+;; proxy in an any), its methods Arbace fns of the object; the object comes back to Arbace as
+;; itself
+(require '[go.fmt] '[go.io] '[go.sort])
+(ns go.rt.reify (:require [arbace.go :as go]))
+(go/import [fmt "fmt"] [io "io"])
+(go/func Describe ^string [^{:tag fmt/Stringer} s] (+ "<" (.String s) ">"))
+(go/func IsStringer ^bool [^any x] (let [(values _ ok) (assert fmt/Stringer x)] ok))
+(go/func Id ^any [^any x] x)
+(go/func Fill ^int [^{:tag (slice byte)} p ^string s] (copy p s))
+(go/func ReadAllString ^string [^{:tag io/Reader} r]
+  (let [(values b err) (io/ReadAll r)]
+    (if (!= err nil) (return (+ "error: " (.Error err))) (return (conv string b)))))
+(in-ns 'goi.repl-test)
+(def stringer (let [n 3] (reify go.fmt/Stringer (String [_] (str "n=" n)))))
+(is "n=3" (go.fmt/Sprint stringer))
+(is "<n=3>" (go.rt.reify/Describe stringer))
+(is true (go.rt.reify/IsStringer stringer))
+(is false (go.rt.reify/IsStringer "x"))
+(is true (identical? stringer (go.rt.reify/Id stringer)))
+;; this is the object, which may implement Arbace's interfaces too
+(is "count 5" (go.fmt/Sprint (reify go.fmt/Stringer (String [this] (str "count " (count this)))
+                                    arbace.lang.Counted (count [_] 5))))
+;; io.Reader: compiled io.ReadAll reads through the wrapper, the fn writes the Go slice it is given
+(defn chunks-reader [chunks]
+  (let [left (atom chunks)]
+    (reify go.io/Reader
+      (Read [_ p]
+        (if-let [c (first @left)]
+          (do (swap! left rest) [(go.rt.reify/Fill p c) nil])
+          [0 @go.io/EOF])))))
+(is "abcdef" (go.rt.reify/ReadAllString (chunks-reader ["ab" "cd" "ef"])))
+(is "" (go.rt.reify/ReadAllString (chunks-reader [])))
+;; sort.Interface: compiled sort.Sort calls Len, Less and Swap
+(is [1 2 3 5 8]
+    (let [v (atom [5 3 8 1 2])]
+      (go.sort/Sort (reify go.sort/Interface
+                      (Len [_] (count @v))
+                      (Less [_ i j] (< (nth @v i) (nth @v j)))
+                      (Swap [_ i j] (swap! v (fn [x] (assoc x i (nth x j) j (nth x i)))))))
+      @v))
+(is ["reify: method Less of sort.Interface is missing"]
+    (try (reify go.sort/Interface (Len [_] 0)) nil
+         (catch IllegalArgumentException e [(ex-message e)])))
+
+;; GR9a-c: interpreted named types as runtime types of their own: %T and compiled code's calls of
+;; their methods (fmt through the runtime type's method table and the table's stubs); a method set
+;; changed makes a new generation (GC68), whose old values keep the old method set; a method's body
+;; redefined with its signature keeps the generation, the stub reaching the new body
+(ns go.rt.named (:require [arbace.go :as go]))
+(go/import [fmt "fmt"] [sort "sort"])
+(go/type Temp float64)
+(go/func TName ^string [] (fmt/Sprintf "%T %v" (conv Temp 1.5) (lit (slice Temp) 2)))
+(goi.repl-test/is "named.Temp [2]" (TName))
+(go/type Box (struct ^int N))
+(go/func MkBox ^Box [^int n] (lit Box n))
+(go/func Str ^string [^any x] (fmt/Sprint x))
+(def b1 (MkBox 1))
+(goi.repl-test/is "{1}" (Str b1))
+(go/method String ^string [^Box b] (fmt/Sprintf "box %d" (.-N b)))
+(def b2 (MkBox 2))
+(goi.repl-test/is ["{1}" "box 2" "box 3"] [(Str b1) (Str b2) (Str (MkBox 3))])
+(go/method String ^string [^Box b] (fmt/Sprintf "BOX %d" (.-N b)))
+(goi.repl-test/is ["{1}" "BOX 2" "BOX 4"] [(Str b1) (Str b2) (Str (MkBox 4))])
+(go/type Ints (slice int))
+(go/method Len ^int [^Ints s] (len s))
+(go/method Less ^bool [^Ints s ^int i ^int j] (> (aget s i) (aget s j)))
+(go/method Swap [^Ints s ^int i ^int j] (set! (values (aget s i) (aget s j)) (values (aget s j) (aget s i))))
+(go/func Desc ^string [] (let [s (lit Ints 3 1 2)] (sort/Sort s) (fmt/Sprintf "%T %v" s s)))
+(goi.repl-test/is "named.Ints [3 2 1]" (Desc))
 
 ;; ---------------------------------------------------------------------------------------
 

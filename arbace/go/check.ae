@@ -148,13 +148,24 @@
               :else nil))]
     (walk (if (#{:var :const} (:kind @d)) (:init @d) (:spec @d)))))
 
+(defn- number-local-types!
+  "Numbers the package's function-scoped defined types as gc's noder does (its typegen, the ·N of
+  their link names, writer.go's collectDecls: source order): by their package-level declarations
+  (whose ids are in source order), then in the order their bodies declare them: :goi/vargen in
+  each one's info (GR9c, the runtime names of local types in generic code)."
+  [lts]
+  (let [sorted (sort-by (fn [[id _ k]] [id k]) (map-indexed (fn [k [id nt]] [id nt k]) lts))]
+    (doseq [[n [_ nt]] (map-indexed vector sorted)]
+      (t/update-info! nt assoc :goi/vargen (inc n)))))
+
 (defn check-package
   "Checks the package of source src (load/package-source) in session: the package (a
   volatile, its :scope its objects) with :result {:errors :decls ...}. resolve: path, file ->
   the imported package (checked)."
   [src resolve & {:keys [keep-trees]}]
   (let [pkg-scope (e/scope nil :package)
-        pkg (volatile! {:path (:path src) :name (:name src) :scope pkg-scope :config (:config src)})
+        pkg (volatile! {:path (:path src) :name (:name src) :scope pkg-scope :config (:config src)
+                        :local-types (volatile! [])})
         errors (volatile! [])
         annotated (contains? (:opts src) :positions)
         ctx {:objs (volatile! []) :methods (volatile! {}) :bodies (volatile! []) :inits (volatile! [])
@@ -174,18 +185,32 @@
                                               (try (resolve q) (catch arbace.lang.ArityException _ nil))))
               code/*instantiate* decl/instantiate
               code/*subst* decl/subst
-              code/*verify-later* decl/verify-later!]
+              code/*verify-later* decl/verify-later!
+              code/*valid-types* (volatile! [])
+              decl/*mono* (volatile! {:vertices [] :edges [] :canon {} :idx {}})
+              code/*anon-ifaces* (volatile! [])]
       (doseq [fi fis] (decl/declare-imports! fi resolve))
       (doseq [fi fis] (decl/collect-file! fi))
+      (doseq [fi fis] (decl/file-scope-conflicts! fi))
       (decl/resolve-method-bases!)
       (let [objs @(:objs ctx)]
         (doseq [[i x] (map-indexed vector objs)] (oset! x :decl-order i))
+        ;; go/types' directCycles (go1.27): cycles of type names
+        (decl/direct-cycles! objs)
         ;; go/types' packageObjects: non-alias types, aliases, the rest
         (doseq [x objs :when (and (= :type (o x :kind)) (not (o x :alias)))] (decl/obj-decl! x))
         (doseq [x objs :when (and (= :type (o x :kind)) (o x :alias))] (decl/obj-decl! x))
         (doseq [x objs :when (not= :type (o x :kind))] (decl/obj-decl! x))
         ;; the bodies, then what each declaration left for later
         (doseq [x @(:bodies ctx)] (decl/check-body! x))
+        ;; validType of the type declarations, in the order they began (GR7c)
+        (loop []
+          (let [vs @code/*valid-types*]
+            (when (seq vs)
+              (vreset! code/*valid-types* [])
+              (doseq [v vs] (v))
+              (recur))))
+        (number-local-types! @(o pkg :local-types))
         (let [decls (distinct (map #(o % :decl) objs))]
           (doseq [d decls]
             (loop []
@@ -206,6 +231,10 @@
           (doseq [fi fis] (decl/unused-imports! fi))
           ;; initialization order
           (let [order (decl/init-order objs)
+                ;; go/types' monomorph, when no error was found (GR7c)
+                _ (when (empty? @errors) (decl/monomorph!))
+                ;; gc's noder after type checking without errors: anonymous interface cycles
+                _ (when (empty? @errors) (code/anon-iface-cycles!))
                 say (get-in src [:opts :init-order])
                 init-entry (fn [lhs]
                              (let [one (fn [v] (if (= "_" (o v :name)) [(o v :file) (o v :line)] (arbace.repr.go.types/name-form (o v :name))))]
@@ -320,8 +349,11 @@
        (if (= "unsafe" path)
          e/unsafe-package
          (let [lp (get-in src [:opts :local-imports path] path)
+               ;; a refused import (goi's REPL, GR8a): its reason, the import's error
+               why (when-let [rf (:refuse s)] (rf lp (:path src)))
                ;; the standard library's vendored packages
-               p (or (ensure-package s lp src chain)
+               p (or why
+                     (ensure-package s lp src chain)
                      (when (and (not (str/includes? (first (str/split lp #"/")) ".")) false) nil)
                      (ensure-package s (str "vendor/" lp) src chain))]
            p))))))
@@ -342,7 +374,9 @@
       (let [src ((:resolve-src s) path importer)
             pkg (when (and src (seq (:files src)))
                   (try
-                    (check-package src (resolver s src (conj (vec chain) path)))
+                    (if (some-> (:keep-trees s) (apply [path]))
+                      (check-package src (resolver s src (conj (vec chain) path)) :keep-trees true)
+                      (check-package src (resolver s src (conj (vec chain) path))))
                     (catch Throwable ex
                       (deliver p nil)
                       (throw (ex-info (str "checking " path ": " (.getMessage ex)) {:path path} ex)))))]

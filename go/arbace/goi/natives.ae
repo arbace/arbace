@@ -420,7 +420,7 @@ nodes by the parameters' kinds, one result as a node of its kind, several writte
             (case [\S] (let [a (assert S x)] (aset cvs i (fn ^{:tag reflect/Value} [^{:tag (* Frame)} fr]
                                                             (let [v (.Elem (reflect/New pt))] (.SetString v (a fr)) v)))))
             (default (let [a (assert R x)
-                           d (TypeOf pt)]
+                           d (descOfRT pt)]
                        (aset cvs i (fn ^{:tag reflect/Value} [^{:tag (* Frame)} fr] (.valueOf d (a fr))))))))))
     (let [call (fn ^{:tag (slice reflect/Value)} [^{:tag (* Frame)} fr]
                  (let [in (make (slice reflect/Value) n)]
@@ -435,12 +435,12 @@ nodes by the parameters' kinds, one result as a node of its kind, several writte
             (case [\I] (return (conv I (fn ^int64 [^{:tag (* Frame)} fr] (intOfValue (aget (call fr) 0))))))
             (case [\F] (return (conv F (fn ^float64 [^{:tag (* Frame)} fr] (.Float (aget (call fr) 0))))))
             (case [\S] (return (conv S (fn ^string [^{:tag (* Frame)} fr] (.String (aget (call fr) 0)))))))
-          (let [d (TypeOf ot)]
+          (let [d (descOfRT ot)]
             (return (conv R (fn ^any [^{:tag (* Frame)} fr] (.fromValue d (aget (call fr) 0))))))))
       (conv T (fn [^{:tag (* Frame)} fr]
                 (let [out (call fr)]
                   (range [i v out]
-                    (setSlotValue fr (slotKindOf (.Kind (.Out ft i))) (aget rs i) (TypeOf (.Out ft i)) v))))))))
+                    (setSlotValue fr (slotKindOf (.Kind (.Out ft i))) (aget rs i) (descOfRT (.Out ft i)) v))))))))
 
 (go/func MemR "MemR is x of type t as Go memory holds it (a closure given to compiled code as a Go func).\n" ^R [^R x ^{:tag (* Type)} t]
   (fn ^any [^{:tag (* Frame)} fr] (toMem t (x fr))))
@@ -489,6 +489,20 @@ the outcome as call0's ([0 results...], [1 message type value], [2 status]).\n"
 ;; GR5: the bridge, methods and fields of Go values from Arbace (GS10), Go values in Arbace's
 ;; collection protocols, read-only (GS7)
 
+(go/func GoInterp_ReifyType0_O1__O1_native
+  "GoInterp_ReifyType0_O1__O1_native is the reify type of Go interface types ts (GoTypes'
+descriptors, G13) and its methods' keys: [T key...].\n"
+  ^{:tag (* jrt/RefArray)} [^{:tag (* jrt/RefArray)} ts]
+  (let [its (make (slice (* Type)) (len (.-A ts)))]
+    (range [i x (.-A ts)]
+      (aset its i (typeArg x)))
+    (let [(values t keys) (ReifyType its)
+          out (make (slice any) 0 (+ (len keys) 1))]
+      (set! out (append out t))
+      (range [_ k keys]
+        (set! out (append out (jrt/Str k))))
+      (objects out))))
+
 (go/func GoInterp_Init1_O__Z_native
   "GoInterp_Init1_O__Z_native is GoInterp's static initializer's second step: it gives goi
 Arbace's bridge (arbace.lang.GoBridge), for Arbace fns called as Go funcs (§7.5) and the
@@ -498,13 +512,10 @@ package arbace (§7.3).\n"
   true)
 
 (go/func collValue
-  "collValue is Go value x (from Arbace) as the value its collection protocol reads: a proxy's
-or a wrapper's value, a pointer to a struct or an array dereferenced.\n"
+  "collValue is Go value x (from Arbace) as the value its collection protocol reads: a pointer
+to a struct or an array dereferenced.\n"
   ^{:tag reflect/Value} [^any x]
   (set! x (Unbox x))
-  (let [(values p ok) (proxyOf x)]
-    (when ok
-      (set! x (.-V p))))
   (let [v (reflect/ValueOf x)]
     (when (and (== (.Kind v) reflect/Pointer) (not (.IsNil v)))
       (switch (.Kind (.Elem (.Type v)))
@@ -610,19 +621,16 @@ compiled type's from the table (T.M, by its reflect type: S39); null when it has
         u (Unbox x)]
     (when (== u nil)
       (return nil))
-    (let [(values p ok) (proxyOf u)]
-      (when ok
-        (let [m (aget (.-Methods (.-T p)) nm)]
-          (when (== m nil)
-            (return nil))
-          (return (addr (lit Callable :Name (+ (typeName (.-T p)) "." nm) :im m))))))
     (let [rt (reflect/TypeOf u)
           base rt]
       (when (== (.Kind base) reflect/Pointer)
         (set! base (.Elem base)))
-      (let [d (interpOf rt)]
-        (when (and (!= d nil) (!= (aget (.-Methods d) nm) nil))
-          (return (addr (lit Callable :Name (+ (typeName d) "." nm) :im (aget (.-Methods d) nm))))))
+      (let [d (descOfRT rt)]
+        (when (not (.-Compiled d))
+          (let [m (aget (.-Methods d) nm)]
+            (when (== m nil)
+              (return nil))
+            (return (addr (lit Callable :Name (+ (typeName d) "." nm) :im m))))))
       (when (== (.Name base) "")
         (return nil))
       (let [(values m ok) (member (.PkgPath base) (+ (.Name base) "." nm))]
@@ -644,12 +652,111 @@ type (a pointer's element's), whose namespace holds its methods' vars T.M (GS10)
         ^{:tag (* Type)} d nil]
     (when (== u nil)
       (return nil))
-    (let [(values p ok) (proxyOf u)]
-      (if ok
-        (set! d (.-T p))
-        (set! d (interpOf (reflect/TypeOf u)))))
+    (set! d (descOfRT (reflect/TypeOf u)))
+    (when (.-Compiled d)
+      (set! d nil))
     (when (and (!= d nil) (== (.-Name d) "") (!= (.-Elem d) nil))
       (set! d (.-Elem d)))
     (when (or (== d nil) (== (.-Name d) "") (== (.-Pkg d) ""))
       (return nil))
     (objects (lit (slice any) (jrt/Str (.-Pkg d)) (jrt/Str (lastName (.-Name d)))))))
+
+;; ---------------------------------------------------------------------------------------
+;; GR9d: what inference asks of Go values and descriptors (generic functions' vars,
+;; arbace.go.generic; GOI-SPEC.md "As built: GR9d")
+
+;; descOfRT (types.ae, GR9a-c) gives a value's descriptor from its reflect type: every interpreted
+;; type's RT is its own
+
+(go/func GoInterp_ValueType0_O__O_native
+  "GoInterp_ValueType0_O__O_native is the descriptor of Go value v's type as inference sees it
+(the registry's interpreted type of its RT, its own since GR9a-c, else the compiled type's), or
+null.\n"
+  ^any [^any v]
+  (set! v (Unbox v))
+  (when (== v nil)
+    (return nil))
+  (descOfRT (reflect/TypeOf v)))
+
+(go/func descsOf "descsOf is descriptors ts as an Object[].\n" ^{:tag (* jrt/RefArray)} [^{:tag (slice (* Type))} ts]
+  (let [xs (make (slice any) (len ts))]
+    (range [i t ts]
+      (aset xs i t))
+    (objects xs)))
+
+(go/func GoInterp_TypeInfo0_O__O1_native
+  "GoInterp_TypeInfo0_O__O1_native is descriptor x's parts: [kind named name pkg elem key len
+ins outs variadic dir field-names field-types field-embedded field-pkgs methods], kind Go's
+kind's name, named \"interp\" (an interpreted named type: name and pkg its), \"compiled\" (a
+compiled named type: its name and package path) or \"\", dir 0 both, 1 receive, 2 send,
+methods an interface's method count.\n"
+  ^{:tag (* jrt/RefArray)} [^any x]
+  (let [t (typeArg x)
+        named ""
+        name ""
+        pkg ""
+        ^any elem nil
+        ^any key nil
+        n 0
+        ins (make (slice (* Type)) 0)
+        outs (make (slice (* Type)) 0)
+        variadic false
+        dir 0
+        fnames (make (slice any) 0)
+        ftypes (make (slice any) 0)
+        femb (make (slice any) 0)
+        fpkgs (make (slice any) 0)
+        nm 0
+        kind (.String (.-GK t))]
+    (if (and (!= (.-Name t) "") (not (.-Compiled t)))
+      (do (set! named "interp") (set! name (.-Name t)) (set! pkg (.-Pkg t)))
+      (if (.-Compiled t)
+      (let [rt (.-RT t)]
+        (set! kind (.String (.Kind rt)))
+        (when (!= (.Name rt) "")
+          (set! name (.Name rt))
+          (set! pkg (.PkgPath rt))
+          (when (!= pkg "")
+            (set! named "compiled")))
+        (switch (.Kind rt)
+          (case [reflect/Pointer reflect/Slice reflect/Array reflect/Chan]
+            (set! elem (descOfRT (.Elem rt))))
+          (case [reflect/Map]
+            (set! key (descOfRT (.Key rt)))
+            (set! elem (descOfRT (.Elem rt))))
+          (case [reflect/Func]
+            (for [i 0] (< i (.NumIn rt)) (inc! i) (set! ins (append ins (descOfRT (.In rt i)))))
+            (for [i 0] (< i (.NumOut rt)) (inc! i) (set! outs (append outs (descOfRT (.Out rt i)))))
+            (set! variadic (.IsVariadic rt)))
+          (case [reflect/Struct]
+            (for [i 0] (< i (.NumField rt)) (inc! i)
+              (let [f (.Field rt i)]
+                (set! fnames (append fnames (jrt/Str (.-Name f))))
+                (set! ftypes (append ftypes (descOfRT (.-Type f))))
+                (set! femb (append femb (jrt/Box (.-Anonymous f))))
+                (set! fpkgs (append fpkgs (jrt/Str (.-PkgPath f)))))))
+          (case [reflect/Interface]
+            (set! nm (.NumMethod rt))))
+        (when (== (.Kind rt) reflect/Array)
+          (set! n (.Len rt)))
+        (when (== (.Kind rt) reflect/Chan)
+          (switch (.ChanDir rt)
+            (case [reflect/RecvDir] (set! dir 1))
+            (case [reflect/SendDir] (set! dir 2)))))
+      (do
+        (when (!= (.-Elem t) nil) (set! elem (.-Elem t)))
+        (when (!= (.-Key t) nil) (set! key (.-Key t)))
+        (set! n (.-Len t))
+        (set! ins (.-Ins t))
+        (set! outs (.-Outs t))
+        (set! variadic (.-Variadic t))
+        (set! dir (.-ChanDir t))
+        (set! nm (len (.-IMethods t)))
+        (range [_ f (.-Fields t)]
+          (set! fnames (append fnames (jrt/Str (.-Name f))))
+          (set! ftypes (append ftypes (.-T f)))
+          (set! femb (append femb (jrt/Box (.-Embedded f))))
+          (set! fpkgs (append fpkgs (jrt/Str "")))))))
+    (objects (lit (slice any) (jrt/Str kind) (jrt/Str named) (jrt/Str name) (jrt/Str pkg) elem key
+                  (jrt/Box (conv int64 n)) (descsOf ins) (descsOf outs) (jrt/Box variadic) (jrt/Box (conv int64 dir))
+                  (objects fnames) (objects ftypes) (objects femb) (objects fpkgs) (jrt/Box (conv int64 nm))))))

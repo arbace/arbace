@@ -50,26 +50,148 @@
   (when e/*decl* (vswap! e/*decl* update :later (fnil conj []) f)))
 
 (defn verify!
-  "go/types' verify: an error at form f for the first type argument of targs that does not
+  "go/types' verify, true when the type arguments satisfy their constraints: else false, with
+  an error at form f for the first type argument of targs that does not
   satisfy its type parameter's constraint (the constraints with the type arguments substituted,
   and extra's: a generic method's receiver type parameters)."
   [f tps targs extra]
   (let [m (merge extra (zipmap tps targs))]
+    ;; true when satisfied
     (loop [i 0]
-      (when (< i (count tps))
+      (if (< i (count tps))
         (let [tp (nth tps i)
               b (subst (or (:bound (t/info tp)) [:interface [] nil]) m)]
           (if-let [cause (t/satisfies-cause (nth targs i) b)]
-            (err! f :InvalidTypeArg "%s" cause)
-            (recur (inc i))))))))
+            (do (err! f :InvalidTypeArg "%s" cause) false)
+            (recur (inc i))))
+        true))))
+
+;;; Instantiation cycles (mono.go: the monomorphization check)
+
+(def ^:dynamic *mono*
+  "The package's graph of type parameters' flows (go/types' monoGraph), a volatile
+  {:vertices [{:weight :pre :len :obj :named}] :edges [{:dst :src :weight :line :file :type}]
+  :canon {tparam tparam} :idx {object index}}."
+  nil)
+
+(defn mono-canon!
+  "go/types' recordCanon: a method's receiver type parameter stands for its type's."
+  [mpar tpar]
+  (when *mono* (vswap! *mono* assoc-in [:canon mpar] tpar)))
+
+(defn- mono-vertex! [k obj named]
+  (let [g *mono*]
+    (or (get (:idx @g) k)
+        (let [i (count (:vertices @g))]
+          (vswap! g #(-> % (update :vertices conj {:weight 0 :pre -1 :len 0 :obj obj :named named}) (assoc-in [:idx k] i)))
+          i))))
+
+(defn- mono-edge! [dst src w line ty]
+  (vswap! *mono* update :edges conj {:dst dst :src src :weight w :line line :file (:name e/*gofile*) :type ty}))
+
+(defn- tparam-vertex! [tp]
+  (let [tp (get (:canon @*mono*) tp tp)
+        x (:obj (t/info tp))]
+    (mono-vertex! (or x tp) x false)))
+
+(defn- local-named-vertex!
+  "go/types' localNamedVertex: a type declared in a generic function, parameterized by the type
+  parameters in scope where it is declared (:ambient), or -1."
+  [nt]
+  (let [i (t/info nt) x (:obj i)]
+    (cond
+      (or (not (:local i)) (nil? x) (not= (:pkg i) (code/pkg-path))) -1
+      (contains? (:idx @*mono*) x) (get (:idx @*mono*) x)
+      (empty? (:ambient i)) (do (vswap! *mono* assoc-in [:idx x] -1) -1)
+      :else
+      (let [v (mono-vertex! x x true)]
+        (doseq [tp (:ambient i)] (mono-edge! v (tparam-vertex! tp) 1 (o x :line) tp))
+        v))))
+
+(defn- mono-assign!
+  "go/types' assign: type argument targ flowing into type parameter tpar at line."
+  [line tpar targ]
+  (when (= (some-> (:obj (t/info tpar)) (o :pkg)) (code/pkg-path))
+    (let [flow (fn [src ty] (mono-edge! (tparam-vertex! tpar) src (if (= ty targ) 0 1) line targ))]
+      (letfn [(walk [ty]
+                (cond
+                  (keyword? ty) nil
+                  (t/tparam? ty) (when (= (some-> (:obj (t/info ty)) (o :pkg)) (code/pkg-path)) (flow (tparam-vertex! ty) ty))
+                  (t/named? ty) (let [i (t/info ty)
+                                      src (local-named-vertex! (or (:origin i) ty))]
+                                  (when (>= src 0) (flow src ty))
+                                  (doseq [a (:targs i)] (walk a)))
+                  :else
+                  (case (nth ty 0)
+                    (:array) (walk (nth ty 2))
+                    (:chan) (walk (nth ty 2))
+                    (:slice :pointer) (walk (nth ty 1))
+                    :map (do (walk (nth ty 1)) (walk (nth ty 2)))
+                    :interface (doseq [m (nth ty 1)] (walk (:type m)))
+                    :func (do (doseq [p (nth ty 1)] (walk p)) (doseq [r (nth ty 2)] (walk r)))
+                    :struct (doseq [fd (nth ty 1)] (walk (:type fd)))
+                    nil)))]
+        (walk targ)))))
+
+(defn- mono-record!
+  "go/types' recordInstance: the type arguments of an instantiation (form f; its explicit type
+  arguments' lines, else f's) flowing into its type parameters."
+  [f tps targs]
+  (when *mono*
+    (let [xs (when (seq? f) (cond (= 'inst (first f)) (vec (nnext f)) (symbol? (first f)) (vec (rest f))))
+          l (or (code/fline f) (e/current-line))]
+      (doseq [[i tp] (map-indexed vector tps)]
+        (mono-assign! (or (code/fline (get xs i)) l) tp (nth targs i))))))
+
+(defn monomorph!
+  "go/types' monomorph: an instantiation cycle (a path of flows through every vertex) reported
+  at its type parameter: \"instantiation cycle:\" and a line per flow."
+  []
+  (when-let [g *mono*]
+    (let [{:keys [edges]} @g
+          vs (java.util.ArrayList. ^java.util.Collection (:vertices @g))
+          n (count vs)
+          report! (fn [v]
+                    (let [stack (loop [v v stack [] seen #{}]
+                                  (if (contains? seen v)
+                                    (vec (drop-while #(not= % v) stack))
+                                    (recur (:src (nth edges (:pre (.get vs v)))) (conj stack v) (conj seen v))))
+                          v0 (first stack)
+                          obj0 (:obj (.get vs v0))]
+                      (e/error! (or (o obj0 :file) (:name e/*gofile*)) (or (o obj0 :line) (o obj0 :decl-line)) :InvalidInstanceCycle
+                                (apply str "instantiation cycle:"
+                                       (for [v stack
+                                             :let [ed (nth edges (:pre (.get vs v)))
+                                                   d (.get vs (:dst ed))]]
+                                         (str "\n\t" (:file ed) ":" (:line ed) ": " (o (:obj d) :name)
+                                              (if (:named d) " implicitly parameterized by " " instantiated as ")
+                                              (t/type-str (:type ed))))))))]
+      (loop []
+        (let [r (reduce (fn [again [i ed]]
+                          (let [src (.get vs (:src ed))
+                                dst (.get vs (:dst ed))
+                                w (+ (long (:weight src)) (long (:weight ed)))]
+                            (if (<= w (long (:weight dst)))
+                              again
+                              (let [len (inc (long (:len src)))]
+                                (.set vs (:dst ed) (assoc dst :pre i :len len :weight w))
+                                (if (= len n)
+                                  (reduced [:loop (:dst ed)])
+                                  true)))))
+                        false (map-indexed vector edges))]
+          (cond
+            (vector? r) (report! (second r))
+            r (recur)))))))
 
 (defn verify-later!
-  "Verifies the type arguments of an instantiation after the current declaration."
+  "Verifies the type arguments of an instantiation after the current declaration; satisfied, they
+  are recorded for the monomorphization check."
   ([f tps targs] (verify-later! f tps targs nil))
   ([f tps targs extra]
    (when (and f (seq tps) (every? t/valid? targs))
      (let [l e/*line* fi e/*gofile*]
-       (later! (fn [] (binding [e/*line* (or (code/fline f) l) e/*gofile* (or e/*gofile* fi)] (verify! f tps targs extra))))))))
+       (later! (fn [] (binding [e/*line* (or (code/fline f) l) e/*gofile* (or e/*gofile* fi)]
+                        (when (verify! f tps targs extra) (mono-record! f tps targs)))))))))
 
 (def ^:private instances (java.util.concurrent.ConcurrentHashMap.))
 
@@ -85,14 +207,24 @@
       (cond
         (empty? tps) (do (err! f :NotAGenericType "%s is not a generic type" (t/type-str g)) :invalid)
         (not= (count tps) (count targs))
-        (do (err! f :WrongTypeArgCount "%s type arguments for type %s: have %d, want %d"
-                  (if (< (count targs) (count tps)) "not enough" "too many") (:name i) (count targs) (count tps))
-            :invalid)
+        ;; go/types: an error, and still the instance (its underlying invalid: expandUnderlying),
+        ;; named by its type arguments in further messages
+        (do (when f
+              (err! f :WrongTypeArgCount "%s type arguments for type %s: have %d, want %d"
+                    (if (< (count targs) (count tps)) "not enough" "too many") (:name i) (count targs) (count tps)))
+            (let [k [g targs]]
+              (or (.get instances k)
+                  (let [nt (t/new-named (assoc (select-keys i [:obj :name :pkg :pkg-name :local]) :origin g :targs targs
+                                               :line (or (code/fline f) (e/current-line)) :file (:name e/*gofile*)
+                                               :underlying :invalid))]
+                    (or (.putIfAbsent instances k nt) nt)))))
         :else
         (let [k [g targs]]
           (verify-later! f tps targs)
           (or (.get instances k)
-              (let [nt (t/new-named (assoc (select-keys i [:obj :name :pkg :pkg-name :local]) :origin g :targs targs))
+              (let [nt (t/new-named (assoc (select-keys i [:obj :name :pkg :pkg-name :local]) :origin g :targs targs
+                                          ;; its position, for cycles (code/valid-type!)
+                                          :line (or (code/fline f) (e/current-line)) :file (:name e/*gofile*)))
                     m (zipmap tps targs)]
                 (t/update-info! nt assoc :subst m :lazy-under (fn [] (subst (t/under g) m)))
                 (or (.putIfAbsent instances k nt) nt))))))))
@@ -141,7 +273,13 @@
                 more)))
 
 (defn- declare-pkg! [x nm form]
-  (when (not= "_" nm)
+  (cond
+    ;; go/types' declarePkgObj: init and main (of package main) only functions
+    (and (= "init" nm) (not= :func (o x :kind)))
+    (err! form :InvalidInitDecl "cannot declare init - must be func")
+    (and (= "main" nm) (not= :func (o x :kind)) (= "main" (o e/*pkg* :name)))
+    (err! form :InvalidMainDecl "cannot declare main - must be func")
+    (not= "_" nm)
     (let [s (o e/*pkg* :scope)]
       (if-let [alt (e/scope-get s nm)]
         (err! form :DuplicateDecl "%s redeclared in this block" nm)
@@ -163,30 +301,33 @@
     (loop [specs specs iota 0 prev nil]
       (when (seq specs)
         (let [[tf init] (first specs)
+              ;; an init written nil is an init (const x = nil)
+              has-init (> (count (first specs)) 1)
               _ (when-let [l (code/fline (first specs))] (set! e/*line* l))
               names (target-list tf)
               tag (some #(:tag (meta %)) names)
               ;; a digest's constant (§6.5) has its :val and no init (a spec of its own, not an
               ;; implicit repetition of the previous spec of a group)
-              valued (and (nil? init) (nil? prev) (contains? (meta (first names)) :val))
+              valued (and (not has-init) (nil? prev) (contains? (meta (first names)) :val))
               [tag inits inherited] (cond
-                                      (some? init) [tag (init-list init) false]
+                                      has-init [tag (init-list init) false]
                                       valued [tag nil false]
                                       :else [(:tag prev) (:inits prev) true])]
-          (when (and (nil? init) (nil? prev) (not valued))
+          (when (and (not has-init) (nil? prev) (not valued))
             (err! tf :MissingInitExpr "missing init expr for const declaration"))
           (doseq [[i nf] (map-indexed vector names)]
             (let [nm (code/ident-name nf)
                   d (new-decl {:kind :const :file fi :form nf :spec f :iota iota :tag tag
-                               :init (get inits i) :ninits (count inits) :nnames (count names) :inherited inherited})
+                               :init (get inits i) :nil-init (and (< i (count inits)) (nil? (get inits i)))
+                               :ninits (count inits) :nnames (count names) :inherited inherited})
                   x (pkg-obj :const nm nf fi d)]
               (vswap! d assoc :obj x)
               (declare-pkg! x nm nf)))
-          (when (and (some? init) (< (count inits) (count names)))
+          (when (and has-init (< (count inits) (count names)))
             (err! tf :WrongAssignCount "missing init expr for %s" (code/ident-name (nth names (count inits)))))
-          (when (and (some? init) (> (count inits) (count names)))
+          (when (and has-init (> (count inits) (count names)))
             (err! tf :WrongAssignCount "extra init expr"))
-          (recur (rest specs) (inc iota) (if (some? init) {:tag tag :inits inits} prev)))))))
+          (recur (rest specs) (inc iota) (if has-init {:tag tag :inits inits} prev)))))))
 
 (defn- collect-var [f fi]
   (let [args (rest f)
@@ -221,7 +362,9 @@
                 [(let [[nf & more] args
                        more (if (string? (first more)) (rest more) more)]
                    (into [nf] more))])]
-    (doseq [[nf & more] specs]
+    (doseq [[[nf & more] sv] (map vector specs (if (group? args) (group-specs args) [nil]))]
+      ;; a group's spec at its line (the objects' lines, their errors')
+      (code/with-line sv
       (let [[tps tf] (if (= :type-params (first more)) [(second more) (nth more 2)] [nil (first more)])
             nm (code/ident-name nf)
             d (new-decl {:kind :type :file fi :form nf :spec f :type-form tf :tparams tps :alias (:alias (meta nf))})
@@ -231,7 +374,7 @@
         ;; Named), so that references to it never wait for its declaration
         (when-not (:alias (meta nf))
           (oset! x :type (t/new-named {:obj x :name nm :pkg (o e/*pkg* :path) :pkg-name (o e/*pkg* :name)})))
-        (declare-pkg! x nm nf)))))
+        (declare-pkg! x nm nf))))))
 
 (defn- recv-base
   "The receiver base type name of a method's receiver form, and whether the receiver type
@@ -250,6 +393,11 @@
         nm (code/ident-name nf)
         tps (when (= :type-params (first more)) (second more))
         sig-forms (if tps (drop 2 more) more)]
+    (if (and method? (vector? (first sig-forms)) (empty? (first sig-forms)))
+      ;; go/types' resolver: a method without a receiver is an error, the method a function
+      (do (err! nf :BadRecv "method has no receiver")
+          ;; its vector [receiver param*] without a receiver: the parameters
+          (collect-func (list* 'go/func (rest f)) fi false))
     (if method?
       (let [pv (first sig-forms)
             rf (first pv)
@@ -270,11 +418,12 @@
           (= "init" nm)
           (do (vswap! (:objs *ctx*) conj x)
               (vswap! (:inits *ctx*) conj x)
-              (when tps (err! nf :InvalidInitDecl "func init must have no type parameters")))
+              (when tps (err! nf :InvalidInitDecl "func init must have no type parameters"))
+              (when (:extern (meta nf)) (err! nf :MissingInitBody "func init must have a body")))
           (and (= "main" nm) (= "main" (o e/*pkg* :name)))
           (do (when tps (err! nf :InvalidMainDecl "func main must have no type parameters"))
               (declare-pkg! x nm nf))
-          :else (declare-pkg! x nm nf))))))
+          :else (declare-pkg! x nm nf)))))))
 
 (defn collect-file!
   "Collects the package-level objects of a file's declaration forms."
@@ -314,14 +463,14 @@
 
 (def ^:dynamic *path* "The objects being declared (go/types' objPath)." [])
 
+(defn- first-in-src
+  "go/types' firstInSrc: the index of the object of path first in the source."
+  [path]
+  (let [k (fn [x] (or (o x :decl-order) Long/MAX_VALUE))]
+    (reduce (fn [b i] (if (< (long (k (nth path i))) (long (k (nth path b)))) i b)) 0 (range (count path)))))
+
 (defn- cycle-error! [cycle]
-  (let [x (first (sort-by #(o % :decl-order) cycle))
-        nm (o x :name)]
-    (binding [e/*gofile* (or (some-> (o x :decl) deref :file) e/*gofile*)]
-      (e/error! (o x :line) :InvalidDeclCycle
-                (if (= :type (o x :kind))
-                  (if (= 1 (count cycle)) (str "invalid recursive type: " nm " refers to itself") (str "invalid recursive type " nm))
-                  (if (= 1 (count cycle)) (str "invalid cycle in declaration: " nm " refers to itself") (str "invalid cycle in declaration of " nm)))))))
+  (code/cycle-error! (mapv code/obj-entry cycle) (first-in-src cycle) (= :type (o (nth cycle (first-in-src cycle)) :kind))))
 
 (defn- valid-cycle? [x]
   (let [i (.indexOf ^java.util.List *path* x)
@@ -367,6 +516,7 @@
       (e/annotation-error! nf ":val" (o x :name) "none" (code/val-form-str (:val n) (:type n))))))
 
 (defn- const-decl! [x d]
+  (binding [e/*errpos* (when (:inherited @d) (o x :line))]
   (let [{:keys [file tag init iota form]} @d
         cx (assoc (file-cx file) :iota iota)
         T (when tag (code/typexpr cx tag))]
@@ -379,6 +529,9 @@
       (if-let [[ty v] (code/val-const (:val (meta form)) (when (and T (t/valid? T)) T))]
         (do (oset! x :type ty) (oset! x :val v))
         (oset! x :type :invalid))
+      ;; const x = nil
+      (and (nil? init) (:nil-init @d))
+      (do (e/error! (or (o x :line) e/*line*) :InvalidConstInit "nil is not constant") (oset! x :type :invalid))
       (nil? init) (oset! x :type :invalid)
       :else
       (let [n (code/expr cx init)]
@@ -394,7 +547,7 @@
               (do (oset! x :type (:type n))
                   (oset! x :val (:val n))
                   (vswap! d assoc :tree {:op :const-decl :obj x :value n :line (code/fline form)})
-                  (verify-val! form x n)))))))))
+                  (verify-val! form x n))))))))))
 
 (defn- var-decl! [x d]
   (let [{:keys [file tag init form lhs multi has-init]} @d
@@ -417,27 +570,6 @@
             n (code/init-var cx x n "variable declaration")]
         (vswap! d assoc :tree {:op :var-init :lhs [x] :rhs [n] :line (code/fline form)})))))
 
-(defn- valid-type!
-  "go/types' validType: reports a named type that contains itself (through arrays and
-  struct fields)."
-  [nt form]
-  (letfn [(walk [ty path]
-            (cond
-              (keyword? ty) true
-              (t/named? ty)
-              (cond
-                (some #(= % ty) path) (not= ty (first path))
-                (not= (:pkg (t/info ty)) (:pkg (t/info nt))) true
-                :else (walk (t/under ty) (conj path ty)))
-              :else
-              (case (nth ty 0)
-                :array (walk (nth ty 2) path)
-                :struct (every? #(walk (:type %) path) (nth ty 1))
-                true)))]
-    (when-not (walk (t/under nt) [nt])
-      (err! form :InvalidDeclCycle "invalid recursive type: %s refers to itself" (o (:obj (t/info nt)) :name))
-      (t/update-info! nt assoc :underlying :invalid))))
-
 (defn- type-decl! [x d]
   (let [{:keys [file form type-form tparams alias]} @d
         cx (file-cx file)]
@@ -452,6 +584,7 @@
             (let [ty (code/typexpr cx type-form)]
               (oset! x :type ty))))
       (let [nt (o x :type)
+            _ (code/valid-type-later! nt)
             [cx tps] (if tparams
                        (let [[s tys] (code/tparam-scope cx tparams nil #(t/update-info! nt assoc :tparams %))] [(assoc cx :scope s) tys])
                        [cx nil])
@@ -460,7 +593,6 @@
             rhs (code/typexpr cx type-form)]
         (t/update-info! nt assoc :underlying (if (t/named? rhs) rhs rhs) :resolving false)
         (when (t/named? rhs) (t/under nt))
-        (vswap! d update :later (fnil conj []) #(valid-type! nt form))
         (vswap! d assoc :tree {:op :type :obj x :type nt :underlying (t/under nt) :line (o x :line)
                                :methods (mapv #(o % :name) (get @(:methods *ctx*) (o x :name)))})
         ;; the methods of the type (collectMethods)
@@ -511,6 +643,7 @@
                           [s tys] (code/tparam-scope cx rnames (vec (repeat (count rnames) nil)))]
                       ;; the bounds: the type's, its type parameters renamed to the receiver's
                       (when (= (count gtps) (count tys))
+                        (doseq [[g r] (map vector gtps tys)] (mono-canon! r g))
                         (let [m (zipmap gtps tys)]
                           (doseq [[g r] (map vector gtps tys)]
                             (t/update-info! r assoc :bound (subst (or (:bound (t/info g)) [:interface [] nil]) m)))))
@@ -538,11 +671,11 @@
         [sig ps rs body named] (code/signature cx sig-forms method)]
     (when method
       (let [[b] (t/deref-type (:type recv))]
+        ;; go/types' validRecv
         (when (and (t/valid? b) (not (and (t/named? b) (= (:pkg (t/info b)) (o e/*pkg* :path)))))
-          (if (and (t/named? b) (:pkg (t/info b)))
+          (if (or (t/named? b) (keyword? b))
             (err! recv-form :InvalidRecv "cannot define new methods on non-local type %s" (t/type-str b))
-            (when (t/valid? b)
-              (err! recv-form :InvalidRecv "cannot define new methods on non-local type %s" (t/type-str b)))))))
+            (err! recv-form :InvalidRecv "invalid receiver type %s" (t/type-str (:type recv)))))))
     (when (and (= "init" (o x :name)) (not method) (or (seq (nth sig 1)) (seq (nth sig 2))))
       (err! form :InvalidInitSig "func init must have no arguments and no return values"))
     (when (and (= "main" (o x :name)) (not method) (= "main" (o e/*pkg* :name)) (or (seq (nth sig 1)) (seq (nth sig 2))))
@@ -558,7 +691,9 @@
   (when (and (o x :pkg-level) (= (o x :pkg) (o e/*pkg* :path)))
     (case (o x :color)
       :black nil
-      :grey (when (some #(identical? % x) *path*)
+      ;; a function's signature is its guard against cycles in go/types (set before its
+      ;; parameters are checked): naming it while declaring it is no cycle (bug464)
+      :grey (when (and (not= :func (o x :kind)) (some #(identical? % x) *path*))
               (when-not (valid-cycle? x)
                 (case (o x :kind)
                   (:const :var :type) (oset! x :type :invalid)
@@ -584,6 +719,35 @@
           (oset! x :generic-invalid true))
         (when-let [lhs (:lhs @d)] (doseq [v lhs] (oset! v :color :black)))
         (oset! x :color :black)))))
+
+(defn direct-cycles!
+  "go/types' directCycles (cycles.go, go1.27): before the declarations are checked, a cycle of
+  package-level type declarations each naming the next (a defined type or an alias whose RHS
+  is a type name of the package scope) is reported (cycleError, from the type first in the
+  source) and the type that closes it made invalid (its object black, never declared)."
+  [objs]
+  (let [idx (java.util.HashMap.)
+        s (o e/*pkg* :scope)]
+    (doseq [x0 objs :when (= :type (o x0 :kind))]
+      (let [path (loop [x x0 path []]
+                   (let [st (.get idx x)]
+                     (cond
+                       (and st (neg? (long st))) path
+                       st (let [cycle (subvec path st)]
+                            (oset! x :type :invalid)
+                            (oset! x :color :black)
+                            (binding [e/*gofile* (:file @(o x :decl))]
+                              (cycle-error! cycle))
+                            path)
+                       :else
+                       (let [_ (.put idx x (count path))
+                             path (conj path x)
+                             tf (:type-form @(o x :decl))
+                             nx (when (code/go-ident? tf) (e/scope-get s (code/ident-name tf)))]
+                         (if (and nx (= :type (o nx :kind)) (o nx :decl))
+                           (recur nx path)
+                           path)))))]
+        (doseq [x path] (.put idx x -1))))))
 
 (defn resolve-named!
   "Completes a named type's declaration when its underlying type is asked for."
@@ -642,39 +806,58 @@
     (let [G (remove #(= :func (o % :kind)) nodes)
           ndeps (java.util.HashMap.)]
       (doseq [x G] (.put ndeps x (count (.get succ x))))
-      (loop [pending (set G) acc [] emitted #{}]
-        (if (empty? pending)
-          acc
-          (let [n (apply min-key (fn [x] (+ (if (= :const (o x :kind)) 0 (bit-shift-left 1 40))
-                                            (* (long (.get ndeps x)) (bit-shift-left 1 20))
-                                            (long (order x))))
-                         pending)]
-            (when (pos? (long (.get ndeps n)))
-              (cycle-report! n succ))
-            (doseq [p (.get pred n)]
-              (when (contains? pending p) (.put ndeps p (dec (long (.get ndeps p))))))
-            (let [d (o n :decl)
-                  init? (and (= :var (o n :kind)) (:has-init @d))]
-              (if (and init? (not (contains? emitted d)))
-                (recur (disj pending n) (conj acc (or (:lhs @d) [n])) (conj emitted d))
-                (recur (disj pending n) acc emitted)))))))))
+      ;; go/types' priority queue (a heap, GR8a: the minimum by a scan was quadratic, 1.1 s for
+      ;; syscall's 1,880 constants), entries made stale by a decrement skipped
+      (let [key (fn [x] (+ (if (= :const (o x :kind)) 0 (bit-shift-left 1 40))
+                           (* (long (.get ndeps x)) (bit-shift-left 1 20))
+                           (long (order x))))
+            heap (java.util.PriorityQueue. (max 1 (count G)) (comparator (fn [a b] (< (long (first a)) (long (first b))))))
+            _ (doseq [x G] (.add heap [(key x) x]))]
+        (loop [pending (set G) acc [] emitted #{}]
+          (if (empty? pending)
+            acc
+            (let [[k n] (.poll heap)]
+              (if (or (not (contains? pending n)) (not= (long k) (long (key n))))
+                (recur pending acc emitted)
+                (do
+                  (when (pos? (long (.get ndeps n)))
+                    (cycle-report! n succ))
+                  (doseq [p (.get pred n)]
+                    (when (contains? pending p)
+                      (.put ndeps p (dec (long (.get ndeps p))))
+                      (.add heap [(key p) p])))
+                  (let [d (o n :decl)
+                        init? (and (= :var (o n :kind)) (:has-init @d))]
+                    (if (and init? (not (contains? emitted d)))
+                      (recur (disj pending n) (conj acc (or (:lhs @d) [n])) (conj emitted d))
+                      (recur (disj pending n) acc emitted))))))))))))
 
-(defn cycle-report! [n succ]
-  (let [path (loop [stack [[n []]] seen #{}]
-               (when (seq stack)
-                 (let [[x p] (peek stack) stack (pop stack)]
-                   (if (contains? seen x)
-                     (recur stack seen)
-                     (let [deps (sort-by #(o % :decl-order) (:deps @(o x :decl)))]
-                       (if (some #(identical? % n) deps)
-                         (conj p x)
-                         (recur (into stack (map (fn [d] [d (conj p x)]) deps)) (conj seen x))))))))]
-    (when (seq path)
-     (binding [e/*gofile* (:file @(o n :decl))]
-      (e/error! (o n :line) :InvalidInitCycle
-                (if (<= (count path) 1)
-                  (str "initialization cycle: " (o n :name) " refers to itself")
-                  (str "initialization cycle for " (o n :name))))))))
+(defn- find-path
+  "go/types' findPath (initorder.go): a path of dependencies from object from to object to,
+  reversed (to first), or nil; the dependencies in source order."
+  [from to seen]
+  (when-not (contains? @seen from)
+    (vswap! seen conj from)
+    (some (fn [d] (if (identical? d to) [d] (when-let [p (find-path d to seen)] (conj p d))))
+          (sort-by #(o % :decl-order) (:deps @(o from :decl))))))
+
+(defn cycle-report!
+  "go/types' reportCycle (initorder.go): the initialization cycle through n, a line per
+  reference at its object (\"\\n\\tFILE:LINE: a refers to b\")."
+  [n _succ]
+  (when-let [cycle (find-path n n (volatile! #{}))]
+    (binding [e/*gofile* (:file @(o n :decl))]
+      (let [x (first cycle)
+            at (fn [y] (str (or (o y :file) (:name e/*gofile*)) ":" (o y :line) ": "))]
+        (e/error! (o x :file) (o x :line) :InvalidInitCycle
+                  (if (= 1 (count cycle))
+                    (str "initialization cycle: " (o x :name) " refers to itself")
+                    (apply str "initialization cycle for " (o x :name)
+                           (loop [j (dec (count cycle)) y x acc []]
+                             (if (neg? j)
+                               acc
+                               (let [z (nth cycle j)]
+                                 (recur (dec j) z (conj acc (str "\n\t" (at y) (o y :name) " refers to " (o z :name))))))))))))))
 
 ;;; The package
 
@@ -692,7 +875,9 @@
           (code/with-line spec
             (cond
               (nil? p) (err! spec :BrokenImport "could not import %s (no forms)" path)
+              (string? p) (err! spec :BrokenImport "could not import %s (%s)" path p)
               (= "_" nm) nil
+              (= "init" nm) (err! spec :InvalidInitDecl "cannot import package as init - init must be a func")
               (= "." nm)
               (let [imp (e/obj {:kind :pkg :name "." :imported p :path path :line (or (code/fline spec) (:line fi)) :file (:name fi) :dot true})]
                 (vswap! (:dot-imports fi) conj imp)
@@ -706,6 +891,23 @@
                   (err! spec :DuplicateDecl "%s redeclared in this block" nm)
                   (e/scope-put! (:scope fi) nm imp))
                 (vswap! (:import-objs fi) conj imp)))))))))
+
+(defn file-scope-conflicts!
+  "go/types' resolver: a package-level object named as one of file fi's imports (or names a
+  dot import brings in) is an error, at the object."
+  [fi]
+  (let [ps (o e/*pkg* :scope)
+        pkg-str (fn [p path] (format "package %s (\"%s\")" (o p :name) path))
+        hits (concat
+              (for [[nm x] (:names (:scope fi))
+                    :when (= :pkg (o x :kind))
+                    :let [alt (e/scope-get ps nm)] :when alt]
+                [alt (format "%s already declared through import of %s" nm (pkg-str (o x :imported) (o x :path)))])
+              (for [[nm [_ imp]] (:dots fi)
+                    :let [alt (e/scope-get ps nm)] :when alt]
+                [alt (format "%s already declared through dot-import of %s" nm (pkg-str (o imp :imported) (o imp :path)))]))]
+    (doseq [[alt msg] (sort-by (fn [[alt]] [(str (o alt :file)) (or (o alt :line) 0)]) hits)]
+      (e/error! (o alt :file) (o alt :line) :DuplicateDecl msg))))
 
 (defn unused-imports! [fi]
   (binding [e/*gofile* fi]

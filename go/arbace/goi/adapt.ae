@@ -7,7 +7,7 @@
 (in-ns 'go.arbace.goi)
 
 (go/file "adapt.go"
-  :imports [[fmt "fmt"] [reflect "reflect"] [sync "sync"] [jrt "arbace/jrt"] [arbace "arbace"]])
+  :imports [[fmt "fmt"] [reflect "reflect"] [sort "sort"] [strings "strings"] [sync "sync"] [jrt "arbace/jrt"] [arbace "arbace"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; The bridge to Arbace: arbace.lang.GoBridge's methods, as j2g names them
@@ -28,7 +28,8 @@
     (FirstOf_O__O ^any [^any x])
     (NextOf_O__O ^any [^any x])
     (InvokeMethod_O_String_O1__O ^any [^any obj ^{:tag (* jrt/String)} name ^{:tag (* jrt/RefArray)} args])
-    (FromGo_O__O ^any [^any x])))
+    (FromGo_O__O ^any [^any x])
+    (ReifyOf_O__O1 ^{:tag (* jrt/RefArray)} [^any x])))
 
 (go/var ^{:tag langBridge :doc "bridge is Arbace's GoBridge, set by GoInterp's initialization (init0).\n"} bridge)
 
@@ -105,23 +106,6 @@ releases it.\n"
     (set! (.-ifn nf) nil)
     nf))
 
-(go/func EnterMethod
-  "EnterMethod is a call of proxy p's interpreted method key from compiled code (a wrapper's
-method, GC22): its frame, the receiver in its slot, the arguments' slots the signature's.\n"
-  ^{:tag (* Frame)} [^Proxy p ^string key]
-  (let [m (aget (.-Methods (.-T p)) key)]
-    (when (== m nil)
-      (panic (fmt/Sprintf "goi: the type %s has no method %s" (typeName (.-T p)) key)))
-    (let [th (CurrentThread)
-          mk (.save th)
-          code (.Code (.-Fn m))
-          nf (.enter th code (.-Fn m))]
-      (setRecv nf (.-RK m) (.-RS m) (.-RT m) (.-V p))
-      (set! (.-saved nf) mk)
-      (set! (.-sig nf) (.-Sig m))
-      (set! (.-ifn nf) nil)
-      nf)))
-
 (go/func RunCall "RunCall runs the call of frame fr (an adapter's, Enter's).\n" [^{:tag (* Frame)} fr]
   (when (!= (.-ifn fr) nil)
     (.run (.-ifn fr) fr)
@@ -148,7 +132,7 @@ adapter, without a typed one): its results.\n"
     (range [i v in]
       (let [pt (aget (.-Ins sig) i)]
         (when (and (.-Variadic sig) (== i (- (len (.-Ins sig)) 1)))
-          (set! pt (TypeOf (.Type v))))
+          (set! pt (descOfRT (.Type v))))
         (setSlotValue fr (.-K pt) (aget ps i) pt v)))
     (RunCall fr)
     (let [out (make (slice reflect/Value) (len rs))]
@@ -205,8 +189,8 @@ types.\n"
   ^{:tag (* Type)} [^{:tag reflect/Type} rt]
   (let [ins (make (slice (* Type)) (.NumIn rt))
         outs (make (slice (* Type)) (.NumOut rt))]
-    (for [i 0] (< i (.NumIn rt)) (inc! i) (aset ins i (TypeOf (.In rt i))))
-    (for [i 0] (< i (.NumOut rt)) (inc! i) (aset outs i (TypeOf (.Out rt i))))
+    (for [i 0] (< i (.NumIn rt)) (inc! i) (aset ins i (descOfRT (.In rt i))))
+    (for [i 0] (< i (.NumOut rt)) (inc! i) (aset outs i (descOfRT (.Out rt i))))
     (TFunc ins outs (.IsVariadic rt))))
 
 (go/func adaptArbaceFn "adaptArbaceFn is Arbace fn f as a Go func of function type rt (§7.5).\n"
@@ -286,3 +270,179 @@ types.\n"
 
 (go/func init []
   (set! arbace/Hooks (lit apiHooks)))
+
+;; ---------------------------------------------------------------------------------------
+;; Arbace objects implementing Go interfaces: reify (G13; GOI-SPEC.md "As built: GR7b")
+;;
+;; An Arbace reify of listed Go interfaces is an arbace.lang.GoReify: goiReify gives
+;; [T f0 f1 ...], T its reify type (one per list of interfaces, ReifyType) and fi the Arbace fn
+;; of T's method i (its sorted key's), the object first. In Go, the object is the content of a
+;; proxy of T (§5.3): in an interface of a listed compiled type, that interface's wrapper; in an
+;; any, the proxy; T's methods are interpreted functions whose code calls the fns.
+
+(go/type ifaceSigs "ifaceSigs are a compiled interface's methods: their names and func types.\n"
+  (struct ^{:tag (slice string)} names ^{:tag (slice reflect/Type)} sigs))
+
+(go/var ^{:tag sync/Map :doc "ifaceMethods are the listed interfaces' methods by reflect type (ifaceSigs), the table's.\n"}
+  ifaceMethods)
+
+(go/func RegisterIfaceMethods
+  "RegisterIfaceMethods records compiled interface type rt's methods (names, func types), the
+table's: goi asks reflect for no type's methods (reflect.Type.Method would keep every exported
+method of the program, S39).\n"
+  [^{:tag reflect/Type} rt ^{:tag (slice string)} names ^{:tag (slice reflect/Type)} sigs]
+  (.Store ifaceMethods rt (lit ifaceSigs names sigs)))
+
+(go/func ifaceMethodsOf "ifaceMethodsOf is compiled interface type rt's methods, or false.\n"
+  [^{:tag reflect/Type} rt] :results [^ifaceSigs m ^bool ok]
+  (when (== rt errorType)
+    (return (lit ifaceSigs (lit (slice string) "Error") (lit (slice reflect/Type) ((inst reflect/TypeFor (func [] [string]))))) true))
+  (let [(values v found) (.Load ifaceMethods rt)]
+    (when (not found)
+      (return))
+    (return (assert ifaceSigs v) true)))
+
+(go/var ^{:tag sync/Mutex} reifyMu)
+
+(go/var ^{:tag (map string (* Type)) :doc "reifyTypes are the reify types by their interfaces' names.
+"}
+  reifyTypes (make (map string (* Type))))
+
+(go/func reifyData
+  "reifyData is the GoReify data of Arbace object x ([T f...]), or nil when x is none.
+"
+  ^{:tag (* jrt/RefArray)} [^any x]
+  (when (or (== x nil) (== bridge nil))
+    (return nil))
+  ;; Arbace's scalars and strings are never one (no call of the bridge for them)
+  (type-switch x
+    (case [(* jrt/String) (* jrt/Long) (* jrt/Double) (* jrt/Boolean) (* jrt/Character) (* jrt/Integer)]
+      (return nil)))
+  (let [(values _ ok) (assert jrt/Object_I x)]
+    (when (not ok)
+      (return nil)))
+  (.ReifyOf_O__O1 bridge x))
+
+(go/func reifyMethodCode
+  "reifyMethodCode is the code of method i (signature sig) of a reify type: it calls the
+object's fn i with the object and the arguments as Arbace takes them (§5.6), its results back
+by the result types; the receiver (the object) in the R slot after the signature's.
+"
+  ^{:tag (* Code)} [^int i ^string name ^{:tag (* Type)} sig]
+  (let [(values n ps rs) (slotCounts sig)
+        recv (aget n 3)]
+    (addr (lit Code :NI (aget n 0) :NF (aget n 1) :NS (aget n 2) :NR (+ recv 1)
+               :Body (fn ^Ctl [^{:tag (* Frame)} fr]
+                       (let [obj (reifyObj (aget (.-R fr) recv))
+                             d (reifyData obj)]
+                         (when (or (== d nil) (<= (len (.-A d)) (+ i 1)))
+                           (panic (jrt/IllegalStateException_New_String (jrt/Str (+ "goi: not an Arbace reify: the receiver of " name)))))
+                         (let [ins (.-Ins sig)
+                               args (make (slice any) 0 (+ (len ins) 1))]
+                           (set! args (append args obj))
+                           (range [j pt ins]
+                             (let [v (slotValue fr pt (aget ps j))]
+                               (if (and (.-Variadic sig) (== j (- (len ins) 1)))
+                                 (for [k 0] (< k (.Len v)) (inc! k)
+                                   (set! args (append args (ToArbace (.Index v k)))))
+                                 (set! args (append args (ToArbace v))))))
+                           (let [outs (.-Outs sig)
+                                 res (callArbace (aget (.-A d) (+ i 1)) args (len outs))]
+                             (range [j ot outs]
+                               (setSlotValue fr (.-K ot) (aget rs j) ot
+                                             (FromArbace (aget res j) (.mem ot) (fmt/Sprintf "result %d of the Arbace reify's %s" (+ j 1) name))))))
+                         0))))))
+
+(go/func ReifyType
+  "ReifyType is the reify type of compiled interfaces its (descriptors): an interpreted named type
+arbace.reify[I...] whose methods are the interfaces' (their union by name, with the same
+signature), its keys sorted; one per list. An interface goi has no wrapper for in the table is
+an error (§6.4).
+"
+  [^{:tag (slice (* Type))} its] :results [^{:tag (* Type)} t ^{:tag (slice string)} keys]
+  (let [names (make (slice string) 0 (len its))]
+    (range [_ it its]
+      (set! names (append names (.String it))))
+    (let [nm (+ "reify[" (strings/Join names ", ") "]")]
+      (.Lock reifyMu)
+      (defer (.Unlock reifyMu))
+      (let [o (aget reifyTypes nm)]
+        (when (!= o nil)
+          (let [ks (make (slice string) 0 (len (.-Methods o)))]
+            (range [k _ (.-Methods o)] (set! ks (append ks k)))
+            (sort/Strings ks)
+            (return o ks))))
+      (let [sigs (make (map string (* Type)))]
+        (range [_ it its]
+          (let [rt (.-RT it)]
+            (when (or (not (.-Compiled it)) (!= (.Kind rt) reflect/Interface))
+              (panic (jrt/IllegalArgumentException_New_String
+                       (jrt/Str (fmt/Sprintf "reify: %s is not an interface of a listed package" (.String it))))))
+            (let [(values ms ok) (ifaceMethodsOf rt)]
+              (when (not ok)
+                (panic (jrt/IllegalArgumentException_New_String
+                         (jrt/Str (fmt/Sprintf "reify: the interface %s has no wrapper in the table" (.String it))))))
+              (range [i nm (.-names ms)]
+                (let [sg (sigOf (aget (.-sigs ms) i))
+                      o (aget sigs nm)]
+                  (when (and (!= o nil) (!= o sg))
+                    (panic (jrt/IllegalArgumentException_New_String
+                             (jrt/Str (fmt/Sprintf "reify: method %s of %s has another signature in another interface" nm (.String it))))))
+                  (aset sigs nm sg))))))
+        (set! keys (make (slice string) 0 (len sigs)))
+        (range [k _ sigs] (set! keys (append keys k)))
+        (sort/Strings keys)
+        ;; a named struct holding the object (GR9a-c): its RT a runtime type of its own whose
+        ;; methods are the interfaces' (the table's stubs reach them)
+        (set! t (TNamed (+ "arbace." nm) "arbace" 0 (conv int reflect/Struct) 0 (len keys) 0))
+        (TSetUnder t reifyUnder (lit (slice string) "O") (lit (slice (* Type)) (TBasic "any")) (lit (slice string) "")
+                   (lit (slice string) "") (lit (slice bool) false))
+        (set! (.-Reify t) true)
+        (let [n (len keys)
+              fns (make (slice (* Func)) n)
+              rks (make (slice int32) n)
+              rss (make (slice int32) n)
+              rts (make (slice (* Type)) n)
+              ss (make (slice (* Type)) n)]
+          (range [i k keys]
+            (let [sg (aget sigs k)
+                  c (reifyMethodCode i k sg)
+                  f (NewFunc (+ nm "." k) "arbace" nil)]
+              (.Store (.-code f) c)
+              (aset fns i f)
+              (aset rks i (conv int32 \R))
+              (aset rss i (- (.-NR c) 1))
+              (aset rts i t)
+              (aset ss i sg)))
+          (TSetMethods t keys fns rks rss rts ss))
+        (aset reifyTypes nm t)
+        (return t keys)))))
+
+(go/var ^{:tag (* Type) :doc "reifyUnder is the reify types' underlying type: struct{O any}, O the Arbace object.\n"}
+  reifyUnder (TStruct (lit (slice string) "O") (lit (slice (* Type)) (TBasic "any")) (lit (slice string) "")
+                      (lit (slice string) "") (lit (slice bool) false)))
+
+(go/func reifyObj "reifyObj is the Arbace object of reify value v (a value of a reify type).\n" ^any [^any v]
+  @(conv (* any) (efaceData v)))
+
+(go/func reifyContent
+  "reifyContent is Arbace object x as a Go value for compiled type rt when x is an Arbace reify:
+a value of its reify type holding it (a Go interface it is stored in gets it through its runtime
+type's methods); ok false when x is none.\n"
+  [^any x ^{:tag reflect/Type} rt ^string what] :results [^any v ^bool ok]
+  (let [d (reifyData x)]
+    (when (== d nil)
+      (return nil false))
+    (let [t (assert (* Type) (aget (.-A d) 0))
+          rv (.Elem (reflect/New (.-RT t)))]
+      (.Set (.Field rv 0) (reflect/ValueOf x))
+      (when (> (.NumMethod rt) 0)
+        (let [(values ms known) (ifaceMethodsOf rt)]
+          (when (not known)
+            (panic (jrt/IllegalArgumentException_New_String
+                     (jrt/Str (fmt/Sprintf "%s: goi cannot give compiled code an Arbace reify as %s: the interface is not in the table" what (.String rt))))))
+          (range [i nm (.-names ms)]
+            (let [e (aget (.-Methods t) nm)]
+              (when (or (== e nil) (!= (.mem (.-Sig e)) (aget (.-sigs ms) i)))
+                (panic (castError what rt x)))))))
+      (return (.Interface rv) true))))

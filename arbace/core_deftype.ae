@@ -63,6 +63,22 @@
              (drop-while seq? (next s)))
       ret)))
 
+(defn- spec-groups
+  "The specs of reify or deftype in order: [name methods] each."
+  [specs]
+  (loop [acc [] s specs]
+    (if (seq s)
+      (recur (conj acc [(first s) (take-while seq? (next s))]) (drop-while seq? (next s)))
+      acc)))
+
+(defn- go-interface-spec?
+  "Whether spec name s names a Go type of goi's table, a GoType's var (Arbace: reify of Go
+  interfaces, G13)."
+  [s]
+  (when (and (symbol? s) (namespace s))
+    (let [v (try (resolve s) (catch Exception _ nil))]
+      (boolean (and (var? v) (.isBound ^arbace.lang.Var v) (instance? arbace.lang.GoType @v))))))
+
 (defn- parse-opts+specs [opts+specs]
   (let [[opts specs] (parse-opts opts+specs)
         impls (parse-impls specs)
@@ -135,8 +151,33 @@
   == {:k :v}"
   {:added "1.2"}
   [& opts+specs]
-  (let [[interfaces methods] (parse-opts+specs opts+specs)]
-    (with-meta `(reify* ~interfaces ~@methods) (meta &form))))
+  (let [[opts specs] (parse-opts opts+specs)
+        groups (spec-groups specs)
+        go? (fn [[s]] (go-interface-spec? s))]
+    (if (not-any? go? groups)
+      (let [[interfaces methods] (parse-opts+specs opts+specs)]
+        (with-meta `(reify* ~interfaces ~@methods) (meta &form)))
+      ;; Arbace: Go interfaces of goi's table among the specs (G13, doc/go/GOI-SPEC.md "As built:
+      ;; GR7b"): their methods are fns of the object and the arguments, the object an
+      ;; arbace.lang.GoReify whose goiReify gives goi its reify type and the fns
+      (let [gos (filter go? groups)
+            ;; (into, reduce and mapv come after this file in arbace.core)
+            fns (apply hash-map (apply concat
+                   (for [[nm params & body] (mapcat second gos)]
+                           (let [[this & ps] params]
+                             [(name nm)
+                              (if (every? symbol? ps)
+                                ;; recur in a method's body passes its arguments, not the object
+                                `(fn ~nm [~this ~@ps] (loop [~@(interleave ps ps)] ~@body))
+                                `(fn ~nm ~params ~@body))]))))
+            [interfaces methods] (parse-opts+specs (concat (mapcat identity opts)
+                                                           (mapcat (fn [[s ms]] (cons s ms)) (remove go? groups))))
+            ts (gensym "ts")
+            d (gensym "goi")]
+        `(let [~ts ~(vec (map first gos))
+               ~d (arbace.go/reify-data (arbace.go/reify-type ~ts) ~ts ~fns)]
+           ~(with-meta `(reify* ~(conj interfaces 'arbace.lang.GoReify) (~'goiReify [~'_] ~d) ~@methods)
+              (meta &form)))))))
 
 (defn hash-combine [x y]
   (arbace.lang.Util/hashCombine x (arbace.lang.Util/hash y)))
