@@ -15,16 +15,18 @@
   arbace/repr/go/godump, and imports go/parser, go/ast and go/token (interpreted from the
   digest), strconv, strings, path/filepath, os, time and arbace (compiled).
 
-  No annotations: they are GP4's. File lists are not the native reader's either (GP2's loader):
-  native-dump takes a helper dump's header (its configuration, directory and files) and parses
-  its files.
+  No annotations: they are GP4's. The files and each dump's header come from the loader
+  (arbace.repr.go.load, GP2; go list's part in arbace.box.plan), not from the helper: native-dump
+  takes a loader's job (its header, directory and files) and parses its files. E-tree compares
+  the native dumps with the helper's: the headers, the trees and the sets of dumps.
 
   bin/repr-go read --reader native ... and bin/repr-go native-check run -main here."
   (:require [arbace.string :as str]
             [arbace.set :as set]
             [arbace.go.repl :as repl]
             [arbace.go.check :as ck]
-            [arbace.repr.go.read :as rd])
+            [arbace.repr.go.read :as rd]
+            [arbace.repr.go.load :as ld])
   (:import [java.io File]
            [java.util.concurrent Executors TimeUnit]))
 
@@ -363,45 +365,35 @@
                digest (decl-forms (repl/digest-forms p))]
            [p (count ours) (= ours digest)]))))
 
-;;; The native dump of a helper dump's package
-
-(defn source-dir
-  "The directory of a dump's files: its :dir with $GOROOT, or relative to $GOROOT/test (the
-  single-file programs and directory tests, which the helper dumps from there)."
-  [dump ^String goroot]
-  (let [dir (:dir dump)]
-    (cond
-      (str/starts-with? dir "$GOROOT/") (str goroot (subs dir (count "$GOROOT")))
-      (= dir "$GOROOT") goroot
-      (str/starts-with? dir "/") dir
-      :else (str goroot "/test/" dir))))
+;;; The native dump of a loader's job
 
 (def header-keys
-  "What the native dump takes from the helper's dump until GP2's loader (doc/go/GO-PARSER-SURVEY.md
-  §5): the package, configuration, directory and file lists."
-  [:package :config :dir :for-test :go-files :cgo-files :c-files :cxx-files :m-files :h-files
+  "A dump's header (doc/go/GO-PARSER-SURVEY.md §5) as the loader (arbace.repr.go.load) gives it
+  and E-tree compares it: the package, configuration, directory, file lists, embedded files,
+  the directory test, local imports and :imports."
+  [:godump :package :config :dir :for-test :go-files :cgo-files :c-files :cxx-files :m-files :h-files
    :f-files :s-files :swig-files :swig-cxx-files :syso-files :ignored-go-files
    :ignored-other-files :embed-patterns :embed-files :test-go-files :test-embed-patterns
-   :test-embed-files :dir-test :local-imports])
+   :test-embed-files :dir-test :local-imports :imports])
 
 (defn native-dump
-  "The native dump of the package of helper dump d: d's header (header-keys) and the package's
-  files (d's :files, in order) parsed by go/parser under goi and dumped, without annotations:
-  {:godump 2 ... :name :files [{:file :go-version :ast :comments}] :directives [:warnings]},
-  plus :times {:parse-ms :dump-ms :bytes}; or {:error message} when a file does not parse."
-  [goroot-forms d ^String goroot]
-  (let [dir (source-dir d goroot)
-        lang (get-in d [:config :go-version])
-        rs (for [fl (:files d)]
-             (let [path (str dir "/" (:file fl))]
-               (assoc (parse-file goroot-forms path) :file (:file fl) :path path)))]
+  "The native dump of loader job j ({:header :dir :files}): its header and its files parsed by
+  go/parser under goi and dumped, without annotations: {:godump 2 ... :name :files [{:file
+  :go-version :ast :comments}] :directives [:warnings]}, plus :times {:parse-ms :dump-ms
+  :bytes}; or {:error message :file} when a file does not parse."
+  [goroot-forms j]
+  (let [dir (:dir j)
+        lang (get-in j [:header :config :go-version])
+        rs (for [f (:files j)]
+             (let [path (str dir "/" f)]
+               (assoc (parse-file goroot-forms path) :file f :path path)))]
     (if-let [e (some #(when (:error %) %) rs)]
       {:error (:error e) :file (:file e)}
       (let [warns (vec (mapcat :warnings rs))
             ;; go/types' package name (Checker.initFiles): the first file's clause that is not
             ;; _ (invalid), "" without one
             nm (or (some #(let [n (-> % :ast second :name second :name)] (when (not= "_" n) n)) rs) "")]
-        (cond-> (merge {:godump 2} (select-keys d header-keys))
+        (cond-> (merge {:godump 2} (:header j))
           true (assoc :name nm
                       :files (vec (for [r rs
                                         :let [v (file-go-version (-> r :ast second :go-version) lang)]]
@@ -414,17 +406,18 @@
                               :dump-ms (reduce + (map :dump-ms rs))
                               :bytes (reduce + (map #(.length (File. ^String (:path %))) rs))}))))))
 
-;;; E-tree: the native tree against the helper's
+;;; E-tree: the native dump against the helper's
 
 (defn tree-of
-  "What E-tree compares of a dump (doc/go/GO-PARSER-SURVEY.md §6): the package's name, each
-  file's name, language version, tree and comments, the directives and the warnings. The
-  annotations are the trees' metadata, which the comparison ignores."
+  "What E-tree compares of a dump (doc/go/GO-PARSER-SURVEY.md §5, §6): the header (header-keys),
+  the package's name, each file's name, language version, tree and comments, the directives and
+  the warnings. The annotations are the trees' metadata, which the comparison ignores."
   [d]
-  {:name (:name d)
-   :files (mapv #(select-keys % [:file :go-version :ast :comments]) (:files d))
-   :directives (:directives d)
-   :warnings (:warnings d)})
+  (merge (select-keys d header-keys)
+         {:name (:name d)
+          :files (mapv #(select-keys % [:file :go-version :ast :comments]) (:files d))
+          :directives (:directives d)
+          :warnings (:warnings d)}))
 
 (defn- kind-of [x]
   (cond
@@ -462,30 +455,35 @@
   (when (= :files (first path))
     (get-in d [:files (second path) :file])))
 
-(defn check-dump
-  "E-tree for helper dump at path: {:path :package :files :keys :nodes :diff [...] :times},
-  :fail when a file does not parse. write, when given, is called with the native dump."
-  [goroot-forms ^String path ^String goroot write]
+(defn- job-keys [j] (vec (for [f (:files j)] (str (get-in j [:header :dir]) "/" f))))
+
+(defn check-job
+  "E-tree for loader job j against the helper's dump at path (nil: the helper made none):
+  {:key :package :files :keys :nodes :diff [...] :times}; :fail when a file does not parse
+  natively and the helper dumped it, :rejected when neither dumps it (a file go/parser
+  rejects), :extra when only the native reader dumps it. write, when given, is called with the
+  native dump."
+  [goroot-forms j ^String path write]
   (try
     (let [t0 (System/nanoTime)
-          d (rd/read-dump path)
+          d (when path (rd/read-dump path))
           t1 (System/nanoTime)
-          n (native-dump goroot-forms d goroot)
-          t2 (System/nanoTime)]
-      (if (:error n)
-        {:path path :package (:package d) :files (count (:files d))
-         :keys (vec (for [f (:files d)] (str (:dir d) "/" (:file f))))
-         :fail (str (:file n) ": " (:error n))}
+          n (native-dump goroot-forms j)
+          t2 (System/nanoTime)
+          base {:key (:key j) :path path :package (get-in j [:header :package]) :files (count (:files j)) :keys (job-keys j)}]
+      (when (and write (not (:error n))) (write n))
+      (cond
+        (and (:error n) d) (assoc base :fail (str (:file n) ": " (:error n)))
+        (:error n) (assoc base :rejected (str (:file n) ": " (:error n)))
+        (nil? d) (assoc base :extra true :nodes (count (mapcat (comp rd/nodes :ast) (:files n))) :times (:times n))
+        :else
         (let [df (diff (tree-of d) (tree-of n) [])]
-          (when write (write n))
-          (cond-> {:path path :package (:package d) :files (count (:files d))
-                   :keys (vec (for [f (:files d)] (str (:dir d) "/" (:file f))))
-                   :nodes (count (mapcat (comp rd/nodes :ast) (:files n)))
-                   :read-ms (/ (- t1 t0) 1e6) :native-ms (/ (- t2 t1) 1e6)
-                   :times (:times n)}
+          (cond-> (assoc base :nodes (count (mapcat (comp rd/nodes :ast) (:files n)))
+                         :read-ms (/ (- t1 t0) 1e6) :native-ms (/ (- t2 t1) 1e6)
+                         :times (:times n))
             df (assoc :diff [(file-at d (first df)) (first df) (short-str (second df)) (short-str (nth df 2))])))))
     (catch Throwable e
-      {:path path :fail (str (.getName (class e)) ": " (.getMessage e))})))
+      {:key (:key j) :path path :keys (job-keys j) :fail (str (.getName (class e)) ": " (.getMessage e))})))
 
 ;;; The command
 
@@ -500,83 +498,183 @@
                    (pr-str (dissoc n :times)))
                  "\n"))))
 
-(defn- run-dump [goroot-forms goroot out [path rel]]
-  (check-dump goroot-forms path goroot (when out #(write-native! % out rel))))
+(defn- read-spec [^String f]
+  (binding [*read-eval* false] (read-string (slurp f))))
 
-(defn- report-corpus
-  "Prints a corpus's results and returns {:corpus :dumps :files :nodes :fail [...] :differ [...]
-  :times}; differences and failures of files in known (key -> reason) are reported as known."
-  [corpus rs known quiet]
-  (let [fails (filter :fail rs)
+(defn- spec-jobs
+  "A corpus spec's loads' jobs, each keyed under its load's :sub: [jobs results load-ms]."
+  [spec]
+  (let [t0 (System/nanoTime)
+        all (vec (mapcat (fn [l]
+                           (for [j (ld/jobs l)]
+                             (cond-> j (:sub l) (assoc :key (str (:sub l) "/" (:key j)) :tsv-key (:key j)))))
+                         (:loads spec)))]
+    [(filterv :files all) (filterv :status all) (/ (- (System/nanoTime) t0) 1e6)]))
+
+(defn- helper-results
+  "The helper's summary (godump's TSV): {key [status msg]}."
+  [^String tsv]
+  (if (and tsv (.isFile (File. tsv)))
+    (into {} (for [l (str/split-lines (slurp tsv))
+                   :let [[st k _ _ _ _ msg] (str/split l #"\t")]
+                   :when k]
+               [k [st msg]]))
+    {}))
+
+(defn helper-header
+  "The header of the helper's dump at path (its text before :files, read alone)."
+  [^String path]
+  (let [s (slurp path)
+        i (.indexOf s "\n :files [")]
+    (binding [*read-eval* false]
+      (read-string (str (subs s (.indexOf s "{") (if (neg? i) (count s) i)) "}")))))
+
+(defn- check-header
+  "The headers' comparison alone (--headers): job j's against the helper's dump at path."
+  [j ^String path]
+  (let [base {:key (:key j) :path path :package (get-in j [:header :package]) :files (count (:files j)) :keys (job-keys j)}]
+    (try
+      (if (nil? path)
+        (assoc base :extra true)
+        (let [df (diff (select-keys (helper-header path) header-keys) (select-keys (:header j) header-keys) [])]
+          (cond-> (assoc base :nodes 0)
+            df (assoc :diff [nil (first df) (short-str (second df)) (short-str (nth df 2))]))))
+      (catch Throwable e
+        (assoc base :fail (str (.getName (class e)) ": " (.getMessage e)))))))
+
+(defn- check-corpus
+  "E-tree over corpus spec (its :dumps the helper's), in pool: the report's entry. headers:
+  the headers and the sets of dumps alone, no parse."
+  [goroot-forms spec pool out known headers]
+  (let [t0 (System/nanoTime)
+        nm (:name spec)
+        dumps (str/replace (:dumps spec) #"/+$" "")
+        [js results load-ms] (spec-jobs spec)
+        helper (into {} (for [p (rd/dump-files [dumps])]
+                          [(str/replace (subs p (inc (count dumps))) #"\.edn$" "") p]))
+        hres (helper-results (:tsv spec))
+        jkeys (set (map :key js))
+        futs (mapv (fn [j]
+                     (.submit ^java.util.concurrent.ExecutorService pool
+                              ^Callable (fn [] (if headers
+                                                 (check-header j (get helper (:key j)))
+                                                 (check-job goroot-forms j (get helper (:key j))
+                                                            (when out #(write-native! % (str out "/" nm) (str (:key j) ".edn"))))))))
+                   js)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        missing (vec (for [[k p] (sort helper) :when (not (jkeys k))]
+                       {:key k :path p :missing (if-let [r (some #(when (= k (:key %)) %) results)]
+                                                  (str "the loader: " (:status r) " " (:msg r))
+                                                  "no such dump from the loader")}))
+        extra (filter :extra rs)
+        helper-failed? (fn [r] (= "fail" (first (get hres (or (:tsv-key (some #(when (= (:key r) (:key %)) %) js)) (:key r))))))
+        known? (fn [r] (or (contains? known (:package r)) (contains? known (:key r)) (some #(contains? known %) (:keys r))))
+        fails (filter :fail rs)
         differ (filter :diff rs)
-        ok (remove :fail rs)
-        known? (fn [r] (or (contains? known (:package r)) (some #(contains? known %) (:keys r))))
-        unknown (remove known? (concat fails differ))
+        bad-extra (remove helper-failed? extra)
+        unknown (remove known? (concat fails differ missing bad-extra))
+        ok (filter #(and (:nodes %) (not (:extra %))) rs)
         sum (fn [k] (reduce + (keep #(get-in % [:times k]) ok)))]
-    (doseq [r fails] (println (if (known? r) "FAIL known" "FAIL") corpus (:path r) (:fail r)))
-    (doseq [r differ] (println (if (known? r) "DIFF known" "DIFF") corpus (:path r) (pr-str (:diff r))))
-    (println (format "%s: E-tree %d of %d dumps equal (%d files, %d nodes, %.1f MB of Go); %d differ, %d failed, %d of them not known; parse %.1f s, dump %.1f s (CPU), helper's dumps read %.1f s"
-                     corpus (- (count ok) (count differ)) (count rs) (reduce + (map :files ok))
-                     (reduce + (keep :nodes ok)) (/ (sum :bytes) 1e6) (count differ) (count fails) (count unknown)
-                     (/ (sum :parse-ms) 1e3) (/ (sum :dump-ms) 1e3) (/ (reduce + (keep :read-ms ok)) 1e3)))
-    {:corpus corpus :dumps (count rs) :equal (- (count ok) (count differ)) :files (reduce + (map :files ok))
-     :nodes (reduce + (keep :nodes ok)) :bytes (sum :bytes)
+    (doseq [r fails] (println (if (known? r) "FAIL known" "FAIL") nm (:key r) (:fail r)))
+    (doseq [r differ] (println (if (known? r) "DIFF known" "DIFF") nm (:key r) (pr-str (:diff r))))
+    (doseq [r missing] (println (if (known? r) "MISSING known" "MISSING") nm (:key r) (:missing r)))
+    (doseq [r bad-extra] (println (if (known? r) "EXTRA known" "EXTRA") nm (:key r) "dumped natively, not by the helper"))
+    (println (format (str "%s: " (if headers "the headers: %d of %d dumps' equal" "E-tree %d of %d dumps equal, header and tree")
+                          " (%d files, %d nodes, %.1f MB of Go); %d differ, %d failed, %d missing, %d extra (%d the helper's failures), %d rejected by both, %d excluded or failed by both, %d not known; load %.1f s, parse %.1f s, dump %.1f s (CPU), helper's dumps read %.1f s")
+                     nm (- (count ok) (count differ)) (count helper) (reduce + (map :files ok)) (reduce + (keep :nodes ok))
+                     (/ (sum :bytes) 1e6) (count differ) (count fails) (count missing) (count extra) (- (count extra) (count bad-extra))
+                     (count (filter :rejected rs)) (count (remove #(contains? helper (:key %)) results)) (count unknown)
+                     (/ load-ms 1e3) (/ (sum :parse-ms) 1e3) (/ (sum :dump-ms) 1e3) (/ (reduce + (keep :read-ms ok)) 1e3)))
+    {:corpus nm :dumps (count helper) :jobs (count js) :results (count results)
+     :equal (- (count ok) (count differ)) :files (reduce + (map :files ok))
+     :nodes (reduce + (keep :nodes ok)) :bytes (sum :bytes) :load-s (/ load-ms 1e3)
      :parse-s (/ (sum :parse-ms) 1e3) :dump-s (/ (sum :dump-ms) 1e3)
      :read-s (/ (reduce + (keep :read-ms ok)) 1e3)
-     :differ (vec (for [r differ] [(:path r) (:diff r)])) :fail (vec (for [r fails] [(:path r) (:fail r)]))
-     :unknown (count unknown)}))
+     :differ (vec (for [r differ] [(:key r) (:diff r)])) :fail (vec (for [r fails] [(:key r) (:fail r)]))
+     :missing (vec (for [r missing] [(:key r) (:missing r)]))
+     :extra (vec (for [r extra] [(:key r) (if (helper-failed? r) (second (get hres (:key r))) "not the helper's failure")]))
+     :rejected (count (filter :rejected rs))
+     :unknown (count unknown) :wall-s (/ (- (System/nanoTime) t0) 1e9)}))
+
+(defn- read-corpus
+  "The native reader over corpus spec, no comparison: native dumps under out/NAME."
+  [goroot-forms spec pool out]
+  (let [t0 (System/nanoTime)
+        nm (:name spec)
+        [js results load-ms] (spec-jobs spec)
+        futs (mapv (fn [j]
+                     (.submit ^java.util.concurrent.ExecutorService pool
+                              ^Callable (fn [] (check-job goroot-forms j nil
+                                                          (when out #(write-native! % (str out "/" nm) (str (:key j) ".edn")))))))
+                   js)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        ok (filter :nodes rs)
+        sum (fn [k] (reduce + (keep #(get-in % [:times k]) ok)))]
+    (doseq [r (filter #(or (:rejected %) (:fail %)) rs)] (println "REJECTED" nm (:key r) (or (:rejected r) (:fail r))))
+    (doseq [r results :when (= "fail" (:status r))] (println "FAIL" nm (:key r) (:msg r)))
+    (println (format "%s: %d dumps natively (%d files, %d nodes, %.1f MB of Go), %d rejected by go/parser, %d excluded, %d failed to load; load %.1f s, parse %.1f s, dump %.1f s (CPU), %.1f s"
+                     nm (count ok) (reduce + (map :files ok)) (reduce + (keep :nodes ok)) (/ (sum :bytes) 1e6)
+                     (count (remove :nodes rs)) (count (filter #(= "excluded" (:status %)) results))
+                     (count (filter #(= "fail" (:status %)) results))
+                     (/ load-ms 1e3) (/ (sum :parse-ms) 1e3) (/ (sum :dump-ms) 1e3) (/ (- (System/nanoTime) t0) 1e9)))
+    {:corpus nm :dumps (count ok) :rejected (count (remove :nodes rs)) :results (count results)
+     :load-s (/ load-ms 1e3) :parse-s (/ (sum :parse-ms) 1e3) :dump-s (/ (sum :dump-ms) 1e3)
+     :unknown (count (filter #(= "fail" (:status %)) results))}))
 
 (defn -main
-  "check [--jobs N] [--goroot DIR] [--forms DIR] [--known FILE] [--report FILE] [--out DIR]
-  NAME=DUMPDIR...: E-tree (doc/go/GO-PARSER-SURVEY.md §6) of every helper dump under each
-  DUMPDIR, the corpus NAME: each package's files parsed by go/parser under goi and dumped
-  natively, the tree compared with the helper's (annotations ignored). --out writes the native
-  dumps under DIR/NAME. Exits 1 when a dump differs or fails and the known differences (a map
-  of file key, \"$GOROOT/src/fmt/print.go\", or package path to the reason) do not list it."
+  "check|read [--headers] [--jobs N] [--forms DIR] [--known FILE] [--report FILE] [--out DIR] SPEC...
+
+  check: E-tree (doc/go/GO-PARSER-SURVEY.md §5, §6) of each corpus SPEC (a file read by the
+  Clojure reader: {:name :dumps DIR :tsv FILE :loads [LOAD ...]}, LOAD arbace.repr.go.load's):
+  the loader's dumps, each package's files parsed by go/parser under goi and dumped natively,
+  against the helper's dumps under :dumps (annotations ignored): the header and the tree, the
+  sets of dumps. --out writes the native dumps under DIR/NAME. Exits 1 when a dump differs,
+  fails or is missing and the known differences (a map of file key, \"$GOROOT/src/fmt/print.go\",
+  dump key or package path to the reason) do not list it.
+
+  --headers (check): the loader alone, the headers and the sets of dumps, no parse.
+
+  read: the native reader alone (no helper): the dumps under --out DIR/NAME."
   [& args]
   (let [[cmd & args] args
-        _ (when (not= cmd "check")
-            (binding [*out* *err*] (println "usage: check [--jobs N] [--goroot DIR] [--forms DIR] [--known FILE] [--report FILE] [--out DIR] NAME=DUMPDIR..."))
+        _ (when-not (#{"check" "read"} cmd)
+            (binding [*out* *err*] (println "usage: check|read [--jobs N] [--forms DIR] [--known FILE] [--report FILE] [--out DIR] SPEC..."))
             (System/exit 2))
-        [opts specs] (loop [opts {:jobs 1 :goroot "/root/tamago-go" :forms "tamago/goroot"}
+        [opts specs] (loop [opts {:jobs 1 :forms "tamago/goroot"}
                             [a & more :as args] args]
                        (case a
+                         "--headers" (recur (assoc opts :headers true) more)
                          "--jobs" (recur (assoc opts :jobs (parse-long (first more))) (rest more))
-                         "--goroot" (recur (assoc opts :goroot (first more)) (rest more))
                          "--forms" (recur (assoc opts :forms (first more)) (rest more))
                          "--known" (recur (assoc opts :known (first more)) (rest more))
                          "--report" (recur (assoc opts :report (first more)) (rest more))
                          "--out" (recur (assoc opts :out (first more)) (rest more))
-                         "--quiet" (recur (assoc opts :quiet true) more)
                          [opts args]))
         known (when-let [k (:known opts)]
                 (when (.isFile (File. ^String k))
                   (binding [*read-eval* false] (read-string (slurp k)))))
-        t-load (System/nanoTime)
-        {:keys [ms]} (load! (:forms opts))
-        _ (println (format "the dumper generated from go/ast's forms and loaded with go/parser by goi in %.2f s" (/ ms 1e3)))
-        fc (forms-check (:forms opts))
+        {:keys [ms]} (if (:headers opts) {:ms 0} (load! (:forms opts)))
+        _ (when-not (:headers opts)
+            (println (format "the dumper generated from go/ast's forms and loaded with go/parser by goi in %.2f s" (/ ms 1e3))))
+        fc (if (:headers opts) [] (forms-check (:forms opts)))
         _ (doseq [[p n eq] fc]
             (println (format "%s: %d declarations, the digest's %s tamago/goroot's" p n (if eq "equal to" "NOT equal to"))))
         forms-bad (count (remove #(nth % 2) fc))
         pool (Executors/newFixedThreadPool (:jobs opts))
-        results (vec (for [spec specs
-                           :let [[nm dir] (let [i (.indexOf ^String spec "=")]
-                                            (if (neg? i) [spec spec] [(subs spec 0 i) (subs spec (inc i))]))
-                                 t0 (System/nanoTime)
-                                 files (for [p (rd/dump-files [dir])] [p (subs p (inc (count (str/replace dir #"/+$" ""))))])
-                                 out (when (:out opts) (str (:out opts) "/" nm))
-                                 futs (mapv (fn [f] (.submit pool ^Callable (fn [] (run-dump (:forms opts) (:goroot opts) out f)))) files)
-                                 rs (mapv #(.get ^java.util.concurrent.Future %) futs)]]
-                       (assoc (report-corpus nm rs (or known {}) (:quiet opts))
-                              :wall-s (/ (- (System/nanoTime) t0) 1e9))))
+        results (vec (for [sf specs]
+                       (let [spec (read-spec sf)]
+                         (if (= cmd "check")
+                           (check-corpus (:forms opts) spec pool (:out opts) (or known {}) (:headers opts))
+                           (read-corpus (:forms opts) spec pool (:out opts))))))
         unknown (+ forms-bad (reduce + (map :unknown results)))]
     (.shutdown pool)
     (.awaitTermination pool 1 TimeUnit/MINUTES)
-    (when (> (count results) 1)
-      (println (format "E-tree: %d corpora, %d of %d dumps equal, %d files, %d nodes; %d not known"
+    (when (and (= cmd "check") (> (count results) 1))
+      (println (format (if (:headers opts)
+                         "the headers: %d corpora, %d of %d dumps' equal, %d files%s; %d not known"
+                         "E-tree: %d corpora, %d of %d dumps equal (header and tree), %d files, %d nodes; %d not known")
                        (count results) (reduce + (map :equal results)) (reduce + (map :dumps results))
-                       (reduce + (map :files results)) (reduce + (map :nodes results)) unknown)))
+                       (reduce + (map :files results)) (if (:headers opts) "" (reduce + (map :nodes results))) unknown)))
     (when-let [rf (:report opts)]
       (spit rf (with-out-str (binding [*print-length* nil] (prn {:forms fc :corpora results})))))
     (shutdown-agents)

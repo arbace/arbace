@@ -336,3 +336,51 @@ From doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN1":
 - JFS15 (b): the build tree's exploded platform as a pinned stand-in.
 - JFS16 (b): the j2g fixes with JN2.
 - JFS17 (a): javac's internals rooted for JN4, measured.
+
+## 2026-10-20: JN2 started (the user)
+
+JN2, javac's forms vendored (branch `java-frontend-jn2`, from `52d8c504`):
+- javac's forms in `jdk/javac/` (forms, provenance, sources) with `bin/javac-vendor
+  convert|verify|check`, and javac's edge in `jdk/javac/edge.edn`;
+- no patches in javac (JFS12 (c)): jrt grows the missing JDK API, and JN1's workarounds become
+  fixes in j2g and `arbace.classes`, each with a regression form in `bin/diffcheck`;
+- LICENSE.md's GPLv2+CE list extended.
+- Exit: `verify` byte for byte; j2g translates javac's world without errors; the essential gate;
+  the shipped program changed only as intended (jrt's additions, `TimeUnit.timedWait`); the
+  fixpoint; JN1's driver equal to the JVM's on the vendored, unpatched forms.
+
+## 2026-10-20: GP2 merged (the native Go parser's loader)
+
+- **What:** branch `go-parser-gp2` (`b42857a8`, from `c8287cf1`) merged.
+  - **The box's planner,** `arbace/box/plan.ae` (346 → 1,020 lines), reads directories as well as
+    store trees. It ports go/build's file matching, build constraints and header reader;
+    cmd/go's embed resolution with globs; `go.mod`; std's and cmd's vendor resolution; go list's
+    patterns and `-deps`.
+  - **New, `arbace/repr/go/load.ae`:** the helper's three modes (packages with test variants,
+    `-files`, `-dirs` with `dirs.go` ported) and each dump's whole header. It needs no go command
+    and no export data.
+  - **The native reader** (`read --reader native`) runs without the helper. `native-check`
+    compares headers and the sets of dumps as well (`--headers`). Each corpus is a spec file.
+  - **New:** `bin/lib/repr-go/plan-check [--base REV]` tests the box's planner without a box run.
+- **The headers:** all 12,275 dumps over 22 corpora equal the helper's; `native-known.edn` stays
+  empty. Equal headers mean go list's file lists match, for `tamago/goroot` and for
+  `tamago/cmd`'s 105 packages, which the loader computes itself.
+  - The native reader dumps 14 goos packages of other architectures that the helper cannot build
+    (GPS17).
+  - Three loader bugs were found and fixed: `builtin` and `runtime/cgo` under `std`, a test
+    variant of a main package without tests, and `:imports` of a spec named `init`.
+- **The box's plan is unchanged.** It is byte identical to the old planner's, `:src` hashes
+  included: 325 packages on tamago/amd64, 324 on arm64, equal to tools/goplan's. It now takes 2.5
+  s instead of 4.2 s.
+  - Embedded files keep walk order (GPS18).
+  - The planner now accepts glob `//go:embed` patterns and refuses `.cxx`, `.for`, `.f90`,
+    `.swigcxx` and `.sx` files, none of which exist in the box's trees.
+  - `bin/box-rebuild plan-check` was not run; it needs a box run.
+- **The program changes:** `arbace.box.plan` and `arbace.repr.go.load` are embedded. Until the
+  re-seed, the loader loads the checkout's `plan.ae` when it differs from the embedded copy
+  (GPS16). The re-seed is batched with JN2's.
+- **Times:** the loader takes about 66 s over all 22 corpora; `native-check --fresh` 19m51s;
+  `--headers` 1m16s. The branch's essential `bin/gate` passed (18m52s).
+- **Not ported**, listed in the survey: symlinks, `go.work`, module-cache requires, modules' own
+  `vendor/`, go.mod `ignore`, cgo on, and go list's errors beyond go/build.
+- **Open for the user:** GPS16-GPS20, each built as (a).
