@@ -1,0 +1,331 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/main/Main.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.main)
+
+(import '(com.sun.tools.javac.api BasicJavacTask)
+        '(com.sun.tools.javac.file BaseFileManager CacheFSInfo JavacFileManager)
+        '(com.sun.tools.javac.jvm Target)
+        '(com.sun.tools.javac.processing AnnotationProcessingError)
+        '(com.sun.tools.javac.resources CompilerProperties$Errors)
+        '(com.sun.tools.javac.util ClientCodeException
+                                   Context
+                                   Dependencies$GraphDependencies
+                                   FatalError
+                                   JCDiagnostic$DiagnosticInfo
+                                   List
+                                   Log
+                                   Log$PrefixKind
+                                   Log$WriterKind
+                                   Options
+                                   PropagatedException)
+        '(java.io FileNotFoundException IOException PrintWriter Writer)
+        '(java.nio.file Files NoSuchFileException OpenOption Paths)
+        '(java.security DigestInputStream MessageDigest NoSuchAlgorithmException)
+        '(java.text SimpleDateFormat)
+        '(java.util Calendar Set)
+        '(java.util.regex Pattern)
+        '(javax.tools JavaFileManager)
+        '(jdk.internal.opt CommandLine CommandLine$UnmatchedQuote))
+
+(defclass ^:public Main
+  (field ^String ownName)
+
+  (field ^PrintWriter stdOut)
+
+  (field ^PrintWriter stdErr)
+
+  (field ^:public ^Log log)
+
+  (field ^boolean apiMode)
+
+  (field ^:private ^:static ^:final ^String ENV_OPT_NAME "JDK_JAVAC_OPTIONS")
+
+  (defclass ^:public ^:enum Result
+    (constants (OK [0]) (ERROR [1]) (CMDERR [2]) (SYSERR [3]) (ABNORMAL [4]))
+
+    (constructor [this ^int exitCode] (set! (.-exitCode this) exitCode))
+
+    (method ^:public isOK ^boolean [this] (== exitCode 0))
+
+    (field ^:public ^:final ^int exitCode))
+
+  (constructor ^:public [this ^String name] (set! (.-ownName this) name))
+
+  (constructor ^:public [this ^String name ^PrintWriter out]
+    (set! (.-ownName this) name)
+    (set! (.-stdOut this) (set! (.-stdErr this) out)))
+
+  (constructor ^:public [this ^String name ^PrintWriter out ^PrintWriter err]
+    (set! (.-ownName this) name)
+    (set! (.-stdOut this) out)
+    (set! (.-stdErr this) err))
+
+  (method reportDiag ^void [this ^JCDiagnostic$DiagnosticInfo diag]
+    (when apiMode
+      (let [msg (.localize log diag)] (throw (PropagatedException. (IllegalStateException. msg)))))
+    (.reportHelper this diag)
+    (.printLines log Log$PrefixKind/JAVAC "msg.usage" (new Object/1 [ownName])))
+
+  (method reportHelper ^void [this ^JCDiagnostic$DiagnosticInfo diag]
+    (let [^:mutable msg (.localize log diag)
+          errorPrefix (.localize log CompilerProperties$Errors/Error)]
+      (set! msg (if (.startsWith msg errorPrefix) msg (java-str errorPrefix msg)))
+      (.printRawLines log msg)))
+
+  (method ^:public compile ^Result [this ^String/1 args]
+    (let [context (Context.)]
+      (JavacFileManager/preRegister context)
+      (let [result (.compile this args context)]
+        (try
+          (when (some? fileManager) (.close fileManager))
+          (catch IOException ex (.bugMessage this ex)))
+        result)))
+
+  (method ^:public compile ^Result [this ^String/1 argv ^Context context]
+    (when (some? stdOut) (.put context Log/outKey stdOut))
+    (when (some? stdErr) (.put context Log/errKey stdErr))
+    (set! log (Log/instance context))
+    (if (== (alength argv) 0)
+        (let [^OptionHelper h (anon OptionHelper$GrumpyHelper [log]
+                                (method ^:public getOwnName ^String [this] ownName)
+
+                                (method ^:public put ^void [this ^String name ^String value]))]
+          (try (.process Option/HELP h "-help") (catch Option$InvalidValueException ignore))
+          Result/CMDERR)
+        (let [^:mutable ^{:tag (Iterable String)} allArgs nil]
+          (try
+            (set! allArgs (CommandLine/parse ENV_OPT_NAME (List/from argv)))
+            (catch CommandLine$UnmatchedQuote ex
+              (.reportDiag this (CompilerProperties$Errors/UnmatchedQuote (.-variableName ex)))
+              (return Result/CMDERR))
+            (catch [FileNotFoundException NoSuchFileException] e
+              (.reportHelper this (CompilerProperties$Errors/FileNotFound (.getMessage e)))
+              (return Result/SYSERR))
+            (catch IOException ex
+              (.printLines log Log$PrefixKind/JAVAC "msg.io" (new Object/1 []))
+              (.printStackTrace ex (.getWriter log Log$WriterKind/NOTICE))
+              (return Result/SYSERR)))
+          (let [args (Arguments/instance context)]
+            (.init args ownName allArgs)
+            (if (> (.-nerrors log) 0)
+                Result/CMDERR
+                (let [options (Options/instance context)
+                      forceStdOut (.isSet options "stdout")]
+                  (when forceStdOut (.flush log) (.setWriters log (PrintWriter. System/out true)))
+                  (let [batchMode (and (.isUnset options "nonBatchMode")
+                                       (nil? (System/getProperty "nonBatchMode")))]
+                    (when batchMode (CacheFSInfo/preRegister context))
+                    (let [^:mutable ok true]
+                      (set! fileManager (cast JavaFileManager (.get context JavaFileManager)))
+                      (let [^JavaFileManager undel
+                              (if-instance [^DelegatingJavaFileManager delegatingJavaFileManager
+                                              fileManager]
+                                (.getBaseFileManager delegatingJavaFileManager)
+                                fileManager)]
+                        (when-instance [^BaseFileManager baseFileManager undel]
+                          (.setContext baseFileManager context)
+                          (set! ok
+                                (let [a-1 ok
+                                      b-2 (.handleOptions
+                                            baseFileManager
+                                            (.getDeferredFileManagerOptions args))]
+                                  (and a-1 b-2))))
+                        (let [^:mutable showClass (.get options "showClass")]
+                          (when (some? showClass)
+                            (when (.equals showClass "showClass")
+                              (set! showClass "com.sun.tools.javac.Main"))
+                            (.showClass this showClass))
+                          (set! ok (let [a-3 ok b-4 (.validate args)] (and a-3 b-4)))
+                          (cond
+                            (or (not ok) (> (.-nerrors log) 0)) Result/CMDERR
+                            (.isEmpty args) Result/OK
+                            :else
+                              (do
+                                (when (.isSet options "debug.completionDeps")
+                                  (Dependencies$GraphDependencies/preRegister context))
+                                (let [t (cast BasicJavacTask (BasicJavacTask/instance context))
+                                      ^{:tag (Set (List String))} pluginOpts (.getPluginOpts args)]
+                                  (.initPlugins t pluginOpts)
+                                  (when (== (.isSupportedOption
+                                              fileManager
+                                              (.-primaryName Option/MULTIRELEASE))
+                                            1)
+                                    (let [target (Target/instance context)
+                                          ^{:tag (List String)} list (List/of
+                                                                       (.multiReleaseValue target))]
+                                      (.handleOption
+                                        fileManager
+                                        (.-primaryName Option/MULTIRELEASE)
+                                        (.iterator list))))
+                                  (let [comp (JavaCompiler/instance context)
+                                        ^{:tag (List String)} docLintOpts (.getDocLintOpts args)]
+                                    (when-not (.isEmpty docLintOpts) (.initDocLint t docLintOpts))
+                                    (when (some? (.get options Option/XSTDOUT))
+                                      (set! (.-closeables comp)
+                                            (.prepend
+                                              (.-closeables comp)
+                                              (.getWriter log Log$WriterKind/NOTICE))))
+                                    (let [^:mutable printArgsToFile (.isSet
+                                                                      options
+                                                                      "printArgsToFile")]
+                                      (try
+                                        (.compile
+                                          comp
+                                          (.getFileObjects args)
+                                          (.getClassNames args)
+                                          nil
+                                          (List/nil))
+                                        (cond
+                                          (some? (.-expectDiagKeys log))
+                                            (if (.isEmpty (.-expectDiagKeys log))
+                                                (do
+                                                  (.printRawLines
+                                                    log
+                                                    "all expected diagnostics found")
+                                                  Result/OK)
+                                                (do
+                                                  (.printRawLines
+                                                    log
+                                                    (java-str
+                                                      "expected diagnostic keys not found: "
+                                                      (.-expectDiagKeys log)))
+                                                  Result/ERROR))
+                                          (== (.errorCount comp) 0) Result/OK
+                                          :else Result/ERROR)
+                                        (catch [OutOfMemoryError StackOverflowError] ex
+                                          (.resourceMessage this ex)
+                                          Result/SYSERR)
+                                        (catch FatalError ex
+                                          (.feMessage this ex options)
+                                          Result/SYSERR)
+                                        (catch AnnotationProcessingError ex
+                                          (.apMessage this ex)
+                                          Result/SYSERR)
+                                        (catch PropagatedException ex (throw (.getCause ex)))
+                                        (catch IllegalAccessError iae
+                                          (when (.twoClassLoadersInUse this iae)
+                                            (.bugMessage this iae))
+                                          (set! printArgsToFile true)
+                                          Result/ABNORMAL)
+                                        (catch Throwable ex
+                                          (when (or
+                                                  (or (nil? comp) (== (.errorCount comp) 0))
+                                                  (.isSet options "dev"))
+                                            (.bugMessage this ex))
+                                          (set! printArgsToFile true)
+                                          Result/ABNORMAL)
+                                        (finally
+                                          (when printArgsToFile (.printArgumentsToFile this argv))
+                                          (when (some? comp)
+                                            (try
+                                              (.close comp)
+                                              (catch ClientCodeException ex
+                                                (throw (RuntimeException. (.getCause ex)))))))))))))))))))))))
+
+  (method printArgumentsToFile ^void [this & ^String/1 params]
+    (let [tmpDir (Paths/get (System/getProperty "java.io.tmpdir") (new String/1 []))
+          out (.resolve tmpDir
+                        (String/format "javac.%s.args"
+                                       (new Object/1
+                                            [(.format
+                                               (SimpleDateFormat. "yyyyMMdd_HHmmss")
+                                               (.getTime (Calendar/getInstance)))])))
+          ^:mutable strOut
+            "# javac crashed, this report includes the parameters passed to it in the @-file format\n"]
+      (try
+        (with-resources [^Writer w (Files/newBufferedWriter out (new OpenOption/1 []))]
+          (for-each [^:mutable ^String param params]
+            (set! param (.replaceAll param "\\\\" "\\\\\\\\"))
+            (when (.matches param ".*\\s+.*") (set! param (java-str "\"" param "\"")))
+            (set! strOut (java-str strOut (java-str param \newline))))
+          (.write w strOut))
+        (.printLines log
+                     Log$PrefixKind/JAVAC
+                     "msg.parameters.output"
+                     (new Object/1 [(.toAbsolutePath out)]))
+        (catch IOException ioe
+          (.printLines log
+                       Log$PrefixKind/JAVAC
+                       "msg.parameters.output.error"
+                       (new Object/1 [(.toAbsolutePath out)]))
+          (.println System/err strOut)
+          (.println System/err)))))
+
+  (method ^:private twoClassLoadersInUse ^boolean [this ^IllegalAccessError iae]
+    (let [msg (.getMessage iae)
+          pattern (Pattern/compile
+                    "(?i)(?<=tried to access class )([a-z_$][a-z\\d_$]*\\.)*[a-z_$][a-z\\d_$]*")
+          matcher (.matcher pattern msg)]
+      (when (.find matcher)
+        (try
+          (let [otherClassName (.group matcher 0)
+                ^{:tag (Class ?)} otherClass (Class/forName otherClassName)
+                otherClassLoader (.getClassLoader otherClass)
+                javacClassLoader (.getClassLoader (.getClass this))]
+            (when-not (identical? javacClassLoader otherClassLoader)
+              (let [otherClassCodeSource (.getCodeSource (.getProtectionDomain otherClass))
+                    javacCodeSource (.getCodeSource (.getProtectionDomain (.getClass this)))]
+                (if (and (some? otherClassCodeSource) (some? javacCodeSource))
+                    (.printLines log
+                                 (CompilerProperties$Errors/TwoClassLoaders2
+                                   (.getLocation otherClassCodeSource)
+                                   (.getLocation javacCodeSource)))
+                    (.printLines log CompilerProperties$Errors/TwoClassLoaders1))
+                (return true))))
+          (catch Throwable t (return false))))
+      false))
+
+  (method bugMessage ^void [this ^Throwable ex]
+    (.printLines log Log$PrefixKind/JAVAC "msg.bug" (new Object/1 [(JavaCompiler/version)]))
+    (.printStackTrace ex (.getWriter log Log$WriterKind/NOTICE)))
+
+  (method feMessage ^void [this ^Throwable ex ^Options options]
+    (.printRawLines log (.getMessage ex))
+    (when (and (some? (.getCause ex)) (.isSet options "dev"))
+      (.printStackTrace (.getCause ex) (.getWriter log Log$WriterKind/NOTICE))))
+
+  (method ioMessage ^void [this ^Throwable ex]
+    (.printLines log Log$PrefixKind/JAVAC "msg.io" (new Object/1 []))
+    (.printStackTrace ex (.getWriter log Log$WriterKind/NOTICE)))
+
+  (method resourceMessage ^void [this ^Throwable ex]
+    (.printLines log Log$PrefixKind/JAVAC "msg.resource" (new Object/1 []))
+    (.printStackTrace ex (.getWriter log Log$WriterKind/NOTICE)))
+
+  (method apMessage ^void [this ^AnnotationProcessingError ex]
+    (.printLines log
+                 Log$PrefixKind/JAVAC
+                 "msg.proc.annotation.uncaught.exception"
+                 (new Object/1 []))
+    (.printStackTrace (.getCause ex) (.getWriter log Log$WriterKind/NOTICE)))
+
+  (method pluginMessage ^void [this ^Throwable ex]
+    (.printLines log Log$PrefixKind/JAVAC "msg.plugin.uncaught.exception" (new Object/1 []))
+    (.printStackTrace ex (.getWriter log Log$WriterKind/NOTICE)))
+
+  (method showClass ^void [this ^String className]
+    (let [pw (.getWriter log Log$WriterKind/NOTICE)]
+      (.println pw (java-str "javac: show class: " className))
+      (let [url (.getResource (.getClass this) (java-str \/ (.replace className \. \/) ".class"))]
+        (when (some? url) (.println pw (java-str "  " url)))
+        (try
+          (with-resources [in (.getResourceAsStream
+                                (.getClass this)
+                                (java-str \/ (.replace className \. \/) ".class"))]
+            (let [^:const algorithm "SHA-256"
+                  ^:mutable ^byte/1 digest nil
+                  md (MessageDigest/getInstance algorithm)]
+              (with-resources [din (DigestInputStream. in md)]
+                (let [buf (new byte/1 8192)
+                      ^:mutable ^int n 0]
+                  (loop [] (set! n (.read din buf)) (when (> n 0) (recur)))
+                  (set! digest (.digest md))))
+              (let [sb (StringBuilder.)]
+                (for-each [^byte b digest] (.append sb (String/format "%02x" (new Object/1 [b]))))
+                (.println pw (java-str (java-str (java-str "  " algorithm) " checksum: ") sb)))))
+          (catch [NoSuchAlgorithmException IOException] e
+            (.println pw (java-str "  cannot compute digest: " e)))))))
+
+  (field ^:private ^JavaFileManager fileManager)
+
+  (field ^:public ^:static ^:final ^String javacBundleName "com.sun.tools.javac.resources.javac"))

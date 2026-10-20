@@ -1,0 +1,399 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/jvm/StringConcat.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.jvm)
+
+(import '(com.sun.tools.javac.code Kinds$Kind
+                                   Symbol
+                                   Symbol$DynamicMethodSymbol
+                                   Symtab
+                                   Type
+                                   Type$MethodType
+                                   TypeTag
+                                   Types)
+        '(com.sun.tools.javac.comp Resolve)
+        '(com.sun.tools.javac.tree JCTree
+                                   JCTree$JCAssignOp
+                                   JCTree$JCBinary
+                                   JCTree$JCExpression
+                                   JCTree$Tag
+                                   TreeInfo
+                                   TreeMaker)
+        '(com.sun.tools.javac.util Assert
+                                   Context
+                                   Context$Key
+                                   JCDiagnostic$DiagnosticPosition
+                                   List
+                                   ListBuffer
+                                   Names
+                                   Options)
+        '(java.util HashMap Map))
+
+(defclass ^:public ^:abstract StringConcat
+  (field ^:private ^:static ^:final ^int MAX_INDY_CONCAT_ARG_SLOTS 200)
+
+  (field ^:private ^:static ^:final ^char TAG_ARG \u0001)
+
+  (field ^:private ^:static ^:final ^char TAG_CONST \u0002)
+
+  (field ^:protected ^:final ^Gen gen)
+
+  (field ^:protected ^:final ^Symtab syms)
+
+  (field ^:protected ^:final ^Names names)
+
+  (field ^:protected ^:final ^TreeMaker make)
+
+  (field ^:protected ^:final ^Types types)
+
+  (field ^:protected ^:final ^{:tag (Map Type Symbol)} sbAppends)
+
+  (field ^:protected ^:final ^Resolve rs)
+
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key StringConcat)} concatKey (Context$Key.))
+
+  (method ^:public ^:static instance ^StringConcat [^Context context]
+    (let [^:mutable instance (cast StringConcat (.get context concatKey))]
+      (when (nil? instance) (set! instance (StringConcat/makeConcat context)))
+      instance))
+
+  (method ^:private ^:static makeConcat ^StringConcat [^Context context]
+    (let [target (Target/instance context)
+          ^:mutable opt (.get (Options/instance context) "stringConcat")]
+      (if (.hasStringConcatFactory target)
+          (when (nil? opt) (set! opt "indyWithConstants"))
+          (do
+            (when (and (some? opt) (not (.equals "inline" opt)))
+              (Assert/error
+                "StringConcatFactory-based string concat is requested on a platform that does not support it."))
+            (set! opt "inline")))
+      (switch opt
+        "inline" (Inline. context)
+        "indy" (IndyPlain. context)
+        "indyWithConstants" (IndyConstants. context)
+        (do
+          (Assert/error (java-str "Unknown stringConcat: " opt))
+          (throw (IllegalStateException. (java-str "Unknown stringConcat: " opt)))))))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context concatKey this)
+    (set! gen (Gen/instance context))
+    (set! syms (Symtab/instance context))
+    (set! types (Types/instance context))
+    (set! names (Names/instance context))
+    (set! make (TreeMaker/instance context))
+    (set! rs (Resolve/instance context))
+    (set! sbAppends (HashMap.)))
+
+  (method ^:public ^:abstract makeConcat ^Items$Item [this ^JCTree$JCAssignOp tree])
+
+  (method ^:public ^:abstract makeConcat ^Items$Item [this ^JCTree$JCBinary tree])
+
+  (method ^:protected collectAll ^{:tag (List JCTree)} [this ^JCTree tree]
+    (.collect this tree (List/nil)))
+
+  (method ^:protected collectAll ^{:tag (List JCTree)} [this ^JCTree$JCExpression lhs
+                                                        ^JCTree$JCExpression rhs]
+    (.appendList (.appendList (List/nil) (.collectAll this lhs)) (.collectAll this rhs)))
+
+  (method ^:private collect ^{:tag (List JCTree)} [this ^:mutable ^JCTree tree
+                                                   ^{:tag (List JCTree)} res]
+    (set! tree (TreeInfo/skipParens tree))
+    (when (and (.hasTag tree JCTree$Tag/PLUS) (nil? (.constValue (.-type tree))))
+      (let [op (cast JCTree$JCBinary tree)]
+        (when (and (identical? (.-kind (.-operator op)) Kinds$Kind/MTH)
+                   (== (.-opcode (.-operator op)) ByteCodes/string_add))
+          (return (.appendList (.appendList res (.collect this (.-lhs op) res))
+                               (.collect this (.-rhs op) res))))))
+    (.append res tree))
+
+  (defclass ^:private ^:static Inline
+    :extends StringConcat
+
+    (constructor ^:public [this ^Context context] (super. context))
+
+    (method ^:public makeConcat ^Items$Item [this ^JCTree$JCAssignOp tree]
+      (let [pos (.pos tree)]
+        (.newStringBuilder this tree)
+        (let [l (.genExpr (.-gen this) (.-lhs tree) (.-type (.-lhs tree)))]
+          (when (> (.width l) 0)
+            (.emitop0 (.getCode (.-gen this))
+                      (unchecked-add-int ByteCodes/dup_x1
+                                         (unchecked-multiply-int
+                                           3
+                                           (unchecked-subtract-int (.width l) 1)))))
+          (.load l)
+          (.appendString this (.-lhs tree))
+          (let [^{:tag (List JCTree)} args (.collectAll this (.-rhs tree))]
+            (for-each [^JCTree t args]
+              (.load (.genExpr (.-gen this) t (.-type t)))
+              (.appendString this t))
+            (.builderToString this pos)
+            l))))
+
+    (method ^:public makeConcat ^Items$Item [this ^JCTree$JCBinary tree]
+      (let [pos (.pos tree)]
+        (.newStringBuilder this tree)
+        (let [^{:tag (List JCTree)} args (.collectAll this tree)]
+          (for-each [^JCTree t args]
+            (.load (.genExpr (.-gen this) t (.-type t)))
+            (.appendString this t))
+          (.builderToString this pos)
+          (.makeStackItem (.getItems (.-gen this)) (.-stringType (.-syms this))))))
+
+    (method ^:private newStringBuilder ^JCDiagnostic$DiagnosticPosition [this ^JCTree tree]
+      (let [pos (.pos tree)]
+        (.emitop2 (.getCode (.-gen this))
+                  ByteCodes/new_
+                  (.makeRef (.-gen this) pos (.-stringBuilderType (.-syms this)))
+                  (.-stringBuilderType (.-syms this)))
+        (.emitop0 (.getCode (.-gen this)) ByteCodes/dup)
+        (.callMethod (.-gen this)
+                     pos
+                     (.-stringBuilderType (.-syms this))
+                     (.-init (.-names this))
+                     (List/nil)
+                     false)
+        pos))
+
+    (method ^:private appendString ^void [this ^JCTree tree]
+      (let [^:mutable t (.baseType (.-type tree))]
+        (when (and (not (.isPrimitive t))
+                   (not (identical? (.-tsym t) (.-tsym (.-stringType (.-syms this))))))
+          (set! t (.-objectType (.-syms this))))
+        (Assert/checkNull (.constValue t))
+        (let [^:mutable method (cast Symbol (.get (.-sbAppends this) t))]
+          (when (nil? method)
+            (set! method
+                  (.resolveInternalMethod (.-rs this)
+                                          (.pos tree)
+                                          (.getAttrEnv (.-gen this))
+                                          (.-stringBuilderType (.-syms this))
+                                          (.-append (.-names this))
+                                          (List/of t)
+                                          nil))
+            (.put (.-sbAppends this) t method))
+          (.invoke (.makeMemberItem (.getItems (.-gen this)) method false)))))
+
+    (method ^:private builderToString ^void [this ^JCDiagnostic$DiagnosticPosition pos]
+      (.callMethod (.-gen this)
+                   pos
+                   (.-stringBuilderType (.-syms this))
+                   (.-toString (.-names this))
+                   (List/nil)
+                   false)))
+
+  (defclass ^:private ^:abstract ^:static Indy
+    :extends StringConcat
+
+    (constructor ^:public [this ^Context context] (super. context))
+
+    (method ^:public makeConcat ^Items$Item [this ^JCTree$JCAssignOp tree]
+      (let [^{:tag (List JCTree)} args (.collectAll this (.-lhs tree) (.-rhs tree))
+            l (.genExpr (.-gen this) (.-lhs tree) (.-type (.-lhs tree)))]
+        (.duplicate l)
+        (.load l)
+        (.emit this (.pos tree) args false (.-type tree))
+        l))
+
+    (method ^:public makeConcat ^Items$Item [this ^JCTree$JCBinary tree]
+      (let [^{:tag (List JCTree)} args (.collectAll this (.-lhs tree) (.-rhs tree))]
+        (.emit this (.pos tree) args true (.-type tree))
+        (.makeStackItem (.getItems (.-gen this)) (.-stringType (.-syms this)))))
+
+    (method ^:protected ^:abstract emit ^void [this ^JCDiagnostic$DiagnosticPosition pos
+                                               ^{:tag (List JCTree)} args ^boolean generateFirstArg
+                                               ^Type type])
+
+    (method ^:protected split ^{:tag (List (List JCTree))} [this ^{:tag (List JCTree)} args]
+      (let [^{:tag (ListBuffer (List JCTree))} splits (ListBuffer.)
+            ^:mutable ^int slots 0
+            ^{:tag (ListBuffer JCTree)} cArgs (ListBuffer.)]
+        (for-each [^JCTree t args]
+          (let [^int needSlots (if (or (identical? (.getTag (.-type t)) TypeTag/LONG)
+                                       (identical? (.getTag (.-type t)) TypeTag/DOUBLE))
+                                   2
+                                   1)]
+            (when (>= (unchecked-add-int slots needSlots) MAX_INDY_CONCAT_ARG_SLOTS)
+              (.add splits (.toList cArgs))
+              (.clear cArgs)
+              (set! slots 0))
+            (.add cArgs t)
+            (set! slots (unchecked-add-int slots needSlots))))
+        (when-not (.isEmpty cArgs) (.add splits (.toList cArgs)))
+        (.toList splits)))
+
+    (method ^:protected shouldConvertToStringEagerly ^boolean [this ^Type argType]
+      (and (not (.isPrimitive (.unboxedTypeOrType (.-types this) argType)))
+           (not (identical? (.-tsym argType) (.-tsym (.-stringType (.-syms this))))))))
+
+  (defclass ^:private ^:static IndyPlain
+    :extends Indy
+
+    (constructor ^:public [this ^Context context] (super. context))
+
+    (method ^:protected emit ^void [this ^JCDiagnostic$DiagnosticPosition pos
+                                    ^{:tag (List JCTree)} args ^boolean generateFirstArg ^Type type]
+      (let [^{:tag (List (List JCTree))} split (.split this args)
+            ^:mutable first true]
+        (for-each [^{:tag (List JCTree)} t split]
+          (Assert/check (not (.isEmpty t)) "Arguments list is empty")
+          (let [^{:tag (ListBuffer Type)} dynamicArgs (ListBuffer.)]
+            (for-each [^JCTree arg t]
+              (let [constVal (.constValue (.-type arg))]
+                (when-not (.equals "" constVal)
+                  (let [^:mutable argType (.-type arg)]
+                    (when (identical? argType (.-botType (.-syms this)))
+                      (set! argType
+                            (.-type (.boxedClass (.-types this) (.-voidType (.-syms this))))))
+                    (when (or (not first) generateFirstArg)
+                      (.load (.genExpr (.-gen this) arg (.-type arg))))
+                    (when (.shouldConvertToStringEagerly this argType)
+                      (.callMethod (.-gen this)
+                                   pos
+                                   (.-stringType (.-syms this))
+                                   (.-valueOf (.-names this))
+                                   (List/of (.-objectType (.-syms this)))
+                                   true)
+                      (set! argType (.-stringType (.-syms this))))
+                    (.add dynamicArgs argType)
+                    (set! first false)))))
+            (.doCall this type pos (.toList dynamicArgs))))
+        (when (> (.size split) 1)
+          (let [^{:tag (ListBuffer Type)} argTypes (ListBuffer.)]
+            (loop [^int c 0]
+              (when (< c (.size split))
+                (.append argTypes (.-stringType (.-syms this)))
+                (recur (unchecked-inc-int c))))
+            (.doCall this type pos (.toList argTypes))))))
+
+    (method ^:private doCall ^void [this ^Type type ^JCDiagnostic$DiagnosticPosition pos
+                                    ^{:tag (List Type)} dynamicArgTypes]
+      (let [indyType (Type$MethodType. dynamicArgTypes
+                                       type
+                                       (List/nil)
+                                       (.-methodClass (.-syms this)))
+            prevPos (.-pos (.-make this))]
+        (try
+          (.at (.-make this) pos)
+          (let [^{:tag (List Type)} bsm_staticArgs (List/of
+                                                     (.-methodHandleLookupType (.-syms this))
+                                                     (.-stringType (.-syms this))
+                                                     (.-methodTypeType (.-syms this)))
+                bsm (.resolveInternalMethod (.-rs this)
+                                            pos
+                                            (.getAttrEnv (.-gen this))
+                                            (.-stringConcatFactory (.-syms this))
+                                            (.-makeConcat (.-names this))
+                                            bsm_staticArgs
+                                            nil)
+                dynSym (Symbol$DynamicMethodSymbol.
+                         (.-makeConcat (.-names this))
+                         (.-noSymbol (.-syms this))
+                         (.asHandle bsm)
+                         indyType
+                         (cast PoolConstant$LoadableConstant/1
+                               (.toArray (List/nil) (new PoolConstant$LoadableConstant/1 0))))
+                item (.makeDynamicItem (.getItems (.-gen this)) dynSym)]
+            (.invoke item))
+          (finally (.at (.-make this) prevPos))))))
+
+  (defclass ^:private ^:static ^:final IndyConstants
+    :extends Indy
+
+    (constructor ^:public [this ^Context context] (super. context))
+
+    (method ^:protected emit ^void [this ^JCDiagnostic$DiagnosticPosition pos
+                                    ^{:tag (List JCTree)} args ^boolean generateFirstArg ^Type type]
+      (let [^{:tag (List (List JCTree))} split (.split this args)
+            ^:mutable first true]
+        (for-each [^{:tag (List JCTree)} t split]
+          (Assert/check (not (.isEmpty t)) "Arguments list is empty")
+          (let [recipe (StringBuilder. (.size t))
+                ^{:tag (ListBuffer Type)} dynamicArgs (ListBuffer.)
+                ^{:tag (ListBuffer PoolConstant$LoadableConstant)} staticArgs (ListBuffer.)]
+            (for-each [^JCTree arg t]
+              (let [constVal (.constValue (.-type arg))]
+                (when-not (.equals "" constVal)
+                  (cond
+                    (and (identical? (.-type arg) (.-botType (.-syms this)))
+                         (.hasTag arg JCTree$Tag/LITERAL))
+                      (.append recipe (cast String nil))
+                    (some? constVal)
+                      (let [a (.stringValue (.-type arg))]
+                        (if (or (not (== (.indexOf a TAG_CONST) -1))
+                                (not (== (.indexOf a TAG_ARG) -1)))
+                            (do
+                              (.append recipe TAG_CONST)
+                              (.add staticArgs (PoolConstant$LoadableConstant/String a)))
+                            (.append recipe a)))
+                    :else
+                      (do
+                        (.append recipe TAG_ARG)
+                        (let [^:mutable argType (.-type arg)]
+                          (when (or (not first) generateFirstArg)
+                            (.load (.genExpr (.-gen this) arg (.-type arg))))
+                          (when (.shouldConvertToStringEagerly this argType)
+                            (.callMethod (.-gen this)
+                                         pos
+                                         (.-stringType (.-syms this))
+                                         (.-valueOf (.-names this))
+                                         (List/of (.-objectType (.-syms this)))
+                                         true)
+                            (set! argType (.-stringType (.-syms this))))
+                          (.add dynamicArgs argType)
+                          (set! first false)))))))
+            (.doCall this type pos (.toString recipe) (.toList staticArgs) (.toList dynamicArgs))))
+        (when (> (.size split) 1)
+          (let [^{:tag (ListBuffer Type)} argTypes (ListBuffer.)
+                recipe (StringBuilder.)]
+            (loop [^int c 0]
+              (when (< c (.size split))
+                (.append argTypes (.-stringType (.-syms this)))
+                (.append recipe TAG_ARG)
+                (recur (unchecked-inc-int c))))
+            (.doCall this type pos (.toString recipe) (List/nil) (.toList argTypes))))))
+
+    (method ^:private doCall ^void [this ^Type type ^JCDiagnostic$DiagnosticPosition pos
+                                    ^String recipe
+                                    ^{:tag (List PoolConstant$LoadableConstant)} staticArgs
+                                    ^{:tag (List Type)} dynamicArgTypes]
+      (let [indyType (Type$MethodType. dynamicArgTypes
+                                       type
+                                       (List/nil)
+                                       (.-methodClass (.-syms this)))
+            prevPos (.-pos (.-make this))]
+        (try
+          (.at (.-make this) pos)
+          (let [^{:tag (ListBuffer Type)} constTypes (ListBuffer.)
+                ^{:tag (ListBuffer PoolConstant$LoadableConstant)} constants (ListBuffer.)]
+            (for-each [^PoolConstant$LoadableConstant t staticArgs]
+              (.add constants t)
+              (.add constTypes (.-stringType (.-syms this))))
+            (let [^{:tag (List Type)} bsm_staticArgs (.appendList
+                                                       (.append
+                                                         (List/of
+                                                           (.-methodHandleLookupType (.-syms this))
+                                                           (.-stringType (.-syms this))
+                                                           (.-methodTypeType (.-syms this)))
+                                                         (.-stringType (.-syms this)))
+                                                       constTypes)
+                  bsm (.resolveInternalMethod (.-rs this)
+                                              pos
+                                              (.getAttrEnv (.-gen this))
+                                              (.-stringConcatFactory (.-syms this))
+                                              (.-makeConcatWithConstants (.-names this))
+                                              bsm_staticArgs
+                                              nil)
+                  dynSym (Symbol$DynamicMethodSymbol.
+                           (.-makeConcatWithConstants (.-names this))
+                           (.-noSymbol (.-syms this))
+                           (.asHandle bsm)
+                           indyType
+                           (cast PoolConstant$LoadableConstant/1
+                                 (.toArray (.appendList
+                                             (List/of (PoolConstant$LoadableConstant/String recipe))
+                                             constants)
+                                           (new PoolConstant$LoadableConstant/1 (.size constants)))))
+                  item (.makeDynamicItem (.getItems (.-gen this)) dynSym)]
+              (.invoke item)))
+          (finally (.at (.-make this) prevPos)))))))

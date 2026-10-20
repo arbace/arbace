@@ -1,0 +1,198 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/launcher/MemoryContext.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.launcher)
+
+(import '(com.sun.tools.javac.api JavacTool)
+        '(com.sun.tools.javac.code Lint$LintCategory)
+        '(com.sun.tools.javac.file JavacFileManager)
+        '(com.sun.tools.javac.resources LauncherProperties$Errors)
+        '(com.sun.tools.javac.util Context Log)
+        '(java.io File IOException PrintWriter)
+        '(java.lang.module ModuleDescriptor ModuleFinder ModuleReference)
+        '(java.nio ByteBuffer)
+        '(java.nio.file Files Path)
+        '(java.util ArrayList Arrays HashMap List Map Set)
+        '(java.util.function Function IntFunction Supplier)
+        '(javax.tools JavaFileManager StandardLocation))
+
+(defclass ^:final MemoryContext
+  (field ^:private ^:final ^PrintWriter out)
+
+  (field ^:private ^:final ^ProgramDescriptor descriptor)
+
+  (field ^:private ^:final ^RelevantJavacOptions options)
+
+  (field ^:private ^:final ^JavacTool compiler)
+
+  (field ^:private ^:final ^JavacFileManager standardFileManager)
+
+  (field ^:private ^:final ^JavaFileManager memoryFileManager)
+
+  (field ^:private ^:final ^{:tag (Map String byte/1)} inMemoryClasses (HashMap.))
+
+  (constructor :throws [Fault] [this ^PrintWriter out ^ProgramDescriptor descriptor
+                                ^RelevantJavacOptions options]
+    (set! (.-out this) out)
+    (set! (.-descriptor this) descriptor)
+    (set! (.-options this) options)
+    (set! (.-compiler this) (JavacTool/create))
+    (set! (.-standardFileManager this) (.getStandardFileManager compiler nil nil nil))
+    (try
+      (let [^{:tag (List File)} searchPath (if (.isFirstLineIgnored (.fileObject descriptor))
+                                               (List/of)
+                                               (List/of (.toFile (.sourceRootPath descriptor))))]
+        (.setLocation standardFileManager StandardLocation/SOURCE_PATH searchPath))
+      (catch IOException e (throw (Error. "unexpected exception from file manager" e))))
+    (set! (.-memoryFileManager this) (MemoryFileManager. inMemoryClasses standardFileManager)))
+
+  (method getProgramDescriptor ^ProgramDescriptor [this] descriptor)
+
+  (method getSourceFileAsString ^String [this]
+    (.toString (.toAbsolutePath (.getFile (.fileObject descriptor)))))
+
+  (method getNamesOfCompiledClasses ^{:tag (Set String)} [this]
+    (Set/copyOf (.keySet inMemoryClasses)))
+
+  (method compileProgram :throws [Fault] ^void [this]
+    (let [units (ArrayList.)]
+      (.add units (.fileObject descriptor))
+      (when (.isModular descriptor)
+        (let [root (.sourceRootPath descriptor)]
+          (.add units (.getJavaFileObject standardFileManager (.resolve root "module-info.java")))))
+      (let [opts (.forProgramCompilation options)
+            context (Context.)
+            task (.getTask compiler out memoryFileManager nil opts nil units context)]
+        (.suppressAggregatedWarningNotes (Log/instance context) Lint$LintCategory/PREVIEW)
+        (let [ok (.call task)]
+          (when-not (.booleanValue ok) (throw (Fault. LauncherProperties$Errors/CompilationFailed)))))))
+
+  (method compileJavaFileByName ^byte/1 [this ^String name]
+    (let [lastDot (.lastIndexOf name ".")
+          ^String packageName (if (== lastDot -1) "" (.substring name 0 lastDot))
+          packagePath (.resolve (.sourceRootPath descriptor) (.replace packageName \. \/))]
+      (when-not (not (Files/isDirectory packagePath))
+        (let [^:mutable candidate (.substring name (unchecked-add-int lastDot 1) (.length name))]
+          (while (.contains candidate "$")
+            (when (Files/exists (.resolve packagePath (java-str candidate ".java"))) (break))
+            (set! candidate (.substring candidate 0 (.lastIndexOf candidate "$"))))
+          (let [file (.resolve packagePath (java-str candidate ".java"))]
+            (when-not (not (Files/exists file))
+              (let [opts (.forSubsequentCompilations options)
+                    unit (.getJavaFileObject standardFileManager file)
+                    task (.getTask compiler out memoryFileManager nil opts nil (List/of unit))
+                    ok (.call task)]
+                (when-not (.booleanValue ok)
+                  (let [fault (Fault. LauncherProperties$Errors/CompilationFailed)]
+                    (.println out (.getMessage fault))
+                    (System/exit 2)))
+                (cast byte/1 (.get inMemoryClasses name)))))))))
+
+  (method newClassLoaderFor :throws [Fault] ^ClassLoader [this ^ClassLoader parent
+                                                          ^String mainClassName]
+    (let [moduleInfoBytes (cast byte/1 (.get inMemoryClasses "module-info"))]
+      (if (nil? moduleInfoBytes)
+          (MemoryClassLoader. inMemoryClasses
+                              parent
+                              nil
+                              descriptor
+                              (method-ref Function
+                                          ^byte/1 [String]
+                                          this
+                                          MemoryContext/.compileJavaFileByName))
+          (let [lastDotInMainClassName (.lastIndexOf mainClassName \.)]
+            (when (== lastDotInMainClassName -1)
+              (throw (Fault. LauncherProperties$Errors/UnnamedPkgNotAllowedNamedModules)))
+            (let [bootLayer (ModuleLayer/boot)
+                  ^:mutable parentLayer bootLayer
+                  ^:mutable parentLoader parent
+                  modulePathFinder (MemoryContext/createModuleFinderFromModulePath)
+                  modulePathModules (.toList (.map
+                                               (.map
+                                                 (.stream (.findAll modulePathFinder))
+                                                 (method-ref
+                                                   Function
+                                                   ^ModuleDescriptor [ModuleReference]
+                                                   ModuleReference/.descriptor))
+                                               (method-ref
+                                                 Function
+                                                 ^String [ModuleDescriptor]
+                                                 ModuleDescriptor/.name)))]
+              (when-not (.isEmpty modulePathModules)
+                (let [modulePathConfiguration (.resolveAndBind
+                                                (.configuration bootLayer)
+                                                modulePathFinder
+                                                (ModuleFinder/of)
+                                                (Set/copyOf modulePathModules))
+                      modulePathController (ModuleLayer/defineModulesWithOneLoader
+                                             modulePathConfiguration
+                                             (List/of bootLayer)
+                                             parent)]
+                  (.enableNativeAccess this modulePathController false)
+                  (let [modulePathLayer (.layer modulePathController)]
+                    (set! parentLayer modulePathLayer)
+                    (set! parentLoader
+                          (.findLoader modulePathLayer (cast String (.getFirst modulePathModules)))))))
+              (let [applicationModule (ModuleDescriptor/read
+                                        (ByteBuffer/wrap moduleInfoBytes)
+                                        (method-ref
+                                          Supplier
+                                          ^Set []
+                                          descriptor
+                                          ProgramDescriptor/.computePackageNames))
+                    memoryFinder (MemoryModuleFinder. inMemoryClasses applicationModule descriptor)
+                    memoryConfig (.resolveAndBind
+                                   (.configuration parentLayer)
+                                   memoryFinder
+                                   (ModuleFinder/of)
+                                   (Set/of (.name applicationModule)))
+                    memoryClassLoader (MemoryClassLoader.
+                                        inMemoryClasses
+                                        parentLoader
+                                        applicationModule
+                                        descriptor
+                                        (method-ref
+                                          Function
+                                          ^byte/1 [String]
+                                          this
+                                          MemoryContext/.compileJavaFileByName))
+                    memoryController (ModuleLayer/defineModules
+                                       memoryConfig
+                                       (List/of parentLayer)
+                                       (lambda Function ^ClassLoader [^String __] memoryClassLoader))
+                    memoryLayer (.layer memoryController)
+                    module (cast Module
+                                 (.orElseThrow (.findModule memoryLayer (.name applicationModule))))
+                    mainClassNamePackageName (.substring mainClassName 0 lastDotInMainClassName)]
+                (.addOpens memoryController
+                           module
+                           mainClassNamePackageName
+                           (.getModule (.getClass this)))
+                (.enableNativeAccess this memoryController true)
+                (.findLoader memoryLayer (.name applicationModule))))))))
+
+  (method ^:private ^:static createModuleFinderFromModulePath ^ModuleFinder []
+    (let [elements (System/getProperty "jdk.module.path")]
+      (if (nil? elements)
+          (ModuleFinder/of)
+          (let [paths (.map (Arrays/stream (.split elements File/pathSeparator))
+                            (method-ref Function ^Path [String] Path/of))]
+            (ModuleFinder/of
+              (cast
+                Path/1
+                (.toArray paths
+                          (lambda IntFunction ^Path/1 ^:method-ref [^int n-1] (new Path/1 n-1)))))))))
+
+  (method ^:private enableNativeAccess ^void [this ^ModuleLayer$Controller controller
+                                              ^boolean shouldWarn]
+    (let [layer (.layer controller)]
+      (for-each [^String name (.enableNativeAccessForModules options)]
+        (when-not (.equals name "ALL-UNNAMED")
+          (let [found (.findModule layer name)]
+            (if (.isEmpty found)
+                (when shouldWarn
+                  (.println out
+                            (java-str "WARNING: Unknown module: "
+                                      name
+                                      " specified to --enable-native-access")))
+                (let [module (cast Module (.get found))]
+                  (when-not (.isNativeAccessEnabled module) (.enableNativeAccess controller module))))))))))

@@ -1,0 +1,300 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/file/PathFileObject.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.file)
+
+(import '(java.io IOException
+                  InputStream
+                  InputStreamReader
+                  OutputStream
+                  OutputStreamWriter
+                  Reader
+                  Writer)
+        '(java.net URI)
+        '(java.nio.file FileSystem FileSystems Files LinkOption Path)
+        '(java.text Normalizer Normalizer$Form)
+        '(java.util Objects)
+        '(javax.lang.model.element Modifier NestingKind)
+        '(javax.tools FileObject JavaFileObject JavaFileObject$Kind))
+
+(defclass ^:public ^:abstract PathFileObject
+  :implements [JavaFileObject]
+
+  (field ^:private ^:static ^:final ^FileSystem defaultFileSystem (FileSystems/getDefault))
+
+  (field ^:private ^:static ^:final ^boolean isMacOS
+    (.contains (System/getProperty "os.name" "") "OS X"))
+
+  (field ^:protected ^:final ^BaseFileManager fileManager)
+
+  (field ^:protected ^:final ^Path path)
+
+  (field ^:private ^boolean hasParents)
+
+  (method ^:static forDirectoryPath ^PathFileObject [^BaseFileManager fileManager ^Path path
+                                                     ^Path userPackageRootDir
+                                                     ^RelativePath relativePath]
+    (DirectoryFileObject. fileManager path userPackageRootDir relativePath))
+
+  (defclass ^:private ^:static DirectoryFileObject
+    :extends PathFileObject
+
+    (field ^:private ^:final ^Path userPackageRootDir)
+
+    (field ^:private ^:final ^RelativePath relativePath)
+
+    (constructor ^:private [this ^BaseFileManager fileManager ^Path path ^Path userPackageRootDir
+                            ^RelativePath relativePath]
+      (super. fileManager path)
+      (set! (.-userPackageRootDir this) (cast Path (Objects/requireNonNull userPackageRootDir)))
+      (set! (.-relativePath this) relativePath))
+
+    (method ^:public getName ^String [this]
+      (.toString (.resolveAgainst relativePath userPackageRootDir)))
+
+    (method ^:public inferBinaryName ^String [this ^{:tag (Iterable (? extends Path))} paths]
+      (DirectoryFileObject/toBinaryName relativePath))
+
+    (method ^:public toString ^String [this]
+      (java-str "DirectoryFileObject[" userPackageRootDir ":" (.-path relativePath) "]"))
+
+    (method getSibling ^PathFileObject [this ^String baseName]
+      (DirectoryFileObject. (.-fileManager this)
+                            (.resolveSibling (.-path this) baseName)
+                            userPackageRootDir
+                            (RelativePath$RelativeFile. (.dirname relativePath) baseName))))
+
+  (method ^:public ^:static forJarPath ^PathFileObject [^BaseFileManager fileManager ^Path path
+                                                        ^Path userJarPath]
+    (JarFileObject. fileManager path userJarPath))
+
+  (defclass ^:private ^:static JarFileObject
+    :extends PathFileObject
+
+    (field ^:private ^:final ^Path userJarPath)
+
+    (constructor ^:private [this ^BaseFileManager fileManager ^Path path ^Path userJarPath]
+      (super. fileManager path)
+      (set! (.-userJarPath this) userJarPath))
+
+    (method ^:public getName ^String [this]
+      (java-str userJarPath "(" (.-path this) ")"))
+
+    (method ^:public inferBinaryName ^String [this ^{:tag (Iterable (? extends Path))} paths]
+      (let [root (cast Path
+                       (.next (.iterator (.getRootDirectories (.getFileSystem (.-path this))))))]
+        (JarFileObject/toBinaryName (.relativize root (.-path this)))))
+
+    (method ^:public toString ^String [this]
+      (java-str "JarFileObject[" userJarPath ":" (.-path this) "]"))
+
+    (method getSibling ^PathFileObject [this ^String baseName]
+      (JarFileObject. (.-fileManager this) (.resolveSibling (.-path this) baseName) userJarPath)))
+
+  (method ^:public ^:static forJRTPath ^PathFileObject [^BaseFileManager fileManager
+                                                        ^:final ^Path path]
+    (JRTFileObject. fileManager path))
+
+  (defclass ^:private ^:static JRTFileObject
+    :extends PathFileObject
+
+    (constructor ^:private [this ^BaseFileManager fileManager ^Path path]
+      (super. fileManager path))
+
+    (method ^:public getName ^String [this] (.toString (.-path this)))
+
+    (method ^:public inferBinaryName ^String [this ^{:tag (Iterable (? extends Path))} paths]
+      (JRTFileObject/toBinaryName (.subpath (.-path this) 2 (.getNameCount (.-path this)))))
+
+    (method ^:public toString ^String [this]
+      (java-str "JRTFileObject[" (.-path this) "]"))
+
+    (method getSibling ^PathFileObject [this ^String baseName]
+      (JRTFileObject. (.-fileManager this) (.resolveSibling (.-path this) baseName))))
+
+  (method ^:static forSimplePath ^PathFileObject [^BaseFileManager fileManager ^Path path
+                                                  ^Path userPath]
+    (SimpleFileObject. fileManager path userPath))
+
+  (defclass ^:private ^:static SimpleFileObject
+    :extends PathFileObject
+
+    (field ^:private ^:final ^Path userPath)
+
+    (constructor ^:private [this ^BaseFileManager fileManager ^Path path ^Path userPath]
+      (super. fileManager path)
+      (set! (.-userPath this) userPath))
+
+    (method ^:public getName ^String [this] (.toString userPath))
+
+    (method ^:public getShortName ^String [this]
+      (.toString (.getFileName userPath)))
+
+    (method ^:public inferBinaryName ^String [this ^{:tag (Iterable (? extends Path))} paths]
+      (let [absPath (.toAbsolutePath (.-path this))]
+        (for-each [^Path p paths]
+          (let [ap (.toAbsolutePath p)]
+            (when (.startsWith absPath ap)
+              (try
+                (let [rp (.relativize ap absPath)]
+                  (when (some? rp) (return (SimpleFileObject/toBinaryName rp))))
+                (catch IllegalArgumentException e)))))
+        nil))
+
+    (method ^:public getKind ^JavaFileObject$Kind [this]
+      (BaseFileManager/getKind userPath))
+
+    (method ^:public isNameCompatible ^boolean [this ^String simpleName ^JavaFileObject$Kind kind]
+      (.isPathNameCompatible this userPath simpleName kind))
+
+    (method ^:public toUri ^URI [this] (.normalize (.toUri userPath)))
+
+    (method getSibling ^PathFileObject [this ^String baseName]
+      (SimpleFileObject. (.-fileManager this)
+                         (.resolveSibling (.-path this) baseName)
+                         (.resolveSibling userPath baseName))))
+
+  (constructor ^:protected [this ^BaseFileManager fileManager ^Path path]
+    (set! (.-fileManager this) (cast BaseFileManager (Objects/requireNonNull fileManager)))
+    (when (Files/isDirectory path) (throw (IllegalArgumentException. "directories not supported")))
+    (set! (.-path this) path))
+
+  (method ^:abstract inferBinaryName ^String [this ^{:tag (Iterable (? extends Path))} paths])
+
+  (method ^:abstract getSibling ^PathFileObject [this ^String basename])
+
+  (method isJarFile ^boolean [this] (instance? JarFileObject this))
+
+  (method ^:public getPath ^Path [this] path)
+
+  (method ^:public getShortName ^String [this]
+    (.toString (.getFileName path)))
+
+  (method ^:public getKind ^JavaFileObject$Kind [this]
+    (BaseFileManager/getKind path))
+
+  (method ^:public isNameCompatible ^boolean [this ^String simpleName ^JavaFileObject$Kind kind]
+    (.isPathNameCompatible this path simpleName kind))
+
+  (method ^:protected isPathNameCompatible ^boolean [this ^Path p ^String simpleName
+                                                     ^JavaFileObject$Kind kind]
+    (Objects/requireNonNull simpleName)
+    (Objects/requireNonNull kind)
+    (if (and (identical? kind JavaFileObject$Kind/OTHER)
+             (not (identical? (BaseFileManager/getKind p) kind)))
+        false
+        (let [sn (java-str simpleName (.-extension kind))
+              pn (.toString (.getFileName p))]
+          (if (.equals pn sn)
+              true
+              (do
+                (when (identical? (.getFileSystem p) defaultFileSystem)
+                  (when isMacOS
+                    (when (and (Normalizer/isNormalized pn Normalizer$Form/NFD)
+                               (Normalizer/isNormalized sn Normalizer$Form/NFC))
+                      (let [normName (Normalizer/normalize pn Normalizer$Form/NFC)]
+                        (when (.equals normName sn) (return true)))))
+                  (when (.equalsIgnoreCase pn sn)
+                    (try
+                      (return (.equals (.toString
+                                         (.getFileName (.toRealPath p LinkOption/NOFOLLOW_LINKS)))
+                                       sn))
+                      (catch IOException e))))
+                false)))))
+
+  (method ^:public getNestingKind ^NestingKind [this] nil)
+
+  (method ^:public getAccessLevel ^Modifier [this] nil)
+
+  (method ^:public toUri ^URI [this] (.toUri path))
+
+  (method ^:public openInputStream :throws [IOException] ^InputStream [this]
+    (.updateLastUsedTime fileManager)
+    (Files/newInputStream path))
+
+  (method ^:public openOutputStream :throws [IOException] ^OutputStream [this]
+    (.updateLastUsedTime fileManager)
+    (.flushCache fileManager this)
+    (.ensureParentDirectoriesExist this)
+    (let [output (Files/newOutputStream path)] (.newOutputToPath fileManager path) output))
+
+  (method ^:public openReader :throws [IOException] ^Reader [this ^boolean ignoreEncodingErrors]
+    (let [decoder (.getDecoder fileManager (.getEncodingName fileManager) ignoreEncodingErrors)]
+      (InputStreamReader. (.openInputStream this) decoder)))
+
+  (method ^:public getCharContent :throws [IOException] ^CharSequence [this
+                                                                       ^boolean ignoreEncodingErrors]
+    (let [^:mutable cb (.getCachedContent fileManager this)]
+      (when (nil? cb)
+        (with-resources [in (.openInputStream this)]
+          (let [bb (.makeByteBuffer fileManager in)
+                prev (.useSource (.-log fileManager) this)]
+            (try
+              (set! cb (.decode fileManager bb ignoreEncodingErrors))
+              (finally (.useSource (.-log fileManager) prev)))
+            (.recycleByteBuffer fileManager bb)
+            (when-not ignoreEncodingErrors (.cache fileManager this cb)))))
+      cb))
+
+  (method ^:public openWriter :throws [IOException] ^Writer [this]
+    (.updateLastUsedTime fileManager)
+    (.flushCache fileManager this)
+    (.ensureParentDirectoriesExist this)
+    (let [^Writer writer (OutputStreamWriter. (Files/newOutputStream path)
+                                              (.getEncodingName fileManager))]
+      (.newOutputToPath fileManager path)
+      writer))
+
+  (method ^:public getLastModified ^long [this]
+    (try (.toMillis (Files/getLastModifiedTime path)) (catch IOException e 0)))
+
+  (method ^:public delete ^boolean [this]
+    (try (Files/delete path) true (catch IOException e false)))
+
+  (method isSameFile ^boolean [this ^PathFileObject other]
+    (.equals path (.-path other)))
+
+  (method ^:public equals ^boolean [this other]
+    (if-instance [^PathFileObject pathFileObject other]
+      (.equals path (.-path pathFileObject))
+      false))
+
+  (method ^:public hashCode ^int [this] (.hashCode path))
+
+  (method ^:public toString ^String [this]
+    (java-str (.getSimpleName (.getClass this)) "[" path "]"))
+
+  (method ^:private ensureParentDirectoriesExist :throws [IOException] ^void [this]
+    (when-not hasParents
+      (let [parent (.getParent path)]
+        (when (and (some? parent) (not (Files/isDirectory parent)))
+          (try
+            (Files/createDirectories parent)
+            (catch IOException e (throw (IOException. "could not create parent directories" e)))))
+        (set! hasParents true))))
+
+  (method ^:protected ^:static toBinaryName ^String [^RelativePath relativePath]
+    (PathFileObject/toBinaryName (.-path relativePath) "/"))
+
+  (method ^:protected ^:static toBinaryName ^String [^Path relativePath]
+    (PathFileObject/toBinaryName (.toString relativePath)
+                                 (.getSeparator (.getFileSystem relativePath))))
+
+  (method ^:private ^:static toBinaryName ^String [^String relativePath ^String sep]
+    (.replace (PathFileObject/removeExtension relativePath) sep "."))
+
+  (method ^:private ^:static removeExtension ^String [^String fileName]
+    (let [lastDot (.lastIndexOf fileName ".")]
+      (if (== lastDot -1) fileName (.substring fileName 0 lastDot))))
+
+  (method ^:public ^:static getSimpleName ^String [^FileObject fo]
+    (let [uri (.toUri fo)
+          s (.getSchemeSpecificPart uri)]
+      (.substring s (unchecked-add-int (.lastIndexOf s "/") 1))))
+
+  (defclass ^:public ^:static CannotCreateUriError
+    :extends Error
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 9101708840997613546)
+
+    (constructor ^:public [this ^String value ^Throwable cause]
+      (super. value cause))))

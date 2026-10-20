@@ -1,0 +1,619 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/comp/ExhaustivenessComputer.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.comp)
+
+(import '(com.sun.tools.javac.code Kinds$Kind
+                                   Symbol
+                                   Symbol$ClassSymbol
+                                   Symbol$CompletionFailure
+                                   Symbol$RecordComponent
+                                   Symbol$TypeSymbol
+                                   Symbol$TypeVariableSymbol
+                                   Symtab
+                                   Type
+                                   Type$IntersectionClassType
+                                   Type$TypeVar
+                                   TypeTag
+                                   Types)
+        '(com.sun.tools.javac.tree JCTree$JCAnyPattern
+                                   JCTree$JCBindingPattern
+                                   JCTree$JCCase
+                                   JCTree$JCCaseLabel
+                                   JCTree$JCConstantCaseLabel
+                                   JCTree$JCExpression
+                                   JCTree$JCLiteral
+                                   JCTree$JCPattern
+                                   JCTree$JCPatternCaseLabel
+                                   JCTree$JCRecordPattern
+                                   TreeInfo)
+        '(com.sun.tools.javac.util Assert Context Context$Key List ListBuffer Pair)
+        '(java.util ArrayList Arrays Collection HashMap HashSet Iterator Map Map$Entry Set)
+        '(java.util.function Consumer Function IntFunction Predicate)
+        '(java.util.stream Collectors Stream))
+
+(defclass ^:public ExhaustivenessComputer
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key ExhaustivenessComputer)} exhaustivenessKey
+    (Context$Key.))
+
+  (field ^:private ^:final ^Symtab syms)
+
+  (field ^:private ^:final ^Types types)
+
+  (field ^:private ^:final ^Check chk)
+
+  (field ^:private ^:final ^Infer infer)
+
+  (field ^:private ^:final ^{:tag (Map (Pair Type Type) Boolean)} isSubtypeCache (HashMap.))
+
+  (method ^:public ^:static instance ^ExhaustivenessComputer [^Context context]
+    (let [^:mutable instance (cast ExhaustivenessComputer (.get context exhaustivenessKey))]
+      (when (nil? instance) (set! instance (ExhaustivenessComputer. context)))
+      instance))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context exhaustivenessKey this)
+    (set! syms (Symtab/instance context))
+    (set! types (Types/instance context))
+    (set! chk (Check/instance context))
+    (set! infer (Infer/instance context)))
+
+  (method ^:public exhausts ^boolean [this ^JCTree$JCExpression selector
+                                      ^{:tag (List JCTree$JCCase)} cases]
+    (let [^{:tag (Set PatternDescription)} patternSet (HashSet.)
+          ^{:tag (Map Symbol (Set Symbol))} enum2Constants (HashMap.)
+          ^{:tag (Set Object)} booleanLiterals (HashSet.
+                                                 (Set/of (Integer/valueOf 0) (Integer/valueOf 1)))]
+      (for-each [^JCTree$JCCase c cases]
+        (when-not (not (TreeInfo/unguardedCase c))
+          (for-each [^JCTree$JCCaseLabel l (.-labels c)]
+            (if-instance [^JCTree$JCPatternCaseLabel patternLabel l]
+              (for-each [^Type component (.components this (.-type selector))]
+                (.add patternSet (.makePatternDescription this component (.-pat patternLabel))))
+              (when-instance [^JCTree$JCConstantCaseLabel constantLabel l]
+                (if (.hasTag (.unboxedTypeOrType types (.-type selector)) TypeTag/BOOLEAN)
+                    (let [value (.-value (cast JCTree$JCLiteral (.-expr constantLabel)))]
+                      (.remove booleanLiterals value))
+                    (let [s (TreeInfo/symbol (.-expr constantLabel))]
+                      (when (and (some? s) (.isEnum s))
+                        (.remove (cast Set
+                                       (.computeIfAbsent
+                                         enum2Constants
+                                         (.-owner s)
+                                         (lambda Function ^Set [^Symbol x]
+                                           (let [^{:tag (Set Symbol)} result (HashSet.)]
+                                             (.forEach
+                                               (.getSymbols
+                                                 (.members (.-owner s))
+                                                 (lambda Predicate ^boolean [^Symbol sym]
+                                                   (and
+                                                     (identical? (.-kind sym) Kinds$Kind/VAR)
+                                                     (.isEnum sym))))
+                                               (method-ref Consumer [Symbol] result Set/.add))
+                                             result))))
+                                 s)))))))))
+      (if (and (.hasTag (.unboxedTypeOrType types (.-type selector)) TypeTag/BOOLEAN)
+               (.isEmpty booleanLiterals))
+          true
+          (do
+            (for-each [^{:tag (Map$Entry Symbol (Set Symbol))} e (.entrySet enum2Constants)]
+              (when (.isEmpty (cast Set (.getValue e)))
+                (.add patternSet (BindingPattern. (.-type (cast Symbol (.getKey e)))))))
+            (let [^:mutable ^{:tag (Set PatternDescription)} patterns patternSet
+                  ^{:tag (Set (Set PatternDescription))} seenFallback (HashSet.)
+                  ^:mutable useHashes true]
+              (try
+                (let [^:mutable repeat true]
+                  (while repeat
+                    (let [^:mutable ^{:tag (Set PatternDescription)} updatedPatterns nil]
+                      (set! updatedPatterns
+                            (.reduceBindingPatterns this (.-type selector) patterns))
+                      (set! updatedPatterns (.reduceNestedPatterns this updatedPatterns useHashes))
+                      (set! updatedPatterns (.reduceRecordPatterns this updatedPatterns))
+                      (set! updatedPatterns (.removeCoveredRecordPatterns this updatedPatterns))
+                      (set! repeat (not (.equals updatedPatterns patterns)))
+                      (when (.checkCovered this (.-type selector) patterns) (return true))
+                      (if (not repeat)
+                          (do
+                            (set! repeat (and useHashes (.add seenFallback updatedPatterns)))
+                            (set! useHashes false))
+                          (set! useHashes true))
+                      (set! patterns updatedPatterns)))
+                  (.checkCovered this (.-type selector) patterns))
+                (catch Symbol$CompletionFailure cf (.completionError chk (.pos selector) cf) true)
+                (finally (.clear isSubtypeCache))))))))
+
+  (method ^:private checkCovered ^boolean [this ^Type seltype
+                                           ^{:tag (Iterable PatternDescription)} patterns]
+    (for-each [^Type seltypeComponent (.components this seltype)]
+      (for-each [^PatternDescription pd patterns]
+        (when (.isBpCovered this seltypeComponent pd) (return true))))
+    false)
+
+  (method ^:private components ^{:tag (List Type)} [this ^Type seltype]
+    (label :switch
+      (switch (.getTag seltype)
+        CLASS
+          (do
+            (when (.isCompound seltype)
+              (when (.isIntersection seltype)
+                (break :switch
+                       (cast List
+                             (.collect (.flatMap
+                                         (.stream
+                                           (.getComponents
+                                             (cast Type$IntersectionClassType seltype)))
+                                         (lambda Function ^Stream [^Type t]
+                                           (.stream (.components this t))))
+                                       (List/collector)))))
+              (break :switch (List/nil)))
+            (List/of (.erasure types seltype)))
+        TYPEVAR (.components this (.getUpperBound (cast Type$TypeVar seltype)))
+        (List/of (.erasure types seltype)))))
+
+  (method ^:private reduceBindingPatterns ^{:tag (Set PatternDescription)} [this ^Type selectorType
+                                                                            ^{:tag (Set PatternDescription)} patterns]
+    (let [^{:tag (Set Symbol)} existingBindings (cast
+                                                  Set
+                                                  (.collect
+                                                    (.map
+                                                      (.filter
+                                                        (.stream patterns)
+                                                        (lambda Predicate ^boolean [^PatternDescription pd]
+                                                          (instance? BindingPattern pd)))
+                                                      (lambda Function ^Symbol$TypeSymbol [^PatternDescription pd]
+                                                        (.-tsym (.-type (cast BindingPattern pd)))))
+                                                    (Collectors/toSet)))]
+      (for-each [^PatternDescription pdOne patterns]
+        (when-instance [^BindingPattern bpOne pdOne]
+          (let [^{:tag (Set PatternDescription)} toAdd (HashSet.)]
+            (for-each [^Type sup (.directSupertypes types (.-type bpOne))]
+              (let [clazz (cast Symbol$ClassSymbol (.-tsym (.erasure types sup)))]
+                (.complete clazz)
+                (when (and (and (.isSealed clazz) (.isAbstract clazz))
+                           (not (.contains existingBindings clazz)))
+                  (let [clazzType (.-type clazz)]
+                    (when-not (.noneMatch (.stream (.components this selectorType))
+                                          (lambda Predicate ^boolean [^Type c]
+                                            (.isSubtypeErasure this clazzType c)))
+                      (let [^{:tag (Set Symbol)} permitted (.allPermittedSubTypes
+                                                             this
+                                                             clazz
+                                                             (lambda Predicate ^boolean [^Symbol$ClassSymbol csym]
+                                                               (let [^Type instantiated
+                                                                       (if (.isEmpty
+                                                                             (.allparams
+                                                                               (.-type csym)))
+                                                                           (.-type csym)
+                                                                           (.instantiatePatternType
+                                                                             infer
+                                                                             selectorType
+                                                                             csym))]
+                                                                 (and
+                                                                   (some? instantiated)
+                                                                   (.isCastable
+                                                                     types
+                                                                     selectorType
+                                                                     instantiated)))))
+                            ^{:tag (Set Symbol)} pendingPermitted (HashSet. permitted)]
+                        (for-each [^PatternDescription pdOther patterns]
+                          (when-instance [^BindingPattern bpOther pdOther]
+                            (.removeIf
+                              pendingPermitted
+                              (lambda Predicate ^boolean [^Symbol pending]
+                                (.isSubtypeErasure this (.-type pending) (.-type bpOther))))
+                            (when (.isAbstract (.-tsym (.-type bpOther)))
+                              (let [^{:tag (Predicate Symbol)} check
+                                      (lambda Predicate ^boolean [^Symbol pending]
+                                        (.isPresent
+                                          (.findAny
+                                            (.filter
+                                              (.filter
+                                                (.stream permitted)
+                                                (lambda Predicate ^boolean [^Symbol perm]
+                                                  (.isSubtypeErasure
+                                                    this
+                                                    (.-type perm)
+                                                    (.-type bpOther))))
+                                              (lambda Predicate ^boolean [^Symbol perm]
+                                                (.isSubtypeErasure
+                                                  this
+                                                  (.-type perm)
+                                                  (.-type pending)))))))]
+                                (.removeIf pendingPermitted check)))))
+                        (when (.isEmpty pendingPermitted)
+                          (.add toAdd (BindingPattern. (.-type clazz))))))))))
+            (when-not (.isEmpty toAdd)
+              (let [^{:tag (Set PatternDescription)} newPatterns (HashSet. patterns)]
+                (.addAll newPatterns toAdd)
+                (return newPatterns))))))
+      patterns))
+
+  (method ^:private allPermittedSubTypes ^{:tag (Set Symbol)} [this ^Symbol$TypeSymbol root
+                                                               ^{:tag (Predicate Symbol$ClassSymbol)} accept]
+    (let [^{:tag (Set Symbol)} permitted (HashSet.)
+          ^:mutable ^{:tag (List Symbol$ClassSymbol)} permittedSubtypesClosure (.baseClasses
+                                                                                 this
+                                                                                 root)]
+      (while (.nonEmpty permittedSubtypesClosure)
+        (let [current (cast Symbol$ClassSymbol (.-head permittedSubtypesClosure))]
+          (set! permittedSubtypesClosure (.-tail permittedSubtypesClosure))
+          (.complete current)
+          (when (and (.isSealed current) (.isAbstract current))
+            (for-each [^Type t (.getPermittedSubclasses current)]
+              (let [csym (cast Symbol$ClassSymbol (.-tsym t))]
+                (when (.test accept csym)
+                  (set! permittedSubtypesClosure (.prepend permittedSubtypesClosure csym))
+                  (.add permitted csym)))))))
+      permitted))
+
+  (method ^:private baseClasses ^{:tag (List Symbol$ClassSymbol)} [this ^Symbol$TypeSymbol root]
+    (if-instance [^Symbol$ClassSymbol clazz root]
+      (List/of clazz)
+      (if-instance [^Symbol$TypeVariableSymbol tvar root]
+        (let [^{:tag (ListBuffer Symbol$ClassSymbol)} result (ListBuffer.)]
+          (for-each [^Type bound (.getBounds tvar)]
+            (.appendList result (.baseClasses this (.-tsym bound))))
+          (.toList result))
+        (List/nil))))
+
+  (method ^:private reduceNestedPatterns ^{:tag (Set PatternDescription)} [this
+                                                                           ^{:tag (Set PatternDescription)} patterns
+                                                                           ^boolean useHashes]
+    (let [groupByRecordClass (cast Map
+                                   (.collect
+                                     (.map (.filter
+                                             (.stream patterns)
+                                             (lambda Predicate ^boolean [^PatternDescription pd]
+                                               (instance? RecordPattern pd)))
+                                           (lambda Function ^RecordPattern [^PatternDescription pd]
+                                             (cast RecordPattern pd)))
+                                     (Collectors/groupingBy
+                                       (lambda Function ^Symbol$ClassSymbol [^RecordPattern pd]
+                                         (cast Symbol$ClassSymbol (.-tsym (.-recordType pd)))))))]
+      (for-each [^Map$Entry e (.entrySet groupByRecordClass)]
+        (let [nestedPatternsCount (.size (.getRecordComponents
+                                           (cast Symbol$ClassSymbol (.getKey e))))
+              ^{:tag (Set RecordPattern)} current (HashSet. (cast Collection (.getValue e)))]
+          (loop [^int mismatchingCandidate 0]
+            (when (< mismatchingCandidate nestedPatternsCount)
+              (let [mismatchingCandidateFin mismatchingCandidate
+                    groupEquivalenceCandidates (cast
+                                                 Map
+                                                 (.collect
+                                                   (.filter
+                                                     (.stream current)
+                                                     (lambda Predicate ^boolean [^RecordPattern pd]
+                                                       (==
+                                                         (alength (.-nested pd))
+                                                         nestedPatternsCount)))
+                                                   (Collectors/groupingBy
+                                                     (lambda Function ^Integer [^RecordPattern pd]
+                                                       (if useHashes
+                                                           (.hashCode pd mismatchingCandidateFin)
+                                                           0)))))]
+                (for-each [^java.util.List candidates (.values groupEquivalenceCandidates)]
+                  (let [candidatesArr (cast
+                                        RecordPattern/1
+                                        (.toArray
+                                          candidates
+                                          (lambda IntFunction ^RecordPattern/1 ^:method-ref [^int n-1]
+                                            (new RecordPattern/1 n-1))))]
+                    (loop [^int firstCandidate 0]
+                      (when (< firstCandidate (alength candidatesArr))
+                        (let [rpOne (aget candidatesArr firstCandidate)
+                              ^{:tag (ListBuffer RecordPattern)} join (ListBuffer.)]
+                          (.append join rpOne)
+                          (loop [^int nextCandidate 0]
+                            (if (< nextCandidate (alength candidatesArr))
+                                (if (== firstCandidate nextCandidate)
+                                    (recur (unchecked-inc-int nextCandidate))
+                                    (let [rpOther (aget candidatesArr nextCandidate)]
+                                      (if (and (identical?
+                                                 (.-tsym (.-recordType rpOne))
+                                                 (.-tsym (.-recordType rpOther)))
+                                               (.nestedComponentsEquivalent
+                                                 this
+                                                 rpOne
+                                                 rpOther
+                                                 mismatchingCandidate
+                                                 useHashes))
+                                          (do
+                                            (.append join rpOther)
+                                            (recur (unchecked-inc-int nextCandidate)))
+                                          (recur (unchecked-inc-int nextCandidate)))))
+                                nil))
+                          (let [nestedPatterns (cast
+                                                 Set
+                                                 (.collect
+                                                   (.map
+                                                     (.stream join)
+                                                     (lambda Function ^PatternDescription [^RecordPattern rp]
+                                                       (aget (.-nested rp) mismatchingCandidateFin)))
+                                                   (Collectors/toSet)))
+                                ^:mutable updatedPatterns (.reduceNestedPatterns
+                                                            this
+                                                            nestedPatterns
+                                                            useHashes)]
+                            (set! updatedPatterns (.reduceRecordPatterns this updatedPatterns))
+                            (set! updatedPatterns
+                                  (.removeCoveredRecordPatterns this updatedPatterns))
+                            (set! updatedPatterns
+                                  (.reduceBindingPatterns
+                                    this
+                                    (aget (.fullComponentTypes rpOne) mismatchingCandidateFin)
+                                    updatedPatterns))
+                            (if (not (.equals nestedPatterns updatedPatterns))
+                                (do
+                                  (when useHashes (.removeAll current join))
+                                  (for-each [^PatternDescription nested updatedPatterns]
+                                    (let [newNested (cast
+                                                      PatternDescription/1
+                                                      (Arrays/copyOf
+                                                        (.-nested rpOne)
+                                                        (alength (.-nested rpOne))))]
+                                      (aset newNested mismatchingCandidateFin nested)
+                                      (let [nue (RecordPattern.
+                                                  (.recordType rpOne)
+                                                  (.fullComponentTypes rpOne)
+                                                  newNested
+                                                  (HashSet. join))]
+                                        (.add current nue))))
+                                  (recur (unchecked-inc-int firstCandidate)))
+                                (recur (unchecked-inc-int firstCandidate)))))))))
+                (recur (unchecked-inc-int mismatchingCandidate)))))
+          (when-not (.equals current (HashSet. (cast Collection (.getValue e))))
+            (let [^{:tag (Set PatternDescription)} result (HashSet. patterns)]
+              (.removeAll result (cast Collection (.getValue e)))
+              (.addAll result current)
+              (return result)))))
+      patterns))
+
+  (method ^:private nestedComponentsEquivalent ^boolean [this ^RecordPattern existing
+                                                         ^RecordPattern candidate
+                                                         ^int mismatchingCandidate
+                                                         ^boolean useHashes]
+    (label :NEXT_NESTED
+      (loop [^int i 0]
+        (if (< i (alength (.-nested existing)))
+            (if (not (== i mismatchingCandidate))
+                (if (not (.equals (aget (.-nested existing) i) (aget (.-nested candidate) i)))
+                    (do
+                      (when useHashes (return false))
+                      (if-instance [^BindingPattern nestedCandidate (aget (.-nested candidate) i)]
+                        (if-instance [^BindingPattern nestedExisting (aget (.-nested existing) i)]
+                          (if (not (.isSubtypeErasure
+                                     this
+                                     (.-type nestedExisting)
+                                     (.-type nestedCandidate)))
+                              (return false)
+                              (recur (unchecked-inc-int i)))
+                          (if-instance [^RecordPattern nestedExisting (aget (.-nested existing) i)]
+                            (let [^{:tag (java.util.List PatternDescription)} pendingReplacedPatterns
+                                    (ArrayList. (.sourcePatterns nestedCandidate))]
+                              (while (not (.isEmpty pendingReplacedPatterns))
+                                (let [currentReplaced (cast
+                                                        PatternDescription
+                                                        (.removeLast pendingReplacedPatterns))]
+                                  (when (.equals nestedExisting currentReplaced)
+                                    (continue :NEXT_NESTED (unchecked-inc-int i)))
+                                  (.addAll pendingReplacedPatterns
+                                           (.sourcePatterns currentReplaced))))
+                              (return false))
+                            (return false)))
+                        (return false)))
+                    (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i)))
+            nil)))
+    true)
+
+  (method ^:private isSubtypeErasure ^boolean [this ^Type t ^Type s]
+    (let [^{:tag (Pair Type Type)} key (Pair/of t s)]
+      (.booleanValue
+        (cast Boolean
+              (.computeIfAbsent isSubtypeCache
+                                key
+                                (lambda Function ^Boolean [^Pair _]
+                                  (.isSubtype types (.erasure types t) (.erasure types s))))))))
+
+  (method ^:private reduceRecordPatterns ^{:tag (Set PatternDescription)} [this
+                                                                           ^{:tag (Set PatternDescription)} patterns]
+    (let [newPatterns (HashSet.)
+          ^:mutable modified false]
+      (for-each [^PatternDescription pd patterns]
+        (when-instance [^RecordPattern rpOne pd]
+          (let [reducedPattern (.reduceRecordPattern this rpOne)]
+            (when-not (identical? reducedPattern rpOne)
+              (.add newPatterns reducedPattern)
+              (set! modified true)
+              (continue))))
+        (.add newPatterns pd))
+      (if modified ^Set newPatterns patterns)))
+
+  (method ^:private reduceRecordPattern ^PatternDescription [this ^PatternDescription pattern]
+    (when-instance [^RecordPattern rpOne pattern]
+      (let [componentType (.fullComponentTypes rpOne)]
+        (when-not (== (alength componentType) (alength (.-nested rpOne))) (return pattern))
+        (let [^:mutable ^PatternDescription/1 reducedNestedPatterns nil
+              ^:mutable covered true]
+          (loop [^int i 0]
+            (when (< i (alength componentType))
+              (let [newNested (.reduceRecordPattern this (aget (.-nested rpOne) i))]
+                (when-not (identical? newNested (aget (.-nested rpOne) i))
+                  (when (nil? reducedNestedPatterns)
+                    (set! reducedNestedPatterns
+                          (cast PatternDescription/1
+                                (Arrays/copyOf (.-nested rpOne) (alength (.-nested rpOne))))))
+                  (aset reducedNestedPatterns i newNested))
+                (set! covered
+                      (let [a-2 covered
+                            b-3 (.checkCovered this (aget componentType i) (List/of newNested))]
+                        (and a-2 b-3)))
+                (recur (unchecked-inc-int i)))))
+          (cond
+            covered
+              (let [^PatternDescription pd (BindingPattern. (.-recordType rpOne) (Set/of pattern))]
+                (return pd))
+            (some? reducedNestedPatterns)
+              (let [^PatternDescription pd (RecordPattern.
+                                             (.-recordType rpOne)
+                                             (.fullComponentTypes rpOne)
+                                             reducedNestedPatterns
+                                             (Set/of pattern))]
+                (return pd))))))
+    pattern)
+
+  (method ^:private removeCoveredRecordPatterns ^{:tag (Set PatternDescription)} [this
+                                                                                  ^{:tag (Set PatternDescription)} patterns]
+    (let [^{:tag (Set Symbol)} existingBindings (cast
+                                                  Set
+                                                  (.collect
+                                                    (.map
+                                                      (.filter
+                                                        (.stream patterns)
+                                                        (lambda Predicate ^boolean [^PatternDescription pd]
+                                                          (instance? BindingPattern pd)))
+                                                      (lambda Function ^Symbol$TypeSymbol [^PatternDescription pd]
+                                                        (.-tsym (.-type (cast BindingPattern pd)))))
+                                                    (Collectors/toSet)))
+          ^{:tag (Set PatternDescription)} result (HashSet. patterns)]
+      (loop [^{:tag (Iterator PatternDescription)} it (.iterator result)]
+        (when (.hasNext it)
+          (let [pd (cast PatternDescription (.next it))]
+            (if-instance [^RecordPattern rp pd]
+              (if (.contains existingBindings (.-tsym (.-recordType rp)))
+                  (do (.remove it) (recur it))
+                  (recur it))
+              (recur it)))))
+      result))
+
+  (method ^:private isBpCovered ^boolean [this ^Type componentType ^PatternDescription newNested]
+    (if-instance [^BindingPattern bp newNested]
+      (let [seltype (.erasure types componentType)
+            pattype (.erasure types (.-type bp))]
+        (if (.isPrimitive seltype)
+            (.isUnconditionallyExactTypeBased types seltype pattype)
+            (or (and (.isPrimitive (.-type bp))
+                     (.isUnconditionallyExactTypeBased
+                       types
+                       (.unboxedType types seltype)
+                       (.-type bp)))
+                (.isSubtype types seltype pattype))))
+      false))
+
+  (defclass ^:sealed ^:interface PatternDescription
+    (method ^:public sourcePatterns ^{:tag (Set PatternDescription)} [this]))
+
+  (method ^:public makePatternDescription ^PatternDescription [this ^Type selectorType
+                                                               ^JCTree$JCPattern pattern]
+    (if-instance [^JCTree$JCBindingPattern binding pattern]
+      (let [^Type type (if (and (not (.isPrimitive selectorType))
+                                (.isSubtype types selectorType (.-type binding)))
+                           selectorType
+                           (.-type binding))]
+        (BindingPattern. type))
+      (if-instance [^JCTree$JCRecordPattern record pattern]
+        (let [^:mutable ^Type/1 componentTypes nil]
+          (if (not (.isErroneous (.-type record)))
+              (set! componentTypes
+                    (cast Type/1
+                          (.toArray (.map (.getRecordComponents
+                                            (cast Symbol$ClassSymbol (.-tsym (.-type record))))
+                                          (lambda Function ^Type [^Symbol$RecordComponent r]
+                                            (.memberType types (.-type record) r)))
+                                    (lambda IntFunction ^Type/1 [^int s] (new Type/1 s)))))
+              (set! componentTypes
+                    (cast Type/1
+                          (.toArray (.map (.-nested record)
+                                          (lambda Function ^Type [^JCTree$JCPattern t]
+                                            (.createErrorType types (.-type t))))
+                                    (lambda IntFunction ^Type/1 [^int s] (new Type/1 s))))))
+          (let [nestedDescriptions (new PatternDescription/1 (.size (.-nested record)))
+                ^:mutable ^int i 0]
+            (let [^:mutable ^{:tag (List JCTree$JCPattern)} it (.-nested record)]
+              (while (.nonEmpty it)
+                (let [^Type componentType (if (< i (alength componentTypes))
+                                              (aget componentTypes i)
+                                              (.-errType syms))]
+                  (aset nestedDescriptions
+                        i
+                        (.makePatternDescription
+                          this
+                          (.erasure types componentType)
+                          (cast JCTree$JCPattern (.-head it)))))
+                (set! it (.-tail it))
+                (set! i (unchecked-inc-int i))))
+            (RecordPattern. (.-type record) componentTypes nestedDescriptions)))
+        (if (instance? JCTree$JCAnyPattern pattern)
+            (BindingPattern. selectorType)
+            (throw (Assert/error))))))
+
+  (defclass ^:record BindingPattern [^Type type ^{:tag (Set PatternDescription)} sourcePatterns]
+    :implements [PatternDescription]
+
+    (constructor ^:public [this ^Type type] (this. type (Set/of)))
+
+    (method ^:public hashCode ^int [this] (.hashCode (.-tsym type)))
+
+    (method ^:public equals ^boolean [this o]
+      (if-instance [^BindingPattern other o]
+        (identical? (.-tsym type) (.-tsym (.-type other)))
+        false))
+
+    (method ^:public toString ^String [this] (java-str (.-tsym type) " _")))
+
+  (defclass ^:record RecordPattern [^Type recordType ^int _hashCode ^Type/1 fullComponentTypes
+                                    ^PatternDescription/1 nested
+                                    ^{:tag (Set PatternDescription)} sourcePatterns]
+    :implements [PatternDescription]
+
+    (constructor ^:public [this ^Type recordType ^Type/1 fullComponentTypes
+                           ^PatternDescription/1 nested]
+      (this. recordType fullComponentTypes nested (Set/of)))
+
+    (constructor ^:public [this ^Type recordType ^Type/1 fullComponentTypes
+                           ^PatternDescription/1 nested
+                           ^{:tag (Set PatternDescription)} sourcePatterns]
+      (this. recordType
+             (RecordPattern/hashCode -1 recordType nested)
+             fullComponentTypes
+             nested
+             sourcePatterns))
+
+    (method ^:public hashCode ^int [this] _hashCode)
+
+    (method ^:public equals ^boolean [this o]
+      (if-instance [^RecordPattern other o]
+        (if (identical? (.-tsym recordType) (.-tsym (.-recordType other)))
+            (Arrays/equals nested (.-nested other))
+            false)
+        false))
+
+    (method ^:public hashCode ^int [this ^int excludeComponent]
+      (RecordPattern/hashCode excludeComponent recordType nested))
+
+    (method ^:public ^:static hashCode ^int [^int excludeComponent ^Type recordType &
+                                             ^PatternDescription/1 nested]
+      (let [^:mutable ^int hash 5]
+        (set! hash
+              (unchecked-add-int (unchecked-multiply-int 41 hash) (.hashCode (.-tsym recordType))))
+        (loop [^int i 0]
+          (if (< i (alength nested))
+              (if (not (== i excludeComponent))
+                  (do
+                    (set! hash
+                          (unchecked-add-int (unchecked-multiply-int 41 hash)
+                                             (.hashCode (aget nested i))))
+                    (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))
+              nil))
+        hash))
+
+    (method ^:public toString ^String [this]
+      (java-str (.-tsym recordType)
+                "("
+                (cast String
+                      (.collect (.map (Arrays/stream nested)
+                                      (lambda Function ^String [^PatternDescription pd]
+                                        (.toString pd)))
+                                (Collectors/joining ", ")))
+                ")"))))

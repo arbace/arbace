@@ -1,0 +1,817 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/parser/JavaTokenizer.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.parser)
+
+(import '(com.sun.tools.javac.code Preview Source Source$Feature)
+        '(com.sun.tools.javac.file JavacFileManager)
+        '(com.sun.tools.javac.resources CompilerProperties$Errors CompilerProperties$LintWarnings)
+        '(com.sun.tools.javac.tree EndPosTable)
+        '(com.sun.tools.javac.util Assert
+                                   JCDiagnostic$DiagnosticFlag
+                                   JCDiagnostic$DiagnosticPosition
+                                   JCDiagnostic$Error
+                                   JCDiagnostic$SimpleDiagnosticPosition
+                                   LayoutCharacters
+                                   List
+                                   Log
+                                   Name
+                                   Names
+                                   Position
+                                   Position$LineMap)
+        '(java.nio CharBuffer)
+        '(java.util Set))
+
+(defclass ^:public JavaTokenizer
+  :extends UnicodeReader
+
+  (field ^:private ^:static ^:final ^boolean scannerDebug false)
+
+  (field ^:private ^:static ^:final ^int NOT_FOUND -1)
+
+  (field ^:private ^:final ^Source source)
+
+  (field ^:private ^:final ^Preview preview)
+
+  (field ^:protected ^:final ^boolean enableLineDocComments)
+
+  (field ^:protected ^:final ^Log log)
+
+  (field ^:private ^:final ^Tokens tokens)
+
+  (field ^:private ^:final ^Names names)
+
+  (field ^:protected ^:final ^ScannerFactory fac)
+
+  (field ^:protected ^:final ^StringBuilder sb)
+
+  (field ^:protected ^Tokens$TokenKind tk)
+
+  (field ^:protected ^int radix)
+
+  (field ^:protected ^Name name)
+
+  (field ^:protected ^int errPos Position/NOPOS)
+
+  (field ^:protected ^boolean isTextBlock)
+
+  (field ^:protected ^boolean hasEscapeSequences)
+
+  (constructor ^:protected [this ^ScannerFactory fac ^CharBuffer cb]
+    (this. fac (JavacFileManager/toArray cb) (.limit cb)))
+
+  (constructor ^:protected [this ^ScannerFactory fac ^char/1 array ^int length]
+    (super. fac array length)
+    (set! (.-fac this) fac)
+    (set! (.-log this) (.-log fac))
+    (set! (.-names this) (.-names fac))
+    (set! (.-tokens this) (.-tokens fac))
+    (set! (.-source this) (.-source fac))
+    (set! (.-preview this) (.-preview fac))
+    (set! (.-enableLineDocComments this) (.-enableLineDocComments fac))
+    (set! (.-sb this) (StringBuilder. 256)))
+
+  (method ^:protected checkSourceLevel ^void [this ^int pos ^Source$Feature feature]
+    (cond
+      (and (.isPreview preview feature) (not (.isEnabled preview)))
+        (.lexError this pos (.disabledError preview feature))
+      (not (.allowedInSource feature source)) (.lexError this pos (.error feature (.-name source)))
+      (.isPreview preview feature) (.warnPreview preview pos feature)))
+
+  (method ^:protected lexError ^void [this ^int pos ^JCDiagnostic$Error key]
+    (.error log pos key)
+    (when-not (.hasFlag key JCDiagnostic$DiagnosticFlag/SOURCE_LEVEL)
+      (set! tk Tokens$TokenKind/ERROR))
+    (set! errPos pos))
+
+  (method ^:protected put ^void [this ^char ch] (.append sb ch))
+
+  (method ^:protected putCodePoint ^void [this ^int codePoint]
+    (.appendCodePoint sb codePoint))
+
+  (method ^:protected put ^void [this]
+    (if (.isSurrogate this) (.putCodePoint this (.getCodepoint this)) (.put this (.get this))))
+
+  (method ^:protected put ^void [this ^String string] (.append sb string))
+
+  (method ^:protected putThenNext ^char [this] (.put this) (.next this))
+
+  (method ^:protected acceptThenPut ^boolean [this ^char ch]
+    (if (.is this ch) (do (.put this (.get this)) (.next this) true) false))
+
+  (method ^:protected acceptOneOfThenPut ^boolean [this ^char ch1 ^char ch2]
+    (if (.isOneOf this ch1 ch2) (do (.put this (.get this)) (.next this) true) false))
+
+  (method ^:private skipLineTerminator ^void [this]
+    (let [start (.position this)]
+      (.accept this \return)
+      (.accept this \newline)
+      (.processLineTerminator this start (.position this))))
+
+  (method ^:private scanLitChar ^void [this ^int pos ^boolean isString]
+    (let [backslash (.position this)]
+      (if (.acceptThenPut this \\)
+          (do
+            (set! hasEscapeSequences true)
+            (switch (.get this)
+              (\0 \1 \2 \3 \4 \5 \6 \7)
+                (let [leadch (.get this)]
+                  (.putThenNext this)
+                  (when (.inRange this \0 \7)
+                    (.putThenNext this)
+                    (when (and (<= leadch \3) (.inRange this \0 \7)) (.putThenNext this))))
+              (\b \t \n \f \r \' \" \\) (.putThenNext this)
+              \s
+                (do
+                  (.checkSourceLevel this (.position this) Source$Feature/TEXT_BLOCKS)
+                  (.putThenNext this))
+              (\newline \return)
+                (if isTextBlock
+                    (do (.skipLineTerminator this) (.put this \newline))
+                    (.lexError this (.position this) CompilerProperties$Errors/IllegalEscChar))
+              (.lexError this (.position this) CompilerProperties$Errors/IllegalEscChar)))
+          (do
+            (when (and (not isString) (not (Character/isBmpCodePoint (.getCodepoint this))))
+              (.lexError this pos CompilerProperties$Errors/IllegalCharLiteralMultipleSurrogates))
+            (.putThenNext this)))))
+
+  (method ^:private scanString ^void [this ^int pos]
+    (let [^:mutable firstEOLN NOT_FOUND]
+      (set! tk Tokens$TokenKind/STRINGLITERAL)
+      (set! isTextBlock (.accept this "\"\"\""))
+      (if isTextBlock
+          (do
+            (.checkSourceLevel this pos Source$Feature/TEXT_BLOCKS)
+            (.skipWhitespace this)
+            (if (.isEOLN this)
+                (.skipLineTerminator this)
+                (do
+                  (.lexError this (.position this) CompilerProperties$Errors/IllegalTextBlockOpen)
+                  (return)))
+            (while (.isAvailable this)
+              (when (.accept this "\"\"\"") (return))
+              (if (.isEOLN this)
+                  (do
+                    (.skipLineTerminator this)
+                    (.put this \newline)
+                    (when (== firstEOLN NOT_FOUND) (set! firstEOLN (.position this))))
+                  (.scanLitChar this pos true))))
+          (do
+            (.next this)
+            (while (.isAvailable this)
+              (when (.accept this \") (return))
+              (if (.isEOLN this) (break) (.scanLitChar this pos true)))))
+      (.lexError this
+                 pos
+                 ^JCDiagnostic$Error (if isTextBlock
+                                         CompilerProperties$Errors/UnclosedTextBlock
+                                         CompilerProperties$Errors/UnclosedStrLit))
+      (when-not (== firstEOLN NOT_FOUND) (.reset this firstEOLN))))
+
+  (method ^:private scanDigits ^void [this ^int pos ^int digitRadix]
+    (let [^int leadingUnderscorePos (if (.is this \_) (.position this) NOT_FOUND)
+          ^:mutable ^int trailingUnderscorePos 0]
+      (loop []
+        (if (not (.is this \_))
+            (do (.put this) (set! trailingUnderscorePos NOT_FOUND))
+            (set! trailingUnderscorePos (.position this)))
+        (.next this)
+        (when (or (>= (.digit this pos digitRadix) 0) (.is this \_)) (recur)))
+      (if (not (== leadingUnderscorePos NOT_FOUND))
+          (.lexError this leadingUnderscorePos CompilerProperties$Errors/IllegalUnderscore)
+          (when-not (== trailingUnderscorePos NOT_FOUND)
+            (.lexError this trailingUnderscorePos CompilerProperties$Errors/IllegalUnderscore)))))
+
+  (method ^:private scanHexExponentAndSuffix ^void [this ^int pos]
+    (if (.acceptOneOfThenPut this \p \P)
+        (do
+          (.skipIllegalUnderscores this)
+          (.acceptOneOfThenPut this \+ \-)
+          (.skipIllegalUnderscores this)
+          (if (>= (.digit this pos 10) 0)
+              (.scanDigits this pos 10)
+              (.lexError this pos CompilerProperties$Errors/MalformedFpLit)))
+        (.lexError this pos CompilerProperties$Errors/MalformedFpLit))
+    (if (.acceptOneOfThenPut this \f \F)
+        (do (set! tk Tokens$TokenKind/FLOATLITERAL) (set! radix 16))
+        (do
+          (.acceptOneOfThenPut this \d \D)
+          (set! tk Tokens$TokenKind/DOUBLELITERAL)
+          (set! radix 16))))
+
+  (method ^:private scanFraction ^void [this ^int pos]
+    (.skipIllegalUnderscores this)
+    (when (>= (.digit this pos 10) 0) (.scanDigits this pos 10))
+    (let [index (.length sb)]
+      (when (.acceptOneOfThenPut this \e \E)
+        (.skipIllegalUnderscores this)
+        (.acceptOneOfThenPut this \+ \-)
+        (.skipIllegalUnderscores this)
+        (if (>= (.digit this pos 10) 0)
+            (.scanDigits this pos 10)
+            (do (.lexError this pos CompilerProperties$Errors/MalformedFpLit) (.setLength sb index))))))
+
+  (method ^:private scanFractionAndSuffix ^void [this ^int pos]
+    (set! radix 10)
+    (.scanFraction this pos)
+    (if (.acceptOneOfThenPut this \f \F)
+        (set! tk Tokens$TokenKind/FLOATLITERAL)
+        (do (.acceptOneOfThenPut this \d \D) (set! tk Tokens$TokenKind/DOUBLELITERAL))))
+
+  (method ^:private scanHexFractionAndSuffix ^void [this ^int pos ^:mutable ^boolean seendigit]
+    (set! radix 16)
+    (Assert/check (.is this \.))
+    (.putThenNext this)
+    (.skipIllegalUnderscores this)
+    (when (>= (.digit this pos 16) 0) (set! seendigit true) (.scanDigits this pos 16))
+    (if (not seendigit)
+        (.lexError this pos CompilerProperties$Errors/InvalidHexNumber)
+        (.scanHexExponentAndSuffix this pos)))
+
+  (method ^:private skipIllegalUnderscores ^void [this]
+    (when (.is this \_)
+      (.lexError this (.position this) CompilerProperties$Errors/IllegalUnderscore)
+      (.skip this \_)))
+
+  (method ^:private scanNumber ^void [this ^int pos ^int radix]
+    (set! (.-radix this) radix)
+    (let [permitFloatingPoint (or (== radix 8) (== radix 10))
+          digitRadix (^[int int] Math/max 10 radix)
+          firstDigit (.digit this pos digitRadix)
+          seendigit (>= firstDigit 0)
+          seenValidDigit (and (>= firstDigit 0) (< firstDigit digitRadix))]
+      (when seendigit (.scanDigits this pos digitRadix))
+      (cond
+        (and (== radix 16) (.is this \.)) (.scanHexFractionAndSuffix this pos seendigit)
+        (and (and seendigit (== radix 16)) (.isOneOf this \p \P))
+          (.scanHexExponentAndSuffix this pos)
+        (and permitFloatingPoint (.is this \.))
+          (do (.putThenNext this) (.scanFractionAndSuffix this pos))
+        (and permitFloatingPoint (.isOneOf this \e \E \f \F \d \D))
+          (.scanFractionAndSuffix this pos)
+        :else
+          (do
+            (when-not seenValidDigit
+              (switch radix
+                2 (.lexError this pos CompilerProperties$Errors/InvalidBinaryNumber)
+                16 (.lexError this pos CompilerProperties$Errors/InvalidHexNumber)))
+            (if (.acceptOneOf this \l \L)
+                (set! tk Tokens$TokenKind/LONGLITERAL)
+                (set! tk Tokens$TokenKind/INTLITERAL))))))
+
+  (method ^:private checkIdent ^void [this]
+    (set! name (.fromString names (.toString sb)))
+    (set! tk (.lookupKind tokens name)))
+
+  (method ^:private scanIdent ^void [this]
+    (.putThenNext this)
+    (loop []
+      (label :do-body
+        (switch (.get this)
+          (\A \B
+              \C
+              \D
+              \E
+              \F
+              \G
+              \H
+              \I
+              \J
+              \K
+              \L
+              \M
+              \N
+              \O
+              \P
+              \Q
+              \R
+              \S
+              \T
+              \U
+              \V
+              \W
+              \X
+              \Y
+              \Z
+              \a
+              \b
+              \c
+              \d
+              \e
+              \f
+              \g
+              \h
+              \i
+              \j
+              \k
+              \l
+              \m
+              \n
+              \o
+              \p
+              \q
+              \r
+              \s
+              \t
+              \u
+              \v
+              \w
+              \x
+              \y
+              \z
+              \$
+              \_
+              \0
+              \1
+              \2
+              \3
+              \4
+              \5
+              \6
+              \7
+              \8
+              \9)
+            nil
+          (\u0000 \u0001
+                  \u0002
+                  \u0003
+                  \u0004
+                  \u0005
+                  \u0006
+                  \u0007
+                  \backspace
+                  \u000e
+                  \u000f
+                  \u0010
+                  \u0011
+                  \u0012
+                  \u0013
+                  \u0014
+                  \u0015
+                  \u0016
+                  \u0017
+                  \u0018
+                  \u0019
+                  \u001b
+                  \u007f)
+            (do (.next this) (break :do-body))
+          \u001a
+            (do
+              (when (.isAvailable this) (.next this) (break :do-body))
+              (.checkIdent this)
+              (return))
+          (let [^:mutable ^boolean isJavaIdentifierPart false]
+            (if (.isASCII this)
+                (set! isJavaIdentifierPart false)
+                (do
+                  (when (Character/isIdentifierIgnorable (.get this)) (.next this) (break :do-body))
+                  (set! isJavaIdentifierPart
+                        (if (.isSurrogate this)
+                            (Character/isJavaIdentifierPart (.getCodepoint this))
+                            (Character/isJavaIdentifierPart (.get this))))))
+            (when-not isJavaIdentifierPart (.checkIdent this) (return))))
+        (.putThenNext this))
+      (when true (recur))))
+
+  (method ^:private isSpecial ^boolean [this ^char ch]
+    (switch ch (\! \% \& \* \? \+ \- \: \< \= \> \^ \| \~ \@) true false))
+
+  (method ^:private scanOperator ^void [this]
+    (while true
+      (.put this)
+      (let [newtk (.lookupKind tokens (.toString sb))]
+        (when (identical? newtk Tokens$TokenKind/IDENTIFIER)
+          (.setLength sb (unchecked-subtract-int (.length sb) 1))
+          (break))
+        (set! tk newtk)
+        (.next this)
+        (when-not (.isSpecial this (.get this)) (break)))))
+
+  (method ^:public readToken ^Tokens$Token [this]
+    (.setLength sb 0)
+    (set! name nil)
+    (set! radix 0)
+    (set! isTextBlock false)
+    (set! hasEscapeSequences false)
+    (let [^:mutable ^int pos 0
+          ^:mutable ^{:tag (List Tokens$Comment)} comments nil]
+      (try
+        (while true
+          (set! pos (.position this))
+          (label :switch
+            (switch (.get this)
+              (\space \tab \formfeed)
+                (do (.skipWhitespace this) (.processWhiteSpace this pos (.position this)))
+              \newline (do (.next this) (.processLineTerminator this pos (.position this)))
+              \return
+                (do
+                  (.next this)
+                  (.accept this \newline)
+                  (.processLineTerminator this pos (.position this)))
+              (\A \B
+                  \C
+                  \D
+                  \E
+                  \F
+                  \G
+                  \H
+                  \I
+                  \J
+                  \K
+                  \L
+                  \M
+                  \N
+                  \O
+                  \P
+                  \Q
+                  \R
+                  \S
+                  \T
+                  \U
+                  \V
+                  \W
+                  \X
+                  \Y
+                  \Z
+                  \a
+                  \b
+                  \c
+                  \d
+                  \e
+                  \f
+                  \g
+                  \h
+                  \i
+                  \j
+                  \k
+                  \l
+                  \m
+                  \n
+                  \o
+                  \p
+                  \q
+                  \r
+                  \s
+                  \t
+                  \u
+                  \v
+                  \w
+                  \x
+                  \y
+                  \z
+                  \$
+                  \_)
+                (do (.scanIdent this) (break))
+              \0
+                (do
+                  (.next this)
+                  (cond
+                    (.acceptOneOf this \x \X)
+                      (do (.skipIllegalUnderscores this) (.scanNumber this pos 16))
+                    (.acceptOneOf this \b \B)
+                      (do (.skipIllegalUnderscores this) (.scanNumber this pos 2))
+                    :else
+                      (do
+                        (.put this \0)
+                        (when (.is this \_)
+                          (let [savePos (.position this)]
+                            (.skip this \_)
+                            (when (< (.digit this pos 10) 0)
+                              (.lexError this savePos CompilerProperties$Errors/IllegalUnderscore))))
+                        (.scanNumber this pos 8)))
+                  (break))
+              (\1 \2 \3 \4 \5 \6 \7 \8 \9) (do (.scanNumber this pos 10) (break))
+              \.
+                (do
+                  (if (.accept this "...")
+                      (do (.put this "...") (set! tk Tokens$TokenKind/ELLIPSIS))
+                      (do
+                        (.next this)
+                        (let [savePos (.position this)]
+                          (cond
+                            (.accept this \.)
+                              (.lexError this savePos CompilerProperties$Errors/IllegalDot)
+                            (>= (.digit this pos 10) 0)
+                              (do (.put this \.) (.scanFractionAndSuffix this pos))
+                            :else (set! tk Tokens$TokenKind/DOT)))))
+                  (break))
+              \, (do (.next this) (set! tk Tokens$TokenKind/COMMA) (break))
+              \; (do (.next this) (set! tk Tokens$TokenKind/SEMI) (break))
+              \( (do (.next this) (set! tk Tokens$TokenKind/LPAREN) (break))
+              \) (do (.next this) (set! tk Tokens$TokenKind/RPAREN) (break))
+              \[ (do (.next this) (set! tk Tokens$TokenKind/LBRACKET) (break))
+              \] (do (.next this) (set! tk Tokens$TokenKind/RBRACKET) (break))
+              \{ (do (.next this) (set! tk Tokens$TokenKind/LBRACE) (break))
+              \} (do (.next this) (set! tk Tokens$TokenKind/RBRACE) (break))
+              \/
+                (do
+                  (.next this)
+                  (if (.accept this \/)
+                      (if (and enableLineDocComments (.accept this \/))
+                          (let [^:mutable ^int endPos 0]
+                            (loop []
+                              (.skipToEOLN this)
+                              (set! endPos (.position this))
+                              (.skipLineTerminator this)
+                              (.skipWhitespace this)
+                              (when (.accept this "///") (recur)))
+                            (set! comments
+                                  (.appendComment
+                                    this
+                                    comments
+                                    (.processComment
+                                      this
+                                      pos
+                                      endPos
+                                      Tokens$Comment$CommentStyle/JAVADOC_LINE))))
+                          (do
+                            (.skipToEOLN this)
+                            (when (.isAvailable this)
+                              (set! comments
+                                    (.appendComment
+                                      this
+                                      comments
+                                      (.processComment
+                                        this
+                                        pos
+                                        (.position this)
+                                        Tokens$Comment$CommentStyle/LINE))))))
+                      (do
+                        (cond
+                          (.accept this \*)
+                            (let [^:mutable isEmpty false
+                                  ^:mutable ^Tokens$Comment$CommentStyle style nil]
+                              (if (.accept this \*)
+                                  (do
+                                    (set! style Tokens$Comment$CommentStyle/JAVADOC_BLOCK)
+                                    (when (.is this \/) (set! isEmpty true)))
+                                  (set! style Tokens$Comment$CommentStyle/BLOCK))
+                              (when-not isEmpty
+                                (while (.isAvailable this)
+                                  (if (.accept this \*) (when (.is this \/) (break)) (.next this))))
+                              (if (.accept this \/)
+                                  (do
+                                    (set! comments
+                                          (.appendComment
+                                            this
+                                            comments
+                                            (.processComment this pos (.position this) style)))
+                                    (break :switch))
+                                  (do
+                                    (.lexError this pos CompilerProperties$Errors/UnclosedComment)
+                                    (break))))
+                          (.accept this \=) (set! tk Tokens$TokenKind/SLASHEQ)
+                          :else (set! tk Tokens$TokenKind/SLASH))
+                        (break))))
+              \'
+                (do
+                  (.next this)
+                  (if (.accept this \')
+                      (.lexError this pos CompilerProperties$Errors/EmptyCharLit)
+                      (do
+                        (when (.isEOLN this)
+                          (.lexError this pos CompilerProperties$Errors/IllegalLineEndInCharLit))
+                        (.scanLitChar this pos false)
+                        (cond
+                          (identical? tk Tokens$TokenKind/ERROR)
+                            (do
+                              (while (and (.isAvailable this) (not (.is this \')))
+                                (when (.is this \\) (.next this))
+                                (.next this))
+                              (.accept this \'))
+                          (.accept this \') (set! tk Tokens$TokenKind/CHARLITERAL)
+                          :else (.lexError this pos CompilerProperties$Errors/UnclosedCharLit))))
+                  (break))
+              \" (do (.scanString this pos) (break))
+              (do
+                (if (.isSpecial this (.get this))
+                    (.scanOperator this)
+                    (let [^boolean isJavaIdentifierStart (cond
+                                                           (.isASCII this) false
+                                                           (.isSurrogate this)
+                                                             (Character/isJavaIdentifierStart
+                                                               (.getCodepoint this))
+                                                           :else
+                                                             (Character/isJavaIdentifierStart
+                                                               (.get this)))]
+                      (cond
+                        isJavaIdentifierStart (.scanIdent this)
+                        (>= (.digit this pos 10) 0) (.scanNumber this pos 10)
+                        (or (.is this (unchecked-char LayoutCharacters/EOI))
+                            (not (.isAvailable this)))
+                          (do (set! tk Tokens$TokenKind/EOF) (set! pos (.position this)))
+                        :else
+                          (let [^:mutable ^String arg nil]
+                            (if (.isSurrogate this)
+                                (let [codePoint (.getCodepoint this)
+                                      hi (Character/highSurrogate codePoint)
+                                      lo (Character/lowSurrogate codePoint)]
+                                  (set! arg
+                                        (String/format
+                                          "\\u%04x\\u%04x"
+                                          (new Object/1 [(int hi) (int lo)]))))
+                                (let [ch (.get this)]
+                                  (set! arg
+                                        (if (and (< 32 ch) (< ch 127))
+                                            (String/valueOf ch)
+                                            (.formatted "\\u%04x" (int ch))))))
+                            (.lexError this pos (CompilerProperties$Errors/IllegalChar arg))
+                            (.next this)))))
+                (break)))))
+        (let [endPos (.position this)]
+          (cond
+            (identical? (.-tag tk) Tokens$Token$Tag/DEFAULT) (Tokens$Token. tk pos endPos comments)
+            (identical? (.-tag tk) Tokens$Token$Tag/NAMED)
+              (Tokens$NamedToken. tk pos endPos name comments)
+            :else
+              (let [^:mutable string (.toString sb)]
+                (when isTextBlock
+                  (let [^{:tag (Set TextBlockSupport$WhitespaceChecks)} checks
+                          (TextBlockSupport/checkWhitespace string)]
+                    (when (.contains checks TextBlockSupport$WhitespaceChecks/INCONSISTENT)
+                      (.warning log
+                                pos
+                                CompilerProperties$LintWarnings/InconsistentWhiteSpaceIndentation))
+                    (when (.contains checks TextBlockSupport$WhitespaceChecks/TRAILING)
+                      (.warning log
+                                pos
+                                CompilerProperties$LintWarnings/TrailingWhiteSpaceWillBeRemoved))
+                    (try (set! string (.stripIndent string)) (catch Exception ex))))
+                (when hasEscapeSequences
+                  (try (set! string (.translateEscapes string)) (catch Exception ex)))
+                (if (identical? (.-tag tk) Tokens$Token$Tag/STRING)
+                    (Tokens$StringToken. tk pos endPos string comments)
+                    (Tokens$NumericToken. tk pos endPos string radix comments)))))
+        (finally
+          (let [endPos (.position this)]
+            (when scannerDebug
+              (.println System/out
+                        (java-str "nextToken("
+                                  pos
+                                  ","
+                                  endPos
+                                  ")=|"
+                                  (.getRawString this pos endPos)
+                                  "|"))))))))
+
+  (method appendComment ^{:tag (List Tokens$Comment)} [this ^{:tag (List Tokens$Comment)} comments
+                                                       ^Tokens$Comment comment]
+    (if (nil? comments) (List/of comment) (.prepend comments comment)))
+
+  (method ^:public errPos ^int [this] errPos)
+
+  (method ^:public errPos ^void [this ^int pos] (set! errPos pos))
+
+  (method ^:protected processComment ^Tokens$Comment [this ^int pos ^int endPos
+                                                      ^Tokens$Comment$CommentStyle style]
+    (when scannerDebug
+      (.println System/out
+                (java-str "processComment("
+                          pos
+                          ","
+                          endPos
+                          ","
+                          style
+                          ")=|"
+                          (.getRawString this pos endPos)
+                          "|")))
+    (BasicComment. style this pos endPos))
+
+  (method ^:protected processWhiteSpace ^void [this ^int pos ^int endPos]
+    (when scannerDebug
+      (.println System/out
+                (java-str "processWhitespace("
+                          pos
+                          ","
+                          endPos
+                          ")=|"
+                          (.getRawString this pos endPos)
+                          "|"))))
+
+  (method ^:protected processLineTerminator ^void [this ^int pos ^int endPos]
+    (when scannerDebug
+      (.println System/out
+                (java-str "processTerminator("
+                          pos
+                          ","
+                          endPos
+                          ")=|"
+                          (.getRawString this pos endPos)
+                          "|"))))
+
+  (method ^:public getLineMap ^Position$LineMap [this]
+    (Position/makeLineMap (.getRawCharacters this) (.length this) false))
+
+  (defclass ^:protected ^:static BasicComment
+    :extends UnicodeReader$PositionTrackingReader
+    :implements [Tokens$Comment]
+
+    (field ^:final ^Tokens$Comment$CommentStyle cs)
+
+    (field ^JCDiagnostic$DiagnosticPosition pos)
+
+    (field ^:protected ^boolean deprecatedFlag false)
+
+    (field ^:protected ^boolean scanned false)
+
+    (constructor ^:protected [this ^Tokens$Comment$CommentStyle cs ^UnicodeReader reader ^int pos
+                              ^int endPos]
+      (super. reader pos endPos)
+      (set! (.-cs this) cs)
+      (set! (.-pos this)
+            (anon JCDiagnostic$SimpleDiagnosticPosition [pos]
+              (method ^:public getEndPosition ^int [this ^EndPosTable endPosTable]
+                endPos))))
+
+    (method ^:public getText ^String [this] nil)
+
+    (method ^:public stripIndent ^Tokens$Comment [this] this)
+
+    (method ^:public getPos ^JCDiagnostic$DiagnosticPosition [this] pos)
+
+    (method ^:public getSourcePos ^int [this ^int pos] -1)
+
+    (method ^:public getStyle ^Tokens$Comment$CommentStyle [this] cs)
+
+    (method ^:public isDeprecated ^boolean [this]
+      (when-not scanned (.scanDocComment this))
+      deprecatedFlag)
+
+    (method trimEndOfComment ^UnicodeReader [this ^UnicodeReader line]
+      (let [pos (.position line)
+            ^:mutable allWhitespace true]
+        (while (.isAvailable line)
+          (let [endPos (.position line)]
+            (if (and (not (== (.skip line \*) 0)) (.is line \/))
+                (return (.lineReader line (if allWhitespace endPos pos) endPos))
+                (do (set! allWhitespace (and allWhitespace (.isWhitespace line))) (.next line)))))
+        (.reset line pos)
+        line))
+
+    (method trimJavadocComment ^UnicodeReader [this ^:mutable ^UnicodeReader line]
+      (set! line (.trimEndOfComment this line))
+      (let [pos (.position line)]
+        (.skipWhitespace line)
+        (if (not (.isAvailable line))
+            line
+            (do (when (== (.skip line \*) 0) (.reset line pos)) line))))
+
+    (method getJavadocLineCommentIndent ^int [this]
+      (let [^:mutable result Integer/MAX_VALUE
+            fullReader (.lineReader this
+                                    (.position this)
+                                    (unchecked-add-int (.position this) (.length this)))]
+        (while (.isAvailable fullReader)
+          (let [line (.lineReader fullReader)]
+            (.skipWhitespace line)
+            (.accept line "///")
+            (let [pos (.position line)]
+              (.skipWhitespace line)
+              (when (.isAvailable line)
+                (set! result (Integer/min result (unchecked-subtract-int (.position line) pos)))))))
+        (if (== result Integer/MAX_VALUE) 0 result)))
+
+    (method trimJavadocLineComment ^UnicodeReader [this ^UnicodeReader line ^int indent]
+      (.skipWhitespace line)
+      (.accept line "///")
+      (loop [^int i 0]
+        (when (and (.isAvailable line) (< i indent)) (.next line) (recur (unchecked-inc-int i))))
+      line)
+
+    (method ^:protected putLine ^void [this ^UnicodeReader line])
+
+    (method ^:protected scanDocComment ^void [this]
+      (when-not scanned
+        (set! deprecatedFlag false)
+        (set! scanned true)
+        (let [^:mutable ^Tokens$Comment$CommentStyle style nil
+              ^:mutable ^int indent 0
+              start (.position this)]
+          (cond
+            (.accept this "/**")
+              (do
+                (set! style Tokens$Comment$CommentStyle/JAVADOC_BLOCK)
+                (when (and (not (== (.skip this \*) 0)) (.is this \/)) (return))
+                (.skipWhitespace this)
+                (when (.isEOLN this) (.accept this \return) (.accept this \newline)))
+            (.accept this "///")
+              (do
+                (set! style Tokens$Comment$CommentStyle/JAVADOC_LINE)
+                (.reset this start)
+                (set! indent (.getJavadocLineCommentIndent this)))
+            :else (return))
+          (while (.isAvailable this)
+            (let [^:mutable line (.lineReader this)]
+              (set! line
+                    (if (identical? style Tokens$Comment$CommentStyle/JAVADOC_LINE)
+                        (.trimJavadocLineComment this line indent)
+                        (.trimJavadocComment this line)))
+              (when (identical? cs Tokens$Comment$CommentStyle/JAVADOC_BLOCK)
+                (let [pos (.position line)]
+                  (.skipWhitespace line)
+                  (when (and (.accept line "@deprecated")
+                             (or (or (or (not (.isAvailable line)) (.isWhitespace line))
+                                     (.isEOLN line))
+                                 (== (.get line) LayoutCharacters/EOI)))
+                    (set! deprecatedFlag true))
+                  (.reset line pos)))
+              (.putLine this line))))))))

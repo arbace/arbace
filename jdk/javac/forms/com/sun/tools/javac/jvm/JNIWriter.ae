@@ -1,0 +1,532 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/jvm/JNIWriter.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.jvm)
+
+(import '(com.sun.tools.javac.code Attribute$Compound
+                                   Flags
+                                   Kinds$Kind
+                                   Scope$LookupKind
+                                   Symbol
+                                   Symbol$ClassSymbol
+                                   Symbol$ModuleSymbol
+                                   Symbol$VarSymbol
+                                   Symtab
+                                   Type
+                                   Type$ArrayType
+                                   Type$CapturedType
+                                   Type$ClassType
+                                   Type$ErrorType
+                                   Type$ForAll
+                                   Type$MethodType
+                                   Type$ModuleType
+                                   Type$PackageType
+                                   Type$TypeVar
+                                   Type$UndetVar
+                                   Type$Visitor
+                                   Type$WildcardType
+                                   Types)
+        '(com.sun.tools.javac.main Option)
+        '(com.sun.tools.javac.model JavacElements)
+        '(com.sun.tools.javac.util Assert Context Context$Key Log Options Pair)
+        '(java.io IOException PrintWriter)
+        '(java.util ArrayList Collections HashMap)
+        '(javax.tools FileObject JavaFileManager JavaFileManager$Location StandardLocation))
+
+(defclass ^:public JNIWriter
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key JNIWriter)} jniWriterKey (Context$Key.))
+
+  (field ^:private ^:final ^JavaFileManager fileManager)
+
+  (field ^Types types)
+
+  (field ^Symtab syms)
+
+  (field ^:private ^:final ^Log log)
+
+  (field ^:private ^boolean verbose)
+
+  (field ^:private ^boolean checkAll)
+
+  (field ^:private ^:final ^{:tag (HashMap String String)} filesWritten (HashMap.))
+
+  (field ^:public ^boolean multiModuleMode)
+
+  (field ^:private ^Context context)
+
+  (field ^:private ^:static ^:final ^boolean isWindows
+    (.startsWith (System/getProperty "os.name") "Windows"))
+
+  (method ^:public ^:static instance ^JNIWriter [^Context context]
+    (let [^:mutable instance (cast JNIWriter (.get context jniWriterKey))]
+      (when (nil? instance) (set! instance (JNIWriter. context)))
+      instance))
+
+  (constructor ^:private [this ^Context context]
+    (.put context jniWriterKey this)
+    (set! fileManager (cast JavaFileManager (.get context JavaFileManager)))
+    (set! log (Log/instance context))
+    (let [options (Options/instance context)]
+      (set! verbose (.isSet options Option/VERBOSE))
+      (set! checkAll (.isSet options "javah:full"))
+      (set! (.-context this) context)))
+
+  (method ^:private lazyInit ^void [this]
+    (when (nil? types) (set! types (Types/instance context)))
+    (when (nil? syms) (set! syms (Symtab/instance context))))
+
+  (method ^:static isSynthetic ^boolean [^Symbol s]
+    (JNIWriter/hasFlag s Flags/SYNTHETIC))
+
+  (method ^:static isStatic ^boolean [^Symbol s]
+    (JNIWriter/hasFlag s Flags/STATIC))
+
+  (method ^:static isFinal ^boolean [^Symbol s]
+    (JNIWriter/hasFlag s Flags/FINAL))
+
+  (method ^:static isNative ^boolean [^Symbol s]
+    (JNIWriter/hasFlag s Flags/NATIVE))
+
+  (method ^:private ^:static hasFlag ^boolean [^Symbol m ^int flag]
+    (not (== (bit-and (.flags m) flag) 0)))
+
+  (method ^:public needsHeader ^boolean [this ^Symbol$ClassSymbol c]
+    (.lazyInit this)
+    (cond
+      (or (.isDirectlyOrIndirectlyLocal c) (JNIWriter/isSynthetic c)) false
+      checkAll (.needsHeader this (.outermostClass c) true)
+      :else (.needsHeader this c false)))
+
+  (method ^:private needsHeader ^boolean [this ^Symbol$ClassSymbol c ^boolean checkNestedClasses]
+    (if (or (.isDirectlyOrIndirectlyLocal c) (JNIWriter/isSynthetic c))
+        false
+        (do
+          (for-each [^Symbol sym (.getSymbols (.-members_field c) Scope$LookupKind/NON_RECURSIVE)]
+            (when (and (identical? (.-kind sym) Kinds$Kind/MTH) (JNIWriter/isNative sym))
+              (return true))
+            (for-each [^Attribute$Compound a (.getDeclarationAttributes sym)]
+              (when (identical? (.-tsym (.-type a)) (.-tsym (.-nativeHeaderType syms)))
+                (return true))))
+          (when checkNestedClasses
+            (for-each [^Symbol sym (.getSymbols (.-members_field c) Scope$LookupKind/NON_RECURSIVE)]
+              (when (and (identical? (.-kind sym) Kinds$Kind/TYP)
+                         (.needsHeader this (cast Symbol$ClassSymbol sym) true))
+                (return true))))
+          false)))
+
+  (method ^:public write :throws [IOException] ^FileObject [this ^Symbol$ClassSymbol c]
+    (let [className (.toString (.flatName c))
+          ^:mutable ^JavaFileManager$Location outLocn nil]
+      (if multiModuleMode
+          (let [^Symbol$ModuleSymbol msym (if (identical? (.-kind (.-owner c)) Kinds$Kind/MDL)
+                                              (cast Symbol$ModuleSymbol (.-owner c))
+                                              (.-modle (.packge c)))]
+            (set! outLocn
+                  (.getLocationForModule fileManager
+                                         StandardLocation/NATIVE_HEADER_OUTPUT
+                                         (.toString (.-name msym)))))
+          (set! outLocn StandardLocation/NATIVE_HEADER_OUTPUT))
+      (let [fileName (java-str (.replaceAll className "[.$]" "_") ".h")
+            prevName (cast String (.put filesWritten fileName className))]
+        (when (some? prevName)
+          (throw (IOException. (String/format
+                                 "native header file collision between %s and %s (both generate %s)"
+                                 (new Object/1 [prevName className fileName])))))
+        (let [^:mutable outFile (.getFileForOutput fileManager outLocn "" fileName nil)
+              ^:mutable out (PrintWriter. (.openWriter outFile))]
+          (try
+            (.write this out c)
+            (when verbose (.printVerbose log "wrote.file" (.getName outFile)))
+            (.close out)
+            (set! out nil)
+            (finally (when (some? out) (.close out) (.delete outFile) (set! outFile nil))))
+          outFile))))
+
+  (method ^:public write :throws [IOException] ^void [this ^PrintWriter out ^Symbol$ClassSymbol sym]
+    (.lazyInit this)
+    (try
+      (let [cname (JNIWriter/encode (.-fullname sym) EncoderType/CLASS)]
+        (.fileTop this out)
+        (.includes this out)
+        (.guardBegin this out cname)
+        (.cppGuardBegin this out)
+        (.writeStatics this out sym)
+        (.writeMethods this out sym cname)
+        (.cppGuardEnd this out)
+        (.guardEnd this out))
+      (catch JNIWriter$TypeSignature$SignatureException e (throw (IOException. e)))))
+
+  (method ^:protected writeStatics :throws [IOException] ^void [this ^PrintWriter out
+                                                                ^Symbol$ClassSymbol sym]
+    (let [^{:tag (java.util.List Symbol$ClassSymbol)} clist (ArrayList.)]
+      (loop [cd sym]
+        (when (some? cd)
+          (.add clist cd)
+          (recur (cast Symbol$ClassSymbol (.-tsym (.getSuperclass cd))))))
+      (Collections/reverse clist)
+      (for-each [^Symbol$ClassSymbol cd clist]
+        (for-each [^Symbol i (.getEnclosedElements cd)]
+          (when (and (and (JNIWriter/isFinal i) (.isStatic i))
+                     (identical? (.-kind i) Kinds$Kind/VAR))
+            (let [v (cast Symbol$VarSymbol i)]
+              (when (some? (.getConstantValue v))
+                (let [^{:tag (Pair Symbol$ClassSymbol Symbol$VarSymbol)} p (Pair. sym v)]
+                  (JNIWriter/printStaticDefines out p)))))))))
+
+  (method ^:static printStaticDefines ^void [^PrintWriter out
+                                             ^{:tag (Pair Symbol$ClassSymbol Symbol$VarSymbol)} p]
+    (let [cls (cast Symbol$ClassSymbol (.-fst p))
+          f (cast Symbol$VarSymbol (.-snd p))
+          value (.getConstantValue f)
+          ^:mutable ^String valueStr nil]
+      (switch (.getKind (.asType f))
+        BOOLEAN (set! valueStr (if (.booleanValue (cast Boolean value)) "1L" "0L"))
+        (BYTE SHORT INT) (set! valueStr (java-str (.toString value) "L"))
+        LONG (set! valueStr (java-str (.toString value) (if isWindows "i64" "LL")))
+        CHAR
+          (let [ch (cast Character value)]
+            (set! valueStr
+                  (java-str (String/valueOf (bit-and-int (int (.charValue ch)) 0xffff)) "L")))
+        FLOAT
+          (let [fv (.floatValue (cast Float value))]
+            (set! valueStr
+                  (if (Float/isInfinite fv)
+                      (java-str (if (< fv (unchecked-float 0)) "-" "") "Inff")
+                      (java-str (.toString value) "f"))))
+        DOUBLE
+          (let [d (.doubleValue (cast Double value))]
+            (set! valueStr
+                  (if (Double/isInfinite d)
+                      (java-str (if (< d 0.0) "-" "") "InfD")
+                      (.toString value))))
+        (set! valueStr nil))
+      (when (some? valueStr)
+        (.print out "#undef ")
+        (let [cname (JNIWriter/encode (.getQualifiedName cls) EncoderType/CLASS)
+              fname (JNIWriter/encode (.getSimpleName f) EncoderType/FIELDSTUB)]
+          (.println out (java-str cname "_" fname))
+          (.print out (java-str "#define " cname "_"))
+          (.println out (java-str fname " " valueStr))))))
+
+  (method ^:protected writeMethods :throws [IOException JNIWriter$TypeSignature$SignatureException] ^void [this
+                                                                                                           ^PrintWriter out
+                                                                                                           ^Symbol$ClassSymbol sym
+                                                                                                           ^String cname]
+    (let [^{:tag (java.util.List Symbol)} classmethods (.getEnclosedElements sym)]
+      (for-each [^Symbol md classmethods]
+        (when (JNIWriter/isNative md)
+          (let [newtypesig (TypeSignature. types)
+                ^CharSequence methodName (.getSimpleName md)
+                ^:mutable isOverloaded false]
+            (for-each [^Symbol md2 classmethods]
+              (when (and (and (not (identical? md2 md)) (.equals methodName (.getSimpleName md2)))
+                         (JNIWriter/isNative md2))
+                (set! isOverloaded true)))
+            (.println out "/*")
+            (.println out (java-str " * Class:     " cname))
+            (.println out
+                      (java-str " * Method:    "
+                                (JNIWriter/encode methodName EncoderType/FIELDSTUB)))
+            (.println out (java-str " * Signature: " (.getSignature newtypesig (.-type md))))
+            (.println out " */")
+            (.println out
+                      (java-str "JNIEXPORT "
+                                (.jniType this (.erasure types (.getReturnType (.-type md))))
+                                " JNICALL "
+                                (.encodeMethod this md sym isOverloaded)))
+            (.print out "  (JNIEnv *, ")
+            (.print out ^String (if (.isStatic md) "jclass" "jobject"))
+            (for-each [^Type arg (.erasure types (.getParameterTypes (.-type md)))]
+              (.print out ", ")
+              (.print out (.jniType this arg)))
+            (.println out ");")
+            (.println out))))))
+
+  (method ^:protected ^:final jniType ^String [this ^Type t]
+    (switch (.getKind t)
+      ARRAY
+        (let [ct (.getComponentType (cast Type$ArrayType t))]
+          (switch (.getKind ct)
+            BOOLEAN (return "jbooleanArray")
+            BYTE (return "jbyteArray")
+            CHAR (return "jcharArray")
+            SHORT (return "jshortArray")
+            INT (return "jintArray")
+            LONG (return "jlongArray")
+            FLOAT (return "jfloatArray")
+            DOUBLE (return "jdoubleArray")
+            (ARRAY DECLARED) (return "jobjectArray")
+            (throw (Error. (.toString ct)))))
+      VOID (return "void")
+      BOOLEAN (return "jboolean")
+      BYTE (return "jbyte")
+      CHAR (return "jchar")
+      SHORT (return "jshort")
+      INT (return "jint")
+      LONG (return "jlong")
+      FLOAT (return "jfloat")
+      DOUBLE (return "jdouble")
+      DECLARED
+        (cond
+          (identical? (.-type (.-tsym t)) (.-stringType syms)) (return "jstring")
+          (.isAssignable types t (.-throwableType syms)) (return "jthrowable")
+          (.isAssignable types t (.-classType syms)) (return "jclass")
+          :else (return "jobject")))
+    (Assert/check false "jni unknown type")
+    nil)
+
+  (method ^:protected fileTop ^void [this ^PrintWriter out]
+    (.println out "/* DO NOT EDIT THIS FILE - it is machine generated */"))
+
+  (method ^:protected includes ^void [this ^PrintWriter out]
+    (.println out "#include <jni.h>"))
+
+  (method ^:protected cppGuardBegin ^void [this ^PrintWriter out]
+    (.println out "#ifdef __cplusplus")
+    (.println out "extern \"C\" {")
+    (.println out "#endif"))
+
+  (method ^:protected cppGuardEnd ^void [this ^PrintWriter out]
+    (.println out "#ifdef __cplusplus")
+    (.println out "}")
+    (.println out "#endif"))
+
+  (method ^:protected guardBegin ^void [this ^PrintWriter out ^String cname]
+    (.println out (java-str "/* Header for class " cname " */"))
+    (.println out)
+    (.println out (java-str "#ifndef _Included_" cname))
+    (.println out (java-str "#define _Included_" cname)))
+
+  (method ^:protected guardEnd ^void [this ^PrintWriter out]
+    (.println out "#endif"))
+
+  (method encodeMethod :throws [JNIWriter$TypeSignature$SignatureException] ^String [this
+                                                                                     ^Symbol msym
+                                                                                     ^Symbol$ClassSymbol clazz
+                                                                                     ^boolean isOverloaded]
+    (let [result (StringBuilder. 100)]
+      (.append result "Java_")
+      (.append result (JNIWriter/encode (.toString (.-flatname clazz)) EncoderType/JNI))
+      (.append result \_)
+      (.append result (JNIWriter/encode (.getSimpleName msym) EncoderType/JNI))
+      (when isOverloaded
+        (let [typeSig (TypeSignature. types)
+              sig (.getParameterSignature typeSig (.-type msym) true)]
+          (.append (.append result "__") (JNIWriter/encode sig EncoderType/JNI))))
+      (.toString result)))
+
+  (defclass ^:static ^:enum EncoderType
+    (constants CLASS FIELDSTUB FIELD JNI SIGNATURE))
+
+  (method ^:static encode ^String [^CharSequence name ^EncoderType mtype]
+    (let [result (StringBuilder. 100)
+          length (.length name)]
+      (loop [^int i 0]
+        (when (< i length)
+          (let [ch (.charAt name i)]
+            (if (JNIWriter/isalnum ch)
+                (do (.append result ch) (recur (unchecked-inc-int i)))
+                (switch mtype
+                  CLASS
+                    (do
+                      (switch ch
+                        (\. \_) (.append result "_")
+                        \$ (.append result "__")
+                        (.append result (JNIWriter/encodeChar ch)))
+                      (recur (unchecked-inc-int i)))
+                  JNI
+                    (do
+                      (switch ch
+                        (\/ \.) (.append result "_")
+                        \_ (.append result "_1")
+                        \; (.append result "_2")
+                        \[ (.append result "_3")
+                        (.append result (JNIWriter/encodeChar ch)))
+                      (recur (unchecked-inc-int i)))
+                  SIGNATURE
+                    (do
+                      (.append result
+                               (if (JNIWriter/isprint ch)
+                                   (Character/valueOf ch)
+                                   ^Object (JNIWriter/encodeChar ch)))
+                      (recur (unchecked-inc-int i)))
+                  FIELDSTUB
+                    (do
+                      (.append result
+                               (if (== ch \_)
+                                   (Character/valueOf ch)
+                                   ^Object (JNIWriter/encodeChar ch)))
+                      (recur (unchecked-inc-int i)))
+                  (do (.append result (JNIWriter/encodeChar ch)) (recur (unchecked-inc-int i))))))))
+      (.toString result)))
+
+  (method ^:static encodeChar ^String [^char ch]
+    (let [s (Integer/toHexString ch)
+          nzeros (unchecked-subtract-int 5 (.length s))
+          result (new char/1 6)]
+      (aset result 0 \_)
+      (loop [^int i 1] (when (<= i nzeros) (aset result i \0) (recur (unchecked-inc-int i))))
+      (loop [^int i (unchecked-add-int nzeros 1)
+             ^int j 0]
+        (when (< i 6)
+          (aset result i (.charAt s j))
+          (recur (unchecked-inc-int i) (unchecked-inc-int j))))
+      (String. result)))
+
+  (method ^:private ^:static isalnum ^boolean [^char ch]
+    (and (<= ch 0x7f)
+         (or (or (and (>= ch \A) (<= ch \Z)) (and (>= ch \a) (<= ch \z)))
+             (and (>= ch \0) (<= ch \9)))))
+
+  (method ^:private ^:static isprint ^boolean [^char ch]
+    (and (>= ch 32) (<= ch 126)))
+
+  (defclass ^:private ^:static TypeSignature
+    (defclass ^:static SignatureException
+      :extends Exception
+
+      (field ^:private ^:static ^:final ^long serialVersionUID 1)
+
+      (constructor [this ^String reason] (super. reason)))
+
+    (field ^JavacElements elems)
+
+    (field ^Types types)
+
+    (field ^:private ^:static ^:final ^String SIG_VOID "V")
+
+    (field ^:private ^:static ^:final ^String SIG_BOOLEAN "Z")
+
+    (field ^:private ^:static ^:final ^String SIG_BYTE "B")
+
+    (field ^:private ^:static ^:final ^String SIG_CHAR "C")
+
+    (field ^:private ^:static ^:final ^String SIG_SHORT "S")
+
+    (field ^:private ^:static ^:final ^String SIG_INT "I")
+
+    (field ^:private ^:static ^:final ^String SIG_LONG "J")
+
+    (field ^:private ^:static ^:final ^String SIG_FLOAT "F")
+
+    (field ^:private ^:static ^:final ^String SIG_DOUBLE "D")
+
+    (field ^:private ^:static ^:final ^String SIG_ARRAY "[")
+
+    (field ^:private ^:static ^:final ^String SIG_CLASS "L")
+
+    (constructor ^:public [this ^Types types] (set! (.-types this) types))
+
+    (method getParameterSignature :throws [SignatureException] ^StringBuilder [this ^Type mType
+                                                                               ^boolean useFlatname]
+      (let [result (StringBuilder.)]
+        (for-each [^Type pType (.getParameterTypes mType)]
+          (.append result (.getJvmSignature this pType useFlatname)))
+        result))
+
+    (method getReturnSignature :throws [SignatureException] ^StringBuilder [this ^Type mType]
+      (.getJvmSignature this (.getReturnType mType) false))
+
+    (method getSignature :throws [SignatureException] ^StringBuilder [this ^Type mType]
+      (let [sb (StringBuilder.)]
+        (.append (.append (.append sb "(") (.getParameterSignature this mType false)) ")")
+        (.append sb (.getReturnSignature this mType))
+        sb))
+
+    (defclass ^:static JvmTypeVisitor
+      :extends (SimpleTypeVisitor Type StringBuilder)
+
+      (field ^:private ^:final ^boolean useFlatname)
+
+      (constructor [this ^boolean useFlatname]
+        (super.)
+        (set! (.-useFlatname this) useFlatname))
+
+      (method ^:public visitClassType ^Type [this ^Type$ClassType t ^StringBuilder s]
+        (.setDeclaredType this t s)
+        nil)
+
+      (method ^:public visitArrayType ^Type [this ^Type$ArrayType t ^StringBuilder s]
+        (.append s "[")
+        (cast Type (.accept (.getComponentType t) this s)))
+
+      (method ^:public visitType ^Type [this ^Type t ^StringBuilder s]
+        (if (.isPrimitiveOrVoid t)
+            (do (.append s (.getJvmPrimitiveSignature this t)) nil)
+            (cast Type (.accept t this s))))
+
+      (method ^:private setDeclaredType ^void [this ^Type t ^StringBuilder s]
+        (let [^:mutable ^String classname (if useFlatname
+                                              (.toString (.flatName (.-tsym t)))
+                                              (.toString (.getQualifiedName (.-tsym t))))]
+          (set! classname (.replace classname \. \/))
+          (.append (.append (.append s "L") classname) ";")))
+
+      (method ^:private getJvmPrimitiveSignature ^String [this ^Type t]
+        (switch (.getKind t)
+          VOID (return SIG_VOID)
+          BOOLEAN (return SIG_BOOLEAN)
+          BYTE (return SIG_BYTE)
+          CHAR (return SIG_CHAR)
+          SHORT (return SIG_SHORT)
+          INT (return SIG_INT)
+          LONG (return SIG_LONG)
+          FLOAT (return SIG_FLOAT)
+          DOUBLE (return SIG_DOUBLE)
+          (Assert/error "unknown type: should not happen"))
+        nil))
+
+    (method getJvmSignature ^StringBuilder [this ^Type type ^boolean useFlatname]
+      (let [t (.erasure types type)
+            sig (StringBuilder.)
+            jv (JvmTypeVisitor. useFlatname)]
+        (.visitType jv t sig)
+        sig)))
+
+  (defclass ^:static SimpleTypeVisitor
+    :implements [(Type$Visitor R P)]
+    :type-params [R P]
+
+    (field ^:protected ^:final ^R DEFAULT_VALUE)
+
+    (constructor ^:protected [this] (set! DEFAULT_VALUE nil))
+
+    (constructor ^:protected [this ^R defaultValue]
+      (set! DEFAULT_VALUE defaultValue))
+
+    (method ^:protected defaultAction ^R [this ^Type t ^P p] DEFAULT_VALUE)
+
+    (method ^:public visitClassType ^R [this ^Type$ClassType t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitWildcardType ^R [this ^Type$WildcardType t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitArrayType ^R [this ^Type$ArrayType t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitMethodType ^R [this ^Type$MethodType t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitPackageType ^R [this ^Type$PackageType t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitTypeVar ^R [this ^Type$TypeVar t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitCapturedType ^R [this ^Type$CapturedType t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitForAll ^R [this ^Type$ForAll t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitUndetVar ^R [this ^Type$UndetVar t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitErrorType ^R [this ^Type$ErrorType t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitType ^R [this ^Type t ^P p]
+      (.defaultAction this t p))
+
+    (method ^:public visitModuleType ^R [this ^Type$ModuleType t ^P p]
+      (.defaultAction this t p))))

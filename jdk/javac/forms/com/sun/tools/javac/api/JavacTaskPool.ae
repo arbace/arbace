@@ -1,0 +1,261 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/api/JavacTaskPool.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.api)
+
+(import '(com.sun.source.tree ClassTree CompilationUnitTree Tree)
+        '(com.sun.source.util JavacTask TaskEvent TaskEvent$Kind TaskListener TreeScanner)
+        '(com.sun.tools.javac.code Kinds$Kind
+                                   LintMapper
+                                   Symbol
+                                   Symtab
+                                   Type
+                                   Type$ClassType
+                                   TypeTag
+                                   Types)
+        '(com.sun.tools.javac.comp Annotate Check CompileStates Enter Modules)
+        '(com.sun.tools.javac.main Arguments JavaCompiler)
+        '(com.sun.tools.javac.model JavacElements)
+        '(com.sun.tools.javac.platform PlatformDescription)
+        '(com.sun.tools.javac.tree JCTree$JCClassDecl JCTree$LetExpr)
+        '(com.sun.tools.javac.util Context Context$Factory Context$Key Log Options)
+        '(java.io PrintStream PrintWriter Writer)
+        '(java.util ArrayDeque ArrayList Collection Comparator HashMap HashSet Map Queue Set)
+        '(java.util.function Function Supplier)
+        '(java.util.stream Collectors Stream StreamSupport)
+        '(javax.tools Diagnostic DiagnosticListener JavaFileManager JavaFileObject StandardLocation))
+
+(defclass ^:public JavacTaskPool
+  (field ^:private ^:static ^:final ^JavacTool systemProvider (JavacTool/create))
+
+  (field ^:private ^:static ^:final ^{:tag (Queue ReusableContext)} EMPTY_QUEUE (ArrayDeque. 0))
+
+  (field ^:private ^:final ^int maxPoolSize)
+
+  (field ^:private ^:final ^{:tag (Map (java.util.List String) (Queue ReusableContext))} options2Contexts
+    (HashMap.))
+
+  (field ^:private ^int id)
+
+  (field ^:private ^int statReused 0)
+
+  (field ^:private ^int statNew 0)
+
+  (field ^:private ^int statPolluted 0)
+
+  (field ^:private ^int statRemoved 0)
+
+  (constructor ^:public [this ^int maxPoolSize]
+    (set! (.-maxPoolSize this) maxPoolSize))
+
+  (method ^:public getTask :type-params [Z] ^Z [this ^Writer out ^JavaFileManager fileManager
+                                                ^{:tag (DiagnosticListener (? super JavaFileObject))} diagnosticListener
+                                                ^{:tag (Iterable String)} options
+                                                ^{:tag (Iterable String)} classes
+                                                ^{:tag (Iterable (? extends JavaFileObject))} compilationUnits
+                                                ^{:tag (Worker Z)} worker]
+    (let [^{:tag (java.util.List String)} opts (cast
+                                                 java.util.List
+                                                 (.collect
+                                                   (StreamSupport/stream
+                                                     (.spliterator options)
+                                                     false)
+                                                   (Collectors/toCollection
+                                                     (method-ref
+                                                       Supplier
+                                                       ^ArrayList []
+                                                       ArrayList/new))))
+          ^:mutable ^ReusableContext ctx nil]
+      (locking this
+        (let [^{:tag (Queue ReusableContext)} cached (cast
+                                                       Queue
+                                                       (.getOrDefault
+                                                         options2Contexts
+                                                         opts
+                                                         EMPTY_QUEUE))]
+          (if (.isEmpty cached)
+              (do (set! ctx (ReusableContext. opts)) (set! statNew (unchecked-inc-int statNew)))
+              (do
+                (set! ctx (cast ReusableContext (.remove cached)))
+                (set! statReused (unchecked-inc-int statReused))))))
+      (set! (.-useCount ctx) (unchecked-inc-int (.-useCount ctx)))
+      (let [task (cast JavacTaskImpl
+                       (.getTask systemProvider
+                                 out
+                                 fileManager
+                                 diagnosticListener
+                                 opts
+                                 classes
+                                 compilationUnits
+                                 ctx))]
+        (.addTaskListener task ctx)
+        (when (some? out) (.setWriters (Log/instance ctx) (PrintWriter. out true)))
+        (let [^Z result (.withTask worker task)]
+          (.clear ctx)
+          (if (.-polluted ctx)
+              (set! statPolluted (unchecked-inc-int statPolluted))
+              (do
+                (.cleanup task)
+                (locking this
+                  (while (> (unchecked-add (.cacheSize this) 1) maxPoolSize)
+                    (let [toRemove (cast
+                                     ReusableContext
+                                     (.get (.findFirst
+                                             (.sorted
+                                               (.flatMap
+                                                 (.stream (.values options2Contexts))
+                                                 (method-ref
+                                                   Function
+                                                   ^Stream [Queue]
+                                                   Collection/.stream))
+                                               (lambda Comparator ^int [^ReusableContext c1
+                                                                        ^ReusableContext c2]
+                                                 (if (< (.-timeStamp c1) (.-timeStamp c2)) -1 1))))))]
+                      (.remove (cast Queue (.get options2Contexts (.-arguments toRemove))) toRemove)
+                      (set! statRemoved (unchecked-inc-int statRemoved))))
+                  (.add (cast Queue
+                              (.computeIfAbsent options2Contexts
+                                                (.-arguments ctx)
+                                                (lambda Function ^Queue [^java.util.List x]
+                                                  (ArrayDeque.))))
+                        ctx)
+                  (set! (.-timeStamp ctx) (let [old-1 id] (set! id (unchecked-inc-int id)) old-1)))))
+          result))))
+
+  (method ^:private cacheSize ^long [this]
+    (.count (.flatMap (.stream (.values options2Contexts))
+                      (method-ref Function ^Stream [Queue] Collection/.stream))))
+
+  (method ^:public printStatistics ^void [this ^PrintStream out]
+    (.println out (java-str statReused " reused Contexts"))
+    (.println out (java-str statNew " newly created Contexts"))
+    (.println out (java-str statPolluted " polluted Contexts"))
+    (.println out (java-str statRemoved " removed Contexts")))
+
+  (defclass ^:public ^:interface Worker
+    :type-params [Z]
+
+    (method ^:public withTask ^Z [this ^JavacTask task]))
+
+  (defclass ^:static ReusableContext
+    :extends Context
+    :implements [TaskListener]
+
+    (field ^{:tag (Set CompilationUnitTree)} roots (HashSet.))
+
+    (field ^{:tag (java.util.List String)} arguments)
+
+    (field ^boolean polluted false)
+
+    (field ^int useCount)
+
+    (field ^long timeStamp)
+
+    (constructor [this ^{:tag (java.util.List String)} arguments]
+      (super.)
+      (set! (.-arguments this) arguments)
+      (.put this Log/logKey ReusableLog/factory)
+      (.put this JavaCompiler/compilerKey ReusableJavaCompiler/factory))
+
+    (method clear ^void [this]
+      (set! polluted
+            (let [a-2 polluted
+                  b-3 (.hasLocation (cast JavaFileManager (.get this JavaFileManager))
+                                    StandardLocation/PATCH_MODULE_PATH)]
+              (or a-2 b-3)))
+      (.drop this Arguments/argsKey)
+      (.drop this DiagnosticListener)
+      (.drop this Log/outKey)
+      (.drop this Log/errKey)
+      (.drop this JavaFileManager)
+      (.drop this JavacTask)
+      (.drop this JavacTrees)
+      (.drop this JavacElements)
+      (.drop this PlatformDescription)
+      (when (instance? ReusableLog (.get (.-ht this) Log/logKey))
+        (.clear (Log/instance this))
+        (.clear (LintMapper/instance this))
+        (.newRound (Enter/instance this))
+        (.clear (cast ReusableJavaCompiler (ReusableJavaCompiler/instance this)))
+        (.newRound (Types/instance this))
+        (.newRound (Check/instance this))
+        (.newRound (Modules/instance this))
+        (.newRound (Annotate/instance this))
+        (.clear (CompileStates/instance this))
+        (.clear (MultiTaskListener/instance this))
+        (.clear (Options/instance this))
+        (let [syms (Symtab/instance this)] (.scan pollutionScanner roots syms) (.clear roots))))
+
+    (field ^{:tag (TreeScanner Void Symtab)} pollutionScanner
+      (anon (TreeScanner Void Symtab) []
+        (method ^:public scan ^Void [this ^Tree tree ^Symtab syms]
+          (if-instance [^JCTree$LetExpr letExpr tree]
+            (do (.scan this (.-defs letExpr) syms) (.scan this (.-expr letExpr) syms) nil)
+            (cast Void (.scan super tree syms))))
+
+        (method ^:public visitClass ^Void [this ^ClassTree node ^Symtab syms]
+          (let [^Symbol sym (.-sym (cast JCTree$JCClassDecl node))]
+            (when (some? sym)
+              (.removeClass syms (.-modle (.packge sym)) (.flatName sym))
+              (let [sup (.supertype this sym)]
+                (when (or (.isCoreClass this sym)
+                          (and (and (some? sup) (.isCoreClass this (.-tsym sup)))
+                               (not (identical? (.-kind (.-tsym sup)) Kinds$Kind/TYP))))
+                  (set! polluted true))))
+            (cast Void (.visitClass super node syms))))
+
+        (method ^:private isCoreClass ^boolean [this ^Symbol s]
+          (.startsWith (.toString (.flatName s)) "java."))
+
+        (method ^:private supertype ^Type [this ^Symbol s]
+          (when-not (or (nil? (.-type s)) (not (.hasTag (.-type s) TypeTag/CLASS)))
+            (let [ct (cast Type$ClassType (.-type s))] (.-supertype_field ct))))))
+
+    (method ^:public finished ^void [this ^TaskEvent e]
+      (when (identical? (.getKind e) TaskEvent$Kind/PARSE) (.add roots (.getCompilationUnit e))))
+
+    (method ^:public started ^void [this ^TaskEvent e])
+
+    (method drop :type-params [T] ^void [this ^{:tag (Context$Key T)} k]
+      (.remove (.-ht this) k))
+
+    (method drop :type-params [T] ^void [this ^{:tag (Class T)} c]
+      (.remove (.-ht this) (.key this c)))
+
+    (defclass ^:static ReusableJavaCompiler
+      :extends JavaCompiler
+
+      (field ^:static ^:final ^{:tag (Context$Factory JavaCompiler)} factory
+        (method-ref Context$Factory ^JavaCompiler [Context] ReusableJavaCompiler/new))
+
+      (constructor [this ^Context context] (super. context))
+
+      (method ^:public close ^void [this])
+
+      (method clear ^void [this] (.newRound this))
+
+      (method ^:protected checkReusable ^void [this]))
+
+    (defclass ^:static ReusableLog
+      :extends Log
+
+      (field ^:static ^:final ^{:tag (Context$Factory Log)} factory
+        (method-ref Context$Factory ^Log [Context] ReusableLog/new))
+
+      (field ^Context context)
+
+      (constructor [this ^Context context]
+        (super. context)
+        (set! (.-context this) context))
+
+      (method ^:public clear ^void [this]
+        (.clear super)
+        (set!
+          (.-diagListener this)
+          (anon (DiagnosticListener JavaFileObject) []
+            (field ^{:tag (DiagnosticListener JavaFileObject)} cachedListener)
+
+            (method ^:public report ^void [this
+                                           ^{:tag (Diagnostic (? extends JavaFileObject))} diagnostic]
+              (when (nil? cachedListener)
+                (set! cachedListener (cast DiagnosticListener (.get context DiagnosticListener))))
+              (.report cachedListener diagnostic))))))))

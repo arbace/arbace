@@ -1,0 +1,525 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/code/ClassFinder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.code)
+
+(import '(com.sun.tools.javac.comp Annotate)
+        '(com.sun.tools.javac.file JRTIndex JavacFileManager)
+        '(com.sun.tools.javac.jvm ClassReader Profile)
+        '(com.sun.tools.javac.main DelegatingJavaFileManager Option)
+        '(com.sun.tools.javac.resources CompilerProperties$Fragments)
+        '(com.sun.tools.javac.util Assert
+                                   Context
+                                   Context$Key
+                                   Convert
+                                   Dependencies
+                                   Dependencies$CompletionCause
+                                   JCDiagnostic
+                                   JCDiagnostic$Factory
+                                   List
+                                   Log
+                                   Name
+                                   Names
+                                   Options)
+        '(java.io IOException)
+        '(java.nio.file Path)
+        '(java.util EnumSet HashMap Iterator Map NoSuchElementException Set)
+        '(java.util.function Consumer Predicate Supplier)
+        '(javax.lang.model SourceVersion)
+        '(javax.tools JavaFileManager
+                      JavaFileManager$Location
+                      JavaFileObject
+                      JavaFileObject$Kind
+                      StandardJavaFileManager
+                      StandardLocation))
+
+(defclass ^:public ClassFinder
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key ClassFinder)} classFinderKey
+    (Context$Key.))
+
+  (field ^ClassReader reader)
+
+  (field ^:private ^:final ^Annotate annotate)
+
+  (field ^boolean verbose)
+
+  (field ^:private ^boolean cacheCompletionFailure)
+
+  (field ^:protected ^boolean preferSource)
+
+  (field ^:protected ^boolean userPathsFirst)
+
+  (field ^:final ^Log log)
+
+  (field ^Symtab syms)
+
+  (field ^:final ^Names names)
+
+  (field ^:final ^Name completionFailureName)
+
+  (field ^:private ^:final ^JavaFileManager fileManager)
+
+  (field ^:private ^:final ^Dependencies dependencies)
+
+  (field ^JCDiagnostic$Factory diagFactory)
+
+  (field ^:final ^DeferredCompletionFailureHandler dcfh)
+
+  (field ^:public ^Symbol$Completer sourceCompleter Symbol$Completer/NULL_COMPLETER)
+
+  (field ^:protected ^JavaFileObject currentClassFile nil)
+
+  (field ^:protected ^Symbol currentOwner nil)
+
+  (field ^:private ^:final ^Profile profile)
+
+  (field ^:private ^:final ^JRTIndex jrtIndex)
+
+  (field ^:private ^:final ^Symbol$Completer thisCompleter
+    (method-ref Symbol$Completer this ClassFinder/.complete))
+
+  (method ^:public getCompleter ^Symbol$Completer [this] thisCompleter)
+
+  (method ^:public ^:static instance ^ClassFinder [^Context context]
+    (let [^:mutable instance (cast ClassFinder (.get context classFinderKey))]
+      (when (nil? instance) (set! instance (ClassFinder. context)))
+      instance))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context classFinderKey this)
+    (set! reader (ClassReader/instance context))
+    (set! names (Names/instance context))
+    (set! syms (Symtab/instance context))
+    (set! fileManager (cast JavaFileManager (.get context JavaFileManager)))
+    (set! dependencies (Dependencies/instance context))
+    (when (nil? fileManager) (throw (AssertionError. "FileManager initialization error")))
+    (set! diagFactory (JCDiagnostic$Factory/instance context))
+    (set! dcfh (DeferredCompletionFailureHandler/instance context))
+    (set! log (Log/instance context))
+    (set! annotate (Annotate/instance context))
+    (let [options (Options/instance context)]
+      (set! verbose (.isSet options Option/VERBOSE))
+      (set! cacheCompletionFailure (.isUnset options "dev"))
+      (set! preferSource (.equals "source" (.get options "-Xprefer")))
+      (set! userPathsFirst (.isSet options Option/XXUSERPATHSFIRST))
+      (set!
+        completionFailureName
+        (when (.isSet options "failcomplete") (.fromString names (.get options "failcomplete"))))
+      (let [^:mutable ^boolean useCtProps false
+            ^:mutable fm (cast JavaFileManager (.get context JavaFileManager))]
+        (when-instance [^DelegatingJavaFileManager delegatingJavaFileManager fm]
+          (set! fm (.getBaseFileManager delegatingJavaFileManager)))
+        (if-instance [^JavacFileManager javacFileManager fm]
+          (set! useCtProps
+                (and (.isDefaultBootClassPath javacFileManager)
+                     (.isSymbolFileEnabled javacFileManager)))
+          (set! useCtProps false))
+        (set! jrtIndex (when (and useCtProps (JRTIndex/isAvailable)) (JRTIndex/getSharedInstance)))
+        (set! profile (Profile/instance context))
+        (set! cachedCompletionFailure
+              (Symbol$CompletionFailure. nil (lambda Supplier ^JCDiagnostic [] nil) dcfh))
+        (.setStackTrace cachedCompletionFailure (new StackTraceElement/1 0)))))
+
+  (method getSupplementaryFlags ^long [this ^Symbol$ClassSymbol c]
+    (if (or (or (nil? jrtIndex) (not (.isInJRT jrtIndex (.-classfile c))))
+            (identical? (.-name c) (.-module_info names)))
+        0
+        (do
+          (when (nil? supplementaryFlags) (set! supplementaryFlags (HashMap.)))
+          (let [packge (.packge c)
+                ^:mutable flags (cast Long (.get supplementaryFlags packge))]
+            (when (nil? flags)
+              (let [^:mutable newFlags 0]
+                (try
+                  (let [owningModule (.-modle packge)]
+                    (cond
+                      (identical? owningModule (.-noModule syms))
+                        (let [ctSym (.getCtSym jrtIndex (.flatName packge))
+                              ^:mutable minProfile Profile/DEFAULT]
+                          (when (.-proprietary ctSym)
+                            (set! newFlags (bit-or newFlags Flags/PROPRIETARY)))
+                          (when (some? (.-minProfile ctSym))
+                            (set! minProfile (Profile/lookup (.-minProfile ctSym))))
+                          (when (and (not (identical? profile Profile/DEFAULT))
+                                     (> (.-value minProfile) (.-value profile)))
+                            (set! newFlags (bit-or newFlags Flags/NOT_IN_PROFILE))))
+                      (identical? (.-name owningModule) (.-jdk_unsupported names))
+                        (set! newFlags (bit-or newFlags Flags/PROPRIETARY))))
+                  (catch IOException ignore))
+                (.put supplementaryFlags packge (set! flags newFlags))))
+            flags))))
+
+  (field ^:private ^{:tag (Map Symbol$PackageSymbol Long)} supplementaryFlags)
+
+  (method ^:private complete :throws [Symbol$CompletionFailure] ^void [this ^Symbol sym]
+    (cond
+      (identical? (.-kind sym) Kinds$Kind/TYP)
+        (try
+          (let [c (cast Symbol$ClassSymbol sym)]
+            (.push dependencies c Dependencies$CompletionCause/CLASS_READER)
+            (.blockAnnotations annotate)
+            (let [members (Scope$ErrorScope. c)]
+              (set! (.-members_field c) members)
+              (.completeOwners this (.-owner c))
+              (.completeEnclosing this c)
+              (when (identical? (.-members_field c) members) (.fillIn this c))))
+          (finally (.unblockAnnotationsNoFlush annotate) (.pop dependencies)))
+      (identical? (.-kind sym) Kinds$Kind/PCK)
+        (let [p (cast Symbol$PackageSymbol sym)]
+          (try
+            (.fillIn this p)
+            (catch IOException ex
+              (throw (.initCause (Symbol$CompletionFailure.
+                                   sym
+                                   (lambda Supplier ^JCDiagnostic []
+                                     (.fragment diagFactory
+                                                (CompilerProperties$Fragments/ExceptionMessage
+                                                  (.getLocalizedMessage ex))))
+                                   dcfh)
+                                 ex))))))
+    (when-not (.-filling reader) (.flush annotate)))
+
+  (method ^:private completeOwners ^void [this ^Symbol o]
+    (when-not (identical? (.-kind o) Kinds$Kind/PCK) (.completeOwners this (.-owner o)))
+    (.complete o))
+
+  (method ^:private completeEnclosing ^void [this ^Symbol$ClassSymbol c]
+    (when (identical? (.-kind (.-owner c)) Kinds$Kind/PCK)
+      (let [owner (.-owner c)]
+        (for-each [^Name name (Convert/enclosingCandidates (Convert/shortName (.-name c)))]
+          (let [^:mutable encl (.findFirst (.members owner) name)]
+            (when (nil? encl)
+              (set! encl
+                    (.getClass syms
+                               (.-modle (.packge c))
+                               (Symbol$TypeSymbol/formFlatName name owner))))
+            (when (some? encl) (.complete encl)))))))
+
+  (method fillIn ^void [this ^Symbol$ClassSymbol c]
+    (when (identical? completionFailureName (.-fullname c))
+      (throw (Symbol$CompletionFailure.
+               c
+               (lambda Supplier ^JCDiagnostic []
+                 (.fragment diagFactory CompilerProperties$Fragments/UserSelectedCompletionFailure))
+               dcfh)))
+    (set! currentOwner c)
+    (let [classfile (.-classfile c)]
+      (if (some? classfile)
+          (let [previousClassFile currentClassFile
+                prevOwner (.-owner c)
+                prevName (.-fullname c)]
+            (try
+              (when (.-filling reader)
+                (Assert/error (java-str "Filling " (.toUri classfile) " during " previousClassFile)))
+              (set! currentClassFile classfile)
+              (when verbose (.printVerbose log "loading" (.getName currentClassFile)))
+              (cond
+                (identical? (.getKind classfile) JavaFileObject$Kind/CLASS)
+                  (do
+                    (.readClassFile reader c)
+                    (set! (.-flags_field c)
+                          (bit-or (.-flags_field c) (.getSupplementaryFlags this c))))
+                (not (.isTerminal sourceCompleter)) (.complete sourceCompleter c)
+                :else
+                  (throw (IllegalStateException.
+                           (java-str "Source completer required to read " (.toUri classfile)))))
+              (catch BadClassFile cf
+                (set! (.-owner c) prevOwner)
+                (.forEach (.getSymbols (.-members_field c)
+                                       (lambda Predicate ^boolean [^Symbol sym]
+                                         (identical? (.-kind sym) Kinds$Kind/TYP)))
+                          (lambda Consumer ^void [^Symbol sym]
+                            (let [csym (cast Symbol$ClassSymbol sym)]
+                              (set! (.-owner csym) (.packge sym))
+                              (.enter (.members (.-owner csym)) sym)
+                              (set! (.-fullname csym) (.flatName sym))
+                              (set! (.-name csym) (Convert/shortName (.flatName sym)))
+                              (.reset csym))))
+                (set! (.-fullname c) prevName)
+                (set! (.-name c) (Convert/shortName prevName))
+                (.reset c)
+                (throw cf))
+              (finally (set! currentClassFile previousClassFile))))
+          (throw (.classFileNotFound this c)))))
+
+  (method ^:private classFileNotFound ^Symbol$CompletionFailure [this ^Symbol$ClassSymbol c]
+    (.newCompletionFailure this
+                           c
+                           (lambda Supplier ^JCDiagnostic []
+                             (.fragment diagFactory
+                                        (CompilerProperties$Fragments/ClassFileNotFound
+                                          (.-flatname c))))))
+
+  (method ^:private newCompletionFailure ^Symbol$CompletionFailure [this ^Symbol$TypeSymbol c
+                                                                    ^{:tag (Supplier JCDiagnostic)} diag]
+    (if (not cacheCompletionFailure)
+        (Symbol$CompletionFailure. c diag dcfh)
+        (let [result cachedCompletionFailure]
+          (set! (.-sym result) c)
+          (.resetDiagnostic result diag)
+          result)))
+
+  (field ^:private ^:final ^Symbol$CompletionFailure cachedCompletionFailure)
+
+  (method ^:public loadClass :throws [Symbol$CompletionFailure] ^Symbol$ClassSymbol [this
+                                                                                     ^Symbol$ModuleSymbol msym
+                                                                                     ^Name flatname]
+    (Assert/checkNonNull msym)
+    (let [packageName (Convert/packagePart flatname)
+          ps (.lookupPackage syms msym packageName)]
+      (Assert/checkNonNull (.-modle ps)
+                           (lambda Supplier ^String []
+                             (java-str "msym=" msym "; flatName=" flatname)))
+      (let [absent (nil? (.getClass syms (.-modle ps) flatname))
+            c (.enterClass syms (.-modle ps) flatname)]
+        (when (nil? (.-members_field c))
+          (try
+            (.complete c)
+            (catch Symbol$CompletionFailure ex
+              (when absent
+                (.removeClass syms (.-modle ps) flatname)
+                (.classSymbolRemoved (.-dcfh ex) c))
+              (throw ex))))
+        c)))
+
+  (method ^:protected includeClassFile ^void [this ^Symbol$PackageSymbol p ^JavaFileObject file]
+    (when (== (bit-and (.-flags_field p) Flags/EXISTS) 0)
+      (loop [^Symbol q p]
+        (when (and (some? q) (identical? (.-kind q) Kinds$Kind/PCK))
+          (set! (.-flags_field q) (bit-or (.-flags_field q) Flags/EXISTS))
+          (recur (.-owner q)))))
+    (let [kind (.getKind file)
+          ^int seen (if (identical? kind JavaFileObject$Kind/CLASS)
+                        Flags/CLASS_SEEN
+                        Flags/SOURCE_SEEN)]
+      (let [binaryName (.inferBinaryName fileManager currentLoc file)
+            lastDot (.lastIndexOf binaryName ".")
+            classname (.fromString names (.substring binaryName (unchecked-add-int lastDot 1)))
+            isPkgInfo (identical? classname (.-package_info names))
+            ^:mutable ^Symbol$ClassSymbol c (if isPkgInfo
+                                                (.-package_info p)
+                                                (cast
+                                                  Symbol$ClassSymbol
+                                                  (.findFirst (.-members_field p) classname)))]
+        (cond
+          (nil? c)
+            (do
+              (set! c (.enterClass syms (.-modle p) classname p))
+              (when (nil? (.-classfile c)) (set! (.-classfile c) file))
+              (cond
+                isPkgInfo (set! (.-package_info p) c)
+                (identical? (.-owner c) p) (.enter (.-members_field p) c)))
+          (and (and (not preferCurrent) (some? (.-classfile c)))
+               (== (bit-and (.-flags_field c) seen) 0))
+            (when-not (== (bit-and (.-flags_field c)
+                                   (bit-or-int Flags/CLASS_SEEN Flags/SOURCE_SEEN))
+                          0)
+              (set! (.-classfile c) (.preferredFileObject this file (.-classfile c)))))
+        (set! (.-flags_field c) (bit-or (.-flags_field c) seen)))))
+
+  (method ^:protected preferredFileObject ^JavaFileObject [this ^JavaFileObject a ^JavaFileObject b]
+    (if preferSource
+        (if (identical? (.getKind a) JavaFileObject$Kind/SOURCE) a b)
+        (let [adate (.getLastModified a) bdate (.getLastModified b)] (if (> adate bdate) a b))))
+
+  (method ^:protected getPackageFileKinds ^{:tag (EnumSet JavaFileObject$Kind)} [this]
+    (EnumSet/of JavaFileObject$Kind/CLASS JavaFileObject$Kind/SOURCE))
+
+  (method ^:protected extraFileActions ^void [this ^Symbol$PackageSymbol pack ^JavaFileObject fe])
+
+  (field ^:protected ^JavaFileManager$Location currentLoc)
+
+  (field ^:private ^boolean verbosePath true)
+
+  (field ^:private ^boolean preferCurrent)
+
+  (method ^:private fillIn :throws [IOException] ^void [this ^Symbol$PackageSymbol p]
+    (when (nil? (.-members_field p)) (set! (.-members_field p) (Scope$WriteableScope/create p)))
+    (let [msym (.-modle p)]
+      (Assert/checkNonNull msym (method-ref Supplier ^String [] p Symbol$PackageSymbol/.toString))
+      (.complete msym)
+      (cond
+        (identical? msym (.-noModule syms))
+          (do
+            (set! preferCurrent false)
+            (if userPathsFirst
+                (do
+                  (.scanUserPaths this p true)
+                  (set! preferCurrent true)
+                  (.scanPlatformPath this p))
+                (do (.scanPlatformPath this p) (.scanUserPaths this p true))))
+        (identical? (.-classLocation msym) StandardLocation/CLASS_PATH)
+          (.scanUserPaths this p (identical? (.-sourceLocation msym) StandardLocation/SOURCE_PATH))
+        :else (.scanModulePaths this p msym))))
+
+  (method ^:private scanModulePaths :throws [IOException] ^void [this ^Symbol$PackageSymbol p
+                                                                 ^Symbol$ModuleSymbol msym]
+    (let [^{:tag (Set JavaFileObject$Kind)} kinds (.getPackageFileKinds this)
+          ^{:tag (Set JavaFileObject$Kind)} classKinds (EnumSet/copyOf kinds)]
+      (.remove classKinds JavaFileObject$Kind/SOURCE)
+      (let [wantClassFiles (not (.isEmpty classKinds))
+            ^{:tag (Set JavaFileObject$Kind)} sourceKinds (EnumSet/copyOf kinds)]
+        (.remove sourceKinds JavaFileObject$Kind/CLASS)
+        (let [wantSourceFiles (not (.isEmpty sourceKinds))
+              packageName (.toString (.-fullname p))
+              classLocn (.-classLocation msym)
+              sourceLocn (.-sourceLocation msym)
+              patchLocn (.-patchLocation msym)
+              patchOutLocn (.-patchOutputLocation msym)
+              prevPreferCurrent preferCurrent]
+          (try
+            (set! preferCurrent false)
+            (when (and wantClassFiles (some? patchOutLocn))
+              (.fillIn this p patchOutLocn (.list this patchOutLocn p packageName classKinds)))
+            (when (and (or wantClassFiles wantSourceFiles) (some? patchLocn))
+              (let [^{:tag (Set JavaFileObject$Kind)} combined (EnumSet/noneOf JavaFileObject$Kind)]
+                (.addAll combined classKinds)
+                (.addAll combined sourceKinds)
+                (.fillIn this p patchLocn (.list this patchLocn p packageName combined))))
+            (set! preferCurrent true)
+            (when (and wantClassFiles (some? classLocn))
+              (.fillIn this p classLocn (.list this classLocn p packageName classKinds)))
+            (when (and wantSourceFiles (some? sourceLocn))
+              (.fillIn this p sourceLocn (.list this sourceLocn p packageName sourceKinds)))
+            (finally (set! preferCurrent prevPreferCurrent)))))))
+
+  (method ^:private scanUserPaths :throws [IOException] ^void [this ^Symbol$PackageSymbol p
+                                                               ^boolean includeSourcePath]
+    (let [^{:tag (Set JavaFileObject$Kind)} kinds (.getPackageFileKinds this)
+          ^{:tag (Set JavaFileObject$Kind)} classKinds (EnumSet/copyOf kinds)]
+      (.remove classKinds JavaFileObject$Kind/SOURCE)
+      (let [wantClassFiles (not (.isEmpty classKinds))
+            ^{:tag (Set JavaFileObject$Kind)} sourceKinds (EnumSet/copyOf kinds)]
+        (.remove sourceKinds JavaFileObject$Kind/CLASS)
+        (let [wantSourceFiles (not (.isEmpty sourceKinds))
+              haveSourcePath (and includeSourcePath
+                                  (.hasLocation fileManager StandardLocation/SOURCE_PATH))]
+          (when (and verbose verbosePath)
+            (set! verbosePath false)
+            (when-instance [^StandardJavaFileManager standardJavaFileManager fileManager]
+              (cond
+                (and haveSourcePath wantSourceFiles)
+                  (let [^:mutable ^{:tag (List Path)} path (List/nil)]
+                    (for-each [^Path sourcePath (.getLocationAsPaths
+                                                  standardJavaFileManager
+                                                  StandardLocation/SOURCE_PATH)]
+                      (set! path (.prepend path sourcePath)))
+                    (.printVerbose log "sourcepath" (.toString (.reverse path))))
+                wantSourceFiles
+                  (let [^:mutable ^{:tag (List Path)} path (List/nil)]
+                    (for-each [^Path classPath (.getLocationAsPaths
+                                                 standardJavaFileManager
+                                                 StandardLocation/CLASS_PATH)]
+                      (set! path (.prepend path classPath)))
+                    (.printVerbose log "sourcepath" (.toString (.reverse path)))))
+              (when wantClassFiles
+                (let [^:mutable ^{:tag (List Path)} path (List/nil)]
+                  (for-each [^Path platformPath (.getLocationAsPaths
+                                                  standardJavaFileManager
+                                                  StandardLocation/PLATFORM_CLASS_PATH)]
+                    (set! path (.prepend path platformPath)))
+                  (for-each [^Path classPath (.getLocationAsPaths
+                                               standardJavaFileManager
+                                               StandardLocation/CLASS_PATH)]
+                    (set! path (.prepend path classPath)))
+                  (.printVerbose log "classpath" (.toString (.reverse path)))))))
+          (let [packageName (.toString (.-fullname p))]
+            (if (and wantSourceFiles (not haveSourcePath))
+                (.fillIn this
+                         p
+                         StandardLocation/CLASS_PATH
+                         (.list this StandardLocation/CLASS_PATH p packageName kinds))
+                (do
+                  (when wantClassFiles
+                    (.fillIn this
+                             p
+                             StandardLocation/CLASS_PATH
+                             (.list this StandardLocation/CLASS_PATH p packageName classKinds)))
+                  (when wantSourceFiles
+                    (.fillIn this
+                             p
+                             StandardLocation/SOURCE_PATH
+                             (.list this StandardLocation/SOURCE_PATH p packageName sourceKinds))))))))))
+
+  (method ^:private scanPlatformPath :throws [IOException] ^void [this ^Symbol$PackageSymbol p]
+    (.fillIn this
+             p
+             StandardLocation/PLATFORM_CLASS_PATH
+             (.list this
+                    StandardLocation/PLATFORM_CLASS_PATH
+                    p
+                    (.toString (.-fullname p))
+                    (EnumSet/of JavaFileObject$Kind/CLASS))))
+
+  (method ^:private fillIn ^void [this ^Symbol$PackageSymbol p ^JavaFileManager$Location location
+                                  ^{:tag (Iterable JavaFileObject)} files]
+    (set! currentLoc location)
+    (for-each [^JavaFileObject fo files]
+      (switch (.getKind fo)
+        OTHER (.extraFileActions this p fo)
+        (CLASS SOURCE)
+          (let [binaryName (.inferBinaryName fileManager currentLoc fo)
+                simpleName (.substring binaryName
+                                       (unchecked-add-int (.lastIndexOf binaryName ".") 1))]
+            (when (or (SourceVersion/isIdentifier simpleName) (.equals simpleName "package-info"))
+              (.includeClassFile this p fo)))
+        (.extraFileActions this p fo))))
+
+  (method list :throws [IOException] ^{:tag (Iterable JavaFileObject)} [this
+                                                                        ^JavaFileManager$Location location
+                                                                        ^Symbol$PackageSymbol p
+                                                                        ^String packageName
+                                                                        ^{:tag (Set JavaFileObject$Kind)} kinds]
+    (let [^{:tag (Iterable JavaFileObject)} listed (.list
+                                                     fileManager
+                                                     location
+                                                     packageName
+                                                     (EnumSet/allOf JavaFileObject$Kind)
+                                                     false)]
+      (lambda Iterable ^Iterator []
+        (anon (Iterator JavaFileObject) []
+          (field ^:private ^:final ^{:tag (Iterator JavaFileObject)} original (.iterator listed))
+
+          (field ^:private ^JavaFileObject next)
+
+          (method ^:public hasNext ^boolean [this]
+            (when (nil? next)
+              (while (.hasNext original)
+                (let [fo (cast JavaFileObject (.next original))]
+                  (when (and (not (identical? (.getKind fo) JavaFileObject$Kind/CLASS))
+                             (not (identical? (.getKind fo) JavaFileObject$Kind/SOURCE)))
+                    (set! (.-flags_field p) (bit-or (.-flags_field p) Flags/HAS_RESOURCE)))
+                  (when (.contains kinds (.getKind fo)) (set! next fo) (break)))))
+            (some? next))
+
+          (method ^:public next ^JavaFileObject [this]
+            (when-not (.hasNext this) (throw (NoSuchElementException.)))
+            (let [result next] (set! next nil) result))))))
+
+  (defclass ^:public ^:static BadClassFile
+    :extends Symbol$CompletionFailure
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+    (constructor ^:public [this ^Symbol$TypeSymbol sym ^JavaFileObject file ^JCDiagnostic diag
+                           ^JCDiagnostic$Factory diagFactory ^DeferredCompletionFailureHandler dcfh]
+      (super. sym
+              (lambda Supplier ^JCDiagnostic []
+                (BadClassFile/createBadClassFileDiagnostic file diag diagFactory))
+              dcfh))
+
+    (method ^:private ^:static createBadClassFileDiagnostic ^JCDiagnostic [^JavaFileObject file
+                                                                           ^JCDiagnostic diag
+                                                                           ^JCDiagnostic$Factory diagFactory]
+      (let [^String key (if (identical? (.getKind file) JavaFileObject$Kind/SOURCE)
+                            "bad.source.file.header"
+                            "bad.class.file.header")]
+        (.fragment diagFactory key (new Object/1 [file diag])))))
+
+  (defclass ^:public ^:static BadEnclosingMethodAttr
+    :extends BadClassFile
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+    (constructor ^:public [this ^Symbol$TypeSymbol sym ^JavaFileObject file ^JCDiagnostic diag
+                           ^JCDiagnostic$Factory diagFactory ^DeferredCompletionFailureHandler dcfh]
+      (super. sym file diag diagFactory dcfh))))

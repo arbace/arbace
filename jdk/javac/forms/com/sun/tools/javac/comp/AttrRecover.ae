@@ -1,0 +1,290 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/comp/AttrRecover.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.comp)
+
+(import '(com.sun.tools.javac.code Flags
+                                   Symbol
+                                   Symbol$TypeSymbol
+                                   Symtab
+                                   Type
+                                   Type$ArrayType
+                                   Type$ErrorType
+                                   TypeTag
+                                   Types)
+        '(com.sun.tools.javac.tree JCTree
+                                   JCTree$JCBlock
+                                   JCTree$JCClassDecl
+                                   JCTree$JCExpression
+                                   JCTree$JCLambda
+                                   JCTree$JCLambda$ParameterKind
+                                   JCTree$JCMethodInvocation
+                                   JCTree$JCReturn
+                                   JCTree$JCVariableDecl
+                                   JCTree$Tag
+                                   TreeInfo
+                                   TreeMaker
+                                   TreeTranslator)
+        '(com.sun.tools.javac.util Context
+                                   Context$Key
+                                   JCDiagnostic
+                                   JCDiagnostic$DiagnosticPosition
+                                   List
+                                   ListBuffer
+                                   Names)
+        '(java.util.function Consumer))
+
+(defclass ^:public AttrRecover
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key AttrRecover)} attrRepairKey
+    (Context$Key.))
+
+  (field ^:final ^Attr attr)
+
+  (field ^:final ^Check chk)
+
+  (field ^:final ^DeferredAttr deferredAttr)
+
+  (field ^:final ^Names names)
+
+  (field ^:final ^TreeMaker make)
+
+  (field ^:final ^Symtab syms)
+
+  (field ^:final ^Types types)
+
+  (method ^:public ^:static instance ^AttrRecover [^Context context]
+    (let [^:mutable instance (cast AttrRecover (.get context attrRepairKey))]
+      (when (nil? instance) (set! instance (AttrRecover. context)))
+      instance))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context attrRepairKey this)
+    (set! attr (Attr/instance context))
+    (set! chk (Check/instance context))
+    (set! deferredAttr (DeferredAttr/instance context))
+    (set! names (Names/instance context))
+    (set! make (TreeMaker/instance context))
+    (set! syms (Symtab/instance context))
+    (set! types (Types/instance context)))
+
+  (field ^:private ^:final ^{:tag (ListBuffer RecoverTodo)} recoveryTodo (ListBuffer.))
+
+  (method ^:public doRecovery ^void [this]
+    (while (.nonEmpty recoveryTodo)
+      (let [todo (cast RecoverTodo (.remove recoveryTodo))
+            ^{:tag (ListBuffer Runnable)} rollback (ListBuffer.)
+            ^:mutable repaired false]
+        (when (.hasTag (.-tree (.-env todo)) JCTree$Tag/APPLY)
+          (let [mit (cast JCTree$JCMethodInvocation (.-tree (.-env todo)))
+                vararg (not (== (bit-and (.flags (.-candSym todo)) Flags/VARARGS) 0))]
+            (when-not (and (not vararg)
+                           (> (.length (.-args mit))
+                              (.length (.getParameterTypes (.-type (.-candSym todo))))))
+              (let [^:mutable ^{:tag (List JCTree$JCExpression)} args (.-args mit)
+                    ^:mutable ^{:tag (List Type)} formals (.getParameterTypes
+                                                            (.-type (.-candSym todo)))]
+                (while (and (.nonEmpty args) (.nonEmpty formals))
+                  (let [arg (cast JCTree$JCExpression (.-head args))
+                        ^Type formal (if (or (.nonEmpty (.-tail formals)) (not vararg))
+                                         (cast Type (.-head formals))
+                                         (.-elemtype (cast Type$ArrayType (.-head formals))))]
+                    (when (.hasTag arg JCTree$Tag/LAMBDA)
+                      (let [lambda (cast JCTree$JCLambda arg)]
+                        (when (identical? (.-paramKind lambda)
+                                          JCTree$JCLambda$ParameterKind/IMPLICIT)
+                          (for-each [^JCTree$JCVariableDecl var (.-params lambda)]
+                            (set! (.-vartype var) nil)))
+                        (when (.isFunctionalInterface types formal)
+                          (let [functionalType (.findDescriptorType types formal)
+                                voidCompatible (.hasTag
+                                                 (.getReturnType functionalType)
+                                                 TypeTag/VOID)]
+                            (set!
+                              (.-body lambda)
+                              (.translate
+                                (anon TreeTranslator []
+                                  (method ^:public visitReturn ^void [this1 ^JCTree$JCReturn tree]
+                                    (set! (.-result this1) tree)
+                                    (if voidCompatible
+                                        (when (some? (.-expr tree))
+                                          (let [err (.Erroneous make (List/of tree))]
+                                            (set! (.-result this1) err)
+                                            (.append
+                                              rollback
+                                              (arbace.core/lambda
+                                                Runnable
+                                                ^void []
+                                                (set!
+                                                  (.-body lambda)
+                                                  (.translate
+                                                    (anon TreeTranslator []
+                                                      (method ^:public translate :type-params [(T
+                                                                                                 extends
+                                                                                                 JCTree)] ^T [this
+                                                                                                              ^T t]
+                                                        (if (identical? t err)
+                                                            ^JCTree tree
+                                                            (.translate super t))))
+                                                    (.-body lambda)))))))
+                                        (when (nil? (.-expr tree))
+                                          (set! (.-expr tree)
+                                                (.setType (.Erroneous make) (.-errType syms)))
+                                          (.append
+                                            rollback
+                                            (arbace.core/lambda
+                                              Runnable
+                                              ^void []
+                                              (set! (.-expr tree) nil))))))
+
+                                  (method ^:public visitLambda ^void [this ^JCTree$JCLambda tree]
+                                    (set! (.-result this) tree))
+
+                                  (method ^:public visitClassDef ^void [this
+                                                                        ^JCTree$JCClassDecl tree]
+                                    (set! (.-result this) tree)))
+                                (.-body lambda)))
+                            (when (and (not voidCompatible)
+                                       (.hasTag (.-body lambda) JCTree$Tag/BLOCK))
+                              (let [ret (.Return make (.setType (.Erroneous make) (.-errType syms)))]
+                                (set! (.-stats (cast JCTree$JCBlock (.-body lambda)))
+                                      (.append (.-stats (cast JCTree$JCBlock (.-body lambda))) ret))
+                                (.append rollback
+                                         (arbace.core/lambda
+                                           Runnable
+                                           ^void []
+                                           (set!
+                                             (.-stats (cast JCTree$JCBlock (.-body lambda)))
+                                             (List/filter
+                                               (.-stats (cast JCTree$JCBlock (.-body lambda)))
+                                               ret))))))))
+                        (set! repaired true)))
+                    (set! args (.-tail args))
+                    (when (or (.nonEmpty (.-tail formals)) (not vararg))
+                      (set! formals (.-tail formals)))))
+                (let [^{:tag (List JCTree$JCExpression)} prevArgs (.-args mit)]
+                  (while (.nonEmpty formals)
+                    (set! (.-args mit)
+                          (.append (.-args mit) (.setType (.Erroneous make) (.-errType syms))))
+                    (set! formals (.-tail formals))
+                    (set! repaired true))
+                  (.append rollback (lambda Runnable ^void [] (set! (.-args mit) prevArgs))))))))
+        (let [^:mutable ^Type owntype nil]
+          (if repaired
+              (let [^{:tag (List JCTree$JCExpression)} args (TreeInfo/args (.-tree (.-env todo)))
+                    ^:mutable ^{:tag (List Type)} pats (.getParameterTypes
+                                                         (.-pt (.-resultInfo todo)))]
+                (while (< (.length pats) (.length args))
+                  (set! pats (.append pats (.-errType syms))))
+                (let [^Check$CheckContext recoveryCheckContext
+                        (anon Check$NestedCheckContext [(.-checkContext (.-resultInfo todo))]
+                          (method ^:public report ^void [this ^JCDiagnostic$DiagnosticPosition pos
+                                                         ^JCDiagnostic details]
+                            (.report (.-basicHandler chk) pos details)))]
+                  (set! owntype
+                        (.checkMethod attr
+                                      (.-site todo)
+                                      (.-candSym todo)
+                                      (.new attr
+                                            Attr$ResultInfo
+                                            (.-pkind (.-resultInfo todo))
+                                            (.getReturnType (.-pt (.-resultInfo todo)))
+                                            recoveryCheckContext
+                                            (.-checkMode (.-resultInfo todo)))
+                                      (.-env todo)
+                                      args
+                                      pats
+                                      (.getTypeArguments (.-pt (.-resultInfo todo)))))
+                  (.forEach rollback (method-ref Consumer [Runnable] Runnable/.run))))
+              (set! owntype
+                    (.basicMethodInvocationRecovery
+                      this
+                      (.-tree todo)
+                      (.-site todo)
+                      (.-errSym todo)
+                      (.-env todo)
+                      (.-resultInfo todo))))
+          (set! (.-type (.-tree todo)) owntype)))))
+
+  (method recoverMethodInvocation ^Type [this ^JCTree tree ^Type site ^Symbol sym
+                                         ^{:tag (Env AttrContext)} env ^Attr$ResultInfo resultInfo]
+    (if (and (not (== (bit-and (.-flags_field sym) Flags/RECOVERABLE) 0))
+             (.recover (.-attributionMode (cast AttrContext (.-info env)))))
+        (do
+          (.append recoveryTodo
+                   (RecoverTodo. tree
+                                 site
+                                 sym
+                                 (.-candidateSymbol (cast RecoveryErrorType (.-type sym)))
+                                 (.copyEnv attr env)
+                                 resultInfo))
+          (.-errType syms))
+        (.basicMethodInvocationRecovery this tree site sym env resultInfo)))
+
+  (method ^:private basicMethodInvocationRecovery ^Type [this ^JCTree tree ^Type site ^Symbol sym
+                                                         ^{:tag (Env AttrContext)} env
+                                                         ^Attr$ResultInfo resultInfo]
+    (let [pt (.map (.-pt resultInfo)
+                   (.new deferredAttr
+                         DeferredAttr$RecoveryDeferredTypeMap
+                         DeferredAttr$AttrMode/SPECULATIVE
+                         sym
+                         (.-pendingResolutionPhase (cast AttrContext (.-info env)))))
+          owntype (.checkIdInternal attr tree site sym pt env resultInfo)]
+      (.map (.-pt resultInfo)
+            (.new deferredAttr
+                  DeferredAttr$RecoveryDeferredTypeMap
+                  DeferredAttr$AttrMode/CHECK
+                  sym
+                  (.-pendingResolutionPhase (cast AttrContext (.-info env)))))
+      owntype))
+
+  (method wrongMethodSymbolCandidate ^void [this ^Symbol$TypeSymbol errSymbol ^Symbol candSym
+                                            ^JCDiagnostic diag]
+    (let [^:mutable ^{:tag (List JCDiagnostic)} diags (List/of diag)
+          recoverable false]
+      (while (and (not recoverable) (.nonEmpty diags))
+        (let [d (cast JCDiagnostic (.-head diags))]
+          (set! diags (.-tail diags))
+          (switch (.getCode d)
+            ("compiler.misc.missing.ret.val" "compiler.misc.unexpected.ret.val"
+                                             "compiler.misc.infer.arg.length.mismatch"
+                                             "compiler.misc.arg.length.mismatch")
+              (do
+                (set! (.-type errSymbol)
+                      (RecoveryErrorType. (cast Type$ErrorType (.-type errSymbol)) candSym))
+                (set! (.-flags_field errSymbol)
+                      (bit-or (.-flags_field errSymbol) Flags/RECOVERABLE))
+                (return))
+            nil)
+          (for-each [a (.getArgs d)]
+            (when-instance [^JCDiagnostic diagnostic a] (set! diags (.prepend diags diagnostic))))))))
+
+  (defclass ^:private ^:static RecoveryErrorType
+    :extends Type$ErrorType
+
+    (field ^:public ^:final ^Symbol candidateSymbol)
+
+    (constructor ^:public [this ^Type$ErrorType original ^Symbol candidateSymbol]
+      (super. (.getOriginalType original) (.-tsym original))
+      (set! (.-candidateSymbol this) candidateSymbol)))
+
+  (defclass ^:private ^:static RecoverTodo
+    (field ^:public ^:final ^JCTree tree)
+
+    (field ^:public ^:final ^Type site)
+
+    (field ^:public ^:final ^Symbol errSym)
+
+    (field ^:public ^:final ^Symbol candSym)
+
+    (field ^:public ^:final ^{:tag (Env AttrContext)} env)
+
+    (field ^:public ^:final ^Attr$ResultInfo resultInfo)
+
+    (constructor ^:public [this ^JCTree tree ^Type site ^Symbol errSym ^Symbol candSym
+                           ^{:tag (Env AttrContext)} env ^Attr$ResultInfo resultInfo]
+      (set! (.-tree this) tree)
+      (set! (.-site this) site)
+      (set! (.-errSym this) errSym)
+      (set! (.-candSym this) candSym)
+      (set! (.-env this) env)
+      (set! (.-resultInfo this) resultInfo))))

@@ -1,0 +1,1424 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/parser/DocCommentParser.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.parser)
+
+(import '(com.sun.source.doctree AttributeTree$ValueKind
+                                 DocTree
+                                 DocTree$Kind
+                                 LiteralTree
+                                 StartElementTree
+                                 TextTree)
+        '(com.sun.source.util SimpleDocTreeVisitor)
+        '(com.sun.tools.javac.tree DCTree
+                                   DCTree$DCDocComment
+                                   DCTree$DCEndPosTree
+                                   DCTree$DCErroneous
+                                   DCTree$DCIdentifier
+                                   DCTree$DCReference
+                                   DCTree$DCText
+                                   DocTreeMaker)
+        '(com.sun.tools.javac.util DiagnosticSource
+                                   JCDiagnostic$Factory
+                                   LayoutCharacters
+                                   List
+                                   ListBuffer
+                                   Name
+                                   Names
+                                   Position
+                                   StringUtils)
+        '(java.util ArrayList HashMap Map)
+        '(java.util.regex Pattern))
+
+(defclass ^:public DocCommentParser
+  (defclass ^:static ParseException
+    :extends Exception
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+    (field ^:final ^int pos)
+
+    (constructor [this ^String key] (this. Position/NOPOS key))
+
+    (constructor [this ^int pos ^String key]
+      (super. key)
+      (set! (.-pos this) pos)))
+
+  (defclass ^:private ^:enum Phase
+    (constants PREAMBLE BODY POSTAMBLE INLINE))
+
+  (field ^:private ^:final ^ParserFactory fac)
+
+  (field ^:private ^:final ^JCDiagnostic$Factory diags)
+
+  (field ^:private ^:final ^DiagnosticSource diagSource)
+
+  (field ^:private ^:final ^Tokens$Comment comment)
+
+  (field ^:private ^:final ^DocTreeMaker m)
+
+  (field ^:private ^:final ^Names names)
+
+  (field ^:private ^:final ^boolean isHtmlFile)
+
+  (field ^:private ^:final ^DocTree$Kind textKind)
+
+  (field ^:private ^:final ^Markdown markdown)
+
+  (field ^:private ^char/1 buf)
+
+  (field ^:private ^int bp)
+
+  (field ^:private ^int buflen)
+
+  (field ^:private ^char ch)
+
+  (field ^:private ^int textStart -1)
+
+  (field ^:private ^int lastNonWhite -1)
+
+  (field ^:private ^boolean newline true)
+
+  (field ^:private ^boolean inPre false)
+
+  (field ^:private ^:final ^{:tag (Map Name TagParser)} tagParsers)
+
+  (constructor ^:public [this ^ParserFactory fac ^DiagnosticSource diagSource
+                         ^Tokens$Comment comment]
+    (this. fac diagSource comment false))
+
+  (constructor ^:public [this ^ParserFactory fac ^DiagnosticSource diagSource
+                         ^Tokens$Comment comment ^boolean isHtmlFile]
+    (set! (.-fac this) fac)
+    (set! (.-diags this) (.-diags (.-log fac)))
+    (set! (.-diagSource this) diagSource)
+    (set! (.-comment this) (.stripIndent comment))
+    (set! names (.-names fac))
+    (set! (.-isHtmlFile this) isHtmlFile)
+    (set! textKind (if isHtmlFile DocTree$Kind/TEXT (DocCommentParser/getTextKind comment)))
+    (set! m (.-docTreeMaker fac))
+    (set! tagParsers (.createTagParsers this))
+    (set! markdown (when (identical? textKind DocTree$Kind/MARKDOWN) (Markdown.))))
+
+  (method ^:private ^:static getTextKind ^DocTree$Kind [^Tokens$Comment c]
+    (switch (.getStyle c)
+      JAVADOC_BLOCK DocTree$Kind/TEXT
+      JAVADOC_LINE DocTree$Kind/MARKDOWN
+      (throw (IllegalArgumentException. (.name (.getStyle c))))))
+
+  (method ^:public parse ^DCTree$DCDocComment [this]
+    (let [c (.getText comment)]
+      (set! buf (new char/1 (unchecked-add-int (.length c) 1)))
+      (.getChars c 0 (.length c) buf 0)
+      (aset buf (unchecked-subtract-int (alength buf) 1) (unchecked-char LayoutCharacters/EOI))
+      (set! buflen (unchecked-subtract-int (alength buf) 1))
+      (set! bp -1)
+      (.nextChar this)
+      (let [^{:tag (List DCTree)} preamble (if isHtmlFile (.content this Phase/PREAMBLE) (List/nil))
+            ^{:tag (List DCTree)} body (.content this Phase/BODY)
+            ^{:tag (List DCTree)} tags (.blockTags this)
+            ^{:tag (List DCTree)} postamble (if isHtmlFile
+                                                (.content this Phase/POSTAMBLE)
+                                                (List/nil))
+            ^int pos (cond
+                       (identical? textKind DocTree$Kind/MARKDOWN) 0
+                       (not (.isEmpty preamble)) (.-pos (cast DCTree (.-head preamble)))
+                       (not (.isEmpty body)) (.-pos (cast DCTree (.-head body)))
+                       (not (.isEmpty tags)) (.-pos (cast DCTree (.-head tags)))
+                       (not (.isEmpty postamble)) (.-pos (cast DCTree (.-head postamble)))
+                       :else 0)]
+        (.newDocCommentTree (.at m pos) comment body tags preamble postamble))))
+
+  (method nextChar ^void [this]
+    (set! ch (aget buf (if (< bp buflen) (set! bp (unchecked-inc-int bp)) buflen)))
+    (switch ch
+      \newline (set! newline true)
+      \return
+        (do
+          (when (and (< (unchecked-add-int bp 1) buflen)
+                     (== (aget buf (unchecked-add-int bp 1)) \newline))
+            (set! bp (unchecked-inc-int bp))
+            (set! ch \newline))
+          (set! newline true))))
+
+  (method peekChar ^char [this]
+    (aget buf (if (< bp buflen) (unchecked-add-int bp 1) buflen)))
+
+  (method ^:protected blockContent ^{:tag (List DCTree)} [this]
+    (while (and (.isHorizontalWhitespace this ch) (< bp buflen)) (.nextChar this))
+    (.content this Phase/BODY))
+
+  (method ^:protected content ^{:tag (List DCTree)} [this ^Phase phase]
+    (let [^:mutable ^{:tag (ListBuffer DCTree)} trees (ListBuffer.)
+          ^:mutable ^{:tag (ListBuffer DCTree)} mainTrees nil]
+      (set! textStart -1)
+      (let [^:mutable ^int depth 1
+            pos bp]
+        (when (identical? textKind DocTree$Kind/MARKDOWN) (.initMarkdownLine this))
+        (while (< bp buflen)
+          (label :switch
+            (switch ch
+              (\newline \return)
+                (do
+                  (.nextChar this)
+                  (when (identical? textKind DocTree$Kind/MARKDOWN) (.initMarkdownLine this)))
+              (\space \tab)
+                (do
+                  (when (and (identical? textKind DocTree$Kind/MARKDOWN) (== textStart -1))
+                    (set! textStart bp))
+                  (.nextChar this))
+              \&
+                (switch textKind
+                  MARKDOWN (.defaultContentCharacter this)
+                  TEXT (.entity this trees)
+                  (throw (.unknownTextKind this textKind)))
+              \<
+                (switch textKind
+                  MARKDOWN (.defaultContentCharacter this)
+                  TEXT
+                    (do
+                      (set! newline false)
+                      (when isHtmlFile
+                        (switch phase
+                          PREAMBLE
+                            (when (.isEndPreamble this)
+                              (.add trees (.html this))
+                              (when (== textStart -1) (set! textStart bp) (set! lastNonWhite -1))
+                              (set! newline true)
+                              (break))
+                          BODY
+                            (when (.isEndBody this)
+                              (.addPendingText this trees lastNonWhite)
+                              (break))
+                          nil))
+                      (.addPendingText this trees (unchecked-subtract-int bp 1))
+                      (.add trees (.html this))
+                      (if inPre
+                          (when (nil? mainTrees) (set! mainTrees trees) (set! trees (ListBuffer.)))
+                          (when (some? mainTrees)
+                            (.addAll mainTrees (.normalizePreContent this trees))
+                            (set! trees mainTrees)
+                            (set! mainTrees nil)))
+                      (when-not (or (identical? phase Phase/PREAMBLE)
+                                    (identical? phase Phase/POSTAMBLE))
+                        (when (== textStart -1) (set! textStart bp) (set! lastNonWhite -1))))
+                  (throw (.unknownTextKind this textKind)))
+              \{
+                (switch phase
+                  (PREAMBLE POSTAMBLE) (.defaultContentCharacter this)
+                  BODY (.inlineTag this trees)
+                  INLINE (when-not (.inlineTag this trees) (set! depth (unchecked-inc-int depth))))
+              \}
+                (if (identical? phase Phase/INLINE)
+                    (do
+                      (set! newline false)
+                      (when (== (set! depth (unchecked-dec-int depth)) 0)
+                        (.addPendingText this trees (unchecked-subtract-int bp 1))
+                        (.nextChar this)
+                        (return (.toList trees)))
+                      (.nextChar this))
+                    (.defaultContentCharacter this))
+              \@
+                (do
+                  (if newline
+                      (let [peek (.peekChar this)]
+                        (if (or (== peek \@) (== peek \*))
+                            (do
+                              (.addPendingText this trees (unchecked-subtract-int bp 1))
+                              (.nextChar this)
+                              (.add trees (.newEscapeTree (.at m (unchecked-subtract-int bp 1)) ch))
+                              (set! newline false)
+                              (.nextChar this)
+                              (set! textStart bp)
+                              (break :switch))
+                            (when (identical? phase Phase/BODY)
+                              (.addPendingText this trees lastNonWhite)
+                              (break))))
+                      (when (and (and (not (== textStart -1))
+                                      (== (aget buf (unchecked-subtract-int bp 1)) \*))
+                                 (== (.peekChar this) \/))
+                        (.addPendingText this trees (unchecked-subtract-int bp 1))
+                        (.nextChar this)
+                        (.add trees (.newEscapeTree (.at m (unchecked-subtract-int bp 1)) \/))
+                        (set! newline false)
+                        (.nextChar this)
+                        (set! textStart bp)
+                        (break :switch)))
+                  (.defaultContentCharacter this))
+              \\
+                (switch textKind
+                  MARKDOWN
+                    (do
+                      (.defaultContentCharacter this)
+                      (.nextChar this)
+                      (.defaultContentCharacter this))
+                  TEXT (.defaultContentCharacter this))
+              (\` \~)
+                (switch textKind
+                  MARKDOWN
+                    (do
+                      (set! newline false)
+                      (when (== textStart -1) (set! textStart bp))
+                      (set! lastNonWhite bp)
+                      (let [saveNewline newline
+                            isCodeFence (.isCodeFence markdown)]
+                        (if (or (== ch \`) (and (== ch \~) isCodeFence))
+                            (let [end (.skipCode markdown)]
+                              (if (== end -1)
+                                  (if isCodeFence
+                                      (set! lastNonWhite (unchecked-subtract-int buflen 1))
+                                      (do
+                                        (set! bp lastNonWhite)
+                                        (set! newline saveNewline)
+                                        (.nextChar this)))
+                                  (set! lastNonWhite (unchecked-subtract-int end 1))))
+                            (.nextChar this))))
+                  TEXT (.defaultContentCharacter this))
+              (.defaultContentCharacter this))))
+        (when-not (== lastNonWhite -1) (.addPendingText this trees lastNonWhite))
+        (when (some? mainTrees)
+          (.addAll mainTrees trees)
+          (set! trees mainTrees)
+          (set! mainTrees nil))
+        (if (identical? phase Phase/INLINE)
+            (List/of (.erroneous this "dc.unterminated.inline.tag" pos))
+            (.toList trees)))))
+
+  (method defaultContentCharacter ^void [this]
+    (set! newline false)
+    (when (== textStart -1) (set! textStart bp))
+    (set! lastNonWhite bp)
+    (.nextChar this))
+
+  (method initMarkdownLine ^void [this]
+    (when (== textStart -1) (set! textStart bp))
+    (.update markdown)
+    (when (.isIndentedCodeBlock markdown)
+      (.skipLine markdown)
+      (set! lastNonWhite (unchecked-subtract-int bp 1))))
+
+  (method ^:private unknownTextKind ^IllegalStateException [this ^DocTree$Kind textKind]
+    (IllegalStateException. (.toString textKind)))
+
+  (method ^:protected blockTags ^{:tag (List DCTree)} [this]
+    (let [^{:tag (ListBuffer DCTree)} tags (ListBuffer.)]
+      (while (and (< bp buflen) (== ch \@)) (.add tags (.blockTag this)))
+      (.toList tags)))
+
+  (method ^:protected blockTag ^DCTree [this]
+    (set! newline false)
+    (let [p bp]
+      (try
+        (.nextChar this)
+        (if (.isIdentifierStart this ch)
+            (let [name (.readTagName this)
+                  tp (cast TagParser (.get tagParsers name))]
+              (cond
+                (nil? tp)
+                  (let [^{:tag (List DCTree)} content (.blockContent this)]
+                    (.newUnknownBlockTagTree (.at m p) name content))
+                (.allowsBlock tp) (.parse tp p DocCommentParser$TagParser$Kind/BLOCK)
+                :else (.erroneous this "dc.bad.inline.tag" p)))
+            (let [prefPos bp] (.blockContent this) (.erroneous this "dc.no.tag.name" p prefPos)))
+        (catch ParseException e (.blockContent this) (.erroneous this (.getMessage e) p (.-pos e))))))
+
+  (method ^:private showPos ^String [this ^int p]
+    (let [sb (StringBuilder.)]
+      (.append (.append (.append sb "[") p) "] ")
+      (when (>= p 0)
+        (loop [^int i (^[int int] Math/max (unchecked-subtract-int p 10) 0)]
+          (when (< i (Math/min (unchecked-add-int p 10) buflen))
+            (when (== i p) (.append sb "["))
+            (let [c (aget buf i)]
+              (.append sb (switch c \newline \| \space \_ c))
+              (if (== i p)
+                  (do (.append sb "]") (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))))))
+      (.toString sb)))
+
+  (method ^:protected inlineTag ^boolean [this ^{:tag (ListBuffer DCTree)} list]
+    (set! newline false)
+    (.nextChar this)
+    (if (== ch \@)
+        (if (== (.peekChar this) \@)
+            (do
+              (when (== textStart -1) (set! textStart (unchecked-subtract-int bp 1)))
+              (.addPendingText this list (unchecked-subtract-int bp 1))
+              (.nextChar this)
+              (.add list (.newEscapeTree (.at m (unchecked-subtract-int bp 1)) \@))
+              (.nextChar this)
+              (set! textStart -1)
+              (set! lastNonWhite bp))
+            (do
+              (.addPendingText this list (unchecked-subtract-int bp 2))
+              (.add list (.inlineTag this))
+              (set! textStart bp)
+              (set! lastNonWhite -1)
+              (return true)))
+        (do
+          (when (== textStart -1) (set! textStart (unchecked-subtract-int bp 1)))
+          (set! lastNonWhite bp)))
+    false)
+
+  (method ^:protected inlineTag ^DCTree [this]
+    (let [p (unchecked-subtract-int bp 1)]
+      (try
+        (.nextChar this)
+        (if (not (.isIdentifierStart this ch))
+            (.erroneous this "dc.no.tag.name" p bp)
+            (let [name (.readTagName this)
+                  tp (cast TagParser (.get tagParsers name))]
+              (if (nil? tp)
+                  (do
+                    (.skipWhitespace this)
+                    (let [^DCTree text (.inlineText this WhitespaceRetentionPolicy/REMOVE_ALL)]
+                      (.nextChar this)
+                      (.setEndPos (.newUnknownInlineTagTree (.at m p) name (List/of text)) bp)))
+                  (do
+                    (when-not (.-retainWhiteSpace tp) (.skipWhitespace this))
+                    (if (.allowsInline tp)
+                        (let [^{:tag (DCTree$DCEndPosTree ?)} tree (cast
+                                                                     DCTree$DCEndPosTree
+                                                                     (.parse
+                                                                       tp
+                                                                       p
+                                                                       DocCommentParser$TagParser$Kind/INLINE))]
+                          (.setEndPos tree bp))
+                        (let [^DCTree text (.inlineText this WhitespaceRetentionPolicy/REMOVE_ALL)]
+                          (.nextChar this)
+                          (.setEndPos (.newUnknownInlineTagTree (.at m p) name (List/of text)) bp)))))))
+        (catch ParseException e (.erroneous this (.getMessage e) p (.-pos e))))))
+
+  (defclass ^:private ^:enum WhitespaceRetentionPolicy
+    (constants RETAIN_ALL REMOVE_FIRST_SPACE REMOVE_ALL))
+
+  (method ^:private inlineText :throws [ParseException] ^DCTree$DCText [this
+                                                                        ^WhitespaceRetentionPolicy whitespacePolicy]
+    (switch whitespacePolicy
+      REMOVE_ALL (.skipWhitespace this)
+      REMOVE_FIRST_SPACE (when (== ch \space) (.nextChar this))
+      RETAIN_ALL nil)
+    (let [pos bp
+          ^:mutable ^int depth 1]
+      (while (< bp buflen)
+        (switch ch
+          (\newline \return \formfeed \space \tab) nil
+          \{ (do (set! newline false) (set! lastNonWhite bp) (set! depth (unchecked-inc-int depth)))
+          \}
+            (do
+              (when (== (set! depth (unchecked-dec-int depth)) 0)
+                (return (.newTextTree (.at m pos) (.newString this pos bp))))
+              (set! newline false)
+              (set! lastNonWhite bp))
+          (do (set! newline false) (set! lastNonWhite bp)))
+        (.nextChar this))
+      (throw (ParseException. "dc.unterminated.inline.tag"))))
+
+  (method ^:protected reference :throws [ParseException] ^DCTree$DCReference [this
+                                                                              ^ReferenceParser$Mode mode]
+    (let [pos bp
+          ^:mutable ^int depth 0]
+      (while (< bp buflen)
+        (switch ch
+          (\newline \return \formfeed \space \tab) (when (== depth 0) (break))
+          (\( \<) (do (set! newline false) (set! depth (unchecked-inc-int depth)))
+          (\) \>) (do (set! newline false) (set! depth (unchecked-dec-int depth)))
+          \} (do (when (== bp pos) (return nil)) (set! newline false) (break))
+          \@ (when newline (break))
+          (set! newline false))
+        (.nextChar this))
+      (when (> depth 0) (throw (ParseException. "dc.unterminated.signature")))
+      (let [sig (.newString this pos bp)]
+        (try
+          (let [ref (.parse (ReferenceParser. fac) sig mode)]
+            (cast DCTree$DCReference (.setEndPos (.newReferenceTree (.at m pos) sig ref) bp)))
+          (catch ReferenceParser$ParseException pe
+            (throw (ParseException. (unchecked-add-int pos (.-pos pe)) (.getMessage pe))))))))
+
+  (method ^:protected identifier :throws [ParseException] ^DCTree$DCIdentifier [this]
+    (.skipWhitespace this)
+    (let [pos bp]
+      (if (.isJavaIdentifierStart this ch)
+          (let [name (.readJavaIdentifier this)] (.newIdentifierTree (.at m pos) name))
+          (throw (ParseException. "dc.identifier.expected")))))
+
+  (method ^:protected quotedString ^DCTree$DCText [this]
+    (set! newline false)
+    (let [pos bp]
+      (.nextChar this)
+      (while (< bp buflen)
+        (switch ch
+          (\newline \return \formfeed \space \tab) nil
+          \" (do (.nextChar this) (return (.newTextTree (.at m pos) (.newString this pos bp))))
+          \@ (when newline (break)))
+        (.nextChar this))
+      nil))
+
+  (method ^:protected inlineWord ^DCTree$DCText [this]
+    (let [pos bp
+          ^:mutable ^int depth 0]
+      (while (< bp buflen)
+        (switch ch
+          (\newline \return \formfeed \space \tab)
+            (return (.newTextTree (.at m pos) (.newString this pos bp)))
+          \@ (when newline (break))
+          \{ (set! depth (unchecked-inc-int depth))
+          \}
+            (do
+              (when (== depth 0) (return (.newTextTree (.at m pos) (.newString this pos bp))))
+              (set! depth (unchecked-dec-int depth))))
+        (set! newline false)
+        (.nextChar this))
+      nil))
+
+  (method ^:private inlineContent ^{:tag (List DCTree)} [this]
+    (.skipWhitespace this)
+    (.content this Phase/INLINE))
+
+  (method ^:protected entity ^void [this ^{:tag (ListBuffer DCTree)} list]
+    (set! newline false)
+    (.addPendingText this list (unchecked-subtract-int bp 1))
+    (.add list (.entity this))
+    (when (== textStart -1) (set! textStart bp) (set! lastNonWhite -1)))
+
+  (method ^:protected entity ^DCTree [this]
+    (let [p bp]
+      (.nextChar this)
+      (let [^:mutable ^Name name nil]
+        (cond
+          (== ch \#)
+            (let [namep bp]
+              (.nextChar this)
+              (if (.isDecimalDigit this ch)
+                  (do
+                    (.nextChar this)
+                    (while (and (< bp buflen) (.isDecimalDigit this ch)) (.nextChar this))
+                    (set! name (.fromChars names buf namep (unchecked-subtract-int bp namep))))
+                  (when (or (== ch \x) (== ch \X))
+                    (.nextChar this)
+                    (when (.isHexDigit this ch)
+                      (.nextChar this)
+                      (while (and (< bp buflen) (.isHexDigit this ch)) (.nextChar this))
+                      (set! name (.fromChars names buf namep (unchecked-subtract-int bp namep)))))))
+          (.isIdentifierStart this ch) (set! name (.readIdentifier this)))
+        (cond
+          (nil? name) (.erroneous this "dc.bad.entity" p)
+          (not (== ch \;)) (.erroneous this "dc.missing.semicolon" p)
+          :else (do (.nextChar this) (.newEntityTree (.at m p) name))))))
+
+  (method isEndPreamble ^boolean [this]
+    (let [savedpos bp]
+      (try
+        (when (== ch \<) (.nextChar this))
+        (when (.isIdentifierStart this ch)
+          (let [^:mutable name (StringUtils/toLowerCase (.toString (.readIdentifier this)))]
+            (switch name
+              "body"
+                (do
+                  (while (and (< bp buflen) (not (== ch \>))) (.nextChar this))
+                  (when (== ch \>) (.nextChar this))
+                  (while (and (< bp buflen) (.isWhitespace this ch)) (.nextChar this))
+                  (when (== ch \<)
+                    (.nextChar this)
+                    (when (.isIdentifierStart this ch)
+                      (set! name (StringUtils/toLowerCase (.toString (.readIdentifier this))))
+                      (when (.equals name "main") (return false))))
+                  (return true))
+              "main" (return true))))
+        false
+        (finally (set! bp savedpos) (set! ch (aget buf bp))))))
+
+  (method isEndBody ^boolean [this]
+    (let [savedpos bp]
+      (try
+        (when (== ch \<) (.nextChar this))
+        (when (== ch \/)
+          (.nextChar this)
+          (when (.isIdentifierStart this ch)
+            (let [name (StringUtils/toLowerCase (.toString (.readIdentifier this)))]
+              (switch name ("body" "main") (return true)))))
+        false
+        (finally (set! bp savedpos) (set! ch (aget buf bp))))))
+
+  (method peek ^boolean [this ^:mutable ^String s]
+    (let [savedpos bp]
+      (try
+        (when (== ch \<) (.nextChar this))
+        (when (== ch \/)
+          (if (not (== (.charAt s 0) ch))
+              (return false)
+              (do (set! s (.substring s 1)) (.nextChar this))))
+        (if (.isIdentifierStart this ch)
+            (let [name (.readIdentifier this)]
+              (.equals (StringUtils/toLowerCase (.toString name)) s))
+            false)
+        (finally (set! bp savedpos) (set! ch (aget buf bp))))))
+
+  (method ^:private html ^DCTree [this]
+    (let [p bp]
+      (.nextChar this)
+      (cond
+        (.isIdentifierStart this ch)
+          (let [name (.readIdentifier this)
+                ^{:tag (List DCTree)} attrs (.htmlAttrs this)]
+            (when (some? attrs)
+              (let [^:mutable selfClosing false]
+                (when (== ch \/) (.nextChar this) (set! selfClosing true))
+                (when (== ch \>)
+                  (.nextChar this)
+                  (when (.equalsIgnoreCase "pre" (.toString name)) (set! inPre true))
+                  (return (.setEndPos (.newStartElementTree (.at m p) name attrs selfClosing) bp))))))
+        (== ch \/)
+          (do
+            (.nextChar this)
+            (when (.isIdentifierStart this ch)
+              (let [name (.readIdentifier this)]
+                (.skipWhitespace this)
+                (when (== ch \>)
+                  (.nextChar this)
+                  (when (.equalsIgnoreCase "pre" (.toString name)) (set! inPre false))
+                  (return (.setEndPos (.newEndElementTree (.at m p) name) bp))))))
+        :else
+          (when (== ch \!)
+            (.nextChar this)
+            (cond
+              (== ch \-)
+                (do
+                  (.nextChar this)
+                  (when (== ch \-)
+                    (.nextChar this)
+                    (while (< bp buflen)
+                      (let [^:mutable ^int dash 0]
+                        (while (and (< bp buflen) (== ch \-))
+                          (set! dash (unchecked-inc-int dash))
+                          (.nextChar this))
+                        (when (and (>= dash 2) (== ch \>))
+                          (.nextChar this)
+                          (return (.newCommentTree (.at m p) (.newString this p bp))))
+                        (.nextChar this)))))
+              (and (.isIdentifierStart this ch) (.peek this "doctype"))
+                (do
+                  (.readIdentifier this)
+                  (.nextChar this)
+                  (.skipWhitespace this)
+                  (let [d bp]
+                    (while (< bp buflen)
+                      (when (== ch \>)
+                        (let [mark bp]
+                          (.nextChar this)
+                          (return (.newDocTypeTree (.at m d) (.newString this d mark)))))
+                      (.nextChar this))))
+              :else
+                (let [CDATA "[CDATA["]
+                  (loop [^int i 0]
+                    (if (< i (.length CDATA))
+                        (if (== ch (.charAt CDATA i))
+                            (do (.nextChar this) (recur (unchecked-inc-int i)))
+                            (return (.erroneous this "dc.invalid.html" p)))
+                        nil))
+                  (while (< bp buflen)
+                    (if (== ch \])
+                        (let [^:mutable ^int n 0]
+                          (while (and (< bp buflen) (== ch \]))
+                            (set! n (unchecked-inc-int n))
+                            (.nextChar this))
+                          (when (and (>= n 2) (== ch \>))
+                            (.nextChar this)
+                            (return (.newTextTree (.at m p) (.newString this p bp)))))
+                        (.nextChar this)))
+                  (return (.erroneous this "dc.invalid.html" p))))))
+      (set! bp (unchecked-add-int p 1))
+      (set! ch (aget buf bp))
+      (.erroneous this "dc.malformed.html" p)))
+
+  (method ^:protected htmlAttrs ^{:tag (List DCTree)} [this]
+    (let [^{:tag (ListBuffer DCTree)} attrs (ListBuffer.)]
+      (.skipWhitespace this)
+      (while (and (< bp buflen) (.isIdentifierStart this ch))
+        (let [namePos bp
+              name (.readAttributeName this)]
+          (.skipWhitespace this)
+          (let [^:mutable ^{:tag (List DCTree)} value nil
+                ^:mutable vkind AttributeTree$ValueKind/EMPTY]
+            (when (== ch \=)
+              (let [^{:tag (ListBuffer DCTree)} v (ListBuffer.)]
+                (.nextChar this)
+                (.skipWhitespace this)
+                (if (or (== ch \') (== ch \"))
+                    (do
+                      (set! newline false)
+                      (set! vkind
+                            (if (== ch \')
+                                AttributeTree$ValueKind/SINGLE
+                                AttributeTree$ValueKind/DOUBLE))
+                      (let [quote ch]
+                        (.nextChar this)
+                        (set! textStart bp)
+                        (while (and (< bp buflen) (not (== ch quote))) (.attrValueChar this v))
+                        (.addPendingText this v (unchecked-subtract-int bp 1) DocTree$Kind/TEXT)
+                        (.nextChar this)))
+                    (do
+                      (set! vkind AttributeTree$ValueKind/UNQUOTED)
+                      (set! textStart bp)
+                      (while (and (< bp buflen) (not (.isUnquotedAttrValueTerminator this ch)))
+                        (.attrValueChar this v))
+                      (.addPendingText this v (unchecked-subtract-int bp 1) DocTree$Kind/TEXT)))
+                (.skipWhitespace this)
+                (set! value (.toList v))))
+            (let [attr (.newAttributeTree (.at m namePos) name vkind value)] (.add attrs attr)))))
+      (.toList attrs)))
+
+  (method normalizePreContent ^{:tag (ListBuffer DCTree)} [this ^{:tag (ListBuffer DCTree)} trees]
+    (if (or (identical? textKind DocTree$Kind/MARKDOWN) isHtmlFile)
+        trees
+        (letclass [(^:enum State
+                     (constants BEFORE_CODE AFTER_CODE SUCCEEDED FAILED))
+                   (Context
+                     (field ^State state State/BEFORE_CODE)
+
+                     (method unexpectedTree ^void [this]
+                       (when-not (identical? state State/SUCCEEDED) (set! state State/FAILED))))]
+          (let [visitor (anon (SimpleDocTreeVisitor DCTree Context) []
+                          (method ^:public visitText ^DCTree [this ^TextTree text ^Context cx]
+                            (when-not (and (identical? (.-state cx) State/BEFORE_CODE)
+                                           (.matches (.getBody text) "[ \t]+"))
+                              (if (and (identical? (.-state cx) State/AFTER_CODE)
+                                       (.startsWith (.getBody text) "\n"))
+                                  (do
+                                    (set! (.-state cx) State/SUCCEEDED)
+                                    (.newTextTree
+                                      (.at m
+                                           (unchecked-add-int (.-pos (cast DCTree$DCText text)) 1))
+                                      (.substring (.getBody text) 1)))
+                                  (do (.unexpectedTree cx) (cast DCTree text)))))
+
+                          (method ^:public visitLiteral ^DCTree [this ^LiteralTree literal
+                                                                 ^Context cx]
+                            (if (and (identical? (.-state cx) State/BEFORE_CODE)
+                                     (.startsWith (.getBody (.getBody literal)) "\n"))
+                                (do
+                                  (set! (.-state cx) State/SUCCEEDED)
+                                  (let [oldBody (cast DCTree$DCText (.getBody literal))
+                                        newBody (.newTextTree
+                                                  (.at m (unchecked-add-int (.-pos oldBody) 1))
+                                                  (.substring (.getBody oldBody) 1))]
+                                    (.at m (.-pos (cast DCTree literal)))
+                                    (if (identical? (.getKind literal) DocTree$Kind/CODE)
+                                        ^DCTree (.newCodeTree m newBody)
+                                        ^DCTree (.newLiteralTree m newBody))))
+                                (do (.unexpectedTree cx) (cast DCTree literal))))
+
+                          (method ^:public visitStartElement ^DCTree [this ^StartElementTree node
+                                                                      ^Context cx]
+                            (if (and (identical? (.-state cx) State/BEFORE_CODE)
+                                     (.equalsIgnoreCase (.toString (.getName node)) "code"))
+                                (set! (.-state cx) State/AFTER_CODE)
+                                (.unexpectedTree cx))
+                            (cast DCTree node))
+
+                          (method ^:protected defaultAction ^DCTree [this ^DocTree node ^Context cx]
+                            (.unexpectedTree cx)
+                            (cast DCTree node)))
+                cx (Context.)
+                normalized (ListBuffer.)]
+            (for-each [^DCTree tree trees]
+              (let [visited (cast DCTree (.visit visitor tree cx))]
+                (when (some? visited) (.add normalized visited))
+                (when (identical? (.-state cx) State/FAILED) (return trees))))
+            (if (identical? (.-state cx) State/SUCCEEDED) normalized trees)))))
+
+  (method ^:protected attrValueChar ^void [this ^{:tag (ListBuffer DCTree)} list]
+    (switch ch \& (.entity this list) \{ (.inlineTag this list) (.nextChar this)))
+
+  (method ^:protected addPendingText ^void [this ^{:tag (ListBuffer DCTree)} list ^int textEnd]
+    (.addPendingText this list textEnd textKind))
+
+  (method ^:protected addPendingText ^void [this ^{:tag (ListBuffer DCTree)} list ^int textEnd
+                                            ^DocTree$Kind kind]
+    (when-not (== textStart -1)
+      (when (<= textStart textEnd)
+        (switch kind
+          TEXT
+            (.add list
+                  (.newTextTree (.at m textStart)
+                                (.newString this textStart (unchecked-add-int textEnd 1))))
+          MARKDOWN
+            (.add list
+                  (.newRawTextTree (.at m textStart)
+                                   DocTree$Kind/MARKDOWN
+                                   (.newString this textStart (unchecked-add-int textEnd 1))))
+          (throw (IllegalArgumentException. (.toString kind)))))
+      (set! textStart -1)))
+
+  (method ^:protected erroneous ^DCTree$DCErroneous [this ^String code ^int pos]
+    (.erroneous this code pos Position/NOPOS))
+
+  (method ^:protected erroneous ^DCTree$DCErroneous [this ^String code ^int pos ^:mutable ^int pref]
+    (let [^:mutable i (unchecked-subtract-int bp 1)]
+      (while (> i pos)
+        (switch (aget buf i)
+          (\formfeed \newline \return) (set! newline true)
+          (\tab \space) nil
+          (break))
+        (set! i (unchecked-dec-int i)))
+      (when (== pref Position/NOPOS) (set! pref i))
+      (let [end (unchecked-add-int i 1)]
+        (set! textStart -1)
+        (let [dp (DCTree/createDiagnosticPosition comment pos pref end)
+              diag (.error diags nil diagSource dp code (new Object/1 []))]
+          (.setPrefPos (.newErroneousTree (.at m pos) (.newString this pos end) diag) pref)))))
+
+  (method ^:protected isIdentifierStart ^boolean [this ^char ch]
+    (Character/isUnicodeIdentifierStart ch))
+
+  (method ^:protected readIdentifier ^Name [this]
+    (let [start bp]
+      (.nextChar this)
+      (while (and (< bp buflen) (Character/isUnicodeIdentifierPart ch)) (.nextChar this))
+      (.fromChars names buf start (unchecked-subtract-int bp start))))
+
+  (method ^:protected readAttributeName ^Name [this]
+    (let [start bp]
+      (.nextChar this)
+      (while (and (< bp buflen) (or (Character/isUnicodeIdentifierPart ch) (== ch \-)))
+        (.nextChar this))
+      (.fromChars names buf start (unchecked-subtract-int bp start))))
+
+  (method ^:protected readTagName ^Name [this]
+    (let [start bp]
+      (.nextChar this)
+      (while (and (< bp buflen)
+                  (or (or (or (Character/isUnicodeIdentifierPart ch) (== ch \.)) (== ch \-))
+                      (== ch \:)))
+        (.nextChar this))
+      (.fromChars names buf start (unchecked-subtract-int bp start))))
+
+  (method ^:protected isJavaIdentifierStart ^boolean [this ^char ch]
+    (Character/isJavaIdentifierStart ch))
+
+  (method ^:protected readJavaIdentifier ^Name [this]
+    (let [start bp]
+      (.nextChar this)
+      (while (and (< bp buflen) (Character/isJavaIdentifierPart ch)) (.nextChar this))
+      (.fromChars names buf start (unchecked-subtract-int bp start))))
+
+  (method ^:protected readSystemPropertyName ^Name [this]
+    (let [pos bp]
+      (.nextChar this)
+      (while (or (and (< bp buflen) (Character/isUnicodeIdentifierPart ch)) (== ch \.))
+        (.nextChar this))
+      (.fromChars names buf pos (unchecked-subtract-int bp pos))))
+
+  (defclass Markdown
+    (defclass ^:private ^:enum ContainerBlockKind
+      (constants LIST_ITEM QUOTE))
+
+    (defclass ^:private ^:record BlockInfo [^ContainerBlockKind blockKind ^int indent])
+
+    (field ^:private ^:final ^{:tag (java.util.List BlockInfo)} containers (ArrayList.))
+
+    (defclass ^:private ^:enum LeafBlockKind
+      (constants NONE PARAGRAPH FENCED_CODE INDENTED_CODE))
+
+    (field ^:private ^LeafBlockKind leafKind LeafBlockKind/NONE)
+
+    (field ^:private ^int blockId 0)
+
+    (method update ^void [this]
+      (let [prevLeafKind leafKind
+            indent (.readIndent this 0)
+            line (.peekLine this)
+            ^:mutable ^int peekIndex 0
+            ^:mutable ^int blockIndex 0]
+        (while true
+          (if (== blockIndex (.size containers))
+              (do
+                (if (identical? prevLeafKind LeafBlockKind/FENCED_CODE)
+                    (return)
+                    (let [codeIndent (unchecked-add-int
+                                       (if (.isEmpty containers)
+                                           0
+                                           (.-indent (cast BlockInfo (.getLast containers))))
+                                       4)]
+                      (when (and (>= indent codeIndent)
+                                 (not (identical? prevLeafKind LeafBlockKind/PARAGRAPH)))
+                        (set! leafKind LeafBlockKind/INDENTED_CODE)
+                        (when-not (identical? leafKind prevLeafKind)
+                          (set! blockId (unchecked-inc-int blockId)))
+                        (return))))
+                (let [peekLineKind (.getLineKind this (.substring line peekIndex))]
+                  (switch peekLineKind
+                    (BULLETED_LIST_ITEM ORDERED_LIST_ITEM)
+                      (let [^:mutable count indent]
+                        (while (and (not (== ch \space)) (not (== ch \tab)))
+                          (set! count (unchecked-inc-int count))
+                          (.nextChar DocCommentParser/this))
+                        (let [listItemIndent (.readIndent this count)]
+                          (.add containers (BlockInfo. ContainerBlockKind/LIST_ITEM listItemIndent))
+                          (set! blockIndex (unchecked-inc-int blockIndex))
+                          (set! peekIndex (unchecked-subtract-int listItemIndent indent))
+                          (set! blockId (unchecked-inc-int blockId))))
+                    BLOCK_QUOTE
+                      (do
+                        (.add containers
+                              (BlockInfo. ContainerBlockKind/QUOTE (unchecked-add-int indent 1)))
+                        (set! blockIndex (unchecked-inc-int blockIndex))
+                        (set! peekIndex (unchecked-add-int peekIndex 1))
+                        (set! blockId (unchecked-inc-int blockId)))
+                    OTHER (do (set! leafKind LeafBlockKind/PARAGRAPH) (return))
+                    (ATX_HEADER SETEXT_UNDERLINE THEMATIC_BREAK BLANK)
+                      (do
+                        (set! leafKind LeafBlockKind/NONE)
+                        (set! blockId (unchecked-inc-int blockId))
+                        (return))
+                    CODE_FENCE
+                      (do
+                        (set! leafKind LeafBlockKind/FENCED_CODE)
+                        (set! blockId (unchecked-inc-int blockId))
+                        (return)))))
+              (let [block (cast BlockInfo (.get containers blockIndex))
+                    blockKind (.-blockKind block)]
+                (switch blockKind
+                  LIST_ITEM
+                    (if (>= indent (.-indent block))
+                        (set! blockIndex (unchecked-inc-int blockIndex))
+                        (let [peekLineKind (.getLineKind this (.substring line peekIndex))]
+                          (cond
+                            (identical? peekLineKind LineKind/BLANK)
+                              (set! blockIndex (unchecked-inc-int blockIndex))
+                            (and (identical? peekLineKind LineKind/OTHER)
+                                 (identical? prevLeafKind LeafBlockKind/PARAGRAPH))
+                              (return)
+                            :else
+                              (do
+                                (.closeContainer this blockIndex)
+                                (set! blockId (unchecked-inc-int blockId))))))
+                  QUOTE
+                    (let [peekLineKind (.getLineKind this (.substring line peekIndex))]
+                      (cond
+                        (identical? peekLineKind LineKind/BLOCK_QUOTE)
+                          (do
+                            (set! blockIndex (unchecked-inc-int blockIndex))
+                            (set! peekIndex (unchecked-inc-int peekIndex)))
+                        (and (identical? peekLineKind LineKind/OTHER)
+                             (identical? prevLeafKind LeafBlockKind/PARAGRAPH))
+                          (return)
+                        :else
+                          (do
+                            (.closeContainer this blockIndex)
+                            (set! blockId (unchecked-inc-int blockId)))))
+                  (throw (IllegalStateException. (.toString blockKind)))))))))
+
+    (method isIndentedCodeBlock ^boolean [this]
+      (identical? leafKind LeafBlockKind/INDENTED_CODE))
+
+    (method isCodeFence ^boolean [this]
+      (identical? leafKind LeafBlockKind/FENCED_CODE))
+
+    (method ^:private closeContainer ^void [this ^int index]
+      (.clear (.subList containers index (.size containers))))
+
+    (method skipLine ^void [this]
+      (while (< bp buflen)
+        (when (or (== ch \newline) (== ch \return)) (return))
+        (.nextChar DocCommentParser/this)))
+
+    (method skipCode ^int [this]
+      (let [term ch
+            count (.count this term)
+            initialLeafKind leafKind
+            isFenced (identical? leafKind LeafBlockKind/FENCED_CODE)
+            initialBlockId blockId]
+        (while (< bp buflen)
+          (switch ch
+            (\newline \return)
+              (do
+                (.nextChar DocCommentParser/this)
+                (.update this)
+                (if isFenced
+                    (when (or (and (and (identical? leafKind LeafBlockKind/FENCED_CODE)
+                                        (== ch term))
+                                   (>= (.count this ch) count))
+                              (not (== blockId initialBlockId)))
+                      (set! leafKind LeafBlockKind/NONE)
+                      (return bp))
+                    (when-not (== blockId initialBlockId) (return -1))))
+            (do
+              (when (and (== ch term) (not (identical? initialLeafKind LeafBlockKind/FENCED_CODE)))
+                (when (== (.count this ch) count) (return bp)))
+              (.nextChar DocCommentParser/this))))
+        -1))
+
+    (method ^:private readIndent ^int [this ^int initialCount]
+      (let [^:const ^int TABSTOP 4
+            ^:mutable indent initialCount]
+        (while (< bp buflen)
+          (switch ch
+            \space (set! indent (unchecked-inc-int indent))
+            \tab
+              (set! indent
+                    (unchecked-add-int indent
+                                       (unchecked-subtract-int
+                                         TABSTOP
+                                         (unchecked-remainder-int indent TABSTOP))))
+            (return indent))
+          (.nextChar DocCommentParser/this))
+        indent))
+
+    (method ^:private getLineKind ^LineKind [this ^String s]
+      (if (.isBlank s)
+          LineKind/BLANK
+          (do
+            (switch (.charAt s 0)
+              (\# \= \- \+ \* \_ \` \~ \> \0 \1 \2 \3 \4 \5 \6 \7 \8 \9)
+                (for-each [^LineKind lk (LineKind/values)]
+                  (when (.matches (.matcher (.-pattern lk) s)) (return lk))))
+            LineKind/OTHER)))
+
+    (method ^:private peekLine ^String [this]
+      (let [^:mutable p bp]
+        (while (< p buflen)
+          (switch (aget buf p)
+            (\newline \return) (return (.newString DocCommentParser/this bp p))
+            (set! p (unchecked-inc-int p))))
+        (.newString DocCommentParser/this bp buflen)))
+
+    (method ^:private count ^int [this ^char c]
+      (let [^:mutable ^int n 1]
+        (.nextChar DocCommentParser/this)
+        (while (and (< bp buflen) (== ch c))
+          (set! n (unchecked-inc-int n))
+          (.nextChar DocCommentParser/this))
+        n))
+
+    (method ^:public toString ^String [this]
+      (java-str (.getSimpleName (.getClass this))
+                "[containers:"
+                containers
+                ", leafKind:"
+                leafKind
+                ", blockId:"
+                blockId
+                "]")))
+
+  (defclass ^:enum LineKind
+    (constants
+      (BLANK [(Pattern/compile "[ \t]*")])
+      (ATX_HEADER [(Pattern/compile "#{1,6}([ \t].*|$)")])
+      (SETEXT_UNDERLINE [(Pattern/compile "(=+|-+)[ \t]*")])
+      (THEMATIC_BREAK [(Pattern/compile "((\\*[ \t]*+){3,})|((-[ \t]*+){3,})|((_[ \t]*+){3,})")])
+      (CODE_FENCE [(Pattern/compile "(`{3,}[^`]*+)|(~{3,}.*+)")])
+      (BULLETED_LIST_ITEM [(Pattern/compile "[-+*][ \t].*")])
+      (ORDERED_LIST_ITEM [(Pattern/compile "[0-9]{1,9}[.)][ \t].*")])
+      (BLOCK_QUOTE [(Pattern/compile ">.*")])
+      (OTHER [(Pattern/compile ".*")]))
+
+    (constructor [this ^Pattern p] (set! (.-pattern this) p))
+
+    (field ^:final ^Pattern pattern))
+
+  (method ^:protected isDecimalDigit ^boolean [this ^char ch]
+    (and (<= \0 ch) (<= ch \9)))
+
+  (method ^:protected isHexDigit ^boolean [this ^char ch]
+    (or (or (and (<= \0 ch) (<= ch \9)) (and (<= \a ch) (<= ch \f))) (and (<= \A ch) (<= ch \F))))
+
+  (method ^:protected isUnquotedAttrValueTerminator ^boolean [this ^char ch]
+    (switch ch (\formfeed \newline \return \tab \space \" \' \` \= \< \>) true false))
+
+  (method ^:protected isWhitespace ^boolean [this ^char ch]
+    (Character/isWhitespace ch))
+
+  (method ^:protected isHorizontalWhitespace ^boolean [this ^char ch]
+    (or (== ch \space) (== ch \tab)))
+
+  (method ^:protected skipWhitespace ^void [this]
+    (while (and (< bp buflen) (.isWhitespace this ch)) (.nextChar this)))
+
+  (method newString ^String [this ^int start ^int end]
+    (String. buf start (unchecked-subtract-int end start)))
+
+  (defclass ^:private ^:abstract ^:static TagParser
+    (defclass ^:enum Kind
+      (constants INLINE BLOCK EITHER))
+
+    (field ^:final ^Kind kind)
+
+    (field ^:final ^DocTree$Kind treeKind)
+
+    (field ^:final ^boolean retainWhiteSpace)
+
+    (constructor [this ^Kind k ^DocTree$Kind tk]
+      (set! kind k)
+      (set! treeKind tk)
+      (set! retainWhiteSpace false))
+
+    (constructor [this ^Kind k ^DocTree$Kind tk ^boolean retainWhiteSpace]
+      (set! kind k)
+      (set! treeKind tk)
+      (set! (.-retainWhiteSpace this) retainWhiteSpace))
+
+    (method allowsBlock ^boolean [this] (not (identical? kind Kind/INLINE)))
+
+    (method allowsInline ^boolean [this] (not (identical? kind Kind/BLOCK)))
+
+    (method getTreeKind ^DocTree$Kind [this] treeKind)
+
+    (method parse :throws [ParseException] ^DCTree [this ^int pos ^Kind kind]
+      (when (and (not (identical? kind (.-kind this))) (not (identical? (.-kind this) Kind/EITHER)))
+        (throw (IllegalArgumentException. (.toString kind))))
+      (.parse this pos))
+
+    (method parse :throws [ParseException] ^DCTree [this ^int pos]
+      (throw (UnsupportedOperationException.))))
+
+  (method ^:private createTagParsers ^{:tag (Map Name TagParser)} [this]
+    (let [parsers (new
+                    TagParser/1
+                    [(anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/AUTHOR]
+                       (method ^:public parse ^DCTree [this ^int pos]
+                         (let [^{:tag (List DCTree)} name (.blockContent DocCommentParser/this)]
+                           (.newAuthorTree (.at m pos) name))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE DocTree$Kind/CODE true]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (let [text (.inlineText
+                                      DocCommentParser/this
+                                      WhitespaceRetentionPolicy/REMOVE_FIRST_SPACE)]
+                           (.nextChar DocCommentParser/this)
+                           (.newCodeTree (.at m pos) text))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/DEPRECATED]
+                       (method ^:public parse ^DCTree [this ^int pos]
+                         (let [^{:tag (List DCTree)} reason (.blockContent DocCommentParser/this)]
+                           (.newDeprecatedTree (.at m pos) reason))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE DocTree$Kind/DOC_ROOT]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (if (== ch \})
+                             (do (.nextChar DocCommentParser/this) (.newDocRootTree (.at m pos)))
+                             (let [savedPos bp]
+                               (.inlineText DocCommentParser/this
+                                            WhitespaceRetentionPolicy/REMOVE_ALL)
+                               (.nextChar DocCommentParser/this)
+                               (throw (ParseException. savedPos "dc.unexpected.content"))))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/EXCEPTION]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (let [ref (.reference DocCommentParser/this
+                                               ReferenceParser$Mode/MEMBER_DISALLOWED)
+                               ^{:tag (List DCTree)} description (.blockContent
+                                                                   DocCommentParser/this)]
+                           (.newExceptionTree (.at m pos) ref description))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/HIDDEN]
+                       (method ^:public parse ^DCTree [this ^int pos]
+                         (let [^{:tag (List DCTree)} reason (.blockContent DocCommentParser/this)]
+                           (.newHiddenTree (.at m pos) reason))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE DocTree$Kind/INDEX]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (when (== ch \}) (throw (ParseException. "dc.no.content")))
+                         (let [^DCTree$DCText term (if (== ch \")
+                                                       (.quotedString DocCommentParser/this)
+                                                       (.inlineWord DocCommentParser/this))]
+                           (when (nil? term) (throw (ParseException. "dc.no.content")))
+                           (.skipWhitespace DocCommentParser/this)
+                           (let [^:mutable ^{:tag (List DCTree)} description (List/nil)]
+                             (if (not (== ch \}))
+                                 (set! description (.inlineContent DocCommentParser/this))
+                                 (.nextChar DocCommentParser/this))
+                             (.newIndexTree (.at m pos) term description)))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE
+                                      DocTree$Kind/INHERIT_DOC]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (let [ref (.reference DocCommentParser/this
+                                               ReferenceParser$Mode/MEMBER_DISALLOWED)]
+                           (.skipWhitespace DocCommentParser/this)
+                           (if (== ch \})
+                               (do
+                                 (.nextChar DocCommentParser/this)
+                                 (if (nil? ref)
+                                     (.newInheritDocTree (.at m pos))
+                                     (.newInheritDocTree (.at m pos) ref)))
+                               (let [errorPos bp]
+                                 (.inlineText DocCommentParser/this
+                                              WhitespaceRetentionPolicy/REMOVE_ALL)
+                                 (.nextChar DocCommentParser/this)
+                                 (throw (ParseException. errorPos "dc.unexpected.content")))))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE DocTree$Kind/LINK]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (let [ref (.reference DocCommentParser/this
+                                               ReferenceParser$Mode/MEMBER_OPTIONAL)
+                               ^{:tag (List DCTree)} label (.inlineContent DocCommentParser/this)]
+                           (.newLinkTree (.at m pos) ref label))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE
+                                      DocTree$Kind/LINK_PLAIN]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (let [ref (.reference DocCommentParser/this
+                                               ReferenceParser$Mode/MEMBER_OPTIONAL)
+                               ^{:tag (List DCTree)} label (.inlineContent DocCommentParser/this)]
+                           (.newLinkPlainTree (.at m pos) ref label))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE
+                                      DocTree$Kind/LITERAL
+                                      true]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (let [text (.inlineText
+                                      DocCommentParser/this
+                                      WhitespaceRetentionPolicy/REMOVE_FIRST_SPACE)]
+                           (.nextChar DocCommentParser/this)
+                           (.newLiteralTree (.at m pos) text))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/PARAM]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (let [^:mutable typaram false]
+                           (when (== ch \<) (set! typaram true) (.nextChar DocCommentParser/this))
+                           (let [id (.identifier DocCommentParser/this)]
+                             (when typaram
+                               (when-not (== ch \>) (throw (ParseException. bp "dc.gt.expected")))
+                               (.nextChar DocCommentParser/this))
+                             (.skipWhitespace DocCommentParser/this)
+                             (let [^{:tag (List DCTree)} desc (.blockContent DocCommentParser/this)]
+                               (.newParamTree (.at m pos) typaram id desc))))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/PROVIDES]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (let [ref (.reference DocCommentParser/this
+                                               ReferenceParser$Mode/MEMBER_DISALLOWED)
+                               ^{:tag (List DCTree)} description (.blockContent
+                                                                   DocCommentParser/this)]
+                           (.newProvidesTree (.at m pos) ref description))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/EITHER DocTree$Kind/RETURN]
+                       (method ^:public parse ^DCTree [this ^int pos
+                                                       ^DocCommentParser$TagParser$Kind kind]
+                         (let [^{:tag (List DCTree)} description (switch kind
+                                                                   BLOCK
+                                                                     (.blockContent
+                                                                       DocCommentParser/this)
+                                                                   INLINE
+                                                                     (.inlineContent
+                                                                       DocCommentParser/this)
+                                                                   (throw
+                                                                     (IllegalArgumentException.
+                                                                       (.toString kind))))]
+                           (.newReturnTree (.at m pos)
+                                           (identical? kind DocCommentParser$TagParser$Kind/INLINE)
+                                           description))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/SEE]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (switch ch
+                           \"
+                             (let [string (.quotedString DocCommentParser/this)]
+                               (when (some? string)
+                                 (.skipWhitespace DocCommentParser/this)
+                                 (when (or (== ch \@)
+                                           (and (== ch LayoutCharacters/EOI)
+                                                (== bp (unchecked-subtract-int (alength buf) 1))))
+                                   (return (.newSeeTree (.at m pos) (List/of string))))))
+                           \<
+                             (let [^{:tag (List DCTree)} html (.blockContent DocCommentParser/this)]
+                               (when (some? html) (return (.newSeeTree (.at m pos) html))))
+                           \@ (when newline (throw (ParseException. "dc.no.content")))
+                           LayoutCharacters/EOI
+                             (when (== bp (unchecked-subtract-int (alength buf) 1))
+                               (throw (ParseException. "dc.no.content")))
+                           (when (or (.isJavaIdentifierStart DocCommentParser/this ch) (== ch \#))
+                             (let [ref (.reference
+                                         DocCommentParser/this
+                                         ReferenceParser$Mode/MEMBER_OPTIONAL)
+                                   ^{:tag (List DCTree)} description (.blockContent
+                                                                       DocCommentParser/this)]
+                               (return (.newSeeTree (.at m pos) (.prepend description ref))))))
+                         (throw (ParseException. "dc.unexpected.content"))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK
+                                      DocTree$Kind/SERIAL_DATA]
+                       (method ^:public parse ^DCTree [this ^int pos]
+                         (let [^{:tag (List DCTree)} description (.blockContent
+                                                                   DocCommentParser/this)]
+                           (.newSerialDataTree (.at m pos) description))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK
+                                      DocTree$Kind/SERIAL_FIELD]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (let [name (.identifier DocCommentParser/this)]
+                           (.skipWhitespace DocCommentParser/this)
+                           (let [type (.reference
+                                        DocCommentParser/this
+                                        ReferenceParser$Mode/MEMBER_DISALLOWED)
+                                 ^:mutable ^{:tag (List DCTree)} description nil]
+                             (when (.isWhitespace DocCommentParser/this ch)
+                               (.skipWhitespace DocCommentParser/this)
+                               (set! description (.blockContent DocCommentParser/this)))
+                             (.newSerialFieldTree (.at m pos) name type description)))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/SERIAL]
+                       (method ^:public parse ^DCTree [this ^int pos]
+                         (let [^{:tag (List DCTree)} description (.blockContent
+                                                                   DocCommentParser/this)]
+                           (.newSerialTree (.at m pos) description))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/SINCE]
+                       (method ^:public parse ^DCTree [this ^int pos]
+                         (let [^{:tag (List DCTree)} description (.blockContent
+                                                                   DocCommentParser/this)]
+                           (.newSinceTree (.at m pos) description))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE DocTree$Kind/SNIPPET]
+                       (method parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (let [^{:tag (List DCTree)} attributes (.tagAttrs this)]
+                           (cond
+                             (== ch \})
+                               (do
+                                 (.nextChar DocCommentParser/this)
+                                 (.newSnippetTree (.at m pos) attributes nil))
+                             (== ch \:)
+                               (do
+                                 (set! newline false)
+                                 (.nextChar DocCommentParser/this)
+                                 (while (and (< bp buflen)
+                                             (.isHorizontalWhitespace DocCommentParser/this ch))
+                                   (.nextChar DocCommentParser/this))
+                                 (when-not newline
+                                   (when (>= bp (unchecked-subtract-int (alength buf) 1))
+                                     (throw (ParseException. "dc.no.content")))
+                                   (throw (ParseException. "dc.unexpected.content")))
+                                 (.nextChar DocCommentParser/this)
+                                 (let [text (.inlineText
+                                              DocCommentParser/this
+                                              WhitespaceRetentionPolicy/RETAIN_ALL)]
+                                   (.nextChar DocCommentParser/this)
+                                   (.newSnippetTree (.at m pos) attributes text)))
+                             (>= bp (unchecked-subtract-int (alength buf) 1))
+                               (throw (ParseException. "dc.no.content"))
+                             :else (throw (ParseException. "dc.unexpected.content")))))
+
+                       (method ^:private tagAttrs ^{:tag (List DCTree)} [this]
+                         (let [^{:tag (ListBuffer DCTree)} attrs (ListBuffer.)]
+                           (.skipWhitespace DocCommentParser/this)
+                           (while (and (< bp buflen) (.isIdentifierStart DocCommentParser/this ch))
+                             (let [namePos bp
+                                   name (.readAttributeName DocCommentParser/this)]
+                               (.skipWhitespace DocCommentParser/this)
+                               (let [^:mutable ^{:tag (List DCTree)} value nil
+                                     ^:mutable vkind AttributeTree$ValueKind/EMPTY]
+                                 (when (== ch \=)
+                                   (let [^{:tag (ListBuffer DCTree)} v (ListBuffer.)]
+                                     (.nextChar DocCommentParser/this)
+                                     (.skipWhitespace DocCommentParser/this)
+                                     (if (or (== ch \') (== ch \"))
+                                         (do
+                                           (set! newline false)
+                                           (set!
+                                             vkind
+                                             (if (== ch \')
+                                                 AttributeTree$ValueKind/SINGLE
+                                                 AttributeTree$ValueKind/DOUBLE))
+                                           (let [quote ch]
+                                             (.nextChar DocCommentParser/this)
+                                             (set! textStart bp)
+                                             (while (and (< bp buflen) (not (== ch quote)))
+                                               (.nextChar DocCommentParser/this))
+                                             (.addPendingText
+                                               DocCommentParser/this
+                                               v
+                                               (unchecked-subtract-int bp 1)
+                                               DocTree$Kind/TEXT)
+                                             (.nextChar DocCommentParser/this)))
+                                         (do
+                                           (set! vkind AttributeTree$ValueKind/UNQUOTED)
+                                           (set! textStart bp)
+                                           (while (and
+                                                    (< bp buflen)
+                                                    (and
+                                                      (and (not (== ch \})) (not (== ch \:)))
+                                                      (not
+                                                        (.isUnquotedAttrValueTerminator
+                                                          DocCommentParser/this
+                                                          ch))))
+                                             (.nextChar DocCommentParser/this))
+                                           (.addPendingText
+                                             DocCommentParser/this
+                                             v
+                                             (unchecked-subtract-int bp 1)
+                                             DocTree$Kind/TEXT)))
+                                     (.skipWhitespace DocCommentParser/this)
+                                     (set! value (.toList v))))
+                                 (let [attr (.newAttributeTree (.at m namePos) name vkind value)]
+                                   (.add attrs attr)))))
+                           (.toList attrs))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/SPEC]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (let [url (.inlineWord DocCommentParser/this)]
+                           (when (or (nil? url) (.isBlank url))
+                             (throw (ParseException. "dc.no.url")))
+                           (.skipWhitespace DocCommentParser/this)
+                           (let [^{:tag (List DCTree)} title (.blockContent DocCommentParser/this)]
+                             (when (or (.isEmpty title) (DCTree/isBlank title))
+                               (throw (ParseException. "dc.no.title")))
+                             (.newSpecTree (.at m pos) url title)))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE DocTree$Kind/SUMMARY]
+                       (method ^:public parse ^DCTree [this ^int pos]
+                         (let [^{:tag (List DCTree)} summary (.inlineContent DocCommentParser/this)]
+                           (.newSummaryTree (.at m pos) summary))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE
+                                      DocTree$Kind/SYSTEM_PROPERTY]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (when (== ch \}) (throw (ParseException. "dc.no.content")))
+                         (let [propertyName (.readSystemPropertyName DocCommentParser/this)]
+                           (when (nil? propertyName) (throw (ParseException. "dc.no.content")))
+                           (.skipWhitespace DocCommentParser/this)
+                           (if (not (== ch \}))
+                               (do
+                                 (.nextChar DocCommentParser/this)
+                                 (throw (ParseException. "dc.unexpected.content")))
+                               (do
+                                 (.nextChar DocCommentParser/this)
+                                 (.newSystemPropertyTree (.at m pos) propertyName))))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/THROWS]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (let [ref (.reference DocCommentParser/this
+                                               ReferenceParser$Mode/MEMBER_DISALLOWED)
+                               ^{:tag (List DCTree)} description (.blockContent
+                                                                   DocCommentParser/this)]
+                           (.newThrowsTree (.at m pos) ref description))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/USES]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (let [ref (.reference DocCommentParser/this
+                                               ReferenceParser$Mode/MEMBER_DISALLOWED)
+                               ^{:tag (List DCTree)} description (.blockContent
+                                                                   DocCommentParser/this)]
+                           (.newUsesTree (.at m pos) ref description))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/INLINE DocTree$Kind/VALUE]
+                       (method ^:public parse :throws [ParseException] ^DCTree [this ^int pos]
+                         (.skipWhitespace DocCommentParser/this)
+                         (let [^:mutable ^DCTree$DCText format nil]
+                           (switch ch
+                             \%
+                               (do
+                                 (set! format (.inlineWord DocCommentParser/this))
+                                 (.skipWhitespace DocCommentParser/this))
+                             \"
+                               (do
+                                 (set! format (.quotedString DocCommentParser/this))
+                                 (.skipWhitespace DocCommentParser/this))
+                             (set! format nil))
+                           (let [ref (.reference
+                                       DocCommentParser/this
+                                       ReferenceParser$Mode/MEMBER_REQUIRED)]
+                             (.skipWhitespace DocCommentParser/this)
+                             (if (== ch \})
+                                 (do
+                                   (.nextChar DocCommentParser/this)
+                                   (if (nil? format)
+                                       ^DCTree (.newValueTree (.at m pos) ref)
+                                       ^DCTree (.newValueTree (.at m pos) format ref)))
+                                 (do
+                                   (.nextChar DocCommentParser/this)
+                                   (throw (ParseException. "dc.unexpected.content"))))))))
+                     (anon TagParser [DocCommentParser$TagParser$Kind/BLOCK DocTree$Kind/VERSION]
+                       (method ^:public parse ^DCTree [this ^int pos]
+                         (let [^{:tag (List DCTree)} description (.blockContent
+                                                                   DocCommentParser/this)]
+                           (.newVersionTree (.at m pos) description))))])
+          ^{:tag (Map Name TagParser)} tagParsers (HashMap.)]
+      (for-each [^TagParser p parsers]
+        (.put tagParsers (.fromString names (.-tagName (.getTreeKind p))) p))
+      tagParsers)))

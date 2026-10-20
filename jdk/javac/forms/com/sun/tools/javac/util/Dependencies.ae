@@ -1,0 +1,232 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/util/Dependencies.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.util)
+
+(import '(com.sun.tools.javac.code Symbol
+                                   Symbol$ClassSymbol
+                                   Symbol$Completer
+                                   Symbol$CompletionFailure)
+        '(com.sun.tools.javac.main JavaCompiler)
+        '(java.io Closeable FileWriter IOException)
+        '(java.util ArrayList Arrays Collection EnumMap EnumSet LinkedHashMap Map Properties Stack)
+        '(javax.tools JavaFileObject$Kind))
+
+(defclass ^:public ^:abstract Dependencies
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key Dependencies)} dependenciesKey
+    (Context$Key.))
+
+  (method ^:public ^:static instance ^Dependencies [^Context context]
+    (let [^:mutable instance (cast Dependencies (.get context dependenciesKey))]
+      (when (nil? instance) (set! instance (DummyDependencies. context)))
+      instance))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context dependenciesKey this))
+
+  (method ^:public ^:abstract push ^void [this ^Symbol$ClassSymbol s ^CompletionCause phase])
+
+  (method ^:public ^:abstract pop ^void [this])
+
+  (defclass ^:public ^:enum CompletionCause
+    :implements [GraphUtils$DependencyKind]
+
+    (constants
+      CLASS_READER
+      HEADER_PHASE
+      HIERARCHY_PHASE
+      IMPORTS_PHASE
+      MEMBER_ENTER
+      RECORD_PHASE
+      MEMBERS_PHASE
+      PERMITS_PHASE
+      OTHER))
+
+  (defclass ^:public ^:static GraphDependencies
+    :extends Dependencies
+    :implements [Closeable Symbol$Completer]
+
+    (field ^:private ^{:tag (EnumSet DependenciesMode)} dependenciesModes)
+
+    (field ^:private ^String dependenciesFile)
+
+    (method ^:public ^:static preRegister ^void [^Context context]
+      (.put context
+            GraphDependencies/dependenciesKey
+            (method-ref Context$Factory ^Dependencies [Context] GraphDependencies/new)))
+
+    (constructor [this ^Context context]
+      (super. context)
+      (let [options (Options/instance context)
+            modes (.split (.get options "debug.completionDeps") ",")]
+        (for-each [^String mode modes]
+          (when (.startsWith mode "file=") (set! dependenciesFile (.substring mode 5))))
+        (set! dependenciesModes (DependenciesMode/getDependenciesModes modes))
+        (let [compiler (JavaCompiler/instance context)]
+          (set! (.-closeables compiler) (.prepend (.-closeables compiler) this)))))
+
+    (defclass ^:enum DependenciesMode
+      (constants (SOURCE ["source"]) (CLASS ["class"]) (REDUNDANT ["redundant"]))
+
+      (field ^:final ^String opt)
+
+      (constructor [this ^String opt] (set! (.-opt this) opt))
+
+      (method ^:static getDependenciesModes ^{:tag (EnumSet DependenciesMode)} [^String/1 modes]
+        (let [^:mutable ^{:tag (EnumSet DependenciesMode)} res (EnumSet/noneOf DependenciesMode)
+              ^{:tag (Collection String)} args (Arrays/asList modes)]
+          (when (.contains args "all") (set! res (EnumSet/allOf DependenciesMode)))
+          (for-each [^DependenciesMode mode (DependenciesMode/values)]
+            (cond
+              (.contains args (.-opt mode)) (.add res mode)
+              (.contains args (java-str "-" (.-opt mode))) (.remove res mode)))
+          res)))
+
+    (defclass ^:public ^:abstract ^:static Node
+      :extends (GraphUtils$AbstractNode Symbol$ClassSymbol Node)
+      :implements [(GraphUtils$DottableNode Symbol$ClassSymbol Node)]
+
+      (field ^{:tag (EnumMap CompletionCause (java.util.List Node))} depsByKind)
+
+      (constructor [this ^Symbol$ClassSymbol value]
+        (super. value)
+        (set! (.-depsByKind this) (EnumMap. CompletionCause))
+        (for-each [^CompletionCause depKind (CompletionCause/values)]
+          (.put depsByKind depKind (ArrayList.))))
+
+      (method addDependency ^void [this ^GraphUtils$DependencyKind depKind ^Node dep]
+        (let [^{:tag (java.util.List Node)} deps (cast java.util.List (.get depsByKind depKind))]
+          (when-not (.contains deps dep) (.add deps dep))))
+
+      (method ^:public equals ^boolean [this obj]
+        (if-instance [^Node node obj]
+          (.equals (cast Symbol$ClassSymbol (.-data this)) (.-data node))
+          false))
+
+      (method ^:public hashCode ^int [this]
+        (.hashCode (cast Symbol$ClassSymbol (.-data this))))
+
+      (method ^:public getSupportedDependencyKinds ^GraphUtils$DependencyKind/1 [this]
+        (CompletionCause/values))
+
+      (method ^:public getDependenciesByKind ^{:tag (Collection (? extends Node))} [this
+                                                                                    ^GraphUtils$DependencyKind dk]
+        (cast Collection (.get depsByKind dk)))
+
+      (method ^:public nodeAttributes ^Properties [this]
+        (let [p (Properties.)] (.put p "label" (GraphUtils$DotVisitor/wrap (.toString this))) p))
+
+      (method ^:public dependencyAttributes ^Properties [this ^Node to ^GraphUtils$DependencyKind dk]
+        (let [p (Properties.)] (.put p "label" dk) p))
+
+      (method ^:public toString ^String [this]
+        (.toString (.getQualifiedName (cast Symbol$ClassSymbol (.-data this))))))
+
+    (defclass ^:public ^:static CompletionNode
+      :extends Node
+
+      (defclass ^:enum Kind
+        (constants (SOURCE ["solid"]) (CLASS ["dotted"]))
+
+        (field ^:final ^String dotStyle)
+
+        (constructor [this ^String dotStyle] (set! (.-dotStyle this) dotStyle)))
+
+      (field ^:final ^Kind ck)
+
+      (constructor [this ^Symbol$ClassSymbol sym]
+        (super. sym)
+        (let [fromClass (or (and (nil? (.-classfile sym)) (nil? (.-sourcefile sym)))
+                            (and
+                              (some? (.-classfile sym))
+                              (identical? (.getKind (.-classfile sym)) JavaFileObject$Kind/CLASS)))]
+          (set! ck (if fromClass Kind/CLASS Kind/SOURCE))))
+
+      (method ^:public nodeAttributes ^Properties [this]
+        (let [p (.nodeAttributes super)]
+          (.put p "style" (.-dotStyle ck))
+          (.put p "shape" "ellipse")
+          p))
+
+      (method ^:public getClassSymbol ^Symbol$ClassSymbol [this]
+        (cast Symbol$ClassSymbol (.-data this))))
+
+    (field ^{:tag (Stack Node)} nodeStack (Stack.))
+
+    (field ^{:tag (Map Symbol$ClassSymbol Node)} dependencyNodeMap (LinkedHashMap.))
+
+    (method ^:public push ^void [this ^Symbol$ClassSymbol s ^CompletionCause phase]
+      (let [^Node n (CompletionNode. s)]
+        (when (identical? n (.push this n phase)) (set! (.-completer s) this))))
+
+    (method ^:protected push ^Node [this ^:mutable ^Node newNode ^CompletionCause cc]
+      (let [cachedNode (cast Node (.get dependencyNodeMap (.-data newNode)))]
+        (if (nil? cachedNode)
+            (.put dependencyNodeMap (cast Symbol$ClassSymbol (.-data newNode)) newNode)
+            (set! newNode cachedNode))
+        (when-not (.isEmpty nodeStack)
+          (let [currentNode (cast Node (.peek nodeStack))] (.addDependency currentNode cc newNode)))
+        (.push nodeStack newNode)
+        newNode))
+
+    (method ^:public pop ^void [this] (.pop nodeStack))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (when-not (.contains dependenciesModes DependenciesMode/REDUNDANT)
+        (.visit (PruneVisitor.) (.values dependencyNodeMap) nil))
+      (when-not (.contains dependenciesModes DependenciesMode/CLASS)
+        (.visit (FilterVisitor. Dependencies$GraphDependencies$CompletionNode$Kind/SOURCE)
+                (.values dependencyNodeMap)
+                nil))
+      (when-not (.contains dependenciesModes DependenciesMode/SOURCE)
+        (.visit (FilterVisitor. Dependencies$GraphDependencies$CompletionNode$Kind/CLASS)
+                (.values dependencyNodeMap)
+                nil))
+      (when (some? dependenciesFile)
+        (with-resources [fw (FileWriter. dependenciesFile)]
+          (.append fw (GraphUtils/toDot (.values dependencyNodeMap) "CompletionDeps" "")))))
+
+    (method ^:public complete :throws [Symbol$CompletionFailure] ^void [this ^Symbol sym]
+      (.push this (cast Symbol$ClassSymbol sym) CompletionCause/OTHER)
+      (.pop this)
+      (set! (.-completer sym) this))
+
+    (method ^:public isTerminal ^boolean [this] true)
+
+    (method ^:public getNodes ^{:tag (Collection Node)} [this]
+      (.values dependencyNodeMap))
+
+    (defclass ^:private ^:static PruneVisitor
+      :extends (GraphUtils$NodeVisitor Symbol$ClassSymbol Node Void)
+
+      (method ^:public visitNode ^void [this ^Node node ^Void arg])
+
+      (method ^:public visitDependency ^void [this ^GraphUtils$DependencyKind dk ^Node from ^Node to
+                                              ^Void arg]
+        (when (.equals from to) (.remove (cast java.util.List (.get (.-depsByKind to) dk)) from))))
+
+    (defclass ^:private FilterVisitor
+      :extends (GraphUtils$NodeVisitor Symbol$ClassSymbol Node Void)
+
+      (field ^Dependencies$GraphDependencies$CompletionNode$Kind ck)
+
+      (constructor ^:private [this ^Dependencies$GraphDependencies$CompletionNode$Kind ck]
+        (set! (.-ck this) ck))
+
+      (method ^:public visitNode ^void [this ^Node node ^Void arg]
+        (when-instance [^CompletionNode completionNode node]
+          (when-not (identical? (.-ck completionNode) ck) (.remove dependencyNodeMap (.-data node)))))
+
+      (method ^:public visitDependency ^void [this ^GraphUtils$DependencyKind dk ^Node from ^Node to
+                                              ^Void arg]
+        (when-instance [^CompletionNode completionNode to]
+          (when-not (identical? (.-ck completionNode) ck)
+            (.remove (cast java.util.List (.get (.-depsByKind from) dk)) to))))))
+
+  (defclass ^:private ^:static DummyDependencies
+    :extends Dependencies
+
+    (constructor ^:private [this ^Context context] (super. context))
+
+    (method ^:public push ^void [this ^Symbol$ClassSymbol s ^CompletionCause phase])
+
+    (method ^:public pop ^void [this])))

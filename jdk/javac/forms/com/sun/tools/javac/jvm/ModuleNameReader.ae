@@ -1,0 +1,107 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/jvm/ModuleNameReader.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.jvm)
+
+(import '(com.sun.tools.javac.util ByteBuffer
+                                   ByteBuffer$UnderflowException
+                                   Convert
+                                   Convert$Validation)
+        '(java.io IOException InputStream)
+        '(java.nio.file Files Path)
+        '(javax.tools JavaFileObject))
+
+(defclass ^:public ModuleNameReader
+  (defclass ^:public ^:static BadClassFile
+    :extends Exception
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+    (constructor [this ^String msg] (super. msg)))
+
+  (field ^:private ^:static ^:final ^int INITIAL_BUFFER_SIZE 0x0fff0)
+
+  (field ^:private ^ByteBuffer buf (ByteBuffer. INITIAL_BUFFER_SIZE))
+
+  (field ^:private ^int bp)
+
+  (field ^:private ^PoolReader reader)
+
+  (constructor ^:public [this])
+
+  (method ^:public readModuleName :throws [IOException BadClassFile] ^String [this ^Path p]
+    (with-resources [in (Files/newInputStream p)] (.readModuleName this in)))
+
+  (method ^:public readModuleName :throws [IOException BadClassFile] ^String [this
+                                                                              ^JavaFileObject jfo]
+    (with-resources [in (.openInputStream jfo)] (.readModuleName this in)))
+
+  (method ^:public readModuleName :throws [IOException BadClassFile] ^String [this ^InputStream in]
+    (set! bp 0)
+    (.reset buf)
+    (.appendStream buf in)
+    (let [magic (.nextInt this)]
+      (when-not (== magic ClassFile/JAVA_MAGIC)
+        (throw (BadClassFile. "illegal.start.of.class.file")))
+      (let [^int minorVersion (.nextChar this)
+            ^int majorVersion (.nextChar this)]
+        (when (< majorVersion 53)
+          (throw (BadClassFile. (java-str "bad major version number for module: " majorVersion))))
+        (set! reader (PoolReader. buf))
+        (set! bp (.readPool reader buf bp))
+        (let [^int access_flags (.nextChar this)]
+          (when-not (== access_flags 0x8000)
+            (throw (BadClassFile.
+                     (java-str "invalid access flags for module: 0x"
+                               (Integer/toHexString access_flags)))))
+          (let [^int this_class (.nextChar this)]
+            (.checkZero this (.nextChar this) "super_class")
+            (.checkZero this (.nextChar this) "interface_count")
+            (.checkZero this (.nextChar this) "fields_count")
+            (.checkZero this (.nextChar this) "methods_count")
+            (let [^int attributes_count (.nextChar this)]
+              (loop [^int i 0]
+                (when (< i attributes_count)
+                  (let [^int attr_name (.nextChar this)
+                        attr_length (.nextInt this)]
+                    (if (and (.equals (cast String
+                                            (.peekName reader attr_name (.utf8Mapper this false)))
+                                      "Module")
+                             (> attr_length 2))
+                        (return (cast String
+                                      (.peekModuleName
+                                        reader
+                                        (.nextChar this)
+                                        (.utf8Mapper this true))))
+                        (do
+                          (set! bp (unchecked-add-int bp attr_length))
+                          (recur (unchecked-inc-int i)))))))
+              (throw (BadClassFile. "no Module attribute"))))))))
+
+  (method checkZero :throws [BadClassFile] ^void [this ^int count ^String name]
+    (when-not (== count 0) (throw (BadClassFile. (java-str "invalid " name " for module: " count)))))
+
+  (method nextChar :throws [BadClassFile] ^char [this]
+    (let [^:mutable ^char res (unchecked-char 0)]
+      (try
+        (set! res (.getChar buf bp))
+        (catch ByteBuffer$UnderflowException e
+          (throw (BadClassFile. (java-str "class file truncated at offset " (.getLength e))))))
+      (set! bp (unchecked-add-int bp 2))
+      res))
+
+  (method nextInt :throws [BadClassFile] ^int [this]
+    (let [^:mutable ^int res 0]
+      (try
+        (set! res (.getInt buf bp))
+        (catch ByteBuffer$UnderflowException e
+          (throw (BadClassFile. (java-str "class file truncated at offset " (.getLength e))))))
+      (set! bp (unchecked-add-int bp 4))
+      res))
+
+  (method utf8Mapper ^{:tag (PoolReader$Utf8Mapper String)} [this ^boolean internalize]
+    (if internalize
+        (lambda PoolReader$Utf8Mapper ^String [^:mutable ^byte/1 buf ^int offset ^int len]
+          (set! buf (ClassFile/internalize buf offset len))
+          (Convert/utf2string buf 0 (alength buf) Convert$Validation/STRICT))
+        (lambda PoolReader$Utf8Mapper ^String [^byte/1 buf ^int offset ^int len]
+          (Convert/utf2string buf offset len Convert$Validation/STRICT)))))

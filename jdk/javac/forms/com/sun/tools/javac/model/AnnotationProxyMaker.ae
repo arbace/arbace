@@ -1,0 +1,231 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/model/AnnotationProxyMaker.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.model)
+
+(import '(com.sun.tools.javac.code Attribute
+                                   Attribute$Array
+                                   Attribute$Class
+                                   Attribute$Compound
+                                   Attribute$Constant
+                                   Attribute$Enum
+                                   Attribute$Error
+                                   Attribute$UnresolvedClass
+                                   Attribute$Visitor
+                                   Kinds$Kind
+                                   Scope$LookupKind
+                                   Symbol
+                                   Symbol$ClassSymbol
+                                   Symbol$MethodSymbol
+                                   Type$ArrayType)
+        '(com.sun.tools.javac.util List ListBuffer Pair)
+        '(java.io IOException ObjectInputStream)
+        '(java.lang.annotation Annotation AnnotationTypeMismatchException)
+        '(java.lang.reflect Array Method)
+        '(java.util LinkedHashMap Map Map$Entry)
+        '(java.util.function Function)
+        '(java.util.stream Collectors)
+        '(javax.lang.model.type MirroredTypeException MirroredTypesException TypeMirror)
+        '(sun.reflect.annotation AnnotationParser
+                                 AnnotationType
+                                 EnumConstantNotPresentExceptionProxy
+                                 ExceptionProxy))
+
+(defclass ^:public AnnotationProxyMaker
+  (field ^:private ^:final ^Attribute$Compound anno)
+
+  (field ^:private ^:final ^{:tag (Class (? extends Annotation))} annoType)
+
+  (constructor ^:private [this ^Attribute$Compound anno
+                          ^{:tag (Class (? extends Annotation))} annoType]
+    (set! (.-anno this) anno)
+    (set! (.-annoType this) annoType))
+
+  (method ^:public ^:static generateAnnotation :type-params [(A extends Annotation)] ^A [^Attribute$Compound anno
+                                                                                         ^{:tag (Class A)} annoType]
+    (let [apm (AnnotationProxyMaker. anno annoType)]
+      (cast Annotation (.cast annoType (.generateAnnotation apm)))))
+
+  (method ^:private generateAnnotation ^Annotation [this]
+    (AnnotationParser/annotationForMap annoType (.getAllReflectedValues this)))
+
+  (method ^:private getAllReflectedValues ^{:tag (Map String Object)} [this]
+    (let [^{:tag (Map String Object)} res (LinkedHashMap.)]
+      (for-each [^{:tag (Map$Entry Symbol$MethodSymbol Attribute)} entry (.entrySet
+                                                                           (.getAllValues this))]
+        (let [meth (cast Symbol$MethodSymbol (.getKey entry))
+              value (.generateValue this meth (cast Attribute (.getValue entry)))]
+          (when (some? value) (.put res (.toString (.-name meth)) value))))
+      res))
+
+  (method ^:private getAllValues ^{:tag (Map Symbol$MethodSymbol Attribute)} [this]
+    (let [^{:tag (Map Symbol$MethodSymbol Attribute)} res (LinkedHashMap.)
+          sym (cast Symbol$ClassSymbol (.-tsym (.-type anno)))]
+      (for-each [^Symbol s (.getSymbols (.members sym) Scope$LookupKind/NON_RECURSIVE)]
+        (when (identical? (.-kind s) Kinds$Kind/MTH)
+          (let [m (cast Symbol$MethodSymbol s)
+                def (.getDefaultValue m)]
+            (when (some? def) (.put res m def)))))
+      (for-each [^{:tag (Pair Symbol$MethodSymbol Attribute)} p (.-values anno)]
+        (.put res (cast Symbol$MethodSymbol (.-fst p)) (cast Attribute (.-snd p))))
+      res))
+
+  (method ^:private generateValue [this ^Symbol$MethodSymbol meth ^Attribute attr]
+    (let [vv (ValueVisitor. meth)] (.getValue vv attr)))
+
+  (defclass ^:private ValueVisitor
+    :implements [Attribute$Visitor]
+
+    (field ^:private ^Symbol$MethodSymbol meth)
+
+    (field ^:private ^{:tag (Class ?)} returnClass)
+
+    (field ^:private value)
+
+    (constructor [this ^Symbol$MethodSymbol meth] (set! (.-meth this) meth))
+
+    (method getValue [this ^Attribute attr]
+      (let [^:mutable ^Method method nil]
+        (try
+          (set! method (.getMethod annoType (.toString (.-name meth))))
+          (catch NoSuchMethodException e (return nil)))
+        (set! returnClass (.getReturnType method))
+        (.accept attr this)
+        (when (and (not (instance? ExceptionProxy value))
+                   (not
+                     (.isInstance (AnnotationType/invocationHandlerReturnType returnClass) value)))
+          (.typeMismatch this method attr))
+        value))
+
+    (method ^:public visitConstant ^void [this ^Attribute$Constant c]
+      (set! value (.getValue c)))
+
+    (method ^:public visitClass ^void [this ^Attribute$Class c]
+      (set! value (MirroredTypeExceptionProxy. (.-classType c))))
+
+    (method ^:public visitArray ^void [this ^Attribute$Array a]
+      (let [elemName (.getQualifiedName (.-tsym (.-elemtype (cast Type$ArrayType (.-type a)))))]
+        (if (.equals elemName (.-java_lang_Class (.-names (.-table elemName))))
+            (let [^{:tag (ListBuffer TypeMirror)} elems (ListBuffer.)]
+              (for-each [^Attribute value (.-values a)]
+                (let [elem (.-classType (cast Attribute$Class value))] (.append elems elem)))
+              (set! value (MirroredTypesExceptionProxy. (.toList elems))))
+            (let [len (alength (.-values a))
+                  ^{:tag (Class ?)} returnClassSaved returnClass]
+              (set! returnClass (.getComponentType returnClass))
+              (try
+                (let [res (Array/newInstance returnClass len)]
+                  (loop [^int i 0]
+                    (when (< i len)
+                      (.accept (aget (.-values a) i) this)
+                      (when (or (nil? value) (instance? ExceptionProxy value)) (return))
+                      (try
+                        (Array/set res i value)
+                        (catch IllegalArgumentException e (set! value nil) (return)))
+                      (recur (unchecked-inc-int i))))
+                  (set! value res))
+                (finally (set! returnClass returnClassSaved)))))))
+
+    (method ^:public visitEnum ^void [this ^Attribute$Enum e]
+      (if (.isEnum returnClass)
+          (let [constName (.toString (.-value e))]
+            (try
+              (set! value (Enum/valueOf returnClass constName))
+              (catch IllegalArgumentException ex
+                (set! value (EnumConstantNotPresentExceptionProxy. returnClass constName)))))
+          (set! value nil)))
+
+    (method ^:public visitCompound ^void [this ^Attribute$Compound c]
+      (try
+        (let [^{:tag (Class (? extends Annotation))} nested (.asSubclass returnClass Annotation)]
+          (set! value (AnnotationProxyMaker/generateAnnotation c nested)))
+        (catch ClassCastException ex (set! value nil))))
+
+    (method ^:public visitError ^void [this ^Attribute$Error e]
+      (if-instance [^Attribute$UnresolvedClass unresolvedClass e]
+        (set! value (MirroredTypeExceptionProxy. (.-classType unresolvedClass)))
+        (set! value nil)))
+
+    (method ^:private typeMismatch ^void [this ^Method method ^:final ^Attribute attr]
+      (letclass [(AnnotationTypeMismatchExceptionProxy
+                   :extends ExceptionProxy
+
+                   (field ^:static ^:final ^long serialVersionUID 269)
+
+                   (field ^:final ^:transient ^Method method)
+
+                   (constructor [this ^Method method] (set! (.-method this) method))
+
+                   (method ^:public toString ^String [this] "<error>")
+
+                   (method ^:protected generateException ^RuntimeException [this]
+                     (AnnotationTypeMismatchException. (.-method this) (.toString (.-type attr)))))]
+        (set! value (AnnotationTypeMismatchExceptionProxy. method)))))
+
+  (defclass ^:private ^:static ^:final MirroredTypeExceptionProxy
+    :extends ExceptionProxy
+
+    (field ^:static ^:final ^long serialVersionUID 269)
+
+    (field ^:private ^:transient ^TypeMirror type)
+
+    (field ^:private ^:final ^String typeString)
+
+    (constructor [this ^TypeMirror t]
+      (set! type t)
+      (set! typeString (.toString t)))
+
+    (method ^:public toString ^String [this] (java-str typeString ".class"))
+
+    (method ^:public hashCode ^int [this]
+      (.hashCode (if (some? type) ^Object type ^Object typeString)))
+
+    (method ^:public equals ^boolean [this obj]
+      (if (some? type)
+          (if-instance [^MirroredTypeExceptionProxy proxy obj] (.equals type (.-type proxy)) false)
+          false))
+
+    (method ^:protected generateException ^RuntimeException [this]
+      (MirroredTypeException. type))
+
+    (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                     ^ObjectInputStream s]
+      (.defaultReadObject s)
+      (set! type nil)))
+
+  (defclass ^:private ^:static ^:final MirroredTypesExceptionProxy
+    :extends ExceptionProxy
+
+    (field ^:static ^:final ^long serialVersionUID 269)
+
+    (field ^:private ^:transient ^{:tag (List TypeMirror)} types)
+
+    (field ^:private ^:final ^String typeStrings)
+
+    (constructor [this ^{:tag (List TypeMirror)} ts]
+      (set! types ts)
+      (set! typeStrings (.toString ts)))
+
+    (method ^:public toString ^String [this]
+      (cast String
+            (.collect (.map (.stream types)
+                            (lambda Function ^String [^TypeMirror t]
+                              (java-str (.toString t) ".class")))
+                      (Collectors/joining ", " "{" "}"))))
+
+    (method ^:public hashCode ^int [this]
+      (.hashCode (if (some? types) ^Object types ^Object typeStrings)))
+
+    (method ^:public equals ^boolean [this obj]
+      (if (some? types)
+          (if-instance [^MirroredTypesExceptionProxy proxy obj]
+            (.equals types (.-types proxy))
+            false)
+          false))
+
+    (method ^:protected generateException ^RuntimeException [this]
+      (MirroredTypesException. types))
+
+    (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                     ^ObjectInputStream s]
+      (.defaultReadObject s)
+      (set! types nil))))

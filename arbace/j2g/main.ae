@@ -81,7 +81,14 @@
       ;; package arbace/gotable joins the program root, the main package imports it
       "--gotable" (recur (rest more) (assoc opts :gotable (first more)))
       "--program" (recur more (-> opts (assoc :program true) (update :roots conj "arbace.lang.Main#main")))
-      "--edge" (recur (rest more) (assoc opts :edge (first more)))
+      ;; repeated: the union of the edges (the tool build's jdk/edge.edn and jdk/javac/edge.edn)
+      "--edge" (recur (rest more) (update opts :edges (fnil conj []) (first more)))
+      ;; more Go-build variant files: the .ae files of a directory (the tool build's
+      ;; overlay/jdk/javac/variants, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN2")
+      "--variants" (recur (rest more) (update opts :variant-dirs (fnil conj []) (first more)))
+      ;; a package prefix whose classes are named by their binary name (names.ae, qualified?),
+      ;; beside the tool's modules' (a driver's package)
+      "--qualify" (recur (rest more) (update opts :qualify (fnil conj []) (first more)))
       "--record-edge" (recur (rest more) (assoc opts :record-edge (first more)))
       "--jvm-reflection" (recur more (assoc opts :jvm-reflection true))
       (throw (ex-info (str "j2g: unknown option " a) {})))))
@@ -115,6 +122,23 @@
         pkg (.replace (subs n 0 (max i 0)) \/ \.)]
     ;; the packages a JDK module does not export: the edge's :unexported
     (not (edge/jvm? :unexported pkg #((requiring-resolve 'arbace.j2g.jvm/unexported?) pkg)))))
+
+(defn- bundle-roots
+  "The public no-argument constructors of the world's concrete ResourceBundle subclasses:
+  ResourceBundle.getBundle makes its bundles by reflection (overlay/jdk's ResourceBundle;
+  javac's messages, doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN2\")."
+  []
+  (let [bundle? (fn [n] (loop [n n i 0]
+                          (cond (or (nil? n) (> i 32)) false
+                                (= n "java/util/ResourceBundle") true
+                                :else (recur (:super (a/decl n)) (inc i)))))]
+    (for [n (sort @(:order a/*unit*))
+          :let [dd (a/decl n)]
+          :when (and dd (not= n "java/util/ResourceBundle")
+                     (not (m/has? (:flags dd) 0x0200)) (not (m/has? (:flags dd) 0x0400))
+                     (bundle? (:super dd))
+                     (some #(and (= "<init>" (:name %)) (= "()V" (:desc %)) (m/has? (:flags %) 1)) (:methods dd)))]
+      [n "<init>" "()V"])))
 
 (defn- root-keys
   "Method keys of a root spec. CLASS$* is the class and every named class nested in it (the
@@ -454,6 +478,7 @@
 (defn run*
   "j2g's run, in the class environment run binds."
   [opts]
+  (reset! nm/qualified-prefixes (vec (:qualify opts)))
   (let [t0 (now)
         root-dir "."
         ;; the converted JDK: --jdk, else $JRT_CONV, else the committed forms (jdk/README.md)
@@ -494,7 +519,9 @@
                           (concat
                             (when (some #(= "arbace" (:root %)) inputs) (clj-files "arbace/lang/go"))
                             ;; the JDK closure's variants (jrt's, overlay/jdk/variants)
-                            (when (some #(= jdk (:root %)) inputs) (clj-files "overlay/jdk/variants"))))
+                            (when (some #(= jdk (:root %)) inputs) (clj-files "overlay/jdk/variants"))
+                            ;; --variants DIR: more, after them
+                            (mapcat clj-files (:variant-dirs opts))))
         world (w/load-world inputs :variant-files variant-files :late-inputs late-inputs :wait wait)
         _ (doseq [[n c] (sort (:variants world))]
             (println (str "j2g: variant of " n ": " (:replaced c) " replaced, " (:cut c) " cut, " (:added c) " added")))
@@ -589,6 +616,11 @@
                                    ["jdk/internal/jrt/RuntimeExec" "exec" d]))
                                (when fjp-support?
                                  (map out/fjp-support-key out/fjp-support-methods))
+                               ;; ResourceBundle.getBundle's classes (overlay/jdk's ResourceBundle:
+                               ;; Class.forName, then the public no-argument constructor by
+                               ;; reflection): every concrete bundle class's
+                               (when (a/decl "java/util/ResourceBundle")
+                                 (bundle-roots))
                                ;; j2g's support for the REPL's reflection (out/support-forms)
                                (when (contains? @(:compile-set world) "java/util/Optional")
                                  [["java/util/Optional" "of" "(Ljava/lang/Object;)Ljava/util/Optional;"]])
@@ -976,11 +1008,12 @@
 
     :else
     (let [t0 (now)
-          f (or (:edge opts) default-edge)
-          _ (when-not (.isFile (io/file f))
-              (throw (ex-info (str "j2g: no edge " f " (bin/j2g-edge update, or --jvm-reflection)") {})))
-          e (edge/read-edge f)]
-      (println (str "j2g: the edge " f ": " (count (:classes e)) " classes, read in " (secs t0) " s"))
+          fs (or (seq (:edges opts)) [default-edge])
+          _ (doseq [f fs]
+              (when-not (.isFile (io/file f))
+                (throw (ex-info (str "j2g: no edge " f " (bin/j2g-edge update, or --jvm-reflection)") {}))))
+          e (apply edge/read-edge fs)]
+      (println (str "j2g: the edge " (str/join " + " fs) ": " (count (:classes e)) " classes, read in " (secs t0) " s"))
       (binding [env/*declared* (:classes e)
                 edge/*edge* e
                 ;; no Java forms sources from the class path (§9.2), as on the Go build

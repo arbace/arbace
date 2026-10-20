@@ -1,0 +1,3629 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/code/Types.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.code)
+
+(import '(com.sun.tools.javac.comp AttrContext Check Enter Env)
+        '(com.sun.tools.javac.jvm ClassFile PoolConstant$LoadableConstant)
+        '(com.sun.tools.javac.main Option)
+        '(com.sun.tools.javac.resources CompilerProperties$Fragments)
+        '(com.sun.tools.javac.util Assert
+                                   CompilerInternalException
+                                   Context
+                                   Context$Key
+                                   JCDiagnostic
+                                   JCDiagnostic$Factory
+                                   JCDiagnostic$MultilineDiagnostic
+                                   JavacMessages
+                                   List
+                                   ListBuffer
+                                   Name
+                                   Names
+                                   Options
+                                   Pair
+                                   Warner)
+        '(java.lang.ref SoftReference)
+        '(java.lang.runtime ExactConversionsSupport)
+        '(java.util HashMap HashSet Locale Map Optional Set WeakHashMap)
+        '(java.util.function BiConsumer
+                             BiPredicate
+                             BinaryOperator
+                             Consumer
+                             Function
+                             Predicate
+                             Supplier)
+        '(java.util.stream Collector Collector$Characteristics)
+        '(javax.tools JavaFileObject$Kind))
+
+(defclass ^:public Types
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key Types)} typesKey (Context$Key.))
+
+  (field ^:final ^Symtab syms)
+
+  (field ^:final ^JavacMessages messages)
+
+  (field ^:final ^Names names)
+
+  (field ^:final ^Check chk)
+
+  (field ^:final ^Enter enter)
+
+  (field ^JCDiagnostic$Factory diags)
+
+  (field ^{:tag (List Warner)} warnStack (List/nil))
+
+  (field ^:final ^Name capturedName)
+
+  (field ^:public ^:final ^Warner noWarnings)
+
+  (field ^:public ^:final ^boolean dumpStacktraceOnError)
+
+  (method ^:public ^:static instance ^Types [^Context context]
+    (let [^:mutable instance (cast Types (.get context typesKey))]
+      (when (nil? instance) (set! instance (Types. context)))
+      instance))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context typesKey this)
+    (set! syms (Symtab/instance context))
+    (set! names (Names/instance context))
+    (let [source (Source/instance context)]
+      (set! chk (Check/instance context))
+      (set! enter (Enter/instance context))
+      (set! capturedName (.fromString names "<captured wildcard>"))
+      (set! messages (JavacMessages/instance context))
+      (set! diags (JCDiagnostic$Factory/instance context))
+      (set! noWarnings (Warner. nil))
+      (let [options (Options/instance context)]
+        (set! dumpStacktraceOnError (or (.isSet options "dev") (.isSet options Option/DOE))))))
+
+  (method ^:public wildUpperBound ^Type [this ^Type t]
+    (if (.hasTag t TypeTag/WILDCARD)
+        (let [w (cast Type$WildcardType t)]
+          (if (.isSuperBound w)
+              (if (nil? (.-bound w)) (.-objectType syms) (.getUpperBound (.-bound w)))
+              (.wildUpperBound this (.-type w))))
+        t))
+
+  (method ^:public cvarUpperBound ^Type [this ^Type t]
+    (if (.hasTag t TypeTag/TYPEVAR)
+        (let [v (cast Type$TypeVar t)]
+          (if (.isCaptured v) (.cvarUpperBound this (.getUpperBound v)) ^Type v))
+        t))
+
+  (method ^:public wildLowerBound ^Type [this ^Type t]
+    (if (.hasTag t TypeTag/WILDCARD)
+        (let [w (cast Type$WildcardType t)]
+          (if (.isExtendsBound w) (.-botType syms) (.wildLowerBound this (.-type w))))
+        t))
+
+  (method ^:public cvarLowerBound ^Type [this ^Type t]
+    (if (and (.hasTag t TypeTag/TYPEVAR) (.isCaptured (cast Type$TypeVar t)))
+        (.cvarLowerBound this (.getLowerBound t))
+        t))
+
+  (method ^:public skipTypeVars ^Type [this ^:mutable ^Type site ^boolean capture]
+    (while (.hasTag site TypeTag/TYPEVAR) (set! site (.getUpperBound site)))
+    (if capture (.capture this site) site))
+
+  (defclass ^:enum ProjectionKind
+    (constants
+      (UPWARDS [] (method complement ^ProjectionKind [this] DOWNWARDS))
+      (DOWNWARDS [] (method complement ^ProjectionKind [this] UPWARDS)))
+
+    (method ^:abstract complement ^ProjectionKind [this]))
+
+  (defclass TypeProjection
+    :extends (TypeMapping ProjectionKind)
+
+    (field ^{:tag (List Type)} vars)
+
+    (field ^{:tag (Set Type)} seen (HashSet.))
+
+    (constructor ^:public [this ^{:tag (List Type)} vars]
+      (set! (.-vars this) vars))
+
+    (method ^:public visitClassType ^Type [this ^Type$ClassType t ^ProjectionKind pkind]
+      (if (.isCompound t)
+          (let [^{:tag (List Type)} components (.directSupertypes Types/this t)
+                ^{:tag (List Type)} components1 (.map
+                                                  components
+                                                  (lambda Function ^Type [^Type c]
+                                                    (.map c this pkind)))]
+            (if (identical? components components1)
+                t
+                (.makeIntersectionType Types/this components1)))
+          (let [outer (.getEnclosingType t)
+                outer1 (cast Type (.visit this outer pkind))
+                ^{:tag (List Type)} typarams (.getTypeArguments t)
+                ^:mutable ^{:tag (List Type)} formals (.getTypeArguments (.-type (.-tsym t)))
+                ^{:tag (ListBuffer Type)} typarams1 (ListBuffer.)
+                ^:mutable changed false]
+            (for-each [^Type actual typarams]
+              (let [t2 (.mapTypeArgument this
+                                         t
+                                         (.getUpperBound (cast Type (.-head formals)))
+                                         actual
+                                         pkind)]
+                (when (.hasTag t2 TypeTag/BOT) (return (.-botType syms)))
+                (.add typarams1 t2)
+                (set! changed (let [a-1 changed b-2 (not (identical? actual t2))] (or a-1 b-2)))
+                (set! formals (.-tail formals))))
+            (if (and (identical? outer1 outer) (not changed))
+                t
+                (anon Type$ClassType [outer1 (.toList typarams1) (.-tsym t) (.getMetadata t)]
+                  (method ^:protected needsStripping ^boolean [this] true))))))
+
+    (method ^:public visitArrayType ^Type [this ^Type$ArrayType t ^ProjectionKind s]
+      (let [elemtype (.-elemtype t)
+            elemtype1 (cast Type (.visit this elemtype s))]
+        (cond
+          (identical? elemtype1 elemtype) t
+          (.hasTag elemtype1 TypeTag/BOT) (.-botType syms)
+          :else
+            (anon Type$ArrayType [elemtype1 (.-tsym t) (.-metadata t)]
+              (method ^:protected needsStripping ^boolean [this] true)))))
+
+    (method ^:public visitTypeVar ^Type [this ^Type$TypeVar t ^ProjectionKind pkind]
+      (if (.contains vars t)
+          (cond
+            (.add seen t)
+              (try
+                (let [^:mutable ^Type bound nil]
+                  (switch pkind
+                    UPWARDS (set! bound (.getUpperBound t))
+                    DOWNWARDS
+                      (set! bound
+                            (if (nil? (.getLowerBound t)) (.-botType syms) (.getLowerBound t)))
+                    (do (Assert/error) (return nil)))
+                  (.map bound this pkind))
+                (finally (.remove seen t)))
+            (identical? pkind ProjectionKind/UPWARDS) (.-objectType syms)
+            :else (.-botType syms))
+          t))
+
+    (method ^:private mapTypeArgument ^Type [this ^Type site ^Type declaredBound ^Type t
+                                             ^ProjectionKind pkind]
+      (if (.containsAny t vars) (.map t (TypeArgumentProjection. site declaredBound) pkind) t))
+
+    (defclass TypeArgumentProjection
+      :extends (TypeMapping ProjectionKind)
+
+      (field ^Type site)
+
+      (field ^Type declaredBound)
+
+      (constructor [this ^Type site ^Type declaredBound]
+        (set! (.-site this) site)
+        (set! (.-declaredBound this) declaredBound))
+
+      (method ^:public visitType ^Type [this ^Type t ^ProjectionKind pkind]
+        (if (identical? pkind ProjectionKind/DOWNWARDS)
+            (.-botType syms)
+            (let [upper (.map t TypeProjection/this ProjectionKind/UPWARDS)
+                  lower (.map t TypeProjection/this ProjectionKind/DOWNWARDS)
+                  ^{:tag (List Type)} formals (.getTypeArguments (.-type (.-tsym site)))
+                  ^:mutable ^BoundKind bk nil
+                  ^:mutable ^Type bound nil]
+              (cond
+                (and (not (.isSameType Types/this upper (.-objectType syms)))
+                     (or (.containsAny declaredBound formals)
+                         (not (.isSubtype Types/this declaredBound upper))))
+                  (do (set! bound upper) (set! bk BoundKind/EXTENDS))
+                (not (.hasTag lower TypeTag/BOT)) (do (set! bound lower) (set! bk BoundKind/SUPER))
+                :else (do (set! bound (.-objectType syms)) (set! bk BoundKind/UNBOUND)))
+              (.makeWildcard this bound bk))))
+
+      (method ^:public visitWildcardType ^Type [this ^Type$WildcardType wt ^ProjectionKind pkind]
+        (let [^:mutable bound (.-botType syms)
+              ^:mutable bk (.-kind wt)]
+          (switch (.-kind wt)
+            EXTENDS
+              (do
+                (set! bound (.map (.-type wt) TypeProjection/this pkind))
+                (when (.hasTag bound TypeTag/BOT) (return (.-botType syms))))
+            SUPER
+              (do
+                (set! bound (.map (.-type wt) TypeProjection/this (.complement pkind)))
+                (when (.hasTag bound TypeTag/BOT)
+                  (set! bound (.-objectType syms))
+                  (set! bk BoundKind/UNBOUND))))
+          (.makeWildcard this bound bk)))
+
+      (method ^:private makeWildcard ^Type [this ^Type bound ^BoundKind bk]
+        (anon Type$WildcardType [bound bk (.-boundClass syms)]
+          (method ^:protected needsStripping ^boolean [this] true)))))
+
+  (method ^:public upward ^Type [this ^Type t ^{:tag (List Type)} vars]
+    (.map t (TypeProjection. vars) ProjectionKind/UPWARDS))
+
+  (method ^:public captures ^{:tag (List Type)} [this ^Type t]
+    (let [cs (CaptureScanner.)
+          ^{:tag (Set Type)} captures (HashSet.)]
+      (.visit cs t captures)
+      (List/from captures)))
+
+  (defclass CaptureScanner
+    :extends (SimpleVisitor Void (Set Type))
+
+    (method ^:public visitType ^Void [this ^Type t ^{:tag (Set Type)} types]
+      nil)
+
+    (method ^:public visitClassType ^Void [this ^Type$ClassType t ^{:tag (Set Type)} seen]
+      (if (.isCompound t)
+          (.forEach (.directSupertypes Types/this t)
+                    (lambda Consumer ^void [^Type s] (.visit this s seen)))
+          (.forEach (.allparams t) (lambda Consumer ^void [^Type ta] (.visit this ta seen))))
+      nil)
+
+    (method ^:public visitArrayType ^Void [this ^Type$ArrayType t ^{:tag (Set Type)} seen]
+      (cast Void (.visit this (.-elemtype t) seen)))
+
+    (method ^:public visitWildcardType ^Void [this ^Type$WildcardType t ^{:tag (Set Type)} seen]
+      (.visit this (.-type t) seen)
+      nil)
+
+    (method ^:public visitTypeVar ^Void [this ^Type$TypeVar t ^{:tag (Set Type)} seen]
+      (when (and (not (== (bit-and (.flags (.-tsym t)) Flags/SYNTHETIC) 0)) (.add seen t))
+        (.visit this (.getUpperBound t) seen))
+      nil)
+
+    (method ^:public visitCapturedType ^Void [this ^Type$CapturedType t ^{:tag (Set Type)} seen]
+      (when (.add seen t)
+        (.visit this (.getUpperBound t) seen)
+        (.visit this (.getLowerBound t) seen))
+      nil))
+
+  (method ^:public isUnbounded ^boolean [this ^Type t]
+    (.booleanValue (cast Boolean (.visit isUnbounded t))))
+
+  (field ^:private ^:final ^{:tag (UnaryVisitor Boolean)} isUnbounded
+    (anon (UnaryVisitor Boolean) []
+      (method ^:public visitType ^Boolean [this ^Type t ^Void ignored] true)
+
+      (method ^:public visitClassType ^Boolean [this ^Type$ClassType t ^Void ignored]
+        (let [^:mutable ^{:tag (List Type)} parms (.allparams (.-type (.-tsym t)))
+              ^:mutable ^{:tag (List Type)} args (.allparams t)]
+          (while (.nonEmpty parms)
+            (let [unb (Type$WildcardType. (.-objectType syms)
+                                          BoundKind/UNBOUND
+                                          (.-boundClass syms)
+                                          (cast Type$TypeVar (.-head parms)))]
+              (when-not (.containsType Types/this (cast Type (.-head args)) unb) (return false))
+              (set! parms (.-tail parms))
+              (set! args (.-tail args))))
+          true))))
+
+  (method ^:public asSub ^Type [this ^Type t ^Symbol sym]
+    (cast Type (.visit asSub t sym)))
+
+  (field ^:private ^:final ^{:tag (SimpleVisitor Type Symbol)} asSub
+    (anon (SimpleVisitor Type Symbol) []
+      (method ^:public visitType ^Type [this ^Type t ^Symbol sym] nil)
+
+      (method ^:public visitClassType ^Type [this ^Type$ClassType t ^Symbol sym]
+        (if (identical? (.-tsym t) sym)
+            t
+            (let [base (.asSuper Types/this (.-type sym) (.-tsym t))]
+              (when (some? base)
+                (let [^{:tag (ListBuffer Type)} from (ListBuffer.)
+                      ^{:tag (ListBuffer Type)} to (ListBuffer.)]
+                  (try (.adapt Types/this base t from to) (catch AdaptFailure ex (return nil)))
+                  (let [^:mutable res (.subst Types/this (.-type sym) (.toList from) (.toList to))]
+                    (when-not (not (.isSubtype Types/this res t))
+                      (let [^{:tag (ListBuffer Type)} openVars (ListBuffer.)]
+                        (loop [^{:tag (List Type)} l (.allparams (.-type sym))]
+                          (if (.nonEmpty l)
+                              (if (and (.contains res (cast Type (.-head l)))
+                                       (not (.contains t (cast Type (.-head l)))))
+                                  (do (.append openVars (cast Type (.-head l))) (recur (.-tail l)))
+                                  (recur (.-tail l)))
+                              nil))
+                        (when (.nonEmpty openVars)
+                          (if (.isRaw t)
+                              (set! res (.erasure Types/this res))
+                              (let [^{:tag (List Type)} opens (.toList openVars)
+                                    ^{:tag (ListBuffer Type)} qs (ListBuffer.)]
+                                (loop [^{:tag (List Type)} iter opens]
+                                  (when (.nonEmpty iter)
+                                    (.append qs
+                                             (Type$WildcardType.
+                                               (.-objectType syms)
+                                               BoundKind/UNBOUND
+                                               (.-boundClass syms)
+                                               (cast Type$TypeVar (.-head iter))))
+                                    (recur (.-tail iter))))
+                                (set! res (.subst Types/this res opens (.toList qs))))))
+                        res))))))))
+
+      (method ^:public visitErrorType ^Type [this ^Type$ErrorType t ^Symbol sym]
+        t)))
+
+  (method ^:public isConvertible ^boolean [this ^Type t ^Type s ^Warner warn]
+    (if (.hasTag t TypeTag/ERROR)
+        true
+        (let [tPrimitive (.isPrimitive t)
+              sPrimitive (.isPrimitive s)]
+          (if (= tPrimitive sPrimitive)
+              (.isSubtypeUnchecked this t s warn)
+              (let [tUndet (.hasTag t TypeTag/UNDETVAR)
+                    sUndet (.hasTag s TypeTag/UNDETVAR)]
+                (cond
+                  (or tUndet sUndet)
+                    (if tUndet
+                        (.isSubtype this t (.boxedTypeOrType this s))
+                        (.isSubtype this (.boxedTypeOrType this t) s))
+                  tPrimitive (.isSubtype this (.-type (.boxedClass this t)) s)
+                  :else (.isSubtype this (.unboxedType this t) s)))))))
+
+  (method ^:public isConvertible ^boolean [this ^Type t ^Type s]
+    (.isConvertible this t s noWarnings))
+
+  (defclass ^:public ^:static FunctionDescriptorLookupError
+    :extends CompilerInternalException
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+    (field ^:transient ^JCDiagnostic diagnostic)
+
+    (constructor [this ^boolean dumpStackTraceOnError]
+      (super. dumpStackTraceOnError)
+      (set! (.-diagnostic this) nil))
+
+    (method setMessage ^FunctionDescriptorLookupError [this ^JCDiagnostic diag]
+      (set! (.-diagnostic this) diag)
+      this)
+
+    (method ^:public getDiagnostic ^JCDiagnostic [this] diagnostic))
+
+  (defclass DescriptorCache
+    (field ^:private ^{:tag (WeakHashMap Symbol$TypeSymbol Entry)} _map (WeakHashMap.))
+
+    (defclass FunctionDescriptor
+      (field ^Symbol descSym)
+
+      (constructor [this ^Symbol descSym] (set! (.-descSym this) descSym))
+
+      (method ^:public getSymbol ^Symbol [this] descSym)
+
+      (method ^:public getType ^Type [this ^:mutable ^Type site]
+        (set! site (.removeWildcards Types/this site))
+        (if (.isIntersection site)
+            (let [ict (cast Type$IntersectionClassType site)]
+              (for-each [^Type component (.getExplicitComponents ict)]
+                (when-not (.checkValidGenericType chk component)
+                  (throw (.failure DescriptorCache/this
+                                   (.fragment
+                                     diags
+                                     (CompilerProperties$Fragments/NoSuitableFunctionalIntfInst
+                                       site)))))))
+            (when-not (.checkValidGenericType chk site)
+              (throw (.failure DescriptorCache/this
+                               (.fragment diags
+                                          (CompilerProperties$Fragments/NoSuitableFunctionalIntfInst
+                                            site))))))
+        (.memberType Types/this site descSym)))
+
+    (defclass Entry
+      (field ^:final ^FunctionDescriptor cachedDescRes)
+
+      (field ^:final ^int prevMark)
+
+      (constructor ^:public [this ^FunctionDescriptor cachedDescRes ^int prevMark]
+        (set! (.-cachedDescRes this) cachedDescRes)
+        (set! (.-prevMark this) prevMark))
+
+      (method matches ^boolean [this ^int mark] (== (.-prevMark this) mark)))
+
+    (method get :throws [FunctionDescriptorLookupError] ^FunctionDescriptor [this
+                                                                             ^Symbol$TypeSymbol origin]
+      (let [e (cast Entry (.get _map origin))
+            members (.membersClosure Types/this (.-type origin) false)]
+        (if (or (nil? e) (not (.matches e (.getMark members))))
+            (let [descRes (.findDescriptorInternal this origin members)]
+              (.put _map origin (Entry. descRes (.getMark members)))
+              descRes)
+            (.-cachedDescRes e))))
+
+    (method ^:public findDescriptorInternal :throws [FunctionDescriptorLookupError] ^FunctionDescriptor [this
+                                                                                                         ^Symbol$TypeSymbol origin
+                                                                                                         ^Scope$CompoundScope membersCache]
+      (when (or (or (not (.isInterface origin))
+                    (not (== (bit-and (.flags origin) Flags/ANNOTATION) 0)))
+                (.isSealed origin))
+        (throw (.failure this "not.a.functional.intf" (new Object/1 [origin]))))
+      (let [^{:tag (ListBuffer Symbol)} abstracts (ListBuffer.)]
+        (for-each [^Symbol sym (.getSymbols membersCache (DescriptorFilter. origin))]
+          (let [mtype (.memberType Types/this (.-type origin) sym)]
+            (cond
+              (.isEmpty abstracts) (.append abstracts sym)
+              (and (identical? (.-name sym) (.-name (cast Symbol (.first abstracts))))
+                   (.overrideEquivalent Types/this
+                                        mtype
+                                        (.memberType
+                                          Types/this
+                                          (.-type origin)
+                                          (cast Symbol (.first abstracts)))))
+                (when-not (.anyMatch (.map (.filter
+                                             (.stream abstracts)
+                                             (lambda Predicate ^boolean [^Symbol msym]
+                                               (.isSubClass
+                                                 (.-owner msym)
+                                                 (.enclClass sym)
+                                                 Types/this)))
+                                           (lambda Function ^Type [^Symbol msym]
+                                             (.memberType Types/this (.-type origin) msym)))
+                                     (lambda Predicate ^boolean [^Type abstractMType]
+                                       (.isSubSignature Types/this abstractMType mtype)))
+                  (.append abstracts sym))
+              :else
+                (throw (.failure this
+                                 "not.a.functional.intf.1"
+                                 (new Object/1
+                                      [origin
+                                       (.fragment
+                                         diags
+                                         (CompilerProperties$Fragments/IncompatibleAbstracts
+                                           (Kinds/kindName origin)
+                                           origin))]))))))
+        (cond
+          (.isEmpty abstracts)
+            (throw (.failure this
+                             "not.a.functional.intf.1"
+                             (new Object/1
+                                  [origin
+                                   (.fragment diags
+                                              (CompilerProperties$Fragments/NoAbstracts
+                                                (Kinds/kindName origin)
+                                                origin))])))
+          (== (.size abstracts) 1) (FunctionDescriptor. (cast Symbol (.first abstracts)))
+          :else
+            (let [descRes (.mergeDescriptors this origin (.toList abstracts))]
+              (when (nil? descRes)
+                (let [^{:tag (ListBuffer JCDiagnostic)} descriptors (ListBuffer.)]
+                  (for-each [^Symbol desc abstracts]
+                    (let [^String key (if (.nonEmpty (.getThrownTypes (.-type desc)))
+                                          "descriptor.throws"
+                                          "descriptor")]
+                      (.append descriptors
+                               (.fragment diags
+                                          key
+                                          (new Object/1
+                                               [(.-name desc)
+                                                (.getParameterTypes (.-type desc))
+                                                (.getReturnType (.-type desc))
+                                                (.getThrownTypes (.-type desc))])))))
+                  (let [msg (.fragment
+                              diags
+                              (CompilerProperties$Fragments/IncompatibleDescsInFunctionalIntf
+                                (Kinds/kindName origin)
+                                origin))
+                        incompatibleDescriptors (JCDiagnostic$MultilineDiagnostic.
+                                                  msg
+                                                  (.toList descriptors))]
+                    (throw (.failure this incompatibleDescriptors)))))
+              descRes))))
+
+    (method ^:private mergeDescriptors ^FunctionDescriptor [this ^Symbol$TypeSymbol origin
+                                                            ^{:tag (List Symbol)} methodSyms]
+      (cast FunctionDescriptor
+            (.orElse (.map (.mergeAbstracts Types/this methodSyms (.-type origin) false)
+                           (lambda Function ^Types$DescriptorCache$1 [^Symbol bestSoFar]
+                             (anon FunctionDescriptor [(.baseSymbol bestSoFar)]
+                               (method ^:public getType ^Type [this ^Type origin]
+                                 (let [mt (.memberType Types/this origin (.getSymbol this))]
+                                   (.createMethodTypeWithThrown
+                                     Types/this
+                                     mt
+                                     (.getThrownTypes (.-type bestSoFar))))))))
+                     nil)))
+
+    (method failure ^FunctionDescriptorLookupError [this ^String msg & ^Object/1 args]
+      (.failure this (.fragment diags msg args)))
+
+    (method failure ^FunctionDescriptorLookupError [this ^JCDiagnostic diag]
+      (.setMessage (FunctionDescriptorLookupError. (.-dumpStacktraceOnError Types/this)) diag)))
+
+  (field ^:private ^DescriptorCache descCache (DescriptorCache.))
+
+  (method ^:public findDescriptorSymbol :throws [FunctionDescriptorLookupError] ^Symbol [this
+                                                                                         ^Symbol$TypeSymbol origin]
+    (.getSymbol (.get descCache origin)))
+
+  (method ^:public findDescriptorType :throws [FunctionDescriptorLookupError] ^Type [this
+                                                                                     ^Type origin]
+    (.getType (.get descCache (.-tsym origin)) origin))
+
+  (method ^:public isFunctionalInterface ^boolean [this ^Symbol$TypeSymbol tsym]
+    (try (.findDescriptorSymbol this tsym) true (catch FunctionDescriptorLookupError ex false)))
+
+  (method ^:public isFunctionalInterface ^boolean [this ^Type site]
+    (try (.findDescriptorType this site) true (catch FunctionDescriptorLookupError ex false)))
+
+  (method ^:public removeWildcards ^Type [this ^Type site]
+    (if (.anyMatch (.stream (.getTypeArguments site))
+                   (lambda Predicate ^boolean [^Type t] (.hasTag t TypeTag/WILDCARD)))
+        (let [^:mutable ^{:tag (List Type)} actuals (.getTypeArguments site)
+              ^{:tag (List Type)} formals (.getTypeArguments (.-type (.-tsym site)))
+              ^{:tag (ListBuffer Type)} targs (ListBuffer.)]
+          (for-each [^Type formal formals]
+            (let [actual (cast Type (.-head actuals))
+                  bound (.getUpperBound formal)]
+              (if (.hasTag (cast Type (.-head actuals)) TypeTag/WILDCARD)
+                  (let [wt (cast Type$WildcardType actual)]
+                    (if (.containsAny bound formals)
+                        (.add targs (.-type wt))
+                        (switch (.-kind wt)
+                          UNBOUND (.add targs bound)
+                          EXTENDS (.add targs (.glb this bound (.-type wt)))
+                          SUPER (.add targs (.-type wt))
+                          (Assert/error "Cannot get here!"))))
+                  (.add targs actual))
+              (set! actuals (.-tail actuals))))
+          (.subst this (.-type (.-tsym site)) formals (.toList targs)))
+        site))
+
+  (method ^:public makeFunctionalInterfaceClass ^Symbol$ClassSymbol [this
+                                                                     ^{:tag (Env AttrContext)} env
+                                                                     ^Name name ^Type target
+                                                                     ^long cflags]
+    (when-not (or (nil? target) (identical? target (.-unknownType syms)))
+      (let [descSym (.findDescriptorSymbol this (.-tsym target))
+            descType (.findDescriptorType this target)
+            csym (Symbol$ClassSymbol. cflags name (.outermostClass (.-sym (.-enclClass env))))]
+        (set! (.-completer csym) Symbol$Completer/NULL_COMPLETER)
+        (set! (.-members_field csym) (Scope$WriteableScope/create csym))
+        (let [instDescSym (Symbol$MethodSymbol. (.flags descSym) (.-name descSym) descType csym)]
+          (.enter (.-members_field csym) instDescSym)
+          (let [ctype (Type$ClassType. Type/noType (List/nil) csym)]
+            (set! (.-supertype_field ctype) (.-objectType syms))
+            (set! (.-interfaces_field ctype)
+                  (if (.isIntersection target) (.directSupertypes this target) (List/of target)))
+            (set! (.-type csym) ctype)
+            (set! (.-sourcefile csym) (.-sourcefile (cast Symbol$ClassSymbol (.-owner csym))))
+            csym)))))
+
+  (method ^:public functionalInterfaceBridges ^{:tag (List Symbol)} [this ^Symbol$TypeSymbol origin]
+    (Assert/check (.isFunctionalInterface this origin))
+    (let [descSym (.findDescriptorSymbol this origin)
+          members (.membersClosure this (.-type origin) false)
+          ^{:tag (ListBuffer Symbol)} overridden (ListBuffer.)]
+      (label :outer
+        (for-each [^Symbol m2 (.getSymbolsByName members (.-name descSym) bridgeFilter)]
+          (when-not (identical? m2 descSym)
+            (when (.overrides descSym m2 origin this false)
+              (for-each [^Symbol m3 overridden]
+                (when (or (.isSameType this (.erasure m3 this) (.erasure m2 this))
+                          (and (.overrides m3 m2 origin this false)
+                               (or (.pendingBridges
+                                     this
+                                     (cast Symbol$ClassSymbol origin)
+                                     (.enclClass m3))
+                                   (some? (.binaryImplementation
+                                            (cast Symbol$MethodSymbol m2)
+                                            (cast Symbol$ClassSymbol (.-owner m3))
+                                            this)))))
+                  (continue :outer)))
+              (.add overridden m2)))))
+      (.toList overridden)))
+
+  (field ^:private ^{:tag (Predicate Symbol)} bridgeFilter
+    (anon (Predicate Symbol) []
+      (method ^:public test ^boolean [this ^Symbol t]
+        (and (and (and (identical? (.-kind t) Kinds$Kind/MTH)
+                       (not (identical? (.-name t) (.-init names))))
+                  (not (identical? (.-name t) (.-clinit names))))
+             (== (bit-and (.flags t) Flags/SYNTHETIC) 0)))))
+
+  (method ^:private pendingBridges ^boolean [this ^Symbol$ClassSymbol origin ^Symbol$TypeSymbol s]
+    (cond
+      (and (and (some? (.-classfile origin))
+                (identical? (.getKind (.-classfile origin)) JavaFileObject$Kind/CLASS))
+           (nil? (.getEnv enter origin)))
+        false
+      (identical? origin s) true
+      :else
+        (do
+          (for-each [^Type t (.interfaces this (.-type origin))]
+            (when (.pendingBridges this (cast Symbol$ClassSymbol (.-tsym t)) s) (return true)))
+          false)))
+
+  (defclass DescriptorFilter
+    :implements [(Predicate Symbol)]
+
+    (field ^Symbol$TypeSymbol origin)
+
+    (constructor [this ^Symbol$TypeSymbol origin]
+      (set! (.-origin this) origin))
+
+    (method ^:public test ^boolean [this ^Symbol sym]
+      (and (and (and (identical? (.-kind sym) Kinds$Kind/MTH)
+                     (== (bit-and (.flags sym) (bit-or Flags/ABSTRACT Flags/DEFAULT))
+                         Flags/ABSTRACT))
+                (not (.overridesObjectMethod Types/this origin sym)))
+           (== (bit-and (.flags (cast Symbol$MethodSymbol
+                                      (.-head (.interfaceCandidates
+                                                Types/this
+                                                (.-type origin)
+                                                (cast Symbol$MethodSymbol sym)))))
+                        Flags/DEFAULT)
+               0))))
+
+  (method ^:public isSubtypeUnchecked ^boolean [this ^Type t ^Type s]
+    (.isSubtypeUnchecked this t s noWarnings))
+
+  (method ^:public isSubtypeUnchecked ^boolean [this ^Type t ^Type s ^Warner warn]
+    (let [result (.isSubtypeUncheckedInternal this t s true warn)]
+      (when result (.checkUnsafeVarargsConversion this t s warn))
+      result))
+
+  (method ^:private isSubtypeUncheckedInternal ^boolean [this ^Type t ^Type s ^boolean capture
+                                                         ^Warner warn]
+    (cond
+      (and (.hasTag t TypeTag/ARRAY) (.hasTag s TypeTag/ARRAY))
+        (if (.isPrimitive (.-elemtype (cast Type$ArrayType t)))
+            (.isSameType this (.elemtype this t) (.elemtype this s))
+            (.isSubtypeUncheckedInternal this (.elemtype this t) (.elemtype this s) false warn))
+      (.isSubtype this t s capture) true
+      (.hasTag t TypeTag/TYPEVAR) (.isSubtypeUncheckedInternal this (.getUpperBound t) s false warn)
+      :else
+        (do
+          (when-not (.isRaw s)
+            (let [t2 (.asSuper this t (.-tsym s))]
+              (when (and (some? t2) (.isRaw t2))
+                (if (.isReifiable this s)
+                    (.silentWarn warn Lint$LintCategory/UNCHECKED)
+                    (.warn warn Lint$LintCategory/UNCHECKED))
+                (return true))))
+          false)))
+
+  (method ^:private checkUnsafeVarargsConversion ^void [this ^Type t ^Type s ^Warner warn]
+    (when-not (or (not (.hasTag t TypeTag/ARRAY)) (.isReifiable this t))
+      (let [from (cast Type$ArrayType t)
+            ^:mutable shouldWarn false]
+        (switch (.getTag s)
+          ARRAY
+            (let [to (cast Type$ArrayType s)]
+              (set! shouldWarn
+                    (and (and (.isVarargs from) (not (.isVarargs to)))
+                         (not (.isReifiable this from)))))
+          CLASS (set! shouldWarn (.isVarargs from)))
+        (when shouldWarn (.warn warn Lint$LintCategory/VARARGS)))))
+
+  (method ^:public ^:final isSubtype ^boolean [this ^Type t ^Type s]
+    (.isSubtype this t s true))
+
+  (method ^:public ^:final isSubtypeNoCapture ^boolean [this ^Type t ^Type s]
+    (.isSubtype this t s false))
+
+  (method ^:public isSubtype ^boolean [this ^Type t ^Type s ^boolean capture]
+    (cond
+      (.equalsIgnoreMetadata t s) true
+      (.isPartial s) (.isSuperType this s t)
+      (.isCompound s)
+        (do
+          (for-each [^Type s2 (.prepend (.interfaces this s) (.supertype this s))]
+            (when-not (.isSubtype this t s2 capture) (return false)))
+          true)
+      :else
+        (do
+          (when (and (not (.hasTag t TypeTag/UNDETVAR)) (not (.isCompound t)))
+            (let [lower (.cvarLowerBound this (.wildLowerBound this s))]
+              (when (and (not (identical? s lower)) (not (.hasTag lower TypeTag/BOT)))
+                (return (.isSubtype this ^Type (if capture (.capture this t) t) lower false)))))
+          (.booleanValue (cast Boolean (.visit isSubtype ^Type (if capture (.capture this t) t) s))))))
+
+  (field ^:private ^TypeRelation isSubtype
+    (anon TypeRelation []
+      (method ^:public visitType ^Boolean [this ^Type t ^Type s]
+        (switch (.getTag t)
+          BYTE (and (not (.hasTag s TypeTag/CHAR)) (.isSubRangeOf (.getTag t) (.getTag s)))
+          CHAR (and (not (.hasTag s TypeTag/SHORT)) (.isSubRangeOf (.getTag t) (.getTag s)))
+          (SHORT INT LONG FLOAT DOUBLE) (.isSubRangeOf (.getTag t) (.getTag s))
+          (BOOLEAN VOID) (.hasTag t (.getTag s))
+          TYPEVAR (.isSubtypeNoCapture Types/this (.getUpperBound t) s)
+          BOT
+            (or (or (or (.hasTag s TypeTag/BOT) (.hasTag s TypeTag/CLASS))
+                    (.hasTag s TypeTag/ARRAY))
+                (.hasTag s TypeTag/TYPEVAR))
+          (WILDCARD NONE) false
+          (throw (AssertionError. (java-str "isSubtype " (.getTag t))))))
+
+      (field ^:private ^{:tag (Set TypePair)} cache (HashSet.))
+
+      (method ^:private containsTypeRecursive ^boolean [this ^Type t ^Type s]
+        (let [pair (TypePair. t s)]
+          (if (.add cache pair)
+              (try
+                (.containsType Types/this (.getTypeArguments t) (.getTypeArguments s))
+                (finally (.remove cache pair)))
+              (.containsType Types/this
+                             (.getTypeArguments t)
+                             (.getTypeArguments (.rewriteSupers this s))))))
+
+      (method ^:private rewriteSupers ^Type [this ^Type t]
+        (if (not (.isParameterized t))
+            t
+            (let [^{:tag (ListBuffer Type)} from (ListBuffer.)
+                  ^{:tag (ListBuffer Type)} to (ListBuffer.)]
+              (.adaptSelf Types/this t from to)
+              (if (.isEmpty from)
+                  t
+                  (let [^{:tag (ListBuffer Type)} rewrite (ListBuffer.)
+                        ^:mutable changed false]
+                    (for-each [^Type orig (.toList to)]
+                      (let [^:mutable s (.rewriteSupers this orig)]
+                        (if (and (.isSuperBound s) (not (.isExtendsBound s)))
+                            (do
+                              (set! s
+                                    (Type$WildcardType.
+                                      (.-objectType syms)
+                                      BoundKind/UNBOUND
+                                      (.-boundClass syms)
+                                      (.getMetadata s)))
+                              (set! changed true))
+                            (when-not (identical? s orig)
+                              (set! s
+                                    (Type$WildcardType.
+                                      (.wildUpperBound Types/this s)
+                                      BoundKind/EXTENDS
+                                      (.-boundClass syms)
+                                      (.getMetadata s)))
+                              (set! changed true)))
+                        (.append rewrite s)))
+                    (if changed
+                        (.subst Types/this (.-type (.-tsym t)) (.toList from) (.toList rewrite))
+                        t))))))
+
+      (method ^:public visitClassType ^Boolean [this ^Type$ClassType t ^Type s]
+        (let [sup (.asSuper Types/this t (.-tsym s))]
+          (cond
+            (nil? sup) false
+            (not (.hasTag sup TypeTag/CLASS)) (.isSubtypeNoCapture Types/this sup s)
+            :else
+              (and (and (identical? (.-tsym sup) (.-tsym s))
+                        (or (not (.isParameterized s)) (.containsTypeRecursive this s sup)))
+                   (.isSubtypeNoCapture Types/this (.getEnclosingType sup) (.getEnclosingType s))))))
+
+      (method ^:public visitArrayType ^Boolean [this ^Type$ArrayType t ^Type s]
+        (cond
+          (.hasTag s TypeTag/ARRAY)
+            (if (.isPrimitive (.-elemtype t))
+                (.isSameType Types/this (.-elemtype t) (.elemtype Types/this s))
+                (.isSubtypeNoCapture Types/this (.-elemtype t) (.elemtype Types/this s)))
+          (.hasTag s TypeTag/CLASS)
+            (let [sname (.getQualifiedName (.-tsym s))]
+              (or (or (identical? sname (.-java_lang_Object names))
+                      (identical? sname (.-java_lang_Cloneable names)))
+                  (identical? sname (.-java_io_Serializable names))))
+          :else false))
+
+      (method ^:public visitUndetVar ^Boolean [this ^Type$UndetVar t ^Type s]
+        (cond
+          (or (or (identical? t s) (identical? (.-qtype t) s)) (.hasTag s TypeTag/ERROR)) true
+          (.hasTag s TypeTag/BOT) false
+          :else (do (.addBound t Type$UndetVar$InferenceBound/UPPER s Types/this) true)))
+
+      (method ^:public visitErrorType ^Boolean [this ^Type$ErrorType t ^Type s]
+        true)))
+
+  (method ^:public isSubtypeUnchecked ^boolean [this ^Type t ^{:tag (List Type)} ts ^Warner warn]
+    (loop [^{:tag (List Type)} l ts]
+      (if (.nonEmpty l)
+          (if (not (.isSubtypeUnchecked this t (cast Type (.-head l)) warn))
+              (return false)
+              (recur (.-tail l)))
+          nil))
+    true)
+
+  (method ^:public isSubtypes ^boolean [this ^:mutable ^{:tag (List Type)} ts
+                                        ^:mutable ^{:tag (List Type)} ss]
+    (while (and (and (some? (.-tail ts)) (some? (.-tail ss)))
+                (.isSubtype this (cast Type (.-head ts)) (cast Type (.-head ss))))
+      (set! ts (.-tail ts))
+      (set! ss (.-tail ss)))
+    (and (nil? (.-tail ts)) (nil? (.-tail ss))))
+
+  (method ^:public isSubtypesUnchecked ^boolean [this ^:mutable ^{:tag (List Type)} ts
+                                                 ^:mutable ^{:tag (List Type)} ss ^Warner warn]
+    (while (and (and (some? (.-tail ts)) (some? (.-tail ss)))
+                (.isSubtypeUnchecked this (cast Type (.-head ts)) (cast Type (.-head ss)) warn))
+      (set! ts (.-tail ts))
+      (set! ss (.-tail ss)))
+    (and (nil? (.-tail ts)) (nil? (.-tail ss))))
+
+  (method ^:public isSuperType ^boolean [this ^Type t ^Type s]
+    (switch (.getTag t)
+      ERROR true
+      UNDETVAR
+        (let [undet (cast Type$UndetVar t)]
+          (if (or (or (or (identical? t s) (identical? (.-qtype undet) s))
+                      (.hasTag s TypeTag/ERROR))
+                  (.hasTag s TypeTag/BOT))
+              true
+              (do (.addBound undet Type$UndetVar$InferenceBound/LOWER s this) true)))
+      (.isSubtype this s t)))
+
+  (method ^:public isSameTypes ^boolean [this ^:mutable ^{:tag (List Type)} ts
+                                         ^:mutable ^{:tag (List Type)} ss]
+    (while (and (and (some? (.-tail ts)) (some? (.-tail ss)))
+                (.isSameType this (cast Type (.-head ts)) (cast Type (.-head ss))))
+      (set! ts (.-tail ts))
+      (set! ss (.-tail ss)))
+    (and (nil? (.-tail ts)) (nil? (.-tail ss))))
+
+  (method ^:public isSignaturePolymorphic ^boolean [this ^Symbol$MethodSymbol msym]
+    (let [^{:tag (List Type)} argtypes (.getParameterTypes (.-type msym))]
+      (and (and (and (and (not (== (bit-and (.-flags_field msym) Flags/NATIVE) 0))
+                          (or (identical? (.-owner msym) (.-tsym (.-methodHandleType syms)))
+                              (identical? (.-owner msym) (.-tsym (.-varHandleType syms)))))
+                     (== (.length argtypes) 1))
+                (.hasTag (cast Type (.-head argtypes)) TypeTag/ARRAY))
+           (identical? (.-tsym (.-elemtype (cast Type$ArrayType (.-head argtypes))))
+                       (.-tsym (.-objectType syms))))))
+
+  (method ^:public isSameType ^boolean [this ^Type t ^Type s]
+    (.booleanValue (cast Boolean (.visit isSameTypeVisitor t s))))
+
+  (defclass ^:abstract TypeEqualityVisitor
+    :extends TypeRelation
+
+    (method ^:public visitType ^Boolean [this ^Type t ^Type s]
+      (cond
+        (.equalsIgnoreMetadata t s) true
+        (.isPartial s) (cast Boolean (.visit this s t))
+        :else
+          (switch (.getTag t)
+            (BYTE CHAR SHORT INT LONG FLOAT DOUBLE BOOLEAN VOID BOT NONE) (.hasTag t (.getTag s))
+            TYPEVAR
+              (if (.hasTag s TypeTag/TYPEVAR)
+                  (identical? t s)
+                  (and
+                    (and (.isSuperBound s) (not (.isExtendsBound s)))
+                    (.booleanValue (cast Boolean (.visit this t (.wildUpperBound Types/this s))))))
+            (throw (AssertionError. (java-str "isSameType " (.getTag t)))))))
+
+    (method ^:public visitWildcardType ^Boolean [this ^Type$WildcardType t ^Type s]
+      (if (not (.hasTag s TypeTag/WILDCARD))
+          false
+          (let [t2 (cast Type$WildcardType s)]
+            (and (or (identical? (.-kind t) (.-kind t2))
+                     (and (.isExtendsBound t) (.isExtendsBound s)))
+                 (.sameTypeComparator this (.-type t) (.-type t2))))))
+
+    (method ^:abstract sameTypeComparator ^boolean [this ^Type t ^Type s])
+
+    (method ^:public visitClassType ^Boolean [this ^Type$ClassType t ^Type s]
+      (cond
+        (identical? t s) true
+        (.isPartial s) (cast Boolean (.visit this s t))
+        (and (.isSuperBound s) (not (.isExtendsBound s)))
+          (and (.booleanValue (cast Boolean (.visit this t (.wildUpperBound Types/this s))))
+               (.booleanValue (cast Boolean (.visit this t (.wildLowerBound Types/this s)))))
+        (and (.isCompound t) (.isCompound s))
+          (if (not (.booleanValue
+                     (cast Boolean
+                           (.visit this (.supertype Types/this t) (.supertype Types/this s)))))
+              false
+              (let [^{:tag (Map Symbol Type)} tMap (HashMap.)]
+                (for-each [^Type ti (.interfaces Types/this t)] (.put tMap (.-tsym ti) ti))
+                (for-each [^Type si (.interfaces Types/this s)]
+                  (when-not (.containsKey tMap (.-tsym si)) (return false))
+                  (let [ti (cast Type (.remove tMap (.-tsym si)))]
+                    (when-not (.booleanValue (cast Boolean (.visit this ti si))) (return false))))
+                (.isEmpty tMap)))
+        :else
+          (and (and (identical? (.-tsym t) (.-tsym s))
+                    (.booleanValue
+                      (cast Boolean (.visit this (.getEnclosingType t) (.getEnclosingType s)))))
+               (.sameTypeArguments this (.getTypeArguments t) (.getTypeArguments s)))))
+
+    (method ^:abstract sameTypeArguments ^boolean [this ^{:tag (List Type)} ts
+                                                   ^{:tag (List Type)} ss])
+
+    (method ^:public visitArrayType ^Boolean [this ^Type$ArrayType t ^Type s]
+      (cond
+        (identical? t s) true
+        (.isPartial s) (cast Boolean (.visit this s t))
+        :else
+          (and (.hasTag s TypeTag/ARRAY)
+               (.containsTypeEquivalent Types/this (.-elemtype t) (.elemtype Types/this s)))))
+
+    (method ^:public visitMethodType ^Boolean [this ^Type$MethodType t ^Type s]
+      (and (.hasSameArgs Types/this t s)
+           (.booleanValue (cast Boolean (.visit this (.getReturnType t) (.getReturnType s))))))
+
+    (method ^:public visitPackageType ^Boolean [this ^Type$PackageType t ^Type s]
+      (identical? t s))
+
+    (method ^:public visitForAll ^Boolean [this ^Type$ForAll t ^Type s]
+      (if (not (.hasTag s TypeTag/FORALL))
+          false
+          (let [forAll (cast Type$ForAll s)]
+            (and
+              (.hasSameBounds Types/this t forAll)
+              (.booleanValue
+                (cast Boolean
+                      (.visit this
+                              (.-qtype t)
+                              (.subst Types/this (.-qtype forAll) (.-tvars forAll) (.-tvars t)))))))))
+
+    (method ^:public visitUndetVar ^Boolean [this ^Type$UndetVar t ^Type s]
+      (cond
+        (.hasTag s TypeTag/WILDCARD) false
+        (or (or (identical? t s) (identical? (.-qtype t) s)) (.hasTag s TypeTag/ERROR)) true
+        :else (do (.addBound t Type$UndetVar$InferenceBound/EQ s Types/this) true)))
+
+    (method ^:public visitErrorType ^Boolean [this ^Type$ErrorType t ^Type s]
+      true))
+
+  (field ^TypeEqualityVisitor isSameTypeVisitor
+    (anon TypeEqualityVisitor []
+      (method sameTypeComparator ^boolean [this ^Type t ^Type s]
+        (.isSameType Types/this t s))
+
+      (method sameTypeArguments ^boolean [this ^{:tag (List Type)} ts ^{:tag (List Type)} ss]
+        (.containsTypeEquivalent Types/this ts ss))))
+
+  (method ^:public containedBy ^boolean [this ^Type t ^Type s]
+    (switch (.getTag t)
+      UNDETVAR
+        (if (.hasTag s TypeTag/WILDCARD)
+            (let [undetvar (cast Type$UndetVar t)
+                  wt (cast Type$WildcardType s)]
+              (switch (.-kind wt)
+                UNBOUND nil
+                EXTENDS
+                  (let [bound (.wildUpperBound this s)]
+                    (.addBound undetvar Type$UndetVar$InferenceBound/UPPER bound this))
+                SUPER
+                  (let [bound (.wildLowerBound this s)]
+                    (.addBound undetvar Type$UndetVar$InferenceBound/LOWER bound this)))
+              true)
+            (.isSameType this t s))
+      ERROR true
+      (.containsType this s t)))
+
+  (method containsType ^boolean [this ^:mutable ^{:tag (List Type)} ts
+                                 ^:mutable ^{:tag (List Type)} ss]
+    (while (and (and (.nonEmpty ts) (.nonEmpty ss))
+                (.containsType this (cast Type (.-head ts)) (cast Type (.-head ss))))
+      (set! ts (.-tail ts))
+      (set! ss (.-tail ss)))
+    (and (.isEmpty ts) (.isEmpty ss)))
+
+  (method ^:public containsType ^boolean [this ^Type t ^Type s]
+    (.booleanValue (cast Boolean (.visit containsType t s))))
+
+  (field ^:private ^TypeRelation containsType
+    (anon TypeRelation []
+      (method ^:public visitType ^Boolean [this ^Type t ^Type s]
+        (if (.isPartial s) (.containedBy Types/this s t) (.isSameType Types/this t s)))
+
+      (method ^:public visitWildcardType ^Boolean [this ^Type$WildcardType t ^Type s]
+        (if (.isPartial s)
+            (.containedBy Types/this s t)
+            (or (or (.isSameWildcard Types/this t s) (.isCaptureOf Types/this s t))
+                (and (or (.isExtendsBound t)
+                         (.isSubtypeNoCapture Types/this
+                                              (.wildLowerBound Types/this t)
+                                              (.wildLowerBound Types/this s)))
+                     (or (.isSuperBound t)
+                         (.isSubtypeNoCapture Types/this
+                                              (.wildUpperBound Types/this s)
+                                              (.wildUpperBound Types/this t)))))))
+
+      (method ^:public visitUndetVar ^Boolean [this ^Type$UndetVar t ^Type s]
+        (if (not (.hasTag s TypeTag/WILDCARD)) (.isSameType Types/this t s) false))
+
+      (method ^:public visitErrorType ^Boolean [this ^Type$ErrorType t ^Type s]
+        true)))
+
+  (method ^:public isCaptureOf ^boolean [this ^Type s ^Type$WildcardType t]
+    (if (or (not (.hasTag s TypeTag/TYPEVAR)) (not (.isCaptured (cast Type$TypeVar s))))
+        false
+        (.isSameWildcard this t (.-wildcard (cast Type$CapturedType s)))))
+
+  (method ^:public isSameWildcard ^boolean [this ^Type$WildcardType t ^Type s]
+    (if (not (.hasTag s TypeTag/WILDCARD))
+        false
+        (let [w (cast Type$WildcardType s)]
+          (and (identical? (.-kind w) (.-kind t)) (identical? (.-type w) (.-type t))))))
+
+  (method ^:public containsTypeEquivalent ^boolean [this ^:mutable ^{:tag (List Type)} ts
+                                                    ^:mutable ^{:tag (List Type)} ss]
+    (while (and (and (.nonEmpty ts) (.nonEmpty ss))
+                (.containsTypeEquivalent this (cast Type (.-head ts)) (cast Type (.-head ss))))
+      (set! ts (.-tail ts))
+      (set! ss (.-tail ss)))
+    (and (.isEmpty ts) (.isEmpty ss)))
+
+  (method ^:public isCastable ^boolean [this ^Type t ^Type s]
+    (.isCastable this t s noWarnings))
+
+  (method ^:public isCastable ^boolean [this ^:mutable ^Type t ^Type s ^Warner warn]
+    (cond
+      (identical? t s) true
+      (not (= (.isPrimitive t) (.isPrimitive s)))
+        (do
+          (set! t (.skipTypeVars this t false))
+          (or (.isConvertible this t s warn)
+              (and (.isPrimitive s) (.isSubtype this (.-type (.boxedClass this s)) t))))
+      :else
+        (let [^:mutable ^boolean result false]
+          (if (not (identical? warn (.-head warnStack)))
+              (try
+                (set! warnStack (.prepend warnStack warn))
+                (.checkUnsafeVarargsConversion this t s warn)
+                (set! result (.booleanValue (cast Boolean (.visit isCastable t s))))
+                (finally (set! warnStack (.-tail warnStack))))
+              (set! result (.booleanValue (cast Boolean (.visit isCastable t s)))))
+          (if (and (and (and (and (and result (.hasTag t TypeTag/CLASS))
+                                  (.matches (.-kind (.-tsym t)) Kinds$KindSelector/TYP))
+                             (.hasTag s TypeTag/CLASS))
+                        (.matches (.-kind (.-tsym s)) Kinds$KindSelector/TYP))
+                   (or (.isSealed (.-tsym t)) (.isSealed (.-tsym s))))
+              (if (or (.isCompound t) (.isCompound s))
+                  true
+                  (not (.areDisjoint (DisjointChecker.)
+                                     (cast Symbol$ClassSymbol (.-tsym t))
+                                     (cast Symbol$ClassSymbol (.-tsym s)))))
+              result))))
+
+  (defclass DisjointChecker
+    (field ^{:tag (Set (Pair Symbol$ClassSymbol Symbol$ClassSymbol))} pairsSeen (HashSet.))
+
+    (method ^:private areDisjoint ^boolean [this ^Symbol$ClassSymbol ts ^Symbol$ClassSymbol ss]
+      (let [^{:tag (Pair Symbol$ClassSymbol Symbol$ClassSymbol)} newPair (Pair. ts ss)]
+        (if (not (.add pairsSeen newPair))
+            false
+            (do
+              (cond
+                (not (= (.isInterface ts) (.isInterface ss)))
+                  (let [^Symbol$ClassSymbol isym (if (.isInterface ts) ts ss)
+                        ^Symbol$ClassSymbol csym (if (identical? isym ts) ss ts)]
+                    (when-not (.isSubtype Types/this
+                                          (.erasure Types/this (.-type csym))
+                                          (.erasure Types/this (.-type isym)))
+                      (cond
+                        (.isFinal csym) (return true)
+                        (.isSealed csym)
+                          (return (.areDisjoint this isym (.getPermittedSubclasses csym)))
+                        (.isSealed isym)
+                          (return (.areDisjoint this csym (.getPermittedSubclasses isym))))))
+                (not (.isInterface ts))
+                  (return (and (not (.isSubtype Types/this
+                                                (.erasure Types/this (.-type ss))
+                                                (.erasure Types/this (.-type ts))))
+                               (not (.isSubtype Types/this
+                                                (.erasure Types/this (.-type ts))
+                                                (.erasure Types/this (.-type ss))))))
+                (and (not (.isSubtype Types/this
+                                      (.erasure Types/this (.-type ts))
+                                      (.erasure Types/this (.-type ss))))
+                     (not (.isSubtype Types/this
+                                      (.erasure Types/this (.-type ss))
+                                      (.erasure Types/this (.-type ts)))))
+                  (cond
+                    (.isSealed ts) (return (.areDisjoint this ss (.getPermittedSubclasses ts)))
+                    (.isSealed ss) (return (.areDisjoint this ts (.getPermittedSubclasses ss)))))
+              false))))
+
+    (method areDisjoint ^boolean [this ^Symbol$ClassSymbol csym
+                                  ^{:tag (List Type)} permittedSubtypes]
+      (.allMatch (.stream permittedSubtypes)
+                 (lambda Predicate ^boolean [^Type psubtype]
+                   (.areDisjoint this csym (cast Symbol$ClassSymbol (.-tsym psubtype)))))))
+
+  (field ^:private ^TypeRelation isCastable
+    (anon TypeRelation []
+      (method ^:public visitType ^Boolean [this ^Type t ^Type s]
+        (if (or (.hasTag s TypeTag/ERROR) (.hasTag t TypeTag/NONE))
+            true
+            (switch (.getTag t)
+              (BYTE CHAR SHORT INT LONG FLOAT DOUBLE) (.isNumeric s)
+              BOOLEAN (.hasTag s TypeTag/BOOLEAN)
+              VOID false
+              BOT (.isSubtype Types/this t s)
+              (throw (AssertionError.)))))
+
+      (method ^:public visitWildcardType ^Boolean [this ^Type$WildcardType t ^Type s]
+        (.isCastable Types/this (.wildUpperBound Types/this t) s (cast Warner (.-head warnStack))))
+
+      (method ^:public visitClassType ^Boolean [this ^Type$ClassType t ^Type s]
+        (cond
+          (or (.hasTag s TypeTag/ERROR) (.hasTag s TypeTag/BOT)) true
+          (.hasTag s TypeTag/TYPEVAR)
+            (if (.isCastable Types/this t (.getUpperBound s) noWarnings)
+                (do (.warn (cast Warner (.-head warnStack)) Lint$LintCategory/UNCHECKED) true)
+                false)
+          (or (.isCompound t) (.isCompound s))
+            (if (not (.isCompound t))
+                (.visitCompoundType this (cast Type$ClassType s) t true)
+                (.visitCompoundType this t s false))
+          :else
+            (do
+              (when (or (.hasTag s TypeTag/CLASS) (.hasTag s TypeTag/ARRAY))
+                (let [^:mutable ^boolean upcast false]
+                  (when (or (set! upcast
+                                  (.isSubtype Types/this
+                                              (.erasure Types/this t)
+                                              (.erasure Types/this s)))
+                            (.isSubtype Types/this (.erasure Types/this s) (.erasure Types/this t)))
+                    (cond
+                      (and (not upcast) (.hasTag s TypeTag/ARRAY))
+                        (do
+                          (when-not (.isReifiable Types/this s)
+                            (.warn (cast Warner (.-head warnStack)) Lint$LintCategory/UNCHECKED))
+                          (return true))
+                      (.isRaw s) (return true)
+                      :else
+                        (when (.isRaw t)
+                          (when-not (.isUnbounded Types/this s)
+                            (.warn (cast Warner (.-head warnStack)) Lint$LintCategory/UNCHECKED))
+                          (return true)))
+                    (let [^Type a (if upcast ^Type t s)
+                          ^Type b (if upcast s ^Type t)
+                          ^:const HIGH true
+                          ^:const LOW false
+                          ^:const DONT_REWRITE_TYPEVARS false
+                          ^:mutable aHigh (.rewriteQuantifiers
+                                            Types/this
+                                            a
+                                            HIGH
+                                            DONT_REWRITE_TYPEVARS)
+                          ^:mutable aLow (.rewriteQuantifiers
+                                           Types/this
+                                           a
+                                           LOW
+                                           DONT_REWRITE_TYPEVARS)
+                          ^:mutable bHigh (.rewriteQuantifiers
+                                            Types/this
+                                            b
+                                            HIGH
+                                            DONT_REWRITE_TYPEVARS)
+                          ^:mutable bLow (.rewriteQuantifiers
+                                           Types/this
+                                           b
+                                           LOW
+                                           DONT_REWRITE_TYPEVARS)
+                          ^:mutable lowSub (.asSub Types/this bLow (.-tsym aLow))
+                          ^:mutable ^Type highSub (when (some? lowSub)
+                                                    (.asSub Types/this bHigh (.-tsym aHigh)))]
+                      (when (nil? highSub)
+                        (let [^:const REWRITE_TYPEVARS true]
+                          (set! aHigh (.rewriteQuantifiers Types/this a HIGH REWRITE_TYPEVARS))
+                          (set! aLow (.rewriteQuantifiers Types/this a LOW REWRITE_TYPEVARS))
+                          (set! bHigh (.rewriteQuantifiers Types/this b HIGH REWRITE_TYPEVARS))
+                          (set! bLow (.rewriteQuantifiers Types/this b LOW REWRITE_TYPEVARS))
+                          (set! lowSub (.asSub Types/this bLow (.-tsym aLow)))
+                          (set! highSub
+                                (when (some? lowSub) (.asSub Types/this bHigh (.-tsym aHigh))))))
+                      (when (some? highSub)
+                        (when-not (and (identical? (.-tsym a) (.-tsym highSub))
+                                       (identical? (.-tsym a) (.-tsym lowSub)))
+                          (Assert/error (java-str
+                                          (.-tsym a)
+                                          " != "
+                                          (.-tsym highSub)
+                                          " != "
+                                          (.-tsym lowSub))))
+                        (when (and (and (and (not
+                                               (.disjointTypes
+                                                 Types/this
+                                                 (.allparams aHigh)
+                                                 (.allparams highSub)))
+                                             (not
+                                               (.disjointTypes
+                                                 Types/this
+                                                 (.allparams aHigh)
+                                                 (.allparams lowSub))))
+                                        (not (.disjointTypes
+                                               Types/this
+                                               (.allparams aLow)
+                                               (.allparams highSub))))
+                                   (not (.disjointTypes
+                                          Types/this
+                                          (.allparams aLow)
+                                          (.allparams lowSub))))
+                          (when (if upcast
+                                    (.giveWarning Types/this a b)
+                                    (.giveWarning Types/this b a))
+                            (.warn (cast Warner (.-head warnStack)) Lint$LintCategory/UNCHECKED))
+                          (return true)))
+                      (if (.isReifiable Types/this s)
+                          (return (.isSubtypeUnchecked Types/this a b))
+                          (return (.isSubtypeUnchecked
+                                    Types/this
+                                    a
+                                    b
+                                    (cast Warner (.-head warnStack)))))))
+                  (when (.hasTag s TypeTag/CLASS)
+                    (cond
+                      (not (== (bit-and (.flags (.-tsym s)) Flags/INTERFACE) 0))
+                        (return
+                          (if (== (bit-and (.flags (.-tsym t)) Flags/FINAL) 0)
+                              (.sideCast Types/this t s (cast Warner (.-head warnStack)))
+                              (.sideCastFinal Types/this t s (cast Warner (.-head warnStack)))))
+                      (not (== (bit-and (.flags (.-tsym t)) Flags/INTERFACE) 0))
+                        (return
+                          (if (== (bit-and (.flags (.-tsym s)) Flags/FINAL) 0)
+                              (.sideCast Types/this t s (cast Warner (.-head warnStack)))
+                              (.sideCastFinal Types/this t s (cast Warner (.-head warnStack)))))
+                      :else (return false)))))
+              false)))
+
+      (method visitCompoundType ^boolean [this ^Type$ClassType ct ^Type s ^boolean reverse]
+        (let [warn noWarnings]
+          (for-each [^Type c (.directSupertypes Types/this ct)]
+            (.clear warn)
+            (when (if reverse
+                      (not (.isCastable Types/this s c warn))
+                      (not (.isCastable Types/this c s warn)))
+              (return false)))
+          (when (.hasLint warn Lint$LintCategory/UNCHECKED)
+            (.warn (cast Warner (.-head warnStack)) Lint$LintCategory/UNCHECKED))
+          true))
+
+      (method ^:public visitArrayType ^Boolean [this ^Type$ArrayType t ^Type s]
+        (switch (.getTag s)
+          (ERROR BOT) true
+          TYPEVAR
+            (if (.isCastable Types/this s t noWarnings)
+                (do (.warn (cast Warner (.-head warnStack)) Lint$LintCategory/UNCHECKED) true)
+                false)
+          CLASS (.isSubtype Types/this t s)
+          ARRAY
+            (if (or (.isPrimitive (.elemtype Types/this t)) (.isPrimitive (.elemtype Types/this s)))
+                (.hasTag (.elemtype Types/this t) (.getTag (.elemtype Types/this s)))
+                (.isCastable Types/this
+                             (.elemtype Types/this t)
+                             (.elemtype Types/this s)
+                             (cast Warner (.-head warnStack))))
+          false))
+
+      (method ^:public visitTypeVar ^Boolean [this ^Type$TypeVar t ^Type s]
+        (switch (.getTag s)
+          (ERROR BOT) true
+          TYPEVAR
+            (cond
+              (.isSubtype Types/this t s) true
+              (.isCastable Types/this (.getUpperBound t) s noWarnings)
+                (do (.warn (cast Warner (.-head warnStack)) Lint$LintCategory/UNCHECKED) true)
+              :else false)
+          (.isCastable Types/this (.getUpperBound t) s (cast Warner (.-head warnStack)))))
+
+      (method ^:public visitErrorType ^Boolean [this ^Type$ErrorType t ^Type s]
+        true)))
+
+  (method ^:public disjointTypes ^boolean [this ^:mutable ^{:tag (List Type)} ts
+                                           ^:mutable ^{:tag (List Type)} ss]
+    (while (and (some? (.-tail ts)) (some? (.-tail ss)))
+      (when (.disjointType this (cast Type (.-head ts)) (cast Type (.-head ss))) (return true))
+      (set! ts (.-tail ts))
+      (set! ss (.-tail ss)))
+    false)
+
+  (method ^:public disjointType ^boolean [this ^Type t ^Type s]
+    (.booleanValue (cast Boolean (.visit disjointType t s))))
+
+  (field ^:private ^TypeRelation disjointType
+    (anon TypeRelation []
+      (field ^:private ^{:tag (Set TypePair)} cache (HashSet.))
+
+      (method ^:public visitType ^Boolean [this ^Type t ^Type s]
+        (if (.hasTag s TypeTag/WILDCARD)
+            (cast Boolean (.visit this s t))
+            (or (.notSoftSubtypeRecursive this t s) (.notSoftSubtypeRecursive this s t))))
+
+      (method ^:private isCastableRecursive ^boolean [this ^Type t ^Type s]
+        (let [pair (TypePair. t s)]
+          (if (.add cache pair)
+              (try (.isCastable Types/this t s) (finally (.remove cache pair)))
+              true)))
+
+      (method ^:private notSoftSubtypeRecursive ^boolean [this ^Type t ^Type s]
+        (let [pair (TypePair. t s)]
+          (if (.add cache pair)
+              (try (.notSoftSubtype Types/this t s) (finally (.remove cache pair)))
+              false)))
+
+      (method ^:public visitWildcardType ^Boolean [this ^Type$WildcardType t ^Type s]
+        (cond
+          (.isUnbound t) false
+          (not (.hasTag s TypeTag/WILDCARD))
+            (if (.isExtendsBound t)
+                (.notSoftSubtypeRecursive this s (.-type t))
+                (.notSoftSubtypeRecursive this (.-type t) s))
+          (.isUnbound s) false
+          :else
+            (do
+              (cond
+                (.isExtendsBound t)
+                  (cond
+                    (.isExtendsBound s)
+                      (return (not (.isCastableRecursive
+                                     this
+                                     (.-type t)
+                                     (.wildUpperBound Types/this s))))
+                    (.isSuperBound s)
+                      (return (.notSoftSubtypeRecursive
+                                this
+                                (.wildLowerBound Types/this s)
+                                (.-type t))))
+                (.isSuperBound t)
+                  (when (.isExtendsBound s)
+                    (return (.notSoftSubtypeRecursive
+                              this
+                              (.-type t)
+                              (.wildUpperBound Types/this s)))))
+              false)))))
+
+  (method ^:public cvarLowerBounds ^{:tag (List Type)} [this ^{:tag (List Type)} ts]
+    (.map ts cvarLowerBoundMapping))
+
+  (field ^:private ^:final ^{:tag (TypeMapping Void)} cvarLowerBoundMapping
+    (anon (TypeMapping Void) []
+      (method ^:public visitCapturedType ^Type [this ^Type$CapturedType t ^Void _unused]
+        (.cvarLowerBound Types/this t))))
+
+  (method ^:public notSoftSubtype ^boolean [this ^Type t ^:mutable ^Type s]
+    (cond
+      (identical? t s) false
+      (.hasTag t TypeTag/TYPEVAR)
+        (let [tv (cast Type$TypeVar t)]
+          (not (.isCastable this (.getUpperBound tv) (.relaxBound this s) noWarnings)))
+      :else
+        (do
+          (when-not (.hasTag s TypeTag/WILDCARD) (set! s (.cvarUpperBound this s)))
+          (not (.isSubtype this t (.relaxBound this s))))))
+
+  (method ^:private relaxBound ^Type [this ^Type t]
+    (if (.hasTag t TypeTag/TYPEVAR)
+        (.rewriteQuantifiers this (.skipTypeVars this t false) true true)
+        t))
+
+  (method ^:public isReifiable ^boolean [this ^Type t]
+    (.booleanValue (cast Boolean (.visit isReifiable t))))
+
+  (field ^:private ^{:tag (UnaryVisitor Boolean)} isReifiable
+    (anon (UnaryVisitor Boolean) []
+      (method ^:public visitType ^Boolean [this ^Type t ^Void ignored] true)
+
+      (method ^:public visitClassType ^Boolean [this ^Type$ClassType t ^Void ignored]
+        (cond
+          (.isCompound t) false
+          (not (.isParameterized t)) true
+          :else
+            (do
+              (for-each [^Type param (.allparams t)] (when-not (.isUnbound param) (return false)))
+              true)))
+
+      (method ^:public visitArrayType ^Boolean [this ^Type$ArrayType t ^Void ignored]
+        (cast Boolean (.visit this (.-elemtype t))))
+
+      (method ^:public visitTypeVar ^Boolean [this ^Type$TypeVar t ^Void ignored]
+        false)))
+
+  (method ^:public isArray ^boolean [this ^:mutable ^Type t]
+    (while (.hasTag t TypeTag/WILDCARD) (set! t (.wildUpperBound this t)))
+    (.hasTag t TypeTag/ARRAY))
+
+  (method ^:public elemtype ^Type [this ^Type t]
+    (switch (.getTag t)
+      WILDCARD (.elemtype this (.wildUpperBound this t))
+      ARRAY (.-elemtype (cast Type$ArrayType t))
+      FORALL (.elemtype this (.-qtype (cast Type$ForAll t)))
+      ERROR t
+      nil))
+
+  (method ^:public elemtypeOrType ^Type [this ^Type t]
+    (let [elemtype (.elemtype this t)] (if (some? elemtype) elemtype t)))
+
+  (field ^:private ^{:tag (TypeMapping Void)} elemTypeFun
+    (anon (TypeMapping Void) []
+      (method ^:public visitArrayType ^Type [this ^Type$ArrayType t ^Void _unused]
+        (.-elemtype t))
+
+      (method ^:public visitTypeVar ^Type [this ^Type$TypeVar t ^Void _unused]
+        (.visit this (.skipTypeVars Types/this t false)))))
+
+  (method ^:public dimensions ^int [this ^:mutable ^Type t]
+    (let [^:mutable ^int result 0]
+      (while (.hasTag t TypeTag/ARRAY)
+        (set! result (unchecked-inc-int result))
+        (set! t (.elemtype this t)))
+      result))
+
+  (method ^:public makeArrayType ^Type$ArrayType [this ^Type t]
+    (when (or (.hasTag t TypeTag/VOID) (.hasTag t TypeTag/PACKAGE))
+      (Assert/error (java-str "Type t must not be a VOID or PACKAGE type, " (.toString t))))
+    (Type$ArrayType. t (.-arrayClass syms)))
+
+  (method ^:public asSuper ^Type [this ^Type t ^Symbol sym]
+    (if (identical? (.-type sym) (.-objectType syms))
+        (.-objectType syms)
+        (cast Type (.visit asSuper t sym))))
+
+  (field ^:private ^{:tag (SimpleVisitor Type Symbol)} asSuper
+    (anon (SimpleVisitor Type Symbol) []
+      (field ^:private ^{:tag (Set Symbol)} seenTypes (HashSet.))
+
+      (method ^:public visitType ^Type [this ^Type t ^Symbol sym] nil)
+
+      (method ^:public visitClassType ^Type [this ^Type$ClassType t ^Symbol sym]
+        (if (identical? (.-tsym t) sym)
+            t
+            (let [^Symbol c (.-tsym t)]
+              (when-not (not (.add seenTypes c))
+                (try
+                  (let [st (.supertype Types/this t)]
+                    (when (or (.hasTag st TypeTag/CLASS) (.hasTag st TypeTag/TYPEVAR))
+                      (let [x (.asSuper Types/this st sym)] (when (some? x) (return x))))
+                    (when-not (== (bit-and (.flags sym) Flags/INTERFACE) 0)
+                      (loop [^{:tag (List Type)} l (.interfaces Types/this t)]
+                        (if (.nonEmpty l)
+                            (if (not (.hasTag (cast Type (.-head l)) TypeTag/ERROR))
+                                (let [x (.asSuper Types/this (cast Type (.-head l)) sym)]
+                                  (if (some? x) (return x) (recur (.-tail l))))
+                                (recur (.-tail l)))
+                            nil)))
+                    nil)
+                  (finally (.remove seenTypes c)))))))
+
+      (method ^:public visitArrayType ^Type [this ^Type$ArrayType t ^Symbol sym]
+        (when (.isSubtype Types/this t (.-type sym)) (.-type sym)))
+
+      (method ^:public visitTypeVar ^Type [this ^Type$TypeVar t ^Symbol sym]
+        (if (identical? (.-tsym t) sym) t (.asSuper Types/this (.getUpperBound t) sym)))
+
+      (method ^:public visitErrorType ^Type [this ^Type$ErrorType t ^Symbol sym]
+        t)))
+
+  (method ^:public asOuterSuper ^Type [this ^Type t ^Symbol sym]
+    (let [^:mutable t1 t]
+      (while (not (.hasTag t1 TypeTag/NONE))
+        (let [s (.asSuper this t1 sym)]
+          (when (some? s) (return s))
+          (set! t1 (.getEnclosingType t1))))
+      nil))
+
+  (method ^:public asEnclosingSuper ^Type [this ^Type t ^Symbol sym]
+    (let [^:mutable t1 t]
+      (while (not (.hasTag t1 TypeTag/NONE))
+        (let [s (.asSuper this t1 sym)]
+          (when (some? s) (return s))
+          (set! t1
+                (if (some? (.enclClass (.-owner (.-tsym t1))))
+                    (.-type (.enclClass (.-owner (.-tsym t1))))
+                    Type/noType))))
+      nil))
+
+  (method ^:public memberType ^Type [this ^Type t ^Symbol sym]
+    (if (not (== (bit-and (.flags sym) Flags/STATIC) 0))
+        (.-type sym)
+        (cast Type (.visit memberType t sym))))
+
+  (field ^:private ^{:tag (SimpleVisitor Type Symbol)} memberType
+    (anon (SimpleVisitor Type Symbol) []
+      (method ^:public visitType ^Type [this ^Type t ^Symbol sym]
+        (.-type sym))
+
+      (method ^:public visitWildcardType ^Type [this ^Type$WildcardType t ^Symbol sym]
+        (.memberType Types/this (.wildUpperBound Types/this t) sym))
+
+      (method ^:public visitClassType ^Type [this ^Type$ClassType t ^Symbol sym]
+        (let [owner (.-owner sym)
+              flags (.flags sym)]
+          (when (and (== (bit-and flags Flags/STATIC) 0) (.isParameterized (.-type owner)))
+            (let [^:mutable base (.asOuterSuper Types/this t owner)]
+              (set! base (if (.isCompound t) (.capture Types/this base) base))
+              (when (some? base)
+                (let [^{:tag (List Type)} ownerParams (.allparams (.-type owner))
+                      ^{:tag (List Type)} baseParams (.allparams base)]
+                  (when (.nonEmpty ownerParams)
+                    (if (.isEmpty baseParams)
+                        (return (.erasure Types/this (.-type sym)))
+                        (return (.subst Types/this (.-type sym) ownerParams baseParams))))))))
+          (.-type sym)))
+
+      (method ^:public visitTypeVar ^Type [this ^Type$TypeVar t ^Symbol sym]
+        (.memberType Types/this (.getUpperBound t) sym))
+
+      (method ^:public visitErrorType ^Type [this ^Type$ErrorType t ^Symbol sym]
+        t)))
+
+  (method ^:public isAssignable ^boolean [this ^Type t ^Type s]
+    (.isAssignable this t s noWarnings))
+
+  (method ^:public isAssignable ^boolean [this ^Type t ^Type s ^Warner warn]
+    (if (.hasTag t TypeTag/ERROR)
+        true
+        (do
+          (when (and (.isSubRangeOf (.getTag t) TypeTag/INT) (some? (.constValue t)))
+            (let [value (.intValue (cast Number (.constValue t)))]
+              (switch (.getTag s)
+                (BYTE CHAR SHORT INT) (when (.checkRange (.getTag s) value) (return true))
+                CLASS
+                  (switch (.getTag (.unboxedType this s))
+                    (BYTE CHAR SHORT) (return (.isAssignable this t (.unboxedType this s) warn))))))
+          (.isConvertible this t s warn))))
+
+  (method ^:public erasure ^Type [this ^Type t]
+    (if (.eraseNotNeeded this t) t (.erasure this t false)))
+
+  (method ^:private eraseNotNeeded ^boolean [this ^Type t]
+    (or (.isPrimitive t) (identical? (.-tsym (.-stringType syms)) (.-tsym t))))
+
+  (method ^:private erasure ^Type [this ^Type t ^boolean recurse]
+    (if (.isPrimitive t) t (let [out (cast Type (.visit erasure t recurse))] out)))
+
+  (field ^:private ^{:tag (TypeMapping Boolean)} erasure
+    (anon (Type$StructuralTypeMapping Boolean) []
+      (method ^:private combineMetadata ^Type [this ^:final ^Type s ^:final ^Type t]
+        (if (.nonEmpty (.getMetadata t))
+            (switch (.getTag s)
+              CLASS
+                (if (or (instance? Type$UnionClassType s) (instance? Type$IntersectionClassType s))
+                    s
+                    (.dropMetadata s TypeMetadata$Annotations))
+              (BYTE CHAR SHORT LONG FLOAT INT DOUBLE BOOLEAN ARRAY MODULE TYPEVAR WILDCARD BOT)
+                (.dropMetadata s TypeMetadata$Annotations)
+              (VOID METHOD
+                    PACKAGE
+                    FORALL
+                    DEFERRED
+                    NONE
+                    ERROR
+                    UNDETVAR
+                    UNINITIALIZED_THIS
+                    UNINITIALIZED_OBJECT)
+                s
+              (throw (AssertionError. (.name (.getTag s)))))
+            s))
+
+      (method ^:public visitType ^Type [this ^Type t ^Boolean recurse]
+        (if (.isPrimitive t) t (.combineMetadata this t t)))
+
+      (method ^:public visitWildcardType ^Type [this ^Type$WildcardType t ^Boolean recurse]
+        (let [erased (.erasure Types/this (.wildUpperBound Types/this t) recurse)]
+          (.combineMetadata this erased t)))
+
+      (method ^:public visitClassType ^Type [this ^Type$ClassType t ^Boolean recurse]
+        (let [^:mutable erased (.erasure (.-tsym t) Types/this)]
+          (if (.booleanValue recurse)
+              (do
+                (set! erased
+                      (Type$ErasedClassType. (.getEnclosingType erased)
+                                             (.-tsym erased)
+                                             (.getMetadata
+                                               (.dropMetadata t TypeMetadata$Annotations))))
+                erased)
+              (.combineMetadata this erased t))))
+
+      (method ^:public visitTypeVar ^Type [this ^Type$TypeVar t ^Boolean recurse]
+        (let [erased (.erasure Types/this (.getUpperBound t) recurse)]
+          (.combineMetadata this erased t)))))
+
+  (method ^:public erasure ^{:tag (List Type)} [this ^{:tag (List Type)} ts]
+    (.visit erasure ts false))
+
+  (method ^:public erasureRecursive ^Type [this ^Type t]
+    (.erasure this t true))
+
+  (method ^:public erasureRecursive ^{:tag (List Type)} [this ^{:tag (List Type)} ts]
+    (.visit erasure ts true))
+
+  (method ^:public makeIntersectionType ^Type$IntersectionClassType [this ^{:tag (List Type)} bounds]
+    (.makeIntersectionType this bounds (.isInterface (.-tsym (cast Type (.-head bounds))))))
+
+  (method ^:public makeIntersectionType ^Type$IntersectionClassType [this
+                                                                     ^:mutable ^{:tag (List Type)} bounds
+                                                                     ^boolean allInterfaces]
+    (Assert/check (.nonEmpty bounds))
+    (let [firstExplicitBound (cast Type (.-head bounds))]
+      (when allInterfaces (set! bounds (.prepend bounds (.-objectType syms))))
+      (let [bc (Symbol$ClassSymbol.
+                 (bit-or-int (bit-or-int (bit-or-int
+                                           (bit-or-int Flags/ABSTRACT Flags/PUBLIC)
+                                           Flags/SYNTHETIC)
+                                         Flags/COMPOUND)
+                             Flags/ACYCLIC)
+                 ^Name (if Type/moreInfo (.fromString names (.toString bounds)) (.-empty names))
+                 nil
+                 (.-noSymbol syms))
+            intersectionType (Type$IntersectionClassType. bounds bc allInterfaces)]
+        (set! (.-type bc) intersectionType)
+        (set! (.-erasure_field bc)
+              (if (.hasTag (cast Type (.-head bounds)) TypeTag/TYPEVAR)
+                  (.-objectType syms)
+                  (.erasure this firstExplicitBound)))
+        (set! (.-members_field bc) (Scope$WriteableScope/create bc))
+        intersectionType)))
+
+  (method ^:public supertype ^Type [this ^Type t]
+    (cast Type (.visit supertype t)))
+
+  (field ^:private ^{:tag (UnaryVisitor Type)} supertype
+    (anon (UnaryVisitor Type) []
+      (method ^:public visitType ^Type [this ^Type t ^Void ignored]
+        Type/noType)
+
+      (method ^:public visitClassType ^Type [this ^Type$ClassType t ^Void ignored]
+        (when (nil? (.-supertype_field t))
+          (let [^:mutable supertype (.getSuperclass (cast Symbol$ClassSymbol (.-tsym t)))]
+            (when (.isInterface t)
+              (set! supertype (.-supertype_field (cast Type$ClassType (.-type (.-tsym t))))))
+            (when (nil? (.-supertype_field t))
+              (let [^{:tag (List Type)} actuals (.allparams (.classBound Types/this t))
+                    ^{:tag (List Type)} formals (.allparams (.-type (.-tsym t)))]
+                (cond
+                  (.hasErasedSupertypes t)
+                    (set! (.-supertype_field t) (.erasureRecursive Types/this supertype))
+                  (.nonEmpty formals)
+                    (set! (.-supertype_field t) (.subst Types/this supertype formals actuals))
+                  :else (set! (.-supertype_field t) supertype))))))
+        (.-supertype_field t))
+
+      (method ^:public visitTypeVar ^Type [this ^Type$TypeVar t ^Void ignored]
+        (if (or
+              (.hasTag (.getUpperBound t) TypeTag/TYPEVAR)
+              (and (not (.isCompound (.getUpperBound t))) (not (.isInterface (.getUpperBound t)))))
+            (.getUpperBound t)
+            (.supertype Types/this (.getUpperBound t))))
+
+      (method ^:public visitArrayType ^Type [this ^Type$ArrayType t ^Void ignored]
+        (if (or (.isPrimitive (.-elemtype t))
+                (.isSameType Types/this (.-elemtype t) (.-objectType syms)))
+            (.arraySuperType Types/this)
+            (Type$ArrayType. (.supertype Types/this (.-elemtype t)) (.-tsym t))))
+
+      (method ^:public visitErrorType ^Type [this ^Type$ErrorType t ^Void ignored]
+        Type/noType)))
+
+  (method ^:public interfaces ^{:tag (List Type)} [this ^Type t]
+    (cast List (.visit interfaces t)))
+
+  (field ^:private ^{:tag (UnaryVisitor (List Type))} interfaces
+    (anon (UnaryVisitor (List Type)) []
+      (method ^:public visitType ^{:tag (List Type)} [this ^Type t ^Void ignored]
+        (List/nil))
+
+      (method ^:public visitClassType ^{:tag (List Type)} [this ^Type$ClassType t ^Void ignored]
+        (when (nil? (.-interfaces_field t))
+          (let [^{:tag (List Type)} interfaces (.getInterfaces (cast Symbol$ClassSymbol (.-tsym t)))]
+            (when (nil? (.-interfaces_field t))
+              (Assert/check (not (identical? t (.-type (.-tsym t)))) t)
+              (let [^{:tag (List Type)} actuals (.allparams t)
+                    ^{:tag (List Type)} formals (.allparams (.-type (.-tsym t)))]
+                (cond
+                  (.hasErasedSupertypes t)
+                    (set! (.-interfaces_field t) (.erasureRecursive Types/this interfaces))
+                  (.nonEmpty formals)
+                    (set! (.-interfaces_field t) (.subst Types/this interfaces formals actuals))
+                  :else (set! (.-interfaces_field t) interfaces))))))
+        (.-interfaces_field t))
+
+      (method ^:public visitTypeVar ^{:tag (List Type)} [this ^Type$TypeVar t ^Void ignored]
+        (cond
+          (.isCompound (.getUpperBound t)) (.interfaces Types/this (.getUpperBound t))
+          (.isInterface (.getUpperBound t)) (List/of (.getUpperBound t))
+          :else (List/nil)))))
+
+  (method ^:public directSupertypes ^{:tag (List Type)} [this ^Type t]
+    (cast List (.visit directSupertypes t)))
+
+  (field ^:private ^:final ^{:tag (UnaryVisitor (List Type))} directSupertypes
+    (anon (UnaryVisitor (List Type)) []
+      (method ^:public visitType ^{:tag (List Type)} [this ^:final ^Type type ^:final ^Void ignored]
+        (if (not (.isIntersection type))
+            (let [sup (.supertype Types/this type)]
+              (if (or (or (identical? sup Type/noType) (identical? sup type)) (nil? sup))
+                  (.interfaces Types/this type)
+                  (.prepend (.interfaces Types/this type) sup)))
+            (.getExplicitComponents (cast Type$IntersectionClassType type))))))
+
+  (method ^:public isDirectSuperInterface ^boolean [this ^Symbol$TypeSymbol isym
+                                                    ^Symbol$TypeSymbol origin]
+    (for-each [^Type i2 (.interfaces this (.-type origin))]
+      (when (identical? isym (.-tsym i2)) (return true)))
+    false)
+
+  (field ^{:tag (Map Type Boolean)} isDerivedRawCache (HashMap.))
+
+  (method ^:public isDerivedRaw ^boolean [this ^Type t]
+    (let [^:mutable result (cast Boolean (.get isDerivedRawCache t))]
+      (when (nil? result)
+        (set! result (.isDerivedRawInternal this t))
+        (.put isDerivedRawCache t result))
+      result))
+
+  (method ^:public isDerivedRawInternal ^boolean [this ^Type t]
+    (if (.isErroneous t)
+        false
+        (or (or (.isRaw t)
+                (and (not (identical? (.supertype this t) Type/noType))
+                     (.isDerivedRaw this (.supertype this t))))
+            (.isDerivedRaw this (.interfaces this t)))))
+
+  (method ^:public isDerivedRaw ^boolean [this ^{:tag (List Type)} ts]
+    (let [^:mutable ^{:tag (List Type)} l ts]
+      (while (and (.nonEmpty l) (not (.isDerivedRaw this (cast Type (.-head l)))))
+        (set! l (.-tail l)))
+      (.nonEmpty l)))
+
+  (method ^:public setBounds ^void [this ^Type$TypeVar t ^{:tag (List Type)} bounds]
+    (.setBounds this t bounds (.isInterface (.-tsym (cast Type (.-head bounds))))))
+
+  (method ^:public setBounds ^void [this ^Type$TypeVar t ^{:tag (List Type)} bounds
+                                    ^boolean allInterfaces]
+    (.setUpperBound t
+                    ^Type (if (.isEmpty (.-tail bounds))
+                              (cast Type (.-head bounds))
+                              ^Type (.makeIntersectionType this bounds allInterfaces)))
+    (set! (.-rank_field t) -1))
+
+  (method ^:public getBounds ^{:tag (List Type)} [this ^Type$TypeVar t]
+    (cond
+      (.hasTag (.getUpperBound t) TypeTag/NONE) (List/nil)
+      (or (.isErroneous (.getUpperBound t)) (not (.isCompound (.getUpperBound t))))
+        (List/of (.getUpperBound t))
+      (== (bit-and (.flags (.-tsym (.erasure this t))) Flags/INTERFACE) 0)
+        (.prepend (.interfaces this t) (.supertype this t))
+      :else (.interfaces this t)))
+
+  (method ^:public classBound ^Type [this ^Type t]
+    (cast Type (.visit classBound t)))
+
+  (field ^:private ^{:tag (UnaryVisitor Type)} classBound
+    (anon (UnaryVisitor Type) []
+      (method ^:public visitType ^Type [this ^Type t ^Void ignored] t)
+
+      (method ^:public visitClassType ^Type [this ^Type$ClassType t ^Void ignored]
+        (let [outer1 (.classBound Types/this (.getEnclosingType t))]
+          (if (not (identical? outer1 (.getEnclosingType t)))
+              (Type$ClassType. outer1 (.getTypeArguments t) (.-tsym t) (.getMetadata t))
+              t)))
+
+      (method ^:public visitTypeVar ^Type [this ^Type$TypeVar t ^Void ignored]
+        (.classBound Types/this (.supertype Types/this t)))
+
+      (method ^:public visitErrorType ^Type [this ^Type$ErrorType t ^Void ignored]
+        t)))
+
+  (method ^:public isSubSignature ^boolean [this ^Type t ^Type s]
+    (or (.hasSameArgs this t s true) (.hasSameArgs this t (.erasure this s) true)))
+
+  (method ^:public overrideEquivalent ^boolean [this ^Type t ^Type s]
+    (or (or (.hasSameArgs this t s) (.hasSameArgs this t (.erasure this s)))
+        (.hasSameArgs this (.erasure this t) s)))
+
+  (method ^:public overridesObjectMethod ^boolean [this ^Symbol$TypeSymbol origin ^Symbol msym]
+    (for-each [^Symbol sym (.getSymbolsByName (.members (.-tsym (.-objectType syms))) (.-name msym))]
+      (when (.overrides msym sym origin this true) (return true)))
+    false)
+
+  (defclass ^:public ^:enum MostSpecificReturnCheck
+    (constants
+      (BASIC []
+             (method ^:public test ^boolean [this ^Type mt1 ^Type mt2 ^Types types]
+               (let [^{:tag (List Type)} tvars (.getTypeArguments mt1)
+                     ^{:tag (List Type)} svars (.getTypeArguments mt2)
+                     t (.getReturnType mt1)
+                     s (.subst types (.getReturnType mt2) svars tvars)]
+                 (or (.isSameType types t s)
+                     (and (and (not (.isPrimitive t)) (not (.isPrimitive s)))
+                          (.isSubtype types t s))))))
+      (RTS []
+           (method ^:public test ^boolean [this ^Type mt1 ^Type mt2 ^Types types]
+             (.returnTypeSubstitutable types mt1 mt2))))
+
+    (method ^:public ^:abstract test ^boolean [this ^Type mt1 ^Type mt2 ^Types types]))
+
+  (method ^:public mergeAbstracts ^{:tag (Optional Symbol)} [this
+                                                             ^{:tag (List Symbol)} ambiguousInOrder
+                                                             ^Type site ^boolean sigCheck]
+    (let [^:mutable shouldErase false
+          ^{:tag (List Type)} erasedParams (.getParameterTypes
+                                             (.erasure (cast Symbol (.-head ambiguousInOrder)) this))]
+      (for-each [^Symbol s ambiguousInOrder]
+        (cond
+          (or (== (bit-and (.flags s) Flags/ABSTRACT) 0)
+              (and sigCheck
+                   (not (.isSameTypes this erasedParams (.getParameterTypes (.erasure s this))))))
+            (return (Optional/empty))
+          (.hasTag (.-type s) TypeTag/FORALL) (set! shouldErase true)))
+      (for-each [^MostSpecificReturnCheck mostSpecificReturnCheck (MostSpecificReturnCheck/values)]
+        (label :outer
+          (for-each [^Symbol s ambiguousInOrder]
+            (let [mt (.memberType this site s)
+                  ^:mutable ^{:tag (List Type)} allThrown (.getThrownTypes mt)]
+              (for-each [^Symbol s2 ambiguousInOrder]
+                (when-not (identical? s s2)
+                  (let [mt2 (.memberType this site s2)]
+                    (if (or (not (.isSubSignature this mt mt2))
+                            (not (.test mostSpecificReturnCheck mt mt2 this)))
+                        (continue :outer)
+                        (let [^:mutable ^{:tag (List Type)} thrownTypes2 (.getThrownTypes mt2)]
+                          (if (and (not (.hasTag mt TypeTag/FORALL)) shouldErase)
+                              (set! thrownTypes2 (.erasure this thrownTypes2))
+                              (when (.hasTag mt TypeTag/FORALL)
+                                (Assert/check (.hasTag mt2 TypeTag/FORALL))
+                                (set! thrownTypes2
+                                      (.subst this
+                                              thrownTypes2
+                                              (.getTypeArguments mt2)
+                                              (.getTypeArguments mt)))))
+                          (set! allThrown (.intersect chk allThrown thrownTypes2)))))))
+              (return (if (identical? allThrown (.getThrownTypes mt))
+                          (Optional/of s)
+                          (Optional/of (anon Symbol$MethodSymbol [(.flags s)
+                                                                  (.-name s)
+                                                                  (.createMethodTypeWithThrown
+                                                                    this
+                                                                    (.-type s)
+                                                                    allThrown)
+                                                                  (.-owner s)]
+                                         (method ^:public baseSymbol ^Symbol [this] s)))))))))
+      (Optional/empty)))
+
+  (defclass ImplementationCache
+    (field ^:private ^{:tag (WeakHashMap Symbol$MethodSymbol (SoftReference (Map Symbol$TypeSymbol Entry)))} _map
+      (WeakHashMap.))
+
+    (defclass Entry
+      (field ^:final ^Symbol$MethodSymbol cachedImpl)
+
+      (field ^:final ^{:tag (Predicate Symbol)} implFilter)
+
+      (field ^:final ^boolean checkResult)
+
+      (field ^:final ^int prevMark)
+
+      (constructor ^:public [this ^Symbol$MethodSymbol cachedImpl
+                             ^{:tag (Predicate Symbol)} scopeFilter ^boolean checkResult
+                             ^int prevMark]
+        (set! (.-cachedImpl this) cachedImpl)
+        (set! (.-implFilter this) scopeFilter)
+        (set! (.-checkResult this) checkResult)
+        (set! (.-prevMark this) prevMark))
+
+      (method matches ^boolean [this ^{:tag (Predicate Symbol)} scopeFilter ^boolean checkResult
+                                ^int mark]
+        (and (and (identical? (.-implFilter this) scopeFilter) (= (.-checkResult this) checkResult))
+             (== (.-prevMark this) mark))))
+
+    (method get ^Symbol$MethodSymbol [this ^Symbol$MethodSymbol ms ^Symbol$TypeSymbol origin
+                                      ^boolean checkResult ^{:tag (Predicate Symbol)} implFilter]
+      (let [^{:tag (SoftReference (Map Symbol$TypeSymbol Entry))} ref_cache (cast
+                                                                              SoftReference
+                                                                              (.get _map ms))
+            ^:mutable ^{:tag (Map Symbol$TypeSymbol Entry)} cache (when (some? ref_cache)
+                                                                    (cast Map (.get ref_cache)))]
+        (when (nil? cache) (set! cache (HashMap.)) (.put _map ms (SoftReference. cache)))
+        (let [e (cast Entry (.get cache origin))
+              members (.membersClosure Types/this (.-type origin) true)]
+          (if (or (nil? e) (not (.matches e implFilter checkResult (.getMark members))))
+              (let [impl (.implementationInternal this ms origin checkResult implFilter)]
+                (.put cache origin (Entry. impl implFilter checkResult (.getMark members)))
+                impl)
+              (.-cachedImpl e)))))
+
+    (method ^:private implementationInternal ^Symbol$MethodSymbol [this ^Symbol$MethodSymbol ms
+                                                                   ^Symbol$TypeSymbol origin
+                                                                   ^boolean checkResult
+                                                                   ^{:tag (Predicate Symbol)} implFilter]
+      (let [^:mutable t (.-type origin)]
+        (while (or (.hasTag t TypeTag/CLASS) (.hasTag t TypeTag/TYPEVAR))
+          (set! t (.skipTypeVars Types/this t false))
+          (let [c (.-tsym t)
+                ^:mutable ^Symbol bestSoFar nil]
+            (for-each [^Symbol sym (.getSymbolsByName (.members c) (.-name ms) implFilter)]
+              (when (and (some? sym) (.overrides sym ms origin Types/this checkResult))
+                (set! bestSoFar sym)
+                (when (== (bit-and (.flags sym) Flags/ABSTRACT) 0) (break))))
+            (when (some? bestSoFar) (return (cast Symbol$MethodSymbol bestSoFar))))
+          (set! t (.supertype Types/this t))))
+      nil))
+
+  (field ^:private ^ImplementationCache implCache (ImplementationCache.))
+
+  (method ^:public implementation ^Symbol$MethodSymbol [this ^Symbol$MethodSymbol ms
+                                                        ^Symbol$TypeSymbol origin
+                                                        ^boolean checkResult
+                                                        ^{:tag (Predicate Symbol)} implFilter]
+    (.get implCache ms origin checkResult implFilter))
+
+  (defclass MembersClosureCache
+    :extends (SimpleVisitor Scope$CompoundScope Void)
+
+    (field ^:private ^{:tag (Map Symbol$TypeSymbol Scope$CompoundScope)} _map (HashMap.))
+
+    (field ^{:tag (Set Symbol$TypeSymbol)} seenTypes (HashSet.))
+
+    (defclass MembersScope
+      :extends Scope$CompoundScope
+
+      (field ^Scope$CompoundScope scope)
+
+      (constructor ^:public [this ^Scope$CompoundScope scope]
+        (super. (.-owner scope))
+        (set! (.-scope this) scope))
+
+      (method combine ^{:tag (Predicate Symbol)} [this ^{:tag (Predicate Symbol)} sf]
+        (lambda Predicate ^boolean [^Symbol s]
+          (and (not (.isInterface (.-owner s))) (or (nil? sf) (.test sf s)))))
+
+      (method ^:public getSymbols ^{:tag (Iterable Symbol)} [this ^{:tag (Predicate Symbol)} sf
+                                                             ^Scope$LookupKind lookupKind]
+        (.getSymbols scope (.combine this sf) lookupKind))
+
+      (method ^:public getSymbolsByName ^{:tag (Iterable Symbol)} [this ^Name name
+                                                                   ^{:tag (Predicate Symbol)} sf
+                                                                   ^Scope$LookupKind lookupKind]
+        (.getSymbolsByName scope name (.combine this sf) lookupKind))
+
+      (method ^:public getMark ^int [this] (.getMark scope)))
+
+    (field ^Scope$CompoundScope nilScope)
+
+    (method ^:public visitType ^Scope$CompoundScope [this ^Type t ^Void _unused]
+      (when (nil? nilScope) (set! nilScope (Scope$CompoundScope. (.-noSymbol syms))))
+      nilScope)
+
+    (method ^:public visitClassType ^Scope$CompoundScope [this ^Type$ClassType t ^Void _unused]
+      (if (not (.add seenTypes (.-tsym t)))
+          (Scope$CompoundScope. (.-tsym t))
+          (try
+            (.add seenTypes (.-tsym t))
+            (let [csym (cast Symbol$ClassSymbol (.-tsym t))
+                  ^:mutable membersClosure (cast Scope$CompoundScope (.get _map csym))]
+              (when (nil? membersClosure)
+                (set! membersClosure (Scope$CompoundScope. csym))
+                (for-each [^Type i (.interfaces Types/this t)]
+                  (.prependSubScope membersClosure (cast Scope (.visit this i nil))))
+                (.prependSubScope membersClosure
+                                  (cast Scope (.visit this (.supertype Types/this t) nil)))
+                (.prependSubScope membersClosure (.members csym))
+                (.put _map csym membersClosure))
+              membersClosure)
+            (finally (.remove seenTypes (.-tsym t))))))
+
+    (method ^:public visitTypeVar ^Scope$CompoundScope [this ^Type$TypeVar t ^Void _unused]
+      (cast Scope$CompoundScope (.visit this (.getUpperBound t) nil))))
+
+  (field ^:private ^MembersClosureCache membersCache (MembersClosureCache.))
+
+  (method ^:public membersClosure ^Scope$CompoundScope [this ^Type site ^boolean skipInterface]
+    (let [cs (cast Scope$CompoundScope (.visit membersCache site nil))]
+      (Assert/checkNonNull cs (lambda Supplier ^String [] (java-str "type " site)))
+      (if skipInterface
+          ^Scope$CompoundScope (.new membersCache Types$MembersClosureCache$MembersScope cs)
+          cs)))
+
+  (method ^:public firstUnimplementedAbstract ^Symbol$MethodSymbol [this ^Symbol$ClassSymbol sym]
+    (try
+      (.firstUnimplementedAbstractImpl this sym sym)
+      (catch Symbol$CompletionFailure ex
+        (.completionError chk (.pos (.-tree (.getEnv enter sym))) ex)
+        nil)))
+
+  (method ^:private firstUnimplementedAbstractImpl ^Symbol$MethodSymbol [this
+                                                                         ^Symbol$ClassSymbol impl
+                                                                         ^Symbol$ClassSymbol c]
+    (let [^:mutable ^Symbol$MethodSymbol undef nil]
+      (when (or (identical? c impl)
+                (not (== (bit-and (.flags c) (bit-or-int Flags/ABSTRACT Flags/INTERFACE)) 0)))
+        (let [^Scope s (.members c)]
+          (for-each [^Symbol sym (.getSymbols s Scope$LookupKind/NON_RECURSIVE)]
+            (when (and (identical? (.-kind sym) Kinds$Kind/MTH)
+                       (== (bit-and (.flags sym)
+                                    (bit-or (bit-or Flags/ABSTRACT Flags/DEFAULT) Flags/PRIVATE))
+                           Flags/ABSTRACT))
+              (let [absmeth (cast Symbol$MethodSymbol sym)
+                    ^:mutable implmeth (.implementation absmeth impl this true)]
+                (when (or (nil? implmeth) (identical? implmeth absmeth))
+                  (let [prov (cast Symbol$MethodSymbol
+                                   (.-head (.interfaceCandidates this (.-type impl) absmeth)))]
+                    (when (and (some? prov) (.overrides prov absmeth impl this true))
+                      (set! implmeth prov))))
+                (when (or (nil? implmeth) (identical? implmeth absmeth))
+                  (set! undef absmeth)
+                  (break)))))
+          (when (nil? undef)
+            (let [st (.supertype this (.-type c))]
+              (when (.hasTag st TypeTag/CLASS)
+                (set! undef
+                      (.firstUnimplementedAbstractImpl
+                        this
+                        impl
+                        (cast Symbol$ClassSymbol (.-tsym st)))))))
+          (loop [^{:tag (List Type)} l (.interfaces this (.-type c))]
+            (when (and (nil? undef) (.nonEmpty l))
+              (set! undef
+                    (.firstUnimplementedAbstractImpl
+                      this
+                      impl
+                      (cast Symbol$ClassSymbol (.-tsym (cast Type (.-head l))))))
+              (recur (.-tail l))))))
+      undef))
+
+  (defclass ^:public CandidatesCache
+    (field ^:public ^{:tag (Map Entry (List Symbol$MethodSymbol))} cache (WeakHashMap.))
+
+    (defclass Entry
+      (field ^Type site)
+
+      (field ^Symbol$MethodSymbol msym)
+
+      (constructor [this ^Type site ^Symbol$MethodSymbol msym]
+        (set! (.-site this) site)
+        (set! (.-msym this) msym))
+
+      (method ^:public equals ^boolean [this obj]
+        (if-instance [^Entry entry obj]
+          (if (identical? (.-msym entry) msym) (.isSameType Types/this site (.-site entry)) false)
+          false))
+
+      (method ^:public hashCode ^int [this]
+        (bit-and-int (.hashCode Types/this site) (bit-not-int (.hashCode msym)))))
+
+    (method ^:public get ^{:tag (List Symbol$MethodSymbol)} [this ^Entry e]
+      (cast List (.get cache e)))
+
+    (method ^:public put ^void [this ^Entry e ^{:tag (List Symbol$MethodSymbol)} msymbols]
+      (.put cache e msymbols)))
+
+  (field ^:public ^CandidatesCache candidatesCache (CandidatesCache.))
+
+  (method ^:public interfaceCandidates ^{:tag (List Symbol$MethodSymbol)} [this ^Type site
+                                                                           ^Symbol$MethodSymbol ms]
+    (let [e (.new candidatesCache Types$CandidatesCache$Entry site ms)
+          ^:mutable ^{:tag (List Symbol$MethodSymbol)} candidates (.get candidatesCache e)]
+      (when (nil? candidates)
+        (let [^{:tag (Predicate Symbol)} filter (MethodFilter. ms site)
+              ^:mutable ^{:tag (List Symbol$MethodSymbol)} candidates2 (List/nil)]
+          (for-each [^Symbol s (.getSymbols (.membersClosure this site false) filter)]
+            (if (and (not (.isInterface (.-tsym site))) (not (.isInterface (.-owner s))))
+                (return (List/of (cast Symbol$MethodSymbol s)))
+                (when-not (.contains candidates2 s)
+                  (set! candidates2 (.prepend candidates2 (cast Symbol$MethodSymbol s))))))
+          (set! candidates (.prune this candidates2))
+          (.put candidatesCache e candidates)))
+      candidates))
+
+  (method ^:public prune ^{:tag (List Symbol$MethodSymbol)} [this
+                                                             ^{:tag (List Symbol$MethodSymbol)} methods]
+    (let [^{:tag (ListBuffer Symbol$MethodSymbol)} methodsMin (ListBuffer.)]
+      (for-each [^Symbol$MethodSymbol m1 methods]
+        (let [^:mutable isMin_m1 true]
+          (for-each [^Symbol$MethodSymbol m2 methods]
+            (when-not (identical? m1 m2)
+              (when (and (not (identical? (.-owner m2) (.-owner m1)))
+                         (some? (.asSuper this (.-type (.-owner m2)) (.-owner m1))))
+                (set! isMin_m1 false)
+                (break))))
+          (when isMin_m1 (.append methodsMin m1))))
+      (.toList methodsMin)))
+
+  (defclass ^:private MethodFilter
+    :implements [(Predicate Symbol)]
+
+    (field ^Symbol msym)
+
+    (field ^Type site)
+
+    (constructor [this ^Symbol msym ^Type site]
+      (set! (.-msym this) msym)
+      (set! (.-site this) site))
+
+    (method ^:public test ^boolean [this ^Symbol s]
+      (and (and (and (and (identical? (.-kind s) Kinds$Kind/MTH)
+                          (identical? (.-name s) (.-name msym)))
+                     (== (bit-and (.flags s) Flags/SYNTHETIC) 0))
+                (.isInheritedIn s (.-tsym site) Types/this))
+           (.overrideEquivalent Types/this
+                                (.memberType Types/this site s)
+                                (.memberType Types/this site msym)))))
+
+  (method ^:public hasSameArgs ^boolean [this ^Type t ^Type s]
+    (.hasSameArgs this t s true))
+
+  (method ^:public hasSameArgs ^boolean [this ^Type t ^Type s ^boolean strict]
+    (.hasSameArgs this t s ^TypeRelation (if strict hasSameArgs_strict hasSameArgs_nonstrict)))
+
+  (method ^:private hasSameArgs ^boolean [this ^Type t ^Type s ^TypeRelation hasSameArgs]
+    (.booleanValue (cast Boolean (.visit hasSameArgs t s))))
+
+  (defclass ^:private HasSameArgs
+    :extends TypeRelation
+
+    (field ^boolean strict)
+
+    (constructor ^:public [this ^boolean strict]
+      (set! (.-strict this) strict))
+
+    (method ^:public visitType ^Boolean [this ^Type t ^Type s]
+      (throw (AssertionError.)))
+
+    (method ^:public visitMethodType ^Boolean [this ^Type$MethodType t ^Type s]
+      (and (.hasTag s TypeTag/METHOD)
+           (.containsTypeEquivalent Types/this (.-argtypes t) (.getParameterTypes s))))
+
+    (method ^:public visitForAll ^Boolean [this ^Type$ForAll t ^Type s]
+      (if (not (.hasTag s TypeTag/FORALL))
+          (if strict false (.booleanValue (.visitMethodType this (.asMethodType t) s)))
+          (let [forAll (cast Type$ForAll s)]
+            (and
+              (.hasSameBounds Types/this t forAll)
+              (.booleanValue
+                (cast Boolean
+                      (.visit this
+                              (.-qtype t)
+                              (.subst Types/this (.-qtype forAll) (.-tvars forAll) (.-tvars t)))))))))
+
+    (method ^:public visitErrorType ^Boolean [this ^Type$ErrorType t ^Type s]
+      false))
+
+  (field ^TypeRelation hasSameArgs_strict (HasSameArgs. true))
+
+  (field ^TypeRelation hasSameArgs_nonstrict (HasSameArgs. false))
+
+  (method ^:public subst ^{:tag (List Type)} [this ^{:tag (List Type)} ts ^{:tag (List Type)} from
+                                              ^{:tag (List Type)} to]
+    (.map ts (Subst. from to)))
+
+  (method ^:public subst ^Type [this ^Type t ^{:tag (List Type)} from ^{:tag (List Type)} to]
+    (.map t (Subst. from to)))
+
+  (defclass ^:private Subst
+    :extends (Type$StructuralTypeMapping Void)
+
+    (field ^{:tag (List Type)} from)
+
+    (field ^{:tag (List Type)} to)
+
+    (constructor ^:public [this ^:mutable ^{:tag (List Type)} from ^:mutable ^{:tag (List Type)} to]
+      (let [^:mutable fromLength (.length from)
+            ^:mutable toLength (.length to)]
+        (while (> fromLength toLength)
+          (set! fromLength (unchecked-dec-int fromLength))
+          (set! from (.-tail from)))
+        (while (< fromLength toLength)
+          (set! toLength (unchecked-dec-int toLength))
+          (set! to (.-tail to)))
+        (set! (.-from this) from)
+        (set! (.-to this) to)))
+
+    (method ^:public visitTypeVar ^Type [this ^Type$TypeVar t ^Void ignored]
+      (loop [^{:tag (List Type)} from (.-from this)
+             ^{:tag (List Type)} to (.-to this)]
+        (if (.nonEmpty from)
+            (if (.equalsIgnoreMetadata t (cast Type (.-head from)))
+                (return (.withTypeVar (cast Type (.-head to)) t))
+                (recur (.-tail from) (.-tail to)))
+            nil))
+      t)
+
+    (method ^:public visitClassType ^Type [this ^Type$ClassType t ^Void ignored]
+      (if (not (.isCompound t))
+          (.visitClassType super t ignored)
+          (let [st (.visit this (.supertype Types/this t))
+                ^{:tag (List Type)} is (.visit this (.interfaces Types/this t) ignored)]
+            (if (and (identical? st (.supertype Types/this t))
+                     (identical? is (.interfaces Types/this t)))
+                t
+                (.makeIntersectionType Types/this (.prepend is st))))))
+
+    (method ^:public visitWildcardType ^Type [this ^Type$WildcardType t ^Void ignored]
+      (let [t2 (cast Type$WildcardType (.visitWildcardType super t ignored))]
+        (when (and (and (not (identical? t2 t)) (.isExtendsBound t)) (.isExtendsBound (.-type t2)))
+          (set! (.-type t2) (.wildUpperBound Types/this (.-type t2))))
+        t2))
+
+    (method ^:public visitForAll ^Type [this ^:mutable ^Type$ForAll t ^Void ignored]
+      (when (Type/containsAny to (.-tvars t))
+        (let [^{:tag (List Type)} freevars (.newInstances Types/this (.-tvars t))]
+          (set! t (Type$ForAll. freevars (.subst Types/this (.-qtype t) (.-tvars t) freevars)))))
+      (let [^{:tag (List Type)} tvars1 (.substBounds Types/this (.-tvars t) from to)
+            qtype1 (.visit this (.-qtype t))]
+        (cond
+          (and (identical? tvars1 (.-tvars t)) (identical? qtype1 (.-qtype t))) t
+          (identical? tvars1 (.-tvars t))
+            (anon Type$ForAll [tvars1 qtype1]
+              (method ^:public needsStripping ^boolean [this] true))
+          :else
+            (anon Type$ForAll [tvars1 (.subst Types/this qtype1 (.-tvars t) tvars1)]
+              (method ^:public needsStripping ^boolean [this] true))))))
+
+  (method ^:public substBounds ^{:tag (List Type)} [this ^{:tag (List Type)} tvars
+                                                    ^:mutable ^{:tag (List Type)} from
+                                                    ^:mutable ^{:tag (List Type)} to]
+    (if (.isEmpty tvars)
+        tvars
+        (let [^{:tag (ListBuffer Type)} newBoundsBuf (ListBuffer.)
+              ^:mutable changed false]
+          (for-each [^Type t tvars]
+            (let [tv (cast Type$TypeVar t)
+                  bound (.subst this (.getUpperBound tv) from to)]
+              (when-not (identical? bound (.getUpperBound tv)) (set! changed true))
+              (.append newBoundsBuf bound)))
+          (if (not changed)
+              tvars
+              (let [^{:tag (ListBuffer Type)} newTvars (ListBuffer.)]
+                (for-each [^Type t tvars]
+                  (.append newTvars
+                           (Type$TypeVar. (.-tsym t) nil (.-botType syms) (.getMetadata t))))
+                (let [^:mutable ^{:tag (List Type)} newBounds (.toList newBoundsBuf)]
+                  (set! from tvars)
+                  (set! to (.toList newTvars))
+                  (while (not (.isEmpty newBounds))
+                    (set! (.-head newBounds) (.subst this (cast Type (.-head newBounds)) from to))
+                    (set! newBounds (.-tail newBounds)))
+                  (set! newBounds (.toList newBoundsBuf))
+                  (for-each [^Type t (.toList newTvars)]
+                    (let [tv (cast Type$TypeVar t)]
+                      (.setUpperBound tv (cast Type (.-head newBounds)))
+                      (set! newBounds (.-tail newBounds))))
+                  (.toList newTvars)))))))
+
+  (method ^:public substBound ^Type$TypeVar [this ^Type$TypeVar t ^{:tag (List Type)} from
+                                             ^{:tag (List Type)} to]
+    (let [bound1 (.subst this (.getUpperBound t) from to)]
+      (if (identical? bound1 (.getUpperBound t))
+          t
+          (let [tv (Type$TypeVar. (.-tsym t) nil (.-botType syms) (.getMetadata t))]
+            (.setUpperBound tv (.subst this bound1 (List/of t) (List/of tv)))
+            tv))))
+
+  (method ^:public hasSameBounds ^boolean [this ^Type$ForAll t ^Type$ForAll s]
+    (let [^:mutable ^{:tag (List Type)} l1 (.-tvars t)
+          ^:mutable ^{:tag (List Type)} l2 (.-tvars s)]
+      (while (and (and (.nonEmpty l1) (.nonEmpty l2))
+                  (.isSameType this
+                               (.getUpperBound (cast Type (.-head l1)))
+                               (.subst this
+                                       (.getUpperBound (cast Type (.-head l2)))
+                                       (.-tvars s)
+                                       (.-tvars t))))
+        (set! l1 (.-tail l1))
+        (set! l2 (.-tail l2)))
+      (and (.isEmpty l1) (.isEmpty l2))))
+
+  (method ^:public newInstances ^{:tag (List Type)} [this ^{:tag (List Type)} tvars]
+    (let [^{:tag (List Type)} tvars1 (.map tvars newInstanceFun)]
+      (loop [^{:tag (List Type)} l tvars1]
+        (when (.nonEmpty l)
+          (let [tv (cast Type$TypeVar (.-head l))]
+            (.setUpperBound tv (.subst this (.getUpperBound tv) tvars tvars1))
+            (recur (.-tail l)))))
+      tvars1))
+
+  (field ^:private ^:static ^:final ^{:tag (TypeMapping Void)} newInstanceFun
+    (anon (TypeMapping Void) []
+      (method ^:public visitTypeVar ^Type$TypeVar [this ^Type$TypeVar t ^Void _unused]
+        (Type$TypeVar. (.-tsym t) (.getUpperBound t) (.getLowerBound t) (.getMetadata t)))))
+
+  (method ^:public createMethodTypeWithParameters ^Type [this ^Type original
+                                                         ^{:tag (List Type)} newParams]
+    (cast Type (.accept original methodWithParameters newParams)))
+
+  (field ^:private ^:final ^{:tag (MapVisitor (List Type))} methodWithParameters
+    (anon (MapVisitor (List Type)) []
+      (method ^:public visitType ^Type [this ^Type t ^{:tag (List Type)} newParams]
+        (throw (IllegalArgumentException. (java-str "Not a method type: " t))))
+
+      (method ^:public visitMethodType ^Type [this ^Type$MethodType t ^{:tag (List Type)} newParams]
+        (Type$MethodType. newParams (.-restype t) (.-thrown t) (.-tsym t)))
+
+      (method ^:public visitForAll ^Type [this ^Type$ForAll t ^{:tag (List Type)} newParams]
+        (Type$ForAll. (.-tvars t) (cast Type (.accept (.-qtype t) this newParams))))))
+
+  (method ^:public createMethodTypeWithThrown ^Type [this ^Type original
+                                                     ^{:tag (List Type)} newThrown]
+    (cast Type (.accept original methodWithThrown newThrown)))
+
+  (field ^:private ^:final ^{:tag (MapVisitor (List Type))} methodWithThrown
+    (anon (MapVisitor (List Type)) []
+      (method ^:public visitType ^Type [this ^Type t ^{:tag (List Type)} newThrown]
+        (throw (IllegalArgumentException. (java-str "Not a method type: " t))))
+
+      (method ^:public visitMethodType ^Type [this ^Type$MethodType t ^{:tag (List Type)} newThrown]
+        (Type$MethodType. (.-argtypes t) (.-restype t) newThrown (.-tsym t)))
+
+      (method ^:public visitForAll ^Type [this ^Type$ForAll t ^{:tag (List Type)} newThrown]
+        (Type$ForAll. (.-tvars t) (cast Type (.accept (.-qtype t) this newThrown))))))
+
+  (method ^:public createMethodTypeWithReturn ^Type [this ^Type original ^Type newReturn]
+    (cast Type (.accept original methodWithReturn newReturn)))
+
+  (field ^:private ^:final ^{:tag (MapVisitor Type)} methodWithReturn
+    (anon (MapVisitor Type) []
+      (method ^:public visitType ^Type [this ^Type t ^Type newReturn]
+        (throw (IllegalArgumentException. (java-str "Not a method type: " t))))
+
+      (method ^:public visitMethodType ^Type [this1 ^Type$MethodType t ^Type newReturn]
+        (anon Type$MethodType [(.-argtypes t) newReturn (.-thrown t) (.-tsym t)]
+          (method ^:public baseType ^Type [this] t)))
+
+      (method ^:public visitForAll ^Type [this1 ^Type$ForAll t ^Type newReturn]
+        (anon Type$ForAll [(.-tvars t) (cast Type (.accept (.-qtype t) this1 newReturn))]
+          (method ^:public baseType ^Type [this] t)))))
+
+  (method ^:public createErrorType ^Type [this ^Type originalType]
+    (Type$ErrorType. originalType (.-errSymbol syms)))
+
+  (method ^:public createErrorType ^Type [this ^Symbol$ClassSymbol c ^Type originalType]
+    (Type$ErrorType. c originalType))
+
+  (method ^:public createErrorType ^Type [this ^Name name ^Symbol$TypeSymbol container
+                                          ^Type originalType]
+    (Type$ErrorType. name container originalType))
+
+  (method ^:public rank ^int [this ^Type t]
+    (switch (.getTag t)
+      CLASS
+        (let [cls (cast Type$ClassType t)]
+          (when (< (.-rank_field cls) 0)
+            (let [fullname (.getQualifiedName (.-tsym cls))]
+              (if (identical? fullname (.-java_lang_Object names))
+                  (set! (.-rank_field cls) 0)
+                  (let [^:mutable r (.rank this (.supertype this cls))]
+                    (loop [^{:tag (List Type)} l (.interfaces this cls)]
+                      (if (.nonEmpty l)
+                          (if (> (.rank this (cast Type (.-head l))) r)
+                              (do (set! r (.rank this (cast Type (.-head l)))) (recur (.-tail l)))
+                              (recur (.-tail l)))
+                          nil))
+                    (set! (.-rank_field cls) (unchecked-add-int r 1))))))
+          (.-rank_field cls))
+      TYPEVAR
+        (let [tvar (cast Type$TypeVar t)]
+          (when (< (.-rank_field tvar) 0)
+            (let [^:mutable r (.rank this (.supertype this tvar))]
+              (loop [^{:tag (List Type)} l (.interfaces this tvar)]
+                (if (.nonEmpty l)
+                    (if (> (.rank this (cast Type (.-head l))) r)
+                        (do (set! r (.rank this (cast Type (.-head l)))) (recur (.-tail l)))
+                        (recur (.-tail l)))
+                    nil))
+              (set! (.-rank_field tvar) (unchecked-add-int r 1))))
+          (.-rank_field tvar))
+      (ERROR NONE) 0
+      (throw (AssertionError.))))
+
+  (method ^:public toString ^String [this ^Type t ^Locale locale]
+    (.visit (Printer/createStandardPrinter messages) t locale))
+
+  (method ^:public toString ^String [this ^Symbol t ^Locale locale]
+    (.visit (Printer/createStandardPrinter messages) t locale))
+
+  (method ^:public ^{Deprecated true} toString ^String [this ^Type t]
+    (if (.hasTag t TypeTag/FORALL)
+        (let [forAll (cast Type$ForAll t)]
+          (java-str (.typaramsString this (.-tvars forAll)) (.-qtype forAll)))
+        (java-str "" t)))
+
+  (method ^:private typaramsString ^String [this ^{:tag (List Type)} tvars]
+    (let [s (StringBuilder.)]
+      (.append s \<)
+      (let [^:mutable first true]
+        (for-each [^Type t tvars]
+          (when-not first (.append s ", "))
+          (set! first false)
+          (.appendTyparamString this (cast Type$TypeVar t) s))
+        (.append s \>)
+        (.toString s))))
+
+  (method ^:private appendTyparamString ^void [this ^Type$TypeVar t ^StringBuilder buf]
+    (.append buf t)
+    (when-not (or (nil? (.getUpperBound t))
+                  (identical? (.getQualifiedName (.-tsym (.getUpperBound t)))
+                              (.-java_lang_Object names)))
+      (.append buf " extends ")
+      (let [bound (.getUpperBound t)]
+        (cond
+          (not (.isCompound bound)) (.append buf bound)
+          (== (bit-and (.flags (.-tsym (.erasure this t))) Flags/INTERFACE) 0)
+            (do
+              (.append buf (.supertype this t))
+              (for-each [^Type intf (.interfaces this t)] (.append buf \&) (.append buf intf)))
+          :else
+            (let [^:mutable first true]
+              (for-each [^Type intf (.interfaces this t)]
+                (when-not first (.append buf \&))
+                (set! first false)
+                (.append buf intf)))))))
+
+  (field ^:private ^{:tag (Map Type (List Type))} closureCache (HashMap.))
+
+  (method ^:public closure ^{:tag (List Type)} [this ^Type t]
+    (let [^:mutable ^{:tag (List Type)} cl (cast List (.get closureCache t))]
+      (when (nil? cl)
+        (let [st (.supertype this t)]
+          (if (not (.isCompound t))
+              (cond
+                (.hasTag st TypeTag/CLASS) (set! cl (.insert this (.closure this st) t))
+                (.hasTag st TypeTag/TYPEVAR) (set! cl (.prepend (.closure this st) t))
+                :else (set! cl (List/of t)))
+              (set! cl (.closure this (.supertype this t))))
+          (loop [^{:tag (List Type)} l (.interfaces this t)]
+            (when (.nonEmpty l)
+              (set! cl (.union this cl (.closure this (cast Type (.-head l)))))
+              (recur (.-tail l))))
+          (.put closureCache t cl)))
+      cl))
+
+  (method ^:public closureCollector ^{:tag (Collector Type ClosureHolder (List Type))} [this
+                                                                                        ^boolean minClosure
+                                                                                        ^{:tag (BiPredicate Type Type)} shouldSkip]
+    (Collector/of (lambda Supplier ^ClosureHolder [] (ClosureHolder. minClosure shouldSkip))
+                  (method-ref BiConsumer [ClosureHolder Type] ClosureHolder/.add)
+                  (method-ref BinaryOperator
+                              ^ClosureHolder [ClosureHolder ClosureHolder]
+                              ClosureHolder/.merge)
+                  (method-ref Function ^List [ClosureHolder] ClosureHolder/.closure)
+                  (new Collector$Characteristics/1 [])))
+
+  (defclass ClosureHolder
+    (field ^{:tag (List Type)} closure)
+
+    (field ^:final ^boolean minClosure)
+
+    (field ^:final ^{:tag (BiPredicate Type Type)} shouldSkip)
+
+    (constructor [this ^boolean minClosure ^{:tag (BiPredicate Type Type)} shouldSkip]
+      (set! (.-closure this) (List/nil))
+      (set! (.-minClosure this) minClosure)
+      (set! (.-shouldSkip this) shouldSkip))
+
+    (method add ^void [this ^Type type]
+      (set! closure (.insert Types/this closure type shouldSkip)))
+
+    (method merge ^ClosureHolder [this ^ClosureHolder other]
+      (set! closure (.union Types/this closure (.-closure other) shouldSkip))
+      this)
+
+    (method closure ^{:tag (List Type)} [this]
+      (if minClosure (.closureMin Types/this closure) closure)))
+
+  (field ^{:tag (BiPredicate Type Type)} basicClosureSkip
+    (lambda BiPredicate ^boolean [^Type t1 ^Type t2] (identical? (.-tsym t1) (.-tsym t2))))
+
+  (method ^:public insert ^{:tag (List Type)} [this ^{:tag (List Type)} cl ^Type t
+                                               ^{:tag (BiPredicate Type Type)} shouldSkip]
+    (cond
+      (.isEmpty cl) (.prepend cl t)
+      (.test shouldSkip t (cast Type (.-head cl))) cl
+      (.precedes (.-tsym t) (.-tsym (cast Type (.-head cl))) this) (.prepend cl t)
+      :else (.prepend (.insert this (.-tail cl) t shouldSkip) (cast Type (.-head cl)))))
+
+  (method ^:public insert ^{:tag (List Type)} [this ^{:tag (List Type)} cl ^Type t]
+    (.insert this cl t basicClosureSkip))
+
+  (method ^:public union ^{:tag (List Type)} [this ^{:tag (List Type)} cl1 ^{:tag (List Type)} cl2
+                                              ^{:tag (BiPredicate Type Type)} shouldSkip]
+    (cond
+      (.isEmpty cl1) cl2
+      (.isEmpty cl2) cl1
+      (.test shouldSkip (cast Type (.-head cl1)) (cast Type (.-head cl2)))
+        (.prepend (.union this (.-tail cl1) (.-tail cl2) shouldSkip) (cast Type (.-head cl1)))
+      (.precedes (.-tsym (cast Type (.-head cl2))) (.-tsym (cast Type (.-head cl1))) this)
+        (.prepend (.union this cl1 (.-tail cl2) shouldSkip) (cast Type (.-head cl2)))
+      :else (.prepend (.union this (.-tail cl1) cl2 shouldSkip) (cast Type (.-head cl1)))))
+
+  (method ^:public union ^{:tag (List Type)} [this ^{:tag (List Type)} cl1 ^{:tag (List Type)} cl2]
+    (.union this cl1 cl2 basicClosureSkip))
+
+  (method ^:public intersect ^{:tag (List Type)} [this ^{:tag (List Type)} cl1
+                                                  ^{:tag (List Type)} cl2]
+    (cond
+      (identical? cl1 cl2) cl1
+      (or (.isEmpty cl1) (.isEmpty cl2)) (List/nil)
+      (.precedes (.-tsym (cast Type (.-head cl1))) (.-tsym (cast Type (.-head cl2))) this)
+        (.intersect this (.-tail cl1) cl2)
+      (.precedes (.-tsym (cast Type (.-head cl2))) (.-tsym (cast Type (.-head cl1))) this)
+        (.intersect this cl1 (.-tail cl2))
+      (.isSameType this (cast Type (.-head cl1)) (cast Type (.-head cl2)))
+        (.prepend (.intersect this (.-tail cl1) (.-tail cl2)) (cast Type (.-head cl1)))
+      :else
+        (do
+          (when (and (and (identical? (.-tsym (cast Type (.-head cl1)))
+                                      (.-tsym (cast Type (.-head cl2))))
+                          (.hasTag (cast Type (.-head cl1)) TypeTag/CLASS))
+                     (.hasTag (cast Type (.-head cl2)) TypeTag/CLASS))
+            (when (and (.isParameterized (cast Type (.-head cl1)))
+                       (.isParameterized (cast Type (.-head cl2))))
+              (let [merge (.merge this (cast Type (.-head cl1)) (cast Type (.-head cl2)))]
+                (return (.prepend (.intersect this (.-tail cl1) (.-tail cl2)) merge))))
+            (when (or (.isRaw (cast Type (.-head cl1))) (.isRaw (cast Type (.-head cl2))))
+              (return (.prepend (.intersect this (.-tail cl1) (.-tail cl2))
+                                (.erasure this (cast Type (.-head cl1)))))))
+          (.intersect this (.-tail cl1) (.-tail cl2)))))
+
+  (defclass TypePair
+    (field ^:final ^Type t1)
+
+    (field ^:final ^Type t2)
+
+    (constructor [this ^Type t1 ^Type t2]
+      (set! (.-t1 this) t1)
+      (set! (.-t2 this) t2))
+
+    (method ^:public hashCode ^int [this]
+      (unchecked-add-int (unchecked-multiply-int 127 (.hashCode Types/this t1))
+                         (.hashCode Types/this t2)))
+
+    (method ^:public equals ^boolean [this obj]
+      (if-instance [^TypePair typePair obj]
+        (if (.booleanValue (cast Boolean (.visit exactTypeVisitor t1 (.-t1 typePair))))
+            (.booleanValue (cast Boolean (.visit exactTypeVisitor t2 (.-t2 typePair))))
+            false)
+        false)))
+
+  (field ^TypeEqualityVisitor exactTypeVisitor
+    (anon TypeEqualityVisitor []
+      (method sameTypeArguments ^boolean [this ^:mutable ^{:tag (List Type)} ts
+                                          ^:mutable ^{:tag (List Type)} ss]
+        (while (and (and (.nonEmpty ts) (.nonEmpty ss))
+                    (.sameTypeComparator this (cast Type (.-head ts)) (cast Type (.-head ss))))
+          (set! ts (.-tail ts))
+          (set! ss (.-tail ss)))
+        (and (.isEmpty ts) (.isEmpty ss)))
+
+      (method sameTypeComparator ^boolean [this ^Type t ^Type s]
+        (.booleanValue (cast Boolean (.visit exactTypeVisitor t s))))))
+
+  (field ^{:tag (Set TypePair)} mergeCache (HashSet.))
+
+  (method ^:private merge ^Type [this ^Type c1 ^Type c2]
+    (let [class1 (cast Type$ClassType c1)
+          ^:mutable ^{:tag (List Type)} act1 (.getTypeArguments class1)
+          class2 (cast Type$ClassType c2)
+          ^:mutable ^{:tag (List Type)} act2 (.getTypeArguments class2)
+          ^{:tag (ListBuffer Type)} merged (ListBuffer.)
+          ^:mutable ^{:tag (List Type)} typarams (.getTypeArguments (.-type (.-tsym class1)))]
+      (while (and (and (.nonEmpty act1) (.nonEmpty act2)) (.nonEmpty typarams))
+        (cond
+          (.containsType this (cast Type (.-head act1)) (cast Type (.-head act2)))
+            (.append merged (cast Type (.-head act1)))
+          (.containsType this (cast Type (.-head act2)) (cast Type (.-head act1)))
+            (.append merged (cast Type (.-head act2)))
+          :else
+            (let [pair (TypePair. c1 c2)
+                  ^:mutable ^Type m nil]
+              (if (.add mergeCache pair)
+                  (do
+                    (set! m
+                          (Type$WildcardType.
+                            (.lub this
+                                  (new Type/1
+                                       [(.wildUpperBound this (cast Type (.-head act1)))
+                                        (.wildUpperBound this (cast Type (.-head act2)))]))
+                            BoundKind/EXTENDS
+                            (.-boundClass syms)))
+                    (.remove mergeCache pair))
+                  (set! m
+                        (Type$WildcardType. (.-objectType syms)
+                                            BoundKind/UNBOUND
+                                            (.-boundClass syms))))
+              (.append merged (.withTypeVar m (cast Type (.-head typarams))))))
+        (set! act1 (.-tail act1))
+        (set! act2 (.-tail act2))
+        (set! typarams (.-tail typarams)))
+      (Assert/check (and (and (.isEmpty act1) (.isEmpty act2)) (.isEmpty typarams)))
+      (Type$ClassType. (.getEnclosingType class1) (.toList merged) (.-tsym class1))))
+
+  (method ^:private compoundMin ^Type [this ^{:tag (List Type)} cl]
+    (if (.isEmpty cl)
+        (.-objectType syms)
+        (let [^{:tag (List Type)} compound (.closureMin this cl)]
+          (when-not (.isEmpty compound)
+            (if (.isEmpty (.-tail compound))
+                (cast Type (.-head compound))
+                (.makeIntersectionType this compound))))))
+
+  (method ^:public closureMin ^{:tag (List Type)} [this ^:mutable ^{:tag (List Type)} cl]
+    (let [^{:tag (ListBuffer Type)} classes (ListBuffer.)
+          ^{:tag (ListBuffer Type)} interfaces (ListBuffer.)
+          ^{:tag (Set Type)} toSkip (HashSet.)]
+      (while (not (.isEmpty cl))
+        (let [current (cast Type (.-head cl))
+              ^:mutable keep (not (.contains toSkip current))]
+          (when (and keep (.hasTag current TypeTag/TYPEVAR))
+            (for-each [^Type t (.-tail cl)]
+              (when (.isSubtypeNoCapture this t current) (set! keep false) (break))))
+          (when keep
+            (if (.isInterface current) (.append interfaces current) (.append classes current))
+            (for-each [^Type t (.-tail cl)]
+              (when (.isSubtypeNoCapture this current t) (.add toSkip t))))
+          (set! cl (.-tail cl))))
+      (.toList (.appendList classes interfaces))))
+
+  (method ^:public lub ^Type [this ^{:tag (List Type)} ts]
+    (.lub this (cast Type/1 (.toArray ts (new Type/1 (.length ts))))))
+
+  (method ^:public lub ^Type [this & ^Type/1 ts]
+    (let [^:const ^int UNKNOWN_BOUND 0
+          ^:const ^int ARRAY_BOUND 1
+          ^:const ^int CLASS_BOUND 2
+          kinds (new int/1 (alength ts))
+          ^:mutable boundkind UNKNOWN_BOUND]
+      (loop [^int i 0]
+        (when (< i (alength ts))
+          (let [^:mutable t (aget ts i)]
+            (switch (.getTag t)
+              CLASS
+                (do
+                  (set! boundkind (bit-or-int boundkind (aset kinds i CLASS_BOUND)))
+                  (recur (unchecked-inc-int i)))
+              ARRAY
+                (do
+                  (set! boundkind (bit-or-int boundkind (aset kinds i ARRAY_BOUND)))
+                  (recur (unchecked-inc-int i)))
+              TYPEVAR
+                (do
+                  (loop [] (set! t (.getUpperBound t)) (when (.hasTag t TypeTag/TYPEVAR) (recur)))
+                  (if (.hasTag t TypeTag/ARRAY)
+                      (set! boundkind (bit-or-int boundkind (aset kinds i ARRAY_BOUND)))
+                      (set! boundkind (bit-or-int boundkind (aset kinds i CLASS_BOUND))))
+                  (recur (unchecked-inc-int i)))
+              (do
+                (aset kinds i UNKNOWN_BOUND)
+                (if (.isPrimitive t) (return (.-errType syms)) (recur (unchecked-inc-int i))))))))
+      (switch boundkind
+        0 (.-botType syms)
+        ARRAY_BOUND
+          (let [elements (new Type/1 (alength ts))]
+            (loop [^int i 0]
+              (when (< i (alength ts))
+                (let [elem (aset elements i (.apply elemTypeFun (aget ts i)))]
+                  (if (.isPrimitive elem)
+                      (let [first (aget ts 0)]
+                        (loop [^int j 1]
+                          (if (< j (alength ts))
+                              (if (not (.isSameType this first (aget ts j)))
+                                  (return (.arraySuperType this))
+                                  (recur (unchecked-inc-int j)))
+                              nil))
+                        (return first))
+                      (recur (unchecked-inc-int i))))))
+            (Type$ArrayType. (.lub this elements) (.-arrayClass syms)))
+        CLASS_BOUND
+          (let [^:mutable ^int startIdx 0]
+            (loop [^int i 0]
+              (when (< i (alength ts))
+                (let [t (aget ts i)]
+                  (when-not (or (.hasTag t TypeTag/CLASS) (.hasTag t TypeTag/TYPEVAR))
+                    (set! startIdx (unchecked-inc-int startIdx))
+                    (recur (unchecked-inc-int i))))))
+            (Assert/check (< startIdx (alength ts)))
+            (let [^:mutable ^{:tag (List Type)} cl (.erasedSupertypes this (aget ts startIdx))]
+              (loop [^int i (unchecked-add-int startIdx 1)]
+                (when (< i (alength ts))
+                  (let [t (aget ts i)]
+                    (if (or (.hasTag t TypeTag/CLASS) (.hasTag t TypeTag/TYPEVAR))
+                        (do
+                          (set! cl (.intersect this cl (.erasedSupertypes this t)))
+                          (recur (unchecked-inc-int i)))
+                        (recur (unchecked-inc-int i))))))
+              (let [^{:tag (List Type)} mec (.closureMin this cl)
+                    ^:mutable ^{:tag (List Type)} candidates (List/nil)]
+                (for-each [^Type erasedSupertype mec]
+                  (let [^:mutable ^{:tag (List Type)} lci (List/of
+                                                            (.asSuper
+                                                              this
+                                                              (aget ts startIdx)
+                                                              (.-tsym erasedSupertype)))]
+                    (loop [^int i (unchecked-add-int startIdx 1)]
+                      (when (< i (alength ts))
+                        (let [superType (.asSuper this (aget ts i) (.-tsym erasedSupertype))]
+                          (set! lci
+                                (.intersect this
+                                            lci
+                                            ^List (if (some? superType)
+                                                      (List/of superType)
+                                                      (List/nil))))
+                          (recur (unchecked-inc-int i)))))
+                    (set! candidates (.appendList candidates lci))))
+                (.compoundMin this candidates))))
+        (let [^:mutable ^{:tag (List Type)} classes (List/of (.arraySuperType this))]
+          (loop [^int i 0]
+            (if (< i (alength ts))
+                (if (not (== (aget kinds i) ARRAY_BOUND))
+                    (do (set! classes (.prepend classes (aget ts i))) (recur (unchecked-inc-int i)))
+                    (recur (unchecked-inc-int i)))
+                nil))
+          (.lub this classes)))))
+
+  (method ^:public erasedSupertypes ^{:tag (List Type)} [this ^Type t]
+    (let [^{:tag (ListBuffer Type)} buf (ListBuffer.)]
+      (for-each [^Type sup (.closure this t)]
+        (if (.hasTag sup TypeTag/TYPEVAR) (.append buf sup) (.append buf (.erasure this sup))))
+      (.toList buf)))
+
+  (field ^:private ^Type arraySuperType)
+
+  (method ^:private arraySuperType ^Type [this]
+    (when (nil? arraySuperType)
+      (set! arraySuperType
+            (.makeIntersectionType this
+                                   (List/of (.-serializableType syms) (.-cloneableType syms))
+                                   true)))
+    arraySuperType)
+
+  (method ^:public glb ^Type [this ^{:tag (List Type)} ts]
+    (let [^:mutable t1 (cast Type (.-head ts))]
+      (for-each [^Type t2 (.-tail ts)]
+        (when (.isErroneous t1) (return t1))
+        (set! t1 (.glb this t1 t2)))
+      t1))
+
+  (method ^:public glb ^Type [this ^Type t ^Type s]
+    (cond
+      (nil? s) t
+      (or (.isPrimitive t) (.isPrimitive s)) (.-errType syms)
+      (.isSubtypeNoCapture this t s) t
+      (.isSubtypeNoCapture this s t) s
+      :else
+        (let [^{:tag (List Type)} closure (.union this (.closure this t) (.closure this s))]
+          (.glbFlattened this closure t))))
+
+  (method ^:private glbFlattened ^Type [this ^{:tag (List Type)} flatBounds ^Type errT]
+    (let [^{:tag (List Type)} bounds (.closureMin this flatBounds)]
+      (cond
+        (.isEmpty bounds) (.-objectType syms)
+        (.isEmpty (.-tail bounds)) (cast Type (.-head bounds))
+        :else
+          (do
+            (let [^:mutable ^int classCount 0
+                  ^:mutable ^{:tag (List Type)} cvars (List/nil)
+                  ^:mutable ^{:tag (List Type)} lowers (List/nil)]
+              (for-each [^Type bound bounds]
+                (when-not (.isInterface bound)
+                  (set! classCount (unchecked-inc-int classCount))
+                  (let [lower (.cvarLowerBound this bound)]
+                    (when (and (not (identical? bound lower)) (not (.hasTag lower TypeTag/BOT)))
+                      (set! cvars (.append cvars bound))
+                      (set! lowers (.append lowers lower))))))
+              (when (> classCount 1)
+                (if (.isEmpty lowers)
+                    (return (.createErrorType this errT))
+                    (let [^{:tag (List Type)} newBounds (.appendList (.diff bounds cvars) lowers)]
+                      (return (.glb this newBounds))))))
+            (.makeIntersectionType this bounds)))))
+
+  (method ^:public hashCode ^int [this ^Type t] (.hashCode this t false))
+
+  (method ^:public hashCode ^int [this ^Type t ^boolean strict]
+    (if strict
+        (cast Integer (.visit hashCodeStrictVisitor t))
+        (cast Integer (.visit hashCodeVisitor t))))
+
+  (field ^:private ^:static ^:final ^HashCodeVisitor hashCodeVisitor (HashCodeVisitor.))
+
+  (field ^:private ^:static ^:final ^HashCodeVisitor hashCodeStrictVisitor
+    (anon HashCodeVisitor []
+      (method ^:public visitTypeVar ^Integer [this ^Type$TypeVar t ^Void ignored]
+        (System/identityHashCode t))))
+
+  (defclass ^:private ^:static HashCodeVisitor
+    :extends (UnaryVisitor Integer)
+
+    (method ^:public visitType ^Integer [this ^Type t ^Void ignored]
+      (.ordinal (.getTag t)))
+
+    (method ^:public visitClassType ^Integer [this ^Type$ClassType t ^Void ignored]
+      (let [^:mutable result (.intValue (cast Integer (.visit this (.getEnclosingType t))))]
+        (set! result (unchecked-multiply-int result 127))
+        (set! result (unchecked-add-int result (.hashCode (.flatName (.-tsym t)))))
+        (for-each [^Type s (.getTypeArguments t)]
+          (set! result (unchecked-multiply-int result 127))
+          (set! result (unchecked-add-int result (.intValue (cast Integer (.visit this s))))))
+        result))
+
+    (method ^:public visitMethodType ^Integer [this ^Type$MethodType t ^Void ignored]
+      (let [^:mutable h (.ordinal TypeTag/METHOD)]
+        (loop [^{:tag (List Type)} thisargs (.-argtypes t)]
+          (when (some? (.-tail thisargs))
+            (set! h
+                  (unchecked-add-int (bit-shift-left-int h 5)
+                                     (.intValue (cast
+                                                  Integer
+                                                  (.visit this (cast Type (.-head thisargs)))))))
+            (recur (.-tail thisargs))))
+        (unchecked-add-int (bit-shift-left-int h 5)
+                           (.intValue (cast Integer (.visit this (.-restype t)))))))
+
+    (method ^:public visitWildcardType ^Integer [this ^Type$WildcardType t ^Void ignored]
+      (let [^:mutable result (.hashCode (.-kind t))]
+        (when (some? (.-type t))
+          (set! result (unchecked-multiply-int result 127))
+          (set! result
+                (unchecked-add-int result (.intValue (cast Integer (.visit this (.-type t)))))))
+        result))
+
+    (method ^:public visitArrayType ^Integer [this ^Type$ArrayType t ^Void ignored]
+      (unchecked-add-int (.intValue (cast Integer (.visit this (.-elemtype t)))) 12))
+
+    (method ^:public visitTypeVar ^Integer [this ^Type$TypeVar t ^Void ignored]
+      (System/identityHashCode t))
+
+    (method ^:public visitUndetVar ^Integer [this ^Type$UndetVar t ^Void ignored]
+      (System/identityHashCode t))
+
+    (method ^:public visitErrorType ^Integer [this ^Type$ErrorType t ^Void ignored]
+      (Integer/valueOf 0)))
+
+  (method ^:public resultSubtype ^boolean [this ^Type t ^Type s ^Warner warner]
+    (let [^{:tag (List Type)} tvars (.getTypeArguments t)
+          ^{:tag (List Type)} svars (.getTypeArguments s)
+          tres (.getReturnType t)
+          sres (.subst this (.getReturnType s) svars tvars)]
+      (.covariantReturnType this tres sres warner)))
+
+  (method ^:public returnTypeSubstitutable ^boolean [this ^Type r1 ^Type r2]
+    (if (.hasSameArgs this r1 r2)
+        (.resultSubtype this r1 r2 noWarnings)
+        (.covariantReturnType this
+                              (.getReturnType r1)
+                              (.erasure this (.getReturnType r2))
+                              noWarnings)))
+
+  (method ^:public returnTypeSubstitutable ^boolean [this ^Type r1 ^Type r2 ^Type r2res
+                                                     ^Warner warner]
+    (cond
+      (.isSameType this (.getReturnType r1) r2res) true
+      (or (.isPrimitive (.getReturnType r1)) (.isPrimitive r2res)) false
+      (.hasSameArgs this r1 r2) (.covariantReturnType this (.getReturnType r1) r2res warner)
+      (.isSubtypeUnchecked this (.getReturnType r1) r2res warner) true
+      (not (.isSubtype this (.getReturnType r1) (.erasure this r2res))) false
+      :else (do (.warn warner Lint$LintCategory/UNCHECKED) true)))
+
+  (method ^:public covariantReturnType ^boolean [this ^Type t ^Type s ^Warner warner]
+    (or (.isSameType this t s)
+        (and (and (not (.isPrimitive t)) (not (.isPrimitive s))) (.isAssignable this t s warner))))
+
+  (method ^:public boxedClass ^Symbol$ClassSymbol [this ^Type t]
+    (.enterClass syms (.-java_base syms) (aget (.-boxedName syms) (.ordinal (.getTag t)))))
+
+  (method ^:public boxedTypeOrType ^Type [this ^Type t]
+    (if (.isPrimitive t) (.-type (.boxedClass this t)) t))
+
+  (method ^:public unboxedType ^Type [this ^Type t]
+    (if (.hasTag t TypeTag/ERROR)
+        Type/noType
+        (do
+          (loop [^int i 0]
+            (when (< i (alength (.-boxedName syms)))
+              (let [box (aget (.-boxedName syms) i)]
+                (if (and (some? box)
+                         (some? (.asSuper this t (.enterClass syms (.-java_base syms) box))))
+                    (return (aget (.-typeOfTag syms) i))
+                    (recur (unchecked-inc-int i))))))
+          Type/noType)))
+
+  (method ^:public unboxedTypeOrType ^Type [this ^Type t]
+    (let [unboxedType (.unboxedType this t)] (if (.hasTag unboxedType TypeTag/NONE) t unboxedType)))
+
+  (method ^:public capture ^{:tag (List Type)} [this ^{:tag (List Type)} ts]
+    (let [^:mutable ^{:tag (List Type)} buf (List/nil)]
+      (for-each [^Type t ts] (set! buf (.prepend buf (.capture this t))))
+      (.reverse buf)))
+
+  (method ^:public capture ^Type [this ^:mutable ^Type t]
+    (if (not (.hasTag t TypeTag/CLASS))
+        t
+        (do
+          (when-not (identical? (.getEnclosingType t) Type/noType)
+            (let [capturedEncl (.capture this (.getEnclosingType t))]
+              (when-not (identical? capturedEncl (.getEnclosingType t))
+                (let [type1 (.memberType this capturedEncl (.-tsym t))]
+                  (set! t
+                        (.subst this
+                                type1
+                                (.getTypeArguments (.-type (.-tsym t)))
+                                (.getTypeArguments t)))))))
+          (let [cls (cast Type$ClassType t)]
+            (if (or (.isRaw cls) (not (.isParameterized cls)))
+                cls
+                (let [G (cast Type$ClassType (.asType (.asElement cls)))
+                      ^{:tag (List Type)} A (.getTypeArguments G)
+                      ^{:tag (List Type)} T (.getTypeArguments cls)
+                      ^{:tag (List Type)} S (.freshTypeVariables this T)
+                      ^:mutable ^{:tag (List Type)} currentA A
+                      ^:mutable ^{:tag (List Type)} currentT T
+                      ^:mutable ^{:tag (List Type)} currentS S
+                      ^:mutable captured false]
+                  (while (and (and (not (.isEmpty currentA)) (not (.isEmpty currentT)))
+                              (not (.isEmpty currentS)))
+                    (when-not (identical? (.-head currentS) (.-head currentT))
+                      (set! captured true)
+                      (let [Ti (cast Type$WildcardType (.-head currentT))
+                            ^:mutable Ui (.getUpperBound (cast Type (.-head currentA)))
+                            Si (cast Type$CapturedType (.-head currentS))]
+                        (when (nil? Ui) (set! Ui (.-objectType syms)))
+                        (switch (.-kind Ti)
+                          UNBOUND
+                            (do
+                              (.setUpperBound Si (.subst this Ui A S))
+                              (set! (.-lower Si) (.-botType syms)))
+                          EXTENDS
+                            (do
+                              (.setUpperBound
+                                Si
+                                (.glb this (.getExtendsBound Ti) (.subst this Ui A S)))
+                              (set! (.-lower Si) (.-botType syms)))
+                          SUPER
+                            (do
+                              (.setUpperBound Si (.subst this Ui A S))
+                              (set! (.-lower Si) (.getSuperBound Ti))))
+                        (let [^Type tmpBound (if (.hasTag (.getUpperBound Si) TypeTag/UNDETVAR)
+                                                 (.-qtype (cast Type$UndetVar (.getUpperBound Si)))
+                                                 (.getUpperBound Si))
+                              ^Type tmpLower (if (.hasTag (.-lower Si) TypeTag/UNDETVAR)
+                                                 (.-qtype (cast Type$UndetVar (.-lower Si)))
+                                                 (.-lower Si))]
+                          (when (and (and (not (.hasTag (.getUpperBound Si) TypeTag/ERROR))
+                                          (not (.hasTag (.-lower Si) TypeTag/ERROR)))
+                                     (.isSameType this tmpBound tmpLower))
+                            (set! (.-head currentS) (.getUpperBound Si))))))
+                    (set! currentA (.-tail currentA))
+                    (set! currentT (.-tail currentT))
+                    (set! currentS (.-tail currentS)))
+                  (cond
+                    (or (or (not (.isEmpty currentA)) (not (.isEmpty currentT)))
+                        (not (.isEmpty currentS)))
+                      (.erasure this t)
+                    captured
+                      (Type$ClassType. (.getEnclosingType cls) S (.-tsym cls) (.getMetadata cls))
+                    :else t)))))))
+
+  (method ^:public freshTypeVariables ^{:tag (List Type)} [this ^{:tag (List Type)} types]
+    (let [^{:tag (ListBuffer Type)} result (ListBuffer.)]
+      (for-each [^Type t types]
+        (if (.hasTag t TypeTag/WILDCARD)
+            (let [^:mutable bound (.getExtendsBound (cast Type$WildcardType t))]
+              (when (nil? bound) (set! bound (.-objectType syms)))
+              (.append result
+                       (Type$CapturedType. capturedName
+                                           (.-noSymbol syms)
+                                           bound
+                                           (.-botType syms)
+                                           (cast Type$WildcardType t))))
+            (.append result t)))
+      (.toList result)))
+
+  (method ^:private sideCast ^boolean [this ^:mutable ^Type from ^:mutable ^Type to ^Warner warn]
+    (let [^:mutable reverse false
+          target to]
+      (when (== (bit-and (.flags (.-tsym to)) Flags/INTERFACE) 0)
+        (Assert/check (not (== (bit-and (.flags (.-tsym from)) Flags/INTERFACE) 0)))
+        (set! reverse true)
+        (set! to from)
+        (set! from target))
+      (let [^:mutable ^{:tag (List Type)} commonSupers (.supertypeClosure
+                                                         this
+                                                         to
+                                                         (.erasure this from))
+            ^:mutable giveWarning (.isEmpty commonSupers)]
+        (while (.nonEmpty commonSupers)
+          (let [t1 (.asSuper this from (.-tsym (cast Type (.-head commonSupers))))
+                t2 (cast Type (.-head commonSupers))]
+            (when (.disjointTypes this (.getTypeArguments t1) (.getTypeArguments t2))
+              (return false))
+            (set! giveWarning
+                  (or giveWarning (if reverse (.giveWarning this t2 t1) (.giveWarning this t1 t2))))
+            (set! commonSupers (.-tail commonSupers))))
+        (when (and giveWarning (not (.isReifiable this ^Type (if reverse from to))))
+          (.warn warn Lint$LintCategory/UNCHECKED))
+        true)))
+
+  (method ^:private sideCastFinal ^boolean [this ^:mutable ^Type from ^:mutable ^Type to
+                                            ^Warner warn]
+    (let [^:mutable reverse false
+          target to]
+      (when (== (bit-and (.flags (.-tsym to)) Flags/INTERFACE) 0)
+        (Assert/check (not (== (bit-and (.flags (.-tsym from)) Flags/INTERFACE) 0)))
+        (set! reverse true)
+        (set! to from)
+        (set! from target))
+      (Assert/check (not (== (bit-and (.flags (.-tsym from)) Flags/FINAL) 0)))
+      (let [t1 (.asSuper this from (.-tsym to))]
+        (if (nil? t1)
+            false
+            (let [t2 to]
+              (if (.disjointTypes this (.getTypeArguments t1) (.getTypeArguments t2))
+                  false
+                  (do
+                    (when (and (not (.isReifiable this target))
+                               (if reverse (.giveWarning this t2 t1) (.giveWarning this t1 t2)))
+                      (.warn warn Lint$LintCategory/UNCHECKED))
+                    true)))))))
+
+  (method ^:private giveWarning ^boolean [this ^Type from ^Type to]
+    (let [^{:tag (List Type)} bounds (if (.isCompound to) (.directSupertypes this to) (List/of to))]
+      (for-each [^Type b bounds]
+        (let [subFrom (.asSub this from (.-tsym b))]
+          (when (and (.isParameterized b)
+                     (not (or (or (.isUnbounded this b) (.isSubtype this from b))
+                              (and (some? subFrom)
+                                   (.containsType this (.allparams b) (.allparams subFrom))))))
+            (return true))))
+      false))
+
+  (method ^:private supertypeClosure ^{:tag (List Type)} [this ^Type t ^Type s]
+    (let [^:mutable ^{:tag (List Type)} cl (List/nil)]
+      (loop [^{:tag (List Type)} l (.interfaces this t)]
+        (if (.nonEmpty l)
+            (if (.isSubtype this s (.erasure this (cast Type (.-head l))))
+                (do (set! cl (.insert this cl (cast Type (.-head l)))) (recur (.-tail l)))
+                (do
+                  (set! cl (.union this cl (.supertypeClosure this (cast Type (.-head l)) s)))
+                  (recur (.-tail l))))
+            nil))
+      cl))
+
+  (method ^:private containsTypeEquivalent ^boolean [this ^Type t ^Type s]
+    (or (.isSameType this t s) (and (.containsType this t s) (.containsType this s t))))
+
+  (method ^:public adapt :throws [AdaptFailure] ^void [this ^Type source ^Type target
+                                                       ^{:tag (ListBuffer Type)} from
+                                                       ^{:tag (ListBuffer Type)} to]
+    (.adapt (Adapter. from to) source target))
+
+  (defclass Adapter
+    :extends (SimpleVisitor Void Type)
+
+    (field ^{:tag (ListBuffer Type)} from)
+
+    (field ^{:tag (ListBuffer Type)} to)
+
+    (field ^{:tag (Map Symbol Type)} mapping)
+
+    (constructor [this ^{:tag (ListBuffer Type)} from ^{:tag (ListBuffer Type)} to]
+      (set! (.-from this) from)
+      (set! (.-to this) to)
+      (set! mapping (HashMap.)))
+
+    (method ^:public adapt :throws [AdaptFailure] ^void [this ^Type source ^Type target]
+      (.visit this source target)
+      (let [^:mutable ^{:tag (List Type)} fromList (.toList from)
+            ^:mutable ^{:tag (List Type)} toList (.toList to)]
+        (while (not (.isEmpty fromList))
+          (let [val (cast Type (.get mapping (.-tsym (cast Type (.-head fromList)))))]
+            (when-not (identical? (.-head toList) val) (set! (.-head toList) val))
+            (set! fromList (.-tail fromList))
+            (set! toList (.-tail toList))))))
+
+    (method ^:public visitClassType :throws [AdaptFailure] ^Void [this ^Type$ClassType source
+                                                                  ^Type target]
+      (when (.hasTag target TypeTag/CLASS)
+        (.adaptRecursive this (.allparams source) (.allparams target)))
+      nil)
+
+    (method ^:public visitArrayType :throws [AdaptFailure] ^Void [this ^Type$ArrayType source
+                                                                  ^Type target]
+      (when (.hasTag target TypeTag/ARRAY)
+        (.adaptRecursive this (.elemtype Types/this source) (.elemtype Types/this target)))
+      nil)
+
+    (method ^:public visitWildcardType :throws [AdaptFailure] ^Void [this ^Type$WildcardType source
+                                                                     ^Type target]
+      (cond
+        (.isExtendsBound source)
+          (.adaptRecursive this
+                           (.wildUpperBound Types/this source)
+                           (.wildUpperBound Types/this target))
+        (.isSuperBound source)
+          (.adaptRecursive this
+                           (.wildLowerBound Types/this source)
+                           (.wildLowerBound Types/this target)))
+      nil)
+
+    (method ^:public visitTypeVar :throws [AdaptFailure] ^Void [this ^Type$TypeVar source
+                                                                ^Type target]
+      (let [^:mutable val (cast Type (.get mapping (.-tsym source)))]
+        (if (some? val)
+            (cond
+              (and (.isSuperBound val) (.isSuperBound target))
+                (set! val
+                      (if (.isSubtype Types/this
+                                      (.wildLowerBound Types/this val)
+                                      (.wildLowerBound Types/this target))
+                          target
+                          val))
+              (and (.isExtendsBound val) (.isExtendsBound target))
+                (set! val
+                      (if (.isSubtype Types/this
+                                      (.wildUpperBound Types/this val)
+                                      (.wildUpperBound Types/this target))
+                          val
+                          target))
+              :else (when-not (.isSameType Types/this val target) (throw (AdaptFailure.))))
+            (do (set! val target) (.append from source) (.append to target)))
+        (.put mapping (.-tsym source) val)
+        nil))
+
+    (method ^:public visitType ^Void [this ^Type source ^Type target] nil)
+
+    (field ^:private ^{:tag (Set TypePair)} cache (HashSet.))
+
+    (method ^:private adaptRecursive ^void [this ^Type source ^Type target]
+      (let [pair (TypePair. source target)]
+        (when (.add cache pair) (try (.visit this source target) (finally (.remove cache pair))))))
+
+    (method ^:private adaptRecursive ^void [this ^:mutable ^{:tag (List Type)} source
+                                            ^:mutable ^{:tag (List Type)} target]
+      (when (== (.length source) (.length target))
+        (while (.nonEmpty source)
+          (.adaptRecursive this (cast Type (.-head source)) (cast Type (.-head target)))
+          (set! source (.-tail source))
+          (set! target (.-tail target))))))
+
+  (defclass ^:public ^:static AdaptFailure
+    :extends RuntimeException
+
+    (field ^:static ^:final ^long serialVersionUID -7490231548272701566))
+
+  (method ^:private adaptSelf ^void [this ^Type t ^{:tag (ListBuffer Type)} from
+                                     ^{:tag (ListBuffer Type)} to]
+    (try
+      (.adapt this (.-type (.-tsym t)) t from to)
+      (catch AdaptFailure ex (throw (AssertionError. ex)))))
+
+  (method ^:private rewriteQuantifiers ^Type [this ^Type t ^boolean high ^boolean rewriteTypeVars]
+    (cast Type (.visit (Rewriter. high rewriteTypeVars) t)))
+
+  (defclass Rewriter
+    :extends (UnaryVisitor Type)
+
+    (field ^boolean high)
+
+    (field ^boolean rewriteTypeVars)
+
+    (field ^{:tag (Map Type Type)} argMap (HashMap.))
+
+    (field ^{:tag (Set Type)} seen (HashSet.))
+
+    (constructor [this ^boolean high ^boolean rewriteTypeVars]
+      (set! (.-high this) high)
+      (set! (.-rewriteTypeVars this) rewriteTypeVars))
+
+    (method ^:public visitClassType ^Type [this ^Type$ClassType t ^Void s]
+      (let [^{:tag (ListBuffer Type)} rewritten (ListBuffer.)
+            ^:mutable changed false]
+        (for-each [^Type arg (.allparams t)]
+          (let [^:mutable bound (cast Type (.get argMap arg))]
+            (when (nil? bound) (.put argMap arg (set! bound (cast Type (.visit this arg)))))
+            (when-not (identical? arg bound) (set! changed true))
+            (.append rewritten bound)))
+        (if changed
+            (.subst Types/this
+                    (.-type (.-tsym t))
+                    (.allparams (.-type (.-tsym t)))
+                    (.toList rewritten))
+            t)))
+
+    (method ^:public visitType ^Type [this ^Type t ^Void s] t)
+
+    (method ^:public visitCapturedType ^Type [this ^Type$CapturedType t ^Void s]
+      (let [w_bound (.-type (.-wildcard t))
+            ^Type bound (if (.contains w_bound t)
+                            (.erasure Types/this w_bound)
+                            (cast Type (.visit this w_bound)))]
+        (.rewriteAsWildcardType this
+                                (cast Type (.visit this bound))
+                                (.-bound (.-wildcard t))
+                                (.-kind (.-wildcard t)))))
+
+    (method ^:public visitTypeVar ^Type [this ^Type$TypeVar t ^Void s]
+      (cond
+        (.add seen t)
+          (if rewriteTypeVars
+              (let [^Type bound (if (.contains (.getUpperBound t) t)
+                                    (.erasure Types/this (.getUpperBound t))
+                                    (cast Type (.visit this (.getUpperBound t))))]
+                (.rewriteAsWildcardType this bound t BoundKind/EXTENDS))
+              t)
+        rewriteTypeVars ^Type (.makeExtendsWildcard Types/this (.-objectType syms) t)
+        :else ^Type t))
+
+    (method ^:public visitWildcardType ^Type [this ^Type$WildcardType t ^Void s]
+      (let [bound2 (cast Type (.visit this (.-type t)))]
+        (if (identical? (.-type t) bound2)
+            ^Type t
+            (.rewriteAsWildcardType this bound2 (.-bound t) (.-kind t)))))
+
+    (method ^:private rewriteAsWildcardType ^Type [this ^Type bound ^Type$TypeVar formal
+                                                   ^BoundKind bk]
+      (switch bk
+        EXTENDS
+          (if high
+              ^Type (.makeExtendsWildcard Types/this (.B this bound) formal)
+              ^Type (.makeExtendsWildcard Types/this (.-objectType syms) formal))
+        SUPER
+          (if high
+              ^Type (.makeSuperWildcard Types/this (.-botType syms) formal)
+              ^Type (.makeSuperWildcard Types/this (.B this bound) formal))
+        UNBOUND (.makeExtendsWildcard Types/this (.-objectType syms) formal)
+        (do (Assert/error (java-str "Invalid bound kind " bk)) nil)))
+
+    (method B ^Type [this ^:mutable ^Type t]
+      (while (.hasTag t TypeTag/WILDCARD)
+        (let [w (cast Type$WildcardType t)]
+          (set! t (if high (.getExtendsBound w) (.getSuperBound w)))
+          (when (nil? t) (set! t (if high (.-objectType syms) (.-botType syms))))))
+      t))
+
+  (method ^:private makeExtendsWildcard ^Type$WildcardType [this ^Type bound ^Type$TypeVar formal]
+    (if (identical? bound (.-objectType syms))
+        (Type$WildcardType. (.-objectType syms) BoundKind/UNBOUND (.-boundClass syms) formal)
+        (Type$WildcardType. bound BoundKind/EXTENDS (.-boundClass syms) formal)))
+
+  (method ^:private makeSuperWildcard ^Type$WildcardType [this ^Type bound ^Type$TypeVar formal]
+    (if (.hasTag bound TypeTag/BOT)
+        (Type$WildcardType. (.-objectType syms) BoundKind/UNBOUND (.-boundClass syms) formal)
+        (Type$WildcardType. bound BoundKind/SUPER (.-boundClass syms) formal)))
+
+  (defclass ^:public ^:static UniqueType
+    (field ^:public ^:final ^Type type)
+
+    (field ^:final ^Types types)
+
+    (constructor ^:public [this ^Type type ^Types types]
+      (set! (.-type this) type)
+      (set! (.-types this) types))
+
+    (method ^:public hashCode ^int [this] (.hashCode types type))
+
+    (method ^:public equals ^boolean [this obj]
+      (if-instance [^UniqueType uniqueType obj] (.isSameType types type (.-type uniqueType)) false))
+
+    (method ^:public toString ^String [this] (.toString type)))
+
+  (defclass ^:public ^:abstract ^:static DefaultTypeVisitor
+    :implements [(Type$Visitor R S)]
+    :type-params [R S]
+
+    (method ^:public ^:final visit ^R [this ^Type t ^S s]
+      (.accept t this s))
+
+    (method ^:public visitClassType ^R [this ^Type$ClassType t ^S s]
+      (.visitType this t s))
+
+    (method ^:public visitWildcardType ^R [this ^Type$WildcardType t ^S s]
+      (.visitType this t s))
+
+    (method ^:public visitArrayType ^R [this ^Type$ArrayType t ^S s]
+      (.visitType this t s))
+
+    (method ^:public visitMethodType ^R [this ^Type$MethodType t ^S s]
+      (.visitType this t s))
+
+    (method ^:public visitPackageType ^R [this ^Type$PackageType t ^S s]
+      (.visitType this t s))
+
+    (method ^:public visitModuleType ^R [this ^Type$ModuleType t ^S s]
+      (.visitType this t s))
+
+    (method ^:public visitTypeVar ^R [this ^Type$TypeVar t ^S s]
+      (.visitType this t s))
+
+    (method ^:public visitCapturedType ^R [this ^Type$CapturedType t ^S s]
+      (.visitType this t s))
+
+    (method ^:public visitForAll ^R [this ^Type$ForAll t ^S s]
+      (.visitType this t s))
+
+    (method ^:public visitUndetVar ^R [this ^Type$UndetVar t ^S s]
+      (.visitType this t s))
+
+    (method ^:public visitErrorType ^R [this ^Type$ErrorType t ^S s]
+      (.visitType this t s)))
+
+  (defclass ^:public ^:abstract ^:static DefaultSymbolVisitor
+    :implements [(Symbol$Visitor R S)]
+    :type-params [R S]
+
+    (method ^:public ^:final visit ^R [this ^Symbol s ^S arg]
+      (.accept s this arg))
+
+    (method ^:public visitClassSymbol ^R [this ^Symbol$ClassSymbol s ^S arg]
+      (.visitSymbol this s arg))
+
+    (method ^:public visitMethodSymbol ^R [this ^Symbol$MethodSymbol s ^S arg]
+      (.visitSymbol this s arg))
+
+    (method ^:public visitOperatorSymbol ^R [this ^Symbol$OperatorSymbol s ^S arg]
+      (.visitSymbol this s arg))
+
+    (method ^:public visitPackageSymbol ^R [this ^Symbol$PackageSymbol s ^S arg]
+      (.visitSymbol this s arg))
+
+    (method ^:public visitTypeSymbol ^R [this ^Symbol$TypeSymbol s ^S arg]
+      (.visitSymbol this s arg))
+
+    (method ^:public visitVarSymbol ^R [this ^Symbol$VarSymbol s ^S arg]
+      (.visitSymbol this s arg)))
+
+  (defclass ^:public ^:abstract ^:static SimpleVisitor
+    :extends (DefaultTypeVisitor R S)
+    :type-params [R S]
+
+    (method ^:public visitCapturedType ^R [this ^Type$CapturedType t ^S s]
+      (.visitTypeVar this t s))
+
+    (method ^:public visitForAll ^R [this ^Type$ForAll t ^S s]
+      (.visit this (.-qtype t) s))
+
+    (method ^:public visitUndetVar ^R [this ^Type$UndetVar t ^S s]
+      (.visit this (.-qtype t) s)))
+
+  (defclass ^:public ^:abstract ^:static TypeRelation
+    :extends (SimpleVisitor Boolean Type))
+
+  (defclass ^:public ^:abstract ^:static UnaryVisitor
+    :extends (SimpleVisitor R Void)
+    :type-params [R]
+
+    (method ^:public ^:final visit ^R [this ^Type t] (.accept t this nil)))
+
+  (defclass ^:public ^:static MapVisitor
+    :extends (DefaultTypeVisitor Type S)
+    :type-params [S]
+
+    (method ^:public ^:final visit ^Type [this ^Type t]
+      (cast Type (.accept t this nil)))
+
+    (method ^:public visitType ^Type [this ^Type t ^S s] t))
+
+  (defclass ^:public ^:static TypeMapping
+    :extends (MapVisitor S)
+    :implements [(Function Type Type)]
+    :type-params [S]
+
+    (method ^:public apply ^Type [this ^Type type] (.visit this type))
+
+    (method visit ^{:tag (List Type)} [this ^{:tag (List Type)} ts ^S s]
+      (.map ts (lambda Function ^Type [^Type t] (cast Type (.visit this t s)))))
+
+    (method ^:public visitCapturedType ^Type [this ^Type$CapturedType t ^S s]
+      (cast Type (.visitTypeVar this t s))))
+
+  (method ^:public isUnconditionallyExactTypeBased ^boolean [this ^Type source ^Type target]
+    (cond
+      (.isSameType this source target) true
+      (.isPrimitive target)
+        (if (and (.isPrimitive source)
+                 (and (.isStrictSubRangeOf (.getTag source) (.getTag target))
+                      (not (or (or
+                                 (and (.hasTag source TypeTag/BYTE) (.hasTag target TypeTag/CHAR))
+                                 (and (.hasTag source TypeTag/INT) (.hasTag target TypeTag/FLOAT)))
+                               (and (.hasTag source TypeTag/LONG)
+                                    (or (.hasTag target TypeTag/DOUBLE)
+                                        (.hasTag target TypeTag/FLOAT)))))))
+            true
+            false)
+      :else (.isSubtype this (.boxedTypeOrType this (.erasure this source)) target)))
+
+  (method ^:public isUnconditionallyExactValueBased ^boolean [this ^Type source ^Type target]
+    (if-instance [^Number value (.constValue source)]
+      (if (not (.isNumeric (.getTag target)))
+          false
+          (do
+            (switch (.getTag source)
+              BYTE
+                (switch (.getTag target)
+                  CHAR (return (ExactConversionsSupport/isIntToCharExact (.intValue value))))
+              CHAR
+                (switch (.getTag target)
+                  BYTE (return (ExactConversionsSupport/isIntToByteExact (.intValue value)))
+                  SHORT (return (ExactConversionsSupport/isIntToShortExact (.intValue value))))
+              SHORT
+                (switch (.getTag target)
+                  BYTE (return (ExactConversionsSupport/isIntToByteExact (.intValue value)))
+                  CHAR (return (ExactConversionsSupport/isIntToCharExact (.intValue value))))
+              INT
+                (switch (.getTag target)
+                  BYTE (return (ExactConversionsSupport/isIntToByteExact (.intValue value)))
+                  CHAR (return (ExactConversionsSupport/isIntToCharExact (.intValue value)))
+                  SHORT (return (ExactConversionsSupport/isIntToShortExact (.intValue value)))
+                  FLOAT (return (ExactConversionsSupport/isIntToFloatExact (.intValue value))))
+              FLOAT
+                (switch (.getTag target)
+                  BYTE (return (ExactConversionsSupport/isFloatToByteExact (.floatValue value)))
+                  CHAR (return (ExactConversionsSupport/isFloatToCharExact (.floatValue value)))
+                  SHORT (return (ExactConversionsSupport/isFloatToShortExact (.floatValue value)))
+                  INT (return (ExactConversionsSupport/isFloatToIntExact (.floatValue value)))
+                  LONG (return (ExactConversionsSupport/isFloatToLongExact (.floatValue value))))
+              LONG
+                (switch (.getTag target)
+                  BYTE (return (ExactConversionsSupport/isLongToByteExact (.longValue value)))
+                  CHAR (return (ExactConversionsSupport/isLongToCharExact (.longValue value)))
+                  SHORT (return (ExactConversionsSupport/isLongToShortExact (.longValue value)))
+                  INT (return (ExactConversionsSupport/isLongToIntExact (.longValue value)))
+                  FLOAT (return (ExactConversionsSupport/isLongToFloatExact (.longValue value)))
+                  DOUBLE (return (ExactConversionsSupport/isLongToDoubleExact (.longValue value))))
+              DOUBLE
+                (switch (.getTag target)
+                  BYTE (return (ExactConversionsSupport/isDoubleToByteExact (.doubleValue value)))
+                  CHAR (return (ExactConversionsSupport/isDoubleToCharExact (.doubleValue value)))
+                  SHORT (return (ExactConversionsSupport/isDoubleToShortExact (.doubleValue value)))
+                  INT (return (ExactConversionsSupport/isDoubleToIntExact (.doubleValue value)))
+                  FLOAT (return (ExactConversionsSupport/isDoubleToFloatExact (.doubleValue value)))
+                  LONG (return (ExactConversionsSupport/isDoubleToLongExact (.doubleValue value)))))
+            true))
+      false))
+
+  (method ^:public isUnconditionallyExactCombined ^boolean [this ^Type currentType ^Type testType]
+    (or (.isUnconditionallyExactTypeBased this currentType testType)
+        (and (instance? Number (.constValue currentType))
+             (.isUnconditionallyExactValueBased this currentType testType))))
+
+  (method ^:public getRetention ^Attribute$RetentionPolicy [this ^Attribute$Compound a]
+    (.getRetention this (.-tsym (.-type a))))
+
+  (method ^:public getRetention ^Attribute$RetentionPolicy [this ^Symbol$TypeSymbol sym]
+    (let [^:mutable vis Attribute$RetentionPolicy/CLASS
+          c (.attribute sym (.-tsym (.-retentionType syms)))]
+      (when (some? c)
+        (let [value (.member c (.-value names))]
+          (when (some? value)
+            (when-instance [^Attribute$Enum attributeEnum value]
+              (let [levelName (.-name (.-value attributeEnum))]
+                (cond
+                  (identical? levelName (.-SOURCE names))
+                    (set! vis Attribute$RetentionPolicy/SOURCE)
+                  (identical? levelName (.-CLASS names)) (set! vis Attribute$RetentionPolicy/CLASS)
+                  (identical? levelName (.-RUNTIME names))
+                    (set! vis Attribute$RetentionPolicy/RUNTIME)))))))
+      vis))
+
+  (defclass ^:public ^:abstract SignatureGenerator
+    (defclass ^:public InvalidSignatureException
+      :extends CompilerInternalException
+
+      (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+      (field ^:private ^:final ^:transient ^Type type)
+
+      (constructor [this ^Type type ^boolean dumpStackTraceOnError]
+        (super. dumpStackTraceOnError)
+        (set! (.-type this) type))
+
+      (method ^:public type ^Type [this] type))
+
+    (method ^:protected ^:abstract append ^void [this ^char ch])
+
+    (method ^:protected ^:abstract append ^void [this ^byte/1 ba])
+
+    (method ^:protected ^:abstract append ^void [this ^Name name])
+
+    (method ^:protected classReference ^void [this ^Symbol$ClassSymbol c])
+
+    (method ^:protected reportIllegalSignature ^void [this ^Type t]
+      (throw (InvalidSignatureException. t (.-dumpStacktraceOnError Types/this))))
+
+    (method ^:public assembleSig ^void [this ^Type type]
+      (switch (.getTag type)
+        BYTE (.append this \B)
+        SHORT (.append this \S)
+        CHAR (.append this \C)
+        INT (.append this \I)
+        LONG (.append this \J)
+        FLOAT (.append this \F)
+        DOUBLE (.append this \D)
+        BOOLEAN (.append this \Z)
+        VOID (.append this \V)
+        CLASS
+          (do
+            (when (.isCompound type) (.reportIllegalSignature this type))
+            (.append this \L)
+            (.assembleClassSig this type)
+            (.append this \;))
+        ARRAY
+          (let [at (cast Type$ArrayType type)]
+            (.append this \[)
+            (.assembleSig this (.-elemtype at)))
+        METHOD
+          (let [mt (cast Type$MethodType type)]
+            (.append this \()
+            (.assembleSig this (.-argtypes mt))
+            (.append this \))
+            (.assembleSig this (.-restype mt))
+            (when (.hasTypeVar this (.-thrown mt))
+              (loop [^{:tag (List Type)} l (.-thrown mt)]
+                (when (.nonEmpty l)
+                  (.append this \^)
+                  (.assembleSig this (cast Type (.-head l)))
+                  (recur (.-tail l))))))
+        WILDCARD
+          (let [ta (cast Type$WildcardType type)]
+            (switch (.-kind ta)
+              SUPER (do (.append this \-) (.assembleSig this (.-type ta)))
+              EXTENDS (do (.append this \+) (.assembleSig this (.-type ta)))
+              UNBOUND (.append this \*)
+              (throw (AssertionError. (.-kind ta)))))
+        TYPEVAR
+          (do
+            (when (.isCaptured (cast Type$TypeVar type)) (.reportIllegalSignature this type))
+            (.append this \T)
+            (.append this (.-name (.-tsym type)))
+            (.append this \;))
+        FORALL
+          (let [ft (cast Type$ForAll type)]
+            (.assembleParamsSig this (.-tvars ft))
+            (.assembleSig this (.-qtype ft)))
+        (throw (AssertionError. (java-str "typeSig " (.getTag type))))))
+
+    (method ^:public hasTypeVar ^boolean [this ^:mutable ^{:tag (List Type)} l]
+      (while (.nonEmpty l)
+        (when (.hasTag (cast Type (.-head l)) TypeTag/TYPEVAR) (return true))
+        (set! l (.-tail l)))
+      false)
+
+    (method ^:public assembleClassSig ^void [this ^Type type]
+      (let [ct (cast Type$ClassType type)
+            c (cast Symbol$ClassSymbol (.-tsym ct))]
+        (.classReference this c)
+        (let [outer (.getEnclosingType ct)]
+          (if (.nonEmpty (.allparams outer))
+              (let [rawOuter (or (identical? (.-kind (.-owner c)) Kinds$Kind/MTH)
+                                 (identical? (.-name c) (.-empty (.-names Types/this))))]
+                (.assembleClassSig this ^Type (if rawOuter (.erasure Types/this outer) outer))
+                (.append this (if rawOuter \$ \.))
+                (Assert/check (.startsWith (.-flatname c) (.-flatname (.enclClass (.-owner c)))))
+                (.append this
+                         ^Name (if rawOuter
+                                   (.subName (.-flatname c)
+                                             (unchecked-add-int
+                                               (.length (.-flatname (.enclClass (.-owner c))))
+                                               1))
+                                   (.-name c))))
+              (.append this (ClassFile/externalize (.-flatname c))))
+          (when (.nonEmpty (.getTypeArguments ct))
+            (.append this \<)
+            (.assembleSig this (.getTypeArguments ct))
+            (.append this \>)))))
+
+    (method ^:public assembleParamsSig ^void [this ^{:tag (List Type)} typarams]
+      (.append this \<)
+      (loop [^{:tag (List Type)} ts typarams]
+        (when (.nonEmpty ts)
+          (let [tvar (cast Type$TypeVar (.-head ts))]
+            (.append this (.-name (.-tsym tvar)))
+            (let [^{:tag (List Type)} bounds (.getBounds Types/this tvar)]
+              (when-not (== (bit-and (.flags (.-tsym (cast Type (.-head bounds)))) Flags/INTERFACE)
+                            0)
+                (.append this \:))
+              (loop [^{:tag (List Type)} l bounds]
+                (when (.nonEmpty l)
+                  (.append this \:)
+                  (.assembleSig this (cast Type (.-head l)))
+                  (recur (.-tail l))))
+              (recur (.-tail ts))))))
+      (.append this \>))
+
+    (method ^:public assembleSig ^void [this ^{:tag (List Type)} types]
+      (loop [^{:tag (List Type)} ts types]
+        (when (.nonEmpty ts) (.assembleSig this (cast Type (.-head ts))) (recur (.-tail ts))))))
+
+  (method ^:public constantType ^Type [this ^PoolConstant$LoadableConstant c]
+    (switch (.poolTag c)
+      ClassFile/CONSTANT_Class (.-classType syms)
+      ClassFile/CONSTANT_String (.-stringType syms)
+      ClassFile/CONSTANT_Integer (.-intType syms)
+      ClassFile/CONSTANT_Float (.-floatType syms)
+      ClassFile/CONSTANT_Long (.-longType syms)
+      ClassFile/CONSTANT_Double (.-doubleType syms)
+      ClassFile/CONSTANT_MethodHandle (.-methodHandleType syms)
+      ClassFile/CONSTANT_MethodType (.-methodTypeType syms)
+      ClassFile/CONSTANT_Dynamic (.-type (cast Symbol$DynamicVarSymbol c))
+      (throw (AssertionError. (java-str "Not a loadable constant: " (.poolTag c))))))
+
+  (method ^:public newRound ^void [this]
+    (.clear (.-_map descCache))
+    (.clear isDerivedRawCache)
+    (.clear (.-_map implCache))
+    (.clear (.-_map membersCache))
+    (.clear closureCache)))

@@ -1,0 +1,179 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/code/LintMapper.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.code)
+
+(import '(com.sun.tools.javac.tree EndPosTable
+                                   JCTree
+                                   JCTree$JCClassDecl
+                                   JCTree$JCCompilationUnit
+                                   JCTree$JCMethodDecl
+                                   JCTree$JCModuleDecl
+                                   JCTree$JCPackageDecl
+                                   JCTree$JCVariableDecl
+                                   JCTree$Tag
+                                   TreeInfo
+                                   TreeScanner)
+        '(com.sun.tools.javac.util Assert Context Context$Key JCDiagnostic$DiagnosticPosition)
+        '(java.util HashMap Iterator LinkedList Map Optional)
+        '(java.util.function Consumer)
+        '(javax.tools JavaFileObject))
+
+(defclass ^:public LintMapper
+  (field ^:private ^:static ^:final ^{:tag (Context$Key LintMapper)} CONTEXT_KEY (Context$Key.))
+
+  (field ^:private ^:final ^{:tag (Map JavaFileObject FileInfo)} fileInfoMap (HashMap.))
+
+  (field ^:private ^:final ^Context context)
+
+  (field ^:private ^Lint rootLint)
+
+  (method ^:public ^:static instance ^LintMapper [^Context context]
+    (let [^:mutable instance (cast LintMapper (.get context CONTEXT_KEY))]
+      (when (nil? instance) (set! instance (LintMapper. context)))
+      instance))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context CONTEXT_KEY this)
+    (set! (.-context this) context))
+
+  (method ^:private initializeIfNeeded ^void [this]
+    (when (nil? rootLint) (set! rootLint (Lint/instance context))))
+
+  (method ^:public isKnown ^boolean [this ^JavaFileObject sourceFile]
+    (.containsKey fileInfoMap sourceFile))
+
+  (method ^:public lintAt ^{:tag (Optional Lint)} [this ^JavaFileObject sourceFile
+                                                   ^JCDiagnostic$DiagnosticPosition pos]
+    (.initializeIfNeeded this)
+    (let [fileInfo (cast FileInfo (.get fileInfoMap sourceFile))]
+      (if (some? fileInfo) (.lintAt fileInfo pos) (Optional/empty))))
+
+  (method ^:public calculateLints ^void [this ^JavaFileObject sourceFile ^JCTree tree
+                                         ^EndPosTable endPositions]
+    (Assert/check (some? rootLint))
+    (.afterAttr (cast FileInfo (.get fileInfoMap sourceFile)) tree endPositions))
+
+  (method ^:public clear ^void [this] (.clear fileInfoMap))
+
+  (method ^:public startParsingFile ^void [this ^JavaFileObject sourceFile]
+    (.initializeIfNeeded this)
+    (.put fileInfoMap sourceFile nil))
+
+  (method ^:public finishParsingFile ^void [this ^JCTree$JCCompilationUnit tree]
+    (Assert/check (some? rootLint))
+    (.put fileInfoMap (.-sourcefile tree) (FileInfo. rootLint tree)))
+
+  (defclass ^:private ^:static FileInfo
+    (field ^:final ^LintRange rootRange)
+
+    (field ^:final ^{:tag (java.util.List Span)} unmappedDecls (LinkedList.))
+
+    (constructor [this ^Lint rootLint ^JCTree$JCCompilationUnit tree]
+      (set! rootRange (LintRange. rootLint))
+      (for-each [^JCTree decl (.-defs tree)]
+        (when (.isTopLevelDecl this decl) (.add unmappedDecls (Span. decl (.-endPositions tree))))))
+
+    (method afterAttr ^void [this ^JCTree tree ^EndPosTable endPositions]
+      (loop [^{:tag (Iterator Span)} i (.iterator unmappedDecls)]
+        (if (.hasNext i)
+            (if (.contains (cast Span (.next i)) (.pos tree))
+                (do (.populateSubtree rootRange tree endPositions) (.remove i) (return))
+                (recur i))
+            nil))
+      (throw (AssertionError. "top-level declaration not found")))
+
+    (method lintAt ^{:tag (Optional Lint)} [this ^JCDiagnostic$DiagnosticPosition pos]
+      (for-each [^Span span unmappedDecls] (when (.contains span pos) (return (Optional/empty))))
+      (Optional/of (.-lint (.bestMatch rootRange pos))))
+
+    (method isTopLevelDecl ^boolean [this ^JCTree tree]
+      (or (or (identical? (.getTag tree) JCTree$Tag/MODULEDEF)
+              (identical? (.getTag tree) JCTree$Tag/PACKAGEDEF))
+          (identical? (.getTag tree) JCTree$Tag/CLASSDEF))))
+
+  (defclass ^:private ^:record Span [^int startPos ^int endPos]
+    (field ^:static ^:final ^Span MAXIMAL (Span. Integer/MIN_VALUE Integer/MAX_VALUE))
+
+    (constructor [this ^JCTree tree ^EndPosTable endPositions]
+      (this. (TreeInfo/getStartPos tree) (TreeInfo/getEndPos tree endPositions)))
+
+    (method contains ^boolean [this ^JCDiagnostic$DiagnosticPosition pos]
+      (let [offset (.getLintPosition pos)]
+        (or (== offset startPos) (and (> offset startPos) (< offset endPos)))))
+
+    (method contains ^boolean [this ^Span that]
+      (and (<= (.-startPos this) (.-startPos that)) (>= (.-endPos this) (.-endPos that)))))
+
+  (defclass ^:private ^:record LintRange [^Span span ^Lint lint
+                                          ^{:tag (java.util.List LintRange)} children]
+    (constructor [this ^Lint rootLint]
+      (this. Span/MAXIMAL rootLint (LinkedList.)))
+
+    (constructor [this ^JCTree tree ^EndPosTable endPositions ^Lint lint]
+      (this. (Span. tree endPositions) lint (LinkedList.)))
+
+    (method bestMatch ^LintRange [this ^JCDiagnostic$DiagnosticPosition pos]
+      (let [^:mutable ^LintRange bestMatch nil]
+        (for-each [^LintRange child children]
+          (when-not (not (.contains (.-span child) pos))
+            (let [childBestMatch (.bestMatch child pos)]
+              (when (and (some? childBestMatch)
+                         (or (nil? bestMatch)
+                             (.contains (.-span bestMatch) (.-span childBestMatch))))
+                (set! bestMatch childBestMatch)))))
+        (when (nil? bestMatch) (set! bestMatch (when (.contains span pos) this)))
+        bestMatch))
+
+    (method populateSubtree ^void [this ^JCTree tree ^EndPosTable endPositions]
+      (.scan
+        (anon TreeScanner []
+          (field ^:private ^LintRange currentNode LintRange/this)
+
+          (method ^:public visitModuleDef ^void [this ^JCTree$JCModuleDecl tree]
+            (.scanDecl
+              this
+              tree
+              (.-sym tree)
+              (method-ref Consumer [JCTree$JCModuleDecl] super TreeScanner/.visitModuleDef)))
+
+          (method ^:public visitPackageDef ^void [this ^JCTree$JCPackageDecl tree]
+            (.scanDecl this
+                       tree
+                       (.-packge tree)
+                       (method-ref Consumer
+                                   [JCTree$JCPackageDecl]
+                                   super
+                                   TreeScanner/.visitPackageDef)))
+
+          (method ^:public visitClassDef ^void [this ^JCTree$JCClassDecl tree]
+            (.scanDecl this
+                       tree
+                       (.-sym tree)
+                       (method-ref Consumer [JCTree$JCClassDecl] super TreeScanner/.visitClassDef)))
+
+          (method ^:public visitMethodDef ^void [this ^JCTree$JCMethodDecl tree]
+            (.scanDecl
+              this
+              tree
+              (.-sym tree)
+              (method-ref Consumer [JCTree$JCMethodDecl] super TreeScanner/.visitMethodDef)))
+
+          (method ^:public visitVarDef ^void [this ^JCTree$JCVariableDecl tree]
+            (.scanDecl this
+                       tree
+                       (.-sym tree)
+                       (method-ref Consumer [JCTree$JCVariableDecl] super TreeScanner/.visitVarDef)))
+
+          (method ^:private scanDecl :type-params [(T extends JCTree)] ^void [this ^T tree
+                                                                              ^Symbol symbol
+                                                                              ^{:tag (Consumer (? super T))} recursor]
+            (if (nil? symbol)
+                (.accept recursor tree)
+                (let [newLint (.augment (.-lint currentNode) symbol)]
+                  (if (identical? newLint (.-lint currentNode))
+                      (.accept recursor tree)
+                      (let [previousNode currentNode]
+                        (set! currentNode (LintRange. tree endPositions newLint))
+                        (.add (.-children previousNode) currentNode)
+                        (try (.accept recursor tree) (finally (set! currentNode previousNode)))))))))
+        tree))))

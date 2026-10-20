@@ -1,0 +1,768 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/code/Scope.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.code)
+
+(import '(com.sun.tools.javac.tree JCTree$JCImport)
+        '(com.sun.tools.javac.util Assert Iterators List ListBuffer Name)
+        '(java.lang.ref WeakReference)
+        '(java.util Arrays
+                    Collections
+                    HashMap
+                    HashSet
+                    IdentityHashMap
+                    Iterator
+                    Map
+                    NoSuchElementException
+                    Set)
+        '(java.util.function BiConsumer Function Predicate))
+
+(defclass ^:public ^:abstract Scope
+  (field ^:public ^:final ^Symbol owner)
+
+  (constructor ^:protected [this ^Symbol owner]
+    (set! (.-owner this) owner))
+
+  (method ^:public ^:final getSymbols ^{:tag (Iterable Symbol)} [this]
+    (.getSymbols this noFilter))
+
+  (method ^:public ^:final getSymbols ^{:tag (Iterable Symbol)} [this ^{:tag (Predicate Symbol)} sf]
+    (.getSymbols this sf LookupKind/RECURSIVE))
+
+  (method ^:public ^:final getSymbols ^{:tag (Iterable Symbol)} [this ^LookupKind lookupKind]
+    (.getSymbols this noFilter lookupKind))
+
+  (method ^:public ^:abstract getSymbols ^{:tag (Iterable Symbol)} [this
+                                                                    ^{:tag (Predicate Symbol)} sf
+                                                                    ^LookupKind lookupKind])
+
+  (method ^:public ^:final getSymbolsByName ^{:tag (Iterable Symbol)} [this ^Name name]
+    (.getSymbolsByName this name LookupKind/RECURSIVE))
+
+  (method ^:public ^:final getSymbolsByName ^{:tag (Iterable Symbol)} [this ^:final ^Name name
+                                                                       ^:final ^{:tag (Predicate Symbol)} sf]
+    (.getSymbolsByName this name sf LookupKind/RECURSIVE))
+
+  (method ^:public ^:final getSymbolsByName ^{:tag (Iterable Symbol)} [this ^Name name
+                                                                       ^LookupKind lookupKind]
+    (.getSymbolsByName this name noFilter lookupKind))
+
+  (method ^:public ^:abstract getSymbolsByName ^{:tag (Iterable Symbol)} [this ^:final ^Name name
+                                                                          ^:final ^{:tag (Predicate Symbol)} sf
+                                                                          ^:final ^LookupKind lookupKind])
+
+  (method ^:public ^:final findFirst ^Symbol [this ^Name name]
+    (.findFirst this name noFilter))
+
+  (method ^:public findFirst ^Symbol [this ^Name name ^{:tag (Predicate Symbol)} sf]
+    (let [^{:tag (Iterator Symbol)} it (.iterator (.getSymbolsByName this name sf))]
+      (when (.hasNext it) (cast Symbol (.next it)))))
+
+  (method ^:public anyMatch ^boolean [this ^{:tag (Predicate Symbol)} filter]
+    (.hasNext (.iterator (.getSymbols this filter LookupKind/NON_RECURSIVE))))
+
+  (method ^:public includes ^boolean [this ^:final ^Symbol sym]
+    (.includes this sym LookupKind/RECURSIVE))
+
+  (method ^:public includes ^boolean [this ^:final ^Symbol sym ^LookupKind lookupKind]
+    (.hasNext (.iterator (.getSymbolsByName this
+                                            (.-name sym)
+                                            (lambda Predicate ^boolean [^Symbol t]
+                                              (identical? t sym))
+                                            lookupKind))))
+
+  (method ^:public isEmpty ^boolean [this]
+    (not (.hasNext (.iterator (.getSymbols this LookupKind/NON_RECURSIVE)))))
+
+  (method ^:public ^:abstract getOrigin ^Scope [this ^Symbol byName])
+
+  (method ^:public ^:abstract isStaticallyImported ^boolean [this ^Symbol byName])
+
+  (field ^:private ^:static ^:final ^{:tag (Predicate Symbol)} noFilter nil)
+
+  (field ^ScopeListenerList listeners (ScopeListenerList.))
+
+  (defclass ^:public ^:interface ScopeListener
+    (method symbolAdded ^void [this ^Symbol sym ^Scope s])
+
+    (method symbolRemoved ^void [this ^Symbol sym ^Scope s]))
+
+  (defclass ^:public ^:static ScopeListenerList
+    (field ^{:tag (List (WeakReference ScopeListener))} listeners (List/nil))
+
+    (method add ^void [this ^ScopeListener sl]
+      (set! listeners (.prepend listeners (WeakReference. sl))))
+
+    (method symbolAdded ^void [this ^Symbol sym ^Scope scope]
+      (.walkReferences this sym scope false))
+
+    (method symbolRemoved ^void [this ^Symbol sym ^Scope scope]
+      (.walkReferences this sym scope true))
+
+    (method ^:private walkReferences ^void [this ^Symbol sym ^Scope scope ^boolean isRemove]
+      (let [^{:tag (ListBuffer (WeakReference ScopeListener))} newListeners (ListBuffer.)]
+        (for-each [^{:tag (WeakReference ScopeListener)} wsl listeners]
+          (let [sl (cast ScopeListener (.get wsl))]
+            (when (some? sl)
+              (if isRemove (.symbolRemoved sl sym scope) (.symbolAdded sl sym scope))
+              (.add newListeners wsl))))
+        (set! listeners (.toList newListeners)))))
+
+  (defclass ^:public ^:enum LookupKind
+    (constants RECURSIVE NON_RECURSIVE))
+
+  (defclass ^:public ^:abstract ^:static WriteableScope
+    :extends Scope
+
+    (constructor ^:public [this ^Symbol owner] (super. owner))
+
+    (method ^:public ^:abstract enter ^void [this ^Symbol c])
+
+    (method ^:public ^:abstract enterIfAbsent ^void [this ^Symbol c])
+
+    (method ^:public ^:abstract remove ^void [this ^Symbol c])
+
+    (method ^:public ^:final dup ^WriteableScope [this]
+      (.dup this (.-owner this)))
+
+    (method ^:public ^:abstract dup ^WriteableScope [this ^Symbol newOwner])
+
+    (method ^:public ^:abstract leave ^WriteableScope [this])
+
+    (method ^:public ^:final dupUnshared ^WriteableScope [this]
+      (.dupUnshared this (.-owner this)))
+
+    (method ^:public ^:abstract dupUnshared ^WriteableScope [this ^Symbol newOwner])
+
+    (method ^:public ^:static create ^WriteableScope [^Symbol owner]
+      (ScopeImpl. owner)))
+
+  (defclass ^:private ^:static ScopeImpl
+    :extends WriteableScope
+
+    (field ^:private ^boolean shared)
+
+    (field ^:public ^ScopeImpl next)
+
+    (field ^Entry/1 table)
+
+    (field ^int hashMask)
+
+    (field ^:public ^Entry elems)
+
+    (field ^int nelems 0)
+
+    (field ^int removeCount 0)
+
+    (field ^:private ^:static ^:final ^Entry sentinel (Entry. nil nil nil nil))
+
+    (field ^:private ^:static ^:final ^int INITIAL_SIZE 0x10)
+
+    (constructor ^:private [this ^ScopeImpl next ^Symbol owner ^Entry/1 table]
+      (super. owner)
+      (set! (.-next this) next)
+      (Assert/check (some? owner))
+      (set! (.-table this) table)
+      (set! (.-hashMask this) (unchecked-subtract-int (alength table) 1)))
+
+    (constructor ^:private [this ^ScopeImpl next ^Symbol owner ^Entry/1 table ^int nelems]
+      (this. next owner table)
+      (set! (.-nelems this) nelems))
+
+    (constructor ^:public [this ^Symbol owner]
+      (this. nil owner (new Entry/1 INITIAL_SIZE)))
+
+    (method ^:public dup ^WriteableScope [this ^Symbol newOwner]
+      (Assert/check (not shared))
+      (let [result (ScopeImpl. this newOwner (.-table this) (.-nelems this))]
+        (set! shared true)
+        result))
+
+    (method ^:public dupUnshared ^WriteableScope [this ^Symbol newOwner]
+      (if shared
+          (let [^{:tag (Set Scope)} acceptScopes (Collections/newSetFromMap (IdentityHashMap.))
+                ^:mutable c this]
+            (while (some? c) (.add acceptScopes c) (set! c (.-next c)))
+            (let [^:mutable ^int n 0
+                  oldTable (.-table this)
+                  newTable (new Entry/1 (alength (.-table this)))]
+              (loop [^int i 0]
+                (when (< i (alength oldTable))
+                  (let [^:mutable e (aget oldTable i)]
+                    (while (and (and (some? e) (not (identical? e sentinel)))
+                                (not (.contains acceptScopes (.-scope e))))
+                      (set! e (.-shadowed e)))
+                    (if (some? e)
+                        (do
+                          (set! n (unchecked-inc-int n))
+                          (aset newTable i e)
+                          (recur (unchecked-inc-int i)))
+                        (recur (unchecked-inc-int i))))))
+              (ScopeImpl. this newOwner newTable n)))
+          (ScopeImpl. this newOwner ^Entry/1 (.clone (.-table this)) (.-nelems this))))
+
+    (method ^:public leave ^WriteableScope [this]
+      (Assert/check (not shared))
+      (if (not (identical? table (.-table next)))
+          next
+          (do
+            (while (some? elems)
+              (let [hash (.getIndex this (.-name (.-sym elems)))
+                    e (aget table hash)]
+                (Assert/check (identical? e elems) (.-sym elems))
+                (aset table hash (.-shadowed elems))
+                (set! elems (.-nextSibling elems))))
+            (Assert/check (.-shared next))
+            (set! (.-shared next) false)
+            (set! (.-nelems next) nelems)
+            next)))
+
+    (method ^:private dble ^void [this]
+      (Assert/check (not shared))
+      (let [oldtable table
+            newtable (new Entry/1 (unchecked-multiply-int (alength oldtable) 2))]
+        (loop [s this]
+          (if (some? s)
+              (if (identical? (.-table s) oldtable)
+                  (do
+                    (Assert/check (or (identical? s this) (.-shared s)))
+                    (set! (.-table s) newtable)
+                    (set! (.-hashMask s) (unchecked-subtract-int (alength newtable) 1))
+                    (recur (.-next s)))
+                  (recur (.-next s)))
+              nil))
+        (let [^:mutable ^int n 0]
+          (let [^:mutable i (alength oldtable)]
+            (while (>= (set! i (unchecked-dec-int i)) 0)
+              (let [e (aget oldtable i)]
+                (when (and (some? e) (not (identical? e sentinel)))
+                  (aset table (.getIndex this (.-name (.-sym e))) e)
+                  (set! n (unchecked-inc-int n))))))
+          (set! nelems n))))
+
+    (method ^:public enter ^void [this ^Symbol sym]
+      (Assert/check (not shared))
+      (when (>= (unchecked-multiply-int nelems 3) (unchecked-multiply-int hashMask 2)) (.dble this))
+      (let [hash (.getIndex this (.-name sym))
+            ^:mutable old (aget table hash)]
+        (when (nil? old) (set! old sentinel) (set! nelems (unchecked-inc-int nelems)))
+        (let [e (Entry. sym old elems this)]
+          (aset table hash e)
+          (set! elems e)
+          (.symbolAdded (.-listeners this) sym this))))
+
+    (method ^:public remove ^void [this ^Symbol sym]
+      (Assert/check (not shared))
+      (let [e (.lookup this
+                       (.-name sym)
+                       (lambda Predicate ^boolean [^Symbol candidate] (identical? candidate sym)))]
+        (when (some? (.-scope e))
+          (let [i (.getIndex this (.-name sym))
+                ^:mutable te (aget table i)]
+            (if (identical? te e)
+                (aset table i (.-shadowed e))
+                (while true
+                  (when (identical? (.-shadowed te) e)
+                    (set! (.-shadowed te) (.-shadowed e))
+                    (break))
+                  (set! te (.-shadowed te))))
+            (if (identical? elems e)
+                (do
+                  (set! elems (.-nextSibling e))
+                  (when (some? elems) (set! (.-prevSibling elems) nil)))
+                (do
+                  (Assert/check (some? (.-prevSibling e)) (.-sym e))
+                  (set! (.-nextSibling (.-prevSibling e)) (.-nextSibling e))
+                  (when (some? (.-nextSibling e))
+                    (set! (.-prevSibling (.-nextSibling e)) (.-prevSibling e)))))
+            (set! removeCount (unchecked-inc-int removeCount))
+            (.symbolRemoved (.-listeners this) sym this)))))
+
+    (method ^:public enterIfAbsent ^void [this ^Symbol sym]
+      (Assert/check (not shared))
+      (let [^:mutable e (.lookup this (.-name sym))]
+        (while (and (identical? (.-scope e) this)
+                    (not (identical? (.-kind (.-sym e)) (.-kind sym))))
+          (set! e (.next e)))
+        (when-not (identical? (.-scope e) this) (.enter this sym))))
+
+    (method ^:public includes ^boolean [this ^Symbol c]
+      (loop [e (.lookup this (.-name c))]
+        (if (identical? (.-scope e) this)
+            (if (identical? (.-sym e) c) (return true) (recur (.next e)))
+            nil))
+      false)
+
+    (method ^:protected lookup ^Entry [this ^Name name]
+      (.lookup this name noFilter))
+
+    (method ^:protected lookup ^Entry [this ^Name name ^{:tag (Predicate Symbol)} sf]
+      (let [^:mutable e (aget table (.getIndex this name))]
+        (if (or (nil? e) (identical? e sentinel))
+            sentinel
+            (do
+              (while (and (some? (.-scope e))
+                          (or (not (identical? (.-name (.-sym e)) name))
+                              (and (some? sf) (not (.test sf (.-sym e))))))
+                (set! e (.-shadowed e)))
+              e))))
+
+    (method ^:public findFirst ^Symbol [this ^Name name ^{:tag (Predicate Symbol)} sf]
+      (.-sym (.lookup this name sf)))
+
+    (method getIndex ^int [this ^Name name]
+      (let [h (.hashCode name)
+            ^:mutable i (bit-and-int h hashMask)
+            x (unchecked-subtract-int hashMask
+                                      (bit-shift-left-int
+                                        (unchecked-add-int h (bit-shift-right-int h 16))
+                                        1))
+            ^:mutable ^int d -1]
+        (while true
+          (let [e (aget table i)]
+            (when (nil? e) (return (if (>= d 0) d i)))
+            (cond
+              (identical? e sentinel) (when (< d 0) (set! d i))
+              (identical? (.-name (.-sym e)) name) (return i))
+            (set! i (bit-and-int (unchecked-add-int i x) hashMask))))))
+
+    (method ^:public anyMatch ^boolean [this ^{:tag (Predicate Symbol)} sf]
+      (.hasNext (.iterator (.getSymbols this sf LookupKind/NON_RECURSIVE))))
+
+    (method ^:public getSymbols ^{:tag (Iterable Symbol)} [this
+                                                           ^:final ^{:tag (Predicate Symbol)} sf
+                                                           ^:final ^LookupKind lookupKind]
+      (lambda Iterable ^Iterator []
+        (anon (Iterator Symbol) []
+          (field ^:private ^ScopeImpl currScope ScopeImpl/this)
+
+          (field ^:private ^Entry currEntry elems)
+
+          (field ^:private ^int seenRemoveCount (.-removeCount currScope))
+
+          (initializer (.update this))
+
+          (method ^:public hasNext ^boolean [this]
+            (when (and (and (not (== seenRemoveCount (.-removeCount currScope))) (some? currEntry))
+                       (not (.includes (.-scope currEntry) (.-sym currEntry))))
+              (.doNext this)
+              (set! seenRemoveCount (.-removeCount currScope)))
+            (some? currEntry))
+
+          (method ^:public next ^Symbol [this]
+            (when-not (.hasNext this) (throw (NoSuchElementException.)))
+            (.doNext this))
+
+          (method ^:private doNext ^Symbol [this]
+            (let [^Symbol sym (when (some? currEntry) (.-sym currEntry))]
+              (when (some? currEntry) (set! currEntry (.-nextSibling currEntry)))
+              (.update this)
+              sym))
+
+          (method ^:private update ^void [this]
+            (.skipToNextMatchingEntry this)
+            (when (identical? lookupKind LookupKind/RECURSIVE)
+              (while (and (nil? currEntry) (some? (.-next currScope)))
+                (set! currScope (.-next currScope))
+                (set! currEntry (.-elems currScope))
+                (set! seenRemoveCount (.-removeCount currScope))
+                (.skipToNextMatchingEntry this))))
+
+          (method skipToNextMatchingEntry ^void [this]
+            (while (and (and (some? currEntry) (some? sf)) (not (.test sf (.-sym currEntry))))
+              (set! currEntry (.-nextSibling currEntry)))))))
+
+    (method ^:public getSymbolsByName ^{:tag (Iterable Symbol)} [this ^:final ^Name name
+                                                                 ^:final ^{:tag (Predicate Symbol)} sf
+                                                                 ^:final ^LookupKind lookupKind]
+      (lambda Iterable ^Iterator []
+        (anon (Iterator Symbol) []
+          (field ^Entry currentEntry (.lookup ScopeImpl/this name sf))
+
+          (field ^int seenRemoveCount
+            (if (some? (.-scope currentEntry)) (.-removeCount (.-scope currentEntry)) -1))
+
+          (method ^:public hasNext ^boolean [this]
+            (when (and (and (some? (.-scope currentEntry))
+                            (not (== seenRemoveCount (.-removeCount (.-scope currentEntry)))))
+                       (not (.includes (.-scope currentEntry) (.-sym currentEntry))))
+              (.doNext this))
+            (and (some? (.-scope currentEntry))
+                 (or (identical? lookupKind LookupKind/RECURSIVE)
+                     (identical? (.-scope currentEntry) ScopeImpl/this))))
+
+          (method ^:public next ^Symbol [this]
+            (when-not (.hasNext this) (throw (NoSuchElementException.)))
+            (.doNext this))
+
+          (method ^:private doNext ^Symbol [this]
+            (let [prevEntry currentEntry]
+              (set! currentEntry (.next currentEntry sf))
+              (.-sym prevEntry)))
+
+          (method ^:public remove ^void [this]
+            (throw (UnsupportedOperationException.))))))
+
+    (method ^:public getOrigin ^Scope [this ^Symbol s]
+      (loop [e (.lookup this (.-name s))]
+        (if (some? (.-scope e)) (if (identical? (.-sym e) s) (return this) (recur (.next e))) nil))
+      nil)
+
+    (method ^:public isStaticallyImported ^boolean [this ^Symbol s] false)
+
+    (method ^:public toString ^String [this]
+      (let [result (StringBuilder.)]
+        (.append result "Scope[")
+        (loop [s this]
+          (when (some? s)
+            (when-not (identical? s this) (.append result " | "))
+            (loop [e (.-elems s)]
+              (when (some? e)
+                (when-not (identical? e (.-elems s)) (.append result ", "))
+                (.append result (.-sym e))
+                (recur (.-nextSibling e))))
+            (recur (.-next s))))
+        (.append result "]")
+        (.toString result))))
+
+  (defclass ^:private ^:static Entry
+    (field ^:public ^Symbol sym)
+
+    (field ^:private ^Entry shadowed)
+
+    (field ^:public ^Entry nextSibling)
+
+    (field ^:public ^Entry prevSibling)
+
+    (field ^:public ^ScopeImpl scope)
+
+    (constructor ^:public [this ^Symbol sym ^Entry shadowed ^Entry nextSibling ^ScopeImpl scope]
+      (set! (.-sym this) sym)
+      (set! (.-shadowed this) shadowed)
+      (set! (.-nextSibling this) nextSibling)
+      (set! (.-scope this) scope)
+      (when (some? nextSibling) (set! (.-prevSibling nextSibling) this)))
+
+    (method ^:public next ^Entry [this] shadowed)
+
+    (method ^:public next ^Entry [this ^{:tag (Predicate Symbol)} sf]
+      (if (or (or (nil? (.-sym shadowed)) (nil? sf)) (.test sf (.-sym shadowed)))
+          shadowed
+          (.next shadowed sf))))
+
+  (defclass ^:public ^:static ImportScope
+    :extends CompoundScope
+
+    (constructor ^:public [this ^Symbol owner] (super. owner))
+
+    (method ^:public finalizeScope ^void [this]
+      (loop [^{:tag (List Scope)} scopes (.toList (.-subScopes this))]
+        (when (.nonEmpty scopes)
+          (set! (.-head scopes) (.finalizeSingleScope this (cast Scope (.-head scopes))))
+          (recur (.-tail scopes)))))
+
+    (method ^:protected finalizeSingleScope ^Scope [this ^Scope impScope]
+      (when-instance [^FilterImportScope filterImportScope impScope]
+        (when (identical? (.-kind (.-owner impScope)) Kinds$Kind/TYP)
+          (when (.isStaticallyImported filterImportScope)
+            (let [finalized (WriteableScope/create (.-owner impScope))]
+              (for-each [^Symbol sym (.getSymbols impScope)] (.enter finalized sym))
+              (.add (.-listeners finalized)
+                    (anon ScopeListener []
+                      (method ^:public symbolAdded ^void [this ^Symbol sym ^Scope s]
+                        (Assert/error "The scope is sealed."))
+
+                      (method ^:public symbolRemoved ^void [this ^Symbol sym ^Scope s]
+                        (Assert/error "The scope is sealed."))))
+              (return finalized)))))
+      impScope))
+
+  (defclass ^:public ^:static NamedImportScope
+    :extends ImportScope
+
+    (field ^:private ^:final ^{:tag (Map Name Scope/1)} name2Scopes (HashMap.))
+
+    (constructor ^:public [this ^Symbol owner] (super. owner))
+
+    (method ^:public importByName ^Scope [this ^Types types ^Scope origin ^Name name
+                                          ^ImportFilter filter ^JCTree$JCImport imp
+                                          ^{:tag (BiConsumer JCTree$JCImport Symbol$CompletionFailure)} cfHandler]
+      (.appendScope this (FilterImportScope. types origin name filter imp cfHandler) name))
+
+    (method ^:public importType ^Scope [this ^Scope delegate ^Scope origin ^Symbol sym]
+      (.appendScope this (SingleEntryScope. (.-owner delegate) sym origin) (.-name sym)))
+
+    (method ^:private appendScope ^Scope [this ^Scope newScope ^Name name]
+      (.appendSubScope this newScope)
+      (let [^:mutable existing (cast Scope/1 (.get name2Scopes name))]
+        (if (some? existing)
+            (set! existing
+                  (cast Scope/1 (Arrays/copyOf existing (unchecked-add-int (alength existing) 1))))
+            (set! existing (new Scope/1 1)))
+        (aset existing (unchecked-subtract-int (alength existing) 1) newScope)
+        (.put name2Scopes name existing)
+        newScope))
+
+    (method ^:public getSymbolsByName ^{:tag (Iterable Symbol)} [this ^Name name
+                                                                 ^{:tag (Predicate Symbol)} sf
+                                                                 ^LookupKind lookupKind]
+      (let [scopes (cast Scope/1 (.get name2Scopes name))]
+        (if (nil? scopes)
+            (Collections/emptyList)
+            (lambda Iterable ^Iterator []
+              (Iterators/createCompoundIterator (Arrays/asList scopes)
+                                                (lambda Function ^Iterator [^Scope scope]
+                                                  (.iterator
+                                                    (.getSymbolsByName scope name sf lookupKind))))))))
+
+    (method ^:public finalizeScope ^void [this]
+      (.finalizeScope super)
+      (for-each [^Scope/1 scopes (.values name2Scopes)]
+        (loop [^int i 0]
+          (when (< i (alength scopes))
+            (aset scopes i (.finalizeSingleScope this (aget scopes i)))
+            (recur (unchecked-inc-int i))))))
+
+    (defclass ^:private ^:static SingleEntryScope
+      :extends Scope
+
+      (field ^:private ^:final ^Symbol sym)
+
+      (field ^:private ^:final ^{:tag (List Symbol)} content)
+
+      (field ^:private ^:final ^Scope origin)
+
+      (constructor ^:public [this ^Symbol owner ^Symbol sym ^Scope origin]
+        (super. owner)
+        (set! (.-sym this) sym)
+        (set! (.-content this) (List/of sym))
+        (set! (.-origin this) origin))
+
+      (method ^:public getSymbols ^{:tag (Iterable Symbol)} [this ^{:tag (Predicate Symbol)} sf
+                                                             ^LookupKind lookupKind]
+        (if (or (nil? sf) (.test sf sym)) ^Iterable content ^Iterable (Collections/emptyList)))
+
+      (method ^:public getSymbolsByName ^{:tag (Iterable Symbol)} [this ^Name name
+                                                                   ^{:tag (Predicate Symbol)} sf
+                                                                   ^LookupKind lookupKind]
+        (if (and (identical? (.-name sym) name) (or (nil? sf) (.test sf sym)))
+            ^Iterable content
+            ^Iterable (Collections/emptyList)))
+
+      (method ^:public getOrigin ^Scope [this ^Symbol byName]
+        (when (identical? sym byName) origin))
+
+      (method ^:public isStaticallyImported ^boolean [this ^Symbol byName]
+        false)))
+
+  (defclass ^:public ^:static StarImportScope
+    :extends ImportScope
+
+    (constructor ^:public [this ^Symbol owner] (super. owner))
+
+    (method ^:public importAll ^void [this ^Types types ^Scope origin ^ImportFilter filter
+                                      ^JCTree$JCImport imp
+                                      ^{:tag (BiConsumer JCTree$JCImport Symbol$CompletionFailure)} cfHandler]
+      (for-each [^Scope existing (.-subScopes this)]
+        (Assert/check (instance? FilterImportScope existing))
+        (let [fis (cast FilterImportScope existing)]
+          (when (and (and (identical? (.-origin fis) origin) (identical? (.-filter fis) filter))
+                     (= (.-staticImport (.-imp fis)) (.-staticImport imp)))
+            (return))))
+      (.prependSubScope this (FilterImportScope. types origin nil filter imp cfHandler)))
+
+    (method ^:public isFilled ^boolean [this]
+      (.nonEmpty (.-subScopes this))))
+
+  (defclass ^:public ^:interface ImportFilter
+    (method ^:public accepts ^boolean [this ^Scope origin ^Symbol sym]))
+
+  (defclass ^:private ^:static FilterImportScope
+    :extends Scope
+
+    (field ^:private ^:final ^Types types)
+
+    (field ^:private ^:final ^Scope origin)
+
+    (field ^:private ^:final ^Name filterName)
+
+    (field ^:private ^:final ^ImportFilter filter)
+
+    (field ^:private ^:final ^JCTree$JCImport imp)
+
+    (field ^:private ^:final ^{:tag (BiConsumer JCTree$JCImport Symbol$CompletionFailure)} cfHandler)
+
+    (constructor ^:public [this ^Types types ^Scope origin ^Name filterName ^ImportFilter filter
+                           ^JCTree$JCImport imp
+                           ^{:tag (BiConsumer JCTree$JCImport Symbol$CompletionFailure)} cfHandler]
+      (super. (.-owner origin))
+      (set! (.-types this) types)
+      (set! (.-origin this) origin)
+      (set! (.-filterName this) filterName)
+      (set! (.-filter this) filter)
+      (set! (.-imp this) imp)
+      (set! (.-cfHandler this) cfHandler))
+
+    (method ^:public getSymbols ^{:tag (Iterable Symbol)} [this
+                                                           ^:final ^{:tag (Predicate Symbol)} sf
+                                                           ^:final ^LookupKind lookupKind]
+      (if (some? filterName)
+          (.getSymbolsByName this filterName sf lookupKind)
+          (try
+            (let [^SymbolImporter si (anon SymbolImporter [(.-staticImport imp)]
+                                       (method doLookup ^{:tag (Iterable Symbol)} [this
+                                                                                   ^Symbol$TypeSymbol tsym]
+                                         (.getSymbols (.members tsym) sf lookupKind)))
+                  ^{:tag (List (Iterable Symbol))} results (.importFrom
+                                                             si
+                                                             (cast
+                                                               Symbol$TypeSymbol
+                                                               (.-owner origin))
+                                                             (List/nil))]
+              (lambda Iterable ^Iterator []
+                (Iterators/createFilterIterator
+                  (Iterators/createCompoundIterator
+                    results
+                    (method-ref Function ^Iterator [Iterable] Iterable/.iterator))
+                  (lambda Predicate ^boolean [^Symbol s] (.accepts filter origin s)))))
+            (catch Symbol$CompletionFailure cf (.accept cfHandler imp cf) (Collections/emptyList)))))
+
+    (method ^:public getSymbolsByName ^{:tag (Iterable Symbol)} [this ^:final ^Name name
+                                                                 ^:final ^{:tag (Predicate Symbol)} sf
+                                                                 ^:final ^LookupKind lookupKind]
+      (if (and (some? filterName) (not (identical? filterName name)))
+          (Collections/emptyList)
+          (try
+            (let [^SymbolImporter si (anon SymbolImporter [(.-staticImport imp)]
+                                       (method doLookup ^{:tag (Iterable Symbol)} [this
+                                                                                   ^Symbol$TypeSymbol tsym]
+                                         (.getSymbolsByName (.members tsym) name sf lookupKind)))
+                  ^{:tag (List (Iterable Symbol))} results (.importFrom
+                                                             si
+                                                             (cast
+                                                               Symbol$TypeSymbol
+                                                               (.-owner origin))
+                                                             (List/nil))]
+              (lambda Iterable ^Iterator []
+                (Iterators/createFilterIterator
+                  (Iterators/createCompoundIterator
+                    results
+                    (method-ref Function ^Iterator [Iterable] Iterable/.iterator))
+                  (lambda Predicate ^boolean [^Symbol s] (.accepts filter origin s)))))
+            (catch Symbol$CompletionFailure cf (.accept cfHandler imp cf) (Collections/emptyList)))))
+
+    (method ^:public getOrigin ^Scope [this ^Symbol byName] origin)
+
+    (method ^:public isStaticallyImported ^boolean [this ^Symbol byName]
+      (.isStaticallyImported this))
+
+    (method ^:public isStaticallyImported ^boolean [this]
+      (.-staticImport imp))
+
+    (defclass ^:abstract SymbolImporter
+      (field ^{:tag (Set Symbol)} processed (HashSet.))
+
+      (field ^{:tag (List (Iterable Symbol))} delegates (List/nil))
+
+      (field ^:final ^boolean inspectSuperTypes)
+
+      (constructor ^:public [this ^boolean inspectSuperTypes]
+        (set! (.-inspectSuperTypes this) inspectSuperTypes))
+
+      (method importFrom ^{:tag (List (Iterable Symbol))} [this ^Symbol$TypeSymbol tsym
+                                                           ^:mutable ^{:tag (List (Iterable Symbol))} results]
+        (if (or (nil? tsym) (not (.add processed tsym)))
+            results
+            (do
+              (when inspectSuperTypes
+                (set! results (.importFrom this (.-tsym (.supertype types (.-type tsym))) results))
+                (for-each [^Type t (.interfaces types (.-type tsym))]
+                  (set! results (.importFrom this (.-tsym t) results))))
+              (.prepend results (.doLookup this tsym)))))
+
+      (method ^:abstract doLookup ^{:tag (Iterable Symbol)} [this ^Symbol$TypeSymbol tsym])))
+
+  (defclass ^:public ^:static CompoundScope
+    :extends Scope
+    :implements [ScopeListener]
+
+    (field ^{:tag (ListBuffer Scope)} subScopes (ListBuffer.))
+
+    (field ^:private ^int mark 0)
+
+    (constructor ^:public [this ^Symbol owner] (super. owner))
+
+    (method ^:public prependSubScope ^void [this ^Scope that]
+      (when (some? that)
+        (.prepend subScopes that)
+        (.add (.-listeners that) this)
+        (set! mark (unchecked-inc-int mark))
+        (.symbolAdded (.-listeners this) nil this)))
+
+    (method ^:public appendSubScope ^void [this ^Scope that]
+      (when (some? that)
+        (.append subScopes that)
+        (.add (.-listeners that) this)
+        (set! mark (unchecked-inc-int mark))
+        (.symbolAdded (.-listeners this) nil this)))
+
+    (method ^:public symbolAdded ^void [this ^Symbol sym ^Scope s]
+      (set! mark (unchecked-inc-int mark))
+      (.symbolAdded (.-listeners this) sym s))
+
+    (method ^:public symbolRemoved ^void [this ^Symbol sym ^Scope s]
+      (set! mark (unchecked-inc-int mark))
+      (.symbolRemoved (.-listeners this) sym s))
+
+    (method ^:public getMark ^int [this] mark)
+
+    (method ^:public toString ^String [this]
+      (let [buf (StringBuilder.)]
+        (.append buf "CompoundScope{")
+        (let [^:mutable sep ""]
+          (for-each [^Scope s subScopes] (.append buf sep) (.append buf s) (set! sep ","))
+          (.append buf "}")
+          (.toString buf))))
+
+    (method ^:public getSymbols ^{:tag (Iterable Symbol)} [this
+                                                           ^:final ^{:tag (Predicate Symbol)} sf
+                                                           ^:final ^LookupKind lookupKind]
+      (lambda Iterable ^Iterator []
+        (Iterators/createCompoundIterator subScopes
+                                          (lambda Function ^Iterator [^Scope scope]
+                                            (.iterator (.getSymbols scope sf lookupKind))))))
+
+    (method ^:public getSymbolsByName ^{:tag (Iterable Symbol)} [this ^:final ^Name name
+                                                                 ^:final ^{:tag (Predicate Symbol)} sf
+                                                                 ^:final ^LookupKind lookupKind]
+      (lambda Iterable ^Iterator []
+        (Iterators/createCompoundIterator
+          subScopes
+          (lambda Function ^Iterator [^Scope scope]
+            (.iterator (.getSymbolsByName scope name sf lookupKind))))))
+
+    (method ^:public getOrigin ^Scope [this ^Symbol sym]
+      (for-each [^Scope delegate subScopes]
+        (when (.includes delegate sym) (return (.getOrigin delegate sym))))
+      nil)
+
+    (method ^:public isStaticallyImported ^boolean [this ^Symbol sym]
+      (for-each [^Scope delegate subScopes]
+        (when (.includes delegate sym) (return (.isStaticallyImported delegate sym))))
+      false))
+
+  (defclass ^:public ^:static ErrorScope
+    :extends ScopeImpl
+
+    (constructor [this ^ScopeImpl next ^Symbol errSymbol ^Entry/1 table]
+      (super. next errSymbol table))
+
+    (constructor ^:public [this ^Symbol errSymbol] (super. errSymbol))
+
+    (method ^:public dup ^WriteableScope [this ^Symbol newOwner]
+      (ErrorScope. this newOwner (.-table this)))
+
+    (method ^:public dupUnshared ^WriteableScope [this ^Symbol newOwner]
+      (ErrorScope. this newOwner ^Entry/1 (.clone (.-table this))))
+
+    (method ^:public lookup ^Entry [this ^Name name]
+      (let [e (.lookup super name)] (if (nil? (.-scope e)) (Entry. (.-owner this) nil nil nil) e)))))

@@ -1055,13 +1055,25 @@
 
 (declare outer-this-node*)
 
+(defn- prologue-class?
+  "Is class n a local or anonymous class declared in a constructor's prologue, before the
+  constructor call (an early construction context: no instance of the constructor's class, so
+  no immediately enclosing instance, JLS 8.1.3)?"
+  [n]
+  (boolean (some-> (decl n) :state deref :prologue)))
+
 (defn outer-this-node
   "Java's T.this from actx: the path of this$0 hops from the current class to class T. In a
   lambda in a constructor of an inner class, the constructor's outer instance parameter
-  captured by the lambda, as javac's Lower makes it before LambdaToMethod."
+  captured by the lambda, as javac's Lower makes it before LambdaToMethod; likewise in a local or
+  anonymous class declared in the constructor's prologue (javac's Attr.RecoveryInfo: its check
+  context's anonymous class reads Attr.this's chk before super(...)), which captures the
+  parameter as it captures a local."
   [actx target]
   (let [frames (take-while some? (iterate :parent (:frame actx)))
-        lambdas (take-while #(= :lambda (:kind %)) frames)
+        lambdas (take-while #(or (= :lambda (:kind %))
+                                 (and (:class %) (not= (:class %) target) (prologue-class? (:class %))))
+                            frames)
         f (nth frames (count lambdas) nil)
         b (some-> f :outer-param deref)]
     (if (and (seq lambdas) f (:ctor f) b (not= (:class f) target))
@@ -3525,7 +3537,8 @@
                            :static-context (boolean (or (:static actx) (prologue? actx)))
                            :local-classes (:local-classes actx)
                            :enclosing-method (:method-info actx)} parsed)
-        _ (swap! (state n) assoc :creation-frame (:frame actx) :creation-actx actx)
+        _ (swap! (state n) assoc :creation-frame (:frame actx) :creation-actx actx
+                 :prologue (and (not (:static actx)) (prologue? actx)))
         _ (resolve-header! n)
         ;; Java's o.new Inner(args) {...}: o is evaluated first
         outer-node (when explicit-outer
@@ -3602,7 +3615,8 @@
                                      :static-context (boolean (or (:static actx) (prologue? actx)))
                                      :local-classes lc :enclosing-method (:method-info actx)}
                                     parsed)
-                    (swap! (state n) assoc :creation-frame (:frame actx) :creation-actx actx)
+                    (swap! (state n) assoc :creation-frame (:frame actx) :creation-actx actx
+                           :prologue (and (not (:static actx)) (prologue? actx)))
                     (process-classes! from)
                     actx))
                 actx specs)]
@@ -3853,6 +3867,17 @@
                        [:lambda-counters prefix]))]
     (str "lambda$" prefix "$" i)))
 
+(defn- lambda-ret-desc
+  "The descriptor of a lambda's return tag. javac records the inferred return type, which may be
+  an anonymous class the lambda's body creates (Types.DescriptorCache.mergeDescriptors' map of a
+  FunctionDescriptor's anonymous subclass: ^Types$DescriptorCache$1), a class not declared until
+  the body is analyzed: then the functional interface method's own return type, which the
+  body's value converts to as well (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN2\")."
+  [actx tg sret]
+  (if (and (symbol? tg) (re-find #"\$\d+$" (name tg)))
+    (try (actx-desc actx tg) (catch Exception _ sret))
+    (actx-desc actx tg)))
+
 (defn analyze-lambda [actx [_ fi params & body]]
   (when-not (vector? params) (fail "lambda needs a parameter vector"))
   (let [[fin markers ser inter] (fi-types actx fi)
@@ -3861,7 +3886,7 @@
         _ (when-not (= (count sps) (count params))
             (fail (str "lambda for " (:name sam) " needs " (count sps) " parameters")))
         ps (mapv (fn [p sp] (if-let [tg (:tag (meta p))] (actx-desc actx tg) sp)) params sps)
-        ret (if-let [tg (:tag (meta params))] (actx-desc actx tg) sret)
+        ret (if-let [tg (:tag (meta params))] (lambda-ret-desc actx tg sret) sret)
         cls (:class actx)
         ;; ^:method-ref on the parameters: the lambda javac makes of an array constructor
         ;; reference (named as a reference)

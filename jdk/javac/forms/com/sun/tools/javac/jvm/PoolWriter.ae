@@ -1,0 +1,313 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/jvm/PoolWriter.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.jvm)
+
+(import '(com.sun.tools.javac.code Kinds$Kind
+                                   Symbol
+                                   Symbol$ClassSymbol
+                                   Symbol$DynamicMethodSymbol
+                                   Symbol$DynamicVarSymbol
+                                   Symbol$MethodHandleSymbol
+                                   Symbol$ModuleSymbol
+                                   Symbol$PackageSymbol
+                                   Type
+                                   Type$MethodType
+                                   TypeTag
+                                   Types
+                                   Types$SignatureGenerator)
+        '(com.sun.tools.javac.util ByteBuffer InvalidUtfException List Name Names)
+        '(java.io IOException OutputStream)
+        '(java.util ArrayDeque HashMap LinkedHashMap LinkedHashSet Map))
+
+(defclass ^:public PoolWriter
+  (field ^:public ^:static ^:final ^int MAX_ENTRIES 0xFFFF)
+
+  (field ^:public ^:static ^:final ^int MAX_STRING_LENGTH 0xFFFF)
+
+  (field ^:private ^:static ^:final ^int POOL_BUF_SIZE 0x7fff)
+
+  (field ^:private ^:final ^Types types)
+
+  (field ^:private ^:final ^Names names)
+
+  (field ^:final ^WriteablePoolHelper pool)
+
+  (field ^:final ^SharedSignatureGenerator signatureGen)
+
+  (field ^{:tag (LinkedHashSet Symbol$ClassSymbol)} innerClasses (LinkedHashSet.))
+
+  (field ^{:tag (Map PoolConstant$Dynamic$BsmKey Integer)} bootstrapMethods (LinkedHashMap.))
+
+  (constructor ^:public [this ^Types types ^Names names]
+    (set! (.-types this) types)
+    (set! (.-names this) names)
+    (set! (.-signatureGen this) (SharedSignatureGenerator.))
+    (set! (.-pool this) (WriteablePoolHelper.)))
+
+  (method putClass ^int [this ^Symbol$ClassSymbol csym]
+    (.putClass this (.-type csym)))
+
+  (method putClass ^int [this ^Type t]
+    (.writeIfNeeded pool (.erasure types t)))
+
+  (method putMember ^int [this ^Symbol s] (.writeIfNeeded pool s))
+
+  (method putDynamic ^int [this ^PoolConstant$Dynamic d]
+    (.writeIfNeeded pool d))
+
+  (method putDescriptor ^int [this ^Type t]
+    (.putName this (.typeSig this (.erasure types t))))
+
+  (method putDescriptor ^int [this ^Symbol s]
+    (.putDescriptor this (.descriptorType this s)))
+
+  (method putSignature ^int [this ^Symbol s]
+    (if (identical? (.-kind s) Kinds$Kind/TYP)
+        (.putName this (.classSig this (.-type s)))
+        (.putName this (.typeSig this (.-type s)))))
+
+  (method putConstant ^int [this o]
+    (if-instance [^Integer intVal o]
+      (.putConstant this (PoolConstant$LoadableConstant/Int intVal))
+      (if-instance [^Float floatVal o]
+        (.putConstant this (PoolConstant$LoadableConstant/Float floatVal))
+        (if-instance [^Long longVal o]
+          (.putConstant this (PoolConstant$LoadableConstant/Long longVal))
+          (if-instance [^Double doubleVal o]
+            (.putConstant this (PoolConstant$LoadableConstant/Double doubleVal))
+            (if-instance [^String strVal o]
+              (.putConstant this (PoolConstant$LoadableConstant/String strVal))
+              (throw (AssertionError. (java-str "unexpected constant: " o)))))))))
+
+  (method putConstant ^int [this ^PoolConstant$LoadableConstant c]
+    (switch (.poolTag c)
+      ClassFile/CONSTANT_Class (.putClass this (cast Type c))
+      ClassFile/CONSTANT_MethodType (.writeIfNeeded pool (.erasure types (cast Type c)))
+      (.writeIfNeeded pool c)))
+
+  (method putName ^int [this ^Name name] (.writeIfNeeded pool name))
+
+  (method putNameAndType ^int [this ^Symbol s]
+    (.writeIfNeeded pool (PoolConstant$NameAndType. (.-name s) (.descriptorType this s))))
+
+  (method putPackage ^int [this ^Symbol$PackageSymbol pkg]
+    (.writeIfNeeded pool pkg))
+
+  (method putModule ^int [this ^Symbol$ModuleSymbol mod]
+    (.writeIfNeeded pool mod))
+
+  (method enterInner ^void [this ^Symbol$ClassSymbol c]
+    (when (.isCompound (.-type c))
+      (throw (AssertionError. (java-str "Unexpected intersection type: " (.-type c)))))
+    (.complete c)
+    (when (and (some? (.enclClass (.-owner c))) (not (.contains innerClasses c)))
+      (.enterInner this (.enclClass (.-owner c)))
+      (.add innerClasses c)))
+
+  (method ^:private descriptorType ^Type [this ^Symbol s]
+    (if (identical? (.-kind s) Kinds$Kind/MTH) (.externalType s types) (.erasure s types)))
+
+  (method ^:private makeBootstrapEntry ^int [this ^PoolConstant$Dynamic dynamic]
+    (let [bsmKey (.bsmKey dynamic types)
+          ^:mutable index (cast Integer (.get bootstrapMethods bsmKey))]
+      (when (nil? index) (set! index (.size bootstrapMethods)) (.put bootstrapMethods bsmKey index))
+      index))
+
+  (method writePool :throws [IOException ClassWriter$PoolOverflow] ^void [this ^OutputStream out]
+    (when (some? (.-overflowString pool))
+      (throw (ClassWriter$StringOverflow. (.-overflowString pool))))
+    (let [size (.size this)]
+      (when (> size MAX_ENTRIES) (throw (ClassWriter$PoolOverflow.)))
+      (.write out (bit-shift-right-int size 8))
+      (.write out size)
+      (.write out (.-elems (.-poolbuf pool)) 0 (.-length (.-poolbuf pool)))))
+
+  (defclass SharedSignatureGenerator
+    :extends Types$SignatureGenerator
+
+    (field ^ByteBuffer sigbuf (ByteBuffer.))
+
+    (constructor [this] (.super types))
+
+    (method ^:public assembleSig ^void [this ^Type type]
+      (switch (.getTag type)
+        (UNINITIALIZED_THIS UNINITIALIZED_OBJECT)
+          (.assembleSig this (.erasure types (.-qtype (cast UninitializedType type))))
+        (.assembleSig super type)))
+
+    (method ^:protected append ^void [this ^char ch]
+      (.appendByte sigbuf ch))
+
+    (method ^:protected append ^void [this ^byte/1 ba]
+      (.appendBytes sigbuf ba))
+
+    (method ^:protected append ^void [this ^Name name]
+      (.appendName sigbuf name))
+
+    (method ^:protected classReference ^void [this ^Symbol$ClassSymbol c]
+      (.enterInner PoolWriter/this c))
+
+    (method ^:protected reset ^void [this] (.reset sigbuf))
+
+    (method ^:protected toName ^Name [this]
+      (try (.toName sigbuf names) (catch InvalidUtfException e (throw (AssertionError. e))))))
+
+  (defclass WriteablePoolHelper
+    (field ^:private ^:final ^{:tag (Map Object Integer)} keysToPos (HashMap. 64))
+
+    (field ^:final ^ByteBuffer poolbuf (ByteBuffer. POOL_BUF_SIZE))
+
+    (field ^int currentIndex 1)
+
+    (field ^{:tag (ArrayDeque PoolConstant)} todo (ArrayDeque.))
+
+    (field ^String overflowString nil)
+
+    (method ^:private writeIfNeeded :type-params [(P extends PoolConstant)] ^int [this ^P p]
+      (let [key (.poolKey p types)
+            ^:mutable index (cast Integer (.get keysToPos key))]
+        (when (nil? index)
+          (.put keysToPos
+                key
+                (set! index
+                      (let [old-1 currentIndex]
+                        (set! currentIndex (unchecked-inc-int currentIndex))
+                        old-1)))
+          (let [first (.isEmpty todo)]
+            (.addLast todo p)
+            (when first
+              (while (not (.isEmpty todo))
+                (.writeConstant this (cast PoolConstant (.peekFirst todo)))
+                (.removeFirst todo)))))
+        index))
+
+    (method writeConstant ^void [this ^PoolConstant c]
+      (let [tag (.poolTag c)]
+        (switch tag
+          ClassFile/CONSTANT_Class
+            (let [ct (cast Type c)
+                  ^Name name (if (.hasTag ct TypeTag/ARRAY)
+                                 (.typeSig PoolWriter/this ct)
+                                 (ClassFile/externalize (.flatName (.-tsym ct))))]
+              (.appendByte poolbuf tag)
+              (.appendChar poolbuf (.putName PoolWriter/this name))
+              (when (.hasTag ct TypeTag/CLASS)
+                (.enterInner PoolWriter/this (cast Symbol$ClassSymbol (.-tsym ct)))))
+          ClassFile/CONSTANT_Utf8
+            (let [name (cast Name c)]
+              (.appendByte poolbuf tag)
+              (let [bs (.toUtf name)]
+                (.appendChar poolbuf (alength bs))
+                (.appendBytes poolbuf bs 0 (alength bs))
+                (when (and (nil? overflowString) (> (alength bs) MAX_STRING_LENGTH))
+                  (set! overflowString (String. bs)))))
+          (ClassFile/CONSTANT_InterfaceMethodref
+            ClassFile/CONSTANT_Methodref
+            ClassFile/CONSTANT_Fieldref)
+            (let [sym (cast Symbol c)]
+              (.appendByte poolbuf tag)
+              (.appendChar poolbuf
+                           (.putClass PoolWriter/this (cast Symbol$ClassSymbol (.-owner sym))))
+              (.appendChar poolbuf (.putNameAndType PoolWriter/this sym)))
+          ClassFile/CONSTANT_Package
+            (let [pkg (cast Symbol$PackageSymbol c)
+                  pkgName (ClassFile/externalize (.flatName pkg))]
+              (.appendByte poolbuf tag)
+              (.appendChar poolbuf (.putName PoolWriter/this pkgName)))
+          ClassFile/CONSTANT_Module
+            (let [mod (cast Symbol$ModuleSymbol c)
+                  modName (.putName PoolWriter/this (.-name mod))]
+              (.appendByte poolbuf (.poolTag mod))
+              (.appendChar poolbuf modName))
+          ClassFile/CONSTANT_Integer
+            (do
+              (.appendByte poolbuf tag)
+              (.appendInt
+                poolbuf
+                (.intValue (cast Integer
+                                 (.-data (cast PoolConstant$LoadableConstant$BasicConstant c))))))
+          ClassFile/CONSTANT_Float
+            (do
+              (.appendByte poolbuf tag)
+              (.appendFloat poolbuf
+                            (.floatValue (cast Float
+                                               (.-data
+                                                 (cast
+                                                   PoolConstant$LoadableConstant$BasicConstant
+                                                   c))))))
+          ClassFile/CONSTANT_Long
+            (do
+              (set! currentIndex (unchecked-inc-int currentIndex))
+              (.appendByte poolbuf tag)
+              (.appendLong poolbuf
+                           (.longValue (cast
+                                         Long
+                                         (.-data
+                                           (cast PoolConstant$LoadableConstant$BasicConstant c))))))
+          ClassFile/CONSTANT_Double
+            (do
+              (set! currentIndex (unchecked-inc-int currentIndex))
+              (.appendByte poolbuf tag)
+              (.appendDouble
+                poolbuf
+                (.doubleValue (cast Double
+                                    (.-data (cast PoolConstant$LoadableConstant$BasicConstant c))))))
+          ClassFile/CONSTANT_MethodHandle
+            (let [h (cast Symbol$MethodHandleSymbol c)]
+              (.appendByte poolbuf tag)
+              (.appendByte poolbuf (.referenceKind h))
+              (.appendChar poolbuf (.putMember PoolWriter/this (.baseSymbol h))))
+          ClassFile/CONSTANT_MethodType
+            (let [mt (cast Type$MethodType c)]
+              (.appendByte poolbuf tag)
+              (.appendChar poolbuf (.putDescriptor PoolWriter/this (.baseType mt))))
+          ClassFile/CONSTANT_String
+            (let [utf (.fromString names
+                                   (cast String
+                                         (.-data
+                                           (cast PoolConstant$LoadableConstant$BasicConstant c))))]
+              (.appendByte poolbuf tag)
+              (.appendChar poolbuf (.putName PoolWriter/this utf)))
+          ClassFile/CONSTANT_NameandType
+            (let [nt (cast PoolConstant$NameAndType c)]
+              (.appendByte poolbuf tag)
+              (.appendChar poolbuf (.putName PoolWriter/this (.-name nt)))
+              (.appendChar poolbuf (.putDescriptor PoolWriter/this (.-type nt))))
+          ClassFile/CONSTANT_InvokeDynamic
+            (let [d (cast Symbol$DynamicMethodSymbol c)]
+              (.appendByte poolbuf tag)
+              (.appendChar poolbuf (.makeBootstrapEntry PoolWriter/this d))
+              (.appendChar poolbuf (.putNameAndType PoolWriter/this d)))
+          ClassFile/CONSTANT_Dynamic
+            (let [d (cast Symbol$DynamicVarSymbol c)]
+              (.appendByte poolbuf tag)
+              (.appendChar poolbuf (.makeBootstrapEntry PoolWriter/this d))
+              (.appendChar poolbuf (.putNameAndType PoolWriter/this d)))
+          (throw (AssertionError. (java-str "Unexpected constant tag: " tag))))))
+
+    (method reset ^void [this]
+      (.clear keysToPos)
+      (set! currentIndex 1)
+      (.clear todo)
+      (set! overflowString nil)
+      (.reset poolbuf)))
+
+  (method size ^int [this] (.-currentIndex pool))
+
+  (method ^:private typeSig ^Name [this ^Type type]
+    (.reset signatureGen)
+    (.assembleSig signatureGen type)
+    (.toName signatureGen))
+
+  (method ^:private classSig ^Name [this ^Type t]
+    (.reset signatureGen)
+    (let [^{:tag (List Type)} typarams (.getTypeArguments t)]
+      (when (.nonEmpty typarams) (.assembleParamsSig signatureGen typarams))
+      (.assembleSig signatureGen (.supertype types t))
+      (for-each [^Type i (.interfaces types t)] (.assembleSig signatureGen i))
+      (.toName signatureGen)))
+
+  (method reset ^void [this]
+    (.clear innerClasses)
+    (.clear bootstrapMethods)
+    (.reset pool)))

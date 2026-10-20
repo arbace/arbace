@@ -1,0 +1,1441 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Infer.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.comp)
+
+(import '(com.sun.tools.javac.code Flags
+                                   Lint$LintCategory
+                                   Source
+                                   Source$Feature
+                                   Symbol
+                                   Symbol$MethodSymbol
+                                   Symbol$TypeSymbol
+                                   Symbol$TypeVariableSymbol
+                                   Symtab
+                                   Type
+                                   Type$ArrayType
+                                   Type$CapturedType
+                                   Type$ClassType
+                                   Type$IntersectionClassType
+                                   Type$JCNoType
+                                   Type$MethodType
+                                   Type$StructuralTypeMapping
+                                   Type$TypeVar
+                                   Type$UndetVar
+                                   Type$UndetVar$InferenceBound
+                                   Type$UndetVar$UndetVarListener
+                                   TypeTag
+                                   Types
+                                   Types$TypeMapping)
+        '(com.sun.tools.javac.main Option)
+        '(com.sun.tools.javac.resources CompilerProperties$Fragments CompilerProperties$Notes)
+        '(com.sun.tools.javac.tree JCTree JCTree$JCExpressionStatement JCTree$JCTypeCast TreeInfo)
+        '(com.sun.tools.javac.util Assert
+                                   CompilerInternalException
+                                   Context
+                                   Context$Key
+                                   GraphUtils
+                                   GraphUtils$DependencyKind
+                                   GraphUtils$DottableNode
+                                   GraphUtils$TarjanNode
+                                   JCDiagnostic
+                                   JCDiagnostic$DiagnosticPosition
+                                   JCDiagnostic$Factory
+                                   JCDiagnostic$Fragment
+                                   List
+                                   ListBuffer
+                                   Log
+                                   Name
+                                   Options
+                                   Pair
+                                   Warner)
+        '(java.io IOException Writer)
+        '(java.nio.file Files OpenOption Paths)
+        '(java.util ArrayList
+                    Collection
+                    Collections
+                    EnumSet
+                    LinkedHashMap
+                    LinkedHashSet
+                    Map
+                    Optional
+                    Properties
+                    Set)
+        '(java.util.function BiFunction BiPredicate Consumer Function Predicate))
+
+(defclass ^:public Infer
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key Infer)} inferKey (Context$Key.))
+
+  (field ^Resolve rs)
+
+  (field ^Check chk)
+
+  (field ^Symtab syms)
+
+  (field ^Types types)
+
+  (field ^JCDiagnostic$Factory diags)
+
+  (field ^Log log)
+
+  (field ^:private ^:final ^String dependenciesFolder)
+
+  (field ^:private ^{:tag (List String)} pendingGraphs)
+
+  (field ^:private ^:final ^boolean dumpStacktraceOnError)
+
+  (field ^:private ^:final ^boolean erasePolySigReturnType)
+
+  (method ^:public ^:static instance ^Infer [^Context context]
+    (let [^:mutable instance (cast Infer (.get context inferKey))]
+      (when (nil? instance) (set! instance (Infer. context)))
+      instance))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context inferKey this)
+    (set! rs (Resolve/instance context))
+    (set! chk (Check/instance context))
+    (set! syms (Symtab/instance context))
+    (set! types (Types/instance context))
+    (set! diags (JCDiagnostic$Factory/instance context))
+    (set! log (Log/instance context))
+    (let [options (Options/instance context)]
+      (set! dependenciesFolder (.get options "debug.dumpInferenceGraphsTo"))
+      (set! pendingGraphs (List/nil))
+      (set! emptyContext (InferenceContext. this (List/nil)))
+      (set! dumpStacktraceOnError (or (.isSet options "dev") (.isSet options Option/DOE)))
+      (let [source (Source/instance context)]
+        (set! erasePolySigReturnType
+              (.allowedInSource Source$Feature/ERASE_POLY_SIG_RETURN_TYPE source)))))
+
+  (field ^:public ^:static ^:final ^Type anyPoly (Type$JCNoType.))
+
+  (defclass ^:public ^:static InferenceException
+    :extends Resolve$InapplicableMethodException
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+    (field ^:transient ^{:tag (List JCDiagnostic)} messages (List/nil))
+
+    (constructor [this ^boolean dumpStacktrace] (super. nil dumpStacktrace))
+
+    (method ^:public getDiagnostic ^JCDiagnostic [this]
+      (cast JCDiagnostic (.-head messages))))
+
+  (method error ^InferenceException [this ^JCDiagnostic diag]
+    (let [result (InferenceException. dumpStacktraceOnError)]
+      (when (some? diag) (set! (.-messages result) (.append (.-messages result) diag)))
+      result))
+
+  (method instantiateMethod :throws [InferenceException] ^Type [this ^{:tag (Env AttrContext)} env
+                                                                ^{:tag (List Type)} tvars
+                                                                ^:mutable ^Type$MethodType mt
+                                                                ^Attr$ResultInfo resultInfo
+                                                                ^Symbol$MethodSymbol msym
+                                                                ^{:tag (List Type)} argtypes
+                                                                ^boolean allowBoxing
+                                                                ^boolean useVarargs
+                                                                ^Resolve$MethodResolutionContext resolveContext
+                                                                ^Warner warn]
+    (let [inferenceContext (InferenceContext. this tvars)]
+      (try
+        (let [deferredAttrContext (.deferredAttrContext
+                                    resolveContext
+                                    msym
+                                    inferenceContext
+                                    resultInfo
+                                    warn)]
+          (.argumentsAcceptable (.-methodCheck resolveContext)
+                                env
+                                deferredAttrContext
+                                argtypes
+                                (.getParameterTypes mt)
+                                warn)
+          (if (and (some? resultInfo) (identical? (.-pt resultInfo) anyPoly))
+              (do
+                (.doIncorporation this inferenceContext warn)
+                (PartiallyInferredMethodType. mt inferenceContext env warn))
+              (do
+                (when (some? resultInfo)
+                  (.doIncorporation this inferenceContext warn)
+                  (when-not (.hasNonSilentLint warn Lint$LintCategory/UNCHECKED)
+                    (let [shouldPropagate (.shouldPropagate
+                                            this
+                                            (.getReturnType mt)
+                                            resultInfo
+                                            inferenceContext)
+                          ^InferenceContext minContext (if shouldPropagate
+                                                           (.min
+                                                             inferenceContext
+                                                             (.roots this mt deferredAttrContext)
+                                                             true
+                                                             warn)
+                                                           inferenceContext)
+                          newRestype (.generateReturnConstraints
+                                       this
+                                       (.-tree env)
+                                       resultInfo
+                                       mt
+                                       minContext)]
+                      (set!
+                        mt
+                        (cast Type$MethodType (.createMethodTypeWithReturn types mt newRestype)))
+                      (when shouldPropagate
+                        (let [duppedTo (.inferenceContext (.-checkContext resultInfo))]
+                          (.dupTo minContext duppedTo)
+                          (when-not (identical? minContext inferenceContext)
+                            (set! (.-parentIC duppedTo) inferenceContext))
+                          (.complete deferredAttrContext)
+                          (return mt))))))
+                (.complete deferredAttrContext)
+                (.solve inferenceContext warn)
+                (set! mt (cast Type$MethodType (.asInstType inferenceContext mt)))
+                (when (and (some? resultInfo)
+                           (.contains (.-verboseResolutionMode rs)
+                                      Resolve$VerboseResolutionMode/DEFERRED_INST))
+                  (.note log
+                         (.-pos (.-tree env))
+                         (CompilerProperties$Notes/DeferredMethodInst msym mt (.-pt resultInfo))))
+                mt)))
+        (finally
+          (if (some? resultInfo)
+              (.notifyChange inferenceContext)
+              (.notifyChange inferenceContext (.boundedVars inferenceContext)))
+          (when (nil? resultInfo) (.clear (.-captureTypeCache inferenceContext)))
+          (.dumpGraphsIfNeeded this (.-tree env) msym resolveContext)))))
+
+  (method ^:private shouldPropagate ^boolean [this ^Type restype ^Attr$ResultInfo target
+                                              ^InferenceContext inferenceContext]
+    (and (and (not (identical? (.inferenceContext (.-checkContext target)) emptyContext))
+              (.free inferenceContext restype))
+         (or (not (.contains (.-inferencevars inferenceContext) restype))
+             (not (.needsEagerInstantiation this
+                                            (cast
+                                              Type$UndetVar
+                                              (.asUndetVar inferenceContext restype))
+                                            (.-pt target)
+                                            inferenceContext)))))
+
+  (method ^:private roots ^{:tag (List Type)} [this ^Type$MethodType mt
+                                               ^DeferredAttr$DeferredAttrContext deferredAttrContext]
+    (if (and (some? deferredAttrContext)
+             (identical? (.-mode deferredAttrContext) DeferredAttr$AttrMode/CHECK))
+        (let [^{:tag (ListBuffer Type)} roots (ListBuffer.)]
+          (.add roots (.getReturnType mt))
+          (for-each [^DeferredAttr$DeferredAttrNode n (.-deferredAttrNodes deferredAttrContext)]
+            (.addAll roots (.stuckVars (.-deferredStuckPolicy n)))
+            (.addAll roots (.depVars (.-deferredStuckPolicy n))))
+          (let [^{:tag (List Type)} thrownVars (cast
+                                                 List
+                                                 (.collect
+                                                   (.filter
+                                                     (.stream
+                                                       (.-inferencevars
+                                                         (.-inferenceContext deferredAttrContext)))
+                                                     (lambda Predicate ^boolean [^Type tv]
+                                                       (not
+                                                         (==
+                                                           (bit-and
+                                                             (.flags (.-tsym tv))
+                                                             Flags/THROWS)
+                                                           0))))
+                                                   (List/collector)))
+                ^:mutable ^{:tag (List Type)} result (.toList roots)]
+            (set! result (.appendList result (.diff thrownVars result)))
+            result))
+        (List/of (.getReturnType mt))))
+
+  (defclass ^:public PartiallyInferredMethodType
+    :extends Type$MethodType
+
+    (constructor ^:public [this ^Type$MethodType mtype ^InferenceContext inferenceContext
+                           ^{:tag (Env AttrContext)} env ^Warner warn]
+      (super. (.getParameterTypes mtype)
+              (.getReturnType mtype)
+              (.getThrownTypes mtype)
+              (.-tsym mtype))
+      (set! (.-inferenceContext this) inferenceContext)
+      (set! (.-env this) env)
+      (set! (.-warn this) warn))
+
+    (field ^:final ^InferenceContext inferenceContext)
+
+    (field ^{:tag (Env AttrContext)} env)
+
+    (field ^:final ^Warner warn)
+
+    (method ^:public isPartial ^boolean [this] true)
+
+    (method check ^Type [this ^Attr$ResultInfo resultInfo]
+      (let [noWarnings (Warner. nil)
+            ^:mutable ^{:tag (List Type)} saved_undet nil]
+        (try
+          (set! saved_undet (.save inferenceContext))
+          (let [unchecked (.hasNonSilentLint warn Lint$LintCategory/UNCHECKED)]
+            (when-not unchecked
+              (let [shouldPropagate (.shouldPropagate
+                                      Infer/this
+                                      (.getReturnType this)
+                                      resultInfo
+                                      inferenceContext)
+                    ^InferenceContext minContext (if shouldPropagate
+                                                     (.min
+                                                       inferenceContext
+                                                       (.roots Infer/this (.asMethodType this) nil)
+                                                       false
+                                                       warn)
+                                                     inferenceContext)
+                    other (cast Type$MethodType (.update minContext (.asMethodType this)))
+                    newRestype (.generateReturnConstraints
+                                 Infer/this
+                                 (.-tree env)
+                                 resultInfo
+                                 other
+                                 minContext)]
+                (when shouldPropagate
+                  (.dupTo minContext
+                          (.inferenceContext (.-checkContext resultInfo))
+                          (.insideOverloadPhase (.deferredAttrContext (.-checkContext resultInfo))))
+                  (return newRestype))))
+            (.solve inferenceContext noWarnings)
+            (let [^:mutable ret (.getReturnType (.asInstType inferenceContext this))]
+              (when unchecked (set! ret (.erasure types ret)))
+              (.check resultInfo (.-tree env) ret)))
+          (catch InferenceException ex
+            (.report (.-checkContext resultInfo) nil (.getDiagnostic ex))
+            (Assert/error)
+            nil)
+          (finally (when (some? saved_undet) (.rollback inferenceContext saved_undet)))))))
+
+  (method ^:private dumpGraphsIfNeeded ^void [this ^JCDiagnostic$DiagnosticPosition pos ^Symbol msym
+                                              ^Resolve$MethodResolutionContext rsContext]
+    (let [^:mutable ^int round 0]
+      (try
+        (for-each [^String graph (.reverse pendingGraphs)]
+          (Assert/checkNonNull dependenciesFolder)
+          (let [^Name name (if (identical? (.-name msym) (.-init (.-names (.-table (.-name msym)))))
+                               (.-name (.-owner msym))
+                               (.-name msym))
+                filename (String/format "%s@%s[mode=%s,step=%s]_%d.dot"
+                                        (new Object/1
+                                             [name
+                                              (.getStartPosition pos)
+                                              (.attrMode rsContext)
+                                              (.-step rsContext)
+                                              round]))
+                dotFile (Paths/get dependenciesFolder (new String/1 [filename]))]
+            (with-resources [^Writer w (Files/newBufferedWriter dotFile (new OpenOption/1 []))]
+              (.append w graph))
+            (set! round (unchecked-inc-int round))))
+        (catch IOException ex
+          (Assert/error (java-str "Error occurred when dumping inference graph: " (.getMessage ex))))
+        (finally (set! pendingGraphs (List/nil))))))
+
+  (method generateReturnConstraints ^Type [this ^JCTree tree ^Attr$ResultInfo resultInfo
+                                           ^Type$MethodType mt ^InferenceContext inferenceContext]
+    (let [rsInfoInfContext (.inferenceContext (.-checkContext resultInfo))
+          ^:mutable from (.getReturnType mt)]
+      (when (and (.containsAny (.getReturnType mt) (.-inferencevars inferenceContext))
+                 (not (identical? rsInfoInfContext emptyContext)))
+        (set! from (.capture types from))
+        (for-each [^Type t (.getTypeArguments from)]
+          (when (and (.hasTag t TypeTag/TYPEVAR) (.isCaptured (cast Type$TypeVar t)))
+            (.addVar inferenceContext (cast Type$TypeVar t)))))
+      (let [^:mutable qtype (.asUndetVar inferenceContext from)
+            ^:mutable to (.-pt resultInfo)]
+        (cond
+          (.hasTag qtype TypeTag/VOID) (set! to (.-voidType syms))
+          (.hasTag to TypeTag/NONE) (set! to (if (.isPrimitive from) from (.-objectType syms)))
+          (.hasTag qtype TypeTag/UNDETVAR)
+            (when (.needsEagerInstantiation this (cast Type$UndetVar qtype) to inferenceContext)
+              (set! to
+                    (.generateReferenceToTargetConstraint
+                      this
+                      tree
+                      (cast Type$UndetVar qtype)
+                      to
+                      resultInfo
+                      inferenceContext)))
+          (.free rsInfoInfContext (.-pt resultInfo))
+            (set! qtype
+                  (.asUndetVar inferenceContext
+                               (.cachedCapture rsInfoInfContext
+                                               tree
+                                               from
+                                               (not (.updateTreeType (.-checkMode resultInfo)))))))
+        (let [retWarn (Warner.)]
+          (when-not (.compatible (.-checkContext resultInfo)
+                                 qtype
+                                 (.asUndetVar rsInfoInfContext to)
+                                 retWarn)
+            (throw (.error this
+                           (.fragment diags
+                                      (CompilerProperties$Fragments/InferNoConformingInstanceExists
+                                        (.restvars inferenceContext)
+                                        (.getReturnType mt)
+                                        to)))))
+          from))))
+
+  (method ^:private needsEagerInstantiation ^boolean [this ^Type$UndetVar from ^Type to
+                                                      ^InferenceContext inferenceContext]
+    (if (.isPrimitive to)
+        (do
+          (for-each [^Type t (.getBounds from (Type$UndetVar$InferenceBound/values))]
+            (let [boundAsPrimitive (.unboxedType types t)]
+              (when-not (or (nil? boundAsPrimitive) (.hasTag boundAsPrimitive TypeTag/NONE))
+                (return true))))
+          false)
+        (let [captureOfTo (.capture types to)]
+          (when (identical? captureOfTo to)
+            (for-each [^Type t (.getBounds from
+                                           Type$UndetVar$InferenceBound/EQ
+                                           Type$UndetVar$InferenceBound/LOWER)]
+              (let [captureOfBound (.capture types t)]
+                (when-not (identical? captureOfBound t) (return true))))
+            (for-each [^Type aLowerBound (.getBounds from Type$UndetVar$InferenceBound/LOWER)]
+              (for-each [^Type anotherLowerBound (.getBounds
+                                                   from
+                                                   Type$UndetVar$InferenceBound/LOWER)]
+                (when (and
+                        (and (and (not (identical? aLowerBound anotherLowerBound))
+                                  (not (.free inferenceContext aLowerBound)))
+                             (not (.free inferenceContext anotherLowerBound)))
+                        (.commonSuperWithDiffParameterization this aLowerBound anotherLowerBound))
+                  (return true)))))
+          (when (.isParameterized to)
+            (for-each [^Type t (.getBounds from
+                                           Type$UndetVar$InferenceBound/EQ
+                                           Type$UndetVar$InferenceBound/LOWER)]
+              (let [sup (.asSuper types t (.-tsym to))]
+                (when (and (some? sup) (.isRaw sup)) (return true)))))
+          false)))
+
+  (method ^:private commonSuperWithDiffParameterization ^boolean [this ^Type t ^Type s]
+    (for-each [^{:tag (Pair Type Type)} supers (.getParameterizedSupers this t s)]
+      (when-not (.isSameType types (cast Type (.-fst supers)) (cast Type (.-snd supers)))
+        (return true)))
+    false)
+
+  (method ^:private generateReferenceToTargetConstraint ^Type [this ^JCTree tree ^Type$UndetVar from
+                                                               ^Type to ^Attr$ResultInfo resultInfo
+                                                               ^InferenceContext inferenceContext]
+    (.solve inferenceContext (List/of (.-qtype from)) (Warner.))
+    (.notifyChange inferenceContext)
+    (let [capturedType (.cachedCapture (.inferenceContext (.-checkContext resultInfo))
+                                       tree
+                                       (.getInst from)
+                                       (not (.updateTreeType (.-checkMode resultInfo))))]
+      (if (.isConvertible types
+                          capturedType
+                          (.asUndetVar (.inferenceContext (.-checkContext resultInfo)) to))
+          (.-objectType syms)
+          to)))
+
+  (method instantiateAsUninferredVars ^void [this ^{:tag (List Type)} vars
+                                             ^InferenceContext inferenceContext]
+    (let [^{:tag (ListBuffer Type)} todo (ListBuffer.)]
+      (for-each [^Type t vars]
+        (let [uv (cast Type$UndetVar (.asUndetVar inferenceContext t))
+              ^{:tag (List Type)} upperBounds (.getBounds uv Type$UndetVar$InferenceBound/UPPER)]
+          (cond
+            (Type/containsAny upperBounds vars)
+              (let [^Symbol$TypeSymbol fresh_tvar (Symbol$TypeVariableSymbol.
+                                                    Flags/SYNTHETIC
+                                                    (.-name (.-tsym (.-qtype uv)))
+                                                    nil
+                                                    (.-owner (.-tsym (.-qtype uv))))]
+                (set! (.-type fresh_tvar)
+                      (Type$TypeVar. fresh_tvar
+                                     (.makeIntersectionType
+                                       types
+                                       (.getBounds uv Type$UndetVar$InferenceBound/UPPER))
+                                     (.-botType syms)))
+                (.append todo uv)
+                (.setInst uv (.-type fresh_tvar)))
+            (.nonEmpty upperBounds) (.setInst uv (.glb types upperBounds))
+            :else (.setInst uv (.-objectType syms)))))
+      (.replaceTypeVarsInBounds this (.toList todo) inferenceContext)))
+
+  (method ^:private replaceTypeVarsInBounds ^void [this ^{:tag (List Type)} vars
+                                                   ^InferenceContext inferenceContext]
+    (for-each [^Type t vars]
+      (let [uv (cast Type$UndetVar t)
+            ct (cast Type$TypeVar (.getInst uv))]
+        (.setUpperBound ct (.glb types (.asInstTypes inferenceContext (.getBounds types ct))))
+        (when (.isErroneous (.getUpperBound ct))
+          (.reportBoundError this uv Type$UndetVar$InferenceBound/UPPER)))))
+
+  (method instantiatePolymorphicSignatureInstance ^Type [this ^{:tag (Env AttrContext)} env
+                                                         ^Symbol$MethodSymbol spMethod
+                                                         ^Resolve$MethodResolutionContext resolveContext
+                                                         ^{:tag (List Type)} argtypes]
+    (let [^:mutable ^Type restype nil
+          ^Type spType (if (nil? spMethod) (.-objectType syms) (.getReturnType spMethod))]
+      (switch (.getTag (.-tree (.-next env)))
+        TYPECAST
+          (let [castTree (cast JCTree$JCTypeCast (.-tree (.-next env)))]
+            (set! restype
+                  (if (identical? (TreeInfo/skipParens (.-expr castTree)) (.-tree env))
+                      (if erasePolySigReturnType
+                          (.erasure types (.-type (.-clazz castTree)))
+                          (.-type (.-clazz castTree)))
+                      spType)))
+        EXEC
+          (let [execTree (cast JCTree$JCExpressionStatement (.-tree (.-next env)))]
+            (set! restype
+                  (if (identical? (TreeInfo/skipParens (.-expr execTree)) (.-tree env))
+                      ^Type (.-voidType syms)
+                      spType)))
+        (set! restype spType))
+      (let [^{:tag (List Type)} paramtypes (.map
+                                             argtypes
+                                             (ImplicitArgType. spMethod (.-step resolveContext)))
+            ^{:tag (List Type)} exType (if (some? spMethod)
+                                           (.getThrownTypes spMethod)
+                                           (List/of (.-throwableType syms)))
+            mtype (Type$MethodType. paramtypes restype exType (.-methodClass syms))]
+        mtype)))
+
+  (defclass ImplicitArgType
+    :extends (DeferredAttr$DeferredTypeMap Void)
+
+    (constructor ^:public [this ^Symbol msym ^Resolve$MethodResolutionPhase phase]
+      (.super (.-deferredAttr rs) DeferredAttr$AttrMode/SPECULATIVE msym phase))
+
+    (method ^:public visitClassType ^Type [this ^Type$ClassType t ^Void aVoid]
+      (.erasure types t))
+
+    (method ^:public visitType ^Type [this ^:mutable ^Type t ^Void _unused]
+      (if (.hasTag t TypeTag/DEFERRED)
+          (.visit this (.visitType super t nil))
+          (do
+            (when (.hasTag t TypeTag/BOT) (set! t (.-type (.boxedClass types (.-voidType syms)))))
+            t))))
+
+  (field ^{:tag (Types$TypeMapping Void)} fromTypeVarFun
+    (anon (Type$StructuralTypeMapping Void) []
+      (method ^:public visitTypeVar ^Type [this ^Type$TypeVar tv ^Void aVoid]
+        (let [uv (Type$UndetVar. tv incorporationEngine types)]
+          (when-not (== (bit-and (.flags (.-tsym tv)) Flags/THROWS) 0) (.setThrow uv))
+          uv))))
+
+  (method ^:public instantiateFunctionalInterface ^Type [this ^JCDiagnostic$DiagnosticPosition pos
+                                                         ^Type funcInterface
+                                                         ^:mutable ^{:tag (List Type)} paramTypes
+                                                         ^Check$CheckContext checkContext]
+    (if (identical? (.capture types funcInterface) funcInterface)
+        funcInterface
+        (let [formalInterface (.-type (.-tsym funcInterface))
+              funcInterfaceContext (InferenceContext.
+                                     this
+                                     (.getTypeArguments (.-type (.-tsym funcInterface))))]
+          (Assert/check (some? paramTypes))
+          (let [^{:tag (List Type)} descParameterTypes (.getParameterTypes
+                                                         (.findDescriptorType types formalInterface))]
+            (if (not (== (.size descParameterTypes) (.size paramTypes)))
+                (do
+                  (.report checkContext
+                           pos
+                           (.fragment diags
+                                      CompilerProperties$Fragments/IncompatibleArgTypesInLambda))
+                  (.createErrorType types funcInterface))
+                (do
+                  (for-each [^Type p descParameterTypes]
+                    (when-not (.isSameType types
+                                           (.asUndetVar funcInterfaceContext p)
+                                           (cast Type (.-head paramTypes)))
+                      (.report checkContext
+                               pos
+                               (.fragment diags
+                                          (CompilerProperties$Fragments/NoSuitableFunctionalIntfInst
+                                            funcInterface)))
+                      (return (.createErrorType types funcInterface)))
+                    (set! paramTypes (.-tail paramTypes)))
+                  (let [^:mutable ^{:tag (List Type)} actualTypeargs (.getTypeArguments
+                                                                       funcInterface)]
+                    (for-each [^Type t (.-undetvars funcInterfaceContext)]
+                      (let [uv (cast Type$UndetVar t)
+                            ^{:tag (Optional Type)} inst (.findFirst
+                                                           (.filter
+                                                             (.stream
+                                                               (.getBounds
+                                                                 uv
+                                                                 Type$UndetVar$InferenceBound/EQ))
+                                                             (lambda Predicate ^boolean [^Type b]
+                                                               (not
+                                                                 (.containsAny
+                                                                   b
+                                                                   (.getTypeArguments
+                                                                     formalInterface))))))]
+                        (.setInst uv (cast Type (.orElse inst (cast Type (.-head actualTypeargs)))))
+                        (set! actualTypeargs (.-tail actualTypeargs))))
+                    (let [owntype (.asInstType funcInterfaceContext formalInterface)]
+                      (when-not (.checkValidGenericType chk owntype)
+                        (.report checkContext
+                                 pos
+                                 (.fragment
+                                   diags
+                                   (CompilerProperties$Fragments/NoSuitableFunctionalIntfInst
+                                     funcInterface))))
+                      (.compatible checkContext owntype funcInterface (.-noWarnings types))
+                      owntype))))))))
+
+  (method ^:public instantiatePatternType ^Type [this ^Type expressionType
+                                                 ^Symbol$TypeSymbol patternTypeSymbol]
+    (if (identical? (.-tsym expressionType) patternTypeSymbol)
+        expressionType
+        (let [^:mutable ^{:tag (List Type)} expressionTypes (List/nil)
+              ^:mutable ^{:tag (List Type)} params (.allparams (.-type patternTypeSymbol))
+              ^:mutable ^{:tag (List Type)} capturedWildcards (List/nil)
+              ^:mutable ^{:tag (List Type)} todo (List/of expressionType)]
+          (while (.nonEmpty todo)
+            (let [current (cast Type (.-head todo))]
+              (set! todo (.-tail todo))
+              (switch (.getTag current)
+                CLASS
+                  (if (.isCompound current)
+                      (set! todo (.prependList todo (.directSupertypes types current)))
+                      (let [captured (.capture types current)]
+                        (for-each [^Type ta (.getTypeArguments captured)]
+                          (when (and (.hasTag ta TypeTag/TYPEVAR)
+                                     (.isCaptured (cast Type$TypeVar ta)))
+                            (set! params (.prepend params (cast Type$TypeVar ta)))
+                            (set! capturedWildcards (.prepend capturedWildcards ta))))
+                        (set! expressionTypes (.prepend expressionTypes captured))))
+                TYPEVAR (set! todo (.prepend todo (.skipTypeVars types current false)))
+                (set! expressionTypes (.prepend expressionTypes current)))))
+          (let [c (InferenceContext. this params)
+                patternType (.asUndetVar c (.-type patternTypeSymbol))
+                ^{:tag (List Type)} exprTypes (.map
+                                                expressionTypes
+                                                (lambda Function ^Type [^Type t] (.asUndetVar c t)))]
+            (.forEach capturedWildcards
+                      (lambda Consumer ^void [^Type s]
+                        (.setNormal (cast Type$UndetVar (.asUndetVar c s)))))
+            (try
+              (for-each [^Type exprType exprTypes]
+                (when (.isParameterized exprType)
+                  (let [patternAsExpression (.asSuper types patternType (.-tsym exprType))]
+                    (when (or (nil? patternAsExpression)
+                              (not (.isSameType types patternAsExpression exprType)))
+                      (return nil)))))
+              (.doIncorporation this c (.-noWarnings types))
+              (let [^{:tag (List Type)} freshVars (.instantiatePatternVars this params c)
+                    substituted (.asInstType c (.-type patternTypeSymbol))]
+                (.upward types substituted freshVars))
+              (catch InferenceException ex nil))))))
+
+  (method ^:private instantiatePatternVars ^{:tag (List Type)} [this ^{:tag (List Type)} vars
+                                                                ^InferenceContext c]
+    (let [^{:tag (ListBuffer Type)} freshVars (ListBuffer.)
+          ^{:tag (ListBuffer Type)} todo (ListBuffer.)]
+      (for-each [^Type t vars]
+        (let [undet (cast Type$UndetVar (.asUndetVar c t))
+              ^{:tag (List Type)} bounds (.filterBounds InferenceStep/EQ undet c)]
+          (if (.nonEmpty bounds)
+              (.setInst undet (cast Type (.-head bounds)))
+              (let [^{:tag (List Type)} upperBounds (.getBounds
+                                                      undet
+                                                      Type$UndetVar$InferenceBound/UPPER)
+                    ^:mutable ^Type upper nil
+                    recursive (Type/containsAny upperBounds vars)]
+                (cond
+                  recursive
+                    (do (set! upper (.makeIntersectionType types upperBounds)) (.append todo undet))
+                  (.nonEmpty upperBounds) (set! upper (.glb types upperBounds))
+                  :else (set! upper (.-objectType syms)))
+                (let [^{:tag (List Type)} lowerBounds (.getBounds
+                                                        undet
+                                                        Type$UndetVar$InferenceBound/LOWER)
+                      ^Type lower (cond
+                                    (.isEmpty lowerBounds) (.-botType syms)
+                                    (.isEmpty (.-tail lowerBounds)) (cast Type (.-head lowerBounds))
+                                    :else (.lub types lowerBounds))
+                      vt (Type$TypeVar. (.-noSymbol syms) upper lower)]
+                  (.add freshVars vt)
+                  (.setInst undet vt))))))
+      (.replaceTypeVarsInBounds this (.toList todo) c)
+      (.toList freshVars)))
+
+  (defclass ^:public ^:abstract IncorporationAction
+    (field ^Type$UndetVar uv)
+
+    (field ^Type t)
+
+    (constructor [this ^Type$UndetVar uv ^Type t]
+      (set! (.-uv this) uv)
+      (set! (.-t this) t))
+
+    (method ^:public ^:abstract dup ^IncorporationAction [this ^Type$UndetVar that])
+
+    (method ^:abstract apply ^void [this ^InferenceContext ic ^Warner warn])
+
+    (method isSubtype ^boolean [this ^Type s ^Type t ^Warner warn ^InferenceContext ic]
+      (.doIncorporationOp Infer/this IncorporationBinaryOpKind/IS_SUBTYPE s t warn ic))
+
+    (method isSameType ^boolean [this ^Type s ^Type t ^InferenceContext ic]
+      (.doIncorporationOp Infer/this IncorporationBinaryOpKind/IS_SAME_TYPE s t nil ic))
+
+    (method ^:public toString ^String [this]
+      (String/format "%s[undet=%s,t=%s]"
+                     (new Object/1 [(.getSimpleName (.getClass this)) (.-qtype uv) t]))))
+
+  (defclass CheckBounds
+    :extends IncorporationAction
+
+    (field ^Type$UndetVar$InferenceBound from)
+
+    (field ^{:tag (BiFunction InferenceContext Type Type)} typeFunc)
+
+    (field ^{:tag (BiPredicate InferenceContext Type)} optFilter)
+
+    (constructor [this ^Type$UndetVar uv ^Type t ^Type$UndetVar$InferenceBound from]
+      (this. uv
+             t
+             (method-ref BiFunction ^Type [InferenceContext Type] InferenceContext/.asUndetVar)
+             nil
+             from))
+
+    (constructor [this ^Type$UndetVar uv ^Type t
+                  ^{:tag (BiFunction InferenceContext Type Type)} typeFunc
+                  ^{:tag (BiPredicate InferenceContext Type)} typeFilter
+                  ^Type$UndetVar$InferenceBound from]
+      (super. uv t)
+      (set! (.-from this) from)
+      (set! (.-typeFunc this) typeFunc)
+      (set! (.-optFilter this) typeFilter))
+
+    (method ^:public dup ^IncorporationAction [this ^Type$UndetVar that]
+      (CheckBounds. that (.-t this) typeFunc optFilter from))
+
+    (method apply ^void [this ^InferenceContext inferenceContext ^Warner warn]
+      (set! (.-t this) (cast Type (.apply typeFunc inferenceContext (.-t this))))
+      (when-not (and (some? optFilter) (.test optFilter inferenceContext (.-t this)))
+        (for-each [^Type$UndetVar$InferenceBound to (.boundsToCheck this)]
+          (for-each [^:mutable ^Type b (.getBounds (.-uv this) to)]
+            (set! b (cast Type (.apply typeFunc inferenceContext b)))
+            (when-not (and (some? optFilter) (.test optFilter inferenceContext b))
+              (let [success (.checkBound this (.-t this) b from to warn inferenceContext)]
+                (when-not success (.report this from to))))))))
+
+    (method boundsToCheck ^{:tag (EnumSet Type$UndetVar$InferenceBound)} [this]
+      (if (identical? from Type$UndetVar$InferenceBound/EQ)
+          (EnumSet/allOf Type$UndetVar$InferenceBound)
+          (EnumSet/complementOf (EnumSet/of from))))
+
+    (method checkBound ^boolean [this ^Type s ^Type t ^Type$UndetVar$InferenceBound ib_s
+                                 ^Type$UndetVar$InferenceBound ib_t ^Warner warn
+                                 ^InferenceContext ic]
+      (cond
+        (.lessThan ib_s ib_t) (.isSubtype this s t warn ic)
+        (.lessThan ib_t ib_s) (.isSubtype this t s warn ic)
+        :else (.isSameType this s t ic)))
+
+    (method report ^void [this ^Type$UndetVar$InferenceBound from ^Type$UndetVar$InferenceBound to]
+      (cond
+        (identical? from to) (.reportBoundError Infer/this (.-uv this) from)
+        (or (identical? from Type$UndetVar$InferenceBound/LOWER)
+            (identical? to Type$UndetVar$InferenceBound/EQ))
+          (.reportBoundError Infer/this (.-uv this) to from)
+        :else (.reportBoundError Infer/this (.-uv this) from to)))
+
+    (method ^:public toString ^String [this]
+      (String/format
+        "%s[undet=%s,t=%s,bound=%s]"
+        (new Object/1 [(.getSimpleName (.getClass this)) (.-qtype (.-uv this)) (.-t this) from]))))
+
+  (defclass CheckInst
+    :extends CheckBounds
+
+    (field ^{:tag (EnumSet Type$UndetVar$InferenceBound)} to)
+
+    (constructor [this ^Type$UndetVar uv ^Type$UndetVar$InferenceBound ib &
+                  ^Type$UndetVar$InferenceBound/1 rest]
+      (this. uv (EnumSet/of ib rest)))
+
+    (constructor [this ^Type$UndetVar uv ^{:tag (EnumSet Type$UndetVar$InferenceBound)} to]
+      (super. uv (.getInst uv) Type$UndetVar$InferenceBound/EQ)
+      (set! (.-to this) to))
+
+    (method ^:public dup ^IncorporationAction [this ^Type$UndetVar that]
+      (CheckInst. that to))
+
+    (method boundsToCheck ^{:tag (EnumSet Type$UndetVar$InferenceBound)} [this]
+      to)
+
+    (method report ^void [this ^Type$UndetVar$InferenceBound from ^Type$UndetVar$InferenceBound to]
+      (.reportInstError Infer/this (.-uv this) to)))
+
+  (defclass SubstBounds
+    :extends CheckInst
+
+    (constructor [this ^Type$UndetVar uv]
+      (super. uv
+              Type$UndetVar$InferenceBound/LOWER
+              (new Type$UndetVar$InferenceBound/1
+                   [Type$UndetVar$InferenceBound/EQ Type$UndetVar$InferenceBound/UPPER])))
+
+    (method ^:public dup ^IncorporationAction [this ^Type$UndetVar that]
+      (SubstBounds. that))
+
+    (method apply ^void [this ^InferenceContext inferenceContext ^Warner warn]
+      (for-each [^Type undet (.-undetvars inferenceContext)]
+        (let [uv2 (cast Type$UndetVar undet)]
+          (.substBounds uv2 (List/of (.-qtype (.-uv this))) (List/of (.getInst (.-uv this))) types)
+          (.checkCompatibleUpperBounds this uv2 inferenceContext)))
+      (.apply super inferenceContext warn))
+
+    (method checkCompatibleUpperBounds ^void [this ^Type$UndetVar uv
+                                              ^InferenceContext inferenceContext]
+      (let [^{:tag (List Type)} hibounds (Type/filter
+                                           (.getBounds uv Type$UndetVar$InferenceBound/UPPER)
+                                           (BoundFilter. inferenceContext))
+            ^Type hb (cond
+                       (.isEmpty hibounds) (.-objectType syms)
+                       (.isEmpty (.-tail hibounds)) (cast Type (.-head hibounds))
+                       :else (.glb types hibounds))]
+        (when (or (nil? hb) (.isErroneous hb))
+          (.reportBoundError Infer/this uv Type$UndetVar$InferenceBound/UPPER)))))
+
+  (defclass CheckUpperBounds
+    :extends IncorporationAction
+
+    (constructor ^:public [this ^Type$UndetVar uv ^Type t] (super. uv t))
+
+    (method ^:public dup ^IncorporationAction [this ^Type$UndetVar that]
+      (CheckUpperBounds. that (.-t this)))
+
+    (method apply ^void [this ^InferenceContext inferenceContext ^Warner warn]
+      (let [^{:tag (List Type)} boundList (cast List
+                                                (.collect
+                                                  (.stream
+                                                    (.getBounds
+                                                      (.-uv this)
+                                                      Type$UndetVar$InferenceBound/UPPER))
+                                                  (.closureCollector
+                                                    types
+                                                    true
+                                                    (method-ref
+                                                      BiPredicate
+                                                      [Type Type]
+                                                      types
+                                                      Types/.isSameType))))]
+        (for-each [^Type b2 boundList]
+          (when-not (identical? (.-t this) b2)
+            (when (and (and (not (identical? (.-t this) b2))
+                            (not (.hasTag (.-t this) TypeTag/WILDCARD)))
+                       (not (.hasTag b2 TypeTag/WILDCARD)))
+              (for-each [^{:tag (Pair Type Type)} commonSupers (.getParameterizedSupers
+                                                                 Infer/this
+                                                                 (.-t this)
+                                                                 b2)]
+                (let [^:mutable ^{:tag (List Type)} allParamsSuperBound1 (.allparams
+                                                                           (cast
+                                                                             Type
+                                                                             (.-fst commonSupers)))
+                      ^:mutable ^{:tag (List Type)} allParamsSuperBound2 (.allparams
+                                                                           (cast
+                                                                             Type
+                                                                             (.-snd commonSupers)))]
+                  (while (and (.nonEmpty allParamsSuperBound1) (.nonEmpty allParamsSuperBound2))
+                    (when (and (not (.hasTag (cast Type (.-head allParamsSuperBound1))
+                                             TypeTag/WILDCARD))
+                               (not (.hasTag (cast Type (.-head allParamsSuperBound2))
+                                             TypeTag/WILDCARD)))
+                      (when-not (.isSameType this
+                                             (.asUndetVar
+                                               inferenceContext
+                                               (cast Type (.-head allParamsSuperBound1)))
+                                             (.asUndetVar
+                                               inferenceContext
+                                               (cast Type (.-head allParamsSuperBound2)))
+                                             inferenceContext)
+                        (.reportBoundError Infer/this
+                                           (.-uv this)
+                                           Type$UndetVar$InferenceBound/UPPER)))
+                    (set! allParamsSuperBound1 (.-tail allParamsSuperBound1))
+                    (set! allParamsSuperBound2 (.-tail allParamsSuperBound2)))
+                  (Assert/check (and (.isEmpty allParamsSuperBound1)
+                                     (.isEmpty allParamsSuperBound2)))))))))))
+
+  (defclass PropagateBounds
+    :extends IncorporationAction
+
+    (field ^Type$UndetVar$InferenceBound ib)
+
+    (constructor ^:public [this ^Type$UndetVar uv ^Type t ^Type$UndetVar$InferenceBound ib]
+      (super. uv t)
+      (set! (.-ib this) ib))
+
+    (method ^:public dup ^IncorporationAction [this ^Type$UndetVar that]
+      (PropagateBounds. that (.-t this) ib))
+
+    (method apply ^void [this ^InferenceContext inferenceContext ^Warner warner]
+      (let [undetT (.asUndetVar inferenceContext (.-t this))]
+        (when (and (.hasTag undetT TypeTag/UNDETVAR)
+                   (not (.isCaptured (cast Type$UndetVar undetT))))
+          (let [uv2 (cast Type$UndetVar undetT)]
+            (.addBound uv2 (.complement ib) (.-uv this) types)
+            (for-each [^Type$UndetVar$InferenceBound ib2 (.backwards this)]
+              (for-each [^Type b (.getBounds uv2 ib2)] (.addBound (.-uv this) ib2 b types)))))
+        (for-each [^Type$UndetVar$InferenceBound ib2 (.forward this)]
+          (for-each [^Type l (.getBounds (.-uv this) ib2)]
+            (let [undet (.asUndetVar inferenceContext l)]
+              (when (and (.hasTag undet TypeTag/UNDETVAR)
+                         (not (.isCaptured (cast Type$UndetVar undet))))
+                (let [uv2 (cast Type$UndetVar undet)]
+                  (.addBound uv2 ib (.asInstType inferenceContext (.-t this)) types))))))))
+
+    (method forward ^{:tag (EnumSet Type$UndetVar$InferenceBound)} [this]
+      (if (identical? ib Type$UndetVar$InferenceBound/EQ)
+          (EnumSet/of Type$UndetVar$InferenceBound/EQ)
+          (EnumSet/complementOf (EnumSet/of ib))))
+
+    (method backwards ^{:tag (EnumSet Type$UndetVar$InferenceBound)} [this]
+      (if (identical? ib Type$UndetVar$InferenceBound/EQ)
+          (EnumSet/allOf Type$UndetVar$InferenceBound)
+          (EnumSet/of ib)))
+
+    (method ^:public toString ^String [this]
+      (String/format "%s[undet=%s,t=%s,bound=%s]"
+                     (new Object/1
+                          [(.getSimpleName (.getClass this)) (.-qtype (.-uv this)) (.-t this) ib]))))
+
+  (defclass IncorporationEngine
+    :implements [Type$UndetVar$UndetVarListener]
+
+    (method ^:public varInstantiated ^void [this ^Type$UndetVar uv]
+      (.addFirst (.-incorporationActions uv) (SubstBounds. uv)))
+
+    (method ^:public varBoundChanged ^void [this ^Type$UndetVar uv ^Type$UndetVar$InferenceBound ib
+                                            ^Type bound ^boolean update]
+      (when-not (.isCaptured uv)
+        (.addAll (.-incorporationActions uv) (.getIncorporationActions this uv ib bound update))))
+
+    (method getIncorporationActions ^{:tag (List IncorporationAction)} [this ^Type$UndetVar uv
+                                                                        ^Type$UndetVar$InferenceBound ib
+                                                                        ^Type t ^boolean update]
+      (let [^{:tag (ListBuffer IncorporationAction)} actions (ListBuffer.)
+            inst (.getInst uv)]
+        (when (some? inst)
+          (.add actions (CheckInst. uv ib (new Type$UndetVar$InferenceBound/1 []))))
+        (.add actions (CheckBounds. uv t ib))
+        (if update
+            (.toList actions)
+            (do
+              (when (identical? ib Type$UndetVar$InferenceBound/UPPER)
+                (.add actions (CheckUpperBounds. uv t)))
+              (.add actions (PropagateBounds. uv t ib))
+              (.toList actions))))))
+
+  (field ^IncorporationEngine incorporationEngine (IncorporationEngine.))
+
+  (field ^:static ^:final ^int MAX_INCORPORATION_STEPS 10000)
+
+  (method doIncorporation :throws [InferenceException] ^void [this
+                                                              ^InferenceContext inferenceContext
+                                                              ^Warner warn]
+    (try
+      (let [^:mutable progress true
+            ^:mutable ^int round 0]
+        (while (and progress (< round MAX_INCORPORATION_STEPS))
+          (set! progress false)
+          (for-each [^Type t (.-undetvars inferenceContext)]
+            (let [uv (cast Type$UndetVar t)]
+              (when-not (.isEmpty (.-incorporationActions uv))
+                (set! progress true)
+                (.apply (cast IncorporationAction (.removeFirst (.-incorporationActions uv)))
+                        inferenceContext
+                        warn))))
+          (set! round (unchecked-inc-int round))))
+      (finally (.clear incorporationCache))))
+
+  (method ^:private getParameterizedSupers ^{:tag (List (Pair Type Type))} [this ^Type t ^Type s]
+    (let [lubResult (.lub types (new Type/1 [t s]))]
+      (if (or (identical? lubResult (.-errType syms)) (identical? lubResult (.-botType syms)))
+          (List/nil)
+          (let [^{:tag (List Type)} supertypesToCheck (if (.isIntersection lubResult)
+                                                          (.getComponents
+                                                            (cast
+                                                              Type$IntersectionClassType
+                                                              lubResult))
+                                                          (List/of lubResult))
+                ^{:tag (ListBuffer (Pair Type Type))} commonSupertypes (ListBuffer.)]
+            (for-each [^Type sup supertypesToCheck]
+              (when (.isParameterized sup)
+                (let [asSuperOfT (.asSuper this t sup)
+                      asSuperOfS (.asSuper this s sup)]
+                  (.add commonSupertypes (Pair. asSuperOfT asSuperOfS)))))
+            (.toList commonSupertypes)))))
+
+  (method ^:private asSuper ^Type [this ^Type t ^Type sup]
+    (if (.hasTag sup TypeTag/ARRAY)
+        ^Type (Type$ArrayType. (.asSuper this (.elemtype types t) (.elemtype types sup))
+                               (.-arrayClass syms))
+        (.asSuper types t (.-tsym sup))))
+
+  (method doIncorporationOp ^boolean [this ^IncorporationBinaryOpKind opKind ^Type op1 ^Type op2
+                                      ^Warner warn ^InferenceContext ic]
+    (let [newOp (IncorporationBinaryOpKey. opKind (.asTypeVar ic op1) (.asTypeVar ic op2) types)
+          ^:mutable res (cast Boolean (.get incorporationCache newOp))]
+      (when (nil? res)
+        (.put incorporationCache newOp (set! res (.apply opKind op1 op2 warn types))))
+      res))
+
+  (defclass ^:enum IncorporationBinaryOpKind
+    (constants
+      (IS_SUBTYPE []
+                  (method apply ^boolean [this ^Type op1 ^Type op2 ^Warner warn ^Types types]
+                    (.isSubtypeUnchecked types op1 op2 warn)))
+      (IS_SAME_TYPE []
+                    (method apply ^boolean [this ^Type op1 ^Type op2 ^Warner warn ^Types types]
+                      (.isSameType types op1 op2))))
+
+    (method ^:abstract apply ^boolean [this ^Type op1 ^Type op2 ^Warner warn ^Types types]))
+
+  (defclass ^:record IncorporationBinaryOpKey [^IncorporationBinaryOpKind opKind ^Type op1 ^Type op2
+                                               ^Types types]
+    (method ^:public equals ^boolean [this o]
+      (if-instance [^IncorporationBinaryOpKey anotherKey o]
+        (if (identical? opKind (.-opKind anotherKey))
+            (if (.isSameType types op1 (.-op1 anotherKey))
+                (.isSameType types op2 (.-op2 anotherKey))
+                false)
+            false)
+        false))
+
+    (method ^:public hashCode ^int [this]
+      (let [^:mutable result (.hashCode opKind)]
+        (set! result (unchecked-multiply-int result 127))
+        (set! result (unchecked-add-int result (.hashCode types op1)))
+        (set! result (unchecked-multiply-int result 127))
+        (set! result (unchecked-add-int result (.hashCode types op2)))
+        result)))
+
+  (field ^{:tag (Map IncorporationBinaryOpKey Boolean)} incorporationCache (LinkedHashMap.))
+
+  (defclass ^:protected ^:static BoundFilter
+    :implements [(Predicate Type)]
+
+    (field ^InferenceContext inferenceContext)
+
+    (constructor ^:public [this ^InferenceContext inferenceContext]
+      (set! (.-inferenceContext this) inferenceContext))
+
+    (method ^:public test ^boolean [this ^Type t]
+      (and (and (not (.isErroneous t)) (not (.free inferenceContext t)))
+           (not (.hasTag t TypeTag/BOT)))))
+
+  (method reportInstError ^void [this ^Type$UndetVar uv ^Type$UndetVar$InferenceBound ib]
+    (switch ib
+      EQ
+        (throw (.error this
+                       (.fragment diags
+                                  (CompilerProperties$Fragments/InferredDoNotConformToEqBounds
+                                    (.getInst uv)
+                                    (.getBounds uv ib)))))
+      LOWER
+        (throw (.error this
+                       (.fragment diags
+                                  (CompilerProperties$Fragments/InferredDoNotConformToLowerBounds
+                                    (.getInst uv)
+                                    (.getBounds uv ib)))))
+      UPPER
+        (throw (.error this
+                       (.fragment diags
+                                  (CompilerProperties$Fragments/InferredDoNotConformToUpperBounds
+                                    (.getInst uv)
+                                    (.getBounds uv ib)))))))
+
+  (method reportBoundError ^void [this ^Type$UndetVar uv ^Type$UndetVar$InferenceBound ib]
+    (switch ib
+      EQ
+        (throw (.error this
+                       (.fragment diags
+                                  (CompilerProperties$Fragments/IncompatibleEqBounds
+                                    (.-qtype uv)
+                                    (.getBounds uv ib)))))
+      UPPER
+        (throw (.error this
+                       (.fragment diags
+                                  (CompilerProperties$Fragments/IncompatibleUpperBounds
+                                    (.-qtype uv)
+                                    (.getBounds uv ib)))))
+      LOWER (throw (AssertionError. "this case shouldn't happen"))))
+
+  (method reportBoundError ^void [this ^Type$UndetVar uv ^Type$UndetVar$InferenceBound ib1
+                                  ^Type$UndetVar$InferenceBound ib2]
+    (throw (.error this
+                   (.fragment diags
+                              (CompilerProperties$Fragments/IncompatibleBounds
+                                (.-qtype uv)
+                                (.getBoundFragment this ib1 (.getBounds uv ib1))
+                                (.getBoundFragment this ib2 (.getBounds uv ib2)))))))
+
+  (method getBoundFragment ^JCDiagnostic$Fragment [this ^Type$UndetVar$InferenceBound ib
+                                                   ^{:tag (List Type)} types]
+    (switch ib
+      EQ (return (CompilerProperties$Fragments/EqBounds types))
+      LOWER (return (CompilerProperties$Fragments/LowerBounds types))
+      UPPER (return (CompilerProperties$Fragments/UpperBounds types)))
+    (throw (AssertionError. "can't get to this place")))
+
+  (defclass ^:interface GraphStrategy
+    (defclass ^:public ^:static NodeNotFoundException
+      :extends CompilerInternalException
+
+      (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+      (field ^:transient ^Infer$GraphSolver$InferenceGraph graph)
+
+      (constructor ^:public [this ^Infer$GraphSolver$InferenceGraph graph
+                             ^boolean dumpStacktraceOnError]
+        (super. dumpStacktraceOnError)
+        (set! (.-graph this) graph)))
+
+    (method pickNode :throws [NodeNotFoundException] ^Infer$GraphSolver$InferenceGraph$Node [this
+                                                                                             ^Infer$GraphSolver$InferenceGraph g])
+
+    (method done ^boolean [this]))
+
+  (defclass ^:abstract LeafSolver
+    :implements [GraphStrategy]
+
+    (method ^:public pickNode ^Infer$GraphSolver$InferenceGraph$Node [this
+                                                                      ^Infer$GraphSolver$InferenceGraph g]
+      (when (.isEmpty (.-nodes g))
+        (throw (Infer$GraphStrategy$NodeNotFoundException. g (.-dumpStacktraceOnError Infer/this))))
+      (cast Infer$GraphSolver$InferenceGraph$Node (.get (.-nodes g) 0))))
+
+  (defclass ^:abstract BestLeafSolver
+    :extends LeafSolver
+
+    (field ^{:tag (List Type)} varsToSolve)
+
+    (constructor [this ^{:tag (List Type)} varsToSolve]
+      (set! (.-varsToSolve this) varsToSolve))
+
+    (method computeTreeToLeafs ^{:tag (Pair (List Infer$GraphSolver$InferenceGraph$Node) Integer)} [this
+                                                                                                    ^Infer$GraphSolver$InferenceGraph$Node n]
+      (let [^:mutable ^{:tag (Pair (List Infer$GraphSolver$InferenceGraph$Node) Integer)} cachedPath
+              (cast Pair (.get treeCache n))]
+        (when (nil? cachedPath)
+          (if (.isLeaf n)
+              (set! cachedPath (Pair. (List/of n) (.length (cast ListBuffer (.-data n)))))
+              (let [^:mutable ^{:tag (Pair (List Infer$GraphSolver$InferenceGraph$Node) Integer)} path
+                      (Pair. (List/of n) (.length (cast ListBuffer (.-data n))))]
+                (for-each [^Infer$GraphSolver$InferenceGraph$Node n2 (.getAllDependencies n)]
+                  (when-not (identical? n2 n)
+                    (let [^{:tag (Pair (List Infer$GraphSolver$InferenceGraph$Node) Integer)} subpath
+                            (.computeTreeToLeafs this n2)]
+                      (set! path
+                            (Pair. (.prependList
+                                     (cast List (.-fst path))
+                                     (cast List (.-fst subpath)))
+                                   (unchecked-add-int
+                                     (.intValue (cast Integer (.-snd path)))
+                                     (.intValue (cast Integer (.-snd subpath)))))))))
+                (set! cachedPath path)))
+          (.put treeCache n cachedPath))
+        cachedPath))
+
+    (field ^:final ^{:tag (Map Infer$GraphSolver$InferenceGraph$Node (Pair (List Infer$GraphSolver$InferenceGraph$Node) Integer))} treeCache
+      (LinkedHashMap.))
+
+    (field ^:final ^{:tag (Pair (List Infer$GraphSolver$InferenceGraph$Node) Integer)} noPath
+      (Pair. nil Integer/MAX_VALUE))
+
+    (method ^:public pickNode ^Infer$GraphSolver$InferenceGraph$Node [this
+                                                                      ^:final ^Infer$GraphSolver$InferenceGraph g]
+      (.clear treeCache)
+      (let [^:mutable ^{:tag (Pair (List Infer$GraphSolver$InferenceGraph$Node) Integer)} bestPath
+              noPath]
+        (for-each [^Infer$GraphSolver$InferenceGraph$Node n (.-nodes g)]
+          (when-not (Collections/disjoint (cast Collection (.-data n)) varsToSolve)
+            (let [^{:tag (Pair (List Infer$GraphSolver$InferenceGraph$Node) Integer)} path
+                    (.computeTreeToLeafs this n)]
+              (when (< (.intValue (cast Integer (.-snd path)))
+                       (.intValue (cast Integer (.-snd bestPath))))
+                (set! bestPath path)))))
+        (when (identical? bestPath noPath)
+          (throw
+            (Infer$GraphStrategy$NodeNotFoundException. g (.-dumpStacktraceOnError Infer/this))))
+        (cast Infer$GraphSolver$InferenceGraph$Node (.-head (cast List (.-fst bestPath)))))))
+
+  (defclass ^:enum InferenceStep
+    (constants
+      (EQ [Type$UndetVar$InferenceBound/EQ]
+          (method solve ^Type [this ^Type$UndetVar uv ^InferenceContext inferenceContext]
+            (cast Type (.-head (.filterBounds this uv inferenceContext)))))
+      (LOWER [Type$UndetVar$InferenceBound/LOWER]
+             (method solve ^Type [this ^Type$UndetVar uv ^InferenceContext inferenceContext]
+               (let [infer (.-infer inferenceContext)
+                     ^{:tag (List Type)} lobounds (.filterBounds this uv inferenceContext)
+                     ^Type owntype (if (nil? (.-tail (.-tail lobounds)))
+                                       (cast Type (.-head lobounds))
+                                       (.lub (.-types infer) lobounds))]
+                 (if (or (.isPrimitive owntype) (.hasTag owntype TypeTag/ERROR))
+                     (throw (.error infer
+                                    (.fragment
+                                      (.-diags infer)
+                                      (CompilerProperties$Fragments/NoUniqueMinimalInstanceExists
+                                        (.-qtype uv)
+                                        lobounds))))
+                     owntype))))
+      (THROWS [Type$UndetVar$InferenceBound/UPPER]
+              (method ^:public accepts ^boolean [this ^Type$UndetVar t
+                                                 ^InferenceContext inferenceContext]
+                (if (not (.isThrows t))
+                    false
+                    (let [types (.-types inferenceContext)
+                          syms (.-syms (.-infer inferenceContext))]
+                      (.allMatch (.filter (.stream
+                                            (.getBounds t Type$UndetVar$InferenceBound/UPPER))
+                                          (lambda Predicate ^boolean [^Type b]
+                                            (not (.free inferenceContext b))))
+                                 (lambda Predicate ^boolean [^Type u]
+                                   (.isSubtype types (.-runtimeExceptionType syms) u))))))
+              (method solve ^Type [this ^Type$UndetVar uv ^InferenceContext inferenceContext]
+                (.-runtimeExceptionType (.-syms (.-infer inferenceContext)))))
+      (UPPER [Type$UndetVar$InferenceBound/UPPER]
+             (method solve ^Type [this ^Type$UndetVar uv ^InferenceContext inferenceContext]
+               (let [infer (.-infer inferenceContext)
+                     ^{:tag (List Type)} hibounds (.filterBounds this uv inferenceContext)
+                     ^Type owntype (if (nil? (.-tail (.-tail hibounds)))
+                                       (cast Type (.-head hibounds))
+                                       (.glb (.-types infer) hibounds))]
+                 (if (or (.isPrimitive owntype) (.hasTag owntype TypeTag/ERROR))
+                     (throw (.error infer
+                                    (.fragment
+                                      (.-diags infer)
+                                      (CompilerProperties$Fragments/NoUniqueMaximalInstanceExists
+                                        (.-qtype uv)
+                                        hibounds))))
+                     owntype))))
+      (CAPTURED [Type$UndetVar$InferenceBound/UPPER]
+                (method ^:public accepts ^boolean [this ^Type$UndetVar t
+                                                   ^InferenceContext inferenceContext]
+                  (and (.isCaptured t)
+                       (not (.free inferenceContext
+                                   (.getBounds t
+                                               Type$UndetVar$InferenceBound/UPPER
+                                               Type$UndetVar$InferenceBound/LOWER)))))
+                (method solve ^Type [this ^Type$UndetVar uv ^InferenceContext inferenceContext]
+                  (let [infer (.-infer inferenceContext)
+                        ^Type upper (if (.nonEmpty (.filterBounds UPPER uv inferenceContext))
+                                        (.solve UPPER uv inferenceContext)
+                                        (.-objectType (.-syms infer)))
+                        ^Type lower (if (.nonEmpty (.filterBounds LOWER uv inferenceContext))
+                                        (.solve LOWER uv inferenceContext)
+                                        (.-botType (.-syms infer)))
+                        prevCaptured (cast Type$CapturedType (.-qtype uv))]
+                    (Type$CapturedType. (.-name (.-tsym prevCaptured))
+                                        (.-owner (.-tsym prevCaptured))
+                                        upper
+                                        lower
+                                        (.-wildcard prevCaptured))))))
+
+    (field ^:final ^Type$UndetVar$InferenceBound ib)
+
+    (constructor [this ^Type$UndetVar$InferenceBound ib]
+      (set! (.-ib this) ib))
+
+    (method ^:abstract solve ^Type [this ^Type$UndetVar uv ^InferenceContext inferenceContext])
+
+    (method ^:public accepts ^boolean [this ^Type$UndetVar t ^InferenceContext inferenceContext]
+      (and (.nonEmpty (.filterBounds this t inferenceContext)) (not (.isCaptured t))))
+
+    (method filterBounds ^{:tag (List Type)} [this ^Type$UndetVar uv
+                                              ^InferenceContext inferenceContext]
+      (Type/filter (.getBounds uv ib) (BoundFilter. inferenceContext))))
+
+  (defclass ^:enum GraphInferenceSteps
+    (constants
+      (EQ [(EnumSet/of InferenceStep/EQ)])
+      (EQ_LOWER [(EnumSet/of InferenceStep/EQ InferenceStep/LOWER)])
+      (EQ_LOWER_THROWS_UPPER_CAPTURED
+        [(EnumSet/of InferenceStep/EQ
+                     InferenceStep/LOWER
+                     InferenceStep/UPPER
+                     InferenceStep/THROWS
+                     InferenceStep/CAPTURED)]))
+
+    (field ^:final ^{:tag (EnumSet InferenceStep)} steps)
+
+    (constructor [this ^{:tag (EnumSet InferenceStep)} steps]
+      (set! (.-steps this) steps)))
+
+  (defclass ^:enum DependencyKind
+    :implements [GraphUtils$DependencyKind]
+
+    (constants (BOUND ["dotted"]) (STUCK ["dashed"]))
+
+    (field ^:final ^String dotStyle)
+
+    (constructor ^:private [this ^String dotStyle]
+      (set! (.-dotStyle this) dotStyle)))
+
+  (defclass GraphSolver
+    (field ^InferenceContext inferenceContext)
+
+    (field ^Warner warn)
+
+    (constructor [this ^InferenceContext inferenceContext ^Warner warn]
+      (set! (.-inferenceContext this) inferenceContext)
+      (set! (.-warn this) warn))
+
+    (method solve ^void [this ^GraphStrategy sstrategy]
+      (.doIncorporation Infer/this inferenceContext warn)
+      (let [inferenceGraph (InferenceGraph.)]
+        (while (not (.done sstrategy))
+          (when (some? dependenciesFolder)
+            (set! pendingGraphs (.prepend pendingGraphs (.toDot inferenceGraph))))
+          (let [nodeToSolve (.pickNode sstrategy inferenceGraph)
+                ^{:tag (List Type)} varsToSolve (List/from (cast Iterable (.-data nodeToSolve)))
+                ^{:tag (List Type)} saved_undet (.save inferenceContext)]
+            (try
+              (label :outer
+                (while (Type/containsAny (.restvars inferenceContext) varsToSolve)
+                  (for-each [^GraphInferenceSteps step (GraphInferenceSteps/values)]
+                    (when (.nonEmpty (.solveBasic inferenceContext varsToSolve (.-steps step)))
+                      (.doIncorporation Infer/this inferenceContext warn)
+                      (continue :outer)))
+                  (throw (.error Infer/this nil))))
+              (catch InferenceException ex
+                (.rollback inferenceContext saved_undet)
+                (.instantiateAsUninferredVars Infer/this varsToSolve inferenceContext)
+                (.doIncorporation Infer/this inferenceContext warn)))
+            (.deleteNode inferenceGraph nodeToSolve)))))
+
+    (defclass InferenceGraph
+      (defclass Node
+        :extends (GraphUtils$TarjanNode (ListBuffer Type) Node)
+        :implements [(GraphUtils$DottableNode (ListBuffer Type) Node)]
+
+        (field ^{:tag (Set Node)} deps)
+
+        (constructor [this ^Type ivar]
+          (super. (ListBuffer/of ivar))
+          (set! (.-deps this) (LinkedHashSet.)))
+
+        (method ^:public getSupportedDependencyKinds ^GraphUtils$DependencyKind/1 [this]
+          (new GraphUtils$DependencyKind/1 [DependencyKind/BOUND]))
+
+        (method ^:public getAllDependencies ^{:tag (Iterable (? extends Node))} [this]
+          deps)
+
+        (method ^:public getDependenciesByKind ^{:tag (Collection (? extends Node))} [this
+                                                                                      ^GraphUtils$DependencyKind dk]
+          (if (identical? dk DependencyKind/BOUND) deps (throw (IllegalStateException.))))
+
+        (method ^:protected addDependency ^void [this ^Node depToAdd]
+          (.add deps depToAdd))
+
+        (method ^:protected addDependencies ^void [this ^{:tag (Set Node)} depsToAdd]
+          (for-each [^Node n depsToAdd] (.addDependency this n)))
+
+        (method ^:protected removeDependency ^boolean [this ^Node n]
+          (.remove deps n))
+
+        (method ^:protected closure ^{:tag (Set Node)} [this]
+          (let [^{:tag (Set Node)} closure (LinkedHashSet.)]
+            (.closureInternal this closure)
+            closure))
+
+        (method ^:private closureInternal ^void [this ^{:tag (Set Node)} closure]
+          (when (.add closure this) (for-each [^Node n deps] (.closureInternal n closure))))
+
+        (method ^:protected isLeaf ^boolean [this]
+          (if (.isEmpty deps)
+              true
+              (do (for-each [^Node n deps] (when-not (identical? n this) (return false))) true)))
+
+        (method ^:protected mergeWith ^void [this ^{:tag (List (? extends Node))} nodes]
+          (for-each [^Node n nodes]
+            (Assert/check (== (.length (cast ListBuffer (.-data n))) 1)
+                          "Attempt to merge a compound node!")
+            (.appendList (cast ListBuffer (.-data this)) (cast ListBuffer (.-data n)))
+            (.addDependencies this (.-deps n)))
+          (let [^{:tag (Set Node)} deps2 (LinkedHashSet.)]
+            (for-each [^Node d deps]
+              (if (.contains (cast ListBuffer (.-data this)) (.first (cast ListBuffer (.-data d))))
+                  (.add deps2 this)
+                  (.add deps2 d)))
+            (set! deps deps2)))
+
+        (method ^:private graphChanged ^void [this ^Node from ^Node to]
+          (when (.removeDependency this from) (when (some? to) (.addDependency this to))))
+
+        (method ^:public nodeAttributes ^Properties [this]
+          (let [p (Properties.)] (.put p "label" (java-str "\"" (.toString this) "\"")) p))
+
+        (method ^:public dependencyAttributes ^Properties [this ^Node sink
+                                                           ^GraphUtils$DependencyKind dk]
+          (let [p (Properties.)]
+            (.put p "style" (.-dotStyle (cast DependencyKind dk)))
+            (let [buf (StringBuilder.)
+                  ^:mutable sep ""]
+              (for-each [^Type from (cast ListBuffer (.-data this))]
+                (let [uv (cast Type$UndetVar (.asUndetVar inferenceContext from))]
+                  (for-each [^Type bound (.getBounds uv (Type$UndetVar$InferenceBound/values))]
+                    (when (.containsAny bound (List/from (cast Iterable (.-data sink))))
+                      (.append buf sep)
+                      (.append buf bound)
+                      (set! sep ",")))))
+              (.put p "label" (java-str "\"" (.toString buf) "\""))
+              p))))
+
+      (field ^{:tag (ArrayList Node)} nodes)
+
+      (constructor [this] (.initNodes this))
+
+      (method ^:public findNode ^Node [this ^Type t]
+        (for-each [^Node n nodes] (when (.contains (cast ListBuffer (.-data n)) t) (return n)))
+        nil)
+
+      (method ^:public deleteNode ^void [this ^Node n]
+        (Assert/check (.contains nodes n))
+        (.remove nodes n)
+        (.notifyUpdate this n nil))
+
+      (method notifyUpdate ^void [this ^Node from ^Node to]
+        (for-each [^Node n nodes] (.graphChanged n from to)))
+
+      (method initNodes ^void [this]
+        (set! nodes (ArrayList.))
+        (for-each [^Type t (.restvars inferenceContext)] (.add nodes (Node. t)))
+        (for-each [^Node n_i nodes]
+          (let [i (cast Type (.first (cast ListBuffer (.-data n_i))))]
+            (for-each [^Node n_j nodes]
+              (let [j (cast Type (.first (cast ListBuffer (.-data n_j))))]
+                (when-not (identical? i j)
+                  (let [uv_i (cast Type$UndetVar (.asUndetVar inferenceContext i))]
+                    (when (Type/containsAny (.getBounds uv_i (Type$UndetVar$InferenceBound/values))
+                                            (List/of j))
+                      (.addDependency n_i n_j))))))))
+        (let [^{:tag (ArrayList Node)} acyclicNodes (ArrayList.)]
+          (for-each [^{:tag (List (? extends Node))} conSubGraph (GraphUtils/tarjan nodes)]
+            (when (> (.length conSubGraph) 1)
+              (let [root (cast Node (.-head conSubGraph))]
+                (.mergeWith root (.-tail conSubGraph))
+                (for-each [^Node n conSubGraph] (.notifyUpdate this n root))))
+            (.add acyclicNodes (cast Node (.-head conSubGraph))))
+          (set! nodes acyclicNodes)))
+
+      (method toDot ^String [this]
+        (let [buf (StringBuilder.)]
+          (for-each [^Type t (.-undetvars inferenceContext)]
+            (let [uv (cast Type$UndetVar t)]
+              (.append buf
+                       (String/format
+                         "var %s - upper bounds = %s, lower bounds = %s, eq bounds = %s\\n"
+                         (new Object/1
+                              [(.-qtype uv)
+                               (.getBounds uv Type$UndetVar$InferenceBound/UPPER)
+                               (.getBounds uv Type$UndetVar$InferenceBound/LOWER)
+                               (.getBounds uv Type$UndetVar$InferenceBound/EQ)])))))
+          (GraphUtils/toDot nodes (java-str "inferenceGraph" (.hashCode this)) (.toString buf))))))
+
+  (defclass ^:interface FreeTypeListener
+    (method typesInferred ^void [this ^InferenceContext inferenceContext]))
+
+  (field ^:final ^InferenceContext emptyContext))

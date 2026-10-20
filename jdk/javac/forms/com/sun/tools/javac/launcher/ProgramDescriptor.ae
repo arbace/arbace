@@ -1,0 +1,116 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/launcher/ProgramDescriptor.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.launcher)
+
+(import '(com.sun.source.tree ClassTree CompilationUnitTree Tree)
+        '(com.sun.tools.javac.api JavacTool)
+        '(com.sun.tools.javac.resources LauncherProperties$Errors)
+        '(java.io IOException UncheckedIOException)
+        '(java.lang.module InvalidModuleDescriptorException)
+        '(java.nio.file Files Path)
+        '(java.nio.file.attribute BasicFileAttributes)
+        '(java.util ArrayList List Optional Set)
+        '(java.util.function BiPredicate Function)
+        '(java.util.stream Collectors Stream)
+        '(javax.lang.model SourceVersion)
+        '(javax.tools Diagnostic DiagnosticListener))
+
+(defclass ^:public ^:record ProgramDescriptor [^ProgramFileObject fileObject
+                                               ^{:tag (Optional String)} packageName
+                                               ^{:tag (List String)} qualifiedTypeNames
+                                               ^Path sourceRootPath]
+  (method ^:static of :throws [Fault] ^ProgramDescriptor [^ProgramFileObject fileObject]
+    (let [file (.getFile fileObject)
+          ^:mutable packageName ""
+          ^:mutable packageNameAndDot ""
+          qualifiedTypeNames (ArrayList.)]
+      (try
+        (let [compiler (JavacTool/create)
+              standardFileManager (.getStandardFileManager compiler nil nil nil)
+              units (List/of fileObject)
+              task (.getTask compiler
+                             nil
+                             standardFileManager
+                             (lambda DiagnosticListener ^void [^Diagnostic diagnostic])
+                             nil
+                             nil
+                             units)
+              tree (cast CompilationUnitTree (.next (.iterator (.parse task))))
+              packageTree (.getPackage tree)]
+          (when (some? packageTree)
+            (set! packageName (.toString (.getPackageName packageTree)))
+            (set! packageNameAndDot (java-str packageName \.)))
+          (for-each [^Tree type (.getTypeDecls tree)]
+            (when-instance [^ClassTree classType type]
+              (.add qualifiedTypeNames (java-str packageNameAndDot (.getSimpleName classType))))))
+        (catch IOException ignore))
+      (when (.isEmpty qualifiedTypeNames) (throw (Fault. LauncherProperties$Errors/NoClass)))
+      (ProgramDescriptor. fileObject
+                          ^Optional (if (.isEmpty packageName)
+                                        (Optional/empty)
+                                        (Optional/of packageName))
+                          (List/copyOf qualifiedTypeNames)
+                          (ProgramDescriptor/computeSourceRootPath file packageName))))
+
+  (method ^:public ^:static computeSourceRootPath :throws [Fault] ^Path [^Path program
+                                                                         ^String packageName]
+    (let [absolute (.toAbsolutePath (.normalize program))
+          absoluteRoot (.getRoot absolute)]
+      (java-assert (some? absoluteRoot))
+      (if (.isEmpty packageName)
+          (let [parent (.getParent absolute)] (if (nil? parent) absoluteRoot parent))
+          (let [packagePath (Path/of (.replace packageName \. \/) (new String/1 []))
+                ending (.resolve packagePath (.getFileName program))]
+            (if (.endsWith absolute ending)
+                (let [max (unchecked-subtract-int (.getNameCount absolute) (.getNameCount ending))]
+                  (if (== max 0) absoluteRoot (.resolve absoluteRoot (.subpath absolute 0 max))))
+                (throw (Fault. (LauncherProperties$Errors/MismatchEndOfPathAndPackageName
+                                 packageName
+                                 program))))))))
+
+  (method ^:public isModular ^boolean [this]
+    (Files/exists (.resolve sourceRootPath "module-info.java")))
+
+  (method ^:public computePackageNames ^{:tag (Set String)} [this]
+    (ProgramDescriptor/explodedPackages sourceRootPath))
+
+  (method ^:private ^:static explodedPackages ^{:tag (Set String)} [^Path dir]
+    (let [separator (.getSeparator (.getFileSystem dir))]
+      (try
+        (with-resources [^{:tag (Stream Path)} stream (Files/find
+                                                        dir
+                                                        Integer/MAX_VALUE
+                                                        (lambda BiPredicate ^boolean [^Path path
+                                                                                      ^BasicFileAttributes attrs]
+                                                          (and
+                                                            (.isRegularFile attrs)
+                                                            (not (ProgramDescriptor/isHidden path)))))]
+          (cast Set
+                (.collect (.flatMap (.map (.map stream
+                                                (method-ref
+                                                  Function
+                                                  ^Path [Path]
+                                                  dir
+                                                  Path/.relativize))
+                                          (lambda Function ^Optional [^Path path]
+                                            (ProgramDescriptor/toPackageName path separator)))
+                                    (method-ref Function ^Stream [Optional] Optional/.stream))
+                          (Collectors/toSet))))
+        (catch IOException x (throw (UncheckedIOException. x))))))
+
+  (method ^:private ^:static toPackageName ^{:tag (Optional String)} [^Path file ^String separator]
+    (java-assert (nil? (.getRoot file)))
+    (let [parent (.getParent file)]
+      (if (nil? parent)
+          (let [name (.toString file)]
+            (when (and (.endsWith name ".class") (not (.equals name "module-info.class")))
+              (let [msg (java-str
+                          name
+                          " found in top-level directory (unnamed package not allowed in module)")]
+                (throw (InvalidModuleDescriptorException. msg))))
+            (Optional/empty))
+          (let [pn (.replace (.toString parent) separator ".")]
+            (if (SourceVersion/isName pn) (Optional/of pn) (Optional/empty))))))
+
+  (method ^:private ^:static isHidden ^boolean [^Path file]
+    (try (Files/isHidden file) (catch IOException ioe false))))

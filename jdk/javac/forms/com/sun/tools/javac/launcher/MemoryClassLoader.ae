@@ -1,0 +1,182 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/launcher/MemoryClassLoader.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.launcher)
+
+(import '(java.io ByteArrayInputStream
+                  FileNotFoundException
+                  IOError
+                  IOException
+                  InputStream
+                  UncheckedIOException)
+        '(java.lang.module ModuleDescriptor)
+        '(java.net MalformedURLException URI URISyntaxException URL URLConnection URLStreamHandler)
+        '(java.security CodeSigner CodeSource ProtectionDomain)
+        '(java.util ArrayList Collections Enumeration List Map NoSuchElementException)
+        '(java.util.function Function)
+        '(jdk.internal.module Resources))
+
+(defclass ^:final MemoryClassLoader
+  :extends ClassLoader
+
+  (field ^:private ^:final ^ClassLoader parentClassLoader)
+
+  (field ^:private ^:final ^{:tag (Map String byte/1)} sourceFileClasses)
+
+  (field ^:private ^:final ^ProtectionDomain domain)
+
+  (field ^:private ^:final ^ModuleDescriptor moduleDescriptor)
+
+  (field ^:private ^:final ^ProgramDescriptor programDescriptor)
+
+  (field ^:private ^:final ^{:tag (Function String byte/1)} compileSourceFile)
+
+  (constructor [this ^{:tag (Map String byte/1)} sourceFileClasses ^ClassLoader parentClassLoader
+                ^ModuleDescriptor moduleDescriptor ^ProgramDescriptor programDescriptor
+                ^{:tag (Function String byte/1)} compileSourceFile]
+    (super. parentClassLoader)
+    (set! (.-parentClassLoader this) parentClassLoader)
+    (set! (.-sourceFileClasses this) sourceFileClasses)
+    (let [^:mutable ^CodeSource codeSource nil]
+      (try
+        (set! codeSource
+              (CodeSource. (.toURL (.toUri (.getFile (.fileObject programDescriptor))))
+                           (cast CodeSigner/1 nil)))
+        (catch MalformedURLException e (set! codeSource nil)))
+      (set! domain (ProtectionDomain. codeSource nil this nil))
+      (set! (.-moduleDescriptor this) moduleDescriptor)
+      (set! (.-programDescriptor this) programDescriptor)
+      (set! (.-compileSourceFile this) compileSourceFile)))
+
+  (method ^:protected loadClass :throws [ClassNotFoundException] ^{:tag (Class ?)} [this
+                                                                                    ^String name
+                                                                                    ^boolean resolve]
+    (locking (.getClassLoadingLock this name)
+      (let [^:mutable ^{:tag (Class ?)} c (.findLoadedClass this name)]
+        (when (nil? c)
+          (set! c (.findOrCompileClass this name))
+          (when (nil? c) (set! c (.loadClass parentClassLoader name)))
+          (when resolve (.resolveClass this c)))
+        c)))
+
+  (method ^:public getResource ^URL [this ^String name]
+    (if (.containsKey sourceFileClasses (.toBinaryName this name))
+        (.findResource this name)
+        (let [resource (.toResourceInRootPath this name)]
+          (if (some? resource) resource (.getResource parentClassLoader name)))))
+
+  (method ^:public getResources :throws [IOException] ^{:tag (Enumeration URL)} [this ^String name]
+    (let [u (.findResource this name)
+          ^{:tag (Enumeration URL)} e (.getResources parentClassLoader name)]
+      (if (nil? u)
+          e
+          (let [^{:tag (List URL)} list (ArrayList.)]
+            (.add list u)
+            (while (.hasMoreElements e) (.add list (cast URL (.nextElement e))))
+            (Collections/enumeration list)))))
+
+  (method ^:protected findClass :throws [ClassNotFoundException] ^{:tag (Class ?)} [this
+                                                                                    ^String name]
+    (let [foundOrCompiledClass (.findOrCompileClass this name)]
+      (when (nil? foundOrCompiledClass) (throw (ClassNotFoundException. name)))
+      foundOrCompiledClass))
+
+  (method ^:protected findClass ^{:tag (Class ?)} [this ^String moduleName ^String name]
+    (try
+      (when (nil? moduleName) (return (.findClass this name)))
+      (when (and (some? moduleDescriptor) (.equals (.name moduleDescriptor) moduleName))
+        (return (.findClass this name)))
+      (return (.findClass super moduleName name))
+      (catch ClassNotFoundException ignore))
+    nil)
+
+  (method ^:private findOrCompileClass ^{:tag (Class ?)} [this ^String name]
+    (let [^:mutable bytes (cast byte/1 (.get sourceFileClasses name))]
+      (when (nil? bytes)
+        (set! bytes (cast byte/1 (.apply compileSourceFile name)))
+        (when (nil? bytes) (return nil)))
+      (.defineClass this name bytes 0 (alength bytes) domain)))
+
+  (method ^:protected findResource :throws [IOException] ^URL [this ^String moduleName ^String name]
+    (cond
+      (nil? moduleName) (.getResource this name)
+      (and (some? moduleDescriptor) (.equals (.name moduleDescriptor) moduleName))
+        (.getResource this name)
+      :else (.findResource super moduleName name)))
+
+  (method ^:public findResource ^URL [this ^String name]
+    (let [binaryName (.toBinaryName this name)]
+      (if (or (nil? binaryName) (nil? (.get sourceFileClasses binaryName)))
+          (.toResourceInRootPath this name)
+          (let [^:mutable handler (.-handler this)]
+            (when (nil? handler) (set! (.-handler this) (set! handler (MemoryURLStreamHandler.))))
+            (try
+              (let [uri (URI. PROTOCOL name nil)] (URL/of uri handler))
+              (catch [URISyntaxException MalformedURLException] e nil))))))
+
+  (method ^:public findResources ^{:tag (Enumeration URL)} [this ^String name]
+    (anon (Enumeration URL) []
+      (field ^:private ^URL next (.findResource MemoryClassLoader/this name))
+
+      (method ^:public hasMoreElements ^boolean [this] (some? next))
+
+      (method ^:public nextElement ^URL [this]
+        (when (nil? next) (throw (NoSuchElementException.)))
+        (let [u next] (set! next nil) u))))
+
+  (method ^:private toResourceInRootPath ^URL [this ^String name]
+    (try
+      (let [path (Resources/toFilePath (.sourceRootPath programDescriptor) name)]
+        (when (some? path) (.toURL (.toUri path))))
+      (catch IOException e (throw (UncheckedIOException. e)))
+      (catch IOError error
+        (let [cause (.getCause error)]
+          (when-instance [^IOException e cause] (throw (UncheckedIOException. e)))
+          (throw (RuntimeException. cause))))))
+
+  (method ^:private toBinaryName ^String [this ^String name]
+    (when-not (not (.endsWith name ".class"))
+      (.replace (.substring name 0 (unchecked-subtract-int (.length name) DOT_CLASS_LENGTH)) \/ \.)))
+
+  (field ^:private ^:static ^:final ^int DOT_CLASS_LENGTH (.length ".class"))
+
+  (field ^:private ^:final ^String PROTOCOL
+    (java-str "sourcelauncher-" (.getSimpleName (.getClass this)) (.hashCode this)))
+
+  (field ^:private ^URLStreamHandler handler)
+
+  (defclass ^:private MemoryURLStreamHandler
+    :extends URLStreamHandler
+
+    (method ^:public openConnection ^URLConnection [this ^URL u]
+      (when-not (.equalsIgnoreCase (.getProtocol u) PROTOCOL)
+        (throw (IllegalArgumentException. (.toString u))))
+      (MemoryURLConnection. u
+                            (cast byte/1
+                                  (.get sourceFileClasses
+                                        (.toBinaryName MemoryClassLoader/this (.getPath u)))))))
+
+  (defclass ^:private ^:static MemoryURLConnection
+    :extends URLConnection
+
+    (field ^:private ^:final ^byte/1 bytes)
+
+    (field ^:private ^InputStream in)
+
+    (constructor [this ^URL u ^byte/1 bytes]
+      (super. u)
+      (set! (.-bytes this) bytes))
+
+    (method ^:public connect :throws [IOException] ^void [this]
+      (when-not (.-connected this)
+        (when (nil? bytes) (throw (FileNotFoundException. (.getPath (.getURL this)))))
+        (set! in (ByteArrayInputStream. bytes))
+        (set! (.-connected this) true)))
+
+    (method ^:public getInputStream :throws [IOException] ^InputStream [this]
+      (.connect this)
+      in)
+
+    (method ^:public getContentLengthLong ^long [this] (alength bytes))
+
+    (method ^:public getContentType ^String [this]
+      "application/octet-stream")))

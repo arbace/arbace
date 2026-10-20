@@ -1,0 +1,365 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/api/JavacTaskImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.api)
+
+(import '(com.sun.source.tree CompilationUnitTree)
+        '(com.sun.tools.javac.code DeferredCompletionFailureHandler Symbol Symbol$TypeSymbol Type)
+        '(com.sun.tools.javac.comp Attr AttrContext Env)
+        '(com.sun.tools.javac.file BaseFileManager)
+        '(com.sun.tools.javac.main Arguments JavaCompiler Main$Result)
+        '(com.sun.tools.javac.parser Parser ParserFactory)
+        '(com.sun.tools.javac.processing AnnotationProcessingError)
+        '(com.sun.tools.javac.tree JCTree
+                                   JCTree$JCClassDecl
+                                   JCTree$JCCompilationUnit
+                                   JCTree$JCModuleDecl
+                                   JCTree$Tag)
+        '(com.sun.tools.javac.util ClientCodeException
+                                   Context
+                                   FatalError
+                                   JavacMessages
+                                   List
+                                   ListBuffer
+                                   Log
+                                   Log$PrefixKind
+                                   Log$WriterKind
+                                   Options
+                                   Pair
+                                   PropagatedException)
+        '(java.io IOException)
+        '(java.nio CharBuffer)
+        '(java.util HashMap HashSet Locale Map Objects Queue Set)
+        '(java.util.concurrent.atomic AtomicBoolean)
+        '(javax.annotation.processing Processor)
+        '(javax.lang.model.element Element TypeElement)
+        '(javax.tools JavaFileManager JavaFileObject JavaFileObject$Kind))
+
+(defclass ^:public JavacTaskImpl
+  :extends BasicJavacTask
+
+  (field ^:private ^:final ^Arguments args)
+
+  (field ^:private ^JavaCompiler compiler)
+
+  (field ^:private ^JavaFileManager fileManager)
+
+  (field ^:private ^DeferredCompletionFailureHandler dcfh)
+
+  (field ^:private ^Locale locale)
+
+  (field ^:private ^{:tag (Map JavaFileObject JCTree$JCCompilationUnit)} notYetEntered)
+
+  (field ^:private ^{:tag (ListBuffer (Env AttrContext))} genList)
+
+  (field ^:private ^:final ^AtomicBoolean used (AtomicBoolean.))
+
+  (field ^:private ^{:tag (Iterable (? extends Processor))} processors)
+
+  (field ^:private ^{:tag (ListBuffer String)} addModules (ListBuffer.))
+
+  (constructor ^:protected [this ^Context context]
+    (super. context true)
+    (set! args (Arguments/instance context))
+    (set! fileManager (cast JavaFileManager (.get context JavaFileManager)))
+    (set! dcfh (DeferredCompletionFailureHandler/instance context))
+    (.setHandler dcfh (.-userCodeHandler dcfh)))
+
+  (method ^:public call ^Boolean [this] (.isOK (.doCall this)))
+
+  (method ^:public doCall ^Main$Result [this]
+    (try
+      (let [^{:tag (Pair Main$Result Throwable)} result (.invocationHelper
+                                                          this
+                                                          (lambda Callable ^Main$Result []
+                                                            (.prepareCompiler this false)
+                                                            (if (> (.errorCount compiler) 0)
+                                                                Main$Result/ERROR
+                                                                (do
+                                                                  (.compile
+                                                                    compiler
+                                                                    (.getFileObjects args)
+                                                                    (.getClassNames args)
+                                                                    processors
+                                                                    addModules)
+                                                                  (if (> (.errorCount compiler) 0)
+                                                                      Main$Result/ERROR
+                                                                      Main$Result/OK)))))]
+        (cond
+          (nil? (.-snd result)) (cast Main$Result (.-fst result))
+          (instance? FatalError (.-snd result)) Main$Result/SYSERR
+          :else Main$Result/ABNORMAL))
+      (finally
+        (try
+          (.cleanup this)
+          (catch ClientCodeException e (throw (RuntimeException. (.getCause e))))))))
+
+  (method ^:public addModules ^void [this ^{:tag (Iterable String)} moduleNames]
+    (Objects/requireNonNull moduleNames)
+    (when (.get used) (throw (IllegalStateException.)))
+    (for-each [^String m moduleNames] (Objects/requireNonNull m) (.add addModules m)))
+
+  (method ^:public setProcessors ^void [this ^{:tag (Iterable (? extends Processor))} processors]
+    (Objects/requireNonNull processors)
+    (when (.get used) (throw (IllegalStateException.)))
+    (set! (.-processors this) processors))
+
+  (method ^:public setLocale ^void [this ^Locale locale]
+    (when (.get used) (throw (IllegalStateException.)))
+    (set! (.-locale this) locale))
+
+  (method ^:private invocationHelper :type-params [T] ^{:tag (Pair T Throwable)} [this
+                                                                                  ^{:tag (Callable T)} c]
+    (let [prevDeferredHandler (.setHandler dcfh (.-javacCodeHandler dcfh))]
+      (try
+        (Pair. (.call c) nil)
+        (catch FatalError ex
+          (let [log (Log/instance (.-context this))
+                options (Options/instance (.-context this))]
+            (.printRawLines log (.getMessage ex))
+            (when (and (some? (.getCause ex)) (.isSet options "dev"))
+              (.printStackTrace (.getCause ex) (.getWriter log Log$WriterKind/NOTICE)))
+            (Pair. nil ex)))
+        (catch [AnnotationProcessingError ClientCodeException] e
+          (throw (RuntimeException. (.getCause e))))
+        (catch PropagatedException e (throw (.getCause e)))
+        (catch IllegalStateException e (throw e))
+        (catch [Exception Error] ex
+          (when (or (or (nil? compiler) (== (.errorCount compiler) 0))
+                    (.isSet (Options/instance (.-context this)) "dev"))
+            (let [log (Log/instance (.-context this))]
+              (.printLines log
+                           Log$PrefixKind/JAVAC
+                           "msg.bug"
+                           (new Object/1 [(JavaCompiler/version)]))
+              (.printStackTrace ex (.getWriter log Log$WriterKind/NOTICE))))
+          (Pair. nil ex))
+        (finally (.setHandler dcfh prevDeferredHandler)))))
+
+  (method ^:private prepareCompiler ^void [this ^boolean forParse]
+    (if (.getAndSet used true)
+        (when (nil? compiler) (throw (PropagatedException. (IllegalStateException.))))
+        (do
+          (.validate args)
+          (.put (.-context this) Locale locale)
+          (let [messages (cast JavacMessages (.get (.-context this) JavacMessages/messagesKey))]
+            (when (and (some? messages) (not (.equals (.getCurrentLocale messages) locale)))
+              (.setCurrentLocale messages locale))
+            (.initPlugins this (.getPluginOpts args))
+            (.initDocLint this (.getDocLintOpts args))
+            (set! compiler (JavaCompiler/instance (.-context this)))
+            (set! (.-keepComments compiler) true)
+            (set! (.-genEndPos compiler) true)
+            (set! notYetEntered (HashMap.))
+            (when forParse
+              (.initProcessAnnotations compiler
+                                       processors
+                                       (.getFileObjects args)
+                                       (.getClassNames args))
+              (for-each [^JavaFileObject file (.getFileObjects args)] (.put notYetEntered file nil))
+              (set! genList (ListBuffer.)))))))
+
+  (method toString :type-params [T] ^String [this ^{:tag (Iterable T)} items ^String sep]
+    (let [^:mutable currSep ""
+          sb (StringBuilder.)]
+      (for-each [item items] (.append sb currSep) (.append sb (.toString item)) (set! currSep sep))
+      (.toString sb)))
+
+  (method cleanup ^void [this]
+    (when (some? compiler) (.close compiler))
+    (when-instance [^BaseFileManager baseFileManager fileManager]
+      (when (.-autoClose baseFileManager) (try (.close fileManager) (catch IOException ignore))))
+    (set! compiler nil)
+    (set! (.-context this) nil)
+    (set! notYetEntered nil))
+
+  (method ^:public parse ^{:tag (Iterable (? extends CompilationUnitTree))} [this]
+    (let [^{:tag (Pair (Iterable (? extends CompilationUnitTree)) Throwable)} result
+            (.invocationHelper this
+                               (method-ref Callable ^Iterable [] this JavacTaskImpl/.parseInternal))]
+      (if (nil? (.-snd result))
+          (cast Iterable (.-fst result))
+          (throw (IllegalStateException. (cast Throwable (.-snd result)))))))
+
+  (method ^:private parseInternal ^{:tag (Iterable (? extends CompilationUnitTree))} [this]
+    (try
+      (.prepareCompiler this true)
+      (let [^{:tag (List JCTree$JCCompilationUnit)} units (.parseFiles
+                                                            compiler
+                                                            (.getFileObjects args))]
+        (for-each [^JCTree$JCCompilationUnit unit units]
+          (let [file (.getSourceFile unit)]
+            (when (.containsKey notYetEntered file) (.put notYetEntered file unit))))
+        units)
+      (finally
+        (set! parsed true)
+        (when (and (some? compiler) (some? (.-log compiler))) (.flush (.-log compiler))))))
+
+  (field ^:private ^boolean parsed false)
+
+  (method ^:public enter ^{:tag (Iterable (? extends Element))} [this]
+    (.enter this nil))
+
+  (method ^:public enter ^{:tag (Iterable (? extends Element))} [this
+                                                                 ^{:tag (Iterable (? extends CompilationUnitTree))} trees]
+    (if (and (and (nil? trees) (some? notYetEntered)) (.isEmpty notYetEntered))
+        (List/nil)
+        (let [wasInitialized (some? compiler)]
+          (.prepareCompiler this true)
+          (let [^:mutable ^{:tag (ListBuffer JCTree$JCCompilationUnit)} roots nil]
+            (if (nil? trees)
+                (when (> (.size notYetEntered) 0)
+                  (when-not parsed (.parseInternal this))
+                  (for-each [^JavaFileObject file (.getFileObjects args)]
+                    (let [unit (cast JCTree$JCCompilationUnit (.remove notYetEntered file))]
+                      (when (some? unit)
+                        (when (nil? roots) (set! roots (ListBuffer.)))
+                        (.append roots unit))))
+                  (.clear notYetEntered))
+                (for-each [^CompilationUnitTree cu trees]
+                  (if-instance [^JCTree$JCCompilationUnit compilationUnit cu]
+                    (do
+                      (when (nil? roots) (set! roots (ListBuffer.)))
+                      (.append roots compilationUnit)
+                      (.remove notYetEntered (.getSourceFile cu)))
+                    (throw (IllegalArgumentException. (.toString cu))))))
+            (if (nil? roots)
+                (do
+                  (when (and (nil? trees) (not wasInitialized)) (.initModules compiler (List/nil)))
+                  (List/nil))
+                (let [^:mutable ^{:tag (List JCTree$JCCompilationUnit)} units (.initModules
+                                                                                compiler
+                                                                                (.toList roots))]
+                  (try
+                    (set! units (.enterTrees compiler units))
+                    (when (.isEmpty notYetEntered) (.processAnnotations compiler units))
+                    (let [^{:tag (ListBuffer Element)} elements (ListBuffer.)]
+                      (for-each [^JCTree$JCCompilationUnit unit units]
+                        (let [isPkgInfo (.isNameCompatible
+                                          (.-sourcefile unit)
+                                          "package-info"
+                                          JavaFileObject$Kind/SOURCE)]
+                          (if isPkgInfo
+                              (.append elements (.-packge unit))
+                              (for-each [^JCTree node (.-defs unit)]
+                                (cond
+                                  (.hasTag node JCTree$Tag/CLASSDEF)
+                                    (let [cdef (cast JCTree$JCClassDecl node)]
+                                      (when (some? (.-sym cdef)) (.append elements (.-sym cdef))))
+                                  (.hasTag node JCTree$Tag/MODULEDEF)
+                                    (let [mdef (cast JCTree$JCModuleDecl node)]
+                                      (when (some? (.-sym mdef)) (.append elements (.-sym mdef)))))))))
+                      (.toList elements))
+                    (finally (.flush (.-log compiler))))))))))
+
+  (method ^:public analyze ^{:tag (Iterable (? extends Element))} [this]
+    (let [^{:tag (Pair (Iterable (? extends Element)) Throwable)} result (.invocationHelper
+                                                                           this
+                                                                           (lambda Callable ^Iterable []
+                                                                             (.analyze this nil)))]
+      (if (nil? (.-snd result))
+          (cast Iterable (.-fst result))
+          (throw (IllegalStateException. (cast Throwable (.-snd result)))))))
+
+  (method ^:public analyze ^{:tag (Iterable (? extends Element))} [this
+                                                                   ^{:tag (Iterable (? extends Element))} classes]
+    (.enter this nil)
+    (let [^{:tag (ListBuffer Element)} results (ListBuffer.)]
+      (try
+        (if (nil? classes)
+            (.handleFlowResults this
+                                (.warn compiler
+                                       (.flow compiler (.attribute compiler (.-todo compiler))))
+                                results)
+            (let [^Filter f (anon Filter []
+                              (method ^:public process ^void [this ^{:tag (Env AttrContext)} env]
+                                (.handleFlowResults
+                                  JavacTaskImpl/this
+                                  (.warn compiler (.flow compiler (.attribute compiler env)))
+                                  results)))]
+              (.run f (.-todo compiler) classes)))
+        (finally (.reportOutstandingWarnings (.-log compiler)) (.flush (.-log compiler))))
+      results))
+
+  (method ^:private handleFlowResults ^void [this ^{:tag (Queue (Env AttrContext))} queue
+                                             ^{:tag (ListBuffer Element)} elems]
+    (for-each [^{:tag (Env AttrContext)} env queue]
+      (switch (.getTag (.-tree env))
+        CLASSDEF
+          (let [cdef (cast JCTree$JCClassDecl (.-tree env))]
+            (when (some? (.-sym cdef)) (.append elems (.-sym cdef))))
+        MODULEDEF
+          (let [mod (cast JCTree$JCModuleDecl (.-tree env))]
+            (when (some? (.-sym mod)) (.append elems (.-sym mod))))
+        PACKAGEDEF
+          (let [unit (.-toplevel env)]
+            (when (some? (.-packge unit)) (.append elems (.-packge unit))))))
+    (.addAll genList queue))
+
+  (method ^:public generate ^{:tag (Iterable (? extends JavaFileObject))} [this]
+    (let [^{:tag (Pair (Iterable (? extends JavaFileObject)) Throwable)} result (.invocationHelper
+                                                                                  this
+                                                                                  (lambda Callable ^Iterable []
+                                                                                    (.generate
+                                                                                      this
+                                                                                      nil)))]
+      (if (nil? (.-snd result))
+          (cast Iterable (.-fst result))
+          (throw (IllegalStateException. (cast Throwable (.-snd result)))))))
+
+  (method ^:public generate ^{:tag (Iterable (? extends JavaFileObject))} [this
+                                                                           ^{:tag (Iterable (? extends Element))} classes]
+    (let [^{:tag (ListBuffer JavaFileObject)} results (ListBuffer.)]
+      (try
+        (.analyze this nil)
+        (if (nil? classes)
+            (do (.generate compiler (.desugar compiler genList) results) (.clear genList))
+            (let [^Filter f (anon Filter []
+                              (method ^:public process ^void [this ^{:tag (Env AttrContext)} env]
+                                (.generate compiler (.desugar compiler (ListBuffer/of env)) results)))]
+              (.run f genList classes)))
+        (when (.isEmpty genList) (.reportDeferredDiagnostics compiler) (.cleanup this))
+        (finally
+          (when (some? compiler)
+            (.reportOutstandingWarnings (.-log compiler))
+            (.flush (.-log compiler)))))
+      results))
+
+  (method ^:public ensureEntered ^void [this]
+    (.allowEmpty args)
+    (.enter this nil))
+
+  (defclass ^:abstract Filter
+    (method run ^void [this ^{:tag (Queue (Env AttrContext))} list
+                       ^{:tag (Iterable (? extends Element))} elements]
+      (let [^{:tag (Set Element)} set (HashSet.)]
+        (for-each [^Element item elements] (.add set item))
+        (let [^:mutable ^{:tag (ListBuffer (Env AttrContext))} defer (ListBuffer.)]
+          (while (some? (.peek list))
+            (let [^{:tag (Env AttrContext)} env (cast Env (.remove list))
+                  ^:mutable ^Symbol test nil]
+              (cond
+                (.hasTag (.-tree env) JCTree$Tag/MODULEDEF)
+                  (set! test (.-sym (cast JCTree$JCModuleDecl (.-tree env))))
+                (.hasTag (.-tree env) JCTree$Tag/PACKAGEDEF) (set! test (.-packge (.-toplevel env)))
+                :else
+                  (let [csym (.-sym (.-enclClass env))]
+                    (when (some? csym) (set! test (.outermostClass csym)))))
+              (if (and (some? test) (.contains set test))
+                  (.process this env)
+                  (set! defer (.append defer env)))))
+          (.addAll list defer))))
+
+    (method ^:abstract process ^void [this ^{:tag (Env AttrContext)} env]))
+
+  (method ^:public parseType ^Type [this ^String expr ^TypeElement scope]
+    (when (or (nil? expr) (.equals expr "")) (throw (IllegalArgumentException.)))
+    (set! compiler (JavaCompiler/instance (.-context this)))
+    (let [prev (.useSource (.-log compiler) nil)
+          parserFactory (ParserFactory/instance (.-context this))
+          attr (Attr/instance (.-context this))]
+      (try
+        (let [buf (CharBuffer/wrap (.toCharArray (java-str expr "\u0000")) 0 (.length expr))
+              ^Parser parser (.newParser parserFactory buf false false false)
+              ^JCTree tree (.parseType parser)]
+          (.attribType attr tree (cast Symbol$TypeSymbol scope)))
+        (finally (.useSource (.-log compiler) prev))))))

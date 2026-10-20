@@ -1,0 +1,327 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/code/ModuleFinder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.code)
+
+(import '(com.sun.tools.javac.jvm ModuleNameReader ModuleNameReader$BadClassFile)
+        '(com.sun.tools.javac.resources CompilerProperties$Errors CompilerProperties$Fragments)
+        '(com.sun.tools.javac.util Assert
+                                   Context
+                                   Context$Key
+                                   JCDiagnostic$Factory
+                                   JCDiagnostic$Fragment
+                                   List
+                                   ListBuffer
+                                   Log
+                                   Name
+                                   Names)
+        '(java.io IOException)
+        '(java.util Arrays HashMap Iterator Map NoSuchElementException Set)
+        '(javax.tools JavaFileManager
+                      JavaFileManager$Location
+                      JavaFileObject
+                      JavaFileObject$Kind
+                      StandardLocation))
+
+(defclass ^:public ModuleFinder
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key ModuleFinder)} moduleFinderKey
+    (Context$Key.))
+
+  (field ^:private ^:final ^Log log)
+
+  (field ^:private ^:final ^Symtab syms)
+
+  (field ^:private ^:final ^Names names)
+
+  (field ^:private ^:final ^ClassFinder classFinder)
+
+  (field ^:private ^:final ^JavaFileManager fileManager)
+
+  (field ^:private ^:final ^JCDiagnostic$Factory diags)
+
+  (field ^:private ^:final ^DeferredCompletionFailureHandler dcfh)
+
+  (field ^:private ^ModuleNameReader moduleNameReader)
+
+  (field ^:public ^ModuleNameFromSourceReader moduleNameFromSourceReader)
+
+  (method ^:public ^:static instance ^ModuleFinder [^Context context]
+    (let [^:mutable instance (cast ModuleFinder (.get context moduleFinderKey))]
+      (when (nil? instance) (set! instance (ModuleFinder. context)))
+      instance))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context moduleFinderKey this)
+    (set! names (Names/instance context))
+    (set! syms (Symtab/instance context))
+    (set! fileManager (cast JavaFileManager (.get context JavaFileManager)))
+    (set! log (Log/instance context))
+    (set! classFinder (ClassFinder/instance context))
+    (set! diags (JCDiagnostic$Factory/instance context))
+    (set! dcfh (DeferredCompletionFailureHandler/instance context)))
+
+  (defclass ModuleLocationIterator
+    :implements [(Iterator (Set JavaFileManager$Location))]
+
+    (field ^StandardLocation outer)
+
+    (field ^{:tag (Set JavaFileManager$Location)} next nil)
+
+    (field ^{:tag (Iterator StandardLocation)} outerIter
+      (.iterator (Arrays/asList
+                   (new StandardLocation/1
+                        [StandardLocation/MODULE_SOURCE_PATH
+                         StandardLocation/UPGRADE_MODULE_PATH
+                         StandardLocation/SYSTEM_MODULES
+                         StandardLocation/MODULE_PATH]))))
+
+    (field ^{:tag (Iterator (Set JavaFileManager$Location))} innerIter nil)
+
+    (method ^:public hasNext ^boolean [this]
+      (while (nil? next)
+        (while (or (nil? innerIter) (not (.hasNext innerIter)))
+          (if (.hasNext outerIter)
+              (do
+                (set! outer (cast StandardLocation (.next outerIter)))
+                (try
+                  (set! innerIter (.iterator (.listLocationsForModules fileManager outer)))
+                  (catch IOException e
+                    (.println System/err
+                              (java-str "error listing module locations for " outer ": " e)))))
+              (return false)))
+        (when (.hasNext innerIter) (set! next (cast Set (.next innerIter)))))
+      true)
+
+    (method ^:public next ^{:tag (Set JavaFileManager$Location)} [this]
+      (.hasNext this)
+      (if (some? next)
+          (let [^{:tag (Set JavaFileManager$Location)} result next] (set! next nil) result)
+          (throw (NoSuchElementException.)))))
+
+  (field ^ModuleLocationIterator moduleLocationIterator (ModuleLocationIterator.))
+
+  (method ^:public findModule ^Symbol$ModuleSymbol [this ^Name name]
+    (.findModule this (.enterModule syms name)))
+
+  (method ^:public findModule ^Symbol$ModuleSymbol [this ^Symbol$ModuleSymbol msym]
+    (when (and (and (not (identical? (.-kind msym) Kinds$Kind/ERR)) (nil? (.-sourceLocation msym)))
+               (nil? (.-classLocation msym)))
+      (let [^{:tag (List Symbol$ModuleSymbol)} list (.scanModulePath this msym)]
+        (when (.isEmpty list) (set! (.-kind msym) Kinds$Kind/ERR))))
+    (when (and (and (not (identical? (.-kind msym) Kinds$Kind/ERR))
+                    (nil? (.-sourcefile (.-module_info msym))))
+               (nil? (.-classfile (.-module_info msym))))
+      (.findModuleInfo this msym))
+    msym)
+
+  (method ^:public findAllModules ^{:tag (List Symbol$ModuleSymbol)} [this]
+    (let [^{:tag (List Symbol$ModuleSymbol)} list (.scanModulePath this nil)]
+      (for-each [^Symbol$ModuleSymbol msym list]
+        (when (and (and (not (identical? (.-kind msym) Kinds$Kind/ERR))
+                        (nil? (.-sourcefile (.-module_info msym))))
+                   (nil? (.-classfile (.-module_info msym))))
+          (.findModuleInfo this msym)))
+      list))
+
+  (method ^:public findSingleModule ^Symbol$ModuleSymbol [this]
+    (try
+      (let [src_fo (.getModuleInfoFromLocation this
+                                               StandardLocation/SOURCE_PATH
+                                               JavaFileObject$Kind/SOURCE)
+            class_fo (.getModuleInfoFromLocation
+                       this
+                       StandardLocation/CLASS_OUTPUT
+                       JavaFileObject$Kind/CLASS)
+            ^JavaFileObject fo (cond
+                                 (nil? src_fo) class_fo
+                                 (nil? class_fo) src_fo
+                                 :else (.preferredFileObject classFinder src_fo class_fo))
+            ^Symbol$ModuleSymbol msym (if (nil? fo) (.-unnamedModule syms) (.readModule this fo))]
+        (if (nil? (.-patchLocation msym))
+            (set! (.-classLocation msym) StandardLocation/CLASS_OUTPUT)
+            (set! (.-patchOutputLocation msym) StandardLocation/CLASS_OUTPUT))
+        msym)
+      (catch IOException e (throw (Error. e)))))
+
+  (method ^:private readModule :throws [IOException] ^Symbol$ModuleSymbol [this ^JavaFileObject fo]
+    (let [^:mutable ^Name name nil]
+      (switch (.getKind fo)
+        SOURCE
+          (do
+            (set! name (.readModuleName moduleNameFromSourceReader fo))
+            (when (nil? name)
+              (let [diag (.fragment diags CompilerProperties$Fragments/FileDoesNotContainModule)
+                    errModuleInfo (.defineClass syms (.-module_info names) (.-errModule syms))]
+                (throw (ClassFinder$BadClassFile. errModuleInfo fo diag diags dcfh)))))
+        CLASS
+          (try
+            (set! name (.fromString names (.readModuleName this fo)))
+            (catch [ModuleNameReader$BadClassFile IOException] ex (set! name (.-error names))))
+        (do (Assert/error) (set! name (.-error names))))
+      (let [msym (.enterModule syms name)]
+        (when (nil? (.-classfile (.-module_info msym)))
+          (set! (.-classfile (.-module_info msym)) fo)
+          (when (and (.hasLocation fileManager StandardLocation/PATCH_MODULE_PATH)
+                     (not (identical? name (.-error names))))
+            (set! (.-patchLocation msym)
+                  (.getLocationForModule fileManager
+                                         StandardLocation/PATCH_MODULE_PATH
+                                         (.toString name)))
+            (when (some? (.-patchLocation msym))
+              (let [^:mutable patchFO (.getModuleInfoFromLocation
+                                        this
+                                        StandardLocation/CLASS_OUTPUT
+                                        JavaFileObject$Kind/CLASS)]
+                (set! patchFO
+                      (.preferredFileObject this
+                                            (.getModuleInfoFromLocation
+                                              this
+                                              (.-patchLocation msym)
+                                              JavaFileObject$Kind/CLASS)
+                                            patchFO))
+                (set! patchFO
+                      (.preferredFileObject this
+                                            (.getModuleInfoFromLocation
+                                              this
+                                              (.-patchLocation msym)
+                                              JavaFileObject$Kind/SOURCE)
+                                            patchFO))
+                (when (some? patchFO) (set! (.-classfile (.-module_info msym)) patchFO)))))
+          (set! (.-completer msym) Symbol$Completer/NULL_COMPLETER)
+          (.fillIn classFinder (.-module_info msym)))
+        msym)))
+
+  (method ^:private readModuleName :throws [IOException ModuleNameReader$BadClassFile] ^String [this
+                                                                                                ^JavaFileObject jfo]
+    (when (nil? moduleNameReader) (set! moduleNameReader (ModuleNameReader.)))
+    (.readModuleName moduleNameReader jfo))
+
+  (method ^:private getModuleInfoFromLocation :throws [IOException] ^JavaFileObject [this
+                                                                                     ^JavaFileManager$Location location
+                                                                                     ^JavaFileObject$Kind kind]
+    (when-not (or (nil? location) (not (.hasLocation fileManager location)))
+      (.getJavaFileForInput fileManager location (.toString (.-module_info names)) kind)))
+
+  (method ^:private scanModulePath ^{:tag (List Symbol$ModuleSymbol)} [this
+                                                                       ^Symbol$ModuleSymbol toFind]
+    (let [^{:tag (ListBuffer Symbol$ModuleSymbol)} results (ListBuffer.)
+          ^{:tag (Map Name JavaFileManager$Location)} namesInSet (HashMap.)
+          multiModuleMode (.hasLocation fileManager StandardLocation/MODULE_SOURCE_PATH)]
+      (while (.hasNext moduleLocationIterator)
+        (let [^{:tag (Set JavaFileManager$Location)} locns (.next moduleLocationIterator)]
+          (.clear namesInSet)
+          (for-each [^JavaFileManager$Location l locns]
+            (try
+              (let [n (.fromString names (.inferModuleName fileManager l))]
+                (if (nil? (.put namesInSet n l))
+                    (let [msym (.enterModule syms n)]
+                      (when-not (or (some? (.-sourceLocation msym)) (some? (.-classLocation msym)))
+                        (when (and (.hasLocation fileManager StandardLocation/PATCH_MODULE_PATH)
+                                   (nil? (.-patchLocation msym)))
+                          (set! (.-patchLocation msym)
+                                (.getLocationForModule
+                                  fileManager
+                                  StandardLocation/PATCH_MODULE_PATH
+                                  (.toString (.-name msym))))
+                          (when (and (and (some? (.-patchLocation msym)) multiModuleMode)
+                                     (.hasLocation fileManager StandardLocation/CLASS_OUTPUT))
+                            (set! (.-patchOutputLocation msym)
+                                  (.getLocationForModule
+                                    fileManager
+                                    StandardLocation/CLASS_OUTPUT
+                                    (.toString (.-name msym))))))
+                        (if (identical? (.-outer moduleLocationIterator)
+                                        StandardLocation/MODULE_SOURCE_PATH)
+                            (do
+                              (set! (.-sourceLocation msym) l)
+                              (when (.hasLocation fileManager StandardLocation/CLASS_OUTPUT)
+                                (set! (.-classLocation msym)
+                                      (.getLocationForModule
+                                        fileManager
+                                        StandardLocation/CLASS_OUTPUT
+                                        (.toString (.-name msym))))))
+                            (set! (.-classLocation msym) l))
+                        (when (or (identical? (.-outer moduleLocationIterator)
+                                              StandardLocation/SYSTEM_MODULES)
+                                  (identical? (.-outer moduleLocationIterator)
+                                              StandardLocation/UPGRADE_MODULE_PATH))
+                          (set! (.-flags_field msym)
+                                (bit-or (.-flags_field msym) Flags/SYSTEM_MODULE)))
+                        (when (or (nil? toFind)
+                                  (and (identical? toFind msym)
+                                       (or (some? (.-sourceLocation msym))
+                                           (some? (.-classLocation msym)))))
+                          (.add results msym))))
+                    (.error log
+                            (CompilerProperties$Errors/DuplicateModuleOnPath
+                              (.getDescription this (.-outer moduleLocationIterator))
+                              n))))
+              (catch IOException e)))
+          (when (and (some? toFind) (.nonEmpty results)) (return (.toList results)))))
+      (.toList results)))
+
+  (method ^:private findModuleInfo ^void [this ^Symbol$ModuleSymbol msym]
+    (try
+      (let [^:mutable ^JavaFileObject fo nil]
+        (set! fo
+              (.getModuleInfoFromLocation this
+                                          (.-patchOutputLocation msym)
+                                          JavaFileObject$Kind/CLASS))
+        (set! fo
+              (.preferredFileObject this
+                                    (.getModuleInfoFromLocation
+                                      this
+                                      (.-patchLocation msym)
+                                      JavaFileObject$Kind/CLASS)
+                                    fo))
+        (set! fo
+              (.preferredFileObject this
+                                    (.getModuleInfoFromLocation
+                                      this
+                                      (.-patchLocation msym)
+                                      JavaFileObject$Kind/SOURCE)
+                                    fo))
+        (when (nil? fo)
+          (set! fo
+                (.getModuleInfoFromLocation this (.-classLocation msym) JavaFileObject$Kind/CLASS))
+          (set! fo
+                (.preferredFileObject this
+                                      (.getModuleInfoFromLocation
+                                        this
+                                        (.-sourceLocation msym)
+                                        JavaFileObject$Kind/SOURCE)
+                                      fo)))
+        (if (nil? fo)
+            (let [^String moduleName (when (and (nil? (.-sourceLocation msym))
+                                                (some? (.-classLocation msym)))
+                                       (.inferModuleName fileManager (.-classLocation msym)))]
+              (if (some? moduleName)
+                  (do
+                    (set! (.-classfile (.-module_info msym)) nil)
+                    (set! (.-flags_field msym) (bit-or (.-flags_field msym) Flags/AUTOMATIC_MODULE)))
+                  (set! (.-kind msym) Kinds$Kind/ERR)))
+            (do
+              (set! (.-classfile (.-module_info msym)) fo)
+              (set!
+                (.-completer (.-module_info msym))
+                (anon Symbol$Completer []
+                  (method ^:public complete :throws [Symbol$CompletionFailure] ^void [this
+                                                                                      ^Symbol sym]
+                    (.fillIn classFinder (.-module_info msym)))
+
+                  (method ^:public toString ^String [this] "ModuleInfoCompleter"))))))
+      (catch IOException e (set! (.-kind msym) Kinds$Kind/ERR))))
+
+  (method ^:private preferredFileObject ^JavaFileObject [this ^JavaFileObject fo1
+                                                         ^JavaFileObject fo2]
+    (cond (nil? fo1) fo2 (nil? fo2) fo1 :else (.preferredFileObject classFinder fo1 fo2)))
+
+  (method getDescription ^JCDiagnostic$Fragment [this ^StandardLocation l]
+    (switch l
+      MODULE_PATH CompilerProperties$Fragments/LocnModule_path
+      MODULE_SOURCE_PATH CompilerProperties$Fragments/LocnModule_source_path
+      SYSTEM_MODULES CompilerProperties$Fragments/LocnSystem_modules
+      UPGRADE_MODULE_PATH CompilerProperties$Fragments/LocnUpgrade_module_path
+      (throw (AssertionError.))))
+
+  (defclass ^:public ^:interface ModuleNameFromSourceReader
+    (method ^:public readModuleName ^Name [this ^JavaFileObject file])))

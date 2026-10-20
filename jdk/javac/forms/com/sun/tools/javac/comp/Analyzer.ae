@@ -1,0 +1,564 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Analyzer.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.comp)
+
+(import '(com.sun.source.tree LambdaExpressionTree NewClassTree VariableTree)
+        '(com.sun.tools.javac.code Flags
+                                   Kinds$Kind
+                                   Source
+                                   Source$Feature
+                                   Symbol$ClassSymbol
+                                   Type
+                                   TypeTag
+                                   Types)
+        '(com.sun.tools.javac.resources CompilerProperties$Warnings)
+        '(com.sun.tools.javac.tree JCTree
+                                   JCTree$JCBlock
+                                   JCTree$JCClassDecl
+                                   JCTree$JCDoWhileLoop
+                                   JCTree$JCEnhancedForLoop
+                                   JCTree$JCExpression
+                                   JCTree$JCForLoop
+                                   JCTree$JCIf
+                                   JCTree$JCLambda
+                                   JCTree$JCLambda$ParameterKind
+                                   JCTree$JCMethodDecl
+                                   JCTree$JCMethodInvocation
+                                   JCTree$JCNewClass
+                                   JCTree$JCStatement
+                                   JCTree$JCSwitch
+                                   JCTree$JCTry
+                                   JCTree$JCTypeApply
+                                   JCTree$JCUnary
+                                   JCTree$JCVariableDecl
+                                   JCTree$JCWhileLoop
+                                   JCTree$Tag
+                                   TreeCopier
+                                   TreeInfo
+                                   TreeMaker
+                                   TreeScanner)
+        '(com.sun.tools.javac.util Assert
+                                   Context
+                                   Context$Key
+                                   JCDiagnostic
+                                   JCDiagnostic$DiagnosticType
+                                   List
+                                   ListBuffer
+                                   Log
+                                   Log$DeferredDiagnosticHandler
+                                   Log$DiagnosticHandler
+                                   Options
+                                   Position)
+        '(java.util ArrayDeque Arrays EnumSet HashMap Map Queue)
+        '(java.util.function Consumer Function Predicate Supplier)
+        '(java.util.stream Collectors))
+
+(defclass ^:public Analyzer
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key Analyzer)} analyzerKey (Context$Key.))
+
+  (field ^:final ^Types types)
+
+  (field ^:final ^Log log)
+
+  (field ^:final ^Attr attr)
+
+  (field ^:final ^DeferredAttr deferredAttr)
+
+  (field ^:final ^ArgumentAttr argumentAttr)
+
+  (field ^:final ^TreeMaker make)
+
+  (field ^:final ^AnalyzerCopier copier)
+
+  (field ^:private ^:final ^boolean allowDiamondWithAnonymousClassCreation)
+
+  (field ^:final ^{:tag (EnumSet AnalyzerMode)} analyzerModes)
+
+  (method ^:public ^:static instance ^Analyzer [^Context context]
+    (let [^:mutable instance (cast Analyzer (.get context analyzerKey))]
+      (when (nil? instance) (set! instance (Analyzer. context)))
+      instance))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context analyzerKey this)
+    (set! types (Types/instance context))
+    (set! log (Log/instance context))
+    (set! attr (Attr/instance context))
+    (set! deferredAttr (DeferredAttr/instance context))
+    (set! argumentAttr (ArgumentAttr/instance context))
+    (set! make (TreeMaker/instance context))
+    (set! copier (AnalyzerCopier.))
+    (let [options (Options/instance context)
+          findOpt (.get options "find")
+          source (Source/instance context)]
+      (set! allowDiamondWithAnonymousClassCreation
+            (.allowedInSource Source$Feature/DIAMOND_WITH_ANONYMOUS_CLASS_CREATION source))
+      (set! analyzerModes (AnalyzerMode/getAnalyzerModes findOpt source))))
+
+  (defclass ^:enum AnalyzerMode
+    (constants
+      (DIAMOND ["diamond"])
+      (LAMBDA ["lambda"])
+      (METHOD ["method"])
+      (LOCAL ["local" Source$Feature/LOCAL_VARIABLE_TYPE_INFERENCE]))
+
+    (field ^:final ^String opt)
+
+    (field ^:final ^Source$Feature feature)
+
+    (constructor [this ^String opt] (this. opt nil))
+
+    (constructor [this ^String opt ^Source$Feature feature]
+      (set! (.-opt this) opt)
+      (set! (.-feature this) feature))
+
+    (method ^:static getAnalyzerModes ^{:tag (EnumSet AnalyzerMode)} [^String opt ^Source source]
+      (if (nil? opt)
+          (EnumSet/noneOf AnalyzerMode)
+          (let [^{:tag (List String)} modes (List/from (.split opt ","))
+                ^:mutable ^{:tag (EnumSet AnalyzerMode)} res (EnumSet/noneOf AnalyzerMode)]
+            (when (.contains modes "all") (set! res (EnumSet/allOf AnalyzerMode)))
+            (for-each [^AnalyzerMode mode (AnalyzerMode/values)]
+              (cond
+                (or (.contains modes (java-str "-" (.-opt mode)))
+                    (and (some? (.-feature mode)) (not (.allowedInSource (.-feature mode) source))))
+                  (.remove res mode)
+                (.contains modes (.-opt mode)) (.add res mode)))
+            res))))
+
+  (defclass ^:abstract StatementAnalyzer
+    :type-params [(S extends JCTree) (T extends JCTree)]
+
+    (field ^AnalyzerMode mode)
+
+    (field ^JCTree$Tag tag)
+
+    (constructor [this ^AnalyzerMode mode ^JCTree$Tag tag]
+      (set! (.-mode this) mode)
+      (set! (.-tag this) tag))
+
+    (method isEnabled ^boolean [this] (.contains analyzerModes mode))
+
+    (method ^:abstract match ^boolean [this ^S tree])
+
+    (method ^:abstract rewrite ^{:tag (List T)} [this ^S oldTree])
+
+    (method ^:abstract process ^void [this ^S oldTree ^T newTree ^boolean hasErrors]))
+
+  (defclass DiamondInitializer
+    :extends (StatementAnalyzer JCTree$JCNewClass JCTree$JCNewClass)
+
+    (constructor [this] (super. AnalyzerMode/DIAMOND JCTree$Tag/NEWCLASS))
+
+    (method match ^boolean [this ^JCTree$JCNewClass tree]
+      (and (and (.hasTag (.-clazz tree) JCTree$Tag/TYPEAPPLY) (not (TreeInfo/isDiamond tree)))
+           (or (nil? (.-def tree)) allowDiamondWithAnonymousClassCreation)))
+
+    (method rewrite ^{:tag (List JCTree$JCNewClass)} [this ^JCTree$JCNewClass oldTree]
+      (if (and (.hasTag (.-clazz oldTree) JCTree$Tag/TYPEAPPLY)
+               (not (.isErroneous (.-type oldTree))))
+          (let [nc (cast JCTree$JCNewClass (.copy copier oldTree))]
+            (set! (.-arguments (cast JCTree$JCTypeApply (.-clazz nc))) (List/nil))
+            (List/of nc))
+          (List/of oldTree)))
+
+    (method process ^void [this ^JCTree$JCNewClass oldTree ^JCTree$JCNewClass newTree
+                           ^boolean hasErrors]
+      (when-not hasErrors
+        (let [^:mutable ^{:tag (List Type)} inferredArgs nil
+              ^:mutable ^{:tag (List Type)} explicitArgs nil]
+          (if (some? (.-def oldTree))
+              (do
+                (set! inferredArgs
+                      (if (.nonEmpty (.-implementing (.-def newTree)))
+                          (.getTypeArguments
+                            (.-type (cast JCTree$JCExpression
+                                          (.get (.-implementing (.-def newTree)) 0))))
+                          (.getTypeArguments (.-type (.-extending (.-def newTree))))))
+                (set! explicitArgs
+                      (if (.nonEmpty (.-implementing (.-def oldTree)))
+                          (.getTypeArguments
+                            (.-type (cast JCTree$JCExpression
+                                          (.get (.-implementing (.-def oldTree)) 0))))
+                          (.getTypeArguments (.-type (.-extending (.-def oldTree)))))))
+              (do
+                (set! inferredArgs (.getTypeArguments (.-type newTree)))
+                (set! explicitArgs (.getTypeArguments (.-type oldTree)))))
+          (for-each [^Type t inferredArgs]
+            (when-not (.isSameType types t (cast Type (.-head explicitArgs))) (return))
+            (set! explicitArgs (.-tail explicitArgs)))
+          (.warning log (.-clazz oldTree) CompilerProperties$Warnings/DiamondRedundantArgs)))))
+
+  (defclass LambdaAnalyzer
+    :extends (StatementAnalyzer JCTree$JCNewClass JCTree$JCLambda)
+
+    (constructor [this] (super. AnalyzerMode/LAMBDA JCTree$Tag/NEWCLASS))
+
+    (method match ^boolean [this ^JCTree$JCNewClass tree]
+      (let [clazztype (.-type (.-clazz tree))]
+        (and (and (and (some? (.-def tree)) (.hasTag clazztype TypeTag/CLASS))
+                  (.isFunctionalInterface types (.-tsym clazztype)))
+             (== (.length (.decls this (.-def tree))) 1))))
+
+    (method ^:private decls ^{:tag (List JCTree)} [this ^JCTree$JCClassDecl decl]
+      (let [^{:tag (ListBuffer JCTree)} decls (ListBuffer.)]
+        (for-each [^JCTree t (.-defs decl)]
+          (if (.hasTag t JCTree$Tag/METHODDEF)
+              (let [md (cast JCTree$JCMethodDecl t)]
+                (when (== (bit-and (.-flags (.getModifiers md)) Flags/GENERATEDCONSTR) 0)
+                  (.add decls md)))
+              (.add decls t)))
+        (.toList decls)))
+
+    (method rewrite ^{:tag (List JCTree$JCLambda)} [this ^JCTree$JCNewClass oldTree]
+      (let [md (cast JCTree$JCMethodDecl
+                     (.copy copier (cast JCTree (.-head (.decls this (.-def oldTree))))))
+            ^{:tag (List JCTree$JCVariableDecl)} params (.-params md)
+            body (.-body md)
+            newTree (.Lambda (.at make oldTree) params body)]
+        (List/of newTree)))
+
+    (method process ^void [this ^JCTree$JCNewClass oldTree ^JCTree$JCLambda newTree
+                           ^boolean hasErrors]
+      (when-not hasErrors
+        (.warning log (.-def oldTree) CompilerProperties$Warnings/PotentialLambdaFound))))
+
+  (defclass RedundantTypeArgAnalyzer
+    :extends (StatementAnalyzer JCTree$JCMethodInvocation JCTree$JCMethodInvocation)
+
+    (constructor [this] (super. AnalyzerMode/METHOD JCTree$Tag/APPLY))
+
+    (method match ^boolean [this ^JCTree$JCMethodInvocation tree]
+      (and (some? (.-typeargs tree)) (.nonEmpty (.-typeargs tree))))
+
+    (method rewrite ^{:tag (List JCTree$JCMethodInvocation)} [this
+                                                              ^JCTree$JCMethodInvocation oldTree]
+      (let [app (cast JCTree$JCMethodInvocation (.copy copier oldTree))]
+        (set! (.-typeargs app) (List/nil))
+        (List/of app)))
+
+    (method process ^void [this ^JCTree$JCMethodInvocation oldTree
+                           ^JCTree$JCMethodInvocation newTree ^boolean hasErrors]
+      (when-not hasErrors
+        (.warning log oldTree CompilerProperties$Warnings/MethodRedundantTypeargs))))
+
+  (defclass ^:abstract RedundantLocalVarTypeAnalyzerBase
+    :extends (StatementAnalyzer X X)
+    :type-params [(X extends JCTree$JCStatement)]
+
+    (constructor [this ^JCTree$Tag tag] (super. AnalyzerMode/LOCAL tag))
+
+    (method rewriteVarType ^JCTree$JCVariableDecl [this ^JCTree$JCVariableDecl oldTree]
+      (let [newTree (cast JCTree$JCVariableDecl (.copy copier oldTree))]
+        (set! (.-vartype newTree) nil)
+        newTree))
+
+    (method processVar ^void [this ^JCTree$JCVariableDecl oldTree ^JCTree$JCVariableDecl newTree
+                              ^boolean hasErrors]
+      (when-not hasErrors
+        (when (.isSameType types (.-type oldTree) (.-type newTree))
+          (.warning log oldTree CompilerProperties$Warnings/LocalRedundantType)))))
+
+  (defclass RedundantLocalVarTypeAnalyzer
+    :extends (RedundantLocalVarTypeAnalyzerBase JCTree$JCVariableDecl)
+
+    (constructor [this] (super. JCTree$Tag/VARDEF))
+
+    (method match ^boolean [this ^JCTree$JCVariableDecl tree]
+      (and (and (and (identical? (.-kind (.-owner (.-sym tree))) Kinds$Kind/MTH)
+                     (some? (.-init tree)))
+                (not (.declaredUsingVar tree)))
+           (nil? (.canInferLocalVarType attr tree))))
+
+    (method rewrite ^{:tag (List JCTree$JCVariableDecl)} [this ^JCTree$JCVariableDecl oldTree]
+      (List/of (.rewriteVarType this oldTree)))
+
+    (method process ^void [this ^JCTree$JCVariableDecl oldTree ^JCTree$JCVariableDecl newTree
+                           ^boolean hasErrors]
+      (.processVar this oldTree newTree hasErrors)))
+
+  (defclass RedundantLocalVarTypeAnalyzerForEach
+    :extends (RedundantLocalVarTypeAnalyzerBase JCTree$JCEnhancedForLoop)
+
+    (constructor [this] (super. JCTree$Tag/FOREACHLOOP))
+
+    (method match ^boolean [this ^JCTree$JCEnhancedForLoop tree]
+      (not (.declaredUsingVar (.-var tree))))
+
+    (method rewrite ^{:tag (List JCTree$JCEnhancedForLoop)} [this ^JCTree$JCEnhancedForLoop oldTree]
+      (let [newTree (cast JCTree$JCEnhancedForLoop (.copy copier oldTree))]
+        (set! (.-var newTree) (.rewriteVarType this (.-var oldTree)))
+        (set! (.-body newTree) (.Block (.at make (.-body oldTree)) 0 (List/nil)))
+        (List/of newTree)))
+
+    (method process ^void [this ^JCTree$JCEnhancedForLoop oldTree ^JCTree$JCEnhancedForLoop newTree
+                           ^boolean hasErrors]
+      (.processVar this (.-var oldTree) (.-var newTree) hasErrors)))
+
+  (field ^{:tag (array (StatementAnalyzer JCTree JCTree))} analyzers
+    (new StatementAnalyzer/1
+         [(DiamondInitializer.)
+          (LambdaAnalyzer.)
+          (RedundantTypeArgAnalyzer.)
+          (RedundantLocalVarTypeAnalyzer.)
+          (RedundantLocalVarTypeAnalyzerForEach.)]))
+
+  (method copyEnvIfNeeded ^{:tag (Env AttrContext)} [this ^JCTree tree ^{:tag (Env AttrContext)} env]
+    (when (and (and (and
+                      (not (.isEmpty analyzerModes))
+                      (not (.-isSpeculative (.-attributionMode (cast AttrContext (.-info env))))))
+                    (TreeInfo/isStatement tree))
+               (not (.hasTag tree JCTree$Tag/LABELLED)))
+      (let [^{:tag (Env AttrContext)} analyzeEnv (.dup
+                                                   env
+                                                   (.-tree env)
+                                                   (.dup
+                                                     (cast AttrContext (.-info env))
+                                                     (.dupUnshared
+                                                       (.-scope (cast AttrContext (.-info env)))
+                                                       (.-owner
+                                                         (.-scope (cast AttrContext (.-info env)))))))]
+        (set! (.-returnResult (cast AttrContext (.-info analyzeEnv)))
+              (when (some? (.-returnResult (cast AttrContext (.-info analyzeEnv))))
+                (.new attr
+                      Attr$ResultInfo
+                      (.-pkind (.-returnResult (cast AttrContext (.-info analyzeEnv))))
+                      (.-pt (.-returnResult (cast AttrContext (.-info analyzeEnv)))))))
+        analyzeEnv)))
+
+  (method analyzeIfNeeded ^void [this ^JCTree tree ^{:tag (Env AttrContext)} env]
+    (when (some? env) (let [stmt (cast JCTree$JCStatement tree)] (.analyze this stmt env))))
+
+  (method ^:protected analyze ^void [this ^JCTree$JCStatement statement
+                                     ^{:tag (Env AttrContext)} env]
+    (let [statementScanner (StatementScanner. statement env)]
+      (.scan statementScanner)
+      (when-not (.isEmpty (.-rewritings statementScanner))
+        (for-each [^RewritingContext rewriting (.-rewritings statementScanner)]
+          (.queue deferredAnalysisHelper rewriting)))))
+
+  (defclass ^:interface DeferredAnalysisHelper
+    (method queue ^void [this ^RewritingContext rewriting])
+
+    (method flush ^void [this ^{:tag (Env AttrContext)} flushEnv]))
+
+  (field ^DeferredAnalysisHelper flushDeferredHelper
+    (anon DeferredAnalysisHelper []
+      (method ^:public queue ^void [this ^RewritingContext rewriting])
+
+      (method ^:public flush ^void [this ^{:tag (Env AttrContext)} flushEnv])))
+
+  (field ^DeferredAnalysisHelper queueDeferredHelper
+    (anon DeferredAnalysisHelper []
+      (field ^{:tag (Map Symbol$ClassSymbol (Queue RewritingContext))} Q (HashMap.))
+
+      (method ^:public queue ^void [this ^RewritingContext rewriting]
+        (let [^{:tag (Queue RewritingContext)} s (cast
+                                                   Queue
+                                                   (.computeIfAbsent
+                                                     Q
+                                                     (.outermostClass
+                                                       (.-sym (.-enclClass (.-env rewriting))))
+                                                     (lambda Function ^Queue [^Symbol$ClassSymbol k]
+                                                       (ArrayDeque.))))]
+          (.add s rewriting)))
+
+      (method ^:public flush ^void [this ^{:tag (Env AttrContext)} flushEnv]
+        (when-not (.isEmpty Q)
+          (let [prevHelper deferredAnalysisHelper]
+            (try
+              (set! deferredAnalysisHelper flushDeferredHelper)
+              (let [^{:tag (Queue RewritingContext)} rewritings (cast
+                                                                  Queue
+                                                                  (.get
+                                                                    Q
+                                                                    (.outermostClass
+                                                                      (.-sym (.-enclClass flushEnv)))))]
+                (while (and (some? rewritings) (not (.isEmpty rewritings)))
+                  (.doAnalysis Analyzer/this (cast RewritingContext (.remove rewritings)))))
+              (finally (set! deferredAnalysisHelper prevHelper))))))))
+
+  (field ^DeferredAnalysisHelper deferredAnalysisHelper queueDeferredHelper)
+
+  (method doAnalysis ^void [this ^RewritingContext rewriting]
+    (let [prevSource (.currentSource log)
+          localCacheContext (.withLocalCacheContext argumentAttr)]
+      (try
+        (.useSource log (.getSourceFile (.-toplevel (.-env rewriting))))
+        (let [^:mutable treeToAnalyze (cast JCTree$JCStatement (.-originalTree rewriting))
+              ^:mutable ^JCTree wrappedTree nil]
+          (when (identical? (.-kind (.-owner
+                                      (.-scope (cast AttrContext (.-info (.-env rewriting))))))
+                            Kinds$Kind/TYP)
+            (set! treeToAnalyze
+                  (.Block (.at make Position/NOPOS)
+                          Flags/SYNTHETIC
+                          (List/of (cast JCTree$JCStatement (.-originalTree rewriting)))))
+            (set! wrappedTree (.-originalTree rewriting)))
+          (.attribSpeculative deferredAttr
+                              treeToAnalyze
+                              (.-env rewriting)
+                              (.-statInfo attr)
+                              (TreeRewriter. rewriting wrappedTree)
+                              (lambda Supplier ^Log$DiagnosticHandler [] (.diagHandler rewriting))
+                              DeferredAttr$AttributionMode/ANALYZER
+                              (.withLocalCacheContext argumentAttr))
+          (.process (.-analyzer rewriting)
+                    (.-oldTree rewriting)
+                    (.-replacement rewriting)
+                    (.-erroneous rewriting)))
+        (catch Throwable ex
+          (Assert/error (java-str "Analyzer error when processing: "
+                                  (.-originalTree rewriting)
+                                  ":"
+                                  (.toString ex)
+                                  "\n"
+                                  (cast String
+                                        (.collect
+                                          (.map (Arrays/stream (.getStackTrace ex))
+                                                (lambda Function ^String [^StackTraceElement se]
+                                                  (.toString se)))
+                                          (Collectors/joining "\n"))))))
+        (finally (.useSource log (.getFile prevSource)) (.leave localCacheContext)))))
+
+  (method ^:public flush ^void [this ^{:tag (Env AttrContext)} flushEnv]
+    (.flush deferredAnalysisHelper flushEnv))
+
+  (defclass StatementScanner
+    :extends TreeScanner
+
+    (field ^{:tag (ListBuffer RewritingContext)} rewritings (ListBuffer.))
+
+    (field ^JCTree originalTree)
+
+    (field ^{:tag (Env AttrContext)} env)
+
+    (constructor [this ^JCTree originalTree ^{:tag (Env AttrContext)} env]
+      (set! (.-originalTree this) originalTree)
+      (set! (.-env this) (.copyEnv attr env)))
+
+    (method ^:public scan ^void [this] (.scan this originalTree))
+
+    (method ^:public scan ^void [this ^JCTree tree]
+      (when (some? tree)
+        (for-each [^{:tag (StatementAnalyzer JCTree JCTree)} analyzer analyzers]
+          (when (and (and (.isEnabled analyzer) (.hasTag tree (.-tag analyzer)))
+                     (.match analyzer tree))
+            (for-each [^JCTree t (.rewrite analyzer tree)]
+              (.add rewritings (RewritingContext. originalTree tree t analyzer env)))
+            (break))))
+      (.scan super tree))
+
+    (method ^:public visitClassDef ^void [this ^JCTree$JCClassDecl tree])
+
+    (method ^:public visitMethodDef ^void [this ^JCTree$JCMethodDecl tree])
+
+    (method ^:public visitBlock ^void [this ^JCTree$JCBlock tree])
+
+    (method ^:public visitLambda ^void [this ^JCTree$JCLambda tree])
+
+    (method ^:public visitSwitch ^void [this ^JCTree$JCSwitch tree]
+      (.scan this (.getExpression tree)))
+
+    (method ^:public visitForLoop ^void [this ^JCTree$JCForLoop tree]
+      (.scan this (.getCondition tree))
+      (.scan this (.getUpdate tree)))
+
+    (method ^:public visitTry ^void [this ^JCTree$JCTry tree]
+      (.scan this (.getBlock tree))
+      (.scan this (.getCatches tree))
+      (.scan this (.getFinallyBlock tree)))
+
+    (method ^:public visitForeachLoop ^void [this ^JCTree$JCEnhancedForLoop tree]
+      (.scan this (.getExpression tree)))
+
+    (method ^:public visitWhileLoop ^void [this ^JCTree$JCWhileLoop tree]
+      (.scan this (.getCondition tree)))
+
+    (method ^:public visitDoLoop ^void [this ^JCTree$JCDoWhileLoop tree]
+      (.scan this (.getCondition tree)))
+
+    (method ^:public visitIf ^void [this ^JCTree$JCIf tree]
+      (.scan this (.getCondition tree))))
+
+  (defclass RewritingContext
+    (field ^JCTree originalTree)
+
+    (field ^JCTree oldTree)
+
+    (field ^JCTree replacement)
+
+    (field ^boolean erroneous)
+
+    (field ^{:tag (Env AttrContext)} env)
+
+    (field ^{:tag (StatementAnalyzer JCTree JCTree)} analyzer)
+
+    (constructor [this ^JCTree originalTree ^JCTree oldTree ^JCTree replacement
+                  ^{:tag (StatementAnalyzer JCTree JCTree)} analyzer ^{:tag (Env AttrContext)} env]
+      (set! (.-originalTree this) originalTree)
+      (set! (.-oldTree this) oldTree)
+      (set! (.-replacement this) replacement)
+      (set! (.-analyzer this) analyzer)
+      (set! (.-env this) (.copyEnv attr env))
+      (when (.hasTag originalTree JCTree$Tag/VARDEF)
+        (.remove (.-scope (cast AttrContext (.-info (.-env this))))
+                 (.-sym (cast JCTree$JCVariableDecl originalTree)))))
+
+    (method diagHandler ^Log$DeferredDiagnosticHandler [this]
+      (.new log
+            Log$DeferredDiagnosticHandler
+            (lambda Predicate ^boolean [^JCDiagnostic d]
+              (when (identical? (.getType d) JCDiagnostic$DiagnosticType/ERROR)
+                (set! erroneous true))
+              true)
+            false)))
+
+  (defclass AnalyzerCopier
+    :extends (TreeCopier Void)
+
+    (constructor ^:public [this] (super. make))
+
+    (method ^:public visitLambdaExpression ^JCTree [this ^LambdaExpressionTree node ^Void _unused]
+      (let [oldLambda (cast JCTree$JCLambda node)
+            newLambda (cast JCTree$JCLambda (.visitLambdaExpression super node _unused))]
+        (when (identical? (.-paramKind oldLambda) JCTree$JCLambda$ParameterKind/IMPLICIT)
+          (set! (.-paramKind newLambda) JCTree$JCLambda$ParameterKind/IMPLICIT)
+          (.forEach (.-params newLambda)
+                    (lambda Consumer ^void [^JCTree$JCVariableDecl p] (set! (.-vartype p) nil))))
+        newLambda))
+
+    (method ^:public visitNewClass ^JCTree [this ^NewClassTree node ^Void aVoid]
+      (let [oldNewClazz (cast JCTree$JCNewClass node)
+            newNewClazz (cast JCTree$JCNewClass (.visitNewClass super node aVoid))]
+        (when (and (not (.isEmpty (.-args oldNewClazz)))
+                   (.hasTag (cast JCTree$JCExpression (.-head (.-args oldNewClazz)))
+                            JCTree$Tag/NULLCHK))
+          (set! (.-encl newNewClazz) (.-arg (cast JCTree$JCUnary (.-head (.-args newNewClazz)))))
+          (set! (.-args newNewClazz) (.-tail (.-args newNewClazz))))
+        newNewClazz)))
+
+  (defclass TreeRewriter
+    :extends AnalyzerCopier
+
+    (field ^RewritingContext rewriting)
+
+    (field ^JCTree wrappedTree)
+
+    (constructor [this ^RewritingContext rewriting ^JCTree wrappedTree]
+      (set! (.-rewriting this) rewriting)
+      (set! (.-wrappedTree this) wrappedTree))
+
+    (method ^:public copy :type-params [(Z extends JCTree)] ^Z [this ^Z tree ^Void _unused]
+      (let [^:mutable ^Z newTree (.copy super tree nil)]
+        (when (and (some? tree) (identical? tree (.-oldTree rewriting)))
+          (Assert/checkNonNull (.-replacement rewriting))
+          (set! newTree (.-replacement rewriting)))
+        newTree))
+
+    (method ^:public visitVariable ^JCTree [this ^VariableTree node ^Void p]
+      (let [result (.visitVariable super node p)]
+        (when (identical? node wrappedTree)
+          (let [o-1 (.-mods (cast JCTree$JCVariableDecl result))]
+            (set! (.-flags o-1) (bit-and (.-flags o-1) Flags/FINAL))))
+        result))))

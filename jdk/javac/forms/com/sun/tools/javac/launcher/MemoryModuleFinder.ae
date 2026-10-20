@@ -1,0 +1,91 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/launcher/MemoryModuleFinder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.launcher)
+
+(import '(java.io ByteArrayInputStream IOError IOException InputStream)
+        '(java.lang.module ModuleDescriptor ModuleFinder ModuleReader ModuleReference)
+        '(java.net URI)
+        '(java.nio ByteBuffer)
+        '(java.nio.file FileVisitOption Files Path)
+        '(java.util ArrayList Collections Map Optional Set)
+        '(java.util.function Consumer Function Predicate)
+        '(java.util.stream Stream)
+        '(jdk.internal.module Resources))
+
+(defclass ^:record MemoryModuleFinder [^{:tag (Map String byte/1)} classes
+                                       ^ModuleDescriptor descriptor
+                                       ^ProgramDescriptor programDescriptor]
+  :implements [ModuleFinder]
+
+  (method ^:public find ^{:tag (Optional ModuleReference)} [this ^String name]
+    (if (.equals name (.name descriptor)) (Optional/of (MemoryModuleReference.)) (Optional/empty)))
+
+  (method ^:public findAll ^{:tag (Set ModuleReference)} [this]
+    (Set/of (MemoryModuleReference.)))
+
+  (defclass MemoryModuleReference
+    :extends ModuleReference
+
+    (constructor ^:protected [this]
+      (super. descriptor (URI/create (java-str "memory:///" (.toNameAndVersion descriptor)))))
+
+    (method ^:public open ^ModuleReader [this] (MemoryModuleReader.)))
+
+  (defclass MemoryModuleReader
+    :implements [ModuleReader]
+
+    (field ^:private ^:volatile ^boolean closed)
+
+    (method ^:private ensureOpen :throws [IOException] ^void [this]
+      (when closed (throw (IOException. "ModuleReader is closed"))))
+
+    (method ^:public find :throws [IOException] ^{:tag (Optional URI)} [this ^String name]
+      (.ensureOpen this)
+      (if (some? (.get classes name))
+          (Optional/of (URI/create (java-str "memory:///" (.replace name \. \/) ".class")))
+          (let [path (Resources/toFilePath (.sourceRootPath programDescriptor) name)]
+            (if (some? path)
+                (try
+                  (Optional/of (.toUri path))
+                  (catch IOError error
+                    (let [cause (.getCause error)]
+                      (when-instance [^IOException e cause] (throw e))
+                      (throw (RuntimeException. cause)))))
+                (Optional/empty)))))
+
+    (method ^:public open :throws [IOException] ^{:tag (Optional InputStream)} [this ^String name]
+      (.ensureOpen this)
+      (let [bytes (cast byte/1 (.get classes name))]
+        (if (some? bytes)
+            (Optional/of (ByteArrayInputStream. bytes))
+            (let [path (Resources/toFilePath (.sourceRootPath programDescriptor) name)]
+              (if (some? path) (Optional/of (Files/newInputStream path)) (Optional/empty))))))
+
+    (method ^:public read :throws [IOException] ^{:tag (Optional ByteBuffer)} [this ^String name]
+      (.ensureOpen this)
+      (let [bytes (cast byte/1 (.get classes name))]
+        (if (some? bytes)
+            (Optional/of (ByteBuffer/wrap bytes))
+            (let [path (Resources/toFilePath (.sourceRootPath programDescriptor) name)]
+              (if (some? path)
+                  (Optional/of (ByteBuffer/wrap (Files/readAllBytes path)))
+                  (Optional/empty))))))
+
+    (method ^:public list :throws [IOException] ^{:tag (Stream String)} [this]
+      (.ensureOpen this)
+      (let [root (.sourceRootPath programDescriptor)
+            list (ArrayList.)]
+        (.forEach (.map (.stream (.keySet classes))
+                        (lambda Function ^String [^String name]
+                          (java-str (.replace name \. \/) ".class")))
+                  (method-ref Consumer [String] list ArrayList/.add))
+        (with-resources [stream (Files/walk root Integer/MAX_VALUE (new FileVisitOption/1 0))]
+          (.forEach (.filter (.map stream
+                                   (lambda Function ^String [^Path file]
+                                     (Resources/toResourceName root file)))
+                             (lambda Predicate ^boolean [^String name] (not (.isEmpty name))))
+                    (method-ref Consumer [String] list ArrayList/.add)))
+        (Collections/sort list)
+        (.stream list)))
+
+    (method ^:public close ^void [this] (set! (.-closed this) true))))
