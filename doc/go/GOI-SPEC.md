@@ -4078,3 +4078,195 @@ errors, every declaration checked); `make check-makefile`.
 
 **Remaining**: GC145 (b), GC150 (b) when a program needs them; `Value.Method` of an interpreted
 interface value (GC71: its RT is `any`, so `NumMethod` 0 where gc counts the interface's methods).
+
+## As built: the arm64 box check (2026-10-19)
+
+Step 4 of the plan to the milestone `arbace-interprets-go-v1` (doc/AGENDA.md): GR7a's check in the
+box (GS13) on tamago/arm64, in the emulated aarch64 VM with KVM/arm64 (`bin/box-arm64-vm`) and on
+the Mac under Hypervisor.framework (`bin/box-mac-bundle`, `box/mac/`), with the board's crash at a
+`GOMAXPROCS` above the box's vCPUs (GR7a's "Remaining"). Built on branch `goi-box-arm64` (from main
+`77370a70`, main `9cdbd4d1` merged into it before the final checks: GR7c, GR8a, GR9a-c and GR9d).
+Its proposals are GC75-GC81.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the check on arm64 | `bin/goi check --box --arch arm64`, `test/goi/check-box-arm64.edn`, `test/goi/check-box-known-arm64.edn` | GR7a's check (each program a box of its own, its forms on the guest's standard input, the console one stream against gc's on linux/amd64) with the launcher a candidate `GOI_BOX_EXE` that runs the arm64 launcher where KVM/arm64 is (`GOI_BOX_TMO`, the program's seconds, exported to it, so that it ends the box there); every second program of `test/goi/box.txt` (GC75; `GOI_BOX_ALL=1`: all); `check-known.edn`'s, `check-box-known.edn`'s and `check-box-known-arm64.edn`'s programs known; its runs in `.tmp/goi-check/box-arm64` (gc's reference shared) |
+| the VM's driver | `bin/box-arm64-vm goi [ARGS]`, `Makefile` (`arm64-vm-goi`) | the arm64 launcher put into the VM; the candidate `bin/box-arm64-vm exec timeout ... arbace-box -`, the sessions multiplexed on one ssh connection (GC79); 8 boxes of 2 vCPUs (`GOI_JOBS`, `GOI_BOX_CPUS`); each program's timeout plus 1,200 s (`GOI_BOX_TIMEOUT`); the VM started and stopped by the step when it was not running |
+| the Mac's | `bin/goi check --box --bundle DIR`, `bin/box-mac-bundle` (`goi/`), `box/mac/mac.sh goi`, `box/mac/README.txt` | the bundle carries every program of `box.txt` as its run (GC76): `goi/in/P.in` (the guest's standard input, box_input's), `goi/want/P.want` (gc's standard output then error, or a directory test's golden output), `goi/programs.tsv` (the program, its timeout, the status expected, the comparison: `one` up to the goroutines' traces, `dir` as is), `goi/known.tsv`; `mac.sh goi` runs them, 4 boxes of 4 vCPUs at a time (`GOI_JOBS`), with the shell, perl and xargs only, into `mac-results/goi-results.tsv` (each program's result and milliseconds); `mac.sh all` runs it after the checklist |
+| the Ps at most the vCPUs | `overlay/go/runtime/proc.ae` (procresize, one line marked Arbace), `overlay/go/runtime/arbace_local.ae` (`arbaceMaxProcs`, `arbace_setMaxProcs`), `go/arbace/jrt/hostbox_tamago.ae`, `go/arbace/jrt/thread.ae` (`setMaxProcs`) | GC77: jrt's box host sets the bound to the board's `GOMAXPROCS` (its vCPUs) at its init; `GOMAXPROCS(n)` above it gives that many Ps |
+| goi's table on tamago/arm64 | `go/arbace/gotable.edn` | GC78: the arm64 guest links again; this branch's `:exclude` of `runtime.CallOnG0` gave way at the merge to GR9a-c's `:exclude-in` (`"tamago/arm64" {"runtime" ["CallOnG0"]}`), found and built on main meanwhile |
+
+**Two findings before the check could run.**
+
+1. **The arm64 guest did not link** (GC78): `runtime.CallOnG0·f: relocation target runtime.CallOnG0
+   not defined`. goi's table lists the runtime's exported functions, among them `CallOnG0`, which
+   TamaGo's `os_tamago.go` declares for every architecture but implements in assembly on amd64
+   and arm only (`sys_tamago_amd64.s`, `sys_tamago_arm.s`; not `sys_tamago_arm64.s`). The table's
+   value of it needs its body, so `ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box` has failed
+   since goi's table entered the program (GR1): no step of the essential gate builds a guest, and
+   `bin/gate --full`'s box-forms step, which builds both, has not run since (the gate's policy until
+   the milestone). This branch left `CallOnG0` out of the table for every configuration
+   (`gotable.edn`'s `:exclude`); GR9a-c, built meanwhile on main, met the same failure with GR8a's
+   `syscall.RawSyscall`, `RawSyscall6` and `Syscall6` and added `:exclude-in` (a member left out in
+   one GOOS or GOOS/GOARCH), `CallOnG0` in tamago/arm64's: the merge keeps main's.
+2. **dropbear drops a client's sixth unauthenticated connection** (GC79): eight programs started at
+   once gave three ssh exits 255 with no message (dropbear's `MAX_UNAUTH_PER_IP`, 5, a compile-time
+   limit; the oracle's runs, `bin/box-arm64-vm oracle`, start further apart). Eight boxes started in
+   one ssh session all ran; `bin/box-arm64-vm goi` starts a master connection (`ControlMaster`,
+   `ssh.ctl` in the state directory) and the programs' sessions are its channels.
+
+**Times in the emulation** (the VM's 16 vCPUs under TCG on the 64 of the shared host, its load
+7-14). Alone, a program takes 33-45 s at 2 and 4 vCPUs (`closedchan.go`, `tinyfin.go`: 66 s for the
+two at 2 vCPUs, 90 s at 4) and `fixedbugs/bug303.go` 88-112 s at 1, 2 or 4 (natively under a second:
+its imports' interpretation, `io` and `strings`). A sample of every twentieth program of `box.txt`
+(29), 8 at a time:
+
+| boxes | vCPUs a box | the sessions | result | time |
+|---|---:|---|---|---:|
+| 8 | 4 | one connection each | 25 pass, 4 timeouts (610 s; three of the first eight gave no output) | 1,308 s |
+| 8 | 2 | one connection each | 23 pass, 6 ssh exits 255 (dropbear) | 338 s |
+| 8 | 2 | multiplexed | 28 pass, `bug303.go` past 610 s | 758 s |
+
+26 s a program at 8 boxes in the sample: all 566 would have taken about 4 hours, so the emulation
+runs half (GC75), and each program is given 1,200 s more than its own timeout. The half took 76
+and 84 minutes (16-18 s a program: the sample's held more slow ones).
+
+**The check in the arm64 box** (this branch's guest, KVM/arm64 in the emulated aarch64 VM, 8 boxes
+of 2 vCPUs):
+
+| guest | programs | pass | fail, error | unsupported | known | time (8 boxes) |
+|---|---:|---:|---:|---:|---:|---:|
+| this branch before the merge (`3934b40d`; `box.txt` of 566) | 283 | 282 | 1 | 0 | 0 | 4,569 s |
+| merged with main `9cdbd4d1` (`22efdcf7`; `box.txt` of 574), recorded | 287 | 285 | 0 | 0 | 2 | 5,049 s |
+
+The error of the first run is `cmplxdivide.go`'s timeout (its 10 s and the 1,200 s more: its
+table of complex divisions, emulated; it passes in the second). The known two are
+`typeparam/issue50109.go` (the box's console, as on amd64: `check-box-known.edn`) and
+`fixedbugs/issue15277.go`, arm64's own (`check-box-known-arm64.edn`): its build constraint is
+`amd64`, so goi finds no file of it for tamago/arm64 (gc's reference is linux/amd64's). No other
+program differs from amd64's box. Main's eight new programs of `box.txt` moved the halves' parity
+past them, so the two runs ran mostly different halves: together 398 distinct programs of the 574
+(every directory): 396 passing in at least one (`cmplxdivide.go` among them), and the two known. Main's amd64 box check on
+the merged tree: 573 of 574, one known (`issue50109.go`), as main's; 299 s.
+
+**`GOMAXPROCS` above the box's vCPUs (GC77).** TamaGo's runtime binds an M to each P and never
+drops one ("Ms are bound to P on tamago": `startTemplateThread`, `LockOSThread` and `sysmon` are off),
+so it starts an M (`newosproc`, `goos.Task`) for each P it runs; the board starts each on a vCPU of
+its own (`smp.go`'s `task`) and has one per vCPU, so `GOMAXPROCS(4)` on 2 vCPUs ends the guest at
+the first M past them (`fatal error: task: no idle vCPU`; on 1 vCPU there is no `goos.Task` at all:
+`newosproc: not implemented`). TamaGo's own boards have the same limit (its `amd64.CPU.Task` panics
+"Task exceeds available resources", and its `CPU.GOMAXPROCS` is to be used instead of the
+runtime's). As built, `procresize` makes at most `arbaceMaxProcs` Ps when that is set, and jrt's box
+host sets it at its init to the `GOMAXPROCS` the board's init gave (its vCPUs; 1 on 1 vCPU). The
+board itself cannot set it: the tool guests (`bin/box-tools`) and `box/`'s test guests are built
+with the board and without the runtime overlay, where a linkname to it would not link. On Linux it
+is not set. `mallocfin.go` (`GOMAXPROCS(4)`) passes in the amd64 box at 1, 2 and 4 vCPUs; with
+2 vCPUs, `GOMAXPROCS(4)` returns 2 and `GOMAXPROCS(0)` then answers 2 where Linux answers 4 (no
+program of the check prints it).
+
+**The Mac (Hypervisor.framework, the M2 Max): the steps for the user.** Not run here. On Linux, at
+the commit to test (everything bundled must be HEAD's, `bin/box-mac-bundle`'s header):
+
+    bin/arbace-go --build
+    ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box
+    bin/box-tools build arm64
+    bin/box-rebuild --arch arm64 prepare host
+    bin/box-mac-bundle        # target/arbace-go/arbace-box-mac-arm64.tar.gz
+
+(through `.tmp/heavy`; about 30 minutes here, `bin/box-mac-bundle` itself a minute: 65,841,315
+bytes at `3934b40d`, before the merge, goi's 566 programs among them; on a tree with GR9a-c,
+`bin/box-rebuild`'s host step first needs GC81). Then on the Mac:
+
+    tar xzf arbace-box-mac-arm64.tar.gz && cd arbace-box-mac-arm64
+    ./mac.sh check && ./mac.sh sign    # once: the launcher signed with the hypervisor entitlement
+    ./mac.sh goi                       # goi's check alone: box.txt's programs, 4 boxes at a time
+    # or ./mac.sh all: check, sign, hv, checklist, goi, rebuild, with the clock (about 1.5 hours)
+
+and send back `mac-results.tar.gz` (`./mac.sh all` packs it; after `./mac.sh goi` alone: `tar czf
+mac-results.tar.gz mac-results`). `mac-results/goi.log` ends with the counts (`goi: 574 programs: N
+pass, N known, N other`), `mac-results/goi-results.tsv` holds each program's result, reason and
+milliseconds: the Mac's reference (`test/goi/check-box-mac.edn`, to be recorded from it) and any
+known differences of Hypervisor.framework come from it. `mac.sh goi` was run here on Linux with the
+amd64 launcher in the bundle's place (the same script, the bundle's inputs): 565 pass, 1 known
+(`typeparam/issue50109.go`), 313 s with 4 boxes.
+
+**The gate (GC80).** The arm64 VM's steps are not in `bin/gate --full` (its header: "arm64, under
+qemu, stays out: its suite takes hours"); `bin/box-arm64-vm check` runs at the arm64 milestones by
+hand. The arm64 goi check belongs beside it: `bin/box-arm64-vm goi` (`make arm64-vm-goi`), after
+`bin/box-arm64-vm check`, when the box's guest, goi or the board change and at the milestone. What
+`--full` gains instead is the arm64 guest's build (box-forms builds both), which would have caught
+GC78.
+
+**Proposals for the user** (each built as recommended):
+
+- **GC75 The emulated arm64 box's subset.** (a) as built, every second program of `box.txt` in its
+  order (the first, the third, ...: 287 of 574, every directory in proportion, 84 minutes with 8
+  boxes of 2 vCPUs), all of them on the Mac; (b) all 574 (about 2.8 hours); (c) GC28's rule over
+  `box.txt` (outside `fixedbugs/` every one, of it every fourth: about 450, 2.2 hours); (d) the sample of
+  every twentieth (29, 13 minutes). *Recommended: (a)*: half the time, the Mac runs the rest, and
+  the rule follows `box.txt` as it grows (a program added shifts the halves after it, as main's
+  eight did); a program of the other half that differs on arm64 is
+  found by the Mac's run or by `GOI_BOX_ALL=1`.
+- **GC76 The Mac's check.** (a) as built, the bundle carries each program's run (its input, gc's
+  console, its timeout and status) and `mac.sh goi` compares with the shell, perl and xargs; (b)
+  the forms and `bin/goi` on the Mac: bash 4 (macOS has 3.2), python3 and gc's reference built
+  there. *Recommended: (a)*: nothing installed on the Mac, as the rest of the bundle.
+- **GC77 `GOMAXPROCS` above the vCPUs.** (a) as built, the Ps at most the vCPUs (procresize's line,
+  the bound set by jrt's box host): the program runs, `GOMAXPROCS(0)` answering the vCPUs; (b) the
+  monitor makes vCPUs on demand when the board's `task` asks past them, up to `vmm.MaxCPUs` (Linux's
+  semantics: the host multiplexes the Ms): vCPUs created after the guest runs, on three hypervisors
+  (the monitor's vCPU table, its park and wake, the doorbell's per-vCPU state), and a box's
+  `ARBACE_BOX_CPUS` no longer its bound; (c) the board's `task` leaves the M unstarted: its P stays taken, and the
+  next stop of the world waits for it forever; (d) unchanged, a box's vCPUs at least the program's
+  `GOMAXPROCS` (GR7a's 4). *Recommended: (a)*: one line and a variable, TamaGo's own rule (one P a
+  CPU) kept by the runtime instead of the program.
+- **GC78 Functions the configuration does not implement.** (a) as merged, GR9a-c's `:exclude-in`
+  per configuration (this branch's `:exclude` for every configuration dropped for it); (b) the
+  table's generator leaves out a body-less function without assembly for the configuration (the
+  general rule; the generator reads forms, not `.s` files); (c) a `CallOnG0` for tamago/arm64 in
+  an overlay (TamaGo's runtime changed). *Recommended: (a)*, (b) if a third appears; and an arm64
+  guest's build in a gate run more often than `--full` (GC80).
+- **GC79 The VM's sessions.** (a) as built, multiplexed on one ssh connection; (b) the candidate
+  retries an ssh exit 255 with no output (a program killed by a signal also ends ssh with 255:
+  run twice); (c) the starts staggered (slower, and still at most 5 connecting). *Recommended:
+  (a)*.
+- **GC80 The arm64 check's place.** (a) as built, `bin/box-arm64-vm goi` beside `bin/box-arm64-vm
+  check`, by hand at the box's changes and the milestone, not in `bin/gate --full`; (b) a `--full`
+  step (the VM's two hours and a heavy slot it holds while it runs). *Recommended: (a)*, and the
+  arm64 guest's build kept in `--full` (it is: box-forms).
+- **GC81 The rebuild in the box after GR9a-c (S8; found here, not built).** `bin/box-rebuild --arch
+  arm64 prepare host` (which `bin/box-mac-bundle` requires) fails on the merged tree: its host step
+  compiles `arbace/goi` against a GOROOT without GR9a-c's reflect overlay (`undefined:
+  reflect.ArbaceMethod`, `ArbaceNamed`, `ArbaceSetLayout` ...): `arbace.box.print`'s
+  `print-goroot` prints `overlay/go/runtime.ae` and `syscall.ae` only, and `arbace.box.rebuild`
+  lays their files over GOROOT/src, not `overlay/go/reflect.ae`'s (`bin/jrt overlay`'s
+  `overlay_pkgs` has it since GR9a). (a) `print-goroot` prints `overlay/go/reflect.ae` into
+  `/o/reflect` and the rebuild lays `reflect/` beside `runtime/` (a few lines; it changes the
+  guest's embedded namespaces, so the box's image and its checks are to be made again: for the
+  box's work, on a branch of its own); (b) the rebuild reads `bin/jrt overlay`'s package list
+  (`overlay_pkgs`) from the tree, so that a next overlay package needs no change there.
+  *Recommended: (a)* now, (b) with S8's next change. Until then the Mac's bundle builds at a
+  commit before GR9a-c only: it was built here at `3934b40d` (before the merge).
+- **GC82 The smoke test's future in the emulation.** `bin/box-arm64-vm check`'s smoke test failed
+  one check, twice, on the merged tree as before it: "a future while the REPL waits for input" (R3),
+  whose future prints `late` 300 ms after it starts; in the VM the REPL's printing of the future
+  (`#object[...]`) takes longer, and `late` came within that line, which the check's filter drops
+  (shown with a sleep of 5,000 ms instead: `late` on a line of its own). (a) as built, the sleep
+  scaled by `--slow` as the check's other waits are (`$((300 * slow))` ms: 300 natively, 9 s in the
+  VM); (b) the filter keeps a line's `late` (a REPL's output and the future's interleaved by
+  design). *Recommended: (a)*.
+
+**Checks** (this branch, on the merged tree `22efdcf7`, but where noted): the essential `bin/gate`
+passed (15 m 50 s; goi's essential check 729 of 729, the suite, the oracle 22,658 of 22,711
+against its 53 known, the differential check, the generated variants; before the merge, at
+`3f50a94f`, 20 m 07 s); `bin/goi check --box` on amd64 573 of 574, one known (before the merge
+565 of 566); the box's smoke test on amd64 (113 checks), `bin/box-suite` (67 namespaces, 19,647
+assertions, no failure), `bin/box-vendor kvm-tests` (34 passed); `bin/goi check --box --arch arm64`
+as above; `bin/box-arm64-vm check` (the smoke test on KVM/arm64 113 of 113 after GC82, before it 112 and the future's check; `box/`'s KVM tests, 27 passed; 42 minutes); `bin/box-mac-bundle` built at `3934b40d` (before the
+merge: 65,841,315 bytes), not on the merged tree (GC81); `mac.sh goi` on Linux with the amd64
+launcher (565 of 566, one known, before the merge); `bin/jrt overlay --check` (proc.go's forms the
+conversion plus the patch); `make check-makefile`.
+
+**Remaining**: the Mac's run (the steps above) and its reference; GC35 (b) and GR7a's others.
