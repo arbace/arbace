@@ -162,3 +162,38 @@ GitHub's repository description, README's first line and CLAUDE.md's.
   data generators.
 - **Proposals JFS1-JFS11** are open, for the user. JFS11 notes that the milestone prefix JF
   collides with PRINTER-NOTES' decided JF1-JF5, and recommends JN1-JN9 instead.
+
+## 2026-10-20: the Go parser's survey merged (doc/go/GO-PARSER-SURVEY.md)
+
+- Branch `go-parser-survey` (`91a6e888`, from `9a6a36e9`) merged.
+- **Today:**
+  - repr/go reads Go only through `tools/godump` (2,801 lines: `go list`, go/parser, go/types). The
+    converter takes about 30 decisions from go/types.
+  - The box cannot read Go: no go command, export data or helper.
+  - 134 of goi's unsupported errorcheck programs come from it: 70 with syntax errors, and 64
+    invalid programs the converter cannot convert (GC47).
+  - The five annotation corpora hold 121,345 declarations (an earlier figure said about 111,000).
+- **Measured:**
+  - **E1:** gc's syntax package gives gc's errors on 66 of the 70 syntax-error programs, go/parser
+    on 20.
+  - **E2:** the two parsers disagree on 16 of `$GOROOT/test`'s 3,400 files.
+  - **E3:** goi interpreting go/parser over std (1,742 files, 19.6 MB) took 26 s, 0.75 MB/s, 59-70×
+    native. Its node counts equal native's file by file (4,844,260 nodes).
+  - **E4:** byte loops in Arbace run at 1.4-1.6 MB/s, so a hand-written Arbace parser would be no
+    faster.
+  - **E5:** compiling go/parser in costs about +356 KB.
+  - Of today's conversion, 7 min 54 s of CPU goes to reading back the helper's 252.7 MB of dump
+    text, out of 13 min 9 s.
+- **Recommended:**
+  - Go's own go/parser from `tamago/goroot`'s forms, interpreted by goi first, compiled through
+    goi's table later.
+  - A dumper generated from go/ast's forms, building the dump's data directly.
+  - Syntax errors in gc's words, from gc's syntax package run from `tamago/cmd`.
+  - Annotations from `arbace.go.check`, which resolves the converter's raw forms in a resolve mode.
+  - The helper stays as the oracle in `bin/gate --full`.
+  - Rejected: gc's syntax for the tree (not go/ast's, no comments). A hand-written parser, about
+    3,500 lines and 2-3 weeks, remains the alternative.
+- **The proof of the switch:** equality with the helper over every corpus at three levels: trees,
+  annotations, and `.ae` byte for byte in `:lines` and `:full`.
+- **Milestones:** GP1-GP8, about 23-32 days, the last letting the box read Go.
+- **Proposals GPS1-GPS11** are open, for the user.

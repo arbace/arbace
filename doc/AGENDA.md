@@ -110,10 +110,10 @@ The current state of the work. This file is rewritten as things change. For the 
     classes), 46 s.
   - **Tagged** `arbace-interprets-go1.27.1-v1` (2026-10-20, on main). After it, the emulated arm64
     check over all of box.txt: 582 of 584, 2 known, as the Mac's.
-- **Running (2026-10-20, the user: "make plans"):** two surveys, each in its own worktree. The
-  results are plans to decide, not builds.
-  - `go-parser-survey`: an Arbace-native Go parser (doc/go/GO-PARSER-SURVEY.md), so repr/go reads
-    Go without Go's toolchain; proposals GPS1-.
+- **The two front-end surveys (2026-10-20, the user: "make plans"):** plans to decide, not builds.
+  - Done: the Go parser's survey (doc/go/GO-PARSER-SURVEY.md, merged): recommended Go's go/parser
+    from forms run by goi, annotations by goi's checker, gc's syntax for errors (GP1-GP8, 23-32
+    days, the box reads Go at GP8); proposals GPS1-GPS11 open, for the user.
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; proposals JFS1-JFS11 open, for the user.
