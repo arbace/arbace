@@ -9,7 +9,8 @@ at `9a6a36e9`: the committed `jdk/forms` (911 files), the conversion reports of 
 `.tmp/gate/*.secs`, jdk26u at `baf63fbe42b8` (`/root/jdk26u`, its build tree included) and three
 prior-art clones (§3). The measuring scripts and the clones are in the survey's scratch
 (`.tmp/jfs/`, `.tmp/prior/`, not tracked); Appendix A says what each computes. No JVM was run for
-this survey and no Go build was made.
+this survey and no Go build was made. Decided on 2026-10-20 ("Decided", at the end); JN1, the
+spike, as built: "As built: JN1 (2026-10-20)", after it.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -741,3 +742,298 @@ The user decided JFS1-JFS11 as recommended:
 - JFS9 (a): the repr/java `--full` steps move to the tool executable.
 - JFS10 (a): no native front end now; decided again after JN6, parser first.
 - JFS11 (b): the milestones are named JN1-JN9; read this document's JF1-JF9 as JN1-JN9.
+
+## As built: JN1 (2026-10-20)
+
+JN1, the spike of JFS1 (b), on the branch `java-frontend-jn1` at main `26816f48`, in about two
+hours of work: javac runs on Arbace. javac's sources read by repr/java, translated by j2g with
+jrt into a tool executable, parse every corpus and attribute the baseline with output equal to
+javac on the frozen JVM. Everything below is scratch in the worktree's `.tmp/jn1/` (sources,
+forms, scripts, logs, the executable); nothing of it is committed but this section. The shipped
+program, jrt, `overlay/jdk`, j2g and `jdk/` are unchanged on the branch. The changes the spike
+needed were made to copies, or made to the checkout and then reverted after their diff was
+saved; each one is listed below (§JN1.5). jdk26u is the checkout at `baf63fbe42b8` (JFS8 (a)).
+The JVM ran only the frozen v4 jar (copied into the worktree's `.tmp/oracle-frozen/`, hash
+checked against `test/oracle/frozen-jar.sha256`), through `bin/repr-java` and
+`bin/lib/frozen.bash`. Go ran only TamaGo's go1.27.1, with no cgo. The tools' host was the
+worktree's own stage 0 (`bin/seed --build`).
+
+### JN1.1 javac's sources read (step 1)
+
+`bin/repr-java read-jdk --check` on the frozen JVM, run once per module, each module's sources
+copied into `.tmp/jn1/src/<module>`: jdk.compiler's `share/classes` plus the 17 generated
+sources of `build/linux-x86_64-server-release/support/gensrc/jdk.compiler/com` (CompilerProperties,
+LauncherProperties, FlagsEnum, and the bundles `compiler`, `javac`, `launcher` with their `_de`,
+`_ja` and `_zh_CN` translations, plus `ct` and `version`; serialver's 4 bundles left out),
+java.compiler's `share/classes`, and jdk.internal.opt's `CommandLine.java`:
+
+| module | Java files | converted | failed | with Java forms | forms | time (12 threads) |
+|---|---:|---:|---:|---:|---|---:|
+| jdk.compiler (348 + 17 generated; `module-info` skipped) | 364 | 364 | 0 | 359 | 6,507,455 bytes, 127,224 lines, 384 files | 18 s |
+| java.compiler (136; `module-info` skipped) | 135 | 135 | 0 | 129 | 164,924 bytes, 141 files | 6 s |
+| jdk.internal.opt (`CommandLine`) | 1 | 1 | 0 | 1 | 7,672 bytes | 8 s |
+
+That is 500 files with no failures, 489 of them with Java forms, 6.7 MB of forms. §4 (b)
+estimated "about 4 MB". The 2026-10-07 counts hold: jdk.compiler had 342 files with forms, and
+there are 359 now, the extra 17 being the generated ones. java.compiler has 129, as before. The
+5 + 6 files without forms are `package-info`s. Every output reads back with `arbace.core/read`.
+After the spike's patches (§JN1.5) jdk.compiler's 365 files still convert, but only with
+`REPR_JAVA_PATCH_ALL=1`, as `bin/jrt-convert` runs it: a new class (`JN1Bundles`) is named
+across `read-jdk`'s chunks.
+
+### JN1.2 The closure, measured (step 2)
+
+Two measures. The first is static: `scripts/closure.py` scans the forms' import lists, qualified
+symbols and bare `java.lang` names. javac's forms name 236 top-level java.base classes. 158 are
+in `jdk/forms`, 21 are jrt's hand-written classes, 26 are declared only in `jdk/edge.edn` (no
+code), and 36 are absent. This is the survey's "171 in the world, 67 missing", recounted over
+the forms instead of the Java text.
+
+The second is j2g's own answer, which decides. j2g ran with `--program` (the test build's
+roots: every public member of every REPL-visible class) over the program plus javac's world.
+The shipped program translates 14,463 classes. The tool translates 16,128: the same 14,463,
+1,646 of javac's world, and **19 java.base classes added to the closure**. That is all javac
+needs beyond what jrt already translates, because the shipped program already roots all of
+java.base's closure. Reached methods grow from 68,355 to 82,648. j2g's report then lists **69
+methods of javac's world with missing parts**, which become operation-level stubs (J2G-SPEC
+§4.1). The gap list, divided as step 2 asked (`.tmp/jn1/gaps.edn`, `closure-translated.txt`):
+
+| what | classes or members | needed for | in JN1 |
+|---|---|---|---|
+| **added to jrt's closure** (translated) | `java.lang.annotation.{Documented, Inherited, Repeatable, AnnotationTypeMismatchException}`, `SafeVarargs`, `java.io.{IOError, FilterWriter}`, `java.lang.module.InvalidModuleDescriptorException`, `java.lang.runtime.ExactConversionsSupport` (TypeTag's constant range checks, reached by every attribution), `java.nio.file.{FileSystem, FileVisitOption, FileVisitResult, ClosedFileSystemException, DirectoryIteratorException, FileSystemNotFoundException, ProviderNotFoundException, ReadOnlyFileSystemException}`, `java.util.spi.ToolProvider`, `sun.reflect.annotation.ExceptionProxy` (19 classes, all small leaves) | declarations of javac's classes: an annotation type or a supertype missing fails a whole class's analysis | converted by `read-jdk java.base` into an extra input tree (`.tmp/jn1/add-tree`) |
+| **members jrt lacks**, declared | `java.nio.file.Files.{list, walk, find, walkFileTree, readAttributes, isSymbolicLink, readSymbolicLink, getLastModifiedTime}`, `Path.getFileSystem` | javac's `file` package (`JavacFileManager`, `PathFileObject`, `Locations`, `JRTIndex`, `CacheFSInfo`, `RelativePath`): a class whose code names a member that does not exist fails its analysis, so it is not translated, and its users then fail (`ClassFinder` holds a `JRTIndex` field) | stubs that throw, in a copy of jrt's `Files.java` and `Path.java` converted into a copy of `jdk/forms` (`.tmp/jn1/jdk/forms`; the unmodified copies convert byte for byte as `jdk/forms` has them) |
+| **cut in javac** (or added to jrt, JFS12) | `ResourceBundle.getBundle` (JavacMessages, JavaCompiler's version, JRTIndex), `ServiceLoader` (DocLint, plugins, processors, `--release`'s platform provider, doc comment transformers), `Runtime.version()` (`SourceVersion.<clinit>`), `Throwable.printStackTrace(PrintWriter)` (javac's crash report), `InputStreamReader(InputStream, CharsetDecoder)` (`PathFileObject`) | the task's setup: reached by the first parse | patched in javac's sources (§JN1.5) |
+| **avoided by the Arbace file manager** (JFS5 (b)) | `FileSystems`, `FileSystemProvider`, `FileStore`, `PathMatcher`, `WatchService`, `BasicFileAttributes`, `FileTime`, `FileVisitor`, `SimpleFileVisitor`, `JarFile`, `ZipFile`, `Manifest`, `Attributes`, `JmodFile`, the module system (`Module`, `ModuleLayer`, `ModuleFinder`, `ModuleReference`, `ModuleReader`, `ModuleDescriptor`, `Configuration`), `CharsetDecoder`, `CoderResult`, `CodeSource`, `ProtectionDomain` | `JavacFileManager`, `Locations`, `JRTIndex`, the source launcher | declared only, from the edge recorded on the JVM (below); never reached at run time |
+| left as stubs, not reached by `parse`/`analyze` | `java.lang.annotation.Annotation` (17 methods: `getAnnotation` for processors), `DataOutputStream` (`ByteBuffer.appendFloat`, `appendDouble`, `appendLong`: **ClassWriter's**, needed by JN3), `Runtime$Version`, `VM.getRuntimeArguments`, `sun.reflect.annotation.*` | processors, class files, `--release` | stubs |
+
+One more gap belongs to j2g's design. **The edge must cover javac's world.** With
+`jdk/edge.edn` alone, 85 classes failed their analysis, because a class neither in the forms nor
+in the edge "does not exist" (`FileSystem`, `CharsetDecoder` and `ServiceLoader$Provider` in
+signatures). `.tmp/jn1/edge.sh` records the edge of javac's world on the frozen JVM, which is
+`bin/j2g-edge`'s `record` for a third world, 30 s. Merged with `jdk/edge.edn` it adds 29 classes
+(416 against 387), and the failures drop to 13. All 13 are in `com.sun.tools.javac.launcher`
+(the source launcher), `sun.tools.serialver`, and the parts of the `file` package the stubs
+above leave failing. None is reached.
+
+### JN1.3 The minimal program (step 3)
+
+**The driver.** `jn1.Main` (126 lines of Java) uses javac's public API (`JavacTool.create`,
+`JavacTask.parse`, `analyze`; `com.sun.source.util.TreePathScanner`; `JavacTrees`). It runs
+over `jn1.Files` (264 lines), a first Arbace `JavaFileManager` after JFS5 (b): sources and class
+files from directories, no `jrt:/`, no zip, an exploded module directory served as the system
+module `java.base` (`listLocationsForModules`, `getLocationForModule`, `inferModuleName`).
+`parse` prints every unit as javac's `Pretty` prints it (`JCTree.toString`). `analyze` also
+prints every expression's kind, type and element (`Trees.getTypeMirror`, `getElement`) and the
+diagnostics. The same Java forms run on both sides:
+- on the JVM, compiled by the frozen jar's own Java forms compiler (`test/repr/java/build.ae`),
+  run by `frozen_java` against the JDK's javac (`.tmp/jn1/jvm.sh`);
+- on Go, translated by j2g into the tool executable with javac's forms (`.tmp/jn1/go.sh`).
+
+**The tool executable** (JFS4 (b)): the test build's recipe (`bin/arbace-go --build-tests DIR`:
+j2g `--program --input`, `bin/build-go`, the image), run by `.tmp/jn1/{j2g,build}.sh` with
+javac's world, the 19 added classes, the patched copy of `jdk/forms` and the merged edge, into
+`.tmp/jn1/bin/arbace-javac`:
+
+| | shipped executable (amd64) | tool executable |
+|---|---:|---:|
+| size (stripped, `-s -w`) | 143,749,280 bytes | **183,373,984 bytes** (+39.6 MB, +28%) |
+| classes translated, methods reached | 14,463, 68,355 | 16,128, 82,648 |
+| j2g's program tree | | 181 MB of Go forms, javac's 478 files 24 MB |
+| j2g on stage 0 (the compiled namespaces already made, 76 s once) | | **76-88 s** |
+| `bin/build-go` (Go's build cache warm for the runtime) | | **173-195 s** |
+| the image and the link | | 8-10 s |
+
+About ten builds were made in the spike, about 5 minutes each, each one after a fix.
+
+**Results.** Every comparison below is byte for byte, on javac's output as the driver prints it:
+
+| run | javac on the frozen JVM | javac on Arbace (Go) | equal |
+|---|---:|---:|---|
+| parse the samples (`test/repr/java/java/sample`, 10 files, 580 lines printed) | 204 ms | 8 ms | **yes** |
+| parse the baseline (the frozen `clojure/`, 183 files, 51,755 lines) | 628 ms | 308 ms | **yes** |
+| parse javac's own sources (jdk.compiler and java.compiler, 482 files, 160,225 lines) | 947 ms | 923 ms (1.5 s wall, 519 MB) | **yes** |
+| parse java.base's closure (the round trip's 838 originals, 380,024 lines) | 1,585 ms | 2,458 ms (3.6 s wall, 837 MB) | **yes** |
+| analyze `Reduced.java` (with a one-method `IDeref`, against the exploded java.base) | 191 ms | **88 ms** | **yes** |
+| analyze `Reduced.java` with the baseline as source path (`IDeref` names `RT`: clojure.lang attributed implicitly) | 2,684 ms | 3,928 ms | yes, but capture numbers |
+| analyze the samples (`--enable-preview -source 26`, 2,173 lines) | 432 ms | 166 ms | yes, but capture numbers |
+| analyze the baseline (183 files, 812 classes, 217,098 lines of facts) | 2,313 ms (5.1 s wall, 650 MB) | **3,933 ms** (5.2 s wall, 612 MB) | yes, but capture numbers |
+
+The JVM's times are javac's own, measured in the process after the frozen runtime's start
+(about 1.5 s), and cold: HotSpot's warm-up is part of them. Go's are the whole run's (the
+executable starts in about 0.1 s). In "capture numbers" the only differences are javac's names
+for captured types (`capture#780 of ?`). javac computes them from identity hash codes, and they
+differ between two runs on the JVM too (10 lines between two JVM runs of the samples). Once they
+are normalized, every output is equal. So javac attributes on Arbace about 1.7 times slower than
+the cold JVM, which is the bottom of §4 (b)'s range (2.3 to 32 times for j2g's code), and it
+parses at the JVM's speed. R1 (Arbace runs Java not as the JVM) showed nothing over these
+corpora: no difference in trees, types, symbols, diagnostics or order.
+
+### JN1.4 The platform's declarations, tried (step 4, JFS2)
+
+On the JVM, with the same driver and file manager, attributing `Reduced.java`:
+
+| option | how | result |
+|---|---|---|
+| exploded classes as the system module (JFS2 (a)'s output) | `--platform` the JDK build tree's `build/linux-x86_64-server-release/jdk/modules/java.base`, served as `SYSTEM_MODULES` / `java.base` | **works** on the JVM and on Arbace: all of §JN1.3's analyses |
+| java.base's sources on the source path, modules (JFS2 (b)) | jdk26u's `src/java.base/share/classes` as `SOURCE_PATH`, no system module | **fails**: javac aborts in `TypeEnter$ImportsPhase.implicitImports`, since without a system `java.base` there is no `java.lang`. A source path cannot stand for the system module, and `--patch-module` needs one to patch |
+| the same with `-source 8` (no modules) | sources on the source path, platform class path empty | fails: java.base's sources use Java 16-25 (100 errors: patterns, switch expressions, sealed classes), and attributing what is reached took 9.9 s |
+| exploded classes on the platform class path, `-source 8` | `PLATFORM_CLASS_PATH` | works (67 ms), but at language level 8: not the corpora's |
+
+So JFS2 (a) holds, and the source-path fallback of JFS2's recommendation does not work for
+module-aware javac. The class files javac needs (it reads them lazily, through its own
+`ClassReader`, translated) must come from an exploded java.base. For JN2-JN3 the build tree's
+exploded classes can stand in until javac on Arbace compiles java.base itself (JFS15).
+
+### JN1.5 What the spike changed, exactly
+
+None of these is committed. The diffs are in `.tmp/jn1/patches/`.
+
+**javac's sources** (copies in `.tmp/jn1/src/`; `jdk.compiler.diff`, 94 lines added and 32
+removed in 11 files; `java.compiler.diff`, 1 line):
+1. `util/JN1Bundles.java` (new) maps javac's five bundle names to `new compiler()` and the rest.
+   It is used by `JavacMessages` (2 calls), `JavaCompiler.version`'s bundle and `JRTIndex`, in
+   place of `ResourceBundle.getBundle` (jrt's `ResourceBundle` loads nothing).
+2. `DocLint.newDocLint` returns `NoDocLint`, and `BasicJavacTask.initPlugins` returns when there
+   are no plugin options. On the JVM `ServiceLoader` finds nothing either; on Arbace it is outside
+   the world.
+3. `JavacTaskImpl`: the crash report prints the stack trace line by line
+   (`Throwable.printStackTrace(PrintWriter)` is not in jrt).
+4. `PathFileObject.openReader`: `new InputStreamReader(in, decoder.charset())`.
+5. `javax.lang.model.SourceVersion.getLatestSupported`: `intVersion = 26` in place of
+   `Runtime.version().feature()`.
+6. Workarounds for the analysis and j2g bugs below: `Attr.RecoveryInfo`'s anonymous check
+   context moved out of the constructor's prologue into an `Attr` method (arbace.classes: "No
+   enclosing instance of type Attr in scope"); `Types.DescriptorCache.mergeDescriptors`' lambda
+   given a cast to `FunctionDescriptor` ("Unknown type: Types$DescriptorCache$1", a lambda whose
+   inferred return type is an anonymous class); `Resolve.onDemandImportScopeRecovery`'s lambda
+   body moved into a method (j2g typed the lambda's last temporary `any`: a Go compile error);
+   `Resolve.MethodReferenceLookupHelper.unboundLookup`'s anonymous helper moved into a `Resolve`
+   method (j2g read `Resolve.this` through the outer parameter's interface type: a Go compile
+   error).
+
+**jrt** (a copy of `overlay/jdk/java.base/java/nio/file/{Files,Path}.java`; `overlay-nio-file.diff`,
+43 lines): the members listed in §JN1.2, which throw `UnsupportedOperationException("jn1: ...")`.
+
+**j2g** (`j2g.diff`: `arbace/j2g/names.ae`, `code.ae`, `reach.ae`, 33 lines added, 5 removed;
+made in the checkout, used by the tool's j2g runs, then reverted):
+1. `names.ae`: classes of javac's packages (`com/sun/source/`, `com/sun/tools/`, `javax/lang/`,
+   `javax/tools/`, `javax/annotation/processing/`, `sun/tools/`, `jdk/internal/opt/`, the driver)
+   are named by their binary name, `Jv_com_sun_tools_javac_util_List`. j2g names a class by its
+   simple name in one Go package, `jrt`, with a hand-written rename table for collisions (§4.4).
+   javac's world made 462 collisions: with java.base (`List`, `Type`, `Name`, `Flow`, `Modifier`,
+   `ByteBuffer`, `Formattable`), within itself (`com.sun.source.tree.ReturnTree` and
+   `doctree.ReturnTree`, the two `Scope`s, the two `TreeScanner`s, the two `Main`s), and in
+   method names through the descriptor codes (`GetAnnotationMirrors__List` for
+   `com.sun.tools.javac.util.List` and `java.util.List`). Also the rename
+   `java/nio/file/FileSystem` → `Nio_FileSystem` (against `java.io.FileSystem`).
+2. `code.ae` `cast-val`: a cast to a class outside the world (a class that failed its analysis,
+   as the binding of an `instanceof` pattern) is an operation-level stub. Before, it emitted a
+   `C_Cast` that does not exist.
+3. `code.ae`: `Object.wait(long)` on an Object-typed receiver called `jrt.WaitTimeout` with two
+   arguments, and it takes three (millis, nanos). The nanos 0 are now added, and `wait(long, int)`
+   is in the helpers' table.
+4. `reach.ae`: a bound method reference to a private method (`this::initOperators` in
+   `Operators.OperatorHelper`, an abstract class) is reached directly. As a virtual call no
+   instantiated class overrode it, so it stayed a "not translated" stub.
+
+The shipped program was translated by j2g with these changes and without them (the shipped
+world, `.tmp/jn1/ship-{old,new}`). The trees differ in one method and in j2g's own embedded
+sources: `java.util.concurrent.TimeUnit.timedWait`, a "not translated" stub before (fix 3), is
+translated now. Fixes 1, 2 and 4 do not change the shipped program.
+
+### JN1.6 What it means for JN2-JN3
+
+- **JN2 (javac's forms vendored) is smaller than estimated.** The conversion is clean (500 files,
+  no failures, 6.7 MB). jrt's additions are 19 small classes plus about ten declared members, not
+  the 67 classes §4 (b) counted, because the Arbace file manager keeps the file systems, jars and
+  the module system out. The work: the script (JFS3 (b)); javac's world in the edge (JFS14); j2g's
+  naming for a second world (JFS13); the fixes of JN1.5 made properly (JFS12, JFS16). About
+  **1-2 working days**, against 2-3.
+- **JN3 (javac runs on Arbace) has its hardest part done.** The tool builds, javac parses and
+  attributes, and the outputs are the JVM's. What remains for JN3 is new ground: class files
+  (`Gen`, `ClassWriter`: `DataOutputStream` is still a stub, and the file manager has no output),
+  `--patch-module` for `read-jdk` (a module-oriented location in the file manager), java.base
+  compiled by javac on Arbace (the JFS2 (a) cache), byte-for-byte checks against the JVM's javac
+  for the baseline's 812 classes and the closure's 2,224, and the processors' paths
+  (`Annotation`, `sun.reflect.annotation`) if a corpus needs them. Speed is not the risk §8 R3
+  feared: 1.7 times the cold JVM for attribution, and equal for parsing. The estimate is **3-4
+  working days**, against 4-6.
+- **JN4 needs javac's internals rooted.** With the recorded edge, `com.sun.tools.javac.*` is a
+  package jdk.compiler does not export, so `--program` roots only javac's public API
+  (`com.sun.source`, `javax.*`). The driver reached `JavacTrees` directly, because `Trees.instance`
+  finds it by reflection and hit an unrooted method. repr/java's converter calls
+  `com.sun.tools.javac.tree`, `code` and `comp` from Arbace code, so the tool must root them too
+  (JFS17). That makes the tool larger than the 183 MB measured here.
+- **The tail is j2g's and arbace.classes'.** Eight problems showed in one spike: six in j2g
+  (four fixed in j2g, two worked around in javac's sources) and two in the analysis (worked
+  around in javac's sources). All are on Java shapes java.base's closure does not use. javac is a good corpus for
+  them, as `bin/diffcheck` is for the forms.
+
+### JN1.7 Proposals
+
+- **JFS12 Where javac's adaptations live.**
+  - Options: (a) javac's sources patched, as in JN1: an `overlay/jdk/jdk.compiler/` and
+    `java.compiler/` tree copied over jdk26u's files before the conversion, the way
+    `overlay/jdk/java.base` is; (b) j2g variants of javac's classes (forms, as
+    `overlay/jdk/variants`); (c) none in javac: jrt grows what is the JDK's API
+    (`ResourceBundle.getBundle` over the world's bundle classes, a `ServiceLoader` that finds no
+    provider, `Runtime.version`, `Throwable.printStackTrace(PrintWriter)`,
+    `InputStreamReader(InputStream, CharsetDecoder)`), and the JN1.5-6 workarounds are replaced
+    by fixes in arbace.classes and j2g.
+  - *Recommended: (c)*, with (a) only for what can be fixed nowhere else. javac's forms then
+    stay jdk26u's text converted, so JN5's fixpoint compares javac's own sources unpatched, and
+    an upgrade of javac is a conversion. jrt's additions change the program and are batched
+    with a re-seed.
+- **JFS13 j2g's names for the tool's world.**
+  - Options: (a) as JN1: the classes of the tool's modules (jdk.compiler, java.compiler,
+    jdk.internal.opt) named by their binary name, `Jv_...`, with java.base's names unchanged;
+    (b) a binary name for every class whose simple name collides, computed from the world, so
+    that adding a class can rename the shipped program's; (c) one Go package per Java package
+    for the tool's world.
+  - *Recommended: (a)*: the shipped program keeps its names byte for byte, it is a rule rather
+    than a table, and the tool's names never depend on what else is in the world. (c) is a
+    larger j2g change for no gain in the tool.
+- **JFS14 The edge of javac's world.**
+  - Options: (a) `bin/j2g-edge update` records a third world (the program with javac's forms)
+    into `jdk/edge.edn`; (b) a `jdk/javac/edge.edn` of its own, recorded by the javac script
+    (JFS3 (b)) and merged into the tool build's edge.
+  - *Recommended: (b)*: the tool's input stays beside javac's forms, and `jdk/edge.edn` and the
+    shipped build stay unchanged. After JN5 it is still JVM data, as `jdk/edge.edn` is (§1.3).
+- **JFS15 The platform until javac on Arbace compiles java.base.**
+  - Options: (a) JN3 starts with java.base compiled by javac on Arbace (JFS2 (a)); (b) the
+    JDK build tree's exploded `jdk/modules/java.base` (and `java.xml`) as the platform for JN2
+    and the start of JN3, pinned by a hash of its class files, replaced by JFS2 (a)'s output
+    once that is shown byte-identical to it.
+  - *Recommended: (b)*. It is what JN1 ran on, and it separates "javac runs" from "javac
+    compiles java.base equal to the JDK build", which is the larger check.
+- **JFS16 The j2g fixes found.**
+  - Options: (a) land JN1.5's j2g fixes 2-4 now, as a j2g change through the essential gate:
+    the shipped program changes in one method, `TimeUnit.timedWait`, which is translated
+    instead of a stub; (b) land them with JN2, with fix 1 (JFS13).
+  - *Recommended: (b)*: no user of the shipped program reached `timedWait`, and JN2 brings the
+    corpus that tests the fixes. Then each lands with a regression form in `bin/diffcheck`'s
+    corpora.
+- **JFS17 What the tool roots.**
+  - Options: (a) javac's internal packages rooted too (`com.sun.tools.javac.*`), for
+    repr/java's converter at JN4: the edge's `:unexported` not applied to the tool's own world;
+    (b) only the classes and members `arbace.repr.java`'s namespaces name (a root list made from
+    their imports, after `--root`), as the shipped program roots what the REPL needs; (c) only
+    javac's API, with the converter rewritten against `com.sun.source` (JFS7 (b)).
+  - *Recommended: (a) for JN4*, measured then. If the tool grows by more than about a third,
+    move to (b). (c) is JFS7's question, left for a native front end.
+
+### JN1.8 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`): `src/jdk.compiler`,
+  `src/java.compiler`, `src/jdk.internal.opt/.../CommandLine.java`, `src/java.base` (the 21
+  classes of JN1.2, read), and the build tree's `support/gensrc/jdk.compiler` and
+  `jdk/modules/java.base`.
+- Arbace at `26816f48` on the branch `java-frontend-jn1`: `bin/repr-java`, `bin/arbace-go`
+  (`--build-tests`, whose steps `.tmp/jn1/{j2g,build}.sh` repeat), `bin/build-go`, `bin/j2g`,
+  `bin/j2g-edge` (the recording, in `.tmp/jn1/edge.sh`), `test/repr/java/build.ae`, the frozen
+  v4 jar.
+- The worktree's `.tmp/jn1/`: `src/` (the modules' sources, patched), `conv/` (the forms),
+  `world/` and `add-tree/` (j2g's inputs), `jdk/forms` (the patched copy), `edge.edn`,
+  `driver/` (`jn1.Main`, `jn1.Files`), `scripts/closure.py` and `gaps.py`, `closure.edn`,
+  `gaps.edn`, `closure-translated.txt`, `patches/`, `bin/arbace-javac`, and the outputs
+  compared (`jvm-*.txt` and `go-*.txt`).
