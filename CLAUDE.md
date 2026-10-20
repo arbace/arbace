@@ -239,7 +239,7 @@ Prior art:
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
-  `--text amd64`: mode `:full` printed back to the original text, byte for byte), repr/haskell's
+  `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's trees equal to the helper's over every corpus), repr/haskell's
   (`bin/repr-haskell roundtrip --iface --text --layout`: GHC's trees and lines over GHC 9.14.1's
   boot libraries, in the braces and the layout layouts, then their interfaces compiled at `-O1`,
   then mode `:full` printed back byte for byte, and `test`; on the host's GHC), repr/clojure's
