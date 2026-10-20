@@ -397,3 +397,50 @@ mode is private (GPS10 (a)) and documented. Exit:
 - every corpus converted raw, read back, its open decisions counted per kind;
 - GC47's invalid programs given raw forms where the parser accepts them;
 - the normal conversion unchanged.
+
+## 2026-10-20: JN2 merged (javac's forms vendored)
+
+- **What:** branch `java-frontend-jn2` (`8b12c86a`, from `52d8c504`, main's GP2 merged in) merged.
+- **The vendored forms:** `jdk/javac/forms` holds 561 files (6.7 MB) from 524 jdk26u sources at
+  `baf63fb`:
+  - jdk.compiler 368, of which 21 come from the build tree's gensrc;
+  - java.compiler 135;
+  - `CommandLine` 1;
+  - 20 java.base classes for javac's world, among them an Arbace `ServiceLoader` that finds no
+    provider (`overlay/jdk/javac/java.base`).
+  `sources.txt`, `provenance.edn` and `jdk/javac/edge.edn` (35 classes beyond `jdk/edge.edn`) sit
+  beside them.
+- **The script:** `bin/javac-vendor convert|edge|verify|check|build`, with `bin/arbace-go
+  --build-java` for the tool executable. The Makefile gets `javac-verify` (in `make verify`) and
+  `build-java`. LICENSE.md's GPLv2+CE list covers `jdk/javac/`.
+- **javac's sources are unpatched** (JFS12 (c)).
+- **jrt's shipped additions:** `ResourceBundle.getBundle` (the JDK's candidate search),
+  `Runtime$Version` and `Runtime.version()`, `printStackTrace(PrintWriter|PrintStream)`. They
+  changed `jdk/edge.edn` in two lines, recorded by `bin/j2g-edge update` (JFS19).
+- **Only in the tool build:** the 19 classes, `ServiceLoader`, and j2g variants for
+  `InputStreamReader(InputStream, CharsetDecoder)`, `Path.getFileSystem` and ten throwing `Files`
+  members (JFS18). j2g gets `--edge` (repeatable), `--variants`, `--qualify`.
+- **The fixes,** each with a regression form in `test/j2g/fixtures/FxJavac.ae` and
+  `FxJavacShapes.ae`:
+  - `Jv_` binary names for the tool's modules;
+  - casts outside the world;
+  - `Object.wait(long)`;
+  - a bound reference to a private method;
+  - a lambda temporary typed `any`;
+  - an outer instance read through an interface type;
+  - an anonymous class in a constructor prologue;
+  - a lambda returning an anonymous class type.
+  The frozen jar cannot compile FxJavacShapes; its two results are kept by hand (JFS21).
+- **The shipped program's diff,** function by function against main's build: `TimeUnit.timedWait`
+  is translated instead of a stub, plus ResourceBundle's members, `Runtime_Version`, the cut list,
+  and `ProcessImpl`'s `onExit` lambda without an `any` temporary.
+- **Checks:**
+  - `javac-vendor verify` byte for byte (564 files);
+  - `javac-vendor check`: 16,668 classes analyzed, 0 failures; the tool is 186,527,904 bytes;
+  - the branch's essential gate and fixpoint (G1 = G2 = G3);
+  - JN1's driver equal to the JVM's on the unpatched forms;
+  - on main after the merge, the essential `bin/gate` passed (20m28s).
+- **The agent's leftover wait loop** (2 h on a finished build) was stopped by its PID.
+- **Rule slips:** one `2>/dev/null`; a first baseline built while editing j2g, discarded.
+- **The re-seed** waits for GP3: the program carries GP2's and JN2's changes.
+- **Open for the user:** JFS18-JFS22.

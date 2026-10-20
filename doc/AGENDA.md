@@ -123,8 +123,9 @@ The current state of the work. This file is rewritten as things change. For the 
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
     milestones named JN1-JN9. JN1 done (2026-10-20: javac's
     sources on Arbace parse and attribute as on the JVM; a tool executable of 183 MB; JN2 1-2
-    days, JN3 3-4); JFS12-JFS17 decided as recommended (the user). Running: JN2, javac's
-    forms vendored (`java-frontend-jn2`).
+    days, JN3 3-4); JFS12-JFS17 decided as recommended (the user). JN2 done (2026-10-20:
+    javac's forms in `jdk/javac/`, unpatched, `bin/javac-vendor`; JFS18-JFS22 open, for the user);
+    next JN3, javac on Arbace compiles byte for byte.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);
