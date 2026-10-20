@@ -325,3 +325,14 @@ GP2, the loader (branch `go-parser-gp2`, from `c8287cf1`):
   an output path twice.
 - **The disk** is at 73%: Go's build cache grew to 32 GB with the tool builds. It trims itself at
   the next builds.
+
+## 2026-10-20: JFS12-JFS17 decided as recommended (the user)
+
+From doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN1":
+- JFS12 (c): javac's sources unpatched; jrt grows the missing JDK API, and the workarounds
+  become j2g and analysis fixes.
+- JFS13 (a): binary names for the tool's modules.
+- JFS14 (b): `jdk/javac/edge.edn`.
+- JFS15 (b): the build tree's exploded platform as a pinned stand-in.
+- JFS16 (b): the j2g fixes with JN2.
+- JFS17 (a): javac's internals rooted for JN4, measured.

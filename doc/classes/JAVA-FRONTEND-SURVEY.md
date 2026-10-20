@@ -1037,3 +1037,19 @@ translated now. Fixes 1, 2 and 4 do not change the shipped program.
   `driver/` (`jn1.Main`, `jn1.Files`), `scripts/closure.py` and `gaps.py`, `closure.edn`,
   `gaps.edn`, `closure-translated.txt`, `patches/`, `bin/arbace-javac`, and the outputs
   compared (`jvm-*.txt` and `go-*.txt`).
+
+## Decided (2026-10-20): JFS12-JFS17
+
+The user decided JFS12-JFS17 as recommended:
+- JFS12 (c): no patches in javac. jrt grows the JDK's API javac uses, and JN1's workarounds become
+  fixes in j2g and arbace.classes (batched with a re-seed). javac's own sources may be patched only
+  for what can be fixed nowhere else.
+- JFS13 (a): binary names (`Jv_...`) for the tool's modules; java.base's and the shipped names
+  unchanged.
+- JFS14 (b): javac's edge in `jdk/javac/edge.edn`, recorded by the javac script.
+- JFS15 (b): the JDK build tree's exploded java.base and java.xml as the platform for JN2 and the
+  start of JN3, pinned by hash, until javac on Arbace compiles them identically.
+- JFS16 (b): JN1's j2g fixes land with JN2, each with a regression form in `bin/diffcheck`'s
+  corpora.
+- JFS17 (a): javac's internal packages rooted in the tool for JN4, measured; (b) if the tool grows
+  by more than about a third.
