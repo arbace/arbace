@@ -97,7 +97,8 @@ The current state of the work. This file is rewritten as things change. For the 
   milestone"), each in its own worktree:
   - GR10 (`goi-gr10`, from `9747f323`): the 2 fails and what else can be fixed, then v1's
     divergences recorded in GOI-SPEC, every non-pass program classed;
-  - the arm64 box check (`goi-box-arm64`).
+  - GC81 (`box-reflect-overlay`, from `8aa86623`): `bin/box-rebuild` without GR9a-c's reflect
+    overlay, so the Mac's bundle does not build; the fix and the rebuild byte for byte.
 - Done under the goal, each merged, its proposals built as recommended and recorded for the user:
   - GR9d (2026-10-19, `e4621b5d`): REPL vars for generic functions (GoGenericFn, `go/inst`, the
     instance cache); GC72-GC74, GC135-GC144.
@@ -110,6 +111,10 @@ The current state of the work. This file is rewritten as things change. For the 
     GC65-GC71, GC125-GC134.
   - GR8b (2026-10-20, `9747f323`): reflect's methods served by goi (GC60 (a), GC61 (a)); the 13
     programs pass, `text/template` and `html/template` execute; GC145-GC151.
+  - The arm64 box check (2026-10-20, `8aa86623`): `bin/goi check --box --arch arm64` in the
+    emulated VM, 285 of 287 (every second program of box.txt, GC75), 2 known; the GOMAXPROCS cap
+    (GC77); the Mac's bundle runs `./mac.sh goi` (the user, on the Mac, once GC81 is built);
+    GC75-GC80, GC82.
   - `bin/goi check`: 1,467 of 1,837 pass, 67 known, 2 fail (GR8a's bounds messages, GC95);
     essential 739; `--box` amd64 583/584.
   - The seed `4b2646e6…` (`bbe368f9`), verified (stage 0 `6375d2db…`).

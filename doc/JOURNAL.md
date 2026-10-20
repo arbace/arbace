@@ -2045,3 +2045,33 @@ v1's divergences by design are listed there. Staging (G16) and speed (F10) come 
   - a section "v1's divergences" in GOI-SPEC classing every program that does not pass.
 - **The arm64 box agent** recorded `bin/goi check --box` in the emulated VM: 285 of 287 pass, 2
   known. It is still finishing.
+
+## 2026-10-20: goi's check in the arm64 box merged; GC81 found
+
+- **What:** branch `goi-box-arm64` (from `77370a70`, main `9cdbd4d1` merged in) merged as
+  `8aa86623`. It is step 4 of the plan.
+  - **The check:** `bin/goi check --box --arch arm64` and `--bundle DIR`, and `bin/box-arm64-vm
+    goi` (Makefile `arm64-vm-goi`), in the emulated aarch64 VM with KVM/arm64. It uses 8 boxes of
+    2 vCPUs and the VM's ssh sessions share one connection: dropbear drops a sixth unauthenticated
+    one.
+  - **Results:** every second program of `test/goi/box.txt` (GC75: all of them would take about
+    4 hours) gives 285 of 287 pass, in 84 minutes. The 2 known are `typeparam/issue50109.go`, as
+    on amd64, and `fixedbugs/issue15277.go`, which is amd64-only by its build constraint. The
+    reference is `test/goi/check-box-arm64.edn`.
+  - **GOMAXPROCS (GC77):** TamaGo ties an M to each P. The board runs each M on its own vCPU, so
+    `GOMAXPROCS` above the vCPUs ended the guest (`task: no idle vCPU`). `procresize` now caps the
+    Ps at `arbaceMaxProcs` (one line marked Arbace in `overlay/go/runtime/proc.ae`), set by jrt's
+    box host from the board's count.
+  - **The Mac's bundle** carries a goi step (`./mac.sh goi`, GC76).
+  - **GC82:** a smoke check's timing under emulation is scaled by `--slow`.
+- **The merge:** doc/go/GOI-SPEC.md was the only conflict, two appended sections; main's text
+  first, then "As built: the arm64 box check". The essential `bin/gate` passed on main
+  (16m57s).
+- **Decisions:** GC75-GC80 and GC82, each built as recommended, as recommended, under the user's
+  goal of 2026-10-19. GC80 keeps the arm64 goi check out of `bin/gate --full`, run by hand like
+  `bin/box-arm64-vm check`.
+- **GC81, found, not built:** `bin/box-rebuild`'s host step does not print or lay in GR9a-c's
+  reflect overlay, so the bundle does not build since GR9a-c. Started on its own branch,
+  `box-reflect-overlay`, from `8aa86623`, as the agent recommended.
+- **Left for the user:** the check on the Mac, `./mac.sh goi` (about 1.5 h with `./mac.sh all`),
+  once the bundle builds.
