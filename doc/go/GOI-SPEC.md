@@ -4270,3 +4270,203 @@ launcher (565 of 566, one known, before the merge); `bin/jrt overlay --check` (p
 conversion plus the patch); `make check-makefile`.
 
 **Remaining**: the Mac's run (the steps above) and its reference; GC35 (b) and GR7a's others.
+
+## As built: GR10 (2026-10-20)
+
+GR10, goi's last step before the milestone `arbace-interprets-go-v1` (doc/AGENDA.md, "The plan to
+the milestone", step 5), is built on branch `goi-gr10` (from main `9747f323`: GR1 to GR9, GR8b; main `8aa86623`, the arm64 box check, merged in before the final checks).
+Its criterion: in `bin/goi check` (run programs, directory tests and errorcheck programs) every
+program passes or is a recorded divergence with its reason. Where building it found otherwise than
+the earlier sections, the text below is the record; proposals for the user are GC155-GC162, each
+built as recommended.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| bounds errors | `go/arbace/goi/expr.ae` (`boundsErr`, `boundsErrType`, `boundsFail`, `checkIndex`, `checkSlice`), `arbace/go/build.ae` (`uidx?`, `uidx-mask`), `test/goi/gen_nodes.ae`, `go/arbace/goi/registry.ae` | a bounds panic is a value of gc's own `runtime.boundsError` (its type word taken at initialization from a real panic, index 1 of an empty slice; the fields written in its layout, go1.27.1's `runtime/error.go`: `x int64`, `y int`, `signed bool`, `code`), so that its message, its `%T` and `runtime.Error` are gc's (GC155); `checkSlice` follows gc's order (`cmd/compile/internal/ssagen`, `state.slice`): max against the capacity, hi against max, lo against hi, or without max hi against the capacity and lo against hi; an array's and a string's bounds by their length (`BoundsSliceAlen`, `BoundsSlice3Alen`), a slice's by its capacity; the comparisons unsigned, each bound printed by its own type's signedness. `SliceElemP`, `ArrayElemP`, `IndexS` take the index's unsignedness, `SliceSlice`, `SliceArray`, `SliceString` a mask of their bounds' (bit 0 lo, 1 hi, 2 max); a signed index's string and slice paths unchanged (Go's own checks), an unsigned one checked by goi. If the template's layout is not the expected one, `boundsFail` panics with goi's `RuntimeError` and gc's message, formatted as `boundsError.Error` formats it |
+| a non-canonical import path | `arbace/go/check/decl.ae` (`clean-path`, `local-path?`, `declare-imports!`) | gc's noder's (`cmd/compile/internal/noder/import.go`, `openPackage`): a non-local import path that `path.Clean` changes is `could not import P (non-canonical import path "P" (should be "Q"))`, the package not resolved (GC156) |
+| gc's limit of errors | `arbace/go/run.ae` (`errorcheck`, `--max-errors N`), `bin/goi` (`check_err`) | without `-e` gc ends at its tenth error (`base.ErrorfAt`): the action flag `-e=0` gives `--max-errors 10`, goi prints the first ten (after a repeated error is dropped) and `FILE:LINE: too many errors` at the tenth's position (GC158) |
+| the check's importcfg | `bin/goi` (`check`) | remade when Go's version changed or an export file it names is gone: Go's build cache is trimmed after 90 minutes unused (`bin/lib/gocache.bash`), and a stale importcfg made gc's errorcheck references fail with `could not import ... no such file or directory` (GC160) |
+| v1's divergences | `test/goi/divergences.edn`, `test/goi/divergences.ae`, `bin/goi divergences [--table \| --programs]`, `make goi-divergences` | the classes of the section "v1's divergences" below as data (an id, a title, by design or deferred, why, where decided, regexps over `RESULT REASON`); the verb classifies every program not passing in `test/goi/check-linux-amd64.edn` and `test/goi/check-box-amd64.edn` (the first class matching), and fails on a program that fails or errs, one no class takes, or a program of `test/goi/essential.txt` not passing; `bin/goi check` runs it after a whole native check that passes (GC159) |
+| tests | `test/goi/run/go/t/bounds.ae` (`.out` gc's) | 22 lines of gc's output: signed and unsigned (`uint64`, `uint8`) indices of a slice, an array, a pointer to an array and a string, two- and three-index slicing of each, `%T` of the recovered value (`runtime.boundsError`); before the fix goi printed `goi.RuntimeError` for the type when the template check refused gc's value (below) |
+
+**Part 1: the five programs and the known errorcheck programs.**
+
+- `fixedbugs/issue30116.go`, `issue30116u.go` (GC95's two failures): pass. goi said `with capacity
+  3` where gc says `with length 3` for an array's bounds, and `[-1]` where gc says
+  `[18446744073709551615] with length 3` for unsigned indices and bounds.
+- `fixedbugs/issue11362.go` (`import _ "unicode//utf8"`, unsupported "no forms"): passes (GC156).
+- `fixedbugs/issue20298.go` (`-e=0`, unsupported "a flag of gc's"): passes (GC158).
+- **`byte`, `rune` and aliases in the checker's types** (the six: `alias.go`, `alias2.go`,
+  `convert1.go`, `copy1.go`, `fixedbugs/issue8183.go`, `issue75022.go`): not a moderate change,
+  so recorded as a divergence (GC157). The checker's types are values compared by `=` (a basic
+  type is a keyword, `[]byte` is `[:slice :uint8]`, an alias is the type it denotes), in the
+  checker (about 530 uses of `=` in `arbace/go/check/`, most of them on types) and in the builder
+  (186), and as keys of its maps (method sets, instances, descriptors). types2 keeps `byte` and `rune` as
+  basic types of their own names identical by kind, and an alias as an `Alias` node every
+  operation unaliases. Either in goi means a type identity function through every one of those
+  sites, and an error at any one changes what goi runs, not only its messages; metadata on the
+  vectors would name `[]byte` but not a bare `byte` (2 of the 6 at most). The other 11 known
+  errorcheck programs need spellings, columns or lines mode `:lines` does not keep, or the forms of
+  an invalid program say another program (GC49): each was run again and fails only for its reason.
+- **The other entries** (item 5 of the task): none is a bug of goi left. `go:embed`'s two
+  errorcheck programs (`embedfunc.go`, `embedvers.go`) expect gc's noder's directive errors
+  (`go:embed cannot apply to var inside func`, `go:embed requires go1.16 or later`) and import
+  `embed`, which goi refuses (GR8a, GC101); GS14 decided `go:embed` for after GR5 (a), so they
+  are deferred with it, not fixed here (GC161).
+
+**The check (§11).** `bin/goi check --record --jobs 8`, from a fresh run, against main's reference
+(`9747f323`):
+
+| result | main (GR8b) | GR10 |
+|---|---:|---:|
+| pass | 1,467 | 1,471 |
+| fail | 2 | 0 |
+| known | 67 | 67 |
+| unsupported | 283 | 281 |
+| skipped | 18 | 18 |
+
+The four: `issue30116`, `issue30116u` (fail → pass), `issue11362`, `issue20298` (unsupported →
+pass); no other line of the reference changes. 107 s with 8 jobs (load about 9). The essential
+subset gains `fixedbugs/issue11362.go` by GC28's rule (the first of the four, all of `fixedbugs/`):
+740 programs, 740 pass (42 s with 8 jobs). The box's (`test/goi/box.txt`) gains none (the
+first is an errorcheck program, which the box does not run): `bin/goi check --box` (amd64, this
+branch's guest) 584 programs, 583 pass, 1 known (`typeparam/issue50109.go`), no regression,
+284 s with 8 boxes. `bin/goi divergences`: every program not passing in a class, none failing
+(below).
+
+**Found while building.**
+
+- **gc's own bounds error of a constant index is unsigned.** `_ = z[i]` with `i := 1` panics with
+  `boundsError{x: 1, y: 0, signed: false, code: 0}`: gc proves the index non-negative and uses
+  the unsigned panic. The template check first required `signed`; it now checks `x`, `y` and
+  `code` only (the bounds test caught it: every message gc's, the type goi's).
+- **Signed and unsigned only differ for an index beyond 2^63.** goi's frames hold every integer as
+  an `int64`, so an unsigned 64-bit index of 2^63 or more is negative there: out of range either
+  way (gc's checks compare unsigned), only its spelling differs. The fast paths keep Go's own
+  check; the flags reach the panic only.
+- **A stale importcfg.** The check's `.tmp/goi-check/importcfg` (`go list -export std`) names
+  export files in Go's build cache, which the builds trim; the references cached before were
+  right, a new one (`issue20298`'s) was not: GC160.
+
+**Measurements.**
+
+- **Size.** The executable (amd64, stripped) is 143,700,128 bytes against main's 143,626,400
+  (`9747f323`, built in a detached worktree of this branch's `.tmp/`): **+73,728 (0.05%)**: the
+  bounds code (its message tables, `strings` and `fmt` in its fallback), six factories' new
+  arguments; arm64 137,625,760 against 137,625,760 (+0, within the link's 64 KB rounding).
+- **Speed** (GR3's criterion; `bin/goi run test/goi/run go.t.fib bench`, three runs alternating
+  main's executable and this branch's, load 9-12):
+
+  | | main (`9747f323`) | GR10 |
+  |---|---|---|
+  | fib 22 | 2.58-2.59 ms | 2.54-2.63 ms |
+  | sumSq 1e6 | 20.43-21.34 ms | 19.31-21.07 ms |
+  | sieve 1e6 | 67.65-70.54 ms | 67.36-70.38 ms |
+  | `sort.Sort` of 10^5 | 172.47-176.30 ms | 176.52-183.97 ms |
+  | 10^5 `String` calls by `fmt` | 88.69-90.19 ms | 87.40-92.32 ms |
+
+  Within noise: the indexing nodes' fast paths are unchanged.
+
+**Checks** (this branch after main `8aa86623` was merged in, amd64): the essential `bin/gate` passed
+(14 m 41 s: the smoke test, Clojure's suite as recorded, the oracle 22,658 of 22,711 against its 53
+known, the differential check 12,731 of 12,754 against its known, goi's essential check 740 of
+740, the generated variants); `bin/arbace-go --fixpoint`: G1 = G2 = G3 (143,700,128 bytes);
+`bin/goi check --record --jobs 8` as recorded (above; 114 s, the reference unchanged by the merge),
+`--essential` 740 of 740, `bin/goi divergences` (every program classified, none failing);
+`bin/goi check --box` (amd64) 583 of 584, the one known; `bin/goi test` and `--gc` (the checker's
+22 assertions, its invalid forms with gc's messages, 20 programs with `bounds`, 110 REPL checks,
+std's 183, §1.4's session); `bin/goi annotations` (the five corpora as recorded: zero errors,
+every declaration checked); `make check-makefile`. The arm64 box's reference
+(`test/goi/check-box-arm64.edn`, main's) is classified, not run here. Not run: `bin/gate --full`.
+
+**Proposals for the user** (GC155-GC162; each built as recommended):
+
+- **GC155 goi's bounds errors.** (a) as built, values of gc's `runtime.boundsError` with goi's
+  fields (its type word from a real panic, its layout checked at initialization, goi's
+  `RuntimeError` with gc's message when it is not the expected one), gc's order of checks, an
+  array's and a string's bounds by their length, unsigned bounds printed unsigned; (b) goi's
+  `RuntimeError` always, with gc's messages (`%T` `goi.RuntimeError`, `errors.As` to
+  `runtime.Error` still works); (c) gc's own checks over slices of empty structs, as before, per
+  signedness combination (2 index and 8 slice variants, and an array's three-index bounds, by
+  length, have no slice to reproduce them). *Recommended: (a)*: gc's values, as goi's other
+  runtime errors are (§10.3).
+- **GC156 A non-canonical import path.** (a) as built, gc's noder's error in the checker,
+  `could not import P (non-canonical import path ...)`, the package unresolved; (b) unsupported,
+  as before. *Recommended: (a)*: an import goi cannot load is gc's error when gc has one (GC46
+  (b) for this check).
+- **GC157 `byte`, `rune` and aliases named in messages.** (a) as built, a divergence (the six
+  errorcheck programs known, GC49's class, deferred); (b) types of their own in the checker,
+  identical through an identity function at every comparison of types in the checker and the
+  builder (about 700 sites, and the maps keyed by types); (c) a spelling kept as metadata on
+  composite types (`[]byte`): 2 of the 6 at most, and fragile through substitution.
+  *Recommended: (a)*, (b) as a step of its own after the milestone, if messages matter at the
+  REPL.
+- **GC158 gc's limit of ten errors.** (a) as built, `-e=0` (and `-e=false`) gives `--max-errors
+  10`: the first ten in goi's order (by position) and `too many errors` at the tenth's line;
+  (b) unsupported, as before. *Recommended: (a)*. goi's order is by position where gc's is
+  types2's report order (an unused import reported last): the same for `issue20298`, the only
+  program with the flag.
+- **GC159 The divergences as data, checked.** (a) as built, `test/goi/divergences.edn` and `bin/goi
+  divergences`, run after a whole `bin/goi check` (not in the essential gate: its subset passes
+  whole, and the verb reads only the references); (b) a step of `bin/gate`; (c) the classes only
+  in this text. *Recommended: (a)*.
+- **GC160 The check's importcfg.** (a) as built, remade when an export file it names is gone;
+  (b) the references' cache keyed by the importcfg's content too (every reference recomputed when
+  std's export data moves). *Recommended: (a)*: gc's errors do not depend on where the export
+  data is.
+- **GC161 `go:embed`'s errorcheck programs.** GS14 (a) decided `go:embed` after GR5; GR8a refuses
+  `embed` at the import (GC101). (a) as built, deferred with GS14: `embedfunc.go`, `embedvers.go`
+  unsupported; (b) `embed` importable in errorcheck mode and gc's noder's six `go:embed` checks
+  in the checker (GC46 (b)), the files themselves still not read. *Recommended: (a)*: the
+  milestone's record says `go:embed` is not in v1, and (b) checks a directive v1 cannot run.
+- **GC162 The essential subset's rule for GR10.** (a) as built, GC28's (the first of four of
+  `fixedbugs/`: `issue11362.go`), the bounds errors covered by `bin/goi test`'s `bounds` program;
+  (b) `issue30116.go` and `issue30116u.go` too (about 1 s each), so the essential gate and the box
+  run the back end's bounds paths. *Recommended: (a)*: the rule as every step applied it.
+
+## v1's divergences (2026-10-20)
+
+The record of the milestone `arbace-interprets-go-v1`: every program of `bin/goi check` that does
+not pass, in the linux/amd64 reference (`test/goi/check-linux-amd64.edn`: 1,837 programs, the
+1,178 run programs and directory tests and the 659 errorcheck programs of the corpus
+`linux-errtest`), the essential subset (`test/goi/essential.txt`, 740: all pass) and the boxes'
+(`test/goi/check-box-amd64.edn`, 584 programs; `test/goi/check-box-arm64.edn`, 287, every second
+of `test/goi/box.txt`, GC75), by its class. The classes are data in
+`test/goi/divergences.edn`; `bin/goi divergences` checks that each program falls into one (the
+first whose pattern matches its result and reason) and that none fails or errs; `--programs` lists
+the programs of each class. **No program fails or errs; 366 do not pass in linux/amd64 (358 by design,
+8 deferred), 1 in the amd64 box and 2 in the arm64 box (by design), none in the essential
+subset.**
+
+| class | count (linux/amd64) | programs | why | where decided |
+|---|---:|---|---|---|
+| assembly, cgo, go:linkname | 9 run (unsupported) | `asmhdr`, `linknameasm`, `noinit`, `retjmp`, `fixedbugs/issue15609`, `issue37513`, `issue42401`, `issue74648`, `issue9608` (a bodiless function); cgo's three programs (`issue34968`, `issue36705`, `issue47227`) are not in the corpus (`//go:build cgo`, cgo off) | goi interprets Go forms: assembly and bodiless functions have none, `go:linkname` pulls gc's symbols | §1.1 |
+| package tests | 0 | none: the test driver runs no `_test.go` file (two directory tests hold one, `fixedbugs/issue11053`, `typeparam/issue48185a`: both pass without it) | goi loads a package's files, not its tests | §1.1, S45 |
+| go:embed (deferred) | 2 errorcheck (unsupported) | `embedfunc`, `embedvers` | `embed` is refused at the import (GR8a's out-of-scope list); GS14 (a) decided `go:embed` after GR5, not built for v1 | §1.1, GS14, GC101, GC161 |
+| runtime.Caller, Callers, FuncForPC and traces naming goi's frames | 21 run (known) | `devirtualization_nil_panics`, `inline_literal`, `fixedbugs/bug347`, `bug348`, `issue11656`, `issue14646`, `issue17381`, `issue18149`, `issue21879`, `issue22083`, `issue22662`, `issue27201`, `issue29504`, `issue29919`, `issue33724`, `issue4562`, `issue58300`, `issue58300b`, `issue5856`, `issue7690`, `issue79762` | gc's program counters and frames are its compiled code's; goi's are its nodes' (traces name interpreted functions and lines, GR5, not gc's frames) | §1.1, §10.6 |
+| finalizer timing, escape analysis, memory statistics, heap profiles | 17 run (known) | `closure`, `finprofiled`, `gc2`, `heapsampling`, `stackobj`, `stackobj3`, `typeparam/chans`, `chansimp`, `fixedbugs/issue15281`, `issue24491a`, `issue24491b`, `issue27518b`, `issue32477`, `issue4618`, `issue46725`, `issue54343`, `issue57823` | the collector sees the interpreter's frames, closures and allocations, not gc's escape analysis and stack allocation | §1.1 |
+| unsafe layout and memory order gc decides | 2 run (known) | `nilptr` (addresses of huge arrays in the data segment), `fixedbugs/issue8606b` (gc's generated comparison order over memory the program protects) | gc's code generation and layout | §1.1, §5.4 |
+| speed: beyond the check's 10 s | 6 run (known) | `abi/fibish`, `abi/fibish_closure`, `abi/uglyfib`, `divmod`, `fixedbugs/issue78081`, `issue79186` | an interpreter: hundreds of millions of calls | §11.1, GR3's criterion |
+| S23's call depth | 1 run (known) | `peano` (362,880 calls deep) | goi's limit of 100,000 interpreted calls, gc's text | S23, GC42 |
+| runs of the go command and the toolchain's root | 3 run (known) | `linkobj`, `fixedbugs/issue21317` (the go command; gc's run fails too, the log's times differ), `winbatch` (`runtime.GOROOT`) | goi's program is not a toolchain's | §1.1, GR4 |
+| syntax errors and invalid programs repr/go cannot convert | 134 errorcheck (unsupported) | 70 go/parser rejects, 64 the converter cannot convert (a selection without an object, a conversion's arity, `x.(type)` outside a type switch, a constant without a value or beyond the reader's range); `bin/goi divergences --programs` | goi interprets Go forms, and these programs have none | GC47, G1 |
+| gc's optimizer diagnostics and flags | 96 errorcheck (unsupported), 15 run (skipped) | errorcheck: `-m` 55, `-m=2` 4, `-l` 9, `-live` 5, `-N` 3, `-d=...` 20 (`ssa/...`, `checkptr`, `nil`, `wb`, `typeassert`, `tailcall`, `append,slice`, `escapedebug`); run actions with `-gcflags` or `-ldflags` (`-d=checkptr` 6, `-l=4` 3, `-N -l`, `-d=softfloat`, `-d=ssa/check/on`, `-d=maymorestack`, `-d=converthash`, `-strictdups`) | gc's phases after type checking: escape analysis, inlining, liveness, the SSA back end | §1.1, GC46 |
+| -race | 5 errorcheck (unsupported) | `fixedbugs/issue13265`, `issue15091`, `issue16008`, `issue17449`, `issue24651a` | gc's race instrumentation | §1.1, GC46 |
+| gc compiling std or the runtime | 7 errorcheck (unsupported) | `-+`: `nowritebarrier`, `internal/runtime/sys/inlinegcpc`, `fixedbugs/issue14999`; `-std`: `uintptrkeepalive`, `fixedbugs/issue18331`, `issue79258`; `-complete`: `fixedbugs/issue48097` | gc's modes for std and the runtime | §1.1, GC46 |
+| errors of gc's phases after type checking | 21 errorcheck (unsupported) | `directive`, `directive2`, `fixedbugs/bug385_64`, `issue18459`, `issue18882`, `issue20027`, `issue20529`, `issue20780`, `issue22200`, `issue22200b`, `issue25507`, `issue34329`, `issue42058a`, `issue42058b`, `issue46525`, `issue48230`, `issue49767`, `issue49814`, `issue51531`, `issue52697`, `issue78355` | go/types reports none of the expected errors: they are gc's noder's or the back end's (`stack frame too large`, `misplaced compiler directive`) | GC46 |
+| line directives | 7 errorcheck (unsupported) | `linkname3`, `fixedbugs/bug305`, `issue15611`, `issue18393`, `issue24339`, `issue32133`, `issue67141` | gc's positions follow `//line`; goi's errors are at the forms' lines | GC46 |
+| message spellings, columns and lines the forms do not keep | 11 errorcheck (known) | literals' spellings: `fixedbugs/issue19947`, `issue56220`, `issue31747`; parentheses: `issue11614`; a column: `issue68292`; a closing brace's or an else's line: `issue23732`, `goto`; a type spanning lines in a tag: `funcdup2`; the forms of an invalid program saying another: `return` (a final expression statement as its return), `ddd1` (a conversion's `...`), `fixedbugs/bug217` (two receivers) | mode `:lines` keeps values, statements' lines and no columns | GC49, SPEC.md §6.4, §10.1 |
+| `byte`, `rune` and aliases named by the types they denote (deferred) | 6 errorcheck (known) | `alias`, `alias2`, `convert1`, `copy1`, `fixedbugs/issue8183`, `issue75022` | goi's checker identifies them with the types they denote; types2 keeps their names for messages | GC49, GC157 |
+| gc's own errors no longer pass the test | 3 errorcheck (skipped) | `shift1`, `fixedbugs/issue20233`, `issue20245` | go1.27.1's gc fails the programs' own `// ERROR` comments: no reference | GR7b |
+| a program of another architecture | 0 (arm64 box: 1 known) | `fixedbugs/issue15277` in the arm64 box (`check-box-known-arm64.edn`) | gc's reference is linux/amd64's; the program's build constraint is amd64, so it has no Go files for tamago/arm64 | the arm64 box check |
+| the box's console | 0 (each box: 1 known) | `typeparam/issue50109` in the amd64 and the arm64 box | TamaGo's console is one stream, and the board's line buffer ends the last line with a newline | GC35, GR7a |
+
+The totals by result: 281 unsupported (9 + 2 + 134 + 96 + 5 + 7 + 21 + 7), 67 known (21 + 17 + 2 +
+6 + 1 + 3 + 11 + 6), 18 skipped (15 + 3). Of the agenda's by-design list, every class has its
+programs above; `go:embed` is deferred rather than by design, by GS14's decision. The classes
+the reference adds to the agenda's list were each checked against their programs: the flags'
+classes by the action lines `check_err` reads, the phases' class by go/types' empty error lists
+in godump's dumps, the syntax and conversion class by the dumps' `:fail` rows and the converter's
+log, the spellings' class program by program (GR7b, GR7c, and again here).

@@ -4,7 +4,7 @@
 (in-ns 'go.arbace.goi)
 
 (go/file "expr.go"
-  :imports [[fmt "fmt"] [bits "math/bits"] [reflect "reflect"] [unsafe "unsafe"]])
+  :imports [[fmt "fmt"] [bits "math/bits"] [reflect "reflect"] [strings "strings"] [unsafe "unsafe"]])
 
 (go/func ConstI ^I [^int64 v] (fn ^int64 [^{:tag (* Frame)} fr] v))
 (go/func ConstF ^F [^float64 v] (fn ^float64 [^{:tag (* Frame)} fr] v))
@@ -41,24 +41,94 @@
 
 (go/var ^{:tag (slice (struct))} zeros (make (slice (struct)) 0))
 
-(go/func checkIndex "checkIndex panics as gc for index i of a length n (a real bounds error).\n" [^int64 i ^int n]
-  (when (or (< i 0) (>= i (conv int64 n)))
-    (let [z (make (slice (struct)) n)]
-      (set! _ (aget z i)))))
+(go/type boundsErr
+  "boundsErr is the layout of gc's runtime.boundsError (go1.27.1's runtime/error.go: x, y, signed,
+code): goi's bounds panics are values of gc's own type with goi's fields (GC155), so that their
+messages, their type and runtime.Error are gc's.\n"
+  (struct ^int64 x ^int y ^bool signed ^uint8 code))
+
+(go/func boundsErrType
+  "boundsErrType is the type word of gc's runtime.boundsError, from a real bounds panic (index 1
+of an empty slice: x 1, y 0, code 0; gc may mark the index unsigned), or nil when its value is
+not boundsErr's layout (then goi's bounds panics are RuntimeErrors with gc's messages).\n"
+  ^unsafe/Pointer [] :results [^unsafe/Pointer t]
+  (defer ((fn []
+            (let [p (recover)
+                  w (conv (* (array 2 unsafe/Pointer)) (conv unsafe/Pointer (addr p)))
+                  b (conv (* boundsErr) (aget w 1))]
+              (when (and (!= (aget w 1) nil) (== (.-x b) 1) (== (.-y b) 0) (== (.-code b) 0))
+                (set! t (aget w 0)))))))
+  (let [z (make (slice (struct)) 0)
+        i 1]
+    (set! _ (aget z i)))
+  nil)
+
+(go/var ^{:tag unsafe/Pointer} boundsType (boundsErrType))
+
+(go/var ^{:tag (slice string)} boundsFmts
+  (lit (slice string) "index out of range [%x] with length %y" "slice bounds out of range [:%x] with length %y"
+       "slice bounds out of range [:%x] with capacity %y" "slice bounds out of range [%x:%y]"
+       "slice bounds out of range [::%x] with length %y" "slice bounds out of range [::%x] with capacity %y"
+       "slice bounds out of range [:%x:%y]" "slice bounds out of range [%x:%y:]"))
+
+(go/var ^{:tag (slice string)} boundsNegFmts
+  (lit (slice string) "index out of range [%x]" "slice bounds out of range [:%x]" "slice bounds out of range [:%x]"
+       "slice bounds out of range [%x:]" "slice bounds out of range [::%x]" "slice bounds out of range [::%x]"
+       "slice bounds out of range [:%x:]" "slice bounds out of range [%x::]"))
+
+(go/func boundsFail
+  "boundsFail panics with gc's bounds error of code (abi.BoundsErrorCode: 0 an index, 1-3 a slice's
+bounds, 4-7 a full slice's), bound x (signed or not: its type's), and y.\n"
+  [^uint8 code ^int64 x ^bool signed ^int y]
+  (when (!= boundsType nil)
+    (let [e (addr (lit boundsErr :x x :y y :signed signed :code code))
+          r (conv any nil)
+          w (conv (* (array 2 unsafe/Pointer)) (conv unsafe/Pointer (addr r)))]
+      (aset w 0 boundsType)
+      (aset w 1 (conv unsafe/Pointer e))
+      (panic r)))
+  (let [f (aget boundsFmts code)
+        xs (fmt/Sprint (conv uint64 x))]
+    (when signed
+      (set! xs (fmt/Sprint x))
+      (when (< x 0)
+        (set! f (aget boundsNegFmts code))))
+    (panic (lit RuntimeError (strings/ReplaceAll (strings/ReplaceAll f "%x" xs) "%y" (fmt/Sprint y))))))
+
+(go/func checkIndex "checkIndex panics as gc for index i of a length n (a real bounds error; signed: i's type).\n" [^int64 i ^int n ^bool signed]
+  (when (>= (conv uint64 i) (conv uint64 n))
+    (boundsFail 0 i signed n)))
 
 (go/func checkSlice
   "checkSlice panics as gc for slice bounds lo, hi, max (each present or not: hasLo, hasHi,
-hasMax) of a slice of length n and capacity c (a real bounds error, from gc's own checks of a
-slice of empty structs).\n"
-  [^int64 lo ^bool hasLo ^int64 hi ^bool hasHi ^int64 mx ^bool hasMax ^int n ^int c]
-  (let [z (make (slice (struct)) n c)]
-    (cond
-      hasMax (let [l lo]
-               (when (not hasLo) (set! l 0))
-               (set! _ (subslice z l hi mx)))
-      (and hasLo hasHi) (set! _ (subslice z lo hi))
-      hasLo (set! _ (subslice z lo))
-      hasHi (set! _ (subslice z _ hi)))))
+hasMax) of a value of length n and capacity c, in gc's order (cmd/compile's ssagen, state.slice):
+max against the capacity, hi against max, lo against hi; without max, hi against the capacity
+and lo against hi (or the length). alen: a string's or an array's bounds (gc's messages say its
+length), else a slice's (its capacity). Bits 0, 1, 2 of uns are set when lo, hi, max are of an
+unsigned type (gc prints them unsigned).\n"
+  [^int64 lo ^bool hasLo ^int64 hi ^bool hasHi ^int64 mx ^bool hasMax ^int n ^int c ^bool alen ^int uns]
+  (let [j (conv uint64 n)
+        k (conv uint64 c)]
+    (if hasMax
+      (let [ac (conv uint8 5)]
+        (when alen (set! ac 4))
+        (when (> (conv uint64 mx) k)
+          (boundsFail ac mx (== (bit-and uns 4) 0) c))
+        (set! k (conv uint64 mx))
+        (when (> (conv uint64 hi) k)
+          (boundsFail 6 hi (== (bit-and uns 2) 0) (conv int k)))
+        (set! j (conv uint64 hi))
+        (when (> (conv uint64 lo) j)
+          (boundsFail 7 lo (== (bit-and uns 1) 0) (conv int j))))
+      (do
+        (when hasHi
+          (let [ac (conv uint8 2)]
+            (when alen (set! ac 1))
+            (when (> (conv uint64 hi) k)
+              (boundsFail ac hi (== (bit-and uns 2) 0) c)))
+          (set! j (conv uint64 hi)))
+        (when (and hasLo (> (conv uint64 lo) j))
+          (boundsFail 3 lo (== (bit-and uns 1) 0) (conv int j)))))))
 
 (go/type RuntimeError "RuntimeError is a runtime error goi raises with gc's message (a runtime.Error).\n"
   (struct ^string msg))
@@ -92,26 +162,32 @@ slice of empty structs).\n"
   (let [m (.mem t)]
     (fn ^any [^{:tag (* Frame)} fr] (.Interface (reflect/New m)))))
 
-(go/func SliceElemP "SliceElemP is element i of slice x (element type et), bounds checked.\n" ^P [^R x ^I i ^{:tag (* Type)} et]
+(go/func SliceElemP "SliceElemP is element i of slice x (element type et), bounds checked (u: i's type unsigned).\n" ^P [^R x ^I i ^{:tag (* Type)} et ^bool u]
   (let [size (.Size (.mem et))]
     (fn ^unsafe/Pointer [^{:tag (* Frame)} fr]
       (let [h (conv (* sliceHeader) (efaceData (x fr)))
             j (i fr)]
         (when (or (< j 0) (>= j (conv int64 (.-Len h))))
-          (checkIndex j (.-Len h)))
+          (checkIndex j (.-Len h) (not u)))
         (unsafe/Add (.-Data h) (* (conv uintptr j) size))))))
 
-(go/func ArrayElemP "ArrayElemP is element i of the array (type at) at place base.\n" ^P [^P base ^I i ^{:tag (* Type)} at]
+(go/func ArrayElemP "ArrayElemP is element i of the array (type at) at place base (u: i's type unsigned).\n" ^P [^P base ^I i ^{:tag (* Type)} at ^bool u]
   (let [size (.Size (.mem (.elem at)))
         n (.-Len at)]
     (fn ^unsafe/Pointer [^{:tag (* Frame)} fr]
       (let [b (base fr)
             j (i fr)]
         (when (or (< j 0) (>= j (conv int64 n)))
-          (checkIndex j n))
+          (checkIndex j n (not u)))
         (unsafe/Add b (* (conv uintptr j) size))))))
 
-(go/func IndexS "IndexS is string s's byte i.\n" ^I [^S s ^I i]
+(go/func IndexS "IndexS is string s's byte i (u: i's type unsigned).\n" ^I [^S s ^I i ^bool u]
+  (when u
+    (return (fn ^int64 [^{:tag (* Frame)} fr]
+              (let [x (s fr)
+                    j (i fr)]
+                (checkIndex j (len x) false)
+                (conv int64 (aget x j))))))
   (fn ^int64 [^{:tag (* Frame)} fr]
     (let [x (s fr)]
       (conv int64 (aget x (i fr))))))
@@ -349,7 +425,7 @@ offs, each of type ts.\n"
           (f fr (unsafe/Add p (aget offs i))))
         p))))
 
-(go/func SliceSlice "SliceSlice is x[lo:hi:max] of slice x (absent bounds nil).\n" ^R [^R x ^I lo ^I hi ^I mx ^{:tag (* Type)} st]
+(go/func SliceSlice "SliceSlice is x[lo:hi:max] of slice x (absent bounds nil; uns: checkSlice's).\n" ^R [^R x ^I lo ^I hi ^I mx ^{:tag (* Type)} st ^int uns]
   (fn ^any [^{:tag (* Frame)} fr]
       (let [v (x fr)
             l (conv int64 0) h (conv int64 -1) k (conv int64 -1)]
@@ -357,15 +433,15 @@ offs, each of type ts.\n"
         (when (!= hi nil) (set! h (hi fr)))
         (when (!= mx nil) (set! k (mx fr)))
         (let [hd (sliceOf v)]
-          (checkSlice l (!= lo nil) h (!= hi nil) k (!= mx nil) (.-Len hd) (.-Cap hd))
+          (checkSlice l (!= lo nil) h (!= hi nil) k (!= mx nil) (.-Len hd) (.-Cap hd) false uns)
           (let [rv (reflect/ValueOf v)]
             (when (< h 0) (set! h (conv int64 (.-Len hd))))
             (when (>= k 0)
               (return (.Interface (.Slice3 rv (conv int l) (conv int h) (conv int k)))))
             (.Interface (.Slice rv (conv int l) (conv int h))))))))
 
-(go/func SliceArray "SliceArray is a[lo:hi:max] of the array (type at) at place p: a slice of its memory.\n"
-  ^R [^P p ^I lo ^I hi ^I mx ^{:tag (* Type)} at]
+(go/func SliceArray "SliceArray is a[lo:hi:max] of the array (type at) at place p: a slice of its memory (uns: checkSlice's).\n"
+  ^R [^P p ^I lo ^I hi ^I mx ^{:tag (* Type)} at ^int uns]
   (let [m (.rt at)
         n (.-Len at)]
     (fn ^any [^{:tag (* Frame)} fr]
@@ -374,14 +450,23 @@ offs, each of type ts.\n"
         (when (!= lo nil) (set! l (lo fr)))
         (when (!= hi nil) (set! h (hi fr)))
         (when (!= mx nil) (set! k (mx fr)))
-        (checkSlice l (!= lo nil) h (!= hi nil) k (!= mx nil) n n)
+        (checkSlice l (!= lo nil) h (!= hi nil) k (!= mx nil) n n true uns)
         (when (< h 0) (set! h (conv int64 n)))
         (let [rv (.Elem (reflect/NewAt m b))]
           (when (>= k 0)
             (return (.Interface (.Slice3 rv (conv int l) (conv int h) (conv int k)))))
           (.Interface (.Slice rv (conv int l) (conv int h))))))))
 
-(go/func SliceString "SliceString is s[lo:hi].\n" ^S [^S s ^I lo ^I hi]
+(go/func SliceString "SliceString is s[lo:hi] (uns: checkSlice's).\n" ^S [^S s ^I lo ^I hi ^int uns]
+  (when (!= uns 0)
+    (return (fn ^string [^{:tag (* Frame)} fr]
+              (let [x (s fr)
+                    l (conv int64 0)
+                    h (conv int64 (len x))]
+                (when (!= lo nil) (set! l (lo fr)))
+                (when (!= hi nil) (set! h (hi fr)))
+                (checkSlice l (!= lo nil) h (!= hi nil) 0 false (len x) (len x) true uns)
+                (subslice x l h)))))
   (fn ^string [^{:tag (* Frame)} fr]
     (let [x (s fr)
           l (conv int64 0)

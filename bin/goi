@@ -122,6 +122,15 @@
 #                                 the timeout's seconds, the status expected, and how to compare
 #                                 (one: the console up to the goroutines' traces; dir: as is);
 #                                 DIR/known.tsv, the known programs and their reasons
+#   bin/goi divergences [--table | --programs]
+#                                 v1's divergences (GR10, GOI-SPEC.md "v1's divergences"): every
+#                                 program not passing in test/goi/check-linux-amd64.edn,
+#                                 check-box-amd64.edn and check-box-arm64.edn in a class of
+#                                 test/goi/divergences.edn (its result and reason matched), none
+#                                 failing or in error, every program of test/goi/essential.txt
+#                                 passing; prints each class's count (--table: the spec's table,
+#                                 --programs: the programs by class; test/goi/divergences.ae).
+#                                 bin/goi check runs it after a whole check that passes
 #
 # Environment: ARBACE_HOST_EXE (the tools' host, bin/lib/host.bash; GOI_EXE runs the table's
 # generator instead), ARBACE_GOROOT (TamaGo's Go tree, for --gc and the linux corpora's
@@ -476,7 +485,7 @@ check_dir() {
 # not report either (godump's :errors empty: they come from gc's phases after type checking) is
 # unsupported. Prints PROGRAM<TAB>RESULT<TAB>REASON.
 check_err() {
-  local p=$1 g=$goroot/test/$1 f act fl tmo=10 want=1 auto="" lang="" goflags=() why="" ns key ref st r types dump reason
+  local p=$1 g=$goroot/test/$1 f act fl tmo=10 want=1 auto="" lang="" maxerr="" goflags=() why="" ns key ref st r types dump reason
   act=$(action_of "$g")
   set -- $act
   [ "$1" = errorcheckwithauto ] && auto=-auto
@@ -488,6 +497,7 @@ check_err() {
       -0) want="" ;;
       -1) want=1 ;;
       -e|-d=panic) goflags+=("$fl") ;;
+      -e=0|-e=false) goflags+=("$fl"); maxerr=10 ;; # gc's limit of 10 errors (GR10)
       -lang=*) lang=${fl#-lang=}; goflags+=("$fl") ;;
       -m|-m=*|-l|-l=*|-live|-wb=*|-N|-smallframes) why=${why:-"$fl: gc's escape analysis, inlining and liveness, which goi does not have"} ;;
       -d=*) why=${why:-"$fl: gc's debug flags (its SSA back end's passes), which goi does not have"} ;;
@@ -535,7 +545,7 @@ check_err() {
   dump=$edumps/$p.edn
   types=0
   [ -f "$dump" ] && types=$("$gocmp" errorcheck -dump-errors "$dump" 2> "$r.types.err" | grep -c . || true)
-  st=0; (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} "$eforms" "$ns" > "$r.out" 2> "$r.err" < /dev/null) || st=$?
+  st=0; (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} ${maxerr:+--max-errors "$maxerr"} "$eforms" "$ns" > "$r.out" 2> "$r.err" < /dev/null) || st=$?
   if [ "$st" = 124 ] && [ "$types" = 0 ] && [ -n "$want" ]; then
     printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none; goi'"'"'s check over %s s)\n' "$p" "$tmo"; return
   fi
@@ -685,7 +695,10 @@ check() {
   gocmp=$cwork/bin/gocmp
   (cd "$root/tools/gocmp" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= CGO_ENABLED=0 \
      "$goroot/bin/go" build -o "$gocmp.new" . && mv -f "$gocmp.new" "$gocmp") || { echo "bin/goi check: cannot build tools/gocmp" >&2; return 1; }
-  if [ ! -s "$cwork/importcfg" ] || { [ ! -f "$cwork/importcfg.version" ] || [ "$(cat "$cwork/importcfg.version")" != "$(cat "$goroot/VERSION")" ]; }; then
+  # remade when Go's version changed or an export file it names is gone (Go's build cache trimmed:
+  # bin/lib/gocache.bash)
+  if [ ! -s "$cwork/importcfg" ] || { [ ! -f "$cwork/importcfg.version" ] || [ "$(cat "$cwork/importcfg.version")" != "$(cat "$goroot/VERSION")" ]; } \
+     || ! sed -n 's/^packagefile [^=]*=//p' "$cwork/importcfg" | while read -r x; do [ -f "$x" ] || exit 1; done; then
     env $(gc_env) "$goroot/bin/go" list -export -f '{{if .Export}}packagefile {{.ImportPath}}={{.Export}}{{end}}' std > "$cwork/importcfg.new" \
       && mv "$cwork/importcfg.new" "$cwork/importcfg" && cat "$goroot/VERSION" > "$cwork/importcfg.version" \
       || { echo "bin/goi check: go list std failed" >&2; return 1; }
@@ -769,6 +782,10 @@ check() {
     return 1
   fi
   echo "   no regression against $(basename "$ref")"
+  # the whole check: its reference's divergences classified (GR10)
+  if [ -z "$only" ] && [ -z "$essential" ] && [ -z "$box" ]; then
+    GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences
+  fi
 }
 
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
@@ -820,6 +837,7 @@ case $cmd in
     [ $# -ge 2 ] || { echo "usage: bin/goi run ROOT NS [ARG...]" >&2; exit 2; }
     exec "$(run_exe)" -m arbace.go.run "$@" ;;
   check) check "$@" ;;
+  divergences) GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences "$@" ;;
   ""|-h|--help|help) usage ;;
   *) echo "bin/goi: unknown command $cmd (bin/goi --help)" >&2; exit 2 ;;
 esac
