@@ -264,10 +264,11 @@ Prior art:
   was done, why, and what alternatives were considered. Name sources precisely, including
   repo, path and commit/tag for anything studied or vendored. Never edit or delete past entries.
   Correct them with a new entry. Write it so the progress could be recreated from it. At each
-  freeze, and after the milestone `arbace-inside-itself-v1`, main's journal started over, by the
-  user's decision: the history up to 2026-10-08 is on `arbace-for-java-26`, from then to
-  2026-10-11 on `arbace-for-golang`, from then to 2026-10-15 at the tag
-  `arbace-inside-itself-v1`, and all of it in git.
+  freeze, and after the milestones `arbace-inside-itself-v1` and `arbace-interprets-go1.27.1-v1`,
+  main's journal started over, by the user's decision: the history up to 2026-10-08 is on
+  `arbace-for-java-26`, from then to 2026-10-11 on `arbace-for-golang`, from then to 2026-10-15 at
+  the tag `arbace-inside-itself-v1`, from then to 2026-10-20 at the tag
+  `arbace-interprets-go1.27.1-v1`, and all of it in git.
 - When vendoring code from prior art, record its origin (repo, path, revision) in the journal and
   next to the vendored code (for `arbace/`, which holds only `.ae` files: `doc/ARBACE.md`), and
   its license in `LICENSE.md`.

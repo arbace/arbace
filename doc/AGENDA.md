@@ -1,9 +1,11 @@
 # Agenda
 
 The current state of the work. This file is rewritten as things change. For the history, see
-[JOURNAL.md](JOURNAL.md) (since 2026-10-15), the journal at the tag
+[JOURNAL.md](JOURNAL.md) (since 2026-10-20), the journals at the tags
+[`arbace-interprets-go1.27.1-v1`](https://github.com/arbace/arbace/blob/arbace-interprets-go1.27.1-v1/doc/JOURNAL.md)
+(2026-10-15 to 2026-10-20) and
 [`arbace-inside-itself-v1`](https://github.com/arbace/arbace/blob/arbace-inside-itself-v1/doc/JOURNAL.md)
-(2026-10-11 to 2026-10-15) and the frozen branches' (before).
+(2026-10-11 to 2026-10-15), and the frozen branches' (before).
 
 ## State
 

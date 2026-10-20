@@ -191,8 +191,9 @@ seed was printed from (the seed's `SEED.edn`).
 - [doc/AGENDA.md](doc/AGENDA.md): where the work stands and what comes next
 - [doc/go/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-golang/doc/go/FREEZE.md)
   (on `arbace-for-golang`): Arbace for Golang: build, run, verify, the frozen branch
-- [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only (since 2026-10-15;
-  the earlier history at the tag `arbace-inside-itself-v1` and on the frozen branches)
+- [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only (since 2026-10-20;
+  the earlier history at the tags `arbace-interprets-go1.27.1-v1` and `arbace-inside-itself-v1`
+  and on the frozen branches)
 - [doc/classes/SPEC.md](doc/classes/SPEC.md): the Java forms
 - [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/J2G-SPEC.md](doc/go/J2G-SPEC.md),
   its translation; [doc/go/EXEC-NOTES.md](doc/go/EXEC-NOTES.md), the executable;
