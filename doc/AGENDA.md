@@ -95,8 +95,6 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - Running, under the user's goal (2026-10-19: "reach arbace-interprets-go-v1, that is the next
   milestone"), each in its own worktree:
-  - GR10 (`goi-gr10`, from `9747f323`): the 2 fails and what else can be fixed, then v1's
-    divergences recorded in GOI-SPEC, every non-pass program classed;
   - GC81 (`box-reflect-overlay`, from `8aa86623`): `bin/box-rebuild` without GR9a-c's reflect
     overlay, so the Mac's bundle does not build; the fix and the rebuild byte for byte.
 - Done under the goal, each merged, its proposals built as recommended and recorded for the user:
@@ -115,8 +113,12 @@ The current state of the work. This file is rewritten as things change. For the 
     emulated VM, 285 of 287 (every second program of box.txt, GC75), 2 known; the GOMAXPROCS cap
     (GC77); the Mac's bundle runs `./mac.sh goi` (the user, on the Mac, once GC81 is built);
     GC75-GC80, GC82.
-  - `bin/goi check`: 1,467 of 1,837 pass, 67 known, 2 fail (GR8a's bounds messages, GC95);
-    essential 739; `--box` amd64 583/584.
+  - GR10 (2026-10-20, `5bc8e036`): no fails left (bounds errors as gc's values, issue11362,
+    `-e=0`); v1's divergences as data (`test/goi/divergences.edn`, `bin/goi divergences`) and in
+    GOI-SPEC; GC155-GC162.
+  - `bin/goi check`: 1,471 of 1,837 pass, 0 fail, 0 error; the other 366 in recorded classes (358
+    by design, 8 deferred: go:embed's 2, GS14; `byte`/`rune`/aliases' 6, GC157); essential 740;
+    `--box` amd64 583/584, arm64 285/287.
   - The seed `4b2646e6…` (`bbe368f9`), verified (stage 0 `6375d2db…`).
 - **The plan to the milestone `arbace-interprets-go-v1`** (the user, 2026-10-19: the full plan; the
   tag's name `arbace-interprets-go1.27.1-v1`, the user, 2026-10-20). The milestone claims goi a complete interpreter of Go forms at the
