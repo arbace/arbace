@@ -3636,3 +3636,286 @@ check-makefile`; `bin/generated-check`. Not run: `bin/gate --full` and the box (
 - **GC104 Interpretable packages checked once per process.** (a) as built, in the digest's
   session (GR6 checked `slices` again for each importer's session); (b) GR6's per importer.
   *Recommended: (a)*.
+
+## Decided (2026-10-19): GC65-GC71
+
+GC65 (a), GC66 (a), GC67 (a), GC68 (a), GC69 (a), GC70 (a), GC71 (a) of doc/go/GR9-SURVEY.md
+§7, as recommended, under the user's goal of 2026-10-19 (reaching the milestone
+`arbace-interprets-go-v1`, doc/AGENDA.md's plan): the reflect overlay; typed stubs per method
+signature and slot, a panic stub for the others; 256 slots for `func() string` and `func()
+error`, 16 for every other family; a new generation when a type's method set changes; proxies
+and wrappers removed; GR7a's shapes kept as a temporary layout only; interpreted interface types
+`any` in Go memory. GC72-GC74 (generic vars, GR9d) are built apart.
+
+## As built: GR9a-c (2026-10-19)
+
+GR9a (the overlay and named types), GR9b (values without proxies) and GR9c (names, embedding,
+recursion, `Equal`) of the GR9 survey (doc/go/GR9-SURVEY.md, §3, §6) are built on branch
+`goi-gr9a` (from main `04ac458b`, with the GR8 and GR9 surveys merged in; main merged in again
+with GR9d at `e4621b5d`, GR8a at `104d2827` and GR7c at `6295e93b`), in that order and as one change of the
+interpreter's representation. Where building them found otherwise than the
+survey's §3 (the spec draft), the text below is the record; proposals for the user are
+GC125-GC134.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the reflect overlay | `overlay/go/reflect.ae`, `overlay/go/reflect/arbace_named.ae`; `bin/jrt` (`make_overlay`, `overlay_pkgs`), `bin/tamago-vendor` (`overlay_json`), `bin/lib/seed-go.bash` | `arbace_named.go` added to `$GOROOT/src/reflect` in every build's overlay (linux and tamago, amd64 and arm64; the box's guests through the same overlay): `ArbaceNamed`, `ArbaceSetLayout`, `ArbaceSetUnderlying`, `ArbaceSetMethods` (§3.1) and `ArbaceDirectIface`; written in Go, converted to forms by `bin/repr-go read` in a copy of the toolchain's tree with the file added (amendment 1). The seed's archive carries `overlay/reflect/` beside `overlay/runtime/` from its next remaking (`seed_go_make`); `seed_go_build` maps every `overlay/PKG/F.go` to `GOROOT/src/PKG/F.go`, so the current seed (runtime only) builds as before |
+| descriptors | `go/arbace/goi/types.ae` | `TNamed` makes the runtime type and its pointer type (`ArbaceNamed`), `TSetUnder` completes it once (`ArbaceSetUnderlying`), `TShape` gives a shape's layout (`ArbaceSetLayout`); one RT per type in frames and in Go memory (`Mem` is `RT`); the registry (`register`, `descOfRT`) |
+| method tables and stubs | `go/arbace/goi/stubs.ae`, `method.ae` (`TSetMethods`) | `setStubs`: a type's RT gets its method table once, each method a stub of its signature's family (`takeStub`), `EnterSlot` the stubs' entry into the interpreted method; `RegisterStubs`, the panic stub |
+| the stubs | `arbace/go/table.ae` (`stub-forms`, `data-type`), `go/arbace/gotable.edn` (`:stubs`) | per family `stubSlotsN` (its slots), `stubCallN` (the typed call through goi's frame, an adapter's), `stubN_k`; the families: the listed interfaces' method signatures and `:common`'s |
+| dispatch | `go/arbace/goi/method.ae` | `ifaceMethod`: an inline cache per call site keyed by the content's reflect type; assertions and type switches compare RTs; `missingMethod` by the descriptor's method set |
+| the builder | `arbace/go/build.ae` | `named-desc` (the method counts, `reflect-kind`, `layout-needed?`), the method sets given at the outermost `desc` (`*methods-pending*`, `set-named-methods!`), `coerce` (a value of another composite type assigned: converted), runtime names (`sym-name`, `rt-name`, `inst-type-name`) |
+| the checker | `arbace/go/check.ae` (`number-local-types!`), `check/code_stmt.ae` | function-scoped defined types numbered as gc's noder does (`:goi/vargen`) |
+| the REPL | `arbace/go/repl.ae` (`define!`) | generations by method set (GC68), to a fixpoint over the package's types; each checked type object carries its generation (`:goi/gen`) |
+| removed | `method.ae`, `types.ae`, `value.ae`, `adapt.ae`, `expr.ae`, `func.ae`, `trace.ae`, `natives.ae`, `convert.ae`, `call.ae`, `table.ae` | `goi.Proxy`, `contentOf`, `proxyOf`, `proxied`, `Proxy.Format` and its `formatGuarded`, `errorWrapper`, `stringerWrapper`, `CallProxy`, `RegisterWrapper`, `wrapProxy`, `EnterMethod`, `RawR` (and the builder's `*raw-any*`), the tags of S37 (`renameTypes`, `tagTypes`, `proxyGoSyntax`), GR3's erased pointers (`convPtr`, `Erased`), GR7a's shaped Go memory (`Shaped`, `reshape`, `toMem1`), `interpOf`, `unfaithful`; the table's wrappers (the table keeps `RegisterIfaceMethods` for reify) |
+| tests | `test/goi/run/go/t/named.ae` (`.out` gc's), `test/goi/repl.ae` (GR9a-c's checks), `test/goi/run/go/t/fib.ae` (two method benchmarks) | X9's checks as a program goi and gc run alike; at the REPL `%T`, a method added making a new generation, a body redefined reached through the same stub, `sort.Sort` of an interpreted `sort.Interface` |
+
+**The known entries (the exit criterion).** The survey's eleven (`fixedbugs/bug177.go`,
+`bug468.go`, `issue15528.go`, `issue30041.go`, `issue77779.go`, `recover2.go`, `genmeth1.go`,
+`typeparam/issue49547.go`, `issue54456.go`, `mdempsky/17.go`, `nested.go`) and
+`fixedbugs/issue4585.go` pass and have left `test/goi/check-known.edn`. `issue4585.go`'s structs
+are named, so GS8's `Equal` (§3.6 of the survey) is enough: the unnamed struct types `StructOf`
+makes keep comparing their blank fields (reflect unchanged, GC132).
+
+**The check (§11).** `bin/goi check`, against `test/goi/check-linux-amd64.edn` (recorded after
+the merges, from a fresh run; its diff against main's is the thirteen programs, known → pass):
+
+| result | main (GR7c, `6295e93b`) | GR9a-c |
+|---|---:|---:|
+| pass | 1,438 | 1,451 |
+| fail | 2 | 2 |
+| known | 83 | 70 |
+| unsupported | 296 | 296 |
+| skipped | 18 | 18 |
+
+The thirteenth is GR8a's `typeparam/issue48318.go` (`encoding/xml` of an interpreted generic
+type's value, known for G8). No program passing on main regresses. Under a load of 30-45 two
+programs passing on main exceed the check's 10 s on both executables, main's and this branch's
+(`fixedbugs/bug358.go`, `nosplit.go`): they pass run alone; the reference, recorded from a run
+with 8 jobs (136 s), keeps their passes. 65-92 s with 16 jobs. The essential subset gains GR9's eight programs by GC28's
+rule (every one outside `fixedbugs/`, every fourth new one of `fixedbugs/`: `bug177.go` and
+`issue4585.go`, the first and the fifth of six): with GR8a's and GR7c's, 729 programs. `bin/goi check --box` (amd64, the guest of this
+branch, before the merges): `test/goi/box.txt` with the same eight, 574 programs, 573 pass, 1
+known (`typeparam/issue50109.go`, the console's last newline), no regression, 271 s with 8 boxes;
+`test/goi/check-box-amd64.edn` recorded with the eight.
+
+**Amendments (as built).**
+
+1. **The overlay's source** (§3.1): Go first (`arbace_named.go`, from Appendix B), checked by
+   building `reflect` with it for linux/amd64, linux/arm64, tamago/amd64 and tamago/arm64 and by
+   X9's prototype against it (34 of 34), then converted to forms by `bin/repr-go read` in a copy
+   of the toolchain's tree (hard links) with the file added; the forms are what the repository
+   holds and the builds print (GC125). Beyond Appendix B: a mutex around its map (one map, the
+   type's uncommon type and room by descriptor), the pointer type made with the type
+   (`ArbaceNamed` gives both) and its room checked by `ArbaceSetMethods`, the method names of
+   unexported methods with their package paths (`abi.Name`'s bit 2), sorted as gc sorts them
+   (exported first, by name, then by package path), the named struct's `Equal` skipping blank
+   fields and `TFlagRegularMemory` cleared for them, and `ArbaceDirectIface` (the runtime's
+   `IsDirectIface`, which decides what a method's code is given as its receiver).
+2. **Blank fields** (§3.6): go1.27's `StructOf` takes several `_` fields (it refuses duplicate
+   names but `_`), so goi no longer numbers them (`_1`, `_2`: S37's era); `%+v` prints `_` as
+   gc, and the named type's `Equal` finds them by `Name.IsBlank`.
+3. **The stubs' calls** (§2.3): every method of a table has a slot of its own (GC130: the
+   pointer type's entries are the builder's thunks, gc's panicwrap message for a nil pointer
+   theirs, as GR4's), and `EnterSlot` makes the receiver the interface value the itab's call is
+   of, the slot's type word and the word it is given (a pointer-shaped value, else a pointer to
+   the interface's copy, which nothing writes): no copy, no reflect. The method set's entry is
+   cached in the slot while the type's method set is the one it was found in (`mver`). A first
+   version shared the value methods' slots between the two tables as §2.3 has it, loading a copy
+   of the value through reflect at each call: `sort.Sort` of 10^5 took 371-472 ms against main's
+   wrappers' 225-246 ms; as built 174-176 ms.
+4. **When method sets are given** (§3.2, GR4's amendment 2): an interpreted named type's method
+   set and its pointer type's are given when its descriptor is made, at the end of the outermost
+   `desc` (`*methods-pending*`, as GR7a's interfaces), no longer when a value first goes into an
+   interface: compiled code may meet a value of the type without goi seeing it go into one
+   (`fmt` printing a slice's elements, `reflect.New`), and a failed itab is cached for good. The
+   method table's room is the count of the checker's method set (`method-count`); an entry left
+   out (a signature the digest cannot describe) leaves room unused. A thunk the table cannot
+   build at once (a promoted compiled method the table leaves out, S39: `struct{ reflect.Value }`'s
+   `Method`) is built when first called, in program mode too (`typeparam/issue48185b.go`).
+5. **Stubs' families** (§2.3): the table's families are the listed interfaces' method signatures
+   and the twelve of `go/arbace/gotable.edn`'s `:stubs :common` (`String`/`Error`/`GoString`,
+   `Unwrap`/`Close`/`Err`, `errors.Is`, `errors.As`, `Unwrap() []error`, `MarshalJSON`,
+   `UnmarshalJSON`, `Timeout`, `Len`, `Less`, `Swap`, `Format`), each family with the method
+   names compiled code calls it by: before GR8a's merge 77 families, 1,712 stubs on linux/amd64;
+   with GR8a's 89 listed packages 118 families and 2,416 stubs in the four configurations' union
+   (two families of 256, `Read`'s and `Write`'s of 64, the others 16). A stub is `stubN_k(p unsafe.Pointer, args...) results`, calling
+   the family's `stubCallN(&stubSlotsN[k], p, args...)`, which enters the method's frame
+   (`goi.EnterSlot`) and writes and reads the slots as the typed adapters do (GC22); `RegisterStubs`
+   takes the stubs' code by `reflect.Value.Pointer` (a Go function's ABIInternal entry, what an
+   itab calls). A method whose signature has no family gets the panic stub (GC134).
+6. **Exhaustion** (GC67, GC126): a method takes a slot only when compiled code can call it by an
+   interface, its name one of its family's (a listed interface's method, a common one), else the
+   panic stub, silently: GR8a's 81 interpreted std packages exhausted `func()`, `func() bool`,
+   `Read` and `func() int` with methods no compiled interface has. goi warns at the REPL only; a program's run (bin/goi run, the
+   check) keeps its standard error the program's (`ken/embed.go` defines more than 16 types with
+   `func() int` methods that compiled code never calls). `SetOSArgs`, now before the program's
+   packages are built, sets program mode.
+7. **The registry** (§3.2): every descriptor whose RT is its own enters it when interned
+   (`intern`, `register`), composites of interpreted types too (`[]Celsius`); an unnamed struct
+   type with embedded fields and a method set of its own enters it at `TSetMethods`. `descOfRT`
+   is the one lookup (dispatch, assertions' messages, `ContentToArbace`, the natives, GR9d's
+   `ValueType0`): the registry, then composites compiled code made of interpreted types
+   (`reflect.SliceOf(T)`) made from their parts, else the compiled type's; its answers cached.
+8. **Assignment between a named and an unnamed composite type** (GC128): their RTs are two now,
+   so the builder converts a value assigned to a variable, parameter, result or element of
+   another struct, array, slice, map or pointer type (`coerce` in `ex`, `ConvR`), and compares two
+   operands of such types after converting one (`fixedbugs/issue23545.go`: an `OutputID` against
+   a `[32]interface{}`); pointers and channels are compared by their words (a channel's frame
+   value keeps its own direction: `fixedbugs/issue67190.go`). `ConvR` reinterprets the bytes
+   (`retype`) when reflect refuses the conversion: an unnamed struct type of plain fields (S36's,
+   still) to a named one whose fields are embedded.
+9. **Generations** (§3.7, GC68): a type's key is its underlying type's and its declared methods'
+   names, receivers and signatures; the keys are computed to a fixpoint over the package's types,
+   so that a type naming another whose generation changed changes too (before GR9, a dependent
+   type kept its generation and its descriptor's underlying type was set again, which a runtime
+   type cannot be). Each checked type object carries its generation (`:goi/gen`), so that a
+   dependent kept with its old definition (§2.5 item 6) builds with the old type's descriptor
+   (GC129). `test/goi/repl.ae`'s `cross.P#1` is now `cross.P#3`: two methods were added before the
+   value was made.
+10. **Names** (§3.5): gc's runtime names. A function-scoped defined type is numbered as gc's noder
+    numbers them (`writer.go`'s `collectDecls`: the package's typegen, source order): the checker
+    records each with its package-level declaration's id (collection order is source order) and
+    numbers them after the bodies (`number-local-types!`, GC131); the copies an instance makes
+    of a generic function's local types carry the instance's type arguments (`:goi/implicits`),
+    and an instance of a local generic type is of the instance's copy (`isubst` takes the origin
+    too). `sym-name` is noder's `mangle`: the name, `[implicits;own]`, then `·N`; the type's own
+    runtime name leaves the trailing `·N` out (`types/fmt.go`), a type argument's keeps it
+    (`LinkString`): `main.T[int;main.U[int;int]·3]`.
+11. **Recursive types** (§3.4, GC70): `layout-needed?` decides which types get their shape's
+    layout first: a type that is a struct's field, an array's element or a map's key or element
+    among the types made while it is (GR7a's `A` through `[]B`, `B` holding an `A`: `StructOf` of
+    `B` reads `A`'s layout); a type recursive through pointers, slices, channels and functions
+    only needs nothing (its RT and `PointerTo`, `SliceOf`, `ChanOf`, `FuncOf` of it exist before
+    it is complete). GR3's erased pointers and GR7a's shaped Go memory are gone.
+12. **Reify** (G13, GR7b): a reify type is a named struct `arbace.reify[I...]` holding the Arbace
+    object (`struct{O any}`), its methods the interfaces' through stubs; a reify given for a
+    compiled interface is a value of it (the runtime's itab), and back in Arbace its object
+    (`reifyObj`). `RegisterIfaceMethods` stays the table's, without the wrappers.
+13. **What compiled code sees** (G8, §9.4): `%T`, `%v`, `%#v`, `reflect`'s names, kinds,
+    `Implements`, `AssignableTo`, `Field(i).Anonymous` of named struct types, the runtime's
+    messages, `fmt`'s `Stringer`, `error`, `Formatter` and `GoStringer`, `errors.Unwrap`, `Is`
+    and `As`, `sort.Interface`, `io.Reader`: gc's (`test/goi/run/go/t/named.ae`, gc's output). The
+    known differences left: interpreted interface types are `interface {}` (GC71); unnamed
+    struct types with embedded fields keep plain fields (GC127); a method of a signature without
+    a stub family panics when compiled code calls it (GC134).
+14. **goString** (§5.7): `%#v` as gc prints it (a named float's `%#v` is its number, as gc's),
+    `#n` after an old generation's name at its first occurrence.
+15. **The merge with GR9d** (main `e4621b5d`): GR9d's `descOfRT` (natives.ae: the registry of
+    named structs and their pointers, GR4's `interpOf`) gave way to GR9a-c's (types.ae), and
+    `ValueType0` asks it alone (a value's type is its RT's descriptor: no proxy); `TypeInfo0`,
+    `desc-types` (kept in `named-desc`, around GR9a-c's body, `named-desc1`) and `rehome` are
+    unchanged.
+
+16. **The merge with GR8a** (main `104d2827`): no textual conflict but `test/goi/essential.txt`
+    (both added programs: their union, sorted). GR8a's `via-iface`, `TCompiled` of a compiled
+    package's unexported types and the digest session's interpretable packages are unchanged; its
+    `reflect.TypeFor` of an interpreted interface stays `goiNilType`'s nil (GC97: an interpreted
+    interface's RT is `any`, GC71 (a); GC134). Its interpreted std made two things of GR9a-c
+    visible: the method sets now given when a descriptor is made reach methods of types goi
+    describes but has no cells for (`internal/bisect`'s unexported `Matcher` methods through
+    `expvar`, a compiled package's unexported type, GC30): such an entry is left out, as one
+    whose signature the digest cannot describe; and their many methods exhausted families
+    (amendment 6). `bin/goi test`'s std section: 183 of 183.
+
+**Proposals for the user** (each built as recommended):
+
+- **GC125 The overlay's source.** (a) as built, written in Go, built and checked against the
+  prototype, then converted to forms by `bin/repr-go read` (the forms are what the repository
+  holds; amendment 1); (b) written in Go forms by hand. *Recommended: (a)*: the conversion is
+  repr/go's, checked by its round trip, and the Go was compiled for the four configurations
+  before it became forms.
+- **GC126 Which methods take slots, and exhaustion.** (a) as built, only a method whose name
+  compiled code calls with its signature (a listed interface's, the list's common names), others
+  the panic stub silently; a family exhausted: goi warns at the REPL, a program's run stays
+  silent (its standard error is the program's); (b) every method of a family's signature takes
+  a slot (the survey's: GR8a's interpreted std exhausts `func()`, `Read`, `func() int`), and
+  warns in program mode too (`ken/embed.go` would fail the check); (c) larger counts. *Recommended:
+  (a)*.
+- **GC127 Unnamed struct types with embedded fields.** (a) as built, S36 for unnamed struct
+  types only: reflect makes them with plain fields (`StructOf` refuses embedded fields with
+  methods), goi dispatches their promoted methods by its descriptor, compiled code sees no
+  methods; (b) the overlay's `ArbaceStructOf`: `StructOf`'s type copied with its fields marked
+  embedded and the promoted methods' stubs, one per struct type (canonical by the plain one).
+  *Recommended: (a)*: no program of the check meets them, (b) when one does.
+- **GC128 Assignment across a named and an unnamed composite type.** (a) as built, the builder
+  converts the value to the target's type where the checker found it assignable (`coerce`,
+  amendment 8; one reflect conversion at run time); (b) the checker records an implicit
+  conversion node, which the builder builds as any conversion. *Recommended: (a)*: the builder
+  has both types at hand; (b) if a later program needs the node elsewhere.
+- **GC129 Generations of kept dependents.** (a) as built, each checked type object carries its
+  generation: a dependent kept with its old definition builds with the old type; (b) the
+  generation by name (GR3's): the kept dependent built with the new generation's descriptor and
+  the old underlying type, which a runtime type cannot change (amendment 9). *Recommended: (a)*.
+- **GC130 A value method's two tables.** (a) as built, a slot each: the receiver is the
+  interface value itself (no copy), the pointer table's entries the builder's thunks
+  (amendment 3); (b) §2.3's one shared slot: half the slots, but a copy of the value at each
+  call (the pointer table's word points to a variable): `sort.Sort` 2.1-2.7 times slower.
+  *Recommended: (a)*: with the families' names (amendment 6) slots are no longer scarce.
+- **GC131 The numbering of local types.** (a) as built, by the package-level declaration's id
+  (collection order, the source's) and the order the body declares them; (b) by file and line
+  (mode `:lines` keeps no columns, and a literal on its parent's line has none).
+  *Recommended: (a)*: exact where gc's typegen is, `typeparam/nested.go`.
+- **GC132 Blank fields in unnamed struct types' `==`.** (a) as built, reflect's `StructOf`
+  unchanged: an unnamed struct type with blank fields compares them in compiled code (map keys
+  of such a type); goi's own `==` (`goEq`) skips them; (b) the overlay replaces `StructOf`'s
+  `Equal` (a change of reflect's own file, not an added one). *Recommended: (a)*: no program
+  of the check meets it.
+- **GC133 Stubs for signatures naming interpreted types.** (a) as built, the panic stub (a
+  compiled interface cannot name an interpreted type, so only `reflect`'s `Value.Method` and
+  `Call` could reach one); (b) shape families: a stub typed by the signature's shape (every
+  pointer-shaped parameter an `unsafe.Pointer`), registered for every signature of that shape
+  (the method type stays the exact one). *Recommended: (a)*, (b) with GR8b's reflect entries if
+  they need it.
+- **GC134 Interface types made by reflect.TypeFor.** GR8a's `goiNilType` (GC97) stays: an
+  interpreted interface type's RT is `any` (GC71), so `reflect.TypeFor` of one is nil. (a) as
+  built; (b) with GC71 (b), the overlay making named interface types (an `interfaceType` with
+  methods), `TypeFor` then their RT. *Recommended: (a)* until GC71 (b).
+
+**Measurements.**
+
+- **Size.** The executable (amd64, stripped) is 143,564,960 bytes against main's 143,007,904
+  (`6295e93b`, built for the comparison; at `104d2827`, 143,065,248 against 142,508,192): +557,056
+  (0.39%), under the exit criterion's 1 MB: the
+  stubs (118 families, 2,416 stubs in the four configurations' union; about 225 bytes each, as
+  X9 measured), goi's new code, the overlay's file. Before the merges, against main `04ac458b`'s
+  136,446,112: +430,080 (77 families).
+- **Speed** (GR3's criterion; `bin/goi run test/goi/run go.t.fib bench`, best of five per run,
+  three runs alternating main's executable and this branch's, load 18-24; `fib.ae` gained two
+  benchmarks of compiled code calling interpreted methods through compiled interfaces):
+
+  | | main (`104d2827`) | GR9a-c |
+  |---|---|---|
+  | fib 22 | 2.75-3.63 ms | 2.55-2.63 ms |
+  | sumSq 1e6 | 18.81-21.24 ms | 19.34-20.80 ms |
+  | sieve 1e6 | 68.90-75.67 ms | 67.32-69.28 ms |
+  | `sort.Sort` of 10^5 ints (`Len`, `Less`, `Swap` by `sort.Interface`) | 229.20-239.31 ms (the table's wrappers) | 174.09-175.93 ms (the stubs) |
+  | 10^5 `String` calls by `fmt` (`fmt.Stringer`) | 125.68-151.96 ms (the proxies' `stringerWrapper`) | 91.27-92.44 ms |
+
+  fib, sumSq and sieve meet no GR9 code (their noise is the load's); compiled code's calls of
+  interpreted methods are 24-27% faster on `sort.Sort` and about 30% on `fmt`, the receiver now
+  the interface's value itself.
+
+**Checks** (this branch, amd64, after the merges of GR9d, GR8a and GR7c; `ee80eaf5` and the
+reference's commit): the essential `bin/gate` passed (15 m 44 s; goi's essential check 729 of
+729, Clojure's suite as recorded, the oracle 22,658 of 22,711 against its 53 known, the
+differential check, the generated variants); `bin/arbace-go --fixpoint`: G1 = G2 = G3
+(143,564,960 bytes); `bin/goi check` as recorded above, `--essential`; `bin/goi check --box`
+(amd64): 573 of 574, the one known, no regression; `bin/arbace-go --smoke --box`: 113 checks
+ok; `bin/goi test` (the checker's 19 assertions and its invalid forms, 18 programs, 106 REPL
+checks with GR9d's and GR9a-c's, GR8a's std 183 of 183, §1.4's session); `bin/goi annotations`
+(the five corpora as recorded: zero errors, every declaration checked); `make check-makefile`;
+the oracle's `forms/go.ae` 150 of 150. The overlay builds for every configuration: the box's
+guests built for tamago/amd64 and tamago/arm64 (`bin/arbace-go --build --box`, both arches,
+from `tamago/`'s forms), and reflect with the overlay compiled for linux/amd64, linux/arm64,
+tamago/amd64 and tamago/arm64. The guests had stopped linking on main: GR8a's listed `syscall`
+lists `RawSyscall`, `RawSyscall6` and `Syscall6`, which TamaGo declares without implementing,
+and since GR1 tamago/arm64's runtime table listed `CallOnG0` (amd64's assembly only): the list's
+new `:exclude-in` leaves them out of those configurations' tables (`go/arbace/gotable.edn`,
+`arbace/go/table.ae`'s `package-members`).
+
+**Remaining**: GC127 (b), GC133 (b), GC134 (b) when a program needs them; the arm64 box's check
+(GR7a's remaining); GR8b's `reflect.Value.Method`, `MethodByName` (reflect's view of interpreted
+methods: their `Tfn` is -1 for a value receiver of a type not pointer-shaped, §2.3).

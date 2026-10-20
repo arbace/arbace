@@ -144,7 +144,12 @@ is J2G-SPEC §16 Q19's amendment of this file, accepted with the spec. The build
 reproducible: the overlay's files are inputs of gc's build IDs like any source. The patch's
 forms are `overlay/go/runtime/` (jrt phase 2a, JRT-NOTES.md; J2G-SPEC §9.3, amendment T15);
 `bin/jrt overlay` prints them and writes the overlay file for `$ARBACE_GOROOT`, and `bin/jrt
-overlay --check` compares them with the toolchain's runtime.
+overlay --check` compares them with the toolchain's runtime. Since goi's GR9a (GOI-SPEC.md, "As
+built: GR9a-c"; GC65 (a)) the overlay also adds one file to package `reflect`,
+`arbace_named.go` (`overlay/go/reflect/`): goi's interpreted named types made at run time as
+runtime types of their own. The seed carries it as `overlay/reflect/` beside
+`overlay/runtime/` (bin/lib/seed-go.bash: `overlay/PKG/F.go` is `GOROOT/src/PKG/F.go`; a seed
+made before has the runtime's only).
 
 ## The print cache (standalone S6, SA146)
 

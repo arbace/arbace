@@ -1,0 +1,300 @@
+;; Arbace's addition to package reflect (doc/go/GOI-SPEC.md, "As built: GR9a-c"; the GR9 survey,
+;; doc/go/GR9-SURVEY.md, §3.1, its Appendix B the prototype): goi's interpreted named types made
+;; at run time as runtime types of their own, with their method sets, so that compiled code, fmt,
+;; reflect and the runtime see them as gc's. The runtime resolves the offsets of a descriptor
+;; that is in no module through reflectOffs (runtime/type.go); this file makes such descriptors
+;; from reflect's own types and helpers, so that a change of internal/abi's layouts is a compile
+;; error. It enters every build as an overlay file (bin/jrt overlay), as overlay/go/runtime's do.
+
+(in-ns 'go.reflect) (go/file "arbace_named.go" :imports [
+
+
+    ^{:line 12} [abi "internal/abi"]
+    ^{:line 13} [sync "sync"]
+    ^{:line 14} [unsafe "unsafe"]])
+
+
+
+(go/type ArbaceMethod "ArbaceMethod is one method of a type made by ArbaceNamed.\n" (struct
+    ^{:line 19 :tag string} Name
+    ^{:line 20 :tag string} PkgPath ; an unexported method's package path; "" for an exported method
+    ^{:line 21 :tag Type} Type ; the method's type without its receiver (FuncOf's)
+    ^{:line 22 :tag unsafe/Pointer} Ifn ; the code an itab and Value.Method call (the receiver one word)
+    ^{:line 23 :tag unsafe/Pointer} Tfn)) ; the code of Type.Method's Func (the receiver by value); nil: unreachable
+
+
+^{:go/end 47} (go/func arbaceHeader ^Type [^Kind k]
+  (switch k
+    (case [Struct]
+      (return ((inst TypeFor structType))))
+    (case [Func]
+      (return ((inst TypeFor funcType))))
+    (case [Pointer]
+      (return ((inst TypeFor ptrType))))
+    (case [Slice]
+      (return ((inst TypeFor sliceType))))
+    (case [Array]
+      (return ((inst TypeFor arrayType))))
+    (case [Chan]
+      (return ((inst TypeFor chanType))))
+    (case [Map]
+      (return ((inst TypeFor abi/MapType))))
+    (case [Interface]
+      (return ((inst TypeFor interfaceType))))
+    (default
+      (return ((inst TypeFor abi/Type))))))
+
+
+
+
+
+
+^{:go/end 71} (go/func arbaceAlloc "arbaceAlloc allocates a type descriptor of kind k followed by its uncommon type, nparams\nparameter types (a function type's) and room for nm methods, at a Go type the collector\nscans as what it holds; reflectOffs pins it.\n" [^Kind k ^int nparams ^int nm] :results [(* abi/Type) (* uncommonType)]
+  (let [fs (lit (slice StructField)
+        (lit _ :Name "H" :Type (arbaceHeader k))
+        (lit _ :Name "U" :Type ((inst TypeFor uncommonType))))]
+
+    (when (> nparams 0)
+      (set! fs (append fs (lit StructField :Name "P" :Type (ArrayOf nparams ((inst TypeFor (* abi/Type))))))))
+
+    (when (> nm 0)
+      (set! fs (append fs (lit StructField :Name "M" :Type (ArrayOf nm ((inst TypeFor abi/Method)))))))
+
+    (let [v (.Elem (New (StructOf fs)))
+        ^{:line 64} t (conv (* abi/Type) (.UnsafePointer (.Addr (.Field v 0))))
+        ^{:line 65} ut (conv (* uncommonType) (.UnsafePointer (.Addr (.Field v 1))))]
+      (set! (.-Moff ut) (+ (conv uint32 (unsafe/Sizeof (lit uncommonType))) (* (conv uint32 nparams) (conv uint32 (unsafe/Sizeof (conv uintptr 0))))))
+      (set! (.-Kind_ t) (conv abi/Kind k))
+      (set! (.-TFlag t) abi/TFlagUncommon)
+      (resolveReflectType t)
+      (return t ut))))
+
+
+(go/var
+  ^{:line 74} [^sync/Mutex arbaceMu]
+  ^{:line 75} [^uint32 arbaceCounter]
+
+
+
+  ^{:line 79} [^{:doc "arbaceTypes are each made type's uncommon type and room, by its descriptor: found by the\nkind it was allocated for, whatever kind its header has while its layout is its shape's\n(ArbaceSetLayout)\n"} arbaceTypes (lit (map (* abi/Type) arbaceRoom))])
+
+
+(go/type arbaceRoom (struct
+    ^{:line 83 :tag (* uncommonType)} u
+    ^{:line 84 :tag int} methods))
+
+
+
+
+
+
+^{:go/end 118} (go/func ArbaceNamed "ArbaceNamed makes the named type str (gc's runtime name, \"main.T\") of package pkgPath and\nkind k, and its pointer type, with room for nm and npm methods; nparams is the underlying\nfunction type's parameter and result count. ArbaceSetUnderlying gives its underlying type,\nArbaceSetMethods its methods. Each call makes a type of its own (a hash of its own).\n" [^string pkgPath ^string str ^Kind k ^int nparams ^int nm ^int npm] :results [Type Type]
+  (let [(values t ut) (arbaceAlloc k nparams nm)
+      (values p put) (arbaceAlloc Pointer 0 npm)]
+    (.Lock arbaceMu)
+    (inc! arbaceCounter)
+    (let [c arbaceCounter]
+      (aset arbaceTypes t (lit arbaceRoom ut nm))
+      (aset arbaceTypes p (lit arbaceRoom put npm))
+      (.Unlock arbaceMu)
+      (set! (.-TFlag t) bit-or (bit-or abi/TFlagNamed abi/TFlagExtraStar))
+      (set! (.-Str t) (resolveReflectName (newName (+ "*" str) "" false false)))
+      (set! (.-Hash t) (fnv1 (fnv1 0 (spread (conv (slice byte) str))) (conv byte (>> c 24)) (conv byte (>> c 16)) (conv byte (>> c 8)) (conv byte c)))
+      (set! (.-PkgPath ut) (resolveReflectName (newName pkgPath "" false false)))
+
+      (let [^any iptr (conv (* unsafe/Pointer) nil)
+          ^{:line 106} proto @(conv (* (* ptrType)) (conv unsafe/Pointer (addr iptr)))
+          ^{:line 107} pt (conv (* ptrType) (conv unsafe/Pointer p))
+          ^{:line 108} moff (.-Moff put)]
+        (set! (.-PtrType pt) (.-PtrType proto))
+        (set! ^{:go/via [PtrType Type]} (.-TFlag pt) (bit-or (bit-and-not ^{:go/via [PtrType Type]} (.-TFlag proto) abi/TFlagNamed) abi/TFlagUncommon))
+        (set! ^{:go/via [PtrType Type]} (.-Str pt) (resolveReflectName (newName (+ "*" str) "" false false)))
+        (set! ^{:go/via [PtrType Type]} (.-Hash pt) (fnv1 (.-Hash t) \*))
+        (set! ^{:go/via [PtrType Type]} (.-PtrToThis pt) 0)
+        (set! ^{:go/via [PtrType]} (.-Elem pt) t)
+        (set! @put (lit uncommonType :PkgPath (.-PkgPath ut) :Moff moff))
+        (set! (.-PtrToThis t) (resolveReflectType p))
+        (return (toType t) (toType p))))))
+
+
+^{:go/end 128} (go/func arbaceRoomOf ^arbaceRoom [^{:tag (* abi/Type)} t]
+  (.Lock arbaceMu)
+  (let [(values r ok) (aget arbaceTypes t)]
+    (.Unlock arbaceMu)
+    (when (not ok)
+      (panic (+ "reflect: " (stringFor t) " was not made by ArbaceNamed")))
+
+    ^{:line 127} r))
+
+
+
+
+
+^{:go/end 202} (go/func ArbaceSetUnderlying "ArbaceSetUnderlying gives T the layout, kind data and operations of under (its name, hash,\npointer type and uncommon type kept); embedded lists the struct fields to mark as embedded.\nA struct's blank fields are not compared by its Equal, as gc's are not.\n" [^Type T ^Type under ^{:tag (slice int)} embedded]
+  (let [t (.common T)
+      ^{:line 135} u (.common under)
+      ^{:line 136} nu (.-u (arbaceRoomOf t)) ; not t.Uncommon(): the header's kind may be its shape's
+      (values str hash ptt ut) (values (.-Str t) (.-Hash t) (.-PtrToThis t) @nu)]
+    (switch (conv Kind (.Kind u))
+      (case [Struct]
+        (let [st (conv (* structType) (conv unsafe/Pointer t))]
+          (set! @st @(conv (* structType) (conv unsafe/Pointer u)))
+          (let [blank false]
+            (range [_ f ^{:go/via [StructType]} (.-Fields st)]
+              (when (.IsBlank (.-Name f))
+                (set! blank true)))
+
+
+            (when (> (len embedded) 0)
+              (let [fs (append (conv (slice abi/StructField) nil) (spread ^{:go/via [StructType]} (.-Fields st)))]
+                (range [_ i embedded]
+                  (let [f (addr (aget fs i))]
+                    (set! (.-Name f) (newName (.Name (.-Name f)) (.Tag (.-Name f)) (.IsExported (.-Name f)) true))))
+
+                (set! ^{:go/via [StructType]} (.-Fields st) fs)))
+
+            (when (and blank (!= ^{:go/via [StructType Type]} (.-Equal st) nil))
+              (let [fs ^{:go/via [StructType]} (.-Fields st)]
+                (set! ^{:go/via [StructType Type]} (.-Equal st) ^{:go/breaks [[3 167]] :go/end 168} (fn ^bool [^unsafe/Pointer p ^unsafe/Pointer q]
+                    (range [_ f fs]
+                      (when (.IsBlank (.-Name f))
+                        (continue))
+
+                      (when (not ((.-Equal (.-Typ f)) (add p (.-Offset f) "&x.field safe") (add q (.-Offset f) "&x.field safe")))
+                        (return false)))
+
+
+                    true)))))))
+
+
+      (case [Func]
+        (let [ft (conv (* funcType) (conv unsafe/Pointer t))
+            ^{:line 172} uf (conv (* funcType) (conv unsafe/Pointer u))]
+          (set! @ft @uf)
+          (let [ps (unsafe/Slice (conv (* (* abi/Type)) (unsafe/Add (conv unsafe/Pointer nu) (unsafe/Sizeof (lit uncommonType)))) (+ (len (.InSlice uf)) (len (.OutSlice uf))))
+              ^{:line 175} n (copy ps (.InSlice uf))]
+            (copy (subslice ps n) (.OutSlice uf)))))
+      (case [Pointer]
+        (set! @(conv (* ptrType) (conv unsafe/Pointer t)) @(conv (* ptrType) (conv unsafe/Pointer u))))
+      (case [Slice]
+        (set! @(conv (* sliceType) (conv unsafe/Pointer t)) @(conv (* sliceType) (conv unsafe/Pointer u))))
+      (case [Array]
+        (set! @(conv (* arrayType) (conv unsafe/Pointer t)) @(conv (* arrayType) (conv unsafe/Pointer u))))
+      (case [Chan]
+        (set! @(conv (* chanType) (conv unsafe/Pointer t)) @(conv (* chanType) (conv unsafe/Pointer u))))
+      (case [Map]
+        (set! @(conv (* abi/MapType) (conv unsafe/Pointer t)) @(conv (* abi/MapType) (conv unsafe/Pointer u))))
+      (case [Interface]
+        (set! @(conv (* interfaceType) (conv unsafe/Pointer t)) @(conv (* interfaceType) (conv unsafe/Pointer u))))
+      (default
+        (set! @t @u)))
+
+    (set! (values (.-Str t) (.-Hash t) (.-PtrToThis t)) (values str hash ptt))
+    (set! (.-TFlag t) (bit-or (bit-and-not (.-TFlag u) (bit-or abi/TFlagUncommon abi/TFlagNamed abi/TFlagExtraStar)) abi/TFlagUncommon abi/TFlagNamed abi/TFlagExtraStar))
+    (when (== (conv Kind (.Kind u)) Struct)
+      (range [_ f ^{:go/via [StructType]} (.-Fields (conv (* structType) (conv unsafe/Pointer t)))]
+        (when (.IsBlank (.-Name f))
+          (set! (.-TFlag t) bit-and-not abi/TFlagRegularMemory))))
+
+
+
+    (set! @nu ut)))
+
+
+
+
+^{:go/end 229} (go/func arbaceMethodName "arbaceMethodName is a method's name, an unexported one with its package's path (abi.Name's\nbit 2), so that the runtime matches it with an interface's method of that package.\n" ^abi/Name [^string n ^string pkgPath]
+  (when (== pkgPath "")
+    (return (newName n "" true false)))
+
+  (let [pp (resolveReflectName (newName pkgPath "" false false))
+      ^{:line 211 :tag (array 10 byte)} l (zero (array 10 byte))
+      ^{:line 212} ll 0]
+    (for [x (len n)] _ _
+      (when (< x (<< 1 7))
+        (aset l ll (conv byte x))
+        (inc! ll)
+        (break))
+
+      (aset l ll (conv byte (bit-or (bit-and x (- (<< 1 7) 1)) (<< 1 7))))
+      (inc! ll)
+      (set! x >> 7))
+
+    (let [b (make (slice byte) (+ 1 ll (len n) 4))]
+      (aset b 0 (<< 1 2))
+      (copy (subslice b 1) (subslice l _ ll))
+      (copy (subslice b (+ 1 ll)) n)
+      (set! @(conv (* (array 4 byte)) (conv unsafe/Pointer (addr (aget b (+ 1 ll (len n)))))) @(conv (* (array 4 byte)) (conv unsafe/Pointer (addr pp))))
+      (lit abi/Name :Bytes (addr (aget b 0))))))
+
+
+
+
+^{:go/end 274} (go/func ArbaceSetMethods "ArbaceSetMethods fills T's method table (its room given to ArbaceNamed) with ms, exported\nmethods first, each group by name, then by package path, as gc sorts them.\n" [^Type T ^{:tag (slice ArbaceMethod)} ms]
+  (let [t (.common T)
+      ^{:line 235} room (arbaceRoomOf t)]
+    (when (> (len ms) (.-methods room))
+      (panic (+ "reflect: ArbaceSetMethods: " (stringFor t) " has room for fewer methods")))
+
+    (let [ut (.-u room)]
+      (set! ms (append (conv (slice ArbaceMethod) nil) (spread ms)))
+      (let [less ^{:go/end 249} (fn ^bool [^{:tag (* ArbaceMethod)} a ^{:tag (* ArbaceMethod)} b]
+            (when (!= (== (.-PkgPath a) "") (== (.-PkgPath b) ""))
+              (return (== (.-PkgPath a) "")))
+
+            (when (!= (.-Name a) (.-Name b))
+              (return (< (.-Name a) (.-Name b))))
+
+            (< (.-PkgPath a) (.-PkgPath b)))]
+
+        (for [i 1] (< i (len ms)) (inc! i)
+          (for [j i] (and (> j 0) (less (addr (aget ms j)) (addr (aget ms (- j 1))))) (dec! j)
+            (set! (values (aget ms j) (aget ms (- j 1))) (values (aget ms (- j 1)) (aget ms j)))))
+
+
+        (let [dst (unsafe/Slice (conv (* abi/Method) (unsafe/Add (conv unsafe/Pointer ut) (.-Moff ut))) (len ms))
+            ^{:line 256} x 0]
+          (range [i m ms]
+            (let [tfn (conv abi/TextOff -1)]
+              (when (!= (.-Tfn m) nil)
+                (set! tfn (conv abi/TextOff (resolveReflectText (.-Tfn m)))))
+
+              (aset dst i ^{:go/breaks [2 4 6 8]} (lit abi/Method
+                  :Name (conv abi/NameOff (resolveReflectName (arbaceMethodName (.-Name m) (.-PkgPath m))))
+                  :Mtyp (conv abi/TypeOff (resolveReflectType (.common (.-Type m))))
+                  :Ifn (conv abi/TextOff (resolveReflectText (.-Ifn m)))
+                  :Tfn tfn))
+
+              (when (== (.-PkgPath m) "")
+                (inc! x))))
+
+
+          (set! (.-Mcount ut) (conv uint16 (len ms)))
+          (set! (.-Xcount ut) (conv uint16 x)))))))
+
+
+
+
+
+
+^{:go/end 294} (go/func ArbaceSetLayout "ArbaceSetLayout gives T, before its underlying type, the header of shape, a type of its\nlayout and pointer words: T's size, alignment, pointer mask and kind data while constructors\nthat read them (MapOf, StructOf, ArrayOf) make types containing T. T has no uncommon type\nmeanwhile; ArbaceSetUnderlying gives it back.\n" [^Type T ^Type shape]
+  (let [t (.common T)
+      ^{:line 282} u (.common shape)
+      (values str hash ptt) (values (.-Str t) (.-Hash t) (.-PtrToThis t))]
+    (switch (conv Kind (.Kind u))
+      (case [Struct]
+        (set! @(conv (* structType) (conv unsafe/Pointer t)) @(conv (* structType) (conv unsafe/Pointer u))))
+      (case [Array]
+        (set! @(conv (* arrayType) (conv unsafe/Pointer t)) @(conv (* arrayType) (conv unsafe/Pointer u))))
+      (default
+        (set! @t @u)))
+
+    (set! (values (.-Str t) (.-Hash t) (.-PtrToThis t)) (values str hash ptt))
+    (set! (.-TFlag t) (bit-or (bit-and-not (.-TFlag u) (bit-or abi/TFlagUncommon abi/TFlagNamed abi/TFlagExtraStar)) abi/TFlagExtraStar))))
+
+
+
+
+
+^{:go/end 301} (go/func ArbaceDirectIface "ArbaceDirectIface reports whether a value of type t is held in an interface's data word\nitself (pointer-shaped) rather than through a pointer to it: what a method's code is given as\nits receiver word.\n" ^bool [^Type t]
+  (.IsDirectIface (.common t)))

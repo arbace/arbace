@@ -1,12 +1,12 @@
 ;; goi: types at run time (GOI-SPEC.md §5.2): descriptors and RT, the typed loads and stores
 ;; through addresses (§4.4, S25), cells, zero values, and the two representations of a value:
-;; in a frame (its slot) and in Go memory. They differ for two kinds of types only: a function
-;; type, whose frame value may be an interpreted closure (*Closure) while Go memory holds a real
-;; Go func (an adapter, §4.6); and a pointer to a recursive named type (erased: its RT cannot be
-;; made by reflect, which has no recursive types), held in Go memory inside composites and
-;; variables as an unsafe.Pointer (as built: GR3); and a named type recursive other than through
-;; pointers (shaped: `type S []S`, `type F func() F`), held in Go memory at its shape, a type of
-;; the same layout and pointer words, and in frames at its RT (GR7a).
+;; in a frame (its slot) and in Go memory. They differ for function types only: a frame value
+;; may be an interpreted closure (*Closure) while Go memory holds a real Go func (an adapter,
+;; §4.6). Since GR9a-c every interpreted named type's RT is a runtime type of its own, made at
+;; run time by reflect's overlay (reflect.ArbaceNamed, overlay/go/reflect.ae) with its method set
+;; (the table's typed stubs, GC66), and so is every composite of one: compiled code, fmt,
+;; reflect and the runtime see it as gc's, and a value is held as itself everywhere (no proxies,
+;; no wrappers, no erased pointers, no shapes in Go memory: GC69, GC70).
 (in-ns 'go.arbace.goi)
 
 (go/file "types.go"
@@ -14,34 +14,35 @@
 
 (go/const
   [^{:tag byte} convNone 0]
-  [^{:tag byte} convPtr 1]
   [^{:tag byte} convFunc 2])
 
 (go/type Field "Field is a struct field: its name, type and offset.\n"
   (struct ^string Name ^{:tag (* Type)} T ^uintptr Off ^bool Embedded))
 
 (go/type Type
-  "Type is a Go type's descriptor (§5.2). RT is the Go type of its values in frames, Mem in Go
-memory (they differ for erased pointers, Conv convPtr, and shaped named types, Shaped: Mem is
-the shape, its bytes reinterpreted as RT, GR7a); Conv convFunc marks function types,
-whose frame values may be closures. K is the slot kind (I, F, S or R), GK the Go kind. Name and
-Pkg name an interpreted named type (Gen its generation; Proxy: its values go into interfaces as
-proxies, its RT not being its own, §5.3), Under its underlying type's descriptor; Elem, Key, Len,
-Fields, Ins, Outs and Variadic the parts of composite types. Compiled types are made from their
-reflect.Type alone (Compiled). Methods is the method set of an interpreted type by key (an
-exported name, or path.name), IMethods an interface type's methods (GR4, §5.3); unfaithful: the
-RT is not the type's own (a named non-struct type, a composite of one), so that its values go
-into interfaces as proxies. Every descriptor but a compiled interface's is made once per type
+  "Type is a Go type's descriptor (§5.2). RT is the Go type of its values, in frames and in Go
+memory alike (Mem is RT, kept for the callers that name Go memory's type); Conv convFunc marks
+function types, whose frame values may be closures. K is the slot kind (I, F, S or R), GK the Go
+kind. Name and Pkg name an interpreted named type (Gen its generation), Under its underlying
+type's descriptor; Elem, Key, Len, Fields, Ins, Outs and Variadic the parts of composite types.
+Compiled types are made from their reflect.Type alone (Compiled). Methods is the method set of
+an interpreted type by key (an exported name, or path.name), IMethods an interface type's
+methods (GR4, §5.3). own: the RT was made at run time for this type (an interpreted named type
+that is not an interface, made by reflect.ArbaceNamed, or a composite of one), so that the
+registry finds the descriptor from a value's reflect type; room, proom: the methods the RT
+(and its pointer type's) have room for; layout: the RT has its shape's layout only, before its
+underlying type (ArbaceSetLayout, GC70); stubbed: the RT's method table is set (once: itabs are
+cached for good, GC68). Every descriptor but a compiled interface's is made once per type
 (interned), so that descriptors compare by identity. Reify: an Arbace reify's type (G13), its
-values Arbace objects, its methods calling their fns.\n"
+values a struct holding the Arbace object, its methods calling its fns.\n"
   (struct ^{:tag reflect/Type} RT ^{:tag reflect/Type} Mem ^byte Conv ^byte K ^{:tag reflect/Kind} GK
-          ^string Name ^string Pkg ^int Gen ^bool Proxy ^bool Erased ^bool Compiled ^bool Iface
+          ^string Name ^string Pkg ^int Gen ^bool Compiled ^bool Iface
           ^{:tag (* Type)} Under ^{:tag (* Type)} Elem ^{:tag (* Type)} Key ^int Len
           ^{:tag (slice Field)} Fields ^{:tag (slice (* Type))} Ins ^{:tag (slice (* Type))} Outs ^bool Variadic
           ^int ChanDir
           ^{:tag (map string (* Method))} Methods ^{:tag (slice IMethod)} IMethods
-          ^bool Shaped ^bool complete
-          ^bool unfaithful ^bool methodsSet ^byte wrap ^bool Reify
+          ^bool complete ^bool own ^bool layout ^int room ^int proom ^bool roomed
+          ^bool methodsSet ^bool stubbed ^bool Reify ^int mver
           ^bool direct ^bool zeroDone ^any zero))
 
 (go/var ^{:tag sync/Mutex} typesMu)
@@ -97,16 +98,13 @@ made from t on demand.\n"
     (set! (.-Key t) (TypeOf (.Key (.-RT t)))))
   (.-Key t))
 
-(go/method rt "rt is the type's RT (made now for a pointer to an erased named type).\n"
-  ^{:tag reflect/Type} [^{:tag (* Type)} t]
-  (when (== (.-RT t) nil)
-    (set! (.-RT t) (reflect/PointerTo (.mem (.-Elem t)))))
+(go/method rt "rt is the type's RT.\n" ^{:tag reflect/Type} [^{:tag (* Type)} t]
   (.-RT t))
 
-(go/method mem "mem is the type's Go type in Go memory.\n" ^{:tag reflect/Type} [^{:tag (* Type)} t]
-  (when (== (.-Mem t) nil)
-    (panic (fmt/Sprintf "goi: the type %s is used before it is complete (a recursive type goi cannot make)" (.String t))))
-  (.-Mem t))
+(go/method mem "mem is the type's Go type in Go memory: its RT.\n" ^{:tag reflect/Type} [^{:tag (* Type)} t]
+  (when (== (.-RT t) nil)
+    (panic (fmt/Sprintf "goi: the type %s is used before it is complete" (.String t))))
+  (.-RT t))
 
 (go/method String "String is the type's name as gc writes it.\n" ^string [^{:tag (* Type)} t]
   (when (!= (.-Name t) "")
@@ -180,11 +178,15 @@ text: the interning key.\n"
     (intern k (addr (lit Type :RT anyType :Mem anyType :K \R :GK reflect/Interface :Iface true :Name name)))))
 
 (go/func composite
-  "composite is the descriptor of an unnamed composite type of Go kind k and RT rt.\n"
-  ^{:tag (* Type)} [^{:tag reflect/Kind} k ^{:tag reflect/Type} rt]
+  "composite is the descriptor of an unnamed composite type of Go kind k and RT rt, made of
+parts ps: its RT is its own (own) when one of its parts' is, and the registry then finds it.\n"
+  ^{:tag (* Type)} [^{:tag reflect/Kind} k ^{:tag reflect/Type} rt & ^{:tag (slice (* Type))} ps]
   (let [t (addr (lit Type :RT rt :Mem rt :K (slotKindOf k) :GK k))]
     (when (!= rt nil)
-      (set! (.-direct t) (isDirect rt)))
+      (set! (.-direct t) (reflect/ArbaceDirectIface rt)))
+    (range [_ p ps]
+      (when (and (!= p nil) (.-own p))
+        (set! (.-own t) true)))
     t))
 
 (go/var ^{:tag sync/Mutex} internMu)
@@ -199,14 +201,17 @@ text: the interning key.\n"
 
 (go/func intern
   "intern records t under key k and gives the descriptor interned there (t, or one made first
-by another goroutine).\n"
+by another goroutine); a descriptor with an RT of its own enters the registry by its RT.\n"
   ^{:tag (* Type)} [^string k ^{:tag (* Type)} t]
   (.Lock internMu)
-  (defer (.Unlock internMu))
   (let [o (aget interned k)]
     (when (!= o nil)
+      (.Unlock internMu)
       (return o))
     (aset interned k t)
+    (.Unlock internMu)
+    (when (.-own t)
+      (register t))
     t))
 
 (go/func typesKey "typesKey is the identities of descriptors ts, for an interning key.\n" ^string [^{:tag (slice (* Type))} ts]
@@ -216,41 +221,28 @@ by another goroutine).\n"
     (.String b)))
 
 (go/func TPtr
-  "TPtr is the descriptor of *elem. A pointer to an erased (recursive) named type is held as an
-unsafe.Pointer in Go memory; its RT is made when first asked.\n"
+  "TPtr is the descriptor of *elem. Of an interpreted named type, its RT is the pointer type
+reflect.ArbaceNamed made with it (its method table's room proom), whether elem is complete or
+not: a type recursive through pointers needs nothing more (GC70).\n"
   ^{:tag (* Type)} [^{:tag (* Type)} elem]
   (let [k (fmt/Sprintf "*%p" elem)
         o (internedType k)]
     (when (!= o nil)
       (return o))
-    (when (.-Erased elem)
-      (let [t (composite reflect/Pointer nil)]
-        (set! (.-Elem t) elem)
-        (set! (.-Mem t) unsafePointerType)
-        (set! (.-Conv t) convPtr)
-        (set! (.-direct t) true)
-        (set! (.-unfaithful t) true)
-        (return (intern k t))))
-    (let [t (composite reflect/Pointer (reflect/PointerTo (.mem elem)))]
+    (let [t (composite reflect/Pointer (reflect/PointerTo (.-RT elem)) elem)]
       (set! (.-Elem t) elem)
-      (fromParts t elem)
+      (when (and (.-own elem) (!= (.-Name elem) "") (not (.-Iface elem)))
+        (set! (.-room t) (.-proom elem))
+        (set! (.-roomed t) true))
       (intern k t))))
-
-(go/func fromParts
-  "fromParts makes composite t unfaithful when its part p is (its values still go into interfaces
-as themselves, as GR3's: compiled code, reflect among them, sees their RT).\n"
-  [^{:tag (* Type)} t ^{:tag (* Type)} p]
-  (when (and (!= p nil) (.-unfaithful p))
-    (set! (.-unfaithful t) true)))
 
 (go/func TSlice ^{:tag (* Type)} [^{:tag (* Type)} elem]
   (let [k (fmt/Sprintf "[]%p" elem)
         o (internedType k)]
     (when (!= o nil)
       (return o))
-    (let [t (composite reflect/Slice (reflect/SliceOf (.mem elem)))]
+    (let [t (composite reflect/Slice (reflect/SliceOf (.-RT elem)) elem)]
       (set! (.-Elem t) elem)
-      (fromParts t elem)
       (intern k t))))
 
 (go/func TArray ^{:tag (* Type)} [^int n ^{:tag (* Type)} elem]
@@ -258,10 +250,9 @@ as themselves, as GR3's: compiled code, reflect among them, sees their RT).\n"
         o (internedType k)]
     (when (!= o nil)
       (return o))
-    (let [t (composite reflect/Array (reflect/ArrayOf n (.mem elem)))]
+    (let [t (composite reflect/Array (reflect/ArrayOf n (.mem elem)) elem)]
       (set! (.-Elem t) elem)
       (set! (.-Len t) n)
-      (fromParts t elem)
       (intern k t))))
 
 (go/func TMap ^{:tag (* Type)} [^{:tag (* Type)} k ^{:tag (* Type)} v]
@@ -269,11 +260,9 @@ as themselves, as GR3's: compiled code, reflect among them, sees their RT).\n"
         o (internedType key)]
     (when (!= o nil)
       (return o))
-    (let [t (composite reflect/Map (reflect/MapOf (.mem k) (.mem v)))]
+    (let [t (composite reflect/Map (reflect/MapOf (.mem k) (.mem v)) k v)]
       (set! (.-Key t) k)
       (set! (.-Elem t) v)
-      (fromParts t k)
-      (fromParts t v)
       (intern key t))))
 
 (go/func TChan ^{:tag (* Type)} [^int dir ^{:tag (* Type)} elem]
@@ -284,10 +273,9 @@ as themselves, as GR3's: compiled code, reflect among them, sees their RT).\n"
     (let [d reflect/BothDir]
       (when (== dir 1) (set! d reflect/RecvDir))
       (when (== dir 2) (set! d reflect/SendDir))
-      (let [t (composite reflect/Chan (reflect/ChanOf d (.mem elem)))]
+      (let [t (composite reflect/Chan (reflect/ChanOf d (.-RT elem)) elem)]
         (set! (.-Elem t) elem)
         (set! (.-ChanDir t) dir)
-        (fromParts t elem)
         (intern key t)))))
 
 (go/func TFunc ^{:tag (* Type)} [^{:tag (slice (* Type))} ins ^{:tag (slice (* Type))} outs ^bool variadic]
@@ -297,36 +285,26 @@ as themselves, as GR3's: compiled code, reflect among them, sees their RT).\n"
       (return o))
     (let [ri (make (slice reflect/Type) (len ins))
           ro (make (slice reflect/Type) (len outs))]
-      (range [i x ins] (aset ri i (.mem x)))
-      (range [i x outs] (aset ro i (.mem x)))
-      (let [t (composite reflect/Func (reflect/FuncOf ri ro variadic))]
+      (range [i x ins] (aset ri i (.-RT x)))
+      (range [i x outs] (aset ro i (.-RT x)))
+      (let [t (composite reflect/Func (reflect/FuncOf ri ro variadic) (spread (append (append (lit (slice (* Type))) (spread ins)) (spread outs))))]
         (set! (.-Ins t) ins)
         (set! (.-Outs t) outs)
         (set! (.-Variadic t) variadic)
         (set! (.-Conv t) convFunc)
-        (range [_ x ins] (fromParts t x))
-        (range [_ x outs] (fromParts t x))
         (intern key t)))))
 
 (go/func structFields
-  "structFields are the reflect fields of a struct type: blank names numbered (reflect refuses
-two fields of one name), unexported ones with their package path, embedded fields as plain
-fields of their type's name (S36); tag0 extends the first field's tag (S37).\n"
+  "structFields are the reflect fields of a struct type: unexported names (blank ones too) with
+their package path; embedded fields are plain fields of their type's name (StructOf refuses
+embedded fields with methods): a named struct type marks them embedded in its own RT
+(reflect.ArbaceSetUnderlying), an unnamed one keeps them plain (S36's difference, for unnamed
+struct types only).\n"
   ^{:tag (slice reflect/StructField)} [^{:tag (slice string)} names ^{:tag (slice (* Type))} ts ^{:tag (slice string)} tags
-                                       ^{:tag (slice string)} pkgs ^string tag0]
-  (let [fs (make (slice reflect/StructField) (len names))
-        blanks 0]
+                                       ^{:tag (slice string)} pkgs]
+  (let [fs (make (slice reflect/StructField) (len names))]
     (range [i n names]
-      (let [tag (aget tags i)]
-        (when (and (== i 0) (!= tag0 ""))
-          (if (== tag "")
-            (set! tag tag0)
-            (set! tag (+ tag " " tag0))))
-        (when (== n "_")
-          (when (> blanks 0)
-            (set! n (fmt/Sprintf "_%d" blanks)))
-          (inc! blanks))
-        (aset fs i (lit reflect/StructField :Name n :Type (.mem (aget ts i)) :Tag (conv reflect/StructTag tag) :PkgPath (aget pkgs i)))))
+      (aset fs i (lit reflect/StructField :Name n :Type (.mem (aget ts i)) :Tag (conv reflect/StructTag (aget tags i)) :PkgPath (aget pkgs i))))
     fs))
 
 (go/func fillFields "fillFields sets t's fields from its RT and the field types.\n"
@@ -343,32 +321,110 @@ fields of their type's name (S36); tag0 extends the first field's tag (S37).\n"
         o (internedType key)]
     (when (!= o nil)
       (return o))
-    (let [t (composite reflect/Struct (reflect/StructOf (structFields names ts tags pkgs "")))]
+    (let [t (composite reflect/Struct (reflect/StructOf (structFields names ts tags pkgs)) (spread ts))]
       (fillFields t names ts emb)
-      (range [_ x ts] (fromParts t x))
       (intern key t))))
 
-(go/var ^{:tag (map reflect/Type (* Type)) :doc "interp is the registry of faithful interpreted named types by RT (§5.2).\n"}
+;; ---------------------------------------------------------------------------------------
+;; The registry: interpreted types by their RT (§5.2)
+
+(go/var ^{:tag (map reflect/Type (* Type)) :doc "interp is the registry of interpreted types by RT (§5.2), guarded by typesMu.\n"}
   interp (make (map reflect/Type (* Type))))
 
 (go/var ^{:tag sync/Map :doc "interpRT is interp as a sync.Map, read without the lock (dispatch, GR4).\n"} interpRT)
 
+(go/func register
+  "register enters interpreted type t into the registry by its RT: a type whose RT is its own,
+or one whose RT reflect made from its fields (an unnamed struct type with embedded fields and a
+method set of its own, TSetMethods); the first one stays.\n"
+  [^{:tag (* Type)} t]
+  (when (== (.-RT t) nil)
+    (return))
+  (.Lock typesMu)
+  (when (== (aget interp (.-RT t)) nil)
+    (aset interp (.-RT t) t)
+    (.Store interpRT (.-RT t) t))
+  (.Unlock typesMu))
+
+(go/var ^{:tag sync/Map :doc "rtDescs are the descriptors descOfRT gave, by reflect type.\n"} rtDescs)
+
+(go/func descOfRT
+  "descOfRT is the descriptor of reflect type rt (a value's dynamic type): the registry's
+interpreted type, a composite of one that compiled code made (reflect.SliceOf of an interpreted
+named type ...), else the compiled type's.\n"
+  ^{:tag (* Type)} [^{:tag reflect/Type} rt]
+  (let [(values d ok) (.Load interpRT rt)]
+    (when ok
+      (return (assert (* Type) d))))
+  (let [(values d ok) (.Load rtDescs rt)]
+    (when ok
+      (return (assert (* Type) d))))
+  (let [^{:tag (* Type)} d nil]
+    (switch (.Kind rt)
+      (case [reflect/Pointer reflect/Slice reflect/Array reflect/Chan]
+        (let [e (descOfRT (.Elem rt))]
+          (when (.-own e)
+            (switch (.Kind rt)
+              (case [reflect/Pointer] (set! d (TPtr e)))
+              (case [reflect/Slice] (set! d (TSlice e)))
+              (case [reflect/Array] (set! d (TArray (.Len rt) e)))
+              (case [reflect/Chan]
+                (switch (.ChanDir rt)
+                  (case [reflect/RecvDir] (set! d (TChan 1 e)))
+                  (case [reflect/SendDir] (set! d (TChan 2 e)))
+                  (default (set! d (TChan 0 e)))))))))
+      (case [reflect/Map]
+        (let [k (descOfRT (.Key rt))
+              v (descOfRT (.Elem rt))]
+          (when (or (.-own k) (.-own v))
+            (set! d (TMap k v))))))
+    (when (or (== d nil) (!= (.-RT d) rt))
+      (set! d (TypeOf rt)))
+    (.Store rtDescs rt d)
+    d))
+
+;; ---------------------------------------------------------------------------------------
+;; Interpreted named types (§5.2; GR9a-c): runtime types of their own
+
 (go/func TNamed
-  "TNamed is a new interpreted named type pkg.name of generation gen, its underlying type set
-later (TSetUnder); erased: recursive, its pointers erased in Go memory.\n"
-  ^{:tag (* Type)} [^string name ^string pkg ^int gen ^bool erased]
-  (intern (fmt/Sprintf "%s %s#%d" pkg name gen) (addr (lit Type :Name name :Pkg pkg :Gen gen :Erased erased))))
+  "TNamed is the interpreted named type pkg.name of generation gen, of Go kind kind, its
+underlying type set later (TSetUnder): a new runtime type (reflect.ArbaceNamed), named name
+(gc's runtime name, pkgname.T) of package pkg (main for a command's), with its pointer type,
+their method tables with room for nm and npm methods; nparams is the parameters' and results'
+count of an underlying function type. One per type and generation (interned).\n"
+  ^{:tag (* Type)} [^string name ^string pkg ^int gen ^int kind ^int nparams ^int nm ^int npm]
+  (let [key (fmt/Sprintf "%s %s#%d" pkg name gen)
+        o (internedType key)]
+    (when (!= o nil)
+      (return o))
+    (let [rpkg pkg]
+      (when (== rpkg "command-line-arguments")
+        (set! rpkg "main"))
+      (let [k (conv reflect/Kind kind)
+            (values rt _) (reflect/ArbaceNamed rpkg name k nparams nm npm)
+            t (addr (lit Type :Name name :Pkg pkg :Gen gen :RT rt :Mem rt :GK k :K (slotKindOf k) :own true
+                         :room nm :proom npm :roomed true))]
+        (when (== k reflect/Func)
+          (set! (.-Conv t) convFunc))
+        (intern key t)))))
+
+(go/func embeddedIndexes "embeddedIndexes are the indexes of the true elements of emb.\n" ^{:tag (slice int)} [^{:tag (slice bool)} emb]
+  (let [out (lit (slice int))]
+    (range [i e emb]
+      (when e
+        (set! out (append out i))))
+    out))
 
 (go/func TSetUnder
-  "TSetUnder completes named type t with its underlying type u: a struct gets its own RT, the
-first field's tag carrying goi:\"path.Name#gen\" (S37); any other type shares u's RT and goes
-into interfaces as a proxy (§5.3). For a struct, u's fields (names, types, tags, package
-paths, embedded) are given again.\n"
+  "TSetUnder completes named type t with its underlying type u (once: a runtime type does not
+change, a REPL's new underlying type is a new generation, §2.5): its RT gets u's layout, kind
+data and operations (reflect.ArbaceSetUnderlying), a struct's embedded fields marked embedded
+(S36 ended) and its blank fields left out of its ==. For a struct, u's fields (names, types,
+tags, package paths, embedded) are given again.\n"
   [^{:tag (* Type)} t ^{:tag (* Type)} u ^{:tag (slice string)} names ^{:tag (slice (* Type))} ts ^{:tag (slice string)} tags
    ^{:tag (slice string)} pkgs ^{:tag (slice bool)} emb]
-  (when (and (== (.-Under t) u) (.-complete t))
+  (when (.-complete t)
     (return))
-  (set! (.-complete t) true)
   (set! (.-Under t) u)
   (set! (.-GK t) (.-GK u))
   (set! (.-K t) (.-K u))
@@ -382,86 +438,43 @@ paths, embedded) are given again.\n"
   (set! (.-Variadic t) (.-Variadic u))
   (set! (.-ChanDir t) (.-ChanDir u))
   (set! (.-IMethods t) (.-IMethods u))
+  (reflect/ArbaceSetUnderlying (.-RT t) (.mem u) (embeddedIndexes emb))
+  (set! (.-direct t) (reflect/ArbaceDirectIface (.-RT t)))
   (if (and (== (.-GK u) reflect/Struct) (> (len names) 0))
-    (let [tag0 (fmt/Sprintf "goi:%q" (fmt/Sprintf "%s.%s#%d" (.-Pkg t) (lastName (.-Name t)) (.-Gen t)))
-          rt (reflect/StructOf (structFields names ts tags pkgs tag0))]
-      (set! (.-RT t) rt)
-      (when (not (.-Shaped t))
-        (set! (.-Mem t) rt))
-      (set! (.-direct t) (isDirect rt))
-      (fillFields t names ts emb)
-      (.Lock typesMu)
-      (aset interp rt t)
-      (.Store interpRT rt t)
-      (when (.-Shaped t)
-        ;; its shape too: an interface's content of a shaped struct is the shape (GR7a)
-        (aset interp (.-Mem t) t)
-        (.Store interpRT (.-Mem t) t))
-      (.Unlock typesMu)
-      (noteType t (fmt/Sprintf "%s.%s#%d" (.-Pkg t) (lastName (.-Name t)) (.-Gen t))))
-    (do
-      (noteType t "")
-      (when (== (.-Conv u) convPtr)
-        ;; a named pointer type recursive through its element (type Peano *Peano): erased as
-        ;; its underlying pointer type, its Mem first (its RT is *Mem)
-        (set! (.-Shaped t) false))
-      (when (not (.-Shaped t))
-        (set! (.-Mem t) (.-Mem u)))
-      (set! (.-RT t) (.rt u))
-      (set! (.-direct t) (.-direct u))
-      (set! (.-Fields t) (.-Fields u))
-      (set! (.-unfaithful t) (not (.-Iface u)))
-      (set! (.-Proxy t) (not (.-Iface u))))))
+    (fillFields t names ts emb)
+    (set! (.-Fields t) (.-Fields u)))
+  (set! (.-layout t) false)
+  (set! (.-complete t) true)
+  (noteType t))
 
 (go/func TShape
-  "TShape gives named type t, recursive other than through pointers, its shape's Go type as its
-Go memory type before its underlying type is built (GR7a): a struct's shape with goi's tag of
-its own on its first field, so that shapes of different types differ.\n"
+  "TShape gives named type t, before its underlying type is built, its shape's layout (the
+layout and pointer words of shape: reflect.ArbaceSetLayout), for the constructors that read it
+while types containing t are made (MapOf's, StructOf's, ArrayOf's: a type recursive through a
+map or by value; GC70).\n"
   [^{:tag (* Type)} t ^{:tag (* Type)} shape]
-  (when (.-complete t)
+  (when (or (.-complete t) (.-layout t))
     (return))
-  (let [m (.mem shape)]
-    (when (and (== (.Kind m) reflect/Struct) (> (.NumField m) 0))
-      (let [fs (make (slice reflect/StructField) (.NumField m))]
-        (for [i 0] (< i (len fs)) (inc! i)
-          (let [f (.Field m i)]
-            (aset fs i (lit reflect/StructField :Name (.-Name f) :PkgPath (.-PkgPath f) :Type (.-Type f) :Tag (.-Tag f)))))
-        (set! (.-Tag (aget fs 0)) (conv reflect/StructTag (fmt/Sprintf "goi:%q" (fmt/Sprintf "%s.%s#%d shape" (.-Pkg t) (lastName (.-Name t)) (.-Gen t)))))
-        (set! m (reflect/StructOf fs))))
-    (set! (.-Mem t) m)
-    (set! (.-Shaped t) true)))
+  (reflect/ArbaceSetLayout (.-RT t) (.mem shape))
+  (set! (.-layout t) true))
 
 (go/func TNamedIface
   "TNamedIface is interpreted named interface type pkg.name of generation gen, complete at once
-(its RT is any), so that its methods' signatures may name it; its methods are given by
+(its RT is any: GC71), so that its methods' signatures may name it; its methods are given by
 TSetIfaceMethods.\n"
   ^{:tag (* Type)} [^string name ^string pkg ^int gen]
-  (let [t (TNamed name pkg gen false)]
-    (when (not (.-complete t))
-      (set! (.-complete t) true)
-      (set! (.-RT t) anyType)
-      (set! (.-Mem t) anyType)
-      (set! (.-K t) \R)
-      (set! (.-GK t) reflect/Interface)
-      (set! (.-Iface t) true))
-    t))
+  (let [key (fmt/Sprintf "%s %s#%d" pkg name gen)
+        o (internedType key)]
+    (when (!= o nil)
+      (return o))
+    (intern key (addr (lit Type :Name name :Pkg pkg :Gen gen :RT anyType :Mem anyType :K \R :GK reflect/Interface
+                           :Iface true :complete true)))))
 
 (go/func lastName "lastName is a qualified name's last element.\n" ^string [^string n]
   (let [i (strings/LastIndex n ".")]
     (when (>= i 0)
       (return (subslice n (+ i 1))))
     n))
-
-;; ---------------------------------------------------------------------------------------
-;; Interfaces' contents of interpreted types (§5.3): proxies
-
-(go/type Proxy
-  "Proxy is an interface's content whose dynamic type is an interpreted type with methods or
-without an RT of its own (a named non-struct type, §5.3 rule 2): its descriptor T and its value
-V. Go's == on two proxies compares T and V; fmt formats it by T's methods, else V (Format), so
-Println of a Celsius prints as gc's.\n"
-  (struct ^{:tag (* Type)} T ^any V))
-
 
 ;; ---------------------------------------------------------------------------------------
 ;; Interface data words, boxes
@@ -483,61 +496,41 @@ an R box): its data word, or for a pointer-shaped type a new variable holding it
 ;; The two representations (frames and Go memory)
 
 (go/func toMem
-  "toMem is frame value v of type t as Go memory holds it: an erased pointer as unsafe.Pointer,
-an interpreted closure as a real Go func of t (§4.6), a shaped type's value at its shape.\n"
+  "toMem is frame value v of type t as Go memory holds it: an interpreted closure as a real Go
+func of t (§4.6); any other value is itself (GR9a-c).\n"
   ^any [^{:tag (* Type)} t ^any v]
-  (when (.-Shaped t)
-    (return (reshape (toMem1 t v) (.-Mem t))))
-  (toMem1 t v))
+  (when (== (.-Conv t) convFunc)
+    (when (== v nil)
+      ;; a nil func in Go memory, an interface's content: typed
+      (return (.Interface (reflect/Zero (.rt t)))))
+    (type-switch [c v]
+      (case [(* Closure)] (return (.goFunc c t)))
+      (case [(* Bound)] (return (.goFunc c t)))))
+  v)
 
-(go/func reshape
-  "reshape is value v as a value of type to of the same size: its bytes reinterpreted (a shaped
-type's RT and shape, GR7a); v itself when of type to.\n"
+(go/func retype
+  "retype is value v as a value of type to of the same kind and size: its bytes reinterpreted
+(an unnamed struct value of a type reflect made with plain fields given for a named struct type
+whose fields are embedded: their RTs are not identical, the layouts are); v itself when of type
+to.\n"
   ^any [^any v ^{:tag reflect/Type} to]
   (when (== v nil)
     (return (.Interface (reflect/Zero to))))
   (let [rv (reflect/ValueOf v)]
     (when (== (.Type rv) to)
       (return v))
-    (when (!= (.Size (.Type rv)) (.Size to))
-      (panic (fmt/Sprintf "goi: reshaping a %s (%d bytes) as a %s (%d)" (.Type rv) (.Size (.Type rv)) to (.Size to))))
+    (when (or (!= (.Size (.Type rv)) (.Size to)) (!= (.Kind (.Type rv)) (.Kind to)))
+      (panic (fmt/Sprintf "goi: retyping a %s (%d bytes) as a %s (%d)" (.Type rv) (.Size (.Type rv)) to (.Size to))))
     (let [p (reflect/New (.Type rv))]
       (.Set (.Elem p) rv)
       (.Interface (.Elem (reflect/NewAt to (.UnsafePointer p)))))))
 
-(go/func toMem1 "toMem1 is toMem but for a shaped type's reshaping.\n" ^any [^{:tag (* Type)} t ^any v]
-  (switch (.-Conv t)
-    (case [convPtr]
-      (return (efaceData v)))
-    (case [convFunc]
-      (when (== v nil)
-        ;; a nil func in Go memory, an interface's content: typed
-        (return (.Interface (reflect/Zero (.rt t)))))
-      (type-switch [c v]
-        (case [(* Closure)] (return (.goFunc c t)))
-        (case [(* Bound)] (return (.goFunc c t))))))
-  (when (and (.-Iface t) (!= (.-Mem t) anyType))
-    ;; a proxy in Go memory of a compiled interface type: its wrapper (§5.3 rule 3)
-    (let [(values p ok) (proxyOf v)]
-      (when ok
-        (return (wrapProxy (.-Mem t) p)))))
-  v)
-
 (go/func fromMem
-  "fromMem is Go memory's value v of type t as a frame holds it: an erased pointer typed again,
-a Go func made from an interpreted closure the closure again, a nil func nil.\n"
+  "fromMem is Go memory's value v of type t as a frame holds it: a Go func made from an
+interpreted closure the closure again, a nil func nil.\n"
   ^any [^{:tag (* Type)} t ^any v]
-  (when (.-Shaped t)
-    (set! v (reshape v (.-RT t))))
-  (switch (.-Conv t)
-    (case [convPtr]
-      (return (.Interface (reflect/NewAt (.mem (.-Elem t)) (assert unsafe/Pointer v)))))
-    (case [convFunc]
-      (return (closureOf v))))
-  (when (.-Iface t)
-    (let [(values w ok) (assert proxied v)]
-      (when ok
-        (return (contentOf (.GoiProxy w))))))
+  (when (== (.-Conv t) convFunc)
+    (return (closureOf v)))
   v)
 
 (go/method valueOf "valueOf is frame value v of t as a reflect.Value of t's Go memory type.\n"
@@ -547,12 +540,13 @@ a Go func made from an interpreted closure the closure again, a nil func nil.\n"
       (return (reflect/Zero (.mem t))))
     (let [rv (reflect/ValueOf m)]
       (when (!= (.Type rv) (.mem t))
-        ;; struct types that differ in goi's tags only (§5.2): converted
-        (when (and (== (.Kind rv) reflect/Struct) (.ConvertibleTo (.Type rv) (.mem t)) (not (.AssignableTo (.Type rv) (.mem t))))
+        (when (.AssignableTo (.Type rv) (.mem t))
+          (let [z (reflect/New (.mem t))]
+            (.Set (.Elem z) rv)
+            (return (.Elem z))))
+        (when (.ConvertibleTo (.Type rv) (.mem t))
           (return (.Convert rv (.mem t))))
-        (let [z (reflect/New (.mem t))]
-          (.Set (.Elem z) rv)
-          (return (.Elem z))))
+        (return (reflect/ValueOf (retype m (.mem t)))))
       rv)))
 
 ;; ---------------------------------------------------------------------------------------
