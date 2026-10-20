@@ -2012,3 +2012,36 @@ v1's divergences by design are listed there. Staging (G16) and speed (F10) come 
   It stopped both.
 - **Started:** GR8b (`goi-gr8b`, from `9cdbd4d1`): reflect's methods, GC60 (a) and GC61 (a) as
   recommended under the goal. The arm64 box agent was asked to merge main and check again.
+
+## 2026-10-20: goi GR8b merged (reflect's methods); GR10 started
+
+- **What:** branch `goi-gr8b` (from `9cdbd4d1`) merged as `9747f323`. It builds GR8-SURVEY's GC60
+  (a) and GC61 (a), decided as recommended under the user's goal of 2026-10-19.
+  - **The overrides:** goi serves reflect's `Value.Method`, `MethodByName`, `NumMethod` and
+    `Type.Method`, `MethodByName`, `NumMethod`. Interpreted types are served from their
+    descriptors' method sets (`go/arbace/goi/reflect.ae`), compiled ones from the table's method
+    expressions through `MakeFunc`. The table never names `reflect.Type.Method`, so the linker's
+    ReflectMethod (+17.7 MB) stays out.
+  - **Dispatch** of compiled types the table doesn't name now goes through a listed interface of
+    their package (GC149).
+  - **recover:** a deferred compiled call's panic is handed to interpreted code (`pendRec`,
+    GC148).
+- **Measured:**
+  - All 13 reflect-method programs pass, and reflectmethod2, reflectmethod3 and issue16037_run
+    leave the known list.
+  - `text/template` and `html/template` execute (`{{.Hello}}` gives `hi cy`).
+  - `bin/goi check`: 1,467 pass, 2 fail, 67 known, 283 unsupported. Essential 739; `--box` amd64
+    583/584.
+  - +61,440 bytes (0.04%). Speed within noise.
+- **Checks on main after the merge:** the essential `bin/gate` passed (17m27s). The branch's own
+  checks: `bin/goi test` (the REPL 110), the fixpoint.
+- **Decisions:** GC145-GC151, each built as recommended, as recommended, under the user's goal.
+  GC148's known limit: an interpreted callback of a deferred compiled function during a panic
+  could recover where gc's `recover()` returns nil.
+- **GR10 started** (`goi-gr10`, from `9747f323`), the milestone's last goi step:
+  - the 2 fails (issue30116, issue30116u: bounds messages), issue11362's import path,
+    issue20298's `-e=0`;
+  - `byte`, `rune` and alias names in the checker's messages, if the change is moderate;
+  - a section "v1's divergences" in GOI-SPEC classing every program that does not pass.
+- **The arm64 box agent** recorded `bin/goi check --box` in the emulated VM: 285 of 287 pass, 2
+  known. It is still finishing.

@@ -10,8 +10,8 @@ nc and perl are macOS's own):
 
     tar xzf arbace-box-mac-arm64.tar.gz
     cd arbace-box-mac-arm64
-    ./mac.sh all          # check, sign, hv, checklist, rebuild, with the clock's
-                          # hour beside them: about an hour and a quarter
+    ./mac.sh all          # check, sign, hv, checklist, goi, rebuild, with the
+                          # clock's hour beside them: about an hour and a half
 
 then send back mac-results.tar.gz (in this directory): every step's output,
 its status, the idle CPU and the times.
@@ -21,10 +21,14 @@ inside the box from the sources in rebuild/store, j2g and repr/go in Arbace's ow
 guest, Go's compile, asm and link in tool guests; it must equal the image the
 same steps gave on Linux with the host's tools (rebuild/expected.txt). Its
 guests ask up to 14 GiB each; the spawns' budget is 60% of the Mac's memory.
+goi's check in the box (doc/go/GOI-SPEC.md, "As built: the arm64 box check"):
+the programs of $GOROOT/test in goi/, each in a box of its own, interpreted by
+goi in the guest; the console and the status against gc's on Linux. Four boxes
+of 4 vCPUs at a time (GOI_JOBS=N for N); results in mac-results/goi-results.tsv.
 The clock (HV6): an idle box's wall clock against the Mac's, once a minute for
 an hour.
 
-Steps one by one: ./mac.sh check | sign | hv | checklist | rebuild | clock.
+Steps one by one: ./mac.sh check | sign | hv | checklist | goi | rebuild | clock.
 After `sign`:
 
     ./mac.sh run                        # the REPL (rlwrap from Homebrew, if installed)

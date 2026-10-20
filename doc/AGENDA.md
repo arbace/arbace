@@ -95,7 +95,8 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - Running, under the user's goal (2026-10-19: "reach arbace-interprets-go-v1, that is the next
   milestone"), each in its own worktree:
-  - GR8b (`goi-gr8b`, from `9cdbd4d1`): reflect's methods (GC60 (a), GC61 (a));
+  - GR10 (`goi-gr10`, from `9747f323`): the 2 fails and what else can be fixed, then v1's
+    divergences recorded in GOI-SPEC, every non-pass program classed;
   - the arm64 box check (`goi-box-arm64`).
 - Done under the goal, each merged, its proposals built as recommended and recorded for the user:
   - GR9d (2026-10-19, `e4621b5d`): REPL vars for generic functions (GoGenericFn, `go/inst`, the
@@ -107,8 +108,10 @@ The current state of the work. This file is rewritten as things change. For the 
     (GC94); GC85-GC94, GC144 (b).
   - GR9a-c (2026-10-20, `9cdbd4d1`): the reflect overlay, typed stubs, proxies removed;
     GC65-GC71, GC125-GC134.
-  - `bin/goi check`: 1,451 of 1,837 pass, 70 known, 2 fail (GR8a's bounds messages, GC95);
-    essential 729; `--box` amd64 573/574.
+  - GR8b (2026-10-20, `9747f323`): reflect's methods served by goi (GC60 (a), GC61 (a)); the 13
+    programs pass, `text/template` and `html/template` execute; GC145-GC151.
+  - `bin/goi check`: 1,467 of 1,837 pass, 67 known, 2 fail (GR8a's bounds messages, GC95);
+    essential 739; `--box` amd64 583/584.
   - The seed `4b2646e6…` (`bbe368f9`), verified (stage 0 `6375d2db…`).
 - **The plan to the milestone `arbace-interprets-go-v1`** (the user, 2026-10-19: the full plan; the
   name to confirm at the tag). The milestone claims goi a complete interpreter of Go forms at the
