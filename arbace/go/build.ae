@@ -768,17 +768,27 @@ GR9a)."
             (recur (op "DerefP" (op "LoadR" p (desc fty))) (nth (t/under fty) 1) (rest path) (rest derefs))
             (recur p fty (rest path) (rest derefs))))))))
 
+(defn- uidx?
+  "Whether index or bound n is of an unsigned type (gc's bounds errors print it unsigned)."
+  [n]
+  (boolean (and n (unsigned? (:type n)))))
+
+(defn- uidx-mask
+  "Bits 0, 1, 2 set when a slice expression's bounds lo, hi, max are of unsigned types."
+  [idxs]
+  (long (reduce + (map-indexed (fn [i x] (if (uidx? x) (bit-shift-left 1 i) 0)) (take 3 idxs)))))
+
 (defn- index-place
   "The place of element (aget x i) of an array, a pointer to an array or a slice."
   [n]
   (let [x (:x n) u (t/under (:type x))]
     (cond
       (and (vector? u) (= :slice (nth u 0)))
-      (op "SliceElemP" (exk x :R) (exk (:index n) :I) (desc (nth u 1)))
+      (op "SliceElemP" (exk x :R) (exk (:index n) :I) (desc (nth u 1)) (uidx? (:index n)))
       (and (vector? u) (= :array (nth u 0)))
-      (op "ArrayElemP" (value-place x) (exk (:index n) :I) (desc (:type x)))
+      (op "ArrayElemP" (value-place x) (exk (:index n) :I) (desc (:type x)) (uidx? (:index n)))
       (and (vector? u) (= :pointer (nth u 0)))
-      (op "ArrayElemP" (op "DerefP" (exk x :R)) (exk (:index n) :I) (desc (nth u 1)))
+      (op "ArrayElemP" (op "DerefP" (exk x :R)) (exk (:index n) :I) (desc (nth u 1)) (uidx? (:index n)))
       :else (unsupported! (str "indexing " (t/type-str (:type x))) "GR3"))))
 
 (defn place
@@ -914,19 +924,20 @@ GR9a)."
          :convert-iface [:R (iface-content (ex (:x n) (:type (:x n))) (:type (:x n)))]
          :field (load-p (field-place n) (:type n))
          :index (if (t/string-type? (:type (:x n)))
-                  [:I (op "IndexS" (exk (:x n) :S) (exk (:index n) :I))]
+                  [:I (op "IndexS" (exk (:x n) :S) (exk (:index n) :I) (uidx? (:index n)))]
                   (load-p (index-place n) (:type n)))
          :map-index (let [m (:x n) mt (:type m) [_ K V] (t/under mt)
                           kn (elem-node (:key n) K)]
                       [(kind V) (op (str "MapGet" (name (kind V))) (exk m :R) kn (desc mt))])
          :slice (let [x (:x n) u (t/under (:type x))
-                      [lo hi mx] (map #(when % (exk % :I)) (concat (:indexes n) (repeat nil)))]
+                      [lo hi mx] (map #(when % (exk % :I)) (concat (:indexes n) (repeat nil)))
+                      um (uidx-mask (:indexes n))]
                   (cond
-                    (t/string-type? (:type x)) [:S (op "SliceString" (exk x :S) lo hi)]
-                    (and (vector? u) (= :slice (nth u 0))) [:R (op "SliceSlice" (exk x :R) lo hi mx (desc (:type x)))]
-                    (and (vector? u) (= :array (nth u 0))) [:R (op "SliceArray" (value-place x) lo hi mx (desc (:type x)))]
+                    (t/string-type? (:type x)) [:S (op "SliceString" (exk x :S) lo hi um)]
+                    (and (vector? u) (= :slice (nth u 0))) [:R (op "SliceSlice" (exk x :R) lo hi mx (desc (:type x)) um)]
+                    (and (vector? u) (= :array (nth u 0))) [:R (op "SliceArray" (value-place x) lo hi mx (desc (:type x)) um)]
                     (and (vector? u) (= :pointer (nth u 0)))
-                    [:R (op "SliceArray" (op "DerefP" (exk x :R)) lo hi mx (desc (nth u 1)))]))
+                    [:R (op "SliceArray" (op "DerefP" (exk x :R)) lo hi mx (desc (nth u 1)) um)]))
          :addr (let [x (:x n)]
                  [:R (op "AddrOf" (place x) (desc (:type x)))])
          :deref (load-p (op "DerefP" (exk (:x n) :R)) (:type n))

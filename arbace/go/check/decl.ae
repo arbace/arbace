@@ -863,6 +863,25 @@
 
 (defn- import-name [p] (o p :name))
 
+(defn- clean-path
+  "Go's path.Clean of import path p (its lexical rules: one slash between elements, no . or ..
+  element where it can be removed, no trailing slash)."
+  [^String p]
+  (let [rooted (str/starts-with? p "/")
+        out (reduce (fn [acc el]
+                      (cond
+                        (or (= el "") (= el ".")) acc
+                        (= el "..") (cond (and (seq acc) (not= ".." (peek acc))) (pop acc)
+                                          rooted acc
+                                          :else (conj acc ".."))
+                        :else (conj acc el)))
+                    [] (str/split p #"/"))
+        s (str (when rooted "/") (str/join "/" out))]
+    (if (= s "") "." s)))
+
+(defn- local-path? [^String p]
+  (or (str/starts-with? p "/") (str/starts-with? p "./") (str/starts-with? p "../") (= p ".") (= p "..")))
+
 (defn declare-imports!
   "The file scope's imports: package objects, dot imports. resolve: path -> package."
   [fi resolve]
@@ -870,10 +889,15 @@
     (doseq [spec (:imports fi)]
       (when (vector? spec)
         (let [[nf path] spec
-              p (resolve path fi)
+              ;; gc's noder (cmd/compile/internal/noder/import.go, openPackage): a non-local import
+              ;; path must be canonical, else gc reads no package
+              canon (when (and (string? path) (not (local-path? path))) (clean-path path))
+              p (when-not (and canon (not= canon path)) (resolve path fi))
               nm (if (code/go-id? nf) (code/ident-name nf) (str nf))]
           (code/with-line spec
             (cond
+              (and canon (not= canon path))
+              (err! spec :NonCanonicalImport "could not import %s (non-canonical import path \"%s\" (should be \"%s\"))" path path canon)
               (nil? p) (err! spec :BrokenImport "could not import %s (no forms)" path)
               (string? p) (err! spec :BrokenImport "could not import %s (%s)" path p)
               (= "_" nm) nil

@@ -1,0 +1,63 @@
+(ns goi.divergences
+  "bin/goi divergences (GR10, GC159): every program of goi's check that does not pass, in the
+  linux/amd64 reference (run programs, directory tests and the errorcheck corpus) and the box's
+  (test/goi/check-box-amd64.edn), falls into a class of test/goi/divergences.edn, its result and
+  reason matched; a program that fails or errs, or that no class takes, is reported and the
+  verb fails. Prints each class's count per reference; --table prints the classes as the
+  spec's table (doc/go/GOI-SPEC.md, \"v1's divergences\"), --programs every program by class."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io PushbackReader)))
+
+(defn- read-file [f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(defn- classify [classes [p result reason]]
+  (let [s (str (name result) " " reason)]
+    (or (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)
+        :unclassified)))
+
+(defn -main [& args]
+  (let [root (or (System/getenv "GOI_ROOT") ".")
+        classes (read-file (str root "/test/goi/divergences.edn"))
+        refs [["linux/amd64" (str root "/test/goi/check-linux-amd64.edn")]
+              ["box amd64" (str root "/test/goi/check-box-amd64.edn")]]
+        essential (set (remove #(or (str/blank? %) (str/starts-with? % "#"))
+                               (str/split-lines (slurp (str root "/test/goi/essential.txt")))))
+        res (for [[nm f] refs]
+              (let [es (read-file f)
+                    bad (filter #(#{:fail :error} (second %)) es)
+                    np (remove #(= :pass (second %)) es)
+                    by (group-by #(classify classes %) np)]
+                {:name nm :total (count es) :pass (count (filter #(= :pass (second %)) es))
+                 :bad bad :by by :entries es}))
+        lin (first res)
+        ess-np (filter #(and (essential (first %)) (not= :pass (second %))) (:entries lin))
+        problems (concat (for [r res e (:bad r)] (str (:name r) ": " (first e) " " (name (second e)) ": " (nth e 2)))
+                         (for [r res e (get (:by r) :unclassified)] (str (:name r) ": " (first e) " in no class: " (name (second e)) " " (nth e 2)))
+                         (for [e ess-np] (str "essential: " (first e) " does not pass in the reference: " (name (second e)))))]
+    (cond
+      (some #{"--table"} args)
+      (do (println "| class | kind | linux/amd64 | box amd64 | why | decided |")
+          (println "|---|---|---:|---:|---|---|")
+          (doseq [c classes]
+            (println (str "| " (:title c) " | " (name (:kind c)) " | "
+                          (count (get (:by (first res)) (:id c))) " | " (count (get (:by (second res)) (:id c))) " | "
+                          (:why c) " | " (:decided c) " |"))))
+      (some #{"--programs"} args)
+      (doseq [c classes r res :let [ps (get (:by r) (:id c))] :when (seq ps)]
+        (println (str (:title c) " (" (:name r) ", " (count ps) "): "
+                      (str/join ", " (map first (sort-by first ps))))))
+      :else
+      (doseq [r res]
+        (println (str "goi divergences: " (:name r) ": " (:total r) " programs, " (:pass r) " pass, "
+                      (- (:total r) (:pass r)) " in "
+                      (count (filter #(seq (get (:by r) (:id %))) classes)) " classes"))
+        (doseq [c classes :let [n (count (get (:by r) (:id c)))] :when (pos? n)]
+          (println (format "   %4d %s (%s)" n (:title c) (name (:kind c)))))))
+    (println (str "goi divergences: essential (test/goi/essential.txt): " (count essential) " programs, "
+                  (count ess-np) " not passing in the linux/amd64 reference"))
+    (doseq [p problems] (println (str "   " p)))
+    (shutdown-agents)
+    (System/exit (if (seq problems) 1 0))))
