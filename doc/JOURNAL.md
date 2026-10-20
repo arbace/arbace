@@ -230,3 +230,38 @@ GitHub's repository description, README's first line and CLAUDE.md's.
   gaps and cuts; a minimal javac program translated by j2g into a tool executable; the platform's
   options tried. Exit: the samples parsed on Go equal the JVM's, as `Pretty` prints them; the
   tool's size and times.
+
+## 2026-10-20: GP1 merged (the native Go parser's tree)
+
+- **What:** branch `go-parser-gp1` (`a71f51c2`, from `26816f48`) merged.
+  - **The parser:** `arbace.repr.go.parse` runs Go's go/parser in goi, in the tools' host, from
+    the executable's digest. Each run checks first that the digest's go/parser, go/scanner, go/ast
+    and go/token equal `tamago/goroot`'s forms declaration by declaration (135, 50, 291, 88; GPS12).
+  - **The dumper** is generated in memory from `tamago/goroot`'s go/ast forms (56 node types, 194
+    fields), with the helper's `:dot`, positions, comments, directives and `/*line*/` warnings
+    written by hand beside it. It builds the dump's data directly, without annotations.
+  - **New commands:** `bin/repr-go read --reader native` and `native-check [--fresh]`. The known
+    differences are listed in `test/repr/go/native-known.edn`, which is empty.
+    `bin/lib/repr-go/native-corpus` dumps the vendored corpora.
+  - **The gate:** `bin/gate --full` gets a step `repr-go-native` after the round trips (GPS15). The
+    Makefile gets `repr-go-native-check`.
+- **E-tree:** the native trees, comments and directives equal the helper's dumps over all 22
+  corpora: 12,275 of 12,275 dumps, 22,603 files, 25,763,858 node forms.
+  - One real difference was found and fixed: `blank1.go` (`package _`), whose go/types package
+    name is `""`.
+  - The 73 errtest programs go/parser rejects have no helper dump; they are GP6's.
+  - File lists come from the helper's headers until GP2 (GPS14).
+- **Times** over std tamago/amd64 (19.6 MB, one thread): parse 25.2 s (0.78 MB/s), dump 27.3 s,
+  52.5 s in all. Reading back the helper's dumps of the same files takes 96.7 s. The native dumps
+  as text are 132 MB, against the helper's 252.7 MB.
+- **Checks:** the branch's essential `bin/gate` passed (20m03s); `make check-makefile` passed.
+  The change is to tools' namespaces only, evaluated from the checkout, so no re-seed is needed.
+- **Open for the user:** GPS12-GPS15, each built as recommended (GOI-SPEC style, in the survey's
+  "As built: GP1"):
+  - GPS12: the forms from the digest, checked against `tamago/goroot`'s;
+  - GPS13: the dumper generated in memory at each load, a committed file at GP7;
+  - GPS14: file lists from the helper's headers until GP2;
+  - GPS15: `native-check --fresh` sequential after repr-go in `--full`.
+- **CLAUDE.md:** repr/go's verbs and `--full`'s list now name the native reader.
+- **A rule slip:** `bin/repr-go` was edited while a run of it was executing. Its dumps were
+  complete; the run's last line then failed.

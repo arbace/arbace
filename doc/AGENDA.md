@@ -113,8 +113,8 @@ The current state of the work. This file is rewritten as things change. For the 
 - **The two front-end surveys (2026-10-20, the user: "make plans"):** plans to decide, not builds.
   - Done: the Go parser's survey (doc/go/GO-PARSER-SURVEY.md, merged): recommended Go's go/parser
     from forms run by goi, annotations by goi's checker, gc's syntax for errors (GP1-GP8, 23-32
-    days, the box reads Go at GP8); GPS1-GPS11 decided as recommended (the user, 2026-10-20). Running:
-    GP1, the tree (`go-parser-gp1`).
+    days, the box reads Go at GP8); GPS1-GPS11 decided as recommended (the user, 2026-10-20). GP1 done
+    (2026-10-20: E-tree 12,275 of 12,275; GPS12-GPS15 open, for the user); next GP2, the loader.
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
