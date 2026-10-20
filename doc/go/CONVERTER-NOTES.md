@@ -364,6 +364,82 @@ The level run is skip for tamago (it does not run on this machine) and for the t
 compile (125 compiledir, 2 builddir); linux/arm64 runs through qemu-aarch64. Each configuration
 takes about 10 s (dump under a second, convert and print 3 s, check 3 to 9 s).
 
+## Raw forms (GP3, 2026-10-20)
+
+Raw forms are a private stage of the native reader (doc/go/GO-PARSER-SURVEY.md §4.2 step 2,
+"As built: GP3"): the converter's raw mode (`arbace.repr.go.convert/*raw*`, option `:raw` of
+`convert-package`) writes the forms of an un-annotated tree, the native reader's, with every
+decision of SPEC §11.1 that needs types left open and marked. They are for repr/go and the
+checker only (GPS10 (a)): not a dialect of SPEC, not printed, not read by goi. GP4's checker
+resolves them; its answers become the dump's annotations and the converter, unchanged, makes the
+final forms.
+
+**No annotation is read.** In raw mode `an` returns nil, so nothing of go/types reaches the
+forms; what the converter decided from the tree alone it decides as before. Raw forms always
+carry mode `:full`'s positions (`::pos`, `:go/pos` in the text): an open form keeps its node's
+positions, so the checker's answers are keyed by position.
+
+**What is open, and how each open decision is marked:**
+
+| decision (SPEC §11.1) | final forms | raw forms | kind |
+|---|---|---|---|
+| a call, a conversion, a builtin call, a method call | `(conv T x)`, `(len x)`, `(.M x a)`, `(f a)`, `(go/call h a)` | `(F a ...)`, F the callee's raw form; `(go/call h a ...)` only when `h` is a head of the forms' syntax that is not a builtin's name (`raw-reserved-heads`): a raw call is never classified, so `(len x)` calls the identifier `len` | `:call` |
+| field, method value, method expression, package member | `(.-f x)`, `(method-expr T M)`, `pkg/Name`, the head of `(.M x ...)` | `(go/select x f)`: x the operand's raw form, f the selected name (a symbol with its position) | `:select` |
+| index or instantiation | `(aget x i)`, `(inst F T ...)`, `(G T ...)` (a generic type) | `(go/index x i ...)`, for `x[i]` and `x[A, B]` | `:index` |
+| indirection or pointer type | `@x`, `(* T)` | `(go/star x)` | `:star` |
+| universe names | `true`, `false`, `nil`, or `(go/id "true")` when declared | `(go/id "true")` always: a name the checker looks up | `:id` |
+| new or reused names of `:=` | `x`, `^:assign x` | `^:go/define x` (every name but `_`) | `:define` |
+| keys of composite literals | `:f v` (a field) or `[k v]` (a map's key, an index) | `^:go/key [k v]` when k is an identifier; other keys are expressions, as before | `:key` |
+| constant values | `^{:val v}` on constant names | no `:val`; each constant name counted | `:val` |
+| untyped constant shifts (§8.3) | `^{:tag T} (<< 1 s)` | no `:tag`; each `<<` and `>>` counted | `:shift` |
+| an `any` constraint | left out when it is the universe's `any` | `^any T` | `:any` |
+| implicit import names | `[fmt "fmt"]` | `["fmt"]` | `:import` |
+| package initialization order | `:init-order [...]` | left out of `go/package` | `:init-order` (one per package) |
+| inferred type arguments, embedded paths | `:inst`, `:go/via` | none: they belong to the calls, selectors, index forms and keys above | |
+
+Decided from the syntax in raw mode as before: everything else. In particular a selector in a
+type context is `pkg/T` (a TypeName is a qualified identifier), `a[i] = v` is `aset` (an
+instance is not assignable), the cases of a type switch and the types of declarations, fields,
+signatures and composite literals are type forms, and `for {}`, labels, `let` scoping, `cond`,
+directives, comments and `:lang` are the converter's own.
+
+**Invalid programs.** Raw forms exist wherever go/parser accepts a file, also for the invalid
+programs the final conversion cannot represent (GC47's 64 of `$GOROOT/test`'s error tests; GPS9
+(b)). Their constructs that no valid program has are marked too:
+
+| construct | raw form | kind |
+|---|---|---|
+| `x.(type)` outside a type switch | `(go/type-guard x)` | `:type-guard` |
+| `:=` where no declaration may stand (a `for`'s post statement) | `(go/define targets init)` | `:define-stmt` |
+| a literal the forms cannot hold (`6e5518446744`) | `(go/literal "FLOAT" "6e5518446744")` | `:literal` |
+| a non-name where a name is required (`(x) := 0`, `switch main() := ...`) | the expression's raw form | |
+| a case of a type switch that is not a type's syntax (`case 0:`) | the expression's raw form | |
+
+A selection with no object, a conversion of several arguments, a constant without a value and
+an import whose path is not a name are ordinary raw forms (`go/select`, a call, a name without
+`:val`, `["path"]`): the checker reports them.
+
+**In memory.** Each open form, symbol or vector also carries the private key
+`arbace.repr.go.convert/open` (its kind), which the text does not have:
+`arbace.repr.go.convert/open-counts` counts them, and `arbace.repr.go.raw` checks them.
+
+**Commands.** `bin/repr-go read --reader native --raw [--corpus C | PKG ...]` writes the raw
+forms of the native reader's dumps as `.ae` files (mode `:full`), reads each back with Arbace's
+reader against the forms in memory, and counts the open decisions by kind (report
+`DIR/NAME.report.edn`, `:open`). `bin/repr-go raw-check [CORPUS ...]` (`make repr-go-raw-check`)
+converts each dump twice, the native dump raw and the helper's annotated dump as ever (mode
+`:full`), and walks the two in parallel (`arbace.repr.go.raw/conform`): equal everywhere but at
+the open decisions, where the final form must be one of that decision's resolutions (the table
+above). So erasing go/types' decisions from the final forms gives the raw forms exactly. The
+resolutions are counted (`[:call :conversion]`, `[:select :package]`, `[:define :reused]`, ...);
+known differences in `test/repr/go/raw-known.edn` (empty).
+
+Three things the final forms write less precisely than the raw ones, which `conform` accepts as
+the final's (GPS25): the operand of an instantiation without its parentheses, and as a field's
+selector or a method expression without the name's position; a conversion's argument without an
+invalid `...` (`unsafe.Pointer(&x...)`, `ddd1.go`, a known errorcheck divergence); a `...` after
+the universe's `nil` without a line.
+
 ## What remains
 
 - Mode `:full` is written but not consumed by the printer yet: columns would make the

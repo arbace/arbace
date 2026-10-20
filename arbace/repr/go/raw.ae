@@ -1,0 +1,535 @@
+(ns arbace.repr.go.raw
+  "repr/go's raw forms (doc/go/GO-PARSER-SURVEY.md GP3, §4.2 step 2; their shape in
+  doc/go/CONVERTER-NOTES.md, \"Raw forms\"): the converter's raw mode (arbace.repr.go.convert,
+  *raw*) over the native reader's un-annotated trees (arbace.repr.go.parse, the loader's jobs),
+  every decision that needs types left open and marked. Private to repr/go and the checker
+  (GPS10 (a)).
+
+  bin/repr-go read --reader native --raw ... runs -main read: the raw forms of each corpus
+  written as .ae files (mode :full's positions) and read back with Arbace's reader, their open
+  decisions counted by kind.
+
+  bin/repr-go raw-check ... runs -main check: each raw conversion against the final forms of the
+  helper's annotated dump, converted as ever (mode :full): the raw forms and the final ones walk
+  in parallel, equal everywhere but at the open decisions, where the final form must be one of
+  that decision's resolutions (conform). So erasing go/types' decisions from the final forms
+  gives the raw forms exactly, and the resolutions are counted by kind (what go/types decided at
+  each open decision)."
+  (:require [arbace.string :as str]
+            [arbace.repr.go :as rg]
+            [arbace.repr.go.convert :as cv]
+            [arbace.repr.go.lit :as lit]
+            [arbace.repr.go.load :as ld]
+            [arbace.repr.go.parse :as ps]
+            [arbace.repr.go.read :as rd])
+  (:import [java.io File]
+           [java.util.concurrent Executors TimeUnit]))
+
+;;; The final forms against the raw ones
+
+(def ^:dynamic *res*
+  "atom {[kind resolution] n}: how the final forms resolve the raw forms' open decisions."
+  nil)
+
+(defn- resolved! [k r] (when *res* (swap! *res* update [k r] (fnil inc 0))))
+
+(def ^:dynamic *inst-operand*
+  "Bound true while the operand of an instantiation is compared: the final instantiation writes
+  a field's or method value's selector without the name's position, and a method expression's
+  name without its line and position."
+  false)
+
+(defn- pos-merge
+  "Positions p with the non-nil ones of m; nil when none (a form relined has none)."
+  [p m]
+  (not-empty (merge p (into {} (filter val m)))))
+
+(defn- open-of [x] (when (instance? arbace.lang.IObj x) (::cv/open (meta x))))
+
+(defn- pos-of [x] (::cv/pos (meta x)))
+
+(defn- strip
+  "x's metadata without the keys ks."
+  [x ks]
+  (if (instance? arbace.lang.IObj x) (vary-meta x #(apply dissoc % ks)) x))
+
+(defn- short-str [x]
+  (let [s (binding [*print-meta* true *print-length* 20 *print-level* 6] (pr-str x))]
+    (if (> (count s) 400) (str (subs s 0 400) "...") s)))
+
+(defn- mismatch [path what r f] [path what (short-str r) (short-str f)])
+
+(declare conform conform-meta)
+
+(defn- conform-seq
+  "The children of r and f in order (lists or vectors), the same count."
+  [rs fs path]
+  (if (not= (count rs) (count fs))
+    (mismatch path :count rs fs)
+    (first (keep identity (map-indexed (fn [i [a b]] (conform a b (conj path i))) (map vector rs fs))))))
+
+(defn- final-only
+  "The final form's metadata only go/types decides beside the open forms: :inst on the uses of
+  generic functions, :go/via on selections and struct literals (counted, then dropped)."
+  [f]
+  (if (instance? arbace.lang.IObj f)
+    (let [m (meta f)]
+      (when (contains? m :inst) (resolved! :inst :inst))
+      (when (contains? m :go/via) (resolved! :via :via))
+      (if (or (contains? m :inst) (contains? m :go/via)) (strip f [:inst :go/via]) f))
+    f))
+
+(defn conform-meta
+  "The metadata of r and f, private keys included (::l, ::pos, ::full), equal as conform; the
+  raw-only ::open left out."
+  [r f path]
+  (let [mr (dissoc (meta r) ::cv/open)
+        mf (meta (final-only f))]
+    (when (or (seq mr) (seq mf))
+      (if (not= (set (keys mr)) (set (keys mf)))
+        (mismatch (conj path :meta) :meta-keys (vec (sort-by str (keys mr))) (vec (sort-by str (keys mf))))
+        (first (keep (fn [k] (conform (get mr k) (get mf k) (conj path :meta k))) (sort-by str (keys mr))))))))
+
+(defn- lit-equal [r f path]
+  (when-not (= (into {} r) (into {} f)) (mismatch path :literal r f)))
+
+(defn- generic
+  "r and f of the same shape, compared part by part."
+  [r f path]
+  (cond
+    (and (lit/lit? r) (lit/lit? f)) (lit-equal r f path)
+    (or (lit/lit? r) (lit/lit? f)) (mismatch path :kind r f)
+    (and (symbol? r) (symbol? f)) (if (= r f) (conform-meta r f path) (mismatch path :symbol r f))
+    (and (seq? r) (seq? f)) (or (conform-seq r f path) (conform-meta r f path))
+    (and (vector? r) (vector? f)) (or (conform-seq r f path) (conform-meta r f path))
+    (and (map? r) (map? f)) (if (not= (set (keys r)) (set (keys f)))
+                              (mismatch path :map-keys r f)
+                              (first (keep (fn [k] (conform (get r k) (get f k) (conj path k))) (sort-by str (keys r)))))
+    :else (when-not (= r f) (mismatch path :value r f))))
+
+(defn- parens [x] (get-in (meta x) [::cv/full :go/parens]))
+
+(defn- without-parens [x]
+  (if (parens x) (vary-meta x update ::cv/full #(not-empty (dissoc % :go/parens))) x))
+
+(defn- fix-meta
+  "x's metadata with ::full left out when empty."
+  [x]
+  (if (and (instance? arbace.lang.IObj x) (contains? (meta x) ::cv/full) (empty? (::cv/full (meta x))))
+    (vary-meta x dissoc ::cv/full)
+    x))
+
+(def unsafe-builtins '#{Add Alignof Offsetof Sizeof Slice SliceData String StringData})
+
+(defn- sel-name
+  "The name a raw (go/select x f) selects: f a symbol, or (go/id \"true\")."
+  [s]
+  (if (symbol? s) (name s) (:value (second s))))
+
+(defn- call-parts
+  "A raw call's callee and arguments: (F args...) or (go/call h args...)."
+  [r]
+  (if (= 'go/call (first r)) [(second r) (nnext r)] [(first r) (rest r)]))
+
+(defn- conform-call [r f path]
+  (let [[rh ra] (call-parts r)
+        fh (first f)]
+    (cond
+      (and (= 'conv fh) (= 3 (count f)) (= 1 (count ra)))
+      (do (resolved! :call :conversion)
+          (or (conform rh (second f) (conj path 0))
+              (when-let [d (conform (first ra) (nth f 2) (conj path 1))]
+                ;; the final conversion drops an invalid ... (unsafe.Pointer(&x...), ddd1.go)
+                (let [a (first ra)]
+                  (if (and (seq? a) (= 'spread (first a)) (not (conform (second a) (nth f 2) (conj path 1))))
+                    (do (resolved! :call :conversion-drops-spread) nil)
+                    d)))
+              (conform-meta r f path)))
+
+      ;; (.M x args...): the callee (go/select x M) is a method
+      (and (symbol? fh) (nil? (namespace fh)) (str/starts-with? (name fh) ".")
+           (not (str/starts-with? (name fh) ".-"))
+           (seq? rh) (= 'go/select (first rh)) (= (subs (name fh) 1) (sel-name (nth rh 2))))
+      (let [[_ x s] rh]
+        (resolved! :call :method)
+        (resolved! :select :method-call)
+        (or (conform x (second f) (conj path 0 1))
+            (conform-seq (vec ra) (vec (nnext f)) path)
+            (let [want (pos-merge (pos-of r) {:dot (:dot (pos-of rh)) :name-pos (:name-pos (pos-of s))})]
+              (when-not (= want (not-empty (pos-of f))) (mismatch path :method-pos want (pos-of f))))
+            (conform-meta (strip r [::cv/pos]) (strip f [::cv/pos]) path)))
+
+      (= 'go/call fh)
+      (do (resolved! :call :call)
+          (or (conform rh (second f) (conj path 0))
+              (conform-seq (vec ra) (vec (nnext f)) path)
+              (conform-meta r f path)))
+
+      :else
+      (do (resolved! :call (cond
+                             (and (symbol? fh) (nil? (namespace fh)) (cv/builtin-heads fh)) :builtin
+                             (and (symbol? fh) (= "unsafe" (namespace fh)) (unsafe-builtins (symbol (name fh)))) :builtin
+                             :else :call))
+          (or (conform rh fh (conj path 0))
+              (conform-seq (vec ra) (vec (rest f)) path)
+              (conform-meta r f path))))))
+
+(defn- conform-select [r f path]
+  (let [[_ x s] r]
+    (cond
+      ;; pkg/Name: x a package
+      (and (symbol? f) (namespace f))
+      (do (resolved! :select :package)
+          (cond
+            (not (and (symbol? x) (nil? (namespace x)) (= (name x) (namespace f)) (= (sel-name s) (name f))))
+            (mismatch path :package-member r f)
+            :else
+            (let [want (pos-merge (pos-of r) {:x-pos (:name-pos (pos-of x)) :name-pos (:name-pos (pos-of s))})]
+              (if (not= want (not-empty (pos-of f)))
+                (mismatch path :member-pos want (pos-of f))
+                (conform-meta (strip r [::cv/pos]) (strip f [::cv/pos]) path)))))
+
+      (and (seq? f) (symbol? (first f)) (str/starts-with? (name (first f)) ".-") (= 2 (count f)))
+      (do (resolved! :select :field-or-method-value)
+          (if (not= (subs (name (first f)) 2) (sel-name s))
+            (mismatch path :field-name r f)
+            (or (binding [*inst-operand* false] (conform x (second f) (conj path 1)))
+                (let [want (if *inst-operand*
+                             (not-empty (pos-of r))
+                             (pos-merge (pos-of r) {:name-pos (:name-pos (pos-of s))}))]
+                  (when-not (= want (not-empty (pos-of f))) (mismatch path :field-pos want (pos-of f))))
+                (conform-meta (strip r [::cv/pos]) (strip f [::cv/pos]) path))))
+
+      (and (seq? f) (= 'method-expr (first f)) (= 3 (count f)))
+      (do (resolved! :select :method-expression)
+          (or (binding [*inst-operand* false] (conform x (second f) (conj path 1)))
+              (conform (if *inst-operand* (strip s [::cv/l ::cv/pos]) s) (nth f 2) (conj path 2))
+              (conform-meta r f path)))
+
+      :else (mismatch path :select r f))))
+
+(defn- conform-index [r f path]
+  (let [[_ x & is] r
+        fh (when (seq? f) (first f))]
+    (cond
+      (not (seq? f)) (mismatch path :index r f)
+      (and (= 'aget fh) (= 1 (count is)) (= 3 (count f)))
+      (do (resolved! :index :index)
+          (or (conform x (second f) (conj path 1))
+              (conform (first is) (nth f 2) (conj path 2))
+              (conform-meta r f path)))
+      (= 'inst fh)
+      (do (resolved! :index :instantiation)
+          (or (when (not= (count r) (count f)) (mismatch path :count r f))
+              ;; the final instance's operand is written without its parentheses
+              (binding [*inst-operand* true]
+                (when (conform x (second f) (conj path 1))
+                  (conform (fix-meta (without-parens x)) (second f) (conj path 1))))
+              (conform-seq (vec is) (vec (nnext f)) path)
+              (conform-meta r f path)))
+      :else
+      (do (resolved! :index :type-instance)
+          (or (when (not= (count r) (inc (count f))) (mismatch path :count r f))
+              (conform x fh (conj path 0))
+              (conform-seq (vec is) (vec (rest f)) path)
+              (conform-meta r f path))))))
+
+(defn- conform-star [r f path]
+  (cond
+    (and (seq? f) (= 2 (count f)) (= 'deref (first f)) (::cv/deref (meta f)))
+    (do (resolved! :star :indirection)
+        (or (conform (second r) (second f) (conj path 1))
+            (conform-meta r (strip f [::cv/deref]) path)))
+    (and (seq? f) (= 2 (count f)) (= '* (first f)))
+    (do (resolved! :star :pointer-type)
+        (or (conform (second r) (second f) (conj path 1))
+            (conform-meta r f path)))
+    :else (mismatch path :star r f)))
+
+(defn- conform-id [r f path]
+  (let [nm (:value (second r))]
+    (if (lit/lit? f)
+      (let [m (meta r)]
+        (resolved! :id :universe)
+        (if (and (= nm (:text f)) (= (:value f) ({"true" true "false" false "nil" nil} nm))
+                 (= (::cv/l m) (:line f)) (= (:name-pos (::cv/pos m)) (:pos f))
+                 (= (parens r) (:parens f)) (nil? (:spell f)) (nil? (:colon f))
+                 (empty? (dissoc (::cv/full m) :go/parens)))
+          nil
+          (mismatch path :universe-literal r f)))
+      (do (resolved! :id :declared) (generic r f path)))))
+
+(defn- conform-lit-elems
+  "The elements of a raw (lit T ...) against the final's: an identifier key ^:go/key [k v] is a
+  field's name (:k v) or stays an expression key ([k v])."
+  [r f path]
+  (loop [rs (seq r) fs (seq f) i 0]
+    (cond
+      (and (empty? rs) (empty? fs)) nil
+      (or (empty? rs) (empty? fs)) (mismatch path :count r f)
+      :else
+      (let [c (first rs) d (first fs)]
+        (if (= :key (open-of c))
+          (if (and (lit/lit? d) (keyword? (:value d)))
+            (let [[k v] c
+                  kname (if (symbol? k) (name k) (:value (second k)))
+                  want {:value (keyword kname) :text (str ":" kname) :line (if (symbol? k) (::cv/l (meta k)) (::cv/l (meta k)))
+                        :pos (:name-pos (pos-of k)) :colon (:colon (pos-of c))}]
+              (resolved! :key :field)
+              (or (when-not (= want (select-keys d (keys want))) (mismatch (conj path i) :field-key want d))
+                  (conform v (second fs) (conj path i 1))
+                  (recur (next rs) (nnext fs) (inc i))))
+            (do (resolved! :key :expression)
+                (or (conform (strip c [:go/key ::cv/open]) d (conj path i))
+                    (recur (next rs) (next fs) (inc i)))))
+          (or (conform c d (conj path i))
+              (recur (next rs) (next fs) (inc i))))))))
+
+(defn conform
+  "nil when the final form f resolves the raw form r (equal but at the open decisions, each
+  resolved as go/types may), else the first difference [path what raw final]."
+  [r f path]
+  (case (open-of r)
+    :call (if (seq? f) (conform-call r f path) (mismatch path :call r f))
+    :select (conform-select r f path)
+    :index (conform-index r f path)
+    :star (conform-star r f path)
+    :id (conform-id r f path)
+    :define (if (and (symbol? f) (= (name r) (name f)))
+              (do (resolved! :define (if (:assign (meta f)) :reused :new))
+                  (conform-meta (strip r [:go/define]) (strip f [:assign]) path))
+              (mismatch path :define r f))
+    :val (do (resolved! :val (if (contains? (meta f) :val) :value :none))
+             (generic (strip r [::cv/open]) (strip f [:val]) path))
+    :shift (do (resolved! :shift (if (contains? (meta f) :tag) :tag :none))
+               (generic (strip r [::cv/open]) (strip f [:tag]) path))
+    :any (if (and (symbol? f) (not (contains? (meta f) :tag)))
+           (do (resolved! :any :universe)
+               (generic (strip r [::cv/open :tag]) f path))
+           (do (resolved! :any :declared)
+               (generic (strip r [::cv/open]) f path)))
+    :import (if (and (vector? f) (= 2 (count f)) (symbol? (first f)) (not (:alias (meta f))))
+              (do (resolved! :import :implicit)
+                  (or (conform (first r) (second f) (conj path 1))
+                      (conform-meta r f path)))
+              (mismatch path :import r f))
+    (:key :type-guard :define-stmt :literal) (mismatch path :open-without-final r f)
+    ;; not open
+    (cond
+      (and (seq? r) (= 'lit (first r)) (seq? f) (= 'lit (first f)))
+      (or (conform-lit-elems r f path) (conform-meta r f path))
+      ;; f(nil...): the final spread of the universe's nil has no line (its operand a literal)
+      (and (seq? r) (= 'spread (first r)) (= 2 (count r)) (= :id (open-of (second r)))
+           (seq? f) (= 'spread (first f)) (= 2 (count f)) (lit/lit? (second f)) (nil? (::cv/l (meta f))))
+      (or (conform (second r) (second f) (conj path 1))
+          (conform-meta (strip r [::cv/l]) (strip f [::cv/l]) path))
+      ;; for true {...}: (while (go/id "true") ...), (for [] true _ ...) when true is the universe's
+      (and (seq? r) (= 'while (first r)) (seq? f) (= 'for (first f)) (= (+ 2 (count r)) (count f))
+           (= :id (open-of (second r))) (= [] (nth f 1)) (= '_ (nth f 3)))
+      (do (resolved! :for :while-true)
+          (or (conform (second r) (nth f 2) (conj path 1))
+              (conform-seq (vec (nnext r)) (vec (drop 4 f)) path)))
+      :else (generic r f path))))
+
+(defn conform-package
+  "The raw conversion rc of a package against the final one fc (arbace.repr.go.convert's
+  convert-package results): nil, or the first difference [file path what raw final]."
+  [rc fc]
+  (let [pf (fn [p] (let [[h nm & kvs] p]
+                     (apply list h nm (mapcat identity (remove #(= :init-order (first %)) (partition 2 kvs))))))]
+    (or (when (not= (:ns rc) (:ns fc)) [nil [] :ns (:ns rc) (:ns fc)])
+        (when (not= (pf (:package fc)) (:package rc))
+          [nil [] :package (short-str (:package rc)) (short-str (:package fc))])
+        (when (not= (count (:files rc)) (count (:files fc)))
+          [nil [] :files (count (:files rc)) (count (:files fc))])
+        (first (keep (fn [[a b]]
+                       (or (when (not= (select-keys a [:name :stem :comments :unplaced])
+                                       (select-keys b [:name :stem :comments :unplaced]))
+                             [(:name a) [] :file (short-str (select-keys a [:name :stem :unplaced])) (short-str (select-keys b [:name :stem :unplaced]))])
+                           (when-let [d (conform-seq (vec (:forms a)) (vec (:forms b)) [])]
+                             (into [(:name a)] d))))
+                     (map vector (:files rc) (:files fc)))))))
+
+;;; Corpora
+
+(defn- read-spec [^String f] (binding [*read-eval* false] (read-string (slurp f))))
+
+(defn spec-jobs
+  "A corpus spec's loads' jobs (arbace.repr.go.parse's, each with its load's :goroot and :sub)."
+  [spec]
+  (vec (mapcat (fn [l]
+                 (for [j (ld/jobs l) :when (:files j)]
+                   (cond-> (assoc j :goroot (:goroot l))
+                     (:sub l) (assoc :key (str (:sub l) "/" (:key j)) :sub (:sub l)))))
+               (:loads spec))))
+
+(defn- merge-counts [ms] (apply merge-with + {} ms))
+
+(defn- raw-job
+  "The raw forms of loader job j, written under out: arbace.repr.go/convert-data's result
+  (:open the open decisions by kind, :bad what did not read back), or :rejected (go/parser) or
+  :fail (the conversion)."
+  [forms j out]
+  (let [t0 (System/nanoTime)
+        n (ps/native-dump forms j)
+        t1 (System/nanoTime)]
+    (if (:error n)
+      {:key (:key j) :rejected (str (:file n) ": " (:error n))}
+      (try
+        (assoc (rg/convert-data n (:key j) (str (:key j) ".edn") t0 t1
+                                {:out (str out (when (:sub j) (str "/" (:sub j)))) :positions :full :raw true
+                                 :goroot (:goroot j) :check true})
+               :key (:key j) :times (:times n))
+        (catch Throwable e
+          {:key (:key j) :fail (str (.getName (class e)) ": " (.getMessage e))
+           :trace (vec (take 12 (map str (.getStackTrace e))))})))))
+
+(defn- read-corpus [forms spec pool out]
+  (let [t0 (System/nanoTime)
+        nm (:name spec)
+        js (spec-jobs spec)
+        futs (mapv (fn [j] (.submit ^java.util.concurrent.ExecutorService pool ^Callable (fn [] (raw-job forms j (str out "/" nm))))) js)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        ok (filter #(and (:files %) (not (:fail %))) rs)
+        bad (filter #(seq (:bad %)) ok)
+        fails (filter :fail rs)
+        open (merge-counts (map :open ok))
+        sum (fn [k] (reduce + (keep #(get-in % [:times k]) ok)))]
+    (doseq [r fails] (println "FAIL" nm (:key r) (:fail r)) (doseq [t (:trace r)] (println "    " t)))
+    (doseq [r bad [f m] (:bad r)] (println "BAD" nm (:key r) f m))
+    (println (format "%s: %d dumps converted raw (%d files, %.1f MB of forms), read back: %d; %d rejected by go/parser, %d failed; open %s (%d); init orders %d; %.1f s"
+                     nm (count ok) (reduce + (map :files ok)) (/ (reduce + (map :bytes ok)) 1e6)
+                     (- (count ok) (count bad)) (count (filter :rejected rs)) (count fails)
+                     (pr-str (into (sorted-map) open)) (reduce + (vals open)) (count ok)
+                     (/ (- (System/nanoTime) t0) 1e9)))
+    {:corpus nm :jobs (count js) :dumps (count ok) :files (reduce + (map :files ok))
+     :bytes (reduce + (map :bytes ok)) :bad (count bad) :failed (count fails)
+     :rejected (count (filter :rejected rs))
+     :open (into (sorted-map) (assoc open :init-order (count ok)))
+     :parse-s (/ (sum :parse-ms) 1e3) :dump-s (/ (sum :dump-ms) 1e3)
+     :convert-s (/ (reduce + (keep :ms ok)) 1e3)
+     :wall-s (/ (- (System/nanoTime) t0) 1e9)
+     :fails (vec (for [r fails] [(:key r) (:fail r)]))
+     :unknown (+ (count bad) (count fails))}))
+
+(defn- check-job
+  "The raw conversion of job j against the final one of the helper's dump at path (nil: none):
+  {:key :conform :diff :final-fail :raw-fail :rejected :extra :res {[kind resolution] n} :open}."
+  [forms j ^String path]
+  (let [base {:key (:key j) :path path}]
+    (try
+      (let [n (ps/native-dump forms j)]
+        (if (:error n)
+          (assoc base :rejected (str (:file n) ": " (:error n)))
+          (let [rel (str (:key j) ".edn")
+                ctx (rg/dump-context n rel (:goroot j))
+                opts (assoc ctx :positions :full)
+                rc (try (cv/convert-package n (assoc opts :raw true))
+                        (catch Throwable e {:raw-fail (str (.getName (class e)) ": " (.getMessage e))
+                                            :trace (vec (take 12 (map str (.getStackTrace e))))}))
+                open (when-not (:raw-fail rc)
+                       (assoc (cv/open-counts (mapcat :forms (:files rc))) :init-order 1))]
+            (cond
+              (:raw-fail rc) (merge base (select-keys rc [:raw-fail :trace]))
+              (nil? path) (assoc base :extra true :open open)
+              :else
+              (let [d (rd/read-dump path)
+                    fc (try (cv/convert-package d (assoc (rg/dump-context d rel (:goroot j)) :positions :full))
+                            (catch Throwable e {:final-fail (str (.getName (class e)) ": " (.getMessage e))}))]
+                (if (:final-fail fc)
+                  (assoc base :final-fail (:final-fail fc) :open open)
+                  (let [res (atom {})
+                        df (binding [*res* res] (conform-package rc fc))]
+                    (cond-> (assoc base :open open :res @res)
+                      df (assoc :diff (vec df))
+                      (not df) (assoc :conform true)))))))))
+      (catch Throwable e
+        (assoc base :fail (str (.getName (class e)) ": " (.getMessage e))
+               :trace (vec (take 12 (map str (.getStackTrace e)))))))))
+
+(defn- check-corpus [forms spec pool known]
+  (let [t0 (System/nanoTime)
+        nm (:name spec)
+        dumps (str/replace (:dumps spec) #"/+$" "")
+        helper (into {} (for [p (rd/dump-files [dumps])]
+                          [(str/replace (subs p (inc (count dumps))) #"\.edn$" "") p]))
+        js (spec-jobs spec)
+        futs (mapv (fn [j] (.submit ^java.util.concurrent.ExecutorService pool
+                                    ^Callable (fn [] (check-job forms j (get helper (:key j))))))
+                   js)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        known? (fn [r] (contains? known (:key r)))
+        by (fn [k] (filter k rs))
+        unknown (remove known? (concat (by :diff) (by :fail) (by :raw-fail)))
+        res (merge-counts (keep :res rs))]
+    (doseq [r (by :diff)] (println (if (known? r) "DIFF known" "DIFF") nm (:key r) (pr-str (:diff r))))
+    (doseq [r (concat (by :fail) (by :raw-fail))]
+      (println (if (known? r) "FAIL known" "FAIL") nm (:key r) (or (:fail r) (:raw-fail r)))
+      (doseq [t (:trace r)] (println "    " t)))
+    (doseq [r (by :final-fail)] (println "RAW ONLY" nm (:key r) "the final conversion fails:" (:final-fail r)))
+    (println (format "%s: %d of %d dumps' raw forms resolved by the final ones; %d differ, %d failed; raw only: %d the final conversion fails, %d without the helper's dump; %d rejected by go/parser; %d not known; %.1f s"
+                     nm (count (by :conform)) (count (filter #(and (:path %) (not (:rejected %))) rs))
+                     (count (by :diff)) (+ (count (by :fail)) (count (by :raw-fail)))
+                     (count (by :final-fail)) (count (by :extra)) (count (by :rejected)) (count unknown)
+                     (/ (- (System/nanoTime) t0) 1e9)))
+    {:corpus nm :jobs (count js) :helper (count helper) :conform (count (by :conform))
+     :differ (vec (for [r (by :diff)] [(:key r) (:diff r)]))
+     :fail (vec (for [r (concat (by :fail) (by :raw-fail))] [(:key r) (or (:fail r) (:raw-fail r))]))
+     :final-fail (vec (for [r (by :final-fail)] [(:key r) (:final-fail r)]))
+     :extra (vec (map :key (by :extra))) :rejected (count (by :rejected))
+     :open (into (sorted-map) (merge-counts (keep :open rs)))
+     :resolutions (into (sorted-map) res)
+     :unknown (count unknown) :wall-s (/ (- (System/nanoTime) t0) 1e9)}))
+
+(defn -main
+  "read|check [--jobs N] [--forms DIR] [--out DIR] [--known FILE] [--report FILE] SPEC...
+
+  read: the raw forms of each corpus SPEC (arbace.repr.go.parse's specs) under --out DIR/NAME
+  (DIR/NAME/SUB for a load's :sub), each file read back with Arbace's reader; the open decisions
+  counted by kind. Exits 1 when a conversion fails or a file does not read back.
+
+  check: the raw forms of each corpus against the final forms of the helper's dumps (:dumps):
+  conform. Exits 1 on a difference or failure that the known differences (a map of dump key to
+  the reason) do not list."
+  [& args]
+  (let [[cmd & args] args
+        _ (when-not (#{"read" "check"} cmd)
+            (binding [*out* *err*] (println "usage: read|check [--jobs N] [--forms DIR] [--out DIR] [--known FILE] [--report FILE] SPEC..."))
+            (System/exit 2))
+        [opts specs] (loop [opts {:jobs 1 :forms "tamago/goroot" :out ".tmp/repr-go/raw"}
+                            [a & more :as args] args]
+                       (case a
+                         "--jobs" (recur (assoc opts :jobs (parse-long (first more))) (rest more))
+                         "--forms" (recur (assoc opts :forms (first more)) (rest more))
+                         "--out" (recur (assoc opts :out (first more)) (rest more))
+                         "--known" (recur (assoc opts :known (first more)) (rest more))
+                         "--report" (recur (assoc opts :report (first more)) (rest more))
+                         [opts args]))
+        known (or (when-let [k (:known opts)]
+                    (when (.isFile (File. ^String k))
+                      (binding [*read-eval* false] (read-string (slurp k)))))
+                  {})
+        {:keys [ms]} (ps/load! (:forms opts))
+        _ (println (format "the dumper generated from go/ast's forms and loaded with go/parser by goi in %.2f s" (/ ms 1e3)))
+        pool (Executors/newFixedThreadPool (:jobs opts))
+        results (vec (for [sf specs]
+                       (let [spec (read-spec sf)]
+                         (if (= cmd "read")
+                           (read-corpus (:forms opts) spec pool (:out opts))
+                           (check-corpus (:forms opts) spec pool known)))))
+        unknown (reduce + (map :unknown results))]
+    (.shutdown pool)
+    (.awaitTermination pool 1 TimeUnit/MINUTES)
+    (when (> (count results) 1)
+      (if (= cmd "read")
+        (println (format "raw forms: %d corpora, %d dumps, %d files, %.1f MB; open %s; %d not known"
+                         (count results) (reduce + (map :dumps results)) (reduce + (map :files results))
+                         (/ (reduce + (map :bytes results)) 1e6)
+                         (pr-str (merge-counts (map :open results))) unknown))
+        (println (format "raw-check: %d corpora, %d dumps resolved by the final forms, %d differ, %d raw only (the final conversion fails); %d not known"
+                         (count results) (reduce + (map :conform results)) (reduce + (map (comp count :differ) results))
+                         (reduce + (map (comp count :final-fail) results)) unknown))))
+    (when-let [rf (:report opts)]
+      (spit rf (with-out-str (binding [*print-length* nil *print-level* nil] (prn {:corpora results})))))
+    (shutdown-agents)
+    (System/exit (if (pos? unknown) 1 0))))
