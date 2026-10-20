@@ -833,3 +833,20 @@ All in the worktree's `.tmp/gps/`, not tracked:
   `dump1/` and `dump64/`: the helper over std at `-j 1` and `-j 64`. `corpus-amd64.log`,
   `read-amd64.log` and `read-amd64-full.log`: `bin/repr-go corpus amd64`, `read --corpus amd64`
   and `read --full --corpus amd64`, timed. `annot.log`: `bin/goi annotations tamago-amd64`.
+
+## Decided (2026-10-20)
+
+The user decided GPS1-GPS11 as recommended:
+- GPS1 (c): Go's go/parser from `tamago/goroot`'s forms, run by Arbace.
+- GPS2 (b): syntax errors from gc's syntax.
+- GPS3 (a): annotations from Arbace's checker over raw forms; (b) at GP7 if the second conversion
+  is measured to matter.
+- GPS4 (b): interpreted from GP1, compiled at GP7.
+- GPS5 (a): the dumper generated from go/ast's forms.
+- GPS6 (a): the dump's data shape.
+- GPS7 (a): native by default, the helper as the oracle.
+- GPS8 (a): `--full` only.
+- GPS9 (b): the 64 invalid programs checked on their raw forms.
+- GPS10 (a): raw forms private.
+- GPS11 (a): Go text at the REPL later.
+The milestones are GP1-GP8 (§8).

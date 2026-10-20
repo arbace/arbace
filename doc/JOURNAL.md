@@ -197,3 +197,23 @@ GitHub's repository description, README's first line and CLAUDE.md's.
   annotations, and `.ae` byte for byte in `:lines` and `:full`.
 - **Milestones:** GP1-GP8, about 23-32 days, the last letting the box read Go.
 - **Proposals GPS1-GPS11** are open, for the user.
+
+## 2026-10-20: GPS1-GPS11 and JFS1-JFS11 decided as recommended (the user)
+
+- **The Go parser** (doc/go/GO-PARSER-SURVEY.md, "Decided"):
+  - Go's go/parser from `tamago/goroot`'s forms, run by goi, compiled at GP7;
+  - gc's syntax for syntax errors;
+  - goi's checker for the annotations, the converter unchanged;
+  - the helper kept as the oracle in `bin/gate --full`;
+  - the 64 invalid programs checked on their raw forms.
+  The milestones are GP1-GP8.
+- **The Java front end** (doc/classes/JAVA-FRONTEND-SURVEY.md, "Decided"):
+  - javac itself as Java forms, in `jdk/javac/` (`bin/javac-vendor`), pinned to jdk26u `baf63fb`;
+  - run by Arbace in a tool executable built on demand, with an Arbace `JavaFileManager`;
+  - the platform's declarations compiled once and cached;
+  - the fixtures' runtime printed from `arbace/lang`;
+  - repr/java's `--full` steps moved to it;
+  - no native front end now.
+  The milestones are renamed JN1-JN9 (JFS11), since JF1-JF5 name PRINTER-NOTES' decided printer
+  choices.
+- Neither has started: the decisions record the plans.

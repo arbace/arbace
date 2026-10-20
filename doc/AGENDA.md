@@ -113,10 +113,12 @@ The current state of the work. This file is rewritten as things change. For the 
 - **The two front-end surveys (2026-10-20, the user: "make plans"):** plans to decide, not builds.
   - Done: the Go parser's survey (doc/go/GO-PARSER-SURVEY.md, merged): recommended Go's go/parser
     from forms run by goi, annotations by goi's checker, gc's syntax for errors (GP1-GP8, 23-32
-    days, the box reads Go at GP8); proposals GPS1-GPS11 open, for the user.
+    days, the box reads Go at GP8); GPS1-GPS11 decided as recommended (the user, 2026-10-20); not
+    started.
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
-    native front end later; proposals JFS1-JFS11 open, for the user.
+    native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
+    milestones named JN1-JN9; not started.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

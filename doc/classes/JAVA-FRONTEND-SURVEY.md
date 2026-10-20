@@ -724,3 +724,20 @@ files named; nothing in them is needed to read this survey):
 - Prior art: shallow clones in `.tmp/prior/` (`jp`, `tsj`, `ecj` with a sparse checkout of
   `org.eclipse.jdt.core.compiler.batch`), measured with `find ... -name '*.java' | wc -l` and
   `wc -l`.
+
+## Decided (2026-10-20)
+
+The user decided JFS1-JFS11 as recommended:
+- JFS1 (b): javac as Java forms, run by Arbace, to the switch; a native front end later on its
+  checks.
+- JFS2 (a): java.base and java.xml compiled once by javac on Arbace, cached.
+- JFS3 (b): javac's forms in `jdk/javac/`, with `bin/javac-vendor convert|verify|check`.
+- JFS4 (b): a tool executable built on demand, cached.
+- JFS5 (b): an Arbace `JavaFileManager`.
+- JFS6 (a): the fixtures' runtime printed from the checkout's `arbace/lang`, any change to their
+  forms reviewed.
+- JFS7 (a): the converter's interface unchanged until a native front end starts.
+- JFS8 (a): javac pinned to jdk26u `baf63fb`.
+- JFS9 (a): the repr/java `--full` steps move to the tool executable.
+- JFS10 (a): no native front end now; decided again after JN6, parser first.
+- JFS11 (b): the milestones are named JN1-JN9; read this document's JF1-JF9 as JN1-JN9.
