@@ -119,7 +119,7 @@ The current state of the work. This file is rewritten as things change. For the 
     essential 739; `--box` amd64 583/584.
   - The seed `4b2646e6…` (`bbe368f9`), verified (stage 0 `6375d2db…`).
 - **The plan to the milestone `arbace-interprets-go-v1`** (the user, 2026-10-19: the full plan; the
-  name to confirm at the tag). The milestone claims goi a complete interpreter of Go forms at the
+  tag's name `arbace-interprets-go1.27.1-v1`, the user, 2026-10-20). The milestone claims goi a complete interpreter of Go forms at the
   REPL. The steps:
   1. **GR7b** (done 2026-10-19, GC45-GC54 as built; GR7c, the rest of its fails, running): `$GOROOT/test`'s errorcheck programs judged by Go's test driver, with the
      checker's errors equal to gc's; `reify` of listed Go interfaces from Arbace (G13). After it,

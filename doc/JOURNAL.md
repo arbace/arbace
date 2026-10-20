@@ -2075,3 +2075,12 @@ v1's divergences by design are listed there. Staging (G16) and speed (F10) come 
   `box-reflect-overlay`, from `8aa86623`, as the agent recommended.
 - **Left for the user:** the check on the Mac, `./mac.sh goi` (about 1.5 h with `./mac.sh all`),
   once the bundle builds.
+
+## 2026-10-20: the milestone's tag named
+
+The user approved the tag `arbace-interprets-go1.27.1-v1` for the milestone, rather than
+`arbace-interprets-go-v1`. Go's version is in the name because goi's claim is checked against
+go1.27.1's `$GOROOT/test` and its checker follows go1.27.1's go/types, as the frozen branch's tag
+`arbace-for-go1.27.1-v1` names its Go. A later Go would get a tag of its own, not a `-v2`.
+Alternatives considered: `arbace-go-at-the-repl-v1` (undersells programs, the box and std),
+`arbace-speaks-go-v1` (vague: repr/go also speaks Go), `arbace-goi-v1` (a tool, not a claim).
