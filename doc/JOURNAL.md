@@ -388,3 +388,12 @@ JN2, javac's forms vendored (branch `java-frontend-jn2`, from `52d8c504`):
 ## 2026-10-20: GPS16-GPS20 decided as built (the user)
 
 GPS16-GPS20 (doc/go/GO-PARSER-SURVEY.md, "As built: GP2"), each (a), as built.
+
+## 2026-10-20: GP3 started (the user)
+
+GP3, raw forms (branch `go-parser-gp3`, from `02d20ed1`): the converter's raw mode over the native
+tree, with every decision that needs types left open and marked, for GP4's resolving checker. The
+mode is private (GPS10 (a)) and documented. Exit:
+- every corpus converted raw, read back, its open decisions counted per kind;
+- GC47's invalid programs given raw forms where the parser accepts them;
+- the normal conversion unchanged.
