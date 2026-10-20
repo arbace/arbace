@@ -1,0 +1,583 @@
+(ns arbace.repr.go.parse
+  "repr/go's native reader, its tree (doc/go/GO-PARSER-SURVEY.md, GP1): Go's own go/parser, as
+  the Go forms of tamago/goroot, run by goi (interpreted, GPS1 (c), GPS4 (b)), and a dumper that
+  builds the tree of the helper's dump (doc/go/HELPER-NOTES.md, \"The tree\") directly as Arbace
+  data (GPS6 (a): format :godump 2, positions \"L:C\"), without the dump's text.
+
+  The dumper is a Go package of Go forms, generated here from go/ast's forms
+  (tamago/goroot/go/go/ast/ast.ae, GPS5 (a)): one case of a type switch per node type of go/ast,
+  its fields in go/ast's order and of the helper's kinds (positions, tokens, channel
+  directions, strings, booleans, comment groups as their first position, nodes and lists of
+  nodes; the parser's resolution, File.Imports and File.Comments not written), plus the parts
+  that are not go/ast's: the selector's and type assertion's :dot, the comment groups with :text
+  on doc groups, the directives and the :warnings, after tools/godump/dump.go. It is checked and
+  defined by goi (arbace.go.repl) once per process, under the import path
+  arbace/repr/go/godump, and imports go/parser, go/ast and go/token (interpreted from the
+  digest), strconv, strings, path/filepath, os, time and arbace (compiled).
+
+  No annotations: they are GP4's. File lists are not the native reader's either (GP2's loader):
+  native-dump takes a helper dump's header (its configuration, directory and files) and parses
+  its files.
+
+  bin/repr-go read --reader native ... and bin/repr-go native-check run -main here."
+  (:require [arbace.string :as str]
+            [arbace.set :as set]
+            [arbace.go.repl :as repl]
+            [arbace.go.check :as ck]
+            [arbace.repr.go.read :as rd])
+  (:import [java.io File]
+           [java.util.concurrent Executors TimeUnit]))
+
+;;; go/ast's nodes, from its forms
+
+(defn- ast-forms [^String ast-dir]
+  (ck/read-string-forms (slurp (File. ast-dir "ast.ae"))))
+
+(defn- type-specs
+  "[name type-form] of every go/type form (single or grouped)."
+  [forms]
+  (for [f forms
+        :when (and (seq? f) (= 'go/type (first f)))
+        :let [body (remove string? (rest f))]
+        spec (if (symbol? (first body))
+               [[(first body) (second body)]]
+               (for [v body :when (vector? v)] [(first (remove string? v)) (last v)]))]
+    spec))
+
+(defn- receiver-types
+  "The names T of the methods named m with the receiver (* T)."
+  [forms m]
+  (set (for [f forms
+             :when (and (seq? f) (= 'go/method (first f)) (= m (second f)))
+             :let [params (first (filter vector? f))
+                   tag (:tag (meta (first params)))]
+             :when (and (seq? tag) (= '* (first tag)))]
+         (second tag))))
+
+(def ^:private skip-field
+  "Fields the helper does not write: the parser's resolution, File.Imports (the import specs
+  again) and File.Comments (written beside the tree)."
+  '#{Obj Scope Unresolved Imports Comments})
+
+(defn kebab
+  "go/ast's name as the dump's keyword name: BinaryExpr is binary-expr."
+  [^String s]
+  (str/lower-case (str/replace s #"(?<=.)([A-Z])" "-$1")))
+
+(defn ast-nodes
+  "go/ast's node types (structs whose pointer has the method Pos and End), in source order:
+  [{:name T :fields [{:name F :key k :kind K :tag tag} ...]} ...]; K is :pos, :token, :chan-dir,
+  :string, :bool, :comment, :node or :nodes (tools/godump/dump.go's fieldKind)."
+  [^String ast-dir]
+  (let [forms (ast-forms ast-dir)
+        specs (type-specs forms)
+        nodes (set/intersection (receiver-types forms 'Pos) (receiver-types forms 'End))
+        ifaces (set (for [[n t] specs :when (and (seq? t) (= 'interface (first t)))] n))
+        node-type? (fn [t] (or (contains? ifaces t)
+                               (and (seq? t) (= '* (first t)) (contains? nodes (second t)))))
+        kind (fn [tname fname t]
+               (cond
+                 (= t 'token/Pos) :pos
+                 (= t 'token/Token) :token
+                 (= t 'ChanDir) :chan-dir
+                 (= t '(* CommentGroup)) :comment
+                 (= t 'string) :string
+                 (= t 'bool) :bool
+                 (and (seq? t) (= 'slice (first t)) (node-type? (second t))) :nodes
+                 (node-type? t) :node
+                 ;; as the helper's infoOf: a panic when such a node is met (none of go/parser's
+                 ;; trees has one: ast.Package's Files)
+                 :else [:unknown (str "godump: field " tname "." fname " of type " (pr-str t))]))]
+    (vec (for [[n t] specs
+               :when (and (contains? nodes n) (seq? t) (= 'struct (first t)))]
+           {:name n
+            :fields (vec (for [f (rest t)
+                               :when (symbol? f)
+                               :when (not (contains? skip-field f))
+                               :when (Character/isUpperCase (.charAt (name f) 0))
+                               :let [tag (:tag (meta f))]]
+                           {:name f :key (kebab (name f)) :tag tag :kind (kind n f tag)}))}))))
+
+;;; The dumper's Go forms
+
+(defn- kw-var [k] (symbol (str "kw_" (str/replace k "-" "_"))))
+
+(defn- field-stmts
+  "The statements appending field f of node x (of type tname) to kv."
+  [tname {:keys [name key kind]}]
+  (let [fx (list (symbol (str ".-" name)) 'x)
+        kv (kw-var key)
+        add (fn [v] (list 'set! 'kv (list 'append 'kv kv v)))]
+    (case kind
+      :pos [(list 'when (list '.IsValid fx) (add (list '.pos 'd fx)))]
+      :token [(list 'when (list '!= fx 'token/ILLEGAL) (add (list '.String fx)))]
+      :chan-dir [(add (list 'chanDir fx))]
+      :string [(list 'when (list '!= fx "") (add (list '.str 'd fx)))]
+      :bool [(list 'when fx (add true))]
+      :comment [(list* 'when (list '!= fx nil)
+                       (add (list '.pos 'd (list '.Pos fx)))
+                       (when (= key "doc") [(list 'aset '(.-docs d) fx true)]))]
+      :node [(list* 'when (list '!= fx nil)
+                    (add (list '.node 'd fx))
+                    ;; the "." of a selector and of a type assertion, which go/ast does not record
+                    (when (and (= key "x") ('#{SelectorExpr TypeAssertExpr} tname))
+                      [(list 'let ['dot (list '.dotAfter 'd (list '.End fx))]
+                             (list 'when '(.IsValid dot)
+                                   '(set! kv (append kv kw_dot (.pos d dot)))))]))]
+      :nodes [(list 'when (list '!= fx nil)
+                    (list 'let ['xs (list 'make '(slice any) (list 'len fx))]
+                          (list 'range ['i 'e fx] '(aset xs i (.node d e)))
+                          (add '(arbace/Call vecFn (spread xs)))))])))
+
+(defn- node-case [{:keys [name fields]}]
+  (let [unknown (some #(when (vector? (:kind %)) (second (:kind %))) fields)]
+    (concat
+      (list 'case [(list '* (symbol "ast" (str name)))]
+            '(when (== x nil) (return nil)))
+      (if unknown
+        [(list 'panic unknown)]
+        [(list* 'let ['kv (list 'make '(slice any) 1 (inc (* 2 (count fields))))]
+                (list 'aset 'kv 0 (kw-var (kebab (str name))))
+                (concat (mapcat #(field-stmts name %) fields)
+                        ['(return (arbace/Call mkFn (spread kv)))]))]))))
+
+(def ^:private fixed-keys
+  "Keywords of the dumper beside the nodes' heads and fields."
+  ["dot" "send" "recv" "both" "list" "text" "bytes"])
+
+(defn dumper-forms
+  "The dumper's package as Go forms (one file), generated from go/ast's forms in ast-dir."
+  [^String ast-dir]
+  (let [nodes (ast-nodes ast-dir)
+        keys (distinct (concat fixed-keys
+                               (map (comp kebab str :name) nodes)
+                               (map :key (mapcat :fields nodes))))]
+    (concat
+      ['(ns go.arbace.repr.go.godump (:require [arbace.go :as go]))
+       '(go/package godump :path "arbace/repr/go/godump" :files ["dump.go"])
+       '(in-ns 'go.arbace.repr.go.godump)
+       '(go/file "dump.go"
+          :doc "Package godump builds the tree of repr/go's dump (doc/go/HELPER-NOTES.md, \"The tree\") of a Go file as Arbace data: generated by arbace.repr.go.parse from go/ast's forms.\n"
+          :imports [[arbace "arbace"] [ast "go/ast"] [parser "go/parser"] [token "go/token"]
+                    [os "os"] [filepath "path/filepath"] [strconv "strconv"] [strings "strings"]
+                    [time "time"] [utf8 "unicode/utf8"]])
+       '(go/type dumper (struct
+                          ^{:tag (* token/FileSet)} fset
+                          ^{:tag (* token/File)} tf
+                          ^{:tag (slice byte)} src
+                          ^{:tag (map (* ast/CommentGroup) bool)} docs
+                          ^{:tag (slice any)} dirs
+                          ^{:tag (slice any)} warns))
+       '(go/var ^{:tag any :doc "mkFn makes a node, (head {key value ...}) from head key value ...\n"} mkFn)
+       '(go/var ^{:tag any :doc "vecFn is arbace.core/vector.\n"} vecFn)
+       '(go/var ^{:tag any :doc "mapFn is arbace.core/array-map.\n"} mapFn)
+       '(go/func Init "Init sets the Arbace fns the dumper builds its data with.\n" [^any mk ^any vec ^any m]
+          (set! mkFn mk)
+          (set! vecFn vec)
+          (set! mapFn m))]
+      (for [k keys] (list 'go/var (kw-var k) (list 'arbace/Kw k)))
+      ['(go/method pos "pos is p as \"L:C\": raw (not adjusted by //line), byte columns from 1; nil when not valid.\n"
+          ^any [^{:tag (* dumper)} d ^token/Pos p]
+          (when (not (.IsValid p)) (return nil))
+          (let [pp (.PositionFor (.-fset d) p false)]
+            (+ (strconv/Itoa (.-Line pp)) ":" (strconv/Itoa (.-Column pp)))))
+       '(go/method posFile "posFile is p as \"FILE:L:C\", FILE a base name.\n"
+          ^string [^{:tag (* dumper)} d ^token/Pos p]
+          (let [pp (.PositionFor (.-fset d) p false)]
+            (+ (filepath/Base (.-Filename pp)) ":" (strconv/Itoa (.-Line pp)) ":" (strconv/Itoa (.-Column pp)))))
+       '(go/method str "str is s, or (:bytes [b ...]) when s is not valid UTF-8.\n"
+          ^any [^{:tag (* dumper)} d ^string s]
+          (when (not (utf8/ValidString s))
+            (let [bs (make (slice any) (len s))]
+              (for [i 0] (< i (len s)) (inc! i)
+                (aset bs i (conv int64 (aget s i))))
+              (return (arbace/Call "arbace.core/list" kw_bytes (arbace/Call vecFn (spread bs))))))
+          s)
+       '(go/func chanDir ^any [^ast/ChanDir dir]
+          (switch dir
+            (case [ast/SEND] (return kw_send))
+            (case [ast/RECV] (return kw_recv)))
+          kw_both)
+       '(go/method dotAfter "dotAfter is the position of the first \".\" at or after from, skipping white space and comments; NoPos if another token comes first.\n"
+          ^token/Pos [^{:tag (* dumper)} d ^token/Pos from]
+          (let [src (.-src d) tf (.-tf d)]
+            (when (or (== tf nil) (not (.IsValid from))) (return token/NoPos))
+            (let [off (.Offset tf from)]
+              (while (< off (len src))
+                (let [c (aget src off)]
+                  (cond
+                    (or (== c \space) (== c \tab) (== c \newline) (== c \return)) (inc! off)
+                    (and (== c \/) (< (+ off 1) (len src)) (== (aget src (+ off 1)) \/))
+                    (while (and (< off (len src)) (!= (aget src off) \newline)) (inc! off))
+                    (and (== c \/) (< (+ off 1) (len src)) (== (aget src (+ off 1)) \*))
+                    (let [end (strings/Index (conv string (subslice src (+ off 2))) "*/")]
+                      (when (< end 0) (return token/NoPos))
+                      (set! off + (+ 2 end 2)))
+                    (== c \.) (return (.Pos tf off))
+                    :else (return token/NoPos))))
+              token/NoPos)))
+       '(go/func isDirective "isDirective: //go: directives, build constraints, line directives, cgo's //export, gccgo's //extern, and every other directive go/ast recognises.\n"
+          ^bool [^string text]
+          (when (or (strings/HasPrefix text "//go:") (strings/HasPrefix text "//line ")
+                    (strings/HasPrefix text "/*line ") (strings/HasPrefix text "// +build")
+                    (strings/HasPrefix text "//export ") (strings/HasPrefix text "//extern "))
+            (return true))
+          (let [(values _ ok) (ast/ParseDirective token/NoPos text)]
+            ok))
+       '(go/func inExpr "inExpr reports whether position p lies strictly inside an expression of f.\n"
+          ^bool [^{:tag (* ast/File)} f ^token/Pos p]
+          (let [found false]
+            (ast/Inspect f (fn ^bool [^ast/Node n]
+                             (when (or found (== n nil) (< p (.Pos n)) (>= p (.End n)))
+                               (return false))
+                             (let [(values _ ok) (assert ast/Expr n)]
+                               (when (and ok (< (.Pos n) p))
+                                 (set! found true)))
+                             (not found)))
+            found))
+       '(go/method comments "comments is the file's comment groups, [{:list [[\"L:C\" text] ...] [:text ...]} ...], :text on doc groups; it collects the directives and the warnings.\n"
+          ^any [^{:tag (* dumper)} d ^{:tag (* ast/File)} f]
+          (let [gs (make (slice any) (len (.-Comments f)))]
+            (range [i g (.-Comments f)]
+              (let [cs (make (slice any) (len (.-List g)))]
+                (range [k c (.-List g)]
+                  (aset cs k (arbace/Call vecFn (.pos d (.-Slash c)) (.str d (.-Text c))))
+                  (when (isDirective (.-Text c))
+                    (set! (.-dirs d) (append (.-dirs d) (arbace/Call vecFn (.posFile d (.-Slash c)) (.str d (.-Text c)))))
+                    (when (and (strings/HasPrefix (.-Text c) "/*line ") (inExpr f (.-Slash c)))
+                      (set! (.-warns d) (append (.-warns d) (+ (.posFile d (.-Slash c)) ": /*line*/ directive inside an expression"))))))
+                (if (aget (.-docs d) g)
+                  (aset gs i (arbace/Call mapFn kw_list (arbace/Call vecFn (spread cs)) kw_text (.str d (.Text g))))
+                  (aset gs i (arbace/Call mapFn kw_list (arbace/Call vecFn (spread cs)))))))
+            (arbace/Call vecFn (spread gs))))
+       (list 'go/method 'node "node is n as the dump's tree: (:kebab-type {:kebab-field value ...}), fields in go/ast's order, those at their zero value left out.\n"
+             '^any [^{:tag (* dumper)} d ^ast/Node n]
+             (concat (list 'type-switch '[x n])
+                     (map node-case nodes))
+             '(panic "godump: a node of a type go/ast does not declare"))
+       '(go/func DumpFile "DumpFile parses the Go file at path (ParseComments, SkipObjectResolution) and dumps it: [tree comments directives warnings parse-ns dump-ns], or the error's text.\n"
+          ^any [^string path]
+          (let [(values src err) (os/ReadFile path)]
+            (when (!= err nil) (return (.Error err)))
+            (let [t0 (time/Now)
+                  fset (token/NewFileSet)
+                  (values f ^:assign err) (parser/ParseFile fset path src (bit-or parser/ParseComments parser/SkipObjectResolution))]
+              (when (!= err nil) (return (.Error err)))
+              (let [t1 (time/Now)
+                    d (addr (lit dumper :fset fset :src src :tf (.File fset (.-FileStart f))
+                                 :docs (make (map (* ast/CommentGroup) bool))))
+                    tree (.node d f)
+                    cs (.comments d f)
+                    ws (make (slice any) (len (.-warns d)))]
+                (range [i w (.-warns d)] (aset ws i w))
+                (arbace/Call vecFn tree cs (arbace/Call vecFn (spread (.-dirs d))) (arbace/Call vecFn (spread ws))
+                             (.Nanoseconds (.Sub t1 t0)) (.Nanoseconds (time/Since t1)))))))])))
+
+;;; Loading the dumper into goi
+
+(def ^:private dumper-path "arbace/repr/go/godump")
+
+(def ^:private loaded (atom nil))
+
+(defn load!
+  "Generates the dumper from the go/ast forms of goroot-forms (tamago/goroot), checks and
+  defines it with goi (once per process) and returns {:dump-file fn :ms ms}: its load time."
+  [^String goroot-forms]
+  (locking loaded
+    (or @loaded
+        (let [t0 (System/nanoTime)
+              forms (dumper-forms (str goroot-forms "/go/go/ast"))
+              src (ck/forms-source forms @repl/config)
+              st (atom {:path (:path src) :name (:name src) :ns 'go.arbace.repr.go.godump
+                        :config (:config src) :opts (:opts src) :files (:files src)
+                        :funcs {} :globals {} :types {} :defined #{}})
+              _ (swap! repl/packages assoc (:path src) st)
+              r (repl/check-source src nil)
+              _ (when (seq (:errors r))
+                  (swap! repl/packages dissoc (:path src))
+                  (throw (ex-info (str "the dumper does not check:\n"
+                                       (str/join "\n" (for [e (take 10 (:errors r))]
+                                                        (str (:file e) ":" (:line e) ": " (:msg e)))))
+                                  {:errors (:errors r)})))
+              {:keys [inits init-funcs]} (repl/define! st r {:vars? true})
+              _ (repl/call0 inits "init")
+              _ (doseq [f init-funcs] (repl/call0 f "init"))
+              init (resolve 'go.arbace.repr.go.godump/Init)
+              dump (resolve 'go.arbace.repr.go.godump/DumpFile)]
+          (init (fn [h & kvs] (list h (apply array-map kvs))) vector array-map)
+          (reset! loaded {:dump-file @dump :ms (/ (- (System/nanoTime) t0) 1e6)})))))
+
+(defn- go-lang
+  "go/version.Lang of v (\"go1.21.3\" is \"go1.21\"), or nil when not a valid version."
+  [v]
+  (when-let [[_ minor] (and (string? v) (re-find #"^go1\.(0|[1-9][0-9]*)(?:$|[.a-z])" v))]
+    [(str "go1." minor) (parse-long minor)]))
+
+(defn file-go-version
+  "The file's language version as go/types gives it (Info.FileVersions): max(its //go:build
+  version, go1.21) when it has one, else the package's lang."
+  [ast-go-version lang]
+  (if-let [[v minor] (go-lang ast-go-version)]
+    (if (< minor 21) "go1.21" v)
+    lang))
+
+(defn parse-file
+  "The native tree of the Go file at path: {:ast :comments :directives :warnings :parse-ms
+  :dump-ms}, or {:error message} when go/parser rejects it."
+  [goroot-forms ^String path]
+  (let [r ((:dump-file (load! goroot-forms)) path)]
+    (if (string? r)
+      {:error r}
+      (let [[tree comments dirs warns parse-ns dump-ns] r]
+        {:ast tree :comments comments :directives dirs :warnings warns
+         :parse-ms (/ parse-ns 1e6) :dump-ms (/ dump-ns 1e6)}))))
+
+;;; go/parser's forms: the digest's against tamago/goroot's
+
+(def parser-packages
+  "The packages of the parser that goi interprets: go/parser and what it is made of."
+  ["go/parser" "go/scanner" "go/ast" "go/token"])
+
+(defn- strip-meta [x]
+  (cond (seq? x) (apply list (map strip-meta x))
+        (vector? x) (mapv strip-meta x)
+        (map? x) (into {} (map (fn [[k v]] [(strip-meta k) (strip-meta v)])) x)
+        :else x))
+
+(defn- decl-forms [forms]
+  (vec (for [f forms
+             :when (and (seq? f) (not (#{'ns 'in-ns 'go/package 'load 'go/file} (first f))))]
+         (strip-meta f))))
+
+(defn forms-check
+  "goi interprets go/parser, go/scanner, go/ast and go/token from the executable's digest (its
+  configuration's conversion, arbace.go.repl): each package's declarations there, in order and
+  metadata aside, against tamago/goroot's forms under goroot-forms. [[path n-decls equal?] ...]."
+  [^String goroot-forms]
+  (vec (for [p parser-packages]
+         (let [dir (str goroot-forms "/go/" p)
+               pkg (ck/read-string-forms (slurp (str dir ".ae")))
+               gp (first (filter #(and (seq? %) (= 'go/package (first %))) pkg))
+               files (:files (apply hash-map (nnext gp)))
+               ours (decl-forms (mapcat #(ck/read-string-forms (slurp (str dir "/" (str/replace % #"\.go$" ".ae")))) files))
+               digest (decl-forms (repl/digest-forms p))]
+           [p (count ours) (= ours digest)]))))
+
+;;; The native dump of a helper dump's package
+
+(defn source-dir
+  "The directory of a dump's files: its :dir with $GOROOT, or relative to $GOROOT/test (the
+  single-file programs and directory tests, which the helper dumps from there)."
+  [dump ^String goroot]
+  (let [dir (:dir dump)]
+    (cond
+      (str/starts-with? dir "$GOROOT/") (str goroot (subs dir (count "$GOROOT")))
+      (= dir "$GOROOT") goroot
+      (str/starts-with? dir "/") dir
+      :else (str goroot "/test/" dir))))
+
+(def header-keys
+  "What the native dump takes from the helper's dump until GP2's loader (doc/go/GO-PARSER-SURVEY.md
+  §5): the package, configuration, directory and file lists."
+  [:package :config :dir :for-test :go-files :cgo-files :c-files :cxx-files :m-files :h-files
+   :f-files :s-files :swig-files :swig-cxx-files :syso-files :ignored-go-files
+   :ignored-other-files :embed-patterns :embed-files :test-go-files :test-embed-patterns
+   :test-embed-files :dir-test :local-imports])
+
+(defn native-dump
+  "The native dump of the package of helper dump d: d's header (header-keys) and the package's
+  files (d's :files, in order) parsed by go/parser under goi and dumped, without annotations:
+  {:godump 2 ... :name :files [{:file :go-version :ast :comments}] :directives [:warnings]},
+  plus :times {:parse-ms :dump-ms :bytes}; or {:error message} when a file does not parse."
+  [goroot-forms d ^String goroot]
+  (let [dir (source-dir d goroot)
+        lang (get-in d [:config :go-version])
+        rs (for [fl (:files d)]
+             (let [path (str dir "/" (:file fl))]
+               (assoc (parse-file goroot-forms path) :file (:file fl) :path path)))]
+    (if-let [e (some #(when (:error %) %) rs)]
+      {:error (:error e) :file (:file e)}
+      (let [warns (vec (mapcat :warnings rs))
+            ;; go/types' package name (Checker.initFiles): the first file's clause that is not
+            ;; _ (invalid), "" without one
+            nm (or (some #(let [n (-> % :ast second :name second :name)] (when (not= "_" n) n)) rs) "")]
+        (cond-> (merge {:godump 2} (select-keys d header-keys))
+          true (assoc :name nm
+                      :files (vec (for [r rs
+                                        :let [v (file-go-version (-> r :ast second :go-version) lang)]]
+                                    (cond-> {:file (:file r)}
+                                      (not= v lang) (assoc :go-version v)
+                                      true (assoc :ast (:ast r) :comments (:comments r)))))
+                      :directives (vec (mapcat :directives rs)))
+          (seq warns) (assoc :warnings warns)
+          true (assoc :times {:parse-ms (reduce + (map :parse-ms rs))
+                              :dump-ms (reduce + (map :dump-ms rs))
+                              :bytes (reduce + (map #(.length (File. ^String (:path %))) rs))}))))))
+
+;;; E-tree: the native tree against the helper's
+
+(defn tree-of
+  "What E-tree compares of a dump (doc/go/GO-PARSER-SURVEY.md §6): the package's name, each
+  file's name, language version, tree and comments, the directives and the warnings. The
+  annotations are the trees' metadata, which the comparison ignores."
+  [d]
+  {:name (:name d)
+   :files (mapv #(select-keys % [:file :go-version :ast :comments]) (:files d))
+   :directives (:directives d)
+   :warnings (:warnings d)})
+
+(defn- kind-of [x]
+  (cond
+    (nil? x) :nil
+    (string? x) :string
+    (keyword? x) :keyword
+    (boolean? x) :boolean
+    (integer? x) :integer
+    (map? x) :map
+    (vector? x) :vector
+    (seq? x) :list
+    :else (class x)))
+
+(defn diff
+  "The first difference between the data a (the helper's) and b (native), strictly: lists,
+  vectors and maps are different kinds (Arbace's = takes a list for a vector); metadata
+  ignored. nil, or [path a b]."
+  [a b path]
+  (let [ka (kind-of a) kb (kind-of b)]
+    (cond
+      (not= ka kb) [path a b]
+      (= ka :map) (or (some (fn [k] (when-not (and (contains? a k) (contains? b k)) [(conj path k) (get a k ::missing) (get b k ::missing)]))
+                            (distinct (concat (keys a) (keys b))))
+                      (some (fn [[k v]] (diff v (get b k) (conj path k))) a))
+      (#{:vector :list} ka) (or (when (not= (count a) (count b)) [(conj path :count) (count a) (count b)])
+                                (first (keep identity (map-indexed (fn [i [x y]] (diff x y (conj path i))) (map vector a b)))))
+      (= a b) nil
+      :else [path a b])))
+
+(defn- short-str [x] (let [s (pr-str x)] (if (> (count s) 300) (str (subs s 0 300) "...") s)))
+
+(defn file-at
+  "The file a difference's path is in, from the dump d."
+  [d path]
+  (when (= :files (first path))
+    (get-in d [:files (second path) :file])))
+
+(defn check-dump
+  "E-tree for helper dump at path: {:path :package :files :keys :nodes :diff [...] :times},
+  :fail when a file does not parse. write, when given, is called with the native dump."
+  [goroot-forms ^String path ^String goroot write]
+  (try
+    (let [t0 (System/nanoTime)
+          d (rd/read-dump path)
+          t1 (System/nanoTime)
+          n (native-dump goroot-forms d goroot)
+          t2 (System/nanoTime)]
+      (if (:error n)
+        {:path path :package (:package d) :files (count (:files d))
+         :keys (vec (for [f (:files d)] (str (:dir d) "/" (:file f))))
+         :fail (str (:file n) ": " (:error n))}
+        (let [df (diff (tree-of d) (tree-of n) [])]
+          (when write (write n))
+          (cond-> {:path path :package (:package d) :files (count (:files d))
+                   :keys (vec (for [f (:files d)] (str (:dir d) "/" (:file f))))
+                   :nodes (count (mapcat (comp rd/nodes :ast) (:files n)))
+                   :read-ms (/ (- t1 t0) 1e6) :native-ms (/ (- t2 t1) 1e6)
+                   :times (:times n)}
+            df (assoc :diff [(file-at d (first df)) (first df) (short-str (second df)) (short-str (nth df 2))])))))
+    (catch Throwable e
+      {:path path :fail (str (.getName (class e)) ": " (.getMessage e))})))
+
+;;; The command
+
+(defn- write-native!
+  "Writes native dump n as text the reader reads back (the helper's format, without
+  annotations), at out/<rel>."
+  [n ^String out ^String rel]
+  (let [f (File. out rel)]
+    (.mkdirs (.getParentFile f))
+    (spit f (str ";; repr/go's native dump (arbace.repr.go.parse): the tree of a Go package, no annotations\n"
+                 (binding [*print-length* nil *print-level* nil *print-meta* false]
+                   (pr-str (dissoc n :times)))
+                 "\n"))))
+
+(defn- run-dump [goroot-forms goroot out [path rel]]
+  (check-dump goroot-forms path goroot (when out #(write-native! % out rel))))
+
+(defn- report-corpus
+  "Prints a corpus's results and returns {:corpus :dumps :files :nodes :fail [...] :differ [...]
+  :times}; differences and failures of files in known (key -> reason) are reported as known."
+  [corpus rs known quiet]
+  (let [fails (filter :fail rs)
+        differ (filter :diff rs)
+        ok (remove :fail rs)
+        known? (fn [r] (or (contains? known (:package r)) (some #(contains? known %) (:keys r))))
+        unknown (remove known? (concat fails differ))
+        sum (fn [k] (reduce + (keep #(get-in % [:times k]) ok)))]
+    (doseq [r fails] (println (if (known? r) "FAIL known" "FAIL") corpus (:path r) (:fail r)))
+    (doseq [r differ] (println (if (known? r) "DIFF known" "DIFF") corpus (:path r) (pr-str (:diff r))))
+    (println (format "%s: E-tree %d of %d dumps equal (%d files, %d nodes, %.1f MB of Go); %d differ, %d failed, %d of them not known; parse %.1f s, dump %.1f s (CPU), helper's dumps read %.1f s"
+                     corpus (- (count ok) (count differ)) (count rs) (reduce + (map :files ok))
+                     (reduce + (keep :nodes ok)) (/ (sum :bytes) 1e6) (count differ) (count fails) (count unknown)
+                     (/ (sum :parse-ms) 1e3) (/ (sum :dump-ms) 1e3) (/ (reduce + (keep :read-ms ok)) 1e3)))
+    {:corpus corpus :dumps (count rs) :equal (- (count ok) (count differ)) :files (reduce + (map :files ok))
+     :nodes (reduce + (keep :nodes ok)) :bytes (sum :bytes)
+     :parse-s (/ (sum :parse-ms) 1e3) :dump-s (/ (sum :dump-ms) 1e3)
+     :read-s (/ (reduce + (keep :read-ms ok)) 1e3)
+     :differ (vec (for [r differ] [(:path r) (:diff r)])) :fail (vec (for [r fails] [(:path r) (:fail r)]))
+     :unknown (count unknown)}))
+
+(defn -main
+  "check [--jobs N] [--goroot DIR] [--forms DIR] [--known FILE] [--report FILE] [--out DIR]
+  NAME=DUMPDIR...: E-tree (doc/go/GO-PARSER-SURVEY.md §6) of every helper dump under each
+  DUMPDIR, the corpus NAME: each package's files parsed by go/parser under goi and dumped
+  natively, the tree compared with the helper's (annotations ignored). --out writes the native
+  dumps under DIR/NAME. Exits 1 when a dump differs or fails and the known differences (a map
+  of file key, \"$GOROOT/src/fmt/print.go\", or package path to the reason) do not list it."
+  [& args]
+  (let [[cmd & args] args
+        _ (when (not= cmd "check")
+            (binding [*out* *err*] (println "usage: check [--jobs N] [--goroot DIR] [--forms DIR] [--known FILE] [--report FILE] [--out DIR] NAME=DUMPDIR..."))
+            (System/exit 2))
+        [opts specs] (loop [opts {:jobs 1 :goroot "/root/tamago-go" :forms "tamago/goroot"}
+                            [a & more :as args] args]
+                       (case a
+                         "--jobs" (recur (assoc opts :jobs (parse-long (first more))) (rest more))
+                         "--goroot" (recur (assoc opts :goroot (first more)) (rest more))
+                         "--forms" (recur (assoc opts :forms (first more)) (rest more))
+                         "--known" (recur (assoc opts :known (first more)) (rest more))
+                         "--report" (recur (assoc opts :report (first more)) (rest more))
+                         "--out" (recur (assoc opts :out (first more)) (rest more))
+                         "--quiet" (recur (assoc opts :quiet true) more)
+                         [opts args]))
+        known (when-let [k (:known opts)]
+                (when (.isFile (File. ^String k))
+                  (binding [*read-eval* false] (read-string (slurp k)))))
+        t-load (System/nanoTime)
+        {:keys [ms]} (load! (:forms opts))
+        _ (println (format "the dumper generated from go/ast's forms and loaded with go/parser by goi in %.2f s" (/ ms 1e3)))
+        fc (forms-check (:forms opts))
+        _ (doseq [[p n eq] fc]
+            (println (format "%s: %d declarations, the digest's %s tamago/goroot's" p n (if eq "equal to" "NOT equal to"))))
+        forms-bad (count (remove #(nth % 2) fc))
+        pool (Executors/newFixedThreadPool (:jobs opts))
+        results (vec (for [spec specs
+                           :let [[nm dir] (let [i (.indexOf ^String spec "=")]
+                                            (if (neg? i) [spec spec] [(subs spec 0 i) (subs spec (inc i))]))
+                                 t0 (System/nanoTime)
+                                 files (for [p (rd/dump-files [dir])] [p (subs p (inc (count (str/replace dir #"/+$" ""))))])
+                                 out (when (:out opts) (str (:out opts) "/" nm))
+                                 futs (mapv (fn [f] (.submit pool ^Callable (fn [] (run-dump (:forms opts) (:goroot opts) out f)))) files)
+                                 rs (mapv #(.get ^java.util.concurrent.Future %) futs)]]
+                       (assoc (report-corpus nm rs (or known {}) (:quiet opts))
+                              :wall-s (/ (- (System/nanoTime) t0) 1e9))))
+        unknown (+ forms-bad (reduce + (map :unknown results)))]
+    (.shutdown pool)
+    (.awaitTermination pool 1 TimeUnit/MINUTES)
+    (when (> (count results) 1)
+      (println (format "E-tree: %d corpora, %d of %d dumps equal, %d files, %d nodes; %d not known"
+                       (count results) (reduce + (map :equal results)) (reduce + (map :dumps results))
+                       (reduce + (map :files results)) (reduce + (map :nodes results)) unknown)))
+    (when-let [rf (:report opts)]
+      (spit rf (with-out-str (binding [*print-length* nil] (prn {:forms fc :corpora results})))))
+    (shutdown-agents)
+    (System/exit (if (pos? unknown) 1 0))))
