@@ -3919,3 +3919,162 @@ new `:exclude-in` leaves them out of those configurations' tables (`go/arbace/go
 **Remaining**: GC127 (b), GC133 (b), GC134 (b) when a program needs them; the arm64 box's check
 (GR7a's remaining); GR8b's `reflect.Value.Method`, `MethodByName` (reflect's view of interpreted
 methods: their `Tfn` is -1 for a value receiver of a type not pointer-shaped, §2.3).
+
+## Decided (2026-10-20): GC60, GC61
+
+GC60 (a) and GC61 (a) of doc/go/GR8-SURVEY.md §7, as recommended, under the user's goal of
+2026-10-19 (reaching the milestone `arbace-interprets-go-v1`, doc/AGENDA.md's plan): goi's
+overrides of reflect's method members, served from goi's descriptors for interpreted types and
+from the table's method entries for compiled listed types, `Value.Method` and `MethodByName`
+listed, `Type.Method` and `MethodByName` overridden but never reflect's (no ReflectMethod); the
+non-faithful interpreted types reached through GR9's runtime types (GR9a-c built them first, so
+GR8b's overrides reach all eight).
+
+## As built: GR8b (2026-10-20)
+
+GR8b, reflect's methods (doc/go/GR8-SURVEY.md §4.1-§4.3, §6.2's "GR8b, reflect's methods"; a step
+of the plan to the milestone `arbace-interprets-go-v1`, doc/AGENDA.md), is built on branch
+`goi-gr8b` (from main `9cdbd4d1`: GR1 to GR7c, GR8a, GR9a-c, GR9d). Since the survey, GR9a-c gave
+interpreted named types runtime types of their own and removed the proxies, so the survey's step 2
+(`ValueOf`/`TypeOf` unwrapping proxies) is moot, and the overrides reach GC61's eight non-faithful
+programs as well as the five faithful ones. Where building it found otherwise than the survey, the
+text below is the record; proposals for the user are GC145-GC151.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the list | `go/arbace/gotable.edn` | `:overrides` gains reflect's six: `Value.Method`, `Value.MethodByName`, `Value.NumMethod`, `Type.Method`, `Type.MethodByName`, `Type.NumMethod`, each goi's function of the same signature (`goi.ValueMethod` ...); `:exclude` keeps only the iterators `Value.Methods`, `Type.Methods` (GC150) |
+| the generator | `arbace/go/table.ae` (`package-members`, `package-table-forms`) | a method member's override (`:override`): its table entry is goi's function in place of the method expression, so the table writes no `reflect.Type.Method` (an interface's method expression is a wrapper calling it, which the compiler marks ReflectMethod: cmd/compile's `usemethod`, the linker's `reflectSeen`) |
+| the overrides | `go/arbace/goi/reflect.ae` | an **interpreted type** (`interpType`: `descOfRT`, neither compiled nor an interface: GC71's interfaces are `any`): its descriptor's method set, the exported keys sorted (reflect's order, cached per descriptor by its method set's version `mver`); `Value.Method`/`MethodByName` a method value (`Bound`, its Go func by `goFunc`: the table's typed adapter or `MakeFunc`, recorded in `adapters`, so interpreted code calling it gets the `Bound` back); `Type.Method`/`MethodByName` a `reflect.Method` of type `FuncOf(t, params...)`, its `Func` the new target `MethodExpr`. A **compiled type**: the table's method expressions by their receiver type (`tableMethods`: a type's own, a pointer type's with its element's value methods, an interface's), sorted by name, all of them when their count is the type's `NumMethod`; a method value is `MakeFunc` around the method expression with the receiver bound (GC146), `Type.Method`'s `Func` the expression itself (a value method of a pointer type: dereferenced, gc's panicwrap message for nil), an interface's without `Func`, as reflect's; an interface value's method is its dynamic value's. A compiled type whose methods the table does not hold (GC145): `MethodByName` asks reflect's own `Value.MethodByName` only whether a method of that name exists (its result is never called) and answers the zero `Value` (or `false`) when none does, else goi's unsupported (`not supported by goi yet: reflect.Value.MethodByName of T: its methods are not in the table of compiled packages (GR8b)`), as `Method(i)` and `Type.Method(i)` of such a type with methods; reflect's panics (`reflect: Method index out of range`, the nil interface's, the invalid `Value`'s `ValueError`) as reflect's |
+| method expressions | `reflect.ae` (`MethodExpr`), `func.ae` (`callValue`), `types.ae` (`toMem`) | an interpreted method as a function of its receiver first (GC147): an interpreted call runs the method in its own frame, the arguments written in the expression's layout and moved to the method's (the receiver to its slot after the results), its results moved back, the deferred call's panic given to it (`rec`), so that a deferred `Func` recovers (`recover.go`); compiled code calls its Go func (`MakeFunc`, recorded in `adapters`) |
+| deferred compiled funcs | `func.ae` (`callDeferredCompiled`), `adapt.ae` (`takePendRec`), `frame.ae` (`Thread.pendRec`) | a deferred call of a compiled func (interpreted `defer f()` of a `reflect.MakeFunc`'s) runs with the thread's `pendRec` the panic it runs in; the first interpreted function compiled code then enters (a typed adapter's or `MakeFunc`'s `Enter`) takes it as its `rec`, once (GC148): `recover.go`'s test15 recovers, test16's nested call does not |
+| dispatch | `go/arbace/goi/method.ae` (`ifaceOfPkg`, `compiledMethodCall`, `IfaceMethodValue`) | a method of a compiled dynamic type the table does not name, through an interpreted interface: a listed interface of the type's package (its element's, for an unnamed pointer) that it implements and that has the method, at run time (GC149; the builder's `via-iface` of GR8a is static): `reflect`'s `*rtype` through `reflect.Type` (`reflectmethod2`, `3`) |
+| tests | `test/goi/run/go/t/reflectm.ae` (`.out` gc's), `test/goi/repl.ae` | `reflectm`, 28 lines of gc's output: an interpreted struct's, a named integer's and an empty struct's `NumMethod`, `Method`, `MethodByName` on the type, its pointer type and values; the method values and expressions called, a variadic one, as Go funcs asserted; a deferred method value and method expression recovering; `strings.Builder`'s methods by name and index, `time.Duration`'s value method through a pointer, `fmt.Stringer`'s on an interface value and its type; `text/template` (`{{.Hello}} ({{.Name}}, {{.Sum 1 2}})` on a value and a pointer, a map's field) and `html/template`'s Execute; at the REPL four checks: a `strings.Builder`'s methods by name, an interpreted struct's (`Rename` through a pointer, then `Hello`), its `Type.Method` and `NumMethod` of the type and its pointer, `text/template`'s Execute giving gc's `hi cy` |
+
+**The exit criteria (the survey's §6.2, as the task set them).**
+
+- **The 13 reflect-method programs pass**: `reflectmethod1`, `4`-`7`, `recover.go`,
+  `fixedbugs/bug424`, `issue16331`, `issue19028`, `issue25897b`, `issue27695`, `issue27695b`,
+  `issue27695c`; none is known. Beyond them `reflectmethod2.go` and `reflectmethod3.go` (known since
+  S39: `reflect.Type`'s `MethodByName` and `Method` through an interpreted interface, GC149) pass.
+- **`text/template` and `html/template`'s Execute work**: fields (GR8a's failure: `evalField` asks
+  `MethodByName` first, now the zero `Value` for a field's name), an interpreted method
+  (`{{.Hello}}` gives gc's `hi cy`, at the REPL and in `reflectm`), a method with arguments, a map's
+  keys; `fixedbugs/issue16037_run.go` (GR8a's known for it) passes.
+- **The executable grows by goi's code only**: +61,440 bytes (below).
+- **No regression**: `bin/goi check` (below), `--essential`, `--box` on amd64.
+
+**The check (§11).** `bin/goi check --record --jobs 8`, from a fresh run, against main's reference
+(`9cdbd4d1`):
+
+| result | main (GR9a-c) | GR8b |
+|---|---:|---:|
+| pass | 1,451 | 1,467 |
+| fail | 2 | 2 |
+| known | 70 | 67 |
+| unsupported | 296 | 283 |
+| skipped | 18 | 18 |
+
+The sixteen: the 13 (unsupported → pass), `reflectmethod2.go`, `reflectmethod3.go` and
+`fixedbugs/issue16037_run.go` (known → pass, out of `test/goi/check-known.edn`); no other line of
+the reference changes. 277 s with 8 jobs under a load of 12-16. The two failures are GC95's
+(`issue30116`, `issue30116u`). The essential subset (`test/goi/essential.txt`) gains ten by GC28's
+rule (every one outside `fixedbugs/`, every fourth new one of `fixedbugs/`: `bug424` and
+`issue25897b`, the first and the fifth of eight): 739 programs, 739 pass (43 s with 8 jobs). The
+box's (`test/goi/box.txt`) gains the same ten: `bin/goi check --box` (amd64, this branch's guest)
+584 programs, 583 pass, 1 known (`typeparam/issue50109.go`, the console's last newline), no
+regression, 376 s with 8 boxes; `test/goi/check-box-amd64.edn` recorded with the ten.
+
+**Found while building.**
+
+- **A compiled type's method values cannot be reflect's own.** The table keeps a listed type's
+  exported methods by their method expressions: `T.M` for a value method, `(*T).M` for a pointer
+  method. reflect's `Value.Method` on a `*T` calls `*T`'s method table, whose entry for a value
+  method is the compiler's wrapper `(*T).M`, which nothing in the table references: the linker may
+  have dropped it (its offset -1, `runtime.unreachableMethod`, a fatal error, not a panic). So goi
+  binds the table's expression itself (GC146), and reflect's own `Value.MethodByName` is used only
+  to ask whether an unlisted type has a method of a name (GC145).
+- **`Type.Method`'s `Func` needs an interpreted target.** `recover.go`'s test9-14reflect2 defer the
+  `Func` of `reflect.TypeOf(x).Method(0)`: gc's recover works in it. A `MakeFunc` alone would run
+  the method through reflect, outside goi's deferred-call frames, and its `recover()` would answer
+  nil; `MethodExpr` makes the interpreted call direct (GC147). test15 and test16 defer a
+  `reflect.MakeFunc` of an interpreted function: GC148.
+- **The method set's keys are its exported methods.** A key without a `.` is an exported name
+  (`method-key`: unexported methods are `path.name`), so the exported methods of an interpreted
+  type are its method set's plain keys; `bug424`'s types have unexported methods only, their
+  `NumMethod` 0 as gc's.
+- **`reflect.Type`'s two methods as a listed interface's.** Out of `:exclude`, `Type.Method` and
+  `Type.MethodByName` are listed interface methods: the stubs gain their two families
+  (`func(int) reflect.Method`, `func(string) (reflect.Method, bool)`, 16 stubs each, about 7 KB;
+  GC151) and reify's registration of `reflect.Type` its two methods.
+
+**Measurements.**
+
+- **Size.** The executable (amd64, stripped) is 143,626,400 bytes against main's 143,564,960
+  (`9cdbd4d1`, built on this branch before the change): **+61,440 (0.04%)**: goi's new code
+  (`reflect.ae`, the dispatch and the deferred calls' changes), the two stub families (about 7 KB)
+  and the table's six entries; no ReflectMethod (the linker's +17.7 MB of §4.2 does not appear).
+  arm64: 137,625,760 against 137,560,224 (+65,536).
+- **Speed** (GR3's criterion; `bin/goi run test/goi/run go.t.fib bench`, best of five per run,
+  three runs alternating main's executable and this branch's, load 12-16):
+
+  | | main (`9cdbd4d1`) | GR8b |
+  |---|---|---|
+  | fib 22 | 2.57-2.67 ms | 2.58-4.35 ms (2.58, 2.64; 4.35 once) |
+  | sumSq 1e6 | 19.84-25.24 ms | 19.43-20.50 ms |
+  | sieve 1e6 | 67.17-70.78 ms | 66.20-69.67 ms |
+  | `sort.Sort` of 10^5 | 176.09-235.06 ms | 175.19-178.25 ms |
+  | 10^5 `String` calls by `fmt` | 95.75-108.80 ms | 90.35-91.13 ms |
+
+  Within noise: none of them meets GR8b's code but a deferred compiled call's test of `passRec`.
+
+**Checks** (this branch, amd64): the essential `bin/gate` passed (17 m 31 s: the smoke test,
+Clojure's suite as recorded, the oracle 22,658 of 22,711 against its 53 known, the differential
+check 12,731 of 12,754 against its known, goi's essential check 739 of 739, the generated
+variants); `bin/arbace-go --fixpoint`: G1 = G2 = G3 (143,626,400 bytes); `bin/goi check` as recorded (above), `--essential`
+739 of 739; `bin/goi check --box` (amd64) 583 of 584, the one known; `bin/goi test` and `--gc` (the checker's
+19 assertions and its invalid forms, 19 programs with `reflectm`, 110 REPL checks with GR8b's four,
+GR8a's std 183 of 183, §1.4's session); `bin/goi annotations` (the five corpora as recorded: zero
+errors, every declaration checked); `make check-makefile`.
+
+**Proposals for the user** (GC145-GC151; each built as recommended):
+
+- **GC145 Compiled types whose methods the table does not hold** (unlisted packages' types, a
+  listed package's unexported types). (a) as built, `MethodByName` asks reflect's own lookup only
+  whether the method exists (the zero `Value`, `false`, when not: `text/template`'s field access on
+  such a value works), else goi's unsupported, as `Method(i)` and `Type.Method(i)` on such a type
+  with methods; (b) the overlay reads the type's method table and serves a method whose code the
+  linker kept (its offsets not -1), as reflect does, so any compiled method kept for another reason
+  works; (c) more types listed. *Recommended: (a)*, (b) when a program needs it.
+- **GC146 A compiled type's method value.** (a) as built, `reflect.MakeFunc` around the table's
+  method expression with the receiver bound (a value method of a pointer dereferenced at the call,
+  gc's panicwrap for nil): the method's code is the table's; (b) reflect's own `Value.Method`: a
+  `reflect.Value` with reflect's method flag, but `*T`'s wrapper of a value method may be dropped
+  (fatal). *Recommended: (a)*.
+- **GC147 An interpreted method's `reflect.Method.Func`.** (a) as built, the target `MethodExpr`:
+  interpreted calls run the method directly (a deferred one recovers), compiled code calls its
+  `MakeFunc` func; (b) a `MakeFunc` func alone: interpreted calls go through reflect, a deferred
+  one cannot recover (`recover.go` fails). *Recommended: (a)*.
+- **GC148 recover in a deferred `reflect.MakeFunc` of an interpreted function** (`recover.go`'s
+  test15, test16). (a) as built, the deferred compiled call's panic is the thread's `pendRec`,
+  taken by the first interpreted function compiled code enters: gc's for `MakeFunc`; a deferred
+  compiled function that calls an interpreted callback before returning (`defer sort.Slice(s,
+  less)` during a panic) lets the callback's `recover()` stop the panic where gc's answers nil;
+  (b) `recover.go` known, nothing changed. *Recommended: (a)*: no program of the check defers
+  such a callback, and `recover.go` passes whole.
+- **GC149 Compiled dynamic types the table does not name, called through an interpreted
+  interface.** (a) as built, a listed interface of the type's package that it implements and has
+  the method, found at run time (`reflectmethod2`, `3`: `*reflect.rtype` by `reflect.Type`); (b)
+  goi's panic as before (`the type is not in the table`). *Recommended: (a)*.
+- **GC150 The iterators `Value.Methods` and `Type.Methods`** (go1.27). (a) as built, still
+  excluded: no program of the check or of std's interpretable packages calls them; (b) goi's
+  overrides over the same lists, as `iter.Seq[reflect.Value]` and `iter.Seq[reflect.Method]`.
+  *Recommended: (a)*, (b) when a program needs them.
+- **GC151 `reflect.Type`'s `Method` and `MethodByName` as listed interface methods.** (a) as
+  built, listed like every interface method (their two stub families, about 7 KB: an interpreted
+  type implementing `reflect.Type` could be given to compiled code); (b) the two left out of the
+  stub families. *Recommended: (a)*.
+
+**Remaining**: GC145 (b), GC150 (b) when a program needs them; `Value.Method` of an interpreted
+interface value (GC71: its RT is `any`, so `NumMethod` 0 where gc counts the interface's methods).
