@@ -34,6 +34,26 @@
 #                                 convert a corpus of `bin/repr-go corpus` (dumped first if missing)
 #                                 into .tmp/repr-go/forms/CORPUS[-full]; report in
 #                                 .tmp/repr-go/forms/CORPUS[-full].report.edn
+#   bin/repr-go read --reader native [--tests] [--goos GOOS] [--goarch ARCH] [--out DIR] PKG...
+#   bin/repr-go read --reader native --corpus CORPUS [--out DIR]
+#                                 the native reader's tree (doc/go/GO-PARSER-SURVEY.md, GP1):
+#                                 each Go file parsed by go/parser from tamago/goroot's forms,
+#                                 run by goi, and dumped as the dump's tree by a dumper generated
+#                                 from go/ast's forms (arbace.repr.go.parse), without annotations;
+#                                 the helper still lists the files (its dumps: the packages', or
+#                                 the corpus's, dumped first if missing), and each native tree is
+#                                 checked against the helper's dump (E-tree). Native dumps under
+#                                 DIR/NAME (default .tmp/repr-go/native; NAME pkgs or the corpus),
+#                                 report DIR/NAME.report.edn. --reader helper: the default above
+#   bin/repr-go native-check [--fresh] [CORPUS...]
+#                                 E-tree over the corpora (default all): repr/go's corpora above
+#                                 (std with linux-errtest) and the vendored trees' sources
+#                                 (bin/lib/repr-go/native-corpus: goos-amd64, goos-arm64,
+#                                 cmd-linux-amd64, cmd-tamago-amd64, cmd-tamago-arm64, box,
+#                                 purego, x509roots), the helper's dumps made when missing
+#                                 (--fresh: afresh); exits non-zero on a difference that
+#                                 test/repr/go/native-known.edn does not list; report in
+#                                 .tmp/repr-go/native-check.report.edn
 #   bin/repr-go roundtrip [[GOOS/]ARCH] [--goos GOOS] [--record]
 #                                 the round trip: convert std and $GOROOT/test's programs for
 #                                 GOOS/ARCH (default tamago/amd64; GOOS tamago or linux, ARCH
@@ -173,45 +193,51 @@ corpus_name() {
   if [ "$1" = tamago ]; then echo "$2"; else echo "$1-$2"; fi
 }
 
+# corpus_dump CORPUS: the helper's dumps of a corpus into .tmp/godump/corpus/NAME (NAME.tsv the
+# helper's summary), afresh; prints the summary line and the packages not dumped
+corpus_dump() {
+  local out t0 t1 cgoos cwhat carch name
+  corpus_config "$1"
+  name=$(corpus_name "$cgoos" "$cwhat")
+  out=$work/corpus/$name
+  mkdir -p "$work/corpus"
+  rm -rf "$out"
+  t0=$(date +%s.%N)
+  case $cwhat in
+    amd64|arm64)
+      godump -goos "$cgoos" -goarch "$carch" -o "$out" std > "$out.tsv" || true ;;
+    tests)
+      godump -tests -goos "$cgoos" -goarch "$carch" -o "$out" std > "$out.tsv" || true ;;
+    test|test-arm64)
+      REPR_GO_GOOS=$cgoos test_programs "$carch" > "$work/corpus/$name-programs.txt"
+      (cd "$goroot/test" && xargs -a "$work/corpus/$name-programs.txt" \
+         env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -files -o "$out") \
+        > "$out.tsv" || true ;;
+    errtest)
+      REPR_GO_GOOS=$cgoos errorcheck_programs "$carch" > "$work/corpus/$name-programs.txt"
+      (cd "$goroot/test" && xargs -a "$work/corpus/$name-programs.txt" \
+         env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -files -o "$out") \
+        > "$out.tsv" || true ;;
+    dirtest|dirtest-arm64)
+      REPR_GO_GOOS=$cgoos dir_tests "$carch" > "$work/corpus/$name-list.txt"
+      (cd "$goroot/test" && xargs -a "$work/corpus/$name-list.txt" \
+         env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -dirs -o "$out") \
+        > "$out.tsv" || true ;;
+  esac
+  t1=$(date +%s.%N)
+  awk -F'\t' -v what="$name" -v secs="$(echo "$t1 - $t0" | bc)" '
+    { n[$1]++ } $1 == "ok" || $1 == "errors" { files += $3; bytes += $4 } $4 > max { max = $4; big = $2 }
+    END { printf "%s: %d dumped (%d ok, %d with type errors, %d failed, %d excluded by the configuration), %d files, %.1f MB (largest %s, %.1f MB), %.1f s\n",
+          what, n["ok"] + n["errors"], n["ok"], n["errors"], n["fail"], n["excluded"], files, bytes / 1e6, big, max / 1e6, secs }' "$out.tsv"
+  grep -v -P '^(ok|excluded)\t' "$out.tsv" || true
+}
+
 corpus() {
-  local what out t0 t1 cgoos cwhat carch name
+  local what cgoos cwhat carch name
   build
   [ $# -gt 0 ] || set -- amd64 arm64 test
-  mkdir -p "$work/corpus"
-  for what in "$@"; do
-    corpus_config "$what"
-    name=$(corpus_name "$cgoos" "$cwhat")
-    out=$work/corpus/$name
-    rm -rf "$out"
-    t0=$(date +%s.%N)
-    case $cwhat in
-      amd64|arm64)
-        godump -goos "$cgoos" -goarch "$carch" -o "$out" std > "$out.tsv" || true ;;
-      tests)
-        godump -tests -goos "$cgoos" -goarch "$carch" -o "$out" std > "$out.tsv" || true ;;
-      test|test-arm64)
-        REPR_GO_GOOS=$cgoos test_programs "$carch" > "$work/corpus/$name-programs.txt"
-        (cd "$goroot/test" && xargs -a "$work/corpus/$name-programs.txt" \
-           env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -files -o "$out") \
-          > "$out.tsv" || true ;;
-      errtest)
-        REPR_GO_GOOS=$cgoos errorcheck_programs "$carch" > "$work/corpus/$name-programs.txt"
-        (cd "$goroot/test" && xargs -a "$work/corpus/$name-programs.txt" \
-           env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -files -o "$out") \
-          > "$out.tsv" || true ;;
-      dirtest|dirtest-arm64)
-        REPR_GO_GOOS=$cgoos dir_tests "$carch" > "$work/corpus/$name-list.txt"
-        (cd "$goroot/test" && xargs -a "$work/corpus/$name-list.txt" \
-           env GOROOT="$goroot" "$helper" -go "$goroot/bin/go" -goos "$cgoos" -goarch "$carch" -dirs -o "$out") \
-          > "$out.tsv" || true ;;
-    esac
-    t1=$(date +%s.%N)
-    awk -F'\t' -v what="$name" -v secs="$(echo "$t1 - $t0" | bc)" '
-      { n[$1]++ } $1 == "ok" || $1 == "errors" { files += $3; bytes += $4 } $4 > max { max = $4; big = $2 }
-      END { printf "%s: %d dumped (%d ok, %d with type errors, %d failed, %d excluded by the configuration), %d files, %.1f MB (largest %s, %.1f MB), %.1f s\n",
-            what, n["ok"] + n["errors"], n["ok"], n["errors"], n["fail"], n["excluded"], files, bytes / 1e6, big, max / 1e6, secs }' "$out.tsv"
-    grep -v -P '^(ok|excluded)\t' "$out.tsv" || true
-  done
+  for what in "$@"; do corpus_config "$what"; done
+  for what in "$@"; do corpus_dump "$what"; done
   for what in "$@"; do
     corpus_config "$what"
     name=$(corpus_name "$cgoos" "$cwhat")
@@ -220,16 +246,86 @@ corpus() {
   done
 }
 
+# The native reader (doc/go/GO-PARSER-SURVEY.md, GP1: the tree): go/parser from tamago/goroot's
+# forms run by goi, and the dumper generated from go/ast's forms (arbace.repr.go.parse), checked
+# against the helper's dumps (E-tree). The helper still gives the files (GP2's loader to come).
+
+# the corpora of native-check: repr/go's (corpus_config) and the vendored trees'
+# (bin/lib/repr-go/native-corpus)
+native_corpora="amd64 arm64 linux-amd64 linux-arm64 tests test test-arm64 linux-test linux-test-arm64
+  dirtest dirtest-arm64 linux-dirtest linux-dirtest-arm64 linux-errtest
+  goos-amd64 goos-arm64 cmd-linux-amd64 cmd-tamago-amd64 cmd-tamago-arm64 box purego x509roots"
+
+# native_dumps CORPUS FRESH: the helper's dumps of CORPUS (made when missing, or FRESH); prints
+# their directory
+native_dumps() {
+  local c=$1 fresh=$2 cgoos cwhat carch name
+  case $c in
+    goos-*|cmd-*|box|purego|x509roots)
+      name=$c
+      if [ -n "$fresh" ] || [ ! -d "$work/corpus/$name" ]; then
+        "$root/bin/lib/repr-go/native-corpus" "$name" "$work/corpus/$name" >&2
+      fi ;;
+    *)
+      corpus_config "$c"
+      name=$(corpus_name "$cgoos" "$cwhat")
+      if [ -n "$fresh" ] || [ ! -d "$work/corpus/$name" ]; then build >&2; corpus_dump "$c" >&2; fi ;;
+  esac
+  echo "$name=$work/corpus/$name"
+}
+
+native_run() {
+  . "$root/bin/lib/repr-go-host.bash"
+  repr_go_run arbace.repr.go.parse check --jobs "${REPR_GO_JOBS:-$(( $(nproc) / 2 ))}" --goroot "$goroot" \
+    --forms "$root/tamago/goroot" "$@"
+}
+
+# native_read TESTS OUT CORPUS [-goos G -goarch A] -- PKG...: read --reader native
+native_read() {
+  local tests=$1 out=$2 corpus=$3 cfg=() spec name dumps
+  shift 3
+  while [ "$1" != -- ]; do cfg+=("$1"); shift; done
+  shift
+  if [ -n "$corpus" ]; then
+    spec=$(native_dumps "$corpus" "")
+    name=${spec%%=*}
+  else
+    [ $# -gt 0 ] || { echo "read --reader native: packages or --corpus" >&2; return 2; }
+    build
+    dumps=${REPR_GO_DUMPS:-$root/.tmp/repr-go/dumps}
+    rm -rf "$dumps"
+    mkdir -p "$dumps"
+    godump $tests ${cfg[@]+"${cfg[@]}"} -o "$dumps" "$@" > "$dumps.tsv" || true
+    grep -v -P '^(ok|errors|excluded)\t' "$dumps.tsv" >&2 || true
+    name=pkgs spec=pkgs=$dumps
+  fi
+  out=${out:-$root/.tmp/repr-go/native}
+  rm -rf "$out/$name"
+  native_run --out "$out" --report "$out/$name.report.edn" "$spec"
+}
+
+# native_check [--fresh] [CORPUS...]: E-tree over the corpora (default all of native_corpora)
+native_check() {
+  local fresh="" specs=() c
+  [ "${1:-}" = --fresh ] && { fresh=1; shift; }
+  [ $# -gt 0 ] || set -- $native_corpora
+  for c in "$@"; do specs+=("$(native_dumps "$c" "$fresh")"); done
+  mkdir -p "$root/.tmp/repr-go"
+  native_run --known "$root/test/repr/go/native-known.edn" --report "$root/.tmp/repr-go/native-check.report.edn" \
+    "${specs[@]}"
+}
+
 convert_main() {
   . "$root/bin/lib/repr-go-host.bash"
   repr_go_run arbace.repr.go read "$@"
 }
 
 convert() {
-  local full="" tests="" out="" corpus="" print="" text=() jobs cfg=()
+  local full="" tests="" out="" corpus="" print="" text=() jobs cfg=() reader=helper
   jobs=${REPR_GO_JOBS:-$(( $(nproc) / 2 ))}
   while [ $# -gt 0 ]; do
     case $1 in
+      --reader) reader=$2; shift 2 ;;
       --full) full=--full; shift ;;
       --tests) tests=-tests; shift ;;
       --out) out=$2; shift 2 ;;
@@ -242,6 +338,14 @@ convert() {
       *) break ;;
     esac
   done
+  case $reader in
+    helper) ;;
+    native)
+      [ -z "$full$print${text[*]+x}" ] || { echo "read --reader native: the tree only (GP1): no --full, --print or --text" >&2; return 2; }
+      native_read "$tests" "$out" "$corpus" ${cfg[@]+"${cfg[@]}"} -- "$@"
+      return ;;
+    *) echo "read: --reader helper or native, not $reader" >&2; return 2 ;;
+  esac
   if [ -n "$corpus" ]; then
     local cgoos cwhat carch
     corpus_config "$corpus"
@@ -390,6 +494,7 @@ case $cmd in
   read)
     if [ "${1:-}" = --dump ]; then shift; read_dumps "$@"; else convert "$@"; fi ;;
   corpus) corpus "$@" ;;
+  native-check) native_check "$@" ;;
   roundtrip) roundtrip "$@" ;;
   print)
     . "$root/bin/lib/repr-go-host.bash"

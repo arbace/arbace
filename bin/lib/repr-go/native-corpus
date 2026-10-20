@@ -1,0 +1,100 @@
+#!/bin/bash
+# The helper's dumps of the vendored trees' sources (doc/go/GO-PARSER-SURVEY.md §6), for
+# bin/repr-go native-check's E-tree: dumped as the vendoring tools dump them, no conversion.
+# Usage: bin/lib/repr-go/native-corpus NAME OUT
+#   NAME   goos-amd64, goos-arm64   TamaGo's goos module (Go's module cache, its pinned hash) for
+#                                   tamago/ARCH, ./... (bin/tamago-vendor)
+#          cmd-linux-amd64, cmd-tamago-amd64, cmd-tamago-arm64
+#                                   GOROOT/src/cmd's packages compile, link and asm build from
+#                                   (bin/toolchain-vendor)
+#          box                      box/ printed (bin/box-vendor print), its packages with tests
+#                                   for each of box-vendor's configurations, OUT/GOOS-GOARCH
+#          purego                   purego's renamed files for darwin/arm64 (bin/box-vendor purego)
+#          x509roots                the renamed root bundle with its tests, linux/amd64
+#                                   (bin/x509roots-vendor)
+#   OUT    the dumps' directory (removed first); the sources dumped stay in OUT.src, where the
+#          dumps' :dir names them
+# The module versions and hashes are the vendoring tools' own (read from them).
+set -euo pipefail
+export CGO_ENABLED=0 GOFLAGS= GOTOOLCHAIN=local GOWORK=off
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+tg=${ARBACE_GOROOT:-/root/tamago-go}
+name=${1:?NAME}
+out=${2:?OUT}
+case $out in /*) ;; *) out=$PWD/$out ;; esac
+src=$out.src
+helper=$root/.tmp/godump/godump
+"$root/bin/repr-go" helper
+rm -rf "$out" "$src"
+mkdir -p "$out" "$src"
+
+godump() { GOROOT="$tg" "$helper" -go "$tg/bin/go" "$@"; }
+modcache() { env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" env GOMODCACHE; }
+# setting NAME FILE: the value of the shell assignment NAME=... in a vendoring script
+setting() { sed -n "s/.*\b$1=\([^ ]*\).*/\1/p" "$2" | head -1; }
+# from_cache MOD VER ZIP: the module's directory in Go's module cache, its hash checked
+from_cache() {
+  local c
+  c=$(modcache)
+  [ "$(cat "$c/cache/download/$1/@v/$2.ziphash" 2>/dev/null)" = "$3" ] \
+    || { echo "native-corpus: $1@$2 is not in Go's module cache with the pinned hash $3" >&2; return 1; }
+  echo "$c/$1@$2"
+}
+
+case $name in
+  goos-amd64|goos-arm64)
+    tv=$root/bin/tamago-vendor
+    d=$(from_cache "$(setting goos_mod "$tv")" "$(setting goos_ver "$tv")" "$(setting goos_zip "$tv")")
+    cp -r "$d" "$src/goosmod"
+    chmod -R u+w "$src/goosmod"
+    (cd "$src/goosmod" && godump -goos tamago -goarch "${name#goos-}" -o "$out" ./...) > "$out.tsv" || true ;;
+  cmd-linux-amd64|cmd-tamago-amd64|cmd-tamago-arm64)
+    c=${name#cmd-} o=${c%-*} a=${c#*-}
+    lvl=GOAMD64=v1; [ "$a" = arm64 ] && lvl=GOARM64=v8.0
+    pkgs=$(cd "$tg/src/cmd" && env -u GOOS -u GOARCH GOOS="$o" GOARCH="$a" "$lvl" GOROOT="$tg" \
+             "$tg/bin/go" list -deps -f '{{.ImportPath}}' cmd/compile cmd/link cmd/asm \
+             | sed 's/ \[.*//' | grep '^cmd/' | LC_ALL=C sort -u)
+    (cd "$tg/src/cmd" && godump -goos "$o" -goarch "$a" -o "$out" $pkgs) > "$out.tsv" || true ;;
+  box)
+    "$root/bin/box-vendor" --work "$src/work" print "$src/print" >&2
+    configs=$(sed -n '/^configs="/,/"$/p' "$root/bin/box-vendor" | sed 's/^configs="//; s/"$//')
+    : > "$out.tsv"
+    for c in $configs; do
+      goos=${c%%/*}; goarch=${c#*/}; goarch=${goarch%%:*}; list=${c#*:}
+      args=(); for p in ${list//,/ }; do args+=("arbace/box/$p"); done
+      (cd "$src/print/mod" && GOPROXY=off godump -tests -goos "$goos" -goarch "$goarch" -o "$out/$goos-$goarch" "${args[@]}") >> "$out.tsv" || true
+    done ;;
+  purego)
+    bv=$root/bin/box-vendor
+    mod=$(setting purego_mod "$bv")
+    m=$(from_cache "$mod" "$(setting purego_ver "$bv")" "$(setting purego_zip "$bv")")
+    d=$src/purego
+    mkdir -p "$d/box/purego"
+    printf 'module arbace\n\ngo 1.27\n' > "$d/go.mod"
+    for p in . internal/fakecgo internal/strings; do
+      mkdir -p "$d/box/purego/$p"
+      for f in $(cd "$m/$p" && env GOOS=darwin GOARCH=arm64 GOFLAGS=-mod=mod GOROOT="$tg" "$tg/bin/go" list \
+                   -f '{{range .GoFiles}}{{.}} {{end}}{{range .SFiles}}{{.}} {{end}}{{range .HFiles}}{{.}} {{end}}' .); do
+        cp "$m/$p/$f" "$d/box/purego/$p/$f"
+      done
+    done
+    chmod -R u+w "$d"
+    find "$d/box/purego" -type f \( -name '*.go' -o -name '*.s' \) -print0 \
+      | xargs -0 sed -i "s#\"$mod/internal/#\"arbace/box/purego/internal/#; s#\"$mod\"#\"arbace/box/purego\"#"
+    (cd "$d" && GOPROXY=off godump -goos darwin -goarch arm64 -o "$out" arbace/box/purego arbace/box/purego/internal/fakecgo arbace/box/purego/internal/strings) > "$out.tsv" || true ;;
+  x509roots)
+    xv=$root/bin/x509roots-vendor
+    mod=$(setting mod "$xv")
+    m=$(from_cache "$mod" "$(setting mod_ver "$xv")" "$(setting mod_zip "$xv")")
+    pkg=$(setting pkg "$xv")
+    d=$src/renamed
+    mkdir -p "$d/x509roots/fallback"
+    printf 'module arbace\n\ngo 1.27\n' > "$d/go.mod"
+    cp -r "$m/bundle" "$d/x509roots/fallback/bundle"
+    chmod -R u+w "$d"
+    find "$d" -name '*.go' -print0 | xargs -0 sed -i "s#\"$mod/bundle\"#\"$pkg\"#; s#\"$mod\"#\"arbace/x509roots/fallback\"#"
+    (cd "$d" && GOPROXY=off godump -tests -goos linux -goarch amd64 -o "$out" "$pkg") > "$out.tsv" || true ;;
+  *) echo "native-corpus: no corpus $name" >&2; exit 2 ;;
+esac
+awk -F'\t' -v what="$name" '{ n[$1]++ } END { printf "%s: %d dumped (%d ok, %d with type errors, %d failed)\n", what, n["ok"] + n["errors"], n["ok"], n["errors"], n["fail"] }' "$out.tsv" >&2
+grep -v -P '^(ok|excluded)\t' "$out.tsv" >&2 || true
