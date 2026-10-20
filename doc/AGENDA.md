@@ -114,8 +114,9 @@ The current state of the work. This file is rewritten as things change. For the 
   results are plans to decide, not builds.
   - `go-parser-survey`: an Arbace-native Go parser (doc/go/GO-PARSER-SURVEY.md), so repr/go reads
     Go without Go's toolchain; proposals GPS1-.
-  - `java-frontend-survey`: an Arbace-native Java front end (doc/classes/JAVA-FRONTEND-SURVEY.md),
-    so repr/java reads Java without javac or the JVM; proposals JFS1-.
+  - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
+    javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
+    native front end later; proposals JFS1-JFS11 open, for the user.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

@@ -132,3 +132,33 @@ GitHub's repository description, README's first line and CLAUDE.md's.
   - It is the first emulated run to include issue15277. The Mac's run of all 584 gave the same 582
     and 2.
 - **No file changed:** the half stays the recorded reference (GC75).
+
+## 2026-10-20: the Java front end's survey merged (doc/classes/JAVA-FRONTEND-SURVEY.md)
+
+- Branch `java-frontend-survey` (`145e64d8`, from `9a6a36e9`) merged. No JVM or Go build was run:
+  the measurements are over the committed `jdk/forms`, the last `bin/gate --full`'s reports, jdk26u
+  at `baf63fb` and shallow clones of the prior art.
+- **Finding: it is not mostly a parser.**
+  - 77% of `convert.ae`'s code lines read javac's attribution.
+  - In jdk/forms, 25.0% of the lists have a head chosen by name and member resolution and 14.4% by
+    expression types; 60.6% follow from syntax alone.
+  - `arbace.classes` has no generic types in code (SPEC principle 4), so it covers about a third of
+    the attribution. The rest is javac's own: about 47,000 lines of Attr, Resolve, Infer and
+    Types, against about 9,300 for its parser.
+  - Only javac makes javac's class files, which the round trip's classes level compares.
+- **Prior art, measured:**
+  - javac (`jdk.compiler`, 162,441 lines, GPLv2+CE, already in LICENSE.md);
+  - ECJ (241,716, EPL-2.0);
+  - JavaParser (99,905 plus 32,375 for its symbol solver);
+  - tree-sitter-java (syntax only).
+- **Recommended: (b), javac itself as Java forms, run by Arbace** (D12 (b) of STANDALONE-SURVEY),
+  in a tool executable translated by j2g, with `convert.ae` on top unchanged.
+  - repr/java converted `jdk.compiler` once already (2026-10-07: 342 of 347 files).
+  - jrt lacks about 67 of the 238 java.base classes javac names (an over-count, to be measured).
+  - A native front end, (a), is estimated at 30-50 days with an open tail, and cannot give the
+    classes level.
+- **Milestones:** JF1-JF6, the switch off the JVM, about 13-20 days; then JF7-JF9 later.
+- **What stays on the JVM afterwards:** the oracle's reference, j2g's edge, `check --suite` and the
+  data generators.
+- **Proposals JFS1-JFS11** are open, for the user. JFS11 notes that the milestone prefix JF
+  collides with PRINTER-NOTES' decided JF1-JF5, and recommends JN1-JN9 instead.
