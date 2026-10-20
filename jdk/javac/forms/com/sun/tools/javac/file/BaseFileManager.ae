@@ -1,0 +1,317 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/file/BaseFileManager.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.file)
+
+(import '(com.sun.tools.javac.code Lint Lint$LintCategory)
+        '(com.sun.tools.javac.main Option
+                                   Option$InvalidValueException
+                                   OptionHelper
+                                   OptionHelper$GrumpyHelper)
+        '(com.sun.tools.javac.resources CompilerProperties$Errors CompilerProperties$LintWarnings)
+        '(com.sun.tools.javac.util Context Log Options)
+        '(java.io IOException InputStream)
+        '(java.lang.ref SoftReference)
+        '(java.lang.reflect Constructor)
+        '(java.net URL URLClassLoader)
+        '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.charset Charset
+                           CharsetDecoder
+                           CodingErrorAction
+                           IllegalCharsetNameException
+                           UnsupportedCharsetException)
+        '(java.nio.file NoSuchFileException Path)
+        '(java.util Collection HashMap HashSet Iterator Map Map$Entry Objects Set)
+        '(java.util.function Consumer)
+        '(javax.tools JavaFileManager JavaFileObject JavaFileObject$Kind))
+
+(defclass ^:public ^:abstract BaseFileManager
+  :implements [JavaFileManager]
+
+  (field ^:private ^:static ^:final ^byte/1 EMPTY_ARRAY (new byte/1 0))
+
+  (constructor ^:protected [this ^Charset charset]
+    (set! (.-charset this) charset)
+    (set! locations (.createLocations this)))
+
+  (method ^:public setContext ^void [this ^Context context]
+    (set! log (Log/instance context))
+    (set! lint (Lint/instance context))
+    (set! options (Options/instance context))
+    (.update locations log (FSInfo/instance context))
+    (.whenReady options (method-ref Consumer [Options] this BaseFileManager/.applyOptions)))
+
+  (method ^:protected applyOptions ^void [this ^Options options]
+    (let [s (.get options "fileManager.deferClose")]
+      (when (some? s)
+        (try
+          (set! deferredCloseTimeout
+                (unchecked-int (unchecked-multiply-float (Float/parseFloat s) (float 1000.0))))
+          (catch NumberFormatException e
+            (set! deferredCloseTimeout (unchecked-multiply-int 60 1000)))))))
+
+  (method ^:protected createLocations ^Locations [this] (Locations.))
+
+  (field ^:public ^Log log)
+
+  (field ^:protected ^Charset charset)
+
+  (field ^:protected ^Options options)
+
+  (field ^:protected ^Lint lint)
+
+  (field ^:protected ^:final ^Locations locations)
+
+  (field ^:private ^:final ^{:tag (HashSet Path)} outputFilesWritten (HashSet.))
+
+  (field ^:public ^boolean autoClose)
+
+  (method ^:protected deferredClose ^void [this]
+    (let [^Thread t (anon Thread [(java-str (.getName (.getClass this)) " DeferredClose")]
+                      (method ^:public run ^void [this]
+                        (try
+                          (locking BaseFileManager/this
+                            (let [^:mutable now (System/currentTimeMillis)]
+                              (while (< now (unchecked-add lastUsedTime deferredCloseTimeout))
+                                (.wait BaseFileManager/this
+                                       (unchecked-subtract
+                                         (unchecked-add lastUsedTime deferredCloseTimeout)
+                                         now))
+                                (set! now (System/currentTimeMillis)))
+                              (set! deferredCloseTimeout 0)
+                              (.close BaseFileManager/this)))
+                          (catch InterruptedException e)
+                          (catch IOException e))))]
+      (.setDaemon t true)
+      (.start t)))
+
+  (method ^:synchronized updateLastUsedTime ^void [this]
+    (when (> deferredCloseTimeout 0) (set! lastUsedTime (System/currentTimeMillis))))
+
+  (field ^:private ^long lastUsedTime (System/currentTimeMillis))
+
+  (field ^:protected ^long deferredCloseTimeout 0)
+
+  (method ^:public clear ^void [this]
+    (.forEach (HashSet. (.keySet options)) (lambda Consumer ^void [^String k] (.remove options k))))
+
+  (method ^:protected getClassLoader ^ClassLoader [this ^URL/1 urls]
+    (let [thisClassLoader (.getClassLoader (.getClass this))
+          classLoaderClass (.get options "procloader")]
+      (when (some? classLoaderClass)
+        (try
+          (let [^{:tag (Class (? extends ClassLoader))} loader (.asSubclass
+                                                                 (Class/forName classLoaderClass)
+                                                                 ClassLoader)
+                ^{:tag (array (Class ?))} constrArgTypes (new Class/1 [URL/1 ClassLoader])
+                ^{:tag (Constructor (? extends ClassLoader))} constr (.getConstructor
+                                                                       loader
+                                                                       constrArgTypes)]
+            (return (cast ClassLoader (.newInstance constr urls thisClassLoader))))
+          (catch ReflectiveOperationException t)))
+      (URLClassLoader. urls thisClassLoader)))
+
+  (method ^:public isDefaultBootClassPath ^boolean [this]
+    (.isDefaultBootClassPath locations))
+
+  (method ^:public isDefaultSystemModulesPath ^boolean [this]
+    (.isDefaultSystemModulesPath locations))
+
+  (method ^:public handleOption ^boolean [this ^String current ^{:tag (Iterator String)} remaining]
+    (let [^OptionHelper helper (anon OptionHelper$GrumpyHelper [log]
+                                 (method ^:public get ^String [this ^Option option]
+                                   (.get options option))
+
+                                 (method ^:public put ^void [this ^String name ^String value]
+                                   (.put options name value))
+
+                                 (method ^:public remove ^void [this ^String name]
+                                   (.remove options name))
+
+                                 (method ^:public handleFileManagerOption ^boolean [this
+                                                                                    ^Option option
+                                                                                    ^String value]
+                                   (.handleOption BaseFileManager/this option value))
+
+                                 (method ^:public initialize ^void [this] (.initialize options)))
+          o (Option/lookup current javacFileManagerOptions)]
+      (if (nil? o)
+          false
+          (do
+            (try
+              (.handleOption o helper current remaining)
+              (catch Option$InvalidValueException e
+                (throw (IllegalArgumentException. (.getMessage e) e))))
+            true))))
+
+  (field ^:protected ^:static ^:final ^{:tag (Set Option)} javacFileManagerOptions
+    (Option/getJavacFileManagerOptions))
+
+  (method ^:public isSupportedOption ^int [this ^String option]
+    (let [o (Option/lookup option javacFileManagerOptions)]
+      (cond (nil? o) -1 (.hasArg o) 1 :else 0)))
+
+  (field ^:protected ^String multiReleaseValue)
+
+  (method ^:public handleOption ^boolean [this ^Option option ^String value]
+    (switch option
+      ENCODING (do (set! encodingName value) true)
+      MULTIRELEASE (do (set! multiReleaseValue value) (.setMultiReleaseValue locations value) true)
+      (.handleOption locations option value)))
+
+  (method ^:public handleOptions ^boolean [this ^{:tag (Map Option String)} map]
+    (let [^:mutable ok true]
+      (for-each [^{:tag (Map$Entry Option String)} e (.entrySet map)]
+        (try
+          (set!
+            ok
+            (let [a-1 ok
+                  b-2 (.handleOption this (cast Option (.getKey e)) (cast String (.getValue e)))]
+              (and a-1 b-2)))
+          (catch IllegalArgumentException ex
+            (.error log
+                    (CompilerProperties$Errors/IllegalArgumentForOption
+                      (.getPrimaryName (cast Option (.getKey e)))
+                      (.getMessage ex)))
+            (set! ok false))))
+      ok))
+
+  (field ^:private ^String encodingName)
+
+  (field ^:private ^String defaultEncodingName)
+
+  (method ^:private getDefaultEncodingName ^String [this]
+    (when (nil? defaultEncodingName) (set! defaultEncodingName (.name (Charset/defaultCharset))))
+    defaultEncodingName)
+
+  (method ^:public getEncodingName ^String [this]
+    (if (some? encodingName) encodingName (.getDefaultEncodingName this)))
+
+  (method ^:public decode ^CharBuffer [this ^ByteBuffer inbuf ^boolean ignoreEncodingErrors]
+    (let [encName (.getEncodingName this)
+          ^:mutable ^CharsetDecoder decoder nil]
+      (try
+        (set! decoder (.getDecoder this encName ignoreEncodingErrors))
+        (catch [IllegalCharsetNameException UnsupportedCharsetException] e
+          (.error log (CompilerProperties$Errors/UnsupportedEncoding encName))
+          (return (.flip (CharBuffer/allocate 1)))))
+      (let [factor (unchecked-add-float
+                     (unchecked-multiply-float (.averageCharsPerByte decoder) (float 0.8))
+                     (unchecked-multiply-float (.maxCharsPerByte decoder) (float 0.2)))
+            ^:mutable dest (CharBuffer/allocate
+                             (unchecked-add-int 10
+                                                (unchecked-int
+                                                  (unchecked-multiply-float
+                                                    (.remaining inbuf)
+                                                    factor))))]
+        (while true
+          (let [result (.decode decoder inbuf dest true)]
+            (.flip dest)
+            (cond
+              (.isUnderflow result)
+                (do
+                  (when (== (.limit dest) (.capacity dest))
+                    (set! dest
+                          (.put (CharBuffer/allocate (unchecked-add-int (.capacity dest) 1)) dest))
+                    (.flip dest))
+                  (return dest))
+              (.isOverflow result)
+                (let [newCapacity (unchecked-add-int
+                                    (unchecked-add-int 10 (.capacity dest))
+                                    (unchecked-int
+                                      (unchecked-multiply-float
+                                        (.remaining inbuf)
+                                        (.maxCharsPerByte decoder))))]
+                  (set! dest (.put (CharBuffer/allocate newCapacity) dest)))
+              (or (.isMalformed result) (.isUnmappable result))
+                (let [unmappable (StringBuilder.)
+                      len (.length result)]
+                  (loop [^int i 0]
+                    (when (< i len)
+                      (.append unmappable (String/format "%02X" (new Object/1 [(.get inbuf)])))
+                      (recur (unchecked-inc-int i))))
+                  (let [^String charsetName (if (nil? charset) encName (.name charset))]
+                    (.error log
+                            (.limit dest)
+                            (CompilerProperties$Errors/IllegalCharForEncoding
+                              (.toString unmappable)
+                              charsetName))
+                    (.position dest (.limit dest))
+                    (.limit dest (.capacity dest))
+                    (.put dest (unchecked-char 0xfffd))))
+              :else (throw (AssertionError. result))))))))
+
+  (method ^:public getDecoder ^CharsetDecoder [this ^String encodingName
+                                               ^boolean ignoreEncodingErrors]
+    (let [^Charset cs (if (nil? (.-charset this)) (Charset/forName encodingName) (.-charset this))
+          decoder (.newDecoder cs)
+          ^CodingErrorAction action (if ignoreEncodingErrors
+                                        CodingErrorAction/REPLACE
+                                        CodingErrorAction/REPORT)]
+      (.onUnmappableCharacter (.onMalformedInput decoder action) action)))
+
+  (method ^:public makeByteBuffer :throws [IOException] ^ByteBuffer [this ^InputStream in]
+    (let [^:mutable ^byte/1 array nil]
+      (locking this
+        (if (some? (set! array byteArrayCache)) (set! byteArrayCache nil) (set! array EMPTY_ARRAY)))
+      (let [buf (com.sun.tools.javac.util.ByteBuffer. array)]
+        (.appendStream buf in)
+        (.asByteBuffer buf))))
+
+  (method ^:public recycleByteBuffer ^void [this ^ByteBuffer buf]
+    (when (.hasArray buf) (locking this (set! byteArrayCache (.array buf)))))
+
+  (field ^:private ^byte/1 byteArrayCache)
+
+  (method ^:public getCachedContent ^CharBuffer [this ^JavaFileObject file]
+    (let [e (cast ContentCacheEntry (.get contentCache file))]
+      (when (some? e)
+        (if (not (.isValid e file)) (do (.remove contentCache file) nil) (.getValue e)))))
+
+  (method ^:public cache ^void [this ^JavaFileObject file ^CharBuffer cb]
+    (.put contentCache file (ContentCacheEntry. file cb)))
+
+  (method ^:public flushCache ^void [this ^JavaFileObject file]
+    (.remove contentCache file))
+
+  (method ^:public ^:synchronized resetOutputFilesWritten ^void [this]
+    (.clear outputFilesWritten))
+
+  (field ^:protected ^:final ^{:tag (Map JavaFileObject ContentCacheEntry)} contentCache (HashMap.))
+
+  (defclass ^:protected ^:static ContentCacheEntry
+    (field ^:final ^long timestamp)
+
+    (field ^:final ^{:tag (SoftReference CharBuffer)} ref)
+
+    (constructor [this ^JavaFileObject file ^CharBuffer cb]
+      (set! (.-timestamp this) (.getLastModified file))
+      (set! (.-ref this) (SoftReference. cb)))
+
+    (method isValid ^boolean [this ^JavaFileObject file]
+      (== timestamp (.getLastModified file)))
+
+    (method getValue ^CharBuffer [this] (cast CharBuffer (.get ref))))
+
+  (method ^:public ^:static getKind ^JavaFileObject$Kind [^Path path]
+    (BaseFileManager/getKind (.toString (.getFileName path))))
+
+  (method ^:public ^:static getKind ^JavaFileObject$Kind [^String name]
+    (cond
+      (.endsWith name (.-extension JavaFileObject$Kind/CLASS)) JavaFileObject$Kind/CLASS
+      (.endsWith name (.-extension JavaFileObject$Kind/SOURCE)) JavaFileObject$Kind/SOURCE
+      (.endsWith name (.-extension JavaFileObject$Kind/HTML)) JavaFileObject$Kind/HTML
+      :else JavaFileObject$Kind/OTHER))
+
+  (method ^:protected ^:static nullCheck :type-params [T] ^T [^T o]
+    (Objects/requireNonNull o))
+
+  (method ^:protected ^:static nullCheck :type-params [T] ^{:tag (Collection T)} [^{:tag (Collection T)} it]
+    (for-each [t it] (Objects/requireNonNull t))
+    it)
+
+  (method ^:synchronized newOutputToPath :throws [IOException] ^void [this ^Path path]
+    (when-not (not (.isEnabled lint Lint$LintCategory/OUTPUT_FILE_CLASH))
+      (let [^:mutable ^Path realPath nil]
+        (try (set! realPath (.toRealPath path)) (catch NoSuchFileException e (return)))
+        (when-not (.add outputFilesWritten realPath)
+          (.warning log (CompilerProperties$LintWarnings/OutputFileClash path)))))))

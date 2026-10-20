@@ -1,0 +1,1497 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/file/Locations.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.file)
+
+(import '(com.sun.tools.javac.jvm ModuleNameReader ModuleNameReader$BadClassFile)
+        '(com.sun.tools.javac.main Option)
+        '(com.sun.tools.javac.resources CompilerProperties$Errors CompilerProperties$LintWarnings)
+        '(com.sun.tools.javac.util Iterators JCDiagnostic$Warning ListBuffer Log Pair StringUtils)
+        '(java.io Closeable File FileNotFoundException IOException UncheckedIOException)
+        '(java.net URI URL URLClassLoader)
+        '(java.nio.file DirectoryIteratorException
+                        DirectoryStream
+                        DirectoryStream$Filter
+                        FileSystem
+                        FileSystemNotFoundException
+                        FileSystems
+                        Files
+                        InvalidPathException
+                        Path
+                        Paths
+                        ProviderNotFoundException)
+        '(java.util ArrayList
+                    Arrays
+                    Collection
+                    Collections
+                    EnumMap
+                    EnumSet
+                    HashMap
+                    HashSet
+                    Iterator
+                    LinkedHashMap
+                    LinkedHashSet
+                    List
+                    Map
+                    Map$Entry
+                    NoSuchElementException
+                    Objects
+                    Set)
+        '(java.util.function BiConsumer Consumer Function Predicate)
+        '(java.util.jar Attributes$Name Manifest)
+        '(java.util.regex Pattern)
+        '(java.util.stream Collectors Stream)
+        '(javax.lang.model SourceVersion)
+        '(javax.tools JavaFileManager$Location StandardJavaFileManager$PathFactory StandardLocation)
+        '(jdk.internal.jmod JmodFile))
+
+(defclass ^:public Locations
+  (field ^:private ^Log log)
+
+  (field ^:private ^FSInfo fsInfo)
+
+  (field ^:private ^ModuleNameReader moduleNameReader)
+
+  (field ^:private ^StandardJavaFileManager$PathFactory pathFactory
+    (method-ref StandardJavaFileManager$PathFactory Paths/get))
+
+  (field ^:static ^:final ^Path javaHome
+    (.getPath (FileSystems/getDefault) (System/getProperty "java.home")))
+
+  (field ^:static ^:final ^Path thisSystemModules (.resolve (.resolve javaHome "lib") "modules"))
+
+  (field ^{:tag (Map Path FileSystem)} fileSystems (LinkedHashMap.))
+
+  (field ^{:tag (List Closeable)} closeables (ArrayList.))
+
+  (field ^:private ^String releaseVersion nil)
+
+  (constructor [this] (.initHandlers this))
+
+  (method getPath ^Path [this ^String first & ^String/1 more]
+    (try
+      (.getPath pathFactory first more)
+      (catch InvalidPathException ipe (throw (IllegalArgumentException. ipe)))))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (let [^{:tag (ListBuffer IOException)} list (ListBuffer.)]
+      (.forEach closeables
+                (lambda Consumer ^void [^Closeable closeable]
+                  (try (.close closeable) (catch IOException ex (.add list ex)))))
+      (when (.nonEmpty list)
+        (let [ex (IOException.)] (for-each [^IOException e list] (.addSuppressed ex e)) (throw ex)))))
+
+  (method update ^void [this ^Log log ^FSInfo fsInfo]
+    (set! (.-log this) log)
+    (set! (.-fsInfo this) fsInfo))
+
+  (method setPathFactory ^void [this ^StandardJavaFileManager$PathFactory f]
+    (set! pathFactory f))
+
+  (method isDefaultBootClassPath ^boolean [this]
+    (let [h (cast BootClassPathLocationHandler
+                  (.getHandler this StandardLocation/PLATFORM_CLASS_PATH))]
+      (.isDefault h)))
+
+  (method isDefaultSystemModulesPath ^boolean [this]
+    (let [h (cast SystemModulesLocationHandler (.getHandler this StandardLocation/SYSTEM_MODULES))]
+      (not (.isExplicit h))))
+
+  (method ^:private getPathEntries ^{:tag (Iterable Path)} [this ^String searchPath]
+    (.getPathEntries this searchPath nil))
+
+  (method ^:private getPathEntries ^{:tag (Iterable Path)} [this ^String searchPath
+                                                            ^Path emptyPathDefault]
+    (let [^{:tag (ListBuffer Path)} entries (ListBuffer.)]
+      (for-each [^String s (.split searchPath (Pattern/quote File/pathSeparator) -1)]
+        (if (.isEmpty s)
+            (when (some? emptyPathDefault) (.add entries emptyPathDefault))
+            (try
+              (.add entries (.getPath this s))
+              (catch IllegalArgumentException e
+                (.warning log (CompilerProperties$LintWarnings/InvalidPath s))))))
+      entries))
+
+  (method ^:public setMultiReleaseValue ^void [this ^String multiReleaseValue]
+    (set! (.-releaseVersion this) multiReleaseValue))
+
+  (method ^:private contains :throws [IOException] ^boolean [this
+                                                             ^{:tag (Collection Path)} searchPath
+                                                             ^Path file]
+    (if (nil? searchPath)
+        false
+        (let [^:mutable ^Path enclosingJar nil]
+          (when (identical? (.provider (.getFileSystem file)) (.getJarFSProvider fsInfo))
+            (let [uri (.toUri file)]
+              (when (.equals (.getScheme uri) "jar")
+                (let [ssp (.getSchemeSpecificPart uri)
+                      sep (.lastIndexOf ssp "!")]
+                  (when (and (.startsWith ssp "file:") (> sep 0))
+                    (set! enclosingJar (Paths/get (URI/create (.substring ssp 0 sep)))))))))
+          (let [nf (Locations/normalize file)]
+            (for-each [^Path p searchPath]
+              (let [np (Locations/normalize p)]
+                (when (and (and (identical? (.getFileSystem np) (.getFileSystem nf))
+                                (Files/isDirectory np))
+                           (.startsWith nf np))
+                  (return true))
+                (when (and (some? enclosingJar) (Files/isSameFile enclosingJar np)) (return true))))
+            false))))
+
+  (defclass ^:private SearchPath
+    :extends (LinkedHashSet Path)
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+    (field ^:private ^boolean expandJarClassPaths false)
+
+    (field ^:private ^:final ^:transient ^{:tag (Set Path)} canonicalValues (HashSet.))
+
+    (method ^:public expandJarClassPaths ^SearchPath [this ^boolean x]
+      (set! expandJarClassPaths x)
+      this)
+
+    (field ^:private ^:transient ^Path emptyPathDefault nil)
+
+    (method ^:public emptyPathDefault ^SearchPath [this ^Path x]
+      (set! emptyPathDefault x)
+      this)
+
+    (method ^:public addDirectories ^SearchPath [this ^String dirs ^boolean warn]
+      (let [prev expandJarClassPaths]
+        (set! expandJarClassPaths true)
+        (try
+          (when (some? dirs)
+            (for-each [^Path dir (.getPathEntries Locations/this dirs)]
+              (.addDirectory this dir warn)))
+          this
+          (finally (set! expandJarClassPaths prev)))))
+
+    (method ^:public addDirectories ^SearchPath [this ^String dirs]
+      (.addDirectories this dirs true))
+
+    (method ^:private addDirectory ^void [this ^Path dir ^boolean warn]
+      (if (not (Files/isDirectory dir))
+          (when warn (.warning log (CompilerProperties$LintWarnings/DirPathElementNotFound dir)))
+          (try
+            (with-resources [^{:tag (Stream Path)} s (Files/list dir)]
+              (.forEach (.filter s
+                                 (method-ref Predicate [Path] Locations/this Locations/.isArchive))
+                        (lambda Consumer ^void [^Path dirEntry] (.addFile this dirEntry warn))))
+            (catch IOException ignore))))
+
+    (method ^:public addFiles ^SearchPath [this ^String files ^boolean warn]
+      (when (some? files)
+        (.addFiles this (.getPathEntries Locations/this files emptyPathDefault) warn))
+      this)
+
+    (method ^:public addFiles ^SearchPath [this ^String files]
+      (.addFiles this files true))
+
+    (method ^:public addFiles ^SearchPath [this ^{:tag (Iterable (? extends Path))} files
+                                           ^boolean warn]
+      (when (some? files) (for-each [^Path file files] (.addFile this file warn)))
+      this)
+
+    (method ^:public addFiles ^SearchPath [this ^{:tag (Iterable (? extends Path))} files]
+      (.addFiles this files true))
+
+    (method ^:public addFile ^void [this ^Path file ^boolean warn]
+      (when-not (.contains this file)
+        (if (not (.exists fsInfo file))
+            (do
+              (when warn (.warning log (CompilerProperties$LintWarnings/PathElementNotFound file)))
+              (.add super file))
+            (let [canonFile (.getCanonicalFile fsInfo file)]
+              (when-not (.contains canonicalValues canonFile)
+                (when (.isFile fsInfo file)
+                  (when (and (not (.endsWith (.toString (.getFileName file)) ".jmod"))
+                             (not (.endsWith file "modules")))
+                    (if (not (.isArchive Locations/this file))
+                        (try
+                          (.close (FileSystems/newFileSystem file (cast ClassLoader nil)))
+                          (when warn
+                            (.warning log
+                                      (CompilerProperties$LintWarnings/UnexpectedArchiveFile file)))
+                          (catch [IOException ProviderNotFoundException] e
+                            (when warn
+                              (.warning log
+                                        (CompilerProperties$LintWarnings/InvalidArchiveFile file)))
+                            (return)))
+                        (when (nil? (.getJarFSProvider fsInfo))
+                          (.error log (CompilerProperties$Errors/NoZipfsForArchive file))
+                          (return)))))
+                (.add super file)
+                (.add canonicalValues canonFile)
+                (when (and (and expandJarClassPaths (.isFile fsInfo file))
+                           (not (.endsWith file "modules")))
+                  (.addJarClassPath this file warn)))))))
+
+    (method ^:private addJarClassPath ^void [this ^Path jarFile ^boolean warn]
+      (try
+        (for-each [^Path f (.getJarClassPath fsInfo jarFile)] (.addFile this f warn))
+        (catch IOException e
+          (.error log
+                  (CompilerProperties$Errors/ErrorReadingFile
+                    jarFile
+                    (JavacFileManager/getMessage e)))))))
+
+  (defclass ^:protected ^:abstract ^:static LocationHandler
+    (method ^:abstract handleOption ^boolean [this ^Option option ^String value])
+
+    (method isSet ^boolean [this] (some? (.getPaths this)))
+
+    (method ^:abstract isExplicit ^boolean [this])
+
+    (method ^:abstract getPaths ^{:tag (Collection Path)} [this])
+
+    (method ^:abstract setPaths :throws [IOException] ^void [this
+                                                             ^{:tag (Iterable (? extends Path))} paths])
+
+    (method ^:abstract setPathsForModule :throws [IOException] ^void [this ^String moduleName
+                                                                      ^{:tag (Iterable (? extends Path))} paths])
+
+    (method getLocationForModule :throws [IOException] ^JavaFileManager$Location [this
+                                                                                  ^String moduleName]
+      nil)
+
+    (method getLocationForModule :throws [IOException] ^JavaFileManager$Location [this ^Path file]
+      nil)
+
+    (method inferModuleName ^String [this] nil)
+
+    (method listLocationsForModules :throws [IOException] ^{:tag (Iterable (Set JavaFileManager$Location))} [this]
+      nil)
+
+    (method ^:abstract contains :throws [IOException] ^boolean [this ^Path file]))
+
+  (defclass ^:private ^:abstract ^:static BasicLocationHandler
+    :extends LocationHandler
+
+    (field ^:final ^JavaFileManager$Location location)
+
+    (field ^:final ^{:tag (Set Option)} options)
+
+    (field ^boolean explicit)
+
+    (constructor ^:protected [this ^JavaFileManager$Location location & ^Option/1 options]
+      (set! (.-location this) location)
+      (set! (.-options this)
+            (if (== (alength options) 0)
+                ^Set (EnumSet/noneOf Option)
+                ^Set (EnumSet/copyOf (Arrays/asList options)))))
+
+    (method setPathsForModule :throws [IOException] ^void [this ^String moduleName
+                                                           ^{:tag (Iterable (? extends Path))} files]
+      (throw (UnsupportedOperationException. (java-str "not supported for " location))))
+
+    (method ^:protected checkSingletonDirectory :throws [IOException] ^Path [this
+                                                                             ^{:tag (Iterable (? extends Path))} paths]
+      (let [^{:tag (Iterator (? extends Path))} pathIter (.iterator paths)]
+        (when-not (.hasNext pathIter)
+          (throw (IllegalArgumentException. "empty path for directory")))
+        (let [path (cast Path (.next pathIter))]
+          (when (.hasNext pathIter)
+            (throw (IllegalArgumentException. "path too long for directory")))
+          (.checkDirectory this path)
+          path)))
+
+    (method ^:protected checkDirectory :throws [IOException] ^Path [this ^Path path]
+      (Objects/requireNonNull path)
+      (when-not (Files/exists path)
+        (throw (FileNotFoundException. (java-str path ": does not exist"))))
+      (when-not (Files/isDirectory path) (throw (IOException. (java-str path ": not a directory"))))
+      path)
+
+    (method isExplicit ^boolean [this] explicit))
+
+  (defclass ^:private OutputLocationHandler
+    :extends BasicLocationHandler
+
+    (field ^:private ^Path outputDir)
+
+    (field ^:private ^ModuleTable moduleTable)
+
+    (constructor [this ^JavaFileManager$Location location & ^Option/1 options]
+      (super. location options))
+
+    (method handleOption ^boolean [this ^Option option ^String value]
+      (if (not (.contains (.-options this) option))
+          false
+          (do
+            (set! (.-explicit this) true)
+            (set! outputDir (when (some? value) (.getPath Locations/this value)))
+            true)))
+
+    (method getPaths ^{:tag (Collection Path)} [this]
+      (when (some? outputDir) ^Collection (Collections/singleton outputDir)))
+
+    (method setPaths :throws [IOException] ^void [this ^{:tag (Iterable (? extends Path))} paths]
+      (if (nil? paths)
+          (set! outputDir nil)
+          (do (set! (.-explicit this) true) (set! outputDir (.checkSingletonDirectory this paths))))
+      (set! moduleTable nil)
+      (set! listed false))
+
+    (method getLocationForModule ^JavaFileManager$Location [this ^String name]
+      (when (nil? moduleTable) (set! moduleTable (ModuleTable.)))
+      (let [^:mutable l (.get moduleTable name)]
+        (when (nil? l)
+          (let [out (.resolve outputDir name)]
+            (set! l
+                  (ModuleLocationHandler. this
+                                          (java-str (.getName (.-location this)) "[" name "]")
+                                          name
+                                          (Collections/singletonList out)
+                                          true))
+            (.add moduleTable l)))
+        l))
+
+    (method setPathsForModule :throws [IOException] ^void [this ^String name
+                                                           ^{:tag (Iterable (? extends Path))} paths]
+      (let [out (.checkSingletonDirectory this paths)]
+        (when (nil? moduleTable) (set! moduleTable (ModuleTable.)))
+        (let [^:mutable l (.get moduleTable name)]
+          (if (nil? l)
+              (do
+                (set! l
+                      (ModuleLocationHandler. this
+                                              (java-str (.getName (.-location this)) "[" name "]")
+                                              name
+                                              (Collections/singletonList out)
+                                              true))
+                (.add moduleTable l))
+              (do
+                (set! (.-searchPath l) (Collections/singletonList out))
+                (.updatePaths moduleTable l)))
+          (set! (.-explicit this) true))))
+
+    (method getLocationForModule ^JavaFileManager$Location [this ^Path file]
+      (when (some? moduleTable) ^JavaFileManager$Location (.get moduleTable file)))
+
+    (field ^:private ^boolean listed)
+
+    (method listLocationsForModules :throws [IOException] ^{:tag (Iterable (Set JavaFileManager$Location))} [this]
+      (when (and (not listed) (some? outputDir))
+        (with-resources [^{:tag (DirectoryStream Path)} stream (Files/newDirectoryStream outputDir)]
+          (for-each [^Path p stream] (.getLocationForModule this (.toString (.getFileName p)))))
+        (set! listed true))
+      (if (or (nil? moduleTable) (.isEmpty moduleTable))
+          (Collections/emptySet)
+          (Collections/singleton (.locations moduleTable))))
+
+    (method contains :throws [IOException] ^boolean [this ^Path file]
+      (if (some? moduleTable)
+          (.contains moduleTable file)
+          (and (some? outputDir)
+               (.startsWith (Locations/normalize file) (Locations/normalize outputDir))))))
+
+  (defclass ^:private SimpleLocationHandler
+    :extends BasicLocationHandler
+
+    (field ^:protected ^{:tag (Collection Path)} searchPath)
+
+    (constructor [this ^JavaFileManager$Location location & ^Option/1 options]
+      (super. location options))
+
+    (method handleOption ^boolean [this ^Option option ^String value]
+      (if (not (.contains (.-options this) option))
+          false
+          (do
+            (set! (.-explicit this) true)
+            (set! searchPath
+                  (when (some? value)
+                    (Collections/unmodifiableCollection (.addFiles (.createPath this) value))))
+            true)))
+
+    (method getPaths ^{:tag (Collection Path)} [this] searchPath)
+
+    (method setPaths ^void [this ^{:tag (Iterable (? extends Path))} files]
+      (let [^:mutable ^SearchPath p nil]
+        (if (nil? files)
+            (set! p (.computePath this nil))
+            (do (set! (.-explicit this) true) (set! p (.addFiles (.createPath this) files))))
+        (set! searchPath (Collections/unmodifiableCollection p))))
+
+    (method ^:protected computePath ^SearchPath [this ^String value]
+      (.addFiles (.createPath this) value))
+
+    (method ^:protected createPath ^SearchPath [this] (SearchPath.))
+
+    (method contains :throws [IOException] ^boolean [this ^Path file]
+      (.contains Locations/this searchPath file)))
+
+  (defclass ^:private ClassPathLocationHandler
+    :extends SimpleLocationHandler
+
+    (constructor [this]
+      (super. StandardLocation/CLASS_PATH Option/CLASS_PATH))
+
+    (method getPaths ^{:tag (Collection Path)} [this]
+      (.lazy this)
+      (.-searchPath this))
+
+    (method ^:protected computePath ^SearchPath [this ^String value]
+      (let [^:mutable cp value]
+        (when (nil? cp) (set! cp (System/getProperty "env.class.path")))
+        (when (and (nil? cp) (nil? (System/getProperty "application.home")))
+          (set! cp (System/getProperty "java.class.path")))
+        (when (nil? cp) (set! cp "."))
+        (.addFiles (.createPath this) cp)))
+
+    (method ^:protected createPath ^SearchPath [this]
+      (.emptyPathDefault (.expandJarClassPaths (SearchPath.) true) (.getPath Locations/this ".")))
+
+    (method ^:private lazy ^void [this]
+      (when (nil? (.-searchPath this)) (.setPaths this nil))))
+
+  (defclass ^:private BootClassPathLocationHandler
+    :extends BasicLocationHandler
+
+    (field ^:private ^{:tag (Collection Path)} searchPath)
+
+    (field ^:final ^{:tag (Map Option String)} optionValues (EnumMap. Option))
+
+    (field ^:private ^boolean isDefault)
+
+    (constructor [this]
+      (super. StandardLocation/PLATFORM_CLASS_PATH
+              Option/BOOT_CLASS_PATH
+              Option/XBOOTCLASSPATH
+              Option/XBOOTCLASSPATH_PREPEND
+              Option/XBOOTCLASSPATH_APPEND
+              Option/ENDORSEDDIRS
+              Option/DJAVA_ENDORSED_DIRS
+              Option/EXTDIRS
+              Option/DJAVA_EXT_DIRS))
+
+    (method isDefault ^boolean [this] (.lazy this) isDefault)
+
+    (method handleOption ^boolean [this ^:mutable ^Option option ^String value]
+      (if (not (.contains (.-options this) option))
+          false
+          (do
+            (set! (.-explicit this) true)
+            (set! option (.canonicalize this option))
+            (.put optionValues option value)
+            (when (identical? option Option/BOOT_CLASS_PATH)
+              (.remove optionValues Option/XBOOTCLASSPATH_PREPEND)
+              (.remove optionValues Option/XBOOTCLASSPATH_APPEND))
+            (set! searchPath nil)
+            true)))
+
+    (method ^:private canonicalize ^Option [this ^Option option]
+      (switch option
+        XBOOTCLASSPATH Option/BOOT_CLASS_PATH
+        DJAVA_ENDORSED_DIRS Option/ENDORSEDDIRS
+        DJAVA_EXT_DIRS Option/EXTDIRS
+        option))
+
+    (method getPaths ^{:tag (Collection Path)} [this]
+      (.lazy this)
+      searchPath)
+
+    (method setPaths ^void [this ^{:tag (Iterable (? extends Path))} files]
+      (if (nil? files)
+          (set! searchPath nil)
+          (do
+            (set! isDefault false)
+            (set! (.-explicit this) true)
+            (let [p (.addFiles (SearchPath.) files false)]
+              (set! searchPath (Collections/unmodifiableCollection p))
+              (.clear optionValues)))))
+
+    (method computePath :throws [IOException] ^SearchPath [this]
+      (let [path (SearchPath.)
+            bootclasspathOpt (cast String (.get optionValues Option/BOOT_CLASS_PATH))
+            endorseddirsOpt (cast String (.get optionValues Option/ENDORSEDDIRS))
+            extdirsOpt (cast String (.get optionValues Option/EXTDIRS))
+            xbootclasspathPrependOpt (cast String (.get optionValues Option/XBOOTCLASSPATH_PREPEND))
+            xbootclasspathAppendOpt (cast String (.get optionValues Option/XBOOTCLASSPATH_APPEND))]
+        (.addFiles path xbootclasspathPrependOpt)
+        (if (some? endorseddirsOpt)
+            (.addDirectories path endorseddirsOpt)
+            (.addDirectories path (System/getProperty "java.endorsed.dirs") false))
+        (if (some? bootclasspathOpt)
+            (.addFiles path bootclasspathOpt)
+            (let [^{:tag (Collection Path)} systemClasses (.systemClasses this)]
+              (if (some? systemClasses)
+                  (.addFiles path systemClasses false)
+                  (let [files (System/getProperty "sun.boot.class.path")]
+                    (.addFiles path files false)))))
+        (.addFiles path xbootclasspathAppendOpt)
+        (if (some? extdirsOpt)
+            (.addDirectories path extdirsOpt)
+            (let [jfxrt (.resolve javaHome "lib/jfxrt.jar")]
+              (when (Files/exists jfxrt) (.addFile path jfxrt false))
+              (.addDirectories path (System/getProperty "java.ext.dirs") false)))
+        (set! isDefault
+              (and (and (nil? xbootclasspathPrependOpt) (nil? bootclasspathOpt))
+                   (nil? xbootclasspathAppendOpt)))
+        path))
+
+    (method ^:private systemClasses :throws [IOException] ^{:tag (Collection Path)} [this]
+      (if (Files/isRegularFile thisSystemModules)
+          (Collections/singleton thisSystemModules)
+          (let [modules (.resolve javaHome "modules")]
+            (when (Files/isDirectory (.resolve modules "java.base"))
+              (with-resources [^{:tag (Stream Path)} listedModules (Files/list modules)]
+                (return (.toList listedModules))))
+            nil)))
+
+    (method ^:private lazy ^void [this]
+      (when (nil? searchPath)
+        (try
+          (set! searchPath (Collections/unmodifiableCollection (.computePath this)))
+          (catch IOException e (throw (UncheckedIOException. e))))))
+
+    (method contains :throws [IOException] ^boolean [this ^Path file]
+      (.contains Locations/this searchPath file)))
+
+  (defclass ^:private ModuleLocationHandler
+    :extends LocationHandler
+    :implements [JavaFileManager$Location]
+
+    (field ^:private ^:final ^LocationHandler parent)
+
+    (field ^:private ^:final ^String name)
+
+    (field ^:private ^:final ^String moduleName)
+
+    (field ^:private ^:final ^boolean output)
+
+    (field ^boolean explicit)
+
+    (field ^{:tag (Collection Path)} searchPath)
+
+    (constructor [this ^LocationHandler parent ^String name ^String moduleName
+                  ^{:tag (Collection Path)} searchPath ^boolean output]
+      (set! (.-parent this) parent)
+      (set! (.-name this) name)
+      (set! (.-moduleName this) moduleName)
+      (set! (.-searchPath this) searchPath)
+      (set! (.-output this) output))
+
+    (method ^:public getName ^String [this] name)
+
+    (method ^:public isOutputLocation ^boolean [this] output)
+
+    (method handleOption ^boolean [this ^Option option ^String value]
+      (throw (UnsupportedOperationException.)))
+
+    (method getPaths ^{:tag (Collection Path)} [this]
+      (Collections/unmodifiableCollection searchPath))
+
+    (method isExplicit ^boolean [this] true)
+
+    (method setPaths :throws [IOException] ^void [this ^{:tag (Iterable (? extends Path))} paths]
+      (.setPathsForModule parent moduleName paths))
+
+    (method setPathsForModule ^void [this ^String moduleName
+                                     ^{:tag (Iterable (? extends Path))} paths]
+      (throw (UnsupportedOperationException. (java-str "not supported for " name))))
+
+    (method inferModuleName ^String [this] moduleName)
+
+    (method contains :throws [IOException] ^boolean [this ^Path file]
+      (.contains Locations/this searchPath file))
+
+    (method ^:public toString ^String [this] name))
+
+  (defclass ^:private ModuleTable
+    (field ^:private ^:final ^{:tag (Map String ModuleLocationHandler)} nameMap (LinkedHashMap.))
+
+    (field ^:private ^:final ^{:tag (Map Path ModuleLocationHandler)} pathMap (LinkedHashMap.))
+
+    (method add ^void [this ^ModuleLocationHandler h]
+      (.put nameMap (.-moduleName h) h)
+      (for-each [^Path p (.-searchPath h)] (.put pathMap (Locations/normalize p) h)))
+
+    (method updatePaths ^void [this ^ModuleLocationHandler h]
+      (loop [^{:tag (Iterator (Map$Entry Path ModuleLocationHandler))} iter (.iterator
+                                                                              (.entrySet pathMap))]
+        (when (.hasNext iter)
+          (let [^{:tag (Map$Entry Path ModuleLocationHandler)} e (cast Map$Entry (.next iter))]
+            (if (identical? (.getValue e) h) (do (.remove iter) (recur iter)) (recur iter)))))
+      (for-each [^Path p (.-searchPath h)] (.put pathMap (Locations/normalize p) h)))
+
+    (method get ^ModuleLocationHandler [this ^String name]
+      (cast ModuleLocationHandler (.get nameMap name)))
+
+    (method get ^ModuleLocationHandler [this ^:mutable ^Path path]
+      (while (some? path)
+        (let [l (cast ModuleLocationHandler (.get pathMap path))]
+          (when (some? l) (return l))
+          (set! path (.getParent path))))
+      nil)
+
+    (method clear ^void [this] (.clear nameMap) (.clear pathMap))
+
+    (method isEmpty ^boolean [this] (.isEmpty nameMap))
+
+    (method contains :throws [IOException] ^boolean [this ^Path file]
+      (.contains Locations/this (.keySet pathMap) file))
+
+    (method locations ^{:tag (Set JavaFileManager$Location)} [this]
+      (Collections/unmodifiableSet
+        (cast Set (.collect (.stream (.values nameMap)) (Collectors/toSet)))))
+
+    (method explicitLocations ^{:tag (Set JavaFileManager$Location)} [this]
+      (Collections/unmodifiableSet
+        (cast Set
+              (.collect (.map (.filter (.stream (.entrySet nameMap))
+                                       (lambda Predicate ^boolean [^Map$Entry e]
+                                         (.-explicit (cast ModuleLocationHandler (.getValue e)))))
+                              (lambda Function ^ModuleLocationHandler [^Map$Entry e]
+                                (cast ModuleLocationHandler (.getValue e))))
+                        (Collectors/toSet))))))
+
+  (defclass ^:private ModulePathLocationHandler
+    :extends SimpleLocationHandler
+
+    (field ^:private ^ModuleTable moduleTable)
+
+    (constructor [this ^JavaFileManager$Location location & ^Option/1 options]
+      (super. location options))
+
+    (method ^:public handleOption ^boolean [this ^Option option ^String value]
+      (if (not (.contains (.-options this) option))
+          false
+          (do
+            (.setPaths this ^Iterable (when (some? value) (.getPathEntries Locations/this value)))
+            true)))
+
+    (method ^:public getLocationForModule ^JavaFileManager$Location [this ^String moduleName]
+      (.initModuleLocations this)
+      (.get moduleTable moduleName))
+
+    (method ^:public getLocationForModule ^JavaFileManager$Location [this ^Path file]
+      (.initModuleLocations this)
+      (.get moduleTable file))
+
+    (method listLocationsForModules ^{:tag (Iterable (Set JavaFileManager$Location))} [this]
+      (let [^{:tag (Set JavaFileManager$Location)} explicitLocations (if (some? moduleTable)
+                                                                         (.explicitLocations
+                                                                           moduleTable)
+                                                                         (Collections/emptySet))
+            ^{:tag (Iterable (Set JavaFileManager$Location))} explicitLocationsList (if (not
+                                                                                          (.isEmpty
+                                                                                            explicitLocations))
+                                                                                        ^Iterable (Collections/singletonList
+                                                                                                    explicitLocations)
+                                                                                        ^Iterable (Collections/emptyList))]
+        (if (nil? (.-searchPath this))
+            explicitLocationsList
+            (let [^{:tag (Iterable (Set JavaFileManager$Location))} searchPathLocations
+                    (lambda Iterable ^Iterator [] (ModulePathIterator.))]
+              (lambda Iterable ^Iterator []
+                (Iterators/createCompoundIterator
+                  (Arrays/asList (new Iterable/1 [explicitLocationsList searchPathLocations]))
+                  (method-ref Function ^Iterator [Iterable] Iterable/.iterator)))))))
+
+    (method contains :throws [IOException] ^boolean [this ^Path file]
+      (when (nil? moduleTable) (.initModuleLocations this))
+      (.contains moduleTable file))
+
+    (method setPaths ^void [this ^{:tag (Iterable (? extends Path))} paths]
+      (when (some? paths) (for-each [^Path p paths] (.checkValidModulePathEntry this p)))
+      (.setPaths super paths)
+      (set! moduleTable nil))
+
+    (method setPathsForModule :throws [IOException] ^void [this ^String name
+                                                           ^{:tag (Iterable (? extends Path))} paths]
+      (let [^{:tag (List Path)} checkedPaths (.checkPaths this paths)]
+        (.initModuleLocations this)
+        (let [^:mutable l (.get moduleTable name)]
+          (if (nil? l)
+              (do
+                (set! l
+                      (ModuleLocationHandler. this
+                                              (java-str (.getName (.-location this)) "[" name "]")
+                                              name
+                                              checkedPaths
+                                              true))
+                (.add moduleTable l))
+              (do (set! (.-searchPath l) checkedPaths) (.updatePaths moduleTable l)))
+          (set! (.-explicit l) true)
+          (set! (.-explicit this) true))))
+
+    (method ^:private checkPaths :throws [IOException] ^{:tag (List Path)} [this
+                                                                            ^{:tag (Iterable (? extends Path))} paths]
+      (Objects/requireNonNull paths)
+      (let [^{:tag (List Path)} validPaths (ArrayList.)]
+        (for-each [^Path p paths] (.add validPaths (.checkDirectory this p)))
+        validPaths))
+
+    (method ^:private initModuleLocations ^void [this]
+      (when-not (some? moduleTable)
+        (set! moduleTable (ModuleTable.))
+        (for-each [^{:tag (Set JavaFileManager$Location)} set (.listLocationsForModules this)]
+          (for-each [^JavaFileManager$Location locn set]
+            (when-instance [^ModuleLocationHandler moduleLocationHandler locn]
+              (when-not (.containsKey (.-nameMap moduleTable) (.-moduleName moduleLocationHandler))
+                (.add moduleTable moduleLocationHandler)))))))
+
+    (method ^:private checkValidModulePathEntry ^void [this ^Path p]
+      (when-not (not (Files/exists p))
+        (when-not (Files/isDirectory p)
+          (let [name (.toString (.getFileName p))
+                lastDot (.lastIndexOf name ".")]
+            (when (> lastDot 0) (switch (.substring name lastDot) (".jar" ".jmod") (return)))
+            (throw (IllegalArgumentException. (.toString p)))))))
+
+    (defclass ModulePathIterator
+      :implements [(Iterator (Set JavaFileManager$Location))]
+
+      (field ^{:tag (Iterator Path)} pathIter
+        (.iterator (.-searchPath ModulePathLocationHandler/this)))
+
+      (field ^int pathIndex 0)
+
+      (field ^{:tag (Set JavaFileManager$Location)} next nil)
+
+      (method ^:public hasNext ^boolean [this]
+        (if (some? next)
+            true
+            (do
+              (while (nil? next)
+                (if (.hasNext pathIter)
+                    (let [path (cast Path (.next pathIter))]
+                      (if (Files/isDirectory path)
+                          (set! next (.scanDirectory this path))
+                          (set! next (.scanFile this path)))
+                      (set! pathIndex (unchecked-inc-int pathIndex)))
+                    (return false)))
+              true)))
+
+      (method ^:public next ^{:tag (Set JavaFileManager$Location)} [this]
+        (.hasNext this)
+        (if (some? next)
+            (let [^{:tag (Set JavaFileManager$Location)} result next] (set! next nil) result)
+            (throw (NoSuchElementException.))))
+
+      (method ^:private scanDirectory ^{:tag (Set JavaFileManager$Location)} [this ^Path path]
+        (let [^{:tag (Set Path)} paths (LinkedHashSet.)
+              ^:mutable ^Path moduleInfoClass nil]
+          (try
+            (with-resources [^{:tag (DirectoryStream Path)} stream (Files/newDirectoryStream path)]
+              (for-each [^Path entry stream]
+                (when (.endsWith entry "module-info.class") (set! moduleInfoClass entry) (break))
+                (.add paths entry)))
+            (catch [DirectoryIteratorException IOException] ignore
+              (.error log (CompilerProperties$Errors/LocnCantReadDirectory path))
+              (return (Collections/emptySet))))
+          (when (some? moduleInfoClass)
+            (try
+              (let [moduleName (.readModuleName this moduleInfoClass)
+                    name (java-str (.getName (.-location ModulePathLocationHandler/this))
+                                   "["
+                                   pathIndex
+                                   ":"
+                                   moduleName
+                                   "]")
+                    l (ModuleLocationHandler. ModulePathLocationHandler/this
+                                              name
+                                              moduleName
+                                              (Collections/singletonList path)
+                                              false)]
+                (return (Collections/singleton l)))
+              (catch ModuleNameReader$BadClassFile e
+                (.error log (CompilerProperties$Errors/LocnBadModuleInfo path))
+                (return (Collections/emptySet)))
+              (catch IOException e
+                (.error log (CompilerProperties$Errors/LocnCantReadFile path))
+                (return (Collections/emptySet)))))
+          (let [^{:tag (Set JavaFileManager$Location)} result (LinkedHashSet.)
+                ^:mutable ^int index 0]
+            (for-each [^Path entry paths]
+              (let [^{:tag (Pair String Path)} module (.inferModuleName this entry)]
+                (when (some? module)
+                  (let [moduleName (cast String (.-fst module))
+                        modulePath (cast Path (.-snd module))
+                        name (java-str (.getName (.-location ModulePathLocationHandler/this))
+                                       "["
+                                       pathIndex
+                                       "."
+                                       (let [old-1 index]
+                                         (set! index (unchecked-inc-int index))
+                                         old-1)
+                                       ":"
+                                       moduleName
+                                       "]")
+                        l (ModuleLocationHandler.
+                            ModulePathLocationHandler/this
+                            name
+                            moduleName
+                            (Collections/singletonList modulePath)
+                            false)]
+                    (.add result l)))))
+            result)))
+
+      (method ^:private scanFile ^{:tag (Set JavaFileManager$Location)} [this ^Path path]
+        (let [^{:tag (Pair String Path)} module (.inferModuleName this path)]
+          (if (nil? module)
+              (Collections/emptySet)
+              (let [moduleName (cast String (.-fst module))
+                    modulePath (cast Path (.-snd module))
+                    name (java-str (.getName (.-location ModulePathLocationHandler/this))
+                                   "["
+                                   pathIndex
+                                   ":"
+                                   moduleName
+                                   "]")
+                    l (ModuleLocationHandler. ModulePathLocationHandler/this
+                                              name
+                                              moduleName
+                                              (Collections/singletonList modulePath)
+                                              false)]
+                (Collections/singleton l)))))
+
+      (method ^:private inferModuleName ^{:tag (Pair String Path)} [this ^Path p]
+        (cond
+          (Files/isDirectory p)
+            (do
+              (when (or (Files/exists (.resolve p "module-info.class"))
+                        (Files/exists (.resolve p "module-info.sig")))
+                (let [name (.toString (.getFileName p))]
+                  (when (SourceVersion/isName name) (return (Pair. name p)))))
+              nil)
+          (and (.endsWith (.toString (.getFileName p)) ".jar") (.exists fsInfo p))
+            (let [jarFSProvider (.getJarFSProvider fsInfo)]
+              (if (nil? jarFSProvider)
+                  (do (.error log (CompilerProperties$Errors/NoZipfsForArchive p)) nil)
+                  (do
+                    (try
+                      (with-resources [fs (.newFileSystem
+                                            jarFSProvider
+                                            p
+                                            (.readOnlyJarFSEnv fsInfo releaseVersion))]
+                        (let [moduleInfoClass (.getPath fs "module-info.class")]
+                          (when (Files/exists moduleInfoClass)
+                            (let [moduleName (.readModuleName this moduleInfoClass)]
+                              (return (Pair. moduleName p))))
+                          (let [mf (.getPath fs "META-INF/MANIFEST.MF")]
+                            (when (Files/exists mf)
+                              (with-resources [in (Files/newInputStream mf)]
+                                (let [man (Manifest. in)
+                                      attrs (.getMainAttributes man)]
+                                  (when (some? attrs)
+                                    (let [moduleName (.getValue
+                                                       attrs
+                                                       (Attributes$Name. "Automatic-Module-Name"))]
+                                      (when (some? moduleName)
+                                        (if (.isModuleName
+                                              ModulePathLocationHandler/this
+                                              moduleName)
+                                            (return (Pair. moduleName p))
+                                            (do
+                                              (.error
+                                                log
+                                                (CompilerProperties$Errors/LocnCantGetModuleNameForJar
+                                                  p))
+                                              (return nil))))))))))))
+                      (catch ModuleNameReader$BadClassFile e
+                        (.error log (CompilerProperties$Errors/LocnBadModuleInfo p))
+                        (return nil))
+                      (catch IOException e
+                        (.error log (CompilerProperties$Errors/LocnCantReadFile p))
+                        (return nil)))
+                    (let [fn (.toString (.getFileName p))
+                          ^:mutable mn (.substring fn 0 (unchecked-subtract-int (.length fn) 4))
+                          matcher (.matcher (Pattern/compile "-(\\d+(\\.|$))") mn)]
+                      (when (.find matcher)
+                        (let [start (.start matcher)] (set! mn (.substring mn 0 start))))
+                      (set! mn
+                            (.replaceAll (.replaceAll
+                                           (.replaceAll
+                                             (.replaceAll mn "[^A-Za-z0-9]" ".")
+                                             "(\\.)(\\1)+"
+                                             ".")
+                                           "^\\."
+                                           "")
+                                         "\\.$"
+                                         ""))
+                      (if (not (.isEmpty mn))
+                          (Pair. mn p)
+                          (do
+                            (.error log (CompilerProperties$Errors/LocnCantGetModuleNameForJar p))
+                            nil))))))
+          :else
+            (do
+              (when (.endsWith (.toString (.getFileName p)) ".jmod")
+                (try
+                  (JmodFile/checkMagic p)
+                  (let [^:mutable fs (cast FileSystem (.get fileSystems p))]
+                    (when (nil? fs)
+                      (let [jarFSProvider (.getJarFSProvider fsInfo)]
+                        (when (nil? jarFSProvider)
+                          (.error log (CompilerProperties$Errors/LocnCantReadFile p))
+                          (return nil))
+                        (set! fs (.newFileSystem jarFSProvider p (.readOnlyJarFSEnv fsInfo nil)))
+                        (try
+                          (let [moduleInfoClass (.getPath fs "classes/module-info.class")
+                                moduleName (.readModuleName this moduleInfoClass)
+                                modulePath (.getPath fs "classes")]
+                            (.put fileSystems p fs)
+                            (.add closeables fs)
+                            (set! fs nil)
+                            (return (Pair. moduleName modulePath)))
+                          (finally (when (some? fs) (.close fs)))))))
+                  (catch ModuleNameReader$BadClassFile e
+                    (.error log (CompilerProperties$Errors/LocnBadModuleInfo p)))
+                  (catch IOException e
+                    (.error log (CompilerProperties$Errors/LocnCantReadFile p))
+                    (return nil))))
+              (when false
+                (.warning log (CompilerProperties$LintWarnings/LocnUnknownFileOnModulePath p)))
+              nil)))
+
+      (method ^:private readModuleName :throws [IOException ModuleNameReader$BadClassFile] ^String [this
+                                                                                                    ^Path path]
+        (when (nil? moduleNameReader) (set! moduleNameReader (ModuleNameReader.)))
+        (.readModuleName moduleNameReader path)))
+
+    (method ^:private isModuleName ^boolean [this ^String name]
+      (let [^:mutable ^int next 0
+            ^:mutable ^int off 0]
+        (while (not (== (set! next (.indexOf name \. off)) -1))
+          (let [id (.substring name off next)]
+            (when-not (SourceVersion/isName id) (return false))
+            (set! off (unchecked-add-int next 1))))
+        (let [last (.substring name off)] (SourceVersion/isName last)))))
+
+  (defclass ^:private ModuleSourcePathLocationHandler
+    :extends BasicLocationHandler
+
+    (field ^:private ^ModuleTable moduleTable)
+
+    (field ^:private ^{:tag (List Path)} paths)
+
+    (constructor [this]
+      (super. StandardLocation/MODULE_SOURCE_PATH Option/MODULE_SOURCE_PATH))
+
+    (method handleOption ^boolean [this ^Option option ^String value]
+      (set! (.-explicit this) true)
+      (.init this value)
+      true)
+
+    (method init ^void [this ^String value]
+      (let [moduleSpecificForm (Pattern/compile "([\\p{Alnum}$_.]+)=(.*)")
+            ^{:tag (List String)} pathsForModules (ArrayList.)
+            ^:mutable ^String modulePattern nil]
+        (for-each [^String v (.split value "\u0000")]
+          (if (.matches (.matcher moduleSpecificForm v))
+              (.add pathsForModules v)
+              (set! modulePattern v)))
+        (when (some? modulePattern) (.initFromPattern this modulePattern))
+        (.forEach
+          pathsForModules
+          (method-ref Consumer [String] this ModuleSourcePathLocationHandler/.initForModule))))
+
+    (method initForModule ^void [this ^String value]
+      (let [eq (.indexOf value \=)
+            name (.substring value 0 eq)
+            ^{:tag (List Path)} paths (ArrayList.)]
+        (for-each [^String v (.split (.substring value (unchecked-add-int eq 1)) File/pathSeparator)]
+          (try
+            (.add paths (Paths/get v (new String/1 [])))
+            (catch InvalidPathException e
+              (throw (IllegalArgumentException. (java-str "invalid path: " v) e)))))
+        (try
+          (.setPathsForModule this name paths)
+          (catch IOException e
+            (.printStackTrace e)
+            (throw (IllegalArgumentException. (java-str "cannot set path for module " name) e))))))
+
+    (method initFromPattern ^void [this ^String value]
+      (let [^{:tag (Collection String)} segments (ArrayList.)]
+        (for-each [^String s (.split value File/pathSeparator)] (.expandBraces this s segments))
+        (let [^{:tag (Map String (List Path))} map (LinkedHashMap.)
+              ^{:tag (List Path)} noSuffixPaths (ArrayList.)
+              ^:mutable anySuffix false
+              ^:const MARKER "*"]
+          (for-each [^String seg segments]
+            (let [markStart (.indexOf seg MARKER)]
+              (if (== markStart -1)
+                  (let [p (.getPath Locations/this seg)]
+                    (.add this map p nil)
+                    (.add noSuffixPaths p))
+                  (do
+                    (when (or (== markStart 0)
+                              (not (.isSeparator
+                                     this
+                                     (.charAt seg (unchecked-subtract-int markStart 1)))))
+                      (throw
+                        (IllegalArgumentException.
+                          (java-str (java-str (java-str "illegal use of " MARKER) " in ") seg))))
+                    (let [prefix (.getPath Locations/this
+                                           (.substring seg 0 (unchecked-subtract-int markStart 1)))
+                          ^:mutable ^Path suffix nil
+                          markEnd (unchecked-add-int markStart (.length MARKER))]
+                      (cond
+                        (== markEnd (.length seg)) (set! suffix nil)
+                        (or (not (.isSeparator this (.charAt seg markEnd)))
+                            (not (== (.indexOf seg MARKER markEnd) -1)))
+                          (throw (IllegalArgumentException.
+                                   (java-str (java-str (java-str "illegal use of " MARKER) " in ")
+                                             seg)))
+                        :else
+                          (do
+                            (set! suffix
+                                  (.getPath Locations/this
+                                            (.substring seg (unchecked-add-int markEnd 1))))
+                            (set! anySuffix true)))
+                      (.add this map prefix suffix)
+                      (when (nil? suffix) (.add noSuffixPaths prefix)))))))
+          (.initModuleTable this map)
+          (set! paths (when-not anySuffix noSuffixPaths)))))
+
+    (method ^:private initModuleTable ^void [this ^{:tag (Map String (List Path))} map]
+      (set! moduleTable (ModuleTable.))
+      (.forEach map
+                (lambda BiConsumer ^void [^String modName ^List modPath]
+                  (let [hasModuleInfo (.anyMatch (.stream modPath) checkModuleInfo)]
+                    (when hasModuleInfo
+                      (let [locnName (java-str (.getName (.-location this)) "[" modName "]")
+                            l (ModuleLocationHandler. this locnName modName modPath false)]
+                        (.add moduleTable l)))))))
+
+    (field ^:private ^:final ^{:tag (Predicate Path)} checkModuleInfo
+      (lambda Predicate ^boolean [^Path p] (Files/exists (.resolve p "module-info.java"))))
+
+    (method ^:private isSeparator ^boolean [this ^char ch]
+      (or (== ch File/separatorChar) (== ch \/)))
+
+    (method add ^void [this ^{:tag (Map String (List Path))} map ^Path prefix ^Path suffix]
+      (if (not (Files/isDirectory prefix))
+          (.warning
+            log
+            ^JCDiagnostic$Warning (if (Files/exists prefix)
+                                      ^JCDiagnostic$Warning (CompilerProperties$LintWarnings/DirPathElementNotDirectory
+                                                              prefix)
+                                      ^JCDiagnostic$Warning (CompilerProperties$LintWarnings/DirPathElementNotFound
+                                                              prefix)))
+          (try
+            (with-resources [^{:tag (DirectoryStream Path)} stream (Files/newDirectoryStream
+                                                                     prefix
+                                                                     (lambda DirectoryStream$Filter ^boolean [^Path path]
+                                                                       (Files/isDirectory path)))]
+              (for-each [^Path entry stream]
+                (let [^Path path (if (nil? suffix) entry (.resolve entry suffix))]
+                  (when (Files/isDirectory path)
+                    (let [name (.toString (.getFileName entry))
+                          ^:mutable ^{:tag (List Path)} paths (cast List (.get map name))]
+                      (when (nil? paths) (.put map name (set! paths (ArrayList.))))
+                      (.add paths path))))))
+            (catch IOException e (.println System/err e)))))
+
+    (method ^:private expandBraces ^void [this ^String value ^{:tag (Collection String)} results]
+      (let [^:mutable ^int depth 0
+            ^:mutable ^int start -1
+            ^:mutable ^String prefix nil
+            ^:mutable ^String suffix nil]
+        (loop [^int i 0]
+          (when (< i (.length value))
+            (switch (.charAt value i)
+              \{
+                (do
+                  (set! depth (unchecked-inc-int depth))
+                  (when (== depth 1)
+                    (set! prefix (.substring value 0 i))
+                    (set! suffix
+                          (.substring value (unchecked-add-int (.getMatchingBrace this value i) 1)))
+                    (set! start (unchecked-add-int i 1)))
+                  (recur (unchecked-inc-int i)))
+              \,
+                (do
+                  (when (== depth 1)
+                    (let [elem (.substring value start i)]
+                      (.expandBraces this (java-str prefix elem suffix) results)
+                      (set! start (unchecked-add-int i 1))))
+                  (recur (unchecked-inc-int i)))
+              \}
+                (do
+                  (switch depth
+                    0 (throw (IllegalArgumentException. "mismatched braces"))
+                    1
+                      (let [elem (.substring value start i)]
+                        (.expandBraces this (java-str prefix elem suffix) results)
+                        (return))
+                    (set! depth (unchecked-dec-int depth)))
+                  (recur (unchecked-inc-int i)))
+              (recur (unchecked-inc-int i)))))
+        (when (> depth 0) (throw (IllegalArgumentException. "mismatched braces")))
+        (.add results value)))
+
+    (method getMatchingBrace ^int [this ^String value ^int offset]
+      (let [^:mutable ^int depth 1]
+        (loop [^int i (unchecked-add-int offset 1)]
+          (when (< i (.length value))
+            (switch (.charAt value i)
+              \{ (do (set! depth (unchecked-inc-int depth)) (recur (unchecked-inc-int i)))
+              \}
+                (do
+                  (when (== (set! depth (unchecked-dec-int depth)) 0) (return i))
+                  (recur (unchecked-inc-int i)))
+              (recur (unchecked-inc-int i)))))
+        (throw (IllegalArgumentException. "mismatched braces"))))
+
+    (method isSet ^boolean [this] (some? moduleTable))
+
+    (method getPaths ^{:tag (Collection Path)} [this]
+      (when (nil? paths) (throw (IllegalStateException. "paths not available")))
+      paths)
+
+    (method setPaths :throws [IOException] ^void [this ^{:tag (Iterable (? extends Path))} files]
+      (let [^{:tag (Map String (List Path))} map (LinkedHashMap.)
+            ^{:tag (List Path)} newPaths (ArrayList.)]
+        (for-each [^Path file files] (.add this map file nil) (.add newPaths file))
+        (.initModuleTable this map)
+        (set! (.-explicit this) true)
+        (set! paths (Collections/unmodifiableList newPaths))))
+
+    (method setPathsForModule :throws [IOException] ^void [this ^String name
+                                                           ^{:tag (Iterable (? extends Path))} paths]
+      (let [^{:tag (List Path)} validPaths (.checkPaths this paths)]
+        (when (nil? moduleTable) (set! moduleTable (ModuleTable.)))
+        (let [^:mutable l (.get moduleTable name)]
+          (if (nil? l)
+              (do
+                (set! l
+                      (ModuleLocationHandler. this
+                                              (java-str (.getName (.-location this)) "[" name "]")
+                                              name
+                                              validPaths
+                                              true))
+                (.add moduleTable l))
+              (do (set! (.-searchPath l) validPaths) (.updatePaths moduleTable l)))
+          (set! (.-explicit this) true))))
+
+    (method ^:private checkPaths :throws [IOException] ^{:tag (List Path)} [this
+                                                                            ^{:tag (Iterable (? extends Path))} paths]
+      (Objects/requireNonNull paths)
+      (let [^{:tag (List Path)} validPaths (ArrayList.)]
+        (for-each [^Path p paths] (.add validPaths (.checkDirectory this p)))
+        validPaths))
+
+    (method getLocationForModule ^JavaFileManager$Location [this ^String name]
+      (when (some? moduleTable) ^JavaFileManager$Location (.get moduleTable name)))
+
+    (method getLocationForModule ^JavaFileManager$Location [this ^Path file]
+      (when (some? moduleTable) ^JavaFileManager$Location (.get moduleTable file)))
+
+    (method listLocationsForModules ^{:tag (Iterable (Set JavaFileManager$Location))} [this]
+      (if (nil? moduleTable)
+          (Collections/emptySet)
+          (Collections/singleton (.locations moduleTable))))
+
+    (method contains :throws [IOException] ^boolean [this ^Path file]
+      (if (nil? moduleTable) false (.contains moduleTable file))))
+
+  (defclass ^:private SystemModulesLocationHandler
+    :extends BasicLocationHandler
+
+    (field ^:private ^Path systemJavaHome)
+
+    (field ^:private ^Path modules)
+
+    (field ^:private ^ModuleTable moduleTable)
+
+    (constructor [this]
+      (super. StandardLocation/SYSTEM_MODULES Option/SYSTEM)
+      (set! systemJavaHome Locations/javaHome))
+
+    (method handleOption ^boolean [this ^Option option ^String value]
+      (if (not (.contains (.-options this) option))
+          false
+          (do
+            (set! (.-explicit this) true)
+            (cond
+              (nil? value) (set! systemJavaHome Locations/javaHome)
+              (.equals value "none") (set! systemJavaHome nil)
+              :else (.update this (.getPath Locations/this value)))
+            (set! modules nil)
+            true)))
+
+    (method getPaths ^{:tag (Collection Path)} [this]
+      (when (some? systemJavaHome) ^Collection (Collections/singleton systemJavaHome)))
+
+    (method setPaths :throws [IOException] ^void [this ^{:tag (Iterable (? extends Path))} files]
+      (if (nil? files)
+          (set! systemJavaHome nil)
+          (do
+            (set! (.-explicit this) true)
+            (let [dir (.checkSingletonDirectory this files)] (.update this dir)))))
+
+    (method setPathsForModule :throws [IOException] ^void [this ^String name
+                                                           ^{:tag (Iterable (? extends Path))} paths]
+      (let [^{:tag (List Path)} checkedPaths (.checkPaths this paths)]
+        (.initSystemModules this)
+        (let [^:mutable l (.get moduleTable name)]
+          (if (nil? l)
+              (do
+                (set! l
+                      (ModuleLocationHandler. this
+                                              (java-str (.getName (.-location this)) "[" name "]")
+                                              name
+                                              checkedPaths
+                                              true))
+                (.add moduleTable l))
+              (do (set! (.-searchPath l) checkedPaths) (.updatePaths moduleTable l)))
+          (set! (.-explicit this) true))))
+
+    (method ^:private checkPaths :throws [IOException] ^{:tag (List Path)} [this
+                                                                            ^{:tag (Iterable (? extends Path))} paths]
+      (Objects/requireNonNull paths)
+      (let [^{:tag (List Path)} validPaths (ArrayList.)]
+        (for-each [^Path p paths] (.add validPaths (.checkDirectory this p)))
+        validPaths))
+
+    (method ^:private update ^void [this ^Path p]
+      (when-not (.isCurrentPlatform this p)
+        (let [noJavaRuntimeFS (Files/notExists
+                                (SystemModulesLocationHandler/resolveInJavaHomeLib p "jrt-fs.jar"))
+              noModulesFile (Files/notExists
+                              (SystemModulesLocationHandler/resolveInJavaHomeLib p "modules"))]
+          (when (or noJavaRuntimeFS noModulesFile)
+            (throw (IllegalArgumentException. (.toString p))))))
+      (set! systemJavaHome p)
+      (set! modules nil))
+
+    (method ^:private isCurrentPlatform ^boolean [this ^Path p]
+      (try
+        (Files/isSameFile p Locations/javaHome)
+        (catch IOException ex (throw (IllegalArgumentException. (.toString p) ex)))))
+
+    (method ^:private ^:static resolveInJavaHomeLib ^Path [^Path javaHomePath ^String name]
+      (.resolve (.resolve javaHomePath "lib") name))
+
+    (method getLocationForModule :throws [IOException] ^JavaFileManager$Location [this ^String name]
+      (.initSystemModules this)
+      (.get moduleTable name))
+
+    (method getLocationForModule :throws [IOException] ^JavaFileManager$Location [this ^Path file]
+      (.initSystemModules this)
+      (.get moduleTable file))
+
+    (method listLocationsForModules :throws [IOException] ^{:tag (Iterable (Set JavaFileManager$Location))} [this]
+      (.initSystemModules this)
+      (Collections/singleton (.locations moduleTable)))
+
+    (method contains :throws [IOException] ^boolean [this ^Path file]
+      (.initSystemModules this)
+      (.contains moduleTable file))
+
+    (method ^:private initSystemModules :throws [IOException] ^void [this]
+      (when-not (some? moduleTable)
+        (if (nil? systemJavaHome)
+            (set! moduleTable (ModuleTable.))
+            (do
+              (when (nil? modules)
+                (try
+                  (let [jrtURI (URI/create "jrt:/")
+                        ^:mutable ^FileSystem jrtfs nil]
+                    (if (.isCurrentPlatform this systemJavaHome)
+                        (set! jrtfs (FileSystems/getFileSystem jrtURI))
+                        (do
+                          (try
+                            (let [^{:tag (Map String String)} attrMap (Collections/singletonMap
+                                                                        "java.home"
+                                                                        (.toString systemJavaHome))]
+                              (set! jrtfs (FileSystems/newFileSystem jrtURI attrMap)))
+                            (catch ProviderNotFoundException ex
+                              (let [jfsJar (.toURL
+                                             (.toUri
+                                               (SystemModulesLocationHandler/resolveInJavaHomeLib
+                                                 systemJavaHome
+                                                 "jrt-fs.jar")))
+                                    currentLoader (.getClassLoader Locations)
+                                    fsLoader (URLClassLoader. (new URL/1 [jfsJar]) currentLoader)]
+                                (set! jrtfs
+                                      (FileSystems/newFileSystem
+                                        jrtURI
+                                        (Collections/emptyMap)
+                                        fsLoader))
+                                (.add closeables fsLoader))))
+                          (.add closeables jrtfs)))
+                    (set! modules (.getPath jrtfs "/modules")))
+                  (catch [FileSystemNotFoundException ProviderNotFoundException] e
+                    (set! modules
+                          (SystemModulesLocationHandler/resolveInJavaHomeLib
+                            systemJavaHome
+                            "modules"))
+                    (when-not (Files/exists modules)
+                      (throw (IOException. "can't find system classes" e))))))
+              (set! moduleTable (ModuleTable.))
+              (with-resources [^{:tag (DirectoryStream Path)} stream (Files/newDirectoryStream
+                                                                       modules
+                                                                       (method-ref
+                                                                         DirectoryStream$Filter
+                                                                         [Path]
+                                                                         Files/isDirectory))]
+                (for-each [^Path entry stream]
+                  (let [moduleName (.toString (.getFileName entry))
+                        name (java-str (.getName (.-location this)) "[" moduleName "]")
+                        h (ModuleLocationHandler.
+                            this
+                            name
+                            moduleName
+                            (Collections/singletonList entry)
+                            false)]
+                    (.add moduleTable h)))))))))
+
+  (defclass ^:private PatchModulesLocationHandler
+    :extends BasicLocationHandler
+
+    (field ^:private ^:final ^ModuleTable moduleTable (ModuleTable.))
+
+    (constructor [this]
+      (super. StandardLocation/PATCH_MODULE_PATH Option/PATCH_MODULE))
+
+    (method handleOption ^boolean [this ^Option option ^String value]
+      (if (not (.contains (.-options this) option))
+          false
+          (do
+            (set! (.-explicit this) true)
+            (.clear moduleTable)
+            (for-each [^String v (.split value "\u0000")]
+              (let [eq (.indexOf v \=)]
+                (if (> eq 0)
+                    (let [moduleName (.substring v 0 eq)
+                          mPatchPath (.addFiles (SearchPath.)
+                                                (.substring v (unchecked-add-int eq 1)))
+                          name (java-str (.getName (.-location this)) "[" moduleName "]")
+                          h (ModuleLocationHandler. this name moduleName mPatchPath false)]
+                      (.add moduleTable h))
+                    (.error log (CompilerProperties$Errors/LocnInvalidArgForXpatch value)))))
+            true)))
+
+    (method isSet ^boolean [this] (not (.isEmpty moduleTable)))
+
+    (method getPaths ^{:tag (Collection Path)} [this]
+      (throw (UnsupportedOperationException.)))
+
+    (method setPaths :throws [IOException] ^void [this ^{:tag (Iterable (? extends Path))} files]
+      (throw (UnsupportedOperationException.)))
+
+    (method setPathsForModule :throws [IOException] ^void [this ^String moduleName
+                                                           ^{:tag (Iterable (? extends Path))} files]
+      (throw (UnsupportedOperationException.)))
+
+    (method getLocationForModule :throws [IOException] ^JavaFileManager$Location [this ^String name]
+      (.get moduleTable name))
+
+    (method getLocationForModule :throws [IOException] ^JavaFileManager$Location [this ^Path file]
+      (.get moduleTable file))
+
+    (method listLocationsForModules :throws [IOException] ^{:tag (Iterable (Set JavaFileManager$Location))} [this]
+      (Collections/singleton (.locations moduleTable)))
+
+    (method contains :throws [IOException] ^boolean [this ^Path file]
+      (.contains moduleTable file)))
+
+  (field ^{:tag (Map JavaFileManager$Location LocationHandler)} handlersForLocation)
+
+  (field ^{:tag (Map Option LocationHandler)} handlersForOption)
+
+  (method initHandlers ^void [this]
+    (set! handlersForLocation (HashMap.))
+    (set! handlersForOption (EnumMap. Option))
+    (let [handlers (new BasicLocationHandler/1
+                        [(BootClassPathLocationHandler.)
+                         (ClassPathLocationHandler.)
+                         (SimpleLocationHandler. StandardLocation/SOURCE_PATH Option/SOURCE_PATH)
+                         (SimpleLocationHandler.
+                           StandardLocation/ANNOTATION_PROCESSOR_PATH
+                           Option/PROCESSOR_PATH)
+                         (SimpleLocationHandler.
+                           StandardLocation/ANNOTATION_PROCESSOR_MODULE_PATH
+                           Option/PROCESSOR_MODULE_PATH)
+                         (OutputLocationHandler. StandardLocation/CLASS_OUTPUT Option/D)
+                         (OutputLocationHandler. StandardLocation/SOURCE_OUTPUT Option/S)
+                         (OutputLocationHandler. StandardLocation/NATIVE_HEADER_OUTPUT Option/H)
+                         (ModuleSourcePathLocationHandler.)
+                         (PatchModulesLocationHandler.)
+                         (ModulePathLocationHandler.
+                           StandardLocation/UPGRADE_MODULE_PATH
+                           Option/UPGRADE_MODULE_PATH)
+                         (ModulePathLocationHandler.
+                           StandardLocation/MODULE_PATH
+                           Option/MODULE_PATH)
+                         (SystemModulesLocationHandler.)])]
+      (for-each [^BasicLocationHandler h handlers]
+        (.put handlersForLocation (.-location h) h)
+        (for-each [^Option o (.-options h)] (.put handlersForOption o h)))))
+
+  (method handleOption ^boolean [this ^Option option ^String value]
+    (let [h (cast LocationHandler (.get handlersForOption option))]
+      (if (nil? h) false (.handleOption h option value))))
+
+  (method hasLocation ^boolean [this ^JavaFileManager$Location location]
+    (let [h (.getHandler this location)] (if (nil? h) false (.isSet h))))
+
+  (method hasExplicitLocation ^boolean [this ^JavaFileManager$Location location]
+    (let [h (.getHandler this location)] (if (nil? h) false (.isExplicit h))))
+
+  (method getLocation ^{:tag (Collection Path)} [this ^JavaFileManager$Location location]
+    (let [h (.getHandler this location)] (when (some? h) (.getPaths h))))
+
+  (method getOutputLocation ^Path [this ^JavaFileManager$Location location]
+    (when-not (.isOutputLocation location) (throw (IllegalArgumentException.)))
+    (let [h (.getHandler this location)] (.-outputDir (cast OutputLocationHandler h))))
+
+  (method setLocation :throws [IOException] ^void [this ^JavaFileManager$Location location
+                                                   ^{:tag (Iterable (? extends Path))} files]
+    (let [^:mutable h (.getHandler this location)]
+      (when (nil? h)
+        (if (.isOutputLocation location)
+            (set! h (OutputLocationHandler. location))
+            (set! h (SimpleLocationHandler. location)))
+        (.put handlersForLocation location h))
+      (.setPaths h files)))
+
+  (method getLocationForModule :throws [IOException] ^JavaFileManager$Location [this
+                                                                                ^JavaFileManager$Location location
+                                                                                ^String name]
+    (let [h (.getHandler this location)] (when (some? h) (.getLocationForModule h name))))
+
+  (method getLocationForModule :throws [IOException] ^JavaFileManager$Location [this
+                                                                                ^JavaFileManager$Location location
+                                                                                ^Path file]
+    (let [h (.getHandler this location)] (when (some? h) (.getLocationForModule h file))))
+
+  (method setLocationForModule :throws [IOException] ^void [this ^JavaFileManager$Location location
+                                                            ^String moduleName
+                                                            ^{:tag (Iterable (? extends Path))} files]
+    (let [^:mutable h (.getHandler this location)]
+      (when (nil? h)
+        (if (.isOutputLocation location)
+            (set! h (OutputLocationHandler. location))
+            (set! h (ModulePathLocationHandler. location)))
+        (.put handlersForLocation location h))
+      (.setPathsForModule h moduleName files)))
+
+  (method inferModuleName ^String [this ^JavaFileManager$Location location]
+    (let [h (.getHandler this location)] (when (some? h) (.inferModuleName h))))
+
+  (method listLocationsForModules :throws [IOException] ^{:tag (Iterable (Set JavaFileManager$Location))} [this
+                                                                                                           ^JavaFileManager$Location location]
+    (let [h (.getHandler this location)] (when (some? h) (.listLocationsForModules h))))
+
+  (method contains :throws [IOException] ^boolean [this ^JavaFileManager$Location location
+                                                   ^Path file]
+    (let [h (.getHandler this location)]
+      (when (nil? h) (throw (IllegalArgumentException. "unknown location")))
+      (.contains h file)))
+
+  (method ^:protected getHandler ^LocationHandler [this ^JavaFileManager$Location location]
+    (Objects/requireNonNull location)
+    (if-instance [^LocationHandler locationHandler location]
+      locationHandler
+      (cast LocationHandler (.get handlersForLocation location))))
+
+  (method ^:private isArchive ^boolean [this ^Path file]
+    (let [n (StringUtils/toLowerCase (.toString (.getFileName file)))]
+      (and (.isFile fsInfo file) (or (.endsWith n ".jar") (.endsWith n ".zip")))))
+
+  (method ^:static normalize ^Path [^Path p]
+    (try (.toRealPath p) (catch IOException e (.normalize (.toAbsolutePath p))))))

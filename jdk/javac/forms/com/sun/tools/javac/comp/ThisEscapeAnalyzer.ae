@@ -1,0 +1,1413 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/comp/ThisEscapeAnalyzer.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.comp)
+
+(import '(com.sun.tools.javac.code Directive$ExportsDirective
+                                   Flags
+                                   Kinds$Kind
+                                   Lint
+                                   Lint$LintCategory
+                                   LintMapper
+                                   Symbol
+                                   Symbol$ClassSymbol
+                                   Symbol$MethodSymbol
+                                   Symbol$ModuleSymbol
+                                   Symbol$PackageSymbol
+                                   Symbol$TypeSymbol
+                                   Symbol$VarSymbol
+                                   Symtab
+                                   Type
+                                   Type$ClassType
+                                   TypeTag
+                                   Types)
+        '(com.sun.tools.javac.resources CompilerProperties$LintWarnings)
+        '(com.sun.tools.javac.tree JCTree
+                                   JCTree$JCAnnotatedType
+                                   JCTree$JCAnnotation
+                                   JCTree$JCArrayAccess
+                                   JCTree$JCArrayTypeTree
+                                   JCTree$JCAssert
+                                   JCTree$JCAssign
+                                   JCTree$JCAssignOp
+                                   JCTree$JCBinary
+                                   JCTree$JCBlock
+                                   JCTree$JCCase
+                                   JCTree$JCClassDecl
+                                   JCTree$JCConditional
+                                   JCTree$JCConstantCaseLabel
+                                   JCTree$JCDoWhileLoop
+                                   JCTree$JCEnhancedForLoop
+                                   JCTree$JCExpression
+                                   JCTree$JCExpressionStatement
+                                   JCTree$JCFieldAccess
+                                   JCTree$JCForLoop
+                                   JCTree$JCIdent
+                                   JCTree$JCIf
+                                   JCTree$JCInstanceOf
+                                   JCTree$JCLambda
+                                   JCTree$JCMemberReference
+                                   JCTree$JCMethodDecl
+                                   JCTree$JCMethodInvocation
+                                   JCTree$JCModifiers
+                                   JCTree$JCNewArray
+                                   JCTree$JCNewClass
+                                   JCTree$JCPatternCaseLabel
+                                   JCTree$JCRecordPattern
+                                   JCTree$JCReturn
+                                   JCTree$JCSwitch
+                                   JCTree$JCSwitchExpression
+                                   JCTree$JCSynchronized
+                                   JCTree$JCThrow
+                                   JCTree$JCTypeApply
+                                   JCTree$JCTypeCast
+                                   JCTree$JCTypeIntersection
+                                   JCTree$JCTypeParameter
+                                   JCTree$JCTypeUnion
+                                   JCTree$JCUnary
+                                   JCTree$JCVariableDecl
+                                   JCTree$JCWhileLoop
+                                   JCTree$JCWildcard
+                                   JCTree$JCYield
+                                   JCTree$LetExpr
+                                   JCTree$Tag
+                                   JCTree$TypeBoundKind
+                                   TreeInfo
+                                   TreeScanner)
+        '(com.sun.tools.javac.util Assert
+                                   Context
+                                   Context$Key
+                                   JCDiagnostic$DiagnosticPosition
+                                   List
+                                   Log
+                                   Names
+                                   Pair
+                                   Position)
+        '(java.util ArrayList Comparator EnumSet HashSet LinkedHashMap Map Objects Optional Set)
+        '(java.util.concurrent.atomic AtomicReference)
+        '(java.util.function Consumer Function IntPredicate Predicate Supplier)
+        '(java.util.stream Collector Collectors IntStream Stream))
+
+(defclass ^:public ThisEscapeAnalyzer
+  :extends TreeScanner
+
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key ThisEscapeAnalyzer)} contextKey
+    (Context$Key.))
+
+  (field ^:private ^:final ^Names names)
+
+  (field ^:private ^:final ^Symtab syms)
+
+  (field ^:private ^:final ^Types types)
+
+  (field ^:private ^:final ^Resolve rs)
+
+  (field ^:private ^:final ^Log log)
+
+  (field ^:private ^:final ^LintMapper lintMapper)
+
+  (field ^:private ^{:tag (Env AttrContext)} topLevelEnv)
+
+  (field ^:private ^:final ^{:tag (Map Symbol MethodInfo)} methodMap (LinkedHashMap.))
+
+  (field ^:private ^:final ^{:tag (Set Symbol$ClassSymbol)} nonPublicOuters (HashSet.))
+
+  (field ^:private ^JCTree$JCClassDecl targetClass)
+
+  (field ^:private ^:final ^{:tag (ArrayList Warning)} warningList (ArrayList.))
+
+  (field ^:private ^MethodInfo currentMethod)
+
+  (field ^:private ^:final ^{:tag (ArrayList StackFrame)} callStack (ArrayList.))
+
+  (field ^:private ^:final ^{:tag (Set (Pair JCTree$JCMethodDecl (RefSet Ref)))} invocations
+    (HashSet.))
+
+  (field ^:private ^int depth -1)
+
+  (field ^:private ^{:tag (RefSet Ref)} refs)
+
+  (method ^:public ^:static instance ^ThisEscapeAnalyzer [^Context context]
+    (let [^:mutable instance (cast ThisEscapeAnalyzer (.get context contextKey))]
+      (when (nil? instance) (set! instance (ThisEscapeAnalyzer. context)))
+      instance))
+
+  (constructor ^:protected [this ^Context context]
+    (.put context contextKey this)
+    (set! names (Names/instance context))
+    (set! log (Log/instance context))
+    (set! syms (Symtab/instance context))
+    (set! types (Types/instance context))
+    (set! rs (Resolve/instance context))
+    (set! lintMapper (LintMapper/instance context)))
+
+  (method ^:public analyzeTree ^void [this ^{:tag (Env AttrContext)} env]
+    (set! topLevelEnv env)
+    (try
+      (.doAnalyzeTree this env)
+      (finally
+        (set! topLevelEnv nil)
+        (.clear methodMap)
+        (.clear nonPublicOuters)
+        (set! targetClass nil)
+        (.clear warningList)
+        (set! currentMethod nil)
+        (.clear callStack)
+        (.clear invocations)
+        (set! depth -1)
+        (set! refs nil))))
+
+  (method ^:private doAnalyzeTree ^void [this ^{:tag (Env AttrContext)} env]
+    (Assert/check (.checkInvariants this false false))
+    (Assert/check (.isEmpty methodMap))
+    (when-not (not (.isEnabled (cast Lint
+                                     (.get (.lintAt
+                                             lintMapper
+                                             (.-sourcefile (.-toplevel env))
+                                             (.pos (.-tree env)))))
+                               Lint$LintCategory/THIS_ESCAPE))
+      (let [^{:tag (Set Symbol$PackageSymbol)} exportedPackages (cast
+                                                                  Set
+                                                                  (.orElse
+                                                                    (.map
+                                                                      (.filter
+                                                                        (.filter
+                                                                          (Optional/ofNullable
+                                                                            (.-modle
+                                                                              (.-toplevel env)))
+                                                                          (lambda Predicate ^boolean [^Symbol$ModuleSymbol mod]
+                                                                            (not
+                                                                              (identical?
+                                                                                mod
+                                                                                (.-noModule syms)))))
+                                                                        (lambda Predicate ^boolean [^Symbol$ModuleSymbol mod]
+                                                                          (not
+                                                                            (identical?
+                                                                              mod
+                                                                              (.-unnamedModule syms)))))
+                                                                      (lambda Function ^Set [^Symbol$ModuleSymbol mod]
+                                                                        (cast
+                                                                          Set
+                                                                          (.collect
+                                                                            (.map
+                                                                              (.stream
+                                                                                (.-exports mod))
+                                                                              (method-ref
+                                                                                Function
+                                                                                ^Symbol$PackageSymbol [Directive$ExportsDirective]
+                                                                                Directive$ExportsDirective/.getPackage))
+                                                                            (Collectors/toSet)))))
+                                                                    nil))]
+        (.scan (anon TreeScanner []
+                 (field ^:private ^JCTree$JCClassDecl currentClass)
+
+                 (field ^:private ^boolean nonPublicOuter)
+
+                 (method ^:public visitClassDef ^void [this ^JCTree$JCClassDecl tree]
+                   (let [currentClassPrev currentClass
+                         nonPublicOuterPrev nonPublicOuter]
+                     (try
+                       (set! currentClass tree)
+                       (set!
+                         nonPublicOuter
+                         (let [a-1 nonPublicOuter b-2 (.isAnonymous (.-sym tree))] (or a-1 b-2)))
+                       (set! nonPublicOuter
+                             (let [a-3 nonPublicOuter
+                                   b-4 (== (bit-and (.-flags (.-mods tree)) Flags/PUBLIC) 0)]
+                               (or a-3 b-4)))
+                       (when nonPublicOuter (.add nonPublicOuters (.-sym currentClass)))
+                       (.visitClassDef super tree)
+                       (finally
+                         (set! currentClass currentClassPrev)
+                         (set! nonPublicOuter nonPublicOuterPrev)))))
+
+                 (method ^:public visitMethodDef ^void [this ^JCTree$JCMethodDecl tree]
+                   (let [constructor (TreeInfo/isConstructor tree)
+                         extendableClass (.currentClassIsExternallyExtendable this)
+                         nonPrivate (not (== (bit-and
+                                               (.flags (.-sym tree))
+                                               (bit-or-int Flags/PUBLIC Flags/PROTECTED))
+                                             0))
+                         finalish (not (== (bit-and
+                                             (.-flags (.-mods tree))
+                                             (bit-or-int
+                                               (bit-or-int Flags/STATIC Flags/PRIVATE)
+                                               Flags/FINAL))
+                                           0))
+                         analyzable (and (and extendableClass constructor) nonPrivate)
+                         invokable (or (or (not extendableClass) constructor) finalish)]
+                     (.put methodMap
+                           (.-sym tree)
+                           (MethodInfo. currentClass tree constructor analyzable invokable))
+                     (.visitMethodDef super tree)))
+
+                 (method ^:private currentClassIsExternallyExtendable ^boolean [this]
+                   (and (and (and (and (and (not (.isFinal (.-sym currentClass)))
+                                            (.isPublic (.-sym currentClass)))
+                                       (or (nil? exportedPackages)
+                                           (.contains
+                                             exportedPackages
+                                             (.packge (.-sym currentClass)))))
+                                  (not (.isSealed (.-sym currentClass))))
+                             (not (.isDirectlyOrIndirectlyLocal (.-sym currentClass))))
+                        (not nonPublicOuter))))
+               (.-tree env))
+        (.forEach (.filter (.stream (.values methodMap))
+                           (method-ref Predicate [MethodInfo] MethodInfo/.analyzable))
+                  (method-ref Consumer [MethodInfo] this ThisEscapeAnalyzer/.analyzeConstructor))
+        (.filterWarnings this
+                         (lambda Predicate ^boolean [^Warning warning]
+                           (not (.isSuppressed warning))))
+        (.forEach warningList (method-ref Consumer [Warning] Warning/.trimInitializerFrames))
+        (.sort warningList (method-ref Comparator [Warning Warning] Warning/sortByStackFrames))
+        (let [^{:tag (AtomicReference Warning)} previousRef (AtomicReference.)]
+          (.filterWarnings this
+                           (lambda Predicate ^boolean [^Warning warning]
+                             (let [previous (cast Warning (.get previousRef))]
+                               (if (and (some? previous) (.isRedundantWith warning previous))
+                                   false
+                                   (do (.set previousRef warning) true)))))
+          (let [^{:tag (Set JCTree)} thingsWarnedAbout (HashSet.)]
+            (.filterWarnings this
+                             (lambda Predicate ^boolean [^Warning warning]
+                               (.add thingsWarnedAbout (.-origin warning))))
+            (for-each [^Warning warning warningList]
+              (let [^:mutable key CompilerProperties$LintWarnings/PossibleThisEscape]
+                (for-each [^StackFrame frame (.-stack warning)]
+                  (.warning log (.warningPos frame) key)
+                  (set! key CompilerProperties$LintWarnings/PossibleThisEscapeLocation))))
+            (.clear warningList))))))
+
+  (method ^:private filterWarnings ^void [this ^{:tag (Predicate Warning)} filter]
+    (let [^:mutable ^int numRetained 0]
+      (for-each [^Warning warning warningList]
+        (when (.test filter warning)
+          (.set warningList numRetained warning)
+          (set! numRetained (unchecked-inc-int numRetained))))
+      (.clear (.subList warningList numRetained (.size warningList)))))
+
+  (method ^:public scan ^void [this ^JCTree tree]
+    (when-not (or (nil? tree) (identical? (.-type tree) Type/stuckType))
+      (Assert/check (.checkInvariants this true false))
+      (let [^:mutable ^boolean referenceExpressionNode false]
+        (switch (.getTag tree)
+          (SWITCH_EXPRESSION CONDEXPR
+                             YIELD
+                             APPLY
+                             NEWCLASS
+                             NEWARRAY
+                             LAMBDA
+                             PARENS
+                             ASSIGN
+                             TYPECAST
+                             INDEXED
+                             SELECT
+                             REFERENCE
+                             IDENT
+                             NULLCHK
+                             LETEXPR)
+            (set! referenceExpressionNode true)
+          (set! referenceExpressionNode false))
+        (.scan super tree)
+        (Assert/check (.checkInvariants this true referenceExpressionNode)))))
+
+  (method ^:public visitClassDef ^void [this ^JCTree$JCClassDecl tree])
+
+  (method ^:public visitVarDef ^void [this ^JCTree$JCVariableDecl tree]
+    (.visitVarDef this (.-sym tree) (.-init tree)))
+
+  (method ^:private visitVarDef ^void [this ^Symbol$VarSymbol sym ^JCTree$JCExpression expr]
+    (.scan this expr)
+    (if (.isParamOrVar this sym)
+        (.replaceExprs refs depth (lambda Function ^Ref [^ExprRef ref] (VarRef. sym ref)))
+        (.discardExprs refs depth)))
+
+  (method ^:public visitMethodDef ^void [this ^JCTree$JCMethodDecl tree]
+    (Assert/check false))
+
+  (method ^:public visitApply ^void [this ^JCTree$JCMethodInvocation invoke]
+    (let [sym (TreeInfo/symbolFor (.-meth invoke))]
+      (.scan this (.-meth invoke))
+      (let [^{:tag (RefSet ThisRef)} receiverRefs (RefSet/newEmpty)]
+        (if (and (some? sym) (not (.isStatic sym)))
+            (.forEach (.map (.removeExprs refs depth)
+                            (method-ref Function ^ThisRef [ExprRef] ThisRef/new))
+                      (method-ref Consumer [ThisRef] receiverRefs RefSet/.add))
+            (.discardExprs refs depth))
+        (if (identical? (TreeInfo/name (.-meth invoke)) (.-_super names))
+            (.forEach (.filter (.stream (.-defs (.-declaringClass currentMethod)))
+                               (lambda Predicate ^boolean [^JCTree def]
+                                 (== (bit-and (TreeInfo/flags def) Flags/STATIC) 0)))
+                      (lambda Consumer ^void [^JCTree def]
+                        (switch def
+                          [^JCTree$JCBlock block]
+                            (.analyzeInitializer
+                              this
+                              invoke
+                              block
+                              receiverRefs
+                              (lambda Runnable ^void [] (.visitBlock this block)))
+                          [^JCTree$JCVariableDecl varDecl]
+                            (.analyzeInitializer
+                              this
+                              invoke
+                              varDecl
+                              receiverRefs
+                              (lambda Runnable ^void [] (.scan this varDecl)))
+                          nil)))
+            (.invoke this invoke sym (.-args invoke) receiverRefs)))))
+
+  (method ^:private analyzeInitializer ^void [this ^JCTree$JCMethodInvocation site
+                                              ^JCTree initializer
+                                              ^{:tag (RefSet ThisRef)} receiverRefs ^Runnable action]
+    (let [^{:tag (RefSet Ref)} refsPrev refs]
+      (set! refs (RefSet/newEmpty))
+      (let [depthPrev depth]
+        (set! depth 0)
+        (.add callStack (StackFrame. currentMethod initializer site))
+        (try
+          (.addAll refs receiverRefs)
+          (.run action)
+          (finally
+            (.remove callStack (unchecked-subtract-int (.size callStack) 1))
+            (set! depth depthPrev)
+            (set! refs refsPrev))))))
+
+  (method ^:private invoke ^void [this ^JCTree site ^Symbol sym
+                                  ^{:tag (List JCTree$JCExpression)} args
+                                  ^{:tag (RefSet ThisRef)} receiverRefs]
+    (when-not (and (and (and (some? sym) (identical? (.-kind (.-owner sym)) Kinds$Kind/TYP))
+                        (identical? (.-tsym (.-type (.-owner sym))) (.-tsym (.-objectType syms))))
+                   (.isFinal sym))
+      (let [^:mutable methodInfo (cast MethodInfo (.get methodMap sym))]
+        (when (and (nil? methodInfo) (== (.size receiverRefs) 1))
+          (let [receiverRef (cast ThisRef (.next (.iterator receiverRefs)))]
+            (set! methodInfo
+                  (cast MethodInfo
+                        (.orElse (.findFirst (.filter
+                                               (.stream (.values methodMap))
+                                               (lambda Predicate ^boolean [^MethodInfo info]
+                                                 (.isTargetMethod
+                                                   this
+                                                   info
+                                                   sym
+                                                   (.-tsym receiverRef)))))
+                                 nil)))))
+        (if (and (some? methodInfo) (.-invokable methodInfo))
+            (.invokeInvokable this site args receiverRefs methodInfo)
+            (.invokeUnknown this site args receiverRefs)))))
+
+  (method ^:private isTargetMethod ^boolean [this ^MethodInfo info ^Symbol method
+                                             ^Symbol$TypeSymbol receiverType]
+    (and (and (and (and (and (identical? (.-kind method) Kinds$Kind/MTH)
+                             (identical? (.-name (.-declaration info)) (.-name method)))
+                        (identical? (.-sym (.-declaringClass info)) receiverType))
+                   (not (.isConstructor (.-sym (.-declaration info)))))
+              (== (bit-and (.flags (.-sym (.-declaration info))) Flags/STATIC) 0))
+         (.overrides (.-sym (.-declaration info)) method receiverType types false)))
+
+  (method ^:private invokeInvokable ^void [this ^JCTree site
+                                           ^:mutable ^{:tag (List JCTree$JCExpression)} args
+                                           ^{:tag (RefSet ThisRef)} receiverRefs
+                                           ^MethodInfo methodInfo]
+    (Assert/check (.-invokable methodInfo))
+    (let [method (.-declaration methodInfo)
+          ^{:tag (RefSet VarRef)} paramRefs (RefSet/newEmpty)
+          ^:mutable ^{:tag (List JCTree$JCVariableDecl)} params (.-params method)]
+      (while (and (.nonEmpty args) (.nonEmpty params))
+        (let [sym (.-sym (cast JCTree$JCVariableDecl (.-head params)))]
+          (.scan this (cast JCTree (.-head args)))
+          (.forEach (.map (.removeExprs refs depth)
+                          (lambda Function ^VarRef [^ExprRef ref] (VarRef. sym ref)))
+                    (method-ref Consumer [VarRef] paramRefs RefSet/.add))
+          (set! args (.-tail args))
+          (set! params (.-tail params))))
+      (let [currentMethodPrev currentMethod]
+        (set! currentMethod methodInfo)
+        (let [^{:tag (RefSet Ref)} refsPrev refs]
+          (set! refs (RefSet/newEmpty))
+          (let [depthPrev depth]
+            (set! depth 0)
+            (.add callStack (StackFrame. currentMethodPrev nil site))
+            (try
+              (.addAll refs receiverRefs)
+              (.addAll refs paramRefs)
+              (when-not (.isEmpty refs)
+                (let [^{:tag (Pair JCTree$JCMethodDecl (RefSet Ref))} invocation (Pair/of
+                                                                                   (.-declaration
+                                                                                     methodInfo)
+                                                                                   (.clone refs))]
+                  (when-not (not (.add invocations invocation))
+                    (try (.scan this (.-body method)) (finally (.remove invocations invocation)))
+                    (when (TreeInfo/isConstructor (.-declaration methodInfo))
+                      (.forEach (.map (.remove refs ThisRef)
+                                      (method-ref Function ^ReturnRef [ThisRef] ReturnRef/new))
+                                (method-ref Consumer [ReturnRef] refs RefSet/.add)))
+                    (.forEach (.map (.remove refs ReturnRef)
+                                    (lambda Function ^ExprRef [^ReturnRef ref]
+                                      (ExprRef. depthPrev ref)))
+                              (method-ref Consumer [ExprRef] refsPrev RefSet/.add)))))
+              (finally
+                (.remove callStack (unchecked-subtract-int (.size callStack) 1))
+                (set! depth depthPrev)
+                (set! refs refsPrev)
+                (set! currentMethod currentMethodPrev))))))))
+
+  (method ^:private invokeUnknown ^void [this ^JCTree invoke ^{:tag (List JCTree$JCExpression)} args
+                                         ^{:tag (RefSet ThisRef)} receiverRefs]
+    (when (.anyMatch (.stream receiverRefs)
+                     (method-ref Predicate
+                                 [ThisRef]
+                                 this
+                                 ThisEscapeAnalyzer/.triggersUnknownInvokeLeak))
+      (.leakAt this invoke))
+    (for-each [^JCTree$JCExpression arg args]
+      (.scan this arg)
+      (when (.anyMatch (.removeExprs refs depth)
+                       (method-ref Predicate
+                                   [ExprRef]
+                                   this
+                                   ThisEscapeAnalyzer/.triggersUnknownInvokeLeak))
+        (.leakAt this arg)))
+    (when (.hasTag invoke JCTree$Tag/NEWCLASS)
+      (.forEach (.map (.stream receiverRefs)
+                      (lambda Function ^ExprRef [^ThisRef ref] (ExprRef. depth ref)))
+                (method-ref Consumer [ExprRef] refs RefSet/.add))))
+
+  (method ^:private triggersUnknownInvokeLeak ^boolean [this ^Ref ref]
+    (or (not (.contains nonPublicOuters (.-tsym ref)))
+        (.anyMatch (.stream (.-indirections ref))
+                   (lambda Predicate ^boolean [^Indirection i]
+                     (not (identical? i Indirection/OUTER))))))
+
+  (method ^:public visitNewClass ^void [this ^JCTree$JCNewClass tree]
+    (let [methodInfo (cast MethodInfo (.get methodMap (.-constructor tree)))
+          ^Symbol$TypeSymbol tsym (if (some? (.-def tree))
+                                      ^Symbol$TypeSymbol (.-sym (.-def tree))
+                                      (.-tsym (.-type (.-clazz tree))))
+          ^{:tag (RefSet ThisRef)} receiverRefs (.receiverRefsForConstructor
+                                                  this
+                                                  (.-encl tree)
+                                                  tsym)]
+      (if (and (some? methodInfo) (.-invokable methodInfo))
+          (.invokeInvokable this tree (.-args tree) receiverRefs methodInfo)
+          (.invokeUnknown this tree (.-args tree) receiverRefs))))
+
+  (method ^:private receiverRefsForConstructor ^{:tag (RefSet ThisRef)} [this
+                                                                         ^JCTree$JCExpression explicitOuterThis
+                                                                         ^Symbol$TypeSymbol tsym]
+    (cond
+      (some? explicitOuterThis)
+        (do
+          (.scan this explicitOuterThis)
+          (cast RefSet
+                (.collect (.flatMap (.map (.removeExprs refs depth)
+                                          (lambda Function ^Optional [^ExprRef ref]
+                                            (.toOuter ref (.-tsym (.-type explicitOuterThis)))))
+                                    (method-ref Function ^Stream [Optional] Optional/.stream))
+                          (RefSet/collector))))
+      (.hasImplicitOuterInstance this tsym)
+        (cast RefSet
+              (.collect (.flatMap (.map (.find refs ThisRef)
+                                        (lambda Function ^Optional [^ThisRef ref]
+                                          (.toOuter ref tsym)))
+                                  (method-ref Function ^Stream [Optional] Optional/.stream))
+                        (RefSet/collector)))
+      :else (RefSet/newEmpty)))
+
+  (method ^:private hasImplicitOuterInstance ^boolean [this ^Symbol$TypeSymbol tsym]
+    (let [currentClassSym (.-sym (.-declaringClass currentMethod))]
+      (and (and (not (identical? tsym currentClassSym)) (.hasOuterInstance tsym))
+           (.isEnclosedBy tsym currentClassSym))))
+
+  (method ^:public visitBlock ^void [this ^JCTree$JCBlock tree]
+    (.visitScoped this false (lambda Runnable ^void [] (.visitBlock super tree)))
+    (Assert/check (.checkInvariants this true false)))
+
+  (method ^:public visitDoLoop ^void [this ^JCTree$JCDoWhileLoop tree]
+    (.visitLooped this
+                  tree
+                  (method-ref Consumer [JCTree$JCDoWhileLoop] super TreeScanner/.visitDoLoop)))
+
+  (method ^:public visitWhileLoop ^void [this ^JCTree$JCWhileLoop tree]
+    (.visitLooped this
+                  tree
+                  (method-ref Consumer [JCTree$JCWhileLoop] super TreeScanner/.visitWhileLoop)))
+
+  (method ^:public visitForLoop ^void [this ^JCTree$JCForLoop tree]
+    (.visitLooped this
+                  tree
+                  (method-ref Consumer [JCTree$JCForLoop] super TreeScanner/.visitForLoop)))
+
+  (method ^:public visitForeachLoop ^void [this ^JCTree$JCEnhancedForLoop tree]
+    (let [elemType (.elemtype types (.-type (.-expr tree)))]
+      (letclass [(^:record ForeachMethods [^Symbol$MethodSymbol iterator
+                                           ^Symbol$MethodSymbol hasNext ^Symbol$MethodSymbol next])]
+        (let [^:mutable ^Symbol$MethodSymbol iterator nil
+              ^:mutable ^Symbol$MethodSymbol hasNext nil
+              ^:mutable ^Symbol$MethodSymbol next nil]
+          (when (nil? elemType)
+            (let [iteratorSym (.resolveQualifiedMethod
+                                rs
+                                (.pos (.-expr tree))
+                                topLevelEnv
+                                (.-type (.-expr tree))
+                                (.-iterator names)
+                                (List/nil)
+                                (List/nil))]
+              (when (instance? Symbol$MethodSymbol iteratorSym)
+                (set! iterator (cast Symbol$MethodSymbol iteratorSym))
+                (let [hasNextSym (.resolveQualifiedMethod
+                                   rs
+                                   (.pos (.-expr tree))
+                                   topLevelEnv
+                                   (.getReturnType iterator)
+                                   (.-hasNext names)
+                                   (List/nil)
+                                   (List/nil))
+                      nextSym (.resolveQualifiedMethod
+                                rs
+                                (.pos (.-expr tree))
+                                topLevelEnv
+                                (.getReturnType iterator)
+                                (.-next names)
+                                (List/nil)
+                                (List/nil))]
+                  (when (instance? Symbol$MethodSymbol hasNextSym)
+                    (set! hasNext (cast Symbol$MethodSymbol hasNextSym)))
+                  (when (instance? Symbol$MethodSymbol nextSym)
+                    (set! next (cast Symbol$MethodSymbol nextSym)))))))
+          (let [^ForeachMethods foreachMethods (when (and
+                                                       (and (some? iterator) (some? hasNext))
+                                                       (some? next))
+                                                 (ForeachMethods. iterator hasNext next))]
+            (.visitLooped
+              this
+              tree
+              (lambda Consumer ^void [^JCTree$JCEnhancedForLoop foreach]
+                (.scan this (.-expr foreach))
+                (cond
+                  (some? elemType)
+                    (if (.isParamOrVar this (.-sym (.-var foreach)))
+                        (.forEach (.map (.flatMap
+                                          (.map (.removeExprs refs depth)
+                                                (lambda Function ^Optional [^ExprRef ref]
+                                                  (.toIndirect ref (.-tsym elemType))))
+                                          (method-ref Function ^Stream [Optional] Optional/.stream))
+                                        (lambda Function ^VarRef [^ExprRef ref]
+                                          (VarRef. (.-sym (.-var foreach)) ref)))
+                                  (method-ref Consumer [VarRef] refs RefSet/.add))
+                        (.discardExprs refs depth))
+                  (some? foreachMethods)
+                    (let [^:mutable ^{:tag (RefSet ThisRef)} receiverRefs (cast
+                                                                            RefSet
+                                                                            (.collect
+                                                                              (.map
+                                                                                (.removeExprs
+                                                                                  refs
+                                                                                  depth)
+                                                                                (method-ref
+                                                                                  Function
+                                                                                  ^ThisRef [ExprRef]
+                                                                                  ThisRef/new))
+                                                                              (RefSet/collector)))]
+                      (.invoke this
+                               (.-expr foreach)
+                               (.-iterator foreachMethods)
+                               (List/nil)
+                               receiverRefs)
+                      (set! receiverRefs
+                            (cast RefSet
+                                  (.collect (.map
+                                              (.removeExprs refs depth)
+                                              (method-ref Function ^ThisRef [ExprRef] ThisRef/new))
+                                            (RefSet/collector))))
+                      (.invoke this
+                               (.-expr foreach)
+                               (.-hasNext foreachMethods)
+                               (List/nil)
+                               receiverRefs)
+                      (.discardExprs refs depth)
+                      (.invoke this
+                               (.-expr foreach)
+                               (.-next foreachMethods)
+                               (List/nil)
+                               receiverRefs)
+                      (if (.isParamOrVar this (.-sym (.-var foreach)))
+                          (.replaceExprs refs
+                                         depth
+                                         (lambda Function ^Ref [^ExprRef ref]
+                                           (VarRef. (.-sym (.-var foreach)) ref)))
+                          (.discardExprs refs depth)))
+                  :else (.discardExprs refs depth))
+                (.scan this (.-body foreach)))))))))
+
+  (method ^:public visitSwitch ^void [this ^JCTree$JCSwitch tree]
+    (.visitScoped this
+                  false
+                  (lambda Runnable ^void []
+                    (.scan this (.-selector tree))
+                    (.discardExprs refs depth)
+                    (.scan this (.-cases tree)))))
+
+  (method ^:public visitSwitchExpression ^void [this ^JCTree$JCSwitchExpression tree]
+    (.visitScoped this
+                  true
+                  (lambda Runnable ^void []
+                    (.scan this (.-selector tree))
+                    (.discardExprs refs depth)
+                    (let [^{:tag (RefSet ExprRef)} combinedRefs (RefSet/newEmpty)]
+                      (loop [^{:tag (List JCTree$JCCase)} cases (.-cases tree)]
+                        (when (.nonEmpty cases)
+                          (.scan this (.-stats (cast JCTree$JCCase (.-head cases))))
+                          (.forEach (.map (.remove refs YieldRef)
+                                          (lambda Function ^ExprRef [^YieldRef ref]
+                                            (ExprRef. depth ref)))
+                                    (method-ref Consumer [ExprRef] combinedRefs RefSet/.add))
+                          (.forEach (.removeExprs refs depth)
+                                    (method-ref Consumer [ExprRef] combinedRefs RefSet/.add))
+                          (recur (.-tail cases))))
+                      (.addAll refs combinedRefs)))))
+
+  (method ^:public visitCase ^void [this ^JCTree$JCCase tree]
+    (.scan this (.-stats tree)))
+
+  (method ^:public visitYield ^void [this ^JCTree$JCYield tree]
+    (.scan this (.-value tree))
+    (.replaceExprs refs depth (method-ref Function ^Ref [ExprRef] YieldRef/new)))
+
+  (method ^:public visitLetExpr ^void [this ^JCTree$LetExpr tree]
+    (.visitScoped this true (lambda Runnable ^void [] (.visitLetExpr super tree))))
+
+  (method ^:public visitReturn ^void [this ^JCTree$JCReturn tree]
+    (.scan this (.-expr tree))
+    (.replaceExprs refs depth (method-ref Function ^Ref [ExprRef] ReturnRef/new)))
+
+  (method ^:public visitLambda ^void [this ^JCTree$JCLambda lambda]
+    (.visitDeferred this
+                    (arbace.core/lambda Runnable
+                                        ^void []
+                                        (.visitScoped
+                                          this
+                                          true
+                                          (arbace.core/lambda
+                                            Runnable
+                                            ^void []
+                                            (.scan this (.-body lambda)))))))
+
+  (method ^:public visitAssign ^void [this ^JCTree$JCAssign tree]
+    (let [sym (cast Symbol$VarSymbol (TreeInfo/symbolFor (.-lhs tree)))]
+      (.scan this (.-lhs tree))
+      (.discardExprs refs depth)
+      (.scan this (.-rhs tree))
+      (if (.isParamOrVar this sym)
+          (.replaceExprs refs depth (lambda Function ^Ref [^ExprRef ref] (VarRef. sym ref)))
+          (.discardExprs refs depth))))
+
+  (method ^:public visitIndexed ^void [this ^JCTree$JCArrayAccess tree]
+    (.scan this (.-index tree))
+    (.discardExprs refs depth)
+    (.scan this (.-indexed tree))
+    (.forEach (.flatMap (.map (.removeExprs refs depth)
+                              (lambda Function ^Optional [^ExprRef ref]
+                                (.toDirect ref (.-tsym (.-type tree)))))
+                        (method-ref Function ^Stream [Optional] Optional/.stream))
+              (method-ref Consumer [ExprRef] refs RefSet/.add)))
+
+  (method ^:public visitSelect ^void [this ^JCTree$JCFieldAccess tree]
+    (.scan this (.-selected tree))
+    (let [^{:tag (Stream ExprRef)} methodRefs (.removeExprs refs depth)
+          currentClassType (cast Type$ClassType (.-type (.-sym (.-declaringClass currentMethod))))]
+      (cond
+        (TreeInfo/isExplicitThisReference types currentClassType tree)
+          (.forEach (.map (.find refs ThisRef)
+                          (lambda Function ^ExprRef [^ThisRef ref] (ExprRef. depth ref)))
+                    (method-ref Consumer [ExprRef] refs RefSet/.add))
+        (.isExplicitOuterThisReference this types currentClassType tree)
+          (.forEach (.flatMap (.map (.find refs ThisRef)
+                                    (lambda Function ^Optional [^ThisRef ref]
+                                      (.fromOuter ref depth)))
+                              (method-ref Function ^Stream [Optional] Optional/.stream))
+                    (method-ref Consumer [ExprRef] refs RefSet/.add))
+        (and (identical? (.-kind (.-sym tree)) Kinds$Kind/MTH)
+             (== (bit-and (.flags (.-sym tree)) Flags/STATIC) 0))
+          (.forEach methodRefs (method-ref Consumer [ExprRef] refs RefSet/.add)))))
+
+  (method ^:public visitReference ^void [this ^JCTree$JCMemberReference tree]
+    (when-not (.isErroneous (.-type tree))
+      (.scan this (.-expr tree))
+      (let [^{:tag (RefSet ThisRef)} receiverRefs (RefSet/newEmpty)]
+        (switch (.-kind tree)
+          (UNBOUND STATIC TOPLEVEL ARRAY_CTOR) (do (.discardExprs refs depth) (return))
+          (SUPER BOUND)
+            (.forEach (.map (.removeExprs refs depth)
+                            (method-ref Function ^ThisRef [ExprRef] ThisRef/new))
+                      (method-ref Consumer [ThisRef] receiverRefs RefSet/.add))
+          IMPLICIT_INNER
+            (.forEach (.receiverRefsForConstructor this nil (.-tsym (.-type (.-expr tree))))
+                      (method-ref Consumer [ThisRef] receiverRefs RefSet/.add))
+          (throw (RuntimeException. "non-exhaustive?")))
+        (.visitDeferred this
+                        (lambda Runnable ^void []
+                          (.invoke this
+                                   tree
+                                   (cast Symbol$MethodSymbol (.-sym tree))
+                                   (List/nil)
+                                   receiverRefs))))))
+
+  (method ^:public visitIdent ^void [this ^JCTree$JCIdent tree]
+    (cond
+      (or (identical? (.-name tree) (.-_this names)) (identical? (.-name tree) (.-_super names)))
+        (.forEach (.map (.find refs ThisRef)
+                        (lambda Function ^ExprRef [^ThisRef ref] (ExprRef. depth ref)))
+                  (method-ref Consumer [ExprRef] refs RefSet/.add))
+      (.isParamOrVar this (.-sym tree))
+        (let [sym (cast Symbol$VarSymbol (.-sym tree))]
+          (.forEach (.map (.find refs
+                                 VarRef
+                                 (lambda Predicate ^boolean [^VarRef ref]
+                                   (identical? (.-sym ref) sym)))
+                          (lambda Function ^ExprRef [^VarRef ref] (ExprRef. depth ref)))
+                    (method-ref Consumer [ExprRef] refs RefSet/.add)))
+      (and (identical? (.-kind (.-sym tree)) Kinds$Kind/MTH)
+           (== (bit-and (.flags (.-sym tree)) Flags/STATIC) 0))
+        (let [sym (cast Symbol$MethodSymbol (.-sym tree))
+              methodClassSym (.-sym (.-declaringClass currentMethod))]
+          (cond
+            (.isSubClass methodClassSym (.-owner sym) types)
+              (.forEach (.map (.find refs ThisRef)
+                              (lambda Function ^ExprRef [^ThisRef ref] (ExprRef. depth ref)))
+                        (method-ref Consumer [ExprRef] refs RefSet/.add))
+            (.isEnclosedBy methodClassSym (cast Symbol$ClassSymbol (.-owner sym)))
+              (.forEach (.flatMap (.map (.find refs ThisRef)
+                                        (lambda Function ^Optional [^ThisRef ref]
+                                          (.fromOuter ref depth)))
+                                  (method-ref Function ^Stream [Optional] Optional/.stream))
+                        (method-ref Consumer [ExprRef] refs RefSet/.add))))))
+
+  (method ^:public visitSynchronized ^void [this ^JCTree$JCSynchronized tree]
+    (.scan this (.-lock tree))
+    (.discardExprs refs depth)
+    (.scan this (.-body tree)))
+
+  (method ^:public visitConditional ^void [this ^JCTree$JCConditional tree]
+    (.scan this (.-cond tree))
+    (.discardExprs refs depth)
+    (let [^{:tag (RefSet ExprRef)} combinedRefs (RefSet/newEmpty)]
+      (.scan this (.-truepart tree))
+      (.forEach (.removeExprs refs depth) (method-ref Consumer [ExprRef] combinedRefs RefSet/.add))
+      (.scan this (.-falsepart tree))
+      (.forEach (.removeExprs refs depth) (method-ref Consumer [ExprRef] combinedRefs RefSet/.add))
+      (.addAll refs combinedRefs)))
+
+  (method ^:public visitIf ^void [this ^JCTree$JCIf tree]
+    (.scan this (.-cond tree))
+    (.discardExprs refs depth)
+    (.scan this (.-thenpart tree))
+    (.scan this (.-elsepart tree)))
+
+  (method ^:public visitExec ^void [this ^JCTree$JCExpressionStatement tree]
+    (.scan this (.-expr tree))
+    (.discardExprs refs depth))
+
+  (method ^:public visitThrow ^void [this ^JCTree$JCThrow tree]
+    (.scan this (.-expr tree))
+    (when (.discardExprs refs depth) (.leakAt this tree)))
+
+  (method ^:public visitAssert ^void [this ^JCTree$JCAssert tree]
+    (.scan this (.-cond tree))
+    (.discardExprs refs depth)
+    (.scan this (.-detail tree))
+    (.discardExprs refs depth))
+
+  (method ^:public visitNewArray ^void [this ^JCTree$JCNewArray tree]
+    (let [^{:tag (RefSet ExprRef)} combinedRefs (RefSet/newEmpty)]
+      (when (some? (.-elems tree))
+        (loop [^{:tag (List JCTree$JCExpression)} elems (.-elems tree)]
+          (when (.nonEmpty elems)
+            (.scan this (cast JCTree (.-head elems)))
+            (.forEach (.flatMap (.map (.removeExprs refs depth)
+                                      (lambda Function ^Optional [^ExprRef ref]
+                                        (.toIndirect ref (.-tsym (.-type tree)))))
+                                (method-ref Function ^Stream [Optional] Optional/.stream))
+                      (method-ref Consumer [ExprRef] combinedRefs RefSet/.add))
+            (recur (.-tail elems)))))
+      (.forEach (.stream combinedRefs) (method-ref Consumer [ExprRef] refs RefSet/.add))))
+
+  (method ^:public visitTypeCast ^void [this ^JCTree$JCTypeCast tree]
+    (.scan this (.-expr tree))
+    (.replaceExprs refs
+                   depth
+                   (lambda Function ^Ref [^ExprRef ref]
+                     (.withType ref (.-tsym (.-type (.-expr tree)))))))
+
+  (method ^:public visitConstantCaseLabel ^void [this ^JCTree$JCConstantCaseLabel tree])
+
+  (method ^:public visitPatternCaseLabel ^void [this ^JCTree$JCPatternCaseLabel tree])
+
+  (method ^:public visitRecordPattern ^void [this ^JCTree$JCRecordPattern that])
+
+  (method ^:public visitTypeTest ^void [this ^JCTree$JCInstanceOf tree]
+    (.scan this (.-expr tree))
+    (.discardExprs refs depth))
+
+  (method ^:public visitTypeArray ^void [this ^JCTree$JCArrayTypeTree tree])
+
+  (method ^:public visitTypeApply ^void [this ^JCTree$JCTypeApply tree])
+
+  (method ^:public visitTypeUnion ^void [this ^JCTree$JCTypeUnion tree])
+
+  (method ^:public visitTypeIntersection ^void [this ^JCTree$JCTypeIntersection tree])
+
+  (method ^:public visitTypeParameter ^void [this ^JCTree$JCTypeParameter tree])
+
+  (method ^:public visitWildcard ^void [this ^JCTree$JCWildcard tree])
+
+  (method ^:public visitTypeBoundKind ^void [this ^JCTree$TypeBoundKind that])
+
+  (method ^:public visitModifiers ^void [this ^JCTree$JCModifiers tree])
+
+  (method ^:public visitAnnotation ^void [this ^JCTree$JCAnnotation tree])
+
+  (method ^:public visitAnnotatedType ^void [this ^JCTree$JCAnnotatedType tree])
+
+  (method ^:public visitAssignop ^void [this ^JCTree$JCAssignOp tree]
+    (.scan this (.-lhs tree))
+    (.discardExprs refs depth)
+    (.scan this (.-rhs tree))
+    (.discardExprs refs depth))
+
+  (method ^:public visitUnary ^void [this ^JCTree$JCUnary tree]
+    (.scan this (.-arg tree))
+    (.discardExprs refs depth))
+
+  (method ^:public visitBinary ^void [this ^JCTree$JCBinary tree]
+    (.scan this (.-lhs tree))
+    (.discardExprs refs depth)
+    (.scan this (.-rhs tree))
+    (.discardExprs refs depth))
+
+  (method ^:private analyzeConstructor ^void [this ^MethodInfo constructor]
+    (Assert/check (nil? targetClass))
+    (Assert/check (nil? currentMethod))
+    (Assert/check (== depth -1))
+    (Assert/check (nil? refs))
+    (set! targetClass (.-declaringClass constructor))
+    (set! currentMethod constructor)
+    (try
+      (set! refs (RefSet/newEmpty))
+      (.add refs (ThisRef. (.-sym targetClass) (EnumSet/of Indirection/DIRECT)))
+      (.visitScoped this
+                    false
+                    (lambda Runnable ^void [] (.scan this (.-body (.-declaration constructor)))))
+      (finally
+        (Assert/check (== depth -1))
+        (set! currentMethod nil)
+        (set! targetClass nil)
+        (set! refs nil))))
+
+  (method ^:private visitDeferred :type-params [(T extends JCTree)] ^void [this
+                                                                           ^Runnable deferredCode]
+    (let [numWarningsPrev (.size warningList)
+          ^{:tag (RefSet Ref)} refsPrev (.clone refs)
+          ^:mutable ^boolean deferredCodeLeaks false]
+      (try
+        (.run deferredCode)
+        (set! deferredCodeLeaks (> (.size warningList) numWarningsPrev))
+        (set! deferredCodeLeaks
+              (let [a-5 deferredCodeLeaks b-6 (.discardExprs refs depth)] (or a-5 b-6)))
+        (finally
+          (set! refs refsPrev)
+          (.clear (.subList warningList numWarningsPrev (.size warningList)))))
+      (when deferredCodeLeaks
+        (.add refs (ExprRef. depth (.-tsym (.-objectType syms)) (EnumSet/of Indirection/INDIRECT))))))
+
+  (method ^:private visitLooped :type-params [(T extends JCTree)] ^void [this ^T tree
+                                                                         ^{:tag (Consumer T)} visitor]
+    (.visitScoped this
+                  false
+                  (lambda Runnable ^void []
+                    (while true
+                      (let [^{:tag (RefSet Ref)} prevRefs (.clone refs)]
+                        (.accept visitor tree)
+                        (when (.equals refs prevRefs) (break)))))))
+
+  (method ^:private visitScoped ^void [this ^boolean promote ^Runnable action]
+    (.pushScope this)
+    (try
+      (Assert/check (.checkInvariants this true false))
+      (.run action)
+      (Assert/check (.checkInvariants this true promote))
+      (when promote
+        (Assert/check (> depth 0))
+        (.forEach (.map (.removeExprs refs depth)
+                        (lambda Function ^ExprRef [^ExprRef ref]
+                          (ExprRef. (unchecked-subtract-int depth 1) ref)))
+                  (method-ref Consumer [ExprRef] refs RefSet/.add)))
+      (finally (.popScope this))))
+
+  (method ^:private pushScope ^void [this]
+    (set! depth (unchecked-inc-int depth)))
+
+  (method ^:private popScope ^void [this]
+    (Assert/check (>= depth 0))
+    (.discardExprs refs depth)
+    (set! depth (unchecked-dec-int depth)))
+
+  (method ^:private leakAt ^void [this ^JCTree tree]
+    (.add callStack (StackFrame. currentMethod nil tree))
+    (.add warningList (Warning. targetClass (ArrayList. callStack)))
+    (.remove callStack (unchecked-subtract-int (.size callStack) 1)))
+
+  (method ^:private isParamOrVar ^boolean [this ^Symbol sym]
+    (and (and (some? sym) (identical? (.-kind sym) Kinds$Kind/VAR))
+         (or (identical? (.-kind (.-owner sym)) Kinds$Kind/MTH)
+             (identical? (.-kind (.-owner sym)) Kinds$Kind/VAR))))
+
+  (method ^:private isExplicitOuterThisReference ^boolean [this ^Types types
+                                                           ^Type$ClassType currentClass
+                                                           ^JCTree$JCFieldAccess select]
+    (let [selectedType (.erasure types (.-type (.-selected select)))]
+      (when (.hasTag selectedType TypeTag/CLASS)
+        (let [currentClassSym (cast Symbol$ClassSymbol (.-tsym currentClass))
+              selectedTypeSym (cast Symbol$ClassSymbol (.-tsym selectedType))]
+          (when (and (and (identical? (.-name select) (.-_this names))
+                          (.hasOuterInstance currentClassSym))
+                     (identical? (.enclClass (.-owner currentClassSym)) selectedTypeSym))
+            (return true))))
+      false))
+
+  (method ^:private isAnalyzing ^boolean [this] (some? targetClass))
+
+  (method ^:private checkInvariants ^boolean [this ^boolean analyzing ^boolean allowExpr]
+    (Assert/check (= analyzing (.isAnalyzing this)))
+    (if (.isAnalyzing this)
+        (do
+          (Assert/check (some? currentMethod))
+          (Assert/check (some? targetClass))
+          (Assert/check (some? refs))
+          (Assert/check (>= depth 0))
+          (Assert/check (.allMatch (.find refs ExprRef)
+                                   (lambda Predicate ^boolean [^ExprRef ref]
+                                     (and allowExpr (<= (.-depth ref) depth))))))
+        (do
+          (Assert/check (nil? targetClass))
+          (Assert/check (nil? refs))
+          (Assert/check (== depth -1))
+          (Assert/check (.isEmpty callStack))
+          (Assert/check (.isEmpty invocations))))
+    true)
+
+  (defclass ^:enum Indirection
+    (constants DIRECT OUTER INDIRECT))
+
+  (defclass ^:private ^:abstract ^:static Ref
+    (field ^:final ^Symbol$TypeSymbol tsym)
+
+    (field ^:final ^{:tag (EnumSet Indirection)} indirections)
+
+    (constructor [this ^Ref ref] (this. (.-tsym ref) (.-indirections ref)))
+
+    (constructor [this ^Symbol$TypeSymbol tsym ^{:tag (EnumSet Indirection)} indirections]
+      (Assert/check (some? tsym))
+      (Assert/check (some? indirections))
+      (set! (.-tsym this) tsym)
+      (set! (.-indirections this) (EnumSet/copyOf indirections)))
+
+    (method ^:public ^:abstract withType ^Ref [this ^Symbol$TypeSymbol tsym])
+
+    (method ^:public hashCode ^int [this]
+      (bit-xor-int (bit-xor-int (.hashCode (.getClass this)) (.hashCode tsym))
+                   (.hashCode indirections)))
+
+    (method ^:public equals ^boolean [this obj]
+      (cond
+        (identical? obj this) true
+        (or (nil? obj) (not (identical? (.getClass obj) (.getClass this)))) false
+        :else
+          (let [that (cast Ref obj)]
+            (and (identical? tsym (.-tsym that)) (.equals indirections (.-indirections that))))))
+
+    (method ^:public ^:final toString ^String [this]
+      (let [^{:tag (ArrayList String)} properties (ArrayList.)]
+        (.add properties (java-str "tsym=" tsym))
+        (.addProperties this properties)
+        (.add properties
+              (cast String
+                    (.collect (.map (.stream indirections)
+                                    (method-ref Function ^String [Indirection] Indirection/.name))
+                              (Collectors/joining ","))))
+        (java-str (.getSimpleName (.getClass this))
+                  "["
+                  (cast String (.collect (.stream properties) (Collectors/joining ",")))
+                  "]")))
+
+    (method ^:protected addProperties ^void [this ^{:tag (ArrayList String)} properties])
+
+    (method ^:public modifiedIndirections ^{:tag (EnumSet Indirection)} [this
+                                                                         ^{:tag (Consumer (? super (EnumSet Indirection)))} modifier]
+      (let [^{:tag (EnumSet Indirection)} newIndirections (EnumSet/copyOf indirections)]
+        (.accept modifier newIndirections)
+        (Assert/check (not (.isEmpty newIndirections)))
+        newIndirections))
+
+    (method ^:public toOuter ^{:tag (Optional ThisRef)} [this ^Symbol$TypeSymbol tsym]
+      (.map (.filter (Optional/of this)
+                     (lambda Predicate ^boolean [^Ref ref]
+                       (.contains (.-indirections ref) Indirection/DIRECT)))
+            (lambda Function ^ThisRef [^Ref ref]
+              (ThisRef. tsym
+                        (.modifiedIndirections ref
+                                               (lambda Consumer ^void [^EnumSet indirections]
+                                                 (.remove indirections Indirection/DIRECT)
+                                                 (.remove indirections Indirection/INDIRECT)
+                                                 (.add indirections Indirection/OUTER))))))))
+
+  (defclass ^:private ^:static ThisRef
+    :extends Ref
+
+    (constructor [this ^Ref ref] (super. ref))
+
+    (constructor [this ^Symbol$TypeSymbol tsym ^{:tag (EnumSet Indirection)} indirections]
+      (super. tsym indirections))
+
+    (method ^:public withType ^ThisRef [this ^Symbol$TypeSymbol tsym]
+      (ThisRef. tsym (.-indirections this)))
+
+    (method ^:public fromOuter ^{:tag (Optional ExprRef)} [this ^int depth]
+      (let [outerType (cast Symbol$ClassSymbol
+                            (.orElse (.map (Optional/of (.-owner (.-tsym this)))
+                                           (method-ref
+                                             Function
+                                             ^Symbol$ClassSymbol [Symbol]
+                                             Symbol/.enclClass))
+                                     nil))]
+        (if (nil? outerType)
+            (Optional/empty)
+            (.map (.filter (Optional/of this)
+                           (lambda Predicate ^boolean [^ThisRef ref]
+                             (.contains (.-indirections ref) Indirection/OUTER)))
+                  (lambda Function ^ExprRef [^ThisRef ref]
+                    (ExprRef. depth
+                              outerType
+                              (.modifiedIndirections
+                                ref
+                                (lambda Consumer ^void [^EnumSet indirections]
+                                  (.remove indirections Indirection/OUTER)
+                                  (.remove indirections Indirection/INDIRECT)
+                                  (.add indirections Indirection/DIRECT))))))))))
+
+  (defclass ^:private ^:static ExprRef
+    :extends Ref
+
+    (field ^:final ^int depth)
+
+    (constructor [this ^int depth ^Ref ref]
+      (super. ref)
+      (set! (.-depth this) depth))
+
+    (constructor [this ^int depth ^Symbol$TypeSymbol tsym ^{:tag (EnumSet Indirection)} indirections]
+      (super. tsym indirections)
+      (set! (.-depth this) depth))
+
+    (method ^:public withType ^ExprRef [this ^Symbol$TypeSymbol tsym]
+      (ExprRef. depth tsym (.-indirections this)))
+
+    (method ^:public toIndirect ^{:tag (Optional ExprRef)} [this ^Symbol$TypeSymbol indirectType]
+      (.map (.filter (Optional/of this)
+                     (lambda Predicate ^boolean [^ExprRef ref]
+                       (or (.contains (.-indirections ref) Indirection/DIRECT)
+                           (.contains (.-indirections ref) Indirection/INDIRECT))))
+            (lambda Function ^ExprRef [^ExprRef ref]
+              (ExprRef. depth
+                        indirectType
+                        (.modifiedIndirections ref
+                                               (lambda Consumer ^void [^EnumSet indirections]
+                                                 (.remove indirections Indirection/DIRECT)
+                                                 (.remove indirections Indirection/OUTER)
+                                                 (.add indirections Indirection/INDIRECT)))))))
+
+    (method ^:public toDirect ^{:tag (Optional ExprRef)} [this ^Symbol$TypeSymbol directType]
+      (.map (.filter (Optional/of this)
+                     (lambda Predicate ^boolean [^ExprRef ref]
+                       (.contains (.-indirections ref) Indirection/INDIRECT)))
+            (lambda Function ^ExprRef [^ExprRef ref]
+              (ExprRef. depth
+                        directType
+                        (.modifiedIndirections ref
+                                               (lambda Consumer ^void [^EnumSet indirections]
+                                                 (.remove indirections Indirection/OUTER)
+                                                 (.add indirections Indirection/DIRECT)))))))
+
+    (method ^:public hashCode ^int [this]
+      (bit-xor-int (.hashCode super) (Integer/hashCode depth)))
+
+    (method ^:public equals ^boolean [this obj]
+      (cond
+        (identical? obj this) true
+        (not (.equals super obj)) false
+        :else (let [that (cast ExprRef obj)] (== depth (.-depth that)))))
+
+    (method ^:protected addProperties ^void [this ^{:tag (ArrayList String)} properties]
+      (.addProperties super properties)
+      (.add properties (java-str "depth=" depth))))
+
+  (defclass ^:private ^:static ReturnRef
+    :extends Ref
+
+    (constructor [this ^Ref ref] (super. ref))
+
+    (constructor [this ^Symbol$TypeSymbol tsym ^{:tag (EnumSet Indirection)} indirections]
+      (super. tsym indirections))
+
+    (method ^:public withType ^ReturnRef [this ^Symbol$TypeSymbol tsym]
+      (ReturnRef. tsym (.-indirections this))))
+
+  (defclass ^:private ^:static YieldRef
+    :extends Ref
+
+    (constructor [this ^Ref ref] (super. ref))
+
+    (constructor [this ^Symbol$TypeSymbol tsym ^{:tag (EnumSet Indirection)} indirections]
+      (super. tsym indirections))
+
+    (method ^:public withType ^YieldRef [this ^Symbol$TypeSymbol tsym]
+      (YieldRef. tsym (.-indirections this))))
+
+  (defclass ^:private ^:static VarRef
+    :extends Ref
+
+    (field ^:final ^Symbol$VarSymbol sym)
+
+    (constructor [this ^Symbol$VarSymbol sym ^Ref ref]
+      (super. ref)
+      (set! (.-sym this) sym))
+
+    (constructor [this ^Symbol$VarSymbol sym ^Symbol$TypeSymbol tsym
+                  ^{:tag (EnumSet Indirection)} indirections]
+      (super. tsym indirections)
+      (set! (.-sym this) sym))
+
+    (method ^:public withType ^VarRef [this ^Symbol$TypeSymbol tsym]
+      (VarRef. sym tsym (.-indirections this)))
+
+    (method ^:public hashCode ^int [this]
+      (bit-xor-int (.hashCode super) (Objects/hashCode sym)))
+
+    (method ^:public equals ^boolean [this obj]
+      (cond
+        (identical? obj this) true
+        (not (.equals super obj)) false
+        :else (let [that (cast VarRef obj)] (Objects/equals sym (.-sym that)))))
+
+    (method ^:protected addProperties ^void [this ^{:tag (ArrayList String)} properties]
+      (.addProperties super properties)
+      (.add properties (java-str "sym=" sym))))
+
+  (defclass ^:private ^:static RefSet
+    :extends (HashSet T)
+    :type-params [(T extends Ref)]
+
+    (constructor ^:private [this] (super. 8))
+
+    (method ^:public ^:static newEmpty :type-params [(T extends Ref)] ^{:tag (RefSet T)} []
+      (RefSet.))
+
+    (method ^:public find :type-params [(T extends Ref)] ^{:tag (Stream T)} [this
+                                                                             ^{:tag (Class T)} refType]
+      (.find this refType (lambda Predicate ^boolean [^Ref ref] true)))
+
+    (method ^:public find :type-params [(T extends Ref)] ^{:tag (Stream T)} [this
+                                                                             ^{:tag (Class T)} refType
+                                                                             ^{:tag (Predicate (? super T))} filter]
+      (.stream (cast java.util.List
+                     (.collect (.filter (.map (.filter
+                                                (.stream this)
+                                                (method-ref
+                                                  Predicate
+                                                  [Ref]
+                                                  refType
+                                                  Class/.isInstance))
+                                              (method-ref Function ^Ref [Ref] refType Class/.cast))
+                                        filter)
+                               (Collectors/toList)))))
+
+    (method ^:public findExprs ^{:tag (Stream ExprRef)} [this ^int depth]
+      (.find this ExprRef (lambda Predicate ^boolean [^ExprRef ref] (== (.-depth ref) depth))))
+
+    (method ^:public remove :type-params [(T extends Ref)] ^{:tag (Stream T)} [this
+                                                                               ^{:tag (Class T)} refType]
+      (.remove this refType (lambda Predicate ^boolean [^Ref ref] true)))
+
+    (method ^:public remove :type-params [(T extends Ref)] ^{:tag (Stream T)} [this
+                                                                               ^{:tag (Class T)} refType
+                                                                               ^{:tag (Predicate (? super T))} filter]
+      (let [^{:tag (ArrayList T)} list (cast
+                                         ArrayList
+                                         (.collect
+                                           (.filter
+                                             (.map
+                                               (.filter
+                                                 (.stream this)
+                                                 (method-ref
+                                                   Predicate
+                                                   [Ref]
+                                                   refType
+                                                   Class/.isInstance))
+                                               (method-ref Function ^Ref [Ref] refType Class/.cast))
+                                             filter)
+                                           (Collectors/toCollection
+                                             (method-ref Supplier ^ArrayList [] ArrayList/new))))]
+        (.removeAll this list)
+        (.stream list)))
+
+    (method ^:public removeExprs ^{:tag (Stream ExprRef)} [this ^int depth]
+      (.remove this ExprRef (lambda Predicate ^boolean [^ExprRef ref] (== (.-depth ref) depth))))
+
+    (method ^:public discardExprs ^boolean [this ^int depth]
+      (.removeIf this
+                 (lambda Predicate ^boolean [^Ref ref]
+                   (if-instance [^ExprRef exprRef ref] (== (.-depth exprRef) depth) false))))
+
+    (method ^:public replaceExprs ^void [this ^int depth
+                                         ^{:tag (Function (? super ExprRef) (? extends T))} mapper]
+      (.forEach (.map (.removeExprs this depth) mapper)
+                (method-ref Consumer [Ref] this RefSet/.add)))
+
+    (method ^:public clone ^{:tag (RefSet T)} [this]
+      (cast RefSet (.clone super)))
+
+    (method ^:public ^:static collector :type-params [(T extends Ref)] ^{:tag (Collector T ? (RefSet T))} []
+      (Collectors/toCollection (method-ref Supplier ^RefSet [] RefSet/new))))
+
+  (defclass ^:private StackFrame
+    (field ^:final ^MethodInfo method)
+
+    (field ^:final ^JCTree site)
+
+    (field ^:final ^JCTree initializer)
+
+    (field ^:final ^boolean suppressible)
+
+    (constructor [this ^MethodInfo method ^JCTree initializer ^JCTree site]
+      (set! (.-method this) method)
+      (set! (.-initializer this) initializer)
+      (set! (.-site this) site)
+      (set! (.-suppressible this)
+            (or (some? initializer)
+                (and (.-constructor method) (identical? (.-declaringClass method) targetClass)))))
+
+    (method warningPos ^JCDiagnostic$DiagnosticPosition [this]
+      (.withLintPosition (.pos site) Position/NOPOS))
+
+    (method lint ^Lint [this]
+      (cast Lint (.get (.lintAt lintMapper (.-sourcefile (.-toplevel topLevelEnv)) (.pos site)))))
+
+    (method isSuppressed ^boolean [this]
+      (and suppressible (not (.isEnabled (.lint this) Lint$LintCategory/THIS_ESCAPE))))
+
+    (method comparePos ^int [this ^StackFrame that]
+      (Integer/compare (.getPreferredPosition (.pos (.-site this)))
+                       (.getPreferredPosition (.pos (.-site that)))))
+
+    (method ^:public toString ^String [this]
+      (java-str "StackFrame["
+                (.-sym (.-declaration method))
+                "@"
+                (.getPreferredPosition (.pos site))
+                (if (some? initializer)
+                    (java-str ",init@" (.getPreferredPosition (.pos initializer)))
+                    "")
+                "]")))
+
+  (defclass ^:private Warning
+    (field ^:final ^JCTree$JCClassDecl declaringClass)
+
+    (field ^:final ^{:tag (ArrayList StackFrame)} stack)
+
+    (field ^:final ^JCTree origin)
+
+    (constructor [this ^JCTree$JCClassDecl declaringClass ^{:tag (ArrayList StackFrame)} stack]
+      (set! (.-declaringClass this) declaringClass)
+      (set! (.-stack this) stack)
+      (set! (.-origin this)
+            (cast JCTree
+                  (.orElseGet (.findFirst (.filter
+                                            (.map
+                                              (.stream stack)
+                                              (lambda Function ^JCTree [^StackFrame frame]
+                                                (.-initializer frame)))
+                                            (method-ref Predicate [JCTree] Objects/nonNull)))
+                              (lambda Supplier ^JCTree []
+                                (.-declaration (.-method (cast StackFrame (.get stack 0)))))))))
+
+    (method isRedundantWith ^boolean [this ^Warning that]
+      (let [numExtra (unchecked-subtract-int (.size (.-stack this)) (.size (.-stack that)))]
+        (and (>= numExtra 0)
+             (.allMatch (IntStream/range 0 (.size (.-stack that)))
+                        (lambda IntPredicate ^boolean [^int index]
+                          (== (.comparePos (cast
+                                             StackFrame
+                                             (.get
+                                               (.-stack this)
+                                               (unchecked-add-int numExtra index)))
+                                           (cast StackFrame (.get (.-stack that) index)))
+                              0))))))
+
+    (method ^:static sortByStackFrames ^int [^Warning warning1 ^Warning warning2]
+      (let [^:mutable index1 (.size (.-stack warning1))
+            ^:mutable index2 (.size (.-stack warning2))]
+        (while true
+          (let [end1 (< (set! index1 (unchecked-dec-int index1)) 0)
+                end2 (< (set! index2 (unchecked-dec-int index2)) 0)]
+            (when (and end1 end2) (return 0))
+            (when end1 (return -1))
+            (when end2 (return 1))
+            (let [diff (.comparePos (cast StackFrame (.get (.-stack warning1) index1))
+                                    (cast StackFrame (.get (.-stack warning2) index2)))]
+              (when-not (== diff 0) (return diff)))))))
+
+    (method isSuppressed ^boolean [this]
+      (loop [^int index (unchecked-subtract-int (.size stack) 1)]
+        (if (>= index 0)
+            (if (.isSuppressed (cast StackFrame (.get stack index)))
+                (return true)
+                (recur (unchecked-dec-int index)))
+            nil))
+      false)
+
+    (method trimInitializerFrames ^void [this]
+      (loop [^int i 0]
+        (if (< i (.size stack))
+            (if (some? (.-initializer (cast StackFrame (.get stack i))))
+                (.clear (.subList stack 0 (unchecked-add-int i 1)))
+                (recur (unchecked-inc-int i)))
+            nil)))
+
+    (method ^:public toString ^String [this]
+      (java-str "Warning[class="
+                (.-flatname (.-sym declaringClass))
+                ",stack=[\n    "
+                (cast String
+                      (.collect (.map (.stream stack)
+                                      (method-ref
+                                        Function
+                                        ^String [StackFrame]
+                                        StackFrame/.toString))
+                                (Collectors/joining "\n    ")))
+                "]]")))
+
+  (defclass ^:private ^:record MethodInfo [^JCTree$JCClassDecl declaringClass
+                                           ^JCTree$JCMethodDecl declaration ^boolean constructor
+                                           ^boolean analyzable ^boolean invokable]
+    (method ^:public toString ^String [this]
+      (java-str "MethodInfo[method="
+                (.-flatname (.-sym declaringClass))
+                "."
+                (.-sym declaration)
+                ",constructor="
+                constructor
+                ",analyzable="
+                analyzable
+                ",invokable="
+                invokable
+                "]"))))

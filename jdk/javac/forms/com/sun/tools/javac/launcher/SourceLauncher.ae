@@ -1,0 +1,133 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/launcher/SourceLauncher.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.launcher)
+
+(import '(com.sun.tools.javac.resources LauncherProperties$Errors)
+        '(java.io OutputStreamWriter PrintStream PrintWriter)
+        '(java.lang.reflect Constructor InvocationTargetException Modifier)
+        '(java.nio.file Files InvalidPathException Path Paths)
+        '(java.util Arrays)
+        '(java.util.function Predicate Supplier)
+        '(jdk.internal.misc MethodFinder VM))
+
+(defclass ^:public ^:final SourceLauncher
+  (method ^:public ^:static main :throws [Throwable] ^void [& ^String/1 args]
+    (try
+      (.run (SourceLauncher. System/err) (VM/getRuntimeArguments) args)
+      (catch Fault f (.println System/err (.getMessage f)) (System/exit 1))
+      (catch InvocationTargetException e (throw (.getCause e)))))
+
+  (field ^:private ^:final ^PrintWriter out)
+
+  (constructor ^:public [this ^PrintStream out]
+    (this. (PrintWriter. (OutputStreamWriter. out) true)))
+
+  (constructor ^:public [this ^PrintWriter out] (set! (.-out this) out))
+
+  (method ^:public run :throws [Fault InvocationTargetException] ^Result [this ^String/1 runtimeArgs
+                                                                          ^String/1 args]
+    (let [file (.getFile this args)
+          program (ProgramDescriptor/of (ProgramFileObject/of file))
+          options (RelevantJavacOptions/of program runtimeArgs)
+          context (MemoryContext. out program options)]
+      (.compileProgram context)
+      (let [mainArgs (cast String/1 (Arrays/copyOfRange args 1 (alength args)))
+            appClass (.execute this context mainArgs)]
+        (Result. appClass (.getNamesOfCompiledClasses context)))))
+
+  (method ^:private getFile :throws [Fault] ^Path [this ^String/1 args]
+    (when (== (alength args) 0) (throw (Fault. LauncherProperties$Errors/NoArgs)))
+    (let [^:mutable ^Path file nil]
+      (try
+        (set! file (Paths/get (aget args 0) (new String/1 [])))
+        (catch InvalidPathException e
+          (throw (Fault. (LauncherProperties$Errors/InvalidFilename (aget args 0))))))
+      (when-not (Files/exists file) (throw (Fault. (LauncherProperties$Errors/FileNotFound file))))
+      file))
+
+  (method ^:private execute :throws [Fault InvocationTargetException] ^{:tag (Class ?)} [this
+                                                                                         ^MemoryContext context
+                                                                                         ^String/1 mainArgs]
+    (System/setProperty "jdk.launcher.sourcefile" (.getSourceFileAsString context))
+    (let [parentLoader (ClassLoader/getSystemClassLoader)
+          program (.getProgramDescriptor context)
+          ^:mutable ^{:tag (Class ?)} firstClass nil
+          firstClassName (cast String (.getFirst (.qualifiedTypeNames program)))
+          loader (.newClassLoaderFor context parentLoader firstClassName)]
+      (.setContextClassLoader (Thread/currentThread) loader)
+      (try
+        (set! firstClass (Class/forName firstClassName false loader))
+        (catch ClassNotFoundException e
+          (throw (Fault. (LauncherProperties$Errors/CantFindClass firstClassName)))))
+      (let [^:mutable mainMethod (MethodFinder/findMainMethod firstClass)]
+        (when (nil? mainMethod)
+          (let [compilationUnitName (.toString (.getFileName (.getFile (.fileObject program))))]
+            (java-assert (.endsWith compilationUnitName ".java"))
+            (let [expectedSimpleName (.substring
+                                       compilationUnitName
+                                       0
+                                       (unchecked-subtract-int (.length compilationUnitName) 5))
+                  expectedPackageName (cast String (.orElse (.packageName program) ""))
+                  ^String expectedName (if (.isEmpty expectedPackageName)
+                                           expectedSimpleName
+                                           (java-str expectedPackageName \. expectedSimpleName))
+                  actualName (cast String
+                                   (.orElseThrow
+                                     (.findFirst
+                                       (.filter (.stream (.qualifiedTypeNames program))
+                                                (lambda Predicate ^boolean [^String name]
+                                                  (.equals name expectedName))))
+                                     (lambda Supplier ^Fault []
+                                       (Fault. (LauncherProperties$Errors/CantFindClass
+                                                 expectedName)))))
+                  ^:mutable ^{:tag (Class ?)} actualClass nil]
+              (try
+                (set! actualClass (Class/forName actualName false (.getClassLoader firstClass)))
+                (catch ClassNotFoundException ignore
+                  (throw (Fault. (LauncherProperties$Errors/CantFindClass actualName)))))
+              (set! mainMethod (MethodFinder/findMainMethod actualClass))
+              (when (nil? mainMethod)
+                (throw (Fault. (LauncherProperties$Errors/CantFindMainMethod actualName)))))))
+        (let [^{:tag (Class ?)} mainClass (.getDeclaringClass mainMethod)
+              mainClassName (.getName mainClass)
+              isStatic (Modifier/isStatic (.getModifiers mainMethod))
+              ^:mutable ^Object instance nil]
+          (when-not isStatic
+            (when (Modifier/isAbstract (.getModifiers mainClass))
+              (throw (Fault. (LauncherProperties$Errors/CantInstantiate mainClassName))))
+            (let [^:mutable ^{:tag (Constructor ?)} constructor nil]
+              (try
+                (set! constructor (.getDeclaredConstructor mainClass))
+                (catch NoSuchMethodException e
+                  (throw (Fault. (LauncherProperties$Errors/CantFindConstructor mainClassName)))))
+              (when (Modifier/isPrivate (.getModifiers constructor))
+                (throw (Fault. (LauncherProperties$Errors/CantUsePrivateConstructor mainClassName))))
+              (try
+                (.setAccessible constructor true)
+                (set! instance (.newInstance constructor))
+                (catch [InstantiationException IllegalAccessException] e
+                  (throw (Fault. (LauncherProperties$Errors/CantAccessConstructor mainClassName)))))))
+          (try
+            (.setAccessible mainMethod true)
+            (let [receiver (if isStatic ^Object mainClass instance)]
+              (if (== (.getParameterCount mainMethod) 0)
+                  (.invoke mainMethod receiver)
+                  (.invoke mainMethod receiver ^Object mainArgs)))
+            (catch IllegalAccessException e
+              (throw (Fault. (LauncherProperties$Errors/CantAccessMainMethod mainClassName))))
+            (catch InvocationTargetException exception
+              (let [invocationElements (.getStackTrace exception)]
+                (when (nil? invocationElements) (throw exception))
+                (let [cause (.getCause exception)]
+                  (when (nil? cause) (throw exception))
+                  (let [causeElements (.getStackTrace cause)]
+                    (when (nil? causeElements) (throw exception))
+                    (let [range (unchecked-subtract-int
+                                  (alength causeElements)
+                                  (alength invocationElements))]
+                      (when (>= range 0)
+                        (.setStackTrace cause
+                                        (cast StackTraceElement/1
+                                              (Arrays/copyOfRange causeElements 0 range))))
+                      (throw exception)))))))
+          mainClass)))))

@@ -527,7 +527,8 @@
         (or (when-not (:array-clone node) (or (class-missing owner) (class-missing mowner)))
             (mdesc-missing (:desc node))
             (when (and (= :special (:kind node)) (:outer-super node)) "an outer class's super call")
-            (when (and (m/hand-written? mowner) (not= mowner "java/lang/Object"))
+            (when (and (m/hand-written? mowner) (not= mowner "java/lang/Object")
+                       (not (m/throwable-print-helper mowner (:name node) (:desc node))))
               (let [base (nm/method-base (:name node) (:desc node))]
                 (if (= :static (:kind node))
                   (when-not (hw-static-exists? mowner base)
@@ -934,6 +935,12 @@
       (t/array? d) (v (list (list 'inst (jsym "J2g_CastArray") (gotype d))
                             (coerce (:x x) (:t x) "Ljava/lang/Object;" (:nn x)) (class-val d))
                       d)
+      ;; a cast to a class outside the closed world, which has no C_Cast (an instanceof
+      ;; pattern's binding, whose cast is not a node of its own for missing-reason: javac's
+      ;; file manager on a FileSystem's subclass): an operation-level stub, as an instance test
+      ;; of it is false (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN2")
+      (class-missing (t/desc->internal d))
+      (v (missing-expr (class-missing (t/desc->internal d)) d) d)
       ;; a fn's code, which has no C_Cast (SA159), cast by a direct call of a linked var
       ;; (Futamura F5) once its fn's class is checked: Go's assertion, never null (a fn's body)
       (m/code-class? (t/desc->internal d))
@@ -970,7 +977,13 @@
   {["equals" "(Ljava/lang/Object;)Z"] "Equals" ["hashCode" "()I"] "HashCode"
    ["toString" "()Ljava/lang/String;"] "ToString" ["getClass" "()Ljava/lang/Class;"] "GetClass"
    ["notify" "()V"] "Notify" ["notifyAll" "()V"] "NotifyAll" ["wait" "()V"] "Wait"
-   ["wait" "(J)V"] "WaitTimeout"})
+   ["wait" "(J)V"] "WaitTimeout" ["wait" "(JI)V"] "WaitTimeout"})
+
+(defn- object-helper-args
+  "The helper's arguments after the receiver: jrt's WaitTimeout is wait(long, int), so
+  wait(long)'s nanoseconds, 0, are added (javac's BaseFileManager; TimeUnit.timedWait)."
+  [name desc xs]
+  (if (= ["wait" "(J)V"] [name desc]) (concat xs [(list 'conv 'int32 0)]) xs))
 
 (defn- args-for [m-desc arg-nodes]
   (let [[ps _] (t/parse-method-desc m-desc)]
@@ -1106,6 +1119,13 @@
       (let [x (expr (:target node))]
         (v (list '.Copy (if (:nn x) (:x x) (list (jsym "NN") (:x x)))) (or (:cast-to node) (:t x))))
 
+      ;; Throwable.printStackTrace(PrintWriter|PrintStream): j2g's support function (jrt's
+      ;; Throwable cannot name the stream classes; m/throwable-print-helper)
+      (and (not= kind :static) (m/throwable-print-helper mowner name desc))
+      (let [[tv a] (operands [(:target node) (first (:args node))] [nil (first ps)])]
+        (rv (list (jsym (m/throwable-print-helper mowner name desc))
+                  (coerce (:x tv) (:t tv) "Ljava/lang/Throwable;" (:nn tv)) (:x a))))
+
       (= kind :static)
       (let [[_ args] (args-for desc (:args node))]
         (rv (apply list (cond (= mowner "java/lang/Object") (fail "static Object method")
@@ -1169,10 +1189,10 @@
           ;; Object's methods on an Object-typed receiver, or on an array: jrt's helpers
           (or (object-like? st) (t/array? st))
           (if-let [h (object-helpers [name desc])]
-            (rv (apply list (jsym h) (coerce recv st "Ljava/lang/Object;" (:nn tv)) (map :x args)))
+            (rv (apply list (jsym h) (coerce recv st "Ljava/lang/Object;" (:nn tv)) (object-helper-args name desc (map :x args))))
             (fail (str "Object method " name desc " on an Object")))
-          (#{["wait" "()V"] ["wait" "(J)V"] ["notify" "()V"] ["notifyAll" "()V"]} [name desc])
-          (rv (apply list (jsym (object-helpers [name desc])) (coerce recv st "Ljava/lang/Object;" (:nn tv)) (map :x args)))
+          (#{["wait" "()V"] ["wait" "(J)V"] ["wait" "(JI)V"] ["notify" "()V"] ["notifyAll" "()V"]} [name desc])
+          (rv (apply list (jsym (object-helpers [name desc])) (coerce recv st "Ljava/lang/Object;" (:nn tv)) (object-helper-args name desc (map :x args))))
           (m/pointer-desc? st)
           (rv (apply list (symbol (str "." base)) (if (:nn tv) recv (list (jsym "NN") recv)) (map :x args)))
           :else

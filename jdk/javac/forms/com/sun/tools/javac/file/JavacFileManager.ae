@@ -1,0 +1,954 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacFileManager.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.file)
+
+(import '(com.sun.tools.javac.main Option)
+        '(com.sun.tools.javac.resources CompilerProperties$Errors)
+        '(com.sun.tools.javac.util Assert Context Context$Factory ListBuffer Options)
+        '(java.io File IOException UncheckedIOException)
+        '(java.lang.module ModuleFinder)
+        '(java.net MalformedURLException URI URISyntaxException URL)
+        '(java.nio CharBuffer)
+        '(java.nio.charset Charset StandardCharsets)
+        '(java.nio.file FileSystem
+                        FileSystems
+                        FileVisitOption
+                        FileVisitResult
+                        Files
+                        InvalidPathException
+                        LinkOption
+                        Path
+                        Paths
+                        ProviderNotFoundException
+                        SimpleFileVisitor)
+        '(java.nio.file.attribute BasicFileAttributes)
+        '(java.util ArrayList
+                    Arrays
+                    Collection
+                    Collections
+                    Comparator
+                    HashMap
+                    Iterator
+                    List
+                    Map
+                    Objects
+                    ServiceLoader
+                    Set)
+        '(java.util.function Consumer Function)
+        '(java.util.stream Stream)
+        '(java.util.zip ZipException)
+        '(javax.lang.model SourceVersion)
+        '(javax.tools FileObject
+                      JavaFileManager
+                      JavaFileManager$Location
+                      JavaFileObject
+                      JavaFileObject$Kind
+                      StandardJavaFileManager
+                      StandardJavaFileManager$PathFactory
+                      StandardLocation))
+
+(defclass ^:public JavacFileManager
+  :extends BaseFileManager
+  :implements [StandardJavaFileManager]
+
+  (method ^:public ^:static toArray ^char/1 [^CharBuffer buffer]
+    (if (.hasArray buffer) (.array (.flip (.compact buffer))) (.toCharArray (.toString buffer))))
+
+  (field ^:private ^FSInfo fsInfo)
+
+  (field ^:private ^:static ^:final ^{:tag (Set JavaFileObject$Kind)} SOURCE_OR_CLASS
+    (Set/of JavaFileObject$Kind/SOURCE JavaFileObject$Kind/CLASS))
+
+  (field ^:protected ^boolean symbolFileEnabled true)
+
+  (field ^:private ^StandardJavaFileManager$PathFactory pathFactory
+    (method-ref StandardJavaFileManager$PathFactory Paths/get))
+
+  (defclass ^:protected ^:enum SortFiles
+    :implements [(Comparator Path)]
+
+    (constants
+      (FORWARD []
+               (method ^:public compare ^int [this ^Path f1 ^Path f2]
+                 (.compareTo (.getFileName f1) (.getFileName f2))))
+      (REVERSE []
+               (method ^:public compare ^int [this ^Path f1 ^Path f2]
+                 (.compareTo (.getFileName f2) (.getFileName f1))))))
+
+  (field ^:protected ^SortFiles sortFiles)
+
+  (field ^:private ^{:tag (Map JavaFileManager$Location (Map RelativePath$RelativeDirectory (List PathAndContainer)))} pathsAndContainersByLocationAndRelativeDirectory
+    (HashMap.))
+
+  (field ^:private ^{:tag (Map JavaFileManager$Location (List PathAndContainer))} nonIndexingContainersByLocation
+    (HashMap.))
+
+  (method ^:public ^:static preRegister ^void [^Context context]
+    (.put context
+          JavaFileManager
+          (lambda Context$Factory ^JavaFileManager [^Context c] (JavacFileManager. c true nil))))
+
+  (constructor ^:public [this ^Context context ^boolean register ^Charset charset]
+    (super. charset)
+    (when register (.put context JavaFileManager this))
+    (.setContext this context))
+
+  (method ^:public setContext ^void [this ^Context context]
+    (.setContext super context)
+    (set! fsInfo (FSInfo/instance context)))
+
+  (method ^:protected applyOptions ^void [this ^Options options]
+    (.applyOptions super options)
+    (set! symbolFileEnabled (not (.isSet options "ignore.symbol.file")))
+    (let [sf (.get options "sortFiles")]
+      (when (some? sf)
+        (set! sortFiles (if (.equals sf "reverse") SortFiles/REVERSE SortFiles/FORWARD)))))
+
+  (method ^:public setPathFactory ^void [this ^StandardJavaFileManager$PathFactory f]
+    (set! pathFactory (cast StandardJavaFileManager$PathFactory (Objects/requireNonNull f)))
+    (.setPathFactory (.-locations this) f))
+
+  (method ^:private getPath ^Path [this ^String first & ^String/1 more]
+    (.getPath pathFactory first more))
+
+  (method ^:public setSymbolFileEnabled ^void [this ^boolean b]
+    (set! symbolFileEnabled b))
+
+  (method ^:public isSymbolFileEnabled ^boolean [this] symbolFileEnabled)
+
+  (method ^:public getJavaFileObject ^JavaFileObject [this ^String name]
+    (cast JavaFileObject (.next (.iterator (.getJavaFileObjects this (new String/1 [name]))))))
+
+  (method ^:public getJavaFileObject ^JavaFileObject [this ^Path file]
+    (cast JavaFileObject (.next (.iterator (.getJavaFileObjects this (new Path/1 [file]))))))
+
+  (method ^:public getFileForOutput :throws [IOException] ^JavaFileObject [this ^String classname
+                                                                           ^JavaFileObject$Kind kind
+                                                                           ^JavaFileObject sibling]
+    (.getJavaFileForOutput this StandardLocation/CLASS_OUTPUT classname kind sibling))
+
+  (method ^:public getJavaFileObjectsFromStrings ^{:tag (Iterable (? extends JavaFileObject))} [this
+                                                                                                ^{:tag (Iterable String)} names]
+    (let [^{:tag (ListBuffer Path)} paths (ListBuffer.)]
+      (for-each [^String name names]
+        (.append paths (.getPath this (cast String (JavacFileManager/nullCheck name)))))
+      (.getJavaFileObjectsFromPaths this (.toList paths))))
+
+  (method ^:public getJavaFileObjects ^{:tag (Iterable (? extends JavaFileObject))} [this &
+                                                                                     ^String/1 names]
+    (.getJavaFileObjectsFromStrings this
+                                    (Arrays/asList
+                                      (cast String/1 (JavacFileManager/nullCheck names)))))
+
+  (method ^:private ^:static isValidName ^boolean [^String name]
+    (for-each [^String s (.split name "\\." -1)]
+      (when-not (SourceVersion/isIdentifier s) (return false)))
+    true)
+
+  (method ^:private ^:static validateClassName ^void [^String className]
+    (when-not (JavacFileManager/isValidName className)
+      (throw (IllegalArgumentException. (java-str "Invalid class name: " className)))))
+
+  (method ^:private ^:static validatePackageName ^void [^String packageName]
+    (when (and (> (.length packageName) 0) (not (JavacFileManager/isValidName packageName)))
+      (throw (IllegalArgumentException. (java-str "Invalid packageName name: " packageName)))))
+
+  (method ^:public ^:static testName ^void [^String name ^boolean isValidPackageName
+                                            ^boolean isValidClassName]
+    (try
+      (JavacFileManager/validatePackageName name)
+      (when-not isValidPackageName
+        (throw (AssertionError. (java-str "Invalid package name accepted: " name))))
+      (JavacFileManager/printAscii "Valid package name: \"%s\"" name)
+      (catch IllegalArgumentException e
+        (when isValidPackageName
+          (throw (AssertionError. (java-str "Valid package name rejected: " name))))
+        (JavacFileManager/printAscii "Invalid package name: \"%s\"" name)))
+    (try
+      (JavacFileManager/validateClassName name)
+      (when-not isValidClassName
+        (throw (AssertionError. (java-str "Invalid class name accepted: " name))))
+      (JavacFileManager/printAscii "Valid class name: \"%s\"" name)
+      (catch IllegalArgumentException e
+        (when isValidClassName
+          (throw (AssertionError. (java-str "Valid class name rejected: " name))))
+        (JavacFileManager/printAscii "Invalid class name: \"%s\"" name))))
+
+  (method ^:private ^:static printAscii ^void [^String format & ^Object/1 args]
+    (let [message (String. (.getBytes (String/format nil format args) StandardCharsets/US_ASCII)
+                           StandardCharsets/US_ASCII)]
+      (.println System/out message)))
+
+  (field ^:private ^:final ^{:tag (Map Path Container)} containers (HashMap.))
+
+  (method ^:synchronized getContainer :throws [IOException] ^Container [this ^Path path]
+    (let [^:mutable fs (cast Container (.get containers path))]
+      (cond
+        (some? fs) fs
+        (and (.isFile fsInfo path) (.equals path Locations/thisSystemModules))
+          (do (.put containers path (set! fs (JRTImageContainer.))) fs)
+        :else
+          (let [realPath (.getCanonicalFile fsInfo path)]
+            (set! fs (cast Container (.get containers realPath)))
+            (if (some? fs)
+                (do (.put containers path fs) fs)
+                (let [^:mutable ^BasicFileAttributes attr nil]
+                  (try
+                    (set! attr
+                          (Files/readAttributes realPath BasicFileAttributes (new LinkOption/1 [])))
+                    (catch IOException ex (set! fs MISSING_CONTAINER)))
+                  (when (some? attr)
+                    (if (.isDirectory attr)
+                        (set! fs (DirectoryContainer. realPath))
+                        (try
+                          (set! fs (ArchiveContainer. path))
+                          (catch ProviderNotFoundException ex (throw (IOException. ex))))))
+                  (.put containers realPath fs)
+                  (.put containers path fs)
+                  fs))))))
+
+  (defclass ^:private ^:interface Container
+    (method ^:public ^:abstract list :throws [IOException] ^void [this ^Path userPath
+                                                                  ^RelativePath$RelativeDirectory subdirectory
+                                                                  ^{:tag (Set JavaFileObject$Kind)} fileKinds
+                                                                  ^boolean recurse
+                                                                  ^{:tag (ListBuffer JavaFileObject)} resultList])
+
+    (method ^:public ^:abstract getFileObject :throws [IOException] ^JavaFileObject [this
+                                                                                     ^Path userPath
+                                                                                     ^RelativePath$RelativeFile name])
+
+    (method ^:public ^:abstract close :throws [IOException] ^void [this])
+
+    (method ^:public ^:abstract maintainsDirectoryIndex ^boolean [this])
+
+    (method ^:public ^:abstract indexedDirectories ^{:tag (Iterable RelativePath$RelativeDirectory)} [this]))
+
+  (field ^:private ^:static ^:final ^Container MISSING_CONTAINER
+    (anon Container []
+      (method ^:public list :throws [IOException] ^void [this ^Path userPath
+                                                         ^RelativePath$RelativeDirectory subdirectory
+                                                         ^{:tag (Set JavaFileObject$Kind)} fileKinds
+                                                         ^boolean recurse
+                                                         ^{:tag (ListBuffer JavaFileObject)} resultList])
+
+      (method ^:public getFileObject :throws [IOException] ^JavaFileObject [this ^Path userPath
+                                                                            ^RelativePath$RelativeFile name]
+        nil)
+
+      (method ^:public close :throws [IOException] ^void [this])
+
+      (method ^:public maintainsDirectoryIndex ^boolean [this] false)
+
+      (method ^:public indexedDirectories ^{:tag (Iterable RelativePath$RelativeDirectory)} [this]
+        (com.sun.tools.javac.util.List/nil))))
+
+  (defclass ^:private ^:final JRTImageContainer
+    :implements [Container]
+
+    (method ^:public list :throws [IOException] ^void [this ^Path userPath
+                                                       ^RelativePath$RelativeDirectory subdirectory
+                                                       ^{:tag (Set JavaFileObject$Kind)} fileKinds
+                                                       ^boolean recurse
+                                                       ^{:tag (ListBuffer JavaFileObject)} resultList]
+      (try
+        (let [e (.getEntry (.getJRTIndex JavacFileManager/this) subdirectory)]
+          (when-not (and symbolFileEnabled (.-hidden (.-ctSym e)))
+            (for-each [^Path file (.values (.-files e))]
+              (when (.contains fileKinds (BaseFileManager/getKind file))
+                (let [^JavaFileObject fe (PathFileObject/forJRTPath JavacFileManager/this file)]
+                  (.append resultList fe))))
+            (when recurse
+              (for-each [^RelativePath$RelativeDirectory rd (.-subdirs e)]
+                (.list this userPath rd fileKinds recurse resultList)))))
+        (catch IOException ex
+          (.printStackTrace ex System/err)
+          (.error (.-log JavacFileManager/this)
+                  (CompilerProperties$Errors/ErrorReadingFile
+                    userPath
+                    (JavacFileManager/getMessage ex))))))
+
+    (method ^:public getFileObject :throws [IOException] ^JavaFileObject [this ^Path userPath
+                                                                          ^RelativePath$RelativeFile name]
+      (let [e (.getEntry (.getJRTIndex JavacFileManager/this) (.dirname name))]
+        (when-not (and symbolFileEnabled (.-hidden (.-ctSym e)))
+          (let [p (cast Path (.get (.-files e) (.basename name)))]
+            (when (some? p) (PathFileObject/forJRTPath JavacFileManager/this p))))))
+
+    (method ^:public close :throws [IOException] ^void [this])
+
+    (method ^:public maintainsDirectoryIndex ^boolean [this] false)
+
+    (method ^:public indexedDirectories ^{:tag (Iterable RelativePath$RelativeDirectory)} [this]
+      (com.sun.tools.javac.util.List/nil)))
+
+  (method ^:private ^:synchronized getJRTIndex ^JRTIndex [this]
+    (when (nil? jrtIndex) (set! jrtIndex (JRTIndex/getSharedInstance)))
+    jrtIndex)
+
+  (field ^:private ^JRTIndex jrtIndex)
+
+  (defclass ^:private ^:final DirectoryContainer
+    :implements [Container]
+
+    (field ^:private ^:final ^Path directory)
+
+    (constructor ^:public [this ^Path directory]
+      (set! (.-directory this) directory))
+
+    (method ^:public list :throws [IOException] ^void [this ^Path userPath
+                                                       ^RelativePath$RelativeDirectory subdirectory
+                                                       ^{:tag (Set JavaFileObject$Kind)} fileKinds
+                                                       ^boolean recurse
+                                                       ^{:tag (ListBuffer JavaFileObject)} resultList]
+      (let [^:mutable ^Path d nil]
+        (try
+          (set! d (.resolveAgainst subdirectory userPath))
+          (catch InvalidPathException ignore (return)))
+        (when-not (not (Files/exists d))
+          (when-not (not (.caseMapCheck JavacFileManager/this d subdirectory))
+            (let [^:mutable ^{:tag (List Path)} files nil]
+              (try
+                (with-resources [^{:tag (Stream Path)} s (Files/list d)]
+                  (set! files (.toList (if (nil? sortFiles) s (.sorted s sortFiles)))))
+                (catch IOException ignore (return)))
+              (for-each [^Path f files]
+                (let [^:mutable fname (.toString (.getFileName f))]
+                  (when (.endsWith fname "/")
+                    (set! fname (.substring fname 0 (unchecked-subtract-int (.length fname) 1))))
+                  (cond
+                    (Files/isDirectory f)
+                      (when (and recurse (SourceVersion/isIdentifier fname))
+                        (.list this
+                               userPath
+                               (RelativePath$RelativeDirectory. subdirectory fname)
+                               fileKinds
+                               recurse
+                               resultList))
+                    (.isValidFile JavacFileManager/this fname fileKinds)
+                      (try
+                        (let [file (RelativePath$RelativeFile. subdirectory fname)
+                              ^JavaFileObject fe (PathFileObject/forDirectoryPath
+                                                   JavacFileManager/this
+                                                   (.resolveAgainst file directory)
+                                                   userPath
+                                                   file)]
+                          (.append resultList fe))
+                        (catch InvalidPathException e
+                          (throw (IOException. (java-str "error accessing directory " directory e)))))))))))))
+
+    (method ^:public getFileObject :throws [IOException] ^JavaFileObject [this ^Path userPath
+                                                                          ^RelativePath$RelativeFile name]
+      (try
+        (let [f (.resolveAgainst name userPath)]
+          (when (Files/exists f)
+            (return (PathFileObject/forSimplePath
+                      JavacFileManager/this
+                      (.getCanonicalFile fsInfo f)
+                      f))))
+        (catch InvalidPathException ignore))
+      nil)
+
+    (method ^:public close :throws [IOException] ^void [this])
+
+    (method ^:public maintainsDirectoryIndex ^boolean [this] false)
+
+    (method ^:public indexedDirectories ^{:tag (Iterable RelativePath$RelativeDirectory)} [this]
+      (com.sun.tools.javac.util.List/nil)))
+
+  (field ^:private ^:static ^:final ^{:tag (Set FileVisitOption)} NO_FILE_VISIT_OPTIONS (Set/of))
+
+  (field ^:private ^:static ^:final ^{:tag (Set FileVisitOption)} FOLLOW_LINKS_OPTIONS
+    (Set/of FileVisitOption/FOLLOW_LINKS))
+
+  (defclass ^:private ^:final ArchiveContainer
+    :implements [Container]
+
+    (field ^:private ^:final ^Path archivePath)
+
+    (field ^:private ^:final ^FileSystem fileSystem)
+
+    (field ^:private ^:final ^{:tag (Map RelativePath$RelativeDirectory Path)} packages)
+
+    (constructor :throws [IOException ProviderNotFoundException] ^:public [this ^Path archivePath]
+      (set! (.-archivePath this) archivePath)
+      (if (and (some? (.-multiReleaseValue JavacFileManager/this))
+               (.endsWith (.toString archivePath) ".jar"))
+          (let [jarFSProvider (.getJarFSProvider fsInfo)]
+            (Assert/checkNonNull jarFSProvider "should have been caught before!")
+            (let [^{:tag (Map String ?)} env (.readOnlyJarFSEnv
+                                               fsInfo
+                                               (.-multiReleaseValue JavacFileManager/this))]
+              (try
+                (set! (.-fileSystem this) (.newFileSystem jarFSProvider archivePath env))
+                (catch ZipException ze
+                  (throw (IOException. (java-str
+                                         "ZipException opening \""
+                                         (.getFileName archivePath)
+                                         "\": "
+                                         (.getMessage ze))
+                                       ze))))))
+          (let [^{:tag (Map String ?)} env (.readOnlyJarFSEnv fsInfo nil)]
+            (set! (.-fileSystem this) (FileSystems/newFileSystem archivePath env))))
+      (set! packages (HashMap.))
+      (for-each [^Path root (.getRootDirectories fileSystem)]
+        (Files/walkFileTree
+          root
+          NO_FILE_VISIT_OPTIONS
+          Integer/MAX_VALUE
+          (anon (SimpleFileVisitor Path) []
+            (method ^:public preVisitDirectory ^FileVisitResult [this ^Path dir
+                                                                 ^BasicFileAttributes attrs]
+              (if (.isValid ArchiveContainer/this (.getFileName dir))
+                  (do
+                    (.put packages
+                          (RelativePath$RelativeDirectory. (.toString (.relativize root dir)))
+                          dir)
+                    FileVisitResult/CONTINUE)
+                  FileVisitResult/SKIP_SUBTREE))))))
+
+    (method ^:public list :throws [IOException] ^void [this ^Path userPath
+                                                       ^RelativePath$RelativeDirectory subdirectory
+                                                       ^{:tag (Set JavaFileObject$Kind)} fileKinds
+                                                       ^boolean recurse
+                                                       ^{:tag (ListBuffer JavaFileObject)} resultList]
+      (let [resolvedSubdirectory (cast Path (.get packages subdirectory))]
+        (when (some? resolvedSubdirectory)
+          (let [^int maxDepth (if recurse Integer/MAX_VALUE 1)]
+            (Files/walkFileTree
+              resolvedSubdirectory
+              FOLLOW_LINKS_OPTIONS
+              maxDepth
+              (anon (SimpleFileVisitor Path) []
+                (method ^:public preVisitDirectory ^FileVisitResult [this ^Path dir
+                                                                     ^BasicFileAttributes attrs]
+                  (if (.isValid ArchiveContainer/this (.getFileName dir))
+                      FileVisitResult/CONTINUE
+                      FileVisitResult/SKIP_SUBTREE))
+
+                (method ^:public visitFile ^FileVisitResult [this ^Path file
+                                                             ^BasicFileAttributes attrs]
+                  (when (and (.isRegularFile attrs)
+                             (.contains fileKinds
+                                        (BaseFileManager/getKind (.toString (.getFileName file)))))
+                    (let [^JavaFileObject fe (PathFileObject/forJarPath
+                                               JavacFileManager/this
+                                               file
+                                               archivePath)]
+                      (.append resultList fe)))
+                  FileVisitResult/CONTINUE)))))))
+
+    (method ^:private isValid ^boolean [this ^Path fileName]
+      (if (nil? fileName)
+          true
+          (let [^:mutable name (.toString fileName)]
+            (when (.endsWith name "/")
+              (set! name (.substring name 0 (unchecked-subtract-int (.length name) 1))))
+            (SourceVersion/isIdentifier name))))
+
+    (method ^:public getFileObject :throws [IOException] ^JavaFileObject [this ^Path userPath
+                                                                          ^RelativePath$RelativeFile name]
+      (let [root (.dirname name)
+            packagepath (cast Path (.get packages root))]
+        (when (some? packagepath)
+          (let [relpath (.resolve packagepath (.basename name))]
+            (when (Files/exists relpath)
+              (return (PathFileObject/forJarPath JavacFileManager/this relpath userPath)))))
+        nil))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (.close fileSystem))
+
+    (method ^:public maintainsDirectoryIndex ^boolean [this] true)
+
+    (method ^:public indexedDirectories ^{:tag (Iterable RelativePath$RelativeDirectory)} [this]
+      (.keySet packages)))
+
+  (method ^:private isValidFile ^boolean [this ^String s ^{:tag (Set JavaFileObject$Kind)} fileKinds]
+    (let [kind (JavacFileManager/getKind s)] (.contains fileKinds kind)))
+
+  (field ^:private ^:static ^:final ^boolean fileSystemIsCaseSensitive (== File/separatorChar \/))
+
+  (method ^:private caseMapCheck ^boolean [this ^Path f ^RelativePath name]
+    (if fileSystemIsCaseSensitive
+        true
+        (let [^:mutable ^String path nil
+              ^:mutable ^char sep (unchecked-char 0)]
+          (try
+            (set! path (.toString (.toRealPath f LinkOption/NOFOLLOW_LINKS)))
+            (set! sep (.charAt (.getSeparator (.getFileSystem f)) 0))
+            (catch IOException ex (return false)))
+          (let [pcs (.toCharArray path)
+                ncs (.toCharArray (.-path name))
+                ^:mutable i (unchecked-subtract-int (alength pcs) 1)
+                ^:mutable j (unchecked-subtract-int (alength ncs) 1)]
+            (while (and (>= i 0) (>= j 0))
+              (while (and (>= i 0) (== (aget pcs i) sep)) (set! i (unchecked-dec-int i)))
+              (while (and (>= j 0) (== (aget ncs j) \/)) (set! j (unchecked-dec-int j)))
+              (when (and (>= i 0) (>= j 0))
+                (when-not (== (aget pcs i) (aget ncs j)) (return false))
+                (set! i (unchecked-dec-int i))
+                (set! j (unchecked-dec-int j))))
+            (< j 0)))))
+
+  (method ^:public flush ^void [this]
+    (.clear (.-contentCache this))
+    (.clear pathsAndContainersByLocationAndRelativeDirectory)
+    (.clear nonIndexingContainersByLocation))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (if (> (.-deferredCloseTimeout this) 0)
+        (.deferredClose this)
+        (do
+          (.close (.-locations this))
+          (for-each [^Container container (.values containers)] (.close container))
+          (.clear containers)
+          (.clear pathsAndContainersByLocationAndRelativeDirectory)
+          (.clear nonIndexingContainersByLocation)
+          (.clear (.-contentCache this))
+          (.resetOutputFilesWritten this))))
+
+  (method ^:public getClassLoader ^ClassLoader [this ^JavaFileManager$Location location]
+    (.checkNotModuleOrientedLocation this location)
+    (let [^{:tag (Iterable (? extends File))} path (.getLocation this location)]
+      (when (some? path)
+        (let [^{:tag (ListBuffer URL)} lb (ListBuffer.)]
+          (for-each [^File f path]
+            (try
+              (.append lb (.toURL (.toURI f)))
+              (catch MalformedURLException e (throw (AssertionError. e)))))
+          (.getClassLoader this (cast URL/1 (.toArray lb (new URL/1 (.size lb)))))))))
+
+  (method ^:public list :throws [IOException] ^{:tag (Iterable JavaFileObject)} [this
+                                                                                 ^JavaFileManager$Location location
+                                                                                 ^String packageName
+                                                                                 ^{:tag (Set JavaFileObject$Kind)} kinds
+                                                                                 ^boolean recurse]
+    (.checkNotModuleOrientedLocation this location)
+    (JavacFileManager/nullCheck packageName)
+    (JavacFileManager/nullCheck kinds)
+    (let [subdirectory (RelativePath$RelativeDirectory/forPackage packageName)
+          ^{:tag (ListBuffer JavaFileObject)} results (ListBuffer.)]
+      (for-each [^PathAndContainer pathAndContainer (.pathsAndContainers this location subdirectory)]
+        (let [directory (.-path pathAndContainer)
+              container (.-container pathAndContainer)]
+          (.list container directory subdirectory kinds recurse results)))
+      (.toList results)))
+
+  (method ^:public inferBinaryName ^String [this ^JavaFileManager$Location location
+                                            ^JavaFileObject file]
+    (.checkNotModuleOrientedLocation this location)
+    (Objects/requireNonNull file)
+    (let [^{:tag (Iterable (? extends Path))} path (.getLocationAsPaths this location)]
+      (when (some? path)
+        (if-instance [^PathFileObject pathFileObject file]
+          (.inferBinaryName pathFileObject path)
+          (throw (IllegalArgumentException. (.getName (.getClass file))))))))
+
+  (method ^:public isSameFile ^boolean [this ^FileObject a ^FileObject b]
+    (JavacFileManager/nullCheck a)
+    (JavacFileManager/nullCheck b)
+    (when-instance [^PathFileObject pathFileObjectA a]
+      (when-instance [^PathFileObject pathFileObjectB b]
+        (return (.isSameFile pathFileObjectA pathFileObjectB))))
+    (.equals a b))
+
+  (method ^:public hasLocation ^boolean [this ^JavaFileManager$Location location]
+    (JavacFileManager/nullCheck location)
+    (.hasLocation (.-locations this) location))
+
+  (method ^:protected hasExplicitLocation ^boolean [this ^JavaFileManager$Location location]
+    (JavacFileManager/nullCheck location)
+    (.hasExplicitLocation (.-locations this) location))
+
+  (method ^:public getJavaFileForInput :throws [IOException] ^JavaFileObject [this
+                                                                              ^JavaFileManager$Location location
+                                                                              ^String className
+                                                                              ^JavaFileObject$Kind kind]
+    (.checkNotModuleOrientedLocation this location)
+    (JavacFileManager/nullCheck className)
+    (JavacFileManager/nullCheck kind)
+    (when-not (.contains SOURCE_OR_CLASS kind)
+      (throw (IllegalArgumentException. (java-str "Invalid kind: " kind))))
+    (.getFileForInput this location (RelativePath$RelativeFile/forClass className kind)))
+
+  (method ^:public getFileForInput :throws [IOException] ^FileObject [this
+                                                                      ^JavaFileManager$Location location
+                                                                      ^String packageName
+                                                                      ^String relativeName]
+    (.checkNotModuleOrientedLocation this location)
+    (JavacFileManager/nullCheck packageName)
+    (when-not (JavacFileManager/isRelativeUri relativeName)
+      (throw (IllegalArgumentException. (java-str "Invalid relative name: " relativeName))))
+    (let [^RelativePath$RelativeFile name (if (== (.length packageName) 0)
+                                              (RelativePath$RelativeFile. relativeName)
+                                              (RelativePath$RelativeFile.
+                                                (RelativePath$RelativeDirectory/forPackage
+                                                  packageName)
+                                                relativeName))]
+      (.getFileForInput this location name)))
+
+  (method ^:private getFileForInput :throws [IOException] ^JavaFileObject [this
+                                                                           ^JavaFileManager$Location location
+                                                                           ^RelativePath$RelativeFile name]
+    (let [^{:tag (Iterable (? extends Path))} path (.getLocationAsPaths this location)]
+      (when (some? path)
+        (for-each [^Path file path]
+          (let [fo (.getFileObject (.getContainer this file) file name)]
+            (when (some? fo) (return fo))))
+        nil)))
+
+  (method ^:public getJavaFileForOutput :throws [IOException] ^JavaFileObject [this
+                                                                               ^JavaFileManager$Location location
+                                                                               ^String className
+                                                                               ^JavaFileObject$Kind kind
+                                                                               ^FileObject sibling]
+    (.checkOutputLocation this location)
+    (JavacFileManager/nullCheck className)
+    (JavacFileManager/nullCheck kind)
+    (when-not (.contains SOURCE_OR_CLASS kind)
+      (throw (IllegalArgumentException. (java-str "Invalid kind: " kind))))
+    (.getFileForOutput this location (RelativePath$RelativeFile/forClass className kind) sibling))
+
+  (method ^:public getFileForOutput :throws [IOException] ^FileObject [this
+                                                                       ^JavaFileManager$Location location
+                                                                       ^String packageName
+                                                                       ^String relativeName
+                                                                       ^FileObject sibling]
+    (.checkOutputLocation this location)
+    (JavacFileManager/nullCheck packageName)
+    (when-not (JavacFileManager/isRelativeUri relativeName)
+      (throw (IllegalArgumentException. (java-str "Invalid relative name: " relativeName))))
+    (let [^RelativePath$RelativeFile name (if (== (.length packageName) 0)
+                                              (RelativePath$RelativeFile. relativeName)
+                                              (RelativePath$RelativeFile.
+                                                (RelativePath$RelativeDirectory/forPackage
+                                                  packageName)
+                                                relativeName))]
+      (.getFileForOutput this location name sibling)))
+
+  (method ^:private getFileForOutput :throws [IOException] ^JavaFileObject [this
+                                                                            ^JavaFileManager$Location location
+                                                                            ^RelativePath$RelativeFile fileName
+                                                                            ^FileObject sibling]
+    (let [^:mutable ^Path dir nil]
+      (cond
+        (identical? location StandardLocation/CLASS_OUTPUT)
+          (if (some? (.getClassOutDir this))
+              (set! dir (.getClassOutDir this))
+              (let [baseName (.basename fileName)]
+                (if-instance [^PathFileObject pathFileObject sibling]
+                  (if (not (.isJarFile pathFileObject))
+                      (return (.getSibling pathFileObject baseName))
+                      (let [userPath (.getPath this baseName)
+                            realPath (.getCanonicalFile fsInfo userPath)]
+                        (return (PathFileObject/forSimplePath this realPath userPath))))
+                  (let [userPath (.getPath this baseName)
+                        realPath (.getCanonicalFile fsInfo userPath)]
+                    (return (PathFileObject/forSimplePath this realPath userPath))))))
+        (identical? location StandardLocation/SOURCE_OUTPUT)
+          (set! dir
+                (if (some? (.getSourceOutDir this)) (.getSourceOutDir this) (.getClassOutDir this)))
+        :else
+          (let [^{:tag (Iterable (? extends Path))} path (.getLocation (.-locations this) location)]
+            (set! dir nil)
+            (for-each [^Path f path] (set! dir f) (break))))
+      (try
+        (when (nil? dir) (set! dir (.getPath this (System/getProperty "user.dir"))))
+        (let [path (.resolveAgainst fileName (.getCanonicalFile fsInfo dir))]
+          (PathFileObject/forDirectoryPath this path dir fileName))
+        (catch InvalidPathException e (throw (IOException. (java-str "bad filename " fileName) e))))))
+
+  (method ^:public getJavaFileObjectsFromFiles ^{:tag (Iterable (? extends JavaFileObject))} [this
+                                                                                              ^{:tag (Iterable (? extends File))} files]
+    (let [^{:tag (ArrayList PathFileObject)} result (if-instance [^{:tag (Collection ?)} collection
+                                                                    files]
+                                                      (ArrayList. (.size collection))
+                                                      (ArrayList.))]
+      (for-each [^File f files]
+        (Objects/requireNonNull f)
+        (let [p (.toPath f)]
+          (.add result (PathFileObject/forSimplePath this (.getCanonicalFile fsInfo p) p))))
+      result))
+
+  (method ^:public getJavaFileObjectsFromPaths ^{:tag (Iterable (? extends JavaFileObject))} [this
+                                                                                              ^{:tag (Collection (? extends Path))} paths]
+    (let [^:mutable ^{:tag (ArrayList PathFileObject)} result nil]
+      (if (some? paths)
+          (do
+            (set! result (ArrayList. (.size paths)))
+            (for-each [^Path p paths]
+              (.add result (PathFileObject/forSimplePath this (.getCanonicalFile fsInfo p) p))))
+          (set! result (ArrayList.)))
+      result))
+
+  (method ^:public getJavaFileObjects ^{:tag (Iterable (? extends JavaFileObject))} [this &
+                                                                                     ^File/1 files]
+    (.getJavaFileObjectsFromFiles this
+                                  (Arrays/asList (cast File/1 (JavacFileManager/nullCheck files)))))
+
+  (method ^:public getJavaFileObjects ^{:tag (Iterable (? extends JavaFileObject))} [this &
+                                                                                     ^Path/1 paths]
+    (.getJavaFileObjectsFromPaths this
+                                  (Arrays/asList (cast Path/1 (JavacFileManager/nullCheck paths)))))
+
+  (method ^:public setLocation :throws [IOException] ^void [this ^JavaFileManager$Location location
+                                                            ^{:tag (Iterable (? extends File))} searchpath]
+    (JavacFileManager/nullCheck location)
+    (.setLocation (.-locations this) location (JavacFileManager/asPaths searchpath))
+    (.clearCachesForLocation this location))
+
+  (method ^:public setLocationFromPaths :throws [IOException] ^void [this
+                                                                     ^JavaFileManager$Location location
+                                                                     ^{:tag (Collection (? extends Path))} searchpath]
+    (JavacFileManager/nullCheck location)
+    (.setLocation (.-locations this) location (JavacFileManager/nullCheck searchpath))
+    (.clearCachesForLocation this location))
+
+  (method ^:public getLocation ^{:tag (Iterable (? extends File))} [this
+                                                                    ^JavaFileManager$Location location]
+    (JavacFileManager/nullCheck location)
+    (JavacFileManager/asFiles (.getLocation (.-locations this) location)))
+
+  (method ^:public getLocationAsPaths ^{:tag (Collection (? extends Path))} [this
+                                                                             ^JavaFileManager$Location location]
+    (JavacFileManager/nullCheck location)
+    (.getLocation (.-locations this) location))
+
+  (method ^:private pathsAndContainers :throws [IOException] ^{:tag (List PathAndContainer)} [this
+                                                                                              ^JavaFileManager$Location location
+                                                                                              ^RelativePath$RelativeDirectory relativeDirectory]
+    (try
+      (cast List
+            (.computeIfAbsent
+              (cast Map
+                    (.computeIfAbsent
+                      pathsAndContainersByLocationAndRelativeDirectory
+                      location
+                      (method-ref Function
+                                  ^Map [JavaFileManager$Location]
+                                  this
+                                  JavacFileManager/.indexPathsAndContainersByRelativeDirectory)))
+              relativeDirectory
+              (lambda Function ^List [^RelativePath$RelativeDirectory d]
+                (cast List (.get nonIndexingContainersByLocation location)))))
+      (catch UncheckedIOException e (throw (.getCause e)))))
+
+  (method ^:private indexPathsAndContainersByRelativeDirectory ^{:tag (Map RelativePath$RelativeDirectory (List PathAndContainer))} [this
+                                                                                                                                     ^JavaFileManager$Location location]
+    (let [^{:tag (Map RelativePath$RelativeDirectory (List PathAndContainer))} result (HashMap.)
+          ^{:tag (List PathAndContainer)} allPathsAndContainers (.pathsAndContainers this location)
+          ^{:tag (List PathAndContainer)} nonIndexingContainers (ArrayList.)]
+      (for-each [^PathAndContainer pathAndContainer allPathsAndContainers]
+        (when-not (.maintainsDirectoryIndex (.-container pathAndContainer))
+          (.add nonIndexingContainers pathAndContainer)))
+      (for-each [^PathAndContainer pathAndContainer allPathsAndContainers]
+        (let [container (.-container pathAndContainer)]
+          (when (.maintainsDirectoryIndex container)
+            (for-each [^RelativePath$RelativeDirectory directory (.indexedDirectories container)]
+              (.add (cast List
+                          (.computeIfAbsent
+                            result
+                            directory
+                            (lambda Function ^List [^RelativePath$RelativeDirectory d]
+                              (ArrayList. nonIndexingContainers))))
+                    pathAndContainer)))))
+      (.put nonIndexingContainersByLocation location nonIndexingContainers)
+      (.forEach (.values result)
+                (lambda Consumer ^void [^List pathAndContainerList]
+                  (Collections/sort pathAndContainerList)))
+      result))
+
+  (method ^:private pathsAndContainers ^{:tag (List PathAndContainer)} [this
+                                                                        ^JavaFileManager$Location location]
+    (let [^{:tag (Collection (? extends Path))} paths (.getLocationAsPaths this location)]
+      (if (nil? paths)
+          (com.sun.tools.javac.util.List/nil)
+          (let [^{:tag (List PathAndContainer)} pathsAndContainers (ArrayList. (.size paths))]
+            (for-each [^Path path paths]
+              (let [^:mutable ^Container container nil]
+                (try
+                  (set! container (.getContainer this path))
+                  (catch IOException e (throw (UncheckedIOException. e))))
+                (.add pathsAndContainers
+                      (PathAndContainer. path container (.size pathsAndContainers)))))
+            pathsAndContainers))))
+
+  (defclass ^:private ^:static PathAndContainer
+    :implements [(Comparable PathAndContainer)]
+
+    (field ^:private ^:final ^Path path)
+
+    (field ^:private ^:final ^Container container)
+
+    (field ^:private ^:final ^int index)
+
+    (constructor [this ^Path path ^Container container ^int index]
+      (set! (.-path this) path)
+      (set! (.-container this) container)
+      (set! (.-index this) index))
+
+    (method ^:public compareTo ^int [this ^PathAndContainer other]
+      (unchecked-subtract-int index (.-index other)))
+
+    (method ^:public equals ^boolean [this o]
+      (if-instance [^PathAndContainer pathAndContainer o]
+        (if (.equals path (.-path pathAndContainer))
+            (if (.equals container (.-container pathAndContainer))
+                (== index (.-index pathAndContainer))
+                false)
+            false)
+        false))
+
+    (method ^:public hashCode ^int [this]
+      (Objects/hash path container index)))
+
+  (method ^:public contains :throws [IOException] ^boolean [this ^JavaFileManager$Location location
+                                                            ^FileObject fo]
+    (JavacFileManager/nullCheck location)
+    (JavacFileManager/nullCheck fo)
+    (let [p (.asPath this fo)] (.contains (.-locations this) location p)))
+
+  (method ^:private getClassOutDir ^Path [this]
+    (.getOutputLocation (.-locations this) StandardLocation/CLASS_OUTPUT))
+
+  (method ^:private getSourceOutDir ^Path [this]
+    (.getOutputLocation (.-locations this) StandardLocation/SOURCE_OUTPUT))
+
+  (method ^:public getLocationForModule :throws [IOException] ^JavaFileManager$Location [this
+                                                                                         ^:mutable ^JavaFileManager$Location location
+                                                                                         ^String moduleName]
+    (.checkModuleOrientedOrOutputLocation this location)
+    (JavacFileManager/nullCheck moduleName)
+    (when (and (identical? location StandardLocation/SOURCE_OUTPUT) (nil? (.getSourceOutDir this)))
+      (set! location StandardLocation/CLASS_OUTPUT))
+    (.getLocationForModule (.-locations this) location moduleName))
+
+  (method ^:public getServiceLoader :type-params [S] :throws [IOException] ^{:tag (ServiceLoader S)} [this
+                                                                                                      ^JavaFileManager$Location location
+                                                                                                      ^{:tag (Class S)} service]
+    (JavacFileManager/nullCheck location)
+    (JavacFileManager/nullCheck service)
+    (.addUses (.getModule (.getClass this)) service)
+    (if (.isModuleOrientedLocation location)
+        (let [^{:tag (Collection Path)} paths (.getLocation (.-locations this) location)
+              finder (ModuleFinder/of (cast Path/1 (.toArray paths (new Path/1 (.size paths)))))
+              bootLayer (ModuleLayer/boot)
+              cf (.resolveAndBind (.configuration bootLayer)
+                                  (ModuleFinder/of)
+                                  finder
+                                  (Collections/emptySet))
+              layer (.defineModulesWithOneLoader bootLayer cf (ClassLoader/getSystemClassLoader))]
+          (ServiceLoader/load layer service))
+        (ServiceLoader/load service (.getClassLoader this location))))
+
+  (method ^:public getLocationForModule :throws [IOException] ^JavaFileManager$Location [this
+                                                                                         ^JavaFileManager$Location location
+                                                                                         ^JavaFileObject fo]
+    (.checkModuleOrientedOrOutputLocation this location)
+    (when-instance [^PathFileObject pathFileObject fo]
+      (let [p (Locations/normalize (.-path pathFileObject))]
+        (.getLocationForModule (.-locations this) location p))))
+
+  (method ^:public setLocationForModule :throws [IOException] ^void [this
+                                                                     ^JavaFileManager$Location location
+                                                                     ^String moduleName
+                                                                     ^{:tag (Collection (? extends Path))} paths]
+    (JavacFileManager/nullCheck location)
+    (.checkModuleOrientedOrOutputLocation this location)
+    (.setLocationForModule (.-locations this)
+                           location
+                           (cast String (JavacFileManager/nullCheck moduleName))
+                           (JavacFileManager/nullCheck paths))
+    (.clearCachesForLocation this location))
+
+  (method ^:public inferModuleName ^String [this ^JavaFileManager$Location location]
+    (.checkNotModuleOrientedLocation this location)
+    (.inferModuleName (.-locations this) location))
+
+  (method ^:public listLocationsForModules :throws [IOException] ^{:tag (Iterable (Set JavaFileManager$Location))} [this
+                                                                                                                    ^JavaFileManager$Location location]
+    (.checkModuleOrientedOrOutputLocation this location)
+    (.listLocationsForModules (.-locations this) location))
+
+  (method ^:public asPath ^Path [this ^FileObject file]
+    (if-instance [^PathFileObject pathFileObject file]
+      (.-path pathFileObject)
+      (throw (IllegalArgumentException. (.getName file)))))
+
+  (method ^:protected ^:static isRelativeUri ^boolean [^URI uri]
+    (if (.isAbsolute uri)
+        false
+        (let [path (.getPath (.normalize uri))]
+          (cond
+            (== (.length path) 0) false
+            (not (.equals path (.getPath uri))) false
+            (or (or (.startsWith path "/") (.startsWith path "./")) (.startsWith path "../")) false
+            :else true))))
+
+  (method ^:protected ^:static isRelativeUri ^boolean [^String u]
+    (try (JavacFileManager/isRelativeUri (URI. u)) (catch URISyntaxException e false)))
+
+  (method ^:public ^:static getRelativeName ^String [^File file]
+    (when-not (.isAbsolute file)
+      (let [result (.replace (.getPath file) File/separatorChar \/)]
+        (when (JavacFileManager/isRelativeUri result) (return result))))
+    (throw (IllegalArgumentException. (java-str "Invalid relative path: " file))))
+
+  (method ^:public ^:static getMessage ^String [^IOException e]
+    (let [^:mutable s (.getLocalizedMessage e)]
+      (if (some? s) s (do (set! s (.getMessage e)) (if (some? s) s (.toString e))))))
+
+  (method ^:private checkOutputLocation ^void [this ^JavaFileManager$Location location]
+    (Objects/requireNonNull location)
+    (when-not (.isOutputLocation location)
+      (throw (IllegalArgumentException.
+               (java-str "location is not an output location: " (.getName location))))))
+
+  (method ^:private checkModuleOrientedOrOutputLocation ^void [this
+                                                               ^JavaFileManager$Location location]
+    (Objects/requireNonNull location)
+    (when (and (not (.isModuleOrientedLocation location)) (not (.isOutputLocation location)))
+      (throw (IllegalArgumentException.
+               (java-str "location is not an output location or a module-oriented location: "
+                         (.getName location))))))
+
+  (method ^:private checkNotModuleOrientedLocation ^void [this ^JavaFileManager$Location location]
+    (Objects/requireNonNull location)
+    (when (.isModuleOrientedLocation location)
+      (throw (IllegalArgumentException.
+               (java-str "location is module-oriented: " (.getName location))))))
+
+  (method ^:private ^:static asPaths ^{:tag (Iterable Path)} [^:final ^{:tag (Iterable (? extends File))} files]
+    (when (some? files)
+      (lambda Iterable ^Iterator []
+        (anon (Iterator Path) []
+          (field ^{:tag (Iterator (? extends File))} iter (.iterator files))
+
+          (method ^:public hasNext ^boolean [this] (.hasNext iter))
+
+          (method ^:public next ^Path [this] (.toPath (cast File (.next iter))))))))
+
+  (method ^:private ^:static asFiles ^{:tag (Iterable File)} [^:final ^{:tag (Iterable (? extends Path))} paths]
+    (when (some? paths)
+      (lambda Iterable ^Iterator []
+        (anon (Iterator File) []
+          (field ^{:tag (Iterator (? extends Path))} iter (.iterator paths))
+
+          (method ^:public hasNext ^boolean [this] (.hasNext iter))
+
+          (method ^:public next ^File [this]
+            (try
+              (.toFile (cast Path (.next iter)))
+              (catch UnsupportedOperationException e (throw (IllegalStateException. e)))))))))
+
+  (method ^:public handleOption ^boolean [this ^Option option ^String value]
+    (when (.contains JavacFileManager/javacFileManagerOptions option)
+      (.clear pathsAndContainersByLocationAndRelativeDirectory)
+      (.clear nonIndexingContainersByLocation))
+    (.handleOption super option value))
+
+  (method ^:private clearCachesForLocation ^void [this ^JavaFileManager$Location location]
+    (JavacFileManager/nullCheck location)
+    (.remove pathsAndContainersByLocationAndRelativeDirectory location)
+    (.remove nonIndexingContainersByLocation location)))

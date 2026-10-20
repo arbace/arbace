@@ -1,0 +1,663 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/util/Log.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.util)
+
+(import '(com.sun.tools.javac.api DiagnosticFormatter)
+        '(com.sun.tools.javac.code Lint Lint$LintCategory LintMapper Source)
+        '(com.sun.tools.javac.main Main Option)
+        '(com.sun.tools.javac.resources CompilerProperties$LintWarnings)
+        '(com.sun.tools.javac.tree EndPosTable)
+        '(java.io IOException PrintWriter)
+        '(java.util ArrayList
+                    Arrays
+                    Comparator
+                    EnumMap
+                    EnumSet
+                    HashSet
+                    LinkedHashMap
+                    LinkedList
+                    Locale
+                    Map
+                    Map$Entry
+                    Optional
+                    Set)
+        '(java.util.function BiConsumer Consumer Function Predicate)
+        '(java.util.stream Stream)
+        '(javax.tools DiagnosticListener JavaFileObject))
+
+(defclass ^:public Log
+  :extends AbstractLog
+
+  (field ^:public ^:static ^:final ^{:tag (Context$Key Log)} logKey (Context$Key.))
+
+  (field ^:public ^:static ^:final ^{:tag (Context$Key PrintWriter)} outKey (Context$Key.))
+
+  (field ^:public ^:static ^:final ^{:tag (Context$Key PrintWriter)} errKey (Context$Key.))
+
+  (defclass ^:public ^:enum PrefixKind
+    (constants (JAVAC ["javac."]) (COMPILER_MISC ["compiler.misc."]))
+
+    (constructor [this ^String v] (set! value v))
+
+    (method ^:public key ^String [this ^String k] (java-str value k))
+
+    (field ^:final ^String value))
+
+  (defclass ^:public ^:abstract DiagnosticHandler
+    (field ^:protected ^:final ^DiagnosticHandler prev)
+
+    (field ^:protected ^{:tag (Map JavaFileObject (java.util.List JCDiagnostic))} lintWaitersMap
+      (LinkedHashMap.))
+
+    (constructor ^:protected [this]
+      (set! prev diagnosticHandler)
+      (set! diagnosticHandler this))
+
+    (method ^:public ^:final report ^void [this ^JCDiagnostic diag]
+      (let [^:mutable ^Lint lint nil
+            category (.getLintCategory diag)]
+        (when (some? category)
+          (let [pos (.getDiagnosticPosition diag)]
+            (if (and (some? pos) (.-annotationSuppression category))
+                (do
+                  (when (and
+                          (and (not (.isEnabled (.rootLint Log/this) category))
+                               (not (.isFlagSet diag JCDiagnostic$DiagnosticFlag/DEFAULT_ENABLED)))
+                          (not
+                            (.equals (.getCode diag)
+                                     (.key
+                                       CompilerProperties$LintWarnings/RequiresTransitiveAutomatic))))
+                    (return))
+                  (when (nil? (set! lint (.lintFor Log/this diag)))
+                    (.addLintWaiter this (.currentSourceFile Log/this) diag)
+                    (return)))
+                (set! lint (.rootLint Log/this)))))
+        (.reportWithLint this diag lint)))
+
+    (method ^:public ^:final reportWithLint ^void [this ^JCDiagnostic diag ^Lint lint]
+      (if (and (.equals (.getCode diag)
+                        (.key CompilerProperties$LintWarnings/RequiresTransitiveAutomatic))
+               (not (.isEnabled lint Lint$LintCategory/REQUIRES_TRANSITIVE_AUTOMATIC)))
+          (.reportWithLint this
+                           (.warning (.-diags Log/this)
+                                     nil
+                                     (.getDiagnosticSource diag)
+                                     (.getDiagnosticPosition diag)
+                                     CompilerProperties$LintWarnings/RequiresAutomatic)
+                           lint)
+          (do
+            (when (some? lint)
+              (let [category (.getLintCategory diag)
+                    emit (cond
+                           (not (.isFlagSet diag JCDiagnostic$DiagnosticFlag/DEFAULT_ENABLED))
+                             (.isEnabled lint category)
+                           (.-annotationSuppression category) (not (.isSuppressed lint category))
+                           :else (not (.isDisabled options Option/XLINT category)))]
+                (when-not emit (return))))
+            (.reportReady this diag))))
+
+    (method ^:protected ^:abstract reportReady ^void [this ^JCDiagnostic diag])
+
+    (method ^:protected addLintWaiter ^void [this ^JavaFileObject sourceFile
+                                             ^JCDiagnostic diagnostic]
+      (.add (cast java.util.List
+                  (.computeIfAbsent lintWaitersMap
+                                    sourceFile
+                                    (lambda Function ^java.util.List [^JavaFileObject s]
+                                      (LinkedList.))))
+            diagnostic))
+
+    (method ^:public flushLintWaiters ^void [this]
+      (.removeIf (.entrySet lintWaitersMap)
+                 (lambda Predicate ^boolean [^Map$Entry entry]
+                   (let [sourceFile (cast JavaFileObject (.getKey entry))]
+                     (if (not (.isKnown lintMapper sourceFile))
+                         true
+                         (let [^{:tag (java.util.List JCDiagnostic)} diagnosticList (cast
+                                                                                      java.util.List
+                                                                                      (.getValue
+                                                                                        entry))
+                               prevSourceFile (.useSource Log/this sourceFile)]
+                           (try
+                             (.removeIf diagnosticList
+                                        (lambda Predicate ^boolean [^JCDiagnostic diag]
+                                          (let [lint (.lintFor Log/this diag)]
+                                            (if (some? lint)
+                                                (do (.reportWithLint this diag lint) true)
+                                                false))))
+                             (finally (.useSource Log/this prevSourceFile)))
+                           (.isEmpty diagnosticList))))))))
+
+  (defclass ^:public DiscardDiagnosticHandler
+    :extends DiagnosticHandler
+
+    (method ^:protected addLintWaiter ^void [this ^JavaFileObject sourceFile
+                                             ^JCDiagnostic diagnostic])
+
+    (method ^:protected reportReady ^void [this ^JCDiagnostic diag]))
+
+  (defclass ^:public DeferredDiagnosticHandler
+    :extends DiagnosticHandler
+
+    (field ^:private ^{:tag (java.util.List JCDiagnostic)} deferred (ArrayList.))
+
+    (field ^:private ^:final ^{:tag (Predicate JCDiagnostic)} filter)
+
+    (field ^:private ^:final ^boolean passOnNonDeferrable)
+
+    (constructor ^:public [this] (this. nil))
+
+    (constructor ^:public [this ^{:tag (Predicate JCDiagnostic)} filter]
+      (this. filter true))
+
+    (constructor ^:public [this ^{:tag (Predicate JCDiagnostic)} filter ^boolean passOnNonDeferrable]
+      (set! (.-filter this)
+            (cast Predicate
+                  (.orElse (Optional/ofNullable filter)
+                           (lambda Predicate ^boolean [^JCDiagnostic d] true))))
+      (set! (.-passOnNonDeferrable this) passOnNonDeferrable))
+
+    (method ^:private deferrable ^boolean [this ^JCDiagnostic diag]
+      (and (not (and (.isFlagSet diag JCDiagnostic$DiagnosticFlag/NON_DEFERRABLE)
+                     passOnNonDeferrable))
+           (.test filter diag)))
+
+    (method ^:protected reportReady ^void [this ^JCDiagnostic diag]
+      (if (.deferrable this diag) (.add deferred diag) (.reportReady (.-prev this) diag)))
+
+    (method ^:protected addLintWaiter ^void [this ^JavaFileObject sourceFile ^JCDiagnostic diag]
+      (if (.deferrable this diag)
+          (.addLintWaiter super sourceFile diag)
+          (.addLintWaiter (.-prev this) sourceFile diag)))
+
+    (method ^:public getDiagnostics ^{:tag (java.util.List JCDiagnostic)} [this]
+      deferred)
+
+    (method ^:public reportDeferredDiagnostics ^void [this]
+      (.reportDeferredDiagnostics this (lambda Predicate ^boolean [^JCDiagnostic d] true)))
+
+    (method ^:public reportDeferredDiagnostics ^void [this ^{:tag (Predicate JCDiagnostic)} accepter]
+      (.forEach (.filter (.stream deferred) accepter)
+                (method-ref Consumer [JCDiagnostic] (.-prev this) DiagnosticHandler/.report))
+      (set! deferred nil)
+      (.forEach (.-lintWaitersMap this)
+                (lambda BiConsumer ^void [^JavaFileObject sourceFile ^java.util.List diagnostics]
+                  (.forEach (.filter (.stream diagnostics) accepter)
+                            (lambda Consumer ^void [^JCDiagnostic diagnostic]
+                              (.addLintWaiter (.-prev this) sourceFile diagnostic)))))
+      (set! (.-lintWaitersMap this) nil))
+
+    (method ^:public reportDeferredDiagnostics ^void [this ^{:tag (Comparator JCDiagnostic)} order]
+      (.sort deferred order)
+      (.reportDeferredDiagnostics this)))
+
+  (defclass ^:public ^:enum WriterKind
+    (constants NOTICE WARNING ERROR STDOUT STDERR))
+
+  (field ^:private ^:final ^{:tag (Map WriterKind PrintWriter)} writers)
+
+  (field ^:protected ^int MaxErrors)
+
+  (field ^:protected ^int MaxWarnings)
+
+  (field ^:public ^boolean promptOnError)
+
+  (field ^:public ^boolean emitWarnings)
+
+  (field ^:public ^boolean suppressNotes)
+
+  (field ^:public ^boolean dumpOnError)
+
+  (field ^:protected ^{:tag (DiagnosticListener (? super JavaFileObject))} diagListener)
+
+  (field ^:private ^{:tag (DiagnosticFormatter JCDiagnostic)} diagFormatter)
+
+  (field ^:public ^{:tag (Set String)} expectDiagKeys)
+
+  (field ^:public ^boolean compressedOutput)
+
+  (field ^:private ^JavacMessages messages)
+
+  (field ^:private ^:final ^Context context)
+
+  (field ^:private ^:final ^Options options)
+
+  (field ^:private ^:final ^LintMapper lintMapper)
+
+  (field ^:private ^Lint rootLint)
+
+  (field ^:private ^DiagnosticHandler diagnosticHandler)
+
+  (method ^:public ^:static instance ^Log [^Context context]
+    (let [^:mutable instance (cast Log (.get context logKey))]
+      (when (nil? instance) (set! instance (Log. context)))
+      instance))
+
+  (method ^:public ^:static preRegister ^void [^Context context ^PrintWriter w]
+    (.put context Log (lambda Context$Factory ^Log [^Context c] (Log. c w))))
+
+  (constructor ^:protected [this ^Context context]
+    (this. context (Log/initWriters context)))
+
+  (method ^:private ^:static initWriters ^{:tag (Map WriterKind PrintWriter)} [^Context context]
+    (let [^:mutable out (cast PrintWriter (.get context outKey))
+          ^:mutable err (cast PrintWriter (.get context errKey))]
+      (cond
+        (and (nil? out) (nil? err))
+          (do
+            (set! out (PrintWriter. System/out true))
+            (set! err (PrintWriter. System/err true))
+            (Log/initWriters out err))
+        (or (nil? out) (nil? err))
+          (let [^PrintWriter pw (if (some? out) out err)] (Log/initWriters pw pw))
+        :else (Log/initWriters out err))))
+
+  (constructor ^:protected [this ^Context context ^PrintWriter writer]
+    (this. context (Log/initWriters writer writer)))
+
+  (constructor ^:protected [this ^Context context ^PrintWriter out ^PrintWriter err]
+    (this. context (Log/initWriters out err)))
+
+  (method ^:private ^:static initWriters ^{:tag (Map WriterKind PrintWriter)} [^PrintWriter out
+                                                                               ^PrintWriter err]
+    (let [^{:tag (Map WriterKind PrintWriter)} writers (EnumMap. WriterKind)]
+      (.put writers WriterKind/ERROR err)
+      (.put writers WriterKind/WARNING err)
+      (.put writers WriterKind/NOTICE err)
+      (.put writers WriterKind/STDOUT out)
+      (.put writers WriterKind/STDERR err)
+      writers))
+
+  (constructor ^:private [this ^Context context ^{:tag (Map WriterKind PrintWriter)} writers]
+    (super. (JCDiagnostic$Factory/instance context))
+    (.put context logKey this)
+    (set! (.-context this) context)
+    (set! (.-options this) (Options/instance context))
+    (set! (.-lintMapper this) (LintMapper/instance context))
+    (set! (.-writers this) writers)
+    (let [^{:tag (DiagnosticListener (? super JavaFileObject))} dl (cast
+                                                                     DiagnosticListener
+                                                                     (.get
+                                                                       context
+                                                                       DiagnosticListener))]
+      (set! (.-diagListener this) dl)
+      (set! diagnosticHandler (DefaultDiagnosticHandler.))
+      (set! messages (JavacMessages/instance context))
+      (.add messages Main/javacBundleName)
+      (set! (.-emitWarnings this) true)
+      (set! (.-MaxErrors this) (.getDefaultMaxErrors this))
+      (set! (.-MaxWarnings this) (.getDefaultMaxWarnings this))
+      (set! (.-diagFormatter this) (BasicDiagnosticFormatter. messages))
+      (.whenReady options (method-ref Consumer [Options] this Log/.initOptions))))
+
+  (method ^:private initOptions ^void [this ^Options options]
+    (set! (.-dumpOnError this) (.isSet options Option/DOE))
+    (set! (.-promptOnError this) (.isSet options Option/PROMPT))
+    (set! (.-emitWarnings this) (.isUnset options Option/NOWARN))
+    (set! (.-suppressNotes this) (.isSet options "suppressNotes"))
+    (set! (.-MaxErrors this)
+          (.getIntOption this options Option/XMAXERRS (.getDefaultMaxErrors this)))
+    (set! (.-MaxWarnings this)
+          (.getIntOption this options Option/XMAXWARNS (.getDefaultMaxWarnings this)))
+    (let [rawDiagnostics (.isSet options "rawDiagnostics")]
+      (set! (.-diagFormatter this)
+            (if rawDiagnostics
+                ^DiagnosticFormatter (RawDiagnosticFormatter. options)
+                ^DiagnosticFormatter (BasicDiagnosticFormatter. options messages)))
+      (let [ek (.get options "expectKeys")]
+        (when (some? ek) (set! expectDiagKeys (HashSet. (Arrays/asList (.split ek ", *"))))))))
+
+  (method ^:private getIntOption ^int [this ^Options options ^Option option ^int defaultValue]
+    (let [s (.get options option)]
+      (try
+        (when (some? s) (let [n (Integer/parseInt s)] (return (if (<= n 0) Integer/MAX_VALUE n))))
+        (catch NumberFormatException e))
+      defaultValue))
+
+  (method ^:protected getDefaultMaxErrors ^int [this] 100)
+
+  (method ^:protected getDefaultMaxWarnings ^int [this] 100)
+
+  (field ^:public ^int nerrors 0)
+
+  (field ^:public ^int nwarnings 0)
+
+  (field ^:public ^:final ^{:tag (EnumSet Lint$LintCategory)} lintWarnings
+    (Lint$LintCategory/newEmptySet))
+
+  (field ^:public ^int nsuppressederrors 0)
+
+  (field ^:public ^int nsuppressedwarns 0)
+
+  (field ^:protected ^{:tag (Set (Pair JavaFileObject Integer))} recorded (HashSet.))
+
+  (field ^:protected ^{:tag (Set (Pair JavaFileObject (java.util.List String)))} recordedSourceLevelErrors
+    (HashSet.))
+
+  (method ^:public hasDiagnosticListener ^boolean [this]
+    (some? diagListener))
+
+  (method ^:public setEndPosTable ^void [this ^JavaFileObject name ^EndPosTable endPosTable]
+    (Assert/checkNonNull name)
+    (.setEndPosTable (.getSource this name) endPosTable))
+
+  (method ^:public currentSourceFile ^JavaFileObject [this]
+    (when (some? (.-source this)) (.getFile (.-source this))))
+
+  (method ^:public getDiagnosticFormatter ^{:tag (DiagnosticFormatter JCDiagnostic)} [this]
+    diagFormatter)
+
+  (method ^:public setDiagnosticFormatter ^void [this
+                                                 ^{:tag (DiagnosticFormatter JCDiagnostic)} diagFormatter]
+    (set! (.-diagFormatter this) diagFormatter))
+
+  (method ^:public getWriter ^PrintWriter [this ^WriterKind kind]
+    (cast PrintWriter (.get writers kind)))
+
+  (method ^:public setWriter ^void [this ^WriterKind kind ^PrintWriter pw]
+    (Assert/checkNonNull pw)
+    (.put writers kind pw))
+
+  (method ^:public setWriters ^void [this ^PrintWriter pw]
+    (Assert/checkNonNull pw)
+    (for-each [^WriterKind k (WriterKind/values)] (.put writers k pw)))
+
+  (method ^:public popDiagnosticHandler ^void [this ^DiagnosticHandler h]
+    (Assert/check (identical? diagnosticHandler h))
+    (Assert/check (some? (.-prev h)))
+    (set! diagnosticHandler (.-prev h)))
+
+  (method ^:public flush ^void [this]
+    (for-each [^PrintWriter pw (.values writers)] (.flush pw)))
+
+  (method ^:public flush ^void [this ^WriterKind kind]
+    (.flush (.getWriter this kind)))
+
+  (method ^:protected shouldReport ^boolean [this ^JavaFileObject file ^int pos]
+    (if (nil? file)
+        true
+        (let [^{:tag (Pair JavaFileObject Integer)} coords (Pair. file pos)
+              shouldReport (not (.contains recorded coords))]
+          (when shouldReport (.add recorded coords))
+          shouldReport)))
+
+  (method ^:private shouldReport ^boolean [this ^JCDiagnostic d]
+    (let [file (.getSource d)]
+      (cond
+        (nil? file) true
+        (not (.shouldReport this file (.getIntPosition d))) false
+        (not (.isFlagSet d JCDiagnostic$DiagnosticFlag/SOURCE_LEVEL)) true
+        :else
+          (let [^{:tag (Pair JavaFileObject (java.util.List String))} coords (Pair.
+                                                                               file
+                                                                               (.getCode this d))
+                shouldReport (not (.contains recordedSourceLevelErrors coords))]
+            (when shouldReport (.add recordedSourceLevelErrors coords))
+            shouldReport))))
+
+  (method ^:private getCode ^{:tag (java.util.List String)} [this ^JCDiagnostic d]
+    (let [^{:tag (ListBuffer String)} buf (ListBuffer.)]
+      (.getCodeRecursive this buf d)
+      (.toList buf)))
+
+  (method ^:private getCodeRecursive ^void [this ^{:tag (ListBuffer String)} buf ^JCDiagnostic d]
+    (.add buf (.getCode d))
+    (for-each [o (.getArgs d)]
+      (when-instance [^JCDiagnostic diagnostic o] (.getCodeRecursive this buf diagnostic))))
+
+  (method ^:public hasErrorOn ^boolean [this ^JCDiagnostic$DiagnosticPosition pos]
+    (let [^JavaFileObject file (when (some? (.-source this)) (.-fileObject (.-source this)))]
+      (and (some? file) (.contains recorded (Pair. file (.getPreferredPosition pos))))))
+
+  (method ^:public prompt ^void [this]
+    (when promptOnError
+      (.println System/err (.localize this "resume.abort" (new Object/1 [])))
+      (try
+        (while true
+          (switch (.read System/in)
+            (\a \A) (do (System/exit -1) (return))
+            (\r \R) (return)
+            (\x \X) (throw (AssertionError. "user abort"))
+            nil))
+        (catch IOException e))))
+
+  (method ^:private printErrLine ^void [this ^int pos ^PrintWriter writer]
+    (let [^String line (when (some? (.-source this)) (.getLine (.-source this) pos))]
+      (when (some? line)
+        (let [col (.getColumnNumber (.-source this) pos false)]
+          (Log/printRawLines writer line)
+          (loop [^int i 0]
+            (when (< i (unchecked-subtract-int col 1))
+              (.print writer ^String (if (== (.charAt line i) \tab) "\t" " "))
+              (recur (unchecked-inc-int i))))
+          (.println writer "^")
+          (.flush writer)))))
+
+  (method ^:public printNewline ^void [this]
+    (let [noticeWriter (cast PrintWriter (.get writers WriterKind/NOTICE))] (.println noticeWriter)))
+
+  (method ^:public printNewline ^void [this ^WriterKind wk]
+    (.println (.getWriter this wk)))
+
+  (method ^:public printLines ^void [this ^String key & ^Object/1 args]
+    (let [noticeWriter (cast PrintWriter (.get writers WriterKind/NOTICE))]
+      (Log/printRawLines noticeWriter (.localize this key args))))
+
+  (method ^:public printLines ^void [this ^JCDiagnostic$DiagnosticInfo diag]
+    (let [noticeWriter (cast PrintWriter (.get writers WriterKind/NOTICE))]
+      (Log/printRawLines noticeWriter (.localize this diag))))
+
+  (method ^:public printLines ^void [this ^PrefixKind pk ^String key & ^Object/1 args]
+    (let [noticeWriter (cast PrintWriter (.get writers WriterKind/NOTICE))]
+      (Log/printRawLines noticeWriter (.localize this pk key args))))
+
+  (method ^:public printLines ^void [this ^WriterKind wk ^String key & ^Object/1 args]
+    (Log/printRawLines (.getWriter this wk) (.localize this key args)))
+
+  (method ^:public printLines ^void [this ^WriterKind wk ^PrefixKind pk ^String key & ^Object/1 args]
+    (Log/printRawLines (.getWriter this wk) (.localize this pk key args)))
+
+  (method ^:public printRawLines ^void [this ^String msg]
+    (let [noticeWriter (cast PrintWriter (.get writers WriterKind/NOTICE))]
+      (Log/printRawLines noticeWriter msg)))
+
+  (method ^:public printRawLines ^void [this ^WriterKind kind ^String msg]
+    (Log/printRawLines (.getWriter this kind) msg))
+
+  (method ^:public ^:static printRawLines ^void [^PrintWriter writer ^:mutable ^String msg]
+    (let [^:mutable ^int nl 0]
+      (while (not (== (set! nl (.indexOf msg \newline)) -1))
+        (.println writer (.substring msg 0 nl))
+        (set! msg (.substring msg (unchecked-add-int nl 1))))
+      (when-not (== (.length msg) 0) (.println writer msg))))
+
+  (method ^:public printVerbose ^void [this ^String key & ^Object/1 args]
+    (let [noticeWriter (cast PrintWriter (.get writers WriterKind/NOTICE))]
+      (Log/printRawLines noticeWriter (.localize this (java-str "verbose." key) args))))
+
+  (method ^:protected directError ^void [this ^String key & ^Object/1 args]
+    (let [errWriter (cast PrintWriter (.get writers WriterKind/ERROR))]
+      (Log/printRawLines errWriter (.localize this key args))
+      (.flush errWriter)))
+
+  (method ^:public report ^void [this ^JCDiagnostic diagnostic]
+    (.report diagnosticHandler diagnostic))
+
+  (method ^:public reportOutstandingWarnings ^void [this]
+    (.flushLintWaiters diagnosticHandler))
+
+  (method ^:private lintFor ^Lint [this ^JCDiagnostic diag]
+    (Assert/check (some? (.getLintCategory diag)))
+    (cast Lint (.orElse (.lintAt lintMapper (.getSource diag) (.getDiagnosticPosition diag)) nil)))
+
+  (method ^:private rootLint ^Lint [this]
+    (when (nil? rootLint) (set! rootLint (Lint/instance context)))
+    rootLint)
+
+  (field ^:private ^:final ^{:tag (EnumMap Lint$LintCategory WarningAggregator)} aggregators
+    (EnumMap. Lint$LintCategory))
+
+  (field ^:private ^:final ^{:tag (EnumSet Lint$LintCategory)} suppressedDeferredMandatory
+    (EnumSet/noneOf Lint$LintCategory))
+
+  (method ^:public suppressAggregatedWarningNotes ^void [this ^Lint$LintCategory category]
+    (.add suppressedDeferredMandatory category))
+
+  (method ^:public reportOutstandingNotes ^void [this]
+    (.forEach (.flatMap (.map (.map (.filter (.stream (.entrySet aggregators))
+                                             (lambda Predicate ^boolean [^Map$Entry entry]
+                                               (not
+                                                 (.contains
+                                                   suppressedDeferredMandatory
+                                                   (.getKey entry)))))
+                                    (method-ref Function
+                                                ^WarningAggregator [Map$Entry]
+                                                Map$Entry/.getValue))
+                              (method-ref Function
+                                          ^java.util.List [WarningAggregator]
+                                          WarningAggregator/.aggregationNotes))
+                        (method-ref Function ^Stream [java.util.List] java.util.List/.stream))
+              (method-ref Consumer [JCDiagnostic] this Log/.report))
+    (.clear aggregators))
+
+  (method ^:private aggregatorFor ^WarningAggregator [this ^Lint$LintCategory lc]
+    (switch lc
+      PREVIEW
+        (cast WarningAggregator
+              (.computeIfAbsent aggregators
+                                lc
+                                (lambda Function ^WarningAggregator [^Lint$LintCategory c]
+                                  (WarningAggregator. this (Source/instance context) c))))
+      DEPRECATION
+        (cast WarningAggregator
+              (.computeIfAbsent aggregators
+                                lc
+                                (lambda Function ^WarningAggregator [^Lint$LintCategory c]
+                                  (WarningAggregator. this nil c "deprecated"))))
+      (cast WarningAggregator
+            (.computeIfAbsent aggregators
+                              lc
+                              (lambda Function ^WarningAggregator [^Lint$LintCategory c]
+                                (WarningAggregator. this nil c))))))
+
+  (method ^:public clear ^void [this]
+    (.clear recorded)
+    (.clear (.-sourceMap this))
+    (.clear lintWarnings)
+    (set! nerrors 0)
+    (set! nwarnings 0)
+    (set! nsuppressederrors 0)
+    (set! nsuppressedwarns 0)
+    (while (some? (.-prev diagnosticHandler)) (.popDiagnosticHandler this diagnosticHandler))
+    (.clear aggregators)
+    (.clear suppressedDeferredMandatory))
+
+  (defclass ^:private DefaultDiagnosticHandler
+    :extends DiagnosticHandler
+
+    (method ^:protected reportReady ^void [this ^:mutable ^JCDiagnostic diagnostic]
+      (when (some? expectDiagKeys) (.remove expectDiagKeys (.getCode diagnostic)))
+      (when (.hasRewriter diagnostic)
+        (let [rewrittenDiag (.rewrite diagnostic)]
+          (set! diagnostic (if (some? rewrittenDiag) rewrittenDiag diagnostic))))
+      (switch (.getType diagnostic)
+        FRAGMENT (throw (IllegalArgumentException.))
+        NOTE
+          (when (and (or emitWarnings (.isMandatory diagnostic)) (not suppressNotes))
+            (.writeDiagnostic Log/this diagnostic))
+        WARNING
+          (do
+            (when (.isFlagSet diagnostic JCDiagnostic$DiagnosticFlag/AGGREGATE)
+              (let [category (.getLintCategory diagnostic)
+                    verbose (.isEnabled (.lintFor Log/this diagnostic) category)]
+                (when-not (.aggregate (.aggregatorFor Log/this category) diagnostic verbose)
+                  (return))))
+            (when (.isFlagSet diagnostic JCDiagnostic$DiagnosticFlag/STRICT)
+              (.writeDiagnostic Log/this diagnostic)
+              (return))
+            (when (or emitWarnings (.isMandatory diagnostic))
+              (if (< nwarnings MaxWarnings)
+                  (.writeDiagnostic Log/this diagnostic)
+                  (set! nsuppressedwarns (unchecked-inc-int nsuppressedwarns)))))
+        ERROR
+          (when (or (.isFlagSet diagnostic JCDiagnostic$DiagnosticFlag/API)
+                    (.shouldReport Log/this diagnostic))
+            (if (< nerrors MaxErrors)
+                (.writeDiagnostic Log/this diagnostic)
+                (set! nsuppressederrors (unchecked-inc-int nsuppressederrors)))))
+      (when (.isFlagSet diagnostic JCDiagnostic$DiagnosticFlag/COMPRESSED)
+        (set! compressedOutput true))))
+
+  (method ^:protected writeDiagnostic ^void [this ^JCDiagnostic diag]
+    (switch (.getType diag)
+      WARNING
+        (do
+          (set! nwarnings (unchecked-inc-int nwarnings))
+          (.ifPresent (.map (Optional/of diag)
+                            (method-ref Function
+                                        ^Lint$LintCategory [JCDiagnostic]
+                                        JCDiagnostic/.getLintCategory))
+                      (method-ref Consumer [Lint$LintCategory] lintWarnings EnumSet/.add)))
+      ERROR (set! nerrors (unchecked-inc-int nerrors))
+      nil)
+    (if (some? diagListener)
+        (.report diagListener diag)
+        (let [writer (.getWriterForDiagnosticType this (.getType diag))]
+          (Log/printRawLines writer (.format diagFormatter diag (.getCurrentLocale messages)))
+          (when promptOnError (switch (.getType diag) (ERROR WARNING) (.prompt this)))
+          (when dumpOnError (.printStackTrace (RuntimeException.) writer))
+          (.flush writer))))
+
+  (method ^:protected getWriterForDiagnosticType ^PrintWriter [this ^JCDiagnostic$DiagnosticType dt]
+    (switch dt
+      FRAGMENT (throw (IllegalArgumentException.))
+      NOTE (cast PrintWriter (.get writers WriterKind/NOTICE))
+      WARNING (cast PrintWriter (.get writers WriterKind/WARNING))
+      ERROR (cast PrintWriter (.get writers WriterKind/ERROR))
+      (throw (Error.))))
+
+  (method ^:public ^:static getLocalizedString ^String [^String key & ^Object/1 args]
+    (JavacMessages/getDefaultLocalizedString (.key PrefixKind/COMPILER_MISC key) args))
+
+  (method ^:public localize ^String [this ^String key & ^Object/1 args]
+    (.localize this PrefixKind/COMPILER_MISC key args))
+
+  (method ^:public localize ^String [this ^JCDiagnostic$DiagnosticInfo diagInfo]
+    (if useRawMessages (.key diagInfo) (.getLocalizedString messages diagInfo)))
+
+  (method ^:public localize ^String [this ^PrefixKind pk ^String key & ^Object/1 args]
+    (if useRawMessages (.key pk key) (.getLocalizedString messages (.key pk key) args)))
+
+  (field ^:private ^:static ^boolean useRawMessages false)
+
+  (method ^:private printRawDiag ^void [this ^PrintWriter pw ^String prefix ^int pos ^String msg]
+    (if (or (nil? (.-source this)) (== pos Position/NOPOS))
+        (Log/printRawLines pw (java-str prefix msg))
+        (let [line (.getLineNumber (.-source this) pos)
+              file (.getFile (.-source this))]
+          (when (some? file) (Log/printRawLines pw (java-str (.getName file) ":" line ": " msg)))
+          (.printErrLine this pos pw)))
+    (.flush pw))
+
+  (method ^:public rawError ^void [this ^int pos ^String msg]
+    (let [errWriter (cast PrintWriter (.get writers WriterKind/ERROR))]
+      (if (and (< nerrors MaxErrors) (.shouldReport this (.currentSourceFile this) pos))
+          (do
+            (.printRawDiag this errWriter "error: " pos msg)
+            (.prompt this)
+            (set! nerrors (unchecked-inc-int nerrors)))
+          (set! nsuppressederrors (unchecked-inc-int nsuppressederrors)))
+      (.flush errWriter)))
+
+  (method ^:public rawWarning ^void [this ^int pos ^String msg]
+    (let [warnWriter (cast PrintWriter (.get writers WriterKind/ERROR))]
+      (when emitWarnings
+        (if (< nwarnings MaxWarnings)
+            (.printRawDiag this warnWriter "warning: " pos msg)
+            (set! nsuppressedwarns (unchecked-inc-int nsuppressedwarns))))
+      (.prompt this)
+      (set! nwarnings (unchecked-inc-int nwarnings))
+      (.flush warnWriter)))
+
+  (method ^:public ^:static format ^String [^String fmt & ^Object/1 args]
+    (String/format (cast Locale nil) fmt args)))

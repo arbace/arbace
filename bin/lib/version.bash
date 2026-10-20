@@ -25,12 +25,15 @@
 # (its classes and natives), the JDK's forms, data and jrt's own Java; not the namespaces'
 # sources, nor j2g and the Java forms' front end (namespaces the compiling host loads from the
 # checkout; their translation of the runtime shows in the next build, and the fixpoint's G2 =
-# G3 proves it), nor j2g's edge (jdk/edge.edn: j2g's data, not the runtime's), Go's runtime
+# G3 proves it), nor j2g's edge (jdk/edge.edn: j2g's data, not the runtime's), nor javac's
+# forms and the tool's own Java (jdk/javac, overlay/jdk/javac: the input of javac's tool build,
+# not the program's, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN2"), Go's runtime
 # patches, the roots and Go's pin. Two programs of one runtime key
 # analyze a checkout's namespaces alike, so a build's host of that key compiles them (one j2g
 # run).
 arbace_runtime_key() {
-  (cd "$1" && find arbace/lang go overlay/jdk jdk -type f ! -path jdk/edge.edn 2>/dev/null \
+  (cd "$1" && find arbace/lang go overlay/jdk jdk -type f ! -path jdk/edge.edn ! -path 'jdk/javac/*' \
+       ! -path 'overlay/jdk/javac/*' 2>/dev/null \
      | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64)
 }
 

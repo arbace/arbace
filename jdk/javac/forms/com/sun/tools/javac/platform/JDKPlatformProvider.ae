@@ -1,0 +1,288 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/platform/JDKPlatformProvider.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.platform)
+
+(import '(com.sun.source.util Plugin)
+        '(com.sun.tools.javac.code Source Source$Feature)
+        '(com.sun.tools.javac.file CacheFSInfo JavacFileManager)
+        '(com.sun.tools.javac.jvm Target)
+        '(com.sun.tools.javac.main Option)
+        '(com.sun.tools.javac.util Context Log StringUtils)
+        '(java.io IOException PrintWriter)
+        '(java.nio.file DirectoryStream
+                        FileSystem
+                        FileSystems
+                        Files
+                        Path
+                        Paths
+                        ProviderNotFoundException)
+        '(java.util ArrayList
+                    Arrays
+                    Collection
+                    Collections
+                    Comparator
+                    EnumSet
+                    HashMap
+                    Iterator
+                    List
+                    Map
+                    Map$Entry
+                    NoSuchElementException
+                    Set
+                    TreeSet)
+        '(java.util.function Function)
+        '(javax.annotation.processing Processor)
+        '(javax.tools ForwardingJavaFileObject
+                      JavaFileManager
+                      JavaFileManager$Location
+                      JavaFileObject
+                      JavaFileObject$Kind
+                      StandardLocation))
+
+(defclass ^:public JDKPlatformProvider
+  :implements [PlatformProvider]
+
+  (method ^:public getSupportedPlatformNames ^{:tag (Iterable String)} [this]
+    SUPPORTED_JAVA_PLATFORM_VERSIONS)
+
+  (method ^:public getPlatform :throws [PlatformProvider$PlatformNotSupported] ^PlatformDescription [this
+                                                                                                     ^String platformName
+                                                                                                     ^String options]
+    (when-not (.contains SUPPORTED_JAVA_PLATFORM_VERSIONS platformName)
+      (throw (PlatformProvider$PlatformNotSupported.)))
+    (.getPlatformTrusted this platformName))
+
+  (method ^:public getPlatformTrusted ^PlatformDescription [this ^String platformName]
+    (PlatformDescriptionImpl. platformName))
+
+  (field ^:private ^:static ^:final ^String/1 symbolFileLocation (new String/1 ["lib" "ct.sym"]))
+
+  (field ^:private ^:static ^:final ^{:tag (Map String ?)} CT_SYM_ZIP_ENV
+    (Map/of "accessMode" "readOnly" "zipinfo-time" "false"))
+
+  (field ^:private ^:static ^:final ^{:tag (Set String)} SUPPORTED_JAVA_PLATFORM_VERSIONS)
+
+  (field ^:public ^:static ^:final ^{:tag (Comparator String)} NUMERICAL_COMPARATOR
+    (lambda Comparator ^int [^String s1 ^String s2]
+      (let [^:mutable ^int i1 0]
+        (try
+          (set! i1 (Integer/parseInt s1))
+          (catch NumberFormatException ex (set! i1 Integer/MAX_VALUE)))
+        (let [^:mutable ^int i2 0]
+          (try
+            (set! i2 (Integer/parseInt s2))
+            (catch NumberFormatException ex (set! i2 Integer/MAX_VALUE)))
+          (if (not (== i1 i2)) (unchecked-subtract-int i1 i2) (.compareTo s1 s2))))))
+
+  (static-initializer
+    (set! SUPPORTED_JAVA_PLATFORM_VERSIONS (TreeSet. NUMERICAL_COMPARATOR))
+    (let [ctSymFile (JDKPlatformProvider/findCtSym)]
+      (when (Files/exists ctSymFile)
+        (try
+          (with-resources [fs (FileSystems/newFileSystem ctSymFile CT_SYM_ZIP_ENV)
+                           ^{:tag (DirectoryStream Path)} dir (Files/newDirectoryStream
+                                                                (cast
+                                                                  Path
+                                                                  (.next
+                                                                    (.iterator
+                                                                      (.getRootDirectories fs)))))]
+            (for-each [^Path section dir]
+              (when-not (.contains (.toString (.getFileName section)) "-")
+                (for-each [^char ver (.toCharArray (.toString (.getFileName section)))]
+                  (let [verString (Character/toString ver)
+                        t (Target/lookup
+                            (java-str "" (Integer/parseInt verString Character/MAX_RADIX)))]
+                    (when (some? t)
+                      (.add SUPPORTED_JAVA_PLATFORM_VERSIONS
+                            (JDKPlatformProvider/targetNumericVersion t))))))))
+          (catch [IOException ProviderNotFoundException] ex)))))
+
+  (method ^:private ^:static targetNumericVersion ^String [^Target target]
+    (Integer/toString
+      (unchecked-add-int (unchecked-subtract-int (.ordinal target) (.ordinal Target/JDK1_1)) 1)))
+
+  (defclass ^:static PlatformDescriptionImpl
+    :implements [PlatformDescription]
+
+    (field ^:private ^:final ^{:tag (Map Path FileSystem)} ctSym2FileSystem (HashMap.))
+
+    (field ^:private ^:final ^String sourceVersion)
+
+    (field ^:private ^:final ^String ctSymVersion)
+
+    (constructor [this ^String sourceVersion]
+      (set! (.-sourceVersion this) sourceVersion)
+      (set! (.-ctSymVersion this)
+            (StringUtils/toUpperCase
+              (Integer/toString (Integer/parseInt sourceVersion) Character/MAX_RADIX))))
+
+    (method ^:public getFileManager ^JavaFileManager [this]
+      (let [context (Context.)
+            pw (PrintWriter. System/err true)]
+        (.put context Log/errKey pw)
+        (CacheFSInfo/preRegister context)
+        (let [^JavacFileManager fm (anon JavacFileManager [context true nil]
+                                     (method ^:public hasLocation ^boolean [this
+                                                                            ^JavaFileManager$Location location]
+                                       (.hasExplicitLocation super location))
+
+                                     (method ^:public getJavaFileForInput :throws [IOException] ^JavaFileObject [this
+                                                                                                                 ^JavaFileManager$Location location
+                                                                                                                 ^String className
+                                                                                                                 ^JavaFileObject$Kind kind]
+                                       (when (identical? kind JavaFileObject$Kind/CLASS)
+                                         (let [fileName (.replace className \. \/)
+                                               result (cast
+                                                        JavaFileObject
+                                                        (.getFileForInput
+                                                          this
+                                                          location
+                                                          ""
+                                                          (java-str fileName ".sig")))]
+                                           (when (some? result)
+                                             (return (SigJavaFileObject. result)))))
+                                       (.getJavaFileForInput super location className kind))
+
+                                     (method ^:public list :throws [IOException] ^{:tag (Iterable JavaFileObject)} [this1
+                                                                                                                    ^JavaFileManager$Location location
+                                                                                                                    ^String packageName
+                                                                                                                    ^{:tag (Set JavaFileObject$Kind)} kinds
+                                                                                                                    ^boolean recurse]
+                                       (let [^{:tag (Set JavaFileObject$Kind)} enhancedKinds
+                                               (EnumSet/copyOf kinds)]
+                                         (.add enhancedKinds JavaFileObject$Kind/OTHER)
+                                         (let [^{:tag (Iterable JavaFileObject)} listed (.list
+                                                                                          super
+                                                                                          location
+                                                                                          packageName
+                                                                                          enhancedKinds
+                                                                                          recurse)]
+                                           (lambda Iterable ^Iterator []
+                                             (anon (Iterator JavaFileObject) []
+                                               (field ^:private ^:final ^{:tag (Iterator JavaFileObject)} original
+                                                 (.iterator listed))
+
+                                               (field ^:private ^JavaFileObject next)
+
+                                               (method ^:public hasNext ^boolean [this]
+                                                 (when (nil? next)
+                                                   (while (.hasNext original)
+                                                     (let [fo (cast JavaFileObject (.next original))]
+                                                       (when (and
+                                                               (identical?
+                                                                 (.getKind fo)
+                                                                 JavaFileObject$Kind/OTHER)
+                                                               (.endsWith (.getName fo) ".sig"))
+                                                         (set! next (SigJavaFileObject. fo))
+                                                         (break))
+                                                       (when (.contains kinds (.getKind fo))
+                                                         (set! next fo)
+                                                         (break)))))
+                                                 (some? next))
+
+                                               (method ^:public next ^JavaFileObject [this]
+                                                 (when-not (.hasNext this)
+                                                   (throw (NoSuchElementException.)))
+                                                 (let [result next] (set! next nil) result)))))))
+
+                                     (method ^:public inferBinaryName ^String [this
+                                                                               ^JavaFileManager$Location location
+                                                                               ^:mutable ^JavaFileObject file]
+                                       (when-instance [^SigJavaFileObject sigJavaFileObject file]
+                                         (set! file (.getDelegate sigJavaFileObject)))
+                                       (.inferBinaryName super location file)))]
+          (.handleOption fm Option/MULTIRELEASE sourceVersion)
+          (let [file (JDKPlatformProvider/findCtSym)]
+            (if (Files/exists file)
+                (try
+                  (let [^:mutable fs (cast FileSystem (.get ctSym2FileSystem file))]
+                    (when (nil? fs)
+                      (set! fs (FileSystems/newFileSystem file CT_SYM_ZIP_ENV))
+                      (.put ctSym2FileSystem file fs))
+                    (let [root (cast Path (.next (.iterator (.getRootDirectories fs))))
+                          hasModules (.allowedInSource
+                                       Source$Feature/MODULES
+                                       (Source/lookup sourceVersion))]
+                      (if (not hasModules)
+                          (let [^{:tag (List Path)} paths (ArrayList.)]
+                            (with-resources [^{:tag (DirectoryStream Path)} dir
+                                               (Files/newDirectoryStream root)]
+                              (for-each [^Path section dir]
+                                (when (and (.contains
+                                             (.toString (.getFileName section))
+                                             ctSymVersion)
+                                           (not (.contains (.toString (.getFileName section)) "-")))
+                                  (with-resources [^{:tag (DirectoryStream Path)} modules
+                                                     (Files/newDirectoryStream section)]
+                                    (for-each [^Path module modules] (.add paths module))))))
+                            (.setLocationFromPaths fm StandardLocation/PLATFORM_CLASS_PATH paths))
+                          (let [^{:tag (Map String (List Path))} module2Paths (HashMap.)]
+                            (with-resources [^{:tag (DirectoryStream Path)} dir
+                                               (Files/newDirectoryStream root)]
+                              (for-each [^Path section dir]
+                                (when (and (.contains
+                                             (.toString (.getFileName section))
+                                             ctSymVersion)
+                                           (not (.contains (.toString (.getFileName section)) "-")))
+                                  (with-resources [^{:tag (DirectoryStream Path)} modules
+                                                     (Files/newDirectoryStream section)]
+                                    (for-each [^Path module modules]
+                                      (.add
+                                        (cast
+                                          List
+                                          (.computeIfAbsent
+                                            module2Paths
+                                            (.toString (.getFileName module))
+                                            (lambda Function ^List [^String dummy] (ArrayList.))))
+                                        module))))))
+                            (.handleOption fm
+                                           "--system"
+                                           (.iterator (Arrays/asList (new String/1 ["none"]))))
+                            (for-each [^{:tag (Map$Entry String (List Path))} e (.entrySet
+                                                                                  module2Paths)]
+                              (.setLocationForModule
+                                fm
+                                StandardLocation/SYSTEM_MODULES
+                                (cast String (.getKey e))
+                                (cast Collection (.getValue e))))))
+                      fm))
+                  (catch IOException ex (throw (IllegalStateException. ex))))
+                (throw (IllegalStateException. "Cannot find ct.sym!")))))))
+
+    (defclass ^:private ^:static SigJavaFileObject
+      :extends (ForwardingJavaFileObject JavaFileObject)
+
+      (constructor ^:public [this ^JavaFileObject fileObject]
+        (super. fileObject))
+
+      (method ^:public getKind ^JavaFileObject$Kind [this]
+        JavaFileObject$Kind/CLASS)
+
+      (method ^:public isNameCompatible ^boolean [this ^String simpleName ^JavaFileObject$Kind kind]
+        (.isNameCompatible super (java-str simpleName ".sig") JavaFileObject$Kind/OTHER))
+
+      (method ^:public getDelegate ^JavaFileObject [this]
+        (cast JavaFileObject (.-fileObject this))))
+
+    (method ^:public getSourceVersion ^String [this] sourceVersion)
+
+    (method ^:public getTargetVersion ^String [this] sourceVersion)
+
+    (method ^:public getAnnotationProcessors ^{:tag (List (PlatformDescription$PluginInfo Processor))} [this]
+      (Collections/emptyList))
+
+    (method ^:public getPlugins ^{:tag (List (PlatformDescription$PluginInfo Plugin))} [this]
+      (Collections/emptyList))
+
+    (method ^:public getAdditionalOptions ^{:tag (List String)} [this]
+      (Collections/emptyList))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (for-each [^FileSystem fs (.values ctSym2FileSystem)] (.close fs))
+      (.clear ctSym2FileSystem)))
+
+  (method ^:static findCtSym ^Path []
+    (let [javaHome (System/getProperty "java.home")
+          ^:mutable file (Paths/get javaHome (new String/1 []))]
+      (for-each [^String name symbolFileLocation] (set! file (.resolve file name)))
+      file)))

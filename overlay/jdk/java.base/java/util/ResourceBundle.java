@@ -13,9 +13,14 @@ package java.util;
  * java.util.ResourceBundle for the Go build: a bundle's lookups through its parent chain, as
  * the JDK's, for the bundles the Go build has as classes (the CLDR locale data of java.base,
  * and of jdk.localedata, which jrt's locale providers chain themselves), and Control's
- * candidate locales, which the providers use. Not here: getBundle and its loading, caching
- * and Control's loading (newBundle, needsReload: there are no class loaders or modules to load
- * bundles from), and clearCache.
+ * candidate locales, which the providers use. getBundle(baseName) and getBundle(baseName,
+ * locale) find the bundles of the world's classes (the java.class format: j2g translates every
+ * concrete ResourceBundle subclass's public no-argument constructor, which Class.forName and
+ * reflection reach; javac's messages, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN2"),
+ * by the candidate and fallback locales as the JDK's getBundle searches them, and chain them;
+ * their getLocale and getBaseBundleName stay null. Not here: the java.properties format, the
+ * cache, the other getBundle overloads and Control's loading (newBundle, needsReload: there are
+ * no class loaders or modules to load bundles from), and clearCache.
  */
 public abstract class ResourceBundle {
     /** The parent bundle, consulted by getObject when this bundle has no value for a key. */
@@ -64,6 +69,77 @@ public abstract class ResourceBundle {
 
     protected void setParent(ResourceBundle parent) {
         this.parent = parent;
+    }
+
+    /** The bundle of baseName for the default locale (getBundle(String, Locale)). */
+    public static final ResourceBundle getBundle(String baseName) {
+        return getBundle(baseName, Locale.getDefault());
+    }
+
+    /**
+     * The bundle of baseName for locale, as the JDK's getBundle finds it with the default
+     * Control: for the locale, then for each fallback locale, the classes of the candidate
+     * locales' bundle names, the first found holding the others found after it as its parents;
+     * a base bundle alone (Locale.ROOT's) is the result only when no fallback finds more.
+     */
+    public static final ResourceBundle getBundle(String baseName, Locale locale) {
+        Objects.requireNonNull(baseName);
+        Objects.requireNonNull(locale);
+        Control control = Control.INSTANCE;
+        ResourceBundle baseBundle = null;
+        for (Locale target = locale; target != null; target = control.getFallbackLocale(baseName, target)) {
+            List<Locale> candidates = control.getCandidateLocales(baseName, target);
+            ResourceBundle bundle = null;
+            ResourceBundle last = null;
+            Locale found = null;
+            for (Locale l : candidates) {
+                ResourceBundle b = newBundle(control.toBundleName(baseName, l));
+                if (b == null) {
+                    continue;
+                }
+                if (bundle == null) {
+                    bundle = b;
+                    found = l;
+                } else {
+                    last.setParent(b);
+                }
+                last = b;
+            }
+            if (bundle != null) {
+                boolean isBaseBundle = Locale.ROOT.equals(found);
+                if (!isBaseBundle || found.equals(locale)
+                        || (candidates.size() == 1 && found.equals(candidates.get(0)))) {
+                    return bundle;
+                }
+                if (baseBundle == null) {
+                    baseBundle = bundle;
+                }
+            }
+        }
+        if (baseBundle == null) {
+            throw new MissingResourceException("Can't find bundle for base name " + baseName
+                                               + ", locale " + locale,
+                                               baseName + "_" + locale, "");
+        }
+        return baseBundle;
+    }
+
+    /** A new bundle of class name, or null: no such class, or not a bundle with a public constructor. */
+    private static ResourceBundle newBundle(String name) {
+        Class<?> c;
+        try {
+            c = Class.forName(name);
+        } catch (ClassNotFoundException | LinkageError e) {
+            return null;
+        }
+        if (!ResourceBundle.class.isAssignableFrom(c)) {
+            return null;
+        }
+        try {
+            return (ResourceBundle) c.getConstructor().newInstance();
+        } catch (ReflectiveOperationException e) {
+            return null;
+        }
     }
 
     protected abstract Object handleGetObject(String key);

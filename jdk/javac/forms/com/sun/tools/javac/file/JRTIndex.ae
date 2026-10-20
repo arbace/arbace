@@ -1,0 +1,157 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/file/JRTIndex.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.file)
+
+(import '(com.sun.tools.javac.util Context)
+        '(java.io IOException UncheckedIOException)
+        '(java.lang.ref SoftReference)
+        '(java.net URI)
+        '(java.nio.file DirectoryStream
+                        FileSystem
+                        FileSystemNotFoundException
+                        FileSystems
+                        Files
+                        Path
+                        ProviderNotFoundException)
+        '(java.util Collections
+                    HashMap
+                    LinkedHashMap
+                    LinkedHashSet
+                    Map
+                    MissingResourceException
+                    ResourceBundle
+                    Set)
+        '(javax.tools FileObject))
+
+(defclass ^:public JRTIndex
+  (field ^:private ^:static ^JRTIndex sharedInstance)
+
+  (method ^:public ^:static ^:synchronized getSharedInstance ^JRTIndex []
+    (when (nil? sharedInstance)
+      (try
+        (set! sharedInstance (JRTIndex.))
+        (catch IOException e (throw (UncheckedIOException. e)))))
+    sharedInstance)
+
+  (method ^:public ^:static instance ^JRTIndex [^Context context]
+    (try
+      (let [^:mutable instance (cast JRTIndex (.get context JRTIndex))]
+        (when (nil? instance) (.put context JRTIndex (set! instance (JRTIndex.))))
+        instance)
+      (catch IOException e (throw (UncheckedIOException. e)))))
+
+  (method ^:public ^:static isAvailable ^boolean []
+    (try
+      (FileSystems/getFileSystem (URI/create "jrt:/"))
+      true
+      (catch [ProviderNotFoundException FileSystemNotFoundException] e false)))
+
+  (field ^:private ^:final ^FileSystem jrtfs)
+
+  (field ^:private ^:final ^{:tag (Map RelativePath$RelativeDirectory (SoftReference Entry))} entries)
+
+  (defclass Entry
+    (field ^:final ^{:tag (Map String Path)} files)
+
+    (field ^:final ^{:tag (Set RelativePath$RelativeDirectory)} subdirs)
+
+    (field ^:final ^CtSym ctSym)
+
+    (constructor ^:private [this ^{:tag (Map String Path)} files
+                            ^{:tag (Set RelativePath$RelativeDirectory)} subdirs ^CtSym ctSym]
+      (set! (.-files this) files)
+      (set! (.-subdirs this) subdirs)
+      (set! (.-ctSym this) ctSym)))
+
+  (defclass ^:public ^:static CtSym
+    (field ^:public ^:final ^boolean hidden)
+
+    (field ^:public ^:final ^boolean proprietary)
+
+    (field ^:public ^:final ^String minProfile)
+
+    (constructor [this ^boolean hidden ^boolean proprietary ^String minProfile]
+      (set! (.-hidden this) hidden)
+      (set! (.-proprietary this) proprietary)
+      (set! (.-minProfile this) minProfile))
+
+    (method ^:public toString ^String [this]
+      (let [sb (StringBuilder. "CtSym[")
+            ^:mutable needSep false]
+        (when hidden (.append sb "hidden") (set! needSep true))
+        (when proprietary
+          (when needSep (.append sb ","))
+          (.append sb "proprietary")
+          (set! needSep true))
+        (when (some? minProfile) (when needSep (.append sb ",")) (.append sb minProfile))
+        (.append sb "]")
+        (.toString sb)))
+
+    (field ^:static ^:final ^CtSym EMPTY (CtSym. false false nil)))
+
+  (constructor :throws [IOException] ^:private [this]
+    (set! jrtfs (FileSystems/getFileSystem (URI/create "jrt:/")))
+    (set! entries (HashMap.)))
+
+  (method ^:public getCtSym :throws [IOException] ^CtSym [this ^CharSequence packageName]
+    (.-ctSym (.getEntry this (RelativePath$RelativeDirectory/forPackage packageName))))
+
+  (method ^:synchronized getEntry :throws [IOException] ^Entry [this
+                                                                ^RelativePath$RelativeDirectory rd]
+    (let [^{:tag (SoftReference Entry)} ref (cast SoftReference (.get entries rd))
+          ^:mutable ^Entry e (when (some? ref) (cast Entry (.get ref)))]
+      (when (nil? e)
+        (let [^{:tag (Map String Path)} files (LinkedHashMap.)
+              ^{:tag (Set RelativePath$RelativeDirectory)} subdirs (LinkedHashSet.)
+              ^:mutable ^Path dir nil]
+          (if (.isEmpty (.-path rd))
+              (set! dir (.getPath jrtfs "/modules"))
+              (let [pkgs (.getPath jrtfs "/packages")]
+                (set! dir (.resolve pkgs (.replace (.replaceAll (.getPath rd) "/$" "") "/" ".")))))
+          (when (Files/exists dir)
+            (with-resources [^{:tag (DirectoryStream Path)} modules (Files/newDirectoryStream dir)]
+              (for-each [^:mutable ^Path module modules]
+                (when (Files/isSymbolicLink module) (set! module (Files/readSymbolicLink module)))
+                (let [p (.resolveAgainst rd module)]
+                  (when-not (not (Files/exists p))
+                    (with-resources [^{:tag (DirectoryStream Path)} stream (Files/newDirectoryStream
+                                                                             p)]
+                      (for-each [^Path entry stream]
+                        (let [name (.toString (.getFileName entry))]
+                          (cond
+                            (Files/isRegularFile entry) (.put files name entry)
+                            (Files/isDirectory entry)
+                              (.add subdirs (RelativePath$RelativeDirectory. rd name)))))))))))
+          (set! e
+                (Entry. (Collections/unmodifiableMap files)
+                        (Collections/unmodifiableSet subdirs)
+                        (.getCtInfo this rd)))
+          (.put entries rd (SoftReference. e))))
+      e))
+
+  (method ^:public isInJRT ^boolean [this ^FileObject fo]
+    (if-instance [^PathFileObject pathFileObject fo]
+      (let [path (.getPath pathFileObject)] (identical? (.getFileSystem path) jrtfs))
+      false))
+
+  (method ^:private getCtInfo ^CtSym [this ^RelativePath$RelativeDirectory dir]
+    (if (.isEmpty (.-path dir))
+        CtSym/EMPTY
+        (do
+          (when (nil? ctBundle)
+            (let [^:const bundleName "com.sun.tools.javac.resources.ct"]
+              (set! ctBundle (ResourceBundle/getBundle bundleName))))
+          (try
+            (let [attrs (.getString ctBundle (java-str (.replace (.-path dir) \/ \.) \*))
+                  ^:mutable hidden false
+                  ^:mutable proprietary false
+                  ^:mutable ^String minProfile nil]
+              (for-each [^String attr (.split attrs " +" 0)]
+                (switch attr
+                  "hidden" (set! hidden true)
+                  "proprietary" (set! proprietary true)
+                  (set! minProfile attr)))
+              (CtSym. hidden proprietary minProfile))
+            (catch MissingResourceException e CtSym/EMPTY)))))
+
+  (field ^:private ^ResourceBundle ctBundle))

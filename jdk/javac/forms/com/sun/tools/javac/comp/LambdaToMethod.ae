@@ -1,0 +1,1108 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/comp/LambdaToMethod.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.comp)
+
+(import '(com.sun.source.tree LambdaExpressionTree$BodyKind)
+        '(com.sun.tools.javac.code Attribute$TypeCompound
+                                   Flags
+                                   Kinds$Kind
+                                   Symbol
+                                   Symbol$ClassSymbol
+                                   Symbol$DynamicMethodSymbol
+                                   Symbol$MethodHandleSymbol
+                                   Symbol$MethodSymbol
+                                   Symbol$VarSymbol
+                                   Symtab
+                                   Type
+                                   Type$MethodType
+                                   TypeTag
+                                   Types
+                                   Types$SignatureGenerator
+                                   Types$SignatureGenerator$InvalidSignatureException)
+        '(com.sun.tools.javac.jvm PoolConstant$LoadableConstant)
+        '(com.sun.tools.javac.main Option)
+        '(com.sun.tools.javac.resources CompilerProperties$Errors
+                                        CompilerProperties$Fragments
+                                        CompilerProperties$Notes)
+        '(com.sun.tools.javac.tree JCTree
+                                   JCTree$JCAnnotation
+                                   JCTree$JCBlock
+                                   JCTree$JCBreak
+                                   JCTree$JCCase
+                                   JCTree$JCClassDecl
+                                   JCTree$JCExpression
+                                   JCTree$JCFieldAccess
+                                   JCTree$JCFunctionalExpression
+                                   JCTree$JCIdent
+                                   JCTree$JCLambda
+                                   JCTree$JCMemberReference
+                                   JCTree$JCMethodDecl
+                                   JCTree$JCNewClass
+                                   JCTree$JCReturn
+                                   JCTree$JCStatement
+                                   JCTree$JCVariableDecl
+                                   JCTree$Tag
+                                   TreeInfo
+                                   TreeMaker
+                                   TreeTranslator)
+        '(com.sun.tools.javac.util Assert
+                                   Context
+                                   Context$Key
+                                   InvalidUtfException
+                                   JCDiagnostic$DiagnosticPosition
+                                   JCDiagnostic$Factory
+                                   List
+                                   ListBuffer
+                                   Log
+                                   Name
+                                   Names
+                                   Options)
+        '(java.lang.invoke LambdaMetafactory)
+        '(java.util HashMap HashSet Map Map$Entry Set)
+        '(java.util.function Consumer Function Supplier)
+        '(javax.lang.model.element ElementKind))
+
+(defclass ^:public LambdaToMethod
+  :extends TreeTranslator
+
+  (field ^:private ^:final ^Attr attr)
+
+  (field ^:private ^:final ^JCDiagnostic$Factory diags)
+
+  (field ^:private ^:final ^Log log)
+
+  (field ^:private ^:final ^Lower lower)
+
+  (field ^:private ^:final ^Names names)
+
+  (field ^:private ^:final ^Symtab syms)
+
+  (field ^:private ^:final ^Resolve rs)
+
+  (field ^:private ^:final ^Operators operators)
+
+  (field ^:private ^TreeMaker make)
+
+  (field ^:private ^:final ^Types types)
+
+  (field ^:private ^:final ^TransTypes transTypes)
+
+  (field ^:private ^{:tag (Env AttrContext)} attrEnv)
+
+  (field ^:private ^KlassInfo kInfo)
+
+  (field ^:private ^LambdaTranslationContext lambdaContext)
+
+  (field ^:private ^Symbol$VarSymbol pendingVar)
+
+  (field ^:private ^:final ^boolean dumpLambdaToMethodStats)
+
+  (field ^:private ^:final ^boolean forceSerializable)
+
+  (field ^:private ^:final ^boolean debugLinesOrVars)
+
+  (field ^:private ^:final ^boolean verboseDeduplication)
+
+  (field ^:private ^:final ^boolean deduplicateLambdas)
+
+  (field ^:public ^:static ^:final ^int FLAG_SERIALIZABLE LambdaMetafactory/FLAG_SERIALIZABLE)
+
+  (field ^:public ^:static ^:final ^int FLAG_MARKERS LambdaMetafactory/FLAG_MARKERS)
+
+  (field ^:public ^:static ^:final ^int FLAG_BRIDGES LambdaMetafactory/FLAG_BRIDGES)
+
+  (field ^:protected ^:static ^:final ^{:tag (Context$Key LambdaToMethod)} unlambdaKey
+    (Context$Key.))
+
+  (method ^:public ^:static instance ^LambdaToMethod [^Context context]
+    (let [^:mutable instance (cast LambdaToMethod (.get context unlambdaKey))]
+      (when (nil? instance) (set! instance (LambdaToMethod. context)))
+      instance))
+
+  (constructor ^:private [this ^Context context]
+    (.put context unlambdaKey this)
+    (set! diags (JCDiagnostic$Factory/instance context))
+    (set! log (Log/instance context))
+    (set! lower (Lower/instance context))
+    (set! names (Names/instance context))
+    (set! syms (Symtab/instance context))
+    (set! rs (Resolve/instance context))
+    (set! operators (Operators/instance context))
+    (set! make (TreeMaker/instance context))
+    (set! types (Types/instance context))
+    (set! transTypes (TransTypes/instance context))
+    (let [options (Options/instance context)]
+      (set! dumpLambdaToMethodStats (.isSet options "debug.dumpLambdaToMethodStats"))
+      (set! attr (Attr/instance context))
+      (set! forceSerializable (.isSet options "forceSerializable"))
+      (let [lineDebugInfo (or (.isUnset options Option/G_CUSTOM)
+                              (.isSet options Option/G_CUSTOM "lines"))
+            varDebugInfo (if (.isUnset options Option/G_CUSTOM)
+                             (.isSet options Option/G)
+                             (.isSet options Option/G_CUSTOM "vars"))]
+        (set! debugLinesOrVars (or lineDebugInfo varDebugInfo))
+        (set! verboseDeduplication (.isSet options "debug.dumpLambdaToMethodDeduplication"))
+        (set! deduplicateLambdas (.getBoolean options "deduplicateLambdas" true)))))
+
+  (defclass DedupedLambda
+    (field ^:private ^:final ^Symbol$MethodSymbol symbol)
+
+    (field ^:private ^:final ^JCTree tree)
+
+    (field ^:private ^int hashCode)
+
+    (constructor [this ^Symbol$MethodSymbol symbol ^JCTree tree]
+      (set! (.-symbol this) symbol)
+      (set! (.-tree this) tree))
+
+    (method ^:public hashCode ^int [this]
+      (let [^:mutable hashCode (.-hashCode this)]
+        (when (== hashCode 0)
+          (set! (.-hashCode this) (set! hashCode (TreeHasher/hash types tree (.params symbol)))))
+        hashCode))
+
+    (method ^:public equals ^boolean [this o]
+      (if-instance [^DedupedLambda dedupedLambda o]
+        (if (.isSameType types (.asType symbol) (.asType (.-symbol dedupedLambda)))
+            (.scan (TreeDiffer. types (.params symbol) (.params (.-symbol dedupedLambda)))
+                   tree
+                   (.-tree dedupedLambda))
+            false)
+        false)))
+
+  (defclass ^:private KlassInfo
+    (field ^:private ^{:tag (ListBuffer JCTree)} appendedMethodList (ListBuffer.))
+
+    (field ^:private ^:final ^{:tag (Map DedupedLambda DedupedLambda)} dedupedLambdas (HashMap.))
+
+    (field ^:private ^:final ^{:tag (Map Object Symbol$DynamicMethodSymbol)} dynMethSyms (HashMap.))
+
+    (field ^:private ^:final ^{:tag (Map String (ListBuffer JCTree$JCStatement))} deserializeCases
+      (HashMap.))
+
+    (field ^:private ^:final ^Symbol$MethodSymbol deserMethodSym)
+
+    (field ^:private ^:final ^Symbol$VarSymbol deserParamSym)
+
+    (field ^:private ^:final ^JCTree$JCClassDecl clazz)
+
+    (field ^:private ^:final ^{:tag (Map String Integer)} syntheticNames (HashMap.))
+
+    (constructor ^:private [this ^JCTree$JCClassDecl clazz]
+      (set! (.-clazz this) clazz)
+      (let [type (Type$MethodType. (List/of (.-serializedLambdaType syms))
+                                   (.-objectType syms)
+                                   (List/nil)
+                                   (.-methodClass syms))]
+        (set! deserMethodSym
+              (.makePrivateSyntheticMethod LambdaToMethod/this
+                                           Flags/STATIC
+                                           (.-deserializeLambda names)
+                                           type
+                                           (.-sym clazz)))
+        (set! deserParamSym
+              (Symbol$VarSymbol. Flags/FINAL
+                                 (.fromString names "lambda")
+                                 (.-serializedLambdaType syms)
+                                 deserMethodSym))))
+
+    (method ^:private addMethod ^void [this ^JCTree decl]
+      (set! appendedMethodList (.prepend appendedMethodList decl)))
+
+    (method syntheticNameIndex ^int [this ^StringBuilder buf ^int start]
+      (let [temp (.toString buf)
+            ^:mutable count (cast Integer (.get syntheticNames temp))]
+        (when (nil? count) (set! count start))
+        (.put syntheticNames temp (unchecked-add-int count 1))
+        count)))
+
+  (method ^:public translateTopLevelClass ^JCTree [this ^{:tag (Env AttrContext)} env ^JCTree cdef
+                                                   ^TreeMaker make]
+    (set! (.-make this) make)
+    (set! (.-attrEnv this) env)
+    (.translate this cdef))
+
+  (method ^:public visitClassDef ^void [this ^JCTree$JCClassDecl tree]
+    (let [prevKlassInfo kInfo
+          prevSource (.currentSource log)
+          prevLambdaContext lambdaContext
+          prevPendingVar pendingVar]
+      (try
+        (set! kInfo (KlassInfo. tree))
+        (.useSource log (.-sourcefile (.-sym tree)))
+        (set! lambdaContext nil)
+        (set! pendingVar nil)
+        (.visitClassDef super tree)
+        (when (some? prevLambdaContext)
+          (set! (.-owner (.-sym tree)) (.-translatedSym prevLambdaContext)))
+        (when-not (.isEmpty (.-deserializeCases kInfo))
+          (let [prevPos (.-pos make)]
+            (try
+              (.at make tree)
+              (.addMethod kInfo (.makeDeserializeMethod this))
+              (finally (.at make prevPos)))))
+        (let [^{:tag (List JCTree)} newMethods (.toList (.-appendedMethodList kInfo))]
+          (set! (.-defs tree) (.appendList (.-defs tree) newMethods))
+          (for-each [^JCTree lambda newMethods]
+            (.enter (.members (.-sym tree)) (.-sym (cast JCTree$JCMethodDecl lambda))))
+          (set! (.-result this) tree))
+        (finally
+          (set! kInfo prevKlassInfo)
+          (.useSource log (.getFile prevSource))
+          (set! lambdaContext prevLambdaContext)
+          (set! pendingVar prevPendingVar)))))
+
+  (method ^:public visitLambda ^void [this ^JCTree$JCLambda tree]
+    (let [localContext (LambdaTranslationContext. tree)
+          ^:mutable sym (.-translatedSym localContext)
+          lambdaType (cast Type$MethodType (.-type sym))]
+      (let [owner (.-owner tree)]
+        (.apportionTypeAnnotations this
+                                   tree
+                                   (method-ref Supplier ^List [] owner Symbol/.getRawTypeAttributes)
+                                   (method-ref Consumer [List] owner Symbol/.setTypeAttributes)
+                                   (method-ref Consumer
+                                               [List]
+                                               sym
+                                               Symbol$MethodSymbol/.setTypeAttributes))
+        (let [ownerFlags (.flags owner)]
+          (when-not (== (bit-and ownerFlags Flags/BLOCK) 0)
+            (let [cs (cast Symbol$ClassSymbol (.-owner owner))
+                  isStaticInit (not (== (bit-and ownerFlags Flags/STATIC) 0))]
+              (.apportionTypeAnnotations
+                this
+                tree
+                ^Supplier (if isStaticInit
+                              (method-ref Supplier
+                                          ^List []
+                                          cs
+                                          Symbol$ClassSymbol/.getClassInitTypeAttributes)
+                              (method-ref Supplier
+                                          ^List []
+                                          cs
+                                          Symbol$ClassSymbol/.getInitTypeAttributes))
+                ^Consumer (if isStaticInit
+                              (method-ref Consumer
+                                          [List]
+                                          cs
+                                          Symbol$ClassSymbol/.setClassInitTypeAttributes)
+                              (method-ref Consumer
+                                          [List]
+                                          cs
+                                          Symbol$ClassSymbol/.setInitTypeAttributes))
+                (method-ref Consumer [List] sym Symbol$MethodSymbol/.appendUniqueTypeAttributes))))
+          (when (and (some? pendingVar) (identical? (.getKind pendingVar) ElementKind/FIELD))
+            (.apportionTypeAnnotations this
+                                       tree
+                                       (method-ref
+                                         Supplier
+                                         ^List []
+                                         pendingVar
+                                         Symbol$VarSymbol/.getRawTypeAttributes)
+                                       (method-ref
+                                         Consumer
+                                         [List]
+                                         pendingVar
+                                         Symbol$VarSymbol/.setTypeAttributes)
+                                       (method-ref
+                                         Consumer
+                                         [List]
+                                         sym
+                                         Symbol$MethodSymbol/.appendUniqueTypeAttributes)))))
+      (let [lambdaDecl (.MethodDef make
+                                   (.Modifiers make (.-flags_field sym))
+                                   (.-name sym)
+                                   (.QualIdent make (.-tsym (.getReturnType lambdaType)))
+                                   (List/nil)
+                                   (.-syntheticParams localContext)
+                                   ^List (if (nil? (.getThrownTypes lambdaType))
+                                             (List/nil)
+                                             (.Types make (.getThrownTypes lambdaType)))
+                                   nil
+                                   nil)]
+        (set! (.-sym lambdaDecl) sym)
+        (set! (.-type lambdaDecl) lambdaType)
+        (let [^{:tag (ListBuffer JCTree$JCExpression)} syntheticInits (ListBuffer.)]
+          (when-not (.isStatic sym)
+            (.append syntheticInits
+                     (.makeThis this
+                                (.asType (.enclClass (.-owner sym)))
+                                (.enclClass (.-owner tree)))))
+          (for-each [^Symbol fv (.-capturedVars localContext)]
+            (let [captured_local (.setType (.Ident make fv) (.-type fv))]
+              (.append syntheticInits captured_local)))
+          (let [^{:tag (List JCTree$JCExpression)} indy_args (.translate
+                                                               this
+                                                               (.toList syntheticInits))
+                prevLambdaContext lambdaContext]
+            (try
+              (set! lambdaContext localContext)
+              (set! (.-body lambdaDecl)
+                    (cast JCTree$JCBlock (.translate this (.makeLambdaBody this tree lambdaDecl))))
+              (finally (set! lambdaContext prevLambdaContext)))
+            (let [^:mutable dedupe false]
+              (when (and (and deduplicateLambdas (not debugLinesOrVars))
+                         (not (.isSerializable this tree)))
+                (let [dedupedLambda (DedupedLambda. (.-sym lambdaDecl) (.-body lambdaDecl))
+                      existing (cast DedupedLambda
+                                     (.putIfAbsent
+                                       (.-dedupedLambdas kInfo)
+                                       dedupedLambda
+                                       dedupedLambda))]
+                  (when (some? existing)
+                    (set! sym (.-symbol existing))
+                    (set! dedupe true)
+                    (when verboseDeduplication
+                      (.note log tree (CompilerProperties$Notes/VerboseL2mDeduplicate sym))))))
+              (when-not dedupe (.addMethod kInfo lambdaDecl))
+              (set! (.-result this)
+                    (.makeMetafactoryIndyCall this
+                                              tree
+                                              (.asHandle sym)
+                                              (.-translatedSym localContext)
+                                              indy_args))))))))
+
+  (method ^:private apportionTypeAnnotations ^void [this ^JCTree$JCLambda tree
+                                                    ^{:tag (Supplier (List Attribute$TypeCompound))} source
+                                                    ^{:tag (Consumer (List Attribute$TypeCompound))} owner
+                                                    ^{:tag (Consumer (List Attribute$TypeCompound))} lambda]
+    (let [^{:tag (ListBuffer Attribute$TypeCompound)} ownerTypeAnnos (ListBuffer.)
+          ^{:tag (ListBuffer Attribute$TypeCompound)} lambdaTypeAnnos (ListBuffer.)]
+      (for-each [^Attribute$TypeCompound tc (cast List (.get source))]
+        (when (.hasUnknownPosition tc) (.tryFixPosition tc))
+        (if (identical? (.-onLambda (.-position tc)) tree)
+            (.append lambdaTypeAnnos tc)
+            (.append ownerTypeAnnos tc)))
+      (when (.nonEmpty lambdaTypeAnnos)
+        (.accept owner (.toList ownerTypeAnnos))
+        (.accept lambda (.toList lambdaTypeAnnos)))))
+
+  (method ^:private makeThis ^JCTree$JCIdent [this ^Type type ^Symbol owner]
+    (let [_this (Symbol$VarSymbol. (bit-or (bit-or Flags/PARAMETER Flags/FINAL) Flags/SYNTHETIC)
+                                   (.-_this names)
+                                   type
+                                   owner)]
+      (.Ident make _this)))
+
+  (method ^:public visitReference ^void [this ^JCTree$JCMemberReference tree]
+    (let [refSym (cast Symbol$MethodSymbol (.-sym tree))
+          ^JCTree$JCExpression init (switch (.-kind tree)
+                                      (IMPLICIT_INNER SUPER)
+                                        (.makeThis
+                                          this
+                                          (.asType (.enclClass (.-owner tree)))
+                                          (.enclClass (.-owner tree)))
+                                      BOUND
+                                        (.makeNullCheck
+                                          attr
+                                          (.coerce
+                                            transTypes
+                                            attrEnv
+                                            (.getQualifierExpression tree)
+                                            (.erasure types (.-type (.-owner (.-sym tree))))))
+                                      (UNBOUND STATIC TOPLEVEL ARRAY_CTOR) nil
+                                      (throw (MatchException. nil nil)))
+          ^{:tag (List JCTree$JCExpression)} indy_args (if (nil? init)
+                                                           (List/nil)
+                                                           (.translate this (List/of init)))]
+      (set! (.-result this)
+            (.makeMetafactoryIndyCall this tree (.asHandle refSym) refSym indy_args))))
+
+  (method ^:public visitIdent ^void [this ^JCTree$JCIdent tree]
+    (if (nil? lambdaContext)
+        (.visitIdent super tree)
+        (let [prevPos (.-pos make)]
+          (try
+            (.at make tree)
+            (let [ltree (.translate lambdaContext tree)]
+              (if (some? ltree) (set! (.-result this) ltree) (.visitIdent super tree)))
+            (finally (.at make prevPos))))))
+
+  (method ^:public visitVarDef ^void [this ^JCTree$JCVariableDecl tree]
+    (let [prevPendingVar pendingVar]
+      (try
+        (set! pendingVar (.-sym tree))
+        (if (some? lambdaContext)
+            (do
+              (set! (.-sym tree) (.addLocal lambdaContext (.-sym tree)))
+              (set! (.-init tree) (cast JCTree$JCExpression (.translate this (.-init tree))))
+              (set! (.-result this) tree))
+            (.visitVarDef super tree))
+        (finally (set! pendingVar prevPendingVar)))))
+
+  (method ^:private makeLambdaBody ^JCTree$JCBlock [this ^JCTree$JCLambda tree
+                                                    ^JCTree$JCMethodDecl lambdaMethodDecl]
+    (if (identical? (.getBodyKind tree) LambdaExpressionTree$BodyKind/EXPRESSION)
+        (.makeLambdaExpressionBody this (cast JCTree$JCExpression (.-body tree)) lambdaMethodDecl)
+        (.makeLambdaStatementBody this
+                                  (cast JCTree$JCBlock (.-body tree))
+                                  lambdaMethodDecl
+                                  (.-canCompleteNormally tree))))
+
+  (method ^:private makeLambdaExpressionBody ^JCTree$JCBlock [this ^JCTree$JCExpression expr
+                                                              ^JCTree$JCMethodDecl lambdaMethodDecl]
+    (let [restype (.getReturnType (.-type lambdaMethodDecl))
+          isLambda_void (.hasTag (.-type expr) TypeTag/VOID)
+          isTarget_void (.hasTag restype TypeTag/VOID)
+          isTarget_Void (.isSameType types restype (.-type (.boxedClass types (.-voidType syms))))
+          prevPos (.-pos make)]
+      (try
+        (cond
+          isTarget_void
+            (let [^JCTree$JCStatement stat (.Exec (.at make expr) expr)]
+              (.Block make 0 (List/of stat)))
+          (and isLambda_void isTarget_Void)
+            (let [^{:tag (ListBuffer JCTree$JCStatement)} stats (ListBuffer.)]
+              (.append stats (.Exec (.at make expr) expr))
+              (.append stats
+                       (.Return make (.setType (.Literal make TypeTag/BOT nil) (.-botType syms))))
+              (.Block make 0 (.toList stats)))
+          :else (.Block (.at make expr) 0 (List/of (.Return make expr))))
+        (finally (.at make prevPos)))))
+
+  (method ^:private makeLambdaStatementBody ^JCTree$JCBlock [this ^JCTree$JCBlock block
+                                                             ^:final ^JCTree$JCMethodDecl lambdaMethodDecl
+                                                             ^boolean completeNormally]
+    (let [restype (.getReturnType (.-type lambdaMethodDecl))
+          isTarget_void (.hasTag restype TypeTag/VOID)
+          isTarget_Void (.isSameType types restype (.-type (.boxedClass types (.-voidType syms))))]
+      (letclass [(LambdaBodyTranslator
+                   :extends TreeTranslator
+
+                   (method ^:public visitClassDef ^void [this ^JCTree$JCClassDecl tree]
+                     (set! (.-result this) tree))
+
+                   (method ^:public visitLambda ^void [this ^JCTree$JCLambda tree]
+                     (set! (.-result this) tree))
+
+                   (method ^:public visitReturn ^void [this ^JCTree$JCReturn tree]
+                     (let [isLambda_void (nil? (.-expr tree))]
+                       (if (and isTarget_void (not isLambda_void))
+                           (let [loc (Symbol$VarSymbol.
+                                       Flags/SYNTHETIC
+                                       (.fromString names "$loc")
+                                       (.-type (.-expr tree))
+                                       (.-sym lambdaMethodDecl))
+                                 varDef (.VarDef make loc (.-expr tree))]
+                             (set! (.-result this)
+                                   (.Block make 0 (List/of varDef (.Return make nil)))))
+                           (set! (.-result this) tree)))))]
+        (let [trans_block (cast JCTree$JCBlock (.translate (LambdaBodyTranslator.) block))]
+          (when (and completeNormally isTarget_Void)
+            (set! (.-stats trans_block)
+                  (.append (.-stats trans_block)
+                           (.Return make
+                                    (.setType (.Literal make TypeTag/BOT nil) (.-botType syms))))))
+          trans_block))))
+
+  (method ^:private makeDeserializeMethod ^JCTree$JCMethodDecl [this]
+    (let [^{:tag (ListBuffer JCTree$JCCase)} cases (ListBuffer.)
+          ^{:tag (ListBuffer JCTree$JCBreak)} breaks (ListBuffer.)]
+      (for-each [^{:tag (Map$Entry String (ListBuffer JCTree$JCStatement))} entry (.entrySet
+                                                                                    (.-deserializeCases
+                                                                                      kInfo))]
+        (let [br (.Break make nil)]
+          (.add breaks br)
+          (let [^{:tag (List JCTree$JCStatement)} stmts (.toList
+                                                          (.append
+                                                            (cast ListBuffer (.getValue entry))
+                                                            br))]
+            (.add cases
+                  (.Case make
+                         JCTree$JCCase/STATEMENT
+                         (List/of (.ConstantCaseLabel make (.Literal make (.getKey entry))))
+                         nil
+                         stmts
+                         nil)))))
+      (let [sw (.Switch make
+                        (.deserGetter this "getImplMethodName" (.-stringType syms))
+                        (.toList cases))]
+        (for-each [^JCTree$JCBreak br breaks] (set! (.-target br) sw))
+        (let [body (.Block
+                     make
+                     0
+                     (List/of
+                       sw
+                       (.Throw make
+                               (.makeNewClass this
+                                              (.-illegalArgumentExceptionType syms)
+                                              (List/of
+                                                (.Literal make "Invalid lambda deserialization"))))))
+              deser (.MethodDef make
+                                (.Modifiers make (.flags (.-deserMethodSym kInfo)))
+                                (.-deserializeLambda names)
+                                (.QualIdent make (.-tsym (.getReturnType (.-deserMethodSym kInfo))))
+                                (List/nil)
+                                (List/of (.VarDef make (.-deserParamSym kInfo) nil))
+                                (List/nil)
+                                body
+                                nil)]
+          (set! (.-sym deser) (.-deserMethodSym kInfo))
+          (set! (.-type deser) (.-type (.-deserMethodSym kInfo)))
+          (.translateMethod lower attrEnv deser make)))))
+
+  (method makeNewClass ^JCTree$JCNewClass [this ^Type ctype ^{:tag (List JCTree$JCExpression)} args
+                                           ^Symbol cons]
+    (let [tree (.NewClass make nil nil (.QualIdent make (.-tsym ctype)) args nil)]
+      (set! (.-constructor tree) cons)
+      (set! (.-type tree) ctype)
+      tree))
+
+  (method makeNewClass ^JCTree$JCNewClass [this ^Type ctype ^{:tag (List JCTree$JCExpression)} args]
+    (.makeNewClass this
+                   ctype
+                   args
+                   (.resolveConstructor rs nil attrEnv ctype (TreeInfo/types args) (List/nil))))
+
+  (method ^:private addDeserializationCase ^void [this ^:mutable ^Symbol$MethodHandleSymbol refSym
+                                                  ^Type targetType ^Symbol$MethodSymbol samSym
+                                                  ^JCDiagnostic$DiagnosticPosition pos
+                                                  ^{:tag (List PoolConstant$LoadableConstant)} staticArgs
+                                                  ^Type$MethodType indyType]
+    (let [functionalInterfaceClass (.classSig this targetType)
+          functionalInterfaceMethodName (.toString (.getSimpleName samSym))
+          functionalInterfaceMethodSignature (.typeSig this (.erasure types (.-type samSym)))
+          baseMethod (.baseSymbol refSym)
+          origMethod (.baseSymbol baseMethod)]
+      (when (and (not (identical? baseMethod origMethod))
+                 (identical? (.-owner origMethod) (.-tsym (.-objectType syms))))
+        (set! refSym (.asHandle (cast Symbol$MethodSymbol origMethod))))
+      (let [implClass (.classSig this (.erasure types (.-type (.-owner refSym))))
+            implMethodName (.toString (.getQualifiedName refSym))
+            implMethodSignature (.typeSig this (.erasure types (.-type refSym)))
+            kindTest (.eqTest this
+                              (.-intType syms)
+                              (.deserGetter this "getImplMethodKind" (.-intType syms))
+                              (.Literal make (.referenceKind refSym)))
+            ^{:tag (ListBuffer JCTree$JCExpression)} serArgs (ListBuffer.)
+            ^:mutable ^int i 0]
+        (for-each [^Type t (.getParameterTypes indyType)]
+          (let [^{:tag (List JCTree$JCExpression)} indexAsArg (.toList
+                                                                (.append
+                                                                  (ListBuffer.)
+                                                                  (.Literal make i)))
+                ^{:tag (List Type)} argTypes (.toList (.append (ListBuffer.) (.-intType syms)))]
+            (.add serArgs
+                  (.TypeCast make
+                             (.erasure types t)
+                             (.deserGetter this
+                                           "getCapturedArg"
+                                           (.-objectType syms)
+                                           argTypes
+                                           indexAsArg)))
+            (set! i (unchecked-inc-int i))))
+        (let [^JCTree$JCStatement stmt (.If make
+                                            (.deserTest
+                                              this
+                                              (.deserTest
+                                                this
+                                                (.deserTest
+                                                  this
+                                                  (.deserTest
+                                                    this
+                                                    (.deserTest
+                                                      this
+                                                      kindTest
+                                                      "getFunctionalInterfaceClass"
+                                                      functionalInterfaceClass)
+                                                    "getFunctionalInterfaceMethodName"
+                                                    functionalInterfaceMethodName)
+                                                  "getFunctionalInterfaceMethodSignature"
+                                                  functionalInterfaceMethodSignature)
+                                                "getImplClass"
+                                                implClass)
+                                              "getImplMethodSignature"
+                                              implMethodSignature)
+                                            (.Return
+                                              make
+                                              (.makeIndyCall
+                                                this
+                                                pos
+                                                (.-lambdaMetafactory syms)
+                                                (.-altMetafactory names)
+                                                staticArgs
+                                                indyType
+                                                (.toList serArgs)
+                                                (.-name samSym)))
+                                            nil)
+              ^:mutable ^{:tag (ListBuffer JCTree$JCStatement)} stmts (cast
+                                                                        ListBuffer
+                                                                        (.get
+                                                                          (.-deserializeCases kInfo)
+                                                                          implMethodName))]
+          (when (nil? stmts)
+            (set! stmts (ListBuffer.))
+            (.put (.-deserializeCases kInfo) implMethodName stmts))
+          (.append stmts stmt)))))
+
+  (method ^:private eqTest ^JCTree$JCExpression [this ^Type argType ^JCTree$JCExpression arg1
+                                                 ^JCTree$JCExpression arg2]
+    (let [testExpr (.Binary make JCTree$Tag/EQ arg1 arg2)]
+      (set! (.-operator testExpr) (.resolveBinary operators testExpr JCTree$Tag/EQ argType argType))
+      (.setType testExpr (.-booleanType syms))
+      testExpr))
+
+  (method ^:private deserTest ^JCTree$JCExpression [this ^JCTree$JCExpression prev ^String func
+                                                    ^String lit]
+    (let [eqmt (Type$MethodType. (List/of (.-objectType syms))
+                                 (.-booleanType syms)
+                                 (List/nil)
+                                 (.-methodClass syms))
+          eqsym (.resolveQualifiedMethod rs
+                                         nil
+                                         attrEnv
+                                         (.-objectType syms)
+                                         (.-equals names)
+                                         (List/of (.-objectType syms))
+                                         (List/nil))
+          eqtest (.Apply make
+                         (List/nil)
+                         (.setType (.Select make (.deserGetter this func (.-stringType syms)) eqsym)
+                                   eqmt)
+                         (List/of (.Literal make lit)))]
+      (.setType eqtest (.-booleanType syms))
+      (let [compound (.Binary make JCTree$Tag/AND prev eqtest)]
+        (set! (.-operator compound)
+              (.resolveBinary operators
+                              compound
+                              JCTree$Tag/AND
+                              (.-booleanType syms)
+                              (.-booleanType syms)))
+        (.setType compound (.-booleanType syms))
+        compound)))
+
+  (method ^:private deserGetter ^JCTree$JCExpression [this ^String func ^Type type]
+    (.deserGetter this func type (List/nil) (List/nil)))
+
+  (method ^:private deserGetter ^JCTree$JCExpression [this ^String func ^Type type
+                                                      ^{:tag (List Type)} argTypes
+                                                      ^{:tag (List JCTree$JCExpression)} args]
+    (let [getmt (Type$MethodType. argTypes type (List/nil) (.-methodClass syms))
+          getsym (.resolveQualifiedMethod rs
+                                          nil
+                                          attrEnv
+                                          (.-serializedLambdaType syms)
+                                          (.fromString names func)
+                                          argTypes
+                                          (List/nil))]
+      (.setType (.Apply make
+                        (List/nil)
+                        (.setType (.Select make
+                                           (.setType
+                                             (.Ident make (.-deserParamSym kInfo))
+                                             (.-serializedLambdaType syms))
+                                           getsym)
+                                  getmt)
+                        args)
+                type)))
+
+  (method ^:private makePrivateSyntheticMethod ^Symbol$MethodSymbol [this ^long flags ^Name name
+                                                                     ^Type type ^Symbol owner]
+    (Symbol$MethodSymbol. (bit-or (bit-or flags Flags/SYNTHETIC) Flags/PRIVATE) name type owner))
+
+  (method ^:private typeToMethodType ^Type$MethodType [this ^Type mt]
+    (let [type (.erasure types mt)]
+      (Type$MethodType. (.getParameterTypes type)
+                        (.getReturnType type)
+                        (.getThrownTypes type)
+                        (.-methodClass syms))))
+
+  (method ^:private makeMetafactoryIndyCall ^JCTree$JCExpression [this
+                                                                  ^JCTree$JCFunctionalExpression tree
+                                                                  ^Symbol$MethodHandleSymbol refSym
+                                                                  ^Symbol$MethodSymbol nonDedupedRefSym
+                                                                  ^{:tag (List JCTree$JCExpression)} indy_args]
+    (let [samSym (cast Symbol$MethodSymbol (.findDescriptorSymbol types (.-tsym (.-target tree))))
+          ^:mutable ^{:tag (List PoolConstant$LoadableConstant)} staticArgs (List/of
+                                                                              (.typeToMethodType
+                                                                                this
+                                                                                (.-type samSym))
+                                                                              (.asHandle refSym)
+                                                                              (.typeToMethodType
+                                                                                this
+                                                                                (.getDescriptorType
+                                                                                  tree
+                                                                                  types)))
+          ^{:tag (ListBuffer Type)} indy_args_types (ListBuffer.)]
+      (for-each [^JCTree$JCExpression arg indy_args] (.append indy_args_types (.-type arg)))
+      (let [indyType (Type$MethodType. (.toList indy_args_types)
+                                       (.-type tree)
+                                       (List/nil)
+                                       (.-methodClass syms))
+            ^{:tag (List Symbol)} bridges (.bridges this tree)
+            isSerializable (.isSerializable this tree)
+            needsAltMetafactory (or (or (.isIntersection (.-target tree)) isSerializable)
+                                    (> (.length bridges) 1))]
+        (.dumpStats this tree needsAltMetafactory nonDedupedRefSym)
+        (let [^Name metafactoryName (if needsAltMetafactory
+                                        (.-altMetafactory names)
+                                        (.-metafactory names))]
+          (when needsAltMetafactory
+            (let [^{:tag (ListBuffer Type)} markers (ListBuffer.)
+                  ^{:tag (List Type)} targets (if (.isIntersection (.-target tree))
+                                                  (.directSupertypes types (.-target tree))
+                                                  (List/nil))]
+              (for-each [^:mutable ^Type t targets]
+                (set! t (.erasure types t))
+                (when (and (and (not (identical? (.-tsym t) (.-tsym (.-serializableType syms))))
+                                (not (identical? (.-tsym t) (.-tsym (.-type tree)))))
+                           (not (identical? (.-tsym t) (.-tsym (.-objectType syms)))))
+                  (.append markers t)))
+              (let [^:mutable ^int flags (if isSerializable FLAG_SERIALIZABLE 0)
+                    hasMarkers (.nonEmpty markers)
+                    hasBridges (.nonEmpty bridges)]
+                (when hasMarkers (set! flags (bit-or-int flags FLAG_MARKERS)))
+                (when hasBridges (set! flags (bit-or-int flags FLAG_BRIDGES)))
+                (set! staticArgs (.append staticArgs (PoolConstant$LoadableConstant/Int flags)))
+                (when hasMarkers
+                  (set! staticArgs
+                        (.append staticArgs (PoolConstant$LoadableConstant/Int (.length markers))))
+                  (set!
+                    staticArgs
+                    (.appendList staticArgs
+                                 (List/convert PoolConstant$LoadableConstant (.toList markers)))))
+                (when hasBridges
+                  (set! staticArgs
+                        (.append staticArgs
+                                 (PoolConstant$LoadableConstant/Int
+                                   (unchecked-subtract-int (.length bridges) 1))))
+                  (for-each [^Symbol s bridges]
+                    (let [s_erasure (.erasure s types)]
+                      (when-not (.isSameType types s_erasure (.erasure samSym types))
+                        (set! staticArgs
+                              (.append staticArgs (cast Type$MethodType (.erasure s types))))))))
+                (when isSerializable
+                  (let [prevPos (.-pos make)]
+                    (try
+                      (.at make (.-clazz kInfo))
+                      (.addDeserializationCase this
+                                               refSym
+                                               (.-type tree)
+                                               samSym
+                                               tree
+                                               staticArgs
+                                               indyType)
+                      (finally (.at make prevPos))))))))
+          (.makeIndyCall this
+                         tree
+                         (.-lambdaMetafactory syms)
+                         metafactoryName
+                         staticArgs
+                         indyType
+                         indy_args
+                         (.-name samSym))))))
+
+  (method ^:private makeIndyCall ^JCTree$JCExpression [this ^JCDiagnostic$DiagnosticPosition pos
+                                                       ^Type site ^Name bsmName
+                                                       ^{:tag (List PoolConstant$LoadableConstant)} staticArgs
+                                                       ^Type$MethodType indyType
+                                                       ^{:tag (List JCTree$JCExpression)} indyArgs
+                                                       ^Name methName]
+    (let [prevPos (.-pos make)]
+      (try
+        (.at make pos)
+        (let [^{:tag (List Type)} bsm_staticArgs (.appendList
+                                                   (List/of
+                                                     (.-methodHandleLookupType syms)
+                                                     (.-stringType syms)
+                                                     (.-methodTypeType syms))
+                                                   (.map
+                                                     staticArgs
+                                                     (method-ref
+                                                       Function
+                                                       ^Type [PoolConstant$LoadableConstant]
+                                                       types
+                                                       Types/.constantType)))
+              bsm (.resolveInternalMethod rs pos attrEnv site bsmName bsm_staticArgs (List/nil))
+              dynSym (Symbol$DynamicMethodSymbol.
+                       methName
+                       (.-noSymbol syms)
+                       (.asHandle bsm)
+                       indyType
+                       (cast PoolConstant$LoadableConstant/1
+                             (.toArray staticArgs
+                                       (new PoolConstant$LoadableConstant/1 (.length staticArgs)))))
+              qualifier (.Select make (.QualIdent make (.-tsym site)) bsmName)
+              existing (cast Symbol$DynamicMethodSymbol
+                             (.putIfAbsent (.-dynMethSyms kInfo) (.poolKey dynSym types) dynSym))]
+          (set! (.-sym qualifier) (if (some? existing) ^Symbol existing ^Symbol dynSym))
+          (set! (.-type qualifier) (.getReturnType indyType))
+          (let [proxyCall (.Apply make (List/nil) qualifier indyArgs)]
+            (set! (.-type proxyCall) (.getReturnType indyType))
+            proxyCall))
+        (finally (.at make prevPos)))))
+
+  (method bridges ^{:tag (List Symbol)} [this ^JCTree$JCFunctionalExpression tree]
+    (let [csym (.makeFunctionalInterfaceClass types
+                                              attrEnv
+                                              (.-empty names)
+                                              (.-target tree)
+                                              (bit-or-int Flags/ABSTRACT Flags/INTERFACE))]
+      (.functionalInterfaceBridges types csym)))
+
+  (method isSerializable ^boolean [this ^JCTree$JCFunctionalExpression tree]
+    (if forceSerializable
+        true
+        (some? (.asSuper types (.-target tree) (.-tsym (.-serializableType syms))))))
+
+  (method dumpStats ^void [this ^JCTree$JCFunctionalExpression tree ^boolean needsAltMetafactory
+                           ^Symbol sym]
+    (when dumpLambdaToMethodStats
+      (if-instance [^JCTree$JCLambda lambda tree]
+        (.note log
+               tree
+               (.noteKey diags
+                         ^String (if (.-wasMethodReference lambda) "mref.stat.1" "lambda.stat")
+                         needsAltMetafactory
+                         sym))
+        (when (instance? JCTree$JCMemberReference tree)
+          (.note log tree (CompilerProperties$Notes/MrefStat needsAltMetafactory nil))))))
+
+  (defclass LambdaTranslationContext
+    (field ^:final ^JCTree$JCFunctionalExpression tree)
+
+    (field ^:final ^{:tag (Map Symbol$VarSymbol Symbol$VarSymbol)} lambdaProxies (HashMap.))
+
+    (field ^:final ^{:tag (List Symbol$VarSymbol)} capturedVars)
+
+    (field ^:final ^Symbol$MethodSymbol translatedSym)
+
+    (field ^:final ^{:tag (List JCTree$JCVariableDecl)} syntheticParams)
+
+    (constructor [this ^JCTree$JCLambda tree]
+      (set! (.-tree this) tree)
+      (let [owner (.-owner tree)]
+        (if (identical? (.-kind owner) Kinds$Kind/MTH)
+            (let [originalOwner (cast Symbol$MethodSymbol (.clone owner (.-owner owner)))]
+              (set! (.-translatedSym this)
+                    (anon Symbol$MethodSymbol [0 nil nil (.enclClass owner)]
+                      (method ^:public originalEnclosingMethod ^Symbol$MethodSymbol [this]
+                        originalOwner))))
+            (set! (.-translatedSym this)
+                  (.makePrivateSyntheticMethod LambdaToMethod/this 0 nil nil (.enclClass owner))))
+        (let [^{:tag (ListBuffer JCTree$JCVariableDecl)} params (ListBuffer.)
+              ^{:tag (ListBuffer Symbol$VarSymbol)} parameterSymbols (ListBuffer.)
+              captureScanner (LambdaCaptureScanner. tree)]
+          (set! capturedVars (.analyzeCaptures captureScanner))
+          (for-each [^Symbol$VarSymbol captured capturedVars]
+            (let [trans (.addSymbol this captured LambdaSymbolKind/CAPTURED_VAR)]
+              (.append params (.VarDef make trans nil))
+              (.add parameterSymbols trans)))
+          (for-each [^JCTree$JCVariableDecl param (.-params tree)]
+            (let [trans (.addSymbol this (.-sym param) LambdaSymbolKind/PARAM)]
+              (.append params (.VarDef make trans nil))
+              (.add parameterSymbols trans)))
+          (set! syntheticParams (.toList params))
+          (.completeLambdaMethodSymbol this owner (.-capturesThis captureScanner))
+          (set! (.-params translatedSym) (.toList parameterSymbols)))))
+
+    (method completeLambdaMethodSymbol ^void [this ^Symbol owner ^boolean thisReferenced]
+      (let [inInterface (.isInterface (.enclClass owner))
+            ^Name name (if (.isSerializable LambdaToMethod/this tree)
+                           (.serializedLambdaName this owner)
+                           (.lambdaName this owner))
+            type (.createMethodTypeWithParameters
+                   types
+                   (.generatedLambdaSig this)
+                   (TreeInfo/types syntheticParams))
+            flags (bit-or (bit-or (bit-or (bit-or
+                                            (bit-or Flags/SYNTHETIC Flags/LAMBDA_METHOD)
+                                            (bit-and (.-flags_field owner) Flags/STRICTFP))
+                                          (bit-and (.-flags_field (.-owner owner)) Flags/STRICTFP))
+                                  Flags/PRIVATE)
+                          (if thisReferenced (if inInterface Flags/DEFAULT 0) (long Flags/STATIC)))]
+        (set! (.-type translatedSym) type)
+        (set! (.-name translatedSym) name)
+        (set! (.-flags_field translatedSym) flags)))
+
+    (method ^:private serializedLambdaDisambiguation ^String [this ^Symbol owner]
+      (let [buf (StringBuilder.)]
+        (Assert/check (or (some? (.-type owner)) (some? lambdaContext)))
+        (when (some? (.-type owner))
+          (.append buf (.typeSig LambdaToMethod/this (.-type owner) true))
+          (.append buf ":"))
+        (.append buf (.flatName (.-owner (.findDescriptorSymbol types (.-tsym (.-type tree))))))
+        (.append buf " ")
+        (when (some? pendingVar) (.append buf (.flatName pendingVar)) (.append buf "="))
+        (for-each [^Symbol fv capturedVars]
+          (when-not (identical? fv owner)
+            (.append buf (.typeSig LambdaToMethod/this (.-type fv) true))
+            (.append buf " ")
+            (.append buf (.flatName fv))
+            (.append buf ",")))
+        (.toString buf)))
+
+    (method ^:private lambdaName ^Name [this ^Symbol owner]
+      (let [buf (StringBuilder.)]
+        (.append buf (.-lambda names))
+        (.append buf (.syntheticMethodNameComponent this owner))
+        (.append buf "$")
+        (.append buf (.syntheticNameIndex kInfo buf 0))
+        (.fromString names (.toString buf))))
+
+    (method syntheticMethodNameComponent ^String [this ^Symbol owner]
+      (let [ownerFlags (.flags owner)]
+        (cond
+          (not (== (bit-and ownerFlags Flags/BLOCK) 0))
+            (if (not (== (bit-and ownerFlags Flags/STATIC) 0)) "static" "new")
+          (.isConstructor owner) "new"
+          :else (.toString (.-name owner)))))
+
+    (method ^:private serializedLambdaName ^Name [this ^Symbol owner]
+      (let [buf (StringBuilder.)]
+        (.append buf (.-lambda names))
+        (.append buf (.syntheticMethodNameComponent this owner))
+        (.append buf \$)
+        (let [disam (.serializedLambdaDisambiguation this owner)]
+          (.append buf (Integer/toHexString (.hashCode disam)))
+          (.append buf \$)
+          (.append buf (.syntheticNameIndex kInfo buf 1))
+          (let [result (.toString buf)] (.fromString names result)))))
+
+    (method translate ^Symbol$VarSymbol [this ^:final ^Symbol$VarSymbol sym ^LambdaSymbolKind skind]
+      (let [^:mutable ^Symbol$VarSymbol ret nil
+            ^:mutable propagateAnnos true]
+        (switch skind
+          CAPTURED_VAR
+            (let [^Name name (if (not (== (bit-and (.flags sym) Flags/LOCAL_CAPTURE_FIELD) 0))
+                                 (.-name (.baseSymbol sym))
+                                 (.-name sym))]
+              (set! ret
+                    (Symbol$VarSymbol.
+                      (bit-or (bit-or-int Flags/SYNTHETIC Flags/FINAL) Flags/PARAMETER)
+                      name
+                      (.erasure types (.-type sym))
+                      translatedSym))
+              (set! propagateAnnos false))
+          LOCAL_VAR
+            (do
+              (set! ret
+                    (Symbol$VarSymbol. (bit-and (.flags sym) Flags/FINAL)
+                                       (.-name sym)
+                                       (.-type sym)
+                                       translatedSym))
+              (set! (.-pos ret) (.-pos sym))
+              (when (.isExceptionParameter sym) (.setData ret ElementKind/EXCEPTION_PARAMETER)))
+          PARAM
+            (do
+              (set! ret
+                    (Symbol$VarSymbol. (bit-or (bit-and (.flags sym) Flags/FINAL) Flags/PARAMETER)
+                                       (.-name sym)
+                                       (.erasure types (.-type sym))
+                                       translatedSym))
+              (set! (.-pos ret) (.-pos sym)))
+          (do (Assert/error (.name skind)) (throw (AssertionError.))))
+        (when (and (not (identical? ret sym)) propagateAnnos)
+          (.setDeclarationAttributes ret (.getRawAttributes sym))
+          (.setTypeAttributes ret (.getRawTypeAttributes sym)))
+        ret))
+
+    (method addLocal ^Symbol$VarSymbol [this ^Symbol$VarSymbol sym]
+      (.addSymbol this sym LambdaSymbolKind/LOCAL_VAR))
+
+    (method ^:private addSymbol ^Symbol$VarSymbol [this ^Symbol$VarSymbol sym
+                                                   ^LambdaSymbolKind skind]
+      (cast Symbol$VarSymbol
+            (.computeIfAbsent lambdaProxies
+                              sym
+                              (lambda Function ^Symbol$VarSymbol [^Symbol$VarSymbol s]
+                                (.translate this s skind)))))
+
+    (method translate ^JCTree [this ^JCTree$JCIdent lambdaIdent]
+      (let [tSym (cast Symbol (.get lambdaProxies (.-sym lambdaIdent)))]
+        (when (some? tSym) ^JCTree (.setType (.Ident make tSym) (.-type lambdaIdent)))))
+
+    (method generatedLambdaSig ^Type [this]
+      (.erasure types (.getDescriptorType tree types)))
+
+    (defclass LambdaCaptureScanner
+      :extends CaptureScanner
+
+      (field ^boolean capturesThis)
+
+      (field ^{:tag (Set Symbol$ClassSymbol)} seenClasses (HashSet.))
+
+      (constructor [this ^JCTree$JCLambda ownerTree] (super. ownerTree))
+
+      (method ^:public visitClassDef ^void [this ^JCTree$JCClassDecl tree]
+        (.add seenClasses (.-sym tree))
+        (.visitClassDef super tree))
+
+      (method ^:public visitIdent ^void [this ^JCTree$JCIdent tree]
+        (if (and (and (and (not (.isStatic (.-sym tree)))
+                           (identical? (.-kind (.-owner (.-sym tree))) Kinds$Kind/TYP))
+                      (or (identical? (.-kind (.-sym tree)) Kinds$Kind/VAR)
+                          (identical? (.-kind (.-sym tree)) Kinds$Kind/MTH)))
+                 (not (.contains seenClasses (.-owner (.-sym tree)))))
+            (if (not (== (bit-and (.flags (.-sym tree)) Flags/LOCAL_CAPTURE_FIELD) 0))
+                (.addFreeVar this (cast Symbol$VarSymbol (.-sym tree)))
+                (set! capturesThis true))
+            (.visitIdent super tree)))
+
+      (method ^:public visitSelect ^void [this ^JCTree$JCFieldAccess tree]
+        (when (and (and (identical? (.-kind (.-sym tree)) Kinds$Kind/VAR)
+                        (or (identical? (.-name (.-sym tree)) (.-_this names))
+                            (identical? (.-name (.-sym tree)) (.-_super names))))
+                   (not (.contains seenClasses (.-tsym (.-type (.-sym tree))))))
+          (set! capturesThis true))
+        (.visitSelect super tree))
+
+      (method ^:public visitAnnotation ^void [this ^JCTree$JCAnnotation tree]))
+
+    (defclass ^:enum LambdaSymbolKind
+      (constants PARAM LOCAL_VAR CAPTURED_VAR)))
+
+  (method ^:private typeSig ^String [this ^Type type]
+    (.typeSig this type false))
+
+  (method ^:private typeSig ^String [this ^Type type ^boolean allowIllegalSignature]
+    (try
+      (let [sg (L2MSignatureGenerator. allowIllegalSignature)]
+        (.assembleSig sg type)
+        (.toString sg))
+      (catch Types$SignatureGenerator$InvalidSignatureException ex
+        (let [^Symbol c (.-sym (.-enclClass attrEnv))]
+          (.error log
+                  (CompilerProperties$Errors/CannotGenerateClass
+                    c
+                    (CompilerProperties$Fragments/IllegalSignature c (.type ex))))
+          "<ERRONEOUS>"))))
+
+  (method ^:private classSig ^String [this ^Type type]
+    (try
+      (let [sg (L2MSignatureGenerator. false)] (.assembleClassSig sg type) (.toString sg))
+      (catch Types$SignatureGenerator$InvalidSignatureException ex
+        (let [^Symbol c (.-sym (.-enclClass attrEnv))]
+          (.error log
+                  (CompilerProperties$Errors/CannotGenerateClass
+                    c
+                    (CompilerProperties$Fragments/IllegalSignature c (.type ex))))
+          "<ERRONEOUS>"))))
+
+  (defclass ^:private L2MSignatureGenerator
+    :extends Types$SignatureGenerator
+
+    (field ^StringBuilder sb (StringBuilder.))
+
+    (field ^boolean allowIllegalSignatures)
+
+    (constructor [this ^boolean allowIllegalSignatures]
+      (.super types)
+      (set! (.-allowIllegalSignatures this) allowIllegalSignatures))
+
+    (method ^:protected reportIllegalSignature ^void [this ^Type t]
+      (when-not allowIllegalSignatures (.reportIllegalSignature super t)))
+
+    (method ^:protected append ^void [this ^char ch] (.append sb ch))
+
+    (method ^:protected append ^void [this ^byte/1 ba]
+      (let [^:mutable ^Name name nil]
+        (try
+          (set! name (.fromUtf names ba))
+          (catch InvalidUtfException e (throw (AssertionError. e))))
+        (.append sb (.toString name))))
+
+    (method ^:protected append ^void [this ^Name name]
+      (.append sb (.toString name)))
+
+    (method ^:public toString ^String [this] (.toString sb))))

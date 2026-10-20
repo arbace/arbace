@@ -10,9 +10,9 @@
 SHELL := /bin/bash
 CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
-.PHONY: help seed-check stage0 seed-verify reseed build build-tests smoke repl fixpoint goi-table goi-table-size \
+.PHONY: help seed-check stage0 seed-verify reseed build build-tests build-java smoke repl fixpoint goi-table goi-table-size \
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild mac-bundle arm64-vm-check arm64-vm-goi \
-  gate gate-full suite oracle diffcheck generated-check verify jdk-verify edge-verify fixtures-verify tamago-verify \
+  gate gate-full suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-roundtrip repr-java-text repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-divergences alpine-check clean \
   check-makefile
@@ -37,6 +37,8 @@ build: ## the executables, amd64 and arm64 (bin/arbace-go --build)
 	bin/arbace-go --build
 build-tests: ## the test build with the suite's Java fixtures (bin/arbace-go --build-tests)
 	bin/arbace-go --build-tests
+build-java: ## javac's tool build: the program with javac's forms, jdk/javac (bin/arbace-go --build-java)
+	bin/arbace-go --build-java
 smoke: ## the smoke test (bin/arbace-go --smoke)
 	bin/arbace-go --smoke
 repl: ## Arbace's REPL (bin/arbace-go, built first when needed)
@@ -89,7 +91,7 @@ generated-check: ## arbace/lang/go's generated variants (CompilerNodes.ae, Compi
 	bin/generated-check
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
-VERIFY := jdk-verify edge-verify fixtures-verify tamago-verify toolchain-verify \
+VERIFY := jdk-verify edge-verify javac-verify fixtures-verify tamago-verify toolchain-verify \
   box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip repr-java-text \
   repr-clojure-roundtrip
 verify: $(VERIFY) ## all of the below, one after another
@@ -97,6 +99,9 @@ jdk-verify: ## jdk/'s forms by repr/java, on the frozen JVM (bin/jrt-convert ver
 	bin/jrt-convert verify
 edge-verify: ## j2g's edge, on the frozen JVM (bin/j2g-edge verify)
 	bin/j2g-edge verify
+javac-verify: ## jdk/javac, javac's forms and edge, on the frozen JVM; j2g translates javac's world (bin/javac-vendor verify, check)
+	bin/javac-vendor verify
+	bin/javac-vendor check
 fixtures-verify: ## the suite's Java fixtures, on the frozen JVM (bin/clojure-tests --java-fixtures verify)
 	bin/clojure-tests --java-fixtures verify
 tamago-verify: ## tamago/goroot and goos; the guest from them (bin/tamago-vendor verify, check)

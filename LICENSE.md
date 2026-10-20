@@ -203,8 +203,25 @@ covers what.
     License, the Eclipse Public License 1.0).
   - `jdk/sources.txt` and `jdk/provenance.edn` (lists made by `bin/jrt-convert`) and
     `jdk/README.md`: Arbace's own, under the Eclipse Public License 1.0.
+  - `jdk/javac/` (javac's forms, doc/classes/JAVA-FRONTEND-SURVEY.md, JN2; `bin/javac-vendor`
+    makes them and `bin/javac-vendor verify` proves them, from https://github.com/openjdk/jdk26u
+    at `baf63fb`): `jdk/javac/forms/`, Java forms converted by repr/java from jdk26u's
+    `src/jdk.compiler/share/classes`, `src/java.compiler/share/classes`,
+    `src/jdk.internal.opt/share/classes/jdk/internal/opt/CommandLine.java`, the sources the JDK
+    build generates for jdk.compiler (its `support/gensrc/jdk.compiler`) and 19 files of
+    `src/java.base/share/classes` (`jdk/javac/sources.txt` lists them, and each form file's
+    first line names its source): Copyright (c) Oracle and/or its affiliates, under the GNU
+    General Public License version 2 with the Classpath Exception (text below); the form files
+    converted from jrt's own Java for javac's world (the first line names
+    `overlay/jdk/javac/...`) are under `overlay/jdk/`'s licenses (the next item).
+    `jdk/javac/edge.edn` (the edge of javac's world beyond `jdk/edge.edn`'s, recorded by
+    `bin/javac-vendor` on the frozen JVM): the declarations of the JDK's classes, as
+    `jdk/edge.edn`'s, under the GNU General Public License version 2 with the Classpath
+    Exception. `jdk/javac/sources.txt` and `jdk/javac/provenance.edn`: Arbace's own, under the
+    Eclipse Public License 1.0.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
-  "Phase 2C"), written for Arbace in place of jdk26u's files of the same names (from their
+  "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
+  JN2), written for Arbace in place of jdk26u's files of the same names (from their
   documented APIs, without their code): Arbace's own, under the Eclipse Public License 1.0. The
   jdk26u files that bin/jrt-convert translates are read from the jdk26u checkout, not kept here;
   their Java forms are, in `jdk/forms/` (above).

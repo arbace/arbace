@@ -1,0 +1,199 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/parser/ReferenceParser.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.parser)
+
+(import '(com.sun.source.tree AnnotatedTypeTree Tree)
+        '(com.sun.tools.javac.tree JCTree JCTree$JCExpression)
+        '(com.sun.tools.javac.util JCDiagnostic List ListBuffer Log$DeferredDiagnosticHandler Name))
+
+(defclass ^:public ReferenceParser
+  (defclass ^:public ^:enum Mode
+    (constants MEMBER_DISALLOWED MEMBER_OPTIONAL MEMBER_REQUIRED))
+
+  (defclass ^:public ^:static Reference
+    (field ^:public ^:final ^JCTree$JCExpression moduleName)
+
+    (field ^:public ^:final ^JCTree qualExpr)
+
+    (field ^:public ^:final ^Name member)
+
+    (field ^:public ^:final ^{:tag (List JCTree)} paramTypes)
+
+    (constructor [this ^JCTree$JCExpression moduleName ^JCTree qualExpr ^Name member
+                  ^{:tag (List JCTree)} paramTypes]
+      (set! (.-moduleName this) moduleName)
+      (set! (.-qualExpr this) qualExpr)
+      (set! (.-member this) member)
+      (set! (.-paramTypes this) paramTypes)))
+
+  (defclass ^:public ^:static ParseException
+    :extends Exception
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+    (field ^:final ^int pos)
+
+    (constructor [this ^int pos ^String message]
+      (super. message)
+      (set! (.-pos this) pos)))
+
+  (field ^:private ^:final ^ParserFactory fac)
+
+  (constructor ^:public [this ^ParserFactory fac] (set! (.-fac this) fac))
+
+  (method ^:public parse :throws [ParseException] ^Reference [this ^String sig ^Mode mode]
+    (let [^:mutable ^JCTree$JCExpression moduleName nil
+          ^:mutable ^JCTree qualExpr nil
+          ^:mutable ^Name member nil
+          ^:mutable ^{:tag (List JCTree)} paramTypes nil
+          dh (.new (.-log fac) Log$DeferredDiagnosticHandler)]
+      (try
+        (let [slash (.indexOf sig "/")
+              afterSlash (unchecked-add-int slash 1)
+              hash (.indexOf sig "#" afterSlash)
+              afterHash (unchecked-add-int hash 1)
+              lparen (.indexOf sig "(" (unchecked-add-int (Math/max slash hash) 1))
+              afterLparen (unchecked-add-int lparen 1)]
+          (set! moduleName
+                (switch slash
+                  -1 nil
+                  0 (throw (ParseException. 0 "dc.ref.syntax.error"))
+                  (.parseModule this sig 0 slash dh)))
+          (cond
+            (and (> slash 0) (== (.length sig) afterSlash))
+              (do (set! qualExpr nil) (set! member nil))
+            (== hash -1)
+              (if (and (== lparen -1) (not (identical? mode Mode/MEMBER_REQUIRED)))
+                  (do
+                    (set! qualExpr (.parseType this sig afterSlash (.length sig) dh))
+                    (set! member nil))
+                  (do
+                    (when (identical? mode Mode/MEMBER_DISALLOWED)
+                      (throw (ParseException. hash "dc.ref.unexpected.input")))
+                    (set! qualExpr nil)
+                    (set! member
+                          (.parseMember this
+                                        sig
+                                        afterSlash
+                                        (if (> lparen -1) lparen (.length sig))
+                                        dh))))
+            :else
+              (do
+                (when (identical? mode Mode/MEMBER_DISALLOWED)
+                  (throw (ParseException. hash "dc.ref.unexpected.input")))
+                (set! qualExpr
+                      (when-not (== hash afterSlash) (.parseType this sig afterSlash hash dh)))
+                (cond
+                  (== (.indexOf sig "#" afterHash) afterHash)
+                    (do
+                      (when-not (identical? mode Mode/MEMBER_OPTIONAL)
+                        (throw (ParseException. afterHash "dc.ref.unexpected.input")))
+                      (set! member nil))
+                  (== lparen -1) (set! member (.parseMember this sig afterHash (.length sig) dh))
+                  :else (set! member (.parseMember this sig afterHash lparen dh)))))
+          (if (== lparen -1)
+              (set! paramTypes nil)
+              (let [rparen (.indexOf sig ")" lparen)]
+                (when-not (== rparen (unchecked-subtract-int (.length sig) 1))
+                  (throw (ParseException. rparen "dc.ref.bad.parens")))
+                (set! paramTypes (.parseParams this sig afterLparen rparen dh))))
+          (java-assert (.isEmpty (.getDiagnostics dh))))
+        (finally (.popDiagnosticHandler (.-log fac) dh)))
+      (Reference. moduleName qualExpr member paramTypes)))
+
+  (method ^:private parseModule :throws [ParseException] ^JCTree$JCExpression [this ^String sig
+                                                                               ^int beginIndex
+                                                                               ^int endIndex
+                                                                               ^Log$DeferredDiagnosticHandler dh]
+    (let [s (.substring sig beginIndex endIndex)
+          prev (.useSource (.-log fac) nil)]
+      (try
+        (let [p (.newParser fac s false false false)
+              expr (.qualident p false)]
+          (when-not (identical? (.-kind (.token p)) Tokens$TokenKind/EOF)
+            (throw (ParseException. (unchecked-add-int beginIndex (.-pos (.token p)))
+                                    "dc.ref.unexpected.input")))
+          (.checkDiags this dh beginIndex)
+          expr)
+        (finally (.useSource (.-log fac) prev)))))
+
+  (method ^:private parseType :throws [ParseException] ^JCTree [this ^String sig ^int beginIndex
+                                                                ^int endIndex
+                                                                ^Log$DeferredDiagnosticHandler dh]
+    (let [s (.substring sig beginIndex endIndex)
+          prev (.useSource (.-log fac) nil)]
+      (try
+        (let [p (.newParser fac s false false false)
+              ^JCTree tree (.parseType p)]
+          (when-not (identical? (.-kind (.token p)) Tokens$TokenKind/EOF)
+            (throw (ParseException. (unchecked-add-int beginIndex (.-pos (.token p)))
+                                    "dc.ref.unexpected.input")))
+          (let [typeAnno (cast Tree (.scan (TypeAnnotationFinder.) tree nil))]
+            (when (some? typeAnno)
+              (let [annoPos (.getStartPosition (cast JCTree typeAnno))]
+                (throw (ParseException. (unchecked-add-int beginIndex annoPos)
+                                        "dc.ref.annotations.not.allowed"))))
+            (.checkDiags this dh beginIndex)
+            tree))
+        (finally (.useSource (.-log fac) prev)))))
+
+  (method ^:private parseMember :throws [ParseException] ^Name [this ^String sig ^int beginIndex
+                                                                ^int endIndex
+                                                                ^Log$DeferredDiagnosticHandler dh]
+    (let [s (.substring sig beginIndex endIndex)
+          prev (.useSource (.-log fac) nil)]
+      (try
+        (let [p (.newParser fac s false false false)
+              name (.ident p)]
+          (when-not (identical? (.-kind (.token p)) Tokens$TokenKind/EOF)
+            (throw (ParseException. (unchecked-add-int beginIndex (.-pos (.token p)))
+                                    "dc.ref.unexpected.input")))
+          (.checkDiags this dh beginIndex)
+          name)
+        (finally (.useSource (.-log fac) prev)))))
+
+  (method ^:private parseParams :throws [ParseException] ^{:tag (List JCTree)} [this ^String sig
+                                                                                ^int beginIndex
+                                                                                ^int endIndex
+                                                                                ^Log$DeferredDiagnosticHandler dh]
+    (let [s (.substring sig beginIndex endIndex)]
+      (if (.isBlank s)
+          (List/nil)
+          (let [prev (.useSource (.-log fac) nil)]
+            (try
+              (let [p (.newParser fac (.replace s "..." "[]") false false false)
+                    ^{:tag (ListBuffer JCTree)} paramTypes (ListBuffer.)]
+                (.add paramTypes (.parseType p))
+                (when (identical? (.-kind (.token p)) Tokens$TokenKind/IDENTIFIER) (.nextToken p))
+                (while (identical? (.-kind (.token p)) Tokens$TokenKind/COMMA)
+                  (.nextToken p)
+                  (.add paramTypes (.parseType p))
+                  (when (identical? (.-kind (.token p)) Tokens$TokenKind/IDENTIFIER) (.nextToken p)))
+                (when-not (identical? (.-kind (.token p)) Tokens$TokenKind/EOF)
+                  (throw (ParseException. (.-pos (.token p)) "dc.ref.unexpected.input")))
+                (let [typeAnno (cast Tree (.scan (TypeAnnotationFinder.) paramTypes nil))]
+                  (when (some? typeAnno)
+                    (let [annoPos (.getStartPosition (cast JCTree typeAnno))]
+                      (throw (ParseException. (unchecked-add-int beginIndex annoPos)
+                                              "dc.ref.annotations.not.allowed"))))
+                  (.checkDiags this dh beginIndex)
+                  (.toList paramTypes)))
+              (finally (.useSource (.-log fac) prev)))))))
+
+  (method ^:private checkDiags :throws [ParseException] ^void [this ^Log$DeferredDiagnosticHandler h
+                                                               ^int offset]
+    (let [^{:tag (java.util.List JCDiagnostic)} diagnostics (.getDiagnostics h)]
+      (when-not (.isEmpty diagnostics)
+        (let [pos (unchecked-add-int offset
+                                     (unchecked-int
+                                       (.getPosition (cast JCDiagnostic (.get diagnostics 0)))))]
+          (throw (ParseException. pos "dc.ref.syntax.error"))))))
+
+  (defclass ^:static TypeAnnotationFinder
+    :extends (com.sun.source.util.TreeScanner Tree Void)
+
+    (method ^:public visitAnnotatedType ^Tree [this ^AnnotatedTypeTree t ^Void ignore]
+      t)
+
+    (method ^:public reduce ^Tree [this ^Tree t1 ^Tree t2]
+      (if (some? t1) t1 t2))))

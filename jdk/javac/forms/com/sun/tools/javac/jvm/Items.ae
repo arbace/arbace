@@ -1,0 +1,553 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/jvm/Items.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.jvm)
+
+(import '(com.sun.tools.javac.code Flags
+                                   Kinds$Kind
+                                   Symbol
+                                   Symbol$DynamicMethodSymbol
+                                   Symbol$DynamicVarSymbol
+                                   Symbol$VarSymbol
+                                   Symtab
+                                   Type
+                                   Type$MethodType
+                                   Types)
+        '(com.sun.tools.javac.tree JCTree)
+        '(com.sun.tools.javac.util Assert)
+        '(java.util.function ToIntBiFunction))
+
+(defclass ^:public Items
+  (field ^PoolWriter poolWriter)
+
+  (field ^Code code)
+
+  (field ^Symtab syms)
+
+  (field ^Types types)
+
+  (field ^:private ^:final ^Item voidItem)
+
+  (field ^:private ^:final ^Item thisItem)
+
+  (field ^:private ^:final ^Item superItem)
+
+  (field ^:private ^:final ^Item/1 stackItem (new Item/1 ByteCodes/TypeCodeCount))
+
+  (constructor ^:public [this ^PoolWriter poolWriter ^Code code ^Symtab syms ^Types types]
+    (set! (.-code this) code)
+    (set! (.-poolWriter this) poolWriter)
+    (set! (.-types this) types)
+    (set! voidItem
+          (anon Item [ByteCodes/VOIDcode]
+            (method ^:public toString ^String [this] "void")))
+    (set! thisItem (SelfItem. false))
+    (set! superItem (SelfItem. true))
+    (loop [^int i 0]
+      (when (< i ByteCodes/VOIDcode)
+        (aset stackItem i (StackItem. i))
+        (recur (unchecked-inc-int i))))
+    (aset stackItem ByteCodes/VOIDcode voidItem)
+    (set! (.-syms this) syms))
+
+  (method makeVoidItem ^Item [this] voidItem)
+
+  (method makeThisItem ^Item [this] thisItem)
+
+  (method makeSuperItem ^Item [this] superItem)
+
+  (method makeStackItem ^Item [this ^Type type]
+    (aget stackItem (Code/typecode type)))
+
+  (method makeDynamicItem ^Item [this ^Symbol member]
+    (DynamicItem. member))
+
+  (method makeIndexedItem ^Item [this ^Type type] (IndexedItem. type))
+
+  (method makeLocalItem ^LocalItem [this ^Symbol$VarSymbol v]
+    (LocalItem. (.erasure v types) (.-adr v)))
+
+  (method ^:private makeLocalItem ^LocalItem [this ^Type type ^int reg]
+    (LocalItem. type reg))
+
+  (method makeStaticItem ^Item [this ^Symbol member] (StaticItem. member))
+
+  (method makeMemberItem ^Item [this ^Symbol member ^boolean nonvirtual]
+    (MemberItem. member nonvirtual))
+
+  (method makeImmediateItem ^Item [this ^Type type value]
+    (ImmediateItem. type value))
+
+  (method makeAssignItem ^Item [this ^Item lhs] (AssignItem. lhs))
+
+  (method makeCondItem ^CondItem [this ^int opcode ^Code$Chain trueJumps ^Code$Chain falseJumps]
+    (CondItem. opcode trueJumps falseJumps))
+
+  (method makeCondItem ^CondItem [this ^int opcode]
+    (.makeCondItem this opcode nil nil))
+
+  (defclass ^:abstract Item
+    (field ^int typecode)
+
+    (constructor [this ^int typecode] (set! (.-typecode this) typecode))
+
+    (method load ^Item [this] (throw (AssertionError.)))
+
+    (method store ^void [this]
+      (throw (AssertionError. (java-str "store unsupported: " this))))
+
+    (method invoke ^Item [this] (throw (AssertionError. this)))
+
+    (method duplicate ^void [this])
+
+    (method drop ^void [this])
+
+    (method stash ^void [this ^int toscode]
+      (.duplicate (aget stackItem toscode)))
+
+    (method mkCond ^CondItem [this]
+      (.load this)
+      (.makeCondItem Items/this ByteCodes/ifne))
+
+    (method coerce ^Item [this ^int targetcode]
+      (if (== typecode targetcode)
+          this
+          (do
+            (.load this)
+            (let [typecode1 (Code/truncate typecode)
+                  targetcode1 (Code/truncate targetcode)]
+              (when-not (== typecode1 targetcode1)
+                (let [^int offset (if (> targetcode1 typecode1)
+                                      (unchecked-subtract-int targetcode1 1)
+                                      targetcode1)]
+                  (.emitop0 code
+                            (unchecked-add-int
+                              (unchecked-add-int ByteCodes/i2l (unchecked-multiply-int typecode1 3))
+                              offset))))
+              (when-not (== targetcode targetcode1)
+                (.emitop0 code
+                          (unchecked-subtract-int
+                            (unchecked-add-int ByteCodes/int2byte targetcode)
+                            ByteCodes/BYTEcode)))
+              (aget stackItem targetcode)))))
+
+    (method coerce ^Item [this ^Type targettype]
+      (.coerce this (Code/typecode targettype)))
+
+    (method width ^int [this] 0)
+
+    (method ^:public ^:abstract toString ^String [this]))
+
+  (defclass StackItem
+    :extends Item
+
+    (constructor [this ^int typecode] (super. typecode))
+
+    (method load ^Item [this] this)
+
+    (method duplicate ^void [this]
+      (.emitop0 code (if (== (.width this) 2) ByteCodes/dup2 ByteCodes/dup)))
+
+    (method drop ^void [this]
+      (.emitop0 code (if (== (.width this) 2) ByteCodes/pop2 ByteCodes/pop)))
+
+    (method stash ^void [this ^int toscode]
+      (.emitop0 code
+                (unchecked-add-int (if (== (.width this) 2) ByteCodes/dup_x2 ByteCodes/dup_x1)
+                                   (unchecked-multiply-int
+                                     3
+                                     (unchecked-subtract-int (Code/width toscode) 1)))))
+
+    (method width ^int [this] (Code/width (.-typecode this)))
+
+    (method ^:public toString ^String [this]
+      (java-str "stack(" (aget ByteCodes/typecodeNames (.-typecode this)) ")")))
+
+  (defclass IndexedItem
+    :extends Item
+
+    (constructor [this ^Type type] (super. (Code/typecode type)))
+
+    (method load ^Item [this]
+      (.emitop0 code (unchecked-add-int ByteCodes/iaload (.-typecode this)))
+      (aget stackItem (.-typecode this)))
+
+    (method store ^void [this]
+      (.emitop0 code (unchecked-add-int ByteCodes/iastore (.-typecode this))))
+
+    (method duplicate ^void [this] (.emitop0 code ByteCodes/dup2))
+
+    (method drop ^void [this] (.emitop0 code ByteCodes/pop2))
+
+    (method stash ^void [this ^int toscode]
+      (.emitop0 code
+                (unchecked-add-int ByteCodes/dup_x2
+                                   (unchecked-multiply-int
+                                     3
+                                     (unchecked-subtract-int (Code/width toscode) 1)))))
+
+    (method width ^int [this] 2)
+
+    (method ^:public toString ^String [this]
+      (java-str "indexed(" (aget ByteCodes/typecodeNames (.-typecode this)) ")")))
+
+  (defclass SelfItem
+    :extends Item
+
+    (field ^boolean isSuper)
+
+    (constructor [this ^boolean isSuper]
+      (super. ByteCodes/OBJECTcode)
+      (set! (.-isSuper this) isSuper))
+
+    (method load ^Item [this]
+      (.emitop0 code ByteCodes/aload_0)
+      (aget stackItem (.-typecode this)))
+
+    (method ^:public toString ^String [this] (if isSuper "super" "this")))
+
+  (defclass LocalItem
+    :extends Item
+
+    (field ^int reg)
+
+    (field ^Type type)
+
+    (constructor [this ^Type type ^int reg]
+      (super. (Code/typecode type))
+      (Assert/check (>= reg 0))
+      (set! (.-type this) type)
+      (set! (.-reg this) reg))
+
+    (method load ^Item [this]
+      (if (<= reg 3)
+          (.emitop0 code
+                    (unchecked-add-int
+                      (unchecked-add-int ByteCodes/iload_0
+                                         (unchecked-multiply-int
+                                           (Code/truncate (.-typecode this))
+                                           4))
+                      reg))
+          (.emitop1w code (unchecked-add-int ByteCodes/iload (Code/truncate (.-typecode this))) reg))
+      (aget stackItem (.-typecode this)))
+
+    (method store ^void [this]
+      (if (<= reg 3)
+          (.emitop0 code
+                    (unchecked-add-int
+                      (unchecked-add-int ByteCodes/istore_0
+                                         (unchecked-multiply-int
+                                           (Code/truncate (.-typecode this))
+                                           4))
+                      reg))
+          (.emitop1w code
+                     (unchecked-add-int ByteCodes/istore (Code/truncate (.-typecode this)))
+                     reg))
+      (.setDefined code reg))
+
+    (method incr ^void [this ^int x]
+      (if (and (and (== (.-typecode this) ByteCodes/INTcode) (>= x -32768)) (<= x 32767))
+          (.emitop1w code ByteCodes/iinc reg x)
+          (do
+            (.load this)
+            (if (>= x 0)
+                (do
+                  (.load (.makeImmediateItem Items/this (.-intType syms) x))
+                  (.emitop0 code ByteCodes/iadd))
+                (do
+                  (.load (.makeImmediateItem Items/this (.-intType syms) (unchecked-negate-int x)))
+                  (.emitop0 code ByteCodes/isub)))
+            (.coerce (.makeStackItem Items/this (.-intType syms)) (.-typecode this))
+            (.store this))))
+
+    (method ^:public toString ^String [this]
+      (java-str "localItem(type=" type "; reg=" reg ")")))
+
+  (defclass StaticItem
+    :extends Item
+
+    (field ^Symbol member)
+
+    (constructor [this ^Symbol member]
+      (super. (Code/typecode (.erasure member types)))
+      (set! (.-member this) member))
+
+    (method load ^Item [this]
+      (.emitop2 code
+                ByteCodes/getstatic
+                member
+                (method-ref ToIntBiFunction [PoolWriter Symbol] PoolWriter/.putMember))
+      (aget stackItem (.-typecode this)))
+
+    (method store ^void [this]
+      (.emitop2 code
+                ByteCodes/putstatic
+                member
+                (method-ref ToIntBiFunction [PoolWriter Symbol] PoolWriter/.putMember)))
+
+    (method invoke ^Item [this]
+      (let [mtype (cast Type$MethodType (.erasure member types))
+            rescode (Code/typecode (.-restype mtype))]
+        (.emitInvokestatic code member mtype)
+        (aget stackItem rescode)))
+
+    (method ^:public toString ^String [this]
+      (java-str "static(" member ")")))
+
+  (defclass DynamicItem
+    :extends StaticItem
+
+    (constructor [this ^Symbol member] (super. member))
+
+    (method load ^Item [this]
+      (Assert/check (identical? (.-kind (.-member this)) Kinds$Kind/VAR))
+      (let [type (.erasure (.-member this) types)
+            rescode (Code/typecode type)]
+        (.emitLdc code (cast Symbol$DynamicVarSymbol (.-member this)))
+        (aget stackItem rescode)))
+
+    (method store ^void [this]
+      (Assert/error "this method shouldn't be invoked"))
+
+    (method invoke ^Item [this]
+      (Assert/check (identical? (.-kind (.-member this)) Kinds$Kind/MTH))
+      (let [mtype (cast Type$MethodType (.erasure (.-member this) types))
+            rescode (Code/typecode (.-restype mtype))]
+        (.emitInvokedynamic code (cast Symbol$DynamicMethodSymbol (.-member this)) mtype)
+        (aget stackItem rescode)))
+
+    (method ^:public toString ^String [this]
+      (java-str "dynamic(" (.-member this) ")")))
+
+  (defclass MemberItem
+    :extends Item
+
+    (field ^Symbol member)
+
+    (field ^boolean nonvirtual)
+
+    (constructor [this ^Symbol member ^boolean nonvirtual]
+      (super. (Code/typecode (.erasure member types)))
+      (set! (.-member this) member)
+      (set! (.-nonvirtual this) nonvirtual))
+
+    (method load ^Item [this]
+      (.emitop2 code
+                ByteCodes/getfield
+                member
+                (method-ref ToIntBiFunction [PoolWriter Symbol] PoolWriter/.putMember))
+      (aget stackItem (.-typecode this)))
+
+    (method store ^void [this]
+      (.emitop2 code
+                ByteCodes/putfield
+                member
+                (method-ref ToIntBiFunction [PoolWriter Symbol] PoolWriter/.putMember)))
+
+    (method invoke ^Item [this]
+      (let [mtype (cast Type$MethodType (.externalType member types))
+            rescode (Code/typecode (.-restype mtype))]
+        (cond
+          (and (not (== (bit-and (.flags (.-owner member)) Flags/INTERFACE) 0)) (not nonvirtual))
+            (.emitInvokeinterface code member mtype)
+          nonvirtual (.emitInvokespecial code member mtype)
+          :else (.emitInvokevirtual code member mtype))
+        (aget stackItem rescode)))
+
+    (method duplicate ^void [this]
+      (.duplicate (aget stackItem ByteCodes/OBJECTcode)))
+
+    (method drop ^void [this] (.drop (aget stackItem ByteCodes/OBJECTcode)))
+
+    (method stash ^void [this ^int toscode]
+      (.stash (aget stackItem ByteCodes/OBJECTcode) toscode))
+
+    (method width ^int [this] 1)
+
+    (method ^:public toString ^String [this]
+      (java-str "member(" member (if nonvirtual " nonvirtual)" ")"))))
+
+  (defclass ImmediateItem
+    :extends Item
+
+    (field ^:final ^PoolConstant$LoadableConstant value)
+
+    (constructor [this ^Type type value]
+      (super. (Code/typecode type))
+      (switch (.-typecode this)
+        (ByteCodes/BYTEcode ByteCodes/SHORTcode ByteCodes/CHARcode ByteCodes/INTcode)
+          (set! (.-value this) (PoolConstant$LoadableConstant/Int (.intValue (cast Integer value))))
+        ByteCodes/LONGcode
+          (set! (.-value this) (PoolConstant$LoadableConstant/Long (.longValue (cast Long value))))
+        ByteCodes/FLOATcode
+          (set! (.-value this)
+                (PoolConstant$LoadableConstant/Float (.floatValue (cast Float value))))
+        ByteCodes/DOUBLEcode
+          (set! (.-value this)
+                (PoolConstant$LoadableConstant/Double (.doubleValue (cast Double value))))
+        ByteCodes/OBJECTcode
+          (set! (.-value this) (PoolConstant$LoadableConstant/String (cast String value)))
+        (throw (UnsupportedOperationException. (java-str "unsupported tag: " (.-typecode this))))))
+
+    (method ^:private numericValue ^Number [this]
+      (cast Number (.-data (cast PoolConstant$LoadableConstant$BasicConstant value))))
+
+    (method load ^Item [this]
+      (switch (.-typecode this)
+        (ByteCodes/INTcode ByteCodes/BYTEcode ByteCodes/SHORTcode ByteCodes/CHARcode)
+          (let [ival (.intValue (.numericValue this))]
+            (cond
+              (and (<= -1 ival) (<= ival 5))
+                (.emitop0 code (unchecked-add-int ByteCodes/iconst_0 ival))
+              (and (<= Byte/MIN_VALUE ival) (<= ival Byte/MAX_VALUE))
+                (.emitop1 code ByteCodes/bipush ival)
+              (and (<= Short/MIN_VALUE ival) (<= ival Short/MAX_VALUE))
+                (.emitop2 code ByteCodes/sipush ival)
+              :else (.emitLdc code value)))
+        ByteCodes/LONGcode
+          (let [lval (.longValue (.numericValue this))]
+            (if (or (== lval 0) (== lval 1))
+                (.emitop0 code (unchecked-add-int ByteCodes/lconst_0 (unchecked-int lval)))
+                (.emitLdc code value)))
+        ByteCodes/FLOATcode
+          (let [fval (.floatValue (.numericValue this))]
+            (if (or (or (.isPosZero this fval) (== fval 1.0)) (== fval 2.0))
+                (.emitop0 code (unchecked-add-int ByteCodes/fconst_0 (unchecked-int fval)))
+                (.emitLdc code value)))
+        ByteCodes/DOUBLEcode
+          (let [dval (.doubleValue (.numericValue this))]
+            (if (or (.isPosZero this dval) (== dval 1.0))
+                (.emitop0 code (unchecked-add-int ByteCodes/dconst_0 (unchecked-int dval)))
+                (.emitLdc code value)))
+        ByteCodes/OBJECTcode (.emitLdc code value)
+        (Assert/error))
+      (aget stackItem (.-typecode this)))
+
+    (method ^:private isPosZero ^boolean [this ^float x]
+      (and (== x (float 0.0)) (> (unchecked-divide-float (float 1.0) x) (float 0.0))))
+
+    (method ^:private isPosZero ^boolean [this ^double x]
+      (and (== x 0.0) (> (unchecked-divide 1.0 x) 0.0)))
+
+    (method mkCond ^CondItem [this]
+      (let [ival (.intValue (.numericValue this))]
+        (.makeCondItem Items/this (if (not (== ival 0)) ByteCodes/goto_ ByteCodes/dontgoto))))
+
+    (method coerce ^Item [this ^int targetcode]
+      (if (== (.-typecode this) targetcode)
+          this
+          (switch targetcode
+            ByteCodes/INTcode
+              (if (and (== (Code/truncate (.-typecode this)) ByteCodes/INTcode)
+                       (not (== (.-typecode this) ByteCodes/CHARcode)))
+                  this
+                  (ImmediateItem. (.-intType syms) (.intValue (.numericValue this))))
+            ByteCodes/LONGcode (ImmediateItem. (.-longType syms) (.longValue (.numericValue this)))
+            ByteCodes/FLOATcode
+              (ImmediateItem. (.-floatType syms) (.floatValue (.numericValue this)))
+            ByteCodes/DOUBLEcode
+              (ImmediateItem. (.-doubleType syms) (.doubleValue (.numericValue this)))
+            ByteCodes/BYTEcode
+              (ImmediateItem. (.-byteType syms)
+                              (int (unchecked-byte (.intValue (.numericValue this)))))
+            ByteCodes/CHARcode
+              (ImmediateItem. (.-charType syms)
+                              (int (unchecked-char (.intValue (.numericValue this)))))
+            ByteCodes/SHORTcode
+              (ImmediateItem. (.-shortType syms)
+                              (int (unchecked-short (.intValue (.numericValue this)))))
+            (.coerce super targetcode))))
+
+    (method ^:public toString ^String [this]
+      (java-str "immediate(" value ")")))
+
+  (defclass AssignItem
+    :extends Item
+
+    (field ^Item lhs)
+
+    (constructor [this ^Item lhs]
+      (super. (.-typecode lhs))
+      (set! (.-lhs this) lhs))
+
+    (method load ^Item [this]
+      (.stash lhs (.-typecode this))
+      (.store lhs)
+      (aget stackItem (.-typecode this)))
+
+    (method duplicate ^void [this] (.duplicate (.load this)))
+
+    (method drop ^void [this] (.store lhs))
+
+    (method stash ^void [this ^int toscode] (Assert/error))
+
+    (method width ^int [this]
+      (unchecked-add-int (.width lhs) (Code/width (.-typecode this))))
+
+    (method ^:public toString ^String [this]
+      (java-str "assign(lhs = " lhs ")")))
+
+  (defclass CondItem
+    :extends Item
+
+    (field ^Code$Chain trueJumps)
+
+    (field ^Code$Chain falseJumps)
+
+    (field ^int opcode)
+
+    (field ^JCTree tree)
+
+    (constructor [this ^int opcode ^Code$Chain truejumps ^Code$Chain falsejumps]
+      (super. ByteCodes/BYTEcode)
+      (set! (.-opcode this) opcode)
+      (set! (.-trueJumps this) truejumps)
+      (set! (.-falseJumps this) falsejumps))
+
+    (method load ^Item [this]
+      (let [^:mutable ^Code$Chain trueChain nil
+            falseChain (.jumpFalse this)]
+        (when-not (.isFalse this)
+          (.resolve code trueJumps)
+          (.emitop0 code ByteCodes/iconst_1)
+          (set! trueChain (.branch code ByteCodes/goto_)))
+        (when (some? falseChain) (.resolve code falseChain) (.emitop0 code ByteCodes/iconst_0))
+        (.resolve code trueChain)
+        (aget stackItem (.-typecode this))))
+
+    (method duplicate ^void [this] (.duplicate (.load this)))
+
+    (method drop ^void [this] (.drop (.load this)))
+
+    (method stash ^void [this ^int toscode] (Assert/error))
+
+    (method mkCond ^CondItem [this] this)
+
+    (method jumpTrue ^Code$Chain [this]
+      (if (nil? tree)
+          (Code/mergeChains trueJumps (.branch code opcode))
+          (let [startpc (.curCP code)
+                c (Code/mergeChains trueJumps (.branch code opcode))]
+            (.put (.-crt code) tree CRTable/CRT_BRANCH_TRUE startpc (.curCP code))
+            c)))
+
+    (method jumpFalse ^Code$Chain [this]
+      (if (nil? tree)
+          (Code/mergeChains falseJumps (.branch code (Code/negate opcode)))
+          (let [startpc (.curCP code)
+                c (Code/mergeChains falseJumps (.branch code (Code/negate opcode)))]
+            (.put (.-crt code) tree CRTable/CRT_BRANCH_FALSE startpc (.curCP code))
+            c)))
+
+    (method negate ^CondItem [this]
+      (let [c (CondItem. (Code/negate opcode) falseJumps trueJumps)] (set! (.-tree c) tree) c))
+
+    (method width ^int [this] (throw (AssertionError.)))
+
+    (method isTrue ^boolean [this]
+      (and (nil? falseJumps) (== opcode ByteCodes/goto_)))
+
+    (method isFalse ^boolean [this]
+      (and (nil? trueJumps) (== opcode ByteCodes/dontgoto)))
+
+    (method ^:public toString ^String [this]
+      (java-str "cond(" (Code/mnem opcode) ")"))))

@@ -1,0 +1,298 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/code/Attribute.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.code)
+
+(import '(com.sun.tools.javac.util Assert Constants List Name Pair)
+        '(java.util LinkedHashMap Map)
+        '(javax.lang.model.element AnnotationMirror AnnotationValue AnnotationValueVisitor)
+        '(javax.lang.model.type DeclaredType))
+
+(defclass ^:public ^:abstract Attribute
+  :implements [AnnotationValue]
+
+  (field ^:public ^Type type)
+
+  (constructor ^:public [this ^Type type] (set! (.-type this) type))
+
+  (method ^:public ^:abstract accept ^void [this ^Visitor v])
+
+  (method ^:public getValue [this]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:public accept :type-params [R P] ^R [this ^{:tag (AnnotationValueVisitor R P)} v ^P p]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:public isSynthesized ^boolean [this] false)
+
+  (method ^:public getPosition ^TypeAnnotationPosition [this] nil)
+
+  (defclass ^:public ^:static Constant
+    :extends Attribute
+
+    (field ^:public ^:final value)
+
+    (method ^:public accept ^void [this ^Visitor v] (.visitConstant v this))
+
+    (constructor ^:public [this ^Type type value]
+      (super. type)
+      (set! (.-value this) value))
+
+    (method ^:public toString ^String [this]
+      (Constants/format value (.-type this)))
+
+    (method ^:public getValue [this] (Constants/decode value (.-type this)))
+
+    (method ^:public accept :type-params [R P] ^R [this ^{:tag (AnnotationValueVisitor R P)} v ^P p]
+      (if-instance [^String str value]
+        (.visitString v str p)
+        (do
+          (when (instance? Integer value)
+            (let [^int i (cast Integer value)]
+              (switch (.getTag (.-type this))
+                BOOLEAN (return (.visitBoolean v (not (== i 0)) p))
+                CHAR (return (.visitChar v (unchecked-char i) p))
+                BYTE (return (.visitByte v (unchecked-byte i) p))
+                SHORT (return (.visitShort v (unchecked-short i) p))
+                INT (return (.visitInt v i p)))))
+          (switch (.getTag (.-type this))
+            LONG (return (.visitLong v (cast Long value) p))
+            FLOAT (return (.visitFloat v (cast Float value) p))
+            DOUBLE (return (.visitDouble v (cast Double value) p)))
+          (throw (AssertionError. (java-str "Bad annotation element value: " value)))))))
+
+  (defclass ^:public ^:static Class
+    :extends Attribute
+
+    (field ^:public ^:final ^Type classType)
+
+    (method ^:public accept ^void [this ^Visitor v] (.visitClass v this))
+
+    (constructor ^:public [this ^Types types ^Type type]
+      (super. (Class/makeClassType types type))
+      (set! (.-classType this) type))
+
+    (method ^:static makeClassType ^Type [^Types types ^Type type]
+      (let [^Type arg (if (.isPrimitive type)
+                          (.-type (.boxedClass types type))
+                          (.erasure types type))]
+        (Type$ClassType. (.getEnclosingType (.-classType (.-syms types)))
+                         (List/of arg)
+                         (.-tsym (.-classType (.-syms types))))))
+
+    (method ^:public toString ^String [this] (java-str classType ".class"))
+
+    (method ^:public getValue ^Type [this] classType)
+
+    (method ^:public accept :type-params [R P] ^R [this ^{:tag (AnnotationValueVisitor R P)} v ^P p]
+      (.visitType v classType p)))
+
+  (defclass ^:public ^:static Compound
+    :extends Attribute
+    :implements [AnnotationMirror]
+
+    (field ^:public ^:final ^{:tag (List (Pair Symbol$MethodSymbol Attribute))} values)
+
+    (field ^:public ^TypeAnnotationPosition position)
+
+    (field ^:private ^boolean synthesized false)
+
+    (method ^:public isSynthesized ^boolean [this] synthesized)
+
+    (method ^:public setSynthesized ^void [this ^boolean synthesized]
+      (set! (.-synthesized this) synthesized))
+
+    (constructor ^:public [this ^Type type
+                           ^{:tag (List (Pair Symbol$MethodSymbol Attribute))} values
+                           ^TypeAnnotationPosition position]
+      (super. type)
+      (set! (.-values this) values)
+      (set! (.-position this) position))
+
+    (constructor ^:public [this ^Type type
+                           ^{:tag (List (Pair Symbol$MethodSymbol Attribute))} values]
+      (this. type values nil))
+
+    (method ^:public getPosition ^TypeAnnotationPosition [this]
+      (when (.hasUnknownPosition this)
+        (when-not (== (.size values) 0)
+          (let [valueName (.-value (.-names (.-table
+                                              (.-name
+                                                (cast
+                                                  Symbol$MethodSymbol
+                                                  (.-fst (cast Pair (.-head values))))))))
+                ^{:tag (Pair Symbol$MethodSymbol Attribute)} res (.getElemPair this valueName)]
+            (set! position (when (some? res) (.getPosition (cast Attribute (.-snd res))))))))
+      position)
+
+    (method ^:public isContainerTypeCompound ^boolean [this]
+      (if (and (.isSynthesized this) (== (.size values) 1))
+          (some? (.getFirstEmbeddedTC this))
+          false))
+
+    (method ^:private getFirstEmbeddedTC ^Compound [this]
+      (when (== (.size values) 1)
+        (let [^{:tag (Pair Symbol$MethodSymbol Attribute)} val (cast Pair (.get values 0))]
+          (when (.contentEquals (.getSimpleName (cast Symbol$MethodSymbol (.-fst val))) "value")
+            (when-instance [^Array arr (.-snd val)]
+              (when-not (== (alength (.-values arr)) 0)
+                (when-instance [^TypeCompound compound (aget (.-values arr) 0)] (return compound)))))))
+      nil)
+
+    (method ^:public tryFixPosition ^boolean [this]
+      (if (not (.isContainerTypeCompound this))
+          false
+          (let [from (.getFirstEmbeddedTC this)]
+            (if (and (and (some? from) (some? (.-position from)))
+                     (not (identical? (.-type (.-position from)) TargetType/UNKNOWN)))
+                (do (set! position (.-position from)) true)
+                false))))
+
+    (method ^:public hasUnknownPosition ^boolean [this]
+      (identical? (.-type position) TargetType/UNKNOWN))
+
+    (method ^:public accept ^void [this ^Visitor v] (.visitCompound v this))
+
+    (method ^:public toString ^String [this]
+      (let [buf (StringBuilder.)]
+        (.append buf "@")
+        (.append buf (.-type this))
+        (let [len (.length values)]
+          (when (> len 0)
+            (.append buf \()
+            (let [^:mutable first true]
+              (for-each [^{:tag (Pair Symbol$MethodSymbol Attribute)} value values]
+                (when-not first (.append buf ", "))
+                (set! first false)
+                (let [name (.-name (cast Symbol$MethodSymbol (.-fst value)))]
+                  (when (or (> len 1) (not (identical? name (.-value (.-names (.-table name))))))
+                    (.append buf name)
+                    (.append buf \=))
+                  (.append buf (.-snd value))))
+              (.append buf \))))
+          (.toString buf))))
+
+    (method ^:public member ^Attribute [this ^Name member]
+      (let [^{:tag (Pair Symbol$MethodSymbol Attribute)} res (.getElemPair this member)]
+        (when (some? res) (cast Attribute (.-snd res)))))
+
+    (method ^:private getElemPair ^{:tag (Pair Symbol$MethodSymbol Attribute)} [this ^Name member]
+      (for-each [^{:tag (Pair Symbol$MethodSymbol Attribute)} pair values]
+        (when (identical? (.-name (cast Symbol$MethodSymbol (.-fst pair))) member) (return pair)))
+      nil)
+
+    (method ^:public getValue ^Compound [this] this)
+
+    (method ^:public accept :type-params [R P] ^R [this ^{:tag (AnnotationValueVisitor R P)} v ^P p]
+      (.visitAnnotation v this p))
+
+    (method ^:public getAnnotationType ^DeclaredType [this]
+      (cast DeclaredType (.-type this)))
+
+    (method ^:public getElementValues ^{:tag (Map Symbol$MethodSymbol Attribute)} [this]
+      (let [^{:tag (Map Symbol$MethodSymbol Attribute)} valmap (LinkedHashMap.)]
+        (for-each [^{:tag (Pair Symbol$MethodSymbol Attribute)} value values]
+          (.put valmap (cast Symbol$MethodSymbol (.-fst value)) (cast Attribute (.-snd value))))
+        valmap)))
+
+  (defclass ^:public ^:static TypeCompound
+    :extends Compound
+
+    (constructor ^:public [this ^Compound compound ^TypeAnnotationPosition position]
+      (super. (.-type compound) (.-values compound) position))
+
+    (constructor ^:public [this ^Type type
+                           ^{:tag (List (Pair Symbol$MethodSymbol Attribute))} values
+                           ^TypeAnnotationPosition position]
+      (super. type values position)))
+
+  (defclass ^:public ^:static Array
+    :extends Attribute
+
+    (field ^:public ^:final ^Attribute/1 values)
+
+    (constructor ^:public [this ^Type type ^Attribute/1 values]
+      (super. type)
+      (set! (.-values this) values))
+
+    (constructor ^:public [this ^Type type ^{:tag (List Attribute)} values]
+      (super. type)
+      (set! (.-values this) (cast Attribute/1 (.toArray values (new Attribute/1 (.size values))))))
+
+    (method ^:public accept ^void [this ^Visitor v] (.visitArray v this))
+
+    (method ^:public toString ^String [this]
+      (let [buf (StringBuilder.)]
+        (.append buf \{)
+        (let [^:mutable first true]
+          (for-each [^Attribute value values]
+            (when-not first (.append buf ", "))
+            (set! first false)
+            (.append buf value))
+          (.append buf \})
+          (.toString buf))))
+
+    (method ^:public getValue ^{:tag (List Attribute)} [this]
+      (List/from values))
+
+    (method ^:public accept :type-params [R P] ^R [this ^{:tag (AnnotationValueVisitor R P)} v ^P p]
+      (.visitArray v (.getValue this) p))
+
+    (method ^:public getPosition ^TypeAnnotationPosition [this]
+      (when-not (== (alength values) 0) (.getPosition (aget values 0)))))
+
+  (defclass ^:public ^:static Enum
+    :extends Attribute
+
+    (field ^:public ^Symbol$VarSymbol value)
+
+    (constructor ^:public [this ^Type type ^Symbol$VarSymbol value]
+      (super. type)
+      (set! (.-value this) (cast Symbol$VarSymbol (Assert/checkNonNull value))))
+
+    (method ^:public accept ^void [this ^Visitor v] (.visitEnum v this))
+
+    (method ^:public toString ^String [this] (.toString value))
+
+    (method ^:public getValue ^Symbol$VarSymbol [this] value)
+
+    (method ^:public accept :type-params [R P] ^R [this ^{:tag (AnnotationValueVisitor R P)} v ^P p]
+      (.visitEnumConstant v value p)))
+
+  (defclass ^:public ^:static Error
+    :extends Attribute
+
+    (constructor ^:public [this ^Type type] (super. type))
+
+    (method ^:public accept ^void [this ^Visitor v] (.visitError v this))
+
+    (method ^:public toString ^String [this] "<error>")
+
+    (method ^:public getValue ^String [this] (.toString this))
+
+    (method ^:public accept :type-params [R P] ^R [this ^{:tag (AnnotationValueVisitor R P)} v ^P p]
+      (.visitString v (.toString this) p)))
+
+  (defclass ^:public ^:static UnresolvedClass
+    :extends Error
+
+    (field ^:public ^Type classType)
+
+    (constructor ^:public [this ^Type type ^Type classType]
+      (super. type)
+      (set! (.-classType this) classType)))
+
+  (defclass ^:public ^:static ^:interface Visitor
+    (method visitConstant ^void [this ^Constant value])
+
+    (method visitClass ^void [this ^Class clazz])
+
+    (method visitCompound ^void [this ^Compound compound])
+
+    (method visitArray ^void [this ^Array array])
+
+    (method visitEnum ^void [this ^Enum e])
+
+    (method visitError ^void [this ^Error e]))
+
+  (defclass ^:public ^:static ^:enum RetentionPolicy
+    (constants SOURCE CLASS RUNTIME)))

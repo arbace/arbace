@@ -1,0 +1,229 @@
+#!/bin/bash
+# javac's forms (doc/classes/JAVA-FRONTEND-SURVEY.md, JN2, JFS3 (b)): jdk26u's javac, its modules
+# jdk.compiler (with the sources the JDK build generates for it), java.compiler and
+# jdk.internal.opt's CommandLine, read by repr/java into Java forms in jdk/javac/, with the
+# java.base classes javac's world needs beyond the program's (the 19 of the survey's JN1.2, from
+# jdk26u, and jrt's own for javac, overlay/jdk/javac/java.base: a ServiceLoader that finds no
+# provider) and the edge of javac's world (JFS14 (b)); the tool executable's input (JFS4 (b)), as
+# jdk/forms is the program's. jdk26u is pinned (JFS8 (a)): $JDK's commit must be the provenance's.
+#
+#   bin/javac-vendor convert  the sources copied from $JDK (and overlay/jdk/javac/java.base) into
+#                             WORK/src/MODULE, converted by `bin/repr-java read-jdk --check` (on
+#                             the frozen JVM, until JN5) module by module, merged into OUT/forms
+#                             (repr/java's reports left out); OUT/sources.txt (MODULE KIND PATH:
+#                             share, a file of jdk26u's src/MODULE/share/classes; gensrc, of the
+#                             JDK build's support/gensrc/MODULE; overlay, of
+#                             overlay/jdk/javac/MODULE), OUT/provenance.edn; then the edge
+#   bin/javac-vendor edge     the edge of javac's world alone: bin/j2g --program --record-edge on
+#                             the frozen JVM over the program and OUT/forms (with the tool's
+#                             variants, overlay/jdk/javac/variants), less what jdk/edge.edn
+#                             answers alike (arbace.j2g.edge's subtract), into OUT/edge.edn;
+#                             jdk/edge.edn stays the shipped build's
+#   bin/javac-vendor verify   convert into WORK/fresh and compare with OUT (diff -r): the tree is
+#                             what the conversion and the recording give, byte for byte
+#   bin/javac-vendor check    j2g translates javac's world (bin/j2g --program on the tools'
+#                             host with OUT/forms, the tool's variants and both edges): status 0
+#                             and no class failing its analysis (WORK/check/j2g.log)
+#   bin/javac-vendor build    the tool executable: bin/arbace-go --build-java (its header)
+#
+# Options (before the command): --work DIR (default .tmp/javac-vendor), --out DIR (default
+# jdk/javac). Environment: JDK (jdk26u's checkout, default /root/jdk26u, with its build tree,
+# whose support/gensrc holds the generated sources), REPR_JAVA_JVM_OPTS (repr/java's heap,
+# default here -Xmx12g), J2G_JVM_OPTS (the recording's, default -Xmx16g).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
+cd "$root"
+work=$root/.tmp/javac-vendor out=$root/jdk/javac
+while [ $# -gt 0 ]; do
+  case $1 in
+    --work) work=$2; shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $work in /*) ;; *) work=$root/$work ;; esac
+case $out in /*) ;; *) out=$root/$out ;; esac
+jdk=${JDK:-/root/jdk26u}
+fail() { echo "javac-vendor: $*" >&2; exit 1; }
+since() { echo "$(( $(date +%s) - $1 )) s"; }
+
+# The origin, pinned (JFS8 (a)): jdk26u at the commit of jdk/'s forms
+pinned=baf63fbe42b8758448fee570a9d9bb914272d259
+# javac's modules: jdk.compiler's and java.compiler's share/classes whole (module-info.java,
+# which repr/java cannot patch, and the javadoc's snippet-files left out, as repr/java leaves
+# them), jdk.compiler's generated sources (the JDK build's support/gensrc/jdk.compiler: the
+# properties' classes, FlagsEnum, the resource bundles), and of jdk.internal.opt the one class
+# javac's launcher uses
+modules="jdk.compiler java.compiler jdk.internal.opt java.base"
+opt_files="jdk/internal/opt/CommandLine.java"
+# java.base's classes javac's world needs beyond the program's (the survey's JN1.2): declarations
+# of javac's classes (annotation types, supertypes, exceptions) and TypeTag's range checks
+base_files="java/io/FilterWriter.java java/io/IOError.java java/lang/SafeVarargs.java
+  java/lang/annotation/AnnotationTypeMismatchException.java java/lang/annotation/Documented.java
+  java/lang/annotation/Inherited.java java/lang/annotation/Repeatable.java
+  java/lang/module/InvalidModuleDescriptorException.java java/lang/runtime/ExactConversionsSupport.java
+  java/nio/file/ClosedFileSystemException.java java/nio/file/DirectoryIteratorException.java
+  java/nio/file/FileSystem.java java/nio/file/FileSystemNotFoundException.java
+  java/nio/file/FileVisitOption.java java/nio/file/FileVisitResult.java
+  java/nio/file/ProviderNotFoundException.java java/nio/file/ReadOnlyFileSystemException.java
+  java/util/spi/ToolProvider.java sun/reflect/annotation/ExceptionProxy.java"
+overlay=$root/overlay/jdk/javac
+variants=$overlay/variants
+
+conf() { ls -d "$jdk"/build/*/spec.gmk 2>/dev/null | head -1; }
+
+# sources: WORK/src/MODULE and WORK/sources.txt
+sources() {
+  local c gensrc m rel
+  c=$(conf); [ -n "$c" ] || fail "no JDK build tree in $jdk/build (its support/gensrc)"
+  gensrc=$(dirname "$c")/support/gensrc
+  [ "$(git -C "$jdk" rev-parse HEAD 2>/dev/null)" = "$pinned" ] || fail "$jdk is not jdk26u at $pinned"
+  rm -rf "$work/src"
+  {
+    (cd "$jdk/src/jdk.compiler/share/classes" && find . -name '*.java' ! -name module-info.java ! -path '*/snippet-files/*' | sed 's|^\./||' | LC_ALL=C sort) |
+      sed 's/^/jdk.compiler share /'
+    (cd "$gensrc/jdk.compiler" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort) | sed 's/^/jdk.compiler gensrc /'
+    (cd "$jdk/src/java.compiler/share/classes" && find . -name '*.java' ! -name module-info.java ! -path '*/snippet-files/*' | sed 's|^\./||' | LC_ALL=C sort) |
+      sed 's/^/java.compiler share /'
+    for rel in $opt_files; do echo "jdk.internal.opt share $rel"; done
+    for rel in $base_files; do echo "java.base share $rel"; done
+    (cd "$overlay/java.base" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort) | sed 's/^/java.base overlay /'
+  } > "$work/sources.txt"
+  while read -r m kind rel; do
+    mkdir -p "$work/src/$m/$(dirname "$rel")"
+    case $kind in
+      share) cp "$jdk/src/$m/share/classes/$rel" "$work/src/$m/$rel" ;;
+      gensrc) cp "$gensrc/$m/$rel" "$work/src/$m/$rel" ;;
+      overlay) cp "$overlay/$m/$rel" "$work/src/$m/$rel" ;;
+    esac || return 1
+  done < "$work/sources.txt"
+}
+
+# origins MODULE: the names the converted files' headers give their sources (repr/java's
+# --origins): not the work tree's copies, so that the output does not depend on where it was made
+origins() {
+  local m kind rel
+  echo "{"
+  while read -r m kind rel; do
+    [ "$m" = "$1" ] || continue
+    case $kind in
+      share) echo "\"$rel\" \"jdk26u src/$m/share/classes/$rel\"" ;;
+      gensrc) echo "\"$rel\" \"jdk26u support/gensrc/$m/$rel (generated by the JDK build)\"" ;;
+      overlay) echo "\"$rel\" \"overlay/jdk/javac/$m/$rel\"" ;;
+    esac
+  done < "$work/sources.txt"
+  echo "}"
+}
+
+# convert_module MODULE CONV: WORK/src/MODULE converted into CONV/MODULE
+convert_module() {
+  local m=$1 conv=$2 log=$work/log/convert-$1.log n
+  n=$(grep -c "^$m " "$work/sources.txt")
+  origins "$m" > "$work/origins-$m.edn"
+  rm -rf "${conv:?}/$m"
+  # from WORK: read-jdk copies the files into .tmp/repr-java-patch below the current directory
+  (cd "$work" && REPR_JAVA_THREADS=8 REPR_JAVA_PATCH_ALL=1 REPR_JAVA_JVM_OPTS=${REPR_JAVA_JVM_OPTS:--Xmx12g} \
+     "$root/bin/repr-java" read-jdk --check --origins "$work/origins-$m.edn" "$conv/$m" "$m" "$work/src/$m") > "$log" 2>&1
+  echo "   $m: $(tail -1 "$log")" >&2
+  grep -q "^$n Java files, $n converted, 0 failed, 0 javac errors, .* 0 unreadable" "$log" ||
+    { echo "javac-vendor: $m: not every file converted ($log)" >&2; return 1; }
+}
+
+provenance() {
+  local q='s/\\/\\\\/g; s/"/\\"/g' url clean c
+  . "$root/bin/lib/frozen.bash"
+  url=$(git -C "$jdk" remote get-url origin 2>/dev/null | sed "$q")
+  if [ -z "$(git -C "$jdk" status --porcelain --untracked-files=no -- src make 2>/dev/null)" ]; then clean=true; else clean=false; fi
+  c=$(conf)
+  echo ";; The provenance of jdk/javac/ (bin/javac-vendor, doc/classes/JAVA-FRONTEND-SURVEY.md, JN2): what"
+  echo ";; its forms and its edge were made from. Written by bin/javac-vendor convert; verify compares it."
+  echo "{:jdk26u {:repo \"$url\" :commit \"$(git -C "$jdk" rev-parse HEAD)\" :clean $clean"
+  echo "          :gensrc \"build/$(basename "$(dirname "$c")")/support/gensrc/jdk.compiler\"}"
+  echo " :jdk \"$(java -version 2>&1 | head -1 | sed "$q")\""
+  echo " :converter {:repr-java \"$(repr_java_reader_hash)\""
+  echo "             :host \"$(frozen_host)\"}"
+  echo " :edge {:recorded-by \"bin/j2g --program --record-edge, less jdk/edge.edn\""
+  echo "        :jdk-edge \"$(sha256sum < "$root/jdk/edge.edn" | cut -c1-64)\"}"
+  echo " :files {:sources $(wc -l < "$work/sources.txt")"
+  for m in $modules; do echo "         :$m $(grep -c "^$m " "$work/sources.txt")"; done
+  echo "         :forms $(find "$1/forms" -name '*.ae' | wc -l)}}"
+}
+
+# the tool world's j2g arguments (on a JVM or the tools' host): javac's forms and the variants
+tool_args() { echo --input "$1/forms" --variants "$variants"; }
+
+# record_edge OUT: the edge of javac's world into OUT/edge.edn
+record_edge() {
+  local o=$1 t0
+  t0=$(date +%s)
+  . "$root/bin/lib/frozen.bash"
+  frozen_jar > /dev/null || return 1
+  mkdir -p "$work/log" "$work/tmp"
+  echo "== the edge of javac's world (bin/j2g --program --record-edge, on the frozen JVM)" >&2
+  # shellcheck disable=SC2046
+  frozen_java tools -Xss64m ${J2G_JVM_OPTS:--Xmx16g} -Djava.io.tmpdir="$work/tmp" --add-modules ALL-SYSTEM -- \
+    -m arbace.j2g.main --program $(tool_args "$o") --record-edge "$work/edge-full.edn" --out "$work/j2g-jvm" \
+    > "$work/log/edge-record.log" 2>&1 || { tail -20 "$work/log/edge-record.log" >&2; return 1; }
+  frozen_java tools -Xss64m -Xmx4g -- -m arbace.j2g.edge subtract "$o/edge.edn" "$work/edge-full.edn" "$root/jdk/edge.edn" \
+    >> "$work/log/edge-record.log" 2>&1 || { tail -20 "$work/log/edge-record.log" >&2; return 1; }
+  echo "   $(grep -c '^  "' "$o/edge.edn") classes beyond jdk/edge.edn's, $(stat -c %s "$o/edge.edn") bytes ($(since "$t0"))" >&2
+}
+
+# convert OUT: the whole tree into OUT
+convert() {
+  local o=$1 t0 m
+  t0=$(date +%s)
+  mkdir -p "$work/log" "$o"
+  echo "== sources (jdk26u at $pinned, $jdk)" >&2
+  sources || fail "the sources were not copied"
+  echo "   $(wc -l < "$work/sources.txt") files: $(for m in $modules; do printf '%s %s, ' "$m" "$(grep -c "^$m " "$work/sources.txt")"; done)" >&2
+  echo "== repr/java read-jdk (on the frozen JVM)" >&2
+  rm -rf "$work/conv"
+  for m in $modules; do convert_module "$m" "$work/conv" || return 1; done
+  rm -rf "$o/forms"
+  mkdir -p "$o/forms"
+  for m in $modules; do
+    (cd "$work/conv/$m" && find . -type f -name '*.ae' | while read -r f; do
+       [ -e "$o/forms/$f" ] && { echo "javac-vendor: $f from two modules" >&2; exit 1; }
+       mkdir -p "$o/forms/$(dirname "$f")" && cp "$f" "$o/forms/$f"
+     done) || return 1
+  done
+  cp "$work/sources.txt" "$o/sources.txt"
+  record_edge "$o" || return 1
+  provenance "$o" > "$o/provenance.edn" || return 1
+  echo "javac-vendor: ${o#$root/}: $(find "$o/forms" -name '*.ae' | wc -l) forms files, $(du -sb "$o/forms" | cut -f1) bytes ($(since "$t0"))" >&2
+}
+
+case $cmd in
+  convert) convert "$out" || exit 1 ;;
+  edge) record_edge "$out" || exit 1 ;;
+  verify)
+    rm -rf "$work/fresh"
+    convert "$work/fresh" || exit 1
+    if diff -r "$out" "$work/fresh" > "$work/verify.diff"; then
+      echo "javac-vendor verify: ${out#$root/} is the conversion and the recording, byte for byte ($(find "$out" -type f | wc -l) files)"
+    else
+      echo "javac-vendor verify: ${out#$root/} differs from a fresh conversion ($work/verify.diff: $(wc -l < "$work/verify.diff") lines)"
+      exit 1
+    fi ;;
+  check)
+    . "$root/bin/lib/tools.bash"
+    mkdir -p "$work/check"
+    t0=$(date +%s)
+    # shellcheck disable=SC2046
+    bin/j2g --program $(tool_args "$out") --edge "$root/jdk/edge.edn" --edge "$out/edge.edn" --out "$work/check/j2g" \
+      > "$work/check/j2g.log" 2>&1
+    st=$?
+    grep '^j2g: .*classes analyzed\|^j2g: reachability\|^j2g: error' "$work/check/j2g.log"
+    [ $st = 0 ] || { tail -20 "$work/check/j2g.log"; fail "j2g failed ($work/check/j2g.log)"; }
+    if grep -q '^j2g: .*classes analyzed.*failures' "$work/check/j2g.log"; then
+      grep -A100 '^j2g: analysis failures' "$work/check/j2g.log" | head -40
+      fail "classes of javac's world failed their analysis ($work/check/j2g.log)"
+    fi
+    echo "javac-vendor check: j2g translates javac's world, no failures ($(since "$t0"))" ;;
+  build) exec bin/arbace-go --build-java "$@" ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac

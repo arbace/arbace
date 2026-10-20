@@ -1,0 +1,1678 @@
+;; Converted from jdk26u src/jdk.compiler/share/classes/com/sun/tools/javac/jvm/Code.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.tools.javac.jvm)
+
+(import '(com.sun.tools.javac.code Attribute$TypeCompound
+                                   Flags
+                                   Symbol
+                                   Symbol$DynamicMethodSymbol
+                                   Symbol$MethodSymbol
+                                   Symbol$VarSymbol
+                                   Symtab
+                                   Type
+                                   Type$ArrayType
+                                   Type$JCPrimitiveType
+                                   Type$MethodType
+                                   TypeAnnotationPosition
+                                   TypeTag
+                                   Types)
+        '(com.sun.tools.javac.resources CompilerProperties$Errors)
+        '(com.sun.tools.javac.util ArrayUtils
+                                   Assert
+                                   Bits
+                                   JCDiagnostic$DiagnosticPosition
+                                   List
+                                   ListBuffer
+                                   Log
+                                   Name
+                                   Names
+                                   Position
+                                   Position$LineMap)
+        '(java.util ArrayList Arrays)
+        '(java.util.function IntFunction Predicate ToIntBiFunction ToIntFunction))
+
+(defclass ^:public Code
+  (field ^:public ^:final ^boolean debugCode)
+
+  (field ^:public ^:final ^boolean needStackMap)
+
+  (defclass ^:public ^:enum StackMapFormat
+    (constants
+      NONE
+      (CLDC [] (method getAttributeName ^Name [this ^Names names] (.-StackMap names)))
+      (JSR202 [] (method getAttributeName ^Name [this ^Names names] (.-StackMapTable names))))
+
+    (method getAttributeName ^Name [this ^Names names] (.-empty names)))
+
+  (field ^:final ^Types types)
+
+  (field ^:final ^Symtab syms)
+
+  (field ^:final ^PoolWriter poolWriter)
+
+  (field ^:public ^int max_stack 0)
+
+  (field ^:public ^int max_locals 0)
+
+  (field ^:public ^byte/1 code (new byte/1 64))
+
+  (field ^:public ^int cp 0)
+
+  (method ^:public checkLimits ^boolean [this ^JCDiagnostic$DiagnosticPosition pos ^Log log]
+    (cond
+      (> cp ClassFile/MAX_CODE) (do (.error log pos CompilerProperties$Errors/LimitCode) true)
+      (> max_locals ClassFile/MAX_LOCALS)
+        (do (.error log pos CompilerProperties$Errors/LimitLocals) true)
+      (> max_stack ClassFile/MAX_STACK)
+        (do (.error log pos CompilerProperties$Errors/LimitStack) true)
+      :else false))
+
+  (field ^{:tag (ListBuffer char/1)} catchInfo (ListBuffer.))
+
+  (field ^{:tag (List char/1)} lineInfo (List/nil))
+
+  (field ^:public ^CRTable crt)
+
+  (field ^:public ^boolean fatcode)
+
+  (field ^:private ^boolean alive true)
+
+  (field ^State state)
+
+  (field ^:private ^boolean fixedPc false)
+
+  (field ^:public ^int nextreg 0)
+
+  (field ^Chain pendingJumps nil)
+
+  (field ^int pendingStatPos Position/NOPOS)
+
+  (field ^boolean pendingStackMap false)
+
+  (field ^StackMapFormat stackMap)
+
+  (field ^boolean varDebugInfo)
+
+  (field ^boolean lineDebugInfo)
+
+  (field ^Position$LineMap lineMap)
+
+  (field ^:final ^Symbol$MethodSymbol meth)
+
+  (field ^:private ^int letExprStackPos 0)
+
+  (constructor ^:public [this ^Symbol$MethodSymbol meth ^boolean fatcode ^Position$LineMap lineMap
+                         ^boolean varDebugInfo ^StackMapFormat stackMap ^boolean debugCode
+                         ^CRTable crt ^Symtab syms ^Types types ^PoolWriter poolWriter]
+    (set! (.-meth this) meth)
+    (set! (.-fatcode this) fatcode)
+    (set! (.-lineMap this) lineMap)
+    (set! (.-lineDebugInfo this) (some? lineMap))
+    (set! (.-varDebugInfo this) varDebugInfo)
+    (set! (.-crt this) crt)
+    (set! (.-syms this) syms)
+    (set! (.-types this) types)
+    (set! (.-poolWriter this) poolWriter)
+    (set! (.-debugCode this) debugCode)
+    (set! (.-stackMap this) stackMap)
+    (switch stackMap
+      (CLDC JSR202) (set! (.-needStackMap this) true)
+      (set! (.-needStackMap this) false))
+    (set! state (State.))
+    (set! lvar (new LocalVar/1 20)))
+
+  (method ^:public ^:static typecode ^int [^Type type]
+    (switch (.getTag type)
+      BYTE ByteCodes/BYTEcode
+      SHORT ByteCodes/SHORTcode
+      CHAR ByteCodes/CHARcode
+      INT ByteCodes/INTcode
+      LONG ByteCodes/LONGcode
+      FLOAT ByteCodes/FLOATcode
+      DOUBLE ByteCodes/DOUBLEcode
+      BOOLEAN ByteCodes/BYTEcode
+      VOID ByteCodes/VOIDcode
+      (CLASS ARRAY METHOD BOT TYPEVAR UNINITIALIZED_THIS UNINITIALIZED_OBJECT) ByteCodes/OBJECTcode
+      (throw (AssertionError. (java-str "typecode " (.getTag type))))))
+
+  (method ^:public ^:static truncate ^int [^int tc]
+    (switch tc (ByteCodes/BYTEcode ByteCodes/SHORTcode ByteCodes/CHARcode) ByteCodes/INTcode tc))
+
+  (method ^:public ^:static width ^int [^int typecode]
+    (switch typecode (ByteCodes/LONGcode ByteCodes/DOUBLEcode) 2 ByteCodes/VOIDcode 0 1))
+
+  (method ^:public ^:static width ^int [^Type type]
+    (if (nil? type) 1 (Code/width (Code/typecode type))))
+
+  (method ^:public ^:static width ^int [^{:tag (List Type)} types]
+    (let [^:mutable ^int w 0]
+      (loop [^{:tag (List Type)} l types]
+        (when (.nonEmpty l)
+          (set! w (unchecked-add-int w (Code/width (cast Type (.-head l)))))
+          (recur (.-tail l))))
+      w))
+
+  (method ^:public ^:static arraycode ^int [^Type type]
+    (switch (.getTag type)
+      BYTE 8
+      BOOLEAN 4
+      SHORT 9
+      CHAR 5
+      INT 10
+      LONG 11
+      FLOAT 6
+      DOUBLE 7
+      CLASS 0
+      ARRAY 1
+      (throw (AssertionError. (java-str "arraycode " type)))))
+
+  (method ^:public curCP ^int [this]
+    (when (some? pendingJumps) (.resolvePending this))
+    (when-not (== pendingStatPos Position/NOPOS) (.markStatBegin this))
+    (set! fixedPc true)
+    cp)
+
+  (method ^:private emit1 ^void [this ^int od]
+    (when-not (not alive)
+      (set! code (ArrayUtils/ensureCapacity code cp))
+      (aset code (let [old-1 cp] (set! cp (unchecked-inc-int cp)) old-1) (unchecked-byte od))))
+
+  (method ^:private emit2 ^void [this ^int od]
+    (when-not (not alive)
+      (if (> (unchecked-add-int cp 2) (alength code))
+          (do (.emit1 this (bit-shift-right-int od 8)) (.emit1 this od))
+          (do
+            (aset code
+                  (let [old-2 cp] (set! cp (unchecked-inc-int cp)) old-2)
+                  (unchecked-byte (bit-shift-right-int od 8)))
+            (aset code (let [old-3 cp] (set! cp (unchecked-inc-int cp)) old-3) (unchecked-byte od))))))
+
+  (method ^:public emit4 ^void [this ^int od]
+    (when-not (not alive)
+      (if (> (unchecked-add-int cp 4) (alength code))
+          (do
+            (.emit1 this (bit-shift-right-int od 24))
+            (.emit1 this (bit-shift-right-int od 16))
+            (.emit1 this (bit-shift-right-int od 8))
+            (.emit1 this od))
+          (do
+            (aset code
+                  (let [old-4 cp] (set! cp (unchecked-inc-int cp)) old-4)
+                  (unchecked-byte (bit-shift-right-int od 24)))
+            (aset code
+                  (let [old-5 cp] (set! cp (unchecked-inc-int cp)) old-5)
+                  (unchecked-byte (bit-shift-right-int od 16)))
+            (aset code
+                  (let [old-6 cp] (set! cp (unchecked-inc-int cp)) old-6)
+                  (unchecked-byte (bit-shift-right-int od 8)))
+            (aset code (let [old-7 cp] (set! cp (unchecked-inc-int cp)) old-7) (unchecked-byte od))))))
+
+  (method ^:private emitop ^void [this ^int op]
+    (when (some? pendingJumps) (.resolvePending this))
+    (when alive
+      (when-not (== pendingStatPos Position/NOPOS) (.markStatBegin this))
+      (when pendingStackMap (set! pendingStackMap false) (.emitStackMap this))
+      (when debugCode
+        (.println System/err
+                  (java-str "emit@" cp " stack=" (.-stacksize state) ": " (Code/mnem op))))
+      (.emit1 this op)))
+
+  (method postop ^void [this]
+    (Assert/check (or alive (.isStatementStart this))))
+
+  (method ^:public emitLdc ^void [this ^PoolConstant$LoadableConstant constant]
+    (let [od (.putConstant poolWriter constant)
+          constantType (.constantType types constant)]
+      (cond
+        (or (.hasTag constantType TypeTag/LONG) (.hasTag constantType TypeTag/DOUBLE))
+          (.emitop2 this ByteCodes/ldc2w od constant)
+        (<= od 255) (.emitop1 this ByteCodes/ldc1 od constant)
+        :else (.emitop2 this ByteCodes/ldc2 od constant))))
+
+  (method ^:public emitMultianewarray ^void [this ^int ndims ^int type ^Type arrayType]
+    (.emitop this ByteCodes/multianewarray)
+    (when-not (not alive)
+      (.emit2 this type)
+      (.emit1 this ndims)
+      (.pop state ndims)
+      (.push state arrayType)))
+
+  (method ^:public emitNewarray ^void [this ^int elemcode ^Type arrayType]
+    (.emitop this ByteCodes/newarray)
+    (when-not (not alive) (.emit1 this elemcode) (.pop state 1) (.push state arrayType)))
+
+  (method ^:public emitAnewarray ^void [this ^int od ^Type arrayType]
+    (.emitop this ByteCodes/anewarray)
+    (when-not (not alive) (.emit2 this od) (.pop state 1) (.push state arrayType)))
+
+  (method ^:public emitInvokeinterface ^void [this ^Symbol member ^Type mtype]
+    (let [argsize (Code/width (.getParameterTypes mtype))]
+      (.emitop this ByteCodes/invokeinterface)
+      (when-not (not alive)
+        (.emit2 this (.putMember poolWriter member))
+        (.emit1 this (unchecked-add-int argsize 1))
+        (.emit1 this 0)
+        (.pop state (unchecked-add-int argsize 1))
+        (.push state (.getReturnType mtype)))))
+
+  (method ^:public emitInvokespecial ^void [this ^Symbol member ^Type mtype]
+    (let [argsize (Code/width (.getParameterTypes mtype))]
+      (.emitop this ByteCodes/invokespecial)
+      (when-not (not alive)
+        (.emit2 this (.putMember poolWriter member))
+        (.pop state argsize)
+        (when (.isConstructor member)
+          (.markInitialized state (cast UninitializedType (.peek state))))
+        (.pop state 1)
+        (.push state (.getReturnType mtype)))))
+
+  (method ^:public emitInvokestatic ^void [this ^Symbol member ^Type mtype]
+    (let [argsize (Code/width (.getParameterTypes mtype))]
+      (.emitop this ByteCodes/invokestatic)
+      (when-not (not alive)
+        (.emit2 this (.putMember poolWriter member))
+        (.pop state argsize)
+        (.push state (.getReturnType mtype)))))
+
+  (method ^:public emitInvokevirtual ^void [this ^Symbol member ^Type mtype]
+    (let [argsize (Code/width (.getParameterTypes mtype))]
+      (.emitop this ByteCodes/invokevirtual)
+      (when-not (not alive)
+        (.emit2 this (.putMember poolWriter member))
+        (.pop state (unchecked-add-int argsize 1))
+        (.push state (.getReturnType mtype)))))
+
+  (method ^:public emitInvokedynamic ^void [this ^Symbol$DynamicMethodSymbol dynMember ^Type mtype]
+    (let [argsize (Code/width (.getParameterTypes mtype))]
+      (.emitop this ByteCodes/invokedynamic)
+      (when-not (not alive)
+        (.emit2 this (.putDynamic poolWriter dynMember))
+        (.emit2 this 0)
+        (.pop state argsize)
+        (.push state (.getReturnType mtype)))))
+
+  (method ^:public emitop0 ^void [this ^int op]
+    (.emitop this op)
+    (when-not (not alive)
+      (switch op
+        ByteCodes/aaload
+          (do
+            (.pop state 1)
+            (let [a (aget (.-stack state) (unchecked-subtract-int (.-stacksize state) 1))]
+              (Assert/check (not (.hasTag a TypeTag/BOT)))
+              (.pop state 1)
+              (.push state (.erasure types (.elemtype types a)))))
+        ByteCodes/goto_ (.markDead this)
+        (ByteCodes/nop ByteCodes/ineg ByteCodes/lneg ByteCodes/fneg ByteCodes/dneg) nil
+        ByteCodes/aconst_null (.push state (.-botType syms))
+        (ByteCodes/iconst_m1 ByteCodes/iconst_0
+                             ByteCodes/iconst_1
+                             ByteCodes/iconst_2
+                             ByteCodes/iconst_3
+                             ByteCodes/iconst_4
+                             ByteCodes/iconst_5
+                             ByteCodes/iload_0
+                             ByteCodes/iload_1
+                             ByteCodes/iload_2
+                             ByteCodes/iload_3)
+          (.push state (.-intType syms))
+        (ByteCodes/lconst_0 ByteCodes/lconst_1
+                            ByteCodes/lload_0
+                            ByteCodes/lload_1
+                            ByteCodes/lload_2
+                            ByteCodes/lload_3)
+          (.push state (.-longType syms))
+        (ByteCodes/fconst_0 ByteCodes/fconst_1
+                            ByteCodes/fconst_2
+                            ByteCodes/fload_0
+                            ByteCodes/fload_1
+                            ByteCodes/fload_2
+                            ByteCodes/fload_3)
+          (.push state (.-floatType syms))
+        (ByteCodes/dconst_0 ByteCodes/dconst_1
+                            ByteCodes/dload_0
+                            ByteCodes/dload_1
+                            ByteCodes/dload_2
+                            ByteCodes/dload_3)
+          (.push state (.-doubleType syms))
+        ByteCodes/aload_0 (.push state (.-type (.-sym (aget lvar 0))))
+        ByteCodes/aload_1 (.push state (.-type (.-sym (aget lvar 1))))
+        ByteCodes/aload_2 (.push state (.-type (.-sym (aget lvar 2))))
+        ByteCodes/aload_3 (.push state (.-type (.-sym (aget lvar 3))))
+        (ByteCodes/iaload ByteCodes/baload ByteCodes/caload ByteCodes/saload)
+          (do (.pop state 2) (.push state (.-intType syms)))
+        ByteCodes/laload (do (.pop state 2) (.push state (.-longType syms)))
+        ByteCodes/faload (do (.pop state 2) (.push state (.-floatType syms)))
+        ByteCodes/daload (do (.pop state 2) (.push state (.-doubleType syms)))
+        (ByteCodes/istore_0 ByteCodes/istore_1
+                            ByteCodes/istore_2
+                            ByteCodes/istore_3
+                            ByteCodes/fstore_0
+                            ByteCodes/fstore_1
+                            ByteCodes/fstore_2
+                            ByteCodes/fstore_3
+                            ByteCodes/astore_0
+                            ByteCodes/astore_1
+                            ByteCodes/astore_2
+                            ByteCodes/astore_3
+                            ByteCodes/pop
+                            ByteCodes/lshr
+                            ByteCodes/lshl
+                            ByteCodes/lushr)
+          (.pop state 1)
+        (ByteCodes/areturn ByteCodes/ireturn ByteCodes/freturn)
+          (do (Assert/check (== (.-nlocks state) 0)) (.pop state 1) (.markDead this))
+        ByteCodes/athrow (do (.pop state (.-stacksize state)) (.markDead this))
+        (ByteCodes/lstore_0 ByteCodes/lstore_1
+                            ByteCodes/lstore_2
+                            ByteCodes/lstore_3
+                            ByteCodes/dstore_0
+                            ByteCodes/dstore_1
+                            ByteCodes/dstore_2
+                            ByteCodes/dstore_3
+                            ByteCodes/pop2)
+          (.pop state 2)
+        (ByteCodes/lreturn ByteCodes/dreturn)
+          (do (Assert/check (== (.-nlocks state) 0)) (.pop state 2) (.markDead this))
+        ByteCodes/dup
+          (.push state (aget (.-stack state) (unchecked-subtract-int (.-stacksize state) 1)))
+        ByteCodes/return_ (do (Assert/check (== (.-nlocks state) 0)) (.markDead this))
+        ByteCodes/arraylength (do (.pop state 1) (.push state (.-intType syms)))
+        (ByteCodes/isub ByteCodes/iadd
+                        ByteCodes/imul
+                        ByteCodes/idiv
+                        ByteCodes/imod
+                        ByteCodes/ishl
+                        ByteCodes/ishr
+                        ByteCodes/iushr
+                        ByteCodes/iand
+                        ByteCodes/ior
+                        ByteCodes/ixor)
+          (.pop state 1)
+        ByteCodes/aastore (.pop state 3)
+        (ByteCodes/land ByteCodes/lor
+                        ByteCodes/lxor
+                        ByteCodes/lmod
+                        ByteCodes/ldiv
+                        ByteCodes/lmul
+                        ByteCodes/lsub
+                        ByteCodes/ladd)
+          (.pop state 2)
+        ByteCodes/lcmp (do (.pop state 4) (.push state (.-intType syms)))
+        ByteCodes/l2i (do (.pop state 2) (.push state (.-intType syms)))
+        ByteCodes/i2l (do (.pop state 1) (.push state (.-longType syms)))
+        ByteCodes/i2f (do (.pop state 1) (.push state (.-floatType syms)))
+        ByteCodes/i2d (do (.pop state 1) (.push state (.-doubleType syms)))
+        ByteCodes/l2f (do (.pop state 2) (.push state (.-floatType syms)))
+        ByteCodes/l2d (do (.pop state 2) (.push state (.-doubleType syms)))
+        ByteCodes/f2i (do (.pop state 1) (.push state (.-intType syms)))
+        ByteCodes/f2l (do (.pop state 1) (.push state (.-longType syms)))
+        ByteCodes/f2d (do (.pop state 1) (.push state (.-doubleType syms)))
+        ByteCodes/d2i (do (.pop state 2) (.push state (.-intType syms)))
+        ByteCodes/d2l (do (.pop state 2) (.push state (.-longType syms)))
+        ByteCodes/d2f (do (.pop state 2) (.push state (.-floatType syms)))
+        (ByteCodes/tableswitch ByteCodes/lookupswitch) (.pop state 1)
+        ByteCodes/dup_x1
+          (let [val1 (.pop1 state)
+                val2 (.pop1 state)]
+            (.push state val1)
+            (.push state val2)
+            (.push state val1))
+        ByteCodes/bastore (.pop state 3)
+        (ByteCodes/int2byte ByteCodes/int2char ByteCodes/int2short) nil
+        (ByteCodes/fmul ByteCodes/fadd ByteCodes/fsub ByteCodes/fdiv ByteCodes/fmod) (.pop state 1)
+        (ByteCodes/castore ByteCodes/iastore ByteCodes/fastore ByteCodes/sastore) (.pop state 3)
+        (ByteCodes/lastore ByteCodes/dastore) (.pop state 4)
+        ByteCodes/dup2
+          (if (some? (aget (.-stack state) (unchecked-subtract-int (.-stacksize state) 1)))
+              (let [value1 (.pop1 state)
+                    value2 (.pop1 state)]
+                (.push state value2)
+                (.push state value1)
+                (.push state value2)
+                (.push state value1))
+              (let [value (.pop2 state)] (.push state value) (.push state value)))
+        ByteCodes/dup2_x1
+          (if (some? (aget (.-stack state) (unchecked-subtract-int (.-stacksize state) 1)))
+              (let [value1 (.pop1 state)
+                    value2 (.pop1 state)
+                    value3 (.pop1 state)]
+                (.push state value2)
+                (.push state value1)
+                (.push state value3)
+                (.push state value2)
+                (.push state value1))
+              (let [value1 (.pop2 state)
+                    value2 (.pop1 state)]
+                (.push state value1)
+                (.push state value2)
+                (.push state value1)))
+        ByteCodes/dup2_x2
+          (if (some? (aget (.-stack state) (unchecked-subtract-int (.-stacksize state) 1)))
+              (let [value1 (.pop1 state)
+                    value2 (.pop1 state)]
+                (if (some? (aget (.-stack state) (unchecked-subtract-int (.-stacksize state) 1)))
+                    (let [value3 (.pop1 state)
+                          value4 (.pop1 state)]
+                      (.push state value2)
+                      (.push state value1)
+                      (.push state value4)
+                      (.push state value3)
+                      (.push state value2)
+                      (.push state value1))
+                    (let [value3 (.pop2 state)]
+                      (.push state value2)
+                      (.push state value1)
+                      (.push state value3)
+                      (.push state value2)
+                      (.push state value1))))
+              (let [value1 (.pop2 state)]
+                (if (some? (aget (.-stack state) (unchecked-subtract-int (.-stacksize state) 1)))
+                    (let [value2 (.pop1 state)
+                          value3 (.pop1 state)]
+                      (.push state value1)
+                      (.push state value3)
+                      (.push state value2)
+                      (.push state value1))
+                    (let [value2 (.pop2 state)]
+                      (.push state value1)
+                      (.push state value2)
+                      (.push state value1)))))
+        ByteCodes/dup_x2
+          (let [value1 (.pop1 state)]
+            (if (some? (aget (.-stack state) (unchecked-subtract-int (.-stacksize state) 1)))
+                (let [value2 (.pop1 state)
+                      value3 (.pop1 state)]
+                  (.push state value1)
+                  (.push state value3)
+                  (.push state value2)
+                  (.push state value1))
+                (let [value2 (.pop2 state)]
+                  (.push state value1)
+                  (.push state value2)
+                  (.push state value1))))
+        (ByteCodes/fcmpl ByteCodes/fcmpg) (do (.pop state 2) (.push state (.-intType syms)))
+        (ByteCodes/dcmpl ByteCodes/dcmpg) (do (.pop state 4) (.push state (.-intType syms)))
+        ByteCodes/swap
+          (let [value1 (.pop1 state)
+                value2 (.pop1 state)]
+            (.push state value1)
+            (.push state value2))
+        (ByteCodes/dadd ByteCodes/dsub ByteCodes/dmul ByteCodes/ddiv ByteCodes/dmod) (.pop state 2)
+        ByteCodes/ret (.markDead this)
+        ByteCodes/wide (return)
+        (ByteCodes/monitorenter ByteCodes/monitorexit) (.pop state 1)
+        (throw (AssertionError. (Code/mnem op))))
+      (.postop this)))
+
+  (method ^:public emitop1 ^void [this ^int op ^int od]
+    (.emitop1 this op od nil))
+
+  (method ^:public emitop1 ^void [this ^int op ^int od ^PoolConstant data]
+    (.emitop this op)
+    (when-not (not alive)
+      (.emit1 this od)
+      (switch op
+        ByteCodes/bipush (.push state (.-intType syms))
+        ByteCodes/ldc1 (.push state (.constantType types (cast PoolConstant$LoadableConstant data)))
+        (throw (AssertionError. (Code/mnem op))))
+      (.postop this)))
+
+  (method ^:public emitop1w ^void [this ^int op ^int od]
+    (if (> od 0xFF)
+        (do (.emitop this ByteCodes/wide) (.emitop this op) (.emit2 this od))
+        (do (.emitop this op) (.emit1 this od)))
+    (when-not (not alive)
+      (switch op
+        ByteCodes/iload (.push state (.-intType syms))
+        ByteCodes/lload (.push state (.-longType syms))
+        ByteCodes/fload (.push state (.-floatType syms))
+        ByteCodes/dload (.push state (.-doubleType syms))
+        ByteCodes/aload (.push state (.-type (.-sym (aget lvar od))))
+        (ByteCodes/lstore ByteCodes/dstore) (.pop state 2)
+        (ByteCodes/istore ByteCodes/fstore ByteCodes/astore) (.pop state 1)
+        ByteCodes/ret (.markDead this)
+        (throw (AssertionError. (Code/mnem op))))
+      (.postop this)))
+
+  (method ^:public emitop1w ^void [this ^int op ^int od1 ^int od2]
+    (if (or (or (> od1 0xFF) (< od2 -128)) (> od2 127))
+        (do (.emitop this ByteCodes/wide) (.emitop this op) (.emit2 this od1) (.emit2 this od2))
+        (do (.emitop this op) (.emit1 this od1) (.emit1 this od2)))
+    (when-not (not alive) (switch op ByteCodes/iinc nil (throw (AssertionError. (Code/mnem op))))))
+
+  (method ^:public emitop2 :type-params [(P extends PoolConstant)] ^void [this ^int op ^P constant
+                                                                          ^{:tag (ToIntBiFunction PoolWriter P)} poolFunc]
+    (let [od (.applyAsInt poolFunc poolWriter constant)] (.emitop2 this op od constant)))
+
+  (method ^:public emitop2 ^void [this ^int op ^int od]
+    (.emitop2 this op od nil))
+
+  (method ^:public emitop2 ^void [this ^int op ^int od ^PoolConstant data]
+    (.emitop this op)
+    (when-not (not alive)
+      (.emit2 this od)
+      (switch op
+        ByteCodes/getstatic (.push state (.erasure (cast Symbol data) types))
+        ByteCodes/putstatic (.pop state (.erasure (cast Symbol data) types))
+        ByteCodes/new_
+          (let [t (cast Type data)]
+            (.push state
+                   (UninitializedType/uninitializedObject
+                     (.erasure (.-tsym t) types)
+                     (unchecked-subtract-int cp 3))))
+        ByteCodes/sipush (.push state (.-intType syms))
+        (ByteCodes/if_acmp_null ByteCodes/if_acmp_nonnull
+                                ByteCodes/ifeq
+                                ByteCodes/ifne
+                                ByteCodes/iflt
+                                ByteCodes/ifge
+                                ByteCodes/ifgt
+                                ByteCodes/ifle)
+          (.pop state 1)
+        (ByteCodes/if_icmpeq ByteCodes/if_icmpne
+                             ByteCodes/if_icmplt
+                             ByteCodes/if_icmpge
+                             ByteCodes/if_icmpgt
+                             ByteCodes/if_icmple
+                             ByteCodes/if_acmpeq
+                             ByteCodes/if_acmpne)
+          (.pop state 2)
+        ByteCodes/goto_ (.markDead this)
+        ByteCodes/putfield (do (.pop state (.erasure (cast Symbol data) types)) (.pop state 1))
+        ByteCodes/getfield (do (.pop state 1) (.push state (.erasure (cast Symbol data) types)))
+        ByteCodes/checkcast
+          (do (.pop state 1) (let [t (.erasure types (cast Type data))] (.push state t)))
+        (ByteCodes/ldc2 ByteCodes/ldc2w)
+          (.push state (.constantType types (cast PoolConstant$LoadableConstant data)))
+        ByteCodes/instanceof_ (do (.pop state 1) (.push state (.-intType syms)))
+        ByteCodes/jsr nil
+        (throw (AssertionError. (Code/mnem op))))))
+
+  (method ^:public emitop4 ^void [this ^int op ^int od]
+    (.emitop this op)
+    (when-not (not alive)
+      (.emit4 this od)
+      (switch op
+        ByteCodes/goto_w (.markDead this)
+        ByteCodes/jsr_w nil
+        (throw (AssertionError. (Code/mnem op))))))
+
+  (method ^:public align ^void [this ^int incr]
+    (when alive
+      (while (not (== (unchecked-remainder-int cp incr) 0)) (.emitop0 this ByteCodes/nop))))
+
+  (method ^:private put1 ^void [this ^int pc ^int op]
+    (aset code pc (unchecked-byte op)))
+
+  (method ^:private put2 ^void [this ^int pc ^int od]
+    (.put1 this pc (bit-shift-right-int od 8))
+    (.put1 this (unchecked-add-int pc 1) od))
+
+  (method ^:public put4 ^void [this ^int pc ^int od]
+    (.put1 this pc (bit-shift-right-int od 24))
+    (.put1 this (unchecked-add-int pc 1) (bit-shift-right-int od 16))
+    (.put1 this (unchecked-add-int pc 2) (bit-shift-right-int od 8))
+    (.put1 this (unchecked-add-int pc 3) od))
+
+  (method ^:private get1 ^int [this ^int pc]
+    (bit-and-int (aget code pc) 0xFF))
+
+  (method ^:private get2 ^int [this ^int pc]
+    (bit-or-int (bit-shift-left-int (.get1 this pc) 8) (.get1 this (unchecked-add-int pc 1))))
+
+  (method ^:public get4 ^int [this ^int pc]
+    (bit-or-int (bit-or-int (bit-or-int (bit-shift-left-int (.get1 this pc) 24)
+                                        (bit-shift-left-int
+                                          (.get1 this (unchecked-add-int pc 1))
+                                          16))
+                            (bit-shift-left-int (.get1 this (unchecked-add-int pc 2)) 8))
+                (.get1 this (unchecked-add-int pc 3))))
+
+  (method ^:public isAlive ^boolean [this]
+    (or alive (some? pendingJumps)))
+
+  (method ^:public markDead ^void [this] (set! alive false))
+
+  (method ^:public entryPoint ^int [this]
+    (let [pc (.curCP this)] (set! alive true) (set! pendingStackMap needStackMap) pc))
+
+  (method ^:public entryPoint ^int [this ^State state]
+    (let [pc (.curCP this)]
+      (set! alive true)
+      (let [newState (.dup state)]
+        (.setDefined this (.-defined newState))
+        (set! (.-state this) newState)
+        (Assert/check (<= (.-stacksize state) max_stack))
+        (when debugCode (.println System/err (java-str "entry point " state)))
+        (set! pendingStackMap needStackMap)
+        pc)))
+
+  (method ^:public entryPoint ^int [this ^State state ^Type pushed]
+    (let [pc (.curCP this)]
+      (set! alive true)
+      (let [newState (.dup state)]
+        (.setDefined this (.-defined newState))
+        (set! (.-state this) newState)
+        (Assert/check (<= (.-stacksize state) max_stack))
+        (.push (.-state this) pushed)
+        (when debugCode (.println System/err (java-str "entry point " state)))
+        (set! pendingStackMap needStackMap)
+        pc)))
+
+  (method ^:public setLetExprStackPos ^int [this ^int pos]
+    (let [res letExprStackPos] (set! letExprStackPos pos) res))
+
+  (method ^:public isStatementStart ^boolean [this]
+    (or (not alive) (== (.-stacksize state) letExprStackPos)))
+
+  (defclass ^:static StackMapFrame
+    (field ^int pc)
+
+    (field ^Type/1 locals)
+
+    (field ^Type/1 stack))
+
+  (field ^StackMapFrame/1 stackMapBuffer nil)
+
+  (field ^ClassWriter$StackMapTableFrame/1 stackMapTableBuffer nil)
+
+  (field ^int stackMapBufferSize 0)
+
+  (field ^int lastStackMapPC -1)
+
+  (field ^StackMapFrame lastFrame nil)
+
+  (field ^StackMapFrame frameBeforeLast nil)
+
+  (method ^:public emitStackMap ^void [this]
+    (let [pc (.curCP this)]
+      (when-not (not needStackMap)
+        (switch stackMap
+          CLDC (.emitCLDCStackMap this pc (.getLocalsSize this))
+          JSR202 (.emitStackMapFrame this pc (.getLocalsSize this))
+          (throw (AssertionError. "Should have chosen a stackmap format")))
+        (when debugCode (.dump state pc)))))
+
+  (method ^:private getLocalsSize ^int [this]
+    (let [^:mutable ^int nextLocal 0]
+      (loop [^int i (unchecked-subtract-int max_locals 1)]
+        (if (>= i 0)
+            (if (and (.isMember (.-defined state) i) (some? (aget lvar i)))
+                (set! nextLocal
+                      (unchecked-add-int i (Code/width (.erasure (.-sym (aget lvar i)) types))))
+                (recur (unchecked-dec-int i)))
+            nil))
+      nextLocal))
+
+  (method emitCLDCStackMap ^void [this ^int pc ^int localsSize]
+    (when (== lastStackMapPC pc)
+      (aset stackMapBuffer (set! stackMapBufferSize (unchecked-dec-int stackMapBufferSize)) nil))
+    (set! lastStackMapPC pc)
+    (if (nil? stackMapBuffer)
+        (set! stackMapBuffer (new StackMapFrame/1 20))
+        (set! stackMapBuffer
+              (cast StackMapFrame/1 (ArrayUtils/ensureCapacity stackMapBuffer stackMapBufferSize))))
+    (let [frame (aset stackMapBuffer
+                      (let [old-8 stackMapBufferSize]
+                        (set! stackMapBufferSize (unchecked-inc-int stackMapBufferSize))
+                        old-8)
+                      (StackMapFrame.))]
+      (set! (.-pc frame) pc)
+      (set! (.-locals frame) (new Type/1 localsSize))
+      (loop [^int i 0]
+        (if (< i localsSize)
+            (if (and (.isMember (.-defined state) i) (some? (aget lvar i)))
+                (let [^:mutable vtype (.-type (.-sym (aget lvar i)))]
+                  (when-not (instance? UninitializedType vtype) (set! vtype (.erasure types vtype)))
+                  (aset (.-locals frame) i vtype)
+                  (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i)))
+            nil))
+      (set! (.-stack frame) (new Type/1 (.-stacksize state)))
+      (loop [^int i 0]
+        (when (< i (.-stacksize state))
+          (aset (.-stack frame) i (aget (.-stack state) i))
+          (recur (unchecked-inc-int i))))))
+
+  (method emitStackMapFrame ^void [this ^int pc ^int localsSize]
+    (if (nil? lastFrame)
+        (set! lastFrame (.getInitialFrame this))
+        (when (== (.-pc lastFrame) pc)
+          (aset stackMapTableBuffer
+                (set! stackMapBufferSize (unchecked-dec-int stackMapBufferSize))
+                nil)
+          (set! lastFrame frameBeforeLast)
+          (set! frameBeforeLast nil)))
+    (let [frame (StackMapFrame.)]
+      (set! (.-pc frame) pc)
+      (let [^:mutable ^int localCount 0
+            locals (new Type/1 localsSize)]
+        (let [^:mutable ^int i 0]
+          (while (< i localsSize)
+            (when (and (.isMember (.-defined state) i) (some? (aget lvar i)))
+              (let [^:mutable vtype (.-type (.-sym (aget lvar i)))]
+                (when-not (instance? UninitializedType vtype) (set! vtype (.erasure types vtype)))
+                (aset locals i vtype)
+                (when (> (Code/width vtype) 1) (set! i (unchecked-inc-int i)))))
+            (set! i (unchecked-inc-int i))
+            (set! localCount (unchecked-inc-int localCount))))
+        (set! (.-locals frame) (new Type/1 localCount))
+        (let [^:mutable ^int i 0
+              ^:mutable ^int j 0]
+          (while (< i localsSize)
+            (Assert/check (< j localCount))
+            (aset (.-locals frame) j (aget locals i))
+            (when (> (Code/width (aget locals i)) 1) (set! i (unchecked-inc-int i)))
+            (set! i (unchecked-inc-int i))
+            (set! j (unchecked-inc-int j))))
+        (let [^:mutable ^int stackCount 0]
+          (loop [^int i 0]
+            (if (< i (.-stacksize state))
+                (if (some? (aget (.-stack state) i))
+                    (do
+                      (set! stackCount (unchecked-inc-int stackCount))
+                      (recur (unchecked-inc-int i)))
+                    (recur (unchecked-inc-int i)))
+                nil))
+          (set! (.-stack frame) (new Type/1 stackCount))
+          (set! stackCount 0)
+          (loop [^int i 0]
+            (if (< i (.-stacksize state))
+                (if (some? (aget (.-stack state) i))
+                    (do
+                      (aset (.-stack frame) stackCount (.erasure types (aget (.-stack state) i)))
+                      (set! stackCount (unchecked-inc-int stackCount))
+                      (recur (unchecked-inc-int i)))
+                    (recur (unchecked-inc-int i)))
+                nil))
+          (if (nil? stackMapTableBuffer)
+              (set! stackMapTableBuffer (new ClassWriter$StackMapTableFrame/1 20))
+              (set! stackMapTableBuffer
+                    (cast ClassWriter$StackMapTableFrame/1
+                          (ArrayUtils/ensureCapacity stackMapTableBuffer stackMapBufferSize))))
+          (aset stackMapTableBuffer
+                (let [old-9 stackMapBufferSize]
+                  (set! stackMapBufferSize (unchecked-inc-int stackMapBufferSize))
+                  old-9)
+                (ClassWriter$StackMapTableFrame/getInstance
+                  frame
+                  (.-pc lastFrame)
+                  (.-locals lastFrame)
+                  types))
+          (set! frameBeforeLast lastFrame)
+          (set! lastFrame frame)))))
+
+  (method getInitialFrame ^StackMapFrame [this]
+    (let [frame (StackMapFrame.)
+          ^{:tag (List Type)} arg_types (.-argtypes
+                                          (cast Type$MethodType (.externalType meth types)))
+          len (.length arg_types)
+          ^:mutable ^int count 0]
+      (if (not (.isStatic meth))
+          (let [thisType (.-type (.-owner meth))]
+            (set! (.-locals frame) (new Type/1 (unchecked-add-int len 1)))
+            (if (and (.isConstructor meth) (not (identical? thisType (.-objectType syms))))
+                (do
+                  (aset (.-locals frame) count (UninitializedType/uninitializedThis thisType))
+                  (set! count (unchecked-inc-int count)))
+                (do
+                  (aset (.-locals frame) count (.erasure types thisType))
+                  (set! count (unchecked-inc-int count)))))
+          (set! (.-locals frame) (new Type/1 len)))
+      (for-each [^Type arg_type arg_types]
+        (aset (.-locals frame) count (.erasure types arg_type))
+        (set! count (unchecked-inc-int count)))
+      (set! (.-pc frame) -1)
+      (set! (.-stack frame) nil)
+      frame))
+
+  (defclass ^:public ^:static Chain
+    (field ^:public ^:final ^int pc)
+
+    (field ^State state)
+
+    (field ^:public ^:final ^Chain next)
+
+    (constructor ^:public [this ^int pc ^Chain next ^State state]
+      (set! (.-pc this) pc)
+      (set! (.-next this) next)
+      (set! (.-state this) state)))
+
+  (method ^:public ^:static negate ^int [^int opcode]
+    (cond
+      (== opcode ByteCodes/if_acmp_null) ByteCodes/if_acmp_nonnull
+      (== opcode ByteCodes/if_acmp_nonnull) ByteCodes/if_acmp_null
+      :else (unchecked-subtract-int (bit-xor-int (unchecked-add-int opcode 1) 1) 1)))
+
+  (method ^:public emitJump ^int [this ^int opcode]
+    (if fatcode
+        (do
+          (if (or (== opcode ByteCodes/goto_) (== opcode ByteCodes/jsr))
+              (.emitop4 this
+                        (unchecked-subtract-int (unchecked-add-int opcode ByteCodes/goto_w)
+                                                ByteCodes/goto_)
+                        0)
+              (do
+                (.emitop2 this (Code/negate opcode) 8)
+                (.emitop4 this ByteCodes/goto_w 0)
+                (set! alive true)
+                (set! pendingStackMap needStackMap)))
+          (unchecked-subtract-int cp 5))
+        (do (.emitop2 this opcode 0) (unchecked-subtract-int cp 3))))
+
+  (method ^:public branch ^Chain [this ^int opcode]
+    (let [^:mutable ^Chain result nil]
+      (when (== opcode ByteCodes/goto_) (set! result pendingJumps) (set! pendingJumps nil))
+      (when (and (not (== opcode ByteCodes/dontgoto)) (.isAlive this))
+        (set! result (Chain. (.emitJump this opcode) result (.dup state)))
+        (set! fixedPc fatcode)
+        (when (== opcode ByteCodes/goto_) (set! alive false)))
+      result))
+
+  (method ^:public resolve ^void [this ^:mutable ^Chain chain ^:mutable ^int target]
+    (let [^:mutable changed false
+          ^:mutable newState state]
+      (while (some? chain)
+        (Assert/check (and (not (identical? state (.-state chain)))
+                           (or (> target (.-pc chain)) (.isStatementStart this))))
+        (cond
+          (>= target cp) (set! target cp)
+          (== (.get1 this target) ByteCodes/goto_)
+            (if fatcode
+                (set! target (unchecked-add-int target (.get4 this (unchecked-add-int target 1))))
+                (set! target (unchecked-add-int target (.get2 this (unchecked-add-int target 1))))))
+        (if (and (and (and (== (.get1 this (.-pc chain)) ByteCodes/goto_)
+                           (== (unchecked-add-int (.-pc chain) 3) target))
+                      (== target cp))
+                 (not fixedPc))
+            (do
+              (when varDebugInfo (.adjustAliveRanges this cp -3))
+              (set! cp (unchecked-subtract-int cp 3))
+              (set! target (unchecked-subtract-int target 3))
+              (when (nil? (.-next chain)) (set! alive true) (break)))
+            (do
+              (cond
+                fatcode
+                  (.put4 this
+                         (unchecked-add-int (.-pc chain) 1)
+                         (unchecked-subtract-int target (.-pc chain)))
+                (or (< (unchecked-subtract-int target (.-pc chain)) Short/MIN_VALUE)
+                    (> (unchecked-subtract-int target (.-pc chain)) Short/MAX_VALUE))
+                  (set! fatcode true)
+                :else
+                  (.put2 this
+                         (unchecked-add-int (.-pc chain) 1)
+                         (unchecked-subtract-int target (.-pc chain))))
+              (Assert/check (or (not alive)
+                                (and (== (.-stacksize (.-state chain)) (.-stacksize newState))
+                                     (== (.-nlocks (.-state chain)) (.-nlocks newState)))))))
+        (set! fixedPc true)
+        (when (== cp target)
+          (set! changed true)
+          (when debugCode (.println System/err (java-str "resolving chain state=" (.-state chain))))
+          (if alive
+              (set! newState (.join (.-state chain) newState))
+              (do (set! newState (.-state chain)) (set! alive true))))
+        (set! chain (.-next chain)))
+      (Assert/check (or (not changed) (not (identical? state newState))))
+      (when-not (identical? state newState)
+        (.setDefined this (.-defined newState))
+        (set! state newState)
+        (set! pendingStackMap needStackMap))))
+
+  (method ^:public resolve ^void [this ^Chain chain]
+    (Assert/check (or (or (not alive) (nil? chain))
+                      (and (== (.-stacksize state) (.-stacksize (.-state chain)))
+                           (== (.-nlocks state) (.-nlocks (.-state chain))))))
+    (set! pendingJumps (Code/mergeChains chain pendingJumps)))
+
+  (method ^:public resolvePending ^void [this]
+    (let [x pendingJumps] (set! pendingJumps nil) (.resolve this x cp)))
+
+  (method ^:public ^:static mergeChains ^Chain [^Chain chain1 ^Chain chain2]
+    (cond
+      (nil? chain2) chain1
+      (nil? chain1) chain2
+      :else
+        (do
+          (Assert/check (and (== (.-stacksize (.-state chain1)) (.-stacksize (.-state chain2)))
+                             (== (.-nlocks (.-state chain1)) (.-nlocks (.-state chain2)))))
+          (if (< (.-pc chain1) (.-pc chain2))
+              (Chain. (.-pc chain2) (Code/mergeChains chain1 (.-next chain2)) (.-state chain2))
+              (Chain. (.-pc chain1) (Code/mergeChains (.-next chain1) chain2) (.-state chain1))))))
+
+  (method ^:public addCatch ^void [this ^char startPc ^char endPc ^char handlerPc ^char catchType]
+    (.append catchInfo (new char/1 [startPc endPc handlerPc catchType])))
+
+  (method ^:public compressCatchTable ^void [this]
+    (let [^{:tag (ListBuffer char/1)} compressedCatchInfo (ListBuffer.)
+          ^:mutable ^{:tag (List Integer)} handlerPcs (List/nil)]
+      (for-each [^char/1 catchEntry catchInfo]
+        (set! handlerPcs (.prepend handlerPcs (int (aget catchEntry 2)))))
+      (for-each [^char/1 catchEntry catchInfo]
+        (let [^int startpc (aget catchEntry 0)
+              ^int endpc (aget catchEntry 1)]
+          (when-not (or (== startpc endpc)
+                        (and (== startpc (unchecked-subtract-int endpc 1))
+                             (.contains handlerPcs startpc)))
+            (.append compressedCatchInfo catchEntry))))
+      (set! catchInfo compressedCatchInfo)))
+
+  (method ^:public addLineNumber ^void [this ^char startPc ^char lineNumber]
+    (when lineDebugInfo
+      (when (and (.nonEmpty lineInfo) (== (aget (cast char/1 (.-head lineInfo)) 0) startPc))
+        (set! lineInfo (.-tail lineInfo)))
+      (when (or (.isEmpty lineInfo) (not (== (aget (cast char/1 (.-head lineInfo)) 1) lineNumber)))
+        (set! lineInfo (.prepend lineInfo (new char/1 [startPc lineNumber]))))))
+
+  (method ^:public statBegin ^void [this ^int pos]
+    (when-not (== pos Position/NOPOS) (set! pendingStatPos pos)))
+
+  (method ^:public markStatBegin ^void [this]
+    (when (and alive lineDebugInfo)
+      (let [line (.getLineNumber lineMap pendingStatPos)
+            cp1 (unchecked-char cp)
+            line1 (unchecked-char line)]
+        (when (and (== cp1 cp) (== line1 line)) (.addLineNumber this cp1 line1))))
+    (set! pendingStatPos Position/NOPOS))
+
+  (defclass State
+    :implements [Cloneable]
+
+    (field ^Bits defined)
+
+    (field ^Type/1 stack)
+
+    (field ^int stacksize)
+
+    (field ^int/1 locks)
+
+    (field ^int nlocks)
+
+    (constructor [this] (set! defined (Bits.)) (set! stack (new Type/1 16)))
+
+    (method dup ^State [this]
+      (try
+        (let [state (cast State (.clone super))]
+          (set! (.-defined state) (Bits. defined))
+          (set! (.-stack state) (.clone stack))
+          (when (some? locks) (set! (.-locks state) (.clone locks)))
+          (when debugCode (.println System/err (java-str "duping state " this)) (.dump this))
+          state)
+        (catch CloneNotSupportedException ex (throw (AssertionError. ex)))))
+
+    (method lock ^void [this ^int register]
+      (if (nil? locks)
+          (set! locks (new int/1 20))
+          (set! locks (ArrayUtils/ensureCapacity locks nlocks)))
+      (aset locks nlocks register)
+      (set! nlocks (unchecked-inc-int nlocks)))
+
+    (method unlock ^void [this ^int register]
+      (set! nlocks (unchecked-dec-int nlocks))
+      (Assert/check (== (aget locks nlocks) register))
+      (aset locks nlocks -1))
+
+    (method push ^void [this ^:mutable ^Type t]
+      (when debugCode (.println System/err (java-str "   pushing " t)))
+      (switch (.getTag t) VOID (return) (BYTE CHAR SHORT BOOLEAN) (set! t (.-intType syms)) nil)
+      (set! stack (cast Type/1 (ArrayUtils/ensureCapacity stack (unchecked-add-int stacksize 2))))
+      (aset stack (let [old-10 stacksize] (set! stacksize (unchecked-inc-int stacksize)) old-10) t)
+      (switch (Code/width t)
+        1 nil
+        2
+          (aset stack
+                (let [old-11 stacksize] (set! stacksize (unchecked-inc-int stacksize)) old-11)
+                nil)
+        (throw (AssertionError. t)))
+      (when (> stacksize max_stack) (set! max_stack stacksize)))
+
+    (method pop1 ^Type [this]
+      (when debugCode (.println System/err (java-str "   popping " 1)))
+      (set! stacksize (unchecked-dec-int stacksize))
+      (let [result (aget stack stacksize)]
+        (aset stack stacksize nil)
+        (Assert/check (and (some? result) (== (Code/width result) 1)))
+        result))
+
+    (method peek ^Type [this]
+      (aget stack (unchecked-subtract-int stacksize 1)))
+
+    (method pop2 ^Type [this]
+      (when debugCode (.println System/err (java-str "   popping " 2)))
+      (set! stacksize (unchecked-subtract-int stacksize 2))
+      (let [result (aget stack stacksize)]
+        (aset stack stacksize nil)
+        (Assert/check (and (and (nil? (aget stack (unchecked-add-int stacksize 1))) (some? result))
+                           (== (Code/width result) 2)))
+        result))
+
+    (method pop ^void [this ^:mutable ^int n]
+      (when debugCode (.println System/err (java-str "   popping " n)))
+      (while (> n 0)
+        (aset stack (set! stacksize (unchecked-dec-int stacksize)) nil)
+        (set! n (unchecked-dec-int n))))
+
+    (method pop ^void [this ^Type t] (.pop this (Code/width t)))
+
+    (method forceStackTop ^void [this ^Type t]
+      (when-not (not alive)
+        (switch (.getTag t)
+          (CLASS ARRAY)
+            (let [width (Code/width t)
+                  old (aget stack (unchecked-subtract-int stacksize width))]
+              (Assert/check (.isSubtype types (.erasure types old) (.erasure types t)))
+              (aset stack (unchecked-subtract-int stacksize width) t))
+          nil)))
+
+    (method markInitialized ^void [this ^UninitializedType old]
+      (let [newtype (.initializedType old)]
+        (loop [^int i 0]
+          (if (< i stacksize)
+              (if (identical? (aget stack i) old)
+                  (do (aset stack i newtype) (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))
+              nil))
+        (loop [^int i 0]
+          (when (< i (alength lvar))
+            (let [lv (aget lvar i)]
+              (if (and (some? lv) (identical? (.-type (.-sym lv)) old))
+                  (let [^:mutable sym (.-sym lv)]
+                    (set! sym (.clone sym (.-owner sym)))
+                    (set! (.-type sym) newtype)
+                    (let [newlv (aset lvar i (LocalVar. sym))]
+                      (set! (.-aliveRanges newlv) (.-aliveRanges lv))
+                      (recur (unchecked-inc-int i))))
+                  (recur (unchecked-inc-int i))))))))
+
+    (method join ^State [this ^State other]
+      (.andSet defined (.-defined other))
+      (Assert/check (and (== stacksize (.-stacksize other)) (== nlocks (.-nlocks other))))
+      (let [^:mutable ^int i 0]
+        (while (< i stacksize)
+          (let [t (aget stack i)
+                tother (aget (.-stack other) i)
+                result (.commonSuperClass this t tother)
+                w (Code/width result)]
+            (aset stack i result)
+            (when (== w 2) (Assert/checkNull (aget stack (unchecked-add-int i 1))))
+            (set! i (unchecked-add-int i w)))))
+      this)
+
+    (method ^:private commonSuperClass ^Type [this ^Type t1 ^Type t2]
+      (cond
+        (identical? t1 t2) t1
+        (.isSubtype types t1 t2) t2
+        (.isSubtype types t2 t1) t1
+        :else
+          (let [es (.erasedSuper this t1 t2)]
+            (when (or (nil? es) (.hasTag es TypeTag/BOT))
+              (throw
+                (Assert/error (java-str "Cannot find a common super class of: " t1 " and " t2))))
+            es)))
+
+    (method ^:private erasedSuper ^Type [this ^:mutable ^Type t1 ^:mutable ^Type t2]
+      (if (and (.hasTag t1 TypeTag/ARRAY) (.hasTag t2 TypeTag/ARRAY))
+          (let [elem1 (.elemtype types t1)
+                elem2 (.elemtype types t2)]
+            (if (or (.isPrimitive elem1) (.isPrimitive elem2))
+                (if (identical? (.-tsym elem1) (.-tsym elem2)) t1 (.-serializableType syms))
+                (Type$ArrayType. (.erasedSuper this elem1 elem2) (.-arrayClass syms))))
+          (do
+            (set! t1 (.skipTypeVars types t1 false))
+            (set! t2 (.skipTypeVars types t2 false))
+            (let [^{:tag (List Type)} result (.closureMin
+                                               types
+                                               (.intersect
+                                                 types
+                                                 ^List (if (.hasTag t1 TypeTag/ARRAY)
+                                                           (List/of
+                                                             (.-serializableType syms)
+                                                             (.-cloneableType syms)
+                                                             (.-objectType syms))
+                                                           (.erasedSupertypes types t1))
+                                                 ^List (if (.hasTag t2 TypeTag/ARRAY)
+                                                           (List/of
+                                                             (.-serializableType syms)
+                                                             (.-cloneableType syms)
+                                                             (.-objectType syms))
+                                                           (.erasedSupertypes types t2))))]
+              (cast Type (.-head result))))))
+
+    (method dump ^void [this] (.dump this -1))
+
+    (method dump ^void [this ^int pc]
+      (.print System/err (java-str "stackMap for " (.-owner meth) "." meth))
+      (if (== pc -1) (.println System/out) (.println System/out (java-str " at " pc)))
+      (.println System/err " stack (from bottom):")
+      (loop [^int i 0]
+        (when (< i stacksize)
+          (.println System/err (java-str "  " i ": " (aget stack i)))
+          (recur (unchecked-inc-int i))))
+      (let [^:mutable ^int lastLocal 0]
+        (loop [^int i (unchecked-subtract-int max_locals 1)]
+          (if (>= i 0)
+              (if (.isMember defined i) (set! lastLocal i) (recur (unchecked-dec-int i)))
+              nil))
+        (when (>= lastLocal 0) (.println System/err " locals:"))
+        (loop [^int i 0]
+          (when (<= i lastLocal)
+            (.print System/err (java-str "  " i ": "))
+            (if (.isMember defined i)
+                (let [var (aget lvar i)]
+                  (cond
+                    (nil? var) (do (.println System/err "(none)") (recur (unchecked-inc-int i)))
+                    (nil? (.-sym var))
+                      (do (.println System/err "UNKNOWN!") (recur (unchecked-inc-int i)))
+                    :else
+                      (do
+                        (.println
+                          System/err
+                          (java-str "" (.-sym var) " of type " (.erasure (.-sym var) types)))
+                        (recur (unchecked-inc-int i)))))
+                (do (.println System/err "undefined") (recur (unchecked-inc-int i))))))
+        (when-not (== nlocks 0)
+          (.print System/err " locks:")
+          (loop [^int i 0]
+            (when (< i nlocks)
+              (.print System/err (java-str " " (aget locks i)))
+              (recur (unchecked-inc-int i))))
+          (.println System/err)))))
+
+  (field ^:static ^:final ^Type jsrReturnValue (Type$JCPrimitiveType. TypeTag/INT nil))
+
+  (defclass ^:static LocalVar
+    (field ^:final ^Symbol$VarSymbol sym)
+
+    (field ^:final ^char reg)
+
+    (defclass Range
+      (field ^char start_pc Character/MAX_VALUE)
+
+      (field ^char length Character/MAX_VALUE)
+
+      (constructor [this])
+
+      (constructor [this ^char start] (set! (.-start_pc this) start))
+
+      (constructor [this ^char start ^char length]
+        (set! (.-start_pc this) start)
+        (set! (.-length this) length))
+
+      (method closed ^boolean [this]
+        (and (not (== start_pc Character/MAX_VALUE)) (not (== length Character/MAX_VALUE))))
+
+      (method ^:public toString ^String [this]
+        (let [^int currentStartPC start_pc
+              ^int currentLength length]
+          (java-str "startpc = " currentStartPC " length " currentLength))))
+
+    (field ^{:tag (java.util.List Range)} aliveRanges (ArrayList.))
+
+    (constructor [this ^Symbol$VarSymbol v]
+      (set! (.-sym this) v)
+      (set! (.-reg this) (unchecked-char (.-adr v))))
+
+    (method ^:public dup ^LocalVar [this] (LocalVar. sym))
+
+    (method firstRange ^Range [this]
+      (when-not (.isEmpty aliveRanges) (cast Range (.get aliveRanges 0))))
+
+    (method lastRange ^Range [this]
+      (when-not (.isEmpty aliveRanges)
+        (cast Range (.get aliveRanges (unchecked-subtract-int (.size aliveRanges) 1)))))
+
+    (method removeLastRange ^void [this]
+      (let [lastRange (.lastRange this)] (when (some? lastRange) (.remove aliveRanges lastRange))))
+
+    (method ^:public toString ^String [this]
+      (if (nil? aliveRanges)
+          "empty local var"
+          (let [sb (.append (.append (.append (.append (StringBuilder.) sym) " in register ")
+                                     (int reg))
+                            " \n")]
+            (for-each [^Range r aliveRanges]
+              (.append (.append (.append (.append
+                                           (.append sb " starts at pc=")
+                                           (Integer/toString (int (.-start_pc r))))
+                                         " length=")
+                                (Integer/toString (int (.-length r))))
+                       "\n"))
+            (.toString sb))))
+
+    (method ^:public openRange ^void [this ^char start]
+      (when-not (.hasOpenRange this) (.add aliveRanges (Range. start))))
+
+    (method ^:public closeRange ^void [this ^char length]
+      (if (and (.isLastRangeInitialized this) (> length 0))
+          (let [range (.lastRange this)]
+            (when (some? range)
+              (when (== (.-length range) Character/MAX_VALUE) (set! (.-length range) length))))
+          (.removeLastRange this)))
+
+    (method ^:public hasOpenRange ^boolean [this]
+      (if (.isEmpty aliveRanges) false (== (.-length (.lastRange this)) Character/MAX_VALUE)))
+
+    (method ^:public isLastRangeInitialized ^boolean [this]
+      (if (.isEmpty aliveRanges)
+          false
+          (not (== (.-start_pc (.lastRange this)) Character/MAX_VALUE))))
+
+    (method ^:public getWidestRange ^Range [this]
+      (if (.isEmpty aliveRanges)
+          (Range.)
+          (let [firstRange (.firstRange this)
+                lastRange (.lastRange this)
+                length (unchecked-char
+                         (unchecked-add-int (.-length lastRange)
+                                            (unchecked-subtract-int
+                                              (.-start_pc lastRange)
+                                              (.-start_pc firstRange))))]
+            (Range. (.-start_pc firstRange) length)))))
+
+  (field ^LocalVar/1 lvar)
+
+  (method ^:private addLocalVar ^void [this ^Symbol$VarSymbol v]
+    (let [adr (.-adr v)]
+      (set! lvar (cast LocalVar/1 (ArrayUtils/ensureCapacity lvar (unchecked-add-int adr 1))))
+      (Assert/checkNull (aget lvar adr))
+      (when (some? pendingJumps) (.resolvePending this))
+      (aset lvar adr (LocalVar. v))
+      (.excl (.-defined state) adr)))
+
+  (method adjustAliveRanges ^void [this ^int oldCP ^int delta]
+    (for-each [^LocalVar localVar lvar]
+      (when (some? localVar)
+        (for-each [^Code$LocalVar$Range range (.-aliveRanges localVar)]
+          (when (and (.closed range)
+                     (>= (unchecked-add-int (.-start_pc range) (.-length range)) oldCP))
+            (set! (.-length range)
+                  (unchecked-char (unchecked-add-int (.-length range) (unchecked-char delta)))))))))
+
+  (method ^:public getLVTSize ^int [this]
+    (let [^:mutable result varBufferSize]
+      (loop [^int i 0]
+        (when (< i varBufferSize)
+          (let [var (aget varBuffer i)]
+            (set! result
+                  (unchecked-add-int result (unchecked-subtract-int (.size (.-aliveRanges var)) 1)))
+            (recur (unchecked-inc-int i)))))
+      result))
+
+  (method ^:public setDefined ^void [this ^Bits newDefined]
+    (when (and alive (not (identical? newDefined (.-defined state))))
+      (let [diff (.xorSet (Bits. (.-defined state)) newDefined)]
+        (loop [^int adr (.nextBit diff 0)]
+          (when (>= adr 0)
+            (cond
+              (>= adr nextreg)
+                (do (.excl (.-defined state) adr) (recur (.nextBit diff (unchecked-add-int adr 1))))
+              (.isMember (.-defined state) adr)
+                (do (.setUndefined this adr) (recur (.nextBit diff (unchecked-add-int adr 1))))
+              :else (do (.setDefined this adr) (recur (.nextBit diff (unchecked-add-int adr 1))))))))))
+
+  (method ^:public setDefined ^void [this ^int adr]
+    (let [v (aget lvar adr)]
+      (if (nil? v)
+          (.excl (.-defined state) adr)
+          (do
+            (.incl (.-defined state) adr)
+            (when (< cp Character/MAX_VALUE) (.openRange v (unchecked-char cp)))))))
+
+  (method ^:public setUndefined ^void [this ^int adr]
+    (.excl (.-defined state) adr)
+    (when (and (and (< adr (alength lvar)) (some? (aget lvar adr)))
+               (.isLastRangeInitialized (aget lvar adr)))
+      (let [v (aget lvar adr)
+            length (unchecked-char
+                     (unchecked-subtract-int (.curCP this) (.-start_pc (.lastRange v))))]
+        (if (< length Character/MAX_VALUE)
+            (do
+              (aset lvar adr (.dup v))
+              (.closeRange v length)
+              (.putVar this v)
+              (.fillLocalVarPosition this v))
+            (.removeLastRange v)))))
+
+  (method ^:private endScope ^void [this ^int adr]
+    (let [v (aget lvar adr)]
+      (when (some? v)
+        (when (.isLastRangeInitialized v)
+          (let [length (unchecked-char
+                         (unchecked-subtract-int (.curCP this) (.-start_pc (.lastRange v))))]
+            (when (< length Character/MAX_VALUE)
+              (.closeRange v length)
+              (.putVar this v)
+              (.fillLocalVarPosition this v))))
+        (aset lvar adr nil))
+      (.excl (.-defined state) adr)))
+
+  (method ^:private fillLocalVarPosition ^void [this ^LocalVar lv]
+    (when-not (or (or (or (nil? lv) (nil? (.-sym lv))) (.isExceptionParameter (.-sym lv)))
+                  (not (.hasTypeAnnotations (.-sym lv))))
+      (let [validRanges (cast Code$LocalVar$Range/1
+                              (.toArray (.filter
+                                          (.stream (.-aliveRanges lv))
+                                          (lambda Predicate ^boolean [^Code$LocalVar$Range r]
+                                            (and (.closed r) (> (.-length r) 0))))
+                                        (lambda IntFunction ^Code$LocalVar$Range/1 [^int s]
+                                          (new Code$LocalVar$Range/1 s))))]
+        (when-not (== (alength validRanges) 0)
+          (let [lvarOffset (.toArray (.mapToInt (Arrays/stream validRanges)
+                                                (lambda ToIntFunction ^int [^Code$LocalVar$Range r]
+                                                  (.-start_pc r))))
+                lvarLength (.toArray (.mapToInt (Arrays/stream validRanges)
+                                                (lambda ToIntFunction ^int [^Code$LocalVar$Range r]
+                                                  (.-length r))))
+                lvarIndex (.toArray (.mapToInt (Arrays/stream validRanges)
+                                               (lambda ToIntFunction ^int [^Code$LocalVar$Range r]
+                                                 (.-reg lv))))]
+            (for-each [^Attribute$TypeCompound ta (.getRawTypeAttributes (.-sym lv))]
+              (let [p (.-position ta)]
+                (set! (.-lvarOffset p) (.appendArray this (.-lvarOffset p) lvarOffset))
+                (set! (.-lvarLength p) (.appendArray this (.-lvarLength p) lvarLength))
+                (set! (.-lvarIndex p) (.appendArray this (.-lvarIndex p) lvarIndex))
+                (set! (.-isValidOffset p) true))))))))
+
+  (method ^:private appendArray ^int/1 [this ^int/1 source ^int/1 append]
+    (if (or (nil? source) (== (alength source) 0))
+        append
+        (let [result (new int/1 (unchecked-add-int (alength source) (alength append)))]
+          (System/arraycopy source 0 result 0 (alength source))
+          (System/arraycopy append 0 result (alength source) (alength append))
+          result)))
+
+  (method ^:public fillExceptionParameterPositions ^void [this]
+    (loop [^int i 0]
+      (when (< i varBufferSize)
+        (let [lv (aget varBuffer i)]
+          (if (or (or (or (nil? lv) (nil? (.-sym lv))) (not (.hasTypeAnnotations (.-sym lv))))
+                  (not (.isExceptionParameter (.-sym lv))))
+              (recur (unchecked-inc-int i))
+              (do
+                (for-each [^Attribute$TypeCompound ta (.getRawTypeAttributes (.-sym lv))]
+                  (let [p (.-position ta)]
+                    (when (.hasCatchType p)
+                      (let [idx (.findExceptionIndex this p)]
+                        (when (== idx -1)
+                          (Assert/error (java-str
+                                          "Could not find exception index for type annotation "
+                                          ta
+                                          " on exception parameter")))
+                        (.setExceptionIndex p idx)))))
+                (recur (unchecked-inc-int i))))))))
+
+  (method ^:private findExceptionIndex ^int [this ^TypeAnnotationPosition p]
+    (let [catchType (.getCatchType p)
+          startPos (.getStartPos p)
+          len (.length catchInfo)
+          ^:mutable ^{:tag (List char/1)} iter (.toList catchInfo)]
+      (loop [^int i 0]
+        (when (< i len)
+          (let [catchEntry (cast char/1 (.-head iter))]
+            (set! iter (.-tail iter))
+            (let [^int ct (aget catchEntry 3)
+                  ^int sp (aget catchEntry 0)]
+              (if (and (== catchType ct) (== sp startPos)) (return i) (recur (unchecked-inc-int i)))))))
+      -1))
+
+  (method putVar ^void [this ^LocalVar var]
+    (let [keepLocalVariables (or varDebugInfo
+                                 (and (.isExceptionParameter (.-sym var))
+                                      (.hasTypeAnnotations (.-sym var))))]
+      (when-not (not keepLocalVariables)
+        (let [ignoredSyntheticVar (and (not (== (bit-and (.flags (.-sym var)) Flags/SYNTHETIC) 0))
+                                       (or (== (bit-and
+                                                 (.flags (.-owner (.-sym var)))
+                                                 Flags/LAMBDA_METHOD)
+                                               0)
+                                           (== (bit-and (.flags (.-sym var)) Flags/PARAMETER) 0)))]
+          (when-not ignoredSyntheticVar
+            (when-not (identical? (.-name (.-sym var))
+                                  (.-empty (.-names (.-table (.-name (.-sym var))))))
+              (if (nil? varBuffer)
+                  (set! varBuffer (new LocalVar/1 20))
+                  (set! varBuffer
+                        (cast LocalVar/1 (ArrayUtils/ensureCapacity varBuffer varBufferSize))))
+              (aset varBuffer
+                    (let [old-12 varBufferSize]
+                      (set! varBufferSize (unchecked-inc-int varBufferSize))
+                      old-12)
+                    var)))))))
+
+  (field ^LocalVar/1 varBuffer)
+
+  (field ^int varBufferSize)
+
+  (method ^:private newLocal ^int [this ^int typecode]
+    (let [reg nextreg
+          w (Code/width typecode)]
+      (set! nextreg (unchecked-add-int reg w))
+      (when (> nextreg max_locals) (set! max_locals nextreg))
+      reg))
+
+  (method ^:private newLocal ^int [this ^Type type]
+    (.newLocal this (Code/typecode type)))
+
+  (method ^:public newLocal ^int [this ^Symbol$VarSymbol v]
+    (let [reg (set! (.-adr v) (.newLocal this (.erasure v types)))] (.addLocalVar this v) reg))
+
+  (method ^:public newRegSegment ^void [this] (set! nextreg max_locals))
+
+  (method ^:public endScopes ^void [this ^int first]
+    (let [prevNextReg nextreg]
+      (set! nextreg first)
+      (loop [^int i nextreg]
+        (when (< i prevNextReg) (.endScope this i) (recur (unchecked-inc-int i))))))
+
+  (method ^:public ^:static mnem ^String [^int opcode]
+    (aget Mneumonics/mnem opcode))
+
+  (defclass ^:private ^:static Mneumonics
+    (field ^:private ^:static ^:final ^String/1 mnem (new String/1 ByteCodes/ByteCodeCount))
+
+    (static-initializer
+      (aset mnem ByteCodes/nop "nop")
+      (aset mnem ByteCodes/aconst_null "aconst_null")
+      (aset mnem ByteCodes/iconst_m1 "iconst_m1")
+      (aset mnem ByteCodes/iconst_0 "iconst_0")
+      (aset mnem ByteCodes/iconst_1 "iconst_1")
+      (aset mnem ByteCodes/iconst_2 "iconst_2")
+      (aset mnem ByteCodes/iconst_3 "iconst_3")
+      (aset mnem ByteCodes/iconst_4 "iconst_4")
+      (aset mnem ByteCodes/iconst_5 "iconst_5")
+      (aset mnem ByteCodes/lconst_0 "lconst_0")
+      (aset mnem ByteCodes/lconst_1 "lconst_1")
+      (aset mnem ByteCodes/fconst_0 "fconst_0")
+      (aset mnem ByteCodes/fconst_1 "fconst_1")
+      (aset mnem ByteCodes/fconst_2 "fconst_2")
+      (aset mnem ByteCodes/dconst_0 "dconst_0")
+      (aset mnem ByteCodes/dconst_1 "dconst_1")
+      (aset mnem ByteCodes/bipush "bipush")
+      (aset mnem ByteCodes/sipush "sipush")
+      (aset mnem ByteCodes/ldc1 "ldc1")
+      (aset mnem ByteCodes/ldc2 "ldc2")
+      (aset mnem ByteCodes/ldc2w "ldc2w")
+      (aset mnem ByteCodes/iload "iload")
+      (aset mnem ByteCodes/lload "lload")
+      (aset mnem ByteCodes/fload "fload")
+      (aset mnem ByteCodes/dload "dload")
+      (aset mnem ByteCodes/aload "aload")
+      (aset mnem ByteCodes/iload_0 "iload_0")
+      (aset mnem ByteCodes/lload_0 "lload_0")
+      (aset mnem ByteCodes/fload_0 "fload_0")
+      (aset mnem ByteCodes/dload_0 "dload_0")
+      (aset mnem ByteCodes/aload_0 "aload_0")
+      (aset mnem ByteCodes/iload_1 "iload_1")
+      (aset mnem ByteCodes/lload_1 "lload_1")
+      (aset mnem ByteCodes/fload_1 "fload_1")
+      (aset mnem ByteCodes/dload_1 "dload_1")
+      (aset mnem ByteCodes/aload_1 "aload_1")
+      (aset mnem ByteCodes/iload_2 "iload_2")
+      (aset mnem ByteCodes/lload_2 "lload_2")
+      (aset mnem ByteCodes/fload_2 "fload_2")
+      (aset mnem ByteCodes/dload_2 "dload_2")
+      (aset mnem ByteCodes/aload_2 "aload_2")
+      (aset mnem ByteCodes/iload_3 "iload_3")
+      (aset mnem ByteCodes/lload_3 "lload_3")
+      (aset mnem ByteCodes/fload_3 "fload_3")
+      (aset mnem ByteCodes/dload_3 "dload_3")
+      (aset mnem ByteCodes/aload_3 "aload_3")
+      (aset mnem ByteCodes/iaload "iaload")
+      (aset mnem ByteCodes/laload "laload")
+      (aset mnem ByteCodes/faload "faload")
+      (aset mnem ByteCodes/daload "daload")
+      (aset mnem ByteCodes/aaload "aaload")
+      (aset mnem ByteCodes/baload "baload")
+      (aset mnem ByteCodes/caload "caload")
+      (aset mnem ByteCodes/saload "saload")
+      (aset mnem ByteCodes/istore "istore")
+      (aset mnem ByteCodes/lstore "lstore")
+      (aset mnem ByteCodes/fstore "fstore")
+      (aset mnem ByteCodes/dstore "dstore")
+      (aset mnem ByteCodes/astore "astore")
+      (aset mnem ByteCodes/istore_0 "istore_0")
+      (aset mnem ByteCodes/lstore_0 "lstore_0")
+      (aset mnem ByteCodes/fstore_0 "fstore_0")
+      (aset mnem ByteCodes/dstore_0 "dstore_0")
+      (aset mnem ByteCodes/astore_0 "astore_0")
+      (aset mnem ByteCodes/istore_1 "istore_1")
+      (aset mnem ByteCodes/lstore_1 "lstore_1")
+      (aset mnem ByteCodes/fstore_1 "fstore_1")
+      (aset mnem ByteCodes/dstore_1 "dstore_1")
+      (aset mnem ByteCodes/astore_1 "astore_1")
+      (aset mnem ByteCodes/istore_2 "istore_2")
+      (aset mnem ByteCodes/lstore_2 "lstore_2")
+      (aset mnem ByteCodes/fstore_2 "fstore_2")
+      (aset mnem ByteCodes/dstore_2 "dstore_2")
+      (aset mnem ByteCodes/astore_2 "astore_2")
+      (aset mnem ByteCodes/istore_3 "istore_3")
+      (aset mnem ByteCodes/lstore_3 "lstore_3")
+      (aset mnem ByteCodes/fstore_3 "fstore_3")
+      (aset mnem ByteCodes/dstore_3 "dstore_3")
+      (aset mnem ByteCodes/astore_3 "astore_3")
+      (aset mnem ByteCodes/iastore "iastore")
+      (aset mnem ByteCodes/lastore "lastore")
+      (aset mnem ByteCodes/fastore "fastore")
+      (aset mnem ByteCodes/dastore "dastore")
+      (aset mnem ByteCodes/aastore "aastore")
+      (aset mnem ByteCodes/bastore "bastore")
+      (aset mnem ByteCodes/castore "castore")
+      (aset mnem ByteCodes/sastore "sastore")
+      (aset mnem ByteCodes/pop "pop")
+      (aset mnem ByteCodes/pop2 "pop2")
+      (aset mnem ByteCodes/dup "dup")
+      (aset mnem ByteCodes/dup_x1 "dup_x1")
+      (aset mnem ByteCodes/dup_x2 "dup_x2")
+      (aset mnem ByteCodes/dup2 "dup2")
+      (aset mnem ByteCodes/dup2_x1 "dup2_x1")
+      (aset mnem ByteCodes/dup2_x2 "dup2_x2")
+      (aset mnem ByteCodes/swap "swap")
+      (aset mnem ByteCodes/iadd "iadd")
+      (aset mnem ByteCodes/ladd "ladd")
+      (aset mnem ByteCodes/fadd "fadd")
+      (aset mnem ByteCodes/dadd "dadd")
+      (aset mnem ByteCodes/isub "isub")
+      (aset mnem ByteCodes/lsub "lsub")
+      (aset mnem ByteCodes/fsub "fsub")
+      (aset mnem ByteCodes/dsub "dsub")
+      (aset mnem ByteCodes/imul "imul")
+      (aset mnem ByteCodes/lmul "lmul")
+      (aset mnem ByteCodes/fmul "fmul")
+      (aset mnem ByteCodes/dmul "dmul")
+      (aset mnem ByteCodes/idiv "idiv")
+      (aset mnem ByteCodes/ldiv "ldiv")
+      (aset mnem ByteCodes/fdiv "fdiv")
+      (aset mnem ByteCodes/ddiv "ddiv")
+      (aset mnem ByteCodes/imod "imod")
+      (aset mnem ByteCodes/lmod "lmod")
+      (aset mnem ByteCodes/fmod "fmod")
+      (aset mnem ByteCodes/dmod "dmod")
+      (aset mnem ByteCodes/ineg "ineg")
+      (aset mnem ByteCodes/lneg "lneg")
+      (aset mnem ByteCodes/fneg "fneg")
+      (aset mnem ByteCodes/dneg "dneg")
+      (aset mnem ByteCodes/ishl "ishl")
+      (aset mnem ByteCodes/lshl "lshl")
+      (aset mnem ByteCodes/ishr "ishr")
+      (aset mnem ByteCodes/lshr "lshr")
+      (aset mnem ByteCodes/iushr "iushr")
+      (aset mnem ByteCodes/lushr "lushr")
+      (aset mnem ByteCodes/iand "iand")
+      (aset mnem ByteCodes/land "land")
+      (aset mnem ByteCodes/ior "ior")
+      (aset mnem ByteCodes/lor "lor")
+      (aset mnem ByteCodes/ixor "ixor")
+      (aset mnem ByteCodes/lxor "lxor")
+      (aset mnem ByteCodes/iinc "iinc")
+      (aset mnem ByteCodes/i2l "i2l")
+      (aset mnem ByteCodes/i2f "i2f")
+      (aset mnem ByteCodes/i2d "i2d")
+      (aset mnem ByteCodes/l2i "l2i")
+      (aset mnem ByteCodes/l2f "l2f")
+      (aset mnem ByteCodes/l2d "l2d")
+      (aset mnem ByteCodes/f2i "f2i")
+      (aset mnem ByteCodes/f2l "f2l")
+      (aset mnem ByteCodes/f2d "f2d")
+      (aset mnem ByteCodes/d2i "d2i")
+      (aset mnem ByteCodes/d2l "d2l")
+      (aset mnem ByteCodes/d2f "d2f")
+      (aset mnem ByteCodes/int2byte "int2byte")
+      (aset mnem ByteCodes/int2char "int2char")
+      (aset mnem ByteCodes/int2short "int2short")
+      (aset mnem ByteCodes/lcmp "lcmp")
+      (aset mnem ByteCodes/fcmpl "fcmpl")
+      (aset mnem ByteCodes/fcmpg "fcmpg")
+      (aset mnem ByteCodes/dcmpl "dcmpl")
+      (aset mnem ByteCodes/dcmpg "dcmpg")
+      (aset mnem ByteCodes/ifeq "ifeq")
+      (aset mnem ByteCodes/ifne "ifne")
+      (aset mnem ByteCodes/iflt "iflt")
+      (aset mnem ByteCodes/ifge "ifge")
+      (aset mnem ByteCodes/ifgt "ifgt")
+      (aset mnem ByteCodes/ifle "ifle")
+      (aset mnem ByteCodes/if_icmpeq "if_icmpeq")
+      (aset mnem ByteCodes/if_icmpne "if_icmpne")
+      (aset mnem ByteCodes/if_icmplt "if_icmplt")
+      (aset mnem ByteCodes/if_icmpge "if_icmpge")
+      (aset mnem ByteCodes/if_icmpgt "if_icmpgt")
+      (aset mnem ByteCodes/if_icmple "if_icmple")
+      (aset mnem ByteCodes/if_acmpeq "if_acmpeq")
+      (aset mnem ByteCodes/if_acmpne "if_acmpne")
+      (aset mnem ByteCodes/goto_ "goto_")
+      (aset mnem ByteCodes/jsr "jsr")
+      (aset mnem ByteCodes/ret "ret")
+      (aset mnem ByteCodes/tableswitch "tableswitch")
+      (aset mnem ByteCodes/lookupswitch "lookupswitch")
+      (aset mnem ByteCodes/ireturn "ireturn")
+      (aset mnem ByteCodes/lreturn "lreturn")
+      (aset mnem ByteCodes/freturn "freturn")
+      (aset mnem ByteCodes/dreturn "dreturn")
+      (aset mnem ByteCodes/areturn "areturn")
+      (aset mnem ByteCodes/return_ "return_")
+      (aset mnem ByteCodes/getstatic "getstatic")
+      (aset mnem ByteCodes/putstatic "putstatic")
+      (aset mnem ByteCodes/getfield "getfield")
+      (aset mnem ByteCodes/putfield "putfield")
+      (aset mnem ByteCodes/invokevirtual "invokevirtual")
+      (aset mnem ByteCodes/invokespecial "invokespecial")
+      (aset mnem ByteCodes/invokestatic "invokestatic")
+      (aset mnem ByteCodes/invokeinterface "invokeinterface")
+      (aset mnem ByteCodes/invokedynamic "invokedynamic")
+      (aset mnem ByteCodes/new_ "new_")
+      (aset mnem ByteCodes/newarray "newarray")
+      (aset mnem ByteCodes/anewarray "anewarray")
+      (aset mnem ByteCodes/arraylength "arraylength")
+      (aset mnem ByteCodes/athrow "athrow")
+      (aset mnem ByteCodes/checkcast "checkcast")
+      (aset mnem ByteCodes/instanceof_ "instanceof_")
+      (aset mnem ByteCodes/monitorenter "monitorenter")
+      (aset mnem ByteCodes/monitorexit "monitorexit")
+      (aset mnem ByteCodes/wide "wide")
+      (aset mnem ByteCodes/multianewarray "multianewarray")
+      (aset mnem ByteCodes/if_acmp_null "if_acmp_null")
+      (aset mnem ByteCodes/if_acmp_nonnull "if_acmp_nonnull")
+      (aset mnem ByteCodes/goto_w "goto_w")
+      (aset mnem ByteCodes/jsr_w "jsr_w")
+      (aset mnem ByteCodes/breakpoint "breakpoint"))))
