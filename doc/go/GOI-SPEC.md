@@ -4270,3 +4270,82 @@ launcher (565 of 566, one known, before the merge); `bin/jrt overlay --check` (p
 conversion plus the patch); `make check-makefile`.
 
 **Remaining**: the Mac's run (the steps above) and its reference; GC35 (b) and GR7a's others.
+
+## As built: GC81 (2026-10-20)
+
+GC81 (the arm64 box check's, above): the rebuild in the box (S8, `bin/box-rebuild`) had not
+followed GR9a-c's reflect overlay. Fixing it, the rebuild's `compare` found a second gap, older:
+the box's program had no goi table (GR1). Both are built, on the branch `box-reflect-overlay`
+(`e24d99e1`, `747086c4`); its proposal is GC165.
+
+**The failure, reproduced on amd64** (`bin/box-rebuild --dir .tmp/box-rebuild/amd64-repro prepare
+host` at main `8aa86623`, 277 s): the host step's compile of `arbace/goi` failed with `undefined:
+reflect.ArbaceMethod`, `ArbaceSetMethods`, `ArbaceDirectIface`, `ArbaceNamed`,
+`ArbaceSetUnderlying`, `ArbaceSetLayout`. The box's step compiles the same plan, so amd64 failed
+too, not only arm64.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the program's overlay packages in the box | `arbace/box/print.ae` (`overlay-packages`, `print-goroot`) | GC81 (a): `overlay-packages`, `["runtime" "reflect"]`, the list `bin/jrt`'s `overlay_pkgs` has; `print-goroot` prints each, then `syscall`, into `/o/PKG`. It stops when `overlay/go` holds an `.ae` file that the list and `syscall` do not name, so a new overlay package fails in a few seconds with its name, not 15 minutes later as an undefined name in a compile. `bin/jrt`'s comment names the other list |
+| laid over GOROOT/src | `arbace/box/rebuild.ae` (`steps`) | every package of `overlay-packages` laid file by file over the printed GOROOT/src (reflect's `arbace_named.go` added beside reflect's files), then `syscall/fs_tamago.go` |
+| goi's table in the rebuild | `arbace/box/rebuild.ae` (`:gotable`), `bin/box-rebuild` (`prepare`, `compare`), `bin/box-mac-bundle` | GC165 (a): `prepare` puts `target/arbace-go/gotable` (bin/goi table's output that `bin/arbace-go --build` gave j2g) into both stores as the tree `gotable`, and stops when it is missing; the j2g step mounts it at `/t` and passes `--gotable /t` (`:gotable`: a hash or a ref, by default the ref `gotable`; `false`: the program without it); `compare` compares it too (`gotable`); the bundle puts the same tree into `rebuild/store` and stops unless its hash is the one in the arm64 host store (so the Mac rebuilds with the table the expected image was built with); `mac.sh` needs no change (the default ref) |
+
+**GC165's gap.** With GC81 alone (`e24d99e1`), the amd64 rebuild ran: the box's image equalled the
+host's byte for byte (`16228452…`, 133,517,610 bytes; box 919 s, host 705 s), but `compare` said
+"j2g's program, but image.bin, = bin/arbace-go --build's: false". The difference was
+`go/arbace/gotable.ae`, `go/arbace/gotable/` (goi's table of compiled packages, GOI-SPEC §6) and
+`go/arbace/cmd/arbace/main.ae` (its import of `arbace/gotable`). `bin/arbace-go --build` runs `bin/goi
+table` and gives j2g `--gotable` since GR1. The rebuild in the box did not, so the box and the host
+built the same image without goi's compiled packages, about 10 MB smaller than Linux's program.
+
+- **GC165 goi's table in the rebuild in the box.** (a) The table is an input of the store, made on
+  Linux like the toolchain's facts (`tool.config.ARCH`, `bin/box-tools put`): `bin/box-rebuild
+  prepare` puts `bin/arbace-go --build`'s `target/arbace-go/gotable` as the ref `gotable`, and the
+  j2g step reads it. This takes a few lines, and the box's program is Linux's. (b) The table is
+  generated in the box: `arbace.go.table` in a guest, with tamago's configurations from the tree's
+  `tamago/`. The linux configurations need std's Go forms for linux/amd64 and arm64, which `bin/goi
+  table` converts with `bin/repr-go read` and the host helper `tools/godump` (go/types). That helper
+  is a Go program of the toolchain, so in the box it would be another tool guest, or the forms
+  would be committed. This is a step of its own (S8's next, with GC81 (b)). (c) The program is
+  built without the table and `compare` ignores it. The box's goi would then lack every compiled
+  package, and the claim "the rebuild gives Linux's program" would no longer hold. *Recommended:
+  (a)*, built. (b) is left for when the box makes its own Go forms.
+
+**Checks** (the branch at `747086c4`, its executables built from it: `bin/arbace-go --build` 883 s,
+`ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box` 119 s, `bin/box-tools build amd64`
+42 s, `arm64` 48 s):
+
+- **`bin/box-rebuild --dir .tmp/box-rebuild/amd64 prepare box host compare boot smoke
+  plan-check`** (1,123 s with the action cache of the `e24d99e1` run: the namespaces' compile
+  cached, j2g run again for the table). In the box: 612 s (j2g 311 s). On the host: 297 s. **The
+  image built in the box = the host's, byte for byte**: `f8f95797…`, 143,290,666 bytes. Every
+  step's result was equal (the sources `ae417289…`, goi's table `96131955…`, j2g's program
+  `b592b919…`, GOROOT/src `3f1796e6…`, the goos module, the module, the plan, the version, the
+  first image, the image of prepared namespaces `6601809b…`, the image before the cut). **j2g's
+  program, but image.bin, = `bin/arbace-go --build`'s: true; the image of prepared namespaces =
+  `bin/arbace-go --build`'s: true.** Booted by its ref ("booted by ref:
+  arbace-inside-itself-v1-417-g747086c4 amd64"). `bin/box-smoke` on it: 119 ok. `plan-check`: 325
+  packages planned in Arbace, 325 by go list, the same.
+- **`bin/box-rebuild --arch arm64 --dir .tmp/box-rebuild/arm64 prepare host`**: 304 s (the
+  namespaces and j2g from its earlier run's cache). The host's arm64 image: `b73db2c4…`,
+  137,204,010 bytes.
+- **`bin/box-mac-bundle`** (`MAC_REBUILD_DIR=.tmp/box-rebuild/arm64`): 309 s,
+  `target/arbace-go/arbace-box-mac-arm64.tar.gz`, 79,682,966 bytes. It holds the launcher
+  (5,247,554), the guest (137,204,046), hv.test (4,757,490) and goi's 584 programs. The expected
+  image is `b73db2c4…`, and the store has the ref `gotable` = `96131955…`, the host store's.
+- **The arm64 rebuild in the emulated VM** (`bin/box-arm64-vm`, `--given` the amd64 run): not run.
+  At `3bf351b` it took 8 h 21 min (BOX-NOTES.md, "The runs again on the final program"), of which
+  jrt's compile alone took 8,118 s, and the program is larger since. That is well over the 2 hours
+  allowed here. The Mac's `./mac.sh rebuild` checks the same chain on arm64 (353 s on the M2 Max at
+  `3bf351b`).
+- `bin/arbace-go --smoke --box` (amd64): 119 ok, none failed (219 s).
+- The essential `bin/gate`: passed in 14 m 18 s. The suite on the Go test build: 20,506 of 20,520,
+  no regressions. The oracle: 22,658 of 22,711, the 53 known mismatches, 0 new. The differential
+  check: 12,731 of 12,754, the 23 known, 0 new. goi's essential check: 739 of 739. The generated
+  variants were unchanged.
+- `bin/arbace-go --fixpoint` (1,301 s): G1 = G2 = G3 byte for byte (`a6d03a73…`, 143,671,456 bytes); the host (stage 0) != G1, as before.
+
+**Remaining**: the Mac's run of the bundle (`./mac.sh all`, with GC81's rebuild now on the merged
+tree); GC81 (b) and GC165 (b) with S8's next change.
