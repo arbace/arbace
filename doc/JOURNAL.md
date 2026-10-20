@@ -284,3 +284,44 @@ GP2, the loader (branch `go-parser-gp2`, from `c8287cf1`):
   GPS14's interim.
 - Exit: E-tree's header equal to the helper's over every corpus; `tamago/goroot`'s and
   `tamago/cmd`'s lists equal to go list's; the box's planner kept working.
+
+## 2026-10-20: JN1 merged (the spike: javac on Arbace)
+
+- **What:** branch `java-frontend-jn1` (`322f7495`, from `26816f48`) merged. It records "As built:
+  JN1" in doc/classes/JAVA-FRONTEND-SURVEY.md. It committed no code: the shipped program, jrt,
+  `overlay/jdk`, j2g and `jdk/` are unchanged.
+- **The conversion:** javac's sources from jdk26u `baf63fb` were converted on the frozen JVM:
+  - jdk.compiler: 364 files, none failed, 18 s;
+  - java.compiler: 135 files, none failed;
+  - `CommandLine`: 1 file.
+  That is 500 files, 6.7 MB of forms.
+- **The closure:** beyond what jrt translates, javac needs only 19 small java.base classes and
+  about ten members (stubbed).
+  - Cut in javac: `ResourceBundle.getBundle`, `ServiceLoader`, `Runtime.version`, two overloads.
+  - Avoided by the Arbace `JavaFileManager`: file systems, jar/zip, jmod, the module system.
+  - `DataOutputStream`, which `ClassWriter` needs, is JN3's.
+  - The edge needed javac's world recorded too: 85 failing classes down to 13, none reached.
+- **The minimal program:** a driver (`jn1.Main`, `jn1.Files`), translated by j2g into a tool
+  executable, gives output byte for byte equal to the frozen JVM's:
+  - parsing the samples, the baseline, javac's own sources, java.base's closure (838 files);
+  - attributing `Reduced`, the samples and the baseline (812 classes). The only difference is
+    `capture#N` numbers, which also differ between two JVM runs.
+  - Parsing runs at about the JVM's speed, attribution at about 1.7× the cold JVM.
+- **The tool:** 183,373,984 bytes (+28% on the shipped executable); a rebuild takes about 5
+  minutes.
+- **The platform (JFS2 (a)) holds:** an exploded java.base works. Its sources on the source path
+  do not.
+- **What the spike needed, not committed:**
+  - javac patched in 11 files (+94 −32);
+  - jrt's `Files` and `Path` stubs;
+  - j2g fixes: `Jv_` binary names for javac's packages (462 collisions), casts outside the world,
+    `Object.wait(long)`, an unreached bound private method reference;
+  - four workarounds: two j2g bugs and two bugs of `arbace.classes`' analysis.
+  The diffs and drivers are kept in `.tmp/jn1/` (patches/, driver/, the scripts, the logs). The
+  worktree's large build outputs were removed.
+- **The estimates are revised:** JN2 to 1-2 days, JN3 to 3-4.
+- **Open for the user:** JFS12-JFS17.
+- **Rule slips:** five error reports went to `/tmp` (moved or deleted); `/dev/stdout` was used as
+  an output path twice.
+- **The disk** is at 73%: Go's build cache grew to 32 GB with the tool builds. It trims itself at
+  the next builds.

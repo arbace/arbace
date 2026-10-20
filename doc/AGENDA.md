@@ -119,7 +119,9 @@ The current state of the work. This file is rewritten as things change. For the 
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
-    milestones named JN1-JN9. Running: JN1, the spike (`java-frontend-jn1`).
+    milestones named JN1-JN9. JN1 done (2026-10-20: javac's
+    sources on Arbace parse and attribute as on the JVM; a tool executable of 183 MB; JN2 1-2
+    days, JN3 3-4); JFS12-JFS17 open, for the user.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);
