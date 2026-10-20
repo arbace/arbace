@@ -1126,3 +1126,12 @@ invalid: such a package is go list's error and the helper's failure anyway.
 
   *Recommended: (a)* until GP5 makes the native reader the default; then (b) can be decided
   with the helper as the oracle.
+
+## Decided (2026-10-20): GPS16-GPS20
+
+The user decided GPS16-GPS20 as built, each (a):
+- GPS16: the checkout's `plan.ae` used until the re-seed.
+- GPS17: the helper's failures dumped natively, reported as extra.
+- GPS18: walk order for the box plan's embedded files.
+- GPS19: `native-check --headers` by hand.
+- GPS20: `:config`'s experiment tags as the helper's until GP5.

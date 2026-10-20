@@ -384,3 +384,7 @@ JN2, javac's forms vendored (branch `java-frontend-jn2`, from `52d8c504`):
 - **Not ported**, listed in the survey: symlinks, `go.work`, module-cache requires, modules' own
   `vendor/`, go.mod `ignore`, cgo on, and go list's errors beyond go/build.
 - **Open for the user:** GPS16-GPS20, each built as (a).
+
+## 2026-10-20: GPS16-GPS20 decided as built (the user)
+
+GPS16-GPS20 (doc/go/GO-PARSER-SURVEY.md, "As built: GP2"), each (a), as built.
