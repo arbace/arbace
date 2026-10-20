@@ -4369,7 +4369,17 @@ branch's guest) 584 programs, 583 pass, 1 known (`typeparam/issue50109.go`), no 
 
   Within noise: the indexing nodes' fast paths are unchanged.
 
-**Checks** (this branch, amd64): CHECKS
+**Checks** (this branch after main `8aa86623` was merged in, amd64): the essential `bin/gate` passed
+(14 m 41 s: the smoke test, Clojure's suite as recorded, the oracle 22,658 of 22,711 against its 53
+known, the differential check 12,731 of 12,754 against its known, goi's essential check 740 of
+740, the generated variants); `bin/arbace-go --fixpoint`: G1 = G2 = G3 (143,700,128 bytes);
+`bin/goi check --record --jobs 8` as recorded (above; 114 s, the reference unchanged by the merge),
+`--essential` 740 of 740, `bin/goi divergences` (every program classified, none failing);
+`bin/goi check --box` (amd64) 583 of 584, the one known; `bin/goi test` and `--gc` (the checker's
+22 assertions, its invalid forms with gc's messages, 20 programs with `bounds`, 110 REPL checks,
+std's 183, §1.4's session); `bin/goi annotations` (the five corpora as recorded: zero errors,
+every declaration checked); `make check-makefile`. The arm64 box's reference
+(`test/goi/check-box-arm64.edn`, main's) is classified, not run here. Not run: `bin/gate --full`.
 
 **Proposals for the user** (GC155-GC162; each built as recommended):
 
