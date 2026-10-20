@@ -336,3 +336,15 @@ From doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN1":
 - JFS15 (b): the build tree's exploded platform as a pinned stand-in.
 - JFS16 (b): the j2g fixes with JN2.
 - JFS17 (a): javac's internals rooted for JN4, measured.
+
+## 2026-10-20: JN2 started (the user)
+
+JN2, javac's forms vendored (branch `java-frontend-jn2`, from `52d8c504`):
+- javac's forms in `jdk/javac/` (forms, provenance, sources) with `bin/javac-vendor
+  convert|verify|check`, and javac's edge in `jdk/javac/edge.edn`;
+- no patches in javac (JFS12 (c)): jrt grows the missing JDK API, and JN1's workarounds become
+  fixes in j2g and `arbace.classes`, each with a regression form in `bin/diffcheck`;
+- LICENSE.md's GPLv2+CE list extended.
+- Exit: `verify` byte for byte; j2g translates javac's world without errors; the essential gate;
+  the shipped program changed only as intended (jrt's additions, `TimeUnit.timedWait`); the
+  fixpoint; JN1's driver equal to the JVM's on the vendored, unpatched forms.
