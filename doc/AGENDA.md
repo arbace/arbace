@@ -95,19 +95,21 @@ The current state of the work. This file is rewritten as things change. For the 
 
 - Running, under the user's goal (2026-10-19: "reach arbace-interprets-go-v1, that is the next
   milestone"), each in its own worktree:
-  - GR9a-c (`goi-gr9a`): real runtime types for interpreted named types;
+  - GR8b (`goi-gr8b`, from `9cdbd4d1`): reflect's methods (GC60 (a), GC61 (a));
   - the arm64 box check (`goi-box-arm64`).
-  Done: GR7c (merged 2026-10-19 as `6295e93b`): of GR7b's 25 broken errorcheck programs 20 pass,
-  5 known (GC94); GC85-GC94 and GC144 (b) as recommended under the goal; `bin/goi check` 1,438
-  pass, 2 fail (GR8a's bounds messages, GC95), essential 721. GR8a (merged 2026-10-19 as `104d2827`): std at the REPL, 89 listed packages, 134
-  interpreted per configuration, the label-on-`:=` fix; `bin/goi check` 1,414 pass (GR7b 1,386);
-  GC95-GC104 as recommended under the goal; `text/template`'s Execute waits for GR8b; its box
-  check and `bin/gate --full` (GC102) are done at the milestone run. GR9d (merged 2026-10-19 as `e4621b5d`): REPL vars for generic functions (GoGenericFn,
-  `go/inst`, the instance cache; GC135-GC144 built as recommended under the goal, GC144 (b), the
-  checker's constraint-term order for digest packages, still to build). The seed `0af285f7…` (GR7a,
-  GR7b), verified; the next re-seed comes after the next merges, not one per merge. The surveys doc/go/GR8-SURVEY.md and GR9-SURVEY.md
-  are merged. Their proposals GC55-GC74 are built as recommended under the goal and recorded so
-  the user can revisit them.
+- Done under the goal, each merged, its proposals built as recommended and recorded for the user:
+  - GR9d (2026-10-19, `e4621b5d`): REPL vars for generic functions (GoGenericFn, `go/inst`, the
+    instance cache); GC72-GC74, GC135-GC144.
+  - GR8a (2026-10-19, `104d2827`): std at the REPL, 89 listed packages, 134 interpreted per
+    configuration, the label-on-`:=` fix; GC55-GC59, GC62-GC64, GC95-GC104. `text/template`'s
+    Execute waits for GR8b; its box check and `bin/gate --full` (GC102) come at the milestone run.
+  - GR7c (2026-10-19, `6295e93b`): of GR7b's 25 broken errorcheck programs 20 pass, 5 known
+    (GC94); GC85-GC94, GC144 (b).
+  - GR9a-c (2026-10-20, `9cdbd4d1`): the reflect overlay, typed stubs, proxies removed;
+    GC65-GC71, GC125-GC134.
+  - `bin/goi check`: 1,451 of 1,837 pass, 70 known, 2 fail (GR8a's bounds messages, GC95);
+    essential 729; `--box` amd64 573/574.
+  - The seed `4b2646e6…` (`bbe368f9`), verified (stage 0 `6375d2db…`).
 - **The plan to the milestone `arbace-interprets-go-v1`** (the user, 2026-10-19: the full plan; the
   name to confirm at the tag). The milestone claims goi a complete interpreter of Go forms at the
   REPL. The steps:

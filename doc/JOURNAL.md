@@ -1964,3 +1964,51 @@ v1's divergences by design are listed there. Staging (G16) and speed (F10) come 
   passed (22 checker assertions, the REPL 101, std 183).
 - **Decisions:** GC85-GC94, each built as recommended, as recommended, under the user's goal of
   2026-10-19.
+
+## 2026-10-20: goi GR9a-c merged (runtime types of interpreted named types); the seed 4b2646e6
+
+- **What:** branch `goi-gr9a` (from `04ac458b` with the two surveys; main's GR9d, GR8a and GR7c
+  merged in) merged as `9cdbd4d1`. It builds GR9-SURVEY's Part 1, GS8 and G8:
+  - **The reflect overlay:** `overlay/go/reflect/arbace_named.ae` adds `arbace_named.go` to
+    `$GOROOT/src/reflect` in every build: `ArbaceNamed`, `ArbaceSetLayout`,
+    `ArbaceSetUnderlying`, `ArbaceSetMethods`, `ArbaceDirectIface`. It was written in Go, run
+    against the survey's X9 prototype (34/34) and converted by `bin/repr-go read`. It is wired
+    into `bin/jrt`, `bin/tamago-vendor` and `bin/lib/seed-go.bash`. Its origin and license are in
+    LICENSE.md and doc/go/BUILD.md.
+  - **Runtime types:** every interpreted named type, and every composite of one, has a runtime
+    type of its own. A registry maps runtime types back to goi's descriptors.
+  - **Removed:** the proxies, the table's wrappers, `Proxy.Format`, `RawR`, S37's tags, GR3's
+    erased pointers and GR7a's shapes in Go memory.
+  - **Typed stubs:** per method signature, a fixed number of typed stubs, in families from the
+    listed interfaces and `:stubs :common`, used only for method names compiled code calls
+    (GC126). The slots per family follow GC67; Read/Write was raised to 64.
+  - **Generations (GC68):** a new generation when a type's method set changes. gc's runtime
+    names of local types (GR9c, `·N`).
+- **A box fix:** GR8a's table had made the box guests fail to link. `syscall.RawSyscall`,
+  `RawSyscall6` and `Syscall6` are not implemented in TamaGo, and tamago/arm64 lists `CallOnG0`.
+  `:exclude-in` in gotable.edn fixes it; both guests build.
+- **Merging main in:** GR9d's proxy-based `descOfRT` was replaced by the overlay's. In `check.ae`
+  and `code_stmt.ae` GR7c's validType loop and `:ambient` are kept beside the local-type
+  numbering.
+- **Measured:**
+  - `bin/goi check`: 1,451 pass (main 1,438) and 70 known (83). The diff is exactly 13 programs,
+    known → pass: the survey's 11, `issue4585.go` and `issue48318.go`.
+  - Essential 729/729; `--box` on amd64 573/574 (one known, issue50109).
+  - The executable is +557,056 bytes (0.39%): 118 stub families, 2,416 stubs over the four
+    configurations.
+  - Calls through compiled interfaces are faster: `sort.Sort` of 10^5 went from 229-239 ms to
+    174-176 ms, 10^5 `fmt.Stringer` calls from 126-152 ms to 91-92 ms. GR3's benchmarks are
+    within noise.
+- **Checks on main after the merge:** the essential `bin/gate` passed (17m20s); `bin/goi test`
+  passed (18 programs, the REPL 106, std 183); `bin/arbace-go --fixpoint` held (G2 = G3).
+- **Decisions:** GC65-GC71 of GR9-SURVEY and GC125-GC134, each built as (a), as recommended, under
+  the user's goal of 2026-10-19. GC134 keeps `reflect.TypeFor` of an interpreted interface nil
+  until GC71 (b).
+- **The re-seed**, one for GR7c, GR8a, GR9a-c and GR9d since the seed `0af285f7`:
+  `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make` gives `4b2646e6…` (18,006,148
+  bytes, 1,929 files), committed as `bbe368f9`. It carries the reflect overlay. `bin/seed --verify`
+  printed it again, byte for byte: stage 0 = G1 = G2 = G3, `6375d2db…`.
+- **Rule slips:** the agent's wait loops used `pgrep -f` once and redirected to /dev/null once.
+  It stopped both.
+- **Started:** GR8b (`goi-gr8b`, from `9cdbd4d1`): reflect's methods, GC60 (a) and GC61 (a) as
+  recommended under the goal. The arm64 box agent was asked to merge main and check again.
