@@ -110,6 +110,12 @@ The current state of the work. This file is rewritten as things change. For the 
     classes), 46 s.
   - **Tagged** `arbace-interprets-go1.27.1-v1` (2026-10-20, on main). Running: the emulated arm64
     check over all of box.txt (`GOI_BOX_ALL=1`), to be recorded.
+- **Running (2026-10-20, the user: "make plans"):** two surveys, each in its own worktree. The
+  results are plans to decide, not builds.
+  - `go-parser-survey`: an Arbace-native Go parser (doc/go/GO-PARSER-SURVEY.md), so repr/go reads
+    Go without Go's toolchain; proposals GPS1-.
+  - `java-frontend-survey`: an Arbace-native Java front end (doc/classes/JAVA-FRONTEND-SURVEY.md),
+    so repr/java reads Java without javac or the JVM; proposals JFS1-.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

@@ -92,3 +92,25 @@ Clojure", and chose "Arbace is a Clojure derivative written entirely in symbolic
 more precise because Arbace's own code is Clojure plus the Java forms and the Go forms (jrt, goi,
 `tamago/`, `box/`), all s-expressions but not all Clojure. The sentence changed in three places:
 GitHub's repository description, README's first line and CLAUDE.md's.
+
+## 2026-10-20: two surveys started: a native Go parser, a native Java front end
+
+- **The user's request:** plans for an Arbace-native Go parser and an Arbace-native Java front
+  end.
+- **Why these two:** the readers of repr/go and repr/java are not Arbace's own.
+  - repr/go reads through `tools/godump`, Go's go/parser and go/types in a Go helper.
+  - repr/java reads through javac's internals on the frozen JVM jar: Arbace's last real JVM
+    dependency besides the oracle's reference.
+  - repr/clojure's reader is already Arbace's own.
+- **Started:** two surveys, each in its own worktree from `9a6a36e9`:
+  - `go-parser-survey`, writing doc/go/GO-PARSER-SURVEY.md (proposals GPS1-);
+  - `java-frontend-survey`, writing doc/classes/JAVA-FRONTEND-SURVEY.md (proposals JFS1-).
+- **What each weighs:**
+  - prior art: go/parser and gc's syntax; javac, ECJ and JavaParser;
+  - a hand-written Arbace reader against running the language's own front end from its forms:
+    gc's parser is already Go forms in `tamago/cmd/`, and javac's Java could be converted by
+    repr/java;
+  - what Arbace already has: goi's checker, an Arbace go/types; `arbace.classes`, javac's analysis
+    over Java forms;
+  - the forms' equality with today's readers over every corpus, as the check of the switch;
+  - milestones and effort.
