@@ -1063,7 +1063,15 @@ rest reading the helper's dumps (E-tree's own cost) and the interpreted parse an
 GP1. `native-check --headers` over the 22 corpora with the helper's dumps present: 1 min 16 s.
 `read --reader native --goos linux fmt go/parser`: 5.8 s, of which 2.2-2.6 s the dumper's load.
 
-**Checks.** CHECKS
+**Checks.** `bin/repr-go native-check --fresh`: 12,275 of 12,275 dumps equal, headers and trees,
+0 not known (before the work, the same at `c8287cf1`'s GP1: 12,275 of 12,275 trees, 18 min 36 s);
+`native-check --headers`: 12,275 of 12,275; `bin/repr-go read --reader native` on packages
+(`fmt`, `go/parser` for linux/amd64, from outside the checkout) and on the corpus `x509roots`,
+without the helper; `bin/lib/repr-go/plan-check --base c8287cf1` (above); `make check-makefile`;
+the essential `bin/gate` passed (18 m 52 s, its build anew since `arbace/` changed: the smoke
+test, Clojure's suite with no regressions, the oracle 22,658 of 22,711 against its 53 known, the
+differential check 12,731 of 12,754 against its 23 known, goi's essential check 740 of 740, the
+generated variants). Not run: `bin/gate --full`, `bin/box-rebuild`.
 
 **What is not ported.** Symbolic links (the trees read have none; jrt has no
 `Files.isSymbolicLink`), workspaces (`go.work`), modules from the module cache (`require`
