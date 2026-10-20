@@ -22,7 +22,8 @@ code. Three kinds of things live here:
   from the checkout, not embedded, until the program carries goi).
 - Arbace's own namespaces of the program, not derived from Clojure: `box.ae` and `box/`
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
-  `arbace.box.build`, its plan `arbace.box.plan`, the rebuild in the box `arbace.box.rebuild`
+  `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go
+  list, doc/go/GO-PARSER-SURVEY.md), the rebuild in the box `arbace.box.rebuild`
   with its printing steps `arbace.box.print`, the symbol table cut `arbace.box.elf`;
   doc/go/BOX-NOTES.md, S3, S7, S8), `tls.ae` and `tls/` (`arbace.tls`, TLS client connections,
   over `arbace.tls.host`) and `http.ae` (`arbace.http`, a small HTTP/1.1 client; BOX-NOTES.md,

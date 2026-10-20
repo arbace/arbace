@@ -1,7 +1,11 @@
 #!/bin/bash
 # The helper's dumps of the vendored trees' sources (doc/go/GO-PARSER-SURVEY.md §6), for
-# bin/repr-go native-check's E-tree: dumped as the vendoring tools dump them, no conversion.
-# Usage: bin/lib/repr-go/native-corpus NAME OUT
+# bin/repr-go native-check's E-tree: dumped as the vendoring tools dump them, no conversion; and
+# the same loads for the native reader's loader (arbace.repr.go.load, GP2), OUT.load.edn: the
+# corpus's spec ({:name :dumps OUT :tsv OUT.tsv :loads [...]}, bin/repr-go native-check, read
+# --reader native --corpus), the packages named as the vendoring tools name them, not by go list.
+# Usage: bin/lib/repr-go/native-corpus [--src-only] NAME OUT
+#   --src-only   the sources and the spec only, no helper (read --reader native --corpus)
 #   NAME   goos-amd64, goos-arm64   TamaGo's goos module (Go's module cache, its pinned hash) for
 #                                   tamago/ARCH, ./... (bin/tamago-vendor)
 #          cmd-linux-amd64, cmd-tamago-amd64, cmd-tamago-arm64
@@ -19,16 +23,22 @@ set -euo pipefail
 export CGO_ENABLED=0 GOFLAGS= GOTOOLCHAIN=local GOWORK=off
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 tg=${ARBACE_GOROOT:-/root/tamago-go}
+src_only=""
+[ "${1:-}" = --src-only ] && { src_only=1; shift; }
 name=${1:?NAME}
 out=${2:?OUT}
 case $out in /*) ;; *) out=$PWD/$out ;; esac
 src=$out.src
 helper=$root/.tmp/godump/godump
-"$root/bin/repr-go" helper
+[ -n "$src_only" ] || "$root/bin/repr-go" helper
 rm -rf "$out" "$src"
 mkdir -p "$out" "$src"
 
-godump() { GOROOT="$tg" "$helper" -go "$tg/bin/go" "$@"; }
+godump() { [ -n "$src_only" ] || GOROOT="$tg" "$helper" -go "$tg/bin/go" "$@"; }
+# load GOOS GOARCH CWD ARGS [MORE]: one of the spec's loads (ARGS and MORE as the Clojure reader
+# reads them)
+load() { printf '{:goroot "%s" :goos "%s" :goarch "%s" :mode :packages :cwd "%s" :args %s %s}\n' "$tg" "$1" "$2" "$3" "$4" "${5:-}"; }
+loads=""
 modcache() { env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" env GOMODCACHE; }
 # setting NAME FILE: the value of the shell assignment NAME=... in a vendoring script
 setting() { sed -n "s/.*\b$1=\([^ ]*\).*/\1/p" "$2" | head -1; }
@@ -47,14 +57,19 @@ case $name in
     d=$(from_cache "$(setting goos_mod "$tv")" "$(setting goos_ver "$tv")" "$(setting goos_zip "$tv")")
     cp -r "$d" "$src/goosmod"
     chmod -R u+w "$src/goosmod"
+    loads=$(load tamago "${name#goos-}" "$src/goosmod" '["./..."]')
     (cd "$src/goosmod" && godump -goos tamago -goarch "${name#goos-}" -o "$out" ./...) > "$out.tsv" || true ;;
   cmd-linux-amd64|cmd-tamago-amd64|cmd-tamago-arm64)
     c=${name#cmd-} o=${c%-*} a=${c#*-}
     lvl=GOAMD64=v1; [ "$a" = arm64 ] && lvl=GOARM64=v8.0
-    pkgs=$(cd "$tg/src/cmd" && env -u GOOS -u GOARCH GOOS="$o" GOARCH="$a" "$lvl" GOROOT="$tg" \
-             "$tg/bin/go" list -deps -f '{{.ImportPath}}' cmd/compile cmd/link cmd/asm \
-             | sed 's/ \[.*//' | grep '^cmd/' | LC_ALL=C sort -u)
-    (cd "$tg/src/cmd" && godump -goos "$o" -goarch "$a" -o "$out" $pkgs) > "$out.tsv" || true ;;
+    # the loader lists the packages itself (-deps, those of cmd); the helper's from go list
+    loads=$(load "$o" "$a" "$tg/src/cmd" '["cmd/compile" "cmd/link" "cmd/asm"]' ':deps true :prefix "cmd/"')
+    if [ -z "$src_only" ]; then
+      pkgs=$(cd "$tg/src/cmd" && env -u GOOS -u GOARCH GOOS="$o" GOARCH="$a" "$lvl" GOROOT="$tg" \
+               "$tg/bin/go" list -deps -f '{{.ImportPath}}' cmd/compile cmd/link cmd/asm \
+               | sed 's/ \[.*//' | grep '^cmd/' | LC_ALL=C sort -u)
+      (cd "$tg/src/cmd" && godump -goos "$o" -goarch "$a" -o "$out" $pkgs) > "$out.tsv" || true
+    fi ;;
   box)
     "$root/bin/box-vendor" --work "$src/work" print "$src/print" >&2
     configs=$(sed -n '/^configs="/,/"$/p' "$root/bin/box-vendor" | sed 's/^configs="//; s/"$//')
@@ -62,6 +77,7 @@ case $name in
     for c in $configs; do
       goos=${c%%/*}; goarch=${c#*/}; goarch=${goarch%%:*}; list=${c#*:}
       args=(); for p in ${list//,/ }; do args+=("arbace/box/$p"); done
+      loads="$loads$(load "$goos" "$goarch" "$src/print/mod" "[$(printf '"%s" ' "${args[@]}")]" ":tests true :sub \"$goos-$goarch\"")"
       (cd "$src/print/mod" && GOPROXY=off godump -tests -goos "$goos" -goarch "$goarch" -o "$out/$goos-$goarch" "${args[@]}") >> "$out.tsv" || true
     done ;;
   purego)
@@ -81,6 +97,7 @@ case $name in
     chmod -R u+w "$d"
     find "$d/box/purego" -type f \( -name '*.go' -o -name '*.s' \) -print0 \
       | xargs -0 sed -i "s#\"$mod/internal/#\"arbace/box/purego/internal/#; s#\"$mod\"#\"arbace/box/purego\"#"
+    loads=$(load darwin arm64 "$d" '["arbace/box/purego" "arbace/box/purego/internal/fakecgo" "arbace/box/purego/internal/strings"]')
     (cd "$d" && GOPROXY=off godump -goos darwin -goarch arm64 -o "$out" arbace/box/purego arbace/box/purego/internal/fakecgo arbace/box/purego/internal/strings) > "$out.tsv" || true ;;
   x509roots)
     xv=$root/bin/x509roots-vendor
@@ -93,8 +110,11 @@ case $name in
     cp -r "$m/bundle" "$d/x509roots/fallback/bundle"
     chmod -R u+w "$d"
     find "$d" -name '*.go' -print0 | xargs -0 sed -i "s#\"$mod/bundle\"#\"$pkg\"#; s#\"$mod\"#\"arbace/x509roots/fallback\"#"
+    loads=$(load linux amd64 "$d" "[\"$pkg\"]" ':tests true')
     (cd "$d" && GOPROXY=off godump -tests -goos linux -goarch amd64 -o "$out" "$pkg") > "$out.tsv" || true ;;
   *) echo "native-corpus: no corpus $name" >&2; exit 2 ;;
 esac
+printf '{:name "%s" :dumps "%s" :tsv "%s.tsv"\n :loads [%s]}\n' "$name" "$out" "$out" "$loads" > "$out.load.edn"
+[ -z "$src_only" ] || exit 0
 awk -F'\t' -v what="$name" '{ n[$1]++ } END { printf "%s: %d dumped (%d ok, %d with type errors, %d failed)\n", what, n["ok"] + n["errors"], n["ok"], n["errors"], n["fail"] }' "$out.tsv" >&2
 grep -v -P '^(ok|excluded)\t' "$out.tsv" >&2 || true

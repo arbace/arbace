@@ -975,3 +975,146 @@ The user decided GPS12-GPS15 as built (a):
 - GPS13: the dumper generated in memory at each load, a committed and checked file at GP7.
 - GPS14: file lists from the helper's headers until GP2.
 - GPS15: `native-check --fresh` after the round trips in `--full`'s repr-go chain.
+
+## As built: GP2 (2026-10-20)
+
+GP2, the loader (§5, §8), is built on branch `go-parser-gp2` from main `c8287cf1`. The native
+reader now takes its packages, their files and every dump's header from Arbace's own loader, not
+from the helper: GPS14's interim is over, and `bin/repr-go read --reader native` runs without the
+helper and without the go command. The tools' host was the worktree's stage 0
+(`target/seed/amd64/arbace`, built from the seed by `bin/seed --build`), on the shared 64-core
+amd64 machine.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| go list's part | `arbace/box/plan.ae`, `arbace.box.plan` (S8's planner, 346 lines before, 1,020 now) | generalized from the store's trees to directories: a tree is a store hash or a `java.io.File`. Ported: go/build's `matchTag`, `goodOSArchFile`, `shouldBuild` and `parseFileHeader` (`//go:build` by go/build/constraint's parser, `// +build` lines when there is none, `multiple //go:build comments`), `readGoInfo` (the import reader: the header through the imports, the package clause, each import spec's name and path, `isValidImport`; `//go:embed` patterns from every `//` comment of a file that imports embed, strings, raw strings and runes skipped, `ast.ParseDirective`'s arguments), `readComments` for the other files, and `Import` (`import-dir`: every list go list gives, `GoFiles` to `IgnoredOtherFiles`, `TestGoFiles`, `XTestGoFiles`, imports and embed patterns per kind, `documentation` packages, files importing `"C"` ignored with cgo off, `.S`/`.sx` ignored, `MultiplePackageError`, `NoGoError`); cmd/go's `resolveEmbed` (`resolve-embed`: `all:`, `path.Match` and `filepath.Glob`, `validEmbedPattern`, `isBadEmbedName` after `module.CheckFilePath`, nested modules, hidden files, sorted lists); `go.mod` (module, go line, local replacements); imports located in a module, GOROOT/src, std's `vendor/` for the standard library and `cmd/vendor/` for cmd (`locate`, `resolve-import`); `load-package` (a package as `go list -e` sees it, its imports resolved); `match-pattern` (`std`, `cmd`, `P/...`, as cmd/go's `matchPackages` walks: testdata, `_` and `.` directories, nested modules and modules' vendor directories pruned, `builtin` and, without cgo, `runtime/cgo` ignored, wildcards dropping directories without Go files); `list-packages` (`go list -e [-deps]`, go list's order) |
+| the loader | `arbace/repr/go/load.ae`, `arbace.repr.go.load` (435 lines) | the helper's three modes over `arbace.box.plan`, each giving the dumps' keys, headers, directories and files (`jobs`): packages (`packageJobs`: patterns, `./...` and `.` in the working directory's module, `-tests`: the variant `p [p.test]` as `load.TestPackagesFor` makes it, of a package with in-package tests or of a main package with external ones, and `p_test`; `-deps` with a path prefix, for `tamago/cmd`), single-file programs (`fileJobs`: `MatchFile`, `FILE,FILE`, `fileKey`) and directory tests (`dirs.go` ported: the action line, `splitQuoted`, the flags, `MatchFile` on the test, grouping by package clause, `-s`, builddir's `.s` files, local imports resolved by gc's `-D`, runindir's module named by the directory with go line `-gomodversion` or 1.14, its packages in `go list -deps ./...`'s order). The header: `:config` (the configuration's tags; the tool tags as godump's: the architecture level's and go1.27.1's baseline experiments for the host the helper runs on, GPS20), `:dir` (`$GOROOT/...` or as given), `:for-test`, go list's lists, `:embed-files` with their SHA-256, `:dir-test`, `:local-imports`, the language version (std and cmd go1.27, a module's go line, runindir's), and `:imports` as go/types makes `Package.Imports`: each spec's path when `validatedImportPath` takes it (not renamed `init`, `"C"` not renamed), resolved as the importer would map it, as written when it does not resolve |
+| the native reader | `arbace/repr/go/parse.ae` | `native-dump` takes a loader's job: its header, directory and files. E-tree (`tree-of`) compares the header (`header-keys`: `:godump`, `:package`, `:config`, `:dir`, `:for-test`, the file lists, the embedded files, `:dir-test`, `:local-imports`, `:imports`) as well as the name, the trees, comments, directives and warnings; the corpus check compares the sets of dumps too: a helper dump without a job is missing, a job without a helper dump is extra (accepted only when the helper's summary says it failed), a job go/parser rejects without a helper dump is rejected by both. `check --headers`: the headers and the sets alone, reading only the helper dumps' headers, no parse (GPS19). `read`: the native reader alone, no helper |
+| the commands | `bin/repr-go` | a corpus is a spec (`$work/corpus/NAME.load.edn`: `{:name :dumps :tsv :loads [LOAD ...]}`, the helper's arguments as data; `native_spec`, and `bin/lib/repr-go/native-corpus` for the vendored trees, which also has `--src-only`); `read --reader native [--tests] [--goos G --goarch A] PKG...` and `read --reader native --corpus C` without the helper; `native-check [--fresh] [--headers] [CORPUS...]`, the known differences in `test/repr/go/native-known.edn` (empty) |
+| the box's planner, checked | `bin/lib/repr-go/plan-check [--base REV]` | the plan of Arbace's program (`arbace/cmd/arbace`, tamago/amd64 and tamago/arm64) from store trees of GOROOT/src, TamaGo's goos module and the seed's program with `box/` printed into it, against tools/goplan's (go list -deps, as `bin/box-rebuild plan-check` compares) and against the planner of commit REV byte for byte |
+
+**go list's part on the tools' host until a re-seed.** `arbace.box.plan` is embedded in the
+program, and `arbace/box/` is not among RT's tool sources (`RT/toolSource`: j2g, repr, build, c2j,
+go), so stage 0 would run its own copy, which has none of GP2's functions. The loader therefore
+loads `arbace/box/plan.ae` from the checkout (ARBACE_PATH) when the embedded copy differs from it
+(GPS16), as RT does for the tools' sources. After the next re-seed the copies are the same and
+nothing is loaded.
+
+**E-tree with the headers (the exit criterion).** `bin/repr-go native-check --fresh`, all 22
+corpora, the helper's dumps made afresh:
+
+| corpus | helper's dumps | native dumps | headers and trees equal | extra (the helper's failures) | rejected by both | load (s) |
+|---|---:|---:|---|---:|---:|---:|
+| std tamago/amd64, tamago/arm64 | 379, 378 | 379, 378 | all | 0 | 0 | 2.8, 3.0 |
+| std linux/amd64, linux/arm64 | 382, 380 | 382, 380 | all | 0 | 0 | 2.6, 3.2 |
+| std with tests, tamago/amd64 | 554 | 554 | all | 0 | 0 | 4.3 |
+| `$GOROOT/test`'s programs, four configurations | 1,707, 1,702, 1,713, 1,707 | the same | all | 0 | 0 | 1.4-1.5 each |
+| directory tests, four configurations | 561, 559, 562, 559 | the same | all | 0 | 0 | 2.2-2.5 each |
+| error tests, linux/amd64 | 586 | 586 | all | 0 | 73 | 1.0 |
+| TamaGo's goos module, amd64, arm64 | 94, 92 | 100, 100 | all 94, 92 | 6, 8 | 0 | 0.7, 1.0 |
+| `tamago/cmd`'s sources, three configurations | 105 each | 105 each | all | 0 | 0 | 7.1, 9.1, 9.7 |
+| `box/` printed, five configurations with tests | 41 | 41 | all | 0 | 0 | 2.3 |
+| purego (darwin/arm64), x509roots (linux/amd64, tests) | 3, 1 | 3, 1 | all | 0 | 0 | 0.4, 0.1 |
+| **total** | **12,275** | **12,289** | **12,275 of 12,275** | **14** | **73** | **about 66** |
+
+No dump of the helper is missing, none differs, `test/repr/go/native-known.edn` stays empty.
+22,603 files, 25,763,858 nodes, as GP1. The first comparisons found three differences of the
+loader, fixed before this run: `builtin` and `runtime/cgo` listed by `std` (cmd/go's walk ignores
+them); a main package without test files given a test variant (go list's `-test` makes one only for a
+package with tests); `:imports` of `import6.go` and `fixedbugs/issue4517d.go` (go/types takes
+each spec on its own, where go/build drops a file's imports at its first invalid path, and leaves
+out an import named `init`).
+
+**The file lists against go list.** The helper writes go list's own lists into its headers
+(`fileLists`: `GoFiles` ... `XTestEmbedFiles`, verbatim), so every equal header is the loader's
+lists equal to go list's for that configuration. `tamago/goroot` is std for tamago/amd64 and
+tamago/arm64 (379 and 378 packages) and TamaGo's goos module (94 and 92); `tamago/cmd` the three
+`cmd-` corpora, 105 packages each, whose package set the loader computes itself (`-deps` of
+cmd/compile, cmd/link and cmd/asm, those of cmd) where the helper takes go list's: the sets are
+equal, and so are all 315 headers. The 14 extra dumps of the goos module are packages for other
+architectures that go list's `-export` cannot build for tamago/amd64 or arm64 (an `.s` file
+gc's assembler rejects for the architecture, `undefined: reg.Out8`, ...): the helper fails them;
+the native reader, which needs no export data, dumps them (GPS17). The 73 of `linux-errtest` are
+the error tests go/parser rejects, the helper's failures too (GP6's).
+
+**The box's planner.** `plan` keeps its output byte for byte. The one change of order the port
+would have made, a directory pattern's embedded files sorted as cmd/go sorts them where the
+planner listed them in its walk's order (`res/arbace/box.ae.z` before `res/arbace/box/build.ae.z`),
+is kept as before for `plan` (`resolve-embed`'s `:walk-order`, GPS18); go list's `EmbedFiles` and
+the headers are sorted. Checked with `bin/lib/repr-go/plan-check --base c8287cf1`: 325 packages
+(tamago/amd64) and 324 (tamago/arm64), equal to tools/goplan's for every package and field, and
+the plans byte for byte the planner's of `c8287cf1` (`:src` tree hashes included), in 22 s; the
+planner itself takes 2.5 s where it took 4.2 s. What the box's plan now accepts that it refused:
+glob patterns in `//go:embed` (cmd/go's resolution); what it now refuses beyond the old list:
+`.cxx`, `.for`, `.f90`, `.swigcxx` and `.sx` files (go/build's lists; none in the box's trees).
+`bin/box-rebuild plan-check` was not run (it needs a box run, `box-steps.edn`).
+
+**The program changes.** `arbace.box.plan` and the new `arbace.repr.go.load` are embedded
+namespaces (`arbace/box/` and `arbace/repr/` in the program's resources, compiled since S6), so
+GP2 changes the program: the next re-seed carries it, to be batched (no re-seed here).
+
+**Times.** The loader over each corpus is 0.1 to 9.7 s on one thread (about 66 s over
+the 22, `load` above; cmd's `-deps` the longest, std 2.6 to 4.3 s), against the helper's go list,
+0.3 s cached and about 6 s the first time for std. The whole `native-check --fresh` took 19 min
+51 s wall (136 CPU-min, 32 jobs), the helper's dumps made afresh first (about 3 min), most of the
+rest reading the helper's dumps (E-tree's own cost) and the interpreted parse and dump, as in
+GP1. `native-check --headers` over the 22 corpora with the helper's dumps present: 1 min 16 s.
+`read --reader native --goos linux fmt go/parser`: 5.8 s, of which 2.2-2.6 s the dumper's load.
+
+**Checks.** CHECKS
+
+**What is not ported.** Symbolic links (the trees read have none; jrt has no
+`Files.isSymbolicLink`), workspaces (`go.work`), modules from the module cache (`require`
+without a local replacement: no corpus imports one), modules' `vendor/` directories (only std's
+and cmd's), go.mod's `ignore`, cgo on, `-mod`, binary-only packages, import comments, go list's
+errors that need more than go/build (import cycles, `use of internal package not allowed`,
+`-export`'s build failures: GPS17). `:imports` of a package (not of the single-file programs or
+directory tests) is taken from go/build's imports, which leave out a file whose import path is
+invalid: such a package is go list's error and the helper's failure anyway.
+
+**Proposals (GPS16-GPS20; each built as recommended).**
+
+- **GPS16 Where the tools' host takes the generalized planner from, until a re-seed.**
+  - (a) the loader loads `arbace/box/plan.ae` from the checkout when the embedded copy differs
+    (as built): no runtime change, the copy loaded is the one the next program embeds;
+  - (b) `arbace/box/` among RT's tool sources: a change to the runtime, and the box's own
+    namespaces would load from a checkout where one is on ARBACE_PATH;
+  - (c) go list's part moved to a tools' namespace (`arbace.repr.go.list`) that the box's
+    planner requires: the box would depend on repr/go's namespaces.
+
+  *Recommended: (a)*.
+- **GPS17 Packages the helper cannot dump.** go list's `-export` fails to build some packages of
+  a corpus (TamaGo's goos module for another architecture: 6 for amd64, 8 for arm64), so the
+  helper fails them, while the native reader needs no export data.
+  - (a) the loader lists them as go list does, the native reader dumps them, and native-check
+    reports them as extra, accepted because the helper's summary says it failed (as built);
+  - (b) the loader drops them: it would have to compile them, or to model gc's assembler.
+
+  *Recommended: (a)*: which of them the vendoring converts is GP5's question, as now.
+- **GPS18 The order of a directory pattern's files in the box's plan.**
+  - (a) the walk's order, as before GP2 (as built): the box's plans byte for byte the same;
+  - (b) sorted as cmd/go sorts `Internal.Embed`'s lists: the box's `-embedcfg` would be go
+    build's, the objects the same (gc sorts the files itself, `staticdata.embedFileList`), the
+    compile's action key of `arbace/cmd/arbace` changed once.
+
+  *Recommended: (a)* now; (b) when the box's driver changes for another reason.
+- **GPS19 A check of the loader alone.**
+  - (a) `native-check --headers`: the headers and the sets of dumps, no parse, about a minute
+    over the 22 corpora with the helper's dumps present (as built), by hand;
+  - (b) the same in the essential gate: it needs the helper's dumps, so the go command.
+
+  *Recommended: (a)*: the full check (GPS15) covers it in `bin/gate --full`.
+- **GPS20 The experiments' tool tags in `:config`.** The helper writes go/build's
+  `Default.ToolTags` of its own process, the baseline experiments of the host it runs on
+  (linux/amd64: `goexperiment.dwarf5` and the rest), also for a corpus of darwin/arm64
+  (purego), where the go command's would leave out `dwarf5`.
+  - (a) the loader computes them as the helper does, for the host (as built): E-tree compares
+    like with like;
+  - (b) the target's, in the helper and the loader: a change to the dumps and the round trips'
+    references, for a tag that only `internal/goexperiment`'s `exp_dwarf5_on.go` and
+    `exp_dwarf5_off.go` test, in std, which no darwin corpus has.
+
+  *Recommended: (a)* until GP5 makes the native reader the default; then (b) can be decided
+  with the helper as the oracle.

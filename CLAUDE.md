@@ -112,7 +112,7 @@ Prior art:
     keeps the Java text, printed back byte for byte: `roundtrip --text`); `arbace.repr.go`
     (`arbace/repr/go{.ae,/}`), Go as Go forms and back (spec `doc/go/SPEC.md`; mode `:full` keeps
     the text: comments, spellings, layout, printed back byte for byte; helpers `tools/godump`, `tools/gocmp`;
-    `bin/repr-go read`, `print`, `roundtrip`, `check`, `test`; `read --reader native` and `native-check`: the native reader, Go's go/parser run by goi from `tamago/goroot`'s forms, doc/go/GO-PARSER-SURVEY.md, GP1), on the tools' host
+    `bin/repr-go read`, `print`, `roundtrip`, `check`, `test`; `read --reader native` and `native-check`: the native reader, Go's go/parser run by goi from `tamago/goroot`'s forms, doc/go/GO-PARSER-SURVEY.md, GP1, its loader `arbace.repr.go.load` with go list's part in `arbace.box.plan`, no helper, GP2; `native-check --headers`: the loader's headers alone), on the tools' host
     (`REPR_GO_EXE` names another executable); `arbace.repr.haskell` (`arbace/repr/haskell{.ae,/}`),
     Haskell as Haskell forms and back (spec `doc/haskell/SPEC.md`, notes
     `doc/haskell/HASKELL-NOTES.md`; helper `tools/hsdump` on the host's GHC, pinned by
@@ -239,7 +239,7 @@ Prior art:
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
-  `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's trees equal to the helper's over every corpus), repr/haskell's
+  `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus), repr/haskell's
   (`bin/repr-haskell roundtrip --iface --text --layout`: GHC's trees and lines over GHC 9.14.1's
   boot libraries, in the braces and the layout layouts, then their interfaces compiled at `-O1`,
   then mode `:full` printed back byte for byte, and `test`; on the host's GHC), repr/clojure's

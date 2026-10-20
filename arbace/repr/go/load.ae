@@ -1,0 +1,435 @@
+(ns arbace.repr.go.load
+  "repr/go's native reader, its loader (doc/go/GO-PARSER-SURVEY.md §5, GP2): what the helper
+  (tools/godump) asks of the go command, in Arbace: a conversion's packages and their files for
+  one configuration, and each dump's header (doc/go/HELPER-NOTES.md, \"The package view\"): the
+  configuration, the directory, go list's file lists, the embedded files with their SHA-256,
+  the test variants (-tests), the single-file programs (-files) and the directory tests of
+  $GOROOT/test (-dirs: dirs.go's rules, as Go's test driver reads them), the language version
+  and :imports (go/types' Package.Imports: the files' imports as resolved, a path that does not
+  resolve as written). go list's part is arbace.box.plan's (S8's planner, generalized to
+  directories); no export data: nothing is compiled.
+
+    (jobs load)   the dumps of one load: [{:key K :header H :dir D :files [F ...]} ...] and
+                  results {:key K :status \"excluded\"|\"fail\" :msg M} for what has no dump
+
+  load: {:goroot DIR :goos G :goarch A :tags [T ...] :mode :packages|:files|:dirs :cwd DIR
+         :args [ARG ...] (or :args-file FILE, one per line) :tests BOOL :deps BOOL :prefix P}
+    :packages  ARGs are import paths and patterns (std, cmd, P/..., ./..., .), in the module of
+               :cwd (its go.mod, local replacements); :tests the test variants and external
+               test packages as godump -tests; :deps the dependencies too, :prefix keeping
+               those whose path begins with P
+    :files     ARGs are FILE or FILE,FILE... relative to :cwd (godump -files)
+    :dirs      ARGs are directory tests FILE.go relative to :cwd (godump -dirs)"
+  (:require [arbace.string :as str])
+  (:import [java.io File]
+           [java.security MessageDigest]
+           [java.nio.file Files]))
+
+;; arbace.box.plan as the checkout has it: the tools' host embeds the program's copy, which a
+;; host made before GP2 has without the loader's part (arbace/box/ is not a tool source, RT's
+;; toolSource), so a checkout source that differs from the embedded one is loaded from the
+;; checkout (GPS16)
+(require 'arbace.box.plan)
+(let [res "arbace/box/plan.ae"
+      emb (let [in (arbace.lang.RT/resourceAsStream nil res)]
+            (when (instance? java.io.ByteArrayInputStream in)
+              (let [b (.readAllBytes ^java.io.InputStream in)] (.close ^java.io.InputStream in) b)))
+      f (some (fn [d] (let [f (File. ^String d res)] (when (.isFile f) f)))
+              (remove empty? (str/split (or (System/getenv "ARBACE_PATH") "") #":")))]
+  (when (and f (or (nil? emb) (not (java.util.Arrays/equals ^bytes emb (Files/readAllBytes (.toPath ^File f))))))
+    (load-file (.getPath ^File f))))
+(alias 'plan 'arbace.box.plan)
+
+(def pinned-lang
+  "The language version the helper accepts (tools/godump's pinnedLang)."
+  "go1.27")
+
+;;; Paths
+
+(defn clean
+  "path.Clean of a /-separated path."
+  ^String [^String p]
+  (let [abs (str/starts-with? p "/")
+        out (reduce (fn [acc seg]
+                      (cond (or (= seg "") (= seg ".")) acc
+                            (= seg "..") (if (and (seq acc) (not= ".." (peek acc))) (pop acc) (if abs acc (conj acc "..")))
+                            :else (conj acc seg)))
+                    [] (str/split p #"/"))
+        s (str/join "/" out)]
+    (cond abs (str "/" s)
+          (empty? s) "."
+          :else s)))
+
+(defn- join [& ps] (clean (str/join "/" (remove empty? ps))))
+
+(defn- rel
+  "filepath.Rel of path p (absolute) to base (absolute), nil when p is not under base."
+  [^String base ^String p]
+  (let [base (clean base) p (clean p)]
+    (cond (= p base) "."
+          (str/starts-with? p (str base "/")) (subs p (inc (count base)))
+          :else nil)))
+
+(defn- abs-path [^String cwd ^String p] (if (str/starts-with? p "/") (clean p) (join cwd p)))
+
+(defn- file-key
+  "godump's fileKey: file's path relative to $GOROOT/test, $GOROOT or the working directory, else
+  its absolute path without the leading /."
+  [{:keys [goroot cwd]} ^String file]
+  (let [a (abs-path cwd file)]
+    (or (some #(rel % a) [(join goroot "test") goroot cwd])
+        (subs a 1))))
+
+(defn- rel-dir
+  "godump's relDir: a directory relative to $GOROOT as $GOROOT/..., else as it is."
+  [{:keys [goroot]} ^String dir]
+  (if-let [r (when (str/starts-with? dir "/") (rel goroot dir))]
+    (if (= r ".") "$GOROOT" (str "$GOROOT/" r))
+    (if (str/ends-with? dir "/") dir (str/replace dir #"/+$" ""))))
+
+;;; The configuration (godump's loadConfig)
+
+(defn experiments
+  "go1.27.1's baseline experiments (internal/buildcfg's ParseGOEXPERIMENT) for goos/goarch, the
+  host the helper runs on: what godump's go/build gives as goexperiment.* tool tags."
+  [goos goarch]
+  (sort (concat (when (#{"amd64" "arm64" "loong64" "ppc64le" "ppc64" "riscv64" "s390x"} goarch)
+                  ["regabiwrappers" "regabiargs"])
+                (when-not (#{"darwin" "ios" "aix"} goos) ["dwarf5"])
+                ["randomizedheapbase64" "greenteagc" "jsonv2" "sizespecializedmalloc"])))
+
+(defn config
+  "The configuration of a load (godump's config): {:goos :goarch :level :tags :tool-tags
+  :release-tags :toolchain :goroot}."
+  [{:keys [goroot goos goarch tags goamd64 goarm64 host-goos host-goarch]}]
+  (let [level (if (= goarch "amd64") (or goamd64 "v1") (or goarm64 "v8.0"))
+        arch-tags (if (= goarch "amd64")
+                    (for [i (range 1 (inc (parse-long (subs level 1))))] (str "amd64.v" i))
+                    (let [[_ maj mi] (re-find #"^v(\d+)\.(\d+)" level)
+                          mi (parse-long mi)]
+                      (if (= maj "9")
+                        (concat (for [i (range 0 (inc mi))] (str "arm64.v9." i))
+                                (for [i (range 0 (+ mi 6))] (str "arm64.v8." i)))
+                        (for [i (range 0 (inc mi))] (str "arm64.v8." i)))))
+        tool-tags (vec (sort (concat arch-tags (map #(str "goexperiment." %) (experiments (or host-goos "linux") (or host-goarch "amd64"))))))
+        minor (parse-long (subs pinned-lang 4))]
+    (when-not (#{"amd64" "arm64"} goarch)
+      (throw (ex-info (str "GOARCH=" goarch ": only amd64 and arm64 are configurations of repr/go") {})))
+    {:goroot goroot :goos goos :goarch goarch :level level
+     :tags (vec (sort (distinct tags))) :tool-tags tool-tags
+     :release-tags (mapv #(str "go1." %) (range 1 (inc minor)))
+     :toolchain (first (str/split-lines (slurp (str goroot "/VERSION"))))}))
+
+(defn- header-config
+  "The dump's :config for a job of language version lang."
+  [c lang]
+  (array-map :goos (:goos c) :goarch (:goarch c)
+             (if (= "amd64" (:goarch c)) :goamd64 :goarm64) (:level c)
+             :tags (:tags c) :tool-tags (:tool-tags c) :goexperiment "" :cgo false :compiler "gc"
+             :toolchain (:toolchain c) :go-version lang :word-size 8 :max-align 8))
+
+(defn- version-lang
+  "go/version's Lang of go + v (a go line's version): go1.N."
+  [^String v]
+  (when-let [[_ mm] (when v (re-find #"^(\d+\.\d+)" v))] (str "go" mm)))
+
+;;; Modules
+
+(defn- find-module
+  "The module of directory cwd: [root go-mod], nil when none (or std's or cmd's, GOROOT/src's)."
+  [goroot ^String cwd]
+  (loop [d (clean cwd)]
+    (let [f (File. (str d "/go.mod"))]
+      (cond
+        (.isFile f) (when-not (#{(join goroot "src") (join goroot "src/cmd")} d)
+                      [d (plan/go-mod (File. d))])
+        (or (= d "/") (= d ".")) nil
+        :else (recur (clean (str d "/..")))))))
+
+(defn- plan-config
+  "arbace.box.plan's cfg for configuration c, modules {path dir} as Files."
+  [c modules]
+  {:goroot (File. (str (:goroot c) "/src")) :goos (:goos c) :goarch (:goarch c)
+   :tool-tags (:tool-tags c) :release-tags (:release-tags c) :tags (:tags c)
+   :modules (into {} (for [[m d] modules] [m (File. ^String d)]))})
+
+;;; Headers
+
+(defn- sha256-hex [^File f]
+  (let [md (MessageDigest/getInstance "SHA-256")
+        bs (.digest md (Files/readAllBytes (.toPath f)))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) bs))))
+
+(defn- embed-files [^String dir files]
+  (vec (for [f files] [f (sha256-hex (File. (str dir "/" f)))])))
+
+(defn- lists
+  "godump's fileLists of package record p (arbace.box.plan/load-package's) for a job: the plain
+  package's, :tests adding the in-package tests', :xtest the external test package's."
+  [p ^String dir {:keys [tests xtest]}]
+  (let [l (fn [m k pk] (if (seq (get p pk)) (assoc m k (vec (get p pk))) m))
+        e (fn [m k fk] (if (seq (get p fk)) (assoc m k (embed-files dir (get p fk))) m))]
+    (if xtest
+      (-> {} (l :go-files :x-test-go-files) (l :embed-patterns :x-test-embed-patterns) (e :embed-files :x-test-embed-files))
+      (cond-> (reduce #(l %1 %2 %2) {} [:go-files :cgo-files :c-files :cxx-files :m-files :h-files :f-files :s-files
+                                        :swig-files :swig-cxx-files :syso-files :ignored-go-files :ignored-other-files
+                                        :embed-patterns])
+        true (e :embed-files :embed-files)
+        tests (-> (l :test-go-files :test-go-files) (l :test-embed-patterns :test-embed-patterns)
+                  (e :test-embed-files :test-embed-files))))))
+
+(defn- imports-of
+  "go/types' Package.Imports of a job: the import paths of its files' imports (raw), each as
+  resolve gives it, or as written when it does not resolve, sorted."
+  [raw resolve]
+  (vec (sort (distinct (map #(or (resolve %) %) raw)))))
+
+(defn- header
+  "A dump's header (godump's write, before :files): what the native dump carries of it."
+  [c {:keys [path lang dir for-test]} more]
+  (merge {:godump 2 :package path :config (header-config c lang) :dir (rel-dir c dir)}
+         (when for-test {:for-test for-test})
+         more))
+
+;;; Packages (godump's packageJobs)
+
+(defn- package-jobs
+  [c {:keys [cwd args tests deps prefix]}]
+  (let [[root gm] (find-module (:goroot c) cwd)
+        mod (:module gm)
+        modules (cond-> {}
+                  mod (assoc mod root)
+                  gm (into (for [[m d] (:replace gm) :when (str/starts-with? d ".")] [m (join root d)])))
+        pc (plan-config c modules)
+        cwd-path (when mod (let [r (rel root cwd)] (if (= r ".") mod (str mod "/" r))))
+        patterns (for [a args]
+                   (cond (= a "./...") (str cwd-path "/...")
+                         (= a ".") cwd-path
+                         (str/starts-with? a "./") (str cwd-path "/" (subs a 2))
+                         :else a))
+        mod-lang (version-lang (:go gm))
+        pkgs (plan/list-packages pc patterns {:deps deps})]
+    (vec
+      (mapcat
+        (fn [p]
+          (let [dir (.getPath ^File (:dir p))
+                lang (if (:module p) (or mod-lang pinned-lang) pinned-lang)
+                resolve (fn [i] (get (:resolved p) i))
+                job (fn [k files raw-imports opts]
+                      (let [path (if (:xtest opts) (str (:path p) "_test") (:path p))]
+                        {:key k :dir dir :files (vec files)
+                         :header (header c {:path path :lang lang :dir dir :for-test (when (or (:xtest opts) (:tests opts)) (:path p))}
+                                         (assoc (lists p dir opts)
+                                                :imports (imports-of raw-imports (if (:xtest opts)
+                                                                                   #(if (= % (:path p)) (:path p) (resolve %))
+                                                                                   resolve))))}))]
+            (cond
+              (and (:dep-only p) (not deps)) nil
+              (and prefix (not (str/starts-with? (:path p) prefix))) nil
+              (:error p) [{:key (:path p) :status "fail" :msg (:error p)}]
+              (not tests) [(job (:path p) (:go-files p) (:imports p) {})]
+              :else
+              (concat
+                ;; go list -test makes the variant p [p.test] of a package with tests
+                ;; (load.TestPackagesFor): its in-package tests, or a main package's external ones
+                [(if (or (seq (:test-go-files p)) (and (= (:name p) "main") (seq (:x-test-go-files p))))
+                   (job (:path p) (concat (:go-files p) (:test-go-files p)) (concat (:imports p) (:test-imports p)) {:tests true})
+                   (job (:path p) (:go-files p) (:imports p) {}))]
+                (when (seq (:x-test-go-files p))
+                  [(job (str (:path p) "_test") (:x-test-go-files p) (:x-test-imports p) {:xtest true})])))))
+        pkgs))))
+
+;;; Single-file programs (godump's fileJobs)
+
+(defn- file-jobs
+  [c {:keys [cwd args]}]
+  (let [pc (plan-config c {})
+        match? (plan/tag-fn pc)]
+    (vec
+      (for [^String arg args]
+        (let [parts (str/split arg #",")
+              key (file-key {:goroot (:goroot c) :cwd cwd} (first parts))
+              d (let [i (.lastIndexOf ^String (first parts) "/")] (if (neg? i) "." (subs (first parts) 0 (inc i))))
+              files (for [^String f parts]
+                      (let [i (.lastIndexOf f "/")
+                            fd (if (neg? i) "." (subs f 0 (inc i)))
+                            f (if (= (clean fd) (clean d)) f (join d f))
+                            i (.lastIndexOf ^String f "/")]
+                        [(if (neg? i) "." (subs f 0 (inc i))) (subs f (inc i))]))
+              adir (abs-path cwd d)
+              st (some (fn [[fd n]]
+                         (let [m (plan/match-file match? (File. (abs-path cwd fd)) n [:file (File. (abs-path cwd (str fd "/" n)))])]
+                           (cond (:error m) {:status "fail" :msg (:error m)}
+                                 (nil? m) {:status "excluded"}
+                                 :else nil)))
+                       files)]
+          (if st
+            (assoc st :key key)
+            (let [names (mapv second files)
+                  raw (mapcat (fn [n] (plan/types-imports (slurp (File. (str adir "/" n))))) names)]
+              {:key key :dir adir :files names
+               :header (header c {:path "command-line-arguments" :lang pinned-lang :dir d}
+                               {:go-files names
+                                :imports (imports-of raw #(when (not= % "C") (plan/resolve-import pc % nil)))})})))))))
+
+;;; Directory tests (godump's dirJobs, dirs.go)
+
+(def ^:private dir-actions #{"compiledir" "rundir" "builddir" "buildrundir" "runindir"})
+
+(defn- split-action
+  "The test driver's splitQuoted: fields, double quotes grouping."
+  [^String s]
+  (loop [cs (seq s) cur (StringBuilder.) in false have false out []]
+    (if-let [ch (first cs)]
+      (cond
+        (= ch \") (recur (rest cs) cur (not in) true out)
+        (and (not in) (#{\space \tab} ch)) (if have
+                                             (recur (rest cs) (StringBuilder.) in false (conj out (str cur)))
+                                             (recur (rest cs) cur in have out))
+        :else (recur (rest cs) (.append cur ch) in true out))
+      (if have (conj out (str cur)) out))))
+
+(def ^:private package-re #"(?m)^package ([\p{Lu}\p{Ll}\w]+)")
+
+(defn- read-dir-test
+  "dirs.go's readDirTest: {:test :dir :action :pkgs [{:name :path :stem :files :s-files}] :mod-vers},
+  {:status \"excluded\"} or {:status \"fail\" :msg}."
+  [c match? ^String cwd ^String file]
+  (let [src (slurp (File. (abs-path cwd file)))
+        action (loop [[l & ls] (str/split src #"\n" -1)]
+                 (cond (nil? l) ""
+                       (or (str/starts-with? l "//go:build") (str/starts-with? l "// +build")) (recur ls)
+                       :else (let [a (str/trim (if (str/starts-with? l "//") (subs l 2) l))]
+                               (if (= a "") (recur ls) a))))
+        f (split-action action)
+        dir (str (subs file 0 (- (count file) 3)) ".dir")]
+    (if (or (empty? f) (not (dir-actions (first f))))
+      {:status "fail" :msg (str file ": action " (pr-str action) " is not a directory test the helper takes (compiledir, rundir, builddir, buildrundir)")}
+      (let [[single mod-vers err]
+            (loop [args (rest f) single false mv "1.14"]
+              (let [a (first args)]
+                (if (and a (str/starts-with? a "-"))
+                  (case a
+                    "-s" (recur (rest args) true mv)
+                    ("-0" "-1") (recur (rest args) single mv)
+                    "-goexperiment" [single mv (str file ": needs another GOEXPERIMENT")]
+                    "-gomodversion" (recur (drop 2 args) single (or (second args) mv))
+                    ("-t" "-godebug") (recur (drop 2 args) single mv)
+                    "-ldflags" [single mv nil]
+                    (recur (rest args) single mv))
+                  [single mv nil])))
+            i (.lastIndexOf file "/")
+            fdir (if (neg? i) "." (subs file 0 (inc i)))
+            m (plan/match-file match? (File. (abs-path cwd fdir)) (subs file (inc i)) [:file (File. (abs-path cwd file))])]
+        (cond
+          err {:status "fail" :msg err}
+          (:error m) {:status "fail" :msg (:error m)}
+          (nil? m) {:status "excluded"}
+          (= (first f) "runindir") {:test file :dir dir :action "runindir" :mod-vers mod-vers}
+          :else
+          (let [ents (sort (map #(.getName ^File %) (or (.listFiles (File. (abs-path cwd dir))) [])))
+                gos (filterv #(= ".go" (second (re-find #"(\.[^.]*)$" %))) ents)
+                ss (filterv #(= ".s" (second (re-find #"(\.[^.]*)$" %))) ents)]
+            (cond
+              (empty? gos) {:status "fail" :msg (str dir ": no Go files")}
+              (#{"builddir" "buildrundir"} (first f))
+                {:test file :dir dir :action (first f)
+                 :pkgs [{:name "main" :path "main" :stem (subs (first gos) 0 (- (count (first gos)) 3)) :files gos :s-files ss}]}
+              :else
+              (let [pkgs (reduce (fn [acc n]
+                                   (let [pn (second (re-find package-re (slurp (File. (abs-path cwd (str dir "/" n))))))]
+                                     (if (nil? pn)
+                                       (reduced {:status "fail" :msg (str dir "/" n ": no package clause")})
+                                       (let [k (if single (count (:order acc)) pn)]
+                                         (if (and (not single) (contains? (:by acc) k))
+                                           (update-in acc [:by k :files] conj n)
+                                           (let [stem (subs n 0 (- (count n) 3))]
+                                             (-> acc
+                                                 (update :order conj k)
+                                                 (assoc-in [:by k] {:name pn :stem stem :files [n]
+                                                                    :path (if (= pn "main") "main" (str "test/" stem))}))))))))
+                                 {:order [] :by {}} gos)]
+                (if (:status pkgs)
+                  pkgs
+                  {:test file :dir dir :action (first f) :pkgs (mapv #((:by pkgs) %) (:order pkgs))})))))))))
+
+(defn- local-prefix [t] (if (#{"builddir" "buildrundir"} (:action t)) "." "test"))
+
+(defn- dir-test-view [c cwd t]
+  (cond-> {:test (file-key {:goroot (:goroot c) :cwd cwd} (:test t)) :action (:action t)}
+    (= "runindir" (:action t)) (assoc :module (last (str/split (:dir t) #"/")))
+    (not= "runindir" (:action t)) (assoc :local-prefix (local-prefix t))
+    true (assoc :packages (mapv (fn [p] [(:path p) (:stem p)]) (:pkgs t)))))
+
+(defn- runindir-jobs
+  "dirs.go's runindirJobs: the module the driver makes of the test's directory (named by its base
+  name, go line :mod-vers), its packages as go list -deps ./... lists them."
+  [c cwd t key]
+  (let [mod (last (str/split (:dir t) #"/"))
+        root (abs-path cwd (:dir t))
+        pc (plan-config c {mod root})
+        pkgs (filter #(and (not (:dep-only %)) (= mod (:module %)))
+                     (plan/list-packages pc [(str mod "/...")] {:deps true}))
+        lang (version-lang (:mod-vers t))
+        t (assoc t :pkgs (mapv (fn [p] {:path (:path p) :stem (or (rel root (.getPath ^File (:dir p))) "")})
+                               pkgs))
+        t (update t :pkgs (fn [ps] (mapv #(update % :stem (fn [s] (if (= s ".") "" s))) ps)))]
+    (cond
+      (empty? pkgs) [{:key key :status "fail" :msg (str "go list in the module " mod ": no packages")}]
+      :else
+      (vec (for [[p tp] (map vector pkgs (:pkgs t))]
+             (if (:error p)
+               {:key key :status "fail" :msg (:error p)}
+               (let [stem (:stem tp)
+                     dir (if (= stem "") (:dir t) (str (:dir t) "/" stem))]
+                 {:key (if (= stem "") key (str key "/" stem)) :dir (abs-path cwd dir) :files (vec (:go-files p))
+                  :header (header c {:path (:path p) :lang lang :dir dir}
+                                  (assoc (lists p (abs-path cwd dir) {})
+                                         :dir-test (dir-test-view c cwd t)
+                                         :imports (imports-of (:imports p) #(get (:resolved p) %))))})))))))
+
+(defn- dir-jobs
+  [c {:keys [cwd args]}]
+  (let [pc (plan-config c {})
+        match? (plan/tag-fn pc)]
+    (vec
+      (mapcat
+        (fn [^String file]
+          (let [key (file-key {:goroot (:goroot c) :cwd cwd} (str (subs file 0 (- (count file) 3)) ".dir"))
+                t (read-dir-test c match? cwd file)]
+            (cond
+              (:status t) [(assoc t :key key)]
+              (= "runindir" (:action t)) (runindir-jobs c cwd t key)
+              :else
+              (let [locals (set (keep #(when (not= "main" (:path %)) (:path %)) (:pkgs t)))
+                    adir (abs-path cwd (:dir t))]
+                (for [p (:pkgs t)]
+                  (let [raw (mapcat #(plan/types-imports (slurp (File. (str adir "/" %)))) (:files p))
+                        lmap (into (sorted-map)
+                                   (for [i raw :when (or (= i ".") (= i "..") (str/starts-with? i "./") (str/starts-with? i "../"))]
+                                     [i (clean (str (local-prefix t) "/" i))]))]
+                    {:key (str key "/" (:stem p)) :dir adir :files (vec (:files p))
+                     :header (header c {:path (:path p) :lang pinned-lang :dir (:dir t)}
+                                     (cond-> {:go-files (vec (:files p))}
+                                       (seq (:s-files p)) (assoc :s-files (:s-files p))
+                                       true (assoc :dir-test (dir-test-view c cwd t))
+                                       (seq lmap) (assoc :local-imports lmap)
+                                       true (assoc :imports (imports-of raw (fn [i]
+                                                                              (if-let [m (get lmap i)]
+                                                                                (when (locals m) m)
+                                                                                (when (not= i "C") (plan/resolve-import pc i nil))))))))}))))))
+        args))))
+
+;;; Loads
+
+(defn jobs
+  "The dumps of load (see the namespace's doc)."
+  [load]
+  (let [load (cond-> (update load :cwd #(clean (or % (System/getProperty "user.dir"))))
+               (:args-file load) (assoc :args (vec (remove str/blank? (str/split-lines (slurp (:args-file load)))))))
+        c (config load)]
+    (plan/call-with-trees
+      #(case (keyword (name (:mode load)))
+         :packages (package-jobs c load)
+         :files (file-jobs c load)
+         :dirs (dir-jobs c load)))))

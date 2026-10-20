@@ -1,0 +1,88 @@
+#!/bin/bash
+# The box's planner (arbace.box.plan, doc/go/BOX-NOTES.md, S8) on the host, without the box: the
+# plan of Arbace's program (arbace/cmd/arbace, tamago/amd64 and tamago/arm64) from store trees of
+# GOROOT/src, TamaGo's goos module (Go's module cache, bin/tamago-vendor's pinned hash) and the
+# seed's program (target/seed/src/mod, bin/seed --build) with box/ printed into it (bin/box-vendor
+# print), the planner the checkout's, against go list's (tools/goplan, as bin/box-rebuild
+# plan-check compares) and, with --base REV, against the planner of commit REV byte for byte
+# (doc/go/GO-PARSER-SURVEY.md, "As built: GP2": the generalized planner keeps the box's plans).
+# Usage: bin/lib/repr-go/plan-check [--base REV] [WORK]   (WORK default .tmp/plan-check)
+set -euo pipefail
+export CGO_ENABLED=0 GOFLAGS= GOTOOLCHAIN=local GOWORK=off
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+tg=${ARBACE_GOROOT:-/root/tamago-go}
+base=""
+[ "${1:-}" = --base ] && { base=$2; shift 2; }
+w=${1:-$root/.tmp/plan-check}
+. "$root/bin/lib/host.bash"
+exe=$(arbace_host_exe)
+[ -d "$root/target/seed/src/mod" ] || { echo "plan-check: no target/seed/src/mod (bin/seed --build)" >&2; exit 1; }
+rm -rf "$w"; mkdir -p "$w/store"
+tv=$root/bin/tamago-vendor
+setting() { sed -n "s/.*\b$1=\([^ ]*\).*/\1/p" "$2" | head -1; }
+mod=$(setting goos_mod "$tv") ver=$(setting goos_ver "$tv") zip=$(setting goos_zip "$tv")
+mc=$(env -u GOOS -u GOARCH GOROOT="$tg" "$tg/bin/go" env GOMODCACHE)
+[ "$(cat "$mc/cache/download/$mod/@v/$ver.ziphash" 2>/dev/null)" = "$zip" ] \
+  || { echo "plan-check: $mod@$ver is not in Go's module cache with the pinned hash $zip" >&2; exit 1; }
+cp -r "$mc/$mod@$ver" "$w/goos"; chmod -R u+w "$w/goos"
+cp -r "$root/target/seed/src/mod" "$w/mod"; chmod -R u+w "$w/mod"
+"$root/bin/box-vendor" --work "$w/box-work" print "$w/box-print" >&2
+cp -r "$w/box-print/mod/box" "$w/mod/box"
+cat > "$w/put.ae" <<'EOF'
+(require '[arbace.box :as box])
+(let [[goroot goos mod out] *command-line-args*]
+  (spit out (pr-str {:goroot (box/put-dir goroot) :goos (box/put-dir goos) :mod (box/put-dir mod)})))
+EOF
+cat > "$w/plan.ae" <<'EOF'
+(require '[arbace.box :as box] '[arbace.string :as str])
+(let [[planfile trees arch tagsfile out] *command-line-args*]
+  (load-file planfile)
+  (let [t (read-string (slurp trees))
+        [tt rt] (str/split (str/trim (slurp tagsfile)) #" \| ")
+        t0 (System/nanoTime)
+        p ((resolve 'arbace.box.plan/plan)
+           {:goroot (:goroot t) :modules {"arbace" (:mod t) "github.com/usbarmory/tamago" (:goos t)}
+            :goospkg "github.com/usbarmory/tamago" :main "arbace/cmd/arbace"
+            :goos "tamago" :goarch arch :goamd64 "v1" :goarm64 "v8.0"
+            :tool-tags (str/split tt #" ") :release-tags (str/split rt #" ") :tags [] :include nil})]
+    (println (format "plan-check: %s, tamago/%s: %d packages planned in %.1f s" planfile arch (count (:packages p)) (/ (- (System/nanoTime) t0) 1e9)))
+    (spit out (pr-str p))))
+EOF
+cat > "$w/compare.ae" <<'EOF'
+(require '[arbace.edn :as edn])
+(let [[pf gf] *command-line-args*
+      p (edn/read-string (slurp pf)) g (edn/read-string (slurp gf))
+      norm #(select-keys % [:path :name :std :lang :go :s :imports :importmap])
+      emb #(vector (set (keys (:patterns (:embed %)))) (set (mapcat val (:patterns (:embed %)))))
+      gemb #(vector (set (:embed-patterns %)) (set (:embed-files %)))
+      bad (remove (fn [[a b]] (and (= (norm a) (norm b)) (= (emb a) (gemb b)))) (map vector (:packages p) (:packages g)))
+      same (and (empty? bad) (= (count (:packages p)) (count (:packages g))))]
+  (println "plan-check:" (count (:packages p)) "packages planned in Arbace," (count (:packages g)) "by go list;"
+           (if same "the same" (str "DIFFERENT: " (pr-str (map (comp :path first) bad)))))
+  (System/exit (if same 0 1)))
+EOF
+ARBACE_BOX_STORE=$w/store "$exe" "$w/put.ae" "$tg/src" "$w/goos" "$w/mod" "$w/trees.edn"
+(cd "$root/tools/goplan" && env -u GOOS -u GOARCH GOROOT="$tg" GOPROXY=off "$tg/bin/go" build -o "$w/goplan" .)
+cp "$w/mod/go.mod" "$w/mod/go.mod.orig"
+printf '\nrequire %s %s\n\nreplace %s %s => %s\n' "$mod" "$ver" "$mod" "$ver" "$w/goos" >> "$w/mod/go.mod"
+if [ -n "$base" ]; then git -C "$root" show "$base:arbace/box/plan.ae" > "$w/plan-base.ae"; fi
+status=0
+for a in amd64 arm64; do
+  env -i PATH=/usr/bin:/bin HOME="$w" GOROOT="$tg" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=off CGO_ENABLED=0 \
+    GOOS=tamago GOARCH=$a GOAMD64=v1 GOARM64=v8.0 "$tg/bin/go" list \
+    -f '{{join context.ToolTags " "}} | {{join context.ReleaseTags " "}}' runtime > "$w/tags-$a.txt"
+  ARBACE_BOX_STORE=$w/store "$exe" "$w/plan.ae" "$root/arbace/box/plan.ae" "$w/trees.edn" $a "$w/tags-$a.txt" "$w/plan-$a.edn"
+  (cd "$w/mod" && env -i PATH=/usr/bin:/bin HOME="$w" GOROOT="$tg" GOTOOLCHAIN=local GOFLAGS=-mod=mod GOWORK=off \
+     GO111MODULE=on GOPROXY=off CGO_ENABLED=0 GOOS=tamago GOARCH=$a GOAMD64=v1 GOARM64=v8.0 \
+     GOOSPKG=$mod "$w/goplan" arbace/cmd/arbace) > "$w/goplan-$a.edn"
+  "$exe" "$w/compare.ae" "$w/plan-$a.edn" "$w/goplan-$a.edn" || status=1
+  if [ -n "$base" ]; then
+    ARBACE_BOX_STORE=$w/store "$exe" "$w/plan.ae" "$w/plan-base.ae" "$w/trees.edn" $a "$w/tags-$a.txt" "$w/plan-base-$a.edn"
+    if cmp -s "$w/plan-$a.edn" "$w/plan-base-$a.edn"; then
+      echo "plan-check: tamago/$a: the plan byte for byte the planner's of $base"
+    else
+      echo "plan-check: tamago/$a: the plan DIFFERS from the planner's of $base"; status=1
+    fi
+  fi
+done
+exit $status
