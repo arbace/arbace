@@ -21,9 +21,12 @@
 #                             jdk/edge.edn stays the shipped build's
 #   bin/javac-vendor verify   convert into WORK/fresh and compare with OUT (diff -r): the tree is
 #                             what the conversion and the recording give, byte for byte
-#   bin/javac-vendor check    j2g translates javac's world (bin/j2g --program on the tools'
-#                             host with OUT/forms, the tool's variants and both edges): status 0
-#                             and no class failing its analysis (WORK/check/j2g.log)
+#   bin/javac-vendor check    j2g translates javac's world (bin/j2g --program with OUT/forms,
+#                             the tool's variants and both edges): status 0 and no class failing
+#                             its analysis (WORK/check/j2g.log, report.edn). On the program built
+#                             from the checkout (target/arbace-go/amd64/arbace, bin/arbace-go
+#                             --build; J2G_GO_EXE names another), whose Java forms' analysis is the
+#                             checkout's: j2g runs on its host's own (bin/j2g)
 #   bin/javac-vendor build    the tool executable: bin/arbace-go --build-java (its header)
 #
 # Options (before the command): --work DIR (default .tmp/javac-vendor), --out DIR (default
@@ -125,7 +128,7 @@ convert_module() {
   origins "$m" > "$work/origins-$m.edn"
   rm -rf "${conv:?}/$m"
   # from WORK: read-jdk copies the files into .tmp/repr-java-patch below the current directory
-  (cd "$work" && REPR_JAVA_THREADS=8 REPR_JAVA_PATCH_ALL=1 REPR_JAVA_JVM_OPTS=${REPR_JAVA_JVM_OPTS:--Xmx12g} \
+  (cd "$work" && REPR_JAVA_THREADS=8 REPR_JAVA_PATCH_ALL=1 REPR_JAVA_JVM_OPTS=${REPR_JAVA_JVM_OPTS:--Xmx12g -Djava.io.tmpdir=$work/tmp} \
      "$root/bin/repr-java" read-jdk --check --origins "$work/origins-$m.edn" "$conv/$m" "$m" "$work/src/$m") > "$log" 2>&1
   echo "   $m: $(tail -1 "$log")" >&2
   grep -q "^$n Java files, $n converted, 0 failed, 0 javac errors, .* 0 unreadable" "$log" ||
@@ -176,7 +179,7 @@ record_edge() {
 convert() {
   local o=$1 t0 m
   t0=$(date +%s)
-  mkdir -p "$work/log" "$o"
+  mkdir -p "$work/log" "$work/tmp" "$o"
   echo "== sources (jdk26u at $pinned, $jdk)" >&2
   sources || fail "the sources were not copied"
   echo "   $(wc -l < "$work/sources.txt") files: $(for m in $modules; do printf '%s %s, ' "$m" "$(grep -c "^$m " "$work/sources.txt")"; done)" >&2
@@ -210,18 +213,20 @@ case $cmd in
       exit 1
     fi ;;
   check)
-    . "$root/bin/lib/tools.bash"
     mkdir -p "$work/check"
     t0=$(date +%s)
+    exe=${J2G_GO_EXE:-$root/target/arbace-go/amd64/arbace}
+    [ -x "$exe" ] || fail "no $exe (bin/arbace-go --build, or J2G_GO_EXE)"
+    echo "== j2g on $exe"
     # shellcheck disable=SC2046
-    bin/j2g --program $(tool_args "$out") --edge "$root/jdk/edge.edn" --edge "$out/edge.edn" --out "$work/check/j2g" \
+    J2G_GO_EXE=$exe bin/j2g --program $(tool_args "$out") --edge "$root/jdk/edge.edn" --edge "$out/edge.edn" --out "$work/check/j2g" \
       > "$work/check/j2g.log" 2>&1
     st=$?
     grep '^j2g: .*classes analyzed\|^j2g: reachability\|^j2g: error' "$work/check/j2g.log"
     [ $st = 0 ] || { tail -20 "$work/check/j2g.log"; fail "j2g failed ($work/check/j2g.log)"; }
     if grep -q '^j2g: .*classes analyzed.*failures' "$work/check/j2g.log"; then
-      grep -A100 '^j2g: analysis failures' "$work/check/j2g.log" | head -40
-      fail "classes of javac's world failed their analysis ($work/check/j2g.log)"
+      awk '/^ :analysis-failures/,/^ :variants/' "$work/check/j2g/report.edn" | head -40
+      fail "classes of javac's world failed their analysis ($work/check/j2g/report.edn)"
     fi
     echo "javac-vendor check: j2g translates javac's world, no failures ($(since "$t0"))" ;;
   build) exec bin/arbace-go --build-java "$@" ;;
