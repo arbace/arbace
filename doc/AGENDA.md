@@ -7,13 +7,13 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`910b4b8f…`), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`fcc37393…`), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
   `bin/arbace-go --build` is a Go-hosted build, `--fixpoint` the chain G1 → G2 → G3.
 - The program's namespaces are compiled to Go (`ARBACE_AOT=1`, the default since S6): the
-  executable 102.4 MB (amd64), a one-run build about 2.5 to 3 minutes.
+  executable 143.7 MB (amd64, with goi's table and digests), a one-run build about 2.5 to 3 minutes.
 - The box: the same program as a TamaGo guest of go-whim's monitor (/dev/kvm on amd64; KVM/arm64
   and Hypervisor.framework on arm64), and the box rebuilding Arbace inside itself byte for byte
   (`bin/box-rebuild`, run by hand at milestones).
@@ -93,80 +93,24 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- Running, under the user's goal (2026-10-19: "reach arbace-interprets-go-v1, that is the next
-  milestone"), each in its own worktree:
-  - GC81 (`box-reflect-overlay`, from `8aa86623`): `bin/box-rebuild` without GR9a-c's reflect
-    overlay, so the Mac's bundle does not build; the fix and the rebuild byte for byte.
-- Done under the goal, each merged, its proposals built as recommended and recorded for the user:
-  - GR9d (2026-10-19, `e4621b5d`): REPL vars for generic functions (GoGenericFn, `go/inst`, the
-    instance cache); GC72-GC74, GC135-GC144.
-  - GR8a (2026-10-19, `104d2827`): std at the REPL, 89 listed packages, 134 interpreted per
-    configuration, the label-on-`:=` fix; GC55-GC59, GC62-GC64, GC95-GC104. `text/template`'s
-    Execute waits for GR8b; its box check and `bin/gate --full` (GC102) come at the milestone run.
-  - GR7c (2026-10-19, `6295e93b`): of GR7b's 25 broken errorcheck programs 20 pass, 5 known
-    (GC94); GC85-GC94, GC144 (b).
-  - GR9a-c (2026-10-20, `9cdbd4d1`): the reflect overlay, typed stubs, proxies removed;
-    GC65-GC71, GC125-GC134.
-  - GR8b (2026-10-20, `9747f323`): reflect's methods served by goi (GC60 (a), GC61 (a)); the 13
-    programs pass, `text/template` and `html/template` execute; GC145-GC151.
-  - The arm64 box check (2026-10-20, `8aa86623`): `bin/goi check --box --arch arm64` in the
-    emulated VM, 285 of 287 (every second program of box.txt, GC75), 2 known; the GOMAXPROCS cap
-    (GC77); the Mac's bundle runs `./mac.sh goi` (the user, on the Mac, once GC81 is built);
-    GC75-GC80, GC82.
-  - GR10 (2026-10-20, `5bc8e036`): no fails left (bounds errors as gc's values, issue11362,
-    `-e=0`); v1's divergences as data (`test/goi/divergences.edn`, `bin/goi divergences`) and in
-    GOI-SPEC; GC155-GC162.
-  - `bin/goi check`: 1,471 of 1,837 pass, 0 fail, 0 error; the other 366 in recorded classes (358
-    by design, 8 deferred: go:embed's 2, GS14; `byte`/`rune`/aliases' 6, GC157); essential 740;
-    `--box` amd64 583/584, arm64 285/287.
-  - The seed `4b2646e6…` (`bbe368f9`), verified (stage 0 `6375d2db…`).
-- **The plan to the milestone `arbace-interprets-go-v1`** (the user, 2026-10-19: the full plan; the
-  tag's name `arbace-interprets-go1.27.1-v1`, the user, 2026-10-20). The milestone claims goi a complete interpreter of Go forms at the
-  REPL. The steps:
-  1. **GR7b** (done 2026-10-19, GC45-GC54 as built; GR7c, the rest of its fails, running): `$GOROOT/test`'s errorcheck programs judged by Go's test driver, with the
-     checker's errors equal to gc's; `reify` of listed Go interfaces from Arbace (G13). After it,
-     main's gate, the fixpoint and one re-seed for GR7a and GR7b; GC45-GC54 for the user.
-  2. **GR8, std at the REPL and reflect's methods.** Today about 30 of the check's 54 unsupported
-     programs import a package neither in the table nor interpretable (`regexp`, `testing`, `flag`,
-     `math/big`, `encoding/json`, `encoding/xml`, `text/tabwriter`, `container/heap`, `go/ast`,
-     `html/template`, `syscall`, `runtime/trace`, `runtime/pprof`, ...). goi will interpret pure-Go
-     std packages from their Go forms (`tamago/goroot`, the linux std forms), as GR6 does `cmp`,
-     `iter`, `maps` and `slices`, and keep a compiled core in the table. Which packages fall to
-     each side, and at what cost in speed and size, is the survey's first question. About 15
-     programs need `reflect.Value.Method`, `MethodByName`, `Type.Method` and `encoding/binary`'s
-     byte orders. These come through a targeted entry, not reflect's whole method set: that made
-     the linker keep every exported method, +18.8 MB, GR7b. Exit: no program unsupported for lack
-     of a std package or a reflect member; every std package importable at the REPL.
-  3. **GR9, interpreted types as the runtime sees them, and generics at the REPL.**
-     - G8/GS8, the runtime overlay for named types: compiled code and reflect see an interpreted
-       named type as its own runtime type, not a proxy, wrapper or RT. That covers `%T` (GS9),
-       `StructField.Anonymous`, `AssignableTo`, `MakeFunc` to a named func type and reflect's names
-       of interpreted instances (about 10 known programs).
-     - GC34 (b): a REPL var for a generic function that infers its type arguments from each call,
-       so that `slices.Index` and the program's own generic functions are called directly.
-     - Exit: those known entries pass.
-  4. **The arm64 box.** `bin/goi check --box` on tamago/arm64: in the emulated aarch64 VM
-     (`bin/box-arm64-vm`) and on the Mac (`bin/box-mac-bundle`'s checklist), as the box's
-     milestones were declared on both architectures. Also the board's crash when a program sets
-     GOMAXPROCS above the box's vCPUs, and GC35 (b) if a program's stdout must be told from its
-     stderr.
-  5. **The milestone run.**
-     - `bin/goi check` (run and errorcheck programs): every program passes or is a recorded
-       divergence with its reason.
-     - The essential subset in the gate; the box check on amd64 and arm64.
-     - `bin/gate --full`, the fixpoint, a re-seed and `bin/seed --verify`; the tag.
-     - The divergences recorded in GOI-SPEC and the journal at the tag.
-  - **v1's divergences, by design (§1.1), recorded rather than built:**
-    - assembly, cgo, `go:linkname`;
-    - package tests (S45);
-    - `go:embed` (GS14);
-    - `runtime.Caller`, `Callers` and traces naming goi's frames;
-    - finalizer timing, escape analysis, memory statistics and heap profiles;
-    - unsafe layout that gc decides;
-    - speed: programs beyond the check's 10 s;
-    - S23's call depth: `peano.go`.
-  - **After v1** (GR7's rest): staging shared with Futamura's F7 (G16); speed (F10's inline
-    caches, specialization), which would bring the speed-bound programs back.
+- **The milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name, the
+  user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):
+  - goi is complete at the REPL for Go 1.27.1: GR7a-GR7c, GR8a-GR8b, GR9a-GR9d, GR10, the arm64
+    box check and GC81, each merged, their proposals (GC35-GC165) built as recommended and recorded
+    for the user to revisit.
+  - `bin/goi check`: 1,471 of 1,837 pass, 0 fail, 0 error. The other 366 are in 17 recorded
+    classes (`bin/goi divergences`; GOI-SPEC, "v1's divergences"): 358 by design, 8 deferred
+    (go:embed's 2, GS14 (a); `byte`/`rune`/alias names in messages' 6, GC157). Essential 740 of
+    740; the box on amd64 583 of 584, in the emulated arm64 VM 291 of 292 (the half, GC75).
+  - `bin/gate --full` (its goi step run again alone after `babde67d`), the fixpoint, the seed
+    `fcc37393…` (`fca6d187`) verified (stage 0 `199e126b…`).
+  - **Left:** the check on the Mac (`./mac.sh goi`, with the bundle built at `f1e107e0`, kept
+    outside the repository), the user's to run; the tag.
+- **After v1:**
+  - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
+  - staging shared with Futamura's F7 (G16);
+  - speed (F10's inline caches, specialization), which would bring the speed-bound programs back;
+  - the arm64 goi check over all of box.txt (`GOI_BOX_ALL=1`, about 4 hours emulated).
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and

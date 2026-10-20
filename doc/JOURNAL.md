@@ -2124,3 +2124,57 @@ Alternatives considered: `arbace-go-at-the-repl-v1` (undersells programs, the bo
   stopped it by task ID. Some scratch files went to the session scratchpad.
 - **Disk** was at 79%. GR10's worktree and eight finished surveys' scratch directories were
   removed, bringing it to 74%.
+
+## 2026-10-20: the milestone run of `arbace-interprets-go1.27.1-v1`
+
+- **What:** step 5 of the plan, at main `f1e107e0` (GR1-GR10, GC81) and the fixes below.
+- **`bin/gate --full`** ran twice.
+  - **The first run (73m09s)** failed 3 of 28 steps, none of them in goi:
+    - `j2g-edge`: `jdk/edge.edn`'s `:exists` set still listed 4 classes the program no longer asks
+      the JVM about (`arbace.lang.ArityException`, `Compiler$BindingInit`, `Compiler$Expr`,
+      `java.io.FileNotFoundException`). Recorded again by `bin/j2g-edge update`.
+    - `java-fixtures`: the fixtures' provenance held an old hash of repr/clojure's sources; the
+      forms were unchanged. Updated by `bin/clojure-tests --java-fixtures update`.
+    - `goi`: `bin/gate` gave goi's test a relative `GOI_RUN_EXE`, which does not resolve once the
+      test runs its programs from their own directories (status 127). It is now the absolute path.
+    All three fixes were committed as one commit.
+  - **The second run (62m08s)** passed 27 of 28 steps, among them the fixpoint (G2 = G3), the
+    round trips of repr/java, repr/go, repr/haskell, repr/rust and repr/clojure, the box's steps,
+    goi in the box and Go's toolchain as forms.
+    - Its `goi` step failed: 3 programs (bug358, issue20298, nosplit) timed out at 16 at a time,
+      while the box checks ran on the same host.
+    - `bin/goi check` now runs a program that timed out among the others again alone, and its
+      second result stands (`babde67d`).
+    - The goi step was then run again on its own, as `bin/gate --full` runs it: annotations, `test
+      --gc` and the whole check. It passed: 1,471 pass, 0 fail, 0 error; 11 programs had timed out
+      at first and passed alone. `bin/goi divergences` passed.
+- **The box checks** ran in a detached worktree at `f1e107e0`:
+  - **amd64:** `bin/goi check --box` gives 583 of 584 (1 known: issue50109, the box's console);
+    `--smoke --box` 119 ok.
+  - **The rebuild in the box (amd64):** the image built in the box is the host's byte for byte
+    (`5a77d383…`, 143,364,394 bytes); `compare`, boot, smoke (119 ok) and plan-check (325 = 325)
+    all pass.
+  - **The emulated arm64 VM:** `bin/box-arm64-vm check` passed (smoke 113 ok, 27 KVM tests).
+    `bin/box-arm64-vm goi --record` ran the half of box.txt: 291 of 292, 1 known (issue50109).
+    The half had moved with box.txt's new programs, so `test/goi/check-box-arm64.edn` was recorded
+    again and merged from branch `milestone-box`.
+  - **The Mac's bundle** was built at `f1e107e0`: 79,702,000 bytes, sha256 `8761116c…`; the
+    expected arm64 image `50a050c0…`. It is kept outside the repository.
+  - On the first try the arm64 guest's build was OOM-killed while main's gate held about 48 GB.
+    It passed alone.
+- **The divergences** (`bin/goi divergences`, GOI-SPEC "v1's divergences"):
+
+  | reference | programs | pass | not passing |
+  |---|---:|---:|---|
+  | linux/amd64 | 1,837 | 1,471 | 366, in 17 classes: 358 by design, 8 deferred |
+  | box amd64 | 584 | 583 | 1, the box's console |
+  | box arm64 | 292 | 291 | 1, the box's console |
+  | essential | 740 | 740 | 0 |
+
+  The deferred ones are go:embed's 2 errorcheck programs (GS14 (a)) and the 6 that need `byte`,
+  `rune` and alias names in messages (GC157).
+- **The re-seed:** from the full gate's G3, `fcc37393…` (18,022,868 bytes, 1,930 files),
+  committed as `fca6d187`. `bin/seed --verify` printed it again: the same archive, and stage 0 = G1
+  = G2 = G3 byte for byte (`199e126b…`).
+- **README and CLAUDE.md:** the milestone's lines. README has a new section, "Go forms at the
+  REPL".

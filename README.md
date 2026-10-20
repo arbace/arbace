@@ -113,6 +113,38 @@ ARBACE_BOX_NET=loopback $B                             # with a network: loopbac
 ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box && bin/box-arm64-vm check
 ```
 
+## Go forms at the REPL
+
+The tag `arbace-interprets-go1.27.1-v1` (2026-10-20, on main) marks goi, Arbace's own interpreter
+of Go forms, complete at the REPL for Go 1.27.1 ([doc/go/GOI-SPEC.md](doc/go/GOI-SPEC.md)). Go is
+written as forms beside Arbace's own code, type-checked as go/types does, and run by goi:
+functions, methods, interfaces, goroutines and channels, generics (a generic function's var
+infers its type arguments at each call), and the standard library, partly compiled into the
+executable and partly interpreted from its own Go forms. Interpreted named types are real runtime
+types to compiled code and to reflect. Go values and Arbace values cross in both directions;
+a Go panic is an Arbace exception.
+
+Over `$GOROOT/test`, run against gc, 1,471 of its 1,837 programs pass, none fail. The other 366
+fall into recorded classes, 358 of them by design: programs that are not Go forms (syntax errors,
+assembly, cgo), gc's own diagnostics (optimizer flags, `-race`, its later phases), and goi's
+frames in traces, timing and speed (`bin/goi divergences`; GOI-SPEC, "v1's divergences"). goi
+passes the same check in the box: on amd64, and on arm64 in the emulated VM.
+
+```sh
+target/arbace-go/amd64/arbace
+user=> (ns go.demo (:require [arbace.go :as go]))
+go.demo=> (go/import [strings "strings"] [fmt "fmt"])
+go.demo=> (go/func Greet ^string [^string name] (+ "hello, " (strings/ToUpper name)))
+go.demo=> (Greet "go")
+"hello, GO"
+go.demo=> (go/type Point (struct ^int X ^int Y))
+go.demo=> (go/method String ^string [^Point p] (fmt/Sprintf "(%d,%d)" (.-X p) (.-Y p)))
+go.demo=> (go/eval (fmt/Println (lit Point 1 2)))
+(1,2)
+bin/goi check          # $GOROOT/test's programs interpreted against gc
+bin/goi divergences    # every program that does not pass, in its recorded class
+```
+
 ## Clojure code on Arbace
 
 repr/clojure translates Clojure source into Arbace's: the names of the Clojure Arbace vendors
