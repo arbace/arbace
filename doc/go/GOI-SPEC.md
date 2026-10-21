@@ -561,6 +561,15 @@ makes the final forms. A source whose `:answers` is a HashMap is checked so
   denotes as metadata (`:arbace.go.check.types/alias`: equality and identity unchanged; `subst`
   keeps a type it does not change). Outside the resolve mode no type is spelled: goi's checking is
   unchanged.
+- **Invalid programs as go/types records them** (GPS30 (a), GP4; extended at GP5 so that the
+  native reader's final conversion fails where the helper's does, with its message): a
+  constant keeps a valid declared type whatever its initialization, its value unknown
+  (`constDecl`, `initConst`; package and local constants), a constant spec with a type and no
+  values in a group inherits nothing (go/types' last spec), an integer literal beyond 512 bits
+  has an unknown value (`basicLit`'s overflow), a blank field or method is never found
+  (`lookupFieldOrMethod`), and `unsafe.Offsetof` records its argument's selection only when the
+  argument is valid. The annotator writes every constant's `:val` (`nil` for an unknown value)
+  and type (`invalid type` included), as the helper writes go/types' objects.
 - **Dependencies.** Each configuration's standard library is one session over the loader's std
   jobs (their raw forms checked on demand, in dependency order); a corpus's own packages, a
   directory test's, test variants (`p [p.test]`, an external test's import of p) are sessions

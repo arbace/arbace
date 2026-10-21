@@ -668,10 +668,15 @@
                     (at (symbol nm) sel l))))
           :select)))
 
+(defn spread
+  "x... as (spread x), on x's line: a literal's too (f(nil...), append(b, \"s\"...); GPS25 (b))."
+  [x]
+  (form nil (if (lit/lit? x) (:line x) (line x)) 'spread x))
+
 (defn call-args [args ellipsis]
   (let [xs (mapv expr args)]
     (if ellipsis
-      (conj (pop xs) (form nil (line (peek xs)) 'spread (peek xs)))
+      (conj (pop xs) (spread (peek xs)))
       xs)))
 
 (defn builtin-name
@@ -709,7 +714,8 @@
     (cond
       (= :type (:mode fa))
       (do (when (not= 1 (count args)) (fail "conversion arity" n))
-          (form n l 'conv (type-form fun) (expr (first args))))
+          ;; an invalid ... kept, (conv T (spread x)): unsafe.Pointer(&x...) (GPS25 (b))
+          (form n l 'conv (type-form fun) (first (call-args args ellipsis))))
 
       (= :builtin (:mode fa))
       (let [_ (loop [x fun] (when (= :paren-expr (nt x)) (count-node! x) (recur (:x (nf x)))))
@@ -726,7 +732,7 @@
           (count-node! u))
         (if a0
           (let [xs (into [a0f] (map expr more))
-                xs (if ellipsis (conj (pop xs) (form nil (line (peek xs)) 'spread (peek xs))) xs)]
+                xs (if ellipsis (conj (pop xs) (spread (peek xs))) xs)]
             (apply form n l head-form xs))
           (form n l head-form)))
 
@@ -749,11 +755,15 @@
       :else (apply form n l (expr fun) (call-args args ellipsis)))))
 
 (defn instantiation
-  "F[T...] in an expression: (inst F T...), F carrying :inst when the arguments are partial."
+  "F[T...] in an expression: (inst F T...), F carrying :inst when the arguments are partial. F is
+  written as the expression it is elsewhere: inside its parentheses (mode :full), a field's or
+  method value's selector with its name's position, a method expression's name with its line and
+  position (GPS25 (b))."
   [n]
   (let [f (nf n)
         idx (if (= :index-expr (nt n)) [(:index f)] (:indices f))
         x (unparen (:x f))
+        _ (loop [p (:x f)] (when (= :paren-expr (nt p)) (count-node! p) (recur (:x (nf p)))))
         fx (case (nt x)
              :ident (ident x (count idx))
              :selector-expr (if (pkg-ident? (:x (nf x)))
@@ -765,16 +775,17 @@
                               (if (= :method-expr (:kind (:sel (an x))))
                                 (do (count-node! x) (count-node! (:sel (nf x)))
                                     (form x (line-of x) 'method-expr (as-inst (type-form (:x (nf x))))
-                                          (-> (symbol (ident-name (:sel (nf x))))
+                                          (-> (at (symbol (ident-name (:sel (nf x)))) (:sel (nf x)) (line-of x))
                                               (add-meta (inst-meta (:sel (nf x)) (count idx))))))
                               (-> (form x (line-of x)
                                         (-> (do (count-node! x) (count-node! (:sel (nf x)))
                                                 (symbol (str ".-" (ident-name (:sel (nf x))))))
                                             (add-meta (inst-meta (:sel (nf x)) (count idx))))
                                         (expr (:x (nf x))))
-                                  (add-meta (selection-via (an x))))))
+                                  (add-meta (selection-via (an x)))
+                                  (with-pos {:name-pos (start (:sel (nf x)))}))))
              (expr x))]
-    (apply form n (line-of n) 'inst fx (map type-form idx))))
+    (apply form n (line-of n) 'inst (reparen fx (:x f)) (map type-form idx))))
 
 (defn composite [n]
   (let [{:keys [type elts]} (nf n)

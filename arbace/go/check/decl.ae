@@ -330,12 +330,19 @@
               ;; a digest's constant (§6.5) has its :val and no init (a spec of its own, not an
               ;; implicit repetition of the previous spec of a group)
               valued (and (not has-init) (nil? prev) (contains? (meta (first names)) :val))
+              ;; the resolve mode: a spec with its type and no values is go/types' last spec,
+              ;; which it does not inherit from (resolver.go: last = s when s.Type != nil), its
+              ;; names without values (missing init expr; GPS30)
+              typed-alone (and (not has-init) (not valued) prev tag (:resolve (:flags *ctx*)))
               [tag inits inherited] (cond
                                       has-init [tag (init-list init) false]
                                       valued [tag nil false]
+                                      typed-alone [tag [] false]
                                       :else [(:tag prev) (:inits prev) true])]
           (when (and (not has-init) (nil? prev) (not valued))
             (err! tf :MissingInitExpr "missing init expr for const declaration"))
+          (when typed-alone
+            (err! tf :WrongAssignCount "missing init expr for %s" (code/ident-name (first names))))
           (doseq [[i nf] (map-indexed vector names)]
             (let [nm (code/ident-name nf)
                   d (new-decl {:kind :const :file fi :form nf :spec f :iota iota :tag tag
@@ -540,7 +547,10 @@
   (binding [e/*errpos* (when (:inherited @d) (o x :line))]
   (let [{:keys [file tag init iota form]} @d
         cx (assoc (file-cx file) :iota iota)
-        T (when tag (code/typexpr cx tag))]
+        T (when tag (code/typexpr cx tag))
+        ;; the resolve mode: go/types' constDecl keeps a valid declared type whatever its
+        ;; initialization (initConst: the value unknown), as the helper's :t records it (GPS30)
+        bad-type (if (and T (t/valid? T) (t/const-type? T) (:resolve (:flags *ctx*))) T :invalid)]
     (cond
       (and T (t/valid? T) (not (t/const-type? T)))
       (do (err! form :InvalidConstType "invalid constant type %s" (t/type-str T))
@@ -552,22 +562,22 @@
       ;; a digest's constant: its :val trusted, at its :tag (else its untyped kind)
       (if-let [[ty v] (code/val-const (:val (meta form)) (when (and T (t/valid? T)) T))]
         (do (oset! x :type ty) (oset! x :val v))
-        (oset! x :type :invalid))
+        (oset! x :type bad-type))
       ;; const x = nil
       (and (nil? init) (:nil-init @d))
-      (do (e/error! (or (o x :line) e/*line*) :InvalidConstInit "nil is not constant") (oset! x :type :invalid))
-      (nil? init) (oset! x :type :invalid)
+      (do (e/error! (or (o x :line) e/*line*) :InvalidConstInit "nil is not constant") (oset! x :type bad-type))
+      (nil? init) (oset! x :type bad-type)
       :else
       (let [n (code/expr cx init)]
         (cond
-          (code/invalid? n) (oset! x :type :invalid)
+          (code/invalid? n) (oset! x :type bad-type)
           (not= :constant (:mode n))
           (do (err! init :InvalidConstInit "%s is not constant" (code/operand-str n))
-              (oset! x :type :invalid))
+              (oset! x :type bad-type))
           :else
           (let [n (if (and T (t/valid? T)) (code/assignment cx n T "constant declaration") n)]
             (if (code/invalid? n)
-              (oset! x :type :invalid)
+              (oset! x :type bad-type)
               (do (oset! x :type (:type n))
                   (oset! x :val (:val n))
                   (vswap! d assoc :tree {:op :const-decl :obj x :value n :line (code/fline form)})

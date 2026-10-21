@@ -90,7 +90,14 @@ func loadConfig() (*config, error) {
 	default:
 		return nil, fmt.Errorf("GOARCH=%s: only amd64 and arm64 are configurations of repr/go", c.goarch)
 	}
-	for _, t := range build.Default.ToolTags {
+	// The configuration's experiments, as the go command computes them for GOOS/GOARCH
+	// (context.ToolTags): not this process's build.Default, whose are the host's (GPS20 (b):
+	// darwin has no goexperiment.dwarf5).
+	tt, err := c.goCmd("list", "-f", "{{context.ToolTags}}", "unsafe").Output()
+	if err != nil {
+		return nil, fmt.Errorf("%s list -f {{context.ToolTags}}: %v", *flagGo, err)
+	}
+	for _, t := range strings.Fields(strings.Trim(strings.TrimSpace(string(tt)), "[]")) {
 		if strings.HasPrefix(t, "goexperiment.") {
 			c.toolTags = append(c.toolTags, t)
 		}

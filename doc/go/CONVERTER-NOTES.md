@@ -441,11 +441,22 @@ annotations, and the converter, unchanged, makes the final forms of it, which `n
 compares with the helper's (E-ann, doc/go/GO-PARSER-SURVEY.md "As built: GP4"). `bin/repr-go read
 --reader native --forms [--full]` writes them as `read --corpus` writes the helper's.
 
-Three things the final forms write less precisely than the raw ones, which `conform` accepts as
-the final's (GPS25): the operand of an instantiation without its parentheses, and as a field's
-selector or a method expression without the name's position; a conversion's argument without an
-invalid `...` (`unsafe.Pointer(&x...)`, `ddd1.go`, a known errorcheck divergence); a `...` after
-the universe's `nil` without a line.
+Three things the final forms wrote less precisely than the raw ones, which `conform` accepted
+as the final's until GP5 (GPS25 (a)), are corrected in the converter since GP5 (GPS25 (b), the
+native reader the default): the operand of an instantiation is written as the expression it is
+elsewhere, inside its parentheses (mode `:full`'s `:go/parens`), a field's or method value's
+selector with its name's position, a method expression's name with its line and position
+(`instantiation`); a conversion keeps an invalid `...`, `(conv T (spread x))` (`unsafe.Pointer(&x...)`,
+`ddd1.go`; the printer prints it back as written); and a `(spread x)` takes its operand's line,
+a literal's too (`f(nil...)`, `append(b, "s"...)`; `spread`). `conform` compares them exactly.
+
+**The switch (GP5).** `bin/repr-go read` reads natively by default (GPS7; `--reader helper`, or
+`REPR_GO_READER=helper`, the helper, its oracle): `arbace.repr.go.annotate -main read` writes the
+final forms as `arbace.repr.go -main read` writes the helper's, the same summary
+(`arbace.repr.go/report`) and a summary file `OUT.tsv` in the helper's format (the checker's
+errors where the helper has go/types'). `native-check` adds E-forms: the `.ae` text of both paths
+in modes `:lines` and `:full`, byte for byte, and, where the helper's conversion fails, the native
+one failing with its message (doc/go/GO-PARSER-SURVEY.md, "As built: GP5").
 
 ## What remains
 

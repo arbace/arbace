@@ -183,6 +183,15 @@
                    (str goroot "/test/" (:dir d))
                    (str/replace (:dir d) "$GOROOT" goroot)))}))
 
+(defn package-texts
+  "The .ae texts of conversion r (convert-package's, of namespace ns-sym) in mode positions, as
+  convert-data writes them: [[\"package\" text] [stem text] ...]."
+  [r ns-sym positions]
+  (binding [layout/*mode* positions]
+    (let [last-seg (last (str/split (ns-dir ns-sym) #"/"))]
+      (into [["package" (layout/write-package ns-sym (:package r) (map #(str last-seg "/" (:stem %)) (:files r)))]]
+            (for [fl (:files r)] [(:stem fl) (layout/write-file (:forms fl) (:comments fl))])))))
+
 (declare convert-data)
 
 (defn convert-dump
@@ -255,33 +264,14 @@
 
 (defn- merge-counts [ms] (apply merge-with + {} ms))
 
-(defn -main [& args]
-  (let [[cmd & args] args
-        _ (when (not= cmd "read")
-            (println "usage: read [--out DIR] [--full] [--jobs N] [--goroot DIR] [--no-check] [--report FILE] DUMP|DIR...")
-            (System/exit 2))
-        [opts paths] (loop [opts {:out ".tmp/repr-go/forms" :positions :lines :jobs 1 :check true}
-                            [a & more :as args] args]
-                       (case a
-                         "--out" (recur (assoc opts :out (first more)) (rest more))
-                         "--full" (recur (assoc opts :positions :full) more)
-                         "--jobs" (recur (assoc opts :jobs (parse-long (first more))) (rest more))
-                         "--goroot" (recur (assoc opts :goroot (first more)) (rest more))
-                         "--no-check" (recur (assoc opts :check false) more)
-                         "--print" (recur (assoc opts :print (first more)) (rest more))
-                         "--report" (recur (assoc opts :report (first more)) (rest more))
-                         "--quiet" (recur (assoc opts :quiet true) more)
-                         "--text" (recur (assoc opts :text true) more)
-                         "--text-known" (recur (assoc opts :text-known (first more)) (rest more))
-                         [opts args]))
-        files (dump-files paths)
-        _ (when (:print opts) (require 'arbace.repr.go.print))
-        t0 (System/nanoTime)
-        pool (Executors/newFixedThreadPool (:jobs opts))
-        futs (mapv (fn [[p rel]] (.submit pool ^Callable (fn [] (convert-dump p rel opts)))) files)
-        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
-        wall (/ (- (System/nanoTime) t0) 1e9)
-        fails (filter :fail rs)
+(defn report
+  "Prints the results rs of a conversion (convert-dump's or convert-data's, one per dump; wall
+  its seconds) as bin/repr-go read prints them: a line per dump (unless :quiet), FAIL and BAD
+  lines, the coverage per node kind, the totals, the text level (:text, against :text-known);
+  writes them as data to :report. Returns the exit status: 1 when a conversion failed, a file did
+  not read back or (:text) a file differs that the known differences do not list."
+  [rs wall opts]
+  (let [fails (filter :fail rs)
         bad (filter #(seq (:bad %)) rs)
         ok (remove :fail rs)
         nodes (merge-counts (map #(get-in % [:stats :nodes]) ok))
@@ -289,8 +279,6 @@
         notes (merge-counts (map #(get-in % [:stats :notes]) ok))
         lay (merge-counts (map :layout ok))
         unplaced (mapcat (fn [r] (map #(vector (:package r) %) (:unplaced r))) ok)]
-    (.shutdown pool)
-    (.awaitTermination pool 1 TimeUnit/MINUTES)
     (doseq [r rs]
       (cond
         (:fail r) (do (println "FAIL" (:path r) (:fail r))
@@ -329,13 +317,45 @@
                          (reduce + (map :files trs)) (- (reduce + (map :files trs)) (count differ))
                          (count differ) (- (count differ) (count unknown)) (count unknown))))
       (when-let [rf (:report opts)]
-      (spit rf (pr-str {:dumps (count rs) :failed (count fails) :bad (count bad)
-                        :files (reduce + (map :files ok)) :bytes (reduce + (map :bytes ok))
-                        :seconds wall :nodes (into (sorted-map) nodes)
-                        :dump-nodes (into (sorted-map) dump-nodes)
-                        :notes (into (sorted-map) notes) :layout (into (sorted-map) lay)
-                        :unplaced (vec unplaced)
-                        :text (when text? {:files (reduce + (map :files trs))
-                                           :differ (vec (sort differ))})})))
+        (spit rf (pr-str (merge (:report-extra opts)
+                                {:dumps (count rs) :failed (count fails) :bad (count bad)
+                                 :files (reduce + (map :files ok)) :bytes (reduce + (map :bytes ok))
+                                 :seconds wall :nodes (into (sorted-map) nodes)
+                                 :dump-nodes (into (sorted-map) dump-nodes)
+                                 :notes (into (sorted-map) notes) :layout (into (sorted-map) lay)
+                                 :unplaced (vec unplaced)
+                                 :text (when text? {:files (reduce + (map :files trs))
+                                                    :differ (vec (sort differ))})}))))
+      (if (or (seq fails) (seq bad) (and text? (seq unknown))) 1 0))))
+
+(defn -main [& args]
+  (let [[cmd & args] args
+        _ (when (not= cmd "read")
+            (println "usage: read [--out DIR] [--full] [--jobs N] [--goroot DIR] [--no-check] [--report FILE] DUMP|DIR...")
+            (System/exit 2))
+        [opts paths] (loop [opts {:out ".tmp/repr-go/forms" :positions :lines :jobs 1 :check true}
+                            [a & more :as args] args]
+                       (case a
+                         "--out" (recur (assoc opts :out (first more)) (rest more))
+                         "--full" (recur (assoc opts :positions :full) more)
+                         "--jobs" (recur (assoc opts :jobs (parse-long (first more))) (rest more))
+                         "--goroot" (recur (assoc opts :goroot (first more)) (rest more))
+                         "--no-check" (recur (assoc opts :check false) more)
+                         "--print" (recur (assoc opts :print (first more)) (rest more))
+                         "--report" (recur (assoc opts :report (first more)) (rest more))
+                         "--quiet" (recur (assoc opts :quiet true) more)
+                         "--text" (recur (assoc opts :text true) more)
+                         "--text-known" (recur (assoc opts :text-known (first more)) (rest more))
+                         [opts args]))
+        files (dump-files paths)
+        _ (when (:print opts) (require 'arbace.repr.go.print))
+        t0 (System/nanoTime)
+        pool (Executors/newFixedThreadPool (:jobs opts))
+        futs (mapv (fn [[p rel]] (.submit pool ^Callable (fn [] (convert-dump p rel opts)))) files)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        wall (/ (- (System/nanoTime) t0) 1e9)]
+    (.shutdown pool)
+    (.awaitTermination pool 1 TimeUnit/MINUTES)
+    (let [status (report rs wall opts)]
       (shutdown-agents)
-      (System/exit (if (or (seq fails) (seq bad) (and text? (seq unknown))) 1 0)))))
+      (System/exit status))))

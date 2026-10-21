@@ -390,8 +390,11 @@
         (e/o x :pkg-level) (assoc :pkg-level true)
         (= :pkg k) (assoc :path (e/o x :path))
         ;; a constant's type (the converter's: its kind for :val, untyped constants in shifts)
-        (and (= :const k) (some? ty) (not= :invalid ty)) (assoc :t (type-id! tt ty))
-        (and def? (= :const k) (some? (val-shape (e/o x :val) ty))) (assoc :val (val-shape (e/o x :val) ty))))
+        ;; (an invalid constant's too, go/types' Typ[Invalid], as the helper writes every
+        ;; object's type)
+        (and (= :const k) (some? ty)) (assoc :t (type-id! tt ty))
+        ;; an unknown value (an invalid constant's) as go/types' constant.Unknown: :val nil
+        (and def? (= :const k)) (assoc :val (val-shape (e/o x :val) ty))))
     {:kind :field :name (:name x)}))
 
 (defn- annotation
@@ -595,6 +598,30 @@
             r (prep j (if ts {} imports))]
         [(when (:src r) (ck/check-src (:ck (or ts s)) (:src r))) r]))))
 
+(defn- first-line-diff
+  "The first line (from 1) where the texts a and b differ."
+  [^String a ^String b]
+  (let [as (str/split-lines a) bs (str/split-lines b)]
+    (inc (or (first (keep-indexed (fn [i [x y]] (when (not= x y) i)) (map vector as bs)))
+             (min (count as) (count bs))))))
+
+(defn forms-diff
+  "E-forms: the .ae texts of the native annotated dump ad (context actx) against the helper's
+  dump d (context dctx), in mode :full (of their conversions nc and fc, already made) and mode
+  :lines (converted here): nil when byte for byte equal, else [mode file line]."
+  [ad actx d dctx nc fc]
+  (or (let [a (rg/package-texts nc (:ns actx) :full) b (rg/package-texts fc (:ns dctx) :full)]
+        (when (not= a b)
+          (if (not= (map first a) (map first b))
+            [:full :files (mapv first a) (mapv first b)]
+            (first (keep (fn [[[f x] [_ y]]] (when (not= x y) [:full f (first-line-diff x y)])) (map vector a b))))))
+      (let [a (rg/package-texts (cv/convert-package ad (assoc actx :positions :lines)) (:ns actx) :lines)
+            b (rg/package-texts (cv/convert-package d (assoc dctx :positions :lines)) (:ns dctx) :lines)]
+        (when (not= a b)
+          (if (not= (map first a) (map first b))
+            [:lines :files (mapv first a) (mapv first b)]
+            (first (keep (fn [[[f x] [_ y]]] (when (not= x y) [:lines f (first-line-diff x y)])) (map vector a b))))))))
+
 (defn- convert-full [d ctx]
   (cv/convert-package d (assoc ctx :positions :full)))
 
@@ -627,7 +654,17 @@
                     fc (try (convert-full d (rg/dump-context d rel (:goroot j)))
                             (catch Throwable ex {:final-fail (str (.getName (class ex)) ": " (.getMessage ex))}))]
                 (if (:final-fail fc)
-                  (assoc base :final-fail (:final-fail fc))
+                  ;; E-forms: the native path fails where the helper's does, with its message
+                  (let [{ad :dump} (annotate n (:answers (:src r)) (when pkg (e/o pkg :result)))
+                        nf (try (convert-full ad (:ctx r)) nil
+                                (catch Throwable ex (str (.getName (class ex)) ": " (.getMessage ex))))]
+                    (cond-> (assoc base :final-fail (:final-fail fc))
+                      ;; no oracle where go/types could not import a package (one the go command
+                      ;; does not build for the configuration: GPS17, GPS32)
+                      (some #(str/includes? (str %) "(no export data for ") (:errors d))
+                      (assoc :no-export true)
+                      (and (not= nf (:final-fail fc)) (not (some #(str/includes? (str %) "(no export data for ") (:errors d))))
+                      (assoc :forms-diff [:fail (:final-fail fc) (or nf "the native path converts it")])))
                   (let [res (atom {})
                         rd (binding [raw/*res* res] (raw/conform-package (:rc r) fc))
                         base (assoc base :res @res)]
@@ -646,7 +683,12 @@
                           (:ann-fail nc) (assoc base :ann-fail (:ann-fail nc))
                           :else (if-let [df (same-package nc fc)]
                                   (assoc base :ann-diff (vec df))
-                                  (assoc base :equal true))))))))))))
+                                  ;; E-forms: the .ae text in modes :full and :lines
+                                  (let [t4 (System/nanoTime)
+                                        fd (forms-diff ad (:ctx r) d (rg/dump-context d rel (:goroot j)) nc fc)]
+                                    (cond-> (assoc base :equal true :forms-ms (/ (- (System/nanoTime) t4) 1e6))
+                                      fd (assoc :forms-diff fd)
+                                      (not fd) (assoc :forms-equal true))))))))))))))
       (catch Throwable ex
         (let [root (loop [x ex] (if-let [c (.getCause ^Throwable x)] (recur c) x))]
           (assoc base :fail (str (.getName (class ex)) ": " (.getMessage ex))
@@ -707,7 +749,7 @@
         by (fn [k] (filter k rs))
         extra (by :extra)
         bad-extra (remove helper-failed? extra)
-        unknown (remove known? (concat (by :fail) (by :diff) (by :raw-diff) (by :ann-diff) (by :ann-fail) missing bad-extra))
+        unknown (remove known? (concat (by :fail) (by :diff) (by :raw-diff) (by :ann-diff) (by :ann-fail) (by :forms-diff) missing bad-extra))
         sum (fn [k] (reduce + (keep #(get-in % [:times k]) rs)))]
     (doseq [r (by :fail)] (println (if (known? r) "FAIL known" "FAIL") nm (:key r) (:fail r))
       (doseq [t (:trace r)] (println "    " t)))
@@ -715,16 +757,18 @@
     (doseq [r (by :raw-diff)] (println (if (known? r) "RAW known" "RAW") nm (:key r) (pr-str (:raw-diff r))))
     (doseq [r (by :ann-fail)] (println (if (known? r) "E-ANN FAIL known" "E-ANN FAIL") nm (:key r) (:ann-fail r)))
     (doseq [r (by :ann-diff)] (println (if (known? r) "E-ANN known" "E-ANN") nm (:key r) (pr-str (:ann-diff r))))
+    (doseq [r (by :forms-diff)] (println (if (known? r) "E-FORMS known" "E-FORMS") nm (:key r) (pr-str (:forms-diff r))))
     (doseq [r missing] (println (if (known? r) "MISSING known" "MISSING") nm (:key r) (:missing r)))
     (doseq [r rs :when (pos? (or (:errors r) 0))]
       (println "CHECKER" nm (:key r) (:errors r) "errors:" (pr-str (:error-msgs r))))
     (doseq [r bad-extra] (println (if (known? r) "EXTRA known" "EXTRA") nm (:key r) "dumped natively, not by the helper"))
-    (println (format "%s: E-tree %d of %d dumps equal (%d files, %d nodes); raw forms %d resolved by the final ones (%d raw only: the helper's final conversion fails); E-ann %d of %d equal (%d differ, %d failed); %d failed, %d missing, %d extra (%d the helper's failures), %d rejected by both; %d not known; load %.1f s, parse %.1f s, dump %.1f s, read %.1f s, check %.1f s (CPU), %.1f s"
+    (println (format "%s: E-tree %d of %d dumps equal (%d files, %d nodes); raw forms %d resolved by the final ones (%d raw only: the helper's final conversion fails); E-ann %d of %d equal (%d differ, %d failed); E-forms %d of %d equal (:lines and :full), %d without an oracle (the helper's imports not built); %d failed, %d missing, %d extra (%d the helper's failures), %d rejected by both; %d not known; load %.1f s, parse %.1f s, dump %.1f s, read %.1f s, check %.1f s (CPU), %.1f s"
                      nm (- (count (filter :nodes rs)) (count extra) (count (by :diff))) (count helper)
                      (reduce + (map :files (filter :nodes rs))) (reduce + (keep :nodes rs))
                      (- (count (filter :res rs)) (count (by :raw-diff))) (count (by :final-fail))
                      (count (by :equal)) (+ (count (by :equal)) (count (by :ann-diff)) (count (by :ann-fail)))
                      (count (by :ann-diff)) (count (by :ann-fail))
+                     (count (by :forms-equal)) (count (by :equal)) (count (by :no-export))
                      (count (by :fail)) (count missing) (count extra) (- (count extra) (count bad-extra))
                      (count (by :rejected)) (count unknown)
                      (/ load-ms 1e3) (/ (sum :parse-ms) 1e3) (/ (sum :dump-ms) 1e3) (/ (sum :read-ms) 1e3)
@@ -737,6 +781,9 @@
      :ann-equal (count (by :equal))
      :ann-differ (vec (for [r (by :ann-diff)] [(:key r) (:ann-diff r)]))
      :ann-fail (vec (for [r (by :ann-fail)] [(:key r) (:ann-fail r)]))
+     :forms-equal (count (by :forms-equal))
+     :no-export (vec (for [r (by :no-export)] (:key r)))
+     :forms-differ (vec (for [r (by :forms-diff)] [(:key r) (:forms-diff r)]))
      :tree-differ (vec (for [r (by :diff)] [(:key r) (:diff r)]))
      :raw-differ (vec (for [r (by :raw-diff)] [(:key r) (:raw-diff r)]))
      :fail (vec (for [r (by :fail)] [(:key r) (:fail r)]))
@@ -750,68 +797,108 @@
      :unknown (count unknown)
      :times {:load-s (/ load-ms 1e3) :parse-s (/ (sum :parse-ms) 1e3) :dump-s (/ (sum :dump-ms) 1e3)
              :read-s (/ (sum :read-ms) 1e3) :check-s (/ (sum :check-ms) 1e3)
-             :ann-s (/ (reduce + (keep :ann-ms rs)) 1e3) :wall-s (/ (- (System/nanoTime) t0) 1e9)}}))
+             :ann-s (/ (reduce + (keep :ann-ms rs)) 1e3) :forms-s (/ (reduce + (keep :forms-ms rs)) 1e3) :wall-s (/ (- (System/nanoTime) t0) 1e9)}}))
+
+(defn- tsv-line
+  "A job's line of the conversion's summary, in the helper's format (tools/godump's: STATUS KEY
+  FILES BYTES MS ERRORS [MSG], tab-separated): ok, errors (the checker's, the first as MSG) or
+  fail (go/parser rejects a file)."
+  [st k files bytes ms errs msg]
+  (str/join "\t" (cond-> [st k files bytes (long ms) errs] msg (conj (str/replace msg "\n" " | ")))))
+
+(defn- error-text [x] (str (:file x) ":" (:line x) ": " (:msg x)))
 
 (defn- read-job
   "The final forms of corpus job j (the checker's annotations, converted) written under out (mode
-  positions): arbace.repr.go/convert-data's result, or :rejected or :fail."
-  [load sess-of j out positions]
+  positions, opts :print :text as arbace.repr.go/convert-data's): convert-data's result with
+  :path NAME/KEY.edn, or {:rejected msg}, or {:fail msg}; and :tsv, its summary line."
+  [nm load sess-of j out positions opts]
   (let [t0 (System/nanoTime)
-        base {:key (:key j) :package (get-in j [:header :package])}]
+        k (or (:tsv-key j) (:key j))
+        path (str nm "/" (when (:sub j) (str (:sub j) "/")) k ".edn")
+        base {:key (:key j) :path path :package (get-in j [:header :package])}]
     (try
-      (let [[pkg r] (checked load sess-of j)]
+      (let [[pkg r] (checked load sess-of j)
+            n (:n r)]
         (if (:rejected r)
-          (assoc base :rejected (:rejected r))
-          (let [{ad :dump} (annotate (:n r) (:answers (:src r)) (when pkg (e/o pkg :result)))
-                res (rg/convert-data ad (:key j) (str (or (:tsv-key j) (:key j)) ".edn") t0 (System/nanoTime)
-                                     {:out (str out (when (:sub j) (str "/" (:sub j)))) :positions positions
-                                      :goroot (:goroot j) :check true})]
-            (merge base (select-keys res [:files :bytes :bad :ms]) {:errors (count (:errors (when pkg (e/o pkg :result))))}))))
+          (assoc base :rejected (:rejected r)
+                 ;; go/parser's error as the helper writes it: its files named from the load's
+                 ;; working directory
+                 :tsv (tsv-line "fail" k (count (:files j)) 0 (/ (- (System/nanoTime) t0) 1e6) 0
+                                (str/replace (str (:error n)) (str (str/replace (str (:cwd load)) #"/+$" "") "/") "")))
+          (let [errs (:errors (when pkg (e/o pkg :result)))
+                {ad :dump} (annotate n (:answers (:src r)) (when pkg (e/o pkg :result)))
+                t1 (System/nanoTime)
+                res (try
+                      (rg/convert-data ad path (str k ".edn") t0 t1
+                                       (merge opts {:out (str out (when (:sub j) (str "/" (:sub j)))) :positions positions
+                                                    :goroot (:goroot j) :check true}))
+                      (catch Throwable ex
+                        {:path path :fail (str (.getName (class ex)) ": " (.getMessage ex))
+                         :trace (vec (take 12 (map str (.getStackTrace ex))))}))]
+            (merge base res
+                   {:errors (count errs)
+                    :tsv (tsv-line (if (seq errs) "errors" "ok") k (count (:files n)) (get-in n [:times :bytes] 0)
+                                   (/ (- t1 t0) 1e6) (count errs) (when (seq errs) (error-text (first errs))))}))))
       (catch Throwable ex
-        (assoc base :fail (str (.getName (class ex)) ": " (.getMessage ex)))))))
+        (assoc base :fail (str (.getName (class ex)) ": " (.getMessage ex))
+               :trace (vec (take 12 (map str (.getStackTrace ex))))
+               :tsv (tsv-line "fail" k (count (:files j)) 0 0 0 (str (.getName (class ex)) ": " (.getMessage ex))))))))
 
-(defn- read-corpus [spec pool out positions]
+(defn- read-corpus
+  "Corpus spec's final forms written into out as bin/repr-go read writes the helper's (each
+  job's convert-data result, arbace.repr.go/report); the summary in the helper's format to
+  opts :tsv. Returns {:status :results ...}."
+  [spec pool out positions opts]
   (let [t0 (System/nanoTime)
         nm (:name spec)
-        dir (str out "/" nm (when (= :full positions) "-full"))
+        loads (spec-loads spec)
         work (vec (mapcat (fn [[l js]]
                             (let [[sess-of js] (load-sessions l js)]
                               (for [j js]
                                 (do (when-let [k (job-key l j)]
                                       (when-not (external-test? l j) (.put ^ConcurrentHashMap (:keep (sess-of j)) k true)))
                                     [l sess-of j]))))
-                          (spec-loads spec)))
+                          loads))
         futs (mapv (fn [[l sess-of j]]
-                     (.submit ^java.util.concurrent.ExecutorService pool ^Callable (fn [] (read-job l sess-of j dir positions))))
+                     (.submit ^java.util.concurrent.ExecutorService pool
+                              ^Callable (fn [] (read-job nm l sess-of j out positions opts))))
                    work)
         rs (mapv #(.get ^java.util.concurrent.Future %) futs)
-        ok (filter :files rs)
-        bad (filter #(seq (:bad %)) ok)]
-    (doseq [r (filter :fail rs)] (println "FAIL" nm (:key r) (:fail r)))
-    (doseq [r bad [f m] (:bad r)] (println "BAD" nm (:key r) f m))
-    (println (format "%s: %d dumps' final forms from the checker's annotations (%d files, %.1f MB of forms), read back: %d; %d rejected by go/parser, %d failed; checker errors in %d; %.1f s"
-                     nm (count ok) (reduce + (map :files ok)) (/ (reduce + (map :bytes ok)) 1e6) (- (count ok) (count bad))
-                     (count (filter :rejected rs)) (count (filter :fail rs)) (count (filter #(pos? (or (:errors %) 0)) ok))
-                     (/ (- (System/nanoTime) t0) 1e9)))
-    {:corpus nm :dir dir :dumps (count ok) :files (reduce + (map :files ok)) :bytes (reduce + (map :bytes ok))
-     :rejected (count (filter :rejected rs)) :failed (vec (for [r (filter :fail rs)] [(:key r) (:fail r)]))
-     :checker-errors (vec (for [r ok :when (pos? (or (:errors r) 0))] [(:key r) (:errors r)]))
-     :unknown (+ (count bad) (count (filter :fail rs))) :wall-s (/ (- (System/nanoTime) t0) 1e9)}))
+        wall (/ (- (System/nanoTime) t0) 1e9)
+        conv (vec (remove :rejected rs))
+        status (rg/report conv wall (assoc opts :report-extra {:reader :native :corpus nm
+                                                               :rejected (count (filter :rejected rs))
+                                                               :checker-errors (count (filter #(pos? (or (:errors %) 0)) rs))}))
+        lines (concat (keep :tsv rs)
+                      (for [[_ _ res] loads r res]
+                        (tsv-line (:status r) (:key r) 0 0 0 0 (:msg r))))]
+    (when-let [f (:tsv opts)]
+      (spit f (apply str (for [l (sort-by #(second (str/split % #"\t")) lines)] (str l "\n")))))
+    (println (format "%s: native reader, %d dumps' final forms from the checker's annotations; %d rejected by go/parser, %d failed; checker errors in %d; %.1f s"
+                     nm (count (remove :fail conv)) (count (filter :rejected rs)) (count (filter :fail conv))
+                     (count (filter #(pos? (or (:errors %) 0)) rs)) wall))
+    {:status status :corpus nm :dumps (count conv)}))
 
 (defn -main
   "check [--jobs N] [--forms DIR] [--known FILE] [--report FILE] SPEC...
-  read [--full] [--jobs N] [--forms DIR] [--out DIR] [--report FILE] SPEC...
+  read [--full] [--jobs N] [--forms DIR] [--out DIR] [--print DIR] [--text] [--text-known FILE]
+       [--quiet] [--report FILE] [--tsv FILE] SPEC
 
-  read: the final forms of each corpus SPEC's dumps (the native reader's, annotated by goi's
-  checker in its resolve mode, converted as the helper's are), written as bin/repr-go read
-  --corpus writes the helper's (mode :lines, --full :full) under --out DIR/NAME[-full], each file
-  read back. Exits 1 when a conversion fails or a file does not read back.
-
+  read: the native reader (bin/repr-go read's default, GPS7): the final forms of the corpus
+  SPEC's dumps (the native reader's, annotated by goi's checker in its resolve mode, converted as
+  the helper's are), written into --out DIR as arbace.repr.go -main read writes the helper's
+  (mode :lines, --full :full), each file read back; --print, --text and --text-known as there
+  (the round trips); its output and --report as there (arbace.repr.go/report), and --tsv the
+  summary in the helper's format (tools/godump's: ok, errors with the checker's first error,
+  fail when go/parser rejects a file or the loader fails, excluded). Exits 1 when a conversion
+  fails, a file does not read back or (--text) a file differs that the known ones do not list.
 
   check: per dump of each corpus SPEC (arbace.repr.go.parse's specs) against the helper's dumps
   (:dumps): E-tree, the raw forms against the final ones (conform), E-ann (the final forms of the
-  annotated native dump equal the helper's). Exits 1 on a difference or failure that the known
-  differences (a map of dump key, package path or file key to the reason) do not list."
+  annotated native dump equal the helper's), E-forms (their .ae text equal in modes :lines and
+  :full). Exits 1 on a difference or failure that the known differences (a map of dump key,
+  package path or file key to the reason) do not list."
   [& args]
   (let [[cmd & args] args
         _ (when-not (#{"check" "read"} cmd)
@@ -826,7 +913,16 @@
                          "--forms" (recur (assoc opts :forms (first more)) (rest more))
                          "--known" (recur (assoc opts :known (first more)) (rest more))
                          "--report" (recur (assoc opts :report (first more)) (rest more))
+                         "--tsv" (recur (assoc opts :tsv (first more)) (rest more))
+                         "--print" (recur (assoc opts :print (first more)) (rest more))
+                         "--text" (recur (assoc opts :text true) more)
+                         "--text-known" (recur (assoc opts :text-known (first more)) (rest more))
+                         "--quiet" (recur (assoc opts :quiet true) more)
                          [opts args]))
+        _ (when (and (= cmd "read") (not= 1 (count specs)))
+            (binding [*out* *err*] (println "read: one SPEC"))
+            (System/exit 2))
+        _ (when (:print opts) (require 'arbace.repr.go.print))
         known (or (when-let [k (:known opts)]
                     (when (.isFile (File. ^String k))
                       (binding [*read-eval* false] (read-string (slurp k)))))
@@ -848,22 +944,24 @@
         results (->> (for [g (sort-by #(apply min (map first %)) groups)
                            :let [rs (doall (for [[i sp] g]
                                              [i (if (= cmd "read")
-                                                  (read-corpus sp pool (:out opts) (if (:full opts) :full :lines))
+                                                  (read-corpus sp pool (:out opts) (if (:full opts) :full :lines)
+                                                               (select-keys opts [:print :text :text-known :quiet :report :tsv :jobs]))
                                                   (check-corpus sp pool known))]))]]
                        (do (drop-std-sessions!) (System/gc) rs))
                      (apply concat)
                      (sort-by first)
                      (mapv second))
-        unknown (+ forms-bad (reduce + (map :unknown results)))]
+        unknown (+ forms-bad (reduce + (keep :unknown results)))]
     (.shutdown pool)
     (.awaitTermination pool 1 TimeUnit/MINUTES)
     (when (and (= cmd "check") (> (count results) 1))
-      (println (format "native-check: %d corpora, %d dumps; E-tree %d equal; raw forms %d resolved, %d raw only; E-ann %d equal, %d differ, %d failed; %d not known"
+      (println (format "native-check: %d corpora, %d dumps; E-tree %d equal; raw forms %d resolved, %d raw only; E-ann %d equal, %d differ, %d failed; E-forms %d equal, %d differ; %d not known"
                        (count results) (reduce + (map :dumps results)) (reduce + (map :tree-equal results))
                        (reduce + (map :raw-resolved results)) (reduce + (map (comp count :raw-only) results))
                        (reduce + (map :ann-equal results)) (reduce + (map (comp count :ann-differ) results))
-                       (reduce + (map (comp count :ann-fail) results)) unknown)))
-    (when-let [rf (:report opts)]
+                       (reduce + (map (comp count :ann-fail) results))
+                       (reduce + (keep :forms-equal results)) (reduce + (map (comp count :forms-differ) results)) unknown)))
+    (when-let [rf (when (= cmd "check") (:report opts))]
       (spit rf (with-out-str (binding [*print-length* nil *print-level* nil] (prn {:forms fc :corpora results})))))
     (shutdown-agents)
-    (System/exit (if (pos? unknown) 1 0))))
+    (System/exit (if (or (pos? unknown) (some #(pos? (or (:status %) 0)) results)) 1 0))))

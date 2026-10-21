@@ -7,17 +7,19 @@
 #
 #   bin/tamago-vendor convert  convert them into OUT (default tamago/), for tamago/amd64 and
 #                              tamago/arm64, and merge the two (BX63, doc/go/BOX-NOTES.md "S4"):
-#                              std with `bin/repr-go read --corpus ARCH` (dumped afresh), the
-#                              packages that have Go files for tamago/ARCH (371 for amd64, 370
+#                              std with `bin/repr-go read --corpus ARCH` (repr/go's native
+#                              reader, GPS7; with REPR_GO_READER=helper the helper's, dumped
+#                              afresh), the packages that have Go files for tamago/ARCH (371 for amd64, 370
 #                              for arm64: the packages of test files only left out, and the 2
 #                              that embed third-party data and only cmd/ or tests import:
 #                              internal/trace/traceviewer, encoding/json/internal/jsontest), each
 #                              package's other files (.s, .h) and embedded files copied from
 #                              GOROOT/src into its forms directory (SPEC §9.5, §9.6); the goos
 #                              module (from Go's module cache, its hash checked) with `bin/repr-go
-#                              convert --goos tamago --goarch ARCH ./...` in a copy of it, the
-#                              packages that dump without errors (69 for amd64, 62 for arm64: the
-#                              others are other ISAs' boards and SoCs), their other files
+#                              read --goos tamago --goarch ARCH ./...` in a copy of it, the
+#                              packages that build for tamago/ARCH (go list -export: 69 for amd64,
+#                              62 for arm64; the others are other ISAs' boards and SoCs, whose
+#                              assembly does not build; GPS32), each read without errors, their other files
 #                              likewise; then one tree, OUT/goroot/go and OUT/goos/go: a file
 #                              both convert alike once, a file one architecture only builds
 #                              beside them (its build constraints select it), the package files
@@ -305,13 +307,13 @@ convert_arch() {
     || { tail -20 "$work/convert-std-$a.log" >&2; fail "std $a: the conversion failed ($work/convert-std-$a.log)"; }
   grep -q '; 0 failed, 0 did not read back$' "$work/convert-std-$a.log" \
     || { tail -3 "$work/convert-std-$a.log" >&2; fail "std $a: packages failed to convert ($work/convert-std-$a.log)"; }
-  grep -v -P '^ok\t' "$root/.tmp/godump/corpus/$a.tsv" >&2 && fail "std $a: packages failed to dump"
+  grep -v -P '^ok\t' "$work/forms-std-$a.tsv" >&2 && fail "std $a: packages failed to read without errors"
   rm -rf "$w"; mkdir -p "$w/goroot"
   # left out: the two std packages that embed third-party data, internal to std and imported
   # only by cmd/trace (internal/trace/traceviewer: Catapult's trace viewer, 2.7 MB) and by
   # encoding/json's tests (encoding/json/internal/jsontest: JSON corpora, 0.3 MB); no program
   # outside GOROOT can import them
-  awk -F'\t' '$1 == "ok" { print $2 }' "$root/.tmp/godump/corpus/$a.tsv" \
+  awk -F'\t' '$1 == "ok" { print $2 }' "$work/forms-std-$a.tsv" \
     | grep -v -x -e internal/trace/traceviewer -e encoding/json/internal/jsontest > "$work/std-ok-$a.txt"
   assemble "$work/forms-std-$a" "$tg/src" "$w/goroot" "$work/std-ok-$a.txt"
   headers "$w/goroot"
@@ -321,12 +323,23 @@ convert_arch() {
   chmod -R u+w "$work/goosmod"
   (cd "$work/goosmod" && "$root/bin/repr-go" read --goos tamago --goarch "$a" --out "$work/forms-goos-$a" ./...) \
     > "$work/convert-goos-$a.log" 2>&1 || true
-  awk -F'\t' '$1 == "ok" { print $2 }' "$root/.tmp/repr-go/dumps.tsv" > "$work/goos-ok-$a.txt"
+  # the packages that build for tamago/ARCH (GPS32): go build's (go list -export), their
+  # assembly included, which no reader checks (the other ISAs' boards and SoCs, and the packages
+  # importing them, type-check); each must read without errors
+  (cd "$work/goosmod" && env GOOS=tamago GOARCH="$a" GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 GOPROXY=off \
+     "$tg/bin/go" list -e -export -f '{{if .Export}}{{.ImportPath}}{{end}}' ./... 2> "$work/goos-build-$a.err") \
+    | grep . | LC_ALL=C sort > "$work/goos-ok-$a.txt" || true
   n=$(wc -l < "$work/goos-ok-$a.txt")
-  echo "   $n of $(wc -l < "$root/.tmp/repr-go/dumps.tsv") packages dump without errors for tamago/$a" >&2
+  awk -F'\t' '$1 == "ok" { print $2 }' "$work/forms-goos-$a.tsv" | LC_ALL=C sort > "$work/goos-read-$a.txt"
+  if comm -23 "$work/goos-ok-$a.txt" "$work/goos-read-$a.txt" | grep . >&2; then
+    fail "goos $a: packages that build did not read without errors ($work/convert-goos-$a.log)"
+  fi
+  echo "   $n of $(wc -l < "$work/forms-goos-$a.tsv") packages build for tamago/$a ($(wc -l < "$work/goos-read-$a.txt") read without errors)" >&2
   grep -q "^$goos_mod/goos\$" "$work/goos-ok-$a.txt" || fail "goos $a: $goos_mod/goos did not convert ($work/convert-goos-$a.log)"
   # every package that dumped converted
-  if grep '^FAIL' "$work/convert-goos-$a.log" | awk '{ print $2 }' | grep -qxF -f "$work/goos-ok-$a.txt"; then
+  # (a FAIL line names the dump, the helper's .tmp/repr-go/dumps/KEY.edn or the native pkgs/KEY.edn)
+  if grep '^FAIL' "$work/convert-goos-$a.log" | awk '{ print $2 }' | sed -E 's#^(.*/dumps/|pkgs/)##; s#\.edn$##' \
+       | grep -qxF -f "$work/goos-ok-$a.txt"; then
     fail "goos $a: a package that dumped failed to convert ($work/convert-goos-$a.log)"
   fi
   mkdir -p "$w/goos"

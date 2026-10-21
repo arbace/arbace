@@ -131,7 +131,7 @@ repr-go-roundtrip-text: ## mode :full prints the original text back, byte for by
 	bin/repr-go roundtrip --text linux/amd64
 	bin/repr-go roundtrip --text --dirs amd64
 	bin/repr-go roundtrip --text --dirs linux/amd64
-repr-go-native-check: ## the native reader against the helper over every corpus: headers and trees, raw forms, the checker's annotations (bin/repr-go native-check)
+repr-go-native-check: ## the native reader (bin/repr-go read's default) against the helper, its oracle, over every corpus: headers and trees, raw forms, the checker's annotations, the forms byte for byte (bin/repr-go native-check)
 	bin/repr-go native-check
 repr-java-roundtrip: ## Java -> forms -> Java -> forms over Clojure's Java, the samples, jdk/forms (bin/repr-java roundtrip)
 	bin/repr-java roundtrip --corpus baseline,samples,jdk

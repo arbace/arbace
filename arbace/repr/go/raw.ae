@@ -34,12 +34,6 @@
 
 (defn- resolved! [k r] (when *res* (swap! *res* update [k r] (fnil inc 0))))
 
-(def ^:dynamic *inst-operand*
-  "Bound true while the operand of an instantiation is compared: the final instantiation writes
-  a field's or method value's selector without the name's position, and a method expression's
-  name without its line and position."
-  false)
-
 (defn- pos-merge
   "Positions p with the non-nil ones of m; nil when none (a form relined has none)."
   [p m]
@@ -110,16 +104,6 @@
 
 (defn- parens [x] (get-in (meta x) [::cv/full :go/parens]))
 
-(defn- without-parens [x]
-  (if (parens x) (vary-meta x update ::cv/full #(not-empty (dissoc % :go/parens))) x))
-
-(defn- fix-meta
-  "x's metadata with ::full left out when empty."
-  [x]
-  (if (and (instance? arbace.lang.IObj x) (contains? (meta x) ::cv/full) (empty? (::cv/full (meta x))))
-    (vary-meta x dissoc ::cv/full)
-    x))
-
 (def unsafe-builtins '#{Add Alignof Offsetof Sizeof Slice SliceData String StringData})
 
 (defn- sel-name
@@ -139,12 +123,7 @@
       (and (= 'conv fh) (= 3 (count f)) (= 1 (count ra)))
       (do (resolved! :call :conversion)
           (or (conform rh (second f) (conj path 0))
-              (when-let [d (conform (first ra) (nth f 2) (conj path 1))]
-                ;; the final conversion drops an invalid ... (unsafe.Pointer(&x...), ddd1.go)
-                (let [a (first ra)]
-                  (if (and (seq? a) (= 'spread (first a)) (not (conform (second a) (nth f 2) (conj path 1))))
-                    (do (resolved! :call :conversion-drops-spread) nil)
-                    d)))
+              (conform (first ra) (nth f 2) (conj path 1))
               (conform-meta r f path)))
 
       ;; (.M x args...): the callee (go/select x M) is a method
@@ -194,17 +173,15 @@
       (do (resolved! :select :field-or-method-value)
           (if (not= (subs (name (first f)) 2) (sel-name s))
             (mismatch path :field-name r f)
-            (or (binding [*inst-operand* false] (conform x (second f) (conj path 1)))
-                (let [want (if *inst-operand*
-                             (not-empty (pos-of r))
-                             (pos-merge (pos-of r) {:name-pos (:name-pos (pos-of s))}))]
+            (or (conform x (second f) (conj path 1))
+                (let [want (pos-merge (pos-of r) {:name-pos (:name-pos (pos-of s))})]
                   (when-not (= want (not-empty (pos-of f))) (mismatch path :field-pos want (pos-of f))))
                 (conform-meta (strip r [::cv/pos]) (strip f [::cv/pos]) path))))
 
       (and (seq? f) (= 'method-expr (first f)) (= 3 (count f)))
       (do (resolved! :select :method-expression)
-          (or (binding [*inst-operand* false] (conform x (second f) (conj path 1)))
-              (conform (if *inst-operand* (strip s [::cv/l ::cv/pos]) s) (nth f 2) (conj path 2))
+          (or (conform x (second f) (conj path 1))
+              (conform s (nth f 2) (conj path 2))
               (conform-meta r f path)))
 
       :else (mismatch path :select r f))))
@@ -222,10 +199,7 @@
       (= 'inst fh)
       (do (resolved! :index :instantiation)
           (or (when (not= (count r) (count f)) (mismatch path :count r f))
-              ;; the final instance's operand is written without its parentheses
-              (binding [*inst-operand* true]
-                (when (conform x (second f) (conj path 1))
-                  (conform (fix-meta (without-parens x)) (second f) (conj path 1))))
+              (conform x (second f) (conj path 1))
               (conform-seq (vec is) (vec (nnext f)) path)
               (conform-meta r f path)))
       :else
@@ -319,11 +293,6 @@
     (cond
       (and (seq? r) (= 'lit (first r)) (seq? f) (= 'lit (first f)))
       (or (conform-lit-elems r f path) (conform-meta r f path))
-      ;; f(nil...): the final spread of the universe's nil has no line (its operand a literal)
-      (and (seq? r) (= 'spread (first r)) (= 2 (count r)) (= :id (open-of (second r)))
-           (seq? f) (= 'spread (first f)) (= 2 (count f)) (lit/lit? (second f)) (nil? (::cv/l (meta f))))
-      (or (conform (second r) (second f) (conj path 1))
-          (conform-meta (strip r [::cv/l]) (strip f [::cv/l]) path))
       ;; for true {...}: (while (go/id "true") ...), (for [] true _ ...) when true is the universe's
       (and (seq? r) (= 'while (first r)) (seq? f) (= 'for (first f)) (= (+ 2 (count r)) (count f))
            (= :id (open-of (second r))) (= [] (nth f 1)) (= '_ (nth f 3)))
