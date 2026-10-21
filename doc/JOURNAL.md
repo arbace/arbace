@@ -615,3 +615,24 @@ JFS26 (a), the `javac` step in `bin/gate --full`.
 - **`test/oracle/forms/processes.ae:178`:** to be rewritten so it does not race the child's exec.
   The work is on the branch `oracle-processes-flake`; the user preferred this over recording it as
   known or leaving it.
+
+## 2026-10-21: the processes form made robust (merged)
+
+- **What:** the branch `oracle-processes-flake` (`de8388f2`) is merged. In
+  `test/oracle/forms/processes.ae` (line 178), the child's `.info` is now polled every 10 ms, for at
+  most 500 tries, until its arguments are present. The value is unchanged:
+  `[true true ["5"] true true true true true true 143 false false]`.
+  `test/oracle/expected/forms/processes.edn` was re-recorded from the frozen jar (129 cases; cases
+  88-129 are 2 lines later).
+- **Why in the form:** jrt's `ProcessHandle.Info` is a snapshot of `/proc/PID/cmdline` taken at
+  `.info` time, as the JDK's is (`hostproc_linux.ae`'s `ProcInfo`). `.start` can return before the
+  child's argument list is readable, which is the JDK's race too.
+- **Checks:**
+  - The old form failed 1 of 60 concurrent runs.
+  - The new form passed 120 of 120 evaluated runs. Compiled, `bin/diffcheck forms/processes` passed
+    20 of 20 under added load.
+  - `bin/oracle check`: 22,658 of 22,711, the 53 known.
+  - `bin/diffcheck`: 12,741 of 12,764, the 23 known.
+  - The branch's essential gate passed.
+- Nothing else keys on the file's line numbers: the known lists have no entries for it, and the
+  box's subset excludes it.

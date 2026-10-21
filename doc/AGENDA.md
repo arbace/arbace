@@ -131,7 +131,7 @@ The current state of the work. This file is rewritten as things change. For the 
     and java.base itself byte for byte as the JVM's javac, `bin/javac-vendor classes`, a `javac`
     step in `bin/gate --full`; the program changed, re-seed batched with GP4's; JFS23-JFS26
     decided as built); re-seed batched with GP4's (the user). Running: JN4, repr/java's `read` on
-    Arbace (`java-frontend-jn4`); the processes form's race (`oracle-processes-flake`).
+    Arbace (`java-frontend-jn4`). The processes form made robust (2026-10-21).
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);
