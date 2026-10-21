@@ -1539,7 +1539,7 @@ reader not yet compiled in):
 |---|---:|---:|
 | classes analyzed, failing | 16,777, 0 | 16,780, 0 |
 | classes translated, methods reached, with missing parts | 16,674, 84,518, 339 | 16,725, 85,990, 368 |
-| tool executable (stripped) | 187,433,120 bytes | 188,498,080 bytes (+1,064,960, +0.6%) |
+| tool executable (stripped) | 187,433,120 bytes | 188,485,792 bytes (+1,052,672, +0.6%); 188,498,080 with javac's edge re-recorded (below) |
 
 So JFS17 (a) stands: the tool grows by 0.6%, not a third, because javac's API already reaches most
 of its internals; (b) is not needed. The rooting made one class compile in Go that had not been
