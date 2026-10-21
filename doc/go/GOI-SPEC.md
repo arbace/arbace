@@ -4599,6 +4599,12 @@ subset.**
 | a program of another architecture | 0 (arm64 box: 1 known) | `fixedbugs/issue15277` in the arm64 box (`check-box-known-arm64.edn`) | gc's reference is linux/amd64's; the program's build constraint is amd64, so it has no Go files for tamago/arm64 | the arm64 box check |
 | the box's console | 0 (each box: 1 known) | `typeparam/issue50109` in the amd64 and the arm64 box | TamaGo's console is one stream, and the board's line buffer ends the last line with a newline | GC35, GR7a |
 
+
+**Since v1.** GP5 (2026-10-21, doc/go/GO-PARSER-SURVEY.md "As built: GP5", GPS25 (b)): the
+converter keeps a conversion's invalid `...` (`(conv T (spread x))`), so `ddd1.go` passes (known
+before, in "message spellings, columns and lines the forms do not keep", now 10): 1,472 of 1,837
+pass. goi's corpora are the native reader's since then, byte for byte the helper's.
+
 The totals by result: 281 unsupported (9 + 2 + 134 + 96 + 5 + 7 + 21 + 7), 67 known (21 + 17 + 2 +
 6 + 1 + 3 + 11 + 6), 18 skipped (15 + 3). Of the agenda's by-design list, every class has its
 programs above; `go:embed` is deferred rather than by design, by GS14's decision. The classes
