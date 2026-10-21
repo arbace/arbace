@@ -502,3 +502,13 @@ JFS18-JFS22 (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN2"), as built:
   byte, `56604d7ea7239f9aa6fbc92c16aad29a98b3459da5373a65996455afcbf5cd20`.
 - **Why batched:** GP2's loader and JN2's jrt and j2g changes changed the program; GP3 followed
   within the day, so one re-seed covers the three (decided at GP2's merge).
+
+## 2026-10-21: GPS21-GPS26 decided as built (the user)
+
+GPS21-GPS26 (doc/go/GO-PARSER-SURVEY.md, "As built: GP3"), each as recommended:
+- marks of their own for the open decisions, `::open` in memory;
+- raw calls unclassified;
+- `raw-check` by hand now, merged into native-check at GP4;
+- the statement lists loop;
+- the final converter's three imprecisions corrected at GP5;
+- GP4's checker takes the raw forms in memory.

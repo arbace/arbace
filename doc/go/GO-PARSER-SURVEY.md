@@ -1338,3 +1338,15 @@ what E-ann will compare kind by kind.
     and costs a write and a read per package.
 
   *Recommended: (a)*.
+
+## Decided (2026-10-21): GPS21-GPS26
+
+The user decided GPS21-GPS26 as built, each as recommended:
+- GPS21 (a): heads of their own for the open forms, public keys for the open names and keys, the
+  typed metadata left out, a call as `(F a ...)`; the private `::open` in memory.
+- GPS22 (a): a raw call is never classified; only the syntax's heads are written `(go/call h ...)`.
+- GPS23 (a): `raw-check` by hand at milestones now; (c) at GP4, merged into native-check.
+- GPS24 (a): the statement lists loop.
+- GPS25 (a): the three imprecisions accepted by `conform` now; (b) at GP5, the final converter
+  corrected.
+- GPS26 (a): GP4's checker takes the raw forms in memory.

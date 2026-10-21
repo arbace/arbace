@@ -118,8 +118,8 @@ The current state of the work. This file is rewritten as things change. For the 
     loader, headers 12,275 of 12,275, the box's plan unchanged; the program changed, re-seed
     batched with JN2's; GPS16-GPS20 decided as built). GP3 done (2026-10-21: raw forms,
     `bin/repr-go raw-check` 12,158 dumps resolved, 0 differ, 117 raw only; the normal conversion
-    unchanged). The seed remade after GP2, JN2 and GP3 (`aa4cb10b…`) and verified. Open for the
-    user: GPS21-GPS26; next GP4, the annotator.
+    unchanged). The seed remade after GP2, JN2 and GP3 (`aa4cb10b…`) and verified. GPS21-GPS26 decided
+    as built (the user, 2026-10-21); next GP4, the annotator.
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
