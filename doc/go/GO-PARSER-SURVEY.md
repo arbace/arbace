@@ -1479,7 +1479,10 @@ batched (no re-seed here). Until then stage 0 evaluates them from the checkout.
 12,158 raw forms resolved, E-ann 12,158 of 12,158, 0 not known); `bin/repr-go read --reader native
 --forms` over goi's five corpora and `bin/goi annotations --forms` over them (above); `bin/goi
 annotations` as recorded; the 28 conversions before and after; `make check-makefile`; the
-essential `bin/gate` (below). Not run: `bin/gate --full`, `bin/box-rebuild`.
+essential `bin/gate` passed (21 m 27 s, its build anew since `arbace/` changed: the smoke test,
+Clojure's suite with no regressions, the oracle 22,658 of 22,711 against its 53 known, the
+differential check 12,741 of 12,764 against its 23 known, goi's essential check 740 of 740, the
+generated variants). Not run: `bin/gate --full`, `bin/box-rebuild`.
 
 **Proposals (GPS27-GPS31; each built as recommended).**
 
