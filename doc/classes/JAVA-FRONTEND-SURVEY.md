@@ -11,8 +11,9 @@ prior-art clones (§3). The measuring scripts and the clones are in the survey's
 (`.tmp/jfs/`, `.tmp/prior/`, not tracked); Appendix A says what each computes. No JVM was run for
 this survey and no Go build was made. Decided on 2026-10-20 ("Decided", at the end); JN1, the
 spike, as built: "As built: JN1 (2026-10-20)", after it; JN2, javac's forms vendored: "As built:
-JN2 (2026-10-20)", with JFS18-JFS22; JN3, javac runs on Arbace: "As built: JN3 (2026-10-21)", at
-the end, with JFS23-JFS26.
+JN2 (2026-10-20)", with JFS18-JFS22; JN3, javac runs on Arbace: "As built: JN3 (2026-10-21)", with
+JFS23-JFS26; JN4, repr/java's `read` on Arbace: "As built: JN4 (2026-10-21)", at the end, with
+JFS27-JFS30.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -1484,3 +1485,294 @@ The user decided JFS23-JFS26 as built:
   Arbace (b) when the build tree goes.
 - JFS25 (a): javac's command line on Arbace as jrt's own Java in jdk.compiler's overlay.
 - JFS26 (a): the `javac` step in `bin/gate --full`'s Go chain.
+
+## As built: JN4 (2026-10-21)
+
+JN4, repr/java's `read` on Arbace, on the branch `java-frontend-jn4` from main `864a5de2`, in about
+three hours of work (against the 2-4 days estimated): `arbace.repr.java`'s reader runs on javac's
+tool executable, its namespaces compiled into the tool by c2j, javac on Arbace attributing against
+the pinned platform, and it reads every corpus of §6 byte for byte as the frozen JVM's reader does:
+the baseline's hashes, the samples, the module sample, `jdk/forms`, the suite's fixtures and mode
+`:full` of the round trip's three corpora. The reader's code is unchanged but for javac's file
+manager (`javac.ae`). The JVM stays the default host (JN5 and JN6 move the checks and remove it).
+The JVM ran only the frozen v4 jar (`bin/repr-java`, `bin/lib/frozen.bash`: the reference reads,
+the re-recorded provenance and edge) and the system JDK's generators (`bin/jrt-convert generate`,
+JN7's); Go only TamaGo's go1.27.1, without cgo. The tools' host was the worktree's stage 0 (the seed
+of `665fa0b6`); j2g for the tool ran on the program built from the checkout (JFS22 (a)).
+
+### JN4.1 The reader on javac's tool executable
+
+- **`javac.ae`** (the reader's only change): when the class `jdk.internal.jrt.javac.FileManager`
+  exists (javac's tool executable; the frozen jar has none), `analyze` hands JN3's file manager to
+  `JavacTool.getTask`, as javac's command line on Arbace does (JFS25 (a)): the file manager's
+  options are taken out of javac's (`-sourcepath`, `-cp`, `--patch-module`), the platform is the
+  directory `REPR_JAVA_PLATFORM` names, the class path `-cp`, else `REPR_JAVA_CP` (on the JVM the
+  class path's tail), else none; the sources are `FileManager.source`'s. Everything else (`parse`,
+  `analyze`, the diagnostics, `Types`, `Symtab`) is as on the JVM, and on the JVM nothing changed.
+  `convert`, `jtypes`, `resolve`, `names`, `layout`, `full`, `forms` and `java.ae` run unchanged.
+- **`read-jdk`'s `--patch-module`** is the file manager's `addPatch`, one per chunk, against the
+  platform's system modules (JN3.3: the build tree's exploded modules with the jmods' module
+  descriptors, `jdk/javac/platform.sha256`), the chunks and threads as on the JVM
+  (`REPR_JAVA_THREADS`, `REPR_JAVA_PATCH_ALL`).
+- **`bin/repr-java`**: `REPR_JAVA_HOST=jvm` (the default) or `arbace`: `read`, `read-jdk`,
+  `coverage` and `main` run on `REPR_JAVA_EXE` (default `target/arbace-go/<arch>/arbace-javac`)
+  with `ARBACE_PATH` the checkout, the platform made once into `.tmp/repr-java-platform` (under a
+  lock) by `bin/javac-vendor platform DIR`, a new command that makes it and checks it against the
+  pin. An environment variable rather than an option, so that every script that calls
+  `bin/repr-java` (`check`, `bin/jrt-convert`, `bin/clojure-tests --java-fixtures`,
+  `bin/javac-vendor`) runs on the selected host unchanged. `bin/lib/repr-java/check` takes
+  `REPR_JAVA_CHECK_WORK`.
+- **The provenance names the host**: `bin/lib/frozen.bash`'s new `repr_java_host` (the frozen jar's
+  name and SHA-256 on the JVM, as before; `arbace-javac SHA-256` of the tool on Arbace) replaces
+  `frozen_host` in the three provenance writers (`bin/jrt-convert`, `bin/clojure-tests`,
+  `bin/javac-vendor`): JFS30.
+
+### JN4.2 What the tool roots (JFS17 (a)) and j2g's fix
+
+j2g's `repl-visible?` (`arbace/j2g/main.ae`) treats a class of the tool's modules (`nm/qualified?`:
+javac's packages, JFS13) as visible whatever the edge's `:unexported` says, so `--program` roots
+every public member of `com.sun.tools.javac.*` as of `javax.*`; the shipped world holds none of
+these packages. The tool, before and after (the program built from the checkout as j2g's host; the
+reader not yet compiled in):
+
+| | JN3 | JN4, javac's internals rooted |
+|---|---:|---:|
+| classes analyzed, failing | 16,777, 0 | 16,780, 0 |
+| classes translated, methods reached, with missing parts | 16,674, 84,518, 339 | 16,725, 85,990, 368 |
+| tool executable (stripped) | 187,433,120 bytes | 188,498,080 bytes (+1,064,960, +0.6%) |
+
+So JFS17 (a) stands: the tool grows by 0.6%, not a third, because javac's API already reaches most
+of its internals; (b) is not needed. The rooting made one class compile in Go that had not been
+reached: javac's source launcher's record `MemoryModuleFinder`, whose component `descriptor` is a
+`java.lang.module.ModuleDescriptor`, outside the closed world. Its struct has no field for it
+(j2g's `class-fields`), but j2g's derived `toString`, `hashCode` and `equals` read the field: a Go
+compile error. **The fix** (`arbace/j2g/decls.ae`, `record-object-body`): such a component's value
+is an operation-level stub (J2G-SPEC §4.1, `J2g_Missing`) as an Object; the record's canonical
+constructor does not exist either, so the stub is never reached. No regression case in
+`bin/diffcheck`'s corpora: the interpreted half cannot name a class outside the program, as for
+JN2's cast fix; javac's world is its test (the tool build).
+
+`jdk/javac/edge.edn` was recorded again (`bin/javac-vendor edge`, then `convert`): the rooted record
+adds `ModuleDescriptor`'s members to `:cut` (39 classes beyond `jdk/edge.edn`'s, 79,753 bytes,
+against 38 and 77,998), and `:unexported` shrinks to `#{"sun.reflect.annotation"}`, since
+`repl-visible?` no longer asks about javac's packages. `jdk/edge.edn` is unchanged (`bin/j2g-edge
+verify`).
+
+### JN4.3 The reader compiled into the tool (JFS28)
+
+Evaluated from the checkout, the reader converted the baseline in 33.1 s (javac's `analyze` 4.7 s);
+the JVM's took 5.4 s (javac 3.6 s). The converter is evaluated Clojure code, and the evaluator
+was the cost, so the tool now carries the reader compiled:
+
+- j2g's new `--embed PREFIX` (`main.ae`, `embed.ae`'s `sources`): sources the shipped program leaves
+  out are embedded too; the tool embeds `arbace/repr/java` (the reader, the printer, the round
+  trip's comparator: 12 namespaces).
+- `bin/arbace-go --build-java` builds the tool in two passes when the compiled reader's tree is
+  missing or of another key (`reader_key`: the compiled namespaces' key, `aot_key`, and javac's
+  world, `jdk/javac`, `overlay/jdk/javac`, `jdk/edge.edn`): a first tool build as before, then
+  `reader_compile` on it (the reader's namespaces required from the checkout as embedded sources,
+  `ARBACE_PATH_FIRST`, with `ARBACE_COMPILE`: only their units are recorded, the program's own
+  namespaces staying compiled; `arbace.c2j.main/run` on them, each source in its own id space) into
+  `target/arbace-go/aot-reader` (12 sources, 1,540 classes, 52 files, 8.4 MB of Java forms, 10 s),
+  then the tool again with `--input aot-reader --embed arbace/repr/java`. With the tree's key
+  unchanged, one pass. `ARBACE_AOT=0` builds the reader evaluated.
+- At run time the reader's namespaces load compiled; a namespace whose source in the checkout
+  differs from the tool's embedded copy is loaded from the checkout, evaluated (`RT.toolSource`:
+  `arbace/repr/`), so a change to the reader runs before the tool is rebuilt.
+
+| | evaluated | compiled | the JVM |
+|---|---:|---:|---:|
+| the baseline's conversion (after javac, 183 units) | 33.1 s | 15.4 s | 5.4 s |
+| `read --check` of the baseline (the run's own time) | 47.3 s | 21.5 s | 8.9 s |
+| `read-jdk --full` of the jdk corpus (4 threads, the run's own time) | 205.9 s | 120.0 s | 32.5-46.1 s |
+| tool executable | 188,498,080 bytes | 197,910,688 bytes (+5.0%) | |
+| j2g: classes analyzed, translated, methods reached | 16,780, 16,725, 85,990 | 18,381, 18,326, 91,849 | |
+
+The tool build: the first pass as JN3's (261-280 s with the host of the checkout's runtime), the
+reader's compile 10 s, the second pass about as long again; 708 s here, where both passes compiled
+the namespaces after a first build of their own (the host's runtime was not the checkout's after
+`jdk/provenance.edn` changed).
+
+**c2j's fix found.** The first two-pass build failed: `arbace/repr/java.ae` was "not compiled:
+Unable to resolve classname: Context". A linked call (`emit-link-site`) reads the callee's fn
+method's nodes for its unboxed signature and spec mask (`site-psig`, `site-spec`); a parameter's
+class there is its tag resolved lazily (`LocalBinding.getJavaClass`, `HostExpr.tagToClass`) in
+`*ns*`, which was the caller's namespace. `arbace.repr.java` calls `arbace.repr.java.javac/types`,
+`[^Context ctx]`, and does not import `Context`; when `javac.ae` had been compiled first, the class
+was already cached in the binding, so the failure depended on the order of the sources (an earlier
+order compiled all twelve). **The fix** (`arbace/c2j/emit.ae`): `site-spec` and `site-psig` bind
+`*ns*` to the callee var's namespace. No regression case in `bin/diffcheck`'s corpora: they are
+the oracle's forms, one namespace per file, and the case needs a namespace calling another's fn
+whose parameter tag only the callee imports, compiled before it; the tool build is its test
+(`reader_compile` compiles `java.ae` before `javac.ae`). The shipped namespaces' compiled tree is
+unchanged by it (JN4.7).
+
+### JN4.4 The fixtures' runtime (JFS6, JFS27)
+
+On the JVM javac reads `arbace.lang.IFn` and `arbace.java.api.Clojure` (the suite's `SwissArmy`)
+from the frozen jar on its class path. JFS6 (a) decided the checkout's `arbace/lang` printed by
+`repr/java print` and put on javac's source path. As decided it does not work: `print` fails on
+`RT.ae` (a stack overflow), `Compiler.ae` and `GoInterp.ae` ("unsupported loop") and the Go
+variants of `arbace/lang/go` (`j2g/variant`), and the runtime is not Java a javac takes whole (the
+Go build's forms, goi's classes, natives). What javac needs is the runtime's declarations, so
+(JFS27 (b)):
+
+- `bin/repr-java print --layout declarations` (`print.ae`'s `*declarations*`): every method and
+  constructor body `throw null;` (a constructor's explicit `this(...)`/`super(...)` call kept), no
+  initializer blocks, a field's initializer kept only when it is a literal of a final field or the
+  field is an interface's (a final field without one is printed non-final), one top-level class per
+  Java file (`GoInterp.ae` holds eight public ones), and a parameter named by a Java keyword
+  (`Compiler`'s `super`, `extends`; `ReflectorCallSite`'s `_`) given a trailing `_`.
+- One printer fix it needed holds for any print: an interface's instance method with a body is
+  printed `default` when the forms leave `^:default` out (the runtime's hand-written
+  `Compiler$Expr.evalIn`; converted forms always write it). The printer's output over `jdk/forms`
+  (838 files), the samples and the baseline's mode `:full` forms is byte for byte the same before
+  and after the change.
+- `bin/repr-java declarations OUT`: `arbace/lang/*.ae` and `arbace/java/api` printed so into
+  `OUT/java` (141 forms files, 0 failed; 10 s on the tools' host), compiled by javac on Arbace
+  (`-g:none`, the platform) into `OUT/classes` (836 class files, about 10 s), whose path it prints.
+- `bin/clojure-tests --java-fixtures` with `REPR_JAVA_HOST=arbace` and no `CLOJURE_SRC` uses it
+  as javac's class path. The 15 forms files are `test/java-fixtures/forms` byte for byte: the
+  runtime's declarations give the fixtures' forms the frozen jar's gave (R5 did not occur).
+
+### JN4.5 The check: `bin/repr-java host-check` (JFS29)
+
+`bin/repr-java host-check [check jdk fixtures full]` (`bin/lib/repr-java/host-check`; Makefile
+`repr-java-host-check`, in `make verify`), under `.tmp/repr-java-host-check`:
+
+| corpus | on javac's tool executable | against | result |
+|---|---|---|---|
+| `check` | `bin/repr-java check`: the baseline (183 files, 189 converted), `test/repr/java/java` (10, 11), `module` (4, 6) | `test/repr/java/expected/baseline.sha256`, `expected/java`, `expected/module` | **equal** |
+| `jdk` | `bin/jrt-convert`'s `sources`, `generate` and `convert` (838 files, 911 converted) | `jdk/forms` (`diff -r`), `jdk/provenance.edn` but the host | **equal** |
+| `fixtures` | `bin/clojure-tests --java-fixtures` (12 files, 15 converted), the runtime's declarations | `test/java-fixtures/forms` | **equal** |
+| `full` | `read --full` of the baseline, the samples and the jdk corpus's originals (`read-jdk --origins`, the round trip's) | the same on the frozen JVM, `diff -r` | **equal** (189, 11, 6, 911 files) |
+
+The whole check: 393 s with the compiled reader (609 s evaluated). The converters' counters and
+heads in the reports (`repr-java-report.edn`) are the JVM's too (compared for the samples). R1
+(Arbace runs Java not as the JVM) showed nothing in the reader either.
+
+### JN4.6 Times
+
+Each read alone (`/usr/bin/time`: wall, user + system CPU, peak RSS; the JVM's include its start,
+about 4-5 s, and HotSpot's warm-up):
+
+| read | files | the tool: wall, CPU, RSS | the JVM: wall, CPU, RSS | the tool against the JVM |
+|---|---:|---|---|---:|
+| baseline (`read --check`) | 183 | 24.1 s, 35.1 s, 1,161 MB | 13.8 s, 86.0 s, 2,285 MB | 1.75 times |
+| baseline in mode `:full` | 183 | 26.5 s, 40.4 s, 1,256 MB | 13.2 s, 88.2 s, 1,755 MB | 2.0 times |
+| samples `java` | 10 | 0.75 s, 1.0 s, 442 MB | 6.1 s, 25.0 s, 724 MB | 0.12 |
+| samples `module` | 4 | 0.33 s, 0.4 s, 265 MB | 5.1 s, 20.4 s, 670 MB | 0.07 |
+| the suite's fixtures | 12 | 0.57 s, 0.7 s, 275 MB | 5.7 s, 23.7 s, 736 MB | 0.10 |
+| jdk (`read-jdk --check`, 4 threads, as `bin/jrt-convert`) | 838 | 98.2 s, 392.3 s, 26,639 MB | 35.7 s, 249.0 s, 13,946 MB | 2.7 times |
+| jdk, 12 threads | 838 | 80.3 s, 405.1 s, 27,362 MB | 25.3 s, 255.5 s, 14,070 MB | 3.2 times |
+
+So the reader on Arbace takes 1.75 to 3.2 times the JVM's wall time on the large corpora and a
+tenth of it on the small ones (no JVM start), using less CPU on the baseline and 1.6 times more on
+the jdk corpus. Memory: half the JVM's on the baseline, twice on the jdk corpus (each chunk's javac
+context and converted units live together; with `GOMEMLIMIT=8GiB` the read took 238 s and 3,099 s
+of CPU at 14,216 MB, the collector running all along, so Go's default stays). The whole of `bin/jrt-convert`'s steps sources,
+generate and convert: 141 s on the tool.
+
+### JN4.7 The shipped program's change
+
+j2g's program tree of main `864a5de2` built in the worktree's `.tmp/base` against the branch's (the
+essential gate's build at `da058fcb`, `diff -r`): 33 files differ, of the four namespaces whose
+sources changed, all of them tools compiled into the program:
+- `arbace.j2g.main` (`repl-visible?`, `--embed`), `arbace.j2g.embed` (`sources`' `also`),
+  `arbace.j2g.decls` (`record-object-body`) and `arbace.c2j.emit` (`site-spec`, `site-psig`): their
+  compiled packages (`aot_arbace_j2g_main`, `_embed`, `_decls`, `aot_arbace_c2j_emit`, each in
+  `gen/` and `prog/`) and their embedded sources (`res/arbace/{j2g/main,j2g/embed,j2g/decls,c2j/emit}.ae.z`);
+- j2g's report.
+
+Nothing else: the translated JDK and runtime (`jrt`, `lang`) and every other compiled namespace
+are the same, so c2j's fix compiles the shipped namespaces as before (their compiled tree
+`target/arbace-go/aot` differs in the same four sources and `aot.edn` alone). The runtime key
+(`bin/lib/version.bash`) changes with `jdk/provenance.edn` (`2e3537a4...` against main's
+`a8919879...`), and with it the version the executable carries; the executable is 147,206,304
+bytes (main's 147,177,632). Not in the program: `arbace/repr/java` (the reader, the printer),
+`bin/`, the Makefile, `jdk/javac` (the tool's). `jdk/edge.edn` and `jdk/forms` are unchanged. No
+re-seed (batched with GP4's and JN3's changes).
+
+### JN4.8 The checks
+
+- `bin/repr-java host-check` (`check jdk fixtures full`): every corpus equal to the JVM's reader
+  (JN4.5), 393 s with the reader compiled (609 s evaluated, before JN4.3)
+- the JVM's read with the new `javac.ae`: the samples as `test/repr/java/expected/java`
+- `bin/jrt-convert update`, `bin/clojure-tests --java-fixtures update`, `bin/javac-vendor convert`
+  (on the frozen JVM): the forms unchanged, the provenance files' `:repr-java` hash only
+  (`b53fba6e...` to `229d9082...`: `javac.ae` and `bin/repr-java` changed), and javac's edge as
+  JN4.2 says
+- `bin/javac-vendor verify`: `jdk/javac` is the conversion, the recording and the pin, byte for byte
+  (574 files, 82 s); `check`: j2g translates javac's world, no failures (49 s)
+- `bin/clojure-tests --java-fixtures verify`: byte for byte (15 files, 10 s)
+- `bin/j2g-edge verify`: `jdk/edge.edn` is the JVM's answer (57 s)
+- `bin/javac-vendor classes baseline samples jdk java.base` on the new tool: every corpus byte for byte
+  the JVM's javac's (baseline 812 classes, samples 28 and 4, jdk 2,224, java.base 7,434 and the
+  build's), 234 s
+- the printer before and after JN4.4's changes over `jdk/forms` (838 files), the samples (14) and
+  the baseline's mode `:full` forms (183): the same Java, byte for byte
+- `bin/gate` (essential, on the branch at `da058fcb`): passes in 13m51s (go-build, go-smoke,
+  suite-go 777 tests with no regression, oracle-go 53 known mismatches as recorded, diffcheck
+  12,741 of 12,764 cases agree with the 23 known, goi-check 740 of 740, generated)
+- not run: `bin/gate --full` (by the rule for branches), so `--full`'s `javac` step with
+  `host-check` (JFS29) has not run as a step; each of its commands ran above
+
+### JN4.9 What it means for JN5
+
+JN5 moves `bin/repr-java check`, `roundtrip`, `bin/jrt-convert`'s `convert` and `javac` steps and
+`bin/clojure-tests --java-fixtures` onto the tool: each already runs there by `REPR_JAVA_HOST=arbace`
+(the reads) and `bin/javac-vendor classes`' way of running javac (the class files), and
+`host-check` shows the reads equal. What remains is the round trip's classes level on javac on
+Arbace and the fixpoint (javac's own sources read by the tool into `jdk/javac/forms`). Speed: the
+round trip reads each corpus twice and in mode `:full`; at the measured 1.75-3.2 times, its 735 s
+on the JVM would be about 25-35 minutes on the tool unless the reads run in parallel. Which host
+the provenance files then name is JFS30's question.
+
+### JN4.10 Proposals
+
+- **JFS27 The fixtures' runtime declarations (JFS6 as built).**
+  - Options: (a) as JFS6 (a) decided, the checkout's `arbace/lang` printed whole onto javac's
+    source path: it does not print (`RT`, `Compiler`, `GoInterp`, the Go variants) and is not Java
+    javac takes; (b) its declarations printed (`print --layout declarations`), compiled by javac on
+    Arbace, javac's class path (`bin/repr-java declarations`); (c) class-file stubs written from
+    arbace.classes' class infos (JFS6 (b)), a new writer.
+  - *Recommended: (b), built*: JFS6 (a)'s intent (the checkout's runtime, printed by repr/java, no
+    JVM artefact) with javac reading only what it needs, through code that exists; the fixtures'
+    forms are the committed ones.
+- **JFS28 How the reader runs on the tool.**
+  - Options: (a) evaluated from the checkout (no build change; 2.1 times slower in the converter);
+    (b) compiled into the tool by c2j on a first tool build, its tree kept by key, embedded with
+    j2g's `--embed` (built); (c) compiled with the program's namespaces in the shipped build's
+    compile (its host lacks javac's classes, so only a tool can compile the reader: (b) by
+    another name).
+  - *Recommended: (b), built*: the converter twice as fast for one more pass of the tool build when
+    Arbace's sources or javac's world change; evaluated still runs whatever the checkout holds.
+- **JFS29 The check in the gate.**
+  - Options: (a) `bin/gate --full`'s `javac` step runs `bin/repr-java host-check` after `classes`
+    (about 10 minutes more with the tool's second pass, JFS28, while the JVM's reader is the reference, until JN5 moves the checks
+    themselves); (b) the same, and the samples on the tool in the essential gate (needs the tool
+    build cached as `--gate-build` caches its builds: about 10 minutes when not); (c) the Makefile
+    only (`repr-java-host-check`).
+  - *Recommended: (a), built* (the step's command; not run here, by the rule of no `--full` gate on
+    a branch): the tool is built in that step anyway, and JN5 replaces the step's host-check with the
+    checks on the tool.
+- **JFS30 The host the provenance files name.**
+  - Options: (a) the host that read (`repr_java_host`): the frozen jar's name and hash on the JVM,
+    `arbace-javac` and the tool executable's SHA-256 on Arbace (built; the committed files are the
+    JVM's until JN5, and `host-check` compares them but the host); (b) on Arbace the key the tool is
+    built from (the sources, as `--gate-build`'s), so that two builds of one commit name it alike;
+    (c) the host left out of the provenance.
+  - *Recommended: (a) now, (b) at JN5* when the tool writes the committed files: the executable's
+    bytes change with every change to the program, its sources' key only with what the tool is
+    made of.
+
+### JN4.11 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`): `src/jdk.compiler`'s
+  `launcher/MemoryModuleFinder.java`, `api/JavacTaskImpl.java` (`analyze`), `main/JavaCompiler.java`
+  (`-implicit` and `todo`), `comp/TypeEnter.java` (read); the build tree's `jdk/modules` and
+  `images/jmods` (the platform, JN3.3).
+- The worktree's `.tmp/`: `jn4/` (the build and check logs, `prof.ae` and the profiles,
+  `times.sh` and `times/`, `decl/`, the evaluated tool `arbace-javac-evaluated`, `aotr/` the first
+  compiled tree, `memtest/`), `repr-java-host-check/` (the check's work: each corpus on both hosts),
+  `base/` (main's export and build for JN4.7).
