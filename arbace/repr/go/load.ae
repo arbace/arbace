@@ -184,6 +184,12 @@
   [raw resolve]
   (vec (sort (distinct (map #(or (resolve %) %) raw)))))
 
+(defn- import-map
+  "{import path as written -> the path it resolves to} of raw imports (resolve: nil when it does
+  not resolve, then as written)."
+  [raw resolve]
+  (into (sorted-map) (for [i raw] [i (or (resolve i) i)])))
+
 (defn- header
   "A dump's header (godump's write, before :files): what the native dump carries of it."
   [c {:keys [path lang dir for-test]} more]
@@ -216,8 +222,11 @@
                 lang (if (:module p) (or mod-lang pinned-lang) pinned-lang)
                 resolve (fn [i] (get (:resolved p) i))
                 job (fn [k files raw-imports opts]
-                      (let [path (if (:xtest opts) (str (:path p) "_test") (:path p))]
+                      (let [path (if (:xtest opts) (str (:path p) "_test") (:path p))
+                            res (if (:xtest opts) #(if (= % (:path p)) (:path p) (resolve %)) resolve)]
                         {:key k :dir dir :files (vec files)
+                         ;; each import as written to its path (GP4's checker resolves them so)
+                         :import-map (import-map raw-imports res)
                          :header (header c {:path path :lang lang :dir dir :for-test (when (or (:xtest opts) (:tests opts)) (:path p))}
                                          (assoc (lists p dir opts)
                                                 :imports (imports-of raw-imports (if (:xtest opts)
@@ -268,6 +277,7 @@
             (let [names (mapv second files)
                   raw (mapcat (fn [n] (plan/types-imports (slurp (File. (str adir "/" n))))) names)]
               {:key key :dir adir :files names
+               :import-map (import-map raw #(when (not= % "C") (plan/resolve-import pc % nil)))
                :header (header c {:path "command-line-arguments" :lang pinned-lang :dir d}
                                {:go-files names
                                 :imports (imports-of raw #(when (not= % "C") (plan/resolve-import pc % nil)))})})))))))
@@ -383,6 +393,7 @@
                (let [stem (:stem tp)
                      dir (if (= stem "") (:dir t) (str (:dir t) "/" stem))]
                  {:key (if (= stem "") key (str key "/" stem)) :dir (abs-path cwd dir) :files (vec (:go-files p))
+                  :import-map (import-map (:imports p) #(get (:resolved p) %))
                   :header (header c {:path (:path p) :lang lang :dir dir}
                                   (assoc (lists p (abs-path cwd dir) {})
                                          :dir-test (dir-test-view c cwd t)
@@ -409,6 +420,10 @@
                                    (for [i raw :when (or (= i ".") (= i "..") (str/starts-with? i "./") (str/starts-with? i "../"))]
                                      [i (clean (str (local-prefix t) "/" i))]))]
                     {:key (str key "/" (:stem p)) :dir adir :files (vec (:files p))
+                     :import-map (import-map raw (fn [i]
+                                                   (if-let [m (get lmap i)]
+                                                     (when (locals m) m)
+                                                     (when (not= i "C") (plan/resolve-import pc i nil)))))
                      :header (header c {:path (:path p) :lang pinned-lang :dir (:dir t)}
                                      (cond-> {:go-files (vec (:files p))}
                                        (seq (:s-files p)) (assoc :s-files (:s-files p))

@@ -12,8 +12,15 @@
 
 (declare subst subst-terms subst-tset instantiate cycle-report! obj-decl! verify-later!)
 
+(declare subst*)
+
 (defn subst
-  "Type ty with the type parameters of map m replaced."
+  "Type ty with the type parameters of map m replaced (ty itself when none is in it: its
+  metadata kept, an alias's name in the resolve mode)."
+  [ty m]
+  (let [r (subst* ty m)] (if (and (vector? r) (= r ty)) ty r)))
+
+(defn- subst*
   [ty m]
   (cond
     (empty? m) ty
@@ -195,6 +202,12 @@
 
 (def ^:private instances (java.util.concurrent.ConcurrentHashMap.))
 
+(defn clear-instances!
+  "Forgets every generic type's instances (only when no checked package that holds them is in
+  use any more: the resolve mode's sessions dropped)."
+  []
+  (.clear ^java.util.concurrent.ConcurrentHashMap instances))
+
 (defn instantiate
   "The instance of generic named type g with type arguments targs (one per argument list)."
   [f g targs]
@@ -212,14 +225,14 @@
         (do (when f
               (err! f :WrongTypeArgCount "%s type arguments for type %s: have %d, want %d"
                     (if (< (count targs) (count tps)) "not enough" "too many") (:name i) (count targs) (count tps)))
-            (let [k [g targs]]
+            (let [k [g (mapv t/canon targs)]]
               (or (.get instances k)
                   (let [nt (t/new-named (assoc (select-keys i [:obj :name :pkg :pkg-name :local]) :origin g :targs targs
                                                :line (or (code/fline f) (e/current-line)) :file (:name e/*gofile*)
                                                :underlying :invalid))]
                     (or (.putIfAbsent instances k nt) nt)))))
         :else
-        (let [k [g targs]]
+        (let [k [g (mapv t/canon targs)]]
           (verify-later! f tps targs)
           (or (.get instances k)
               (let [nt (t/new-named (assoc (select-keys i [:obj :name :pkg :pkg-name :local]) :origin g :targs targs
@@ -270,21 +283,29 @@
 (defn- pkg-obj [kind nm form fi decl & {:as more}]
   (e/obj (merge {:kind kind :name nm :pkg (o e/*pkg* :path) :pkg-level true
                  :file (:name fi) :line (or (code/fline form) e/*line*) :decl decl :color :white}
+                ;; the resolve mode: the name's position (an initializer's _ in :init-order)
+                (when-let [p (:name-pos (second (e/at-of form)))] {:pos p})
                 more)))
 
 (defn- declare-pkg! [x nm form]
-  (cond
-    ;; go/types' declarePkgObj: init and main (of package main) only functions
-    (and (= "init" nm) (not= :func (o x :kind)))
-    (err! form :InvalidInitDecl "cannot declare init - must be func")
-    (and (= "main" nm) (not= :func (o x :kind)) (= "main" (o e/*pkg* :name)))
-    (err! form :InvalidMainDecl "cannot declare main - must be func")
-    (not= "_" nm)
-    (let [s (o e/*pkg* :scope)]
-      (if-let [alt (e/scope-get s nm)]
-        (err! form :DuplicateDecl "%s redeclared in this block" nm)
-        (e/scope-put! s nm x))))
-  (vswap! (:objs *ctx*) conj x))
+  (let [bad (cond
+              ;; go/types' declarePkgObj: init and main (of package main) only functions
+              (and (= "init" nm) (not= :func (o x :kind)))
+              (do (err! form :InvalidInitDecl "cannot declare init - must be func") true)
+              (and (= "main" nm) (not= :func (o x :kind)) (= "main" (o e/*pkg* :name)))
+              (do (err! form :InvalidMainDecl "cannot declare main - must be func") true)
+              (not= "_" nm)
+              (let [s (o e/*pkg* :scope)]
+                (if-let [alt (e/scope-get s nm)]
+                  ;; go/types' declare: no Defs entry for it (the resolve mode answers none)
+                  (do (err! form :DuplicateDecl "%s redeclared in this block" nm)
+                      (oset! x :undeclared true))
+                  (e/scope-put! s nm x))
+                nil))]
+    ;; the resolve mode: such an object is not one of the package's (go/types returns before
+    ;; its objMap), never checked, never initialized
+    (when-not (and bad (:resolve (:flags *ctx*)))
+      (vswap! (:objs *ctx*) conj x))))
 
 (defn- group? [args]
   (let [args (if (string? (first args)) (rest args) args)]
@@ -524,6 +545,9 @@
       (and T (t/valid? T) (not (t/const-type? T)))
       (do (err! form :InvalidConstType "invalid constant type %s" (t/type-str T))
           (oset! x :type :invalid))
+      ;; the resolve mode: go/types' constDecl stops at an invalid type (no value)
+      (and T (not (t/valid? T)) (:resolve (:flags *ctx*)))
+      (oset! x :type :invalid)
       (and (nil? init) (contains? (meta form) :val))
       ;; a digest's constant: its :val trusted, at its :tag (else its untyped kind)
       (if-let [[ty v] (code/val-const (:val (meta form)) (when (and T (t/valid? T)) T))]
@@ -547,7 +571,8 @@
               (do (oset! x :type (:type n))
                   (oset! x :val (:val n))
                   (vswap! d assoc :tree {:op :const-decl :obj x :value n :line (code/fline form)})
-                  (verify-val! form x n))))))))))
+                  (verify-val! form x n)))))))
+    (when-not (o x :undeclared) (e/answer! form {:def x})))))
 
 (defn- var-decl! [x d]
   (let [{:keys [file tag init form lhs multi has-init]} @d
@@ -888,12 +913,19 @@
   (binding [e/*gofile* fi]
     (doseq [spec (:imports fi)]
       (when (vector? spec)
-        (let [[nf path] spec
+        (let [;; the resolve mode: [path], an import without a name (its package's, go/types'
+              ;; implicit PkgName)
+              implicit (= 1 (count spec))
+              [nf path] (if implicit [nil (first spec)] spec)
               ;; gc's noder (cmd/compile/internal/noder/import.go, openPackage): a non-local import
               ;; path must be canonical, else gc reads no package
               canon (when (and (string? path) (not (local-path? path))) (clean-path path))
               p (when-not (and canon (not= canon path)) (resolve path fi))
-              nm (if (code/go-id? nf) (code/ident-name nf) (str nf))]
+              nm (cond
+                   implicit (if (and p (not (string? p))) (o p :name) "_")
+                   (code/go-id? nf) (code/ident-name nf)
+                   :else (str nf))
+              _ (when (and implicit p (not (string? p))) (e/answer! spec {:implicit nm}))]
           (code/with-line spec
             (cond
               (and canon (not= canon path))

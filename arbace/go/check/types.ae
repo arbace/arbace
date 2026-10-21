@@ -34,7 +34,9 @@
            (m :untyped-bool 0 :bool? :untyped?) (m :untyped-int 0 :int? :untyped?)
            (m :untyped-rune 0 :int? :untyped?) (m :untyped-float 0 :float? :untyped?)
            (m :untyped-complex 0 :complex? :untyped?) (m :untyped-string 0 :string? :untyped?)
-           (m :untyped-nil 0 :untyped?)])))
+           (m :untyped-nil 0 :untyped?)
+           ;; the resolve mode's spellings (*spelled*): byte and rune, uint8 and int32 by another name
+           (m :byte 1 :int? :unsigned?) (m :rune 4 :int?)])))
 
 (def basic-names
   {:bool "bool" :int8 "int8" :int16 "int16" :int32 "int32" :int64 "int64" :int "int"
@@ -43,7 +45,77 @@
    :string "string" :unsafe-pointer "unsafe.Pointer"
    :untyped-bool "untyped bool" :untyped-int "untyped int" :untyped-rune "untyped rune"
    :untyped-float "untyped float" :untyped-complex "untyped complex"
-   :untyped-string "untyped string" :untyped-nil "untyped nil" :invalid "invalid type"})
+   :untyped-string "untyped string" :untyped-nil "untyped nil" :invalid "invalid type"
+   :byte "byte" :rune "rune"})
+
+;;; Spellings (the resolve mode, doc/go/GO-PARSER-SURVEY.md GP4)
+;;
+;; go/types keeps the universe's byte and rune apart from uint8 and int32 (other *Basic objects of
+;; the same kind, identical to them), and the converter writes the types it records (:inst,
+;; :tag) as go/types spells them. In the resolve mode the checker's types do too: byte and rune
+;; are :byte and :rune, and types are identical when they are canonically equal (same?, canon).
+;; Outside it no type is spelled, and same? is =.
+
+(def ^:dynamic *spelled*
+  "Whether types keep go/types' spellings of byte and rune (the resolve mode)."
+  false)
+
+(def ^:private kw-aliases
+  "The resolve mode's aliases of basic types (type A = int): their keywords
+  (:arbace.go.check.types/aN) -> {:actual :name :pkg :obj}."
+  (java.util.concurrent.ConcurrentHashMap.))
+
+(defn kw-alias
+  "The keyword spelling alias object x (named name, of package pkg) of basic type actual (made
+  once per object)."
+  [x name pkg actual]
+  (let [k (keyword "arbace.go.check.types" (str "a" (System/identityHashCode x) "-" name))]
+    (.putIfAbsent ^java.util.concurrent.ConcurrentHashMap kw-aliases k {:actual actual :name name :pkg pkg :obj x})
+    k))
+
+(defn kw-alias-info [k] (when (namespace k) (.get ^java.util.concurrent.ConcurrentHashMap kw-aliases k)))
+
+(defn canon-kw
+  "The canonical basic type of a keyword: uint8 for byte, int32 for rune, an alias's actual."
+  [t]
+  (case t
+    :byte :uint8
+    :rune :int32
+    (if (namespace t) (if-let [a (kw-alias-info t)] (canon-kw (:actual a)) t) t)))
+
+(declare canon)
+
+(defn- canon-vec [t]
+  (case (nth t 0)
+    (:named :tparam) t
+    (:pointer :slice) (let [e (nth t 1) c (canon e)] (if (identical? e c) t (with-meta [(nth t 0) c] (meta t))))
+    :array (let [e (nth t 2) c (canon e)] (if (identical? e c) t (with-meta [:array (nth t 1) c] (meta t))))
+    :chan (let [e (nth t 2) c (canon e)] (if (identical? e c) t (with-meta [:chan (nth t 1) c] (meta t))))
+    :map (let [k (nth t 1) v (nth t 2) ck (canon k) cv (canon v)]
+           (if (and (identical? k ck) (identical? v cv)) t (with-meta [:map ck cv] (meta t))))
+    :func (let [[_ ps rs v] t cps (mapv canon ps) crs (mapv canon rs)]
+            (if (and (= ps cps) (every? true? (map identical? ps cps)) (every? true? (map identical? rs crs)))
+              t
+              (with-meta [:func cps crs v] (meta t))))
+    :struct (with-meta [:struct (mapv #(update % :type canon) (nth t 1))] (meta t))
+    :interface (with-meta [:interface (mapv #(update % :type canon) (nth t 1)) (nth t 2)] (meta t))
+    :tuple (with-meta (into [:tuple] (map canon (rest t))) (meta t))
+    t))
+
+(defn canon
+  "t with its spellings (byte, rune) made canonical, deeply (named types and type parameters
+  are their own: identity)."
+  [t]
+  (cond
+    (not *spelled*) t
+    (keyword? t) (canon-kw t)
+    (vector? t) (canon-vec t)
+    :else t))
+
+(defn same?
+  "Whether types x and y are identical: equal, or (the resolve mode) canonically equal."
+  [x y]
+  (or (= x y) (and *spelled* (= (canon x) (canon y)))))
 
 ;;; Named types and type parameters
 
@@ -88,11 +160,11 @@
           :invalid)))))
 
 (defn under
-  "The underlying type of t."
+  "The underlying type of t (a basic type's canonical: uint8 for byte)."
   [t]
   (cond
-    (keyword? t) t
-    (identical? :named (nth t 0)) (named-under t)
+    (keyword? t) (canon-kw t)
+    (identical? :named (nth t 0)) (let [u (named-under t)] (if (keyword? u) (canon-kw u) u))
     (identical? :tparam (nth t 0)) (tparam-iface t)
     :else t))
 
@@ -139,10 +211,10 @@
   (let [u (under t)] (and (vector? u) (= :interface (nth u 0)) (empty? (nth u 1)) (nil? (nth u 2)))))
 
 (defn default-type
-  "The default type of an untyped type (Go's Default)."
+  "The default type of an untyped type (Go's Default: untyped rune's is rune, spelled)."
   [t]
   (case t
-    :untyped-bool :bool :untyped-int :int :untyped-rune :int32 :untyped-float :float64
+    :untyped-bool :bool :untyped-int :int :untyped-rune (if *spelled* :rune :int32) :untyped-float :float64
     :untyped-complex :complex128 :untyped-string :string
     t))
 
@@ -162,7 +234,7 @@
       t)
     t))
 
-(defn identical-ignore-tags? [x y] (= (ignore-tags x) (ignore-tags y)))
+(defn identical-ignore-tags? [x y] (= (canon (ignore-tags x)) (canon (ignore-tags y))))
 
 (declare comparable? type-str)
 
@@ -241,7 +313,7 @@
 (defn union? [t] (and (vector? t) (identical? :union (nth t 0))))
 
 (defn- term-disjoint? [[xt x] [yt y]]
-  (not= (if yt (under x) x) (if xt (under y) y)))
+  (not (same? (if yt (under x) x) (if xt (under y) y))))
 
 (defn- term-union [x y]
   (cond
@@ -255,7 +327,7 @@
     (or (not (first x)) (first y)) x
     :else y))
 
-(defn- term-includes? [[tilde ty] t] (= ty (if tilde (under t) t)))
+(defn- term-includes? [[tilde ty] t] (same? ty (if tilde (under t) t)))
 
 (defn- term-subset? [x y] (and (not (term-disjoint? x y)) (or (not (first x)) (first y))))
 
@@ -414,12 +486,12 @@
            (nil? cu) (recur (rest ps) ty u)
            (and (vector? cu) (= :chan (nth cu 0)) (vector? u) (= :chan (nth u 0)))
            (cond
-             (not= (nth cu 2) (nth u 2)) [nil (str "channels " (pr-str ct) " and " (pr-str ty) " have different element types")]
+             (not (same? (nth cu 2) (nth u 2))) [nil (str "channels " (pr-str ct) " and " (pr-str ty) " have different element types")]
              (= (nth cu 1) (nth u 1)) (recur (rest ps) ct cu)
              (= :both (nth cu 1)) (recur (rest ps) ty u)
              (not= :both (nth u 1)) [nil "conflicting channel directions"]
              :else (recur (rest ps) ct cu))
-           (not= cu u) [nil "different underlying types"]
+           (not (same? cu u)) [nil "different underlying types"]
            :else (recur (rest ps) ct cu)))))))
 
 (defn core-type
@@ -477,7 +549,7 @@
   "Go's text of a type."
   [t]
   (cond
-    (keyword? t) (get basic-names t (name t))
+    (keyword? t) (or (get basic-names t) (some-> (kw-alias-info t) :name) (name t))
     (named? t) (named-str t)
     (tparam? t) (:name (info t))
     :else
@@ -664,7 +736,7 @@
     (if (empty? es)
       acc
       (let [e (first es)
-            k (:type e)]
+            k (canon (:type e))]
         (if-let [j (get idx k)]
           (recur (rest es) (assoc-in acc [j :multiples] true) idx)
           (recur (rest es) (conj acc e) (assoc idx k (count acc))))))))
@@ -761,7 +833,7 @@
   "go/types' missingMethod: nil when V implements interface type T (u its underlying), else
   {:method m :cause kw}: :missing, :ptr-recv (found with a pointer receiver), :wrong-type
   (with :have), :field (a field of that name), :unexported (other package's)."
-  ([V T static] (missing-method V T static =))
+  ([V T static] (missing-method V T static same?))
   ([V T static same?]
    (let [tu (under T)
          vu (under V)]

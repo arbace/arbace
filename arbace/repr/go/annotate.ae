@@ -1,0 +1,869 @@
+(ns arbace.repr.go.annotate
+  "repr/go's annotator (doc/go/GO-PARSER-SURVEY.md GP4, §4.2 steps 3-5): goi's checker
+  (arbace.go.check) in its resolve mode over the raw forms of the native reader's dumps
+  (arbace.repr.go.raw, GP3), each open decision answered by position; the answers put into the
+  native dump as go/types' annotations, in the helper's shape (doc/go/HELPER-NOTES.md, \"Output
+  format\": :mode, :t, :use, :def, :sel, :field, :inst, :implicit, :init-order, :types'
+  :underlying, :type-table), which the converter, unchanged, turns into the final forms.
+
+  The packages are checked in dependency order, as bin/goi annotations checks them: one session
+  of the standard library per configuration (its packages from the loader, std), a corpus's own
+  packages in a session over it (a module's, cmd's, a directory test's, test variants), each
+  package's imports by the loader's resolution. Raw forms are taken in memory (GPS26 (a)), as
+  the checker reads text: literals as values, lines as :line, and each node's positions as
+  :arbace.go.check/at [file {field [line col]}], the key of its answers.
+
+  bin/repr-go native-check runs -main check: per dump E-tree (arbace.repr.go.parse), the raw
+  forms against the final ones (arbace.repr.go.raw/conform, GPS23 (c)) and E-ann: the final
+  forms the converter makes of the annotated native dump equal, form for form, metadata and
+  positions included (mode :full), to those of the helper's dump: the annotations the converter
+  reads equal go/types', types compared by the type forms they give. bin/repr-go read --reader
+  native --forms runs -main read: the final forms written as bin/repr-go read writes the helper's."
+  (:require [arbace.string :as str]
+            [arbace.go.check :as ck]
+            [arbace.go.check.env :as e]
+            [arbace.go.check.types :as t]
+            [arbace.go.check.const :as c]
+            [arbace.repr.go :as rg]
+            [arbace.repr.go.convert :as cv]
+            [arbace.repr.go.lit :as lit]
+            [arbace.repr.go.load :as ld]
+            [arbace.repr.go.parse :as ps]
+            [arbace.repr.go.print :as rp]
+            [arbace.repr.go.raw :as raw]
+            [arbace.repr.go.read :as rd])
+  (:import [java.io File]
+           [java.util HashMap]
+           [java.util.concurrent ConcurrentHashMap Executors TimeUnit]))
+
+;;; Raw forms as the checker reads them
+
+(defn- private-key? [k] (and (keyword? k) (= "arbace.repr.go.convert" (namespace k))))
+
+(declare cform)
+
+(defn- cmeta
+  "The metadata x reads back with (its public keys, :line), and the key of its answers."
+  [x file]
+  (let [m (meta x)
+        pub (persistent! (reduce-kv (fn [acc k v] (if (private-key? k) acc (assoc! acc k (cform v file))))
+                                    (transient {}) (or m {})))
+        l (::cv/l m)
+        pos (::cv/pos m)]
+    (cond-> pub
+      l (assoc :line l)
+      (seq pos) (assoc ::ck/at [file pos]))))
+
+(defn cform
+  "The in-memory raw form x of Go file file as the checker reads it: literals as their values,
+  each list, vector and symbol with its line and its positions' key (:arbace.go.check/at)."
+  [x file]
+  (cond
+    (lit/lit? x) (:value x)
+    (seq? x) (if (::cv/raw (meta x))
+               (list 'in-ns (list 'quote (second (second x))))
+               (with-meta (apply list (map #(cform % file) x)) (cmeta x file)))
+    (vector? x) (with-meta (mapv #(cform % file) x) (cmeta x file))
+    (map? x) (into {} (map (fn [[k v]] [(cform k file) (cform v file)])) x)
+    (symbol? x) (with-meta x (cmeta x file))
+    :else x))
+
+(defn- import-specs
+  "A go/file form whose import specs carry their path's position (:path-pos), the key of an
+  implicit name's answer."
+  [f]
+  (if (and (seq? f) (= 'go/file (first f)))
+    (let [[h nm & opts] f
+          opts (vec opts)
+          i (.indexOf ^java.util.List opts :imports)]
+      (if (neg? i)
+        f
+        (with-meta (apply list h nm (update opts (inc i)
+                                            (fn [v]
+                                              (with-meta (mapv (fn [sp]
+                                                                 (if (and (vector? sp) (lit/lit? (peek sp)) (:pos (peek sp)))
+                                                                   (vary-meta sp update ::cv/pos #(assoc (or % (sorted-map)) :path-pos (:pos (peek sp))))
+                                                                   sp))
+                                                               v)
+                                                (meta v)))))
+          (meta f))))
+    f))
+
+(defn raw-source
+  "The checker's source (arbace.go.check/check-package's) of raw conversion rc (convert-package's
+  result, raw), its imports resolved by import-map ({as written -> key}), its answers in a
+  HashMap (:answers)."
+  [rc import-map]
+  (let [forms (concat [(cform (:package rc) nil)]
+                      (mapcat (fn [fl] (map #(cform (import-specs %) (:name fl)) (:forms fl))) (:files rc)))
+        {:keys [package name files]} (rp/collect-forms forms)
+        config (merge {:lang "go1.27"} (:config package))]
+    {:path (or (:path package) "main") :name (rp/name-text name) :config config
+     :opts (update package :local-imports #(merge import-map %))
+     :files (vec files) :answers (HashMap.)}))
+
+;;; Sessions: the standard library per configuration, a corpus's packages over it
+
+(def forms-dir "The forms of go/parser's packages (tamago/goroot)." (atom "tamago/goroot"))
+
+(defn- config-key [load]
+  (let [c (ld/config load)]
+    [(:goroot c) (:goos c) (:goarch c) (:level c) (:tags c)]))
+
+(defn- prep
+  "A loader job's native dump, raw conversion and checker source (import-map over the job's own),
+  or {:rejected msg} when go/parser rejects a file."
+  [j more-imports]
+  (let [t0 (System/nanoTime)
+        n (ps/native-dump @forms-dir j)
+        t1 (System/nanoTime)]
+    (if (:error n)
+      {:job j :n n :rejected (str (:file n) ": " (:error n))}
+      (let [ctx (rg/dump-context n (str (:key j) ".edn") (:goroot j))
+            rc (cv/convert-package n (assoc ctx :positions :full :raw true))
+            src (raw-source rc (merge (:import-map j) more-imports))]
+        {:job j :n n :ctx ctx :rc rc :src src :native-ms (/ (- t1 t0) 1e6)
+         :raw-ms (/ (- (System/nanoTime) t1) 1e6)}))))
+
+(defn- new-session
+  "A session over index ({key job}): the checker's (arbace.go.check/session), delegating to
+  base for the keys index does not have (fallback: key -> a job, or nil), the records of the
+  keys kept (registered with keep!) for their jobs (:recs)."
+  [index base fallback imports-of]
+  (let [recs (ConcurrentHashMap.)
+        keep (ConcurrentHashMap.)
+        src-of (fn [k _]
+                 (when-let [j (or (get index k) (when fallback (fallback k)))]
+                   (let [r (prep j (imports-of j))]
+                     (when (.containsKey keep k) (.put recs k r))
+                     (:src r))))
+        s (ck/session src-of)
+        s (if base
+            (assoc s :delegate (:ck base) :local #(or (contains? index %) (not ((:has base) %))))
+            s)]
+    {:ck s :recs recs :keep keep :index index :has #(contains? index %) :base base :fallback fallback}))
+
+(def ^:private std-sessions (atom {}))
+
+(defn- std-index [load]
+  (let [g (:goroot load)
+        js (ld/jobs (assoc (select-keys load [:goroot :goos :goarch :tags :goamd64 :goarm64])
+                           :mode :packages :cwd (str g "/src") :args ["std"]))]
+    (into {} (for [j js :when (:files j)] [(get-in j [:header :package]) (assoc j :goroot g)]))))
+
+(defn std-session
+  "The session of the standard library of load's configuration (made once per process)."
+  [load]
+  (let [k (config-key load)]
+    (locking std-sessions
+      (or (get @std-sessions k)
+          (let [s (new-session (std-index load) nil nil (constantly nil))]
+            (swap! std-sessions assoc k s)
+            s)))))
+
+(defn drop-std-sessions!
+  "Forgets the standard library's sessions (and the generic types' instances they made)."
+  []
+  (reset! std-sessions {})
+  (arbace.go.check.decl/clear-instances!)
+  (arbace.go.check.load/clear-cache!))
+
+;;; Corpus jobs: their session and key
+
+(defn- std-load? [load]
+  (and (= (keyword (name (:mode load))) :packages) (= ["std"] (:args load)) (not (:tests load))))
+
+(defn- variant-key [p] (str p " [" p ".test]"))
+
+(defn- job-key
+  "The key a corpus job is checked under: its package path, a test variant's p [p.test]; nil for
+  a program (checked alone)."
+  [load j]
+  (let [h (:header j)
+        p (:package h)]
+    (case (keyword (name (:mode load)))
+      :files nil
+      (if (and (:tests load) (:for-test h) (= p (:for-test h)) (seq (:test-go-files h)))
+        (variant-key p)
+        p))))
+
+(defn- job-imports
+  "The imports of a corpus job beyond the loader's map: an external test's package as its test
+  variant (go list -test's ImportMap) when there is one."
+  [load index j]
+  (let [h (:header j)
+        ft (:for-test h)]
+    (if (and (:tests load) ft (not= ft (:package h)) (contains? index (variant-key ft)))
+      {ft (variant-key ft)}
+      {})))
+
+(defn load-sessions
+  "The sessions of a corpus load's jobs: [session-of-job keyed-jobs], session-of-job giving a
+  job's session (the standard library's, the load's, a directory test's)."
+  [load js]
+  (let [std (std-session load)
+        mode (keyword (name (:mode load)))]
+    (cond
+      (std-load? load) [(constantly std) js]
+      (= mode :dirs)
+      ;; one session per directory test (its packages), over the standard library
+      (let [by-test (group-by #(get-in % [:header :dir-test :test]) js)
+            sess (into {} (for [[tst tjs] by-test]
+                            [tst (new-session (into {} (for [j tjs] [(get-in j [:header :package]) j]))
+                                              std nil (constantly nil))]))]
+        [(fn [j] (get sess (get-in j [:header :dir-test :test]))) js])
+      (= mode :files) [(constantly std) js]
+      :else
+      ;; the load's own packages (a module's, cmd's, test variants, external tests); a job of a
+      ;; standard library's package as it is (a tests corpus's package without tests) is std's
+      (let [index (into {} (for [j js :let [k (job-key load j)] :when (and k (not ((:has std) k)))] [k j]))
+            fallback (fn [k]
+                       (when-not (str/includes? k " ")
+                         (first (filter :files (ld/jobs (assoc load :args [k] :tests false :deps false :prefix nil))))))
+            s (new-session index std
+                           (fn [k] (when-let [j (fallback k)] (assoc j :goroot (:goroot load))))
+                           #(job-imports load index %))]
+        [(fn [j] (if (contains? index (job-key load j)) s std)) js]))))
+
+;;; The answers as go/types' annotations
+
+(def ^:private anchors
+  "The position fields that name a node, in order, for an answer whose positions are not exactly
+  one node's (a form whose positions merge another node's)."
+  [:path-pos :dot :lbrack :lparen :star :colon :op-pos :value-pos :lbrace :map :begin :func :struct
+   :interface :arrow :name-pos])
+
+(defn- node-index
+  "{[field [line col]] [node-path node]} and {positions [node-path node]} of a file's tree."
+  [ast]
+  (let [by-field (HashMap.) by-pos (HashMap.)]
+    (letfn [(walk [x path]
+              (cond
+                (and (seq? x) (map? (second x)))
+                (let [ps (cv/positions x)
+                      e [path x]]
+                  (when (seq ps) (.put by-pos ps e))
+                  (doseq [[k p] ps] (.put by-field [k p] e))
+                  (when (= :import-spec (first x))
+                    (when-let [p (cv/parse-pos (cv/start (:path (second x))))]
+                      (.put by-field [:path-pos p] e)))
+                  (doseq [[k v] (second x)] (walk v (conj path 1 k))))
+                (vector? x) (doseq [[i v] (map-indexed vector x)] (walk v (conj path i)))
+                :else nil))]
+      (walk ast [])
+      [by-field by-pos])))
+
+(defn- node-of
+  "The path of the node an answer's positions pm name, in index [by-field by-pos], or nil."
+  [[^HashMap by-field ^HashMap by-pos] pm]
+  (or (when (:path-pos pm) (.get by-field [:path-pos (:path-pos pm)]))
+      (when (:x-pos pm) (some-> (:dot pm) (#(.get by-field [:dot %]))))
+      (when (and (:name-pos pm) (not (:x-pos pm))) (.get by-field [:name-pos (:name-pos pm)]))
+      (.get by-pos pm)
+      (some (fn [k] (when-let [p (get pm k)] (.get by-field [k p]))) anchors)))
+
+;;; The type table (doc/go/HELPER-NOTES.md, "Types")
+
+(defn- new-table [] {:entries (java.util.ArrayList.) :ids (HashMap.) :named (java.util.ArrayList.)})
+
+(declare type-id!)
+
+(defn- entry-of
+  "The type table entry of checker type T, its parts' ids made first."
+  [tt T]
+  (let [id #(type-id! tt %)
+        al (when (vector? T) (:arbace.go.check.types/alias (meta T)))]
+    (cond
+      ;; an alias (go/types' Alias): its name, what it denotes
+      al (cond-> {:kind :alias :name (:name al) :actual (id (vary-meta T dissoc :arbace.go.check.types/alias))}
+           (:pkg al) (assoc :pkg (:pkg al)))
+      (and (keyword? T) (t/kw-alias-info T))
+      (let [a (t/kw-alias-info T)]
+        (cond-> {:kind :alias :name (:name a) :actual (id (:actual a))} (:pkg a) (assoc :pkg (:pkg a))))
+      (keyword? T) (case T
+                     :unsafe-pointer {:kind :basic :name "Pointer" :pkg "unsafe"}
+                     {:kind :basic :name (get t/basic-names T (name T))})
+      (t/named? T) (let [i (t/info T)]
+                     (cond-> {:kind :named :name (:name i)}
+                       (:pkg i) (assoc :pkg (:pkg i))
+                       (:origin i) (assoc :origin (id (:origin i)) :args (mapv id (:targs i)))))
+      (t/tparam? T) (let [i (t/info T)]
+                      (cond-> {:kind :type-param :name (:name i) :index (:index i)}
+                        (some-> (:obj i) (e/o :pkg)) (assoc :pkg (e/o (:obj i) :pkg))))
+      :else
+      (case (nth T 0)
+        :pointer {:kind :pointer :elem (id (nth T 1))}
+        :slice {:kind :slice :elem (id (nth T 1))}
+        :array {:kind :array :len (nth T 1) :elem (id (nth T 2))}
+        :map {:kind :map :key (id (nth T 1)) :elem (id (nth T 2))}
+        :chan {:kind :chan :dir (nth T 1) :elem (id (nth T 2))}
+        :func (let [[_ ps rs v] T]
+                (cond-> {:kind :func :params (mapv (fn [p] {:t (id p)}) ps)}
+                  (seq rs) (assoc :results (mapv (fn [r] {:t (id r)}) rs))
+                  v (assoc :variadic true)))
+        :struct {:kind :struct
+                 :fields (mapv (fn [fd]
+                                 (cond-> {:name (:name fd) :t (id (:type fd))}
+                                   (:pkg fd) (assoc :pkg (:pkg fd))
+                                   (:embedded fd) (assoc :embedded true)
+                                   (:tag fd) (assoc :tag (c/value-text (:tag fd)))))
+                               (nth T 1))}
+        :interface (let [embs (:embeddeds (meta T))
+                         ;; go/types' interface as declared: its own methods and its embedded
+                         ;; types (the checker's method set has the embedded ones' flattened)
+                         inherited (set (for [et embs
+                                              :let [u (t/under et)]
+                                              :when (and (vector? u) (= :interface (nth u 0)))
+                                              m (nth u 1)]
+                                          [(:name m) (:pkg m)]))
+                         own (remove #(contains? inherited [(:name %) (:pkg %)]) (nth T 1))]
+                     (cond-> {:kind :interface}
+                       (seq own) (assoc :methods (mapv (fn [m] (cond-> {:name (:name m) :t (id (:type m))}
+                                                                 (:pkg m) (assoc :pkg (:pkg m))))
+                                                       own))
+                       (seq embs) (assoc :embeddeds (mapv id embs))))
+        :tuple {:kind :tuple :vars (mapv (fn [x] {:t (id x)}) (rest T))}
+        :union {:kind :union :terms (mapv (fn [[tl x]] (cond-> {:t (id x)} tl (assoc :tilde true)))
+                                          (let [ts (nth T 1)] (if (= :all ts) [] (sort-by #(t/type-str (second %)) ts))))}
+        {:kind :basic :name "invalid type"}))))
+
+(defn type-id!
+  "The id of checker type T in the table tt (entered, its parts first, when new)."
+  [tt T]
+  (let [^HashMap ids (:ids tt)
+        ^java.util.ArrayList es (:entries tt)
+        al (when (vector? T) (:arbace.go.check.types/alias (meta T)))
+        k (cond
+            al [::alias (:obj al) T]
+            (or (t/named? T) (t/tparam? T)) [::id T]
+            :else nil)]
+    (or (when k (.get ids k))
+        (let [en (entry-of tt T)
+              k (or k en)]
+          (or (.get ids k)
+              (let [i (.size es)]
+                (.add es en)
+                (.put ids k i)
+                (when (and (t/named? T) (not al)) (.add ^java.util.ArrayList (:named tt) [T i]))
+                i))))))
+
+;;; Constant values in the helper's shape (doc/go/HELPER-NOTES.md, "Constant values")
+
+(defn- float-shape [v]
+  (cond
+    (c/bf? v) (list :float (nth v 1) (nth v 2))
+    :else (list :float (if (ratio? v) v (if (integer? v) v (c/make-rat v))))))
+
+(defn val-shape
+  "The helper's :val of a constant value v of checker type ty (go/constant's kind as go/types
+  computes it for the type: a float type's value a float, a complex type's a complex), or nil."
+  [v ty]
+  (cond
+    (or (nil? v) (= :unknown v)) nil
+    (boolean? v) v
+    (string? v) (let [bs (c/value-bytes v)
+                      u (String. bs java.nio.charset.StandardCharsets/UTF_8)]
+                  ;; valid UTF-8 when it encodes back to its bytes
+                  (if (java.util.Arrays/equals bs (.getBytes u java.nio.charset.StandardCharsets/UTF_8))
+                    u
+                    (list :bytes (mapv #(bit-and (long %) 0xff) bs))))
+    (c/complex? v) (list :complex (float-shape (nth v 1)) (float-shape (nth v 2)))
+    (or (t/float-type? ty) (c/bf? v) (ratio? v)) (float-shape v)
+    (t/complex-type? ty) (list :complex (float-shape v) (list :float 0))
+    :else v))
+
+;;; Annotating a native dump
+
+(def ^:private mode-of
+  {:typexpr :type :builtin :builtin :constant :const :novalue :void :commaok :commaok
+   :mapindex :mapindex :variable :var :value :value})
+
+(defn- obj-annotation
+  "An object (the checker's) as the helper writes it: {:kind :name [:universe] [:pkg-level]
+  [:pkg] [:t] [:val]}."
+  [tt x def?]
+  (if (e/obj? x)
+    (let [k (e/o x :kind)
+          ty (e/o x :type)]
+      (cond-> {:kind k :name (e/o x :name)}
+        (e/o x :universe) (assoc :universe true)
+        (e/o x :pkg-level) (assoc :pkg-level true)
+        (= :pkg k) (assoc :path (e/o x :path))
+        ;; a constant's type (the converter's: its kind for :val, untyped constants in shifts)
+        (and (= :const k) (some? ty) (not= :invalid ty)) (assoc :t (type-id! tt ty))
+        (and def? (= :const k) (some? (val-shape (e/o x :val) ty))) (assoc :val (val-shape (e/o x :val) ty))))
+    {:kind :field :name (:name x)}))
+
+(defn- annotation
+  "The helper's annotations of node n from the answers a there (merged), or nil."
+  [tt n a]
+  (let [mode (when-let [m (:mode a)]
+               (if (and (= :value m) (= :untyped-nil (:type a))) :nil (mode-of m)))
+        sel (:sel a)
+        fld (:field a)]
+    (not-empty
+     (cond-> {}
+       mode (assoc :mode mode)
+       (and mode (some? (:type a)) (not= :invalid (:type a))
+            (or (:final a) (and (= :binary-expr (first n)) (#{"<<" ">>"} (:op (second n))))))
+       (assoc :t (type-id! tt (:type a)))
+       (:def a) (assoc :def (obj-annotation tt (:def a) true))
+       (:use a) (assoc :use (obj-annotation tt (:use a) false))
+       (and (:obj a) (not (:def a)) (not (:use a))) (assoc :use (obj-annotation tt (:obj a) false))
+       (:field-obj a) (assoc :use (obj-annotation tt (:field-obj a) false))
+       sel (assoc :sel (cond-> {:kind (:kind sel) :path (vec (:path sel)) :indirect (boolean (:indirect sel))}
+                         (seq (:via sel)) (assoc :via (vec (:via sel)))))
+       fld (assoc :field (cond-> {:path (vec (:path fld))} (seq (:via fld)) (assoc :via (vec (:via fld)))))
+       (:inst a) (assoc :inst {:targs (mapv #(type-id! tt %) (:inst a))})
+       (:implicit a) (assoc :implicit {:kind :pkg :name (:implicit a)})
+       (:x-unrecorded a) (assoc :x-unrecorded true)))))
+
+(defn- rebuild
+  "The tree x with metadata ann (by node path) merged into its nodes; basic literals are
+  constants, parentheses take their operand's mode."
+  [x path anns]
+  (cond
+    (and (seq? x) (map? (second x)))
+    (let [f (second x)
+          f2 (persistent! (reduce-kv (fn [m k v] (assoc! m k (rebuild v (conj path 1 k) anns))) (transient {}) f))
+          n (apply list (first x) f2 (nnext x))
+          a (get anns path)
+          a (cond
+              (= :basic-lit (first x)) (merge {:mode :const} a)
+              ;; -1, a negative literal (one form, a literal): a constant as its operand
+              (and (= :unary-expr (first x)) (nil? (:mode a)) (#{"-" "+" "^" "!"} (:op f))
+                   (= :const (:mode (meta (:x f2)))))
+              (merge {:mode :const} a)
+              (and (= :paren-expr (first x)) (nil? a)) (some-> (meta (:x f2)) (select-keys [:mode :t]) not-empty)
+              :else a)
+          ;; a shift whose operand go/types left unrecorded (an error)
+          n (if (:x-unrecorded a)
+              (apply list (first x) (update f2 :x #(vary-meta % dissoc :mode)) (nnext x))
+              n)
+          a (dissoc a :x-unrecorded)]
+      (with-meta n (merge (meta x) a)))
+    (vector? x) (with-meta (vec (map-indexed (fn [i v] (rebuild v (conj path i) anns)) x)) (meta x))
+    :else x))
+
+(defn annotate
+  "Native dump n with the checker's answers (a HashMap, raw-source's) and package result as
+  go/types' annotations: the trees' metadata, :init-order, :types (the package's named types'
+  underlying types) and :type-table. {:dump :unplaced n-answers-not-on-a-node}."
+  [n ^HashMap answers result]
+  (let [tt (new-table)
+        files (:files n)
+        idx (into {} (for [fe files] [(:file fe) (node-index (:ast fe))]))
+        ;; answers by file and node path, merged
+        by-node (HashMap.)
+        unplaced (volatile! 0)]
+    (doseq [[[file pm] a] answers]
+      (if-let [[p nd] (when-let [ix (get idx file)] (node-of ix pm))]
+        (let [k [file p]] (.put by-node k (let [[_ a0] (.get by-node k)] [nd (merge a0 a)])))
+        (vswap! unplaced inc)))
+    (let [anns (into {} (for [[[file p] [nd a]] by-node
+                              :let [an (annotation tt nd a)]
+                              :when an]
+                          [[file p] an]))
+          by-file (group-by ffirst anns)
+          files2 (mapv (fn [fe]
+                         (let [fa (into {} (for [[[_ p] an] (get by-file (:file fe))] [p an]))]
+                           (assoc fe :ast (rebuild (:ast fe) [] fa))))
+                       files)
+          init (vec (for [lhs (:resolve-init-order result)]
+                      {:lhs (mapv (fn [[nm file line col]] [nm (str file ":" line ":" (or col 0))]) lhs)}))
+          ;; the package's named types in the table: their underlying types
+          path (:package n)
+          ^java.util.ArrayList named (:named tt)
+          types (loop [i 0 acc []]
+                  (if (< i (.size named))
+                    (let [[T id] (.get named i)
+                          inf (t/info T)]
+                      (recur (inc i)
+                             (if (and (nil? (:origin inf)) (= path (:pkg inf)))
+                               (conj acc {:name (:name inf) :t id :underlying (type-id! tt (t/under T))})
+                               acc)))
+                    acc))]
+      {:dump (assoc n :files files2 :init-order init :types types
+                    :type-table (vec (.toArray ^java.util.ArrayList (:entries tt))))
+       :unplaced @unplaced})))
+
+;;; E-ann: the final forms against the helper's
+
+(defn- short-str [x]
+  (let [s (binding [*print-meta* true *print-length* 20 *print-level* 6] (pr-str x))]
+    (if (> (count s) 400) (str (subs s 0 400) "...") s)))
+
+(declare same)
+
+(defn- same-meta [a b path]
+  (let [ma (meta a) mb (meta b)]
+    (when (or (seq ma) (seq mb))
+      (if (not= (set (keys ma)) (set (keys mb)))
+        [(conj path :meta) :meta-keys (vec (sort-by str (keys ma))) (vec (sort-by str (keys mb)))]
+        (first (keep (fn [k] (same (get ma k) (get mb k) (conj path :meta k))) (sort-by str (keys ma))))))))
+
+(defn- same-seq [as bs path]
+  (if (not= (count as) (count bs))
+    [path :count (short-str as) (short-str bs)]
+    (first (keep identity (map-indexed (fn [i [x y]] (same x y (conj path i))) (map vector as bs))))))
+
+(defn same
+  "nil when the forms a (the native path's) and b (the helper's) are equal, metadata, positions
+  and literals' parts included; else the first difference [path what a b]."
+  [a b path]
+  (cond
+    (and (lit/lit? a) (lit/lit? b)) (when-not (= (into {} a) (into {} b)) [path :literal (short-str a) (short-str b)])
+    (or (lit/lit? a) (lit/lit? b)) [path :kind (short-str a) (short-str b)]
+    (and (symbol? a) (symbol? b)) (if (= a b) (same-meta a b path) [path :symbol (short-str a) (short-str b)])
+    (and (seq? a) (seq? b)) (or (same-seq (vec a) (vec b) path) (same-meta a b path))
+    (and (vector? a) (vector? b)) (or (same-seq a b path) (same-meta a b path))
+    (and (map? a) (map? b)) (if (not= (set (keys a)) (set (keys b)))
+                              [path :map-keys (short-str (keys a)) (short-str (keys b))]
+                              (first (keep (fn [k] (same (get a k) (get b k) (conj path k))) (sort-by str (keys a)))))
+    :else (when-not (= a b) [path :value (short-str a) (short-str b)])))
+
+(defn- line-at
+  "The Go line of the innermost form on path in forms xs (a difference's), or nil."
+  [xs path]
+  (loop [x xs [p & ps] path l nil]
+    (let [l (or (when (instance? arbace.lang.IMeta x) (::cv/l (meta x))) (when (lit/lit? x) (:line x)) l)]
+      (cond
+        (nil? p) l
+        (= :meta p) (recur (get (meta x) (first ps)) (rest ps) l)
+        (and (integer? p) (or (seq? x) (vector? x)) (< p (count x))) (recur (nth (vec x) p) ps l)
+        (and (map? x) (not (lit/lit? x))) (recur (get x p) ps l)
+        :else l))))
+
+(defn same-package
+  "nil when the conversions na (of the annotated native dump) and fb (of the helper's) are equal;
+  else the first difference [file line path what a b]."
+  [na fb]
+  (or (when (not= (:ns na) (:ns fb)) [nil [] :ns (:ns na) (:ns fb)])
+      (when-let [d (same (:package na) (:package fb) [])] (into [nil] d))
+      (when (not= (count (:files na)) (count (:files fb))) [nil [] :files (count (:files na)) (count (:files fb))])
+      (first (keep (fn [[a b]]
+                     (or (when (not= (select-keys a [:name :stem :comments :unplaced]) (select-keys b [:name :stem :comments :unplaced]))
+                           [(:name a) [] :file (short-str (select-keys a [:name :stem :unplaced])) (short-str (select-keys b [:name :stem :unplaced]))])
+                         (when-let [d (same-seq (vec (:forms a)) (vec (:forms b)) [])]
+                           (into [(:name a) (line-at (vec (:forms a)) (first d))] d))))
+                   (map vector (:files na) (:files fb))))))
+
+;;; Corpora
+
+(defn- external-test? [load j]
+  (let [h (:header j)] (and (:tests load) (:for-test h) (not= (:for-test h) (:package h)))))
+
+(defn- xtest-session
+  "go list -test's world of external test j of a package p with in-package tests, over session s
+  (its load's): p is its test variant (p [p.test]), and the packages of the test's imports that
+  import p, directly or not, are checked anew against it (go list's recompiled q [p.test]); the
+  others are s's and the standard library's. nil when p has no variant."
+  [s j]
+  (let [p (get-in j [:header :for-test])
+        vj (get (:index s) (variant-key p))
+        std (:base s)]
+    (when (and vj std)
+      (let [job-of (fn [k] (or (get (:index s) k) (get (:index std) k) (when-let [fb (:fallback s)] (fb k))))
+            imports (memoize (fn [k] (disj (set (vals (:import-map (job-of k)))) k)))
+            memo (ConcurrentHashMap.)
+            reaches (fn reaches [k]
+                      (let [v (.get memo k)]
+                        (if (some? v)
+                          v
+                          (let [v (boolean (some #(or (= % p) (reaches %)) (imports k)))]
+                            (.put memo k v)
+                            v))))
+            src-of (fn [k _] (when-let [jj (if (= k p) vj (job-of k))] (:src (prep jj {}))))]
+        {:ck (assoc (ck/session src-of) :delegate (:ck s) :local #(or (= % p) (reaches %)))}))))
+
+(defn- checked
+  "Corpus job j of load checked: [package record], the record prep's (its native dump, raw
+  forms, source and answers). A package is checked through its session (for its importers too);
+  a program alone; an external test alone, in its world (xtest-session); a package its session
+  checked before it was kept, anew."
+  [load sess-of j]
+  (let [s (sess-of j)
+        k (job-key load j)
+        imports (job-imports load (:index s) j)]
+    (if (and k (not (external-test? load j)))
+      (let [pkg (ck/ensure-package (:ck s) k nil [])
+            r (.remove ^ConcurrentHashMap (:recs s) k)]
+        (if r
+          [pkg r]
+          (let [r (prep j imports)] [(when (:src r) (ck/check-src (:ck s) (:src r))) r])))
+      (let [ts (when (external-test? load j) (xtest-session s j))
+            r (prep j (if ts {} imports))]
+        [(when (:src r) (ck/check-src (:ck (or ts s)) (:src r))) r]))))
+
+(defn- convert-full [d ctx]
+  (cv/convert-package d (assoc ctx :positions :full)))
+
+(defn- check-job
+  "A corpus job's checks against the helper's dump at path (nil: none): E-tree, the raw forms'
+  conformance to the final ones, E-ann."
+  [load sess-of j ^String path]
+  (let [base {:key (:key j) :path path :package (get-in j [:header :package]) :files (count (:files j))
+              :keys (vec (for [f (:files j)] (str (get-in j [:header :dir]) "/" f)))}]
+    (try
+      (let [t0 (System/nanoTime)
+            d (when path (rd/read-dump path))
+            t1 (System/nanoTime)
+            [pkg r] (checked load sess-of j)
+            t2 (System/nanoTime)
+            n (:n r)
+            times (assoc (:times n) :read-ms (/ (- t1 t0) 1e6) :check-ms (/ (- t2 t1) 1e6))]
+        (cond
+          (and (:rejected r) d) (assoc base :fail (str "go/parser: " (:rejected r)))
+          (:rejected r) (assoc base :rejected (:rejected r))
+          :else
+          (let [base (assoc base :nodes (count (mapcat (comp rd/nodes :ast) (:files n))) :times times
+                            :open (assoc (cv/open-counts (mapcat :forms (:files (:rc r)))) :init-order 1))
+                tree (when d (ps/diff (ps/tree-of d) (ps/tree-of n) []))]
+            (cond
+              (nil? d) (assoc base :extra true)
+              tree (assoc base :diff [(ps/file-at d (first tree)) (first tree) (short-str (second tree)) (short-str (nth tree 2))])
+              :else
+              (let [rel (str (:key j) ".edn")
+                    fc (try (convert-full d (rg/dump-context d rel (:goroot j)))
+                            (catch Throwable ex {:final-fail (str (.getName (class ex)) ": " (.getMessage ex))}))]
+                (if (:final-fail fc)
+                  (assoc base :final-fail (:final-fail fc))
+                  (let [res (atom {})
+                        rd (binding [raw/*res* res] (raw/conform-package (:rc r) fc))
+                        base (assoc base :res @res)]
+                    (if rd
+                      (assoc base :raw-diff (vec rd))
+                      (let [t3 (System/nanoTime)
+                            {ad :dump unplaced :unplaced} (annotate n (:answers (:src r)) (when pkg (e/o pkg :result)))
+                            nc (try (convert-full ad (:ctx r))
+                                    (catch Throwable ex {:ann-fail (str (.getName (class ex)) ": " (.getMessage ex))}))
+                            errs (:errors (when pkg (e/o pkg :result)))
+                            base (assoc base :unplaced unplaced :errors (count errs)
+                                        :error-msgs (vec (for [x (take 3 errs)] (str (:file x) ":" (:line x) ": " (:msg x))))
+                                        :ann-ms (/ (- (System/nanoTime) t3) 1e6))]
+                        (cond
+                          (and (nil? pkg) (seq (:files n))) (assoc base :ann-fail "not checked")
+                          (:ann-fail nc) (assoc base :ann-fail (:ann-fail nc))
+                          :else (if-let [df (same-package nc fc)]
+                                  (assoc base :ann-diff (vec df))
+                                  (assoc base :equal true))))))))))))
+      (catch Throwable ex
+        (let [root (loop [x ex] (if-let [c (.getCause ^Throwable x)] (recur c) x))]
+          (assoc base :fail (str (.getName (class ex)) ": " (.getMessage ex))
+                 :trace (vec (take 16 (map str (.getStackTrace ^Throwable root))))))))))
+
+(defn- read-spec [^String f] (binding [*read-eval* false] (read-string (slurp f))))
+
+(defn- spec-loads
+  "The loads of corpus spec: [[load jobs results] ...], jobs keyed under the load's :sub."
+  [spec]
+  (vec (for [l (:loads spec)]
+         (let [all (vec (for [j (ld/jobs l)]
+                          (cond-> (assoc j :goroot (:goroot l))
+                            (:sub l) (assoc :key (str (:sub l) "/" (:key j)) :tsv-key (:key j) :sub (:sub l)))))]
+           [l (filterv :files all) (filterv :status all)]))))
+
+(defn- merge-counts [ms] (apply merge-with + {} ms))
+
+(defn- helper-results [^String tsv]
+  (if (and tsv (.isFile (File. tsv)))
+    (into {} (for [l (str/split-lines (slurp tsv))
+                   :let [[st k _ _ _ _ msg] (str/split l #"\t")]
+                   :when k]
+               [k [st msg]]))
+    {}))
+
+(defn- check-corpus [spec pool known]
+  (let [t0 (System/nanoTime)
+        nm (:name spec)
+        dumps (str/replace (:dumps spec) #"/+$" "")
+        loads (spec-loads spec)
+        load-ms (/ (- (System/nanoTime) t0) 1e6)
+        helper (into {} (for [p (rd/dump-files [dumps])]
+                          [(str/replace (subs p (inc (count dumps))) #"\.edn$" "") p]))
+        hres (helper-results (:tsv spec))
+        ;; each job with its session; the kept keys registered before any job runs
+        work (vec (mapcat (fn [[l js]]
+                            (let [[sess-of js] (load-sessions l js)]
+                              (for [j js]
+                                (do (when-let [k (job-key l j)]
+                                      (when-not (external-test? l j) (.put ^ConcurrentHashMap (:keep (sess-of j)) k true)))
+                                    [l sess-of j]))))
+                          loads))
+        js (mapv #(nth % 2) work)
+        results (vec (mapcat #(nth % 2) loads))
+        futs (mapv (fn [[l sess-of j]]
+                     (.submit ^java.util.concurrent.ExecutorService pool
+                              ^Callable (fn [] (check-job l sess-of j (get helper (:key j))))))
+                   work)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        jkeys (set (map :key js))
+        missing (vec (for [[k p] (sort helper) :when (not (jkeys k))]
+                       {:key k :path p :missing (if-let [r (some #(when (= k (:key %)) %) results)]
+                                                  (str "the loader: " (:status r) " " (:msg r))
+                                                  "no such dump from the loader")}))
+        helper-failed? (fn [r] (= "fail" (first (get hres (or (:tsv-key (some #(when (= (:key r) (:key %)) %) js)) (:key r))))))
+        known? (fn [r] (or (contains? known (:package r)) (contains? known (:key r)) (some #(contains? known %) (:keys r))))
+        by (fn [k] (filter k rs))
+        extra (by :extra)
+        bad-extra (remove helper-failed? extra)
+        unknown (remove known? (concat (by :fail) (by :diff) (by :raw-diff) (by :ann-diff) (by :ann-fail) missing bad-extra))
+        sum (fn [k] (reduce + (keep #(get-in % [:times k]) rs)))]
+    (doseq [r (by :fail)] (println (if (known? r) "FAIL known" "FAIL") nm (:key r) (:fail r))
+      (doseq [t (:trace r)] (println "    " t)))
+    (doseq [r (by :diff)] (println (if (known? r) "E-TREE known" "E-TREE") nm (:key r) (pr-str (:diff r))))
+    (doseq [r (by :raw-diff)] (println (if (known? r) "RAW known" "RAW") nm (:key r) (pr-str (:raw-diff r))))
+    (doseq [r (by :ann-fail)] (println (if (known? r) "E-ANN FAIL known" "E-ANN FAIL") nm (:key r) (:ann-fail r)))
+    (doseq [r (by :ann-diff)] (println (if (known? r) "E-ANN known" "E-ANN") nm (:key r) (pr-str (:ann-diff r))))
+    (doseq [r missing] (println (if (known? r) "MISSING known" "MISSING") nm (:key r) (:missing r)))
+    (doseq [r rs :when (pos? (or (:errors r) 0))]
+      (println "CHECKER" nm (:key r) (:errors r) "errors:" (pr-str (:error-msgs r))))
+    (doseq [r bad-extra] (println (if (known? r) "EXTRA known" "EXTRA") nm (:key r) "dumped natively, not by the helper"))
+    (println (format "%s: E-tree %d of %d dumps equal (%d files, %d nodes); raw forms %d resolved by the final ones (%d raw only: the helper's final conversion fails); E-ann %d of %d equal (%d differ, %d failed); %d failed, %d missing, %d extra (%d the helper's failures), %d rejected by both; %d not known; load %.1f s, parse %.1f s, dump %.1f s, read %.1f s, check %.1f s (CPU), %.1f s"
+                     nm (- (count (filter :nodes rs)) (count extra) (count (by :diff))) (count helper)
+                     (reduce + (map :files (filter :nodes rs))) (reduce + (keep :nodes rs))
+                     (- (count (filter :res rs)) (count (by :raw-diff))) (count (by :final-fail))
+                     (count (by :equal)) (+ (count (by :equal)) (count (by :ann-diff)) (count (by :ann-fail)))
+                     (count (by :ann-diff)) (count (by :ann-fail))
+                     (count (by :fail)) (count missing) (count extra) (- (count extra) (count bad-extra))
+                     (count (by :rejected)) (count unknown)
+                     (/ load-ms 1e3) (/ (sum :parse-ms) 1e3) (/ (sum :dump-ms) 1e3) (/ (sum :read-ms) 1e3)
+                     (/ (sum :check-ms) 1e3) (/ (- (System/nanoTime) t0) 1e9)))
+    {:corpus nm :dumps (count helper) :jobs (count js)
+     :tree-equal (- (count (filter :nodes rs)) (count extra) (count (by :diff)))
+     :files (reduce + (map :files (filter :nodes rs))) :nodes (reduce + (keep :nodes rs))
+     :raw-resolved (- (count (filter :res rs)) (count (by :raw-diff)))
+     :raw-only (vec (for [r (by :final-fail)] [(:key r) (:final-fail r)]))
+     :ann-equal (count (by :equal))
+     :ann-differ (vec (for [r (by :ann-diff)] [(:key r) (:ann-diff r)]))
+     :ann-fail (vec (for [r (by :ann-fail)] [(:key r) (:ann-fail r)]))
+     :tree-differ (vec (for [r (by :diff)] [(:key r) (:diff r)]))
+     :raw-differ (vec (for [r (by :raw-diff)] [(:key r) (:raw-diff r)]))
+     :fail (vec (for [r (by :fail)] [(:key r) (:fail r)]))
+     :missing (vec (for [r missing] [(:key r) (:missing r)]))
+     :extra (vec (for [r extra] [(:key r) (if (helper-failed? r) (second (get hres (or (:tsv-key (some #(when (= (:key r) (:key %)) %) js)) (:key r)))) "not the helper's failure")]))
+     :rejected (count (by :rejected))
+     :open (into (sorted-map) (merge-counts (keep :open rs)))
+     :resolutions (into (sorted-map) (merge-counts (keep :res rs)))
+     :unplaced (reduce + (keep :unplaced rs))
+     :checker-errors (vec (for [r rs :when (pos? (or (:errors r) 0))] [(:key r) (:errors r) (:error-msgs r)]))
+     :unknown (count unknown)
+     :times {:load-s (/ load-ms 1e3) :parse-s (/ (sum :parse-ms) 1e3) :dump-s (/ (sum :dump-ms) 1e3)
+             :read-s (/ (sum :read-ms) 1e3) :check-s (/ (sum :check-ms) 1e3)
+             :ann-s (/ (reduce + (keep :ann-ms rs)) 1e3) :wall-s (/ (- (System/nanoTime) t0) 1e9)}}))
+
+(defn- read-job
+  "The final forms of corpus job j (the checker's annotations, converted) written under out (mode
+  positions): arbace.repr.go/convert-data's result, or :rejected or :fail."
+  [load sess-of j out positions]
+  (let [t0 (System/nanoTime)
+        base {:key (:key j) :package (get-in j [:header :package])}]
+    (try
+      (let [[pkg r] (checked load sess-of j)]
+        (if (:rejected r)
+          (assoc base :rejected (:rejected r))
+          (let [{ad :dump} (annotate (:n r) (:answers (:src r)) (when pkg (e/o pkg :result)))
+                res (rg/convert-data ad (:key j) (str (or (:tsv-key j) (:key j)) ".edn") t0 (System/nanoTime)
+                                     {:out (str out (when (:sub j) (str "/" (:sub j)))) :positions positions
+                                      :goroot (:goroot j) :check true})]
+            (merge base (select-keys res [:files :bytes :bad :ms]) {:errors (count (:errors (when pkg (e/o pkg :result))))}))))
+      (catch Throwable ex
+        (assoc base :fail (str (.getName (class ex)) ": " (.getMessage ex)))))))
+
+(defn- read-corpus [spec pool out positions]
+  (let [t0 (System/nanoTime)
+        nm (:name spec)
+        dir (str out "/" nm (when (= :full positions) "-full"))
+        work (vec (mapcat (fn [[l js]]
+                            (let [[sess-of js] (load-sessions l js)]
+                              (for [j js]
+                                (do (when-let [k (job-key l j)]
+                                      (when-not (external-test? l j) (.put ^ConcurrentHashMap (:keep (sess-of j)) k true)))
+                                    [l sess-of j]))))
+                          (spec-loads spec)))
+        futs (mapv (fn [[l sess-of j]]
+                     (.submit ^java.util.concurrent.ExecutorService pool ^Callable (fn [] (read-job l sess-of j dir positions))))
+                   work)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        ok (filter :files rs)
+        bad (filter #(seq (:bad %)) ok)]
+    (doseq [r (filter :fail rs)] (println "FAIL" nm (:key r) (:fail r)))
+    (doseq [r bad [f m] (:bad r)] (println "BAD" nm (:key r) f m))
+    (println (format "%s: %d dumps' final forms from the checker's annotations (%d files, %.1f MB of forms), read back: %d; %d rejected by go/parser, %d failed; checker errors in %d; %.1f s"
+                     nm (count ok) (reduce + (map :files ok)) (/ (reduce + (map :bytes ok)) 1e6) (- (count ok) (count bad))
+                     (count (filter :rejected rs)) (count (filter :fail rs)) (count (filter #(pos? (or (:errors %) 0)) ok))
+                     (/ (- (System/nanoTime) t0) 1e9)))
+    {:corpus nm :dir dir :dumps (count ok) :files (reduce + (map :files ok)) :bytes (reduce + (map :bytes ok))
+     :rejected (count (filter :rejected rs)) :failed (vec (for [r (filter :fail rs)] [(:key r) (:fail r)]))
+     :checker-errors (vec (for [r ok :when (pos? (or (:errors r) 0))] [(:key r) (:errors r)]))
+     :unknown (+ (count bad) (count (filter :fail rs))) :wall-s (/ (- (System/nanoTime) t0) 1e9)}))
+
+(defn -main
+  "check [--jobs N] [--forms DIR] [--known FILE] [--report FILE] SPEC...
+  read [--full] [--jobs N] [--forms DIR] [--out DIR] [--report FILE] SPEC...
+
+  read: the final forms of each corpus SPEC's dumps (the native reader's, annotated by goi's
+  checker in its resolve mode, converted as the helper's are), written as bin/repr-go read
+  --corpus writes the helper's (mode :lines, --full :full) under --out DIR/NAME[-full], each file
+  read back. Exits 1 when a conversion fails or a file does not read back.
+
+
+  check: per dump of each corpus SPEC (arbace.repr.go.parse's specs) against the helper's dumps
+  (:dumps): E-tree, the raw forms against the final ones (conform), E-ann (the final forms of the
+  annotated native dump equal the helper's). Exits 1 on a difference or failure that the known
+  differences (a map of dump key, package path or file key to the reason) do not list."
+  [& args]
+  (let [[cmd & args] args
+        _ (when-not (#{"check" "read"} cmd)
+            (binding [*out* *err*] (println "usage: check|read [--full] [--jobs N] [--forms DIR] [--known FILE] [--out DIR] [--report FILE] SPEC..."))
+            (System/exit 2))
+        [opts specs] (loop [opts {:jobs 1 :forms "tamago/goroot" :out ".tmp/repr-go/native-forms"}
+                            [a & more :as args] args]
+                       (case a
+                         "--full" (recur (assoc opts :full true) more)
+                         "--out" (recur (assoc opts :out (first more)) (rest more))
+                         "--jobs" (recur (assoc opts :jobs (parse-long (first more))) (rest more))
+                         "--forms" (recur (assoc opts :forms (first more)) (rest more))
+                         "--known" (recur (assoc opts :known (first more)) (rest more))
+                         "--report" (recur (assoc opts :report (first more)) (rest more))
+                         [opts args]))
+        known (or (when-let [k (:known opts)]
+                    (when (.isFile (File. ^String k))
+                      (binding [*read-eval* false] (read-string (slurp k)))))
+                  {})
+        {:keys [ms]} (ps/load! (:forms opts))
+        _ (println (format "the dumper generated from go/ast's forms and loaded with go/parser by goi in %.2f s" (/ ms 1e3)))
+        fc (ps/forms-check (:forms opts))
+        _ (doseq [[p n eq] fc]
+            (println (format "%s: %d declarations, the digest's %s tamago/goroot's" p n (if eq "equal to" "NOT equal to"))))
+        forms-bad (count (remove #(nth % 2) fc))
+        pool (Executors/newFixedThreadPool (:jobs opts))
+        _ (reset! forms-dir (:forms opts))
+        ;; the corpora grouped by the configurations their loads need (the standard library's
+        ;; sessions), each group's sessions dropped after it: memory for one group's at a time
+        specs (map-indexed (fn [i sf] (let [sp (read-spec sf)]
+                                        [i sp (vec (sort (distinct (map (comp str config-key) (:loads sp)))))]))
+                           specs)
+        groups (vals (group-by #(nth % 2) (sort-by (fn [[i _ ks]] [(count ks) (first ks) i]) specs)))
+        results (->> (for [g (sort-by #(apply min (map first %)) groups)
+                           :let [rs (doall (for [[i sp] g]
+                                             [i (if (= cmd "read")
+                                                  (read-corpus sp pool (:out opts) (if (:full opts) :full :lines))
+                                                  (check-corpus sp pool known))]))]]
+                       (do (drop-std-sessions!) (System/gc) rs))
+                     (apply concat)
+                     (sort-by first)
+                     (mapv second))
+        unknown (+ forms-bad (reduce + (map :unknown results)))]
+    (.shutdown pool)
+    (.awaitTermination pool 1 TimeUnit/MINUTES)
+    (when (and (= cmd "check") (> (count results) 1))
+      (println (format "native-check: %d corpora, %d dumps; E-tree %d equal; raw forms %d resolved, %d raw only; E-ann %d equal, %d differ, %d failed; %d not known"
+                       (count results) (reduce + (map :dumps results)) (reduce + (map :tree-equal results))
+                       (reduce + (map :raw-resolved results)) (reduce + (map (comp count :raw-only) results))
+                       (reduce + (map :ann-equal results)) (reduce + (map (comp count :ann-differ) results))
+                       (reduce + (map (comp count :ann-fail) results)) unknown)))
+    (when-let [rf (:report opts)]
+      (spit rf (with-out-str (binding [*print-length* nil *print-level* nil] (prn {:forms fc :corpora results})))))
+    (shutdown-agents)
+    (System/exit (if (pos? unknown) 1 0))))

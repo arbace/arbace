@@ -426,13 +426,20 @@ an import whose path is not a name are ordinary raw forms (`go/select`, a call, 
 **Commands.** `bin/repr-go read --reader native --raw [--corpus C | PKG ...]` writes the raw
 forms of the native reader's dumps as `.ae` files (mode `:full`), reads each back with Arbace's
 reader against the forms in memory, and counts the open decisions by kind (report
-`DIR/NAME.report.edn`, `:open`). `bin/repr-go raw-check [CORPUS ...]` (`make repr-go-raw-check`)
-converts each dump twice, the native dump raw and the helper's annotated dump as ever (mode
-`:full`), and walks the two in parallel (`arbace.repr.go.raw/conform`): equal everywhere but at
-the open decisions, where the final form must be one of that decision's resolutions (the table
-above). So erasing go/types' decisions from the final forms gives the raw forms exactly. The
-resolutions are counted (`[:call :conversion]`, `[:select :package]`, `[:define :reused]`, ...);
-known differences in `test/repr/go/raw-known.edn` (empty).
+`DIR/NAME.report.edn`, `:open`). `bin/repr-go native-check [CORPUS ...]` (`make
+repr-go-native-check`; GP3's `raw-check`, merged into it at GP4 as GPS23 (c) decided) converts
+each dump twice, the native dump raw and the helper's annotated dump as ever (mode `:full`), and
+walks the two in parallel (`arbace.repr.go.raw/conform`): equal everywhere but at the open
+decisions, where the final form must be one of that decision's resolutions (the table above). So
+erasing go/types' decisions from the final forms gives the raw forms exactly. The resolutions are
+counted (`[:call :conversion]`, `[:select :package]`, `[:define :reused]`, ...); known differences
+in `test/repr/go/native-known.edn`.
+
+**Resolved (GP4).** goi's checker answers the open decisions (doc/go/GOI-SPEC.md §3.10, "The
+resolve mode"), `arbace.repr.go.annotate` writes the answers into the native dump as go/types'
+annotations, and the converter, unchanged, makes the final forms of it, which `native-check`
+compares with the helper's (E-ann, doc/go/GO-PARSER-SURVEY.md "As built: GP4"). `bin/repr-go read
+--reader native --forms [--full]` writes them as `read --corpus` writes the helper's.
 
 Three things the final forms write less precisely than the raw ones, which `conform` accepts as
 the final's (GPS25): the operand of an instantiation without its parentheses, and as a field's

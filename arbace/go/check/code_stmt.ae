@@ -20,8 +20,9 @@
     (if-let [alt (e/scope-get (:scope cx) nm)]
       ;; go/types does not declare it: never reported unused
       (do (err! f :DuplicateDecl "%s redeclared in this block" nm)
-          (when (e/obj? x) (oset! x :used true)))
-      (e/scope-put! (:scope cx) nm x))))
+          (when (e/obj? x) (oset! x :used true))
+          false)
+      (do (e/scope-put! (:scope cx) nm x) true))))
 
 (defn block-cx [cx] (assoc cx :scope (e/scope (:scope cx) :block)))
 
@@ -85,7 +86,7 @@
              (not (contains? #{"+" "-" "*" "/" "%" "<<" ">>" "==" "!=" "<" "<=" ">" ">=" "and" "or" "not" "bit-and"
                                "bit-or" "bit-xor" "bit-not" "bit-and-not" "addr" "<!" "lit" "assert" "aget" "subslice"
                                "spread" "values" "inst" "method-expr" "fn" "zero" "rune" "imaginary" "byte-string"
-                               "deref" "go/id"} h))))
+                               "deref" "go/id" "go/select" "go/index" "go/star"} h))))
        (not (and (= "-" (head-name f)) (= 2 (count f))))
        (not (str/starts-with? (str (head-name f)) ".-"))))
 
@@ -238,12 +239,16 @@
                          (= (boolean say) (boolean alt)) (when say (e/verified! :assign x))
                          (or say (:annotated cx-flags))
                          (e/annotation-error! x "^:assign" nm (if say "assigned" "declared") (if alt "assigned" "declared")))
-                       (cond
-                         ;; go/types: a repeated name is a dummy variable, not declared
-                         rep {:obj (new-local cx "_" nil x) :form x :err true}
-                         (and alt (= :var (o alt :kind))) {:obj alt :reused true :form x}
-                         alt (do (err! x :UnassignableOperand "cannot assign to %s" (expr-str x)) {:obj nil :form x})
-                         :else {:obj (new-local cx nm nil x) :new true :form x})))))
+                       (let [l (cond
+                                 ;; go/types: a repeated name is a dummy variable, not declared
+                                 rep {:obj (new-local cx "_" nil x) :form x :err true}
+                                 (and alt (= :var (o alt :kind))) {:obj alt :reused true :form x}
+                                 alt (do (err! x :UnassignableOperand "cannot assign to %s" (expr-str x)) {:obj nil :form x})
+                                 :else {:obj (new-local cx nm nil x) :new true :form x})]
+                         ;; the resolve mode: ^:go/define names new (go/types' Defs) or reused (Uses)
+                         (when (and e/*answers* (:obj l) (not= "_" nm))
+                           (e/answer! x (if (:reused l) {:use (:obj l)} {:def (:obj l)})))
+                         l)))))
         vals (rhs-values cx f (count lhs) rhs)
         nodes (if (nil? vals)
                 (do (doseq [l lhs] (when (and (:new l) (:obj l)) (oset! (:obj l) :type :invalid))) [])
@@ -341,11 +346,24 @@
                     (let [[node iota]
                           (with-line tf
                             (cond
-                              (:const m)
+                              ;; constants: one name, or several of one spec ((values a b), each
+                              ;; name marked ^:const), each with its init, declared after them
+                              (or (:const m) (and (= "values" (head-name tf)) (:const (meta (second tf)))))
                               (let [iota (if (:go/grouped m) (inc iota) 0)
-                                    [x n] (local-const cx tf rf iota)]
-                                (declare! cx (o x :name) x tf)
-                                [{:op :decl :const true :objs [x] :init [n] :line (fline tf)} iota])
+                                    names (target-names tf)
+                                    inits (if (= 1 (count names)) [rf] (values-forms rf))
+                                    _ (cond
+                                        (< (count inits) (count names))
+                                        (err! tf :WrongAssignCount "missing init expr for %s" (ident-name (nth names (count inits))))
+                                        (> (count inits) (count names))
+                                        (err! tf :WrongAssignCount "extra init expr"))
+                                    xs (vec (for [[i nf] (map-indexed vector names) :when (< i (count inits))]
+                                              (with-line nf (let [[x n] (local-const cx nf (nth inits i) iota)] [nf x n]))))]
+                                ;; the resolve mode: each definition (go/types records none for a
+                                ;; name redeclared)
+                                (doseq [[nf x] xs]
+                                  (when (or (= "_" (o x :name)) (declare! cx (o x :name) x nf)) (e/answer! nf {:def x})))
+                                [{:op :decl :const true :objs (mapv second xs) :init (mapv #(nth % 2) xs) :line (fline tf)} iota])
                               (or (:var m) (some #(:tag (meta %)) (target-names tf)) (zero-form? rf))
                               [(var-decl cx tf tf rf) -1]
                               :else
@@ -468,7 +486,7 @@
                                               ;; duplicate constant cases
                                               (when (and (= :constant (:mode v)) (not= :unknown (:val v))
                                                          (not (t/boolean-type? (:type v))) (not (t/complex-type? (:type v))))
-                                                (let [k [(t/type-str (:type v)) (key-val v)]]
+                                                (let [k [(t/type-str (t/canon (:type v))) (key-val v)]]
                                                   (if (get @seen k)
                                                     (err! vf :DuplicateCase "duplicate case %s in expression switch" (operand-str v))
                                                     (vswap! seen assoc k true))))
@@ -507,15 +525,21 @@
                              (when (> @defaults 1) (err! cl :DuplicateDefault "multiple defaults in switch")))
                      types (when-not default
                              (vec (for [tf (second cl)]
-                                    (if (nil? tf)
+                                    (if (or (nil? tf)
+                                            ;; the resolve mode: raw forms' (go/id "nil"), the universe's
+                                            (and (:resolve cx-flags) (go-id? tf) (= "nil" (ident-name tf))
+                                                 (let [x (resolve-name icx "nil")]
+                                                   (when (= :nil (some-> x (o :kind)))
+                                                     (e/answer! tf {:obj x :mode :value :type :untyped-nil})
+                                                     true))))
                                       (do (when (contains? @seen :nil) (err! cl :DuplicateCase "multiple nil cases in type switch (first at line ?)"))
                                           (vswap! seen conj :nil)
                                           :untyped-nil)
                                       (let [T (typexpr icx tf)]
                                         (when (and ok (t/valid? T))
-                                          (when (contains? @seen T)
+                                          (when (contains? @seen (t/canon T))
                                             (err! tf :DuplicateCase "duplicate case %s in type switch" (expr-str tf)))
-                                          (vswap! seen conj T)
+                                          (vswap! seen conj (t/canon T))
                                           (when (and (not (t/interface? T)) (t/missing-method T (:type x) false))
                                             (err! tf :ImpossibleAssert "impossible type switch case: %s\n\t%s cannot have dynamic type %s %s"
                                                   (expr-str tf) (operand-str x) (t/type-str T)
@@ -597,7 +621,7 @@
             u)]
     (cond
       (nil? u) nil
-      (t/string-type? u) [:string :int :int32]
+      (t/string-type? u) [:string :int (if t/*spelled* :rune :int32)]
       (t/integer-type? u) (when (allow-version? cx 22) [:int (if (t/untyped? ty) :int ty) nil])
       (not (vector? u)) nil
       :else
@@ -925,7 +949,13 @@
           (not (and (:label-id s) (has-break? cx (:label-id s))))
           (or (= :select (:op s)) (some :default (:clauses s)))
           (every? (fn [cl] (let [b (:body cl)
-                                 l (last (remove #(= :directive (:op %)) b))]
+                                 ;; the clause's last statement: a let's (x := e in the clause is
+                                 ;; in its list, not a block of its own)
+                                 l (loop [b b]
+                                     (let [l (last (remove #(= :directive (:op %)) b))]
+                                       (if (and l (= :block (:op l)) (or (:let l) (:let-type l)) (not (:nested l)))
+                                         (recur (:stmts l))
+                                         l)))]
                              (or (and l (= :fallthrough (:op l))) (list-terminating? b))))
                   (:clauses s)))
      false)))

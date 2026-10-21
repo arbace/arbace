@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild mac-bundle arm64-vm-check arm64-vm-goi \
   gate gate-full suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-go-raw-check repr-java-roundtrip repr-java-text repr-java-host-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-divergences alpine-check clean \
+  repr-java-roundtrip repr-java-text repr-java-host-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-divergences alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -131,10 +131,8 @@ repr-go-roundtrip-text: ## mode :full prints the original text back, byte for by
 	bin/repr-go roundtrip --text linux/amd64
 	bin/repr-go roundtrip --text --dirs amd64
 	bin/repr-go roundtrip --text --dirs linux/amd64
-repr-go-native-check: ## the native reader's headers and trees equal the helper's over every corpus (bin/repr-go native-check)
+repr-go-native-check: ## the native reader against the helper over every corpus: headers and trees, raw forms, the checker's annotations (bin/repr-go native-check)
 	bin/repr-go native-check
-repr-go-raw-check: ## the raw forms (GP3) resolved by the final ones over every corpus (bin/repr-go raw-check)
-	bin/repr-go raw-check
 repr-java-roundtrip: ## Java -> forms -> Java -> forms over Clojure's Java, the samples, jdk/forms (bin/repr-java roundtrip)
 	bin/repr-java roundtrip --corpus baseline,samples,jdk
 repr-java-text: ## the same in mode :full: each Java file printed back byte for byte, javac's classes compared (bin/repr-java roundtrip --text-only)
