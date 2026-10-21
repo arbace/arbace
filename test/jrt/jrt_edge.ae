@@ -1,0 +1,196 @@
+(ns jrt.jrt-edge
+  "The edge of jrt's translated input (B1a step 3, doc/go/JRT-SOURCES.md): what the translated
+  classes (whole files, javac's classes) call outside themselves (the edge jrt hand-writes), with
+  the natives and the VM intrinsics they declare, cross-checked against the closure's boundary
+  (reached methods only) recorded by bin/java-surface. Run by bin/jrt-convert's edge step, on the
+  frozen JVM: it reads class files with the JDK's class file API (java.lang.classfile) and
+  jrt.java-surface's class reading and treatments. Until JN6 a part of jrt.jrt-sources, whose
+  other parts run on the tools' host since (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN6\",
+  JFS40). Outputs are deterministic: sorted, without times."
+  (:require [arbace.java.io :as io]
+            [arbace.string :as str]
+            [arbace.pprint :as pp]
+            [jrt.java-surface :as js])
+  (:import (java.lang.classfile ClassFile ClassModel MethodModel FieldModel Attributes Annotation)
+           (java.lang.classfile.attribute RuntimeVisibleAnnotationsAttribute)
+           (java.io File)
+           (java.nio.file Files)))
+
+(defn- read-data [f] (binding [*read-eval* false] (read-string (slurp f))))
+
+(def ^:private cf (ClassFile/of))
+
+(defn- class-files [dir]
+  (->> (file-seq (io/file dir))
+       (filter #(str/ends-with? (.getName ^File %) ".class"))
+       (sort-by #(.getPath ^File %))))
+
+(defn- dotted [^String s] (.replace s \/ \.))
+
+(defn- elem-class [^String n]
+  (if (str/starts-with? n "[")
+    (some-> (second (re-find #"L([^;]+);" n)) dotted)
+    (dotted n)))
+
+(defn- model-info [^ClassModel m]
+  {:super (some-> (.orElse (.superclass m) nil) .asInternalName dotted)
+   :ifaces (mapv #(dotted (.asInternalName ^java.lang.classfile.constantpool.ClassEntry %)) (.interfaces m))
+   :interface? (.has (.flags m) java.lang.reflect.AccessFlag/INTERFACE)
+   :methods (into {} (for [^MethodModel mm (.methods m)]
+                       [(str (.stringValue (.methodName mm)) (.stringValue (.methodType mm)))
+                        {:static? (.has (.flags mm) java.lang.reflect.AccessFlag/STATIC)
+                         :private? (.has (.flags mm) java.lang.reflect.AccessFlag/PRIVATE)}]))
+   :fields (set (map #(.stringValue (.fieldName ^FieldModel %)) (.fields m)))})
+
+(defn- intrinsic? [^MethodModel mm]
+  (boolean
+   (some (fn [^RuntimeVisibleAnnotationsAttribute a]
+           (some #(= "Ljdk/internal/vm/annotation/IntrinsicCandidate;"
+                     (.stringValue (.className ^Annotation %)))
+                 (.annotations a)))
+         (.findAttributes mm (Attributes/runtimeVisibleAnnotations)))))
+
+(def ^:private class-kinds
+  "Reference kinds that use a class without a member."
+  #{:super :interface :new :checkcast :instanceof :anewarray :multianewarray :ldc-class :catch})
+
+(defn- area
+  "What a class at the edge is, for j2g and jrt: one of the VM's services."
+  [n]
+  (let [t (js/top-level n)]
+    (cond
+      (= t "jdk.internal.misc.Unsafe") :unsafe
+      (re-find #"^java\.lang\.(reflect|invoke)\.|^java\.lang\.(Class|ClassLoader|ClassValue)$" t) :reflection
+      (re-find #"^java\.lang\.(Object|String|StringBuilder|StringBuffer|AbstractStringBuilder|StringLatin1|StringUTF16|StringConcatHelper|Math|StrictMath|Enum|Record|Throwable|StackTraceElement|System|Runtime|Thread|ThreadLocal)$" t) :lang
+      (re-find #"^java\.lang\.ref\." t) :references
+      (re-find #"^java\.util\.concurrent\.(atomic|locks)\.|^java\.util\.concurrent\.(Executor|Executors|ExecutorService|Future|FutureTask|CountDownLatch|ThreadLocalRandom|ThreadFactory|ForkJoin)" t) :concurrency
+      (re-find js/internal-boundary t) :vm-internal
+      :else (or (js/category n) :other))))
+
+(defn edge
+  "The edge of the translated classes compiled into `dir` (dotted names = the translated set):
+  every class and member outside the set they reference, resolved as the JVM resolves it (a
+  call on a translated class inherited from java.lang.Object is Object's), with the
+  translated classes using it; the native methods and the @IntrinsicCandidate methods the set
+  declares. `closure` is java-surface.edn's [:closure :repl] (its :boundary and :native), for
+  the cross-check: the closure's boundary is computed over reached methods only, the edge over
+  whole files, so the boundary must be contained in the edge. `arbace-uses`: the member keys
+  Arbace (runtime + REPL) itself calls on translated classes (the closure's entries; a member
+  they inherit from a shim is boundary without any translated caller)."
+  [dir closure arbace-uses]
+  (let [models (into (sorted-map)
+                     (for [f (class-files dir)
+                           :let [m (.parse ^ClassFile cf (Files/readAllBytes (.toPath ^File f)))]]
+                       [(dotted (.asInternalName (.thisClass ^ClassModel m))) m]))
+        in-set? (fn [n] (contains? models n))
+        index (into {} (for [[n m] models] [n (model-info m)]))
+        members (atom (sorted-map))           ; [class member] -> #{user top-level}
+        classes (atom (sorted-map))           ; class -> #{user} (class-only uses)
+        types (atom (sorted-map))             ; class -> #{user} (in descriptors only)
+        array-calls (atom (sorted-map))       ; member of an array type -> #{user}
+        vcalls (atom {})                      ; virtual call: member -> #{owner named}
+        add! (fn [a k u] (swap! a update k (fnil conj (sorted-set)) u))]
+    (binding [js/*index* index]
+      (doseq [[n ^ClassModel m] models
+              :let [user (js/top-level n)]
+              r (js/class-refs m)
+              :let [owner (:owner r)
+                    o (elem-class owner)]
+              :when (and o (js/jdk-class? o))]
+        (cond
+          (contains? js/member-kinds (:kind r))
+          (if (str/starts-with? owner "[")
+            (add! array-calls (str (:name r) (:desc r)) user)
+            (let [field? (#{:getfield :putfield :getstatic :putstatic} (:kind r))
+                  k (if field? (:name r) (str (:name r) (:desc r)))
+                  ;; a constructor is its class's own, never inherited
+                  decl (or (cond field? (@#'js/find-field o (:name r))
+                                 (str/starts-with? k "<") o
+                                 :else (@#'js/find-method o k))
+                           o)]
+              (when (#{:invokevirtual :invokeinterface} (:kind r))
+                (swap! vcalls update k (fnil conj #{}) o))
+              (when-not (in-set? decl)
+                (add! members [decl k] user))))
+          (class-kinds (:kind r)) (when-not (in-set? o) (add! classes o user))
+          :else (when-not (in-set? o) (add! types o user)))))
+    (let [natives (into (sorted-map)
+                        (for [[n ^ClassModel m] models
+                              :let [ks (sort (for [^MethodModel mm (.methods m)
+                                                   :when (.has (.flags mm) java.lang.reflect.AccessFlag/NATIVE)]
+                                               (str (.stringValue (.methodName mm)) (.stringValue (.methodType mm)))))]
+                              :when (seq ks)]
+                          [n (vec ks)]))
+          intrinsics (into (sorted-map)
+                           (for [[n ^ClassModel m] models
+                                 :let [ks (sort (for [^MethodModel mm (.methods m) :when (intrinsic? mm)]
+                                                  (str (.stringValue (.methodName mm)) (.stringValue (.methodType mm)))))]
+                                 :when (seq ks)]
+                             [n (vec ks)]))
+          by-class (reduce (fn [acc [[c k] us]]
+                             (update acc c (fnil assoc (sorted-map)) k us))
+                           (sorted-map) @members)
+          edge-classes (into (sorted-set) (concat (keys by-class) (keys @classes)))
+          ;; the closure's boundary: members by name+descriptor, fields by name
+          boundary (for [[c ks] (:boundary closure) k ks] [c k])
+          missing (for [[c k] boundary :when (not (contains? @members [c k]))] [c k])
+          ;; reached in the closure by dispatch: a virtual call on a supertype of c (an
+          ;; interface or class of the set, or Object), with c instantiated
+          dispatch? (fn [[c k]]
+                      (binding [js/*index* index]
+                        (let [sups (conj (@#'js/jdk-supertypes c) "java.lang.Object")]
+                          (some sups (get @vcalls k)))))
+          by-dispatch (vec (filter dispatch? missing))
+          missing (remove dispatch? missing)
+          from-arbace (vec (filter (fn [[_ k]] (contains? arbace-uses k)) missing))
+          missing (vec (remove (fn [[_ k]] (contains? arbace-uses k)) missing))
+          native-missing (vec (for [[c ks] (:native closure) k ks
+                                    :when (not (some #{k} (get natives c)))]
+                                [c k]))]
+      {:translated-classes (count models)
+       :translated-top-level (count (into #{} (map js/top-level (keys models))))
+       :edge-classes (count edge-classes)
+       :edge-members (count @members)
+       :by-treatment (into (sorted-map)
+                           (for [[t cs] (group-by js/treatment edge-classes)]
+                             [t {:classes (count cs)
+                                 :members (count (filter #((set cs) (first %)) (keys @members)))}]))
+       :by-area (into (sorted-map)
+                      (for [[a cs] (group-by area edge-classes)]
+                        [a {:classes (count cs)
+                            :members (count (filter #((set cs) (first %)) (keys @members)))}]))
+       :members (into (sorted-map)
+                      (for [[c ks] by-class]
+                        [c {:treatment (js/treatment c) :area (area c)
+                            :members (into (sorted-map) (for [[k us] ks] [k (vec us)]))}]))
+       :class-uses (into (sorted-map) (for [[c us] @classes]
+                                        [c {:treatment (js/treatment c) :area (area c) :users (vec us)}]))
+       :type-uses (into (sorted-map) (for [[c us] @types :when (not (contains? by-class c))
+                                           :when (not (contains? @classes c))]
+                                       [c {:treatment (js/treatment c) :users (count us)}]))
+       :array-members (into (sorted-map) (for [[k us] @array-calls] [k (count us)]))
+       :natives natives
+       :intrinsics intrinsics
+       :closure-check {:boundary-members (count boundary)
+                       :boundary-classes (count (:boundary closure))
+                       :in-edge (- (count boundary) (count missing) (count by-dispatch) (count from-arbace))
+                       :by-dispatch by-dispatch
+                       :from-arbace from-arbace
+                       :missing missing
+                       :closure-natives (reduce + (map count (vals (:native closure))))
+                       :natives-missing native-missing}})))
+
+(defn write-edge
+  "Computes the edge of the classes in dir and writes it to out."
+  [dir surface out]
+  (let [d (read-data surface)
+        uses (into #{} (for [[_ v] (:classes d)
+                             :when (= :translate (:treatment v))
+                             g [:runtime :repl]
+                             k (keys (get-in v [:groups g :members]))]
+                         k))
+        e (edge dir (get-in d [:closure :repl]) uses)]
+    (spit out (with-out-str (binding [*print-length* nil] (pp/pprint e))))
+    (println "edge of" dir ":" (:edge-classes e) "classes," (:edge-members e) "members;"
+             "closure boundary in edge:" (get-in e [:closure-check :in-edge]) "of"
+             (get-in e [:closure-check :boundary-members]))))

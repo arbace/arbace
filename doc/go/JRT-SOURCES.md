@@ -34,7 +34,8 @@ comparison of float constants).
 (`jrt.jrt-sources`, next to `jrt.java-surface`, whose class reading and treatments it reuses).
 It ran on Arbace's `target/stage2` until standalone S4, and since on the frozen JVM Arbace
 (`bin/lib/frozen.bash`: the jar of `arbace-for-java-26-v4`, repr/java and the Java forms' front end
-from the checkout's sources; "Since S4" below), and writes only under
+from the checkout's sources; "Since S4" below), until repr/java moved to javac's tool executable
+and the namespace to the tools' host (JN5, JN6: "Since JN5 and JN6" below), and writes only under
 `.tmp/jrt/` (`JRT_WORK`), regenerated on every run and not tracked (the user's decision for
 repr/java's output; reversed by standalone S1's D2, 2026-10-12: the output is committed as `jdk/`, and
 `bin/jrt-convert update` and `verify` write and check it, "The committed forms" below). Steps
@@ -603,6 +604,20 @@ mean is checked downstream, by j2g's analysis of them in the Go build, the oracl
 suite on it. `provenance.edn`'s converter names the frozen jar too (`:host`, its name and
 SHA-256). The forms repr/java makes on the frozen jar are those it made on main's `target/stage2`, byte
 for byte (`verify`; doc/STANDALONE-NOTES.md).
+
+### Since JN5 and JN6: repr/java on javac's tool executable, `jrt.jrt-sources` on the tools' host
+
+Since JN5 (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN5") the `convert` and `javac` steps run
+on javac's tool executable (`bin/repr-java read-jdk`, `bin/repr-java javac`: javac on Arbace, against
+the platform of `jdk/javac/platform.sha256`), and `provenance.edn`'s `:host` names the tool by the key
+of its sources (`verify` reports it, not compares it). Since JN6 ("As built: JN6") the JVM has left
+the rest but two parts: `jrt.jrt-sources` (the source list, the locales, the report) runs on the
+tools' host (`arbace_tool -p test`), its outputs the same byte for byte (`sources.txt`,
+`LocaleDataIndex.java`, so `jdk/` by `verify`); the edge is `jrt.jrt-edge` (`test/jrt/jrt_edge.ae`,
+split from it), on the frozen jar, since it reads javac's classes with the JDK's class file API and
+`jrt.java-surface`'s reading of them (JFS40); and the generators run on `GEN_JDK` until JN7.
+`provenance.edn`'s `:jdk` names the platform by the SHA-256 of its pin, no longer `java -version`
+(JFS35 (b)); `REPR_JAVA_JVM_OPTS` is gone with the JVM's read.
 
 `bin/jrt-convert` kept its steps and checks at S1, and gained two modes, after them:
 

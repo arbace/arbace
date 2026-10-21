@@ -10,9 +10,9 @@
 #
 #   bin/javac-vendor convert  the sources copied from $JDK (and overlay/jdk/javac/MODULE) into
 #                             WORK/src/MODULE, converted by `bin/repr-java read-jdk --check` (on
-#                             bin/repr-java's host: javac's tool executable since JN5, javac on
-#                             Arbace reading javac's own sources, the fixpoint; on the frozen JVM
-#                             with REPR_JAVA_HOST=jvm) module by module, merged into OUT/forms
+#                             javac's tool executable, bin/repr-java's only host since JN6: javac
+#                             on Arbace reading javac's own sources, the fixpoint) module by
+#                             module, merged into OUT/forms
 #                             (repr/java's reports left out); OUT/sources.txt (MODULE KIND PATH:
 #                             share, a file of jdk26u's src/MODULE/share/classes; gensrc, of the
 #                             JDK build's support/gensrc/MODULE; overlay, of
@@ -40,7 +40,9 @@
 #                             Arbace (jdk.internal.jrt.javac.Main, overlay/jdk/javac/jdk.compiler)
 #                             against the platform (below), and the JVM's javac (javac on $PATH,
 #                             the frozen JDK) the same; their class files are compared byte for
-#                             byte, and their diagnostics. Corpora (default baseline samples jdk):
+#                             byte, and their diagnostics (the JVM's javac, a JDK, not the frozen
+#                             jar: the reference while a JDK is at hand, JFS41). Corpora (default
+#                             baseline samples jdk):
 #                             baseline (the frozen clojure/'s 183 files), samples
 #                             (test/repr/java/java and module), jdk (java.base's closure, 838
 #                             files, made by bin/jrt-convert's sources and generate steps into
@@ -51,7 +53,7 @@
 #   bin/javac-vendor platform [DIR]
 #                             the platform made into DIR (default WORK/platform) and checked
 #                             against OUT/platform.sha256; prints DIR (repr/java on Arbace,
-#                             bin/repr-java's REPR_JAVA_HOST=arbace, JN4)
+#                             bin/repr-java, JN4)
 #   bin/javac-vendor platform-pin
 #                             the platform made and pinned alone: OUT/platform.sha256 (JFS15 (b),
 #                             JFS23 (b): the build tree's exploded modules with their jmods' module
@@ -59,8 +61,8 @@
 #
 # Options (before the command): --work DIR (default .tmp/javac-vendor), --out DIR (default
 # jdk/javac). Environment: JDK (jdk26u's checkout, default /root/jdk26u, with its build tree,
-# whose support/gensrc holds the generated sources), REPR_JAVA_JVM_OPTS (repr/java's heap,
-# default here -Xmx12g), J2G_JVM_OPTS (the recording's, default -Xmx16g).
+# whose support/gensrc holds the generated sources), REPR_JAVA_EXE (bin/repr-java's tool),
+# J2G_JVM_OPTS (the edge's recording on the frozen JVM, default -Xmx16g).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
@@ -162,7 +164,7 @@ convert_module() {
   origins "$m" > "$work/origins-$m.edn"
   rm -rf "${conv:?}/$m"
   # from WORK: read-jdk copies the files into .tmp/repr-java-patch below the current directory
-  (cd "$work" && REPR_JAVA_THREADS=8 REPR_JAVA_PATCH_ALL=1 REPR_JAVA_JVM_OPTS=${REPR_JAVA_JVM_OPTS:--Xmx12g -Djava.io.tmpdir=$work/tmp} \
+  (cd "$work" && REPR_JAVA_THREADS=8 REPR_JAVA_PATCH_ALL=1 \
      "$root/bin/repr-java" read-jdk --check --origins "$work/origins-$m.edn" "$conv/$m" "$m" "$work/src/$m") > "$log" 2>&1
   echo "   $m: $(tail -1 "$log")" >&2
   grep -q "^$n Java files, $n converted, 0 failed, 0 javac errors, .* 0 unreadable" "$log" ||
@@ -171,7 +173,7 @@ convert_module() {
 
 provenance() {
   local q='s/\\/\\\\/g; s/"/\\"/g' url clean c
-  . "$root/bin/lib/frozen.bash"
+  . "$root/bin/lib/repr-java/host.bash"
   url=$(git -C "$jdk" remote get-url origin 2>/dev/null | sed "$q")
   if [ -z "$(git -C "$jdk" status --porcelain --untracked-files=no -- src make 2>/dev/null)" ]; then clean=true; else clean=false; fi
   c=$(conf)
@@ -179,7 +181,7 @@ provenance() {
   echo ";; its forms and its edge were made from. Written by bin/javac-vendor convert; verify compares it."
   echo "{:jdk26u {:repo \"$url\" :commit \"$(git -C "$jdk" rev-parse HEAD)\" :clean $clean"
   echo "          :gensrc \"build/$(basename "$(dirname "$c")")/support/gensrc/jdk.compiler\"}"
-  echo " :jdk \"$(java -version 2>&1 | head -1 | sed "$q")\""
+  echo " :jdk \"$(repr_java_platform)\""
   echo " :converter {:repr-java \"$(repr_java_reader_hash)\""
   echo "             :host \"$(repr_java_host)\"}"
   echo " :edge {:recorded-by \"bin/j2g --program --record-edge, less jdk/edge.edn\""
@@ -217,7 +219,7 @@ convert() {
   echo "== sources (jdk26u at $pinned, $jdk)" >&2
   sources || fail "the sources were not copied"
   echo "   $(wc -l < "$work/sources.txt") files: $(for m in $modules; do printf '%s %s, ' "$m" "$(grep -c "^$m " "$work/sources.txt")"; done)" >&2
-  echo "== repr/java read-jdk (on ${REPR_JAVA_HOST:-arbace})" >&2
+  echo "== repr/java read-jdk (on javac's tool executable)" >&2
   rm -rf "$work/conv"
   for m in $modules; do convert_module "$m" "$work/conv" || return 1; done
   rm -rf "$o/forms"
@@ -236,16 +238,21 @@ convert() {
 }
 
 # The platform javac on Arbace compiles against (JFS15 (b), JFS23 (b)): the JDK build tree's
-# exploded modules ($JDK/build/*/jdk/modules), those the corpora name and what they require (and,
-# since JN5, JFS31, javac's own: jdk.compiler, java.compiler, jdk.internal.opt and jdk.zipfs,
-# which read-jdk patches when javac on Arbace reads javac's sources),
-# each with its module descriptor as the build's jmod holds it (images/jmods/MODULE.jmod's
-# classes/module-info.class, which is the image's: it carries the module's version, which javac
-# writes into a module's requires; the exploded descriptor has none), assembled into WORK/platform
-# (a tree of links, the descriptor copied) and pinned by jdk/javac/platform.sha256 (one line per
-# module: the SHA-256 of its files' sha256sum listing, sorted, without the build's _the.* marks)
-platform_modules="java.base java.compiler java.datatransfer java.desktop java.logging java.prefs java.xml
-  jdk.compiler jdk.internal.opt jdk.zipfs"
+# exploded modules ($JDK/build/*/jdk/modules), since JN6 every one of them (JFS37: the 68 modules of
+# the JDK image the JVM's javac sees, so that bin/repr-java check --jdk reads any module of jdk26u
+# on javac on Arbace; until JN6 the ten the corpora and javac's own sources name: java.base,
+# java.compiler, java.datatransfer, java.desktop, java.logging, java.prefs, java.xml, jdk.compiler,
+# jdk.internal.opt, jdk.zipfs), each with its module descriptor as the build's jmod holds it
+# (images/jmods/MODULE.jmod's classes/module-info.class, which is the image's: it carries the
+# module's version, which javac writes into a module's requires; the exploded descriptor has
+# none), assembled into WORK/platform (a tree of links, the descriptor copied) and pinned by
+# jdk/javac/platform.sha256 (one line per module: the SHA-256 of its files' sha256sum listing,
+# sorted, without the build's _the.* marks)
+platform_modules() {
+  local c
+  c=$(conf); [ -n "$c" ] || fail "no JDK build tree in $jdk/build (its jdk/modules, images/jmods)"
+  (cd "$(dirname "$c")/jdk/modules" && ls | LC_ALL=C sort)
+}
 module_hash() { (cd "$1" && find -L . -type f ! -name '_the.*' | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64); }
 # platform_make DIR: DIR/MODULE for each module
 platform_make() {
@@ -253,7 +260,7 @@ platform_make() {
   c=$(conf); [ -n "$c" ] || fail "no JDK build tree in $jdk/build (its jdk/modules, images/jmods)"
   b=$(dirname "$c")
   rm -rf "$d"; mkdir -p "$d"
-  for m in $platform_modules; do
+  for m in $(platform_modules); do
     [ -f "$b/jdk/modules/$m/module-info.class" ] && [ -f "$b/images/jmods/$m.jmod" ] || fail "no module $m in $b/jdk/modules, images/jmods"
     cp -rs "$b/jdk/modules/$m" "$d/$m" || return 1
     rm -f "$d/$m/module-info.class"
@@ -266,7 +273,7 @@ platform_make() {
 platform() {
   local d=$1 m h want st=0
   platform_make "$d" || return 1
-  for m in $platform_modules; do
+  for m in $(platform_modules); do
     h=$(module_hash "$d/$m")
     want=$(sed -n "s/^\([0-9a-f]\{64\}\)  $m\$/\1/p" "$out/platform.sha256" 2>/dev/null)
     if [ "$h" != "$want" ]; then echo "javac-vendor: the platform's $m: $h, pinned ${want:-none} ($out/platform.sha256)" >&2; st=1; fi
@@ -282,7 +289,7 @@ platform_pin() {
     echo "# JFS15 (b), JFS23 (b), \"As built: JN3\"): jdk26u's build tree at $pinned,"
     echo "# build/$(basename "$(dirname "$(conf)")")/jdk/modules with each module's module-info.class from images/jmods;"
     echo "# per module the SHA-256 of its files' sha256sum listing (sorted, without _the.*)"
-    for m in $platform_modules; do echo "$(module_hash "$work/platform/$m")  $m"; done
+    for m in $(platform_modules); do echo "$(module_hash "$work/platform/$m")  $m"; done
   } > "$o/platform.sha256"
 }
 
@@ -389,7 +396,7 @@ case $cmd in
   verify)
     rm -rf "$work/fresh"
     convert "$work/fresh" || exit 1
-    . "$root/bin/lib/frozen.bash"
+    . "$root/bin/lib/repr-java/host.bash"
     # the provenance but its host (the tool that wrote it, JFS32): reported
     if diff -r -x provenance.edn "$out" "$work/fresh" > "$work/verify.diff" &&
        repr_java_provenance_same "$out/provenance.edn" "$work/fresh/provenance.edn"; then

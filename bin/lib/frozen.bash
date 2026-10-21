@@ -1,10 +1,14 @@
 # The frozen JVM Arbace (standalone S4, doc/STANDALONE-NOTES.md, "S4: the JVM removed"): what
 # stays on a JVM after S4 runs on the jar of the frozen branch's last release, built from its
 # tag and pinned by hash, never on a JVM build of the checkout (main has none). It is the
-# oracle's reference (bin/oracle) and the host of the JVM-side tools: repr/java (javac is its front
-# end), the edge's recording (bin/j2g-edge: the JVM's reflection), the data generators
-# (bin/jrt testdata|manifest|standins, bin/jrt-coverage, bin/net-check). Sourced, with $root
-# set to the repository root. Defines:
+# oracle's reference (bin/oracle) and the host of the JVM-side tools: the edges' recordings
+# (bin/j2g-edge, bin/javac-vendor edge: the JVM's reflection), the back end of bin/repr-java check
+# --suite (the frozen jar's Java forms compiler, test/repr/java/build.ae), bin/jrt-convert's edge
+# step (jrt.jrt-edge: javac's classes read by the JDK's class file API) and the data generators
+# (bin/jrt testdata|manifest|standins, bin/jrt-coverage, bin/net-check). Not repr/java since JN6
+# (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN6"): its read runs on javac's tool executable
+# alone (bin/repr-java), and its provenance helpers are bin/lib/repr-java/host.bash's. Sourced,
+# with $root set to the repository root. Defines:
 #
 #   frozen_jar     prints the path of the frozen jar: FROZEN_JAR (or ARBACE_ORACLE_JAR) when
 #                  set, unchecked; else the jar of the tag FROZEN_TAG (or ARBACE_ORACLE_TAG,
@@ -16,10 +20,12 @@
 #                  namespaces the frozen jar is to load from source, as .clj links (its loader
 #                  reads .clj only, not .ae), .tmp/frozen-view/K:
 #                    test   test/'s namespaces (the oracle's runner, jrt's generators, ...)
-#                    tools  those, the tools' namespaces (arbace.repr.java, arbace.repr.go,
-#                           arbace.repr.clojure, arbace.build.go, arbace.j2g), the Java forms'
-#                           front end (arbace.classes.types, env, parse, lower, analyze) and every namespace of the checkout the jar
-#                           lacks (arbace.box, a JVM-only part of env, the access flags ...)
+#                    tools  those, the tools' namespaces (arbace.repr.go, arbace.repr.clojure,
+#                           arbace.build.go, arbace.j2g), the Java forms' front end
+#                           (arbace.classes.types, env, parse, lower, analyze) and every namespace
+#                           of the checkout the jar lacks (arbace.box, a JVM-only part of env, the
+#                           access flags ...) but repr/java's (arbace.repr.java and below: since
+#                           JN6 nothing runs it on the JVM)
 #                  arbace.core, the runtime (the jar's Java forms: arbace.lang, arbace.asm)
 #                  and every other namespace stay the jar's. The jar's sources and __init
 #                  classes are dated 2000-01-01, the links take their target's date: RT.load
@@ -29,7 +35,6 @@
 #                  which needs the jar's own back end, emit and compiler: tools' code that
 #                  uses Java forms compiles with the jar's compiler, front end included,
 #                  unchanged) and the back end (boot, compiler, emit, shape, verify, build)
-#   frozen_host    the jar as provenance files name it: "NAME SHA-256" (arbace-for-java-26-v4 ...)
 #   frozen_java    runs java on the frozen jar: frozen_java K [JVM-OPTION...] -- [ARG...] runs
 #                  `java JVM-OPTION... -cp VIEW:JAR[:FROZEN_CP] arbace.lang.Main ARG...` with
 #                  frozen_view K (K: jar for the jar alone, test, tools)
@@ -95,10 +100,13 @@ frozen_view() {
       frozen_link "$view" "$f" "$root/test"
     done
     if [ "$kind" = tools ]; then
+      # repr/java's links of a view made before JN6
+      rm -rf "$view/arbace/repr/java" "$view/arbace/repr/java.clj"
       (cd "$root" && find arbace -name '*.ae' ! -path 'arbace/lang/go/*' | LC_ALL=C sort) | awk -v list="$list" '
         BEGIN { while ((getline l < list) > 0) jar[l] = 1 }
         { b = substr($0, 1, length($0) - 3) }
-        b ~ /^arbace\/(repr\/java|repr\/go|repr\/clojure|build|j2g)(\/|$)/ { print; next }
+        b ~ /^arbace\/repr\/java(\/|$)/ { next }
+        b ~ /^arbace\/(repr\/go|repr\/clojure|build|j2g)(\/|$)/ { print; next }
         b ~ /^arbace\/classes\/(types|env|parse|lower|analyze)$/ { print; next }
         b ~ /^arbace\/classes\/(native|boot|compiler|emit|shape|verify|build)$/ { next }
         !((b ".clj") in jar) && !((b "__init.class") in jar) { print }' |
@@ -118,45 +126,3 @@ frozen_java() {
   java "${opts[@]}" -cp "$view:$jar${FROZEN_CP:+:$FROZEN_CP}" arbace.lang.Main "$@"
 }
 
-# frozen_host: the frozen jar as provenance records name it: its file's name and its SHA-256
-frozen_host() {
-  local j
-  j=$(frozen_jar) || return 1
-  echo "$(basename "$j" .jar) $(sha256sum "$j" | cut -c1-64)"
-}
-
-# repr_java_host: the host repr/java's read runs on as provenance files name it (bin/repr-java's
-# REPR_JAVA_HOST): "arbace-javac KEY" on javac's tool executable (the default since JN5;
-# REPR_JAVA_EXE), KEY the sources it is built from (bin/lib/javac-key.bash; JFS30 (b): two builds
-# of one commit name it alike), refused when the tool is not built from the checkout's; on the JVM
-# (REPR_JAVA_HOST=jvm) frozen_host (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN4", "As
-# built: JN5")
-repr_java_host() {
-  local e k
-  if [ "${REPR_JAVA_HOST:-arbace}" = arbace ]; then
-    e=${REPR_JAVA_EXE:-$root/target/arbace-go/$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac)/arbace-javac}
-    [ -x "$e" ] || { echo "repr_java_host: no javac tool executable $e (bin/javac-vendor build)" >&2; return 1; }
-    . "$root/bin/lib/javac-key.bash"
-    k=$(arbace_javac_fresh repr_java_host "$e") || return 1
-    echo "arbace-javac $k"
-  else
-    frozen_host
-  fi
-}
-
-# repr_java_provenance_same A B: provenance files A and B the same but for the converter's
-# :host line, which names the tool that wrote the file (its sources' key), not what the forms
-# are (JFS32): verify requires the rest byte for byte and reports the host
-repr_java_provenance_same() {
-  cmp -s <(grep -v '^ *:host ' "$1") <(grep -v '^ *:host ' "$2")
-}
-
-# repr_java_reader_hash: the SHA-256 the provenance files (jdk/provenance.edn,
-# test/java-fixtures/provenance.edn) give repr/java as converter: of its reader's sources, what
-# converts Java into forms (arbace/repr/java.ae and convert, javac, jtypes, resolve, forms, names,
-# layout, full) and bin/repr-java; not the printer or the round trip's comparator, which change no forms
-# (PRINTER-NOTES.md, JP1). Run from the repository root.
-repr_java_reader_hash() {
-  (cd "$root" && for f in arbace/repr/java.ae arbace/repr/java/{convert,forms,full,javac,jtypes,layout,names,resolve}.ae bin/repr-java; do
-     echo "$f"; done | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-64)
-}

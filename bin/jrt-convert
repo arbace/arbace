@@ -53,7 +53,8 @@
 #             classes): each converted file compared with the committed one, jdk/forms
 #             (forms-check.edn: the same, different, added, removed); a report, not a
 #             failure (update's change shows there; verify requires none)
-#   edge      jrt.jrt-sources/write-edge on javac's classes (ref1): edge.edn
+#   edge      jrt.jrt-edge/write-edge on javac's classes (ref1): edge.edn (on the frozen JVM: the
+#             JDK's class file API)
 #   report    report.md and report.edn; manifest.sha256 (every file of src and conv)
 # Environment:
 #   JDK        jdk26u's checkout (default /root/jdk26u)
@@ -65,19 +66,20 @@
 #              none (the default: java.base's root and English data alone), common (the 27
 #              locales of jrt.jrt-sources/text-locales), all, or comma-separated language tags
 #   JRT_WORK   work directory (default .tmp/jrt)
-#   REPR_JAVA_JVM_OPTS  repr/java's heap (default here -Xmx8g)
-# repr/java and javac run on bin/repr-java's host (REPR_JAVA_HOST: javac's tool executable by
-# default since JN5, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN5"); the closure's own
-# namespaces (jrt.jrt-sources: the source list, the locales, the edge, the report) on the frozen
-# JVM Arbace (bin/lib/frozen.bash), and the generators on $GEN_JDK (JN7). Exit status 0 when every file converts and javac compiles the tree
+# repr/java and javac run on javac's tool executable (bin/repr-java, REPR_JAVA_EXE;
+# doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN5", "As built: JN6"); the closure's own
+# namespace jrt.jrt-sources (the source list, the locales, the report) on the tools' host
+# (bin/lib/tools.bash's arbace_tool, since JN6); the edge step's jrt.jrt-edge on the frozen JVM
+# Arbace (bin/lib/frozen.bash: it reads javac's classes with the JDK's class file API, JFS40), and
+# the generators on $GEN_JDK (JN7). Exit status 0 when every file converts and javac compiles the tree
 # (with --twice, the conversion is deterministic; with verify, jdk/ is the conversion's output).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 cd "$root"
-. bin/lib/frozen.bash
-frozen_jar > /dev/null || exit 1
+. bin/lib/tools.bash
+. bin/lib/repr-java/host.bash
 jdk=${JDK:-/root/jdk26u}
 surface=${SURFACE:-$root/doc/go/java-surface.edn}
 work=${JRT_WORK:-$root/.tmp/jrt}
@@ -89,7 +91,10 @@ case ${1:-} in verify|update) mode=$1; shift ;; esac
 # the committed tree (jdk/README.md)
 committed=$root/jdk
 has() { case ",$steps," in *",$1,"*) return 0 ;; esac; return 1; }
-clj() { frozen_java test -Xss64m -Xmx4g -- -e "(require 'jrt.jrt-sources) $1"; }
+# clj EXPR: jrt.jrt-sources on the tools' host (test/ on ARBACE_PATH); jvm_clj EXPR: jrt.jrt-edge on
+# the frozen JVM (the JDK's class file API)
+clj() { arbace_tool -p "$root/test" -e "(require 'jrt.jrt-sources) $1"; }
+jvm_clj() { (. "$root/bin/lib/frozen.bash" && frozen_java test -Xss64m -Xmx4g -- -e "(require 'jrt.jrt-edge) $1"); }
 status=0
 mkdir -p "$work/log"
 t00=$(date +%s)
@@ -376,7 +381,7 @@ convert() {
   rm -rf "$conv"
   origins > "$work/origins.edn" || return 1
   # from $work: repr/java's jdk command copies the files into .tmp/repr-java-patch below the current directory
-  (cd "$work" && REPR_JAVA_THREADS=4 REPR_JAVA_PATCH_ALL=1 REPR_JAVA_JVM_OPTS=${REPR_JAVA_JVM_OPTS:--Xmx8g} \
+  (cd "$work" && REPR_JAVA_THREADS=4 REPR_JAVA_PATCH_ALL=1 \
      "$root/bin/repr-java" read-jdk --check --origins "$work/origins.edn" "$conv" java.base "$tree/java.base") > "$log" 2>&1
   tail -1 "$log"
   grep -q " 0 failed, 0 javac errors, .* 0 unreadable" "$log"
@@ -431,10 +436,11 @@ fi
 # provenance: what the forms and the data are made from, $work/provenance.edn (jdk/'s
 # provenance.edn): jdk26u's repository and commit (and whether its checkout is clean), the JDK
 # whose javac attributes the sources for repr/java, the JDK that runs the generators, the locales, the
-# converter (a hash of repr/java's reader, bin/lib/frozen.bash's repr_java_reader_hash; its host,
-# repr_java_host: javac's tool executable by the key of its sources, or the frozen jar by its tag
-# and hash) and the counts; nothing of the run's place or time, so that verify compares it too
-# (the host but reported, JFS32)
+# converter (a hash of repr/java's reader, bin/lib/repr-java/host.bash's repr_java_reader_hash; its
+# host, repr_java_host: javac's tool executable by the key of its sources) and the counts; :jdk, the
+# platform javac on Arbace attributes against, by its pin (repr_java_platform, JFS35 (b): no JVM is
+# asked); nothing of the run's place or time, so that verify compares it too (the host but
+# reported, JFS32)
 provenance() {
   local q='s/\\/\\\\/g; s/"/\\"/g' url commit clean
   url=$(git -C "$jdk" remote get-url origin 2>/dev/null | sed "$q")
@@ -443,7 +449,7 @@ provenance() {
   echo ";; The provenance of jdk/ (jdk/README.md): what bin/jrt-convert made its forms and data from."
   echo ";; Written by bin/jrt-convert update; bin/jrt-convert verify compares it with a fresh run's."
   echo "{:jdk26u {:repo \"$url\" :commit \"$commit\" :clean $clean}"
-  echo " :jdk \"$(java -version 2>&1 | head -1 | sed "$q")\""
+  echo " :jdk \"$(repr_java_platform)\""
   echo " :gen-jdk \"$("$GEN_JDK/bin/java" -version 2>&1 | head -1 | sed "$q")\""
   echo " :locales \"${JRT_LOCALES:-none}\""
   echo " :converter {:repr-java \"$(repr_java_reader_hash)\""
@@ -493,7 +499,7 @@ fi
 
 if has edge; then
   echo "== the edge"
-  clj "(jrt.jrt-sources/write-edge \"$work/ref1\" \"$surface\" \"$work/edge.edn\")" || status=1
+  jvm_clj "(jrt.jrt-edge/write-edge \"$work/ref1\" \"$surface\" \"$work/edge.edn\")" || status=1
 fi
 
 if has report; then
