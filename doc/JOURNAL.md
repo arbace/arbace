@@ -605,3 +605,13 @@ GPS21-GPS26 (doc/go/GO-PARSER-SURVEY.md, "As built: GP3"), each as recommended:
 JFS23 (b), the exploded modules with the jmods' descriptors; JFS24 (a), the pinned build tree
 stays the platform until JN6; JFS25 (a), the command line as jrt's Java in jdk.compiler's overlay;
 JFS26 (a), the `javac` step in `bin/gate --full`.
+
+## 2026-10-21: the re-seed batched, JN4 started, the processes form to be made robust (the user)
+
+- **The re-seed:** JN3's changes to the program wait for GP4, for one re-seed (the user chose
+  this over re-seeding now).
+- **JN4, repr/java's `read` on Arbace:** started on the branch `java-frontend-jn4` from main
+  `864a5de2`, in the worktree `.tmp/worktrees/java-frontend-jn4`, alongside GP4.
+- **`test/oracle/forms/processes.ae:178`:** to be rewritten so it does not race the child's exec.
+  The work is on the branch `oracle-processes-flake`; the user preferred this over recording it as
+  known or leaving it.
