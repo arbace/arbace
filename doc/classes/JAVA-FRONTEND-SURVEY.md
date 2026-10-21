@@ -11,7 +11,8 @@ prior-art clones (§3). The measuring scripts and the clones are in the survey's
 (`.tmp/jfs/`, `.tmp/prior/`, not tracked); Appendix A says what each computes. No JVM was run for
 this survey and no Go build was made. Decided on 2026-10-20 ("Decided", at the end); JN1, the
 spike, as built: "As built: JN1 (2026-10-20)", after it; JN2, javac's forms vendored: "As built:
-JN2 (2026-10-20)", at the end, with JFS18-JFS22.
+JN2 (2026-10-20)", with JFS18-JFS22; JN3, javac runs on Arbace: "As built: JN3 (2026-10-21)", at
+the end, with JFS23-JFS26.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -1261,3 +1262,214 @@ The user decided JFS18-JFS22 as built:
 - JFS20: the generated sources are copied from the build tree until JN7.
 - JFS21: two fixture results are kept by hand for shapes the frozen jar cannot compile.
 - JFS22: j2g for the tool runs on a program built from the checkout.
+
+## As built: JN3 (2026-10-21)
+
+JN3, javac runs on Arbace, on the branch `java-frontend-jn3` from main `982ae875`, in about an hour
+and a half of work (against the 3-4 days estimated): javac's forms, translated by j2g into the tool
+executable `arbace-javac`, compile class files, and they are the JVM's javac's byte for byte
+over every corpus, and java.base compiled as the JDK build compiles it is the build's own
+classes. No javac patch (JFS12 (c)). The JVM ran only the frozen v4 jar (`bin/repr-java`,
+`bin/lib/frozen.bash`: the conversion and the edges) and the frozen JDK's `javac` (the
+reference, `images/jdk` of jdk26u's build tree at `baf63fb`, 26.0.2.1-internal); Go only
+TamaGo's go1.27.1, without cgo. The tools' host was the worktree's stage 0 (the seed of
+`665fa0b6`, which holds JN2); j2g for the tool ran on the program built from the checkout
+(JFS22 (a)).
+
+### JN3.1 javac's command line on Arbace (JFS5 (b), JFS25)
+
+javac's own launcher, `com.sun.tools.javac.Main`, runs over `JavacFileManager`, which reads through
+java.nio.file's file systems, `jrt:/` and zip. JN3's launcher is jrt's own Java in javac's
+module, `overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/` (package
+`jdk.internal.jrt.javac`, named by binary names as javac's packages are: `names.ae`'s
+`tool-module-prefixes`), converted by `bin/javac-vendor` into `jdk/javac/forms` with javac:
+
+- `Main` (170 lines): javac's command line. The file manager's options are parsed here (`-d`,
+  `-sourcepath`, `-cp` with javac's default `.`, `--patch-module`, `--module-source-path`, and
+  `--system none`, an empty `--module-path` and `-encoding utf-8` accepted as what the file
+  manager does), `@argfiles` expand as javac's (`jdk.internal.opt.CommandLine.loadCmdFile`), and
+  the rest goes to `JavacTool.getTask` with the diagnostics printed by javac's own `Log`, so the
+  output is javac's command line's. `--platform DIR` names the platform (below). The exit status
+  is javac's (0, 1 errors, 2 a bad command line).
+- `FileManager` (451 lines), a `JavaFileManager` over `java.io.File`: the source path, the class
+  path, the class output, the platform's system modules (each a module directory with a
+  `module-info.class`), `--patch-module`'s patches and the module source path's modules (javac's
+  module-pattern form, `P/*/S`), with the class output per module in multi-module mode, as
+  `Modules`, `ModuleFinder`, `ClassFinder` and `ClassWriter` ask (`getLocationForModule` by name
+  and by file, `listLocationsForModules`, `inferModuleName`, `contains`, `getJavaFileForInput` of
+  `module-info`). It decides only where files come from and go to. JN1's file manager answered no
+  `getJavaFileForInput`, so javac took the platform's java.base for an automatic module; this one
+  reads its descriptor.
+
+The tool runs it as `arbace-javac SCRIPT ARGS...`, the script
+`(System/exit (jdk.internal.jrt.javac.Main/run (into-array String *command-line-args*)))`.
+
+### JN3.2 What javac's world needed beyond JN2's
+
+| gap | where it showed | the fix |
+|---|---|---|
+| `DataOutputStream` (javac's `ByteBuffer.appendLong`, `appendFloat`, `appendDouble`: the constant pool's `long`, `float`, `double`), a declared-only class in jrt | ClassWriter | jdk26u's `java/io/DataOutput.java`, `DataOutputStream.java`, `UTFDataFormatException.java` and `jdk/internal/util/ModifiedUtf.java` converted into javac's world (`bin/javac-vendor`'s `base_files`, JFS18 (b)); unpatched |
+| `JavaLangAccess.countNonZeroAscii` (`DataOutputStream.writeUTF`) | DataOutputStream's analysis | jrt (shipped): the member in jrt's hand-written `JavaLangAccess` (`go/arbace/jrt/access.ae`, 10 lines), as the JDK's `String.countNonZeroAscii`; jrt test `TestCountNonZeroAscii` |
+| `java.nio.file.FileSystems` (`PathFileObject.<clinit>` holds `FileSystems.getDefault()`; reached by `ClassWriter` for the `SourceFile` attribute, so by every compilation with `-g` or javac's default `-g:source,lines`, not by `-g:none`) | java.base with `-g`: "class java.nio.file.FileSystems is not in the closed world" | javac's world: `overlay/jdk/javac/java.base/java/nio/file/FileSystems.java`, jrt's own (126 lines): the default file system of jrt's paths (`getPath` as `Path.of`, the separator, the root; the rest throws), no other (`ProviderNotFoundException`) |
+| analysis: a class with forms that the declared edge also declares (`java.io.DataOutput`, in `jdk/edge.edn` for the shipped world, in javac's world's forms now) was asked of the edge, which declares only its `:info` ("Undeclared functional of class java.io.DataOutput", j2g's `fromfn/functional?`) | j2g over javac's world | `arbace.classes.env/known?`: with `*declared*` bound, a class compiled from source (`*from-source*`) is not known, as `load-class` already said without it. No case in `bin/diffcheck`'s corpora: the test build's world cannot hold forms of a class the shipped edge declares without changing the shipped edge; javac's world is its test (`bin/javac-vendor check`, the tool build), as for JN2's cast fix |
+
+`jdk/javac/`: 531 sources (jdk.compiler 370: 347 of `share/classes`, 21 generated, the 2
+launcher files; java.compiler 135; jdk.internal.opt 1; java.base 25: 23 of jdk26u, 2 of
+`overlay/jdk/javac`), 570 form files (6,721,894 bytes, against 561 and 6,684,582), the edge 38
+classes beyond `jdk/edge.edn`'s (77,998 bytes, against 35 and 77,522), `platform.sha256` new.
+The tool:
+
+| | JN2 | JN3 |
+|---|---:|---:|
+| classes analyzed, failing | 16,668, 0 | 16,777, 0 |
+| classes translated, methods reached, with missing parts | 16,565, 84,078, 349 | 16,674, 84,518, 339 |
+| tool executable (stripped) | 186,527,904 bytes | 187,433,120 bytes |
+| tool build (j2g 75 s, build-go 177 s) | 343 s | 261-280 s |
+
+The processors' paths (`java.lang.annotation.Annotation`'s members, `sun.reflect.annotation`)
+stayed stubs: no corpus reached them (`-proc:none`).
+
+### JN3.3 The platform (JFS15 (b), JFS23)
+
+The build tree's exploded modules (`build/linux-x86_64-server-release/jdk/modules`), the six the
+corpora name and require: java.base, java.xml (the baseline's `org.xml.sax`), java.logging and
+java.desktop (the module sample's `requires`), java.datatransfer and java.prefs (java.desktop's).
+The exploded modules' class files are the image's (`jimage extract` of `lib/modules`,
+compared once) but for three kinds: the module descriptors, which jlink and jmod give the
+module's version (`26.0.2.1-internal`) and `ModulePackages`, jlink's generated
+`java.lang.invoke` holders and species, and `SystemModules`. javac writes a required module's
+version into `requires` (the samples' `module-info.class`: 20 bytes and three constant pool
+entries apart), so the platform takes each module's descriptor from the build's jmod
+(`images/jmods/MODULE.jmod`'s `classes/module-info.class`, byte for byte the image's), JFS23 (b).
+`bin/javac-vendor` assembles it in `.tmp/javac-vendor/platform` (a tree of links, the
+descriptors copied, by `unzip`) and pins it in `jdk/javac/platform.sha256` (per module the
+SHA-256 of its files' `sha256sum` listing), written by `convert` (so `verify` compares it) and
+`platform-pin`, checked by every `classes` run.
+
+### JN3.4 The check: `bin/javac-vendor classes` (JFS26)
+
+`bin/javac-vendor classes [baseline samples jdk java.base]` compiles each corpus by the JVM's
+javac and by javac on Arbace (`$JAVAC_EXE`, default `target/arbace-go/amd64/arbace-javac`),
+with the round trip's options (`bin/lib/repr-java/roundtrip`: `-g:none -nowarn
+-XDsuppressNotes -proc:none -implicit:none`, the jdk corpus with `--patch-module java.base=...
+-XDstringConcat=inline --enable-preview -source 26`), the files sorted as the round trip lists
+them, and compares the class files (`diff -r`) and the diagnostics; `java.base` is JFS2 (a)'s
+check (JN3.5). Makefile: `javac-classes` (in `make verify`). Results, all byte for byte:
+
+| corpus | files | classes | equal | JVM's javac: wall, CPU, peak RSS | javac on Arbace: wall, CPU, peak RSS |
+|---|---:|---:|---|---|---|
+| baseline (the frozen `clojure/`) | 183 | 812 | **yes** | 4.0 s, 33.2 s, 512 MB | 5.5 s, 6.8 s, 542 MB |
+| samples `java` | 10 | 28 | **yes** | 0.9 s | 0.3 s |
+| samples `module` | 4 | 4 | **yes** | 0.5 s | 0.2 s |
+| java.base's closure (the round trip's jdk originals) | 838 | 2,224 | **yes** | 8.7 s, 61.5 s, 1,033 MB | 18.0 s, 26.1 s, 1,188 MB |
+| java.base as the JDK build (JN3.5) | 3,404 | 7,434 | **yes**, and the build's | 21.1 s, 100.7 s, 2,291 MB | 62.9 s, 101.4 s, 3,253 MB |
+
+(`/usr/bin/time` of each compilation alone; the JVM's times include HotSpot's start and warm-up,
+its CPU its compiler and collector threads.) javac on Arbace is 1.4 times the JVM's wall time on
+the baseline, 2.1 times on the closure and 3.0 times on java.base, faster on the small samples
+(no warm-up), and uses less CPU but on java.base (the same); memory is 6-42% more. R1 (Arbace
+runs Java not as the JVM) showed nothing: no class file, constant pool order, attribute or
+diagnostic differs. The whole run of the four corpora: 178 s.
+
+### JN3.5 java.base compiled by javac on Arbace (JFS2 (a))
+
+The JDK build's own compilation of java.base, read from the build tree
+(`jdk/modules/java.base/_the.java.base_batch.cmdline` and `.filelist`: 3,404 files of
+`src/java.base/{share,unix,linux}/classes` and `support/gensrc/java.base`, the build's interim
+javac of jdk26u on the boot JDK 25), with its options: `-g -source 26 -target 26 -implicit:none
+-Xprefer:source -XDignore.symbol.file=true -XDstringConcat=inline --module-source-path
+"gensrc/*:src/*/linux/classes:src/*/unix/classes:src/*/share/classes" --module-path "" --system
+none -encoding utf-8 -d OUT`; left out: `-h` (the JNI headers), `-Xplugin:depend` and the
+javacserver's `-XD` options, `-Xlint:all`, `-Xdoclint`, `-Werror` (diagnostics only). javac on
+Arbace and the JVM's javac give the same 7,434 class files, and all but one are the build's own
+class files in `jdk/modules/java.base`, byte for byte. The one is `module-info.class`, which the
+build rewrites after javac (`make/ExplodedImageOptimize.gmk`: `build.tools.jigsaw.AddPackagesAttribute`
+adds `ModulePackages`); javac's own is compared with the JVM's. So "the platform's class files
+equal to the frozen JDK's" holds for java.base, the larger check of JF3 in §7: the whole module,
+not only what the corpora read, with debug attributes (`-g`). The first run failed in
+`PathFileObject.<clinit>` (JN3.2's `FileSystems`), after attributing all of java.base in about
+10 s: that run was the only failure of JN3.
+
+### JN3.6 The shipped program's change
+
+j2g's program tree of main `982ae875` built in the worktree's `.tmp/base`, against the branch's
+(`diff -r`): 18 files differ, of three changes:
+- jrt's `access.ae` (`JavaLangAccess` with `countNonZeroAscii`), and so j2g's `Dyn` table, whose
+  slots count one method more (1,412 against 1,411; the slots after it renumbered);
+- the compiled namespaces `arbace.classes.env` (`known?`) and `arbace.j2g.names`
+  (`tool-module-prefixes`), with their embedded sources;
+- j2g's report.
+
+Nothing else: the translated JDK and runtime are the same. `bin/j2g-edge verify` passes
+(`jdk/edge.edn` unchanged), `bin/jrt test` passes. No re-seed (batched).
+
+### JN3.7 The checks
+
+- `bin/javac-vendor classes baseline samples jdk java.base`: all equal, byte for byte (178 s)
+- `bin/javac-vendor verify`: `jdk/javac` is the conversion, the recording and the pin, byte for
+  byte (574 files, 79 s)
+- `bin/javac-vendor check`: j2g translates javac's world, no failures (40 s)
+- `bin/j2g-edge verify`: passes (59 s); `bin/jrt test --arch amd64`: passes, with
+  `TestCountNonZeroAscii`
+- `bin/gate` (essential): see the hand-back report (run at the end on the branch)
+
+### JN3.8 What it means for JN4
+
+javac is the front end on Arbace for class files already; JN4 runs repr/java's reader on it.
+Two things carry over: the file manager serves `read-jdk`'s `--patch-module` and the platform
+(JN3.1), and the tool roots only javac's exported API and its launcher's package, so JN4 needs
+JFS17 (a)'s rooting of javac's internals (`com.sun.tools.javac.tree`, `code`, `comp`) for the
+converter. The platform's other modules (java.xml and the rest) could be compiled the same way
+as java.base (JFS24).
+
+### JN3.9 Proposals
+
+- **JFS23 The platform's module descriptors.**
+  - Options: (a) the exploded modules alone: javac on Arbace writes a named module's `requires`
+    without the required modules' versions, so the module sample's `module-info.class` differs
+    from the JVM's javac's; (b) the exploded modules with each module's descriptor from the
+    build's jmod (`images/jmods`, the image's descriptor byte for byte), pinned with them; (c) the
+    image's classes entirely (`jimage extract` of `lib/modules`, a JDK tool, with jlink's
+    generated classes).
+  - *Recommended: (b), built*: the declarations javac reads are the JVM javac's (the image's
+    descriptors), from the build tree, with no JVM tool; (c) would add jlink's own classes, which
+    no source declares.
+- **JFS24 The platform after java.base compiled equal (JFS15's replacement).**
+  - Options: (a) the build tree's exploded modules stay the platform (pinned) until JN6, the
+    equality shown by `classes java.base`; (b) the platform compiled by javac on Arbace (java.base
+    as JN3.5, then java.xml, java.logging, java.desktop, java.datatransfer, java.prefs the same
+    way), cached by key, the descriptors still the jmods'.
+  - *Recommended: (a) now* (nothing to build): the bytes are the same, as JN3.5 shows, and (b)
+    costs a minute of java.base and more of java.desktop for every new key; (b) when the build tree
+    is to go (JN6, with JN7's generators for the generated sources).
+- **JFS25 Where javac's command line on Arbace lives.**
+  - Options: (a) jrt's own Java in javac's module (`overlay/jdk/javac/jdk.compiler`,
+    `jdk.internal.jrt.javac`), converted with javac into `jdk/javac/forms` and verified with it;
+    (b) an Arbace namespace driving javac's API by interop (needs javac's internals rooted, JFS17,
+    and a `JavaFileManager` reified in Arbace); (c) javac's own launcher over `JavacFileManager`
+    (JFS5 (a): the file systems, `jrt:/` and zip in jrt).
+  - *Recommended: (a), built*: one tree, one conversion, one `verify`; JN4's `javac.ae` can hand
+    the same `FileManager` to `getTask`.
+- **JFS26 The check in the gate.**
+  - Options: (a) `bin/gate --full`'s Go chain gets a step `javac` after `go-build-full`:
+    `bin/javac-vendor verify`, `check`, `build`, `classes baseline samples jdk java.base` (about 10
+    minutes; JN2's `verify` and `check` had no gate step); (b) the same plus the samples in the
+    essential gate (needs the tool build cached as `--gate-build` caches its builds); (c) the
+    Makefile only (`javac-verify`, `javac-classes`).
+  - *Recommended: (a), built* while the JVM's javac exists (it is the reference); JFS9 moves it
+    on at JN5.
+
+### JN3.10 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`): `src/java.base`'s
+  `java/io/DataOutput.java`, `DataOutputStream.java`, `UTFDataFormatException.java`,
+  `jdk/internal/util/ModifiedUtf.java` (converted), `java/nio/file/FileSystems.java`,
+  `FileSystem.java` (their API read), `src/jdk.compiler`'s `api/JavacTool.java`,
+  `main/Arguments.java`, `main/Option.java`, `comp/Modules.java`, `code/ModuleFinder.java`,
+  `jvm/ClassWriter.java`, `util/ByteBuffer.java`, `file/PathFileObject.java` (read),
+  `make/ExplodedImageOptimize.gmk`, `make/ModuleTools.gmk`; the build tree's `jdk/modules`,
+  `images/jmods`, `images/jdk` and `jdk/modules/java.base/_the.java.base_batch.{cmdline,filelist}`.
+- The worktree's `.tmp/`: `javac-vendor/` (the conversions, the platform, `classes/CORPUS/` with
+  each side's classes, logs and times, `jdk-originals/`), `jn3/` (the build logs, `rss.sh` and
+  its measures, `jimg/` and `jmod/`, the image's and jmods' classes compared), `base/` (main's
+  export and build for JN3.6).

@@ -208,7 +208,7 @@ covers what.
     at `baf63fb`): `jdk/javac/forms/`, Java forms converted by repr/java from jdk26u's
     `src/jdk.compiler/share/classes`, `src/java.compiler/share/classes`,
     `src/jdk.internal.opt/share/classes/jdk/internal/opt/CommandLine.java`, the sources the JDK
-    build generates for jdk.compiler (its `support/gensrc/jdk.compiler`) and 19 files of
+    build generates for jdk.compiler (its `support/gensrc/jdk.compiler`) and 23 files of
     `src/java.base/share/classes` (`jdk/javac/sources.txt` lists them, and each form file's
     first line names its source): Copyright (c) Oracle and/or its affiliates, under the GNU
     General Public License version 2 with the Classpath Exception (text below); the form files
@@ -217,8 +217,8 @@ covers what.
     `jdk/javac/edge.edn` (the edge of javac's world beyond `jdk/edge.edn`'s, recorded by
     `bin/javac-vendor` on the frozen JVM): the declarations of the JDK's classes, as
     `jdk/edge.edn`'s, under the GNU General Public License version 2 with the Classpath
-    Exception. `jdk/javac/sources.txt` and `jdk/javac/provenance.edn`: Arbace's own, under the
-    Eclipse Public License 1.0.
+    Exception. `jdk/javac/sources.txt`, `jdk/javac/provenance.edn` and `jdk/javac/platform.sha256`
+    (the pin of javac on Arbace's platform, JN3): Arbace's own, under the Eclipse Public License 1.0.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
   JN2), written for Arbace in place of jdk26u's files of the same names (from their

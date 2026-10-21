@@ -176,7 +176,14 @@ Prior art:
   and edge (`jdk/javac/edge.edn`: what javac's world asks beyond `jdk/edge.edn`), made by
   `bin/javac-vendor convert` on the frozen JVM (`verify` byte for byte, `check`: j2g translates
   javac's world; doc/classes/JAVA-FRONTEND-SURVEY.md, JN2); the input of javac's tool build,
-  `bin/arbace-go --build-java` (`target/arbace-go/<arch>/arbace-javac`, not shipped). `bin/arbace-go` builds
+  `bin/arbace-go --build-java` (`target/arbace-go/<arch>/arbace-javac`, not shipped). javac runs on
+  it (JN3) through its command line on Arbace, `jdk.internal.jrt.javac.Main` with an Arbace file
+  manager (jrt's own Java in `overlay/jdk/javac/jdk.compiler`), against the platform: the JDK build
+  tree's exploded modules with their jmods' module descriptors, pinned by
+  `jdk/javac/platform.sha256` (`bin/javac-vendor platform-pin`); `bin/javac-vendor classes`
+  compiles the baseline, the samples and java.base's closure (`-g:none`) by javac on Arbace and by
+  the JVM's javac and compares the class files byte for byte (`java.base`: java.base as the JDK
+  build compiles it, against the build's classes). `bin/arbace-go` builds
   (`--build`, `--build-tests`, `--pgo`, by the tools' host; the test build's Java
   fixtures committed as forms in `test/java-fixtures/`, `bin/clojure-tests --java-fixtures update`,
   `verify`), smoke-tests and runs it. Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
@@ -242,7 +249,8 @@ Prior art:
   (then mode `:full` printed back to the original Java, byte for byte),
   `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
   `bin/j2g-edge verify`, `bin/clojure-tests --java-fixtures verify`; the Go build afresh with its
-  smoke test, the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
+  smoke test, then javac's forms and javac on Arbace (`bin/javac-vendor verify`, `check`, `build`,
+  `classes baseline samples jdk java.base`), the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
