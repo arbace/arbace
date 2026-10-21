@@ -47,6 +47,24 @@
 #                                 under DIR/NAME (default .tmp/repr-go/native; NAME pkgs or the
 #                                 corpus), report DIR/NAME.report.edn. --reader helper: the
 #                                 default above
+#   bin/repr-go read --reader native --raw [--tests] [--goos GOOS] [--goarch ARCH] [--out DIR] PKG...
+#   bin/repr-go read --reader native --raw --corpus CORPUS [--out DIR]
+#                                 raw forms (doc/go/GO-PARSER-SURVEY.md, GP3; their shape in
+#                                 doc/go/CONVERTER-NOTES.md, "Raw forms"; private to repr/go and
+#                                 the checker): the native reader's trees converted with every
+#                                 decision that needs types left open (arbace.repr.go.raw), mode
+#                                 :full's positions, each file read back; the open decisions
+#                                 counted by kind. Under DIR/NAME (default .tmp/repr-go/raw),
+#                                 report DIR/NAME.report.edn
+#   bin/repr-go raw-check [--fresh] [CORPUS...]
+#                                 the raw forms against the final ones over the corpora (default
+#                                 all of native-check's): each dump's raw conversion (native)
+#                                 and the helper's annotated dump converted as ever (mode :full)
+#                                 walk in parallel, equal but at the open decisions, each
+#                                 resolved as go/types may; the resolutions counted. The helper's
+#                                 dumps made when missing (--fresh: afresh); exits non-zero on a
+#                                 difference that test/repr/go/raw-known.edn does not list;
+#                                 report in .tmp/repr-go/raw-check.report.edn
 #   bin/repr-go native-check [--fresh] [--headers] [CORPUS...]
 #                                 E-tree over the corpora (default all): repr/go's corpora above
 #                                 (std with linux-errtest) and the vendored trees' sources
@@ -310,20 +328,21 @@ native_dumps() {
 
 native_run() {
   . "$root/bin/lib/repr-go-host.bash"
-  repr_go_run arbace.repr.go.parse "$1" --jobs "${REPR_GO_JOBS:-$(( $(nproc) / 2 ))}" --forms "$root/tamago/goroot" "${@:2}"
+  repr_go_run "${native_ns:-arbace.repr.go.parse}" "$1" --jobs "${REPR_GO_JOBS:-$(( $(nproc) / 2 ))}" --forms "$root/tamago/goroot" "${@:2}"
 }
 
-# native_read TESTS OUT CORPUS [-goos G -goarch A] -- PKG...: read --reader native, the loader's
-# files and headers, no helper
+# native_read RAW TESTS OUT CORPUS [-goos G -goarch A] -- PKG...: read --reader native, the
+# loader's files and headers, no helper; RAW non-empty: the raw forms (arbace.repr.go.raw)
 native_read() {
-  local tests=$1 out=$2 corpus=$3 goos=tamago goarch=amd64 spec name pkgs=""
-  shift 3
+  local raw=$1 tests=$2 out=$3 corpus=$4 goos=tamago goarch=amd64 spec name pkgs="" native_ns=arbace.repr.go.parse
+  shift 4
+  [ -z "$raw" ] || native_ns=arbace.repr.go.raw
   while [ "$1" != -- ]; do
     case $1 in -goos) goos=$2 ;; -goarch) goarch=$2 ;; esac
     shift 2
   done
   shift
-  out=${out:-$root/.tmp/repr-go/native}
+  if [ -n "$raw" ]; then out=${out:-$root/.tmp/repr-go/raw}; else out=${out:-$root/.tmp/repr-go/native}; fi
   mkdir -p "$out"
   if [ -n "$corpus" ]; then
     case $corpus in
@@ -362,17 +381,35 @@ native_check() {
     --report "$root/.tmp/repr-go/native-check${headers:+-headers}.report.edn" "${specs[@]}"
 }
 
+# raw_check [--fresh] [CORPUS...]: the raw forms against the final ones (default all of
+# native_corpora)
+raw_check() {
+  local fresh="" specs=() c native_ns=arbace.repr.go.raw
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --fresh) fresh=1; shift ;;
+      *) break ;;
+    esac
+  done
+  [ $# -gt 0 ] || set -- $native_corpora
+  for c in "$@"; do specs+=("$(native_dumps "$c" "$fresh")"); done
+  mkdir -p "$root/.tmp/repr-go"
+  native_run check --known "$root/test/repr/go/raw-known.edn" \
+    --report "$root/.tmp/repr-go/raw-check.report.edn" "${specs[@]}"
+}
+
 convert_main() {
   . "$root/bin/lib/repr-go-host.bash"
   repr_go_run arbace.repr.go read "$@"
 }
 
 convert() {
-  local full="" tests="" out="" corpus="" print="" text=() jobs cfg=() reader=helper
+  local full="" tests="" out="" corpus="" print="" text=() jobs cfg=() reader=helper raw=""
   jobs=${REPR_GO_JOBS:-$(( $(nproc) / 2 ))}
   while [ $# -gt 0 ]; do
     case $1 in
       --reader) reader=$2; shift 2 ;;
+      --raw) raw=1; shift ;;
       --full) full=--full; shift ;;
       --tests) tests=-tests; shift ;;
       --out) out=$2; shift 2 ;;
@@ -386,10 +423,10 @@ convert() {
     esac
   done
   case $reader in
-    helper) ;;
+    helper) [ -z "$raw" ] || { echo "read --raw: with --reader native (the raw forms are of the native trees)" >&2; return 2; } ;;
     native)
       [ -z "$full$print${text[*]+x}" ] || { echo "read --reader native: the tree only (GP1): no --full, --print or --text (GP1, GP2)" >&2; return 2; }
-      native_read "$tests" "$out" "$corpus" ${cfg[@]+"${cfg[@]}"} -- "$@"
+      native_read "$raw" "$tests" "$out" "$corpus" ${cfg[@]+"${cfg[@]}"} -- "$@"
       return ;;
     *) echo "read: --reader helper or native, not $reader" >&2; return 2 ;;
   esac
@@ -542,6 +579,7 @@ case $cmd in
     if [ "${1:-}" = --dump ]; then shift; read_dumps "$@"; else convert "$@"; fi ;;
   corpus) corpus "$@" ;;
   native-check) native_check "$@" ;;
+  raw-check) raw_check "$@" ;;
   roundtrip) roundtrip "$@" ;;
   print)
     . "$root/bin/lib/repr-go-host.bash"

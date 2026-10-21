@@ -160,69 +160,85 @@
      :keys (mapv first rs)
      :differ (vec (filter second rs))}))
 
+(defn dump-context
+  "How dump d, at rel (its path relative to the directory given), converts: {:ns :namespaces
+  :src-dir :text-dir}; goroot the Go tree of its sources (nil: no source directory or text)."
+  [d rel goroot]
+  (let [dir-test (:dir-test d)
+        program? (or (= "command-line-arguments" (:package d)) (some? dir-test))]
+    {:ns (if program? (program-ns rel) (ty/ns-name-of (:package d)))
+     ;; a directory test's packages: go.test.<its .dir>[.<key>] (doc/go/SPEC.md §4.1)
+     :namespaces (when dir-test
+                   (let [base (str (program-ns (str/replace (:test dir-test) #"\.go$" ".dir")))]
+                     (into {} (for [[path k] (:packages dir-test)]
+                                [path (symbol (apply str base (for [seg (str/split k #"/")
+                                                                    :when (seq seg)]
+                                                                (str "." (munge-seg seg)))))]))))
+     :src-dir (when goroot
+                (cond
+                  dir-test (str goroot "/test/" (:dir d))
+                  (not program?) (str/replace (:dir d) "$GOROOT" goroot)))
+     :text-dir (when goroot
+                 (if program?
+                   (str goroot "/test/" (:dir d))
+                   (str/replace (:dir d) "$GOROOT" goroot)))}))
+
+(declare convert-data)
+
 (defn convert-dump
   "Converts the dump at path into out; returns a result map."
-  [path rel {:keys [out positions goroot check print text]}]
+  [path rel opts]
   (let [t0 (System/nanoTime)]
     (try
-      (let [d (rd/read-dump path)
-            t1 (System/nanoTime)
-            dir-test (:dir-test d)
-            program? (or (= "command-line-arguments" (:package d)) (some? dir-test))
-            ns-sym (if program? (program-ns rel) (ty/ns-name-of (:package d)))
-            ;; a directory test's packages: go.test.<its .dir>[.<key>] (doc/go/SPEC.md §4.1)
-            namespaces (when dir-test
-                         (let [base (str (program-ns (str/replace (:test dir-test) #"\.go$" ".dir")))]
-                           (into {} (for [[path k] (:packages dir-test)]
-                                      [path (symbol (apply str base (for [seg (str/split k #"/")
-                                                                          :when (seq seg)]
-                                                                      (str "." (munge-seg seg)))))]))))
-            src-dir (when goroot
-                      (cond
-                        dir-test (str goroot "/test/" (:dir d))
-                        (not program?) (str/replace (:dir d) "$GOROOT" goroot)))
-            text-dir (when goroot
-                       (if program?
-                         (str goroot "/test/" (:dir d))
-                         (str/replace (:dir d) "$GOROOT" goroot)))
-            r (cv/convert-package d {:positions positions :ns ns-sym :src-dir src-dir
-                                     :namespaces namespaces
-                                     :text-dir text-dir})
-            dir (ns-dir ns-sym)
-            last-seg (last (str/split dir #"/"))
-            layout-stats (atom {})
-            files (binding [layout/*mode* positions
-                            layout/*stats* layout-stats]
-                    (vec (for [fl (:files r)]
-                           (let [text (layout/write-file (:forms fl) (:comments fl))
-                                 bad (when check
-                                       (check-text text (layout/prepare (:forms fl))))]
-                             (assoc fl :text text :bad bad)))))
-            pkg-text (layout/write-package ns-sym (:package r)
-                                           (map #(str last-seg "/" (:stem %)) files))
-            pkg-bad (when check
-                      (try (read-all pkg-text) nil
-                           (catch Throwable e (str "read error: " (.getMessage e)))))
-            bytes (atom (count (.getBytes pkg-text "UTF-8")))]
-        (spit-file (File. (str out "/" dir ".ae")) pkg-text)
-        (doseq [fl files]
-          (swap! bytes + (count (.getBytes ^String (:text fl) "UTF-8")))
-          (spit-file (File. (str out "/" dir "/" (:stem fl) ".ae")) (:text fl)))
-        (let [print-fail (when print
-                           (print-candidate (str out "/" dir ".ae") (candidate-dir print d)))
-              text-r (when (and text print text-dir (not print-fail))
-                       (text-level d files text-dir (candidate-dir print d)))
-              dump-nodes (frequencies (map first (mapcat (comp rd/nodes :ast) (:files d))))]
-          {:path path :package (:package d) :ns ns-sym :files (count files)
-           :bytes @bytes :ms (/ (- (System/nanoTime) t0) 1e6) :read-ms (/ (- t1 t0) 1e6)
-           :stats (:stats r) :layout @layout-stats :dump-nodes dump-nodes :text text-r
-           :unplaced (vec (for [fl files u (:unplaced fl)] [(:name fl) u]))
-           :bad (vec (concat (keep (fn [fl] (when (:bad fl) [(:name fl) (:bad fl)])) files)
-                             (when pkg-bad [["package" pkg-bad]])
-                             (when print-fail [["print" print-fail]])))}))
+      (let [d (rd/read-dump path)]
+        (convert-data d path rel t0 (System/nanoTime) opts))
       (catch Throwable e
         {:path path :fail (str (.getName (class e)) ": " (.getMessage e))
          :trace (vec (take 12 (map str (.getStackTrace e))))}))))
+
+(defn convert-data
+  "Converts dump d (read from path at t0, by t1; or made in memory) into out; returns a result
+  map. opts :raw: raw forms (arbace.repr.go.convert's raw mode, with :positions :full), their
+  open decisions counted (:open)."
+  [d path rel t0 t1 {:keys [out positions goroot check print text raw]}]
+  (let [{ns-sym :ns :keys [namespaces src-dir text-dir]} (dump-context d rel goroot)
+        r (cv/convert-package d {:positions positions :ns ns-sym :src-dir src-dir
+                                 :namespaces namespaces
+                                 :text-dir text-dir :raw raw})
+        dir (ns-dir ns-sym)
+        last-seg (last (str/split dir #"/"))
+        layout-stats (atom {})
+        files (binding [layout/*mode* positions
+                        layout/*stats* layout-stats]
+                (vec (for [fl (:files r)]
+                       (let [text (layout/write-file (:forms fl) (:comments fl))
+                             bad (when check
+                                   (check-text text (layout/prepare (:forms fl))))]
+                         (assoc fl :text text :bad bad)))))
+        pkg-text (layout/write-package ns-sym (:package r)
+                                       (map #(str last-seg "/" (:stem %)) files))
+        pkg-bad (when check
+                  (try (read-all pkg-text) nil
+                       (catch Throwable e (str "read error: " (.getMessage e)))))
+        bytes (atom (count (.getBytes pkg-text "UTF-8")))]
+    (spit-file (File. (str out "/" dir ".ae")) pkg-text)
+    (doseq [fl files]
+      (swap! bytes + (count (.getBytes ^String (:text fl) "UTF-8")))
+      (spit-file (File. (str out "/" dir "/" (:stem fl) ".ae")) (:text fl)))
+    (let [print-fail (when print
+                       (print-candidate (str out "/" dir ".ae") (candidate-dir print d)))
+          text-r (when (and text print text-dir (not print-fail))
+                   (text-level d files text-dir (candidate-dir print d)))
+          dump-nodes (frequencies (map first (mapcat (comp rd/nodes :ast) (:files d))))]
+      (cond->
+       {:path path :package (:package d) :ns ns-sym :files (count files)
+        :bytes @bytes :ms (/ (- (System/nanoTime) t0) 1e6) :read-ms (/ (- t1 t0) 1e6)
+        :stats (:stats r) :layout @layout-stats :dump-nodes dump-nodes :text text-r
+        :unplaced (vec (for [fl files u (:unplaced fl)] [(:name fl) u]))
+        :bad (vec (concat (keep (fn [fl] (when (:bad fl) [(:name fl) (:bad fl)])) files)
+                          (when pkg-bad [["package" pkg-bad]])
+                          (when print-fail [["print" print-fail]])))}
+        raw (assoc :open (cv/open-counts (mapcat :forms (:files r))))))))
 
 (defn dump-files
   "[path rel] of the .edn files of the paths, sorted; rel relative to the path given."

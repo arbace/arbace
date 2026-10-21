@@ -1135,3 +1135,206 @@ The user decided GPS16-GPS20 as built, each (a):
 - GPS18: walk order for the box plan's embedded files.
 - GPS19: `native-check --headers` by hand.
 - GPS20: `:config`'s experiment tags as the helper's until GP5.
+
+## As built: GP3 (2026-10-20)
+
+GP3, raw forms (§4.2 step 2, §8), is built on branch `go-parser-gp3` from main `02d20ed1`, as
+decided: GPS3 (a) (raw forms, then the checker, then the converter unchanged) and GPS10 (a)
+(private, documented in doc/go/CONVERTER-NOTES.md, "Raw forms", not a dialect of SPEC). The tools'
+host was the worktree's stage 0 (`target/seed/amd64/arbace`, 143,749,280 bytes, built by `bin/seed
+--build`), on the shared 64-core amd64 machine (load average 15 to 25 during the runs).
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the raw mode | `arbace/repr/go/convert.ae` (`*raw*`, option `:raw` of `convert-package`) | `an` reads no annotation in raw mode; at each decision of SPEC §11.1 that needs types the converter writes an open form instead (`raw-call`, `raw-select`, `go/index`, `go/star`, `go/id`, `^:go/define`, `^:go/key`, no `:val`, `:tag`, `:inst`, `:go/via`, implicit import name or `:init-order`), marked in memory with the private `::open` (its kind); `open-counts` counts them; mode `:full`'s positions always. Invalid programs' constructs: `go/type-guard`, `go/define`, `go/literal`, a non-name where a name is required as its expression |
+| the shape | doc/go/CONVERTER-NOTES.md, "Raw forms" | what is open and how each decision is marked (12 kinds), what stays decided from the syntax, the invalid programs' marks |
+| the commands | `arbace/repr/go/raw.ae`, `arbace.repr.go.raw` (new, 535 lines); `bin/repr-go` | `read --reader native --raw [--corpus C \| PKG ...]`: the loader's jobs, the native dumps, the raw forms written as `.ae` (`arbace.repr.go/convert-data`, the read-back check against the forms in memory), the open decisions counted per kind; `raw-check [--fresh] [CORPUS ...]` (`make repr-go-raw-check`): the raw forms against the final ones (below), known differences `test/repr/go/raw-known.edn` (empty) |
+| `arbace.repr.go` | `arbace/repr/go.ae` | `convert-dump` split into `dump-context` (a dump's namespace, its directory test's namespaces, its source directory and text) and `convert-data` (a dump in memory converted, written and read back), so that the native reader's dumps convert as the helper's do; the output unchanged |
+| the statement lists | `convert.ae`, `stmts-forms` | a loop over the statements that do not declare, recurring only into a `let`'s body (GPS24): the recursion per statement overflowed the stack on `fixedbugs/bug385_64.go` (16,480 statements) when the converter is evaluated, as it is until a re-seed |
+
+**Every corpus converted raw, read back (the exit criterion).** `bin/repr-go read --reader native
+--raw --corpus C` over the 22 corpora of native-check: every dump the loader gives and go/parser
+accepts converts raw, and every file reads back with Arbace's reader as the forms in memory. The
+open decisions per kind and per corpus (`:init-order`: one per package):
+
+| corpus | dumps | files | MB | `:call` | `:select` | `:index` | `:star` | `:id` | `:define` | `:key` | `:val` | `:shift` | `:any` | `:import` | `:init-order` | invalid | total |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| amd64 | 379 | 1,742 | 108.2 | 125,373 | 148,710 | 14,394 | 3,998 | 31,156 | 38,950 | 22,393 | 9,143 | 4,821 | 146 | 5,523 | 379 | 0 | 404,986 |
+| arm64 | 378 | 1,738 | 108.0 | 125,186 | 148,515 | 14,382 | 3,988 | 31,188 | 38,881 | 22,330 | 9,048 | 4,712 | 146 | 5,518 | 378 | 0 | 404,272 |
+| linux-amd64 | 382 | 1,834 | 110.4 | 129,032 | 150,679 | 14,684 | 4,131 | 31,773 | 39,878 | 22,296 | 10,972 | 4,891 | 147 | 5,743 | 382 | 0 | 414,608 |
+| linux-arm64 | 380 | 1,829 | 110.3 | 128,954 | 150,590 | 14,706 | 4,127 | 31,818 | 39,816 | 22,237 | 11,063 | 4,824 | 147 | 5,748 | 380 | 0 | 414,410 |
+| tests | 554 | 2,935 | 187.8 | 276,867 | 281,248 | 21,029 | 6,188 | 62,777 | 89,765 | 58,004 | 11,015 | 6,489 | 230 | 12,409 | 554 | 0 | 826,575 |
+| test | 1,707 | 1,708 | 22.1 | 33,782 | 7,773 | 4,382 | 782 | 1,998 | 5,267 | 687 | 629 | 1,576 | 521 | 1,068 | 1,707 | 0 | 60,172 |
+| test-arm64 | 1,702 | 1,703 | 22.0 | 33,763 | 7,767 | 4,379 | 782 | 1,997 | 5,263 | 687 | 629 | 1,571 | 521 | 1,067 | 1,702 | 0 | 60,128 |
+| linux-test | 1,713 | 1,714 | 22.1 | 33,950 | 7,851 | 4,414 | 784 | 2,017 | 5,346 | 699 | 633 | 1,600 | 521 | 1,087 | 1,713 | 0 | 60,615 |
+| linux-test-arm64 | 1,707 | 1,708 | 22.1 | 33,862 | 7,831 | 4,383 | 784 | 2,008 | 5,327 | 699 | 633 | 1,573 | 521 | 1,084 | 1,707 | 0 | 60,412 |
+| dirtest | 561 | 586 | 1.8 | 2,189 | 1,713 | 160 | 73 | 275 | 582 | 63 | 30 | 1 | 195 | 415 | 561 | 0 | 6,257 |
+| dirtest-arm64 | 559 | 584 | 1.8 | 2,186 | 1,712 | 160 | 73 | 275 | 581 | 63 | 30 | 1 | 195 | 414 | 559 | 0 | 6,249 |
+| linux-dirtest | 562 | 587 | 1.8 | 2,197 | 1,719 | 161 | 73 | 275 | 584 | 63 | 30 | 1 | 195 | 419 | 562 | 0 | 6,279 |
+| linux-dirtest-arm64 | 559 | 584 | 1.8 | 2,186 | 1,712 | 160 | 73 | 275 | 581 | 63 | 30 | 1 | 195 | 414 | 559 | 0 | 6,249 |
+| linux-errtest | 586 | 586 | 17.4 | 5,098 | 1,721 | 668 | 575 | 524 | 1,890 | 118 | 578 | 49,950 | 30 | 155 | 586 | 4 | 61,897 |
+| goos-amd64 | 100 | 324 | 4.2 | 5,217 | 7,378 | 79 | 80 | 649 | 1,043 | 434 | 2,841 | 502 | 0 | 759 | 100 | 0 | 19,082 |
+| goos-arm64 | 100 | 322 | 4.2 | 5,217 | 7,378 | 79 | 80 | 649 | 1,043 | 434 | 2,841 | 502 | 0 | 759 | 100 | 0 | 19,082 |
+| cmd-linux-amd64 | 105 | 647 | 139.2 | 175,232 | 314,686 | 39,750 | 1,197 | 43,021 | 93,914 | 111,638 | 22,890 | 6,722 | 5 | 2,949 | 105 | 0 | 812,109 |
+| cmd-tamago-amd64 | 105 | 647 | 139.2 | 175,178 | 314,615 | 39,747 | 1,195 | 43,000 | 93,898 | 111,632 | 22,889 | 6,720 | 5 | 2,935 | 105 | 0 | 811,919 |
+| cmd-tamago-arm64 | 105 | 647 | 139.2 | 175,178 | 314,615 | 39,747 | 1,195 | 43,000 | 93,898 | 111,632 | 22,889 | 6,720 | 5 | 2,935 | 105 | 0 | 811,919 |
+| box | 41 | 217 | 6.6 | 11,023 | 12,944 | 1,011 | 220 | 3,080 | 4,399 | 893 | 1,249 | 380 | 0 | 903 | 41 | 0 | 36,143 |
+| purego | 3 | 27 | 0.5 | 1,064 | 915 | 118 | 105 | 57 | 176 | 49 | 23 | 35 | 0 | 36 | 3 | 0 | 2,581 |
+| x509roots | 1 | 5 | 0.1 | 18 | 34 | 0 | 0 | 4 | 8 | 482 | 0 | 0 | 0 | 10 | 1 | 0 | 557 |
+| **total** | 12,289 | 22,674 | 1,170.8 | 1,482,752 | 1,892,106 | 218,593 | 30,503 | 331,816 | 561,090 | 487,596 | 130,085 | 103,592 | 3,725 | 52,350 | 12,289 | 4 | 5,306,501 |
+
+The kinds are CONVERTER-NOTES' table's: `:call` calls of unknown kind, `:select` selectors,
+`:index` index or instantiation, `:star` indirection or pointer type, `:id` the names `true`,
+`false`, `nil`, `:define` names of `:=`, `:key` identifier keys of composite literals, `:val`
+constant names, `:shift` shifts, `:any` constraints `any`, `:import` implicit import names; the
+column invalid counts the invalid programs' marks, all in `linux-errtest`: 2 `x.(type)` outside a
+type switch, 1 `:=` in a post statement, 1 malformed literal.
+
+**Invalid programs (GPS9 (b)).** Of `linux-errtest`'s 659 error tests, the loader gives 586
+programs that go/parser accepts and 73 it rejects (GP6's, by gc's syntax). All 586 get raw forms,
+which read back. Among them are GC47's 64, which the final conversion cannot convert; `raw-check`
+lists exactly these 64 as raw only, the same names as `test/goi/check-linux-amd64.edn`'s "repr/go
+cannot convert". Their raw forms: a selection without an object is a `go/select` like any other
+(39), a constant without a value a name without `:val` (10), an import path that is not a name
+`["path"]`, `(x) := 0` and `main() :=` their expressions' forms (6), `x.y` in a type context
+`x/y` (4), `x.(type)` outside a type switch `(go/type-guard x)` (2), a conversion of two arguments
+a call (1), `for ;; x := 1` `(go/define x 1)` (1), `6e5518446744` `(go/literal "FLOAT"
+"6e5518446744")` (1). `fixedbugs/bug340.go`'s `case 0:` in a type switch is the literal's form.
+
+**The check against the final forms (`raw-check`).** For each dump, its native dump converted raw
+and the helper's annotated dump converted as ever (mode `:full`) walk in parallel
+(`arbace.repr.go.raw/conform`): every form, symbol, literal and metadata key (`::l`, `::pos`,
+`::full` included) equal, but at the open decisions, where the final form must be one of that
+kind's resolutions, which are counted. Erasing go/types' decisions from the final forms thus gives
+the raw forms exactly. Over the 22 corpora:
+
+- 12,158 dumps resolved, 0 differ, 0 failed; 117 raw only: GC47's 64 and 53 packages of TamaGo's
+  goos module for other boards (24 for amd64, 29 for arm64: the helper dumps them with type
+  errors, the final conversion stops at `selector`); 14 without the helper's dump (GPS17), raw
+  only too; 73 rejected by go/parser.
+- The resolutions, summed: `:call` 542,581 calls, 535,915 method calls, 207,896 builtin calls,
+  192,589 conversions (1 dropping an invalid `...`, GPS25); `:select` 959,460 fields or method
+  values, 535,915 methods called, 391,171 package members, 1,242 method expressions; `:index`
+  214,169 indexes, 4,030 instantiations, 365 generic types; `:star` 20,378 indirections, 10,021
+  pointer types; `:id` 331,359 the universe's, 101 declared; `:define` 554,398 new, 5,848
+  reused; `:key` 474,025 fields, 12,931 expressions; `:val` 127,470 values, 64 none; `:shift`
+  2,294 tagged, 100,865 not; `:any` 3,665 the universe's, 60 declared; `:import` 51,631; besides
+  them the final forms' `:inst` (12,726) and `:go/via` (72,963), and 44 `for true {}`.
+- A negative check: the final forms of `strings` with one symbol renamed, or one form's positions
+  moved, do not conform; the raw forms against themselves do not either (the final forms carry no
+  `::open`).
+
+The first runs found five differences, fixed: a `^:go/key` vector compared without dropping its
+mark; a generic type instance's count; the operand of an instantiation, which the final forms
+write without its parentheses and positions (accepted, GPS25); the final `...` of a conversion
+and of `nil` (accepted, GPS25); `r.true` (a field named `true`), whose raw name was the symbol
+`true`, which reads back as a boolean (now `(go/id "true")`, as the final forms name it).
+
+**The normal conversion is unchanged.** The raw mode is additive: it is a binding the normal path
+never sets, and `an` is the annotations when it is not set. Checked byte for byte: `bin/repr-go
+read --corpus C` and `read --full --corpus C` of the 14 corpora of repr/go's own (std for four
+configurations, std with tests, `$GOROOT/test`'s programs and directory tests for four
+configurations each, the error tests), 28 conversions, before (main `02d20ed1`, a pristine copy
+of its tree on the same stage 0 and the same helper's dumps) and after: every `.ae` file equal
+(62,878 files, 0 differ; the error tests' 64 failures the same). The round trips' references are
+functions of these forms (`bin/repr-go roundtrip` prints and judges them), so they hold
+unchanged; run as well: `bin/repr-go roundtrip --dirs amd64` (no regressions against its
+reference), `roundtrip --text --dirs amd64` (586 of 586 files byte-identical) and `roundtrip
+--text amd64` (std 1,742 of 1,742, `$GOROOT/test` 1,705 of 1,708, the 3 known). GPS24's loop changes no output: it is among the 28.
+
+**Times.** The raw conversion runs on stage 0, which evaluates `arbace.repr.go.convert`,
+`arbace.repr.go` and the new `arbace.repr.go.raw` from the checkout until a re-seed (their
+compiled copies are main's). `read --reader native --raw` over the 22 corpora: 42 min 4 s wall
+(24 jobs, 270 CPU-min), of which the interpreted parse 526 CPU-s, the dump 701 CPU-s, and the raw
+conversion with its layout and read-back check 11,532 CPU-s (std tamago/amd64: 56, 75 and
+1,375 CPU-s, 124 s wall; the helper's path converts the same corpus in mode `:full`, compiled, in
+about 112 s wall at 24 jobs). `raw-check` over the 22 corpora: 43 min 25 s wall (300
+CPU-min, 32 jobs), the three `cmd-` corpora 9 to 10 min each (the long pole their largest
+package, `cmd/compile/internal/ssa`, 12.4 MB of Go, one job), std 1.7 to 2.2 min each.
+
+**The program changes.** `arbace.repr.go.convert` and `arbace.repr.go` are embedded namespaces,
+and `arbace.repr.go.raw` is a new one under `arbace/repr/`: the next re-seed carries them, to be
+batched (no re-seed here). Until then stage 0 loads them from the checkout.
+
+**Checks.** `bin/repr-go raw-check` (above); `bin/repr-go read --reader native --raw` over the
+22 corpora (above) and on packages (`fmt`, `strings` for linux/amd64); the 28 conversions before
+and after; `make check-makefile`; the essential `bin/gate` passed (20 m 50 s, its build anew since
+`arbace/` changed: the smoke test, Clojure's suite with no regressions, the oracle 22,658 of 22,711
+against its 53 known, the differential check 12,731 of 12,754 against its 23 known, goi's
+essential check 740 of 740, the generated variants). Not run: `bin/gate --full`.
+
+**For GP4.** The checker's resolve mode takes the raw forms in memory (GPS26) and answers by
+position: an open form carries its node's positions (`::pos`, `:go/pos` in the text), a name its
+`:name-pos`. It must accept the heads `go/select`, `go/index`, `go/star` and `go/id` (resolved by
+the checker's own rules for `pkg/Name`, `(.-f x)`, `(.M x)`, `method-expr`, `aget`, `inst`,
+`deref` and `*`, and scopes), calls whose head is any form (`expr-or-type` decides conversion,
+builtin, method or function), `^:go/define` names (new or reused, as go/types' Defs and Uses),
+`^:go/key` vectors (field or key, by the literal's type), constant names without `:val`, shifts
+without `:tag`, `^any` constraints, `["path"]` imports and a `go/package` without `:init-order`.
+Its answers are then the annotations the converter reads, and `raw-check`'s resolutions are
+what E-ann will compare kind by kind.
+
+**Proposals (GPS21-GPS26; each built as recommended).**
+
+- **GPS21 How raw forms mark what is open.**
+  - (a) heads of their own for the open forms (`go/select`, `go/index`, `go/star`, `go/id`), public
+    keys for the open names and keys (`^:go/define`, `^:go/key`), the typed metadata left out
+    (`:val`, `:tag`, `:inst`, `:go/via`, an implicit name, `:init-order`), a call as `(F a ...)`;
+    and the private `::open` in memory (as built);
+  - (b) one wrapper `(go/open :kind form)` around each open form: uniform, but 5.3 million
+    wrappers over the corpora (1.5 million calls, 1.9 million selectors), each to unwrap;
+  - (c) only the private `::open`, no mark in the text: the text would not say what is open
+    (`(len x)`, a `[k v]` key), so it could not be checked or read as raw forms.
+
+  *Recommended: (a)*: the raw forms keep the final forms' shape wherever the syntax decides, and
+  each open decision is visible in the text and countable in memory.
+- **GPS22 Calls of names that are builtins' or heads of the syntax.**
+  - (a) a raw call is never classified: `(len x)` calls the identifier `len`, whatever it denotes,
+    and only a name that is a head of the forms' syntax (`fn`, `do`, `slice`, `assert`, ...) is
+    written `(go/call h ...)` (as built; `raw-reserved-heads`);
+  - (b) every raw call `(go/call F ...)`: no reserved names, but 1.5 million extra heads, and the
+    final forms' builtin calls would differ in shape from their raw ones.
+
+  *Recommended: (a)*.
+- **GPS23 Where `raw-check` runs.**
+  - (a) by hand at milestones (as built; 43 min over the 22 corpora with the helper's dumps
+    present);
+  - (b) a step of `bin/gate --full` after native-check: 43 more minutes, the helper's dumps read a
+    second time;
+  - (c) merged into native-check at GP4: one read of the helper's dumps for E-tree, the raw forms'
+    check and E-ann, which compares the checker's answers with go/types' at the same open
+    decisions.
+
+  *Recommended: (a)* now, (c) at GP4.
+- **GPS24 The statement lists' recursion.** `stmts-forms` recurred once per statement: on stage
+  0, which evaluates the converter until a re-seed, `fixedbugs/bug385_64.go` (16,480 statements)
+  overflowed the stack, raw and final alike (the compiled converter of main converts it).
+  - (a) a loop over the statements that do not declare, recurring only into a `let`'s body (as
+    built): the same forms, byte for byte over the 28 conversions;
+  - (b) unchanged, the program known in `raw-known.edn` until a re-seed compiles the converter.
+
+  *Recommended: (a)*: GPS9 (b) needs raw forms for every error test, and the loop is no
+  slower.
+- **GPS25 What the final forms write less precisely than the raw ones.** Three cases, which
+  `conform` accepts as the final's: an instantiation's operand without its parentheses, and as a
+  field's selector or a method expression without the name's position (`instantiation` builds its
+  operand apart from `selector-form`; 4,030 instantiations, the few with such operands); a
+  conversion's argument without an invalid `...` (`unsafe.Pointer(&x...)`, `ddd1.go`, already a
+  known errorcheck divergence of goi); a `...` after the universe's `nil` without a line
+  (`f(nil...)`, 2 error tests).
+  - (a) accepted by `conform`, the final converter unchanged (as built: GP3 additive, the round
+    trips' references unchanged);
+  - (b) the final converter corrected now: the forms of those files change, and with them, for the
+    first, mode `:full`'s positions.
+
+  *Recommended: (a)* now; (b) at GP5, when E-forms makes the native path's forms the reference.
+- **GPS26 How GP4's checker takes the raw forms.**
+  - (a) in memory, from the converter in the same process: the forms, their `::open` and their
+    positions as data; the `.ae` text for the read-back check and for reading by hand (as built:
+    `read --raw` writes it, `raw-check` and GP4 take the forms in memory);
+  - (b) through the `.ae` files, read back: the text carries the marks and positions, not `::open`,
+    and costs a write and a read per package.
+
+  *Recommended: (a)*.
