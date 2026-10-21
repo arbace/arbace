@@ -1411,7 +1411,9 @@ Nothing else: the translated JDK and runtime are the same. `bin/j2g-edge verify`
 - `bin/javac-vendor check`: j2g translates javac's world, no failures (40 s)
 - `bin/j2g-edge verify`: passes (59 s); `bin/jrt test --arch amd64`: passes, with
   `TestCountNonZeroAscii`
-- `bin/gate` (essential): see the hand-back report (run at the end on the branch)
+- `bin/gate` (essential, on the branch at `ed56f50f`): passes in 15m34s (go-build, go-smoke,
+  suite-go 777 tests with no regression, oracle-go 53 known mismatches as recorded, diffcheck
+  12,741 of 12,764 cases agree with the 23 known, goi-check 740 of 740, generated)
 
 ### JN3.8 What it means for JN4
 
