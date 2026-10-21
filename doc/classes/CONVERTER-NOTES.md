@@ -17,7 +17,7 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 
 | file | namespace | role |
 |---|---|---|
-| `arbace/repr/java/javac.ae` | `arbace.repr.java.javac` | runs the JDK's javac (`JavacTask.parse` + `analyze`: attribution and flow, no desugaring) |
+| `arbace/repr/java/javac.ae` | `arbace.repr.java.javac` | runs the JDK's javac (`JavacTask.parse` + `analyze`: attribution and flow, no desugaring); on javac's tool executable javac on Arbace, with the file manager of javac's command line on Arbace (`jdk.internal.jrt.javac.FileManager`) against the platform |
 | `arbace/repr/java/jtypes.ae` | `arbace.repr.java.jtypes` | javac types and symbols: erasure, boxing, widening, flags, binary names, renaming |
 | `arbace/repr/java/forms.ae` | `arbace.repr.java.forms` | output data: forms, class references named later (`CRef`), raw tokens, ordered metadata |
 | `arbace/repr/java/convert.ae` | `arbace.repr.java.convert` | the conversion of attributed trees: declarations, code, control flow, patterns, switches, lambdas |
@@ -26,7 +26,8 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 | `arbace/repr/java.ae` | `arbace.repr.java` | command line: `convert`, `jdk` |
 | `arbace/repr/java/coverage.ae` | `arbace.repr.java.coverage` | coverage summary from run reports |
 | `arbace/repr/java/resolve.ae` | `arbace.repr.java.resolve` | asks the Java forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
-| `bin/repr-java` | | starts the frozen JVM Arbace (`bin/lib/frozen.bash`) with access to javac's internals, repr/java and the Java forms' front end loaded from the checkout's sources |
+| `bin/repr-java` | | starts the frozen JVM Arbace (`bin/lib/frozen.bash`) with access to javac's internals, repr/java and the Java forms' front end loaded from the checkout's sources; with `REPR_JAVA_HOST=arbace` javac's tool executable instead (JN4) |
+| `bin/repr-java host-check` | | the reader on javac's tool executable against the frozen JVM's, every corpus (`bin/lib/repr-java/host-check`) |
 | `bin/repr-java check` | | the checks (below) |
 | `test/repr/java/expected/` | | the expected output of the checks: `java/` and `module/` (the samples' forms), `baseline.sha256` (the baseline's, by hash) |
 | `test/repr/java/build.ae` | `repr.java.build` | compiles converted files with the frozen jar's own Java forms compiler into class files (`bin/repr-java check --suite`; until S4 `arbace.repr.java.build`) |
@@ -48,6 +49,14 @@ jar's entries are dated 2000-01-01): `frozen_view tools` puts `.clj` links to th
 before the jar on the class path, so those load from the checkout's sources and the rest
 (`arbace.core`, the runtime, the jar's own back end) is the jar's. The converter's output is the
 same as on main's stage 2 (`jdk/forms`, `test/java-fixtures` and the samples, byte for byte).
+
+Since JN4 (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN4") the reader also runs on javac's
+tool executable (`bin/arbace-go --build-java`, `REPR_JAVA_HOST=arbace`): javac on Arbace, the
+reader's namespaces compiled into the tool by c2j (evaluated from the checkout when its sources
+differ from the tool's), the platform the exploded modules of `jdk/javac/platform.sha256`, and for
+the suite's fixtures the checkout's runtime declarations (`bin/repr-java declarations`) in place
+of the frozen jar. Its output is the JVM's over every corpus (`bin/repr-java host-check`); the JVM
+stays the default until JN5 and JN6.
 From the freeze to S4 it ran on `target/stage2`, before the freeze on the frozen Clojure. Its
 output names the running core: a head shadowed by a local or field is qualified `arbace.core/`
 (before, `clojure.core/` for Clojure's own names). The baseline `clojure/` is no longer in

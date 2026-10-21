@@ -104,7 +104,10 @@ Prior art:
   - `arbace/repr/`: the bridges between a language's source text and its forms, each one
     namespace with its parts below it and one command with the verbs `read` and `print`:
     `arbace.repr.java` (`arbace/repr/java{.ae,/}`), Java → Java forms (`bin/repr-java read`,
-    `check`) on the frozen JVM, and Java forms → Java (`print`, `arbace.repr.java.print`; the
+    `check`) on the frozen JVM, or with `REPR_JAVA_HOST=arbace` on javac's tool executable
+    (javac on Arbace, the reader compiled into the tool; JN4, doc/classes/JAVA-FRONTEND-SURVEY.md,
+    "As built: JN4"; `bin/repr-java host-check`: every corpus read as on the JVM; `bin/repr-java
+    declarations`: the runtime's declarations, javac's class path for the suite's fixtures), and Java forms → Java (`print`, `arbace.repr.java.print`; the
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →
     forms → Java → forms at the levels forms, ae (the converted text) and classes (javac's, byte
     for byte; `bin/repr-java roundtrip`, corpora baseline, samples and jdk/forms, references in
@@ -183,7 +186,10 @@ Prior art:
   `jdk/javac/platform.sha256` (`bin/javac-vendor platform-pin`); `bin/javac-vendor classes`
   compiles the baseline, the samples and java.base's closure (`-g:none`) by javac on Arbace and by
   the JVM's javac and compares the class files byte for byte (`java.base`: java.base as the JDK
-  build compiles it, against the build's classes). `bin/arbace-go` builds
+  build compiles it, against the build's classes). repr/java's reader runs on the tool (JN4,
+  `REPR_JAVA_HOST=arbace`): `--build-java` embeds `arbace/repr/java` and compiles it by c2j on a
+  first tool build (`target/arbace-go/aot-reader`, kept by key; j2g's `--embed`); `read-jdk`'s
+  `--patch-module` against the same platform. `bin/arbace-go` builds
   (`--build`, `--build-tests`, `--pgo`, by the tools' host; the test build's Java
   fixtures committed as forms in `test/java-fixtures/`, `bin/clojure-tests --java-fixtures update`,
   `verify`), smoke-tests and runs it. Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
@@ -250,7 +256,8 @@ Prior art:
   `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
   `bin/j2g-edge verify`, `bin/clojure-tests --java-fixtures verify`; the Go build afresh with its
   smoke test, then javac's forms and javac on Arbace (`bin/javac-vendor verify`, `check`, `build`,
-  `classes baseline samples jdk java.base`), the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
+  `classes baseline samples jdk java.base`, then `bin/repr-java host-check`: repr/java's read on the
+  tool against the JVM's over every corpus), the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
@@ -302,6 +309,6 @@ Prior art:
   dated records name them.
 - The tools (c2j, j2g, repr/go, repr/clojure, the suite runner) run on the tools' Go host, stage 0 by default
   (`bin/lib/host.bash`, `bin/lib/tools.bash`); repr/java and the JVM's records on the frozen jar
-  (`bin/lib/frozen.bash`). Nothing builds or runs a JVM Arbace of the checkout.
+  (`bin/lib/frozen.bash`), repr/java's read also on javac's tool executable (`REPR_JAVA_HOST=arbace`). Nothing builds or runs a JVM Arbace of the checkout.
 - Put temporary and scratch files in `.tmp/`, which is gitignored.
 - Never create or modify anything under `.claude/`.

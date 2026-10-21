@@ -125,6 +125,20 @@ frozen_host() {
   echo "$(basename "$j" .jar) $(sha256sum "$j" | cut -c1-64)"
 }
 
+# repr_java_host: the host repr/java's read runs on as provenance files name it (bin/repr-java's
+# REPR_JAVA_HOST): frozen_host on the JVM (the default), else "arbace-javac SHA-256" of javac's
+# tool executable (REPR_JAVA_EXE; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN4")
+repr_java_host() {
+  local e
+  if [ "${REPR_JAVA_HOST:-jvm}" = arbace ]; then
+    e=${REPR_JAVA_EXE:-$root/target/arbace-go/$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac)/arbace-javac}
+    [ -x "$e" ] || { echo "repr_java_host: no javac tool executable $e" >&2; return 1; }
+    echo "arbace-javac $(sha256sum "$e" | cut -c1-64)"
+  else
+    frozen_host
+  fi
+}
+
 # repr_java_reader_hash: the SHA-256 the provenance files (jdk/provenance.edn,
 # test/java-fixtures/provenance.edn) give repr/java as converter: of its reader's sources, what
 # converts Java into forms (arbace/repr/java.ae and convert, javac, jtypes, resolve, forms, names,

@@ -121,6 +121,15 @@
 (def ^:dynamic *anew*
   "--anew: every member printed anew, within the recorded text." false)
 
+(def ^:dynamic *declarations*
+  "--layout declarations: the classes' declarations alone (doc/classes/JAVA-FRONTEND-SURVEY.md,
+  JFS27, \"As built: JN4\"): every method and constructor body `throw null;` (a constructor's
+  explicit this(...) or super(...) call kept), initializers left out, a field's initializer kept
+  only when it is a literal of a final field or the field is an interface's (a final field
+  without one is no longer final). What javac needs to attribute code against Arbace's runtime
+  without its code: the suite's Java fixtures against the checkout's arbace.lang (JFS6)."
+  false)
+
 
 (defn- radix-java
   "Java's spelling of a radix token of a converted file (2r101 is 0b101)."
@@ -2888,7 +2897,10 @@
   (let [t (tag-of p)
         tt (if t (decl-type-text (:scope env) t) "Object")
         tt (if varargs? (str/replace tt #"\[\]$" "...") tt)]
-    (str (binding-mods env p) tt " " (ident p))))
+    (str (binding-mods env p) tt " " (ident p)
+         ;; the declarations alone: a parameter of the runtime's forms named by a Java keyword
+         ;; (Compiler's `super`, `extends`; ReflectorCallSite's `_`), which no body reads here
+         (when (and *declarations* (java-keywords (name p))) "_"))))
 
 (defn- params-text
   "The parameter list of params vector `pv` without its receiver; [text env']."
@@ -2941,15 +2953,20 @@
         abstract? (and (empty? body)
                        (or (:abstract m) (:native m)
                            (and iface? (not (:static m)) (not (:private m)) (not (:default m)))))
-        head (str (modifiers-text env1 m)
+        ;; an interface's instance method with a body is a default method: the runtime's
+        ;; hand-written forms may leave ^:default out (Compiler$Expr's evalIn), converted ones
+        ;; always write it
+        mods (if (and iface? (seq body) (not static?) (not (:private m)) (not (:default m))) (assoc m :default true) m)
+        head (str (modifiers-text env1 mods)
                   (when (seq tps) (str (tparams-text sc tps) " "))
                   (if rt (decl-type-text sc rt) "Object") " " (ident (name nm)) ptext
                   (when-let [d (find opts :default)] (str " default " (ann-value-text sc (val d))))
                   (when-let [th (seq (:throws opts))] (str " throws " (str/join ", " (map #(type-text sc %) th)))))]
     (into (vec (javadoc m))
-          (if abstract?
-            [(str head ";")]
-            (block head (body-lines env' body (if void? :stmt :return)))))))
+          (cond
+            abstract? [(str head ";")]
+            *declarations* (block head ["throw null;"])
+            :else (block head (body-lines env' body (if void? :stmt :return)))))))
 
 (defn- ctor-lines [env [_ & more] ckind]
   (let [[opts [pv & body]] (split-opts more)
@@ -2967,10 +2984,21 @@
                   (:class-name env)
                   (when-not (:compact m) ptext)
                   (when-let [th (seq (:throws opts))] (str " throws " (str/join ", " (map #(type-text sc %) th)))))]
-    (into (vec (javadoc m)) (block head (body-lines env' body :stmt)))))
+    (into (vec (javadoc m))
+          (block head (if *declarations*
+                        (let [[c] body]
+                          (into (if (and (seq? c) (symbol? (first c)) (#{"this." "super." ".super"} (name (first c))))
+                                  (body-lines env' [c] :stmt)
+                                  [])
+                                ["throw null;"]))
+                        (body-lines env' body :stmt))))))
 
-(defn- field-lines [env [_ nm & init]]
+(defn- field-lines [env [_ nm & init] & [ckind]]
   (let [m (meta nm)
+        keep? (or (not *declarations*) (#{:interface :annotation} ckind)
+                  (and (:final m) (let [x (first init)] (or (number? x) (string? x) (char? x) (boolean? x)))))
+        init (when keep? init)
+        m (if (or keep? (not (:final m))) m (dissoc m :final))
         t (:tag m)
         env' (assoc env :recv "this")]
     (into (vec (javadoc m))
@@ -3001,20 +3029,22 @@
   "The members of a class body, separated by blank lines; `ckind` the class's kind."
   [env members ckind]
   (let [members (mapcat #(if (is? % 'do) (rest %) [%]) members)
-        groups (for [mb members]
-                 (or
-                  (full-member-lines env mb ckind)
-                  ;; a member printed anew in the full layout: its doc comment is in the record
-                  (binding [*javadoc?* (and *javadoc?* (not (and *full* (full/span mb))))]
-                  (case (str (head mb))
-                   "field" (field-lines env mb)
-                   "method" (method-lines env mb ckind)
-                   "constructor" (ctor-lines env mb ckind)
-                   "initializer" (block "" (body-lines (assoc env :recv "this") (rest mb) :stmt))
-                   "static-initializer" (block "static" (body-lines env (rest mb) :stmt))
-                   "constants" (constants-lines env mb true)
-                   "defclass" (class-body-lines env mb :member)
-                   (throw (ex-info (str "unknown member " (head mb)) {:member mb}))))))
+        groups (keep identity
+                     (for [mb members]
+                       (or
+                        (full-member-lines env mb ckind)
+                        ;; a member printed anew in the full layout: its doc comment is in the record
+                        (binding [*javadoc?* (and *javadoc?* (not (and *full* (full/span mb))))]
+                          (case (str (head mb))
+                            "field" (field-lines env mb ckind)
+                            "method" (method-lines env mb ckind)
+                            "constructor" (ctor-lines env mb ckind)
+                            ;; the declarations alone have no initializers (nil: no group)
+                            "initializer" (when-not *declarations* (block "" (body-lines (assoc env :recv "this") (rest mb) :stmt)))
+                            "static-initializer" (when-not *declarations* (block "static" (body-lines env (rest mb) :stmt)))
+                            "constants" (constants-lines env mb true)
+                            "defclass" (class-body-lines env mb :member)
+                            (throw (ex-info (str "unknown member " (head mb)) {:member mb})))))))
         ;; an enum without constants still needs its ;
         groups (if (and (= ckind :enum) (not (some #(is? % 'constants) members))) (cons [";"] groups) groups)]
     (vec (apply concat (interpose [""] groups)))))
@@ -3316,14 +3346,27 @@
   "Prints `units` into directory `out`, with the declarations of them and of `index-extra`. Returns
   {:printed n :failed [[path message] ...]}."
   [units index-extra out & {:keys [quiet layout anew] :or {layout "full"}}]
-  (let [pk (package-classes (concat index-extra units))]
+  (let [units (if (= "declarations" layout)
+                ;; one top-level class per Java file, as javac requires of public ones (the
+                ;; runtime's GoInterp.ae holds several)
+                (vec (mapcat (fn [u]
+                               (let [[cs others] ((juxt filter remove) #(is? % 'defclass) (:forms u))]
+                                 (if (next cs)
+                                   (cons (assoc u :forms (vec (concat others [(first cs)])))
+                                         (for [c (rest cs)] (assoc u :forms [c])))
+                                   [u])))
+                             units))
+                units)
+        pk (package-classes (concat index-extra units))]
     (binding [*pkg-classes* pk *decls* (binding [*pkg-classes* pk] (declare-units (concat index-extra units)))]
       (let [results (doall
                      (for [u units]
                        (try
-                         (let [text (if (and (= "full" layout) (:java/file (meta (first (:forms u)))))
+                         (let [text (cond
+                                      (and (= "full" layout) (:java/file (meta (first (:forms u)))))
                                       (binding [*anew* anew] (java-text-full u))
-                                      (java-text u))
+                                      (= "declarations" layout) (binding [*declarations* true] (java-text u))
+                                      :else (java-text u))
                                o (io/file out (out-path u))]
                            (io/make-parents o)
                            (spit o text)
@@ -3343,7 +3386,7 @@
                          (= "--layout" (first as)) (recur (nnext as) (assoc opts :layout (second as)) ps)
                          :else (recur (next as) opts (conj ps (first as)))))]
     (when (< (count paths) 2)
-      (binding [*out* *err*] (println "usage: bin/repr-java print [--index DIR]... [--layout full|lines] [--anew] [--quiet] FORMS... OUT"))
+      (binding [*out* *err*] (println "usage: bin/repr-java print [--index DIR]... [--layout full|lines|declarations] [--anew] [--quiet] FORMS... OUT"))
       (System/exit 2))
     (let [out (last paths)
           t0 (System/nanoTime)

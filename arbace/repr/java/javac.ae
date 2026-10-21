@@ -1,18 +1,59 @@
 (ns arbace.repr.java.javac
-  "Bridge to the JDK's own javac: parse and attribute Java sources (JavacTask.analyze), giving
-  the attributed compilation units the converter works on."
+  "Bridge to javac: parse and attribute Java sources (JavacTask.analyze), giving the attributed
+  compilation units the converter works on. javac is the frozen JVM's (its standard file manager,
+  against the running JDK) or, on javac's tool executable (bin/arbace-go --build-java;
+  doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN4\"), javac on Arbace, with the file manager of
+  javac's command line on Arbace (jdk.internal.jrt.javac.FileManager, JFS5 (b)) against the
+  platform REPR_JAVA_PLATFORM names (the exploded modules of jdk/javac/platform.sha256)."
+  (:require [arbace.string :as str])
   (:import [com.sun.tools.javac.api JavacTool JavacTaskImpl]
            [com.sun.tools.javac.tree JCTree$JCCompilationUnit]
            [com.sun.tools.javac.util Context]
            [com.sun.tools.javac.code Types Symtab]
            [javax.tools DiagnosticCollector Diagnostic Diagnostic$Kind JavaFileObject]
-           [java.io File]))
+           [java.io File]
+           [java.util List]))
 
 (defn- diagnostics->errors [^DiagnosticCollector dc]
   (vec (for [^Diagnostic d (.getDiagnostics dc)
              :when (= Diagnostic$Kind/ERROR (.getKind d))]
          (str (some-> ^JavaFileObject (.getSource d) .getName) ":" (.getLineNumber d) ": "
               (.getMessage d nil)))))
+
+(def file-manager-class
+  "javac's file manager on Arbace, when this is javac's tool executable (else nil: the JVM)."
+  (try (Class/forName "jdk.internal.jrt.javac.FileManager") (catch Throwable _ nil)))
+
+(defn- path-list
+  "A path's directories, as javac's command line on Arbace splits it (an empty entry is .)."
+  ^List [^String p]
+  (List/copyOf (for [s (str/split p (re-pattern (java.util.regex.Pattern/quote File/pathSeparator)) -1)]
+                 (File. ^String (if (= s "") "." s)))))
+
+(defn- arbace-task
+  "The task of javac on Arbace: the file manager's options (-sourcepath, -cp, --patch-module) taken
+  from `opts` and served by jdk.internal.jrt.javac.FileManager, as javac's command line on Arbace
+  does (jdk.internal.jrt.javac.Main), with the platform REPR_JAVA_PLATFORM names; the class path
+  -cp, else REPR_JAVA_CP (on the JVM: the class path's tail), else none."
+  [^JavacTool tool dc paths opts]
+  (let [platform (or (System/getenv "REPR_JAVA_PLATFORM")
+                     (throw (ex-info "repr/java on Arbace: no platform (REPR_JAVA_PLATFORM)" {})))
+        {:keys [sp cp patches others]}
+        (loop [[a b & more :as os] opts acc {:patches [] :others []}]
+          (case a
+            nil acc
+            ("-sourcepath" "--source-path") (recur more (assoc acc :sp b))
+            ("-cp" "-classpath" "--class-path") (recur more (assoc acc :cp b))
+            "--patch-module" (let [i (str/index-of b "=")]
+                               (recur more (update acc :patches conj [(subs b 0 i) (subs b (inc i))])))
+            (recur (next os) (update acc :others conj a))))
+        cp (or cp (System/getenv "REPR_JAVA_CP"))
+        fm (arbace.lang.Reflector/invokeConstructor
+            file-manager-class
+            (object-array [(when sp (path-list sp)) (if cp (path-list cp) (List/of)) nil]))]
+    (.addPlatform fm (File. ^String platform))
+    (doseq [[m p] patches] (.addPatch fm m (path-list p)))
+    (.getTask tool nil fm dc others nil (List/copyOf (map #(.source fm (File. ^String %)) paths)))))
 
 (defn analyze
   "Parse and attribute the Java files `paths` together with the javac options `opts`.
@@ -21,12 +62,12 @@
   [paths opts]
   (let [tool (JavacTool/create)
         dc (DiagnosticCollector.)
-        fm (.getStandardFileManager tool dc nil nil)
-        objs (.getJavaFileObjectsFromFiles fm (map #(File. ^String %) paths))
-        task ^JavacTaskImpl (.getTask tool nil fm dc
-                                      (into ["-proc:none" "-nowarn" "-Xlint:none" "-XDsuppressNotes"
-                                             "-Xmaxerrs" "100000"] opts)
-                                      nil objs)
+        opts (into ["-proc:none" "-nowarn" "-Xlint:none" "-XDsuppressNotes" "-Xmaxerrs" "100000"] opts)
+        task ^JavacTaskImpl (if file-manager-class
+                              (arbace-task tool dc paths opts)
+                              (let [fm (.getStandardFileManager tool dc nil nil)]
+                                (.getTask tool nil fm dc opts nil
+                                          (.getJavaFileObjectsFromFiles fm (map #(File. ^String %) paths)))))
         units (vec (.parse task))]
     (.analyze task)
     {:units units :context (.getContext task) :errors (diagnostics->errors dc)}))
