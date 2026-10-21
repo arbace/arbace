@@ -2048,3 +2048,14 @@ report; they could run on the tools' host, but the edge reads class files throug
   gate's chain order mocked, `ref-jvm/`, the javac step's classes by the JVM's javac, `base/`, the
   program tree before the provenance changed), `javac-vendor/`, `jrt/`, `repr-java-roundtrip/`,
   `gate-javac/` (the tool's copy).
+
+## Decided (2026-10-21): JFS31-JFS36
+
+The user decided JFS31-JFS36 as built:
+- JFS31 (a): the one platform grown by jdk.compiler, java.compiler, jdk.internal.opt and jdk.zipfs.
+- JFS32 (b): the verifies compare the provenance but its `:host` line, both hosts printed.
+- JFS33 (b): javac's tool executable the default host, built by hand; the JVM by
+  `REPR_JAVA_HOST=jvm` until JN6.
+- JFS34 (b): the round trip's corpora concurrently.
+- JFS35 (a) now, (b) at JN6.
+- JFS36 (a): `bin/repr-java host-check` kept, out of the gate, until JN6.

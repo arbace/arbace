@@ -789,3 +789,62 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   `java.io.tmpdir` defines.
 - **Checked:** the essential `bin/gate` passed (11m05s). It wrote nothing to /tmp: its two reports
   went to `.tmp/tmp`.
+
+## 2026-10-21: JN5 merged (the checks moved to the tool)
+
+- **What:** the branch `java-frontend-jn5` (`724eb171`, from `ad80344b`) is merged. The survey's
+  "As built: JN5" has the details.
+- **The fixpoint:** javac on Arbace reads javac's own sources into `jdk/javac/forms`, byte for
+  byte.
+- **The tool is repr/java's default host** (`REPR_JAVA_HOST=arbace`, JFS33 (b)), built by hand by
+  `bin/javac-vendor build`. The JVM stays the reference until JN6, by `REPR_JAVA_HOST=jvm`.
+- **The tool's key** (JFS30 (b), `bin/lib/javac-key.bash`) is written as `arbace-javac.key`. The
+  provenance writers refuse a tool of another key; `REPR_JAVA_STALE_OK=1` overrides.
+- **`bin/repr-java javac`** (new) runs javac's command line on the selected host. The round trip's
+  classes level and `jrt-convert`'s `javac` step use it.
+- **The platform** grows by jdk.compiler, java.compiler, jdk.internal.opt and jdk.zipfs (JFS31
+  (a)): `jdk/javac/platform.sha256` has 10 lines.
+- **The verifies** compare the provenance except `:host` (JFS32 (b)).
+- **The round trip's corpora** run concurrently (JFS34 (b)).
+- **`bin/gate --full`** (JFS9, JFS29):
+  - the JVM chain keeps only `j2g-edge`;
+  - the `javac` step runs check, build, the tool copied into `.tmp/gate-javac`, `verify` on the
+    tool, then `classes`;
+  - a java chain after it runs `repr-java`, `repr-java-roundtrip`, `jrt-convert` and
+    `java-fixtures` on the tool;
+  - `host-check` leaves the gate but stays a command (JFS36 (a)).
+- **A fix:** `bin/jrt-convert verify` had failed since JN2 ("Only in jdk: javac"). It now leaves
+  out `jdk/javac`.
+- **Re-recorded:** the three provenance files, written on the tool. Only `:repr-java` and `:host`
+  change; the forms, the edges and the round trip's references are unchanged.
+- **Checks** on the tool, each command as the gate runs it:
+
+  | check | time | result |
+  |---|---|---|
+  | `javac-vendor check` | 49 s | no failures |
+  | `javac-vendor verify` | 94 s | 574 files |
+  | `javac-vendor classes` (4 corpora) | 228 s | byte for byte |
+  | `repr-java check --suite` | 178 s | as expected |
+  | `roundtrip --corpus baseline,samples,jdk --text` | 543 s | every level as the references |
+  | `jrt-convert verify` | 193 s | equal |
+  | `--java-fixtures verify` | 20 s | equal |
+
+  - The branch's essential gate passed (16m02s).
+- **Speed:** the jdk reads are 3-3.6 times the JVM's. One process peaks at about 30 GB. The tool
+  builds in 231 s with Go's cache warm, 1,006 s cold.
+- **The shipped program:** no code change. `jdk/provenance.edn` changes the runtime key, so the
+  version map changes; j2g's tree is identical.
+- **On merging,** CLAUDE.md's conventions conflicted with the TMPDIR line and were merged by hand; the
+  essential `bin/gate` on main at `e5923785` passed (14m36s).
+- **What JN6 meets:** the edges' recordings, `check --suite`'s back end, `jrt-convert`'s sources'
+  namespaces and the reference javac stay on the JVM. `check --jdk` still needs the JVM, since the
+  platform holds 10 modules.
+
+## 2026-10-21: JFS31-JFS36 decided as built (the user)
+
+- JFS31 (a): one platform, grown by javac's four modules.
+- JFS32 (b): the verifies compare all but `:host`.
+- JFS33 (b): the tool is the default host, built by hand.
+- JFS34 (b): the corpora run concurrently.
+- JFS35: (a) now and (b) at JN6.
+- JFS36 (a): `host-check` kept until JN6.
