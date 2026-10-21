@@ -453,3 +453,52 @@ JFS18-JFS22 (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN2"), as built:
 - the generated sources copied until JN7;
 - two fixture results kept by hand;
 - j2g for the tool on a program built from the checkout.
+
+
+## 2026-10-21: GP3 merged (raw forms)
+
+- **What:** branch `go-parser-gp3` (`5a6c822f`, from `02d20ed1`) merged. The converter has a raw
+  mode (`arbace/repr/go/raw.ae`, new, 535 lines; `convert.ae`, `go.ae`). It reads no annotation
+  and leaves every decision that needs types open, marked in the text and by a private `::open`
+  key:
+  - calls `(F a…)`, never classified;
+  - `(go/select x f)`, `(go/index x i…)`, `(go/star x)`;
+  - `true`/`false`/`nil` as `(go/id "…")`;
+  - `^:go/define`, `^:go/key`, `^any` constraints, implicit import names `["path"]`;
+  - three marks used only by invalid programs.
+  It writes no `:val`, `:tag` on shifts, `:inst`, `:go/via` or `:init-order`. Raw forms always
+  carry `:full`'s positions. They are private (GPS10 (a)), documented in doc/go/CONVERTER-NOTES.md,
+  "Raw forms".
+- **Measured** over all 22 corpora (`bin/repr-go read --reader native --raw`):
+  - 12,289 dumps convert raw and read back, 22,674 files, 1,170.8 MB of forms;
+  - 5,306,501 open decisions, the largest kinds select (1.89 M) and call (1.48 M);
+  - all 586 error tests go/parser accepts get raw forms, GC47's 64 among them.
+- **The check against the final forms:** `bin/repr-go raw-check` (Makefile `repr-go-raw-check`,
+  `test/repr/go/raw-known.edn` empty) walks raw and final forms in parallel. They must be equal
+  except at the open decisions, where the final form must be one of the kind's resolutions.
+  - 12,158 dumps resolved, 0 differ.
+  - 117 are raw only: GC47's 64, and 53 goos packages of other boards that the helper dumps with
+    type errors.
+- **The normal path is unchanged:** 28 conversions (14 corpora in `:lines` and `:full`), 62,878
+  `.ae` files byte identical to main's; the round trips without regression.
+- **A fix (GPS24):** the converter's statement lists loop instead of recursing. `bug385_64.go`
+  (16,480 statements) overflowed the stack.
+- **Times:** the raw read takes 42 min wall over the 22 corpora, `raw-check` 43 min, both
+  evaluated from the checkout until the re-seed. The branch's essential gate passed (20m50s).
+- **Open for the user:** GPS21-GPS26, each built as (a). GPS25 recommends correcting, at GP5, three
+  places where the final forms are less precise than the raw ones.
+- **A rule slip:** `convert.ae` was edited during a raw read over all corpora (a field named
+  `true`). The run was stopped by its PIDs and all 22 corpora were done again with the final code.
+
+## 2026-10-21: the seed remade after GP2, JN2 and GP3
+
+- **What:** on main at `5f72b4ee` (GP3's merge), one chain: the essential `bin/gate` passed
+  (27m24s), `bin/arbace-go --fixpoint` held (G2 = G3 byte for byte), then
+  `ARBACE_SEED_GO_BUILD=$PWD/target/arbace-go/fixpoint/g3 bin/seed --make`, committed as
+  `665fa0b6`, then `bin/seed --verify`.
+- **The seed:** `aa4cb10b22fe51b3fe8d45359263383c1e2f86f9e7749a8b65292cbc9373dc89` (was
+  `fcc37393…`), 18,316,556 bytes, 1,948 files, 120,922,551 bytes unpacked.
+- **Verified:** printed again from its commit, the same archive; stage 0 = G1 = G2 = G3, byte for
+  byte, `56604d7ea7239f9aa6fbc92c16aad29a98b3459da5373a65996455afcbf5cd20`.
+- **Why batched:** GP2's loader and JN2's jrt and j2g changes changed the program; GP3 followed
+  within the day, so one re-seed covers the three (decided at GP2's merge).
