@@ -1350,3 +1350,193 @@ The user decided GPS21-GPS26 as built, each as recommended:
 - GPS25 (a): the three imprecisions accepted by `conform` now; (b) at GP5, the final converter
   corrected.
 - GPS26 (a): GP4's checker takes the raw forms in memory.
+
+## As built: GP4 (2026-10-21)
+
+GP4, the annotator (§4.2 steps 3-5, §8), is built on branch `go-parser-gp4` from main `982ae875`,
+as decided: GPS3 (a) (the checker over raw forms, its answers put into the tree, the converter
+unchanged), GPS23 (c) (`raw-check` merged into `native-check`) and GPS26 (a) (the raw forms taken
+in memory). The tools' host was the worktree's stage 0 (`target/seed/amd64/arbace`, built by
+`bin/seed --build` from the seed of `665fa0b6`), on the shared 64-core amd64 machine (load
+average 15 to 25 during the runs).
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the resolve mode | `arbace.go.check` (`check-package` of a source whose `:answers` is a HashMap, `check-src`; doc/go/GOI-SPEC.md §3.10) | the raw forms' open heads accepted: `go/select` a package's member, a method expression, a field or a method value; `go/index` a generic type's instance, a generic function's instantiation or an index; `go/star` a pointer type or an indirection; a call of a builtin's name the name's object's call (the universe's builtin or a local function); `^:go/define` names new or reused by the block; `^:go/key` vectors fields in struct literals; `["path"]` imports named by their package; raw expressions where a type is wanted (instantiations' type arguments, `make`'s operand) as types. Nothing verified (`:annotated` false) |
+| the answers | `arbace.go.check.env/*answers*`, `answer!` | by position: a raw form's `::pos` read as `:arbace.go.check/at [file {field [line col]}]`; every expression's and type's mode, type and value (`expr-internal`, `typexpr`), every name's object (a qualified name's qualifier and member by their `:x-pos` and `:name-pos`), selections' kind, path and embedded fields, struct keys' fields, instances' type arguments, `:=` names new or reused, constants, implicit import names, a shift's final type (`update-type`, and the checked tree), the initializers' order |
+| go/types' spellings | `arbace.go.check.types/*spelled*` (the resolve mode only) | `byte` and `rune` are `:byte` and `:rune`, identical to `:uint8` and `:int32` (`same?`, `canon`; `under` and `basic` canonical; a string's byte `byte`, its range's value `rune`, untyped rune's default `rune`, `unsafe.StringData`'s `*byte`); an alias's name as metadata on the type it denotes (`:arbace.go.check.types/alias`; `subst` keeps a type it leaves unchanged), an alias of a basic type a keyword of its own (`kw-alias`); goi's normal mode spells nothing (GPS27) |
+| the annotator | `arbace/repr/go/annotate.ae`, `arbace.repr.go.annotate` (new, 906 lines) | the raw forms as the checker reads them (`cform`: literals as values, lines, positions as keys); sessions: each configuration's standard library one session over the loader's std jobs, their raw forms checked on demand in dependency order; a corpus's own packages, a directory test's, test variants (`p [p.test]`) sessions over it; an external test in go list -test's world (`xtest-session`: its package's variant, the packages of its imports that import it checked anew against it, GPS29); the answers put into the native dump by node (`node-of`: the positions exactly, else an anchor field) as go/types' annotations in the helper's shape (`:mode`, `:t`, `:use`, `:def` with `:val`, `:sel`, `:field`, `:inst`, `:implicit`), with `:init-order`, `:types` (the package's named types' `:underlying`) and `:type-table` (`type-id!`: interned by structure, named types and type parameters by identity, aliases as `:alias` entries) |
+| E-ann | `arbace.repr.go.annotate/same-package` | the final forms the converter makes of the annotated native dump against those of the helper's dump, both mode `:full`, form for form, every symbol, literal and metadata key (`::l`, `::pos`, `::full`, `:tag`, `:val`, `:inst`, `:go/via` ...), the package form (`:init-order`) and each file's comments: the annotations the converter reads, as it reads them, types compared by the type forms they give (GPS28); the first difference reported with its Go line |
+| `native-check` | `bin/repr-go native-check`, `arbace.repr.go.annotate -main check` | each dump read once (GPS23 (c)): E-tree (`arbace.repr.go.parse`), the raw forms resolved by the final ones (`arbace.repr.go.raw/conform`), E-ann; the checker's errors per package reported; the corpora grouped by the configurations their loads need, each group's sessions dropped after it; `--headers` still `arbace.repr.go.parse`'s; `raw-check` and `test/repr/go/raw-known.edn` gone, `native-known.edn` the one list |
+| the final forms | `bin/repr-go read --reader native --forms [--full] (--corpus C \| PKG ...)` | the annotated native dumps converted and written as `read --corpus` writes the helper's (mode `:lines`, `--full` `:full`), each file read back, under `.tmp/repr-go/native-forms/NAME[-full]` |
+| goi's annotation check | `bin/goi annotations --forms DIR [--reference DIR]` | the corpora's forms DIR's (`DIR/amd64`, `DIR/arm64` for tamago's std, one tree each; `DIR/linux-amd64`, `linux-test`, `linux-dirtest`); `--reference`: the counts compared with another run's reports |
+| the loader | `arbace.repr.go.load` | each job's `:import-map` (an import as written to the path it resolves to), the checker's resolution of the job's imports |
+
+**E-ann (the exit criterion).** `bin/repr-go native-check`, all 22 corpora, the helper's dumps
+present (made by `native-check --headers` at the start of the work):
+
+| corpus | dumps | E-tree equal | raw forms resolved | raw only (the helper's final conversion fails) | E-ann equal | the checker's errors |
+|---|---:|---:|---:|---:|---:|---:|
+| std tamago/amd64, tamago/arm64 | 379, 378 | all | 379, 378 | 0 | **379, 378** | 0 |
+| std linux/amd64, linux/arm64 | 382, 380 | all | 382, 380 | 0 | **382, 380** | 0 |
+| std with tests, tamago/amd64 | 554 | all | 554 | 0 | **554** | 0 |
+| `$GOROOT/test`'s programs, four configurations | 1,707, 1,702, 1,713, 1,707 | all | all | 0 | **all** | 0 |
+| directory tests, four configurations | 561, 559, 562, 559 | all | all | 0 | **all** | 0 |
+| error tests, linux/amd64 | 586 | all | 522 | 64 (GC47's) | **522** | 385 programs (their errors) |
+| TamaGo's goos module, amd64, arm64 | 94, 92 | all | 70, 63 | 24, 29 | **70, 63** | 0 |
+| `tamago/cmd`'s sources, three configurations | 105 each | all | 105 each | 0 | **105 each** | 0 |
+| `box/` printed, purego, x509roots | 41, 3, 1 | all | all | 0 | **all** | 0 |
+| **total** | **12,275** | **12,275** | **12,158** | **117** | **12,158 of 12,158** | |
+
+No E-ann difference, none known: `test/repr/go/native-known.edn` is empty. The 117 raw only are
+GP3's (GC47's 64 and the goos module's 53 for other boards, which the helper dumps with type
+errors and the final conversion cannot convert); the 14 dumps without the helper's (GPS17) and the
+73 programs go/parser rejects are as GP2's. The resolutions the final forms make of the open
+decisions are GP3's, every one now the checker's too: `:call` 542,581 calls, 535,915 method calls,
+207,896 builtins, 192,589 conversions; `:select` 959,460 fields or method values, 535,915 methods
+called, 391,171 package members, 1,242 method expressions; `:index` 214,169 indexes, 4,030
+instantiations, 365 generic types; `:star` 20,378 indirections, 10,021 pointer types; `:id`
+331,359 the universe's, 101 declared; `:define` 554,398 new, 5,848 reused; `:key` 474,025
+fields, 12,931 expressions; `:val` 127,470 values, 64 none; `:shift` 2,294 tagged, 100,865 not;
+`:any` 3,665 the universe's, 60 declared; `:import` 51,631; `:inst` 12,726; `:go/via` 72,963. No
+answer failed to find its node.
+
+**What the first runs found, fixed** (std tamago/amd64 first: 322 of 379, then 375, 379):
+
+- go/types' spellings: `byte` and `rune` written `uint8` and `int32` in `:inst` and `:tag` (30 of
+  std's dumps), aliases written as what they denote (`any`, `os.FileInfo`, `os.DirEntry`: 4),
+  an alias of a basic type (`slices_test`'s `Element`), `unsafe.StringData`'s `*byte` (GPS27);
+- the raw forms' constructs the first resolve mode missed: `unsafe.Offsetof` of a raw selector
+  and raw types in expression positions (an instantiation's `x509.CertificateInvalidError`; 16
+  dumps), packages without files (6), negative literals' constness under a shift (2);
+- checker bugs, in goi's normal mode too: a local constant spec of several names
+  (`const a, b = 1, 2` in a function) checked as variables (8 dumps of the tests corpus); a switch
+  clause ending in `fallthrough` after a declaration not terminating (`cmd/compile/internal/walk`'s
+  and `ssagen`'s false "missing return"; cmd was never checked by goi before); a named type's
+  spelled underlying basic type;
+- type identity across test variants: an external test importing its package's variant beside
+  packages that import the package itself (17 external tests with the checker's errors, 1 E-ann
+  failure), now go list -test's world (GPS29);
+- a struct literal's keys as the helper finds their fields (its `structOf` of the literal's
+  recorded type: through one pointer, a type parameter's common struct; 2 programs);
+- invalid programs as go/types records them (19 error tests; GPS30): a shifted operand made
+  invalid by its final type left unrecorded, no `Defs` for a redeclared name, `constDecl` stopping
+  at an invalid type, `arrayLength` looking a name up before evaluating it, an invalid index
+  leaving the element's type, a variable named `init` or `main` not one of the package's objects,
+  a promoted field reached through an embedded pointer not recorded, an invalid operand's mode not
+  recorded, a qualifier recorded when its member is unexported or undefined.
+
+**Times.** `native-check` over the 22 corpora: 70 min 57 s wall, 580 CPU-min (32 jobs), at most
+29.9 GB resident; GP2's E-tree alone took 19 min 51 s and GP3's `raw-check` 43 min 25 s, so the
+merged check is shorter than the two apart. Per corpus (wall): std 2 min 59 s to 3 min 14 s each,
+std with tests 6 min 22 s, cmd 13 min 25 s to 14 min 20 s each (its std checked first), the
+programs 35 to 40 s each, the directory tests 4 s each. The checker's share is most of the CPU:
+the native reader's parse and dump 1,006 CPU-s and the reading of the helper's dumps 1,816 CPU-s
+over the 22 corpora, the rest the raw and final conversions and the checker, evaluated from the
+checkout on stage 0 (its namespaces changed; compiled at the next re-seed).
+
+**goi's annotation check over the native conversions.** `bin/repr-go read --reader native --forms
+--corpus C --out .tmp/gp4/nforms` for the corpora of `bin/goi annotations` (std tamago/amd64 and
+tamago/arm64, linux/amd64, `$GOROOT/test`'s programs and directory tests for linux/amd64: 2 min
+24 s to 2 min 37 s each for std, 1 min 19 s and 1 min 16 s for the programs and directory tests),
+then `bin/goi annotations --forms .tmp/gp4/nforms`:
+
+| corpus | packages | declarations | errors | verified | init-order |
+|---|---:|---:|---:|---|---|
+| tamago-amd64 | 373 | 35,950 | 0 | `{:assign 759, :conv 22582, :inst 1066, :tag 269, :val 9143, :go/via 4983}` | 373 packages, 2,549 initializers |
+| tamago-arm64 | 372 | 35,867 | 0 | `{:assign 759, :conv 22563, :inst 1066, :tag 270, :val 9048, :go/via 4970}` | 372, 2,545 |
+| linux-amd64 | 376 | 38,366 | 0 | `{:assign 793, :conv 24185, :inst 1091, :tag 282, :val 10972, :go/via 4909}` | 376, 2,560 |
+| linux-test | 1,713 | 9,770 | 0 | `{:assign 37, :conv 3555, :inst 422, :tag 48, :val 633, :go/via 163}` | 1,713, 932 |
+| linux-dirtest | 562 | 1,726 | 0 | `{:conv 198, :inst 218, :val 30, :go/via 12}` | 562, 132 |
+
+Zero errors, every annotation verified, and the same counts: the linux corpora's equal the
+recorded references (`test/goi/annotations-linux-*.edn`), and tamago's equal those of the helper's
+conversions of the same corpora in the same layout (`bin/repr-go read --corpus amd64`, `arm64`;
+`--reference`), which the recorded references cannot be: they are of `tamago/goroot`, one tree of
+both architectures with its overlays (371 and 370 packages, its forms without `:init-order`).
+`bin/goi annotations` as recorded (tamago/goroot, the helper's linux conversions) passes too, so
+the checker's fixes of goi's normal mode (GPS31) change none of its counts. The native forms of
+these five corpora are byte for byte the helper's conversions (`diff -r`: 0 of 11,029 `.ae` files
+differ), GP5's E-forms in mode `:lines` already.
+
+**The normal conversion is unchanged.** The converter and its namespaces (`arbace.repr.go`,
+`.convert`, `.types`, `.lit`, `.layout`, `.read`) are not changed: the native path adds annotations
+to the tree and converts it as the helper's dumps are converted. Checked byte for byte as at GP3:
+`bin/repr-go read --corpus C` and `read --full --corpus C` of repr/go's 14 corpora (std for four
+configurations, std with tests, `$GOROOT/test`'s programs and directory tests for four
+configurations each, the error tests), 28 conversions, by main `982ae875` (a pristine copy of its
+tree, on the same stage 0 and the same helper's dumps) and by the branch: every `.ae` file equal
+(62,878 files, 0 differ; the error tests' 64 failures the same, by dump and message). The round
+trips' references, functions of these forms, hold unchanged.
+
+**The program changes.** `arbace.go.check` and its parts, `arbace.repr.go.load`, `arbace.repr.go.raw`
+and the new `arbace.repr.go.annotate` are embedded namespaces: the next re-seed carries them, to be
+batched (no re-seed here). Until then stage 0 evaluates them from the checkout.
+
+**Checks.** `bin/repr-go native-check` over the 22 corpora (above: 12,275 dumps, E-tree all,
+12,158 raw forms resolved, E-ann 12,158 of 12,158, 0 not known); `bin/repr-go read --reader native
+--forms` over goi's five corpora and `bin/goi annotations --forms` over them (above); `bin/goi
+annotations` as recorded; the 28 conversions before and after; `make check-makefile`; the
+essential `bin/gate` (below). Not run: `bin/gate --full`, `bin/box-rebuild`.
+
+**Proposals (GPS27-GPS31; each built as recommended).**
+
+- **GPS27 Types as go/types spells them.** The converter writes the types go/types records (`:inst`,
+  `:tag`) as it spells them: `byte` and `rune` apart from `uint8` and `int32`, aliases by their
+  names. The checker's types were canonical (`:uint8`, an alias's denotation).
+  - (a) the resolve mode's types spelled (as built): `:byte` and `:rune` keywords identical to
+    `:uint8` and `:int32` by `same?` and `canon` (every comparison of types in the checker made
+    canonical: assignability, conversions, operators' operands, unification, type sets, the
+    instances' keys, duplicate cases and keys), an alias's name as metadata on the type it denotes
+    (equality and identity unchanged), an alias of a basic type a keyword of its own; goi's normal
+    mode spells nothing, its checking and its builder's types unchanged;
+  - (b) the same in goi's normal mode too: one representation, but `:byte` in the checked trees the
+    builder and goi's table read, a change to the interpreter;
+  - (c) none: E-ann comparing types up to identity, the spellings left to GP5's E-forms, which could
+    not hold (34 of std's dumps, the tests corpus's alias).
+
+  *Recommended: (a)*: go/types' spellings exactly where the forms need them, nothing changed for
+  goi; (b) when goi's REPL is to print types as go/types does.
+- **GPS28 How E-ann compares.**
+  - (a) the final forms the converter makes of the annotated native dump against the helper's,
+    form for form with every metadata key and position (as built): what the converter reads,
+    exactly as it reads it, and a difference reported where the forms show it;
+  - (b) the annotations themselves, a projection of the keys the converter reads at each node: a
+    second model of the converter's reads, to keep in step with it.
+
+  *Recommended: (a)*. GP5's E-forms then adds the `.ae` text, in modes `:lines` and `:full`.
+- **GPS29 External tests' worlds.** go list -test compiles an external test `p_test` against its
+  package's test variant `p [p.test]` and recompiles the packages of its imports that import p
+  (`q [p.test]`), so that one p is seen.
+  - (a) the same (as built): `p_test` checked in a session where p is its variant and the packages
+    of its imports that import p, directly or not, are checked anew against it; 1,258 packages
+    rechecked over the tests corpus's 175 external tests (most for `internal/strconv` and
+    `runtime`'s), the tests corpus 6 min 49 s where it took 4 min 18 s without them;
+  - (b) the variant for `p_test`'s import of p only: p's types seen through another package are the
+    plain p's (17 external tests with the checker's errors, one E-ann failure).
+
+  *Recommended: (a)*.
+- **GPS30 go/types' records of invalid programs.** For the error tests go/types records what
+  goi's checker did not, or the other way round: a shifted operand made invalid by its final type
+  unrecorded, no `Defs` for a redeclared name, `constDecl` stopped at an invalid type, `arrayLength`
+  looking a name up before evaluating it, an invalid index keeping the element's type, a variable
+  named `init` or `main` outside the package's objects, a promoted field through an embedded
+  pointer unrecorded (19 error tests).
+  - (a) go/types' rules in the resolve mode only (as built): goi's errorcheck results stay as
+    recorded (`test/goi/check-linux-amd64.edn`), E-ann holds for every error test;
+  - (b) in goi's normal mode too: goi's checker closer to go/types on invalid programs, its
+    errorcheck results to be measured again (GP6 measures them anyway).
+
+  *Recommended: (a)* now, (b) at GP6 with the error tests' raw forms (GPS9 (b)).
+- **GPS31 The checker's fixes in goi's normal mode.** Two checker bugs found by the corpora that
+  goi's annotation check never covered (cmd, std's tests) were fixed in both modes: a function's
+  local constant spec of several names (checked as variables: `var x [a]int` after `const a, b =
+  1, 2` was an error) and a switch clause ending in `fallthrough` after a declaration (not
+  terminating: a false "missing return").
+  - (a) fixed in both modes (as built): `bin/goi annotations` over its five corpora keeps its counts
+    (none of them has either construct; checked below), goi's essential check passes;
+  - (b) in the resolve mode only, goi's normal mode keeping the bugs.
+
+  *Recommended: (a)*.
