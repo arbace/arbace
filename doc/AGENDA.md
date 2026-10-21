@@ -119,7 +119,7 @@ The current state of the work. This file is rewritten as things change. For the 
     batched with JN2's; GPS16-GPS20 decided as built). GP3 done (2026-10-21: raw forms,
     `bin/repr-go raw-check` 12,158 dumps resolved, 0 differ, 117 raw only; the normal conversion
     unchanged). The seed remade after GP2, JN2 and GP3 (`aa4cb10b…`) and verified. GPS21-GPS26 decided
-    as built (the user, 2026-10-21); next GP4, the annotator.
+    as built (the user, 2026-10-21). Running: GP4, the annotator (`go-parser-gp4`).
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
@@ -127,7 +127,7 @@ The current state of the work. This file is rewritten as things change. For the 
     sources on Arbace parse and attribute as on the JVM; a tool executable of 183 MB; JN2 1-2
     days, JN3 3-4); JFS12-JFS17 decided as recommended (the user). JN2 done (2026-10-20:
     javac's forms in `jdk/javac/`, unpatched, `bin/javac-vendor`; JFS18-JFS22 decided as built);
-    next JN3, javac on Arbace compiles byte for byte.
+    running: JN3, javac on Arbace compiles byte for byte (`java-frontend-jn3`).
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

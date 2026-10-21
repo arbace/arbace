@@ -512,3 +512,15 @@ GPS21-GPS26 (doc/go/GO-PARSER-SURVEY.md, "As built: GP3"), each as recommended:
 - the statement lists loop;
 - the final converter's three imprecisions corrected at GP5;
 - GP4's checker takes the raw forms in memory.
+
+## 2026-10-21: GP4 and JN3 started (the user: "start GP4 and JN3")
+
+- **GP4, the annotator:** branch `go-parser-gp4` from main `982ae875`, in the worktree
+  `.tmp/worktrees/go-parser-gp4`. Its work: goi's checker in a resolve mode over the raw forms in
+  memory (GPS26), E-ann for every corpus, and `raw-check` merged into native-check (GPS23 (c)).
+- **JN3, javac runs on Arbace:** branch `java-frontend-jn3` from main `982ae875`, in the worktree
+  `.tmp/worktrees/java-frontend-jn3`. Its work: javac's class-file output on Arbace, byte for byte
+  equal to the frozen JVM's javac over the baseline, the samples and java.base's closure
+  (`-g:none`), on JFS15 (b)'s pinned platform.
+- Each is built by an agent in its worktree. The merges, the journal, the agenda and the re-seed
+  stay in the main session.
