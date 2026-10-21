@@ -16,6 +16,11 @@
 (declare check-branches! inst-say record-inst! instantiate-fn slice-elem tparam-index generic-fn? func-inst-target call-sig rename-tparams infer instance-type mark-addressed! call-form? expr expr-or-type multi-expr typexpr typexpr-generic byte-string-value literal const-node invalid-conversion! finish-comparison composite-lit builtin-call val-equal? val-form-str key-val stmt terminating? missing-cause implements? invalid invalid? signature rhs-values init-var assignment func-body check-fn-lit const-expr
          convert-untyped update-type operand-str expr-str stmt-list expr-internal pkg-path)
 
+(def ^:dynamic cx-flags
+  "{:annotated bool :resolve bool}: whether the package's forms carry the converter's annotations;
+  whether they are raw forms, the checker's resolve mode (doc/go/GO-PARSER-SURVEY.md GP4)."
+  {})
+
 ;;; Hooks set by arbace.go.check.decl
 
 (def ^:dynamic *obj-decl*
@@ -326,6 +331,11 @@
           :else
           (do (when (and (package-level? x) *obj-decl* (not (and (= :type (o x :kind)) (not (o x :alias)))))
                 (*obj-decl* x))
+              ;; the resolve mode: the qualifier a package name, the name its member
+              (when e/*answers*
+                (when-let [px (e/scope-get (:file-scope cx) q)]
+                  (e/answer! sym :x-pos {:obj px}))
+                (e/answer! sym :name-pos {:obj x}))
               x))))))
 
 ;;; Type expressions (typexpr.go)
@@ -335,7 +345,12 @@
 (defn type-of-obj
   "The type a type name object denotes; generic types without instantiation are an error."
   [f x]
-  (let [ty (o x :type)]
+  (let [ty (if (and t/*spelled* (o x :spelled)) (o x :spelled) (o x :type))
+        ;; the resolve mode: an alias's name kept on the type it denotes (go/types' Alias), when
+        ;; a vector can carry it (metadata: identity and equality as before)
+        ty (if (and t/*spelled* (o x :alias) (vector? ty) (not (seq (o x :tparams))))
+             (vary-meta ty assoc :arbace.go.check.types/alias {:name (o x :name) :pkg (o x :pkg) :obj x})
+             ty)]
     (cond
       (nil? ty) :invalid
       (or (and (t/named? ty) (seq (:tparams (t/info ty))) (not (:targs (t/info ty)))) (o x :tparams-count))
@@ -358,6 +373,7 @@
               (if (= "_" n)
                 (do (err! f :InvalidBlank "cannot use _ as value or type") nil)
                 (or (resolve-name cx n true) (do (err! f :UndeclaredName "undefined: %s" n) nil)))))]
+    (when (and x (not (and (symbol? f) (namespace f)))) (e/answer! f {:obj x}))
     (cond
       (nil? x) :invalid
       (not= :type (o x :kind))
@@ -455,9 +471,9 @@
                         (not (t/valid? ty)) nil
                         (t/interface? ty)
                         (do (err! x :InvalidUnion "invalid use of ~ (%s is an interface)" (t/type-str ty)) nil)
-                        (not= ty (t/under ty))
+                        (not (t/same? ty (t/under ty)))
                         (do (err! x :InvalidUnion "invalid use of ~ (underlying type of %s is %s)" (t/type-str ty) (t/type-str (t/under ty))) nil)
-                        :else #{[true ty]}))
+                        :else #{[true (t/canon ty)]}))
                     (let [ty (typexpr cx x)
                           u (t/under ty)]
                       (cond
@@ -465,7 +481,7 @@
                         (t/tparam? ty) (do (err! x :MisplacedTypeParam "term cannot be a type parameter") nil)
                         (and (vector? u) (= :interface (nth u 0))) (:terms (t/iface-tset u))
                         (t/union? u) (nth u 1)
-                        :else #{[false ty]})))))]
+                        :else #{[false (t/canon ty)]})))))]
     [:union (reduce t/terms-union #{} (remove nil? terms))]))
 
 (defn- intersect-term-lists
@@ -536,7 +552,7 @@
         ms (reduce (fn [acc m]
                      (let [k [(:name m) (:pkg m)]]
                        (if-let [prev (get acc k)]
-                         (do (when (or (and (:own prev) (:own m)) (not= (:type prev) (:type m)))
+                         (do (when (or (and (:own prev) (:own m)) (not (t/same? (:type prev) (:type m))))
                                ;; an embedded interface's method: at the interface (its embedding)
                                (error! (or (:line m) (e/current-line)) :DuplicateDecl (format "duplicate method %s" (:name m))))
                              acc)
@@ -579,12 +595,38 @@
       :send [:chan :send (typexpr cx b)]
       [:chan :both (typexpr cx a)])))
 
+(declare typexpr*)
+
 (defn typexpr
-  "The type a type form denotes (:invalid after an error)."
+  "The type a type form denotes (:invalid after an error); the resolve mode records it."
+  [cx f]
+  (let [T (typexpr* cx f)]
+    (when e/*answers* (e/answer! f {:mode :typexpr :type T}))
+    T))
+
+(declare raw-select raw-index)
+
+(defn- raw-typexpr
+  "The resolve mode: a type written as a raw expression (an instantiation's type arguments,
+  make's operand): (go/select pkg T), (go/index G T...), (go/star T); nil for another form."
+  [cx f]
+  (case (head-name f)
+    "go/select" (let [n (raw-select cx f)]
+                  (if (= :typexpr (:mode n)) (:type n)
+                      (do (when-not (= :invalid (:mode n)) (err! f :NotAType "%s is not a type" (expr-str f))) :invalid)))
+    "go/index" (let [n (raw-index cx f)]
+                 (if (= :typexpr (:mode n)) (:type n)
+                     (do (when-not (= :invalid (:mode n)) (err! f :NotAType "%s is not a type" (expr-str f))) :invalid)))
+    "go/star" [:pointer (typexpr cx (second f))]
+    nil))
+
+(defn- typexpr*
   [cx f]
   (with-line f
     (cond
       (or (symbol? f) (go-id? f)) (ident-type cx f)
+      (and (seq? f) (:resolve cx-flags) (#{"go/select" "go/index" "go/star"} (head-name f)))
+      (raw-typexpr cx f)
       (seq? f)
       (let [h (first f)]
         (cond
@@ -628,7 +670,9 @@
     (cond
       (nil? x) (do (err! f :UndeclaredName "undefined: %s" (expr-str f)) nil)
       (not= :type (o x :kind)) (do (err! f :NotAType "%s is not a type" (expr-str f)) nil)
-      :else (do (note-ref! x) x))))
+      :else (do (note-ref! x)
+                (when-not (and (symbol? f) (namespace f)) (e/answer! f {:obj x}))
+                x))))
 
 (defn typexpr-generic
   "The generic named type a name denotes (for an instantiation)."

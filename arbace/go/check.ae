@@ -167,15 +167,20 @@
         pkg (volatile! {:path (:path src) :name (:name src) :scope pkg-scope :config (:config src)
                         :local-types (volatile! [])})
         errors (volatile! [])
-        annotated (contains? (:opts src) :positions)
+        ;; the resolve mode (doc/go/GO-PARSER-SURVEY.md GP4): raw forms, the open decisions answered
+        ;; by position into (:answers src), nothing verified
+        resolving (some? (:answers src))
+        annotated (and (contains? (:opts src) :positions) (not resolving))
         ctx {:objs (volatile! []) :methods (volatile! {}) :bodies (volatile! []) :inits (volatile! [])
-             :flags {:annotated annotated}}
+             :flags {:annotated annotated :resolve resolving}}
         fis (mapv #(file-info pkg-scope % (:config src)) (:files src))]
     (binding [e/*pkg* pkg
               e/*errors* errors
               e/*seen* (java.util.IdentityHashMap.)
               decl/*ctx* ctx
-              code/cx-flags {:annotated annotated}
+              e/*answers* (:answers src)
+              t/*spelled* resolving
+              code/cx-flags {:annotated annotated :resolve resolving}
               t/*resolve-named* decl/resolve-named!
               t/*method-obj* decl/method-data!
               t/*qualify* (:path src)
@@ -225,6 +230,13 @@
           (doseq [d decls :when (:tree @d)]
             (binding [e/*decl* d e/*gofile* (:file @d)]
               (verify-tags! (:tree @d))))
+          ;; the resolve mode: the shifts' final types (an untyped operand's, its context's: go/types
+          ;; records an expression's type after updateExprType)
+          (when resolving
+            (doseq [d decls :when (:tree @d)
+                    n (nodes-seq (:tree @d))
+                    :when (and (= :binary (:op n)) (code/shift-ops (:go/op n)))]
+              (e/answer! (:form n) {:mode (:mode n) :type (:type n) :final true})))
           ;; skipped declarations (what the checker does not check): their imports used
           (doseq [d decls :when (:unsupported @d)]
             (mark-qualifiers-used! (:file @d) (:spec @d)))
@@ -315,6 +327,10 @@
                                            (select-keys @d [:id :kind :spec :form :obj :lhs :tree :generic :unsupported
                                                             :method :base :file]))))
                            :order (when keep-trees order)
+                           ;; the resolve mode: the initializers' variables [name file line col]
+                           :resolve-init-order (when resolving
+                                                 (mapv (fn [lhs] (mapv (fn [v] [(o v :name) (o v :file) (o v :line) (second (o v :pos))]) lhs))
+                                                       order))
                            :scope (when keep-trees pkg-scope)
                            :inits (when keep-trees @(:inits ctx))))
             pkg))))))
@@ -384,6 +400,11 @@
         (swap! (:ns-index s) assoc (load/path->ns path) path)
         (deliver p pkg)
         pkg)))))
+
+(defn check-src
+  "Checks the package of source src (not cached) against session s's packages: the package."
+  [s src]
+  (check-package src (resolver s src [])))
 
 ;;; Corpora (§11.4)
 

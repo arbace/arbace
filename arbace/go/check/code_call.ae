@@ -53,7 +53,7 @@
         (= "_" n) (do (err! f :InvalidBlank "cannot use _ as value") (invalid f))
         :else
         (if-let [x (resolve-name cx n)]
-          (obj-node cx f x)
+          (do (e/answer! f {:obj x}) (obj-node cx f x))
           (do (err! f :UndeclaredName "undefined: %s" n) (invalid f)))))))
 
 ;;; Literals
@@ -115,7 +115,6 @@
       :unexported (format "type %s has no field or method %s, but does have unexported %s %s" (t/type-str ty) sel what an)
       :inaccessible (format "cannot refer to unexported %s %s" what an))))
 
-(def ^:dynamic cx-flags "{:annotated bool}: whether the package's forms carry the converter's annotations." {})
 
 (defn- via-names [r] (mapv str (:via r)))
 
@@ -150,10 +149,18 @@
   [m]
   (t/method-data m))
 
+(declare select-expr*)
+
 (defn select-expr
   "x.name: a field, a method value (or a method for a call: call? true)."
   [cx f x-form nm call?]
-  (let [x (expr-or-type cx x-form)]
+  (select-expr* cx f x-form (expr-or-type cx x-form) nm nil))
+
+(defn select-expr*
+  "x.name of the checked operand x (of form x-form); sf, in the resolve mode, the name's form
+  (raw forms' (go/select x f)), its answers recorded."
+  [cx f x-form x nm sf]
+  (let []
     (cond
       (invalid? x) (invalid f)
       (= :typexpr (:mode x))
@@ -179,10 +186,14 @@
           (do (err! f :InvalidMethodExpr "cannot call pointer method %s on %s" nm (t/type-str ty)) (invalid f))
           :else
           (do
-            (verify-via! f r)
+            (if sf
+              (e/answer! f {:sel {:kind (if (= :field (:kind r)) :field :method) :path (:index r) :via (via-names r)
+                                  :indirect (boolean (:indirect r))}})
+              (verify-via! f r))
             (case (:kind r)
               :field
               (let [fd (:obj r)]
+                (when sf (e/answer! sf {:field-obj fd}))
                 {:op :field :path (:index r) :derefs (path-derefs ty (:index r)) :via (via-names r) :field fd :x x
                  :mode (if (or (= :variable (:mode x)) (:indirect r)) :variable :value)
                  :type (:type fd) :form f :line (fline f)})
@@ -198,6 +209,7 @@
                           (and (not recv-ptr) (:indirect r) (empty? (:via r)) (t/pointer? ty)) :deref
                           :else nil)]
                 (note-ref! m)
+                (when sf (e/answer! sf {:obj m}))
                 (when (o m :generic) (e/generic!))
                 ;; &x taken implicitly: x's variable is addressed (for the builder: a cell)
                 (when (= :addr adj) (mark-addressed! x))
@@ -210,18 +222,26 @@
                          :rmap (let [[rb] (t/deref-type (:recv-type r))]
                                  (when (t/named? rb)
                                    (zipmap (or (o m :rtparams) []) (or (:targs (t/info rb)) []))))
-                         :inst-say (inst-say cx (if (seq? f) (first f) f)) :inst-form (if (seq? f) (first f) f))))
+                         :inst-say (inst-say cx (if (seq? f) (first f) f)) :inst-form (or sf (if (seq? f) (first f) f)))))
               :iface-method
               (let [m (:obj r)]
+                (when sf (e/answer! sf {:obj m}))
                 {:op :iface-method :method m :iface (:iface r) :recv x :path (:index r) :via (via-names r)
                  :mode :value :type (:type m) :form f :line (fline f)}))))))))
+
+(declare method-expr*)
 
 (defn method-expr
   "(method-expr T M): the method as a function of its receiver."
   [cx f]
-  (let [[_ tf mf] f
-        T (typexpr cx tf)
-        nm (name mf)]
+  (let [[_ tf mf] f]
+    (method-expr* cx f tf (typexpr cx tf) mf false)))
+
+(defn method-expr*
+  "T.M of the type T (of form tf), M's form mf; raw: the resolve mode's (go/select T M), its
+  answers recorded."
+  [cx f tf T mf raw]
+  (let [nm (ident-name mf)]
     (if-not (t/valid? T)
       (invalid f)
       (let [r (t/lookup T false nm (pkg-path))]
@@ -242,6 +262,9 @@
                 ty [:func (into [T] ps) rs v]]
             ;; the converter writes no :go/via on method expressions
             (when (:go/via (meta f)) (verify-via! f r))
+            (when raw
+              (e/answer! f {:sel {:kind :method-expr :path (:index r) :via (via-names r) :indirect (boolean (:indirect r))}})
+              (e/answer! mf {:obj (:obj r)}))
             (when (= :method (:kind r)) (note-ref! (:obj r)) (when (o (:obj r) :generic) (e/generic!)))
             (cond-> {:op :method-expr :recv-type T :method (:obj r) :path (:index r)
                      :mode :value :type ty :form f :line (fline f)}
@@ -299,13 +322,13 @@
                            (let [b (t/under (nth u 1))] (when (and (vector? b) (= :array (nth b 0))) b)))]
                   (cond
                     (nil? u) nil
-                    (t/string-type? u) {:e :uint8 :l -1 :mode :value}
+                    (t/string-type? u) {:e (if t/*spelled* :byte :uint8) :l -1 :mode :value}
                     (and (vector? u) (= :array (nth u 0))) {:e (nth u 2) :l (nth u 1) :mode (if (= :variable (:mode x)) :variable :value)}
                     pa {:e (nth pa 2) :l (nth pa 1) :mode :variable}
                     (and (vector? u) (= :slice (nth u 0))) {:e (nth u 1) :l -1 :mode :variable}
                     (and (vector? u) (= :map (nth u 0))) {:k (nth u 1) :e (nth u 2) :l -1}
                     :else nil)))]
-    (if (or (empty? infos) (some nil? infos) (not (apply = (map :k infos))) (not (apply = (map :e infos))))
+    (if (or (empty? infos) (some nil? infos) (not (apply = (map (comp t/canon :k) infos))) (not (apply = (map (comp t/canon :e) infos))))
       (do (err! f :NonIndexableOperand "cannot index %s" (operand-str x)) (invalid f))
       (let [{:keys [k e]} (first infos)
             mode (if (some #(= :value (:mode %)) infos) :value :variable)
@@ -318,11 +341,18 @@
             (if (invalid? i) (invalid f)
                 {:op :index :x x :index i :mode mode :type e :form f :line (fline f)})))))))
 
+(declare index-expr*)
+
 (defn index-expr
   "(aget x i)."
   [cx f]
-  (let [[_ xf if*] f
-        x (expr-or-type cx xf)]
+  (let [[_ xf if*] f]
+    (index-expr* cx f xf (expr-or-type cx xf) if*)))
+
+(defn index-expr*
+  "x[i] of the checked operand x (of form xf)."
+  [cx f xf x if*]
+  (let []
     (cond
       (invalid? x) (invalid f)
       (= :typexpr (:mode x))
@@ -343,8 +373,8 @@
               (invalid f)
               (if (and (= :constant (:mode x)) iv)
                 ;; a constant string indexed by a constant: a byte value (not a constant)
-                {:op :index :x x :index i :mode :value :type :uint8 :form f :line (fline f)}
-                {:op :index :x (default-final x) :index i :mode :value :type :uint8 :form f :line (fline f)})))
+                {:op :index :x x :index i :mode :value :type (if t/*spelled* :byte :uint8) :form f :line (fline f)}
+                {:op :index :x (default-final x) :index i :mode :value :type (if t/*spelled* :byte :uint8) :form f :line (fline f)})))
           (and (vector? u) (= :array (nth u 0)))
           (let [[i] (index-value cx if* (nth u 1) "index")]
             (if (invalid? i) (invalid f)
@@ -376,7 +406,7 @@
                       us (map #(if (and % (t/string-type? %)) [:slice :uint8] %) us)]
                   (cond
                     (some nil? us) nil
-                    (not (apply = us)) nil
+                    (not (apply = (map t/canon us))) nil
                     str? :string
                     :else (first us)))
                 (t/under ty))
@@ -576,7 +606,9 @@
                                 (kv? (first es)) (recur (next es) (conj acc (keyword (ident-name (first (first es)))) (second (first es))))
                                 :else (recur (next es) (conj acc (first es)))))
                             :else elems)
-                    keyed (and (seq elems) (keyword? (first elems)))]
+                    keyed (and (seq elems) (keyword? (first elems)))
+                    ;; the resolve mode: the literal's elements as written (^:go/key [k v])
+                    orig (when e/*answers* (vec (nnext f)))]
                 (if keyed
                   (let [pairs (partition 2 elems)
                         via-map (:go/via (meta f))
@@ -607,6 +639,8 @@
                                                                 (pr-str (vec (or say []))) (pr-str (mapv symbol have)))))
                                        (when (and (:pkg fd) (not= (:pkg fd) (pkg-path)))
                                          (err! vf :UnexportedLitField "cannot refer to unexported field %s in struct literal of type %s" nm (t/type-str T)))
+                                       (when-let [el (get orig j)]
+                                         (when (vector? el) (e/answer! el {:field {:path (:index r) :via have}})))
                                        {:field fd :path (:index r) :via have :pos (+ 3 (* 2 j))
                                         :value (assignment cx (expr cx vf) (:type fd) "struct literal")})))))) ]
                     ;; duplicate keys (of fields found)
@@ -673,7 +707,7 @@
                           ;; go/types: a constant key, of an interface key type by its own type too
                           (if-let [kv (let [key (if (= :convert-iface (:op key)) (:x key) key)]
                                         (when (and key (= :constant (:mode key))) (key-val key)))]
-                            (let [kk [(t/type-str (:type (if (= :convert-iface (:op key)) (:x key) key))) kv]]
+                            (let [kk [(t/type-str (t/canon (:type (if (= :convert-iface (:op key)) (:x key) key)))) kv]]
                               (if (contains? seen kk)
                                 (do (with-elem fv pos
                                       (err! (:form key) :DuplicateLitKey "duplicate key %s in map literal" (expr-str (:form key))))
@@ -717,6 +751,9 @@
   checker computed (inferred?: some of them inferred, which the converter always annotates)."
   [n targs inferred?]
   (let [say (:inst-say n) f (:inst-form n)]
+    ;; the resolve mode: at the name (a qualified one's: its :name-pos)
+    (when e/*answers*
+      (if (:x-pos (second (e/at-of f))) (e/answer! f :name-pos {:inst targs}) (e/answer! f {:inst targs})))
     (cond
       say (if (= say targs)
             (e/verified! :inst f)
@@ -877,7 +914,7 @@
     (cond
       (invalid? callee) (do (doseq [a arg-forms] (when-not (spread? a) (expr cx a))) (invalid f))
       (= :typexpr (:mode callee))
-      (do (e/annotation-error! f "conv" (expr-str f) "a call" "a conversion")
+      (do (when-not (:resolve cx-flags) (e/annotation-error! f "conv" (expr-str f) "a call" "a conversion"))
           (if (= 1 (count arg-forms))
             (conversion cx f (expr cx (first arg-forms)) (:type callee))
             (invalid f)))
@@ -923,7 +960,7 @@
   (let [us (map second (t/typeset-pairs ty))]
     (when (every? #(and (vector? %) (= :slice (nth % 0))) us)
       (let [es (map #(nth % 1) us)]
-        (when (apply = es) (first es))))))
+        (when (apply = (map t/canon es)) (first es))))))
 
 (defn- string-or-bytes?
   "Whether every type of ty's type set is a string or []byte, one at least a string."
@@ -1075,7 +1112,7 @@
                   (node {:args [d (default-final s)] :mode :value :type :int})
                   (nil? se)
                   (do (err! (:form s) :InvalidCopy "%s" (not-slice s)) (invalid f))
-                  (not= de se)
+                  (not (t/same? de se))
                   (bad "invalid copy: arguments %s and %s have different element types %s and %s"
                        (operand-str d) (operand-str s) (t/type-str de) (t/type-str se))
                   :else (node {:args [d s] :mode :value :type :int}))))))
@@ -1086,7 +1123,7 @@
             (if (invalid? m)
               (do (expr cx (second arg-forms)) (invalid f))
               (let [us (map second (t/typeset-pairs (:type m)))
-                    u (when (and (every? #(and (vector? %) (= :map (nth % 0))) us) (apply = (map #(nth % 1) us))) (first us))]
+                    u (when (and (every? #(and (vector? %) (= :map (nth % 0))) us) (apply = (map #(t/canon (nth % 1)) us))) (first us))]
                 (if-not u
                   (do (expr cx (second arg-forms)) (bad "invalid argument: %s is not a map" (operand-str m)))
                   (let [k (assignment cx (expr cx (second arg-forms)) (nth u 1) "argument to delete")]
@@ -1136,7 +1173,7 @@
                             :else [x y])]
                 (cond
                   (or (invalid? x) (invalid? y)) (invalid f)
-                  (not= (:type x) (:type y))
+                  (not (t/same? (:type x) (:type y)))
                   (bad "invalid operation: %s (mismatched types %s and %s)" (expr-str f) (t/type-str (:type x)) (t/type-str (:type y)))
                   (not (t/float-type? (:type x)))
                   (bad "invalid argument: arguments have type %s, expected floating-point" (t/type-str (:type x)))
@@ -1226,7 +1263,7 @@
                                   (let [[x y] (match-types x y)]
                                     (cond
                                       (or (invalid? x) (invalid? y)) (invalid f)
-                                      (not= (:type x) (:type y))
+                                      (not (t/same? (:type x) (:type y)))
                                       (do (err! f :MismatchedTypes "invalid argument: mismatched types %s (previous argument) and %s (type of %s)"
                                                 (t/type-str (:type x)) (t/type-str (:type y)) (expr-str (:form y)))
                                           (invalid f))
@@ -1264,10 +1301,17 @@
         (if-not (need 1 1)
           (invalid f)
           (let [af (first arg-forms)
-                h (head-name af)]
-            (if-not (and h (str/starts-with? h ".-"))
+                h (head-name af)
+                ;; the resolve mode: raw forms' (go/select x f)
+                raw (and (:resolve cx-flags) (= "go/select" h))]
+            (if-not (and h (or raw (str/starts-with? h ".-")))
               (bad "invalid argument: %s is not a selector expression" (expr-str af))
-              (let [x (select-expr cx af (second af) (subs h 2) false)]
+              (let [x (if raw
+                        (let [n (raw-select cx af)]
+                          (e/answer! af {:mode (:mode n) :type (:type n)})
+                          n)
+                        (select-expr cx af (second af) (subs h 2) false))
+                    h (if raw (str ".-" (ident-name (nth af 2))) h)]
                 (cond
                   (invalid? x) (invalid f)
                   (not= :field (:op x)) (bad "invalid argument: %s is a method value" (expr-str af))
@@ -1354,6 +1398,102 @@
   (let [[sig ps rs body named] (signature cx (rest f) nil)]
     (func-body cx f sig ps rs body named)))
 
+;;; Raw forms (the resolve mode, doc/go/GO-PARSER-SURVEY.md GP4; doc/go/CONVERTER-NOTES.md "Raw forms")
+
+(def raw-heads #{"go/select" "go/index" "go/star" "go/type-guard" "go/define" "go/literal"})
+
+(def raw-builtin-names
+  #{"append" "cap" "clear" "close" "complex" "copy" "delete" "imag" "len" "make" "max" "min" "new"
+    "panic" "print" "println" "real" "recover"})
+
+(defn- raw-qualified
+  "The qualified name pkg/nm of a raw (go/select x f) whose operand names a package: a symbol
+  with the selector's line and positions, the operand's and the name's (:x-pos, :name-pos)."
+  [f xf sf]
+  (let [[file pm] (e/at-of f)
+        xp (get (second (e/at-of xf)) :name-pos)
+        np (get (second (e/at-of sf)) :name-pos)]
+    (with-meta (symbol (ident-name xf) (ident-name sf))
+      (cond-> {:line (fline f)}
+        file (assoc :arbace.go.check/at [file (cond-> pm xp (assoc :x-pos xp) np (assoc :name-pos np))])))))
+
+(defn- pkg-name-obj
+  "The package object a raw operand form names (a name resolving to an import), or nil."
+  [cx xf]
+  (when (and (go-ident? xf) (not (and (symbol? xf) (namespace xf))))
+    (let [x (or (e/scope-lookup (:scope cx) (ident-name xf)) (e/scope-get e/universe (ident-name xf)))]
+      (when (and x (= :pkg (o x :kind))) x))))
+
+(defn raw-select
+  "(go/select x f): a package's member, a field, a method value or a method expression."
+  [cx f]
+  (let [[_ xf sf] f
+        nm (ident-name sf)]
+    (if (pkg-name-obj cx xf)
+      (let [q (raw-qualified f xf sf)
+            n (ident cx q)]
+        (assoc n :form f))
+      (let [x (expr-or-type cx xf)]
+        (if (= :typexpr (:mode x))
+          (method-expr* cx f xf (:type x) sf true)
+          (select-expr* cx f xf x nm sf))))))
+
+(defn- raw-type-name
+  "The generic type a raw index's operand names: [the type name's object, its form (a symbol,
+  or pkg/T made of a (go/select pkg T))], or nil when it names no type."
+  [cx xf]
+  (cond
+    (and (go-ident? xf) (not (and (symbol? xf) (namespace xf))))
+    (let [x (or (e/scope-lookup (:scope cx) (ident-name xf))
+                (when-let [[x _] (some-> (:file cx) :dots (.get (ident-name xf)))] x)
+                (e/scope-get e/universe (ident-name xf)))]
+      (when (and x (= :type (o x :kind))) [x xf]))
+    (= "go/select" (head-name xf))
+    (let [[_ pf sf] xf]
+      (when-let [px (pkg-name-obj cx pf)]
+        (let [p (o px :imported)
+              x (when (and p (not (string? p))) (e/scope-get (o p :scope) (ident-name sf)))]
+          (when (and x (= :type (o x :kind))) [x (raw-qualified xf pf sf)]))))
+    :else nil))
+
+(defn raw-index
+  "(go/index x i ...): an index, a generic function's instantiation or a generic type's."
+  [cx f]
+  (let [[_ xf & ifs] f]
+    (if-let [[_ g] (raw-type-name cx xf)]
+      (let [T (typexpr cx (with-meta (list* 'inst g ifs) (meta f)))]
+        (when (= "go/select" (head-name xf)) (e/answer! xf {:mode :typexpr}))
+        (if (t/valid? T) {:op :type :mode :typexpr :type T :form f :line (fline f)} (invalid f)))
+      (let [g (expr-or-type cx xf)]
+        (cond
+          (invalid? g) (invalid f)
+          (generic-fn? g)
+          (let [tps (:tparams g)
+                targs (mapv #(typexpr cx %) ifs)]
+            (e/generic!)
+            (cond
+              (some #(not (t/valid? %)) targs) (invalid f)
+              (> (count targs) (count tps))
+              (do (err! f :WrongTypeArgCount "got %d type arguments but want %d" (count targs) (count tps)) (invalid f))
+              (= (count targs) (count tps)) (assoc (instantiate-fn g targs false) :form f :line (fline f))
+              :else (assoc g :ptargs targs :form f :line (fline f))))
+          (= :typexpr (:mode g))
+          (do (err! f :NotAGenericType "%s is not a generic type" (expr-str xf)) (invalid f))
+          (not= 1 (count ifs))
+          (do (err! f :InvalidSyntaxTree "invalid operation: more than one index") (invalid f))
+          :else (index-expr* cx f xf g (first ifs)))))))
+
+(defn raw-expr
+  "A raw form's open head h (the resolve mode)."
+  [cx f h]
+  (case h
+    "go/select" (raw-select cx f)
+    "go/index" (raw-index cx f)
+    "go/star" (indirect cx f)
+    "go/type-guard" (do (err! f :BadTypeKeyword "invalid syntax tree: use of .(type) outside type switch") (invalid f))
+    "go/define" (do (err! f :InvalidSyntaxTree "invalid syntax tree: := outside a declaration") (invalid f))
+    "go/literal" (do (err! f :InvalidConstVal "malformed constant: %s" (nth f 2)) (invalid f))))
+
 ;;; The expression dispatch
 
 (defn expr-dispatch [cx f hint]
@@ -1364,6 +1504,14 @@
     (let [h (head-name f)
           args (rest f)]
       (cond
+        ;; the resolve mode: raw forms' open heads, and calls of a builtin's name (looked up)
+        (and (:resolve cx-flags) h (raw-heads h)) (raw-expr cx f h)
+        (and (:resolve cx-flags) h (raw-builtin-names h))
+        (let [x (resolve-name cx h)]
+          (if (and x (= :builtin (o x :kind)) (nil? (namespace (first f))))
+            (do (e/answer! (first f) {:obj x :mode :builtin :type :invalid})
+                (builtin-call cx f h args false))
+            (call cx f (first f) args)))
         (nil? h)
         (if (and (symbol? (first f)) (namespace (first f)))
           ;; pkg/F args...: a call of a package member (or unsafe's builtins)
@@ -1421,6 +1569,7 @@
   (with-line f
     (let [n (expr-dispatch cx f hint)
           n (if (and (map? n) (nil? (:form n))) (assoc n :form f) n)]
+      (when e/*answers* (e/answer! f {:mode (:mode n) :type (:type n) :val (:val n)}))
       (if (and (seq? f) (:tag (meta f)) (not= "lit" (head-name f)))
         (assoc n :tag-form f :tag-type (typexpr cx (:tag (meta f))))
         n))))
