@@ -70,9 +70,12 @@ Prior art:
   embedded copy loaded from the checkout instead, evaluated (`bin/lib/tools.bash`'s
   `arbace_tool`, `ARBACE_PATH`). The JVM runs only the frozen jar of `arbace-for-java-26-v4` (built from its tag,
   pinned by `test/oracle/frozen-jar.sha256`; `bin/lib/frozen.bash`, its tools' namespaces from the
-  checkout as `.clj` links before the jar): the oracle's reference, repr/java (javac's front end:
-  `bin/repr-java`, its `check`, `jrt-convert`, `--java-fixtures`), j2g's edge (`bin/j2g-edge`) and the
-  data generators (`bin/jrt testdata|manifest|standins`, `jrt-coverage`).
+  checkout as `.clj` links before the jar): the oracle's reference, repr/java's reference read
+  (`REPR_JAVA_HOST=jvm`, until JN6; since JN5 repr/java reads on javac's tool executable by default),
+  the back end of `bin/repr-java check --suite`, the edges' recordings (`bin/j2g-edge`, `bin/javac-vendor
+  edge`), `bin/jrt-convert`'s own namespaces (the source list, the locales, the edge, the report) and the
+  data generators (`bin/jrt testdata|manifest|standins`, `jrt-coverage`); the system JDK's `javac`
+  is the reference `bin/javac-vendor classes` compares javac on Arbace with.
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
   frozen baseline on the JVM (`test/baseline-results.edn`), or with `CLOJURE_TESTS_GO` the Go
   build's test executable (`test/arbace-go-results.edn`; repr/clojure's translation and the report on the
@@ -104,9 +107,12 @@ Prior art:
   - `arbace/repr/`: the bridges between a language's source text and its forms, each one
     namespace with its parts below it and one command with the verbs `read` and `print`:
     `arbace.repr.java` (`arbace/repr/java{.ae,/}`), Java → Java forms (`bin/repr-java read`,
-    `check`) on the frozen JVM, or with `REPR_JAVA_HOST=arbace` on javac's tool executable
-    (javac on Arbace, the reader compiled into the tool; JN4, doc/classes/JAVA-FRONTEND-SURVEY.md,
-    "As built: JN4"; `bin/repr-java host-check`: every corpus read as on the JVM; `bin/repr-java
+    `check`) on javac's tool executable (javac on Arbace, the reader compiled into the tool; JN4,
+    JN5, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN4", "As built: JN5"; the default host
+    since JN5, `REPR_JAVA_HOST=arbace`, the tool's key beside it, `arbace-javac.key`,
+    `bin/lib/javac-key.bash`, named by the provenance files it writes), or with `REPR_JAVA_HOST=jvm`
+    on the frozen JVM (the reference until JN6; `bin/repr-java host-check`: every corpus read as on
+    the JVM); `bin/repr-java javac`: javac's command line on the same host; `bin/repr-java
     declarations`: the runtime's declarations, javac's class path for the suite's fixtures), and Java forms → Java (`print`, `arbace.repr.java.print`; the
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →
     forms → Java → forms at the levels forms, ae (the converted text) and classes (javac's, byte
@@ -178,17 +184,19 @@ Prior art:
   java.compiler, `CommandLine` and the java.base classes javac's world needs, unpatched; jrt's
   own Java and j2g variants for that world in `overlay/jdk/javac/`), its source list, provenance
   and edge (`jdk/javac/edge.edn`: what javac's world asks beyond `jdk/edge.edn`), made by
-  `bin/javac-vendor convert` on the frozen JVM (`verify` byte for byte, `check`: j2g translates
-  javac's world; doc/classes/JAVA-FRONTEND-SURVEY.md, JN2); the input of javac's tool build,
+  `bin/javac-vendor convert`: since JN5 read by javac on Arbace (the fixpoint: javac's tool reads
+  javac's own sources into these forms), the edge recorded on the frozen JVM (`verify` byte for
+  byte, `check`: j2g translates javac's world; doc/classes/JAVA-FRONTEND-SURVEY.md, JN2, JN5); the input of javac's tool build,
   `bin/arbace-go --build-java` (`target/arbace-go/<arch>/arbace-javac`, not shipped). javac runs on
   it (JN3) through its command line on Arbace, `jdk.internal.jrt.javac.Main` with an Arbace file
   manager (jrt's own Java in `overlay/jdk/javac/jdk.compiler`), against the platform: the JDK build
-  tree's exploded modules with their jmods' module descriptors, pinned by
+  tree's exploded modules with their jmods' module descriptors (the corpora's six and, since JN5,
+  javac's own four, which `read-jdk` patches for `bin/javac-vendor`), pinned by
   `jdk/javac/platform.sha256` (`bin/javac-vendor platform-pin`); `bin/javac-vendor classes`
   compiles the baseline, the samples and java.base's closure (`-g:none`) by javac on Arbace and by
   the JVM's javac and compares the class files byte for byte (`java.base`: java.base as the JDK
-  build compiles it, against the build's classes). repr/java's reader runs on the tool (JN4,
-  `REPR_JAVA_HOST=arbace`): `--build-java` embeds `arbace/repr/java` and compiles it by c2j on a
+  build compiles it, against the build's classes). repr/java's reader runs on the tool (JN4; the
+  default since JN5): `--build-java` embeds `arbace/repr/java` and compiles it by c2j on a
   first tool build (`target/arbace-go/aot-reader`, kept by key; j2g's `--embed`); `read-jdk`'s
   `--patch-module` against the same platform. `bin/arbace-go` builds
   (`--build`, `--build-tests`, `--pgo`, by the tools' host; the test build's Java
@@ -252,13 +260,15 @@ Prior art:
   --essential`: `$GOROOT/test`'s programs of `test/goi/essential.txt` interpreted against gc), and the generated variants'
   check (`bin/generated-check`, F7.3: `arbace/lang/go/CompilerNodes.ae` and `CompilerAOTFn.ae`
   regenerated and compared with the committed files). `bin/gate --full` adds, concurrently: on the frozen
-  JVM `bin/repr-java check --suite`, `bin/repr-java roundtrip --corpus baseline,samples,jdk --text`
-  (then mode `:full` printed back to the original Java, byte for byte),
-  `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte),
-  `bin/j2g-edge verify`, `bin/clojure-tests --java-fixtures verify`; the Go build afresh with its
-  smoke test, then javac's forms and javac on Arbace (`bin/javac-vendor verify`, `check`, `build`,
-  `classes baseline samples jdk java.base`, then `bin/repr-java host-check`: repr/java's read on the
-  tool against the JVM's over every corpus), the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
+  JVM `bin/j2g-edge verify`; the Go build afresh with its
+  smoke test, then javac's forms and javac on Arbace (`bin/javac-vendor check`, `build`, `verify`:
+  javac's forms read afresh by javac on Arbace, `classes baseline samples jdk java.base`), then,
+  beside the rest of that chain, repr/java's checks on the tool just built (JN5, JFS9): `bin/repr-java
+  check --suite`, `bin/repr-java roundtrip --corpus baseline,samples,jdk --text` (then mode `:full`
+  printed back to the original Java, byte for byte; the classes level by javac on Arbace),
+  `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte), `bin/clojure-tests
+  --java-fixtures verify` (the verifies compare the provenance but its host, which names the tool
+  that wrote it, JFS32); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
@@ -309,7 +319,8 @@ Prior art:
   records and the tags name them; j2c, g2c and c2g before 2026-10-11, as the frozen branches and
   dated records name them.
 - The tools (c2j, j2g, repr/go, repr/clojure, the suite runner) run on the tools' Go host, stage 0 by default
-  (`bin/lib/host.bash`, `bin/lib/tools.bash`); repr/java and the JVM's records on the frozen jar
-  (`bin/lib/frozen.bash`), repr/java's read also on javac's tool executable (`REPR_JAVA_HOST=arbace`). Nothing builds or runs a JVM Arbace of the checkout.
+  (`bin/lib/host.bash`, `bin/lib/tools.bash`); repr/java's read and javac on javac's tool executable
+  (`REPR_JAVA_HOST=arbace`, the default since JN5), or on the frozen jar (`REPR_JAVA_HOST=jvm`, the
+  reference until JN6), and the JVM's records on the frozen jar (`bin/lib/frozen.bash`). Nothing builds or runs a JVM Arbace of the checkout.
 - Put temporary and scratch files in `.tmp/`, which is gitignored.
 - Never create or modify anything under `.claude/`.
