@@ -35,7 +35,14 @@
 #                                      of j2g's arguments, e.g. --qualify for a driver's package,
 #                                      --edge for its edge), built into
 #                                      target/arbace-go/<arch>/arbace-javac for
-#                                      $ARBACE_GO_ARCHES. Neither shipped nor in the gate
+#                                      $ARBACE_GO_ARCHES; with repr/java's namespaces embedded
+#                                      and compiled into it (the survey's "As built: JN4",
+#                                      JFS28: repr/java's read on javac's tool executable,
+#                                      bin/repr-java's REPR_JAVA_HOST=arbace) by c2j on a first
+#                                      tool build, target/arbace-go/aot-reader, kept while its
+#                                      key holds (Arbace's sources, the runtime, javac's world;
+#                                      ARBACE_AOT=0: the reader evaluated). Not shipped; in
+#                                      bin/gate --full's javac step
 #        bin/arbace-go --fixpoint      the Go-hosted fixpoint (standalone S3, S4;
 #                                      doc/STANDALONE-NOTES.md): G1 built by the host executable
 #                                      (stage 0 by default), G2 by G1 (j2g and repr/go on G1), G3 by
@@ -382,9 +389,45 @@ build_tests() {
   echo "arbace-go: the test build in $(since "$t0")" >&2
 }
 
+# reader_key: what repr/java's reader compiled for javac's tool ($dir/aot-reader) is a function of:
+# the compiled namespaces' key (aot_key: the runtime, Arbace's sources, c2j among them) and
+# javac's world, whose classes the reader's code names (jdk/javac, overlay/jdk/javac, the edges)
+reader_key() {
+  (cd "$root" && { aot_key; find jdk/javac overlay/jdk/javac jdk/edge.edn -type f | LC_ALL=C sort | xargs -d '\n' sha256sum; } \
+     | sha256sum | cut -c1-64)
+}
+
+# reader_compile TOOL OUT: repr/java's namespaces (arbace/repr/java{.ae,/}) compiled to Java forms
+# by c2j into OUT, on TOOL (a javac tool executable of the checkout's runtime, whose world holds
+# the javac classes the reader names): loaded from the checkout as embedded sources
+# (ARBACE_PATH_FIRST), the program's own compiled namespaces kept, so that only the reader's
+# units are recorded (each source in its own id space)
+reader_compile() {
+  local tool=$1 out=$2 nss t0
+  t0=$(date +%s)
+  echo "== repr/java's reader compiled (arbace.c2j, on $tool)" >&2
+  nss=$(cd "$root" && find arbace/repr/java.ae arbace/repr/java -name '*.ae' | LC_ALL=C sort | sed 's/\.ae$//; s|/|.|g; s/_/-/g' | tr '\n' ' ')
+  rm -rf "$out"
+  printf '(doseq [n (quote [%s])] (require n))
+(require (quote arbace.c2j.main))
+(let [srcs (vec (distinct (filter #(re-find #"^arbace/repr/java[./]" %%) (map #(aget ^objects %% 0) (arbace.lang.Compiler$AST/units)))))
+      r (arbace.c2j.main/run "%s" srcs)]
+  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")
+  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m))
+  (System/exit (if (seq (:failed r)) 1 0)))
+' "$nss" "$out" > "$dir/reader-compile.ae"
+  (cd "$root" && GOGC=${GOGC:-400} ARBACE_COMPILE=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 ARBACE_PATH=$root \
+     ARBACE_AOT_ROOT=$root ARBACE_PREPARE=$dir/reader-compile.image "$tool" "$dir/reader-compile.ae") \
+    > "$dir/reader-compile.log" 2>&1 \
+    || { tail -20 "$dir/reader-compile.log" >&2; echo "arbace-go: repr/java's reader was not compiled" >&2; return 1; }
+  grep '^aot:' "$dir/reader-compile.log" >&2
+  [ -f "$out/packages.edn" ] || { echo "arbace-go: the reader compiled nothing ($dir/reader-compile.log)" >&2; return 1; }
+  echo "   compiled: $(since "$t0")" >&2
+}
+
 # build_java DIR...: javac's tool build (--build-java)
 build_java() {
-  local t0 d extra=()
+  local t0 d extra=() saved rkey
   t0=$(date +%s)
   [ -d "$root/jdk/javac/forms" ] || { echo "arbace-go: --build-java: no jdk/javac/forms (bin/javac-vendor convert)" >&2; return 1; }
   # shellcheck disable=SC2206
@@ -397,6 +440,23 @@ build_java() {
     j2g_args+=(--input "$(cd "$d" && pwd)")
   done
   j2g_args+=("${extra[@]}")
+  if [ "${ARBACE_AOT:-1}" = 1 ]; then
+    # repr/java's reader compiled into the tool (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built:
+    # JN4", JFS28): by a first tool build when the compiled reader's tree is not of this key
+    rkey=$(reader_key)
+    if [ "$(cat "$dir/aot-reader.key" 2>/dev/null)" != "$rkey" ] || [ ! -f "$dir/aot-reader/packages.edn" ]; then
+      echo "== javac's tool build, first (the host that compiles repr/java's reader): ${j2g_args[*]}" >&2
+      rm -f "$dir/aot-reader.key"
+      saved=("${j2g_args[@]}")
+      build || return 1
+      j2g_args=("${saved[@]}")
+      reader_compile "$dir/$(host_arch)/$exe" "$dir/aot-reader" || return 1
+      echo "$rkey" > "$dir/aot-reader.key"
+    else
+      echo "== repr/java's reader compiled: $dir/aot-reader (key ${rkey:0:12})" >&2
+    fi
+    j2g_args+=(--input "$dir/aot-reader" --embed arbace/repr/java)
+  fi
   echo "== javac's tool build: ${j2g_args[*]}" >&2
   build || return 1
   echo "arbace-go: javac's tool build in $(since "$t0")" >&2

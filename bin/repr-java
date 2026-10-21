@@ -28,6 +28,17 @@
 #                       ae (the converted text), classes (bin/lib/repr-java/roundtrip, its header;
 #                       corpora baseline, samples, jdk), against test/repr/java/roundtrip/; --text,
 #                       then the text level: mode :full printed back byte for byte
+#   bin/repr-java declarations OUT
+#                       the declarations of Arbace's runtime (doc/classes/JAVA-FRONTEND-SURVEY.md,
+#                       JFS6, JFS27): the checkout's arbace/lang and arbace/java/api printed by print
+#                       --layout declarations (no code: bodies throw null) into OUT/java, compiled by
+#                       javac on Arbace (javac's tool executable, as REPR_JAVA_HOST=arbace below,
+#                       -g:none) into OUT/classes, whose path it prints: javac's class path for Java
+#                       that names the runtime (the suite's fixtures, arbace.lang.IFn) without the
+#                       frozen jar
+#   bin/repr-java host-check [CORPUS...]
+#                       read on javac's tool executable (REPR_JAVA_HOST=arbace) against today's
+#                       JVM-hosted read, every corpus (bin/lib/repr-java/host-check, its header)
 #   bin/repr-java coverage REPORT.edn...
 #                       a Markdown summary of conversion reports (arbace.repr.java.coverage)
 #   bin/repr-java check [--suite | --update | --jdk [MODULE...]]
@@ -39,6 +50,13 @@
 # Environment: REPR_JAVA_JVM_OPTS, heap options (default -Xmx24g); REPR_JAVA_CP, more class path
 # (javac's class path for the classes the sources name is read's --javac -cp); REPR_JAVA_THREADS,
 # read-jdk's parallel chunks (default 12); REPR_JAVA_PATCH_ALL, REPR_JAVA_DEBUG (arbace.repr.java).
+# REPR_JAVA_HOST, the host of read, read-jdk, coverage and main: jvm (the default), the frozen JVM
+# above; arbace, javac's tool executable (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN4"):
+# REPR_JAVA_EXE (default target/arbace-go/<arch>/arbace-javac, bin/arbace-go --build-java), with
+# arbace.repr.java evaluated from the checkout (ARBACE_PATH) and javac on Arbace attributing
+# against the platform of jdk/javac/platform.sha256 (bin/javac-vendor platform, made once into
+# .tmp/repr-java-platform), REPR_JAVA_CP its class path; the output is the JVM's
+# (bin/lib/repr-java/host-check).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
@@ -48,12 +66,48 @@ case $cmd in
   read|read-jdk) set -- -m arbace.repr.java "$cmd" "$@" ;;
   coverage) set -- -m arbace.repr.java.coverage "$@" ;;
   check) exec "$root/bin/lib/repr-java/check" "$@" ;;
+  host-check) exec "$root/bin/lib/repr-java/host-check" "$@" ;;
+  declarations) declarations=1 ;;
   roundtrip) exec "$root/bin/lib/repr-java/roundtrip" "$@" ;;
   print) . "$root/bin/lib/tools.bash"
          arbace_tool -m arbace.repr.java.print "$@"; exit $? ;;
   main) ;;
   *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
 esac
+if [ "${REPR_JAVA_HOST:-jvm}" = arbace ] || [ -n "${declarations:-}" ]; then
+  . "$root/bin/lib/host.bash"
+  exe=${REPR_JAVA_EXE:-$root/target/arbace-go/$(arbace_host_arch)/arbace-javac}
+  [ -x "$exe" ] || { echo "repr-java: no javac tool executable $exe (bin/arbace-go --build-java, or REPR_JAVA_EXE)" >&2; exit 1; }
+  platform=$root/.tmp/repr-java-platform
+  mkdir -p "$root/.tmp"
+  (
+    # made once for the pin (bin/javac-vendor platform checks it), one maker at a time
+    flock 9
+    if ! cmp -s "$root/jdk/javac/platform.sha256" "$platform/.pin"; then
+      made=$("$root/bin/javac-vendor" platform "$platform") || exit 1
+      [ "$made" = "$platform" ] || exit 1
+      cp "$root/jdk/javac/platform.sha256" "$platform/.pin"
+    fi
+  ) 9> "$root/.tmp/repr-java-platform.lock" || { echo "repr-java: no platform (bin/javac-vendor platform)" >&2; exit 1; }
+  if [ -n "${declarations:-}" ]; then
+    out=${1:?usage: bin/repr-java declarations OUT}
+    case $out in /*) ;; *) out=$PWD/$out ;; esac
+    rm -rf "$out"; mkdir -p "$out/classes"
+    . "$root/bin/lib/tools.bash"
+    (cd "$root" && arbace_tool -m arbace.repr.java.print --quiet --layout declarations --index jdk/forms \
+       arbace/lang/*.ae arbace/java/api "$out/java") > "$out/print.log" 2>&1 \
+      || { cat "$out/print.log" >&2; echo "repr-java declarations: the print failed" >&2; exit 1; }
+    (cd "$out/java" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort) > "$out/files.list"
+    printf '(System/exit (jdk.internal.jrt.javac.Main/run (into-array String *command-line-args*)))\n' > "$out/javac.ae"
+    (cd "$out/java" && "$exe" "$out/javac.ae" --platform "$platform" -g:none -nowarn -XDsuppressNotes -proc:none \
+       -Xmaxerrs 100000 -sourcepath . -d "$out/classes" "@$out/files.list") > "$out/javac.log" 2>&1 \
+      || { head -40 "$out/javac.log" >&2; echo "repr-java declarations: javac on Arbace failed ($out/javac.log)" >&2; exit 1; }
+    echo "$out/classes"
+    exit 0
+  fi
+  REPR_JAVA_PLATFORM=$platform ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} exec "$exe" "$@"
+fi
+[ "${REPR_JAVA_HOST:-jvm}" = jvm ] || { echo "repr-java: REPR_JAVA_HOST is jvm or arbace, not $REPR_JAVA_HOST" >&2; exit 2; }
 . "$root/bin/lib/frozen.bash"
 exports=()
 for p in api tree util parser code file main comp jvm; do
