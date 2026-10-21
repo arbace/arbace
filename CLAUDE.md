@@ -112,7 +112,7 @@ Prior art:
     keeps the Java text, printed back byte for byte: `roundtrip --text`); `arbace.repr.go`
     (`arbace/repr/go{.ae,/}`), Go as Go forms and back (spec `doc/go/SPEC.md`; mode `:full` keeps
     the text: comments, spellings, layout, printed back byte for byte; helpers `tools/godump`, `tools/gocmp`;
-    `bin/repr-go read`, `print`, `roundtrip`, `check`, `test`; `read --reader native` and `native-check`: the native reader, Go's go/parser run by goi from `tamago/goroot`'s forms, doc/go/GO-PARSER-SURVEY.md, GP1, its loader `arbace.repr.go.load` with go list's part in `arbace.box.plan`, no helper, GP2; `native-check --headers`: the loader's headers alone), on the tools' host
+    `bin/repr-go read`, `print`, `roundtrip`, `check`, `test`; `read --reader native` and `native-check`: the native reader, Go's go/parser run by goi from `tamago/goroot`'s forms, doc/go/GO-PARSER-SURVEY.md, GP1, its loader `arbace.repr.go.load` with go list's part in `arbace.box.plan`, no helper, GP2; `native-check --headers`: the loader's headers alone; `read --reader native --raw` and `raw-check`: raw forms, the decisions that need types left open, GP3), on the tools' host
     (`REPR_GO_EXE` names another executable); `arbace.repr.haskell` (`arbace/repr/haskell{.ae,/}`),
     Haskell as Haskell forms and back (spec `doc/haskell/SPEC.md`, notes
     `doc/haskell/HASKELL-NOTES.md`; helper `tools/hsdump` on the host's GHC, pinned by
