@@ -1251,3 +1251,13 @@ No re-seed (batched).
 - The worktree's `.tmp/`: `javac-vendor/` (the conversion's work and logs), `driver/` (JN1's driver,
   its commands and outputs), `base/` (main's export and build for JN2.5), `shipped-fndiff.txt`,
   `scripts/fndiff.py`.
+
+## Decided (2026-10-20): JFS18-JFS22
+
+The user decided JFS18-JFS22 as built:
+- JFS18: the JDK API only javac needs is in javac's world, not the shipped closure.
+- JFS19: the shipped additions (`ResourceBundle.getBundle`, `Runtime.version`,
+  `printStackTrace(PrintWriter|PrintStream)`) and their two lines of `jdk/edge.edn` are kept.
+- JFS20: the generated sources are copied from the build tree until JN7.
+- JFS21: two fixture results are kept by hand for shapes the frozen jar cannot compile.
+- JFS22: j2g for the tool runs on a program built from the checkout.

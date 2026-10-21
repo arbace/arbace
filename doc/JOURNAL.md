@@ -444,3 +444,12 @@ mode is private (GPS10 (a)) and documented. Exit:
 - **Rule slips:** one `2>/dev/null`; a first baseline built while editing j2g, discarded.
 - **The re-seed** waits for GP3: the program carries GP2's and JN2's changes.
 - **Open for the user:** JFS18-JFS22.
+
+## 2026-10-20: JFS18-JFS22 decided as built (the user)
+
+JFS18-JFS22 (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN2"), as built:
+- javac-only API in the tool's world;
+- the shipped additions and their two `jdk/edge.edn` lines kept;
+- the generated sources copied until JN7;
+- two fixture results kept by hand;
+- j2g for the tool on a program built from the checkout.
