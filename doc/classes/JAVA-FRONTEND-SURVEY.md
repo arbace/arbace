@@ -1475,3 +1475,12 @@ as java.base (JFS24).
   each side's classes, logs and times, `jdk-originals/`), `jn3/` (the build logs, `rss.sh` and
   its measures, `jimg/` and `jmod/`, the image's and jmods' classes compared), `base/` (main's
   export and build for JN3.6).
+
+## Decided (2026-10-21): JFS23-JFS26
+
+The user decided JFS23-JFS26 as built:
+- JFS23 (b): the exploded modules with each module's descriptor from its jmod, pinned with them.
+- JFS24 (a): the pinned build tree stays the platform until JN6; the platform compiled by javac on
+  Arbace (b) when the build tree goes.
+- JFS25 (a): javac's command line on Arbace as jrt's own Java in jdk.compiler's overlay.
+- JFS26 (a): the `javac` step in `bin/gate --full`'s Go chain.

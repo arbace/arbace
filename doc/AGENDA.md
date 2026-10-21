@@ -127,7 +127,10 @@ The current state of the work. This file is rewritten as things change. For the 
     sources on Arbace parse and attribute as on the JVM; a tool executable of 183 MB; JN2 1-2
     days, JN3 3-4); JFS12-JFS17 decided as recommended (the user). JN2 done (2026-10-20:
     javac's forms in `jdk/javac/`, unpatched, `bin/javac-vendor`; JFS18-JFS22 decided as built);
-    running: JN3, javac on Arbace compiles byte for byte (`java-frontend-jn3`).
+    JN3 done (2026-10-21: javac on Arbace compiles the baseline, the samples, java.base's closure
+    and java.base itself byte for byte as the JVM's javac, `bin/javac-vendor classes`, a `javac`
+    step in `bin/gate --full`; the program changed, re-seed batched with GP4's; JFS23-JFS26
+    decided as built); next JN4, repr/java's converter on javac on Arbace.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

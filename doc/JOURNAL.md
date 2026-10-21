@@ -524,3 +524,84 @@ GPS21-GPS26 (doc/go/GO-PARSER-SURVEY.md, "As built: GP3"), each as recommended:
   (`-g:none`), on JFS15 (b)'s pinned platform.
 - Each is built by an agent in its worktree. The merges, the journal, the agenda and the re-seed
   stay in the main session.
+
+## 2026-10-21: JN3 merged (javac runs on Arbace)
+
+- **What:** the branch `java-frontend-jn3` (`f805cbdd`, from `982ae875`) is merged.
+  doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN3" (JN3.1-JN3.10), has the details.
+- **javac's command line on Arbace.** `jdk.internal.jrt.javac.Main` (170 lines) and `FileManager`
+  (451 lines, a `java.io.File`-based `JavaFileManager`, JFS5 (b)) are jrt's own Java in
+  `overlay/jdk/javac/jdk.compiler/`, converted with javac into `jdk/javac/forms` (JFS25 (a)).
+  - Main handles `-d`, `-sourcepath`, `-cp`, `--patch-module`, `--module-source-path`,
+    `--system none` and @argfiles.
+  - javac's own Log prints the diagnostics.
+- **Gaps filled:**
+  - jdk26u's `DataOutput`, `DataOutputStream`, `UTFDataFormatException` and `ModifiedUtf` are
+    converted unpatched into javac's world, for ClassWriter.
+  - jrt's own `FileSystems` serves `PathFileObject.<clinit>`.
+  - The annotation and processor paths stay stubs, since no corpus needs them.
+  - No javac source is patched (JFS12 (c)).
+- **The platform** is the build tree's exploded java.base, java.xml, java.logging, java.desktop,
+  java.datatransfer and java.prefs. Each module's descriptor comes from `images/jmods` (JFS23 (b)),
+  and the set is pinned by `jdk/javac/platform.sha256` (`bin/javac-vendor platform-pin`; `convert`
+  writes the pin and `verify` checks it).
+- **The check:** `bin/javac-vendor classes` compiles each corpus with the JVM's javac and with
+  javac on Arbace (`-g:none`) and compares the class files and diagnostics. It has a Makefile target
+  `javac-classes` and a `javac` step in `bin/gate --full`'s Go chain (JFS26 (a)).
+  - All are byte for byte equal:
+
+    | corpus | classes |
+    |---|---|
+    | baseline | 812 (183 files) |
+    | samples | 32 |
+    | java.base's closure | 2,224 (838 files) |
+    | java.base, built the JDK build's way (JFS2 (a)) | 7,434 (3,404 files) |
+
+  - java.base's classes also equal the build's `jdk/modules/java.base` in 7,433 of 7,434. The
+    exception is `module-info.class`, which the build rewrites after javac (`AddPackagesAttribute`).
+  - Wall time against the JVM's javac:
+
+    | corpus | JVM's javac | javac on Arbace | ratio |
+    |---|---|---|---|
+    | baseline | 4.0 s | 5.5 s | 1.4× |
+    | closure | 8.7 s | 18.0 s | 2.1× |
+    | java.base | 21.1 s | 62.9 s | 3.0× |
+
+    The samples are faster on Arbace, since there is no warm-up. Arbace's CPU time is lower
+    throughout.
+- **The tool:**
+  - 16,777 classes analyzed, 0 failing, and 16,674 translated.
+  - 187,433,120 bytes, built in 261-280 s.
+  - `jdk/javac`: 531 sources, 570 form files (6.7 MB), an edge of 38 classes.
+- **Shipped-program changes, for the next re-seed:**
+  - jrt's `JavaLangAccess.countNonZeroAscii`, with a test. j2g's Dyn slot table has one more
+    method (1,412).
+  - `arbace.classes.env/known?`: a class compiled from source no longer counts as declared while
+    `*declared*` is bound.
+  - j2g's `tool-module-prefixes` gains `jdk/internal/jrt/javac/`.
+  - `jdk/edge.edn`, `jdk/forms` and the java-fixtures are unchanged.
+- **The branch's checks:**
+  - `javac-vendor verify` (574 files) and `check`.
+  - `j2g-edge verify`.
+  - `bin/jrt test`.
+  - The essential gate passed (15m34s).
+- **Time:** about 1.5 h, against the 3-4 days estimated. JN1 had done the hardest part.
+- **Rule slips:**
+  - `bin/javac-vendor` was edited while a `convert` run was executing. That run died at its end
+    and was re-run clean.
+  - j2g's failure report went to `/tmp` (TMPDIR unset). It was removed, and TMPDIR was set to
+    `.tmp/tmp` after that.
+- **On main after the merge (`62d31a6a`):** the essential `bin/gate` passed every step but one
+  (13m56s). The differential check had one new mismatch, `test/oracle/forms/processes.ae:178`:
+  the compiled side's `(.get (.arguments info))` of a `sleep` just started gave "No value present".
+  GP4's corpus runs were loading the machine at the time. `bin/diffcheck` run again alone passed
+  (12,741 of 12,764, the 23 known, 0 new). The case is a timing flake: the child's `/proc`
+  arguments were read before its exec. Left as is, to watch.
+- **The re-seed** waits for GP4: the program changed (jrt, `arbace.classes.env`, j2g).
+- **Open for the user:** JFS23-JFS26.
+
+## 2026-10-21: JFS23-JFS26 decided as built (the user)
+
+JFS23 (b), the exploded modules with the jmods' descriptors; JFS24 (a), the pinned build tree
+stays the platform until JN6; JFS25 (a), the command line as jrt's Java in jdk.compiler's overlay;
+JFS26 (a), the `javac` step in `bin/gate --full`.
