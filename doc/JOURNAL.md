@@ -848,3 +848,13 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - JFS34 (b): the corpora run concurrently.
 - JFS35: (a) now and (b) at JN6.
 - JFS36 (a): `host-check` kept until JN6.
+
+## 2026-10-21: JN6 started (the user: "start JN6 now")
+
+- **What:** JN6, the JVM leaves repr/java, started on the branch `java-frontend-jn6` from main
+  `02d2c34b`, in the worktree `.tmp/worktrees/java-frontend-jn6`, alongside GP5.
+- **Its work:**
+  - `bin/repr-java` without `bin/lib/frozen.bash`, and `frozen_view tools` without repr/java;
+  - a trace showing that nothing of repr/java starts a JVM;
+  - JFS35 (b);
+  - each JVM-only remainder JN5 listed, either moved to the tool or kept with a reason.

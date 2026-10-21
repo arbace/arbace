@@ -134,8 +134,8 @@ The current state of the work. This file is rewritten as things change. For the 
     decided as built). JN4 done (2026-10-21: repr/java's read on the tool, every corpus byte for
     byte the JVM reader's, `bin/repr-java host-check`; JFS27-JFS30 decided as built). JN5 done (2026-10-21: javac's forms
     read by javac on Arbace byte for byte, the tool repr/java's default host, its --full steps on
-    the tool; JFS31-JFS36 decided as built); next JN6, the JVM leaves repr/java. Running: GP5
-    (`go-parser-gp5`). The seed remade after JN3, JN4 and GP4 (`3dda04f6…`) and verified. The processes form made robust (2026-10-21).
+    the tool; JFS31-JFS36 decided as built); running: JN6, the JVM leaves repr/java
+    (`java-frontend-jn6`), and GP5 (`go-parser-gp5`). The seed remade after JN3, JN4 and GP4 (`3dda04f6…`) and verified. The processes form made robust (2026-10-21).
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);
