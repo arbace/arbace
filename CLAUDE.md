@@ -311,5 +311,6 @@ Prior art:
 - The tools (c2j, j2g, repr/go, repr/clojure, the suite runner) run on the tools' Go host, stage 0 by default
   (`bin/lib/host.bash`, `bin/lib/tools.bash`); repr/java and the JVM's records on the frozen jar
   (`bin/lib/frozen.bash`), repr/java's read also on javac's tool executable (`REPR_JAVA_HOST=arbace`). Nothing builds or runs a JVM Arbace of the checkout.
-- Put temporary and scratch files in `.tmp/`, which is gitignored.
+- Put temporary and scratch files in `.tmp/`, which is gitignored. The scripts of `bin/` set `TMPDIR` to `.tmp/tmp`
+  when it is unset (`bin/lib/tmpdir.bash`), so Arbace's error reports stay out of /tmp.
 - Never create or modify anything under `.claude/`.

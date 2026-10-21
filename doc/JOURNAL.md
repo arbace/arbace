@@ -776,3 +776,16 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   from 2026-10-20 and 2026-10-21 were deleted; some came from the re-seed's own gate as it ran. The
   scripts of `bin/` will set `TMPDIR` to `.tmp/tmp` when it is unset (the user's choice over
   deleting only).
+
+## 2026-10-21: TMPDIR set by the scripts of bin/ (the user)
+
+- **What:** a new `bin/lib/tmpdir.bash` sets `TMPDIR` to `.tmp/tmp` when it is unset. All 34
+  scripts of `bin/` source it right after setting `$root`, and CLAUDE.md's working conventions say
+  so.
+- **Why:** Arbace writes its error reports (`arbace-*.edn`) to `$TMPDIR`, else /tmp. The gate's
+  own runs left them in /tmp.
+- **Alternatives:** an export in `bin/gate` alone would not cover scripts run directly. Changing
+  where the program writes its reports would change the program's behaviour, which the JVM's
+  `java.io.tmpdir` defines.
+- **Checked:** the essential `bin/gate` passed (11m05s). It wrote nothing to /tmp: its two reports
+  went to `.tmp/tmp`.
