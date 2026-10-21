@@ -194,10 +194,16 @@
   [f]
   (and (seq? f) (= 'go/id (first f))))
 
+(declare expr-str)
+
 (defn ident-name
-  "The Go name of a symbol or (go/id \"x\")."
+  "The Go name of a symbol or (go/id \"x\"); raw forms of invalid programs (the resolve mode) put
+  an expression where a name is required: its text."
   ^String [f]
-  (if (go-id? f) (second f) (name f)))
+  (cond
+    (go-id? f) (second f)
+    (or (symbol? f) (keyword? f) (string? f)) (name f)
+    :else (expr-str f)))
 
 (defn go-ident? [f] (or (and (symbol? f) (nil? (namespace f))) (go-id? f)))
 
@@ -318,6 +324,10 @@
   [cx sym]
   (let [q (namespace sym) n (name sym)
         p (package-by-qualifier cx q)]
+    ;; the resolve mode: the qualifier a package name (go/types records it, the member found or not)
+    (when (and e/*answers* p)
+      (when-let [px (e/scope-get (:file-scope cx) q)]
+        (when (= :pkg (o px :kind)) (e/answer! sym :x-pos {:obj px}))))
     (cond
       (nil? p) (do (err! sym :UndeclaredName "undefined: %s" q) nil)
       :else
@@ -327,15 +337,14 @@
           (do (err! sym :UndeclaredImportedName "undefined: %s.%s" (o p :name) n) nil)
           (nil? x) (do (err! sym :UndeclaredImportedName "undefined: %s.%s" (o p :name) n) nil)
           (and (not (t/exported? n)) (not (str/includes? q ".")) (not (o x :unsafe)) (not= "Pointer" n))
-          (do (err! sym :UnexportedName "name %s not exported by package %s" n (o p :name)) nil)
+          (do (err! sym :UnexportedName "name %s not exported by package %s" n (o p :name))
+              (e/answer! sym :name-pos {:obj x})
+              nil)
           :else
           (do (when (and (package-level? x) *obj-decl* (not (and (= :type (o x :kind)) (not (o x :alias)))))
                 (*obj-decl* x))
-              ;; the resolve mode: the qualifier a package name, the name its member
-              (when e/*answers*
-                (when-let [px (e/scope-get (:file-scope cx) q)]
-                  (e/answer! sym :x-pos {:obj px}))
-                (e/answer! sym :name-pos {:obj x}))
+              ;; the resolve mode: the name the qualifier's member
+              (when e/*answers* (e/answer! sym :name-pos {:obj x}))
               x))))))
 
 ;;; Type expressions (typexpr.go)
@@ -348,9 +357,12 @@
   (let [ty (if (and t/*spelled* (o x :spelled)) (o x :spelled) (o x :type))
         ;; the resolve mode: an alias's name kept on the type it denotes (go/types' Alias), when
         ;; a vector can carry it (metadata: identity and equality as before)
-        ty (if (and t/*spelled* (o x :alias) (vector? ty) (not (seq (o x :tparams))))
-             (vary-meta ty assoc :arbace.go.check.types/alias {:name (o x :name) :pkg (o x :pkg) :obj x})
-             ty)]
+        ty (cond
+             (not (and t/*spelled* (o x :alias) (not (seq (o x :tparams))))) ty
+             (vector? ty) (vary-meta ty assoc :arbace.go.check.types/alias {:name (o x :name) :pkg (o x :pkg) :obj x})
+             ;; an alias of a basic type: a keyword of its own, canonically its actual
+             (and (keyword? ty) (not= :invalid ty) (not (o x :universe))) (t/kw-alias x (o x :name) (o x :pkg) ty)
+             :else ty)]
     (cond
       (nil? ty) :invalid
       (or (and (t/named? ty) (seq (:tparams (t/info ty))) (not (:targs (t/info ty)))) (o x :tparams-count))
@@ -565,8 +577,25 @@
                  (seq etys) (assoc :embeddeds (mapv second etys))
                  @incomplete (assoc :incomplete true)))))
 
+(declare array-length*)
+
 (defn array-length
   "The length of an array type: a constant expression of integer value, representable as int."
+  [cx n]
+  (if-let [bad (when (and (:resolve cx-flags) (go-ident? n) (not (and (symbol? n) (namespace n))))
+                 ;; the resolve mode: go/types' arrayLength looks a name up first, not evaluated
+                 ;; unless it names a constant
+                 (let [nm (ident-name n)
+                       x (or (e/scope-lookup (:scope cx) nm)
+                             (when-let [[x _] (some-> (:file cx) :dots (.get nm))] x)
+                             (e/scope-get e/universe nm))]
+                   (cond
+                     (nil? x) (do (err! n :InvalidArrayLen "undefined array length %s or missing type constraint" nm) true)
+                     (not= :const (o x :kind)) (do (err! n :InvalidArrayLen "invalid array length %s" nm) true))))]
+    -1
+    (array-length* cx n)))
+
+(defn- array-length*
   [cx n]
   (let [x (const-expr cx n)
         ;; go/constant's ToInt: a complex constant with a zero imaginary part is its real part

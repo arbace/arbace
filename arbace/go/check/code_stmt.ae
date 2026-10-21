@@ -20,8 +20,9 @@
     (if-let [alt (e/scope-get (:scope cx) nm)]
       ;; go/types does not declare it: never reported unused
       (do (err! f :DuplicateDecl "%s redeclared in this block" nm)
-          (when (e/obj? x) (oset! x :used true)))
-      (e/scope-put! (:scope cx) nm x))))
+          (when (e/obj? x) (oset! x :used true))
+          false)
+      (do (e/scope-put! (:scope cx) nm x) true))))
 
 (defn block-cx [cx] (assoc cx :scope (e/scope (:scope cx) :block)))
 
@@ -212,7 +213,6 @@
             :else n)
         x (e/obj {:kind :const :name nm :type (if (invalid? n) :invalid (:type n)) :val (:val n) :local? true
                   :line (fline tf) :pkg (pkg-path)})]
-    (e/answer! tf {:def x})
     (when-not (invalid? n) (verify-const-val! tf nm n))
     [x n]))
 
@@ -346,11 +346,24 @@
                     (let [[node iota]
                           (with-line tf
                             (cond
-                              (:const m)
+                              ;; constants: one name, or several of one spec ((values a b), each
+                              ;; name marked ^:const), each with its init, declared after them
+                              (or (:const m) (and (= "values" (head-name tf)) (:const (meta (second tf)))))
                               (let [iota (if (:go/grouped m) (inc iota) 0)
-                                    [x n] (local-const cx tf rf iota)]
-                                (declare! cx (o x :name) x tf)
-                                [{:op :decl :const true :objs [x] :init [n] :line (fline tf)} iota])
+                                    names (target-names tf)
+                                    inits (if (= 1 (count names)) [rf] (values-forms rf))
+                                    _ (cond
+                                        (< (count inits) (count names))
+                                        (err! tf :WrongAssignCount "missing init expr for %s" (ident-name (nth names (count inits))))
+                                        (> (count inits) (count names))
+                                        (err! tf :WrongAssignCount "extra init expr"))
+                                    xs (vec (for [[i nf] (map-indexed vector names) :when (< i (count inits))]
+                                              (with-line nf (let [[x n] (local-const cx nf (nth inits i) iota)] [nf x n]))))]
+                                ;; the resolve mode: each definition (go/types records none for a
+                                ;; name redeclared)
+                                (doseq [[nf x] xs]
+                                  (when (or (= "_" (o x :name)) (declare! cx (o x :name) x nf)) (e/answer! nf {:def x})))
+                                [{:op :decl :const true :objs (mapv second xs) :init (mapv #(nth % 2) xs) :line (fline tf)} iota])
                               (or (:var m) (some #(:tag (meta %)) (target-names tf)) (zero-form? rf))
                               [(var-decl cx tf tf rf) -1]
                               :else

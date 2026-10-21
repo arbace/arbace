@@ -364,12 +364,13 @@
             u (t/under ty)
             [u ptr] (if (and (vector? u) (= :pointer (nth u 0)) (let [b (t/under (nth u 1))] (and (vector? b) (= :array (nth b 0)))))
                       [(t/under (nth u 1)) true] [u false])]
+        ;; the resolve mode: an invalid index leaves the element's type (go/types' indexExpr)
         (cond
           (t/tparam? ty) (tparam-index cx f x if*)
           (t/string-type? u)
           (let [len (when (= :constant (:mode x)) (count (:val x)))
                 [i iv] (index-value cx if* len "index")]
-            (if (invalid? i)
+            (if (and (invalid? i) (not (:resolve cx-flags)))
               (invalid f)
               (if (and (= :constant (:mode x)) iv)
                 ;; a constant string indexed by a constant: a byte value (not a constant)
@@ -377,16 +378,16 @@
                 {:op :index :x (default-final x) :index i :mode :value :type (if t/*spelled* :byte :uint8) :form f :line (fline f)})))
           (and (vector? u) (= :array (nth u 0)))
           (let [[i] (index-value cx if* (nth u 1) "index")]
-            (if (invalid? i) (invalid f)
+            (if (and (invalid? i) (not (:resolve cx-flags))) (invalid f)
                 {:op :index :x x :index i :mode (if (or ptr (= :variable (:mode x))) :variable :value)
                  :type (nth u 2) :form f :line (fline f)}))
           (and (vector? u) (= :slice (nth u 0)))
           (let [[i] (index-value cx if* nil "index")]
-            (if (invalid? i) (invalid f)
+            (if (and (invalid? i) (not (:resolve cx-flags))) (invalid f)
                 {:op :index :x x :index i :mode :variable :type (nth u 1) :form f :line (fline f)}))
           (and (vector? u) (= :map (nth u 0)))
           (let [k (assignment cx (expr cx if*) (nth u 1) "map index")]
-            (if (invalid? k) (invalid f)
+            (if (and (invalid? k) (not (:resolve cx-flags))) (invalid f)
                 {:op :map-index :x x :key k :mode :mapindex :type (nth u 2) :form f :line (fline f)}))
           :else
           (do (err! f :NonIndexableOperand "cannot index %s" (operand-str x)) (invalid f)))))))
@@ -518,7 +519,7 @@
   (if (and (= "lit" (head-name vf)) (elided? (second vf)))
     (let [[base ptr] (t/deref-type (if (t/tparam? elem-type) (or (t/core-type elem-type) :invalid) (t/under elem-type)))
           base (if ptr base elem-type)]
-      (let [n (composite-lit cx vf base)]
+      (let [n (composite-lit (assoc cx ::lit-hint elem-type) vf base)]
         (if ptr
           {:op :addr :x n :mode :value :type elem-type :form vf :line (fline vf) :implicit true}
           n)))
@@ -566,7 +567,10 @@
 (defn composite-lit
   "(lit T element*), T a type form or _ (elided: hint, the element type of the outer literal)."
   [cx f hint]
-  (let [[_ tf & elems] f
+  (let [;; an elided literal's type as go/types records it: the element type (its hint)
+        lit-hint (::lit-hint cx)
+        cx (dissoc cx ::lit-hint)
+        [_ tf & elems] f
         elems (vec elems)
         ;; the form as a vector (its metadata kept): its elements' lines in constant time
         fv (if (vector? f) f (with-meta (vec f) (meta f)))]
@@ -608,7 +612,15 @@
                             :else elems)
                     keyed (and (seq elems) (keyword? (first elems)))
                     ;; the resolve mode: the literal's elements as written (^:go/key [k v])
-                    orig (when e/*answers* (vec (nnext f)))]
+                    ;; the resolve mode: the keys' fields, answered as the helper finds them (its
+                    ;; structOf of the literal's recorded type: through a pointer, a type
+                    ;; parameter's common struct)
+                    orig (when (and e/*answers*
+                                    (let [R (if (elided? tf) (or lit-hint hint) T)
+                                          R (if (t/tparam? R) R (let [u (t/under R)] (if (t/pointer? u) (nth u 1) R)))
+                                          su (if (t/tparam? R) (t/core-type R) (t/under R))]
+                                      (and (vector? su) (= :struct (nth su 0)))))
+                           (vec (nnext f)))]
                 (if keyed
                   (let [pairs (partition 2 elems)
                         via-map (:go/via (meta f))
@@ -627,6 +639,11 @@
                                      (and (nil? direct) (not (allow-version? cx 27)))
                                      (do (err! vf :MissingLitField "unknown field %s in struct literal of type %s" nm (t/type-str T))
                                          nil)
+                                     ;; the resolve mode: go/types' rule for a promoted field reached
+                                     ;; through an embedded pointer (no field recorded)
+                                     (and (nil? direct) (:resolve cx-flags) (:indirect r))
+                                     (do (err! vf :InvalidLitField "invalid implicit pointer indirection to reach %s" nm)
+                                         (expr cx vf) nil)
                                      :else
                                      (let [r (if direct {:kind :field :obj (nth fields direct) :index [direct] :via []} r)
                                            fd (:obj r)
@@ -1353,14 +1370,14 @@
         "String"
         (if-not (need 2 2)
           (invalid f)
-          (let [p (assignment cx (expr cx (first arg-forms)) [:pointer :uint8] "argument to unsafe.String")
+          (let [p (assignment cx (expr cx (first arg-forms)) [:pointer (if t/*spelled* :byte :uint8)] "argument to unsafe.String")
                 [n] (index-value cx (second arg-forms) nil "length")]
             (if (or (invalid? p) (invalid? n)) (invalid f) (node {:args [p n] :mode :value :type :string}))))
         "StringData"
         (if-not (need 1 1)
           (invalid f)
           (let [s (assignment cx (expr cx (first arg-forms)) :string "argument to unsafe.StringData")]
-            (if (invalid? s) (invalid f) (node {:args [s] :mode :value :type [:pointer :uint8]}))))
+            (if (invalid? s) (invalid f) (node {:args [s] :mode :value :type [:pointer (if t/*spelled* :byte :uint8)]}))))
         (bad "unknown builtin %s" nm)))))
 
 ;;; Explicit instantiation
@@ -1569,7 +1586,8 @@
   (with-line f
     (let [n (expr-dispatch cx f hint)
           n (if (and (map? n) (nil? (:form n))) (assoc n :form f) n)]
-      (when e/*answers* (e/answer! f {:mode (:mode n) :type (:type n) :val (:val n)}))
+      ;; the resolve mode: what go/types records (not an invalid operand's)
+      (when (and e/*answers* (not= :invalid (:mode n))) (e/answer! f {:mode (:mode n) :type (:type n) :val (:val n)}))
       (if (and (seq? f) (:tag (meta f)) (not= "lit" (head-name f)))
         (assoc n :tag-form f :tag-type (typexpr cx (:tag (meta f))))
         n))))

@@ -518,6 +518,54 @@ file of the wrong configuration declares nothing; `:lang` of a file (or the pack
 features (§3.4) and decides loop variables' scope. The configuration of the REPL's implicit
 packages is the program's (§2.1).
 
+### 3.10 The resolve mode (doc/go/GO-PARSER-SURVEY.md GP4)
+
+repr/go's native reader (GP1-GP3) makes **raw forms** (doc/go/CONVERTER-NOTES.md, "Raw forms"):
+Go forms of an un-annotated syntax tree, every decision of SPEC §11.1 that needs types left open.
+The checker in its resolve mode checks them and answers each decision; `arbace.repr.go.annotate`
+puts the answers into the native dump as go/types' annotations, and the converter, unchanged,
+makes the final forms. A source whose `:answers` is a HashMap is checked so
+(`check-package`; `check-src` checks a source against a session's packages without caching it):
+
+- **What it accepts.** The open heads: `(go/select x f)` is a package's member (x names an
+  import: `pkg/f`), a method expression (x denotes a type), a field or a method value
+  (`select-expr`); `(go/index x i ...)` an instantiation of a generic type (x names a type
+  name), of a generic function, or an index; `(go/star x)` a pointer type or an indirection
+  (`indirect`); `(go/id "true")` a name looked up (the universe's or a declared one). A call of a
+  builtin's name, `(len x)`, calls the name's object: the universe's builtin, or a local
+  function named `len`. Calls of any other head are classified by the callee (`expr-or-type`): a
+  conversion, a builtin's call, a method call, a function call. `^:go/define` targets are new or
+  reused by the block's scope, `^:go/key [k v]` a field's name in a struct literal and an
+  expression key otherwise, `["path"]` an import named by its package, and constant names without
+  `:val`, shifts without `:tag`, `^any T` constraints and a `go/package` without `:init-order` are
+  computed as ever. Raw expressions where a type is wanted (an instantiation's type arguments,
+  make's operand) are types (`typexpr`). The invalid programs' marks (`go/type-guard`,
+  `go/define`, `go/literal`) are errors.
+- **Nothing is verified.** The annotations raw forms lack are not missing (`:annotated` false):
+  no `:val`, `:tag`, `^:assign`, `:inst`, `:go/via` or `conv` disagreement is reported.
+- **The answers, by position.** Raw forms carry each node's positions; the checker reads them in
+  memory (GPS26 (a)) as `:arbace.go.check/at [file {field [line col]}]`. `e/answer!` records,
+  for that key, what the checker decided: every expression's and type's mode, type and value
+  (`expr-internal`, `typexpr`; a shift's after its final type, from the checked tree), every
+  name's object (`:obj`; a qualified name's operand and member by their `:x-pos` and
+  `:name-pos`), a selection's kind, path and embedded fields (`:sel`), a struct literal key's
+  field (`:field`), an instance's type arguments (`:inst`), a `:=` name's object new (`:def`) or
+  reused (`:use`), a constant's (`:def`, its value and type), an import's implicit name
+  (`:implicit`); the package's result has the initializers' order (`:resolve-init-order`).
+- **go/types' spellings.** The converter writes the types go/types records (`:inst`, `:tag`) as
+  go/types spells them, so in this mode the checker's types do too (`arbace.go.check.types/
+  *spelled*`): the universe's `byte` and `rune` are `:byte` and `:rune` (identical to `:uint8`
+  and `:int32`: types compare by `same?`, canonically; `under` and `basic` give the canonical
+  keyword; a string's byte is `byte`, its range's value `rune`, untyped rune's default type
+  `rune`, as go/types' universeByte and universeRune), and an alias's name stays on the type it
+  denotes as metadata (`:arbace.go.check.types/alias`: equality and identity unchanged; `subst`
+  keeps a type it does not change). Outside the resolve mode no type is spelled: goi's checking is
+  unchanged.
+- **Dependencies.** Each configuration's standard library is one session over the loader's std
+  jobs (their raw forms checked on demand, in dependency order); a corpus's own packages, a
+  directory test's, test variants (`p [p.test]`, an external test's import of p) are sessions
+  delegating to it (`arbace.repr.go.annotate/load-sessions`).
+
 ## 4. The builder and the nodes
 
 ### 4.1 The builder

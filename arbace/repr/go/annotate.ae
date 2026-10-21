@@ -141,7 +141,7 @@
         s (if base
             (assoc s :delegate (:ck base) :local #(or (contains? index %) (not ((:has base) %))))
             s)]
-    {:ck s :recs recs :keep keep :index index :has #(contains? index %)}))
+    {:ck s :recs recs :keep keep :index index :has #(contains? index %) :base base :fallback fallback}))
 
 (def ^:private std-sessions (atom {}))
 
@@ -209,7 +209,9 @@
         [(fn [j] (get sess (get-in j [:header :dir-test :test]))) js])
       (= mode :files) [(constantly std) js]
       :else
-      (let [index (into {} (for [j js :let [k (job-key load j)] :when k] [k j]))
+      ;; the load's own packages (a module's, cmd's, test variants, external tests); a job of a
+      ;; standard library's package as it is (a tests corpus's package without tests) is std's
+      (let [index (into {} (for [j js :let [k (job-key load j)] :when (and k (not ((:has std) k)))] [k j]))
             fallback (fn [k]
                        (when-not (str/includes? k " ")
                          (first (filter :files (ld/jobs (assoc load :args [k] :tests false :deps false :prefix nil))))))
@@ -270,6 +272,9 @@
       ;; an alias (go/types' Alias): its name, what it denotes
       al (cond-> {:kind :alias :name (:name al) :actual (id (vary-meta T dissoc :arbace.go.check.types/alias))}
            (:pkg al) (assoc :pkg (:pkg al)))
+      (and (keyword? T) (t/kw-alias-info T))
+      (let [a (t/kw-alias-info T)]
+        (cond-> {:kind :alias :name (:name a) :actual (id (:actual a))} (:pkg a) (assoc :pkg (:pkg a))))
       (keyword? T) (case T
                      :unsafe-pointer {:kind :basic :name "Pointer" :pkg "unsafe"}
                      {:kind :basic :name (get t/basic-names T (name T))})
@@ -405,7 +410,8 @@
                          (seq (:via sel)) (assoc :via (vec (:via sel)))))
        fld (assoc :field (cond-> {:path (vec (:path fld))} (seq (:via fld)) (assoc :via (vec (:via fld)))))
        (:inst a) (assoc :inst {:targs (mapv #(type-id! tt %) (:inst a))})
-       (:implicit a) (assoc :implicit {:kind :pkg :name (:implicit a)})))))
+       (:implicit a) (assoc :implicit {:kind :pkg :name (:implicit a)})
+       (:x-unrecorded a) (assoc :x-unrecorded true)))))
 
 (defn- rebuild
   "The tree x with metadata ann (by node path) merged into its nodes; basic literals are
@@ -424,7 +430,12 @@
                    (= :const (:mode (meta (:x f2)))))
               (merge {:mode :const} a)
               (and (= :paren-expr (first x)) (nil? a)) (some-> (meta (:x f2)) (select-keys [:mode :t]) not-empty)
-              :else a)]
+              :else a)
+          ;; a shift whose operand go/types left unrecorded (an error)
+          n (if (:x-unrecorded a)
+              (apply list (first x) (update f2 :x #(vary-meta % dissoc :mode)) (nnext x))
+              n)
+          a (dissoc a :x-unrecorded)]
       (with-meta n (merge (meta x) a)))
     (vector? x) (with-meta (vec (map-indexed (fn [i v] (rebuild v (conj path i) anns)) x)) (meta x))
     :else x))
@@ -506,9 +517,21 @@
                               (first (keep (fn [k] (same (get a k) (get b k) (conj path k))) (sort-by str (keys a)))))
     :else (when-not (= a b) [path :value (short-str a) (short-str b)])))
 
+(defn- line-at
+  "The Go line of the innermost form on path in forms xs (a difference's), or nil."
+  [xs path]
+  (loop [x xs [p & ps] path l nil]
+    (let [l (or (when (instance? arbace.lang.IMeta x) (::cv/l (meta x))) (when (lit/lit? x) (:line x)) l)]
+      (cond
+        (nil? p) l
+        (= :meta p) (recur (get (meta x) (first ps)) (rest ps) l)
+        (and (integer? p) (or (seq? x) (vector? x)) (< p (count x))) (recur (nth (vec x) p) ps l)
+        (and (map? x) (not (lit/lit? x))) (recur (get x p) ps l)
+        :else l))))
+
 (defn same-package
   "nil when the conversions na (of the annotated native dump) and fb (of the helper's) are equal;
-  else the first difference [file path what a b]."
+  else the first difference [file line path what a b]."
   [na fb]
   (or (when (not= (:ns na) (:ns fb)) [nil [] :ns (:ns na) (:ns fb)])
       (when-let [d (same (:package na) (:package fb) [])] (into [nil] d))
@@ -516,7 +539,8 @@
       (first (keep (fn [[a b]]
                      (or (when (not= (select-keys a [:name :stem :comments :unplaced]) (select-keys b [:name :stem :comments :unplaced]))
                            [(:name a) [] :file (short-str (select-keys a [:name :stem :unplaced])) (short-str (select-keys b [:name :stem :unplaced]))])
-                         (when-let [d (same-seq (vec (:forms a)) (vec (:forms b)) [])] (into [(:name a)] d))))
+                         (when-let [d (same-seq (vec (:forms a)) (vec (:forms b)) [])]
+                           (into [(:name a) (line-at (vec (:forms a)) (first d))] d))))
                    (map vector (:files na) (:files fb))))))
 
 ;;; Corpora
@@ -524,10 +548,34 @@
 (defn- external-test? [load j]
   (let [h (:header j)] (and (:tests load) (:for-test h) (not= (:for-test h) (:package h)))))
 
+(defn- xtest-session
+  "go list -test's world of external test j of a package p with in-package tests, over session s
+  (its load's): p is its test variant (p [p.test]), and the packages of the test's imports that
+  import p, directly or not, are checked anew against it (go list's recompiled q [p.test]); the
+  others are s's and the standard library's. nil when p has no variant."
+  [s j]
+  (let [p (get-in j [:header :for-test])
+        vj (get (:index s) (variant-key p))
+        std (:base s)]
+    (when (and vj std)
+      (let [job-of (fn [k] (or (get (:index s) k) (get (:index std) k) (when-let [fb (:fallback s)] (fb k))))
+            imports (memoize (fn [k] (disj (set (vals (:import-map (job-of k)))) k)))
+            memo (ConcurrentHashMap.)
+            reaches (fn reaches [k]
+                      (let [v (.get memo k)]
+                        (if (some? v)
+                          v
+                          (let [v (boolean (some #(or (= % p) (reaches %)) (imports k)))]
+                            (.put memo k v)
+                            v))))
+            src-of (fn [k _] (when-let [jj (if (= k p) vj (job-of k))] (:src (prep jj {}))))]
+        {:ck (assoc (ck/session src-of) :delegate (:ck s) :local #(or (= % p) (reaches %)))}))))
+
 (defn- checked
   "Corpus job j of load checked: [package record], the record prep's (its native dump, raw
   forms, source and answers). A package is checked through its session (for its importers too);
-  a program or an external test alone; a package its session checked before it was kept, anew."
+  a program alone; an external test alone, in its world (xtest-session); a package its session
+  checked before it was kept, anew."
   [load sess-of j]
   (let [s (sess-of j)
         k (job-key load j)
@@ -538,7 +586,9 @@
         (if r
           [pkg r]
           (let [r (prep j imports)] [(when (:src r) (ck/check-src (:ck s) (:src r))) r])))
-      (let [r (prep j imports)] [(when (:src r) (ck/check-src (:ck s) (:src r))) r]))))
+      (let [ts (when (external-test? load j) (xtest-session s j))
+            r (prep j (if ts {} imports))]
+        [(when (:src r) (ck/check-src (:ck (or ts s)) (:src r))) r]))))
 
 (defn- convert-full [d ctx]
   (cv/convert-package d (assoc ctx :positions :full)))

@@ -282,18 +282,24 @@
                 more)))
 
 (defn- declare-pkg! [x nm form]
-  (cond
-    ;; go/types' declarePkgObj: init and main (of package main) only functions
-    (and (= "init" nm) (not= :func (o x :kind)))
-    (err! form :InvalidInitDecl "cannot declare init - must be func")
-    (and (= "main" nm) (not= :func (o x :kind)) (= "main" (o e/*pkg* :name)))
-    (err! form :InvalidMainDecl "cannot declare main - must be func")
-    (not= "_" nm)
-    (let [s (o e/*pkg* :scope)]
-      (if-let [alt (e/scope-get s nm)]
-        (err! form :DuplicateDecl "%s redeclared in this block" nm)
-        (e/scope-put! s nm x))))
-  (vswap! (:objs *ctx*) conj x))
+  (let [bad (cond
+              ;; go/types' declarePkgObj: init and main (of package main) only functions
+              (and (= "init" nm) (not= :func (o x :kind)))
+              (do (err! form :InvalidInitDecl "cannot declare init - must be func") true)
+              (and (= "main" nm) (not= :func (o x :kind)) (= "main" (o e/*pkg* :name)))
+              (do (err! form :InvalidMainDecl "cannot declare main - must be func") true)
+              (not= "_" nm)
+              (let [s (o e/*pkg* :scope)]
+                (if-let [alt (e/scope-get s nm)]
+                  ;; go/types' declare: no Defs entry for it (the resolve mode answers none)
+                  (do (err! form :DuplicateDecl "%s redeclared in this block" nm)
+                      (oset! x :undeclared true))
+                  (e/scope-put! s nm x))
+                nil))]
+    ;; the resolve mode: such an object is not one of the package's (go/types returns before
+    ;; its objMap), never checked, never initialized
+    (when-not (and bad (:resolve (:flags *ctx*)))
+      (vswap! (:objs *ctx*) conj x))))
 
 (defn- group? [args]
   (let [args (if (string? (first args)) (rest args) args)]
@@ -533,6 +539,9 @@
       (and T (t/valid? T) (not (t/const-type? T)))
       (do (err! form :InvalidConstType "invalid constant type %s" (t/type-str T))
           (oset! x :type :invalid))
+      ;; the resolve mode: go/types' constDecl stops at an invalid type (no value)
+      (and T (not (t/valid? T)) (:resolve (:flags *ctx*)))
+      (oset! x :type :invalid)
       (and (nil? init) (contains? (meta form) :val))
       ;; a digest's constant: its :val trusted, at its :tag (else its untyped kind)
       (if-let [[ty v] (code/val-const (:val (meta form)) (when (and T (t/valid? T)) T))]
@@ -557,7 +566,7 @@
                   (oset! x :val (:val n))
                   (vswap! d assoc :tree {:op :const-decl :obj x :value n :line (code/fline form)})
                   (verify-val! form x n)))))))
-    (e/answer! form {:def x}))))
+    (when-not (o x :undeclared) (e/answer! form {:def x})))))
 
 (defn- var-decl! [x d]
   (let [{:keys [file tag init form lhs multi has-init]} @d
