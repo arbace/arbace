@@ -161,7 +161,12 @@
             (swap! std-sessions assoc k s)
             s)))))
 
-(defn drop-std-sessions! [] (reset! std-sessions {}) (arbace.go.check.load/clear-cache!))
+(defn drop-std-sessions!
+  "Forgets the standard library's sessions (and the generic types' instances they made)."
+  []
+  (reset! std-sessions {})
+  (arbace.go.check.decl/clear-instances!)
+  (arbace.go.check.load/clear-cache!))
 
 ;;; Corpus jobs: their session and key
 
@@ -834,10 +839,21 @@
         forms-bad (count (remove #(nth % 2) fc))
         pool (Executors/newFixedThreadPool (:jobs opts))
         _ (reset! forms-dir (:forms opts))
-        results (vec (for [sf specs]
-                       (if (= cmd "read")
-                         (read-corpus (read-spec sf) pool (:out opts) (if (:full opts) :full :lines))
-                         (check-corpus (read-spec sf) pool known))))
+        ;; the corpora grouped by the configurations their loads need (the standard library's
+        ;; sessions), each group's sessions dropped after it: memory for one group's at a time
+        specs (map-indexed (fn [i sf] (let [sp (read-spec sf)]
+                                        [i sp (vec (sort (distinct (map (comp str config-key) (:loads sp)))))]))
+                           specs)
+        groups (vals (group-by #(nth % 2) (sort-by (fn [[i _ ks]] [(count ks) (first ks) i]) specs)))
+        results (->> (for [g (sort-by #(apply min (map first %)) groups)
+                           :let [rs (doall (for [[i sp] g]
+                                             [i (if (= cmd "read")
+                                                  (read-corpus sp pool (:out opts) (if (:full opts) :full :lines))
+                                                  (check-corpus sp pool known))]))]]
+                       (do (drop-std-sessions!) (System/gc) rs))
+                     (apply concat)
+                     (sort-by first)
+                     (mapv second))
         unknown (+ forms-bad (reduce + (map :unknown results)))]
     (.shutdown pool)
     (.awaitTermination pool 1 TimeUnit/MINUTES)
