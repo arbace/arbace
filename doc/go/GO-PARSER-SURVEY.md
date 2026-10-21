@@ -1543,3 +1543,13 @@ generated variants). Not run: `bin/gate --full`, `bin/box-rebuild`.
   - (b) in the resolve mode only, goi's normal mode keeping the bugs.
 
   *Recommended: (a)*.
+
+## Decided (2026-10-21): GPS27-GPS31
+
+The user decided GPS27-GPS31 as built, each (a):
+- GPS27: go/types' spellings of types in the resolve mode only.
+- GPS28: E-ann compares the final forms the converter makes, metadata and positions included.
+- GPS29: external tests checked in go list -test's world.
+- GPS30: go/types' records of invalid programs in the resolve mode only; (b), goi's normal mode
+  too, left for GP6.
+- GPS31: the two checker fixes in both modes.

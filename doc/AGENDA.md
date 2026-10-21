@@ -9,7 +9,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`aa4cb10b…`, 2026-10-21), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`3dda04f6…`, 2026-10-21), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
@@ -120,7 +120,7 @@ The current state of the work. This file is rewritten as things change. For the 
     `bin/repr-go raw-check` 12,158 dumps resolved, 0 differ, 117 raw only; the normal conversion
     unchanged). The seed remade after GP2, JN2 and GP3 (`aa4cb10b…`) and verified. GPS21-GPS26 decided
     as built (the user, 2026-10-21). GP4 done (2026-10-21: the checker's
-    resolve mode, E-ann 12,158 of 12,158 equal, none known; GPS27-GPS31 open); next GP5, the switch.
+    resolve mode, E-ann 12,158 of 12,158 equal, none known; GPS27-GPS31 decided as built); next GP5, the switch.
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
@@ -133,7 +133,7 @@ The current state of the work. This file is rewritten as things change. For the 
     step in `bin/gate --full`; the program changed, re-seed batched with GP4's; JFS23-JFS26
     decided as built). JN4 done (2026-10-21: repr/java's read on the tool, every corpus byte for
     byte the JVM reader's, `bin/repr-java host-check`; JFS27-JFS30 decided as built); next JN5, the
-    checks moved to the tool. Re-seed for JN3, JN4 and GP4 running. The processes form made robust (2026-10-21).
+    checks moved to the tool. The seed remade after JN3, JN4 and GP4 (`3dda04f6…`) and verified. The processes form made robust (2026-10-21).
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

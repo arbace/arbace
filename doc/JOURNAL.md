@@ -745,3 +745,34 @@ JFS26 (a), the `javac` step in `bin/gate --full`.
 - **Rule slips:** a crash report went to /tmp before TMPDIR was set; it was deleted.
 - **Open for the user:** GPS27-GPS31.
 - **Next, the batched re-seed** for JN3, JN4 and GP4.
+
+## 2026-10-21: GPS27-GPS31 decided as built (the user)
+
+GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
+- go/types' spellings in the resolve mode only;
+- E-ann compares the final forms, with every key and position;
+- external tests in go list -test's world;
+- go/types' rules for invalid programs in the resolve mode only, with (b) left for GP6;
+- the two checker fixes in both modes.
+
+## 2026-10-21: the seed remade after JN3, JN4 and GP4
+
+- **What:** on main at `fd3aba59`, one chain: the essential `bin/gate` passed (26m59s),
+  `bin/arbace-go --fixpoint` held (G2 = G3), then `bin/seed --make` from G3, committed as
+  `66f8aaba`, then `bin/seed --verify`.
+- **The seed:** `3dda04f62af832c90d5c7574ddc209607c9bcdd8401b44e6fb2428dc9762ef2e` (was
+  `aa4cb10b…`), 18,488,584 bytes, 1,954 files, 123,303,354 bytes unpacked.
+- **Verified:** the same archive printed again from its commit; stage 0 = G1 = G2 = G3, byte for
+  byte, `4f32a6af6dc87a820cdf8b471a265e2893a6f43962d5228518d484678b7d9abd`.
+- The gate at the start of the chain was also the first on GP4's merge (`7dd53bef`, its Makefile
+  conflict resolved by hand).
+
+## 2026-10-21: what next, the full gate, and /tmp (the user)
+
+- **GP5 and JN5** start together, in worktrees off the re-seeded main.
+- **`bin/gate --full`** waits for the next milestone, as the policy says. Its steps added since the
+  tag (javac, `repr-java host-check`, native-check with E-ann) first run as gate steps then.
+- **/tmp:** Arbace writes its error reports to `$TMPDIR` (else /tmp). 28 `arbace-*.edn` reports
+  from 2026-10-20 and 2026-10-21 were deleted; some came from the re-seed's own gate as it ran. The
+  scripts of `bin/` will set `TMPDIR` to `.tmp/tmp` when it is unset (the user's choice over
+  deleting only).
