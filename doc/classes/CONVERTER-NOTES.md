@@ -26,8 +26,8 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 | `arbace/repr/java.ae` | `arbace.repr.java` | command line: `convert`, `jdk` |
 | `arbace/repr/java/coverage.ae` | `arbace.repr.java.coverage` | coverage summary from run reports |
 | `arbace/repr/java/resolve.ae` | `arbace.repr.java.resolve` | asks the Java forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
-| `bin/repr-java` | | starts the frozen JVM Arbace (`bin/lib/frozen.bash`) with access to javac's internals, repr/java and the Java forms' front end loaded from the checkout's sources; with `REPR_JAVA_HOST=arbace` javac's tool executable instead (JN4) |
-| `bin/repr-java host-check` | | the reader on javac's tool executable against the frozen JVM's, every corpus (`bin/lib/repr-java/host-check`) |
+| `bin/repr-java` | | runs the reader on javac's tool executable (javac on Arbace, the reader compiled into it; JN4, its only host since JN6); until JN6 also on the frozen JVM Arbace (`REPR_JAVA_HOST=jvm`, `bin/lib/frozen.bash`), with `host-check` comparing the two |
+| `bin/lib/repr-java/host.bash` | | the host and the platform as the provenance files name them, their comparison but the host, the reader's hash (in `bin/lib/frozen.bash` until JN6) |
 | `bin/repr-java check` | | the checks (below) |
 | `test/repr/java/expected/` | | the expected output of the checks: `java/` and `module/` (the samples' forms), `baseline.sha256` (the baseline's, by hash) |
 | `test/repr/java/build.ae` | `repr.java.build` | compiles converted files with the frozen jar's own Java forms compiler into class files (`bin/repr-java check --suite`; until S4 `arbace.repr.java.build`) |
@@ -51,12 +51,17 @@ before the jar on the class path, so those load from the checkout's sources and 
 same as on main's stage 2 (`jdk/forms`, `test/java-fixtures` and the samples, byte for byte).
 
 Since JN4 (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN4") the reader also runs on javac's
-tool executable (`bin/arbace-go --build-java`, `REPR_JAVA_HOST=arbace`): javac on Arbace, the
-reader's namespaces compiled into the tool by c2j (evaluated from the checkout when its sources
-differ from the tool's), the platform the exploded modules of `jdk/javac/platform.sha256`, and for
-the suite's fixtures the checkout's runtime declarations (`bin/repr-java declarations`) in place
-of the frozen jar. Its output is the JVM's over every corpus (`bin/repr-java host-check`); the JVM
-stays the default until JN5 and JN6.
+tool executable (`bin/arbace-go --build-java`): javac on Arbace, the reader's namespaces compiled
+into the tool by c2j (evaluated from the checkout when its sources differ from the tool's), the
+platform the exploded modules of `jdk/javac/platform.sha256`, and for the suite's fixtures the
+checkout's runtime declarations (`bin/repr-java declarations`) in place of the frozen jar. Its
+output was the JVM's over every corpus (`bin/repr-java host-check`, JN4-JN5); the default host since
+JN5, and the only one since JN6 ("As built: JN6", 2026-10-21): `bin/repr-java` no longer starts the
+frozen JVM, `frozen_view tools` holds no repr/java, `REPR_JAVA_HOST=jvm` and `host-check` are gone,
+the platform holds the JDK image's 68 modules (so `check --jdk` runs on the tool too), and the
+provenance files' `:jdk` names the platform by its pin, not `java -version`. Nothing of repr/java
+starts a JVM; the frozen jar compiles `check --suite`'s converted baseline (step 4), a JVM back end
+by design. The paragraph above is the history of S4 to JN5.
 From the freeze to S4 it ran on `target/stage2`, before the freeze on the frozen Clojure. Its
 output names the running core: a head shadowed by a local or field is qualified `arbace.core/`
 (before, `clojure.core/` for Clojure's own names). The baseline `clojure/` is no longer in
@@ -251,7 +256,13 @@ through the Java forms' front end into the Go build, and the oracle and Clojure'
 
 Since S4 `bin/repr-java check --jdk [MODULE...]` only converts the modules (`--check`: no failures,
 every file read back; `test/repr/java/jdk.bash`, two conversions at a time, `JDK_JOBS`); the
-compilation and comparison with javac below went with the back end.
+compilation and comparison with javac below went with the back end. Since JN6 (2026-10-21,
+doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN6") it runs on javac's tool executable against the
+platform of the JDK image's 68 modules, one module at a time (`JDK_JOBS` 1, `JDK_THREADS` 4 chunks):
+68 modules, 12,730 files, no failures, 14 minutes, 8.5 GB at the peak. It had not run since the move to
+`test/repr/java/` (2026-10-17: the script's root was one level short), and a module of
+`module-info.java` alone (`java.se` and four more) stopped `read --check`'s report on either host;
+both fixed then.
 
 Until S4, `bin/repr-java check --jdk [MODULE...]` (about 10 minutes on 64 cores; not part of the default
 checks) converted every module of jdk26u's `src/*/share/classes` with `bin/repr-java ... jdk`,

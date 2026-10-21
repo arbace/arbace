@@ -38,8 +38,11 @@ the branch describe what it holds, how to build, run and verify it, and its know
 
 Main no longer builds the JVM Arbace (since standalone S4, the milestone `arbace-seed-is-go-v1`). The
 frozen jar of `arbace-for-java-26-v4`, built from its tag and pinned by hash, stays main's
-reference for the Go build's differential tests ([doc/go/ORACLE.md](doc/go/ORACLE.md)), and
-the JVM hosts repr/java's Java front end (javac).
+reference for the Go build's differential tests ([doc/go/ORACLE.md](doc/go/ORACLE.md)) and the
+JVM's records (j2g's edge, the data generators). repr/java's Java front end is javac itself, held
+as Java forms and run by Arbace (javac on Arbace, a tool executable built from them): since the
+milestone JN6 (2026-10-21) nothing of repr/java starts a JVM
+([doc/classes/JAVA-FRONTEND-SURVEY.md](doc/classes/JAVA-FRONTEND-SURVEY.md)).
 
 ## Arbace for Golang
 

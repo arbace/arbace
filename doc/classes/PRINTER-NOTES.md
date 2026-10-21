@@ -5,7 +5,9 @@ The second verb of repr/java, Java's bridge (doc/NAMING-SURVEY.md, R1 and R5, de
 [CONVERTER-NOTES.md](CONVERTER-NOTES.md)), `print` turns Java forms back into Java source that
 javac compiles and that `read` converts to the same forms. It runs on the tools' host (stage 0,
 like repr/go's printer, [../go/PRINTER-NOTES.md](../go/PRINTER-NOTES.md)): it needs no javac and no
-JVM. The reading side stays on the frozen JVM, since javac is its front end. SPEC §14 states
+JVM. The reading side needs javac, its front end: on the frozen JVM until JN5, on javac's tool
+executable (javac on Arbace) by default since JN5 and only there since JN6
+([JAVA-FRONTEND-SURVEY.md](JAVA-FRONTEND-SURVEY.md)), so no JVM either. SPEC §14 states
 the printer's contract; these notes say how it is built, what the round trip checks, and what
 it found.
 
@@ -120,7 +122,8 @@ that value so everywhere; otherwise decimal (the text level's known differences)
 
 ## The round trip
 
-`bin/repr-java roundtrip` converts the corpus's Java into forms F1 (`read`, on the frozen JVM),
+`bin/repr-java roundtrip` converts the corpus's Java into forms F1 (`read`, on the frozen JVM until
+JN5, on javac's tool executable since),
 prints them (`print`, on the tools' host), reads the printed Java into F2 and judges every
 converted file at three levels (`arbace.repr.java.roundtrip`):
 
@@ -130,7 +133,9 @@ converted file at three levels (`arbace.repr.java.roundtrip`):
 | `ae` | the same files as text, byte for byte (after the first line, which names the Java file read) | the forms and the spellings the converter keeps (radixes) |
 | `classes` | javac's class files of the original Java and of the printed Java, `-g:none` (no `LineNumberTable`, `LocalVariableTable`, `SourceFile`), byte for byte, per Java file (its classes and their nested ones) | the same javac output |
 
-The javac of the class level is the frozen JVM's (jdk26u's, 26.0.2.1), with the options the
+The javac of the class level was the frozen JVM's (jdk26u's, 26.0.2.1) until JN5, and is javac on
+Arbace since (`bin/repr-java javac`; its class files are the JVM's javac's byte for byte,
+`bin/javac-vendor classes`), with the options the
 corpus is built with (the JDK's java.base: `--patch-module`, `-XDstringConcat=inline`). Printed
 files javac rejects are replaced by their originals and compiled again, so that the other files'
 classes are compared; the rejected ones fail the class level (their forms are then missing too).

@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild mac-bundle arm64-vm-check arm64-vm-goi \
   gate gate-full suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-host-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-divergences alpine-check clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-divergences alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -91,11 +91,11 @@ generated-check: ## arbace/lang/go's generated variants (CompilerNodes.ae, Compi
 	bin/generated-check
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
-VERIFY := jdk-verify edge-verify javac-verify javac-classes repr-java-check repr-java-host-check fixtures-verify tamago-verify toolchain-verify \
+VERIFY := jdk-verify edge-verify javac-verify javac-classes repr-java-check fixtures-verify tamago-verify toolchain-verify \
   box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip repr-java-text \
   repr-clojure-roundtrip
 verify: $(VERIFY) ## all of the below, one after another
-jdk-verify: ## jdk/'s forms by repr/java, on javac's tool executable (bin/jrt-convert verify)
+jdk-verify: ## jdk/'s forms by repr/java, on javac's tool executable; the generators on a JDK, the edge step on the frozen JVM (bin/jrt-convert verify)
 	bin/jrt-convert verify
 edge-verify: ## j2g's edge, on the frozen JVM (bin/j2g-edge verify)
 	bin/j2g-edge verify
@@ -106,8 +106,8 @@ javac-classes: ## javac on Arbace (the tool build) compiles the baseline, sample
 	bin/javac-vendor classes
 repr-java-check: ## repr/java's converter checks on javac's tool executable: the baseline, the samples, the module sample (bin/repr-java check)
 	bin/repr-java check
-repr-java-host-check: ## repr/java's read on the tool build reads every corpus as on the frozen JVM, the reference until JN6 (bin/repr-java host-check)
-	bin/repr-java host-check
+repr-java-jdk: ## jdk26u's 68 modules read by repr/java on javac's tool executable, no failures; long, not in verify (bin/repr-java check --jdk)
+	bin/repr-java check --jdk
 fixtures-verify: ## the suite's Java fixtures, on javac's tool executable (bin/clojure-tests --java-fixtures verify)
 	bin/clojure-tests --java-fixtures verify
 tamago-verify: ## tamago/goroot and goos; the guest from them (bin/tamago-vendor verify, check)

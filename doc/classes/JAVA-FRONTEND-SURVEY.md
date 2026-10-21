@@ -13,8 +13,9 @@ this survey and no Go build was made. Decided on 2026-10-20 ("Decided", at the e
 spike, as built: "As built: JN1 (2026-10-20)", after it; JN2, javac's forms vendored: "As built:
 JN2 (2026-10-20)", with JFS18-JFS22; JN3, javac runs on Arbace: "As built: JN3 (2026-10-21)", with
 JFS23-JFS26; JN4, repr/java's `read` on Arbace: "As built: JN4 (2026-10-21)", with
-JFS27-JFS30; JN5, the fixpoint and the checks moved: "As built: JN5 (2026-10-21)", at the end, with
-JFS31-JFS36.
+JFS27-JFS30; JN5, the fixpoint and the checks moved: "As built: JN5 (2026-10-21)", with
+JFS31-JFS36; JN6, the JVM leaves repr/java: "As built: JN6 (2026-10-21)", at the end, with
+JFS37-JFS42.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -2059,3 +2060,260 @@ The user decided JFS31-JFS36 as built:
 - JFS34 (b): the round trip's corpora concurrently.
 - JFS35 (a) now, (b) at JN6.
 - JFS36 (a): `bin/repr-java host-check` kept, out of the gate, until JN6.
+
+## As built: JN6 (2026-10-21)
+
+JN6, the JVM leaves repr/java, on the branch `java-frontend-jn6` from main `02d2c34b` (whose seed
+holds JN3 and JN4; JN5 is not in it), in about four hours of work (against the day estimated).
+`bin/repr-java` starts no JVM: its read runs on javac's tool executable alone, the frozen JVM's read
+(`REPR_JAVA_HOST=jvm`) and `host-check` are gone, `frozen_view tools` holds no repr/java, and the
+provenance files' `:jdk` names the platform by its pin, not `java -version` (JFS35 (b)). The two
+JVM-only remainders of repr/java's own work moved too: `check --jdk` (jdk26u's 68 modules) runs on the
+tool, the platform grown to the JDK image's 68 modules (JFS37), and `bin/jrt-convert`'s source list,
+locales and report run on the tools' host (JFS40). Every corpus's forms, the round trip's references
+and the class files are unchanged. A trace of every exec (strace) over the affected `--full` steps'
+commands shows no JVM under `bin/repr-java` (JN6.4). The JVM ran only the frozen v4 jar (the edges'
+recordings, `check --suite`'s back end and suite, `bin/jrt-convert`'s edge step, the trace's control
+run of main's JVM read), the frozen JDK's `javac` (the reference of `bin/javac-vendor classes`) and the
+system JDK's generators (`bin/jrt-convert generate`, JN7's); Go only TamaGo's go1.27.1, without cgo.
+The tools' host was the worktree's stage 0; j2g for the tool ran on the program built from the
+checkout (JFS22 (a)).
+
+### JN6.1 `bin/repr-java` without the JVM
+
+- **`bin/repr-java`**: the JVM branch (`bin/lib/frozen.bash`, `frozen_java tools` with javac's
+  `--add-exports`, `REPR_JAVA_JVM_OPTS`) and the command `host-check` (`bin/lib/repr-java/host-check`)
+  removed; `read`, `read-jdk`, `coverage`, `main`, `javac` and `declarations` run on javac's tool
+  executable (`REPR_JAVA_EXE`), as they did by default since JN5. `REPR_JAVA_HOST` unset or `arbace`
+  is accepted; `jvm` stops with a message naming this section (JFS38), any other value as before.
+- **`arbace/repr/java/javac.ae`**: the reader's JVM branch (javac's standard file manager against the
+  running JDK, taken when `jdk.internal.jrt.javac.FileManager` was absent) removed; elsewhere than on
+  the tool `analyze` now refuses with a message. With `java.ae`'s fix (JN6.7) and `full.ae`'s
+  docstring the reader's only changes; they move the provenance's `:repr-java` hash (`2edfddeb...` to
+  `8028aa94...`).
+- **`bin/lib/repr-java/host.bash`** (new): `repr_java_host`, `repr_java_provenance_same`,
+  `repr_java_reader_hash`, moved out of `bin/lib/frozen.bash` (the JVM's half of `repr_java_host` and
+  `frozen_host` dropped), and `repr_java_platform` (JFS35 (b)). Under `bin/lib/repr-java/`, the check
+  scripts' directory, so that the tool's key (`bin/lib/javac-key.bash`) does not hold them, as it did
+  not hold `frozen.bash`. The provenance writers (`bin/jrt-convert`, `bin/clojure-tests
+  --java-fixtures`, `bin/javac-vendor`) source it, not `frozen.bash`.
+- **`frozen_view tools`** links no `arbace/repr/java` (the awk's explicit exclusion: the jar of v4
+  holds no `arbace/repr/java`, so the rule "every namespace the jar lacks" would have linked it
+  anyway) and removes the links a view made before JN6 holds. Its users, `bin/j2g-edge`,
+  `bin/javac-vendor edge`, `bin/jrt` and `bin/jrt-coverage`, need none of it (`bin/j2g-edge verify`
+  passes, JN6.6).
+- **`bin/lib/repr-java/check`** sources `frozen.bash` only for `--suite`'s step 4; **`roundtrip`**,
+  **`bin/jrt-convert`**, **`bin/javac-vendor`**, **`bin/clojure-tests --java-fixtures`** and
+  **`test/repr/java/jdk.bash`** lost `REPR_JAVA_JVM_OPTS` (the JVM read's heap); `--java-fixtures`
+  always takes the runtime's declarations as javac's class path (the frozen jar was the JVM's).
+- **`bin/gate`**: the java chain and the javac step no longer set `REPR_JAVA_HOST`.
+
+### JN6.2 The provenance's `:jdk` (JFS35 (b))
+
+`repr_java_platform` prints `platform SHA-256`, the SHA-256 of `jdk/javac/platform.sha256`: the
+platform javac on Arbace attributes against (jdk26u's build tree's exploded modules with the jmods'
+descriptors), so no `java -version` is asked. The three provenance files were written on the tool
+(`bin/jrt-convert update`, `bin/clojure-tests --java-fixtures update`, `bin/javac-vendor convert`):
+in each only `:jdk` (`"openjdk version \"26.0.2.1-internal\" 2026-08-18"` to `"platform
+7abd8629..."`), `:repr-java` (JN6.1) and `:host` (`arbace-javac ee04e344...` to `arbace-javac
+811e563f...`, the final tool's) changed. `jdk/provenance.edn`'s `:gen-jdk` stays `java -version`'s line of `GEN_JDK`,
+the generators' JDK (JN7).
+
+### JN6.3 The remainders decided
+
+| remainder (JN5.9) | decided | as built |
+|---|---|---|
+| `check --jdk`: the platform held 10 modules | moved (JFS37) | the platform holds every module of the build tree's `jdk/modules`, the 68 of the JDK image (`bin/javac-vendor`'s `platform_modules`, a function of the build tree now; `jdk/javac/platform.sha256` 58 lines more, the 10 of JN5 unchanged); `check --jdk` reads them on the tool (JN6.5). The unnamed module's default roots are the full image's again, as on the JVM: every corpus's forms and class files are unchanged (JN6.6) |
+| `bin/jrt-convert`'s own namespaces | moved but the edge (JFS40) | `jrt.jrt-sources` (the source list, the locales and `LocaleDataIndex`, the report) on the tools' host (`arbace_tool -p test`: 0.7 s for `print-sources` against a JVM's start); the edge split into `jrt.jrt-edge` (`test/jrt/jrt_edge.ae`), on the frozen jar: it reads javac's classes with `java.lang.classfile` and `jrt.java-surface`'s class reading, which jrt has not. `sources.txt`, `LocaleDataIndex.java` (so its forms), the report: the same |
+| the edges' recordings (`bin/j2g-edge`, `bin/javac-vendor edge`) | kept on the JVM | JVM data by design (JFS14): HotSpot's reflection and method order |
+| `check --suite`'s back end | kept on the JVM | the frozen jar's Java forms compiler and the suite on the JVM (§1.3, O2 (a)); the Go test build runs the suite on the converted forms already |
+| the reference javac of `bin/javac-vendor classes` | kept (JFS41) | the JDK's javac (not the frozen jar) as the reference of javac on Arbace's class files, while a JDK is at hand |
+| `REPR_JAVA_HOST=jvm` | removed (JFS38) | stops with a message |
+| `bin/repr-java host-check` | removed (JFS39) | with the JVM's read it compared against |
+| the generators (`bin/jrt-convert generate`) | JN7 | on `GEN_JDK` |
+
+### JN6.4 The trace: nothing of repr/java starts a JVM
+
+Each affected `--full` step's command ran alone, as `bin/gate --full` runs it (the tool
+`target/arbace-go/amd64/arbace-javac`, key `21adc92f...`, before JN6.7's fix of the reader; the
+updates, the three verifies, `check` and `check --jdk` again on the final tool, key `811e563f...`, the
+counts the same but `check --jdk`'s), under `strace -f --seccomp-bpf -e
+trace=execve,fork,vfork,clone,clone3` (`.tmp/jn6/trace.sh`): every exec and the process tree, so a
+JVM started by an absolute path (`$GEN_JDK/bin/java`) or through a script counts too. `.tmp/jn6/javas.py`
+finds every exec of a `java` or `javac` binary, rebuilds the chain of processes above it (a pid's
+history reset at each fork, since pids are reused) and counts those with a `bin/repr-java` process
+above them other than `check` and `roundtrip` (which `exec` the check scripts: `check --suite`'s step
+4 is the back end, and the round trip's own reads and compiles are `bin/repr-java read`, `read-jdk`
+and `javac` processes below it). A control run of main's `bin/repr-java` (`02d2c34b`, exported into
+`.tmp/jn6/control`) with `REPR_JAVA_HOST=jvm` over the samples is found: 2 execs under `bin/repr-java
+read` (the `/usr/bin/java` launcher re-execs the JDK's, so each JVM is two execs).
+
+| command | JVM execs | under `bin/repr-java` | what they are |
+|---|---:|---:|---|
+| control: main's `REPR_JAVA_HOST=jvm bin/repr-java read --check` of the samples | 2 | **2** | the frozen jar, view `tools`, `-m arbace.repr.java` |
+| `bin/javac-vendor check` | 0 | 0 | |
+| `bin/javac-vendor verify` | 4 | 0 | the frozen jar, view `tools`: `arbace.j2g.main --record-edge`, `arbace.j2g.edge subtract` (the edge) |
+| `bin/javac-vendor classes baseline samples jdk java.base` | 110 | 0 | the reference javac (12), the jdk corpus's originals' generators on `GEN_JDK` (82, with their 16 javac) |
+| `bin/repr-java check --suite` | 123 | 0 | step 4: the frozen jar, view `test`, `repr.java.build` (2); Clojure's suite on the JVM (117, its javac 2, the AOT example 2) |
+| `bin/repr-java roundtrip --corpus baseline,samples,jdk --text` | 97 | 0 | the jdk corpus's originals' generators (82, with their 15 javac) |
+| `bin/jrt-convert verify` | 100 | 0 | the generators (82, 16 javac); the frozen jar, view `test`, `jrt.jrt-edge` (2) |
+| `bin/clojure-tests --java-fixtures verify` | **0** | 0 | |
+| `bin/j2g-edge verify` | 6 | 0 | the frozen jar, view `tools`: `arbace.j2g.main`, `arbace.j2g.edge` |
+| `bin/repr-java check --jdk` (JN6.5) | 0 | 0 | |
+| the updates (`bin/jrt-convert update`, `--java-fixtures update`, `bin/javac-vendor convert`) | 135, 0, 4 | 0 | as their verifies, and the frozen jar built once from its tag inside the edge step (jrt-convert's first run in the worktree) |
+
+So the frozen jar is used only by the oracle (not in these steps), the edges (`arbace.j2g.main`,
+`arbace.j2g.edge`), `check --suite` (`repr.java.build`, then the suite) and `bin/jrt-convert`'s edge step
+(`jrt.jrt-edge`, a data generator); no JVM runs `arbace.repr.java`. The traces: `.tmp/jn6/trace/`,
+the summary `summary.txt`. The steps' times under the trace are longer than the gate's (ptrace stops
+at every thread's creation: `check --suite` 608 s against JN5's 178 s, the round trip 1,012 s against
+543 s); they are not the measure of this milestone.
+
+### JN6.5 `check --jdk` on the tool
+
+`bin/repr-java check --jdk` (`test/repr/java/jdk.bash`) reads every module of jdk26u's
+`src/*/share/classes`, largest first, with `read-jdk --check` on the tool, each module attributed
+with `--patch-module` against the platform of 68 modules (JFS37). Two bugs stopped it first (JN6.7);
+then, on the final tool (key `811e563f...`):
+
+| | |
+|---|---:|
+| modules | 68 (63 with Java files; 5 of `module-info.java` alone) |
+| Java files read, converted | 12,730, 12,730 |
+| failures, javac errors, files unreadable by `arbace.core/read` | 0, 0, 0 |
+| files written | 13,566 |
+| wall time (one module at a time, `JDK_THREADS` 4 chunks; traced) | 14 m 16 s |
+| peak RSS of a reader process | 8.5 GB |
+| the largest: java.base, java.desktop, java.xml | 3,088 files 180 s, 2,287 files 144 s, 1,854 files 92 s |
+
+The defaults changed for the tool: `JDK_JOBS` 1 (was 2 JVMs of 10 GB), `JDK_THREADS` 4 chunks per
+module (was 8 threads in the JVM). The JVM's last full run (2026-10-07, CONVERTER-NOTES' "The converted
+JDK") had the same 68 modules without failure; the forms are not compared (`check --jdk` checks only
+that every file converts and reads back), as since S4.
+
+### JN6.6 The checks
+
+Each affected `--full` step's command alone, as `bin/gate --full` runs it, on the tool (all traced,
+JN6.4):
+
+- `bin/javac-vendor check`: j2g translates javac's world, no failures (65 s)
+- `bin/javac-vendor verify`: `jdk/javac` read by javac on Arbace is the committed tree, byte for byte
+  (574 files, the grown pin included; 111 s)
+- `bin/javac-vendor classes baseline samples jdk java.base`: byte for byte the JVM's javac's
+  (baseline 812 classes, samples 28 and 4, jdk 2,224, java.base 7,434 and the build's but
+  `module-info.class`), with the platform of 68 modules (364 s)
+- `bin/repr-java check --suite`: the baseline's 189 files as `baseline.sha256`, the samples (11) and
+  the module (6) as expected; the suite on the converted baseline 809 tests, 20,750 assertions, 20,718
+  passing, no regressions against `test/baseline-results.edn` (608 s traced)
+- `bin/repr-java roundtrip --corpus baseline,samples,jdk --text`: as the references (baseline forms
+  189, ae 182, classes 143 of 183; samples 17, 17, 12 of 14; jdk forms 874 of 911 (7 failing, 30
+  missing), ae 816, classes 473 of 838; the text level record, text and classes all, `anew` 183, 14,
+  799 of 838; 1,012 s traced)
+- `bin/jrt-convert verify`: `jdk/` is the conversion, byte for byte (911 forms files, 10 data files;
+  `jrt.jrt-sources` on the tools' host; 280 s)
+- `bin/clojure-tests --java-fixtures verify`: byte for byte (15 files; 22 s)
+- `bin/j2g-edge verify`: `jdk/edge.edn` is the JVM's answer, with `frozen_view tools` without
+  repr/java (76 s)
+- `bin/repr-java check`: as expected (30 s; 50 s traced on the final tool), and `make check-makefile`
+- on the final tool (`811e563f...`, after JN6.7's fix), the updates, `bin/jrt-convert verify` (335 s),
+  `--java-fixtures verify` (26 s), `bin/javac-vendor verify` (172 s), `check` and `check --jdk` traced
+  again (no JVM under `bin/repr-java`), and untraced the round trip (as the references, 592 s), `check
+  --suite` (no regressions, 194 s) and `bin/javac-vendor classes baseline samples jdk java.base` (byte
+  for byte, 300 s)
+- `bin/gate` (essential): on the branch at `d173a4b6`, passes in 26m07s (go-build 830 s, both
+  builds afresh; go-smoke, suite-go 777 tests with no regression, oracle-go 53 known mismatches as
+  recorded, diffcheck 12,741 of 12,764 cases agree with the 23 known, goi-check 740 of 740, generated)
+- not run: `bin/gate --full` as a whole (the user's rule: at the milestone)
+
+### JN6.7 Bugs found
+
+- **A module of `module-info.java` alone stopped `read --check`** (`java.se`, `jdk.crypto.ec`,
+  `jdk.jdwp.agent`, `jdk.graal.compiler`, `jdk.graal.compiler.management` in jdk26u: their Java is
+  generated or elsewhere): `read-jdk` skips the descriptor, writes no file, and the report's `spit`
+  found no `OUT` ("FileNotFoundException ... repr-java-report.edn"). The frozen JVM's read failed the
+  same (main's `REPR_JAVA_HOST=jvm` on `java.se`), so `check --jdk` could not have passed on the JVM
+  either since the report was written by `read` itself. Fixed in `arbace/repr/java.ae` (`OUT` made
+  before the report). No regression form (the reader is not in `bin/diffcheck`'s corpora); `check
+  --jdk` is its test.
+- **`bin/repr-java check --jdk` had not run since 2026-10-17.** `test/repr/java/jdk.bash` took the
+  repository root as `$(dirname "$0")/../..`, two levels up, from when it was `test/j2a/jdk.bash`;
+  the move to `test/repr/java/` (`789b8534`, R1's renames) made it `test/`, so every module "failed"
+  with `bin/repr-java: No such file or directory` at once. Fixed (`../../..`). No regression form:
+  a script, not Arbace code; the check itself is its test.
+- **The trace's own first version** missed `fork()` lines (strace pads them before `=`) and merged
+  reused pids' histories; the control run caught both before the results above were read.
+
+### JN6.8 The shipped program's change
+
+None in code: `arbace/repr/java` is not in the shipped program (j2g's `embed.ae` leaves it out; the
+tool embeds it), and `go/`, `overlay/`, `jdk/forms`, `jdk/data` and `jdk/edge.edn` are unchanged.
+`jdk/provenance.edn` (JN6.2) and `jdk/README.md` (its rows' text) change the runtime key
+(`bin/lib/version.bash`'s `arbace_runtime_key` holds `jdk/` but j2g's edge), and with it the version map
+the executable carries (`:runtime`), as at JN5. `jdk/javac/` is the tool's (outside the runtime key).
+No re-seed (batched).
+
+### JN6.9 What stays on a JVM, and why
+
+| use | on | why |
+|---|---|---|
+| the oracle's reference (`bin/oracle`, `test/oracle/expected`) | the frozen jar | the frozen v4 Arbace is the reference by definition |
+| j2g's edge (`bin/j2g-edge update`, `verify`, `trace`) and javac's (`bin/javac-vendor edge`, in `convert` and `verify`) | the frozen jar | the JVM's reflection over the classes outside the forms and HotSpot's method order (JFS14) |
+| `bin/repr-java check --suite`'s step 4 | the frozen jar, then the suite's JVMs | the converted baseline compiled by the jar's own Java forms back end (main has none, O2 (a)) and Clojure's suite run on its classes |
+| `bin/jrt-convert`'s edge step (`jrt.jrt-edge`) | the frozen jar | javac's classes read with the JDK's class file API and `jrt.java-surface` (JFS40); a report (`edge.edn`, the report's tables), compared with nothing |
+| the data generators (`bin/jrt testdata`, `manifest`, `standins`, `bin/jrt-coverage`, `bin/net-check`'s servers) | the frozen jar | they read the JVM |
+| `bin/jrt-convert generate` | a JDK (`GEN_JDK`) | the JDK build's generators, Java run on a JDK (JN7) |
+| the reference javac of `bin/javac-vendor classes` | a JDK (`javac` on `PATH`) | the reference of javac on Arbace's class files (JFS41) |
+
+Nothing of it is repr/java's read or print, and nothing of it runs `arbace.repr.java`.
+
+### JN6.10 Proposals
+
+- **JFS37 The platform for `check --jdk`.**
+  - Options: (a) the one platform grown to every module of the build tree, the 68 of the JDK image,
+    pinned with the others (built); (b) a second platform of 68 modules for `check --jdk` alone, the
+    corpora's of 10 unchanged; (c) `check --jdk` kept on the JVM (the frozen jar's view keeping
+    repr/java for it alone).
+  - *Recommended: (a), built*: the JVM's javac sees the whole image, so the full platform is what the
+    committed forms were read against until JN5; every corpus's forms and class files are unchanged,
+    the platform is links (made in seconds), and (c) would keep the JVM's read alive for one check.
+- **JFS38 `REPR_JAVA_HOST=jvm` after JN6.**
+  - Options: (a) kept as an opt-in reference (it needs `frozen_view tools` to keep repr/java, the
+    reader's JVM branch in `javac.ae` and `bin/repr-java`'s JVM branch: JN6's exit criteria not
+    met); (b) removed, the variable's `jvm` stopping with a message (built); (c) removed silently.
+  - *Recommended: (b), built*: the references are the committed outputs, which every verify compares
+    byte for byte, and javac's class files, compared with the JDK's javac (`bin/javac-vendor
+    classes`); the JVM's read is on the frozen branch's history and at main's `02d2c34b` if ever
+    wanted. A stale setting fails loudly rather than reading on another host.
+- **JFS39 `bin/repr-java host-check` (JFS36 at JN6).**
+  - Options: (a) kept (needs JFS38 (a)); (b) removed with the JVM's read (built).
+  - *Recommended: (b), built*: its reference is gone, and what it compared (every corpus) is what the
+    verifies and `check` compare with the committed files.
+- **JFS40 `bin/jrt-convert`'s own namespaces.**
+  - Options: (a) `jrt.jrt-sources` on the tools' host, the edge split into `jrt.jrt-edge` on the
+    frozen jar (built); (b) all of it on the frozen jar, as JN5; (c) the edge too on the tools' host,
+    with a class-file reader of Arbace's own (javac on Arbace's `ClassReader`, or a small reader in
+    Arbace) in place of `java.lang.classfile`, and `jrt.java-surface`'s reading ported.
+  - *Recommended: (a) now, built; (c) later* (with JN7, when the generators leave the JDK too): the
+    edge is a report compared with nothing, and porting `jrt.java-surface` (1,051 lines over the
+    class file API) is a task of its own.
+- **JFS41 The reference javac of `bin/javac-vendor classes`.**
+  - Options: (a) the JDK's javac kept as the reference in `bin/gate --full`'s javac step while a JDK
+    is at hand (built: unchanged); (b) the class files of javac on Arbace recorded as references
+    (hashes, as `baseline.sha256`), the JDK no longer needed; (c) dropped.
+  - *Recommended: (a)*: javac on Arbace against the JDK's javac is the check that R1 holds, and the
+    JDK stays on the host for the generators (JN7) anyway; (b) when the JDK leaves the host.
+- **JFS42 `check --jdk` in the gate.**
+  - Options: (a) out of every gate, a command and a Makefile target (`repr-java-jdk`, built); (b) in
+    `bin/gate --full`'s java chain.
+  - *Recommended: (a)*: 14 minutes, 8.5 GB, and the round trip's jdk corpus already reads java.base's
+    closure; run it when the reader or javac's world changes.
+
+### JN6.11 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`): the build tree's
+  `jdk/modules` (the 68 modules) and `images/jmods` (the platform), `src/*/share/classes` (`check --jdk`).
+- Arbace at main `02d2c34b` (the control run's `bin/repr-java`, `.tmp/jn6/control`).
+- The worktree's `.tmp/`: `jn6/` (`build.sh` and the build logs, `trace.sh`, `javas.py`,
+  `updates.sh`, `checks.sh`, `trace/` with every traced run's strace log, output and `status.txt`,
+  `summary.txt`, `control/`, `jdk.out`), `javac-vendor/`, `jrt/`, `repr-java-roundtrip/`,
+  `repr-java-jdk/`, `clojure-tests/`.

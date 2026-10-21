@@ -639,6 +639,11 @@ oracle's reference or repr/java). Counts at `b0f5730`.
   Options: (a) the frozen v4 jar with `arbace.repr.java` loaded from the checkout's source (it reads
   `.clj` only: a view as the oracle's); (b) repr/java's Arbace side on the Go executable, javac alone in
   a JVM (a process boundary inside repr/java). Recommended: (a) at S4, (b) with D12's later stage.
+  **Closed at JN6 (2026-10-21)**, by neither: D12 (b)'s later stage was javac itself held as Java
+  forms and run by Arbace (doc/classes/JAVA-FRONTEND-SURVEY.md, JN1-JN6), so repr/java runs whole on
+  javac's tool executable, its reader compiled into it, and starts no JVM; the frozen jar keeps only
+  the back end of `check --suite`'s step 4 (O2 (a)), which is not repr/java's read. (a) held from S4
+  to JN5 ("What stays on a JVM" below is that record).
 - **O2 repr/java's checks compile to bytecode.** `repr-java-check` (steps 2-4) and `jrt-convert check`
   compile converted forms with the Java forms back end (emit, ASM's ClassReader) and compare
   with javac. Options: (a) run them on the frozen jar's own compiler (at the freeze's state);
@@ -1098,8 +1103,8 @@ puts `.clj` links to the checkout's tool namespaces (repr/java, j2g, repr/clojur
 `go`, `jvm`, `interp`) *before* the jar on the class path; `arbace.core`, the runtime and the
 jar's own back end (`native`, `emit`, `compiler` ...) stay v4's (SA62). On it:
 
-- repr/java (O1 (a)): `bin/repr-java`, `bin/repr-java check`, `bin/jrt-convert`, `bin/clojure-tests
-  --java-fixtures`. repr/java's checks are forms-level (O2 (b), SA63): the baseline converted with
+- repr/java (O1 (a); until JN6, 2026-10-21, since on javac's tool executable alone, O1 closed):
+  `bin/repr-java`, `bin/repr-java check`, `bin/jrt-convert`, `bin/clojure-tests --java-fixtures`. repr/java's checks are forms-level (O2 (b), SA63): the baseline converted with
   `--check` against a SHA-256 manifest (`test/repr/java/expected/baseline.sha256`, 189 files), the
   samples against their committed forms (`test/repr/java/expected/java`, `module`), `--update` to
   rewrite them; and `--suite` (O2 (a)): the converted baseline compiled by the jar's own compiler
