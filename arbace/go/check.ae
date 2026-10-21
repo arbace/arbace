@@ -412,7 +412,23 @@
 
 (def ^:dynamic *root* "The checkout." ".")
 
+(def ^:dynamic *forms-root*
+  "When set (bin/goi annotations --forms DIR), the corpora's forms are DIR's: DIR/amd64 and
+  DIR/arm64 for tamago's std (one tree each, no overlay), DIR/linux-amd64, DIR/linux-test and
+  DIR/linux-dirtest (bin/repr-go read --reader native --forms writes them)."
+  nil)
+
 (defn corpus-config [corpus]
+  (if-let [f *forms-root*]
+    (case corpus
+      "tamago-amd64" {:roots [{:dir (str f "/amd64")}] :config {:goos "tamago" :goarch "amd64" :goamd64 "v1"}}
+      "tamago-arm64" {:roots [{:dir (str f "/arm64")}] :config {:goos "tamago" :goarch "arm64" :goarm64 "v8.0"}}
+      "linux-amd64" {:roots [{:dir (str f "/linux-amd64")}] :config {:goos "linux" :goarch "amd64" :goamd64 "v1"}}
+      "linux-test" {:roots [{:dir (str f "/linux-amd64")}] :programs {:dir (str f "/linux-test") :sub "test"}
+                    :config {:goos "linux" :goarch "amd64" :goamd64 "v1"}}
+      "linux-dirtest" {:roots [{:dir (str f "/linux-amd64")}] :dirtests {:dir (str f "/linux-dirtest") :sub "test"}
+                       :config {:goos "linux" :goarch "amd64" :goamd64 "v1"}}
+      (throw (ex-info (str "unknown corpus " corpus) {:corpus corpus})))
   (case corpus
     "tamago-amd64" {:roots [{:dir (str *root* "/tamago/goroot") :overlay (str *root* "/tamago/goroot/arch/amd64")}]
                     :config {:goos "tamago" :goarch "amd64" :goamd64 "v1"}}
@@ -426,7 +442,7 @@
     "linux-dirtest" {:roots [{:dir (str *root* "/.tmp/repr-go/forms/linux-amd64")}]
                      :dirtests {:dir (str *root* "/.tmp/repr-go/forms/linux-dirtest") :sub "test"}
                      :config {:goos "linux" :goarch "amd64" :goamd64 "v1"}}
-    (throw (ex-info (str "unknown corpus " corpus) {:corpus corpus}))))
+    (throw (ex-info (str "unknown corpus " corpus) {:corpus corpus})))))
 
 (defn- std-session [{:keys [roots config]}]
   (session (fn [path importer]
@@ -606,7 +622,15 @@
   (io/make-parents path)
   (spit path (with-out-str (pp/pprint x))))
 
-(defn reference-path [corpus] (str *root* "/test/goi/annotations-" corpus ".edn"))
+(def ^:dynamic *reference-dir*
+  "When set (--reference DIR), the counts compared are DIR/annotations-CORPUS.report.edn's (another
+  run's report, its :summary): the native conversions' against the helper's of the same corpus."
+  nil)
+
+(defn reference-path [corpus]
+  (if *reference-dir*
+    (str *reference-dir* "/annotations-" corpus ".report.edn")
+    (str *root* "/test/goi/annotations-" corpus ".edn")))
 
 (defn annotations
   "Checks a corpus, writes its report under work, compares its counts with the reference
@@ -619,7 +643,8 @@
         sm (summarize corpus rs)
         secs (/ (Math/round (/ (- (System/nanoTime) t0) 1e7)) 100.0)
         ref-file (File. (reference-path corpus))
-        ref (when (.isFile ref-file) (read-string (slurp ref-file)))
+        ref (when (.isFile ref-file)
+              (let [r (read-string (slurp ref-file))] (if *reference-dir* (dissoc (:summary r) :crashed) r)))
         clean (and (zero? (:errors sm)) (zero? (:crashes sm)) (empty? (get-in sm [:annotations :unverified]))
                    (zero? (get-in sm [:declarations :unsupported]))
                    (zero? (get-in sm [:annotations :init-order :mismatches])))
@@ -663,10 +688,14 @@
                        "--record" (recur (rest as) (assoc o :record true))
                        "--jobs" (recur (nnext as) (assoc o :jobs (Long/parseLong (second as))))
                        "--work" (recur (nnext as) (assoc o :work (second as)))
+                       "--forms" (recur (nnext as) (assoc o :forms (second as)))
+                       "--reference" (recur (nnext as) (assoc o :reference (second as)))
                        (recur (rest as) (update o :corpora conj (first as))))))
             cs (if (seq (:corpora opts)) (:corpora opts) corpora)
-            ok (doall (for [c cs] (annotations c opts)))]
+            ok (binding [*forms-root* (:forms opts)
+                         *reference-dir* (:reference opts)]
+                 (doall (for [c cs] (annotations c opts))))]
         (shutdown-agents)
         (System/exit (if (every? true? ok) 0 1)))
-      (do (println "usage: arbace.go.check annotations [--record] [--jobs N] [--work DIR] [CORPUS...]")
+      (do (println "usage: arbace.go.check annotations [--record] [--jobs N] [--work DIR] [--forms DIR] [--reference DIR] [CORPUS...]")
           (System/exit 2)))))

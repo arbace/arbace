@@ -112,7 +112,7 @@ Prior art:
     keeps the Java text, printed back byte for byte: `roundtrip --text`); `arbace.repr.go`
     (`arbace/repr/go{.ae,/}`), Go as Go forms and back (spec `doc/go/SPEC.md`; mode `:full` keeps
     the text: comments, spellings, layout, printed back byte for byte; helpers `tools/godump`, `tools/gocmp`;
-    `bin/repr-go read`, `print`, `roundtrip`, `check`, `test`; `read --reader native` and `native-check`: the native reader, Go's go/parser run by goi from `tamago/goroot`'s forms, doc/go/GO-PARSER-SURVEY.md, GP1, its loader `arbace.repr.go.load` with go list's part in `arbace.box.plan`, no helper, GP2; `native-check --headers`: the loader's headers alone; `read --reader native --raw` and `raw-check`: raw forms, the decisions that need types left open, GP3), on the tools' host
+    `bin/repr-go read`, `print`, `roundtrip`, `check`, `test`; `read --reader native` and `native-check`: the native reader, Go's go/parser run by goi from `tamago/goroot`'s forms, doc/go/GO-PARSER-SURVEY.md, GP1, its loader `arbace.repr.go.load` with go list's part in `arbace.box.plan`, no helper, GP2; `native-check --headers`: the loader's headers alone; `read --reader native --raw`: raw forms, the decisions that need types left open, GP3; goi's checker in its resolve mode answering them as go/types does, its answers written into the native dumps as go/types' annotations by `arbace.repr.go.annotate`, `read --reader native --forms`: the final forms of them, GP4; `native-check`: each dump read once, E-tree, the raw forms resolved by the final ones, E-ann), on the tools' host
     (`REPR_GO_EXE` names another executable); `arbace.repr.haskell` (`arbace/repr/haskell{.ae,/}`),
     Haskell as Haskell forms and back (spec `doc/haskell/SPEC.md`, notes
     `doc/haskell/HASKELL-NOTES.md`; helper `tools/hsdump` on the host's GHC, pinned by
@@ -152,7 +152,8 @@ Prior art:
   - `arbace/go.ae`, `arbace/go/`: goi, the interpreter of Go forms (spec `doc/go/GOI-SPEC.md`):
     `arbace.go` (the table's namespaces, GR1; the macros of Go forms, GR3), the checker
     `arbace.go.check` (§3, GR2; `bin/goi annotations`, `test`), Go forms type-checked after
-    go/types, the converter's annotations verified; the builder `arbace.go.build`, the REPL's
+    go/types, the converter's annotations verified, and its resolve mode (§3.10, GP4: repr/go's raw
+    forms, their open decisions answered by position, go/types' spellings kept); the builder `arbace.go.build`, the REPL's
     state `arbace.go.repl` and program runs `arbace.go.run` (GR3; `bin/goi run`, `check`, `test`; `divergences`, GR10: every program of the check that does not pass in a recorded class, `test/goi/divergences.edn`),
     all embedded (the table's generator `arbace.go.table` runs on the tools' host). Its back end is
     `go/arbace/goi` (hand-written Go forms; the operators' nodes and the factories' registry
@@ -246,7 +247,7 @@ Prior art:
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
-  `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus), repr/haskell's
+  `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's), repr/haskell's
   (`bin/repr-haskell roundtrip --iface --text --layout`: GHC's trees and lines over GHC 9.14.1's
   boot libraries, in the braces and the layout layouts, then their interfaces compiled at `-O1`,
   then mode `:full` printed back byte for byte, and `test`; on the host's GHC), repr/clojure's

@@ -655,7 +655,7 @@
   (vec (for [l (:loads spec)]
          (let [all (vec (for [j (ld/jobs l)]
                           (cond-> (assoc j :goroot (:goroot l))
-                            (:sub l) (assoc :key (str (:sub l) "/" (:key j)) :tsv-key (:key j)))))]
+                            (:sub l) (assoc :key (str (:sub l) "/" (:key j)) :tsv-key (:key j) :sub (:sub l)))))]
            [l (filterv :files all) (filterv :status all)]))))
 
 (defn- merge-counts [ms] (apply merge-with + {} ms))
@@ -747,8 +747,61 @@
              :read-s (/ (sum :read-ms) 1e3) :check-s (/ (sum :check-ms) 1e3)
              :ann-s (/ (reduce + (keep :ann-ms rs)) 1e3) :wall-s (/ (- (System/nanoTime) t0) 1e9)}}))
 
+(defn- read-job
+  "The final forms of corpus job j (the checker's annotations, converted) written under out (mode
+  positions): arbace.repr.go/convert-data's result, or :rejected or :fail."
+  [load sess-of j out positions]
+  (let [t0 (System/nanoTime)
+        base {:key (:key j) :package (get-in j [:header :package])}]
+    (try
+      (let [[pkg r] (checked load sess-of j)]
+        (if (:rejected r)
+          (assoc base :rejected (:rejected r))
+          (let [{ad :dump} (annotate (:n r) (:answers (:src r)) (when pkg (e/o pkg :result)))
+                res (rg/convert-data ad (:key j) (str (or (:tsv-key j) (:key j)) ".edn") t0 (System/nanoTime)
+                                     {:out (str out (when (:sub j) (str "/" (:sub j)))) :positions positions
+                                      :goroot (:goroot j) :check true})]
+            (merge base (select-keys res [:files :bytes :bad :ms]) {:errors (count (:errors (when pkg (e/o pkg :result))))}))))
+      (catch Throwable ex
+        (assoc base :fail (str (.getName (class ex)) ": " (.getMessage ex)))))))
+
+(defn- read-corpus [spec pool out positions]
+  (let [t0 (System/nanoTime)
+        nm (:name spec)
+        dir (str out "/" nm (when (= :full positions) "-full"))
+        work (vec (mapcat (fn [[l js]]
+                            (let [[sess-of js] (load-sessions l js)]
+                              (for [j js]
+                                (do (when-let [k (job-key l j)]
+                                      (when-not (external-test? l j) (.put ^ConcurrentHashMap (:keep (sess-of j)) k true)))
+                                    [l sess-of j]))))
+                          (spec-loads spec)))
+        futs (mapv (fn [[l sess-of j]]
+                     (.submit ^java.util.concurrent.ExecutorService pool ^Callable (fn [] (read-job l sess-of j dir positions))))
+                   work)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        ok (filter :files rs)
+        bad (filter #(seq (:bad %)) ok)]
+    (doseq [r (filter :fail rs)] (println "FAIL" nm (:key r) (:fail r)))
+    (doseq [r bad [f m] (:bad r)] (println "BAD" nm (:key r) f m))
+    (println (format "%s: %d dumps' final forms from the checker's annotations (%d files, %.1f MB of forms), read back: %d; %d rejected by go/parser, %d failed; checker errors in %d; %.1f s"
+                     nm (count ok) (reduce + (map :files ok)) (/ (reduce + (map :bytes ok)) 1e6) (- (count ok) (count bad))
+                     (count (filter :rejected rs)) (count (filter :fail rs)) (count (filter #(pos? (or (:errors %) 0)) ok))
+                     (/ (- (System/nanoTime) t0) 1e9)))
+    {:corpus nm :dir dir :dumps (count ok) :files (reduce + (map :files ok)) :bytes (reduce + (map :bytes ok))
+     :rejected (count (filter :rejected rs)) :failed (vec (for [r (filter :fail rs)] [(:key r) (:fail r)]))
+     :checker-errors (vec (for [r ok :when (pos? (or (:errors r) 0))] [(:key r) (:errors r)]))
+     :unknown (+ (count bad) (count (filter :fail rs))) :wall-s (/ (- (System/nanoTime) t0) 1e9)}))
+
 (defn -main
   "check [--jobs N] [--forms DIR] [--known FILE] [--report FILE] SPEC...
+  read [--full] [--jobs N] [--forms DIR] [--out DIR] [--report FILE] SPEC...
+
+  read: the final forms of each corpus SPEC's dumps (the native reader's, annotated by goi's
+  checker in its resolve mode, converted as the helper's are), written as bin/repr-go read
+  --corpus writes the helper's (mode :lines, --full :full) under --out DIR/NAME[-full], each file
+  read back. Exits 1 when a conversion fails or a file does not read back.
+
 
   check: per dump of each corpus SPEC (arbace.repr.go.parse's specs) against the helper's dumps
   (:dumps): E-tree, the raw forms against the final ones (conform), E-ann (the final forms of the
@@ -756,12 +809,14 @@
   differences (a map of dump key, package path or file key to the reason) do not list."
   [& args]
   (let [[cmd & args] args
-        _ (when-not (#{"check"} cmd)
-            (binding [*out* *err*] (println "usage: check [--jobs N] [--forms DIR] [--known FILE] [--report FILE] SPEC..."))
+        _ (when-not (#{"check" "read"} cmd)
+            (binding [*out* *err*] (println "usage: check|read [--full] [--jobs N] [--forms DIR] [--known FILE] [--out DIR] [--report FILE] SPEC..."))
             (System/exit 2))
-        [opts specs] (loop [opts {:jobs 1 :forms "tamago/goroot"}
+        [opts specs] (loop [opts {:jobs 1 :forms "tamago/goroot" :out ".tmp/repr-go/native-forms"}
                             [a & more :as args] args]
                        (case a
+                         "--full" (recur (assoc opts :full true) more)
+                         "--out" (recur (assoc opts :out (first more)) (rest more))
                          "--jobs" (recur (assoc opts :jobs (parse-long (first more))) (rest more))
                          "--forms" (recur (assoc opts :forms (first more)) (rest more))
                          "--known" (recur (assoc opts :known (first more)) (rest more))
@@ -779,11 +834,14 @@
         forms-bad (count (remove #(nth % 2) fc))
         pool (Executors/newFixedThreadPool (:jobs opts))
         _ (reset! forms-dir (:forms opts))
-        results (vec (for [sf specs] (check-corpus (read-spec sf) pool known)))
+        results (vec (for [sf specs]
+                       (if (= cmd "read")
+                         (read-corpus (read-spec sf) pool (:out opts) (if (:full opts) :full :lines))
+                         (check-corpus (read-spec sf) pool known))))
         unknown (+ forms-bad (reduce + (map :unknown results)))]
     (.shutdown pool)
     (.awaitTermination pool 1 TimeUnit/MINUTES)
-    (when (> (count results) 1)
+    (when (and (= cmd "check") (> (count results) 1))
       (println (format "native-check: %d corpora, %d dumps; E-tree %d equal; raw forms %d resolved, %d raw only; E-ann %d equal, %d differ, %d failed; %d not known"
                        (count results) (reduce + (map :dumps results)) (reduce + (map :tree-equal results))
                        (reduce + (map :raw-resolved results)) (reduce + (map (comp count :raw-only) results))
