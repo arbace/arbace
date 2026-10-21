@@ -1789,7 +1789,7 @@ The user decided JFS27-JFS30 as built:
 ## As built: JN5 (2026-10-21)
 
 JN5, the fixpoint and the checks moved, on the branch `java-frontend-jn5` from main `ad80344b`
-(whose seed holds JN3 and JN4), in about two and a half hours of work (against the 2-3 days
+(whose seed holds JN3 and JN4), in about three hours of work (against the 2-3 days
 estimated). javac on Arbace reads javac's own sources into the committed forms, byte for byte (the
 fixpoint), and every repr/java check of `bin/gate --full` runs on javac's tool executable: `bin/repr-java
 check` and `roundtrip` (every level, the classes level compiled by javac on Arbace, mode `:full`'s
@@ -1944,7 +1944,12 @@ Makefile: `repr-java-check` (new, in `make verify`); the `##` lines of `jdk-veri
 None in code: no change to `arbace/`, `go/`, `overlay/` or `jdk/forms`. `jdk/provenance.edn`'s two
 lines change the runtime key (`bin/lib/version.bash`), and with it the version map the executable
 carries (`:runtime`); `jdk/javac/platform.sha256` and `jdk/javac/provenance.edn` are the tool's
-(outside the runtime key). JN5.9 compares the program trees. No re-seed (batched).
+(outside the runtime key). j2g's program tree of the build at the branch's start (`ad80344b`, the
+provenance as main's) against the essential gate's build at `160e96c3` (`diff -r`): the same but
+j2g's `report.edn` (its times), and the compiled namespaces' tree `target/arbace-go/aot` the same;
+the executables, 149,196,960 bytes each, differ in the version map (`:commit`, `:describe`,
+`:dirty`, `:runtime` `2e3537a4...` to `ddd668ad...`) and Go's build id (2,657 bytes). No re-seed
+(batched).
 
 ### JN5.8 The checks
 
@@ -1964,6 +1969,82 @@ Each moved `--full` step's command, as `bin/gate --full` runs it (on the tool's 
 - `bin/clojure-tests --java-fixtures verify`: byte for byte (15 files; 20 s)
 - on the frozen JVM, for comparison, `bin/jrt-convert verify`, `bin/javac-vendor verify`,
   `bin/clojure-tests --java-fixtures verify`, `bin/repr-java check`, `roundtrip ... --text`: all pass
-- `bin/gate` (essential): JN5.9
+- `bin/gate` (essential, on the branch at `160e96c3`): passes in 16m02s (go-build, go-smoke,
+  suite-go 777 tests with no regression, oracle-go 53 known mismatches as recorded, diffcheck 12,741
+  of 12,764 cases agree with the 23 known, goi-check 740 of 740, generated)
+- the gate's `--full` chains' order, mocked (`step` replaced by a printer): the java chain starts
+  after the javac step and runs beside box-forms, box-smoke, box-oracle, box-suite and the fixpoint;
+  when the javac step fails it does not run (its steps then report "not run")
 - not run: `bin/gate --full` as a whole (the user's rule: at the milestone)
 
+### JN5.9 What it means for JN6
+
+Nothing of repr/java needs the JVM now but as the reference: `REPR_JAVA_HOST=jvm` (the JVM's read,
+`host-check`), `check --suite`'s back end (the frozen jar's compiler and the suite on the JVM, which
+§1.3 keeps there), the edges' recordings (`bin/j2g-edge`, `bin/javac-vendor edge`: JVM data by
+design, JFS14) and `bin/javac-vendor classes`' reference javac. What JN6 removes: the JVM branch of
+`bin/repr-java` (and with it `host-check`, JFS36), `frozen_view tools`' repr/java links, the
+provenance's `java -version` (JFS35). What stays on the frozen jar after JN6 and is not repr/java's:
+`bin/jrt-convert`'s own namespaces (`jrt.jrt-sources`: the source list, the locales, the edge, the
+report; they could run on the tools' host, but the edge reads class files through the JVM-only
+`arbace.classes.jvm`) and the generators (JN7).
+
+### JN5.10 Proposals
+
+- **JFS31 The platform for javac's own sources.**
+  - Options: (a) the one platform grown by javac's modules, jdk.compiler, java.compiler,
+    jdk.internal.opt and jdk.zipfs (jdk.compiler's `requires`), pinned with the others (built); (b) a
+    second platform for `bin/javac-vendor` alone, the corpora's unchanged; (c) javac's modules read
+    with `--module-source-path` instead of `--patch-module`, no platform module for them (another
+    shape of attribution than the JVM's read, so other forms possible).
+  - *Recommended: (a), built*: the JVM's javac sees every module of the image, so the grown platform
+    is nearer to it, and every corpus's class files and forms are unchanged
+    (`bin/javac-vendor classes`, the round trip, `check`, `verify`s).
+- **JFS32 How the verifies treat the provenance's host.**
+  - Options: (a) byte for byte, the host included: every change to the tool's sources (nearly any
+    change to `arbace/`, `go/`, `overlay/`, `jdk/`) fails `bin/jrt-convert verify`, `bin/javac-vendor
+    verify` and `--java-fixtures verify` until their updates are run again, and changes the runtime key
+    with `jdk/provenance.edn`; (b) the provenance compared but its `:host` line, both hosts printed
+    (built); (c) a narrower key (only the reader, javac's world and the platform): fewer changes, but
+    it would not name what the tool is (j2g, jrt and the runtime decide its output as much).
+  - *Recommended: (b), built*: the host records which tool wrote the files, as a version, and the
+    verify proves that today's tool (or the JVM) writes the same forms; `update` refreshes the host.
+- **JFS33 The default host after JN5.**
+  - Options: (a) the JVM until JN6, the tool by `REPR_JAVA_HOST=arbace` (as JN4): the committed
+    provenance would name a host the default does not run, and an `update` run without the variable
+    would write the JVM back into it; (b) javac's tool executable the default, built by hand
+    (`bin/javac-vendor build`, a missing tool named with the command), provenance writers refusing a
+    tool not built from the checkout (`REPR_JAVA_STALE_OK=1` to go on), the JVM by
+    `REPR_JAVA_HOST=jvm` until JN6 (built); (c) as (b), the tool built on demand when missing or of
+    another key, under a lock, as stage 0 is.
+  - *Recommended: (b), built*: the checks and the committed files already use the tool, and a source
+    change must not start a 4-17 minute build inside a read (with (c), every edit to `arbace/` would);
+    the reader's own changes run before a rebuild anyway (JN4.3, `RT.toolSource`). (c) if building by
+    hand proves a nuisance.
+- **JFS34 The round trip's parallelism.**
+  - Options: (a) sequential, as on the JVM (837 s on the tool); (b) the corpora concurrently, the jdk
+    corpus's originals compiled while F2 is read and its `anew` print while the full print compiles
+    (543 s, built); (c) also the jdk corpus's two reads concurrently (about 27 GB each: near the
+    machine's 62 GB, beside the gate's other chains).
+  - *Recommended: (b), built*: the JVM's time, the jdk read's memory once.
+- **JFS35 The provenance's `:jdk` on the tool.**
+  - Options: (a) unchanged, `java -version`'s first line (the JDK build tree the platform is made
+    of names the same release; built: no change); (b) the platform by its pin
+    (`jdk/javac/platform.sha256`'s hash), no JVM asked.
+  - *Recommended: (a) now, (b) at JN6*, when the JVM leaves repr/java and `java` is no longer asked.
+- **JFS36 `bin/repr-java host-check` after JN5.**
+  - Options: (a) kept as a command and in `make verify` (not in the gate), until JN6 removes the
+    JVM's read it compares with (built); (b) removed now.
+  - *Recommended: (a)*: it is the one check of the tool's reads against the JVM's while both exist,
+    and costs nothing in the gate.
+
+### JN5.11 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`): the build tree's
+  `jdk/modules/{jdk.compiler,java.compiler,jdk.internal.opt,jdk.zipfs}` and their `images/jmods`
+  (the platform), `src/jdk.compiler/share/classes/module-info.java` (its `requires`).
+- The worktree's `.tmp/`: `jn5/` (`run.sh`, the runs' logs and `/usr/bin/time` outputs, `runs.txt`,
+  `moved.sh` and `cmp.sh`, the commands as the gate runs them and the JVM's, `gatemock.sh`, the
+  gate's chain order mocked, `ref-jvm/`, the javac step's classes by the JVM's javac, `base/`, the
+  program tree before the provenance changed), `javac-vendor/`, `jrt/`, `repr-java-roundtrip/`,
+  `gate-javac/` (the tool's copy).
