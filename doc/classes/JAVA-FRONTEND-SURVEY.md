@@ -2220,7 +2220,9 @@ JN6.4):
   again (no JVM under `bin/repr-java`), and untraced the round trip (as the references, 592 s), `check
   --suite` (no regressions, 194 s) and `bin/javac-vendor classes baseline samples jdk java.base` (byte
   for byte, 300 s)
-- `bin/gate` (essential): {{GATE}}
+- `bin/gate` (essential): on the branch at `d173a4b6`, passes in 26m07s (go-build 830 s, both
+  builds afresh; go-smoke, suite-go 777 tests with no regression, oracle-go 53 known mismatches as
+  recorded, diffcheck 12,741 of 12,764 cases agree with the 23 known, goi-check 740 of 740, generated)
 - not run: `bin/gate --full` as a whole (the user's rule: at the milestone)
 
 ### JN6.7 Bugs found
