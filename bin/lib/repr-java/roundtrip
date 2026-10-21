@@ -1,10 +1,12 @@
 #!/bin/bash
 # repr/java's round trip (doc/classes/PRINTER-NOTES.md, "The round trip"): Java -> forms F1 (repr/java
-# read, on the frozen JVM) -> Java (repr/java print, arbace.repr.java.print, on the tools' host) -> forms
+# read, on bin/repr-java's host: javac's tool executable since JN5) -> Java (repr/java print, arbace.repr.java.print, on the tools' host) -> forms
 # F2 (read again), judged per converted file by arbace.repr.java.roundtrip at three levels: forms (F1's
 # and F2's files the same forms as data, metadata included), ae (the same text, byte for byte, after
 # the first line naming the Java file), classes (javac's class files of the original and of the
-# printed Java, -g:none, byte for byte). Writes under .tmp/repr-java-roundtrip/CORPUS/.
+# printed Java, -g:none, byte for byte; bin/repr-java javac: javac on Arbace, or with
+# REPR_JAVA_HOST=jvm the frozen JDK's javac, which give the same class files, JN3). Writes under
+# .tmp/repr-java-roundtrip/CORPUS/.
 #
 # Usage: bin/repr-java roundtrip [--corpus C,...] [--no-classes] [--text | --text-only] [--record]
 #   --corpus     baseline (Clojure's Java, the frozen clojure/: 183 files), samples
@@ -21,6 +23,8 @@
 #   --text-only  the text level alone
 #   --record     write each corpus's results as its reference, test/repr/java/roundtrip/CORPUS.edn,
 #                and its differences with their reasons, test/repr/java/roundtrip/CORPUS-known.edn
+# The corpora run concurrently, each logged into .tmp/repr-java-roundtrip/CORPUS.log and shown in
+# order when all are done (JN5: the reads on javac's tool executable take longer than the JVM's).
 # Each corpus's results are compared with its reference, test/repr/java/roundtrip/CORPUS.edn (an
 # entry and level passing there and not now fails the run); its known differences with their
 # reasons, CORPUS-known.edn, are expected. Results: .tmp/repr-java-roundtrip/CORPUS/results.edn.
@@ -40,20 +44,22 @@ while [ $# -gt 0 ]; do
     --record) record=1; shift ;;
     --text) text=1; shift ;;
     --text-only) text=1; lines=; shift ;;
-    *) sed -n '9,23p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '/^# Usage/,/^# Each corpus/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 work=.tmp/repr-java-roundtrip
 ref=test/repr/java/roundtrip
-status=0
+status=0 pids=()
+mkdir -p "$work"
 
 # print F1 OUT [OPTION...]: the forms into Java (on the tools' host)
 print() {
   local t0=$SECONDS f1=$1 out=$2
   shift 2
   arbace_tool -m arbace.repr.java.print --quiet --index jdk/forms "$@" "$f1" "$out" | tail -3
-  [ "${PIPESTATUS[0]}" = 0 ] || status=1
+  local st=${PIPESTATUS[0]}
   echo "print: $((SECONDS - t0)) s"
+  [ "$st" = 0 ] || { status=1; return 1; }
 }
 
 # read NAME OUT ROOT [PATH...]: Java into forms, the first lines without ROOT's path
@@ -72,7 +78,7 @@ compile() {
   shift 2
   rm -rf "$out"; mkdir -p "$out"
   (cd "$src" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort > "$root/$out.list" &&
-     javac -J-Xmx4g -Xmaxerrs 100000 -g:none -nowarn -XDsuppressNotes -proc:none -implicit:none -d "$root/$out" "$@" "@$root/$out.list") \
+     "$root/bin/repr-java" javac -Xmaxerrs 100000 -g:none -nowarn -XDsuppressNotes -proc:none -implicit:none -d "$root/$out" "$@" "@$root/$out.list") \
      > "$out.log" 2>&1 || echo "javac failed in $src: $out.log ($(grep -c 'error:' "$out.log") errors)"
   echo "javac $src: $(find "$out" -name '*.class' | wc -l) classes, $((SECONDS - t0)) s"
 }
@@ -203,9 +209,11 @@ text_level() {
       tail -1 "$t/read.log"; echo "read --full: $((SECONDS - t0)) s"
       print "$t/full" "$t/java/java.base"
       if [ -n "$classes" ]; then
-        print "$t/full" "$t/anew/java.base" --anew
+        # the anew print while the full layout's print compiles
+        print "$t/full" "$t/anew/java.base" --anew > "$t/print-anew.log" 2>&1 & local pp=$!
         [ -d "$w/c1" ] || compile "$w/c1" "$orig/src/java.base" --patch-module "java.base=$root/$orig/src/java.base" "${jopts[@]}"
         compile "$t/c2" "$t/java/java.base" --patch-module "java.base=$root/$t/java/java.base" "${jopts[@]}"
+        wait "$pp" || status=1; cat "$t/print-anew.log"
         compile_printed "$t/c3" "$t/anew/java.base" "$orig/src/java.base" --patch-module "java.base=$root/$t/anew/java.base" "${jopts[@]}"
         anew=(--c1 "$w/c1" --c2 "$t/c2" --anew-rejected "$(sort -u "$t/c3.rejected" | tr '\n' ' ')" --javac-logs "$t/c3.all.log")
       fi
@@ -236,7 +244,9 @@ lines_forms() {
   esac
 }
 
-for corpus in ${corpora//,/ }; do
+# corpus_run CORPUS: one corpus's round trip, its status the run's
+corpus_run() {
+  corpus=$1
   w=$work/$corpus
   orig=${JRT_WORK_RT:-$work/jdk-originals}
   rm -rf "$w"; mkdir -p "$w"
@@ -245,11 +255,11 @@ for corpus in ${corpora//,/ }; do
     lines_forms "$corpus"
     if [ "$corpus" = samples ]; then mkdir -p "$w/f1all"; for s in java module; do cp -r "$w/f1/$s/." "$w/f1all/"; done; rm -f "$w/f1all/repr-java-report.edn"; fi
     text_level "$corpus"
-    continue
+    return $status
   fi
   case $corpus in
     baseline)
-      frozen=$(frozen_clojure) || exit 1
+      frozen=$(frozen_clojure) || return 1
       bin/repr-java read --check "$w/f1" "$frozen" clojure | grep -v '^slowest' | grep -v '^arbace.edn'
       find "$w/f1" -name '*.ae' -exec sed -i "1s|^;; Converted from $frozen/|;; Converted from |" {} +
       print "$w/f1" "$w/java"
@@ -283,28 +293,46 @@ for corpus in ${corpora//,/ }; do
         judge samples "$w/f1" "$w/f2"
       fi ;;
     jdk)
-      if [ -n "$classes" ] || [ -n "$text" ]; then jdk_originals || { status=1; continue; }; fi
+      if [ -n "$classes" ] || [ -n "$text" ]; then jdk_originals || return 1; fi
       cp -r jdk/forms "$w/f1"
       print "$w/f1" "$w/java/java.base"
       jdk_origins > "$w/origins.edn"
+      # the originals compiled while F2 is read
+      c1p=
+      if [ -n "$classes" ]; then compile "$w/c1" "$orig/src/java.base" --patch-module "java.base=$root/$orig/src/java.base" "${jopts[@]}" > "$w/c1.out" 2>&1 & c1p=$!; fi
       t0=$SECONDS
       (cd "$w" && REPR_JAVA_THREADS=4 REPR_JAVA_PATCH_ALL=1 REPR_JAVA_JVM_OPTS=${REPR_JAVA_JVM_OPTS:--Xmx8g} \
          "$root/bin/repr-java" read-jdk --check --origins "$root/$w/origins.edn" "$root/$w/f2" java.base "$root/$w/java/java.base") \
          > "$w/jdk.read.log" 2>&1
       tail -1 "$w/jdk.read.log"; echo "read: $((SECONDS - t0)) s"
       rm -f "$w"/f1/repr-java-report.edn "$w"/f2/repr-java-report.edn
+      [ -z "$c1p" ] || { wait "$c1p"; cat "$w/c1.out"; }
       if [ -n "$classes" ]; then
-        compile "$w/c1" "$orig/src/java.base" --patch-module "java.base=$root/$orig/src/java.base" "${jopts[@]}"
         compile_printed "$w/c2" "$w/java/java.base" "$orig/src/java.base" --patch-module "java.base=$root/$w/java/java.base" "${jopts[@]}"
         judge jdk "$w/f1" "$w/f2" "$w/c1" "$w/c2"
       else
         judge jdk "$w/f1" "$w/f2"
       fi ;;
-    *) echo "unknown corpus $corpus" >&2; exit 2 ;;
+    *) echo "unknown corpus $corpus" >&2; return 2 ;;
   esac
   if [ -n "$text" ]; then
     if [ "$corpus" = samples ]; then mkdir -p "$w/f1all"; for s in java module; do cp -r "$w/f1/$s/." "$w/f1all/"; done; fi
     text_level "$corpus"
   fi
+  return $status
+}
+
+# the corpora concurrently (JN5: the reads on javac's tool executable take longer than on the JVM,
+# the jdk corpus most), each into $work/CORPUS.log, shown in order when all are done
+for corpus in ${corpora//,/ }; do
+  case $corpus in baseline|samples|jdk) ;; *) echo "unknown corpus $corpus" >&2; exit 2 ;; esac
+  (corpus_run "$corpus") > "$work/$corpus.log" 2>&1 &
+  pids+=("$!")
+done
+n=0
+for corpus in ${corpora//,/ }; do
+  wait "${pids[$n]}" || status=1
+  cat "$work/$corpus.log"
+  n=$((n + 1))
 done
 exit $status

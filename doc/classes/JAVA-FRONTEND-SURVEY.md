@@ -12,8 +12,9 @@ prior-art clones (§3). The measuring scripts and the clones are in the survey's
 this survey and no Go build was made. Decided on 2026-10-20 ("Decided", at the end); JN1, the
 spike, as built: "As built: JN1 (2026-10-20)", after it; JN2, javac's forms vendored: "As built:
 JN2 (2026-10-20)", with JFS18-JFS22; JN3, javac runs on Arbace: "As built: JN3 (2026-10-21)", with
-JFS23-JFS26; JN4, repr/java's `read` on Arbace: "As built: JN4 (2026-10-21)", at the end, with
-JFS27-JFS30.
+JFS23-JFS26; JN4, repr/java's `read` on Arbace: "As built: JN4 (2026-10-21)", with
+JFS27-JFS30; JN5, the fixpoint and the checks moved: "As built: JN5 (2026-10-21)", at the end, with
+JFS31-JFS36.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -1784,3 +1785,266 @@ The user decided JFS27-JFS30 as built:
 - JFS28 (b): the reader compiled into the tool by c2j, its tree kept by key.
 - JFS29 (a): `bin/repr-java host-check` at the end of `bin/gate --full`'s javac step, until JN5.
 - JFS30 (a) now, (b) at JN5.
+
+## As built: JN5 (2026-10-21)
+
+JN5, the fixpoint and the checks moved, on the branch `java-frontend-jn5` from main `ad80344b`
+(whose seed holds JN3 and JN4), in about three hours of work (against the 2-3 days
+estimated). javac on Arbace reads javac's own sources into the committed forms, byte for byte (the
+fixpoint), and every repr/java check of `bin/gate --full` runs on javac's tool executable: `bin/repr-java
+check` and `roundtrip` (every level, the classes level compiled by javac on Arbace, mode `:full`'s
+text level included), `bin/jrt-convert`'s `convert` and `javac` steps, `bin/clojure-tests
+--java-fixtures` and `bin/javac-vendor verify`. The references of `test/repr/java/roundtrip/` are
+unchanged, and so are every corpus's forms; the committed provenance files now name the tool by
+the key of its sources (JFS30 (b)). javac on Arbace is the default host (JFS33). No change to j2g,
+arbace.classes, c2j or jrt was needed: R1 (Arbace runs Java not as the JVM) showed nothing. The
+JVM ran only the frozen v4 jar (the edges' recordings, `check --suite`'s back end and suite,
+`bin/jrt-convert`'s own namespaces, the JVM-hosted reads measured for comparison), the frozen JDK's
+`javac` (the reference of `bin/javac-vendor classes`, and once for the comparison below) and the
+system JDK's generators (`bin/jrt-convert generate`, JN7's); Go only TamaGo's go1.27.1, without cgo.
+The tools' host was the worktree's stage 0 (the seed of `66f8aaba`); j2g for the tool ran on the
+program built from the checkout (JFS22 (a)).
+
+### JN5.1 The fixpoint: javac on Arbace reads javac
+
+`bin/javac-vendor convert` (and so `verify`) runs `bin/repr-java read-jdk` module by module:
+jdk.compiler (370 files, `--patch-module jdk.compiler=...`), java.compiler (135), jdk.internal.opt (1)
+and java.base (25). On the JVM the running JDK holds every module; javac on Arbace attributes against
+the platform (JN3.3), which held only the six modules the corpora name, so the first run stopped at
+the platform's pin. The platform now holds javac's own modules too, jdk.compiler, java.compiler,
+jdk.internal.opt and jdk.zipfs (jdk.compiler's `requires`), from the same build tree with their jmods'
+descriptors (JFS31): `jdk/javac/platform.sha256` gains four lines, the six others unchanged. Then:
+
+- the 570 forms files are `jdk/javac/forms` byte for byte, javac's edge (recorded on the frozen JVM, as
+  before) and the platform's pin too: the whole tree but the provenance's `:repr-java` hash
+  (`bin/repr-java` changed) and its host;
+- the read of jdk.compiler takes 41.5-42.9 s on the tool against 14.2 s on the JVM (three chunks of
+  about 125 files, `REPR_JAVA_THREADS=8`), the others 1-2 s; the whole `verify` 94 s against 87 s on
+  the JVM, of either 35-36 s the edge's recording on the JVM;
+- javac on Arbace's class files with the grown platform: `bin/javac-vendor classes baseline samples
+  jdk java.base` byte for byte the JVM's javac's as before (baseline 812 classes, samples 28 and 4, jdk
+  2,224, java.base 7,434 and the build's), 228 s. The unnamed module's default roots now include
+  jdk.compiler and java.compiler (they export API), as on the JVM's full image.
+
+So a javac upgrade needs no JVM for its forms: the tool of the previous javac reads the next one's
+sources (§7's "even javac's next upgrade needs no JVM"), the edge's recording aside (JVM data, JFS14).
+
+### JN5.2 The checks on the tool, and the default host
+
+- **`bin/repr-java javac`** (new): javac's command line on repr/java's host, javac on Arbace
+  (`jdk.internal.jrt.javac.Main`, the script `.tmp/repr-java-platform.javac.ae`, against the platform)
+  or on the JVM the frozen JDK's `javac -J-Xmx4g`. The round trip's `compile` (the classes level, its
+  rejection passes, the text level's `classes` and `anew`) and `bin/jrt-convert`'s `javac` step
+  compile with it, so they follow the host; `bin/repr-java declarations` uses the same script.
+- **The default host is javac's tool executable** (JFS33 (b)): `REPR_JAVA_HOST` defaults to
+  `arbace` in `bin/repr-java`, `bin/lib/frozen.bash`'s `repr_java_host` and `bin/clojure-tests`;
+  `REPR_JAVA_HOST=jvm` is the frozen JVM, the reference until JN6 (`host-check` uses it). A missing
+  tool stops `bin/repr-java` with the command that builds it (`bin/javac-vendor build`).
+- **`bin/jrt-convert`**: `convert` and `javac` on the host; `sources`, `generate`, `edge` and `report`
+  as before (the closure's own namespaces `jrt.jrt-sources` on the frozen jar, the generators on
+  `GEN_JDK`). The `javac` step's classes (the default `-g`, so `SourceFile` and `LineNumberTable`)
+  on the tool are the JVM's javac's byte for byte (2,224 classes, compared once by hand; ref1 = ref2),
+  so the edge read from them is the same.
+- **`bin/clojure-tests --java-fixtures`**: on the tool its class path is the runtime's declarations
+  (JN4.4), the default now.
+- **`bin/repr-java check`**: steps 1-3 on the tool, `--suite`'s step 4 (the converted baseline
+  compiled by the frozen jar's back end, Clojure's suite on the JVM) unchanged.
+
+### JN5.3 The provenance names the tool by its sources' key (JFS30 (b), JFS32)
+
+`bin/lib/javac-key.bash` (new): `arbace_javac_key` is the SHA-256 of what the tool is built from,
+`bin/arbace-go`'s `gate_key` inputs (Arbace's sources, `go/`, `overlay/`, `jdk/` with javac's forms,
+edge and the platform's pin, `x509roots/`, the build's scripts, the seed's and Go's pins, Go's
+version) without the files repr/java writes (`jdk/provenance.edn`, `jdk/javac/provenance.edn`; the
+fixtures are not an input) and without the check scripts (`bin/lib/repr-*/`, `bin/lib/frozen.bash`).
+`bin/arbace-go --build-java` records it beside the executable (`arbace-javac.key`); `repr_java_host`
+prints `arbace-javac KEY` and refuses a tool whose recorded key is not the checkout's
+(`arbace_javac_fresh`; `REPR_JAVA_STALE_OK=1` warns instead, as `ARBACE_BOX_STALE_OK` does for the
+box). Two builds of one commit write the same provenance. The executable's hash would not serve: the
+tool rebuilt after `bin/arbace-go` and the platform's pin changed (so of another key) was byte for
+byte the first build (199,901,344 bytes), and its version map carries the commit, so a commit that
+changes nothing of the tool still changes its bytes.
+
+Since any change to the tool's sources changes the key, a byte-for-byte comparison of the provenance
+would make three verifies fail after every such change until their updates ran again. So the
+verifies (`bin/jrt-convert verify`, `bin/javac-vendor verify`, `bin/clojure-tests --java-fixtures
+verify`) compare the provenance but its `:host` line (`repr_java_provenance_same`) and print both
+hosts, the recorded one and the run's (JFS32 (b)): the host says which tool wrote the files, not what
+they are. With it the JVM-hosted verifies pass too (`jdk/`, `jdk/javac`, the fixtures: the run's host
+`arbace-for-java-26-v4 4b6f0319...`, the recorded `arbace-javac ee04e344...`).
+
+The three provenance files were written on the tool (`bin/jrt-convert update`, `bin/clojure-tests
+--java-fixtures update`, `bin/javac-vendor convert`): in each only `:repr-java` (`229d9082...` to
+`2edfddeb...`: `bin/repr-java` changed) and `:host` (`arbace-for-java-26-v4 4b6f0319...` to
+`arbace-javac ee04e344...`) changed. `:jdk` stays `java -version`'s line, which names the JDK
+build tree the platform is made of (JFS35).
+
+### JN5.4 A bug found in `bin/jrt-convert verify`
+
+`verify` compared `jdk/` with the fresh tree by `diff -r` leaving out `README.md`, `.gitattributes`
+and `edge.edn`, but not `jdk/javac/` (since JN2, `bin/javac-vendor`'s): "Only in jdk: javac", so the
+verify has failed since JN2 on main too (no `--full` gate ran since; JN2-JN4 ran `update` and
+`host-check`, which compare `jdk/forms` alone). It now leaves out `javac` as well.
+
+### JN5.5 The round trip in parallel (JFS34), and times
+
+The round trip's corpora run concurrently, each logged into `.tmp/repr-java-roundtrip/CORPUS.log` and
+shown in order; in the jdk corpus the originals compile while F2 is read, and the text level's
+`anew` print runs while the full layout's print compiles. Results (every level of the three corpora
+as the references, `test/repr/java/roundtrip/` unchanged): baseline forms 189, ae 182 of 189, classes
+143 of 183; samples 17, 17, 12 of 14; jdk forms 874 of 911 (7 failing, 30 missing), ae 816, classes
+473 of 838; the text level record, text and classes all, `anew` 183, 14, 799 of 838.
+
+Each command alone (`/usr/bin/time`: wall, the largest process's peak RSS; the JVM's include its
+starts and HotSpot's warm-up):
+
+| command | javac's tool executable | the frozen JVM | the tool against the JVM |
+|---|---:|---:|---:|
+| `bin/repr-java roundtrip --corpus baseline,samples,jdk --text`, sequential | 837 s (50 s of it making the jdk originals), 30.0 GB | 548 s, 9.3 GB | 1.4 times |
+| the same, corpora concurrently (as built) | **543 s**, 29.6 GB, 1,696 s of CPU | (548 s sequential, 2,046 s of CPU) | 0.99 |
+| of it, the jdk corpus: F2's `read-jdk` (4 threads), the text level's `read-jdk --full` | 94 s, 124 s | 30 s, 34 s | 3.1, 3.6 |
+| of it, javac: the jdk originals, the full layout's print | 19 s, 18 s | 8 s, 9 s | 2.4, 2.0 |
+| `bin/repr-java check` (the baseline, the samples, the module) | 24 s, 1.2 GB | 23 s, 1.8 GB | 1.0 |
+| `bin/repr-java check --suite` | 178 s, 13.3 GB (the suite on the JVM) | (328 s in the gate of 2026-10-20) | |
+| `bin/jrt-convert verify` (its `convert`, its `javac`) | 193 s (96 s, 40 s), 27.8 GB | 114 s (34 s, 20 s), 9.4 GB | 1.7 |
+| `bin/clojure-tests --java-fixtures verify` | 20 s, 1.0 GB | 11 s, 0.5 GB | 1.8 |
+| `bin/javac-vendor verify` | 94 s, 8.2 GB | 87 s, 8.1 GB | 1.1 |
+| `bin/javac-vendor classes baseline samples jdk java.base` | 228 s | (the comparison itself) | |
+| the tool's build (`bin/javac-vendor build`, both passes, Go's cache warm) | 231 s (1,006 s from nothing, the shipped build first: 584 s) | | |
+
+The JN4 estimate, 25-35 minutes for the round trip unless its reads ran in parallel, did not hold
+even sequentially (14 minutes): the reads are 3-3.6 times the JVM's on the jdk corpus, but prints and
+javac dominate the rest, and the printer runs on the tools' host either way. With the corpora
+concurrent the round trip takes the JVM's time. Running the jdk corpus's two reads concurrently was
+not done: each peaks at about 27 GB.
+
+`bin/gate --full`'s repr/java steps, before and after: the JVM chain's `repr-java`,
+`repr-java-roundtrip`, `jrt-convert` and `java-fixtures` (328 + 735 + 151 + 11 s in the gate of
+2026-10-20, beside the go chain) and the javac step's `verify` and `host-check` (79 + 393 s, JN3,
+JN4) become the java chain on the tool (178 + 543 + 193 + 20 s, about 15.5 minutes, beside the box's
+steps) and `verify` on the tool (94 s).
+
+### JN5.6 `bin/gate --full` (JFS9 (a), JFS29)
+
+- the `jvm` chain keeps `j2g-edge` alone (HotSpot's answers);
+- the go chain's `javac` step: `bin/javac-vendor check`, `build`, the tool copied into
+  `.tmp/gate-javac` (with its key; the box's and the fixpoint's builds run on), `verify` on it (the
+  fixpoint), `classes baseline samples jdk java.base` (the JVM's javac the reference while it exists);
+  `host-check` is no longer in the gate (JFS29: replaced by the checks themselves);
+- when it passes, the new `java` chain runs beside the rest of the go chain, with `REPR_JAVA_HOST=arbace`
+  and `REPR_JAVA_EXE` the copy: `repr-java` (`check --suite`), `repr-java-roundtrip`
+  (`roundtrip --corpus baseline,samples,jdk --text`), `jrt-convert` (`verify`), `java-fixtures`
+  (`--java-fixtures verify`), one after the other (the jdk reads' memory); the step names stay.
+
+Makefile: `repr-java-check` (new, in `make verify`); the `##` lines of `jdk-verify`, `javac-verify`,
+`fixtures-verify` and `repr-java-host-check` name the hosts; `make check-makefile` passes.
+
+### JN5.7 The shipped program's change
+
+None in code: no change to `arbace/`, `go/`, `overlay/` or `jdk/forms`. `jdk/provenance.edn`'s two
+lines change the runtime key (`bin/lib/version.bash`), and with it the version map the executable
+carries (`:runtime`); `jdk/javac/platform.sha256` and `jdk/javac/provenance.edn` are the tool's
+(outside the runtime key). j2g's program tree of the build at the branch's start (`ad80344b`, the
+provenance as main's) against the essential gate's build at `160e96c3` (`diff -r`): the same but
+j2g's `report.edn` (its times), and the compiled namespaces' tree `target/arbace-go/aot` the same;
+the executables, 149,196,960 bytes each, differ in the version map (`:commit`, `:describe`,
+`:dirty`, `:runtime` `2e3537a4...` to `ddd668ad...`) and Go's build id (2,657 bytes). No re-seed
+(batched).
+
+### JN5.8 The checks
+
+Each moved `--full` step's command, as `bin/gate --full` runs it (on the tool's copy, `REPR_JAVA_HOST=arbace`,
+`REPR_JAVA_EXE=.tmp/gate-javac/arbace-javac`), alone:
+
+- `bin/javac-vendor check`: j2g translates javac's world, no failures (49 s)
+- `bin/javac-vendor verify`: `jdk/javac` read by javac on Arbace is the committed tree, byte for byte
+  (574 files; 94 s)
+- `bin/javac-vendor classes baseline samples jdk java.base`: byte for byte (228 s)
+- `bin/repr-java check --suite`: the baseline's 189 files as `baseline.sha256`, the samples (11) and the
+  module (6) as expected; the suite on the converted baseline 809 tests, 20,750 assertions, no
+  regressions against `test/baseline-results.edn` (178 s)
+- `bin/repr-java roundtrip --corpus baseline,samples,jdk --text`: as the references (543 s)
+- `bin/jrt-convert verify`: `jdk/` is the conversion, byte for byte (911 forms files, 10 data files;
+  193 s; the first run failed by JN5.4)
+- `bin/clojure-tests --java-fixtures verify`: byte for byte (15 files; 20 s)
+- on the frozen JVM, for comparison, `bin/jrt-convert verify`, `bin/javac-vendor verify`,
+  `bin/clojure-tests --java-fixtures verify`, `bin/repr-java check`, `roundtrip ... --text`: all pass
+- `bin/gate` (essential, on the branch at `160e96c3`): passes in 16m02s (go-build, go-smoke,
+  suite-go 777 tests with no regression, oracle-go 53 known mismatches as recorded, diffcheck 12,741
+  of 12,764 cases agree with the 23 known, goi-check 740 of 740, generated)
+- the gate's `--full` chains' order, mocked (`step` replaced by a printer): the java chain starts
+  after the javac step and runs beside box-forms, box-smoke, box-oracle, box-suite and the fixpoint;
+  when the javac step fails it does not run (its steps then report "not run")
+- not run: `bin/gate --full` as a whole (the user's rule: at the milestone)
+
+### JN5.9 What it means for JN6
+
+Nothing of repr/java needs the JVM now but as the reference: `REPR_JAVA_HOST=jvm` (the JVM's read,
+`host-check`), `check --suite`'s back end (the frozen jar's compiler and the suite on the JVM, which
+§1.3 keeps there), the edges' recordings (`bin/j2g-edge`, `bin/javac-vendor edge`: JVM data by
+design, JFS14) and `bin/javac-vendor classes`' reference javac. What JN6 removes: the JVM branch of
+`bin/repr-java` (and with it `host-check`, JFS36), `frozen_view tools`' repr/java links, the
+provenance's `java -version` (JFS35). What stays on the frozen jar after JN6 and is not repr/java's:
+`bin/jrt-convert`'s own namespaces (`jrt.jrt-sources`: the source list, the locales, the edge, the
+report; they could run on the tools' host, but the edge reads class files through the JVM-only
+`arbace.classes.jvm`) and the generators (JN7).
+
+### JN5.10 Proposals
+
+- **JFS31 The platform for javac's own sources.**
+  - Options: (a) the one platform grown by javac's modules, jdk.compiler, java.compiler,
+    jdk.internal.opt and jdk.zipfs (jdk.compiler's `requires`), pinned with the others (built); (b) a
+    second platform for `bin/javac-vendor` alone, the corpora's unchanged; (c) javac's modules read
+    with `--module-source-path` instead of `--patch-module`, no platform module for them (another
+    shape of attribution than the JVM's read, so other forms possible).
+  - *Recommended: (a), built*: the JVM's javac sees every module of the image, so the grown platform
+    is nearer to it, and every corpus's class files and forms are unchanged
+    (`bin/javac-vendor classes`, the round trip, `check`, `verify`s).
+- **JFS32 How the verifies treat the provenance's host.**
+  - Options: (a) byte for byte, the host included: every change to the tool's sources (nearly any
+    change to `arbace/`, `go/`, `overlay/`, `jdk/`) fails `bin/jrt-convert verify`, `bin/javac-vendor
+    verify` and `--java-fixtures verify` until their updates are run again, and changes the runtime key
+    with `jdk/provenance.edn`; (b) the provenance compared but its `:host` line, both hosts printed
+    (built); (c) a narrower key (only the reader, javac's world and the platform): fewer changes, but
+    it would not name what the tool is (j2g, jrt and the runtime decide its output as much).
+  - *Recommended: (b), built*: the host records which tool wrote the files, as a version, and the
+    verify proves that today's tool (or the JVM) writes the same forms; `update` refreshes the host.
+- **JFS33 The default host after JN5.**
+  - Options: (a) the JVM until JN6, the tool by `REPR_JAVA_HOST=arbace` (as JN4): the committed
+    provenance would name a host the default does not run, and an `update` run without the variable
+    would write the JVM back into it; (b) javac's tool executable the default, built by hand
+    (`bin/javac-vendor build`, a missing tool named with the command), provenance writers refusing a
+    tool not built from the checkout (`REPR_JAVA_STALE_OK=1` to go on), the JVM by
+    `REPR_JAVA_HOST=jvm` until JN6 (built); (c) as (b), the tool built on demand when missing or of
+    another key, under a lock, as stage 0 is.
+  - *Recommended: (b), built*: the checks and the committed files already use the tool, and a source
+    change must not start a 4-17 minute build inside a read (with (c), every edit to `arbace/` would);
+    the reader's own changes run before a rebuild anyway (JN4.3, `RT.toolSource`). (c) if building by
+    hand proves a nuisance.
+- **JFS34 The round trip's parallelism.**
+  - Options: (a) sequential, as on the JVM (837 s on the tool); (b) the corpora concurrently, the jdk
+    corpus's originals compiled while F2 is read and its `anew` print while the full print compiles
+    (543 s, built); (c) also the jdk corpus's two reads concurrently (about 27 GB each: near the
+    machine's 62 GB, beside the gate's other chains).
+  - *Recommended: (b), built*: the JVM's time, the jdk read's memory once.
+- **JFS35 The provenance's `:jdk` on the tool.**
+  - Options: (a) unchanged, `java -version`'s first line (the JDK build tree the platform is made
+    of names the same release; built: no change); (b) the platform by its pin
+    (`jdk/javac/platform.sha256`'s hash), no JVM asked.
+  - *Recommended: (a) now, (b) at JN6*, when the JVM leaves repr/java and `java` is no longer asked.
+- **JFS36 `bin/repr-java host-check` after JN5.**
+  - Options: (a) kept as a command and in `make verify` (not in the gate), until JN6 removes the
+    JVM's read it compares with (built); (b) removed now.
+  - *Recommended: (a)*: it is the one check of the tool's reads against the JVM's while both exist,
+    and costs nothing in the gate.
+
+### JN5.11 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`): the build tree's
+  `jdk/modules/{jdk.compiler,java.compiler,jdk.internal.opt,jdk.zipfs}` and their `images/jmods`
+  (the platform), `src/jdk.compiler/share/classes/module-info.java` (its `requires`).
+- The worktree's `.tmp/`: `jn5/` (`run.sh`, the runs' logs and `/usr/bin/time` outputs, `runs.txt`,
+  `moved.sh` and `cmp.sh`, the commands as the gate runs them and the JVM's, `gatemock.sh`, the
+  gate's chain order mocked, `ref-jvm/`, the javac step's classes by the JVM's javac, `base/`, the
+  program tree before the provenance changed), `javac-vendor/`, `jrt/`, `repr-java-roundtrip/`,
+  `gate-javac/` (the tool's copy).

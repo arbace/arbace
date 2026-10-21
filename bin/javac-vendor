@@ -10,7 +10,9 @@
 #
 #   bin/javac-vendor convert  the sources copied from $JDK (and overlay/jdk/javac/MODULE) into
 #                             WORK/src/MODULE, converted by `bin/repr-java read-jdk --check` (on
-#                             the frozen JVM, until JN5) module by module, merged into OUT/forms
+#                             bin/repr-java's host: javac's tool executable since JN5, javac on
+#                             Arbace reading javac's own sources, the fixpoint; on the frozen JVM
+#                             with REPR_JAVA_HOST=jvm) module by module, merged into OUT/forms
 #                             (repr/java's reports left out); OUT/sources.txt (MODULE KIND PATH:
 #                             share, a file of jdk26u's src/MODULE/share/classes; gensrc, of the
 #                             JDK build's support/gensrc/MODULE; overlay, of
@@ -20,8 +22,10 @@
 #                             variants, overlay/jdk/javac/variants), less what jdk/edge.edn
 #                             answers alike (arbace.j2g.edge's subtract), into OUT/edge.edn;
 #                             jdk/edge.edn stays the shipped build's
-#   bin/javac-vendor verify   convert into WORK/fresh and compare with OUT (diff -r): the tree is
-#                             what the conversion and the recording give, byte for byte
+#   bin/javac-vendor verify   convert into WORK/fresh and compare with OUT (diff -r; the
+#                             provenance's host, the tool that wrote it, reported, not compared:
+#                             JFS32): the tree is what the conversion and the recording give, byte
+#                             for byte
 #   bin/javac-vendor check    j2g translates javac's world (bin/j2g --program with OUT/forms,
 #                             the tool's variants and both edges): status 0 and no class failing
 #                             its analysis (WORK/check/j2g.log, report.edn). On the program built
@@ -213,7 +217,7 @@ convert() {
   echo "== sources (jdk26u at $pinned, $jdk)" >&2
   sources || fail "the sources were not copied"
   echo "   $(wc -l < "$work/sources.txt") files: $(for m in $modules; do printf '%s %s, ' "$m" "$(grep -c "^$m " "$work/sources.txt")"; done)" >&2
-  echo "== repr/java read-jdk (on the frozen JVM)" >&2
+  echo "== repr/java read-jdk (on ${REPR_JAVA_HOST:-arbace})" >&2
   rm -rf "$work/conv"
   for m in $modules; do convert_module "$m" "$work/conv" || return 1; done
   rm -rf "$o/forms"
@@ -232,13 +236,16 @@ convert() {
 }
 
 # The platform javac on Arbace compiles against (JFS15 (b), JFS23 (b)): the JDK build tree's
-# exploded modules ($JDK/build/*/jdk/modules), those the corpora name and what they require,
+# exploded modules ($JDK/build/*/jdk/modules), those the corpora name and what they require (and,
+# since JN5, JFS31, javac's own: jdk.compiler, java.compiler, jdk.internal.opt and jdk.zipfs,
+# which read-jdk patches when javac on Arbace reads javac's sources),
 # each with its module descriptor as the build's jmod holds it (images/jmods/MODULE.jmod's
 # classes/module-info.class, which is the image's: it carries the module's version, which javac
 # writes into a module's requires; the exploded descriptor has none), assembled into WORK/platform
 # (a tree of links, the descriptor copied) and pinned by jdk/javac/platform.sha256 (one line per
 # module: the SHA-256 of its files' sha256sum listing, sorted, without the build's _the.* marks)
-platform_modules="java.base java.datatransfer java.desktop java.logging java.prefs java.xml"
+platform_modules="java.base java.compiler java.datatransfer java.desktop java.logging java.prefs java.xml
+  jdk.compiler jdk.internal.opt jdk.zipfs"
 module_hash() { (cd "$1" && find -L . -type f ! -name '_the.*' | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64); }
 # platform_make DIR: DIR/MODULE for each module
 platform_make() {
@@ -382,9 +389,13 @@ case $cmd in
   verify)
     rm -rf "$work/fresh"
     convert "$work/fresh" || exit 1
-    if diff -r "$out" "$work/fresh" > "$work/verify.diff"; then
-      echo "javac-vendor verify: ${out#$root/} is the conversion and the recording, byte for byte ($(find "$out" -type f | wc -l) files)"
+    . "$root/bin/lib/frozen.bash"
+    # the provenance but its host (the tool that wrote it, JFS32): reported
+    if diff -r -x provenance.edn "$out" "$work/fresh" > "$work/verify.diff" &&
+       repr_java_provenance_same "$out/provenance.edn" "$work/fresh/provenance.edn"; then
+      echo "javac-vendor verify: ${out#$root/} is the conversion and the recording, byte for byte ($(find "$out" -type f | wc -l) files; the provenance's host $(grep -o ':host "[^ ]* [0-9a-f]\{12\}' "$out/provenance.edn" | cut -c8-), this run's $(grep -o ':host "[^ ]* [0-9a-f]\{12\}' "$work/fresh/provenance.edn" | cut -c8-))"
     else
+      diff -r "$out" "$work/fresh" > "$work/verify.diff"
       echo "javac-vendor verify: ${out#$root/} differs from a fresh conversion ($work/verify.diff: $(wc -l < "$work/verify.diff") lines)"
       exit 1
     fi ;;

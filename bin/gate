@@ -2,7 +2,9 @@
 # The gate: the checks a change must pass before it is committed to main. Since standalone S4
 # (doc/STANDALONE-NOTES.md, "S4: the JVM removed") the bootstrap starts from the Go-source seed
 # and every build is Go-hosted; the JVM runs only the oracle's reference (the frozen v4 jar) and,
-# with --full, repr/java and the checks of what repr/java and the JVM made (jdk/, the edge, the fixtures).
+# with --full, the checks of what the JVM made (the edge), the reference javac and the frozen
+# back end of repr/java's checks; since JN5 repr/java's checks run on javac's tool executable
+# (doc/classes/JAVA-FRONTEND-SURVEY.md, JFS9, "As built: JN5").
 #
 # Usage: bin/gate [--full]
 #   (default)  the essential gate:
@@ -31,32 +33,36 @@
 #                                 test/goi/check-linux-amd64.edn (doc/go/GOI-SPEC.md §11.5, GS12;
 #                                 gc's references cached in .tmp/goi-check)
 #   --full     also, once those are done, concurrently:
-#                   jvm           on the frozen JVM (bin/lib/frozen.bash), one after the other:
-#                     repr-java     bin/repr-java check --suite (the converter's checks, and Clojure's
-#                                   suite on the converted baseline)
-#                     repr-java-roundtrip  bin/repr-java roundtrip --corpus baseline,samples,jdk --text
-#                                   (Java -> forms -> Java -> forms, levels forms, ae and classes,
-#                                   then the text level: mode :full printed back byte for byte,
-#                                   against test/repr/java/roundtrip/: about 13 minutes)
-#                     jrt-convert   bin/jrt-convert verify (jdk/'s forms converted afresh by repr/java
-#                                   and compared byte for byte: jdk/README.md)
+#                   jvm           on the frozen JVM (bin/lib/frozen.bash):
 #                     j2g-edge      bin/j2g-edge verify (j2g's edge recorded afresh on the JVM and
 #                                   compared byte for byte with jdk/edge.edn)
-#                     java-fixtures bin/clojure-tests --java-fixtures verify (the suite's Java
-#                                   fixtures converted afresh by repr/java, compared with
-#                                   test/java-fixtures)
 #                   go            the Go build afresh, one after the other:
 #                     go-build-full ARBACE_GO_ARCHES=amd64 bin/arbace-go --build, then --smoke
 #                     javac         javac's forms and javac on Arbace (doc/classes/
-#                                   JAVA-FRONTEND-SURVEY.md, JN2, JN3, JFS26): bin/javac-vendor
-#                                   verify (jdk/javac converted afresh on the frozen JVM, byte for
-#                                   byte), check (j2g translates javac's world), build (the tool
-#                                   executable, j2g on the build just made), classes baseline
-#                                   samples jdk java.base (javac on Arbace's class files against
-#                                   the JVM's javac's, byte for byte, and java.base's against the
-#                                   JDK build's), then bin/repr-java host-check (repr/java's read
-#                                   on the tool executable against the frozen JVM's, every corpus,
-#                                   JN4, JFS29)
+#                                   JAVA-FRONTEND-SURVEY.md, JN2, JN3, JN5, JFS26, JFS9): bin/javac-vendor
+#                                   check (j2g translates javac's world), build (the tool
+#                                   executable, j2g on the build just made; copied into
+#                                   .tmp/gate-javac, the java chain's), verify (jdk/javac read
+#                                   afresh by javac on Arbace, the fixpoint, its edge recorded on
+#                                   the frozen JVM: byte for byte), classes baseline samples jdk
+#                                   java.base (javac on Arbace's class files against the JVM's
+#                                   javac's, byte for byte, and java.base's against the JDK
+#                                   build's)
+#                     java          after javac, concurrently with the rest of the go chain,
+#                                   repr/java's checks on the tool executable just built
+#                                   (REPR_JAVA_HOST=arbace, REPR_JAVA_EXE), one after the other:
+#                       repr-java     bin/repr-java check --suite (the converter's checks, and
+#                                     Clojure's suite on the converted baseline, compiled by the
+#                                     frozen jar's back end and run on the JVM)
+#                       repr-java-roundtrip  bin/repr-java roundtrip --corpus baseline,samples,jdk
+#                                     --text (Java -> forms -> Java -> forms, levels forms, ae and
+#                                     classes by javac on Arbace, then the text level: mode :full
+#                                     printed back byte for byte, against test/repr/java/roundtrip/)
+#                       jrt-convert   bin/jrt-convert verify (jdk/'s forms converted afresh by
+#                                     repr/java and compared byte for byte: jdk/README.md)
+#                       java-fixtures bin/clojure-tests --java-fixtures verify (the suite's Java
+#                                     fixtures converted afresh by repr/java, compared with
+#                                     test/java-fixtures)
 #                     box-forms     bin/arbace-go --build --box for amd64 and arm64 (the guests
 #                                   from tamago/'s forms), then bin/tamago-vendor check: each
 #                                   guest byte-identical to one built from TamaGo's originals
@@ -226,7 +232,7 @@ report() {  # report NAME: a check's outcome, wall time and summary lines
     jrt-convert) summary jrt-convert '^verify:|^jrt-convert:' 2 ;;
     j2g-edge) summary j2g-edge '^j2g-edge:' 1 ;;
     java-fixtures) summary java-fixtures '^verify:' 1 ;;
-    javac) summary javac '^javac-vendor|^   [a-z.-]*: |^host-check:' 11 ;;
+    javac) summary javac '^javac-vendor|^   [a-z.-]*: ' 11 ;;
     box-forms) summary box-forms 'identical|differ|FAIL' 3 ;;
     box-smoke) summary box-smoke 'checks|ok|FAIL' 2 ;;
     fixpoint) summary fixpoint '^fixpoint:' 9 ;;
@@ -270,21 +276,33 @@ for name in go-smoke suite-go oracle-go diffcheck goi-check generated; do report
 
 if [ -n "$full" ]; then
   jvm_chain() {
+    step j2g-edge bin/j2g-edge verify
+  }
+  # repr/java's checks on javac's tool executable (JFS9 (a), JN5), the javac step's copy of it
+  java_chain() {
+    export REPR_JAVA_HOST=arbace REPR_JAVA_EXE=$root/.tmp/gate-javac/arbace-javac JAVAC_EXE=$root/.tmp/gate-javac/arbace-javac
     step repr-java env REPR_JAVA_TEST_JOBS="$jobs" bin/repr-java check --suite
     step repr-java-roundtrip bin/repr-java roundtrip --corpus baseline,samples,jdk --text
     step jrt-convert bin/jrt-convert verify
-    step j2g-edge bin/j2g-edge verify
     step java-fixtures bin/clojure-tests --java-fixtures verify
   }
   go_chain() {
     step go-build-full sh -c 'ARBACE_GO_ARCHES=amd64 bin/arbace-go --build && ARBACE_GO_ARCHES=amd64 bin/arbace-go --smoke' || return 1
-    step javac sh -c 'bin/javac-vendor verify && bin/javac-vendor check && ARBACE_GO_ARCHES=amd64 bin/javac-vendor build && bin/javac-vendor classes baseline samples jdk java.base && bin/repr-java host-check'
+    # repr/java's checks wait for the tool, then run beside the rest of the chain
+    if step javac sh -c 'bin/javac-vendor check && ARBACE_GO_ARCHES=amd64 bin/javac-vendor build &&
+      rm -rf .tmp/gate-javac && mkdir -p .tmp/gate-javac &&
+      cp target/arbace-go/amd64/arbace-javac target/arbace-go/amd64/arbace-javac.key .tmp/gate-javac/ &&
+      REPR_JAVA_HOST=arbace REPR_JAVA_EXE=$PWD/.tmp/gate-javac/arbace-javac bin/javac-vendor verify &&
+      JAVAC_EXE=$PWD/.tmp/gate-javac/arbace-javac bin/javac-vendor classes baseline samples jdk java.base'; then
+      java_chain &
+    fi
     step box-forms sh -c 'ARBACE_GO_ARCHES=amd64 ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box && bin/tamago-vendor check' \
       && step box-smoke env ARBACE_BOX_ARCHES=amd64 bin/arbace-go --smoke --box \
       && step box-oracle env ARBACE_BOX_NET=loopback bin/oracle check 'target/arbace-go/box-amd64/arbace-box -' -j 8 --timeout 900 \
            --exclude forms/files. --exclude forms/processes. --expected test/oracle/known-go-box-amd64.edn \
       && step box-suite bin/box-suite
     step fixpoint bin/arbace-go --fixpoint
+    wait
   }
   repr_go_chain() {
     step repr-go sh -c 'bin/repr-go roundtrip amd64 && bin/repr-go roundtrip linux/amd64 && bin/repr-go roundtrip --text amd64 && bin/repr-go roundtrip --dirs amd64 && bin/repr-go roundtrip --dirs linux/amd64 && bin/repr-go roundtrip --text --dirs amd64 && bin/box-vendor roundtrip && bin/box-vendor kvm-tests && bin/box-vendor purego-check && bin/tamago-vendor verify && bin/x509roots-vendor verify && bin/x509roots-vendor check'

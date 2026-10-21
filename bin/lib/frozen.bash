@@ -126,17 +126,29 @@ frozen_host() {
 }
 
 # repr_java_host: the host repr/java's read runs on as provenance files name it (bin/repr-java's
-# REPR_JAVA_HOST): frozen_host on the JVM (the default), else "arbace-javac SHA-256" of javac's
-# tool executable (REPR_JAVA_EXE; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN4")
+# REPR_JAVA_HOST): "arbace-javac KEY" on javac's tool executable (the default since JN5;
+# REPR_JAVA_EXE), KEY the sources it is built from (bin/lib/javac-key.bash; JFS30 (b): two builds
+# of one commit name it alike), refused when the tool is not built from the checkout's; on the JVM
+# (REPR_JAVA_HOST=jvm) frozen_host (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN4", "As
+# built: JN5")
 repr_java_host() {
-  local e
-  if [ "${REPR_JAVA_HOST:-jvm}" = arbace ]; then
+  local e k
+  if [ "${REPR_JAVA_HOST:-arbace}" = arbace ]; then
     e=${REPR_JAVA_EXE:-$root/target/arbace-go/$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac)/arbace-javac}
-    [ -x "$e" ] || { echo "repr_java_host: no javac tool executable $e" >&2; return 1; }
-    echo "arbace-javac $(sha256sum "$e" | cut -c1-64)"
+    [ -x "$e" ] || { echo "repr_java_host: no javac tool executable $e (bin/javac-vendor build)" >&2; return 1; }
+    . "$root/bin/lib/javac-key.bash"
+    k=$(arbace_javac_fresh repr_java_host "$e") || return 1
+    echo "arbace-javac $k"
   else
     frozen_host
   fi
+}
+
+# repr_java_provenance_same A B: provenance files A and B the same but for the converter's
+# :host line, which names the tool that wrote the file (its sources' key), not what the forms
+# are (JFS32): verify requires the rest byte for byte and reports the host
+repr_java_provenance_same() {
+  cmp -s <(grep -v '^ *:host ' "$1") <(grep -v '^ *:host ' "$2")
 }
 
 # repr_java_reader_hash: the SHA-256 the provenance files (jdk/provenance.edn,
