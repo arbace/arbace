@@ -1776,3 +1776,11 @@ the provenance files then name is JFS30's question.
   `times.sh` and `times/`, `decl/`, the evaluated tool `arbace-javac-evaluated`, `aotr/` the first
   compiled tree, `memtest/`), `repr-java-host-check/` (the check's work: each corpus on both hosts),
   `base/` (main's export and build for JN4.7).
+
+## Decided (2026-10-21): JFS27-JFS30
+
+The user decided JFS27-JFS30 as built:
+- JFS27 (b): the fixtures' runtime declarations printed and compiled by javac on Arbace.
+- JFS28 (b): the reader compiled into the tool by c2j, its tree kept by key.
+- JFS29 (a): `bin/repr-java host-check` at the end of `bin/gate --full`'s javac step, until JN5.
+- JFS30 (a) now, (b) at JN5.

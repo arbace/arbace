@@ -119,7 +119,8 @@ The current state of the work. This file is rewritten as things change. For the 
     batched with JN2's; GPS16-GPS20 decided as built). GP3 done (2026-10-21: raw forms,
     `bin/repr-go raw-check` 12,158 dumps resolved, 0 differ, 117 raw only; the normal conversion
     unchanged). The seed remade after GP2, JN2 and GP3 (`aa4cb10b…`) and verified. GPS21-GPS26 decided
-    as built (the user, 2026-10-21). Running: GP4, the annotator (`go-parser-gp4`).
+    as built (the user, 2026-10-21). GP4 done (2026-10-21: the checker's
+    resolve mode, E-ann 12,158 of 12,158 equal, none known; GPS27-GPS31 open); next GP5, the switch.
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
@@ -130,8 +131,9 @@ The current state of the work. This file is rewritten as things change. For the 
     JN3 done (2026-10-21: javac on Arbace compiles the baseline, the samples, java.base's closure
     and java.base itself byte for byte as the JVM's javac, `bin/javac-vendor classes`, a `javac`
     step in `bin/gate --full`; the program changed, re-seed batched with GP4's; JFS23-JFS26
-    decided as built); re-seed batched with GP4's (the user). Running: JN4, repr/java's `read` on
-    Arbace (`java-frontend-jn4`). The processes form made robust (2026-10-21).
+    decided as built). JN4 done (2026-10-21: repr/java's read on the tool, every corpus byte for
+    byte the JVM reader's, `bin/repr-java host-check`; JFS27-JFS30 decided as built); next JN5, the
+    checks moved to the tool. Re-seed for JN3, JN4 and GP4 running. The processes form made robust (2026-10-21).
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

@@ -636,3 +636,112 @@ JFS26 (a), the `javac` step in `bin/gate --full`.
   - The branch's essential gate passed.
 - Nothing else keys on the file's line numbers: the known lists have no entries for it, and the
   box's subset excludes it.
+
+## 2026-10-21: JN4 merged (repr/java's read on Arbace)
+
+- **What:** the branch `java-frontend-jn4` (`664103b2`, from `864a5de2`) is merged. The survey's
+  "As built: JN4" (JN4.1-JN4.11) has the details.
+- **The reader on the tool.** `arbace/repr/java/javac.ae` hands JN3's
+  `jdk.internal.jrt.javac.FileManager` to `getTask`, with the platform from `REPR_JAVA_PLATFORM`.
+  - `bin/repr-java` takes `REPR_JAVA_HOST=jvm|arbace` and `REPR_JAVA_EXE`; the JVM stays the
+    default.
+  - `bin/javac-vendor platform DIR` makes the platform.
+  - `bin/repr-java host-check [check jdk fixtures full]` is the check (Makefile
+    `repr-java-host-check`).
+  - The fixtures' runtime is Arbace's declarations, printed by `print --layout declarations`
+    (bodies `throw null;`) and compiled by javac on Arbace: 141 files, 836 classes (JFS27 (b)).
+  - The reader is compiled into the tool by c2j on a second pass of `--build-java`, kept by key in
+    `target/arbace-go/aot-reader`, and embedded by j2g's new `--embed` (JFS28 (b)).
+- **Equal to the JVM's reader, byte for byte:**
+
+  | corpus | files |
+  |---|---|
+  | baseline | 189 |
+  | samples | 11 |
+  | module | 6 |
+  | `jdk/forms` | 911 |
+  | fixtures | 15 |
+  | mode `:full` | 189 / 11 / 6 / 911 |
+
+  `host-check` takes 393 s compiled and 609 s evaluated.
+- **JFS17 (a) measured:** rooting javac's internals grows the tool by 0.6%
+  (187,433,120 → 188,498,080 bytes). With the compiled reader it is 197,910,688 bytes.
+- **Speed:**
+
+  | corpus | the tool | the JVM |
+  |---|---|---|
+  | baseline | 24.1 s | 13.8 s |
+  | jdk (12 threads) | 80.3 s | 25.3 s |
+
+  The samples, module and fixtures take 0.3-0.75 s against 5-6 s, since no JVM starts. The jdk
+  corpus peaks at 26.6 GB, about twice the JVM.
+- **Fixes:**
+  - j2g (`decls.ae`): a record component typed outside the world is now an operation-level stub.
+  - c2j (`emit.ae`): a linked call resolves the callee's parameter tags in the callee's
+    namespace; before, it depended on the order sources were compiled in.
+  - The printer: `default` for an interface method with a body, and the declarations layout.
+  - No diffcheck form is possible for these, for the reasons the survey gives.
+- **Re-recorded:**
+  - `jdk/javac/edge.edn`: 39 classes, `ModuleDescriptor` cut.
+  - The three provenance files: the `:repr-java` hash only.
+  - `jdk/edge.edn` and `jdk/forms` are unchanged.
+- **The shipped program:** only four tool namespaces' compiled code changes (`arbace.j2g.main`,
+  `.embed`, `.decls`, `arbace.c2j.emit`). The executable is 147,206,304 bytes.
+- **Checks:**
+  - `javac-vendor verify`, `check`, and `classes` on all four corpora.
+  - `j2g-edge verify`.
+  - `--java-fixtures verify`.
+  - The branch's essential gate.
+  - On main after the merge (`f824fc24`), the essential `bin/gate` passed (13m24s).
+- **Time:** about 3 h, against the 2-4 days estimated.
+- **Rule slips:** one wait loop used `pgrep -f build-prog.sh > /dev/null`. It only read; nothing
+  was stopped.
+
+## 2026-10-21: JFS27-JFS30 decided as built (the user)
+
+- JFS27 (b): the fixtures' runtime from Arbace's declarations, compiled by javac on Arbace.
+- JFS28 (b): the reader compiled into the tool, kept by key.
+- JFS29 (a): `bin/repr-java host-check` ends `bin/gate --full`'s javac step until JN5.
+- JFS30 (a) now and (b) at JN5: the provenance names the host that read, then the key of the
+  tool's sources.
+
+## 2026-10-21: GP4 merged (the annotator)
+
+- **What:** the branch `go-parser-gp4` (`61905030`, from `982ae875`) is merged. The survey's "As
+  built: GP4" has the details.
+- **The checker's resolve mode** (`arbace.go.check`, doc/go/GOI-SPEC.md §3.10) checks GP3's raw
+  forms in memory.
+  - It resolves `go/select`, `go/index`, `go/star`, builtin-named calls through the scope,
+    `^:go/define`, `^:go/key` and implicit imports.
+  - It records answers by position: modes, types, values, objects, selections, fields, `:inst`,
+    the init order.
+  - go/types' spellings (`byte`, `rune`, aliases) are kept in this mode only (GPS27 (a)).
+- **`arbace/repr/go/annotate.ae`** (new, 869 lines):
+  - sessions per configuration;
+  - external tests in go list -test's world (GPS29 (a));
+  - the answers written into the native dump in the helper's shape;
+  - E-ann: the annotated dump converted by the unchanged converter, compared with the helper's
+    final forms with every key and position (GPS28 (a)).
+- **Commands:**
+  - `bin/repr-go native-check` runs E-tree, the raw check and E-ann in one read (GPS23 (c)).
+    `raw-check` and `raw-known.edn` are removed.
+  - New `read --reader native --forms [--full]`.
+  - New `bin/goi annotations --forms DIR [--reference DIR]`.
+- **Numbers:**
+  - `native-check` over 22 corpora: 12,275 dumps, E-tree 12,275 equal, **E-ann 12,158 of 12,158
+    equal**, `native-known.edn` empty. It took 70 min 57 s wall at a peak of 29.9 GB.
+  - `bin/goi annotations` over the native conversions: zero errors.
+  - The native forms of goi's five corpora are byte for byte the helper's (0 of 11,029 differ;
+    GP5's E-forms already holds in `:lines`).
+  - The 28 conversions are unchanged (62,878 files).
+- **Checker fixes:**
+  - Two apply in goi's normal mode too (GPS31 (a)): local multi-name constant specs, and
+    `fallthrough` after a declaration.
+  - The rest are fidelity fixes in the resolve mode, including seven rules for how go/types
+    records invalid programs (GPS30 (a)).
+- **Checks:** the branch's essential gate passed (21m27s). On merging, the Makefile's `.PHONY`
+  line conflicted with JN4's: it was resolved with `repr-go-raw-check` removed and
+  `repr-java-host-check` kept.
+- **Rule slips:** a crash report went to /tmp before TMPDIR was set; it was deleted.
+- **Open for the user:** GPS27-GPS31.
+- **Next, the batched re-seed** for JN3, JN4 and GP4.
