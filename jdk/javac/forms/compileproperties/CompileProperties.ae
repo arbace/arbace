@@ -1,0 +1,292 @@
+;; Converted from jdk26u make/langtools/tools/compileproperties/CompileProperties.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'compileproperties)
+
+(import '(java.io BufferedWriter
+                  File
+                  FileInputStream
+                  FileNotFoundException
+                  FileOutputStream
+                  IOException
+                  OutputStreamWriter
+                  Writer)
+        '(java.nio.charset StandardCharsets)
+        '(java.nio.file Files Path)
+        '(java.text MessageFormat)
+        '(java.util ArrayList Collections Iterator List Properties))
+
+(defclass ^:public CompileProperties
+  (method ^:public ^:static main ^void [^String/1 args]
+    (let [cp (CompileProperties.) ok (.run cp args)] (when-not ok (System/exit 1))))
+
+  (defclass ^:public ^:static ^:interface Log
+    (method info ^void [this ^String msg])
+
+    (method verbose ^void [this ^String msg])
+
+    (method error ^void [this ^String msg ^Exception e]))
+
+  (field ^:private ^String/1 propfiles)
+
+  (field ^:private ^String/1 outfiles)
+
+  (field ^:private ^String/1 supers)
+
+  (field ^:private ^int compileCount 0)
+
+  (field ^:private ^boolean quiet false)
+
+  (field ^:public ^Log log)
+
+  (method ^:public setLog ^void [this ^Log log] (set! (.-log this) log))
+
+  (method ^:public run ^boolean [this ^String/1 args]
+    (when (nil? log)
+      (set! log
+            (anon Log []
+              (method ^:public error ^void [this ^String msg ^Exception e]
+                (.println System/err (java-str "ERROR: CompileProperties: " msg))
+                (when (some? e)
+                  (.println System/err (java-str "EXCEPTION: " (.toString e)))
+                  (.printStackTrace e)))
+
+              (method ^:public info ^void [this ^String msg]
+                (.println System/out msg))
+
+              (method ^:public verbose ^void [this ^String msg]
+                (when-not quiet (.println System/out msg))))))
+    (let [^:mutable ok true]
+      (set! ok (.parseOptions this args))
+      (when (and ok (== compileCount 0))
+        (.error log "options parsed but no files to compile" nil)
+        (set! ok false))
+      (if (not ok)
+          (CompileProperties/usage log)
+          (loop [^int i 0]
+            (when (and (< i compileCount) ok)
+              (set! ok (.createFile this (aget propfiles i) (aget outfiles i) (aget supers i)))
+              (recur (unchecked-inc-int i)))))
+      ok))
+
+  (method ^:private parseOptions ^boolean [this ^String/1 args]
+    (let [^:mutable ok true]
+      (if (> compileCount 0)
+          (let [new_propfiles (new String/1 (unchecked-add-int compileCount (alength args)))
+                new_outfiles (new String/1 (unchecked-add-int compileCount (alength args)))
+                new_supers (new String/1 (unchecked-add-int compileCount (alength args)))]
+            (System/arraycopy propfiles 0 new_propfiles 0 compileCount)
+            (System/arraycopy outfiles 0 new_outfiles 0 compileCount)
+            (System/arraycopy supers 0 new_supers 0 compileCount)
+            (set! propfiles new_propfiles)
+            (set! outfiles new_outfiles)
+            (set! supers new_supers))
+          (do
+            (set! propfiles (new String/1 (alength args)))
+            (set! outfiles (new String/1 (alength args)))
+            (set! supers (new String/1 (alength args)))))
+      (let [^:mutable ^int i 0]
+        (while (< i (alength args))
+          (cond
+            (and (.equals "-compile" (aget args i)) (< (unchecked-add-int i 3) (alength args)))
+              (do
+                (aset propfiles compileCount (aget args (set! i (unchecked-inc-int i))))
+                (aset outfiles compileCount (aget args (set! i (unchecked-inc-int i))))
+                (aset supers compileCount (aget args (set! i (unchecked-inc-int i))))
+                (set! compileCount (unchecked-inc-int compileCount)))
+            (and (.startsWith (aget args i) "@") (> (.length (aget args i)) 1))
+              (let [filename (.substring (aget args i) 1)
+                    ^:mutable ^FileInputStream finput nil
+                    ^:mutable ^byte/1 contents nil]
+                (try
+                  (set! finput (FileInputStream. filename))
+                  (let [byteCount (.available finput)]
+                    (if (<= byteCount 0)
+                        (do (.error log "The @-file file is empty" nil) (set! ok false))
+                        (do
+                          (set! contents (new byte/1 byteCount))
+                          (let [bytesRead (.read finput contents)]
+                            (when-not (== byteCount bytesRead)
+                              (.error log "Cannot read all of @-file file" nil)
+                              (set! ok false))))))
+                  (catch IOException e
+                    (.error log (java-str "cannot open " filename) e)
+                    (set! ok false)))
+                (when (some? finput)
+                  (try
+                    (.close finput)
+                    (catch IOException e
+                      (set! ok false)
+                      (.error log (java-str "cannot close " filename) e))))
+                (set! ok true)
+                (when (some? contents)
+                  (let [tokens (.split (String. contents) "\\s+")]
+                    (when (> (alength tokens) 0) (set! ok (.parseOptions this tokens)))))
+                (when-not ok (break)))
+            (.equals "-quiet" (aget args i)) (set! quiet true)
+            :else (do (.error log "argument error" nil) (set! ok false)))
+          (set! i (unchecked-inc-int i))))
+      ok))
+
+  (method ^:private createFile ^boolean [this ^String propertiesPath ^String outputPath
+                                         ^String superClass]
+    (let [^:mutable ok true]
+      (.verbose log (java-str "parsing: " propertiesPath))
+      (let [p (Properties.)]
+        (try
+          (with-resources [input (Files/newBufferedReader
+                                   (Path/of propertiesPath (new String/1 [])))]
+            (.load p input))
+          (catch FileNotFoundException e
+            (set! ok false)
+            (.error log (java-str "Cannot find file " propertiesPath) e))
+          (catch IOException e
+            (set! ok false)
+            (.error log (java-str "IO error on file " propertiesPath) e)))
+        (when ok
+          (let [packageName (CompileProperties/inferPackageName propertiesPath outputPath)]
+            (.verbose log (java-str "inferred package name: " packageName))
+            (let [^{:tag (List String)} sortedKeys (ArrayList.)]
+              (for-each [key (.keySet p)] (.add sortedKeys (cast String key)))
+              (Collections/sort sortedKeys)
+              (let [^{:tag (Iterator String)} keys (.iterator sortedKeys)
+                    data (StringBuffer.)]
+                (while (.hasNext keys)
+                  (let [key (cast String (.next keys))]
+                    (.append data
+                             (java-str "            { \""
+                                       (CompileProperties/escape key)
+                                       "\", \""
+                                       (CompileProperties/escape (cast String (.get p key)))
+                                       "\" },\n"))))
+                (let [file (File. outputPath)
+                      name (.getName file)
+                      dotIndex (.lastIndexOf name \.)
+                      ^String className (if (== dotIndex -1) name (.substring name 0 dotIndex))]
+                  (let [^:mutable packageString ""]
+                    (when (and (some? packageName) (not (.equals packageName "")))
+                      (set! packageString (java-str "package " packageName ";\n\n")))
+                    (let [^:mutable ^Writer writer nil]
+                      (try
+                        (set! writer
+                              (BufferedWriter.
+                                (OutputStreamWriter.
+                                  (FileOutputStream. outputPath)
+                                  StandardCharsets/US_ASCII)))
+                        (let [format (MessageFormat. FORMAT)]
+                          (.write
+                            writer
+                            (.format format
+                                     (new Object/1 [packageString className superClass data]))))
+                        (catch IOException e
+                          (set! ok false)
+                          (.error log (java-str "IO error writing to file " outputPath) e)))
+                      (when (some? writer)
+                        (try
+                          (.flush writer)
+                          (catch IOException e
+                            (set! ok false)
+                            (.error log (java-str "IO error flush " outputPath) e)))
+                        (try
+                          (.close writer)
+                          (catch IOException e
+                            (set! ok false)
+                            (.error log (java-str "IO error close " outputPath) e))))
+                      (.verbose log (java-str "wrote: " outputPath)))))))))
+        ok)))
+
+  (method ^:private ^:static usage ^void [^Log log]
+    (.info log "usage:")
+    (.info
+      log
+      "    java CompileProperties {-compile path_to_properties_file path_to_java_output_file super_class} -or- @optionsfile")
+    (.info log "")
+    (.info log "Example:")
+    (.info
+      log
+      "    java CompileProperties -compile test.properties test.java java.util.ListResourceBundle")
+    (.info log "    java CompileProperties @optionsfile")
+    (.info log
+           "optionsfile contains: -compile test.properties test.java java.util.ListResourceBundle"))
+
+  (method ^:private ^:static escape ^String [^String theString]
+    (let [len (.length theString)
+          outBuffer (StringBuffer. (unchecked-multiply-int len 2))]
+      (loop [^int x 0]
+        (when (< x len)
+          (let [aChar (.charAt theString x)]
+            (switch aChar
+              \\ (do (.append outBuffer \\) (.append outBuffer \\) (recur (unchecked-inc-int x)))
+              \tab (do (.append outBuffer \\) (.append outBuffer \t) (recur (unchecked-inc-int x)))
+              \newline
+                (do (.append outBuffer \\) (.append outBuffer \n) (recur (unchecked-inc-int x)))
+              \return
+                (do (.append outBuffer \\) (.append outBuffer \r) (recur (unchecked-inc-int x)))
+              \formfeed
+                (do (.append outBuffer \\) (.append outBuffer \f) (recur (unchecked-inc-int x)))
+              (if (or (< aChar 0x0020) (> aChar 0x007e))
+                  (do
+                    (.append outBuffer \\)
+                    (.append outBuffer \u)
+                    (.append outBuffer
+                             (CompileProperties/toHex
+                               (bit-and-int (bit-shift-right-int aChar 12) 0xF)))
+                    (.append outBuffer
+                             (CompileProperties/toHex
+                               (bit-and-int (bit-shift-right-int aChar 8) 0xF)))
+                    (.append outBuffer
+                             (CompileProperties/toHex
+                               (bit-and-int (bit-shift-right-int aChar 4) 0xF)))
+                    (.append outBuffer (CompileProperties/toHex (bit-and-int aChar 0xF)))
+                    (recur (unchecked-inc-int x)))
+                  (do
+                    (when-not (== (.indexOf specialSaveChars aChar) -1) (.append outBuffer \\))
+                    (.append outBuffer aChar)
+                    (recur (unchecked-inc-int x))))))))
+      (.toString outBuffer)))
+
+  (method ^:private ^:static inferPackageName ^String [^:mutable ^String inputPath
+                                                       ^:mutable ^String outputPath]
+    (set! inputPath (.getPath (File. inputPath)))
+    (set! outputPath (.getPath (File. outputPath)))
+    (let [^String sep (if (== File/separatorChar \\) "\\\\" File/separator)]
+      (let [inputs (.split inputPath sep)
+            outputs (.split outputPath sep)
+            ^:mutable ^int inStart 0
+            inEnd (unchecked-subtract-int (alength inputs) 2)
+            outEnd (unchecked-subtract-int (alength outputs) 2)
+            ^:mutable i inEnd
+            ^:mutable j outEnd]
+        (while (and (>= i 0) (>= j 0))
+          (when (or (or
+                      (not (.equals (aget inputs i) (aget outputs j)))
+                      (and (.equals (aget inputs i) "gensrc") (.equals (aget outputs j) "gensrc")))
+                    (.contains (aget inputs i) "."))
+            (set! i (unchecked-inc-int i))
+            (set! j (unchecked-inc-int j))
+            (break))
+          (set! i (unchecked-dec-int i))
+          (set! j (unchecked-dec-int j)))
+        (let [^:mutable ^String result nil]
+          (if (or (or (or (< i 0) (< j 0)) (>= i inEnd)) (>= j outEnd))
+              (set! result "")
+              (do
+                (set! inStart i)
+                (let [buf (StringBuffer.)]
+                  (set! i inStart)
+                  (while (<= i inEnd)
+                    (.append buf (aget inputs i))
+                    (when (< i inEnd) (.append buf \.))
+                    (set! i (unchecked-inc-int i)))
+                  (set! result (.toString buf)))))
+          result))))
+
+  (field ^:private ^:static ^:final ^String FORMAT
+    "{0}public final class {1} extends {2} '{'\n    protected final Object[][] getContents() '{'\n        return new Object[][] '{'\n{3}        };\n    }\n}\n")
+
+  (method ^:private ^:static toHex ^char [^int nibble]
+    (aget hexDigit (bit-and-int nibble 0xF)))
+
+  (field ^:private ^:static ^:final ^char/1 hexDigit
+    (new char/1 [\0 \1 \2 \3 \4 \5 \6 \7 \8 \9 \A \B \C \D \E \F]))
+
+  (field ^:private ^:static ^:final ^String specialSaveChars "\""))

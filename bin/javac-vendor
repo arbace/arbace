@@ -10,6 +10,12 @@
 # java.time.zone), with the JDK's classes they need (overlay/jdk/javac/closure.txt: java.xml's SAX
 # parser, java.base's) and jrt's own zlib Deflater; and the edge of javac's world (JFS14 (b)); the tool executable's
 # input (JFS4 (b)), as jdk/forms is the program's. jdk26u is pinned (JFS8 (a)): $JDK's commit must be the provenance's.
+# Since JFS48 (b) jdk.compiler's generated sources are generated here as the JDK build generates them
+# (make/modules/jdk.compiler/Gensrc.gmk), by its langtools tools (make/langtools/tools:
+# compileproperties, the resource bundles' classes; propertiesparser, CompilerProperties and
+# LauncherProperties) read into module buildtools and run on javac's tool executable, and compared
+# with the build tree's support/gensrc/jdk.compiler (WORK/generated.edn); FlagsEnum (flagsgenerator)
+# is still copied from the build tree (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JFS48 (b)").
 #
 #   bin/javac-vendor convert  the sources copied from $JDK (and overlay/jdk/javac/MODULE) into
 #                             WORK/src/MODULE, converted by `bin/repr-java read-jdk --check` (on
@@ -17,12 +23,27 @@
 #                             on Arbace reading javac's own sources, the fixpoint) module by
 #                             module, merged into OUT/forms
 #                             (repr/java's reports left out); OUT/sources.txt (MODULE KIND PATH:
-#                             share, a file of jdk26u's src/MODULE/share/classes; gensrc, of the
-#                             JDK build's support/gensrc/MODULE; overlay, of
-#                             overlay/jdk/javac/MODULE; make, of make/jdk/src/classes; interim,
+#                             share, a file of jdk26u's src/MODULE/share/classes; gensrc, of
+#                             support/gensrc/MODULE as this script generates it (below);
+#                             gensrc-build, of the JDK build's support/gensrc/MODULE, copied
+#                             (FlagsEnum); overlay, of overlay/jdk/javac/MODULE; make, of
+#                             make/jdk/src/classes; langtools, of make/langtools/tools; interim,
 #                             a java.time.zone file as make/CopyInterimTZDB.gmk copies it), OUT/provenance.edn; then the edge
 #                             (module buildtools by bin/repr-java read, the class path, with
-#                             --add-exports java.base/sun.text=ALL-UNNAMED as the build's)
+#                             --add-exports java.base/sun.text=ALL-UNNAMED as the build's).
+#                             First the generate step (JFS48 (b)): version.properties as
+#                             GensrcCommon.gmk's SetupVersionProperties writes it (the build's
+#                             spec.gmk's VERSION_NUMBER, VERSION_STRING, VERSION_SHORT),
+#                             compileproperties.CompileProperties over jdk.compiler's .properties
+#                             and it, propertiesparser.PropertiesParser over compiler.properties
+#                             and launcher.properties, each tool's main called on javac's tool
+#                             executable ($REPR_JAVA_EXE, bin/repr-java's) with
+#                             make/langtools/tools on ARBACE_PATH (propertiesparser's templates),
+#                             into WORK/gensrc/jdk.compiler; each output compared with the build
+#                             tree's (WORK/generated.edn: :same, :different, :no-reference): a
+#                             difference fails. JAVAC_VENDOR_BOOTSTRAP=1 takes the build tree's
+#                             files instead (a tool that does not yet hold the generators; the
+#                             provenance says so, and verify, which always generates, then differs)
 #   bin/javac-vendor edge     the edge of javac's world alone: bin/j2g --program --record-edge on
 #                             the frozen JVM over the program and OUT/forms (with the tool's
 #                             variants, overlay/jdk/javac/variants), less what jdk/edge.edn
@@ -98,6 +119,12 @@ pinned=baf63fbe42b8758448fee570a9d9bb914272d259
 # properties' classes, FlagsEnum, the resource bundles), and of jdk.internal.opt the one class
 # javac's launcher uses
 modules="jdk.compiler java.compiler jdk.internal.opt java.base java.xml buildtools"
+# (JFS48 (b)) jdk.compiler's generated sources: generated here by the JDK build's langtools tools
+# (make/langtools/tools, read into module buildtools, KIND langtools) on the tool, but those of
+# gensrc_build, copied from the build tree (KIND gensrc-build): FlagsEnum, which flagsgenerator
+# makes from Flags.java with javac's standard file manager (JFS48 (c))
+langtools_dirs="compileproperties propertiesparser"
+gensrc_build="com/sun/tools/javac/code/FlagsEnum.java"
 opt_files="jdk/internal/opt/CommandLine.java"
 # java.base's classes javac's world needs beyond the program's (the survey's JN1.2): declarations
 # of javac's classes (annotation types, supertypes, exceptions) and TypeTag's range checks; and
@@ -128,6 +155,85 @@ interim_tzdb="ZoneOffsetTransition ZoneOffsetTransitionRule ZoneRules Ser"
 closure=$overlay/closure.txt
 
 conf() { ls -d "$jdk"/build/*/spec.gmk 2>/dev/null | head -1; }
+# spec VAR: a value of the build's spec.gmk (VAR := VALUE)
+spec() { sed -n "s/^$1 := //p" "$(conf)" | head -1; }
+
+# The generators (JFS48 (b)): the JDK build's langtools tools as Java forms on javac's tool
+# executable, each main called by its class name, as bin/jrt-convert's generate step calls
+# make/jdk/src/classes' (JN7)
+gen_exe() { . "$root/bin/lib/host.bash"; echo "${REPR_JAVA_EXE:-$root/target/arbace-go/$(arbace_host_arch)/arbace-javac}"; }
+gen_tools="compileproperties.CompileProperties propertiesparser.PropertiesParser"
+gen_script() {
+  local c
+  echo ';; bin/javac-vendor'"'"'s generate step: a JDK build langtools tool'"'"'s main (JFS48 (b))'
+  echo '(let [[c & args] *command-line-args* a (into-array String args)]'
+  echo '  (case c'
+  for c in $gen_tools; do echo "    \"$c\" ($c/main a)"; done
+  echo '    (do (println "javac-vendor: no tool" c) (System/exit 2))))'
+}
+vprops=com/sun/tools/javac/resources/version.properties
+
+# generate: WORK/gensrc/jdk.compiler as make/modules/jdk.compiler/Gensrc.gmk makes it (but
+# FlagsEnum), then WORK/generated.edn, each output against the build tree's
+generate() {
+  local c ref g=$work/gensrc/jdk.compiler src=$jdk/src/jdk.compiler/share/classes rel v st=0 exe t0
+  t0=$(date +%s)
+  c=$(conf); [ -n "$c" ] || fail "no JDK build tree in $jdk/build (its spec.gmk)"
+  ref=$(dirname "$c")/support/gensrc/jdk.compiler
+  rm -rf "$work/gensrc" "$work/gen-tools"
+  mkdir -p "$g/$(dirname "$vprops")" "$work/gen-tools" "$work/tmp"
+  if [ "${JAVAC_VENDOR_BOOTSTRAP:-}" = 1 ]; then
+    echo "   bootstrap (JAVAC_VENDOR_BOOTSTRAP=1): the build tree's files, not generated" >&2
+    (cd "$ref" && find . -name '*.java' -o -name '*.properties' | sed 's|^\./||') | while read -r rel; do
+      case " $gensrc_build " in *" $rel "*) continue ;; esac
+      mkdir -p "$g/$(dirname "$rel")" && cp "$ref/$rel" "$g/$rel"
+    done
+  else
+    exe=$(gen_exe)
+    [ -x "$exe" ] || fail "no $exe (bin/javac-vendor build, or REPR_JAVA_EXE)"
+    gen_script > "$work/gen-tools/gen.ae"
+    local tool=(env "TMPDIR=$work/tmp" "ARBACE_PATH=$jdk/make/langtools/tools" "$exe" "$work/gen-tools/gen.ae")
+    # GensrcCommon.gmk's SetupVersionProperties: jdk.compiler's version.properties
+    printf 'jdk=%s\nfull=%s\nrelease=%s\n' "$(spec VERSION_NUMBER)" "$(spec VERSION_STRING)" "$(spec VERSION_SHORT)" > "$g/$vprops"
+    # GensrcProperties.gmk's SetupCompileProperties (TYPE langtools, CLASS
+    # java.util.ListResourceBundle, EXTRA_FILES version.properties; no translation excluded):
+    # -compile PROPERTIES JAVA CLASS for each, in an @-file, -quiet
+    {
+      (cd "$src" && find . -name '*.properties' | sed 's|^\./||' | LC_ALL=C sort) | while read -r rel; do
+        printf -- '-compile\n%s\n%s\n%s\n' "$src/$rel" "$g/${rel%.properties}.java" java.util.ListResourceBundle
+      done
+      printf -- '-compile\n%s\n%s\n%s\n' "$g/$vprops" "$g/${vprops%.properties}.java" java.util.ListResourceBundle
+    } > "$work/gen-tools/compileproperties.cmdline"
+    sed -n '3~4p' "$work/gen-tools/compileproperties.cmdline" | while read -r f; do mkdir -p "$(dirname "$f")"; done
+    "${tool[@]}" compileproperties.CompileProperties -quiet "@$work/gen-tools/compileproperties.cmdline" \
+      > "$work/log/compileproperties.log" 2>&1 || { cat "$work/log/compileproperties.log" >&2; return 1; }
+    # Gensrc.gmk's PARSEPROPERTIES: compiler.properties and launcher.properties into their factories
+    "${tool[@]}" propertiesparser.PropertiesParser \
+      -compile "$src/com/sun/tools/javac/resources/compiler.properties" "$g/com/sun/tools/javac/resources/" \
+      -compile "$src/com/sun/tools/javac/resources/launcher.properties" "$g/com/sun/tools/javac/resources/" \
+      > "$work/log/propertiesparser.log" 2>&1 || { cat "$work/log/propertiesparser.log" >&2; return 1; }
+  fi
+  # against the build tree's support/gensrc/jdk.compiler (the generated files and those the build
+  # has beside FlagsEnum)
+  {
+    echo ";; bin/javac-vendor's generate step (JFS48 (b)): each output against the JDK build's"
+    echo "{:generators \"$([ "${JAVAC_VENDOR_BOOTSTRAP:-}" = 1 ] && echo "the JDK build tree (bootstrap)" || echo "javac's tool executable")\" :jdk-gensrc \"$ref\""
+    echo " :files {"
+    { (cd "$g" && find . -type f | sed 's|^\./||'); (cd "$ref" && find . -name '*.java' -o -name '*.properties' | sed 's|^\./||'); } |
+      LC_ALL=C sort -u | while read -r rel; do
+      case " $gensrc_build " in *" $rel "*) continue ;; esac
+      if [ ! -f "$g/$rel" ]; then v=:not-generated
+      elif [ ! -f "$ref/$rel" ]; then v=:no-reference
+      elif cmp -s "$g/$rel" "$ref/$rel"; then v=:same
+      else v=:different; fi
+      echo "  \"$rel\" $v"
+    done
+    echo "}}"
+  } > "$work/generated.edn"
+  grep -q ':different\|:not-generated' "$work/generated.edn" && st=1
+  echo "   $(grep -c '" :same' "$work/generated.edn") of $(grep -c '^  "' "$work/generated.edn") generated files equal to the build tree's ($work/generated.edn; $(since "$t0"))" >&2
+  return $st
+}
 
 # sources: WORK/src/MODULE and WORK/sources.txt
 sources() {
@@ -139,7 +245,10 @@ sources() {
   {
     (cd "$jdk/src/jdk.compiler/share/classes" && find . -name '*.java' ! -name module-info.java ! -path '*/snippet-files/*' | sed 's|^\./||' | LC_ALL=C sort) |
       sed 's/^/jdk.compiler share /'
-    (cd "$gensrc/jdk.compiler" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort) | sed 's/^/jdk.compiler gensrc /'
+    { (cd "$work/gensrc/jdk.compiler" && find . -name '*.java' | sed 's|^\./||'); for rel in $gensrc_build; do echo "$rel"; done; } |
+      LC_ALL=C sort | while read -r rel; do
+      case " $gensrc_build " in *" $rel "*) echo "jdk.compiler gensrc-build $rel" ;; *) echo "jdk.compiler gensrc $rel" ;; esac
+    done
     (cd "$overlay/jdk.compiler" && find . -name '*.java' | sed 's|^\./||' | LC_ALL=C sort) | sed 's/^/jdk.compiler overlay /'
     (cd "$jdk/src/java.compiler/share/classes" && find . -name '*.java' ! -name module-info.java ! -path '*/snippet-files/*' | sed 's|^\./||' | LC_ALL=C sort) |
       sed 's/^/java.compiler share /'
@@ -150,14 +259,17 @@ sources() {
     sed -n 's/^java.xml //p' "$closure" | LC_ALL=C sort | sed 's/^/java.xml share /'
     for d in $tool_dirs; do (cd "$jdk/make/jdk/src/classes" && ls build/tools/$d/*.java); done | LC_ALL=C sort | sed 's/^/buildtools make /'
     for f in $interim_tzdb; do echo "build/tools/tzdb/$f.java"; done | LC_ALL=C sort | sed 's/^/buildtools interim /'
+    (cd "$jdk/make/langtools/tools" && find $langtools_dirs -name '*.java') | LC_ALL=C sort | sed 's/^/buildtools langtools /'
   } > "$work/sources.txt"
   while read -r m kind rel; do
     mkdir -p "$work/src/$m/$(dirname "$rel")"
     case $kind in
       share) cp "$jdk/src/$m/share/classes/$rel" "$work/src/$m/$rel" ;;
-      gensrc) cp "$gensrc/$m/$rel" "$work/src/$m/$rel" ;;
+      gensrc) cp "$work/gensrc/$m/$rel" "$work/src/$m/$rel" ;;
+      gensrc-build) cp "$gensrc/$m/$rel" "$work/src/$m/$rel" ;;
       overlay) cp "$overlay/$m/$rel" "$work/src/$m/$rel" ;;
       make) cp "$jdk/make/jdk/src/classes/$rel" "$work/src/$m/$rel" ;;
+      langtools) cp "$jdk/make/langtools/tools/$rel" "$work/src/$m/$rel" ;;
       interim) sed -e "s/package java.time.zone/package build.tools.tzdb/" \
                  < "$jdk/src/java.base/share/classes/java/time/zone/$(basename "$rel")" > "$work/src/$m/$rel" ;;
     esac || return 1
@@ -173,9 +285,11 @@ origins() {
     [ "$m" = "$1" ] || continue
     case $kind in
       share) echo "\"$rel\" \"jdk26u src/$m/share/classes/$rel\"" ;;
-      gensrc) echo "\"$rel\" \"jdk26u support/gensrc/$m/$rel (generated by the JDK build)\"" ;;
+      gensrc) echo "\"$rel\" \"jdk26u support/gensrc/$m/$rel (generated by bin/javac-vendor)\"" ;;
+      gensrc-build) echo "\"$rel\" \"jdk26u support/gensrc/$m/$rel (generated by the JDK build)\"" ;;
       overlay) echo "\"$rel\" \"overlay/jdk/javac/$m/$rel\"" ;;
       make) echo "\"$rel\" \"jdk26u make/jdk/src/classes/$rel\"" ;;
+      langtools) echo "\"$rel\" \"jdk26u make/langtools/tools/$rel\"" ;;
       interim) echo "\"$rel\" \"jdk26u src/java.base/share/classes/java/time/zone/$(basename "$rel") (package build.tools.tzdb, as make/CopyInterimTZDB.gmk copies it)\"" ;;
     esac
   done < "$work/sources.txt"
@@ -213,6 +327,9 @@ provenance() {
   echo ";; its forms and its edge were made from. Written by bin/javac-vendor convert; verify compares it."
   echo "{:jdk26u {:repo \"$url\" :commit \"$(git -C "$jdk" rev-parse HEAD)\" :clean $clean"
   echo "          :gensrc \"build/$(basename "$(dirname "$c")")/support/gensrc/jdk.compiler\"}"
+  echo " :generated {:by \"$([ "${JAVAC_VENDOR_BOOTSTRAP:-}" = 1 ] && echo "the JDK build tree (bootstrap)" || echo "make/langtools/tools' compileproperties, propertiesparser on javac's tool executable")\""
+  echo "             :files $(grep -c ' gensrc ' "$work/sources.txt") :equal-to-the-build $(grep -c '\.java" :same' "$work/generated.edn")"
+  echo "             :copied [$(for rel in $gensrc_build; do printf '"%s"' "$rel"; done)]}"
   echo " :jdk \"$(repr_java_platform)\""
   echo " :converter {:repr-java \"$(repr_java_reader_hash)\""
   echo "             :host \"$(repr_java_host)\"}"
@@ -248,6 +365,9 @@ convert() {
   local o=$1 t0 m
   t0=$(date +%s)
   mkdir -p "$work/log" "$work/tmp" "$o"
+  [ "$(git -C "$jdk" rev-parse HEAD 2>/dev/null)" = "$pinned" ] || fail "$jdk is not jdk26u at $pinned"
+  echo "== generate (jdk.compiler's generated sources, the JDK build's langtools tools on javac's tool executable)" >&2
+  generate || fail "jdk.compiler's generated sources differ from the build tree's ($work/generated.edn)"
   echo "== sources (jdk26u at $pinned, $jdk)" >&2
   sources || fail "the sources were not copied"
   echo "   $(wc -l < "$work/sources.txt") files: $(for m in $modules; do printf '%s %s, ' "$m" "$(grep -c "^$m " "$work/sources.txt")"; done)" >&2
@@ -426,6 +546,7 @@ case $cmd in
   convert) convert "$out" || exit 1 ;;
   edge) record_edge "$out" || exit 1 ;;
   verify)
+    unset JAVAC_VENDOR_BOOTSTRAP
     rm -rf "$work/fresh"
     convert "$work/fresh" || exit 1
     . "$root/bin/lib/repr-java/host.bash"
