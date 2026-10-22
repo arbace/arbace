@@ -2317,3 +2317,14 @@ Nothing of it is repr/java's read or print, and nothing of it runs `arbace.repr.
   `updates.sh`, `checks.sh`, `trace/` with every traced run's strace log, output and `status.txt`,
   `summary.txt`, `control/`, `jdk.out`), `javac-vendor/`, `jrt/`, `repr-java-roundtrip/`,
   `repr-java-jdk/`, `clojure-tests/`.
+
+## Decided (2026-10-22): JFS37-JFS42
+
+The user decided JFS37-JFS42 as built:
+- JFS37 (a): one platform, grown to every module of the build tree, the JDK image's 68.
+- JFS38 (b): `REPR_JAVA_HOST=jvm` removed; set, it stops with a message.
+- JFS39 (b): `bin/repr-java host-check` removed with the JVM's read.
+- JFS40 (a) now: `jrt.jrt-sources` on the tools' host, `jrt.jrt-edge` on the frozen jar; (c) later,
+  with JN7: a class-file reader of Arbace's own for the edge.
+- JFS41 (a): the JDK's javac kept as the reference of `bin/javac-vendor classes` while a JDK is at hand.
+- JFS42 (a): `check --jdk` out of every gate, a command and the Makefile's `repr-java-jdk`.

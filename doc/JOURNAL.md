@@ -858,3 +858,36 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   - a trace showing that nothing of repr/java starts a JVM;
   - JFS35 (b);
   - each JVM-only remainder JN5 listed, either moved to the tool or kept with a reason.
+
+## 2026-10-22: JN6 merged; JFS37-JFS42 decided as built (the user)
+
+- **What:** JN6, the JVM leaves repr/java (branch `java-frontend-jn6`, `d173a4b6`, `78eb99ff`;
+  doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN6"), merged into main at `2b97f41e`.
+- **Built:**
+  - `bin/repr-java` no longer sources `bin/lib/frozen.bash`; the JVM's read and `host-check` are gone,
+    `REPR_JAVA_HOST=jvm` stops with a message; the reader's JVM branch (`arbace/repr/java/javac.ae`)
+    removed; `frozen_view tools` leaves out `arbace/repr/java`.
+  - The provenance's helpers in `bin/lib/repr-java/host.bash`; `:jdk` names the platform by the hash
+    of `jdk/javac/platform.sha256` (JFS35 (b)); the three provenance files rewritten on the tool,
+    their forms unchanged.
+  - `check --jdk` on the tool, the platform grown to the 68 modules of the build tree (JFS37):
+    12,730 files, 0 failures, 14 min, 8.5 GB peak.
+  - `bin/jrt-convert`'s source list, locales and report (`jrt.jrt-sources`) on the tools' host, the
+    edge split into `test/jrt/jrt_edge.ae` on the frozen jar (JFS40).
+  - Fixed: `test/repr/java/jdk.bash`'s root, wrong since `789b8534` (`check --jdk` could not run);
+    `read --check`'s report for a module of `module-info.java` alone.
+- **Trace:** `strace -f` over the affected `--full` steps' commands: no JVM exec under
+  `bin/repr-java`; main's `REPR_JAVA_HOST=jvm` read as the control (flagged). What stays on the JVM:
+  the frozen jar's oracle reference, edges, `check --suite`'s back end, `jrt.jrt-edge` and the data
+  generators; a JDK's javac as the reference of `bin/javac-vendor classes`.
+- **Checks** (each `--full` step's command alone, on the tool `811e563f`): `javac-vendor check`,
+  `verify`, `classes` (4 corpora), `repr-java check --suite`, `roundtrip --text`, `jrt-convert
+  verify`, `--java-fixtures verify`, `j2g-edge verify`, `check`, `check --jdk`: all pass. The
+  essential `bin/gate` on main at `2b97f41e` passed (18m23s).
+- **The shipped program:** no code change; `jdk/provenance.edn` moves the runtime key, so the
+  version map. Re-seed batched with GP5's.
+- **Rule slips:** a wait loop with `pgrep -f` (read-only, stopped by task ID); the control's JVM wrote
+  one report to /tmp, deleted.
+- **Decided (the user):** JFS37 (a), JFS38 (b), JFS39 (b), JFS40 (a) now and (c) with JN7, JFS41 (a),
+  JFS42 (a); recommended over a second platform, an opt-in JVM reference, `check --jdk` in `--full`
+  and hashes in place of the JDK's javac.
