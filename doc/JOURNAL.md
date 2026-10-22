@@ -1019,3 +1019,16 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   scratch measurements, recorded in the survey.
 - **Decided (the user):** JFS43-JFS50 as built; over a tree of the tools' own and the generators' JDK
   kept as a reference. The re-seed batched with GP7 (GP6, JN7 and GP7 in one), over re-seeding now.
+
+## 2026-10-22: the frozen jar's JVM writes its reports to $TMPDIR (the user: "do JN7's one-line fix")
+
+- **What:** `bin/lib/frozen.bash`'s `frozen_java` passes `-Djava.io.tmpdir="$TMPDIR"` (when set, as
+  `bin/lib/tmpdir.bash` sets it) before the caller's options, so every frozen-jar JVM's error reports
+  (`arbace-*.edn`) land in `.tmp/tmp`, not /tmp; a caller's own `-Djava.io.tmpdir` (`bin/javac-vendor`,
+  `bin/clojure-tests`) comes later and wins. JN7 found `bin/j2g-check --record-fixtures`'s JVM without
+  it. Fixed in the one function rather than in `bin/j2g-check` alone, which covers every caller.
+- **Checked:** a throwing `frozen_java jar -- -e ...` with `TMPDIR=.tmp/tmpdir-test` wrote its report
+  there, none to /tmp. No gate needed: `bin/lib/frozen.bash` is in no build's key and the frozen jar's
+  outputs do not depend on its temp directory.
+- **A slip of mine:** the test's command line redirected a `source`'s stderr to /dev/null, against
+  the standing rule; nothing was lost (the line printed nothing).

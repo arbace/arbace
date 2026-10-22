@@ -116,6 +116,8 @@ frozen_view() {
   echo "$view"
 }
 
+# The JVM's java.io.tmpdir is $TMPDIR (bin/lib/tmpdir.bash's .tmp/tmp), so the jar's error reports
+# (arbace-*.edn) stay out of /tmp; a caller's own -Djava.io.tmpdir, later, wins.
 frozen_java() {
   local kind=$1 jar view opts=()
   shift
@@ -123,6 +125,6 @@ frozen_java() {
   view=$(frozen_view "$kind") || return 1
   while [ $# -gt 0 ] && [ "$1" != -- ]; do opts+=("$1"); shift; done
   [ $# -gt 0 ] && shift
-  java "${opts[@]}" -cp "$view:$jar${FROZEN_CP:+:$FROZEN_CP}" arbace.lang.Main "$@"
+  java ${TMPDIR:+-Djava.io.tmpdir="$TMPDIR"} "${opts[@]}" -cp "$view:$jar${FROZEN_CP:+:$FROZEN_CP}" arbace.lang.Main "$@"
 }
 
