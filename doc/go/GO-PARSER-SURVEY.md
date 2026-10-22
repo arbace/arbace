@@ -1806,7 +1806,9 @@ the raw forms, E-ann and E-forms: 3,328 dumps, 0 differ, 0 not known; `linux-err
 "without an oracle" is a dump whose helper's go/types could not import a path, as GPS34 counts it);
 `bin/repr-go syntax-errors` over the 659 and E1's judge (66 of 70, as E1); `bin/repr-go read
 --corpus linux-errtest` (the summary's messages gc's); `make check-makefile`; the essential
-`bin/gate` (below). Not run: `bin/gate --full`; repr/go's round trips (the converter's final mode
+`bin/gate` passed (14 m 58 s, its build anew since `arbace/` changed: the smoke test, Clojure's
+suite with no regressions, the oracle 22,658 of 22,711 against its 53 known, the differential check
+12,741 of 12,764 against its 23 known, goi's essential check 797 of 797, the generated variants). Not run: `bin/gate --full`; repr/go's round trips (the converter's final mode
 and the printer are unchanged: the raw mode's `package _` only).
 
 **Proposals (GPS38-GPS44; each built as recommended).**
