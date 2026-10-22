@@ -9,7 +9,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`a8672e0d…`, 2026-10-22), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`d7303cf8…`, 2026-10-22), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
@@ -131,8 +131,8 @@ The current state of the work. This file is rewritten as things change. For the 
     was 1,472; GC47 63 of 64; the program changed, re-seed batched with JN7's; GPS38-GPS44 decided as
     built); GP7 done (2026-10-22: the native reader compiled, go/parser's
     four packages, the dumper, gc's syntax driver and a renamed copy of syntax in goi's table; std
-    parsed in 0.5 s, the executable +1.06 MB; GPS45-GPS49 decided as built); re-seed with GP6, JN7 and
-    JFS48 (b) running; then the Go plan holds for the user's direction (GP8 next in the plan).
+    parsed in 0.5 s, the executable +1.06 MB; GPS45-GPS49 decided as built); the seed remade after GP6, JN7,
+    JFS48 (b) and GP7 (`d7303cf8…`) and verified; then the Go plan holds for the user's direction (GP8 next in the plan).
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the

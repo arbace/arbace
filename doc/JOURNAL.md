@@ -1099,3 +1099,11 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - **Decided (the user):** GPS45-GPS49 as built; over the syntax renamed at build time, a smaller
   table and profiling the raw conversion next.
 - **The re-seed** (GP6, JN7, JFS48 (b), GP7) follows on main.
+
+## 2026-10-22: seed d7303cf8 (GP6, JN7, JFS48 (b), GP7)
+
+- `bin/arbace-go --fixpoint` on main at `bdd61ecf` (host `c60d5659…` != G1; G1 = G2 = G3 =
+  `0fdfb00d…`, 150,823,072 bytes), then `ARBACE_SEED_GO_BUILD=$PWD/target/arbace-go/fixpoint/g3
+  bin/seed --make`: `d7303cf8…` (18,354,656 bytes, 1,984 files), committed at `3ed72c96`;
+  `bin/seed --verify` passed: stage 0 = G1 = G2 = G3 = `0fdfb00d…`, the same tar. The tools' host
+  (stage 0) now carries the compiled native reader (GP7) and GP6's checker.
