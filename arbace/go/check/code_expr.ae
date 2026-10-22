@@ -30,8 +30,18 @@
     (instance? java.math.BigDecimal v) (str v)
     :else (str v)))
 
+(declare expr-str*)
+
 (defn expr-str
-  "Go's text of an expression form (abridged where long)."
+  "Go's text of an expression form (abridged where long); a form's :go/parens (raw forms, mode
+  :full's parentheses) written."
+  [f]
+  (let [ps (when (instance? arbace.lang.IMeta f) (count (:go/parens (meta f))))]
+    (if (and ps (pos? ps))
+      (str (apply str (repeat ps "(")) (expr-str* f) (apply str (repeat ps ")")))
+      (expr-str* f))))
+
+(defn- expr-str*
   [f]
   (cond
     (symbol? f) (if (namespace f) (str (let [q (namespace f)] (if (str/includes? q ".") (last (str/split q #"\.")) q)) "." (name f)) (name f))
@@ -90,6 +100,11 @@
         (= h "byte-string") "\"…\""
         (= h "go/call") (str (expr-str (second f)) "(" (str/join ", " (map expr-str (nnext f))) ")")
         (= h "inst") (str (expr-str (second f)) "[" (str/join ", " (map expr-str (nnext f))) "]")
+        ;; raw forms' open heads (the resolve mode, GP6: invalid programs' messages)
+        (= h "go/select") (str (expr-str (second f)) "." (expr-str (nth f 2)))
+        (= h "go/index") (str (expr-str (second f)) "[" (str/join ", " (map expr-str (nnext f))) "]")
+        (= h "go/star") (str "*" (expr-str (second f)))
+        (= h "go/type-guard") (str (expr-str (second f)) ".(type)")
         (and h (str/starts-with? h ".-")) (str (expr-str (first args)) "." (subs h 2))
         (and h (str/starts-with? h ".") (not= h "...")) (str (expr-str (first args)) "." (subs h 1) "("
                                                              (str/join ", " (map expr-str (rest args))) ")")
@@ -200,7 +215,7 @@
 (defn operand-str
   "go/types' operandString of a node."
   [n]
-  (let [ex (when-let [f (:form n)] (expr-str f))
+  (let [ex (let [f (:form n)] (when (some? f) (expr-str f)))
         m (:mode n)
         ty (:type n)]
     (if (and (= :untyped-nil ty) (not= :invalid m))
@@ -844,7 +859,9 @@
               (assoc n :mode :invalid :type :invalid))
           (assoc n :val v2)))
       (and (t/integer-type? ty) (integer? v) (> (c/bit-len v) 512))
-      (do (err! (:form n) :InvalidConstVal "constant %soverflow" (if op (str (get {"+" "addition" "-" "subtraction" "*" "multiplication" "<<" "shift"} op "") " ") ""))
+      (do (err! (:form n) :InvalidConstVal "constant %soverflow" (if op (str (get {"+" "addition" "-" "subtraction" "*" "multiplication" "<<" "shift" "bit-xor" "bitwise XOR"
+                                                                                   ;; types2's op2str1 (a unary operator's): ^x only
+                                                                                   "unary bit-not" "bitwise complement"} op "") " ") ""))
           (assoc n :val :unknown))
       :else n)))
 
@@ -869,7 +886,11 @@
                                    (let [bits (* 8 (t/sizeof ty))]
                                      (c/norm-int (.andNot (.not (c/bi v)) (.shiftLeft (c/bi -1) (int bits)))))
                                    (c/norm-int (.not (c/bi v)))))]
-        (overflow {:op :unary :go/op op :x x :mode :constant :type ty :val v :form f :line (fline f)} op))
+        ;; types2's unary: an unknown value stays unknown, no error
+        (if (= :unknown v)
+          {:op :unary :go/op op :x x :mode :constant :type ty :val v :form f :line (fline f)}
+          (overflow {:op :unary :go/op op :x x :mode :constant :type ty :val v :form f :line (fline f)}
+                    (when (= op "bit-not") "unary bit-not"))))
       :else {:op :unary :go/op op :x x :mode :value :type (:type x) :form f :line (fline f)})))
 
 (defn- may-convert? [x y]
@@ -1030,6 +1051,9 @@
                    im2 (c/fmul (nth z 2) (nth z 2))]
                (and (not= :unknown re2) (not= :unknown im2) (c/fzero? re2) (c/fzero? im2))))
         (do (err! (:form y) :DivByZero "invalid operation: division by zero") (invalid f))
+        ;; types2's binary: an operand's unknown value makes the result's unknown, no error
+        (and (= :constant (:mode x)) (= :constant (:mode y)) (or (= :unknown (:val x)) (= :unknown (:val y))))
+        {:op :binary :go/op op :x x :y y :mode :constant :type (:type x) :val :unknown :form f :line (fline f)}
         (and (= :constant (:mode x)) (= :constant (:mode y)))
         (let [v (const-binary op (:val x) (:val y) (:type x))]
           (overflow {:op :binary :go/op op :x x :y y :mode :constant :type (:type x) :val v :form f :line (fline f)} op))

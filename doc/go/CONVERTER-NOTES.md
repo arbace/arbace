@@ -370,7 +370,8 @@ Raw forms are a private stage of the native reader (doc/go/GO-PARSER-SURVEY.md ย
 "As built: GP3"): the converter's raw mode (`arbace.repr.go.convert/*raw*`, option `:raw` of
 `convert-package`) writes the forms of an un-annotated tree, the native reader's, with every
 decision of SPEC ยง11.1 that needs types left open and marked. They are for repr/go and the
-checker only (GPS10 (a)): not a dialect of SPEC, not printed, not read by goi. GP4's checker
+checker only (GPS10 (a)): not a dialect of SPEC, not printed, read by goi only for its
+errorcheck of invalid programs (GP6, below). GP4's checker
 resolves them; its answers become the dump's annotations and the converter, unchanged, makes the
 final forms.
 
@@ -457,6 +458,17 @@ final forms as `arbace.repr.go -main read` writes the helper's, the same summary
 errors where the helper has go/types'). `native-check` adds E-forms: the `.ae` text of both paths
 in modes `:lines` and `:full`, byte for byte, and, where the helper's conversion fails, the native
 one failing with its message (doc/go/GO-PARSER-SURVEY.md, "As built: GP5").
+
+**Read by goi's errorcheck (GP6).** For the invalid programs the final conversion cannot
+convert (GC47's 64 of `$GOROOT/test`'s error tests), goi's check judges goi's checker over their
+raw forms (GPS9 (b); doc/go/GO-PARSER-SURVEY.md, "As built: GP6"): `bin/repr-go read --reader
+native --raw --corpus linux-errtest` writes them, `arbace.go.run --errorcheck --raw` reads the
+text, takes the lines mode `:lines` would write from mode `:full`'s positions (a form's least
+`:go/pos` line but its comment groups', a vector's from its literals and children, a function's
+`:go/end` from `:rbrace`, literals' `:go/breaks` from `:go/apos`) and checks it in the resolve
+mode, its answers dropped. In raw mode a package whose files' clauses all name `_` (go/types'
+name `""`) is `(go/package _ ...)`, which the checker reports (`invalid package name _`), where
+the final forms take a name from the path.
 
 ## What remains
 

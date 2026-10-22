@@ -50,7 +50,7 @@
     (if-let [x (qualified-obj cx f)] (obj-node cx f x) (invalid f))
     (let [n (ident-name f)]
       (cond
-        (= "_" n) (do (err! f :InvalidBlank "cannot use _ as value") (invalid f))
+        (= "_" n) (do (err! f :InvalidBlank "cannot use _ as value or type") (invalid f))
         :else
         (if-let [x (resolve-name cx n)]
           (do (e/answer! f {:obj x}) (obj-node cx f x))
@@ -63,13 +63,18 @@
   [f]
   (cond
     (instance? Long f) (const-node f :untyped-int f)
-    ;; the resolve mode: go/types' basicLit checks an integer for overflow (go.dev/issue/54280:
-    ;; beyond 512 bits, the value unknown; GPS30)
-    (and (or (instance? arbace.lang.BigInt f) (instance? BigInteger f)) (:resolve cx-flags) (> (c/bit-len (bigint f)) 512))
+    ;; go/types' basicLit checks an integer for overflow (go.dev/issue/54280: beyond 512 bits, the
+    ;; value unknown; GPS30, in both modes since GP6, GPS36 (b))
+    (and (or (instance? arbace.lang.BigInt f) (instance? BigInteger f)) (> (c/bit-len (bigint f)) 512))
     (do (err! f :InvalidConstVal "constant overflow") (const-node f :untyped-int :unknown))
     (instance? arbace.lang.BigInt f) (const-node f :untyped-int f)
     (instance? BigInteger f) (const-node f :untyped-int (bigint f))
     (instance? Double f) (const-node f :untyped-float (c/double-literal f))
+    ;; go/constant's MakeFromLiteral: a float beyond big.Float's exponent (MaxInt32 bits) is
+    ;; unknown, types2's basicLit a malformed constant
+    (and (instance? java.math.BigDecimal f) (not (zero? (.signum ^java.math.BigDecimal f)))
+         (> (* 3.321928094887362 (- (.precision ^java.math.BigDecimal f) (.scale ^java.math.BigDecimal f) 1)) 2147483647.0))
+    (do (err! f :InvalidConstVal "malformed constant: %s" (str/lower-case (str f))) (invalid f))
     (instance? java.math.BigDecimal f) (const-node f :untyped-float (c/decimal-exact f))
     (ratio? f) (const-node f :untyped-float (c/make-rat f))
     (string? f) (const-node f :untyped-string (c/utf8-value f))
@@ -173,8 +178,8 @@
       :else
       (let [ty (:type x)
             _ (when (t/tparam? ty) (e/generic!))
-            ;; the resolve mode: go/types' lookup never finds a blank field or method
-            r (when-not (and (= "_" nm) (:resolve cx-flags)) (t/lookup ty (= :variable (:mode x)) nm (pkg-path)))]
+            ;; go/types' lookup never finds a blank field or method
+            r (when-not (= "_" nm) (t/lookup ty (= :variable (:mode x)) nm (pkg-path)))]
         (cond
           (nil? r)
           (do (let [[b p] (t/deref-type ty)]
@@ -369,30 +374,29 @@
             u (t/under ty)
             [u ptr] (if (and (vector? u) (= :pointer (nth u 0)) (let [b (t/under (nth u 1))] (and (vector? b) (= :array (nth b 0)))))
                       [(t/under (nth u 1)) true] [u false])]
-        ;; the resolve mode: an invalid index leaves the element's type (go/types' indexExpr)
+        ;; an invalid index leaves the element's type (go/types' indexExpr; GPS36 (b))
         (cond
           (t/tparam? ty) (tparam-index cx f x if*)
           (t/string-type? u)
           (let [len (when (= :constant (:mode x)) (count (:val x)))
                 [i iv] (index-value cx if* len "index")]
-            (if (and (invalid? i) (not (:resolve cx-flags)))
-              (invalid f)
+            (do
               (if (and (= :constant (:mode x)) iv)
                 ;; a constant string indexed by a constant: a byte value (not a constant)
                 {:op :index :x x :index i :mode :value :type (if t/*spelled* :byte :uint8) :form f :line (fline f)}
                 {:op :index :x (default-final x) :index i :mode :value :type (if t/*spelled* :byte :uint8) :form f :line (fline f)})))
           (and (vector? u) (= :array (nth u 0)))
           (let [[i] (index-value cx if* (nth u 1) "index")]
-            (if (and (invalid? i) (not (:resolve cx-flags))) (invalid f)
+            (do
                 {:op :index :x x :index i :mode (if (or ptr (= :variable (:mode x))) :variable :value)
                  :type (nth u 2) :form f :line (fline f)}))
           (and (vector? u) (= :slice (nth u 0)))
           (let [[i] (index-value cx if* nil "index")]
-            (if (and (invalid? i) (not (:resolve cx-flags))) (invalid f)
+            (do
                 {:op :index :x x :index i :mode :variable :type (nth u 1) :form f :line (fline f)}))
           (and (vector? u) (= :map (nth u 0)))
           (let [k (assignment cx (expr cx if*) (nth u 1) "map index")]
-            (if (and (invalid? k) (not (:resolve cx-flags))) (invalid f)
+            (do
                 {:op :map-index :x x :key k :mode :mapindex :type (nth u 2) :form f :line (fline f)}))
           :else
           (do (err! f :NonIndexableOperand "cannot index %s" (operand-str x)) (invalid f)))))))
@@ -605,6 +609,10 @@
                     elems (cond
                             (and (seq elems) (every? kv? elems))
                             (vec (mapcat (fn [[k v]] [(keyword (ident-name k)) v]) elems))
+                            ;; raw forms (an invalid program's): keys [k v] whose key is no name
+                            ;; (types2: invalid field name, the value checked)
+                            (and (seq elems) (every? #(and (vector? %) (= 2 (count %))) elems))
+                            (vec (mapcat (fn [[k v :as kv]] [(if (go-ident? k) (keyword (ident-name k)) {::bad-key k ::kv kv}) v]) elems))
                             ;; keys :k v among which the converter wrote [k v] (a key it found no
                             ;; field for: an invalid program's)
                             (and (keyword? (first elems)) (some kv? elems))
@@ -615,7 +623,7 @@
                                 (kv? (first es)) (recur (next es) (conj acc (keyword (ident-name (first (first es)))) (second (first es))))
                                 :else (recur (next es) (conj acc (first es)))))
                             :else elems)
-                    keyed (and (seq elems) (keyword? (first elems)))
+                    keyed (and (seq elems) (or (keyword? (first elems)) (map? (first elems))))
                     ;; the resolve mode: the literal's elements as written (^:go/key [k v]), the
                     ;; keys' fields, answered as the helper finds them (its
                     ;; structOf of the literal's recorded type: through a pointer, a type
@@ -632,6 +640,10 @@
                         nodes (vec
                                (for [[j [k vf]] (map-indexed vector pairs)]
                                  (with-elem fv (+ 3 (* 2 j))
+                                 (if (map? k)
+                                   (do (expr cx vf)
+                                       (err! (::kv k) :InvalidLitField "invalid field name %s in struct literal" (expr-str (::bad-key k)))
+                                       nil)
                                  (let [nm (name k)
                                        r (t/lookup (if (t/tparam? T) u T) false nm (pkg-path))
                                        ;; a blank field is never found (go/types' lookup)
@@ -644,9 +656,9 @@
                                      (and (nil? direct) (not (allow-version? cx 27)))
                                      (do (err! vf :MissingLitField "unknown field %s in struct literal of type %s" nm (t/type-str T))
                                          nil)
-                                     ;; the resolve mode: go/types' rule for a promoted field reached
-                                     ;; through an embedded pointer (no field recorded)
-                                     (and (nil? direct) (:resolve cx-flags) (:indirect r))
+                                     ;; go/types' rule for a promoted field reached through an embedded
+                                     ;; pointer (no field recorded; GPS30, both modes since GPS36 (b))
+                                     (and (nil? direct) (:indirect r))
                                      (do (err! vf :InvalidLitField "invalid implicit pointer indirection to reach %s" nm)
                                          (expr cx vf) nil)
                                      :else
@@ -664,7 +676,7 @@
                                        (when-let [el (get orig j)]
                                          (when (vector? el) (e/answer! el {:field {:path (:index r) :via have}})))
                                        {:field fd :path (:index r) :via have :pos (+ 3 (* 2 j))
-                                        :value (assignment cx (expr cx vf) (:type fd) "struct literal")})))))) ]
+                                        :value (assignment cx (expr cx vf) (:type fd) "struct literal")}))))))) ]
                     ;; duplicate keys (of fields found)
                     (reduce (fn [seen n]
                               (let [k (:field n)]
@@ -937,9 +949,13 @@
       (invalid? callee) (do (doseq [a arg-forms] (when-not (spread? a) (expr cx a))) (invalid f))
       (= :typexpr (:mode callee))
       (do (when-not (:resolve cx-flags) (e/annotation-error! f "conv" (expr-str f) "a call" "a conversion"))
-          (if (= 1 (count arg-forms))
-            (conversion cx f (expr cx (first arg-forms)) (:type callee))
-            (invalid f)))
+          (case (count arg-forms)
+            1 (conversion cx f (expr cx (first arg-forms)) (:type callee))
+            ;; types2's callExpr: the arity of a conversion
+            0 (do (err! f :WrongArgCount "missing argument in conversion to %s" (t/type-str (:type callee))) (invalid f))
+            (do (doseq [a arg-forms] (when-not (spread? a) (expr cx a)))
+                (err! (last arg-forms) :WrongArgCount "too many arguments in conversion to %s" (t/type-str (:type callee)))
+                (invalid f))))
       (= :builtin (:mode callee)) (builtin-call cx f (:builtin callee) arg-forms (:unsafe callee))
       :else
       (let [u (call-sig (:type callee))]
@@ -1344,19 +1360,25 @@
                         off (offsetof-value base (:path x))]
                     (cond
                       (nil? off) (do (when raw (e/unanswer! af [:sel]))
-                                     (bad "invalid argument: field %s is embedded via a pointer in %s" (subs h 2) (expr-str (second af))))
+                                     (bad "invalid argument: field %s is embedded via a pointer in %s" (subs h 2) (t/type-str base)))
                       ;; a size depending on type parameters: not constant (each instance's)
                       (has-var-size? base) (node {:args [x] :mode :value :type :uintptr})
                       (neg? (long off)) (do (err! (second af) :TypeTooLarge "%s is too large" (operand-str (:x x))) (invalid f))
                       :else (node {:args [x] :mode :constant :type :uintptr :val off}))))))))
         "Add"
-        (if-not (need 2 2)
+        (if-not (do (when-not (allow-version? cx 17)
+                      ;; types2: an error, the call checked on (verifyVersionf)
+                      (err! f :UnsupportedFeature "unsafe.Add requires go1.17 or later"))
+                    (need 2 2))
           (invalid f)
           (let [p (assignment cx (expr cx (first arg-forms)) :unsafe-pointer "argument to unsafe.Add")
                 [n] (index-value cx (second arg-forms) nil "length" :allow-negative true)]
             (if (or (invalid? p) (invalid? n)) (invalid f) (node {:args [p n] :mode :value :type :unsafe-pointer}))))
         "Slice"
-        (if-not (need 2 2)
+        (if-not (do (when-not (allow-version? cx 17)
+                      ;; types2: an error, the call checked on (verifyVersionf)
+                      (err! f :UnsupportedFeature "unsafe.Slice requires go1.17 or later"))
+                    (need 2 2))
           (invalid f)
           (let [p (expr cx (first arg-forms))
                 [n] (index-value cx (second arg-forms) nil "length")]
@@ -1366,7 +1388,10 @@
               (bad "invalid argument: %s is not a pointer" (operand-str p))
               :else (node {:args [p n] :mode :value :type [:slice (nth (t/under (:type p)) 1)]}))))
         "SliceData"
-        (if-not (need 1 1)
+        (if-not (do (when-not (allow-version? cx 20)
+                      ;; types2: an error, the call checked on (verifyVersionf)
+                      (err! f :UnsupportedFeature "unsafe.SliceData requires go1.20 or later"))
+                    (need 1 1))
           (invalid f)
           (let [s (expr cx (first arg-forms))
                 u (t/under (:type s))]
@@ -1375,13 +1400,19 @@
               (not (and (vector? u) (= :slice (nth u 0)))) (bad "invalid argument: %s is not a slice" (operand-str s))
               :else (node {:args [s] :mode :value :type [:pointer (nth u 1)]}))))
         "String"
-        (if-not (need 2 2)
+        (if-not (do (when-not (allow-version? cx 20)
+                      ;; types2: an error, the call checked on (verifyVersionf)
+                      (err! f :UnsupportedFeature "unsafe.String requires go1.20 or later"))
+                    (need 2 2))
           (invalid f)
           (let [p (assignment cx (expr cx (first arg-forms)) [:pointer (if t/*spelled* :byte :uint8)] "argument to unsafe.String")
                 [n] (index-value cx (second arg-forms) nil "length")]
             (if (or (invalid? p) (invalid? n)) (invalid f) (node {:args [p n] :mode :value :type :string}))))
         "StringData"
-        (if-not (need 1 1)
+        (if-not (do (when-not (allow-version? cx 20)
+                      ;; types2: an error, the call checked on (verifyVersionf)
+                      (err! f :UnsupportedFeature "unsafe.StringData requires go1.20 or later"))
+                    (need 1 1))
           (invalid f)
           (let [s (assignment cx (expr cx (first arg-forms)) :string "argument to unsafe.StringData")]
             (if (invalid? s) (invalid f) (node {:args [s] :mode :value :type [:pointer (if t/*spelled* :byte :uint8)]}))))

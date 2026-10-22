@@ -172,7 +172,7 @@
     (when (and (map? place) (#{:place-local :place-global} (:op place))) (use-var! cx (:obj place)))
     (cond
       (or (= :blank place) (invalid? place))
-      (do (when (= :blank place) (err! f :InvalidBlank "cannot use _ as value"))
+      (do (when (= :blank place) (err! f :InvalidBlank "cannot use _ as value or type"))
           {:op :incdec :inc inc :place place :line (fline f)})
       (not (t/all-numeric? (:type place)))
       (do (err! f :NonNumericIncDec "invalid operation: %s%s (non-numeric type %s)" (expr-str pf) (if inc "++" "--") (t/type-str (:type place)))
@@ -211,11 +211,11 @@
             (do (err! tf :InvalidConstType "invalid constant type %s" (t/type-str T)) (invalid init))
             T (assignment cx n T "constant declaration")
             :else n)
-        ;; the resolve mode: go/types' constDecl keeps a valid declared type, the value unknown
-        ;; (GPS30)
-        keep-T (and (invalid? n) T (t/valid? T) (t/const-type? T) (:resolve cx-flags))
+        ;; go/types' constDecl keeps a valid declared type, the value unknown (GPS30; both modes
+        ;; since GPS36 (b))
+        keep-T (and (invalid? n) T (t/valid? T) (t/const-type? T))
         x (e/obj {:kind :const :name nm :type (cond keep-T T (invalid? n) :invalid :else (:type n))
-                  :val (if (and (invalid? n) (:resolve cx-flags)) :unknown (:val n)) :local? true
+                  :val (if (invalid? n) :unknown (:val n)) :local? true
                   :line (fline tf) :pkg (pkg-path)})]
     (when-not (invalid? n) (verify-const-val! tf nm n))
     [x n]))
@@ -230,8 +230,18 @@
         seen (volatile! #{})
         ;; reused names (in this block): assigned, marked ^:assign
         lhs (vec (for [x targets]
-                   (if-not (go-ident? x)
-                     (do (err! x :BadDecl "non-name %s on left side of :=" (expr-str x)) nil)
+                   (if-not (and (go-ident? x) (not (:go/parens (meta x))))
+                     ;; types2's shortVarDecl: the operand used (useLHS: a variable's name not a
+                     ;; use of it, an undefined one reported), then the error; a parenthesized
+                     ;; name (raw forms, mode :full's :go/parens) is not a name
+                     (do
+                       (if (go-ident? x)
+                         (when-not (or (= "_" (ident-name x)) (resolve-name cx (ident-name x)))
+                           (expr cx x))
+                         (expr cx x))
+                       ;; expr-str writes the parentheses
+                       (err! x :BadDecl "non-name %s on left side of :=" (expr-str x))
+                       nil)
                      (let [nm (ident-name x)
                            rep (and (not= "_" nm) (contains? @seen nm))
                            alt (when (not= "_" nm) (e/scope-get (:scope cx) nm))
