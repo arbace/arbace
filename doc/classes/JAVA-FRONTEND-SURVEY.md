@@ -17,7 +17,8 @@ JFS27-JFS30; JN5, the fixpoint and the checks moved: "As built: JN5 (2026-10-21)
 JFS31-JFS36; JN6, the JVM leaves repr/java: "As built: JN6 (2026-10-21)", with
 JFS37-JFS42; JN7, the generators on Arbace: "As built: JN7 (2026-10-22)", with
 JFS43-JFS50; JFS48 (b), javac's generated sources on the tool: "As built: JFS48 (b) (2026-10-22)",
-at the end, with JFS51-JFS54.
+with JFS51-JFS54; JFS52 (b), `FlagsEnum` on the tool: "As built: JFS52 (b) (2026-10-22)", at the
+end, with JFS55-JFS58.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -2830,3 +2831,198 @@ The user decided JFS51-JFS54 as built:
 - JFS53 (a): `JAVAC_VENDOR_BOOTSTRAP=1`, `verify` always generating.
 - JFS54 (a): a prefix per tool in j2g's names; (c), package jrt for every non-`arbace/` class of
   javac's world, when a third group of tools comes.
+
+## As built: JFS52 (b) (2026-10-22)
+
+JFS52 (b), `FlagsEnum` on the tool, on the branch `java-frontend-flags` from main `818ccb0c` (whose
+seed `d7303cf8` holds JFS48 (b)). The last source the JDK build generates for jdk.compiler,
+`FlagsEnum` (`make/modules/jdk.compiler/Gensrc.gmk`'s `FLAGSGENERATOR`), is made by the build's
+own `flagsgenerator` read into `jdk/javac/forms` and run on javac's tool executable by `bin/javac-vendor
+convert`'s generate step, beside JFS48 (b)'s compileproperties and propertiesparser: it is the build
+tree's byte for byte, with no difference to explain. No generated source of javac's is copied from
+the build tree any more. flagsgenerator compiles `Flags.java` through javax.tools' API, so the tool
+world gained what the API asks: `ToolProvider.getSystemJavaCompiler` answers javac on Arbace's
+`JavaCompiler`. Nothing of it starts a JVM (JFS52 (b).4). The JVM ran the frozen v4 jar (javac's
+edge, as before) and the JDK's `javac` (the reference of `bin/javac-vendor classes`); Go only
+TamaGo's go1.27.1, without cgo. The tools' host was the worktree's stage 0 (the seed's, `0fdfb00d`);
+j2g for the tool ran on the program built from the checkout (JFS22 (a)).
+
+### JFS52 (b).1 What was built
+
+- **The tool as Java forms.** `bin/javac-vendor` reads `make/langtools/tools/flagsgenerator/FlagsGenerator.java`
+  (161 lines) into module `buildtools` (KIND `langtools`, `langtools_dirs`), as JFS48 (b)'s tools.
+- **javax.tools on Arbace** (jrt's own Java in `overlay/jdk/javac/jdk.compiler`, JFS5 (b)):
+  - `jdk.internal.jrt.javac.SystemCompiler`, a `JavaCompiler`: its tasks are javac's `JavacTool`'s
+    (`getTask`, with its standard file manager when given none), its standard file manager the next
+    class, its `run` javac on Arbace's command line (`Main`). The platform its file manager
+    attributes against is the system property `jdk.internal.jrt.javac.platform` (directories, each
+    served as `Main`'s `--platform DIR`): the JDK's standard file manager takes its own image
+    (`java.home`), which the tool has not (JFS55).
+  - `jdk.internal.jrt.javac.StandardFileManager`, javac on Arbace's `FileManager` as a
+    `StandardJavaFileManager`: file objects of files named by `File` or by path (their kind by their
+    extension), `setLocation`/`getLocation` for the source path, the class path (default the current
+    directory) and the class output. `FileManager` is no longer final; its source path, class path and
+    class output are settable by it. javac's own `JavacFileManager` stays unused (JFS52 (c)).
+- **A tool-world variant** (`overlay/jdk/javac/variants/ToolProvider.ae`, JFS18 (b)):
+  `getSystemJavaCompiler` returns a `SystemCompiler`. The JDK's looks javac up in the boot layer's
+  jdk.compiler module by reflection; jrt has no module layer. Nothing else of the tool world was
+  needed: `Trees.instance`'s reflective lookup of `JavacTrees.instance` works on jrt as is (javac's
+  packages are rooted whole, JN4.2), and `Files.newBufferedWriter`, `EnumMap`, the text blocks and the
+  unnamed lambda parameters (`_ ->`) translate as they are.
+- **j2g** (shipped code, JFS52 (b).5): `flagsgenerator/` joins `tool-module-prefixes` and `pkg-of`'s
+  package jrt (`arbace/j2g/names.ae`), by JFS54 (a)'s rule. flagsgenerator is the third tool of
+  make/langtools/tools (`make/ToolsLangtools.gmk` builds the three as one, `INCLUDES :=
+  compileproperties flagsgenerator propertiesparser`), so it completes JFS48 (b)'s group rather than
+  starting a third; JFS54 (c) waits for a third group (JFS56).
+- **The generate step** runs, after propertiesparser, `flagsgenerator.FlagsGenerator Flags.java
+  FlagsEnum.java` (Gensrc.gmk's command line) on the tool, the platform made in `WORK/platform`
+  and checked against `jdk/javac/platform.sha256` first and named by the script (`gen.ae` sets the
+  property): the JDK build ran it on its boot JDK 25 against that JDK's own image; the output depends
+  only on `Flags.java`'s annotations and constants. `gensrc_build` is empty, so KIND `gensrc-build`
+  no longer occurs in `sources.txt`, and the provenance's `:generated` names three tools and copies
+  none (`:copied []`). `JAVAC_VENDOR_BOOTSTRAP=1` copies `FlagsEnum` too.
+- **The provenance's host** (JFS57 (b)): `convert` names the tool by its key before it writes, not
+  after. The bootstrap conversion below wrote `:host ""`: `repr_java_host` compares the tool's key
+  with the checkout's, which holds `jdk/javac`, already rewritten. A stale tool now stops `convert`
+  at its start (`REPR_JAVA_STALE_OK=1` still warns instead).
+- **The bootstrap** (JFS53 (a)): the tool built from main's tree (key `589683c9`; the variant's
+  `SystemCompiler` not yet in its world, so `ToolProvider` failed its analysis there, the only
+  failure, harmless to the conversion) converted the tree with `JAVAC_VENDOR_BOOTSTRAP=1`; the tool
+  built from that tree (key `7c805cbb`, no analysis failure) generated the 21 files equal to the build
+  tree's, and its conversion wrote the same forms and edge: the checkout's key after it was the
+  tool's own (`repr_java_host` accepted it), so the tree is a fixpoint of the tool, as JFS48 (b)'s.
+
+| | JFS48 (b) | JFS52 (b) |
+|---|---:|---:|
+| `jdk/javac/sources.txt` | 821 | 824: jdk.compiler 372 (21 generated here, none copied; the 2 overlay classes), java.compiler 135, jdk.internal.opt 1, java.base 32, java.xml 221, buildtools 63 |
+| `jdk/javac/forms` | 910 files, 9,349,032 bytes | 914 files, 9,364,978 bytes (flagsgenerator's 2 and the overlay's 2, 15,910 bytes) |
+| `jdk/javac/edge.edn` | 223 classes, 419,123 bytes | 223 classes, 419,285 bytes: `:exists` gained 4 classes, not by this change (JFS58) |
+| the tool's j2g: files, classes analyzed, failing; methods reached, with missing parts | 2,306, 19,175, 0; 97,575, 617 | 2,310, 19,209, 0; 97,708, 617 |
+| the tool (amd64, `arbace-javac`) | 210,055,328 bytes | 211,210,400 bytes (main's tree in this worktree, after GP7: 211,108,000) |
+| a tool build (amd64, the reader compiled first) | 680 s | 431-449 s |
+| the generate step | 1 s | 6 s (the platform made and checked 5 s; flagsgenerator 0.3 s) |
+| `bin/javac-vendor convert` | 224-251 s | 125 s (the edge's recording 34 s); 226 s with the frozen jar built first |
+
+### JFS52 (b).2 The output (the exit criterion)
+
+| output | by | equal to the build tree's |
+|---|---|---:|
+| `FlagsEnum.java` (82 lines, 3,328 bytes) | flagsgenerator on javac on Arbace | yes, byte for byte |
+| JFS48 (b)'s 20 and `version.properties` | compileproperties, propertiesparser, the script | 21 of 21, as before |
+
+`WORK/generated.edn`: 22 of 22 `:same`. As JFS48 (b)'s, nothing here depends on the running JDK's
+data: the flags' names and bits are `Flags.java`'s constants and annotations, attributed by javac on
+Arbace (jdk26u's javac) where the build attributed them with its boot JDK 25's javac, and the two
+agree. Unlike the build's run, which compiled `Flags.java` in the unnamed module against an image
+whose jdk.compiler holds the same package, javac on Arbace sees the build tree's platform; the errors
+either reports (the package in another module, `Assert` not visible) go to flagsgenerator's diagnostic
+listener, which drops them, and attribution of the annotations and constants does not need them.
+
+### JFS52 (b).3 The checks
+
+- `bin/javac-vendor convert` (bootstrap, then generating), then `verify`: `jdk/javac` is the
+  conversion and the recording, byte for byte (918 files; generated on the tool, 175 s, traced),
+  and again after JFS57 (b)'s change
+- `bin/javac-vendor check`: j2g translates javac's world, no failures (1,803 files, 5,314 classes
+  analyzed; 50 s)
+- `bin/javac-vendor classes baseline samples jdk java.base`: javac on Arbace byte for byte the JDK's
+  javac's (baseline 812 classes, samples 28 and 4, jdk 2,224) and java.base the build's (7,433
+  classes but `module-info.class`), the diagnostics' text equal too (223 s)
+- `bin/repr-java check`: as expected
+- `bin/jrt-convert verify`: `jdk/` is the conversion, byte for byte (911 forms files, 10 data
+  files; the tool world grew, JN7's generators on it as before; 232 s)
+- `make check-makefile`
+- `bin/gate` (essential) at this section's commit: the result is the branch's last commit's
+  message and the report's
+- not run: `bin/gate --full` (the user's rule: at the milestone)
+
+### JFS52 (b).4 The trace: no JVM generates
+
+`bin/javac-vendor verify` under `strace -f --seccomp-bpf -e trace=execve`
+(`.tmp/jfs52/trace/verify.strace`), the successful execs counted:
+
+| what | execs |
+|---|---:|
+| javac's tool executable, `compileproperties.CompileProperties` | 1 |
+| javac's tool executable, `propertiesparser.PropertiesParser` | 1 |
+| javac's tool executable, `flagsgenerator.FlagsGenerator` | 1 |
+| javac's tool executable, repr/java's `read-jdk` (5 modules) and `read` (buildtools) | 6 |
+| a JVM (`java`): the frozen jar's `arbace.j2g.main --record-edge` and `arbace.j2g.edge subtract`, each a launcher and the JDK it runs | 4 |
+| `javac` | 0 |
+
+The 4 are javac's edge (JFS14 (b)), as in JN6, JN7 and JFS48 (b). No generated source of javac's
+comes from a JDK's run any more.
+
+### JFS52 (b).5 The shipped program's change
+
+j2g's `names.ae` changed (JFS52 (b).1), so j2g's compiled namespace in the program differs; the
+translated runtime cannot: `flagsgenerator/` names no class of the shipped world. `jdk/`, `go/`,
+`overlay/jdk/java.base` and `jdk/edge.edn` are unchanged; `jdk/javac/` and `overlay/jdk/javac/` are
+the tool's (outside the runtime key). As in JFS48 (b), the committed provenance files that name the
+tool (`jdk/provenance.edn`, `test/java-fixtures/provenance.edn`) keep their host. No re-seed here;
+a re-seed would carry the j2g change.
+
+### JFS52 (b).6 What is still taken from the build tree, and why
+
+| what | from | why |
+|---|---|---|
+| no generated source | | (all 21 and `version.properties` generated on the tool) |
+| the build tree's files as the reference the generated ones are compared with | `support/gensrc/jdk.compiler` | the check, not an input; and the bootstrap's input (JFS53 (a)) |
+| the version strings of `version.properties` | `spec.gmk` | the build's configuration (JFS51 (a)) |
+| the platform (now also flagsgenerator's), the java.base batch, the jdk corpus's references | the build tree | as before (JFS15 (b), JFS23 (b), JFS2 (a)) |
+
+### JFS52 (b).7 Proposals
+
+- **JFS55 Where javax.tools' system compiler finds its platform.**
+  - Options: (a) the system property `jdk.internal.jrt.javac.platform`, set by the caller (built:
+    the generate step's script); (b) a default when it is unset: an environment variable, or a
+    directory beside the tool (as the JDK's `java.home`); (c) the platform's module descriptors and
+    classes embedded in the tool's resources, its image.
+  - *Recommended: (a)* while the one caller is `bin/javac-vendor`, which already makes and pins the
+    platform; (c) with JFS24 (b), when the build tree goes and the platform must travel with the tool.
+- **JFS56 How j2g names the tools' packages (JFS54 again).**
+  - Options: (a) a prefix per tool package (built: `flagsgenerator/`, the third of
+    make/langtools/tools, JFS48 (b)'s group); (b) `--qualify` per build with `pkg-of` placing
+    qualified prefixes in package jrt; (c) package jrt and qualified names for every class j2g reads
+    from the tool's inputs not of `arbace/` (a j2g option marking `jdk/javac/forms` as the tool
+    world), so that a new tool never changes the shipped j2g.
+  - *Recommended: (a)* now (the decided rule; flagsgenerator is no new group); (c) at the next
+    group of tools (e.g. the JDK build's `make/jdk/src/classes` tools beyond JN7's, or the
+    jlink/jmod tools), when JFS54 (c) applies.
+- **JFS57 The provenance's host on a conversion that changes the tree.**
+  - Options: (a) as before: the host asked after writing, empty when the tree changed (the next
+    conversion, on a tool built from the new tree, writes it); (b) the host asked before writing, a
+    stale tool refused at the start (built); (c) the host read from the tool's key file without the
+    freshness check.
+  - *Recommended: (b)*: the provenance names the tool that converted; (a) left a committed-looking
+    `:host ""` after every bootstrap. `bin/jrt-convert` is not affected: it writes its provenance
+    into its work directory before `update` replaces `jdk/forms`.
+- **JFS58 javac's edge and the shipped edge after GP7.** javac's edge gained an `:exists` set of 4
+  classes (`java.util.concurrent.ExecutionException`, `FutureTask`, `Semaphore`,
+  `java.util.concurrent.atomic.LongAdder`): GP7's `arbace/repr/go/annotate.ae` names them, the
+  recording asks the JVM whether the embedded sources' names exist, and `jdk/edge.edn`'s `:exists`,
+  recorded before GP7, lacks them, so the subtraction leaves them in javac's edge. On main,
+  `bin/javac-vendor verify` would have failed on this alone, and `bin/j2g-edge verify` (`--full`)
+  likely fails on `jdk/edge.edn`.
+  - Options: (a) `bin/j2g-edge update` on main (the shipped edge with the 4), then `bin/javac-vendor
+    convert` (javac's edge without them again); (b) leave `jdk/edge.edn`, javac's edge carrying the
+    4 (as committed here); (c) the essential gate checks the edges' `:exists` against the embedded
+    sources' names on the tools' host, cheaply, so the drift shows when it happens.
+  - *Recommended: (a)* before the next re-seed (it changes j2g's data for the shipped program, not
+    this branch's business), with (c) if it recurs.
+
+### JFS52 (b).8 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`):
+  `make/langtools/tools/flagsgenerator/FlagsGenerator.java`, `make/modules/jdk.compiler/Gensrc.gmk`
+  (`FLAGSGENERATOR`), `make/ToolsLangtools.gmk`, `src/jdk.compiler/share/classes/com/sun/tools/javac/code/Flags.java`,
+  `src/java.compiler/share/classes/javax/tools/{ToolProvider,JavaCompiler,StandardJavaFileManager}.java`,
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/api/{JavacTool,ClientCodeWrapper}.java`,
+  `com/sun/tools/javac/main/Arguments.java`, `com/sun/tools/javac/code/ClassFinder.java` (where javac
+  treats a `StandardJavaFileManager` apart), the build tree's
+  `support/gensrc/jdk.compiler/com/sun/tools/javac/code/{FlagsEnum.java,_FLAGSGENERATOR_exec.cmdline}`.
+- The worktree's `.tmp/jfs52/`: `build-program.log`, `build-tool-1.log` (main's tree),
+  `build-tool-2.log` (the bootstrap's tree), `convert-1.log` (bootstrap), `convert-2.log`,
+  `verify.log`, `verify-2.log`, `check.log`, `classes.log`, `repr-check.log`, `jrt-verify.log`,
+  `trace/verify.strace`, `try/` (flagsgenerator's first run on the tool, 0.3 s, equal);
+  `.tmp/javac-vendor/generated.edn`.
