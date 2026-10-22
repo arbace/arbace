@@ -1553,3 +1553,166 @@ The user decided GPS27-GPS31 as built, each (a):
 - GPS30: go/types' records of invalid programs in the resolve mode only; (b), goi's normal mode
   too, left for GP6.
 - GPS31: the two checker fixes in both modes.
+
+## As built: GP5 (2026-10-21)
+
+GP5, the forms and the switch (§8), is built on branch `go-parser-gp5` from main `ad80344b`, whose
+seed carries GP1-GP4, as decided: GPS7 (a) (native by default, the helper the oracle), GPS20 settled
+(b) and GPS25 (b) applied. The tools' host was the worktree's stage 0 (`target/seed/amd64/arbace`,
+149,196,960 bytes, built by `bin/seed --build`), on the shared 64-core amd64 machine (load average
+15 to 30 during most runs, another agent's builds and the main session's gate beside them).
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the switch | `bin/repr-go read` | the reader is `--reader native` by default (`REPR_GO_READER`, else native); `--reader helper` (or `REPR_GO_READER=helper`) the helper, the oracle. `read [--full] [--tests] [--goos G --goarch A] [--out DIR] PKG...` and `read [--full] --corpus C`, with the round trips' `--print DIR`, `--text`, `--text-known`, write the same forms, in the same places, with the same output lines and report (`DIR.report.edn`) for either reader; `read --reader native --trees` is GP1's native dumps (formerly `--reader native` alone), `--raw` GP3's raw forms; GP4's `--forms` is the default now |
+| the native read | `arbace.repr.go.annotate -main read` | the corpus's jobs checked in their sessions (GP4), each dump annotated and converted by `arbace.repr.go/convert-data` as the helper's dumps are, into `--out DIR` itself; `--print`, `--text`, `--text-known`, `--quiet` as there; the summary and report by `arbace.repr.go/report`, the helper path's own reporting (`-main read` split into it, no change of output); a dump's name in the FAIL and per-dump lines `NAME/KEY.edn` |
+| the summary | `DIR.tsv` (both readers) | one line per package in the helper's format (tools/godump's: STATUS KEY FILES BYTES MS ERRORS [MSG]): `ok`, `errors` (the checker's, the first as MSG; go/types' with the helper), `fail` (go/parser rejects a file: its message as the helper writes it, the files named from the load's working directory; the loader's failures), `excluded`; the helper path copies the helper's own summary there. The vendoring tools and goi read it in place of `.tmp/repr-go/dumps.tsv` and `.tmp/godump/corpus/C.tsv` |
+| E-forms | `bin/repr-go native-check`, `arbace.repr.go.annotate/forms-diff` | per dump after E-ann: the `.ae` texts (the package file and each file, `arbace.repr.go/package-texts`) of the native path and of the helper's, mode `:full` (the conversions E-ann made) and mode `:lines` (converted again), byte for byte; where the helper's final conversion fails, the native one must fail with the same message, but where go/types could not import a package the go command does not build for the configuration (GPS34) |
+| GPS25 (b) | `arbace/repr/go/convert.ae`, `print_code.ae`, `raw.ae` | `instantiation`: the operand inside its parentheses (mode `:full`), a field's or method value's selector with its name's position, a method expression's name with its line and position, as `selector-form` writes them, and the parentheses' nodes counted; a conversion keeps an invalid `...`, `(conv T (spread x))`, which the printer prints back; `spread`: `(spread x)` on its operand's line, a literal's too (GPS35); `raw/conform`'s three acceptances removed |
+| GPS20 (b) | `tools/godump/load.go`, `arbace.repr.go.load/config` | the goexperiment tool tags the configuration's, as the go command computes them (`go list -f {{context.ToolTags}}`), not the helper's process's: darwin/arm64 without `goexperiment.dwarf5`, in the helper and in the loader alike |
+| the vendoring tools | `bin/tamago-vendor`, `bin/toolchain-vendor`, `bin/box-vendor`, `bin/x509roots-vendor` | read natively (`bin/repr-go read`'s default), their summaries `OUT.tsv`; the goos module's packages those go build builds for tamago/ARCH, each read without errors (GPS32); tamago-vendor's check that every package converted now compares the FAIL lines' packages (it compared dump paths with package paths: vacuous) |
+| goi's corpora | `bin/goi` | `check`'s programs, directory tests and error tests, `annotations`' linux corpora and `table`'s linux std (its cache key with the checker's and the loader's sources) read natively; the error tests' go/types errors (the class "errors of gc's phases after type checking") from the helper's dumps, made when missing (GPS33); the syntax errors' reasons from the read's summary, the conversion failures' from its log |
+| the resolve mode | `arbace/go/check/decl.ae`, `code_stmt.ae`, `code_call.ae`, `env.ae`; `annotate.ae` | for the error tests whose helper conversion fails (GC47's), go/types' records (GPS36): a constant keeps a valid declared type whatever its initialization, its value unknown (package and local constants; `constDecl`, `initConst`); a typed constant spec without values inherits nothing; an integer literal beyond 512 bits has an unknown value; a blank field or method is never found; `unsafe.Offsetof` records its argument's selection only when valid (`e/unanswer!`); every constant definition's `:val` written (`nil` unknown) and its type (`invalid type` included), as the helper writes go/types' objects |
+
+**E-forms (the exit criterion).** `bin/repr-go native-check` over the 22 corpora (the helper's dumps
+made by `native-check --headers` at the start; `goos-amd64`, `goos-arm64` and `box` again with
+`--fresh` after GPS34's rule and GPS20's helper):
+
+| corpus | dumps | E-tree | E-ann | E-forms, `:lines` and `:full` | the helper's conversion fails | no oracle (GPS34) |
+|---|---:|---:|---:|---:|---:|---:|
+| std tamago/amd64, tamago/arm64, linux/amd64, linux/arm64 | 379, 378, 382, 380 | all | all | **all** | 0 | 0 |
+| std with tests, tamago/amd64 | 554 | all | all | **554** | 0 | 0 |
+| `$GOROOT/test`'s programs, four configurations | 1,707, 1,702, 1,713, 1,707 | all | all | **all** | 0 | 0 |
+| directory tests, four configurations | 561, 559, 562, 559 | all | all | **all** | 0 | 0 |
+| error tests, linux/amd64 | 586 | all | 522 | **522** | 64, each failing natively with the helper's message | 0 |
+| TamaGo's goos module, amd64, arm64 | 94, 92 | all | 70, 63 | **70, 63** | 24, 29 | 24, 29 |
+| `tamago/cmd`'s sources, three configurations | 105 each | all | all | **105 each** | 0 | 0 |
+| `box/` printed, purego, x509roots | 41, 3, 1 | all | all | **all** | 0 | 0 |
+| **total** | **12,275** | **12,275** | **12,158** | **12,158 of 12,158** | **117** | **53** |
+
+No difference, none known: `test/repr/go/native-known.edn` stays empty. 22,603 files, 25,763,858
+nodes. The 14 dumps the helper fails (GPS17) and the 73 programs go/parser rejects are as before.
+The first runs found 12 error tests (of GC47's 64) the native path converted, or failed otherwise,
+where the helper's fails ("not a numeric value: nil" 10, "selector" 2), all fixed in the resolve
+mode (GPS36), and the 53 packages of the goos module whose imports go list cannot build (GPS34). The
+whole check took 110 minutes wall (6,617 s summed over the corpora, 32 jobs), against GP4's 71:
+E-forms' two more conversions and layouts, and the converter evaluated from the checkout again
+(GPS25 (b) changed it; compiled at the next re-seed).
+
+**The vendoring tools' verify, on the native reader.**
+
+| check | result | native | helper |
+|---|---|---:|---:|
+| `bin/tamago-vendor verify` | `tamago/` the conversion, byte for byte (2,416 forms files); goos: 69 of 100 packages build for amd64 (98 read without errors), 62 for arm64 (91) | 8 m 43 s | 4 m 21 s |
+| `bin/toolchain-vendor verify` | `tamago/cmd/` byte for byte (758 forms files) | 31 m 37 s | 22 m 52 s |
+| `bin/x509roots-vendor verify` | `x509roots/` byte for byte | 2 m 58 s | 4 s |
+| `bin/box-vendor purego` into a scratch tree | `box/go/arbace/box/purego*` byte for byte | 1 m 28 s | |
+| `bin/box-vendor roundtrip` | 41 of 41 packages pass (tree, export, code) | 11 m 14 s | |
+
+So **no committed file changes by GPS25 (b)**: no committed tree has an instantiation of a
+parenthesized or selected operand in a position the text shows, a conversion with `...`, or a
+literal's `...` beginning a line (the printer's round trips below say the same of std and
+`$GOROOT/test`). Only goi's references change: `ddd1.go` passes (below).
+
+**The round trips, on the native reader** (no regression against any reference): `bin/repr-go
+roundtrip amd64` 447 s (convert and print 372 s, check 75 s; the helper's 137 s: 122 s and 14 s),
+`linux/amd64` 428 s, `--tests` 581 s, `--dirs amd64` 105 s, `--dirs linux/amd64` 101 s; `--text amd64`
+1,742 of 1,742 and 1,705 of 1,708 (the 3 known) byte-identical, 334 s (the helper's 207 s), `--text
+linux/amd64` 1,834 and 1,711 of 1,714 (3 known), 411 s, `--text --dirs amd64` 586 of 586, 99 s, `--text
+--tests` 2,935 of 2,935, 614 s. `bin/repr-go test read` and `test print` pass.
+
+**goi.** `bin/goi annotations` over its five corpora (the linux ones read natively): 0 errors, every
+count as recorded, 2 m 27 s. `bin/goi check` (the whole check, on the gate's build): every result as
+recorded but `ddd1.go`, now passing (GPS25 (b): the conversion's `...` kept, goi's checker reports
+`invalid use of ...` at its line; `test/goi/check-known.edn`'s entry removed, the reference's line
+changed, `test/goi/divergences.edn`'s class of spellings without it), and 4 run programs near the
+10 s limit timing out (`fixedbugs/bug358.go`, `issue16037_run.go`, `issue20298.go`, `nosplit.go`; and
+`bug385_64.go`'s unsupported reason with "over 10 s"), which time out one at a time at a load of 2
+as well, and so with main's executable on the same forms: the machine's, not GP5's. `bin/goi
+divergences`: 1,472 of 1,837 pass, the rest in their classes, the essential subset all passing.
+
+**Times against the helper.** The native path is the slower one until GP7 compiles the parser and a
+re-seed compiles the changed converter: whole corpora 1.4 to 3 times the helper path's (std's
+round trip 3.0 times (convert and print), the text level 1.6, `tamago/` 2.0, `tamago/cmd` 1.4), a few packages far more
+(`read --goos linux fmt unicode/utf8`: 87 s against 3.8 s; the error tests 156 s against 44 s),
+because a read checks the standard library of its configuration first (its session, GP4), each
+package's parse interpreted (GP1: 0.37 MB/s with the dump) and the converter evaluated (GPS37). The
+helper's path spends its time reading the dumps' text (§7), which the native path does not have.
+
+**The program changes.** The embedded namespaces `arbace.repr.go` (`go.ae`: `report`,
+`package-texts`), `arbace.repr.go.annotate`, `.convert`, `.raw`, `.load`, `.print` (`print_code.ae`:
+a conversion's `(spread x)`) and goi's checker `arbace.go.check` (`decl.ae`, `code_stmt.ae`,
+`code_call.ae`: resolve-mode paths only; `env.ae`: `unanswer!`): the next re-seed carries them, to be
+batched (no re-seed here). goi's normal mode is unchanged (every change is under `:resolve`), so is
+the printer for every valid program. The helper (`tools/godump`) is not shipped.
+
+**Checks.** `bin/repr-go native-check` (above); the four vendoring verifies and box-vendor's
+round trip (above); the round trips (above); `bin/goi annotations`, `bin/goi check`, `bin/goi
+divergences` (above); `bin/repr-go test read`, `test print`; `make check-makefile`; the essential
+`bin/gate` passed (38 m 33 s, its build anew: the smoke test, Clojure's suite with no regressions,
+the oracle 22,658 of 22,711 against its 53 known, the differential check 12,741 of 12,764 against
+its 23 known, goi's essential check 740 of 740 natively read, the generated variants). Not run:
+`bin/gate --full` (reserved for the milestone), `bin/tamago-vendor check`, `bin/toolchain-vendor
+check`, `bin/box-vendor kvm-tests`, `purego-check` (they print and build the committed forms, which
+did not change).
+
+**Proposals (GPS32-GPS37; each built as recommended).**
+
+- **GPS32 The goos module's packages the vendoring takes.** The helper took those it dumped
+  without errors, which were go list `-export`'s: a package whose assembly does not build for the
+  architecture, or that imports one, fails there. No reader sees assembly: natively 98 of 100
+  packages read without errors for amd64 (91 for arm64), not 69 (62).
+  - (a) the packages go build builds for tamago/ARCH (`go list -e -export`, its `.Export`), each
+    required to read without errors (as built): the same 69 and 62, the tree unchanged; the
+    vendoring needs Go's toolchain anyway (its `check` builds the guest);
+  - (b) a committed list of the packages per architecture, checked as a subset of those reading
+    without errors;
+  - (c) every package that reads without errors: other ISAs' boards and SoCs vendored, which
+    `check` cannot build.
+
+  *Recommended: (a)*.
+- **GPS33 The error tests' "go/types reports none".** goi's check calls a program whose expected
+  errors goi does not report unsupported (gc's later phases) when go/types reports none either,
+  from the helper's dumps' `:errors`.
+  - (a) go/types' errors from the helper's dumps, made by goi's check when missing (as built): the
+    independent oracle kept; goi's check needs Go's toolchain anyway (gc's references, gocmp);
+  - (b) the checker's own errors in the resolve mode (§4.4's plan): a tautology, goi's checker
+    judging itself, the class unchecked.
+
+  *Recommended: (a)*; GP6 revisits it with the error tests' raw forms.
+- **GPS34 E-forms where the helper's conversion fails.**
+  - (a) the native conversion must fail with the helper's message (goi's reasons are its), but
+    where go/types could not import a package go list does not build (`no export data`), which
+    leaves no oracle: counted apart (as built: 53, the goos module's other boards);
+  - (b) only the dumps both convert compared; (c) the 53 listed in `native-known.edn`.
+
+  *Recommended: (a)*: goi's check sees the same unsupported programs with the same reasons, and the
+  known list stays empty.
+- **GPS35 The line of a literal's `...`.** GPS25 named `f(nil...)`; the converter wrote no line for
+  any spread whose operand is a literal (`append(b, "s"...)` too).
+  - (a) every `(spread x)` on its operand's line (as built): one rule for raw and final forms; no
+    committed file and no round trip changes;
+  - (b) only after the universe's `nil`.
+
+  *Recommended: (a)*.
+- **GPS36 Invalid programs as go/types records them, for the failures.** 12 of GC47's 64 converted
+  natively, or failed otherwise, where the helper's conversion fails (constants without a value
+  but with a type; a blank field; `unsafe.Offsetof` of an invalid argument).
+  - (a) go/types' rules in the resolve mode only, the annotator writing every constant's `:val`
+    and type (as built): the native path fails as the helper's, with its message, goi's
+    normal mode unchanged;
+  - (b) the same in goi's normal mode too (GPS30 (b)), at GP6 with the error tests' raw forms.
+
+  *Recommended: (a)* now, (b) at GP6.
+- **GPS37 The native reader's speed until GP7.** It is 1.4 to 3 times the helper's path on whole
+  corpora, and a read of a few packages pays for its configuration's standard library (87 s for
+  `fmt`).
+  - (a) accepted until GP7 (the parser and the dumper compiled) and the next re-seed (the changed
+    converter and checker compiled), the helper's path a flag away (as built);
+  - (b) the standard library's checked sessions cached on disk per configuration: a format to
+    keep in step with the checker's state;
+  - (c) the helper the default until GP7.
+
+  *Recommended: (a)*: GPS7 decided the switch, and the costs fall with GP7's compilation.

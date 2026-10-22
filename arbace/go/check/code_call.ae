@@ -63,6 +63,10 @@
   [f]
   (cond
     (instance? Long f) (const-node f :untyped-int f)
+    ;; the resolve mode: go/types' basicLit checks an integer for overflow (go.dev/issue/54280:
+    ;; beyond 512 bits, the value unknown; GPS30)
+    (and (or (instance? arbace.lang.BigInt f) (instance? BigInteger f)) (:resolve cx-flags) (> (c/bit-len (bigint f)) 512))
+    (do (err! f :InvalidConstVal "constant overflow") (const-node f :untyped-int :unknown))
     (instance? arbace.lang.BigInt f) (const-node f :untyped-int f)
     (instance? BigInteger f) (const-node f :untyped-int (bigint f))
     (instance? Double f) (const-node f :untyped-float (c/double-literal f))
@@ -169,7 +173,8 @@
       :else
       (let [ty (:type x)
             _ (when (t/tparam? ty) (e/generic!))
-            r (t/lookup ty (= :variable (:mode x)) nm (pkg-path))]
+            ;; the resolve mode: go/types' lookup never finds a blank field or method
+            r (when-not (and (= "_" nm) (:resolve cx-flags)) (t/lookup ty (= :variable (:mode x)) nm (pkg-path)))]
         (cond
           (nil? r)
           (do (let [[b p] (t/deref-type ty)]
@@ -1331,13 +1336,15 @@
                     h (if raw (str ".-" (ident-name (nth af 2))) h)]
                 (cond
                   (invalid? x) (invalid f)
-                  (not= :field (:op x)) (bad "invalid argument: %s is a method value" (expr-str af))
+                  ;; (the resolve mode: go/types records the selection only of a valid argument)
+                  (not= :field (:op x)) (do (when raw (e/unanswer! af [:sel])) (bad "invalid argument: %s is a method value" (expr-str af)))
                   :else
                   ;; the offset along the embedded path, without crossing a pointer
                   (let [base (first (t/deref-type (:type (:x x))))
                         off (offsetof-value base (:path x))]
                     (cond
-                      (nil? off) (bad "invalid argument: field %s is embedded via a pointer in %s" (subs h 2) (expr-str (second af)))
+                      (nil? off) (do (when raw (e/unanswer! af [:sel]))
+                                     (bad "invalid argument: field %s is embedded via a pointer in %s" (subs h 2) (expr-str (second af))))
                       ;; a size depending on type parameters: not constant (each instance's)
                       (has-var-size? base) (node {:args [x] :mode :value :type :uintptr})
                       (neg? (long off)) (do (err! (second af) :TypeTooLarge "%s is too large" (operand-str (:x x))) (invalid f))
