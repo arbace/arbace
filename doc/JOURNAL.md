@@ -1066,3 +1066,36 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   the batched re-seed with GP7's.
 - **Decided (the user):** JFS51 (a), JFS52 (a), JFS53 (a), JFS54 (a), as built; over flagsgenerator
   next and package jrt for the tools now.
+
+## 2026-10-22: GP7 merged; GPS45-GPS49 decided as built (the user); the re-seed started
+
+- **What:** GP7, the native reader compiled (branch `go-parser-gp7`, `b58e7c48`, `c33263e6`,
+  `e73ef3e7`, `01cc886b`, `bbb84c11`; doc/go/GO-PARSER-SURVEY.md, "As built: GP7"), merged into main
+  at `97e34a6a` without conflicts.
+- **Built:**
+  - `go/arbace/gotable.edn` lists go/ast, go/parser, go/scanner, go/token, `arbace/repr/go/godump`
+    and `arbace/repr/go/gcsyntax`.
+  - The dumper committed as generated Go forms (`go/arbace/repr/go/godump.ae`, `godump/`; GPS13
+    (b)), written by `arbace.repr.go.parse generate`.
+  - The syntax-errors driver moved into `go/arbace/repr/go/gcsyntax`.
+  - gc's syntax as a renamed copy, `go/arbace/repr/go/internal/syntax` (17 files), from
+    `tamago/cmd/go/cmd/compile/internal/syntax`: TamaGo's go1.27.1 `src/cmd/compile/internal/syntax`,
+    only its namespace and import path changed (`arbace.repr.go.syntax/copy-texts`; LICENSE.md).
+  - The readers' `load!` a `require`: compiled where the table lists the package, else interpreted
+    from ARBACE_PATH.
+  - `bin/generated-check` also compares repr/go's 19 generated files.
+  - A prefetch of imported packages, bounded by `REPR_GO_JOBS` permits (`REPR_GO_PREFETCH=0`), and
+    a phases line in `bin/repr-go read`.
+- **Results:** std's parse 0.5 s on one thread (GP1 interpreted: 25.2 s), the dump 6.5 s; the
+  executable 149,749,920 → 150,814,880 bytes (+1,064,960; go/parser's four packages 221,184 of it).
+  `read fmt unicode/utf8` 33-45 s (GP5: 87 s; the helper 5.1 s); `roundtrip amd64` 183 s (GP5: 447 s);
+  `native-check` 107 min (GP5: 110). The tools' host is stage 0, so the speed comes with the re-seed.
+- **Checks:** `native-check` over the 22 corpora on the GP7 executable (E-tree 12,275, E-ann and
+  E-forms 12,158 of 12,158); the reader's output unchanged; `roundtrip amd64` no regression; goi
+  `check --essential` 797 of 797, `annotations`, `test`; `generated-check`. The branch's essential
+  gate passed; on main at `97e34a6a` it passed (31m36s).
+- **Slips:** the first native-check, with the prefetch unbounded, was killed by the memory limit (its
+  own process); runs at 32-64 jobs on the shared machine.
+- **Decided (the user):** GPS45-GPS49 as built; over the syntax renamed at build time, a smaller
+  table and profiling the raw conversion next.
+- **The re-seed** (GP6, JN7, JFS48 (b), GP7) follows on main.

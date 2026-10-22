@@ -2031,3 +2031,13 @@ the re-seed compiles the namespaces once (two runs) as after any runtime change.
     constructor of its own).
 
   *Recommended: (a)* in GP7; (c) first when the reader's speed is next worked on, then (b).
+
+## Decided (2026-10-22): GPS45-GPS49
+
+The user decided GPS45-GPS49 as built:
+- GPS45 (a): gc's syntax a renamed copy committed in `go/`, kept in step by `bin/generated-check`.
+- GPS46 (a): the table lists go/ast, go/parser, go/scanner, go/token and repr/go's two packages.
+- GPS47 (a): GPS3 (b) not built.
+- GPS48 (a): the prefetch bounded by permits, `REPR_GO_PREFETCH=0` to turn it off.
+- GPS49 (a) now; when speed is scheduled, (c), the raw conversion profiled, then (b), std's checked
+  sessions cached.
