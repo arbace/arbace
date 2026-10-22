@@ -1150,3 +1150,11 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - **Decided (the user):** JFS55 (a), JFS56 (a), JFS57 (b) as built, over package jrt for the tools
   now; JFS58 (a).
 - **The shipped program changed** (j2g's `names.ae`; `jdk/edge.edn`, j2g's data): a re-seed is due.
+
+## 2026-10-22: seed 3ab3b603 (JFS52 (b), JFS58; the user: re-seed now)
+
+- `bin/arbace-go --fixpoint` on main at `1a80bf75` (host `0fdfb00d…` != G1; G1 = G2 = G3 =
+  `2e4ce3e9…`, 150,827,168 bytes), then `ARBACE_SEED_GO_BUILD=$PWD/target/arbace-go/fixpoint/g3
+  bin/seed --make`: `3ab3b603…` (18,349,996 bytes, 1,984 files), committed at `c4f5c8ba`;
+  `bin/seed --verify` passed: stage 0 = G1 = G2 = G3 = `2e4ce3e9…`, the same tar. The user chose
+  now over batching with the next work.

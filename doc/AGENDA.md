@@ -9,7 +9,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`d7303cf8…`, 2026-10-22), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`3ab3b603…`, 2026-10-22), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
@@ -156,8 +156,8 @@ The current state of the work. This file is rewritten as things change. For the 
     by compileproperties and propertiesparser on the tool, 20 of 20 the build tree's, no JVM;
     `FlagsEnum` still copied; JFS51-JFS54 decided as built); JFS52 (b) done (2026-10-22: `FlagsEnum` by flagsgenerator on the
     tool through javax.tools' API on javac on Arbace, no generated source copied; JFS55-JFS58 decided,
-    JFS58 (a) done: `jdk/edge.edn` re-recorded, stale since GP7); what follows to be decided. The
-    shipped program changed (j2g's `names.ae`, `jdk/edge.edn`): a re-seed is due.
+    JFS58 (a) done: `jdk/edge.edn` re-recorded, stale since GP7); what follows to be decided. The seed
+    remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);
