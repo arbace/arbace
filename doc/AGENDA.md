@@ -122,7 +122,10 @@ The current state of the work. This file is rewritten as things change. For the 
     `bin/repr-go raw-check` 12,158 dumps resolved, 0 differ, 117 raw only; the normal conversion
     unchanged). The seed remade after GP2, JN2 and GP3 (`aa4cb10b…`) and verified. GPS21-GPS26 decided
     as built (the user, 2026-10-21). GP4 done (2026-10-21: the checker's
-    resolve mode, E-ann 12,158 of 12,158 equal, none known; GPS27-GPS31 decided as built); next GP5, the switch.
+    resolve mode, E-ann 12,158 of 12,158 equal, none known; GPS27-GPS31 decided as built). GP5 done (2026-10-22: the native reader
+    `bin/repr-go read`'s default, the helper the oracle, E-forms 12,158 of 12,158 in `:full` and
+    `:lines`, GPS25 (b)'s corrections, the vendoring tools and goi on the native reader, every committed
+    tree unchanged; GPS32-GPS37 decided as built); next GP6, syntax errors.
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
@@ -139,7 +142,7 @@ The current state of the work. This file is rewritten as things change. For the 
     the tool; JFS31-JFS36 decided as built). JN6 done (2026-10-22: the JVM
     leaves repr/java, no JVM under `bin/repr-java` by an strace trace, `check --jdk` on the tool over
     68 modules, `jrt.jrt-sources` on the tools' host, `:jdk` the platform's pin; JFS37-JFS42 decided
-    as built); next JN7. GP5 done, merging (`go-parser-gp5`). The seed remade after JN3, JN4 and GP4 (`3dda04f6…`) and verified. The processes form made robust (2026-10-21).
+    as built); next JN7. Re-seed after JN6 and GP5 running. The seed remade after JN3, JN4 and GP4 (`3dda04f6…`) and verified. The processes form made robust (2026-10-21).
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

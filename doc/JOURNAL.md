@@ -891,3 +891,35 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - **Decided (the user):** JFS37 (a), JFS38 (b), JFS39 (b), JFS40 (a) now and (c) with JN7, JFS41 (a),
   JFS42 (a); recommended over a second platform, an opt-in JVM reference, `check --jdk` in `--full`
   and hashes in place of the JDK's javac.
+
+## 2026-10-22: GP5 merged; GPS32-GPS37 decided as built; re-seed now (the user)
+
+- **What:** GP5, the native reader the default (branch `go-parser-gp5`, `aa9835ee`, `a20dad43`;
+  doc/go/GO-PARSER-SURVEY.md, "As built: GP5"), merged into main at `a58eae7e` without conflicts.
+- **Built:**
+  - `bin/repr-go read` native by default (`--reader helper`, `REPR_GO_READER=helper`: the helper);
+    both readers write the same forms, lines, report and `OUT.tsv` summary; `arbace.repr.go/report`
+    shared; `--reader native --trees` the dumps alone.
+  - `native-check`'s E-forms: both readers' `.ae` text byte for byte, `:full` and `:lines`; where the
+    helper's conversion fails, the native one with the same message.
+  - GPS25 (b): an instantiation's operand keeps its parentheses, an invalid conversion's `...` kept as
+    `(conv T (spread x))`, `(spread x)` on its operand's line; `conform`'s three exceptions gone.
+  - GPS20 (b): the goexperiment tool tags the target's, helper and loader (darwin/arm64 alone changes,
+    no forms).
+  - The vendoring tools and goi (`check`, `annotations`, the table's linux std) on the native reader;
+    tamago-vendor's "every package converted" was vacuous, fixed.
+  - goi's checker, resolve mode only: go/types' records of invalid programs (GPS36).
+- **Results:** E-forms over 22 corpora: 12,275 dumps, E-tree 12,275, E-ann and E-forms 12,158 of
+  12,158; `native-known.edn` empty; 64 failing error tests fail alike; 53 goos packages without an
+  oracle. tamago-, toolchain-, x509roots-vendor verify byte for byte natively; box-vendor roundtrip
+  41 of 41; every repr/go round trip without regression. goi: `ddd1.go` now passes (references
+  updated); four run programs time out at 10 s under load, as main's executable does; divergences
+  1,472 of 1,837 pass. The native path is 1.4-3 times the helper's (87 s for `fmt`).
+- **Gates:** the branch's essential gate passed twice; on main at `a58eae7e` (after JN6) it passed
+  (29m32s).
+- **Rule slips:** `bin/repr-go` edited while a run of it executed (the run passed, bash then failed
+  after it); a wait loop with `pgrep -f` (read-only, stopped by task ID).
+- **Decided (the user):** GPS32-GPS37 as built (a), GPS36 (b) at GP6; over a committed package list,
+  the 53 as known, a disk cache of std's sessions and the helper as default until GP7.
+- **Re-seed now** (the user, over batching with GP6/JN7): GP5's converter and checker changed, and
+  JN6's `jdk/provenance.edn` moved the runtime key.

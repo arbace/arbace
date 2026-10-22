@@ -1716,3 +1716,16 @@ did not change).
   - (c) the helper the default until GP7.
 
   *Recommended: (a)*: GPS7 decided the switch, and the costs fall with GP7's compilation.
+
+## Decided (2026-10-22): GPS32-GPS37
+
+The user decided GPS32-GPS37 as built:
+- GPS32 (a): the goos module's packages those go build builds for tamago/ARCH (`go list -e -export`),
+  each read without errors.
+- GPS33 (a): goi's "go/types reports none" from the helper's dumps' errors; GP6 revisits it.
+- GPS34 (a): where the helper's conversion fails, the native one fails with its message; the 53
+  without export data counted apart.
+- GPS35 (a): every `(spread x)` on its operand's line.
+- GPS36 (a) now, in the resolve mode; (b) at GP6, in goi's normal mode.
+- GPS37 (a): the native reader's speed accepted until GP7 and the next re-seed; `--reader helper` a
+  flag away.
