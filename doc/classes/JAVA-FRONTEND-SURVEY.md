@@ -2623,3 +2623,16 @@ No re-seed (batched).
   loading logs), `deftest/` (the zlib port against the JDK's), `jrt-ref/` (main's generate on the
   JDK), `jrt-arb/`, `jrt-arb-all/`, `edge-jvm.edn`, `edge-arb.edn`, `trace/`, the build and
   conversion logs.
+
+## Decided (2026-10-22): JFS43-JFS50
+
+The user decided JFS43-JFS50 as built:
+- JFS43 (a): the build tree's `CaseFolding` kept where only the boot JDK's entries differ; (c) when
+  the build tree goes.
+- JFS44 (a): the edge's JFR members as the class files declare them.
+- JFS45 (a): the tools' forms in `jdk/javac/`, one tool world.
+- JFS46 (a) now, a committed list; (b), an analysis of Arbace's own, when the JDK leaves the host.
+- JFS47 (a): jrt's `Deflater` in the tool's world only.
+- JFS48 (b) next: `compileproperties` and `propertiesparser` on the tool, `FlagsEnum` copied.
+- JFS49 (a): the generators' JDK removed.
+- JFS50 (a): `jrt.java-surface`'s retired parts ported, run only through the edge.

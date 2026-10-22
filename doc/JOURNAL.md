@@ -977,3 +977,45 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   recorded, the essential gate. On the branch `go-parser-gp7` from main `8677987a`, in
   `.tmp/worktrees/go-parser-gp7`, beside JN7.
 - **The re-seed** GP7 needs is done on main after its merge, batched with GP6's and JN7's.
+
+## 2026-10-22: JN7 merged; JFS43-JFS50 decided as built; re-seed with GP7 (the user)
+
+- **What:** JN7, the generators on Arbace, and JFS40 (c) (branch `java-frontend-jn7`, `efc39ada`,
+  `36dc57ba`, `09c38b3a`; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN7"), merged into main at
+  `4e825839` without conflicts.
+- **Built:**
+  - The JDK build's tools (generatecharacter, spp, generateextraproperties, cldrconverter,
+    generatelsrequivmaps, tzdb, generatecurrencydata, generatebreakiteratordata, makejavasecurity)
+    read by `bin/javac-vendor` into `jdk/javac/forms` (module `buildtools`), with 221 java.xml and 6
+    java.base files (`overlay/jdk/javac/closure.txt`); `bin/repr-java read --origins`.
+  - zlib 1.3.2's deflate ported to Java (`overlay/jdk/javac/java.base/java/util/zip/Deflater.java`;
+    zlib's license in LICENSE.md); tool-world variants (`ResourceBundle`, `Files.walk`, `Scanner`,
+    java.xml's `SecuritySupport`, `JdkXmlConfig$CatalogHolder`).
+  - j2g fixes: binary names for the tool's packages; a superinterface's static field initializes
+    the interface (regression `test/j2g/fixtures/FxJn7.ae`); values and calls of classes outside the
+    closed world.
+  - `bin/jrt-convert generate` on javac's tool executable; `GEN_JDK` removed, the provenance's
+    `:generators`.
+  - JFS40 (c): `test/jrt/classfile.ae` (`jrt.classfile`), `jrt.java-surface` and `jrt.jrt-edge` on it,
+    the edge step on the tools' host.
+- **Results:** the generated sources and data equal the JDK build's (30 of 31 sources and 10 of 10
+  data files; `JRT_LOCALES=all` 1,561 of 1,562), but CaseFolding, whose build ran on boot JDK 25 (28
+  entries more; the tool's is JDK 26's): the build's file kept (JFS43 (a)), `jdk/forms` unchanged.
+  The ported edge equals the frozen JVM's but 3 JFR members (JFS44). The generate step 44-62 s on the
+  tool (36-42 s on the JDK); the tool 209 MB.
+- **Trace:** `bin/jrt-convert verify` and `bin/repr-java roundtrip` start no JVM (JN6: 100 and 97);
+  `javac-vendor classes` only the reference javac. On a JVM remain the oracle, the edges'
+  recordings, `check --suite`'s back end, j2g's fixtures' results, the data generators, the JDK's
+  javac.
+- **Checks:** `jrt-convert update`/`verify`, `javac-vendor convert`/`verify`/`check`/`classes`,
+  `--java-fixtures`, `j2g-edge verify`, `repr-java check` and `roundtrip --text`: all pass. The branch's
+  essential gate passed (after diffcheck's FxVarHandles case renumbered); on main at `4e825839` it
+  passed (15m35s).
+- **The shipped program:** j2g's code changed (one call in `java.security.MessageDigest` a missing
+  call, the same behaviour); `jdk/provenance.edn` moves the runtime key.
+- **Rule slips:** five reports to /tmp before TMPDIR was set (one from `bin/j2g-check
+  --record-fixtures`, whose JVM gets no `java.io.tmpdir`), deleted; `pgrep -n -x` in a wait loop;
+  `jdk/README.md` edited during checks, reverted then re-applied; the system JDK used for three
+  scratch measurements, recorded in the survey.
+- **Decided (the user):** JFS43-JFS50 as built; over a tree of the tools' own and the generators' JDK
+  kept as a reference. The re-seed batched with GP7 (GP6, JN7 and GP7 in one), over re-seeding now.
