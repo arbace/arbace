@@ -923,3 +923,19 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   the 53 as known, a disk cache of std's sessions and the helper as default until GP7.
 - **Re-seed now** (the user, over batching with GP6/JN7): GP5's converter and checker changed, and
   JN6's `jdk/provenance.edn` moved the runtime key.
+
+## 2026-10-22: seed a8672e0d; GP6 and JN7 started (the user)
+
+- **Re-seed** (the user: now, over batching): `bin/arbace-go --fixpoint` on main at `7315ca94`
+  (host `4f32a6af…` != G1; G1 = G2 = G3 = `c60d5659…`, 149,332,128 bytes), then
+  `ARBACE_SEED_GO_BUILD=$PWD/target/arbace-go/fixpoint/g3 bin/seed --make`: `a8672e0d…` (18,499,044
+  bytes, 1,954 files), committed at `6e428346`; `bin/seed --verify` passed: stage 0 = G1 = G2 = G3 =
+  `c60d5659…`, the same tar.
+- **Decided (the user):**
+  - next: GP6 (syntax errors in gc's words, invalid programs for goi) and JN7 (the generators: `bin/jrt-convert
+    generate`'s tools read by repr/java on Arbace and run as Java forms, and JFS40 (c), a class-file reader
+    of Arbace's own for `jrt-convert`'s edge) together, over GP6 then GP7, GP6 alone or a pause;
+  - `bin/gate --full` at the next milestone, over now;
+  - no milestone tag yet, over a tag after `--full`.
+- GP6 on the branch `go-parser-gp6`, JN7 on `java-frontend-jn7`, both from main after this entry, in
+  `.tmp/worktrees/`.
