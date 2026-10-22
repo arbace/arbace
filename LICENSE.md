@@ -158,6 +158,11 @@ covers what.
     `compile/default.pgo`: Copyright The Go Authors, under Go's BSD 3-Clause License (text
     below).
   Each Go file's notice is kept, as `;;` lines of its forms.
+- `go/arbace/repr/go/internal/syntax.ae` and `syntax/` (doc/go/GO-PARSER-SURVEY.md, "As built:
+  GP7"): a renamed copy of `tamago/cmd/`'s forms of `cmd/compile/internal/syntax` (above: the
+  same tree's `src/cmd/compile/internal/syntax/`), its namespace and import path renamed
+  `arbace/repr/go/internal/syntax` by `arbace.repr.go.syntax/copy-texts`, nothing else changed:
+  Copyright The Go Authors, under Go's BSD 3-Clause License (text below); each file's notice kept.
 - `x509roots/` (`x509roots/go/arbace/x509roots/fallback/bundle.ae` and `bundle/`, with
   `bundle/bundle.der`; x509roots/README.md, doc/go/BOX-NOTES.md "TLS (option 2)"): the package
   `bundle` of the module `golang.org/x/crypto/x509roots/fallback`, https://go.googlesource.com/crypto

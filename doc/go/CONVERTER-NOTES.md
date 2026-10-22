@@ -470,6 +470,15 @@ mode, its answers dropped. In raw mode a package whose files' clauses all name `
 name `""`) is `(go/package _ ...)`, which the checker reports (`invalid package name _`), where
 the final forms take a name from the path.
 
+**Compiled (GP7).** The trees the converter reads are made by go/parser and the dumper
+(`go/arbace/repr/go/godump`, a committed generated file) compiled into the program through goi's
+table, gc's syntax errors by the driver `go/arbace/repr/go/gcsyntax` over a renamed copy of gc's
+syntax; the converter itself is unchanged, its output the same byte for byte
+(doc/go/GO-PARSER-SURVEY.md, "As built: GP7"). The native read prepares the packages a checked
+package imports (their trees and raw conversions) ahead of the checker, and prints the time of
+its phases (`phases`: the parse and dump, the raw conversion, the annotation, the final
+conversion, its layout).
+
 ## What remains
 
 - Mode `:full` is written but not consumed by the printer yet: columns would make the

@@ -1,149 +1,102 @@
 (ns arbace.repr.go.syntax
-  "repr/go's syntax errors in gc's words (doc/go/GO-PARSER-SURVEY.md GP6, GPS2 (b)): a Go file
+  "repr/go's syntax errors in gc's words (doc/go/GO-PARSER-SURVEY.md GP6, GP7; GPS2 (b)): a Go file
   that go/parser rejects has no tree and no forms; gc's own parser, cmd/compile/internal/syntax,
-  run by goi from tamago/cmd's forms (tamago/cmd/go/cmd/compile/internal/syntax/, interpreted),
   reports its errors as gc reports them.
 
-  A driver package of Go forms (arbace/repr/go/gcsyntax, below) parses the file as gc's noder
-  does (noder.LoadPackage: syntax.Parse with an error handler and CheckBranches, no pragma
-  handler) and keeps the errors as base.ErrorfAt and base.FlushErrors print them: one error
-  beginning with \"syntax error\" per line (the last one's line), one of equal other errors per
-  line, sorted by position, an error equal to the one before it printed once; each as gc
-  prints it with -C, FILE:LINE: MESSAGE, FILE the name given. gc stops after them when one of
-  them is a syntax error (noder's checkFiles: base.SyntaxErrors); else types2 would check the
-  tree, which go/parser did not give (syntax-only? false).
+  A driver package of Go forms, arbace/repr/go/gcsyntax (go/arbace/repr/go/gcsyntax.ae,
+  hand-written), parses the file as gc's noder does (noder.LoadPackage: syntax.Parse with an
+  error handler and CheckBranches, no pragma handler) and keeps the errors as base.ErrorfAt and
+  base.FlushErrors print them: one error beginning with \"syntax error\" per line (the last one's
+  line), one of equal other errors per line, sorted by position, an error equal to the one
+  before it printed once; each as gc prints it with -C, FILE:LINE: MESSAGE, FILE the name given.
+  gc stops after them when one of them is a syntax error (noder's checkFiles:
+  base.SyntaxErrors); else types2 would check the tree, which go/parser did not give (syntax-only?
+  false).
 
-  The driver and syntax are checked and defined by goi once per process (load!, about 3 s);
-  syntax imports fmt, go/build/constraint, io, os, path/filepath, reflect, strconv, strings,
-  unicode and unicode/utf8 (compiled, or interpreted from the digest)."
+  The driver imports gc's syntax as a renamed copy, arbace/repr/go/internal/syntax
+  (go/arbace/repr/go/internal/syntax.ae and syntax/, copy-texts: tamago/cmd's forms of
+  cmd/compile/internal/syntax with their namespace and import path renamed, which cmd's internal
+  rule would not let the program import; GP7). Since GP7 the driver is listed in goi's table and
+  compiled with the copy into the program; on an executable whose table does not list it (the
+  tools' host until the re-seed that carries GP7) goi loads both from ARBACE_PATH and interprets
+  them (load!, about 3 s), as GP6 built."
   (:require [arbace.string :as str]
-            [arbace.go.repl :as repl]
-            [arbace.go.check :as ck]
-            [arbace.go.check.load :as load])
+            [arbace.go.repl :as repl])
   (:import [java.io File]))
 
 (def syntax-path "cmd/compile/internal/syntax")
 
-(def driver-forms
-  "The driver's package as Go forms (one file)."
-  '[(ns go.arbace.repr.go.gcsyntax (:require [arbace.go :as go]))
-    (go/package gcsyntax :path "arbace/repr/go/gcsyntax" :files ["errors.go"])
-    (in-ns 'go.arbace.repr.go.gcsyntax)
-    (go/file "errors.go"
-      :doc "Package gcsyntax reports a Go file's syntax errors as gc does: cmd/compile/internal/syntax's, kept and ordered as gc's base.ErrorfAt and base.FlushErrors keep and order them (doc/go/GO-PARSER-SURVEY.md GP6).\n"
-      :imports [[bytes "bytes"] [os "os"] [sort "sort"] [strconv "strconv"] [strings "strings"]
-                [syntax "cmd/compile/internal/syntax"]])
-    (go/type serr (struct ^uint line ^uint col ^string msg))
-    (go/func Errors "Errors parses the Go file at path as gc's noder does (syntax.Parse, its errors to a handler, CheckBranches) and returns its errors as gc prints them with -C, a line each, name:LINE: MESSAGE, and whether one of them is a syntax error (gc stops after the parse).\n"
-      ^string [^string path ^string name]
-      (let [(values src err) (os/ReadFile path)]
-        (when (!= err nil) (return (+ name ": " (.Error err) "\n")))
-        (let [errs (make (slice serr) 0)
-              syn false
-              lastSyntax (conv uint 0)
-              lastOther (conv uint 0)
-              lastMsg ""
-              h (fn [^error e]
-                  (let [se (assert syntax/Error e)
-                        line (.Line (.-Pos se))
-                        msg (.-Msg se)]
-                    ;; base.ErrorfAt: one syntax error per line, one of equal other errors
-                    (cond
-                      (strings/HasPrefix msg "syntax error")
-                      (do (when (and (!= lastSyntax 0) (== line lastSyntax)) (return))
-                          (set! lastSyntax line)
-                          (set! syn true))
-                      :else
-                      (do (when (and (!= lastOther 0) (== line lastOther) (== msg lastMsg)) (return))
-                          (set! lastOther line)
-                          (set! lastMsg msg)))
-                    (set! errs (append errs (lit serr :line line :col (.Col (.-Pos se)) :msg msg)))))]
-          (syntax/Parse (syntax/NewFileBase path) (bytes/NewReader src) h nil syntax/CheckBranches)
-          ;; base.FlushErrors: sorted by position, an error equal to the one before it once
-          (sort/SliceStable errs (fn ^bool [^int i ^int j]
-                                   (let [a (aget errs i) b (aget errs j)]
-                                     (or (< (.-line a) (.-line b))
-                                         (and (== (.-line a) (.-line b)) (< (.-col a) (.-col b)))))))
-          (let [out "" prev ""]
-            (range [_ e errs]
-              (let [l (+ name ":" (strconv/FormatUint (conv uint64 (.-line e)) 10) ": " (.-msg e) "\n")]
-                (when (!= l prev) (set! out + l))
-                (set! prev l)))
-            (when syn (return (+ "S" out)))
-            (+ "-" out)))))])
+(def copy-path "The renamed copy's import path." "arbace/repr/go/internal/syntax")
+
+(def ^:private driver-path "arbace/repr/go/gcsyntax")
+
+(defn copy-texts
+  "The renamed copy of gc's syntax from the forms of cmd-forms (tamago/cmd): its package file and
+  files under go/arbace/repr/go/internal/, the namespace go.cmd.compile.internal.syntax renamed
+  go.arbace.repr.go.internal.syntax and the import path arbace/repr/go/internal/syntax, nothing
+  else changed (each file's lines kept: the forms' positions are its lines); the package file
+  says where it comes from. {relative-path text}."
+  [^String cmd-forms]
+  (let [src (str cmd-forms "/go/cmd/compile/internal/syntax")
+        dst "go/arbace/repr/go/internal/syntax"
+        rename (fn [^String t]
+                 (-> t
+                     (str/replace "go.cmd.compile.internal.syntax" "go.arbace.repr.go.internal.syntax")
+                     (str/replace (str ":path \"" syntax-path "\"") (str ":path \"" copy-path "\""))))
+        note (str ";; Generated by arbace.repr.go.syntax (bin/generated-check --update): gc's parser,\n"
+                  ";; tamago/cmd/go/" syntax-path ", renamed " copy-path "\n"
+                  ";; (doc/go/GO-PARSER-SURVEY.md, GP7); do not edit.\n")]
+    (into {(str dst ".ae") (str note (rename (slurp (str src ".ae"))))}
+          (for [^File f (sort-by #(.getName ^File %) (.listFiles (File. src)))
+                :when (str/ends-with? (.getName f) ".ae")]
+            [(str dst "/" (.getName f)) (rename (slurp f))]))))
 
 (def ^:private loaded (atom nil))
 
-(defn- define-package!
-  "Checks and defines package source src with goi, registered under its path; its init run."
-  [src ns-sym what]
-  (let [st (atom {:path (:path src) :name (:name src) :ns ns-sym
-                  :config (:config src) :opts (:opts src)
-                  ;; repl/source-of takes a file's imports from :imports
-                  :files (mapv #(assoc % :imports (or (:imports %) (get-in % [:opts :imports]))) (:files src))
-                  :funcs {} :globals {} :types {} :defined #{}})
-        _ (swap! repl/packages assoc (:path src) st)
-        r (repl/check-source src nil)
-        _ (when (seq (:errors r))
-            (swap! repl/packages dissoc (:path src))
-            (throw (ex-info (str what " does not check:\n"
-                                 (str/join "\n" (for [e (take 10 (:errors r))]
-                                                  (str (:file e) ":" (:line e) ": " (:msg e)))))
-                            {:errors (:errors r)})))
-        {:keys [inits init-funcs]} (repl/define! st r {:vars? true})]
-    (repl/call0 inits "init")
-    (doseq [f init-funcs] (repl/call0 f "init"))
-    st))
-
 (defn load!
-  "Checks and defines gc's syntax from the forms of cmd-forms (tamago/cmd) and the driver with
-  goi, once per process; returns {:errors fn :ms ms}."
-  [^String cmd-forms]
+  "The driver (arbace/repr/go/gcsyntax), once per process: compiled when goi's table lists it
+  (GP7), else loaded with gc's syntax (the renamed copy) from ARBACE_PATH and interpreted by goi;
+  returns {:errors fn :ms ms :compiled bool}."
+  []
   (locking loaded
     (or @loaded
         (let [t0 (System/nanoTime)
-              cfg @repl/config
-              ssrc (load/package-source {:dir cmd-forms} syntax-path cfg)
-              _ (when-not ssrc (throw (ex-info (str "no forms of " syntax-path " under " cmd-forms) {})))
-              _ (define-package! ssrc (symbol (str (load/path->ns syntax-path))) "gc's syntax")
-              dsrc (ck/forms-source driver-forms cfg)
-              _ (define-package! dsrc 'go.arbace.repr.go.gcsyntax "the syntax errors' driver")
+              compiled (repl/listed? driver-path)
+              _ (require 'go.arbace.repr.go.gcsyntax)
               f (resolve 'go.arbace.repr.go.gcsyntax/Errors)]
-          (reset! loaded {:errors @f :ms (/ (- (System/nanoTime) t0) 1e6)})))))
+          (when-not f (throw (ex-info (str "the driver " driver-path " has no Errors") {})))
+          (reset! loaded {:errors @f :ms (/ (- (System/nanoTime) t0) 1e6) :compiled compiled})))))
 
 (defn file-errors
   "gc's syntax errors of the Go file at path, as gc prints them with -C (FILE:LINE: MESSAGE, FILE
   name): {:lines [line ...] :syntax? bool}, :syntax? whether one is a syntax error (gc stops
   after them; else types2 would go on)."
-  [cmd-forms ^String path ^String name]
-  (let [^String r ((:errors (load! cmd-forms)) path name)]
+  [^String path ^String name]
+  (let [^String r ((:errors (load!)) path name)]
     {:lines (vec (remove str/blank? (str/split-lines (subs r 1))))
      :syntax? (= \S (.charAt r 0))}))
 
 (defn errors-text
   "The syntax errors of the files of a job (dir, file names) as gc prints them, one text."
-  [cmd-forms ^String dir files]
-  (let [rs (for [f files] (file-errors cmd-forms (str dir "/" f) f))]
+  [^String dir files]
+  (let [rs (for [f files] (file-errors (str dir "/" f) f))]
     {:text (apply str (for [r rs l (:lines r)] (str l "\n")))
      :syntax? (boolean (some :syntax? rs))}))
 
 (defn -main
-  "[--forms DIR] [--out DIR] FILE...: each Go file's syntax errors as gc prints them with -C (its
-  base name), by gc's syntax from tamago/cmd's forms (--forms: another tree) run by goi; on
-  standard output, or with --out into DIR/FILE.txt each (FILE as given, relative), a summary
-  on standard error."
+  "[--out DIR] FILE...: each Go file's syntax errors as gc prints them with -C (its base name),
+  by gc's syntax (load!: compiled, or interpreted by goi); on standard output, or with --out into
+  DIR/FILE.txt each (FILE as given, relative), a summary on standard error."
   [& args]
-  (let [[opts files] (loop [opts {:forms "tamago/cmd"} as args]
+  (let [[opts files] (loop [opts {} as args]
                        (case (first as)
-                         "--forms" (recur (assoc opts :forms (second as)) (drop 2 as))
                          "--out" (recur (assoc opts :out (second as)) (drop 2 as))
                          [opts as]))
-        forms (:forms opts)
-        {:keys [ms]} (load! forms)
+        {:keys [ms compiled]} (load!)
         t0 (System/nanoTime)
         rs (doall
              (for [^String f files]
-               (let [{:keys [lines syntax?] :as r} (file-errors forms f (.getName (File. f)))]
+               (let [{:keys [lines syntax?] :as r} (file-errors f (.getName (File. f)))]
                  (if-let [out (:out opts)]
                    (let [o (File. (str out "/" f ".txt"))]
                      (.mkdirs (.getParentFile o))
@@ -152,8 +105,9 @@
                  r)))]
     (flush)
     (binding [*out* *err*]
-      (println (format "gc's syntax errors: %d files, %d with errors, %d with a syntax error (gc stops after them); gc's syntax loaded by goi in %.2f s, the files in %.2f s"
+      (println (format "gc's syntax errors: %d files, %d with errors, %d with a syntax error (gc stops after them); gc's syntax %s in %.2f s, the files in %.2f s"
                        (count rs) (count (filter (comp seq :lines) rs)) (count (filter :syntax? rs))
+                       (if compiled "compiled (goi's table), its namespace made" "loaded by goi")
                        (/ ms 1e3) (/ (- (System/nanoTime) t0) 1e9))))
     (shutdown-agents)
     (System/exit 0)))

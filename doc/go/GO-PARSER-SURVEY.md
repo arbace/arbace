@@ -1879,3 +1879,155 @@ The user decided GPS38-GPS44 as built:
 - GPS42 (a): raw forms only where the final conversion fails.
 - GPS43 (a): E1's 4 known.
 - GPS44 (a): the essential subset's rule applied (57 programs more, 797).
+
+## As built: GP7 (2026-10-22)
+
+GP7, compiled (§8), is built on branch `go-parser-gp7` from main `311a43a0` (seed `a8672e0d`,
+which carries GP1-GP5), as decided: GPS4 (b) (interpreted from GP1, compiled now) and GPS13 (b)
+(the dumper a committed and checked file). GPS3 (b) was measured and not built (GPS47). The
+tools' host for the checks was the worktree's stage 0 (`target/seed/amd64/arbace`, 149,332,128
+bytes, `bin/seed --build`), whose table does not list the new packages, so it runs them
+interpreted as before; the numbers of the compiled reader were taken with executables built in
+the worktree as `ARBACE_HOST_EXE` (below). The shared 64-core amd64 machine, load 6 to 25 for
+most runs (125 during the round trips' own 64 jobs), another agent's builds beside them. No
+re-seed (`bin/seed --make` not run).
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the table's list | `go/arbace/gotable.edn` | `go/ast`, `go/parser`, `go/scanner`, `go/token` listed (interpretable from the digest before), and two packages of the program's own Go forms, `arbace/repr/go/godump` and `arbace/repr/go/gcsyntax` |
+| the dumper | `go/arbace/repr/go/godump.ae`, `godump/dump.ae` (1,030 lines, generated) | GP1's dumper, the same forms (`dumper-forms`), written by `arbace.repr.go.parse/dumper-texts` (`layout-text`: arbace.go.table's `form-text` with lines broken at 100 columns) and committed (GPS13 (b)); its keywords made by `Init`, not at the package's initialization (compiled, the package is initialized before Arbace sets `arbace`'s Hooks: the first build panicked there) |
+| gc's syntax errors' driver | `go/arbace/repr/go/gcsyntax.ae`, `gcsyntax/errors.ae` (hand-written) | GP6's driver, moved from `arbace.repr.go.syntax`'s inline forms into go/; it imports the renamed copy |
+| gc's syntax, renamed | `go/arbace/repr/go/internal/syntax.ae`, `syntax/` (17 files, generated) | `tamago/cmd`'s forms of `cmd/compile/internal/syntax` with the namespace `go.arbace.repr.go.internal.syntax` and the import path `arbace/repr/go/internal/syntax`, nothing else changed (each file's lines kept), by `arbace.repr.go.syntax/copy-texts` (GPS45); not listed: only the driver calls it; Go's internal rule lets `arbace/repr/go/...` import it |
+| the readers | `arbace.repr.go.parse/load!`, `arbace.repr.go.syntax/load!` | `(require 'go.arbace.repr.go.godump)` (and `gcsyntax`): on an executable whose table lists the package, its namespace is the table's (RT.load asks the table first: §2.3 of GOI-SPEC), the calls compiled; else goi loads the package from ARBACE_PATH (the checkout's go/) and interprets it, with go/parser's packages from the digest, as GP1 and GP6 did. `forms-check` says which: a listed package "compiled", else the digest's declarations against `tamago/goroot`'s as before, and the dumper's committed files against those generated from `tamago/goroot`'s go/ast; `bin/repr-go syntax-errors` loses `--forms` |
+| the program | `arbace/go/table.ae` (`program-path?`), `arbace/j2g/main.ae`, `bin/goi` | the table's generator reads `arbace` and every `arbace/repr/...` path from go/ (the program's own forms); j2g copies `go/arbace/repr/` into the program; the table's key includes its files |
+| the generated files' check | `bin/generated-check` | beside F7.3's variants: `arbace.repr.go.parse generate` writes the dumper's 2 files and the copy's 17 into a scratch tree, which must equal go/'s, file for file and byte for byte, with no other file under the two trees (`--update` writes them); in the essential gate as before. A changed or an extra file is reported (checked) |
+| the prefetch | `arbace.repr.go.annotate` (`new-session`) | a package the checker asks for starts the preparation (the native dump and the raw conversion, which need no other package) of the packages it imports, in a pool of `REPR_GO_JOBS` threads, at most `REPR_GO_JOBS` prepared and not yet asked for (a permit each; a task without one leaves the job to the checker's own call, which never waits for a permit); `REPR_GO_PREFETCH=0` turns it off (GPS48) |
+| the phases | `arbace.repr.go.annotate`, `arbace.repr.go/convert-data` (`:convert-ms`) | `bin/repr-go read` prints the time of each phase summed over the jobs: the parse and dump, the raw conversion with the checker's source, the annotation, the final conversion, its layout, write and read-back check |
+
+**The output is unchanged.** go/parser compiled is the toolchain's `GOROOT/src/go/parser`, of
+which `tamago/goroot`'s forms are the conversion (`bin/tamago-vendor verify`); the dumper's code
+is the forms goi interpreted. `bin/repr-go native-check` over the 22 corpora with the compiled
+program as the host: 12,275 dumps, E-tree 12,275 equal, 12,158 raw forms resolved (117 raw only,
+as GP4), E-ann 12,158 of 12,158, E-forms 12,158 of 12,158, 0 not known; the native forms of
+`fmt` and `unicode/utf8` (linux/amd64) byte for byte stage 0's interpreted reader's, std
+tamago/amd64's (mode `:lines`) byte for byte the helper's.
+
+**The exit criteria, measured.**
+
+- **The parse over std under 1 s: 0.5 s.** `REPR_GO_JOBS=1 bin/repr-go read --reader native
+  --trees --corpus amd64` (std tamago/amd64, 1,742 files, 19.6 MB, 2,308,308 nodes), one thread:
+  parse 0.5 s (GP1, interpreted: 25.2 s; E3's native go/parser 0.44 s), dump 6.5 s (GP1: 27.3 s),
+  the dumper's namespace made in 0.14 s (GP1's load 2.2-2.6 s). The dump is now 13 times the
+  parse: its 2.3 million nodes and their vectors built by calls into Arbace (`arbace.Call` of
+  `mkFn`, `vecFn`, `mapFn`), about 3 µs a node; at 32 jobs the same corpus sums 15 to 25 s of
+  dump (contended).
+- **The executable's growth** (linux/amd64, stripped; `bin/goi table --size` on the work
+  module): 149,749,920 bytes built from main `311a43a0` in the worktree, 150,814,880 at GP7's head,
+  **+1,064,960 (+0.71%)**. The table 9,584,640 bytes against 10,489,856 (+905,216), its invokers
+  1,519,616 against 1,597,440 (+77,824); linked without the table, 140,165,280 against 140,316,832.
+  §3.4's +0.36 MB was go/parser linked alone: the measure here adds gc's syntax (the copy and
+  the driver), the dumper, and the table's API of the four packages (GPS46: with only the two
+  repr/go packages listed, go/parser's four linked but not listed, 150,585,504 bytes, so listing
+  them costs 221,184).
+- **The essential gate** passed (below).
+- **Batched into a re-seed**: not made here; what it carries is listed below.
+
+**Speed, before and after** (wall; A: stage 0, the reader and the checker evaluated where GP6
+changed them, the parser interpreted; B: main's program built in the worktree, everything
+compiled but the parser and the dumper, which goi interprets: what a re-seed of main would give;
+GP7: the gate's executable of GP7's head, all compiled; helper: the helper's path on the same
+host):
+
+| run | GP5's record | A | B | GP7 | helper |
+|---|---:|---:|---:|---:|---:|
+| `read --goos linux fmt unicode/utf8` | 87 s (helper 3.8 s) | 99.4 s | 59.7 s | 33 to 45 s (50 to 62 s with `REPR_GO_PREFETCH=0`) | 5.1 s |
+| `read --corpus amd64` (std, mode `:lines`) | | | | 99 s (1,388 CPU-s) | 45 s with the dumps made (801 CPU-s); 81 s making them |
+| `read --corpus linux-errtest` | 156 s (helper 44 s) | | | 99 s | 35 s |
+| `roundtrip amd64` (convert and print, check) | 447 s (372, 75; helper 137 s) | | | 183 s (138, 45) | 80 s (69, 10) |
+| `native-check`, 22 corpora | 110 min | | | 107 min (919 CPU-min, at most 30.2 GB resident) | |
+
+So the native path is now 1.2 to 2.8 times the helper's on whole corpora (std's read 2.2, its
+round trip 2.3, the error tests 2.8; GP5: 1.4 to 3), and a read of a few packages 6 to 9 times
+(GP5: 23). The parse and the dump are no longer what costs: over std's read they sum 16.5 s of
+the 1,388 CPU-s. The rest is the checker's walk of the configuration's standard library (its
+session: every read checks the packages its packages import, in dependency order), the raw
+conversion (309 s summed over std's jobs), the final conversion (89 s), the annotation (107 s)
+and the layout, write and read-back check (297 s). `native-check` gains nothing: it is the
+helper's dumps' reading (E-tree's own cost) and the checker and four conversions per dump, as
+at GP5. Which numbers need the re-seed: none of GP7's columns; the tools' host is stage 0
+until the re-seed that carries GP7, so `bin/repr-go read` runs at A's speed until then (B's
+with a re-seed of main alone), at GP7's after it.
+
+**GPS3 (b), measured.** The one-conversion path would save the annotation and the final
+conversion, 196 of std's 1,388 CPU-s (14%), less what the checker would spend writing the forms
+itself, and it would move the converter's typed half into the checker, with E-ann and E-forms
+proven again. Not worthwhile now (GPS47).
+
+**Checks.** `bin/repr-go native-check` over the 22 corpora (above; the first run, with the
+prefetch unbounded, was killed by the system's memory limit in the `cmd-` group, hence the
+permits); `bin/repr-go read` of `fmt` and `unicode/utf8` on stage 0 (interpreted) and on the
+compiled executables, the forms byte for byte equal; `bin/repr-go read --corpus amd64` native
+and helper, equal; `bin/repr-go syntax-errors` on stage 0 (the driver and the copy interpreted:
+`syntax/semi1.go`, `fixedbugs/issue19610.go`, `syntax/typesw.go`, gc's messages);
+`bin/repr-go roundtrip amd64` (no regressions); `bin/generated-check` (19 files as generated; a
+changed and an extra file reported); `bin/goi check --essential` on GP7's executable (797 of 797, no regression); `bin/goi annotations` with the compiled reader as the host (its five corpora: 0 errors, every count as recorded); `bin/goi test` (the checker's tests, the interpreter's programs 20 of 20, the REPL 110 of 110, every user std package imported at the REPL 185 of 185: 94 compiled, go/parser's four among them, 77 interpreted); `make check-makefile`; the essential `bin/gate`
+passed (13 m 49 s, its build the cached gate build of the same inputs: the smoke test, Clojure's suite
+with no regressions, the oracle 22,658 of 22,711 against its 53 known, the differential check
+12,741 of 12,764 against its 23 known, goi's essential check 797 of 797, the generated files, repr/go's 19
+among them). Not run: `bin/gate --full`, the box (the program's change reaches it at the next box build).
+
+**The program changes, for the re-seed.** The table (the six packages listed: the program links
+and registers go/parser, go/scanner, go/ast, go/token, the dumper, the driver and the renamed
+syntax), `go/arbace/repr/` (new Go forms of the program), `arbace.go.table` (`program-path?`),
+j2g's copy of `go/arbace/repr/`, and the embedded tools' namespaces `arbace.repr.go.parse`,
+`.syntax`, `.annotate`, `.raw` and `arbace.repr.go` (`convert-data`'s `:convert-ms`). After the
+re-seed, stage 0 runs the reader compiled (GP7's column) and loads nothing of GP1-GP7 from the
+checkout. The runtime's key changes with go/ (`bin/lib/version.bash`), so the first build after
+the re-seed compiles the namespaces once (two runs) as after any runtime change.
+
+**Proposals (GPS45-GPS49; each built as recommended).**
+
+- **GPS45 gc's syntax in the program.** cmd's internal packages cannot be imported from the
+  program's module, so the driver needs a copy under another path.
+  - (a) a renamed copy committed in go/ (`go/arbace/repr/go/internal/syntax`, 244 KB, 17 files),
+    generated from `tamago/cmd`'s forms and kept so by `bin/generated-check` (as built): the
+    program's build reads only go/, as for the dumper (GPS13 (b));
+  - (b) renamed at build time, by j2g's copy and the table's generator from `tamago/cmd`: no
+    duplicate in the tree, but the build, its gate key and the runtime's key would read
+    `tamago/cmd` too, and the interpreted path would need a source of its own again.
+
+  *Recommended: (a)*.
+- **GPS46 What the table lists.**
+  - (a) go/ast, go/parser, go/scanner, go/token and the two repr/go packages (as built,
+    +1,064,960 bytes): the plan's list; goi's programs that import go/parser's packages run them
+    compiled;
+  - (b) only the two repr/go packages: go/parser's four linked and called by the dumper, but
+    interpreted from the digest for goi's programs, 221,184 bytes less.
+
+  *Recommended: (a)*.
+- **GPS47 GPS3 (b), the checker finishing the forms itself.**
+  - (a) not built: 14% of a corpus's read at most, against the converter's typed half moved into
+    the checker and the equalities proven again (as built);
+  - (b) built now.
+
+  *Recommended: (a)*: the next costs are elsewhere (GPS49).
+- **GPS48 The packages a checked package imports prepared ahead.**
+  - (a) in a pool, at most `REPR_GO_JOBS` held, `REPR_GO_PREFETCH=0` to turn it off (as built):
+    a read of a few packages 33 to 45 s against 50 to 62 s; `native-check` the same (its jobs
+    already parallel), its resident memory as GP4's (30.2 GB against 29.9);
+  - (b) none, as GP4 built: each package prepared when the checker asks for it.
+
+  *Recommended: (a)*.
+- **GPS49 The native read's next costs** (for a later step, not this plan's milestones).
+  - (a) none now (as built);
+  - (b) GPS37 (b): each configuration's checked standard library cached on disk, which a read of
+    a few packages pays for today (most of the 33 to 45 s), its format kept in step with the
+    checker's state;
+  - (c) the raw conversion profiled: it costs 3.5 times the final one over std (309 s against 89 s
+    summed), where the two convert the same trees;
+  - (d) the dumper's nodes built without a call into Arbace per node (`arbace` given a map
+    constructor of its own).
+
+  *Recommended: (a)* in GP7; (c) first when the reader's speed is next worked on, then (b).
