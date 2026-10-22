@@ -939,3 +939,32 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   - no milestone tag yet, over a tag after `--full`.
 - GP6 on the branch `go-parser-gp6`, JN7 on `java-frontend-jn7`, both from main after this entry, in
   `.tmp/worktrees/`.
+
+## 2026-10-22: GP6 merged; GPS38-GPS44 decided as built (the user)
+
+- **What:** GP6, syntax errors in gc's words and invalid programs for goi (branch `go-parser-gp6`,
+  `e351b51b`, `35ef6af5`, `f709bdcb`; doc/go/GO-PARSER-SURVEY.md, "As built: GP6"), merged into main
+  at `475f84e3` without conflicts.
+- **Built:**
+  - `arbace.repr.go.syntax` (`arbace/repr/go/syntax.ae`): goi runs gc's `cmd/compile/internal/syntax`
+    from `tamago/cmd`'s forms with a driver of Go forms parsing as gc's noder does, errors ordered and
+    printed as gc's `-C`; `bin/repr-go syntax-errors`; the native read's summary gives gc's syntax
+    errors for a file go/parser rejects.
+  - `arbace.go.run --errorcheck --raw`: goi checks raw forms in the resolve mode; `raw-lines`
+    rebuilds lines from mode `:full`'s positions; `(go/package _ ...)` in raw mode.
+  - `bin/goi check`: error tests judged on gc's syntax errors first (GPS38); programs the converter
+    cannot convert judged on their raw forms.
+  - The checker: GPS36 (b), go/types' records of invalid programs in the normal mode too; new types2
+    errors for GC47's programs; three `-lang` bugs found by GPS33's revisit fixed.
+  - Records: `check-linux-amd64.edn` re-recorded, E1's 4 known, `divergences.edn` reclassed,
+    `essential.txt` 797 programs.
+- **Results:** `bin/goi check` 1,604 of 1,837 pass (was 1,472), 145 unsupported (was 281), 70 known,
+  none fail; syntax errors 66 of 70 (E1's 4 known); GC47 63 of 64 (`weak.go` unsupported); the
+  gc-phases class 18 (was 21). `native-check` over the five corpora concerned: 3,328 dumps, 0 differ.
+  `annotations` as recorded.
+- **Gates:** the branch's essential gate passed (14m58s); on main at `475f84e3` it passed (22m28s).
+- **The shipped program changed** (`arbace.go.check`, `arbace.go.run`, `arbace.repr.go.annotate`,
+  `.convert` in raw mode, the new `.syntax`): re-seed batched with JN7's.
+- **Decided (the user):** GPS38-GPS44 as built: 38 (a), 39 (a) now and (b) with 41 (c), 40 (a), 41 (a)
+  with (b) when needed and (c) as a step of its own, 42 (a), 43 (a), 44 (a); over porting the pragmas
+  now and no raw read in the essential gate.

@@ -1867,3 +1867,15 @@ and the printer are unchanged: the raw mode's `package _` only).
   - (b) gc's syntax's programs only, no raw read in the essential gate.
 
   *Recommended: (a)*: the subset's rule, as every milestone applied it.
+
+## Decided (2026-10-22): GPS38-GPS44
+
+The user decided GPS38-GPS44 as built:
+- GPS38 (a): gc's syntax on every error test, judged alone on a syntax error or go/parser's rejection.
+- GPS39 (a) now: syntax's branch errors left out, goi's checker reporting branches; (b) with GPS41 (c).
+- GPS40 (a): raw forms' lines from mode `:full`'s positions (`raw-lines`).
+- GPS41 (a): go/types from the helper's dumps the class's oracle; (b) when a `-lang` program next
+  lands in it; (c), noder's pragma handler ported, as a step of its own.
+- GPS42 (a): raw forms only where the final conversion fails.
+- GPS43 (a): E1's 4 known.
+- GPS44 (a): the essential subset's rule applied (57 programs more, 797).
