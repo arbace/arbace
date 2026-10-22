@@ -35,7 +35,7 @@
             [arbace.repr.go.read :as rd])
   (:import [java.io File]
            [java.util HashMap]
-           [java.util.concurrent ConcurrentHashMap ExecutionException Executors FutureTask TimeUnit]
+           [java.util.concurrent ConcurrentHashMap ExecutionException Executors FutureTask Semaphore TimeUnit]
            [java.util.concurrent.atomic LongAdder]))
 
 ;;; Raw forms as the checker reads them
@@ -145,8 +145,9 @@
 
 (def ^:private prefetch
   "The pool that prepares jobs (prep: their native dumps and raw conversions, which need no other
-  package) ahead of the checker, which asks for them in dependency order (GP7); nil: each job
-  prepared when the checker asks for it."
+  package) ahead of the checker, which asks for them in dependency order (GP7), and the permits
+  that bound the jobs prepared but not yet asked for (their trees and raw forms held): {:pool
+  :permits}; nil: each job prepared when the checker asks for it."
   (atom nil))
 
 (defn- run-task
@@ -169,12 +170,17 @@
         deps (fn [j] (distinct (concat (vals (:import-map j)) (vals (imports-of j)))))
         start! (fn start! [k]
                  (if (contains? index k)
-                   (when-let [^java.util.concurrent.ExecutorService pool @prefetch]
+                   (when-let [{:keys [^java.util.concurrent.ExecutorService pool ^Semaphore permits]} @prefetch]
                      (when-not (.containsKey futs k)
                        (let [j (get index k)
+                             ;; prepared only with a permit, released when asked for; else left
+                             ;; to the checker's own call (never waiting: no deadlock)
                              ft (FutureTask. ^Callable (fn []
                                                          (doseq [d (deps j)] (start! d))
-                                                         (prep j (imports-of j))))]
+                                                         (if (.tryAcquire permits)
+                                                           (try (prep j (imports-of j))
+                                                                (catch Throwable ex (.release permits) (throw ex)))
+                                                           ::skipped)))]
                          (when (nil? (.putIfAbsent futs k ft))
                            (.execute pool ft)))))
                    (when base ((:start! base) k))))
@@ -183,7 +189,11 @@
                    (let [_ (when (contains? index k) (start! k))
                          ft (.get futs k)
                          r (if (instance? FutureTask ft)
-                             (let [r (run-task ft)] (.put futs k :done) r)
+                             (let [r (run-task ft)]
+                               (.put futs k :done)
+                               (if (= ::skipped r)
+                                 (prep j (imports-of j))
+                                 (do (.release ^Semaphore (:permits @prefetch)) r)))
                              (prep j (imports-of j)))]
                      (when (.containsKey keep k) (.put recs k r))
                      (:src r))))
@@ -994,7 +1004,7 @@
         _ (doseq [x fc] (println (ps/forms-check-text x)))
         forms-bad (count (remove #(nth % 2) fc))
         pool (Executors/newFixedThreadPool (:jobs opts))
-        _ (reset! prefetch (Executors/newFixedThreadPool (:jobs opts)))
+        _ (reset! prefetch {:pool (Executors/newFixedThreadPool (:jobs opts)) :permits (Semaphore. (int (:jobs opts)))})
         _ (reset! forms-dir (:forms opts))
         ;; the corpora grouped by the configurations their loads need (the standard library's
         ;; sessions), each group's sessions dropped after it: memory for one group's at a time
@@ -1014,7 +1024,7 @@
                      (mapv second))
         unknown (+ forms-bad (reduce + (keep :unknown results)))]
     (.shutdown pool)
-    (.shutdownNow ^java.util.concurrent.ExecutorService @prefetch)
+    (.shutdownNow ^java.util.concurrent.ExecutorService (:pool @prefetch))
     (.awaitTermination pool 1 TimeUnit/MINUTES)
     (when (and (= cmd "check") (> (count results) 1))
       (println (format "native-check: %d corpora, %d dumps; E-tree %d equal; raw forms %d resolved, %d raw only; E-ann %d equal, %d differ, %d failed; E-forms %d equal, %d differ; %d not known"
