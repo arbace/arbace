@@ -1729,3 +1729,139 @@ The user decided GPS32-GPS37 as built:
 - GPS36 (a) now, in the resolve mode; (b) at GP6, in goi's normal mode.
 - GPS37 (a): the native reader's speed accepted until GP7 and the next re-seed; `--reader helper` a
   flag away.
+
+## As built: GP6 (2026-10-22)
+
+GP6, syntax errors in gc's words and invalid programs for goi (§8), is built on branch
+`go-parser-gp6` from main `f76981ca` (seed `a8672e0d`, which carries GP1-GP5), as decided: GPS2
+(b) (gc's syntax for the errors), GPS9 (b) (goi's errorcheck on the raw forms of the programs the
+converter cannot convert, E1's 4 known), GPS33 revisited and GPS36 (b) (go/types' records of
+invalid programs in goi's normal mode too). The tools' host was the worktree's stage 0
+(`target/seed/amd64/arbace`, 149,332,128 bytes, `bin/seed --build`); goi's check ran on the
+worktree's build (`bin/arbace-go --build`); the shared 64-core amd64 machine, load 9 to 25.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| gc's syntax errors | `arbace/repr/go/syntax.ae`, `arbace.repr.go.syntax` (new, 159 lines) | `cmd/compile/internal/syntax` checked and defined by goi from `tamago/cmd/go/cmd/compile/internal/syntax/`'s forms (its 16 files, interpreted; its imports compiled or from the digest), and a driver package of Go forms (`arbace/repr/go/gcsyntax`, in the namespace) that parses a file as gc's noder does (`noder.LoadPackage`: `syntax.Parse` with an error handler and `CheckBranches`, no pragma handler) and keeps its errors as `base.ErrorfAt` does (one error beginning `syntax error` per line, one of equal other errors per line), ordered and printed as `base.FlushErrors` with `-C` prints them (by position, a repeated line once, `FILE:LINE: MESSAGE`), and says whether one is a syntax error (gc stops after them: noder's `checkFiles`, `base.SyntaxErrors`; else types2 goes on with syntax's tree). Loaded once per process, 3.3 to 5.0 s; then about 0.6 ms a file |
+| the command | `bin/repr-go syntax-errors [--out DIR] FILE...` | the errors of each file on standard output, or into `DIR/FILE.txt`; a summary on standard error |
+| the native read | `arbace.repr.go.annotate` (`read-job`) | a file go/parser rejects: the summary's `fail` line has gc's syntax errors as its message (go/parser's, as the helper writes it, when gc's syntax reports none) |
+| raw forms for goi | `arbace.go.run --errorcheck --raw ROOT NS` | the raw forms' text of an invalid program (`bin/repr-go read --reader native --raw`, mode `:full`) read as a package, the lines mode `:lines` writes taken from mode `:full`'s positions (`raw-lines`: a form's least `:go/pos` line but its comment groups' (`:doc`, `:comment`), a vector's from its literals and children (an import group's first spec holds the group's positions), a function's `:go/end` from `:rbrace`, literals' `:go/breaks` from `:go/apos`), checked in the resolve mode (GOI-SPEC §3.10) against the table's digest, its answers dropped, its errors printed as errorcheck prints them |
+| `package _` | `arbace.repr.go.convert/package-form` (raw mode only) | a package whose files' clauses all name `_` (go/types' name `""`) is `(go/package _ ...)` in raw forms; the final forms take a name from the path as before |
+| goi's check | `bin/goi check`'s `check_err` | after the action's flags, the line directives and gc's reference, as gc's front end goes: gc's syntax errors of every error test to check (`bin/repr-go syntax-errors`, `.tmp/goi-check/syntax/`) judged alone when one is a syntax error or go/parser rejects the file; else goi's checker on the final forms, or, where the converter cannot convert the program, on its raw forms (`.tmp/repr-go/raw/linux-errtest`, made when missing and needed); then the judge and GPS33's oracle as before |
+| the checker (GPS36 (b)) | `arbace/go/check/` | GPS30's and GPS36's rules in both modes: an integer literal beyond 512 bits (`constant overflow`, its value unknown), a blank field or method never found, an invalid index keeping the element's type, a promoted field through an embedded pointer in a struct literal, `arrayLength`'s look-up, a constant keeping a valid declared type with an unknown value (package and local), a typed constant spec without values, a redeclared `init` or `main` outside the package's objects |
+| the checker (types2's errors on the 64) | the same | invalid import paths (`validatedImportPath`: `invalid import path (empty string)`, `(invalid character U+0021 '!')`; an absolute path, gc's importer), a non-name on the left of `:=` (its operand used first, `useLHS`; a parenthesized name is none), a struct literal's key that is no name (`invalid field name os.File in struct literal`), a conversion's arity (`too many arguments in conversion to []byte`, `missing argument ...`), a float literal beyond big.Float's exponent (`malformed constant`), an operand of unknown value making an unknown result without an error (types2's `binary`, `unary`), `bitwise XOR` and `bitwise complement` overflows, a selector on a type being declared where a type is wanted (its cycle, `isComplete`; else `x.f is not a type`), `invalid package name _`, `field X is embedded via a pointer in T` naming the type; messages print raw forms' heads as Go and mode `:full`'s parentheses (`:go/parens`); `cannot use _ as value or type` (types2's words), an operand whose form is `false` printed with it |
+| the checker (GPS33 revisited) | the same, both modes | `-lang`: `unsafe.Add` and `Slice` (go1.17), `SliceData`, `String`, `StringData` (go1.20), type parameters (go1.18), an embedded duplicate method (go1.14, at the embedding's line) |
+| the records | `test/goi/check-linux-amd64.edn`, `check-known.edn`, `divergences.edn`, `essential.txt` | the reference recorded; E1's 4 known; the class of syntax errors and invalid programs now E1's 4 (`:no-forms`), `weak.go` a class of its own (GR8a's refused std package); 57 programs added to the essential subset by its rule (every new passing one outside `fixedbugs/`, every fourth of `fixedbugs/`) |
+
+**The exit criteria, measured.** `bin/goi check` (all 1,837 programs; errorcheck's 659 from the
+corpus `linux-errtest`), against the reference before GP6:
+
+| class before | programs | now |
+|---|---:|---|
+| syntax errors: go/parser rejects them | 70 | **66 pass** (E1's 66, the same programs), 4 known: E1's 4, as GPS9 (b) decided (`fixedbugs/issue23586.go`, `issue50372.go`: gc's syntax accepts them, types2 reports the errors; `issue4468.go`, `slice3err.go`: gc's syntax reports some) |
+| repr/go cannot convert the invalid program (GC47) | 64 | **63 pass**: 61 on their raw forms, 2 (`syntax/typesw.go`, `fixedbugs/issue19610.go`, E2's two that go/parser accepts and gc's syntax rejects) on gc's syntax errors; `weak.go` unsupported (it imports `weak`, refused by GR8a) |
+| errors of gc's phases after type checking (go/types reports none) | 21 | **3 pass** (`issue34329`, `issue46525`, `issue51531`: `-lang` programs whose errors goi did not report, hidden by the oracle, which checks at the package's version), 18 stay |
+| everything else | 1,682 | as recorded (`nosplit.go` times out at 10 s under load, alone too, as at GP5: kept as recorded) |
+| **total** | **1,837** | **1,604 pass** (1,472 before), 145 unsupported (281), 70 known (66), 18 skipped; none fails or errs |
+
+`bin/goi divergences`: 1,604 of 1,837 pass, the 233 others in 18 classes; the essential subset
+(797 programs) all passing; the boxes' references unchanged (no errorcheck program runs in the box).
+
+**gc's syntax over the error tests.** Over all 659: 85 files with errors. 68 are files go/parser
+rejects (E2's two it accepts have none); of the 589 go/parser accepts, 17: 2 with a syntax error
+(`syntax/typesw.go`, `fixedbugs/issue19610.go`, judged on them), 3 with line directives
+(unsupported before; `issue18393.go` with a syntax error), 11 with CheckBranches' label and jump
+errors and `bug217.go` with `method has no receiver`, which goi's checker reports as go/types
+does (GPS39). The run takes 7.7 s for the 659, 3.6 s of it the load.
+
+**Raw forms against final forms.** goi's errorcheck on the raw forms and on the final forms of
+the 522 error tests both have (stage 0, the action's flags left out, judged): 25 outputs differ,
+every one by the resolve mode's spellings and parentheses (`byte` for `uint8`, `A1` for an alias's
+`int`, `(chan (chan int))(nil)`, `(1 << 64) - 1`, `(I)`), each the closer to gc's; the raw forms
+pass all the final ones pass and 3 more (`convert1.go`, `fixedbugs/issue8183.go`: byte and rune;
+`funcdup2.go`: a type's line), none fewer (GPS42). The lines of the raw forms first differed in 12
+programs (a node's doc comment's position, an import group's, literals' and closing braces'
+lines), fixed in `raw-lines`.
+
+**GPS33 revisited.** The class's oracle is go/types' errors in the helper's dumps. The raw forms
+give no second oracle (the checker would judge itself), but they make every error test checkable
+by goi, and the revisit found the oracle blind to `-lang`: godump checks each program at the
+package's version, so go/types reported none of `-lang=go1.13`'s, `go1.16`'s and `go1.17`'s errors
+and goi's failure to report them was classed as gc's later phases. Fixed in the checker (above).
+The 18 left: 5 gc's noder's pragma checks (`directive.go`, `directive2.go`: misplaced compiler
+directive; `issue18459`, `issue18882`, `issue48230`: `//go:` directives' rules), 13 gc's back end's
+(stack frame, channel and map element sizes, `issue49814`'s array beyond the address space).
+
+**The program changes.** `arbace.go.check` and its parts, `arbace.go.run`, `arbace.repr.go.annotate`,
+`arbace.repr.go.convert` (raw mode only) and the new `arbace.repr.go.syntax` are embedded namespaces:
+the next re-seed carries them, to be batched (no re-seed here). goi's normal mode changes for
+invalid programs only (errors and their follow-ons); `bin/goi annotations` keeps every count.
+
+**Checks.** `bin/goi check` (above; recorded) and `bin/goi check --essential` (797 of 797);
+`bin/goi divergences` (above); `bin/goi annotations` (its five corpora: 0 errors, every count as
+recorded); `bin/repr-go native-check linux-errtest test amd64 linux-dirtest goos-amd64` (E-tree,
+the raw forms, E-ann and E-forms: 3,328 dumps, 0 differ, 0 not known; `linux-errtest`'s one
+"without an oracle" is a dump whose helper's go/types could not import a path, as GPS34 counts it);
+`bin/repr-go syntax-errors` over the 659 and E1's judge (66 of 70, as E1); `bin/repr-go read
+--corpus linux-errtest` (the summary's messages gc's); `make check-makefile`; the essential
+`bin/gate` (below). Not run: `bin/gate --full`; repr/go's round trips (the converter's final mode
+and the printer are unchanged: the raw mode's `package _` only).
+
+**Proposals (GPS38-GPS44; each built as recommended).**
+
+- **GPS38 Which files gc's syntax checks for goi's check.**
+  - (a) every error test, its errors judged alone when one is a syntax error (gc stops after
+    them) or go/parser rejects the file (as built): E2's two go/parser accepts pass, 7.7 s for 659;
+  - (b) only the files go/parser rejects (GPS2 (b)'s letter): `typesw.go` and `issue19610.go`
+    judged on goi's `invalid syntax tree` errors, failing.
+
+  *Recommended: (a)*: it is gc's order.
+- **GPS39 gc's syntax's other errors on files go/parser accepts** (CheckBranches' label and jump
+  errors; gc goes on to types2, with `IgnoreBranchErrors`).
+  - (a) left out: goi's checker reports branches as go/types does (as built; 10 such programs pass,
+    `goto.go` and `bug217.go` stay known);
+  - (b) merged into goi's output, goi's own branch errors dropped: gc's words exactly
+    (`goto L jumps over declaration of x at FILE:43:4`), and with GPS41 (c) noder's pragma errors.
+
+  *Recommended: (a)* now; (b) with GPS41 (c), which needs the same merge.
+- **GPS40 The lines of raw forms read by goi.**
+  - (a) taken from mode `:full`'s positions when goi reads the text (`raw-lines`, as built);
+  - (b) raw forms written in mode `:lines` for goi: no positions, so no parentheses (`(x) := 0`'s
+    `non-name (x)`, the messages' `(*T)(x)`), and the raw writer's layout a second mode.
+
+  *Recommended: (a)*.
+- **GPS41 The class "errors of gc's phases after type checking"** (GPS33's revisit; 18 left).
+  - (a) go/types' errors from the helper's dumps as its oracle, as GPS33 (a) (as built);
+  - (b) the same, the helper's dump of a `-lang` program made at the action's language version,
+    so that the oracle sees what `-lang` adds (none left today: the three fixed);
+  - (c) gc's noder's pragma handler (`noder.go`'s `pragma`, `checkUnusedDuringParse`, `lex.go`'s
+    `pragcgo`) ported into the syntax driver as Go forms (about 150 lines): its 5 programs judged
+    on gc's front end's errors, the class only the back end's 13;
+  - (d) the class by the expected messages (`stack frame too large`, ...), no oracle.
+
+  *Recommended: (a)* now, with (b) when a `-lang` program next lands in the class; (c) as a step of
+  its own (it needs GPS39 (b)'s merge).
+- **GPS42 Raw forms for the error tests the converter converts.**
+  - (a) only where the final conversion fails (as built): goi's check checks goi on the forms goi
+    runs;
+  - (b) every error test on its raw forms: 3 more pass (byte and rune spellings, a line), none
+    fewer, but the check then judges the resolve mode, not the forms' checking.
+
+  *Recommended: (a)*; (b)'s spellings come to the final forms with GPS27 (b) (goi's normal mode
+  spelling types), deferred as GC157.
+- **GPS43 E1's 4** (go/parser rejects them; types2 reports some or all of their errors on syntax's
+  tree).
+  - (a) known, with their reasons (as built, GPS9 (b));
+  - (b) GPS9 (c): syntax's tree turned into raw forms (an adapter from syntax's nodes to the
+    dump's go/ast shape) for the files go/parser rejects.
+
+  *Recommended: (a)*: four programs, and (b) is a second tree's adapter.
+- **GPS44 The essential gate's share.**
+  - (a) the essential subset's rule applied to GP6's new passes (as built: 57 programs, gc's syntax
+    errors for its 191 error tests, about 5 s, and the raw read of the error tests, about 80 s,
+    when missing);
+  - (b) gc's syntax's programs only, no raw read in the essential gate.
+
+  *Recommended: (a)*: the subset's rule, as every milestone applied it.

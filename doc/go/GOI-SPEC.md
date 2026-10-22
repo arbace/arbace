@@ -4618,7 +4618,16 @@ subset.**
 **Since v1.** GP5 (2026-10-21, doc/go/GO-PARSER-SURVEY.md "As built: GP5", GPS25 (b)): the
 converter keeps a conversion's invalid `...` (`(conv T (spread x))`), so `ddd1.go` passes (known
 before, in "message spellings, columns and lines the forms do not keep", now 10): 1,472 of 1,837
-pass. goi's corpora are the native reader's since then, byte for byte the helper's.
+pass. goi's corpora are the native reader's since then, byte for byte the helper's. GP6
+(2026-10-22, doc/go/GO-PARSER-SURVEY.md "As built: GP6"): the error tests go/parser rejects, and
+those with a syntax error by gc's syntax, are judged on gc's syntax errors (gc's own parser run by
+goi from `tamago/cmd`'s forms; 66 of the 70 pass, E1's 4 known), the invalid programs the
+converter cannot convert on their raw forms (`arbace.go.run --errorcheck --raw`; 63 of GC47's 64
+pass, `weak.go` refused at its import, a class of its own), and three programs of the class
+"errors of gc's phases after type checking" were goi's (`-lang`'s checks; 18 left): 1,604 of
+1,837 pass, 145 unsupported, 70 known, 18 skipped. The table's rows of the syntax errors and
+invalid programs and of gc's later phases stand as of v1; `bin/goi divergences` gives today's
+counts.
 
 The totals by result: 281 unsupported (9 + 2 + 134 + 96 + 5 + 7 + 21 + 7), 67 known (21 + 17 + 2 +
 6 + 1 + 3 + 11 + 6), 18 skipped (15 + 3). Of the agenda's by-design list, every class has its
