@@ -1973,7 +1973,10 @@ and helper, equal; `bin/repr-go syntax-errors` on stage 0 (the driver and the co
 `syntax/semi1.go`, `fixedbugs/issue19610.go`, `syntax/typesw.go`, gc's messages);
 `bin/repr-go roundtrip amd64` (no regressions); `bin/generated-check` (19 files as generated; a
 changed and an extra file reported); `bin/goi check --essential` on GP7's executable (797 of 797, no regression); `bin/goi annotations` with the compiled reader as the host (its five corpora: 0 errors, every count as recorded); `bin/goi test` (the checker's tests, the interpreter's programs 20 of 20, the REPL 110 of 110, every user std package imported at the REPL 185 of 185: 94 compiled, go/parser's four among them, 77 interpreted); `make check-makefile`; the essential `bin/gate`
-GATE. Not run: `bin/gate --full`, the box (the program's change reaches it at the next box build).
+passed (13 m 49 s, its build the cached gate build of the same inputs: the smoke test, Clojure's suite
+with no regressions, the oracle 22,658 of 22,711 against its 53 known, the differential check
+12,741 of 12,764 against its 23 known, goi's essential check 797 of 797, the generated files, repr/go's 19
+among them). Not run: `bin/gate --full`, the box (the program's change reaches it at the next box build).
 
 **The program changes, for the re-seed.** The table (the six packages listed: the program links
 and registers go/parser, go/scanner, go/ast, go/token, the dumper, the driver and the renamed
