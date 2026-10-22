@@ -154,9 +154,10 @@ The current state of the work. This file is rewritten as things change. For the 
     JDK entries; `jrt.classfile`, the edge on the tools' host; `bin/jrt-convert` starts no JVM;
     JFS43-JFS50 decided as built); JFS48 (b) done (2026-10-22: javac's generated sources
     by compileproperties and propertiesparser on the tool, 20 of 20 the build tree's, no JVM;
-    `FlagsEnum` still copied; JFS51-JFS54 decided as built); running: JFS52 (b), flagsgenerator on the tool
-    (`java-frontend-flags`); what follows decided after it reports. The seed
-    remade after JN6 and GP5 (`a8672e0d…`) and verified. The seed remade after JN3, JN4 and GP4 (`3dda04f6…`) and verified. The processes form made robust (2026-10-21).
+    `FlagsEnum` still copied; JFS51-JFS54 decided as built); JFS52 (b) done (2026-10-22: `FlagsEnum` by flagsgenerator on the
+    tool through javax.tools' API on javac on Arbace, no generated source copied; JFS55-JFS58 decided,
+    JFS58 (a) done: `jdk/edge.edn` re-recorded, stale since GP7); what follows to be decided. The
+    shipped program changed (j2g's `names.ae`, `jdk/edge.edn`): a re-seed is due.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

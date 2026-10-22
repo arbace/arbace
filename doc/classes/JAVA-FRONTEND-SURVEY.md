@@ -3026,3 +3026,15 @@ a re-seed would carry the j2g change.
   `verify.log`, `verify-2.log`, `check.log`, `classes.log`, `repr-check.log`, `jrt-verify.log`,
   `trace/verify.strace`, `try/` (flagsgenerator's first run on the tool, 0.3 s, equal);
   `.tmp/javac-vendor/generated.edn`.
+
+## Decided (2026-10-22): JFS55-JFS58
+
+The user decided JFS55-JFS57 as built and JFS58 (a) to be done:
+- JFS55 (a): the system compiler's platform from the property its caller sets; (c), embedded in
+  the tool, when the build tree goes.
+- JFS56 (a): a prefix per tool package in j2g's names; (c) at the next group of tools.
+- JFS57 (b): `convert` reads the tool's key before it writes.
+- JFS58 (a), done on main after the merge: `bin/j2g-edge verify` failed at `5b3fa825` (`jdk/edge.edn`'s
+  `:exists` lacked `ExecutionException`, `FutureTask`, `Semaphore`, `LongAdder`, asked since GP7);
+  `bin/j2g-edge update`, then `bin/javac-vendor build` and `convert` (javac's edge loses its
+  `:exists`), then `build`, `verify` (918 files byte for byte) and `bin/j2g-edge verify`: pass.
