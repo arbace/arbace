@@ -2512,7 +2512,13 @@ as the reference (JN7.9). Traces: `.tmp/jn7/trace/`.
 j2g's code changed (`arbace/j2g/names.ae`, `code.ae`: JN7.1, JN7.2), so its compiled namespaces in
 the program differ; `jdk/provenance.edn` (`:generators`, `:repr-java`, `:host`) and `jdk/README.md`
 change the runtime key and with it the version map the executable carries. The translated JDK and
-runtime: see JN7.8 (the gate's build against main's). `jdk/forms`, `jdk/data`, `jdk/edge.edn`, `go/`
+runtime: j2g's program tree (`bin/j2g --program`, without the compiled namespaces) by main's j2g
+(`f76981ca`, `.tmp/jn7/control`) and by the branch's, string literals' numbers normalized
+(`.tmp/jn7/scripts/normdiff.py`): one function differs, `java.security.MessageDigest`'s
+`isEqual`-path call of `equals` on a value of a class outside the closed world, now one missing
+call (JN7.2's third fix), and with it one string literal fewer (`j2g_strings.ae`, the others'
+numbers shifted): the same behaviour, `J2g_Missing` throwing first. The superinterface's
+initialization (JN7.2's first fix) changes nothing in the shipped program. `jdk/forms`, `jdk/data`, `jdk/edge.edn`, `go/`
 and `overlay/jdk/java.base` are unchanged; `jdk/javac/` and `overlay/jdk/javac/` are the tool's.
 No re-seed (batched).
 
@@ -2532,7 +2538,12 @@ No re-seed (batched).
   --text`: as the references (jdk: record 911, text 838, classes 838, anew 799 of 838; 682 s traced)
 - `bin/j2g-check --record-fixtures` (the frozen jar): `test/j2g/fixtures.edn` gains FxJn7's case
 - `make check-makefile`
-- `bin/gate` (essential): GATE_RESULT
+- `bin/gate` (essential): first at `efc39ada`, failed only in diffcheck: FxJn7's file came before
+  FxVarHandles, whose known case was renumbered (`test/j2g/fixtures:9` to `:10`, as at JN2;
+  `test/diffcheck/known.edn`); then at `36dc57ba` passes (go-build 572 s, both builds afresh, then
+  cached; go-smoke, suite-go 777 tests with no regression, oracle-go 53 known mismatches as recorded,
+  diffcheck 12,743 of 12,766 cases agree with the 23 known, FxJn7's case among the agreeing,
+  goi-check 740 of 740, generated), and again at this section's commit
 - not run: `bin/gate --full` as a whole (the user's rule: at the milestone)
 
 ### JN7.9 What stays on a JVM, and why
