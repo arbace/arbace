@@ -129,7 +129,7 @@ The current state of the work. This file is rewritten as things change. For the 
     by goi running `cmd/compile/internal/syntax` from `tamago/cmd`'s forms, `bin/repr-go
     syntax-errors`; invalid programs on their raw forms for goi; `bin/goi check` 1,604 of 1,837 pass,
     was 1,472; GC47 63 of 64; the program changed, re-seed batched with JN7's; GPS38-GPS44 decided as
-    built); next GP7, compiled.
+    built); running: GP7, compiled (`go-parser-gp7`).
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the

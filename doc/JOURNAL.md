@@ -968,3 +968,12 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - **Decided (the user):** GPS38-GPS44 as built: 38 (a), 39 (a) now and (b) with 41 (c), 40 (a), 41 (a)
   with (b) when needed and (c) as a step of its own, 42 (a), 43 (a), 44 (a); over porting the pragmas
   now and no raw read in the essential gate.
+
+## 2026-10-22: GP7 started (the user: "start GP7")
+
+- **What:** GP7, the native reader compiled (doc/go/GO-PARSER-SURVEY.md, §8): go/parser, go/scanner,
+  go/ast and go/token in goi's table, the dumper as Go forms in `go/`, gc's syntax as a renamed copy,
+  GPS3 (b) if measured worthwhile; exit: the parse over std under 1 s, the executable's growth
+  recorded, the essential gate. On the branch `go-parser-gp7` from main `8677987a`, in
+  `.tmp/worktrees/go-parser-gp7`, beside JN7.
+- **The re-seed** GP7 needs is done on main after its merge, batched with GP6's and JN7's.
