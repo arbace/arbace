@@ -95,11 +95,11 @@ VERIFY := jdk-verify edge-verify javac-verify javac-classes repr-java-check fixt
   box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip repr-java-text \
   repr-clojure-roundtrip
 verify: $(VERIFY) ## all of the below, one after another
-jdk-verify: ## jdk/'s forms by repr/java, on javac's tool executable; the generators on a JDK, the edge step on the frozen JVM (bin/jrt-convert verify)
+jdk-verify: ## jdk/'s forms by repr/java and the JDK build's generators, on javac's tool executable; the edge step on the tools' host (bin/jrt-convert verify)
 	bin/jrt-convert verify
 edge-verify: ## j2g's edge, on the frozen JVM (bin/j2g-edge verify)
 	bin/j2g-edge verify
-javac-verify: ## jdk/javac, javac's forms read by javac on Arbace (the fixpoint), its edge on the frozen JVM; j2g translates javac's world (bin/javac-vendor verify, check)
+javac-verify: ## jdk/javac, javac's forms (and the JDK build's tools, java.xml's SAX parser) read by javac on Arbace (the fixpoint), its edge on the frozen JVM; j2g translates javac's world (bin/javac-vendor verify, check)
 	bin/javac-vendor verify
 	bin/javac-vendor check
 javac-classes: ## javac on Arbace (the tool build) compiles the baseline, samples and jdk corpora as the JVM's javac, byte for byte (bin/javac-vendor classes)

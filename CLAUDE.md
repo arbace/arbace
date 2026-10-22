@@ -74,11 +74,13 @@ Prior art:
   checkout as `.clj` links before the jar, repr/java's not among them since JN6): the oracle's
   reference, the back end of `bin/repr-java check --suite` (the converted baseline compiled by the
   jar's own compiler, Clojure's suite run on it), the edges' recordings (`bin/j2g-edge`,
-  `bin/javac-vendor edge`), `bin/jrt-convert`'s edge step (`jrt.jrt-edge`: javac's classes read by
-  the JDK's class file API) and the data generators (`bin/jrt testdata|manifest|standins`,
-  `jrt-coverage`); a JDK runs `bin/jrt-convert`'s generators (JN7) and is the reference javac
-  `bin/javac-vendor classes` compares javac on Arbace with. Nothing of repr/java starts a JVM
-  (JN6, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN6").
+  `bin/javac-vendor edge`) and the data generators (`bin/jrt testdata|manifest|standins`,
+  `jrt-coverage`); a JDK is the reference javac `bin/javac-vendor classes` compares javac on Arbace
+  with. Nothing of repr/java starts a JVM (JN6, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built:
+  JN6"), and since JN7 ("As built: JN7") nothing of `bin/jrt-convert` either: the JDK build's
+  tools of its generate step run as Java forms on javac's tool
+  executable (jdk/javac's `buildtools`, with java.xml's SAX parser), and its edge step
+  (`jrt.jrt-edge`) on the tools' host, reading class files with `jrt.classfile`, Arbace's own reader.
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
   frozen baseline on the JVM (`test/baseline-results.edn`), or with `CLOJURE_TESTS_GO` the Go
   build's test executable (`test/arbace-go-results.edn`; repr/clojure's translation and the report on the
@@ -185,7 +187,10 @@ Prior art:
   (`bin/j2g-edge update`, `verify`, `trace`; S2, doc/STANDALONE-NOTES.md); `bin/jrt`); `overlay/go/` patches Go's runtime.
   `jdk/javac/`: javac's Java forms (jdk26u's jdk.compiler with its generated sources,
   java.compiler, `CommandLine` and the java.base classes javac's world needs, unpatched; jrt's
-  own Java and j2g variants for that world in `overlay/jdk/javac/`), its source list, provenance
+  own Java and j2g variants for that world in `overlay/jdk/javac/`; since JN7 also the JDK build's
+  tools `bin/jrt-convert`'s generate step runs on the tool, `make/jdk/src/classes/build/tools` as
+  module `buildtools`, with java.xml's SAX parser and the JDK classes they need beyond the
+  program's, `overlay/jdk/javac/closure.txt`, and jrt's own zlib `Deflater`), its source list, provenance
   and edge (`jdk/javac/edge.edn`: what javac's world asks beyond `jdk/edge.edn`), made by
   `bin/javac-vendor convert`: since JN5 read by javac on Arbace (the fixpoint: javac's tool reads
   javac's own sources into these forms), the edge recorded on the frozen JVM (`verify` byte for
@@ -322,7 +327,8 @@ Prior art:
   compiled pipeline: `ARBACE_AOT`, the packages `aot_arbace_*`); j2a, g2a and a2g before, as dated
   records and the tags name them; j2c, g2c and c2g before 2026-10-11, as the frozen branches and
   dated records name them.
-- The tools (c2j, j2g, repr/go, repr/clojure, the suite runner, `bin/jrt-convert`'s `jrt.jrt-sources`)
+- The tools (c2j, j2g, repr/go, repr/clojure, the suite runner, `bin/jrt-convert`'s `jrt.jrt-sources`
+  and, since JN7, `jrt.jrt-edge`)
   run on the tools' Go host, stage 0 by default (`bin/lib/host.bash`, `bin/lib/tools.bash`);
   repr/java's read and javac on javac's tool executable (its only host since JN6), and the JVM's
   records on the frozen jar (`bin/lib/frozen.bash`). Nothing builds or runs a JVM Arbace of the checkout.

@@ -1,0 +1,1263 @@
+;; Converted from jdk26u src/java.xml/share/classes/com/sun/org/apache/xerces/internal/impl/XMLEntityScanner.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.org.apache.xerces.internal.impl)
+
+(import '(com.sun.org.apache.xerces.internal.impl.io ASCIIReader UCSReader UTF8Reader)
+        '(com.sun.org.apache.xerces.internal.impl.msg XMLMessageFormatter)
+        '(com.sun.org.apache.xerces.internal.util EncodingMap SymbolTable XMLChar XMLStringBuffer)
+        '(com.sun.org.apache.xerces.internal.xni QName XMLLocator XMLString)
+        '(com.sun.org.apache.xerces.internal.xni.parser
+           XMLComponentManager
+           XMLConfigurationException)
+        '(com.sun.xml.internal.stream Entity$ScannedEntity XMLBufferListener)
+        '(java.io EOFException IOException InputStream InputStreamReader Reader)
+        '(java.util ArrayList Locale)
+        '(jdk.xml.internal XMLLimitAnalyzer XMLSecurityManager XMLSecurityManager$Limit))
+
+(defclass ^:public XMLEntityScanner
+  :implements [XMLLocator]
+
+  (field ^:protected ^Entity$ScannedEntity fCurrentEntity nil)
+
+  (field ^:protected ^int fBufferSize XMLEntityManager/DEFAULT_BUFFER_SIZE)
+
+  (field ^:protected ^XMLEntityManager fEntityManager)
+
+  (field ^:protected ^XMLSecurityManager fSecurityManager nil)
+
+  (field ^:protected ^XMLLimitAnalyzer fLimitAnalyzer nil)
+
+  (field ^:private ^:static ^:final ^boolean DEBUG_ENCODINGS false)
+
+  (field ^:private ^{:tag (ArrayList XMLBufferListener)} listeners (ArrayList.))
+
+  (field ^:private ^:static ^:final ^boolean/1 VALID_NAMES (new boolean/1 127))
+
+  (field ^:private ^:static ^:final ^boolean DEBUG_BUFFER false)
+
+  (field ^:private ^:static ^:final ^boolean DEBUG_SKIP_STRING false)
+
+  (field ^:private ^:static ^:final ^EOFException END_OF_DOCUMENT_ENTITY
+    (anon EOFException []
+      (field ^:private ^:static ^:final ^long serialVersionUID 980337771224675268)
+
+      (method ^:public fillInStackTrace ^Throwable [this] this)))
+
+  (field ^:protected ^SymbolTable fSymbolTable nil)
+
+  (field ^:protected ^XMLErrorReporter fErrorReporter nil)
+
+  (field ^int/1 whiteSpaceLookup (new int/1 100))
+
+  (field ^int whiteSpaceLen 0)
+
+  (field ^boolean whiteSpaceInfoNeeded true)
+
+  (field ^:protected ^boolean fAllowJavaEncodings)
+
+  (field ^:protected ^:static ^:final ^String SYMBOL_TABLE
+    (java-str Constants/XERCES_PROPERTY_PREFIX Constants/SYMBOL_TABLE_PROPERTY))
+
+  (field ^:protected ^:static ^:final ^String ERROR_REPORTER
+    (java-str Constants/XERCES_PROPERTY_PREFIX Constants/ERROR_REPORTER_PROPERTY))
+
+  (field ^:protected ^:static ^:final ^String ALLOW_JAVA_ENCODINGS
+    (java-str Constants/XERCES_FEATURE_PREFIX Constants/ALLOW_JAVA_ENCODINGS_FEATURE))
+
+  (field ^:protected ^PropertyManager fPropertyManager nil)
+
+  (field ^boolean isExternal false)
+
+  (static-initializer
+    (loop [^int i 0x0041]
+      (when (<= i 0x005A) (aset VALID_NAMES i true) (recur (unchecked-inc-int i))))
+    (loop [^int i 0x0061]
+      (when (<= i 0x007A) (aset VALID_NAMES i true) (recur (unchecked-inc-int i))))
+    (loop [^int i 0x0030]
+      (when (<= i 0x0039) (aset VALID_NAMES i true) (recur (unchecked-inc-int i))))
+    (aset VALID_NAMES 45 true)
+    (aset VALID_NAMES 46 true)
+    (aset VALID_NAMES 58 true)
+    (aset VALID_NAMES 95 true))
+
+  (field ^:protected ^boolean xmlVersionSetExplicitly false)
+
+  (field ^boolean detectingVersion false)
+
+  (field ^int offset 0)
+
+  (field ^int newlines 0)
+
+  (field ^boolean counted false)
+
+  (constructor ^:public [this])
+
+  (constructor ^:public [this ^PropertyManager propertyManager ^XMLEntityManager entityManager]
+    (set! fEntityManager entityManager)
+    (.reset this propertyManager))
+
+  (method ^:public ^:final setBufferSize ^void [this ^int size]
+    (set! fBufferSize size))
+
+  (method ^:public reset ^void [this ^PropertyManager propertyManager]
+    (set! fSymbolTable (cast SymbolTable (.getProperty propertyManager SYMBOL_TABLE)))
+    (set! fErrorReporter (cast XMLErrorReporter (.getProperty propertyManager ERROR_REPORTER)))
+    (.resetCommon this))
+
+  (method ^:public reset :throws [XMLConfigurationException] ^void [this
+                                                                    ^XMLComponentManager componentManager]
+    (set! fAllowJavaEncodings (.getFeature componentManager ALLOW_JAVA_ENCODINGS false))
+    (set! fSymbolTable (cast SymbolTable (.getProperty componentManager SYMBOL_TABLE)))
+    (set! fErrorReporter (cast XMLErrorReporter (.getProperty componentManager ERROR_REPORTER)))
+    (.resetCommon this))
+
+  (method ^:public ^:final reset ^void [this ^SymbolTable symbolTable
+                                        ^XMLEntityManager entityManager ^XMLErrorReporter reporter]
+    (set! fCurrentEntity nil)
+    (set! fSymbolTable symbolTable)
+    (set! fEntityManager entityManager)
+    (set! fErrorReporter reporter)
+    (set! fLimitAnalyzer (.-fLimitAnalyzer fEntityManager))
+    (set! fSecurityManager (.-fSecurityManager fEntityManager)))
+
+  (method ^:private resetCommon ^void [this]
+    (set! fCurrentEntity nil)
+    (set! whiteSpaceLen 0)
+    (set! whiteSpaceInfoNeeded true)
+    (.clear listeners)
+    (set! fLimitAnalyzer (.-fLimitAnalyzer fEntityManager))
+    (set! fSecurityManager (.-fSecurityManager fEntityManager)))
+
+  (method ^:public ^:final getXMLVersion ^String [this]
+    (when (some? fCurrentEntity) (.-xmlVersion fCurrentEntity)))
+
+  (method ^:public ^:final setXMLVersion ^void [this ^String xmlVersion]
+    (set! xmlVersionSetExplicitly true)
+    (set! (.-xmlVersion fCurrentEntity) xmlVersion))
+
+  (method ^:public ^:final setCurrentEntity ^void [this ^Entity$ScannedEntity scannedEntity]
+    (set! fCurrentEntity scannedEntity)
+    (when (some? fCurrentEntity)
+      (set! isExternal (.isExternal fCurrentEntity))
+      (when DEBUG_BUFFER
+        (.println System/out (java-str "Current Entity is " (.-name scannedEntity))))))
+
+  (method ^:public getCurrentEntity ^Entity$ScannedEntity [this]
+    fCurrentEntity)
+
+  (method ^:public ^:final getBaseSystemId ^String [this]
+    (when (and (some? fCurrentEntity) (some? (.-entityLocation fCurrentEntity)))
+      (.getExpandedSystemId (.-entityLocation fCurrentEntity))))
+
+  (method ^:public setBaseSystemId ^void [this ^String systemId])
+
+  (method ^:public ^:final getLineNumber ^int [this]
+    (if (some? fCurrentEntity) (.-lineNumber fCurrentEntity) -1))
+
+  (method ^:public setLineNumber ^void [this ^int line])
+
+  (method ^:public ^:final getColumnNumber ^int [this]
+    (if (some? fCurrentEntity) (.-columnNumber fCurrentEntity) -1))
+
+  (method ^:public setColumnNumber ^void [this ^int col])
+
+  (method ^:public ^:final getCharacterOffset ^int [this]
+    (if (some? fCurrentEntity)
+        (unchecked-add-int (.-fTotalCountTillLastLoad fCurrentEntity) (.-position fCurrentEntity))
+        -1))
+
+  (method ^:public ^:final getExpandedSystemId ^String [this]
+    (when (and (some? fCurrentEntity) (some? (.-entityLocation fCurrentEntity)))
+      (.getExpandedSystemId (.-entityLocation fCurrentEntity))))
+
+  (method ^:public setExpandedSystemId ^void [this ^String systemId])
+
+  (method ^:public ^:final getLiteralSystemId ^String [this]
+    (when (and (some? fCurrentEntity) (some? (.-entityLocation fCurrentEntity)))
+      (.getLiteralSystemId (.-entityLocation fCurrentEntity))))
+
+  (method ^:public setLiteralSystemId ^void [this ^String systemId])
+
+  (method ^:public ^:final getPublicId ^String [this]
+    (when (and (some? fCurrentEntity) (some? (.-entityLocation fCurrentEntity)))
+      (.getPublicId (.-entityLocation fCurrentEntity))))
+
+  (method ^:public setPublicId ^void [this ^String publicId])
+
+  (method ^:public setVersion ^void [this ^String version]
+    (set! (.-version fCurrentEntity) version))
+
+  (method ^:public getVersion ^String [this]
+    (when (some? fCurrentEntity) (.-version fCurrentEntity)))
+
+  (method ^:public ^:final getEncoding ^String [this]
+    (when (some? fCurrentEntity) (.-encoding fCurrentEntity)))
+
+  (method ^:public ^:final setEncoding :throws [IOException] ^void [this ^String encoding]
+    (when DEBUG_ENCODINGS (.println System/out (java-str "$$$ setEncoding: " encoding)))
+    (when (some? (.-stream fCurrentEntity))
+      (cond
+        (or (nil? (.-encoding fCurrentEntity)) (not (.equals (.-encoding fCurrentEntity) encoding)))
+          (do
+            (when (and (some? (.-encoding fCurrentEntity))
+                       (.startsWith (.-encoding fCurrentEntity) "UTF-16"))
+              (let [ENCODING (.toUpperCase encoding Locale/ENGLISH)]
+                (when (.equals ENCODING "UTF-16") (return))
+                (when (.equals ENCODING "ISO-10646-UCS-4")
+                  (if (.equals (.-encoding fCurrentEntity) "UTF-16BE")
+                      (set! (.-reader fCurrentEntity)
+                            (UCSReader. (.-stream fCurrentEntity) UCSReader/UCS4BE))
+                      (set! (.-reader fCurrentEntity)
+                            (UCSReader. (.-stream fCurrentEntity) UCSReader/UCS4LE)))
+                  (return))
+                (when (.equals ENCODING "ISO-10646-UCS-2")
+                  (if (.equals (.-encoding fCurrentEntity) "UTF-16BE")
+                      (set! (.-reader fCurrentEntity)
+                            (UCSReader. (.-stream fCurrentEntity) UCSReader/UCS2BE))
+                      (set! (.-reader fCurrentEntity)
+                            (UCSReader. (.-stream fCurrentEntity) UCSReader/UCS2LE)))
+                  (return))))
+            (when DEBUG_ENCODINGS
+              (.println
+                System/out
+                (java-str "$$$ creating new reader from stream: " (.-stream fCurrentEntity))))
+            (set! (.-reader fCurrentEntity)
+                  (.createReader this (.-stream fCurrentEntity) encoding nil))
+            (set! (.-encoding fCurrentEntity) encoding))
+        DEBUG_ENCODINGS (.println System/out "$$$ reusing old reader on stream"))))
+
+  (method ^:public ^:final isExternal ^boolean [this]
+    (.isExternal fCurrentEntity))
+
+  (method ^:public getChar :throws [IOException] ^int [this ^int relative]
+    (if (.arrangeCapacity this (unchecked-add-int relative 1) false)
+        (aget (.-ch fCurrentEntity) (unchecked-add-int (.-position fCurrentEntity) relative))
+        -1))
+
+  (method ^:public peekChar :throws [IOException] ^int [this]
+    (when DEBUG_BUFFER (.print System/out "(peekChar: ") (.print this) (.println System/out))
+    (when (== (.-position fCurrentEntity) (.-count fCurrentEntity)) (.load this 0 true true))
+    (let [^int c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity))]
+      (when DEBUG_BUFFER
+        (.print System/out ")peekChar: ")
+        (.print this)
+        (if isExternal
+            (.println System/out
+                      (java-str " -> '" (if (not (== c \return)) (unchecked-char c) \newline) "'"))
+            (.println System/out (java-str " -> '" (unchecked-char c) "'"))))
+      (if isExternal (if (not (== c \return)) c (int \newline)) c)))
+
+  (method ^:protected scanChar :throws [IOException] ^int [this ^XMLScanner$NameType nt]
+    (when DEBUG_BUFFER (.print System/out "(scanChar: ") (.print this) (.println System/out))
+    (when (== (.-position fCurrentEntity) (.-count fCurrentEntity)) (.load this 0 true true))
+    (set! offset (.-position fCurrentEntity))
+    (let [^:mutable ^int c (aget (.-ch fCurrentEntity)
+                                 (let [old-1 (.-position fCurrentEntity)]
+                                   (set! (.-position fCurrentEntity)
+                                         (unchecked-inc-int (.-position fCurrentEntity)))
+                                   old-1))]
+      (when (or (== c \newline) (and (== c \return) isExternal))
+        (set! (.-lineNumber fCurrentEntity) (unchecked-inc-int (.-lineNumber fCurrentEntity)))
+        (set! (.-columnNumber fCurrentEntity) 1)
+        (when (== (.-position fCurrentEntity) (.-count fCurrentEntity))
+          (.invokeListeners this 1)
+          (aset (.-ch fCurrentEntity) 0 (unchecked-char c))
+          (.load this 1 true false)
+          (set! offset 0))
+        (when (and (and (== c \return) isExternal)
+                   (< (.-position fCurrentEntity) (.-count fCurrentEntity)))
+          (when-not (== (aget (.-ch fCurrentEntity)
+                              (let [old-2 (.-position fCurrentEntity)]
+                                (set! (.-position fCurrentEntity)
+                                      (unchecked-inc-int (.-position fCurrentEntity)))
+                                old-2))
+                        \newline)
+            (set! (.-position fCurrentEntity) (unchecked-dec-int (.-position fCurrentEntity))))
+          (set! c \newline)))
+      (when DEBUG_BUFFER
+        (.print System/out ")scanChar: ")
+        (.print this)
+        (.println System/out (java-str " -> '" (unchecked-char c) "'")))
+      (set! (.-columnNumber fCurrentEntity) (unchecked-inc-int (.-columnNumber fCurrentEntity)))
+      (when-not detectingVersion
+        (.checkEntityLimit this
+                           nt
+                           fCurrentEntity
+                           offset
+                           (unchecked-subtract-int (.-position fCurrentEntity) offset)))
+      c))
+
+  (method ^:protected scanNmtoken :throws [IOException] ^String [this]
+    (when DEBUG_BUFFER (.print System/out "(scanNmtoken: ") (.print this) (.println System/out))
+    (when (== (.-position fCurrentEntity) (.-count fCurrentEntity)) (.load this 0 true true))
+    (set! offset (.-position fCurrentEntity))
+    (let [^:mutable vc false
+          ^:mutable ^char c (unchecked-char 0)]
+      (while true
+        (set! c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity)))
+        (if (< c 127) (set! vc (aget VALID_NAMES c)) (set! vc (XMLChar/isName c)))
+        (when-not vc (break))
+        (when (== (set! (.-position fCurrentEntity) (unchecked-inc-int (.-position fCurrentEntity)))
+                  (.-count fCurrentEntity))
+          (let [length (unchecked-subtract-int (.-position fCurrentEntity) offset)]
+            (.invokeListeners this length)
+            (if (== length (.-fBufferSize fCurrentEntity))
+                (let [tmp (new char/1 (unchecked-multiply-int (.-fBufferSize fCurrentEntity) 2))]
+                  (System/arraycopy (.-ch fCurrentEntity) offset tmp 0 length)
+                  (set! (.-ch fCurrentEntity) tmp)
+                  (set! (.-fBufferSize fCurrentEntity)
+                        (unchecked-multiply-int (.-fBufferSize fCurrentEntity) 2)))
+                (System/arraycopy (.-ch fCurrentEntity) offset (.-ch fCurrentEntity) 0 length))
+            (set! offset 0)
+            (when (.load this length false false) (break)))))
+      (let [length (unchecked-subtract-int (.-position fCurrentEntity) offset)]
+        (set! (.-columnNumber fCurrentEntity)
+              (unchecked-add-int (.-columnNumber fCurrentEntity) length))
+        (let [^:mutable ^String symbol nil]
+          (when (> length 0)
+            (set! symbol (.addSymbol fSymbolTable (.-ch fCurrentEntity) offset length)))
+          (when DEBUG_BUFFER
+            (.print System/out ")scanNmtoken: ")
+            (.print this)
+            (.println System/out (java-str " -> " (String/valueOf symbol))))
+          symbol))))
+
+  (method ^:protected scanName :throws [IOException] ^String [this ^XMLScanner$NameType nt]
+    (when DEBUG_BUFFER (.print System/out "(scanName: ") (.print this) (.println System/out))
+    (when (== (.-position fCurrentEntity) (.-count fCurrentEntity)) (.load this 0 true true))
+    (set! offset (.-position fCurrentEntity))
+    (let [^:mutable ^int length 0]
+      (when (XMLChar/isNameStart (aget (.-ch fCurrentEntity) offset))
+        (when (== (set! (.-position fCurrentEntity) (unchecked-inc-int (.-position fCurrentEntity)))
+                  (.-count fCurrentEntity))
+          (.invokeListeners this 1)
+          (aset (.-ch fCurrentEntity) 0 (aget (.-ch fCurrentEntity) offset))
+          (set! offset 0)
+          (when (.load this 1 false false)
+            (set! (.-columnNumber fCurrentEntity)
+                  (unchecked-inc-int (.-columnNumber fCurrentEntity)))
+            (let [symbol (.addSymbol fSymbolTable (.-ch fCurrentEntity) 0 1)]
+              (when DEBUG_BUFFER
+                (.print System/out ")scanName: ")
+                (.print this)
+                (.println System/out (java-str " -> " (String/valueOf symbol))))
+              (return symbol))))
+        (let [^:mutable vc false]
+          (while true
+            (let [c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity))]
+              (if (< c 127) (set! vc (aget VALID_NAMES c)) (set! vc (XMLChar/isName c)))
+              (when-not vc (break))
+              (when (> (set! length (.checkBeforeLoad this fCurrentEntity offset offset)) 0)
+                (set! offset 0)
+                (when (.load this length false false) (break)))))))
+      (set! length (unchecked-subtract-int (.-position fCurrentEntity) offset))
+      (set! (.-columnNumber fCurrentEntity)
+            (unchecked-add-int (.-columnNumber fCurrentEntity) length))
+      (let [^:mutable ^String symbol nil]
+        (if (> length 0)
+            (do
+              (.checkLimit this
+                           XMLSecurityManager$Limit/MAX_NAME_LIMIT
+                           fCurrentEntity
+                           offset
+                           length)
+              (.checkEntityLimit this nt fCurrentEntity offset length)
+              (set! symbol (.addSymbol fSymbolTable (.-ch fCurrentEntity) offset length)))
+            (set! symbol nil))
+        (when DEBUG_BUFFER
+          (.print System/out ")scanName: ")
+          (.print this)
+          (.println System/out (java-str " -> " (String/valueOf symbol))))
+        symbol)))
+
+  (method ^:protected scanQName :throws [IOException] ^boolean [this ^QName qname
+                                                                ^XMLScanner$NameType nt]
+    (when DEBUG_BUFFER
+      (.print System/out (java-str "(scanQName, " qname ": "))
+      (.print this)
+      (.println System/out))
+    (when (== (.-position fCurrentEntity) (.-count fCurrentEntity)) (.load this 0 true true))
+    (set! offset (.-position fCurrentEntity))
+    (when (XMLChar/isNameStart (aget (.-ch fCurrentEntity) offset))
+      (when (== (set! (.-position fCurrentEntity) (unchecked-inc-int (.-position fCurrentEntity)))
+                (.-count fCurrentEntity))
+        (.invokeListeners this 1)
+        (aset (.-ch fCurrentEntity) 0 (aget (.-ch fCurrentEntity) offset))
+        (set! offset 0)
+        (when (.load this 1 false false)
+          (set! (.-columnNumber fCurrentEntity) (unchecked-inc-int (.-columnNumber fCurrentEntity)))
+          (let [name (.addSymbol fSymbolTable (.-ch fCurrentEntity) 0 1)]
+            (.setValues qname nil name name nil)
+            (when DEBUG_BUFFER
+              (.print System/out (java-str ")scanQName, " qname ": "))
+              (.print this)
+              (.println System/out " -> true"))
+            (.checkEntityLimit this nt fCurrentEntity 0 1)
+            (return true))))
+      (let [^:mutable ^int index -1
+            ^:mutable vc false
+            ^:mutable ^int length 0]
+        (while true
+          (let [c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity))]
+            (if (< c 127) (set! vc (aget VALID_NAMES c)) (set! vc (XMLChar/isName c)))
+            (when-not vc (break))
+            (when (== c \:)
+              (when-not (== index -1) (break))
+              (set! index (.-position fCurrentEntity))
+              (.checkLimit this
+                           XMLSecurityManager$Limit/MAX_NAME_LIMIT
+                           fCurrentEntity
+                           offset
+                           (unchecked-subtract-int index offset)))
+            (when (> (set! length (.checkBeforeLoad this fCurrentEntity offset index)) 0)
+              (when-not (== index -1) (set! index (unchecked-subtract-int index offset)))
+              (set! offset 0)
+              (when (.load this length false false) (break)))))
+        (set! length (unchecked-subtract-int (.-position fCurrentEntity) offset))
+        (set! (.-columnNumber fCurrentEntity)
+              (unchecked-add-int (.-columnNumber fCurrentEntity) length))
+        (when (> length 0)
+          (let [^:mutable ^String prefix nil
+                ^:mutable ^String localpart nil
+                rawname (.addSymbol fSymbolTable (.-ch fCurrentEntity) offset length)]
+            (if (not (== index -1))
+                (let [prefixLength (unchecked-subtract-int index offset)]
+                  (.checkLimit this
+                               XMLSecurityManager$Limit/MAX_NAME_LIMIT
+                               fCurrentEntity
+                               offset
+                               prefixLength)
+                  (set! prefix (.addSymbol fSymbolTable (.-ch fCurrentEntity) offset prefixLength))
+                  (let [len (unchecked-subtract-int (unchecked-subtract-int length prefixLength) 1)
+                        startLocal (unchecked-add-int index 1)]
+                    (when-not (XMLChar/isNCNameStart (aget (.-ch fCurrentEntity) startLocal))
+                      (.reportError fErrorReporter
+                                    XMLMessageFormatter/XML_DOMAIN
+                                    "IllegalQName"
+                                    (new Object/1 [rawname])
+                                    XMLErrorReporter/SEVERITY_FATAL_ERROR))
+                    (.checkLimit this
+                                 XMLSecurityManager$Limit/MAX_NAME_LIMIT
+                                 fCurrentEntity
+                                 (unchecked-add-int index 1)
+                                 len)
+                    (set! localpart
+                          (.addSymbol fSymbolTable
+                                      (.-ch fCurrentEntity)
+                                      (unchecked-add-int index 1)
+                                      len))))
+                (do
+                  (set! localpart rawname)
+                  (.checkLimit this
+                               XMLSecurityManager$Limit/MAX_NAME_LIMIT
+                               fCurrentEntity
+                               offset
+                               length)))
+            (.setValues qname prefix localpart rawname nil)
+            (when DEBUG_BUFFER
+              (.print System/out (java-str ")scanQName, " qname ": "))
+              (.print this)
+              (.println System/out " -> true"))
+            (.checkEntityLimit this nt fCurrentEntity offset length)
+            (return true)))))
+    (when DEBUG_BUFFER
+      (.print System/out (java-str ")scanQName, " qname ": "))
+      (.print this)
+      (.println System/out " -> false"))
+    false)
+
+  (method ^:protected checkBeforeLoad :throws [IOException] ^int [this ^Entity$ScannedEntity entity
+                                                                  ^int offset
+                                                                  ^:mutable ^int nameOffset]
+    (let [^:mutable ^int length 0]
+      (when (== (set! (.-position entity) (unchecked-inc-int (.-position entity))) (.-count entity))
+        (set! length (unchecked-subtract-int (.-position entity) offset))
+        (let [^:mutable nameLength length]
+          (if (not (== nameOffset -1))
+              (do
+                (set! nameOffset (unchecked-subtract-int nameOffset offset))
+                (set! nameLength (unchecked-subtract-int length nameOffset)))
+              (set! nameOffset offset))
+          (.checkLimit this XMLSecurityManager$Limit/MAX_NAME_LIMIT entity nameOffset nameLength)
+          (.invokeListeners this length)
+          (if (== length (alength (.-ch entity)))
+              (let [tmp (new char/1 (unchecked-multiply-int (.-fBufferSize entity) 2))]
+                (System/arraycopy (.-ch entity) offset tmp 0 length)
+                (set! (.-ch entity) tmp)
+                (set! (.-fBufferSize entity) (unchecked-multiply-int (.-fBufferSize entity) 2)))
+              (System/arraycopy (.-ch entity) offset (.-ch entity) 0 length))))
+      length))
+
+  (method ^:protected checkEntityLimit ^void [this ^XMLScanner$NameType nt
+                                              ^Entity$ScannedEntity entity ^int offset ^int length]
+    (when-not (or (nil? entity) (not (.-isGE entity)))
+      (when-not (identical? nt XMLScanner$NameType/REFERENCE)
+        (.checkLimit this XMLSecurityManager$Limit/GENERAL_ENTITY_SIZE_LIMIT entity offset length))
+      (when (or (identical? nt XMLScanner$NameType/ELEMENTSTART)
+                (identical? nt XMLScanner$NameType/ATTRIBUTENAME))
+        (.checkNodeCount this entity))))
+
+  (method ^:protected checkNodeCount ^void [this ^Entity$ScannedEntity entity]
+    (when (and (some? entity) (.-isGE entity))
+      (.checkLimit this XMLSecurityManager$Limit/ENTITY_REPLACEMENT_LIMIT entity 0 1)))
+
+  (method ^:protected checkLimit ^void [this ^XMLSecurityManager$Limit limit
+                                        ^Entity$ScannedEntity entity ^int offset ^int length]
+    (.addValue fLimitAnalyzer limit (.-name entity) length)
+    (when (.isOverLimit fSecurityManager limit fLimitAnalyzer)
+      (.debugPrint fSecurityManager fLimitAnalyzer)
+      (let [^Object/1 e (if (identical? limit XMLSecurityManager$Limit/ENTITY_REPLACEMENT_LIMIT)
+                            (new Object/1
+                                 [(.getValue fLimitAnalyzer limit)
+                                  (.getLimit fSecurityManager limit)
+                                  (.getStateLiteral fSecurityManager limit)])
+                            (new Object/1
+                                 [(.-name entity)
+                                  (.getValue fLimitAnalyzer limit)
+                                  (.getLimit fSecurityManager limit)
+                                  (.getStateLiteral fSecurityManager limit)]))]
+        (.reportError fErrorReporter
+                      XMLMessageFormatter/XML_DOMAIN
+                      (.key limit)
+                      e
+                      XMLErrorReporter/SEVERITY_FATAL_ERROR)))
+    (when (.isOverLimit fSecurityManager
+                        XMLSecurityManager$Limit/TOTAL_ENTITY_SIZE_LIMIT
+                        fLimitAnalyzer)
+      (.debugPrint fSecurityManager fLimitAnalyzer)
+      (.reportError fErrorReporter
+                    XMLMessageFormatter/XML_DOMAIN
+                    "TotalEntitySizeLimit"
+                    (new Object/1
+                         [(.getTotalValue fLimitAnalyzer
+                                          XMLSecurityManager$Limit/TOTAL_ENTITY_SIZE_LIMIT)
+                          (.getLimit fSecurityManager
+                                     XMLSecurityManager$Limit/TOTAL_ENTITY_SIZE_LIMIT)
+                          (.systemProperty XMLSecurityManager$Limit/TOTAL_ENTITY_SIZE_LIMIT)])
+                    XMLErrorReporter/SEVERITY_FATAL_ERROR)))
+
+  (method ^:protected scanContent :throws [IOException] ^int [this ^XMLString content]
+    (when DEBUG_BUFFER (.print System/out "(scanContent: ") (.print this) (.println System/out))
+    (if (== (.-position fCurrentEntity) (.-count fCurrentEntity))
+        (.load this 0 true true)
+        (when (== (.-position fCurrentEntity) (unchecked-subtract-int (.-count fCurrentEntity) 1))
+          (.invokeListeners this 1)
+          (aset (.-ch fCurrentEntity)
+                0
+                (aget (.-ch fCurrentEntity) (unchecked-subtract-int (.-count fCurrentEntity) 1)))
+          (.load this 1 false false)
+          (set! (.-position fCurrentEntity) 0)))
+    (if (.normalizeNewlines this Constants/XML_VERSION_1_0 content false false nil)
+        -1
+        (let [^:mutable ^int c 0]
+          (while (< (.-position fCurrentEntity) (.-count fCurrentEntity))
+            (set! c
+                  (aget (.-ch fCurrentEntity)
+                        (let [old-3 (.-position fCurrentEntity)]
+                          (set! (.-position fCurrentEntity)
+                                (unchecked-inc-int (.-position fCurrentEntity)))
+                          old-3)))
+            (when-not (XMLChar/isContent c)
+              (set! (.-position fCurrentEntity) (unchecked-dec-int (.-position fCurrentEntity)))
+              (break)))
+          (let [length (unchecked-subtract-int (.-position fCurrentEntity) offset)]
+            (set! (.-columnNumber fCurrentEntity)
+                  (unchecked-add-int (.-columnNumber fCurrentEntity)
+                                     (unchecked-subtract-int length newlines)))
+            (when-not counted (.checkEntityLimit this nil fCurrentEntity offset length))
+            (.setValues content (.-ch fCurrentEntity) offset length)
+            (if (not (== (.-position fCurrentEntity) (.-count fCurrentEntity)))
+                (do
+                  (set! c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity)))
+                  (when (and (== c \return) isExternal) (set! c \newline)))
+                (set! c -1))
+            (when DEBUG_BUFFER
+              (.print System/out ")scanContent: ")
+              (.print this)
+              (.println System/out (java-str " -> '" (unchecked-char c) "'")))
+            c))))
+
+  (method ^:protected scanLiteral :throws [IOException] ^int [this ^int quote ^XMLString content
+                                                              ^boolean isNSURI]
+    (when DEBUG_BUFFER
+      (.print System/out (java-str "(scanLiteral, '" (unchecked-char quote) "': "))
+      (.print this)
+      (.println System/out))
+    (if (== (.-position fCurrentEntity) (.-count fCurrentEntity))
+        (.load this 0 true true)
+        (when (== (.-position fCurrentEntity) (unchecked-subtract-int (.-count fCurrentEntity) 1))
+          (.invokeListeners this 1)
+          (aset (.-ch fCurrentEntity)
+                0
+                (aget (.-ch fCurrentEntity) (unchecked-subtract-int (.-count fCurrentEntity) 1)))
+          (.load this 1 false false)
+          (set! (.-position fCurrentEntity) 0)))
+    (when whiteSpaceInfoNeeded (set! whiteSpaceLen 0))
+    (if (.normalizeNewlines this Constants/XML_VERSION_1_0 content false true nil)
+        -1
+        (let [^:mutable ^int c 0]
+          (while (< (.-position fCurrentEntity) (.-count fCurrentEntity))
+            (set! c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity)))
+            (when (or (or (or (and (== c quote) (or (not (.-literal fCurrentEntity)) isExternal))
+                              (== c \%))
+                          (not (XMLChar/isContent c)))
+                      (and (== c \return) (not isExternal)))
+              (break))
+            (when (and whiteSpaceInfoNeeded (== c \tab))
+              (.storeWhiteSpace this (.-position fCurrentEntity)))
+            (set! (.-position fCurrentEntity) (unchecked-inc-int (.-position fCurrentEntity))))
+          (let [length (unchecked-subtract-int (.-position fCurrentEntity) offset)]
+            (set! (.-columnNumber fCurrentEntity)
+                  (unchecked-add-int (.-columnNumber fCurrentEntity)
+                                     (unchecked-subtract-int length newlines)))
+            (.checkEntityLimit this nil fCurrentEntity offset length)
+            (when isNSURI
+              (.checkLimit this
+                           XMLSecurityManager$Limit/MAX_NAME_LIMIT
+                           fCurrentEntity
+                           offset
+                           length))
+            (.setValues content (.-ch fCurrentEntity) offset length)
+            (if (not (== (.-position fCurrentEntity) (.-count fCurrentEntity)))
+                (do
+                  (set! c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity)))
+                  (when (and (== c quote) (.-literal fCurrentEntity)) (set! c -1)))
+                (set! c -1))
+            (when DEBUG_BUFFER
+              (.print System/out (java-str ")scanLiteral, '" (unchecked-char quote) "': "))
+              (.print this)
+              (.println System/out (java-str " -> '" (unchecked-char c) "'")))
+            c))))
+
+  (method storeWhiteSpace ^void [this ^int whiteSpacePos]
+    (when (>= whiteSpaceLen (alength whiteSpaceLookup))
+      (let [tmp (new int/1 (unchecked-add-int (alength whiteSpaceLookup) 100))]
+        (System/arraycopy whiteSpaceLookup 0 tmp 0 (alength whiteSpaceLookup))
+        (set! whiteSpaceLookup tmp)))
+    (aset whiteSpaceLookup
+          (let [old-4 whiteSpaceLen] (set! whiteSpaceLen (unchecked-inc-int whiteSpaceLen)) old-4)
+          whiteSpacePos))
+
+  (method ^:protected scanData :throws [IOException] ^boolean [this ^String delimiter
+                                                               ^XMLStringBuffer buffer
+                                                               ^int chunkLimit]
+    (let [^:mutable done false
+          delimLen (.length delimiter)
+          charAt0 (.charAt delimiter 0)]
+      (loop []
+        (when DEBUG_BUFFER (.print System/out "(scanData: ") (.print this) (.println System/out))
+        (when (== (.-position fCurrentEntity) (.-count fCurrentEntity)) (.load this 0 true false))
+        (let [^:mutable bNextEntity false]
+          (while (and (> (.-position fCurrentEntity)
+                         (unchecked-subtract-int (.-count fCurrentEntity) delimLen))
+                      (not bNextEntity))
+            (System/arraycopy (.-ch fCurrentEntity)
+                              (.-position fCurrentEntity)
+                              (.-ch fCurrentEntity)
+                              0
+                              (unchecked-subtract-int
+                                (.-count fCurrentEntity)
+                                (.-position fCurrentEntity)))
+            (set! bNextEntity
+                  (.load this
+                         (unchecked-subtract-int
+                           (.-count fCurrentEntity)
+                           (.-position fCurrentEntity))
+                         false
+                         false))
+            (set! (.-position fCurrentEntity) 0)
+            (set! (.-startPosition fCurrentEntity) 0))
+          (when (> (.-position fCurrentEntity)
+                   (unchecked-subtract-int (.-count fCurrentEntity) delimLen))
+            (let [length (unchecked-subtract-int
+                           (.-count fCurrentEntity)
+                           (.-position fCurrentEntity))]
+              (.checkEntityLimit this
+                                 XMLScanner$NameType/COMMENT
+                                 fCurrentEntity
+                                 (.-position fCurrentEntity)
+                                 length)
+              (.append buffer (.-ch fCurrentEntity) (.-position fCurrentEntity) length)
+              (set! (.-columnNumber fCurrentEntity)
+                    (unchecked-add-int (.-columnNumber fCurrentEntity) (.-count fCurrentEntity)))
+              (set! (.-baseCharOffset fCurrentEntity)
+                    (unchecked-add-int (.-baseCharOffset fCurrentEntity)
+                                       (unchecked-subtract-int
+                                         (.-position fCurrentEntity)
+                                         (.-startPosition fCurrentEntity))))
+              (set! (.-position fCurrentEntity) (.-count fCurrentEntity))
+              (set! (.-startPosition fCurrentEntity) (.-count fCurrentEntity))
+              (.load this 0 true false)
+              (return false)))
+          (when (.normalizeNewlines this
+                                    Constants/XML_VERSION_1_0
+                                    buffer
+                                    true
+                                    false
+                                    XMLScanner$NameType/COMMENT)
+            (return true))
+          (let [^:mutable ^int c 0]
+            (label :OUTER
+              (while (< (.-position fCurrentEntity) (.-count fCurrentEntity))
+                (set! c
+                      (aget (.-ch fCurrentEntity)
+                            (let [old-5 (.-position fCurrentEntity)]
+                              (set! (.-position fCurrentEntity)
+                                    (unchecked-inc-int (.-position fCurrentEntity)))
+                              old-5)))
+                (cond
+                  (== c charAt0)
+                    (let [delimOffset (unchecked-subtract-int (.-position fCurrentEntity) 1)]
+                      (loop [^int i 1]
+                        (when (< i delimLen)
+                          (when (== (.-position fCurrentEntity) (.-count fCurrentEntity))
+                            (set! (.-position fCurrentEntity)
+                                  (unchecked-subtract-int (.-position fCurrentEntity) i))
+                            (break :OUTER))
+                          (set! c
+                                (aget (.-ch fCurrentEntity)
+                                      (let [old-6 (.-position fCurrentEntity)]
+                                        (set! (.-position fCurrentEntity)
+                                              (unchecked-inc-int (.-position fCurrentEntity)))
+                                        old-6)))
+                          (if (not (== (.charAt delimiter i) c))
+                              (set! (.-position fCurrentEntity)
+                                    (unchecked-subtract-int (.-position fCurrentEntity) i))
+                              (recur (unchecked-inc-int i)))))
+                      (when (== (.-position fCurrentEntity)
+                                (unchecked-add-int delimOffset delimLen))
+                        (set! done true)
+                        (break)))
+                  (or (== c \newline) (and isExternal (== c \return)))
+                    (do
+                      (set! (.-position fCurrentEntity)
+                            (unchecked-dec-int (.-position fCurrentEntity)))
+                      (break))
+                  :else
+                    (when (XMLChar/isInvalid c)
+                      (set! (.-position fCurrentEntity)
+                            (unchecked-dec-int (.-position fCurrentEntity)))
+                      (let [length (unchecked-subtract-int (.-position fCurrentEntity) offset)]
+                        (set! (.-columnNumber fCurrentEntity)
+                              (unchecked-add-int
+                                (.-columnNumber fCurrentEntity)
+                                (unchecked-subtract-int length newlines)))
+                        (.checkEntityLimit this
+                                           XMLScanner$NameType/COMMENT
+                                           fCurrentEntity
+                                           offset
+                                           length)
+                        (.append buffer (.-ch fCurrentEntity) offset length)
+                        (return true))))
+                (when (and (> chunkLimit 0)
+                           (>= (unchecked-subtract-int
+                                 (unchecked-add-int (.-length buffer) (.-position fCurrentEntity))
+                                 offset)
+                               chunkLimit))
+                  (break))))
+            (let [^:mutable length (unchecked-subtract-int (.-position fCurrentEntity) offset)]
+              (set! (.-columnNumber fCurrentEntity)
+                    (unchecked-add-int (.-columnNumber fCurrentEntity)
+                                       (unchecked-subtract-int length newlines)))
+              (.checkEntityLimit this XMLScanner$NameType/COMMENT fCurrentEntity offset length)
+              (when done (set! length (unchecked-subtract-int length delimLen)))
+              (.append buffer (.-ch fCurrentEntity) offset length)
+              (when DEBUG_BUFFER
+                (.print System/out ")scanData: ")
+                (.print this)
+                (.println System/out (java-str " -> " done)))
+              (when (and (> chunkLimit 0) (>= (.-length buffer) chunkLimit)) (break)))))
+        (when (and (not done) (== chunkLimit 0)) (recur)))
+      (not done)))
+
+  (method ^:protected skipChar :throws [IOException] ^boolean [this ^int c ^XMLScanner$NameType nt]
+    (when DEBUG_BUFFER
+      (.print System/out (java-str "(skipChar, '" (unchecked-char c) "': "))
+      (.print this)
+      (.println System/out))
+    (when (== (.-position fCurrentEntity) (.-count fCurrentEntity)) (.load this 0 true true))
+    (set! offset (.-position fCurrentEntity))
+    (let [^int cc (aget (.-ch fCurrentEntity) (.-position fCurrentEntity))]
+      (if (== cc c)
+          (do
+            (set! (.-position fCurrentEntity) (unchecked-inc-int (.-position fCurrentEntity)))
+            (if (== c \newline)
+                (do
+                  (set! (.-lineNumber fCurrentEntity)
+                        (unchecked-inc-int (.-lineNumber fCurrentEntity)))
+                  (set! (.-columnNumber fCurrentEntity) 1))
+                (set! (.-columnNumber fCurrentEntity)
+                      (unchecked-inc-int (.-columnNumber fCurrentEntity))))
+            (when DEBUG_BUFFER
+              (.print System/out (java-str ")skipChar, '" (unchecked-char c) "': "))
+              (.print this)
+              (.println System/out " -> true"))
+            (.checkEntityLimit this
+                               nt
+                               fCurrentEntity
+                               offset
+                               (unchecked-subtract-int (.-position fCurrentEntity) offset))
+            true)
+          (do
+            (when DEBUG_BUFFER
+              (.print System/out (java-str ")skipChar, '" (unchecked-char c) "': "))
+              (.print this)
+              (.println System/out " -> false"))
+            false))))
+
+  (method ^:public isSpace ^boolean [this ^char ch]
+    (or (or (or (== ch \space) (== ch \newline)) (== ch \tab)) (== ch \return)))
+
+  (method ^:protected skipSpaces :throws [IOException] ^boolean [this]
+    (when DEBUG_BUFFER (.print System/out "(skipSpaces: ") (.print this) (.println System/out))
+    (when (== (.-position fCurrentEntity) (.-count fCurrentEntity)) (.load this 0 true true))
+    (if (nil? fCurrentEntity)
+        false
+        (let [^:mutable ^int c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity))]
+          (set! offset (unchecked-subtract-int (.-position fCurrentEntity) 1))
+          (if (XMLChar/isSpace c)
+              (do
+                (loop []
+                  (let [^:mutable entityChanged false]
+                    (if (or (== c \newline) (and isExternal (== c \return)))
+                        (do
+                          (set! (.-lineNumber fCurrentEntity)
+                                (unchecked-inc-int (.-lineNumber fCurrentEntity)))
+                          (set! (.-columnNumber fCurrentEntity) 1)
+                          (when (== (.-position fCurrentEntity)
+                                    (unchecked-subtract-int (.-count fCurrentEntity) 1))
+                            (.invokeListeners this 1)
+                            (aset (.-ch fCurrentEntity) 0 (unchecked-char c))
+                            (set! entityChanged (.load this 1 true false))
+                            (cond
+                              (not entityChanged) (set! (.-position fCurrentEntity) 0)
+                              (nil? fCurrentEntity) (return true)))
+                          (when (and (== c \return) isExternal)
+                            (when-not (== (aget (.-ch fCurrentEntity)
+                                                (set!
+                                                  (.-position fCurrentEntity)
+                                                  (unchecked-inc-int (.-position fCurrentEntity))))
+                                          \newline)
+                              (set! (.-position fCurrentEntity)
+                                    (unchecked-dec-int (.-position fCurrentEntity))))))
+                        (set! (.-columnNumber fCurrentEntity)
+                              (unchecked-inc-int (.-columnNumber fCurrentEntity))))
+                    (.checkEntityLimit this
+                                       nil
+                                       fCurrentEntity
+                                       offset
+                                       (unchecked-subtract-int (.-position fCurrentEntity) offset))
+                    (set! offset (.-position fCurrentEntity))
+                    (when-not entityChanged
+                      (set! (.-position fCurrentEntity)
+                            (unchecked-inc-int (.-position fCurrentEntity))))
+                    (when (== (.-position fCurrentEntity) (.-count fCurrentEntity))
+                      (.load this 0 true true)
+                      (when (nil? fCurrentEntity) (return true))))
+                  (when (XMLChar/isSpace
+                          (set! c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity))))
+                    (recur)))
+                (when DEBUG_BUFFER
+                  (.print System/out ")skipSpaces: ")
+                  (.print this)
+                  (.println System/out " -> true"))
+                true)
+              (do
+                (when DEBUG_BUFFER
+                  (.print System/out ")skipSpaces: ")
+                  (.print this)
+                  (.println System/out " -> false"))
+                false)))))
+
+  (method ^:public arrangeCapacity :throws [IOException] ^boolean [this ^int length]
+    (.arrangeCapacity this length false))
+
+  (method ^:public arrangeCapacity :throws [IOException] ^boolean [this ^int length
+                                                                   ^boolean changeEntity]
+    (if (>= (unchecked-subtract-int (.-count fCurrentEntity) (.-position fCurrentEntity)) length)
+        true
+        (do
+          (when DEBUG_SKIP_STRING
+            (.println System/out (java-str "fCurrentEntity.count = " (.-count fCurrentEntity)))
+            (.println System/out
+                      (java-str "fCurrentEntity.position = " (.-position fCurrentEntity)))
+            (.println System/out (java-str "length = " length)))
+          (let [^:mutable entityChanged false]
+            (while (< (unchecked-subtract-int (.-count fCurrentEntity) (.-position fCurrentEntity))
+                      length)
+              (when (< (unchecked-subtract-int (alength (.-ch fCurrentEntity))
+                                               (.-position fCurrentEntity))
+                       length)
+                (.invokeListeners this 0)
+                (System/arraycopy (.-ch fCurrentEntity)
+                                  (.-position fCurrentEntity)
+                                  (.-ch fCurrentEntity)
+                                  0
+                                  (unchecked-subtract-int
+                                    (.-count fCurrentEntity)
+                                    (.-position fCurrentEntity)))
+                (set! (.-count fCurrentEntity)
+                      (unchecked-subtract-int (.-count fCurrentEntity) (.-position fCurrentEntity)))
+                (set! (.-position fCurrentEntity) 0))
+              (when (< (unchecked-subtract-int (.-count fCurrentEntity) (.-position fCurrentEntity))
+                       length)
+                (let [pos (.-position fCurrentEntity)]
+                  (.invokeListeners this pos)
+                  (set! entityChanged (.load this (.-count fCurrentEntity) changeEntity false))
+                  (set! (.-position fCurrentEntity) pos)
+                  (when entityChanged (break))))
+              (when DEBUG_SKIP_STRING
+                (.println System/out (java-str "fCurrentEntity.count = " (.-count fCurrentEntity)))
+                (.println System/out
+                          (java-str "fCurrentEntity.position = " (.-position fCurrentEntity)))
+                (.println System/out (java-str "length = " length))))
+            (if (>= (unchecked-subtract-int (.-count fCurrentEntity) (.-position fCurrentEntity))
+                    length)
+                true
+                false)))))
+
+  (method ^:protected skipString :throws [IOException] ^boolean [this ^String s]
+    (let [length (.length s)]
+      (when (.arrangeCapacity this length false)
+        (let [beforeSkip (.-position fCurrentEntity)
+              ^:mutable afterSkip (unchecked-subtract-int
+                                    (unchecked-add-int (.-position fCurrentEntity) length)
+                                    1)]
+          (when DEBUG_SKIP_STRING
+            (.println System/out (java-str "skipString,length = " s "," length))
+            (.println System/out
+                      (java-str "Buffer string to be skipped = "
+                                (String. (.-ch fCurrentEntity) beforeSkip length))))
+          (let [^:mutable i (unchecked-subtract-int length 1)]
+            (while (== (.charAt s (let [old-7 i] (set! i (unchecked-dec-int i)) old-7))
+                       (aget (.-ch fCurrentEntity) afterSkip))
+              (when (== (let [old-8 afterSkip] (set! afterSkip (unchecked-dec-int afterSkip)) old-8)
+                        beforeSkip)
+                (set! (.-position fCurrentEntity)
+                      (unchecked-add-int (.-position fCurrentEntity) length))
+                (set! (.-columnNumber fCurrentEntity)
+                      (unchecked-add-int (.-columnNumber fCurrentEntity) length))
+                (when-not detectingVersion
+                  (.checkEntityLimit this nil fCurrentEntity beforeSkip length))
+                (return true))))))
+      false))
+
+  (method ^:protected skipString :throws [IOException] ^boolean [this ^char/1 s]
+    (let [length (alength s)]
+      (if (.arrangeCapacity this length false)
+          (let [^:mutable beforeSkip (.-position fCurrentEntity)]
+            (when DEBUG_SKIP_STRING
+              (.println System/out (java-str "skipString,length = " (String. s) "," length))
+              (.println System/out (java-str "skipString,length = " (String. s) "," length)))
+            (loop [^int i 0]
+              (if (< i length)
+                  (if (not (== (aget (.-ch fCurrentEntity)
+                                     (let [old-9 beforeSkip]
+                                       (set! beforeSkip (unchecked-inc-int beforeSkip))
+                                       old-9))
+                               (aget s i)))
+                      (return false)
+                      (recur (unchecked-inc-int i)))
+                  nil))
+            (set! (.-position fCurrentEntity)
+                  (unchecked-add-int (.-position fCurrentEntity) length))
+            (set! (.-columnNumber fCurrentEntity)
+                  (unchecked-add-int (.-columnNumber fCurrentEntity) length))
+            (when-not detectingVersion
+              (.checkEntityLimit this nil fCurrentEntity beforeSkip length))
+            true)
+          false)))
+
+  (method ^:final load :throws [IOException] ^boolean [this ^int offset ^boolean changeEntity
+                                                       ^boolean notify]
+    (when DEBUG_BUFFER
+      (.print System/out (java-str "(load, " offset ": "))
+      (.print this)
+      (.println System/out))
+    (when notify (.invokeListeners this offset))
+    (set! (.-fTotalCountTillLastLoad fCurrentEntity)
+          (unchecked-add-int (.-fTotalCountTillLastLoad fCurrentEntity)
+                             (.-fLastCount fCurrentEntity)))
+    (let [^:mutable length (unchecked-subtract-int (alength (.-ch fCurrentEntity)) offset)]
+      (when (and (not (.-mayReadChunks fCurrentEntity))
+                 (> length XMLEntityManager/DEFAULT_XMLDECL_BUFFER_SIZE))
+        (set! length XMLEntityManager/DEFAULT_XMLDECL_BUFFER_SIZE))
+      (when DEBUG_BUFFER (.println System/out (java-str "  length to try to read: " length)))
+      (let [count (.read (.-reader fCurrentEntity) (.-ch fCurrentEntity) offset length)]
+        (when DEBUG_BUFFER (.println System/out (java-str "  length actually read:  " count)))
+        (let [^:mutable entityChanged false]
+          (if (not (== count -1))
+              (when-not (== count 0)
+                (set! (.-fLastCount fCurrentEntity) count)
+                (set! (.-count fCurrentEntity) (unchecked-add-int count offset))
+                (set! (.-position fCurrentEntity) offset))
+              (do
+                (set! (.-count fCurrentEntity) offset)
+                (set! (.-position fCurrentEntity) offset)
+                (set! entityChanged true)
+                (when changeEntity
+                  (.endEntity fEntityManager)
+                  (when (nil? fCurrentEntity) (throw END_OF_DOCUMENT_ENTITY))
+                  (when (== (.-position fCurrentEntity) (.-count fCurrentEntity))
+                    (.load this 0 true false)))))
+          (when DEBUG_BUFFER
+            (.print System/out (java-str ")load, " offset ": "))
+            (.print this)
+            (.println System/out))
+          entityChanged))))
+
+  (method ^:protected createReader :throws [IOException] ^Reader [this ^InputStream inputStream
+                                                                  ^:mutable ^String encoding
+                                                                  ^Boolean isBigEndian]
+    (when (nil? encoding) (set! encoding "UTF-8"))
+    (let [ENCODING (.toUpperCase encoding Locale/ENGLISH)]
+      (cond
+        (.equals ENCODING "UTF-8")
+          (do
+            (when DEBUG_ENCODINGS (.println System/out "$$$ creating UTF8Reader"))
+            (UTF8Reader. inputStream
+                         (.-fBufferSize fCurrentEntity)
+                         (.getMessageFormatter fErrorReporter XMLMessageFormatter/XML_DOMAIN)
+                         (.getLocale fErrorReporter)))
+        (.equals ENCODING "US-ASCII")
+          (do
+            (when DEBUG_ENCODINGS (.println System/out "$$$ creating ASCIIReader"))
+            (ASCIIReader. inputStream
+                          (.-fBufferSize fCurrentEntity)
+                          (.getMessageFormatter fErrorReporter XMLMessageFormatter/XML_DOMAIN)
+                          (.getLocale fErrorReporter)))
+        :else
+          (do
+            (when (.equals ENCODING "ISO-10646-UCS-4")
+              (if (some? isBigEndian)
+                  (let [isBE (.booleanValue isBigEndian)]
+                    (if isBE
+                        (return (UCSReader. inputStream UCSReader/UCS4BE))
+                        (return (UCSReader. inputStream UCSReader/UCS4LE))))
+                  (.reportError fErrorReporter
+                                XMLMessageFormatter/XML_DOMAIN
+                                "EncodingByteOrderUnsupported"
+                                (new Object/1 [encoding])
+                                XMLErrorReporter/SEVERITY_FATAL_ERROR)))
+            (when (.equals ENCODING "ISO-10646-UCS-2")
+              (if (some? isBigEndian)
+                  (let [isBE (.booleanValue isBigEndian)]
+                    (if isBE
+                        (return (UCSReader. inputStream UCSReader/UCS2BE))
+                        (return (UCSReader. inputStream UCSReader/UCS2LE))))
+                  (.reportError fErrorReporter
+                                XMLMessageFormatter/XML_DOMAIN
+                                "EncodingByteOrderUnsupported"
+                                (new Object/1 [encoding])
+                                XMLErrorReporter/SEVERITY_FATAL_ERROR)))
+            (let [validIANA (XMLChar/isValidIANAEncoding encoding)
+                  validJava (XMLChar/isValidJavaEncoding encoding)]
+              (when (or (not validIANA) (and fAllowJavaEncodings (not validJava)))
+                (.reportError fErrorReporter
+                              XMLMessageFormatter/XML_DOMAIN
+                              "EncodingDeclInvalid"
+                              (new Object/1 [encoding])
+                              XMLErrorReporter/SEVERITY_FATAL_ERROR)
+                (set! encoding "ISO-8859-1"))
+              (let [^:mutable javaEncoding (EncodingMap/getIANA2JavaMapping ENCODING)]
+                (if (nil? javaEncoding)
+                    (if fAllowJavaEncodings
+                        (set! javaEncoding encoding)
+                        (do
+                          (.reportError fErrorReporter
+                                        XMLMessageFormatter/XML_DOMAIN
+                                        "EncodingDeclInvalid"
+                                        (new Object/1 [encoding])
+                                        XMLErrorReporter/SEVERITY_FATAL_ERROR)
+                          (set! javaEncoding "ISO8859_1")))
+                    (when (.equals javaEncoding "ASCII")
+                      (when DEBUG_ENCODINGS (.println System/out "$$$ creating ASCIIReader"))
+                      (return (ASCIIReader. inputStream
+                                            fBufferSize
+                                            (.getMessageFormatter
+                                              fErrorReporter
+                                              XMLMessageFormatter/XML_DOMAIN)
+                                            (.getLocale fErrorReporter)))))
+                (when DEBUG_ENCODINGS
+                  (.print System/out
+                          (java-str "$$$ creating Java InputStreamReader: encoding=" javaEncoding))
+                  (when (identical? javaEncoding encoding) (.print System/out " (IANA encoding)"))
+                  (.println System/out))
+                (InputStreamReader. inputStream javaEncoding)))))))
+
+  (method ^:protected getEncodingName ^Object/1 [this ^byte/1 b4 ^int count]
+    (if (< count 2)
+        (new Object/1 ["UTF-8" nil])
+        (let [b0 (bit-and-int (aget b4 0) 0xFF)
+              b1 (bit-and-int (aget b4 1) 0xFF)]
+          (cond
+            (and (== b0 0xFE) (== b1 0xFF)) (new Object/1 ["UTF-16BE" true])
+            (and (== b0 0xFF) (== b1 0xFE)) (new Object/1 ["UTF-16LE" false])
+            (< count 3) (new Object/1 ["UTF-8" nil])
+            :else
+              (let [b2 (bit-and-int (aget b4 2) 0xFF)]
+                (cond
+                  (and (and (== b0 0xEF) (== b1 0xBB)) (== b2 0xBF)) (new Object/1 ["UTF-8" nil])
+                  (< count 4) (new Object/1 ["UTF-8" nil])
+                  :else
+                    (let [b3 (bit-and-int (aget b4 3) 0xFF)]
+                      (cond
+                        (and (and (and (== b0 0x00) (== b1 0x00)) (== b2 0x00)) (== b3 0x3C))
+                          (new Object/1 ["ISO-10646-UCS-4" true])
+                        (and (and (and (== b0 0x3C) (== b1 0x00)) (== b2 0x00)) (== b3 0x00))
+                          (new Object/1 ["ISO-10646-UCS-4" false])
+                        (and (and (and (== b0 0x00) (== b1 0x00)) (== b2 0x3C)) (== b3 0x00))
+                          (new Object/1 ["ISO-10646-UCS-4" nil])
+                        (and (and (and (== b0 0x00) (== b1 0x3C)) (== b2 0x00)) (== b3 0x00))
+                          (new Object/1 ["ISO-10646-UCS-4" nil])
+                        (and (and (and (== b0 0x00) (== b1 0x3C)) (== b2 0x00)) (== b3 0x3F))
+                          (new Object/1 ["UTF-16BE" true])
+                        (and (and (and (== b0 0x3C) (== b1 0x00)) (== b2 0x3F)) (== b3 0x00))
+                          (new Object/1 ["UTF-16LE" false])
+                        (and (and (and (== b0 0x4C) (== b1 0x6F)) (== b2 0xA7)) (== b3 0x94))
+                          (new Object/1 ["CP037" nil])
+                        :else (new Object/1 ["UTF-8" nil])))))))))
+
+  (method ^:final print ^void [this]
+    (when DEBUG_BUFFER
+      (if (some? fCurrentEntity)
+          (do
+            (.print System/out \[)
+            (.print System/out (.-count fCurrentEntity))
+            (.print System/out \space)
+            (.print System/out (.-position fCurrentEntity))
+            (when (> (.-count fCurrentEntity) 0)
+              (.print System/out " \"")
+              (loop [^int i 0]
+                (when (< i (.-count fCurrentEntity))
+                  (when (== i (.-position fCurrentEntity)) (.print System/out \^))
+                  (let [c (aget (.-ch fCurrentEntity) i)]
+                    (switch c
+                      \newline (do (.print System/out "\\n") (recur (unchecked-inc-int i)))
+                      \return (do (.print System/out "\\r") (recur (unchecked-inc-int i)))
+                      \tab (do (.print System/out "\\t") (recur (unchecked-inc-int i)))
+                      \\ (do (.print System/out "\\\\") (recur (unchecked-inc-int i)))
+                      (do (.print System/out c) (recur (unchecked-inc-int i)))))))
+              (when (== (.-position fCurrentEntity) (.-count fCurrentEntity))
+                (.print System/out \^))
+              (.print System/out \"))
+            (.print System/out \])
+            (.print System/out " @ ")
+            (.print System/out (.-lineNumber fCurrentEntity))
+            (.print System/out \,)
+            (.print System/out (.-columnNumber fCurrentEntity)))
+          (.print System/out "*NO CURRENT ENTITY*"))))
+
+  (method ^:public registerListener ^void [this ^XMLBufferListener listener]
+    (when-not (.contains listeners listener) (.add listeners listener)))
+
+  (method ^:public invokeListeners ^void [this ^int loadPos]
+    (loop [^int i 0]
+      (when (< i (.size listeners))
+        (.refresh (cast XMLBufferListener (.get listeners i)) loadPos)
+        (recur (unchecked-inc-int i)))))
+
+  (method ^:protected ^:final skipDeclSpaces :throws [IOException] ^boolean [this]
+    (when DEBUG_BUFFER (.print System/out "(skipDeclSpaces: ") (.println System/out))
+    (when (== (.-position fCurrentEntity) (.-count fCurrentEntity)) (.load this 0 true false))
+    (let [^:mutable ^int c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity))]
+      (if (XMLChar/isSpace c)
+          (let [external (.isExternal fCurrentEntity)]
+            (loop []
+              (let [^:mutable entityChanged false]
+                (if (or (== c \newline) (and external (== c \return)))
+                    (do
+                      (set! (.-lineNumber fCurrentEntity)
+                            (unchecked-inc-int (.-lineNumber fCurrentEntity)))
+                      (set! (.-columnNumber fCurrentEntity) 1)
+                      (when (== (.-position fCurrentEntity)
+                                (unchecked-subtract-int (.-count fCurrentEntity) 1))
+                        (aset (.-ch fCurrentEntity) 0 (unchecked-char c))
+                        (set! entityChanged (.load this 1 true false))
+                        (when-not entityChanged (set! (.-position fCurrentEntity) 0)))
+                      (when (and (== c \return) external)
+                        (when-not (== (aget (.-ch fCurrentEntity)
+                                            (set!
+                                              (.-position fCurrentEntity)
+                                              (unchecked-inc-int (.-position fCurrentEntity))))
+                                      \newline)
+                          (set! (.-position fCurrentEntity)
+                                (unchecked-dec-int (.-position fCurrentEntity))))))
+                    (set! (.-columnNumber fCurrentEntity)
+                          (unchecked-inc-int (.-columnNumber fCurrentEntity))))
+                (when-not entityChanged
+                  (set! (.-position fCurrentEntity) (unchecked-inc-int (.-position fCurrentEntity))))
+                (when (== (.-position fCurrentEntity) (.-count fCurrentEntity))
+                  (.load this 0 true false)))
+              (when (XMLChar/isSpace
+                      (set! c (aget (.-ch fCurrentEntity) (.-position fCurrentEntity))))
+                (recur)))
+            (when DEBUG_BUFFER
+              (.print System/out ")skipDeclSpaces: ")
+              (.println System/out " -> true"))
+            true)
+          (do
+            (when DEBUG_BUFFER
+              (.print System/out ")skipDeclSpaces: ")
+              (.println System/out " -> false"))
+            false))))
+
+  (method ^:protected normalizeNewlines :throws [IOException] ^boolean [this ^short version
+                                                                        ^XMLString buffer
+                                                                        ^boolean append
+                                                                        ^boolean storeWS
+                                                                        ^XMLScanner$NameType nt]
+    (set! offset (.-position fCurrentEntity))
+    (let [^:mutable ^int c (aget (.-ch fCurrentEntity) offset)]
+      (set! newlines 0)
+      (set! counted false)
+      (when (or (or (== c \newline) (== c \return))
+                (and (and (== version Constants/XML_VERSION_1_1) (or (== c 0x85) (== c 0x2028)))
+                     isExternal))
+        (loop []
+          (set! c
+                (aget (.-ch fCurrentEntity)
+                      (let [old-10 (.-position fCurrentEntity)]
+                        (set! (.-position fCurrentEntity)
+                              (unchecked-inc-int (.-position fCurrentEntity)))
+                        old-10)))
+          (if (or (or (== c \newline) (== c \return))
+                  (and (== version Constants/XML_VERSION_1_1) (or (== c 0x85) (== c 0x2028))))
+              (do
+                (set! newlines (unchecked-inc-int newlines))
+                (set! (.-lineNumber fCurrentEntity)
+                      (unchecked-inc-int (.-lineNumber fCurrentEntity)))
+                (set! (.-columnNumber fCurrentEntity) 1)
+                (when (== (.-position fCurrentEntity) (.-count fCurrentEntity))
+                  (.checkEntityLimit this nt fCurrentEntity offset newlines)
+                  (set! offset 0)
+                  (set! (.-position fCurrentEntity) newlines)
+                  (when (.load this newlines false true) (set! counted true) (break)))
+                (when (and (== c \return) isExternal)
+                  (let [^int cc (aget (.-ch fCurrentEntity) (.-position fCurrentEntity))]
+                    (if (or (== cc \newline)
+                            (and (== version Constants/XML_VERSION_1_1) (== cc 0x85)))
+                        (do
+                          (set! (.-position fCurrentEntity)
+                                (unchecked-inc-int (.-position fCurrentEntity)))
+                          (set! offset (unchecked-inc-int offset)))
+                        (set! newlines (unchecked-inc-int newlines))))))
+              (do
+                (set! (.-position fCurrentEntity) (unchecked-dec-int (.-position fCurrentEntity)))
+                (break)))
+          (when (< (.-position fCurrentEntity) (unchecked-subtract-int (.-count fCurrentEntity) 1))
+            (recur)))
+        (loop [^int i offset]
+          (when (< i (.-position fCurrentEntity))
+            (aset (.-ch fCurrentEntity) i \newline)
+            (if storeWS
+                (do (.storeWhiteSpace this i) (recur (unchecked-inc-int i)))
+                (recur (unchecked-inc-int i)))))
+        (let [length (unchecked-subtract-int (.-position fCurrentEntity) offset)]
+          (when (== (.-position fCurrentEntity) (unchecked-subtract-int (.-count fCurrentEntity) 1))
+            (.checkEntityLimit this nt fCurrentEntity offset length)
+            (if append
+                (.append buffer (.-ch fCurrentEntity) offset length)
+                (.setValues buffer (.-ch fCurrentEntity) offset length))
+            (return true))))
+      false)))

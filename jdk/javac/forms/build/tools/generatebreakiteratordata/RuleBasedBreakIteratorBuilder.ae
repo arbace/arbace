@@ -1,0 +1,1164 @@
+;; Converted from jdk26u make/jdk/src/classes/build/tools/generatebreakiteratordata/RuleBasedBreakIteratorBuilder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'build.tools.generatebreakiteratordata)
+
+(import '(java.io BufferedOutputStream File FileOutputStream)
+        '(java.util Enumeration Hashtable Stack Vector)
+        '(java.util.zip CRC32)
+        '(sun.text CompactByteArray))
+
+(defclass RuleBasedBreakIteratorBuilder
+  (field ^:protected ^:static ^:final ^byte IGNORE -1)
+
+  (field ^:private ^CompactByteArray charCategoryTable nil)
+
+  (field ^:private ^SupplementaryCharacterData supplementaryCharCategoryTable nil)
+
+  (field ^:private ^short/1 stateTable nil)
+
+  (field ^:private ^short/1 backwardsStateTable nil)
+
+  (field ^:private ^boolean/1 endStates nil)
+
+  (field ^:private ^boolean/1 lookaheadStates nil)
+
+  (field ^:private ^byte/1 additionalData nil)
+
+  (field ^:private ^int numCategories)
+
+  (field ^:protected ^{:tag (Vector CharSet)} categories nil)
+
+  (field ^:protected ^{:tag (Hashtable String Object)} expressions nil)
+
+  (field ^:protected ^CharSet ignoreChars nil)
+
+  (field ^:protected ^{:tag (Vector short/1)} tempStateTable nil)
+
+  (field ^:protected ^{:tag (Vector Integer)} decisionPointList nil)
+
+  (field ^:protected ^{:tag (Stack (Vector Integer))} decisionPointStack nil)
+
+  (field ^:protected ^{:tag (Vector Integer)} loopingStates nil)
+
+  (field ^:protected ^{:tag (Vector Integer)} statesToBackfill nil)
+
+  (field ^:protected ^{:tag (Vector int/1)} mergeList nil)
+
+  (field ^:protected ^boolean clearLoopingStates false)
+
+  (field ^:protected ^:static ^:final ^int END_STATE_FLAG 0x8000)
+
+  (field ^:protected ^:static ^:final ^int DONT_LOOP_FLAG 0x4000)
+
+  (field ^:protected ^:static ^:final ^int LOOKAHEAD_STATE_FLAG 0x2000)
+
+  (field ^:protected ^:static ^:final ^int ALL_FLAGS
+    (bit-or-int (bit-or-int END_STATE_FLAG LOOKAHEAD_STATE_FLAG) DONT_LOOP_FLAG))
+
+  (constructor ^:public [this ^String description]
+    (let [^{:tag (Vector String)} tempRuleList (.buildRuleList this description)]
+      (.buildCharCategories this tempRuleList)
+      (.buildStateTable this tempRuleList)
+      (.buildBackwardsStateTable this tempRuleList)))
+
+  (method ^:private buildRuleList ^{:tag (Vector String)} [this ^:mutable ^String description]
+    (let [^{:tag (Vector String)} tempRuleList (Vector.)
+          ^{:tag (Stack Character)} parenStack (Stack.)
+          ^:mutable ^int p 0
+          ^:mutable ^int ruleStart 0
+          ^:mutable ^int c \u0000
+          ^:mutable ^int lastC \u0000
+          ^:mutable ^int lastOpen \u0000
+          ^:mutable haveEquals false
+          ^:mutable havePipe false
+          ^:mutable sawVarName false
+          ^:const charsThatCantPrecedeAsterisk "=/{(|}*;\u0000"]
+      (when (and (not (== (.length description) 0))
+                 (not (== (.codePointAt description
+                                        (unchecked-subtract-int (.length description) 1))
+                          \;)))
+        (set! description (java-str description ";")))
+      (while (< p (.length description))
+        (set! c (.codePointAt description p))
+        (switch c
+          \\ (set! p (unchecked-inc-int p))
+          (\{ \< \[ \()
+            (do
+              (when (== lastOpen \<) (.error this "Can't nest brackets inside <>" p description))
+              (when (and (== lastOpen \[) (not (== c \[)))
+                (.error this "Can't nest anything in [] but []" p description))
+              (when (and (== c \<) (or haveEquals havePipe))
+                (.error this "Unknown variable name" p description))
+              (set! lastOpen c)
+              (.push parenStack (Character/valueOf (unchecked-char c)))
+              (when (== c \<) (set! sawVarName true)))
+          (\} \> \] \))
+            (let [^:mutable expectedClose \u0000]
+              (switch lastOpen
+                \{ (set! expectedClose \})
+                \[ (set! expectedClose \])
+                \( (set! expectedClose \))
+                \< (set! expectedClose \>))
+              (when-not (== c expectedClose) (.error this "Unbalanced parentheses" p description))
+              (when (== lastC lastOpen) (.error this "Parens don't contain anything" p description))
+              (.pop parenStack)
+              (if (not (.empty parenStack))
+                  (set! lastOpen (.charValue (cast Character (.peek parenStack))))
+                  (set! lastOpen \u0000)))
+          \*
+            (when-not (== (.indexOf charsThatCantPrecedeAsterisk lastC) -1)
+              (.error this "Misplaced asterisk" p description))
+          \? (when-not (== lastC \*) (.error this "Misplaced ?" p description))
+          \=
+            (do
+              (when (or haveEquals havePipe)
+                (.error this "More than one = or / in rule" p description))
+              (set! haveEquals true))
+          \/
+            (do
+              (when (or haveEquals havePipe)
+                (.error this "More than one = or / in rule" p description))
+              (when sawVarName (.error this "Unknown variable name" p description))
+              (set! havePipe true))
+          \!
+            (when (and (not (== lastC \;)) (not (== lastC \u0000)))
+              (.error this "! can only occur at the beginning of a rule" p description))
+          \. nil
+          (\^ \- \:)
+            (when (and (not (== lastOpen \[)) (not (== lastOpen \<)))
+              (.error this "Illegal character" p description))
+          \;
+            (do
+              (when (or (== lastC \;) (== lastC \u0000)) (.error this "Empty rule" p description))
+              (when-not (.empty parenStack) (.error this "Unbalanced parenheses" p description))
+              (when (.empty parenStack)
+                (if haveEquals
+                    (set! description
+                          (.processSubstitution this
+                                                (.substring description ruleStart p)
+                                                description
+                                                (unchecked-add-int p 1)))
+                    (do
+                      (when sawVarName (.error this "Unknown variable name" p description))
+                      (.addElement tempRuleList (.substring description ruleStart p))))
+                (set! ruleStart (unchecked-add-int p 1))
+                (set! haveEquals (set! havePipe (set! sawVarName false)))))
+          \|
+            (do
+              (when (== lastC \|) (.error this "Empty alternative" p description))
+              (when (or (.empty parenStack) (not (== lastOpen \()))
+                (.error this "Misplaced |" p description)))
+          (do
+            (when (and (and (and (>= c \space) (< c \u007f))
+                            (not (Character/isLetter (unchecked-char c))))
+                       (not (Character/isDigit (unchecked-char c))))
+              (.error this "Illegal character" p description))
+            (when (>= c Character/MIN_SUPPLEMENTARY_CODE_POINT) (set! p (unchecked-inc-int p)))))
+        (set! lastC c)
+        (set! p (unchecked-inc-int p)))
+      (when (== (.size tempRuleList) 0) (.error this "No valid rules in description" p description))
+      tempRuleList))
+
+  (method ^:protected processSubstitution ^String [this ^String substitutionRule ^String description
+                                                   ^int startPos]
+    (let [^:mutable ^String replace nil
+          ^:mutable ^String replaceWith nil
+          equalPos (.indexOf substitutionRule \=)]
+      (set! replace (.substring substitutionRule 0 equalPos))
+      (set! replaceWith (.substring substitutionRule (unchecked-add-int equalPos 1)))
+      (.handleSpecialSubstitution this replace replaceWith startPos description)
+      (when (== (.length replaceWith) 0)
+        (.error this "Nothing on right-hand side of =" startPos description))
+      (when (== (.length replace) 0)
+        (.error this "Nothing on left-hand side of =" startPos description))
+      (when (and (== (.length replace) 2) (not (== (.charAt replace 0) \\)))
+        (.error this "Illegal left-hand side for =" startPos description))
+      (when (and (and (>= (.length replace) 3) (not (== (.charAt replace 0) \<)))
+                 (not (== (.codePointBefore replace equalPos) \>)))
+        (.error this "Illegal left-hand side for =" startPos description))
+      (when (and (not (and (== (.charAt replaceWith 0) \[)
+                           (== (.charAt replaceWith
+                                        (unchecked-subtract-int (.length replaceWith) 1))
+                               \])))
+                 (not (and (== (.charAt replaceWith 0) \()
+                           (== (.charAt replaceWith
+                                        (unchecked-subtract-int (.length replaceWith) 1))
+                               \)))))
+        (.error this "Illegal right-hand side for =" startPos description))
+      (let [result (StringBuffer.)]
+        (.append result (.substring description 0 startPos))
+        (let [^:mutable lastPos startPos
+              ^:mutable pos (.indexOf description replace startPos)]
+          (while (not (== pos -1))
+            (.append result (.substring description lastPos pos))
+            (.append result replaceWith)
+            (set! lastPos (unchecked-add-int pos (.length replace)))
+            (set! pos (.indexOf description replace lastPos)))
+          (.append result (.substring description lastPos))
+          (.toString result)))))
+
+  (method ^:protected handleSpecialSubstitution ^void [this ^String replace ^String replaceWith
+                                                       ^int startPos ^String description]
+    (when (.equals replace "<ignore>")
+      (when (== (.charAt replaceWith 0) \()
+        (.error this "Ignore group can't be enclosed in (" startPos description))
+      (set! ignoreChars (CharSet/parseString replaceWith))))
+
+  (method ^:protected buildCharCategories ^void [this ^{:tag (Vector String)} tempRuleList]
+    (let [^:mutable ^int bracketLevel 0
+          ^:mutable ^int p 0
+          ^:mutable ^int lineNum 0]
+      (set! expressions (Hashtable.))
+      (while (< lineNum (.size tempRuleList))
+        (let [line (cast String (.elementAt tempRuleList lineNum))]
+          (set! p 0)
+          (while (< p (.length line))
+            (let [^:mutable c (.codePointAt line p)]
+              (switch c
+                (\{ \} \( \) \* \. \/ \| \; \? \!) nil
+                \[
+                  (let [^:mutable q (unchecked-add-int p 1)]
+                    (set! bracketLevel (unchecked-inc-int bracketLevel))
+                    (while (and (< q (.length line)) (not (== bracketLevel 0)))
+                      (set! c (.codePointAt line q))
+                      (switch c
+                        \\ (set! q (unchecked-inc-int q))
+                        \[ (set! bracketLevel (unchecked-inc-int bracketLevel))
+                        \] (set! bracketLevel (unchecked-dec-int bracketLevel)))
+                      (set! q (unchecked-add-int q (Character/charCount c))))
+                    (when (nil? (.get expressions (.substring line p q)))
+                      (.put expressions
+                            (.substring line p q)
+                            (CharSet/parseString (.substring line p q))))
+                    (set! p (unchecked-subtract-int q 1)))
+                \\
+                  (do
+                    (set! p (unchecked-inc-int p))
+                    (set! c (.codePointAt line p))
+                    (.put expressions
+                          (.substring line p (unchecked-add-int p 1))
+                          (CharSet/parseString (.substring line p (unchecked-add-int p 1)))))
+                (.put expressions
+                      (.substring line p (unchecked-add-int p 1))
+                      (CharSet/parseString (.substring line p (unchecked-add-int p 1)))))
+              (set! p (unchecked-add-int p (Character/charCount (.codePointAt line p))))))
+          (set! lineNum (unchecked-inc-int lineNum))))
+      (CharSet/releaseExpressionCache)
+      (set! categories (Vector.))
+      (if (some? ignoreChars)
+          (.addElement categories ignoreChars)
+          (.addElement categories (CharSet.)))
+      (set! ignoreChars nil)
+      (.mungeExpressionList this expressions)
+      (loop [^{:tag (Enumeration Object)} iter (.elements expressions)]
+        (when (.hasMoreElements iter)
+          (let [^:mutable e (cast CharSet (.nextElement iter))]
+            (loop [^int j (unchecked-subtract-int (.size categories) 1)]
+              (when (and (not (.empty e)) (> j 0))
+                (let [that (cast CharSet (.elementAt categories j))]
+                  (if (not (.empty (.intersection that e)))
+                      (let [^:mutable temp (.difference that e)]
+                        (when-not (.empty temp) (.addElement categories temp))
+                        (set! temp (.intersection e that))
+                        (set! e (.difference e that))
+                        (if (not (.equals temp that))
+                            (do (.setElementAt categories temp j) (recur (unchecked-dec-int j)))
+                            (recur (unchecked-dec-int j))))
+                      (recur (unchecked-dec-int j))))))
+            (if (not (.empty e)) (do (.addElement categories e) (recur iter)) (recur iter)))))
+      (let [^:mutable allChars (CharSet.)]
+        (loop [^int i 1]
+          (when (< i (.size categories))
+            (set! allChars (.union allChars (cast CharSet (.elementAt categories i))))
+            (recur (unchecked-inc-int i))))
+        (let [^:mutable ignoreChars (cast CharSet (.elementAt categories 0))]
+          (set! ignoreChars (.difference ignoreChars allChars))
+          (.setElementAt categories ignoreChars 0)
+          (loop [^{:tag (Enumeration String)} iter (.keys expressions)]
+            (when (.hasMoreElements iter)
+              (let [key (cast String (.nextElement iter))
+                    cs (cast CharSet (.get expressions key))
+                    cats (StringBuffer.)]
+                (loop [^int j 0]
+                  (when (< j (.size categories))
+                    (let [temp (.intersection cs (cast CharSet (.elementAt categories j)))]
+                      (if (not (.empty temp))
+                          (do
+                            (.append cats (unchecked-char (unchecked-add-int 0x100 j)))
+                            (when-not (.equals temp cs) (recur (unchecked-inc-int j))))
+                          (recur (unchecked-inc-int j))))))
+                (.put expressions key (.toString cats))
+                (recur iter))))
+          (set! charCategoryTable (CompactByteArray. (unchecked-byte 0)))
+          (set! supplementaryCharCategoryTable (SupplementaryCharacterData. (unchecked-byte 0)))
+          (loop [^int i 0]
+            (when (< i (.size categories))
+              (let [chars (cast CharSet (.elementAt categories i))
+                    ^{:tag (Enumeration int/1)} enum_ (.getChars chars)]
+                (while (.hasMoreElements enum_)
+                  (let [range (cast int/1 (.nextElement enum_))]
+                    (cond
+                      (not (== i 0))
+                        (if (< (aget range 0) Character/MIN_SUPPLEMENTARY_CODE_POINT)
+                            (if (< (aget range 1) Character/MIN_SUPPLEMENTARY_CODE_POINT)
+                                (.setElementAt charCategoryTable
+                                               (unchecked-char (aget range 0))
+                                               (unchecked-char (aget range 1))
+                                               (unchecked-byte i))
+                                (do
+                                  (.setElementAt
+                                    charCategoryTable
+                                    (unchecked-char (aget range 0))
+                                    (unchecked-char 0xFFFF)
+                                    (unchecked-byte i))
+                                  (.appendElement
+                                    supplementaryCharCategoryTable
+                                    Character/MIN_SUPPLEMENTARY_CODE_POINT
+                                    (aget range 1)
+                                    (unchecked-byte i))))
+                            (.appendElement supplementaryCharCategoryTable
+                                            (aget range 0)
+                                            (aget range 1)
+                                            (unchecked-byte i)))
+                      (< (aget range 0) Character/MIN_SUPPLEMENTARY_CODE_POINT)
+                        (if (< (aget range 1) Character/MIN_SUPPLEMENTARY_CODE_POINT)
+                            (.setElementAt charCategoryTable
+                                           (unchecked-char (aget range 0))
+                                           (unchecked-char (aget range 1))
+                                           IGNORE)
+                            (do
+                              (.setElementAt charCategoryTable
+                                             (unchecked-char (aget range 0))
+                                             (unchecked-char 0xFFFF)
+                                             IGNORE)
+                              (.appendElement supplementaryCharCategoryTable
+                                              Character/MIN_SUPPLEMENTARY_CODE_POINT
+                                              (aget range 1)
+                                              IGNORE)))
+                      :else
+                        (.appendElement supplementaryCharCategoryTable
+                                        (aget range 0)
+                                        (aget range 1)
+                                        IGNORE))))
+                (recur (unchecked-inc-int i)))))
+          (.compact charCategoryTable)
+          (.complete supplementaryCharCategoryTable)
+          (set! numCategories (.size categories))))))
+
+  (method ^:protected mungeExpressionList ^void [this ^{:tag (Hashtable String Object)} expressions])
+
+  (method ^:private buildStateTable ^void [this ^{:tag (Vector String)} tempRuleList]
+    (set! tempStateTable (Vector.))
+    (.addElement tempStateTable (new short/1 (unchecked-add-int numCategories 1)))
+    (.addElement tempStateTable (new short/1 (unchecked-add-int numCategories 1)))
+    (loop [^int i 0]
+      (when (< i (.size tempRuleList))
+        (let [rule (cast String (.elementAt tempRuleList i))]
+          (if (not (== (.charAt rule 0) \!))
+              (do (.parseRule this rule true) (recur (unchecked-inc-int i)))
+              (recur (unchecked-inc-int i))))))
+    (.finishBuildingStateTable this true))
+
+  (method ^:private parseRule ^void [this ^String rule ^boolean forward]
+    (let [^:mutable ^int p 0
+          ^:mutable ^int currentState 1
+          ^:mutable lastState currentState
+          ^:mutable pendingChars ""]
+      (set! decisionPointStack (Stack.))
+      (set! decisionPointList (Vector.))
+      (set! loopingStates (Vector.))
+      (set! statesToBackfill (Vector.))
+      (let [^:mutable ^short/1 state nil
+            ^:mutable sawEarlyBreak false]
+        (when-not forward (.addElement loopingStates (Integer/valueOf 1)))
+        (.addElement decisionPointList (Integer/valueOf currentState))
+        (set! currentState (unchecked-subtract-int (.size tempStateTable) 1))
+        (while (< p (.length rule))
+          (let [^:mutable c (.codePointAt rule p)]
+            (set! clearLoopingStates false)
+            (cond
+              (or (or (or (or (or (or (== c \[) (== c \\)) (Character/isLetter c))
+                              (Character/isDigit c))
+                          (< c \space))
+                      (== c \.))
+                  (>= c \u007f))
+                (do
+                  (if (not (== c \.))
+                      (let [^:mutable q p]
+                        (cond
+                          (== c \\)
+                            (do (set! q (unchecked-add-int p 2)) (set! p (unchecked-inc-int p)))
+                          (== c \[)
+                            (let [^:mutable ^int bracketLevel 1]
+                              (set! q
+                                    (unchecked-add-int
+                                      q
+                                      (Character/charCount (.codePointAt rule q))))
+                              (while (> bracketLevel 0)
+                                (set! c (.codePointAt rule q))
+                                (cond
+                                  (== c \[) (set! bracketLevel (unchecked-inc-int bracketLevel))
+                                  (== c \]) (set! bracketLevel (unchecked-dec-int bracketLevel))
+                                  (== c \\)
+                                    (set! c (.codePointAt rule (set! q (unchecked-inc-int q)))))
+                                (set! q (unchecked-add-int q (Character/charCount c)))))
+                          :else (set! q (unchecked-add-int p (Character/charCount c))))
+                        (set! pendingChars (cast String (.get expressions (.substring rule p q))))
+                        (set! p
+                              (unchecked-subtract-int
+                                q
+                                (Character/charCount (.codePointBefore rule q)))))
+                      (let [rowNum (.intValue (cast Integer (.lastElement decisionPointList)))]
+                        (set! state (cast short/1 (.elementAt tempStateTable rowNum)))
+                        (if (and (and (< (unchecked-add-int p 1) (.length rule))
+                                      (== (.charAt rule (unchecked-add-int p 1)) \*))
+                                 (not (== (aget state 0) 0)))
+                            (do
+                              (.addElement decisionPointList (Integer/valueOf (aget state 0)))
+                              (set! pendingChars "")
+                              (set! p (unchecked-inc-int p)))
+                            (let [temp (StringBuffer.)]
+                              (loop [^int i 0]
+                                (when (< i numCategories)
+                                  (.append temp (unchecked-char (unchecked-add-int i 0x100)))
+                                  (recur (unchecked-inc-int i))))
+                              (set! pendingChars (.toString temp))))))
+                  (when-not (== (.length pendingChars) 0)
+                    (when (and (< (unchecked-add-int p 1) (.length rule))
+                               (== (.charAt rule (unchecked-add-int p 1)) \*))
+                      (let [^{:tag (Vector Integer)} clone (cast Vector (.clone decisionPointList))]
+                        (.push decisionPointStack clone)))
+                    (let [newState (.size tempStateTable)]
+                      (when-not (== (.size loopingStates) 0)
+                        (.addElement statesToBackfill (Integer/valueOf newState)))
+                      (set! state (new short/1 (unchecked-add-int numCategories 1)))
+                      (when sawEarlyBreak
+                        (aset state numCategories (unchecked-short DONT_LOOP_FLAG)))
+                      (.addElement tempStateTable state)
+                      (.updateStateTable this
+                                         decisionPointList
+                                         pendingChars
+                                         (unchecked-short newState))
+                      (.removeAllElements decisionPointList)
+                      (set! lastState currentState)
+                      (loop []
+                        (set! currentState (unchecked-inc-int currentState))
+                        (.addElement decisionPointList (Integer/valueOf currentState))
+                        (when (< (unchecked-add-int currentState 1) (.size tempStateTable)) (recur))))))
+              (== c \{)
+                (let [^{:tag (Vector Integer)} clone (cast Vector (.clone decisionPointList))]
+                  (.push decisionPointStack clone))
+              (or (== c \}) (== c \*))
+                (do
+                  (when (== c \*)
+                    (loop [^int i (unchecked-add-int lastState 1)]
+                      (when (< i (.size tempStateTable))
+                        (let [^{:tag (Vector Integer)} temp (Vector.)]
+                          (.addElement temp (Integer/valueOf i))
+                          (.updateStateTable this
+                                             temp
+                                             pendingChars
+                                             (unchecked-short (unchecked-add-int lastState 1)))
+                          (recur (unchecked-inc-int i))))))
+                  (let [^{:tag (Vector Integer)} temp (cast Vector (.pop decisionPointStack))]
+                    (loop [^int i 0]
+                      (when (< i (.size decisionPointList))
+                        (.addElement temp (cast Integer (.elementAt decisionPointList i)))
+                        (recur (unchecked-inc-int i))))
+                    (set! decisionPointList temp)))
+              (== c \?) (.setLoopingStates this decisionPointList decisionPointList)
+              (== c \()
+                (do
+                  (.addElement tempStateTable (new short/1 (unchecked-add-int numCategories 1)))
+                  (set! lastState currentState)
+                  (set! currentState (unchecked-inc-int currentState))
+                  (.insertElementAt decisionPointList (Integer/valueOf currentState) 0)
+                  (let [^{:tag (Vector Integer)} clone (cast Vector (.clone decisionPointList))]
+                    (.push decisionPointStack clone)
+                    (.push decisionPointStack (Vector.))))
+              (== c \|)
+                (let [^{:tag (Vector Integer)} oneDown (cast Vector (.pop decisionPointStack))
+                      ^{:tag (Vector Integer)} twoDown (cast Vector (.peek decisionPointStack))]
+                  (.push decisionPointStack oneDown)
+                  (loop [^int i 0]
+                    (when (< i (.size decisionPointList))
+                      (.addElement oneDown (cast Integer (.elementAt decisionPointList i)))
+                      (recur (unchecked-inc-int i))))
+                  (let [^{:tag (Vector Integer)} clone (cast Vector (.clone twoDown))]
+                    (set! decisionPointList clone)))
+              (== c \))
+                (let [^:mutable ^{:tag (Vector Integer)} exitPoints (cast
+                                                                      Vector
+                                                                      (.pop decisionPointStack))]
+                  (loop [^int i 0]
+                    (when (< i (.size decisionPointList))
+                      (.addElement exitPoints (cast Integer (.elementAt decisionPointList i)))
+                      (recur (unchecked-inc-int i))))
+                  (set! decisionPointList exitPoints)
+                  (if (or (>= (unchecked-add-int p 1) (.length rule))
+                          (not (== (.charAt rule (unchecked-add-int p 1)) \*)))
+                      (.pop decisionPointStack)
+                      (let [^{:tag (Vector Integer)} clone (cast Vector (.clone decisionPointList))]
+                        (set! exitPoints clone)
+                        (let [^{:tag (Vector Integer)} temp (cast Vector (.pop decisionPointStack))
+                              tempStateNum (.intValue (cast Integer (.firstElement temp)))
+                              tempState (cast short/1 (.elementAt tempStateTable tempStateNum))]
+                          (loop [^int i 0]
+                            (when (< i (.size decisionPointList))
+                              (.addElement temp (cast Integer (.elementAt decisionPointList i)))
+                              (recur (unchecked-inc-int i))))
+                          (set! decisionPointList temp)
+                          (loop [^int i 0]
+                            (if (< i (alength tempState))
+                                (if (> (aget tempState i) tempStateNum)
+                                    (do
+                                      (.updateStateTable
+                                        this
+                                        exitPoints
+                                        (.toString
+                                          (Character/valueOf
+                                            (unchecked-char (unchecked-add-int i 0x100))))
+                                        (aget tempState i))
+                                      (recur (unchecked-inc-int i)))
+                                    (recur (unchecked-inc-int i)))
+                                nil))
+                          (set! lastState currentState)
+                          (set! currentState (unchecked-subtract-int (.size tempStateTable) 1))
+                          (set! p (unchecked-inc-int p))))))
+              :else
+                (when (== c \/)
+                  (set! sawEarlyBreak true)
+                  (loop [^int i 0]
+                    (when (< i (.size decisionPointList))
+                      (set! state
+                            (cast short/1
+                                  (.elementAt tempStateTable
+                                              (.intValue
+                                                (cast Integer (.elementAt decisionPointList i))))))
+                      (aset state
+                            numCategories
+                            (unchecked-short
+                              (bit-or-int (aget state numCategories) LOOKAHEAD_STATE_FLAG)))
+                      (recur (unchecked-inc-int i))))))
+            (when clearLoopingStates (.setLoopingStates this nil decisionPointList))
+            (set! p (unchecked-add-int p (Character/charCount c)))))
+        (.setLoopingStates this nil decisionPointList)
+        (loop [^int i 0]
+          (when (< i (.size decisionPointList))
+            (let [rowNum (.intValue (cast Integer (.elementAt decisionPointList i)))]
+              (set! state (cast short/1 (.elementAt tempStateTable rowNum)))
+              (aset state
+                    numCategories
+                    (unchecked-short
+                      (bit-or-int (aget state numCategories) (unchecked-short END_STATE_FLAG))))
+              (if sawEarlyBreak
+                  (do
+                    (aset state
+                          numCategories
+                          (unchecked-short
+                            (bit-or-int (aget state numCategories) LOOKAHEAD_STATE_FLAG)))
+                    (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))))))))
+
+  (method ^:private updateStateTable ^void [this ^{:tag (Vector Integer)} rows ^String pendingChars
+                                            ^short newValue]
+    (let [newValues (new short/1 (unchecked-add-int numCategories 1))]
+      (loop [^int i 0]
+        (when (< i (.length pendingChars))
+          (aset newValues (unchecked-subtract-int (int (.charAt pendingChars i)) 0x100) newValue)
+          (recur (unchecked-inc-int i))))
+      (loop [^int i 0]
+        (when (< i (.size rows))
+          (.mergeStates this (.intValue (cast Integer (.elementAt rows i))) newValues rows)
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:private mergeStates ^void [this ^int rowNum ^short/1 newValues
+                                       ^{:tag (Vector Integer)} rowsBeingUpdated]
+    (let [oldValues (cast short/1 (.elementAt tempStateTable rowNum))
+          isLoopingState (.contains loopingStates (Integer/valueOf rowNum))]
+      (loop [^int i 0]
+        (when (< i (alength oldValues))
+          (cond
+            (== (aget oldValues i) (aget newValues i)) (recur (unchecked-inc-int i))
+            (and isLoopingState (.contains loopingStates (Integer/valueOf (aget oldValues i))))
+              (if (not (== (aget newValues i) 0))
+                  (do
+                    (when (== (aget oldValues i) 0) (set! clearLoopingStates true))
+                    (aset oldValues i (aget newValues i))
+                    (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))
+            (== (aget oldValues i) 0)
+              (do (aset oldValues i (aget newValues i)) (recur (unchecked-inc-int i)))
+            (== i numCategories)
+              (do
+                (aset oldValues
+                      i
+                      (unchecked-short
+                        (bit-or-int (bit-and-int (aget newValues i) ALL_FLAGS) (aget oldValues i))))
+                (recur (unchecked-inc-int i)))
+            (and (not (== (aget oldValues i) 0)) (not (== (aget newValues i) 0)))
+              (let [^:mutable combinedRowNum (.searchMergeList
+                                               this
+                                               (aget oldValues i)
+                                               (aget newValues i))]
+                (if (not (== combinedRowNum 0))
+                    (do
+                      (aset oldValues i (unchecked-short combinedRowNum))
+                      (recur (unchecked-inc-int i)))
+                    (let [^int oldRowNum (aget oldValues i)
+                          ^int newRowNum (aget newValues i)]
+                      (set! combinedRowNum (.size tempStateTable))
+                      (when (nil? mergeList) (set! mergeList (Vector.)))
+                      (.addElement mergeList (new int/1 [oldRowNum newRowNum combinedRowNum]))
+                      (let [newRow (new short/1 (unchecked-add-int numCategories 1))
+                            oldRow (cast short/1 (.elementAt tempStateTable oldRowNum))]
+                        (System/arraycopy oldRow 0 newRow 0 (unchecked-add-int numCategories 1))
+                        (.addElement tempStateTable newRow)
+                        (aset oldValues i (unchecked-short combinedRowNum))
+                        (when (and (or (.contains decisionPointList (Integer/valueOf oldRowNum))
+                                       (.contains decisionPointList (Integer/valueOf newRowNum)))
+                                   (not (.contains
+                                          decisionPointList
+                                          (Integer/valueOf combinedRowNum))))
+                          (.addElement decisionPointList (Integer/valueOf combinedRowNum)))
+                        (when (and (or (.contains rowsBeingUpdated (Integer/valueOf oldRowNum))
+                                       (.contains rowsBeingUpdated (Integer/valueOf newRowNum)))
+                                   (not (.contains
+                                          rowsBeingUpdated
+                                          (Integer/valueOf combinedRowNum))))
+                          (.addElement decisionPointList (Integer/valueOf combinedRowNum)))
+                        (loop [^int k 0]
+                          (when (< k (.size decisionPointStack))
+                            (let [^{:tag (Vector Integer)} dpl (cast
+                                                                 Vector
+                                                                 (.elementAt decisionPointStack k))]
+                              (if (and (or (.contains dpl (Integer/valueOf oldRowNum))
+                                           (.contains dpl (Integer/valueOf newRowNum)))
+                                       (not (.contains dpl (Integer/valueOf combinedRowNum))))
+                                  (do
+                                    (.addElement dpl (Integer/valueOf combinedRowNum))
+                                    (recur (unchecked-inc-int k)))
+                                  (recur (unchecked-inc-int k))))))
+                        (.mergeStates this
+                                      combinedRowNum
+                                      (cast short/1 (.elementAt tempStateTable (aget newValues i)))
+                                      rowsBeingUpdated)
+                        (recur (unchecked-inc-int i))))))
+            :else (recur (unchecked-inc-int i)))))))
+
+  (method ^:private searchMergeList ^int [this ^int a ^int b]
+    (if (nil? mergeList)
+        0
+        (let [^:mutable ^int/1 entry nil]
+          (loop [^int i 0]
+            (when (< i (.size mergeList))
+              (set! entry (cast int/1 (.elementAt mergeList i)))
+              (when (or (and (== (aget entry 0) a) (== (aget entry 1) b))
+                        (and (== (aget entry 0) b) (== (aget entry 1) a)))
+                (return (aget entry 2)))
+              (when (and (== (aget entry 2) a) (or (== (aget entry 0) b) (== (aget entry 1) b)))
+                (return (aget entry 2)))
+              (if (and (== (aget entry 2) b) (or (== (aget entry 0) a) (== (aget entry 1) a)))
+                  (return (aget entry 2))
+                  (recur (unchecked-inc-int i)))))
+          0)))
+
+  (method ^:private setLoopingStates ^void [this ^{:tag (Vector Integer)} newLoopingStates
+                                            ^{:tag (Vector Integer)} endStates]
+    (when-not (.isEmpty loopingStates)
+      (let [loopingState (.intValue (cast Integer (.lastElement loopingStates)))
+            ^:mutable ^int rowNum 0]
+        (loop [^int i 0]
+          (when (< i (.size endStates))
+            (.eliminateBackfillStates this (.intValue (cast Integer (.elementAt endStates i))))
+            (recur (unchecked-inc-int i))))
+        (loop [^int i 0]
+          (when (< i (.size statesToBackfill))
+            (set! rowNum (.intValue (cast Integer (.elementAt statesToBackfill i))))
+            (let [state (cast short/1 (.elementAt tempStateTable rowNum))]
+              (aset state
+                    numCategories
+                    (unchecked-short
+                      (bit-or-int (bit-and-int (aget state numCategories) ALL_FLAGS) loopingState)))
+              (recur (unchecked-inc-int i)))))
+        (.removeAllElements statesToBackfill)
+        (.removeAllElements loopingStates)))
+    (when (some? newLoopingStates)
+      (let [^{:tag (Vector Integer)} clone (cast Vector (.clone newLoopingStates))]
+        (set! loopingStates clone))))
+
+  (method ^:private eliminateBackfillStates ^void [this ^int baseState]
+    (when (.contains statesToBackfill (Integer/valueOf baseState))
+      (.removeElement statesToBackfill (Integer/valueOf baseState))
+      (let [state (cast short/1 (.elementAt tempStateTable baseState))]
+        (loop [^int i 0]
+          (if (< i numCategories)
+              (if (not (== (aget state i) 0))
+                  (do (.eliminateBackfillStates this (aget state i)) (recur (unchecked-inc-int i)))
+                  (recur (unchecked-inc-int i)))
+              nil)))))
+
+  (method ^:private backfillLoopingStates ^void [this]
+    (let [^:mutable ^short/1 state nil
+          ^:mutable ^short/1 loopingState nil
+          ^:mutable ^int loopingStateRowNum 0
+          ^:mutable ^int fromState 0]
+      (loop [^int i 0]
+        (when (< i (.size tempStateTable))
+          (set! state (cast short/1 (.elementAt tempStateTable i)))
+          (set! fromState (bit-and-int (aget state numCategories) (bit-not-int ALL_FLAGS)))
+          (if (> fromState 0)
+              (do
+                (when-not (== fromState loopingStateRowNum)
+                  (set! loopingStateRowNum fromState)
+                  (set! loopingState (cast short/1 (.elementAt tempStateTable loopingStateRowNum))))
+                (aset state
+                      numCategories
+                      (unchecked-short
+                        (bit-and-int (aget state numCategories) (unchecked-short ALL_FLAGS))))
+                (loop [^int j 0]
+                  (when (< j (alength state))
+                    (cond
+                      (== (aget state j) 0)
+                        (do (aset state j (aget loopingState j)) (recur (unchecked-inc-int j)))
+                      (== (aget state j) DONT_LOOP_FLAG)
+                        (do (aset state j 0) (recur (unchecked-inc-int j)))
+                      :else (recur (unchecked-inc-int j)))))
+                (recur (unchecked-inc-int i)))
+              (recur (unchecked-inc-int i)))))))
+
+  (method ^:private finishBuildingStateTable ^void [this ^boolean forward]
+    (.backfillLoopingStates this)
+    (let [rowNumMap (new int/1 (.size tempStateTable))
+          ^{:tag (Stack Integer)} rowsToFollow (Stack.)]
+      (.push rowsToFollow (Integer/valueOf 1))
+      (aset rowNumMap 1 1)
+      (while (not (== (.size rowsToFollow) 0))
+        (let [rowNum (.intValue (cast Integer (.pop rowsToFollow)))
+              row (cast short/1 (.elementAt tempStateTable rowNum))]
+          (loop [^int i 0]
+            (if (< i numCategories)
+                (if (not (== (aget row i) 0))
+                    (if (== (aget rowNumMap (aget row i)) 0)
+                        (do
+                          (aset rowNumMap (aget row i) (aget row i))
+                          (.push rowsToFollow (Integer/valueOf (aget row i)))
+                          (recur (unchecked-inc-int i)))
+                        (recur (unchecked-inc-int i)))
+                    (recur (unchecked-inc-int i)))
+                nil))))
+      (let [^:mutable ^boolean madeChange false
+            ^:mutable ^int newRowNum 0
+            stateClasses (new int/1 (.size tempStateTable))
+            ^:mutable nextClass (unchecked-add-int numCategories 1)
+            ^:mutable ^short/1 state1 nil
+            ^:mutable ^short/1 state2 nil]
+        (loop [^int i 1]
+          (if (< i (alength stateClasses))
+              (if (== (aget rowNumMap i) 0)
+                  (recur (unchecked-inc-int i))
+                  (do
+                    (set! state1 (cast short/1 (.elementAt tempStateTable i)))
+                    (loop [^int j 0]
+                      (if (< j numCategories)
+                          (if (not (== (aget state1 j) 0))
+                              (do
+                                (aset stateClasses i (unchecked-inc-int (aget stateClasses i)))
+                                (recur (unchecked-inc-int j)))
+                              (recur (unchecked-inc-int j)))
+                          nil))
+                    (if (== (aget stateClasses i) 0)
+                        (do (aset stateClasses i nextClass) (recur (unchecked-inc-int i)))
+                        (recur (unchecked-inc-int i)))))
+              nil))
+        (set! nextClass (unchecked-inc-int nextClass))
+        (let [^:mutable ^int currentClass 0
+              ^:mutable ^int lastClass 0
+              ^:mutable ^boolean split false]
+          (loop []
+            (set! currentClass 1)
+            (set! lastClass nextClass)
+            (while (< currentClass nextClass)
+              (set! split false)
+              (set! state1 (set! state2 nil))
+              (loop [^int i 0]
+                (if (< i (alength stateClasses))
+                    (if (== (aget stateClasses i) currentClass)
+                        (if (nil? state1)
+                            (do
+                              (set! state1 (cast short/1 (.elementAt tempStateTable i)))
+                              (recur (unchecked-inc-int i)))
+                            (do
+                              (set! state2 (cast short/1 (.elementAt tempStateTable i)))
+                              (loop [^int j 0]
+                                (if (< j (alength state2))
+                                    (if (or (and
+                                              (and
+                                                (== j numCategories)
+                                                (not (== (aget state1 j) (aget state2 j))))
+                                              forward)
+                                            (and
+                                              (not (== j numCategories))
+                                              (not
+                                                (==
+                                                  (aget stateClasses (aget state1 j))
+                                                  (aget stateClasses (aget state2 j))))))
+                                        (do (aset stateClasses i nextClass) (set! split true))
+                                        (recur (unchecked-inc-int j)))
+                                    nil))
+                              (recur (unchecked-inc-int i))))
+                        (recur (unchecked-inc-int i)))
+                    nil))
+              (when split (set! nextClass (unchecked-inc-int nextClass)))
+              (set! currentClass (unchecked-inc-int currentClass)))
+            (when-not (== lastClass nextClass) (recur)))
+          (let [representatives (new int/1 nextClass)]
+            (loop [^int i 1]
+              (if (< i (alength stateClasses))
+                  (if (== (aget representatives (aget stateClasses i)) 0)
+                      (do
+                        (aset representatives (aget stateClasses i) i)
+                        (recur (unchecked-inc-int i)))
+                      (do
+                        (aset rowNumMap i (aget representatives (aget stateClasses i)))
+                        (recur (unchecked-inc-int i))))
+                  nil))
+            (loop [^int i 1]
+              (if (< i (alength rowNumMap))
+                  (if (not (== (aget rowNumMap i) i))
+                      (do (.setElementAt tempStateTable nil i) (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i)))
+                  nil))
+            (set! newRowNum 1)
+            (loop [^int i 1]
+              (if (< i (alength rowNumMap))
+                  (if (some? (.elementAt tempStateTable i))
+                      (do
+                        (aset rowNumMap i newRowNum)
+                        (set! newRowNum (unchecked-inc-int newRowNum))
+                        (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i)))
+                  nil))
+            (loop [^int i 1]
+              (if (< i (alength rowNumMap))
+                  (if (nil? (.elementAt tempStateTable i))
+                      (do
+                        (aset rowNumMap i (aget rowNumMap (aget rowNumMap i)))
+                        (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i)))
+                  nil))
+            (if forward
+                (do
+                  (set! endStates (new boolean/1 newRowNum))
+                  (set! lookaheadStates (new boolean/1 newRowNum))
+                  (set! stateTable (new short/1 (unchecked-multiply-int newRowNum numCategories)))
+                  (let [^:mutable ^int p 0
+                        ^:mutable ^int p2 0]
+                    (loop [^int i 0]
+                      (when (< i (.size tempStateTable))
+                        (let [row (cast short/1 (.elementAt tempStateTable i))]
+                          (if (nil? row)
+                              (recur (unchecked-inc-int i))
+                              (do
+                                (loop [^int j 0]
+                                  (when (< j numCategories)
+                                    (aset stateTable
+                                          p
+                                          (unchecked-short (aget rowNumMap (aget row j))))
+                                    (set! p (unchecked-inc-int p))
+                                    (recur (unchecked-inc-int j))))
+                                (aset endStates
+                                      p2
+                                      (not (== (bit-and-int (aget row numCategories) END_STATE_FLAG)
+                                               0)))
+                                (aset lookaheadStates
+                                      p2
+                                      (not (== (bit-and-int
+                                                 (aget row numCategories)
+                                                 LOOKAHEAD_STATE_FLAG)
+                                               0)))
+                                (set! p2 (unchecked-inc-int p2))
+                                (recur (unchecked-inc-int i)))))))))
+                (do
+                  (set! backwardsStateTable
+                        (new short/1 (unchecked-multiply-int newRowNum numCategories)))
+                  (let [^:mutable ^int p 0]
+                    (loop [^int i 0]
+                      (when (< i (.size tempStateTable))
+                        (let [row (cast short/1 (.elementAt tempStateTable i))]
+                          (if (nil? row)
+                              (recur (unchecked-inc-int i))
+                              (do
+                                (loop [^int j 0]
+                                  (when (< j numCategories)
+                                    (aset backwardsStateTable
+                                          p
+                                          (unchecked-short (aget rowNumMap (aget row j))))
+                                    (set! p (unchecked-inc-int p))
+                                    (recur (unchecked-inc-int j))))
+                                (recur (unchecked-inc-int i)))))))))))))))
+
+  (method ^:private buildBackwardsStateTable ^void [this ^{:tag (Vector String)} tempRuleList]
+    (set! tempStateTable (Vector.))
+    (.addElement tempStateTable (new short/1 (unchecked-add-int numCategories 1)))
+    (.addElement tempStateTable (new short/1 (unchecked-add-int numCategories 1)))
+    (loop [^int i 0]
+      (when (< i (.size tempRuleList))
+        (let [rule (cast String (.elementAt tempRuleList i))]
+          (if (== (.charAt rule 0) \!)
+              (do (.parseRule this (.substring rule 1) false) (recur (unchecked-inc-int i)))
+              (recur (unchecked-inc-int i))))))
+    (.backfillLoopingStates this)
+    (let [^:mutable backTableOffset (.size tempStateTable)]
+      (when (> backTableOffset 2) (set! backTableOffset (unchecked-inc-int backTableOffset)))
+      (loop [^int i 0]
+        (when (< i (unchecked-add-int numCategories 1))
+          (.addElement tempStateTable (new short/1 (unchecked-add-int numCategories 1)))
+          (recur (unchecked-inc-int i))))
+      (let [^:mutable state (cast short/1
+                                  (.elementAt tempStateTable
+                                              (unchecked-subtract-int backTableOffset 1)))]
+        (loop [^int i 0]
+          (when (< i numCategories)
+            (aset state i (unchecked-short (unchecked-add-int i backTableOffset)))
+            (recur (unchecked-inc-int i))))
+        (let [numRows (unchecked-divide-int (alength stateTable) numCategories)]
+          (loop [^int column 0]
+            (when (< column numCategories)
+              (loop [^int row 0]
+                (when (< row numRows)
+                  (let [nextRow (.lookupState this row column)]
+                    (if (not (== nextRow 0))
+                        (do
+                          (loop [^int nextColumn 0]
+                            (when (< nextColumn numCategories)
+                              (let [cellValue (.lookupState this nextRow nextColumn)]
+                                (if (not (== cellValue 0))
+                                    (do
+                                      (set! state
+                                            (cast
+                                              short/1
+                                              (.elementAt
+                                                tempStateTable
+                                                (unchecked-add-int nextColumn backTableOffset))))
+                                      (aset state
+                                            column
+                                            (unchecked-short
+                                              (unchecked-add-int column backTableOffset)))
+                                      (recur (unchecked-inc-int nextColumn)))
+                                    (recur (unchecked-inc-int nextColumn))))))
+                          (recur (unchecked-inc-int row)))
+                        (recur (unchecked-inc-int row))))))
+              (recur (unchecked-inc-int column))))
+          (when (> backTableOffset 1)
+            (set! state (cast short/1 (.elementAt tempStateTable 1)))
+            (loop [^int i (unchecked-subtract-int backTableOffset 1)]
+              (when (< i (.size tempStateTable))
+                (let [state2 (cast short/1 (.elementAt tempStateTable i))]
+                  (loop [^int j 0]
+                    (if (< j numCategories)
+                        (if (and (not (== (aget state j) 0)) (not (== (aget state2 j) 0)))
+                            (do (aset state2 j (aget state j)) (recur (unchecked-inc-int j)))
+                            (recur (unchecked-inc-int j)))
+                        nil))
+                  (recur (unchecked-inc-int i)))))
+            (set! state
+                  (cast short/1
+                        (.elementAt tempStateTable (unchecked-subtract-int backTableOffset 1))))
+            (loop [^int i 1]
+              (when (< i (unchecked-subtract-int backTableOffset 1))
+                (let [state2 (cast short/1 (.elementAt tempStateTable i))]
+                  (if (== (bit-and-int (aget state2 numCategories) END_STATE_FLAG) 0)
+                      (do
+                        (loop [^int j 0]
+                          (if (< j numCategories)
+                              (if (== (aget state2 j) 0)
+                                  (do (aset state2 j (aget state j)) (recur (unchecked-inc-int j)))
+                                  (recur (unchecked-inc-int j)))
+                              nil))
+                        (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i)))))))
+          (.finishBuildingStateTable this false)))))
+
+  (method ^:protected lookupState ^int [this ^int state ^int category]
+    (aget stateTable (unchecked-add-int (unchecked-multiply-int state numCategories) category)))
+
+  (method ^:protected error ^void [this ^String message ^int position ^String context]
+    (throw (IllegalArgumentException.
+             (java-str "Parse error at position ("
+                       position
+                       "): "
+                       message
+                       "\n"
+                       (.substring context 0 position)
+                       " -here- "
+                       (.substring context position)))))
+
+  (method makeFile ^void [this ^String filename]
+    (.writeTables this filename))
+
+  (field ^:private ^:static ^:final ^byte/1 LABEL
+    (new byte/1
+         [(unchecked-byte \B)
+          (unchecked-byte \I)
+          (unchecked-byte \d)
+          (unchecked-byte \a)
+          (unchecked-byte \t)
+          (unchecked-byte \a)
+          (unchecked-byte \u0000)]))
+
+  (field ^:private ^:static ^:final ^byte/1 supportedVersion (new byte/1 [(unchecked-byte 1)]))
+
+  (field ^:private ^:static ^:final ^int HEADER_LENGTH 36)
+
+  (field ^:private ^:static ^:final ^int BMP_INDICES_LENGTH 512)
+
+  (method ^:protected writeTables ^void [this ^String datafile]
+    (let [^:mutable ^String filename nil
+          ^:mutable ^String outputDir nil
+          tmpbuf (GenerateBreakIteratorData/getOutputDirectory)]
+      (if (.equals tmpbuf "")
+          (do (set! filename datafile) (set! outputDir ""))
+          (let [sep File/separatorChar]
+            (cond
+              (== sep \/) (set! outputDir tmpbuf)
+              (== sep \\) (set! outputDir (.replaceAll tmpbuf "/" "\\\\"))
+              :else (set! outputDir (.replaceAll tmpbuf "/" (String/valueOf sep))))
+            (set! filename (java-str outputDir sep datafile))))
+      (try
+        (when-not (.equals outputDir "") (.mkdirs (File. outputDir)))
+        (let [out (BufferedOutputStream. (FileOutputStream. filename))
+              ^:mutable BMPdata (.getStringArray charCategoryTable)
+              ^:mutable BMPindices (.getIndexArray charCategoryTable)
+              ^:mutable nonBMPdata (.getArray supplementaryCharCategoryTable)]
+          (when (<= (alength BMPdata) 0)
+            (throw (InternalError. (java-str "Wrong BMP data length(" (alength BMPdata) ")"))))
+          (when-not (== (alength BMPindices) BMP_INDICES_LENGTH)
+            (throw (InternalError. (java-str "Wrong BMP indices length(" (alength BMPindices) ")"))))
+          (when (<= (alength nonBMPdata) 0)
+            (throw
+              (InternalError. (java-str "Wrong non-BMP data length(" (alength nonBMPdata) ")"))))
+          (let [^:mutable ^int len 0
+                crc32 (CRC32.)]
+            (set! len (alength stateTable))
+            (loop [^int i 0]
+              (when (< i len) (.update crc32 (aget stateTable i)) (recur (unchecked-inc-int i))))
+            (set! len (alength backwardsStateTable))
+            (loop [^int i 0]
+              (when (< i len)
+                (.update crc32 (aget backwardsStateTable i))
+                (recur (unchecked-inc-int i))))
+            (.update crc32 (.toByteArray this endStates))
+            (.update crc32 (.toByteArray this lookaheadStates))
+            (loop [^int i 0]
+              (when (< i BMP_INDICES_LENGTH)
+                (.update crc32 (aget BMPindices i))
+                (recur (unchecked-inc-int i))))
+            (.update crc32 BMPdata)
+            (set! len (alength nonBMPdata))
+            (loop [^int i 0]
+              (when (< i len) (.update crc32 (aget nonBMPdata i)) (recur (unchecked-inc-int i))))
+            (when (some? additionalData)
+              (set! len (alength additionalData))
+              (loop [^int i 0]
+                (when (< i len)
+                  (.update crc32 (aget additionalData i))
+                  (recur (unchecked-inc-int i)))))
+            (set! len
+                  (unchecked-add-int
+                    (unchecked-add-int
+                      (unchecked-add-int
+                        (unchecked-add-int
+                          (unchecked-add-int
+                            (unchecked-add-int
+                              (unchecked-add-int
+                                HEADER_LENGTH
+                                (unchecked-multiply-int
+                                  (unchecked-add-int
+                                    (alength stateTable)
+                                    (alength backwardsStateTable))
+                                  2))
+                              (alength endStates))
+                            (alength lookaheadStates))
+                          1024)
+                        (alength BMPdata))
+                      (unchecked-multiply-int (alength nonBMPdata) 4))
+                    (if (nil? additionalData) 0 (alength additionalData))))
+            (.write out LABEL)
+            (.write out supportedVersion)
+            (.write out (.toByteArray this len))
+            (.write out (.toByteArray this (alength stateTable)))
+            (.write out (.toByteArray this (alength backwardsStateTable)))
+            (.write out (.toByteArray this (alength endStates)))
+            (.write out (.toByteArray this (alength lookaheadStates)))
+            (.write out (.toByteArray this (alength BMPdata)))
+            (.write out (.toByteArray this (alength nonBMPdata)))
+            (if (nil? additionalData)
+                (.write out (^[int] RuleBasedBreakIteratorBuilder/.toByteArray this 0))
+                (.write out (.toByteArray this (alength additionalData))))
+            (.write out (.toByteArray this (.getValue crc32)))
+            (set! len (alength stateTable))
+            (loop [^int i 0]
+              (when (< i len)
+                (.write out (.toByteArray this (aget stateTable i)))
+                (recur (unchecked-inc-int i))))
+            (set! len (alength backwardsStateTable))
+            (loop [^int i 0]
+              (when (< i len)
+                (.write out (.toByteArray this (aget backwardsStateTable i)))
+                (recur (unchecked-inc-int i))))
+            (.write out (.toByteArray this endStates))
+            (.write out (.toByteArray this lookaheadStates))
+            (loop [^int i 0]
+              (when (< i BMP_INDICES_LENGTH)
+                (.write out (.toByteArray this (aget BMPindices i)))
+                (recur (unchecked-inc-int i))))
+            (set! BMPindices nil)
+            (.write out BMPdata)
+            (set! BMPdata nil)
+            (set! len (alength nonBMPdata))
+            (loop [^int i 0]
+              (when (< i len)
+                (.write out (.toByteArray this (aget nonBMPdata i)))
+                (recur (unchecked-inc-int i))))
+            (set! nonBMPdata nil)
+            (when (some? additionalData) (.write out additionalData))
+            (.close out)))
+        (catch Exception e (throw (InternalError. (.toString e)))))))
+
+  (method toByteArray ^byte/1 [this ^short val]
+    (let [buf (new byte/1 2)]
+      (aset buf 0 (unchecked-byte (bit-and-int (unsigned-bit-shift-right-int val 8) 0xFF)))
+      (aset buf 1 (unchecked-byte (bit-and-int val 0xFF)))
+      buf))
+
+  (method toByteArray ^byte/1 [this ^int val]
+    (let [buf (new byte/1 4)]
+      (aset buf 0 (unchecked-byte (bit-and-int (unsigned-bit-shift-right-int val 24) 0xFF)))
+      (aset buf 1 (unchecked-byte (bit-and-int (unsigned-bit-shift-right-int val 16) 0xFF)))
+      (aset buf 2 (unchecked-byte (bit-and-int (unsigned-bit-shift-right-int val 8) 0xFF)))
+      (aset buf 3 (unchecked-byte (bit-and-int val 0xFF)))
+      buf))
+
+  (method toByteArray ^byte/1 [this ^long val]
+    (let [buf (new byte/1 8)]
+      (aset buf 0 (unchecked-byte (bit-and (unsigned-bit-shift-right val 56) 0xff)))
+      (aset buf 1 (unchecked-byte (bit-and (unsigned-bit-shift-right val 48) 0xff)))
+      (aset buf 2 (unchecked-byte (bit-and (unsigned-bit-shift-right val 40) 0xff)))
+      (aset buf 3 (unchecked-byte (bit-and (unsigned-bit-shift-right val 32) 0xff)))
+      (aset buf 4 (unchecked-byte (bit-and (unsigned-bit-shift-right val 24) 0xff)))
+      (aset buf 5 (unchecked-byte (bit-and (unsigned-bit-shift-right val 16) 0xff)))
+      (aset buf 6 (unchecked-byte (bit-and (unsigned-bit-shift-right val 8) 0xff)))
+      (aset buf 7 (unchecked-byte (bit-and val 0xff)))
+      buf))
+
+  (method toByteArray ^byte/1 [this ^boolean/1 data]
+    (let [buf (new byte/1 (alength data))]
+      (loop [^int i 0]
+        (when (< i (alength data))
+          (aset buf i (if (aget data i) (unchecked-byte 1) (unchecked-byte 0)))
+          (recur (unchecked-inc-int i))))
+      buf))
+
+  (method setAdditionalData ^void [this ^byte/1 data]
+    (set! additionalData data)))

@@ -3,22 +3,19 @@
   classes (whole files, javac's classes) call outside themselves (the edge jrt hand-writes), with
   the natives and the VM intrinsics they declare, cross-checked against the closure's boundary
   (reached methods only) recorded by bin/java-surface. Run by bin/jrt-convert's edge step, on the
-  frozen JVM: it reads class files with the JDK's class file API (java.lang.classfile) and
-  jrt.java-surface's class reading and treatments. Until JN6 a part of jrt.jrt-sources, whose
-  other parts run on the tools' host since (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN6\",
-  JFS40). Outputs are deterministic: sorted, without times."
+  tools' host since JN7: it reads class files with jrt.classfile, Arbace's own reader, and
+  jrt.java-surface's class reading and treatments, the JDK classes' facts from the platform's class
+  files (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN7\", JFS40 (c)); until then on the frozen
+  JVM, with the JDK's class file API (java.lang.classfile) and reflection. Until JN6 a part of
+  jrt.jrt-sources. Outputs are deterministic: sorted, without times."
   (:require [arbace.java.io :as io]
             [arbace.string :as str]
             [arbace.pprint :as pp]
+            [jrt.classfile :as cf]
             [jrt.java-surface :as js])
-  (:import (java.lang.classfile ClassFile ClassModel MethodModel FieldModel Attributes Annotation)
-           (java.lang.classfile.attribute RuntimeVisibleAnnotationsAttribute)
-           (java.io File)
-           (java.nio.file Files)))
+  (:import (java.io File)))
 
 (defn- read-data [f] (binding [*read-eval* false] (read-string (slurp f))))
-
-(def ^:private cf (ClassFile/of))
 
 (defn- class-files [dir]
   (->> (file-seq (io/file dir))
@@ -32,23 +29,18 @@
     (some-> (second (re-find #"L([^;]+);" n)) dotted)
     (dotted n)))
 
-(defn- model-info [^ClassModel m]
-  {:super (some-> (.orElse (.superclass m) nil) .asInternalName dotted)
-   :ifaces (mapv #(dotted (.asInternalName ^java.lang.classfile.constantpool.ClassEntry %)) (.interfaces m))
-   :interface? (.has (.flags m) java.lang.reflect.AccessFlag/INTERFACE)
-   :methods (into {} (for [^MethodModel mm (.methods m)]
-                       [(str (.stringValue (.methodName mm)) (.stringValue (.methodType mm)))
-                        {:static? (.has (.flags mm) java.lang.reflect.AccessFlag/STATIC)
-                         :private? (.has (.flags mm) java.lang.reflect.AccessFlag/PRIVATE)}]))
-   :fields (set (map #(.stringValue (.fieldName ^FieldModel %)) (.fields m)))})
+(defn- model-info [m]
+  {:super (some-> (:super m) dotted)
+   :ifaces (mapv dotted (:interfaces m))
+   :interface? (cf/flag? (:flags m) cf/ACC_INTERFACE)
+   :methods (into {} (for [mm (:methods m)]
+                       [(str (:name mm) (:desc mm))
+                        {:static? (cf/flag? (:flags mm) cf/ACC_STATIC)
+                         :private? (cf/flag? (:flags mm) cf/ACC_PRIVATE)}]))
+   :fields (set (map :name (:fields m)))})
 
-(defn- intrinsic? [^MethodModel mm]
-  (boolean
-   (some (fn [^RuntimeVisibleAnnotationsAttribute a]
-           (some #(= "Ljdk/internal/vm/annotation/IntrinsicCandidate;"
-                     (.stringValue (.className ^Annotation %)))
-                 (.annotations a)))
-         (.findAttributes mm (Attributes/runtimeVisibleAnnotations)))))
+(defn- intrinsic? [mm]
+  (boolean (some #{"Ljdk/internal/vm/annotation/IntrinsicCandidate;"} (:annotations mm))))
 
 (def ^:private class-kinds
   "Reference kinds that use a class without a member."
@@ -80,8 +72,8 @@
   [dir closure arbace-uses]
   (let [models (into (sorted-map)
                      (for [f (class-files dir)
-                           :let [m (.parse ^ClassFile cf (Files/readAllBytes (.toPath ^File f)))]]
-                       [(dotted (.asInternalName (.thisClass ^ClassModel m))) m]))
+                           :let [m (cf/read-file f)]]
+                       [(dotted (:this m)) m]))
         in-set? (fn [n] (contains? models n))
         index (into {} (for [[n m] models] [n (model-info m)]))
         members (atom (sorted-map))           ; [class member] -> #{user top-level}
@@ -91,7 +83,7 @@
         vcalls (atom {})                      ; virtual call: member -> #{owner named}
         add! (fn [a k u] (swap! a update k (fnil conj (sorted-set)) u))]
     (binding [js/*index* index]
-      (doseq [[n ^ClassModel m] models
+      (doseq [[n m] models
               :let [user (js/top-level n)]
               r (js/class-refs m)
               :let [owner (:owner r)
@@ -115,16 +107,16 @@
           (class-kinds (:kind r)) (when-not (in-set? o) (add! classes o user))
           :else (when-not (in-set? o) (add! types o user)))))
     (let [natives (into (sorted-map)
-                        (for [[n ^ClassModel m] models
-                              :let [ks (sort (for [^MethodModel mm (.methods m)
-                                                   :when (.has (.flags mm) java.lang.reflect.AccessFlag/NATIVE)]
-                                               (str (.stringValue (.methodName mm)) (.stringValue (.methodType mm)))))]
+                        (for [[n m] models
+                              :let [ks (sort (for [mm (:methods m)
+                                                   :when (cf/flag? (:flags mm) cf/ACC_NATIVE)]
+                                               (str (:name mm) (:desc mm))))]
                               :when (seq ks)]
                           [n (vec ks)]))
           intrinsics (into (sorted-map)
-                           (for [[n ^ClassModel m] models
-                                 :let [ks (sort (for [^MethodModel mm (.methods m) :when (intrinsic? mm)]
-                                                  (str (.stringValue (.methodName mm)) (.stringValue (.methodType mm)))))]
+                           (for [[n m] models
+                                 :let [ks (sort (for [mm (:methods m) :when (intrinsic? mm)]
+                                                  (str (:name mm) (:desc mm))))]
                                  :when (seq ks)]
                              [n (vec ks)]))
           by-class (reduce (fn [acc [[c k] us]]
@@ -181,8 +173,10 @@
                        :natives-missing native-missing}})))
 
 (defn write-edge
-  "Computes the edge of the classes in dir and writes it to out."
-  [dir surface out]
+  "Computes the edge of the classes in dir and writes it to out, the JDK classes' facts read from
+  the platform's class files (jrt.java-surface's *platform*: a directory of exploded modules)."
+  [dir surface out platform]
+  (binding [js/*platform* platform]
   (let [d (read-data surface)
         uses (into #{} (for [[_ v] (:classes d)
                              :when (= :translate (:treatment v))
@@ -193,4 +187,4 @@
     (spit out (with-out-str (binding [*print-length* nil] (pp/pprint e))))
     (println "edge of" dir ":" (:edge-classes e) "classes," (:edge-members e) "members;"
              "closure boundary in edge:" (get-in e [:closure-check :in-edge]) "of"
-             (get-in e [:closure-check :boundary-members]))))
+             (get-in e [:closure-check :boundary-members])))))

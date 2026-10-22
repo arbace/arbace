@@ -1,0 +1,693 @@
+;; Converted from jdk26u make/jdk/src/classes/build/tools/tzdb/TzdbZoneRulesProvider.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'build.tools.tzdb)
+
+(import '(java.io IOException)
+        '(java.nio.charset StandardCharsets)
+        '(java.nio.file Files Path)
+        '(java.time DayOfWeek LocalDate LocalDateTime LocalTime Month Year ZoneOffset)
+        '(java.time.chrono IsoChronology)
+        '(java.time.temporal TemporalAdjusters)
+        '(java.time.zone ZoneRulesException)
+        '(java.util ArrayList Collections Comparator List Map Set TreeMap TreeSet)
+        '(java.util.concurrent ConcurrentSkipListMap)
+        '(java.util.function Function Predicate))
+
+(defclass TzdbZoneRulesProvider
+  (constructor ^:public [this ^{:tag (List Path)} files]
+    (try
+      (.load this files)
+      (catch Exception ex (throw (ZoneRulesException. "Unable to load TZDB time-zone rules" ex)))))
+
+  (method ^:public getZoneIds ^{:tag (Set String)} [this]
+    (TreeSet. regionIds))
+
+  (method ^:public getAliasMap ^{:tag (Map String String)} [this] links)
+
+  (method ^:public getZoneRules ^ZoneRules [this ^:mutable ^String zoneId]
+    (let [^:mutable obj (.get zones zoneId)]
+      (when (nil? obj)
+        (let [zoneId0 zoneId]
+          (when (.containsKey links zoneId)
+            (set! zoneId (cast String (.get links zoneId)))
+            (set! obj (.get zones zoneId)))
+          (when (nil? obj)
+            (let [zoneIdBack zoneId]
+              (when (.containsKey links zoneId)
+                (set! zoneId (cast String (.get links zoneId)))
+                (set! obj (.get zones zoneId)))
+              (when (nil? obj)
+                (throw (ZoneRulesException. (java-str "Unknown time-zone ID: " zoneIdBack))))))))
+      (if (instance? ZoneRules obj)
+          (cast ZoneRules obj)
+          (try
+            (let [zrules (.buildRules this zoneId (cast List obj))]
+              (.put zones zoneId zrules)
+              zrules)
+            (catch Exception ex
+              (throw (ZoneRulesException. (java-str "Invalid binary time-zone data: TZDB:" zoneId)
+                                          ex)))))))
+
+  (field ^:private ^{:tag (List String)} regionIds (ArrayList. 600))
+
+  (field ^:private ^:final ^{:tag (Map String Object)} zones (ConcurrentSkipListMap.))
+
+  (field ^:private ^:static ^{:tag (Set String)} excludedZones)
+
+  (static-initializer
+    (set! excludedZones (TreeSet.))
+    (.add excludedZones "EST")
+    (.add excludedZones "HST")
+    (.add excludedZones "MST")
+    (.add excludedZones "GMT+0")
+    (.add excludedZones "GMT-0")
+    (.add excludedZones "ROC"))
+
+  (field ^:private ^{:tag (Map String String)} links (TreeMap.))
+
+  (field ^:private ^{:tag (Map String (List RuleLine))} rules (TreeMap.))
+
+  (method ^:private load :throws [IOException] ^void [this ^{:tag (List Path)} files]
+    (for-each [^Path file files]
+      (let [^:mutable ^{:tag (List ZoneLine)} openZone nil]
+        (try
+          (for-each [^String line (Files/readAllLines file StandardCharsets/ISO_8859_1)]
+            (when-not (or (== (.length line) 0) (== (.charAt line 0) \#))
+              (let [tokens (.split this line)]
+                (if (and (and (some? openZone) (Character/isWhitespace (.charAt line 0)))
+                         (> (alength tokens) 0))
+                    (let [zLine (ZoneLine.)]
+                      (.add openZone zLine)
+                      (when (.parse zLine tokens 0) (set! openZone nil)))
+                    (let [^int token0len (if (> (alength tokens) 0)
+                                             (.length (aget tokens 0))
+                                             (.length line))]
+                      (cond
+                        (.regionMatches line true 0 "Zone" 0 token0len)
+                          (let [name (aget tokens 1)]
+                            (when-not (.contains excludedZones name)
+                              (when (.containsKey zones name)
+                                (throw (IllegalArgumentException.
+                                         (java-str
+                                           "Duplicated zone name in file: "
+                                           name
+                                           ", line: ["
+                                           line
+                                           "]"))))
+                              (set! openZone (ArrayList. 10))
+                              (.put zones name openZone)
+                              (.add regionIds name)
+                              (let [zLine (ZoneLine.)]
+                                (.add openZone zLine)
+                                (when (.parse zLine tokens 2) (set! openZone nil)))))
+                        (.regionMatches line true 0 "Rule" 0 token0len)
+                          (let [name (aget tokens 1)]
+                            (when-not (.containsKey rules name) (.put rules name (ArrayList. 10)))
+                            (.add (cast List (.get rules name)) (.parse (RuleLine.) tokens)))
+                        (.regionMatches line true 0 "Link" 0 token0len)
+                          (if (>= (alength tokens) 3)
+                              (let [realId (aget tokens 1)
+                                    aliasId (aget tokens 2)]
+                                (when-not (.contains excludedZones aliasId)
+                                  (.put links aliasId realId)
+                                  (.add regionIds aliasId)))
+                              (throw (IllegalArgumentException.
+                                       (java-str
+                                         "Invalid Link line in file"
+                                         file
+                                         ", line: ["
+                                         line
+                                         "]"))))))))))
+          (catch Exception ex
+            (throw (RuntimeException. (java-str "Failed while processing file [" file "]") ex)))))))
+
+  (method ^:private split ^String/1 [this ^String str]
+    (let [^:mutable ^int off 0
+          end (.length str)
+          ^{:tag (ArrayList String)} list (ArrayList. 10)]
+      (while (< off end)
+        (let [^:mutable c (.charAt str off)]
+          (if (or (== c \tab) (== c \space))
+              (set! off (unchecked-inc-int off))
+              (do
+                (when (== c \#) (break))
+                (let [start off]
+                  (while (< off end)
+                    (set! c (.charAt str off))
+                    (when (or (== c \space) (== c \tab)) (break))
+                    (set! off (unchecked-inc-int off)))
+                  (when-not (== start off) (.add list (.substring str start off))))))))
+      (cast String/1 (.toArray list (new String/1 (.size list))))))
+
+  (defclass ^:private ^:abstract ^:static MonthDayTime
+    (field ^Month month Month/JANUARY)
+
+    (field ^int dayOfMonth 1)
+
+    (field ^boolean adjustForwards true)
+
+    (field ^DayOfWeek dayOfWeek)
+
+    (field ^int secsOfDay 0)
+
+    (field ^boolean endOfDay)
+
+    (field ^ZoneOffsetTransitionRule$TimeDefinition timeDefinition
+      ZoneOffsetTransitionRule$TimeDefinition/WALL)
+
+    (method adjustToForwards ^void [this ^int year]
+      (when (and (= adjustForwards false) (> dayOfMonth 0))
+        (let [adjustedDate (.minusDays (LocalDate/of year month dayOfMonth) 6)]
+          (set! dayOfMonth (.getDayOfMonth adjustedDate))
+          (set! month (.getMonth adjustedDate))
+          (set! adjustForwards true))))
+
+    (method toDateTime ^LocalDateTime [this ^int year]
+      (let [^:mutable ^LocalDate date nil]
+        (if (< dayOfMonth 0)
+            (let [monthLen (.length month (.isLeapYear IsoChronology/INSTANCE year))]
+              (set! date
+                    (LocalDate/of year
+                                  month
+                                  (unchecked-add-int (unchecked-add-int monthLen 1) dayOfMonth)))
+              (when (some? dayOfWeek)
+                (set! date (.with date (TemporalAdjusters/previousOrSame dayOfWeek)))))
+            (do
+              (set! date (LocalDate/of year month dayOfMonth))
+              (when (some? dayOfWeek)
+                (set! date (.with date (TemporalAdjusters/nextOrSame dayOfWeek))))))
+        (when endOfDay (set! date (.plusDays date 1)))
+        (LocalDateTime/of date (LocalTime/ofSecondOfDay secsOfDay))))
+
+    (method ^:private parse ^void [this ^String/1 tokens ^:mutable ^int off]
+      (set! month (.parseMonth this (aget tokens off)))
+      (set! off (unchecked-inc-int off))
+      (when (< off (alength tokens))
+        (let [^:mutable dayRule (aget tokens
+                                      (let [old-1 off] (set! off (unchecked-inc-int off)) old-1))]
+          (if (.regionMatches dayRule true 0 "last" 0 4)
+              (do
+                (set! dayOfMonth -1)
+                (set! dayOfWeek (.parseDayOfWeek this (.substring dayRule 4)))
+                (set! adjustForwards false))
+              (let [^:mutable index (.indexOf dayRule ">=")]
+                (if (> index 0)
+                    (do
+                      (set! dayOfWeek (.parseDayOfWeek this (.substring dayRule 0 index)))
+                      (set! dayRule (.substring dayRule (unchecked-add-int index 2))))
+                    (do
+                      (set! index (.indexOf dayRule "<="))
+                      (when (> index 0)
+                        (set! dayOfWeek (.parseDayOfWeek this (.substring dayRule 0 index)))
+                        (set! adjustForwards false)
+                        (set! dayRule (.substring dayRule (unchecked-add-int index 2))))))
+                (set! dayOfMonth (Integer/parseInt dayRule))
+                (when (or (or (< dayOfMonth -28) (> dayOfMonth 31)) (== dayOfMonth 0))
+                  (throw
+                    (IllegalArgumentException.
+                      "Day of month indicator must be between -28 and 31 inclusive excluding zero")))))
+          (when (< off (alength tokens))
+            (let [timeStr (aget tokens (let [old-2 off] (set! off (unchecked-inc-int off)) old-2))]
+              (set! secsOfDay (.parseSecs this timeStr))
+              (cond
+                (== secsOfDay 86400) (do (set! endOfDay true) (set! secsOfDay 0))
+                (or (< secsOfDay 0) (> secsOfDay 86400))
+                  (let [^:mutable beyondDays (unchecked-divide-int secsOfDay 86400)]
+                    (set! secsOfDay (unchecked-remainder-int secsOfDay 86400))
+                    (when (< secsOfDay 0)
+                      (set! secsOfDay (unchecked-add-int 86400 secsOfDay))
+                      (set! beyondDays (unchecked-subtract-int beyondDays 1)))
+                    (let [date (.plusDays (LocalDate/of 2004 month dayOfMonth) beyondDays)]
+                      (set! month (.getMonth date))
+                      (set! dayOfMonth (.getDayOfMonth date))
+                      (when (some? dayOfWeek) (set! dayOfWeek (.plus dayOfWeek beyondDays))))))
+              (set! timeDefinition
+                    (.parseTimeDefinition this
+                                          (.charAt
+                                            timeStr
+                                            (unchecked-subtract-int (.length timeStr) 1)))))))))
+
+    (method parseYear ^int [this ^String year ^int defaultYear]
+      (let [len (.length year)]
+        (cond
+          (.regionMatches year true 0 "minimum" 0 len) 1900
+          (.regionMatches year true 0 "maximum" 0 len) Year/MAX_VALUE
+          (.regionMatches year true 0 "only" 0 len) defaultYear
+          :else (Integer/parseInt year))))
+
+    (method parseMonth ^Month [this ^String mon]
+      (let [len (.length mon)]
+        (cond
+          (.regionMatches mon true 0 "January" 0 len) Month/JANUARY
+          (.regionMatches mon true 0 "February" 0 len) Month/FEBRUARY
+          (.regionMatches mon true 0 "March" 0 len) Month/MARCH
+          (.regionMatches mon true 0 "April" 0 len) Month/APRIL
+          (.regionMatches mon true 0 "May" 0 len) Month/MAY
+          (.regionMatches mon true 0 "June" 0 len) Month/JUNE
+          (.regionMatches mon true 0 "July" 0 len) Month/JULY
+          (.regionMatches mon true 0 "August" 0 len) Month/AUGUST
+          (.regionMatches mon true 0 "September" 0 len) Month/SEPTEMBER
+          (.regionMatches mon true 0 "October" 0 len) Month/OCTOBER
+          (.regionMatches mon true 0 "November" 0 len) Month/NOVEMBER
+          (.regionMatches mon true 0 "December" 0 len) Month/DECEMBER
+          :else (throw (IllegalArgumentException. (java-str "Unknown month: " mon))))))
+
+    (method parseDayOfWeek ^DayOfWeek [this ^String dow]
+      (let [len (.length dow)]
+        (cond
+          (.regionMatches dow true 0 "Monday" 0 len) DayOfWeek/MONDAY
+          (.regionMatches dow true 0 "Tuesday" 0 len) DayOfWeek/TUESDAY
+          (.regionMatches dow true 0 "Wednesday" 0 len) DayOfWeek/WEDNESDAY
+          (.regionMatches dow true 0 "Thursday" 0 len) DayOfWeek/THURSDAY
+          (.regionMatches dow true 0 "Friday" 0 len) DayOfWeek/FRIDAY
+          (.regionMatches dow true 0 "Saturday" 0 len) DayOfWeek/SATURDAY
+          (.regionMatches dow true 0 "Sunday" 0 len) DayOfWeek/SUNDAY
+          :else (throw (IllegalArgumentException. (java-str "Unknown day-of-week: " dow))))))
+
+    (method parseOptional ^String [this ^String str]
+      (when-not (.equals str "-") str))
+
+    (method ^:static ^:final isDigit ^boolean [^char c]
+      (and (>= c \0) (<= c \9)))
+
+    (method ^:private parseSecs ^int [this ^String time]
+      (if (.equals time "-")
+          0
+          (let [^:mutable ^int secs 0
+                ^:mutable ^int sign 1
+                ^:mutable ^int off 0
+                len (.length time)]
+            (when (and (< off len) (== (.charAt time off) \-))
+              (set! sign -1)
+              (set! off (unchecked-inc-int off)))
+            (let [^:mutable ^char c0 (unchecked-char 0)
+                  ^:mutable ^char c1 (unchecked-char 0)]
+              (if (and
+                    (< off len)
+                    (MonthDayTime/isDigit
+                      (set! c0
+                            (.charAt time
+                                     (let [old-3 off] (set! off (unchecked-inc-int off)) old-3)))))
+                  (let [^:mutable hour (unchecked-subtract-int c0 \0)]
+                    (when (and (< off len) (MonthDayTime/isDigit (set! c1 (.charAt time off))))
+                      (set! hour
+                            (unchecked-subtract-int
+                              (unchecked-add-int (unchecked-multiply-int hour 10) c1)
+                              \0))
+                      (set! off (unchecked-inc-int off)))
+                    (set! secs (unchecked-multiply-int (unchecked-multiply-int hour 60) 60))
+                    (when (and (< off len)
+                               (== (.charAt time
+                                            (let [old-4 off]
+                                              (set! off (unchecked-inc-int off))
+                                              old-4))
+                                   \:))
+                      (when (and (and (< (unchecked-add-int off 1) len)
+                                      (MonthDayTime/isDigit
+                                        (set! c0
+                                              (.charAt
+                                                time
+                                                (let [old-5 off]
+                                                  (set! off (unchecked-inc-int off))
+                                                  old-5)))))
+                                 (MonthDayTime/isDigit
+                                   (set! c1
+                                         (.charAt
+                                           time
+                                           (let [old-6 off]
+                                             (set! off (unchecked-inc-int off))
+                                             old-6)))))
+                        (set! secs
+                              (unchecked-add-int
+                                secs
+                                (unchecked-multiply-int
+                                  (unchecked-subtract-int
+                                    (unchecked-add-int
+                                      (unchecked-multiply-int (unchecked-subtract-int c0 \0) 10)
+                                      c1)
+                                    \0)
+                                  60)))
+                        (when (and (< off len)
+                                   (== (.charAt time
+                                                (let [old-7 off]
+                                                  (set! off (unchecked-inc-int off))
+                                                  old-7))
+                                       \:))
+                          (when (and (and (< (unchecked-add-int off 1) len)
+                                          (MonthDayTime/isDigit
+                                            (set!
+                                              c0
+                                              (.charAt
+                                                time
+                                                (let [old-8 off]
+                                                  (set! off (unchecked-inc-int off))
+                                                  old-8)))))
+                                     (MonthDayTime/isDigit
+                                       (set! c1
+                                             (.charAt
+                                               time
+                                               (let [old-9 off]
+                                                 (set! off (unchecked-inc-int off))
+                                                 old-9)))))
+                            (set! secs
+                                  (unchecked-add-int
+                                    secs
+                                    (unchecked-subtract-int
+                                      (unchecked-add-int
+                                        (unchecked-multiply-int (unchecked-subtract-int c0 \0) 10)
+                                        c1)
+                                      \0)))))))
+                    (unchecked-multiply-int secs sign))
+                  (throw (IllegalArgumentException. (java-str "[" time "]"))))))))
+
+    (method parseOffset ^int [this ^String str]
+      (let [secs (.parseSecs this str)]
+        (when (> (Math/abs secs) (unchecked-multiply-int (unchecked-multiply-int 18 60) 60))
+          (throw (IllegalArgumentException. "Zone offset not in valid range: -18:00 to +18:00")))
+        secs))
+
+    (method parsePeriod ^int [this ^String str] (.parseSecs this str))
+
+    (method parseTimeDefinition ^ZoneOffsetTransitionRule$TimeDefinition [this ^char c]
+      (switch c
+        (\s \S) ZoneOffsetTransitionRule$TimeDefinition/STANDARD
+        (\u \U \g \G \z \Z) ZoneOffsetTransitionRule$TimeDefinition/UTC
+        ZoneOffsetTransitionRule$TimeDefinition/WALL)))
+
+  (defclass ^:private ^:static RuleLine
+    :extends MonthDayTime
+
+    (field ^int startYear)
+
+    (field ^int endYear)
+
+    (field ^int savingsAmount)
+
+    (field ^String text)
+
+    (method toTransitionRule ^ZoneOffsetTransitionRule [this ^ZoneOffset stdOffset
+                                                        ^int savingsBefore ^int negativeSavings]
+      (let [^:mutable month (.-month this)
+            ^:mutable dayOfMonth (.-dayOfMonth this)
+            ^:mutable dayOfWeek (.-dayOfWeek this)
+            ^:mutable endOfDay (.-endOfDay this)]
+        (when (< dayOfMonth 0)
+          (when-not (identical? month Month/FEBRUARY)
+            (set! dayOfMonth (unchecked-subtract-int (.maxLength month) 6))))
+        (when (and (and endOfDay (> dayOfMonth 0))
+                   (= (and (== dayOfMonth 28) (identical? month Month/FEBRUARY)) false))
+          (let [date (.plusDays (LocalDate/of 2004 month dayOfMonth) 1)]
+            (set! month (.getMonth date))
+            (set! dayOfMonth (.getDayOfMonth date))
+            (when (some? dayOfWeek) (set! dayOfWeek (.plus dayOfWeek 1)))
+            (set! endOfDay false)))
+        (ZoneOffsetTransitionRule/of month
+                                     dayOfMonth
+                                     dayOfWeek
+                                     (LocalTime/ofSecondOfDay (.-secsOfDay this))
+                                     endOfDay
+                                     (.-timeDefinition this)
+                                     stdOffset
+                                     (ZoneOffset/ofTotalSeconds
+                                       (unchecked-add-int
+                                         (.getTotalSeconds stdOffset)
+                                         savingsBefore))
+                                     (ZoneOffset/ofTotalSeconds
+                                       (unchecked-subtract-int
+                                         (unchecked-add-int
+                                           (.getTotalSeconds stdOffset)
+                                           savingsAmount)
+                                         negativeSavings)))))
+
+    (method parse ^RuleLine [this ^String/1 tokens]
+      (set! startYear (.parseYear this (aget tokens 2) 0))
+      (set! endYear (.parseYear this (aget tokens 3) startYear))
+      (when (> startYear endYear)
+        (throw (IllegalArgumentException.
+                 (java-str "Invalid <Rule> line/Year order invalid:" startYear " > " endYear))))
+      (.parse super tokens 5)
+      (set! savingsAmount (.parsePeriod this (aget tokens 8)))
+      this))
+
+  (defclass ^:private ^:static ZoneLine
+    :extends MonthDayTime
+
+    (field ^int stdOffsetSecs)
+
+    (field ^int fixedSavingsSecs 0)
+
+    (field ^String savingsRule)
+
+    (field ^String text)
+
+    (field ^int year Year/MAX_VALUE)
+
+    (field ^LocalDateTime ldt)
+
+    (field ^long ldtSecs Long/MIN_VALUE)
+
+    (method toDateTime ^LocalDateTime [this]
+      (when (nil? ldt) (set! ldt (.toDateTime this year)))
+      ldt)
+
+    (method toDateTimeEpochSecond ^long [this ^int savingsSecs]
+      (when (== ldtSecs Long/MIN_VALUE)
+        (set! ldtSecs (.toEpochSecond (.toDateTime this) ZoneOffset/UTC)))
+      (switch (.-timeDefinition this)
+        UTC ldtSecs
+        STANDARD (unchecked-subtract ldtSecs stdOffsetSecs)
+        (unchecked-subtract ldtSecs (unchecked-add-int stdOffsetSecs savingsSecs))))
+
+    (method parse ^boolean [this ^String/1 tokens ^:mutable ^int off]
+      (set! stdOffsetSecs (.parseOffset this (aget tokens off)))
+      (set! off (unchecked-inc-int off))
+      (set! savingsRule (.parseOptional this (aget tokens off)))
+      (set! off (unchecked-inc-int off))
+      (when (and (and (some? savingsRule) (> (.length savingsRule) 0))
+                 (or (== (.charAt savingsRule 0) \-) (ZoneLine/isDigit (.charAt savingsRule 0))))
+        (try
+          (set! fixedSavingsSecs (.parsePeriod this savingsRule))
+          (set! savingsRule nil)
+          (catch Exception ex (set! fixedSavingsSecs 0))))
+      (set! text (aget tokens off))
+      (set! off (unchecked-inc-int off))
+      (if (< off (alength tokens))
+          (do
+            (set! year (Integer/parseInt (aget tokens off)))
+            (set! off (unchecked-inc-int off))
+            (when (< off (alength tokens)) (.parse super tokens off))
+            false)
+          true)))
+
+  (defclass ^:private ^:static TransRule
+    :implements [(Comparable TransRule)]
+
+    (field ^:private ^int year)
+
+    (field ^:private ^RuleLine rule)
+
+    (field ^:private ^LocalDateTime ldt)
+
+    (field ^long ldtSecs)
+
+    (constructor [this ^int year ^RuleLine rule]
+      (set! (.-year this) year)
+      (set! (.-rule this) rule)
+      (set! (.-ldt this) (.toDateTime rule year))
+      (set! (.-ldtSecs this) (.toEpochSecond ldt ZoneOffset/UTC)))
+
+    (method toTransition ^ZoneOffsetTransition [this ^ZoneOffset standardOffset
+                                                ^int savingsBeforeSecs ^int negativeSavings]
+      (let [wallOffset (ZoneOffset/ofTotalSeconds
+                         (unchecked-add-int (.getTotalSeconds standardOffset) savingsBeforeSecs))
+            offsetAfter (ZoneOffset/ofTotalSeconds
+                          (unchecked-subtract-int
+                            (unchecked-add-int (.getTotalSeconds standardOffset)
+                                               (.-savingsAmount rule))
+                            negativeSavings))
+            dt (.createDateTime (.-timeDefinition rule) ldt standardOffset wallOffset)]
+        (ZoneOffsetTransition/of dt wallOffset offsetAfter)))
+
+    (method toEpochSecond ^long [this ^ZoneOffset stdOffset ^int savingsBeforeSecs]
+      (switch (.-timeDefinition rule)
+        UTC ldtSecs
+        STANDARD (unchecked-subtract ldtSecs (.getTotalSeconds stdOffset))
+        (unchecked-subtract ldtSecs
+                            (unchecked-add-int (.getTotalSeconds stdOffset) savingsBeforeSecs))))
+
+    (method isTransition ^boolean [this ^int savingsBefore ^int negativeSavings]
+      (not (== (unchecked-subtract-int (.-savingsAmount rule) negativeSavings) savingsBefore)))
+
+    (method ^:public compareTo ^int [this ^TransRule other]
+      (cond (< ldtSecs (.-ldtSecs other)) -1 (== ldtSecs (.-ldtSecs other)) 0 :else 1)))
+
+  (method ^:private buildRules ^ZoneRules [this ^String zoneId ^{:tag (List ZoneLine)} zones]
+    (when (.isEmpty zones) (throw (IllegalStateException. "No available zone window")))
+    (let [^{:tag (List ZoneOffsetTransition)} standardTransitionList (ArrayList. 4)
+          ^{:tag (List ZoneOffsetTransition)} transitionList (ArrayList. 256)
+          ^{:tag (List ZoneOffsetTransitionRule)} lastTransitionRuleList (ArrayList. 2)
+          zone0 (cast ZoneLine (.get zones 0))
+          ^:mutable stdOffset (ZoneOffset/ofTotalSeconds (.-stdOffsetSecs zone0))
+          ^:mutable savings (.-fixedSavingsSecs zone0)
+          ^:mutable wallOffset (ZoneOffset/ofTotalSeconds
+                                 (unchecked-add-int (.getTotalSeconds stdOffset) savings))
+          ^:mutable zoneStart LocalDateTime/MIN
+          firstStdOffset stdOffset
+          firstWallOffset wallOffset]
+      (for-each [^ZoneLine zone zones]
+        (let [negativeSavings (Math/min (.-fixedSavingsSecs zone)
+                                        (.findNegativeSavings this zoneStart zone))]
+          (when (< negativeSavings 0)
+            (set! (.-stdOffsetSecs zone) (unchecked-add-int (.-stdOffsetSecs zone) negativeSavings))
+            (when (< (.-fixedSavingsSecs zone) 0) (set! (.-fixedSavingsSecs zone) 0)))
+          (let [stdOffsetPrev stdOffset]
+            (when-not (== (.-stdOffsetSecs zone) (.getTotalSeconds stdOffset))
+              (let [stdOffsetNew (ZoneOffset/ofTotalSeconds (.-stdOffsetSecs zone))]
+                (.add standardTransitionList
+                      (ZoneOffsetTransition/of
+                        (LocalDateTime/ofEpochSecond
+                          (.toEpochSecond zoneStart wallOffset)
+                          0
+                          stdOffset)
+                        stdOffset
+                        stdOffsetNew))
+                (set! stdOffset stdOffsetNew)))
+            (let [^LocalDateTime zoneEnd (if (== (.-year zone) Year/MAX_VALUE)
+                                             LocalDateTime/MAX
+                                             (.toDateTime zone))]
+              (when (< (.compareTo zoneEnd zoneStart) 0)
+                (throw (IllegalStateException.
+                         (java-str "Windows must be in date-time order: " zoneEnd " < " zoneStart))))
+              (let [^:mutable ^{:tag (List TransRule)} trules nil
+                    ^:mutable ^{:tag (List TransRule)} lastRules nil
+                    ^:mutable effectiveSavings (.-fixedSavingsSecs zone)]
+                (when (some? (.-savingsRule zone))
+                  (let [^{:tag (List RuleLine)} tzdbRules (cast
+                                                            List
+                                                            (.get rules (.-savingsRule zone)))]
+                    (when (nil? tzdbRules)
+                      (throw (IllegalArgumentException.
+                               (java-str "<Rule> not found: " (.-savingsRule zone)))))
+                    (set! trules (ArrayList. 256))
+                    (set! lastRules (ArrayList. 2))
+                    (let [^:mutable lastRulesStartYear Year/MIN_VALUE]
+                      (for-each [^RuleLine rule tzdbRules]
+                        (when-not (> (.-startYear rule) (.getYear zoneEnd))
+                          (.adjustToForwards rule 2004)
+                          (let [startYear (.-startYear rule)
+                                ^:mutable endYear (.-endYear rule)]
+                            (cond
+                              (.equals zoneEnd LocalDateTime/MAX)
+                                (do
+                                  (when (== endYear Year/MAX_VALUE)
+                                    (set! endYear startYear)
+                                    (.add lastRules (TransRule. endYear rule)))
+                                  (set! lastRulesStartYear (Math/max startYear lastRulesStartYear)))
+                              (== endYear Year/MAX_VALUE) (set! endYear (.-year zone)))
+                            (let [^:mutable year startYear]
+                              (while (<= year endYear)
+                                (.add trules (TransRule. year rule))
+                                (set! year (unchecked-inc-int year)))))))
+                      (when (.equals zoneEnd LocalDateTime/MAX)
+                        (set! lastRulesStartYear
+                              (unchecked-add-int
+                                (Math/max lastRulesStartYear (.getYear zoneStart))
+                                1))
+                        (for-each [^TransRule rule lastRules]
+                          (when (<= (.-year rule) lastRulesStartYear)
+                            (let [^:mutable year (.-year rule)]
+                              (while (<= year lastRulesStartYear)
+                                (.add trules (TransRule. year (.-rule rule)))
+                                (set! year (unchecked-inc-int year)))
+                              (set! (.-year rule) lastRulesStartYear)
+                              (set! (.-ldt rule) (.toDateTime (.-rule rule) year))
+                              (set! (.-ldtSecs rule) (.toEpochSecond (.-ldt rule) ZoneOffset/UTC)))))
+                        (Collections/sort lastRules))
+                      (Collections/sort trules)
+                      (set! effectiveSavings (unchecked-negate-int negativeSavings))
+                      (for-each [^TransRule rule trules]
+                        (when (> (.toEpochSecond rule stdOffsetPrev savings)
+                                 (.toEpochSecond zoneStart wallOffset))
+                          (break))
+                        (set! effectiveSavings
+                              (unchecked-subtract-int
+                                (.-savingsAmount (.-rule rule))
+                                negativeSavings))))))
+                (let [effectiveWallOffset (ZoneOffset/ofTotalSeconds
+                                            (unchecked-add-int
+                                              (.getTotalSeconds stdOffset)
+                                              effectiveSavings))]
+                  (when-not (.equals wallOffset effectiveWallOffset)
+                    (.add transitionList
+                          (ZoneOffsetTransition/of zoneStart wallOffset effectiveWallOffset)))
+                  (set! savings effectiveSavings)
+                  (when (some? trules)
+                    (let [zoneStartEpochSecs (.toEpochSecond zoneStart wallOffset)]
+                      (for-each [^TransRule trule trules]
+                        (when (.isTransition trule savings negativeSavings)
+                          (let [epochSecs (.toEpochSecond trule stdOffset savings)]
+                            (when-not (or (< epochSecs zoneStartEpochSecs)
+                                          (>= epochSecs (.toDateTimeEpochSecond zone savings)))
+                              (.add transitionList
+                                    (.toTransition trule stdOffset savings negativeSavings))
+                              (set! savings
+                                    (unchecked-subtract-int
+                                      (.-savingsAmount (.-rule trule))
+                                      negativeSavings))))))))
+                  (when (some? lastRules)
+                    (for-each [^TransRule trule lastRules]
+                      (.add lastTransitionRuleList
+                            (.toTransitionRule (.-rule trule) stdOffset savings negativeSavings))
+                      (set! savings
+                            (unchecked-subtract-int
+                              (.-savingsAmount (.-rule trule))
+                              negativeSavings))))
+                  (set! wallOffset
+                        (ZoneOffset/ofTotalSeconds
+                          (unchecked-add-int (.getTotalSeconds stdOffset) savings)))
+                  (set! zoneStart
+                        (LocalDateTime/ofEpochSecond
+                          (.toDateTimeEpochSecond zone savings)
+                          0
+                          wallOffset))))))))
+      (ZoneRules. firstStdOffset
+                  firstWallOffset
+                  standardTransitionList
+                  transitionList
+                  lastTransitionRuleList)))
+
+  (method ^:private findNegativeSavings ^int [this ^LocalDateTime zoneStart ^ZoneLine zl]
+    (let [^:mutable ^int negativeSavings 0
+          zoneEnd (.toDateTime zl)]
+      (when (some? (.-savingsRule zl))
+        (let [^{:tag (List RuleLine)} rlines (cast List (.get rules (.-savingsRule zl)))]
+          (when (nil? rlines)
+            (throw (IllegalArgumentException. (java-str "<Rule> not found: " (.-savingsRule zl)))))
+          (set! negativeSavings
+                (^[int int] Math/min 0
+                                     (.intValue (cast
+                                                  Integer
+                                                  (.orElse
+                                                    (.min
+                                                      (.map
+                                                        (.filter
+                                                          (.stream rlines)
+                                                          (lambda Predicate ^boolean [^RuleLine l]
+                                                            (.windowOverlap
+                                                              this
+                                                              l
+                                                              (.getYear zoneStart)
+                                                              (.getYear zoneEnd))))
+                                                        (lambda Function ^Integer [^RuleLine l]
+                                                          (.-savingsAmount l)))
+                                                      (Comparator/naturalOrder))
+                                                    (Integer/valueOf 0))))))))
+      negativeSavings))
+
+  (method ^:private windowOverlap ^boolean [this ^RuleLine ruleLine ^int zoneStartYear
+                                            ^int zoneEndYear]
+    (let [overlap (or (and (<= zoneStartYear (.-startYear ruleLine))
+                           (>= zoneEndYear (.-startYear ruleLine)))
+                      (and (<= zoneStartYear (.-endYear ruleLine))
+                           (>= zoneEndYear (.-endYear ruleLine))))]
+      overlap)))

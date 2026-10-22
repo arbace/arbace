@@ -1,0 +1,243 @@
+;; Converted from jdk26u src/java.xml/share/classes/javax/xml/catalog/CatalogImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'javax.xml.catalog)
+
+(import '(com.sun.org.apache.xerces.internal.jaxp SAXParserFactoryImpl)
+        '(java.io IOException)
+        '(java.net MalformedURLException URI URL)
+        '(java.util ArrayList Iterator List NoSuchElementException Spliterator Spliterators)
+        '(java.util.function Consumer Predicate)
+        '(java.util.stream Stream StreamSupport)
+        '(javax.xml.parsers ParserConfigurationException SAXParser SAXParserFactory)
+        '(org.xml.sax SAXException))
+
+(defclass CatalogImpl
+  :extends GroupEntry
+  :implements [Catalog]
+
+  (field ^int level 0)
+
+  (field ^boolean isDeferred true)
+
+  (field ^CatalogResolver$NotFoundAction resolveType CatalogResolver$NotFoundAction/STRICT)
+
+  (field ^boolean isEmpty)
+
+  (field ^int current 0)
+
+  (field ^String systemId)
+
+  (field ^{:tag (List String)} inputFiles)
+
+  (field ^{:tag (List NextCatalog)} nextCatalogs)
+
+  (field ^SAXParser parser)
+
+  (constructor :throws [CatalogException] ^:public [this ^CatalogFeatures f & ^URI/1 uris]
+    (this. nil f uris))
+
+  (constructor :throws [CatalogException] ^:public [this ^CatalogImpl parent ^CatalogFeatures f &
+                                                    ^URI/1 uris]
+    (super. BaseEntry$CatalogEntryType/CATALOG parent)
+    (when (nil? f)
+      (throw (NullPointerException.
+               (CatalogMessages/formatMessage CatalogMessages/ERR_NULL_ARGUMENT
+                                              (new Object/1 ["CatalogFeatures"])))))
+    (.init this f)
+    (let [^:mutable ^String/1 catalogFile nil]
+      (if (and (== level 0) (== (alength uris) 0))
+          (let [files (.get (.-features this) CatalogFeatures$Feature/FILES)]
+            (when (some? files) (set! catalogFile (.split files ";"))))
+          (do
+            (set! catalogFile (new String/1 (alength uris)))
+            (loop [^int i 0]
+              (when (< i (alength uris))
+                (aset catalogFile i (.toASCIIString (aget uris i)))
+                (recur (unchecked-inc-int i))))))
+      (when (and (some? catalogFile) (> (alength catalogFile) 0))
+        (let [^:mutable ^int start 0
+              ^:mutable ^URI uri nil]
+          (for-each [^String temp catalogFile]
+            (set! uri (URI/create temp))
+            (set! start (unchecked-inc-int start))
+            (when (.verifyCatalogFile this nil uri)
+              (set! systemId temp)
+              (try
+                (let [_unused (set! (.-baseURI this) (URL. systemId))] nil)
+                (catch MalformedURLException e
+                  (CatalogMessages/reportRunTimeError
+                    CatalogMessages/ERR_INVALID_PATH
+                    (new Object/1 [temp])
+                    e)))
+              (break)))
+          (when (and (== level 0) (> (alength catalogFile) start))
+            (set! inputFiles (ArrayList.))
+            (loop [^int i start]
+              (if (< i (alength catalogFile))
+                  (if (some? (aget catalogFile i))
+                      (do (.add inputFiles (aget catalogFile i)) (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i)))
+                  nil)))))))
+
+  (method load ^void [this]
+    (when (some? systemId) (.parse this systemId))
+    (.setCatalog this this)
+    (.put (.-loadedCatalogs this) systemId this)
+    (when-not (.isDeferred this) (.loadDelegateCatalogs this this) (.loadNextCatalogs this)))
+
+  (method ^:private init ^void [this ^CatalogFeatures f]
+    (if (nil? (.-parent this))
+        (set! level 0)
+        (do
+          (set! level (unchecked-add-int (.-level (.-parent this)) 1))
+          (set! (.-loadedCatalogs this) (.-loadedCatalogs (.-parent this)))
+          (set! (.-catalogsSearched this) (.-catalogsSearched (.-parent this)))))
+    (if (nil? f) (set! (.-features this) (CatalogFeatures/defaults)) (set! (.-features this) f))
+    (.setPrefer this (.get (.-features this) CatalogFeatures$Feature/PREFER))
+    (.setDeferred this (.get (.-features this) CatalogFeatures$Feature/DEFER))
+    (.setResolve this (.get (.-features this) CatalogFeatures$Feature/RESOLVE)))
+
+  (method ^:public reset ^void [this]
+    (.reset super)
+    (set! current 0)
+    (when (== level 0) (.clear (.-catalogsSearched this)))
+    (.forEach (.filter (.stream (.-entries this))
+                       (lambda Predicate ^boolean [^BaseEntry entry]
+                         (identical? (.-type entry) BaseEntry$CatalogEntryType/GROUP)))
+              (lambda Consumer ^void [^BaseEntry entry] (.reset (cast GroupEntry entry)))))
+
+  (method isTop ^boolean [this] (== level 0))
+
+  (method ^:public getParent ^Catalog [this] (.-parent this))
+
+  (method ^:public ^:final setDeferred ^void [this ^String value]
+    (set! isDeferred (.equals CatalogFeatures/DEFER_TRUE value)))
+
+  (method ^:public isDeferred ^boolean [this] isDeferred)
+
+  (method ^:public ^:final setResolve ^void [this ^String value]
+    (set! resolveType (CatalogResolver$NotFoundAction/getType value)))
+
+  (method ^:public ^:final getResolve ^CatalogResolver$NotFoundAction [this]
+    resolveType)
+
+  (method markAsSearched ^void [this]
+    (.add (.-catalogsSearched this) systemId))
+
+  (method ^:private parse ^void [this ^String systemId]
+    (when (nil? parser) (set! parser (.getParser this)))
+    (try
+      (let [reader (CatalogReader. this parser)] (.parse parser systemId reader))
+      (catch [SAXException IOException] ex
+        (CatalogMessages/reportRunTimeError CatalogMessages/ERR_PARSING_FAILED ex))))
+
+  (method ^:private getParser ^SAXParser [this]
+    (let [^:mutable ^SAXParser p nil]
+      (try
+        (let [^SAXParserFactory spf (SAXParserFactoryImpl.)]
+          (.setNamespaceAware spf true)
+          (.setValidating spf false)
+          (.setFeature spf "http://apache.org/xml/features/nonvalidating/load-external-dtd" false)
+          (set! p (.newSAXParser spf)))
+        (catch [ParserConfigurationException SAXException] e
+          (CatalogMessages/reportRunTimeError CatalogMessages/ERR_PARSING_FAILED e)))
+      p))
+
+  (method ^:public isEmpty ^boolean [this] isEmpty)
+
+  (method ^:public catalogs ^{:tag (Stream Catalog)} [this]
+    (let [^{:tag (Iterator Catalog)} iter (anon (Iterator Catalog) []
+                                            (field ^Catalog nextCatalog nil)
+
+                                            (field ^int inputFilesIndex 0)
+
+                                            (field ^int nextCatalogIndex 0)
+
+                                            (method ^:public hasNext ^boolean [this]
+                                              (if (some? nextCatalog)
+                                                  true
+                                                  (do
+                                                    (set! nextCatalog (.nextCatalog this))
+                                                    (some? nextCatalog))))
+
+                                            (method ^:public next ^Catalog [this]
+                                              (if (or (some? nextCatalog) (.hasNext this))
+                                                  (let [catalog nextCatalog]
+                                                    (set! nextCatalog nil)
+                                                    catalog)
+                                                  (throw (NoSuchElementException.))))
+
+                                            (method ^:private nextCatalog ^Catalog [this]
+                                              (let [^:mutable ^Catalog c nil]
+                                                (when (some? nextCatalogs)
+                                                  (while (and
+                                                           (nil? c)
+                                                           (< nextCatalogIndex (.size nextCatalogs)))
+                                                    (set!
+                                                      c
+                                                      (.getCatalog
+                                                        CatalogImpl/this
+                                                        (.-catalog CatalogImpl/this)
+                                                        (.getCatalogURI
+                                                          (cast
+                                                            NextCatalog
+                                                            (.get
+                                                              nextCatalogs
+                                                              (let [old-1 nextCatalogIndex]
+                                                                (set!
+                                                                  nextCatalogIndex
+                                                                  (unchecked-inc-int
+                                                                    nextCatalogIndex))
+                                                                old-1))))))))
+                                                (when (and (nil? c) (some? inputFiles))
+                                                  (while (and
+                                                           (nil? c)
+                                                           (< inputFilesIndex (.size inputFiles)))
+                                                    (set!
+                                                      c
+                                                      (.getCatalog
+                                                        CatalogImpl/this
+                                                        nil
+                                                        (URI/create
+                                                          (cast
+                                                            String
+                                                            (.get
+                                                              inputFiles
+                                                              (let [old-2 inputFilesIndex]
+                                                                (set!
+                                                                  inputFilesIndex
+                                                                  (unchecked-inc-int
+                                                                    inputFilesIndex))
+                                                                old-2))))))))
+                                                c)))]
+      (StreamSupport/stream
+        (Spliterators/spliteratorUnknownSize iter
+                                             (bit-or-int Spliterator/ORDERED Spliterator/NONNULL))
+        false)))
+
+  (method addNextCatalog ^void [this ^NextCatalog catalog]
+    (when (some? catalog)
+      (when (nil? nextCatalogs) (set! nextCatalogs (ArrayList.)))
+      (.add nextCatalogs catalog)))
+
+  (method loadNextCatalogs ^void [this]
+    (when (some? nextCatalogs)
+      (.forEach nextCatalogs
+                (lambda Consumer ^void [^NextCatalog next]
+                  (.getCatalog this this (.getCatalogURI next)))))
+    (when (some? inputFiles)
+      (.forEach inputFiles
+                (lambda Consumer ^void [^String uri] (.getCatalog this nil (URI/create uri))))))
+
+  (method getCatalog ^Catalog [this ^CatalogImpl parent ^URI uri]
+    (when (some? uri)
+      (let [^:mutable ^CatalogImpl c nil]
+        (when (.verifyCatalogFile this parent uri)
+          (set! c (.getLoadedCatalog this (.toASCIIString uri)))
+          (when (nil? c) (set! c (CatalogImpl. this (.-features this) (new URI/1 [uri]))) (.load c)))
+        c)))
+
+  (method saveLoadedCatalog ^void [this ^String catalogId ^CatalogImpl c]
+    (.put (.-loadedCatalogs this) catalogId c))
+
+  (method loadedCatalogCount ^int [this] (.size (.-loadedCatalogs this))))

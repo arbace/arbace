@@ -1,7 +1,11 @@
 (ns jrt.java-surface
   "The Java surface of Arbace (B1a step 1, doc/go/JAVA-SURFACE.md): every JDK class, method,
-  constructor and field the compiled classes of a stage reference, read from their bytecode
-  with the JDK's class file API (java.lang.classfile). Run by bin/java-surface.
+  constructor and field the compiled classes of a stage reference, read from their bytecode.
+  Run by bin/java-surface (retired at S4, SA76: this namespace stays the library jrt.jrt-edge reads
+  class files with). Since JN7 (doc/classes/JAVA-FRONTEND-SURVEY.md, JFS40 (c)) it reads them with
+  jrt.classfile, Arbace's own reader, and the JDK classes' facts from the platform's class files
+  (*platform*), no longer with the JDK's class file API (java.lang.classfile) and reflection on
+  the running JVM: it runs on the tools' host.
 
   Every class file under the stage directory is parsed; from each, the references to classes
   outside Arbace (java.*, javax.*, jdk.*, sun.*, org.*) are collected:
@@ -31,19 +35,9 @@
 
   The output (doc/go/java-surface.edn) is deterministic: sorted, without times."
   (:require [arbace.java.io :as io]
-            [arbace.string :as str])
-  (:import (java.lang.classfile ClassFile ClassModel MethodModel FieldModel CodeModel)
-           (java.lang.classfile.instruction InvokeInstruction FieldInstruction
-                                            NewObjectInstruction TypeCheckInstruction
-                                            ConstantInstruction$LoadConstantInstruction
-                                            InvokeDynamicInstruction
-                                            NewReferenceArrayInstruction
-                                            NewMultiArrayInstruction ExceptionCatch)
-           (java.lang.classfile.constantpool ClassEntry MethodHandleEntry MethodTypeEntry
-                                             MemberRefEntry ConstantDynamicEntry)
-           (java.lang.invoke MethodType)
-           (java.io File)
-           (java.nio.file Files)))
+            [arbace.string :as str]
+            [jrt.classfile :as cf])
+  (:import (java.io File)))
 
 ;; ---------------------------------------------------------------------------------------
 ;; names
@@ -69,38 +63,71 @@
     (dotted n)))
 
 ;; ---------------------------------------------------------------------------------------
-;; the class index: Arbace's classes from their class files, JDK classes by reflection
+;; the class index: Arbace's classes from their class files, JDK classes from the platform's
 
-(def ^:private cf (ClassFile/of))
+(defn- parse [^File f] (cf/read-file f))
 
-(defn- parse [^File f] (.parse ^ClassFile cf (Files/readAllBytes (.toPath f))))
+(def ^:dynamic *platform*
+  "The JDK's classes the JDK classes' facts are read from: a directory of exploded modules
+  (MODULE/a/b/C.class), the platform of javac on Arbace (bin/javac-vendor platform, the JDK build
+  tree's jdk/modules with the jmods' descriptors: the classes of the JDK the frozen JVM ran, where
+  until JN7 they were the running JVM's, by reflection and its jrt:/ image; JFS40 (c)). Default
+  $JRT_PLATFORM."
+  (System/getenv "JRT_PLATFORM"))
 
-(defn- method-desc [^java.lang.reflect.Method m]
-  (.toMethodDescriptorString (MethodType/methodType (.getReturnType m) (.getParameterTypes m))))
+(def ^:private platform-modules
+  (memoize (fn [dir] (vec (sort (for [^File m (.listFiles (io/file dir)) :when (.isDirectory m)] (.getName m)))))))
+
+(def ^:private platform-file
+  "The class file of a JDK class (dotted name) in *platform*, or nil."
+  (memoize
+    (fn [dir n]
+      (when dir
+        (let [rel (str (str/replace n "." "/") ".class")]
+          (some (fn [m] (let [f (io/file dir m rel)] (when (.isFile f) f)))
+                (platform-modules dir)))))))
+
+(def ^:private reflection-filtered
+  "The fields reflection hides (jdk.internal.reflect.Reflection's fieldFilterMap, and what
+  MethodHandles registers): getDeclaredFields, which the facts were read with until JN7, does not
+  list them. :all for every field."
+  {"jdk.internal.reflect.Reflection" :all "java.lang.reflect.AccessibleObject" :all
+   "java.lang.Class" #{"classLoader" "classData" "modifiers" "protectionDomain" "primitive"}
+   "java.lang.ClassLoader" :all "java.lang.reflect.Constructor" :all "java.lang.reflect.Field" :all
+   "java.lang.reflect.Method" :all "java.lang.Module" :all
+   "java.lang.invoke.MethodHandles$Lookup" #{"lookupClass" "allowedModes"}})
 
 (def ^:private jdk-info
+  ;; as reflection gave them (Class.getSuperclass, getInterfaces, getDeclaredMethods,
+  ;; getDeclaredFields): an interface's superclass is nil, the constructors and the class
+  ;; initializer are not methods, the filtered fields are left out
   (memoize
     (fn [n]
-      (when-let [^Class c (try (Class/forName n false (ClassLoader/getPlatformClassLoader))
-                               (catch Throwable _ nil))]
-        {:super (some-> (.getSuperclass c) .getName)
-         :ifaces (mapv #(.getName ^Class %) (.getInterfaces c))
-         :interface? (.isInterface c)
-         :methods (into {} (for [^java.lang.reflect.Method m (.getDeclaredMethods c)]
-                             [(str (.getName m) (method-desc m))
-                              {:static? (java.lang.reflect.Modifier/isStatic (.getModifiers m))
-                               :private? (java.lang.reflect.Modifier/isPrivate (.getModifiers m))}]))
-         :fields (set (map #(.getName ^java.lang.reflect.Field %) (.getDeclaredFields c)))}))))
+      (when-let [f (platform-file *platform* n)]
+        (let [m (cf/parse (java.nio.file.Files/readAllBytes (.toPath ^File f)))
+              iface? (cf/flag? (:flags m) cf/ACC_INTERFACE)
+              hidden (reflection-filtered n)]
+          {:super (when-not iface? (some-> (:super m) dotted))
+           :ifaces (mapv dotted (:interfaces m))
+           :interface? iface?
+           :methods (into {} (for [mm (:methods m)
+                                   :when (not (str/starts-with? (:name mm) "<"))]
+                               [(str (:name mm) (:desc mm))
+                                {:static? (cf/flag? (:flags mm) cf/ACC_STATIC)
+                                 :private? (cf/flag? (:flags mm) cf/ACC_PRIVATE)}]))
+           :fields (set (for [fm (:fields m)
+                              :when (not (or (= hidden :all) (contains? hidden (:name fm))))]
+                          (:name fm)))})))))
 
-(defn- model-info [^ClassModel m]
-  {:super (some-> (.orElse (.superclass m) nil) .asInternalName dotted)
-   :ifaces (mapv #(dotted (.asInternalName ^ClassEntry %)) (.interfaces m))
-   :interface? (.has (.flags m) java.lang.reflect.AccessFlag/INTERFACE)
-   :methods (into {} (for [^MethodModel mm (.methods m)]
-                       [(str (.stringValue (.methodName mm)) (.stringValue (.methodType mm)))
-                        {:static? (.has (.flags mm) java.lang.reflect.AccessFlag/STATIC)
-                         :private? (.has (.flags mm) java.lang.reflect.AccessFlag/PRIVATE)}]))
-   :fields (set (map #(.stringValue (.fieldName ^FieldModel %)) (.fields m)))})
+(defn- model-info [m]
+  {:super (some-> (:super m) dotted)
+   :ifaces (mapv dotted (:interfaces m))
+   :interface? (cf/flag? (:flags m) cf/ACC_INTERFACE)
+   :methods (into {} (for [mm (:methods m)]
+                       [(str (:name mm) (:desc mm))
+                        {:static? (cf/flag? (:flags mm) cf/ACC_STATIC)
+                         :private? (cf/flag? (:flags mm) cf/ACC_PRIVATE)}]))
+   :fields (set (map :name (:fields m)))})
 
 (def ^:dynamic *index* "Arbace's classes: dotted name to model-info." {})
 
@@ -214,85 +241,58 @@
 (defn class-refs
   "The references of a parsed class: a seq of maps with :kind and :owner (internal or array
   name), and :name/:desc for members."
-  [^ClassModel m]
+  [m]
   (let [out (transient [])
         add! (fn [r] (conj! out r))]
-    (when-let [s (.orElse (.superclass m) nil)] (add! {:kind :super :owner (.asInternalName s)}))
-    (doseq [^ClassEntry i (.interfaces m)] (add! {:kind :interface :owner (.asInternalName i)}))
-    (doseq [^FieldModel f (.fields m)]
-      (doseq [c (desc-classes (.stringValue (.fieldType f)))] (add! {:kind :sig :owner c})))
-    (doseq [^MethodModel mm (.methods m)]
-      (doseq [c (desc-classes (.stringValue (.methodType mm)))] (add! {:kind :sig :owner c}))
-      (when-let [^CodeModel code (.orElse (.code mm) nil)]
+    (when-let [s (:super m)] (add! {:kind :super :owner s}))
+    (doseq [i (:interfaces m)] (add! {:kind :interface :owner i}))
+    (doseq [f (:fields m)]
+      (doseq [c (desc-classes (:desc f))] (add! {:kind :sig :owner c})))
+    (doseq [mm (:methods m)]
+      (doseq [c (desc-classes (:desc mm))] (add! {:kind :sig :owner c}))
+      (when-let [code (:code mm)]
         (doseq [r (class-refs-of-code code)] (add! r))))
     (persistent! out)))
 
 (defn class-refs-of-code
-  "The references of the instructions and exception handlers of a method's code."
-  [^CodeModel code]
+  "The references of the instructions and exception handlers of a method's code (jrt.classfile's
+  :code)."
+  [code]
   (let [out (transient [])
         add! (fn [r] (conj! out r))
-        mh! (fn [kind ^MethodHandleEntry e]
-              (let [^MemberRefEntry r (.reference e)]
-                (add! (member-ref kind (.asInternalName (.owner r)) (.stringValue (.name r))
-                                  (.stringValue (.type r))))))]
-        (doseq [e (.elementList code)]
-          (condp instance? e
-            InvokeInstruction
-            (let [^InvokeInstruction i e]
-              (add! (member-ref (keyword (str/lower-case (str (.opcode i))))
-                                (.asInternalName (.owner i)) (.stringValue (.name i))
-                                (.stringValue (.type i)))))
-            FieldInstruction
-            (let [^FieldInstruction i e]
-              (add! (member-ref (keyword (str/lower-case (str (.opcode i))))
-                                (.asInternalName (.owner i)) (.stringValue (.name i))
-                                (.stringValue (.type i)))))
-            NewObjectInstruction
-            (add! {:kind :new :owner (.asInternalName (.className ^NewObjectInstruction e))})
-            TypeCheckInstruction
-            (let [^TypeCheckInstruction i e]
-              (add! {:kind (keyword (str/lower-case (str (.opcode i))))
-                     :owner (.asInternalName (.type i))}))
-            NewReferenceArrayInstruction
-            (add! {:kind :anewarray
-                   :owner (.asInternalName (.componentType ^NewReferenceArrayInstruction e))})
-            NewMultiArrayInstruction
-            (add! {:kind :multianewarray
-                   :owner (.asInternalName (.arrayType ^NewMultiArrayInstruction e))})
-            ConstantInstruction$LoadConstantInstruction
-            (let [c (.constantEntry ^ConstantInstruction$LoadConstantInstruction e)]
-              (condp instance? c
-                ClassEntry (add! {:kind :ldc-class :owner (.asInternalName ^ClassEntry c)})
-                MethodHandleEntry (mh! :ldc-mh c)
-                MethodTypeEntry (doseq [x (desc-classes (.stringValue (.descriptor ^MethodTypeEntry c)))]
-                                  (add! {:kind :sig :owner x}))
-                ConstantDynamicEntry
-                (let [^ConstantDynamicEntry d c]
-                  (mh! :condy-bootstrap (.bootstrapMethod (.bootstrap d))))
-                nil))
-            InvokeDynamicInstruction
-            (let [^InvokeDynamicInstruction i e
-                  bsm (.bootstrap (.invokedynamic i))]
-              (mh! :indy-bootstrap (.bootstrapMethod bsm))
-              (when (= "arbace/lang/ReflectorCallSite"
-                       (.asInternalName (.owner (.reference (.bootstrapMethod bsm)))))
-                (add! {:kind :reflective-site :owner "arbace/lang/ReflectorCallSite"
-                       :args (mapv (fn [a]
-                                     (condp instance? a
-                                       java.lang.classfile.constantpool.StringEntry
-                                       (.stringValue ^java.lang.classfile.constantpool.StringEntry a)
-                                       java.lang.classfile.constantpool.IntegerEntry
-                                       (.intValue ^java.lang.classfile.constantpool.IntegerEntry a)
-                                       (str a)))
-                                   (.arguments bsm))}))
-              (doseq [a (.arguments bsm)]
-                (when (instance? MethodHandleEntry a) (mh! :indy-mh-arg a)))
-              (doseq [x (desc-classes (.stringValue (.type i)))] (add! {:kind :sig :owner x})))
-            ExceptionCatch
-            (when-let [t (.orElse (.catchType ^ExceptionCatch e) nil)]
-              (add! {:kind :catch :owner (.asInternalName ^ClassEntry t)}))
+        mh! (fn [kind e] (add! (member-ref kind (:owner e) (:name e) (:desc e))))]
+    (doseq [e (:elements code)]
+      (case (:op e)
+        (:invokevirtual :invokespecial :invokestatic :invokeinterface
+         :getfield :putfield :getstatic :putstatic)
+        (add! (member-ref (:op e) (:owner e) (:name e) (:desc e)))
+        (:new :checkcast :instanceof :anewarray :multianewarray)
+        (add! {:kind (:op e) :owner (:class e)})
+        :ldc
+        (let [c (:const e)]
+          (case (:tag c)
+            :class (add! {:kind :ldc-class :owner (:name c)})
+            :method-handle (mh! :ldc-mh c)
+            :method-type (doseq [x (desc-classes (:desc c))] (add! {:kind :sig :owner x}))
+            :dynamic (mh! :condy-bootstrap (:method (:bootstrap c)))
             nil))
+        :invokedynamic
+        (let [bsm (:bootstrap e)]
+          (mh! :indy-bootstrap (:method bsm))
+          (when (= "arbace/lang/ReflectorCallSite" (:owner (:method bsm)))
+            (add! {:kind :reflective-site :owner "arbace/lang/ReflectorCallSite"
+                   :args (mapv (fn [a]
+                                 (case (:tag a)
+                                   (:string :integer) (:value a)
+                                   (str a)))
+                               (:args bsm))}))
+          (doseq [a (:args bsm)]
+            (when (= :method-handle (:tag a)) (mh! :indy-mh-arg a)))
+          (doseq [x (desc-classes (:desc e))] (add! {:kind :sig :owner x})))
+        :catch
+        (when-let [t (:class e)]
+          (add! {:kind :catch :owner t}))
+        nil))
     (persistent! out)))
 
 (def member-kinds
@@ -324,15 +324,15 @@
 (defn- overrides
   "The JDK methods that the methods class model m declares override or implement:
   [{:kind :override :class jdk-class :member k}]."
-  [n ^ClassModel m]
+  [n m]
   (let [sups (jdk-supertypes n)]
     (when (seq sups)
-      (for [^MethodModel mm (.methods m)
-            :let [k (str (.stringValue (.methodName mm)) (.stringValue (.methodType mm)))
-                  fl (.flags mm)]
+      (for [mm (:methods m)
+            :let [k (str (:name mm) (:desc mm))
+                  fl (:flags mm)]
             :when (not (or (str/starts-with? k "<")
-                           (.has fl java.lang.reflect.AccessFlag/STATIC)
-                           (.has fl java.lang.reflect.AccessFlag/PRIVATE)))
+                           (cf/flag? fl cf/ACC_STATIC)
+                           (cf/flag? fl cf/ACC_PRIVATE)))
             c sups
             :let [mi (get (:methods (jdk-info c)) k)]
             :when (and mi (not (:static? mi)) (not (:private? mi)))]
@@ -350,7 +350,7 @@
   (let [root (.toPath (io/file stage-dir))
         models (for [^File f (class-files stage-dir)
                      :let [m (parse f)]]
-                 [(dotted (.asInternalName (.thisClass ^ClassModel m))) m])
+                 [(dotted (:this m)) m])
         idx (into {} (map (fn [[n m]] [n (model-info m)])) models)
         ns-munged (into {} (map (fn [ns] [(munge ns) ns])) (set (vals file-ns)))]
     (binding [*index* idx]
@@ -514,27 +514,19 @@
 ;; ---------------------------------------------------------------------------------------
 ;; the translation closure: what the translated JDK classes need of the JDK in turn
 
-(def jrt-fs (delay (java.nio.file.FileSystems/getFileSystem (java.net.URI/create "jrt:/"))))
-
 (def jdk-model
-  "The class model of a JDK class (dotted name), from the running JDK's jrt image, or nil."
+  "The class (jrt.classfile's data) of a JDK class (dotted name), from *platform*, or nil (until
+  JN7 the running JDK's jrt image)."
   (memoize
     (fn [n]
-      (when-let [^Class c (try (Class/forName n false (ClassLoader/getPlatformClassLoader))
-                               (catch Throwable _ nil))]
-        (let [p (.getPath ^java.nio.file.FileSystem @jrt-fs
-                          (str "/modules/" (.getName (.getModule c)) "/"
-                               (str/replace n "." "/") ".class")
-                          (make-array String 0))]
-          (when (Files/exists p (make-array java.nio.file.LinkOption 0))
-            (.parse ^ClassFile cf (Files/readAllBytes p))))))))
+      (when-let [f (platform-file *platform* n)]
+        (cf/read-file f)))))
 
 (defn- translated? [n] (= :translate (treatment n)))
 
-(defn- method-model ^MethodModel [^ClassModel m k]
-  (some (fn [^MethodModel mm]
-          (when (= k (str (.stringValue (.methodName mm)) (.stringValue (.methodType mm)))) mm))
-        (.methods m)))
+(defn- method-model [m k]
+  (some (fn [mm] (when (= k (str (:name mm) (:desc mm))) mm))
+        (:methods m)))
 
 (defn closure
   "The JDK methods reached from the entry members [class key] by rapid type analysis over the
@@ -575,10 +567,9 @@
             (scan! [c k]
               (when-let [m (jdk-model c)]
                 (when-let [mm (method-model m k)]
-                  (if-let [^CodeModel code (.orElse (.code mm) nil)]
+                  (if-let [code (:code mm)]
                     (do
-                      (swap! code-bytes update c (fnil + 0)
-                             (.codeLength ^java.lang.classfile.attribute.CodeAttribute code))
+                      (swap! code-bytes update c (fnil + 0) (:length code))
                       (doseq [r (class-refs-of-code code)]
                         (let [o (elem-class (:owner r))]
                           (when (and o (not (str/starts-with? (:owner r) "[")))
@@ -596,7 +587,7 @@
                               :new (instantiate! o)
                               :indy-bootstrap (reach! o (str (:name r) (:desc r)))
                               (when (jdk-class? o) (touch! o)))))))
-                    (when (.has (.flags mm) java.lang.reflect.AccessFlag/NATIVE)
+                    (when (cf/flag? (:flags mm) cf/ACC_NATIVE)
                       (swap! natives update c (fnil conj (sorted-set)) k))))))]
       (doseq [x instantiated0] (instantiate! x))
       (doseq [[c k] entries] (if (= k :new) (instantiate! c) (reach! c k)))
@@ -720,7 +711,7 @@
   (let [ns-munged (into {} (map (fn [ns] [(munge ns) ns])) (set (vals file-ns)))
         rows (for [^File f (class-files stage-dir)
                    :let [m (parse f)
-                         n (dotted (.asInternalName (.thisClass ^ClassModel m)))
+                         n (dotted (:this m))
                          [g u] (unit-of file-ns ns-munged n)
                          g (or g (ns-group repl-nss u))]
                    r (class-refs m)
@@ -817,7 +808,7 @@
                     (into (sorted-set)
                           (for [^File f (class-files (io/file stage-dir "arbace/lang"))
                                 :let [m (parse f)
-                                      n (dotted (.asInternalName (.thisClass ^ClassModel m)))]
+                                      n (dotted (:this m))]
                                 r (class-refs m)
                                 :when (some-> (elem-class (:owner r)) (str/starts-with? "arbace.asm."))]
                             (first (str/split n #"\$")))))

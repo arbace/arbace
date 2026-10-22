@@ -1,0 +1,268 @@
+(ns jrt.classfile
+  "A class-file reader of Arbace's own (doc/classes/JAVA-FRONTEND-SURVEY.md, JFS40 (c), \"As built:
+  JN7\"): a class file (JVMS 4) as data, for jrt.java-surface and jrt.jrt-edge, which read class files
+  with the JDK's class file API (java.lang.classfile) on the frozen JVM until JN7. It reads what they
+  ask of a class: its name, superclass, interfaces and flags; its fields and methods (name,
+  descriptor, flags, the classes of RuntimeVisibleAnnotations); a method's code (its length, the
+  instructions that name a class, a member or a constant of the constant pool, and its exception
+  handlers' catch types), with invokedynamic's and condy's bootstrap methods and arguments. Every
+  constant pool entry is resolved to data: nothing of the JVM.
+
+  (parse bytes) is
+    {:this \"a/b/C\" :super \"a/b/S\" or nil :interfaces [\"a/b/I\" ...] :flags n
+     :fields [{:name :desc :flags}] :methods [{:name :desc :flags :annotations [\"La/b/A;\" ...]
+     :code {:length n :elements [...]} or nil}]}
+  where an element is, in the code's order, after the exception handlers' catches (the order of
+  java.lang.classfile's CodeModel elements):
+    {:op :catch :class \"a/b/E\" or nil}
+    {:op :invokevirtual|:invokespecial|:invokestatic|:invokeinterface|:getfield|:putfield|:getstatic
+         |:putstatic :owner :name :desc}
+    {:op :new|:checkcast|:instanceof|:anewarray|:multianewarray :class \"a/b/C\" or \"[...\"}
+    {:op :ldc :const c}, c one of {:tag :class :name} {:tag :method-handle :kind :owner :name :desc}
+         {:tag :method-type :desc} {:tag :dynamic :bootstrap b :name :desc} {:tag :string :value}
+         {:tag :integer|:float|:long|:double :value}
+    {:op :invokedynamic :bootstrap b :name :desc}
+  and a bootstrap b is {:method mh :args [c ...]} (mh a :method-handle constant). The flags are the
+  access flags' bits (JVMS tables 4.1-B, 4.5-A, 4.6-A).")
+
+;; ---------------------------------------------------------------------------------------
+;; bytes
+
+(defn- u1 ^long [^bytes b ^long i] (bit-and (long (aget b i)) 0xff))
+(defn- u2 ^long [^bytes b ^long i] (bit-or (bit-shift-left (u1 b i) 8) (u1 b (inc i))))
+(defn- u4 ^long [^bytes b ^long i] (bit-or (bit-shift-left (u2 b i) 16) (u2 b (+ i 2))))
+(defn- s4 ^long [^bytes b ^long i] (long (unchecked-int (u4 b i))))
+
+(defn- mutf8
+  "The modified UTF-8 of n bytes at i (JVMS 4.4.7) as a string."
+  [^bytes b ^long i ^long n]
+  (let [sb (StringBuilder.)
+        end (+ i n)]
+    (loop [j i]
+      (when (< j end)
+        (let [c (u1 b j)]
+          (cond
+            (< c 0x80) (do (.append sb (char c)) (recur (inc j)))
+            (= (bit-and c 0xe0) 0xc0)
+            (do (.append sb (char (bit-or (bit-shift-left (bit-and c 0x1f) 6)
+                                          (bit-and (u1 b (inc j)) 0x3f))))
+                (recur (+ j 2)))
+            :else
+            (do (.append sb (char (bit-or (bit-shift-left (bit-and c 0x0f) 12)
+                                          (bit-shift-left (bit-and (u1 b (inc j)) 0x3f) 6)
+                                          (bit-and (u1 b (+ j 2)) 0x3f))))
+                (recur (+ j 3)))))))
+    (str sb)))
+
+;; ---------------------------------------------------------------------------------------
+;; the constant pool
+
+(defn- read-pool
+  "The constant pool's raw entries: a vector indexed by entry (nil at 0 and after a long or a
+  double), each [tag ...operands], and the offset after it."
+  [^bytes b]
+  (let [n (u2 b 8)]
+    (loop [k 1 i 10 out (transient [nil])]
+      (if (>= k n)
+        [(persistent! out) i]
+        (let [tag (u1 b i)]
+          (case (int tag)
+            1 (let [len (u2 b (inc i))]
+                (recur (inc k) (+ i 3 len) (conj! out [:utf8 (mutf8 b (+ i 3) len)])))
+            3 (recur (inc k) (+ i 5) (conj! out [:integer (s4 b (inc i))]))
+            4 (recur (inc k) (+ i 5) (conj! out [:float (Float/intBitsToFloat (unchecked-int (u4 b (inc i))))]))
+            5 (recur (+ k 2) (+ i 9) (-> out (conj! [:long (bit-or (bit-shift-left (u4 b (inc i)) 32) (u4 b (+ i 5)))]) (conj! nil)))
+            6 (recur (+ k 2) (+ i 9) (-> out (conj! [:double (Double/longBitsToDouble (bit-or (bit-shift-left (u4 b (inc i)) 32) (u4 b (+ i 5))))]) (conj! nil)))
+            7 (recur (inc k) (+ i 3) (conj! out [:class (u2 b (inc i))]))
+            8 (recur (inc k) (+ i 3) (conj! out [:string (u2 b (inc i))]))
+            (9 10 11) (recur (inc k) (+ i 5) (conj! out [:member (u2 b (inc i)) (u2 b (+ i 3))]))
+            12 (recur (inc k) (+ i 5) (conj! out [:nat (u2 b (inc i)) (u2 b (+ i 3))]))
+            15 (recur (inc k) (+ i 4) (conj! out [:method-handle (u1 b (inc i)) (u2 b (+ i 2))]))
+            16 (recur (inc k) (+ i 3) (conj! out [:method-type (u2 b (inc i))]))
+            (17 18) (recur (inc k) (+ i 5) (conj! out [(if (= tag 17) :dynamic :indy) (u2 b (inc i)) (u2 b (+ i 3))]))
+            (19 20) (recur (inc k) (+ i 3) (conj! out [:named (u2 b (inc i))]))
+            (throw (ex-info (str "class file: constant pool tag " tag " at " i) {:tag tag :offset i}))))))))
+
+(defn- utf [pool ^long k] (second (nth pool k)))
+(defn- class-name [pool ^long k] (when (pos? k) (utf pool (second (nth pool k)))))
+
+(defn- member-ref
+  "A Fieldref, Methodref or InterfaceMethodref entry as {:owner :name :desc}."
+  [pool ^long k]
+  (let [[_ c nat] (nth pool k)
+        [_ n d] (nth pool nat)]
+    {:owner (class-name pool c) :name (utf pool n) :desc (utf pool d)}))
+
+(declare constant)
+
+(defn- bootstrap [pool bsms ^long k]
+  (let [[mh args] (nth bsms k)]
+    {:method (constant pool bsms mh) :args (mapv #(constant pool bsms %) args)}))
+
+(defn- constant
+  "A loadable constant (or a method handle's) entry as data."
+  [pool bsms ^long k]
+  (let [[tag a c] (nth pool k)]
+    (case tag
+      :class {:tag :class :name (utf pool a)}
+      :string {:tag :string :value (utf pool a)}
+      (:integer :float :long :double) {:tag tag :value a}
+      :method-handle (assoc (member-ref pool c) :tag :method-handle :kind a)
+      :method-type {:tag :method-type :desc (utf pool a)}
+      :dynamic (let [[_ n d] (nth pool c)]
+                 {:tag :dynamic :bootstrap (bootstrap pool bsms a) :name (utf pool n) :desc (utf pool d)})
+      {:tag tag})))
+
+;; ---------------------------------------------------------------------------------------
+;; attributes and code
+
+(defn- attributes
+  "The attributes at offset i: [{name [start length]} offset-after]."
+  [pool ^bytes b ^long i]
+  (let [n (u2 b i)]
+    (loop [k 0 i (+ i 2) out {}]
+      (if (= k n)
+        [out i]
+        (let [len (u4 b (+ i 2))]
+          (recur (inc k) (+ i 6 len) (assoc out (utf pool (u2 b i)) [(+ i 6) len])))))))
+
+(defn- annotation-classes
+  "The type descriptors of a RuntimeVisibleAnnotations attribute's annotations."
+  [pool ^bytes b ^long i]
+  (letfn [(skip-value [^long i]
+            ;; element_value (JVMS 4.7.16.1): the offset after it
+            (let [t (char (u1 b i))]
+              (case t
+                (\B \C \D \F \I \J \S \Z \s \c) (+ i 3)
+                \e (+ i 5)
+                \@ (skip-annotation (inc i))
+                \[ (let [n (u2 b (inc i))]
+                     (loop [k 0 j (+ i 3)] (if (= k n) j (recur (inc k) (skip-value j))))))))
+          (skip-annotation [^long i]
+            (let [n (u2 b (+ i 2))]
+              (loop [k 0 j (+ i 4)] (if (= k n) j (recur (inc k) (skip-value (+ j 2)))))))]
+    (let [n (u2 b i)]
+      (loop [k 0 j (+ i 2) out []]
+        (if (= k n)
+          out
+          (recur (inc k) (skip-annotation j) (conj out (utf pool (u2 b j)))))))))
+
+(def ^:private ops
+  "Opcode -> [keyword operand-kind] for the instructions read; the others are skipped by length."
+  {0xb2 [:getstatic :member] 0xb3 [:putstatic :member] 0xb4 [:getfield :member] 0xb5 [:putfield :member]
+   0xb6 [:invokevirtual :member] 0xb7 [:invokespecial :member] 0xb8 [:invokestatic :member]
+   0xb9 [:invokeinterface :member] 0xba [:invokedynamic :indy]
+   0xbb [:new :class] 0xbd [:anewarray :class] 0xc0 [:checkcast :class] 0xc1 [:instanceof :class]
+   0xc5 [:multianewarray :class] 0x12 [:ldc :ldc1] 0x13 [:ldc :ldc2] 0x14 [:ldc :ldc2]})
+
+(defn- insn-length
+  "The length of the instruction at code offset pc (code starting at c0)."
+  ^long [^bytes b ^long c0 ^long pc]
+  (let [op (u1 b (+ c0 pc))]
+    (cond
+      (or (<= 0x15 op 0x19) (<= 0x36 op 0x3a) (#{0x10 0x12 0xa9 0xbc} op)) 2
+      (or (<= 0x99 op 0xa8) (#{0x11 0x13 0x14 0x84 0xb2 0xb3 0xb4 0xb5 0xb6 0xb7 0xb8 0xbb 0xbd 0xc0 0xc1 0xc6 0xc7} op)) 3
+      (= op 0xc5) 4
+      (#{0xb9 0xba 0xc8 0xc9} op) 5
+      (= op 0xc4) (if (= (u1 b (+ c0 pc 1)) 0x84) 6 4)
+      (= op 0xaa) (let [p (+ pc 1 (mod (- 3 pc) 4))
+                        lo (s4 b (+ c0 p 4)) hi (s4 b (+ c0 p 8))]
+                    (+ (- p pc) 12 (* 4 (inc (- hi lo)))))
+      (= op 0xab) (let [p (+ pc 1 (mod (- 3 pc) 4))
+                        n (s4 b (+ c0 p 4))]
+                    (+ (- p pc) 8 (* 8 n)))
+      :else 1)))
+
+(defn- read-code
+  "A Code attribute at offset i as {:length :elements}."
+  [pool bsms ^bytes b ^long i]
+  (let [len (u4 b (+ i 4))
+        c0 (+ i 8)
+        ex (+ c0 len)
+        nex (u2 b ex)
+        catches (vec (for [k (range nex)]
+                       {:op :catch :class (class-name pool (u2 b (+ ex 2 (* 8 k) 6)))}))
+        insns (loop [pc 0 out (transient [])]
+                (if (>= pc len)
+                  (persistent! out)
+                  (let [op (u1 b (+ c0 pc))
+                        [kw kind] (ops op)
+                        e (case kind
+                            nil nil
+                            :member (assoc (member-ref pool (u2 b (+ c0 pc 1))) :op kw)
+                            :class {:op kw :class (class-name pool (u2 b (+ c0 pc 1)))}
+                            :ldc1 {:op :ldc :const (constant pool bsms (u1 b (+ c0 pc 1)))}
+                            :ldc2 {:op :ldc :const (constant pool bsms (u2 b (+ c0 pc 1)))}
+                            :indy (let [[_ bi nat] (nth pool (u2 b (+ c0 pc 1)))
+                                        [_ n d] (nth pool nat)]
+                                    {:op :invokedynamic :bootstrap (bootstrap pool bsms bi)
+                                     :name (utf pool n) :desc (utf pool d)}))]
+                    (recur (+ pc (insn-length b c0 pc)) (if e (conj! out e) out)))))]
+    {:length len :elements (into catches insns)}))
+
+;; ---------------------------------------------------------------------------------------
+;; the class
+
+(defn- bootstrap-methods [pool ^bytes b attrs]
+  (if-let [[i _] (get attrs "BootstrapMethods")]
+    (let [n (u2 b i)]
+      (loop [k 0 j (+ i 2) out []]
+        (if (= k n)
+          out
+          (let [na (u2 b (+ j 2))]
+            (recur (inc k) (+ j 4 (* 2 na))
+                   (conj out [(u2 b j) (mapv #(u2 b (+ j 4 (* 2 %))) (range na))]))))))
+    []))
+
+(defn- skip-members
+  "The offsets of the n members (fields or methods) from offset i, and the offset after them."
+  [pool ^bytes b ^long i]
+  (let [n (u2 b i)]
+    (loop [k 0 j (+ i 2) out []]
+      (if (= k n)
+        [out j]
+        (let [[_ after] (attributes pool b (+ j 6))]
+          (recur (inc k) after (conj out j)))))))
+
+(defn parse
+  "The class file in bytes `b` as data (the namespace's docstring)."
+  [^bytes b]
+  (when-not (= (u4 b 0) 0xcafebabe)
+    (throw (ex-info "not a class file" {})))
+  (let [[pool i] (read-pool b)
+        flags (u2 b i)
+        this (class-name pool (u2 b (+ i 2)))
+        super (class-name pool (u2 b (+ i 4)))
+        ni (u2 b (+ i 6))
+        ifaces (mapv #(class-name pool (u2 b (+ i 8 (* 2 %)))) (range ni))
+        [fields i] (skip-members pool b (+ i 8 (* 2 ni)))
+        [methods i] (skip-members pool b i)
+        [cattrs _] (attributes pool b i)
+        bsms (bootstrap-methods pool b cattrs)
+        member (fn [^long j]
+                 (let [[attrs _] (attributes pool b (+ j 6))]
+                   [{:name (utf pool (u2 b (+ j 2))) :desc (utf pool (u2 b (+ j 4))) :flags (u2 b j)} attrs]))]
+    {:this this :super super :interfaces ifaces :flags flags
+     :fields (mapv (comp first member) fields)
+     :methods (mapv (fn [j]
+                      (let [[m attrs] (member j)]
+                        (assoc m
+                               :annotations (if-let [[a _] (get attrs "RuntimeVisibleAnnotations")]
+                                              (annotation-classes pool b a)
+                                              [])
+                               :code (when-let [[c _] (get attrs "Code")]
+                                       (read-code pool bsms b c)))))
+                    methods)}))
+
+(defn read-file
+  "The class file at path (a string or a java.io.File) as data."
+  [f]
+  (parse (java.nio.file.Files/readAllBytes (.toPath (java.io.File. (str f))))))
+
+;; the access flags read (JVMS tables 4.1-B, 4.6-A)
+(def ACC_PRIVATE 0x0002)
+(def ACC_STATIC 0x0008)
+(def ACC_NATIVE 0x0100)
+(def ACC_INTERFACE 0x0200)
+
+(defn flag? "Whether flags has bit." [flags bit] (not (zero? (bit-and (long flags) (long bit)))))
