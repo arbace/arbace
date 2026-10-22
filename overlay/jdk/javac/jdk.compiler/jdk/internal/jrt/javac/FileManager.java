@@ -7,7 +7,8 @@
  * jdk/modules holds them), --patch-module's patches and --module-source-path's modules (with the
  * class output's per module: the JDK build's multi-module compilations), module-oriented as
  * javac's Modules, ModuleFinder and ClassWriter ask. It decides only where files come from and go to, not what javac makes of
- * them. Written for javac's documented javax.tools API (https://github.com/openjdk/jdk26u at
+ * them. Since JFS52 (b) StandardFileManager extends it, the standard file manager of javac's
+ * JavaCompiler on Arbace (SystemCompiler). Written for javac's documented javax.tools API (https://github.com/openjdk/jdk26u at
  * baf63fb): Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt.javac;
@@ -35,7 +36,7 @@ import javax.tools.SimpleJavaFileObject;
 import javax.tools.StandardLocation;
 
 /** javac's locations as directories (JFS5 (b)): no jrt:/, no zip, no java.nio.file. */
-public final class FileManager implements JavaFileManager {
+public class FileManager implements JavaFileManager {
 
     /** A file of a directory, with the binary name it was found under (null for output and resources). */
     public static final class Obj extends SimpleJavaFileObject {
@@ -133,9 +134,10 @@ public final class FileManager implements JavaFileManager {
         }
     }
 
-    final List<File> sourcePath;
-    final List<File> classPath;
-    final File classOutput;
+    /** Set by the constructor, or by StandardFileManager's setLocation. */
+    List<File> sourcePath;
+    List<File> classPath;
+    File classOutput;
     final Map<String, ModuleLoc> system = new LinkedHashMap<>();
     final Map<String, ModuleLoc> patches = new LinkedHashMap<>();
     final Map<String, ModuleLoc> sourceModules = new LinkedHashMap<>();

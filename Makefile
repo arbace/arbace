@@ -99,7 +99,7 @@ jdk-verify: ## jdk/'s forms by repr/java and the JDK build's generators, on java
 	bin/jrt-convert verify
 edge-verify: ## j2g's edge, on the frozen JVM (bin/j2g-edge verify)
 	bin/j2g-edge verify
-javac-verify: ## jdk/javac, javac's forms (and the JDK build's tools, java.xml's SAX parser) read by javac on Arbace (the fixpoint), jdk.compiler's generated sources generated on the tool by the build's langtools tools, its edge on the frozen JVM; j2g translates javac's world (bin/javac-vendor verify, check)
+javac-verify: ## jdk/javac, javac's forms (and the JDK build's tools, java.xml's SAX parser) read by javac on Arbace (the fixpoint), all of jdk.compiler's generated sources generated on the tool by the build's langtools tools (FlagsEnum through javac on Arbace's javax.tools API), its edge on the frozen JVM; j2g translates javac's world (bin/javac-vendor verify, check)
 	bin/javac-vendor verify
 	bin/javac-vendor check
 javac-classes: ## javac on Arbace (the tool build) compiles the baseline, samples and jdk corpora as the JVM's javac, byte for byte (bin/javac-vendor classes)

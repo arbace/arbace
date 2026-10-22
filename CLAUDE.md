@@ -82,7 +82,9 @@ Prior art:
   executable (jdk/javac's `buildtools`, with java.xml's SAX parser), and its edge step
   (`jrt.jrt-edge`) on the tools' host, reading class files with `jrt.classfile`, Arbace's own reader;
   since JFS48 (b) ("As built: JFS48 (b)") jdk.compiler's generated sources are generated likewise,
-  by the build's langtools tools on the tool (`bin/javac-vendor convert`, `FlagsEnum` still copied).
+  by the build's langtools tools on the tool (`bin/javac-vendor convert`), since JFS52 (b) ("As built:
+  JFS52 (b)") `FlagsEnum` too, flagsgenerator compiling `Flags.java` through javax.tools' API on javac
+  on Arbace (`jdk.internal.jrt.javac.SystemCompiler`): no generated source is copied.
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
   frozen baseline on the JVM (`test/baseline-results.edn`), or with `CLOJURE_TESTS_GO` the Go
   build's test executable (`test/arbace-go-results.edn`; repr/clojure's translation and the report on the
@@ -195,8 +197,10 @@ Prior art:
   program's, `overlay/jdk/javac/closure.txt`, and jrt's own zlib `Deflater`; since JFS48 (b) the
   langtools tools `make/langtools/tools/{compileproperties,propertiesparser}`, which generate
   jdk.compiler's resource bundles and `CompilerProperties`/`LauncherProperties` on the tool in
-  `convert`'s generate step, compared with the build tree's, `FlagsEnum` alone still copied from
-  it), its source list, provenance
+  `convert`'s generate step, compared with the build tree's, and since JFS52 (b) `flagsgenerator`,
+  `FlagsEnum`, through javax.tools' API: `ToolProvider`'s tool-world variant returns javac on
+  Arbace's `JavaCompiler`, `SystemCompiler`, JavacTool's tasks over its file manager as a standard
+  one, against the platform), its source list, provenance
   and edge (`jdk/javac/edge.edn`: what javac's world asks beyond `jdk/edge.edn`), made by
   `bin/javac-vendor convert`: since JN5 read by javac on Arbace (the fixpoint: javac's tool reads
   javac's own sources into these forms), the edge recorded on the frozen JVM (`verify` byte for
