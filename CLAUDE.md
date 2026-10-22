@@ -80,7 +80,9 @@ Prior art:
   JN6"), and since JN7 ("As built: JN7") nothing of `bin/jrt-convert` either: the JDK build's
   tools of its generate step run as Java forms on javac's tool
   executable (jdk/javac's `buildtools`, with java.xml's SAX parser), and its edge step
-  (`jrt.jrt-edge`) on the tools' host, reading class files with `jrt.classfile`, Arbace's own reader.
+  (`jrt.jrt-edge`) on the tools' host, reading class files with `jrt.classfile`, Arbace's own reader;
+  since JFS48 (b) ("As built: JFS48 (b)") jdk.compiler's generated sources are generated likewise,
+  by the build's langtools tools on the tool (`bin/javac-vendor convert`, `FlagsEnum` still copied).
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
   frozen baseline on the JVM (`test/baseline-results.edn`), or with `CLOJURE_TESTS_GO` the Go
   build's test executable (`test/arbace-go-results.edn`; repr/clojure's translation and the report on the
@@ -190,7 +192,11 @@ Prior art:
   own Java and j2g variants for that world in `overlay/jdk/javac/`; since JN7 also the JDK build's
   tools `bin/jrt-convert`'s generate step runs on the tool, `make/jdk/src/classes/build/tools` as
   module `buildtools`, with java.xml's SAX parser and the JDK classes they need beyond the
-  program's, `overlay/jdk/javac/closure.txt`, and jrt's own zlib `Deflater`), its source list, provenance
+  program's, `overlay/jdk/javac/closure.txt`, and jrt's own zlib `Deflater`; since JFS48 (b) the
+  langtools tools `make/langtools/tools/{compileproperties,propertiesparser}`, which generate
+  jdk.compiler's resource bundles and `CompilerProperties`/`LauncherProperties` on the tool in
+  `convert`'s generate step, compared with the build tree's, `FlagsEnum` alone still copied from
+  it), its source list, provenance
   and edge (`jdk/javac/edge.edn`: what javac's world asks beyond `jdk/edge.edn`), made by
   `bin/javac-vendor convert`: since JN5 read by javac on Arbace (the fixpoint: javac's tool reads
   javac's own sources into these forms), the edge recorded on the frozen JVM (`verify` byte for

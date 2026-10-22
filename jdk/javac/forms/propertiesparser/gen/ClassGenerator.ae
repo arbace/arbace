@@ -1,0 +1,481 @@
+;; Converted from jdk26u make/langtools/tools/propertiesparser/gen/ClassGenerator.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'propertiesparser.gen)
+
+(import '(java.io File FileWriter IOException)
+        '(java.text MessageFormat)
+        '(java.util ArrayList
+                    Arrays
+                    Collections
+                    List
+                    Locale
+                    Map
+                    Map$Entry
+                    Properties
+                    Set
+                    TreeMap
+                    TreeSet)
+        '(java.util.function Consumer Function Predicate Supplier)
+        '(java.util.stream Collectors Stream)
+        '(propertiesparser.parser Message
+                                  MessageFile
+                                  MessageLine
+                                  MessageType
+                                  MessageType$CompoundType
+                                  MessageType$CustomType
+                                  MessageType$SimpleType
+                                  MessageType$UnionType
+                                  MessageType$Visitor))
+
+(defclass ^:public ClassGenerator
+  (field ^:private ^:static ^:final ^String INDENT_STRING
+    "                                                                   ")
+
+  (field ^:private ^:static ^:final ^int INDENT_WIDTH 4)
+
+  (field ^:static ^Properties stubs)
+
+  (static-initializer
+    (set! stubs (Properties.))
+    (let [resourcePath "/propertiesparser/resources/templates.properties"]
+      (try
+        (with-resources [in (.getResourceAsStream ClassGenerator resourcePath)] (.load stubs in))
+        (catch IOException ex (throw (AssertionError. ex))))))
+
+  (defclass ^:enum StubKind
+    (constants
+      (TOPLEVEL ["toplevel.decl"])
+      (FACTORY_CLASS ["nested.decl"])
+      (IMPORT ["import.decl"])
+      (FACTORY_METHOD_DECL ["factory.decl.method"])
+      (FACTORY_METHOD_ARG ["factory.decl.method.arg"])
+      (FACTORY_METHOD_BODY ["factory.decl.method.body"])
+      (FACTORY_METHOD_BODY_LINT ["factory.decl.method.body.lint"])
+      (FACTORY_FIELD ["factory.decl.field"])
+      (FACTORY_FIELD_LINT ["factory.decl.field.lint"])
+      (WILDCARDS_EXTENDS ["wildcards.extends"])
+      (SUPPRESS_WARNINGS ["suppress.warnings"])
+      (LINT_CATEGORY ["lint.category"])
+      (DIAGNOSTIC_FLAGS_EMPTY ["diagnostic.flags.empty"])
+      (DIAGNOSTIC_FLAGS_NON_EMPTY ["diagnostic.flags.non-empty"]))
+
+    (field ^String key)
+
+    (constructor [this ^String key] (set! (.-key this) key))
+
+    (method format ^String [this & ^Object/1 args]
+      (MessageFormat/format (cast String (.get stubs key)) args)))
+
+  (defclass ^:enum FactoryKind
+    (constants
+      (ERR ["err" "Error" "Errors"])
+      (WARN ["warn" "Warning" "Warnings"])
+      (LINT_WARN ["warn" "LintWarning" "LintWarnings"])
+      (NOTE ["note" "Note" "Notes"])
+      (MISC ["misc" "Fragment" "Fragments"])
+      (OTHER [nil nil nil]))
+
+    (field ^String prefix)
+
+    (field ^String keyClazz)
+
+    (field ^String factoryClazz)
+
+    (constructor [this ^String prefix ^String keyClazz ^String factoryClazz]
+      (set! (.-prefix this) prefix)
+      (set! (.-keyClazz this) keyClazz)
+      (set! (.-factoryClazz this) factoryClazz))
+
+    (method ^:static of ^FactoryKind [^{:tag (Map$Entry String Message)} messageEntry]
+      (let [prefix (aget (.split (cast String (.getKey messageEntry)) "\\.") 1)
+            ^:mutable ^FactoryKind selected nil]
+        (for-each [^FactoryKind k (FactoryKind/values)]
+          (when (or (nil? (.-prefix k)) (.equals (.-prefix k) prefix)) (set! selected k) (break)))
+        (when (identical? selected WARN)
+          (for-each [^MessageLine line (.getLines (cast Message (.getValue messageEntry)) false)]
+            (when (.isLint line) (set! selected LINT_WARN) (break))))
+        selected)))
+
+  (method ^:public generateFactory ^void [this ^MessageFile messageFile ^File outDir]
+    (let [^{:tag (Map FactoryKind (List (Map$Entry String Message)))} groupedEntries (cast
+                                                                                       Map
+                                                                                       (.collect
+                                                                                         (.stream
+                                                                                           (.entrySet
+                                                                                             (.-messages
+                                                                                               messageFile)))
+                                                                                         (Collectors/groupingBy
+                                                                                           (method-ref
+                                                                                             Function
+                                                                                             ^FactoryKind [Map$Entry]
+                                                                                             FactoryKind/of)
+                                                                                           (method-ref
+                                                                                             Supplier
+                                                                                             ^TreeMap []
+                                                                                             TreeMap/new)
+                                                                                           (Collectors/toList))))
+          ^{:tag (List String)} nestedDecls (ArrayList.)
+          ^{:tag (Set String)} importedTypes (TreeSet.)]
+      (for-each [^{:tag (Map$Entry FactoryKind (List (Map$Entry String Message)))} entry (.entrySet
+                                                                                           groupedEntries)]
+        (when-not (identical? (.getKey entry) FactoryKind/OTHER)
+          (let [members (cast String
+                              (.collect (.flatMap
+                                          (.stream (cast List (.getValue entry)))
+                                          (lambda Function ^Stream [^Map$Entry e]
+                                            (.stream
+                                              (.generateFactoryMethodsAndFields
+                                                this
+                                                (cast FactoryKind (.getKey entry))
+                                                (cast String (.getKey e))
+                                                (cast Message (.getValue e))))))
+                                        (Collectors/joining "\n\n")))
+                factoryDecl (.format StubKind/FACTORY_CLASS
+                                     (.-factoryClazz (cast FactoryKind (.getKey entry)))
+                                     (.indent this members 1))]
+            (.add nestedDecls (.indent this factoryDecl 1))
+            (.forEach (.stream (cast List (.getValue entry)))
+                      (lambda Consumer ^void [^Map$Entry e]
+                        (.addAll importedTypes
+                                 (.importedTypes
+                                   this
+                                   (.getTypes (.getMessageInfo (cast Message (.getValue e)))))))))))
+      (let [clazz (.format StubKind/TOPLEVEL
+                           (.packageName this (.-file messageFile))
+                           (String/join "\n" (.generateImports this importedTypes))
+                           (ClassGenerator/toplevelName (.-file messageFile))
+                           (String/join "\n" nestedDecls))]
+        (try
+          (with-resources [fw (FileWriter. (File.
+                                             outDir
+                                             (java-str
+                                               (ClassGenerator/toplevelName (.-file messageFile))
+                                               ".java")))]
+            (.append fw clazz))
+          (catch Throwable ex (throw (AssertionError. ex)))))))
+
+  (method indent ^String [this ^String s ^int level]
+    (cast String
+          (.collect (.map (Stream/of (.split s "\n"))
+                          (lambda Function ^String [^String sub]
+                            (java-str (.substring
+                                        INDENT_STRING
+                                        0
+                                        (unchecked-multiply-int level INDENT_WIDTH))
+                                      sub)))
+                    (Collectors/joining "\n"))))
+
+  (method packageName ^String [this ^File file]
+    (let [path (.getAbsolutePath file)
+          begin (.lastIndexOf path (java-str File/separatorChar "com" File/separatorChar))
+          packagePath (.substring path
+                                  (unchecked-add-int begin 1)
+                                  (.lastIndexOf path File/separatorChar))
+          packageName (.replace packagePath File/separatorChar \.)]
+      packageName))
+
+  (method ^:public ^:static toplevelName ^String [^File file]
+    (cast String
+          (.collect (.map (Stream/of (.split (.getName file) "\\."))
+                          (lambda Function ^String [^String s]
+                            (java-str (Character/toUpperCase (.charAt s 0)) (.substring s 1))))
+                    (Collectors/joining ""))))
+
+  (method generateImports ^{:tag (List String)} [this ^{:tag (Set String)} importedTypes]
+    (let [^{:tag (List String)} importDecls (ArrayList.)]
+      (for-each [^String it importedTypes] (.add importDecls (.format StubKind/IMPORT it)))
+      importDecls))
+
+  (method generateFactoryMethodsAndFields ^{:tag (List String)} [this ^FactoryKind k ^String key
+                                                                 ^Message msg]
+    (let [msgInfo (.getMessageInfo msg)
+          ^{:tag (List MessageLine)} lines (.getLines msg false)
+          javadoc (cast String
+                        (.collect (.map (.filter
+                                          (.stream lines)
+                                          (lambda Predicate ^boolean [^MessageLine ml]
+                                            (and (not (.isInfo ml)) (not (.isEmptyOrComment ml)))))
+                                        (lambda Function ^String [^MessageLine ml] (.-text ml)))
+                                  (Collectors/joining "\n *")))
+          keyParts (.split key "\\.")
+          lintCategory (cast String
+                             (.orElse (.findFirst
+                                        (.map (.filter
+                                                (.stream lines)
+                                                (method-ref
+                                                  Predicate
+                                                  [MessageLine]
+                                                  MessageLine/.isLint))
+                                              (method-ref
+                                                Function
+                                                ^String [MessageLine]
+                                                MessageLine/.lintCategory)))
+                                      nil))
+          diagnosticFlags (cast String
+                                (.collect (.map (.map
+                                                  (.flatMap
+                                                    (.map
+                                                      (.filter
+                                                        (.stream lines)
+                                                        (method-ref
+                                                          Predicate
+                                                          [MessageLine]
+                                                          MessageLine/.isDiagnosticFlags))
+                                                      (method-ref
+                                                        Function
+                                                        ^String/1 [MessageLine]
+                                                        MessageLine/.diagnosticFlags))
+                                                    (method-ref
+                                                      Function
+                                                      ^Stream [String/1]
+                                                      Stream/of))
+                                                  (lambda Function ^String [^String s]
+                                                    (.replace s \- \_)))
+                                                (lambda Function ^String [^String s]
+                                                  (.toUpperCase s Locale/ROOT)))
+                                          (Collectors/joining ", ")))
+          factoryName (.factoryName this key)]
+      (if (.isEmpty (.getTypes msgInfo))
+          (let [^String factoryField (if (nil? lintCategory)
+                                         (.format
+                                           StubKind/FACTORY_FIELD
+                                           (.-keyClazz k)
+                                           factoryName
+                                           (if (.isEmpty diagnosticFlags)
+                                               ^Object (.format StubKind/DIAGNOSTIC_FLAGS_EMPTY)
+                                               ^Object (.format
+                                                         StubKind/DIAGNOSTIC_FLAGS_NON_EMPTY
+                                                         diagnosticFlags))
+                                           (java-str "\"" (aget keyParts 0) "\"")
+                                           (java-str
+                                             "\""
+                                             (cast
+                                               String
+                                               (.collect
+                                                 (.skip (Stream/of keyParts) 2)
+                                                 (Collectors/joining ".")))
+                                             "\"")
+                                           javadoc)
+                                         (.format
+                                           StubKind/FACTORY_FIELD_LINT
+                                           (.-keyClazz k)
+                                           factoryName
+                                           (if (.isEmpty diagnosticFlags)
+                                               ^Object (.format StubKind/DIAGNOSTIC_FLAGS_EMPTY)
+                                               ^Object (.format
+                                                         StubKind/DIAGNOSTIC_FLAGS_NON_EMPTY
+                                                         diagnosticFlags))
+                                           (.format
+                                             StubKind/LINT_CATEGORY
+                                             (java-str "\"" lintCategory "\""))
+                                           (java-str "\"" (aget keyParts 0) "\"")
+                                           (java-str
+                                             "\""
+                                             (cast
+                                               String
+                                               (.collect
+                                                 (.skip (Stream/of keyParts) 2)
+                                                 (Collectors/joining ".")))
+                                             "\"")
+                                           javadoc))]
+            (Collections/singletonList factoryField))
+          (let [^{:tag (List String)} factoryMethods (ArrayList.)]
+            (for-each [^{:tag (List MessageType)} msgTypes (.normalizeTypes
+                                                             this
+                                                             0
+                                                             (.getTypes msgInfo))]
+              (let [^{:tag (List String)} types (.generateTypes this msgTypes)
+                    ^{:tag (List String)} argNames (.argNames this (.size types))
+                    ^String suppressionString (if (.needsSuppressWarnings this msgTypes)
+                                                  (.format StubKind/SUPPRESS_WARNINGS)
+                                                  "")
+                    ^String methodBody (if (nil? lintCategory)
+                                           (.format
+                                             StubKind/FACTORY_METHOD_BODY
+                                             (.-keyClazz k)
+                                             (if (.isEmpty diagnosticFlags)
+                                                 ^Object (.format StubKind/DIAGNOSTIC_FLAGS_EMPTY)
+                                                 ^Object (.format
+                                                           StubKind/DIAGNOSTIC_FLAGS_NON_EMPTY
+                                                           diagnosticFlags))
+                                             (java-str "\"" (aget keyParts 0) "\"")
+                                             (java-str
+                                               "\""
+                                               (cast
+                                                 String
+                                                 (.collect
+                                                   (.skip (Stream/of keyParts) 2)
+                                                   (Collectors/joining ".")))
+                                               "\"")
+                                             (.collect (.stream argNames) (Collectors/joining ", ")))
+                                           (.format
+                                             StubKind/FACTORY_METHOD_BODY_LINT
+                                             (.-keyClazz k)
+                                             (if (.isEmpty diagnosticFlags)
+                                                 ^Object (.format StubKind/DIAGNOSTIC_FLAGS_EMPTY)
+                                                 ^Object (.format
+                                                           StubKind/DIAGNOSTIC_FLAGS_NON_EMPTY
+                                                           diagnosticFlags))
+                                             (.format
+                                               StubKind/LINT_CATEGORY
+                                               (java-str "\"" lintCategory "\""))
+                                             (java-str "\"" (aget keyParts 0) "\"")
+                                             (java-str
+                                               "\""
+                                               (cast
+                                                 String
+                                                 (.collect
+                                                   (.skip (Stream/of keyParts) 2)
+                                                   (Collectors/joining ".")))
+                                               "\"")
+                                             (.collect (.stream argNames) (Collectors/joining ", "))))]
+                (let [factoryMethod (.format StubKind/FACTORY_METHOD_DECL
+                                             suppressionString
+                                             (.-keyClazz k)
+                                             factoryName
+                                             (.collect
+                                               (.stream (.argDecls this types argNames))
+                                               (Collectors/joining ", "))
+                                             (.indent this methodBody 1)
+                                             javadoc)]
+                  (.add factoryMethods factoryMethod))))
+            factoryMethods))))
+
+  (method factoryName ^String [this ^String key]
+    (cast String
+          (.collect (.map (.skip (Stream/of (.split key "[\\.-]")) 2)
+                          (lambda Function ^String [^String s]
+                            (java-str (Character/toUpperCase (.charAt s 0)) (.substring s 1))))
+                    (Collectors/joining ""))))
+
+  (method argDecls ^{:tag (List String)} [this ^{:tag (List String)} types
+                                          ^{:tag (List String)} args]
+    (let [^{:tag (List String)} argNames (ArrayList.)]
+      (loop [^int i 0]
+        (when (< i (.size types))
+          (.add argNames (java-str (cast String (.get types i)) " " (cast String (.get args i))))
+          (recur (unchecked-inc-int i))))
+      argNames))
+
+  (method argNames ^{:tag (List String)} [this ^int size]
+    (let [^{:tag (List String)} argNames (ArrayList.)]
+      (loop [^int i 0]
+        (when (< i size)
+          (.add argNames (.format StubKind/FACTORY_METHOD_ARG i))
+          (recur (unchecked-inc-int i))))
+      argNames))
+
+  (method generateTypes ^{:tag (List String)} [this ^{:tag (List MessageType)} msgTypes]
+    (cast List
+          (.collect (.map (.stream msgTypes)
+                          (lambda Function ^String [^MessageType t]
+                            (cast String (.accept t stringVisitor nil))))
+                    (Collectors/toList))))
+
+  (field ^{:tag (MessageType$Visitor String Void)} stringVisitor
+    (anon (MessageType$Visitor String Void) []
+      (method ^:public visitCustomType ^String [this ^MessageType$CustomType t ^Void aVoid]
+        (let [customType (.-typeString t)]
+          (.substring customType (unchecked-add-int (.lastIndexOf customType \.) 1))))
+
+      (method ^:public visitSimpleType ^String [this ^MessageType$SimpleType t ^Void aVoid]
+        (.-clazz t))
+
+      (method ^:public visitCompoundType ^String [this ^MessageType$CompoundType t ^Void aVoid]
+        (.format StubKind/WILDCARDS_EXTENDS
+                 (.-clazz (.-clazz (.-kind t)))
+                 (.accept (.-elemtype t) this nil)))
+
+      (method ^:public visitUnionType ^String [this ^MessageType$UnionType t ^Void aVoid]
+        (throw (AssertionError. "Union types should have been denormalized!")))))
+
+  (method needsSuppressWarnings ^boolean [this ^{:tag (List MessageType)} msgTypes]
+    (.anyMatch (.stream msgTypes)
+               (lambda Predicate ^boolean [^MessageType t]
+                 (.booleanValue (cast Boolean (.accept t suppressWarningsVisitor nil))))))
+
+  (field ^{:tag (MessageType$Visitor Boolean Void)} suppressWarningsVisitor
+    (anon (MessageType$Visitor Boolean Void) []
+      (method ^:public visitCustomType ^Boolean [this ^MessageType$CustomType t ^Void aVoid]
+        true)
+
+      (method ^:public visitSimpleType ^Boolean [this ^MessageType$SimpleType t ^Void aVoid]
+        (switch t (LIST SET) true false))
+
+      (method ^:public visitCompoundType ^Boolean [this ^MessageType$CompoundType t ^Void aVoid]
+        (cast Boolean (.accept (.-elemtype t) this nil)))
+
+      (method ^:public visitUnionType ^Boolean [this ^MessageType$UnionType t ^Void aVoid]
+        (.needsSuppressWarnings ClassGenerator/this (Arrays/asList (.-choices t))))))
+
+  (method importedTypes ^{:tag (Set String)} [this ^{:tag (List MessageType)} msgTypes]
+    (let [^{:tag (Set String)} imports (TreeSet.)]
+      (.forEach msgTypes (lambda Consumer ^void [^MessageType t] (.accept t importVisitor imports)))
+      imports))
+
+  (field ^{:tag (MessageType$Visitor Void (Set String))} importVisitor
+    (anon (MessageType$Visitor Void (Set String)) []
+      (method ^:public visitCustomType ^Void [this ^MessageType$CustomType t
+                                              ^{:tag (Set String)} imports]
+        (.add imports (.-typeString t))
+        nil)
+
+      (method ^:public visitSimpleType ^Void [this ^MessageType$SimpleType t
+                                              ^{:tag (Set String)} imports]
+        (when (some? (.-qualifier t)) (.add imports (java-str (.-qualifier t) "." (.-clazz t))))
+        nil)
+
+      (method ^:public visitCompoundType ^Void [this ^MessageType$CompoundType t
+                                                ^{:tag (Set String)} imports]
+        (.visitSimpleType this (.-clazz (.-kind t)) imports)
+        (.accept (.-elemtype t) this imports)
+        nil)
+
+      (method ^:public visitUnionType ^Void [this ^MessageType$UnionType t
+                                             ^{:tag (Set String)} imports]
+        (.forEach (Stream/of (.-choices t))
+                  (lambda Consumer ^void [^MessageType c] (.accept c this imports)))
+        nil)))
+
+  (method normalizeTypes ^{:tag (List (List MessageType))} [this ^int idx
+                                                            ^{:tag (List MessageType)} msgTypes]
+    (if (== (.size msgTypes) idx)
+        (Collections/singletonList (Collections/emptyList))
+        (let [head (cast MessageType (.get msgTypes idx))
+              ^{:tag (List (List MessageType))} buf (ArrayList.)]
+          (for-each [^MessageType alternative (cast List (.accept head normalizeVisitor nil))]
+            (for-each [^{:tag (List MessageType)} rest (.normalizeTypes
+                                                         this
+                                                         (unchecked-add-int idx 1)
+                                                         msgTypes)]
+              (let [^{:tag (List MessageType)} temp (ArrayList. rest)]
+                (.add temp 0 alternative)
+                (.add buf temp))))
+          buf)))
+
+  (field ^{:tag (MessageType$Visitor (List MessageType) Void)} normalizeVisitor
+    (anon (MessageType$Visitor (List MessageType) Void) []
+      (method ^:public visitCustomType ^{:tag (List MessageType)} [this ^MessageType$CustomType t
+                                                                   ^Void aVoid]
+        (Collections/singletonList t))
+
+      (method ^:public visitSimpleType ^{:tag (List MessageType)} [this ^MessageType$SimpleType t
+                                                                   ^Void aVoid]
+        (Collections/singletonList t))
+
+      (method ^:public visitCompoundType ^{:tag (List MessageType)} [this
+                                                                     ^MessageType$CompoundType t
+                                                                     ^Void aVoid]
+        (cast List
+              (.collect (.map (.stream (cast List (.accept (.-elemtype t) this nil)))
+                              (lambda Function ^MessageType$CompoundType [^MessageType nt]
+                                (MessageType$CompoundType. (.-kind t) nt)))
+                        (Collectors/toList))))
+
+      (method ^:public visitUnionType ^{:tag (List MessageType)} [this ^MessageType$UnionType t
+                                                                  ^Void aVoid]
+        (cast List
+              (.collect (.flatMap (Stream/of (.-choices t))
+                                  (lambda Function ^Stream [^MessageType t2]
+                                    (.stream (cast List (.accept t2 this nil)))))
+                        (Collectors/toList)))))))
