@@ -1,0 +1,880 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file implements scanner, a lexical tokenizer for
+;; Go source. After initialization, consecutive calls of
+;; next advance the scanner one token at a time.
+;;
+;; This file, source.go, tokens.go, and token_string.go are self-contained
+;; (`go tool compile scanner.go source.go tokens.go token_string.go` compiles)
+;; and thus could be made into their own package.
+
+(in-ns 'go.arbace.repr.go.internal.syntax) (go/file "scanner.go" :imports [
+
+
+    ^{:line 16} [fmt "fmt"]
+    ^{:line 17} [io "io"]
+    ^{:line 18} [unicode "unicode"]
+    ^{:line 19} [utf8 "unicode/utf8"]])
+
+
+
+
+
+(go/const "The mode flags below control which comments are reported\nby calling the error handler. If no flag is set, comments\nare ignored.\n"
+  ^{:line 26} [^{:tag uint :val 1} comments (<< 1 iota)] ; call handler for all comments
+  ^{:line 27} [^{:val 2} directives]) ; call handler for directives only
+
+
+(go/type scanner (struct
+    ^{:line 31} source
+    ^{:line 32 :tag uint} mode
+    ^{:line 33 :tag bool} nlsemi ; if set '\n' and EOF translate to ';'
+
+
+    ^{:line 36 :tag uint :doc "current token, valid after calling next()\n"} line ^{:tag uint :doc "current token, valid after calling next()\n"} col
+    ^{:line 37 :tag bool} blank ; line is blank up to col
+    ^{:line 38 :tag token} tok
+    ^{:line 39 :tag string} lit ; valid if tok is _Name, _Literal, or _Semi ("semicolon", "newline", or "EOF"); may be malformed if bad is true
+    ^{:line 40 :tag bool} bad ; valid if tok is _Literal, true if a syntax error occurred, lit may be malformed
+    ^{:line 41 :tag LitKind} kind ; valid if tok is _Literal
+    ^{:line 42 :tag Operator} op ; valid if tok is _Operator, _Star, _AssignOp, or _IncOp
+    ^{:line 43 :tag int} prec)) ; valid if tok is _Operator, _Star, _AssignOp, or _IncOp
+
+
+^{:go/end 50} (go/method init [^{:tag (* scanner)} s ^io/Reader src ^{:tag (func [^uint line ^uint col ^string msg])} errh ^uint mode]
+  (.init (.-source s) src errh)
+  (set! (.-mode s) mode)
+  (set! (.-nlsemi s) false))
+
+
+
+^{:go/end 55} (go/method errorf "errorf reports an error at the most recently read character position.\n" [^{:tag (* scanner)} s ^string format & ^{:tag (slice any)} args]
+  ^{:go/via [source]} (.error s (fmt/Sprintf format (spread args))))
+
+
+
+^{:go/end 60} (go/method errorAtf "errorAtf reports an error at a byte column offset relative to the current token start.\n" [^{:tag (* scanner)} s ^int offset ^string format & ^{:tag (slice any)} args]
+  (^{:go/via [source]} (.-errh s) (.-line s) (+ (.-col s) (conv uint offset)) (fmt/Sprintf format (spread args))))
+
+
+
+^{:go/end 69} (go/method setLit "setLit sets the scanner state for a recognized _Literal token.\n" [^{:tag (* scanner)} s ^LitKind kind ^bool ok]
+  (set! (.-nlsemi s) true)
+  (set! (.-tok s) _Literal)
+  (set! (.-lit s) (conv string ^{:go/via [source]} (.segment s)))
+  (set! (.-bad s) (not ok))
+  (set! (.-kind s) kind))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 366} (go/method next "next advances the scanner by reading the next token.\n\nIf a read, source encoding, or lexical error occurs, next calls\nthe installed error handler with the respective error position\nand message. The error message is guaranteed to be non-empty and\nnever starts with a '/'. The error handler must exist.\n\nIf the scanner mode includes the comments flag and a comment\n(including comments containing directives) is encountered, the\nerror handler is also called with each comment position and text\n(including opening /* or // and closing */, but without a newline\nat the end of line comments). Comment text always starts with a /\nwhich can be used to distinguish these handler calls from errors.\n\nIf the scanner mode includes the directives (but not the comments)\nflag, only comments containing a //line, /*line, or //go: directive\nare reported, in the same way as regular comments.\n" [^{:tag (* scanner)} s]
+  (let [nlsemi (.-nlsemi s)]
+    (set! (.-nlsemi s) false)
+
+    (label :redo
+      ;; skip white space
+      ^{:go/via [source]} (.stop s))
+    (let [(values startLine startCol) ^{:go/via [source]} (.pos s)]
+      (while (or (== ^{:go/via [source]} (.-ch s) \space) (== ^{:go/via [source]} (.-ch s) \tab) (and (== ^{:go/via [source]} (.-ch s) \newline) (not nlsemi)) (== ^{:go/via [source]} (.-ch s) \return))
+        ^{:go/via [source]} (.nextch s))
+
+
+      ;; token start
+      (set! (values (.-line s) (.-col s)) ^{:go/via [source]} (.pos s))
+      (set! (.-blank s) (or (> (.-line s) startLine) (== startCol colbase)))
+      ^{:go/via [source]} (.start s)
+      (when (or (isLetter ^{:go/via [source]} (.-ch s)) (and (>= ^{:go/via [source]} (.-ch s) utf8/RuneSelf) (.atIdentChar s true)))
+        ^{:go/via [source]} (.nextch s)
+        (.ident s)
+        (return))
+
+
+      (switch ^{:go/via [source]} (.-ch s)
+        (case [-1]
+          (when nlsemi
+            (set! (.-lit s) "EOF")
+            (set! (.-tok s) _Semi)
+            (break))
+
+          (set! (.-tok s) _EOF))
+
+        (case [\newline]
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-lit s) "newline")
+          (set! (.-tok s) _Semi))
+
+        (case [\0 \1 \2 \3 \4 \5 \6 \7 \8 \9]
+          (.number s false))
+
+        (case [\"]
+          (.stdString s))
+
+        (case [\`]
+          (.rawString s))
+
+        (case [\']
+          (.rune s))
+
+        (case [\(]
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-tok s) _Lparen))
+
+        (case [\[]
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-tok s) _Lbrack))
+
+        (case [\{]
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-tok s) _Lbrace))
+
+        (case [\,]
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-tok s) _Comma))
+
+        (case [\;]
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-lit s) "semicolon")
+          (set! (.-tok s) _Semi))
+
+        (case [\)]
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-nlsemi s) true)
+          (set! (.-tok s) _Rparen))
+
+        (case [\]]
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-nlsemi s) true)
+          (set! (.-tok s) _Rbrack))
+
+        (case [\}]
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-nlsemi s) true)
+          (set! (.-tok s) _Rbrace))
+
+        (case [\:]
+          ^{:go/via [source]} (.nextch s)
+          (when (== ^{:go/via [source]} (.-ch s) \=)
+            ^{:go/via [source]} (.nextch s)
+            (set! (.-tok s) _Define)
+            (break))
+
+          (set! (.-tok s) _Colon))
+
+        (case [\.]
+          ^{:go/via [source]} (.nextch s)
+          (when (isDecimal ^{:go/via [source]} (.-ch s))
+            (.number s true)
+            (break))
+
+          (when (== ^{:go/via [source]} (.-ch s) \.)
+            ^{:go/via [source]} (.nextch s)
+            (when (== ^{:go/via [source]} (.-ch s) \.)
+              ^{:go/via [source]} (.nextch s)
+              (set! (.-tok s) _DotDotDot)
+              (break))
+
+            ^{:go/via [source]} (.rewind s) ; now s.ch holds 1st '.'
+            ^{:go/via [source]} (.nextch s)) ; consume 1st '.' again
+
+          (set! (.-tok s) _Dot))
+
+        (case [\+]
+          ^{:go/via [source]} (.nextch s)
+          (set! (values (.-op s) (.-prec s)) (values Add precAdd))
+          (when (!= ^{:go/via [source]} (.-ch s) \+)
+            (goto :assignop))
+
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-nlsemi s) true)
+          (set! (.-tok s) _IncOp))
+
+        (case [\-]
+          ^{:go/via [source]} (.nextch s)
+          (set! (values (.-op s) (.-prec s)) (values Sub precAdd))
+          (when (!= ^{:go/via [source]} (.-ch s) \-)
+            (goto :assignop))
+
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-nlsemi s) true)
+          (set! (.-tok s) _IncOp))
+
+        (case [\*]
+          ^{:go/via [source]} (.nextch s)
+          (set! (values (.-op s) (.-prec s)) (values Mul precMul))
+          ;; don't goto assignop - want _Star token
+          (when (== ^{:go/via [source]} (.-ch s) \=)
+            ^{:go/via [source]} (.nextch s)
+            (set! (.-tok s) _AssignOp)
+            (break))
+
+          (set! (.-tok s) _Star))
+
+        (case [\/]
+          ^{:go/via [source]} (.nextch s)
+          (when (== ^{:go/via [source]} (.-ch s) \/)
+            ^{:go/via [source]} (.nextch s)
+            (.lineComment s)
+            (goto :redo))
+
+          (when (== ^{:go/via [source]} (.-ch s) \*)
+            ^{:go/via [source]} (.nextch s)
+            (.fullComment s)
+            (when [(values line _) ^{:go/via [source]} (.pos s)] (and (> line (.-line s)) nlsemi)
+              ;; A multi-line comment acts like a newline;
+              ;; it translates to a ';' if nlsemi is set.
+              (set! (.-lit s) "newline")
+              (set! (.-tok s) _Semi)
+              (break))
+
+            (goto :redo))
+
+          (set! (values (.-op s) (.-prec s)) (values Div precMul))
+          (goto :assignop))
+
+        (case [\%]
+          ^{:go/via [source]} (.nextch s)
+          (set! (values (.-op s) (.-prec s)) (values Rem precMul))
+          (goto :assignop))
+
+        (case [\&]
+          ^{:go/via [source]} (.nextch s)
+          (when (== ^{:go/via [source]} (.-ch s) \&)
+            ^{:go/via [source]} (.nextch s)
+            (set! (values (.-op s) (.-prec s)) (values AndAnd precAndAnd))
+            (set! (.-tok s) _Operator)
+            (break))
+
+          (set! (values (.-op s) (.-prec s)) (values And precMul))
+          (when (== ^{:go/via [source]} (.-ch s) \^)
+            ^{:go/via [source]} (.nextch s)
+            (set! (.-op s) AndNot))
+
+          (goto :assignop))
+
+        (case [\|]
+          ^{:go/via [source]} (.nextch s)
+          (when (== ^{:go/via [source]} (.-ch s) \|)
+            ^{:go/via [source]} (.nextch s)
+            (set! (values (.-op s) (.-prec s)) (values OrOr precOrOr))
+            (set! (.-tok s) _Operator)
+            (break))
+
+          (set! (values (.-op s) (.-prec s)) (values Or precAdd))
+          (goto :assignop))
+
+        (case [\^]
+          ^{:go/via [source]} (.nextch s)
+          (set! (values (.-op s) (.-prec s)) (values Xor precAdd))
+          (goto :assignop))
+
+        (case [\<]
+          ^{:go/via [source]} (.nextch s)
+          (when (== ^{:go/via [source]} (.-ch s) \=)
+            ^{:go/via [source]} (.nextch s)
+            (set! (values (.-op s) (.-prec s)) (values Leq precCmp))
+            (set! (.-tok s) _Operator)
+            (break))
+
+          (when (== ^{:go/via [source]} (.-ch s) \<)
+            ^{:go/via [source]} (.nextch s)
+            (set! (values (.-op s) (.-prec s)) (values Shl precMul))
+            (goto :assignop))
+
+          (when (== ^{:go/via [source]} (.-ch s) \-)
+            ^{:go/via [source]} (.nextch s)
+            (set! (.-tok s) _Arrow)
+            (break))
+
+          (set! (values (.-op s) (.-prec s)) (values Lss precCmp))
+          (set! (.-tok s) _Operator))
+
+        (case [\>]
+          ^{:go/via [source]} (.nextch s)
+          (when (== ^{:go/via [source]} (.-ch s) \=)
+            ^{:go/via [source]} (.nextch s)
+            (set! (values (.-op s) (.-prec s)) (values Geq precCmp))
+            (set! (.-tok s) _Operator)
+            (break))
+
+          (when (== ^{:go/via [source]} (.-ch s) \>)
+            ^{:go/via [source]} (.nextch s)
+            (set! (values (.-op s) (.-prec s)) (values Shr precMul))
+            (goto :assignop))
+
+          (set! (values (.-op s) (.-prec s)) (values Gtr precCmp))
+          (set! (.-tok s) _Operator))
+
+        (case [\=]
+          ^{:go/via [source]} (.nextch s)
+          (when (== ^{:go/via [source]} (.-ch s) \=)
+            ^{:go/via [source]} (.nextch s)
+            (set! (values (.-op s) (.-prec s)) (values Eql precCmp))
+            (set! (.-tok s) _Operator)
+            (break))
+
+          (set! (.-tok s) _Assign))
+
+        (case [\!]
+          ^{:go/via [source]} (.nextch s)
+          (when (== ^{:go/via [source]} (.-ch s) \=)
+            ^{:go/via [source]} (.nextch s)
+            (set! (values (.-op s) (.-prec s)) (values Neq precCmp))
+            (set! (.-tok s) _Operator)
+            (break))
+
+          (set! (values (.-op s) (.-prec s)) (values Not 0))
+          (set! (.-tok s) _Operator))
+
+        (case [\~]
+          ^{:go/via [source]} (.nextch s)
+          (set! (values (.-op s) (.-prec s)) (values Tilde 0))
+          (set! (.-tok s) _Operator))
+
+        (default
+          (.errorf s "invalid character %#U" ^{:go/via [source]} (.-ch s))
+          ^{:go/via [source]} (.nextch s)
+          (goto :redo)))
+
+
+      (return)
+
+      (label :assignop
+        (when (== ^{:go/via [source]} (.-ch s) \=)
+          ^{:go/via [source]} (.nextch s)
+          (set! (.-tok s) _AssignOp)
+          (return)))
+
+      (set! (.-tok s) _Operator))))
+
+
+^{:go/end 394} (go/method ident [^{:tag (* scanner)} s]
+  ;; accelerate common case (7bit ASCII)
+  (while (or (isLetter ^{:go/via [source]} (.-ch s)) (isDecimal ^{:go/via [source]} (.-ch s)))
+    ^{:go/via [source]} (.nextch s))
+
+
+  ;; general case
+  (when (>= ^{:go/via [source]} (.-ch s) utf8/RuneSelf)
+    (while (.atIdentChar s false)
+      ^{:go/via [source]} (.nextch s)))
+
+
+
+  ;; possibly a keyword
+  (let [lit ^{:go/via [source]} (.segment s)]
+    (when (>= (len lit) 2)
+      (when [tok (aget keywordMap (hash lit))] (and (!= tok 0) (== (tokStrFast tok) (conv string lit)))
+        (set! (.-nlsemi s) (contains (bit-or (<< 1 _Break) (<< 1 _Continue) (<< 1 _Fallthrough) (<< 1 _Return)) tok))
+        (set! (.-tok s) tok)
+        (return)))
+
+
+
+    (set! (.-nlsemi s) true)
+    (set! (.-lit s) (conv string lit))
+    (set! (.-tok s) _Name)))
+
+
+
+
+^{:go/end 400} (go/func tokStrFast "tokStrFast is a faster version of token.String, which assumes that tok\nis one of the valid tokens - and can thus skip bounds checks.\n" ^string [^token tok]
+  (subslice _token_name (aget _token_index (- tok 1)) (aget _token_index tok)))
+
+
+^{:go/breaks [[4 415]] :go/end 416} (go/method atIdentChar ^bool [^{:tag (* scanner)} s ^bool first]
+  (switch
+    (case [(or (unicode/IsLetter ^{:go/via [source]} (.-ch s)) (== ^{:go/via [source]} (.-ch s) \_))])
+    ;; ok
+    (case [(unicode/IsDigit ^{:go/via [source]} (.-ch s))]
+      (when first
+        (.errorf s "identifier cannot begin with digit %#U" ^{:go/via [source]} (.-ch s))))
+
+    (case [(>= ^{:go/via [source]} (.-ch s) utf8/RuneSelf)]
+      (.errorf s "invalid character %#U in identifier" ^{:go/via [source]} (.-ch s)))
+    (default
+      (return false)))
+
+  true)
+
+
+
+
+^{:go/end 422} (go/func hash "hash is a perfect hash function for keywords.\nIt assumes that s has at least length 2.\n" ^uint [^{:tag (slice byte)} s]
+  (bit-and (+ (bit-xor (<< (conv uint (aget s 0)) 4) (conv uint (aget s 1))) (conv uint (len s))) (conv uint (- (len keywordMap) 1))))
+
+
+(go/var ^{:tag (array (<< 1 6) token)} keywordMap) ; size must be power of two
+
+^{:go/end 435} (go/func init []
+  ;; populate keywordMap
+  (for [tok _Break] (<= tok _Var) (inc! tok)
+    (let [h (hash (conv (slice byte) (.String tok)))]
+      (when (!= (aget keywordMap h) 0)
+        (panic "imperfect hash"))
+
+      (aset keywordMap h tok))))
+
+
+
+^{:go/end 437} (go/func lower ^rune [^rune ch] (bit-or (- \a \A) ch)) ; returns lower-case ch iff ch is ASCII letter
+^{:go/end 438} (go/func isLetter ^bool [^rune ch] (or (and (<= \a (lower ch)) (<= (lower ch) \z)) (== ch \_)))
+^{:go/end 439} (go/func isDecimal ^bool [^rune ch] (and (<= \0 ch) (<= ch \9)))
+^{:go/end 440} (go/func isHex ^bool [^rune ch] (or (and (<= \0 ch) (<= ch \9)) (and (<= \a (lower ch)) (<= (lower ch) \f))))
+
+
+
+
+
+
+
+^{:go/end 473} (go/method digits "digits accepts the sequence { digit | '_' }.\nIf base <= 10, digits accepts any decimal digit but records\nthe index (relative to the literal start) of a digit >= base\nin *invalid, if *invalid < 0.\ndigits returns a bitset describing whether the sequence contained\ndigits (bit 0 is set), or separators '_' (bit 1 is set).\n" [^{:tag (* scanner)} s ^int base ^{:tag (* int)} invalid] :results [^int digsep]
+  (if (<= base 10)
+    (let [max (conv rune (+ \0 base))]
+      (while (or (isDecimal ^{:go/via [source]} (.-ch s)) (== ^{:go/via [source]} (.-ch s) \_))
+        (let [ds 1]
+          (cond (== ^{:go/via [source]} (.-ch s) \_)
+            (set! ds 2)
+            (and (>= ^{:go/via [source]} (.-ch s) max) (< @invalid 0))
+            (let [(values _ col) ^{:go/via [source]} (.pos s)]
+              (set! @invalid (conv int (- col (.-col s)))))) ; record invalid rune index
+
+          (set! digsep bit-or ds)
+          ^{:go/via [source]} (.nextch s))))
+
+
+    (while (or (isHex ^{:go/via [source]} (.-ch s)) (== ^{:go/via [source]} (.-ch s) \_))
+      (let [ds 1]
+        (when (== ^{:go/via [source]} (.-ch s) \_)
+          (set! ds 2))
+
+        (set! digsep bit-or ds)
+        ^{:go/via [source]} (.nextch s))))
+
+
+  (return))
+
+
+^{:go/end 572} (go/method number [^{:tag (* scanner)} s ^bool seenPoint]
+  (let [ok true
+      ^{:line 477} kind IntLit
+      ^{:line 478} base 10 ; number base
+      ^{:line 479} prefix (conv rune 0) ; one of 0 (decimal), '0' (0-octal), 'x', 'o', or 'b'
+      ^{:line 480} digsep 0 ; bit 0: digit present, bit 1: '_' present
+      ^{:line 481} invalid -1] ; index of invalid digit in literal, or < 0
+
+    ;; integer part
+    (when (not seenPoint)
+      (when (== ^{:go/via [source]} (.-ch s) \0)
+        ^{:go/via [source]} (.nextch s)
+        (switch (lower ^{:go/via [source]} (.-ch s))
+          (case [\x]
+            ^{:go/via [source]} (.nextch s)
+            (set! (values base prefix) (values 16 \x)))
+          (case [\o]
+            ^{:go/via [source]} (.nextch s)
+            (set! (values base prefix) (values 8 \o)))
+          (case [\b]
+            ^{:go/via [source]} (.nextch s)
+            (set! (values base prefix) (values 2 \b)))
+          (default
+            (set! (values base prefix) (values 8 \0))
+            (set! digsep 1)))) ; leading 0
+
+
+      (set! digsep bit-or (.digits s base (addr invalid)))
+      (when (== ^{:go/via [source]} (.-ch s) \.)
+        (when (or (== prefix \o) (== prefix \b))
+          (.errorf s "invalid radix point in %s literal" (baseName base))
+          (set! ok false))
+
+        ^{:go/via [source]} (.nextch s)
+        (set! seenPoint true)))
+
+
+
+    ;; fractional part
+    (when seenPoint
+      (set! kind FloatLit)
+      (set! digsep bit-or (.digits s base (addr invalid))))
+
+
+    (when (and (== (bit-and digsep 1) 0) ok)
+      (.errorf s "%s literal has no digits" (baseName base))
+      (set! ok false))
+
+
+    ;; exponent
+    (if [e (lower ^{:go/via [source]} (.-ch s))] (or (== e \e) (== e \p)) (do
+        (when ok
+          (switch
+            (case [(and (== e \e) (!= prefix 0) (!= prefix \0))]
+              (.errorf s "%q exponent requires decimal mantissa" ^{:go/via [source]} (.-ch s))
+              (set! ok false))
+            (case [(and (== e \p) (!= prefix \x))]
+              (.errorf s "%q exponent requires hexadecimal mantissa" ^{:go/via [source]} (.-ch s))
+              (set! ok false))))
+
+
+        ^{:go/via [source]} (.nextch s)
+        (set! kind FloatLit)
+        (when (or (== ^{:go/via [source]} (.-ch s) \+) (== ^{:go/via [source]} (.-ch s) \-))
+          ^{:go/via [source]} (.nextch s))
+
+        (set! digsep (bit-or (.digits s 10 nil) (bit-and digsep 2))) ; don't lose sep bit
+        (when (and (== (bit-and digsep 1) 0) ok)
+          (.errorf s "exponent has no digits")
+          (set! ok false)))
+
+      (when (and (== prefix \x) (== kind FloatLit) ok)
+        (.errorf s "hexadecimal mantissa requires a 'p' exponent")
+        (set! ok false)))
+
+
+    ;; suffix 'i'
+    (when (== ^{:go/via [source]} (.-ch s) \i)
+      (set! kind ImagLit)
+      ^{:go/via [source]} (.nextch s))
+
+
+    (.setLit s kind ok) ; do this now so we can use s.lit below
+
+    (when (and (== kind IntLit) (>= invalid 0) ok)
+      (.errorAtf s invalid "invalid digit %q in %s literal" (aget (.-lit s) invalid) (baseName base))
+      (set! ok false))
+
+
+    (when (and (!= (bit-and digsep 2) 0) ok)
+      (when [i (invalidSep (.-lit s))] (>= i 0)
+        (.errorAtf s i "'_' must separate successive digits")
+        (set! ok false)))
+
+
+
+    (set! (.-bad s) (not ok)))) ; correct s.bad
+
+
+^{:go/end 586} (go/func baseName ^string [^int base]
+  (switch base
+    (case [2]
+      (return "binary"))
+    (case [8]
+      (return "octal"))
+    (case [10]
+      (return "decimal"))
+    (case [16]
+      (return "hexadecimal")))
+
+  (panic "invalid base"))
+
+
+
+^{:go/end 626} (go/func invalidSep "invalidSep returns the index of the first invalid separator in x, or -1.\n" ^int [^string x]
+  ^{:go/breaks [[5 625]]} (let [x1 \space ; prefix char, we only care if it's 'x'
+      ^{:line 591} d \. ; digit, one of '_', '0' (a digit), or '.' (anything else)
+      ^{:line 592} i 0]
+
+    ;; a prefix counts as a digit
+    (when (and (>= (len x) 2) (== (aget x 0) \0))
+      (set! x1 (lower (conv rune (aget x 1))))
+      (when (or (== x1 \x) (== x1 \o) (== x1 \b))
+        (set! d \0)
+        (set! i 2)))
+
+
+
+    ;; mantissa and exponent
+    (for [] (< i (len x)) (inc! i)
+      (let [p d] ; previous digit
+        (set! d (conv rune (aget x i)))
+        (switch
+          (case [(== d \_)]
+            (when (!= p \0)
+              (return i)))
+
+          (case [(or (isDecimal d) (and (== x1 \x) (isHex d)))]
+            (set! d \0))
+          (default
+            (when (== p \_)
+              (return (- i 1)))
+
+            (set! d \.)))))
+
+
+    (when (== d \_)
+      (return (- (len x) 1)))
+
+
+    -1))
+
+
+^{:go/end 672} (go/method rune [^{:tag (* scanner)} s]
+  (let [ok true]
+    ^{:go/via [source]} (.nextch s)
+
+    (let [n 0]
+      (for [] _ (inc! n)
+        (when (== ^{:go/via [source]} (.-ch s) \')
+          (when ok
+            (cond (== n 0) (do
+                (.errorf s "empty rune literal or unescaped '")
+                (set! ok false))
+              (!= n 1) (do
+                (.errorAtf s 0 "more than one character in rune literal")
+                (set! ok false))))
+
+
+          ^{:go/via [source]} (.nextch s)
+          (break))
+
+        (when (== ^{:go/via [source]} (.-ch s) \\)
+          ^{:go/via [source]} (.nextch s)
+          (when (not (.escape s \'))
+            (set! ok false))
+
+          (continue))
+
+        (when (== ^{:go/via [source]} (.-ch s) \newline)
+          (when ok
+            (.errorf s "newline in rune literal")
+            (set! ok false))
+
+          (break))
+
+        (when (< ^{:go/via [source]} (.-ch s) 0)
+          (when ok
+            (.errorAtf s 0 "rune literal not terminated")
+            (set! ok false))
+
+          (break))
+
+        ^{:go/via [source]} (.nextch s))
+
+
+      (.setLit s RuneLit ok))))
+
+
+^{:go/end 704} (go/method stdString [^{:tag (* scanner)} s]
+  (let [ok true]
+    ^{:go/via [source]} (.nextch s)
+
+    (while true
+      (when (== ^{:go/via [source]} (.-ch s) \")
+        ^{:go/via [source]} (.nextch s)
+        (break))
+
+      (when (== ^{:go/via [source]} (.-ch s) \\)
+        ^{:go/via [source]} (.nextch s)
+        (when (not (.escape s \"))
+          (set! ok false))
+
+        (continue))
+
+      (when (== ^{:go/via [source]} (.-ch s) \newline)
+        (.errorf s "newline in string")
+        (set! ok false)
+        (break))
+
+      (when (< ^{:go/via [source]} (.-ch s) 0)
+        (.errorAtf s 0 "string not terminated")
+        (set! ok false)
+        (break))
+
+      ^{:go/via [source]} (.nextch s))
+
+
+    (.setLit s StringLit ok)))
+
+
+^{:go/end 727} (go/method rawString [^{:tag (* scanner)} s]
+  (let [ok true]
+    ^{:go/via [source]} (.nextch s)
+
+    (while true
+      (when (== ^{:go/via [source]} (.-ch s) \`)
+        ^{:go/via [source]} (.nextch s)
+        (break))
+
+      (when (< ^{:go/via [source]} (.-ch s) 0)
+        (.errorAtf s 0 "string not terminated")
+        (set! ok false)
+        (break))
+
+      ^{:go/via [source]} (.nextch s))
+
+    ;; We leave CRs in the string since they are part of the
+    ;; literal (even though they are not part of the literal
+    ;; value).
+
+    (.setLit s StringLit ok)))
+
+
+^{:go/end 731} (go/method comment [^{:tag (* scanner)} s ^string text]
+  (.errorAtf s 0 "%s" text))
+
+
+^{:go/end 738} (go/method skipLine [^{:tag (* scanner)} s]
+  ;; don't consume '\n' - needed for nlsemi logic
+  (while (and (>= ^{:go/via [source]} (.-ch s) 0) (!= ^{:go/via [source]} (.-ch s) \newline))
+    ^{:go/via [source]} (.nextch s)))
+
+
+
+^{:go/end 773} (go/method lineComment [^{:tag (* scanner)} s]
+  ;; opening has already been consumed
+
+  (when (!= (bit-and (.-mode s) comments) 0)
+    (.skipLine s)
+    (.comment s (conv string ^{:go/via [source]} (.segment s)))
+    (return))
+
+
+  ;; are we saving directives? or is this definitely not a directive?
+  (when (or (== (bit-and (.-mode s) directives) 0) ^:go/paren (and (!= ^{:go/via [source]} (.-ch s) \g) (!= ^{:go/via [source]} (.-ch s) \l)))
+    ^{:go/via [source]} (.stop s)
+    (.skipLine s)
+    (return))
+
+
+  ;; recognize go: or line directives
+  (let [prefix "go:"]
+    (when (== ^{:go/via [source]} (.-ch s) \l)
+      (set! prefix "line "))
+
+    (range [_ m prefix]
+      (when (!= ^{:go/via [source]} (.-ch s) m)
+        ^{:go/via [source]} (.stop s)
+        (.skipLine s)
+        (return))
+
+      ^{:go/via [source]} (.nextch s))
+
+
+    ;; directive text
+    (.skipLine s)
+    (.comment s (conv string ^{:go/via [source]} (.segment s)))))
+
+
+^{:go/breaks [5] :go/end 788} (go/method skipComment ^bool [^{:tag (* scanner)} s]
+  (while (>= ^{:go/via [source]} (.-ch s) 0)
+    (while (== ^{:go/via [source]} (.-ch s) \*)
+      ^{:go/via [source]} (.nextch s)
+      (when (== ^{:go/via [source]} (.-ch s) \/)
+        ^{:go/via [source]} (.nextch s)
+        (return true)))
+
+
+    ^{:go/via [source]} (.nextch s))
+
+  (.errorAtf s 0 "comment not terminated")
+  false)
+
+
+^{:go/end 821} (go/method fullComment [^{:tag (* scanner)} s]
+  ;; /* opening has already been consumed */
+
+  (when (!= (bit-and (.-mode s) comments) 0)
+    (when (.skipComment s)
+      (.comment s (conv string ^{:go/via [source]} (.segment s))))
+
+    (return))
+
+
+  (when (or (== (bit-and (.-mode s) directives) 0) (!= ^{:go/via [source]} (.-ch s) \l))
+    ^{:go/via [source]} (.stop s)
+    (.skipComment s)
+    (return))
+
+
+  ;; recognize line directive
+  (let [^:const ^{:val "line "} prefix "line "]
+    (range [_ m prefix]
+      (when (!= ^{:go/via [source]} (.-ch s) m)
+        ^{:go/via [source]} (.stop s)
+        (.skipComment s)
+        (return))
+
+      ^{:go/via [source]} (.nextch s))
+
+
+    ;; directive text
+    (when (.skipComment s)
+      (.comment s (conv string ^{:go/via [source]} (.segment s))))))
+
+
+
+^{:go/end 881} (go/method escape ^bool [^{:tag (* scanner)} s ^rune quote]
+  (let [^int n (zero int)
+      (values ^uint32 base ^uint32 max) (zero uint32)]
+
+    (switch ^{:go/via [source]} (.-ch s)
+      (case [quote \a \b \f \n \r \t \v \\]
+        ^{:go/via [source]} (.nextch s)
+        (return true))
+      (case [\0 \1 \2 \3 \4 \5 \6 \7]
+        (set! (values n base max) (values 3 8 255)))
+      (case [\x]
+        ^{:go/via [source]} (.nextch s)
+        (set! (values n base max) (values 2 16 255)))
+      (case [\u]
+        ^{:go/via [source]} (.nextch s)
+        (set! (values n base max) (values 4 16 unicode/MaxRune)))
+      (case [\U]
+        ^{:go/via [source]} (.nextch s)
+        (set! (values n base max) (values 8 16 unicode/MaxRune)))
+      (default
+        (when (< ^{:go/via [source]} (.-ch s) 0)
+          (return true)) ; complain in caller about EOF
+
+        (.errorf s "unknown escape")
+        (return false)))
+
+
+    ^{:go/breaks [[5 880]]} (let [^uint32 x (zero uint32)]
+      (for [i n] (> i 0) (dec! i)
+        (when (< ^{:go/via [source]} (.-ch s) 0)
+          (return true)) ; complain in caller about EOF
+
+        (let [d base]
+          (cond (isDecimal ^{:go/via [source]} (.-ch s))
+            (set! d (- (conv uint32 ^{:go/via [source]} (.-ch s)) \0))
+            (and (<= \a (lower ^{:go/via [source]} (.-ch s))) (<= (lower ^{:go/via [source]} (.-ch s)) \f))
+            (set! d (+ (- (conv uint32 (lower ^{:go/via [source]} (.-ch s))) \a) 10)))
+
+          (when (>= d base)
+            (.errorf s "invalid character %q in %s escape" ^{:go/via [source]} (.-ch s) (baseName (conv int base)))
+            (return false))
+
+          ;; d < base
+          (set! x (+ (* x base) d))
+          ^{:go/via [source]} (.nextch s)))
+
+
+      (when (and (> x max) (== base 8))
+        (.errorf s "octal escape value %d > 255" x)
+        (return false))
+
+
+      (when (or (> x max) (and (<= 0xD800 x) (< x 0xE000))) ; /* surrogate range */
+        (.errorf s "escape is invalid Unicode code point %#U" x)
+        (return false))
+
+
+      true)))

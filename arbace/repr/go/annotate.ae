@@ -35,7 +35,8 @@
             [arbace.repr.go.read :as rd])
   (:import [java.io File]
            [java.util HashMap]
-           [java.util.concurrent ConcurrentHashMap Executors TimeUnit]))
+           [java.util.concurrent ConcurrentHashMap ExecutionException Executors FutureTask TimeUnit]
+           [java.util.concurrent.atomic LongAdder]))
 
 ;;; Raw forms as the checker reads them
 
@@ -107,11 +108,23 @@
 
 (def forms-dir "The forms of go/parser's packages (tamago/goroot)." (atom "tamago/goroot"))
 
-(def cmd-forms-dir "The forms of gc's syntax (tamago/cmd: arbace.repr.go.syntax)." (atom "tamago/cmd"))
-
 (defn- config-key [load]
   (let [c (ld/config load)]
     [(:goroot c) (:goos c) (:goarch c) (:level c) (:tags c)]))
+
+(def ^:private phases
+  "The native read's time per phase, in ns summed over the jobs (bin/repr-go read's phases
+  line): the parse and dump, the raw conversion with the checker's source, the annotation of
+  the dump, the final conversion, its layout, write and read-back check."
+  {:native (LongAdder.) :raw (LongAdder.) :annotate (LongAdder.) :convert (LongAdder.) :layout (LongAdder.)})
+
+(defn- phase! [k ^long ns] (.add ^LongAdder (get phases k) ns))
+
+(defn phases-text
+  "The phases summed so far, as CPU-seconds."
+  []
+  (str/join ", " (for [k [:native :raw :annotate :convert :layout]]
+                   (format "%s %.1f" (name k) (/ (.sum ^LongAdder (get phases k)) 1e9)))))
 
 (defn- prep
   "A loader job's native dump, raw conversion and checker source (import-map over the job's own),
@@ -119,32 +132,67 @@
   [j more-imports]
   (let [t0 (System/nanoTime)
         n (ps/native-dump @forms-dir j)
-        t1 (System/nanoTime)]
+        t1 (System/nanoTime)
+        _ (phase! :native (- t1 t0))]
     (if (:error n)
       {:job j :n n :rejected (str (:file n) ": " (:error n))}
       (let [ctx (rg/dump-context n (str (:key j) ".edn") (:goroot j))
             rc (cv/convert-package n (assoc ctx :positions :full :raw true))
             src (raw-source rc (merge (:import-map j) more-imports))]
+        (phase! :raw (- (System/nanoTime) t1))
         {:job j :n n :ctx ctx :rc rc :src src :native-ms (/ (- t1 t0) 1e6)
          :raw-ms (/ (- (System/nanoTime) t1) 1e6)}))))
+
+(def ^:private prefetch
+  "The pool that prepares jobs (prep: their native dumps and raw conversions, which need no other
+  package) ahead of the checker, which asks for them in dependency order (GP7); nil: each job
+  prepared when the checker asks for it."
+  (atom nil))
+
+(defn- run-task
+  "Runs FutureTask ft here unless it runs or ran already, and returns its value."
+  [^FutureTask ft]
+  (.run ft)
+  (try (.get ft)
+       (catch ExecutionException ex (throw (or (.getCause ex) ex)))))
 
 (defn- new-session
   "A session over index ({key job}): the checker's (arbace.go.check/session), delegating to
   base for the keys index does not have (fallback: key -> a job, or nil), the records of the
-  keys kept (registered with keep!) for their jobs (:recs)."
+  keys kept (registered with keep!) for their jobs (:recs). With the prefetch pool, a job asked
+  for starts the preparation of the jobs it imports (:start!), each once, so that their native
+  dumps and raw conversions run in parallel ahead of the checker's walk."
   [index base fallback imports-of]
   (let [recs (ConcurrentHashMap.)
         keep (ConcurrentHashMap.)
+        futs (ConcurrentHashMap.)
+        deps (fn [j] (distinct (concat (vals (:import-map j)) (vals (imports-of j)))))
+        start! (fn start! [k]
+                 (if (contains? index k)
+                   (when-let [^java.util.concurrent.ExecutorService pool @prefetch]
+                     (when-not (.containsKey futs k)
+                       (let [j (get index k)
+                             ft (FutureTask. ^Callable (fn []
+                                                         (doseq [d (deps j)] (start! d))
+                                                         (prep j (imports-of j))))]
+                         (when (nil? (.putIfAbsent futs k ft))
+                           (.execute pool ft)))))
+                   (when base ((:start! base) k))))
         src-of (fn [k _]
                  (when-let [j (or (get index k) (when fallback (fallback k)))]
-                   (let [r (prep j (imports-of j))]
+                   (let [_ (when (contains? index k) (start! k))
+                         ft (.get futs k)
+                         r (if (instance? FutureTask ft)
+                             (let [r (run-task ft)] (.put futs k :done) r)
+                             (prep j (imports-of j)))]
                      (when (.containsKey keep k) (.put recs k r))
                      (:src r))))
         s (ck/session src-of)
         s (if base
             (assoc s :delegate (:ck base) :local #(or (contains? index %) (not ((:has base) %))))
             s)]
-    {:ck s :recs recs :keep keep :index index :has #(contains? index %) :base base :fallback fallback}))
+    {:ck s :recs recs :keep keep :index index :has #(contains? index %) :base base :fallback fallback
+     :start! start!}))
 
 (def ^:private std-sessions (atom {}))
 
@@ -824,10 +872,10 @@
       (let [[pkg r] (checked load sess-of j)
             n (:n r)]
         (if (:rejected r)
-          (let [;; gc's syntax errors (GP6, GPS2 (b): gc's syntax run by goi, arbace.repr.go.syntax),
+          (let [;; gc's syntax errors (GP6, GPS2 (b): gc's syntax, arbace.repr.go.syntax),
                 ;; as gc prints them; go/parser's error, as the helper writes it (its files named
                 ;; from the load's working directory), when gc's syntax reports none
-                gc (try (:text (syn/errors-text @cmd-forms-dir (:dir j) (:files j)))
+                gc (try (:text (syn/errors-text (:dir j) (:files j)))
                         (catch Throwable _ nil))]
             (assoc base :rejected (:rejected r) :syntax-errors gc
                    :tsv (tsv-line "fail" k (count (:files j)) 0 (/ (- (System/nanoTime) t0) 1e6) 0
@@ -835,15 +883,20 @@
                                     (str/join "\n" (str/split-lines gc))
                                     (str/replace (str (:error n)) (str (str/replace (str (:cwd load)) #"/+$" "") "/") "")))))
           (let [errs (:errors (when pkg (e/o pkg :result)))
+                ta (System/nanoTime)
                 {ad :dump} (annotate n (:answers (:src r)) (when pkg (e/o pkg :result)))
                 t1 (System/nanoTime)
+                _ (phase! :annotate (- t1 ta))
                 res (try
                       (rg/convert-data ad path (str k ".edn") t0 t1
                                        (merge opts {:out (str out (when (:sub j) (str "/" (:sub j)))) :positions positions
                                                     :goroot (:goroot j) :check true}))
                       (catch Throwable ex
                         {:path path :fail (str (.getName (class ex)) ": " (.getMessage ex))
-                         :trace (vec (take 12 (map str (.getStackTrace ex))))}))]
+                         :trace (vec (take 12 (map str (.getStackTrace ex))))}))
+                cms (long (* 1e6 (or (:convert-ms res) 0)))
+                _ (phase! :convert cms)
+                _ (phase! :layout (- (System/nanoTime) t1 cms))]
             (merge base res
                    {:errors (count errs)
                     :tsv (tsv-line (if (seq errs) "errors" "ok") k (count (:files n)) (get-in n [:times :bytes] 0)
@@ -886,6 +939,7 @@
     (println (format "%s: native reader, %d dumps' final forms from the checker's annotations; %d rejected by go/parser, %d failed; checker errors in %d; %.1f s"
                      nm (count (remove :fail conv)) (count (filter :rejected rs)) (count (filter :fail conv))
                      (count (filter #(pos? (or (:errors %) 0)) rs)) wall))
+    (println (str nm ": phases (s summed over the jobs, the process's so far): " (phases-text)))
     {:status status :corpus nm :dumps (count conv)}))
 
 (defn -main
@@ -935,16 +989,13 @@
                     (when (.isFile (File. ^String k))
                       (binding [*read-eval* false] (read-string (slurp k)))))
                   {})
-        {:keys [ms]} (ps/load! (:forms opts))
-        _ (println (format "the dumper generated from go/ast's forms and loaded with go/parser by goi in %.2f s" (/ ms 1e3)))
+        _ (println (ps/load-text (ps/load! (:forms opts))))
         fc (ps/forms-check (:forms opts))
-        _ (doseq [[p n eq] fc]
-            (println (format "%s: %d declarations, the digest's %s tamago/goroot's" p n (if eq "equal to" "NOT equal to"))))
+        _ (doseq [x fc] (println (ps/forms-check-text x)))
         forms-bad (count (remove #(nth % 2) fc))
         pool (Executors/newFixedThreadPool (:jobs opts))
+        _ (reset! prefetch (Executors/newFixedThreadPool (:jobs opts)))
         _ (reset! forms-dir (:forms opts))
-        ;; gc's syntax beside go/parser: tamago/cmd beside tamago/goroot
-        _ (reset! cmd-forms-dir (str (or (.getParent (File. ^String (:forms opts))) ".") "/cmd"))
         ;; the corpora grouped by the configurations their loads need (the standard library's
         ;; sessions), each group's sessions dropped after it: memory for one group's at a time
         specs (map-indexed (fn [i sf] (let [sp (read-spec sf)]
@@ -963,6 +1014,7 @@
                      (mapv second))
         unknown (+ forms-bad (reduce + (keep :unknown results)))]
     (.shutdown pool)
+    (.shutdownNow ^java.util.concurrent.ExecutorService @prefetch)
     (.awaitTermination pool 1 TimeUnit/MINUTES)
     (when (and (= cmd "check") (> (count results) 1))
       (println (format "native-check: %d corpora, %d dumps; E-tree %d equal; raw forms %d resolved, %d raw only; E-ann %d equal, %d differ, %d failed; E-forms %d equal, %d differ; %d not known"

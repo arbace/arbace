@@ -1,0 +1,2906 @@
+;; Copyright 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.arbace.repr.go.internal.syntax) (go/file "parser.go" :imports [
+
+
+    ^{:line 8} [fmt "fmt"]
+    ^{:line 9} [constraint "go/build/constraint"]
+    ^{:line 10} [io "io"]
+    ^{:line 11} [filepath "path/filepath"]
+    ^{:line 12} [strconv "strconv"]
+    ^{:line 13} [strings "strings"]])
+
+
+(go/const ^{:val false} debug false)
+(go/const ^{:val false} trace false)
+
+(go/type parser (struct
+    ^{:line 20 :tag (* PosBase)} file
+    ^{:line 21 :tag ErrorHandler} errh
+    ^{:line 22 :tag Mode} mode
+    ^{:line 23 :tag PragmaHandler} pragh
+    ^{:line 24} scanner
+
+    ^{:line 26 :tag (* PosBase)} base ; current position base
+    ^{:line 27 :tag error} first ; first error encountered
+    ^{:line 28 :tag int} errcnt ; number of errors encountered
+    ^{:line 29 :tag Pragma} pragma ; pragmas
+    ^{:line 30 :tag string} goVersion ; Go version from //go:build line
+
+    ^{:line 32 :tag bool} top ; in top of file (before package clause)
+    ^{:line 33 :tag int} fnest ; function nesting level (for error handling)
+    ^{:line 34 :tag int} xnest ; expression nesting level (for complit ambiguity resolution)
+    ^{:line 35 :tag (slice byte)} indent)) ; tracing support
+
+
+^{:go/end 100} (go/method init [^{:tag (* parser)} p ^{:tag (* PosBase)} file ^io/Reader r ^ErrorHandler errh ^PragmaHandler pragh ^Mode mode]
+  (set! (.-top p) true)
+  (set! (.-file p) file)
+  (set! (.-errh p) errh)
+  (set! (.-mode p) mode)
+  (set! (.-pragh p) pragh)
+  (.init (.-scanner p)
+    ^{:line 45} r
+    ;; Error and directive handler for scanner.
+    ;; Because the (line, col) positions passed to the
+    ;; handler is always at or after the current reading
+    ;; position, it is safe to use the most recent position
+    ;; base to compute the corresponding Pos value.
+    ^{:go/end 88} (fn [^uint line ^uint col ^string msg]
+      (when (!= (aget msg 0) \/)
+        (.errorAt p (.posAt p line col) msg)
+        (return))
+
+
+      ;; otherwise it must be a comment containing a line or go: directive.
+      ;; //line directives must be at the start of the line (column colbase).
+      ;; /*line*/ directives can be anywhere in the line.
+      (let [text (commentText msg)]
+        (when (and ^:go/paren (or (== col colbase) (== (aget msg 1) \*)) (strings/HasPrefix text "line "))
+          (let [^Pos pos (zero Pos)] ; position immediately following the comment
+            (if (== (aget msg 1) \/)
+              ;; line comment (newline is part of the comment)
+              (set! pos (MakePos (.-file p) (+ line 1) colbase))
+
+              ;; regular comment
+              ;; (if the comment spans multiple lines it's not
+              ;; a valid line directive and will be discarded
+              ;; by updateBase)
+              (set! pos (MakePos (.-file p) line (+ col (conv uint (len msg))))))
+
+            (.updateBase p pos line (+ col 2 5) (subslice text 5)) ; +2 to skip over // or /*
+            (return)))
+
+
+        ;; go: directive (but be conservative and test)
+        (when (strings/HasPrefix text "go:")
+          (when (and (.-top p) (strings/HasPrefix msg "//go:build"))
+            (when [(values x err) (constraint/Parse msg)] (== err nil)
+              (set! (.-goVersion p) (constraint/GoVersion x))))
+
+
+          (when (!= pragh nil)
+            (set! (.-pragma p) (pragh (.posAt p line (+ col 2)) (.-blank (.-scanner p)) text (.-pragma p))))))) ; +2 to skip over // or /*
+
+
+
+    ^{:line 89} directives)
+
+
+  (set! (.-base p) file)
+  (set! (.-first p) nil)
+  (set! (.-errcnt p) 0)
+  (set! (.-pragma p) nil)
+
+  (set! (.-fnest p) 0)
+  (set! (.-xnest p) 0)
+  (set! (.-indent p) nil))
+
+
+
+
+^{:go/end 108} (go/method takePragma "takePragma returns the current parsed pragmas\nand clears them from the parser state.\n" ^Pragma [^{:tag (* parser)} p]
+  (let [prag (.-pragma p)]
+    (set! (.-pragma p) nil)
+    ^{:line 107} prag))
+
+
+
+
+
+
+^{:go/end 119} (go/method clearPragma "clearPragma is called at the end of a statement or\nother Go form that does NOT accept a pragma.\nIt sends the pragma back to the pragma handler\nto be reported as unused.\n" [^{:tag (* parser)} p]
+  (when (!= (.-pragma p) nil)
+    ((.-pragh p) (.pos p) (.-blank (.-scanner p)) "" (.-pragma p))
+    (set! (.-pragma p) nil)))
+
+
+
+
+
+
+^{:go/end 175} (go/method updateBase "updateBase sets the current position base to a new line base at pos.\nThe base's filename, line, and column values are extracted from text\nwhich is positioned at (tline, tcol) (only needed for error messages).\n" [^{:tag (* parser)} p ^Pos pos ^uint tline ^uint tcol ^string text]
+  (let [(values i n ok) (trailingDigits text)]
+    (when (== i 0)
+      (return)) ; ignore (not a line directive)
+
+    ;; i > 0
+
+    (when (not ok)
+      ;; text has a suffix :xxx but xxx is not a number
+      (.errorAt p (.posAt p tline (+ tcol i)) (+ "invalid line number: " (subslice text i)))
+      (return))
+
+
+    (let [(values ^uint line ^uint col) (zero uint)
+        (values i2 n2 ok2) (trailingDigits (subslice text _ (- i 1)))]
+      (if ok2 (do
+          ;;line filename:line:col
+          (set! (values i i2) (values i2 i))
+          (set! (values line col) (values n2 n))
+          (when (or (== col 0) (> col PosMax))
+            (.errorAt p (.posAt p tline (+ tcol i2)) (+ "invalid column number: " (subslice text i2)))
+            (return))
+
+          (set! text (subslice text _ (- i2 1)))) ; lop off ":col"
+
+        ;;line filename:line
+        (set! line n))
+
+
+      (when (or (== line 0) (> line PosMax))
+        (.errorAt p (.posAt p tline (+ tcol i)) (+ "invalid line number: " (subslice text i)))
+        (return))
+
+
+      ;; If we have a column (//line filename:line:col form),
+      ;; an empty filename means to use the previous filename.
+      (let [filename (subslice text _ (- i 1)) ; lop off ":line"
+          ^{:line 161} trimmed false]
+        (cond (and (== filename "") ok2) (do
+            (set! filename (.Filename (.-base p)))
+            (set! trimmed (.Trimmed (.-base p))))
+          (!= filename "") (do
+            (set! filename (filepath/Clean filename))
+            (when (not (filepath/IsAbs filename))
+              (when [dir (filepath/Dir (.Filename (.-file p)))] (!= dir ".")
+                (set! filename (filepath/Join dir filename))))))
+
+
+
+
+        (set! (.-base p) (NewLineBase pos filename trimmed line col))))))
+
+
+^{:go/end 189} (go/func commentText ^string [^string s]
+  (when (== (subslice s _ 2) "/*")
+    (return (subslice s 2 (- (len s) 2)))) ; lop off /* and */
+
+
+  ;; line comment (does not include newline)
+  ;; (on Windows, the line comment may end in \r\n)
+  (let [i (len s)]
+    (when (== (aget s (- i 1)) \return)
+      (dec! i))
+
+    (subslice s 2 i))) ; lop off //, and \r at end, if any
+
+
+^{:go/end 199} (go/func trailingDigits [^string text] :results [uint uint bool]
+  (let [i (strings/LastIndexByte text \:)] ; look from right (Windows filenames may contain ':')
+    (when (< i 0)
+      (return 0 0 false)) ; no ':'
+
+    ;; i >= 0
+    (let [(values n err) (strconv/ParseUint (subslice text (+ i 1)) 10 0)]
+      (return (conv uint (+ i 1)) (conv uint n) (== err nil)))))
+
+
+^{:go/breaks [[4 206]] :go/end 207} (go/method got ^bool [^{:tag (* parser)} p ^token tok]
+  (when (== ^{:go/via [scanner]} (.-tok p) tok)
+    ^{:go/via [scanner]} (.next p)
+    (return true))
+
+  false)
+
+
+^{:go/end 214} (go/method want [^{:tag (* parser)} p ^token tok]
+  (when (not (.got p tok))
+    (.syntaxError p (+ "expected " (tokstring tok)))
+    (.advance p)))
+
+
+
+
+
+^{:go/breaks [[5 227]] :go/end 228} (go/method gotAssign "gotAssign is like got(_Assign) but it also accepts \":=\"\n(and reports an error) for better parser error recovery.\n" ^bool [^{:tag (* parser)} p]
+  (switch ^{:go/via [scanner]} (.-tok p)
+    (case [_Define]
+      (.syntaxError p "expected =")
+      (fallthrough))
+    (case [_Assign]
+      ^{:go/via [scanner]} (.next p)
+      (return true)))
+
+  false)
+
+
+;; ----------------------------------------------------------------------------
+;; Error handling
+
+
+^{:go/end 236} (go/method posAt "posAt returns the Pos value for (line, col) and the current position base.\n" ^Pos [^{:tag (* parser)} p ^uint line ^uint col]
+  (MakePos (.-base p) line col))
+
+
+
+^{:go/end 249} (go/method errorAt "errorAt reports an error at the given position.\n" [^{:tag (* parser)} p ^Pos pos ^string msg]
+  (let [err (lit Error pos msg)]
+    (when (== (.-first p) nil)
+      (set! (.-first p) err))
+
+    (inc! (.-errcnt p))
+    (when (== (.-errh p) nil)
+      (panic (.-first p)))
+
+    ((.-errh p) err)))
+
+
+
+^{:go/end 298} (go/method syntaxErrorAt "syntaxErrorAt reports a syntax error at the given position.\n" [^{:tag (* parser)} p ^Pos pos ^string msg]
+  (when trace
+    (.print p (+ "syntax error: " msg)))
+
+
+  (when (and (== ^{:go/via [scanner]} (.-tok p) _EOF) (!= (.-first p) nil))
+    (return)) ; avoid meaningless follow-up errors
+
+
+  ;; add punctuation etc. as needed to msg
+  (switch
+    (case [(== msg "")])
+    ;; nothing to do
+    (case [(strings/HasPrefix msg "in ") (strings/HasPrefix msg "at ") (strings/HasPrefix msg "after ")]
+      (set! msg (+ " " msg)))
+    (case [(strings/HasPrefix msg "expected ")]
+      (set! msg (+ ", " msg)))
+    (default
+      ;; plain error - we don't care about current token
+      (.errorAt p pos (+ "syntax error: " msg))
+      (return)))
+
+
+  ;; determine token string
+  (let [^string tok (zero string)]
+    (switch ^{:go/via [scanner]} (.-tok p)
+      (case [_Name]
+        (set! tok (+ "name " ^{:go/via [scanner]} (.-lit p))))
+      (case [_Semi]
+        (set! tok ^{:go/via [scanner]} (.-lit p)))
+      (case [_Literal]
+        (set! tok (+ "literal " ^{:go/via [scanner]} (.-lit p))))
+      (case [_Operator]
+        (set! tok (.String ^{:go/via [scanner]} (.-op p))))
+      (case [_AssignOp]
+        (set! tok (+ (.String ^{:go/via [scanner]} (.-op p)) "=")))
+      (case [_IncOp]
+        (set! tok (.String ^{:go/via [scanner]} (.-op p)))
+        (set! tok + tok))
+      (default
+        (set! tok (tokstring ^{:go/via [scanner]} (.-tok p)))))
+
+
+    ;; TODO(gri) This may print "unexpected X, expected Y".
+    ;;           Consider "got X, expected Y" in this case.
+    (.errorAt p pos (+ "syntax error: unexpected " tok msg))))
+
+
+
+
+
+
+^{:go/end 316} (go/func tokstring "tokstring returns the English word for selected punctuation tokens\nfor more readable error messages. Use tokstring (not tok.String())\nfor user-facing (error) messages; use tok.String() for debugging\noutput.\n" ^string [^token tok]
+  (switch tok
+    (case [_Comma]
+      (return "comma"))
+    (case [_Semi]
+      (return "semicolon or newline")))
+
+  (let [s (.String tok)]
+    (when (and (<= _Break tok) (<= tok _Var))
+      (return (+ "keyword " s)))
+
+    ^{:line 315} s))
+
+
+
+^{:go/end 319} (go/method pos "Convenience methods using the current token position.\n" ^Pos [^{:tag (* parser)} p] (.posAt p ^{:go/via [scanner]} (.-line p) ^{:go/via [scanner]} (.-col p)))
+^{:go/end 320} (go/method error [^{:tag (* parser)} p ^string msg] (.errorAt p (.pos p) msg))
+^{:go/end 321} (go/method syntaxError [^{:tag (* parser)} p ^string msg] (.syntaxErrorAt p (.pos p) msg))
+
+
+
+
+(go/const ^{:tag uint64 :val 129806096138240 :doc "The stopset contains keywords that start a statement.\nThey are good synchronization points in case of syntax\nerrors and (usually) shouldn't be skipped over.\n"} stopset (bit-or (<< 1 _Break)
+    (<< 1 _Const)
+    (<< 1 _Continue)
+    (<< 1 _Defer)
+    (<< 1 _Fallthrough)
+    (<< 1 _For)
+    (<< 1 _Go)
+    (<< 1 _Goto)
+    (<< 1 _If)
+    (<< 1 _Return)
+    (<< 1 _Select)
+    (<< 1 _Switch)
+    (<< 1 _Type)
+    (<< 1 _Var)))
+
+
+
+
+
+^{:go/end 375} (go/method advance "advance consumes tokens until it finds a token of the stopset or followlist.\nThe stopset is only considered if we are inside a function (p.fnest > 0).\nThe followlist is the list of valid tokens that can follow a production;\nif it is empty, exactly one (non-EOF) token is consumed to ensure progress.\n" [^{:tag (* parser)} p & ^{:tag (slice token)} followlist]
+  (when trace
+    (.print p (fmt/Sprintf "advance %s" followlist)))
+
+
+  ;; compute follow set
+  ;; (not speed critical, advance is only called in error situations)
+  (let [^uint64 followset (<< 1 _EOF)] ; don't skip over EOF
+    (when (> (len followlist) 0)
+      (when (> (.-fnest p) 0)
+        (set! followset bit-or stopset))
+
+      (range [_ tok followlist]
+        (set! followset bit-or ^uint64 (<< 1 tok))))
+
+
+
+    (while (not (contains followset ^{:go/via [scanner]} (.-tok p)))
+      (when trace
+        (.print p (+ "skip " (.String ^{:go/via [scanner]} (.-tok p)))))
+
+      ^{:go/via [scanner]} (.next p)
+      (when (== (len followlist) 0)
+        (break)))
+
+
+
+    (when trace
+      (.print p (+ "next " (.String ^{:go/via [scanner]} (.-tok p)))))))
+
+
+
+
+^{:go/end 389} (go/method trace "usage: defer p.trace(msg)()\n" ^{:tag (func [])} [^{:tag (* parser)} p ^string msg]
+  (.print p (+ msg " ("))
+  (let [^:const ^{:val ". "} tab ". "]
+    (set! (.-indent p) (append (.-indent p) (spread tab)))
+    ^{:go/end 388} (fn []
+      (set! (.-indent p) (subslice (.-indent p) _ (- (len (.-indent p)) (len tab))))
+      (when [x (recover)] (!= x nil)
+        (panic x)) ; skip print_trace
+
+      (.print p ")"))))
+
+
+
+^{:go/end 393} (go/method print [^{:tag (* parser)} p ^string msg]
+  (fmt/Printf "%5d: %s%s\n" ^{:go/via [scanner]} (.-line p) (.-indent p) msg))
+
+
+;; ----------------------------------------------------------------------------
+;; Package files
+;;
+;; Parse methods are annotated with matching Go productions as appropriate.
+;; The annotations are intended as guidelines only since a single Go grammar
+;; rule may be covered by multiple parse methods and vice versa.
+;;
+;; Excluding methods returning slices, parse methods named xOrNil may return
+;; nil; all others are expected to return a valid non-nil node.
+
+
+^{:go/end 488} (go/method fileOrNil "SourceFile = PackageClause \";\" { ImportDecl \";\" } { TopLevelDecl \";\" } .\n" ^{:tag (* File)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "file"))))
+
+
+  (let [f (new File)]
+    (set! ^{:go/via [node]} (.-pos f) (.pos p))
+
+    ;; PackageClause
+    (set! (.-GoVersion f) (.-goVersion p))
+    (set! (.-top p) false)
+    (when (not (.got p _Package))
+      (.syntaxError p "package statement must be first")
+      (return nil))
+
+    (set! (.-Pragma f) (.takePragma p))
+    (set! (.-PkgName f) (.name p))
+    (.want p _Semi)
+
+    ;; don't bother continuing if package clause has errors
+    (when (!= (.-first p) nil)
+      (return nil))
+
+
+    ;; Accept import declarations anywhere for error tolerance, but complain.
+    ;; { ( ImportDecl | TopLevelDecl ) ";" }
+    (let [prev _Import]
+      (while (!= ^{:go/via [scanner]} (.-tok p) _EOF)
+        (when (and (== ^{:go/via [scanner]} (.-tok p) _Import) (!= prev _Import))
+          (.syntaxError p "imports must appear before other declarations"))
+
+        (set! prev ^{:go/via [scanner]} (.-tok p))
+
+        (switch ^{:go/via [scanner]} (.-tok p)
+          (case [_Import]
+            ^{:go/via [scanner]} (.next p)
+            (set! (.-DeclList f) (.appendGroup p (.-DeclList f) (.-importDecl p))))
+
+          (case [_Const]
+            ^{:go/via [scanner]} (.next p)
+            (set! (.-DeclList f) (.appendGroup p (.-DeclList f) (.-constDecl p))))
+
+          (case [_Type]
+            ^{:go/via [scanner]} (.next p)
+            (set! (.-DeclList f) (.appendGroup p (.-DeclList f) (.-typeDecl p))))
+
+          (case [_Var]
+            ^{:go/via [scanner]} (.next p)
+            (set! (.-DeclList f) (.appendGroup p (.-DeclList f) (.-varDecl p))))
+
+          (case [_Func]
+            ^{:go/via [scanner]} (.next p)
+            (when [d (.funcDeclOrNil p)] (!= d nil)
+              (set! (.-DeclList f) (append (.-DeclList f) d))))
+
+
+          (default
+            (if (and (== ^{:go/via [scanner]} (.-tok p) _Lbrace) (> (len (.-DeclList f)) 0) (isEmptyFuncDecl (aget (.-DeclList f) (- (len (.-DeclList f)) 1))))
+              ;; opening { of function declaration on next line
+              (.syntaxError p "unexpected semicolon or newline before {")
+
+              (.syntaxError p "non-declaration statement outside function body"))
+
+            (.advance p _Import _Const _Type _Var _Func)
+            (continue)))
+
+
+        ;; Reset p.pragma BEFORE advancing to the next token (consuming ';')
+        ;; since comments before may set pragmas for the next function decl.
+        (.clearPragma p)
+
+        (when (and (!= ^{:go/via [scanner]} (.-tok p) _EOF) (not (.got p _Semi)))
+          (.syntaxError p "after top level declaration")
+          (.advance p _Import _Const _Type _Var _Func)))
+
+
+      ;; p.tok == _EOF
+
+      (.clearPragma p)
+      (set! (.-EOF f) (.pos p))
+
+      ^{:line 487} f)))
+
+
+^{:go/end 493} (go/func isEmptyFuncDecl ^bool [^Decl dcl]
+  (let [(values f ok) (assert (* FuncDecl) dcl)]
+    (and ok (== (.-Body f) nil))))
+
+
+;; ----------------------------------------------------------------------------
+;; Declarations
+
+
+
+
+
+
+
+
+
+
+^{:go/end 529} (go/method list "list parses a possibly empty, sep-separated list of elements, optionally\nfollowed by sep, and closed by close (or EOF). sep must be one of _Comma\nor _Semi, and close must be one of _Rparen, _Rbrace, or _Rbrack.\n\nFor each list element, f is called. Specifically, unless we're at close\n(or EOF), f is called at least once. After f returns true, no more list\nelements are accepted. list returns the position of the closing token.\n\nlist = [ f { sep f } [sep] ] close .\n" ^Pos [^{:tag (* parser)} p ^string context ^token sep ^token close ^{:tag (func [] [bool])} f]
+  (when (and debug ^:go/paren (or (and (!= sep _Comma) (!= sep _Semi)) (and (!= close _Rparen) (!= close _Rbrace) (!= close _Rbrack))))
+    (panic "invalid sep or close argument for list"))
+
+
+  (let [done false]
+    (while (and (!= ^{:go/via [scanner]} (.-tok p) _EOF) (!= ^{:go/via [scanner]} (.-tok p) close) (not done))
+      (set! done (f))
+      ;; sep is optional before close
+      (when (and (not (.got p sep)) (!= ^{:go/via [scanner]} (.-tok p) close))
+        (.syntaxError p (fmt/Sprintf "in %s; possibly missing %s or %s" context (tokstring sep) (tokstring close)))
+        (.advance p _Rparen _Rbrack _Rbrace)
+        (when (!= ^{:go/via [scanner]} (.-tok p) close)
+          ;; position could be better but we had an error so we don't care
+          (return (.pos p)))))
+
+
+
+
+    (let [pos (.pos p)]
+      (.want p close)
+      ^{:line 528} pos)))
+
+
+
+^{:go/end 549} (go/method appendGroup "appendGroup(f) = f | \"(\" { f \";\" } \")\" . // \";\" is optional before \")\"\n" ^{:tag (slice Decl)} [^{:tag (* parser)} p ^{:tag (slice Decl)} list ^{:tag (func [(* Group)] [Decl])} f]
+  (if (== ^{:go/via [scanner]} (.-tok p) _Lparen)
+    (let [g (new Group)]
+      (.clearPragma p)
+      ^{:go/via [scanner]} (.next p) ; must consume "(" after calling clearPragma!
+      (.list p "grouped declaration" _Semi _Rparen ^{:go/breaks [[3 541]] :go/end 542} (fn ^bool []
+          (when [x (f g)] (!= x nil)
+            (set! list (append list x)))
+
+          false)))
+
+    (do
+      (when [x (f nil)] (!= x nil)
+        (set! list (append list x)))))
+
+
+  ^{:line 548} list)
+
+
+
+
+^{:go/end 583} (go/method importDecl "ImportSpec = [ \".\" | PackageName ] ImportPath .\nImportPath = string_lit .\n" ^Decl [^{:tag (* parser)} p ^{:tag (* Group)} group]
+  (when trace
+    (defer ((.trace p "importDecl"))))
+
+
+  (let [d (new ImportDecl)]
+    (set! ^{:go/via [decl node]} (.-pos d) (.pos p))
+    (set! (.-Group d) group)
+    (set! (.-Pragma d) (.takePragma p))
+
+    (switch ^{:go/via [scanner]} (.-tok p)
+      (case [_Name]
+        (set! (.-LocalPkgName d) (.name p)))
+      (case [_Dot]
+        (set! (.-LocalPkgName d) (NewName (.pos p) "."))
+        ^{:go/via [scanner]} (.next p)))
+
+    (set! (.-Path d) (.oliteral p))
+    (when (== (.-Path d) nil)
+      (.syntaxError p "missing import path")
+      (.advance p _Semi _Rparen)
+      (return d))
+
+    (when (and (not (.-Bad (.-Path d))) (!= (.-Kind (.-Path d)) StringLit))
+      (.syntaxErrorAt p ^{:go/via [expr node]} (.Pos (.-Path d)) "import path must be a string")
+      (set! (.-Bad (.-Path d)) true))
+
+    ;; d.Path.Bad || d.Path.Kind == StringLit
+
+    ^{:line 582} d))
+
+
+
+^{:go/end 605} (go/method constDecl "ConstSpec = IdentifierList [ [ Type ] \"=\" ExpressionList ] .\n" ^Decl [^{:tag (* parser)} p ^{:tag (* Group)} group]
+  (when trace
+    (defer ((.trace p "constDecl"))))
+
+
+  (let [d (new ConstDecl)]
+    (set! ^{:go/via [decl node]} (.-pos d) (.pos p))
+    (set! (.-Group d) group)
+    (set! (.-Pragma d) (.takePragma p))
+
+    (set! (.-NameList d) (.nameList p (.name p)))
+    (when (and (!= ^{:go/via [scanner]} (.-tok p) _EOF) (!= ^{:go/via [scanner]} (.-tok p) _Semi) (!= ^{:go/via [scanner]} (.-tok p) _Rparen))
+      (set! (.-Type d) (.typeOrNil p))
+      (when (.gotAssign p)
+        (set! (.-Values d) (.exprList p))))
+
+
+
+    ^{:line 604} d))
+
+
+
+^{:go/end 689} (go/method typeDecl "TypeSpec = identifier [ TypeParams ] [ \"=\" ] Type .\n" ^Decl [^{:tag (* parser)} p ^{:tag (* Group)} group]
+  (when trace
+    (defer ((.trace p "typeDecl"))))
+
+
+  (let [d (new TypeDecl)]
+    (set! ^{:go/via [decl node]} (.-pos d) (.pos p))
+    (set! (.-Group d) group)
+    (set! (.-Pragma d) (.takePragma p))
+
+    (set! (.-Name d) (.name p))
+    (if (== ^{:go/via [scanner]} (.-tok p) _Lbrack)
+      ;; d.Name "[" ...
+      ;; array/slice type or type parameter list
+      (let [pos (.pos p)]
+        ^{:go/via [scanner]} (.next p)
+        (switch ^{:go/via [scanner]} (.-tok p)
+          (case [_Name]
+            ;; We may have an array type or a type parameter list.
+            ;; In either case we expect an expression x (which may
+            ;; just be a name, or a more complex expression) which
+            ;; we can analyze further.
+            ;;
+            ;; A type parameter list may have a type bound starting
+            ;; with a "[" as in: P []E. In that case, simply parsing
+            ;; an expression would lead to an error: P[] is invalid.
+            ;; But since index or slice expressions are never constant
+            ;; and thus invalid array length expressions, if the name
+            ;; is followed by "[" it must be the start of an array or
+            ;; slice constraint. Only if we don't see a "[" do we
+            ;; need to parse a full expression. Notably, name <- x
+            ;; is not a concern because name <- x is a statement and
+            ;; not an expression.
+            (let [^Expr x (.name p)]
+              (when (!= ^{:go/via [scanner]} (.-tok p) _Lbrack)
+                ;; To parse the expression starting with name, expand
+                ;; the call sequence we would get by passing in name
+                ;; to parser.expr, and pass in name to parser.pexpr.
+                (inc! (.-xnest p))
+                (set! x (.binaryExpr p (.pexpr p x false) 0))
+                (dec! (.-xnest p)))
+
+              ;; Analyze expression x. If we can split x into a type parameter
+              ;; name, possibly followed by a type parameter type, we consider
+              ;; this the start of a type parameter list, with some caveats:
+              ;; a single name followed by "]" tilts the decision towards an
+              ;; array declaration; a type parameter type that could also be
+              ;; an ordinary expression but which is followed by a comma tilts
+              ;; the decision towards a type parameter list.
+              (if [(values pname ptype) (extractName x (== ^{:go/via [scanner]} (.-tok p) _Comma))] (and (!= pname nil) ^:go/paren (or (!= ptype nil) (!= ^{:go/via [scanner]} (.-tok p) _Rbrack))) (do
+                  ;; d.Name "[" pname ...
+                  ;; d.Name "[" pname ptype ...
+                  ;; d.Name "[" pname ptype "," ...
+                  (set! (.-TParamList d) (.paramList p pname ptype _Rbrack true false)) ; ptype may be nil
+                  (set! (.-Alias d) (.gotAssign p))
+                  (set! (.-Type d) (.typeOrNil p)))
+
+                ;; d.Name "[" pname "]" ...
+                ;; d.Name "[" x ...
+                (set! (.-Type d) (.arrayType p pos x)))))
+
+          (case [_Rbrack]
+            ;; d.Name "[" "]" ...
+            ^{:go/via [scanner]} (.next p)
+            (set! (.-Type d) (.sliceType p pos)))
+          (default
+            ;; d.Name "[" ...
+            (set! (.-Type d) (.arrayType p pos nil)))))
+
+      (do
+        (set! (.-Alias d) (.gotAssign p))
+        (set! (.-Type d) (.typeOrNil p))))
+
+
+    (when (== (.-Type d) nil)
+      (set! (.-Type d) (.badExpr p))
+      (.syntaxError p "in type declaration")
+      (.advance p _Semi _Rparen))
+
+
+    ^{:line 688} d))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 754} (go/func extractName "extractName splits the expression x into (name, expr) if syntactically\nx can be written as name expr. The split only happens if expr is a type\nelement (per the isTypeElem predicate) or if force is set.\nIf x is just a name, the result is (name, nil). If the split succeeds,\nthe result is (name, expr). Otherwise the result is (nil, x).\nExamples:\n\n\tx           force    name    expr\n\t------------------------------------\n\tP*[]int     T/F      P       *[]int\n\tP*E         T        P       *E\n\tP*E         F        nil     P*E\n\tP([]int)    T/F      P       []int\n\tP(E)        T        P       E\n\tP(E)        F        nil     P(E)\n\tP*E|F|~G    T/F      P       *E|F|~G\n\tP*E|F|G     T        P       *E|F|G\n\tP*E|F|G     F        nil     P*E|F|G\n" [^Expr x ^bool force] :results [(* Name) Expr]
+  (type-switch [x x]
+    (case [(* Name)]
+      (return x nil))
+    (case [(* Operation)]
+      (when (== (.-Y x) nil)
+        (break)) ; unary expr
+
+      (switch (.-Op x)
+        (case [Mul]
+          (when [(values name _) (assert (* Name) (.-X x))] (and (!= name nil) ^:go/paren (or force (isTypeElem (.-Y x))))
+            ;; x = name *x.Y
+            (let [op @x]
+              (set! (values (.-X op) (.-Y op)) (values (.-Y op) nil)) ; change op into unary *op.Y
+              (return name (addr op)))))
+
+        (case [Or]
+          (when [(values name lhs) (extractName (.-X x) (or force (isTypeElem (.-Y x))))] (and (!= name nil) (!= lhs nil))
+            ;; x = name lhs|x.Y
+            (let [op @x]
+              (set! (.-X op) lhs)
+              (return name (addr op)))))))
+
+
+    (case [(* CallExpr)]
+      (when [(values name _) (assert (* Name) (.-Fun x))] (!= name nil)
+        (when (and (== (len (.-ArgList x)) 1) (not (.-HasDots x)) ^:go/paren (or force (isTypeElem (aget (.-ArgList x) 0))))
+          ;; The parser doesn't keep unnecessary parentheses.
+          ;; Set the flag below to keep them, for testing
+          ;; (see go.dev/issues/69206).
+          (let [^:const ^{:val false} keep_parens false]
+            (if keep_parens
+              ;; x = name (x.ArgList[0])
+              (let [px (new ParenExpr)]
+                (set! ^{:go/via [expr node]} (.-pos px) ^{:go/via [expr node]} (.-pos x)) ; position of "(" in call
+                (set! (.-X px) (aget (.-ArgList x) 0))
+                (return name px))
+
+              ;; x = name x.ArgList[0]
+              (return name (Unparen (aget (.-ArgList x) 0)))))))))
+
+
+
+
+  (return nil x))
+
+
+
+
+^{:go/breaks [[5 767]] :go/end 768} (go/func isTypeElem "isTypeElem reports whether x is a (possibly parenthesized) type element expression.\nThe result is false if x could be a type element OR an ordinary (value) expression.\n" ^bool [^Expr x]
+  (type-switch [x x]
+    (case [(* ArrayType) (* StructType) (* FuncType) (* InterfaceType) (* SliceType) (* MapType) (* ChanType)]
+      (return true))
+    (case [(* Operation)]
+      (return (or (isTypeElem (.-X x)) ^:go/paren (and (!= (.-Y x) nil) (isTypeElem (.-Y x))) (== (.-Op x) Tilde))))
+    (case [(* ParenExpr)]
+      (return (isTypeElem (.-X x)))))
+
+  false)
+
+
+
+^{:go/end 792} (go/method varDecl "VarSpec = IdentifierList ( Type [ \"=\" ExpressionList ] | \"=\" ExpressionList ) .\n" ^Decl [^{:tag (* parser)} p ^{:tag (* Group)} group]
+  (when trace
+    (defer ((.trace p "varDecl"))))
+
+
+  (let [d (new VarDecl)]
+    (set! ^{:go/via [decl node]} (.-pos d) (.pos p))
+    (set! (.-Group d) group)
+    (set! (.-Pragma d) (.takePragma p))
+
+    (set! (.-NameList d) (.nameList p (.name p)))
+    (if (.gotAssign p)
+      (set! (.-Values d) (.exprList p))
+      (do
+        (set! (.-Type d) (.type_ p))
+        (when (.gotAssign p)
+          (set! (.-Values d) (.exprList p)))))
+
+
+
+    ^{:line 791} d))
+
+
+
+
+
+
+
+^{:go/end 843} (go/method funcDeclOrNil "FunctionDecl = \"func\" FunctionName [ TypeParams ] ( Function | Signature ) .\nFunctionName = identifier .\nFunction     = Signature FunctionBody .\nMethodDecl   = \"func\" Receiver MethodName ( Function | Signature ) .\nReceiver     = Parameters .\n" ^{:tag (* FuncDecl)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "funcDecl"))))
+
+
+  (let [f (new FuncDecl)]
+    (set! ^{:go/via [decl node]} (.-pos f) (.pos p))
+    (set! (.-Pragma f) (.takePragma p))
+
+    (let [hasRecv false]
+      (when (.got p _Lparen)
+        (set! hasRecv true)
+        (let [rcvr (.paramList p nil nil _Rparen false false)]
+          (switch (len rcvr)
+            (case [0]
+              (.error p "method has no receiver"))
+            (default
+              (.error p "method has multiple receivers")
+              (fallthrough))
+            (case [1]
+              (set! (.-Recv f) (aget rcvr 0))))))
+
+
+
+      (if (== ^{:go/via [scanner]} (.-tok p) _Name) (do
+          (set! (.-Name f) (.name p))
+          (set! (values (.-TParamList f) (.-Type f)) (.funcType p "")))
+        (do
+          (set! (.-Name f) (NewName (.pos p) "_"))
+          (set! (.-Type f) (new FuncType))
+          (set! ^{:go/via [expr node]} (.-pos (.-Type f)) (.pos p))
+          (let [msg "expected name or ("]
+            (when hasRecv
+              (set! msg "expected name"))
+
+            (.syntaxError p msg)
+            (.advance p _Lbrace _Semi))))
+
+
+      (when (== ^{:go/via [scanner]} (.-tok p) _Lbrace)
+        (set! (.-Body f) (.funcBody p)))
+
+
+      ^{:line 842} f)))
+
+
+^{:go/end 859} (go/method funcBody ^{:tag (* BlockStmt)} [^{:tag (* parser)} p]
+  (inc! (.-fnest p))
+  (let [errcnt (.-errcnt p)
+      ^{:line 848} body (.blockStmt p "")]
+    (dec! (.-fnest p))
+
+    ;; Don't check branches if there were syntax errors in the function
+    ;; as it may lead to spurious errors (e.g., see test/switch2.go) or
+    ;; possibly crashes due to incomplete syntax trees.
+    (when (and (!= (bit-and (.-mode p) CheckBranches) 0) (== errcnt (.-errcnt p)))
+      (checkBranches body (.-errh p)))
+
+
+    ^{:line 858} body))
+
+
+;; ----------------------------------------------------------------------------
+;; Expressions
+
+^{:go/end 870} (go/method expr ^Expr [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "expr"))))
+
+
+  (.binaryExpr p nil 0))
+
+
+
+^{:go/end 890} (go/method binaryExpr "Expression = UnaryExpr | Expression binary_op Expression .\n" ^Expr [^{:tag (* parser)} p ^Expr x ^int prec]
+  ;; don't trace binaryExpr - only leads to overly nested trace output
+
+  (when (== x nil)
+    (set! x (.unaryExpr p)))
+
+  (while (and ^:go/paren (or (== ^{:go/via [scanner]} (.-tok p) _Operator) (== ^{:go/via [scanner]} (.-tok p) _Star)) (> ^{:go/via [scanner]} (.-prec p) prec))
+    (let [t (new Operation)]
+      (set! ^{:go/via [expr node]} (.-pos t) (.pos p))
+      (set! (.-Op t) ^{:go/via [scanner]} (.-op p))
+      (let [tprec ^{:go/via [scanner]} (.-prec p)]
+        ^{:go/via [scanner]} (.next p)
+        (set! (.-X t) x)
+        (set! (.-Y t) (.binaryExpr p nil tprec))
+        (set! x t))))
+
+  ^{:line 889} x)
+
+
+
+^{:go/end 982} (go/method unaryExpr "UnaryExpr = PrimaryExpr | unary_op UnaryExpr .\n" ^Expr [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "unaryExpr"))))
+
+
+  (switch ^{:go/via [scanner]} (.-tok p)
+    (case [_Operator _Star]
+      (switch ^{:go/via [scanner]} (.-op p)
+        (case [Mul Add Sub Not Xor Tilde]
+          (let [x (new Operation)]
+            (set! ^{:go/via [expr node]} (.-pos x) (.pos p))
+            (set! (.-Op x) ^{:go/via [scanner]} (.-op p))
+            ^{:go/via [scanner]} (.next p)
+            (set! (.-X x) (.unaryExpr p))
+            (return x)))
+
+        (case [And]
+          (let [x (new Operation)]
+            (set! ^{:go/via [expr node]} (.-pos x) (.pos p))
+            (set! (.-Op x) And)
+            ^{:go/via [scanner]} (.next p)
+            ;; unaryExpr may have returned a parenthesized composite literal
+            ;; (see comment in operand) - remove parentheses if any
+            (set! (.-X x) (Unparen (.unaryExpr p)))
+            (return x)))))
+
+
+    (case [_Arrow]
+      ;; receive op (<-x) or receive-only channel (<-chan E)
+      (let [pos (.pos p)]
+        ^{:go/via [scanner]} (.next p)
+
+        ;; If the next token is _Chan we still don't know if it is
+        ;; a channel (<-chan int) or a receive op (<-chan int(ch)).
+        ;; We only know once we have found the end of the unaryExpr.
+
+        (let [x (.unaryExpr p)]
+
+          ;; There are two cases:
+          ;;
+          ;;   <-chan...  => <-x is a channel type
+          ;;   <-x        => <-x is a receive operation
+          ;;
+          ;; In the first case, <- must be re-associated with
+          ;; the channel type parsed already:
+          ;;
+          ;;   <-(chan E)   =>  (<-chan E)
+          ;;   <-(chan<-E)  =>  (<-chan (<-E))
+
+          (when [(values _ ok) (assert (* ChanType) x)] ok
+            ;; x is a channel type => re-associate <-
+            (let [dir SendOnly
+                ^{:line 945} t x]
+              (while (== dir SendOnly)
+                (let [(values c ok) (assert (* ChanType) t)]
+                  (when (not ok)
+                    (break))
+
+                  (set! dir (.-Dir c))
+                  (when (== dir RecvOnly)
+                    ;; t is type <-chan E but <-<-chan E is not permitted
+                    ;; (report same error as for "type _ <-<-chan E")
+                    (.syntaxError p "unexpected <-, expected chan"))
+                  ;; already progressed, no need to advance
+
+                  (set! (.-Dir c) RecvOnly)
+                  (set! t (.-Elem c))))
+
+              (when (== dir SendOnly)
+                ;; channel dir is <- but channel element E is not a channel
+                ;; (report same error as for "type _ <-chan<-E")
+                (.syntaxError p (fmt/Sprintf "unexpected %s, expected chan" (String t))))
+              ;; already progressed, no need to advance
+
+              (return x)))
+
+
+          ;; x is not a channel type => we have a receive op
+          (let [o (new Operation)]
+            (set! ^{:go/via [expr node]} (.-pos o) pos)
+            (set! (.-Op o) Recv)
+            (set! (.-X o) x)
+            (return o))))))
+
+
+  ;; TODO(mdempsky): We need parens here so we can report an
+  ;; error for "(x) := true". It should be possible to detect
+  ;; and reject that more efficiently though.
+  (.pexpr p nil true))
+
+
+
+^{:go/end 1004} (go/method callStmt "callStmt parses call-like statements that can be preceded by 'defer' and 'go'.\n" ^{:tag (* CallStmt)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "callStmt"))))
+
+
+  (let [s (new CallStmt)]
+    (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+    (set! (.-Tok s) ^{:go/via [scanner]} (.-tok p)) ; _Defer or _Go
+    ^{:go/via [scanner]} (.next p)
+
+    (let [x (.pexpr p nil (== ^{:go/via [scanner]} (.-tok p) _Lparen))] ; keep_parens so we can report error below
+      (when [t (Unparen x)] (!= t x)
+        (.errorAt p (.Pos x) (fmt/Sprintf "expression in %s must not be parenthesized" (.-Tok s)))
+        ;; already progressed, no need to advance
+        (set! x t))
+
+
+      (set! (.-Call s) x)
+      ^{:line 1003} s)))
+
+
+
+
+
+
+^{:go/end 1084} (go/method operand "Operand     = Literal | OperandName | MethodExpr | \"(\" Expression \")\" .\nLiteral     = BasicLit | CompositeLit | FunctionLit .\nBasicLit    = int_lit | float_lit | imaginary_lit | rune_lit | string_lit .\nOperandName = identifier | QualifiedIdent.\n" ^Expr [^{:tag (* parser)} p ^bool keep_parens]
+  (when trace
+    (defer ((.trace p (+ "operand " (.String ^{:go/via [scanner]} (.-tok p)))))))
+
+
+  (switch ^{:go/via [scanner]} (.-tok p)
+    (case [_Name]
+      (return (.name p)))
+
+    (case [_Literal]
+      (return (.oliteral p)))
+
+    (case [_Lparen]
+      (let [pos (.pos p)]
+        ^{:go/via [scanner]} (.next p)
+        (inc! (.-xnest p))
+        (let [x (.expr p)]
+          (dec! (.-xnest p))
+          (.want p _Rparen)
+
+          ;; Optimization: Record presence of ()'s only where needed
+          ;; for error reporting. Don't bother in other cases; it is
+          ;; just a waste of memory and time.
+          ;;
+          ;; Parentheses are not permitted around T in a composite
+          ;; literal T{}. If the next token is a {, assume x is a
+          ;; composite literal type T (it may not be, { could be
+          ;; the opening brace of a block, but we don't know yet).
+          (when (== ^{:go/via [scanner]} (.-tok p) _Lbrace)
+            (set! keep_parens true))
+
+
+          ;; Parentheses are also not permitted around the expression
+          ;; in a go/defer statement. In that case, operand is called
+          ;; with keep_parens set.
+          (when keep_parens
+            (let [px (new ParenExpr)]
+              (set! ^{:go/via [expr node]} (.-pos px) pos)
+              (set! (.-X px) x)
+              (set! x px)))
+
+          (return x))))
+
+    (case [_Func]
+      (let [pos (.pos p)]
+        ^{:go/via [scanner]} (.next p)
+        (let [(values _ ftyp) (.funcType p "function type")]
+          (when (== ^{:go/via [scanner]} (.-tok p) _Lbrace)
+            (inc! (.-xnest p))
+
+            (let [f (new FuncLit)]
+              (set! ^{:go/via [expr node]} (.-pos f) pos)
+              (set! (.-Type f) ftyp)
+              (set! (.-Body f) (.funcBody p))
+
+              (dec! (.-xnest p))
+              (return f)))
+
+          (return ftyp))))
+
+    (case [_Lbrack _Chan _Map _Struct _Interface]
+      (return (.type_ p))) ; othertype
+
+    (default
+      (let [x (.badExpr p)]
+        (.syntaxError p "expected expression")
+        (.advance p _Rparen _Rbrack _Rbrace)
+        (return x)))))
+
+
+;; Syntactically, composite literals are operands. Because a complit
+;; type may be a qualified identifier which is handled by pexpr
+;; (together with selector expressions), complits are parsed there
+;; as well (operand is only called from pexpr).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+^{:go/end 1256} (go/method pexpr "pexpr parses a PrimaryExpr.\n\n\tPrimaryExpr =\n\t\tOperand |\n\t\tConversion |\n\t\tPrimaryExpr Selector |\n\t\tPrimaryExpr Index |\n\t\tPrimaryExpr Slice |\n\t\tPrimaryExpr TypeAssertion |\n\t\tPrimaryExpr Arguments .\n\n\tSelector       = \".\" identifier .\n\tIndex          = \"[\" Expression \"]\" .\n\tSlice          = \"[\" ( [ Expression ] \":\" [ Expression ] ) |\n\t                     ( [ Expression ] \":\" Expression \":\" Expression )\n\t                 \"]\" .\n\tTypeAssertion  = \".\" \"(\" Type \")\" .\n\tArguments      = \"(\" [ ( ExpressionList | Type [ \",\" ExpressionList ] ) [ \"...\" ] [ \",\" ] ] \")\" .\n" ^Expr [^{:tag (* parser)} p ^Expr x ^bool keep_parens]
+  (when trace
+    (defer ((.trace p "pexpr"))))
+
+
+  (when (== x nil)
+    (set! x (.operand p keep_parens)))
+
+
+  (label :loop
+    (while true
+      (let [pos (.pos p)]
+        (switch ^{:go/via [scanner]} (.-tok p)
+          (case [_Dot]
+            ^{:go/via [scanner]} (.next p)
+            (switch ^{:go/via [scanner]} (.-tok p)
+              (case [_Name]
+                ;; pexpr '.' sym
+                (let [t (new SelectorExpr)]
+                  (set! ^{:go/via [expr node]} (.-pos t) pos)
+                  (set! (.-X t) x)
+                  (set! (.-Sel t) (.name p))
+                  (set! x t)))
+
+              (case [_Lparen]
+                ^{:go/via [scanner]} (.next p)
+                (if (.got p _Type)
+                  (let [t (new TypeSwitchGuard)]
+                    ;; t.Lhs is filled in by parser.simpleStmt
+                    (set! ^{:go/via [expr node]} (.-pos t) pos)
+                    (set! (.-X t) x)
+                    (set! x t))
+
+                  (let [t (new AssertExpr)]
+                    (set! ^{:go/via [expr node]} (.-pos t) pos)
+                    (set! (.-X t) x)
+                    (set! (.-Type t) (.type_ p))
+                    (set! x t)))
+
+                (.want p _Rparen))
+
+              (default
+                (.syntaxError p "expected name or (")
+                (.advance p _Semi _Rparen))))
+
+
+          (case [_Lbrack]
+            ^{:go/via [scanner]} (.next p)
+
+            (let [^Expr i (zero Expr)]
+              (when (!= ^{:go/via [scanner]} (.-tok p) _Colon)
+                (let [^bool comma (zero bool)]
+                  (if (== ^{:go/via [scanner]} (.-tok p) _Rbrack) (do
+                      ;; invalid empty instance, slice or index expression; accept but complain
+                      (.syntaxError p "expected operand")
+                      (set! i (.badExpr p)))
+
+                    (set! (values i comma) (.typeList p false)))
+
+                  (when (or comma (== ^{:go/via [scanner]} (.-tok p) _Rbrack))
+                    (.want p _Rbrack)
+                    ;; x[], x[i,] or x[i, j, ...]
+                    (let [t (new IndexExpr)]
+                      (set! ^{:go/via [expr node]} (.-pos t) pos)
+                      (set! (.-X t) x)
+                      (set! (.-Index t) i)
+                      (set! x t)
+                      (break)))))
+
+
+
+              ;; x[i:...
+              ;; For better error message, don't simply use p.want(_Colon) here (go.dev/issue/47704).
+              (when (not (.got p _Colon))
+                (.syntaxError p "expected comma, : or ]")
+                (.advance p _Comma _Colon _Rbrack))
+
+              (inc! (.-xnest p))
+              (let [t (new SliceExpr)]
+                (set! ^{:go/via [expr node]} (.-pos t) pos)
+                (set! (.-X t) x)
+                (aset (.-Index t) 0 i)
+                (when (and (!= ^{:go/via [scanner]} (.-tok p) _Colon) (!= ^{:go/via [scanner]} (.-tok p) _Rbrack))
+                  ;; x[i:j...
+                  (aset (.-Index t) 1 (.expr p)))
+
+                (when (== ^{:go/via [scanner]} (.-tok p) _Colon)
+                  (set! (.-Full t) true)
+                  ;; x[i:j:...]
+                  (when (== (aget (.-Index t) 1) nil)
+                    (.error p "middle index required in 3-index slice")
+                    (aset (.-Index t) 1 (.badExpr p)))
+
+                  ^{:go/via [scanner]} (.next p)
+                  (if (!= ^{:go/via [scanner]} (.-tok p) _Rbrack)
+                    ;; x[i:j:k...
+                    (aset (.-Index t) 2 (.expr p))
+                    (do
+                      (.error p "final index required in 3-index slice")
+                      (aset (.-Index t) 2 (.badExpr p)))))
+
+
+                (dec! (.-xnest p))
+                (.want p _Rbrack)
+                (set! x t))))
+
+          (case [_Lparen]
+            (let [t (new CallExpr)]
+              (set! ^{:go/via [expr node]} (.-pos t) pos)
+              ^{:go/via [scanner]} (.next p)
+              (set! (.-Fun t) x)
+              (set! (values (.-ArgList t) (.-HasDots t)) (.argList p))
+              (set! x t)))
+
+          (case [_Lbrace]
+            ;; operand may have returned a parenthesized complit
+            ;; type; accept it but complain if we have a complit
+            (let [t (Unparen x)
+                ;; determine if '{' belongs to a composite literal or a block statement
+                ^{:line 1223} complit_ok false]
+              (type-switch t
+                (case [(* Name) (* SelectorExpr)]
+                  (when (>= (.-xnest p) 0)
+                    ;; x is possibly a composite literal type
+                    (set! complit_ok true)))
+
+                (case [(* IndexExpr)]
+                  (when (and (>= (.-xnest p) 0) (not (isValue t)))
+                    ;; x is possibly a composite literal type
+                    (set! complit_ok true)))
+
+                (case [(* ArrayType) (* SliceType) (* StructType) (* MapType)]
+                  ;; x is a comptype
+                  (set! complit_ok true)))
+
+              (when (not complit_ok)
+                (break :loop))
+
+              (when (!= t x)
+                (.syntaxError p "cannot parenthesize type in composite literal"))
+              ;; already progressed, no need to advance
+
+              (let [n (.complitexpr p)]
+                (set! (.-Type n) x)
+                (set! x n))))
+
+          (default
+            (break :loop))))))
+
+
+
+  ^{:line 1255} x)
+
+
+
+^{:go/breaks [[5 1270]] :go/end 1271} (go/func isValue "isValue reports whether x syntactically must be a value (and not a type) expression.\n" ^bool [^Expr x]
+  (type-switch [x x]
+    (case [(* BasicLit) (* CompositeLit) (* FuncLit) (* SliceExpr) (* AssertExpr) (* TypeSwitchGuard) (* CallExpr)]
+      (return true))
+    (case [(* Operation)]
+      (return (or (!= (.-Op x) Mul) (!= (.-Y x) nil)))) ; *T may be a type
+    (case [(* ParenExpr)]
+      (return (isValue (.-X x))))
+    (case [(* IndexExpr)]
+      (return (or (isValue (.-X x)) (isValue (.-Index x))))))
+
+  false)
+
+
+
+^{:go/end 1285} (go/method bare_complitexpr "Element = Expression | LiteralValue .\n" ^Expr [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "bare_complitexpr"))))
+
+
+  (when (== ^{:go/via [scanner]} (.-tok p) _Lbrace)
+    ;; '{' start_complit braced_keyval_list '}'
+    (return (.complitexpr p)))
+
+
+  (.expr p))
+
+
+
+^{:go/end 1317} (go/method complitexpr "LiteralValue = \"{\" [ ElementList [ \",\" ] ] \"}\" .\n" ^{:tag (* CompositeLit)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "complitexpr"))))
+
+
+  (let [x (new CompositeLit)]
+    (set! ^{:go/via [expr node]} (.-pos x) (.pos p))
+
+    (inc! (.-xnest p))
+    (.want p _Lbrace)
+    (set! (.-Rbrace x) (.list p "composite literal" _Comma _Rbrace ^{:go/end 1313} (fn ^bool []
+          ;; value
+          ^{:go/breaks [4]} (let [e (.bare_complitexpr p)]
+            (when (== ^{:go/via [scanner]} (.-tok p) _Colon)
+              ;; key ':' value
+              (let [l (new KeyValueExpr)]
+                (set! ^{:go/via [expr node]} (.-pos l) (.pos p))
+                ^{:go/via [scanner]} (.next p)
+                (set! (.-Key l) e)
+                (set! (.-Value l) (.bare_complitexpr p))
+                (set! e l)
+                (inc! (.-NKeys x))))
+
+            (set! (.-ElemList x) (append (.-ElemList x) e))
+            false))))
+
+    (dec! (.-xnest p))
+
+    ^{:line 1316} x))
+
+
+;; ----------------------------------------------------------------------------
+;; Types
+
+^{:go/end 1335} (go/method type_ ^Expr [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "type_"))))
+
+
+  (let [typ (.typeOrNil p)]
+    (when (== typ nil)
+      (set! typ (.badExpr p))
+      (.syntaxError p "expected type")
+      (.advance p _Comma _Colon _Semi _Rparen _Rbrack _Rbrace))
+
+
+    ^{:line 1334} typ))
+
+
+^{:go/end 1343} (go/func newIndirect ^Expr [^Pos pos ^Expr typ]
+  (let [o (new Operation)]
+    (set! ^{:go/via [expr node]} (.-pos o) pos)
+    (set! (.-Op o) Mul)
+    (set! (.-X o) typ)
+    ^{:line 1342} o))
+
+
+
+
+
+
+
+
+
+^{:go/end 1439} (go/method typeOrNil "typeOrNil is like type_ but it returns nil if there was no type\ninstead of reporting an error.\n\n\tType     = TypeName | TypeLit | \"(\" Type \")\" .\n\tTypeName = identifier | QualifiedIdent .\n\tTypeLit  = ArrayType | StructType | PointerType | FunctionType | InterfaceType |\n\t\t      SliceType | MapType | Channel_Type .\n" ^Expr [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "typeOrNil"))))
+
+
+  ^{:go/breaks [[3 1438]]} (let [pos (.pos p)]
+    (switch ^{:go/via [scanner]} (.-tok p)
+      (case [_Star]
+        ;; ptrtype
+        ^{:go/via [scanner]} (.next p)
+        (return (newIndirect pos (.type_ p))))
+
+      (case [_Arrow]
+        ;; recvchantype
+        ^{:go/via [scanner]} (.next p)
+        (.want p _Chan)
+        (let [t (new ChanType)]
+          (set! ^{:go/via [expr node]} (.-pos t) pos)
+          (set! (.-Dir t) RecvOnly)
+          (set! (.-Elem t) (.chanElem p))
+          (return t)))
+
+      (case [_Func]
+        ;; fntype
+        ^{:go/via [scanner]} (.next p)
+        (let [(values _ t) (.funcType p "function type")]
+          (return t)))
+
+      (case [_Lbrack]
+        ;; '[' oexpr ']' ntype
+        ;; '[' _DotDotDot ']' ntype
+        ^{:go/via [scanner]} (.next p)
+        (when (.got p _Rbrack)
+          (return (.sliceType p pos)))
+
+        (return (.arrayType p pos nil)))
+
+      (case [_Chan]
+        ;; _Chan non_recvchantype
+        ;; _Chan _Comm ntype
+        ^{:go/via [scanner]} (.next p)
+        (let [t (new ChanType)]
+          (set! ^{:go/via [expr node]} (.-pos t) pos)
+          (when (.got p _Arrow)
+            (set! (.-Dir t) SendOnly))
+
+          (set! (.-Elem t) (.chanElem p))
+          (return t)))
+
+      (case [_Map]
+        ;; _Map '[' ntype ']' ntype
+        ^{:go/via [scanner]} (.next p)
+        (.want p _Lbrack)
+        (let [t (new MapType)]
+          (set! ^{:go/via [expr node]} (.-pos t) pos)
+          (set! (.-Key t) (.type_ p))
+          (.want p _Rbrack)
+          (set! (.-Value t) (.type_ p))
+          (return t)))
+
+      (case [_Struct]
+        (return (.structType p)))
+
+      (case [_Interface]
+        (return (.interfaceType p)))
+
+      (case [_Name]
+        (return (.qualifiedName p nil)))
+
+      (case [_Lparen]
+        ^{:go/via [scanner]} (.next p)
+        (let [t (.type_ p)]
+          (.want p _Rparen)
+          ;; The parser doesn't keep unnecessary parentheses.
+          ;; Set the flag below to keep them, for testing
+          ;; (see e.g. tests for go.dev/issue/68639).
+          (let [^:const ^{:val false} keep_parens false]
+            (when keep_parens
+              (let [px (new ParenExpr)]
+                (set! ^{:go/via [expr node]} (.-pos px) pos)
+                (set! (.-X px) t)
+                (set! t px)))
+
+            (return t)))))
+
+
+    nil))
+
+
+^{:go/end 1459} (go/method typeInstance ^Expr [^{:tag (* parser)} p ^Expr typ]
+  (when trace
+    (defer ((.trace p "typeInstance"))))
+
+
+  (let [pos (.pos p)]
+    (.want p _Lbrack)
+    (let [x (new IndexExpr)]
+      (set! ^{:go/via [expr node]} (.-pos x) pos)
+      (set! (.-X x) typ)
+      (if (== ^{:go/via [scanner]} (.-tok p) _Rbrack) (do
+          (.syntaxError p "expected type argument list")
+          (set! (.-Index x) (.badExpr p)))
+
+        (set! (values (.-Index x) _) (.typeList p true)))
+
+      (.want p _Rbrack)
+      ^{:line 1458} x)))
+
+
+
+^{:go/end 1489} (go/method funcType "If context != \"\", type parameters are not permitted.\n" [^{:tag (* parser)} p ^string context] :results [(slice (* Field)) (* FuncType)]
+  (when trace
+    (defer ((.trace p "funcType"))))
+
+
+  (let [typ (new FuncType)]
+    (set! ^{:go/via [expr node]} (.-pos typ) (.pos p))
+
+    (let [^{:tag (slice (* Field))} tparamList (zero (slice (* Field)))]
+      (when (.got p _Lbrack)
+        (when (!= context "")
+          ;; accept but complain
+          (.syntaxErrorAt p ^{:go/via [expr node]} (.-pos typ) (+ context " must have no type parameters")))
+
+        (if (== ^{:go/via [scanner]} (.-tok p) _Rbrack) (do
+            (.syntaxError p "empty type parameter list")
+            ^{:go/via [scanner]} (.next p))
+
+          (set! tparamList (.paramList p nil nil _Rbrack true false))))
+
+
+
+      (.want p _Lparen)
+      (set! (.-ParamList typ) (.paramList p nil nil _Rparen false true))
+      (set! (.-ResultList typ) (.funcResult p))
+
+      (return tparamList typ))))
+
+
+
+
+^{:go/end 1516} (go/method arrayType "\"[\" has already been consumed, and pos is its position.\nIf len != nil it is the already consumed array length.\n" ^Expr [^{:tag (* parser)} p ^Pos pos ^Expr len]
+  (when trace
+    (defer ((.trace p "arrayType"))))
+
+
+  (when (and (== len nil) (not (.got p _DotDotDot)))
+    (inc! (.-xnest p))
+    (set! len (.expr p))
+    (dec! (.-xnest p)))
+
+  (when (== ^{:go/via [scanner]} (.-tok p) _Comma)
+    ;; Trailing commas are accepted in type parameter
+    ;; lists but not in array type declarations.
+    ;; Accept for better error handling but complain.
+    (.syntaxError p "unexpected comma; expected ]")
+    ^{:go/via [scanner]} (.next p))
+
+  (.want p _Rbrack)
+  (let [t (new ArrayType)]
+    (set! ^{:go/via [expr node]} (.-pos t) pos)
+    (set! (.-Len t) len)
+    (set! (.-Elem t) (.type_ p))
+    ^{:line 1515} t))
+
+
+
+^{:go/end 1524} (go/method sliceType "\"[\" and \"]\" have already been consumed, and pos is the position of \"[\".\n" ^Expr [^{:tag (* parser)} p ^Pos pos]
+  (let [t (new SliceType)]
+    (set! ^{:go/via [expr node]} (.-pos t) pos)
+    (set! (.-Elem t) (.type_ p))
+    ^{:line 1523} t))
+
+
+^{:go/end 1539} (go/method chanElem ^Expr [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "chanElem"))))
+
+
+  (let [typ (.typeOrNil p)]
+    (when (== typ nil)
+      (set! typ (.badExpr p))
+      (.syntaxError p "missing channel element type"))
+    ;; assume element type is simply absent - don't advance
+
+
+    ^{:line 1538} typ))
+
+
+
+^{:go/end 1558} (go/method structType "StructType = \"struct\" \"{\" { FieldDecl \";\" } \"}\" .\n" ^{:tag (* StructType)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "structType"))))
+
+
+  (let [typ (new StructType)]
+    (set! ^{:go/via [expr node]} (.-pos typ) (.pos p))
+
+    (.want p _Struct)
+    (.want p _Lbrace)
+    (.list p "struct type" _Semi _Rbrace ^{:go/breaks [3] :go/end 1555} (fn ^bool []
+        (.fieldDecl p typ)
+        false))
+
+
+    ^{:line 1557} typ))
+
+
+
+^{:go/end 1584} (go/method interfaceType "InterfaceType = \"interface\" \"{\" { ( MethodDecl | EmbeddedElem ) \";\" } \"}\" .\n" ^{:tag (* InterfaceType)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "interfaceType"))))
+
+
+  (let [typ (new InterfaceType)]
+    (set! ^{:go/via [expr node]} (.-pos typ) (.pos p))
+
+    (.want p _Interface)
+    (.want p _Lbrace)
+    (.list p "interface type" _Semi _Rbrace ^{:go/end 1581} (fn ^bool []
+        ^{:go/breaks [5]} (let [^{:tag (* Field)} f (zero (* Field))]
+          (when (== ^{:go/via [scanner]} (.-tok p) _Name)
+            (set! f (.methodDecl p)))
+
+          (when (or (== f nil) (== (.-Name f) nil))
+            (set! f (.embeddedElem p f)))
+
+          (set! (.-MethodList typ) (append (.-MethodList typ) f))
+          false)))
+
+
+    ^{:line 1583} typ))
+
+
+
+^{:go/end 1605} (go/method funcResult "Result = Parameters | Type .\n" ^{:tag (slice (* Field))} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "funcResult"))))
+
+
+  (when (.got p _Lparen)
+    (return (.paramList p nil nil _Rparen false false)))
+
+
+  ^{:go/breaks [[3 1604]]} (let [pos (.pos p)]
+    (when [typ (.typeOrNil p)] (!= typ nil)
+      (let [f (new Field)]
+        (set! ^{:go/via [node]} (.-pos f) pos)
+        (set! (.-Type f) typ)
+        (return (lit (slice (* Field)) f))))
+
+
+    nil))
+
+
+^{:go/end 1624} (go/method addField [^{:tag (* parser)} p ^{:tag (* StructType)} styp ^Pos pos ^{:tag (* Name)} name ^Expr typ ^{:tag (* BasicLit)} tag]
+  (when (!= tag nil)
+    (for [i (- (len (.-FieldList styp)) (len (.-TagList styp)))] (> i 0) (dec! i)
+      (set! (.-TagList styp) (append (.-TagList styp) nil)))
+
+    (set! (.-TagList styp) (append (.-TagList styp) tag)))
+
+
+  (let [f (new Field)]
+    (set! ^{:go/via [node]} (.-pos f) pos)
+    (set! (.-Name f) name)
+    (set! (.-Type f) typ)
+    (set! (.-FieldList styp) (append (.-FieldList styp) f))
+
+    (when (and debug (!= tag nil) (!= (len (.-FieldList styp)) (len (.-TagList styp))))
+      (panic "inconsistent struct field list"))))
+
+
+
+
+
+
+^{:go/end 1709} (go/method fieldDecl "FieldDecl      = (IdentifierList Type | AnonymousField) [ Tag ] .\nAnonymousField = [ \"*\" ] TypeName .\nTag            = string_lit .\n" [^{:tag (* parser)} p ^{:tag (* StructType)} styp]
+  (when trace
+    (defer ((.trace p "fieldDecl"))))
+
+
+  (let [pos (.pos p)]
+    (switch ^{:go/via [scanner]} (.-tok p)
+      (case [_Name]
+        (let [name (.name p)]
+          (when (or (== ^{:go/via [scanner]} (.-tok p) _Dot) (== ^{:go/via [scanner]} (.-tok p) _Literal) (== ^{:go/via [scanner]} (.-tok p) _Semi) (== ^{:go/via [scanner]} (.-tok p) _Rbrace))
+            ;; embedded type
+            (let [typ (.qualifiedName p name)
+                ^{:line 1641} tag (.oliteral p)]
+              (.addField p styp pos nil typ tag)
+              (break)))
+
+
+          ;; name1, name2, ... Type [ tag ]
+          (let [names (.nameList p name)
+              ^{:line 1648 :tag Expr} typ (zero Expr)]
+
+            ;; Careful dance: We don't know if we have an embedded instantiated
+            ;; type T[P1, P2, ...] or a field T of array/slice type [P]E or []E.
+            (if (and (== (len names) 1) (== ^{:go/via [scanner]} (.-tok p) _Lbrack)) (do
+                (set! typ (.arrayOrTArgs p))
+                (when [(values typ ok) (assert (* IndexExpr) typ)] ok
+                  ;; embedded type T[P1, P2, ...]
+                  (set! (.-X typ) name) ; name == names[0]
+                  (let [tag (.oliteral p)]
+                    (.addField p styp pos nil typ tag)
+                    (break))))
+
+
+              ;; T P
+              (set! typ (.type_ p)))
+
+
+            (let [tag (.oliteral p)]
+
+              (range [_ name names]
+                (.addField p styp ^{:go/via [expr node]} (.Pos name) name typ tag))))))
+
+
+      (case [_Star]
+        ^{:go/via [scanner]} (.next p)
+        (let [^Expr typ (zero Expr)]
+          (if (== ^{:go/via [scanner]} (.-tok p) _Lparen) (do
+              ;; *(T)
+              (.syntaxError p "cannot parenthesize embedded type")
+              ^{:go/via [scanner]} (.next p)
+              (set! typ (.qualifiedName p nil))
+              (.got p _Rparen)) ; no need to complain if missing
+
+            ;; *T
+            (set! typ (.qualifiedName p nil)))
+
+          (let [tag (.oliteral p)]
+            (.addField p styp pos nil (newIndirect pos typ) tag))))
+
+      (case [_Lparen]
+        (.syntaxError p "cannot parenthesize embedded type")
+        ^{:go/via [scanner]} (.next p)
+        (let [^Expr typ (zero Expr)]
+          (if (== ^{:go/via [scanner]} (.-tok p) _Star)
+            ;; (*T)
+            (let [pos (.pos p)]
+              ^{:go/via [scanner]} (.next p)
+              (set! typ (newIndirect pos (.qualifiedName p nil))))
+
+            ;; (T)
+            (set! typ (.qualifiedName p nil)))
+
+          (.got p _Rparen) ; no need to complain if missing
+          (let [tag (.oliteral p)]
+            (.addField p styp pos nil typ tag))))
+
+      (default
+        (.syntaxError p "expected field name or embedded type")
+        (.advance p _Semi _Rbrace)))))
+
+
+
+^{:go/end 1742} (go/method arrayOrTArgs ^Expr [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "arrayOrTArgs"))))
+
+
+  (let [pos (.pos p)]
+    (.want p _Lbrack)
+    (when (.got p _Rbrack)
+      (return (.sliceType p pos)))
+
+
+    ;; x [n]E or x[n,], x[n1, n2], ...
+    (let [(values n comma) (.typeList p false)]
+      (.want p _Rbrack)
+      (when (not comma)
+        (when [elem (.typeOrNil p)] (!= elem nil)
+          ;; x [n]E
+          (let [t (new ArrayType)]
+            (set! ^{:go/via [expr node]} (.-pos t) pos)
+            (set! (.-Len t) n)
+            (set! (.-Elem t) elem)
+            (return t))))
+
+
+
+      ;; x[n,], x[n1, n2], ...
+      (let [t (new IndexExpr)]
+        (set! ^{:go/via [expr node]} (.-pos t) pos)
+        ;; t.X will be filled in by caller
+        (set! (.-Index t) n)
+        ^{:line 1741} t))))
+
+
+^{:go/breaks [[4 1754]] :go/end 1755} (go/method oliteral ^{:tag (* BasicLit)} [^{:tag (* parser)} p]
+  (when (== ^{:go/via [scanner]} (.-tok p) _Literal)
+    (let [b (new BasicLit)]
+      (set! ^{:go/via [expr node]} (.-pos b) (.pos p))
+      (set! (.-Value b) ^{:go/via [scanner]} (.-lit p))
+      (set! (.-Kind b) ^{:go/via [scanner]} (.-kind p))
+      (set! (.-Bad b) ^{:go/via [scanner]} (.-bad p))
+      ^{:go/via [scanner]} (.next p)
+      (return b)))
+
+  nil)
+
+
+
+
+
+^{:go/end 1851} (go/method methodDecl "MethodSpec        = MethodName Signature | InterfaceTypeName .\nMethodName        = identifier .\nInterfaceTypeName = TypeName .\n" ^{:tag (* Field)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "methodDecl"))))
+
+
+  (let [f (new Field)]
+    (set! ^{:go/via [node]} (.-pos f) (.pos p))
+    (let [name (.name p)
+
+        ^:const ^{:line 1769 :val "interface method"} context "interface method"]
+
+      (switch ^{:go/via [scanner]} (.-tok p)
+        (case [_Lparen]
+          ;; method
+          (set! (.-Name f) name)
+          (set! (values _ (.-Type f)) (.funcType p context)))
+
+        (case [_Lbrack]
+          ;; Careful dance: We don't know if we have a generic method m[T C](x T)
+          ;; or an embedded instantiated type T[P1, P2] (we accept generic methods
+          ;; for generality and robustness of parsing but complain with an error).
+          (let [pos (.pos p)]
+            ^{:go/via [scanner]} (.next p)
+
+            ;; Empty type parameter or argument lists are not permitted.
+            ;; Treat as if [] were absent.
+            (when (== ^{:go/via [scanner]} (.-tok p) _Rbrack)
+              ;; name[]
+              (let [pos (.pos p)]
+                ^{:go/via [scanner]} (.next p)
+                (if (== ^{:go/via [scanner]} (.-tok p) _Lparen) (do
+                    ;; name[](
+                    (.errorAt p pos "empty type parameter list")
+                    (set! (.-Name f) name)
+                    (set! (values _ (.-Type f)) (.funcType p context)))
+                  (do
+                    (.errorAt p pos "empty type argument list")
+                    (set! (.-Type f) name)))
+
+                (break)))
+
+
+            ;; A type argument list looks like a parameter list with only
+            ;; types. Parse a parameter list and decide afterwards.
+            (let [list (.paramList p nil nil _Rbrack false false)]
+              (when (== (len list) 0)
+                ;; The type parameter list is not [] but we got nothing
+                ;; due to other errors (reported by paramList). Treat
+                ;; as if [] were absent.
+                (if (== ^{:go/via [scanner]} (.-tok p) _Lparen) (do
+                    (set! (.-Name f) name)
+                    (set! (values _ (.-Type f)) (.funcType p context)))
+
+                  (set! (.-Type f) name))
+
+                (break))
+
+
+              ;; len(list) > 0
+              (when (!= (.-Name (aget list 0)) nil)
+                ;; generic method
+                (set! (.-Name f) name)
+                (set! (values _ (.-Type f)) (.funcType p context))
+                (.errorAt p pos "interface method must have no type parameters")
+                (break))
+
+
+              ;; embedded instantiated type
+              (let [t (new IndexExpr)]
+                (set! ^{:go/via [expr node]} (.-pos t) pos)
+                (set! (.-X t) name)
+                (if (== (len list) 1)
+                  (set! (.-Index t) (.-Type (aget list 0)))
+
+                  ;; len(list) > 1
+                  (let [l (new ListExpr)]
+                    (set! ^{:go/via [expr node]} (.-pos l) ^{:go/via [node]} (.Pos (aget list 0)))
+                    (set! (.-ElemList l) (make (slice Expr) (len list)))
+                    (range [i list]
+                      (aset (.-ElemList l) i (.-Type (aget list i))))
+
+                    (set! (.-Index t) l)))
+
+                (set! (.-Type f) t)))))
+
+        (default
+          ;; embedded type
+          (set! (.-Type f) (.qualifiedName p name))))
+
+
+      ^{:line 1850} f)))
+
+
+
+^{:go/end 1876} (go/method embeddedElem "EmbeddedElem = MethodSpec | EmbeddedTerm { \"|\" EmbeddedTerm } .\n" ^{:tag (* Field)} [^{:tag (* parser)} p ^{:tag (* Field)} f]
+  (when trace
+    (defer ((.trace p "embeddedElem"))))
+
+
+  (when (== f nil)
+    (set! f (new Field))
+    (set! ^{:go/via [node]} (.-pos f) (.pos p))
+    (set! (.-Type f) (.embeddedTerm p)))
+
+
+  (while (and (== ^{:go/via [scanner]} (.-tok p) _Operator) (== ^{:go/via [scanner]} (.-op p) Or))
+    (let [t (new Operation)]
+      (set! ^{:go/via [expr node]} (.-pos t) (.pos p))
+      (set! (.-Op t) Or)
+      ^{:go/via [scanner]} (.next p)
+      (set! (.-X t) (.-Type f))
+      (set! (.-Y t) (.embeddedTerm p))
+      (set! (.-Type f) t)))
+
+
+  ^{:line 1875} f)
+
+
+
+^{:go/end 1901} (go/method embeddedTerm "EmbeddedTerm = [ \"~\" ] Type .\n" ^Expr [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "embeddedTerm"))))
+
+
+  (when (and (== ^{:go/via [scanner]} (.-tok p) _Operator) (== ^{:go/via [scanner]} (.-op p) Tilde))
+    (let [t (new Operation)]
+      (set! ^{:go/via [expr node]} (.-pos t) (.pos p))
+      (set! (.-Op t) Tilde)
+      ^{:go/via [scanner]} (.next p)
+      (set! (.-X t) (.type_ p))
+      (return t)))
+
+
+  (let [t (.typeOrNil p)]
+    (when (== t nil)
+      (set! t (.badExpr p))
+      (.syntaxError p "expected ~ term or type")
+      (.advance p _Operator _Semi _Rparen _Rbrack _Rbrace))
+
+
+    ^{:line 1900} t))
+
+
+
+^{:go/end 1999} (go/method paramDeclOrNil "ParameterDecl = [ IdentifierList ] [ \"...\" ] Type .\n" ^{:tag (* Field)} [^{:tag (* parser)} p ^{:tag (* Name)} name ^token follow]
+  (when trace
+    (defer ((.trace p "paramDeclOrNil"))))
+
+
+  ;; type set notation is ok in type parameter lists
+  (let [typeSetsOk (== follow _Rbrack)
+
+      ^{:line 1912} pos (.pos p)]
+    (cond (!= name nil)
+      (set! pos ^{:go/via [expr node]} (.-pos name))
+      (and typeSetsOk (== ^{:go/via [scanner]} (.-tok p) _Operator) (== ^{:go/via [scanner]} (.-op p) Tilde))
+      ;; "~" ...
+      (return (.embeddedElem p nil)))
+
+
+    ^{:go/breaks [11]} (let [f (new Field)]
+      (set! ^{:go/via [node]} (.-pos f) pos)
+
+      (when (or (== ^{:go/via [scanner]} (.-tok p) _Name) (!= name nil))
+        ;; name
+        (when (== name nil)
+          (set! name (.name p)))
+
+
+        (when (== ^{:go/via [scanner]} (.-tok p) _Lbrack)
+          ;; name "[" ...
+          (set! (.-Type f) (.arrayOrTArgs p))
+          (if [(values typ ok) (assert (* IndexExpr) (.-Type f))] ok
+            ;; name "[" ... "]"
+            (set! (.-X typ) name)
+
+            ;; name "[" n "]" E
+            (set! (.-Name f) name))
+
+          (when (and typeSetsOk (== ^{:go/via [scanner]} (.-tok p) _Operator) (== ^{:go/via [scanner]} (.-op p) Or))
+            ;; name "[" ... "]" "|" ...
+            ;; name "[" n "]" E "|" ...
+            (set! f (.embeddedElem p f)))
+
+          (return f))
+
+
+        (when (== ^{:go/via [scanner]} (.-tok p) _Dot)
+          ;; name "." ...
+          (set! (.-Type f) (.qualifiedName p name))
+          (when (and typeSetsOk (== ^{:go/via [scanner]} (.-tok p) _Operator) (== ^{:go/via [scanner]} (.-op p) Or))
+            ;; name "." name "|" ...
+            (set! f (.embeddedElem p f)))
+
+          (return f))
+
+
+        (when (and typeSetsOk (== ^{:go/via [scanner]} (.-tok p) _Operator) (== ^{:go/via [scanner]} (.-op p) Or))
+          ;; name "|" ...
+          (set! (.-Type f) name)
+          (return (.embeddedElem p f)))
+
+
+        (set! (.-Name f) name))
+
+
+      (when (== ^{:go/via [scanner]} (.-tok p) _DotDotDot)
+        ;; [name] "..." ...
+        (let [t (new DotsType)]
+          (set! ^{:go/via [expr node]} (.-pos t) (.pos p))
+          ^{:go/via [scanner]} (.next p)
+          (set! (.-Elem t) (.typeOrNil p))
+          (if (== (.-Elem t) nil) (do
+              (set! (.-Type f) (.badExpr p))
+              (.syntaxError p "... is missing type"))
+
+            (set! (.-Type f) t))
+
+          (return f)))
+
+
+      (when (and typeSetsOk (== ^{:go/via [scanner]} (.-tok p) _Operator) (== ^{:go/via [scanner]} (.-op p) Tilde))
+        ;; [name] "~" ...
+        (set! (.-Type f) (.-Type (.embeddedElem p nil)))
+        (return f))
+
+
+      (set! (.-Type f) (.typeOrNil p))
+      (when (and typeSetsOk (== ^{:go/via [scanner]} (.-tok p) _Operator) (== ^{:go/via [scanner]} (.-op p) Or) (!= (.-Type f) nil))
+        ;; [name] type "|"
+        (set! f (.embeddedElem p f)))
+
+      (when (or (!= (.-Name f) nil) (!= (.-Type f) nil))
+        (return f))
+
+
+      (.syntaxError p (+ "expected " (tokstring follow)))
+      (.advance p _Comma follow)
+      nil)))
+
+
+
+
+
+
+
+
+^{:go/end 2139} (go/method paramList "Parameters    = \"(\" [ ParameterList [ \",\" ] ] \")\" .\nParameterList = ParameterDecl { \",\" ParameterDecl } .\n\"(\" or \"[\" has already been consumed.\nIf name != nil, it is the first name after \"(\" or \"[\".\nIf typ != nil, name must be != nil, and (name, typ) is the first field in the list.\nIn the result list, either all fields have a name, or no field has a name.\n" [^{:tag (* parser)} p ^{:tag (* Name)} name ^Expr typ ^token close ^bool requireNames ^bool dddok] :results [^{:tag (slice (* Field))} list]
+  (when trace
+    (defer ((.trace p "paramList"))))
+
+
+  ;; p.list won't invoke its function argument if we're at the end of the
+  ;; parameter list. If we have a complete field, handle this case here.
+  (when (and (!= name nil) (!= typ nil) (== ^{:go/via [scanner]} (.-tok p) close))
+    ^{:go/via [scanner]} (.next p)
+    (let [par (new Field)]
+      (set! ^{:go/via [node]} (.-pos par) ^{:go/via [expr node]} (.-pos name))
+      (set! (.-Name par) name)
+      (set! (.-Type par) typ)
+      (return (lit (slice (* Field)) par))))
+
+
+  (let [^int named (zero int) ; number of parameters that have an explicit name and type
+      ^{:line 2024 :tag int} typed (zero int) ; number of parameters that have an explicit type
+      ^{:line 2025} end (.list p "parameter list" _Comma close ^{:go/end 2053} (fn ^bool []
+          ^{:go/breaks [[6 2052]]} (let [^{:tag (* Field)} par (zero (* Field))]
+            (if (!= typ nil) (do
+                (when (and debug (== name nil))
+                  (panic "initial type provided without name"))
+
+                (set! par (new Field))
+                (set! ^{:go/via [node]} (.-pos par) ^{:go/via [expr node]} (.-pos name))
+                (set! (.-Name par) name)
+                (set! (.-Type par) typ))
+
+              (set! par (.paramDeclOrNil p name close)))
+
+            (set! name nil) ; 1st name was consumed if present
+            (set! typ nil) ; 1st type was consumed if present
+            (when (!= par nil)
+              (when (and debug (== (.-Name par) nil) (== (.-Type par) nil))
+                (panic "parameter without name or type"))
+
+              (when (and (!= (.-Name par) nil) (!= (.-Type par) nil))
+                (inc! named))
+
+              (when (!= (.-Type par) nil)
+                (inc! typed))
+
+              (set! list (append list par)))
+
+            false)))]
+
+
+    (when (== (len list) 0)
+      (return))
+
+
+    ;; distribute parameter types (len(list) > 0)
+    (cond (and (== named 0) (not requireNames))
+      ;; all unnamed and we're not in a type parameter list => found names are named types
+      (range [_ par list]
+        (when [typ (.-Name par)] (!= typ nil)
+          (set! (.-Type par) typ)
+          (set! (.-Name par) nil)))
+
+
+      (!= named (len list))
+      ;; some named or we're in a type parameter list => all must be named
+      (let [^Pos errPos (zero Pos) ; left-most error position (or unknown)
+          ^{:line 2071 :tag Expr} typ (zero Expr)] ; current type (from right to left)
+        (for [i (- (len list) 1)] (>= i 0) (dec! i)
+          (let [par (aget list i)]
+            (cond (!= (.-Type par) nil) (do
+                (set! typ (.-Type par))
+                (when (== (.-Name par) nil)
+                  (set! errPos (StartPos typ))
+                  (set! (.-Name par) (NewName errPos "_"))))
+
+              (!= typ nil)
+              (set! (.-Type par) typ) :else
+              (do
+                ;; par.Type == nil && typ == nil => we only have a par.Name
+                (set! errPos ^{:go/via [expr node]} (.Pos (.-Name par)))
+                (let [t (.badExpr p)]
+                  (set! ^{:go/via [expr node]} (.-pos t) errPos) ; correct position
+                  (set! (.-Type par) t))))))
+
+
+        (when (.IsKnown errPos)
+          ;; Not all parameters are named because named != len(list).
+          ;; If named == typed, there must be parameters that have no types.
+          ;; They must be at the end of the parameter list, otherwise types
+          ;; would have been filled in by the right-to-left sweep above and
+          ;; there would be no error.
+          ;; If requireNames is set, the parameter list is a type parameter
+          ;; list.
+          (let [^string msg (zero string)]
+            (if (== named typed) (do
+                (set! errPos end) ; position error at closing token ) or ]
+                (if requireNames
+                  (set! msg "missing type constraint")
+
+                  (set! msg "missing parameter type")))
+
+              (do
+                (if requireNames (do
+                    (set! msg "missing type parameter name")
+                    ;; go.dev/issue/60812
+                    (when (== (len list) 1)
+                      (set! msg + " or invalid array length")))
+
+
+                  (set! msg "missing parameter name"))))
+
+
+            (.syntaxErrorAt p errPos msg)))))
+
+
+
+    ;; check use of ...
+    (let [first true] ; only report first occurrence
+      (range [i f list]
+        (when [(values t _) (assert (* DotsType) (.-Type f))] (and (!= t nil) ^:go/paren (or (not dddok) (< (+ i 1) (len list))))
+          (when first
+            (set! first false)
+            (if dddok
+              (.errorAt p ^{:go/via [expr node]} (.-pos t) "can only use ... with final parameter")
+
+              (.errorAt p ^{:go/via [expr node]} (.-pos t) "invalid use of ...")))
+
+
+          ;; use T instead of invalid ...T
+          (set! (.-Type f) (.-Elem t))))
+
+
+
+      (return))))
+
+
+^{:go/end 2145} (go/method badExpr ^{:tag (* BadExpr)} [^{:tag (* parser)} p]
+  (let [b (new BadExpr)]
+    (set! ^{:go/via [expr node]} (.-pos b) (.pos p))
+    ^{:line 2144} b))
+
+
+;; ----------------------------------------------------------------------------
+;; Statements
+
+
+^{:go/end 2245} (go/method simpleStmt "SimpleStmt = EmptyStmt | ExpressionStmt | SendStmt | IncDecStmt | Assignment | ShortVarDecl .\n" ^SimpleStmt [^{:tag (* parser)} p ^Expr lhs ^token keyword]
+  (when trace
+    (defer ((.trace p "simpleStmt"))))
+
+
+  (when (and (== keyword _For) (== ^{:go/via [scanner]} (.-tok p) _Range))
+    ;; _Range expr
+    (when (and debug (!= lhs nil))
+      (panic "invalid call of simpleStmt"))
+
+    (return (.newRangeClause p nil false)))
+
+
+  (when (== lhs nil)
+    (set! lhs (.exprList p)))
+
+
+  (when [(values _ ok) (assert (* ListExpr) lhs)] (and (not ok) (!= ^{:go/via [scanner]} (.-tok p) _Assign) (!= ^{:go/via [scanner]} (.-tok p) _Define))
+    ;; expr
+    (let [pos (.pos p)]
+      (switch ^{:go/via [scanner]} (.-tok p)
+        (case [_AssignOp]
+          ;; lhs op= rhs
+          (let [op ^{:go/via [scanner]} (.-op p)]
+            ^{:go/via [scanner]} (.next p)
+            (return (.newAssignStmt p pos op lhs (.expr p)))))
+
+        (case [_IncOp]
+          ;; lhs++ or lhs--
+          (let [op ^{:go/via [scanner]} (.-op p)]
+            ^{:go/via [scanner]} (.next p)
+            (return (.newAssignStmt p pos op lhs nil))))
+
+        (case [_Arrow]
+          ;; lhs <- rhs
+          (let [s (new SendStmt)]
+            (set! ^{:go/via [simpleStmt stmt node]} (.-pos s) pos)
+            ^{:go/via [scanner]} (.next p)
+            (set! (.-Chan s) lhs)
+            (set! (.-Value s) (.expr p))
+            (return s)))
+
+        (default
+          ;; expr
+          (let [s (new ExprStmt)]
+            (set! ^{:go/via [simpleStmt stmt node]} (.-pos s) (.Pos lhs))
+            (set! (.-X s) lhs)
+            (return s))))))
+
+
+
+  ;; expr_list
+  (switch ^{:go/via [scanner]} (.-tok p)
+    (case [_Assign _Define]
+      (let [pos (.pos p)
+          ^{:line 2206 :tag Operator} op (zero Operator)]
+        (when (== ^{:go/via [scanner]} (.-tok p) _Define)
+          (set! op Def))
+
+        ^{:go/via [scanner]} (.next p)
+
+        (when (and (== keyword _For) (== ^{:go/via [scanner]} (.-tok p) _Range))
+          ;; expr_list op= _Range expr
+          (return (.newRangeClause p lhs (== op Def))))
+
+
+        ;; expr_list op= expr_list
+        (let [rhs (.exprList p)]
+
+          (when [(values x ok) (assert (* TypeSwitchGuard) rhs)] (and ok (== keyword _Switch) (== op Def))
+            (when [(values lhs ok) (assert (* Name) lhs)] ok
+              ;; switch … lhs := rhs.(type)
+              (set! (.-Lhs x) lhs)
+              (let [s (new ExprStmt)]
+                (set! ^{:go/via [simpleStmt stmt node]} (.-pos s) ^{:go/via [expr node]} (.Pos x))
+                (set! (.-X s) x)
+                (return s))))
+
+
+
+          (return (.newAssignStmt p pos op lhs rhs)))))
+
+    (default
+      (.syntaxError p "expected := or = or comma")
+      (.advance p _Semi _Rbrace)
+      ;; make the best of what we have
+      (when [(values x ok) (assert (* ListExpr) lhs)] ok
+        (set! lhs (aget (.-ElemList x) 0)))
+
+      (let [s (new ExprStmt)]
+        (set! ^{:go/via [simpleStmt stmt node]} (.-pos s) (.Pos lhs))
+        (set! (.-X s) lhs)
+        (return s)))))
+
+
+
+^{:go/end 2255} (go/method newRangeClause ^{:tag (* RangeClause)} [^{:tag (* parser)} p ^Expr lhs ^bool def]
+  (let [r (new RangeClause)]
+    (set! ^{:go/via [simpleStmt stmt node]} (.-pos r) (.pos p))
+    ^{:go/via [scanner]} (.next p) ; consume _Range
+    (set! (.-Lhs r) lhs)
+    (set! (.-Def r) def)
+    (set! (.-X r) (.expr p))
+    ^{:line 2254} r))
+
+
+^{:go/end 2264} (go/method newAssignStmt ^{:tag (* AssignStmt)} [^{:tag (* parser)} p ^Pos pos ^Operator op ^Expr lhs ^Expr rhs]
+  (let [a (new AssignStmt)]
+    (set! ^{:go/via [simpleStmt stmt node]} (.-pos a) pos)
+    (set! (.-Op a) op)
+    (set! (.-Lhs a) lhs)
+    (set! (.-Rhs a) rhs)
+    ^{:line 2263} a))
+
+
+^{:go/end 2296} (go/method labeledStmtOrNil ^Stmt [^{:tag (* parser)} p ^{:tag (* Name)} label]
+  (when trace
+    (defer ((.trace p "labeledStmt"))))
+
+
+  ^{:go/breaks [[9 2295]]} (let [s (new LabeledStmt)]
+    (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+    (set! (.-Label s) label)
+
+    (.want p _Colon)
+
+    (when (== ^{:go/via [scanner]} (.-tok p) _Rbrace)
+      ;; We expect a statement (incl. an empty statement), which must be
+      ;; terminated by a semicolon. Because semicolons may be omitted before
+      ;; an _Rbrace, seeing an _Rbrace implies an empty statement.
+      (let [e (new EmptyStmt)]
+        (set! ^{:go/via [simpleStmt stmt node]} (.-pos e) (.pos p))
+        (set! (.-Stmt s) e)
+        (return s)))
+
+
+    (set! (.-Stmt s) (.stmtOrNil p))
+    (when (!= (.-Stmt s) nil)
+      (return s))
+
+
+    ;; report error at line of ':' token
+    (.syntaxErrorAt p ^{:go/via [stmt node]} (.-pos s) "missing statement after label")
+    ;; we are already at the end of the labeled statement - no need to advance
+    nil)) ; avoids follow-on errors (see e.g., fixedbugs/bug274.go)
+
+
+
+^{:go/end 2322} (go/method blockStmt "context must be a non-empty string unless we know that p.tok == _Lbrace.\n" ^{:tag (* BlockStmt)} [^{:tag (* parser)} p ^string context]
+  (when trace
+    (defer ((.trace p "blockStmt"))))
+
+
+  (let [s (new BlockStmt)]
+    (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+
+    ;; people coming from C may forget that braces are mandatory in Go
+    (when (not (.got p _Lbrace))
+      (.syntaxError p (+ "expected { after " context))
+      (.advance p _Name _Rbrace)
+      (set! (.-Rbrace s) (.pos p)) ; in case we found "}"
+      (when (.got p _Rbrace)
+        (return s)))
+
+
+
+    (set! (.-List s) (.stmtList p))
+    (set! (.-Rbrace s) (.pos p))
+    (.want p _Rbrace)
+
+    ^{:line 2321} s))
+
+
+^{:go/end 2336} (go/method declStmt ^{:tag (* DeclStmt)} [^{:tag (* parser)} p ^{:tag (func [(* Group)] [Decl])} f]
+  (when trace
+    (defer ((.trace p "declStmt"))))
+
+
+  (let [s (new DeclStmt)]
+    (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+
+    ^{:go/via [scanner]} (.next p) ; _Const, _Type, or _Var
+    (set! (.-DeclList s) (.appendGroup p nil f))
+
+    ^{:line 2335} s))
+
+
+^{:go/end 2350} (go/method forStmt ^Stmt [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "forStmt"))))
+
+
+  (let [s (new ForStmt)]
+    (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+
+    (set! (values (.-Init s) (.-Cond s) (.-Post s)) (.header p _For))
+    (set! (.-Body s) (.blockStmt p "for clause"))
+
+    ^{:line 2349} s))
+
+
+^{:go/end 2453} (go/method header [^{:tag (* parser)} p ^token keyword] :results [^SimpleStmt init ^Expr cond ^SimpleStmt post]
+  (.want p keyword)
+
+  (when (== ^{:go/via [scanner]} (.-tok p) _Lbrace)
+    (when (== keyword _If)
+      (.syntaxError p "missing condition in if statement")
+      (set! cond (.badExpr p)))
+
+    (return))
+
+  ;; p.tok != _Lbrace
+
+  (let [outer (.-xnest p)]
+    (set! (.-xnest p) -1)
+
+    (when (!= ^{:go/via [scanner]} (.-tok p) _Semi)
+      ;; accept potential varDecl but complain
+      (when (.got p _Var)
+        (.syntaxError p (fmt/Sprintf "var declaration not allowed in %s initializer" (.String keyword))))
+
+      (set! init (.simpleStmt p nil keyword))
+      ;; If we have a range clause, we are done (can only happen for keyword == _For).
+      (when [(values _ ok) (assert (* RangeClause) init)] ok
+        (set! (.-xnest p) outer)
+        (return)))
+
+
+
+    (let [^SimpleStmt condStmt (zero SimpleStmt)
+        ^{:line 2381 :tag (struct ^Pos pos ^string lit)} semi (zero (struct
+            ^{:line 2382 :tag Pos} pos
+            ^{:line 2383 :tag string} lit))] ; valid if pos.IsKnown()
+
+      (if (!= ^{:go/via [scanner]} (.-tok p) _Lbrace) (do
+          (if (== ^{:go/via [scanner]} (.-tok p) _Semi) (do
+              (set! (.-pos semi) (.pos p))
+              (set! (.-lit semi) ^{:go/via [scanner]} (.-lit p))
+              ^{:go/via [scanner]} (.next p))
+            (do
+              ;; asking for a '{' rather than a ';' here leads to a better error message
+              (.want p _Lbrace)
+              (when (!= ^{:go/via [scanner]} (.-tok p) _Lbrace)
+                (.advance p _Lbrace _Rbrace)))) ; for better synchronization (e.g., go.dev/issue/22581)
+
+
+          (cond (== keyword _For) (do
+              (when (!= ^{:go/via [scanner]} (.-tok p) _Semi)
+                (when (== ^{:go/via [scanner]} (.-tok p) _Lbrace)
+                  (.syntaxError p "expected for loop condition")
+                  (goto :done))
+
+                (set! condStmt (.simpleStmt p nil 0))) ; /* range not permitted */
+
+              (.want p _Semi)
+              (when (!= ^{:go/via [scanner]} (.-tok p) _Lbrace)
+                (set! post (.simpleStmt p nil 0)) ; /* range not permitted */
+                (when [(values a _) (assert (* AssignStmt) post)] (and (!= a nil) (== (.-Op a) Def))
+                  (.syntaxErrorAt p ^{:go/via [simpleStmt stmt node]} (.Pos a) "cannot declare in post statement of for loop"))))
+
+
+            (!= ^{:go/via [scanner]} (.-tok p) _Lbrace)
+            (set! condStmt (.simpleStmt p nil keyword))))
+
+        (do
+          (set! condStmt init)
+          (set! init nil)))
+
+
+      (label :done
+        ;; unpack condStmt
+        (type-switch [s condStmt]
+          (case [nil]
+            (when (and (== keyword _If) (.IsKnown (.-pos semi)))
+              (if (!= (.-lit semi) "semicolon")
+                (.syntaxErrorAt p (.-pos semi) (fmt/Sprintf "unexpected %s, expected { after if clause" (.-lit semi)))
+
+                (.syntaxErrorAt p (.-pos semi) "missing condition in if statement"))
+
+              (let [b (new BadExpr)]
+                (set! ^{:go/via [expr node]} (.-pos b) (.-pos semi))
+                (set! cond b))))
+
+          (case [(* ExprStmt)]
+            (set! cond (.-X s)))
+          (default
+            ;; A common syntax error is to write '=' instead of '==',
+            ;; which turns an expression into an assignment. Provide
+            ;; a more explicit error message in that case to prevent
+            ;; further confusion.
+            (let [^string str (zero string)]
+              (if [(values as ok) (assert (* AssignStmt) s)] (and ok (== (.-Op as) 0))
+                ;; Emphasize complex Lhs and Rhs of assignment with parentheses to highlight '='.
+                (set! str (+ "assignment " (emphasize (.-Lhs as)) " = " (emphasize (.-Rhs as))))
+
+                (set! str (String s)))
+
+              (.syntaxErrorAt p (.Pos s) (fmt/Sprintf "cannot use %s as value" str))))))
+
+
+      (set! (.-xnest p) outer)
+      (return))))
+
+
+
+
+^{:go/end 2464} (go/func emphasize "emphasize returns a string representation of x, with (top-level)\nbinary expressions emphasized by enclosing them in parentheses.\n" ^string [^Expr x]
+  (let [s (String x)]
+    (when [(values op _) (assert (* Operation) x)] (and (!= op nil) (!= (.-Y op) nil))
+      ;; binary expression
+      (return (+ "(" s ")")))
+
+    ^{:line 2463} s))
+
+
+^{:go/end 2490} (go/method ifStmt ^{:tag (* IfStmt)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "ifStmt"))))
+
+
+  (let [s (new IfStmt)]
+    (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+
+    (set! (values (.-Init s) (.-Cond s) _) (.header p _If))
+    (set! (.-Then s) (.blockStmt p "if clause"))
+
+    (when (.got p _Else)
+      (switch ^{:go/via [scanner]} (.-tok p)
+        (case [_If]
+          (set! (.-Else s) (.ifStmt p)))
+        (case [_Lbrace]
+          (set! (.-Else s) (.blockStmt p "")))
+        (default
+          (.syntaxError p "else must be followed by if or statement block")
+          (.advance p _Name _Rbrace))))
+
+
+
+    ^{:line 2489} s))
+
+
+^{:go/end 2513} (go/method switchStmt ^{:tag (* SwitchStmt)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "switchStmt"))))
+
+
+  (let [s (new SwitchStmt)]
+    (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+
+    (set! (values (.-Init s) (.-Tag s) _) (.header p _Switch))
+
+    (when (not (.got p _Lbrace))
+      (.syntaxError p "missing { after switch clause")
+      (.advance p _Case _Default _Rbrace))
+
+    (while (and (!= ^{:go/via [scanner]} (.-tok p) _EOF) (!= ^{:go/via [scanner]} (.-tok p) _Rbrace))
+      (set! (.-Body s) (append (.-Body s) (.caseClause p))))
+
+    (set! (.-Rbrace s) (.pos p))
+    (.want p _Rbrace)
+
+    ^{:line 2512} s))
+
+
+^{:go/end 2535} (go/method selectStmt ^{:tag (* SelectStmt)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "selectStmt"))))
+
+
+  (let [s (new SelectStmt)]
+    (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+
+    (.want p _Select)
+    (when (not (.got p _Lbrace))
+      (.syntaxError p "missing { after select clause")
+      (.advance p _Case _Default _Rbrace))
+
+    (while (and (!= ^{:go/via [scanner]} (.-tok p) _EOF) (!= ^{:go/via [scanner]} (.-tok p) _Rbrace))
+      (set! (.-Body s) (append (.-Body s) (.commClause p))))
+
+    (set! (.-Rbrace s) (.pos p))
+    (.want p _Rbrace)
+
+    ^{:line 2534} s))
+
+
+^{:go/end 2563} (go/method caseClause ^{:tag (* CaseClause)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "caseClause"))))
+
+
+  (let [c (new CaseClause)]
+    (set! ^{:go/via [node]} (.-pos c) (.pos p))
+
+    (switch ^{:go/via [scanner]} (.-tok p)
+      (case [_Case]
+        ^{:go/via [scanner]} (.next p)
+        (set! (.-Cases c) (.exprList p)))
+
+      (case [_Default]
+        ^{:go/via [scanner]} (.next p))
+
+      (default
+        (.syntaxError p "expected case or default or }")
+        (.advance p _Colon _Case _Default _Rbrace)))
+
+
+    (set! (.-Colon c) (.pos p))
+    (.want p _Colon)
+    (set! (.-Body c) (.stmtList p))
+
+    ^{:line 2562} c))
+
+
+^{:go/end 2601} (go/method commClause ^{:tag (* CommClause)} [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "commClause"))))
+
+
+  (let [c (new CommClause)]
+    (set! ^{:go/via [node]} (.-pos c) (.pos p))
+
+    (switch ^{:go/via [scanner]} (.-tok p)
+      (case [_Case]
+        ^{:go/via [scanner]} (.next p)
+        (set! (.-Comm c) (.simpleStmt p nil 0)))
+
+      ;; The syntax restricts the possible simple statements here to:
+      ;;
+      ;;     lhs <- x (send statement)
+      ;;     <-x
+      ;;     lhs = <-x
+      ;;     lhs := <-x
+      ;;
+      ;; All these (and more) are recognized by simpleStmt and invalid
+      ;; syntax trees are flagged later, during type checking.
+
+      (case [_Default]
+        ^{:go/via [scanner]} (.next p))
+
+      (default
+        (.syntaxError p "expected case or default or }")
+        (.advance p _Colon _Case _Default _Rbrace)))
+
+
+    (set! (.-Colon c) (.pos p))
+    (.want p _Colon)
+    (set! (.-Body c) (.stmtList p))
+
+    ^{:line 2600} c))
+
+
+
+
+
+
+
+
+
+^{:go/breaks [[9 2709]] :go/end 2710} (go/method stmtOrNil "stmtOrNil parses a statement if one is present, or else returns nil.\n\n\tStatement =\n\t\tDeclaration | LabeledStmt | SimpleStmt |\n\t\tGoStmt | ReturnStmt | BreakStmt | ContinueStmt | GotoStmt |\n\t\tFallthroughStmt | Block | IfStmt | SwitchStmt | SelectStmt | ForStmt |\n\t\tDeferStmt .\n" ^Stmt [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p (+ "stmt " (.String ^{:go/via [scanner]} (.-tok p)))))))
+
+
+  ;; Most statements (assignments) start with an identifier;
+  ;; look for it first before doing anything more expensive.
+  (when (== ^{:go/via [scanner]} (.-tok p) _Name)
+    (.clearPragma p)
+    (let [lhs (.exprList p)]
+      (when [(values label ok) (assert (* Name) lhs)] (and ok (== ^{:go/via [scanner]} (.-tok p) _Colon))
+        (return (.labeledStmtOrNil p label)))
+
+      (return (.simpleStmt p lhs 0))))
+
+
+  (switch ^{:go/via [scanner]} (.-tok p)
+    (case [_Var]
+      (return (.declStmt p (.-varDecl p))))
+
+    (case [_Const]
+      (return (.declStmt p (.-constDecl p))))
+
+    (case [_Type]
+      (return (.declStmt p (.-typeDecl p)))))
+
+
+  (.clearPragma p)
+
+  (switch ^{:go/via [scanner]} (.-tok p)
+    (case [_Lbrace]
+      (return (.blockStmt p "")))
+
+    (case [_Operator _Star]
+      (switch ^{:go/via [scanner]} (.-op p)
+        (case [Add Sub Mul And Xor Not]
+          (return (.simpleStmt p nil 0))))) ; unary operators
+
+
+    (case [_Literal _Func _Lparen ; operands
+        ^{:line 2650} _Lbrack _Struct _Map _Chan _Interface ; composite types
+        ^{:line 2651} _Arrow] ; receive operator
+      (return (.simpleStmt p nil 0)))
+
+    (case [_For]
+      (return (.forStmt p)))
+
+    (case [_Switch]
+      (return (.switchStmt p)))
+
+    (case [_Select]
+      (return (.selectStmt p)))
+
+    (case [_If]
+      (return (.ifStmt p)))
+
+    (case [_Fallthrough]
+      (let [s (new BranchStmt)]
+        (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+        ^{:go/via [scanner]} (.next p)
+        (set! (.-Tok s) _Fallthrough)
+        (return s)))
+
+    (case [_Break _Continue]
+      (let [s (new BranchStmt)]
+        (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+        (set! (.-Tok s) ^{:go/via [scanner]} (.-tok p))
+        ^{:go/via [scanner]} (.next p)
+        (when (== ^{:go/via [scanner]} (.-tok p) _Name)
+          (set! (.-Label s) (.name p)))
+
+        (return s)))
+
+    (case [_Go _Defer]
+      (return (.callStmt p)))
+
+    (case [_Goto]
+      (let [s (new BranchStmt)]
+        (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+        (set! (.-Tok s) _Goto)
+        ^{:go/via [scanner]} (.next p)
+        (set! (.-Label s) (.name p))
+        (return s)))
+
+    (case [_Return]
+      (let [s (new ReturnStmt)]
+        (set! ^{:go/via [stmt node]} (.-pos s) (.pos p))
+        ^{:go/via [scanner]} (.next p)
+        (when (and (!= ^{:go/via [scanner]} (.-tok p) _Semi) (!= ^{:go/via [scanner]} (.-tok p) _Rbrace))
+          (set! (.-Results s) (.exprList p)))
+
+        (return s)))
+
+    (case [_Semi]
+      (let [s (new EmptyStmt)]
+        (set! ^{:go/via [simpleStmt stmt node]} (.-pos s) (.pos p))
+        (return s))))
+
+
+  nil)
+
+
+
+^{:go/end 2733} (go/method stmtList "StatementList = { Statement \";\" } .\n" [^{:tag (* parser)} p] :results [^{:tag (slice Stmt)} l]
+  (when trace
+    (defer ((.trace p "stmtList"))))
+
+
+  (while (and (!= ^{:go/via [scanner]} (.-tok p) _EOF) (!= ^{:go/via [scanner]} (.-tok p) _Rbrace) (!= ^{:go/via [scanner]} (.-tok p) _Case) (!= ^{:go/via [scanner]} (.-tok p) _Default))
+    (let [s (.stmtOrNil p)]
+      (.clearPragma p)
+      (when (== s nil)
+        (break))
+
+      (set! l (append l s))
+      ;; ";" is optional before "}"
+      (when (and (not (.got p _Semi)) (!= ^{:go/via [scanner]} (.-tok p) _Rbrace))
+        (.syntaxError p "at end of statement")
+        (.advance p _Semi _Rbrace _Case _Default)
+        (.got p _Semi)))) ; avoid spurious empty statement
+
+
+  (return))
+
+
+
+
+
+
+
+^{:go/end 2754} (go/method argList "argList parses a possibly empty, comma-separated list of arguments,\noptionally followed by a comma (if not empty), and closed by \")\".\nThe last argument may be followed by \"...\".\n\nargList = [ arg { \",\" arg } [ \"...\" ] [ \",\" ] ] \")\" .\n" [^{:tag (* parser)} p] :results [^{:tag (slice Expr)} list ^bool hasDots]
+  (when trace
+    (defer ((.trace p "argList"))))
+
+
+  (inc! (.-xnest p))
+  (.list p "argument list" _Comma _Rparen ^{:go/end 2750} (fn ^bool []
+      (set! list (append list (.expr p)))
+      (set! hasDots (.got p _DotDotDot))
+      ^{:line 2749} hasDots))
+
+  (dec! (.-xnest p))
+
+  (return))
+
+
+;; ----------------------------------------------------------------------------
+;; Common productions
+
+^{:go/end 2772} (go/method name ^{:tag (* Name)} [^{:tag (* parser)} p]
+  ;; no tracing to avoid overly verbose output
+
+  (when (== ^{:go/via [scanner]} (.-tok p) _Name)
+    (let [n (NewName (.pos p) ^{:go/via [scanner]} (.-lit p))]
+      ^{:go/via [scanner]} (.next p)
+      (return n)))
+
+
+  (let [n (NewName (.pos p) "_")]
+    (.syntaxError p "expected name")
+    (.advance p)
+    ^{:line 2771} n))
+
+
+
+
+^{:go/end 2791} (go/method nameList "IdentifierList = identifier { \",\" identifier } .\nThe first name must be provided.\n" ^{:tag (slice (* Name))} [^{:tag (* parser)} p ^{:tag (* Name)} first]
+  (when trace
+    (defer ((.trace p "nameList"))))
+
+
+  (when (and debug (== first nil))
+    (panic "first name not provided"))
+
+
+  (let [l (lit (slice (* Name)) first)]
+    (while (.got p _Comma)
+      (set! l (append l (.name p))))
+
+
+    ^{:line 2790} l))
+
+
+
+^{:go/end 2825} (go/method qualifiedName "The first name may be provided, or nil.\n" ^Expr [^{:tag (* parser)} p ^{:tag (* Name)} name]
+  (when trace
+    (defer ((.trace p "qualifiedName"))))
+
+
+  (let [^Expr x (zero Expr)]
+    (switch
+      (case [(!= name nil)]
+        (set! x name))
+      (case [(== ^{:go/via [scanner]} (.-tok p) _Name)]
+        (set! x (.name p)))
+      (default
+        (set! x (NewName (.pos p) "_"))
+        (.syntaxError p "expected name")
+        (.advance p _Dot _Semi _Rbrace)))
+
+
+    (when (== ^{:go/via [scanner]} (.-tok p) _Dot)
+      (let [s (new SelectorExpr)]
+        (set! ^{:go/via [expr node]} (.-pos s) (.pos p))
+        ^{:go/via [scanner]} (.next p)
+        (set! (.-X s) x)
+        (set! (.-Sel s) (.name p))
+        (set! x s)))
+
+
+    (when (== ^{:go/via [scanner]} (.-tok p) _Lbrack)
+      (set! x (.typeInstance p x)))
+
+
+    ^{:line 2824} x))
+
+
+
+^{:go/end 2845} (go/method exprList "ExpressionList = Expression { \",\" Expression } .\n" ^Expr [^{:tag (* parser)} p]
+  (when trace
+    (defer ((.trace p "exprList"))))
+
+
+  (let [x (.expr p)]
+    (when (.got p _Comma)
+      (let [list (lit (slice Expr) x (.expr p))]
+        (while (.got p _Comma)
+          (set! list (append list (.expr p))))
+
+        (let [t (new ListExpr)]
+          (set! ^{:go/via [expr node]} (.-pos t) (.Pos x))
+          (set! (.-ElemList t) list)
+          (set! x t))))
+
+    ^{:line 2844} x))
+
+
+
+
+
+
+
+
+
+
+^{:go/end 2884} (go/method typeList "typeList parses a non-empty, comma-separated list of types,\noptionally followed by a comma. If strict is set to false,\nthe first element may also be a (non-type) expression.\nIf there is more than one argument, the result is a *ListExpr.\nThe comma result indicates whether there was a (separating or\ntrailing) comma.\n\ntypeList = arg { \",\" arg } [ \",\" ] .\n" [^{:tag (* parser)} p ^bool strict] :results [^Expr x ^bool comma]
+  (when trace
+    (defer ((.trace p "typeList"))))
+
+
+  (inc! (.-xnest p))
+  (if strict
+    (set! x (.type_ p))
+
+    (set! x (.expr p)))
+
+  (when (.got p _Comma)
+    (set! comma true)
+    (when [t (.typeOrNil p)] (!= t nil)
+      (let [list (lit (slice Expr) x t)]
+        (while (.got p _Comma)
+          (when [(set! t (.typeOrNil p))] (== t nil)
+            (break))
+
+          (set! list (append list t)))
+
+        (let [l (new ListExpr)]
+          (set! ^{:go/via [expr node]} (.-pos l) (.Pos x)) ; == list[0].Pos()
+          (set! (.-ElemList l) list)
+          (set! x l)))))
+
+
+  (dec! (.-xnest p))
+  (return))
+
+
+
+^{:go/end 2896} (go/func Unparen "Unparen returns e with any enclosing parentheses stripped.\n" ^Expr [^Expr x]
+  (while true
+    (let [(values p ok) (assert (* ParenExpr) x)]
+      (when (not ok)
+        (break))
+
+      (set! x (.-X p))))
+
+  ^{:line 2895} x)
+
+
+
+^{:go/end 2908} (go/func UnpackListExpr "UnpackListExpr unpacks a *ListExpr into a []Expr.\n" ^{:tag (slice Expr)} [^Expr x]
+  (type-switch [x x]
+    (case [nil]
+      (return nil))
+    (case [(* ListExpr)]
+      (return (.-ElemList x)))
+    (default
+      (return (lit (slice Expr) x)))))

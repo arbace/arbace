@@ -1,0 +1,46 @@
+(in-ns 'go.arbace.repr.go.gcsyntax)
+
+(go/file "errors.go"
+  :doc "Package gcsyntax reports a Go file's syntax errors as gc does: cmd/compile/internal/syntax's, kept and ordered as gc's base.ErrorfAt and base.FlushErrors keep and order them (doc/go/GO-PARSER-SURVEY.md GP6).\n"
+  :imports [[bytes "bytes"] [os "os"] [sort "sort"] [strconv "strconv"] [strings "strings"]
+            [syntax "arbace/repr/go/internal/syntax"]])
+
+(go/type serr (struct ^uint line ^uint col ^string msg))
+
+(go/func Errors "Errors parses the Go file at path as gc's noder does (syntax.Parse, its errors to a handler, CheckBranches) and returns its errors as gc prints them with -C, a line each, name:LINE: MESSAGE, after a first character S when one of them is a syntax error (gc stops after the parse), else -.\n"
+  ^string [^string path ^string name]
+  (let [(values src err) (os/ReadFile path)]
+    (when (!= err nil) (return (+ "-" name ": " (.Error err) "\n")))
+    (let [errs (make (slice serr) 0)
+          syn false
+          lastSyntax (conv uint 0)
+          lastOther (conv uint 0)
+          lastMsg ""
+          h (fn [^error e]
+              (let [se (assert syntax/Error e)
+                    line (.Line (.-Pos se))
+                    msg (.-Msg se)]
+                ;; base.ErrorfAt: one syntax error per line, one of equal other errors
+                (cond
+                  (strings/HasPrefix msg "syntax error")
+                  (do (when (and (!= lastSyntax 0) (== line lastSyntax)) (return))
+                      (set! lastSyntax line)
+                      (set! syn true))
+                  :else
+                  (do (when (and (!= lastOther 0) (== line lastOther) (== msg lastMsg)) (return))
+                      (set! lastOther line)
+                      (set! lastMsg msg)))
+                (set! errs (append errs (lit serr :line line :col (.Col (.-Pos se)) :msg msg)))))]
+      (syntax/Parse (syntax/NewFileBase path) (bytes/NewReader src) h nil syntax/CheckBranches)
+      ;; base.FlushErrors: sorted by position, an error equal to the one before it once
+      (sort/SliceStable errs (fn ^bool [^int i ^int j]
+                               (let [a (aget errs i) b (aget errs j)]
+                                 (or (< (.-line a) (.-line b))
+                                     (and (== (.-line a) (.-line b)) (< (.-col a) (.-col b)))))))
+      (let [out "" prev ""]
+        (range [_ e errs]
+          (let [l (+ name ":" (strconv/FormatUint (conv uint64 (.-line e)) 10) ": " (.-msg e) "\n")]
+            (when (!= l prev) (set! out + l))
+            (set! prev l)))
+        (when syn (return (+ "S" out)))
+        (+ "-" out)))))
