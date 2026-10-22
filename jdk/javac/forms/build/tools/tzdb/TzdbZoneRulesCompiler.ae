@@ -1,0 +1,194 @@
+;; Converted from jdk26u make/jdk/src/classes/build/tools/tzdb/TzdbZoneRulesCompiler.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'build.tools.tzdb)
+
+(import '(java.io ByteArrayOutputStream DataOutputStream)
+        '(java.nio.file Files Path Paths)
+        '(java.util ArrayList Arrays List Map Map$Entry SortedMap TreeMap)
+        '(java.util.regex Pattern)
+        '(java.util.stream Collectors))
+
+(defclass ^:public ^:final TzdbZoneRulesCompiler
+  (method ^:public ^:static main ^void [^String/1 args]
+    (.compile (TzdbZoneRulesCompiler.) args))
+
+  (method ^:private compile ^void [this ^:mutable ^String/1 args]
+    (if (< (alength args) 2)
+        (TzdbZoneRulesCompiler/outputHelp)
+        (let [^:mutable ^Path srcDir nil
+              ^:mutable ^Path dstFile nil
+              ^:mutable ^String version nil
+              ^:mutable ^int i 0]
+          (set! i 0)
+          (while (< i (alength args))
+            (let [arg (aget args i)]
+              (when-not (.startsWith arg "-") (break))
+              (cond
+                (.equals "-srcdir" arg)
+                  (when (and (nil? srcDir) (< (set! i (unchecked-inc-int i)) (alength args)))
+                    (set! srcDir (Paths/get (aget args i) (new String/1 [])))
+                    (set! i (unchecked-inc-int i))
+                    (continue))
+                (.equals "-dstfile" arg)
+                  (when (and (nil? dstFile) (< (set! i (unchecked-inc-int i)) (alength args)))
+                    (set! dstFile (Paths/get (aget args i) (new String/1 [])))
+                    (set! i (unchecked-inc-int i))
+                    (continue))
+                (.equals "-verbose" arg)
+                  (when-not verbose (set! verbose true) (set! i (unchecked-inc-int i)) (continue))
+                :else
+                  (when-not (.equals "-help" arg)
+                    (.println System/out (java-str "Unrecognised option: " arg))))
+              (TzdbZoneRulesCompiler/outputHelp)
+              (return))
+            (set! i (unchecked-inc-int i)))
+          (when (nil? srcDir)
+            (.println System/err "Source directory must be specified using -srcdir")
+            (System/exit 1))
+          (when-not (Files/isDirectory srcDir)
+            (.println System/err (java-str "Source does not exist or is not a directory: " srcDir))
+            (System/exit 1))
+          (when (== i (alength args))
+            (set! i 0)
+            (set! args
+                  (new String/1
+                       ["africa" "antarctica" "asia" "australasia" "europe" "northamerica"
+                        "southamerica" "backward" "etcetera"]))
+            (.println System/out "Source filenames not specified, using default set ( ")
+            (for-each [^String name args]
+              (.printf System/out (java-str name " ") (new Object/1 [])))
+            (.println System/out ")"))
+          (let [^{:tag (List Path)} srcFiles (ArrayList.)]
+            (while (< i (alength args))
+              (let [file (.resolve srcDir (aget args i))]
+                (if (Files/exists file)
+                    (.add srcFiles file)
+                    (do
+                      (.println System/err
+                                (java-str "Source directory does not contain source file: "
+                                          (aget args i)))
+                      (System/exit 1))))
+              (set! i (unchecked-inc-int i)))
+            (if (nil? dstFile)
+                (set! dstFile (.resolve srcDir "tzdb.dat"))
+                (let [parent (.getParent dstFile)]
+                  (when (and (some? parent) (not (Files/exists parent)))
+                    (.println System/err (java-str "Destination directory does not exist: " parent))
+                    (System/exit 1))))
+            (try
+              (let [m (.matcher (Pattern/compile "tzdata(?<ver>[0-9]{4}[A-z])")
+                                (String. (Files/readAllBytes (.resolve srcDir "VERSION"))
+                                         "ISO-8859-1"))]
+                (if (.find m)
+                    (set! version (.group m "ver"))
+                    (do
+                      (System/exit 1)
+                      (.println System/err "Source directory does not contain file: VERSION")))
+                (.printVerbose this (java-str "Compiling TZDB version " version))
+                (let [provider (TzdbZoneRulesProvider. srcFiles)]
+                  (.printVerbose this "Building rules")
+                  (let [^{:tag (SortedMap String ZoneRules)} builtZones (TreeMap.)]
+                    (for-each [^String zoneId (.getZoneIds provider)]
+                      (.printVerbose this (java-str "Building zone " zoneId))
+                      (.put builtZones zoneId (.getZoneRules provider zoneId)))
+                    (let [^{:tag (Map String String)} links (.getAliasMap provider)]
+                      (for-each [^String aliasId (.keySet links)]
+                        (let [^:mutable realId (cast String (.get links aliasId))]
+                          (.printVerbose this (java-str "Linking alias " aliasId " to " realId))
+                          (let [^:mutable realRules (cast ZoneRules (.get builtZones realId))]
+                            (when (nil? realRules)
+                              (set! realId (cast String (.get links realId)))
+                              (.printVerbose this
+                                             (java-str "Relinking alias " aliasId " to " realId))
+                              (set! realRules (cast ZoneRules (.get builtZones realId)))
+                              (when (nil? realRules)
+                                (throw (IllegalArgumentException.
+                                         (java-str
+                                           "Alias '"
+                                           aliasId
+                                           "' links to invalid zone '"
+                                           realId))))
+                              (.put links aliasId realId))
+                            (.put builtZones aliasId realRules))))
+                      (.printVerbose this (java-str "Outputting tzdb file: " dstFile))
+                      (.outputFile this dstFile version builtZones links)))))
+              (catch Exception ex
+                (.println System/out (java-str "Failed: " (.toString ex)))
+                (.printStackTrace ex)
+                (System/exit 1)))
+            (System/exit 0)))))
+
+  (method ^:private ^:static outputHelp ^void []
+    (.println System/out "Usage: TzdbZoneRulesCompiler <options> <tzdb source filenames>")
+    (.println System/out "where options include:")
+    (.println System/out "   -srcdir  <directory>  Where to find tzdb source directory (required)")
+    (.println System/out
+              "   -dstfile <file>       Where to output generated file (default srcdir/tzdb.dat)")
+    (.println System/out "   -help                 Print this usage message")
+    (.println System/out "   -verbose              Output verbose information during compilation")
+    (.println System/out
+              " The source directory must contain the unpacked tzdb files, such as asia or europe"))
+
+  (method ^:private outputFile ^void [this ^Path dstFile ^String version
+                                      ^{:tag (SortedMap String ZoneRules)} builtZones
+                                      ^{:tag (Map String String)} links]
+    (try
+      (with-resources [out (DataOutputStream. (Files/newOutputStream dstFile))]
+        (.writeByte out 1)
+        (.writeUTF out "TZDB")
+        (.writeShort out 1)
+        (.writeUTF out version)
+        (let [regionArray (cast String/1
+                                (.toArray (.keySet builtZones) (new String/1 (.size builtZones))))]
+          (.writeShort out (alength regionArray))
+          (for-each [^String regionId regionArray] (.writeUTF out regionId))
+          (let [^{:tag (List ZoneRules)} rulesList (cast
+                                                     List
+                                                     (.collect
+                                                       (.distinct (.stream (.values builtZones)))
+                                                       (Collectors/toList)))]
+            (.writeShort out (.size rulesList))
+            (let [baos (ByteArrayOutputStream. 1024)]
+              (for-each [^ZoneRules rules rulesList]
+                (.reset baos)
+                (let [dataos (DataOutputStream. baos)]
+                  (Ser/write rules dataos)
+                  (.close dataos)
+                  (let [bytes (.toByteArray baos)]
+                    (.writeShort out (alength bytes))
+                    (.write out bytes))))
+              (.writeShort out (.size builtZones))
+              (for-each [^{:tag (Map$Entry String ZoneRules)} entry (.entrySet builtZones)]
+                (let [regionIndex (TzdbZoneRulesCompiler/findRegionIndex
+                                    regionArray
+                                    (cast String (.getKey entry)))
+                      rulesIndex (.indexOf rulesList (.getValue entry))]
+                  (.writeShort out regionIndex)
+                  (.writeShort out rulesIndex)))
+              (.writeShort out (.size links))
+              (for-each [^{:tag (Map$Entry String String)} entry (.entrySet links)]
+                (let [aliasIndex (TzdbZoneRulesCompiler/findRegionIndex
+                                   regionArray
+                                   (cast String (.getKey entry)))
+                      regionIndex (TzdbZoneRulesCompiler/findRegionIndex
+                                    regionArray
+                                    (cast String (.getValue entry)))]
+                  (.writeShort out aliasIndex)
+                  (.writeShort out regionIndex)))
+              (.flush out)))))
+      (catch Exception ex
+        (.println System/out (java-str "Failed: " (.toString ex)))
+        (.printStackTrace ex)
+        (System/exit 1))))
+
+  (method ^:private ^:static findRegionIndex ^int [^String/1 regionArray ^String region]
+    (let [index (Arrays/binarySearch regionArray region)]
+      (when (< index 0) (throw (IllegalArgumentException. (java-str "Unknown region: " region))))
+      index))
+
+  (field ^:private ^boolean verbose)
+
+  (constructor ^:private [this])
+
+  (method ^:private printVerbose ^void [this ^String message]
+    (when verbose (.println System/out message))))

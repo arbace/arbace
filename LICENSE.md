@@ -219,6 +219,24 @@ covers what.
     `jdk/edge.edn`'s, under the GNU General Public License version 2 with the Classpath
     Exception. `jdk/javac/sources.txt`, `jdk/javac/provenance.edn` and `jdk/javac/platform.sha256`
     (the pin of javac on Arbace's platform, JN3): Arbace's own, under the Eclipse Public License 1.0.
+    Since JN7 (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN7") `jdk/javac/forms/` also holds
+    the forms of the JDK build's tools that `bin/jrt-convert`'s generate step runs, converted from
+    jdk26u's `make/jdk/src/classes/build/tools/` (with the interim copies of
+    `src/java.base/share/classes/java/time/zone/` in package `build.tools.tzdb`): Copyright (c)
+    Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath
+    Exception; and of java.xml's SAX parser and the classes it names
+    (`overlay/jdk/javac/closure.txt`, from jdk26u's `src/java.xml/share/classes`): each form file
+    keeps its source's notice, the GNU General Public License version 2 with the Classpath
+    Exception (Copyright (c) Oracle and/or its affiliates) or, for the files derived from Apache
+    Xerces (jdk26u's `src/java.xml/share/legal/xerces.md`; their notice "Licensed to the Apache
+    Software Foundation (ASF)"), the Apache License 2.0 (text in "Murmur3 (Guava): Apache License
+    2.0" below), with Oracle's copyright line where the file has one.
+- `overlay/jdk/javac/java.base/java/util/zip/Deflater.java` (JN7): jrt's `Deflater` for javac's
+  tool build, a port to Java of zlib 1.3.2's compressor as jdk26u bundles it
+  (`src/java.base/share/native/libzip/zlib/`: `deflate.c`, `deflate.h`, `trees.c`; zlib by
+  Jean-loup Gailly and Mark Adler, https://zlib.net): Copyright (C) 1995-2026 Jean-loup Gailly and
+  Mark Adler, and the Arbace authors for the port, under the zlib License (section "zlib: zlib
+  License" below); its public API follows jdk26u's documented `java.util.zip.Deflater`.
 - `overlay/jdk/`: jrt's own Java sources and Go-build variants of JDK classes (doc/go/JRT-NOTES.md,
   "Phase 2C"; `overlay/jdk/javac/`, those of javac's tool build, doc/classes/JAVA-FRONTEND-SURVEY.md,
   JN2), written for Arbace in place of jdk26u's files of the same names (from their
@@ -1879,4 +1897,33 @@ Modification by Unicode, Inc. Unicode, Inc. shall have the right to modify this 
 Taxes. The user agrees to pay any taxes arising from access to this website or use of the information herein, except for those based on Unicode’s net income.
 Severability.  If any provision of this Agreement is declared invalid or unenforceable, the remaining provisions of this Agreement shall remain in effect.
 Entire Agreement. This Agreement constitutes the entire agreement between the parties.
+```
+
+## zlib: zlib License
+
+Covers `overlay/jdk/javac/java.base/java/util/zip/Deflater.java` (a port of zlib's compressor) and
+the form file converted from it (`jdk/javac/forms/java/util/zip/Deflater.ae`). The license, as
+zlib 1.3.2's `zlib.h` states it (jdk26u's `src/java.base/share/native/libzip/zlib/zlib.h`):
+
+```
+  Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler
+
+  This software is provided 'as-is', without any express or implied
+  warranty.  In no event will the authors be held liable for any damages
+  arising from the use of this software.
+
+  Permission is granted to anyone to use this software for any purpose,
+  including commercial applications, and to alter it and redistribute it
+  freely, subject to the following restrictions:
+
+  1. The origin of this software must not be misrepresented; you must not
+     claim that you wrote the original software. If you use this software
+     in a product, an acknowledgment in the product documentation would be
+     appreciated but is not required.
+  2. Altered source versions must be plainly marked as such, and must not be
+     misrepresented as being the original software.
+  3. This notice may not be removed or altered from any source distribution.
+
+  Jean-loup Gailly        Mark Adler
+  jloup@gzip.org          madler@alumni.caltech.edu
 ```

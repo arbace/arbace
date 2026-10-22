@@ -615,9 +615,38 @@ the rest but two parts: `jrt.jrt-sources` (the source list, the locales, the rep
 tools' host (`arbace_tool -p test`), its outputs the same byte for byte (`sources.txt`,
 `LocaleDataIndex.java`, so `jdk/` by `verify`); the edge is `jrt.jrt-edge` (`test/jrt/jrt_edge.ae`,
 split from it), on the frozen jar, since it reads javac's classes with the JDK's class file API and
-`jrt.java-surface`'s reading of them (JFS40); and the generators run on `GEN_JDK` until JN7.
+`jrt.java-surface`'s reading of them (JFS40); and the generators run on `GEN_JDK` until JN7 (below).
 `provenance.edn`'s `:jdk` names the platform by the SHA-256 of its pin, no longer `java -version`
 (JFS35 (b)); `REPR_JAVA_JVM_OPTS` is gone with the JVM's read.
+
+### Since JN7: the generators and the edge on Arbace
+
+Since JN7 (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN7") `bin/jrt-convert` starts no JVM.
+The `generate` step runs the JDK build's tools as Java forms on javac's tool executable: their
+sources (`make/jdk/src/classes/build/tools/`: generatecharacter, generateextraproperties, spp,
+cldrconverter, generatelsrequivmaps, tzdb with its interim copies of `java.time.zone`,
+generatecurrencydata, generatebreakiteratordata, makejavasecurity) are read by repr/java into
+`jdk/javac/forms` (module `buildtools`, `bin/javac-vendor`), with what they need of the JDK beyond
+the program (java.xml's validating SAX parser for cldrconverter, `Scanner`, `PropertyResourceBundle`,
+`DeflaterOutputStream`, `sun.text.resources.BreakIteratorRules`: `overlay/jdk/javac/closure.txt`)
+and jrt's own Java for them (a port of zlib 1.3.2's compressor as `java.util.zip.Deflater`, so that
+`uniName.dat` is zlib's stream byte for byte; variants of `ResourceBundle`, `Files.walk`,
+`Scanner`, java.xml's `SecuritySupport` and `JdkXmlConfig`). The script calls each tool's `main` by
+its class name (the tool's script `gen-tools/gen.ae`), with `ARBACE_PATH` holding the tools' and
+java.xml's resource directories (`OtherCommonLocales.properties`, the JDK's XML catalog, the parser's
+messages). Every generated source and data file is the JDK build's byte for byte (`generated.edn`),
+with the default locales and with `JRT_LOCALES=all` (1,561 of 1,562 sources), but one: `CaseFolding`,
+whose regex entries follow the running JDK's Unicode version ("The generator JDK matters" above). On
+Arbace, a JDK 26, it is the stock JDK 26's output byte for byte, 28 entries fewer than the build's
+(its boot JDK 25's); the tree takes the build's file when the two differ only by entries the build's
+alone has (`generated.edn`'s `:boot-jdk`), so `jdk/forms` is unchanged (JFS43). The `:gen-jdk` of
+`provenance.edn` became `:generators` (the converter's host runs them). The `edge` step's
+`jrt.jrt-edge` runs on the tools' host, reading javac's classes with `jrt.classfile` (Arbace's own
+class-file reader) and the JDK classes' facts from the platform's class files (`bin/javac-vendor
+platform`), where it read them with `java.lang.classfile` and reflection on the frozen JVM: the edge
+is the JVM's but for three members HotSpot's JFR adds to the event classes at load
+(`jdk.internal.event.ProcessStartEvent`'s `commit()` and `isEnabled()`, one of
+`X509CertificateEvent`'s), which the class files do not declare (JFS44).
 
 `bin/jrt-convert` kept its steps and checks at S1, and gained two modes, after them:
 

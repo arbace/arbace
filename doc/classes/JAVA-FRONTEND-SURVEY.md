@@ -14,8 +14,9 @@ spike, as built: "As built: JN1 (2026-10-20)", after it; JN2, javac's forms vend
 JN2 (2026-10-20)", with JFS18-JFS22; JN3, javac runs on Arbace: "As built: JN3 (2026-10-21)", with
 JFS23-JFS26; JN4, repr/java's `read` on Arbace: "As built: JN4 (2026-10-21)", with
 JFS27-JFS30; JN5, the fixpoint and the checks moved: "As built: JN5 (2026-10-21)", with
-JFS31-JFS36; JN6, the JVM leaves repr/java: "As built: JN6 (2026-10-21)", at the end, with
-JFS37-JFS42.
+JFS31-JFS36; JN6, the JVM leaves repr/java: "As built: JN6 (2026-10-21)", with
+JFS37-JFS42; JN7, the generators on Arbace: "As built: JN7 (2026-10-22)", at the end, with
+JFS43-JFS50.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -2328,3 +2329,297 @@ The user decided JFS37-JFS42 as built:
   with JN7: a class-file reader of Arbace's own for the edge.
 - JFS41 (a): the JDK's javac kept as the reference of `bin/javac-vendor classes` while a JDK is at hand.
 - JFS42 (a): `check --jdk` out of every gate, a command and the Makefile's `repr-java-jdk`.
+
+## As built: JN7 (2026-10-22)
+
+JN7, the generators on Arbace, on the branch `java-frontend-jn7` from main `f76981ca` (whose seed
+holds JN6 and GP5), in about seven hours of work (against the 3-5 days estimated). The JDK build's
+tools that `bin/jrt-convert`'s generate step runs (generatecharacter, generateextraproperties,
+spp, cldrconverter with java.xml's validating SAX parser, generatelsrequivmaps, tzdb,
+generatecurrencydata, generatebreakiteratordata, makejavasecurity) are read by repr/java on Arbace
+into `jdk/javac/forms` and run as Java forms translated into javac's tool executable: every output
+is the JDK build's byte for byte (`generated.edn`) but `CaseFolding`, which follows the running
+JDK's Unicode version and is the stock JDK 26's byte for byte (JN7.3, JFS43). With JFS40 (c) the
+edge step's `jrt.jrt-edge` runs on the tools' host, reading class files with a reader of Arbace's
+own: `bin/jrt-convert` starts no JVM (JN7.6). `jdk/forms` and `jdk/data` are unchanged. The JVM ran
+the frozen v4 jar (the edges' recordings, the fixtures' recording, the edge's control run) and the
+JDK's `javac` (the reference of `bin/javac-vendor classes`), and, for three one-time measures in
+scratch named below (JN7.2, JN7.3, JN7.4), the generators' JDK and the JDK 26; Go only TamaGo's
+go1.27.1, without cgo. The tools' host was the worktree's stage 0; j2g for the tool ran on the
+program built from the checkout (JFS22 (a)).
+
+### JN7.1 The tools as Java forms (JFS45)
+
+- **`bin/javac-vendor`** reads two more modules into `jdk/javac/forms` (`sources.txt`'s new kinds):
+  `buildtools`, the class path: the 50 files of `make/jdk/src/classes/build/tools/{cldrconverter,
+  generatebreakiteratordata, generatecharacter, generatecurrencydata, generateextraproperties,
+  generatelsrequivmaps, makejavasecurity, spp, tzdb}` (KIND `make`) and the 4 interim copies of
+  `java/time/zone/{ZoneOffsetTransition, ZoneOffsetTransitionRule, ZoneRules, Ser}` in package
+  `build.tools.tzdb` as `make/CopyInterimTZDB.gmk` makes them (KIND `interim`, the `sed` of the
+  build), read by `bin/repr-java read` with the build's `--add-exports java.base/sun.text=ALL-UNNAMED`;
+  and `java.xml`, 221 files of `src/java.xml/share/classes` (JN7.2). java.base gains 6 files of
+  jdk26u (`Readable`, `Scanner`, `PropertyResourceBundle`, `ServiceConfigurationError`,
+  `DeflaterOutputStream`, `sun.text.resources.BreakIteratorRules`: the list
+  `overlay/jdk/javac/closure.txt`) and one of jrt's own, `java.util.zip.Deflater` (JN7.4).
+  `arbace/repr/java.ae`'s `read` takes `--origins` as `read-jdk` does, so the tools' forms name
+  `jdk26u make/jdk/src/classes/...` in their headers, not the work tree.
+- **Tool-world variants** (`overlay/jdk/javac/variants/`, JFS18 (b)): `ResourceBundle` (newBundle
+  reads `NAME.properties` from the resources when no class that is a bundle has the name, as the
+  default Control's java.properties format: cldrconverter's `OtherCommonLocales.properties`,
+  java.xml's messages), `Files` (the two `walk`s, depth first in jrt's listing order, for
+  cldrconverter's time-zone directory), `Scanner` (its `File` constructors without
+  `FileInputStream.getChannel`), `jdk.xml.internal.SecuritySupport` (the context class loader is the
+  system loader: jrt's threads have none) and `JdkXmlConfig$CatalogHolder` (the JDK's XML catalog,
+  java.xml's resource `jdk/xml/internal/jdkcatalog/JDKCatalog.xml`, by a `file:` URI from
+  `ARBACE_PATH`: jrt has no `jrt:/` URL handler).
+- **j2g** (shipped code, JN7.7): the tool's new packages are named by binary names
+  (`tool-module-prefixes`: `build/tools/`, `com/sun/org/apache/`, `com/sun/xml/internal/`,
+  `javax/xml/`, `jdk/xml/internal/`, `org/w3c/dom/`, `org/xml/sax/`; `build.tools.tzdb.ZoneRules`
+  beside `java.time.zone.ZoneRules`) in package jrt (`pkg-of`: `org/xml/`, `org/w3c/`,
+  `build/tools/`, which fell into package lang and made an import cycle); and three fixes found by
+  xerces, below.
+- **`bin/jrt-convert generate`** calls each tool's `main` by class name with a script the tool runs
+  (`gen-tools/gen.ae`), its `ARBACE_PATH` the tools' and java.xml's resource directories
+  (`make/jdk/src/classes`, `src/java.xml/share/classes`); the JAVA_SMALL flags' locale is jrt's
+  default (en_US). No javac compiles the tools, no `--patch-module` (the patch of java.base is the
+  tool's `BreakIteratorRules`; the Thai rules, read only with `-language`, are not converted).
+  `provenance.edn`'s `:gen-jdk` (the JDK's `java -version`) became `:generators` (the converter's
+  host runs them); `GEN_JDK` is not read (JFS49).
+
+| | JN6 | JN7 |
+|---|---:|---:|
+| `jdk/javac/sources.txt` | 531 | 813: jdk.compiler 370, java.compiler 135, jdk.internal.opt 1, java.base 32, java.xml 221, buildtools 54 |
+| `jdk/javac/forms` | 570 files | 898 files, 9,290,750 bytes |
+| `jdk/javac/edge.edn` | 39 classes beyond `jdk/edge.edn`'s, 79,753 bytes | 223, 419,123 bytes |
+| the tool's j2g: files, classes analyzed, failing; methods reached, with missing parts | | 2,296, 19,090, 0; 97,219, 617 |
+| the tool (amd64, `arbace-javac`) | 200,052,896 bytes | 209,285,280 bytes |
+| a tool build (amd64, the reader compiled first) | about 9 minutes | about 12 minutes |
+
+### JN7.2 java.xml's closure, measured (JFS46)
+
+cldrconverter parses CLDR's XML with `SAXParserFactory.newInstance()`, validating, with the DTDs
+(`accessExternalDTD` `file`). A rapid type analysis over the class files (the tools' and the
+platform's, a scratch namespace on `jrt.classfile`) reached 654 of java.xml's top-level classes
+(schemas, DOM, the serializer: whatever the parser's configuration names), and stopping at the
+world's classes it still dragged java.base's security and invoke internals; the JDK itself loads
+162 of java.xml's when it runs the tools (`-Xlog:class+load` over `bin/jrt-convert`'s generate
+step on the generators' JDK, once, in scratch). The committed list is that set, plus the classes the
+descriptors of the members their code calls name (j2g translates a call only when its descriptor's
+classes are in the world: `XMLGrammarPool` in `SAXParser`'s constructor) and their supertypes, one
+level (14, then 37 once a scratch bug was fixed), and the exceptions the parser throws and the tools
+catch (9): 221 files, 70 of them never loaded. Their unexecuted paths name 600-odd classes outside
+the world, translated as j2g's missing parts. The list is data (`overlay/jdk/javac/closure.txt`),
+regenerated by hand when the tools change.
+
+What xerces needed of j2g, each found by the build or by a run, each fixed in j2g:
+- **A superinterface's static field read by an implementing class was read uninitialized.**
+  `guarded-static?` left out the `_Init()` call for a field of a supertype of the reading class,
+  as a class's initialization initializes its superclass; but not its superinterfaces (JLS
+  12.4.1). xerces' `NamespaceSupport.reset` stored `NamespaceContext.XML_URI` (`"...".intern()`)
+  as null, so every namespace prefix was unbound ("The prefix "xmlns" for attribute "xmlns" ... is
+  not bound"). Now the guard is left out for the class itself and its superclasses only. Regression
+  case: `test/j2g/fixtures/FxJn7.ae`'s `tIfaceStaticInit` (recorded on the frozen jar).
+- **A value of a class outside the closed world passed where an interface of the world is
+  expected** (`XSMessageFormatter` as a `MessageFormatter`, `XMLParseException` thrown as a
+  `Throwable`): Go's `any` implements no interface of the world; `coerce` converts it (`As`), the
+  value being `J2g_Missing`'s, which throws first.
+- **A call on such a receiver** (`fId.hashCode()`, `fId` of a class outside the world): the call is
+  missing too (`missing-reason` of its target), not a method of `any`.
+The last two have no regression form: the interpreted half of `bin/diffcheck` cannot name a class
+outside the world (javac's world, the tool build, is their test, as for JN2's cast).
+
+### JN7.3 The outputs (the exit criterion)
+
+`bin/jrt-convert`'s generate step on the tool (`JRT_STEPS=sources,generate`, and within `update` and
+`verify`), against the JDK build's `support/gensrc` and module image (`generated.edn`) and against the
+same step of main's script on the generators' JDK (`diff -r` of the trees):
+
+| | outputs | equal to the build's | equal to main's run on the JDK |
+|---|---:|---:|---:|
+| generated sources, default locales | 31 | 30, and `CaseFolding` the build's file (`:boot-jdk`) | 31 (the tree) |
+| generated sources, `JRT_LOCALES=all` (jdk.localedata's CLDR bundles) | 1,562 | 1,561, and `CaseFolding` | not run |
+| resource data (`uniName.dat` deflated by zlib, `currency.data`, the break iterators' 4, `tzdb.dat`, `java.security`, ICU's 3 copied) | 10 | 10 | 10 |
+| cldrconverter's own output directory (base module) | 13 | | 13 |
+
+`CaseFolding.java` (GenerateCaseFolding filters its regex entries with the running JDK's
+`Character.toUpperCase`/`toLowerCase`: JRT-SOURCES.md, "The generator JDK matters"): on Arbace, whose
+`Character` is jdk26u's (Unicode 17), it is the stock JDK 26's output byte for byte (the same tool
+on the JDK 26 build of jdk26u, once, in scratch), 28 entries fewer than the build's (its boot JDK
+25's, Unicode 16). The tree takes the build's file when the two differ by entries the build's alone
+has (JFS43 (a)), so `jdk/forms` is unchanged and the shipped program's regex stays the JDK 26 it is
+checked against. The step is deterministic (two runs, the same trees) and takes 44-62 s on the tool
+(cldrconverter 16 s per run, 784 MB peak), against 36-42 s on the JDK.
+
+### JN7.4 zlib's compressor in Java (JFS47)
+
+`build.tools.generatecharacter.CharacterName` writes `uniName.dat` through `DeflaterOutputStream`;
+the JDK's `Deflater` is zlib's C code, Go's `compress/flate` writes other bytes, and j2g's own
+compressor (`arbace/j2g/zlib.ae`) is not zlib's. `overlay/jdk/javac/java.base/java/util/zip/Deflater.java`
+ports zlib 1.3.2's deflate (as jdk26u bundles it, and the host's system zlib, `zlib-1.3.2-r1`, which
+the generators' JDK links) to Java: `deflate`, `fill_window`, `longest_match`, `deflate_fast`,
+`deflate_slow`, and `trees.c` whole, for levels 1-9, the zlib and raw formats and the flush modes
+(not level 0, Huffman-only, dictionaries or a change of parameters mid-stream: they throw). Checked
+once in scratch against the JDK's zlib on 170 cases (8 inputs up to 149 MB, 5 levels, input chunks
+of 7, 512 and 100,000 bytes, with and without SYNC_FLUSH): equal byte for byte; on the tool,
+`uniName.dat` is the build's. Under zlib's License (LICENSE.md).
+
+### JN7.5 A class-file reader of Arbace's own (JFS40 (c))
+
+- **`test/jrt/classfile.ae`** (`jrt.classfile`, 268 lines): a class file as data: the constant pool
+  resolved (every tag of Java 26), the class's name, superclass, interfaces and flags, its fields and
+  methods with their `RuntimeVisibleAnnotations`' types, and a method's code: its length, the
+  instructions that name the constant pool (member, class, `ldc` and `invokedynamic` with their
+  bootstrap methods and arguments), the exception handlers' catch types, in `java.lang.classfile`'s
+  element order. It reads all 7,434 classes of the build's java.base in 35 s on the tools' host.
+- **`jrt.java-surface`** reads with it and takes the JDK classes' facts from the platform's class
+  files (`*platform*`, `bin/javac-vendor platform`) as reflection gave them (an interface's
+  superclass nil, no constructors among the methods, the fields `Reflection` filters left out), where
+  it used `java.lang.classfile` and reflection on the running JVM; **`jrt.jrt-edge`** likewise; the
+  edge step runs on the tools' host (`arbace_tool -p test`, 25 s).
+- **The check**: the edge of the same `ref1` computed by main's namespaces on the frozen jar and by
+  the port: equal but 3 members (1,220 against 1,223): `commit()V` and `isEnabled()Z` of
+  `jdk.internal.event.ProcessStartEvent` and `commit()V` of `X509CertificateEvent`, which HotSpot's
+  JFR adds to the event classes when it loads them; the class files declare them in
+  `jdk.internal.event.Event`, where the port resolves them (JFS44). The rest of `jrt.java-surface`
+  (the retired `bin/java-surface`'s closure, units and tables) is ported on the same reader but not
+  run (JFS50).
+
+### JN7.6 The trace: `bin/jrt-convert` starts no JVM
+
+Each command alone under `strace -f --seccomp-bpf -e trace=execve,fork,vfork,clone,clone3`
+(`.tmp/jn7/trace.sh`), the execs of a `java` or `javac` binary counted with the chain of processes
+above them (`.tmp/jn7/scripts/javas.py`, as JN6.4's). The control: main's `bin/jrt-convert`
+(`f76981ca`, exported into `.tmp/jn7/control`) with `JRT_STEPS=sources,generate,edge`.
+
+| command | JVM execs | JN6 | what they are |
+|---|---:|---:|---|
+| control: main's `bin/jrt-convert` (sources, generate, edge) | 134 | | the generators on the generators' JDK (81 `java`, 16 `javac`), the edge on the frozen jar (2), the frozen jar built from its tag in the control's tree (35) |
+| `bin/jrt-convert verify` | **0** | 100 | |
+| `bin/javac-vendor verify` | 4 | 4 | the frozen jar: `arbace.j2g.main --record-edge`, `arbace.j2g.edge subtract` (the edge) |
+| `bin/javac-vendor check` | 0 | 0 | |
+| `bin/javac-vendor classes baseline samples jdk java.base` | 12 | 110 | the reference javac (JFS41); the jdk corpus's originals now generated on the tool |
+| `bin/repr-java roundtrip --corpus baseline,samples,jdk --text` | **0** | 97 | (the jdk corpus's originals likewise) |
+| `bin/clojure-tests --java-fixtures verify` | 0 | 0 | |
+| `bin/j2g-edge verify` | 6 | 6 | the frozen jar: `arbace.j2g.main`, `arbace.j2g.edge` |
+| `bin/repr-java check` | 0 | 0 | |
+
+So no generator runs on a JDK and nothing of `bin/jrt-convert` starts a JVM; the JVM remains for the
+edges' recordings, `check --suite`'s back end, the oracle, the data generators, and the JDK's javac
+as the reference (JN7.9). Traces: `.tmp/jn7/trace/`.
+
+### JN7.7 The shipped program's change
+
+j2g's code changed (`arbace/j2g/names.ae`, `code.ae`: JN7.1, JN7.2), so its compiled namespaces in
+the program differ; `jdk/provenance.edn` (`:generators`, `:repr-java`, `:host`) and `jdk/README.md`
+change the runtime key and with it the version map the executable carries. The translated JDK and
+runtime: j2g's program tree (`bin/j2g --program`, without the compiled namespaces) by main's j2g
+(`f76981ca`, `.tmp/jn7/control`) and by the branch's, string literals' numbers normalized
+(`.tmp/jn7/scripts/normdiff.py`): one function differs, `java.security.MessageDigest`'s
+`isEqual`-path call of `equals` on a value of a class outside the closed world, now one missing
+call (JN7.2's third fix), and with it one string literal fewer (`j2g_strings.ae`, the others'
+numbers shifted): the same behaviour, `J2g_Missing` throwing first. The superinterface's
+initialization (JN7.2's first fix) changes nothing in the shipped program. `jdk/forms`, `jdk/data`, `jdk/edge.edn`, `go/`
+and `overlay/jdk/java.base` are unchanged; `jdk/javac/` and `overlay/jdk/javac/` are the tool's.
+No re-seed (batched).
+
+### JN7.8 The checks
+
+- `bin/jrt-convert update`, then `verify`: `jdk/` is the conversion, byte for byte (911 forms files,
+  10 data files; generate, convert, javac, edge on Arbace; 256 s traced)
+- `bin/javac-vendor convert`, then `verify`: `jdk/javac` is the conversion and the recording, byte
+  for byte (902 files; 146 s)
+- `bin/javac-vendor check`: j2g translates javac's world, no failures (62 s)
+- `bin/javac-vendor classes baseline samples jdk java.base`: javac on Arbace, in the grown tool, byte
+  for byte the JDK's javac's and java.base the build's (271 s)
+- `bin/clojure-tests --java-fixtures update`, then `verify`: byte for byte (only the provenance's
+  `:repr-java` and `:host` changed; 22 s)
+- `bin/j2g-edge verify`: `jdk/edge.edn` is the JVM's answer (65 s)
+- `bin/repr-java check`: as expected (26 s); `bin/repr-java roundtrip --corpus baseline,samples,jdk
+  --text`: as the references (jdk: record 911, text 838, classes 838, anew 799 of 838; 682 s traced)
+- `bin/j2g-check --record-fixtures` (the frozen jar): `test/j2g/fixtures.edn` gains FxJn7's case
+- `make check-makefile`
+- `bin/gate` (essential): first at `efc39ada`, failed only in diffcheck: FxJn7's file came before
+  FxVarHandles, whose known case was renumbered (`test/j2g/fixtures:9` to `:10`, as at JN2;
+  `test/diffcheck/known.edn`); then at `36dc57ba` passes (go-build 572 s, both builds afresh, then
+  cached; go-smoke, suite-go 777 tests with no regression, oracle-go 53 known mismatches as recorded,
+  diffcheck 12,743 of 12,766 cases agree with the 23 known, FxJn7's case among the agreeing,
+  goi-check 740 of 740, generated), and again at this section's commit
+- not run: `bin/gate --full` as a whole (the user's rule: at the milestone)
+
+### JN7.9 What stays on a JVM, and why
+
+| use | on | why |
+|---|---|---|
+| the oracle's reference | the frozen jar | the frozen v4 Arbace is the reference by definition |
+| j2g's edge and javac's (`bin/j2g-edge`, `bin/javac-vendor edge`) | the frozen jar | the JVM's reflection over the classes outside the forms and HotSpot's method order (JFS14) |
+| `bin/repr-java check --suite`'s step 4 | the frozen jar, then the suite's JVMs | the frozen jar's Java forms back end (O2 (a)) |
+| j2g's fixtures' results (`bin/j2g-check --record-fixtures`) | the frozen jar | the reference of the fixtures' translations |
+| the data generators (`bin/jrt testdata`, `manifest`, `standins`, `bin/jrt-coverage`) | the frozen jar | they read the JVM |
+| the reference javac of `bin/javac-vendor classes` | a JDK | JFS41 |
+
+`bin/jrt-convert` is no longer in it: its generators and its edge left with JN7.
+
+### JN7.10 Proposals
+
+- **JFS43 CaseFolding and the generators' Unicode version.**
+  - Options: (a) the build tree's file when the tool's output differs from it by entries the
+    build's alone has (`:boot-jdk`), else the tool's (built); (b) the tool's output (a JDK 26's)
+    committed: `jdk/forms`' `CaseFolding` loses 28 entries and the shipped regex's case-insensitive
+    matching differs from the JDK 26 it is checked against for those code points; (c) the boot
+    JDK's Unicode version emulated (JDK 25's `CharacterData` from its `src.zip` as the tool's
+    `Character` for this tool), or the file committed as an input.
+  - *Recommended: (a), built*: the program stays the JDK 26 it is checked against, and the
+    difference is the JDK build's own (its output changes with its boot JDK); (c) when the build tree
+    goes (JFS24 (b)).
+- **JFS44 The edge's three members of the JFR event classes.**
+  - Options: (a) the class files' answer, those members resolved to `jdk.internal.event.Event`
+    (built); (b) HotSpot's instrumentation emulated (the event classes' `commit`, `isEnabled`,
+    `shouldCommit` declared in each subclass).
+  - *Recommended: (a)*: the edge is a report of what the translated classes call, and the class
+    files are what javac and j2g read.
+- **JFS45 Where the tools' forms live.**
+  - Options: (a) `jdk/javac/`, one tool world, one conversion, one edge and one `verify` (built);
+    (b) a tree of their own (`jdk/buildtools/`, a script, a separate tool executable); (c) not
+    committed: read and built on demand by `bin/jrt-convert`.
+  - *Recommended: (a)*: the tool that runs repr/java runs them, the tool's key covers them, and a
+    second tool would cost a build of its own (12 minutes) and a second edge.
+- **JFS46 java.xml's closure.**
+  - Options: (a) the classes the JDK loads running the tools, with the descriptors' and the
+    exceptions' classes, as a committed list (built; the list regenerated by hand); (b) an analysis
+    of Arbace's own over the class files (`jrt.java-surface`'s closure on `jrt.classfile`) without a
+    JDK, bounded at the world; (c) all of java.xml (1,854 files).
+  - *Recommended: (a) now, (b) when the JDK leaves the host*: (b) as tried over-approximates
+    (654 classes of java.xml) and needs the world's semantics (jrt's `ServiceLoader`, `Files`) to
+    stop where the JVM does.
+- **JFS47 zlib's compressor.**
+  - Options: (a) jrt's own `Deflater` in the tool's world (built); (b) in the shipped jrt, with
+    `DeflaterOutputStream` and `GZIPOutputStream` in the closure; (c) j2g's `zlib.ae` made zlib's.
+  - *Recommended: (a)*: only the tool needs it (JFS18); (b) when the program needs compression.
+- **JFS48 javac's generated sources (JFS20 (b)).**
+  - Options: (a) still copied from the build tree; (b) `compileproperties` and `propertiesparser`
+    (`make/langtools/tools`) run on the tool by `bin/javac-vendor`, `FlagsEnum` still copied; (c) all
+    three, `flagsgenerator` with javac's standard file manager on Arbace (JFS5 (a)).
+  - *Recommended: (b) next*, as JN7's tools; (c) needs `JavacFileManager` over jrt's file systems.
+- **JFS49 The generators' JDK.**
+  - Options: (a) removed: the generators run on the tool only (built); (b) kept behind a variable
+    (`JRT_GENERATORS=jdk`) as a reference.
+  - *Recommended: (a)*: `generated.edn` compares with the JDK build's own outputs, the reference.
+- **JFS50 `jrt.java-surface`'s retired parts.**
+  - Options: (a) ported on `jrt.classfile`, run only through the edge (built); (b) cut to what the
+    edge uses; (c) `bin/java-surface` revived on the tools' host, `doc/go/java-surface.edn` recomputed.
+  - *Recommended: (a)*: no reader of the JDK's API remains, and (c) is a task of its own.
+
+### JN7.11 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`): `make/jdk/src/classes/build/tools/`
+  (the nine tools), `make/CopyInterimTZDB.gmk`, `make/modules/java.base/{Gensrc,Gendata}.gmk`,
+  `src/java.xml/share/classes` (221 files and its resources), `src/java.base/share/classes` (the 6
+  files), `src/java.base/share/native/libzip/zlib/` (`deflate.c`, `deflate.h`, `trees.c`, `zlib.h`,
+  zlib 1.3.2, ported), `src/java.base/share/native/libzip/Deflater.c` (read), the build tree's
+  `support/gensrc` and `jdk/modules`.
+- Arbace at main `f76981ca` (the control's `bin/jrt-convert`, `.tmp/jn7/control`).
+- The worktree's `.tmp/jn7/`: `scripts/` (`closure.ae`, the rapid type analysis; `sigclosure.ae`, the
+  descriptors' closure; `notworld.py`; `javas.py`; `port_surface.py`), `cl/` (the JDK's class
+  loading logs), `deftest/` (the zlib port against the JDK's), `jrt-ref/` (main's generate on the
+  JDK), `jrt-arb/`, `jrt-arb-all/`, `edge-jvm.edn`, `edge-arb.edn`, `trace/`, the build and
+  conversion logs.
