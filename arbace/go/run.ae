@@ -135,16 +135,60 @@
         (fail 126 "error" "no main function"))
       (b/op "RunProgram" (object-array (mapcat @inits (init-order))) main))))
 
+(defn- raw-lines
+  "Form x of raw forms read from text, the lines mode :lines writes from the positions mode
+  :full writes (doc/go/SPEC.md §10.2), as the converter's in-memory forms carry them: each
+  form's :line its node's first line (its :go/pos' least; a vector's its children's), not the
+  reader's (a vector's, a symbol's, a list's written after its line); a function's :go/end its
+  closing brace's line; a literal child's line its :go/breaks entry, from :go/apos."
+  [x]
+  (let [walk-meta (fn [m] (cond-> m (contains? m :tag) (update :tag raw-lines)))
+        x' (cond
+             (seq? x) (with-meta (apply list (map raw-lines x)) (some-> (meta x) walk-meta))
+             (vector? x) (with-meta (mapv raw-lines x) (some-> (meta x) walk-meta))
+             (map? x) (with-meta (into {} (map (fn [[k v]] [(raw-lines k) (raw-lines v)])) x) (some-> (meta x) walk-meta))
+             (symbol? x) (with-meta x (some-> (meta x) walk-meta))
+             :else x)
+        m (when (instance? arbace.lang.IObj x') (meta x'))
+        pos (:go/pos m)
+        ;; (not a comment group's: a node's :doc and :comment); a vector's from its literals and
+        ;; children first (a spec's :go/pos may hold its declaration's: an import group's
+        ;; first spec, the group's import keyword and parentheses)
+        lines (fn [ps] (keep #(when (vector? %) (first %)) ps))
+        l (or (when (vector? x')
+                (some->> (concat (lines (vals (:go/apos m)))
+                                 (keep #(when (instance? arbace.lang.IMeta %) (:line (meta %))) x'))
+                         seq (apply min)))
+              (when (map? pos) (some->> (apply dissoc pos [:doc :comment]) vals lines seq (apply min))))
+        ;; a function's closing brace (mode :lines' :go/end), a literal child's line (its
+        ;; :go/breaks, from :go/apos)
+        end (when (map? pos) (first (:rbrace pos)))
+        apos (:go/apos m)]
+    (if (or l end (seq apos))
+      (vary-meta x' (fn [m] (cond-> m
+                              l (assoc :line l)
+                              end (assoc :go/end end)
+                              (seq apos) (assoc :go/breaks (vec (for [[i p] (sort apos) :when (vector? p)] [i (first p)]))))))
+      x')))
+
 (defn errorcheck
   "Checks the package of package file pf (forms root root) without running it (GR7b, the
   errorcheck programs of §11): its errors on standard output as gc prints them with -C, one
   FILE:LINE: MESSAGE each (a message's further lines indented by a tab), in the checker's
   order; the status 1 when there are errors, else 0. What goi cannot check ends it as a run's:
   goi: unsupported (125), goi: error (126). max-errors (gc without -e: 10, GR10): the first
-  max-errors printed, then gc's FILE:LINE: too many errors at the last one's position."
-  [root ^File pf lang max-errors]
+  max-errors printed, then gc's FILE:LINE: too many errors at the last one's position. raw:
+  the forms are repr/go's raw forms of an invalid program (doc/go/CONVERTER-NOTES.md, \"Raw
+  forms\"; doc/go/GO-PARSER-SURVEY.md GP6, GPS9 (b)), checked in the checker's resolve mode
+  (GOI-SPEC.md §3.10), its answers dropped."
+  [root ^File pf lang max-errors raw]
   (let [src (cond-> (load/package-source {:dir root} nil @repl/config pf)
-              lang (assoc-in [:config :lang] lang))
+              lang (assoc-in [:config :lang] lang)
+              raw (-> (update :files (fn [fs] (mapv #(cond-> (update % :decls (fn [ds] (mapv raw-lines ds)))
+                                                      (:file %) (update :file raw-lines)
+                                                      (get-in % [:opts :imports]) (update-in [:opts :imports] raw-lines))
+                                                   fs)))
+                      (assoc :answers (java.util.HashMap.))))
         _ (when (empty? (:files src)) (fail 125 "unsupported" "no Go files for the configuration"))
         _ (no-assembly! src)
         r (repl/check-source src (fn [_] nil) false)
@@ -179,21 +223,23 @@
       (if (seq lines) 1 0))))
 
 (defn -main
-  "bin/goi run's Arbace side: ROOT NS [ARG...]; --errorcheck [--lang goV] [--max-errors N] ROOT
-  NS: the package's errors (errorcheck), checked at language version goV (gc's -lang) when
-  given, at most N of them then gc's too many errors (gc without -e)."
+  "bin/goi run's Arbace side: ROOT NS [ARG...]; --errorcheck [--lang goV] [--max-errors N] [--raw]
+  ROOT NS: the package's errors (errorcheck), checked at language version goV (gc's -lang) when
+  given, at most N of them then gc's too many errors (gc without -e); --raw: ROOT holds repr/go's
+  raw forms of the program (GP6), checked in the resolve mode."
   [& args]
   (when (= "--errorcheck" (first args))
     (let [[opts args] (loop [opts {} as (rest args)]
                         (case (first as)
                           "--lang" (recur (assoc opts :lang (second as)) (drop 2 as))
                           "--max-errors" (recur (assoc opts :max (Long/parseLong (second as))) (drop 2 as))
+                          "--raw" (recur (assoc opts :raw true) (rest as))
                           [opts as]))
           lang (:lang opts)
           [root ns-name] args
           pf (File. (str root "/" (load/ns->file ns-name)))]
       (when-not (.isFile pf) (fail 126 "error" (str "no package file " pf)))
-      (System/exit (int (try (errorcheck root pf lang (:max opts))
+      (System/exit (int (try (errorcheck root pf lang (:max opts) (:raw opts))
                              (catch Throwable ex
                                (let [d (ex-data ex)
                                      u (or (:goi/unsupported d)

@@ -302,9 +302,9 @@
                       (oset! x :undeclared true))
                   (e/scope-put! s nm x))
                 nil))]
-    ;; the resolve mode: such an object is not one of the package's (go/types returns before
-    ;; its objMap), never checked, never initialized
-    (when-not (and bad (:resolve (:flags *ctx*)))
+    ;; such an object is not one of the package's (go/types returns before its objMap), never
+    ;; checked, never initialized (GPS30; both modes since GPS36 (b))
+    (when-not bad
       (vswap! (:objs *ctx*) conj x))))
 
 (defn- group? [args]
@@ -330,10 +330,10 @@
               ;; a digest's constant (§6.5) has its :val and no init (a spec of its own, not an
               ;; implicit repetition of the previous spec of a group)
               valued (and (not has-init) (nil? prev) (contains? (meta (first names)) :val))
-              ;; the resolve mode: a spec with its type and no values is go/types' last spec,
-              ;; which it does not inherit from (resolver.go: last = s when s.Type != nil), its
-              ;; names without values (missing init expr; GPS30)
-              typed-alone (and (not has-init) (not valued) prev tag (:resolve (:flags *ctx*)))
+              ;; a spec with its type and no values is go/types' last spec, which it does not
+              ;; inherit from (resolver.go: last = s when s.Type != nil), its names without
+              ;; values (missing init expr; GPS30, both modes since GPS36 (b))
+              typed-alone (and (not has-init) (not valued) prev tag)
               [tag inits inherited] (cond
                                       has-init [tag (init-list init) false]
                                       valued [tag nil false]
@@ -398,6 +398,9 @@
             d (new-decl {:kind :type :file fi :form nf :spec f :type-form tf :tparams tps :alias (:alias (meta nf))})
             x (pkg-obj :type nm nf fi d :alias (boolean (:alias (meta nf))) :tparams-count (when tps (count tps)))]
         (vswap! d assoc :obj x)
+        ;; types2's typeDecl: type parameters from go1.18
+        (when (and tps (< (long (or (:lang fi) 27)) 18))
+          (err! nf :UnsupportedFeature "type parameter requires go1.18 or later"))
         ;; a defined type's named type exists at once, its underlying completed lazily (go/types'
         ;; Named), so that references to it never wait for its declaration
         (when-not (:alias (meta nf))
@@ -442,6 +445,9 @@
       (let [d (new-decl {:kind :func :file fi :form nf :spec f :sig-forms sig-forms :tparams tps})
             x (pkg-obj :func nm nf fi d :generic (boolean tps) :tparams-count (when tps (count tps)))]
         (vswap! d assoc :obj x)
+        ;; types2's collectObjects: type parameters from go1.18
+        (when (and tps (< (long (or (:lang fi) 27)) 18))
+          (err! nf :UnsupportedFeature "type parameter requires go1.18 or later"))
         (cond
           (= "init" nm)
           (do (vswap! (:objs *ctx*) conj x)
@@ -510,6 +516,12 @@
       (and (zero? nval) (pos? ndef)) true
       :else (do (cycle-error! cycle) false))))
 
+(defn on-path!
+  "types2's isComplete: when x is being declared (on *path*), its cycle reported; true then."
+  [x]
+  (let [i (.indexOf ^java.util.List *path* x)]
+    (when (>= i 0) (cycle-error! (subvec *path* i)) true)))
+
 (defn- with-decl
   "Runs f with the declaration's context bound (its file, the decl for records)."
   [d f]
@@ -548,36 +560,39 @@
   (let [{:keys [file tag init iota form]} @d
         cx (assoc (file-cx file) :iota iota)
         T (when tag (code/typexpr cx tag))
-        ;; the resolve mode: go/types' constDecl keeps a valid declared type whatever its
-        ;; initialization (initConst: the value unknown), as the helper's :t records it (GPS30)
-        bad-type (if (and T (t/valid? T) (t/const-type? T) (:resolve (:flags *ctx*))) T :invalid)]
+        ;; go/types' constDecl keeps a valid declared type whatever its initialization
+        ;; (initConst: the value unknown), as the helper's :t records it (GPS30; both modes since
+        ;; GPS36 (b))
+        bad-type (if (and T (t/valid? T) (t/const-type? T)) T :invalid)
+        ;; an invalid constant: its kept type with an unknown value (go/constant's Unknown)
+        bad! (fn [] (oset! x :type bad-type) (when (not= :invalid bad-type) (oset! x :val :unknown)))]
     (cond
       (and T (t/valid? T) (not (t/const-type? T)))
       (do (err! form :InvalidConstType "invalid constant type %s" (t/type-str T))
           (oset! x :type :invalid))
-      ;; the resolve mode: go/types' constDecl stops at an invalid type (no value)
-      (and T (not (t/valid? T)) (:resolve (:flags *ctx*)))
+      ;; go/types' constDecl stops at an invalid type (no value)
+      (and T (not (t/valid? T)))
       (oset! x :type :invalid)
       (and (nil? init) (contains? (meta form) :val))
       ;; a digest's constant: its :val trusted, at its :tag (else its untyped kind)
       (if-let [[ty v] (code/val-const (:val (meta form)) (when (and T (t/valid? T)) T))]
         (do (oset! x :type ty) (oset! x :val v))
-        (oset! x :type bad-type))
+        (bad!))
       ;; const x = nil
       (and (nil? init) (:nil-init @d))
-      (do (e/error! (or (o x :line) e/*line*) :InvalidConstInit "nil is not constant") (oset! x :type bad-type))
-      (nil? init) (oset! x :type bad-type)
+      (do (e/error! (or (o x :line) e/*line*) :InvalidConstInit "nil is not constant") (bad!))
+      (nil? init) (bad!)
       :else
       (let [n (code/expr cx init)]
         (cond
-          (code/invalid? n) (oset! x :type bad-type)
+          (code/invalid? n) (bad!)
           (not= :constant (:mode n))
           (do (err! init :InvalidConstInit "%s is not constant" (code/operand-str n))
-              (oset! x :type bad-type))
+              (bad!))
           :else
           (let [n (if (and T (t/valid? T)) (code/assignment cx n T "constant declaration") n)]
             (if (code/invalid? n)
-              (oset! x :type bad-type)
+              (bad!)
               (do (oset! x :type (:type n))
                   (oset! x :val (:val n))
                   (vswap! d assoc :tree {:op :const-decl :obj x :value n :line (code/fline form)})
@@ -917,6 +932,38 @@
 (defn- local-path? [^String p]
   (or (str/starts-with? p "/") (str/starts-with? p "./") (str/starts-with? p "../") (= p ".") (= p "..")))
 
+(defn- go-graphic?
+  "unicode.IsGraphic and not unicode.IsSpace: a letter, mark, number, punctuation or symbol."
+  [cp]
+  (let [t (Character/getType (int cp))]
+    (contains? #{Character/UPPERCASE_LETTER Character/LOWERCASE_LETTER Character/TITLECASE_LETTER
+                 Character/MODIFIER_LETTER Character/OTHER_LETTER Character/NON_SPACING_MARK
+                 Character/ENCLOSING_MARK Character/COMBINING_SPACING_MARK Character/DECIMAL_DIGIT_NUMBER
+                 Character/LETTER_NUMBER Character/OTHER_NUMBER Character/CONNECTOR_PUNCTUATION
+                 Character/DASH_PUNCTUATION Character/START_PUNCTUATION Character/END_PUNCTUATION
+                 Character/INITIAL_QUOTE_PUNCTUATION Character/FINAL_QUOTE_PUNCTUATION
+                 Character/OTHER_PUNCTUATION Character/MATH_SYMBOL Character/CURRENCY_SYMBOL
+                 Character/MODIFIER_SYMBOL Character/OTHER_SYMBOL}
+               (int t))))
+
+(defn import-path-error
+  "types2's validatedImportPath: why import path p (unquoted) is invalid, or nil: an empty
+  string, or its first invalid character as Go's %#U writes it (U+0021 '!', U+000A)."
+  [p]
+  (when (string? p)
+    (if (= "" p)
+      "empty string"
+      (let [^String s p
+            illegal "!\"#$%&'()*,:;<=>?[\\]^{|}`\ufffd"]
+        (loop [i 0]
+          (when (< i (.length s))
+            (let [cp (.codePointAt s i)]
+              (if (or (not (go-graphic? cp)) (>= (.indexOf illegal (int cp)) 0))
+                (format "invalid character U+%04X%s" cp
+                        ;; %#U: the character too when strconv.IsPrint (graphic or the ASCII space)
+                        (if (or (go-graphic? cp) (= cp 32)) (str " '" (String. (Character/toChars cp)) "'") ""))
+                (recur (+ i (Character/charCount cp)))))))))))
+
 (defn declare-imports!
   "The file scope's imports: package objects, dot imports. resolve: path -> package."
   [fi resolve]
@@ -930,7 +977,9 @@
               ;; gc's noder (cmd/compile/internal/noder/import.go, openPackage): a non-local import
               ;; path must be canonical, else gc reads no package
               canon (when (and (string? path) (not (local-path? path))) (clean-path path))
-              p (when-not (and canon (not= canon path)) (resolve path fi))
+              p (when-not (or (and canon (not= canon path)) (import-path-error path)
+                              (and (string? path) (or (str/starts-with? path "/") (str/starts-with? path "\\"))))
+                  (resolve path fi))
               nm (cond
                    implicit (if (and p (not (string? p))) (o p :name) "_")
                    (code/go-id? nf) (code/ident-name nf)
@@ -938,6 +987,12 @@
               _ (when (and implicit p (not (string? p))) (e/answer! spec {:implicit nm}))]
           (code/with-line spec
             (cond
+              ;; types2's collectObjects: an invalid path reported, the import skipped
+              (import-path-error path)
+              (err! spec :BadImportPath "invalid import path (%s)" (import-path-error path))
+              ;; gc's noder (resolveImportPath): a local path may not be absolute
+              (and (string? path) (or (str/starts-with? path "/") (str/starts-with? path "\\")))
+              (err! spec :BadImportPath "could not import %s (import path cannot be absolute path)" path)
               (and canon (not= canon path))
               (err! spec :NonCanonicalImport "could not import %s (non-canonical import path \"%s\" (should be \"%s\"))" path path canon)
               (nil? p) (err! spec :BrokenImport "could not import %s (no forms)" path)

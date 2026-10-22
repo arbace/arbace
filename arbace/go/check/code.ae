@@ -27,6 +27,11 @@
   "A function checking a package-level object's declaration (go/types' objDecl)."
   nil)
 
+(def ^:dynamic *on-path*
+  "A function [x]: when package-level object x is being declared (on go/types' objPath), its
+  cycle reported (types2's isComplete) and true; bound by the checker."
+  nil)
+
 (def ^:dynamic *package-of-ns*
   "A function from a namespace name (go.x.y) to its package, for the qualified names of
   annotations (doc/go/SPEC.md §4.4)."
@@ -329,7 +334,15 @@
       (when-let [px (e/scope-get (:file-scope cx) q)]
         (when (= :pkg (o px :kind)) (e/answer! sym :x-pos {:obj px}))))
     (cond
-      (nil? p) (do (err! sym :UndeclaredName "undefined: %s" q) nil)
+      (nil? p)
+      (if-let [x (when-not (str/includes? q ".") (resolve-name cx q))]
+        ;; types2's selector of an operand that is no package where a type is wanted (raw
+        ;; forms' x/y in a type context): the operand's type complete (a type being declared:
+        ;; its cycle, isComplete), else not a type
+        (do (when-not (and (= :type (o x :kind)) *on-path* (*on-path* x))
+              (err! sym :NotAType "%s.%s is not a type" q n))
+            nil)
+        (do (err! sym :UndeclaredName "undefined: %s" q) nil))
       :else
       (let [x (e/scope-get (o p :scope) n)]
         (cond
@@ -531,10 +544,11 @@
                    (do (e/error! (or line (e/current-line)) :BlankIfaceMethod "methods must have a unique non-blank name") nil)
                    {:name n :pkg (when-not (t/exported? n) p) :type sig :line line}))))
         own (remove nil? own)
-        etys (vec (for [x (rest f) :when (not (method-elem? x))]
+        etys (vec (for [[i x] (map-indexed vector (rest f)) :when (not (method-elem? x))]
                     (with-line x
-                      [x (if (and (seq? x) (#{'| 'tilde} (first x))) (union-type cx x) (typexpr cx x))])))
-        elems (vec (for [[x ty] etys]
+                      [x (if (and (seq? x) (#{'| 'tilde} (first x))) (union-type cx x) (typexpr cx x))
+                       (or (fline x) (e/child-line f (inc i)))])))
+        elems (vec (for [[x ty eline] etys]
                      (with-line x
                        (let [u (t/under ty)]
                          (cond
@@ -554,7 +568,8 @@
                              {:terms (nth u 1)}
                              (do (err! x :UnsupportedFeature "embedding interface element %s requires go1.18 or later" (t/type-str u)) nil))
                            (and (vector? u) (= :interface (nth u 0)))
-                           (let [ts (t/iface-tset u)] {:methods (:methods ts) :terms (:terms ts) :comparable (:comparable ts)})
+                           ;; its methods at the embedding's line (types2's addMethod: pos)
+                           (let [ts (t/iface-tset u)] {:methods (map #(assoc % :line eline) (:methods ts)) :terms (:terms ts) :comparable (:comparable ts)})
                            (not (allow-version? cx 18))
                            (do (err! x :UnsupportedFeature "embedding non-interface type %s requires go1.18 or later" (t/type-str ty)) nil)
                            :else {:terms #{[false ty]}})))))
@@ -564,7 +579,9 @@
         ms (reduce (fn [acc m]
                      (let [k [(:name m) (:pkg m)]]
                        (if-let [prev (get acc k)]
-                         (do (when (or (and (:own prev) (:own m)) (not (t/same? (:type prev) (:type m))))
+                         (do (when (or (and (:own prev) (:own m)) (not (t/same? (:type prev) (:type m)))
+                                       ;; types2: an embedded duplicate allowed since go1.14
+                                       (not (allow-version? cx 14)))
                                ;; an embedded interface's method: at the interface (its embedding)
                                (error! (or (:line m) (e/current-line)) :DuplicateDecl (format "duplicate method %s" (:name m))))
                              acc)
@@ -582,9 +599,9 @@
 (defn array-length
   "The length of an array type: a constant expression of integer value, representable as int."
   [cx n]
-  (if-let [bad (when (and (:resolve cx-flags) (go-ident? n) (not (and (symbol? n) (namespace n))))
-                 ;; the resolve mode: go/types' arrayLength looks a name up first, not evaluated
-                 ;; unless it names a constant
+  (if-let [bad (when (and (go-ident? n) (not (and (symbol? n) (namespace n))))
+                 ;; go/types' arrayLength looks a name up first, not evaluated unless it names
+                 ;; a constant (GPS30, both modes since GPS36 (b))
                  (let [nm (ident-name n)
                        x (or (e/scope-lookup (:scope cx) nm)
                              (when-let [[x _] (some-> (:file cx) :dots (.get nm))] x)

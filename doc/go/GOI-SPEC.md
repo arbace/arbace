@@ -562,7 +562,9 @@ makes the final forms. A source whose `:answers` is a HashMap is checked so
   keeps a type it does not change). Outside the resolve mode no type is spelled: goi's checking is
   unchanged.
 - **Invalid programs as go/types records them** (GPS30 (a), GP4; extended at GP5 so that the
-  native reader's final conversion fails where the helper's does, with its message): a
+  native reader's final conversion fails where the helper's does, with its message; in goi's
+  normal mode too since GP6, GPS36 (b): the rules below are go/types' and types2's checking,
+  not only their records): a
   constant keeps a valid declared type whatever its initialization, its value unknown
   (`constDecl`, `initConst`; package and local constants), a constant spec with a type and no
   values in a group inherits nothing (go/types' last spec), an integer literal beyond 512 bits
@@ -570,6 +572,19 @@ makes the final forms. A source whose `:answers` is a HashMap is checked so
   (`lookupFieldOrMethod`), and `unsafe.Offsetof` records its argument's selection only when the
   argument is valid. The annotator writes every constant's `:val` (`nil` for an unknown value)
   and type (`invalid type` included), as the helper writes go/types' objects.
+- **Errorcheck on raw forms (GP6, GPS9 (b)).** `arbace.go.run --errorcheck --raw ROOT NS` checks
+  the raw forms' text of an invalid program the converter cannot convert in this mode, imports
+  from the table's digest as for any program, and prints its errors as errorcheck does; the
+  messages print raw forms' heads as Go (`go/select` `x.f`, `go/index` `x[i]`, `go/star` `*x`)
+  and mode `:full`'s parentheses (`:go/parens`). With GP6 the checker also reports what types2
+  does on those programs: invalid import paths (`validatedImportPath`; an absolute local path,
+  gc's importer), a non-name on the left of `:=` (its operand used first), a struct literal's
+  key that is no name, a conversion's arity, a float literal beyond big.Float's exponent
+  (`malformed constant`), an operand of unknown value making an unknown result silently,
+  `bitwise XOR` and `bitwise complement` overflows, a selector on a type being declared (its
+  cycle, `isComplete`), `package _`; and, in both modes, `-lang`'s `unsafe.Add`/`Slice` (go1.17),
+  `SliceData`/`String`/`StringData` (go1.20), type parameters (go1.18) and an embedded duplicate
+  method (go1.14, at the embedding's line).
 - **Dependencies.** Each configuration's standard library is one session over the loader's std
   jobs (their raw forms checked on demand, in dependency order); a corpus's own packages, a
   directory test's, test variants (`p [p.test]`, an external test's import of p) are sessions
