@@ -1043,3 +1043,26 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   - `bin/gate --full` and a tag later, over after GP8 or after GP7.
 - JFS48 (b) on the branch `java-frontend-gensrc` from main, in `.tmp/worktrees/java-frontend-gensrc`,
   beside GP7.
+
+## 2026-10-22: JFS48 (b) merged; JFS51-JFS54 decided as built (the user)
+
+- **What:** javac's generated sources made by `make/langtools/tools`' compileproperties and
+  propertiesparser run on javac's tool executable (branch `java-frontend-gensrc`, `121343ec`;
+  doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JFS48 (b)"), merged into main at `e02b7485`.
+- **Built:** the tools' 8 files read into `jdk/javac/forms` (module `buildtools`, KIND `langtools`);
+  `bin/javac-vendor convert` generates first (`version.properties` from the build's `spec.gmk`,
+  CompileProperties over 17 `.properties`, PropertiesParser over `compiler.properties` and
+  `launcher.properties`), every output compared with the build tree's; KIND `gensrc` generated,
+  `gensrc-build` (`FlagsEnum`) copied; `:generated` in the provenance; `JAVAC_VENDOR_BOOTSTRAP=1` for
+  a tool without the generators (used once: the tree then a fixpoint). j2g's `names.ae` gains the two
+  prefixes.
+- **Results:** 20 of 20 generated files the build tree's byte for byte; `jdk/javac/edge.edn`
+  unchanged; the tool 210,055,328 bytes; the generate step 1 s. A trace of `bin/javac-vendor verify`:
+  only the frozen jar's 4 edge-recording execs, no `javac`.
+- **Checks:** `javac-vendor convert`/`verify`/`check`/`classes` (4 corpora), `repr-java check`,
+  `jrt-convert verify`, `make check-makefile`: pass. The branch's essential gate passed (31m03s); on
+  main at `e02b7485` it passed (18m34s).
+- **The shipped program:** j2g's compiled `names.ae` alone; the translated runtime cannot change. In
+  the batched re-seed with GP7's.
+- **Decided (the user):** JFS51 (a), JFS52 (a), JFS53 (a), JFS54 (a), as built; over flagsgenerator
+  next and package jrt for the tools now.

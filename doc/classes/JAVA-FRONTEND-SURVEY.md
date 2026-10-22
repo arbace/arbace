@@ -2820,3 +2820,13 @@ keep `:host` of the tool they were written on (`7a352b7a`): the verifies compare
   `convert-2.log`), `verify.log`, `check.log`, `classes.log`, `repr-check.log`, `jrt-verify.log`,
   `trace/verify.strace`, `try/` (the first run of propertiesparser on the tool);
   `.tmp/javac-vendor/generated.edn`.
+
+## Decided (2026-10-22): JFS51-JFS54
+
+The user decided JFS51-JFS54 as built:
+- JFS51 (a): `version.properties` from the build's `spec.gmk` while the build tree is the reference;
+  (c), committed as an input, when it goes.
+- JFS52 (a): `FlagsEnum` still copied; (b), flagsgenerator on the tool, a possible next step.
+- JFS53 (a): `JAVAC_VENDOR_BOOTSTRAP=1`, `verify` always generating.
+- JFS54 (a): a prefix per tool in j2g's names; (c), package jrt for every non-`arbace/` class of
+  javac's world, when a third group of tools comes.
