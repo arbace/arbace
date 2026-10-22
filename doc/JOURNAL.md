@@ -1032,3 +1032,14 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   outputs do not depend on its temp directory.
 - **A slip of mine:** the test's command line redirected a `source`'s stderr to /dev/null, against
   the standing rule; nothing was lost (the line printed nothing).
+
+## 2026-10-22: JFS48 (b) started; the Go plan stops after GP7; no milestone yet (the user)
+
+- **Decided (the user):**
+  - Java: JFS48 (b) now, javac's generated sources (`make/langtools/tools`' `compileproperties`
+    and `propertiesparser`) run on javac's tool executable by `bin/javac-vendor`, `FlagsEnum` still
+    copied; over JN8 now, JFS48 (b) then JN8, or nothing yet.
+  - Go: stop after GP7 (with its re-seed), over GP8 next or GP8 with the pragmas.
+  - `bin/gate --full` and a tag later, over after GP8 or after GP7.
+- JFS48 (b) on the branch `java-frontend-gensrc` from main, in `.tmp/worktrees/java-frontend-gensrc`,
+  beside GP7.

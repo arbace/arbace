@@ -129,7 +129,7 @@ The current state of the work. This file is rewritten as things change. For the 
     by goi running `cmd/compile/internal/syntax` from `tamago/cmd`'s forms, `bin/repr-go
     syntax-errors`; invalid programs on their raw forms for goi; `bin/goi check` 1,604 of 1,837 pass,
     was 1,472; GC47 63 of 64; the program changed, re-seed batched with JN7's; GPS38-GPS44 decided as
-    built); running: GP7, compiled (`go-parser-gp7`); re-seed after it, with GP6's and JN7's.
+    built); running: GP7, compiled (`go-parser-gp7`); re-seed after it, with GP6's and JN7's; then the Go plan holds for the user's direction.
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
@@ -149,7 +149,7 @@ The current state of the work. This file is rewritten as things change. For the 
     as built); JN7 done (2026-10-22: the generators read by
     repr/java and run on javac's tool executable, their outputs the JDK build's but CaseFolding's boot
     JDK entries; `jrt.classfile`, the edge on the tools' host; `bin/jrt-convert` starts no JVM;
-    JFS43-JFS50 decided as built); next JFS48 (b), javac's generated sources on the tool, or JN8. The seed
+    JFS43-JFS50 decided as built); running: JFS48 (b), javac's generated sources on the tool (`java-frontend-gensrc`). The seed
     remade after JN6 and GP5 (`a8672e0d…`) and verified. The seed remade after JN3, JN4 and GP4 (`3dda04f6…`) and verified. The processes form made robust (2026-10-21).
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
