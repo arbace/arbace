@@ -2132,9 +2132,11 @@ and the goos module for both architectures read afresh, assembled and merged by
 arbace.box.convert goroot`, `diff -r` against `tamago/goroot`: none, 4 s; `src-digest` of
 `/root/tamago-go/src` the pin; the box's smoke test (`bin/arbace-go --smoke --box`, amd64, the
 executables of `5a0b7e16`: 113 ok, none failed, the tool guests' part skipped: `bin/box-tools build`
-not run in the worktree); `make check-makefile`; the essential `bin/gate` (GATE_PLACEHOLDER).
-repr/go, the loader, the checker and the converter are unchanged, so no repr/go check was due beyond
-the conversions above. Not run: `bin/gate --full`.
+not run in the worktree); `make check-makefile`; the essential `bin/gate` (passed at `3d58e820`, 12
+m 18 s: its builds afresh, the smoke test, Clojure's suite with no regressions, the oracle 22,658 of
+22,711 against its 53 known, the differential check 12,743 of 12,766 against its 23 known, goi's
+essential check 797 of 797, the generated files). repr/go, the loader, the checker and the converter
+are unchanged, so no repr/go check was due beyond the conversions above. Not run: `bin/gate --full`.
 
 **The program changes, for the re-seed.** `arbace/box/convert.ae` is a new namespace of the program
 (embedded and compiled with it, as `arbace.box.rebuild`): the native executable of `09fd87d0` is
