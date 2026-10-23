@@ -1158,3 +1158,18 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   bin/seed --make`: `3ab3b603…` (18,349,996 bytes, 1,984 files), committed at `c4f5c8ba`;
   `bin/seed --verify` passed: stage 0 = G1 = G2 = G3 = `2e4ce3e9…`, the same tar. The user chose
   now over batching with the next work.
+
+## 2026-10-23: JN8 and GP8 started; bin/gate --full alongside (the user)
+
+- **Decided (the user):**
+  - Java: JN8, the native Java parser (doc/classes/JAVA-FRONTEND-SURVEY.md, JF8 = JN8:
+    `arbace.repr.java.parse`, Java 26's lexer and parser in Arbace, javac's trees as data, checked
+    against javac on Arbace over jdk26u's 68 modules, the corpora and javac's sources), over the
+    cleanups for the build tree's leaving (JFS43 (c), JFS51 (c), JFS55 (c)) and holding.
+  - Go: GP8, the box reads Go (doc/go/GO-PARSER-SURVEY.md, §8: `tamago/goroot`'s conversion in the
+    box byte for byte the committed forms, on amd64 and the emulated arm64 VM), over profiling the
+    raw conversion, noder's pragmas and holding.
+  - `bin/gate --full` now on main, alongside the two, over before new work and later: its first run
+    since the tag `arbace-interprets-go1.27.1-v1`.
+- JN8 on the branch `java-frontend-jn8`, GP8 on `go-parser-gp8`, both from main after this entry, in
+  `.tmp/worktrees/`; nothing is merged into main while its `--full` runs.

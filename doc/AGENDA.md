@@ -132,7 +132,7 @@ The current state of the work. This file is rewritten as things change. For the 
     built); GP7 done (2026-10-22: the native reader compiled, go/parser's
     four packages, the dumper, gc's syntax driver and a renamed copy of syntax in goi's table; std
     parsed in 0.5 s, the executable +1.06 MB; GPS45-GPS49 decided as built); the seed remade after GP6, JN7,
-    JFS48 (b) and GP7 (`d7303cf8…`) and verified; then the Go plan holds for the user's direction (GP8 next in the plan).
+    JFS48 (b) and GP7 (`d7303cf8…`) and verified; running: GP8, the box reads Go (`go-parser-gp8`); `bin/gate --full` on main alongside (2026-10-23).
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
@@ -156,8 +156,8 @@ The current state of the work. This file is rewritten as things change. For the 
     by compileproperties and propertiesparser on the tool, 20 of 20 the build tree's, no JVM;
     `FlagsEnum` still copied; JFS51-JFS54 decided as built); JFS52 (b) done (2026-10-22: `FlagsEnum` by flagsgenerator on the
     tool through javax.tools' API on javac on Arbace, no generated source copied; JFS55-JFS58 decided,
-    JFS58 (a) done: `jdk/edge.edn` re-recorded, stale since GP7); what follows to be decided. The seed
-    remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
+    JFS58 (a) done: `jdk/edge.edn` re-recorded, stale since GP7); running: JN8, the native parser
+    (`java-frontend-jn8`). The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);
