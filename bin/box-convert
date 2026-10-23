@@ -34,8 +34,16 @@
 #                 (the driver's; the actions load it from the sources at /s when the image has none)
 #   --jobs N      the reader's threads in each read (default 8; each read's guest N vCPUs)
 #   --serial      the two architectures' reads one after the other (default: at once)
+#   --packages 'P...'
+#                 read these packages (import paths, patterns) instead of std: their forms only, no
+#                 tree; compare then checks each file the box converted against the same file of
+#                 a whole run's forms (--reference; the emulated VM's check, where all of std
+#                 takes too long: doc/go/GO-PARSER-SURVEY.md, "As built: GP8")
+#   --reference DIR  the whole run compare takes the files of --packages from (its box/ store and
+#                 box-steps.edn; default .tmp/box-convert/amd64)
 # Environment: ARBACE_BOX_SPAWN_RAM (the box's budget for its spawned guests; by default 36GiB),
-# ARBACE_BOX_SPAWN_CPUS (by default 16), BOX_CONVERT_RAM (each read's guest, by default 16GiB).
+# ARBACE_BOX_SPAWN_CPUS (by default 32: each read's guest has twice its threads in vCPUs, GPS54),
+# BOX_CONVERT_RAM (each read's guest, by default 16GiB).
 # Prerequisites: bin/arbace-go --build --box (ARBACE_BOX_ARCHES with ARCH), from the same commit
 # (bin/lib/fresh.bash, as bin/box-rebuild; ARBACE_BOX_STALE_OK=1 warns instead). Memory: two
 # reads of up to BOX_CONVERT_RAM each: run it through .tmp/heavy.
@@ -44,7 +52,7 @@ export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo 
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
-arch=amd64 rev=HEAD dir="" dev=false jobs=8 serial=false steps=()
+arch=amd64 rev=HEAD dir="" dev=false jobs=8 serial=false steps=() packages="" reference=""
 while [ $# -gt 0 ]; do
   case $1 in
     --arch) arch=$2; shift 2 ;;
@@ -53,8 +61,10 @@ while [ $# -gt 0 ]; do
     --dev) dev=true; shift ;;
     --jobs) jobs=$2; shift 2 ;;
     --serial) serial=true; shift ;;
+    --packages) packages=$2; shift 2 ;;
+    --reference) reference=$2; shift 2 ;;
     prepare|box|host|compare) steps+=("$1"); shift ;;
-    *) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 [ ${#steps[@]} -gt 0 ] || steps=(prepare box host compare)
@@ -70,6 +80,12 @@ native=$root/target/arbace-go/$harch/arbace             # the host step's Arbace
 bs=$dir/box hs=$dir/host
 src_dirs="VERSION arbace go tamago/goroot"
 ram=${BOX_CONVERT_RAM:-16GiB}
+reference=${reference:-$root/.tmp/box-convert/$harch}
+pkgs_opt=""
+if [ -n "$packages" ]; then
+  for p in $packages; do pkgs_opt="$pkgs_opt \"$p\""; done
+  pkgs_opt=":packages [$pkgs_opt]"
+fi
 export ARBACE_BOX_STORE_MAX=off
 
 since() { echo "$(( $(date +%s) - $1 )) s"; }
@@ -118,8 +134,8 @@ prepare() {
 
 # the expression that runs the conversion and keeps its steps: convert_expr NAME OPTS
 convert_expr() {
-  printf '%s (let [r (arbace.box.convert/steps "src" "goroot.text" (merge {:ref "%s" :jobs %s :pin "%s" :serial %s :ram %s} %s))] (arbace.box/put! "%s.steps" (pr-str r)) (prn r) (System/exit (if (:equal r) 0 1)))' \
-    "$(driver_loads)" "$1" "$jobs" "$pin" "$serial" "$(ram_bytes "$ram")" "$2" "$1"
+  printf '%s (let [r (arbace.box.convert/steps "src" "goroot.text" (merge {:ref "%s" :jobs %s :pin "%s" :serial %s :ram %s %s} %s))] (arbace.box/put! "%s.steps" (pr-str r)) (prn r) (System/exit (if (false? (:equal r)) 1 0)))' \
+    "$(driver_loads)" "$1" "$jobs" "$pin" "$serial" "$(ram_bytes "$ram")" "$pkgs_opt" "$2" "$1"
 }
 ram_bytes() { numfmt --from=iec "${1%iB}"; }
 
@@ -129,7 +145,7 @@ box() {
   t0=$(date +%s)
   if [ "$arch" != "$harch" ]; then vm_box; return; fi
   echo "== the conversion in the box ($arch)"
-  ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-36GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-16} \
+  ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-36GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-32} \
     ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.$arch \
     "$launcher" --store "$bs" -e "$(convert_expr "converted.box.$arch" "{:host \"arbace.$arch\"}")" 2>&1 | tee "$dir/box.log"
   st=${PIPESTATUS[0]}
@@ -148,7 +164,7 @@ vm_box() {
   tar -C "$dir" -cf "$dir/box-store.tar" box || return 1
   "$vmrun" put "$vl" "$dir/box-store.tar" || return 1
   "$vmrun" sh 'rm -rf box && tar -xf box-store.tar && rm box-store.tar' || return 1
-  printf '%s\n' '#!/bin/sh' "cd /h && ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-36GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-16} ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.arm64 ./arbace-box --store box -e '$(convert_expr converted.box.arm64 '{:host "arbace.arm64"}' | sed "s/'/'\\\\''/g")' > convert.log 2>&1; echo \$? > convert.status" > "$dir/vm-convert.sh"
+  printf '%s\n' '#!/bin/sh' "cd /h && ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-36GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-32} ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.arm64 ./arbace-box --store box -e '$(convert_expr converted.box.arm64 '{:host "arbace.arm64"}' | sed "s/'/'\\\\''/g")' > convert.log 2>&1; echo \$? > convert.status" > "$dir/vm-convert.sh"
   "$vmrun" put "$dir/vm-convert.sh" || return 1
   "$vmrun" sh 'rm -f convert.status convert.log; chmod +x vm-convert.sh; nohup ./vm-convert.sh > /dev/null 2>&1 &' || return 1
   until "$vmrun" sh 'test -f convert.status' 2> "$dir/vm-poll.err"; do
@@ -183,8 +199,28 @@ host() {
   return $st
 }
 
+# compare_part: --packages' run: each file of each architecture's forms, in the box's store, is the
+# same file (path, hash, size) of the reference run's forms
+compare_part() {
+  local a h r n bad=0 rs=$reference/box
+  [ -s "$reference/box-steps.edn" ] || { echo "box-convert: no $reference/box-steps.edn (--reference: a whole run)" >&2; return 1; }
+  for a in amd64 arm64; do
+    h=$(sed -n "s/.*:forms-$a \"\([0-9a-f]*\)\".*/\1/p" "$dir/box-steps.edn")
+    r=$(sed -n "s/.*:forms-$a \"\([0-9a-f]*\)\".*/\1/p" "$reference/box-steps.edn")
+    [ -n "$h" ] && [ -n "$r" ] || { echo "box-convert: no forms of $a in the steps" >&2; return 1; }
+    "$launcher" --store "$bs" tree ls "$h" | grep -v '^dir ' | LC_ALL=C sort > "$dir/part-$a.txt" || return 1
+    "$launcher" --store "$rs" tree ls "$r" | grep -v '^dir ' | LC_ALL=C sort > "$dir/reference-$a.txt" || return 1
+    n=$(LC_ALL=C comm -23 "$dir/part-$a.txt" "$dir/reference-$a.txt" | tee "$dir/part-$a.diff" | wc -l)
+    echo "box-convert: tamago/$a: $(wc -l < "$dir/part-$a.txt") files converted in the box, $n not the same file of the whole run's forms ($r)"
+    [ "$n" = 0 ] || bad=1
+  done
+  [ "$bad" = 0 ] && echo "box-convert: the packages' forms converted in the box = the whole run's, file for file"
+  return $bad
+}
+
 compare() {
   local hsteps=$dir/host-steps.edn
+  [ -z "$packages" ] || { compare_part; return; }
   [ -s "$dir/box-steps.edn" ] || { echo "box-convert: no box-steps.edn (box)" >&2; return 1; }
   # arm64: the host's steps are amd64's (the same native executable) when this run made none
   [ -s "$hsteps" ] || [ "$arch" = "$harch" ] || hsteps=$root/.tmp/box-convert/$harch/host-steps.edn

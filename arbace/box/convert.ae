@@ -26,7 +26,9 @@
                 (goroot ...) below: bin/tamago-vendor's assemble, headers and merge_trees
 
   opts: :host (Arbace's image, a hash or a ref; by default arbace.<the guest's arch>), :jobs
-  (the reader's threads in each read, by default 8), :cpus (each read's vCPUs, by default :jobs),
+  (the reader's threads in each read, by default 8), :cpus (each read's vCPUs, by default twice
+  :jobs: GPS54), :packages (import paths or patterns read instead of std: their forms only, no
+  tree assembled; by default [\"std\"]),
   :ram (each read's guest, by default 16 GiB), :serial (the two reads one after the other), :pin
   (the SHA-256 of GOROOT/src but src/cmd as bin/tamago-vendor pins it: checked first), :run,
   :log, :cache (arbace.box.build's).
@@ -389,9 +391,9 @@
 (defn- arch-of []
   (case (System/getProperty "os.arch") ("aarch64" "arm64") "arm64" "amd64"))
 
-(defn- spec-text [arch]
+(defn- spec-text [arch packages]
   (str "{:name \"std\"\n :loads [{:goroot \"/g\" :goos \"tamago\" :goarch \"" arch
-       "\" :mode :packages :cwd \"/\" :args [\"std\"]}]}\n"))
+       "\" :mode :packages :cwd \"/\" :args [" (str/join " " (map #(str "\"" % "\"") packages)) "]}]}\n"))
 
 (defn steps
   "The conversion of GOROOT text tree text with the sources src (see the namespace's doc): a map
@@ -412,29 +414,37 @@
               (fail (str "GOROOT/src is not the pinned tree (digest " digest ", pinned " pin ")") {:digest digest :pin pin})))
         _ (log (str "convert: GOROOT/src " gsrc ", digest " digest (when (:pin opts) " (the pin)")))
         jobs (:jobs opts 8)
+        packages (:packages opts ["std"])
+        what (if (= packages ["std"]) "std" (str (count packages) " packages"))
         tools (select-paths src (concat ["arbace" "go"] parser-forms))
         read-arch (fn [a]
                     (let [t1 (System/nanoTime)
-                          res (run (str "read std for tamago/" a)
+                          res (run (str "read " what " for tamago/" a)
                                    {:image host
                                     :args ["arbace" "-m" "arbace.repr.go.annotate" "read" "--jobs" (str jobs)
                                            "--out" "/o/std" "--quiet" "--report" "/o/std.report.edn" "--tsv" "/o/std.tsv" "/c/spec.edn"]
                                     :env ["ARBACE_PATH=/s" "GOGC=200" (str "GOMEMLIMIT=" (quot (- (:ram opts (* 16 GiB)) GiB) (* 1024 1024)) "MiB")]
                                     :trees [["/s" tools] ["/g" text]
-                                            ["/c" (box/put-tree {"spec.edn" (box/put-file (spec-text a))})]]
-                                    :out "/o" :cwd "/s" :ram (:ram opts (* 16 GiB)) :cpus (:cpus opts jobs)})
+                                            ["/c" (box/put-tree {"spec.edn" (box/put-file (spec-text a packages))})]]
+                                    :out "/o" :cwd "/s" :ram (:ram opts (* 16 GiB)) :cpus (:cpus opts (* 2 jobs))})
                           o (or (:out res) (fail (str "read " a ": no output tree") {:result res}))]
                       (doseq [l (str/split-lines (or (box/get (:console res)) ""))
                               :when (re-find #"^std: |^the dumper|^converted" l)]
                         (log (str "convert: " a ": " l)))
-                      (log (format "convert: read std for tamago/%s: %s, the forms %s (%.1f s; %s)" a o (dir-at! o "std" "read")
+                      (log (format "convert: read %s for tamago/%s: %s, the forms %s (%.1f s; %s)" what a o (dir-at! o "std" "read")
                                    (/ (- (System/nanoTime) t1) 1e9) (secs)))
                       o))
         reads (if (:serial opts)
                 (into {} (for [a arches] [a (read-arch a)]))
                 (let [fs (into {} (for [a arches] [a (future (read-arch a))]))]
                   (into {} (for [[a f] fs] [a @f]))))
-        t2 (System/nanoTime)
+        forms {:read-amd64 (get reads "amd64") :read-arm64 (get reads "arm64")
+               :forms-amd64 (dir-at (get reads "amd64") "std") :forms-arm64 (dir-at (get reads "arm64") "std")}]
+    (if (not= packages ["std"])
+      ;; a part of std (:packages): its forms only, no tree to assemble
+      (do (log (str "convert: " what " read for both architectures in " (secs)))
+          (merge {:src src :text text :digest digest :packages packages} forms))
+    (let [t2 (System/nanoTime)
         res (run "assemble and merge tamago/goroot"
                  {:image host
                   :args (into ["arbace" "-m" "arbace.box.convert" "goroot" "/g/src" "/o"]
@@ -452,10 +462,8 @@
                     equal " = the sources' tamago/goroot, byte for byte"
                     :else (str " DIFFERS from the sources' tamago/goroot " expected))))
     (when-let [r (:ref opts)] (box/ref! r goroot))
-    {:src src :text text :digest digest
-     :read-amd64 (get reads "amd64") :read-arm64 (get reads "arm64")
-     :forms-amd64 (dir-at (get reads "amd64") "std") :forms-arm64 (dir-at (get reads "arm64") "std")
-     :goroot goroot :expected expected :equal equal}))
+    (merge {:src src :text text :digest digest} forms
+           {:goroot goroot :expected expected :equal equal})))))
 
 (defn main*
   "The verbs of -main (bin/tamago-vendor's file steps run them by -e): nil."
