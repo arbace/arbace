@@ -20,7 +20,8 @@ JFS43-JFS50; JFS48 (b), javac's generated sources on the tool: "As built: JFS48 
 with JFS51-JFS54; JFS52 (b), `FlagsEnum` on the tool: "As built: JFS52 (b) (2026-10-22)", with
 JFS55-JFS58; JN8, the native parser: "As built: JN8 (2026-10-23)", with JFS59-JFS66; JFS66 (b), the
 converter on an interface over both front ends and the split measured: "As built: JFS66 (b)
-(2026-10-23)", at the end, with JFS67-JFS71.
+(2026-10-23)", with JFS67-JFS71; JFS70 (b), the pins independent of the javac run's history: "As
+built: JFS70 (2026-10-23)", at the end, with JFS72.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -3630,3 +3631,153 @@ The user decided:
 - JFS70 (b): `resolve.ae`'s history-dependent pins fixed as a task of its own, the known list
   emptied; with it, the notice and LICENSE.md/doc/ARBACE.md entry for `tree.ae`'s TreeInfo helpers.
 - JFS71: the converter's eager queries narrowed within JN9a.
+
+## As built: JFS70 (2026-10-23)
+
+JFS70 (b), the converter's pins made independent of the history of the javac run, on the branch
+`java-frontend-jfs70` from main `ba707b05`, in about half a working day. The three files of jdk26u
+JFS66 (b).5 listed are equal now, `test/repr/java/front-check-known.edn` is `{}`, and every form
+file the updates write is byte for byte as committed. The JVM ran only the frozen v4 jar, for
+javac's edge in `bin/javac-vendor convert`; Go only TamaGo's go1.27.1, without cgo; the tools'
+host was the worktree's stage 0 (the seed's).
+
+### JFS70.1 What was wrong
+
+`arbace.repr.java.resolve` decides a pin by asking the Java forms compiler's resolution
+(`arbace.classes.analyze`) over class infos it makes from javac's symbols. It found a class by
+name as `(first (Symtab/getClassesForName name))`, remembered every symbol it met by internal name
+(`register!`, the last one met winning) and kept the info made of a name per javac run.
+
+javac's `Symtab` keeps class symbols by flat name and module (`classes: Map<Name, Map<ModuleSymbol,
+ClassSymbol>>`). Besides a nested class's own symbol, under the module of its package, `ClassReader`
+enters one more under the key of each other module whose class file names the nested class in its
+`InnerClasses` attribute (`readInnerClasses`, `enterClass(currentModule, name, outer)`); that one
+has no class file, and completing it fails ("class file for com.sun.source.doctree.DocTree$Kind not
+found"); once failed it stays javac's erroneous class (`kind` ERR, no members, no supertypes), and
+completing it again no longer throws. `getClassesForName` returns them all in the order of a
+`HashMap` keyed by the modules' identity hashes. Instrumented on jdk.javadoc: 2 to 3 symbols for
+`DocTree$Kind`, `JavaFileObject$Kind`, `Diagnostic$Kind`, `Symbol$ClassSymbol`, `Context$Key`, one of
+them with a class file; with one chunk (`REPR_JAVA_THREADS=1`) the same 6 completion failures in
+every run, with 4 chunks a different number in each run. An info made from a stray symbol has no
+superclass and no methods, so an enum constant is not an `Enum` and an enum has no `values` or
+`toString`: the compiler finds no method and the converter pins javac's choice. Which symbol came
+first depended on the run (the identity hashes, the files converted before in the chunk), hence
+the three files of JFS66 (b).5 and more that front-check could not see, being wrong the same way in
+both of its conversions of a run: on the base tool, every run of jdk.javadoc pinned
+`DocTree$Kind`'s inherited `toString` and `equals` in six files (`HtmlDocletWriter`, `SeeTaglet`,
+`TagletManager`, `IndexItem`, `Utils`, `JavadocLog`: `(^[] DocTree$Kind/.toString ...)`), and
+`JavadocClassFinder`'s `EnumSet.of(JavaFileObject.Kind...)` was pinned in one run of two.
+
+### JFS70.2 The fix
+
+`resolve.ae` (164 lines, now 207) works on javac's own symbols only:
+
+- `canonical`: for a symbol met in a type, a tree or an info, javac's own: the symbol itself when it
+  is a class of the run's sources (`Check.getCompiled` of its module and flat name gives it) or a
+  local or anonymous class, else the one `Symtab.getClass` keeps under the module of its package.
+- `find-class`: a name is resolved to the class of the run's sources `Check` compiles under it in
+  the module of the call's class (`*module*`, bound by `choice`), else among `getClassesForName`'s
+  symbols those that are their module's own, the module of the call's class first, else the first
+  by module name. A first version took Symtab's symbol before the run's sources: a local class of a
+  patched module (`CharSequence.chars()`'s `CharIterator`, java.base) has a namesake in the
+  platform's class files, whose constructor takes the outer instance, and `bin/jrt-convert update`
+  pinned 14 constructor calls in 7 files of `jdk/forms`; with the run's sources first the committed
+  forms came back byte for byte.
+- `class-info`: made only from a symbol that completes (`completed?`: no `CompletionFailure`, not
+  erroneous) and kept per symbol (nil kept for one that does not complete, which is then
+  deterministic: a canonical symbol fails only when its class file is absent).
+- The registry of symbols met by name (`register!`) is gone; `jtypes/*check*` (javac's `Check` of
+  the run) is bound by `convert-units` beside `*syms*`.
+
+Each answer is now a function of the name, the module and the platform, whatever was converted
+before. JFS70 (b)'s two candidate approaches: "infos only from completed symbols" is part of the
+fix but not enough alone (an info made from a stray symbol is never a completed one, but the right
+symbol must still be found by name); "a registry per unit" would make a file independent of its
+predecessors but not of `getClassesForName`'s order, which changes between runs.
+
+### JFS70.3 The reproduction
+
+`.tmp/jfs70/repro.sh` (worktree scratch): jdk.javadoc and jdk.jdeps each read twice by
+`bin/repr-java read-jdk --check` (4 chunks, fresh runs), and `ElementsTable.java`, `Checker.java`
+and jdeprscan's `Main.java` each read alone:
+
+| | base tool (`e0096891...`) | fixed |
+|---|---|---|
+| jdk.javadoc, run 1 against run 2 | `Checker.ae`, `JavadocClassFinder.ae` differ | equal |
+| jdk.jdeps, run 1 against run 2 | equal | equal |
+| the three files alone against in their module | (not taken) | equal |
+| jdk.javadoc with 1, 4 and 12 chunks, and its `doclint`, `toolkit/util` and `tool` packages alone | the 1-chunk runs pin `Stream.of(DocTree.Kind.values())` | every file equal to the 4-chunk run's |
+
+And over all of jdk26u, two fresh runs on the final tool: `bin/repr-java check --jdk`'s outputs
+(`.tmp/repr-java-jdk/conv`) and front-check's conversion of javac's trees
+(`.tmp/repr-java-front-check/jdk26u/*/javac`), 68 modules, every forms file equal.
+
+The pins the fix removes are the right ones to remove: javac resolves `EnumSet.of(E)` (JLS 15.12.2's
+first phase, `JavaFileObject.Kind extends Enum<Kind>`), `DocTree.Kind.values()` (the enum's
+implicit method) and `Enum.toString()`, `Enum.equals(Object)` (inherited), and so does the forms
+compiler once `Kind`'s info has its superclass and members: the call needs no param-tags.
+
+### JFS70.4 The effect on the corpora
+
+- The committed forms: none changed. `bin/clojure-tests --java-fixtures update` (15 forms files),
+  `bin/jrt-convert update` (911 forms files, 10 data files), `bin/javac-vendor convert` (914 forms
+  files; its edge on the frozen v4 jar, 223 classes beyond `jdk/edge.edn`'s, unchanged): only the
+  provenance files' `:repr-java` (`9f87559b...` to `c40d75a6...`) and `:host` (the tool's key,
+  `e0096891...` to `bbd9d979...`) changed in `jdk/provenance.edn`, `jdk/javac/provenance.edn`,
+  `test/java-fixtures/provenance.edn`. The default corpora never met a stray symbol first.
+- jdk26u (not committed, checked by `check --jdk` and front-check): the files above (jdk.javadoc's
+  six `DocTree$Kind` files, `Checker`, `ElementsTable`, `JavadocClassFinder`, jdeprscan's `Main`)
+  lose their spurious pins; the rest of jdk26u was not converted on the base tool for a full count.
+- `tree.ae` (JFS70 (b)'s notice): the non-javac branches of `skip-parens`, `tree-name`, `full-name`,
+  `diamond?` and `class-kind` reimplement TreeInfo's `skipParens`, `name`, `fullName`, `isDiamond` and
+  `JCClassDecl.getKind`'s flag test (jdk26u `baf63fbe42b8758448fee570a9d9bb914272d259`,
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/tree/TreeInfo.java`, `JCTree.java`); the file
+  carries their notice as `parse.ae`'s port does, and LICENSE.md and doc/ARBACE.md name them.
+
+### JFS70.5 The shipped program's change
+
+None in code: `arbace/repr/java` is not in the shipped program (javac's tool embeds it: 216,879,264
+bytes against 216,862,880). `jdk/provenance.edn` is in the runtime key (`bin/lib/version.bash`), so
+the version map the executable carries changes, as at JFS66 (b). No re-seed.
+
+### JFS70.6 The checks
+
+- the reproduction (JFS70.3): every run equal
+- the updates (JFS70.4): every forms file byte for byte; only the three provenance files changed
+- `bin/repr-java check --jdk`: 68 modules converted, 0 with failures (9 m 19 s)
+- `bin/repr-java front-check --corpus all`: every corpus equal, the known list empty: samples 17,
+  baseline 189, jdk 911, javac 1,828, jdk26u 13,788 forms files (25 m 48 s, the host shared)
+- `bin/repr-java check`: the baseline's 189 files as `baseline.sha256`, the samples' 11 and the
+  module's 6 as `test/repr/java/expected` (27 s)
+- `bin/repr-java parse-check`: every corpus's trees as javac's (the parser unchanged; 3 m 18 s)
+- `bin/gate` (essential): GATE_RESULT
+- not run: `bin/gate --full` (the user's rule), `bin/repr-java roundtrip`, `check --suite`,
+  `bin/javac-vendor verify` and `classes` (the converter's outputs and javac's world are unchanged:
+  the updates show the forms byte for byte)
+
+### JFS70.7 Proposals
+
+- **JFS72 jdk26u's forms recorded.**
+  - Options: (a) as built: `check --jdk` checks only that every file converts, and front-check that
+    both trees give the same forms, so a pin that is wrong the same way in both (the six
+    `DocTree$Kind` files) shows nowhere; (b) the hashes of jdk26u's 13,788 forms files recorded
+    (`test/repr/java/expected/jdk26u.sha256`, as the baseline's), `check --jdk` comparing against
+    them and `check --update --jdk` rewriting them, so that any change to jdk26u's forms is seen and
+    reviewed; (c) (b) and two runs compared in `check --jdk` (the history's check, about 9 minutes
+    more).
+  - *Recommended: (b)*: it costs a file of about 1.3 MB and no time, and it would have shown this
+    defect's six files; (c) adds little once the answers no longer depend on the run.
+
+### JFS70.8 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`):
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/code/Symtab.java` (`classes`,
+  `getClassesForName`, `getClass`, `enterClass`), `jvm/ClassReader.java` (`readInnerClasses`,
+  `enterClass`), `code/ClassFinder.java` (`complete`, `completeEnclosing`, `fillIn`),
+  `code/DeferredCompletionFailureHandler.java`, `comp/Enter.java` (local classes, `unenter`),
+  `comp/Check.java` (`localClassName`, `putCompiled`, `getCompiled`), `tree/TreeInfo.java`,
+  `tree/JCTree.java`.
+- The worktree's `.tmp/`: `jfs70/` (the tool builds' logs, `repro.sh` and `repro/` its runs on the
+  base and the fixed tool, `repro/dbg/` the instrumented runs, `dbg2/`, the updates' and checks'
+  logs, `arbace-javac.base`, the base tool), `repr-java-front-check/`, `repr-java-jdk/`,
+  `repr-java-check/`, `repr-java-parse-check/`, `jrt/`, `javac-vendor/`, `clojure-tests/`.
