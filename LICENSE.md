@@ -12,7 +12,8 @@ full in this file. Source files keep the copyright and license notices they came
 covers what.
 
 - `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
-  `arbace/repr/`, `arbace/build/`, `arbace/j2g/` and `arbace/c2j/`, which are Arbace's own) is
+  `arbace/repr/`, `arbace/build/`, `arbace/j2g/` and `arbace/c2j/`, which are Arbace's own but
+  for repr/java's native lexer and parser, ports of jdk26u's javac, below) is
   derived from Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
   with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
@@ -369,6 +370,14 @@ covers what.
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
   and "Phase 2B (step 5)"): Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below).
+- `arbace/repr/java/lex.ae` and `arbace/repr/java/parse.ae` (repr/java's native lexer and parser,
+  doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"): Arbace forms porting, method by method,
+  https://github.com/openjdk/jdk26u at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/`'s
+  `parser/UnicodeReader.java`, `JavaTokenizer.java`, `JavadocTokenizer.java` (its comments),
+  `Tokens.java`, `JavacParser.java`, `tree/TreeInfo.java` (`getStartPos`, `getEndPos` and the
+  helpers the parser calls) and `TreeMaker.java` (its factories' positions): Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath
+  Exception (text below; each file carries the notice of the files it ports).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`

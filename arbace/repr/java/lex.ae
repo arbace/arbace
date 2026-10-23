@@ -1,0 +1,533 @@
+;; Ported from jdk26u (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259),
+;; src/jdk.compiler/share/classes/com/sun/tools/javac/parser/UnicodeReader.java, JavaTokenizer.java, JavadocTokenizer.java and Tokens.java, whose notice follows
+;; (LICENSE.md, "OpenJDK (jdk26u)"):
+;;
+;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+(ns arbace.repr.java.lex
+  "Java 26's lexer, after javac's (jdk26u com/sun/tools/javac/parser: UnicodeReader, JavaTokenizer,
+  JavadocTokenizer's comments, Tokens): the text's Unicode escapes decoded once (UnicodeReader's
+  rules, `\\\\u` included), then the tokens of javac's JavaTokenizer.readToken with javac's
+  positions (UTF-16 offsets into the original text, escapes counted as written). A token is an
+  object array [kind pos endPos value radix comments]: kind a keyword named as javac's TokenKind
+  (:IDENTIFIER, :LPAREN, :INTLITERAL, ...), value the name of a named token or the string value
+  of a literal (escapes translated, a text block's indentation stripped, as javac's tokens hold
+  them), radix the radix of a numeric literal, comments the comments before the token, latest
+  first (javac's prepend order), each [style pos endPos start end] with style :LINE, :BLOCK,
+  :JAVADOC_LINE or :JAVADOC_BLOCK and start, end its range in the decoded text. The last token
+  is :EOF. The parser is arbace.repr.java.parse (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built:
+  JN8\").")
+
+(set! *warn-on-reflection* true)
+
+(def ^:const EOI (char 0x1A))
+
+;; ---------------------------------------------------------------------------------------------
+;; The text decoded: UnicodeReader's escapes
+
+(defn decode
+  "The characters of `text` as javac's UnicodeReader reads them (\\uXXXX escapes decoded where
+  the backslash is not itself escaped; a broken escape skipped) and, for each, the offset of
+  its first code unit in `text`: [chars offsets], offsets one longer (the text's length last)."
+  [^String text]
+  (let [raw (.toCharArray text)
+        len (alength raw)]
+    (if (neg? (.indexOf text "\\u"))
+      (let [pos (int-array (inc len))]
+        (dotimes [i (inc len)] (aset pos i (int i)))
+        [raw pos])
+      (let [out (char-array len)
+            pos (int-array (inc len))]
+        (loop [p 0 i 0 was-bs false was-ue false]
+          (if (>= p len)
+            (do (aset pos i (int len))
+                [(java.util.Arrays/copyOf out i) (java.util.Arrays/copyOf pos (inc i))])
+            (let [c (aget raw p)]
+              (if (and (= c \\) (or (not was-bs) was-ue))
+                (let [idx (loop [k (inc p)] (if (and (< k len) (= (aget raw k) \u)) (recur (inc k)) k))]
+                  (if (= idx (inc p))
+                    (do (aset out i \\) (aset pos i (int p))
+                        (recur (inc p) (inc i) (not was-bs) false))
+                    (let [[code idx] (loop [k 0 code 0 idx idx]
+                                       (if (< k 4)
+                                         (let [d (if (< idx len) (Character/digit (aget raw idx) 16) -1)
+                                               code (bit-or (bit-shift-left code 4) d)]
+                                           (if (neg? code) [code idx] (recur (inc k) code (inc idx))))
+                                         [code idx]))]
+                      (if (neg? code)
+                        ;; a broken escape: javac reports it and skips it
+                        (recur (long idx) i false false)
+                        (let [ch (char code)]
+                          (aset out i ch) (aset pos i (int p))
+                          (recur (long idx) (inc i) (and (= ch \\) (not was-bs)) true))))))
+                (do (aset out i c) (aset pos i (int p))
+                    (recur (inc p) (inc i) false false))))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Token kinds
+
+(def keywords
+  "javac's TokenKind names of the keywords and the named literals, by their text."
+  {"abstract" :ABSTRACT "assert" :ASSERT "boolean" :BOOLEAN "break" :BREAK "byte" :BYTE
+   "case" :CASE "catch" :CATCH "char" :CHAR "class" :CLASS "const" :CONST "continue" :CONTINUE
+   "default" :DEFAULT "do" :DO "double" :DOUBLE "else" :ELSE "enum" :ENUM "extends" :EXTENDS
+   "final" :FINAL "finally" :FINALLY "float" :FLOAT "for" :FOR "goto" :GOTO "if" :IF
+   "implements" :IMPLEMENTS "import" :IMPORT "instanceof" :INSTANCEOF "int" :INT
+   "interface" :INTERFACE "long" :LONG "native" :NATIVE "new" :NEW "package" :PACKAGE
+   "private" :PRIVATE "protected" :PROTECTED "public" :PUBLIC "return" :RETURN "short" :SHORT
+   "static" :STATIC "strictfp" :STRICTFP "super" :SUPER "switch" :SWITCH
+   "synchronized" :SYNCHRONIZED "this" :THIS "throw" :THROW "throws" :THROWS
+   "transient" :TRANSIENT "try" :TRY "void" :VOID "volatile" :VOLATILE "while" :WHILE
+   "true" :TRUE "false" :FALSE "null" :NULL "_" :UNDERSCORE})
+
+(def operators
+  "javac's TokenKind names of the operators and separators, by their text."
+  {"->" :ARROW "::" :COLCOL "(" :LPAREN ")" :RPAREN "{" :LBRACE "}" :RBRACE "[" :LBRACKET
+   "]" :RBRACKET ";" :SEMI "," :COMMA "." :DOT "..." :ELLIPSIS "=" :EQ ">" :GT "<" :LT "!" :BANG
+   "~" :TILDE "?" :QUES ":" :COLON "==" :EQEQ "<=" :LTEQ ">=" :GTEQ "!=" :BANGEQ "&&" :AMPAMP
+   "||" :BARBAR "++" :PLUSPLUS "--" :SUBSUB "+" :PLUS "-" :SUB "*" :STAR "/" :SLASH "&" :AMP
+   "|" :BAR "^" :CARET "%" :PERCENT "<<" :LTLT ">>" :GTGT ">>>" :GTGTGT "+=" :PLUSEQ
+   "-=" :SUBEQ "*=" :STAREQ "/=" :SLASHEQ "&=" :AMPEQ "|=" :BAREQ "^=" :CARETEQ
+   "%=" :PERCENTEQ "<<=" :LTLTEQ ">>=" :GTGTEQ ">>>=" :GTGTGTEQ "@" :MONKEYS_AT})
+
+(def kind-names
+  "Each kind's text (javac's TokenKind.name), for the operators' and keywords' kinds."
+  (into {} (map (fn [[s k]] [k s])) (concat keywords operators)))
+
+(def named-kinds
+  "The kinds of javac's NamedTokens (Token.Tag.NAMED)."
+  #{:IDENTIFIER :ASSERT :BOOLEAN :BYTE :CHAR :DOUBLE :ENUM :FLOAT :INT :LONG :SHORT :SUPER :THIS
+    :VOID :TRUE :FALSE :NULL :UNDERSCORE})
+
+;; ---------------------------------------------------------------------------------------------
+;; The tokenizer: st holds [i] (the index into the decoded chars)
+
+(defmacro ^:private at [] `(aget ~'st 0))
+(defmacro ^:private cur []
+  `(let [i# (aget ~'st 0)] (char (if (< i# ~'n) (aget ~'cs i#) EOI))))
+(defmacro ^:private width
+  "UnicodeReader's width of the character at the cursor: 2 for a surrogate pair (one code point)."
+  []
+  `(let [i# (aget ~'st 0)]
+     (if (and (< (inc i#) ~'n)
+              (let [c# (int (aget ~'cs i#))] (and (>= c# 0xD800) (<= c# 0xDBFF)))
+              (let [c# (int (aget ~'cs (int (inc i#))))] (and (>= c# 0xDC00) (<= c# 0xDFFF))))
+       2 1)))
+(defmacro ^:private nxt
+  "UnicodeReader.next(): past the character (a surrogate pair's two units)."
+  []
+  `(let [i# (aget ~'st 0)]
+     (if (and (< i# ~'n) (< (int (aget ~'cs i#)) 0xD800))
+       (aset ~'st 0 (inc i#))
+       (aset ~'st 0 (+ i# (long (width)))))))
+(defmacro ^:private put-cp
+  "JavaTokenizer.put(): the character, or the code point of a surrogate pair."
+  []
+  `(let [i# (aget ~'st 0)]
+     (when (< i# ~'n)
+       (.append ~'sb (aget ~'cs i#))
+       (when (= 2 (long (width))) (.append ~'sb (aget ~'cs (int (inc i#))))))))
+(defmacro ^:private position [] `(aget ~'pmap (int (aget ~'st 0))))
+(defmacro ^:private avail? [] `(< (aget ~'st 0) ~'n))
+(defmacro ^:private is [c] `(= (cur) ~c))
+(defmacro ^:private accept [c] `(if (is ~c) (do (nxt) true) false))
+(defmacro ^:private put [c] `(.append ~'sb (char ~c)))
+
+(defn- accept-str
+  "UnicodeReader.accept(String): the string's characters next, consumed; else nothing moves."
+  [^chars cs ^longs st n ^String s]
+  (let [i (aget st 0) k (.length s)]
+    (if (and (<= (+ i k) n)
+             (loop [j 0] (cond (= j k) true
+                               (= (aget cs (int (+ i j))) (.charAt s j)) (recur (inc j))
+                               :else false)))
+      (do (aset st 0 (+ i k)) true)
+      false)))
+
+(defn- digit
+  "UnicodeReader.digit: the current character's value in radix r, or -1; a non-ASCII digit's
+  character replaced by the ASCII digit (javac's error recovery), a surrogate pair's code point
+  kept."
+  ^long [^chars cs ^longs st n r]
+  (let [c (cur)]
+    (if (and (<= (int \0) (int c)) (<= (int c) (int \9)))
+      (let [d (- (int c) (int \0))] (if (< d (long r)) d -1))
+      (if (= 2 (long (width)))
+        (Character/digit (Character/toCodePoint c (aget cs (int (inc (aget st 0))))) (int r))
+        (let [d (Character/digit c (int r))]
+          (when (and (>= d 0) (> (int c) 127))
+            (aset cs (int (aget st 0)) (.charAt "0123456789abcdef" d)))
+          d)))))
+
+(defn- eoln? [c] (or (= c \return) (= c \newline)))
+(defn- white? [c] (or (= c \space) (= c \tab) (= c \formfeed)))
+
+(defn- skip-white [^chars cs ^longs st n]
+  (loop [] (when (white? (cur)) (nxt) (recur))))
+
+(defn- skip-line-terminator [^chars cs ^longs st n]
+  (accept \return) (accept \newline))
+
+(defn- skip-to-eoln [^chars cs ^longs st n]
+  (loop [] (when (and (avail?) (not (eoln? (cur)))) (nxt) (recur))))
+
+(defn- scan-digits [^chars cs ^longs st n ^StringBuilder sb r]
+  (loop []
+    (when-not (is \_) (put-cp))
+    (nxt)
+    (when (or (>= (digit cs st n r) 0) (is \_)) (recur))))
+
+(defn- skip-illegal-underscores [^chars cs ^longs st n]
+  (when (is \_) (loop [] (when (accept \_) (recur)))))
+
+(defn- accept-one-then-put [^chars cs ^longs st n ^StringBuilder sb a b]
+  (if (or (is (char a)) (is (char b))) (do (put (cur)) (nxt) true) false))
+
+;; the scanned token's kind and radix: tk holds [kind radix]
+(defn- scan-hex-exponent-and-suffix [^chars cs ^longs st n ^StringBuilder sb ^objects tk]
+  (when (accept-one-then-put cs st n sb \p \P)
+    (skip-illegal-underscores cs st n)
+    (accept-one-then-put cs st n sb \+ \-)
+    (skip-illegal-underscores cs st n)
+    (when (>= (digit cs st n 10) 0) (scan-digits cs st n sb 10)))
+  (if (accept-one-then-put cs st n sb \f \F)
+    (do (aset tk 0 :FLOATLITERAL) (aset tk 1 (num 16)))
+    (do (accept-one-then-put cs st n sb \d \D) (aset tk 0 :DOUBLELITERAL) (aset tk 1 (num 16)))))
+
+(defn- scan-fraction [^chars cs ^longs st n ^StringBuilder sb]
+  (skip-illegal-underscores cs st n)
+  (when (>= (digit cs st n 10) 0) (scan-digits cs st n sb 10))
+  (let [index (.length sb)]
+    (when (accept-one-then-put cs st n sb \e \E)
+      (skip-illegal-underscores cs st n)
+      (accept-one-then-put cs st n sb \+ \-)
+      (skip-illegal-underscores cs st n)
+      (if (>= (digit cs st n 10) 0)
+        (scan-digits cs st n sb 10)
+        (.setLength sb index)))))
+
+(defn- scan-fraction-and-suffix [^chars cs ^longs st n ^StringBuilder sb ^objects tk]
+  (aset tk 1 (num 10))
+  (scan-fraction cs st n sb)
+  (if (accept-one-then-put cs st n sb \f \F)
+    (aset tk 0 :FLOATLITERAL)
+    (do (accept-one-then-put cs st n sb \d \D) (aset tk 0 :DOUBLELITERAL))))
+
+(defn- scan-hex-fraction-and-suffix [^chars cs ^longs st n ^StringBuilder sb ^objects tk seen]
+  (aset tk 1 (num 16))
+  (put-cp) (nxt)
+  (skip-illegal-underscores cs st n)
+  (let [seen (if (>= (digit cs st n 16) 0) (do (scan-digits cs st n sb 16) true) seen)]
+    (if seen
+      (scan-hex-exponent-and-suffix cs st n sb tk)
+      (aset tk 0 :ERROR))))
+
+(defn- scan-number [^chars cs ^longs st n ^StringBuilder sb ^objects tk r]
+  (aset tk 1 (num r))
+  (let [float-ok (or (= r 8) (= r 10))
+        dr (max 10 (long r))
+        first-digit (digit cs st n dr)
+        seen (>= first-digit 0)]
+    (when seen (scan-digits cs st n sb dr))
+    (cond
+      (and (= r 16) (is \.)) (scan-hex-fraction-and-suffix cs st n sb tk seen)
+      (and seen (= r 16) (or (is \p) (is \P))) (scan-hex-exponent-and-suffix cs st n sb tk)
+      (and float-ok (is \.)) (do (put-cp) (nxt) (scan-fraction-and-suffix cs st n sb tk))
+      (and float-ok (let [c (cur)] (or (= c \e) (= c \E) (= c \f) (= c \F) (= c \d) (= c \D))))
+      (scan-fraction-and-suffix cs st n sb tk)
+      :else (aset tk 0 (if (or (accept \l) (accept \L)) :LONGLITERAL :INTLITERAL)))))
+
+(defn- ident-part
+  "The width (1 or 2 chars) of the identifier part at the cursor, 0 when none, -1 for an
+  ignorable character (skipped, not put), as JavaTokenizer.scanIdent decides."
+  ^long [^chars cs ^longs st n]
+  (let [c (cur)
+        ic (int c)]
+    (cond
+      (or (and (>= ic 97) (<= ic 122)) (and (>= ic 65) (<= ic 90)) (and (>= ic 48) (<= ic 57))
+          (= c \$) (= c \_)) 1
+      (or (<= ic 8) (and (>= ic 14) (<= ic 27) (not= ic 26)) (= ic 127)) -1
+      (= ic 26) (if (avail?) -1 0)
+      (< ic 128) 0
+      (Character/isIdentifierIgnorable c) -1
+      (and (Character/isHighSurrogate c) (< (inc (at)) n)
+           (Character/isLowSurrogate (aget cs (int (inc (at))))))
+      (if (Character/isJavaIdentifierPart (Character/toCodePoint c (aget cs (int (inc (at)))))) 2 0)
+      (Character/isJavaIdentifierPart c) 1
+      :else 0)))
+
+(defn- scan-ident [^chars cs ^longs st n ^StringBuilder sb]
+  ;; the first character: putThenNext (a surrogate pair as one code point)
+  (put-cp) (nxt)
+  (loop []
+    (let [w (ident-part cs st n)]
+      (cond
+        (= w -1) (do (nxt) (recur))
+        (= w 0) nil
+        :else (do (put-cp) (nxt) (recur))))))
+
+(defn- special? [c]
+  (case c (\! \% \& \* \? \+ \- \: \< \= \> \^ \| \~ \@) true false))
+
+(defn- scan-operator [^chars cs ^longs st n ^StringBuilder sb ^objects tk]
+  (loop []
+    (put-cp)
+    (if-let [k (get operators (.toString sb))]
+      (do (aset tk 0 k) (nxt) (when (special? (cur)) (recur)))
+      (.setLength sb (dec (.length sb))))))
+
+(defn- scan-lit-char
+  "JavaTokenizer.scanLitChar; returns true when the text has an escape sequence."
+  [^chars cs ^longs st n ^StringBuilder sb text-block string? ^objects tk]
+  (if (is \\)
+    (do (put \\) (nxt)
+        (let [c (cur)]
+          (case c
+            (\0 \1 \2 \3 \4 \5 \6 \7)
+            (do (put-cp) (nxt)
+                (when (let [d (cur)] (and (>= (int d) 48) (<= (int d) 55)))
+                  (put-cp) (nxt)
+                  (when (and (<= (int c) 51) (let [d (cur)] (and (>= (int d) 48) (<= (int d) 55))))
+                    (put-cp) (nxt))))
+            (\b \t \n \f \r \' \" \\ \s) (do (put-cp) (nxt))
+            (\newline \return) (if text-block
+                                 (do (skip-line-terminator cs st n) (put \newline))
+                                 (aset tk 0 :ERROR))
+            (aset tk 0 :ERROR)))
+        true)
+    (do (when (and (not string?) (= 2 (long (width)))) (aset tk 0 :ERROR))
+        (put-cp) (nxt) false)))
+
+(defn- scan-string
+  "JavaTokenizer.scanString: [text-block? escapes?]."
+  [^chars cs ^longs st n ^StringBuilder sb ^objects tk]
+  (aset tk 0 :STRINGLITERAL)
+  (if (accept-str cs st n "\"\"\"")
+    (do (skip-white cs st n)
+        (if (eoln? (cur))
+          (do (skip-line-terminator cs st n)
+              (loop [esc false first-eoln -1]
+                (cond
+                  (not (avail?)) (do (aset tk 0 :ERROR)
+                                     (when (>= first-eoln 0) (aset st 0 first-eoln))
+                                     [true esc])
+                  (accept-str cs st n "\"\"\"") [true esc]
+                  (eoln? (cur)) (do (skip-line-terminator cs st n) (put \newline)
+                                    (recur esc (if (< first-eoln 0) (aget st 0) first-eoln)))
+                  :else (recur (or (scan-lit-char cs st n sb true true tk) esc) first-eoln))))
+          (do (aset tk 0 :ERROR) [true false])))
+    (do (nxt)
+        (loop [esc false]
+          (cond
+            (not (avail?)) (do (aset tk 0 :ERROR) [false esc])
+            (accept \") [false esc]
+            (eoln? (cur)) (do (aset tk 0 :ERROR) [false esc])
+            :else (recur (or (scan-lit-char cs st n sb false true tk) esc)))))))
+
+(defn- mk-comment
+  "A comment [style pos endPos start end]: positions in the text, start and end decoded indices."
+  [^ints pmap style start end]
+  (object-array [style (aget pmap (int start)) (aget pmap (int end)) start end]))
+
+(defn tokens
+  "The tokens of `text` (javac's, through EOF) as an object array of tokens, and the decoded
+  characters: [tokens chars]."
+  [^String text]
+  (let [[^chars cs ^ints pmap] (decode text)
+        n (alength cs)
+        st (long-array 1)
+        sb (StringBuilder. 256)
+        tk (object-array 2)
+        out (java.util.ArrayList.)]
+    (loop [comments nil]
+      (.setLength sb 0)
+      ;; tk[0], the kind, is not reset: javac's JavaTokenizer keeps its tk from the last token,
+      ;; which a character literal's error recovery reads
+      (aset tk 1 nil)
+      (let [start (at)
+            pos (position)
+            c (cur)
+            more
+            (cond
+              (white? c) (do (skip-white cs st n) :again)
+              (= c \newline) (do (nxt) :again)
+              (= c \return) (do (nxt) (accept \newline) :again)
+              (or (and (>= (int c) 97) (<= (int c) 122)) (and (>= (int c) 65) (<= (int c) 90))
+                  (= c \$) (= c \_))
+              (do (scan-ident cs st n sb) :ident)
+              (= c \0)
+              (do (nxt)
+                  (cond
+                    (or (accept \x) (accept \X)) (do (skip-illegal-underscores cs st n) (scan-number cs st n sb tk 16))
+                    (or (accept \b) (accept \B)) (do (skip-illegal-underscores cs st n) (scan-number cs st n sb tk 2))
+                    :else (do (put \0)
+                              (when (is \_) (loop [] (when (accept \_) (recur))))
+                              (scan-number cs st n sb tk 8)))
+                  :token)
+              (and (>= (int c) 49) (<= (int c) 57)) (do (scan-number cs st n sb tk 10) :token)
+              (= c \.)
+              (do (if (accept-str cs st n "...")
+                    (do (.append sb "...") (aset tk 0 :ELLIPSIS))
+                    (do (nxt)
+                        (cond
+                          (accept \.) (aset tk 0 :ERROR)
+                          (>= (digit cs st n 10) 0) (do (put \.) (scan-fraction-and-suffix cs st n sb tk))
+                          :else (aset tk 0 :DOT))))
+                  :token)
+              (= c \,) (do (nxt) (aset tk 0 :COMMA) :token)
+              (= c \;) (do (nxt) (aset tk 0 :SEMI) :token)
+              (= c \() (do (nxt) (aset tk 0 :LPAREN) :token)
+              (= c \)) (do (nxt) (aset tk 0 :RPAREN) :token)
+              (= c \[) (do (nxt) (aset tk 0 :LBRACKET) :token)
+              (= c \]) (do (nxt) (aset tk 0 :RBRACKET) :token)
+              (= c \{) (do (nxt) (aset tk 0 :LBRACE) :token)
+              (= c \}) (do (nxt) (aset tk 0 :RBRACE) :token)
+              (= c \/)
+              (do (nxt)
+                  (cond
+                    (accept \/)
+                    (if (accept \/)
+                      (let [end (loop []
+                                  (skip-to-eoln cs st n)
+                                  (let [e (at)]
+                                    (skip-line-terminator cs st n)
+                                    (skip-white cs st n)
+                                    (if (accept-str cs st n "///") (recur) e)))]
+                        [:comment (mk-comment pmap :JAVADOC_LINE start end)])
+                      (do (skip-to-eoln cs st n)
+                          (if (avail?) [:comment (mk-comment pmap :LINE start (at))] :again)))
+                    (accept \*)
+                    (let [[style empty] (if (accept \*)
+                                          [:JAVADOC_BLOCK (is \/)]
+                                          [:BLOCK false])]
+                      (when-not empty
+                        (loop []
+                          (when (avail?)
+                            (if (accept \*)
+                              (when-not (is \/) (recur))
+                              (do (nxt) (recur))))))
+                      (if (accept \/)
+                        [:comment (mk-comment pmap style start (at))]
+                        (do (aset tk 0 :ERROR) :token)))
+                    (accept \=) (do (aset tk 0 :SLASHEQ) :token)
+                    :else (do (aset tk 0 :SLASH) :token)))
+              (= c \')
+              (do (nxt)
+                  (if (accept \')
+                    (aset tk 0 :ERROR)
+                    (do (when (eoln? (cur)) (aset tk 0 :ERROR))
+                        (let [esc (scan-lit-char cs st n sb false false tk)]
+                          (if (= (aget tk 0) :ERROR)
+                            (do (loop [] (when (and (avail?) (not (is \')))
+                                           (when (is \\) (nxt)) (nxt) (recur)))
+                                (accept \'))
+                            (if (accept \')
+                              (do (aset tk 0 :CHARLITERAL) (aset tk 1 (if esc :esc nil)))
+                              (aset tk 0 :ERROR))))))
+                  :token)
+              (= c \") (let [[tb esc] (scan-string cs st n sb tk)]
+                         (aset tk 1 [tb esc]) :string)
+              (special? c) (do (scan-operator cs st n sb tk) :token)
+              :else
+              (let [ic (int c)
+                    start? (and (>= ic 128)
+                                (if (and (Character/isHighSurrogate c) (< (inc (at)) n)
+                                         (Character/isLowSurrogate (aget cs (int (inc (at))))))
+                                  (Character/isJavaIdentifierStart (Character/toCodePoint c (aget cs (int (inc (at))))))
+                                  (Character/isJavaIdentifierStart c)))]
+                (cond
+                  start? (do (scan-ident cs st n sb) :ident)
+                  (>= (digit cs st n 10) 0) (do (scan-number cs st n sb tk 10) :token)
+                  (or (= c EOI) (not (avail?))) :eof
+                  :else (do (aset tk 0 :ERROR) (nxt) :token))))]
+        (cond
+          (= more :again) (recur comments)
+          (vector? more) (recur (cons (second more) comments))
+          :else
+          (let [end (position)
+                tok (case more
+                      :eof (object-array [:EOF pos pos nil nil comments])
+                      :ident (let [s (.toString sb)]
+                               (object-array [(get keywords s :IDENTIFIER) pos end s nil comments]))
+                      :string (let [[tb esc] (aget tk 1)
+                                    s (.toString sb)
+                                    ^String s (if tb (try (.stripIndent s) (catch Exception _ s)) s)
+                                    s (if esc (try (.translateEscapes s) (catch Exception _ s)) s)]
+                                (object-array [(aget tk 0) pos end s nil comments]))
+                      :token (let [k (aget tk 0)]
+                               (case k
+                                 (:INTLITERAL :LONGLITERAL :FLOATLITERAL :DOUBLELITERAL)
+                                 (object-array [k pos end (.toString sb) (aget tk 1) comments])
+                                 :CHARLITERAL
+                                 (let [s (.toString sb)
+                                       s (if (aget tk 1) (try (.translateEscapes ^String s) (catch Exception _ s)) s)]
+                                   (object-array [k pos end s nil comments]))
+                                 (object-array [k pos end (get kind-names k) nil comments]))))]
+            (.add out tok)
+            (if (= more :eof)
+              [(.toArray out) cs]
+              (recur nil))))))))
+
+(defn deprecated?
+  "Whether doc comment `c` (a comment of tokens) marks its declaration @deprecated, as javac's
+  BasicComment.isDeprecated scans a JAVADOC_BLOCK comment (a JAVADOC_LINE comment never does)."
+  [^chars cs ^objects c]
+  (when (= (aget c 0) :JAVADOC_BLOCK)
+    (let [n (long (aget c 4))
+          st (long-array [(aget c 3)])]
+      (when (accept-str cs st n "/**")
+        (when-not (let [k (loop [k 0] (if (accept \*) (recur (inc k)) k))] (and (pos? k) (is \/)))
+          (skip-white cs st n)
+          (when (eoln? (cur)) (accept \return) (accept \newline))
+          (loop [dep false]
+            (if-not (avail?)
+              dep
+              (let [lstart (at)
+                    _ (skip-to-eoln cs st n)
+                    lend (at)
+                    _ (do (accept \return) (accept \newline))
+                    ;; trimEndOfComment: the line up to a closing */
+                    [ls le] (loop [k lstart all-white true]
+                              (if (< k lend)
+                                (let [k2 (long (loop [j k] (if (and (< j lend) (= (aget cs (int j)) \*)) (recur (inc j)) j)))]
+                                  (if (and (> k2 k) (< k2 lend) (= (aget cs (int k2)) \/))
+                                    [(if all-white k lstart) k]
+                                    (let [all-white (and all-white (< k2 lend) (white? (aget cs (int k2))))]
+                                      (recur (inc k2) all-white))))
+                                [lstart lend]))
+                    lst (long-array [ls])
+                    ;; trimJavadocComment: leading white space and stars
+                    _ (let [p (aget lst 0)]
+                        (loop [] (when (and (< (aget lst 0) le) (white? (aget cs (int (aget lst 0))))) (aset lst 0 (inc (aget lst 0))) (recur)))
+                        (when (< (aget lst 0) le)
+                          (let [k (loop [k 0] (if (and (< (aget lst 0) le) (= (aget cs (int (aget lst 0))) \*))
+                                                (do (aset lst 0 (inc (aget lst 0))) (recur (inc k))) k))]
+                            (when (zero? k) (aset lst 0 p)))))
+                    _ (loop [] (when (and (< (aget lst 0) le) (white? (aget cs (int (aget lst 0))))) (aset lst 0 (inc (aget lst 0))) (recur)))
+                    dep (or dep
+                            (and (accept-str cs lst le "@deprecated")
+                                 (or (>= (aget lst 0) le)
+                                     (let [ch (aget cs (int (aget lst 0)))]
+                                       (or (white? ch) (eoln? ch) (= ch EOI))))))]
+                (recur dep)))))))))

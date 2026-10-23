@@ -1,0 +1,130 @@
+#!/bin/bash
+# The tree level of repr/java's native parser (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"):
+# every Java file of the corpora parsed by javac on Arbace (JavacTask.parse, on javac's tool
+# executable) and by arbace.repr.java.parse (Java 26's parser in Arbace), the two trees as data
+# (arbace.repr.java.jtree: tags, javac's pos, TreeInfo.getStartPos and getEndPos, the parser's stored
+# end positions, doc comments, every field), compared as text, file by file, against
+# test/repr/java/parse-check-known.edn (the files whose trees are known to differ, by corpus; empty).
+# Run through bin/repr-java parse-check (from the repository root); writes only under
+# .tmp/repr-java-parse-check/ (REPR_JAVA_PARSE_WORK).
+#
+# Usage: bin/repr-java parse-check [--corpus C,...]
+# Corpora (default all of them, `all`: samples,baseline,jdk,javac,jdk26u,mutants,tests):
+#   samples   test/repr/java/java and test/repr/java/module (14 files)
+#   baseline  the frozen clojure/ (183 files; bin/lib/tools.bash's frozen_clojure)
+#   jdk       java.base's closure, jdk/forms' originals (838 files), made by bin/jrt-convert's
+#             sources and generate steps, as bin/repr-java roundtrip makes them (again when
+#             jdk/sources.txt changes)
+#   javac     javac's own sources, jdk/javac/sources.txt's files (824): jdk26u's, the overlay's, the
+#             build's tools', and the generated ones from the JDK build's support/gensrc (bin/javac-vendor
+#             generates them byte for byte the same, its generated.edn)
+#   jdk26u    every Java file of jdk26u's 68 modules, $JDK_SRC/*/share/classes (12,809 files: the
+#             12,730 bin/repr-java check --jdk reads, the 68 module-info.java and 11 snippet files)
+#   mutants   javac's error recovery: 8,000 mutants of jdk26u's modules, 4,000 of their files (a
+#             seeded shuffle) each made into 2 mutants of 4 random edits to tokens (deleted,
+#             duplicated, swapped, a token inserted; arbace.repr.java.jtree's mutate, seed 26)
+#   tests     every Java file of jdk26u's test/ (37,797 files, langtools' error tests among them)
+# Each corpus: WORK/CORPUS/report.edn (files, equal, the parse times of both parsers), files.tsv,
+# javac-errors.txt (javac's syntax errors: such a file is compared too), and
+# diff/PATH.javac, PATH.native for each file whose trees differ.
+#   JDK_SRC   jdk26u's src directory (default /root/jdk26u/src)
+#   REPR_JAVA_THREADS (default 12), REPR_JAVA_CHUNK (files per javac task, default 50)
+# REPR_JAVA_EXE (bin/repr-java) names javac's tool executable.
+# Exit status: 0 when every corpus's differing files are the known ones.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
+cd "$root"
+. bin/lib/tools.bash
+
+corpora=samples,baseline,jdk,javac,jdk26u,mutants,tests
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    *) sed -n '11,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+[ "$corpora" = all ] && corpora=samples,baseline,jdk,javac,jdk26u,mutants,tests
+work=${REPR_JAVA_PARSE_WORK:-$root/.tmp/repr-java-parse-check}
+case $work in /*) ;; *) work=$root/$work ;; esac
+jdk_src=${JDK_SRC:-/root/jdk26u/src}
+jdk=$(dirname "$jdk_src")
+known=test/repr/java/parse-check-known.edn
+export REPR_JAVA_THREADS=${REPR_JAVA_THREADS:-12}
+mkdir -p "$work"
+status=0
+
+# check CORPUS ROOT [PATH...]: the tree check of the files under ROOT (or its PATHs)
+check() {
+  local corpus=$1 r=$2 t0=$SECONDS
+  shift 2
+  rm -rf "${work:?}/$corpus"
+  bin/repr-java main -m arbace.repr.java.jtree check "$work/$corpus" "$r" "$@" > "$work/$corpus.log" 2>&1
+  [ -f "$work/$corpus/files.tsv" ] || { tail -20 "$work/$corpus.log"; echo "$corpus: the check did not run ($work/$corpus.log)"; return 1; }
+  echo "$corpus: $(tail -1 "$work/$corpus.log") [$((SECONDS - t0)) s]"
+  # the differing files against the known ones
+  awk -F'\t' '$2 != "equal" {print $1}' "$work/$corpus/files.tsv" | LC_ALL=C sort > "$work/$corpus.differ"
+  arbace_tool -e "(let [k (get (read-string (slurp \"$known\")) :$corpus)] (doseq [f (sort k)] (println f)))" \
+    | LC_ALL=C sort > "$work/$corpus.known" || return 1
+  if ! cmp -s "$work/$corpus.differ" "$work/$corpus.known"; then
+    echo "$corpus: the differing files are not the known ones ($known):"
+    diff "$work/$corpus.known" "$work/$corpus.differ" | grep '^[<>]' | head -20
+    return 1
+  fi
+}
+
+# jdk_originals: java.base's closure as bin/jrt-convert's sources and generate steps make it
+jdk_originals() {
+  local orig=$work/jdk-originals
+  # made again when jdk/sources.txt (the closure) changed
+  if [ ! -d "$orig/src/java.base" ] || ! cmp -s jdk/sources.txt "$orig/.sources.txt"; then
+    echo "the jdk corpus's originals: bin/jrt-convert's sources and generate steps into $orig"
+    rm -rf "$orig"
+    JRT_WORK=$orig JRT_STEPS=sources,generate bin/jrt-convert > "$work/jrt.log" 2>&1 \
+      || { echo "bin/jrt-convert failed: $work/jrt.log"; return 1; }
+    cp jdk/sources.txt "$orig/.sources.txt"
+  fi
+  echo "$orig/src/java.base"
+}
+
+# javac_sources: javac's sources, jdk/javac/sources.txt's files, into WORK/javac-src/MODULE
+javac_sources() {
+  local d=$work/javac-src gensrc m kind rel
+  gensrc=$(ls -d "$jdk"/build/*/support/gensrc 2>/dev/null | head -1)
+  [ -n "$gensrc" ] || { echo "no JDK build tree's support/gensrc under $jdk/build" >&2; return 1; }
+  rm -rf "$d"
+  while read -r m kind rel; do
+    mkdir -p "$d/$m/$(dirname "$rel")"
+    case $kind in
+      share) cp "$jdk/src/$m/share/classes/$rel" "$d/$m/$rel" ;;
+      gensrc|gensrc-build) cp "$gensrc/$m/$rel" "$d/$m/$rel" ;;
+      overlay) cp "overlay/jdk/javac/$m/$rel" "$d/$m/$rel" ;;
+      make) cp "$jdk/make/jdk/src/classes/$rel" "$d/$m/$rel" ;;
+      langtools) cp "$jdk/make/langtools/tools/$rel" "$d/$m/$rel" ;;
+      interim) sed -e "s/package java.time.zone/package build.tools.tzdb/" \
+                 < "$jdk/src/java.base/share/classes/java/time/zone/$(basename "$rel")" > "$d/$m/$rel" ;;
+      *) echo "jdk/javac/sources.txt: unknown kind $kind" >&2; return 1 ;;
+    esac || return 1
+  done < jdk/javac/sources.txt
+  echo "$d"
+}
+
+for c in ${corpora//,/ }; do
+  case $c in
+    samples) check samples "$root/test/repr/java" java module || status=1 ;;
+    baseline) frozen=$(frozen_clojure) && check baseline "$frozen" || status=1 ;;
+    jdk) o=$(jdk_originals) && check jdk "$(echo "$o" | tail -1)" || status=1 ;;
+    javac) s=$(javac_sources) && check javac "$s" || status=1 ;;
+    jdk26u) mods=$(cd "$jdk_src" && ls -d */share/classes)
+            check jdk26u "$jdk_src" $mods || status=1
+            echo "jdk26u: $(echo "$mods" | wc -l) modules, $(awk -F'\t' '$2 != "equal"' "$work/jdk26u/files.tsv" | cut -d/ -f1 | LC_ALL=C sort -u | wc -l) with a file whose trees differ" ;;
+    mutants) rm -rf "$work/mutants-src"
+             bin/repr-java main -m arbace.repr.java.jtree mutate "$work/mutants-src" "$jdk_src" 4000 2 4 26 \
+               $(cd "$jdk_src" && ls -d */share/classes) > "$work/mutate.log" 2>&1 \
+               && check mutants "$work/mutants-src" || { tail -5 "$work/mutate.log"; status=1; } ;;
+    tests) check tests "$jdk/test" || status=1 ;;
+    *) echo "parse-check: no corpus $c (samples, baseline, jdk, javac, jdk26u, mutants, tests)" >&2; exit 2 ;;
+  esac
+done
+[ $status = 0 ] && echo "parse-check: every corpus's trees as javac's (but the known)" || echo "parse-check: FAILED"
+exit $status
