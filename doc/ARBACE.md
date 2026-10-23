@@ -9,7 +9,11 @@ code. Three kinds of things live here:
   and `repr/clojure/` (repr/clojure, Clojure source to Arbace's, `arbace.repr.clojure` and
   `arbace.repr.clojure.*`; doc/REPR-CLOJURE.md; c2a, `arbace.c2a.*`, until 2026-10-17), `repr/java.ae`
   and `repr/java/` (repr/java, the Java to Java forms converter, `arbace.repr.java` and
-  `arbace.repr.java.*`), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
+  `arbace.repr.java.*`; its native lexer and parser, `repr/java/lex.ae` and `parse.ae`, are ports of
+  jdk26u's javac: https://github.com/openjdk/jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259`,
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/parser/{UnicodeReader,JavaTokenizer,JavadocTokenizer,Tokens,JavacParser}.java`
+  and `tree/{TreeInfo,TreeMaker}.java`, ported by hand on 2026-10-23, the files carrying their
+  notice; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
   `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
   `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,
   `arbace.build.go`; doc/go/BUILD.md; until 2026-10-17 j2a, g2a and `arbace.g2a.build`) and

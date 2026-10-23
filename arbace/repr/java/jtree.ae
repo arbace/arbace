@@ -8,6 +8,7 @@
 
   bin/repr-java parse-check (bin/lib/repr-java/parse-check) runs `check` over its corpora:
     -m arbace.repr.java.jtree check OUT ROOT [PATH...]
+    -m arbace.repr.java.jtree mutate OUT ROOT N K EDITS SEED [PATH...]   (its mutants corpus)
   every .java file under ROOT (or the PATHs) parsed by both, in chunks of REPR_JAVA_CHUNK files
   (default 50) on REPR_JAVA_THREADS threads (default 4); OUT/report.edn the counts and times,
   OUT/diff/<path>.javac and .native the dumps of each file whose trees differ, OUT/files.tsv a
@@ -277,12 +278,58 @@
                   (:wall-s report) " s)"))
     report))
 
+(def ^:private inserted
+  [";" "{" "}" "(" ")" "," "." "=" "<" ">" "@" "int" "class" "->" "::" "?" "x" "new" "case" "\"s\"" "[" "]"])
+
+(defn- mutate-text
+  "Text with `edits` random edits at distinct tokens (javac's tokens, as arbace.repr.java.lex reads
+  them, `spans` their [pos endPos]), each token deleted, duplicated, swapped with the next, or
+  preceded by one of `inserted`; applied from the last, so that each edit's positions hold."
+  [^java.util.Random rnd ^String text spans edits]
+  (if (< (count spans) 3)
+    text
+    (let [at (sort > (distinct (repeatedly edits #(* 2 (.nextInt rnd (quot (dec (count spans)) 2))))))]
+      (reduce (fn [^String t i]
+                (let [[a b] (spans i) [c d] (spans (inc i))]
+                  (case (.nextInt rnd 4)
+                    0 (str (subs t 0 a) (subs t b))
+                    1 (str (subs t 0 b) " " (subs t a b) (subs t b))
+                    2 (str (subs t 0 a) (subs t c d) (subs t b c) (subs t a b) (subs t d))
+                    (str (subs t 0 a) (inserted (.nextInt rnd (count inserted))) " " (subs t a)))))
+              text at))))
+
+(defn mutate
+  "Mutants of the .java files under `root` (its PATHs): `n` of them, chosen by a shuffle seeded
+  with `seed`, each made into `k` mutants of `edits` edits (mutate-text), OUT/J/<path> for the
+  J-th; the corpus of javac's error recovery (bin/repr-java parse-check's mutants)."
+  [out root paths n k edits seed]
+  (let [root (.getCanonicalPath (io/file root))
+        files (java.util.ArrayList. ^java.util.Collection
+                                    (parse/java-files (if (seq paths) (map #(str root "/" %) paths) [root])))
+        rnd (java.util.Random. (long seed))]
+    (java.util.Collections/shuffle files rnd)
+    (let [m (volatile! 0)]
+      (doseq [^String f (take n files)
+              :let [rel (subs (.getCanonicalPath (io/file f)) (inc (count root)))
+                    text (slurp f)
+                    [toks] (arbace.repr.java.lex/tokens text)
+                    spans (vec (for [^objects t (butlast toks)] [(long (aget t 1)) (long (aget t 2))]))]
+              j (range k)]
+        (let [o (io/file out (str j) rel)]
+          (io/make-parents o)
+          (spit o (mutate-text rnd text spans edits))
+          (vswap! m inc)))
+      (println @m "mutants"))))
+
 (defn -main [cmd & args]
   (case cmd
     "check" (let [[out root & paths] args
                   r (check out root paths)]
               (shutdown-agents)
               (System/exit (if (= (:equal r) (:files r)) 0 1)))
+    "mutate" (let [[out root n k edits seed & paths] args]
+               (mutate out root paths (Long/parseLong n) (Long/parseLong k) (Long/parseLong edits) (Long/parseLong seed))
+               (shutdown-agents))
     "time" (let [files (parse/java-files args)
                  t0 (System/nanoTime)
                  units (vec (mapcat #(:units (javac/parse-only % ["--enable-preview" "-source" "26"]))

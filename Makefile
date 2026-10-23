@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild mac-bundle arm64-vm-check arm64-vm-goi \
   gate gate-full suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-divergences alpine-check clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-divergences alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -108,6 +108,8 @@ repr-java-check: ## repr/java's converter checks on javac's tool executable: the
 	bin/repr-java check
 repr-java-jdk: ## jdk26u's 68 modules read by repr/java on javac's tool executable, no failures; long, not in verify (bin/repr-java check --jdk)
 	bin/repr-java check --jdk
+repr-java-parse-check: ## repr/java's native parser: every file of the samples, the baseline, jdk/forms' and javac's sources and jdk26u's 68 modules parsed to javac on Arbace's trees, positions included (bin/repr-java parse-check)
+	bin/repr-java parse-check
 fixtures-verify: ## the suite's Java fixtures, on javac's tool executable (bin/clojure-tests --java-fixtures verify)
 	bin/clojure-tests --java-fixtures verify
 tamago-verify: ## tamago/goroot and goos; the guest from them (bin/tamago-vendor verify, check)
