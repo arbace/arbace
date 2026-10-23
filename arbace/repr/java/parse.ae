@@ -1,0 +1,2872 @@
+;; Ported from jdk26u (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259),
+;; src/jdk.compiler/share/classes/com/sun/tools/javac/parser/JavacParser.java, tree/TreeInfo.java and
+;; TreeMaker.java, whose notice follows
+;; (LICENSE.md, "OpenJDK (jdk26u)"):
+;;
+;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+(ns arbace.repr.java.parse
+  "Java 26's parser in Arbace: javac's trees as data, without javac (doc/classes/JAVA-FRONTEND-SURVEY.md,
+  \"As built: JN8\"). A port of jdk26u's com/sun/tools/javac/parser/JavacParser.java (at
+  baf63fbe42b8758448fee570a9d9bb914272d259; GPLv2 with the Classpath Exception, LICENSE.md's
+  \"OpenJDK (jdk26u)\"), method by method, with TreeMaker's factories, the end positions of its
+  SimpleEndPosTable, the doc comments of its LazyDocCommentTable and TreeInfo's getStartPos and
+  getEndPos, as javac's JavacTask.parse runs it (doc comments and end positions kept, source 26,
+  preview enabled); the tokens are arbace.repr.java.lex's. javac's error recovery is ported as far
+  as it shapes trees; no diagnostics are reported.
+
+  (parse text) gives the compilation unit as javac's tree in data: every node a map with :tag
+  (javac's JCTree.Tag, a keyword: :CLASSDEF, :IDENT, :PLUS_ASG, ...), :pos (the tree's pos),
+  :endpos (the end position the parser stored, -1 when none), :start and :end (TreeInfo.getStartPos,
+  TreeInfo.getEndPos), :doc ([style pos endPos] of its doc comment, when it has one) and its fields
+  under javac's names (:mods, :name, :typarams, ...; names as strings, flags as longs, enums as
+  keywords, lists as vectors, absent trees nil). arbace.repr.java.jtree gives the same data from
+  javac's own trees on javac's tool executable; `dump` prints either as text, one node per line,
+  the form bin/repr-java parse-check compares."
+  (:require [arbace.repr.java.lex :as lex]
+            [arbace.string :as str])
+  (:import [java.util HashMap ArrayList]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; The parser's state
+
+(deftype P [^objects toks ^longs n ^objects o ^chars cs ^ArrayList undo])
+
+(def ^:private ^:const IX 0)        ; the current token's index
+(def ^:private ^:const MODE 1)
+(def ^:private ^:const LASTMODE 2)
+(def ^:private ^:const ERREND 3)    ; the end position table's errorEndPos
+(def ^:private ^:const FPOS 4)      ; TreeMaker's pos
+(def ^:private ^:const PREVEND 5)   ; S.prevToken().endPos
+(def ^:private ^:const THISID 6)    ; allowThisIdent
+(def ^:private ^:const PUSHBACK 7)  ; permitTypeAnnotationsPushBack
+(def ^:private ^:const ERRPOS 8)    ; reportSyntaxError's errorPos
+(def ^:private ^:const ERRCOUNT 9)
+(def ^:private ^:const SPEC 10)     ; speculative (VirtualParser) depth
+
+(def ^:private ^:const PUSHED 0)    ; typeAnnotationsPushedBack
+(def ^:private ^:const RECV 1)      ; receiverParam
+
+(def ^:private ^:const EXPR 1)
+(def ^:private ^:const TYPE 2)
+(def ^:private ^:const NOPARAMS 4)
+(def ^:private ^:const TYPEARG 8)
+(def ^:private ^:const DIAMOND 16)
+(def ^:private ^:const NOLAMBDA 32)
+
+(def ^:private ^:const NOPOS -1)
+
+;; javac's Flags
+(def ^:private ^:const F-PUBLIC 1)
+(def ^:private ^:const F-PRIVATE 2)
+(def ^:private ^:const F-PROTECTED 4)
+(def ^:private ^:const F-STATIC 8)
+(def ^:private ^:const F-FINAL 16)
+(def ^:private ^:const F-SYNCHRONIZED 32)
+(def ^:private ^:const F-VOLATILE 64)
+(def ^:private ^:const F-TRANSIENT 128)
+(def ^:private ^:const F-NATIVE 256)
+(def ^:private ^:const F-INTERFACE 512)
+(def ^:private ^:const F-ABSTRACT 1024)
+(def ^:private ^:const F-STRICTFP 2048)
+(def ^:private ^:const F-ANNOTATION 8192)
+(def ^:private ^:const F-ENUM 16384)
+(def ^:private ^:const F-MANDATED 32768)
+(def ^:private ^:const F-StandardFlags 0x0fff)
+(def ^:private ^:const F-DEPRECATED 131072)
+(def ^:private ^:const F-IMPLICIT_CLASS 524288)
+(def ^:private ^:const F-GENERATED_MEMBER 16777216)
+(def ^:private ^:const F-PARAMETER 8589934592)
+(def ^:private ^:const F-VARARGS 17179869184)
+(def ^:private ^:const F-DEFAULT 8796093022208)
+(def ^:private ^:const F-SEALED 281474976710656)
+(def ^:private ^:const F-COMPACT_RECORD_CONSTRUCTOR 2251799813685248)
+(def ^:private ^:const F-RECORD 2305843009213693952)
+(def ^:private ^:const F-NON_SEALED -9223372036854775808)
+(def ^:private F-ModifierFlags
+  (bit-or (bit-and-not F-StandardFlags F-INTERFACE) F-DEFAULT F-SEALED F-NON_SEALED))
+
+(defmacro ^:private nget [slot] `(aget ^"[J" (.-n ~'p) ~slot))
+(defmacro ^:private nset [slot v] `(aset ^"[J" (.-n ~'p) ~slot (long ~v)))
+(defmacro ^:private oget [slot] `(aget ^"[Ljava.lang.Object;" (.-o ~'p) ~slot))
+(defmacro ^:private oset [slot v] `(aset ^"[Ljava.lang.Object;" (.-o ~'p) ~slot ~v))
+
+(defmacro ^:private tok []
+  (with-meta `(aget ^"[Ljava.lang.Object;" (.-toks ~'p) (int (aget ^"[J" (.-n ~'p) IX)))
+    {:tag "[Ljava.lang.Object;"}))
+(defmacro ^:private tk [] `(aget ^"[Ljava.lang.Object;" (tok) 0))
+(defmacro ^:private tpos [] `(long (aget ^"[Ljava.lang.Object;" (tok) 1)))
+(defmacro ^:private tend [] `(long (aget ^"[Ljava.lang.Object;" (tok) 2)))
+(defmacro ^:private tname [] `(aget ^"[Ljava.lang.Object;" (tok) 3))
+(defmacro ^:private is? [k] `(identical? (tk) ~k))
+(defmacro ^:private mode? [m] `(not (zero? (bit-and (nget MODE) ~m))))
+(defmacro ^:private prev-end [] `(nget PREVEND))
+
+(defn- tok-at
+  "S.token(k): the token k after the current one (the last token, EOF, past the end)."
+  ^objects [^P p k]
+  (let [^objects toks ^objects (.-toks p)
+        i (+ (aget ^longs (.-n p) IX) (long k))
+        last (dec (alength toks))]
+    (aget toks (int (if (> i last) last i)))))
+
+(defn- kind-at [^P p k] (aget (tok-at p k) 0))
+(defn- tok-kind [^objects t] (aget t 0))
+(defn- tok-pos ^long [^objects t] (long (aget t 1)))
+(defn- tok-end ^long [^objects t] (long (aget t 2)))
+(defn- tok-name [^objects t] (aget t 3))
+
+(def ^:private lax #{:IDENTIFIER :UNDERSCORE :ASSERT :ENUM})
+(defn- lax? [k] (contains? lax k))
+
+(defn- next! [^P p]
+  (let [t (tok)]
+    (nset PREVEND (tok-end t))
+    (when-not (identical? (tok-kind t) :EOF)
+      (nset IX (inc (nget IX))))))
+
+(defn- peek?
+  "peekToken(lookahead, preds...): the kinds after lookahead, each a keyword, a set or a fn."
+  [^P p lookahead & preds]
+  (loop [k (inc (long lookahead)) [pr & more] preds]
+    (if (nil? pr)
+      true
+      (let [kind (kind-at p k)]
+        (if (cond (keyword? pr) (identical? kind pr)
+                  (set? pr) (contains? pr kind)
+                  :else (pr kind))
+          (recur (inc k) more)
+          false)))))
+
+(defn- token-comments [^objects t] (aget t 5))
+
+(defn- doc-comment
+  "Token.docComment(): the latest doc comment before token t."
+  [^objects t]
+  (some (fn [^objects c] (when (contains? #{:JAVADOC_BLOCK :JAVADOC_LINE} (aget c 0)) c))
+        (token-comments t)))
+
+(defn- deprecated-flag? [^P p ^objects t]
+  (boolean (some (fn [^objects c] (lex/deprecated? (.-cs p) c)) (token-comments t))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Trees: mutable maps while parsing, as javac's are mutable objects
+
+(defmacro ^:private g [t k] (if (symbol? t) `(.get ~(with-meta t {:tag 'java.util.HashMap}) ~k) `(let [~'t# ~t] (.get ~(with-meta 't# {:tag 'java.util.HashMap}) ~k))))
+(defmacro ^:private s! [t k v] (if (symbol? t) `(.put ~(with-meta t {:tag 'java.util.HashMap}) ~k ~v) `(let [~'t# ~t] (.put ~(with-meta 't# {:tag 'java.util.HashMap}) ~k ~v))))
+(defn- tag [t] (when t (.get ^HashMap t :tag)))
+(defn- has-tag? [t k] (identical? (tag t) k))
+
+(defn- mk*
+  "A tree of `tag` at TreeMaker's pos, its fields kvs."
+  [^P p tag kvs]
+  (let [t (HashMap.)]
+    (.put t :tag tag)
+    (.put t :pos (aget ^longs (.-n p) FPOS))
+    (loop [[k v & more] kvs]
+      (when k (.put t k v) (recur more)))
+    t))
+
+(defmacro ^:private mk [tag & kvs] `(mk* ~'p ~tag [~@kvs]))
+(defmacro ^:private at [pos] `(nset FPOS ~pos))
+(defmacro ^:private mk-at [pos tag & kvs] `(do (at ~pos) (mk ~tag ~@kvs)))
+(defmacro ^:private at-tree [t] `(nset FPOS (start-pos ~t)))
+
+(defn- modifiers
+  "TreeMaker.Modifiers: its pos NOPOS when it has neither flags nor annotations."
+  [^P p flags annos]
+  (let [t (mk :MODIFIERS :flags (long flags) :annotations (vec annos))]
+    (when (and (zero? (bit-and (long flags) (bit-or F-ModifierFlags F-ANNOTATION))) (empty? annos))
+      (s! t :pos NOPOS))
+    t))
+
+(defn- stored-end ^long [t] (if-let [e (g t :endpos)] (long e) -1))
+
+(defn- store-end [^P p t e]
+  (when t (s! t :endpos (max (long e) (nget ERREND))))
+  t)
+
+(defn- to [^P p t] (store-end p t (tend)))
+(defn- toP [^P p t] (store-end p t (prev-end)))
+
+(defn- replace-tree [^P p old new]
+  (let [e (stored-end old)]
+    (.remove ^HashMap old :endpos)
+    (when (and (not= e -1) new) (store-end p new e))
+    e))
+
+(defn- set-error-end-pos [^P p e]
+  (when (> (long e) (nget ERREND)) (nset ERREND e)))
+
+(def ^:private binary-tags
+  #{:OR :AND :BITOR :BITXOR :BITAND :EQ :NE :LT :GT :LE :GE :SL :SR :USR :PLUS :MINUS :MUL :DIV :MOD})
+(def ^:private assignop-tags
+  #{:BITOR_ASG :BITXOR_ASG :BITAND_ASG :SL_ASG :SR_ASG :USR_ASG :PLUS_ASG :MINUS_ASG :MUL_ASG
+    :DIV_ASG :MOD_ASG})
+(def ^:private unary-tags #{:POS :NEG :NOT :COMPL :PREINC :PREDEC :POSTINC :POSTDEC})
+
+(defn start-pos
+  "TreeInfo.getStartPos."
+  ^long [t]
+  (if (nil? t)
+    NOPOS
+    (let [tg (tag t)
+          pos (long (g t :pos))]
+      (cond
+        (identical? tg :MODULEDEF) (let [as (g (g t :mods) :annotations)] (if (empty? as) pos (long (g (first as) :pos))))
+        (identical? tg :PACKAGEDEF) (let [as (g t :annotations)] (if (empty? as) pos (long (g (first as) :pos))))
+        (identical? tg :APPLY) (start-pos (g t :meth))
+        (identical? tg :ASSIGN) (start-pos (g t :lhs))
+        (or (contains? assignop-tags tg) (contains? binary-tags tg)) (start-pos (g t :lhs))
+        (or (identical? tg :POSTINC) (identical? tg :POSTDEC)) (start-pos (g t :arg))
+        (identical? tg :CLASSDEF) (let [mp (long (g (g t :mods) :pos))] (if (not= mp NOPOS) mp pos))
+        (identical? tg :CONDEXPR) (start-pos (g t :cond))
+        (identical? tg :EXEC) (start-pos (g t :expr))
+        (identical? tg :INDEXED) (start-pos (g t :indexed))
+        (identical? tg :METHODDEF) (let [mp (long (g (g t :mods) :pos))]
+                                     (cond (not= mp NOPOS) mp
+                                           (seq (g t :typarams)) (start-pos (first (g t :typarams)))
+                                           (nil? (g t :restype)) pos
+                                           :else (start-pos (g t :restype))))
+        (identical? tg :SELECT) (start-pos (g t :selected))
+        (identical? tg :TYPEAPPLY) (start-pos (g t :clazz))
+        (identical? tg :TYPEARRAY) (start-pos (g t :elemtype))
+        (identical? tg :TYPETEST) (start-pos (g t :expr))
+        (identical? tg :ANNOTATED_TYPE) (let [as (g t :annotations) u (g t :underlyingType)]
+                                          (if (seq as)
+                                            (if (or (has-tag? u :TYPEARRAY) (has-tag? u :SELECT))
+                                              (start-pos u)
+                                              (start-pos (first as)))
+                                            (start-pos u)))
+        (identical? tg :NEWCLASS) (if (g t :encl) (start-pos (g t :encl)) pos)
+        (identical? tg :VARDEF) (let [mp (long (g (g t :mods) :pos))]
+                                  (cond (not= mp NOPOS) mp
+                                        (g t :vartype) (start-pos (g t :vartype))
+                                        (not= (long (g t :typePos)) NOPOS) (long (g t :typePos))
+                                        :else pos))
+        (identical? tg :BINDINGPATTERN) (start-pos (g t :var))
+        (identical? tg :ERRONEOUS) (let [es (g t :errs)]
+                                     (if (seq es)
+                                       (let [s (start-pos (first es))] (if (not= s NOPOS) s pos))
+                                       pos))
+        :else pos))))
+
+(defn end-pos
+  "TreeInfo.getEndPos with the parser's end positions."
+  ^long [t]
+  (if (nil? t)
+    NOPOS
+    (let [e (stored-end t)]
+      (if (not= e NOPOS)
+        e
+        (let [tg (tag t)]
+          (cond
+            (or (contains? assignop-tags tg) (contains? binary-tags tg)) (end-pos (g t :rhs))
+            (contains? #{:POS :NEG :NOT :COMPL :PREINC :PREDEC} tg) (end-pos (g t :arg))
+            (identical? tg :CASE) (end-pos (peek (g t :stats)))
+            (identical? tg :CATCH) (end-pos (g t :body))
+            (identical? tg :CONDEXPR) (end-pos (g t :falsepart))
+            (identical? tg :FORLOOP) (end-pos (g t :body))
+            (identical? tg :FOREACHLOOP) (end-pos (g t :body))
+            (identical? tg :IF) (end-pos (or (g t :elsepart) (g t :thenpart)))
+            (identical? tg :LABELLED) (end-pos (g t :body))
+            (identical? tg :MODIFIERS) (end-pos (peek (g t :annotations)))
+            (identical? tg :SYNCHRONIZED) (end-pos (g t :body))
+            (identical? tg :TOPLEVEL) (end-pos (peek (g t :defs)))
+            (identical? tg :TRY) (cond (g t :finalizer) (end-pos (g t :finalizer))
+                                       (seq (g t :catchers)) (end-pos (peek (g t :catchers)))
+                                       :else (end-pos (g t :body)))
+            (identical? tg :WILDCARD) (end-pos (g t :inner))
+            (identical? tg :TYPECAST) (end-pos (g t :expr))
+            (identical? tg :TYPETEST) (end-pos (g t :pattern))
+            (identical? tg :WHILELOOP) (end-pos (g t :body))
+            (identical? tg :ANNOTATED_TYPE) (end-pos (g t :underlyingType))
+            (identical? tg :ERRONEOUS) (let [es (g t :errs)] (if (seq es) (end-pos (peek es)) NOPOS))
+            :else NOPOS))))))
+
+(defn- type-in
+  "TreeInfo.typeIn."
+  [t]
+  (if (has-tag? t :ANNOTATED_TYPE) (g t :underlyingType) t))
+
+(defn- innermost-type
+  "TreeInfo.innermostType(type, true)."
+  [t]
+  (loop [cur t]
+    (case (tag cur)
+      :TYPEARRAY (recur (g cur :elemtype))
+      :WILDCARD (recur (g cur :inner))
+      :ANNOTATED_TYPE (recur (g cur :underlyingType))
+      cur)))
+
+(defn- expression-statement? [t]
+  (contains? #{:PREINC :PREDEC :POSTINC :POSTDEC :ASSIGN :BITOR_ASG :BITXOR_ASG :BITAND_ASG
+               :SL_ASG :SR_ASG :USR_ASG :PLUS_ASG :MINUS_ASG :MUL_ASG :DIV_ASG :MOD_ASG
+               :APPLY :NEWCLASS :ERRONEOUS}
+             (tag t)))
+
+(defn- null-case-label? [l]
+  (and (has-tag? l :CONSTANTCASELABEL)
+       (let [e (g l :expr)] (and (has-tag? e :LITERAL) (identical? (g e :typetag) :BOT)))))
+
+(defn- contains-type-annotation?
+  "TreeInfo.containsTypeAnnotation: a TYPE_ANNOTATION anywhere in the tree."
+  [t]
+  (cond
+    (instance? HashMap t) (or (has-tag? t :TYPE_ANNOTATION)
+                              (boolean (some contains-type-annotation? (vals t))))
+    (vector? t) (boolean (some contains-type-annotation? t))
+    :else false))
+
+;; ---------------------------------------------------------------------------------------------
+;; Errors: only what shapes the trees
+
+(def ^:private ^:const RECOVERY_THRESHOLD 50)
+
+(defn- report-syntax-error [^P p pos]
+  (if (and (= (tpos) (nget ERRPOS)) (not (is? :EOF)))
+    (do (nset ERRCOUNT (inc (nget ERRCOUNT)))
+        (when (>= (nget ERRCOUNT) RECOVERY_THRESHOLD)
+          (throw (ex-info "repr/java parse: no progress in error recovery" {:pos pos}))))
+    (do (nset ERRCOUNT 0) (nset ERRPOS (tpos)))))
+
+(defn- syntax-error
+  ([^P p pos] (syntax-error p pos []))
+  ([^P p pos errs]
+   (set-error-end-pos p pos)
+   (let [err (mk-at pos :ERRONEOUS :errs (when errs (vec errs)))]
+     (report-syntax-error p pos)
+     (when errs (when-let [l (peek (vec errs))] (store-end p l pos)))
+     (toP p err))))
+
+(defn- accept! [^P p k]
+  (if (is? k)
+    (next! p)
+    (do (set-error-end-pos p (tpos))
+        (report-syntax-error p (prev-end)))))
+
+(defn- illegal
+  ([^P p] (illegal p (tpos)))
+  ([^P p pos] (set-error-end-pos p pos) (syntax-error p pos)))
+
+(defn- skip!
+  "JavacParser.skip: error recovery to a likely restart."
+  [^P p stop-import stop-member stop-ident stop-stat]
+  (loop []
+    (let [k (tk)]
+      (cond
+        (identical? k :SEMI) (next! p)
+        (contains? #{:PUBLIC :FINAL :ABSTRACT :MONKEYS_AT :EOF :CLASS :INTERFACE :ENUM} k) nil
+        (and (identical? k :IMPORT) stop-import) nil
+        (and (contains? #{:LBRACE :RBRACE :PRIVATE :PROTECTED :STATIC :TRANSIENT :NATIVE :VOLATILE
+                          :SYNCHRONIZED :STRICTFP :LT :BYTE :SHORT :CHAR :INT :LONG :FLOAT :DOUBLE
+                          :BOOLEAN :VOID} k)
+             stop-member) nil
+        (and (contains? #{:UNDERSCORE :IDENTIFIER} k) stop-ident) nil
+        (and (contains? #{:CASE :DEFAULT :IF :FOR :WHILE :DO :TRY :SWITCH :RETURN :THROW :BREAK
+                          :CONTINUE :ELSE :FINALLY :CATCH :THIS :SUPER :NEW :ASSERT} k)
+             stop-stat) nil
+        :else (do (next! p) (recur))))))
+
+(defn- speculate
+  "A VirtualParser's run of f on a copy of the parser's position (its own error end, modes and
+  flags; TreeMaker shared, as javac's is): f's result, then the position restored."
+  [^P p f]
+  (let [saved (aclone ^longs (.-n p))
+        osaved (aclone ^objects (.-o p))
+        ^ArrayList undo (.-undo p)
+        mark (.size undo)]
+    (nset SPEC (inc (nget SPEC)))
+    (nset ERREND NOPOS) (nset MODE 0) (nset LASTMODE 0) (nset THISID 0) (nset PUSHBACK 0)
+    (oset PUSHED []) (oset RECV nil)
+    (try
+      (try (f) (catch Exception _ nil))
+      (finally
+        (loop [i (dec (.size undo))]
+          (when (>= i mark)
+            (let [[^long j t] (.get undo i)] (aset ^objects (.-toks p) (int j) t))
+            (.remove undo (int i))
+            (recur (dec i))))
+        (let [fpos (nget FPOS)]
+          (System/arraycopy saved 0 (.-n p) 0 (alength ^longs saved))
+          (nset FPOS fpos))
+        (System/arraycopy osaved 0 (.-o p) 0 (alength ^objects osaved))))))
+
+(defn- split!
+  "S.split(): the current token (>>, >>>, >=, ...) split after its first character."
+  [^P p]
+  (let [t (tok)
+        k (tok-kind t)
+        s ^String (lex/kind-names k)
+        k1 (lex/operators (subs s 0 1))
+        k2 (lex/operators (subs s 1))
+        pos (tok-pos t)
+        t2 (object-array [k2 (inc pos) (tok-end t) (subs s 1) nil nil])]
+    (when (pos? (nget SPEC)) (.add ^ArrayList (.-undo p) [(nget IX) t]))
+    (aset ^objects (.-toks p) (int (nget IX)) t2)
+    (nset PREVEND (inc pos))
+    k1))
+
+;; ---------------------------------------------------------------------------------------------
+;; Doc comments
+
+(defn- attach [^P p t dc]
+  (when (and t dc) (s! t :doc dc))
+  t)
+
+;; ---------------------------------------------------------------------------------------------
+;; The parser, after JavacParser's methods
+
+(declare tok-at kind-at tok-kind tok-pos tok-end tok-name lax? next! peek? token-comments
+         doc-comment deprecated-flag? tag has-tag? mk* modifiers stored-end store-end to toP
+         replace-tree set-error-end-pos start-pos end-pos type-in innermost-type
+         expression-statement? null-case-label? contains-type-annotation? report-syntax-error
+         syntax-error accept! illegal skip! speculate split! attach select-expr-mode
+         select-type-mode was-type-mode? ident* ident qualident string2int string2long zero-literal?
+         literal parse-expression parse-pattern parse-type parse-type* parse-intersection-type
+         restricted-type-name-at-source restricted-type-name unannotated-type prec term term-rest
+         term1 term1-rest term2 fold-strings term2-rest analyze-parens skip-annotation
+         unbound-member-ref? lambda-expression-or-statement-rest lambda-param-kind
+         lambda-expression-or-statement super-suffix basic-type arguments-opt arguments
+         arguments-tree type-arguments-opt-tree type-arguments-opt type-arguments type-argument
+         type-arguments-tree brackets-opt brackets-opt-cont brackets-suffix member-reference-suffix
+         term3 type-tree? switch-expression-statement-group term3-rest creator inner-creator
+         array-creator-rest class-creator-rest array-initializer array-initializer-elements
+         variable-initializer par-expression block block-statements parse-statement-as-block
+         non-sealed-identifier? allowed-after-sealed? non-sealed-class-start? sealed-class-start?
+         yield-statement? block-statement check-expr-stat local-variable-declarations
+         parse-simple-statement do-recover catch-clause switch-block-statement-groups
+         switch-block-statement-group parse-case-label parse-guard analyze-pattern
+         more-statement-expressions for-init for-update annotations-opt type-annotations-opt
+         modifiers-opt annotation annotation-field-value annotation-field-values annotation-value
+         variable-declarators variable-declarators-rest variable-declarator-rest
+         variable-declarator-id resources resource parse-compilation-unit construct-implicit-class
+         module-decl qualident-list module-directive-list import-declaration type-declaration
+         class-or-record-or-interface-or-enum-declaration type-name permits-clause class-declaration
+         class-record-declaration interface-declaration enum-declaration
+         estimate-enumerator-or-member enum-body enumerator-declaration type-list
+         class-interface-or-record-body class-or-interface-or-record-body-declaration
+         constructor-or-method-or-field-declaration top-level-method-or-field-declaration
+         declaration*? declaration? definite-statement-start? record-start? opening-brace-missing?
+         method-declarator-rest type-parameters-opt type-parameter formal-parameters
+         implicit-parameters opt-final insert-annotations-to-most-inner formal-parameter
+         implicit-parameter literal-value freeze parse tree? child? scalar-str dump)
+
+(defmacro ^:private with-mode
+  "term(newmode)'s save and restore of the mode around body."
+  [m & body]
+  `(let [prev# (nget MODE)]
+     (nset MODE ~m)
+     (let [t# (do ~@body)]
+       (nset LASTMODE (nget MODE))
+       (nset MODE prev#)
+       t#)))
+
+(defn- select-expr-mode [^P p] (nset MODE (bit-or (bit-and (nget MODE) NOLAMBDA) EXPR)))
+(defn- select-type-mode [^P p] (nset MODE (bit-or (bit-and (nget MODE) NOLAMBDA) TYPE)))
+(defn- was-type-mode? [^P p] (not (zero? (bit-and (nget LASTMODE) TYPE))))
+
+(defn- ident*
+  "JavacParser.ident(allowClass, asVariable)."
+  [^P p allow-class]
+  (case (tk)
+    :IDENTIFIER (let [nm (tname)] (next! p) nm)
+    (:ASSERT :ENUM) (do (next! p) "<error>")
+    :THIS (if (pos? (nget THISID))
+            (let [nm (tname)] (next! p) nm)
+            (do (next! p) "<error>"))
+    :UNDERSCORE (let [nm (tname)] (next! p) nm)
+    (do (accept! p :IDENTIFIER)
+        (if (and allow-class (is? :CLASS)) (do (next! p) "class") "<error>"))))
+
+(defn- ident [^P p] (ident* p false))
+
+(defn- qualident [^P p allow-annos]
+  (let [t (toP p (mk-at (tpos) :IDENT :name (ident p)))]
+    (loop [t t]
+      (if (is? :DOT)
+        (let [pos (tpos)
+              _ (next! p)
+              tyannos (when allow-annos (type-annotations-opt p))
+              t (toP p (mk-at pos :SELECT :selected t :name (ident p)))
+              t (if (seq tyannos)
+                  (toP p (mk-at (g (first tyannos) :pos) :ANNOTATED_TYPE :annotations tyannos :underlyingType t))
+                  t)]
+          (recur t))
+        t))))
+
+(defn- string2int [^String s r]
+  (if (= (long r) 10)
+    (Integer/parseInt s 10)
+    (let [r (int r)
+          limit (int (quot Integer/MAX_VALUE (quot r 2)))]
+      (loop [i 0 nn (int 0)]
+        (if (< i (.length s))
+          (let [d (int (Character/digit (.charAt s i) r))]
+            (when (or (neg? nn) (> nn limit)
+                      (> (unchecked-multiply-int nn r) (unchecked-subtract-int Integer/MAX_VALUE d)))
+              (throw (NumberFormatException.)))
+            (recur (inc i) (unchecked-add-int (unchecked-multiply-int nn r) d)))
+          nn)))))
+
+(defn- string2long [^String s r]
+  (if (= (long r) 10)
+    (Long/parseLong s 10)
+    (let [r (long r)
+          limit (quot Long/MAX_VALUE (quot r 2))]
+      (loop [i 0 nn 0]
+        (if (< i (.length s))
+          (let [d (long (Character/digit (.charAt s i) (int r)))]
+            (when (or (neg? nn) (> nn limit)
+                      (> (unchecked-multiply nn r) (unchecked-subtract Long/MAX_VALUE d)))
+              (throw (NumberFormatException.)))
+            (recur (inc i) (unchecked-add (unchecked-multiply nn r) d)))
+          nn)))))
+
+(defn- zero-literal? [^String s]
+  (let [base (if (and (> (.length s) 1) (= (Character/toLowerCase (.charAt s 1)) \x)) 16 10)]
+    (loop [i (if (= base 16) 2 0)]
+      (if (and (< i (.length s)) (let [c (.charAt s i)] (or (= c \0) (= c \.))))
+        (recur (inc i))
+        (not (and (< i (.length s)) (pos? (Character/digit (.charAt s i) (int base)))))))))
+
+(defn- literal
+  ([^P p prefix] (literal p prefix (tpos)))
+  ([^P p ^String prefix pos]
+   (let [t (tok)
+         ^String sv (tok-name t)
+         strval (fn [] (if (empty? prefix) sv (str prefix sv)))
+         radix (aget t 4)
+         lit (fn [tt v] (mk-at pos :LITERAL :typetag tt :value v))
+         r (case (tok-kind t)
+             :INTLITERAL (try (lit :INT (string2int (strval) radix)) (catch NumberFormatException _ nil))
+             :LONGLITERAL (try (lit :LONG (Long/valueOf (long (string2long (strval) radix)))) (catch NumberFormatException _ nil))
+             :FLOATLITERAL (let [proper (if (= radix 16) (str "0x" sv) sv)
+                                 nv (try (Float/valueOf ^String proper) (catch NumberFormatException _ Float/NaN))]
+                             (cond (and (== (.floatValue ^Float nv) 0.0) (not (zero-literal? proper))) nil
+                                   (== (.floatValue ^Float nv) Float/POSITIVE_INFINITY) nil
+                                   :else (lit :FLOAT nv)))
+             :DOUBLELITERAL (let [proper (if (= radix 16) (str "0x" sv) sv)
+                                  nv (try (Double/valueOf ^String proper) (catch NumberFormatException _ Double/NaN))]
+                              (cond (and (== (.doubleValue ^Double nv) 0.0) (not (zero-literal? proper))) nil
+                                    (== (.doubleValue ^Double nv) Double/POSITIVE_INFINITY) nil
+                                    :else (lit :DOUBLE nv)))
+             :CHARLITERAL (lit :CHAR (int (.charAt sv 0)))
+             :STRINGLITERAL (lit :CLASS sv)
+             :TRUE (lit :BOOLEAN 1)
+             :FALSE (lit :BOOLEAN 0)
+             :NULL (lit :BOT nil))
+         r (or r (mk-at pos :ERRONEOUS :errs []))]
+     (store-end p r (tend))
+     (next! p)
+     r)))
+
+(defn parse-expression [^P p] (with-mode EXPR (term p)))
+
+(defn- parse-pattern [^P p pos mods parsed-type allow-var check-guard]
+  (let [mods (or mods (opt-final p 0))]
+    (if (and (is? :UNDERSCORE) (nil? parsed-type))
+      (do (next! p)
+          (toP p (mk-at (tpos) :ANYPATTERN)))
+      (let [[e var-type-pos]
+            (if (nil? parsed-type)
+              (let [var? (and (is? :IDENTIFIER) (= (tname) "var"))
+                    e (unannotated-type p allow-var (bit-or TYPE NOLAMBDA))]
+                (if var? [nil (long (g e :pos))] [e NOPOS]))
+              [parsed-type NOPOS])]
+        (if (is? :LPAREN)
+          (let [nested (if-not (peek? p 0 :RPAREN)
+                         (loop [acc []]
+                           (next! p)
+                           (let [acc (conj acc (parse-pattern p (tpos) nil nil true false))]
+                             (if (is? :COMMA) (recur acc) acc)))
+                         (do (next! p) []))]
+            (accept! p :RPAREN)
+            (toP p (mk-at pos :RECORDPATTERN :deconstructor e :nested nested)))
+          (let [var-pos (tpos)
+                nm (ident p)
+                nm (if (= nm "_") "" nm)
+                v (toP p (mk-at var-pos :VARDEF :mods mods :name nm :nameexpr nil :vartype e :init nil
+                                :declKind (if (not= var-type-pos NOPOS) :VAR :EXPLICIT)
+                                :typePos var-type-pos))]
+            (toP p (mk-at pos :BINDINGPATTERN :var v))))))))
+
+(defn- parse-type
+  ([^P p] (parse-type p false))
+  ([^P p allow-var] (parse-type* p allow-var (type-annotations-opt p))))
+
+(defn- parse-type* [^P p allow-var annos]
+  (let [r (unannotated-type p allow-var TYPE)]
+    (if (seq annos) (insert-annotations-to-most-inner p r annos false) r)))
+
+(defn- parse-intersection-type [^P p pos first-type]
+  (let [targets (loop [ts [first-type]]
+                  (if (is? :AMP)
+                    (do (accept! p :AMP) (recur (conj ts (parse-type p))))
+                    ts))]
+    (if (> (count targets) 1)
+      (toP p (mk-at pos :TYPEINTERSECTION :bounds targets))
+      first-type)))
+
+(defn- restricted-type-name-at-source
+  "restrictedTypeNameStartingAtSource: the restricted identifiers of source 26."
+  [nm]
+  (contains? #{"var" "yield" "record" "sealed" "permits"} nm))
+
+(defn- restricted-type-name [e]
+  (case (tag e)
+    :IDENT (when (restricted-type-name-at-source (g e :name)) (g e :name))
+    :TYPEARRAY (restricted-type-name (g e :elemtype))
+    nil))
+
+(defn- unannotated-type
+  ([^P p allow-var] (unannotated-type p allow-var TYPE))
+  ([^P p allow-var newmode]
+   (let [result (with-mode newmode (term p))
+         rname (restricted-type-name result)]
+     (when (and rname (or (not allow-var) (not= rname "var")))
+       (syntax-error p (g result :pos)))
+     (if (zero? (bit-and (nget LASTMODE) TYPE))
+       (mk :ERRONEOUS :errs [result])
+       result))))
+
+(def ^:private optags
+  {:BARBAR :OR :AMPAMP :AND :BAR :BITOR :BAREQ :BITOR_ASG :CARET :BITXOR :CARETEQ :BITXOR_ASG
+   :AMP :BITAND :AMPEQ :BITAND_ASG :EQEQ :EQ :BANGEQ :NE :LT :LT :GT :GT :LTEQ :LE :GTEQ :GE
+   :LTLT :SL :LTLTEQ :SL_ASG :GTGT :SR :GTGTEQ :SR_ASG :GTGTGT :USR :GTGTGTEQ :USR_ASG
+   :PLUS :PLUS :PLUSEQ :PLUS_ASG :SUB :MINUS :SUBEQ :MINUS_ASG :STAR :MUL :STAREQ :MUL_ASG
+   :SLASH :DIV :SLASHEQ :DIV_ASG :PERCENT :MOD :PERCENTEQ :MOD_ASG :INSTANCEOF :TYPETEST})
+
+(def ^:private op-prec
+  {:OR 4 :AND 5 :EQ 9 :NE 9 :LT 10 :GT 10 :LE 10 :GE 10 :BITOR 6 :BITXOR 7 :BITAND 8
+   :SL 11 :SR 11 :USR 11 :PLUS 12 :MINUS 12 :MUL 13 :DIV 13 :MOD 13 :TYPETEST 10
+   :BITOR_ASG 2 :BITXOR_ASG 2 :BITAND_ASG 2 :SL_ASG 2 :SR_ASG 2 :USR_ASG 2 :PLUS_ASG 2
+   :MINUS_ASG 2 :MUL_ASG 2 :DIV_ASG 2 :MOD_ASG 2})
+
+(def ^:private ^:const or-prec 4)
+
+(defn- prec ^long [k] (if-let [o (optags k)] (long (op-prec o)) -1))
+
+(def ^:private unoptags {:PLUS :POS :SUB :NEG :BANG :NOT :TILDE :COMPL :PLUSPLUS :PREINC :SUBSUB :PREDEC})
+
+(def ^:private typetags {:BYTE :BYTE :CHAR :CHAR :SHORT :SHORT :INT :INT :LONG :LONG :FLOAT :FLOAT
+                         :DOUBLE :DOUBLE :BOOLEAN :BOOLEAN})
+
+(def ^:private assign-kinds
+  #{:PLUSEQ :SUBEQ :STAREQ :SLASHEQ :PERCENTEQ :AMPEQ :BAREQ :CARETEQ :LTLTEQ :GTGTEQ :GTGTGTEQ})
+
+(defn- term [^P p]
+  (let [t (term1 p)]
+    (if (and (mode? EXPR) (or (is? :EQ) (contains? assign-kinds (tk))))
+      (term-rest p t)
+      t)))
+
+(defn- term-rest [^P p t]
+  (let [k (tk)]
+    (cond
+      (identical? k :EQ) (let [pos (tpos)]
+                           (next! p) (select-expr-mode p)
+                           (let [t1 (term p)] (toP p (mk-at pos :ASSIGN :lhs t :rhs t1))))
+      (contains? assign-kinds k) (let [pos (tpos)]
+                                   (next! p) (select-expr-mode p)
+                                   (let [t1 (term p)] (mk-at pos (optags k) :lhs t :rhs t1)))
+      :else t)))
+
+(defn- term1 [^P p]
+  (let [t (term2 p)]
+    (if (and (mode? EXPR) (is? :QUES))
+      (do (select-expr-mode p) (term1-rest p t))
+      t)))
+
+(defn- term1-rest [^P p t]
+  (if (is? :QUES)
+    (let [pos (tpos)]
+      (next! p)
+      (let [t1 (term p)]
+        (accept! p :COLON)
+        (let [t2 (term1 p)]
+          (mk-at pos :CONDEXPR :cond t :truepart t1 :falsepart t2))))
+    t))
+
+(defn- term2 [^P p]
+  (let [t (term3 p)]
+    (if (and (mode? EXPR) (>= (prec (tk)) or-prec))
+      (do (select-expr-mode p) (term2-rest p t or-prec))
+      t)))
+
+(defn- fold-strings
+  "JavacParser.foldStrings: adjacent string literals of a + chain folded into one."
+  [^P p tree]
+  (let [ops (ArrayList.) lits (ArrayList.)
+        merge (fn []
+                (cond
+                  (.isEmpty lits) false
+                  (= (.size lits) 1) (do (.add ops 0 (.get lits 0)) false)
+                  :else (let [lt (mk-at (start-pos (.get lits 0)) :LITERAL :typetag :CLASS
+                                        :value (apply str (map #(g % :value) lits)))]
+                          (store-end p lt (end-pos (.get lits (dec (.size lits)))))
+                          (.add ops 0 lt)
+                          true)))
+        string-lit? (fn [t] (and (has-tag? t :LITERAL) (identical? (g t :typetag) :CLASS)))
+        fold (fn [t last]
+               (if (string-lit? t)
+                 (do (.add lits 0 t) (and last (merge)))
+                 (let [r (merge)] (.clear lits) (.add ops 0 t) r)))
+        needs (loop [cur tree needs false]
+                (if (has-tag? cur :PLUS)
+                  (recur (g cur :lhs) (boolean (or (fold (g cur :rhs) false) needs)))
+                  (boolean (or (fold cur true) needs))))]
+    (if needs
+      (reduce (fn [res op]
+                (let [b (mk-at (start-pos op) :PLUS :lhs res :rhs op)]
+                  (store-end p b (stored-end op))
+                  b))
+              (.get ops 0) (rest (vec ops)))
+      tree)))
+
+(defn- term2-rest [^P p t minprec]
+  (let [od (object-array 11)
+        op (object-array 11)
+        _ (aset od 0 t)]
+    (loop [top 0 top-op nil]
+      (if (>= (prec (tk)) (long minprec))
+        (let [_ (aset op top top-op)
+              [top top-op]
+              (if (is? :INSTANCEOF)
+                (let [pos (tpos)]
+                  (next! p)
+                  (let [pattern
+                        (if (is? :LPAREN)
+                          (parse-pattern p (tpos) nil nil false false)
+                          (let [pattern-pos (tpos)
+                                mods (opt-final p 0)
+                                typ (unannotated-type p false)]
+                            (cond
+                              (is? :IDENTIFIER) (parse-pattern p pattern-pos mods typ false false)
+                              (is? :LPAREN) (parse-pattern p pattern-pos mods typ false false)
+                              (is? :UNDERSCORE) (parse-pattern p pattern-pos mods typ false false)
+                              :else
+                              (let [annos (g mods :annotations)]
+                                (if (seq annos)
+                                  (let [tannos (mapv (fn [d]
+                                                       (let [ta (mk-at (g d :pos) :TYPE_ANNOTATION
+                                                                       :annotationType (g d :annotationType)
+                                                                       :args (g d :args))]
+                                                         (replace-tree p d ta)
+                                                         ta))
+                                                     annos)]
+                                    (insert-annotations-to-most-inner p typ tannos false))
+                                  typ)))))]
+                    (aset od top (mk-at pos :TYPETEST :expr (aget od top) :pattern pattern))
+                    [top top-op]))
+                (let [top-op (tok)]
+                  (next! p)
+                  (let [top (inc top)]
+                    (aset od top (term3 p))
+                    [top top-op])))
+              [top top-op]
+              (loop [top (long top) top-op top-op]
+                (if (and (> top 0) (>= (prec (tok-kind top-op)) (prec (tk))))
+                  (do (aset od (dec top) (mk-at (tok-pos top-op) (optags (tok-kind top-op))
+                                                :lhs (aget od (dec top)) :rhs (aget od top)))
+                      (recur (dec top) (aget op (dec top))))
+                  [top top-op]))]
+          (recur (long top) top-op))
+        (let [t (aget od 0)]
+          (if (has-tag? t :PLUS) (fold-strings p t) t))))))
+
+(defn- analyze-parens
+  "JavacParser.analyzeParens: :CAST, :EXPLICIT_LAMBDA, :IMPLICIT_LAMBDA or :PARENS."
+  [^P p]
+  (loop [la 0 depth 0 type false default :PARENS]
+    (let [k (kind-at p la)]
+      (case k
+        :COMMA (recur (inc la) depth true default)
+        (:EXTENDS :SUPER :DOT :AMP) (recur (inc la) depth type default)
+        :QUES (recur (inc la) depth (if (or (peek? p la :EXTENDS) (peek? p la :SUPER)) true type) default)
+        (:BYTE :SHORT :INT :LONG :FLOAT :DOUBLE :BOOLEAN :CHAR :VOID)
+        (cond (peek? p la :RPAREN) :CAST
+              (peek? p la lax) :EXPLICIT_LAMBDA
+              :else (recur (inc la) depth type default))
+        :LPAREN (cond (not= la 0) :PARENS
+                      (peek? p la :RPAREN) :EXPLICIT_LAMBDA
+                      :else (recur (inc la) depth type default))
+        :RPAREN (if type
+                  :CAST
+                  (case (kind-at p (inc la))
+                    (:BANG :TILDE :LPAREN :THIS :SUPER :INTLITERAL :LONGLITERAL :FLOATLITERAL
+                     :DOUBLELITERAL :CHARLITERAL :STRINGLITERAL :STRINGFRAGMENT :TRUE :FALSE :NULL
+                     :NEW :IDENTIFIER :ASSERT :ENUM :UNDERSCORE :SWITCH :BYTE :SHORT :CHAR :INT
+                     :LONG :FLOAT :DOUBLE :BOOLEAN :VOID) :CAST
+                    default))
+        (:UNDERSCORE :ASSERT :ENUM :IDENTIFIER)
+        (cond (peek? p la lax) :EXPLICIT_LAMBDA
+              (peek? p la :RPAREN :ARROW) (if-not (mode? NOLAMBDA) :IMPLICIT_LAMBDA :PARENS)
+              :else (recur (inc la) depth false
+                           (if (and (= depth 0) (peek? p la :COMMA)) :IMPLICIT_LAMBDA default)))
+        (:FINAL :ELLIPSIS) :EXPLICIT_LAMBDA
+        :MONKEYS_AT (let [la (long (skip-annotation p la))] (recur (inc la) depth true default))
+        :LBRACKET (cond (peek? p la :RBRACKET lax) :EXPLICIT_LAMBDA
+                        (or (peek? p la :RBRACKET :RPAREN) (peek? p la :RBRACKET :AMP)) :CAST
+                        (peek? p la :RBRACKET) (recur (+ la 2) depth true default)
+                        :else :PARENS)
+        :LT (recur (inc la) (inc depth) type default)
+        (:GTGTGT :GTGT :GT)
+        (let [depth (- depth (case k :GTGTGT 3 :GTGT 2 1))]
+          (cond
+            (= depth 0) (cond (or (peek? p la :RPAREN) (peek? p la :AMP)) :CAST
+                              (or (peek? p la lax :COMMA) (peek? p la lax :RPAREN :ARROW)
+                                  (peek? p la :ELLIPSIS)) :EXPLICIT_LAMBDA
+                              :else (recur (inc la) depth true default))
+            (< depth 0) :PARENS
+            :else (recur (inc la) depth type default)))
+        default))))
+
+(defn- skip-annotation [^P p la]
+  (let [la (loop [la (inc (long la))] (if (peek? p la :DOT) (recur (+ la 2)) la))]
+    (if (peek? p la :LPAREN)
+      (loop [la (inc la) nesting 0]
+        (case (kind-at p la)
+          :EOF la
+          :LPAREN (recur (inc la) (inc nesting))
+          :RPAREN (let [nesting (dec nesting)] (if (= nesting 0) la (recur (inc la) nesting)))
+          (recur (inc la) nesting)))
+      la)))
+
+(defn- unbound-member-ref?
+  "JavacParser.isUnboundMemberRef."
+  [^P p]
+  (loop [pos 0 depth 0]
+    (let [k (kind-at p pos)]
+      (case k
+        (:IDENTIFIER :UNDERSCORE :QUES :EXTENDS :SUPER :DOT :RBRACKET :LBRACKET :COMMA :BYTE :SHORT
+         :INT :LONG :FLOAT :DOUBLE :BOOLEAN :CHAR :MONKEYS_AT)
+        (recur (inc pos) depth)
+        :LPAREN (let [r (loop [pos pos nesting 0]
+                          (case (kind-at p pos)
+                            :EOF nil
+                            :LPAREN (recur (inc pos) (inc nesting))
+                            :RPAREN (let [nesting (dec nesting)] (if (= nesting 0) pos (recur (inc pos) nesting)))
+                            (recur (inc pos) nesting)))]
+                  (if r (recur (inc (long r)) depth) false))
+        :LT (recur (inc pos) (inc depth))
+        (:GTGTGT :GTGT :GT)
+        (let [depth (- depth (case k :GTGTGT 3 :GTGT 2 1))]
+          (if (= depth 0)
+            (contains? #{:DOT :LBRACKET :COLCOL} (kind-at p (inc pos)))
+            (recur (inc pos) depth)))
+        false))))
+
+(defn- lambda-expression-or-statement-rest [^P p args pos]
+  (accept! p :ARROW)
+  (if (is? :LBRACE)
+    (let [b (block p (tpos) 0)]
+      (toP p (mk-at pos :LAMBDA :params args :body b :paramKind (lambda-param-kind args))))
+    (let [e (parse-expression p)]
+      (toP p (mk-at pos :LAMBDA :params args :body e :paramKind (lambda-param-kind args))))))
+
+(defn- lambda-param-kind [params]
+  (if (or (empty? params) (g (first params) :vartype)) :EXPLICIT :IMPLICIT))
+
+(defn- lambda-expression-or-statement [^P p has-parens explicit pos]
+  (let [params (if explicit (formal-parameters p true false) (implicit-parameters p has-parens))]
+    (when explicit
+      (doseq [param params]
+        (let [vt (g param :vartype)]
+          (when (and vt (restricted-type-name vt))
+            (s! param :declKind :VAR)
+            (s! param :typePos (start-pos vt))
+            (s! param :vartype nil)))))
+    (lambda-expression-or-statement-rest p params pos)))
+
+(defn- super-suffix [^P p type-args t]
+  (next! p)
+  (cond
+    (or (is? :LPAREN) type-args) (arguments-tree p type-args t)
+    (is? :COLCOL) (if type-args (illegal p) (member-reference-suffix p t))
+    :else (let [pos (tpos)]
+            (accept! p :DOT)
+            (let [type-args (when (is? :LT) (type-arguments p false))
+                  t (toP p (mk-at pos :SELECT :selected t :name (ident p)))]
+              (arguments-opt p type-args t)))))
+
+(defn- basic-type [^P p]
+  (let [t (to p (mk-at (tpos) :TYPEIDENT :typetag (typetags (tk))))]
+    (next! p)
+    t))
+
+(defn- arguments-opt [^P p type-args t]
+  (if (or (and (mode? EXPR) (is? :LPAREN)) type-args)
+    (do (select-expr-mode p) (arguments-tree p type-args t))
+    t))
+
+(defn- arguments [^P p]
+  (if (is? :LPAREN)
+    (do (next! p)
+        (let [args (if-not (is? :RPAREN)
+                     (loop [args [(parse-expression p)]]
+                       (if (is? :COMMA)
+                         (do (next! p) (recur (conj args (parse-expression p))))
+                         args))
+                     [])]
+          (accept! p :RPAREN)
+          args))
+    (do (syntax-error p (tpos)) [])))
+
+(defn- arguments-tree [^P p type-args t]
+  (let [pos (tpos)
+        args (arguments p)
+        mi (mk-at pos :APPLY :typeargs (or type-args []) :meth t :args args)
+        mi (if (and (has-tag? t :IDENT) (= (g t :name) "yield"))
+             (mk :ERRONEOUS :errs [mi])
+             mi)]
+    (toP p mi)))
+
+(defn- type-arguments-opt-tree [^P p t]
+  (if (and (is? :LT) (mode? TYPE) (not (mode? NOPARAMS)))
+    (do (select-type-mode p) (type-arguments-tree p t false))
+    t))
+
+(defn- type-arguments-opt
+  ([^P p] (type-arguments-opt p TYPE))
+  ([^P p use-mode]
+   (when (is? :LT)
+     (when (or (not (mode? use-mode)) (mode? NOPARAMS)) (illegal p))
+     (nset MODE use-mode)
+     (type-arguments p false))))
+
+(defn- type-arguments [^P p diamond-allowed]
+  (if (is? :LT)
+    (do (next! p)
+        (if (and (is? :GT) diamond-allowed)
+          (do (nset MODE (bit-or (nget MODE) DIAMOND)) (next! p) [])
+          (let [one (fn [] (if-not (mode? EXPR) (type-argument p) (parse-type p)))
+                args (loop [args [(one)]]
+                       (if (is? :COMMA) (do (next! p) (recur (conj args (one)))) args))]
+            (case (tk)
+              (:GTGTGTEQ :GTGTEQ :GTEQ :GTGTGT :GTGT) (do (split! p) args)
+              :GT (do (next! p) args)
+              (conj args (syntax-error p (tpos)))))))
+    [(syntax-error p (tpos))]))
+
+(defn- type-argument [^P p]
+  (let [annos (type-annotations-opt p)]
+    (if-not (is? :QUES)
+      (parse-type* p false annos)
+      (let [pos (tpos)
+            _ (next! p)
+            result (cond
+                     (is? :EXTENDS) (let [t (to p (mk-at pos :TYPEBOUNDKIND :kind :EXTENDS))]
+                                      (next! p)
+                                      (let [bound (parse-type p)]
+                                        (mk-at pos :WILDCARD :kind t :inner bound)))
+                     (is? :SUPER) (let [t (to p (mk-at pos :TYPEBOUNDKIND :kind :SUPER))]
+                                    (next! p)
+                                    (let [bound (parse-type p)]
+                                      (mk-at pos :WILDCARD :kind t :inner bound)))
+                     (lax? (tk)) (let [t (mk-at NOPOS :TYPEBOUNDKIND :kind :UNBOUND)
+                                       wc (toP p (mk-at pos :WILDCARD :kind t :inner nil))
+                                       id (toP p (mk-at (tpos) :IDENT :name (ident p)))
+                                       err (mk-at pos :ERRONEOUS :errs [wc id])]
+                                   (report-syntax-error p pos)
+                                   err)
+                     :else (let [t (toP p (mk-at pos :TYPEBOUNDKIND :kind :UNBOUND))]
+                             (toP p (mk-at pos :WILDCARD :kind t :inner nil))))]
+        (if (seq annos)
+          (toP p (mk-at (g (first annos) :pos) :ANNOTATED_TYPE :annotations annos :underlyingType result))
+          result)))))
+
+(defn- type-arguments-tree [^P p t diamond-allowed]
+  (let [pos (tpos)
+        args (type-arguments p diamond-allowed)]
+    (toP p (mk-at pos :TYPEAPPLY :clazz t :arguments args))))
+
+(defn- brackets-opt
+  ([^P p t] (brackets-opt p t []))
+  ([^P p t annos]
+   (let [next-annos (type-annotations-opt p)
+         t (cond
+             (is? :LBRACKET) (let [pos (tpos)] (next! p) (brackets-opt-cont p t pos next-annos))
+             (seq next-annos) (if (pos? (nget PUSHBACK))
+                                (do (oset PUSHED next-annos) t)
+                                (reduced (illegal p (g (first next-annos) :pos))))
+             :else t)]
+     (cond
+       (reduced? t) @t
+       (seq annos) (toP p (mk-at (tpos) :ANNOTATED_TYPE :annotations annos :underlyingType t))
+       :else t))))
+
+(defn- brackets-opt-cont [^P p t pos annos]
+  (accept! p :RBRACKET)
+  (let [t (brackets-opt p t)
+        t (toP p (mk-at pos :TYPEARRAY :elemtype t))]
+    (if (seq annos)
+      (toP p (mk-at pos :ANNOTATED_TYPE :annotations annos :underlyingType t))
+      t)))
+
+(defn- brackets-suffix [^P p t]
+  (cond
+    (and (mode? EXPR) (is? :DOT))
+    (do (select-expr-mode p)
+        (let [pos (tpos)]
+          (next! p)
+          (accept! p :CLASS)
+          (if (= (tpos) (nget ERREND))
+            (let [nm (if (lax? (tk)) (let [nm (tname)] (next! p) nm) "<error>")]
+              (mk-at pos :ERRONEOUS :errs [(toP p (mk-at pos :SELECT :selected t :name nm))]))
+            (do (when (or (and (has-tag? t :TYPEARRAY) (contains-type-annotation? t))
+                          (has-tag? t :ANNOTATED_TYPE))
+                  (syntax-error p (tpos)))
+                (toP p (mk-at pos :SELECT :selected t :name "class"))))))
+    (mode? TYPE) (do (when-not (is? :COLCOL) (select-type-mode p)) t)
+    :else (do (when-not (is? :COLCOL) (syntax-error p (tpos))) t)))
+
+(defn- member-reference-suffix
+  ([^P p t] (let [pos1 (tpos)] (accept! p :COLCOL) (member-reference-suffix p pos1 t)))
+  ([^P p pos1 t]
+   (select-expr-mode p)
+   (let [type-args (when (is? :LT) (type-arguments p false))
+         [mode nm] (if (is? :NEW) (do (next! p) [:NEW "<init>"]) [:INVOKE (ident p)])]
+     (toP p (mk-at (start-pos t) :REFERENCE :mode mode :name nm :expr t :typeargs type-args)))))
+
+(defn- term3 [^P p]
+  (let [pos (tpos)
+        start-mode (nget MODE)
+        type-args (type-arguments-opt p EXPR)
+        k (tk)]
+    (case k
+      :QUES (if (and (mode? TYPE) (mode? TYPEARG) (not (mode? NOPARAMS)))
+              (do (select-type-mode p) (type-argument p))
+              (illegal p))
+      (:PLUSPLUS :SUBSUB :BANG :TILDE :PLUS :SUB)
+      (if (and (nil? type-args) (mode? EXPR))
+        (do (next! p)
+            (select-expr-mode p)
+            (if (and (identical? k :SUB) (or (is? :INTLITERAL) (is? :LONGLITERAL)) (= (aget ^objects (tok) 4) 10))
+              (do (select-expr-mode p)
+                  (term3-rest p (literal p "-" pos) type-args))
+              (let [t (term3 p)] (mk-at pos (unoptags k) :arg t))))
+        (illegal p))
+      :LPAREN
+      (if (and (nil? type-args) (mode? EXPR))
+        (let [pres (analyze-parens p)]
+          (case pres
+            :CAST (do (accept! p :LPAREN)
+                      (select-type-mode p)
+                      (let [t (parse-intersection-type p pos (parse-type p))]
+                        (accept! p :RPAREN)
+                        (select-expr-mode p)
+                        (let [t1 (term3 p)] (mk-at pos :TYPECAST :clazz t :expr t1))))
+            (:IMPLICIT_LAMBDA :EXPLICIT_LAMBDA)
+            (term3-rest p (lambda-expression-or-statement p true (identical? pres :EXPLICIT_LAMBDA) pos) type-args)
+            (do (accept! p :LPAREN)
+                (select-expr-mode p)
+                (let [t (term-rest p (term1-rest p (term2-rest p (term3 p) or-prec)))]
+                  (accept! p :RPAREN)
+                  (term3-rest p (toP p (mk-at pos :PARENS :expr t)) type-args)))))
+        (illegal p))
+      :THIS
+      (if (mode? EXPR)
+        (do (select-expr-mode p)
+            (let [t (to p (mk-at pos :IDENT :name "this"))]
+              (next! p)
+              (term3-rest p (if (nil? type-args) (arguments-opt p nil t) (arguments-tree p type-args t)) nil)))
+        (illegal p))
+      :SUPER
+      (if (mode? EXPR)
+        (do (select-expr-mode p)
+            (let [t (to p (mk-at pos :IDENT :name "super"))]
+              (term3-rest p (super-suffix p type-args t) nil)))
+        (illegal p))
+      (:INTLITERAL :LONGLITERAL :FLOATLITERAL :DOUBLELITERAL :CHARLITERAL :STRINGLITERAL :TRUE :FALSE :NULL)
+      (if (and (nil? type-args) (mode? EXPR))
+        (do (select-expr-mode p) (term3-rest p (literal p "") type-args))
+        (illegal p))
+      :NEW
+      (if type-args
+        (illegal p)
+        (if (mode? EXPR)
+          (do (select-expr-mode p)
+              (next! p)
+              (let [type-args (when (is? :LT) (type-arguments p false))]
+                (term3-rest p (creator p pos type-args) nil)))
+          (illegal p)))
+      :MONKEYS_AT
+      (let [type-annos (type-annotations-opt p)
+            expr (term3 p)]
+        (if-not (mode? TYPE)
+          (case (tag expr)
+            :REFERENCE (let [mexpr (g expr :expr)]
+                         (if (type-tree? mexpr)
+                           (s! expr :expr (insert-annotations-to-most-inner p mexpr type-annos false))
+                           (let [at (toP p (mk-at pos :ANNOTATED_TYPE :annotations type-annos :underlyingType mexpr))]
+                             (s! expr :expr (syntax-error p (start-pos mexpr) [at]))))
+                         (s! expr :pos (start-pos (g expr :expr)))
+                         (term3-rest p expr type-args))
+            :SELECT (if (not= (g expr :name) "class") (illegal p) expr)
+            (illegal p (g (first type-annos) :pos)))
+          (term3-rest p (insert-annotations-to-most-inner p expr type-annos false) type-args)))
+      (:UNDERSCORE :IDENTIFIER :ASSERT :ENUM)
+      (if type-args
+        (illegal p)
+        (if (and (mode? EXPR) (not (mode? NOLAMBDA)) (peek? p 0 :ARROW))
+          (term3-rest p (lambda-expression-or-statement p false false pos) type-args)
+          (let [t (toP p (mk-at (tpos) :IDENT :name (ident p)))
+                ;; the loop: [:done t type-args] or [:return t]
+                r (loop [t t type-args type-args]
+                    (let [pos (tpos)
+                          annos (type-annotations-opt p)]
+                      (if (and (seq annos) (not (is? :LBRACKET)) (not (is? :ELLIPSIS)))
+                        [:return (illegal p (g (first annos) :pos))]
+                        (case (tk)
+                          :LBRACKET
+                          (do (next! p)
+                              (if (is? :RBRACKET)
+                                (do (next! p)
+                                    (let [t (brackets-opt p t)
+                                          t (toP p (mk-at pos :TYPEARRAY :elemtype t))
+                                          t (if (seq annos) (toP p (mk-at pos :ANNOTATED_TYPE :annotations annos :underlyingType t)) t)
+                                          t (brackets-suffix p t)]
+                                      [:done t type-args]))
+                                (let [t (if (mode? EXPR)
+                                          (do (select-expr-mode p)
+                                              (let [t1 (term p)
+                                                    t (if (seq annos) (illegal p (g (first annos) :pos)) t)]
+                                                (to p (mk-at pos :INDEXED :indexed t :index t1))))
+                                          t)]
+                                  (accept! p :RBRACKET)
+                                  [:done t type-args])))
+                          :LPAREN
+                          (if (mode? EXPR)
+                            (do (select-expr-mode p)
+                                (let [t (arguments-tree p type-args t)
+                                      t (if (seq annos) (illegal p (g (first annos) :pos)) t)]
+                                  [:done t nil]))
+                            [:done t type-args])
+                          :DOT
+                          (do (next! p)
+                              (if (and (is? :IDENTIFIER) type-args)
+                                [:return (illegal p)]
+                                (let [prevmode (nget MODE)
+                                      _ (nset MODE (bit-and prevmode (bit-not NOPARAMS)))
+                                      type-args (type-arguments-opt p EXPR)
+                                      _ (nset MODE prevmode)
+                                      special
+                                      (when (mode? EXPR)
+                                        (case (tk)
+                                          :CLASS (if type-args
+                                                   [:return (illegal p)]
+                                                   (do (select-expr-mode p)
+                                                       (let [t (to p (mk-at pos :SELECT :selected t :name "class"))]
+                                                         (next! p) [:done t type-args])))
+                                          :THIS (if type-args
+                                                  [:return (illegal p)]
+                                                  (do (select-expr-mode p)
+                                                      (let [t (to p (mk-at pos :SELECT :selected t :name "this"))]
+                                                        (next! p) [:done t type-args])))
+                                          :SUPER (do (select-expr-mode p)
+                                                     (let [t (to p (mk-at pos :SELECT :selected t :name "super"))
+                                                           t (super-suffix p type-args t)]
+                                                       [:done t nil]))
+                                          :NEW (if type-args
+                                                 [:return (illegal p)]
+                                                 (do (select-expr-mode p)
+                                                     (let [pos1 (tpos)]
+                                                       (next! p)
+                                                       (let [type-args (when (is? :LT) (type-arguments p false))
+                                                             t (inner-creator p pos1 type-args t)]
+                                                         [:done t nil]))))
+                                          nil))]
+                                  (or special
+                                      (let [tyannos (when (and (mode? TYPE) (is? :MONKEYS_AT)) (type-annotations-opt p))
+                                            t (toP p (mk-at pos :SELECT :selected t :name (ident p)))]
+                                        (if (and (<= (tpos) (nget ERREND)) (is? :MONKEYS_AT))
+                                          (do (when type-args (illegal p)) [:return (toP p t)])
+                                          (let [t (if (seq tyannos)
+                                                    (toP p (mk-at (g (first tyannos) :pos) :ANNOTATED_TYPE :annotations tyannos :underlyingType t))
+                                                    t)]
+                                            (recur t type-args))))))))
+                          :ELLIPSIS
+                          (do (cond (pos? (nget PUSHBACK)) (oset PUSHED annos)
+                                    (seq annos) (illegal p (g (first annos) :pos)))
+                              [:done t type-args])
+                          :LT
+                          (if (and (not (mode? TYPE)) (unbound-member-ref? p))
+                            (let [pos1 (tpos)]
+                              (accept! p :LT)
+                              (let [args (loop [args [(type-argument p)]]
+                                           (if (is? :COMMA) (do (next! p) (recur (conj args (type-argument p)))) args))]
+                                (accept! p :GT)
+                                (let [t (toP p (mk-at pos1 :TYPEAPPLY :clazz t :arguments args))
+                                      t (loop [t t]
+                                          (if (is? :DOT)
+                                            (do (next! p)
+                                                (select-type-mode p)
+                                                (let [t (toP p (mk-at (tpos) :SELECT :selected t :name (ident p)))]
+                                                  (recur (type-arguments-opt-tree p t))))
+                                            t))
+                                      t (brackets-opt p t)
+                                      t (if-not (is? :COLCOL) (illegal p) t)]
+                                  (select-expr-mode p)
+                                  [:return (term3-rest p t type-args)])))
+                            [:done t type-args])
+                          [:done t type-args]))))]
+            (if (identical? (first r) :return)
+              (second r)
+              (let [[_ t type-args] r]
+                (when type-args (illegal p))
+                (term3-rest p (type-arguments-opt-tree p t) type-args))))))
+      (:BYTE :SHORT :CHAR :INT :LONG :FLOAT :DOUBLE :BOOLEAN)
+      (do (when type-args (illegal p))
+          (term3-rest p (brackets-suffix p (brackets-opt p (basic-type p))) nil))
+      :VOID
+      (do (when type-args (illegal p))
+          (if (mode? EXPR)
+            (do (next! p)
+                (if (is? :DOT)
+                  (let [ti (toP p (mk-at pos :TYPEIDENT :typetag :VOID))]
+                    (term3-rest p (brackets-suffix p ti) nil))
+                  (illegal p pos)))
+            (let [ti (to p (mk-at pos :TYPEIDENT :typetag :VOID))]
+              (next! p)
+              ti)))
+      :SWITCH
+      (let [switch-pos (tpos)]
+        (next! p)
+        (let [selector (par-expression p)]
+          (accept! p :LBRACE)
+          (loop [cases []]
+            (let [pos (tpos)]
+              (case (tk)
+                (:CASE :DEFAULT) (recur (into cases (switch-expression-statement-group p)))
+                (:RBRACE :EOF) (let [e (to p (mk-at switch-pos :SWITCH_EXPRESSION :selector selector :cases cases))]
+                                 (s! e :bracePos (tpos))
+                                 (accept! p :RBRACE)
+                                 e)
+                (do (next! p) (syntax-error p pos) (recur cases)))))))
+      (if (and type-args (not (zero? (bit-and start-mode TYPE))))
+        (mk-at pos :TYPEAPPLY :clazz (mk :ERRONEOUS :errs []) :arguments type-args)
+        (illegal p)))))
+
+(defn- type-tree?
+  "TreeInfo.isType at parse time (no symbols): an identifier not this or super, a parameterized
+  or array type, an annotated one."
+  [t]
+  (case (tag t)
+    :IDENT (not (contains? #{"this" "super"} (g t :name)))
+    :SELECT (throw (NullPointerException. "TreeInfo.isType of a selection without symbols"))
+    (:TYPEAPPLY :TYPEARRAY) true
+    :ANNOTATED_TYPE (type-tree? (g t :underlyingType))
+    false))
+
+(defn- switch-expression-statement-group [^P p]
+  (let [case-pos (tpos)
+        pats (if (is? :DEFAULT)
+               (do (next! p) [(toP p (mk-at case-pos :DEFAULTCASELABEL))])
+               (do (accept! p :CASE)
+                   (loop [pats [] allow-default false]
+                     (let [label (parse-case-label p allow-default)
+                           pats (conj pats label)]
+                       (if (is? :COMMA)
+                         (do (next! p) (recur pats (null-case-label? label)))
+                         pats)))))
+        guard (parse-guard p (peek pats))
+        [stats body kind]
+        (if (is? :ARROW)
+          (do (next! p)
+              (if (or (is? :THROW) (is? :LBRACE))
+                (let [s (parse-statement-as-block p)] [[s] s :RULE])
+                (let [value (parse-expression p)
+                      y (do (at-tree value) (to p (mk :YIELD :value value)))]
+                  (accept! p :SEMI)
+                  [[y] value :RULE])))
+          (do (accept! p :COLON)
+              [(block-statements p) nil :STATEMENT]))]
+    [(toP p (mk-at case-pos :CASE :caseKind kind :labels pats :guard guard :stats stats :body body))]))
+
+(defn- term3-rest [^P p t type-args]
+  (when type-args (illegal p))
+  (let [r (loop [t t type-args type-args]
+            (let [pos1 (tpos)
+                  annos (type-annotations-opt p)]
+              (cond
+                (is? :LBRACKET)
+                (do (next! p)
+                    (let [array-type
+                          (when (mode? TYPE)
+                            (let [prevmode (nget MODE)]
+                              (select-type-mode p)
+                              (if (is? :RBRACKET)
+                                (do (next! p)
+                                    (let [t (brackets-opt p t)
+                                          t (toP p (mk-at pos1 :TYPEARRAY :elemtype t))]
+                                      (if (is? :COLCOL)
+                                        (do (select-expr-mode p) [:continue t])
+                                        [:return (if (seq annos)
+                                                   (toP p (mk-at pos1 :ANNOTATED_TYPE :annotations annos :underlyingType t))
+                                                   t)])))
+                                (do (nset MODE prevmode) nil))))]
+                      (if array-type
+                        (if (identical? (first array-type) :continue)
+                          (recur (second array-type) type-args)
+                          array-type)
+                        (let [t (if (mode? EXPR)
+                                  (do (select-expr-mode p)
+                                      (let [t1 (term p)] (to p (mk-at pos1 :INDEXED :indexed t :index t1))))
+                                  t)]
+                          (accept! p :RBRACKET)
+                          (recur t type-args)))))
+                (is? :DOT)
+                (do (next! p)
+                    (let [type-args (type-arguments-opt p EXPR)]
+                      (cond
+                        (and (is? :SUPER) (mode? EXPR))
+                        (do (select-expr-mode p)
+                            (let [t (to p (mk-at pos1 :SELECT :selected t :name "super"))]
+                              (next! p)
+                              (recur (arguments-tree p type-args t) nil)))
+                        (and (is? :NEW) (mode? EXPR))
+                        (if type-args
+                          [:return (illegal p)]
+                          (do (select-expr-mode p)
+                              (let [pos2 (tpos)]
+                                (next! p)
+                                (let [type-args (when (is? :LT) (type-arguments p false))]
+                                  (recur (inner-creator p pos2 type-args t) nil)))))
+                        :else
+                        (let [tyannos (when (and (mode? TYPE) (is? :MONKEYS_AT)) (type-annotations-opt p))
+                              t (toP p (mk-at pos1 :SELECT :selected t :name (ident* p true)))]
+                          (if (and (<= (tpos) (nget ERREND)) (is? :MONKEYS_AT))
+                            [:break t]
+                            (let [t (if (seq tyannos)
+                                      (toP p (mk-at (g (first tyannos) :pos) :ANNOTATED_TYPE :annotations tyannos :underlyingType t))
+                                      t)]
+                              (recur (arguments-opt p type-args (type-arguments-opt-tree p t)) nil)))))))
+                (and (mode? EXPR) (is? :COLCOL))
+                (do (select-expr-mode p)
+                    (if type-args
+                      [:return (illegal p)]
+                      (do (accept! p :COLCOL)
+                          (recur (member-reference-suffix p pos1 t) type-args))))
+                :else
+                (if (seq annos)
+                  (if (pos? (nget PUSHBACK))
+                    (do (oset PUSHED annos) [:break t])
+                    [:return (illegal p (g (first annos) :pos))])
+                  [:break t]))))]
+    (if (identical? (first r) :return)
+      (second r)
+      (let [t (loop [t (second r)]
+                (if (and (or (is? :PLUSPLUS) (is? :SUBSUB)) (mode? EXPR))
+                  (do (select-expr-mode p)
+                      (let [t (to p (mk-at (tpos) (if (is? :PLUSPLUS) :POSTINC :POSTDEC) :arg t))]
+                        (next! p)
+                        (recur t)))
+                  t))]
+        (toP p t)))))
+
+(defn- creator [^P p newpos type-args]
+  (let [new-annos (type-annotations-opt p)]
+    (if (and (contains? typetags (tk)) (nil? type-args))
+      (if (empty? new-annos)
+        (array-creator-rest p newpos (basic-type p))
+        (array-creator-rest p newpos (toP p (mk-at (g (first new-annos) :pos) :ANNOTATED_TYPE
+                                                   :annotations new-annos :underlyingType (basic-type p)))))
+      (let [t (qualident p true)
+            prevmode (nget MODE)
+            _ (select-type-mode p)
+            [t diamond last-pos]
+            (if (is? :LT)
+              (let [lp (tpos) t (type-arguments-tree p t true)] [t (mode? DIAMOND) lp])
+              [t false -1])
+            [t diamond last-pos]
+            (loop [t t diamond diamond last-pos last-pos]
+              (if (is? :DOT)
+                (do (when diamond (illegal p))
+                    (let [pos (tpos)]
+                      (next! p)
+                      (let [tyannos (type-annotations-opt p)
+                            t (toP p (mk-at pos :SELECT :selected t :name (ident p)))
+                            t (if (seq tyannos)
+                                (toP p (mk-at (g (first tyannos) :pos) :ANNOTATED_TYPE :annotations tyannos :underlyingType t))
+                                t)]
+                        (if (is? :LT)
+                          (let [lp (tpos) t (type-arguments-tree p t true)] (recur t (mode? DIAMOND) lp))
+                          (recur t diamond last-pos)))))
+                [t diamond last-pos]))]
+        (nset MODE prevmode)
+        (cond
+          (or (is? :LBRACKET) (is? :MONKEYS_AT))
+          (let [t (if (seq new-annos) (insert-annotations-to-most-inner p t new-annos false) t)
+                e (array-creator-rest p newpos t)]
+            (cond
+              diamond (do (report-syntax-error p last-pos) (toP p (mk-at newpos :ERRONEOUS :errs [e])))
+              type-args (let [pos (if (and (seq type-args) (not= (long (g (first type-args) :pos)) NOPOS))
+                                    (g (first type-args) :pos) newpos)]
+                          (set-error-end-pos p (prev-end))
+                          (let [err (mk-at pos :ERRONEOUS :errs (into [e] type-args))]
+                            (report-syntax-error p pos)
+                            (toP p err)))
+              :else e))
+          (is? :LPAREN)
+          (let [t (if (seq new-annos) (insert-annotations-to-most-inner p t new-annos false) t)]
+            (class-creator-rest p newpos nil type-args t))
+          :else
+          (do (set-error-end-pos p (tpos))
+              (report-syntax-error p (tpos))
+              (let [t (toP p (mk-at newpos :NEWCLASS :encl nil :typeargs (or type-args []) :clazz t :args [] :def nil))]
+                (toP p (mk-at newpos :ERRONEOUS :errs [t])))))))))
+
+(defn- inner-creator [^P p newpos type-args encl]
+  (let [new-annos (type-annotations-opt p)
+        t (toP p (mk-at (tpos) :IDENT :name (ident p)))
+        t (if (seq new-annos)
+            (toP p (mk-at (g (first new-annos) :pos) :ANNOTATED_TYPE :annotations new-annos :underlyingType t))
+            t)
+        t (if (is? :LT)
+            (let [prevmode (nget MODE) t (type-arguments-tree p t true)] (nset MODE prevmode) t)
+            t)]
+    (class-creator-rest p newpos encl type-args t)))
+
+(defn- array-creator-rest [^P p newpos elemtype]
+  (let [annos (type-annotations-opt p)]
+    (accept! p :LBRACKET)
+    (if (is? :RBRACKET)
+      (do (accept! p :RBRACKET)
+          (let [elemtype (brackets-opt p elemtype annos)]
+            (if (is? :LBRACE)
+              (let [na (array-initializer p newpos elemtype)]
+                (when (seq annos)
+                  (s! na :annotations (g elemtype :annotations))
+                  (s! na :elemtype (g elemtype :underlyingType)))
+                na)
+              (let [t (toP p (mk-at newpos :NEWARRAY :elemtype elemtype :dims [] :elems nil
+                                    :annotations [] :dimAnnotations []))]
+                (syntax-error p (tpos) [t])))))
+      (let [dims [(parse-expression p)]
+            dim-annos [annos]
+            _ (accept! p :RBRACKET)
+            [elemtype dims dim-annos]
+            (loop [elemtype elemtype dims dims dim-annos dim-annos]
+              (if (or (is? :LBRACKET) (is? :MONKEYS_AT))
+                (let [maybe (type-annotations-opt p)
+                      pos (tpos)]
+                  (next! p)
+                  (if (is? :RBRACKET)
+                    (recur (brackets-opt-cont p elemtype pos maybe) dims dim-annos)
+                    (let [d (parse-expression p)]
+                      (accept! p :RBRACKET)
+                      (recur elemtype (conj dims d) (conj dim-annos maybe)))))
+                [elemtype dims dim-annos]))
+            errpos (tpos)
+            elems (when (is? :LBRACE) (array-initializer-elements p newpos elemtype))
+            na (toP p (mk-at newpos :NEWARRAY :elemtype elemtype :dims dims :elems elems
+                             :annotations [] :dimAnnotations []))]
+        (s! na :dimAnnotations dim-annos)
+        (if elems (syntax-error p errpos [na]) na)))))
+
+(defn- class-creator-rest [^P p newpos encl type-args t]
+  (let [args (arguments p)
+        body (when (is? :LBRACE)
+               (let [pos (tpos)
+                     defs (class-interface-or-record-body p "" false false)
+                     mods (do (at NOPOS) (modifiers p 0 []))]
+                 (toP p (mk-at pos :CLASSDEF :mods mods :name "" :typarams [] :extending nil
+                               :implementing [] :permitting [] :defs defs))))]
+    (toP p (mk-at newpos :NEWCLASS :encl encl :typeargs (or type-args []) :clazz t :args args :def body))))
+
+(defn- array-initializer [^P p newpos t]
+  (let [elems (array-initializer-elements p newpos t)]
+    (toP p (mk-at newpos :NEWARRAY :elemtype t :dims [] :elems elems :annotations [] :dimAnnotations []))))
+
+(defn- array-initializer-elements [^P p newpos t]
+  (accept! p :LBRACE)
+  (let [elems (cond
+                (is? :COMMA) (do (next! p) [])
+                (not (is? :RBRACE)) (loop [elems [(variable-initializer p)]]
+                                      (if (is? :COMMA)
+                                        (do (next! p)
+                                            (if (is? :RBRACE) elems (recur (conj elems (variable-initializer p)))))
+                                        elems))
+                :else [])]
+    (accept! p :RBRACE)
+    elems))
+
+(defn- variable-initializer [^P p]
+  (if (is? :LBRACE) (array-initializer p (tpos) nil) (parse-expression p)))
+
+(defn- par-expression [^P p]
+  (let [pos (tpos)]
+    (accept! p :LPAREN)
+    (let [t (parse-expression p)]
+      (accept! p :RPAREN)
+      (toP p (mk-at pos :PARENS :expr t)))))
+
+(defn- block
+  ([^P p] (block p (tpos) 0))
+  ([^P p pos flags]
+   (accept! p :LBRACE)
+   (let [stats (block-statements p)
+         t (mk-at pos :BLOCK :flags (long flags) :stats stats :bracePos NOPOS)]
+     (loop []
+       (when (or (is? :CASE) (is? :DEFAULT))
+         (syntax-error p (tpos))
+         (switch-block-statement-groups p)
+         (recur)))
+     (s! t :bracePos (tpos))
+     (accept! p :RBRACE)
+     (toP p t))))
+
+(defn- block-statements [^P p]
+  (loop [stats [] last-err -1]
+    (let [stat (block-statement p)]
+      (if (empty? stat)
+        stats
+        (if (= (tpos) last-err)
+          stats
+          (let [last-err (if (<= (tpos) (nget ERREND))
+                           (do (skip! p false true true true) (tpos))
+                           last-err)]
+            (recur (into stats stat) last-err)))))))
+
+(defn- parse-statement-as-block [^P p]
+  (let [pos (tpos)
+        stats (block-statement p)]
+    (if (empty? stats)
+      (let [e (syntax-error p pos)] (toP p (mk-at pos :EXEC :expr e)))
+      (let [first-stat (first stats)]
+        (if (contains? #{:CLASSDEF :VARDEF} (tag first-stat))
+          (toP p (mk-at pos :EXEC :expr (mk-at (g first-stat :pos) :ERRONEOUS
+                                                :errs [(mk-at (g first-stat :pos) :BLOCK :flags 0 :stats stats :bracePos NOPOS)])))
+          first-stat)))))
+
+(defn- non-sealed-identifier? [^P p ^objects t la]
+  (and (= (tok-name t) "non") (peek? p la :SUB :IDENTIFIER)
+       (let [ts (tok-at p (inc (long la))) tse (tok-at p (+ 2 (long la)))]
+         (and (= (tok-end t) (tok-pos ts)) (= (tok-end ts) (tok-pos tse)) (= (tok-name tse) "sealed")))))
+
+(defn- allowed-after-sealed? [^P p ^objects nxt local current-non-sealed]
+  (case (tok-kind nxt)
+    :MONKEYS_AT (or (not (identical? (kind-at p 2) :INTERFACE)) current-non-sealed)
+    (:ABSTRACT :FINAL :STRICTFP :CLASS :INTERFACE :ENUM) true
+    (:PUBLIC :PROTECTED :PRIVATE :STATIC) (not local)
+    :IDENTIFIER (and (not local)
+                     (or (non-sealed-identifier? p nxt (if current-non-sealed 3 1)) (= (tok-name nxt) "sealed")))
+    false))
+
+(defn- non-sealed-class-start? [^P p local]
+  (and (non-sealed-identifier? p (tok) 0) (allowed-after-sealed? p (tok-at p 3) local true)))
+
+(defn- sealed-class-start? [^P p local]
+  (and (= (tname) "sealed") (allowed-after-sealed? p (tok-at p 1) local false)))
+
+(defn- yield-statement? [^P p]
+  (let [nxt (tok-at p 1)]
+    (case (tok-kind nxt)
+      (:PLUS :SUB :STRINGLITERAL :CHARLITERAL :STRINGFRAGMENT :INTLITERAL :LONGLITERAL :FLOATLITERAL
+       :DOUBLELITERAL :NULL :IDENTIFIER :UNDERSCORE :TRUE :FALSE :NEW :SWITCH :THIS :SUPER :BYTE :CHAR
+       :SHORT :INT :LONG :FLOAT :DOUBLE :VOID :BOOLEAN) true
+      (:PLUSPLUS :SUBSUB) (not (identical? (kind-at p 2) :SEMI))
+      (:BANG :TILDE) (not (identical? (kind-at p 1) :SEMI))
+      :LPAREN (loop [la 2 balance 1 has-comma false in-type-args false]
+                (let [l (tok-at p la) k (tok-kind l)]
+                  (if (and (not (identical? k :EOF)) (not= balance 0))
+                    (case k
+                      :LPAREN (recur (inc la) (inc balance) has-comma in-type-args)
+                      :RPAREN (recur (inc la) (dec balance) has-comma in-type-args)
+                      :COMMA (recur (inc la) balance (or has-comma (and (= balance 1) (not in-type-args))) in-type-args)
+                      :LT (recur (inc la) balance has-comma true)
+                      :GT (recur (inc la) balance has-comma false)
+                      (recur (inc la) balance has-comma in-type-args))
+                    (or (and (not has-comma) (not= la 3)) (identical? k :ARROW)))))
+      :SEMI true
+      false)))
+
+(defn- block-statement [^P p]
+  (let [pos (tpos)
+        k (tk)]
+    (case k
+      (:RBRACE :CASE :DEFAULT :EOF) []
+      (:LBRACE :IF :FOR :WHILE :DO :TRY :SWITCH :SYNCHRONIZED :RETURN :THROW :BREAK :CONTINUE :SEMI
+       :ELSE :FINALLY :CATCH :ASSERT) [(parse-simple-statement p)]
+      (:MONKEYS_AT :FINAL) (let [dc (doc-comment (tok))
+                                 mods (modifiers-opt p nil)]
+                             (if (declaration? p)
+                               [(class-or-record-or-interface-or-enum-declaration p mods dc)]
+                               (let [t (parse-type p true)] (local-variable-declarations p mods t dc))))
+      (:ABSTRACT :STRICTFP) (let [dc (doc-comment (tok))
+                                  mods (modifiers-opt p nil)]
+                              [(class-or-record-or-interface-or-enum-declaration p mods dc)])
+      (:INTERFACE :CLASS :ENUM) (let [dc (doc-comment (tok))]
+                                  [(class-or-record-or-interface-or-enum-declaration p (modifiers-opt p nil) dc)])
+      (let [special
+            (when (identical? k :IDENTIFIER)
+              (cond
+                (and (= (tname) "yield") (yield-statement? p))
+                (do (next! p)
+                    (let [t (with-mode EXPR (term p))]
+                      (accept! p :SEMI)
+                      [(toP p (mk-at pos :YIELD :value t))]))
+                (= (tname) "yield") nil
+                (non-sealed-class-start? p true)
+                (do (next! p) (next! p) (next! p)
+                    [(class-or-record-or-interface-or-enum-declaration p (modifiers-opt p nil) (doc-comment (tok)))])
+                (sealed-class-start? p true)
+                (do (next! p)
+                    [(class-or-record-or-interface-or-enum-declaration p (modifiers-opt p nil) (doc-comment (tok)))])))]
+        (or special
+            (let [dc (doc-comment (tok))]
+              (if (record-start? p)
+                [(class-record-declaration p (do (at pos) (modifiers p 0 [])) dc)]
+                (let [prev-token (tok)
+                      t (with-mode (bit-or EXPR TYPE) (term p))]
+                  (cond
+                    (and (is? :COLON) (has-tag? t :IDENT))
+                    (do (next! p)
+                        (let [stat (parse-statement-as-block p)]
+                          [(mk-at pos :LABELLED :label (tok-name prev-token) :body stat)]))
+                    (and (was-type-mode? p) (lax? (tk)))
+                    (let [pos (tpos)
+                          mods (do (at NOPOS) (modifiers p 0 []))]
+                      (at pos)
+                      (local-variable-declarations p mods t dc))
+                    :else
+                    (let [t (check-expr-stat p t)]
+                      (accept! p :SEMI)
+                      [(toP p (mk-at pos :EXEC :expr t))]))))))))))
+
+(defn- check-expr-stat [^P p t]
+  (if (expression-statement? t)
+    t
+    (mk-at (g t :pos) :ERRONEOUS :errs [t])))
+
+(defn- local-variable-declarations [^P p mods typ dc]
+  (let [stats (variable-declarators p mods typ [] true)]
+    (accept! p :SEMI)
+    (store-end p (peek stats) (prev-end))
+    stats))
+
+(defn- parse-simple-statement [^P p]
+  (let [pos (tpos)]
+    (case (tk)
+      :LBRACE (block p)
+      :IF (do (next! p)
+              (let [c (par-expression p)
+                    then (parse-statement-as-block p)
+                    else (when (is? :ELSE) (next! p) (parse-statement-as-block p))]
+                (mk-at pos :IF :cond c :thenpart then :elsepart else)))
+      :FOR (do (next! p)
+               (accept! p :LPAREN)
+               (let [inits (if (is? :SEMI) [] (for-init p))]
+                 (if (and (= (count inits) 1) (has-tag? (first inits) :VARDEF)
+                          (nil? (g (first inits) :init)) (is? :COLON))
+                   (let [v (first inits)]
+                     (accept! p :COLON)
+                     (let [e (parse-expression p)]
+                       (accept! p :RPAREN)
+                       (let [body (parse-statement-as-block p)]
+                         (mk-at pos :FOREACHLOOP :var v :expr e :body body))))
+                   (do (accept! p :SEMI)
+                       (let [c (if (is? :SEMI) nil (parse-expression p))]
+                         (accept! p :SEMI)
+                         (let [steps (if (is? :RPAREN) [] (for-update p))]
+                           (accept! p :RPAREN)
+                           (let [body (parse-statement-as-block p)]
+                             (mk-at pos :FORLOOP :init inits :cond c :step steps :body body))))))))
+      :WHILE (do (next! p)
+                 (let [c (par-expression p) body (parse-statement-as-block p)]
+                   (mk-at pos :WHILELOOP :cond c :body body)))
+      :DO (do (next! p)
+              (let [body (parse-statement-as-block p)]
+                (accept! p :WHILE)
+                (let [c (par-expression p)]
+                  (accept! p :SEMI)
+                  (toP p (mk-at pos :DOLOOP :body body :cond c)))))
+      :TRY (do (next! p)
+               (let [res (if (is? :LPAREN)
+                           (do (next! p) (let [r (resources p)] (accept! p :RPAREN) r))
+                           [])
+                     body (block p)
+                     [catchers finalizer]
+                     (if (or (is? :CATCH) (is? :FINALLY))
+                       (let [cs (loop [cs []] (if (is? :CATCH) (recur (conj cs (catch-clause p))) cs))
+                             fin (when (is? :FINALLY) (next! p) (block p))]
+                         [cs fin])
+                       [[] nil])]
+                 (mk-at pos :TRY :resources res :body body :catchers catchers :finalizer finalizer)))
+      :SWITCH (do (next! p)
+                  (let [selector (par-expression p)]
+                    (accept! p :LBRACE)
+                    (let [cases (switch-block-statement-groups p)
+                          t (to p (mk-at pos :SWITCH :selector selector :cases cases))]
+                      (s! t :bracePos (tend))
+                      (accept! p :RBRACE)
+                      t)))
+      :SYNCHRONIZED (do (next! p)
+                        (let [lock (par-expression p) body (block p)]
+                          (mk-at pos :SYNCHRONIZED :lock lock :body body)))
+      :RETURN (do (next! p)
+                  (let [r (if (is? :SEMI) nil (parse-expression p))]
+                    (accept! p :SEMI)
+                    (toP p (mk-at pos :RETURN :expr r))))
+      :THROW (do (next! p)
+                 (let [e (parse-expression p)]
+                   (accept! p :SEMI)
+                   (toP p (mk-at pos :THROW :expr e))))
+      (:BREAK :CONTINUE) (let [k (tk)]
+                           (next! p)
+                           (let [label (when (lax? (tk)) (ident p))]
+                             (accept! p :SEMI)
+                             (toP p (mk-at pos (if (identical? k :BREAK) :BREAK :CONTINUE) :label label))))
+      :SEMI (do (next! p) (toP p (mk-at pos :SKIP)))
+      (:ELSE :FINALLY) (let [epos (tpos)]
+                         (next! p)
+                         (do-recover p epos #(parse-statement-as-block p)))
+      :CATCH (do-recover p (tpos) #(catch-clause p))
+      :ASSERT (do (next! p)
+                  (let [a (parse-expression p)
+                        msg (when (is? :COLON) (next! p) (parse-expression p))]
+                    (accept! p :SEMI)
+                    (toP p (mk-at pos :ASSERT :cond a :detail msg)))))))
+
+(defn- do-recover [^P p start f]
+  (let [stm (f)
+        e (syntax-error p start [stm])]
+    (toP p (mk :EXEC :expr e))))
+
+(defn- catch-clause [^P p]
+  (let [pos (tpos)]
+    (accept! p :CATCH)
+    (accept! p :LPAREN)
+    (let [mods (opt-final p F-PARAMETER)
+          types (loop [ts [(parse-type p)]] (if (is? :BAR) (do (next! p) (recur (conj ts (parse-type p)))) ts))
+          ptype (if (> (count types) 1)
+                  (toP p (mk-at (start-pos (first types)) :TYPEUNION :alternatives types))
+                  (first types))
+          formal (variable-declarator-id p mods ptype true false false)]
+      (accept! p :RPAREN)
+      (let [body (block p)]
+        (mk-at pos :CATCH :param formal :body body)))))
+
+(defn- switch-block-statement-groups [^P p]
+  (loop [cases []]
+    (let [pos (tpos)]
+      (case (tk)
+        (:CASE :DEFAULT) (recur (into cases (switch-block-statement-group p)))
+        (:RBRACE :EOF) cases
+        (do (next! p) (syntax-error p pos) (recur cases))))))
+
+(defn- switch-block-statement-group [^P p]
+  (let [pos (tpos)
+        dflt (is? :DEFAULT)
+        _ (next! p)
+        pats (if dflt
+               [(toP p (mk-at pos :DEFAULTCASELABEL))]
+               (loop [pats [] allow-default false]
+                 (let [label (parse-case-label p allow-default)
+                       pats (conj pats label)]
+                   (if (is? :COMMA)
+                     (do (next! p) (recur pats (null-case-label? label)))
+                     pats))))
+        guard (parse-guard p (peek pats))
+        [kind stats body] (if (is? :ARROW)
+                            (do (accept! p :ARROW)
+                                (let [s (parse-statement-as-block p)] [:RULE [s] s]))
+                            (do (accept! p :COLON)
+                                [:STATEMENT (block-statements p) nil]))
+        c (mk-at pos :CASE :caseKind kind :labels pats :guard guard :stats stats :body body)]
+    (when (empty? stats) (store-end p c (prev-end)))
+    [c]))
+
+(defn- parse-case-label [^P p allow-default]
+  (let [pattern-pos (tpos)]
+    (if (is? :DEFAULT)
+      (do (when-not allow-default (report-syntax-error p (tpos)))
+          (next! p)
+          (toP p (mk-at pattern-pos :DEFAULTCASELABEL)))
+      (let [mods (opt-final p 0)
+            pattern (or (not= (long (g mods :flags)) 0) (seq (g mods :annotations))
+                        (identical? (analyze-pattern p 0) :PATTERN))]
+        (if pattern
+          (let [pt (parse-pattern p pattern-pos mods nil false true)]
+            (toP p (mk-at pattern-pos :PATTERNCASELABEL :pat pt)))
+          (let [e (with-mode (bit-or EXPR NOLAMBDA) (term p))]
+            (toP p (mk-at pattern-pos :CONSTANTCASELABEL :expr e))))))))
+
+(defn- parse-guard [^P p label]
+  (when (and (is? :IDENTIFIER) (= (tname) "when"))
+    (let [pos (tpos)]
+      (next! p)
+      (let [guard (with-mode (bit-or EXPR NOLAMBDA) (term p))]
+        (if-not (has-tag? label :PATTERNCASELABEL)
+          (syntax-error p pos [guard])
+          guard)))))
+
+(defn- analyze-pattern
+  "JavacParser.analyzePattern: :PATTERN or :EXPRESSION."
+  [^P p la]
+  (loop [la (long la) type-depth 0 paren-depth 0 pending :EXPRESSION]
+    (let [k (kind-at p la)]
+      (case k
+        (:BYTE :SHORT :INT :LONG :FLOAT :DOUBLE :BOOLEAN :CHAR :VOID :ASSERT :ENUM :IDENTIFIER)
+        (cond
+          (and (= type-depth 0) (peek? p la lax))
+          (if (= paren-depth 0) :PATTERN (recur (inc la) type-depth paren-depth :PATTERN))
+          (and (= type-depth 0) (= paren-depth 0) (peek? p la #{:ARROW :COMMA})) :EXPRESSION
+          :else (recur (inc la) type-depth paren-depth pending))
+        :UNDERSCORE
+        (cond
+          (and (= type-depth 0) (peek? p la #{:RPAREN :COMMA})) :PATTERN
+          (and (= type-depth 0) (peek? p la lax))
+          (if (= paren-depth 0) :PATTERN (recur (inc la) type-depth paren-depth :PATTERN))
+          :else (recur (inc la) type-depth paren-depth pending))
+        (:DOT :QUES :EXTENDS :SUPER :COMMA) (recur (inc la) type-depth paren-depth pending)
+        :LT (recur (inc la) (inc type-depth) paren-depth pending)
+        (:GTGTGT :GTGT :GT)
+        (let [type-depth (- type-depth (case k :GTGTGT 3 :GTGT 2 1))]
+          (cond
+            (and (= type-depth 0) (not (peek? p la :DOT)))
+            (if (or (peek? p la lax) (peek? p la :LPAREN)) :PATTERN :EXPRESSION)
+            (< type-depth 0) :EXPRESSION
+            :else (recur (inc la) type-depth paren-depth pending)))
+        :MONKEYS_AT (let [la (long (skip-annotation p la))] (recur (inc la) type-depth paren-depth pending))
+        :LBRACKET (cond
+                    (peek? p la :RBRACKET lax) :PATTERN
+                    (peek? p la :RBRACKET) (recur (+ la 2) type-depth paren-depth pending)
+                    :else pending)
+        :LPAREN (if (identical? (kind-at p (inc la)) :RPAREN)
+                  (if (and (not= paren-depth 0) (identical? (kind-at p (+ la 2)) :ARROW)) :EXPRESSION :PATTERN)
+                  (recur (inc la) type-depth (inc paren-depth) pending))
+        :RPAREN (let [paren-depth (dec paren-depth)]
+                  (if (and (= paren-depth 0) (= type-depth 0) (peek? p la :IDENTIFIER)
+                           (= (tok-name (tok-at p (inc la))) "when"))
+                    :PATTERN
+                    (recur (inc la) type-depth paren-depth pending)))
+        :ARROW (if (> paren-depth 0) :EXPRESSION pending)
+        :FINAL (if (> paren-depth 0) :PATTERN pending)
+        pending))))
+
+(defn- more-statement-expressions [^P p pos first-expr stats]
+  (loop [stats (conj stats (toP p (mk-at pos :EXEC :expr (check-expr-stat p first-expr))))]
+    (if (is? :COMMA)
+      (do (next! p)
+          (let [pos (tpos)
+                t (parse-expression p)]
+            (recur (conj stats (toP p (mk-at pos :EXEC :expr (check-expr-stat p t)))))))
+      stats)))
+
+(defn- for-init [^P p]
+  (let [pos (tpos)]
+    (if (or (is? :FINAL) (is? :MONKEYS_AT))
+      (variable-declarators p (opt-final p 0) (parse-type p true) [] true)
+      (let [t (with-mode (bit-or EXPR TYPE) (term p))]
+        (cond
+          (and (was-type-mode? p) (lax? (tk))) (variable-declarators p (modifiers-opt p nil) t [] true)
+          (and (was-type-mode? p) (is? :COLON))
+          [(mk-at pos :VARDEF :mods (modifiers-opt p nil) :name "<error>" :nameexpr nil :vartype t :init nil
+                  :declKind :EXPLICIT :typePos NOPOS)]
+          :else (more-statement-expressions p pos t []))))))
+
+(defn- for-update [^P p]
+  (let [pos (tpos)] (more-statement-expressions p pos (parse-expression p) [])))
+
+(defn- annotations-opt [^P p kind]
+  (if-not (is? :MONKEYS_AT)
+    []
+    (let [prevmode (nget MODE)
+          buf (loop [buf []]
+                (if (is? :MONKEYS_AT)
+                  (let [pos (tpos)] (next! p) (recur (conj buf (annotation p pos kind))))
+                  buf))]
+      (nset LASTMODE (nget MODE))
+      (nset MODE prevmode)
+      buf)))
+
+(defn- type-annotations-opt [^P p] (annotations-opt p :TYPE_ANNOTATION))
+
+(def ^:private modifier-flags
+  {:PRIVATE F-PRIVATE :PROTECTED F-PROTECTED :PUBLIC F-PUBLIC :STATIC F-STATIC :TRANSIENT F-TRANSIENT
+   :FINAL F-FINAL :ABSTRACT F-ABSTRACT :NATIVE F-NATIVE :VOLATILE F-VOLATILE
+   :SYNCHRONIZED F-SYNCHRONIZED :STRICTFP F-STRICTFP :MONKEYS_AT F-ANNOTATION :DEFAULT F-DEFAULT})
+
+(defn- modifiers-opt [^P p partial]
+  (let [[flags annos pos] (if partial
+                            [(long (g partial :flags)) (g partial :annotations) (long (g partial :pos))]
+                            [0 [] (tpos)])
+        flags (if (deprecated-flag? p (tok)) (bit-or flags F-DEPRECATED) flags)
+        [flags annos pos]
+        (loop [flags (long flags) annos annos pos (long pos)]
+          (let [k (tk)
+                flag (cond
+                       (contains? modifier-flags k) (modifier-flags k)
+                       (identical? k :ERROR) (do (next! p) 0)
+                       (identical? k :IDENTIFIER)
+                       (cond (non-sealed-class-start? p false) (do (next! p) (next! p) F-NON_SEALED)
+                             (sealed-class-start? p false) F-SEALED
+                             :else nil)
+                       :else nil)]
+            (if (nil? flag)
+              [flags annos pos]
+              (let [last-pos (tpos)]
+                (next! p)
+                (if (and (= (long flag) F-ANNOTATION) (not (is? :INTERFACE)))
+                  (let [ann (annotation p last-pos :ANNOTATION)
+                        pos (if (and (= flags 0) (empty? annos)) (long (g ann :pos)) pos)]
+                    (recur flags (conj annos ann) pos))
+                  (recur (bit-or flags (long flag)) annos pos))))))
+        flags (case (tk) :ENUM (bit-or flags F-ENUM) :INTERFACE (bit-or flags F-INTERFACE) flags)
+        pos (if (and (zero? (bit-and flags (bit-or F-ModifierFlags F-ANNOTATION))) (empty? annos)) NOPOS pos)
+        mods (do (at pos) (modifiers p flags annos))]
+    (when (not= pos NOPOS) (store-end p mods (prev-end)))
+    mods))
+
+(defn- annotation [^P p pos kind]
+  (let [ident (qualident p false)
+        vals (if (is? :LPAREN) (annotation-field-values p) [])
+        ann (mk-at pos kind :annotationType ident :args vals)]
+    (toP p ann)))
+
+(defn- annotation-field-value [^P p]
+  (if (lax? (tk))
+    (do (select-expr-mode p)
+        (let [t1 (term1 p)]
+          (if (and (has-tag? t1 :IDENT) (is? :EQ))
+            (let [pos (tpos)]
+              (accept! p :EQ)
+              (let [v (annotation-value p)] (toP p (mk-at pos :ASSIGN :lhs t1 :rhs v))))
+            t1)))
+    (annotation-value p)))
+
+(defn- annotation-field-values [^P p]
+  (accept! p :LPAREN)
+  (let [buf (if-not (is? :RPAREN)
+              (loop [buf [(annotation-field-value p)]]
+                (if (is? :COMMA) (do (next! p) (recur (conj buf (annotation-field-value p)))) buf))
+              [])]
+    (accept! p :RPAREN)
+    buf))
+
+(defn- annotation-value [^P p]
+  (case (tk)
+    :MONKEYS_AT (let [pos (tpos)] (next! p) (annotation p pos :ANNOTATION))
+    :LBRACE (let [pos (tpos)]
+              (accept! p :LBRACE)
+              (let [buf (cond
+                          (is? :COMMA) (do (next! p) [])
+                          (not (is? :RBRACE)) (loop [buf [(annotation-value p)]]
+                                                (if (is? :COMMA)
+                                                  (do (next! p) (if (is? :RBRACE) buf (recur (conj buf (annotation-value p)))))
+                                                  buf))
+                          :else [])]
+                (accept! p :RBRACE)
+                (toP p (mk-at pos :NEWARRAY :elemtype nil :dims [] :elems buf :annotations [] :dimAnnotations []))))
+    (do (select-expr-mode p) (term1 p))))
+
+(defn- variable-declarators [^P p mods typ vdefs local]
+  (let [pos (tpos)] (variable-declarators-rest p pos mods typ (ident p) false nil vdefs local)))
+
+(defn- variable-declarators-rest [^P p pos mods typ nm req-init dc vdefs local]
+  (loop [vdefs (conj vdefs (variable-declarator-rest p pos mods typ nm req-init dc local false))]
+    (if (is? :COMMA)
+      (do (store-end p (peek vdefs) (tend))
+          (next! p)
+          (let [pos (tpos) nm (ident p)]
+            (recur (conj vdefs (variable-declarator-rest p pos mods typ nm req-init dc local true)))))
+      vdefs)))
+
+(defn- variable-declarator-rest [^P p pos mods typ nm req-init dc local compound]
+  (let [typ (brackets-opt p typ)
+        nm (if (= nm "_") "" nm)
+        init (if (is? :EQ)
+               (do (next! p) (variable-initializer p))
+               (do (when req-init (syntax-error p (tpos))) nil))
+        _ (when (and (= nm "") local (nil? init) (not (is? :COLON))) (syntax-error p (tpos)))
+        elem (innermost-type typ)
+        [typ var? vtp]
+        (if (and (has-tag? elem :IDENT) (restricted-type-name-at-source (g elem :name)))
+          (let [tn (g elem :name)]
+            (cond
+              (not= tn "var") (do (report-syntax-error p (g elem :pos)) [typ false NOPOS])
+              (and (has-tag? typ :TYPEARRAY) (not compound)) (do (report-syntax-error p (g elem :pos)) [typ false NOPOS])
+              :else (do (when compound (report-syntax-error p (g elem :pos)))
+                        [nil true (long (g elem :pos))])))
+          [typ false NOPOS])
+        result (toP p (mk-at pos :VARDEF :mods mods :name nm :nameexpr nil :vartype typ :init init
+                             :declKind (if var? :VAR :EXPLICIT) :typePos vtp))]
+    (attach p result dc)))
+
+(defn- variable-declarator-id [^P p mods typ catch-param lambda-param record-component]
+  (let [pos (tpos)
+        r (if (or (pos? (nget THISID)) (not lambda-param) (lax? (tk))
+                  (not= (long (g mods :flags)) F-PARAMETER) (seq (g mods :annotations)))
+            (let [pn (if (and (is? :UNDERSCORE) (or catch-param lambda-param))
+                       (toP p (mk-at (tpos) :IDENT :name (ident p)))
+                       (qualident p false))]
+              (cond
+                (and (has-tag? pn :IDENT) (not= (g pn :name) "this")) [:name (g pn :name) typ]
+                (and lambda-param (nil? typ)) (do (report-syntax-error p pos) [:name "" pn])
+                :else [:recv (toP p (mk-at pos :VARDEF :mods mods :name "this" :nameexpr pn :vartype typ
+                                           :init nil :declKind :EXPLICIT :typePos NOPOS))]))
+            [:name "<error>" typ])]
+    (if (identical? (first r) :recv)
+      (let [t (second r)]
+        ;; ReceiverVarDef: the name is the name expression's
+        (s! t :name (let [pn (g t :nameexpr)] (if (has-tag? pn :IDENT) (g pn :name) (g pn :name))))
+        t)
+      (let [[_ nm typ] r
+            typ (brackets-opt p typ)
+            nm (if (= nm "_") "" nm)
+            var? (and typ (has-tag? typ :IDENT) (= (g typ :name) "var"))
+            kind (cond var? :VAR typ :EXPLICIT :else :IMPLICIT)
+            tpos* (if typ (long (g typ :pos)) pos)]
+        (toP p (mk-at pos :VARDEF :mods mods :name nm :nameexpr nil :vartype typ :init nil
+                      :declKind kind :typePos tpos*))))))
+
+(defn- resources [^P p]
+  (loop [defs [(resource p)]]
+    (if (is? :SEMI)
+      (do (store-end p (peek defs) (tend))
+          (next! p)
+          (if (is? :RPAREN) defs (recur (conj defs (resource p)))))
+      defs)))
+
+(defn- resource [^P p]
+  (if (or (is? :FINAL) (is? :MONKEYS_AT))
+    (let [mods (opt-final p 0)
+          t (parse-type p true)
+          pos (tpos)]
+      (variable-declarator-rest p pos mods t (ident p) true nil true false))
+    (let [t (with-mode (bit-or EXPR TYPE) (term p))]
+      (if (and (was-type-mode? p) (lax? (tk)))
+        (let [mods (modifiers p 0 [])
+              pos (tpos)]
+          (variable-declarator-rest p pos mods t (ident p) true nil true false))
+        t))))
+
+(defn- parse-compilation-unit [^P p]
+  (let [first-token (tok)
+        mods (when (is? :MONKEYS_AT) (modifiers-opt p nil))
+        defs (ArrayList.)
+        state (object-array [mods false false false])  ; mods consumedToplevelDoc seenImport seenPackage
+        _ (when (is? :PACKAGE)
+            (let [package-pos (tpos)
+                  annos (if mods (g mods :annotations) [])]
+              (aset state 0 nil)
+              (aset state 3 true)
+              (next! p)
+              (let [pid (qualident p false)]
+                (accept! p :SEMI)
+                (let [pd (toP p (mk-at package-pos :PACKAGEDEF :annotations annos :pid pid))]
+                  (attach p pd (doc-comment first-token))
+                  (aset state 1 true)
+                  (.add defs pd)))))
+        implicit
+        (loop [first-type-decl true implicit false]
+          (if (is? :EOF)
+            implicit
+            (let [stop (when (<= (tpos) (nget ERREND))
+                         (skip! p first-type-decl false false false)
+                         (is? :EOF))]
+              (if stop
+                implicit
+                (let [semis (loop [semis []]
+                              (if (and first-type-decl (nil? (aget state 0)) (is? :SEMI))
+                                (let [pos (tpos)]
+                                  (next! p)
+                                  (let [semis (conj semis (toP p (mk-at pos :SKIP)))]
+                                    (if (is? :EOF) (reduced semis) (recur semis))))
+                                semis))
+                      eof (reduced? semis)
+                      semis (if (reduced? semis) @semis semis)]
+                  (cond
+                    eof implicit
+                    (and first-type-decl (nil? (aget state 0)) (is? :IMPORT))
+                    (do (aset state 2 true)
+                        (.add defs (import-declaration p))
+                        (recur first-type-decl implicit))
+                    :else
+                    (let [dc0 (doc-comment (tok))
+                          dc (if (and first-type-decl (not (aget state 2)) (not (aget state 3)))
+                               (do (aset state 1 true) (doc-comment first-token))
+                               dc0)
+                          mods (aget state 0)
+                          mods (if (or mods (not (is? :SEMI))) (modifiers-opt p mods) mods)
+                          module (when (and first-type-decl (is? :IDENTIFIER))
+                                   (let [kind (if (= (tname) "open") (do (next! p) :OPEN) :STRONG)]
+                                     (when (and (is? :IDENTIFIER) (= (tname) "module"))
+                                       (.add defs (module-decl p mods kind dc))
+                                       (aset state 1 true)
+                                       true)))]
+                      (if module
+                        implicit
+                        (do
+                          (.addAll defs semis)
+                          (let [top-level? (and (not (declaration*? p true))
+                                                (let [r (speculate p #(top-level-method-or-field-declaration p mods nil))]
+                                                  (contains? #{:METHODDEF :VARDEF} (tag (first r)))))
+                                implicit
+                                (cond
+                                  top-level? (do (.addAll defs (top-level-method-or-field-declaration p mods dc)) true)
+                                  (definite-statement-start? p)
+                                  (let [start (tpos)
+                                        stats (block-statement p)]
+                                    (.add defs (syntax-error p start stats))
+                                    implicit)
+                                  :else
+                                  (let [d (type-declaration p mods dc)
+                                        d (if (has-tag? d :EXEC) (g d :expr) d)]
+                                    (.add defs d)
+                                    implicit))]
+                            (aset state 0 nil)
+                            (recur false implicit)))))))))))
+        defs (vec defs)
+        top-defs (if implicit (construct-implicit-class p defs (prev-end)) defs)
+        toplevel (mk-at (tok-pos first-token) :TOPLEVEL :defs top-defs)]
+    (when-not (aget state 1) (attach p toplevel (doc-comment first-token)))
+    (when (empty? defs) (store-end p toplevel (prev-end)))
+    toplevel))
+
+(defn- construct-implicit-class [^P p defs end]
+  (let [top (filterv #(contains? #{:IMPORT :MODULEIMPORT} (tag %)) defs)
+        members (filterv #(not (contains? #{:PACKAGEDEF :IMPORT :MODULEIMPORT :SKIP} (tag %))) defs)
+        primary (start-pos (first members))
+        mods (do (at NOPOS) (modifiers p (bit-or F-FINAL F-IMPLICIT_CLASS) []))
+        cls (mk-at primary :CLASSDEF :mods mods :name (oget 2) :typarams [] :extending nil
+                   :implementing [] :permitting [] :defs members)]
+    (store-end p cls end)
+    (conj top cls)))
+
+(defn- module-decl [^P p mods kind dc]
+  (let [pos (tpos)]
+    (next! p)
+    (let [nm (qualident p false)]
+      (accept! p :LBRACE)
+      (let [directives (module-directive-list p)]
+        (accept! p :RBRACE)
+        (let [end (prev-end)]
+          (accept! p :EOF)
+          (let [r (mk-at pos :MODULEDEF :mods mods :kind kind :qualId nm :directives directives)]
+            (store-end p r end)
+            (attach p r dc)))))))
+
+(defn- qualident-list [^P p allow-annos]
+  (let [one (fn []
+              (let [annos (if allow-annos (type-annotations-opt p) [])
+                    qi (qualident p allow-annos)]
+                (if (seq annos) (insert-annotations-to-most-inner p qi annos false) qi)))]
+    (loop [ts [(one)]]
+      (if (is? :COMMA) (do (next! p) (recur (conj ts (one)))) ts))))
+
+(defn- module-directive-list [^P p]
+  (loop [defs []]
+    (if-not (is? :IDENTIFIER)
+      defs
+      (let [pos (tpos) nm (tname)]
+        (cond
+          (= nm "requires")
+          (do (next! p)
+              (let [[tr st] (loop [tr false st false]
+                              (case (tk)
+                                :IDENTIFIER (if (= (tname) "transitive")
+                                              (if (contains? #{:SEMI :DOT} (kind-at p 1))
+                                                [tr st]
+                                                (do (next! p) (recur true st)))
+                                              [tr st])
+                                :STATIC (do (next! p) (recur tr true))
+                                [tr st]))
+                    mn (qualident p false)]
+                (accept! p :SEMI)
+                (recur (conj defs (toP p (mk-at pos :REQUIRES :isTransitive tr :isStaticPhase st :moduleName mn))))))
+          (or (= nm "exports") (= nm "opens"))
+          (do (next! p)
+              (let [pkg (qualident p false)
+                    names (when (and (is? :IDENTIFIER) (= (tname) "to")) (next! p) (qualident-list p false))]
+                (accept! p :SEMI)
+                (recur (conj defs (toP p (mk-at pos (if (= nm "exports") :EXPORTS :OPENS) :qualid pkg :moduleNames names))))))
+          (= nm "provides")
+          (do (next! p)
+              (let [svc (qualident p false)
+                    impls (if (and (is? :IDENTIFIER) (= (tname) "with")) (do (next! p) (qualident-list p false)) [])]
+                (accept! p :SEMI)
+                (recur (conj defs (toP p (mk-at pos :PROVIDES :serviceName svc :implNames impls))))))
+          (= nm "uses")
+          (do (next! p)
+              (let [svc (qualident p false)]
+                (accept! p :SEMI)
+                (recur (conj defs (toP p (mk-at pos :USES :qualid svc))))))
+          :else (do (set-error-end-pos p pos) (report-syntax-error p pos) defs))))))
+
+(defn- import-declaration [^P p]
+  (let [pos (tpos)]
+    (next! p)
+    (if (and (is? :IDENTIFIER) (= (tname) "module") (peek? p 0 :IDENTIFIER))
+      (do (next! p)
+          (let [mn (qualident p false)]
+            (accept! p :SEMI)
+            (toP p (mk-at pos :MODULEIMPORT :module mn))))
+      (let [static? (if (is? :STATIC) (do (next! p) true) false)
+            pid (toP p (mk-at (tpos) :IDENT :name (ident p)))
+            pid (loop [pid pid]
+                  (let [pos1 (tpos)]
+                    (accept! p :DOT)
+                    (if (is? :STAR)
+                      (let [pid (to p (mk-at pos1 :SELECT :selected pid :name "*"))] (next! p) pid)
+                      (let [pid (toP p (mk-at pos1 :SELECT :selected pid :name (ident p)))]
+                        (if (is? :DOT) (recur pid) pid)))))]
+        (accept! p :SEMI)
+        (toP p (mk-at pos :IMPORT :qualid pid :staticImport static?))))))
+
+(defn- type-declaration [^P p mods dc]
+  (let [pos (tpos)]
+    (if (and (nil? mods) (is? :SEMI))
+      (do (next! p) (toP p (mk-at pos :SKIP)))
+      (class-or-record-or-interface-or-enum-declaration p (modifiers-opt p mods) dc))))
+
+(defn- class-or-record-or-interface-or-enum-declaration [^P p mods dc]
+  (cond
+    (is? :CLASS) (class-declaration p mods dc)
+    (record-start? p) (class-record-declaration p mods dc)
+    (is? :INTERFACE) (interface-declaration p mods dc)
+    (is? :ENUM) (enum-declaration p mods dc)
+    :else (let [pos (tpos)
+                errs (if (lax? (tk))
+                       (let [e [mods (toP p (mk-at pos :IDENT :name (ident p)))]]
+                         (set-error-end-pos p (tpos))
+                         e)
+                       [mods])]
+            (toP p (mk :EXEC :expr (syntax-error p pos errs))))))
+
+(defn- type-name [^P p]
+  (let [pos (tpos) nm (ident p)]
+    (when (restricted-type-name-at-source nm) (report-syntax-error p pos))
+    nm))
+
+(defn- permits-clause [^P p mods]
+  (if (and (is? :IDENTIFIER) (= (tname) "permits"))
+    (do (next! p) (qualident-list p false))
+    []))
+
+(defn- class-declaration [^P p mods dc]
+  (let [pos (tpos)]
+    (accept! p :CLASS)
+    (let [nm (type-name p)
+          typarams (type-parameters-opt p false)
+          extending (when (is? :EXTENDS) (next! p) (parse-type p))
+          implementing (if (is? :IMPLEMENTS) (do (next! p) (type-list p)) [])
+          permitting (permits-clause p mods)
+          defs (class-interface-or-record-body p nm false false)
+          r (toP p (mk-at pos :CLASSDEF :mods mods :name nm :typarams typarams :extending extending
+                          :implementing implementing :permitting permitting :defs defs))]
+      (attach p r dc))))
+
+(defn- class-record-declaration [^P p mods dc]
+  (let [pos (tpos)]
+    (next! p)
+    (s! mods :flags (bit-or (long (g mods :flags)) F-RECORD))
+    (let [nm (type-name p)
+          typarams (type-parameters-opt p false)
+          header (formal-parameters p false true)
+          implementing (if (is? :IMPLEMENTS) (do (next! p) (type-list p)) [])
+          defs (class-interface-or-record-body p nm false true)]
+      (doseq [d defs]
+        (when (and (has-tag? d :METHODDEF) (= (g d :name) "<init>") (empty? (g d :params))
+                   (not (zero? (bit-and (long (g (g d :mods) :flags)) F-COMPACT_RECORD_CONSTRUCTOR))))
+          (s! d :params
+              (mapv (fn [param]
+                      (at-tree param)
+                      (mk :VARDEF
+                          :mods (modifiers p (bit-or F-PARAMETER F-GENERATED_MEMBER F-MANDATED
+                                                     (bit-and (long (g (g param :mods) :flags)) F-VARARGS))
+                                           (g (g param :mods) :annotations))
+                          :name (g param :name) :nameexpr nil :vartype (g param :vartype) :init nil
+                          :declKind :EXPLICIT :typePos NOPOS))
+                    header))))
+      (let [defs (into (vec header) defs)
+            r (toP p (mk-at pos :CLASSDEF :mods mods :name nm :typarams typarams :extending nil
+                            :implementing implementing :permitting [] :defs defs))]
+        (attach p r dc)))))
+
+(defn- interface-declaration [^P p mods dc]
+  (let [pos (tpos)]
+    (accept! p :INTERFACE)
+    (let [nm (type-name p)
+          typarams (type-parameters-opt p false)
+          extending (if (is? :EXTENDS) (do (next! p) (type-list p)) [])
+          permitting (permits-clause p mods)
+          defs (class-interface-or-record-body p nm true false)
+          r (toP p (mk-at pos :CLASSDEF :mods mods :name nm :typarams typarams :extending nil
+                          :implementing extending :permitting permitting :defs defs))]
+      (attach p r dc))))
+
+(defn- enum-declaration [^P p mods dc]
+  (let [pos (tpos)]
+    (accept! p :ENUM)
+    (let [nm (type-name p)
+          _ (type-parameters-opt p true)
+          implementing (if (is? :IMPLEMENTS) (do (next! p) (type-list p)) [])
+          defs (enum-body p nm)]
+      (s! mods :flags (bit-or (long (g mods :flags)) F-ENUM))
+      (let [r (toP p (mk-at pos :CLASSDEF :mods mods :name nm :typarams [] :extending nil
+                            :implementing implementing :permitting [] :defs defs))]
+        (attach p r dc)))))
+
+(defn- estimate-enumerator-or-member [^P p enum-name]
+  (let [ident? (or (is? :IDENTIFIER) (is? :UNDERSCORE))]
+    (if (and ident? (not= (tname) enum-name) (not (record-start? p))
+             (contains? #{:LPAREN :LBRACE :COMMA :SEMI} (kind-at p 1)))
+      :ENUMERATOR
+      (case (tk)
+        :IDENTIFIER (if (record-start? p) :MEMBER :UNKNOWN)
+        (:MONKEYS_AT :LT :UNDERSCORE) :UNKNOWN
+        :MEMBER))))
+
+(defn- enum-body [^P p enum-name]
+  (accept! p :LBRACE)
+  (let [defs (ArrayList.)
+        st (boolean-array 3) ; wasSemi hasStructuralErrors wasError
+        _ (when (is? :COMMA)
+            (next! p)
+            (cond (is? :SEMI) (do (aset st 0 true) (next! p))
+                  (not (is? :RBRACE)) (do (report-syntax-error p (prev-end)) (aset st 2 true))))]
+    (loop []
+      (when (and (not (is? :RBRACE)) (not (is? :EOF)))
+        (let [stop (when (is? :SEMI)
+                     (accept! p :SEMI)
+                     (aset st 0 true)
+                     (or (is? :RBRACE) (is? :EOF)))]
+          (when-not stop
+            (let [mt (estimate-enumerator-or-member p enum-name)
+                  mt (if (identical? mt :UNKNOWN) (if (aget st 0) :MEMBER :ENUMERATOR) mt)]
+              (if (identical? mt :ENUMERATOR)
+                (do (aset st 2 false)
+                    (when (and (aget st 0) (not (aget st 1)))
+                      (report-syntax-error p (tpos)) (aset st 1 true))
+                    (.add defs (enumerator-declaration p enum-name))
+                    (if (<= (tpos) (nget ERREND))
+                      (skip! p false true true false)
+                      (when (and (not (is? :RBRACE)) (not (is? :SEMI)) (not (is? :EOF)))
+                        (if (is? :COMMA)
+                          (next! p)
+                          (do (set-error-end-pos p (tpos)) (report-syntax-error p (prev-end)) (aset st 2 true))))))
+                (do (when (and (not (aget st 0)) (not (aget st 1)) (not (aget st 2)))
+                      (report-syntax-error p (tpos)) (aset st 1 true))
+                    (aset st 2 false)
+                    (.addAll defs (class-or-interface-or-record-body-declaration p nil enum-name false false))
+                    (when (<= (tpos) (nget ERREND)) (skip! p false true true false))))
+              (recur))))))
+    (accept! p :RBRACE)
+    (vec defs)))
+
+(defn- enumerator-declaration [^P p enum-name]
+  (let [dc (doc-comment (tok))
+        flags (bit-or F-PUBLIC F-STATIC F-FINAL F-ENUM (if (deprecated-flag? p (tok)) F-DEPRECATED 0))
+        pos (tpos)
+        annos (annotations-opt p :ANNOTATION)
+        mods (do (at (if (empty? annos) NOPOS pos)) (modifiers p flags annos))
+        type-args (type-arguments-opt p)
+        ident-pos (tpos)
+        nm (ident p)
+        create-pos (tpos)
+        args (if (is? :LPAREN) (arguments p) [])
+        body (when (is? :LBRACE)
+               (let [mods1 (do (at NOPOS) (modifiers p F-ENUM []))
+                     defs (class-interface-or-record-body p "" false false)]
+                 (toP p (mk-at ident-pos :CLASSDEF :mods mods1 :name "" :typarams [] :extending nil
+                               :implementing [] :permitting [] :defs defs))))
+        create-pos (if (and (empty? args) (nil? body)) ident-pos create-pos)
+        id (mk-at ident-pos :IDENT :name enum-name)
+        create (mk-at create-pos :NEWCLASS :encl nil :typeargs (or type-args []) :clazz id :args args :def body)
+        _ (when (not= create-pos ident-pos) (store-end p create (prev-end)))
+        id (mk-at ident-pos :IDENT :name enum-name)
+        r (toP p (mk-at pos :VARDEF :mods mods :name nm :nameexpr nil :vartype id :init create
+                        :declKind :EXPLICIT :typePos NOPOS))]
+    (attach p r dc)))
+
+(defn- type-list [^P p]
+  (loop [ts [(parse-type p)]]
+    (if (is? :COMMA) (do (next! p) (recur (conj ts (parse-type p)))) ts)))
+
+(defn- class-interface-or-record-body [^P p class-name interface? record?]
+  (accept! p :LBRACE)
+  (if (and (<= (tpos) (nget ERREND))
+           (do (skip! p false true false false)
+               (if (is? :LBRACE) (do (next! p) false) true)))
+    []
+    (let [defs (ArrayList.)]
+      (loop []
+        (when (and (not (is? :RBRACE)) (not (is? :EOF)))
+          (.addAll defs (class-or-interface-or-record-body-declaration p nil class-name interface? record?))
+          (when (<= (tpos) (nget ERREND)) (skip! p false true true false))
+          (recur)))
+      (accept! p :RBRACE)
+      (vec defs))))
+
+(defn- class-or-interface-or-record-body-declaration [^P p mods class-name interface? record?]
+  (if (is? :SEMI)
+    (do (next! p) [])
+    (let [dc (doc-comment (tok))
+          pos (tpos)
+          mods (modifiers-opt p mods)]
+      (cond
+        (declaration? p) [(class-or-record-or-interface-or-enum-declaration p mods dc)]
+        (and (is? :LBRACE)
+             (zero? (bit-and (long (g mods :flags)) (bit-and-not F-StandardFlags F-STATIC)))
+             (empty? (g mods :annotations)))
+        [(block p pos (g mods :flags))]
+        (definite-statement-start? p)
+        (let [start (tpos) stats (block-statement p)] [(syntax-error p start stats)])
+        :else (constructor-or-method-or-field-declaration p mods class-name interface? record? dc)))))
+
+(defn- constructor-or-method-or-field-declaration [^P p mods class-name interface? record? dc]
+  (let [pos (tpos)
+        typarams (type-parameters-opt p false)
+        _ (when (and (seq typarams) (= (long (g mods :pos)) NOPOS))
+            (s! mods :pos pos)
+            (store-end p mods pos))
+        annos-after (annotations-opt p :ANNOTATION)
+        _ (when (seq annos-after)
+            (s! mods :annotations (into (g mods :annotations) annos-after))
+            (when (= (long (g mods :pos)) NOPOS)
+              (s! mods :pos (g (first (g mods :annotations)) :pos))))
+        tk0 (tok)
+        pos (tpos)
+        void? (is? :VOID)
+        typ (if void?
+              (let [t (to p (mk-at pos :TYPEIDENT :typetag :VOID))] (next! p) t)
+              (unannotated-type p false))]
+    (cond
+      (and (or (and (is? :LPAREN) (not interface?)) (and record? (is? :LBRACE))) (has-tag? typ :IDENT))
+      (do (when (and (seq annos-after) (not (or interface? (not= (tok-name tk0) class-name))))
+            (illegal p (g (first annos-after) :pos)))
+          (when (and record? (is? :LBRACE))
+            (s! mods :flags (bit-or (long (g mods :flags)) F-COMPACT_RECORD_CONSTRUCTOR)))
+          [(method-declarator-rest p pos mods nil "<init>" typarams interface? true record? dc)])
+      (and record? (has-tag? typ :IDENT) (is? :THROWS))
+      (do (skip! p false true false false)
+          [(method-declarator-rest p pos mods nil "<init>" typarams interface? true record? dc)])
+      :else
+      (let [pos (tpos)
+            nm (ident p)]
+        (cond
+          (is? :LPAREN) [(method-declarator-rest p pos mods typ nm typarams interface? void? false dc)]
+          (and (not void?) (empty? typarams))
+          (if (or (not record?) (not (zero? (bit-and (long (g mods :flags)) F-STATIC))))
+            (let [defs (variable-declarators-rest p pos mods typ nm interface? dc [] false)]
+              (accept! p :SEMI)
+              (store-end p (peek defs) (prev-end))
+              defs)
+            (let [err-pos pos]
+              (variable-declarators-rest p pos mods typ nm interface? dc [] false)
+              (accept! p :SEMI)
+              [(syntax-error p err-pos nil)]))
+          :else
+          (let [pos (tpos)
+                err (if (or void? (seq typarams))
+                      (let [m (toP p (mk-at pos :METHODDEF :mods mods :name nm :restype typ :typarams typarams
+                                            :recvparam nil :params [] :thrown [] :body nil :defaultValue nil))]
+                        (attach p m dc)
+                        [m])
+                      [])]
+            [(syntax-error p (tpos) err)]))))))
+
+(defn- top-level-method-or-field-declaration [^P p mods dc]
+  (let [pos (tpos)
+        dc (or dc (doc-comment (tok)))
+        typarams (type-parameters-opt p false)
+        _ (when (and (seq typarams) (= (long (g mods :pos)) NOPOS))
+            (s! mods :pos pos) (store-end p mods pos))
+        annos-after (annotations-opt p :ANNOTATION)
+        _ (when (seq annos-after)
+            (s! mods :annotations (into (g mods :annotations) annos-after))
+            (when (= (long (g mods :pos)) NOPOS)
+              (s! mods :pos (g (first (g mods :annotations)) :pos))))
+        pos (tpos)
+        void? (is? :VOID)
+        typ (if void?
+              (let [t (to p (mk-at pos :TYPEIDENT :typetag :VOID))] (next! p) t)
+              (unannotated-type p false))]
+    (or
+     (cond
+       (is? :IDENTIFIER)
+       (let [pos (tpos) nm (ident p)]
+         (cond
+           (is? :LPAREN) [(method-declarator-rest p pos mods typ nm typarams false void? false dc)]
+           (and (not void?) (empty? typarams) (or (is? :EQ) (is? :SEMI) (is? :COMMA)))
+           (let [defs (variable-declarators-rest p pos mods typ nm false dc [] false)]
+             (accept! p :SEMI)
+             (store-end p (peek defs) (prev-end))
+             defs)))
+       (and (is? :LPAREN) (has-tag? typ :IDENT))
+       [(method-declarator-rest p pos mods nil "<init>" typarams false true false dc)])
+     [(mk :ERRONEOUS :errs [])])))
+
+(defn- declaration*? [^P p allow-records]
+  (or (is? :CLASS) (is? :INTERFACE) (is? :ENUM) (and (record-start? p) allow-records)))
+
+(defn- declaration? [^P p] (declaration*? p true))
+
+(defn- definite-statement-start? [^P p]
+  (contains? #{:IF :WHILE :DO :SWITCH :RETURN :TRY :FOR :ASSERT :BREAK :CONTINUE :THROW} (tk)))
+
+(defn- record-start? [^P p]
+  (and (is? :IDENTIFIER) (= (tname) "record") (peek? p 0 :IDENTIFIER)))
+
+(defn- opening-brace-missing? [^P p unclosed]
+  (skip! p false true (not unclosed) (not unclosed))
+  (cond
+    (is? :LBRACE) true
+    unclosed false
+    :else
+    (case (tk)
+      (:CASE :DEFAULT :IF :FOR :WHILE :DO :TRY :SWITCH :RETURN :THROW :BREAK :CONTINUE :ELSE :FINALLY
+       :CATCH :THIS :SUPER :NEW) true
+      :RBRACE (loop [k 1 balance 1]
+                (case (kind-at p k)
+                  :EOF (= balance 0)
+                  :LBRACE (recur (inc k) (inc balance))
+                  :RBRACE (recur (inc k) (dec balance))
+                  (recur (inc k) balance)))
+      (let [r (speculate p #(block p))]
+        (if (and r (seq (g r :stats)))
+          (let [stats (g r :stats) lst (peek stats)]
+            (or (not (every? #(or (contains? #{:VARDEF :CLASSDEF :BLOCK} (tag %)) (identical? % lst)) stats))
+                (not (and (has-tag? lst :EXEC) (has-tag? (g lst :expr) :ERRONEOUS)))))
+          false)))))
+
+(defn- method-declarator-rest [^P p pos mods typ nm typarams interface? void? record? dc]
+  (let [prev-recv (oget RECV)]
+    (try
+      (oset RECV nil)
+      (let [[params typ thrown unclosed]
+            (if (or (not record?) (not= nm "<init>") (is? :LPAREN))
+              (let [params (formal-parameters p false false)
+                    unclosed (= (tpos) (nget ERREND))
+                    typ (if-not void? (brackets-opt p typ) typ)
+                    thrown (if (is? :THROWS) (do (next! p) (qualident-list p true)) [])]
+                [params typ thrown unclosed])
+              [[] typ [] false])
+            [body default-value]
+            (if (is? :LBRACE)
+              [(block p) nil]
+              (let [dv (if (is? :DEFAULT)
+                         (do (accept! p :DEFAULT)
+                             (let [v (annotation-value p)] (accept! p :SEMI) v))
+                         (do (accept! p :SEMI) nil))
+                    body (when (and (<= (tpos) (nget ERREND)) (opening-brace-missing? p unclosed))
+                           (block p))]
+                [body dv]))
+            r (toP p (mk-at pos :METHODDEF :mods mods :name nm :restype typ :typarams typarams
+                            :recvparam (oget RECV) :params params :thrown thrown :body body
+                            :defaultValue default-value))]
+        (attach p r dc))
+      (finally (oset RECV prev-recv)))))
+
+(defn- type-parameters-opt [^P p parse-empty]
+  (if (is? :LT)
+    (do (next! p)
+        (if (and parse-empty (is? :GT))
+          (do (accept! p :GT) nil)
+          (let [tps (loop [tps [(type-parameter p)]]
+                      (if (is? :COMMA) (do (next! p) (recur (conj tps (type-parameter p)))) tps))]
+            (accept! p :GT)
+            tps)))
+    []))
+
+(defn- type-parameter [^P p]
+  (let [pos (tpos)
+        annos (type-annotations-opt p)
+        nm (type-name p)
+        bounds (if (is? :EXTENDS)
+                 (do (next! p)
+                     (loop [bs [(parse-type p)]]
+                       (if (is? :AMP) (do (next! p) (recur (conj bs (parse-type p)))) bs)))
+                 [])]
+    (toP p (mk-at pos :TYPEPARAMETER :name nm :bounds bounds :annotations annos))))
+
+(defn- formal-parameters [^P p lambda-params record-components]
+  (accept! p :LPAREN)
+  (let [params
+        (if-not (is? :RPAREN)
+          (do (nset THISID (if (and (not lambda-params) (not record-components)) 1 0))
+              (let [last-param (formal-parameter p lambda-params record-components)
+                    params (if (g last-param :nameexpr)
+                             (do (oset RECV last-param) [])
+                             [last-param])]
+                (nset THISID 0)
+                (loop [params params]
+                  (if (is? :COMMA)
+                    (do (next! p)
+                        (recur (conj params (formal-parameter p lambda-params record-components))))
+                    params))))
+          [])]
+    (if (is? :RPAREN)
+      (next! p)
+      (do (set-error-end-pos p (tpos)) (report-syntax-error p (prev-end))))
+    params))
+
+(defn- implicit-parameters [^P p has-parens]
+  (when has-parens (accept! p :LPAREN))
+  (let [params (if (and (not (is? :RPAREN)) (not (is? :ARROW)))
+                 (loop [ps [(implicit-parameter p)]]
+                   (if (is? :COMMA) (do (next! p) (recur (conj ps (implicit-parameter p)))) ps))
+                 [])]
+    (when has-parens (accept! p :RPAREN))
+    params))
+
+(defn- opt-final [^P p flags]
+  (let [mods (modifiers-opt p nil)]
+    (s! mods :flags (bit-or (long (g mods :flags)) (long flags)))
+    mods))
+
+(defn- insert-annotations-to-most-inner [^P p typ annos create-new-level]
+  (let [orig-end (stored-end typ)
+        [most-inner array]
+        (loop [mi typ arr nil]
+          (if (has-tag? (type-in mi) :TYPEARRAY)
+            (let [arr (type-in mi)] (recur (g arr :elemtype) arr))
+            [mi arr]))
+        [most-inner orig-end]
+        (if create-new-level
+          (let [mi (to p (mk-at (tpos) :TYPEARRAY :elemtype most-inner))] [mi (stored-end mi)])
+          [most-inner orig-end])
+        to-return
+        (if (seq annos)
+          (let [[mi last-to-modify]
+                (loop [mi most-inner last most-inner]
+                  (if (or (has-tag? (type-in mi) :SELECT) (has-tag? (type-in mi) :TYPEAPPLY))
+                    (let [[mi last] (loop [mi mi last last]
+                                      (if (has-tag? (type-in mi) :SELECT)
+                                        (recur (g (type-in mi) :selected) mi)
+                                        [mi last]))
+                          [mi last] (loop [mi mi last last]
+                                      (if (has-tag? (type-in mi) :TYPEAPPLY)
+                                        (recur (g (type-in mi) :clazz) mi)
+                                        [mi last]))]
+                      (recur mi last))
+                    [mi last]))
+                annotated (mk-at (g (first annos) :pos) :ANNOTATED_TYPE :annotations annos :underlyingType mi)
+                ltm (type-in last-to-modify)]
+            (cond
+              (has-tag? ltm :TYPEAPPLY) (do (s! ltm :clazz annotated) most-inner)
+              (has-tag? ltm :SELECT) (do (s! ltm :selected annotated) most-inner)
+              :else annotated))
+          most-inner)]
+    (if (nil? array)
+      to-return
+      (do (s! array :elemtype to-return)
+          (store-end p typ orig-end)))))
+
+(defn- formal-parameter [^P p lambda-param record-component]
+  (let [mods (if-not record-component (opt-final p F-PARAMETER) (modifiers-opt p nil))]
+    (when record-component
+      (s! mods :flags (bit-or (long (g mods :flags)) F-RECORD F-FINAL F-PRIVATE F-GENERATED_MEMBER)))
+    (nset PUSHBACK 1)
+    (let [typ (parse-type p lambda-param)]
+      (nset PUSHBACK 0)
+      (let [typ (if (is? :ELLIPSIS)
+                  (let [vannos (oget PUSHED)]
+                    (oset PUSHED [])
+                    (s! mods :flags (bit-or (long (g mods :flags)) F-VARARGS))
+                    (let [t (insert-annotations-to-most-inner p typ vannos true)]
+                      (next! p)
+                      t))
+                  (do (when (seq (oget PUSHED)) (report-syntax-error p (g (first (oget PUSHED)) :pos)))
+                      (oset PUSHED [])
+                      typ))]
+        (variable-declarator-id p mods typ false lambda-param record-component)))))
+
+(defn- implicit-parameter [^P p]
+  (let [mods (do (at (tpos)) (modifiers p F-PARAMETER []))]
+    (variable-declarator-id p mods nil false true false)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The tree as data
+
+(defn literal-value
+  "A literal's value as data: an integer as a long (int, long, char, boolean), a float or double
+  as its bits in hexadecimal (\"f3f800000\", \"d3ff0000000000000\"), a string itself, null nil."
+  [typetag v]
+  (case typetag
+    :FLOAT (str "f" (Integer/toHexString (Float/floatToRawIntBits (float v))))
+    :DOUBLE (str "d" (Long/toHexString (Double/doubleToRawLongBits (double v))))
+    :CLASS v
+    :BOT nil
+    (when v (long v))))
+
+(defn- freeze
+  "The tree as data (the namespace's docstring): persistent maps with :start, :end and :endpos."
+  [t]
+  (cond
+    (instance? HashMap t)
+    (let [^HashMap t t
+          m (persistent!
+             (reduce (fn [m [k v]]
+                       (case k
+                         (:tag :pos :endpos :doc) m
+                         (assoc! m k (freeze v))))
+                     (transient {:tag (.get t :tag) :pos (long (.get t :pos)) :endpos (stored-end t)
+                                 :start (start-pos t) :end (end-pos t)})
+                     (seq t)))
+          m (if (identical? (.get t :tag) :LITERAL)
+              (assoc m :value (literal-value (.get t :typetag) (.get t :value)))
+              m)]
+      (if-let [^objects dc (.get t :doc)]
+        (assoc m :doc [(aget dc 0) (long (aget dc 1)) (long (aget dc 2))])
+        m))
+    (vector? t) (mapv freeze t)
+    :else t))
+
+(defn parse
+  "The compilation unit of Java source `text` as javac's tree in data (the namespace's docstring);
+  `file-name` names the file (javac takes an implicit class's name from it)."
+  ([text] (parse text "Unknown.java"))
+  ([^String text ^String file-name]
+   (let [[toks cs] (lex/tokens text)
+         base (let [i (.lastIndexOf file-name "/")] (subs file-name (inc i)))
+         simple (if (str/ends-with? base ".java") (subs base 0 (- (count base) 5)) base)
+         p (P. toks (long-array 12) (object-array [[] nil simple]) cs (ArrayList.))]
+     (aset ^longs (.-n p) ERREND NOPOS)
+     (aset ^longs (.-n p) ERRPOS NOPOS)
+     (aset ^longs (.-n p) FPOS NOPOS)
+     (aset ^longs (.-n p) PREVEND 0)
+     (freeze (parse-compilation-unit p)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The text form: one node per line
+
+(def fields
+  "Each tag's fields in javac's order (JCTree's), the order `dump` prints them in."
+  (let [binary [:lhs :rhs] unary [:arg]]
+    (merge
+     {:TOPLEVEL [:defs] :PACKAGEDEF [:annotations :pid] :IMPORT [:staticImport :qualid]
+      :MODULEIMPORT [:module]
+      :CLASSDEF [:mods :name :typarams :extending :implementing :permitting :defs]
+      :METHODDEF [:mods :name :restype :typarams :recvparam :params :thrown :body :defaultValue]
+      :VARDEF [:mods :name :nameexpr :vartype :init :declKind :typePos]
+      :SKIP [] :BLOCK [:flags :stats :bracePos] :DOLOOP [:body :cond] :WHILELOOP [:cond :body]
+      :FORLOOP [:init :cond :step :body] :FOREACHLOOP [:var :expr :body] :LABELLED [:label :body]
+      :SWITCH [:selector :cases :bracePos] :CASE [:caseKind :labels :guard :stats :body]
+      :SWITCH_EXPRESSION [:selector :cases :bracePos] :SYNCHRONIZED [:lock :body]
+      :TRY [:resources :body :catchers :finalizer] :CATCH [:param :body]
+      :CONDEXPR [:cond :truepart :falsepart] :IF [:cond :thenpart :elsepart] :EXEC [:expr]
+      :BREAK [:label] :YIELD [:value] :CONTINUE [:label] :RETURN [:expr] :THROW [:expr]
+      :ASSERT [:cond :detail] :APPLY [:typeargs :meth :args]
+      :NEWCLASS [:encl :typeargs :clazz :args :def]
+      :NEWARRAY [:elemtype :dims :annotations :dimAnnotations :elems]
+      :LAMBDA [:paramKind :params :body] :PARENS [:expr] :ASSIGN [:lhs :rhs]
+      :TYPECAST [:clazz :expr] :TYPETEST [:expr :pattern] :ANYPATTERN [] :BINDINGPATTERN [:var]
+      :DEFAULTCASELABEL [] :CONSTANTCASELABEL [:expr] :PATTERNCASELABEL [:pat]
+      :RECORDPATTERN [:deconstructor :nested] :INDEXED [:indexed :index] :SELECT [:selected :name]
+      :REFERENCE [:mode :name :expr :typeargs] :IDENT [:name] :LITERAL [:typetag :value]
+      :TYPEIDENT [:typetag] :TYPEARRAY [:elemtype] :TYPEAPPLY [:clazz :arguments]
+      :TYPEUNION [:alternatives] :TYPEINTERSECTION [:bounds] :TYPEPARAMETER [:name :bounds :annotations]
+      :WILDCARD [:kind :inner] :TYPEBOUNDKIND [:kind] :ANNOTATION [:annotationType :args]
+      :TYPE_ANNOTATION [:annotationType :args] :MODIFIERS [:flags :annotations]
+      :ANNOTATED_TYPE [:annotations :underlyingType] :MODULEDEF [:mods :kind :qualId :directives]
+      :EXPORTS [:qualid :moduleNames] :OPENS [:qualid :moduleNames] :PROVIDES [:serviceName :implNames]
+      :REQUIRES [:isTransitive :isStaticPhase :moduleName] :USES [:qualid] :ERRONEOUS [:errs]}
+     (zipmap binary-tags (repeat binary))
+     (zipmap assignop-tags (repeat binary))
+     (zipmap unary-tags (repeat unary)))))
+
+(defn- tree? [x] (and (map? x) (contains? x :tag)))
+
+(defn- child? [v] (or (tree? v) (and (vector? v) (boolean (some #(or (tree? %) (vector? %)) v)))))
+
+(defn- scalar-str [v]
+  (cond
+    (nil? v) "nil"
+    (string? v) (pr-str v)
+    (keyword? v) (name v)
+    :else (str v)))
+
+(defn dump
+  "The tree (data) as text, one node per line: the tag, @pos, start-end, ~endpos (the stored end
+  position), doc comment, scalar fields; then each child field indented."
+  ^String [tree]
+  (let [sb (StringBuilder.)]
+    (letfn [(indent [d] (dotimes [_ d] (.append sb "  ")))
+            (node [t d]
+              (let [tg (:tag t)
+                    fs (or (fields tg) (sort (remove #{:tag :pos :endpos :start :end :doc} (keys t))))]
+                (indent d)
+                (.append sb (name tg))
+                (.append sb " @") (.append sb (str (:pos t)))
+                (.append sb " ") (.append sb (str (:start t))) (.append sb "-") (.append sb (str (:end t)))
+                (.append sb " ~") (.append sb (str (:endpos t)))
+                (when-let [[s a b] (:doc t)]
+                  (.append sb (str " doc=" (name s) ":" a "-" b)))
+                (doseq [f fs
+                        :let [v (get t f)]
+                        :when (not (child? v))]
+                  (.append sb " ") (.append sb (name f)) (.append sb "=")
+                  (.append sb (if (vector? v) (str "[" (str/join " " (map scalar-str v)) "]") (scalar-str v))))
+                (.append sb "\n")
+                (doseq [f fs
+                        :let [v (get t f)]]
+                  (cond
+                    (tree? v) (do (indent (inc d)) (.append sb (str "." (name f) ":\n")) (node v (+ d 2)))
+                    (child? v)
+                    (do (indent (inc d)) (.append sb (str "." (name f) "[" (count v) "]:\n"))
+                        (doseq [x v]
+                          (cond (tree? x) (node x (+ d 2))
+                                (vector? x) (do (indent (+ d 2)) (.append sb (str "[" (count x) "]\n"))
+                                                (doseq [y x] (node y (+ d 3))))
+                                :else (do (indent (+ d 2)) (.append sb (scalar-str x)) (.append sb "\n")))))))))]
+      (node tree 0))
+    (.toString sb)))
+
+(defn java-files
+  "The .java files under `paths` (files or directories), sorted."
+  [paths]
+  (sort (for [p paths
+              ^java.io.File f (file-seq (java.io.File. ^String p))
+              :when (and (.isFile f) (str/ends-with? (.getName f) ".java"))]
+          (.getPath f))))
+
+(defn time-parse
+  "The parser's speed over the .java files under `paths`, on one thread: each file read, then
+  parsed (the time of parse alone, the reads not counted): {:files :chars :s :chars-per-s}."
+  [paths]
+  (let [files (java-files paths)
+        texts (mapv #(slurp %) files)
+        t0 (System/nanoTime)]
+    (doseq [[f t] (map vector files texts)] (parse t f))
+    (let [s (/ (- (System/nanoTime) t0) 1e9)
+          chars (reduce + (map count texts))]
+      {:files (count files) :chars chars :s (/ (Math/round (* s 100)) 100.0)
+       :chars-per-s (Math/round (/ chars s))})))
+
+(defn -main
+  "bin/repr-java parse FILE...: each Java file's tree, as `dump` prints it; --time PATH...: the
+  parser's speed over the .java files under the PATHs (time-parse)."
+  [& args]
+  (if (= (first args) "--time")
+    (prn (time-parse (rest args)))
+    (doseq [f args]
+      (println "==" f)
+      (print (dump (parse (slurp f) f)))))
+  (flush))

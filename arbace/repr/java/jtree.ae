@@ -1,0 +1,304 @@
+(ns arbace.repr.java.jtree
+  "javac's trees as data, and the tree level of the native parser (doc/classes/JAVA-FRONTEND-SURVEY.md,
+  \"As built: JN8\"): on javac's tool executable, javac on Arbace parses Java files
+  (JavacTask.parse: doc comments and end positions kept) and each compilation unit becomes the
+  data arbace.repr.java.parse gives (its namespace docstring: tags, positions with
+  TreeInfo.getStartPos and getEndPos and the stored end positions, doc comments, fields); the
+  native parser parses the same text, and the two are compared as `parse/dump` prints them.
+
+  bin/repr-java parse-check (bin/lib/repr-java/parse-check) runs `check` over its corpora:
+    -m arbace.repr.java.jtree check OUT ROOT [PATH...]
+  every .java file under ROOT (or the PATHs) parsed by both, in chunks of REPR_JAVA_CHUNK files
+  (default 50) on REPR_JAVA_THREADS threads (default 4); OUT/report.edn the counts and times,
+  OUT/diff/<path>.javac and .native the dumps of each file whose trees differ, OUT/files.tsv a
+  line per file (path, equal|differ|javac-error|native-error, the first differing line)."
+  (:require [arbace.repr.java.javac :as javac]
+            [arbace.repr.java.parse :as parse]
+            [arbace.java.io :as io]
+            [arbace.pprint :as pp]
+            [arbace.string :as str])
+  (:import [com.sun.tools.javac.tree JCTree JCTree$JCCompilationUnit TreeInfo EndPosTable
+            JCTree$JCPackageDecl JCTree$JCImport JCTree$JCModuleImport JCTree$JCClassDecl
+            JCTree$JCMethodDecl JCTree$JCVariableDecl JCTree$JCBlock JCTree$JCDoWhileLoop
+            JCTree$JCWhileLoop JCTree$JCForLoop JCTree$JCEnhancedForLoop JCTree$JCLabeledStatement
+            JCTree$JCSwitch JCTree$JCCase JCTree$JCSwitchExpression JCTree$JCSynchronized JCTree$JCTry
+            JCTree$JCCatch JCTree$JCConditional JCTree$JCIf JCTree$JCExpressionStatement
+            JCTree$JCBreak JCTree$JCYield JCTree$JCContinue JCTree$JCReturn JCTree$JCThrow
+            JCTree$JCAssert JCTree$JCMethodInvocation JCTree$JCNewClass JCTree$JCNewArray
+            JCTree$JCLambda JCTree$JCParens JCTree$JCAssign JCTree$JCAssignOp JCTree$JCUnary
+            JCTree$JCBinary JCTree$JCTypeCast JCTree$JCInstanceOf JCTree$JCBindingPattern
+            JCTree$JCConstantCaseLabel JCTree$JCPatternCaseLabel JCTree$JCRecordPattern
+            JCTree$JCArrayAccess JCTree$JCFieldAccess JCTree$JCMemberReference JCTree$JCIdent
+            JCTree$JCLiteral JCTree$JCPrimitiveTypeTree JCTree$JCArrayTypeTree JCTree$JCTypeApply
+            JCTree$JCTypeUnion JCTree$JCTypeIntersection JCTree$JCTypeParameter JCTree$JCWildcard
+            JCTree$TypeBoundKind JCTree$JCAnnotation JCTree$JCModifiers JCTree$JCAnnotatedType
+            JCTree$JCModuleDecl JCTree$JCExports JCTree$JCOpens JCTree$JCProvides JCTree$JCRequires
+            JCTree$JCUses JCTree$JCErroneous]
+           [com.sun.tools.javac.tree DocCommentTable]
+           [com.sun.tools.javac.parser Tokens$Comment]
+           [java.io File]))
+
+(set! *warn-on-reflection* true)
+
+(defn- jlist [xs] (when xs (vec xs)))
+
+(defn- nm [x] (when x (str x)))
+
+(defn- kw [x] (when x (keyword (.name ^Enum x))))
+
+(declare data)
+
+(defn- trees [ctx xs] (when xs (mapv #(data ctx %) xs)))
+
+(defn- fields
+  "The fields of javac's tree t as data, under javac's names."
+  [ctx ^JCTree t tg]
+  (case tg
+    :TOPLEVEL {:defs (trees ctx (.-defs ^JCTree$JCCompilationUnit t))}
+    :PACKAGEDEF (let [^JCTree$JCPackageDecl t t] {:annotations (trees ctx (.-annotations t)) :pid (data ctx (.-pid t))})
+    :IMPORT (let [^JCTree$JCImport t t] {:staticImport (.-staticImport t) :qualid (data ctx (.-qualid t))})
+    :MODULEIMPORT {:module (data ctx (.-module ^JCTree$JCModuleImport t))}
+    :CLASSDEF (let [^JCTree$JCClassDecl t t]
+                {:mods (data ctx (.-mods t)) :name (nm (.-name t)) :typarams (trees ctx (.-typarams t))
+                 :extending (data ctx (.-extending t)) :implementing (trees ctx (.-implementing t))
+                 :permitting (trees ctx (.-permitting t)) :defs (trees ctx (.-defs t))})
+    :METHODDEF (let [^JCTree$JCMethodDecl t t]
+                 {:mods (data ctx (.-mods t)) :name (nm (.-name t)) :restype (data ctx (.-restype t))
+                  :typarams (trees ctx (.-typarams t)) :recvparam (data ctx (.-recvparam t))
+                  :params (trees ctx (.-params t)) :thrown (trees ctx (.-thrown t))
+                  :body (data ctx (.-body t)) :defaultValue (data ctx (.-defaultValue t))})
+    :VARDEF (let [^JCTree$JCVariableDecl t t]
+              {:mods (data ctx (.-mods t)) :name (nm (.-name t)) :nameexpr (data ctx (.-nameexpr t))
+               :vartype (data ctx (.-vartype t)) :init (data ctx (.-init t)) :declKind (kw (.-declKind t))
+               :typePos (long (.-typePos t))})
+    :SKIP {}
+    :BLOCK (let [^JCTree$JCBlock t t] {:flags (.-flags t) :stats (trees ctx (.-stats t)) :bracePos (long (.-bracePos t))})
+    :DOLOOP (let [^JCTree$JCDoWhileLoop t t] {:body (data ctx (.-body t)) :cond (data ctx (.-cond t))})
+    :WHILELOOP (let [^JCTree$JCWhileLoop t t] {:cond (data ctx (.-cond t)) :body (data ctx (.-body t))})
+    :FORLOOP (let [^JCTree$JCForLoop t t]
+               {:init (trees ctx (.-init t)) :cond (data ctx (.-cond t)) :step (trees ctx (.-step t)) :body (data ctx (.-body t))})
+    :FOREACHLOOP (let [^JCTree$JCEnhancedForLoop t t]
+                   {:var (data ctx (.-var t)) :expr (data ctx (.-expr t)) :body (data ctx (.-body t))})
+    :LABELLED (let [^JCTree$JCLabeledStatement t t] {:label (nm (.-label t)) :body (data ctx (.-body t))})
+    :SWITCH (let [^JCTree$JCSwitch t t] {:selector (data ctx (.-selector t)) :cases (trees ctx (.-cases t)) :bracePos (long (.-bracePos t))})
+    :CASE (let [^JCTree$JCCase t t]
+            {:caseKind (kw (.-caseKind t)) :labels (trees ctx (.-labels t)) :guard (data ctx (.-guard t))
+             :stats (trees ctx (.-stats t)) :body (data ctx (.-body t))})
+    :SWITCH_EXPRESSION (let [^JCTree$JCSwitchExpression t t]
+                         {:selector (data ctx (.-selector t)) :cases (trees ctx (.-cases t)) :bracePos (long (.-bracePos t))})
+    :SYNCHRONIZED (let [^JCTree$JCSynchronized t t] {:lock (data ctx (.-lock t)) :body (data ctx (.-body t))})
+    :TRY (let [^JCTree$JCTry t t]
+           {:resources (trees ctx (.-resources t)) :body (data ctx (.-body t)) :catchers (trees ctx (.-catchers t))
+            :finalizer (data ctx (.-finalizer t))})
+    :CATCH (let [^JCTree$JCCatch t t] {:param (data ctx (.-param t)) :body (data ctx (.-body t))})
+    :CONDEXPR (let [^JCTree$JCConditional t t]
+                {:cond (data ctx (.-cond t)) :truepart (data ctx (.-truepart t)) :falsepart (data ctx (.-falsepart t))})
+    :IF (let [^JCTree$JCIf t t] {:cond (data ctx (.-cond t)) :thenpart (data ctx (.-thenpart t)) :elsepart (data ctx (.-elsepart t))})
+    :EXEC {:expr (data ctx (.-expr ^JCTree$JCExpressionStatement t))}
+    :BREAK {:label (nm (.-label ^JCTree$JCBreak t))}
+    :YIELD {:value (data ctx (.-value ^JCTree$JCYield t))}
+    :CONTINUE {:label (nm (.-label ^JCTree$JCContinue t))}
+    :RETURN {:expr (data ctx (.-expr ^JCTree$JCReturn t))}
+    :THROW {:expr (data ctx (.-expr ^JCTree$JCThrow t))}
+    :ASSERT (let [^JCTree$JCAssert t t] {:cond (data ctx (.-cond t)) :detail (data ctx (.-detail t))})
+    :APPLY (let [^JCTree$JCMethodInvocation t t]
+             {:typeargs (trees ctx (.-typeargs t)) :meth (data ctx (.-meth t)) :args (trees ctx (.-args t))})
+    :NEWCLASS (let [^JCTree$JCNewClass t t]
+                {:encl (data ctx (.-encl t)) :typeargs (trees ctx (.-typeargs t)) :clazz (data ctx (.-clazz t))
+                 :args (trees ctx (.-args t)) :def (data ctx (.-def t))})
+    :NEWARRAY (let [^JCTree$JCNewArray t t]
+                {:elemtype (data ctx (.-elemtype t)) :dims (trees ctx (.-dims t)) :annotations (trees ctx (.-annotations t))
+                 :dimAnnotations (when-let [ds (.-dimAnnotations t)] (mapv #(trees ctx %) ds))
+                 :elems (trees ctx (.-elems t))})
+    :LAMBDA (let [^JCTree$JCLambda t t] {:paramKind (kw (.-paramKind t)) :params (trees ctx (.-params t)) :body (data ctx (.-body t))})
+    :PARENS {:expr (data ctx (.-expr ^JCTree$JCParens t))}
+    :ASSIGN (let [^JCTree$JCAssign t t] {:lhs (data ctx (.-lhs t)) :rhs (data ctx (.-rhs t))})
+    :TYPECAST (let [^JCTree$JCTypeCast t t] {:clazz (data ctx (.-clazz t)) :expr (data ctx (.-expr t))})
+    :TYPETEST (let [^JCTree$JCInstanceOf t t] {:expr (data ctx (.-expr t)) :pattern (data ctx (.-pattern t))})
+    (:ANYPATTERN :DEFAULTCASELABEL) {}
+    :BINDINGPATTERN {:var (data ctx (.-var ^JCTree$JCBindingPattern t))}
+    :CONSTANTCASELABEL {:expr (data ctx (.-expr ^JCTree$JCConstantCaseLabel t))}
+    :PATTERNCASELABEL {:pat (data ctx (.-pat ^JCTree$JCPatternCaseLabel t))}
+    :RECORDPATTERN (let [^JCTree$JCRecordPattern t t] {:deconstructor (data ctx (.-deconstructor t)) :nested (trees ctx (.-nested t))})
+    :INDEXED (let [^JCTree$JCArrayAccess t t] {:indexed (data ctx (.-indexed t)) :index (data ctx (.-index t))})
+    :SELECT (let [^JCTree$JCFieldAccess t t] {:selected (data ctx (.-selected t)) :name (nm (.-name t))})
+    :REFERENCE (let [^JCTree$JCMemberReference t t]
+                 {:mode (kw (.-mode t)) :name (nm (.-name t)) :expr (data ctx (.-expr t)) :typeargs (trees ctx (.-typeargs t))})
+    :IDENT {:name (nm (.-name ^JCTree$JCIdent t))}
+    :LITERAL (let [^JCTree$JCLiteral t t
+                   tt (kw (.-typetag t))]
+               {:typetag tt :value (parse/literal-value tt (.-value t))})
+    :TYPEIDENT {:typetag (kw (.-typetag ^JCTree$JCPrimitiveTypeTree t))}
+    :TYPEARRAY {:elemtype (data ctx (.-elemtype ^JCTree$JCArrayTypeTree t))}
+    :TYPEAPPLY (let [^JCTree$JCTypeApply t t] {:clazz (data ctx (.-clazz t)) :arguments (trees ctx (.-arguments t))})
+    :TYPEUNION {:alternatives (trees ctx (.-alternatives ^JCTree$JCTypeUnion t))}
+    :TYPEINTERSECTION {:bounds (trees ctx (.-bounds ^JCTree$JCTypeIntersection t))}
+    :TYPEPARAMETER (let [^JCTree$JCTypeParameter t t]
+                     {:name (nm (.-name t)) :bounds (trees ctx (.-bounds t)) :annotations (trees ctx (.-annotations t))})
+    :WILDCARD (let [^JCTree$JCWildcard t t] {:kind (data ctx (.-kind t)) :inner (data ctx (.-inner t))})
+    :TYPEBOUNDKIND {:kind (kw (.-kind ^JCTree$TypeBoundKind t))}
+    (:ANNOTATION :TYPE_ANNOTATION) (let [^JCTree$JCAnnotation t t]
+                                     {:annotationType (data ctx (.-annotationType t)) :args (trees ctx (.-args t))})
+    :MODIFIERS (let [^JCTree$JCModifiers t t] {:flags (.-flags t) :annotations (trees ctx (.-annotations t))})
+    :ANNOTATED_TYPE (let [^JCTree$JCAnnotatedType t t]
+                      {:annotations (trees ctx (.-annotations t)) :underlyingType (data ctx (.-underlyingType t))})
+    :MODULEDEF (let [^JCTree$JCModuleDecl t t]
+                 {:mods (data ctx (.-mods t)) :kind (kw (.getModuleType t)) :qualId (data ctx (.-qualId t))
+                  :directives (trees ctx (.-directives t))})
+    :EXPORTS (let [^JCTree$JCExports t t] {:qualid (data ctx (.-qualid t)) :moduleNames (trees ctx (.-moduleNames t))})
+    :OPENS (let [^JCTree$JCOpens t t] {:qualid (data ctx (.-qualid t)) :moduleNames (trees ctx (.-moduleNames t))})
+    :PROVIDES (let [^JCTree$JCProvides t t] {:serviceName (data ctx (.-serviceName t)) :implNames (trees ctx (.-implNames t))})
+    :REQUIRES (let [^JCTree$JCRequires t t]
+                {:isTransitive (.-isTransitive t) :isStaticPhase (.-isStaticPhase t) :moduleName (data ctx (.-moduleName t))})
+    :USES {:qualid (data ctx (.-qualid ^JCTree$JCUses t))}
+    :ERRONEOUS {:errs (trees ctx (.-errs ^JCTree$JCErroneous t))}
+    (cond
+      (instance? JCTree$JCAssignOp t) (let [^JCTree$JCAssignOp t t] {:lhs (data ctx (.-lhs t)) :rhs (data ctx (.-rhs t))})
+      (instance? JCTree$JCBinary t) (let [^JCTree$JCBinary t t] {:lhs (data ctx (.-lhs t)) :rhs (data ctx (.-rhs t))})
+      (instance? JCTree$JCUnary t) {:arg (data ctx (.-arg ^JCTree$JCUnary t))}
+      :else (throw (ex-info (str "repr/java jtree: no fields for " tg) {:tag tg})))))
+
+(defn- data
+  "javac's tree t as data (arbace.repr.java.parse's form); ctx [EndPosTable DocCommentTable]."
+  [ctx ^JCTree t]
+  (when t
+    (let [[^EndPosTable ends ^DocCommentTable docs] ctx
+          tg (keyword (str (.getTag t)))
+          m (merge {:tag tg :pos (long (.-pos t)) :endpos (long (.getEndPos ends t))
+                    :start (long (TreeInfo/getStartPos t)) :end (long (TreeInfo/getEndPos t ends))}
+                   (fields ctx t tg))]
+      (if-let [^Tokens$Comment c (when docs (.getComment docs t))]
+        (let [dp (.getPos c)]
+          (assoc m :doc [(keyword (str (.getStyle c))) (long (.getStartPosition dp)) (long (.getEndPosition dp nil))]))
+        m))))
+
+(defn unit-data
+  "Compilation unit cu (parsed by javac) as data."
+  [^JCTree$JCCompilationUnit cu]
+  (data [(.-endPositions cu) (.-docComments cu)] cu))
+
+;; ---------------------------------------------------------------------------------------------
+;; The check
+
+(defn- first-difference
+  "The first line where texts a and b differ: [line-number a-line b-line]."
+  [^String a ^String b]
+  (let [as (str/split-lines a) bs (str/split-lines b)]
+    (loop [i 0 [x & xs] as [y & ys] bs]
+      (if (and (nil? x) (nil? y))
+        nil
+        (if (= x y) (recur (inc i) xs ys) [(inc i) (or x "") (or y "")])))))
+
+(defn- count-lines ^long [^String s]
+  (loop [i 0 k 0] (let [j (.indexOf s "\n" (int i))] (if (neg? j) k (recur (inc j) (inc k))))))
+
+(defn- check-chunk
+  "Parse `files` with javac on Arbace and natively; a result per file."
+  [root out files]
+  (let [t0 (System/nanoTime)
+        {:keys [units errors]} (javac/parse-only files ["--enable-preview" "-source" "26"])
+        t1 (System/nanoTime)
+        native-ns (volatile! 0)
+        chars (volatile! 0)]
+    (let [results
+          (vec (for [^JCTree$JCCompilationUnit cu units
+                     :let [path (.getCanonicalPath (io/file (.getName (.getSourceFile cu))))
+                           rel (if (str/starts-with? path (str root "/")) (subs path (inc (count root))) path)
+                           ^String text (javac/source-text cu)
+                           _ (vswap! chars + (.length text))
+                           jdump (parse/dump (unit-data cu))
+                           s (System/nanoTime)
+                           tree (try (parse/parse text rel)
+                                     (catch Throwable e (str "native parser failed: " e)))
+                           _ (vswap! native-ns + (- (System/nanoTime) s))
+                           ndump (if (string? tree) tree (parse/dump tree))]]
+                 (if (= jdump ndump)
+                   {:file rel :result :equal :lines (count-lines jdump)}
+                   (let [d (io/file out "diff" rel)]
+                     (io/make-parents d)
+                     (spit (str d ".javac") jdump)
+                     (spit (str d ".native") ndump)
+                     {:file rel :result (if (str/starts-with? ndump "native parser failed") :native-error :differ)
+                      :first (first-difference jdump ndump)}))))]
+      {:results results
+       :errors errors
+       :javac-ns (- t1 t0)
+       :native-ns @native-ns
+       :chars @chars})))
+
+(defn- chunks [files n]
+  (vec (partition-all n files)))
+
+(defn check
+  "Every .java file under ROOT (or the PATHs below it) parsed by javac on Arbace and natively,
+  the trees compared (the namespace's docstring)."
+  [out root paths]
+  (let [root (.getCanonicalPath (io/file root))
+        files (sort (for [p (if (seq paths) (map #(if (.isAbsolute (io/file %)) % (str root "/" %)) paths) [root])
+                          ^File f (file-seq (io/file p))
+                          :when (and (.isFile f) (str/ends-with? (.getName f) ".java"))]
+                      (.getCanonicalPath f)))
+        t0 (System/nanoTime)
+        n (Integer/parseInt (or (System/getenv "REPR_JAVA_CHUNK") "50"))
+        pool (java.util.concurrent.Executors/newFixedThreadPool
+              (Integer/parseInt (or (System/getenv "REPR_JAVA_THREADS") "4")))
+        futures (mapv (fn [fs] (.submit pool ^java.util.concurrent.Callable
+                                        (fn [] (try (check-chunk root out fs)
+                                                    (catch Throwable e
+                                                      {:results (mapv (fn [f] {:file f :result :javac-error :error (str e)}) fs)})))))
+                      (chunks files n))
+        rs (mapv deref futures)
+        _ (.shutdown pool)
+        results (vec (mapcat :results rs))
+        by (frequencies (map :result results))
+        report {:root root
+                :files (count files)
+                :parsed (count results)
+                :equal (get by :equal 0)
+                :differ (get by :differ 0)
+                :native-error (get by :native-error 0)
+                :javac-error (+ (get by :javac-error 0) (- (count files) (count results)))
+                :javac-errors (vec (mapcat :errors rs))
+                :nodes (reduce + (keep :lines results))
+                :chars (reduce + (keep :chars rs))
+                :javac-parse-s (/ (Math/round (/ (reduce + (keep :javac-ns rs)) 1e7)) 100.0)
+                :native-parse-s (/ (Math/round (/ (reduce + (keep :native-ns rs)) 1e7)) 100.0)
+                :wall-s (/ (Math/round (/ (- (System/nanoTime) t0) 1e7)) 100.0)}]
+    (io/make-parents (io/file out "report.edn"))
+    (spit (io/file out "report.edn") (with-out-str (pp/pprint report)))
+    (spit (io/file out "files.tsv")
+          (apply str (for [r (sort-by :file results)]
+                       (str (:file r) "\t" (name (:result r))
+                            (when-let [[l a b] (:first r)] (str "\t" l "\t" (str/trim a) "\t" (str/trim b)))
+                            "\n"))))
+    (println (str (:files report) " files, " (:equal report) " equal, " (:differ report) " differ, "
+                  (:native-error report) " native errors, " (:javac-error report) " javac errors"
+                  " (javac " (:javac-parse-s report) " s, native " (:native-parse-s report) " s, wall "
+                  (:wall-s report) " s)"))
+    report))
+
+(defn -main [cmd & args]
+  (case cmd
+    "check" (let [[out root & paths] args
+                  r (check out root paths)]
+              (shutdown-agents)
+              (System/exit (if (= (:equal r) (:files r)) 0 1)))
+    "time" (let [files (parse/java-files args)
+                 t0 (System/nanoTime)
+                 units (vec (mapcat #(:units (javac/parse-only % ["--enable-preview" "-source" "26"]))
+                                    (partition-all 200 files)))
+                 t1 (System/nanoTime)
+                 texts (mapv #(javac/source-text %) units)
+                 t2 (System/nanoTime)
+                 _ (doseq [[f t] (map vector files texts)] (parse/parse t f))
+                 t3 (System/nanoTime)
+                 r2 (fn [x] (/ (Math/round (* x 100.0)) 100.0))]
+             (prn {:files (count files) :chars (reduce + (map count texts))
+                   :javac-s (r2 (/ (- t1 t0) 1e9)) :native-s (r2 (/ (- t3 t2) 1e9))})
+             (shutdown-agents))
+    "dump" (do (doseq [f args
+                       :let [{:keys [units]} (javac/parse-only [f] ["--enable-preview" "-source" "26"])]]
+                 (println "==" f)
+                 (doseq [cu units] (print (parse/dump (unit-data cu)))))
+               (flush)
+               (shutdown-agents))))
