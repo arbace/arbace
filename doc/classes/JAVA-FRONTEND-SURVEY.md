@@ -3063,7 +3063,7 @@ seed's); j2g for the tool ran on it (the worktree held no program built from the
 |---|---:|---|
 | `arbace/repr/java/lex.ae` | 533 | `parser/UnicodeReader.java` (the escapes, decoded once into the characters and a map to the text's offsets), `JavaTokenizer.java` (`readToken` and its scanners, by code point), `JavadocTokenizer.java` and `BasicComment` (the comments, `isDeprecated`'s scan of a doc comment), `Tokens.java` (the kinds, `docComment`, `deprecatedFlag`, `split`) |
 | `arbace/repr/java/parse.ae` | 2,881 | `parser/JavacParser.java` (every method `parseCompilationUnit` reaches, error recovery and `VirtualParser`'s speculation included), its `SimpleEndPosTable` and `MinimalEndPosTable`, `tree/TreeMaker.java` (its factories and their `pos`), `tree/TreeInfo.java` (`getStartPos`, `getEndPos` and the helpers the parser calls) |
-| `arbace/repr/java/jtree.ae` | 356 | (javac's side) javac's trees as the same data; the check; the mutants |
+| `arbace/repr/java/jtree.ae` | 354 | (javac's side) javac's trees as the same data; the check; the mutants |
 
 §4 (a) estimated the parser at 3,000 to 5,000 lines of Arbace: the lexer and the parser are 3,414.
 Both carry the notice of the files they port (LICENSE.md's jdk26u list, doc/ARBACE.md).
@@ -3083,7 +3083,7 @@ javac's names (names as strings, flags as longs, enums as keywords, a literal's 
 `literal-value` gives it: floats by their bits). `parse/dump` prints a tree one node per line: the
 form the check compares.
 
-javac's behaviour the port reproduces where it shapes trees, each found by the check (JN8.4):
+javac's behaviour the port reproduces where it shapes trees, the first five found by the check (JN8.4):
 - the lexer's `tk` survives from one token to the next, and a character literal's error recovery
   reads it: after `'''` the next character literal swallows the text to the next quote;
 - a non-ASCII digit is replaced by its ASCII digit in a number's text, a surrogate pair's code point
@@ -3203,7 +3203,10 @@ No re-seed (batched).
   edge on the frozen jar: 223 classes beyond `jdk/edge.edn`'s, 129 s): only the three provenance
   files' `:repr-java` and `:host` changed (the converter's outputs unchanged)
 - `make check-makefile`: passes
-- `bin/gate` (essential) at the branch's head: GATERESULT
+- `bin/gate` (essential): on the branch at `fdfb0fd5` (this section's commit but this list), passes
+  in 16m41s (go-build 406 s, afresh; go-smoke, suite-go 777 tests with no regression, oracle-go 53
+  known mismatches as recorded, diffcheck 12,743 of 12,766 cases agree with the 23 known, goi-check
+  797 of 797, generated)
 - not run: `bin/gate --full` (the user's rule: at the milestone), `bin/repr-java roundtrip`, `check
   --suite`, `bin/javac-vendor verify` and `classes` (the converter and javac's world are unchanged:
   `javac.ae` only gained `parse-only`, which `read` does not call, and `bin/repr-java` only its two
