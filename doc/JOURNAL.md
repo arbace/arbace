@@ -1197,3 +1197,32 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   (22m03s). The namespace is embedded: the next re-seed carries it.
 - **Still to run:** the steps the OOM killer stopped and `goi`'s check, on a quieter machine;
   then `--full` again.
+
+## 2026-10-23: JN8 merged; JFS59-JFS66 decided as built; JFS66 (b) next (the user)
+
+- **What:** JN8, the native Java 26 parser (branch `java-frontend-jn8`, `60def626`, `bcbc7a8a`,
+  `7062dc96`, `fdfb0fd5`, `35ef87e6`; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"), merged
+  into main at `737d0dc7` without conflicts.
+- **Built:** `arbace/repr/java/lex.ae` (533 lines) and `parse.ae` (2,881), a method-by-method port of
+  jdk26u's javac `JavacParser`, `JavaTokenizer` and the parts of `TreeInfo` and `TreeMaker` they use
+  (jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259`, `src/jdk.compiler/share/classes/com/sun/tools/javac/parser/`
+  and `tree/`; Oracle's GPLv2 with the Classpath Exception, LICENSE.md, doc/ARBACE.md); the trees as
+  maps with javac's tags, positions, end positions and fields; `arbace/repr/java/jtree.ae` (javac on
+  Arbace's trees as the same data, the comparison, seeded mutants); `javac.ae`'s `parse-only`;
+  `bin/repr-java parse`, `parse-check` (`test/repr/java/parse-check-known.edn`, empty); `parse-check`
+  in `bin/gate --full`'s java chain.
+- **Results:** equal trees, positions included: samples 14, baseline 183, jdk 838, javac's sources
+  824, jdk26u's 68 modules 12,809, 8,000 mutants (66,598 javac errors), jdk26u's tests 37,797; six
+  error-recovery behaviours fixed on the way. 199 s for the whole check. The parser compiled in the
+  tool about 9 times javac on Arbace's time (java.base 50.5 s against 5.6 s), 17% of it in j2g's
+  checked array casts.
+- **Checks:** `parse-check` over all corpora, `bin/repr-java check`, the three updates (forms byte for
+  byte, only the provenance's `:repr-java` and `:host` moved), `make check-makefile`; the branch's
+  essential gate (16m41s); on main at `737d0dc7` the essential gate passed (14m11s).
+- **The shipped program:** no code; `jdk/provenance.edn`'s `:repr-java` moves the runtime key (the
+  version map). Batched into the next re-seed.
+- **Slips** (the agent's): one `> /dev/null 2>&1` in a profiling command; two reports to /tmp before
+  TMPDIR, deleted.
+- **Decided (the user):** JFS59-JFS66 as built; over embedding the parser now, a smaller `--full`,
+  JN9 straight away or stopping after JN8. Next on Java: JFS66 (b), over j2g's array casts and
+  holding until `--full`.

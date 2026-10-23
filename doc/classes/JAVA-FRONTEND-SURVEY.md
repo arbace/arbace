@@ -3292,3 +3292,17 @@ first (JFS66).
   tool builds' logs `tool-build-{1,2,3}.log`; `devtool/`, a copy of main's tool for the first,
   evaluated, runs), `repr-java-parse-check/` (the corpora's reports, the jdk originals, javac's
   sources, the mutants), `repr-java-check/`, `jrt/`, `javac-vendor/`, `clojure-tests/`.
+
+## Decided (2026-10-23): JFS59-JFS66
+
+The user decided JFS59-JFS66 as built:
+- JFS59 (a): the parser evaluated on the tools' host and compiled in javac's tool; (b), embedded
+  in the shipped program, when a consumer outside the tool needs its speed.
+- JFS60 (a): `bin/repr-java parse-check` in `bin/gate --full`'s java chain.
+- JFS61 (b): jdk26u's tests in the default corpora.
+- JFS62 (a): one fixed set of mutants (seed 26), the seed changed by hand with the parser.
+- JFS63 (a): doc comments' style and positions, not their text.
+- JFS64 (a): Java 26 with preview, fixed.
+- JFS65 (a) for JN8; (b), j2g's checked array casts as a type switch, a j2g task of its own.
+- JFS66 (b): next, the converter's interface (JFS7 (b)) tried on the native trees for its
+  syntax-only facts, javac on Arbace answering the attribution by position, measured before JN9.

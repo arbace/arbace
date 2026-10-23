@@ -156,8 +156,10 @@ The current state of the work. This file is rewritten as things change. For the 
     by compileproperties and propertiesparser on the tool, 20 of 20 the build tree's, no JVM;
     `FlagsEnum` still copied; JFS51-JFS54 decided as built); JFS52 (b) done (2026-10-22: `FlagsEnum` by flagsgenerator on the
     tool through javax.tools' API on javac on Arbace, no generated source copied; JFS55-JFS58 decided,
-    JFS58 (a) done: `jdk/edge.edn` re-recorded, stale since GP7); running: JN8, the native parser
-    (`java-frontend-jn8`). The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
+    JFS58 (a) done: `jdk/edge.edn` re-recorded, stale since GP7); JN8 done (2026-10-23: the native Java 26
+    parser, javac's trees with positions for 52,465 files and 8,000 mutants, none known;
+    `bin/repr-java parse-check` in `--full`; JFS59-JFS66 decided as built); running: JFS66 (b), the
+    converter on the native trees, measured (`java-frontend-jfs66`). The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);
