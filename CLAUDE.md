@@ -256,7 +256,8 @@ Prior art:
   `bin/box-mac-bundle` packs the Mac's launcher, guest and checklist (`box/mac/`). `bin/box-rebuild`
   rebuilds Arbace's guest inside the box (S8); `bin/box-convert` converts `tamago/goroot` inside it
   (GP8: repr/go's native reader in spawned guests, `arbace.box.convert`'s assembling and merging,
-  also `bin/tamago-vendor`'s), byte for byte the committed forms. The store (S3):
+  also `bin/tamago-vendor`'s), byte for byte the committed forms (on amd64; in the emulated arm64
+  VM a part of std, `--packages`, file for file against a whole run). The store (S3):
   blobs and refs in a host directory (`ARBACE_BOX_STORE`, `arbace-box --store DIR`, which is also
   its tool), the namespace `arbace.box` over it in the box and natively.
 - `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env

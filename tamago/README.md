@@ -44,7 +44,8 @@ arm64.
 `bin/box-convert` puts GOROOT/src's text in a store, repr/go's native reader converts std for both
 architectures in spawned guests of Arbace's image, and `arbace.box.convert` assembles and merges
 the two (the same steps `bin/tamago-vendor convert` runs on the host since GP8); the tree it gives
-is this one, byte for byte, on amd64 and in the emulated arm64 VM.
+is this one, byte for byte, on amd64 (in the emulated arm64 VM, where all of std takes too
+long, a part of it, file for file against the amd64 box's whole conversion).
 
 Licence: Go's BSD 3-Clause License (std, "The Go Authors") and the BSD 3-Clause License of The
 TamaGo Authors (the module), [LICENSE.md](../LICENSE.md); the files keep their notices as `;;`
