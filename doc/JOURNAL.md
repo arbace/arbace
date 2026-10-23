@@ -1253,3 +1253,34 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - **Decided (the user):** JFS67 (a), JFS68 (a), JFS69 (b) (JN9 by tiers, JN9a first; over stopping and
   the whole JN9 at once), JFS70 (b) with `tree.ae`'s notice, JFS71 within JN9a. JFS70 first (both
   touch repr/java), on the branch `java-frontend-jfs70` from main.
+
+## 2026-10-23: JFS70 (b) merged; JFS72 (b) decided; JN9a after all settles (the user)
+
+- **What:** `resolve.ae`'s param-tags pins made independent of the javac run's history (branch
+  `java-frontend-jfs70`, `af0237e3`, `3150a539`, `01cb107e`, `aeb4ed47`, `ff7a68ba`, `5343df47`;
+  doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JFS70"), merged into main at the merge after
+  `ba707b05`.
+- **Cause:** `(first (Symtab/getClassesForName n))` and a by-name registry for the whole run. javac's
+  `ClassReader.readInnerClasses` enters a nested class's symbol for each other module whose class
+  file names it; those have no class file, fail to complete and stay erroneous (no superclass, no
+  members), and `getClassesForName` returns them in a HashMap order of module identity hashes. An
+  info made from one made an enum constant no `Enum`, so the converter pinned javac's choice.
+- **Fix:** `canonical` (the run's source class by `Check.getCompiled`, a local or anonymous class, else
+  `Symtab.getClass` in its package's module); `find-class` (the run's source class in the caller's
+  module first, else the symbols their modules own, the caller's module first); `class-info` only from
+  a symbol that completes, cached per symbol; the registry removed. A first version that asked Symtab
+  first pinned 7 files of `jdk/forms` (local classes of the patched java.base), fixed before the updates.
+- **Results:** two fresh runs agree over all 68 modules; jdk.javadoc with 1, 4 and 12 chunks the same;
+  `front-check-known.edn` `{}`. No committed form changed (the three updates byte for byte, only the
+  provenance's `:repr-java` and `:host`); in jdk26u (not committed) about 10 wrong pins gone,
+  6 of which front-check could not see (both conversions alike): hence JFS72.
+- **tree.ae:** jdk26u's notice for `skip-parens`, `tree-name`, `full-name`, `diamond?`, `class-kind`
+  (`TreeInfo.java`'s `skipParens`, `name`, `fullName`, `isDiamond`; `JCTree.java`'s
+  `JCClassDecl.getKind`, at `baf63fbe42b8758448fee570a9d9bb914272d259`,
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/tree/`); LICENSE.md, doc/ARBACE.md.
+- **Checks:** `check --jdk` (68 modules, 0 with failures), `front-check --corpus all`, `repr-java check`,
+  `parse-check`; the branch's essential gate (17m59s); on main the essential gate passed (13m31s).
+- **Slip** (the agent's): `cmp` against a process substitution (`/dev/fd/63`), then temp files.
+- **Decided (the user):** JFS72 (b), jdk26u's forms as hashes compared by `check --jdk`, over a
+  two-run comparison and neither; JN9a (with JFS71, JFS72) after GP8, `--full` and the re-seed have
+  settled, over starting now.

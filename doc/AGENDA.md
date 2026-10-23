@@ -161,8 +161,9 @@ The current state of the work. This file is rewritten as things change. For the 
     `bin/repr-java parse-check` in `--full`; JFS59-JFS66 decided as built); JFS66 (b) done (2026-10-23: the
     converter on an interface over the tree and attribution by position, the native trees giving the
     same forms but 3 known files; the split: 69% of lists need at most types, 98% overload; JN9
-    re-estimated 19-34 days; JFS67-JFS71 decided); running: JFS70, the pins fixed, and `tree.ae`'s
-    notice (`java-frontend-jfs70`); then JN9a, scope and declarations. The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
+    re-estimated 19-34 days; JFS67-JFS71 decided); JFS70 (b) done (2026-10-23: `resolve.ae`'s pins
+    independent of the javac run's history, the known list empty, no committed form changed; `tree.ae`'s
+    notice; JFS72 (b) decided); next, after GP8, `--full` and the re-seed: JN9a with JFS71 and JFS72. The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

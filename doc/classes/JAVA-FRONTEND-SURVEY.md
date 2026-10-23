@@ -3785,3 +3785,9 @@ the version map the executable carries changes, as at JFS66 (b). No re-seed.
   base and the fixed tool, `repro/dbg/` the instrumented runs, `dbg2/`, the updates' and checks'
   logs, `arbace-javac.base`, the base tool), `repr-java-front-check/`, `repr-java-jdk/`,
   `repr-java-check/`, `repr-java-parse-check/`, `jrt/`, `javac-vendor/`, `clojure-tests/`.
+
+## Decided (2026-10-23): JFS72
+
+The user decided JFS72 (b): jdk26u's forms recorded as hashes (`test/repr/java/expected/jdk26u.sha256`),
+`bin/repr-java check --jdk` comparing against them; built with JN9a, which starts after GP8, `bin/gate
+--full` and the re-seed have settled (the user).
