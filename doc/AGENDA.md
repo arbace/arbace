@@ -132,7 +132,9 @@ The current state of the work. This file is rewritten as things change. For the 
     built); GP7 done (2026-10-22: the native reader compiled, go/parser's
     four packages, the dumper, gc's syntax driver and a renamed copy of syntax in goi's table; std
     parsed in 0.5 s, the executable +1.06 MB; GPS45-GPS49 decided as built); the seed remade after GP6, JN7,
-    JFS48 (b) and GP7 (`d7303cf8…`) and verified; running: GP8, the box reads Go (`go-parser-gp8`); `bin/gate --full` on main alongside (2026-10-23).
+    JFS48 (b) and GP7 (`d7303cf8…`) and verified; GP8 done (2026-10-23: the box converts `tamago/goroot`
+    byte for byte on amd64, 167 s, a part of std in the emulated arm64 VM; GPS50-GPS56 decided as
+    built): the Go parser plan GP1-GP8 complete. `bin/gate --full` on main: see the Java line.
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the
@@ -163,7 +165,9 @@ The current state of the work. This file is rewritten as things change. For the 
     same forms but 3 known files; the split: 69% of lists need at most types, 98% overload; JN9
     re-estimated 19-34 days; JFS67-JFS71 decided); JFS70 (b) done (2026-10-23: `resolve.ae`'s pins
     independent of the javac run's history, the known list empty, no committed form changed; `tree.ae`'s
-    notice; JFS72 (b) decided); next, after GP8, `--full` and the re-seed: JN9a with JFS71 and JFS72. The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
+    notice; JFS72 (b) decided); `bin/gate --full` at `a1be9220` failed: the edge stale again (GP8, fixed), `nosplit.go`'s timeout, and
+    mode `:full` dropping members (`ResourceBundle`; being fixed); then the re-seed. JN9a (with JFS71,
+    JFS72) waits for the user (2026-10-23: "do not start JN9a yet"). The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

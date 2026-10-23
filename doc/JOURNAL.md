@@ -1284,3 +1284,40 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - **Decided (the user):** JFS72 (b), jdk26u's forms as hashes compared by `check --jdk`, over a
   two-run comparison and neither; JN9a (with JFS71, JFS72) after GP8, `--full` and the re-seed have
   settled, over starting now.
+
+## 2026-10-23: GP8 merged; GPS50-GPS56 decided as built; bin/gate --full at a1be9220 (the user)
+
+- **What:** GP8, the box reads Go (branch `go-parser-gp8`, `5c86ea8d`, `5a0b7e16`, `45bab282`,
+  `09fd87d0`, `3d58e820`, `7eb397b3`; doc/go/GO-PARSER-SURVEY.md, "As built: GP8"), merged into main
+  at `a1be9220` without conflicts: the Go parser plan's last milestone.
+- **Built:** `arbace/box/convert.ae` (`arbace.box.convert`, embedded): GOROOT/src's digest checked in
+  the box against `bin/tamago-vendor`'s pin, two guests reading std natively for tamago/amd64 and
+  tamago/arm64 at once, a third assembling and merging (a port of `bin/tamago-vendor`'s three Python
+  programs, which the script now calls too); `bin/box-convert` (`prepare`, `box`, `host`, `compare`;
+  `make box-convert`).
+- **Results:** amd64 from empty stores: 166.7 s and 20.0 GB peak (16 vCPUs a read; the host 154.9 s),
+  the tree `0445b850…`, 2,269 files, equal to the committed `tamago/goroot` and the host's. The emulated
+  arm64 VM: the whole of std impractical (about 180 times the amd64 box, an estimated 17 h or more);
+  eight packages for both configurations (33 files each) equal to the amd64 box's whole run, 12,429 s.
+  `bin/tamago-vendor verify` on the port: byte for byte. The program +778,240 bytes.
+- **Gates:** the branch's essential gate (12m18s); on main at `a1be9220` it passed (12m34s).
+- **Decided (the user):** GPS50-GPS56 as built; over Python kept on the host, the whole tree in the VM
+  and profiling the emulation first. The user: "do not start JN9a yet".
+- **`bin/gate --full` at `a1be9220`** (no agents running) failed in 121m00s. Passed: the essential
+  steps, `go-build-full`, `box-forms`, `box-smoke`, `box-oracle`, `box-suite`, `fixpoint`, `repr-go`,
+  `repr-go-native` (80m23s: every corpus, E-forms), `box-goi`, repr/haskell, repr/rust, repr/clojure,
+  `toolchain`: the forms-check fix holds. Failed:
+  - `j2g-edge` and `javac`'s verify: `jdk/edge.edn`'s `:exists` lacked `java.nio.file.OpenOption`,
+    which GP8's `arbace.box.convert` asks (JFS58 again: an embedded namespace's new JDK class, caught
+    only by `--full`); the four repr/java steps behind them did not run. Fixed as JFS58 (a):
+    `bin/j2g-edge update`, `bin/javac-vendor build`, `convert`, `build`, `verify` (918 files byte for
+    byte), `bin/j2g-edge verify`; the essential gate passed (16m47s). Then the java chain's commands
+    alone: `check --suite` (no regressions), `jrt-convert verify`, `--java-fixtures verify`,
+    `parse-check`, `front-check`: pass; `roundtrip --corpus baseline,samples,jdk --text`: fails (below).
+  - `goi`: `nosplit.go` over the check's 10 s again, the machine running only `--full`.
+  - `roundtrip --text`, jdk's record level: mode `:full`'s forms of `java/util/ResourceBundle.ae`
+    (overlay/jdk/java.base) lack 3 of its 22 members (both `getBundle` and `newBundle`, the static
+    methods), mode `:lines`' have them; the text level passes (mode `:full` keeps the text). A
+    regression of the reader since the references were recorded, first seen now: today's first
+    `--full` did not reach repr/java's steps, and JN8, JFS66 (b) and JFS70 ran no `roundtrip --text`.
+    To be bisected and fixed.

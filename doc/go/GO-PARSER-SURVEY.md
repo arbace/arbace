@@ -2222,3 +2222,15 @@ it is batched into the next one.
     conversion 280), and the idle driver spends 3 cores.
 
   *Recommended: (a)* now, (c) at the next Mac run.
+
+## Decided (2026-10-23): GPS50-GPS56
+
+The user decided GPS50-GPS56 as built:
+- GPS50 (a): the assembling, headers and merge one Arbace port, the box's and `bin/tamago-vendor`'s.
+- GPS51 (a): the box converts `tamago/goroot`; (b), the goos module, and (c), `tamago/cmd` and `box/`,
+  when the box is to vendor a TamaGo release itself.
+- GPS52 (a): the reader's forms check in the box on go/parser's forms mounted from the sources.
+- GPS53 (a): the two reads at once, `--serial` where memory is short.
+- GPS54 (a): a read's guest twice its threads in vCPUs, a spawn budget of 32.
+- GPS55 (a): `arbace.box.convert` embedded and compiled.
+- GPS56 (a) now, a part of std in the emulated VM; (c), the whole tree on the Mac, at its next run.
