@@ -40,6 +40,12 @@ the module's packages likewise, and the box's guest image built from the printed
 byte-identical to the one built from the originals (both without build IDs), each for amd64 and
 arm64.
 
+`goroot/` is also converted inside the box (GP8, doc/go/GO-PARSER-SURVEY.md, "As built: GP8"):
+`bin/box-convert` puts GOROOT/src's text in a store, repr/go's native reader converts std for both
+architectures in spawned guests of Arbace's image, and `arbace.box.convert` assembles and merges
+the two (the same steps `bin/tamago-vendor convert` runs on the host since GP8); the tree it gives
+is this one, byte for byte, on amd64 and in the emulated arm64 VM.
+
 Licence: Go's BSD 3-Clause License (std, "The Go Authors") and the BSD 3-Clause License of The
 TamaGo Authors (the module), [LICENSE.md](../LICENSE.md); the files keep their notices as `;;`
 lines.

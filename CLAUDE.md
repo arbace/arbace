@@ -253,7 +253,10 @@ Prior art:
   guest image and Arbace's launcher `arbace-box` (`--smoke --box`, which runs `bin/box-smoke`;
   `bin/box-suite`; arm64 with `ARBACE_BOX_ARCHES`). `bin/box-arm64-vm` runs an emulated aarch64
   VM with KVM/arm64 for the arm64 box's checks (`check`: its smoke test, `box/`'s KVM tests);
-  `bin/box-mac-bundle` packs the Mac's launcher, guest and checklist (`box/mac/`). The store (S3):
+  `bin/box-mac-bundle` packs the Mac's launcher, guest and checklist (`box/mac/`). `bin/box-rebuild`
+  rebuilds Arbace's guest inside the box (S8); `bin/box-convert` converts `tamago/goroot` inside it
+  (GP8: repr/go's native reader in spawned guests, `arbace.box.convert`'s assembling and merging,
+  also `bin/tamago-vendor`'s), byte for byte the committed forms. The store (S3):
   blobs and refs in a host directory (`ARBACE_BOX_STORE`, `arbace-box --store DIR`, which is also
   its tool), the namespace `arbace.box` over it in the box and natively.
 - `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env
