@@ -3791,3 +3791,49 @@ the version map the executable carries changes, as at JFS66 (b). No re-seed.
 The user decided JFS72 (b): jdk26u's forms recorded as hashes (`test/repr/java/expected/jdk26u.sha256`),
 `bin/repr-java check --jdk` comparing against them; built with JN9a, which starts after GP8, `bin/gate
 --full` and the re-seed have settled (the user).
+
+## Fixed (2026-10-23): mode :full's members
+
+- **What was seen.** `bin/repr-java roundtrip --corpus jdk --text` failed at the record level on
+  `java/util/ResourceBundle.ae`: the forms read in mode `:full` from the corpus's
+  `java/util/ResourceBundle.java`, their record stripped, lacked 3 of the class's 22 members (both
+  `getBundle` overloads and `newBundle`) that `jdk/forms/java/util/ResourceBundle.ae` has. The text
+  level passed.
+- **The cause: not the reader.** The jdk corpus's originals, `bin/jrt-convert`'s sources and generate
+  steps into `.tmp/repr-java-roundtrip/jdk-originals` (`JRT_WORK_RT`), were made once, when the
+  directory was missing, and never again (`jdk_originals` in `bin/lib/repr-java/roundtrip`, since
+  `f8d03c78`, the text level). Main's tree was made on 2026-10-20 at 08:06, before JN2's `f1f7889d`
+  (2026-10-20, 19:25) added `getBundle` and `newBundle` to jrt's own
+  `overlay/jdk/java.base/java/util/ResourceBundle.java`: the text level read the old file in mode
+  `:full`, printed it back byte for byte (text: pass, against the same stale original) and compared
+  its members with the committed forms of the new file (record: fail). Of the corpus's 806 copied
+  originals (not generated) only this one was stale. The reader's recent changes (JN8, JFS66 (b),
+  JFS70 (b)) are not involved: with fresh originals the record level passes, 911 of 911, on main's
+  reader. The same stale original also fed the `:lines` level's class level (`c1`, compiled from
+  the originals) for this file; its result and `jdk-known.edn`'s reason did not change with fresh
+  originals.
+- **The same flaw elsewhere.** `bin/repr-java parse-check` made its own tree of the originals
+  again only when `jdk/sources.txt` changed (an edit to jrt's own Java left it stale), `front-check`
+  read parse-check's tree the same way, and `bin/javac-vendor classes jdk` made its tree once, as the
+  round trip did. And parse-check and front-check run at once both made the shared tree, one
+  removing it under the other (seen here: parse-check's jdk corpus failed so).
+- **The fix.** One helper for the four, `bin/lib/repr-java/originals.bash` (outside javac's tool's
+  key, as `bin/lib/repr-java/`): the originals keyed (`arbace_jdk_originals_key`, written to
+  `originals.key` beside them: the SHA-256 of `bin/jrt-convert`, `test/jrt`,
+  `doc/go/java-surface.edn`, `overlay/jdk/java.base`, jdk26u's checkout, its commit and status, and
+  `JRT_LOCALES`), the tree made again when the key differs, under a lock (`ORIG.lock`, flock). A
+  tree named by `JRT_WORK_RT` is the caller's: made when missing, never removed nor keyed.
+- **The check added.** `arbace_jdk_originals_check`, run whenever the originals are used (the
+  round trip's jdk corpus, parse-check's and front-check's jdk corpus, `javac-vendor classes jdk`):
+  each original that `jdk/sources.txt` lists as copied (share, share:MODULE, unix, overlay; not the
+  generated ones) compared byte for byte with its source, a stale file failing the run by name. On
+  main's stale tree it names `java/util/ResourceBundle.java` and fails.
+
+- **JFS73 the round trip's cached inputs checked.**
+  - Options: (a) as built: the originals keyed and their copied files compared, the generated ones
+    trusted to the key (bin/jrt-convert's generate step compares them with the build tree's
+    `support/gensrc` when it runs); (b) (a) and the generated originals compared with
+    `bin/jrt-convert`'s last work tree (`.tmp/jrt/src`) when one exists; (c) no cache: the
+    originals made on every jdk run (about a minute of the generators on the tool).
+  - *Recommended: (a)*: the copied files are the ones edited by hand (jrt's own Java); the
+    generated ones change only with the inputs the key names.
