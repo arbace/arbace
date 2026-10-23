@@ -296,7 +296,8 @@ Prior art:
   printed back to the original Java, byte for byte; the classes level by javac on Arbace),
   `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte), `bin/clojure-tests
   --java-fixtures verify` (the verifies compare the provenance but its host, which names the tool
-  that wrote it, JFS32); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
+  that wrote it, JFS32), `bin/repr-java parse-check` (the native parser's trees equal to javac on
+  Arbace's, JN8); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and

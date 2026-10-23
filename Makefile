@@ -91,7 +91,7 @@ generated-check: ## the generated files as their generators write them: arbace/l
 	bin/generated-check
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
-VERIFY := jdk-verify edge-verify javac-verify javac-classes repr-java-check fixtures-verify tamago-verify toolchain-verify \
+VERIFY := jdk-verify edge-verify javac-verify javac-classes repr-java-check repr-java-parse-check fixtures-verify tamago-verify toolchain-verify \
   box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip repr-java-text \
   repr-clojure-roundtrip
 verify: $(VERIFY) ## all of the below, one after another
