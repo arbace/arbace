@@ -3555,7 +3555,10 @@ No re-seed (batched).
   equal (200 s)
 - the updates of JFS66 (b).7: only the three provenance files' `:repr-java` and `:host` changed
 - `make check-makefile`: passes
-- `bin/gate` (essential): GATE_RESULT
+- `bin/gate` (essential): on the branch at `432d05a4` (this section's commit but this line), passes in
+  17m37s (go-build 478 s, afresh; go-smoke, suite-go 777 tests with no regression, oracle-go 53 known
+  mismatches as recorded, diffcheck 12,743 of 12,766 cases agree with the 23 known, goi-check 797 of
+  797, generated)
 - not run: `bin/gate --full` (the user's rule: at the milestone), `bin/repr-java roundtrip`, `check
   --suite`, `bin/javac-vendor verify` and `classes` (the converter's outputs and javac's world are
   unchanged: the updates show the forms byte for byte)
