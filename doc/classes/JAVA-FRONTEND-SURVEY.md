@@ -3618,3 +3618,15 @@ No re-seed (batched).
   rewrite as edit scripts, `dbg/` the investigation of JFS66 (b).5, `split-run2.edn`),
   `repr-java-front-check/` (the corpora's outputs, logs, `split.md`, `split.edn`, `static.edn`),
   `repr-java-check/`, `repr-java-parse-check/`, `jrt/`, `javac-vendor/`, `clojure-tests/`.
+
+## Decided (2026-10-23): JFS67-JFS71
+
+The user decided:
+- JFS67 (a): `bin/repr-java front-check`'s default corpora in `bin/gate --full`'s java chain,
+  jdk26u by `--corpus all`.
+- JFS68 (a): javac's trees the converter's default, the native trees by `--front native`.
+- JFS69 (b): JN9 by tiers, each a provider behind `attr` checked fact by fact against javac;
+  first JN9a, scope and declarations from the platform's class files.
+- JFS70 (b): `resolve.ae`'s history-dependent pins fixed as a task of its own, the known list
+  emptied; with it, the notice and LICENSE.md/doc/ARBACE.md entry for `tree.ae`'s TreeInfo helpers.
+- JFS71: the converter's eager queries narrowed within JN9a.

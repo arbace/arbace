@@ -1226,3 +1226,30 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - **Decided (the user):** JFS59-JFS66 as built; over embedding the parser now, a smaller `--full`,
   JN9 straight away or stopping after JN8. Next on Java: JFS66 (b), over j2g's array casts and
   holding until `--full`.
+
+## 2026-10-23: JFS66 (b) merged; JFS67-JFS71 decided (the user); JFS70 started
+
+- **What:** the converter on an interface over the tree and an attribution interface keyed by
+  position (branch `java-frontend-jfs66`, `3a94ee54`, `432d05a4`, `39771c4c`;
+  doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JFS66 (b)"), merged into main at `0f84b77d`.
+- **Built:** `arbace/repr/java/tree.ae` (the syntax over JCTrees or the native trees as data),
+  `attr.ae` (19 attribution functions; for native trees `attr/index` pairs each node with javac's of
+  the same tag and position), `split.ae` (the catalogue of 70 fact sites and the split); `convert.ae`
+  on 575 tree and 159 attribution calls; `read`/`read-jdk --front javac|native|both`, `--split`;
+  `bin/repr-java front-check` (`test/repr/java/front-check-known.edn`), in `--full`'s java chain.
+- **Results:** the native trees with javac's attribution give the current converter's forms: samples
+  17, baseline 189, jdk 911, javac's sources 1,828; jdk26u's 13,788 but 3 files, one param-tags pin
+  each, which javac's own trees differ on across runs (class infos cached while a class is half
+  completed: JFS70); 8,872,827 nodes paired. The split over jdk26u's 2,258,047 lists by the most
+  demanding tier asked: syntax 0.6%, + scope 2.3%, + declarations 15.0%, + members 16.0%, + types
+  68.7%, + overload 98.3%, + inference 100%; statically 79 of `convert.ae`'s 243 forms syntax only.
+  JN9 re-estimated at 19-34 days (§7: 25-45).
+- **Checks:** `front-check --corpus all`, `repr-java check`, `parse-check`, the three updates byte for
+  byte (the provenance's `:repr-java` and `:host` moved); the branch's essential gate (17m37s); on
+  main at `0f84b77d` it passed (13m29s).
+- **The shipped program:** no code; the runtime key moves with `jdk/provenance.edn`. Batched.
+- **Slips** (the agent's): a tool build ran while `convert.ae`, in its key, was being edited (it
+  failed; later runs on settled sources); `/dev/stdin` passed as an input path once.
+- **Decided (the user):** JFS67 (a), JFS68 (a), JFS69 (b) (JN9 by tiers, JN9a first; over stopping and
+  the whole JN9 at once), JFS70 (b) with `tree.ae`'s notice, JFS71 within JN9a. JFS70 first (both
+  touch repr/java), on the branch `java-frontend-jfs70` from main.

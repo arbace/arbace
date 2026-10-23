@@ -158,8 +158,11 @@ The current state of the work. This file is rewritten as things change. For the 
     tool through javax.tools' API on javac on Arbace, no generated source copied; JFS55-JFS58 decided,
     JFS58 (a) done: `jdk/edge.edn` re-recorded, stale since GP7); JN8 done (2026-10-23: the native Java 26
     parser, javac's trees with positions for 52,465 files and 8,000 mutants, none known;
-    `bin/repr-java parse-check` in `--full`; JFS59-JFS66 decided as built); running: JFS66 (b), the
-    converter on the native trees, measured (`java-frontend-jfs66`). The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
+    `bin/repr-java parse-check` in `--full`; JFS59-JFS66 decided as built); JFS66 (b) done (2026-10-23: the
+    converter on an interface over the tree and attribution by position, the native trees giving the
+    same forms but 3 known files; the split: 69% of lists need at most types, 98% overload; JN9
+    re-estimated 19-34 days; JFS67-JFS71 decided); running: JFS70, the pins fixed, and `tree.ae`'s
+    notice (`java-frontend-jfs70`); then JN9a, scope and declarations. The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);
