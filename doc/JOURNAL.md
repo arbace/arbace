@@ -1173,3 +1173,27 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
     since the tag `arbace-interprets-go1.27.1-v1`.
 - JN8 on the branch `java-frontend-jn8`, GP8 on `go-parser-gp8`, both from main after this entry, in
   `.tmp/worktrees/`; nothing is merged into main while its `--full` runs.
+
+## 2026-10-23: bin/gate --full at a138539a failed; GP7's forms check fixed
+
+- **The run** (the user: `--full` alongside JN8 and GP8): `bin/gate --full` on main at `a138539a`, its
+  first since the tag `arbace-interprets-go1.27.1-v1`, failed in 73m38s. Passed: the essential steps,
+  `j2g-edge`, `go-build-full`, `box-forms`, `box-smoke`, `box-oracle`, `box-suite`, `fixpoint`,
+  `box-goi`, `repr-haskell`, `repr-rust`, `repr-clojure`. Failed:
+  - `javac`: j2g's run of javac's tool build killed by the kernel's OOM killer (18 GB resident), so
+    `repr-java`, `repr-java-roundtrip`, `jrt-convert` and `java-fixtures` did not run;
+    `repr-go-native`: `native-check --fresh` killed likewise (21 GB), every corpus it finished equal.
+    The machine (62 GB) was shared with JN8's and GP8's agents.
+  - `goi`: `nosplit.go` timed out at 10 s (the load, as GP5 and GP6 recorded).
+  - `repr-go` (`bin/box-vendor roundtrip`) and `toolchain` (`bin/toolchain-vendor verify`): a bug of
+    GP7's. `arbace.repr.go.parse/forms-check` compared the dumper's committed files
+    (`go/arbace/repr/go/godump`) by paths relative to the working directory; the vendoring tools read
+    from their modules' directories, so the files were missing there, the check printed "NOT as
+    generated" and `bin/repr-go read` exited 1 after a conversion with no failure. Deterministic (the
+    box's round trip failed alone too); GP7's merge ran neither step (`--full`'s).
+- **The fix:** `forms-check` takes the committed files under the checkout that holds its goroot forms
+  (ROOT/tamago/goroot, which `bin/repr-go` passes absolute). `bin/box-vendor roundtrip` passes,
+  `bin/toolchain-vendor verify` (`tamago/cmd` byte for byte) passes, and the essential gate passed
+  (22m03s). The namespace is embedded: the next re-seed carries it.
+- **Still to run:** the steps the OOM killer stopped and `goi`'s check, on a quieter machine;
+  then `--full` again.
