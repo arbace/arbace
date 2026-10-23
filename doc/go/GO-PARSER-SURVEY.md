@@ -2041,3 +2041,184 @@ The user decided GPS45-GPS49 as built:
 - GPS48 (a): the prefetch bounded by permits, `REPR_GO_PREFETCH=0` to turn it off.
 - GPS49 (a) now; when speed is scheduled, (c), the raw conversion profiled, then (b), std's checked
   sessions cached.
+
+## As built: GP8 (2026-10-23)
+
+GP8, the box reads Go (§8), is built on branch `go-parser-gp8` from main `a138539a` (seed
+`3ab3b603`, which carries GP1-GP7: go/parser, the dumper and gc's syntax compiled). The exit
+criterion's runs are at the commits `5a0b7e16` and `09fd87d0`, each with `bin/arbace-go --build` and
+`--build --box` (amd64 and arm64) of that commit; the shared 64-core amd64 machine, load 15 to 30,
+`bin/gate --full` and another agent's builds beside them.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| the conversion's driver | `arbace/box/convert.ae`, `arbace.box.convert/steps` (new; embedded, compiled with the program) | from two trees of the store, the sources (`VERSION arbace go tamago/goroot` of the commit) and GOROOT's text (TamaGo's `VERSION` and `src/` but `src/cmd`): GOROOT/src's digest checked against `bin/tamago-vendor`'s pin, computed from the tree's blob hashes (`tree-digest`, sha256sum's lines as `src_digest` makes them); then three actions (`arbace.box.build/action`: spawned guests of Arbace's image, their results in the action cache, as S8's steps): **read std for tamago/amd64** and **for tamago/arm64**, at once (`:serial` one after the other), each `arbace -m arbace.repr.go.annotate read` (`bin/repr-go read --corpus ARCH`'s native read: the loader, go/parser and the dumper, goi's checker, the converter, each file read back) with GOROOT's text at `/g`, the spec `{:goroot "/g" :goos "tamago" :goarch ARCH :mode :packages :args ["std"]}`, 8 threads in a 16-vCPU, 16 GiB guest (`:jobs`, `:cpus` by default twice `:jobs`, `:ram`; `GOMEMLIMIT` 1 GiB under it), or `:packages` instead of std (their forms only, no tree: the VM's check); then **assemble and merge tamago/goroot**, `arbace -m arbace.box.convert goroot`, in a 4 GiB guest: the result is the tree `goroot`, compared with the sources' `tamago/goroot` (`:equal`) |
+| bin/tamago-vendor's file steps, in Arbace | `arbace.box.convert`: `assemble`, `headers`, `merge-trees`, `goroot`, `src-digest` | the three Python programs of `bin/tamago-vendor` (`assemble`, `headers`, `merge_trees`) ported line for line (their regular expressions, the order of the walk, the directories left empty, the package files' merge); `goroot` is `convert`'s goroot part (the summary's `ok` packages less the two left out, assembled against GOROOT/src, the headers, the merge, `go.mod`, `go.sum`, `vendor/modules.txt`, the headers from outside the packages) |
+| bin/tamago-vendor | `bin/tamago-vendor` | its `assemble`, `headers` and `merge_trees` call `arbace.box.convert`'s (`box_convert`: the checkout's source loaded by `load-file` on the tools' host, whatever the executable embeds), so the host's vendoring and the box's conversion run the same code (GPS50); Python stays only for go.sum's hash line |
+| the command | `bin/box-convert` (new; `make box-convert`) | as `bin/box-rebuild`: `prepare` (two stores, `box/` and `host/`: the sources' tree, GOROOT's text from `ARBACE_GOROOT`, the guest as `arbace.ARCH`; the executables checked against the commit, `bin/lib/fresh.bash`), `box` (the launcher with `ARBACE_BOX_SPAWN=1` runs the driver in a 6 GiB guest; arm64: in the aarch64 VM, the store copied in and back, detached, its log followed), `host` (the same steps natively, each action a chrooted host process of the native executable, `arbace.box.rebuild/host-run`), `compare` (each architecture's forms and the tree, box against host, and against the sources'; with `--packages`, each file the box converted against the same file of a whole run's forms, `--reference`); `--dev` loads the driver's namespace from the sources' tree, `--serial`, `--jobs`, `--packages`; the spawns' budget 36 GiB and 32 vCPUs |
+
+**What the box needs that it has.** Nothing of repr/go, the loader, the checker or the converter
+changed: the reader runs in a tool guest as on the host, its files the tree mounted at `/g`
+(java.io over the guest's file system), its output the guest's `/o` stored as a tree. The parser
+is compiled (the table lists go/parser's packages since GP7), so the box needs no digest for it;
+the reader's forms check still reads go/parser's four packages' forms and the dumper's committed
+files (it counts their declarations and regenerates the dumper from go/ast's forms), so the read
+mounts `tamago/goroot/go/go/{ast,parser,scanner,token}` from the sources beside `arbace/` and `go/`
+(GPS52). goi's checker checks std from the read's own raw forms, in dependency order, as on the
+host: it reads no digest (the box's digest, goi's table's conversion, serves programs at the REPL,
+not the reader). The converted forms do not depend on GOROOT's path (`/g` in the box,
+`/root/tamago-go` on the host: the same trees, checked on `errors` and `unicode/utf8` first, then
+on all of std below).
+
+**The exit criterion, measured.**
+
+- **amd64** (`bin/box-convert prepare box host compare` from empty stores, on /dev/kvm), twice:
+  at `5a0b7e16`, each read's guest with as many vCPUs as threads (8), and at `09fd87d0`, with
+  twice as many (16, GPS54, the default since). **The tree converted in the box is the committed
+  `tamago/goroot`, byte for byte**, both times: `0445b850…`, 2,269 files (2,152 forms files), and
+  so is the host's; each architecture's forms equal the host's (`76a4a414…` tamago/amd64, 379
+  packages, 1,742 files; `47a3c126…` tamago/arm64, 378 packages, 1,738 files); GOROOT/src's digest
+  in the box is the pin (`415d2301…`).
+
+  | step | box, 8 vCPUs a read | box, 16 vCPUs a read | host |
+  |---|---:|---:|---:|
+  | GOROOT/src's digest (7,653 files, from the tree) | under 1 s | under 1 s | under 1 s |
+  | read std for tamago/amd64 (8 threads) | 292.0 s (the read 286.2 s) | 162.7 s (158.1 s) | 146.7 s (138.6 s) |
+  | read std for tamago/arm64, at the same time | 292.0 s (286.0 s) | 163.4 s (158.9 s) | 148.3 s (140.5 s) |
+  | assemble and merge | 3.1 s | 2.9 s | 6.3 s |
+  | all (the driver's, from empty action caches) | 295.4 s | 166.7 s | 154.9 s |
+  | `bin/box-convert box` / `host compare`, wall | 4 min 56 s | 2 min 48 s | 2 min 36 s |
+  | resident at most (the launcher and its guests; the host's processes) | 23.7 GB | 20.0 GB | 14.9 GB |
+
+  The host's column is `5a0b7e16`'s (at `09fd87d0`: 164.6 s, 15.2 GB; the host step's processes
+  are not bounded to the guests' vCPUs). The phases summed over the amd64 read's jobs (box with 16
+  vCPUs; host): parse and dump 12 s, 9 s; raw conversion 202 s, 182 s; annotation 90 s, 81 s;
+  final conversion 74 s, 67 s; layout, write and read-back 262 s, 225 s. With 16 vCPUs a read in
+  the box costs about 6% more than on the host. `prepare` takes 4 s (the sources' tree and
+  GOROOT's 80 MB of text into two stores).
+- **arm64, in the aarch64 VM** (`bin/box-arm64-vm start`, 16 emulated vCPUs and 20 GiB; every
+  instruction emulated, the box on KVM/arm64 inside it). **The whole of std did not finish**: at
+  `5a0b7e16`, `bin/box-convert --arch arm64 --serial --jobs 16 prepare box` (one read at a time, a
+  16-vCPU 12 GiB guest) ran 5 h 24 min without ending its first read (tamago/amd64's), its guest
+  at 10 GB resident and 11 to 13 of the VM's 16 cores, and was stopped: the read that takes 158 s
+  in the amd64 box would take some 8 to 9 h there, the tree 17 h or more (GPS56). What ran
+  instead, at `09fd87d0`: **a part of std in the arm64 box, checked file for file against the
+  amd64 box's whole run**, `bin/box-convert --arch arm64 --packages 'unicode/utf8 unicode/utf16
+  unicode math/bits container/list container/ring strconv strings' --serial --jobs 8 --reference
+  .tmp/box-convert/amd64 prepare box compare` (the eight packages read for tamago/amd64 and for
+  tamago/arm64, `strconv` and `strings` checked by goi's checker against their imports' raw forms,
+  `internal/bytealg`, `internal/abi`, `iter` and the rest, as in a whole read): **33 files for
+  each configuration (8 package files, 25 Go files' forms), each the same file of the amd64
+  box's whole conversion**, which assembles to `tamago/goroot` byte for byte; the two forms
+  trees (`ed09da7a…`, `825b3523…`) are those of the same part read in the amd64 box. Times: the
+  tamago/amd64 read 6,072 s, the tamago/arm64 read 6,333 s, all 12,429 s (3 h 27 min), against
+  34.7 s, 33.2 s and 69.1 s in the amd64 box: about 180 times. The phases summed over the jobs
+  (VM; amd64 box): parse and dump 313 s, 1.3 s; raw conversion 4,426 s, 23.3 s; annotation 347
+  s, 1.6 s; final conversion 331 s, 1.2 s; layout, write and read-back 966 s, 4.7 s. The VM's
+  idle driver guest spent 3 of its 16 cores the whole time (its vCPUs parking, each park a
+  trap the emulation makes costly), the read's guest 6 to 9.
+
+**Checks.** The in-box conversion on amd64 (above, twice: the `--dev` run at `5c86ea8d` with the
+driver loaded from the sources, then the exit criterion's at `5a0b7e16` with the image's own, both
+`0445b850…`), its host step and `compare`, at `5a0b7e16` and at `09fd87d0`; in the emulated arm64 VM
+a part of std, file for file (above; the whole stopped after 5 h 24 min), and the same part in the
+amd64 box (73 s, the same 33 files for each configuration); `bin/tamago-vendor verify` with the
+Arbace file steps (`tamago is the conversion, byte for byte`, 7 min 12 s at `REPR_GO_JOBS=16`: std
+and the goos module for both architectures read afresh, assembled and merged by
+`arbace.box.convert`); the port alone on the host's two reads (`bin/repr-go read --corpus amd64`,
+`arm64`: 152 s and 198 s at 16 threads, 8.8 GB and 8.6 GB resident at most), `arbace -m
+arbace.box.convert goroot`, `diff -r` against `tamago/goroot`: none, 4 s; `src-digest` of
+`/root/tamago-go/src` the pin; the box's smoke test (`bin/arbace-go --smoke --box`, amd64, the
+executables of `5a0b7e16`: 113 ok, none failed, the tool guests' part skipped: `bin/box-tools build`
+not run in the worktree); `make check-makefile`; the essential `bin/gate` (passed at `3d58e820`, 12
+m 18 s: its builds afresh, the smoke test, Clojure's suite with no regressions, the oracle 22,658 of
+22,711 against its 53 known, the differential check 12,743 of 12,766 against its 23 known, goi's
+essential check 797 of 797, the generated files). repr/go, the loader, the checker and the converter
+are unchanged, so no repr/go check was due beyond the conversions above. Not run: `bin/gate --full`.
+
+**The program changes, for the re-seed.** `arbace/box/convert.ae` is a new namespace of the program
+(embedded and compiled with it, as `arbace.box.rebuild`): the native executable of `09fd87d0` is
+151,605,408 bytes against 150,827,168 for the program of `a138539a` (stage 0 of the seed `3ab3b603`,
+the same program: only records changed since; main's gate build has that size too), **+778,240
+(+0.52%)**: the namespace compiled by c2j and j2g (its 35 functions and their closures as classes)
+and its source embedded. Nothing else of the program changed. A re-seed is not needed for anything
+GP8 runs: `bin/tamago-vendor` loads the checkout's `arbace/box/convert.ae` on any host, and the
+box's actions load it from the sources at `/s` when an image lacks it (the `--dev` run's image did);
+it is batched into the next one.
+
+**Proposals (GPS50-GPS56; each built as recommended where a choice was needed).**
+
+- **GPS50 One code for the assembling, the host's and the box's.** The box has no Python, so
+  `bin/tamago-vendor`'s three Python programs needed an Arbace port.
+  - (a) the port in `arbace.box.convert`, used by the box and by `bin/tamago-vendor` alike (as
+    built; `verify` byte for byte with it): the two cannot drift, and `tamago-vendor` loses most
+    of its Python;
+  - (b) the port for the box only, Python kept on the host: two programs to keep in step, the
+    box's proven only by its own runs.
+
+  *Recommended: (a)*.
+- **GPS51 What the box converts.** The survey's criterion is `tamago/goroot`.
+  - (a) `tamago/goroot` only (as built);
+  - (b) the goos module too (`tamago/goos`): its packages are those go build builds for the
+    architecture (GPS32, `go list -export` on the host), which the box would decide by compiling
+    and assembling each package in tool guests (S7's driver, its plan), about 130 packages for
+    two architectures;
+  - (c) `tamago/cmd` and `box/` as well: the vendoring tools' other trees, their own merges
+    (three configurations; `box/`'s comments and literals merged from the originals) ported.
+
+  *Recommended: (a)* now; (b) when the box is to vendor a new TamaGo release itself, then (c).
+- **GPS52 The reader's forms check in the box.** `arbace.repr.go.annotate read` checks first that
+  what runs as go/parser is `tamago/goroot`'s forms (compiled: counted only) and that the
+  dumper's committed files are those generated from go/ast's forms, so the read reads four
+  packages' forms of the tree it converts.
+  - (a) those four packages' forms mounted from the sources (as built): the check as on the
+    host; the conversion takes nothing from them (the parser is compiled from the toolchain's
+    GOROOT/src, of which they are the conversion: `bin/tamago-vendor verify`);
+  - (b) a flag that skips the check in the box: nothing of the expected tree in the read's
+    trees, the provenance unchecked there;
+  - (c) the check against the box's own conversion, after it: a second pass.
+
+  *Recommended: (a)*: the equality of the whole tree is the stronger check, and (a) keeps the
+  read the host's command line.
+- **GPS53 The two reads at once.**
+  - (a) at once by default, `--serial` where memory is short (as built): 23.7 GB at most on
+    amd64 (16 GiB guests each, `GOMEMLIMIT` 15 GiB), the VM's run serial in 12 GiB guests;
+  - (b) always one after the other: half the memory, the same vCPU time.
+
+  *Recommended: (a)*.
+- **GPS54 The reads' vCPUs.** A read with 8 threads takes 286 s in an 8-vCPU guest and 139 s on
+  the host, where the process's collector has the machine's 64 cores beside the threads. In a
+  16-vCPU guest the same read takes 154 s (amd64; arm64 147.5 s; serial, `.tmp/gp8/cpus16.sh`,
+  the forms the same): the guest is not slower, it had half the cores.
+  - (a) each read's guest twice its threads in vCPUs, the spawns' budget 32 vCPUs
+    (`ARBACE_BOX_SPAWN_CPUS`; as built since `09fd87d0`): the two reads at once 166.7 s, the
+    host's 164.6 s, 20.0 GB at most;
+  - (b) the vCPUs the threads (as first built at `5a0b7e16`): 16 vCPUs for both reads, 295.4 s.
+
+  *Recommended: (a)*.
+- **GPS55 `arbace.box.convert` in the program.**
+  - (a) embedded and compiled, as every `arbace.box` namespace (as built): the box's driver runs
+    from the image it boots, with no sources; +778,240 bytes (+0.52%);
+  - (b) not embedded, evaluated from the sources as repr/haskell's and repr/rust's are: the
+    box's actions already mount the sources at `/s`, the driver would load it from the store's
+    tree as `--dev` does, `bin/tamago-vendor` loads the checkout's anyway; the program unchanged,
+    no re-seed carries it.
+
+  *Recommended: (a)*: the box's own steps belong to the image, as S8's rebuild does; the size
+  is the next re-seed's.
+- **GPS56 The arm64 check of a whole conversion.** The emulated VM runs the reader about 180
+  times slower than the amd64 box (S8's compiles: 44 times), so the tree would take 17 h or more
+  there, on a machine others share.
+  - (a) a part of std in the VM, file for file against the amd64 box's whole conversion (as
+    built: 3 h 27 min for eight packages, both configurations), the whole tree on amd64;
+  - (b) the whole tree in the VM at a milestone, the machine otherwise idle (estimated 17 h or
+    more);
+  - (c) the whole tree on the Mac, natively on Hypervisor.framework, as S8's rebuild ran there
+    (`bin/box-mac-bundle`, its checklist given a step `./mac.sh convert` beside `rebuild`);
+  - (d) the emulation's cost profiled first: every phase of the read is 190 to 280 times the
+    amd64 box's there (the raw conversion 190, the layout 205, the dump 240, the final
+    conversion 280), and the idle driver spends 3 cores.
+
+  *Recommended: (a)* now, (c) at the next Mac run.

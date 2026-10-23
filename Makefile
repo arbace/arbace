@@ -11,7 +11,7 @@ SHELL := /bin/bash
 CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests build-java smoke repl fixpoint goi-table goi-table-size \
-  box box-smoke box-oracle box-suite box-goi box-tools box-rebuild mac-bundle arm64-vm-check arm64-vm-goi \
+  box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle arm64-vm-check arm64-vm-goi \
   gate gate-full suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-divergences alpine-check clean \
@@ -67,6 +67,8 @@ box-tools: ## the tool guests (gc, the linker, the assembler) from tamago/cmd (b
 	bin/box-tools build
 box-rebuild: ## Arbace rebuilt inside the box, compared byte for byte; stops on stale executables (bin/box-rebuild)
 	bin/box-rebuild
+box-convert: ## tamago/goroot converted inside the box by repr/go's native reader, = the committed forms (bin/box-convert)
+	bin/box-convert
 mac-bundle: ## the Mac's launcher, guest and checklist, all HEAD's (bin/box-mac-bundle; after box-rebuild for arm64)
 	bin/box-mac-bundle
 arm64-vm-check: ## the arm64 box in an emulated aarch64 VM: smoke, hv (bin/box-arm64-vm check)

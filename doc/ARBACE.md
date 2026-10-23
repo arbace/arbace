@@ -32,7 +32,9 @@ code. Three kinds of things live here:
   (`arbace.box`, the store, over its host layer `arbace.box.host`; the box's build driver
   `arbace.box.build`, its plan `arbace.box.plan` (since GP2 also repr/go's native loader's go
   list, doc/go/GO-PARSER-SURVEY.md), the rebuild in the box `arbace.box.rebuild`
-  with its printing steps `arbace.box.print`, the symbol table cut `arbace.box.elf`;
+  with its printing steps `arbace.box.print`, the symbol table cut `arbace.box.elf`, the
+  conversion of `tamago/goroot` in the box `arbace.box.convert` (GP8, doc/go/GO-PARSER-SURVEY.md,
+  also `bin/tamago-vendor`'s assembling and merging);
   doc/go/BOX-NOTES.md, S3, S7, S8), `tls.ae` and `tls/` (`arbace.tls`, TLS client connections,
   over `arbace.tls.host`) and `http.ae` (`arbace.http`, a small HTTP/1.1 client; BOX-NOTES.md,
   "TLS (option 2)"), `go.ae` and `go/` (`arbace.go`, Go forms at the REPL, goi; since GR1 the
