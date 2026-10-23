@@ -28,7 +28,10 @@
 #                              (constants' values, a selector's path: the printer prints neither)
 #                              in OUT/goroot/arch/ARCH/go; GOROOT/src's go.mod, go.sum,
 #                              vendor/modules.txt and the headers included from outside the
-#                              packages into OUT/goroot/src, the module's go.mod into OUT/goos
+#                              packages into OUT/goroot/src, the module's go.mod into OUT/goos; the
+#                              assembling, the headers and the merge are arbace.box.convert's
+#                              (in Arbace since GP8, the steps the box's conversion runs:
+#                              bin/box-convert)
 #   bin/tamago-vendor verify   convert into WORK/fresh and compare it with OUT (diff -r): the tree
 #                              is what the conversion gives, byte for byte
 #   bin/tamago-vendor print [DIR]
@@ -117,6 +120,16 @@ go_sum() {
     "$(python3 -I -c 'import sys,hashlib,base64; d=open(sys.argv[1],"rb").read(); print("h1:"+base64.b64encode(hashlib.sha256(("%s  go.mod\n" % hashlib.sha256(d).hexdigest()).encode()).digest()).decode())' "$c/$goos_ver.mod")"
 }
 
+# box_convert VERB ARG...: arbace.box.convert's file steps (the conversion in the box's, GP8:
+# doc/go/GO-PARSER-SURVEY.md, "As built: GP8"), the checkout's source loaded on the tools' host
+box_convert() {
+  local exe a args=""
+  . "$root/bin/lib/host.bash"
+  exe=$(arbace_host_exe) || return 1
+  for a in "$@"; do args="$args \"$a\""; done
+  ARBACE_PATH=$root "$exe" -e "(do (load-file \"$root/arbace/box/convert.ae\") nil) (arbace.box.convert/main*$args)"
+}
+
 # assemble FORMS ORIG DST [OK-LIST]: the converter's tree FORMS/go into DST/go, without the
 # package files whose :files is empty (std's 6 packages of test files only) or whose path is not
 # in OK-LIST (a file of import paths: the goos module's packages that dumped without errors),
@@ -124,54 +137,7 @@ go_sum() {
 # from ORIG/<its directory> (ORIG GOROOT/src, or the module's root with PREFIX stripped) into
 # its forms directory, embedded files checked against their hashes
 assemble() {
-  python3 -I - "$@" <<'EOF'
-import hashlib, os, re, shutil, sys
-forms, orig, dst = sys.argv[1], sys.argv[2], sys.argv[3]
-ok = set(open(sys.argv[4]).read().split()) if len(sys.argv) > 4 else None
-prefix = sys.argv[5] + "/" if len(sys.argv) > 5 else ""
-src = os.path.join(forms, "go")
-shutil.rmtree(os.path.join(dst, "go"), ignore_errors=True)
-shutil.copytree(src, os.path.join(dst, "go"))
-kept = dropped = others = embeds = 0
-for d, _, fs in sorted(os.walk(os.path.join(dst, "go"))):
-    for f in sorted(fs):
-        p = os.path.join(d, f)
-        if not f.endswith(".ae") or not os.path.exists(p):
-            continue
-        s = open(p, encoding="utf-8").read()
-        if "\n(go/package " not in s:
-            continue
-        path = re.search(r'\n  :path "([^"]+)"', s).group(1)
-        files = re.search(r'\n  :files \[([^\]]*)\]', s).group(1)
-        if not files.strip() or (ok is not None and path not in ok):
-            os.remove(p)
-            for l in re.findall(r'\n\(load "([^"]+)"\)', s):
-                os.remove(os.path.join(d, l + ".ae"))
-            dropped += 1
-            continue
-        kept += 1
-        fdir = p[:-3]
-        pdir = os.path.join(orig, path[len(prefix):] if prefix and path.startswith(prefix) else path)
-        m = re.search(r'\n  :other-files \[([^\]]*)\]', s)
-        for o in re.findall(r'"([^"]+)"', m.group(1)) if m else []:
-            os.makedirs(fdir, exist_ok=True)
-            shutil.copyfile(os.path.join(pdir, o), os.path.join(fdir, o))
-            others += 1
-        m = re.search(r'\n  :embed-files \[(.*?)\]\n', s)
-        for e, h in re.findall(r'\["([^"]+)" "([0-9a-f]+)"\]', m.group(1)) if m else []:
-            t = os.path.join(fdir, e)
-            os.makedirs(os.path.dirname(t), exist_ok=True)
-            shutil.copyfile(os.path.join(pdir, e), t)
-            if hashlib.sha256(open(t, "rb").read()).hexdigest() != h:
-                sys.exit("embedded file %s of %s: not the hash the forms record" % (e, path))
-            embeds += 1
-# directories left empty by the dropped packages
-for d, ds, fs in sorted(os.walk(os.path.join(dst, "go")), reverse=True):
-    if not os.listdir(d):
-        os.rmdir(d)
-print("%s: %d packages (%d left out), %d other files, %d embedded files"
-      % (os.path.relpath(dst), kept, dropped, others, embeds), file=sys.stderr)
-EOF
+  box_convert assemble "$@"
 }
 
 # headers DST: the headers that the kept packages' assembly includes from outside their own
@@ -179,41 +145,7 @@ EOF
 # files when cgo is off), copied from GOROOT/src to DST/src at their paths; followed through the
 # headers they include
 headers() {
-  python3 -I - "$tg/src" "$1" <<'EOF'
-import os, re, shutil, sys
-src, dst = sys.argv[1], sys.argv[2]
-fdirs = {}
-for d, _, fs in os.walk(os.path.join(dst, "go")):
-    for f in fs:
-        if f.endswith(".ae"):
-            s = open(os.path.join(d, f), encoding="utf-8").read()
-            m = re.search(r'\n  :path "([^"]+)"', s) if "\n(go/package " in s else None
-            if m:
-                fdirs[m.group(1)] = os.path.join(d, f[:-3])
-todo = []
-for path, fdir in fdirs.items():
-    if os.path.isdir(fdir):
-        for f in os.listdir(fdir):
-            if f.endswith((".s", ".h")):
-                todo.append((os.path.join(fdir, f), path))
-copied = set()
-while todo:
-    f, path = todo.pop()
-    for inc in re.findall(r'^#include "([^"]+)"', open(f, encoding="utf-8", errors="replace").read(), re.M):
-        rel = os.path.normpath(os.path.join(path, inc))
-        if rel in copied or not os.path.isfile(os.path.join(src, rel)):
-            continue
-        # the package's own file (in its forms directory) needs nothing
-        if path in fdirs and os.path.isfile(os.path.join(fdirs[path], inc)):
-            continue
-        t = os.path.join(dst, "src", rel)
-        os.makedirs(os.path.dirname(t), exist_ok=True)
-        shutil.copyfile(os.path.join(src, rel), t)
-        copied.add(rel)
-        todo.append((t, os.path.dirname(rel)))
-print("%s/src: %d headers included from outside the packages: %s"
-      % (os.path.relpath(dst), len(copied), " ".join(sorted(copied))), file=sys.stderr)
-EOF
+  box_convert headers "$tg/src" "$1"
 }
 
 # merge_trees AMD64 ARM64 DST: the two architectures' trees of forms (each assembled: AMD64/go,
@@ -225,75 +157,7 @@ EOF
 # embedded fields), which the printer does not print, each architecture's as converted, in
 # DST/arch/ARCH/go at the same path. Other files (assembly, headers, embedded) once.
 merge_trees() {
-  python3 -I - "$@" <<'EOF'
-import os, re, shutil, sys
-a, b, dst = sys.argv[1], sys.argv[2], sys.argv[3]
-for d in ("go", "arch"):
-    shutil.rmtree(os.path.join(dst, d), ignore_errors=True)
-def files(root):
-    out = {}
-    base = os.path.join(root, "go")
-    for d, _, fs in os.walk(base):
-        for f in fs:
-            p = os.path.join(d, f)
-            out[os.path.relpath(p, base)] = p
-    return out
-fa, fb = files(a), files(b)
-def read(p):
-    return open(p, encoding="utf-8").read()
-def lst(s, key):
-    m = re.search(r'\n  :%s \[([^\]]*)\]' % key, s)
-    return re.findall(r'"([^"]+)"', m.group(1)) if m else []
-def put(rel, text, sub="go"):
-    t = os.path.join(dst, sub, rel)
-    os.makedirs(os.path.dirname(t), exist_ok=True)
-    open(t, "w", encoding="utf-8").write(text)
-def merge_pkg(rel, sa, sb):
-    texts = [x for x in (sa, sb) if x is not None]
-    fs = sorted(set(sum((lst(x, "files") for x in texts), [])))
-    os_ = sorted(set(sum((lst(x, "other-files") for x in texts), [])))
-    loads = set(sum((re.findall(r'\n\(load "([^"]+)"\)', x) for x in texts), []))
-    loads = sorted(loads, key=lambda l: l.rsplit("/", 1)[-1] + ".go")
-    heads = []
-    for x in texts:
-        h = x[:x.index("\n(go/package ")]
-        m = re.search(r'\n\(go/package [^\n]*\n  :path "[^"]+"', x)
-        rest = x[m.end():x.index("\n\n(load ") if "\n\n(load " in x else len(x)]
-        keys = [l for l in rest.split("\n") if l.startswith("  :") and not re.match(r'  :(config|init-order|files|other-files) ', l)]
-        heads.append((h + m.group(0), keys))
-    if len(heads) == 2 and heads[0] != heads[1]:
-        sys.exit("merge: %s: the package files differ beyond their files and configuration" % rel)
-    h, keys = heads[0]
-    out = h + "\n  :files [%s]" % " ".join('"%s"' % f for f in fs)
-    if os_:
-        out += "\n  :other-files [%s]" % " ".join('"%s"' % f for f in os_)
-    for k in keys:
-        out += "\n" + k
-    if not keys or not keys[-1].endswith(")"):
-        sys.exit("merge: %s: unexpected package file" % rel)
-    out += "\n\n" + "".join('(load "%s")\n' % l for l in loads)
-    put(rel, out)
-shared = per = pkgs = 0
-for rel in sorted(set(fa) | set(fb)):
-    pa, pb = fa.get(rel), fb.get(rel)
-    if rel.endswith(".ae"):
-        sa = read(pa) if pa else None
-        sb = read(pb) if pb else None
-        if "\n(go/package " in (sa or sb):
-            merge_pkg(rel, sa, sb); pkgs += 1
-        elif sa is not None and sb is not None and sa != sb:
-            put(rel, sa, "arch/amd64/go"); put(rel, sb, "arch/arm64/go"); per += 1
-        else:
-            put(rel, sa if sa is not None else sb); shared += 1
-    else:
-        if pa and pb and open(pa, "rb").read() != open(pb, "rb").read():
-            sys.exit("merge: %s differs by architecture" % rel)
-        t = os.path.join(dst, "go", rel)
-        os.makedirs(os.path.dirname(t), exist_ok=True)
-        shutil.copyfile(pa or pb, t)
-print("%s: %d package files merged, %d files once, %d per architecture (arch/ARCH/go)"
-      % (os.path.relpath(dst), pkgs, shared, per), file=sys.stderr)
-EOF
+  box_convert merge "$@"
 }
 
 # convert_arch ARCH W: std and the goos module for tamago/ARCH, each assembled (assemble,
