@@ -108,7 +108,7 @@ repr-java-check: ## repr/java's converter checks on javac's tool executable: the
 	bin/repr-java check
 repr-java-jdk: ## jdk26u's 68 modules read by repr/java on javac's tool executable, no failures; long, not in verify (bin/repr-java check --jdk)
 	bin/repr-java check --jdk
-repr-java-parse-check: ## repr/java's native parser: every file of the samples, the baseline, jdk/forms' and javac's sources and jdk26u's 68 modules parsed to javac on Arbace's trees, positions included (bin/repr-java parse-check)
+repr-java-parse-check: ## repr/java's native parser: every file of the samples, the baseline, jdk/forms' and javac's sources, jdk26u's 68 modules, mutants and jdk26u's tests parsed to javac on Arbace's trees, positions included (bin/repr-java parse-check)
 	bin/repr-java parse-check
 fixtures-verify: ## the suite's Java fixtures, on javac's tool executable (bin/clojure-tests --java-fixtures verify)
 	bin/clojure-tests --java-fixtures verify

@@ -128,8 +128,8 @@ Prior art:
     start and end, stored end positions, doc comments, every field), `bin/repr-java parse` (on the
     tools' host, evaluated from the checkout; `--javac`: javac on Arbace's tree, `arbace.repr.java.jtree`,
     on the tool; `--time`: the speed); `bin/repr-java parse-check`: the tree level, every file of the
-    samples, the baseline, the jdk corpus's and javac's sources and jdk26u's 68 modules (`--corpus all`:
-    jdk26u's tests too) parsed by both, the trees equal, against `test/repr/java/parse-check-known.edn`;
+    samples, the baseline, the jdk corpus's and javac's sources and jdk26u's 68 modules, 8,000
+    mutants (javac's error recovery) and jdk26u's tests parsed by both, the trees equal, against `test/repr/java/parse-check-known.edn`;
     doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"), and Java forms → Java (`print`, `arbace.repr.java.print`; the
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →
     forms → Java → forms at the levels forms, ae (the converted text) and classes (javac's, byte

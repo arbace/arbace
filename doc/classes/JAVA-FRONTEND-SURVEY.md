@@ -17,8 +17,8 @@ JFS27-JFS30; JN5, the fixpoint and the checks moved: "As built: JN5 (2026-10-21)
 JFS31-JFS36; JN6, the JVM leaves repr/java: "As built: JN6 (2026-10-21)", with
 JFS37-JFS42; JN7, the generators on Arbace: "As built: JN7 (2026-10-22)", with
 JFS43-JFS50; JFS48 (b), javac's generated sources on the tool: "As built: JFS48 (b) (2026-10-22)",
-with JFS51-JFS54; JFS52 (b), `FlagsEnum` on the tool: "As built: JFS52 (b) (2026-10-22)", at the
-end, with JFS55-JFS58.
+with JFS51-JFS54; JFS52 (b), `FlagsEnum` on the tool: "As built: JFS52 (b) (2026-10-22)", with
+JFS55-JFS58; JN8, the native parser: "As built: JN8 (2026-10-23)", at the end, with JFS59-JFS66.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -3038,3 +3038,254 @@ The user decided JFS55-JFS57 as built and JFS58 (a) to be done:
   `:exists` lacked `ExecutionException`, `FutureTask`, `Semaphore`, `LongAdder`, asked since GP7);
   `bin/j2g-edge update`, then `bin/javac-vendor build` and `convert` (javac's edge loses its
   `:exists`), then `build`, `verify` (918 files byte for byte) and `bin/j2g-edge verify`: pass.
+
+## As built: JN8 (2026-10-23)
+
+JN8, the native parser (JF8 of §7: option (a)'s first half, as JFS10 put it, parser first), on the
+branch `java-frontend-jn8` from main `a138539a` (whose seed `3ab3b603` holds JFS52 (b)), in about
+four and a half hours of work (against the 4-6 days estimated). `arbace.repr.java.parse`, with its lexer
+`arbace.repr.java.lex`, is Java 26's lexer and parser in Arbace, a port of jdk26u's javac parser
+method by method, and gives javac's trees as data: the tags, javac's `pos`, `TreeInfo.getStartPos`
+and `getEndPos`, the end positions the parser stores, the doc comments it attaches and every field
+of every tree. `bin/repr-java parse-check`, the tree level, parses every file of its corpora with
+javac on Arbace (javac's tool executable, `JavacTask.parse`) and natively and compares the two
+trees: **every file of every corpus has javac's tree**, positions included: the samples, the
+baseline, the jdk corpus, javac's own sources and jdk26u's 68 modules (14,668 files), 8,000 mutants
+(javac's error recovery) and jdk26u's 37,797 test files; the known differences
+(`test/repr/java/parse-check-known.edn`) are none. It joins `bin/gate --full`'s java chain (JFS60
+(a)). The JVM ran only the frozen v4 jar, for javac's edge in `bin/javac-vendor convert`
+(JN8.7); Go only TamaGo's go1.27.1, without cgo. The tools' host was the worktree's stage 0 (the
+seed's); j2g for the tool ran on it (the worktree held no program built from the checkout, JFS22).
+
+### JN8.1 The parser: `arbace.repr.java.lex` and `arbace.repr.java.parse`
+
+| file | lines | ports (jdk26u `src/jdk.compiler/share/classes/com/sun/tools/javac/`) |
+|---|---:|---|
+| `arbace/repr/java/lex.ae` | 533 | `parser/UnicodeReader.java` (the escapes, decoded once into the characters and a map to the text's offsets), `JavaTokenizer.java` (`readToken` and its scanners, by code point), `JavadocTokenizer.java` and `BasicComment` (the comments, `isDeprecated`'s scan of a doc comment), `Tokens.java` (the kinds, `docComment`, `deprecatedFlag`, `split`) |
+| `arbace/repr/java/parse.ae` | 2,881 | `parser/JavacParser.java` (every method `parseCompilationUnit` reaches, error recovery and `VirtualParser`'s speculation included), its `SimpleEndPosTable` and `MinimalEndPosTable`, `tree/TreeMaker.java` (its factories and their `pos`), `tree/TreeInfo.java` (`getStartPos`, `getEndPos` and the helpers the parser calls) |
+| `arbace/repr/java/jtree.ae` | 356 | (javac's side) javac's trees as the same data; the check; the mutants |
+
+§4 (a) estimated the parser at 3,000 to 5,000 lines of Arbace: the lexer and the parser are 3,414.
+Both carry the notice of the files they port (LICENSE.md's jdk26u list, doc/ARBACE.md).
+
+The parser runs as javac's `JavacTask.parse` runs it: doc comments and end positions kept, source
+26 with preview enabled (`read-jdk`'s options, JFS64). Its state is javac's: the tokens (lexed whole
+first: javac's lexing depends on nothing the parser does but `split`, which replaces the current
+token in place, undone after a speculation), the modes, `errorEndPos`, TreeMaker's `pos` (a
+factory called without `at` takes the last one), `prevToken`'s end, `allowThisIdent`, the
+pushed-back type annotations and the receiver parameter. Trees are mutable maps while parsing,
+since javac changes its trees after making them (`mods.flags |=`, `mods.pos`, a method
+reference's `expr` and `pos`, a new array's annotations, a lambda parameter's `vartype`, `bracePos`,
+the type into which `insertAnnotationsToMostInner` moves annotations), and become persistent data at
+the end (`freeze`): a map per node with `:tag` (javac's `JCTree.Tag`), `:pos`, `:endpos` (stored, -1
+when none), `:start`, `:end`, `:doc` ([style pos end] of its doc comment) and its fields under
+javac's names (names as strings, flags as longs, enums as keywords, a literal's value as
+`literal-value` gives it: floats by their bits). `parse/dump` prints a tree one node per line: the
+form the check compares.
+
+javac's behaviour the port reproduces where it shapes trees, each found by the check (JN8.4):
+- the lexer's `tk` survives from one token to the next, and a character literal's error recovery
+  reads it: after `'''` the next character literal swallows the text to the next quote;
+- a non-ASCII digit is replaced by its ASCII digit in a number's text, a surrogate pair's code point
+  is kept (`UnicodeReader.digit`, `put`); the reader advances by code point;
+- an unclosed text block resets to its first line end; a character literal of a surrogate pair is
+  an error token;
+- `syntaxError(pos, null, ...)`'s erroneous tree has no list (`errs` nil), the others an empty one;
+- a speculation (`VirtualParser`) has a `MinimalEndPosTable` of its own: it stores no end position
+  but declarations', not even into the trees it shares with the real parse (the modifiers, whose
+  `pos` it does set, so that the real parse stores none either);
+- `F.at(x).Foo(args)`: TreeMaker's `pos` is set before the arguments are evaluated and read after,
+  so a factory call among the arguments moves it (`AnnotatedType(annos, basicType())` takes the
+  primitive's position).
+
+### JN8.2 javac's trees as data: `arbace.repr.java.jtree`
+
+On javac's tool executable, `arbace.repr.java.javac/parse-only` runs `JavacTask.parse` with javac on
+Arbace's file manager, as `analyze` does but without attribution, and `jtree/unit-data` walks each
+`JCCompilationUnit`: per tag javac's fields (JCTree's public fields; a module's kind by
+`getModuleType`), `pos`, the unit's `EndPosTable`, `TreeInfo.getStartPos` and `getEndPos`, and the
+unit's `DocCommentTable` (a comment's style, `getPos()`'s start and end). The native parser parses
+the text javac read (`getCharContent`), so both see the same characters.
+
+### JN8.3 The check: `bin/repr-java parse-check`
+
+`bin/repr-java parse-check [--corpus C,...]` (`bin/lib/repr-java/parse-check`; Makefile
+`repr-java-parse-check`, in `make verify`) runs `jtree check` per corpus on javac's tool executable:
+the files in chunks of 50, each chunk parsed by javac on Arbace in one task, then natively file by
+file, on `REPR_JAVA_THREADS` threads (12); a file is equal when both dumps are, and the differing
+files must be `test/repr/java/parse-check-known.edn`'s (`{}`). Each corpus writes `report.edn`
+(the counts, the nodes, the characters, both parse times), `files.tsv` (a line per file, the first
+differing line), `javac-errors.txt` (javac's syntax errors: a file with errors is compared like any
+other) and both dumps of each differing file under `diff/`. Also `bin/repr-java parse [--javac]
+FILE...` (a file's tree: native, on the tools' host; or javac's, on the tool) and `parse [--javac]
+--time PATH...` (the speed, JN8.5).
+
+| corpus | what | files | equal | javac's syntax errors | wall |
+|---|---|---:|---:|---:|---:|
+| `samples` | `test/repr/java/java`, `module` | 14 | 14 | 0 | 0.1 s |
+| `baseline` | the frozen `clojure/` | 183 | 183 | 0 | 2.8 s |
+| `jdk` | java.base's closure, `jdk/forms`' originals (`bin/jrt-convert`'s sources and generate steps, made again when `jdk/sources.txt` changes) | 838 | 838 | 0 | 5.5 s |
+| `javac` | javac's own sources, `jdk/javac/sources.txt` (the generated ones from the build tree's `support/gensrc`, which `bin/javac-vendor` generates byte for byte) | 824 | 824 | 0 | 7.7 s |
+| `jdk26u` | every Java file of jdk26u's 68 modules (`src/*/share/classes`: the 12,730 that `check --jdk` reads, the 68 `module-info.java`, 11 snippet files) | 12,809 | 12,809 | 0 | 37 s |
+| `mutants` | javac's error recovery: 4,000 files of the 68 modules (a shuffle, seed 26), each made into 2 mutants of 4 edits at random tokens (deleted, duplicated, swapped with the next, a token inserted before; `jtree mutate`) | 8,000 | 8,000 | 66,598 (7,979 files) | 24 s |
+| `tests` | every Java file of jdk26u's `test/`, langtools' error tests among them | 37,797 | 37,797 | 553 (213 files) | 80 s |
+
+The nodes compared: 4,460 (samples), 425,618 (baseline), 1,733,429 (jdk), 1,540,934 (javac),
+16,408,129 (jdk26u), 10,254,529 (mutants), 31,538,285 (tests). The wall times are the check's alone, on the final tool,
+12 threads, the host shared: the whole command took 199 s (117 s for the first six corpora, the
+mutants' generation included, and 82 s for the tests), the jdk corpus's originals about a minute more
+when the closure changes. Beyond the corpora,
+scratch mutants of the worktree's `.tmp/jn8/` (Python, `scripts/mut.py`): 6,000 of one edit, 10,000
+of 4 and 20,417 of 2 to 8 edits, over the modules and the tests: all equal (two of the 10,000 found
+the speculation's end positions, JN8.4).
+
+### JN8.4 Bugs found
+
+The first run over the samples, the baseline, java.base and then jdk26u's 68 modules had every file
+equal; what differed was error recovery, found by langtools' tests (5 of 7,227 files: the lexer's
+`tk`, the non-ASCII and surrogate digits, the text block's reset, `errs` nil), the rest of `test/`
+(1 of 37,797: the surrogate pair in a character literal) and the scratch mutants (2 of 10,000: the
+speculation's end positions): the six behaviours of JN8.1, each fixed in the port. No regression
+form: `parse-check` is the parser's test, its `tests` corpus and the mutants the error recovery's.
+One more cost found: `pp/pprint` of the report took about 6.5 minutes when it held the mutants'
+66,598 diagnostics; they go to `javac-errors.txt` now, the report keeps their count.
+
+### JN8.5 Speed
+
+One thread, the parse alone (the texts read before; `bin/repr-java parse --time`, `parse --javac
+--time`), on the shared host (other work running):
+
+| | baseline (183 files, 2.20 M chars) | `java/util` (370 files, 9.62 M chars) | java.base (3,097 files, 46.0 M chars) |
+|---|---:|---:|---:|
+| javac on Arbace (`JavacTask.parse`, javac's tool executable) | 0.41 s (5.4 M chars/s) | | 5.6 s (8.2 M chars/s) |
+| the native parser compiled into the tool (c2j) | 4.0 s (0.55 M chars/s) | 10.9 s (0.88 M chars/s) | 50.5 s (0.91 M chars/s) |
+| the native parser evaluated (the tools' host, stage 0) | 21.9 s (0.10 M chars/s) | 62.0 s (0.16 M chars/s) | |
+
+So the native parser compiled takes about 9 times javac on Arbace's time, and evaluated about 5 times
+its compiled time. Its compiled time over `java/util` splits into the lexer 3.9 s (2.5 M chars/s),
+the parse 5.6 s and `freeze` 3.6 s (before `freeze` iterated its maps' entries directly: now about
+1.4 s less); a CPU profile (`ARBACE_CPUPROFILE`) puts 17% of it in j2g's checked casts of arrays
+(`J2g_CastArray` through `Class.IsInstance`: the parser's state and the lexer's characters are
+arrays, each hinted use a checked cast) and much of the rest in allocation (a `HashMap` per node,
+boxed positions) (JFS65).
+
+### JN8.6 Where the parser runs (JFS59)
+
+Built: in both places the reader's namespaces already run. On the tools' host it is evaluated from
+the checkout (`bin/repr-java parse`, like repr/haskell's and repr/rust's namespaces: not in the
+shipped program, no re-seed); in javac's tool it is compiled with the reader (`--build-java` embeds
+`arbace/repr/java` whole: 15 sources, 1,925 classes, the tool 215,048,352 bytes against the first
+pass's 201,785,504 and JFS52 (b)'s 211,210,400), where the check runs it beside javac. The parser
+needs nothing of javac's world, so it could run compiled anywhere the program does (JFS59 (b)).
+
+### JN8.7 The shipped program's change
+
+None in code: `arbace/repr/java` is not in the shipped program (j2g's `embed.ae` leaves it out; the
+tool embeds it), and `go/`, `overlay/`, `jdk/forms`, `jdk/data` and `jdk/edge.edn` are unchanged.
+The provenance files' `:repr-java` (`bin/lib/repr-java/host.bash`'s `repr_java_reader_hash`: the
+reader's sources and `bin/repr-java`, which gained `parse`, `parse-check` and `javac.ae`'s
+`parse-only`) moved from `295a3d0a...` to `2abe20bf...`, written by the updates on the final tool
+(key `64d7081d...`): `bin/jrt-convert update`, `bin/clojure-tests --java-fixtures update` and
+`bin/javac-vendor convert` (its edge on the frozen v4 jar), every form file byte for byte as
+committed, only `:repr-java` and `:host` changed in `jdk/provenance.edn`,
+`test/java-fixtures/provenance.edn` and `jdk/javac/provenance.edn`. `jdk/provenance.edn` is in the
+runtime key (`bin/lib/version.bash`), so the version map the executable carries changes, as at JN6.
+No re-seed (batched).
+
+### JN8.8 The checks
+
+- `bin/repr-java parse-check` (the default corpora) and `--corpus tests`, on the final tool (key
+  `64d7081d...`): every file equal, as JN8.3's table
+- `bin/repr-java check`: as expected (the baseline's 189 files as `baseline.sha256`, the samples' 11
+  and the module's 6 as `test/repr/java/expected`; 25 s)
+- the updates of JN8.7: `bin/clojure-tests --java-fixtures update` (15 forms files, 20 s), `bin/jrt-convert
+  update` (911 forms files, 10 data files, 216 s), `bin/javac-vendor convert` (914 forms files, the
+  edge on the frozen jar: 223 classes beyond `jdk/edge.edn`'s, 129 s): only the three provenance
+  files' `:repr-java` and `:host` changed (the converter's outputs unchanged)
+- `make check-makefile`: passes
+- `bin/gate` (essential) at the branch's head: GATERESULT
+- not run: `bin/gate --full` (the user's rule: at the milestone), `bin/repr-java roundtrip`, `check
+  --suite`, `bin/javac-vendor verify` and `classes` (the converter and javac's world are unchanged:
+  `javac.ae` only gained `parse-only`, which `read` does not call, and `bin/repr-java` only its two
+  verbs; the updates of JN8.7 show the forms unchanged)
+
+### JN8.9 What it means for JN9
+
+The parser gives what javac's parser gives, so the syntax JN9's attribution would start from is
+javac's, positions included, without javac. What it does not give is what §2 measured: 77% of
+`convert.ae`'s code reads javac's attribution, not its trees. The trees as data have javac's shape
+and names (the converter's tree walking, `(.-defs t)` against `(:defs t)`, is a mechanical port), so
+JFS7 (b), the converter over an interface, can be tried on these trees for the syntax-only facts
+first (JFS66).
+
+### JN8.10 Proposals
+
+- **JFS59 Where the parser runs.**
+  - Options: (a) evaluated from the checkout on the tools' host and compiled into javac's tool
+    (built: the tool embeds `arbace/repr/java` whole, JFS28); (b) also embedded in the shipped
+    program and compiled (j2g's `embed.ae`, as goi's namespaces), so that the tools' host and the
+    box parse Java at the compiled speed without javac's world: the program grows and is re-seeded;
+    (c) javac's tool only.
+  - *Recommended: (a)*; (b) when a consumer outside the tool needs the speed (JN9's attribution on
+    the tools' host, or Java read in the box), batched with that re-seed.
+- **JFS60 The tree level in the gates.**
+  - Options: (a) `bin/repr-java parse-check` (the default corpora) in `bin/gate --full`'s java chain,
+    after `java-fixtures`, on the tool the javac step built (built: `repr-java-parse`, about 3.5
+    minutes); (b) out of every gate, a command and the Makefile's target, as `check --jdk` (JFS42);
+    (c) in `--full` the four small corpora only, jdk26u, the mutants and the tests a command.
+  - *Recommended: (a)*: a few minutes beside the chain's 10 to 20, and the parser's only check.
+- **JFS61 jdk26u's tests as a corpus.**
+  - Options: (a) opt-in (`--corpus tests`); (b) in the default, so in `--full` (built: 37,797 files,
+    80 s; jdk26u's test tree is read where it is, nothing copied).
+  - *Recommended: (b)*: langtools' tests are javac's own error cases (213 files with 553 syntax
+    errors javac reports), cheap beside the mutants, and found one of the six behaviours alone.
+- **JFS62 The mutants.**
+  - Options: (a) one fixed set, 8,000 by seed 26 (built: reproducible from the commit); (b) a new
+    seed per gate run (its date), more of javac's recovery over time but a failure not reproducible
+    from the commit alone (the seed in the log would reproduce it); (c) more of them (every file of
+    the 68 modules, 25,618 mutants, about three times the time).
+  - *Recommended: (a)*, the seed changed by hand when the parser changes (a commit's known file and
+    seed together).
+- **JFS63 Doc comments' text.**
+  - Options: (a) a doc comment's style and positions, `@deprecated` in the modifiers' flags as javac
+    folds it (built); (b) also the text `JavadocTokenizer` extracts (`getText`, its offset map), for
+    a consumer of Javadoc.
+  - *Recommended: (a)*: the converter keeps comments only in mode `:full`, by the text's positions.
+- **JFS64 Source levels.**
+  - Options: (a) Java 26 with preview, fixed (built: javac's source-dependent branches as at 26,
+    `-source 26 --enable-preview`, the options `read-jdk` reads every corpus with); (b) a source
+    level argument following javac's `Feature.allowedInSource` (`yield`, `record`, `sealed`, `_`,
+    `var` and the warnings), checked against javac at each level.
+  - *Recommended: (a)* until a corpus must be read at another level.
+- **JFS65 The parser's speed.**
+  - Options: (a) as built, about 9 times javac on Arbace compiled (JN8.5); (b) j2g's checked array
+    casts as a type switch, not `Class.IsInstance` (17% of the parser's time, and of all compiled
+    code's that uses arrays: a j2g change to the shipped program, measured on `bin/j2g-perf`,
+    re-seeded); (c) the parser's own: nodes as records rather than `HashMap`s, the arrays bound once
+    per function.
+  - *Recommended: (a)* for JN8; (b) as a j2g task of its own, since it speeds every compiled
+    program; (c) with JN9 if the parser's cost then matters next to attribution's.
+- **JFS66 After JN8.**
+  - Options: (a) JN9 as §7 plans it (the attribution, 25-45 days, an open tail: §8 R6); (b) a
+    bounded step first: JFS7 (b)'s interface tried on the native trees for the converter's syntax-only
+    facts (§2.1's forms that read no attribution, and the trees' shape everywhere), javac on Arbace
+    still answering the attribution by position (§4 (d4) as a check), measuring how the converter
+    splits before JN9 is decided; (c) stop after JN8: the native parser serves tools that need Java's
+    syntax (an editor's view, Java in the box without javac's world), javac on Arbace stays the
+    front end.
+  - *Recommended: (b)*: a few days, and the numbers JN9's decision needs; (c) if no consumer of a
+    JVM-free, javac-free attribution is in sight.
+
+### JN8.11 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`):
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/parser/{JavacParser,JavaTokenizer,JavadocTokenizer,UnicodeReader,Tokens,Scanner,VirtualParser,TextBlockSupport,LazyDocCommentTable}.java`,
+  `tree/{JCTree,TreeInfo,TreeMaker,EndPosTable}.java`, `code/Flags.java`, `util/Convert.java`,
+  `main/JavaCompiler.java` and `api/JavacTaskImpl.java` (what `parse` keeps); `src/*/share/classes`
+  (the jdk26u corpus), `test/` (the tests corpus).
+- The worktree's `.tmp/`: `jn8/` (`ref/JavacParser.nc`, the parser without comments, read for the
+  port; `exp/` the evaluator's micro-benchmarks; `scripts/mut.py`, `prof.ae`, `prof2.ae`,
+  `final-checks.sh`; the mutants `mut*/` and their checks `pc/`; `parse.pprof`, `mut6.pprof`; the
+  tool builds' logs `tool-build-{1,2,3}.log`; `devtool/`, a copy of main's tool for the first,
+  evaluated, runs), `repr-java-parse-check/` (the corpora's reports, the jdk originals, javac's
+  sources, the mutants), `repr-java-check/`, `jrt/`, `javac-vendor/`, `clojure-tests/`.
