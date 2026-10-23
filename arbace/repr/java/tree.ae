@@ -1,0 +1,316 @@
+(ns arbace.repr.java.tree
+  "The converter's interface to the tree (doc/classes/JAVA-FRONTEND-SURVEY.md, JFS7 (b), \"As built:
+  JFS66 (b)\"): the syntax of a compilation unit, over either of its two representations, javac's
+  `JCTree` objects (javac on Arbace's parse, which attribution then completes) or the native
+  parser's trees as data (arbace.repr.java.parse: a map per node, javac's tags and field names,
+  positions included). Every read of the tree's shape by arbace.repr.java.convert goes through
+  here; what javac's attribution adds to a tree (symbols, types, chosen members, jump targets, flow)
+  goes through arbace.repr.java.attr, keyed by position for the native trees.
+
+  (tag t) javac's JCTree.Tag as a keyword (:IDENT, :PLUS_ASG, ...); (is? t :IDENT); the classes of
+  tags javac's class hierarchy groups (statement?, binary?, unary?, assignop?, pattern?); (f t :k)
+  the field :k under javac's name (a tree, a list of trees, a name, flags); (start t), (end t)
+  TreeInfo.getStartPos and getEndPos; TreeInfo's helpers (skip-parens, tree-name, full-name,
+  diamond?); (children t) the child trees in javac's field order (the order the converter walked
+  javac's fields in by reflection)."
+  (:require [arbace.repr.java.parse :as parse])
+  (:import [com.sun.tools.javac.tree JCTree JCTree$Tag TreeInfo EndPosTable
+            JCTree$JCCompilationUnit JCTree$JCPackageDecl JCTree$JCImport JCTree$JCModuleImport
+            JCTree$JCClassDecl JCTree$JCMethodDecl JCTree$JCVariableDecl JCTree$JCSkip JCTree$JCBlock
+            JCTree$JCDoWhileLoop JCTree$JCWhileLoop JCTree$JCForLoop JCTree$JCEnhancedForLoop
+            JCTree$JCLabeledStatement JCTree$JCSwitch JCTree$JCCase JCTree$JCSwitchExpression
+            JCTree$JCSynchronized JCTree$JCTry JCTree$JCCatch JCTree$JCConditional JCTree$JCIf
+            JCTree$JCExpressionStatement JCTree$JCBreak JCTree$JCYield JCTree$JCContinue
+            JCTree$JCReturn JCTree$JCThrow JCTree$JCAssert JCTree$JCMethodInvocation JCTree$JCNewClass
+            JCTree$JCNewArray JCTree$JCLambda JCTree$JCParens JCTree$JCAssign JCTree$JCAssignOp
+            JCTree$JCUnary JCTree$JCBinary JCTree$JCTypeCast JCTree$JCInstanceOf JCTree$JCAnyPattern
+            JCTree$JCBindingPattern JCTree$JCDefaultCaseLabel JCTree$JCConstantCaseLabel
+            JCTree$JCPatternCaseLabel JCTree$JCRecordPattern JCTree$JCArrayAccess JCTree$JCFieldAccess
+            JCTree$JCMemberReference JCTree$JCIdent JCTree$JCLiteral JCTree$JCPrimitiveTypeTree
+            JCTree$JCArrayTypeTree JCTree$JCTypeApply JCTree$JCTypeUnion JCTree$JCTypeIntersection
+            JCTree$JCTypeParameter JCTree$JCWildcard JCTree$TypeBoundKind JCTree$JCAnnotation
+            JCTree$JCModifiers JCTree$JCAnnotatedType JCTree$JCModuleDecl JCTree$JCExports
+            JCTree$JCOpens JCTree$JCProvides JCTree$JCRequires JCTree$JCUses JCTree$JCErroneous
+            JCTree$JCVariableDecl$DeclKind]
+           [com.sun.source.tree CaseTree$CaseKind ModuleTree$ModuleKind]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Tags
+
+(def ^:private tag-kws
+  (into {} (for [^JCTree$Tag e (JCTree$Tag/values)] [e (keyword (.name e))])))
+
+(defn jc? "Is `t` one of javac's trees (not the native parser's data)?" [t] (instance? JCTree t))
+
+(defn tree? "Is `x` a tree of either representation?" [x]
+  (or (instance? JCTree x) (and (map? x) (contains? x :tag))))
+
+(defn tag
+  "The tag of tree `t`, a keyword (javac's JCTree.Tag)."
+  [t]
+  (if (instance? JCTree t) (get tag-kws (.getTag ^JCTree t)) (get t :tag)))
+
+(defn tag-name "The tag's name, as javac's (str (.getTag t))." ^String [t] (name (tag t)))
+
+(defn is? "Has tree `t` (nil allowed) tag `k`?" [t k] (and (some? t) (identical? k (tag t))))
+
+(def binary-tags
+  #{:OR :AND :BITOR :BITXOR :BITAND :EQ :NE :LT :GT :LE :GE :SL :SR :USR :PLUS :MINUS :MUL :DIV :MOD})
+(def assignop-tags
+  #{:BITOR_ASG :BITXOR_ASG :BITAND_ASG :SL_ASG :SR_ASG :USR_ASG :PLUS_ASG :MINUS_ASG :MUL_ASG
+    :DIV_ASG :MOD_ASG})
+(def unary-tags #{:POS :NEG :NOT :COMPL :PREINC :PREDEC :POSTINC :POSTDEC})
+(def statement-tags
+  "The tags of javac's JCStatement subclasses."
+  #{:CLASSDEF :VARDEF :SKIP :BLOCK :DOLOOP :WHILELOOP :FORLOOP :FOREACHLOOP :LABELLED :SWITCH :CASE
+    :SYNCHRONIZED :TRY :IF :EXEC :BREAK :YIELD :CONTINUE :RETURN :THROW :ASSERT})
+(def pattern-tags #{:ANYPATTERN :BINDINGPATTERN :RECORDPATTERN})
+(def loop-tags #{:WHILELOOP :DOLOOP :FORLOOP :FOREACHLOOP})
+
+(defn binary? [t] (and (some? t) (contains? binary-tags (tag t))))
+(defn assignop? [t] (and (some? t) (contains? assignop-tags (tag t))))
+(defn unary? [t] (and (some? t) (contains? unary-tags (tag t))))
+(defn statement? [t] (and (some? t) (contains? statement-tags (tag t))))
+(defn pattern? [t] (and (some? t) (contains? pattern-tags (tag t))))
+(defn loop? [t] (and (some? t) (contains? loop-tags (tag t))))
+(defn expression?
+  "A JCExpression (for the converter's uses: a lambda's or a rule case's body that is not a
+  statement)."
+  [t]
+  (and (some? t) (not (statement? t))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Fields
+
+(def tag-classes
+  "javac's class for each tag (the binary, assignment-operator and unary tags share one)."
+  (merge
+   '{:TOPLEVEL JCTree$JCCompilationUnit :PACKAGEDEF JCTree$JCPackageDecl :IMPORT JCTree$JCImport
+     :MODULEIMPORT JCTree$JCModuleImport :CLASSDEF JCTree$JCClassDecl :METHODDEF JCTree$JCMethodDecl
+     :VARDEF JCTree$JCVariableDecl :SKIP JCTree$JCSkip :BLOCK JCTree$JCBlock :DOLOOP JCTree$JCDoWhileLoop
+     :WHILELOOP JCTree$JCWhileLoop :FORLOOP JCTree$JCForLoop :FOREACHLOOP JCTree$JCEnhancedForLoop
+     :LABELLED JCTree$JCLabeledStatement :SWITCH JCTree$JCSwitch :CASE JCTree$JCCase
+     :SWITCH_EXPRESSION JCTree$JCSwitchExpression :SYNCHRONIZED JCTree$JCSynchronized :TRY JCTree$JCTry
+     :CATCH JCTree$JCCatch :CONDEXPR JCTree$JCConditional :IF JCTree$JCIf :EXEC JCTree$JCExpressionStatement
+     :BREAK JCTree$JCBreak :YIELD JCTree$JCYield :CONTINUE JCTree$JCContinue :RETURN JCTree$JCReturn
+     :THROW JCTree$JCThrow :ASSERT JCTree$JCAssert :APPLY JCTree$JCMethodInvocation
+     :NEWCLASS JCTree$JCNewClass :NEWARRAY JCTree$JCNewArray :LAMBDA JCTree$JCLambda
+     :PARENS JCTree$JCParens :ASSIGN JCTree$JCAssign :TYPECAST JCTree$JCTypeCast
+     :TYPETEST JCTree$JCInstanceOf :ANYPATTERN JCTree$JCAnyPattern :BINDINGPATTERN JCTree$JCBindingPattern
+     :DEFAULTCASELABEL JCTree$JCDefaultCaseLabel :CONSTANTCASELABEL JCTree$JCConstantCaseLabel
+     :PATTERNCASELABEL JCTree$JCPatternCaseLabel :RECORDPATTERN JCTree$JCRecordPattern
+     :INDEXED JCTree$JCArrayAccess :SELECT JCTree$JCFieldAccess :REFERENCE JCTree$JCMemberReference
+     :IDENT JCTree$JCIdent :LITERAL JCTree$JCLiteral :TYPEIDENT JCTree$JCPrimitiveTypeTree
+     :TYPEARRAY JCTree$JCArrayTypeTree :TYPEAPPLY JCTree$JCTypeApply :TYPEUNION JCTree$JCTypeUnion
+     :TYPEINTERSECTION JCTree$JCTypeIntersection :TYPEPARAMETER JCTree$JCTypeParameter
+     :WILDCARD JCTree$JCWildcard :TYPEBOUNDKIND JCTree$TypeBoundKind :ANNOTATION JCTree$JCAnnotation
+     :TYPE_ANNOTATION JCTree$JCAnnotation :MODIFIERS JCTree$JCModifiers
+     :ANNOTATED_TYPE JCTree$JCAnnotatedType :MODULEDEF JCTree$JCModuleDecl :EXPORTS JCTree$JCExports
+     :OPENS JCTree$JCOpens :PROVIDES JCTree$JCProvides :REQUIRES JCTree$JCRequires :USES JCTree$JCUses
+     :ERRONEOUS JCTree$JCErroneous}
+   (zipmap binary-tags (repeat 'JCTree$JCBinary))
+   (zipmap assignop-tags (repeat 'JCTree$JCAssignOp))
+   (zipmap unary-tags (repeat 'JCTree$JCUnary))))
+
+(def scalar-fields
+  "The fields the converter reads that hold no tree (names, flags, booleans), by tag."
+  {:name [:IDENT :SELECT :VARDEF :METHODDEF :CLASSDEF :TYPEPARAMETER :REFERENCE]
+   :label [:LABELLED :BREAK :CONTINUE]
+   :flags [:MODIFIERS :BLOCK]
+   :isTransitive [:REQUIRES] :isStaticPhase [:REQUIRES] :staticImport [:IMPORT]})
+
+(def tree-fields
+  "Each tag's fields that hold trees (a tree, a list of trees; :dimAnnotations a list of lists), in
+  javac's order: arbace.repr.java.parse's fields but the scalars."
+  (let [scalar (fn [tg k]
+                 (or (#{:name :staticImport :flags :bracePos :label :caseKind :declKind :typePos :typetag
+                        :value :paramKind :mode :isTransitive :isStaticPhase} k)
+                     (and (= k :kind) (not= tg :WILDCARD))))]
+    (into {} (for [[tg fs] parse/fields]
+               [tg (vec (remove #(and (scalar tg %) (not (and (= tg :YIELD) (= % :value)))) fs))]))))
+
+(defmacro ^:private def-field
+  "(field t k): the field k of tree t: javac's public field of that name for a JCTree, the map's
+  value for the native trees; a case per field name, javac's classes that have it."
+  []
+  (let [t (gensym "t") k (gensym "k")
+        by-field (reduce (fn [m [tg fs]] (reduce #(update %1 %2 (fnil conj #{}) tg) m fs))
+                         {} (merge-with (comp vec distinct concat) tree-fields
+                                        (reduce (fn [m [f tgs]] (reduce #(update %1 %2 (fnil conj []) f) m tgs))
+                                                {} scalar-fields)))
+        branch (fn [fld tgs]
+                 (let [classes (distinct (map tag-classes tgs))]
+                   `(condp instance? ~t
+                      ~@(mapcat (fn [c] [c (list (symbol (str ".-" (name fld))) (with-meta t {:tag c}))]) classes)
+                      (throw (ex-info (str "repr/java tree: no field " ~fld " in " (class ~t)) {})))))]
+    `(defn ~'field
+       ~'"The field `k` (a keyword, javac's name) of tree `t`."
+       [~t ~k]
+       (if (instance? JCTree ~t)
+         (case ~k
+           ~@(mapcat (fn [[fld tgs]] [fld (branch fld tgs)]) (sort-by key by-field))
+           (throw (ex-info (str "repr/java tree: no field " ~k) {})))
+         (get ~t ~k)))))
+
+(def-field)
+
+(defn f "The field `k` of tree `t` (field)." [t k] (field t k))
+
+;;; ------------------------------------------------------------------------------------------
+;;; What javac's tree classes give by methods: kinds, literal values
+
+(defn var-decl?
+  "Was the variable declaration `d` written with `var` (JCVariableDecl.declaredUsingVar)?"
+  [d]
+  (if (instance? JCTree d)
+    (.declaredUsingVar ^JCTree$JCVariableDecl d)
+    (identical? :VAR (get d :declKind))))
+
+(defn rule-case? "Is case `c` a rule (case L -> ...)?" [c]
+  (if (instance? JCTree c)
+    (= CaseTree$CaseKind/RULE (.-caseKind ^JCTree$JCCase c))
+    (identical? :RULE (get c :caseKind))))
+
+(defn open-module? "Is module declaration `md` open (getModuleType)?" [md]
+  (if (instance? JCTree md)
+    (= ModuleTree$ModuleKind/OPEN (.getModuleType ^JCTree$JCModuleDecl md))
+    (identical? :OPEN (get md :kind))))
+
+(def ^:private ANNOTATION 0x2000)
+(def ^:private INTERFACE 0x200)
+(def ^:private ENUM 0x4000)
+(def ^:private RECORD (bit-shift-left 1 61))
+
+(defn class-kind
+  "JCClassDecl.getKind's name for class declaration `cd`, from its modifiers' flags as the parser
+  wrote them (the kind bits are the parser's)."
+  ^String [cd]
+  (if (instance? JCTree cd)
+    (str (.getKind ^JCTree$JCClassDecl cd))
+    (let [fl (long (get-in cd [:mods :flags]))]
+      (cond
+        (not (zero? (bit-and fl ANNOTATION))) "ANNOTATION_TYPE"
+        (not (zero? (bit-and fl INTERFACE))) "INTERFACE"
+        (not (zero? (bit-and fl ENUM))) "ENUM"
+        (not (zero? (bit-and fl RECORD))) "RECORD"
+        :else "CLASS"))))
+
+(defn literal-value
+  "The value of literal `t` as JCLiteral.getValue gives it: a Number for int and long, a Character
+  for char, a Boolean, a Float, a Double, a String, nil."
+  [t]
+  (if (instance? JCTree t)
+    (.getValue ^JCTree$JCLiteral t)
+    (let [v (get t :value)]
+      (case (get t :typetag)
+        :INT (int v)
+        :LONG (long v)
+        :CHAR (char (int v))
+        :BOOLEAN (not (zero? (long v)))
+        :FLOAT (Float/intBitsToFloat (unchecked-int (Long/parseLong (subs v 1) 16)))
+        :DOUBLE (Double/longBitsToDouble (Long/parseUnsignedLong (subs v 1) 16))
+        :CLASS v
+        :BOT nil))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Positions
+
+(def ^:dynamic ^EndPosTable *end-positions*
+  "The end positions of the javac compilation unit being converted (TreeInfo.getEndPos's table)."
+  nil)
+
+(defn start "TreeInfo.getStartPos." ^long [t]
+  (if (instance? JCTree t) (TreeInfo/getStartPos ^JCTree t) (long (get t :start))))
+
+(defn end "TreeInfo.getEndPos, with the unit's end positions." ^long [t]
+  (if (instance? JCTree t) (TreeInfo/getEndPos ^JCTree t *end-positions*) (long (get t :end))))
+
+(defn pos "The tree's pos." ^long [t]
+  (if (instance? JCTree t) (.-pos ^JCTree t) (long (get t :pos))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; TreeInfo's helpers
+
+(defn skip-parens "TreeInfo.skipParens." [t]
+  (if (instance? JCTree t)
+    (TreeInfo/skipParens ^JCTree t)
+    (loop [t t] (if (is? t :PARENS) (recur (get t :expr)) t))))
+
+(defn tree-name
+  "TreeInfo.name: the name of an identifier, a selection or a type application's class, else nil
+  (javac's Name, or the native trees' string; the converter takes its str)."
+  [t]
+  (if (instance? JCTree t)
+    (TreeInfo/name ^JCTree t)
+    (case (tag t)
+      (:IDENT :SELECT) (get t :name)
+      :TYPEAPPLY (tree-name (get t :clazz))
+      nil)))
+
+(defn full-name "TreeInfo.fullName." [t]
+  (if (instance? JCTree t)
+    (TreeInfo/fullName ^JCTree t)
+    (let [t (skip-parens t)]
+      (case (tag t)
+        :IDENT (get t :name)
+        :SELECT (when-let [s (full-name (get t :selected))] (str s "." (get t :name)))
+        nil))))
+
+(defn diamond? "TreeInfo.isDiamond." [t]
+  (if (instance? JCTree t)
+    (TreeInfo/isDiamond ^JCTree t)
+    (case (tag t)
+      :TYPEAPPLY (empty? (get t :arguments))
+      :NEWCLASS (diamond? (get t :clazz))
+      :ANNOTATED_TYPE (diamond? (get t :underlyingType))
+      false)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Children
+
+(def ^:private attribution-fields
+  #{"type" "sym" "target" "operator" "constructor" "varargsElement" "constructorType" "polyKind"})
+
+(defn- jc-children
+  "javac's child trees of `x` by reflection over its public fields (as the converter always walked
+  them: attribution's fields left out, lists of lists not entered)."
+  [^JCTree x]
+  (for [fld (.getFields (class x))
+        :when (not (java.lang.reflect.Modifier/isStatic (.getModifiers ^java.lang.reflect.Field fld)))
+        :let [nm (.getName ^java.lang.reflect.Field fld)]
+        :when (not (attribution-fields nm))
+        :let [v (.get ^java.lang.reflect.Field fld x)]
+        c (cond (instance? JCTree v) [v]
+                (instance? com.sun.tools.javac.util.List v) (filter #(instance? JCTree %) v)
+                :else [])]
+    c))
+
+(defmacro ^:private class-map [] (into {} (for [[k s] tag-classes] [k s])))
+
+(def ^:private tag-class-objects "tag-classes, the classes themselves." (class-map))
+
+(def ^:private field-order
+  "For a tag, the native tree's fields in the order javac's reflection gives its class's fields
+  (jc-children's order), so that both representations are walked alike."
+  (memoize
+   (fn [tg]
+     (let [c (get tag-class-objects tg)
+           data (set (get tree-fields tg))]
+       (vec (for [fld (.getFields ^Class c)
+                  :when (not (java.lang.reflect.Modifier/isStatic (.getModifiers ^java.lang.reflect.Field fld)))
+                  :let [k (keyword (.getName ^java.lang.reflect.Field fld))]
+                  :when (contains? data k)]
+              k))))))
+
+(defn children
+  "The child trees of tree `t` (either representation), in javac's field order; javac's include
+  what attribution added (a constructor javac made, a `var`'s type)."
+  [t]
+  (if (instance? JCTree t)
+    (jc-children t)
+    (for [k (field-order (get t :tag))
+          :let [v (get t k)]
+          c (cond (map? v) [v]
+                  (vector? v) (filter map? v)
+                  :else [])]
+      c)))

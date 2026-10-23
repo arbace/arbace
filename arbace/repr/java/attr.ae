@@ -1,0 +1,349 @@
+(ns arbace.repr.java.attr
+  "The converter's interface to javac's attribution (doc/classes/JAVA-FRONTEND-SURVEY.md, JFS7 (b),
+  \"As built: JFS66 (b)\"): every fact arbace.repr.java.convert takes from attribution rather than
+  from the tree's syntax (symbols, types, chosen members, instantiated signatures, jump targets,
+  flow, annotation values, the modifiers as javac's Enter completed them), asked of a tree of
+  either representation (arbace.repr.java.tree). For javac's trees the answer is the tree's own
+  (the attributed JCTree); for the native parser's trees it is javac on Arbace's answer for the
+  same tree, found by position: `index` pairs each native node with javac's attributed node of the
+  same tag and position, walking both trees field by field (javac's own additions, a default
+  constructor, an implicit super(), a `var`'s type, skipped), so attribution is answered by position
+  (§4 (d4) as a check). The answers are javac's objects (Symbol, Type, Attribute); a jump target is
+  a tree of the asker's representation.
+
+  Measurement (the split, \"As built: JFS66 (b)\"): with *measure*, each fact asked is counted by its
+  id (a keyword: its namespace the fact's class, :scope, :enter, :names, :types, :overload, :infer,
+  :flow, :annotations; its name the site's), and the converter's frames (a tree node's conversion,
+  arbace.repr.java.convert's `framed`) record the classes of the facts they asked, so that every
+  list of the output is classified by what its writing needed."
+  (:require [arbace.repr.java.tree :as tr]
+            [arbace.repr.java.jtypes :as jt])
+  (:import [com.sun.tools.javac.tree JCTree TreeInfo JCTree$JCIdent JCTree$JCFieldAccess
+            JCTree$JCVariableDecl JCTree$JCMethodDecl JCTree$JCClassDecl JCTree$JCMemberReference
+            JCTree$JCModuleDecl JCTree$JCNewClass JCTree$JCMethodInvocation JCTree$JCLambda
+            JCTree$JCBinary JCTree$JCAssignOp JCTree$JCUnary JCTree$JCBreak JCTree$JCContinue
+            JCTree$JCYield JCTree$JCSwitch JCTree$JCSwitchExpression JCTree$JCCase JCTree$JCAnnotation
+            JCTree$JCCompilationUnit JCTree$JCExpressionStatement JCTree$JCPackageDecl
+            JCTree$JCFunctionalExpression JCTree$JCAssign]
+           [com.sun.tools.javac.code Symbol Symbol$VarSymbol Symbol$MethodSymbol Symbol$ClassSymbol
+            Symbol$PackageSymbol Type Type$ArrayType]
+           [java.util IdentityHashMap HashSet]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Twins: the native trees' javac nodes, by position
+
+(def ^:dynamic ^IdentityHashMap *twins* "Native node -> javac's attributed node (index)." nil)
+(def ^:dynamic ^IdentityHashMap *natives* "javac's node -> the native node (index)." nil)
+(def ^:dynamic ^IdentityHashMap *dropped* "The native annotations javac took off the modifiers (index)." nil)
+
+(defn- jlist [v] (cond (nil? v) [] (instance? java.util.List v) (vec v) :else [v]))
+
+(defn index
+  "Pair the native compilation unit `n` (arbace.repr.java.parse's data) with javac's attributed unit
+  `j` of the same text: {:twins {native javac} :natives {javac native} (IdentityHashMaps), :nodes,
+  :misses (native nodes without a javac node of their tag and position), :synthetic (javac's nodes
+  attribution added, skipped), :dropped (the native annotations javac took off the modifiers),
+  :flags (modifiers whose flags javac changed)}."
+  [n ^JCTree j]
+  (let [tw (IdentityHashMap.) nat (IdentityHashMap.) dropped (IdentityHashMap.)
+        nodes (volatile! 0) misses (volatile! []) synthetic (volatile! 0) flags (volatile! 0)
+        same? (fn [nt ^JCTree jt] (and (instance? JCTree jt) (identical? (tr/tag nt) (tr/tag jt))
+                                       (= (long (:pos nt)) (.-pos jt))))]
+    (letfn [(walk [nt ^JCTree jt]
+              (vswap! nodes inc)
+              (.put tw nt jt)
+              (.put nat jt nt)
+              (when (and (identical? :MODIFIERS (:tag nt)) (not= (long (:flags nt)) (long (tr/f jt :flags))))
+                (vswap! flags inc))
+              (doseq [k (get tr/tree-fields (:tag nt))]
+                (let [nv (get nt k) jv (tr/f jt k)
+                      at [(:tag nt) k]]
+                  (cond
+                    (map? nv) (if (same? nv jv) (walk nv jv) (miss at nv jv))
+                    (and (vector? nv) (= k :dimAnnotations))
+                    (doseq [[a b] (map vector nv (concat (jlist jv) (repeat nil)))] (align at a (jlist b)))
+                    (vector? nv) (align at nv (jlist jv))
+                    (nil? nv) (when (some? jv) (vswap! synthetic inc))))))
+            (align [at nvs jvs]
+              (loop [[nt & nmore :as ns] (seq nvs) jvs (seq jvs)]
+                (when ns
+                  (let [hit (drop-while #(not (same? nt %)) jvs)]
+                    (cond
+                      (seq hit)
+                      (do (vswap! synthetic + (- (count jvs) (count hit)))
+                          (walk nt (first hit))
+                          (recur nmore (next hit)))
+                      ;; Annotate's `value = x` for an annotation's single argument x
+                      (and (#{[:ANNOTATION :args] [:TYPE_ANNOTATION :args]} at) (instance? JCTree$JCAssign (first jvs))
+                           (same? nt (.-rhs ^JCTree$JCAssign (first jvs))))
+                      (do (vswap! synthetic inc)
+                          (walk nt (.-rhs ^JCTree$JCAssign (first jvs)))
+                          (recur nmore (next jvs)))
+                      ;; an annotation javac's attribution took off the modifiers (a record
+                      ;; component's annotation that does not apply to its field: TypeEnter)
+                      (= at [:MODIFIERS :annotations])
+                      (do (.put dropped nt true) (recur nmore jvs))
+                      :else (do (miss at nt (first jvs)) (recur nmore jvs)))))))
+            (miss [at nt jt]
+              (vswap! misses conj [at (:tag nt) (:pos nt) (when (instance? JCTree jt) [(tr/tag jt) (.-pos ^JCTree jt)])]))]
+      (if (same? n j) (walk n j) (miss [:TOPLEVEL] n j)))
+    {:twins tw :natives nat :dropped dropped :nodes @nodes :misses @misses :synthetic @synthetic :flags @flags}))
+
+(defn twin
+  "javac's attributed node for tree `t`: `t` itself for javac's trees; a native node's by position."
+  ^JCTree [t]
+  (if (instance? JCTree t)
+    t
+    (or (some-> *twins* (.get t))
+        (throw (ex-info (str "repr/java attr: no javac node at " (:tag t) " @" (:pos t)) {:tag (:tag t) :pos (:pos t)})))))
+
+(defn- as-asker
+  "javac's node `j` in the representation of the asker `t`."
+  [t j]
+  (cond (nil? j) nil
+        (instance? JCTree t) j
+        :else (or (.get *natives* j) (throw (ex-info "repr/java attr: javac's node has no native one" {})))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Measurement: facts and frames
+
+(def ^:dynamic *measure* "Count the facts asked and classify the output's lists (the split)." false)
+(def ^:dynamic *counts* "An atom of {fact-id count} (the run's statistics)." nil)
+(def ^:dynamic ^HashSet *frame* "The facts the current frame asked (their ids)." nil)
+
+(defn note!
+  "Record fact `id` asked (counted, and in the current frame)."
+  [id]
+  (when *measure*
+    (when *counts* (swap! *counts* update (keyword (str "attr." (namespace id)) (name id)) (fnil inc 0)))
+    (when *frame* (.add *frame* id))))
+
+(defn- sym-class
+  "The class of a fact that is symbol `s`: a local variable :scope, a declaration's :enter, a
+  field, class or package :names, a method :overload."
+  [^Symbol s decl?]
+  (cond
+    (nil? s) "names"
+    (instance? Symbol$MethodSymbol s) (if decl? "enter" "overload")
+    (instance? Symbol$VarSymbol s)
+    (let [ok (str (.kind (.owner s)))]
+      (if (or (= "MTH" ok) (= "VAR" ok) (not (#{"TYP" "PCK"} ok))) "scope" (if decl? "enter" "names")))
+    :else (if decl? "enter" "names")))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The facts
+
+(defn sym
+  "The symbol of tree `t` (an identifier, a selection, a declaration, a method reference); the fact
+  `site` (a keyword), classed by the symbol: :scope (a local), :enter (a declaration's), :names (a
+  field, class or package named), :overload (a method)."
+  ^Symbol [t site]
+  (let [j (twin t)
+        s (condp instance? j
+            JCTree$JCIdent (.-sym ^JCTree$JCIdent j)
+            JCTree$JCFieldAccess (.-sym ^JCTree$JCFieldAccess j)
+            JCTree$JCVariableDecl (.-sym ^JCTree$JCVariableDecl j)
+            JCTree$JCMethodDecl (.-sym ^JCTree$JCMethodDecl j)
+            JCTree$JCClassDecl (.-sym ^JCTree$JCClassDecl j)
+            JCTree$JCMemberReference (.-sym ^JCTree$JCMemberReference j)
+            JCTree$JCModuleDecl (.-sym ^JCTree$JCModuleDecl j)
+            (throw (ex-info (str "repr/java attr: no sym in " (class j)) {})))]
+    (when *measure*
+      (note! (keyword (sym-class s (contains? #{:VARDEF :METHODDEF :CLASSDEF :MODULEDEF} (tr/tag j))) (name site))))
+    s))
+
+(defn symbol-of
+  "TreeInfo.symbol of tree `t`, the fact `site` classed as sym's."
+  ^Symbol [t site]
+  (let [s (TreeInfo/symbol (twin t))]
+    (when *measure* (note! (keyword (sym-class s false) (name site))))
+    s))
+
+(defn type-of
+  "javac's type of tree `t` (`.type`); `fact` the fact's id (:types/..., :names/... for a type tree)."
+  [t fact]
+  (note! fact)
+  (.-type (twin t)))
+
+(defn constructor "NEWCLASS: the constructor chosen." ^Symbol [t]
+  (note! :overload/constructor) (.-constructor ^JCTree$JCNewClass (twin t)))
+
+(defn- generic-type? [^Type t] (not (.isSameType jt/*types* t (.erasure jt/*types* t))))
+
+(defn- own-type-params? [^Symbol m] (boolean (seq (.getTypeArguments (.type m)))))
+
+(defn- instantiation-fact
+  "The class of an instantiated signature of method `m` (javac's answer the same in each case): the
+  symbol's own when its type is not generic (:overload), inferred when the method has type
+  parameters of its own or the creation is a diamond (:infer), else the member's type at the
+  site's type arguments (:types, Types.memberType)."
+  [^Symbol m diamond? site]
+  (cond
+    (or (own-type-params? m) diamond?) (keyword "infer" site)
+    (generic-type? (.type m)) (keyword "types" (str "member-" site))
+    :else (keyword "overload" (str "declared-" site))))
+
+(defn method-type
+  "The instantiated type of the method `meth` (an APPLY's meth tree) calls, `m` its symbol."
+  [meth ^Symbol m]
+  (note! (instantiation-fact m false "method-type"))
+  (.-type (twin meth)))
+
+(defn constructor-type "NEWCLASS: the instantiated type of its constructor, `m` (or the one it calls)." [t ^Symbol m]
+  (note! (instantiation-fact m (tr/diamond? t) "constructor-type"))
+  (.-constructorType ^JCTree$JCNewClass (twin t)))
+
+(defn varargs-element
+  "APPLY, NEWCLASS, REFERENCE: the (inferred) element type of a variable arity call's array, nil
+  when the call is not of variable arity; `m` the method's symbol (the fact's class: whether the
+  call is of variable arity is overload resolution's phase 3; the element is inferred when the
+  declared one is generic)."
+  [t ^Symbol m]
+  (let [j (twin t)
+        ve (condp instance? j
+             JCTree$JCMethodInvocation (.-varargsElement ^JCTree$JCMethodInvocation j)
+             JCTree$JCNewClass (.-varargsElement ^JCTree$JCNewClass j)
+             JCTree$JCMemberReference (.-varargsElement ^JCTree$JCMemberReference j))]
+    (when *measure*
+      (note! (cond
+               (nil? ve) :overload/arity
+               (let [ps (.getParameterTypes (.type m))
+                     l (when (seq ps) (last ps))]
+                 (and (instance? Type$ArrayType l) (not (generic-type? (.-elemtype ^Type$ArrayType l)))))
+               :overload/declared-varargs-element
+               :else (instantiation-fact m (tr/diamond? t) "varargs-element"))))
+    ve))
+
+(defn fn-target "LAMBDA, REFERENCE: the functional interface type javac inferred." [t]
+  (note! :infer/target) (.-target ^JCTree$JCFunctionalExpression (twin t)))
+
+(defn operator "BINARY, ASSIGNOP, UNARY: the operator symbol javac resolved." ^Symbol [t]
+  (note! :types/operator)
+  (let [j (twin t)]
+    (condp instance? j
+      JCTree$JCBinary (.-operator ^JCTree$JCBinary j)
+      JCTree$JCAssignOp (.-operator ^JCTree$JCAssignOp j)
+      JCTree$JCUnary (.-operator ^JCTree$JCUnary j))))
+
+(defn ref-kind "REFERENCE: the method reference's kind (JCMemberReference.ReferenceKind)." [t]
+  (note! :overload/ref-kind) (.-kind ^JCTree$JCMemberReference (twin t)))
+
+(defn jump-target
+  "BREAK, CONTINUE, YIELD: the statement it leaves or continues (Attr's findJumpTarget), a tree of
+  the asker's representation."
+  [t]
+  (note! :scope/jump-target)
+  (let [j (twin t)]
+    (as-asker t (condp instance? j
+                  JCTree$JCBreak (.-target ^JCTree$JCBreak j)
+                  JCTree$JCContinue (.-target ^JCTree$JCContinue j)
+                  JCTree$JCYield (.-target ^JCTree$JCYield j)))))
+
+(defn pattern-switch? "SWITCH, SWITCH_EXPRESSION: a pattern switch (Attr's)." [t]
+  (note! :types/pattern-switch)
+  (let [j (twin t)]
+    (if (instance? JCTree$JCSwitch j) (.-patternSwitch ^JCTree$JCSwitch j) (.-patternSwitch ^JCTree$JCSwitchExpression j))))
+
+(defn unconditional-pattern? "SWITCH, SWITCH_EXPRESSION: has an unconditional pattern (Attr's)." [t]
+  (note! :flow/unconditional-pattern)
+  (let [j (twin t)]
+    (if (instance? JCTree$JCSwitch j) (.-hasUnconditionalPattern ^JCTree$JCSwitch j)
+        (.-hasUnconditionalPattern ^JCTree$JCSwitchExpression j))))
+
+(defn exhaustive? "SWITCH: exhaustive (Flow's)." [t]
+  (note! :flow/exhaustive) (.-isExhaustive ^JCTree$JCSwitch (twin t)))
+
+(defn completes-normally? "CASE: its statements can complete normally (Flow's)." [t]
+  (note! :flow/case-completes) (.-completesNormally ^JCTree$JCCase (twin t)))
+
+(defn attribute
+  "ANNOTATION: its value as Annotate computed it (Attribute$Compound), nil for none (and for a native
+  annotation javac took off the modifiers, as javac's tree then has none)."
+  [t]
+  (note! :annotations/attribute)
+  (when-not (and *dropped* (.containsKey *dropped* t))
+    (.-attribute ^JCTree$JCAnnotation (twin t))))
+
+(defn mods-flags
+  "The flags of declaration `d`'s modifiers as javac's Enter left them (it adds PUBLIC and STATIC to
+  a member class of an interface)."
+  ^long [d]
+  (note! :enter/flags)
+  (long (tr/f (tr/f (twin d) :mods) :flags)))
+
+(defn packge "TOPLEVEL: the unit's package symbol." ^Symbol$PackageSymbol [cu]
+  (note! :names/package)
+  (.-packge ^JCTree$JCCompilationUnit (twin cu)))
+
+(defn anon-super-ctor
+  "The superclass constructor that the constructor javac made for the anonymous class declared by
+  `cd` calls (a node only javac's tree has: TypeEnter's), else `fallback`."
+  ^Symbol$MethodSymbol [cd fallback]
+  (note! :overload/anon-super-ctor)
+  (or (some (fn [d]
+              (when (and (instance? JCTree$JCMethodDecl d) (= "<init>" (str (.-name ^JCTree$JCMethodDecl d)))
+                         (.-body ^JCTree$JCMethodDecl d))
+                (some (fn [st]
+                        (when (instance? JCTree$JCExpressionStatement st)
+                          (let [e (.-expr ^JCTree$JCExpressionStatement st)]
+                            (when (instance? JCTree$JCMethodInvocation e)
+                              (let [s (TreeInfo/symbol (.-meth ^JCTree$JCMethodInvocation e))]
+                                (when (and (instance? Symbol$MethodSymbol s) (= "<init>" (str (.-name ^Symbol s))))
+                                  s))))))
+                      (.-stats (.-body ^JCTree$JCMethodDecl d)))))
+            (.-defs ^JCTree$JCClassDecl (twin cd)))
+      fallback))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The split: the output's lists by the facts their writing asked
+
+(def ^:dynamic ^IdentityHashMap *owners* "With *measure*: an output list -> its frame's record." nil)
+(def ^:dynamic *frames* "With *measure*: a volatile of the frames' records [tag classes]." nil)
+
+(defn- own!
+  "Record `rec` as the owner of the lists of form `x` that no frame owns yet (not entering the owned
+  ones, metadata, or lazy sequences not yet realized)."
+  [x rec]
+  (cond
+    (instance? arbace.lang.LazySeq x) (when (realized? x) (run! #(own! % rec) x))
+    (seq? x) (when-not (.containsKey *owners* x)
+               (.put *owners* x rec)
+               (run! #(own! % rec) x))
+    (vector? x) (run! #(own! % rec) x)
+    (map? x) (doseq [[k v] x] (own! k rec) (own! v rec))
+    :else nil))
+
+(defn framed*
+  "Run `f` as the frame of a tree of tag `tg`: the facts it asks (not its sub-frames') are its, and
+  the lists of its result that no sub-frame wrote are owned by it."
+  [tg f]
+  (if (and *measure* *owners*)
+    (let [fr (HashSet.)
+          res (binding [*frame* fr] (f))
+          rec [tg (into (sorted-set) fr)]]
+      (vswap! *frames* conj rec)
+      (own! (if (and (map? res) (contains? res :f)) (:f res) res) rec)
+      res)
+    (f)))
+
+(defmacro framed "(framed tag body...): framed* over body." [tg & body]
+  `(framed* ~tg (fn [] ~@body)))
+
+(defn split-of
+  "The split of a unit's forms (before simplify): {:lists {facts count} :frames {[tag facts]
+  count}}, facts the sorted set of the ids of the facts the owning frame asked (#{} for a list of
+  syntax alone; :unowned for a list no frame wrote)."
+  [forms]
+  (let [lists (volatile! {})]
+    (letfn [(walk [x]
+              (cond
+                (instance? arbace.lang.LazySeq x) (when (realized? x) (run! walk x))
+                (seq? x) (let [rec (.get *owners* x)
+                               k (if rec (second rec) :unowned)]
+                           (vswap! lists update k (fnil inc 0))
+                           (run! walk x))
+                (vector? x) (run! walk x)
+                (map? x) (doseq [[k v] x] (walk k) (walk v))
+                :else nil))]
+      (run! walk forms))
+    {:lists @lists :frames (frequencies @*frames*)}))

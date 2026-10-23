@@ -130,7 +130,13 @@ Prior art:
     on the tool; `--time`: the speed); `bin/repr-java parse-check`: the tree level, every file of the
     samples, the baseline, the jdk corpus's and javac's sources and jdk26u's 68 modules, 8,000
     mutants (javac's error recovery) and jdk26u's tests parsed by both, the trees equal, against `test/repr/java/parse-check-known.edn`;
-    doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"), and Java forms → Java (`print`, `arbace.repr.java.print`; the
+    doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"); since JFS66 (b) the converter reads the tree through
+    `arbace.repr.java.tree` (javac's JCTrees or the native trees as data) and asks javac's attribution through
+    `arbace.repr.java.attr` (for the native trees by position: each native node paired with javac's attributed
+    node of its tag and position), `read --front javac|native|both` (`--split`: the attribution facts asked and
+    what each output list needed, `arbace.repr.java.split`); `bin/repr-java front-check`: the samples, the
+    baseline, the jdk corpus and javac's sources (`--corpus all`: jdk26u's 68 modules) converted from both
+    trees, the forms equal byte for byte, the split summed ("As built: JFS66 (b)"), and Java forms → Java (`print`, `arbace.repr.java.print`; the
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →
     forms → Java → forms at the levels forms, ae (the converted text) and classes (javac's, byte
     for byte; `bin/repr-java roundtrip`, corpora baseline, samples and jdk/forms, references in
@@ -297,7 +303,8 @@ Prior art:
   `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte), `bin/clojure-tests
   --java-fixtures verify` (the verifies compare the provenance but its host, which names the tool
   that wrote it, JFS32), `bin/repr-java parse-check` (the native parser's trees equal to javac on
-  Arbace's, JN8); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
+  Arbace's, JN8), `bin/repr-java front-check` (the converter's forms from the native trees equal to
+  javac's trees', JFS66 (b)); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
