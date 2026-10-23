@@ -378,6 +378,14 @@ covers what.
   helpers the parser calls) and `TreeMaker.java` (its factories' positions): Copyright (c) Oracle
   and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below; each file carries the notice of the files it ports).
+- The non-javac branches of `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` in
+  `arbace/repr/java/tree.ae` (repr/java's interface to the tree, doc/classes/JAVA-FRONTEND-SURVEY.md,
+  "As built: JFS66 (b)"): Arbace forms reimplementing, for the native parser's trees,
+  https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/tree/TreeInfo.java`'s `skipParens`, `name`,
+  `fullName` and `isDiamond`, and `tree/JCTree.java`'s `JCClassDecl.getKind` (its test of the
+  modifiers' flags): Copyright (c) Oracle and/or its affiliates, under the GNU General Public
+  License version 2 with the Classpath Exception (text below; the file carries their notice).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`
