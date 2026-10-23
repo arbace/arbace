@@ -13,7 +13,11 @@ code. Three kinds of things live here:
   jdk26u's javac: https://github.com/openjdk/jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259`,
   `src/jdk.compiler/share/classes/com/sun/tools/javac/parser/{UnicodeReader,JavaTokenizer,JavadocTokenizer,Tokens,JavacParser}.java`
   and `tree/{TreeInfo,TreeMaker}.java`, ported by hand on 2026-10-23, the files carrying their
-  notice; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
+  notice; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"; and `repr/java/tree.ae`'s helpers
+  `skip-parens`, `tree-name`, `full-name`, `diamond?` and `class-kind` reimplement, for the native
+  trees, `tree/TreeInfo.java`'s `skipParens`, `name`, `fullName` and `isDiamond` and
+  `tree/JCTree.java`'s `JCClassDecl.getKind`, at the same commit, by hand on 2026-10-23, the file
+  carrying their notice; "As built: JFS66 (b)", "As built: JFS70"), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
   `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
   `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,
   `arbace.build.go`; doc/go/BUILD.md; until 2026-10-17 j2a, g2a and `arbace.g2a.build`) and
