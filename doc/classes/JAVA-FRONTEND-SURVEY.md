@@ -3681,8 +3681,9 @@ both of its conversions of a run: on the base tool, every run of jdk.javadoc pin
   by module name. A first version took Symtab's symbol before the run's sources: a local class of a
   patched module (`CharSequence.chars()`'s `CharIterator`, java.base) has a namesake in the
   platform's class files, whose constructor takes the outer instance, and `bin/jrt-convert update`
-  pinned 14 constructor calls in 7 files of `jdk/forms`; with the run's sources first the committed
-  forms came back byte for byte.
+  pinned calls in 7 files of `jdk/forms` (constructors of local classes, and
+  `HostFiles.setDescriptorAccess` given an anonymous class); with the run's sources first the
+  committed forms came back byte for byte.
 - `class-info`: made only from a symbol that completes (`completed?`: no `CompletionFailure`, not
   erroneous) and kept per symbol (nil kept for one that does not complete, which is then
   deterministic: a canonical symbol fails only when its class file is absent).
@@ -3765,7 +3766,7 @@ the version map the executable carries changes, as at JFS66 (b). No re-seed.
     them and `check --update --jdk` rewriting them, so that any change to jdk26u's forms is seen and
     reviewed; (c) (b) and two runs compared in `check --jdk` (the history's check, about 9 minutes
     more).
-  - *Recommended: (b)*: it costs a file of about 1.3 MB and no time, and it would have shown this
+  - *Recommended: (b)*: it costs a file of about 1.4 MB and no time, and it would have shown this
     defect's six files; (c) adds little once the answers no longer depend on the run.
 
 ### JFS70.8 Sources and scratch
