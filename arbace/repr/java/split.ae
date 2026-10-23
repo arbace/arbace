@@ -1,0 +1,308 @@
+(ns arbace.repr.java.split
+  "How the converter splits between the tree's syntax and javac's attribution
+  (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JFS66 (b)\"): the catalogue of the attribution facts
+  arbace.repr.java.convert asks through arbace.repr.java.attr (each with the javac phase that
+  computes it and what a native attribution, JN9, would have to provide), their tiers, the summary of
+  the measured runs (`read --split`'s repr-java-split.edn files: the facts asked, the output lists
+  classified by the facts their writing asked, the converted nodes) and the static split of the
+  converter's code (its top-level forms that ask attribution, directly or through the functions they
+  call).
+
+  bin/repr-java front-check (bin/lib/repr-java/front-check) runs, on the tools' host:
+    -m arbace.repr.java.split summary OUT DIR...   the split of the runs under the DIRs, by corpus
+                                                   (a DIR's name), into OUT/split.edn and OUT/split.md
+    -m arbace.repr.java.split static               the static split, printed"
+  (:require [arbace.java.io :as io]
+            [arbace.pprint :as pp]
+            [arbace.string :as str])
+  (:import [java.io File PushbackReader StringReader]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The tiers and the catalogue
+
+(def tiers
+  "The tiers of what a native front end must provide, cheapest first: what the tree gives with a
+  local rule; local scopes (a syntactic pass); the declarations (javac's Enter, TypeEnter,
+  MemberEnter: classes, members, flags, declared types, type names resolved, annotation values);
+  flow (JLS 14.22, exhaustiveness); member lookup of names in code; expression types; overload
+  resolution; inference (generic methods, poly expressions, lambda targets)."
+  [:syntax :scope :declarations :flow :members :types :overload :inference])
+
+(def tier-rank (zipmap tiers (range)))
+
+(def catalogue
+  "Fact id -> [tier javac's phase what the converter takes]; a sym fact's class (its namespace) is the
+  symbol's (attr/sym): :scope a local, :enter a declaration's, :names a field, class or package,
+  :overload a method."
+  {:types/literal [:syntax "Attr.visitLiteral" "a literal's type (its typetag: int, long, String, ...)"]
+   :scope/ident [:scope "Attr.visitIdent, Resolve.findVar" "a name's local variable or parameter"]
+   :scope/local-decl [:scope "MemberEnter (local VarSymbol)" "a local declaration's symbol (identity, declared type, flags: final, effectively final)"]
+   :scope/param [:scope "MemberEnter.visitMethodDef" "a parameter's symbol (identity, type, flags)"]
+   :scope/lambda-param [:scope "Attr.visitLambda" "a lambda parameter's symbol (identity, type: inferred for implicit ones)"]
+   :scope/binding [:scope "Attr.visitBindingPattern" "a pattern variable's symbol"]
+   :scope/assigned [:scope "Attr.visitIdent" "an assigned local (the converter's ^:mutable)"]
+   :scope/capture [:scope "Attr.visitIdent" "a local a class or lambda captures"]
+   :scope/hoist [:scope "Attr.visitIdent" "the names in an expression with postfix increments (their uses)"]
+   :scope/refers [:scope "Attr.visitIdent" "whether a tree mentions a local"]
+   :scope/local-names [:scope "MemberEnter" "the unit's locals' names"]
+   :scope/type-expr [:scope "Attr.visitIdent" "a qualifier that is a local, not a type"]
+   :scope/label [:scope "Attr.visitIdent" "a case label naming a local constant"]
+   :scope/resource [:scope "Attr.visitIdent" "a resource named by a local"]
+   :scope/jump-target [:scope "Attr.findJumpTarget" "the statement a break, continue or yield leaves"]
+   :scope/select [:scope "Attr.visitSelect" "a selection that is a local"]
+   :enter/class-decl [:declarations "Enter.visitClassDef, TypeEnter" "a class's symbol: flags, members, supertypes, type parameters, record components"]
+   :enter/method-decl [:declarations "MemberEnter.visitMethodDef" "a method's symbol: flags (varargs, generated, compact), type, default value"]
+   :enter/field-decl [:declarations "MemberEnter.visitVarDef" "a field's symbol: flags (enum, record, generated), type, constant value"]
+   :enter/flags [:declarations "Enter.visitClassDef" "the modifiers as Enter completes them (public static of an interface's member class)"]
+   :enter/local-names [:declarations "MemberEnter" "a field among the unit's variable declarations"]
+   :annotations/attribute [:declarations "Annotate" "an annotation's values (constants, classes, enums, nested), its retention"]
+   :names/type-tree [:declarations "Attr.attribType, TypeEnter" "a type tree's type (names resolved, type arguments, annotations)"]
+   :names/type-expr [:declarations "Attr.visitIdent, visitSelect (KindSelector)" "whether a qualifier names a type or package (JLS 6.5)"]
+   :names/package [:declarations "Enter.visitTopLevel" "the unit's package symbol and its classes"]
+   :names/record-pattern [:declarations "Attr.visitRecordPattern" "a record pattern's record type"]
+   :types/this [:declarations "Attr.visitIdent, visitSelect" "the type of this, super, C.this"]
+   :types/class-literal [:declarations "Attr.visitSelect" "a class literal's type"]
+   :flow/case-completes [:flow "Flow.AliveAnalyzer" "whether a case's statements complete normally (fall-through)"]
+   :flow/exhaustive [:flow "Flow, ExhaustivenessComputer" "whether a switch statement is exhaustive"]
+   :flow/unconditional-pattern [:flow "Attr.handleSwitch" "whether a switch has an unconditional pattern"]
+   :names/ident [:members "Attr.visitIdent, Resolve.findIdent" "a simple name's field or class (inherited, outer, static imports)"]
+   :names/select [:members "Attr.visitSelect, Resolve.findIdentInType" "a selection's field, class or package"]
+   :names/assigned [:members "Attr.visitIdent" "an assigned name's symbol (a field)"]
+   :names/capture [:members "Attr.visitIdent" "a name's symbol in a capturing class or lambda (a field or class)"]
+   :names/hoist [:members "Attr.visitIdent, visitSelect" "the names' symbols in an expression with postfix increments"]
+   :names/refers [:members "Attr.visitIdent" "a name's symbol (a field or class), compared with a local's"]
+   :names/label [:members "Attr.visitIdent, visitSelect" "a case label's constant field"]
+   :names/resource [:members "Attr.visitIdent" "a resource named by a field"]
+   :names/local-names [:members "MemberEnter" "the unit's variable declarations' symbols"]
+   :names/method [:members "Attr.visitApply" "a call's method symbol where it is not a method"]
+   :names/ident-sym [:members "Attr.visitIdent" "a name's symbol"]
+   :types/expr [:types "Attr (attribExpr, check)" "an expression's type (erased by the converter)"]
+   :types/qualifier [:types "Attr.visitSelect" "a qualifier's type (the site of a member)"]
+   :types/constant [:types "Attr, ConstFold" "an expression's constant value (folded labels, while(true), concatenation operands)"]
+   :types/operator [:types "Attr.visitBinary, Operators.resolveBinary" "the operator resolved by the operand types (its parameter types)"]
+   :types/new [:types "Attr.visitNewClass" "a new instance's class type"]
+   :types/new-array [:types "Attr.visitNewArray" "a new array's type"]
+   :types/ident [:types "Attr.visitIdent" "an odd name's type"]
+   :types/pattern-switch [:types "Attr.handleSwitch" "whether a switch is a pattern switch (labels and selector type)"]
+   :types/result [:types "Attr (the operands' types)" "a conversion decided by a converted operand's type (coerce, test-form)"]
+   :overload/method [:overload "Resolve.resolveQualifiedMethod, findFun" "a call's method symbol"]
+   :overload/constructor [:overload "Resolve.resolveConstructor" "a new instance's constructor"]
+   :overload/anon-super-ctor [:overload "TypeEnter (anonymous constructor), Resolve" "the superclass constructor of an anonymous class"]
+   :overload/method-ref [:overload "Attr.visitReference, Resolve" "a method reference's method"]
+   :overload/ref-kind [:overload "Attr.visitReference" "a method reference's kind (static, bound, unbound, constructor)"]
+   :overload/hoist [:overload "Resolve" "a method named in an expression with postfix increments"]
+   :overload/capture [:overload "Resolve" "a method named in a capturing class or lambda"]
+   :overload/assigned [:overload "Resolve" "a method named where assignments are sought"]
+   :overload/refers [:overload "Resolve" "a method named where a local is sought"]
+   :overload/ident [:overload "Resolve" "a name that is a method"]
+   :overload/select [:overload "Resolve" "a selection that is a method"]
+   :overload/local-names [:overload "Resolve" "-"]
+   :overload/declared-method-type [:overload "MemberEnter (the symbol's type)" "a call's method type, the symbol's own (not generic)"]
+   :overload/declared-constructor-type [:overload "MemberEnter (the symbol's type)" "a constructor's type, the symbol's own"]
+   :overload/arity [:overload "Resolve (phase 3)" "whether a call is of variable arity"]
+   :overload/declared-varargs-element [:overload "Resolve (phase 3)" "a variable arity call's array element, the declared one"]
+   :types/member-method-type [:types "Types.memberType" "a call's method type at the site's type arguments"]
+   :types/member-constructor-type [:types "Types.memberType" "a constructor's type at the class's type arguments"]
+   :types/member-varargs-element [:types "Types.memberType" "a variable arity call's array element at the site's type arguments"]
+   :infer/method-type [:inference "Attr.checkMethod, Infer" "a generic method's instantiated type (argument targets, call site types)"]
+   :infer/constructor-type [:inference "Attr.visitNewClass, Infer" "a generic or diamond constructor's instantiated type"]
+   :infer/varargs-element [:inference "Attr.checkMethod, Infer" "a generic method's variable arity array element type, inferred"]
+   :infer/target [:inference "Attr.visitLambda, visitReference, DeferredAttr" "a lambda's or method reference's functional interface type"]
+   :infer/poly-result [:inference "Attr.visitApply" "a signature polymorphic call's result type"]})
+
+(defn tier-of
+  "The tier of fact `id`: the catalogue's, else by its class."
+  [id]
+  (or (first (get catalogue id))
+      (case (namespace id)
+        "scope" :scope "enter" :declarations "annotations" :declarations "flow" :flow "names" :members
+        "types" :types "overload" :overload "infer" :inference :types)))
+
+(defn max-tier
+  "The highest tier of the facts `ids` (:syntax for none); :unowned for a list no frame wrote."
+  [ids]
+  (if (= ids :unowned) :unowned (reduce #(if (> (tier-rank %2) (tier-rank %1)) %2 %1) :syntax (map tier-of ids))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The summary of the measured runs
+
+(defn- read-edn [f]
+  (with-open [r (PushbackReader. (io/reader f))] (binding [*read-eval* false] (read r))))
+
+(defn- split-files [dir]
+  (for [^File f (file-seq (io/file dir))
+        :when (and (.isFile f) (= "repr-java-split.edn" (.getName f)))]
+    f))
+
+(defn- add [a b] (merge-with + a b))
+
+(defn summarize
+  "The split of the runs whose repr-java-split.edn files are under `dir`."
+  [dir]
+  (let [rs (map read-edn (split-files dir))
+        facts (reduce add {} (map :facts rs))
+        lists (reduce add {} (map :lists rs))
+        frames (reduce add {} (map :frames rs))
+        index (reduce add {} (map :index rs))
+        total (reduce + (vals lists))
+        by-tier (reduce (fn [m [ids n]] (update m (max-tier ids) (fnil + 0) n)) {} lists)
+        needs (reduce (fn [m [ids n]]
+                        (if (= ids :unowned) m
+                            (reduce #(update %1 %2 (fnil + 0) n) m (distinct (map tier-of ids)))))
+                      {} lists)
+        by-class (reduce (fn [m [ids n]]
+                           (if (= ids :unowned) m
+                               (reduce #(update %1 %2 (fnil + 0) n) m (distinct (map #(keyword (namespace %)) ids)))))
+                         {} lists)
+        nodes (reduce + (vals frames))
+        node-tiers (reduce (fn [m [[tg ids] n]] (update-in m [tg (max-tier ids)] (fnil + 0) n)) {} frames)
+        node-syntax (reduce + (for [[[_ ids] n] frames :when (empty? ids)] n))]
+    {:units (reduce + (map :units rs))
+     :facts (into (sorted-map) facts)
+     :index index
+     :lists total
+     :lists-by-tier (into {} by-tier)
+     :lists-needing (into {} needs)
+     :lists-needing-class (into (sorted-map) by-class)
+     :nodes nodes
+     :nodes-asking-nothing node-syntax
+     :nodes-by-tag (into (sorted-map) node-tiers)}))
+
+(defn- pct [n d] (if (zero? d) "-" (format "%.1f%%" (* 100.0 (/ (double n) d)))))
+
+(defn- fmt [n] (let [s (str n)] (str/replace s #"\B(?=(\d{3})+(?!\d))" ",")))
+
+(defn markdown
+  "The summaries by corpus ({corpus summary}) as Markdown tables."
+  [sums]
+  (let [cs (sort (keys sums))
+        all-facts (sort (distinct (mapcat (comp keys :facts) (vals sums))))
+        sb (StringBuilder.)
+        line (fn [& xs] (.append sb (apply str xs)) (.append sb "\n"))]
+    (line "| | " (str/join " | " cs) " |")
+    (line "|---|" (str/join "" (repeat (count cs) "---:|")))
+    (line "| units | " (str/join " | " (map #(fmt (:units (sums %))) cs)) " |")
+    (line "| nodes converted (frames) | " (str/join " | " (map #(fmt (:nodes (sums %))) cs)) " |")
+    (line "| of them asking no attribution | " (str/join " | " (map #(let [s (sums %)] (str (fmt (:nodes-asking-nothing s)) " (" (pct (:nodes-asking-nothing s) (:nodes s)) ")")) cs)) " |")
+    (line "| lists written | " (str/join " | " (map #(fmt (:lists (sums %))) cs)) " |")
+    (line "")
+    (line "Lists by the highest tier their writing asked (cumulative share in parentheses):")
+    (line "")
+    (line "| tier | " (str/join " | " cs) " |")
+    (line "|---|" (str/join "" (repeat (count cs) "---:|")))
+    (doseq [[i t] (map-indexed vector (conj tiers :unowned))]
+      (line "| " (name t) " | "
+            (str/join " | " (for [c cs :let [s (sums c) n (get (:lists-by-tier s) t 0)
+                                             cum (reduce + (for [u (take (inc i) (conj tiers :unowned))] (get (:lists-by-tier s) u 0)))]]
+                              (str (fmt n) " (" (pct cum (:lists s)) ")")))
+            " |"))
+    (line "")
+    (line "Lists whose writing asked a fact of the tier (not exclusive):")
+    (line "")
+    (line "| tier | " (str/join " | " cs) " |")
+    (line "|---|" (str/join "" (repeat (count cs) "---:|")))
+    (doseq [t (rest tiers)]
+      (line "| " (name t) " | " (str/join " | " (for [c cs :let [s (sums c) n (get (:lists-needing s) t 0)]] (str (fmt n) " (" (pct n (:lists s)) ")"))) " |"))
+    (line "")
+    (line "The facts asked (attr's sites), by id:")
+    (line "")
+    (line "| fact | tier | " (str/join " | " cs) " |")
+    (line "|---|---|" (str/join "" (repeat (count cs) "---:|")))
+    (doseq [f all-facts]
+      (line "| `" (subs (str f) 1) "` | " (name (tier-of f)) " | " (str/join " | " (map #(fmt (get-in sums [% :facts f] 0)) cs)) " |"))
+    (line "")
+    (line "The index (native nodes paired with javac's by position):")
+    (line "")
+    (doseq [c cs] (line "- " c ": " (pr-str (:index (sums c)))))
+    (str sb)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The static split
+
+(def converter-files
+  ["arbace/repr/java/convert.ae"])
+
+(defn- code-lines
+  "The lines of text `lines` (a seq) that hold code (not blank, not comments)."
+  [lines]
+  (count (remove #(re-matches #"\s*(;.*)?" %) lines)))
+
+(defn- syms [x]
+  (cond (symbol? x) [x]
+        (or (seq? x) (vector? x) (set? x)) (mapcat syms x)
+        (map? x) (mapcat syms (concat (keys x) (vals x)))
+        :else []))
+
+(def ^:private model-methods
+  "The interop methods the converter calls on attribution's answers (javac's Symbol, Type, Types,
+  Attribute), the tree's being behind arbace.repr.java.tree."
+  #{".tsym" ".owner" ".flags" ".members" ".getSymbolsByName" ".getSymbols" ".erasure" ".closure"
+    ".isMemberOf" ".outermostClass" ".packge" ".getParameterTypes" ".getReturnType" ".getTypeArguments"
+    ".getEnclosingType" ".allparams" ".constValue" ".getConstValue" ".isInterface" ".getSimpleName"
+    ".baseSymbol" ".isSignaturePolymorphic" ".isSameType" ".skipTypeVars" ".isCompound"
+    ".getAnnotationMirrors" ".getRecordComponents" ".getInterfaces" ".getSuperclass" ".getRetention"
+    ".findDescriptorType" ".findDescriptorSymbol" ".unboxedType" ".makeArrayType" ".asMethodType"
+    ".getThrownTypes" ".defaultValue" ".values" ".fst" ".snd" ".elemtype" ".type" ".name" ".kind"
+    ".getValue" ".isVarargs" ".getTag" ".tail" ".getUpperBound" ".intType" ".booleanType"})
+
+(defn- model? [s]
+  (or (#{"jt" "res"} (namespace s))
+      ;; jtypes' functions convert refers
+      (and (nil? (namespace s)) (#{"erasure" "prim?" "ref-type?" "same?" "subtype?" "tag-name"} (name s)))
+      (re-find #"^(Type|Symbol|Attribute|Flags|BoundKind|TypeTag)" (str s))
+      (model-methods (name s))))
+
+(defn static-split
+  "For each file of `files`: its top-level forms, those asking attribution (calling attr/'s
+  functions) directly and through the file's functions they call, and their code lines."
+  [files]
+  (vec
+   (for [path files]
+     (let [text (slurp path)
+           lines (vec (str/split-lines text))
+           ;; auto-resolved keywords (::f/m) read as plain ones: only the symbols matter here
+           r (arbace.lang.LineNumberingPushbackReader. (StringReader. (str/replace text "::" ":")))
+           eof (Object.)
+           forms (binding [*read-eval* false]
+                   (loop [acc []]
+                     (let [f (read r false eof)]
+                       (if (identical? f eof) acc (recur (conj acc f))))))
+           starts (mapv #(or (:line (meta %)) 1) forms)
+           ends (conj (mapv dec (rest starts)) (count lines))
+           info (vec (for [[f s e] (map vector forms starts ends)]
+                       (let [ss (syms f)]
+                         {:name (when (seq? f) (second f))
+                          :attr (into (sorted-set) (keep #(when (= "attr" (namespace %)) (name %)) ss))
+                          :tree (some #(= "tr" (namespace %)) ss)
+                          :model (some model? ss)
+                          :refs (set (remove namespace ss))
+                          :lines (code-lines (subvec lines (dec s) e))})))
+           names (set (keep :name info))
+           direct (set (keep #(when (seq (:attr %)) (:name %)) info))
+           answers (into direct (keep #(when (:model %) (:name %)) info))
+           trans (loop [s answers]
+                   (let [s' (into s (keep #(when (some s (filter names (:refs %))) (:name %)) info))]
+                     (if (= s s') s (recur s'))))
+           sum (fn [p] (reduce + (map :lines (filter p info))))]
+       {:file path
+        :forms (count info) :lines (sum identity)
+        :attr-direct (count direct) :attr-direct-lines (sum #(direct (:name %)))
+        :answers-direct (count answers) :answers-direct-lines (sum #(answers (:name %)))
+        :attr-transitive (count trans) :attr-transitive-lines (sum #(trans (:name %)))
+        :tree-only (count (filter #(and (:tree %) (not (trans (:name %)))) info))
+        :syntax-only-forms (vec (sort (map str (keep #(when (and (:name %) (not (trans (:name %)))) (:name %)) info))))
+        :attr-calls (frequencies (mapcat (fn [i] (map #(str "attr/" %) (:attr i))) info))}))))
+
+;;; ------------------------------------------------------------------------------------------
+
+(defn -main [cmd & args]
+  (case cmd
+    "summary" (let [[out & dirs] args
+                    sums (into (sorted-map) (for [d dirs] [(.getName (io/file d)) (summarize d)]))
+                    md (markdown sums)]
+                (io/make-parents (io/file out "split.edn"))
+                (spit (io/file out "split.edn") (with-out-str (pp/pprint sums)))
+                (spit (io/file out "split.md") md)
+                (print md))
+    "static" (pp/pprint (static-split converter-files)))
+  (flush))

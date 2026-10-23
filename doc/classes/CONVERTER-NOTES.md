@@ -20,10 +20,13 @@ the spec should change (amendments, accepted and folded into SPEC.md). The compi
 | `arbace/repr/java/javac.ae` | `arbace.repr.java.javac` | runs the JDK's javac (`JavacTask.parse` + `analyze`: attribution and flow, no desugaring); on javac's tool executable javac on Arbace, with the file manager of javac's command line on Arbace (`jdk.internal.jrt.javac.FileManager`) against the platform |
 | `arbace/repr/java/jtypes.ae` | `arbace.repr.java.jtypes` | javac types and symbols: erasure, boxing, widening, flags, binary names, renaming |
 | `arbace/repr/java/forms.ae` | `arbace.repr.java.forms` | output data: forms, class references named later (`CRef`), raw tokens, ordered metadata |
-| `arbace/repr/java/convert.ae` | `arbace.repr.java.convert` | the conversion of attributed trees: declarations, code, control flow, patterns, switches, lambdas |
+| `arbace/repr/java/convert.ae` | `arbace.repr.java.convert` | the conversion of attributed trees: declarations, code, control flow, patterns, switches, lambdas; since JFS66 (b) over the two interfaces below |
+| `arbace/repr/java/tree.ae` | `arbace.repr.java.tree` | the converter's interface to the tree (JFS66 (b), JAVA-FRONTEND-SURVEY.md): tags, fields, positions and TreeInfo's helpers over javac's JCTrees or the native parser's trees as data |
+| `arbace/repr/java/attr.ae` | `arbace.repr.java.attr` | the converter's interface to javac's attribution: symbols, types, chosen members, instantiated signatures, jump targets, flow, annotation values, Enter's modifiers; for the native trees javac's answer for the node of the same tag and position (`index`); the split's measurement (`--split`) |
+| `arbace/repr/java/split.ae` | `arbace.repr.java.split` | the catalogue of attribution facts and their tiers, the summary of `--split` runs, the static split of `convert.ae` (`bin/repr-java front-check`) |
 | `arbace/repr/java/names.ae` | `arbace.repr.java.names` | one namespace per package: which class gets which simple name, imports, file layout |
 | `arbace/repr/java/layout.ae` | `arbace.repr.java.layout` | writing the forms as `.ae` text, with metadata and a Clojure-style layout (until 2026-10-17 `print.ae`, `arbace.repr.java.print`: renamed by R1, doc/NAMING-SURVEY.md, for the printer) |
-| `arbace/repr/java.ae` | `arbace.repr.java` | command line: `convert`, `jdk` |
+| `arbace/repr/java.ae` | `arbace.repr.java` | command line: `convert`, `jdk`; `--front javac|native|both` (the tree the converter reads), `--split` |
 | `arbace/repr/java/coverage.ae` | `arbace.repr.java.coverage` | coverage summary from run reports |
 | `arbace/repr/java/resolve.ae` | `arbace.repr.java.resolve` | asks the Java forms compiler's overload resolution where pins are needed, over class infos made from javac's symbols |
 | `bin/repr-java` | | runs the reader on javac's tool executable (javac on Arbace, the reader compiled into it; JN4, its only host since JN6); until JN6 also on the frozen JVM Arbace (`REPR_JAVA_HOST=jvm`, `bin/lib/frozen.bash`), with `host-check` comparing the two |

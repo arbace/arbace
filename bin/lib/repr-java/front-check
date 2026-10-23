@@ -1,0 +1,166 @@
+#!/bin/bash
+# The converter on the native trees (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JFS66 (b)"): every
+# Java file of the corpora read by bin/repr-java read --front both --split (read-jdk for a module): javac
+# on Arbace attributes the files once, the converter converts each unit twice, from javac's attributed
+# trees (arbace.repr.java.tree over JCTrees) and from the native parser's trees of the same text
+# (arbace.repr.java.parse), its attribution javac's answered by position (arbace.repr.java.attr), and
+# the two outputs must be equal, byte for byte (but the known files, below); the native conversion measures the split (which
+# attribution facts the converter asks, what each output list needed: OUT/repr-java-split.edn),
+# summed by corpus by arbace.repr.java.split (WORK/split.md, split.edn) with the static split of the
+# converter's code (WORK/static.edn). Run through bin/repr-java front-check (from the repository root);
+# writes only under .tmp/repr-java-front-check/ (REPR_JAVA_FRONT_WORK).
+#
+# Usage: bin/repr-java front-check [--corpus C,...]
+# Corpora (default samples,baseline,jdk,javac; all adds jdk26u):
+#   samples   test/repr/java/java and test/repr/java/module (14 files), as bin/repr-java check reads them
+#   baseline  the frozen clojure/ (183 files), as bin/repr-java check reads it
+#   jdk       java.base's closure (838 files), read-jdk as bin/jrt-convert's convert step reads it, on
+#             the originals bin/repr-java parse-check makes (its WORK, jdk-originals)
+#   javac     javac's own sources (824 files) module by module, as bin/javac-vendor convert reads them
+#   jdk26u    jdk26u's 68 modules (12,730 files), read-jdk module by module as bin/repr-java check
+#             --jdk reads them (long: about half an hour)
+# Each corpus: WORK/CORPUS/[MODULE/]javac and .../native (the forms), the logs, WORK/CORPUS.diff.
+#   JDK_SRC   jdk26u's src directory (default /root/jdk26u/src)
+# REPR_JAVA_EXE (bin/repr-java) names javac's tool executable.
+# The files whose forms may differ are test/repr/java/front-check-known.edn's, by corpus: calls whose pin
+# the converter's resolution decides by the history of the javac run (JFS70), the same when javac's own
+# trees are converted twice; none in the default corpora.
+# Exit status: 0 when every corpus converts without failure and the differing files are known ones.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
+cd "$root"
+. bin/lib/tools.bash
+
+corpora=samples,baseline,jdk,javac
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    *) sed -n '12,13p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+[ "$corpora" = all ] && corpora=samples,baseline,jdk,javac,jdk26u
+work=${REPR_JAVA_FRONT_WORK:-$root/.tmp/repr-java-front-check}
+case $work in /*) ;; *) work=$root/$work ;; esac
+jdk_src=${JDK_SRC:-/root/jdk26u/src}
+known=test/repr/java/front-check-known.edn
+jdk=$(dirname "$jdk_src")
+mkdir -p "$work"
+status=0
+
+# same DIR LOG: no failures in LOG; the forms files of DIR/javac and DIR/native that differ (the
+# reports aside) listed in DIR.differ (the corpus's paths, MODULE/...), DIR.diff the differences
+same() {
+  local d=$1 log=$2 rel
+  if grep -q '^FAILED\| [1-9][0-9]* failed' "$log"; then
+    echo "  $(basename "$d"): conversion failures ($log):"; grep '^FAILED' "$log" | head -5; return 1
+  fi
+  diff -r -x 'repr-java-*.edn' "$d/javac" "$d/native" > "$d.diff"
+  rel=$(basename "$d")
+  [ "$(basename "$(dirname "$d")")" = "$c" ] || rel=""
+  { grep '^diff ' "$d.diff" | awk '{print $NF}' | sed "s|^$d/native/||; s|^|${rel:+$rel/}|"
+    grep '^Only in ' "$d.diff" | sed 's/ /_/g'; } > "$d.differ"
+  return 0
+}
+
+# read_both DIR ARGS...: bin/repr-java read --front both --split into DIR/javac, DIR/native
+read_both() {
+  local d=$1; shift
+  rm -rf "$d"; mkdir -p "$d"
+  bin/repr-java read --check --front both --split --native-out "$d/native" "$d/javac" "$@" > "$d.log" 2>&1
+  same "$d" "$d.log"
+}
+
+# read_jdk DIR MODULE SRC THREADS [all]: read-jdk --front both --split, from WORK (its patch
+# directories), REPR_JAVA_THREADS chunks; with all, REPR_JAVA_PATCH_ALL (the vendoring scripts')
+read_jdk() {
+  local d=$1 m=$2 src=$3 threads=$4 all=${5:-}
+  rm -rf "$d"; mkdir -p "$d"
+  jdk_read "$threads" "$all" --front both --split --native-out "$d/native" "$d/javac" "$m" "$src" > "$d.log" 2>&1
+  same "$d" "$d.log"
+}
+
+# jdk_read THREADS ALL ARGS...: bin/repr-java read-jdk --check ARGS... from WORK
+jdk_read() {
+  local threads=$1 all=$2
+  shift 2
+  (cd "$work" && export REPR_JAVA_THREADS=$threads && { [ -n "$all" ] && export REPR_JAVA_PATCH_ALL=1 || unset REPR_JAVA_PATCH_ALL; } &&
+     "$root/bin/repr-java" read-jdk --check "$@")
+}
+
+summary_line() { grep ' Java files, ' "$1" | sed 's/ in [0-9.]*s$//' | paste -sd ';' -; }
+
+for c in ${corpora//,/ }; do
+  t0=$SECONDS
+  case $c in
+    samples)
+      read_both "$work/samples/java" "$root/test/repr/java/java" || status=1
+      read_both "$work/samples/module" "$root/test/repr/java/module" || status=1 ;;
+    baseline)
+      frozen=$(frozen_clojure) && read_both "$work/baseline/clojure" "$frozen" clojure || status=1 ;;
+    jdk)
+      orig=$root/.tmp/repr-java-parse-check/jdk-originals
+      if [ ! -d "$orig/src/java.base" ] || ! cmp -s jdk/sources.txt "$orig/.sources.txt"; then
+        echo "jdk: the originals: bin/jrt-convert's sources and generate steps into $orig"
+        rm -rf "$orig"
+        JRT_WORK=$orig JRT_STEPS=sources,generate bin/jrt-convert > "$work/jrt.log" 2>&1 \
+          || { echo "bin/jrt-convert failed: $work/jrt.log"; status=1; continue; }
+        cp jdk/sources.txt "$orig/.sources.txt"
+      fi
+      read_jdk "$work/jdk/java.base" java.base "$orig/src/java.base" 4 all || status=1 ;;
+    javac)
+      gensrc=$(ls -d "$jdk"/build/*/support/gensrc 2>/dev/null | head -1)
+      s=$work/javac-src
+      rm -rf "$s"
+      while read -r m kind rel; do
+        mkdir -p "$s/$m/$(dirname "$rel")"
+        case $kind in
+          share) cp "$jdk/src/$m/share/classes/$rel" "$s/$m/$rel" ;;
+          gensrc|gensrc-build) cp "$gensrc/$m/$rel" "$s/$m/$rel" ;;
+          overlay) cp "overlay/jdk/javac/$m/$rel" "$s/$m/$rel" ;;
+          make) cp "$jdk/make/jdk/src/classes/$rel" "$s/$m/$rel" ;;
+          langtools) cp "$jdk/make/langtools/tools/$rel" "$s/$m/$rel" ;;
+          interim) sed -e "s/package java.time.zone/package build.tools.tzdb/" \
+                     < "$jdk/src/java.base/share/classes/java/time/zone/$(basename "$rel")" > "$s/$m/$rel" ;;
+        esac
+      done < jdk/javac/sources.txt
+      for m in $(cut -d' ' -f1 jdk/javac/sources.txt | LC_ALL=C sort -u); do
+        if [ "$m" = buildtools ]; then
+          read_both "$work/javac/$m" --javac --add-exports --javac java.base/sun.text=ALL-UNNAMED "$s/$m" || status=1
+        else
+          read_jdk "$work/javac/$m" "$m" "$s/$m" 8 all || status=1
+        fi
+      done ;;
+    jdk26u)
+      for d in "$jdk_src"/*/share/classes; do
+        m=${d#"$jdk_src"/}; m=${m%%/*}
+        read_jdk "$work/jdk26u/$m" "$m" "$d" 4 || status=1
+      done ;;
+    *) echo "front-check: no corpus $c (samples, baseline, jdk, javac, jdk26u)" >&2; exit 2 ;;
+  esac
+  n=$(find "$work/$c" -name '*.ae' -path '*/javac/*' | wc -l)
+  # the differing files against the known ones (test/repr/java/front-check-known.edn)
+  find "$work/$c" -maxdepth 2 -name '*.differ' -exec cat {} + | LC_ALL=C sort > "$work/$c.differ"
+  arbace_tool -e "(let [k (get (read-string (slurp \"$known\")) :$c)] (doseq [f (sort k)] (println f)))" \
+    | LC_ALL=C sort > "$work/$c.known"
+  if grep -qs '^FAILED' $(find "$work/$c" -maxdepth 2 -name '*.log'); then
+    verdict="FAILED (conversion failures)"; status=1
+  elif ! cmp -s "$work/$c.differ" "$work/$c.known" && [ -n "$(LC_ALL=C comm -23 "$work/$c.differ" "$work/$c.known")" ]; then
+    verdict="DIFFERENT beyond the known ($known):"; status=1
+  elif [ -s "$work/$c.differ" ]; then
+    verdict="equal but $(wc -l < "$work/$c.differ") known files ($known)"
+  else
+    verdict=equal
+  fi
+  echo "$c: $n forms files from javac's trees, the native trees' $verdict [$((SECONDS - t0)) s]"
+  case $verdict in DIFFERENT*) LC_ALL=C comm -23 "$work/$c.differ" "$work/$c.known" | head -20 ;; esac
+  for l in $(find "$work/$c" -maxdepth 2 -name '*.log' | LC_ALL=C sort); do echo "  ${l#"$work/"}: $(summary_line "$l")"; done
+done
+# the split, by corpus, and the static split of the converter's code
+dirs=()
+for c in ${corpora//,/ }; do [ -d "$work/$c" ] && dirs+=("$work/$c"); done
+arbace_tool -m arbace.repr.java.split summary "$work" "${dirs[@]}" > "$work/split.log" 2>&1 || { tail -5 "$work/split.log"; status=1; }
+arbace_tool -m arbace.repr.java.split static > "$work/static.edn" 2>&1 || status=1
+echo "the split: $work/split.md; the static split: $work/static.edn"
+[ $status = 0 ] && echo "front-check: the native trees' forms equal javac's in every corpus" || echo "front-check: FAILED"
+exit $status

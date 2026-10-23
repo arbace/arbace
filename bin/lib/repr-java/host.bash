@@ -19,7 +19,8 @@
 #                      forms are (JFS32): verify requires the rest byte for byte and reports the host
 #   repr_java_reader_hash
 #                      the SHA-256 the provenance files give repr/java as converter: of its reader's
-#                      sources, what converts Java into forms (arbace/repr/java.ae and convert,
+#                      sources, what converts Java into forms (arbace/repr/java.ae and convert, its
+#                      interfaces tree and attr (JFS66 (b)),
 #                      javac, jtypes, resolve, forms, names, layout, full) and bin/repr-java; not the
 #                      printer or the round trip's comparator, which change no forms (PRINTER-NOTES.md,
 #                      JP1)
@@ -43,6 +44,6 @@ repr_java_provenance_same() {
 }
 
 repr_java_reader_hash() {
-  (cd "$root" && for f in arbace/repr/java.ae arbace/repr/java/{convert,forms,full,javac,jtypes,layout,names,resolve}.ae bin/repr-java; do
+  (cd "$root" && for f in arbace/repr/java.ae arbace/repr/java/{attr,convert,forms,full,javac,jtypes,layout,names,resolve,tree}.ae bin/repr-java; do
      echo "$f"; done | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-64)
 }
