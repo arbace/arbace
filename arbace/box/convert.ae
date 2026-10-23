@@ -1,0 +1,466 @@
+;; The conversion in the box (doc/go/GO-PARSER-SURVEY.md, GP8): tamago/goroot, the box guest's
+;; standard library as Go forms, converted inside the box from the Go text of TamaGo's GOROOT/src
+;; in the store, by repr/go's native reader (the loader, go/parser and the dumper, goi's checker,
+;; the converter) in spawned guests of Arbace's image, then assembled and merged as
+;; bin/tamago-vendor convert does; the result must be the committed tamago/goroot byte for byte.
+(ns arbace.box.convert
+  "tamago/goroot converted in the box, as bin/tamago-vendor convert converts it on the host.
+
+    (steps src text opts)   the conversion of the GOROOT text tree text (TamaGo's VERSION and
+                            src/ but src/cmd, a hash or a ref) with the sources of tree src (a
+                            hash or a ref: arbace/, go/ and the forms of go/parser's packages
+                            under tamago/goroot, which the reader's forms check compares the
+                            compiled parser with): a map of every step's result, :goroot the
+                            converted tree (bin/tamago-vendor convert's OUT/goroot), :expected
+                            src's tamago/goroot, :equal whether they are the same tree
+
+  The steps, each an action (arbace.box.build/action: a spawned guest of Arbace's image, its
+  result in the action cache):
+    read ARCH   std for tamago/ARCH, by arbace.repr.go.annotate -main read (bin/repr-go read
+                --corpus ARCH's native read): the forms (/o/std), the summary in the helper's
+                format (/o/std.tsv) and the report (/o/std.report.edn); amd64 and arm64 at once
+    goroot      the two conversions assembled (each package's other and embedded files copied
+                from GOROOT/src, the packages left out dropped, the headers their assembly
+                includes from outside them), merged into one tree (the files both convert alike
+                once, the others under arch/ARCH/go) and GOROOT/src's module files added, by
+                (goroot ...) below: bin/tamago-vendor's assemble, headers and merge_trees
+
+  opts: :host (Arbace's image, a hash or a ref; by default arbace.<the guest's arch>), :jobs
+  (the reader's threads in each read, by default 8), :cpus (each read's vCPUs, by default :jobs),
+  :ram (each read's guest, by default 16 GiB), :serial (the two reads one after the other), :pin
+  (the SHA-256 of GOROOT/src but src/cmd as bin/tamago-vendor pins it: checked first), :run,
+  :log, :cache (arbace.box.build's).
+
+  Natively (or in a guest whose trees are mounted), the file steps of bin/tamago-vendor:
+
+    (assemble forms orig dst ok prefix)   assemble's: FORMS/go into DST/go, packages kept and
+                                          their files copied from ORIG
+    (headers src dst)                     headers'
+    (merge-trees a b dst)                 merge_trees'
+    (goroot src reads out)                bin/tamago-vendor convert's goroot part: reads {ARCH
+                                          DIR} (each DIR/std, DIR/std.tsv) into OUT/goroot
+    (src-digest dir)                      the digest bin/tamago-vendor pins (sha256sum of the
+                                          sorted files of dir but cmd/, then of that)
+
+    arbace -m arbace.box.convert goroot SRC OUT ARCH=DIR...   (goroot ...) in a guest"
+  (:require [arbace.box :as box]
+            [arbace.box.build :as build]
+            [arbace.string :as str])
+  (:import (java.io File)
+           (java.nio.charset StandardCharsets)
+           (java.nio.file Files)
+           (java.security MessageDigest)))
+
+(def ^:private GiB (* 1024 1024 1024))
+
+(defn- fail [msg data]
+  (throw (ex-info (str "arbace.box.convert: " msg) (assoc data ::error true))))
+
+(defn- note [& xs]
+  (binding [*out* *err*] (apply println xs) (flush)))
+
+;; ---------------------------------------------------------------------------------------
+;; Files
+
+(defn- file ^File [^String p & more] (reduce (fn [^File d ^String n] (File. d n)) (File. p) more))
+
+(defn- delete-tree [^File f]
+  (when (.isDirectory f)
+    (doseq [c (.listFiles f)] (delete-tree c)))
+  (.delete f))
+
+(defn- copy-file
+  "f's bytes into t, its directory made (shutil.copyfile: the contents, not the mode)."
+  [^File f ^File t]
+  (.mkdirs (.getParentFile t))
+  (Files/write (.toPath t) (Files/readAllBytes (.toPath f)) ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+(defn- copy-tree
+  "Directory s copied into d (made), recursively."
+  [^File s ^File d]
+  (.mkdirs d)
+  (doseq [^File f (.listFiles s)]
+    (let [t (File. d (.getName f))]
+      (if (.isDirectory f) (copy-tree f t) (copy-file f t)))))
+
+(defn- read-text ^String [^File f] (String. (Files/readAllBytes (.toPath f)) StandardCharsets/UTF_8))
+
+(defn- write-text [^File f ^String s]
+  (.mkdirs (.getParentFile f))
+  (Files/write (.toPath f) (.getBytes s StandardCharsets/UTF_8) ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+(defn- files-under
+  "The files under directory d, recursively: their paths relative to d, sorted."
+  [^File d]
+  (let [walk (fn walk [^File x ^String rel]
+               (mapcat (fn [^File f]
+                         (let [r (if (empty? rel) (.getName f) (str rel "/" (.getName f)))]
+                           (if (.isDirectory f) (walk f r) [r])))
+                       (or (.listFiles x) [])))]
+    (sort (walk d ""))))
+
+(defn- dirs-under
+  "Directory d and the directories under it, as Files."
+  [^File d]
+  (cons d (mapcat (fn [^File f] (when (.isDirectory f) (dirs-under f))) (or (.listFiles d) []))))
+
+(defn- sha256-hex ^String [^bytes b]
+  (let [d (.digest (MessageDigest/getInstance "SHA-256") b)
+        sb (StringBuilder.)]
+    (doseq [x d]
+      (let [x (bit-and x 0xff)]
+        (.append sb (Character/forDigit (bit-shift-right x 4) 16))
+        (.append sb (Character/forDigit (bit-and x 15) 16))))
+    (str sb)))
+
+(defn- clean
+  "os.path.normpath of a relative /-separated path."
+  ^String [^String p]
+  (let [out (reduce (fn [acc seg]
+                      (cond (or (= seg "") (= seg ".")) acc
+                            (= seg "..") (if (and (seq acc) (not= ".." (peek acc))) (pop acc) (conj acc ".."))
+                            :else (conj acc seg)))
+                    [] (str/split p #"/"))]
+    (if (empty? out) "." (str/join "/" out))))
+
+(defn- dirname ^String [^String p]
+  (let [i (.lastIndexOf p "/")] (if (neg? i) "" (subs p 0 i))))
+
+;; ---------------------------------------------------------------------------------------
+;; The forms' package files, as bin/tamago-vendor's regular expressions read them
+
+(def ^:private package-mark "\n(go/package ")
+
+(defn- package-file? [^String s] (str/includes? s package-mark))
+
+(defn- quoted [^String s] (map second (re-seq #"\"([^\"]+)\"" s)))
+
+(defn- list-of
+  "The strings of the package file's vector :key, [] when it has none."
+  [^String s ^String k]
+  (if-let [[_ m] (re-find (re-pattern (str "\n  :" k " \\[([^\\]]*)\\]")) s)] (vec (quoted m)) []))
+
+(defn- loads-of [^String s] (map second (re-seq #"\n\(load \"([^\"]+)\"\)" s)))
+
+(defn- path-of [^String s] (second (re-find #"\n  :path \"([^\"]+)\"" s)))
+
+;; ---------------------------------------------------------------------------------------
+;; bin/tamago-vendor's file steps
+
+(defn assemble
+  "bin/tamago-vendor's assemble: the converter's tree forms/go into dst/go, without the package
+  files whose :files is empty or whose path is not in ok (a set of import paths; nil: all) and
+  the files they load; each kept package's :other-files and :embed-files copied from orig (its
+  directory there: the import path, prefix and a / stripped when it begins so) into its forms
+  directory, the embedded files checked against their hashes. Directories left empty removed."
+  [^String forms ^String orig ^String dst ok prefix]
+  (let [d (file dst "go")
+        prefix (when prefix (str prefix "/"))
+        n (atom {:kept 0 :dropped 0 :others 0 :embeds 0})]
+    (delete-tree d)
+    (copy-tree (file forms "go") d)
+    (doseq [rel (files-under d)
+            :let [p (File. d ^String rel)]
+            :when (and (str/ends-with? rel ".ae") (.exists p))
+            :let [s (read-text p)]
+            :when (package-file? s)]
+      (let [path (path-of s)
+            [_ files] (re-find #"\n  :files \[([^\]]*)\]" s)]
+        (if (or (str/blank? files) (and ok (not (contains? ok path))))
+          (do (.delete p)
+              (doseq [l (loads-of s)] (.delete (File. (.getParentFile p) (str l ".ae"))))
+              (swap! n update :dropped inc))
+          (let [fdir (File. (subs (.getPath p) 0 (- (count (.getPath p)) 3)))
+                pdir (file orig (if (and prefix (str/starts-with? path prefix)) (subs path (count prefix)) path))]
+            (swap! n update :kept inc)
+            (doseq [o (list-of s "other-files")]
+              (copy-file (File. pdir ^String o) (File. fdir ^String o))
+              (swap! n update :others inc))
+            (when-let [[_ m] (re-find #"(?d)\n  :embed-files \[(.*?)\]\n" s)]
+              (doseq [[_ e h] (re-seq #"\[\"([^\"]+)\" \"([0-9a-f]+)\"\]" m)]
+                (let [t (File. fdir ^String e)]
+                  (copy-file (File. pdir ^String e) t)
+                  (when-not (= h (sha256-hex (Files/readAllBytes (.toPath t))))
+                    (fail (str "embedded file " e " of " path ": not the hash the forms record") {:path path :file e}))
+                  (swap! n update :embeds inc))))))))
+    ;; the directories left empty by the dropped packages, the deepest first
+    (doseq [^File x (sort-by #(.getPath ^File %) #(compare %2 %1) (dirs-under d))]
+      (when (empty? (.list x)) (.delete x)))
+    (let [{:keys [kept dropped others embeds]} @n]
+      (note (format "%s: %d packages (%d left out), %d other files, %d embedded files" dst kept dropped others embeds)))
+    @n))
+
+(defn headers
+  "bin/tamago-vendor's headers: the headers that the packages' assembly under dst/go includes
+  from outside their own files, copied from src (GOROOT/src) to dst/src at their paths, followed
+  through the headers they include. The paths copied, sorted."
+  [^String src ^String dst]
+  (let [g (file dst "go")
+        fdirs (into {} (for [rel (files-under g)
+                             :when (str/ends-with? rel ".ae")
+                             :let [s (read-text (File. g ^String rel))]
+                             :when (package-file? s)
+                             :let [path (path-of s)]
+                             :when path]
+                         [path (File. g ^String (subs rel 0 (- (count rel) 3)))]))
+        todo (vec (for [[path ^File fdir] fdirs
+                        :when (.isDirectory fdir)
+                        n (sort (.list fdir))
+                        :when (or (str/ends-with? n ".s") (str/ends-with? n ".h"))]
+                    [(File. fdir ^String n) path]))]
+    (loop [todo todo copied (sorted-set)]
+      (if (empty? todo)
+        (do (note (format "%s/src: %d headers included from outside the packages: %s" dst (count copied) (str/join " " copied)))
+            (vec copied))
+        (let [[^File f path] (peek todo)
+              incs (map second (re-seq #"(?md)^#include \"([^\"]+)\"" (read-text f)))
+              [todo copied] (reduce (fn [[todo copied] inc]
+                                      (let [rel (clean (str path "/" inc))
+                                            o (file src rel)]
+                                        (if (or (contains? copied rel) (not (.isFile o))
+                                                (when-let [^File fd (get fdirs path)] (.isFile (file (.getPath fd) inc))))
+                                          [todo copied]
+                                          (let [t (file dst "src" rel)]
+                                            (copy-file o t)
+                                            [(conj todo [t (dirname rel)]) (conj copied rel)]))))
+                                    [(pop todo) copied] incs)]
+          (recur todo copied))))))
+
+(defn- merge-package
+  "bin/tamago-vendor's merge_pkg: the package files sa and sb (either nil) as one."
+  [rel sa sb]
+  (let [texts (remove nil? [sa sb])
+        fs (sort (distinct (mapcat #(list-of % "files") texts)))
+        os (sort (distinct (mapcat #(list-of % "other-files") texts)))
+        loads (sort-by #(str (last (str/split % #"/")) ".go") (sort (distinct (mapcat loads-of texts))))
+        heads (for [^String x texts]
+                (let [h (subs x 0 (.indexOf x ^String package-mark))
+                      m (re-matcher #"\n\(go/package [^\n]*\n  :path \"[^\"]+\"" x)
+                      _ (.find m)
+                      li (.indexOf x "\n\n(load ")
+                      rest (subs x (.end m) (if (neg? li) (count x) li))
+                      keys (filterv #(and (str/starts-with? % "  :")
+                                          (not (re-find #"^  :(config|init-order|files|other-files) " %)))
+                                    (str/split rest #"\n" -1))]
+                  [(str h (.group m)) keys]))
+        _ (when (and (= 2 (count heads)) (not= (first heads) (second heads)))
+            (fail (str "merge: " rel ": the package files differ beyond their files and configuration") {:file rel}))
+        [h keys] (first heads)
+        _ (when (or (empty? keys) (not (str/ends-with? (peek keys) ")")))
+            (fail (str "merge: " rel ": unexpected package file") {:file rel}))]
+    (str h "\n  :files [" (str/join " " (map #(str "\"" % "\"") fs)) "]"
+         (when (seq os) (str "\n  :other-files [" (str/join " " (map #(str "\"" % "\"") os)) "]"))
+         (apply str (map #(str "\n" %) keys))
+         "\n\n" (apply str (map #(str "(load \"" % "\")\n") loads)))))
+
+(defn merge-trees
+  "bin/tamago-vendor's merge_trees: the two architectures' assembled trees a/go (amd64's) and
+  b/go (arm64's) as one, dst/go: a file both convert alike once, a file one architecture only
+  builds as it is, the package files merged (merge-package), the files both build whose forms
+  differ (by the configuration's facts) each architecture's under dst/arch/ARCH/go; other files
+  once (they must be the same)."
+  [^String a ^String b ^String dst]
+  (doseq [d ["go" "arch"]] (delete-tree (file dst d)))
+  (let [fa (set (files-under (file a "go")))
+        fb (set (files-under (file b "go")))
+        n (atom {:packages 0 :shared 0 :per-arch 0})
+        put (fn [rel text sub] (write-text (file dst sub rel) text))]
+    (doseq [rel (sort (into fa fb))]
+      (let [pa (when (fa rel) (file a "go" rel))
+            pb (when (fb rel) (file b "go" rel))]
+        (if (str/ends-with? rel ".ae")
+          (let [sa (some-> pa read-text)
+                sb (some-> pb read-text)]
+            (cond
+              (package-file? (if (seq sa) sa sb))
+              (do (put rel (merge-package rel sa sb) "go") (swap! n update :packages inc))
+              (and sa sb (not= sa sb))
+              (do (put rel sa "arch/amd64/go") (put rel sb "arch/arm64/go") (swap! n update :per-arch inc))
+              :else (do (put rel (or sa sb) "go") (swap! n update :shared inc))))
+          (do (when (and pa pb (not (java.util.Arrays/equals (Files/readAllBytes (.toPath ^File pa)) (Files/readAllBytes (.toPath ^File pb)))))
+                (fail (str "merge: " rel " differs by architecture") {:file rel}))
+              (copy-file (or pa pb) (file dst "go" rel))))))
+    (let [{:keys [packages shared per-arch]} @n]
+      (note (format "%s: %d package files merged, %d files once, %d per architecture (arch/ARCH/go)" dst packages shared per-arch)))
+    @n))
+
+(def left-out
+  "The two std packages bin/tamago-vendor leaves out: they embed third-party data, and only cmd/
+  or tests import them (internal/trace/traceviewer, encoding/json/internal/jsontest)."
+  #{"internal/trace/traceviewer" "encoding/json/internal/jsontest"})
+
+(def arches ["amd64" "arm64"])
+
+(defn goroot
+  "bin/tamago-vendor convert's goroot part: the reads {ARCH DIR} (each the native read of std for
+  tamago/ARCH: DIR/std, its forms, and DIR/std.tsv, its summary) assembled against src
+  (GOROOT/src) in out/work, merged into out/goroot with GOROOT/src's module files and the headers
+  from outside the packages in out/goroot/src. The work directory removed after."
+  [^String src reads ^String out]
+  (let [work (str out "/work")
+        o (str out "/goroot")]
+    (doseq [a arches]
+      (let [r (or (get reads a) (fail (str "no read for " a) {:arch a}))
+            lines (remove str/blank? (str/split-lines (read-text (file r "std.tsv"))))
+            bad (remove #(str/starts-with? % "ok\t") lines)
+            _ (when (seq bad) (fail (str "std " a ": packages failed to read without errors: " (first bad)) {:arch a :bad (vec bad)}))
+            ok (set (remove left-out (map #(second (str/split % #"\t")) lines)))
+            w (str work "/arch-" a "/goroot")]
+        (assemble (str r "/std") src w ok nil)
+        (headers src w)))
+    (delete-tree (file o))
+    (.mkdirs (file o "src" "vendor"))
+    (merge-trees (str work "/arch-amd64/goroot") (str work "/arch-arm64/goroot") o)
+    (doseq [f ["go.mod" "go.sum" "vendor/modules.txt"]]
+      (copy-file (file src f) (file o "src" f)))
+    (doseq [a arches
+            :let [s (file work (str "arch-" a) "goroot" "src")]
+            :when (.isDirectory s)]
+      (copy-tree s (file o "src")))
+    (delete-tree (file work))
+    (note (format "converted into %s: %d forms files, %d files" o
+                  (count (filter #(str/ends-with? % ".ae") (files-under (file o)))) (count (files-under (file o)))))
+    o))
+
+(defn src-digest
+  "bin/tamago-vendor's src_digest of directory dir (GOROOT/src): the SHA-256 of sha256sum's lines
+  (\"HASH  ./PATH\") of its files but those under cmd/, sorted by path."
+  [^String dir]
+  (let [lines (for [rel (sort (map #(str "./" %) (remove #(str/starts-with? % "cmd/") (files-under (file dir)))))]
+                (str (sha256-hex (Files/readAllBytes (.toPath (file dir (subs rel 2))))) "  " rel "\n"))]
+    (sha256-hex (.getBytes ^String (apply str lines) StandardCharsets/UTF_8))))
+
+;; ---------------------------------------------------------------------------------------
+;; The same over the store's trees: the digest of a GOROOT/src tree
+
+(defn- tree-files
+  "The files of tree h: [[path entry] ...], paths /-separated."
+  [h ^String prefix]
+  (mapcat (fn [[n [k eh :as e]]]
+            (let [p (str prefix n)]
+              (if (= k :dir) (tree-files eh (str p "/")) [[p e]])))
+          (box/tree h)))
+
+(defn tree-digest
+  "src-digest of the tree h (GOROOT/src) from the store: the files' hashes are their blobs'."
+  [h]
+  (let [lines (for [[p [_ eh]] (sort-by first (map (fn [[p e]] [(str "./" p) e])
+                                                    (remove #(str/starts-with? (first %) "cmd/") (tree-files h ""))))]
+                (str eh "  " p "\n"))]
+    (sha256-hex (.getBytes ^String (apply str lines) StandardCharsets/UTF_8))))
+
+;; ---------------------------------------------------------------------------------------
+;; The steps
+
+(defn- hash-of [x what]
+  (cond (and (string? x) (re-matches #"[0-9a-f]{64}" x)) x
+        (string? x) (or (box/ref x) (fail (str "no ref " x " (" what ")") {:ref x}))
+        :else (fail (str "not a hash or a ref: " (pr-str x) " (" what ")") {})))
+
+(defn- dir-at [t ^String p]
+  (let [[k h] (box/tree-get t p)] (when (= k :dir) h)))
+
+(defn- dir-at! [t p what]
+  (or (dir-at t p) (fail (str what ": no directory " p) {:tree t :path p})))
+
+(defn- select-paths
+  "The tree of t's entries at paths ps (\"a/b\", directories or files), their directories made."
+  [t ps]
+  (reduce (fn [acc p]
+            (let [e (or (box/tree-get t p) (fail (str "no " p " in the sources") {:path p}))
+                  put-at (fn put-at [acc [n & more]]
+                           (let [m (if acc (box/tree acc) {})]
+                             (box/put-tree (assoc m n (if more
+                                                        [:dir (put-at (let [[k h] (get m n)] (when (= k :dir) h)) more)]
+                                                        e)))))]
+              (put-at acc (remove empty? (str/split p #"/")))))
+          nil ps))
+
+(def parser-forms
+  "The forms the reader's forms check reads (arbace.repr.go.parse/forms-check: go/parser's
+  packages' declarations counted, the dumper's files generated from go/ast's): the four packages
+  under tamago/goroot/go/go."
+  (vec (for [p ["ast" "parser" "scanner" "token"]
+             x [p (str p ".ae")]]
+         (str "tamago/goroot/go/go/" x))))
+
+(defn- arch-of []
+  (case (System/getProperty "os.arch") ("aarch64" "arm64") "arm64" "amd64"))
+
+(defn- spec-text [arch]
+  (str "{:name \"std\"\n :loads [{:goroot \"/g\" :goos \"tamago\" :goarch \"" arch
+       "\" :mode :packages :cwd \"/\" :args [\"std\"]}]}\n"))
+
+(defn steps
+  "The conversion of GOROOT text tree text with the sources src (see the namespace's doc): a map
+  of every step's result."
+  [src text opts]
+  (let [src (hash-of src "the sources")
+        text (hash-of text "GOROOT's text")
+        host (hash-of (:host opts (str "arbace." (arch-of))) "Arbace's image")
+        log (:log opts println)
+        bopts (select-keys opts [:run :log :cache])
+        run (fn [what req] (build/action what req bopts))
+        t0 (System/nanoTime)
+        secs #(format "%.1f s" (/ (- (System/nanoTime) t0) 1e9))
+        gsrc (dir-at! text "src" "GOROOT's text")
+        digest (tree-digest gsrc)
+        _ (when-let [pin (:pin opts)]
+            (when-not (= pin digest)
+              (fail (str "GOROOT/src is not the pinned tree (digest " digest ", pinned " pin ")") {:digest digest :pin pin})))
+        _ (log (str "convert: GOROOT/src " gsrc ", digest " digest (when (:pin opts) " (the pin)")))
+        jobs (:jobs opts 8)
+        tools (select-paths src (concat ["arbace" "go"] parser-forms))
+        read-arch (fn [a]
+                    (let [t1 (System/nanoTime)
+                          res (run (str "read std for tamago/" a)
+                                   {:image host
+                                    :args ["arbace" "-m" "arbace.repr.go.annotate" "read" "--jobs" (str jobs)
+                                           "--out" "/o/std" "--quiet" "--report" "/o/std.report.edn" "--tsv" "/o/std.tsv" "/c/spec.edn"]
+                                    :env ["ARBACE_PATH=/s" "GOGC=200" (str "GOMEMLIMIT=" (quot (- (:ram opts (* 16 GiB)) GiB) (* 1024 1024)) "MiB")]
+                                    :trees [["/s" tools] ["/g" text]
+                                            ["/c" (box/put-tree {"spec.edn" (box/put-file (spec-text a))})]]
+                                    :out "/o" :cwd "/s" :ram (:ram opts (* 16 GiB)) :cpus (:cpus opts jobs)})
+                          o (or (:out res) (fail (str "read " a ": no output tree") {:result res}))]
+                      (doseq [l (str/split-lines (or (box/get (:console res)) ""))
+                              :when (re-find #"^std: |^the dumper|converted|failed" l)]
+                        (log (str "convert: " a ": " l)))
+                      (log (format "convert: read std for tamago/%s: %s, the forms %s (%.1f s; %s)" a o (dir-at! o "std" "read")
+                                   (/ (- (System/nanoTime) t1) 1e9) (secs)))
+                      o))
+        reads (if (:serial opts)
+                (into {} (for [a arches] [a (read-arch a)]))
+                (let [fs (into {} (for [a arches] [a (future (read-arch a))]))]
+                  (into {} (for [[a f] fs] [a @f]))))
+        t2 (System/nanoTime)
+        res (run "assemble and merge tamago/goroot"
+                 {:image host
+                  :args (into ["arbace" "-m" "arbace.box.convert" "goroot" "/g/src" "/o"]
+                              (for [a arches] (str a "=/r/" a)))
+                  :env ["ARBACE_PATH=/s"]
+                  :trees (into [["/s" (select-paths src ["arbace"])] ["/g" text]]
+                               (for [a arches] [(str "/r/" a) (get reads a)]))
+                  :out "/o" :cwd "/" :ram (* 4 GiB) :cpus 1})
+        goroot (dir-at! (or (:out res) (fail "goroot: no output tree" {:result res})) "goroot" "goroot")
+        _ (log (format "convert: assembled and merged: %s (%.1f s; %s)" goroot (/ (- (System/nanoTime) t2) 1e9) (secs)))
+        expected (dir-at src "tamago/goroot")
+        equal (= goroot expected)]
+    (log (str "convert: tamago/goroot converted in " (secs) ": " goroot
+              (cond (nil? expected) " (the sources hold no tamago/goroot)"
+                    equal " = the sources' tamago/goroot, byte for byte"
+                    :else (str " DIFFERS from the sources' tamago/goroot " expected))))
+    (when-let [r (:ref opts)] (box/ref! r goroot))
+    {:src src :text text :digest digest
+     :read-amd64 (get reads "amd64") :read-arm64 (get reads "arm64")
+     :forms-amd64 (dir-at (get reads "amd64") "std") :forms-arm64 (dir-at (get reads "arm64") "std")
+     :goroot goroot :expected expected :equal equal}))
+
+(defn -main [& [cmd & args]]
+  (case cmd
+    "goroot" (let [[src out & reads] args]
+               (goroot src (into {} (for [r reads :let [i (.indexOf ^String r "=")]] [(subs r 0 i) (subs r (inc i))])) out))
+    "digest" (println (src-digest (first args)))
+    (do (binding [*out* *err*] (println "usage: arbace -m arbace.box.convert goroot SRC OUT ARCH=DIR... | digest DIR"))
+        (System/exit 2)))
+  (shutdown-agents)
+  (System/exit 0))

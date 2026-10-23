@@ -1,0 +1,211 @@
+#!/bin/bash
+# The conversion in the box (doc/go/GO-PARSER-SURVEY.md, GP8): tamago/goroot, the box guest's
+# standard library as Go forms, converted inside the box from the Go text of TamaGo's GOROOT/src
+# in the store (arbace.box.convert: repr/go's native reader, the loader, go/parser and the dumper
+# compiled, goi's checker and the converter, in spawned guests of Arbace's image, for tamago/amd64
+# and tamago/arm64; then bin/tamago-vendor's assembling and merging, in Arbace), and the same
+# steps run on the host with the native executable: the tree converted must be the commit's
+# tamago/goroot, byte for byte.
+#
+#   bin/box-convert [OPTIONS] [STEP...]
+#
+# Steps (by default prepare box host compare, in this order):
+#   prepare   two stores in DIR (box/, host/): the commit REV's sources as a tree (git archive of
+#             VERSION arbace go tamago/goroot; the ref src: the reader's namespaces, the forms of
+#             go/parser's packages its forms check reads, and the expected tree), GOROOT's text
+#             (TamaGo's VERSION and src/ but src/cmd, from ARBACE_GOROOT; the ref goroot.text,
+#             its digest checked in the box against bin/tamago-vendor's pin), and the image
+#             that runs the reader, bin/arbace-go --build --box's guest (the ref arbace.ARCH)
+#   box       the conversion in the box: the launcher (ARBACE_BOX_SPAWN=1) runs it in its guest;
+#             every step's result under the ref converted.box.ARCH.steps (DIR/box-steps.edn), the
+#             tree under converted.box.ARCH; status 0 when it is the sources' tamago/goroot
+#   host      the same steps natively, every action a host process (arbace.box.rebuild/host-run,
+#             tools/chrootrun) run by the native executable: DIR/host-steps.edn
+#   compare   the two runs' results compared (each architecture's forms, the tree) and against
+#             the sources' tamago/goroot; status 0 when all are equal
+#
+# Options:
+#   --arch ARCH   the box's architecture: amd64 (default) or arm64 (arm64's box step runs in the
+#                 aarch64 VM, bin/box-arm64-vm, started first; its host step is amd64's, the
+#                 native executable's: the conversion does not depend on the host's architecture)
+#   --rev REV     the commit (default HEAD); the checkout's uncommitted changes are not in it
+#   --dir DIR     the stores and logs (default .tmp/box-convert/ARCH); the action cache stays there
+#   --dev         arbace/box/convert.ae loaded from the source tree over the image's embedded one
+#                 (the driver's; the actions load it from the sources at /s when the image has none)
+#   --jobs N      the reader's threads in each read (default 8; each read's guest N vCPUs)
+#   --serial      the two architectures' reads one after the other (default: at once)
+# Environment: ARBACE_BOX_SPAWN_RAM (the box's budget for its spawned guests; by default 36GiB),
+# ARBACE_BOX_SPAWN_CPUS (by default 16), BOX_CONVERT_RAM (each read's guest, by default 16GiB).
+# Prerequisites: bin/arbace-go --build --box (ARBACE_BOX_ARCHES with ARCH), from the same commit
+# (bin/lib/fresh.bash, as bin/box-rebuild; ARBACE_BOX_STALE_OK=1 warns instead). Memory: two
+# reads of up to BOX_CONVERT_RAM each: run it through .tmp/heavy.
+set -uo pipefail
+export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
+. "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
+arch=amd64 rev=HEAD dir="" dev=false jobs=8 serial=false steps=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --arch) arch=$2; shift 2 ;;
+    --rev) rev=$2; shift 2 ;;
+    --dir) dir=$2; shift 2 ;;
+    --dev) dev=true; shift ;;
+    --jobs) jobs=$2; shift 2 ;;
+    --serial) serial=true; shift ;;
+    prepare|box|host|compare) steps+=("$1"); shift ;;
+    *) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+[ ${#steps[@]} -gt 0 ] || steps=(prepare box host compare)
+case $arch in amd64|arm64) ;; *) echo "box-convert: no architecture $arch" >&2; exit 2 ;; esac
+harch=$(case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac)
+dir=${dir:-$root/.tmp/box-convert/$arch}
+mkdir -p "$dir"
+dir=$(cd "$dir" && pwd)
+goroot=${ARBACE_GOROOT:-/root/tamago-go}
+launcher=$root/target/arbace-go/box-$harch/arbace-box   # the host's launcher: the store's tool
+guest=$root/target/arbace-go/box-$arch/arbace.elf        # the image that runs the reader
+native=$root/target/arbace-go/$harch/arbace             # the host step's Arbace
+bs=$dir/box hs=$dir/host
+src_dirs="VERSION arbace go tamago/goroot"
+ram=${BOX_CONVERT_RAM:-16GiB}
+export ARBACE_BOX_STORE_MAX=off
+
+since() { echo "$(( $(date +%s) - $1 )) s"; }
+. "$root/bin/lib/fresh.bash"
+
+# the pin of GOROOT/src but src/cmd (bin/tamago-vendor's src_hash)
+pin=$(sed -n 's/^src_hash=\([0-9a-f]\{64\}\)$/\1/p' "$root/bin/tamago-vendor")
+[ -n "$pin" ] || { echo "box-convert: no src_hash in bin/tamago-vendor" >&2; exit 1; }
+
+prepared_commit() {
+  if [ -s "$dir/prepared.commit" ]; then cat "$dir/prepared.commit"
+  else git -C "$root" rev-parse --verify "$rev^{commit}"; fi
+}
+fresh() {
+  local cmd=$2
+  [ "$3" = "$(git -C "$root" rev-parse HEAD)" ] || cmd="git checkout ${3:0:12}, then $cmd"
+  arbace_fresh box-convert "$1" "$3" "$cmd"
+}
+native_cmd="bin/arbace-go --build"
+guest_cmd="ARBACE_BOX_ARCHES=$arch bin/arbace-go --build --box"
+launcher_cmd="ARBACE_BOX_ARCHES=$harch bin/arbace-go --build --box"
+
+# arbace.box.convert from the source tree (--dev) or the image's
+driver_loads() {
+  $dev || { printf '%s' '(require (quote arbace.box.convert))'; return 0; }
+  printf '%s' '(require (quote arbace.box) (quote arbace.box.build)) (let [f "arbace/box/convert.ae"] (arbace.lang.Compiler/load (java.io.StringReader. (arbace.box/get (second (arbace.box/tree-get (arbace.box/ref "src") f)))) f f))'
+}
+
+prepare() {
+  local s t0 c src text
+  c=$(git -C "$root" rev-parse --verify "$rev^{commit}") || return 1
+  fresh "$native" "$native_cmd" "$c"
+  fresh "$guest" "$guest_cmd" "$c"
+  fresh "$launcher" "$launcher_cmd" "$c"
+  rm -f "$dir/prepared.commit"
+  t0=$(date +%s)
+  for s in "$bs" "$hs"; do
+    mkdir -p "$s"
+    src=$(git -C "$root" archive --format=tar "$rev" $src_dirs | "$launcher" --store "$s" tree tar - src) || return 1
+    text=$(tar -C "$goroot" --exclude=./src/cmd -cf - ./VERSION ./src | "$launcher" --store "$s" tree tar - goroot.text) || return 1
+    "$launcher" --store "$s" put "$guest" "arbace.$arch" > "$dir/guest.hash" || return 1
+  done
+  echo "$c" > "$dir/prepared.commit"
+  echo "box-convert: prepared: $rev ($c) as the tree $src; GOROOT's text ($goroot) as the tree $text; the image $(cat "$dir/guest.hash") ($(since "$t0"))"
+}
+
+# the expression that runs the conversion and keeps its steps: convert_expr NAME OPTS
+convert_expr() {
+  printf '%s (let [r (arbace.box.convert/steps "src" "goroot.text" (merge {:ref "%s" :jobs %s :pin "%s" :serial %s :ram %s} %s))] (arbace.box/put! "%s.steps" (pr-str r)) (prn r) (System/exit (if (:equal r) 0 1)))' \
+    "$(driver_loads)" "$1" "$jobs" "$pin" "$serial" "$(ram_bytes "$ram")" "$2" "$1"
+}
+ram_bytes() { numfmt --from=iec "${1%iB}"; }
+
+box() {
+  local t0 st
+  fresh "$launcher" "$launcher_cmd" "$(prepared_commit)"
+  t0=$(date +%s)
+  if [ "$arch" != "$harch" ]; then vm_box; return; fi
+  echo "== the conversion in the box ($arch)"
+  ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-36GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-16} \
+    ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.$arch \
+    "$launcher" --store "$bs" -e "$(convert_expr "converted.box.$arch" "{:host \"arbace.$arch\"}")" 2>&1 | tee "$dir/box.log"
+  st=${PIPESTATUS[0]}
+  "$launcher" --store "$bs" get "converted.box.$arch.steps" > "$dir/box-steps.edn"
+  echo "box-convert: the box's run: status $st ($(since "$t0"))"
+  return $st
+}
+
+# arm64: the box step in the aarch64 VM (bin/box-arm64-vm), the store copied in and back
+vm_box() {
+  local vmrun=$root/bin/box-arm64-vm vl=$root/target/arbace-go/box-arm64/arbace-box st n=0
+  fresh "$vl" "ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box" "$(prepared_commit)"
+  "$vmrun" status > "$dir/vm-status.txt" 2>&1 || { echo "box-convert: start the VM first (bin/box-arm64-vm start; MEM)" >&2; return 1; }
+  echo "== the conversion in the box (arm64, in the aarch64 VM)"
+  : > "$dir/box.log"
+  tar -C "$dir" -cf "$dir/box-store.tar" box || return 1
+  "$vmrun" put "$vl" "$dir/box-store.tar" || return 1
+  "$vmrun" sh 'rm -rf box && tar -xf box-store.tar && rm box-store.tar' || return 1
+  printf '%s\n' '#!/bin/sh' "cd /h && ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-36GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-16} ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.arm64 ./arbace-box --store box -e '$(convert_expr converted.box.arm64 '{:host "arbace.arm64"}' | sed "s/'/'\\\\''/g")' > convert.log 2>&1; echo \$? > convert.status" > "$dir/vm-convert.sh"
+  "$vmrun" put "$dir/vm-convert.sh" || return 1
+  "$vmrun" sh 'rm -f convert.status convert.log; chmod +x vm-convert.sh; nohup ./vm-convert.sh > /dev/null 2>&1 &' || return 1
+  until "$vmrun" sh 'test -f convert.status' 2> "$dir/vm-poll.err"; do
+    sleep 60
+    "$vmrun" sh "tail -n +$((n + 1)) convert.log" 2> "$dir/vm-poll.err" | tee -a "$dir/box.log" || true
+    n=$(wc -l < "$dir/box.log")
+  done
+  "$vmrun" sh "tail -n +$((n + 1)) convert.log" | tee -a "$dir/box.log"
+  st=$("$vmrun" sh 'cat convert.status')
+  "$vmrun" sh 'tar -cf box-store.tar box' && "$vmrun" exec cat box-store.tar > "$dir/box-store.tar" \
+    && rm -rf "$bs" && tar -C "$dir" -xf "$dir/box-store.tar" && rm -f "$dir/box-store.tar" || return 1
+  "$launcher" --store "$bs" get "converted.box.arm64.steps" > "$dir/box-steps.edn"
+  echo "box-convert: the box's run (in the VM): status $st"
+  return "$st"
+}
+
+host() {
+  local t0 st cr=$dir/chrootrun opts c
+  c=$(prepared_commit) || return 1
+  fresh "$native" "$native_cmd" "$c"
+  t0=$(date +%s)
+  echo "== the same steps on the host"
+  (cd "$root/tools/chrootrun" && env -u GOOS -u GOARCH GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOPROXY=off \
+     CGO_ENABLED=0 "$goroot/bin/go" build -o "$cr" .) || return 1
+  opts="{:host \"arbace.$arch\" :run (arbace.box.rebuild/host-run {:chrootrun \"$cr\" :work \"$dir/host-work\"
+    :images {(arbace.box/ref \"arbace.$arch\") {:exe \"$native\" :env [\"HOME=/tmp\"]}}})}"
+  ARBACE_BOX_STORE=$hs ARBACE_BOX_LAUNCHER=$launcher "$native" -e "(require (quote arbace.box.rebuild)) $(convert_expr "converted.host.$arch" "$opts")" 2>&1 | tee "$dir/host.log"
+  st=${PIPESTATUS[0]}
+  "$launcher" --store "$hs" get "converted.host.$arch.steps" > "$dir/host-steps.edn"
+  rm -rf "$dir/host-work"
+  echo "box-convert: the host's run: status $st ($(since "$t0"))"
+  return $st
+}
+
+compare() {
+  local hsteps=$dir/host-steps.edn
+  [ -s "$dir/box-steps.edn" ] || { echo "box-convert: no box-steps.edn (box)" >&2; return 1; }
+  # arm64: the host's steps are amd64's (the same native executable) when this run made none
+  [ -s "$hsteps" ] || [ "$arch" = "$harch" ] || hsteps=$root/.tmp/box-convert/$harch/host-steps.edn
+  [ -s "$hsteps" ] || { echo "box-convert: no host-steps.edn (host)" >&2; return 1; }
+  "$native" -e "
+(require (quote [arbace.edn :as edn]))
+(let [b (edn/read-string (slurp \"$dir/box-steps.edn\"))
+      h (edn/read-string (slurp \"$hsteps\"))
+      ks [:src :text :digest :forms-amd64 :forms-arm64 :goroot :expected]
+      ok (atom (:equal b))]
+  (doseq [k ks]
+    (let [e (= (b k) (h k))]
+      (when-not (or e (= k :src)) (reset! ok false))
+      (println (format \"%-12s %s %s\" (name k) (if e \"=\" \"DIFFERS\") (if e (b k) (str (b k) \" (box) \" (h k) \" (host)\"))))))
+  (println (if @ok \"box-convert: tamago/goroot converted in the box = the host's = the sources', byte for byte:\"
+               \"box-convert: the trees DIFFER\") (:goroot b))
+  (System/exit (if @ok 0 1)))"
+}
+
+status=0
+for s in "${steps[@]}"; do
+  "$s" || { status=1; [ "$s" = compare ] || break; }
+done
+exit $status
