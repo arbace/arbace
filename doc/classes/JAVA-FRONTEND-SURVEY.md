@@ -3751,7 +3751,10 @@ the version map the executable carries changes, as at JFS66 (b). No re-seed.
 - `bin/repr-java check`: the baseline's 189 files as `baseline.sha256`, the samples' 11 and the
   module's 6 as `test/repr/java/expected` (27 s)
 - `bin/repr-java parse-check`: every corpus's trees as javac's (the parser unchanged; 3 m 18 s)
-- `bin/gate` (essential): GATE_RESULT
+- `bin/gate` (essential): on the branch at `ff7a68ba` (this section's commit but this line), passes in
+  17m59s (go-build 453 s, afresh; go-smoke, suite-go 777 tests with no regression, oracle-go 53 known
+  mismatches as recorded, diffcheck 12,743 of 12,766 cases agree with the 23 known, goi-check 797 of
+  797, generated)
 - not run: `bin/gate --full` (the user's rule), `bin/repr-java roundtrip`, `check --suite`,
   `bin/javac-vendor verify` and `classes` (the converter's outputs and javac's world are unchanged:
   the updates show the forms byte for byte)
