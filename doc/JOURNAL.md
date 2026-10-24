@@ -1321,3 +1321,35 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
     regression of the reader since the references were recorded, first seen now: today's first
     `--full` did not reach repr/java's steps, and JN8, JFS66 (b) and JFS70 ran no `roundtrip --text`.
     To be bisected and fixed.
+
+## 2026-10-24: bin/gate --full's remaining failures fixed; j2g-edge in the essential gate; JN9a started (the user)
+
+- **A correction** of the entry "GP8 merged; GPS50-GPS56 decided as built; bin/gate --full at
+  a1be9220": the round trip's record failure on `java/util/ResourceBundle.ae` was not a reader
+  regression. `bin/lib/repr-java/roundtrip`'s `jdk_originals` built `.tmp/repr-java-roundtrip/jdk-originals`
+  once (since `f8d03c78`) and never again; main's was made on 2026-10-20 before JN2's `f1f7889d` added
+  both `getBundle` and `newBundle` to `overlay/jdk/java.base/java/util/ResourceBundle.java`, so the text
+  level read the old file (and printed it back) while the record level compared it with the committed
+  forms of the new one. JN8, JFS66 (b) and JFS70 were not involved (911 of 911 with fresh originals).
+- **The fix** (branch `repr-java-full-members`, `0f7defc0`, merged at `bd3ba0bb`):
+  `bin/lib/repr-java/originals.bash`, the jdk corpus's originals for the round trip, parse-check,
+  front-check and `bin/javac-vendor classes jdk`, keyed (`bin/jrt-convert`, `test/jrt`,
+  `doc/go/java-surface.edn`, `overlay/jdk/java.base`, jdk26u's commit and status, `JRT_LOCALES`),
+  rebuilt under a lock when the key differs, and every copied file checked byte for byte against
+  its source at each use. JFS73 (a).
+- **`bin/gate --full` at `bd3ba0bb`** (no agents running), 121m56s: every step passed but `goi`:
+  `nosplit.go` over 10 s with `--jobs 8` too. Measured alone on the idle machine: 8.7 s run directly,
+  about 20 s inside the check (it runs the go command over many assembly snippets); GP6 had recorded it
+  as a pass although it timed out alone. My question to the user had said it passes alone; corrected,
+  the user chose a per-program limit (over recording it known and raising the default to 30 s):
+  `test/goi/timeouts.txt` (`nosplit.go` 60, `fixedbugs/bug358.go` 30), read by `bin/goi`'s
+  `run_program`. `--full`'s goi step alone then passed (1,604 of 1,837, no regression).
+- **Decided (the user), 2026-10-23:** `bin/j2g-edge verify` in the essential gate (over agents
+  running it and leaving it to `--full`): an embedded namespace's new JDK class made `jdk/edge.edn`
+  stale twice (GP7's, GP8's), seen only by `--full`; it left `--full`'s jvm chain. `--full`'s
+  `bin/goi check` with 8 jobs (as its reference was recorded). The essential gate with both passed
+  (18m10s; `j2g-edge` 1m02s), and again with the timeouts (12m05s).
+- **The re-seed** started: the fixpoint at `bd3ba0bb` in `.tmp/worktrees/reseed` (the uncommitted
+  changes above are not the program's), to be packed and verified on main.
+- **JN9a started** (the user: "start JN9a"), with JFS71 and JFS72 (b), on the branch
+  `java-frontend-jn9a` from `bd3ba0bb`, in `.tmp/worktrees/java-frontend-jn9a`.

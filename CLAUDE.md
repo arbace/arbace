@@ -297,8 +297,9 @@ Prior art:
   --essential`: `$GOROOT/test`'s programs of `test/goi/essential.txt` interpreted against gc), and the generated variants'
   check (`bin/generated-check`, F7.3: `arbace/lang/go/CompilerNodes.ae` and `CompilerAOTFn.ae`, and
   since GP7 repr/go's generated Go forms, the dumper `go/arbace/repr/go/godump` and the renamed copy of gc's
-  syntax `go/arbace/repr/go/internal/syntax`, regenerated and compared with the committed files). `bin/gate --full` adds, concurrently: on the frozen
-  JVM `bin/j2g-edge verify`; the Go build afresh with its
+  syntax `go/arbace/repr/go/internal/syntax`, regenerated and compared with the committed files), and since 2026-10-24 `bin/j2g-edge verify` on the
+  frozen JVM (j2g's edge recorded afresh: an embedded namespace's new JDK class makes `jdk/edge.edn`
+  stale). `bin/gate --full` adds, concurrently: the Go build afresh with its
   smoke test, then javac's forms and javac on Arbace (`bin/javac-vendor check`, `build`, `verify`:
   javac's forms read afresh by javac on Arbace, `classes baseline samples jdk java.base`), then,
   beside the rest of that chain, repr/java's checks on the tool just built (JN5, JFS9): `bin/repr-java
@@ -321,7 +322,7 @@ Prior art:
   layout's trees, then mode `:full` printed back byte for byte, and `test`; on the host's rustc;
   `REPR_RUST_CORPORA=all` adds RR4's corpora and the UI suite, `'all --run --std'` the behaviour level, `'all --code'` the lowered and code levels), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
   `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; goi (`bin/goi
-  annotations`, `test --gc`, `check`, after repr/go's round trips); Go's toolchain as forms
+  annotations`, `test --gc`, `check --jobs 8`, after repr/go's round trips); Go's toolchain as forms
   (`bin/toolchain-vendor verify`, `check`). Run it when the Java forms'
   front end, repr/java, repr/go, j2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or repr/java, `bin/jrt-convert update` first; after a change to what j2g asks of the JVM,

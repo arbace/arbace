@@ -3837,3 +3837,8 @@ The user decided JFS72 (b): jdk26u's forms recorded as hashes (`test/repr/java/e
     originals made on every jdk run (about a minute of the generators on the tool).
   - *Recommended: (a)*: the copied files are the ones edited by hand (jrt's own Java); the
     generated ones change only with the inputs the key names.
+
+## Decided (2026-10-24): JFS73
+
+JFS73 (a), as built: the round trip's cached originals keyed and the copied files checked byte for byte,
+the generated ones trusted to the key (taken as recommended with the fix's merge).

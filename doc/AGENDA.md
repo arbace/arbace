@@ -165,9 +165,10 @@ The current state of the work. This file is rewritten as things change. For the 
     same forms but 3 known files; the split: 69% of lists need at most types, 98% overload; JN9
     re-estimated 19-34 days; JFS67-JFS71 decided); JFS70 (b) done (2026-10-23: `resolve.ae`'s pins
     independent of the javac run's history, the known list empty, no committed form changed; `tree.ae`'s
-    notice; JFS72 (b) decided); `bin/gate --full` at `a1be9220` failed: the edge stale again (GP8, fixed), `nosplit.go`'s timeout, and
-    mode `:full` dropping members (`ResourceBundle`; being fixed); then the re-seed. JN9a (with JFS71,
-    JFS72) waits for the user (2026-10-23: "do not start JN9a yet"). The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
+    notice; JFS72 (b) decided); `bin/gate --full`'s failures fixed (2026-10-24): the edge (GP8's `OpenOption`), the round trip's
+    stale cached originals (not the reader), `nosplit.go` by a per-program limit; `bin/j2g-edge verify`
+    in the essential gate. Running: the re-seed, and JN9a with JFS71 and JFS72
+    (`java-frontend-jn9a`). The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);
