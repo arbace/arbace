@@ -103,9 +103,13 @@ The current state of the work. This file is rewritten as things change. For the 
   meet the rule in substance (Clojure read and print, Java read, Go read, eval, print); Clojure's
   eval 20,506 of 20,520 and Go's AOT 1,032 of 1,051 close; Clojure's AOT (the suite compiled, never
   run), Java's eval, AOT and print the work. Plan REAP1-REAP9 with JC1-JC6 and JC8's record, 24-41
-  days; RPS1-RPS17 decided as recommended. Running: REAP1 (the classes as data, `bin/reap`), REAP2
-  (`bin/goi check --aot`), JC1; JC4 done (2026-10-24: the interpreter's private calls, `Object` methods through world
-  interfaces, `clone`, the REPL's source lookup on Go; JCS30-JCS33 decided); JFS65 (b) and JFS75 (b) merging.
+  days; RPS1-RPS17 decided as recommended. Done: REAP1 (2026-10-24: `bin/reap`, the matrix from the
+  committed references, the classes as data per cell; RPS18-RPS29 decided), JC1 (`bin/java-check`:
+  read 2,965 and interpreted 1,364 of 2,967 jtreg and JLS tests passing on the JDK; JCS16-JCS25
+  decided), JC4 (the interpreter's private calls, `Object` methods through world interfaces, `clone`,
+  the REPL's source lookup on Go; JCS30-JCS33 decided). Running: REAP2 (`bin/goi check --aot`), REAP3
+  (Clojure's suite compiled, F2.4), REAP4 (NaN, `BitSet`, SL5), JN9b; next JC2 with JC1's follow-ups,
+  the first batched re-seed.
 
 - **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,
   the user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):

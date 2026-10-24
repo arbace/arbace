@@ -1,0 +1,347 @@
+(ns reap.main
+  "bin/reap (doc/FULL-SUPPORT-SURVEY.md, REAP1, RPS3, RPS13): the REAP matrix, read, eval, AOT and
+  print for Clojure, Java and Go, from the checks' recorded results alone (no runs). The cells and
+  their sources are data, test/reap/cells.edn; each source's reference gives its passing cases and
+  its non-passing ones (read-source), each non-pass falls into a class of its classes file, the
+  first whose :match finds \"RESULT REASON\" (test/goi/divergences.edn's format), and the matrix
+  prints pass / by design / deferred per cell. A non-pass no class takes, a class's :kind neither
+  :design nor :deferred (nor mapped by the cell's :kind-map), or a reference missing fails the
+  verb; a cell none of whose checks is recorded yet prints \"no check yet\" and does not.
+
+  -main [--entries]          the matrix, each cell's sources and classes (--entries: every
+                             non-pass under its class), the classes awaiting the user's decision
+  -main --suite RESULTS      the Clojure suite's results RESULTS (bin/clojure-tests' RUN/results.edn,
+                             or its reference) judged per test against the Clojure classes
+                             (bin/clojure-tests --divergences)
+  -main record-native-check REPORT OUT
+                             test/repr/go/native-check-results.edn written from bin/repr-go
+                             native-check's report (.tmp/repr-go/native-check.report.edn)"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader)))
+
+(def ^:dynamic *root* ".")
+
+(defn- path [^String f] (if (str/starts-with? f "/") f (str *root* "/" f)))
+
+(defn- exists? [f] (and f (.isFile (File. ^String (path f)))))
+
+(defn- read-edn [f]
+  (with-open [r (PushbackReader. (io/reader (path f)))]
+    (read r)))
+
+(defn- selected? [src ^String s]
+  (and (or (nil? (:include src)) (re-find (:include src) s))
+       (or (nil? (:exclude src)) (not (re-find (:exclude src) s)))))
+
+(defn- entry
+  ([id result reason] (entry id result reason 1))
+  ([id result reason n] {:id (str id) :result result :reason (str reason) :n n}))
+
+;; the readers: a source's {:pass N (nil: not recorded) :entries [entry...] :detail "..."}
+
+(defmulti read-source :reader)
+
+(defn- suite-results
+  "Clojure's suite: one case per test (a skipped namespace counts its upstream tests, at least one),
+  against upstream's results (every assertion passes there); test.generative's specs with
+  :generative."
+  [src res up]
+  (let [nss (filter #(selected? src (str %)) (keys (:namespaces up)))
+        skipped (:skipped res)
+        skipped-tests (:skipped-tests res)
+        ran (:namespaces res)
+        per (for [ns nss
+                  :let [u (get-in up [:namespaces ns]) r (get ran ns)]]
+              (cond
+                (contains? skipped ns)
+                {:entries [(entry ns :skip (str ns ": " (get skipped ns)) (max 1 (:test u)))]}
+                (nil? r)
+                {:entries [(entry ns :missing (str ns ": not run, not skipped") (max 1 (:test u)))]}
+                (:load-error r)
+                {:entries [(entry ns :error (str ns ": failed to load: " (:load-error r)) (max 1 (:test u)))]}
+                :else
+                (let [failing (:failing r)
+                      st (get skipped-tests ns)]
+                  {:pass (- (:test r) (count failing))
+                   :assertions (:pass r)
+                   :entries (concat
+                             (for [[t why] (sort-by (comp str key) st)]
+                               (entry (str ns "/" t) :skip (str ns "/" t ": " why)))
+                             (for [[t {:keys [fail error]}] (sort-by (comp str key) failing)]
+                               (entry (str ns "/" (name t)) (if (pos? fail) :fail :error)
+                                      (str ns "/" (name t) " (fail " fail ", error " error ")"))))})))
+        gen (when (:generative src) (:generative res))
+        gen-entries (concat (for [s (sort (map str (:failing gen)))] (entry s :fail (str "spec " s)))
+                            (for [n (sort (map str (:load-errors gen)))] (entry n :error (str "load " n))))]
+    {:pass (+ (reduce + (keep :pass per)) (if gen (- (:tests gen) (count (:failing gen))) 0))
+     :entries (vec (concat (mapcat :entries per) gen-entries))
+     :detail (str (count nss) " namespaces, " (format "%,d" (long (reduce + (keep :assertions per)))) " assertions passing"
+                  (when gen (str ", test.generative " (- (:tests gen) (count (:failing gen))) " of " (:tests gen) " specs")))}))
+
+(defmethod read-source :clojure-suite [src]
+  (suite-results src (read-edn (:file src)) (read-edn (:upstream src))))
+
+(defn- known-cases
+  "The cases of a known file in the oracle's shape ({:mismatches [{:reason :cases [{:case}]}]}),
+  selected by their :case."
+  [src f]
+  (for [g (:mismatches (read-edn f)) c (:cases g) :when (selected? src (:case c))]
+    (entry (:case c) :known (:reason g))))
+
+(defn- expected-files
+  "The oracle's expected files under DIR, relative (\"forms/reader.edn\"), with their :count."
+  [dir]
+  (let [d (File. ^String (path dir))
+        base (inc (count (.getPath d)))]
+    (for [^File f (file-seq d) :when (and (.isFile f) (str/ends-with? (.getName f) ".edn"))]
+      (let [head (with-open [r (io/reader f)] (let [cs (char-array 400) n (.read r cs)] (String. cs 0 (max n 0))))]
+        [(subs (.getPath f) base) (Long/parseLong (second (re-find #":count (\d+)" head)))]))))
+
+(defn- case-file
+  "An oracle case's expected file: test/oracle/forms/text.ae:67 -> forms/text.edn."
+  [c]
+  (str/replace (str/replace c #"^test/oracle/" "") #"\.ae:\d+$" ".edn"))
+
+(defmethod read-source :oracle [src]
+  (let [files (filter #(selected? src (first %)) (expected-files (:expected src)))
+        sel (set (map first files))
+        es (for [g (:mismatches (read-edn (:file src))) c (:cases g) :when (sel (case-file (:case c)))]
+             (entry (:case c) :known (:reason g)))]
+    {:pass (- (reduce + (map second files)) (count es)) :entries (vec es)
+     :detail (str (count files) " files")}))
+
+(defmethod read-source :known-mismatches [src]
+  {:pass nil :entries (vec (known-cases src (:file src)))
+   :detail "the known file only: its passing cases are not recorded"})
+
+(defmethod read-source :repr-clojure-rules [src]
+  (require 'arbace.repr.clojure.rules)
+  (let [rules @(resolve 'arbace.repr.clojure.rules/rules)
+        one-way (filter #(= :one-way (:way %)) rules)]
+    {:pass (- (count rules) (count one-way))
+     :entries (vec (for [r one-way]
+                     (entry (:id r) :one-way (str (:id r) ": " (str/replace (str/trim (:loss r)) #"\s+" " ")))))
+     :detail "arbace.repr.clojure.rules"}))
+
+(defmethod read-source :repr-clojure-known [src]
+  {:pass nil
+   :entries (vec (for [[corpus files] (read-edn (:file src)) [f why] files]
+                   (entry (str (name corpus) " " f) :known (str (name corpus) ": " why))))
+   :detail "the known file only: its corpora's passing files are not recorded"})
+
+(defmethod read-source :native-check [src]
+  (let [r (read-edn (:file src))
+        cs (:corpora r)]
+    {:pass (reduce + (map :equal cs))
+     :entries (vec (concat
+                    (for [c cs [k why] (:raw-only c)] (entry (str (:corpus c) " " k) :raw-only (str (:corpus c) ": " why)))
+                    (for [c cs [k why] (:extra c)] (entry (str (:corpus c) " " k) :extra (str (:corpus c) ": the helper's failure: " why)))
+                    (for [c cs :when (pos? (:rejected c))]
+                      (entry (:corpus c) :rejected (str (:corpus c) ": " (:rejected c) " files go/parser rejects") (:rejected c)))))
+     :detail (str (count cs) " corpora, " (format "%,d" (long (reduce + (map :dumps cs)))) " dumps (" (:recorded r) ")")}))
+
+(defmethod read-source :native-known [src]
+  {:pass nil :entries (vec (for [[k why] (read-edn (:file src))] (entry k :known (str k ": " why))))
+   :detail "the known file only"})
+
+(defmethod read-source :results [src]
+  (let [rows (read-edn (:file src))]
+    {:pass (count (filter #(= :pass (second %)) rows))
+     :entries (vec (for [[id r why] rows :when (not= :pass r)] (entry id r why)))}))
+
+(defmethod read-source :java-check [src]
+  (let [rows (read-edn (:file src))]
+    {:pass (count (filter #(= :pass (nth % 2)) rows))
+     :entries (vec (for [[id _ r why] rows :when (not= :pass r)] (assoc (entry id r why) :level (:level src))))}))
+
+(defmethod read-source :roundtrip [src]
+  (let [r (read-edn (:file src))
+        known (into {} (for [[kind p lvls why] (when (:known src) (:known (read-edn (:known src))))]
+                         [[kind p] [(set lvls) why]]))
+        rows (:results r)
+        np (for [[kind p st first-line] rows
+                 :let [bad (filter #(not= :pass (get st %)) (:levels r))]
+                 :when (seq bad)]
+             (let [lv (str/join "," (map name bad))
+                   [klv why] (known [kind p])]
+               (cond
+                 (and klv (every? klv bad)) (entry (str (name kind) " " p) :known (str lv ": " why))
+                 (some #(#{:fail :error :differ} (get st %)) bad) (entry (str (name kind) " " p) :fail (str lv ": " first-line))
+                 :else (entry (str (name kind) " " p) :skip (str lv ": " first-line)))))]
+    {:pass (- (count rows) (count np)) :entries (vec np)
+     :detail (str (str/join ", " (map name (:levels r))) " levels; " (pr-str (:config r)))}))
+
+(defmethod read-source :text-known [src]
+  {:pass nil :entries (vec (for [[p why] (sort-by key (read-edn (:file src)))] (entry p :known (str "text: " why))))
+   :detail "the known file only: the level's passing files are not recorded"})
+
+;; the classes
+
+(defn- classes-of [f]
+  (if (exists? f) (read-edn f) []))
+
+(defn- classify
+  "An entry's class: the first of its :level (or of none) that names it in :tests or one of whose
+  :match regexps finds \"RESULT REASON\"; nil when none does."
+  [classes e]
+  (let [s (str (name (:result e)) " " (:reason e))]
+    (some (fn [c] (when (and (or (nil? (:level e)) (nil? (:level c)) (= (:level e) (:level c)))
+                             (or (some #{(:id e)} (:tests c)) (some #(re-find % s) (:match c))))
+                    c))
+          classes)))
+
+(defn- kind-of [cell c]
+  (let [k (:kind c)]
+    (if (#{:design :deferred} k) k (get (:kind-map cell) k))))
+
+(defn- judge-source
+  "A source read and judged: its entries with their classes."
+  [cell src]
+  (let [file (or (:file src) "")
+        present (or (= :repr-clojure-rules (:reader src)) (exists? (:file src)))
+        cf (or (:classes src) (:classes cell))]
+    (if-not present
+      (assoc src :present false
+                 :problems (when-not (:until src) [(str (:name src) ": no " file)]))
+      (let [r (read-source src)
+            classes (classes-of cf)
+            es (for [e (:entries r)] (let [c (classify classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))]
+        (merge src r
+               {:present true :classes-file cf :entries (vec es)
+                :problems (vec (concat
+                                (for [e es :when (nil? (:class e))]
+                                  (str (:name src) ": " (:id e) " in no class of " cf ": " (name (:result e)) " " (:reason e)))
+                                (for [c (distinct (keep :class es)) :when (nil? (kind-of cell c))]
+                                  (str cf ": class " (:id c) "'s kind " (:kind c) " is neither :design nor :deferred"))))})))))
+
+(defn- sum [k es] (reduce + (map :n (filter #(= k (:kind %)) es))))
+
+(defn- judge-cell [cell]
+  (let [ss (mapv #(judge-source cell %) (:sources cell))
+        checks (filter #(and (not= :beside (:role %)) (:present %)) ss)
+        es (mapcat :entries checks)]
+    (assoc cell :sources ss
+                :checked (boolean (seq checks))
+                :until (some :until (remove :present (:sources cell)))
+                :pass (reduce + (keep :pass checks))
+                :pass-partial (boolean (some #(and (nil? (:pass %)) (not (:within %))) checks))
+                :design (sum :design es) :deferred (sum :deferred es)
+                :pending (reduce + (map :n (filter #(= :pending (:decided (:class %))) es))))))
+
+(defn- n [x] (format "%,d" (long x)))
+
+(defn- cell-text [c]
+  (if-not (:checked c)
+    (str "no check yet" (when (:until c) (str " (" (:until c) ")")))
+    (str (n (:pass c)) (when (:pass-partial c) "+") " / " (n (:design c)) " / " (n (:deferred c))
+         (when (pos? (:pending c)) (str " (" (n (:pending c)) " pending)")))))
+
+(defn- print-source [s entries?]
+  (if-not (:present s)
+    (println (str "   " (:name s) (when (= :beside (:role s)) " (beside)") ": not recorded yet"
+                  (when (:until s) (str " (" (:until s) ")")) ", " (:file s)))
+    (let [es (:entries s)
+          by (group-by :class es)]
+      (println (str "   " (:name s) (when (= :beside (:role s)) " (beside)") (when (:file s) (str ", " (:file s)))
+                    ": " (if (:pass s) (n (:pass s)) "?") " " (:unit s) " pass, "
+                    (n (reduce + (map :n es))) " not"
+                    (when (:detail s) (str " (" (:detail s) ")"))))
+      (doseq [[c xs] (sort-by (comp str :id key) (dissoc by nil))]
+        (println (format "      %5d %s: %s (%s%s)" (long (reduce + (map :n xs))) (name (:id c)) (:title c)
+                         (name (:kind (first xs)))
+                         (if (= :pending (:decided c)) ", decision pending" "")))
+        (when entries?
+          (doseq [e xs]
+            (println (str "              "
+                          (if (str/starts-with? (:reason e) (:id e))
+                            (str (name (:result e)) " " (:reason e))
+                            (let [r (:reason e)] (str (:id e) ": " (name (:result e)) " " (if (> (count r) 100) (str (subs r 0 100) "...") r))))))))))))
+
+(defn- matrix [spec cells]
+  (let [nm (:names spec)]
+    (println (str "| | " (str/join " | " (map nm (:levels spec))) " |"))
+    (println (str "|---|" (str/join (repeat (count (:levels spec)) "---|"))))
+    (doseq [l (:languages spec)]
+      (println (str "| " (nm l) " | " (str/join " | " (for [v (:levels spec)] (cell-text (get cells [l v])))) " |")))))
+
+(defn- run [spec entries?]
+  (let [cells (into {} (for [[k c] (:cells spec)] [k (judge-cell c)]))
+        nm (:names spec)
+        order (for [l (:languages spec) v (:levels spec)] [l v])
+        problems (mapcat (fn [k] (mapcat :problems (:sources (cells k)))) order)]
+    (println "reap: the REAP matrix (doc/FULL-SUPPORT-SURVEY.md, RPS13): pass / by design / deferred per cell,")
+    (println "      summed over the cell's checks, each in its unit; + : a check records only its non-passes;")
+    (println "      the checks beside a level (RPS16) and the cells' sources below")
+    (println)
+    (matrix spec cells)
+    (println)
+    (doseq [k order :let [c (cells k)]]
+      (println (str (nm (first k)) " " (nm (second k)) ": " (cell-text c) "; classes " (:classes c)))
+      (doseq [s (:sources c)] (print-source s entries?)))
+    (let [pending (for [k order s (:sources (cells k)) e (:entries s)
+                        :when (= :pending (:decided (:class e)))]
+                    [(:classes-file s) (:class e)])
+          pc (distinct pending)]
+      (when (seq pc)
+        (println)
+        (println "reap: classes whose decision is pending (the user's):")
+        (doseq [[f c] pc]
+          (println (str "   " f " " (:id c) ": " (:title c) " (" (name (:kind c)) ", "
+                        (count (filter #(= [f c] %) pending)) " cases)")))))
+    (println)
+    (println (str "reap: " (count (filter :checked (vals cells))) " of " (count cells) " cells checked, "
+                  (count (remove :checked (vals cells))) " with no check yet; "
+                  (count problems) " problems"))
+    (doseq [p problems] (println (str "   " p)))
+    (empty? problems)))
+
+(defn- suite-only
+  "bin/clojure-tests --divergences RESULTS: the Clojure cells' suite sources over RESULTS."
+  [spec results]
+  (let [cells (for [v (:levels spec) :let [k [:clojure v] c (get-in spec [:cells k])]
+                    :let [ss (filter #(and (= :clojure-suite (:reader %)) (not (:until %))) (:sources c))]
+                    :when (seq ss)]
+                [k (assoc c :sources (mapv #(assoc % :file results) ss))])
+        js (for [[k c] cells] [k (judge-cell c)])
+        problems (mapcat (fn [[_ c]] (mapcat :problems (:sources c))) js)]
+    (doseq [[k c] js]
+      (println (str "Clojure " ((:names spec) (second k)) ": " (cell-text c) "; classes " (:classes c)))
+      (doseq [s (:sources c)] (print-source s true)))
+    (println (str "clojure-tests divergences: " results ": " (count problems) " not in a class"))
+    (doseq [p problems] (println (str "   " p)))
+    (empty? problems)))
+
+(defn- record-native-check
+  "The summary of bin/repr-go native-check's report, the read level's reference."
+  [report out]
+  (let [r (with-open [rd (PushbackReader. (io/reader report))] (read rd))
+        at (str (java.time.Instant/ofEpochMilli (.lastModified (File. ^String report))))
+        lines (concat
+               [";; bin/repr-go native-check's numbers (doc/FULL-SUPPORT-SURVEY.md, REAP1): per corpus its dumps, those"
+                ";; equal at every level (E-tree, the raw forms resolved, E-ann, E-forms), the raw-only ones (the"
+                ";; final conversion's failure), those dumped natively and not by the helper (its failure), the"
+                ";; files go/parser rejects; written from the check's report by bin/reap record-native-check,"
+                ";; after a run of bin/repr-go native-check (--fresh) over every corpus. Read with the Clojure reader."
+                (str "{:recorded " (pr-str (str "native-check's report of " at)))
+                " :corpora"
+                " ["]
+               (for [c (:corpora r)]
+                 (str "  {:corpus " (pr-str (:corpus c)) " :dumps " (:dumps c) " :equal " (:forms-equal c)
+                      " :rejected " (:rejected c) " :unknown " (:unknown c)
+                      "\n   :raw-only [" (str/join "\n              " (map #(pr-str [(str (first %)) (str (second %))]) (:raw-only c))) "]"
+                      "\n   :extra [" (str/join "\n           " (map #(pr-str [(str (first %)) (str/join " | " (take 2 (str/split (str (second %)) #" \| ")))]) (:extra c))) "]}"))
+               ["  ]}"])]
+    (spit out (str (str/join "\n" lines) "\n"))
+    (println (str "reap: wrote " out " (" (count (:corpora r)) " corpora)"))
+    true))
+
+(defn -main [& args]
+  (binding [*root* (or (System/getenv "REAP_ROOT") ".")]
+    (let [spec (read-edn "test/reap/cells.edn")
+          ok (case (first args)
+               "--suite" (suite-only spec (second args))
+               "record-native-check" (record-native-check (second args) (nth args 2))
+               (run spec (some #{"--entries"} args)))]
+      (shutdown-agents)
+      (System/exit (if ok 0 1)))))
