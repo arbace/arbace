@@ -26,7 +26,18 @@
 #                        classes  javac on Arbace's class files (bin/repr-java javac, -g:none -nowarn
 #                                 -XDsuppressNotes -proc:none -implicit:none and the test's options)
 #                                 against the JDK javac's, by the digest of their listing
-#                      (j2g is JC2's, diagnostics JC3's.) Results in .tmp/java-check/results.tsv,
+#                        diagnostics  langtools' golden-diagnostics tests (the corpus
+#                                 langtools-diagnostics, compile-fail-ref: JC3, "As built: JC3"), in
+#                                 place and not renamed, their @build and @compile actions in order by
+#                                 javac on Arbace (bin/repr-java javac) as jtreg runs them (-d one
+#                                 classes directory, -sourcepath the test's directory and @library's,
+#                                 @modules as --add-exports, @enablePreview, ${test.src}...): pass when
+#                                 each action's status is the JDK javac's and each ref=F action's
+#                                 output equals F line by line, trailing white space dropped (the
+#                                 JDK javac's does: a test whose JDK output differs is not checked);
+#                                 fail (a status), differ (an output: its first differing line)
+#                      (j2g is JC2's.) The run tests are the levels read, interp, classes', the
+#                      golden-diagnostics tests diagnostics'. Results in .tmp/java-check/results.tsv,
 #                      against test/java/check-LEVEL.edn (as recorded, new, now passing; a test
 #                      passing there and not now fails the check), every test not passing in a class
 #                      of test/java/divergences.edn (none in no class), the numbers by area; --record
@@ -47,7 +58,10 @@
 #                      parses it, the files renamed, compiled by the JDK's javac (as the test's
 #                      @compile options say; and with -g:none ... for the classes level), each main
 #                      action run twice (in an empty directory, -Dtest.src=DIR -Dtest.classes=...,
-#                      HotSpot's JIT options dropped, -Xmx2g, 60 s); written as test/java/ref-jdk26.edn.
+#                      HotSpot's JIT options dropped, -Xmx2g, 60 s); the golden-diagnostics tests'
+#                      actions by the JDK's javac in place, each output's digest and whether it is the
+#                      golden file's; written as test/java/ref-jdk26.edn (--only REGEX: the plans it
+#                      finds, the other tests' lines kept; kind.diagnostics, the golden tests).
 #                      JDK names the jdk26u checkout (default /root/jdk26u), its commit the platform's
 #   bin/java-check --forms verify|update
 #                      the essential tests' forms (test/java/forms/ID, test/java/forms/provenance.edn):
@@ -93,6 +107,7 @@ record_sources() {
   local id=$1 d=$work/record/$1 dir opts=() files=() k a b
   dir=$(awk -F'\t' '$1=="dir"{print $2}' "$d/plan.tsv")
   grep -q '^skip' "$d/plan.tsv" && return 0
+  grep -q '^kind	diagnostics' "$d/plan.tsv" && return 0 # record_diag's
   while IFS=$'\t' read -r k a b; do
     case $k in
       javac) [ "$a" = -Werror ] || opts+=("$a") ;;
@@ -174,8 +189,131 @@ record_ref() {
   jc rename "$work" > "$work/rename.txt"
   echo "== java-check: the JDK's javac and runs, twice ($((SECONDS - t0)) s)" >&2
   xargs -a "$list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); record_runs "$1"' _ {}
+  echo "== java-check: the golden-diagnostics tests by the JDK's javac ($((SECONDS - t0)) s)" >&2
+  export -f record_diag diag_actions diag_root diag_norm diag_first_diff
+  : > "$work/empty"
+  xargs -a "$list" -P "$jobs" -I{} bash -c 'record_diag "$1"' _ {}
   jc gather "$work" "$ref" "$corpora"
+  jc gather-diag "$work" "$ref"
   echo "java-check --record-ref: $((SECONDS - t0)) s"
+}
+
+# ---------------------------------------------------------------------------------------------
+# the diagnostics level (JC3, doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC3"): langtools'
+# golden-diagnostics tests (compile-fail-ref) run as jtreg runs them, in place (not renamed: the
+# golden files name the tests' files and classes), by the JDK's javac for the reference and by
+# javac on Arbace for the check
+
+# diag_root DIR: the test's jtreg root (the nearest directory at or above DIR holding TEST.ROOT)
+diag_root() { local r=$1; while [ "$r" != / ] && [ ! -f "$r/TEST.ROOT" ]; do r=$(dirname "$r"); done; echo "$r"; }
+
+# diag_norm IN OUT: javac's output as jtreg compares it with a golden file, line by line: each
+# line's trailing white space (and a CR) dropped
+diag_norm() { awk '{ sub(/[ \t\r]+$/, ""); print }' "$1" > "$2"; }
+
+# diag_first_diff A B: the first line where A (javac's output) and B (the golden file) differ
+diag_first_diff() {
+  awk 'FILENAME == ARGV[1] { a[FNR] = $0; na = FNR; next } { b[FNR] = $0; nb = FNR }
+       END { n = (na > nb ? na : nb)
+             for (i = 1; i <= n; i++) if (!(i in a) || !(i in b) || a[i] != b[i]) {
+               printf "line %d: %s (the golden file: %s)", i, (i in a ? substr(a[i], 1, 160) : "nothing"), (i in b ? substr(b[i], 1, 160) : "nothing"); exit } }' "$1" "$2" | tr '\t' ' '
+}
+
+# diag_actions DIR PLAN OUT JAVAC...: the test's @build and @compile actions (PLAN's act lines) in
+# order, by the javac command JAVAC..., in DIR, as jtreg runs them: -d OUT/classes (one directory for
+# every action), -sourcepath DIR and the @library directories, -classpath the classes; @modules as
+# --add-exports (a package) or --add-modules, @enablePreview as --enable-preview --source 26; jtreg's
+# substitutions ${test.src}, ${test.classes}, ${jdk.version}; /process as -proc:only. Per action I:
+# OUT/dI.exit, the output normalized (dI.out, diag_norm) with its digest (dI.sha) and length (dI.len),
+# its first line (dI.err1), and for a ref=F action dI.golden (1 when it equals F, else 0 and dI.diff)
+diag_actions() {
+  local dir=$1 plan=$2 out=$3; shift 3
+  local cls=$out/classes troot sp k a m x i kind modes toks t f c files opts extra=() st ref
+  troot=$(diag_root "$dir"); sp=$dir
+  rm -rf "$cls"; mkdir -p "$cls"
+  while IFS=$'\t' read -r k a; do
+    case $k in
+      library) case $a in /*) sp+=":$troot$a" ;; *) sp+=":$dir/$a" ;; esac ;;
+      modules) m=${a%%:*}; case $m in */*) extra+=(--add-exports "$m=ALL-UNNAMED") ;; *) extra+=(--add-modules "$m") ;; esac ;;
+      preview) extra+=(--enable-preview --source 26) ;;
+    esac
+  done < "$plan"
+  while IFS=$'\t' read -r -a x; do
+    [ "${x[0]}" = act ] || continue
+    i=${x[1]} kind=${x[2]} modes=${x[3]} toks=("${x[@]:4}")
+    for t in "${!toks[@]}"; do
+      toks[$t]=${toks[$t]//'${test.src}'/$dir}
+      toks[$t]=${toks[$t]//'${test.classes}'/$cls}
+      toks[$t]=${toks[$t]//'${jdk.version}'/26}
+    done
+    st=0
+    if [ "$kind" = build ]; then
+      # @build: the classes' files found on the source path, compiled
+      files=()
+      for c in ${toks[@]+"${toks[@]}"}; do
+        for f in ${sp//:/ }; do [ -f "$f/${c//.//}.java" ] && { files+=("$f/${c//.//}.java"); break; }; done
+      done
+      : > "$out/d$i.raw"
+      [ ${#files[@]} = 0 ] || (cd "$dir" && "$@" ${extra[@]+"${extra[@]}"} -d "$cls" -sourcepath "$sp" -classpath "$cls" "${files[@]}") \
+        < "$work/empty" > "$out/d$i.raw" 2>&1 || st=$?
+    else
+      opts=()
+      case /$modes/ in */process/*) opts+=(-proc:only) ;; esac
+      (cd "$dir" && "$@" ${extra[@]+"${extra[@]}"} -d "$cls" -sourcepath "$sp" -classpath "$cls" ${opts[@]+"${opts[@]}"} ${toks[@]+"${toks[@]}"}) \
+        < "$work/empty" > "$out/d$i.raw" 2>&1 || st=$?
+    fi
+    echo "$st" > "$out/d$i.exit"
+    diag_norm "$out/d$i.raw" "$out/d$i.out"
+    sha256sum < "$out/d$i.out" | cut -c1-16 > "$out/d$i.sha"
+    stat -c %s "$out/d$i.out" > "$out/d$i.len"
+    first_line "$out/d$i.out" > "$out/d$i.err1"
+    ref=$(printf '%s\n' "${modes//\//$'\n'}" | sed -n 's/^ref=//p')
+    rm -f "$out/d$i.golden" "$out/d$i.diff"
+    if [ -n "$ref" ]; then
+      if [ -f "$dir/$ref" ]; then
+        diag_norm "$dir/$ref" "$out/d$i.gold"
+        if cmp -s "$out/d$i.out" "$out/d$i.gold"; then echo 1 > "$out/d$i.golden"
+        else echo 0 > "$out/d$i.golden"; diag_first_diff "$out/d$i.out" "$out/d$i.gold" > "$out/d$i.diff"; fi
+        rm -f "$out/d$i.gold"
+      else
+        echo 0 > "$out/d$i.golden"; echo "no golden file $ref" > "$out/d$i.diff"
+      fi
+    fi
+    rm -f "$out/d$i.raw"
+  done < "$plan"
+  rm -rf "$cls"
+}
+
+# record_diag ID: a golden-diagnostics test's actions by the JDK's javac
+record_diag() {
+  local d=$work/record/$1 dir
+  grep -q '^kind	diagnostics' "$d/plan.tsv" || return 0
+  grep -q '^skip' "$d/plan.tsv" && return 0
+  dir=$(awk -F'\t' '$1=="dir"{print $2}' "$d/plan.tsv")
+  diag_actions "$dir" "$d/plan.tsv" "$d" javac -J-Xmx1g
+}
+
+# check_diag ID: a golden-diagnostics test's actions by javac on Arbace (bin/repr-java javac): pass
+# when each action's status is the JDK javac's and each ref= action's output the golden file, as the
+# JDK javac's is; fail (a status differs) or differ (an output) otherwise
+check_diag() {
+  local id=$1 p=$work/run/$1 dir k i e g st res=""
+  dir=$jdktest/$(awk -F'\t' '$1=="dir"{print $2}' "$p/plan.tsv")
+  diag_actions "$dir" "$p/plan.tsv" "$p" "$root/bin/repr-java" javac
+  while IFS=$'\t' read -r k i e g; do
+    [ "$k" = exp ] || continue
+    st=$(cat "$p/d$i.exit")
+    if [ "$st" != "$e" ]; then
+      res="fail	action $i: status $st (the JDK's $e): $(cat "$p/d$i.err1")"; break
+    elif [ "$g" = 1 ] && [ "$(cat "$p/d$i.golden")" != 1 ]; then
+      res="differ	action $i: the output differs from the golden file, $(cat "$p/d$i.diff")"; break
+    fi
+  done < "$p/plan.tsv"
+  # a crash of the compiler: its exception named in the reason
+  if [ -n "$res" ] && grep -q '^An exception has occurred in the compiler' "$p/d$i.out"; then
+    res="$res; the compiler's crash: $(grep -m1 -E '^[A-Za-z0-9_.$]+(Exception|Error)' "$p/d$i.out" | tr '\t' ' ' | cut -c1-200)"
+  fi
+  printf '%s\tdiagnostics\t%s\n' "$id" "${res:-pass	}" | sed -e "s|$p|RUN|g" -e "s|$root|.|g" -e "s|$jdktest/||g"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -208,6 +346,7 @@ read_opts() {
 # check_one ID: the test's levels; prints ID<TAB>LEVEL<TAB>RESULT<TAB>REASON per level
 check_one() {
   local id=$1 p=$work/run/$1 dir rel dst pre k x forms key st reason r i tmo opts=() files=() res
+  grep -q '^kind	diagnostics' "$p/plan.tsv" && { check_diag "$id"; return; } # the diagnostics level's
   # the test's directory: under jdk26u's test/, or the checkout's (Arbace's own corpus)
   case $(awk -F'\t' '$1=="root"{print $2}' "$p/plan.tsv") in
     checkout) dir=$root/$(awk -F'\t' '$1=="dir"{print $2}' "$p/plan.tsv") ;;
@@ -321,14 +460,15 @@ check() {
     pargs+=(--list "$root/test/java/essential.txt")
   else
     check_pin
-    case ",$levels," in *,read,*|*,interp,*|*,classes,*)
+    case ",$levels," in *,read,*|*,interp,*|*,classes,*|*,diagnostics,*)
       . "$root/bin/lib/repr-java/host.bash"
       reader_key="$(repr_java_reader_hash) $(repr_java_host)" || return 1 ;;
     esac
   fi
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
+  jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
-  export -f check_one read_opts first_line classes_sha
+  export -f check_one read_opts first_line classes_sha check_diag diag_actions diag_root diag_norm diag_first_diff
   export root work jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
   echo "java-check: $(wc -l < "$work/run.list") tests in $((SECONDS - t0)) s"

@@ -33,7 +33,7 @@ does.
 Contents: Executive summary · 1 Today · 2 What goi's check is, and what Java's must be · 3 The
 corpora · 4 What "pass" means · 5 Measurements · 6 What the failures say · 7 The tool:
 `bin/java-check` · 8 Plan (JC1-JC8) · 9 Proposals (JCS1-JCS15) · Decided · As built: JC1
-(JCS16-JCS25) · 10 Risks · 11 Sources · Appendix A: the scripts.
+(JCS16-JCS25) · 10 Risks · 11 Sources · Appendix A: the scripts · As built: JC3 (JCS50-JCS55).
 
 ## Executive summary
 
@@ -1228,3 +1228,146 @@ tmpdir, at the next `--record-ref`), JCS20 (a), JCS21 (a), JCS22 (a), JCS23 (a),
 stack overflow in its class; the converter iterative with JC5), JCS25 (a) (the JLS corpus grown by
 chapter). JCS16, JCS17, JCS19 and JCS33 (a) (the interp level file by file, JC4 now on main) are built
 with JC2.
+
+## As built: JC3 (2026-10-24)
+
+Branch `java-check-jc3`, from main `0050e92a`. JC3 adds the level `diagnostics` to `bin/java-check`;
+the levels `classes` and `read` were JC1's and stay as they are: `classes` was already judged
+against the JDK javac's class files recorded as digests (the reference's `:classes`, the first 16
+hex digits of the SHA-256 of their `sha256sum` listing), with §5.2's numbers as its reference
+(`test/java/check-classes.edn`: 2,965 of 2,967, the two `--release 8` and `--release 17`), and
+`read` likewise (2,965 of 2,967). Nothing under `arbace/`, `go/`, `overlay/` or `jdk/` changed: the
+shipped program, javac's tool and the gate's keys are the same.
+
+**What it is.**
+
+- *The corpus* `langtools-diagnostics` (`test/java/corpora.edn`): every `compile-fail-ref` test
+  (§3.1's category: a `@compile/fail/ref=F` action) under jdk26u's `test/langtools/`: 1,212 tests,
+  1,203 of `tools/javac` and 9 of `tools/doclint` (§3.1's measurement counted 1,211 by its
+  own scan). Ids `t06426`-`t07637`,
+  after JC1's.
+- *Run as jtreg runs them, in place*: a golden file names the test's files and classes
+  (`T.java:10:5: compiler.err...`), so these tests are not renamed (JCS4 (a) is the run levels').
+  The scan keeps each test's `@build` and `@compile` actions in order with their tokens as written,
+  its `@library`, `@modules` and `@enablePreview` (`java.check/diag-plan`); `diag_actions` runs them
+  with one classes directory: `-d CLASSES -sourcepath DIR:LIBRARIES -classpath CLASSES` (jtreg's;
+  `@library /x` under the test's jtreg root, the directory of `TEST.ROOT`), `@modules m/p` as
+  `--add-exports m/p=ALL-UNNAMED` (a module alone as `--add-modules`), `@enablePreview` as
+  `--enable-preview --source 26`, jtreg's substitutions `${test.src}`, `${test.classes}` and
+  `${jdk.version}`, `/process` as `-proc:only`; `@build C` compiles `C.java` found on the source
+  path. javac's output (stdout and stderr together, stdin empty) is compared with `F` as jtreg
+  compares a golden file: line by line, each line's trailing white space and CR dropped.
+  Skipped, with why: `@clean` between the actions (5), `@compile/module=` (3).
+- *The reference* (`--record-ref`, JCS5 (b)): the same actions by the JDK's javac; per action the
+  status, the normalized output's SHA-256 (16 hex digits) and length, and `:golden` (equal to `F`).
+  The JDK passes a test when each action's status is what jtreg expects (0, or 1 for `/fail`) and
+  each `ref=` output is the golden file. `--record-ref --only kind.diagnostics` recorded them alone
+  (gather keeps the other tests' lines byte for byte; `java.check/gather-diag` writes the golden
+  tests' lines and the reference's header note about them).
+- *The check* (`--levels diagnostics`, `check_diag`): the same actions by javac on Arbace
+  (`bin/repr-java javac`); `pass` when each status is the JDK javac's and each `ref=` output the
+  golden file; `fail` (a status; the reason the output's first line), `differ` (an output; the
+  reason its first differing line, ours and the golden file's), a crash of the compiler named by
+  its exception. `java.check/plan-diag` gives the golden tests to the level `diagnostics` alone
+  and the run tests to the others, so `--levels read,interp,classes,diagnostics` runs each test at
+  its levels. Results in `test/java/check-diagnostics.edn` (`--record`), every non-pass in a class
+  of `test/java/divergences.edn` with `:level :diagnostics`.
+- *In the gates*: `bin/gate --full`'s `java-check-full` now runs `--levels
+  read,interp,classes,diagnostics` (§7.4; the essential gate is unchanged: the level needs javac's
+  tool); the REAP matrix's Java read cell takes `check-diagnostics.edn` as a third source
+  (`test/reap/cells.edn`, the new kind `:javac` mapped to deferred); Makefile
+  `java-check-diagnostics`.
+
+**Measured** (javac's tool of main's `target/arbace-go/amd64/arbace-javac`, key `bf740cf0…`, built
+04:35 the same day, run with `REPR_JAVA_STALE_OK=1`: javac's world, `jdk/javac` and
+`overlay/jdk/javac`, has not changed since; the worktree's key is `3a1913ee…`. The JDK the system's
+26.0.2.1. 8 jobs):
+
+| step | tests | wall |
+|---|---:|---:|
+| `--record-ref --only kind.diagnostics` (the scan, the JDK's javac in place) | 1,212 | 177 s (the actions about 2 minutes) |
+| `--levels diagnostics` (javac on Arbace) | 1,194 | 60-65 s |
+
+The reference: **1,194 of 1,212 pass on the JDK** (§5.5: 1,157 of 1,211 matched; the source path,
+`@build`, `@library` and `@modules` give back most of §5.5's "JDK differs"), 8 skipped (above), 10
+fail there: 8 build a class from a `.jcod` file (`@build Foo` of `Foo.jcod`, `@compile X.jcod`:
+jtreg's own class-file assembler, which the runner does not have), `TypeVariableMissingTA` (its
+`-cp .`, jtreg's working directory, replaces the classes directory, so the processor is not found)
+and a doclint module test whose `@modules` names `jdk.javadoc` for `--add-exports` (a warning,
+status 1 under `-Werror`).
+
+| javac on Arbace, the diagnostics level | tests |
+|---|---:|
+| **pass** (each status the JDK javac's, each output the golden file) | **1,101 (92.2%)** |
+| `--release N` (no `ct.sym`: "release version N not supported", 8-26) | 44 |
+| annotation processors from class files ("Could not instantiate an instance of processor") | 25 |
+| `-Xdoclint` (doclint not in javac's world: `compiler.warn.doclint.not.available`) | 8 |
+| javac on Arbace's file manager: file names in full in raw diagnostics (2), no `source.no.system.modules.path` warning for `-source N` (4), `-source 8`'s platform classes (1), a `module-info.java`'s error reported twice (1) | 8 |
+| javac on Arbace's command line: `-XDexpectKeys` ignored (1), no error count after a plug-in error (1), `-encoding ascii` and `--module-path missing.jar` refused (2) | 4 |
+| a class outside javac's closed world (`java.lang.Module` in the processing environment's processor loader, 3; `java.lang.annotation.Annotation` in `Check`'s leak check under `--patch-module`, 1): the compiler's crash | 4 |
+| **all** | **1,194** |
+
+So §5.5's finding holds and is sharpened: wherever javac on Arbace's world has what a test asks,
+its diagnostics are the JDK javac's byte for byte (no test differs in a diagnostic javac itself
+computes); what differs is the platform (`ct.sym`), what the world lacks (doclint, a class loader for
+processors, two closed-world classes) and javac on Arbace's own launcher and file manager
+(jrt's own Java in `overlay/jdk/javac`, As built: JN3), which take javac's API, not its command
+line: the last two classes (12 tests) are the only ones whose fix is Arbace's own small Java.
+
+**Proposals (JCS50-JCS55).**
+
+- **JCS50 `--release N`.**
+  - Options: (a) the platform gains the JDK build's `lib/ct.sym` (pinned with the platform,
+    `jdk/javac/platform.sha256`) and javac on Arbace's file manager serves `--release N` from it as
+    javac's `JDKPlatformProvider` does (a zip read through jrt's zip classes, not a zip file
+    system); (b) `--release 26` (the current release) accepted as `-source 26 -target 26` with the
+    system modules, older releases left in the class; (c) by design: javac on Arbace compiles for
+    its own platform only.
+  - *Recommended: (a)*, with (b) as its first step: `--release` is what build tools pass (Maven's
+    `maven.compiler.release`, Gradle's `options.release`), 44 of the 93 tests, and the read and
+    classes levels' two; (c) would leave every such build to `-source`/`-target`.
+- **JCS51 Annotation processors.**
+  - Options: (a) deferred, then processors given as sources defined by the interpreter
+    (`arbace.classes.interp`, the REPL's way of making a class) and handed to javac's processing
+    environment as instances (javac's `-processor` naming a class of the processor path's sources);
+    (b) by design: a processor is a class file loaded by a class loader, out of the Go build
+    (J2G-SPEC §12); (c) a closed list of processors compiled into javac's tool, as the JDK build's
+    tools are (JN7).
+  - *Recommended: (a)*: the processing tests (25) and much of the ecosystem (Lombok, record and
+    mapper generators) are processors; the interpreter already defines classes from Java forms, so
+    no class loader is needed; (c) fits the build's own tools, not a user's.
+- **JCS52 doclint.**
+  - Options: (a) jdk.javadoc's doclint (`jdk.javadoc.internal.doclint`, which javac finds through
+    `DocLint.newDocLint()`'s service lookup) added to javac's world (`jdk/javac`, `bin/javac-vendor
+    convert`), the service bound as javac's world binds its others; (b) by design: doclint is
+    javadoc's, not the compiler's.
+  - *Recommended: (a)*: `-Xdoclint` is a javac option the JDK's javac honours, the closure is a
+    few dozen classes of plain Java, and 8 tests check it.
+- **JCS53 javac on Arbace's command line and file manager.**
+  - Options: (a) javac on Arbace's `Main` calls javac's own `com.sun.tools.javac.main.Main.compile`
+    with Arbace's file manager put in the context (javac's `Main` uses a context's file manager),
+    so the command line's behaviour (`-XDexpectKeys`, the counts, the option checks and warnings)
+    is javac's by construction, and the file manager's file objects give javac what a
+    `PathFileObject` does (short names, `isSameFile`, the system modules location's default) ;
+    (b) each difference patched in `jdk.internal.jrt.javac.Main` and `FileManager` as found; (c) left
+    in their classes.
+  - *Recommended: (a)*: 12 tests now, and every later difference of javac's command line is then
+    javac's own code, as the rest of javac on Arbace is; `-encoding` other than UTF-8 and a jar on
+    `--module-path` stay refused (jrt's charsets, no jar file system) and in the class.
+- **JCS54 The golden warnings tests.**
+  - Options: (a) the corpus widened to every test with a `ref=` action, also `@compile/ref=F`
+    without `/fail` (233 actions: lint warnings and notes golden files, today categorized
+    `compile-only` or other), the level unchanged; (b) the 1,212 `compile-fail-ref` tests only,
+    as built.
+  - *Recommended: (a)*: the same runner and comparison, and lint's warnings are diagnostics the
+    level does not see yet.
+- **JCS55 The tests the runner cannot run.**
+  - Options: (a) as built: `@clean` and `@compile/module=` skipped, `.jcod` tests failing on the
+    JDK (18 in all, not checked); (b) the runner learns `@clean` (delete the named classes' files),
+    `/module=M` (`--patch-module M=DIR`, which javac on Arbace takes) and jtreg's working directory
+    (`-cp .`), `.jcod` left out.
+  - *Recommended: (b)*: small cases of `diag_actions` and up to 9 more tests; `.jcod` needs jtreg's
+    assembler (asmtools' `jcod`), a tool of its own.
+
+The scratch this section cites (the worktree's `.tmp/`, not tracked): `jc3-record.log` (the
+reference's run), `jc3-diag.log` (the check's run), `jc3-diagnostics-results.tsv` (its results).

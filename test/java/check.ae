@@ -199,6 +199,55 @@
   [corpora jdktest]
   (into {} (for [c corpora] [(:id c) (if (= :checkout (:root c)) (.getCanonicalPath (io/file ".")) jdktest)])))
 
+(defn- run-plan
+  "A run test's plan lines (the levels read, interp, classes): javac's options, the files compiled,
+  the classes built, the main actions."
+  [skip opts main-file compiles acts runs base]
+  (concat (when skip [(str "skip\t" skip)])
+          (for [o opts] (str "javac\t" o))
+          (distinct (cons (str "compile\t" main-file)
+                          (for [c compiles fl (:files c)] (str "compile\t" fl))))
+          (for [a acts :when (= :build (:tag a)) c (:classes a)] (str "build\t" c))
+          (for [ru runs]
+            (str "run\t" (or (some #(second (re-matches #"timeout=(\d+)" %)) (:modes ru)) "120") "\t"
+                 (str/replace (:class ru) "${test.main.class}" base) "\t" (str/join "\t" (:args ru))))))
+
+;; the diagnostics level (JC3, "As built: JC3"): a golden-diagnostics test (compile-fail-ref) is run
+;; as jtreg runs it, in place (no renaming: its golden files name its files and classes), its
+;; @build and @compile actions in order, against one classes directory
+
+(def ^:private diag-modes
+  "The @compile modes the diagnostics level runs: /fail, /ref=FILE, /timeout=N, /process
+  (annotation processing only, jtreg's -proc:only)."
+  #"fail|ref=\S+|timeout=\d+|process")
+
+(def ^:private diag-substitutions
+  "jtreg's substitutions in an action's tokens the diagnostics level makes (bin/java-check's diag_actions)."
+  #{"${test.src}" "${test.classes}" "${jdk.version}"})
+
+(defn- diag-plan
+  "A golden-diagnostics test's plan lines: kind, @library and @modules entries, @enablePreview, and
+  each @compile and @build action in order (act I KIND MODES TOKEN...: the tokens as written), or
+  skip with why."
+  [desc]
+  (let [acts (vec (for [[t v] desc :when (#{"compile" "build"} t)
+                        :let [toks (remove str/blank? (str/split (str/trim v) #"\s+"))
+                              moded (and (= t "compile") (str/starts-with? (str (first toks)) "/"))]]
+                    {:kind t :modes (if moded (vec (remove str/blank? (str/split (first toks) #"/"))) [])
+                     :toks (vec (if moded (rest toks) toks))}))
+        subst (set (for [a acts tk (:toks a) s (re-seq #"\$\{[^}]*\}" tk)] s))
+        skip (cond (some #(= "clean" (first %)) desc) "@clean between the actions"
+                   (some #(not (re-matches diag-modes %)) (mapcat :modes acts))
+                   (str "@compile mode " (first (remove #(re-matches diag-modes %) (mapcat :modes acts))))
+                   (seq (remove diag-substitutions subst)) (str "the substitution " (first (remove diag-substitutions subst))))]
+    (concat ["kind\tdiagnostics"]
+            (when skip [(str "skip\t" skip)])
+            (for [[t v] desc :when (= t "library") l (str/split (str/trim v) #"\s+") :when (seq l)] (str "library\t" l))
+            (for [[t v] desc :when (= t "modules") m (str/split (str/trim v) #"\s+") :when (seq m)] (str "modules\t" m))
+            (when (some #(and (= "enablePreview" (first %)) (not= "false" (second %))) desc) ["preview\t1"])
+            (for [[i a] (map-indexed vector acts)]
+              (str/join "\t" (concat ["act" i (:kind a) (if (seq (:modes a)) (str/join "/" (:modes a)) "-")] (:toks a)))))))
+
 (defn scan [jdktest corpora-file ref work]
   (let [{:keys [corpora]} (read-edn corpora-file)
         rts (roots corpora jdktest)
@@ -219,7 +268,7 @@
                    [i d] (map-indexed vector ds)
                    :let [tid (second (re-find #"^id=(\S+)" (second (first d))))
                          {:keys [category actions]} (categorize d)]]
-               {:key (test-key path i n tid) :path path :root croot
+               {:key (test-key path i n tid) :path path :root croot :desc d
                 :root-kind (:root (first cs) :jdk26u) :category category :actions actions
                 :corpus (corpus-of cs path category) :file f})
         rows (distinct rows)
@@ -246,14 +295,9 @@
                    (concat [(str "key\t" (:key r)) (str "path\t" (:path r)) (str "corpus\t" (name (:corpus r)))
                             (str "category\t" (name (:category r))) (str "dir\t" (.getPath dir))
                             (str "root\t" (name (:root-kind r)) "\t" (:root r))]
-                           (when skip [(str "skip\t" skip)])
-                           (for [o opts] (str "javac\t" o))
-                           (distinct (cons (str "compile\t" (.getName ^File (:file r)))
-                                           (for [c compiles fl (:files c)] (str "compile\t" fl))))
-                           (for [a acts :when (= :build (:tag a)) c (:classes a)] (str "build\t" c))
-                           (for [ru runs]
-                             (str "run\t" (or (some #(second (re-matches #"timeout=(\d+)" %)) (:modes ru)) "120") "\t"
-                                  (str/replace (:class ru) "${test.main.class}" base) "\t" (str/join "\t" (:args ru)))))))
+                           (if (= :compile-fail-ref (:category r))
+                             (diag-plan (:desc r))
+                             (run-plan skip opts (.getName ^File (:file r)) compiles acts runs base)))))
     (write-lines (str work "/record.list") (map :id sel))
     ;; the counts, by area and category
     (let [cats (sort (distinct (map (comp name :category) rows)))
@@ -488,12 +532,102 @@
     (shutdown-agents)
     (System/exit (if (seq @problems) 1 0))))
 
+;; ---------------------------------------------------------------------------------------------
+;; the diagnostics level (JC3, "As built: JC3"): the golden-diagnostics tests (compile-fail-ref),
+;; run in place as jtreg runs them (bin/java-check's diag_actions), javac's output compared with
+;; the golden files line by line
+
+(defn- diag-test? [work id]
+  (some #(= ["kind" "diagnostics"] (vec (take 2 %))) (tsv (str work "/record/" id "/plan.tsv"))))
+
+(def ^:private diag-header
+  (str ";; A golden-diagnostics test (:category :compile-fail-ref, the diagnostics level, JC3) is run in place,"
+       " not renamed: its\n;; :libraries, :modules and :preview, and its :actions (@build and @compile in order: :kind,"
+       " jtreg's\n;; :modes, the :toks as written, the JDK javac's :exit, its output's SHA-256 (16 hex digits) and"
+       " length\n;; as jtreg compares it, trailing white space dropped, :golden whether it equals the ref= file)."))
+
+(defn- diag-line
+  "A golden-diagnostics test's line of the reference, from WORK/record/ID (diag_actions' files)."
+  [work id]
+  (let [d (str work "/record/" id)
+        pm (plan-map (tsv (str d "/plan.tsv")))
+        g #(ffirst (pm %))
+        base (second (first (pm "root")))
+        r #(slurp1 (str d "/d" %1 "." %2))
+        acts (vec (for [[i kind modes & toks] (pm "act")
+                        :let [modes (if (= "-" modes) "" modes)
+                              gold (r i "golden")]]
+                    {:kind kind :modes modes :toks (vec toks)
+                     :exit (some-> (r i "exit") Long/parseLong) :out (r i "sha") :out-len (some-> (r i "len") Long/parseLong)
+                     :golden (case gold "1" true "0" false nil)
+                     :diff (when (= "0" gold) (clean (r i "diff") work id base))
+                     :err (clean (r i "err1") work id base)}))
+        bad (first (keep-indexed
+                    (fn [i a]
+                      (let [fail? (some #{"fail"} (str/split (:modes a) #"/"))
+                            want (if fail? 1 0)]
+                        (cond (nil? (:exit a)) (str "action " i ": not run")
+                              (not= want (:exit a)) (str "action " i ": status " (:exit a) " (expected " want "): " (:err a))
+                              (false? (:golden a)) (str "action " i ": the output differs from the golden file, " (:diff a)))))
+                    acts))
+        status (cond (g "skip") [:skip (g "skip")]
+                     bad [:fail bad]
+                     :else [:pass nil])]
+    (edn-map [[:id id] [:test (g "key")] [:corpus (keyword (g "corpus"))] [:category (keyword (g "category"))]
+              [:jdk (first status)] [:why (second status)]
+              [:dir (subs (g "dir") (inc (count base)))]
+              [:libraries (when-let [l (pm "library")] (vec (map first l)))]
+              [:modules (when-let [m (pm "modules")] (vec (map first m)))]
+              [:preview (when (pm "preview") true)]
+              [:actions (when-not (g "skip")
+                          (vec (for [a acts] (into {} (remove (comp nil? val) (dissoc a :err (when (:golden a) :diff)))))))]])))
+
+(defn gather-diag
+  "After gather: the golden-diagnostics tests of WORK/record.list recorded in REF (their lines
+  replaced; gather wrote them as run tests without a source set)."
+  [work ref]
+  (let [ids (filter #(diag-test? work %) (lines (str work "/record.list")))
+        recs (into {} (for [id ids] [id (diag-line work id)]))
+        ls (str/split-lines (slurp ref))
+        ls (if (some #(str/starts-with? % ";; A golden-diagnostics test") ls)
+             ls
+             (let [[hd tl] (split-with #(str/starts-with? % ";;") ls)] (concat hd (str/split-lines diag-header) tl)))
+        out (for [l ls] (if-let [[_ id] (re-find #"^ \{:id \"(t\d+)\"" l)] (if-let [x (recs id)] (str " " x) l) l))]
+    (write-lines ref out)
+    (println (str "java-check gather-diag: " (count ids) " golden-diagnostics tests recorded ("
+                  (count (filter #(str/includes? % ":jdk :pass") (vals recs))) " pass on the JDK)"))))
+
+(defn plan-diag
+  "After plan: the golden-diagnostics tests' plans (WORK/run/ID/plan.tsv: kind, library, modules,
+  preview, act I KIND MODES TOKEN..., exp I EXIT GOLDEN), and WORK/run.list kept to the tests of
+  LEVELS (the diagnostics level's tests, the other levels' the run tests)."
+  [ref work levels]
+  (let [lv (set (str/split levels #","))
+        tests (into {} (for [t (ref-tests ref) :when (= :compile-fail-ref (:category t))] [(:id t) t]))
+        kept (filter #(if (tests %) (lv "diagnostics") (some (fn [l] (not= "diagnostics" l)) lv))
+                     (lines (str work "/run.list")))]
+    (doseq [id kept :let [t (tests id)] :when t]
+      (write-lines (str work "/run/" id "/plan.tsv")
+                   (concat [(str "test\t" (:test t)) (str "dir\t" (:dir t)) (str "root\tjdk26u") "kind\tdiagnostics"]
+                           (for [l (:libraries t)] (str "library\t" l))
+                           (for [m (:modules t)] (str "modules\t" m))
+                           (when (:preview t) ["preview\t1"])
+                           (for [[i a] (map-indexed vector (:actions t))]
+                             (str/join "\t" (concat ["act" i (:kind a) (if (str/blank? (:modes a)) "-" (:modes a))] (:toks a))))
+                           (for [[i a] (map-indexed vector (:actions t))]
+                             (str "exp\t" i "\t" (:exit a) "\t" (if (:golden a) "1" "-"))))))
+    (write-lines (str work "/run.list") kept)
+    (println (str "java-check plan-diag: " (count kept) " tests at the levels " levels
+                  " (" (count (filter tests kept)) " golden-diagnostics tests)"))))
+
 (defn -main [cmd & args]
   (case cmd
     "scan" (apply scan args)
     "rename" (apply rename args)
     "gather" (apply gather args)
     "plan" (apply plan args)
-    "report" (apply report args))
+    "report" (apply report args)
+    "gather-diag" (apply gather-diag args)
+    "plan-diag" (apply plan-diag args))
   (shutdown-agents)
   (System/exit 0))
