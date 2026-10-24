@@ -875,6 +875,15 @@ references are made once (the first run 508 s, both levels then share them).
     program of the linux check moved); (b) the box kept on the printed forms' reference.
   - *Recommended: (a)*: one reference (RPS16).
 
+## Decided (2026-10-24): RPS30-RPS34
+
+The user decided REAP2's proposals as recommended: RPS30 (a) (the positions class by design, the
+lines layout checked), RPS31 (a) (go build's `-complete` by design), RPS32 (a) (the printer refusing
+the forms of three invalid programs deferred: taught to print them as written, in REAP6 or after the
+milestone), RPS33 (a) (REAP8's essential subset of the AOT level, about 240 programs, about 75 s),
+RPS34 (a) (the box's references re-recorded at REAP9's `bin/gate --full` run if they move). The two
+`:pending` classes of `test/goi/divergences-aot.edn` now cite this.
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail

@@ -1724,3 +1724,30 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   commands; left as they are for now, a sweep offered to the user.
 - Decided (the user): the scripts' sweep (`/dev/null` and process substitution replaced by files under
   TMPDIR, one commit per script, each script's check rerun) after the REAP milestone.
+
+## 2026-10-24: the first batched re-seed; REAP2 merged, RPS30-RPS34 decided; JC3 started (the user)
+
+- The first batched re-seed: `bin/arbace-go --fixpoint` at `45c41a46` in a detached worktree (host
+  `696be4b3` != G1; G1 = G2 = G3 = `e1471263`, 152,404,128 bytes), packed by `ARBACE_SEED_GO_BUILD=<G3>
+  bin/seed --make`: `seed/arbace-seed-go.tar.xz` 18,520,792 bytes, SHA-256 `916770d0` (was `54f77c90`),
+  committed `cd0f1e24`, merged `0050e92a`. It carries GPS41 (c), GPS49 (c), GC157 and go:embed, JC4 and
+  JFS65 (b). `bin/seed --verify` at `0050e92a`: printed again at `45c41a46`, the same tree (`34f35cf4`)
+  and archive, stage 0 = G1 = G2 = G3 (`e1471263`), 1,746 s. Logs in `.tmp/reseed1-scratch/`.
+- REAP2 (branch `reap2-goi-aot` from `37422a67`, merged `b348387c`): `bin/goi check --aot` (RPS10):
+  goi's corpora built by `arbace.build.go` from the printed forms and run, the errorcheck programs
+  printed from mode `:full` and compiled by gc, the directory tests built under the module (RPS11),
+  against gc on the originals; 1,685 of 1,837 pass, 0 fail, 0 error (run 1,045 of 1,051, directory
+  126 of 127, errorcheck 514 of 659, 137 of them invalid programs with no forms); 152 non-passes in 7
+  classes (`test/goi/divergences-aot.edn`, known programs in `test/goi/check-aot-known.edn`, results
+  `test/goi/check-aot-linux-amd64.edn`); `bin/goi divergences --aot`; the step `goi-aot` in `bin/gate
+  --full`; Makefile `goi-check-aot`, `goi-divergences-aot`. goi's own reference switched to gc on the
+  originals (RPS12): no program moved (1,618 pass, the results byte for byte). `arbace/build/go.ae` takes
+  `--go-flag` (shipped code: the second re-seed). `bin/goi --record`'s backslash escaping fixed. The
+  check takes 554-582 s at 8 jobs. Merge conflicts in the Makefile, `bin/gate` (the steps of both sides
+  kept) and the survey (both sections kept). The essential gate on `b348387c` passed (19m19s); the
+  matrix: 9 of 12 cells checked, 0 problems. The agent's slips: `/dev/null` as a grep argument twice,
+  one `<(echo)`, a read outside heavy at 32 threads; nothing committed has them.
+- Decided (the user): RPS30 (a), RPS31 (a), RPS32 (a), RPS33 (a), RPS34 (a), as recommended (doc/
+  FULL-SUPPORT-SURVEY.md, "Decided (2026-10-24): RPS30-RPS34"); the two `:pending` classes cite them.
+- JC3 started (branch `java-check-jc3` from `0050e92a`; the user): Java's front end's levels in
+  `bin/java-check`, `diagnostics` beside JC1's `read` and `classes`; proposals JCS50-JCS59.
