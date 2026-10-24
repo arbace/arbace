@@ -126,6 +126,13 @@
   (str/join ", " (for [k [:native :raw :annotate :convert :layout]]
                    (format "%s %.1f" (name k) (/ (.sum ^LongAdder (get phases k)) 1e9)))))
 
+(def ^:private conform-raw
+  "Whether the raw conversions are conformed to the final ones (-main check, native-check): then
+  they keep the files' text beyond the tree (convert's source-text, mode :full's ::full of each
+  go/file form), which conform compares. A read's checker reads none of it (cform leaves the
+  private keys out), so a read converts without it (GPS49 (c))."
+  (atom false))
+
 (defn- prep
   "A loader job's native dump, raw conversion and checker source (import-map over the job's own),
   or {:rejected msg} when go/parser rejects a file."
@@ -137,7 +144,7 @@
     (if (:error n)
       {:job j :n n :rejected (str (:file n) ": " (:error n))}
       (let [ctx (rg/dump-context n (str (:key j) ".edn") (:goroot j))
-            rc (cv/convert-package n (assoc ctx :positions :full :raw true))
+            rc (cv/convert-package n (assoc ctx :positions :full :raw true :source-text @conform-raw))
             src (raw-source rc (merge (:import-map j) more-imports))]
         (phase! :raw (- (System/nanoTime) t1))
         {:job j :n n :ctx ctx :rc rc :src src :native-ms (/ (- t1 t0) 1e6)
@@ -308,7 +315,9 @@
                   (when (= :import-spec (first x))
                     (when-let [p (cv/parse-pos (cv/start (:path (second x))))]
                       (.put by-field [:path-pos p] e)))
-                  (doseq [[k v] (second x)] (walk v (conj path 1 k))))
+                  (let [p1 (conj path 1)]
+                    (doseq [[k v] (second x)]
+                      (when (coll? v) (walk v (conj p1 k))))))
                 (vector? x) (doseq [[i v] (map-indexed vector x)] (walk v (conj path i)))
                 :else nil))]
       (walk ast [])
@@ -489,7 +498,9 @@
   (cond
     (and (seq? x) (map? (second x)))
     (let [f (second x)
-          f2 (persistent! (reduce-kv (fn [m k v] (assoc! m k (rebuild v (conj path 1 k) anns))) (transient {}) f))
+          p1 (conj path 1)
+          f2 (persistent! (reduce-kv (fn [m k v] (assoc! m k (if (coll? v) (rebuild v (conj p1 k) anns) v)))
+                                     (transient {}) f))
           n (apply list (first x) f2 (nnext x))
           a (get anns path)
           a (cond
@@ -1008,6 +1019,7 @@
         _ (when-not (= "0" (System/getenv "REPR_GO_PREFETCH"))
             (reset! prefetch {:pool (Executors/newFixedThreadPool (:jobs opts)) :permits (Semaphore. (int (:jobs opts)))}))
         _ (reset! forms-dir (:forms opts))
+        _ (reset! conform-raw (= cmd "check"))
         ;; the corpora grouped by the configurations their loads need (the standard library's
         ;; sessions), each group's sessions dropped after it: memory for one group's at a time
         specs (map-indexed (fn [i sf] (let [sp (read-spec sf)]
