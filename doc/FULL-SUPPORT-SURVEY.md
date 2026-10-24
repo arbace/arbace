@@ -795,3 +795,168 @@ worktree goes, as the journal's correction of 2026-10-24 asks):
 | `summary.md`, `matrix.md`, `plan.md`, ... | this survey's drafts |
 | the worktree's `target/arbace-go/amd64/arbace-tests` | §5.3's evaluated test build (93.9 MB), and `.tmp/clojure-tests/evaluated/` its suite run |
 | `work/`, `ework/` | per program: the outputs of both sides (`gc/out`, `gc/err`, `a.out`, `a.err`, the build logs; `ref.out`, `aot.out`, the judges) |
+
+## As built: REAP1 (2026-10-24)
+
+Branch `reap1-classes`, from main `37422a67` (after JC4's merge). The record of RPS3 and the tool of
+RPS13: every cell's non-passes as classes in `test/goi/divergences.edn`'s format, judged by
+`bin/reap` from the checks' recorded results alone (no runs: 0.8 s on the tools' host), in the
+essential gate (its step `reap`) and `make reap`. No shipped code changed (no re-seed).
+
+**The tool.** `bin/reap` (bash, `arbace_tool -m reap.main`) reads `test/reap/cells.edn`, the per-cell
+source table (data): for each language and level its classes file and its sources, each with a
+reader (`test/reap/main.ae`'s `read-source`: Clojure's suite against upstream's results, the
+oracle's expected files and known mismatches, a known file in the oracle's shape, repr/clojure's
+rules and round-trip known file, repr/go's native-check numbers and known file, goi's and
+`bin/java-check`'s result rows, repr/go's round-trip references with their known files, the text
+level's known file), `:include`/`:exclude` regexps choosing its part (namespaces, files, cases), a
+`:role` (`:check`, the level's conformance check, or `:beside`, a check of the same code that is not
+the level's reference, RPS16: diffcheck's pairs, the oracle's Java forms and Go files), and `:until`
+for a check not recorded yet. A non-pass's class is the first whose `:match` finds its `RESULT
+REASON` (and, for `bin/java-check`'s rows, whose `:level` is the row's, or that names it in `:tests`,
+as JC1's `java.check` does). It fails on a non-pass no class takes, on a class whose `:kind` is
+neither `:design` nor `:deferred` nor mapped by the cell's `:kind-map`, and on a recorded reference
+gone; a cell none of whose checks is recorded prints "no check yet (MILESTONE)" and does not fail.
+Classes whose `:decided` is `:pending` are listed at the end, not failed. `bin/reap --entries` lists
+every non-pass under its class; `bin/reap record-native-check [REPORT]` writes Go's read numbers.
+`bin/clojure-tests --divergences [RESULTS]` judges a suite run (`RUN/results.edn`) or the reference
+per test against the Clojure levels' classes (the same namespace, `--suite`): a test failing that no
+class takes fails it (checked with a fabricated failing test).
+
+**The plug-ins.** REAP2: `test/goi/check-aot-linux-amd64.edn` (rows `[ID RESULT REASON]` as goi's)
+with `test/goi/divergences-aot.edn`; REAP3: `test/arbace-go-aot-results.edn` (the suite's shape);
+JC1: `test/java/check-read.edn`, `check-classes.edn`, `check-interp.edn` with `test/java/divergences.edn`
+(its `:level` per class, its kinds mapped: `:world`, `:interp`, `:analysis`, `:repl`, `:repr-java`,
+`:harness`, `:other` deferred, `:speed` by design, RPS22); JC2: `test/java/check-compiled.edn`, level
+`:compiled` (a guess at JC2's names, RPS29); REAP5: `test/java/check-print.edn`, level `:print`. Each
+is a source already in `cells.edn`: the cell turns on when its file is committed. Tried with
+`java-check-jc1`'s committed data (`1aae6470`) in a scratch root: Java read 5,930 / 0 / 4, eval 1,364
+/ 278 / 1,325, 0 problems.
+
+**Units.** Each source counts in its own unit, summed per cell: Clojure's suite one case per test
+(eval: 6 tests failing, 7 not run, and 7 namespaces not run counting their 27 upstream tests, a
+namespace at least one; test.generative's 27 specs with eval; the assertions in the detail line: 7,796 read, 12,162
+eval, 548 print), the oracle per case (its files split by level: the reader's three files read,
+the printer's four print, `defclass`, `defclass_corpus` beside Java's eval, `go` beside Go's eval,
+the rest eval; 22,725 cases since JC4 added 14 to `defclass.ae`), goi per program, repr/go per dump,
+package, program, directory test or file, repr/clojure per rule or file. A `+` marks a cell one of
+whose checks records only its non-passes (repr/clojure's round trip, repr/go's text level), so its
+passes are not all counted (RPS24).
+
+**The matrix as printed** (`bin/reap`, at this branch's head, pass / by design / deferred):
+
+| | read | eval | AOT | print |
+|---|---|---|---|---|
+| Clojure | 908 / 2 / 0 | 21,026 / 79 / 14 (1 pending) | no check yet (REAP3) | 1,031+ / 0 / 0 |
+| Java | no check yet (JC1) | no check yet (JC1) | no check yet (JC2) | no check yet (REAP5) |
+| Go | 12,158 / 204 / 0 | 1,618 / 219 / 0 | no check yet (REAP2) | 2,584+ / 141 / 0 |
+
+Beside (not in the numbers): Clojure AOT's diffcheck pair 21 known (10 by design, 5 of them
+pending, 11 deferred: F2.4, REAP3), Java eval's diffcheck pair 2 (deferred, pending) and the oracle's
+Java forms files 358 of 358, Go eval's oracle file 150 of 150. 6 of 12 cells checked, 0 problems.
+
+**The classes files and their counts** (cases; design / deferred / pending):
+
+| file | cell | classes | cases by class |
+|---|---|---|---|
+| `test/clojure/divergences-read.edn` | Clojure read | 1 | one-way rules 2 (design: REPR-CLOJURE.md, "The one-way rules") |
+| `test/clojure/divergences.edn` | Clojure eval (and the oracle beside Java's, Go's) | 17 | suite: out for good 23 (XML, gen-class, serialization, Swing/AWT, jars: D6's "Not to be done"), class files 2 (D13), Q1 2 (design); D6's namespaces cut 7 (metadata 6, java.javadoc 1: deferred, SL5 "not taken for now", RPS18), trace lines 1, FIPrims 2, BitSet 1 (REAP4), `javax.xml.stream` 1, `seq-and-transducer` 1 (deferred, RPS5); oracle: locales 42, providers 1, serialization 1, SecurityManager 1, identity hash 1, main since v4 2, Q1 3 (design), Method.invoke's message 1 (design, pending: RPS19), NaN 1 (deferred, REAP4) |
+| `test/clojure/divergences-aot.edn` | Clojure AOT (diffcheck beside) | 6 | interned at load 4, compiled loader's `Compiler/LINE` 1 (design, pending: RPS20), shared symbols 1 (F3.3 (a)), Q1 compiled 3, identity hash 1 (design); F2.4's limit 11 (deferred: RPS6, REAP3) |
+| `test/clojure/divergences-print.edn` | Clojure print | 0 | none |
+| `test/java/divergences-diffcheck.edn` | Java eval (diffcheck beside) | 1 | the interpreter's world limits 2 (deferred, pending: RPS21) |
+| `test/repr/go/divergences-read.edn` | Go read | 3 | invalid programs 64 (GC47), goos for other boards 53 raw only + 14 the helper's failures (GP3, GPS17), go/parser's rejections 73 (GP6) (all design) |
+| `test/goi/divergences.edn` (goi's, unchanged) | Go eval | 16 used | 219, all design (GC157 and `go:embed` built since the survey: 1,618 pass) |
+| `test/repr/go/divergences-print.edn` | Go print | 4 | `unsafe` 2 (export, code), compile-only directory tests' run level 127, TamaGo's tests embedding their sources 9, empty declaration groups 3 (all design: ROUNDTRIP.md, G2F6) |
+
+Totals of the checked cells: 645 by design, 14 deferred (all Clojure eval's: RPS5's six and RPS18's
+two), 1 pending in the matrix and 7 beside. The kept known files are unchanged
+(`known-go-amd64-frozen.edn`, `diffcheck/known.edn`, the round trips', `native-known.edn`): their
+entries are classed by their reasons. Go's read numbers, which no file recorded (native-check prints
+them), are `test/repr/go/native-check-results.edn`, written by `bin/reap record-native-check` from
+the report of main's last full native-check (`bd3ba0bb`, 06:07 the same day: 22 corpora, 12,275
+dumps, 12,158 equal at every level, 117 raw only, 14 dumped natively and not by the helper, 73
+rejected by go/parser).
+
+**What `bin/reap` found beside the survey.** (1) `metadata` and `java.javadoc` are deferred, not by
+design: EVAL-NOTES.md's amendments of 2026-10-10 record SL5 (embed D6's namespaces with their classes
+cut, half a day) as "not taken for now", where §2.4 above called D6's namespaces by design (RPS18).
+(2) Five of diffcheck's Clojure-pair classes and the oracle's message are recorded as known with a
+reason but by no decision (RPS19, RPS20). (3) The 127 compile-only directory tests' `run :skip` and
+the 14 goos packages the helper cannot dump are non-passes the survey's §6 did not count (RPS28).
+
+### Proposals (RPS18-RPS29)
+
+- **RPS18 `metadata` and `java.javadoc` (7 tests, 58 assertions).**
+  - Options: (a) deferred as recorded (SL5 "not taken for now"), built after the milestone; (b) SL5
+    built in REAP4 (embed `arbace.inspector`, `arbace.xml`, `arbace.java.browse`, `javadoc`, `shell`
+    with Swing, SAX and `Desktop` cut: they load, their fns throw; half a day); (c) by design, D6
+    amended (the namespaces out for good with Swing and SAX).
+  - *Recommended: (b)*: cheap, and the two namespaces' tests then run as upstream's; (c) if the user
+    prefers no stub namespaces in the executable.
+- **RPS19 The oracle's `Method.invoke` message (1 case, `native.ae:652`).**
+  - Options: (a) by design: jrt words it as JDK 26's `DirectMethodHandleAccessor` does, the frozen
+    reference's wording is the JVM Arbace's call path; (b) deferred: jrt's message aligned with the
+    reference's.
+  - *Recommended: (a)*: the JDK the milestone names words it so; the exception's class is the same.
+- **RPS20 Compiled load-time semantics (diffcheck: vars interned at load 4, the compiled loader's
+  `Compiler/LINE` 1).**
+  - Options: (a) by design, as Clojure's AOT on the JVM does (upstream's reference behaves the same,
+    RPS16); (b) deferred: the compiled loader interning lazily and setting `Compiler/LINE` per form.
+  - *Recommended: (a)*: the AOT level's reference is the JVM's AOT, which they match.
+- **RPS21 diffcheck's Java pair (2: a run-time class extending `java.io.StringReader`, `MethodHandles`).**
+  - Options: (a) deferred, decided with JC6's ranking of the world's classes (extendable
+    superclasses, `java.lang.invoke`; JCS9 (b), RPS8 (a)); (b) by design (the interpreter's model).
+  - *Recommended: (a)*: they are JC1's `interp-extends` and `invoke` classes, which JC6 ranks.
+- **RPS22 JC1's kinds and RPS3's two.**
+  - Options: (a) as built: `bin/reap` maps JC1's finer kinds onto design and deferred by the cells'
+    `:kind-map` (`:speed` by design; `:world`, `:interp`, `:analysis`, `:repl`, `:repr-java`,
+    `:harness`, `:other` deferred), JC1's file keeping its kinds for its owner; (b) JC1's classes
+    rewritten to `:design`/`:deferred` with the finer kind as `:owner`; (c) (a), and JC8's record
+    reviewing `:harness` and `:other` (a check's own failures and the untriaged are not Arbace's
+    deferred work).
+  - *Recommended: (c)*.
+- **RPS23 Go's read numbers.**
+  - Options: (a) `bin/repr-go native-check --record` writing `test/repr/go/native-check-results.edn`
+    itself on a run over every corpus (as `bin/goi check --record`), `bin/gate --full`'s run
+    comparing; (b) as built: `bin/reap record-native-check` after a full run, by hand.
+  - *Recommended: (a)*, in REAP9's run at the latest.
+- **RPS24 Checks that record only their non-passes** (repr/clojure's round trip, repr/go's text
+  level, diffcheck's pairs: the `+` cells and "?" sources).
+  - Options: (a) each records its per-file (per-case) results as a reference, as repr/go's round
+    trips do, so every cell has its totals; (b) their totals as one line in their known files;
+    (c) left as `+`.
+  - *Recommended: (b)*: the pass count is what the matrix needs; per-file references for three
+    corpora of repr/clojure (about 300 files) and the text level add little.
+- **RPS25 The suite's unit.**
+  - Options: (a) as built: tests (a skipped namespace counts its upstream tests; the assertions in
+    the detail); (b) assertions (the reference does not record a skipped test's assertions, so a
+    namespace's remainder would be split by guess).
+  - *Recommended: (a)*: `bin/clojure-tests --divergences` judges per test, and the reference names tests.
+- **RPS26 Go's print scope.**
+  - Options: (a) as built: linux/amd64's round trips (std, the test programs, the directory tests),
+    std with its tests (tamago/amd64's: the only `--tests` reference) and the text level (amd64);
+    (b) every configuration's references (tamago, arm64) too.
+  - *Recommended: (a)*: the milestone's scope is the host (decided); the others stay `--full`'s
+    regression checks.
+- **RPS27 diffcheck's exclusions** (`test/diffcheck/jforms-excluded.edn`: 14 classes of the Java
+  forms' corpora not given to j2g; `excluded.edn`, empty).
+  - Options: (a) a source beside Java's AOT with its classes, in JC2 (F2.4's kin deferred to REAP3,
+    the corpus's own classes failing in both halves by design); (b) left out of the matrix.
+  - *Recommended: (a)*, JC2's.
+- **RPS28 A level that does not apply** (the 127 compile-only directory tests' `run`, `unsafe`'s
+  export and code: 129 of Go print's 141).
+  - Options: (a) as built: non-passes in by-design classes, as goi's skips are; (b) not cases at that
+    level (the reader drops a `skip` the corpus's action implies).
+  - *Recommended: (a)*: one rule, goi's; the class says why.
+- **RPS29 The plug-ins' names.**
+  - Options: (a) as built in `test/reap/cells.edn` (REAP2's and REAP3's as the plan names them;
+    JC2's `check-compiled.edn` at level `:compiled` and REAP5's `check-print.edn` at `:print`
+    guessed), each owner editing its source's entry if its names differ; (b) the owners keep these
+    names.
+  - *Recommended: (a)*.
+
+**Pending the user's decision** (`:decided :pending`, listed by `bin/reap`): `:method-invoke-message`
+(`test/clojure/divergences.edn`, 1 case, RPS19), `:interned-at-load` (4) and `:compiled-loader-line`
+(1) (`test/clojure/divergences-aot.edn`, RPS20), `:interp-world-limits`
+(`test/java/divergences-diffcheck.edn`, 2, RPS21); and the kind of `:d6-namespaces-cut` (recorded
+deferred, RPS18).

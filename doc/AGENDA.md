@@ -103,7 +103,7 @@ The current state of the work. This file is rewritten as things change. For the 
   meet the rule in substance (Clojure read and print, Java read, Go read, eval, print); Clojure's
   eval 20,506 of 20,520 and Go's AOT 1,032 of 1,051 close; Clojure's AOT (the suite compiled, never
   run), Java's eval, AOT and print the work. Plan REAP1-REAP9 with JC1-JC6 and JC8's record, 24-41
-  days; RPS1-RPS17 decided as recommended. Running: REAP1 (the classes as data, `bin/reap`), REAP2
+  days; RPS1-RPS17 decided as recommended. REAP1 built (branch `reap1-classes`: `bin/reap`, the classes as data; RPS18-RPS29 proposed). Running: REAP2
   (`bin/goi check --aot`), JC1, JFS65 (b), JFS75 (b); JC4 merging.
 
 - **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,

@@ -1558,3 +1558,38 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   20,520 as the compiled runtime's. Its scratch kept in main's `.tmp/reap-survey-fs/`. Milestones
   REAP1-REAP9 (RP and FS taken), proposals RPS1-RPS17. Decided (the user): all as recommended; REAP1
   and REAP2 started.
+
+## 2026-10-24: REAP1 built: `bin/reap`, the classes of every recorded cell (branch `reap1-classes`)
+
+- What (doc/FULL-SUPPORT-SURVEY.md, "As built: REAP1"; RPS3, RPS13): `bin/reap` (and `make reap`,
+  the essential gate's step `reap`, seconds) judges the REAP matrix from the checks' recorded results
+  alone: `test/reap/cells.edn` holds each cell's classes file and sources (reader, files, the part
+  taken, `:check` or `:beside`, `:until` for a check not recorded yet), `test/reap/main.ae` (`reap.main`)
+  reads them and classifies each non-pass as `test/goi/divergences.edn` does. New classes files in
+  that format: `test/clojure/divergences.edn` (eval: the suite's 40 non-passing or not-run tests and
+  namespaces, the oracle's 53), `divergences-read.edn` (repr/clojure's 2 one-way rules),
+  `divergences-aot.edn` (diffcheck's Clojure pair, 21), `divergences-print.edn` (none);
+  `test/repr/go/divergences-read.edn` (native-check's 117 raw only, 14 the helper's failures, 73
+  rejected), `divergences-print.edn` (the round trips' 141); `test/java/divergences-diffcheck.edn`
+  (diffcheck's Java pair, 2). Go's read numbers, printed by native-check but recorded nowhere, written
+  to `test/repr/go/native-check-results.edn` by `bin/reap record-native-check` from main `bd3ba0bb`'s
+  full run's report. `bin/clojure-tests --divergences [RESULTS]` judges a suite run per test. The known
+  files are kept unchanged; their entries are classed by their reasons.
+- The matrix as printed: Clojure read 908 / 2 / 0, eval 21,026 / 79 / 14 (1 pending), AOT no check
+  yet (REAP3), print 1,031+ / 0 / 0; Java no check yet (JC1, JC2, REAP5); Go read 12,158 / 204 / 0,
+  eval 1,618 / 219 / 0, AOT no check yet (REAP2), print 2,584+ / 141 / 0 (pass / by design /
+  deferred); 0 problems. JC1's committed data (`java-check-jc1` `1aae6470`) tried in a scratch root:
+  the Java cells turn on (read 5,930 / 0 / 4, eval 1,364 / 278 / 1,325), 0 problems.
+- Why so: RPS3 (a) and RPS13 (a) as decided; one file per language and level (goi's name for eval,
+  `-read`, `-aot`, `-print` beside it, as REAP2's `divergences-aot.edn`); the units each check's own
+  (the suite per test, RPS25). Alternatives considered: one classes file per language with a `:level`
+  key (JC1's way; one per level keeps a level's owner its file's), counting the suite by assertions
+  (skipped tests' assertions are not recorded per test), the matrix only over checks with totals.
+- Found: `metadata` and `java.javadoc` are deferred by the record (EVAL-NOTES.md, SL5 "not taken for
+  now"), not by design as the survey said; five classes known with reasons but decided nowhere (the
+  oracle's `Method.invoke` message, diffcheck's vars interned at load and compiled `Compiler/LINE`,
+  the Java pair's two interpreter limits), recorded `:decided :pending`. Proposals RPS18-RPS29.
+- Sources: main `37422a67`; doc/go/B1-PLAN.md (D6), doc/go/EVAL-NOTES.md (2B, 2C, "The suite's last
+  failures", the amendments of 2026-10-10), doc/go/EVAL-PLAN.md (Q1), doc/FUTAMURA-SURVEY.md (F2, F3.3),
+  doc/go/GO-PARSER-SURVEY.md (GP3, GP6, GPS9, GPS17), doc/go/ROUNDTRIP.md, doc/go/PRINTER-NOTES.md
+  (G2F6), doc/REPR-CLOJURE.md; `java-check-jc1`'s `test/java/check.ae` (its classify, its kinds).
