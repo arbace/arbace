@@ -1417,3 +1417,13 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   112.5 s, 25,019 MiB resident at most; every digest equal to Linux's (the forms `47a3c126…`,
   `76a4a414…`; GOROOT/src's digest the pin `415d2301…`). GP8's arm64 criterion met on hardware
   (doc/go/GO-PARSER-SURVEY.md, "On the Mac (2026-10-24)").
+
+## 2026-10-24: j2g's array casts and a Java conformance survey started (the user)
+
+- Beside JN9a and GPS49 (c), the user chose (over Go text at the REPL, GPS11, and nothing more):
+  - JFS65 (b), j2g's checked array casts as a type switch rather than `Class.IsInstance` (17% of the
+    compiled Java parser's time, JN8.5; every compiled program's), on the branch `j2g-array-casts`
+    from `317927c0`;
+  - a survey of Java's conformance (no counterpart of `$GOROOT/test` for interpreting and compiling
+    Java: a corpus, today's coverage by `arbace.classes.interp` and j2g, a plan), on the branch
+    `java-conformance-survey` from `317927c0`.
