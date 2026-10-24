@@ -109,7 +109,8 @@ The current state of the work. This file is rewritten as things change. For the 
   decided), JC4 (the interpreter's private calls, `Object` methods through world interfaces, `clone`,
   the REPL's source lookup on Go; JCS30-JCS33 decided). Running: REAP2 (`bin/goi check --aot`), REAP3
   (Clojure's suite compiled, F2.4), REAP4 (NaN, `BitSet`, SL5), JN9b; next JC2 with JC1's follow-ups,
-  the first batched re-seed.
+  the first batched re-seed (running). After the milestone: the scripts' sweep of `/dev/null` and
+  process substitution (the user, 2026-10-24).
 
 - **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,
   the user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):

@@ -1722,3 +1722,5 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - Noticed: committed scripts of `bin/` still use `/dev/null` (123 places) and process substitution
   (about 40: `bin/seed`, `bin/repr-haskell`, `bin/repr-rust`, ...), against the working rule for
   commands; left as they are for now, a sweep offered to the user.
+- Decided (the user): the scripts' sweep (`/dev/null` and process substitution replaced by files under
+  TMPDIR, one commit per script, each script's check rerun) after the REAP milestone.
