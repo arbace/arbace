@@ -1458,3 +1458,23 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   GC161 (b) (`embedfunc.go`, `embedvers.go`; the files read from the package's forms directory), on
   the branch `goi-after-v1` from `d36a03c9`, in `arbace/go/` alone. The shipped program changes:
   the batched re-seed.
+
+## 2026-10-24: GPS49 (c) merged, the native read about twice as fast; GPS57-GPS59, GPS66, GPS67 decided (the user)
+
+- GPS49 (c) (branch `go-raw-speed` from `8a879ec0`; doc/go/GO-PARSER-SURVEY.md, "As built: GPS49 (c)"):
+  Go CPU profiles (`ARBACE_CPUPROFILE`, TamaGo's `go tool pprof`) found the raw conversion's cost in
+  mode `:full`'s `basic-lit-extents` (a lazy `tree-seq` walk, about 20 µs a node), `parse-pos`'s regex,
+  and the layout's read-back `diff` (depth × size), forms prepared twice and `printable?`'s set rebuilt
+  per code point. Changed in `arbace/repr/go{.ae,/convert,annotate,layout,lit,read}.ae`: eager walks,
+  a hand scan of positions, the reads' raw conversions without the text (`native-check` keeps it), one
+  preparation, one comparison, an ASCII fast path. std's read 139.0 → 72.0 s (1,284 → 568 CPU-s), a
+  `fmt` read 46.8 → 27.1 s, `cmd-linux-amd64` 477 → 250 s; every tree, summary and report byte for
+  byte as before; `native-check` over the 22 corpora all equal (117 raw only, as before);
+  `tamago-vendor verify` 4:01, `toolchain-vendor verify` 13:04 (GP5: 8:43, 31:37). The shipped program
+  changed (the six namespaces): the batched re-seed, stage 0 at the old speed meanwhile.
+- At the merge (`114fa076`) the branch's proposals GPS60 and GPS61 were renumbered GPS66 and GPS67
+  (GPS41 (c)'s GPS60-GPS65 merged first); the frozen view's race its first gate met was fixed on main
+  meanwhile (`c555f949`). The agent reports its slips: a `pgrep -f` as a read, a `/dev/null` operand,
+  a process substitution, and goi's checks at its default 16 jobs (`OMP_NUM_THREADS` does not cap
+  them). The essential gate on `114fa076` passed (24m24s; goi 801 of 801).
+- Decided (the user): GPS57 (a), GPS58 (a), GPS59 (a), GPS66 (a), GPS67 (a), all as built.

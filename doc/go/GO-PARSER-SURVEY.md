@@ -2584,3 +2584,12 @@ allows, `OMP_NUM_THREADS=8` for the scripts that count `nproc`):
 
   *Recommended: (a)*: nothing is slower meanwhile, and the next re-seed brings the after column.
 
+## Decided (2026-10-24): GPS57-GPS59, GPS66, GPS67
+
+The user decided GPS49 (c)'s proposals as built:
+- GPS57 (a): a read's raw conversions without the file text (`:source-text false`), `native-check` with it.
+- GPS58 (a): no cache of std's checked sessions now; (c), a resident session, before (b) if reads of
+  a few packages become frequent.
+- GPS59 (a): GOGC kept at 200; `GOGC=400` the caller's choice.
+- GPS66 (a): no further speed work on the read now.
+- GPS67 (a): batched into the next re-seed.
