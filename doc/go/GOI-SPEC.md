@@ -395,7 +395,9 @@ representation inside the checker is the checker's.
   `:uintptr`, `:float32`, `:float64`, `:complex64`, `:complex128`, `:string`,
   `:unsafe-pointer`; untyped kinds `:untyped-bool`, `:untyped-int`, `:untyped-rune`,
   `:untyped-float`, `:untyped-complex`, `:untyped-string`, `:untyped-nil`; `byte` and `rune` are
-  `:uint8` and `:int32`, their spelling kept for messages). Composite types are values compared by
+  `:uint8` and `:int32`, their spelling kept for messages; since GC157 (b), 2026-10-24, the
+  checker's own `:byte` and `:rune`, identical to them, and aliases named as written: "As built:
+  GC157 (b) and GS14 (a)"). Composite types are values compared by
   structure (`=`): `[:pointer T]`, `[:slice T]`, `[:array n T]`, `[:map K V]`, `[:chan dir T]`,
   `[:func params results variadic?]`, `[:struct fields]` (each field its name, type, tag,
   embedded flag and, for an unexported name, its package), `[:interface methods embeddeds]`,
@@ -4643,7 +4645,9 @@ pass, `weak.go` refused at its import, a class of its own), and three programs o
 "errors of gc's phases after type checking" were goi's (`-lang`'s checks; 18 left): 1,604 of
 1,837 pass, 145 unsupported, 70 known, 18 skipped. The table's rows of the syntax errors and
 invalid programs and of gc's later phases stand as of v1; `bin/goi divergences` gives today's
-counts.
+counts. GC157 (b) and GS14 (a) (2026-10-24, "As built: GC157 (b) and GS14 (a)" below): the eight
+deferred programs pass, the two deferred classes are gone: 1,618 of 1,837 pass, 138 unsupported, 63
+known, 18 skipped, every program not passing in a class by design.
 
 The totals by result: 281 unsupported (9 + 2 + 134 + 96 + 5 + 7 + 21 + 7), 67 known (21 + 17 + 2 +
 6 + 1 + 3 + 11 + 6), 18 skipped (15 + 3). Of the agenda's by-design list, every class has its
@@ -4652,3 +4656,158 @@ the reference adds to the agenda's list were each checked against their programs
 classes by the action lines `check_err` reads, the phases' class by go/types' empty error lists
 in godump's dumps, the syntax and conversion class by the dumps' `:fail` rows and the converter's
 log, the spellings' class program by program (GR7b, GR7c, and again here).
+
+## Decided (2026-10-24): GC157 (b), GS14 (a) and GC161 (b)
+
+The user chose, 2026-10-24, goi's two items deferred from v1 (doc/AGENDA.md): GC157 (b), `byte`,
+`rune` and aliases as types of their own in the checker, named as written in its messages; and
+GS14 (a) with GC161 (b), `embed` importable and `//go:embed` working at the REPL and in program
+runs, the embedded files read from the package's forms directory when the package loads
+(SPEC.md §9.6, amendment B2), with gc's noder's `go:embed` checks in errorcheck mode. GC157's
+proposal text and GC161's stand as decided at GR10; the record of what was built is below.
+
+## As built: GC157 (b) and GS14 (a) (2026-10-24)
+
+Built on branch `goi-after-v1` (from main `d36a03c9`). Where building it found otherwise than the
+proposals, the text below is the record; proposals for the user are GC166-GC174, each built as
+recommended.
+
+**The design of GC157 (b).** go/types and types2 keep `byte` and `rune` as `*Basic` objects of
+their own names whose kinds are `Uint8` and `Int32` (`go/types/universe.go`, `basicAliases`;
+`cmd/compile/internal/types2/universe.go`), identical to `uint8` and `int32` because `Identical`
+compares basic types by kind; an alias is an `*Alias` node (`alias.go`) that every operation
+unaliases (`Unalias`) and that printing names. GP4's resolve mode had built the same in goi's
+checker for raw forms (GO-PARSER-SURVEY.md GP4: `types.ae`'s `*spelled*`, `canon`, `same?`):
+`byte` and `rune` the keywords `:byte` and `:rune`, an alias of a basic type a keyword of its own
+(`kw-alias`), an alias of any other type the type it denotes with its name in the vector's
+metadata (`::alias`, which `=` and `hash` ignore: identity and equality unchanged), and type
+comparisons through `same?` (canonically equal) where a spelling can meet its canonical type, the
+instances' and method sets' maps keyed by `canon`. It had been run over every corpus in the
+resolve mode (`bin/repr-go native-check`'s E-ann: the answers equal to go/types'), so it is the
+checker's tested identity, not a new one: GC157 (b) turns it on in every mode rather than adding
+the "about 700 sites" GR10 estimated, which counted every `=` on types, most of which never meet a
+spelling (an `under`, a `kind-of`, a basic predicate canonicalizes first). This is go/types'
+approach (alias objects resolved at comparisons), not (b)'s literal "types of their own at every
+comparison": the least invasive design that is correct (GC166).
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| spellings in every mode | `arbace/go/check.ae` (`check-package` binds `*spelled*` true), `arbace/go/check/types.ae` (`canon`, `same?`, `unalias`, `alias-of`, `under`, `type-str`, `kw-alias`), `arbace/go/check/code.ae` (`type-of-obj`), `arbace/go/check/decl.ae` (an alias object's `:pkg-name`), `arbace/go/check/code_call.ae` (`copy`'s string element, `byte`) | the universe's `byte` and `rune` are `:byte` and `:rune`, an alias of a basic type its keyword, any other alias the denoted type with `::alias` metadata `{:name :pkg :pkg-name :local :obj}` (the universe's `any` too: go/types prints `any` where the source says it); `canon` is canonical always (it was a no-op outside the resolve mode) and allocates only when something changes (`map-same`); `same?` compares canonically only when a spelling is present; `under` unaliases a composite alias (go/types' `under` of an alias is the actual's); `type-str` names an alias by its name, qualified by its package's name outside the current package, as types2 qualifies named types (GC166) |
+| verification | `arbace/go/check.ae` (`verify-tags!`), `code_call.ae` (`record-inst!`) | `:tag` and `:inst` compared by `same?` (the converter writes go/types' spellings; identity is what is verified) |
+| canonical where types are built | `arbace/go/build.ae` (`desc`, `rt-name`, `tstr` for every `type-str`), `arbace/go/repl.ae` (`type-key`), `arbace/go/table.ae` (`data`) | descriptors, gc's runtime names (`%T` of a `[]byte` is `[]uint8`), method-value and instance names, the REPL's generations and the table's invoker keys take canonical types: the builder and the table see what they saw before (the table's content unchanged but for `embed`'s members, below) |
+| `embed` importable | `go/arbace/gotable.edn` | listed (`:packages`), off `:out`: its `FS` and three methods in the table (one invoker more, `embed.FS.ReadDir`'s signature); its digest's forms check `embed.FS`'s methods (GC172) |
+| `//go:embed` variables | `arbace/go/embed.ae` (`arbace.go.embed`, new), `arbace/go/repl.ae` (`embed-trees`, `embed-kind`, `package-file`; `package!` records `:load-file`), `arbace/go/run.ae` (the program's state has its `:pf` and `:opts`) | when a package is defined (`define!`), each package-level variable with `:go/embed` gets an initializer, first in the package's initialization (gc's are static data): gc's `checkEmbed` (embed imported, one variable, no initializer, go1.16), the directive's patterns (gc's `parseGoEmbed`), the variable's kind (gc's `embedKind`: `embed.FS`, a string type, a slice of a `uint8` kind; else `go:embed cannot apply to var of type T`), each pattern matched in the package's forms directory as the go command matches it (`resolveEmbed`: `path.Match`'s globs per element, `all:`, a directory's files below it but `.` and `_` names, other modules' directories and invalid names refused, the go command's messages: `pattern P: no matching files found` ...), the variable's files as gc's `embedFileList` gathers them (an `embed.FS`'s parent directories with a final slash, sorted by directory then name; one file for a string or `[]byte`, else `invalid go:embed: multiple files for type T`), each checked against `:embed-files`' SHA-256 when the forms give one (B2's rule, the printer's message). The values: a string `ConstSB` of the file's bytes, a `[]byte` `BytesFromStr` of it, an `embed.FS` `ConstR` of goi's `EmbedFS` (GC167-GC170) |
+| `embed.FS` values | `go/arbace/goi/embed.ae` (new), `test/goi/gen_nodes.ae`, `go/arbace/goi/registry.ae` (the factory `EmbedFS`) | an `embed.FS` laid out as gc's compiler lays out its static data (`cmd/compile/internal/staticdata/embed.go`, `WriteEmbed`: a pointer to a `[]file` of name, data and the first 16 bytes of the data's SHA-256), through a struct of the same layout and `unsafe`: `embed`'s own methods (`Open`, `ReadDir`, `ReadFile`, `io/fs`'s walkers) read it as gc's |
+| a compiled func type's signature | `go/arbace/goi/types.ae` (`typeOfLocked`) | found while building (GC171): the descriptor of a compiled func type had no `Ins`/`Outs`, so a closure given to compiled code through a function type the table has no typed adapter for (`fs.WalkDir`'s `fs.WalkDirFunc`, reflect.Value.Call) failed in `callTargetValues` (`index out of range [0] with length 0`, on main too); the descriptor now has its parameters and results as `TFunc`'s, recorded before they are made (a signature naming its own type ends) |
+| errorcheck | (none new) | `embedfunc.go` and `embedvers.go` import `embed`, so they are checked: their errors are gc's noder's, which `--gc-front` already ported (GPS41 (c): `gcsyntax`'s `checkEmbed`, `go:embed cannot apply to var inside func`, `go:embed requires go1.16 or later (-lang was set to go1.15; check go.mod)`); GC161 (b)'s "noder's six checks in the checker" were built by GPS41 (c), so nothing of the checker changed for them |
+| tests | `test/goi/run/go/t/embed.ae` (its forms directory `embed/`: `hello.txt`, `bin.dat`, `static/` with `.hidden`, `_skip.txt`, `sub/b.txt`; `.out` gc's), `test/goi/repl-pkgs/go/rt/emb.ae` with `emb/msg.txt`, `test/goi/repl.ae`, `bin/goi` (`run_tests`: the forms directory copied beside the printed Go file for gc's build), `test/goi/checked/control.edn`, `methods.edn` | a string, a `[]byte` of bytes that are not UTF-8, `embed.FS` of a directory (hidden files left out), of `all:`, of a quoted pattern and a glob, walked by `fs.WalkDir`, read, opened, listed, `fs.Sub`: gc's output; a REPL package loaded from ARBACE_PATH embedding a file of its forms directory with its hash; the checked trees' references now spell `any` and `rune` as go/types does (GC173) |
+
+**The check (§11).** `bin/goi check --record --jobs 8` against the reference of main (`d36a03c9`):
+
+| result | main | this branch |
+|---|---:|---:|
+| pass | 1,610 | 1,618 |
+| fail | 0 | 0 |
+| known | 69 | 63 |
+| unsupported | 140 | 138 |
+| skipped | 18 | 18 |
+
+The eight: `alias.go`, `alias2.go`, `convert1.go`, `copy1.go`, `fixedbugs/issue8183.go`,
+`fixedbugs/issue75022.go` (known → pass; their six lines left `test/goi/check-known.edn`) and
+`embedfunc.go`, `embedvers.go` (unsupported → pass); no other line of the reference changes.
+`bin/goi divergences`: 219 programs not passing in linux/amd64 in 16 classes, all by design; the two
+deferred classes (`:embed`, `:type-names`) left `test/goi/divergences.edn`. The essential subset is
+unchanged (801 of 801; the eight are not in `test/goi/essential.txt`, GC28's rule applied at their
+time). The box's references are unchanged (none of the eight is in `test/goi/box.txt`); the box was
+not run (GC174).
+
+**Measurements.**
+
+- **The checker's speed.** The whole check (8 jobs, the host shared, load 15-27): main 238 s, this
+  branch 237 s and 228 s; `--essential`: main 45 s, this branch 47 s. The annotation check of
+  linux-amd64 (the checker alone over std's 376 packages, 8 jobs, main and this branch alternated
+  in one slot, each on its own executable as the tools' host, `ARBACE_HOST_EXE`, so that both
+  checkers are compiled): main 30.8 s and 27.1 s, this branch 27.3 s and 28.0 s (the checkout's
+  checker evaluated by stage 0, as `bin/goi annotations` runs it by default before a re-seed, takes
+  about 48 s: evaluation, not the spellings). Within noise: `same?` canonicalizes only on a mismatch, and `canon`
+  allocates only when a spelling is present.
+- **Size.** The executable (amd64, `bin/arbace-go --build`) is 152,297,632 bytes against main's
+  151,711,904 (`d36a03c9`'s gate build, the same key): **+585,728 (0.39%)**: mostly
+  `arbace.go.embed` compiled to Go (c2j; 361 KB of printed Go source) and `repl`'s embedding
+  (+208 KB of source), `embed`'s table entries and one invoker, goi's `EmbedFS`. arm64:
+  145,752,224 (no current main build to compare).
+- **The shipped program changes**: the embedded namespaces `arbace.go.check.types`,
+  `arbace.go.check.code`, `arbace.go.check.code_call`, `arbace.go.check.decl`, `arbace.go.check`,
+  `arbace.go.build`, `arbace.go.repl`, `arbace.go.run`, `arbace.go.table`, the new
+  `arbace.go.embed`; the Go packages `arbace/goi` (`embed.go`, `types.go`, `registry.go`) and the
+  table (`embed`): a re-seed carries them (the batched re-seed).
+
+**Checks.** `bin/goi check --record --jobs 8` (above, 228 s), `--essential --jobs 8` 801 of 801;
+`bin/goi test --gc` (the checker's 22 assertions, gc's messages for the invalid forms, 21 programs
+with `embed`, gc's runs equal to their references, 111 REPL checks with the embedding package,
+std's 185, §1.4's session); `bin/goi annotations --jobs 8` (the five corpora as recorded: zero
+errors, every declaration checked, the verified counts unchanged); `bin/goi divergences`; the essential
+`bin/gate` passed (16 m 18 s once it had a slot: the builds, the smoke test, Clojure's suite as
+recorded, the oracle, the differential check, goi's essential check 801 of 801, the generated
+variants, `bin/j2g-edge verify`: `jdk/edge.edn` still the JVM's answer); `make check-makefile`.
+Not run: `bin/gate --full`, the box's checks.
+
+**Found while building.**
+
+- **GR10's estimate.** "About 700 sites" counted every `=` near a type in the checker and the
+  builder; nearly all compare a kind or a type after `under`, `basic` or a predicate, which
+  canonicalize. The sites that meet a spelling are those GP4 had already moved to `same?` or
+  `canon` (about 40), and the builder's entry points (`desc`, `rt-name`, `type-key`, the table's
+  `data`) and its names of types (`tstr`): no other site of the builder needed a change.
+- **A closure given to compiled code by a func type the table has no adapter for** failed on main
+  (above, GC171): `fs.WalkDir`'s callback, through reflect.Value.Call, found by the embed test.
+- **The forms keep a directive's text verbatim** (SPEC §9.1): `embedvers.ae`'s `:go/embed` is
+  `"x.txt // ERROR \"go:embed requires go1.16 or later\""`, the trailing comment included, as gc's
+  pragma text is: `parseGoEmbed` sees the same patterns gc does.
+
+**Proposals for the user** (GC166-GC174; each built as recommended):
+
+- **GC166 The design of GC157 (b).** (a) as built, go/types' approach through GP4's machinery: the
+  spellings made in every mode, identity by `same?` and `canon` where a spelling can meet its
+  canonical type, the builder and the table given canonical types at their entry points; (b) GR10's
+  (b) literally, an identity function at every comparison of types in the checker and the
+  builder; (c) the spellings in errorcheck mode only (the REPL's messages saying `uint8`).
+  *Recommended: (a)*: the resolve mode had proved it over every corpus; (b) touches hundreds of
+  sites that never meet a spelling, (c) leaves the REPL's messages unlike gc's.
+- **GC167 Where the embedded files are found.** (a) as built, the package's forms directory (B2):
+  a program's package file (`bin/goi run`), or the package file a load read, found on
+  ARBACE_PATH's directories; a package typed at the REPL, the digest's, or one loaded from a
+  store entry (`store:`, the box) has none: `go:embed: the package has no forms directory`; (b)
+  store entries too, the files read from the store by their paths. *Recommended: (a)*, (b) when a
+  program in the box embeds.
+- **GC168 The go command's matching.** (a) as built, `resolveEmbed` ported: `path.Match` per
+  element (as a regex), hidden names, `all:`, other modules' directories, irregular files, and
+  golang.org/x/mod's `CheckFilePath` approximated (its characters and Windows' reserved names);
+  (b) `CheckFilePath` ported whole. *Recommended: (a)*: the names it adds are rare in a forms
+  directory.
+- **GC169 go:embed's errors in a run.** (a) as built, gc's and the go command's messages as check
+  errors at the variable's line (`goi: error: check: P: FILE:LINE: MSG`, status 126; at the REPL
+  `Go check errors in package P`); (b) at the directive's line and column, status 1, as `go build`
+  prints them. *Recommended: (a)*: goi's other check errors in a run are so.
+- **GC170 The hashes.** (a) as built, a file's SHA-256 checked when `:embed-files` gives one (the
+  printer's rule, B2), a file the forms do not list read all the same; (b) only the listed files
+  embeddable. *Recommended: (a)*: a package typed by hand need not list them.
+- **GC171 A compiled func type's signature.** (a) as built, its descriptor's `Ins`, `Outs` and
+  `Variadic` made from its reflect type, as `TFunc` makes an interpreted one's; (b) the
+  reflect.Value.Call path alone reading the reflect type. *Recommended: (a)*: one descriptor, every
+  path.
+- **GC172 `embed` compiled.** (a) as built, listed in the table (its `FS` a compiled type, its
+  values made by goi with gc's layout); (b) interpreted from the digest, `FS` an interpreted type
+  (compiled `io/fs` callers through interface wrappers). *Recommended: (a)*: `embed.FS` passes
+  to compiled code as itself.
+- **GC173 The checked trees' spellings.** (a) as built, `test/goi/checked/*.edn` as go/types spells
+  (`any`, `rune`); (b) canonical in the references (the tree data printed through `canon`).
+  *Recommended: (a)*: the trees are the checker's, spelled.
+- **GC174 The essential subset and the box.** (a) as built, unchanged: the eight programs not in
+  `test/goi/essential.txt` nor `test/goi/box.txt`, the embed run test in `bin/goi test` (which the
+  gate's `--full` runs with `--gc`); (b) `embedfunc.go` and one of GC157's six in the essential
+  subset (seconds), and the box's check run at the next `--full`. *Recommended: (a)* for the
+  essential subset (GC28's rule), and the box's check at the merge's `--full`: its guest embeds goi
+  (the shipped program changed), its programs do not embed.
