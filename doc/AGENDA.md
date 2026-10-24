@@ -97,6 +97,15 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
+- **The milestone REAP** (the user, 2026-10-24; doc/FULL-SUPPORT-SURVEY.md): read, eval, AOT and print
+  for Clojure, Java and Go on the host, goi's v1 rule (none fails, every non-pass in a recorded class),
+  tag `arbace-reaps-3-crops-v1` (annotated: Clojure `98d735fab02f`, Java 26, Go 1.27.1). Six cells
+  meet the rule in substance (Clojure read and print, Java read, Go read, eval, print); Clojure's
+  eval 20,506 of 20,520 and Go's AOT 1,032 of 1,051 close; Clojure's AOT (the suite compiled, never
+  run), Java's eval, AOT and print the work. Plan REAP1-REAP9 with JC1-JC6 and JC8's record, 24-41
+  days; RPS1-RPS17 decided as recommended. Running: REAP1 (the classes as data, `bin/reap`), REAP2
+  (`bin/goi check --aot`), JC1, JFS65 (b), JFS75 (b); JC4 merging.
+
 - **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,
   the user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):
   - goi is complete at the REPL for Go 1.27.1: GR7a-GR7c, GR8a-GR8b, GR9a-GR9d, GR10, the arm64
@@ -181,7 +190,8 @@ The current state of the work. This file is rewritten as things change. For the 
     (`java-check-jc1`); JFS75 (b), the converter's model behind an interface
     (`java-model`); JFS65 (b), j2g's array casts (`j2g-array-casts`);. The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
-  - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
+  - done (2026-10-24): GC157 (b) and go:embed (GS14 (a), GC161 (b)): `bin/goi check` 1,618 of 1,837,
+    no deferred class left; GC166-GC174 decided as built;
   - staging shared with Futamura's F7 (G16);
   - speed (F10's inline caches, specialization), which would bring the speed-bound programs back;
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both

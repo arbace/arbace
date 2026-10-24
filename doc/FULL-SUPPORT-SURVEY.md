@@ -717,6 +717,21 @@ versions; JC1-JC8 and JCS1-JCS15 for Java's eval and AOT.
     become judgeable); mode `:full` keeps what the GC49 kin needs. (c) if `:full`'s printing of
     invalid programs turns out costly.
 
+## Decided (2026-10-24): RPS1-RPS17
+
+The user decided every proposal as recommended, (a): RPS1 (REAP1-REAP9, RPS, Java's JC names kept),
+RPS2 (Clojure's read and print both the reader and printer and repr/clojure), RPS3 (classes as data
+per check, `test/goi/divergences.edn`'s format), RPS4 (Clojure's suite at eval and AOT, against
+upstream's), RPS5 (NaN identity and `BitSet` fixed in REAP4; trace lines, FIPrims, `javax.xml.stream`,
+`seq-and-transducer` deferred), RPS6 (F2.4 fixed in REAP3), RPS7 (JC1's corpora and JC6's widening,
+the JLS corpus; JC7 after the milestone), RPS8 (the world's classes by JC6's ranking, deferred ones
+allowed), RPS9 (Java's print level in `bin/java-check`, the 39 type-argument files deferred to JFS75
+(b)'s model), RPS10 (`bin/goi check --aot`), RPS11 (directory tests built by `arbace.build.go`),
+RPS12 (gc on the originals the reference of goi's check and of AOT), RPS13 (`bin/reap`), RPS14
+(REAP7 in the milestone), RPS15 (essential subsets in the essential gate), RPS16 (each level against
+the language's reference; `--full` as it is, its box steps regression checks), RPS17 (the lines
+layout, the action's gc flags, errorcheck programs from mode `:full`). REAP1 and REAP2 started.
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail

@@ -4811,3 +4811,10 @@ Not run: `bin/gate --full`, the box's checks.
   subset (seconds), and the box's check run at the next `--full`. *Recommended: (a)* for the
   essential subset (GC28's rule), and the box's check at the merge's `--full`: its guest embeds goi
   (the shipped program changed), its programs do not embed.
+
+## Decided (2026-10-24): GC166-GC174
+
+The user decided GC166-GC174 as built: GC166 (a) (go/types' approach through GP4's spellings),
+GC167 (a) (the forms directory; store entries when a program in the box embeds), GC168 (a),
+GC169 (a), GC170 (a), GC171 (a), GC172 (a), GC173 (a), GC174 (a) (the essential subset unchanged,
+the box's check at the next `--full`).

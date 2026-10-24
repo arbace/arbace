@@ -1535,3 +1535,26 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   `arbace-reaps-3-crops-v1`, an annotated tag naming the three crops and their versions (Clojure
   at its vendored revision, Java 26, Go 1.27.1); considered: `arbace-reaps-clojure-java-go-v1`,
   `arbace-reaps-java26-go1.27.1-v1`.
+
+## 2026-10-24: goi's GC157 and go:embed merged; REAP's survey merged, RPS1-RPS17 decided (the user)
+
+- goi (branch `goi-after-v1` from `d36a03c9`, merged `5b0df516`; GOI-SPEC, "As built: GC157 (b) and
+  GS14 (a)"): GC157 (b) by go/types' approach, GP4's resolve-mode spellings (`*spelled*`, `canon`,
+  `same?`) made in every mode, about 40 sites where a spelling meets its canonical type rather than
+  GR10's estimated 700, the builder and the table given canonical types (`%T` of `[]byte` still
+  `[]uint8`); go:embed: `embed` listed in the table, `arbace/go/embed.ae` porting gc's `parseGoEmbed`,
+  `checkEmbed`, `embedKind`, `embedFileList` and the go command's `resolveEmbed`, the files read from
+  the package's forms directory, `embed.FS` made by `go/arbace/goi/embed.ae` in gc's layout; a bug of
+  main's found by the embed test (a closure passed to compiled code through a func type without a
+  typed adapter panicked: compiled func types' descriptors without `Ins`/`Outs`, GC171). `bin/goi
+  check` 1,618 of 1,837 pass (1,610), 0 fail, 138 unsupported, 63 known; `divergences` 219 in 16
+  classes, all by design. Speed unchanged (the whole check 237 s against 238), the executable +0.39%.
+  The agent's slips: a process substitution, one error report written to `/tmp` (removed). The
+  essential gate on `5b0df516` passed (31m27s). Decided (the user): GC166-GC174 as built.
+- REAP's survey (branch `full-support-survey` from `fcda820e`, merged): doc/FULL-SUPPORT-SURVEY.md, the
+  matrix measured, Go's AOT for the first time (every run program of `$GOROOT/test` built from its
+  forms by `bin/build-go`: 1,032 of 1,051 with the lines layout, the 6 failing in goi's recorded
+  classes; errorcheck 388 of 407 judged), Clojure's suite on the evaluated build the same 20,506 of
+  20,520 as the compiled runtime's. Its scratch kept in main's `.tmp/reap-survey-fs/`. Milestones
+  REAP1-REAP9 (RP and FS taken), proposals RPS1-RPS17. Decided (the user): all as recommended; REAP1
+  and REAP2 started.
