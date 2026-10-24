@@ -33,6 +33,26 @@
 #                                 hv.test, and the tarball; the rebuild's expected image from
 #                                 MAC_REBUILD_DIR (default .tmp/box-rebuild/arm64: bin/box-rebuild
 #                                 --arch arm64 [--dir DIR] prepare host first, for the commit HEAD)
+#   bin/box-mac-bundle --convert  the conversion alone (doc/go/GO-PARSER-SURVEY.md, GP8, GPS56
+#                                 (c): tamago/goroot converted in the box on the Mac):
+#                                 target/arbace-go/arbace-box-mac-arm64-convert.tar.gz, its
+#                                 directory arbace-box-mac-arm64-convert/ with the launcher, the
+#                                 guest, hv.test, the entitlements, mac.sh, README.txt
+#                                 (box/mac/README-convert.txt), VERSION and
+#                                   convert/store         a store as bin/box-convert prepare makes
+#                                                         it: the commit's sources (the ref src:
+#                                                         VERSION arbace go tamago/goroot) and
+#                                                         GOROOT's text (goroot.text: TamaGo's
+#                                                         VERSION and src/ but src/cmd); the image
+#                                                         is the bundle's guest, put as
+#                                                         arbace.arm64 by ./mac.sh convert
+#                                   convert/expected.edn  what the same steps gave on Linux with
+#                                                         the native executable (bin/box-convert
+#                                                         --arch arm64 [--dir DIR] prepare host on
+#                                                         HEAD: DIR/host-steps.edn, DIR/host.verified
+#                                                         HEAD), the pin of GOROOT/src
+#                                 MAC_CONVERT_DIR is DIR (default .tmp/box-convert/arm64); no goi/,
+#                                 no rebuild/, so neither's prerequisites
 #
 # Everything bundled is HEAD's (bin/lib/fresh.bash): the arm64 guest, when it does not carry the
 # version of HEAD (clean unless the checkout is dirty) or was not linked from the program of the
@@ -46,7 +66,8 @@
 # hv.test are built here, always.
 #
 # On the Mac: tar xzf arbace-box-mac-arm64.tar.gz && cd arbace-box-mac-arm64 && ./mac.sh all;
-# then send back mac-results.tar.gz (README.txt).
+# then send back mac-results.tar.gz (README.txt). --convert's: tar xzf
+# arbace-box-mac-arm64-convert.tar.gz && cd arbace-box-mac-arm64-convert && ./mac.sh convert.
 set -euo pipefail
 export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -54,7 +75,14 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 dir=$root/target/arbace-go
 tg=${ARBACE_GOROOT:-/root/tamago-go}
+mode=all
+case ${1:-} in
+  "") ;;
+  --convert) mode=convert ;;
+  *) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac
 name=arbace-box-mac-arm64
+[ $mode = convert ] && name=arbace-box-mac-arm64-convert
 b=$dir/$name
 . "$root/bin/lib/version.bash"
 v=$(arbace_version "$root")
@@ -80,9 +108,19 @@ fi
 # the store tool (the rebuild's store, the tool guests' refs)
 l=$dir/box-$harch/arbace-box
 arbace_fresh box-mac-bundle "$l" "$head" "ARBACE_BOX_ARCHES=$harch bin/arbace-go --build --box"
-# the expected image: bin/box-rebuild's host step, on HEAD's executables
+# the expected image: bin/box-rebuild's host step, on HEAD's executables (--convert: the expected
+# digests, bin/box-convert's host step on HEAD's)
 rd=${MAC_REBUILD_DIR:-$root/.tmp/box-rebuild/arm64}
-if [ "$(cat "$rd/host.verified" 2>/dev/null)" != "$head" ]; then
+cd_=${MAC_CONVERT_DIR:-$root/.tmp/box-convert/arm64}
+if [ $mode = convert ]; then
+  hv=none
+  [ -s "$cd_/host.verified" ] && hv=$(cat "$cd_/host.verified")
+  if [ "$hv" != "$head" ] || [ ! -s "$cd_/host-steps.edn" ]; then
+    arbace_stale box-mac-bundle "$cd_/host-steps.edn" \
+      "its digests not made by bin/box-convert's host step on HEAD's executables ($cd_/host.verified: $hv)" \
+      "bin/box-convert --arch arm64${MAC_CONVERT_DIR:+ --dir $cd_} prepare host"
+  fi
+elif [ "$(cat "$rd/host.verified" 2>/dev/null)" != "$head" ]; then
   arbace_stale box-mac-bundle "$rd/host" \
     "its expected image not made by bin/box-rebuild's host step on HEAD's executables ($rd/host.verified: $(cat "$rd/host.verified" 2>/dev/null || echo none))" \
     "bin/box-rebuild --arch arm64${MAC_REBUILD_DIR:+ --dir $rd} prepare host"
@@ -100,6 +138,41 @@ echo "== hv's tests for darwin/arm64" >&2
    GOTOOLCHAIN=local GOFLAGS= GOWORK=off GOPROXY=off "$tg/bin/go" test -c -o "$b/hv.test" arbace/box/hv) \
   >> "$dir/build-box-mac.log" 2>&1 || { tail -20 "$dir/build-box-mac.log" >&2; exit 1; }
 cp "$dir/box-arm64/arbace.elf" "$b/arbace-box.elf"
+if [ $mode = convert ]; then
+  echo "== the conversion's store (GP8: bin/box-convert prepare's, but the image) and the expected digests" >&2
+  st=$b/convert/store
+  mkdir -p "$st"
+  src=$(git -C "$root" archive --format=tar HEAD VERSION arbace go tamago/goroot | ARBACE_BOX_STORE_MAX=off "$l" --store "$st" tree tar - src)
+  text=$(tar -C "$tg" --exclude=./src/cmd -cf - ./VERSION ./src | ARBACE_BOX_STORE_MAX=off "$l" --store "$st" tree tar - goroot.text)
+  hs=$cd_/host-steps.edn
+  # field KEY: KEY's hash in the host's steps (one line, pr-str of a map)
+  field() { sed -n "s/.*:$1 \"\([0-9a-f]*\)\".*/\1/p" "$hs"; }
+  [ "$(field src)" = "$src" ] || arbace_stale box-mac-bundle "$hs" "its sources $(field src), HEAD's $src" "bin/box-convert --arch arm64 prepare host"
+  [ "$(field text)" = "$text" ] || arbace_stale box-mac-bundle "$hs" "its GOROOT text $(field text), $tg's $text" "bin/box-convert --arch arm64 prepare host"
+  grep -q ':equal true' "$hs" || { echo "box-mac-bundle: $hs: the host's tree is not the sources' tamago/goroot" >&2; exit 1; }
+  pin=$(sed -n 's/^src_hash=\([0-9a-f]\{64\}\)$/\1/p' "$root/bin/tamago-vendor")
+  {
+    echo ";; bin/box-mac-bundle --convert: what bin/box-convert's host step gave on Linux at the commit"
+    echo ";; (the native executable; the same steps as the box's), for ./mac.sh convert to compare with"
+    printf '{:commit "%s"\n :pin "%s"\n' "$head" "$pin"
+    for k in src text digest forms-amd64 forms-arm64 goroot expected; do
+      [ -n "$(field $k)" ] || { echo "box-mac-bundle: no :$k in $hs" >&2; exit 1; }
+      printf ' :%s "%s"\n' "$k" "$(field $k)"
+    done
+    echo ' :equal true}'
+  } > "$b/convert/expected.edn"
+  cp "$root/box/mac/mac.sh" "$root/box/mac/arbace-box.entitlements" "$b/"
+  cp "$root/box/mac/README-convert.txt" "$b/README.txt"
+  chmod +x "$b/mac.sh" "$b/arbace-box" "$b/hv.test"
+  {
+    echo "arbace $v"
+    echo "built $(date -u +%Y-%m-%dT%H:%M:%SZ) on $(uname -m) Linux (--convert)"
+    (cd "$b" && sha256sum arbace-box arbace-box.elf hv.test mac.sh convert/expected.edn)
+  } > "$b/VERSION"
+  tar -C "$dir" --owner=0 --group=0 -czf "$dir/$name.tar.gz" "$name"
+  echo "box-mac-bundle: $dir/$name.tar.gz ($(stat -c %s "$dir/$name.tar.gz") bytes): the launcher $(stat -c %s "$b/arbace-box"), the guest $(stat -c %s "$b/arbace-box.elf"), hv.test $(stat -c %s "$b/hv.test"), the store $(du -sb "$st" | cut -f1); expected tamago/goroot $(field goroot)" >&2
+  exit 0
+fi
 echo "== the rebuild's store (S8) and the expected image" >&2
 hs=$rd/host
 want=$(ARBACE_BOX_STORE_MAX=off "$l" --store "$hs" ref rebuilt.host.arm64 2>/dev/null) \
