@@ -1,0 +1,325 @@
+;; unboxed-type, boxed-type, the promotions, same-type?, subtype?, contains-type?, member-type,
+;; capture, glb and the conditional's cond-type reimplement, for the native types, jdk26u
+;; (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259)'s
+;; src/jdk.compiler/share/classes/com/sun/tools/javac/code/Types.java (unboxedType, boxedClass,
+;; isSameType, isSubtype, containsType, isAssignable, memberType, capture, glb, skipTypeVars) and
+;; comp/{Operators,Attr}.java (unaryPromotion, binaryPromotion, condType), whose notice follows
+;; (LICENSE.md, "OpenJDK (jdk26u)"):
+;;
+;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+(ns arbace.repr.java.types
+  "Types' relations on the native types (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN9b\"): the
+  types tier's part of javac's code/Types.java over arbace.repr.java.decls's types (data): boxing and
+  unboxing, the numeric promotions, the same type, subtyping with generics (type arguments contained,
+  type variables' bounds, captured variables, intersections, arrays), a member's type at a site's type
+  arguments (memberType), capture conversion (fresh captured type variables: a type variable symbol
+  {:sk :tvar :captured true}, its upper bound the glb of the wildcard's and the formal's), glb and the
+  conditional's type (Attr.condType) for primitive and boxed arms."
+  (:require [arbace.repr.java.decls :as d]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:private box-of
+  {:boolean "Boolean" :byte "Byte" :short "Short" :int "Integer" :long "Long" :char "Character"
+   :float "Float" :double "Double" :void "Void"})
+
+(def ^:private unbox-of (into {} (for [[k v] box-of :when (not= k :void)] [(str "java.lang." v) k])))
+
+(defn prim? "A primitive type (not void, not null)?" [t] (and (keyword? t) (not (identical? t :void)) (not (identical? t :null))))
+
+(defn numeric? [t] (contains? #{:byte :short :char :int :long :float :double} t))
+(defn integral? [t] (contains? #{:byte :short :char :int :long} t))
+(defn class-t? [t] (and (map? t) (identical? :class (:k t))))
+(defn tvar-t? [t] (and (map? t) (identical? :tvar (:k t))))
+(defn captured? [t] (and (tvar-t? t) (boolean (:captured (:tv t)))))
+(defn reference? "isNullOrReference: a class, array, type variable, intersection or the null type." [t]
+  (or (identical? t :null) (and (map? t) (contains? #{:class :array :tvar :inter :union :null} (:k t)))))
+
+(defn upper-bound
+  "A type variable's upper bound (getUpperBound: its bounds as one type, an intersection when more)."
+  [t]
+  (let [bs (d/tvar-bounds (:tv t))]
+    (if (= 1 (count bs)) (first bs) {:k :inter :ts (vec bs)})))
+
+(defn unboxed-type
+  "Types.unboxedType: the primitive type class type `t` (or a type variable bounded by one) unboxes
+  to, else nil."
+  [t]
+  (cond
+    (class-t? t) (unbox-of (:flat (:c t)))
+    (tvar-t? t) (unboxed-type (upper-bound t))
+    (and (map? t) (= :inter (:k t))) (some unboxed-type (:ts t))
+    :else nil))
+
+(defn unboxed-or-type [t] (or (when-not (keyword? t) (unboxed-type t)) t))
+
+(defn boxed-type "Types.boxedClass(t).type: the class type primitive `t` boxes to." [reg t]
+  (d/ctype (d/lang reg (box-of t))))
+
+(defn unary-promotion "Operators.unaryPromotion (JLS 5.6.1)." [t]
+  (let [u (unboxed-or-type t)]
+    (if (contains? #{:byte :short :char} u) :int u)))
+
+(declare same-type?)
+
+(defn binary-promotion "Operators.binaryPromotion (JLS 5.6.2); `object` the type Object." [t1 t2 object]
+  (let [a (unboxed-or-type t1) b (unboxed-or-type t2)]
+    (cond
+      (and (numeric? a) (numeric? b))
+      (cond (or (= :double a) (= :double b)) :double
+            (or (= :float a) (= :float b)) :float
+            (or (= :long a) (= :long b)) :long
+            :else :int)
+      (same-type? a b) a
+      :else object)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The same type, subtyping
+
+(defn same-type?
+  "Types.isSameType: the same type, type annotations aside (type variables by identity, captured ones
+  too; wildcards by kind and bound)."
+  [a b]
+  (cond
+    (identical? a b) true
+    (or (keyword? a) (keyword? b)) (identical? a b)
+    (or (nil? a) (nil? b)) false
+    :else
+    (let [k (:k a)]
+      (and (identical? k (:k b))
+           (case k
+             :class (and (identical? (:c a) (:c b))
+                         (= (count (:args a)) (count (:args b)))
+                         (every? true? (map same-type? (:args a) (:args b)))
+                         (if (and (:outer a) (:outer b)) (same-type? (:outer a) (:outer b)) true))
+             :array (same-type? (:e a) (:e b))
+             :tvar (identical? (:tv a) (:tv b))
+             :wild (and (= (:bk a) (:bk b))
+                        (or (= :unbound (:bk a)) (same-type? (:t a) (:t b))))
+             (:inter :union) (and (= (count (:ts a)) (count (:ts b))) (every? true? (map same-type? (:ts a) (:ts b))))
+             :null true
+             false)))))
+
+(def ^:private prim-supers
+  {:byte #{:short} :short #{:int} :char #{:int} :int #{:long} :long #{:float} :float #{:double}})
+
+(defn- prim-sub? [a b] (or (identical? a b) (boolean (some #(prim-sub? % b) (prim-supers a)))))
+
+(declare subtype? contains-type?)
+
+(defn- wild-upper [reg w]
+  (case (:bk w) :extends (:t w) (d/object-type reg)))
+
+(defn- lower-bound [t]
+  (when (captured? t) (:lower (:tv t))))
+
+(defn subtype?
+  "Types.isSubtype (no capture of `s`): `s` a subtype of `t`."
+  [reg s t]
+  (cond
+    (same-type? s t) true
+    (keyword? s) (cond (identical? s :null) (reference? t)
+                       (keyword? t) (and (prim? s) (prim? t) (prim-sub? s t))
+                       :else false)
+    (keyword? t) false
+    (= :inter (:k t)) (every? #(subtype? reg s %) (:ts t))
+    (and (tvar-t? t) (some? (lower-bound t)) (subtype? reg s (lower-bound t))) true
+    :else
+    (case (:k s)
+      :null (reference? t)
+      :tvar (subtype? reg (upper-bound s) t)
+      :inter (some #(subtype? reg % t) (:ts s))
+      :union (every? #(subtype? reg % t) (:ts s))
+      :array (cond
+               (= :array (:k t)) (let [ea (:e s) eb (:e t)]
+                                   (if (or (keyword? ea) (keyword? eb)) (identical? ea eb) (subtype? reg ea eb)))
+               (class-t? t) (contains? #{"java.lang.Object" "java.lang.Cloneable" "java.io.Serializable"} (:flat (:c t)))
+               :else false)
+      :class (if (class-t? t)
+               (let [base (d/as-super s (:c t))]
+                 (cond
+                   (nil? base) false
+                   (d/raw? t) true
+                   (empty? (:args t)) (if (and (:outer t) (:outer base)) (subtype? reg (:outer base) (:outer t)) true)
+                   (d/raw? base) false
+                   :else (and (= (count (:args base)) (count (:args t)))
+                              (every? true? (map #(contains-type? reg %1 %2) (:args t) (:args base)))
+                              (if (and (:outer t) (:outer base) (seq (:args (:outer t))))
+                                (subtype? reg (:outer base) (:outer t))
+                                true))))
+               false)
+      false)))
+
+(defn contains-type?
+  "Types.containsType: does type argument `t` contain `s`?"
+  [reg t s]
+  (if (and (map? t) (= :wild (:k t)))
+    (case (:bk t)
+      :unbound true
+      :extends (subtype? reg (if (and (map? s) (= :wild (:k s))) (wild-upper reg s) s) (:t t))
+      :super (cond
+               (and (map? s) (= :wild (:k s))) (and (= :super (:bk s)) (subtype? reg (:t t) (:t s)))
+               :else (subtype? reg (:t t) s)))
+    (same-type? t s)))
+
+(defn assignable-const?
+  "Types.isAssignable's constant case: an int constant `v` that fits primitive `t` (byte, char, short,
+  int), or its box."
+  [v t]
+  (let [v (long v)
+        t (if (keyword? t) t (unboxed-type t))]
+    (case t
+      :byte (<= -128 v 127)
+      :char (<= 0 v 65535)
+      :short (<= -32768 v 32767)
+      :int true
+      false)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; glb, capture, memberType
+
+(defn glb
+  "Types.glb of two reference types: the one that is a subtype of the other, else their intersection,
+  the class first."
+  [reg a b]
+  (cond
+    (subtype? reg a b) a
+    (subtype? reg b a) b
+    :else (let [ts (sort-by (fn [t] (if (and (class-t? t) (d/interface? (:c t))) 1 0))
+                            (concat (if (= :inter (:k a)) (:ts a) [a]) (if (= :inter (:k b)) (:ts b) [b])))]
+            {:k :inter :ts (vec ts)})))
+
+(defn capture
+  "Types.capture of class type `t`: its wildcard arguments replaced by fresh captured type variables."
+  [reg t]
+  (if-not (and (class-t? t) (seq (:args t)) (some #(and (map? %) (= :wild (:k %))) (:args t)))
+    t
+    (let [c (:c t)
+          formals (d/class-tparams c)]
+      (if (not= (count formals) (count (:args t)))
+        (d/erasure t)
+        (let [S (volatile! nil)
+              smap (fn [] (zipmap formals @S))
+              caps (vec (for [[i a] (map-indexed vector (:args t))]
+                          (if (and (map? a) (= :wild (:k a)))
+                            (let [fv (nth formals i)
+                                  ui (fn [] (let [bs (d/tvar-bounds fv)
+                                                  u (if (= 1 (count bs)) (first bs) {:k :inter :ts (vec bs)})]
+                                              (d/subst u (smap))))
+                                  tv (d/sym {:sk :tvar :name "capture#" :captured true :wildcard a
+                                             :lower (when (= :super (:bk a)) (:t a))
+                                             :bounds-fn (fn [] (let [u (ui)]
+                                                                 [(case (:bk a)
+                                                                    :extends (glb reg (:t a) u)
+                                                                    u)]))
+                                             :memo (java.util.HashMap.)})]
+                              (d/tvar-type tv))
+                            a)))]
+          (vreset! S caps)
+          (assoc t :args caps))))))
+
+(defn skip-type-vars
+  "Types.skipTypeVars: through type variables to their upper bounds; `capture?` captures the result."
+  [reg t capture?]
+  (loop [t t]
+    (if (tvar-t? t)
+      (recur (upper-bound t))
+      (if capture? (capture reg t) t))))
+
+(defn- allparams-empty? [t] (loop [t t] (cond (not (class-t? t)) true (seq (:args t)) false :else (recur (:outer t)))))
+
+(defn- msubst
+  "Method type `mt` (decls' {:tparams :params :ret :throws}) with map `m` substituted."
+  [mt m]
+  (assoc mt :params (mapv #(d/subst % m) (:params mt)) :ret (d/subst (:ret mt) m)
+            :throws (mapv #(d/subst % m) (:throws mt))))
+
+(defn- merase [mt]
+  (assoc mt :tparams [] :params (mapv d/erasure (:params mt)) :ret (d/erasure (:ret mt))
+            :throws (mapv d/erasure (:throws mt))))
+
+(defn member-type
+  "Types.memberType: the type of member `s` (a field symbol: its type; a method symbol: its method
+  type) as a member of type `site`: a non-static member of a generic class at the type arguments of
+  site's supertype of that class (asOuterSuper), erased when that supertype is raw."
+  [reg site s]
+  (let [own (if (= :field (:sk s)) (d/field-type s) (d/method-type s))
+        static? (d/has? (if (= :field (:sk s)) (d/field-flags s) (d/method-flags s)) d/STATIC)
+        erase (fn [x] (if (= :field (:sk s)) (d/erasure x) (merase x)))
+        sub (fn [x m] (if (= :field (:sk s)) (d/subst x m) (msubst x m)))]
+    (if static?
+      own
+      (loop [site site]
+        (cond
+          (tvar-t? site) (recur (upper-bound site))
+          (and (map? site) (= :wild (:k site))) (recur (wild-upper reg site))
+          (class-t? site)
+          (let [o (:owner s)]
+            (if (d/generic-class? o)
+              (let [base (d/as-outer-super site o)]
+                (cond
+                  (nil? base) own
+                  (allparams-empty? base) (erase own)
+                  :else (sub own (d/subst-map base))))
+              own))
+          (and (map? site) (= :inter (:k site)))
+          (let [o (:owner s)]
+            (if (d/generic-class? o)
+              (let [base (some #(d/as-outer-super % o) (:ts site))
+                    base (when base (capture reg base))]
+                (cond (nil? base) own
+                      (allparams-empty? base) (erase own)
+                      :else (sub own (d/subst-map base))))
+              own))
+          :else own)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Attr.condType, for arms that are primitive or boxed
+
+(def ^:private prim-tags [:byte :char :short :int :long :float :double :boolean])
+
+(defn cond-type
+  "Attr.condType of arm types `ts` (`consts` their constant values, nil for none): the same type; the
+  least primitive both arms convert to; the boxed arm all others are assignable to (subtypes); nil
+  when it is their lub (left to javac)."
+  [reg ts consts]
+  (let [first-t (first ts)]
+    (if (every? #(same-type? first-t %) (rest ts))
+      first-t
+      (let [us (map #(if (keyword? %) % (unboxed-type %)) ts)]
+        (or (when (every? prim? us)
+              (or (some (fn [[i u]]
+                          (when (contains? #{:byte :short :char} u)
+                            (when (every? (fn [[j t]] (or (= i j)
+                                                          (and (= :int (nth us j)) (keyword? t)
+                                                               (some? (nth consts j))
+                                                               (assignable-const? (nth consts j) u))))
+                                          (map-indexed vector ts))
+                              u)))
+                        (map-indexed vector us))
+                  (some (fn [cand] (when (every? #(prim-sub? % cand) us) cand)) prim-tags)))
+            (let [bs (mapv #(if (prim? %) (boxed-type reg %) %) ts)]
+              (some (fn [[i t]] (when (every? (fn [[j u]] (or (= i j) (subtype? reg u t))) (map-indexed vector bs)) t))
+                    (map-indexed vector bs))))))))

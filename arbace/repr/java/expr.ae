@@ -1,0 +1,621 @@
+;; The expressions' types and the names' members reimplement, for the native trees, jdk26u
+;; (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259)'s
+;; src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Attr.java (visitIdent, visitSelect and
+;; selectSym, checkIdInternal, visitApply and adjustMethodReturnType, checkMethod's unchecked
+;; erasure, visitIndexed, visitParens, visitAssign, visitAssignop, visitUnary, visitBinary,
+;; visitTypeCast, visitTypeTest, visitConditional and isBooleanOrNumeric, visitNewClass's and
+;; visitNewArray's types, visitLiteral) and Operators.java (resolveUnary, resolveBinary: the
+;; operator helpers' tests and lookups, stringPromotion), whose notice follows (LICENSE.md, "OpenJDK
+;; (jdk26u)"):
+;;
+;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+(ns arbace.repr.java.expr
+  "The native attribution's members and types tiers (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built:
+  JN9b\"): the symbol a name in code denotes (a field, a class, a package: Resolve's findIdent and
+  findIdentInType, a field of an expression's type) and the type of every expression as javac's Attr
+  gives it (`.type`: member types at the site's type arguments, capture, the constant of a constant
+  expression, the operator Operators resolves), over arbace.repr.java.scope's walk (each expression's
+  environment and role, recorded) and arbace.repr.java.types's relations.
+
+  An expression's role is javac's expected kind: :val (a value, the default: names captured), :var (an
+  assignment's or increment's target: not captured), :qual (a selection's qualifier, KindSelector VAL |
+  TYP: not captured). A call's result needs the method overload resolution chose, the next tier's
+  (JN9c): until it is native it is javac's (`method-of`: javac's symbol of the call, found in the
+  native model by owner, name and erased parameters), and an answer that needed it is marked in
+  `*leaned*`. What needs inference (a generic method's call, a diamond, a lambda, a method reference,
+  a poly conditional, a `var`'s type) or a least upper bound is declined (decls/decline!)."
+  (:require [arbace.repr.java.decls :as d]
+            [arbace.repr.java.types :as ty]
+            [arbace.repr.java.scope :as sc]
+            [arbace.repr.java.nattr :as na]
+            [arbace.repr.java.jtypes :as jt]
+            [arbace.string :as str])
+  (:import [com.sun.tools.javac.tree JCTree TreeInfo]
+           [com.sun.tools.javac.code Symbol Symbol$MethodSymbol Symbol$ClassSymbol Type Type$ArrayType]
+           [java.util IdentityHashMap]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:dynamic *leaned*
+  "A volatile set true when an answer being computed needed javac's answer of a higher tier (the
+  method a call's overload resolution chose), or nil."
+  nil)
+
+(defn- lean! [] (when *leaned* (vreset! *leaned* true)))
+
+(defn- ans [p t] (.get ^IdentityHashMap (:ans p) t))
+
+(defn- reg [p] (:reg p))
+
+(defn- skip-parens [t] (if (= :PARENS (:tag t)) (recur (:expr t)) t))
+
+(defn env-of "The environment the walk recorded for expression `t`." [p t]
+  (or (:env (ans p t)) (d/decline! (str "no environment for " (:tag t)))))
+
+(defn role "Expression `t`'s role: :val, :var, :qual." [p t] (or (:role (ans p t)) :val))
+
+(defn- env-class [env] (some :class (:levels env)))
+
+(defn- object-type [p] (d/object-type (reg p)))
+
+(defn- string-type [p] (d/ctype (d/class-named (reg p) "java.lang.String")))
+
+(def ^:private array-length
+  "Symtab's lengthVar: an array's length, a field of javac's array class (Array)."
+  (d/sym {:sk :field :name "length" :owner (d/sym {:sk :class :flat "Array" :name "Array" :memo (doto (java.util.HashMap.) (.put :flags (long (bit-or d/PUBLIC d/FINAL))))})
+          :memo (doto (java.util.HashMap.) (.put :type :int) (.put :flags (long (bit-or d/PUBLIC d/FINAL))))}))
+
+(declare etype etype* name-sym name-sym* method-of site-classes method-accessible? call-site call-member-type pt)
+
+;;; ------------------------------------------------------------------------------------------
+;;; this, super
+
+(defn this-type-of
+  "The type of this, super, C.this, C.super from the walk's :this-type answer of `t`, or nil."
+  [p t]
+  (when-let [[k c x] (:this-type (ans p t))]
+    (case k
+      :this (d/this-type (if x @x c))
+      :super (if x
+               (let [q @x]
+                 (if (d/interface? q)
+                   (d/as-super (d/this-type c) q)
+                   (d/supertype (d/this-type q))))
+               (d/supertype (d/this-type c)))
+      nil)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Names: the members tier
+
+(defn- type-expr?
+  "Does qualifier `t` name a type or a package (the walk's answer, else scope's rule in `t`'s
+  environment)?"
+  [p t]
+  (if-let [x (:type-expr? (ans p t))]
+    @x
+    (when-let [env (:env (ans p t))] (sc/type-name? env t))))
+
+(defn- enum-label
+  "Attr.enumConstant: the enum constant a case label IDENT `t` of a switch on an enum names (a field
+  of the selector's enum class), or nil."
+  [p t]
+  (when (= :IDENT (:tag t))
+    (when-let [sel (:case-selector (ans p t))]
+      (let [st (etype p sel)]
+        (when (and (ty/class-t? st) (d/has? (d/class-flags (:c st)) d/ENUM))
+          (first (d/fields-named (:c st) (:name t))))))))
+
+(defn name-sym
+  "The symbol name `t` (an IDENT or SELECT in code) denotes: a field symbol, a class symbol, a package
+  {:sk :package :name}; a local's is the scope tier's (nil here); declines a method's (the overload
+  tier's) and what this tier cannot find."
+  [p t]
+  (or (enum-label p t) (name-sym* p t)))
+
+(defn- name-sym*
+  [p t]
+  (let [env (env-of p t)
+        n (:name t)
+        kinds (if (true? (type-expr? p t)) #{:val :typ :pck} #{:val})]
+    (case (:tag t)
+      :IDENT
+      (let [r (d/resolve-qualified env t kinds)]
+        (cond (:local r) nil
+              (:field r) (:field r)
+              (:c r) (:c r)
+              (:pck r) (d/sym {:sk :package :name (:pck r)})
+              :else (d/decline! (str "no symbol " n))))
+      :SELECT
+      (let [q (:selected t)]
+        (if (true? (type-expr? p q))
+          (let [r (d/resolve-qualified env t kinds)]
+            (cond (:field r) (:field r)
+                  (:c r) (:c r)
+                  (:pck r) (d/sym {:sk :package :name (:pck r)})
+                  :else (d/decline! (str "no symbol " n))))
+          (let [site (ty/capture (reg p) (etype p q))]
+            (if (= :array (:k site))
+              (if (= "length" n) array-length (d/decline! "an array's member"))
+              (or (some (fn [c] (d/find-field env site n c)) (site-classes p site))
+                  (d/decline! (str "no field " n)))))))
+      (d/decline! "not a name"))))
+
+(defn- site-classes
+  "The classes whose members a site type has: a class type's, a type variable's bounds', an
+  intersection's components'."
+  [p t]
+  (cond
+    (ty/class-t? t) [(:c t)]
+    (ty/tvar-t? t) (site-classes p (ty/upper-bound t))
+    (= :inter (:k t)) (mapcat #(site-classes p %) (:ts t))
+    :else []))
+
+(defn- ident-site
+  "visitIdent's site of member `s` (a field or method, of class `owner`): the type of the innermost
+  enclosing class of `env` from which s is accessible."
+  [env s]
+  (let [cs (distinct (keep :class (:levels env)))
+        owner (:owner s)]
+    (d/this-type
+     (or (first (filter (fn [c] (or (identical? c owner)
+                                    (if (= :field (:sk s))
+                                      (d/accessible? env (d/this-type c) s owner)
+                                      (method-accessible? env c s))))
+                        cs))
+         (first cs)))))
+
+(defn- method-accessible?
+  "Resolve.isAccessible of method `m` through class `c` (as d/accessible? for fields)."
+  [env c m]
+  (let [fl (d/method-flags m)
+        owner (:owner m)
+        ec (env-class env)]
+    (cond
+      (d/has? fl d/PUBLIC) true
+      (d/has? fl d/PRIVATE) (and ec (identical? (d/outermost ec) (d/outermost owner)) (identical? c owner))
+      (d/has? fl d/PROTECTED) true
+      :else (= (:pkg (:uctx env)) (:pkg owner)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Operators (Operators.java)
+
+(def ^:private op-names
+  {:POS "+" :NEG "-" :NOT "!" :COMPL "~" :PREINC "++" :PREDEC "--" :POSTINC "++" :POSTDEC "--"
+   :OR "||" :AND "&&" :EQ "==" :NE "!=" :LT "<" :GT ">" :LE "<=" :GE ">=" :BITOR "|" :BITXOR "^"
+   :BITAND "&" :SL "<<" :SR ">>" :USR ">>>" :PLUS "+" :MINUS "-" :MUL "*" :DIV "/" :MOD "%"})
+
+(def ^:private ^IdentityHashMap op-cache (IdentityHashMap.))
+
+(defn- op-sym
+  "An operator symbol: a method symbol {:sk :method :operator true} of name `n`, its type params ->
+  ret (its memo holding the type, decls/method-type)."
+  [n params ret]
+  (let [k [n params ret]]
+    (locking op-cache
+      (or (some (fn [[kk v]] (when (= kk k) v)) (get (.get op-cache n) :list))
+          (let [m (d/sym {:sk :method :name n :operator true :owner nil
+                          :memo (doto (java.util.HashMap.)
+                                  (.put :type {:tparams [] :params (vec params) :ret ret :throws []})
+                                  (.put :flags 0))})]
+            (.put op-cache n (update (.get op-cache n) :list conj [k m]))
+            m)))))
+
+(defn- assignop->op [tg] (keyword (subs (name tg) 0 (- (count (name tg)) 4))))
+
+(defn- string-promotion [p t]
+  (cond
+    (ty/prim? t) (ty/unary-promotion t)
+    (or (= t :void) (= t :null) (ty/same-type? t (string-type p))) t
+    (ty/tvar-t? t) (string-promotion p (ty/upper-bound t))
+    :else (object-type p)))
+
+(defn- string-t? [p t] (ty/same-type? t (string-type p)))
+
+(defn binary-operator
+  "Operators.resolveBinary of tag `tg` for operand types `a` and `b`: [params ret]."
+  [p tg a b]
+  (let [ua (ty/unary-promotion a) ub (ty/unary-promotion b)
+        num? (and (ty/numeric? ua) (ty/numeric? ub))
+        int? (and (ty/integral? ua) (ty/integral? ub))
+        bool? (and (= :boolean (ty/unboxed-or-type a)) (= :boolean (ty/unboxed-or-type b)))
+        bp #(ty/binary-promotion a b (object-type p))]
+    (case tg
+      :PLUS (cond
+              num? (let [t (bp)] [[t t] t])
+              (and (or (string-t? p a) (string-t? p b)) (not= a :void) (not= b :void))
+              [[(string-promotion p a) (string-promotion p b)] (string-type p)]
+              :else nil)
+      (:MINUS :MUL :DIV :MOD) (when num? (let [t (bp)] [[t t] t]))
+      (:BITAND :BITOR :BITXOR) (cond int? (let [t (bp)] [[t t] t])
+                                     bool? [[:boolean :boolean] :boolean]
+                                     :else nil)
+      (:SL :SR :USR) (when (and (#{:int :long} ua) (#{:int :long} ub)) [[ua ub] ua])
+      (:LT :GT :LE :GE) (when num? (let [t (bp)] [[t t] :boolean]))
+      (:EQ :NE) (let [pa (ty/prim? a) pb (ty/prim? b)
+                      kind (cond (and pa pb) :num
+                                 pa (if (ty/prim? ub) :num :invalid)
+                                 pb (if (ty/prim? ua) :num :invalid)
+                                 :else (if (and (ty/reference? a) (ty/reference? b)) :ref :invalid))]
+                  (case kind
+                    :num (let [t (bp)] [[t t] :boolean])
+                    :ref (let [o (object-type p)] [[o o] :boolean])
+                    nil))
+      (:AND :OR) (when bool? [[:boolean :boolean] :boolean])
+      nil)))
+
+(defn unary-operator
+  "Operators.resolveUnary of tag `tg` for operand type `a`: [params ret]."
+  [p tg a]
+  (let [ua (ty/unary-promotion a)]
+    (case tg
+      (:POS :NEG) (when (ty/numeric? ua) [[ua] ua])
+      :COMPL (when (ty/integral? ua) [[ua] ua])
+      (:PREINC :PREDEC :POSTINC :POSTDEC) (let [u (ty/unboxed-or-type a)] (when (ty/numeric? u) [[u] u]))
+      :NOT (when (= :boolean (ty/unboxed-or-type a)) [[:boolean] :boolean])
+      nil)))
+
+(defn operator
+  "The operator symbol javac resolves for BINARY, ASSIGNOP or UNARY `t` (by its operands' types)."
+  [p t]
+  (let [tg (:tag t)
+        r (cond
+            (contains? #{:PREINC :PREDEC :POSTINC :POSTDEC :POS :NEG :NOT :COMPL} tg)
+            (unary-operator p tg (etype p (:arg t)))
+            (str/ends-with? (name tg) "_ASG")
+            (binary-operator p (assignop->op tg) (etype p (:lhs t)) (etype p (:rhs t)))
+            :else (binary-operator p tg (etype p (:lhs t)) (etype p (:rhs t))))
+        n (op-names (if (str/ends-with? (name tg) "_ASG") (assignop->op tg) tg))]
+    (if r
+      (let [[ps ret] r] (op-sym n (mapv #(if (map? %) (assoc % :anns []) %) ps) ret))
+      (d/decline! (str "no operator " tg)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The method a call chose (overload resolution's, javac's until JN9c)
+
+(defn- erased-key
+  "A key of erased javac type `t`: a primitive's tag, an array's element's key with [], a class's
+  flat name."
+  [^Type t]
+  (let [tg (str (.getTag t))]
+    (case tg
+      "ARRAY" (str (erased-key (.-elemtype ^Type$ArrayType t)) "[]")
+      "CLASS" (str (.flatName ^Symbol$ClassSymbol (.-tsym t)))
+      (str/lower-case tg))))
+
+(defn- nerased-key [t]
+  (let [t (d/erasure t)]
+    (cond
+      (keyword? t) (name t)
+      (= :array (:k t)) (str (nerased-key (:e t)) "[]")
+      (= :class (:k t)) (:flat (:c t))
+      :else (str t))))
+
+(defn nmethod
+  "The native method symbol of javac's method symbol `js` (a method of a class the native registry
+  holds, found by owner, name and erased parameter types), or nil. `canon` maps javac's symbols of the
+  unit's declarations to their native twins."
+  [p canon ^Symbol js]
+  (let [c (canon js)]
+    (if (and (map? (:memo c)) (= :method (:sk c)))
+      c
+      (let [o (.-owner js)]
+        (when (instance? Symbol$ClassSymbol o)
+          (let [oc (let [x (canon o)] (if (= :class (:sk x)) x (d/class-named (reg p) (str (.flatName ^Symbol$ClassSymbol o)))))
+                n (str (.-name js))
+                want (mapv erased-key (.getParameterTypes (.erasure js jt/*types*)))]
+            (when oc
+              (first (filter (fn [m] (and (= n (:name m))
+                                          (= want (mapv nerased-key (:params (d/method-type m))))))
+                             (:methods (d/members oc)))))))))))
+
+(defn method-of
+  "The native method symbol of the method call APPLY `t` chose: javac's (overload resolution, the next
+  tier's), marked in *leaned*; declined when the native model does not hold it."
+  [p t]
+  (lean!)
+  (let [^JCTree j (.get ^IdentityHashMap (:twins p) (:meth t))
+        js (when j (TreeInfo/symbol j))]
+    (or (when (instance? Symbol$MethodSymbol js) (nmethod p #(na/canon p %) js))
+        (d/decline! "the call's method is not in the native model"))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Expressions' types (Attr)
+
+(defn- cap
+  "checkIdInternal's capture of a name's type in a value context."
+  [p t x]
+  (if (= :val (role p t)) (ty/capture (reg p) x) x))
+
+(defn- field-type-at [p env site f]
+  (ty/member-type (reg p) site f))
+
+(defn- name-type
+  "The type of name `t` (IDENT or SELECT) denoting non-local symbol `s`, `site` its site's type."
+  [p t s site]
+  (case (:sk s)
+    :field (cap p t (field-type-at p (env-of p t) site s))
+    :class (d/class-type-at s site)
+    (d/decline! "a package's type")))
+
+(defn- ident-type [p t]
+  (let [n (:name t) a (ans p t) env (env-of p t)]
+    (cond
+      (#{"this" "super"} n) (or (this-type-of p t) (d/decline! "this"))
+      ;; a local's type as Attr sets it on its uses: its declaration's TYPE_USE annotations are put on
+      ;; the symbol's type after the body's attribution (TypeAnnotations), so not on the uses' types
+      (enum-label p t) (d/field-type (enum-label p t))
+      (:local a) (let [e (:local a)
+                       dcl (:decl e)
+                       vt (when (and dcl (:vartype dcl) (not= :VAR (:declKind dcl)))
+                            (d/type-of-tree (:env e) (:vartype dcl)))]
+                   (if (and vt (not= :union (:k vt)))
+                     (cap p t vt)
+                     (d/decline! "an inferred local type")))
+      :else (let [s (name-sym p t)]
+              (case (:sk s)
+                :field (cap p t (field-type-at p env (ident-site env s) s))
+                :class (d/class-type-at s (some-> (env-class env) d/this-type))
+                (d/decline! "a package's type"))))))
+
+(defn- select-type [p t]
+  (let [n (:name t) q (:selected t) a (ans p t)]
+    (cond
+      (= "class" n) (or (when-let [x (:class-literal a)]
+                          (when-let [q @x]
+                            (d/ctype (d/class-named (reg p) "java.lang.Class")
+                                     [(if (keyword? q)
+                                        (d/ctype (d/class-named (reg p) (str "java.lang." ({:int "Integer" :char "Character" :void "Void"} q (str/capitalize (name q))))))
+                                        (d/erasure q))]
+                                     nil)))
+                        (d/decline! "a class literal"))
+      (#{"this" "super"} n) (or (this-type-of p t) (d/decline! "C.this"))
+      (true? (type-expr? p q))
+      (let [s (name-sym p t)]
+        (case (:sk s)
+          :field (cap p t (d/field-type s))
+          :class (d/class-type-at s (let [r (d/resolve-qualified (env-of p t) q #{:typ :pck})]
+                                      (when (:c r) (etype p q))))
+          (d/decline! "a package's type")))
+      :else
+      (let [qt (etype p q)
+            site (ty/capture (reg p) qt)]
+        (if (and (= :array (:k site)) (= "length" n))
+          :int
+          (let [s (name-sym p t)
+                site (if (ty/tvar-t? site) (ty/skip-type-vars (reg p) site true) site)]
+            (cap p t (field-type-at p (env-of p t) site s))))))))
+
+(defn- formals-generic? [ts]
+  (some (fn generic? [t] (and (map? t) (case (:k t)
+                                         :class (or (seq (:args t)) (some-> (:outer t) generic?))
+                                         :array (generic? (:e t))
+                                         :tvar true
+                                         false)))
+        ts))
+
+(defn- unchecked-call?
+  "Does the call of method type `mt` with argument trees `args` need unchecked conversion (an argument
+  convertible to its formal only by erasure: Resolve's checkRawArgumentsAcceptable warning)?"
+  [p mt args varargs?]
+  (let [ps (:params mt)]
+    (when (formals-generic? ps)
+      (let [n (count ps)]
+        (boolean
+         (some (fn [[i arg]]
+                 (let [at (etype p arg)
+                       f (cond (< i (dec n)) (nth ps i)
+                               (not varargs?) (nth ps i nil)
+                               :else (let [l (last ps)]
+                                       (if (and (= i (dec n)) (= (count args) n) (ty/subtype? (reg p) (d/erasure at) (d/erasure l)))
+                                         l
+                                         (:e l))))]
+                   (when (and f (map? f) (not (keyword? at)))
+                     (and (not (ty/subtype? (reg p) at f))
+                          (ty/subtype? (reg p) (d/erasure at) (d/erasure f))))))
+               (map-indexed vector args)))))))
+
+(defn- apply-type [p t]
+  (let [meth (:meth t)
+        mname (:name meth)]
+    (if (#{"this" "super"} mname)
+      :void
+      (let [m (method-of p t)
+            mt0 (d/method-type m)
+            _ (when (seq (:tparams mt0)) (d/decline! "a generic method's call (inferred)"))
+            _ (when (and (d/has? (d/method-flags m) d/NATIVE)
+                         (#{"java.lang.invoke.MethodHandle" "java.lang.invoke.VarHandle"} (:flat (:owner m))))
+                (d/decline! "a signature polymorphic call"))
+            [site qtype] (call-site p t m)
+            mt (ty/member-type (reg p) site m)
+            ret (:ret mt)
+            ret (if (unchecked-call? p mt (:args t) (d/has? (d/method-flags m) d/VARARGS)) (d/erasure ret) ret)
+            ret (cond
+                  (and (= "getClass" (:name m)) (empty? (:args t))
+                       (let [o (:owner m)] (or (= "java.lang.Object" (:flat o)) (d/interface? o))))
+                  (d/ctype (:c ret) [{:k :wild :bk :extends :t (d/erasure qtype)}] nil)
+                  :else ret)]
+        (ty/capture (reg p) ret)))))
+
+(defn- call-site
+  "The site of call APPLY `t` of method `m`, and its qualifier's type: the enclosing class's (an
+  unqualified call's, visitIdent's) or the qualifier's, captured, through its type variables."
+  [p t m]
+  (let [meth (:meth t)
+        env (env-of p t)]
+    (if (= :IDENT (:tag meth))
+      (let [s (ident-site env m)] [s s])
+      (let [q (:selected meth)]
+        (if (true? (type-expr? p q))
+          (let [qt (etype p q)] [qt qt])
+          (let [qt (etype p q)
+                s (ty/capture (reg p) qt)
+                s (if (ty/tvar-t? s) (ty/skip-type-vars (reg p) s true) s)]
+            [s qt]))))))
+
+(defn- call-member-type [p t m]
+  (ty/member-type (reg p) (first (call-site p t m)) m))
+
+(defn- new-class-type [p t]
+  (let [clazz (:clazz t)
+        bare (loop [x clazz] (if (= :ANNOTATED_TYPE (:tag x)) (recur (:underlyingType x)) x))
+        diamond? (and (= :TYPEAPPLY (:tag bare)) (empty? (:arguments bare)))]
+    (cond
+      diamond? (d/decline! "a diamond (inferred)")
+      (:def t) (if-let [c (:class (ans p (:def t)))] (d/this-type c) (d/decline! "an anonymous class"))
+      (:encl t) (d/decline! "a qualified creation")
+      :else (or (some-> (:type (ans p clazz)) deref) (d/decline! "the created type")))))
+
+(defn- new-array-type [p t]
+  (if-let [et (:elemtype t)]
+    (let [e (or (some-> (:type (ans p et)) deref) (d/decline! "the element type"))]
+      (if (:elems t)
+        (d/array-of e)
+        (reduce (fn [x _] (d/array-of x)) e (:dims t))))
+    (let [x (pt p t)]
+      (if (and (map? x) (= :array (:k x)))
+        (d/array-of (:e x))
+        (d/decline! "an array initializer's target")))))
+
+(defn- boolean-or-numeric?
+  "Attr.isBooleanOrNumeric of conditional arm `t`."
+  [p t]
+  (let [pob (fn [x] (and (not (ty/tvar-t? x)) (ty/prim? (ty/unboxed-or-type x))))]
+    (case (:tag t)
+      :LITERAL (not= :CLASS (:typetag t))
+      (:LAMBDA :REFERENCE) false
+      :PARENS (boolean-or-numeric? p (:expr t))
+      :CONDEXPR (and (boolean-or-numeric? p (:truepart t)) (boolean-or-numeric? p (:falsepart t)))
+      :APPLY (let [meth (:meth t)]
+               (if (#{"this" "super"} (:name meth))
+                 false
+                 (let [m (method-of p t)
+                       env (env-of p t)
+                       site (if (= :IDENT (:tag meth))
+                              (some-> (env-class env) d/this-type)
+                              (etype p (:selected meth)))]
+                   (pob (:ret (ty/member-type (reg p) site m))))))
+      :NEWCLASS (let [bare (loop [x (:clazz t)] (case (:tag x) :ANNOTATED_TYPE (recur (:underlyingType x)) :TYPEAPPLY (recur (:clazz x)) x))]
+                  (pob (or (some-> (:type (ans p bare)) deref) (d/decline! "the created class"))))
+      (pob (etype p t)))))
+
+(defn pt
+  "javac's target type (pt()) of expression `t` from the walk's record: a type, :none (no target:
+  Type.noType), declined when unknown (a lambda's body, a yield, a constructor's argument)."
+  [p t]
+  (let [x (:pt (ans p t))]
+    (if (nil? x)
+      :none
+      (case (first x)
+        :same (pt p (second x))
+        :type (second x)
+        :local (let [dcl (second x)]
+                 (or (some->> (:vartype dcl) (d/type-of-tree (env-of p t))) (d/decline! "an inferred target")))
+        :field (d/field-type (second x))
+        :assign (etype p (second x))
+        :return (:ret (d/method-type (second x)))
+        :elem (let [at (etype p (second x))]
+                (if (= :array (:k at)) (:e at) (d/decline! "an element's target")))
+        :arg (let [[_ app i] x
+                   m (method-of p app)
+                   mt (d/method-type m)]
+               (when (seq (:tparams mt)) (d/decline! "a generic method's argument (inferred)"))
+               (let [ps (:params (call-member-type p app m))
+                     n (count ps)
+                     ^JCTree j (.get ^IdentityHashMap (:twins p) app)
+                     varargs? (some? (when j (.-varargsElement ^com.sun.tools.javac.tree.JCTree$JCMethodInvocation j)))]
+                 (if (and varargs? (>= i (dec n)))
+                   (:e (last ps))
+                   (nth ps i))))
+        (d/decline! "an unknown target")))))
+
+(defn- arm-const [p t] (some-> (d/const-value (env-of p t) t) second))
+
+(defn- cond-type [p t]
+  (if (and (boolean-or-numeric? p (:truepart t)) (boolean-or-numeric? p (:falsepart t)))
+    (let [ts [(etype p (:truepart t)) (etype p (:falsepart t))]]
+      (or (ty/cond-type (reg p) ts [(arm-const p (:truepart t)) (arm-const p (:falsepart t))])
+          (d/decline! "a conditional's lub")))
+    (let [x (pt p t)]
+      (if (= :none x)
+        (let [ts [(etype p (:truepart t)) (etype p (:falsepart t))]]
+          (or (ty/cond-type (reg p) ts [nil nil]) (d/decline! "a conditional's lub")))
+        x))))
+
+(defn etype*
+  "javac's type of expression `t` (`.type`), computed."
+  [p t]
+  (case (:tag t)
+    :PARENS (etype p (:expr t))
+    :LITERAL (case (:typetag t)
+               :CLASS (string-type p)
+               :BOT :null
+               (d/prim-of-tag (:typetag t)))
+    :IDENT (ident-type p t)
+    :SELECT (select-type p t)
+    :APPLY (apply-type p t)
+    :NEWCLASS (new-class-type p t)
+    :NEWARRAY (new-array-type p t)
+    :TYPECAST (ty/capture (reg p) (or (some-> (:type (ans p (:clazz t))) deref) (d/decline! "the cast's type")))
+    :TYPETEST :boolean
+    :CONDEXPR (cond-type p t)
+    :ASSIGN (ty/capture (reg p) (etype p (:lhs t)))
+    (:PREINC :PREDEC :POSTINC :POSTDEC) (do (operator p t) (etype p (:arg t)))
+    (:POS :NEG :NOT :COMPL) (:ret (d/method-type (operator p t)))
+    :INDEXED (let [at (etype p (:indexed t))
+                   at (if (ty/tvar-t? at) (ty/upper-bound at) at)]
+               (if (= :array (:k at))
+                 (let [e (:e at)] (if (= :var (role p t)) (ty/capture (reg p) e) e))
+                 (d/decline! "an indexed non-array")))
+    (:LAMBDA :REFERENCE) (d/decline! "a lambda's or method reference's type (inferred)")
+    :SWITCH_EXPRESSION (d/decline! "a switch expression's type")
+    (cond
+      (str/ends-with? (name (:tag t)) "_ASG") (do (operator p t) (etype p (:lhs t)))
+      (and (:lhs t) (:rhs t)) (:ret (d/method-type (operator p t)))
+      :else (d/decline! (str "an expression " (:tag t))))))
+
+(defn etype
+  "javac's type of expression `t` (memoized in the provider's :etypes; a decline too): computed by
+  etype*, a lean on javac's higher tiers remembered with it."
+  [p t]
+  (let [^IdentityHashMap cache (:etypes p)
+        hit (.get cache t)]
+    (if hit
+      (let [[v leaned?] hit]
+        (when leaned? (lean!))
+        (if (instance? Throwable v) (throw v) v))
+      (let [outer *leaned*
+            mine (volatile! false)
+            [v ex] (binding [*leaned* mine]
+                     (try [(etype* p t) nil]
+                          (catch Throwable e
+                            (if (:arbace.repr.java.decls/decline (ex-data e)) [e e] (throw e)))))]
+        (.put cache t [v @mine])
+        (when (and @mine outer) (vreset! outer true))
+        (if ex (throw ex) v)))))
+
+(defn econst
+  "The constant value [kind value] of expression `t` (ConstFold over javac's constant types), or nil."
+  [p t]
+  (d/const-value (env-of p t) t))

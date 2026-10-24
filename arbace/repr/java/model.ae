@@ -53,6 +53,7 @@
             [arbace.repr.java.decls :as d]
             [arbace.repr.java.attr :as attr]
             [arbace.repr.java.nattr :as na]
+            [arbace.repr.java.expr :as ex]
             [arbace.string :as str])
   (:import [arbace.repr.java.decls Sym]
            [com.sun.tools.javac.code Type Type$ArrayType Type$ClassType Type$WildcardType Type$TypeVar
@@ -479,8 +480,11 @@
 (defn tag-name
   "The type's tag as javac's TypeTag names it (INT, CLASS, ARRAY, TYPEVAR, WILDCARD, BOT, VOID, ...)."
   [t]
-  (if (instance? Type t)
+  (cond
+    (and (map? t) (identical? :ctype (:k t))) (tag-name (:t t))
+    (instance? Type t)
     (do (rd :model/tag :javac) (jt/tag-name t))
+    :else
     (do (rd :model/tag :native)
         (if (keyword? t)
           (if (identical? t :null) "BOT" (str/upper-case (name t)))
@@ -510,7 +514,8 @@
   (if (instance? Type t) (do (rd :model/tag :javac) (instance? Type$TypeVar t)) (do (rd :model/tag :native) (and (map? t) (= :tvar (:k t))))))
 
 (defn captured? [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (instance? Type$CapturedType t)) (do (rd :model/tag :native) false)))
+  (if (instance? Type t) (do (rd :model/tag :javac) (instance? Type$CapturedType t))
+      (do (rd :model/tag :native) (boolean (and (map? t) (= :tvar (:k t)) (:captured (:tv t)))))))
 
 (defn wildcard? [t]
   (if (instance? Type t) (do (rd :model/tag :javac) (instance? Type$WildcardType t)) (do (rd :model/tag :native) (and (map? t) (= :wild (:k t))))))
@@ -709,12 +714,17 @@
 
 (defn member-of?
   "Symbol.isMemberOf: is field or method `s` a member of class `c` (its owner, or inherited by c and
-  not hidden in it)? A native field's natively; a method's (hiding by subsignature) javac's: a
-  bridge."
+  not hidden in it)? Natively for native symbols (a method's since JN9b, JFS90); a native one with a
+  javac one a bridge."
   [s c]
   (cond
     (and (nsym? s) (= :field (:sk s)) (nsym? c))
     (do (rd :model/member-of :native) (na/field-member-of? s c))
+    (and (nsym? s) (= :method (:sk s)) (nsym? c))
+    (do (rd :model/member-of :native) (na/method-member-of? s c))
+    ;; a javac method (the overload tier's answer) of a native class: the method in the native model
+    (and (instance? Symbol$MethodSymbol s) (nsym? c) (ex/nmethod (p) canon s))
+    (do (rd :model/member-of :native) (na/method-member-of? (ex/nmethod (p) canon s) c))
     (or (nsym? s) (nsym? c))
     (do (rd :model/member-of :bridge)
         (.isMemberOf ^Symbol (if (nsym? s) (javac-of s) s)
@@ -819,8 +829,23 @@
   [t]
   (if (instance? Type t) (do (rd :model/box :javac) (.unboxedType jt/*types* ^Type t)) (unboxed t)))
 
-(defn type-const "An expression type's constant value (`.constValue`)." [t]
-  (rd :model/type-const :javac) (when t (.constValue ^Type t)))
+(defn type-const
+  "An expression type's constant value (`.constValue`; a native constant expression's type
+  {:k :ctype :t type :const [kind value]}, its value as javac's: an Integer for an int, short, byte,
+  char or boolean)."
+  [t]
+  (cond
+    (instance? Type t) (do (rd :model/type-const :javac) (.constValue ^Type t))
+    (nil? t) nil
+    :else (do (rd :model/type-const :native)
+              (when (and (map? t) (identical? :ctype (:k t)))
+                (let [[k v] (:const t)]
+                  (case k
+                    (:int :short :byte :char :boolean) (Integer/valueOf (int v))
+                    :long (Long/valueOf (long v))
+                    :float (Float/valueOf (float v))
+                    :double (Double/valueOf (double v))
+                    v))))))
 
 (defn descriptor-type "The functional descriptor of functional interface type `t` (Types.findDescriptorType)." [t]
   (rd :model/descriptor :javac) (.findDescriptorType jt/*types* ^Type t))

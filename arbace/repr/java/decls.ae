@@ -653,7 +653,7 @@
        (empty? (:args t))
        (loop [o (:outer t)] (or (nil? o) (and (empty? (:args o)) (recur (:outer o)))))))
 
-(defn- subst-map
+(defn subst-map
   "{tvsym type}: class type `t`'s type variables (its class's, its enclosing types') to its arguments."
   [t]
   (loop [t t m {}]
@@ -877,19 +877,76 @@
 (defn fields-named [c n] (filter #(= n (:name %)) (:fields (members c))))
 (defn member-class [c n] (get (:classes (members c)) n))
 
+(declare generated-methods)
+
 (defn- source-members [c]
   (let [cd (:tree c)
-        uctx (:uctx c)]
-    {:fields (vec (for [d (:defs cd) :when (= :VARDEF (:tag d))]
-                    (field-sym {:name (:name d) :owner c :tree d})))
-     :methods (vec (for [d (:defs cd) :when (= :METHODDEF (:tag d))]
-                     (method-sym {:name (:name d) :owner c :tree d})))
+        uctx (:uctx c)
+        fields (vec (for [d (:defs cd) :when (= :VARDEF (:tag d))]
+                      (field-sym {:name (:name d) :owner c :tree d})))
+        methods (vec (for [d (:defs cd) :when (= :METHODDEF (:tag d))]
+                       (method-sym {:name (:name d) :owner c :tree d})))]
+    {:fields fields
+     :methods (into methods (generated-methods c fields methods))
      :classes (into {} (for [d (:defs cd) :when (= :CLASSDEF (:tag d))
                              :let [m (if (local-class? c)
                                        (get (memo c :local-members (fn [] {})) (:name d))
                                        (class-named (:reg c) (str (:flat c) "$" (:name d))))]
                              :when m]
                          [(:name d) m]))}))
+
+(defn- generated-method
+  "A member TypeEnter generates (no tree): method `name` of class `c` with the modifiers' flags `fl`
+  (checked as MemberEnter checks a method's), parameter types `params`, return type `ret`."
+  [c name fl params ret & [extra]]
+  (let [fl (check-flags :method fl {:owner-flags (class-flags c) :ctor? (= "<init>" name)})]
+    (sym (merge {:sk :method :name name :owner c :generated true
+                 :memo (doto (new-memo)
+                         (.put :type {:tparams [] :params (vec params) :ret ret :throws []})
+                         (.put :tparams [])
+                         (.put :flags (long (bit-or fl (long (or (:extra-flags extra) 0))))))}
+                (dissoc extra :extra-flags)))))
+
+(defn- generated-methods
+  "TypeEnter's generated members of source class `c` (JFS79; declared `fields`, `methods`): the default
+  constructor of a class without one (an enum's PRIVATE; an anonymous class's is the overload tier's,
+  left out), an enum's values() and valueOf(String) (addEnumMembers), a record's canonical constructor
+  when none is declared (RecordConstructorHelper), toString(), hashCode(), equals(Object) and the
+  components' accessors not declared (addRecordMembersIfNeeded)."
+  [c fields methods]
+  (when-not (:anon? c)
+    (let [cd (:tree c)
+          fl (long (get-in cd [:mods :flags]))
+          cfl (class-flags c)
+          reg (:reg c)
+          iface? (has? cfl INTERFACE)
+          record? (has? fl RECORD)
+          enum? (and (has? fl ENUM) (not (:extending cd)))
+          ctors (filter #(= "<init>" (:name %)) methods)
+          comps (filter #(has? (get-in % [:tree :mods :flags]) RECORD) fields)
+          ctypes (mapv field-type comps)
+          string-t (ctype (class-named reg "java.lang.String"))
+          object-t (object-type reg)
+          declared? (fn [n ps] (some #(and (= n (:name %)) (= (mapv erasure ps) (mapv erasure (:params (method-type %))))) methods))
+          last-varargs? (some-> (last comps) (get-in [:tree :mods :flags]) (has? VARARGS))]
+      (concat
+       (when (and (not iface?) (not record?) (empty? ctors))
+         [(generated-method c "<init>" (if enum? (bit-or PRIVATE GENERATEDCONSTR) (bit-or (bit-and cfl AccessFlags) GENERATEDCONSTR)) [] :void)])
+       (when (and record? (not (some #(= (mapv erasure ctypes) (mapv erasure (:params (method-type %)))) ctors)))
+         [(generated-method c "<init>" (bit-or (bit-and cfl AccessFlags) GENERATEDCONSTR RECORD) ctypes :void
+                            {:extra-flags (if last-varargs? VARARGS 0)})])
+       (when enum?
+         [(generated-method c "values" (bit-or PUBLIC STATIC) [] (array-of (this-type c)))
+          (generated-method c "valueOf" (bit-or PUBLIC STATIC) [string-t] (this-type c))])
+       (when record?
+         (concat
+          (when-not (declared? "toString" []) [(generated-method c "toString" (bit-or PUBLIC RECORD FINAL GENERATED_MEMBER) [] string-t)])
+          (when-not (declared? "hashCode" []) [(generated-method c "hashCode" (bit-or PUBLIC RECORD FINAL GENERATED_MEMBER) [] :int)])
+          (when-not (declared? "equals" [object-t]) [(generated-method c "equals" (bit-or PUBLIC RECORD FINAL GENERATED_MEMBER) [object-t] :boolean)])
+          (for [f comps
+                :when (not (#{"hashCode" "toString" "getClass" "notify" "notifyAll" "wait" "clone" "finalize"} (:name f)))
+                :when (not (declared? (:name f) []))]
+            (generated-method c (:name f) (bit-or PUBLIC GENERATED_MEMBER) [] (field-type f)))))))))
 
 (defn local-class
   "The class symbol of local or anonymous class declaration `cd` in environment `env` (inside class
