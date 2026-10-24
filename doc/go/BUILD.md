@@ -18,8 +18,8 @@ the path by which Arbace itself is built from forms (`bin/arbace-go`).
 
 ```sh
 bin/build-go [--arch amd64|arm64] [--goos linux|tamago|darwin] [-o OUT] [--layout gofmt|lines]
-              [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--print-cache DIR]
-              [--root ROOT]... [--goos-dir DIR] DIR
+              [--line-file] [--work DIR] [--overlay FILE] [--pgo FILE] [--go-flag FLAG]...
+              [--print-cache DIR] [--root ROOT]... [--goos-dir DIR] DIR
 bin/build-go --print-only --work DIR [--tests] [--module PATH] [--layout gofmt|lines]
               [--line-file] SRC
 bin/build-go test [--arch amd64|arm64]... [PROG...]
@@ -103,7 +103,9 @@ DIR/
    `OUT` defaults to the main package path's last element in the current directory, as
    `go build` names it. Go's output and exit status are the command's. `--overlay FILE` adds
    `-overlay FILE` ("Overlays" below), `--pgo FILE` adds `-pgo FILE` (made absolute): a CPU
-   profile for gc's profile-guided optimization (amendment O5, SPEED-NOTES.md).
+   profile for gc's profile-guided optimization (amendment O5, SPEED-NOTES.md); `--go-flag FLAG`
+   (repeated) adds FLAG before `-o`: a test's build flags, `-gcflags=...`, `-tags=...` (2026-10-24,
+   REAP2: `bin/goi check --aot` passes a `$GOROOT/test` action's flags, RPS17).
 
 **Toolchain.** `$ARBACE_GOROOT/bin/go`, by default TamaGo's go1.27.1 at `/root/tamago-go`, the
 toolchain of the rest of repr/go (the round trip); it builds `linux` targets like upstream Go.
