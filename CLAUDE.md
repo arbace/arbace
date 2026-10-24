@@ -89,6 +89,14 @@ Prior art:
   frozen baseline on the JVM (`test/baseline-results.edn`), or with `CLOJURE_TESTS_GO` the Go
   build's test executable (`test/arbace-go-results.edn`; repr/clojure's translation and the report on the
   tools' host).
+- `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
+  read, eval, AOT and print for Clojure, Java and Go, judged from the checks' recorded results
+  alone (no runs): the cells and their sources in `test/reap/cells.edn`, the judging in
+  `test/reap/main.ae`, each level's classes in `test/goi/divergences.edn`'s format
+  (`test/clojure/divergences{,-read,-aot,-print}.edn`, `test/repr/go/divergences-{read,print}.edn`,
+  goi's, `test/java/divergences-diffcheck.edn`; Go's read numbers `test/repr/go/native-check-results.edn`,
+  `bin/reap record-native-check`); a cell whose check is not recorded yet prints "no check yet".
+  `bin/clojure-tests --divergences [RESULTS]` judges a suite run per test against the Clojure classes.
 - `LICENSE.md` holds all licenses: their full texts and which files each covers. Licenses are
   stated nowhere else, apart from the notices source files came with, which stay. Extend it when
   vendoring from a new source.
@@ -308,7 +316,7 @@ Prior art:
   since GP7 repr/go's generated Go forms, the dumper `go/arbace/repr/go/godump` and the renamed copy of gc's
   syntax `go/arbace/repr/go/internal/syntax`, regenerated and compared with the committed files), and since 2026-10-24 `bin/j2g-edge verify` on the
   frozen JVM (j2g's edge recorded afresh: an embedded namespace's new JDK class makes `jdk/edge.edn`
-  stale). `bin/gate --full` adds, concurrently: the Go build afresh with its
+  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds). `bin/gate --full` adds, concurrently: the Go build afresh with its
   smoke test, then javac's forms and javac on Arbace (`bin/javac-vendor check`, `build`, `verify`:
   javac's forms read afresh by javac on Arbace, `classes baseline samples jdk java.base`), then,
   beside the rest of that chain, repr/java's checks on the tool just built (JN5, JFS9): `bin/repr-java
