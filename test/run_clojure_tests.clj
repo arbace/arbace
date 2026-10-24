@@ -36,8 +36,9 @@
 ;;   levels A B UPSTREAM
 ;;       The two levels' results compared (RPS16: a finding, not a class): the namespaces, tests and
 ;;       specs of the results file A (the AOT level's) that pass at one level and not the other, or
-;;       run at one only, against the results file B (the eval level's), and both levels' totals
-;;       against UPSTREAM's (test/baseline-results.edn: every assertion passes there).
+;;       run at one only, against the results file B (the eval level's), and the totals of both and
+;;       of UPSTREAM (test/baseline-results.edn, the frozen JVM baseline's run: upstream's suite on the
+;;       JDK passes every one of its assertions).
 ;;   report OUT EXPECTED RESULTS NSS
 ;;       Read the OUT/<ns>.edn results of the namespaces NSS (a space-separated string) and
 ;;       OUT/generative.edn, print per-namespace counts and totals, write all results to RESULTS
@@ -214,7 +215,7 @@
         oa (outcomes a) ob (outcomes b)
         ks (sort-by str (distinct (concat (keys oa) (keys ob))))
         diffs (for [k ks :let [x (get oa k :pass) y (get ob k :pass)] :when (not= x y)] [k x y])]
-    (doseq [[label r] [["upstream" u] ["eval" b] ["AOT" a]]]
+    (doseq [[label r] [["baseline" u] ["eval" b] ["AOT" a]]]
       (println (format "%-9s %s" label (pr-str (totals r)))))
     (println (str "levels: " (count diffs) " tests, namespaces or specs with another outcome at AOT ("
                   a-file ") than at eval (" b-file ")"))

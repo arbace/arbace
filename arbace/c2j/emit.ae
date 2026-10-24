@@ -102,6 +102,8 @@
               (swap! registered assoc n r)
               r))))))
 
+(declare dynamic-class-cached?)
+
 (defn- runtime-class?
   "Is class c made at run time (a Dyn class: an evaluated fn's, deftype's, interface's, proxy's)
   rather than a class of the program, or one the program does not register by name (java.sql's,
@@ -115,7 +117,8 @@
       ;; made with an event, it is made again before the unit runs (unit-method)
       (when (.isAssignableFrom arbace.lang.IProxy c)
         (when-let [ps (:unit-proxies ctx)] (swap! ps conj c))
-        true)))
+        true)
+      (dynamic-class-cached? c)))
 
 (defn- public? [^Class c]
   (java.lang.reflect.Modifier/isPublic (.getModifiers c)))
@@ -411,6 +414,30 @@
   naming one is looked up where used, as a class made at run time, and the classes holding it
   initialize without it."
   #{})
+
+(def ^:dynamic *event-classes*
+  "The names of the classes the recorded units' events make (arbace.c2j.main's compile-all):
+  compiled, or made at run time again by their units."
+  #{})
+
+(def ^:private dynamic-cache (atom {}))
+
+(defn- dynamic-class?*
+  "Was class c made at run time while the program prepared, by no recorded event (a deftype an
+  eval made while a namespace loaded: Clojure's suite's compilation.examples, REAP3)? The class
+  is made again when that code runs, not compiled."
+  [^Class c]
+  (let [n (destub (.getName c))]
+    (and (not (contains? *event-classes* n))
+         (not (contains? *late-classes* n))
+         (try (boolean (arbace.lang.Reflector/invokeStaticMethod
+                         "arbace.lang.Compiler$AST" "dynamic" (object-array [c])))
+              ;; a program older than AST.dynamic
+              (catch Throwable _ false)))))
+
+(defn- dynamic-class-cached? [^Class c]
+  (let [k [c *event-classes* *late-classes*]]
+    (if-some [r (get @dynamic-cache k)] r (let [r (dynamic-class?* c)] (swap! dynamic-cache assoc k r) r))))
 
 (defn- holds-fn?
   "Does constant v hold an evaluated fn (in a collection or its metadata)?"
@@ -1323,16 +1350,21 @@
                 (if (closed? ctx lb)
                   (list 'set! (field-read ctx lb b) (if (:bindingPrim b) (emit-unboxed ctx val) (emit ctx val)))
                   (fail "set! of a local that is no field")))
+      ;; a final field: set by reflection, which refuses it as the evaluator does (the JVM's
+      ;; putstatic or putfield of a final field throws; Java forms would assign it: REAP3)
       "instance-field" (let [^java.lang.reflect.Field f (:field tn)]
-                         (if (field-ok? ctx f)
+                         (if (and (field-ok? ctx f) (not (java.lang.reflect.Modifier/isFinal (.getModifiers f))))
                            (list 'set! (list (symbol (str ".-" (.getName f)))
                                              (list 'cast (type-sym (.getDeclaringClass f)) (emit ctx (:target tn))))
                                  (first (typed-args ctx [(.getType f)] [val])))
                            (list 'arbace.lang.Reflector/setInstanceField (emit ctx (:target tn)) (:fieldName tn)
                                  (emit ctx val))))
       "static-field" (let [^java.lang.reflect.Field f (:field tn)]
-                       (list 'set! (symbol (str (type-sym (.getDeclaringClass f))) (.getName f))
-                             (first (typed-args ctx [(.getType f)] [val]))))
+                       (if (java.lang.reflect.Modifier/isFinal (.getModifiers f))
+                         (list (with-meta 'arbace.lang.Reflector/setStaticField {:param-tags '[java.lang.Class java.lang.String java.lang.Object]})
+                               (constant ctx (.getDeclaringClass f)) (.getName f) (emit ctx val))
+                         (list 'set! (symbol (str (type-sym (.getDeclaringClass f))) (.getName f))
+                               (first (typed-args ctx [(.getType f)] [val])))))
       (fail (str "set! of " (:op tn))))))
 
 (defn- coll-call [sym es ctx]
