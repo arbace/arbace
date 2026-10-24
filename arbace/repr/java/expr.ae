@@ -359,6 +359,48 @@
     :class (d/class-type-at s site)
     (d/decline! "a package's type")))
 
+(defn- captured-in? [t]
+  (and (map? t)
+       (case (:k t)
+         :tvar (boolean (:captured (:tv t)))
+         :class (or (some captured-in? (:args t)) (some-> (:outer t) captured-in?))
+         :array (captured-in? (:e t))
+         :wild (some-> (:t t) captured-in?)
+         (:inter :union) (some captured-in? (:ts t))
+         false)))
+
+(defn local-type
+  "The type of local variable entry `e` as Attr sets it on its uses (its declaration's TYPE_USE
+  annotations are put on the symbol's type after the body's attribution, TypeAnnotations, so not on
+  the uses'): its declared type; a `var`'s its initializer's (a for-each's the element type of its
+  array or Iterable), when that has no captured type variable (else its upward projection, declined);
+  a multi-catch parameter's and an implicit lambda parameter's declined."
+  [p e]
+  (let [dcl (:decl e)]
+    (cond
+      (nil? dcl) (d/decline! "a local without a declaration")
+      (and (:vartype dcl) (not= :VAR (:declKind dcl)))
+      (let [vt (d/type-of-tree (:env e) (:vartype dcl))]
+        (if (= :union (:k vt)) (d/decline! "a multi-catch parameter's type (a lub)") vt))
+      (and (= :VAR (:declKind dcl)) (:init dcl) (#{:local :resource} (:kind e)))
+      (let [it (etype p (:init dcl))]
+        (cond (captured-in? it) (d/decline! "a var's upward projection")
+              (or (= :null it) (= :void it)) (d/decline! "a var's null type")
+              :else it))
+      (and (= :VAR (:declKind dcl)) (= :for-each (:kind e)) (:foreach (ans p dcl)))
+      (let [xt (etype p (:expr (:foreach (ans p dcl))))
+            xt (if (ty/tvar-t? xt) (ty/upper-bound xt) xt)
+            el (cond
+                 (= :array (:k xt)) (:e xt)
+                 :else (let [b (d/as-super xt (d/class-named (reg p) "java.lang.Iterable"))]
+                         (cond (nil? b) (d/decline! "a for-each's element")
+                               (empty? (:args b)) (object-type p)
+                               :else (first (:args b)))))]
+        (if (or (captured-in? el) (and (map? el) (= :wild (:k el))))
+          (d/decline! "a var's upward projection")
+          el))
+      :else (d/decline! "an inferred local type"))))
+
 (defn- ident-type [p t]
   (let [n (:name t) a (ans p t) env (env-of p t)]
     (cond
@@ -366,13 +408,7 @@
       ;; a local's type as Attr sets it on its uses: its declaration's TYPE_USE annotations are put on
       ;; the symbol's type after the body's attribution (TypeAnnotations), so not on the uses' types
       (enum-label p t) (d/field-type (enum-label p t))
-      (:local a) (let [e (:local a)
-                       dcl (:decl e)
-                       vt (when (and dcl (:vartype dcl) (not= :VAR (:declKind dcl)))
-                            (d/type-of-tree (:env e) (:vartype dcl)))]
-                   (if (and vt (not= :union (:k vt)))
-                     (cap p t vt)
-                     (d/decline! "an inferred local type")))
+      (:local a) (cap p t (local-type p (:local a)))
       :else (let [s (name-sym p t)]
               (case (:sk s)
                 :field (cap p t (field-type-at p env (ident-site env s) s))
