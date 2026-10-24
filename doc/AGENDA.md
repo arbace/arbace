@@ -104,7 +104,8 @@ The current state of the work. This file is rewritten as things change. For the 
   eval 20,506 of 20,520 and Go's AOT 1,032 of 1,051 close; Clojure's AOT (the suite compiled, never
   run), Java's eval, AOT and print the work. Plan REAP1-REAP9 with JC1-JC6 and JC8's record, 24-41
   days; RPS1-RPS17 decided as recommended. Running: REAP1 (the classes as data, `bin/reap`), REAP2
-  (`bin/goi check --aot`), JC1, JFS65 (b), JFS75 (b); JC4 merging.
+  (`bin/goi check --aot`), JC1; JC4 done (2026-10-24: the interpreter's private calls, `Object` methods through world
+  interfaces, `clone`, the REPL's source lookup on Go; JCS30-JCS33 decided); JFS65 (b) and JFS75 (b) merging.
 
 - **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,
   the user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):

@@ -1002,3 +1002,11 @@ The data: `.tmp/jc/scan.tsv`, `cls.tsv` (26,271 rows), `work/tNNNNN/` (2,428 tes
 input, `j2g-forms.excluded.json`), `j2g-forms2/` and `j2g2.mains` (as finally translated),
 `j2g2.prefiltered.tsv`, `j2g2/refused-all.tsv`, `j2g2/goerrs-*.log`, `j2g2/j2g/` (j2g's output and
 `report.edn`), `j2g2/arbace-j2g` (the program, 277,482,863 bytes).
+
+## Decided (2026-10-24): JCS30-JCS33
+
+The user decided JC4's proposals as recommended: JCS30 (b) (repr/java writes a Java file's top-level
+classes as one `defclasses`, a top-level `do` one definition; JC5's, with JCS11), JCS31 (a) (the lookup
+also in the file being loaded, SPEC §9.2 (3) amended), JCS32 (b) (`clone` of an interpreted class
+extending a world class left until a test needs it), JCS33 (a) (JC1's interp level file by file once
+JC1 and JC4 are both on main, the one-`do` load kept as a comparison mode).

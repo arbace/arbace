@@ -1558,3 +1558,22 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   20,520 as the compiled runtime's. Its scratch kept in main's `.tmp/reap-survey-fs/`. Milestones
   REAP1-REAP9 (RP and FS taken), proposals RPS1-RPS17. Decided (the user): all as recommended; REAP1
   and REAP2 started.
+
+## 2026-10-24: JC4 merged, JCS30-JCS33 decided (the user)
+
+- JC4 (branch `java-interp-jc4` from `549c5c49`, merged `37422a67`; doc/classes/JAVA-CONFORMANCE-SURVEY.md,
+  "As built: JC4"): a private instance call (kind `:virtual`, as javac's `invokevirtual` of a nestmate's
+  private method) went to the vtable (`CallV`), where private methods rightly are not, then to
+  reflection, which found nothing for an interpreted owner: `this.run()` failed as well as `p.run()`;
+  now `CallI`, direct (CLASSFORMS-REPL §2.2), method references too. An `Object` method through a world
+  interface (`Map.toString()`): `real-method` falls back to `Object`'s (JLS 9.2). `clone` of an interpreted
+  `Cloneable`: `Rt/cloneOf` in `Compiler$CF`, a shallow copy, `CloneNotSupportedException` otherwise.
+  JCS8 (b): `*source-lookup*` on everywhere but j2g, through `RT/resourceAsStream`, and the file being
+  loaded searched for its later classes (`p/C.ae` alone recovered no test). Sample A (324 single-file
+  plain run tests): 205 → 221 interpreted, none regressing; sample B (24 found by the patterns): 2 → 13.
+  14 cases appended to the oracle's `defclass.ae` (recorded on the frozen jar), a smoke check. Changed:
+  `arbace.lang.Compiler`, `arbace.classes.interp`, `arbace.classes.analyze` (the batched re-seed). Its
+  scratch kept in main's `.tmp/jc4-scratch/`. The essential gate on `37422a67` passed (19m26s).
+- Decided (the user): JCS30 (b), JCS31 (a), JCS32 (b), JCS33 (a), as recommended.
+- Disk at 85% (the user): JC4's worktree removed after its cited scratch was kept; the agents asked to
+  delete their intermediate builds (j2g-array-casts' worktree 14 GB → 1.1 GB).
