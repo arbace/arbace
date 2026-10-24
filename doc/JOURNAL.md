@@ -1353,3 +1353,13 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   changes above are not the program's), to be packed and verified on main.
 - **JN9a started** (the user: "start JN9a"), with JFS71 and JFS72 (b), on the branch
   `java-frontend-jn9a` from `bd3ba0bb`, in `.tmp/worktrees/java-frontend-jn9a`.
+
+## 2026-10-24: the Go plan's optional work started (the user: "start the optional later work for go")
+
+- GPS49 (c), the native read's raw conversion (and layout) profiled and made faster, outputs byte
+  for byte: the branch `go-raw-speed` from `8a879ec0`, proposals from GPS57.
+- GPS41 (c) with GPS39 (b), gc's noder pragmas (`noder.go`'s `pragma`, `checkUnusedDuringParse`,
+  `lex.go`'s `pragcgo`) ported into the syntax driver and syntax's branch errors merged into goi's
+  check in gc's words: the branch `go-pragmas` from `8a879ec0`, proposals from GPS60.
+- GPS56 (c), the whole tree converted in the box on the Mac, waits for the user's next Mac session.
+- Both beside the re-seed's fixpoint and JN9a, each at 8 jobs or fewer.
