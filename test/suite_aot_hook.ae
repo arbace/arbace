@@ -1,0 +1,77 @@
+;; Clojure's suite compiled (doc/FULL-SUPPORT-SURVEY.md, REAP3; bin/clojure-tests --aot): the load
+;; hook test/run_clojure_tests.clj installs when CLOJURE_TESTS_AOT names this file. Arbace's own
+;; names (not translated by repr/clojure, as the runner is); loaded by load-file, evaluated.
+;;
+;; The suite's sources are on ARBACE_PATH, not embedded in the program, so RT.load evaluates them
+;; (it uses a compiled loader, Compiler$AOT, only for an embedded source). arbace.core/load (a
+;; ^:redef var, which load-one calls through) is replaced by a fn that, for a source found on
+;; ARBACE_PATH and not embedded (the suite's namespaces, its test libraries, test/suite-go's
+;; stand-ins), does what the level asks, and leaves every other load (the runtime's embedded
+;; namespaces) to RT.load as before:
+;;   record   (the compiling program, ARBACE_COMPILE and ARBACE_PREPARE set): the source loaded as an
+;;            embedded one is when the program prepares, by Compiler$Image/load, so that its units
+;;            are recorded for arbace.c2j (Compiler$AST);
+;;   compiled (the compiled program): the source's compiled loader, SCRIPTBASE__init, run by
+;;            Compiler$AOT/load as RT.load runs an embedded one's; a source without one (c2j did
+;;            not compile it, or the program does not hold it) loaded from source as before.
+(ns suite-aot.hook
+  (:import (java.io ByteArrayInputStream InputStreamReader)
+           (arbace.lang Compiler$AOT Compiler$Image RT)))
+
+(defn- path-source
+  "[scriptfile stream] of the source scriptbase (clojure/test_clojure/reader) as RT.load finds it
+  (.ae, then .clj, then .cljc), when it is found on ARBACE_PATH, not embedded; else nil."
+  [^String base]
+  (loop [[x & more] [".ae" ".clj" ".cljc"]]
+    (when x
+      (let [f (str base x)
+            ins (RT/resourceAsStream nil f)]
+        (cond
+          (nil? ins) (recur more)
+          (instance? ByteArrayInputStream ins) (do (.close ins) nil)
+          :else [f ins])))))
+
+(defn- file-name [^String f] (subs f (inc (.lastIndexOf f "/"))))
+
+(defn- hook
+  "The load fn of mode (:record or :compiled) around load, arbace.core/load's root."
+  [mode load]
+  (let [root-directory @#'arbace.core/root-directory
+        check-cyclic-dependency @#'arbace.core/check-cyclic-dependency
+        pending #'arbace.core/*pending-paths*]
+    (fn [& paths]
+      (doseq [^String path paths]
+        (let [^String path (if (.startsWith path "/") path (str (root-directory (ns-name *ns*)) \/ path))
+              base (subs path 1)
+              [f ^java.io.InputStream ins] (path-source base)]
+          (cond
+            (nil? f) (load path)
+            (and (= mode :compiled) (nil? (Compiler$AOT/loader base))) (do (.close ins) (load path))
+            :else
+            (do (check-cyclic-dependency path)
+                (when-not (= path (first @pending))
+                  (push-thread-bindings {pending (conj @pending path)})
+                  (try
+                    (if (= mode :record)
+                      (with-open [r (InputStreamReader. ins "UTF-8")]
+                        (Compiler$Image/load r f (file-name f)))
+                      (do (.close ins)
+                          (Compiler$AOT/load base f (file-name f))))
+                    (finally (pop-thread-bindings)))))))))))
+
+(defn install!
+  "Replaces arbace.core/load by the hook of mode (:record, :compiled)."
+  [mode]
+  (alter-var-root #'arbace.core/load (fn [load] (hook mode load)))
+  mode)
+
+(defn compile!
+  "The units recorded so far compiled by arbace.c2j into directory out (all of them: the
+  runtime's namespaces, prepared before, and the suite's); prints the report as bin/arbace-go's
+  host compile does. True when every source compiled."
+  [out]
+  (require 'arbace.c2j.main)
+  (let [r ((resolve 'arbace.c2j.main/run) out nil)]
+    (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")
+    (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m))
+    (empty? (:failed r))))

@@ -6,11 +6,26 @@
 # only under .tmp/clojure-tests/.
 #
 # Usage: bin/clojure-tests [-j JOBS] [--no-generative|--generative] [NAMESPACE...]
+#        bin/clojure-tests --aot [-j JOBS] [--no-generative|--generative] [NAMESPACE...]
 #        bin/clojure-tests --java-fixtures verify|update|OUT
 #   -j JOBS          parallel test processes (default: number of CPUs)
 #   --no-generative  skip the test.generative phase (upstream's `ant test-generative`)
 #   --generative     run it (the default, with CLOJURE_TESTS_GO too)
 #   NAMESPACE...     run only these test namespaces (the totals then cover only them)
+#   --aot            Clojure's AOT level (doc/FULL-SUPPORT-SURVEY.md, REAP3, RPS4 (a)): the suite
+#                    translated as for CLOJURE_TESTS_GO, its namespaces and test libraries
+#                    prepared and compiled by c2j with the runtime's on the gate's test build
+#                    (bin/arbace-go --gate-build's arbace-tests; the runner's compile mode, the
+#                    suite's sources recorded by test/suite_aot_hook.ae), j2g and bin/build-go
+#                    making the program with the suite's Java fixtures (as the test build:
+#                    RUN/aot-build/arbace-aot, cached by the key of what it is made from; j2g's
+#                    whole-program run, about 20 GiB: a heavy command), and each test namespace run
+#                    on it, loaded through its compiled loader (the hook's compiled mode), against
+#                    test/arbace-go-aot-results.edn (CLOJURE_TESTS_RUN defaults to aot); then the
+#                    two levels compared (the runner's levels mode: what passes at one level and
+#                    not at the other, against test/arbace-go-results.edn, and both levels' totals
+#                    against upstream's, test/baseline-results.edn: a finding, RPS16, not a
+#                    regression)
 #   --java-fixtures OUT  only convert the suite's Java fixtures (test/java), renamed as for
 #                    the Go build, into Java forms under OUT with repr/java (bin/repr-java, on
 #                    javac's tool executable, its only host since JN6; run CLOJURE_TESTS_RUN,
@@ -109,6 +124,15 @@ if [ "${1:-}" = --java-fixtures ]; then
   fi
   unset CLOJURE_TESTS_GO
   set --
+fi
+# --aot: the compiled suite's program is the Go build under test (built in step 3)
+aot=
+if [ "${1:-}" = --aot ]; then
+  aot=1; shift
+  : "${CLOJURE_TESTS_RUN:=aot}" "${CLOJURE_TESTS_EXPECTED:=$root/test/arbace-go-aot-results.edn}"
+  CLOJURE_TESTS_GO=$base/$CLOJURE_TESTS_RUN/aot-build/arbace-aot
+  CLOJURE_TESTS_AOT=$root/test/suite_aot_hook.ae
+  export CLOJURE_TESTS_AOT CLOJURE_TESTS_EXPECTED
 fi
 # rename mode (the Clojure under test is Arbace's): the Go build and the Java fixtures
 rename=
@@ -366,10 +390,58 @@ while read -r coord sha; do
 done <<< "$deps"
 flock -u 9
 
+# aot_build: --aot's program (step 3): the gate's executables (bin/arbace-go --gate-build), the
+# suite compiled on its test build (the runner's compile mode), j2g on its executable (the
+# checkout's runtime, as bin/diffcheck's), bin/build-go; cached in RUN/aot-build by the key of the
+# executables, the translated suite and libraries, the hook, the runner, the reference (its skipped
+# tests are not compiled) and this script
+aot_build() {
+  local ab=$work/aot-build gexe texe key t0 overlay
+  mkdir -p "$ab"
+  (cd "$root" && bin/arbace-go --gate-build) > "$ab/gate-build.log" 2>&1 \
+    || { tail -20 "$ab/gate-build.log"; echo "clojure-tests --aot: bin/arbace-go --gate-build failed" >&2; return 1; }
+  gexe=$root/.tmp/arbace-go-gate/amd64/arbace texe=$root/.tmp/arbace-go-gate/amd64/arbace-tests
+  key=$( { sha256sum < "$gexe"; sha256sum < "$texe"
+           (cd "$suite" && find test src -type f | LC_ALL=C sort | xargs -d '\n' sha256sum)
+           echo "$repr_clojure_stamp $deps"
+           (cd "$root" && sha256sum test/suite_aot_hook.ae test/run_clojure_tests.clj bin/clojure-tests "$expected"
+            find test/suite-go test/java-fixtures -type f | LC_ALL=C sort | xargs -d '\n' sha256sum); } \
+         | sha256sum | cut -c1-64)
+  if [ -x "$ab/arbace-aot" ] && [ "$(cat "$ab/key" 2>/dev/null)" = "$key" ]; then
+    echo "   the cached program (key ${key:0:12})"; return 0
+  fi
+  rm -rf "$ab/key" "$ab/arbace-aot" "$ab/aot" "$ab/j2g"
+  host_run "$runner" list test "$expected" > "$ab/namespaces.txt" || return 1
+  t0=$(date +%s)
+  (cd "$suite" && env GOGC=${GOGC:-400} ARBACE_COMPILE=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 \
+     ARBACE_PREPARE="$ab/compile.image" ARBACE_PATH="$(go_path):$root" ARBACE_AOT_ROOT="$root" TMPDIR=$work/tmp \
+     "$texe" "$runner" compile "$ab/namespaces.txt" "$ab/aot" "$expected") > "$ab/compile.log" 2>&1 \
+    || { tail -20 "$ab/compile.log"; echo "clojure-tests --aot: the compiling failed ($ab/compile.log)" >&2; return 1; }
+  grep '^aot:' "$ab/compile.log" | head -40
+  echo "   compiled: $(( $(date +%s) - t0 )) s"
+  t0=$(date +%s)
+  (cd "$root" && J2G_GO_EXE=$gexe REPR_GO_EXE=$gexe bin/j2g --program --input "$root/test/java-fixtures/forms" \
+     --input "$ab/aot" --out "$ab/j2g") > "$ab/j2g.log" 2>&1 \
+    || { tail -20 "$ab/j2g.log"; echo "clojure-tests --aot: j2g failed ($ab/j2g.log)" >&2; return 1; }
+  grep '^j2g: .*classes analyzed\|^j2g: error' "$ab/j2g.log" | head -20
+  echo "   j2g: $(( $(date +%s) - t0 )) s"
+  t0=$(date +%s)
+  overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
+  (cd "$root" && REPR_GO_EXE=$gexe bin/build-go --line-file --arch amd64 --work "$ab/work" -o "$ab/arbace-aot" \
+     --print-cache "$root/.tmp/repr-go-print-cache" --overlay "$overlay" --root "$root/x509roots" "$ab/j2g/prog") \
+    > "$ab/build.log" 2>&1 \
+    || { grep -v '^==' "$ab/build.log" | tail -20; echo "clojure-tests --aot: the build failed ($ab/build.log)" >&2; return 1; }
+  echo "   build-go: $(( $(date +%s) - t0 )) s"
+  echo "$key" > "$ab/key"
+}
+
 # 3. build
 rm -rf "${work:?}/classes" "${suite:?}/target" "${work:?}/tmp"
 mkdir -p "$work/classes" "$suite/target/test-classes" "$work/tmp"
-if [ -n "$go_exe" ]; then
+if [ -n "$aot" ]; then
+  step "[$run] the suite compiled by c2j with the runtime's namespaces, the program built by j2g and bin/build-go ($go_exe)"
+  aot_build || exit 1
+elif [ -n "$go_exe" ]; then
   step "[$run] nothing to compile: the Go build holds its namespaces, prepared in its image"
 else
   step "[$run] AOT-compile the Clojure under test into $work/classes"
@@ -436,9 +508,14 @@ if [ $generative = 1 ] && [ ${#only[@]} -eq 0 ]; then
 fi
 
 # 7. report
-if [ -n "$go_exe" ]; then
-  host_run "$runner" report "$work/out" "$expected" "$work/results.edn" "$(tr '\n' ' ' < "$work/selected.txt")"
-else
+if [ -n "$aot" ]; then
+  status=0
+  host_run "$runner" report "$work/out" "$expected" "$work/results.edn" "$(tr '\n' ' ' < "$work/selected.txt")" || status=$?
+  step "[$run] the two levels: $work/results.edn (AOT) against test/arbace-go-results.edn (eval)"
+  host_run "$runner" levels "$work/results.edn" "$root/test/arbace-go-results.edn" "$root/test/baseline-results.edn" \
+    | tee "$work/levels.txt"
+  exit $status
+elif [ -n "$go_exe" ]; then
   (cd "$suite" && java -cp "$(test_cp)" $main_class "$runner" report "$work/out" "$expected" \
     "$work/results.edn" "$(tr '\n' ' ' < "$work/selected.txt")")
 fi
