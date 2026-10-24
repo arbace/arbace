@@ -40,7 +40,12 @@ repr_java_platform() {
 }
 
 repr_java_provenance_same() {
-  cmp -s <(grep -v '^ *:host ' "$1") <(grep -v '^ *:host ' "$2")
+  local a b st
+  a=$(mktemp) && b=$(mktemp) || return 1
+  grep -v '^ *:host ' "$1" > "$a"; grep -v '^ *:host ' "$2" > "$b"
+  cmp -s "$a" "$b"; st=$?
+  rm -f "$a" "$b"
+  return $st
 }
 
 repr_java_reader_hash() {

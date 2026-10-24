@@ -11,7 +11,11 @@
   bin/repr-java front-check (bin/lib/repr-java/front-check) runs, on the tools' host:
     -m arbace.repr.java.split summary OUT DIR...   the split of the runs under the DIRs, by corpus
                                                    (a DIR's name), into OUT/split.edn and OUT/split.md
-    -m arbace.repr.java.split static               the static split, printed"
+    -m arbace.repr.java.split static               the static split, printed
+    -m arbace.repr.java.split attr OUT KNOWN DIR...  the native provider's outcomes (\"As built: JN9a\")
+                                                   under the DIRs, by corpus, into OUT/attr.edn and
+                                                   OUT/attr.md; the different facts beyond KNOWN's
+                                                   ({:CORPUS {:facts {fact n}}}) printed"
   (:require [arbace.java.io :as io]
             [arbace.pprint :as pp]
             [arbace.string :as str])
@@ -118,10 +122,17 @@
         "scope" :scope "enter" :declarations "annotations" :declarations "flow" :flow "names" :members
         "types" :types "overload" :overload "infer" :inference :types)))
 
+(defn- fact? "A fact id (not the native provider's mark :provider/javac)." [id] (not= "provider" (namespace id)))
+
 (defn max-tier
   "The highest tier of the facts `ids` (:syntax for none); :unowned for a list no frame wrote."
   [ids]
-  (if (= ids :unowned) :unowned (reduce #(if (> (tier-rank %2) (tier-rank %1)) %2 %1) :syntax (map tier-of ids))))
+  (if (= ids :unowned) :unowned (reduce #(if (> (tier-rank %2) (tier-rank %1)) %2 %1) :syntax (map tier-of (filter fact? ids)))))
+
+(defn native-list?
+  "With the native provider (\"As built: JN9a\"): did its writing ask no fact that javac answered?"
+  [ids]
+  (and (not= ids :unowned) (not (contains? (set ids) :provider/javac))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; The summary of the measured runs
@@ -148,12 +159,14 @@
         by-tier (reduce (fn [m [ids n]] (update m (max-tier ids) (fnil + 0) n)) {} lists)
         needs (reduce (fn [m [ids n]]
                         (if (= ids :unowned) m
-                            (reduce #(update %1 %2 (fnil + 0) n) m (distinct (map tier-of ids)))))
+                            (reduce #(update %1 %2 (fnil + 0) n) m (distinct (map tier-of (filter fact? ids))))))
                       {} lists)
         by-class (reduce (fn [m [ids n]]
                            (if (= ids :unowned) m
-                               (reduce #(update %1 %2 (fnil + 0) n) m (distinct (map #(keyword (namespace %)) ids)))))
+                               (reduce #(update %1 %2 (fnil + 0) n) m (distinct (map #(keyword (namespace %)) (filter fact? ids))))))
                          {} lists)
+        native (reduce (fn [a [ids n]] (if (native-list? ids) (+ a n) a)) 0 lists)
+        marked? (some (fn [[ids _]] (and (not= ids :unowned) (contains? (set ids) :provider/javac))) lists)
         nodes (reduce + (vals frames))
         node-tiers (reduce (fn [m [[tg ids] n]] (update-in m [tg (max-tier ids)] (fnil + 0) n)) {} frames)
         node-syntax (reduce + (for [[[_ ids] n] frames :when (empty? ids)] n))]
@@ -164,6 +177,7 @@
      :lists-by-tier (into {} by-tier)
      :lists-needing (into {} needs)
      :lists-needing-class (into (sorted-map) by-class)
+     :lists-native (when marked? native)
      :nodes nodes
      :nodes-asking-nothing node-syntax
      :nodes-by-tag (into (sorted-map) node-tiers)}))
@@ -185,6 +199,9 @@
     (line "| nodes converted (frames) | " (str/join " | " (map #(fmt (:nodes (sums %))) cs)) " |")
     (line "| of them asking no attribution | " (str/join " | " (map #(let [s (sums %)] (str (fmt (:nodes-asking-nothing s)) " (" (pct (:nodes-asking-nothing s) (:nodes s)) ")")) cs)) " |")
     (line "| lists written | " (str/join " | " (map #(fmt (:lists (sums %))) cs)) " |")
+    (when (some #(:lists-native (sums %)) cs)
+      (line "| lists the native provider wrote alone | "
+            (str/join " | " (map #(let [s (sums %)] (if-let [n (:lists-native s)] (str (fmt n) " (" (pct n (:lists s)) ")") "-")) cs)) " |"))
     (line "")
     (line "Lists by the highest tier their writing asked (cumulative share in parentheses):")
     (line "")
@@ -294,6 +311,48 @@
         :attr-calls (frequencies (mapcat (fn [i] (map #(str "attr/" %) (:attr i))) info))}))))
 
 ;;; ------------------------------------------------------------------------------------------
+;;; The native provider's check ("As built: JN9a"): the outcomes of the facts it answered
+
+(defn- attr-files [dir]
+  (for [^File f (file-seq (io/file dir))
+        :when (and (.isFile f) (= "repr-java-attr.edn" (.getName f)))]
+    f))
+
+(defn attr-summarize
+  "The native provider's outcomes under `dir` (its runs' repr-java-attr.edn): {:facts {fact {outcome
+  n}} :tiers {tier {outcome n}} :totals {outcome n} :diffs [...]}."
+  [dir]
+  (let [rs (map read-edn (attr-files dir))
+        facts (apply merge-with (partial merge-with +) {} (map :facts rs))]
+    {:facts (into (sorted-map) facts)
+     :tiers (reduce (fn [m [f o]] (update m (tier-of f) #(merge-with + % o))) {} facts)
+     :totals (apply merge-with + {} (vals facts))
+     :diffs (vec (take 2000 (mapcat :diffs rs)))}))
+
+(defn attr-markdown
+  "The provider's outcomes by corpus ({corpus summary}) as Markdown tables: by tier and by fact."
+  [sums]
+  (let [cs (sort (keys sums))
+        sb (StringBuilder.)
+        line (fn [& xs] (.append sb (apply str xs)) (.append sb "\n"))
+        cell (fn [o] (str (fmt (get o :equal 0)) " / " (fmt (get o :differ 0)) " / " (fmt (get o :declined 0))))]
+    (line "Facts answered natively, equal / different / declined (left to javac), by tier:")
+    (line "")
+    (line "| tier | " (str/join " | " cs) " |")
+    (line "|---|" (str/join "" (repeat (count cs) "---:|")))
+    (doseq [t tiers :when (some #(get-in sums [% :tiers t]) cs)]
+      (line "| " (name t) " | " (str/join " | " (map #(cell (get-in sums [% :tiers t])) cs)) " |"))
+    (line "| total | " (str/join " | " (map #(cell (get-in sums [% :totals])) cs)) " |")
+    (line "")
+    (line "By fact:")
+    (line "")
+    (line "| fact | tier | " (str/join " | " cs) " |")
+    (line "|---|---|" (str/join "" (repeat (count cs) "---:|")))
+    (doseq [f (sort (distinct (mapcat #(keys (get-in sums [% :facts])) cs)))]
+      (line "| `" (subs (str f) 1) "` | " (name (tier-of f)) " | " (str/join " | " (map #(cell (get-in sums [% :facts f])) cs)) " |"))
+    (str sb)))
+
+;;; ------------------------------------------------------------------------------------------
 
 (defn -main [cmd & args]
   (case cmd
@@ -304,5 +363,20 @@
                 (spit (io/file out "split.edn") (with-out-str (pp/pprint sums)))
                 (spit (io/file out "split.md") md)
                 (print md))
-    "static" (pp/pprint (static-split converter-files)))
+    "static" (pp/pprint (static-split converter-files))
+    "attr" (let [[out known & dirs] args
+                 known (read-edn known)
+                 sums (into (sorted-map) (for [d dirs] [(.getName (io/file d)) (attr-summarize d)]))
+                 md (attr-markdown sums)]
+             (io/make-parents (io/file out "attr.edn"))
+             (spit (io/file out "attr.edn") (with-out-str (pp/pprint sums)))
+             (spit (io/file out "attr.md") md)
+             (print md)
+             ;; the known differences: {:corpus {:facts {fact n}}}
+             (doseq [[c s] sums
+                     [f o] (:facts s)
+                     :let [n (get o :differ 0)
+                           k (get-in known [(keyword c) :facts f] 0)]
+                     :when (pos? n)]
+               (println (str "attr: " c ": " f " " n " different" (if (> n k) (str ", beyond the known " k) " (known)"))))))
   (flush))

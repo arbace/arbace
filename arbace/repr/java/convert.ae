@@ -600,8 +600,8 @@
            (or (= "MTH" ok) (= "VAR" ok) (not (#{"TYP" "PCK"} ok)))))))
 
 (defn- ident [env t]
-  (let [sym (attr/sym t :ident)
-        nm (str (tr/f t :name))]
+  (let [nm (str (tr/f t :name))
+        sym (when-not (#{"this" "super"} nm) (attr/sym t :ident))]
     (cond
       (= nm "this") (r (or (:this env) 'this) (erasure (attr/type-of t :types/this)))
       (= nm "super") (r 'super (erasure (attr/type-of t :types/this)))
@@ -618,10 +618,9 @@
       :else (do (note! :warn/odd-ident) (r (symbol nm) (erasure (attr/type-of t :types/ident)))))))
 
 (defn- type-expr?
-  "True when expression tree `t` names a type (or package), not a value."
+  "True when expression tree `t` names a type (or package), not a value (JLS 6.5; attr's, JFS71)."
   [t]
-  (let [s (attr/symbol-of t :type-expr)]
-    (and s (#{"TYP" "PCK"} (jt/kind s)))))
+  (attr/type-expr? t))
 
 (defn- qual-type
   "The erased type javac uses for qualifier expression `q`."
@@ -643,8 +642,8 @@
     (erased-form env t)))
 
 (defn- select [env t]
-  (let [sym (attr/sym t :select)
-        nm (str (tr/f t :name))
+  (let [nm (str (tr/f t :name))
+        sym (when-not (#{"class" "this" "super"} nm) (attr/sym t :select))
         q (tr/f t :selected)
         qtype #(attr/type-of q :names/type-tree)]
     (cond
@@ -1153,8 +1152,8 @@
   (distinct
    (for [x (tree-seq tr/tree? tree-children t)
          :when (tr/is? x :IDENT)
-         :let [sym (attr/sym x :capture)]
-         :when (and sym (= "VAR" (jt/kind sym)) (local? sym) (mutable? sym))
+         :let [sym (attr/local-of x :capture)]
+         :when (and sym (mutable? sym))
          :let [f (get (:locals env) sym)]
          :when f]
      f)))
@@ -1179,8 +1178,11 @@
   (let [trees (all-trees e)
         effects? (some #(#{:APPLY :NEWCLASS :ASSIGN :LAMBDA :REFERENCE} (tr/tag %)) trees)
         effects? (or effects? (some tr/assignop? trees))
-        uses (frequencies (keep #(when (#{:IDENT :SELECT} (tr/tag %)) (attr/sym % :hoist))
-                                trees))
+        ;; the uses of a candidate's variable: a local's by scope (JFS71), a field's, only without
+        ;; effects, by the symbols of the names
+        uses (delay (frequencies (keep #(when (#{:IDENT :SELECT} (tr/tag %)) (attr/sym % :hoist))
+                                       trees)))
+        local-uses (fn [loc] (count (filter #(and (tr/is? % :IDENT) (identical? loc (attr/local-of % :hoist))) trees)))
         cands (volatile! #{})]
     (letfn [(walk [x]
               (cond
@@ -1192,9 +1194,10 @@
                 (do (when (#{:POSTINC :POSTDEC} (tr/tag x))
                       (let [a (tr/skip-parens (tr/f x :arg))]
                         (when (tr/is? a :IDENT)
-                          (let [sym (attr/sym a :hoist)]
-                            (when (and (= 1 (uses sym))
-                                       (or (local? sym) (not effects?)))
+                          (if-let [loc (attr/local-of a :hoist)]
+                            (when (= 1 (local-uses loc))
+                              (vswap! cands conj x))
+                            (when (and (not effects?) (= 1 (@uses (attr/sym a :hoist))))
                               (vswap! cands conj x))))))
                     (run! walk (tree-children x)))))]
       (walk e))
@@ -1879,7 +1882,7 @@
                 (let [e (tr/skip-parens (tr/f s :expr))]
                   (when (and (tr/is? e :ASSIGN)
                              (tr/is? (tr/f e :lhs) :IDENT)
-                             (identical? sym (attr/sym (tr/f e :lhs) :assigned)))
+                             (identical? sym (attr/local-of (tr/f e :lhs) :assigned)))
                     (tr/f e :rhs))))))
             (chain [s]
               (if (tr/is? s :IF)
@@ -1895,7 +1898,7 @@
   (let [found (volatile! false)]
     (letfn [(walk [x]
               (when (and (not @found) (tr/tree? x))
-                (when (and (tr/is? x :IDENT) (identical? sym (attr/sym x :refers)))
+                (when (and (tr/is? x :IDENT) (identical? sym (attr/local-of x :refers)))
                   (vreset! found true))
                 (run! walk (tree-children x))))]
       (walk t))
@@ -2099,7 +2102,7 @@
   (let [found (volatile! #{})]
     (letfn [(lhs-sym [e]
               (let [e (tr/skip-parens e)]
-                (when (tr/is? e :IDENT) (attr/sym e :assigned))))
+                (when (tr/is? e :IDENT) (attr/local-of e :assigned))))
             (walk [x]
               (when (tr/tree? x)
                 (cond
@@ -2160,7 +2163,7 @@
                 (tr/f e :arg))
           lhs (some-> lhs tr/skip-parens)]
       (when (tr/is? lhs :IDENT)
-        [(attr/sym lhs :assigned) e]))))
+        [(attr/local-of lhs :assigned) e]))))
 
 (defn- recur-style? [t]
   (let [init (tr/f t :init)
@@ -2300,8 +2303,8 @@
       (tr/is? e :LITERAL)
       (let [x (literal env e)]
         (if (seq? (:f x)) (.constValue ^Type (et)) (:f x)))
-      (and (or (tr/is? e :IDENT) (tr/is? e :SELECT))
-           (let [s (attr/symbol-of e :label)] (and s (= "VAR" (jt/kind s)))))
+      ;; a constant label's name is a variable's (JFS71: no symbol asked)
+      (or (tr/is? e :IDENT) (tr/is? e :SELECT))
       (let [x (ex env e)] (if (seq? (:f x)) (.constValue ^Type (et)) (:f x)))
       :else (let [v (.constValue ^Type (et))]
               (note! :switch/folded-label)
@@ -2517,7 +2520,9 @@
                                         sf (vary-meta sf update ::f/m (fn [items] (vec (remove #{:mutable} items))))]
                                     [(conj bv sf init) env'])
                                   (let [x (ex env res)
-                                        nm (or (some-> (attr/symbol-of res :resource) .name str) "r")
+                                        ;; the resource's variable's name (JFS71: its tree's)
+                                        rn (tr/skip-parens res)
+                                        nm (or (when (#{:IDENT :SELECT} (tr/tag rn)) (some-> (tr/tree-name rn) str)) "r")
                                         s (if (and (symbol? (:f x)) (not (namespace (:f x)))) (:f x) (gensym! env nm))]
                                     [(conj bv s (:f x)) env])))
                               [[] env] resources)
@@ -3056,7 +3061,7 @@
                 *local-names* (into #{} (for [d (type-decls u)
                                               x (tree-seq tr/tree? tree-children d)
                                               :when (and (tr/is? x :VARDEF)
-                                                         (some-> (attr/sym x :local-names) local?))]
+                                                         (attr/local-of x :local-names))]
                                           (str (tr/f x :name))))]
         (let [env (base-env opts)
               pkg (attr/packge u)

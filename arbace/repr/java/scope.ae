@@ -1,0 +1,593 @@
+;; The walk reimplements, for the native trees, the scoping of jdk26u (https://github.com/openjdk/jdk26u at
+;; baf63fbe42b8758448fee570a9d9bb914272d259)'s src/jdk.compiler/share/classes/com/sun/tools/javac/comp/
+;; Attr.java (the environments its visit methods make: visitBlock, visitVarDef, visitIf, the loops,
+;; handleSwitch and addVars, visitLambda, visitTry; the match bindings of MatchBindingsComputer.java
+;; and addBindings2Scope; findJumpTarget), and Flow.java's AliveAnalyzer (aliveAfter, breaksToTree) as
+;; far as the bindings' scopes need them, whose notice follows (LICENSE.md, "OpenJDK (jdk26u)"):
+;;
+;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+(ns arbace.repr.java.scope
+  "The native attribution's scope tier and its walk of a unit (doc/classes/JAVA-FRONTEND-SURVEY.md,
+  \"As built: JN9a\"): the native parser's tree of a compilation unit walked with javac's
+  environments (arbace.repr.java.decls), recording for its nodes what the scope and declarations
+  tiers answer without javac:
+
+    a name (IDENT, SELECT)        :local, the local variable it denotes (an entry), or :nonlocal
+    a variable declaration        :local (an entry) or :field (a field symbol)
+    a method, a class declaration :method, :class (their symbols)
+    break, continue, yield        :target, the statement it leaves (a native node)
+    a type tree                   :type, its type (a delay; nil when inferred: a diamond)
+    an annotation                 :compound (a delay)
+    a declaration                 :mods-flags (its modifiers' flags as Enter leaves them)
+    this, super, C.this, C.super  :this-type (a delay); X.class :class-literal; a literal :literal
+    a qualifier                   :type-expr? (a delay: does it name a type or a package)
+    a record pattern              :record-type (a delay; nil when inferred)
+    the unit                      :package
+
+  A local variable entry is {:sk :local :name n :decl VARDEF :kind :local|:param|:lambda-param
+  |:binding|:catch|:resource|:for-each}. `walk-unit` returns the answers, an IdentityHashMap from
+  the native nodes to maps of them."
+  (:require [arbace.repr.java.decls :as d])
+  (:import [java.util IdentityHashMap]))
+
+(set! *warn-on-reflection* true)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Answers
+
+(def ^:dynamic ^IdentityHashMap *ans* nil)
+
+(defn- put! [node k v]
+  (when node
+    (.put *ans* node (assoc (.get *ans* node) k v))))
+
+(defn- local-entry [d kind env]
+  (d/sym {:sk :local :name (:name d) :decl d :kind kind :env env}))
+
+(defn- bind-local [env e] (d/bind env (:name e) e))
+
+(defn- bind-all [env es] (reduce bind-local env es))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The walk's context: {:jumps (jump ...) :class c :static? b}, a jump {:tree :kind :label}
+
+(declare w-expr w-stmt w-stmts w-type w-class w-annotations w-pattern alive? w-cases)
+
+(defn- jump-target
+  "Attr.findJumpTarget: the statement break, continue or yield `t` leaves (a native node)."
+  [ctx t]
+  (let [js (:jumps ctx)
+        lbl (:label t)]
+    (case (:tag t)
+      :YIELD (:tree (first (filter #(= :switch-expr (:kind %)) js)))
+      :BREAK (if lbl
+               (:tree (first (filter #(and (= :label (:kind %)) (= lbl (:label %))) js)))
+               (:tree (first (filter #(#{:loop :switch} (:kind %)) (take-while #(not= :switch-expr (:kind %)) js)))))
+      :CONTINUE (if lbl
+                  (when-let [l (:tree (first (filter #(and (= :label (:kind %)) (= lbl (:label %))) js)))]
+                    (loop [b (:body l)] (if (= :LABELLED (:tag b)) (recur (:body b)) b)))
+                  (:tree (first (filter #(= :loop (:kind %)) js)))))))
+
+(defn- push-jump [ctx tree kind & [label]]
+  (update ctx :jumps conj {:tree tree :kind kind :label label}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Liveness (Flow.AliveAnalyzer, JLS 14.22), for the bindings an if or a loop introduces
+
+(defn- const-true? [env c]
+  (or (nil? c) (= [:boolean 1] (d/const-value env c))))
+
+(defn- breaks-to?
+  "Flow.breaksToTree: is there a break (or a yield, for a switch expression) in `body` whose target
+  is `target`?"
+  [target body]
+  (letfn [(walk [x]
+            (cond
+              (vector? x) (some walk x)
+              (not (map? x)) false
+              (#{:CLASSDEF :LAMBDA} (:tag x)) false
+              (= :BREAK (:tag x)) (identical? target (:target (.get *ans* x)))
+              :else (some (fn [[k v]] (when (and (not (#{:mods} k)) (or (map? v) (vector? v))) (walk v))) x)))]
+    (boolean (walk body))))
+
+(defn alive?
+  "Can statement `t` complete normally (JLS 14.22, as Flow's AliveAnalyzer)? `env` evaluates
+  constant conditions."
+  [env t]
+  (case (:tag t)
+    (:RETURN :THROW :BREAK :CONTINUE :YIELD) false
+    :BLOCK (every? #(alive? env %) (:stats t))
+    :IF (if (:elsepart t) (or (alive? env (:thenpart t)) (alive? env (:elsepart t))) true)
+    (:WHILELOOP :FORLOOP) (or (not (const-true? env (:cond t))) (breaks-to? t (:body t)))
+    :DOLOOP (or (and (alive? env (:body t)) (not (const-true? env (:cond t))))
+                (breaks-to? t (:body t))
+                ;; a continue makes the condition reachable
+                (and (not (const-true? env (:cond t))) (not (alive? env (:body t)))
+                     (letfn [(cont? [x] (cond (vector? x) (some cont? x) (not (map? x)) false
+                                              (#{:CLASSDEF :LAMBDA} (:tag x)) false
+                                              (= :CONTINUE (:tag x)) (identical? t (:target (.get *ans* x)))
+                                              :else (some (fn [[k v]] (when (or (map? v) (vector? v)) (cont? v))) x)))]
+                       (boolean (cont? (:body t))))))
+    :FOREACHLOOP true
+    :LABELLED (or (alive? env (:body t)) (breaks-to? t (:body t)))
+    :SWITCH (let [cases (:cases t)
+                  labels (mapcat :labels cases)
+                  uncond? (some #(= :DEFAULTCASELABEL (:tag %)) labels)
+                  exh? (some #(or (= :PATTERNCASELABEL (:tag %))
+                                  (and (= :CONSTANTCASELABEL (:tag %)) (= :LITERAL (get-in % [:expr :tag]))
+                                       (= :BOT (get-in % [:expr :typetag]))))
+                             labels)]
+              (boolean
+               (or (and (not uncond?) (not exh?))
+                   (empty? cases)
+                   (breaks-to? t cases)
+                   (if (= :RULE (:caseKind (last cases)))
+                     (some (fn [c] (let [b (:body c)]
+                                     (if (#{:BLOCK :THROW :EXEC :IF :RETURN :SWITCH :TRY :YIELD :WHILELOOP :DOLOOP
+                                            :FORLOOP :FOREACHLOOP :SYNCHRONIZED :LABELLED :BREAK :CONTINUE} (:tag b))
+                                       (alive? env b)
+                                       true)))
+                           cases)
+                     (every? #(alive? env %) (:stats (last cases)))))))
+    :TRY (and (or (alive? env (:body t)) (some #(alive? env (:body %)) (:catchers t)))
+              (or (nil? (:finalizer t)) (alive? env (:finalizer t))))
+    :SYNCHRONIZED (alive? env (:body t))
+    true))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Names and types
+
+(defn- w-name
+  "An expression name IDENT `t`: what Resolve.findVar finds in `env`."
+  [env ctx t]
+  (let [n (:name t)]
+    (if (#{"this" "super"} n)
+      (do (put! t :nonlocal true) (put! t :this-type [(keyword n) (:class ctx)]))
+      ;; a name this tier cannot resolve (a lookup through a class whose supertype is the types
+      ;; tier's) is left without an answer: javac's
+      (when-let [[k x] (try [(d/find-var env n)] (catch Throwable _ nil))]
+        (let [[k x] k]
+          (if (= k :local) (put! t :local x) (put! t :nonlocal true)))))))
+
+(defn- w-type-names
+  "The names inside type tree `t`: not locals; its annotations."
+  [env t]
+  (when (map? t)
+    (case (:tag t)
+      (:IDENT :SELECT) (do (put! t :nonlocal true)
+                           (when (= :SELECT (:tag t)) (w-type-names env (:selected t))))
+      (:ANNOTATED_TYPE) (do (w-annotations env (:annotations t)) (w-type-names env (:underlyingType t)))
+      (:TYPE_ANNOTATION :ANNOTATION) (w-annotations env [t])
+      (doseq [[k v] t :when (not= k :mods)]
+        (cond (map? v) (w-type-names env v)
+              (vector? v) (run! #(w-type-names env %) v))))))
+
+(defn w-type
+  "Type tree `t` in `env`: its type (Attr.attribType), its names."
+  [env t]
+  (when t
+    (put! t :type (delay (d/type-of-tree env t)))
+    (w-type-names env t)))
+
+(defn w-annotations
+  "Annotation trees `as` in `env`: their values (Annotate), their names."
+  [env as]
+  (doseq [a as]
+    (put! a :compound (delay (d/annotation-compound env a (= :TYPE_ANNOTATION (:tag a)))))
+    (w-type-names env (:annotationType a))
+    (doseq [arg (:args a)]
+      (if (= :ASSIGN (:tag arg))
+        (do (put! (:lhs arg) :nonlocal true) (w-expr env {:jumps ()} (:rhs arg)))
+        (w-expr env {:jumps ()} arg)))))
+
+(defn- type-name?
+  "Does expression `q` (a qualifier) name a type or a package (JLS 6.5, as Attr's KindSelector VAL |
+  TYP for a qualifier: TreeInfo.symbol's kind TYP or PCK)?"
+  [env q]
+  (let [q (loop [q q] (if (= :PARENS (:tag q)) (recur (:expr q)) q))]
+    (if (#{:IDENT :SELECT} (:tag q))
+      (let [r (d/resolve-qualified env q #{:val :typ})]
+        (boolean (or (:c r) (:pck r) (:tv r))))
+      false)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Expressions: walked in `env`, returning the match bindings {:t [entry ...] :f [entry ...]}
+
+(def ^:private none {:t [] :f []})
+
+(defn- w-args [env ctx ts] (doseq [t ts] (w-expr env ctx t)))
+
+(defn- w-class-body-new
+  "The anonymous class of NEWCLASS `t` in `env`."
+  [env ctx t]
+  (when-let [cd (:def t)]
+    (let [encl (:class ctx)
+          c (d/local-class env cd encl (str (:flat encl) "$anon@" (:pos cd))
+                           {:newclass t :static-context? (:static? ctx)})]
+      (put! cd :class c)
+      (put! cd :mods-flags (long (get-in cd [:mods :flags])))
+      (w-class ctx c))))
+
+(defn w-expr
+  "Expression `t` in `env`; its match bindings."
+  [env ctx t]
+  (if-not (map? t)
+    none
+    (case (:tag t)
+      :IDENT (do (w-name env ctx t) none)
+      :SELECT (let [n (:name t) q (:selected t)]
+                (put! t :nonlocal true)
+                (cond
+                  (= n "class") (do (w-type env q) (put! t :class-literal (delay (d/type-of-tree env q))))
+                  (#{"this" "super"} n) (do (w-type env q) (put! t :this-type [(keyword n) (:class ctx) (delay (:c (d/resolve-qualified env q #{:typ})))]))
+                  :else (let [tn? (try (type-name? env q) (catch Throwable _ ::unknown))]
+                          (when-not (= tn? ::unknown) (put! q :type-expr? (delay tn?)))
+                          (if (true? tn?)
+                            (w-type-names env q)
+                            (w-expr env ctx q))))
+                none)
+      :LITERAL (do (put! t :literal (:typetag t)) none)
+      :PARENS (w-expr env ctx (:expr t))
+      :APPLY (let [m (:meth t)]
+               (run! #(w-type env %) (:typeargs t))
+               (cond
+                 (= :IDENT (:tag m))
+                 (do (put! m :nonlocal true)
+                     (when (#{"this" "super"} (:name m)) (put! m :this-type [(keyword (:name m)) (:class ctx)])))
+                 ;; o.super(...): a qualified superclass constructor call, o an expression
+                 (and (= :SELECT (:tag m)) (#{"super" "this"} (:name m))
+                      (not (true? (try (type-name? env (:selected m)) (catch Throwable _ false)))))
+                 (w-expr env ctx (:selected m))
+                 :else (w-expr env ctx m))
+               (when (= :SELECT (:tag m)) (put! m :nonlocal true))
+               (w-args env ctx (:args t))
+               none)
+      :NEWCLASS (do (w-expr env ctx (:encl t))
+                    (run! #(w-type env %) (:typeargs t))
+                    (if (:encl t)
+                      (w-type-names env (:clazz t))
+                      (w-type env (:clazz t)))
+                    (w-args env ctx (:args t))
+                    (w-class-body-new env ctx t)
+                    none)
+      :NEWARRAY (do (w-type env (:elemtype t))
+                    (w-args env ctx (:dims t))
+                    (w-args env ctx (:elems t))
+                    (w-annotations env (:annotations t))
+                    (run! #(w-annotations env %) (:dimAnnotations t))
+                    none)
+      :TYPECAST (do (w-type env (:clazz t)) (w-expr env ctx (:expr t)) none)
+      :TYPETEST (do (w-expr env ctx (:expr t))
+                    (let [p (:pattern t)]
+                      (if (#{:BINDINGPATTERN :RECORDPATTERN :ANYPATTERN} (:tag p))
+                        {:t (w-pattern env ctx p) :f []}
+                        (do (w-type env p) none))))
+      :CONDEXPR (let [b (w-expr env ctx (:cond t))]
+                  (w-expr (bind-all env (:t b)) ctx (:truepart t))
+                  (w-expr (bind-all env (:f b)) ctx (:falsepart t))
+                  none)
+      :AND (let [a (w-expr env ctx (:lhs t))
+                 b (w-expr (bind-all env (:t a)) ctx (:rhs t))]
+             {:t (into (:t a) (:t b)) :f []})
+      :OR (let [a (w-expr env ctx (:lhs t))
+                b (w-expr (bind-all env (:f a)) ctx (:rhs t))]
+            {:t [] :f (into (:f a) (:f b))})
+      :NOT (let [b (w-expr env ctx (:arg t))] {:t (:f b) :f (:t b)})
+      :LAMBDA (let [ps (:params t)
+                    es (vec (for [p ps]
+                              (let [e (local-entry p :lambda-param env)]
+                                (w-annotations env (get-in p [:mods :annotations]))
+                                (when (and (:vartype p) (not= :VAR (:declKind p)))
+                                  (w-type env (:vartype p)))
+                                (put! p :local e)
+                                (put! p :mods-flags (long (get-in p [:mods :flags])))
+                                e)))
+                    env' (bind-all env es)
+                    ctx' (assoc ctx :jumps ())
+                    b (:body t)]
+                (if (= :BLOCK (:tag b)) (w-stmt env' ctx' b) (w-expr env' ctx' b))
+                none)
+      :REFERENCE (let [q (:expr t)]
+                   (run! #(w-type env %) (:typeargs t))
+                   (if (true? (try (type-name? env q) (catch Throwable _ false)))
+                     (w-type env q)
+                     (if (#{:TYPEAPPLY :TYPEARRAY :ANNOTATED_TYPE} (:tag q))
+                       (w-type env q)
+                       (w-expr env ctx q)))
+                   none)
+      :SWITCH_EXPRESSION (do (w-expr env ctx (:selector t))
+                             (put! t :switch true)
+                             (w-cases env (push-jump ctx t :switch-expr) (:cases t) t)
+                             none)
+      :ASSIGN (do (w-expr env ctx (:lhs t)) (w-expr env ctx (:rhs t)) none)
+      :INDEXED (do (w-expr env ctx (:indexed t)) (w-expr env ctx (:index t)) none)
+      (:POS :NEG :COMPL :PREINC :PREDEC :POSTINC :POSTDEC) (do (w-expr env ctx (:arg t)) none)
+      :ERRONEOUS none
+      (if (and (:lhs t) (:rhs t))
+        (do (w-expr env ctx (:lhs t)) (w-expr env ctx (:rhs t)) none)
+        none))))
+
+(defn w-pattern
+  "Pattern `p` in `env`: the bindings it introduces (entries)."
+  [env ctx p]
+  (case (:tag p)
+    :BINDINGPATTERN (let [v (:var p)
+                          e (local-entry v :binding env)]
+                      (w-annotations env (get-in v [:mods :annotations]))
+                      (when (and (:vartype v) (not= :VAR (:declKind v))) (w-type env (:vartype v)))
+                      (put! v :local e)
+                      (put! v :mods-flags (long (get-in v [:mods :flags])))
+                      (if (= "_" (:name v)) [] [e]))
+    :RECORDPATTERN (do (w-type env (:deconstructor p))
+                       (put! p :record-type (delay (let [t (d/type-of-tree env (:deconstructor p))]
+                                                     (when-not (and (= :class (:k t)) (d/raw? t)) t))))
+                       (vec (mapcat #(w-pattern env ctx %) (:nested p))))
+    :ANYPATTERN []
+    []))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Statements: walked in `env`, returning the env of the statements after them
+
+(defn- w-local-var
+  "Local variable declaration `d` of kind `kind` in `env`: its entry (bound in its own initializer)."
+  [env ctx d kind]
+  (let [e (local-entry d kind env)
+        env' (bind-local env e)]
+    (w-annotations env (get-in d [:mods :annotations]))
+    (when (and (:vartype d) (not= :VAR (:declKind d))) (w-type env (:vartype d)))
+    (put! d :local e)
+    (put! d :mods-flags (long (get-in d [:mods :flags])))
+    (w-expr env' ctx (:init d))
+    [e env']))
+
+(defn- after-bindings
+  "addBindings2Scope: `env` with the bindings `bs` that statement `s` introduces, unless a break to
+  an immediately enclosing labeled statement exists."
+  [env ctx s bs]
+  (if (empty? bs)
+    env
+    (let [labels (take-while (fn [j] (= :label (:kind j))) (:jumps ctx))
+          ;; the labeled statements whose body is s, directly or through labels
+          ls (loop [inner s [j & more] labels out []]
+               (if (and j (identical? inner (:body (:tree j))))
+                 (recur (:tree j) more (conj out (:tree j)))
+                 out))]
+      (if (some (fn [l] (breaks-to? l (:body l))) ls)
+        env
+        (bind-all env bs)))))
+
+(defn w-cases
+  "The cases of switch `sw` (a statement or an expression) in `env` (Attr.handleSwitch): a case's
+  pattern bindings in its guard and body; the local variables of a case's statements in scope in
+  the cases after it (addVars)."
+  [env ctx cases sw]
+  (loop [[c & more :as cs] (seq cases) senv env]
+    (when cs
+      (let [bindings (vec (mapcat (fn [l]
+                                    (case (:tag l)
+                                      :CONSTANTCASELABEL (do (w-expr senv ctx (:expr l)) [])
+                                      :PATTERNCASELABEL (w-pattern senv ctx (:pat l))
+                                      []))
+                                  (:labels c)))
+            g (when (:guard c) (w-expr (bind-all senv bindings) ctx (:guard c)))
+            cenv (bind-all senv (into bindings (:t g)))]
+        (if (= :RULE (:caseKind c))
+          (let [b (:body c)]
+            ;; a rule's body and its statements are copies of one tree (the parser's one node, frozen
+            ;; twice): both walked
+            (w-stmts cenv ctx (:stats c))
+            (if (#{:BLOCK :THROW :EXEC :IF :RETURN :SWITCH :TRY :YIELD :WHILELOOP :DOLOOP :FORLOOP :FOREACHLOOP :SYNCHRONIZED :LABELLED} (:tag b))
+              (w-stmt cenv ctx b)
+              (w-expr cenv ctx b))
+            (recur more senv))
+          (let [_ (w-stmts cenv ctx (:stats c))
+                ;; addVars: the case's local variables, by their entries
+                senv (reduce (fn [e s] (if (= :VARDEF (:tag s)) (bind-local e (:local (.get *ans* s))) e))
+                             senv (:stats c))]
+            (recur more senv)))))))
+
+(defn w-stmts
+  "Statements `ss` in sequence in `env`; the env after them."
+  [env ctx ss]
+  (reduce (fn [e s] (w-stmt e ctx s)) env ss))
+
+(defn w-stmt
+  "Statement `s` in `env`; the env of the statements after it in its block."
+  [env ctx s]
+  (if-not (map? s)
+    env
+    (case (:tag s)
+      :BLOCK (do (w-stmts env ctx (:stats s)) env)
+      :VARDEF (second (w-local-var env ctx s :local))
+      :CLASSDEF (let [encl (:class ctx)
+                      c (d/local-class env s encl (str (:flat encl) "$" (:name s) "@" (:pos s))
+                                       {:static-context? (:static? ctx)})]
+                  (w-class ctx c)
+                  (d/bind env (:name s) c))
+      :EXEC (do (w-expr env ctx (:expr s)) env)
+      :IF (let [b (w-expr env ctx (:cond s))
+                th (:thenpart s) el (:elsepart s)]
+            (w-stmt (bind-all env (:t b)) ctx th)
+            (when el (w-stmt (bind-all env (:f b)) ctx el))
+            ;; liveness matters only to the bindings the condition introduces
+            (if (and (empty? (:t b)) (empty? (:f b)))
+              env
+              (let [at (alive? env th)
+                    ae (if el (alive? env el) true)]
+                (after-bindings env ctx s (cond (and at (not ae)) (:t b)
+                                                (and ae (not at)) (:f b)
+                                                :else [])))))
+      :WHILELOOP (let [b (w-expr env ctx (:cond s))]
+                   (w-stmt (bind-all env (:t b)) (push-jump ctx s :loop) (:body s))
+                   (if (and (seq (:f b)) (not (breaks-to? s (:body s))))
+                     (after-bindings env ctx s (:f b))
+                     env))
+      :DOLOOP (do (w-stmt env (push-jump ctx s :loop) (:body s))
+                  (let [b (w-expr env ctx (:cond s))]
+                    (if (and (seq (:f b)) (not (breaks-to? s (:body s))))
+                      (after-bindings env ctx s (:f b))
+                      env)))
+      :FORLOOP (let [e1 (w-stmts env ctx (:init s))
+                     b (if (:cond s) (w-expr e1 ctx (:cond s)) none)
+                     e2 (bind-all e1 (:t b))
+                     ctx' (push-jump ctx s :loop)]
+                 (w-stmts e2 ctx' (:step s))
+                 (w-stmt e2 ctx' (:body s))
+                 (if (and (seq (:f b)) (not (breaks-to? s (:body s))))
+                   (after-bindings env ctx s (:f b))
+                   env))
+      :FOREACHLOOP (do (w-expr env ctx (:expr s))
+                       (let [[_ e'] (w-local-var env ctx (:var s) :for-each)]
+                         (w-stmt e' (push-jump ctx s :loop) (:body s)))
+                       env)
+      :LABELLED (w-stmt env (push-jump ctx s :label (:label s)) (:body s))
+      :SWITCH (do (w-expr env ctx (:selector s))
+                  (w-cases env (push-jump ctx s :switch) (:cases s) s)
+                  env)
+      :SYNCHRONIZED (do (w-expr env ctx (:lock s)) (w-stmt env ctx (:body s)) env)
+      :TRY (let [renv (reduce (fn [e r]
+                                (if (= :VARDEF (:tag r))
+                                  (second (w-local-var e ctx r :resource))
+                                  (do (w-expr e ctx r) e)))
+                              env (:resources s))]
+             (w-stmt renv ctx (:body s))
+             (doseq [c (:catchers s)]
+               (let [p (:param c)
+                     vt (:vartype p)]
+                 (when (= :TYPEUNION (:tag vt))
+                   (run! #(w-type env %) (:alternatives vt))
+                   (w-type-names env vt)
+                   ;; the parameter's TYPE_USE annotations on the first alternative's type
+                   (when-let [a0 (first (:alternatives vt))]
+                     (put! a0 :type (delay (d/with-annotations (d/type-of-tree env a0)
+                                                               (d/type-use-annotations env (get-in p [:mods :annotations])))))))
+                 (let [[_ e'] (w-local-var env ctx p :catch)]
+                   (w-stmt e' ctx (:body c)))))
+             (when (:finalizer s) (w-stmt env ctx (:finalizer s)))
+             env)
+      (:BREAK :CONTINUE) (do (put! s :target (jump-target ctx s)) env)
+      :YIELD (do (w-expr env ctx (:value s)) (put! s :target (jump-target ctx s)) env)
+      (:RETURN :THROW) (do (w-expr env ctx (:expr s)) env)
+      :ASSERT (do (w-expr env ctx (:cond s)) (w-expr env ctx (:detail s)) env)
+      :SKIP env
+      env)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Classes
+
+(defn- member-of [c tree kind]
+  (first (filter #(identical? tree (:tree %)) (get (d/members c) kind))))
+
+(defn w-class
+  "Class `c`'s declaration (its tree) walked: its header in its base env, its members in its body's."
+  [ctx c]
+  (let [cd (:tree c)
+         benv (d/base-env c)
+         cenv (d/class-env c)
+         ctx (assoc ctx :class c :jumps ())]
+     (put! cd :class c)
+     (put! cd :mods-flags (d/mods-flags c))
+     (w-annotations benv (get-in cd [:mods :annotations]))
+     (doseq [tp (:typarams cd)]
+       (w-annotations benv (:annotations tp))
+       (run! #(w-type benv %) (:bounds tp)))
+     (w-type benv (:extending cd))
+     (run! #(w-type benv %) (:implementing cd))
+     (run! #(w-type benv %) (:permitting cd))
+     (doseq [m (:defs cd)]
+       (case (:tag m)
+         :VARDEF
+         (let [f (member-of c m :fields)
+               static? (d/has? (d/field-flags f) d/STATIC)
+               fenv (assoc cenv :static? (or static? (d/interface? c)))]
+           (put! m :field f)
+           (put! m :mods-flags (let [fl (long (get-in m [:mods :flags]))
+                                     fl (if (d/has? fl d/RECORD) (bit-and fl (bit-not d/VARARGS)) fl)]
+                                 ;; Attr's FIELD_INIT_TYPE_ANNOTATIONS_QUEUED on a field with an initializer,
+                                 ;; on the modifiers its declaration's declarators share (int a = 1, b;)
+                                 (if (some #(and (= :VARDEF (:tag %)) (= (:start %) (:start m)) (:init %)) (:defs cd))
+                                   (bit-or fl (bit-shift-left 1 53))
+                                   fl)))
+           (w-annotations cenv (get-in m [:mods :annotations]))
+           (w-type cenv (:vartype m))
+           (w-expr fenv (assoc ctx :static? (or static? (d/interface? c))) (:init m)))
+         :METHODDEF
+         (let [ms (member-of c m :methods)
+               static? (d/has? (get-in m [:mods :flags]) d/STATIC)
+               menv (d/method-env ms)
+               mctx (assoc ctx :static? static?)]
+           (put! m :method ms)
+           (put! m :mods-flags (long (get-in m [:mods :flags])))
+           (w-annotations menv (get-in m [:mods :annotations]))
+           (doseq [tp (:typarams m)]
+             (w-annotations menv (:annotations tp))
+             (run! #(w-type menv %) (:bounds tp)))
+           (w-type menv (:restype m))
+           (run! #(w-type menv %) (:thrown m))
+           (when-let [rp (:recvparam m)]
+             (w-annotations menv (get-in rp [:mods :annotations]))
+             (w-type menv (:vartype rp))
+             (put! rp :local (local-entry rp :receiver menv))
+             (put! rp :mods-flags (long (get-in rp [:mods :flags]))))
+           (let [penv (reduce (fn [e p]
+                                (let [en (local-entry p :param e)]
+                                  (w-annotations menv (get-in p [:mods :annotations]))
+                                  (w-type menv (:vartype p))
+                                  (put! p :local en)
+                                  (put! p :mods-flags (long (get-in p [:mods :flags])))
+                                  (bind-local e en)))
+                              menv (:params m))]
+             (when (:defaultValue m) (w-expr menv mctx (:defaultValue m)))
+             (when-let [b (:body m)] (w-stmt penv mctx b))))
+         :BLOCK
+         (let [static? (d/has? (:flags m) d/STATIC)]
+           (w-stmt (assoc cenv :static? static?) (assoc ctx :static? static?) m))
+         :CLASSDEF
+         (let [mc (d/member-class c (:name m))]
+           (when mc (w-class ctx mc)))
+         nil))))
+
+(defn walk-unit
+  "The answers for native unit `uctx` (arbace.repr.java.decls/enter-unit!'s): an IdentityHashMap
+  node -> {fact answer}."
+  [uctx]
+  (binding [*ans* (IdentityHashMap.)]
+    (let [tree (:tree uctx)
+          env (d/unit-env uctx)]
+      (put! tree :package (:pkg uctx))
+      (doseq [x (:defs tree)]
+        (case (:tag x)
+          :PACKAGEDEF (do (w-annotations env (:annotations x)) (w-type-names env (:pid x)))
+          (:IMPORT :MODULEIMPORT) (w-type-names env (or (:qualid x) (:module x)))
+          :CLASSDEF (w-class {:jumps ()} (get @(:toplevel uctx) (:name x)))
+          :MODULEDEF (do (put! x :module (d/tree-name-of (:qualId x)))
+                         (w-annotations env (get-in x [:mods :annotations]))
+                         (doseq [dr (:directives x)]
+                           (case (:tag dr)
+                             :USES (w-type env (:qualid dr))
+                             :PROVIDES (do (w-type env (:serviceName dr)) (run! #(w-type env %) (:implNames dr)))
+                             (w-type-names env dr))))
+          nil)))
+    *ans*))

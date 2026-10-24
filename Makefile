@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
   gate gate-full suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-divergences alpine-check clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-divergences alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -95,7 +95,7 @@ generated-check: ## the generated files as their generators write them: arbace/l
 	bin/generated-check
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
-VERIFY := jdk-verify edge-verify javac-verify javac-classes repr-java-check repr-java-parse-check repr-java-front-check fixtures-verify tamago-verify toolchain-verify \
+VERIFY := jdk-verify edge-verify javac-verify javac-classes repr-java-check repr-java-parse-check repr-java-front-check repr-java-attr-check fixtures-verify tamago-verify toolchain-verify \
   box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip repr-java-text \
   repr-clojure-roundtrip
 verify: $(VERIFY) ## all of the below, one after another
@@ -110,12 +110,14 @@ javac-classes: ## javac on Arbace (the tool build) compiles the baseline, sample
 	bin/javac-vendor classes
 repr-java-check: ## repr/java's converter checks on javac's tool executable: the baseline, the samples, the module sample (bin/repr-java check)
 	bin/repr-java check
-repr-java-jdk: ## jdk26u's 68 modules read by repr/java on javac's tool executable, no failures; long, not in verify (bin/repr-java check --jdk)
+repr-java-jdk: ## jdk26u's 68 modules read by repr/java on javac's tool executable, no failures, the forms as test/repr/java/expected/jdk26u.sha256; long, not in verify (bin/repr-java check --jdk)
 	bin/repr-java check --jdk
 repr-java-parse-check: ## repr/java's native parser: every file of the samples, the baseline, jdk/forms' and javac's sources, jdk26u's 68 modules, mutants and jdk26u's tests parsed to javac on Arbace's trees, positions included (bin/repr-java parse-check)
 	bin/repr-java parse-check
 repr-java-front-check: ## repr/java's converter on the native parser's trees, javac's attribution by position: its forms equal to javac's trees' over the samples, the baseline, the jdk corpus and javac's sources, and the split measured (bin/repr-java front-check)
 	bin/repr-java front-check
+repr-java-attr-check: ## repr/java's native attribution provider: the scope and declarations tiers answered without javac (the platform's class files read natively), each fact equal to javac on Arbace's, the forms still javac's trees', over the samples, the baseline, the jdk corpus and javac's sources (bin/repr-java attr-check)
+	bin/repr-java attr-check
 fixtures-verify: ## the suite's Java fixtures, on javac's tool executable (bin/clojure-tests --java-fixtures verify)
 	bin/clojure-tests --java-fixtures verify
 tamago-verify: ## tamago/goroot and goos; the guest from them (bin/tamago-vendor verify, check)

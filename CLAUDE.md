@@ -136,7 +136,16 @@ Prior art:
     node of its tag and position), `read --front javac|native|both` (`--split`: the attribution facts asked and
     what each output list needed, `arbace.repr.java.split`); `bin/repr-java front-check`: the samples, the
     baseline, the jdk corpus and javac's sources (`--corpus all`: jdk26u's 68 modules) converted from both
-    trees, the forms equal byte for byte, the split summed ("As built: JFS66 (b)"), and Java forms → Java (`print`, `arbace.repr.java.print`; the
+    trees, the forms equal byte for byte, the split summed ("As built: JFS66 (b)"); since JN9a a native
+    attribution provider behind `attr` for the scope and declarations tiers, `arbace.repr.java.nattr` over
+    `arbace.repr.java.decls` (classes, members, flags, declared types, names, annotation values: Enter,
+    TypeEnter, MemberEnter, Resolve's lookups, ConstFold, Annotate; the platform's class files read by
+    `arbace.repr.java.classfile`, no javac) and `arbace.repr.java.scope` (locals, pattern bindings, jump
+    targets), `read --front native|both --attr native`, each native answer checked against javac's;
+    `bin/repr-java attr-check` (front-check `--attr native`): the facts equal fact by fact and the forms
+    still javac's trees', against `test/repr/java/attr-check-known.edn` ("As built: JN9a"); `bin/repr-java
+    check --jdk` compares jdk26u's forms with their hashes, `test/repr/java/expected/jdk26u.sha256`
+    (`--update` rewrites them, JFS72 (b)), and Java forms → Java (`print`, `arbace.repr.java.print`; the
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →
     forms → Java → forms at the levels forms, ae (the converted text) and classes (javac's, byte
     for byte; `bin/repr-java roundtrip`, corpora baseline, samples and jdk/forms, references in
@@ -309,7 +318,8 @@ Prior art:
   --java-fixtures verify` (the verifies compare the provenance but its host, which names the tool
   that wrote it, JFS32), `bin/repr-java parse-check` (the native parser's trees equal to javac on
   Arbace's, JN8), `bin/repr-java front-check` (the converter's forms from the native trees equal to
-  javac's trees', JFS66 (b)); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
+  javac's trees', JFS66 (b)), `bin/repr-java attr-check` (the native provider's facts equal to javac on
+  Arbace's, JN9a); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
   `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
