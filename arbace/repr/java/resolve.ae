@@ -7,6 +7,7 @@
   (:require [arbace.classes.analyze :as a]
             [arbace.classes.env :as env]
             [arbace.repr.java.jtypes :as jt]
+            [arbace.repr.java.model :as md]
             [arbace.string :as str])
   (:import [com.sun.tools.javac.code Type Type$ArrayType Symbol Symbol$ClassSymbol
             Symbol$MethodSymbol Flags]))
@@ -15,19 +16,22 @@
 ;;; javac symbols as the compiler's class infos (arbace.classes.env)
 
 (defn internal
-  "The internal name of class symbol `c` (not renamed: resolution is on the source's names)."
-  [^Symbol$ClassSymbol c]
-  (str/replace (str (.flatName c)) "." "/"))
+  "The internal name of class symbol `c` (not renamed: resolution is on the source's names), of
+  either model (arbace.repr.java.model)."
+  [c]
+  (if (instance? Symbol c)
+    (str/replace (str (.flatName ^Symbol$ClassSymbol c)) "." "/")
+    (str/replace (md/flat-name c) "." "/")))
 
 (defn desc
-  "The descriptor of the erasure of javac type `t`."
-  [^Type t]
-  (let [t (jt/erasure t)]
-    (case (jt/tag-name t)
+  "The descriptor of the erasure of type `t` (of either model)."
+  [t]
+  (let [t (md/erasure t)]
+    (case (md/tag-name t)
       "BOOLEAN" "Z" "BYTE" "B" "SHORT" "S" "CHAR" "C" "INT" "I" "LONG" "J" "FLOAT" "F"
       "DOUBLE" "D" "VOID" "V"
-      "ARRAY" (str "[" (desc (.elemtype ^Type$ArrayType t)))
-      "CLASS" (str "L" (internal (.tsym t)) ";")
+      "ARRAY" (str "[" (desc (md/elemtype t)))
+      "CLASS" (str "L" (internal (if (instance? Type t) (.-tsym ^Type t) (md/tsym t))) ";")
       "BOT" :null
       (throw (ex-info (str "No descriptor for type " t) {:type (str t)})))))
 
@@ -53,7 +57,14 @@
 ;; is resolved among javac's own symbols alone (`find-class`), and a class info is made only from a
 ;; symbol that completes (`class-info`): each answer is a function of the name and the platform.
 
-(defn- module-of [^Symbol c] (.modle (.packge c)))
+(defn- module-of
+  "The module of class `c`'s package (javac's module symbol; a native class's by its module's name in
+  javac's Symtab)."
+  [c]
+  (if (instance? Symbol c)
+    (.modle (.packge ^Symbol c))
+    (let [m (if (:src c) (:module (:reg c)) (:module c))]
+      (if m (.getModule jt/*syms* (jt/jname m)) (.-unnamedModule jt/*syms*)))))
 
 (defn- canonical
   "javac's own symbol for class symbol `c`: c itself when it is a class of the run's sources (Check's
@@ -170,7 +181,7 @@
   (cond
     (= t :null) {:op :const :type :null :val nil}
     (= t :lit-int) (when (seq vals) (literal-node vals))
-    (instance? Type t) {:op :local :type (desc t)}
+    (md/type? t) {:op :local :type (desc t)}
     :else nil))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -181,14 +192,17 @@
   of static type `site`), :static (class `site`) or :ctor (of class `site`), from class `from`
   (symbols), method name `mname`, argument stubs `args`. Returns [descriptor varargs?], or nil
   when the compiler finds no method or an ambiguous call."
-  [kind ^Symbol$ClassSymbol from site mname args]
+  [kind from site mname args]
   (when (every? some? args)
     (binding [env/*compile-set* compile-set
               *module* (module-of from)]
       (let [fname (internal from)
-            sname (if (instance? Type site)
+            sname (cond
+                    (instance? Type site)
                     (if (= "ARRAY" (jt/tag-name site)) "java/lang/Object" (internal (.tsym (jt/erasure site))))
-                    (internal site))]
+                    (md/type? site)
+                    (if (md/array? site) "java/lang/Object" (internal (md/tsym (md/erasure site))))
+                    :else (internal site))]
         (try
           (let [cands (case kind
                         :instance (a/instance-candidates fname sname mname)
@@ -205,8 +219,8 @@
 (defn pin-needed?
   "True unless the compiler, given the call without param-tags, chooses javac's method `m` in
   the same arity mode (`varargs?`: the variable arguments are written unpacked)."
-  [kind from site ^Symbol$MethodSymbol m args varargs?]
-  (let [[d va] (choice kind from site (str (.name m)) args)
-        ps (.getParameterTypes (.erasure m jt/*types*))
+  [kind from site m args varargs?]
+  (let [[d va] (choice kind from site (md/sname m) args)
+        ps (md/erased-params m)
         want (str "(" (apply str (map desc ps)) ")")]
     (not (and d (= (params-part d) want) (= va (boolean varargs?))))))
