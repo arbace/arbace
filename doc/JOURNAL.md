@@ -1542,3 +1542,7 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - Proposals JCS16-JCS25 (the survey's "As built: JC1"); JCS30 on are JC4's.
 - The agent's slips: one throwaway command used `pgrep -f` (as a no-op operand, nothing stopped),
   one used a process substitution `source <(...)` to try a function; neither in a committed script.
+- The coordinator relayed the user's JCS33 (a) (JC4's): once JC1 and JC4 are both on main, the
+  interpreted level loads a test file by file with JC4's source lookup, the one-`do` load kept for
+  comparison. Built as a switch, `bin/java-check --load do|files` (`JAVA_CHECK_LOAD`), `do` the
+  default until then; without the lookup `files` passes 412 of the essential 428.

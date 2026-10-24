@@ -3,14 +3,16 @@
 ;; actions run, on the executable under test (not the tools' host: the runtime must be the
 ;; checkout's). A script, run as
 ;;
-;;   EXE test/java/run.ae ROOT MAIN [-DNAME=VALUE]... -- [ARG...]
+;;   EXE test/java/run.ae [--load do|files] ROOT MAIN [-DNAME=VALUE]... -- [ARG...]
 ;;
 ;; ROOT is the test's forms as repr/java wrote them (a namespace file per Java package, PKG.ae,
 ;; loading its class files PKG/C.ae). The classes are defined as one top-level do per package
 ;; (JCS8 (a), until JC4's source lookup): the package's namespace form, then each class file's
 ;; other forms (in-ns, import) in the order the namespace file loads them, then every defclass of
 ;; the package in one do, entered together before any body is analyzed (SPEC §9.2, 2), as javac
-;; compiles a test's files together. Packages are defined in the order of their imports of each
+;; compiles a test's files together; with --load files (JCS33 (a), once JC4's source lookup is on
+;; main), each package's namespace is required as the REPL loads it, file by file (ROOT on
+;; ARBACE_PATH, bin/java-check's --load). Packages are defined in the order of their imports of each
 ;; other (a package another one imports first), the rest by name. Then MAIN's main is called with
 ;; the ARGs, the -D properties set first (jtreg's test.src, test.classes). An uncaught exception
 ;; is printed as the JVM's launcher prints it ("Exception in thread \"main\" " and the trace) and
@@ -80,6 +82,9 @@
               nxt (or (first ready) (first left))]
           (recur (conj done nxt) (remove #{nxt} left)))))))
 
+(defn- require! [pkgs]
+  (doseq [[n] (order pkgs)] (require n)))
+
 (defn- define! [pkgs]
   (doseq [[n ns-forms cfs] (order pkgs)]
     (binding [*ns* *ns*]
@@ -92,12 +97,13 @@
         (in-ns n)
         (when (seq classes) (eval (cons 'do classes)))))))
 
-(defn -main [root main & more]
-  (let [[props [_ & args]] (split-with #(not= "--" %) more)]
+(defn -main [& argv]
+  (let [[mode [root main & more]] (if (= "--load" (first argv)) [(second argv) (drop 2 argv)] ["do" argv])
+        [props [_ & args]] (split-with #(not= "--" %) more)]
     (doseq [p props :let [[_ k v] (re-matches #"-D([^=]+)=(.*)" p)] :when k]
       (System/setProperty k v))
     (when-not
-      (try (define! (packages (File. ^String root))) true
+      (try ((if (= mode "files") require! define!) (packages (File. ^String root))) true
            (catch Throwable e
              (.println System/err (str "java-check: load-failed: " (one-line (cause e))))
              (.flush System/err)

@@ -880,6 +880,12 @@ keys (`test/java/` is in neither `gate_key` nor the javac tool's key).
   runs differ, JCS3 (a)), else `fail` (the status), `differ` (stdout), `timeout` (20 s an action, the
   definition included), `unread`; `classes`, `bin/repr-java javac` with the reference's options, the
   class files' digest against the JDK javac's.
+- *The load* (JCS8 (a), and the user's JCS33 (a) of JC4): `--load do|files` (`JAVA_CHECK_LOAD`), `do`
+  the default as built; `files` requires each package's namespace as the REPL loads it, file by
+  file, the forms' root on `ARBACE_PATH`. On the essential subset without JC4's source lookup,
+  `files` passes 412 of 428 (16 a class of a later file: SPEC §9.2, 3). Once JC1 and JC4 are both on
+  main, `files` becomes the default and the references are recorded again; `do` stays the
+  comparison mode.
 - *Results and classes*: `.tmp/java-check/results.tsv`, against `test/java/check-LEVEL.edn` (as
   recorded, new or changed, now passing; a test passing there and not now is a regression; `--record`
   writes them, a partial run updating its tests' lines); every test not passing in a class of
