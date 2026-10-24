@@ -1600,3 +1600,25 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   in jdk26u 62.7% of the model's reads native, 99.4% of the native answers' reads; attr-check 5%
   slower. Proposals JFS79, JFS90-JFS94 (JFS80-JFS89 left to the j2g branch); JN9b re-estimated 2-3
   days. No shipped code changed; no re-seed.
+
+## 2026-10-24: JFS75 (b) and JFS65 (b) merged; JFS79-JFS82, JFS90-JFS94 decided (the user)
+
+- JFS75 (b) (branch `java-model`, merged `6663972b`; its own entry above, "JFS75 (b) built"): the
+  converter's model behind `arbace.repr.java.model`; in jdk26u 62.7% of the converter's model reads
+  native, 99.4% of those of the native tiers' answers; 6,660,391 facts equal, none different; the
+  forms of every corpus byte for byte; attr-check 5% slower. No shipped code changed.
+- JFS65 (b) (branch `j2g-array-casts` from `317927c0`, merged `407ed654`; doc/classes/JAVA-FRONTEND-SURVEY.md,
+  "As built: JFS65 (b)"): j2g's checked casts and `instanceof` of array types as jrt's type switch
+  (`go/arbace/jrt/array.ae`: `IntArray_Cast` and kin, `ObjectArray_Cast`, `RefArray_Cast` with
+  `Class.isInstance` out of line for covariance; each fast path within gc's inline budget),
+  `arbace.j2g.model/array-test`, `J2g_CastArray` removed; the native parser in javac's tool over
+  java.base 49.0 → 37.3 s (−24%), hinted-array workloads through the evaluator −19% to −22%, general
+  ones unchanged; the fixture `FxArrays` (21 array types, 18 values); `test/j2g/check.ae` requiring
+  `arbace.pprint` (it failed to load on stage 0). The shipped program changed: the batched re-seed.
+  The agents' slips: process substitutions, a `pgrep -f` in a wait loop, two error reports in `/tmp`
+  (removed). Their cited scratch kept in main's `.tmp/jfs75-scratch/`, `.tmp/jfs65-scratch/`; the
+  worktrees removed (the disk 82% → 68%). The essential gate on `407ed654` passed (30m04s).
+- Decided (the user): JFS79 (b), JFS80 (a), JFS81 (a), JFS82 (a), JFS90 (b), JFS91 (a), JFS92 ((a) until
+  a javac-free read is the aim), JFS93 (a), JFS94 (b). JN9b started (branch `java-jn9b` from
+  `407ed654`), beside REAP3 (`reap3-clojure-aot`) and REAP4 (`reap4-clojure-eval`), the user's choice;
+  RPS18 (b) added SL5 (the suite's `metadata` and `java.javadoc`) to REAP4.
