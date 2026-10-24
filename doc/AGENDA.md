@@ -9,7 +9,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`3ab3b603…`, 2026-10-22), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`54f77c90…`, 2026-10-24), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
@@ -167,8 +167,8 @@ The current state of the work. This file is rewritten as things change. For the 
     independent of the javac run's history, the known list empty, no committed form changed; `tree.ae`'s
     notice; JFS72 (b) decided); `bin/gate --full`'s failures fixed (2026-10-24): the edge (GP8's `OpenOption`), the round trip's
     stale cached originals (not the reader), `nosplit.go` by a per-program limit; `bin/j2g-edge verify`
-    in the essential gate. Running: the re-seed, and JN9a with JFS71 and JFS72
-    (`java-frontend-jn9a`). The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
+    in the essential gate. The seed remade (`54f77c90…`) and verified. Running: JN9a with JFS71
+    and JFS72 (`java-frontend-jn9a`). The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
   - staging shared with Futamura's F7 (G16);

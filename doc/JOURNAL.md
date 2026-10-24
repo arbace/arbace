@@ -1363,3 +1363,15 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   check in gc's words: the branch `go-pragmas` from `8a879ec0`, proposals from GPS60.
 - GPS56 (c), the whole tree converted in the box on the Mac, waits for the user's next Mac session.
 - Both beside the re-seed's fixpoint and JN9a, each at 8 jobs or fewer.
+
+## 2026-10-24: seed 54f77c90
+
+- The fixpoint at `bd3ba0bb` in `.tmp/worktrees/reseed` (host `2e4ce3e9…` != G1; G1 = G2 = G3 =
+  `c17d6ce8…`, 151,605,408 bytes), beside the essential gate on main: the uncommitted gate changes are
+  not the program's. `ARBACE_SEED_GO_BUILD=…/reseed/target/arbace-go/fixpoint/g3 bin/seed --make` on
+  main: `54f77c90…` (18,419,044 bytes, 1,990 files), committed at `fde09d4c` on `950f16a4`.
+  `bin/seed --verify` (at `950f16a4`) passed: the same tree (`acdbf054…`) and archive; stage 0 = G1 =
+  G2 = G3 = `696be4b3…`. The executables' hashes differ from the worktree's G3 by the version map
+  alone (`:describe`, `:commit`: built at another commit); the program printed is the same.
+- It carries GP8's `arbace.box.convert`, GP7's forms-check fix, JFS58's and GP8's edges, and the
+  provenance moved by JN8, JFS66 (b) and JFS70.
