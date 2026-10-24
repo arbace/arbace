@@ -25,6 +25,13 @@
                          JFS66 (b)\"): the attribution facts the converter asks and what each
                          output list needed, into OUT/repr-java-split.edn (of the native
                          conversion when there is one)
+      --attr A           with --front native or both, who answers the native trees' attribution:
+                         javac (the default), javac on Arbace by position; native, the native
+                         provider for the scope and declarations tiers (arbace.repr.java.nattr,
+                         \"As built: JN9a\": arbace.repr.java.decls, arbace.repr.java.scope, the
+                         platform's class files) and javac for the rest, each native answer
+                         checked against javac's, the outcomes by fact and the first differences
+                         into OUT/repr-java-attr.edn (of the native conversion)
 
   bin/repr-java read-jdk [options] OUT MODULE SRC [PATH...]
     The same for a module of the JDK itself (java.base: jdk/, bin/jrt-convert), attributed with
@@ -38,6 +45,8 @@
             [arbace.repr.java.full :as full]
             [arbace.repr.java.parse :as parse]
             [arbace.repr.java.attr :as attr]
+            [arbace.repr.java.decls :as decls]
+            [arbace.repr.java.nattr :as nattr]
             [arbace.edn :as edn]
             [arbace.java.io :as io]
             [arbace.pprint :as pp]
@@ -93,13 +102,14 @@
 
 (defn- convert-one
   "Convert javac's attributed unit `cu`, its own tree or (native?) the native parser's tree of its
-  text with attribution by position; measured with `split?`. A unit, or a failure."
-  [^com.sun.tools.javac.tree.JCTree$JCCompilationUnit cu full native? split? stats]
+  text with attribution by position (`nunit` its native unit, entered, when the native provider
+  answers: `check` and `diffs` its outcomes' atoms); measured with `split?`. A unit, or a failure."
+  [^com.sun.tools.javac.tree.JCTree$JCCompilationUnit cu full native? split? stats & [nunit check diffs]]
   (let [src (.getName (.getSourceFile cu))]
     (try
       (let [t0 (System/nanoTime)
             opts (if native?
-                   (let [n (parse/parse (javac/source-text cu) src)
+                   (let [n (if nunit (:tree nunit) (parse/parse (javac/source-text cu) src))
                          idx (attr/index n cu)]
                      (swap! stats #(-> % (update :index/nodes (fnil + 0) (:nodes idx))
                                        (update :index/misses (fnil + 0) (count (:misses idx)))
@@ -113,7 +123,16 @@
                      {:full full :tree n :index idx})
                    {:full full})
             u (binding [attr/*measure* split?
-                        attr/*counts* (when split? stats)]
+                        attr/*counts* (when split? stats)
+                        attr/*provider* (when nunit
+                                          (try (nattr/provider nunit (:index opts) check diffs)
+                                               (catch Throwable e
+                                                 ;; the walk failed: javac answers this unit
+                                                 (swap! check update-in [:nattr/walk :differ] (fnil inc 0))
+                                                 (swap! diffs conj {:fact :nattr/walk :file src
+                                                                    :native (str (.getName (class e)) ": " (.getMessage e))
+                                                                    :trace (vec (take 8 (filter #(re-find #"arbace" %) (map str (.getStackTrace e)))))})
+                                                 nil)))]
                 (cv/convert-unit cu opts))]
         (assoc u :source src :ms (quot (- (System/nanoTime) t0) 1000000)))
       (catch Throwable e
@@ -121,28 +140,58 @@
          :error (str (.getName (class e)) ": " (.getMessage e))
          :trace (vec (take 12 (filter #(re-find #"arbace" %) (map str (.getStackTrace e)))))}))))
 
+(defn- native-units
+  "The native units of javac's `units`, parsed and entered in a registry of the run (javac options
+  `opts`: the source path or the patched module's directories, and the module, are the registry's)."
+  [units opts]
+  (let [{:keys [sp module patch]} (loop [[a b & more :as os] opts acc {}]
+                                    (case a
+                                      nil acc
+                                      ("-sourcepath" "--source-path") (recur more (assoc acc :sp b))
+                                      "--patch-module" (let [i (str/index-of b "=")]
+                                                         (recur more (assoc acc :module (subs b 0 i) :patch (subs b (inc i)))))
+                                      (recur (next os) acc)))
+        dirs (concat (when patch (str/split patch (re-pattern (java.util.regex.Pattern/quote File/pathSeparator))))
+                     (when sp (str/split sp (re-pattern (java.util.regex.Pattern/quote File/pathSeparator)))))
+        trees (mapv (fn [^com.sun.tools.javac.tree.JCTree$JCCompilationUnit cu]
+                      (let [src (.getName (.getSourceFile cu))]
+                        [(parse/parse (javac/source-text cu) src) src]))
+                    units)
+        ;; sources with a module declaration are that module's
+        module (or module (some (fn [[t _]] (some #(when (= :MODULEDEF (:tag %)) (decls/tree-name-of (:qualId %))) (:defs t))) trees))
+        reg (decls/registry {:platform (System/getenv "REPR_JAVA_PLATFORM") :module module :source-dirs dirs})]
+    (mapv (fn [[t src]] (decls/enter-unit! reg {:tree t :file src})) trees)))
+
 (defn convert-units
   "Analyze the Java `files` with javac options `opts` and convert every compilation unit (in mode
   :full with `full`; `front` :javac, :native or :both, the trees the converter reads; measured with
-  `split`). Returns {:units [...] :failures [...] :errors [...] :stats {...}}, with :both also
-  :native, the same of the native trees."
-  [files opts rename & [full front split]]
+  `split`; `attr-native`, the native provider answering the native trees' scope and declarations).
+  Returns {:units [...] :failures [...] :errors [...] :stats {...}}, with :both also :native, the
+  same of the native trees (and with `attr-native` its :attr-check and :attr-diffs)."
+  [files opts rename & [full front split attr-native]]
   (let [front (or front :javac)
         {:keys [units context errors]} (javac/analyze files opts)
         stats (atom {})
-        nstats (atom {})]
+        nstats (atom {})
+        check (atom {})
+        diffs (atom [])]
     (binding [jt/*types* (javac/types context)
               jt/*syms* (javac/symtab context)
               jt/*check* (com.sun.tools.javac.comp.Check/instance context)
               jt/*names* (com.sun.tools.javac.util.Names/instance context)
               jt/*rename* (rename-fn rename)]
-      (let [run (fn [native? split? st]
+      (let [nunits (when (and attr-native (not= front :javac)) (native-units units opts))
+            run (fn [native? split? st]
                   (binding [cv/*stats* st]
-                    (let [results (doall (for [cu units] (convert-one cu full native? split? st)))]
-                      {:units (vec (remove :failure results))
-                       :failures (vec (filter :failure results))
-                       :errors errors
-                       :stats @st})))]
+                    (let [results (doall (map-indexed (fn [i cu]
+                                                        (convert-one cu full native? split? st
+                                                                     (when native? (get nunits i)) check diffs))
+                                                      units))]
+                      (cond-> {:units (vec (remove :failure results))
+                               :failures (vec (filter :failure results))
+                               :errors errors
+                               :stats @st}
+                        (and native? nunits) (assoc :attr-check @check :attr-diffs @diffs)))))]
         (case front
           :javac (run false split stats)
           :native (run true split stats)
@@ -227,12 +276,26 @@
      :lists (into (sorted-map-by #(compare (str %1) (str %2))) (sum :lists))
      :frames (into (sorted-map-by #(compare (str %1) (str %2))) (sum :frames))}))
 
+(defn- attr-report
+  "The native provider's check: {:facts {fact {outcome n}} :diffs [...]}, and a line of its totals."
+  [check diffs]
+  (let [tot (apply merge-with + (vals check))]
+    {:facts (into (sorted-map) check)
+     :totals tot
+     :diffs (vec (take 2000 diffs))}))
+
 (defn finish
-  "Write the converted units, check them, print and write the report (and with `split` the split)."
-  [out files units failures errors stats check t0 & [split]]
+  "Write the converted units, check them, print and write the report (and with `split` the split;
+  with `attr` the native provider's check, {:check :diffs})."
+  [out files units failures errors stats check t0 & [split attr]]
   (when split
     (io/make-parents (io/file out "repr-java-split.edn"))
     (spit (io/file out "repr-java-split.edn") (with-out-str (pp/pprint (split-report units stats)))))
+  (when attr
+    (let [r (attr-report (:check attr) (:diffs attr))]
+      (io/make-parents (io/file out "repr-java-attr.edn"))
+      (spit (io/file out "repr-java-attr.edn") (with-out-str (pp/pprint r)))
+      (println (format "native attribution: %s" (pr-str (:totals r))))))
   (let [written (write-output out units)
         reads (when check (vec (pmap (fn [{:keys [path text]}] (assoc (readable text) :path path)) written)))
         unreadable (vec (filter :core reads))
@@ -265,7 +328,7 @@
     {:failures failures :unreadable unreadable :errors errors}))
 
 (defn convert
-  [out root paths {:keys [rename javac-opts check origins front native-out split]}]
+  [out root paths {:keys [rename javac-opts check origins front native-out split attr]}]
   (let [root (.getCanonicalPath (io/file root))
         paths (if (seq paths)
                 (map #(if (.isAbsolute (io/file %)) % (str root "/" %)) paths)
@@ -276,7 +339,7 @@
         origin-names (when origins (with-open [r (PushbackReader. (io/reader origins))] (binding [*read-eval* false] (read r))))
         t0 (System/nanoTime)
         front (keyword (or front "javac"))
-        r (convert-units files (into ["-sourcepath" root] javac-opts) rename *full* front split)
+        r (convert-units files (into ["-sourcepath" root] javac-opts) rename *full* front split (= attr "native"))
         origin (fn [units]
                  (if origin-names
                    (vec (for [u units
@@ -285,11 +348,14 @@
                           (if-let [o (get origin-names rel)] (assoc u :origin o) u)))
                    units))
         {:keys [units failures errors stats]} r
-        res (finish out files (origin units) failures errors stats check t0 (and split (not= front :both)))]
+        nat (when (= front :native) r)
+        res (finish out files (origin units) failures errors stats check t0 (and split (not= front :both))
+                    (when (and nat (:attr-check nat)) {:check (:attr-check nat) :diffs (:attr-diffs nat)}))]
     (if-let [n (:native r)]
       (let [nout (or native-out (str out ".native"))]
         (println "native trees:")
-        (finish nout files (origin (:units n)) (:failures n) (:errors n) (:stats n) check t0 split)
+        (finish nout files (origin (:units n)) (:failures n) (:errors n) (:stats n) check t0 split
+                (when (:attr-check n) {:check (:attr-check n) :diffs (:attr-diffs n)}))
         res)
       res)))
 
@@ -309,7 +375,7 @@
   part of module `module` against the running JDK's compiled classes. The files are copied
   into patch directories under .tmp, one per chunk of packages, so javac takes everything else
   from the system image; the chunks are converted in parallel."
-  [out module module-src paths {:keys [javac-opts check origins front native-out split] :as opts}]
+  [out module module-src paths {:keys [javac-opts check origins front native-out split attr] :as opts}]
   (let [src (.getCanonicalPath (io/file module-src))
         ;; the name each converted file's header gives its source: the original file, not the
         ;; copy in the numbered patch directory (which depends on the chunking); with
@@ -359,7 +425,7 @@
                                   (into ["--patch-module" (str module "=" ppath)
                                          "-implicit:none" "--enable-preview" "-source" "26"]
                                         javac-opts)
-                                  (:rename opts) full? front split)
+                                  (:rename opts) full? front split (= attr "native"))
                    (catch Throwable e
                      {:failures (mapv (fn [f] {:failure true :source f :error (str "javac: " e)}) copies)}))))
         futures (mapv (fn [w] (.submit pool ^java.util.concurrent.Callable (fn [] (task w)))) work)
@@ -370,13 +436,17 @@
                                 (assoc u :origin (get origin-by-copy (.getCanonicalPath (io/file (:source u))) (:source u)))))
                   :failures (vec (mapcat :failures results))
                   :errors (vec (mapcat :errors results))
-                  :stats (apply merge-with + (map :stats results))})
-        {:keys [units failures errors stats]} (gather results)
-        res (finish out files units failures errors stats check t0 (and split (not= front :both)))]
+                  :stats (apply merge-with + (map :stats results))
+                  :attr-check (apply merge-with (partial merge-with +) (keep :attr-check results))
+                  :attr-diffs (vec (mapcat :attr-diffs results))})
+        {:keys [units failures errors stats] :as g} (gather results)
+        res (finish out files units failures errors stats check t0 (and split (not= front :both))
+                    (when (and (= front :native) (= attr "native")) {:check (or (:attr-check g) {}) :diffs (:attr-diffs g)}))]
     (when (= front :both)
       (let [n (gather (map #(or (:native %) (select-keys % [:failures])) results))]
         (println "native trees:")
-        (finish (or native-out (str out ".native")) files (:units n) (:failures n) (:errors n) (:stats n) check t0 split)))
+        (finish (or native-out (str out ".native")) files (:units n) (:failures n) (:errors n) (:stats n) check t0 split
+                (when (= attr "native") {:check (or (:attr-check n) {}) :diffs (:attr-diffs n)}))))
     res))
 
 (defn- parse-opts [args]
@@ -393,6 +463,7 @@
           "--front" (recur more (assoc opts :front b) pos)
           "--native-out" (recur more (assoc opts :native-out b) pos)
           "--split" (recur (rest args) (assoc opts :split true) pos)
+          "--attr" (recur more (assoc opts :attr b) pos)
           (recur (rest args) opts (conj pos a)))))))
 
 (defn -main [cmd & args]

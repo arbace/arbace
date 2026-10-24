@@ -1,0 +1,1635 @@
+;; check-flags and implicit-enum-final reimplement Check.checkFlags and Check.implicitEnumFinalFlag;
+;; find-type, find-var, find-field, member-type and their helpers Resolve.findType, findTypeVar,
+;; findImmediateMemberType, findInheritedMemberType, findMemberType, findGlobalType, findVar,
+;; findField, findIdentInPackage and isAccessible; the classes' headers TypeEnter's
+;; attribSuperTypes and baseEnv; the members MemberEnter's visitMethodDef and visitVarDef; the
+;; constant folding ConstFold's; the annotation values Annotate's attributeAnnotationValue; the
+;; supertypes Types' asSuper, asOuterSuper, asEnclosingSuper and substitution; an enum's ABSTRACT
+;; Symbol's markAbstractIfNeeded: of jdk26u (https://github.com/openjdk/jdk26u at
+;; baf63fbe42b8758448fee570a9d9bb914272d259), src/jdk.compiler/share/classes/com/sun/tools/javac/
+;; comp/{Check,Resolve,TypeEnter,MemberEnter,ConstFold,Enter,Annotate}.java and
+;; code/{Flags,Types,Symbol}.java, whose notice
+;; follows (LICENSE.md, "OpenJDK (jdk26u)"):
+;;
+;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+(ns arbace.repr.java.decls
+  "The declarations of a javac run without javac (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built:
+  JN9a\"): the native attribution's declarations tier. Classes, their members and their declared
+  types, from the native parser's trees of the run's sources (arbace.repr.java.parse; javac's Enter,
+  TypeEnter and MemberEnter) and from the platform's class files (arbace.repr.java.classfile;
+  javac's ClassReader), and the resolution of names in them (javac's Resolve for types, packages,
+  variables and fields), with javac's flags.
+
+  A registry (`registry`) holds a run's classes: those of its units, the sources javac would find
+  on the source path or in a patched module's other directories, and the platform's classes (the
+  exploded modules REPR_JAVA_PLATFORM names), each a class symbol made on first use. The symbols are
+  maps (compared by identity) with memoized parts: a class's flags, header (type parameters,
+  superclass, interfaces) and members; a type is data:
+
+    :int ... :void :boolean           a primitive (a keyword)
+    {:k :class :c csym :args [t ...] :outer t-or-nil :anns [a ...]}
+    {:k :array :e t :anns [a ...]}
+    {:k :tvar :tv tvsym :anns [a ...]}
+    {:k :wild :bk :extends|:super|:unbound :t t-or-nil}
+    {:k :inter :ts [t ...]}
+    {:k :null}
+
+  `env`s are javac's environments as data: the levels of class nesting from the innermost, each
+  with the class and the names in scope there (locals, local classes, type variables)."
+  (:refer-clojure :exclude [find-var])
+  (:require [arbace.repr.java.parse :as parse]
+            [arbace.repr.java.classfile :as cf]
+            [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import [java.io File]
+           [java.util.concurrent ConcurrentHashMap]))
+
+(set! *warn-on-reflection* true)
+
+(declare sym has? memo new-memo platform-index read-class-file registry module-of-package package-exists? unit-top-class source-file-class platform-class class-named class-in-package lang csym class-flags cf-class-flags class-file-csym outer interface? class-static? encl-class outermost local-class? source-class source-interfaces-raw enum-unimplemented? mods-flags deprecated-flags source-class-flags implicit-enum-final check-flags tree-name-of enter-members! unit-package enter-unit! unit-env push-class bind decl-env class-env base-env ctype array-of tvar-sym tvar-bounds tvar-type inner-class? enclosing-instance-class this-type object-type generic-class? erasure raw? subst-map subst supertype interfaces as-super as-outer-super as-enclosing-super class-tparams class-supertype class-interfaces source-tparams decline! expr-decl-type anon-creation-type source-supertype source-interfaces cf-tvar-scope cf-sig cf-tparams cf-supertype cf-interfaces cf-type field-sym method-sym members fields-named member-class source-members local-class cf-members field-flags method-flags canonical-ctor method-tparams method-env method-type field-type env-class subclass? accessible? find-inherited-member-type find-member-type found find-field import-scope star-type named-type method-tvar? find-type find-var resolve-qualified env-site class-type-at type-of-tree annotation-targets type-use-annotations with-annotations vartype-of skip-parens num-rank promote as-kind jfloat->int const-string field-constant local-constant literal-const fold-binary const-value annotation-type annotation-is? element-type enum-class? annotation-class? class-class? string-type? annotation-value annotation-compound)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Symbols: maps by identity (their parts refer to the registry and to each other)
+
+(deftype Sym [^arbace.lang.IPersistentMap m]
+  arbace.lang.ILookup
+  (valAt [_ k] (.valAt m k))
+  (valAt [_ k nf] (.valAt m k nf))
+  Object
+  (toString [_] (str "#sym[" (name (or (.valAt m :sk) :?)) " " (or (.valAt m :flat) (.valAt m :name)) "]")))
+
+(defn sym "A symbol of map `m` (keyword lookups; equal only to itself)." [m] (Sym. m))
+
+;;; ------------------------------------------------------------------------------------------
+;;; javac's flags (code/Flags.java)
+
+(def PUBLIC 1) (def PRIVATE 2) (def PROTECTED 4) (def STATIC 8) (def FINAL 0x10)
+(def SYNCHRONIZED 0x20) (def VOLATILE 0x40) (def TRANSIENT 0x80) (def NATIVE 0x100)
+(def INTERFACE 0x200) (def ABSTRACT 0x400) (def STRICTFP 0x800) (def SYNTHETIC 0x1000)
+(def ANNOTATION 0x2000) (def ENUM 0x4000) (def MANDATED 0x8000)
+(def DEPRECATED (bit-shift-left 1 17)) (def HASINIT (bit-shift-left 1 18))
+(def GENERATED_MEMBER (bit-shift-left 1 24)) (def ANONCONSTR (bit-shift-left 1 29))
+(def BRIDGE (bit-shift-left 1 31)) (def PARAMETER (bit-shift-left 1 33))
+(def VARARGS (bit-shift-left 1 34)) (def GENERATEDCONSTR (bit-shift-left 1 36))
+(def UNION (bit-shift-left 1 39)) (def DEFAULT (bit-shift-left 1 43)) (def SEALED (bit-shift-left 1 48))
+(def COMPACT_RECORD_CONSTRUCTOR (bit-shift-left 1 51))
+(def DEPRECATED_ANNOTATION (bit-shift-left 1 54)) (def DEPRECATED_REMOVAL (bit-shift-left 1 55))
+(def RECORD (bit-shift-left 1 61)) (def NON_SEALED (bit-shift-left 1 63))
+
+(def ^:private StandardFlags 0x0fff)
+(def ^:private AccessFlags (bit-or PUBLIC PROTECTED PRIVATE))
+(def ^:private LocalClassFlags (bit-or FINAL ABSTRACT STRICTFP ENUM SYNTHETIC))
+(def ^:private StaticLocalFlags (bit-or LocalClassFlags STATIC INTERFACE))
+(def ^:private MemberClassFlags (bit-or LocalClassFlags INTERFACE AccessFlags))
+(def ^:private MemberStaticClassFlags (bit-or MemberClassFlags STATIC))
+(def ^:private ClassFlags (bit-or LocalClassFlags INTERFACE PUBLIC ANNOTATION))
+(def ^:private InterfaceVarFlags (bit-or FINAL STATIC PUBLIC))
+(def ^:private VarFlags (bit-or AccessFlags FINAL STATIC VOLATILE TRANSIENT ENUM))
+(def ^:private ConstructorFlags AccessFlags)
+(def ^:private InterfaceMethodFlags (bit-or ABSTRACT PUBLIC))
+(def ^:private MethodFlags (bit-or AccessFlags ABSTRACT STATIC NATIVE SYNCHRONIZED FINAL STRICTFP))
+(def ^:private RecordMethodFlags (bit-or AccessFlags ABSTRACT STATIC SYNCHRONIZED FINAL STRICTFP))
+(def ^:private ExtendedStandardFlags (bit-or StandardFlags DEFAULT SEALED NON_SEALED))
+(def ^:private ExtendedMemberClassFlags (bit-or MemberClassFlags SEALED NON_SEALED))
+(def ^:private ExtendedMemberStaticClassFlags (bit-or MemberStaticClassFlags SEALED NON_SEALED))
+(def ^:private ExtendedClassFlags (bit-or ClassFlags SEALED NON_SEALED))
+(def ^:private InterfaceMethodMask (bit-or ABSTRACT PRIVATE STATIC PUBLIC STRICTFP DEFAULT))
+(def ^:private AnnotationTypeElementMask (bit-or ABSTRACT PUBLIC))
+(def ^:private LocalVarFlags (bit-or FINAL PARAMETER))
+(def ^:private ReceiverParamFlags PARAMETER)
+
+(defn has? "Has flags `fl` (a long) bit `b`?" [fl b] (not (zero? (bit-and (long fl) (long b)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Memoized parts, with javac's cycles answered by nil
+
+(def ^:private computing (Object.))
+
+(defn memo
+  "The part `k` of symbol `s` (its :memo atom), computed once by (f); while it is being computed a
+  nested request (a cycle: a class whose header needs itself) gets `cyclic`."
+  ([s k f] (memo s k f nil))
+  ([s k f cyclic]
+   (let [^java.util.Map m (:memo s)
+         v (locking m (if (.containsKey m k) (.get m k) (do (.put m k computing) ::new)))]
+     (cond
+       (identical? v ::new) (let [r (try (f) (catch Throwable e (locking m (.remove m k)) (throw e)))]
+                              (locking m (.put m k r))
+                              r)
+       (identical? v computing) cyclic
+       :else v))))
+
+(defn- new-memo [] (java.util.HashMap.))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The platform: its packages, by module
+
+(def ^:private ^ConcurrentHashMap platform-indexes (ConcurrentHashMap.))
+
+(defn platform-index
+  "The platform at `dir` (exploded modules: DIR/MODULE/pkg/path/C.class): {package [module ...]}."
+  [^String dir]
+  (or (.get platform-indexes dir)
+      (let [idx (java.util.HashMap.)]
+        (doseq [^File m (sort-by #(.getName ^File %) (.listFiles (File. dir)))
+                :when (.isDirectory m)
+                :let [mn (.getName m)
+                      base (count (.getPath m))]]
+          (letfn [(walk [^File d]
+                    (let [fs (.listFiles d)]
+                      (when (some #(str/ends-with? (.getName ^File %) ".class") fs)
+                        (let [rel (subs (.getPath d) (min (count (.getPath d)) (inc base)))
+                              pkg (str/replace rel "/" ".")]
+                          (.put idx pkg (conj (or (.get idx pkg) []) mn))))
+                      (doseq [^File f fs :when (.isDirectory f)] (walk f))))]
+            (walk m)))
+        (.putIfAbsent platform-indexes dir (into {} idx))
+        (.get platform-indexes dir))))
+
+(def ^:private ^ConcurrentHashMap class-files (ConcurrentHashMap.))
+
+(defn- read-class-file [^String path]
+  (or (.get class-files path)
+      (let [c (cf/read-file path)]
+        (.putIfAbsent class-files path c)
+        (.get class-files path))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The registry of a run
+
+(defn registry
+  "A run's registry: `platform` the platform's directory, `module` the module of the run's sources
+  (nil: the unnamed module), `source-dirs` the directories javac finds more sources of it in (the
+  source path, a patched module's directories), searched in order."
+  [{:keys [platform module source-dirs]}]
+  (sym
+  {:platform platform :index (platform-index platform) :module module
+   :source-dirs (vec source-dirs)
+   :classes (ConcurrentHashMap.)       ; flat name -> csym (or ::none)
+   :units (atom [])                    ; the units entered
+   :unit-classes (ConcurrentHashMap.)  ; package -> {simple csym}, the units' top-level classes
+   :source-files (ConcurrentHashMap.)  ; path -> unit (the sources parsed beside the run's)
+   :memo (new-memo)}))
+
+(declare enter-unit! class-file-csym source-class)
+
+(defn- module-of-package
+  "The module the platform's package `pkg` is in (the run's own module first)."
+  [reg pkg]
+  (let [ms (get (:index reg) pkg)]
+    (when (seq ms)
+      (if (some #{(:module reg)} ms) (:module reg) (first ms)))))
+
+(defn package-exists?
+  "Is `pkg` (dotted) a package of the run's sources, of their directories or of the platform?"
+  [reg ^String pkg]
+  (boolean
+   (or (contains? (:index reg) pkg)
+       (.containsKey ^ConcurrentHashMap (:unit-classes reg) pkg)
+       (some (fn [d] (.isDirectory (File. (str d "/" (str/replace pkg "." "/"))))) (:source-dirs reg))
+       ;; a package that has only subpackages exists for javac as a prefix of a known one
+       (some #(str/starts-with? % (str pkg ".")) (keys (:index reg))))))
+
+(defn- unit-top-class [reg pkg simple]
+  (get (.get ^ConcurrentHashMap (:unit-classes reg) pkg) simple))
+
+(defn- source-file-class
+  "The top-level class `simple` of package `pkg` from a source directory's PKG/SIMPLE.java (parsed
+  and entered, as javac's source path gives it), or nil."
+  [reg pkg simple]
+  (some (fn [d]
+          (let [f (File. (str d "/" (when (seq pkg) (str (str/replace pkg "." "/") "/")) simple ".java"))]
+            (when (.isFile f)
+              (let [p (.getCanonicalPath f)
+                    ^ConcurrentHashMap sf (:source-files reg)]
+                (when-not (.containsKey sf p)
+                  (locking sf
+                    (when-not (.containsKey sf p)
+                      (let [tree (parse/parse (slurp f) p)]
+                        (.put sf p (enter-unit! reg {:tree tree :file p :side true}))))))
+                (unit-top-class reg pkg simple)))))
+        (:source-dirs reg)))
+
+(defn- platform-class
+  "The platform's class of flat name `flat` (a top-level or member class's file), or nil."
+  [reg ^String flat]
+  (let [i (.lastIndexOf flat ".")
+        pkg (if (neg? i) "" (subs flat 0 i))
+        simple (subs flat (inc i))]
+    (when-let [m (module-of-package reg pkg)]
+      (let [path (str (:platform reg) "/" m "/" (str/replace pkg "." "/") (when (seq pkg) "/") simple ".class")]
+        (when (.isFile (File. path))
+          (class-file-csym reg flat m path))))))
+
+(defn class-named
+  "The class of flat name `flat` (a.b.C$D), from the run's sources, their directories or the
+  platform; nil when there is none."
+  [reg ^String flat]
+  (let [^ConcurrentHashMap cs (:classes reg)
+        c (.get cs flat)]
+    (cond
+      (identical? c ::none) nil
+      c c
+      :else
+      (let [i (.lastIndexOf flat ".")
+            pkg (if (neg? i) "" (subs flat 0 i))
+            simple (subs flat (inc i))
+            top (first (str/split simple #"\$"))
+            r (or (unit-top-class reg pkg simple)
+                  (when (str/includes? simple "$")
+                    ;; a member class of a source class: entered with its outer
+                    (when-let [o (or (unit-top-class reg pkg top) (source-file-class reg pkg top))]
+                      (when (:src o) (.get cs flat))))
+                  (source-file-class reg pkg simple)
+                  (platform-class reg flat))]
+        (if r
+          (do (.putIfAbsent cs flat r) (.get cs flat))
+          (do (.putIfAbsent cs flat ::none) nil))))))
+
+(defn class-in-package
+  "The top-level class `simple` of package `pkg`, or nil (javac's loadClass of pkg.simple)."
+  [reg pkg simple]
+  (let [c (class-named reg (if (seq pkg) (str pkg "." simple) simple))]
+    (when (and c (nil? (:outer c)) (not (:local? c))) c)))
+
+(defn lang [reg simple] (class-named reg (str "java.lang." simple)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Class symbols
+;;
+;; A class symbol is a map: :flat (javac's flat name, a.b.C$D; a local or anonymous class's is
+;; not javac's numbering, which follows attribution), :name, :pkg, :module, :reg; a source class's
+;; :tree, :uctx, :owner-kind (:package, :class, :local), :encl (the class it is declared in, for a
+;; local class the innermost enclosing one), :decl-env (a local class's environment), :anon?,
+;; :newclass (an anonymous class's NEWCLASS), :static-context? (a local class declared where no
+;; instance of :encl exists); a class file's :cf and :outer-flat. Its parts are memoized (:memo).
+
+(defn- csym [m] (sym (assoc m :sk :class :memo (new-memo))))
+
+(declare check-flags cf-class-flags source-class-flags source-tparams source-supertype source-interfaces source-members
+         cf-tparams cf-supertype cf-interfaces cf-members)
+
+(defn class-flags "The class's flags as javac's." ^long [c]
+  (memo c :flags #(if (:src c) (source-class-flags c) (cf-class-flags c)) 0))
+
+(defn- cf-class-flags
+  "ClassReader's flags of a class file's class: adjustClassFlags of its own InnerClasses entry's
+  flags (else the class's), DEPRECATED from @Deprecated, RECORD, SEALED."
+  [c]
+  (let [cfd (:cf c)
+        flat (:flat c)
+        own (some #(when (= (some-> (:inner %) (str/replace "/" ".")) flat) (:flags %)) (:inner cfd))
+        fl (long (or own (:flags cfd)))
+        fl (bit-and fl (bit-not 0x20))
+        fl (if (has? fl 0x8000) (bit-and fl (bit-not 0x8000)) fl)]
+    (cond-> fl
+      (some #(= "Ljava/lang/Deprecated;" (:type %)) (:annotations cfd)) (bit-or DEPRECATED DEPRECATED_ANNOTATION)
+      (:record? cfd) (bit-or RECORD)
+      (seq (:permitted cfd)) (bit-or SEALED))))
+
+(defn class-file-csym
+  "The class symbol of the platform's class file at `path` (nil for a local or anonymous class's)."
+  [reg ^String flat module path]
+  (let [cfd (read-class-file path)
+        own (some #(when (= (some-> (:inner %) (str/replace "/" ".")) flat) %) (:inner cfd))
+        i (.lastIndexOf flat ".")
+        pkg (if (neg? i) "" (subs flat 0 i))]
+    (when-not (and own (nil? (:outer own)))
+      (csym {:flat flat :pkg pkg :module module :cf cfd :reg reg
+             :name (if own (:name own) (subs flat (inc i)))
+             :outer-flat (some-> (:outer own) (str/replace "/" "."))}))))
+
+(defn outer
+  "The class `c` is a member of, or nil."
+  [c]
+  (or (:outer c)
+      (when-let [of (:outer-flat c)] (class-named (:reg c) of))))
+
+(defn interface? [c] (has? (class-flags c) INTERFACE))
+(defn class-static? [c] (has? (class-flags c) STATIC))
+
+(defn encl-class "The class `c` is declared in (its outer class, a local class's enclosing one)." [c]
+  (or (outer c) (:encl c)))
+
+(defn outermost [c] (if-let [o (encl-class c)] (recur o) c))
+
+(defn local-class? "A local or anonymous class, or one declared inside one?" [c]
+  (boolean (or (:local? c) (some-> (encl-class c) local-class?))))
+
+(defn source-class
+  "A class symbol for class declaration `cd`: `owner-kind` :package (top-level), :class (a member of
+  `encl`) or :local (local or anonymous, in `env`); `extra` more keys (:newclass, :static-context?)."
+  [reg uctx cd owner-kind encl flat env & [extra]]
+  (csym (merge {:flat flat :name (:name cd) :pkg (:pkg uctx) :module (:module reg) :reg reg
+                :tree cd :uctx uctx :src true
+                :outer (when (= owner-kind :class) encl)
+                :encl encl :local? (= owner-kind :local) :anon? (= "" (:name cd)) :owner-kind owner-kind
+                :decl-env env}
+               extra)))
+
+(defn- source-interfaces-raw [c] (mapv #(type-of-tree (base-env c) %) (:implementing (:tree c))))
+
+(defn- enum-unimplemented?
+  "types.firstUnimplementedAbstract for enum `c`, by name and arity: an abstract method it declares,
+  or an abstract method of its interfaces (and theirs) that neither it nor Enum declares."
+  [c]
+  (let [cd (:tree c)
+        own (for [d (:defs cd) :when (= :METHODDEF (:tag d))] d)
+        declared (set (for [d own] [(:name d) (count (:params d))]))]
+    (boolean
+     (or (some #(has? (get-in % [:mods :flags]) ABSTRACT) own)
+         (let [reg (:reg c)
+               enum-ms (set (for [m (concat (:methods (members (class-named reg "java.lang.Enum")))
+                                            (:methods (members (class-named reg "java.lang.Object"))))]
+                              [(:name m) (count (:params (method-type m)))]))]
+           (loop [todo (vec (keep #(when (= :class (:k %)) (:c %)) (source-interfaces-raw c))) seen #{}]
+             (when-let [i (peek todo)]
+               (if (seen i)
+                 (recur (pop todo) seen)
+                 (or (some (fn [m] (let [fl (method-flags m)
+                                         k [(:name m) (count (:params (method-type m)))]]
+                                     (and (has? fl ABSTRACT) (not (has? fl (bit-or STATIC DEFAULT PRIVATE)))
+                                          (not (declared k)) (not (enum-ms k)))))
+                           (:methods (members i)))
+                     (recur (into (pop todo) (keep #(when (= :class (:k %)) (:c %)) (class-interfaces i))) (conj seen i)))))))))))
+
+(defn mods-flags
+  "The flags of class declaration `c`'s modifiers as javac's Enter leaves them on the tree: the
+  parser's, with PUBLIC | STATIC for a member class of an interface."
+  ^long [c]
+  (let [fl (long (get-in (:tree c) [:mods :flags]))]
+    (if (and (= :class (:owner-kind c)) (interface? (:encl c))) (bit-or fl PUBLIC STATIC) fl)))
+
+(declare class-env find-type annotation-is?)
+
+(defn- deprecated-flags
+  "handleDeprecatedAnnotations (TypeEnter, MemberEnter's annotateLater): DEPRECATED |
+  DEPRECATED_ANNOTATION (and DEPRECATED_REMOVAL for forRemoval = true) when the modifiers hold
+  java.lang.Deprecated, its name resolved in `env`."
+  [mods env]
+  (reduce (fn [fl a]
+            (if (annotation-is? env a "java.lang.Deprecated")
+              (cond-> (bit-or fl DEPRECATED DEPRECATED_ANNOTATION)
+                (some (fn [e] (and (= :ASSIGN (:tag e)) (= "forRemoval" (get-in e [:lhs :name]))
+                                   (let [r (loop [r (:rhs e)] (if (= :PARENS (:tag r)) (recur (:expr r)) r))]
+                                     (and (= :LITERAL (:tag r)) (= :BOOLEAN (:typetag r)) (= 1 (:value r))))))
+                      (:args a))
+                (bit-or DEPRECATED_REMOVAL))
+              fl))
+          0 (:annotations mods)))
+
+(defn- source-class-flags
+  "Enter.visitClassDef's flags (checkFlags of the modifiers, a member class of an interface public
+  and static), TypeEnter's DEPRECATED, MemberEnter's DEFAULT of an interface with a default method."
+  [c]
+  (let [cd (:tree c)
+        fl (long (get-in cd [:mods :flags]))
+        encl (:encl c)
+        ofl (if encl (class-flags encl) 0)
+        fl (if (and (= :class (:owner-kind c)) (has? ofl INTERFACE)) (bit-or fl PUBLIC STATIC) fl)
+        fl (check-flags :class fl {:owner-kind (:owner-kind c) :owner-flags ofl :anon? (:anon? c) :tree cd
+                                   :local-class? (local-class? c)
+                                   :owner-owner-package? (and encl (= :package (:owner-kind encl)))})
+        fl (bit-or fl (deprecated-flags (:mods cd) (base-env c)))
+        ;; ClassSymbol.markAbstractIfNeeded: an enum not final with an abstract method of its own
+        ;; or of an interface it does not implement is ABSTRACT
+        fl (if (and (has? fl ENUM) (not (has? fl (bit-or FINAL ABSTRACT))) (enum-unimplemented? c))
+             (bit-or fl ABSTRACT)
+             fl)]
+    (if (and (has? fl INTERFACE)
+             (some #(and (= :METHODDEF (:tag %)) (has? (get-in % [:mods :flags]) DEFAULT)) (:defs cd)))
+      (bit-or fl DEFAULT)
+      fl)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Check.checkFlags
+
+(defn- implicit-enum-final
+  "Check.implicitEnumFinalFlag: FINAL for an enum without specialized constants, else SEALED."
+  [cd]
+  (if (some (fn [d] (and (= :VARDEF (:tag d)) (has? (get-in d [:mods :flags]) ENUM)
+                         (= :NEWCLASS (get-in d [:init :tag])) (get-in d [:init :def])))
+            (:defs cd))
+    SEALED
+    FINAL))
+
+(defn check-flags
+  "Check.checkFlags: the flags javac gives a symbol of `kind` (:var, :method, :class) declared with
+  `flags`; `o` describes it: :owner-kind (:class, :local, :package), :owner-flags (its class's),
+  :ctor?, :receiver?, :anon?, :tree (a class's), :local-class?, :owner-owner-package? (a member class
+  of a top-level class)."
+  ^long [kind flags o]
+  (let [flags (long flags)
+        ofl (long (or (:owner-flags o) 0))
+        [mask implicit]
+        (case kind
+          :var (cond
+                 (:receiver? o) [ReceiverParamFlags 0]
+                 (not= :class (:owner-kind o)) [LocalVarFlags 0]
+                 (has? ofl INTERFACE) [InterfaceVarFlags InterfaceVarFlags]
+                 :else [VarFlags 0])
+          :method (let [[mask implicit]
+                        (cond
+                          (:ctor? o) (if (has? ofl ENUM) [PRIVATE PRIVATE] [ConstructorFlags 0])
+                          (has? ofl INTERFACE)
+                          (cond
+                            (has? ofl ANNOTATION) [AnnotationTypeElementMask (bit-or PUBLIC ABSTRACT)]
+                            (has? flags (bit-or DEFAULT STATIC PRIVATE))
+                            [InterfaceMethodMask (bit-or (if (has? flags PRIVATE) 0 PUBLIC)
+                                                         (if (has? flags DEFAULT) ABSTRACT 0))]
+                            :else [InterfaceMethodFlags InterfaceMethodFlags])
+                          (has? ofl RECORD) [RecordMethodFlags 0]
+                          :else [MethodFlags 0])
+                        implicit (if (or (zero? (bit-and (bit-or flags (long implicit)) ABSTRACT)) (has? flags DEFAULT))
+                                   (bit-or (long implicit) (bit-and ofl STRICTFP))
+                                   implicit)]
+                    [mask implicit])
+          :class (let [[mask implicit]
+                       (cond
+                         (or (= :local (:owner-kind o)) (and (:local-class? o) (has? flags ANNOTATION)))
+                         (let [implicitly-static (and (not (:anon? o)) (has? flags (bit-or RECORD ENUM INTERFACE)))
+                               static-or (or (has? flags STATIC) implicitly-static)]
+                           [(if (and static-or (not (has? flags ANNOTATION))) StaticLocalFlags LocalClassFlags)
+                            (if implicitly-static STATIC 0)])
+                         (= :class (:owner-kind o))
+                         (let [mask (if (and (has? flags STATIC) (not (has? flags ANNOTATION)))
+                                      ExtendedMemberStaticClassFlags ExtendedMemberClassFlags)
+                               mask (if (or (:owner-owner-package? o) (has? ofl STATIC)) (bit-or mask STATIC) mask)]
+                           [mask (if (has? flags (bit-or INTERFACE ENUM RECORD)) STATIC 0)])
+                         :else [ExtendedClassFlags 0])
+                       implicit (if (has? flags INTERFACE) (bit-or (long implicit) ABSTRACT) implicit)
+                       [mask implicit] (if (has? flags ENUM)
+                                         [(bit-and (long mask) (bit-not (bit-or ABSTRACT FINAL SEALED NON_SEALED)))
+                                          (bit-or (long implicit) (long (implicit-enum-final (:tree o))))]
+                                         [mask implicit])
+                       [mask implicit] (if (has? flags RECORD)
+                                         [(bit-and (long mask) (bit-not ABSTRACT)) (bit-or (long implicit) FINAL)]
+                                         [mask implicit])]
+                   [mask (bit-or (long implicit) (bit-and ofl STRICTFP))]))
+        mask (long mask)
+        illegal (bit-and flags ExtendedStandardFlags (bit-not mask))
+        mask (if (and (not (zero? illegal)) (has? illegal INTERFACE)) (bit-or mask INTERFACE) mask)]
+    (bit-or (bit-and flags (bit-or mask (bit-not ExtendedStandardFlags))) (long implicit))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Units (Enter)
+
+(defn tree-name-of
+  "TreeInfo.fullName of a qualified name tree (IDENT, SELECT): a.b.c."
+  [t]
+  (case (:tag t)
+    :IDENT (:name t)
+    :SELECT (str (tree-name-of (:selected t)) "." (:name t))
+    nil))
+
+(defn- enter-members!
+  "Enter class `c`'s member classes, recursively (Enter's classEnter of the class body)."
+  [reg uctx c]
+  (doseq [d (:defs (:tree c))
+          :when (= :CLASSDEF (:tag d))]
+    (let [m (source-class reg uctx d :class c (str (:flat c) "$" (:name d)) nil)]
+      (.putIfAbsent ^ConcurrentHashMap (:classes reg) (:flat m) m)
+      (swap! (:members-of uctx) update c (fnil conj []) m)
+      (enter-members! reg uctx m))))
+
+(defn unit-package "The package a native unit declares (\"\" for none)." [tree]
+  (let [pd (first (filter #(= :PACKAGEDEF (:tag %)) (:defs tree)))]
+    (if pd (tree-name-of (:pid pd)) "")))
+
+(defn enter-unit!
+  "Enter native compilation unit `tree` (javac's Enter of a unit): its package, its top-level classes
+  and their member classes; returns the unit's context. `side`: a source entered for its classes
+  only (not converted)."
+  [reg {:keys [tree file side]}]
+  (let [pkg (unit-package tree)
+        uctx (sym {:tree tree :file file :pkg pkg :module (:module reg) :reg reg :side side :memo (new-memo)
+                   :toplevel (atom {}) :members-of (atom {})})
+        tops (vec (for [d (:defs tree) :when (= :CLASSDEF (:tag d))]
+                    (source-class reg uctx d :package nil (if (seq pkg) (str pkg "." (:name d)) (:name d)) nil)))]
+    (reset! (:toplevel uctx) (into {} (map (juxt :name identity) tops)))
+    (let [^ConcurrentHashMap uc (:unit-classes reg)]
+      (locking uc
+        (.put uc pkg (merge (.get uc pkg) (into {} (map (juxt :name identity) tops))))))
+    (doseq [c tops]
+      (.putIfAbsent ^ConcurrentHashMap (:classes reg) (:flat c) c)
+      (enter-members! reg uctx c))
+    (swap! (:units reg) conj uctx)
+    uctx))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Environments
+;;
+;; An env is {:reg :uctx :levels (level ...) :static? b}: a level per class nesting, innermost first,
+;; {:class c :scope {name (entry ...)} :base? b}: the class (nil for the top level's predef class),
+;; the names javac's env holds in scope at that level (locals, local classes, method type
+;; variables), the newest first; a class's own type variables are its level's.
+
+(defn unit-env "The environment of unit `uctx`'s top level." [uctx]
+  {:reg (:reg uctx) :uctx uctx :levels ()})
+
+(defn push-class "`env` inside class `c` (javac's classEnv)." [env c]
+  (assoc env :levels (conj (:levels env) {:class c :scope {}}) :static? false))
+
+(defn bind
+  "`env` with `entry` (a local variable, a local class, a type variable) in scope as `name` at its
+  innermost level."
+  [env name entry]
+  (if (empty? (:levels env))
+    env
+    (let [[l & more] (:levels env)]
+      (assoc env :levels (conj more (update-in l [:scope name] #(cons entry %)))))))
+
+(defn decl-env
+  "The environment class `c` is declared in (a named local class's own name in scope in it)."
+  [c]
+  (or (get (:memo c) :decl-env)
+      (:decl-env c)
+      (if-let [o (:encl c)] (class-env o) (unit-env (:uctx c)))))
+
+(declare class-tparams)
+
+(defn class-env "The environment of class `c`'s body." [c]
+  (memo c :env #(push-class (decl-env c) c)))
+
+(defn base-env
+  "TypeEnter.baseEnv: the environment of class `c`'s header: c's type variables in scope at a level
+  of the class c is declared in, above the environment c is declared in; c's members not seen."
+  [c]
+  (let [e (decl-env c)
+        encl (:class (first (:levels e)))
+        base {:class encl :scope (into {} (for [tv (class-tparams c)] [(:name tv) (list tv)])) :base? true}]
+    (assoc e :levels (conj (:levels e) base) :base c)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types
+
+(defn ctype
+  "A class type: class `c`, its arguments, its enclosing type (an inner class's)."
+  ([c] (ctype c [] nil))
+  ([c args outer] {:k :class :c c :args (vec args) :outer outer :anns []}))
+
+(defn array-of [t] {:k :array :e t :anns []})
+
+(defn tvar-sym
+  "A type variable symbol `name` of `owner` (a class or method symbol), its bounds by (bounds-fn)."
+  [name owner idx bounds-fn tree]
+  (sym {:sk :tvar :name name :owner owner :idx idx :bounds-fn bounds-fn :tree tree :memo (new-memo)}))
+
+(defn tvar-bounds "The bounds of type variable `tv` (Object when it declares none)." [tv]
+  (memo tv :bounds (:bounds-fn tv) []))
+
+(defn tvar-type [tv] {:k :tvar :tv tv :anns []})
+
+(defn inner-class?
+  "Has class `c` an enclosing instance (javac's ct.getEnclosingType a class)? A non-static member
+  class; a local or anonymous class declared where an instance of its enclosing class exists."
+  [c]
+  (and (not= :package (:owner-kind c))
+       (not (class-static? c))
+       (if (:local? c)
+         (and (:encl c) (not (:static-context? c)))
+         (some? (outer c)))))
+
+(defn enclosing-instance-class [c] (if (:local? c) (:encl c) (outer c)))
+
+(defn this-type
+  "javac's c.type: class `c` with its type variables as arguments, the enclosing type its enclosing
+  instance class's this-type."
+  [c]
+  (memo c :this-type
+        (fn []
+          (ctype c (map tvar-type (class-tparams c))
+                 (when (inner-class? c) (this-type (enclosing-instance-class c)))))))
+
+(defn object-type [reg] (ctype (class-named reg "java.lang.Object")))
+
+(defn generic-class?
+  "Has class `c` type parameters, its own or an enclosing instance class's (javac's allparams)?"
+  [c]
+  (boolean (or (seq (class-tparams c))
+               (when (inner-class? c) (generic-class? (enclosing-instance-class c))))))
+
+(defn erasure
+  "The erasure of type `t` (types.erasure): a class type without arguments, its enclosing type
+  erased; an array of the erasure; a type variable's first bound's erasure."
+  [t]
+  (cond
+    (keyword? t) t
+    :else
+    (case (:k t)
+      :class (let [c (:c t)] (ctype c [] (when (:outer t) (erasure (:outer t)))))
+      :array (array-of (erasure (:e t)))
+      :tvar (erasure (first (tvar-bounds (:tv t))))
+      :inter (erasure (first (:ts t)))
+      :wild (erasure (or (:t t) (object-type nil)))
+      t)))
+
+(defn raw?
+  "Is class type `t` raw (javac's isRaw: its class generic, the type without arguments)?"
+  [t]
+  (and (= :class (:k t)) (generic-class? (:c t))
+       (empty? (:args t))
+       (loop [o (:outer t)] (or (nil? o) (and (empty? (:args o)) (recur (:outer o)))))))
+
+(defn- subst-map
+  "{tvsym type}: class type `t`'s type variables (its class's, its enclosing types') to its arguments."
+  [t]
+  (loop [t t m {}]
+    (if (and t (= :class (:k t)))
+      (recur (:outer t)
+             (let [tps (class-tparams (:c t))]
+               (if (= (count tps) (count (:args t)))
+                 (into m (map vector tps (:args t)))
+                 m)))
+      m)))
+
+(defn subst
+  "Type `t` with the type variables of map `m` ({tvsym type}) replaced."
+  [t m]
+  (if (or (empty? m) (keyword? t) (nil? t))
+    t
+    (case (:k t)
+      :tvar (if-let [r (get m (:tv t))] r t)
+      :class (assoc t :args (mapv #(subst % m) (:args t)) :outer (some-> (:outer t) (subst m)))
+      :array (assoc t :e (subst (:e t) m))
+      :wild (assoc t :t (some-> (:t t) (subst m)))
+      :inter (assoc t :ts (mapv #(subst % m) (:ts t)))
+      t)))
+
+(declare class-supertype class-interfaces)
+
+(defn supertype
+  "types.supertype of class type `t`: its class's superclass type at t's arguments (erased when t is
+  raw), nil for Object and for interfaces' (javac's Object for an interface, as TypeEnter sets it)."
+  [t]
+  (when (= :class (:k t))
+    (let [s (class-supertype (:c t))]
+      (when s (if (raw? t) (erasure s) (subst s (subst-map t)))))))
+
+(defn interfaces
+  "types.interfaces of class type `t`."
+  [t]
+  (when (= :class (:k t))
+    (let [is (class-interfaces (:c t))]
+      (if (raw? t) (mapv erasure is) (mapv #(subst % (subst-map t)) is)))))
+
+(defn as-super
+  "types.asSuper: the supertype of `t` whose class is `c`, or nil."
+  [t c]
+  (cond
+    (nil? t) nil
+    (= :tvar (:k t)) (some #(as-super % c) (tvar-bounds (:tv t)))
+    (not= :class (:k t)) nil
+    (identical? (:c t) c) t
+    :else (or (as-super (supertype t) c)
+              (some #(as-super % c) (interfaces t)))))
+
+(defn as-outer-super
+  "types.asOuterSuper: as-super of `t` or of its enclosing types."
+  [t c]
+  (loop [t t]
+    (when (and t (= :class (:k t)))
+      (or (as-super t c) (recur (:outer t))))))
+
+(defn as-enclosing-super
+  "types.asEnclosingSuper: as-super of `t`, of its enclosing types, or of its class's enclosing
+  classes' types."
+  [t c]
+  (case (:k t)
+    :class (loop [t t]
+             (when (and t (= :class (:k t)))
+               (or (as-super t c)
+                   (recur (or (:outer t)
+                              (when-let [e (encl-class (:c t))] (this-type e)))))))
+    :tvar (as-super t c)
+    nil))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Class headers: type parameters, superclass, interfaces
+
+(declare type-of-tree cf-type)
+
+(defn class-tparams "The type variables of class `c`." [c]
+  (memo c :tparams #(if (:src c) (source-tparams c) (cf-tparams c)) []))
+
+(defn class-supertype "Class `c`'s declared superclass type (nil for Object)." [c]
+  (memo c :super #(if (:src c) (source-supertype c) (cf-supertype c)) nil))
+
+(defn class-interfaces "Class `c`'s declared interface types." [c]
+  (memo c :ifaces #(if (:src c) (source-interfaces c) (cf-interfaces c)) []))
+
+(defn- source-tparams [c]
+  (vec (map-indexed (fn [i tp]
+                      (tvar-sym (:name tp) c i
+                                (fn [] (let [bs (:bounds tp)]
+                                         (if (seq bs)
+                                           (mapv #(type-of-tree (base-env c) %) bs)
+                                           [(object-type (:reg c))])))
+                                tp))
+                    (:typarams (:tree c)))))
+
+(defn decline!
+  "Leave the fact being answered to javac: it needs a tier beyond this one (`why`)."
+  [why]
+  (throw (ex-info (str "repr/java decls: declined: " why) {::decline true})))
+
+(defn expr-decl-type
+  "The declared type of expression `t` when it names a variable (a local's, a field's) or is this or
+  C.this; nil otherwise (an expression's type is the types tier's)."
+  [env t]
+  (case (:tag t)
+    :PARENS (expr-decl-type env (:expr t))
+    :IDENT (if (= "this" (:name t))
+             (some-> (:class (first (:levels env))) this-type)
+             (when-let [[k x] (find-var env (:name t))]
+               (if (= k :local) (when (:decl x) (vartype-of (:env x) (:decl x))) (field-type x))))
+    :SELECT (if (= "this" (:name t))
+              (some-> (:c (resolve-qualified env (:selected t) #{:typ})) this-type)
+              (let [r (resolve-qualified env t #{:val})] (when-let [f (:field r)] (field-type f))))
+    nil))
+
+(defn- anon-creation-type
+  "The class type anonymous class `c`'s creation names (its NEWCLASS's clazz; a diamond's raw, its
+  arguments inferred; of a qualified creation o.new C() {}, C a member of o's declared type)."
+  [c]
+  (let [nc (:newclass c)
+        env (decl-env c)
+        clazz (loop [x (:clazz nc)] (if (= :ANNOTATED_TYPE (:tag x)) (recur (:underlyingType x)) x))
+        diamond? (and (= :TYPEAPPLY (:tag clazz)) (empty? (:arguments clazz)))]
+    (if-let [encl (:encl nc)]
+      (let [et (expr-decl-type env encl)
+            n (tree-name-of (if (= :TYPEAPPLY (:tag clazz)) (:clazz clazz) clazz))
+            m (when (and et (= :class (:k et))) (found (find-member-type env et n (:c et))))]
+        (when-not m (decline! (str "the qualified creation of " n)))
+        (let [t (class-type-at m et)]
+          (if (and (= :TYPEAPPLY (:tag clazz)) (not diamond?))
+            (assoc t :args (mapv #(type-of-tree env %) (:arguments clazz)))
+            t)))
+      (if diamond?
+        (erasure (type-of-tree env (:clazz clazz)))
+        (type-of-tree env (:clazz nc))))))
+
+(defn- source-supertype
+  "TypeEnter.attribSuperTypes's supertype: the extends clause's type in the header's environment;
+  an enum's Enum<E>; Object's none; a record's Record; else Object (an interface's too). An
+  anonymous class's is its creation's class (Attr.visitNewClass) unless that is an interface."
+  [c]
+  (let [cd (:tree c) reg (:reg c)
+        fl (long (get-in cd [:mods :flags]))]
+    (cond
+      (:anon? c) (let [t (anon-creation-type c)]
+                   (if (and (= :class (:k t)) (interface? (:c t))) (object-type reg) t))
+      (:extending cd) (type-of-tree (base-env c) (:extending cd))
+      (has? fl ENUM) (ctype (class-named reg "java.lang.Enum") [(this-type c)] nil)
+      (= "java.lang.Object" (:flat c)) nil
+      (has? fl RECORD) (ctype (class-named reg "java.lang.Record"))
+      :else (object-type reg))))
+
+(defn- source-interfaces [c]
+  (let [cd (:tree c) reg (:reg c)]
+    (cond
+      (:anon? c) (let [t (anon-creation-type c)]
+                   (if (and (= :class (:k t)) (interface? (:c t))) [t] []))
+      (has? (get-in cd [:mods :flags]) ANNOTATION) [(ctype (class-named reg "java.lang.annotation.Annotation"))]
+      :else (mapv #(type-of-tree (base-env c) %) (:implementing cd)))))
+
+(defn- cf-tvar-scope
+  "The type variables a class file's signature names for class `c`: its own, then its enclosing
+  instance classes' (by name)."
+  [c]
+  (loop [c c out {}]
+    (if c
+      (recur (when (inner-class? c) (enclosing-instance-class c))
+             (merge (into {} (map (juxt :name identity) (class-tparams c))) out))
+      out)))
+
+(defn- cf-sig [c] (memo c :sig #(some-> (:signature (:cf c)) cf/class-signature)))
+
+(defn- cf-tparams [c]
+  (vec (map-indexed (fn [i [n bs]]
+                      (tvar-sym n c i (fn [] (mapv #(cf-type (:reg c) (cf-tvar-scope c) %) bs)) nil))
+                    (:tparams (cf-sig c)))))
+
+(defn- cf-supertype [c]
+  (let [cfd (:cf c)]
+    (cond
+      (has? (class-flags c) INTERFACE) (object-type (:reg c))
+      (cf-sig c) (cf-type (:reg c) (cf-tvar-scope c) (:super (cf-sig c)))
+      (:super cfd) (ctype (class-named (:reg c) (str/replace (:super cfd) "/" ".")))
+      :else nil)))
+
+(defn- cf-interfaces [c]
+  (if-let [s (cf-sig c)]
+    (mapv #(cf-type (:reg c) (cf-tvar-scope c) %) (:interfaces s))
+    (mapv #(ctype (class-named (:reg c) (str/replace % "/" "."))) (:interfaces (:cf c)))))
+
+(defn cf-type
+  "The type of a class file's signature type `t` (arbace.repr.java.classfile's), its type variables
+  named in `tvs` ({name tvsym})."
+  [reg tvs t]
+  (if (keyword? t)
+    t
+    (case (first t)
+      :class (let [[_ flat args o] t
+                   c (or (class-named reg flat) (throw (ex-info (str "repr/java decls: no class " flat) {:flat flat})))]
+               (ctype c (mapv #(cf-type reg tvs %) args)
+                      (cond
+                        o (cf-type reg tvs o)
+                        (inner-class? c) (erasure (this-type (enclosing-instance-class c)))
+                        :else nil)))
+      :array (array-of (cf-type reg tvs (second t)))
+      :tvar (if-let [tv (get tvs (second t))] (tvar-type tv) (object-type reg))
+      :wild (let [[_ bk b] t] {:k :wild :bk bk :t (when b (cf-type reg tvs b))}))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Members: fields, methods, member classes
+
+(defn- field-sym [m] (sym (assoc m :sk :field :memo (new-memo))))
+(defn- method-sym [m] (sym (assoc m :sk :method :memo (new-memo))))
+
+(defn members
+  "Class `c`'s members: {:fields [fsym ...] :methods [msym ...] :classes {name csym}}."
+  [c]
+  (memo c :members #(if (:src c) (source-members c) (cf-members c)) {:fields [] :methods [] :classes {}}))
+
+(defn fields-named [c n] (filter #(= n (:name %)) (:fields (members c))))
+(defn member-class [c n] (get (:classes (members c)) n))
+
+(defn- source-members [c]
+  (let [cd (:tree c)
+        uctx (:uctx c)]
+    {:fields (vec (for [d (:defs cd) :when (= :VARDEF (:tag d))]
+                    (field-sym {:name (:name d) :owner c :tree d})))
+     :methods (vec (for [d (:defs cd) :when (= :METHODDEF (:tag d))]
+                     (method-sym {:name (:name d) :owner c :tree d})))
+     :classes (into {} (for [d (:defs cd) :when (= :CLASSDEF (:tag d))
+                             :let [m (if (local-class? c)
+                                       (get (memo c :local-members (fn [] {})) (:name d))
+                                       (class-named (:reg c) (str (:flat c) "$" (:name d))))]
+                             :when m]
+                         [(:name d) m]))}))
+
+(defn local-class
+  "The class symbol of local or anonymous class declaration `cd` in environment `env` (inside class
+  `encl`; `extra` :newclass, :static-context?), with its member classes, recursively."
+  [env cd encl flat extra]
+  (let [reg (:reg env) uctx (:uctx env)
+        c (source-class reg uctx cd :local encl flat env extra)]
+    (when (seq (:name cd))
+      (let [^java.util.Map m (:memo c)] (locking m (.put m :decl-env (bind env (:name cd) c)))))
+    (letfn [(enter [c]
+              (let [ms (vec (for [d (:defs (:tree c)) :when (= :CLASSDEF (:tag d))]
+                              (source-class reg uctx d :class c (str (:flat c) "$" (:name d)) nil)))]
+                (let [^java.util.Map m (:memo c)]
+                  (locking m (.put m :local-members (into {} (map (juxt :name identity) ms)))))
+                (run! enter ms)))]
+      (enter c))
+    c))
+
+(defn- cf-members [c]
+  (let [cfd (:cf c) reg (:reg c)]
+    {:fields (vec (for [f (:fields cfd)] (field-sym (assoc f :owner c))))
+     :methods (vec (for [m (:methods cfd)] (method-sym (assoc m :owner c))))
+     :classes (into {} (for [e (:inner cfd)
+                             :when (and (:name e) (= (:outer e) (:this cfd)))
+                             :let [m (class-named reg (str/replace (:inner e) "/" "."))]
+                             :when m]
+                         [(:name e) m]))}))
+
+(declare deprecated-flags-of field-env method-env)
+
+(defn field-flags
+  "A field's flags as javac's (MemberEnter.visitVarDef: checkFlags, HASINIT; Annotate's DEPRECATED;
+  TypeEnter's record field without VARARGS); a class file's as ClassReader's."
+  ^long [f]
+  (memo f :flags
+        (fn []
+          (if-let [d (:tree f)]
+            (let [c (:owner f)
+                  fl (check-flags :var (get-in d [:mods :flags]) {:owner-kind :class :owner-flags (class-flags c)})
+                  fl (if (:init d) (bit-or fl HASINIT) fl)
+                  fl (if (has? fl RECORD) (bit-and fl (bit-not VARARGS)) fl)]
+              (bit-or fl (deprecated-flags (:mods d) (class-env c))))
+            (long (:flags f))))
+        0))
+
+(defn method-flags
+  "A method's flags as javac's (MemberEnter.visitMethodDef: checkFlags, VARARGS; Annotate's
+  DEPRECATED; TypeEnter's RECORD of a record's canonical constructor); a class file's as
+  ClassReader's adjustMethodFlags."
+  ^long [m]
+  (memo m :flags
+        (fn []
+          (if-let [d (:tree m)]
+            (let [c (:owner m)
+                  ctor? (= "<init>" (:name d))
+                  fl (check-flags :method (get-in d [:mods :flags]) {:owner-flags (class-flags c) :ctor? ctor?})
+                  ps (:params d)
+                  fl (if (and (seq ps) (has? (get-in (last ps) [:mods :flags]) VARARGS)) (bit-or fl VARARGS) fl)
+                  fl (if (and ctor? (identical? m (canonical-ctor c))) (bit-or fl RECORD) fl)]
+              (bit-or fl (deprecated-flags (:mods d) (method-env m))))
+            (let [fl (long (:flags m))
+                  fl (if (has? fl 0x40) (bit-or (bit-and fl (bit-not 0x40)) BRIDGE) fl)
+                  fl (if (has? fl 0x80) (bit-or (bit-and fl (bit-not 0x80)) VARARGS) fl)]
+              fl)))
+        0))
+
+(defn canonical-ctor
+  "TypeEnter.getCanonicalConstructorDecl: record `c`'s compact constructor, or its first constructor
+  whose parameters' erased types are its components'; nil for another class."
+  [c]
+  (memo c :canonical
+        (fn []
+          (when (has? (get-in (:tree c) [:mods :flags]) RECORD)
+            (let [comps (filter #(and (= :VARDEF (:tag %)) (has? (get-in % [:mods :flags]) RECORD)) (:defs (:tree c)))
+                  cenv (class-env c)
+                  ctypes (mapv #(erasure (vartype-of cenv %)) comps)
+                  ctors (filter #(= "<init>" (:name %)) (:methods (members c)))]
+              (or (first (filter #(has? (get-in (:tree %) [:mods :flags]) COMPACT_RECORD_CONSTRUCTOR) ctors))
+                  (first (filter (fn [m] (= ctypes (mapv erasure (:params (method-type m))))) ctors))))))))
+
+(defn method-tparams [m]
+  (memo m :tparams
+        (fn []
+          (if-let [d (:tree m)]
+            (let [cell (volatile! nil)
+                  tvs (vec (map-indexed (fn [i tp]
+                                          (tvar-sym (:name tp) m i
+                                                    (fn [] (let [bs (:bounds tp)]
+                                                             (if (seq bs)
+                                                               (mapv #(type-of-tree (method-env m) %) bs)
+                                                               [(object-type (:reg (:owner m)))])))
+                                                    tp))
+                                        (:typarams d)))]
+              tvs)
+            (let [sig (memo m :sig #(cf/method-signature (or (:signature m) (:desc m))))
+                  c (:owner m)]
+              (vec (map-indexed (fn [i [n bs]]
+                                  (tvar-sym n m i (fn [] (mapv #(cf-type (:reg c) (merge (cf-tvar-scope c)
+                                                                                          (into {} (map (juxt :name identity) (method-tparams m))))
+                                                                         %) bs))
+                                            nil))
+                                (:tparams sig))))))
+        []))
+
+(defn method-env
+  "The environment of method `m`'s signature and body (MemberEnter.methodEnv): its class's, its type
+  variables in scope."
+  [m]
+  (memo m :env
+        (fn []
+          (let [c (:owner m)
+                e (class-env c)
+                e (reduce (fn [e tv] (bind e (:name tv) tv)) e (method-tparams m))]
+            (assoc e :static? (has? (get-in (:tree m) [:mods :flags]) STATIC))))))
+
+(declare vartype-of)
+
+(defn method-type
+  "Method `m`'s declared type: {:tparams [tv] :params [t] :ret t :throws [t]}."
+  [m]
+  (memo m :type
+        (fn []
+          (if-let [d (:tree m)]
+            (let [e (method-env m)]
+              {:tparams (method-tparams m)
+               :params (mapv #(vartype-of e %) (:params d))
+               :ret (if (:restype d)
+                      (with-annotations (type-of-tree e (:restype d)) (type-use-annotations e (get-in d [:mods :annotations])))
+                      :void)
+               :throws (mapv #(type-of-tree e %) (:thrown d))})
+            (let [c (:owner m)
+                  sig (cf/method-signature (or (:signature m) (:desc m)))
+                  tvs (merge (cf-tvar-scope c) (into {} (map (juxt :name identity) (method-tparams m))))]
+              {:tparams (method-tparams m)
+               :params (mapv #(cf-type (:reg c) tvs %) (:params sig))
+               :ret (cf-type (:reg c) tvs (:ret sig))
+               :throws (mapv #(cf-type (:reg c) tvs %) (:throws sig))})))))
+
+(defn field-type
+  "Field `f`'s declared type."
+  [f]
+  (memo f :type
+        (fn []
+          (if-let [d (:tree f)]
+            (vartype-of (class-env (:owner f)) d)
+            (let [c (:owner f)]
+              (cf-type (:reg c) (cf-tvar-scope c) (cf/field-signature (or (:signature f) (:desc f)))))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Access (Resolve.isAccessible, for the lookups of names: an inaccessible member does not hide)
+
+(defn- env-class [env] (some :class (:levels env)))
+
+(defn- subclass? [c d] (boolean (as-super (this-type c) d)))
+
+(defn accessible?
+  "Resolve.isAccessible of member `s` (a field or class; its :owner or outer class `owner`) from `env`
+  through class `site`."
+  [env site s owner]
+  (let [fl (if (= :class (:sk s)) (class-flags s) (field-flags s))
+        ec (env-class env)
+        site (if (instance? Sym site) site (:c site))]
+    (cond
+      (has? fl PUBLIC) true
+      (has? fl PRIVATE) (and ec (identical? (outermost ec) (outermost owner)) (identical? site owner))
+      (has? fl PROTECTED) (or (= (:pkg (:uctx env)) (:pkg owner))
+                              (some #(subclass? % owner) (take-while some? (iterate encl-class ec))))
+      :else (= (:pkg (:uctx env)) (:pkg owner)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Member types and fields (Resolve.findMemberType, findField)
+
+(declare find-member-type)
+
+(defn- find-inherited-member-type [env site name c]
+  (let [ct (this-type c)
+        st (class-supertype c)
+        r (when (and st (= :class (:k st))) (find-member-type env site name (:c st)))]
+    (if (and r (not= r ::inaccessible))
+      r
+      (or (some (fn [it] (let [x (find-member-type env site name (:c it))] (when (and x (not= x ::inaccessible)) x)))
+                (filter #(= :class (:k %)) (class-interfaces c)))
+          r))))
+
+(defn find-member-type
+  "Resolve.findMemberType: the member class `name` of class `c` or inherited by it, from `env`
+  through `site`; ::inaccessible when the immediate one is not accessible; nil when none."
+  [env site name c]
+  (if-let [m (member-class c name)]
+    (if (accessible? env site m c) m ::inaccessible)
+    (find-inherited-member-type env site name c)))
+
+(defn- found [x] (when (and x (not= x ::inaccessible)) x))
+
+(defn find-field
+  "Resolve.findField: the field `name` of class `c` or inherited by it (not synthetic), from `env`
+  through `site`; nil when none is accessible."
+  [env site name c]
+  (let [own (first (remove #(has? (field-flags %) SYNTHETIC) (fields-named c name)))]
+    (if own
+      (when (accessible? env site own c) own)
+      (let [st (class-supertype c)]
+        (or (when (and st (= :class (:k st))) (find-field env site name (:c st)))
+            (when (and st (= :tvar (:k st))) nil)
+            (some #(find-field env site name (:c %)) (filter #(= :class (:k %)) (class-interfaces c))))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Imports (TypeEnter's import scopes)
+
+(declare resolve-qualified)
+
+(defn- import-scope
+  "The unit's imports, resolved: {:named {simple [csym]} :static-named [[csym name] ...]
+  :star [package-name-or-csym ...] :static-star [csym ...]}; java.lang on demand first."
+  [uctx]
+  (memo uctx :imports
+        (fn []
+          (let [env (assoc (unit-env uctx) :import? true)]
+            (reduce
+             (fn [acc imp]
+               (case (:tag imp)
+                 :IMPORT
+                 (let [q (:qualid imp)
+                       star? (= "*" (:name q))
+                       static? (:staticImport imp)]
+                   (cond
+                     (and static? star?)
+                     (let [r (resolve-qualified env (:selected q) #{:typ})]
+                       (if-let [c (:c r)] (update acc :static-star conj c) acc))
+                     static?
+                     (let [r (resolve-qualified env (:selected q) #{:typ})]
+                       (if-let [c (:c r)] (update acc :static-named conj [c (:name q)]) acc))
+                     star?
+                     (let [r (resolve-qualified env (:selected q) #{:typ :pck})]
+                       (cond (:c r) (update acc :star conj (:c r))
+                             (:pck r) (update acc :star conj (:pck r))
+                             :else acc))
+                     :else
+                     (let [r (resolve-qualified env q #{:typ})]
+                       (if-let [c (:c r)] (update-in acc [:named (:name q)] (fnil conj []) c) acc))))
+                 :MODULEIMPORT (update acc :modules conj (tree-name-of (:module imp)))
+                 acc))
+             {:named {} :static-named [] :star ["java.lang"] :static-star [] :modules []}
+             (:defs (:tree uctx)))))))
+
+(defn- star-type
+  "A type `name` from the on-demand imports: a package's class, an imported type's member class."
+  [env name]
+  (let [imps (import-scope (:uctx env))
+        reg (:reg env)
+        hits (distinct
+              (concat
+               ;; import T.*: T's own member classes (Scope's SymbolImporter inspects the supertypes
+               ;; of a static import only)
+               (keep (fn [s] (if (string? s)
+                               (class-in-package reg s name)
+                               (when-let [m (member-class s name)] (when (accessible? env s m s) m))))
+                     (:star imps))
+               (keep (fn [c] (let [m (found (find-member-type env (this-type c) name c))]
+                               (when (and m (class-static? m)) m)))
+                     (:static-star imps))))]
+    (first hits)))
+
+(defn- named-type
+  "A type `name` from the single imports: a single-type import's, a static import's member class."
+  [env name]
+  (let [imps (import-scope (:uctx env))]
+    (or (first (get-in imps [:named name]))
+        (some (fn [[c n]] (when (= n name) (found (find-member-type env (this-type c) name c))))
+              (:static-named imps)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Names (Resolve.findType, findVar)
+
+(defn- method-tvar? [x] (and (= :tvar (:sk x)) (= :method (:sk (:owner x)))))
+
+(defn find-type
+  "Resolve.findType: the class or type variable `name` denotes in `env`, or nil."
+  [env name]
+  (when (seq name)
+    (or
+     (loop [[l & more :as ls] (seq (:levels env))]
+       (when ls
+         (let [c (:class l)
+               tyvar (or (first (filter #(#{:tvar :class} (:sk %)) (get (:scope l) name)))
+                         (when (and c (not (:base? l)))
+                           (first (filter #(= name (:name %)) (class-tparams c)))))
+               imm (when c (member-class c name))
+               imm (when imm (if (accessible? env (this-type c) imm c) imm ::inaccessible))]
+           (if (and tyvar (or (:base? l) (nil? imm) (method-tvar? tyvar)
+                              (and (= :class (:sk tyvar)) (:local? tyvar))))
+             tyvar
+             (let [sym (or imm (when c (find-inherited-member-type env (this-type c) name c)))]
+               (if (found sym) sym (recur more)))))))
+     (when-not (:import? env)
+       (let [uctx (:uctx env) reg (:reg env)]
+         (or (named-type env name)
+             (get @(:toplevel uctx) name)
+             (class-in-package reg (:pkg uctx) name)
+             (star-type env name)))))))
+
+(defn find-var
+  "Resolve.findVar: what variable `name` denotes in `env`: [:local entry] (a local variable, a
+  parameter, a pattern variable; entry {:sk :local ...}), [:field fsym], or nil."
+  [env name]
+  (or
+   (loop [[l & more :as ls] (seq (:levels env))]
+     (when ls
+       (let [loc (first (filter #(= :local (:sk %)) (get (:scope l) name)))]
+         (if loc
+           [:local loc]
+           (if-let [f (when-let [c (:class l)] (find-field env (this-type c) name c))]
+             [:field f]
+             (recur more))))))
+   (let [imps (import-scope (:uctx env))]
+     (or (some (fn [[c n]] (when (= n name) (when-let [f (find-field env (this-type c) name c)]
+                                               (when (has? (field-flags f) STATIC) [:field f]))))
+               (:static-named imps))
+         (some (fn [c] (when-let [f (find-field env (this-type c) name c)]
+                         (when (has? (field-flags f) STATIC) [:field f])))
+               (:static-star imps))))))
+
+(defn resolve-qualified
+  "A name tree (IDENT, SELECT) resolved as javac's Attr does for the kinds `kinds` (a set of :val,
+  :typ, :pck): {:pck name}, {:c csym} (a class), {:tv tvsym}, {:local entry}, {:field fsym}, {:expr
+  true} (a value this tier does not resolve: a field of an expression's type), or nil."
+  [env t kinds]
+  (case (:tag t)
+    :IDENT
+    (let [n (:name t)]
+      (cond
+        (#{"this" "super"} n) {:expr true}
+        :else
+        (or (when (:val kinds)
+              (when-let [[k x] (find-var env n)] (if (= k :local) {:local x} {:field x})))
+            (when (:typ kinds)
+              (when-let [s (find-type env n)]
+                (case (:sk s) :class {:c s} :tvar {:tv s} nil)))
+            (when (:pck kinds) {:pck n}))))
+    :SELECT
+    (let [n (:name t)
+          qk (cond-> #{}
+               (:pck kinds) (conj :pck)
+               (:typ kinds) (conj :typ :pck)
+               (:val kinds) (conj :val :typ))]
+      (if (#{"class" "this" "super"} n)
+        {:expr true}
+        (let [q (resolve-qualified env (:selected t) qk)]
+          (cond
+            (nil? q) nil
+            (:pck q) (or (when (:typ kinds)
+                           (when-let [c (class-in-package (:reg env) (:pck q) n)] {:c c}))
+                         (when (:pck kinds) {:pck (str (:pck q) "." n)}))
+            (:c q) (let [c (:c q)]
+                     (or (when (:val kinds)
+                           (when-let [f (find-field env (this-type c) n c)] {:field f}))
+                         (when (:typ kinds)
+                           (when-let [m (found (find-member-type env (this-type c) n c))] {:c m}))))
+            (:tv q) (when (:val kinds) {:expr true})
+            :else (when (:val kinds) {:expr true})))))
+    (when (:val kinds) {:expr true})))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Type trees (Attr.attribType)
+
+(def prim-of-tag
+  {:INT :int :LONG :long :SHORT :short :BYTE :byte :CHAR :char :FLOAT :float :DOUBLE :double
+   :BOOLEAN :boolean :VOID :void})
+
+(defn- env-site
+  "The type of the class of `env`'s innermost level (Attr's env.enclClass.sym.type), nil at the top level."
+  [env]
+  (some-> (:class (first (:levels env))) this-type))
+
+(defn class-type-at
+  "Attr.checkId's type of class `c` named at `site` (the qualifier's type, else the env's class's):
+  its this-type; erased when generic; an inner class's enclosing type as the site's supertype."
+  [c site]
+  (let [own (this-type c)
+        o (:outer own)]
+    (cond
+      (seq (class-tparams c)) (erasure own)
+      (and o (= :class (:k o)))
+      (let [norm (or (when site (as-enclosing-super site (:c o))) (erasure o))]
+        (assoc own :outer norm))
+      :else own)))
+
+(declare annotation-compound)
+
+(defn type-of-tree
+  "The type of type tree `t` in `env` (Attr.attribType), nil when it is not one this tier gives (a
+  diamond's)."
+  [env t]
+  (case (:tag t)
+    :TYPEIDENT (prim-of-tag (:typetag t))
+    :IDENT (let [s (find-type env (:name t))]
+             (case (:sk s)
+               :class (class-type-at s (env-site env))
+               :tvar (tvar-type s)
+               (throw (ex-info (str "repr/java decls: no type " (:name t)) {:name (:name t) :pos (:pos t)}))))
+    :SELECT (let [r (if (#{:IDENT :SELECT} (:tag (:selected t)))
+                      (resolve-qualified env t #{:typ})
+                      ;; a member of a parameterized or annotated type: Outer<T>.Inner
+                      (let [qt (type-of-tree env (:selected t))]
+                        (when-let [m (and (= :class (:k qt)) (found (find-member-type env qt (:name t) (:c qt))))]
+                          {:c m :site qt})))]
+              (if-let [c (:c r)]
+                (let [site (or (:site r)
+                               (let [q (resolve-qualified env (:selected t) #{:typ :pck})]
+                                 (when (:c q) (type-of-tree env (:selected t)))))]
+                  (class-type-at c site))
+                (throw (ex-info (str "repr/java decls: no type " (tree-name-of t)) {:pos (:pos t)}))))
+    :TYPEAPPLY (let [ct (type-of-tree env (:clazz t))
+                     args (mapv #(type-of-tree env %) (:arguments t))
+                     o (:outer ct)
+                     clazz (loop [x (:clazz t)] (if (= :ANNOTATED_TYPE (:tag x)) (recur (:underlyingType x)) x))
+                     o (if (and o (= :class (:k o)))
+                         (let [site (case (:tag clazz)
+                                      :IDENT (env-site env)
+                                      :SELECT (let [q (resolve-qualified env (:selected clazz) #{:typ :pck})]
+                                                (when (:c q) (type-of-tree env (:selected clazz)))))]
+                           (if (and site (not= site o))
+                             (or (when (= :class (:k site)) (as-outer-super site (:c o))) (erasure o))
+                             (or site (erasure o))))
+                         o)]
+                 (when (or (seq args) (empty? (:arguments t)))
+                   (if (empty? (:arguments t))
+                     nil ;; a diamond: its type is inferred
+                     (assoc ct :args args :outer o))))
+    :TYPEARRAY (some-> (type-of-tree env (:elemtype t)) array-of)
+    :WILDCARD (let [bk (get-in t [:kind :kind])]
+                {:k :wild :bk (case bk :EXTENDS :extends :SUPER :super :UNBOUND :unbound)
+                 :t (when (:inner t) (type-of-tree env (:inner t)))})
+    :ANNOTATED_TYPE (let [u (type-of-tree env (:underlyingType t))]
+                      (when u
+                        (assoc u :anns (into (vec (:anns u)) (keep #(annotation-compound env % true) (:annotations t))))))
+    :TYPEINTERSECTION {:k :inter :ts (mapv #(type-of-tree env %) (:bounds t))}
+    :TYPEUNION {:k :union :ts (mapv #(type-of-tree env %) (:alternatives t))}
+    nil))
+
+(defn annotation-targets
+  "The element types (names: TYPE_USE, FIELD, ...) annotation class `c`'s @Target lists, nil when it
+  has none."
+  [c]
+  (memo c :targets
+        (fn []
+          (if (:src c)
+            (when-let [a (first (filter #(annotation-is? (base-env c) % "java.lang.annotation.Target")
+                                        (get-in (:tree c) [:mods :annotations])))]
+              (let [v (second (first (:values (annotation-compound (base-env c) a false))))]
+                (set (keep :name (if (:array v) (:values v) [v])))))
+            (when-let [a (first (filter #(= "Ljava/lang/annotation/Target;" (:type %)) (:annotations (:cf c))))]
+              (let [v (get (:values a) "value")]
+                (set (keep :name (if (= \[ (:tag v)) (:values v) [v])))))))))
+
+(defn type-use-annotations
+  "The compounds of declaration annotations `as` (trees, in `env`) that apply to types (TYPE_USE in
+  their @Target): javac's TypeAnnotations puts them on the declared type too."
+  [env as]
+  (vec (for [a as
+             :let [c (annotation-type env a)]
+             :when (and c (contains? (annotation-targets c) "TYPE_USE"))]
+         (annotation-compound env a false))))
+
+(defn with-annotations
+  "Type `t` with type annotations `anns` where a declaration's go (TypeAnnotations.typeWithAnnotations):
+  an array's on its innermost element type, else on the type."
+  [t anns]
+  (cond
+    (or (empty? anns) (nil? t) (keyword? t)) t
+    (= :array (:k t)) (assoc t :e (with-annotations (:e t) anns))
+    :else (assoc t :anns (into (vec anns) (:anns t)))))
+
+(defn vartype-of
+  "The declared type of variable declaration `d` in `env` (MemberEnter.visitVarDef, with its TYPE_USE
+  declaration annotations), nil when it is inferred (var, an implicit lambda parameter)."
+  [env d]
+  (when-let [vt (:vartype d)]
+    (when-not (= :VAR (:declKind d))
+      (let [t (type-of-tree env vt)
+            anns (type-use-annotations env (get-in d [:mods :annotations]))]
+        ;; a union's type annotations are on its alternatives' trees only
+        (if (= :union (:k t)) t (with-annotations t anns))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Constants (ConstFold, for annotation values): [type value], type a primitive keyword or
+;;; :string, value as javac's constValue (an int, char, short, byte or boolean as an int, a long, a
+;;; float, a double, a String)
+
+(defn- skip-parens [t] (if (= :PARENS (:tag t)) (recur (:expr t)) t))
+
+(defn- num-rank [k] (case k (:byte :short :char :int) 0 :long 1 :float 2 :double 3 nil))
+
+(defn- promote [a b]
+  (let [r (max (num-rank a) (num-rank b))] ([:int :long :float :double] r)))
+
+(defn- as-kind
+  "Constant value `v` (of kind `from`) converted to kind `to` (javac's coerce)."
+  [from v to]
+  (if (= from to)
+    v
+    (case to
+      :int (case from (:long) (unchecked-int (long v)) (:float :double) (unchecked-int (long (double v))) (int v))
+      :byte (unchecked-int (unchecked-byte (case from (:float :double) (long (double v)) (long v))))
+      :short (unchecked-int (unchecked-short (case from (:float :double) (long (double v)) (long v))))
+      :char (unchecked-int (unchecked-char (case from (:float :double) (long (double v)) (long v))))
+      :long (case from (:float :double) (long (double v)) (long v))
+      :float (float (double v))
+      :double (double v)
+      v)))
+
+(defn- jfloat->int [^double d] (cond (Double/isNaN d) 0 :else (long d)))
+
+(defn- const-string
+  "Type.stringValue of constant [k v]."
+  [[k v]]
+  (case k
+    :boolean (if (zero? (long v)) "false" "true")
+    :char (str (char (int v)))
+    :float (Float/toString (float v))
+    :double (Double/toString (double v))
+    :string v
+    (str v)))
+
+(declare const-value)
+
+(defn field-constant
+  "Field `f`'s constant value [type value] (a final field of a primitive type or String with a
+  constant initializer; a class file's ConstantValue), or nil."
+  [f]
+  (memo f :const
+        (fn []
+          (if-let [d (:tree f)]
+            (let [fl (field-flags f)
+                  t (field-type f)]
+              (when (and (has? fl FINAL) (:init d) (or (keyword? t) (and (= :class (:k t)) (= "java.lang.String" (:flat (:c t))))))
+                (let [env (cond-> (class-env (:owner f)) (has? fl STATIC) (assoc :static? true))]
+                  (when-let [[k v] (const-value env (:init d))]
+                    (let [tk (if (keyword? t) t :string)]
+                      (if (= tk :string)
+                        (when (= k :string) [:string v])
+                        (when (num-rank k) [tk (if (= tk :boolean) v (as-kind k v tk))])))))))
+            (when-some [v (:const f)]
+              (let [t (field-type f)]
+                (cond
+                  (keyword? t) [t (case t (:int :short :char :byte :boolean) (int v) v)]
+                  :else [:string v])))))))
+
+(defn local-constant
+  "Local variable entry `e`'s constant value (final, a constant initializer of its type), or nil."
+  [e]
+  (when-let [f (:const-fn e)] (f)))
+
+(defn- literal-const [t]
+  (let [v (:value t)]
+    (case (:typetag t)
+      :INT [:int (int v)] :LONG [:long (long v)] :CHAR [:char (int v)] :BOOLEAN [:boolean (int v)]
+      :FLOAT [:float (Float/intBitsToFloat (unchecked-int (Long/parseLong (subs v 1) 16)))]
+      :DOUBLE [:double (Double/longBitsToDouble (Long/parseUnsignedLong (subs v 1) 16))]
+      :CLASS [:string v]
+      nil)))
+
+(defn- fold-binary [tag [ka va :as a] [kb vb :as b]]
+  (let [string? (or (= :string ka) (= :string kb))]
+    (cond
+      (and (= tag :PLUS) string?) [:string (str (const-string a) (const-string b))]
+      string? (case tag :EQ nil :NE nil nil)
+      (and (= :boolean ka) (= :boolean kb))
+      (let [x (not (zero? (long va))) y (not (zero? (long vb)))
+            r (case tag (:AND :BITAND) (and x y) (:OR :BITOR) (or x y) :BITXOR (not= x y) :EQ (= x y) :NE (not= x y) nil)]
+        (when (some? r) [:boolean (if r 1 0)]))
+      (or (= :boolean ka) (= :boolean kb)) nil
+      (#{:SL :SR :USR} tag)
+      (let [k (promote ka ka)
+            n (long (as-kind kb vb :long))]
+        (case k
+          :int (let [x (int (as-kind ka va :int)) s (bit-and n 31)]
+                 [:int (case tag :SL (unchecked-int (bit-shift-left x s)) :SR (bit-shift-right x s)
+                         :USR (unchecked-int (unsigned-bit-shift-right (bit-and (long x) 0xffffffff) s)))])
+          :long (let [x (long (as-kind ka va :long)) s (bit-and n 63)]
+                  [:long (case tag :SL (bit-shift-left x s) :SR (bit-shift-right x s) :USR (unsigned-bit-shift-right x s))])
+          nil))
+      :else
+      (let [k (promote ka kb)
+            x (as-kind ka va k) y (as-kind kb vb k)
+            cmp (fn [r] [:boolean (if r 1 0)])]
+        (case k
+          :int (let [x (int x) y (int y)]
+                 (case tag
+                   :PLUS [:int (unchecked-add-int x y)] :MINUS [:int (unchecked-subtract-int x y)]
+                   :MUL [:int (unchecked-multiply-int x y)]
+                   :DIV (when-not (zero? y) [:int (unchecked-int (quot (long x) (long y)))])
+                   :MOD (when-not (zero? y) [:int (unchecked-int (rem (long x) (long y)))])
+                   :BITAND [:int (bit-and x y)] :BITOR [:int (bit-or x y)] :BITXOR [:int (bit-xor x y)]
+                   :EQ (cmp (== x y)) :NE (cmp (not= x y)) :LT (cmp (< x y)) :GT (cmp (> x y))
+                   :LE (cmp (<= x y)) :GE (cmp (>= x y)) nil))
+          :long (let [x (long x) y (long y)]
+                  (case tag
+                    :PLUS [:long (unchecked-add x y)] :MINUS [:long (unchecked-subtract x y)]
+                    :MUL [:long (unchecked-multiply x y)]
+                    :DIV (when-not (zero? y) [:long (quot x y)]) :MOD (when-not (zero? y) [:long (rem x y)])
+                    :BITAND [:long (bit-and x y)] :BITOR [:long (bit-or x y)] :BITXOR [:long (bit-xor x y)]
+                    :EQ (cmp (== x y)) :NE (cmp (not= x y)) :LT (cmp (< x y)) :GT (cmp (> x y))
+                    :LE (cmp (<= x y)) :GE (cmp (>= x y)) nil))
+          :float (let [x (float x) y (float y)]
+                   (case tag
+                     :PLUS [:float (float (+ x y))] :MINUS [:float (float (- x y))] :MUL [:float (float (* x y))]
+                     :DIV [:float (float (/ (double x) (double y)))] :MOD [:float (float (Math/IEEEremainder x y))]
+                     :EQ (cmp (== x y)) :NE (cmp (not (== x y))) :LT (cmp (< x y)) :GT (cmp (> x y))
+                     :LE (cmp (<= x y)) :GE (cmp (>= x y)) nil))
+          :double (let [x (double x) y (double y)]
+                    (case tag
+                      :PLUS [:double (+ x y)] :MINUS [:double (- x y)] :MUL [:double (* x y)]
+                      :DIV [:double (/ x y)]
+                      :EQ (cmp (== x y)) :NE (cmp (not (== x y))) :LT (cmp (< x y)) :GT (cmp (> x y))
+                      :LE (cmp (<= x y)) :GE (cmp (>= x y)) nil))
+          nil)))))
+
+(defn const-value
+  "The constant value [type value] of expression `t` in `env` (JLS 15.29, javac's ConstFold over
+  Attr's constant types), or nil."
+  [env t]
+  (let [t (skip-parens t)]
+    (case (:tag t)
+      :LITERAL (literal-const t)
+      (:IDENT :SELECT)
+      (let [r (resolve-qualified env t #{:val})]
+        (cond (:field r) (field-constant (:field r))
+              (:local r) (local-constant (:local r))
+              :else nil))
+      (:POS :NEG :COMPL :NOT)
+      (when-let [[k v] (const-value env (:arg t))]
+        (case (:tag t)
+          :NOT (when (= k :boolean) [:boolean (if (zero? (long v)) 1 0)])
+          :POS (when (num-rank k) (let [p (promote k k)] [p (as-kind k v p)]))
+          :NEG (when (num-rank k)
+                 (let [p (promote k k) x (as-kind k v p)]
+                   [p (case p :int (unchecked-negate-int (int x)) :long (unchecked-negate (long x)) :float (float (- (double x))) :double (- (double x)))]))
+          :COMPL (when (#{0 1} (num-rank k))
+                   (let [p (promote k k) x (as-kind k v p)]
+                     [p (if (= p :int) (bit-not (int x)) (bit-not (long x)))]))))
+      :TYPECAST
+      (when-let [[k v] (const-value env (:expr t))]
+        (let [ct (type-of-tree env (:clazz t))]
+          (cond
+            (keyword? ct) (cond (= ct k) [k v]
+                                (and (num-rank k) (num-rank ct)) [ct (as-kind k v ct)]
+                                :else nil)
+            (and (= :class (:k ct)) (= "java.lang.String" (:flat (:c ct))) (= k :string)) [k v]
+            :else nil)))
+      :CONDEXPR
+      (when-let [[ck cv] (const-value env (:cond t))]
+        (let [a (const-value env (:truepart t)) b (const-value env (:falsepart t))]
+          (when (and (= ck :boolean) a b)
+            (let [[ka va] a [kb vb] b
+                  k (cond (= ka kb) ka
+                          (and (num-rank ka) (num-rank kb)) (promote ka kb)
+                          :else nil)]
+              (when k
+                (if (zero? (long cv)) [k (as-kind kb vb k)] [k (as-kind ka va k)]))))))
+      (if (contains? #{:PLUS :MINUS :MUL :DIV :MOD :SL :SR :USR :LT :GT :LE :GE :EQ :NE :BITAND :BITOR :BITXOR :AND :OR}
+                     (:tag t))
+        (let [a (const-value env (:lhs t))
+              b (when a (const-value env (:rhs t)))]
+          (when (and a b) (fold-binary (:tag t) a b)))
+        nil))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Annotations (Annotate.attributeAnnotation)
+
+(defn annotation-type
+  "The class of annotation tree `a`'s type in `env`, or nil."
+  [env a]
+  (let [t (:annotationType a)
+        r (resolve-qualified env t #{:typ})]
+    (:c r)))
+
+(defn annotation-is?
+  "Is annotation tree `a` of the class of flat name `flat` (its type resolved in `env` when its name
+  can be that class's)?"
+  [env a flat]
+  (let [n (tree-name-of (:annotationType a))
+        simple (subs flat (inc (.lastIndexOf ^String flat ".")))]
+    (and n (or (= n flat) (= n simple) (str/ends-with? n (str "." simple)))
+         (= flat (:flat (annotation-type env a))))))
+
+(defn element-type
+  "The type of annotation class `c`'s element `name` (its method's return type), or nil."
+  [c name]
+  (some (fn [m] (when (and (= name (:name m)) (empty? (:params (method-type m)))) (:ret (method-type m))))
+        (:methods (members c))))
+
+(declare annotation-value)
+
+(defn- enum-class? [t] (and (= :class (:k t)) (has? (class-flags (:c t)) ENUM)))
+(defn- annotation-class? [t] (and (= :class (:k t)) (has? (class-flags (:c t)) ANNOTATION)))
+(defn- class-class? [t] (and (= :class (:k t)) (= "java.lang.Class" (:flat (:c t)))))
+(defn- string-type? [t] (and (= :class (:k t)) (= "java.lang.String" (:flat (:c t)))))
+
+(defn annotation-value
+  "Annotate.attributeAnnotationValue: annotation element value tree `t` against the element type
+  `et` in `env`: {:const [k v] :type et}, {:class t}, {:enum c :name n}, {:array et :values [...]},
+  {:compound ...}, or {:error true}."
+  [env et t]
+  (cond
+    (nil? et) {:error true}
+    (= :array (:k et))
+    (let [elems (if (= :NEWARRAY (:tag t)) (:elems t) [t])]
+      {:array et :values (mapv #(annotation-value env (:e et) %) elems)})
+    (= :NEWARRAY (:tag t)) {:error true}
+    (annotation-class? et) (if (= :ANNOTATION (:tag t)) {:compound (annotation-compound env t false)} {:error true})
+    (or (keyword? et) (string-type? et))
+    (let [c (const-value env t)
+          tk (if (keyword? et) et :string)]
+      (cond
+        (nil? c) {:error true}
+        (= tk :string) (if (= :string (first c)) {:const [:string (second c)] :type et} {:error true})
+        (= tk :boolean) (if (= :boolean (first c)) {:const c :type et} {:error true})
+        (num-rank (first c)) {:const [tk (as-kind (first c) (second c) tk)] :type et}
+        :else {:error true}))
+    (class-class? et)
+    (let [s (skip-parens t)]
+      (if (and (= :SELECT (:tag s)) (= "class" (:name s)))
+        (if-let [ct (type-of-tree env (:selected s))] {:class ct} {:error true})
+        {:error true}))
+    (enum-class? et)
+    (let [r (resolve-qualified env (skip-parens t) #{:val})]
+      (if-let [f (:field r)]
+        (if (has? (field-flags f) ENUM) {:enum (:owner f) :name (:name f) :type et} {:error true})
+        {:error true}))
+    :else {:error true}))
+
+(defn annotation-compound
+  "Annotate.attributeAnnotation of annotation tree `a` in `env`: {:c csym :values [[name value] ...]},
+  nil when its type is not found; `type-ann?` a type annotation's."
+  [env a type-ann?]
+  (when-let [c (annotation-type env a)]
+    {:c c
+     :values (vec (for [arg (:args a)]
+                    (let [[n v] (if (= :ASSIGN (:tag arg))
+                                  [(get-in arg [:lhs :name]) (:rhs arg)]
+                                  ["value" arg])]
+                      [n (annotation-value env (element-type c n) v)])))}))

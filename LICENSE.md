@@ -386,6 +386,22 @@ covers what.
   `fullName` and `isDiamond`, and `tree/JCTree.java`'s `JCClassDecl.getKind` (its test of the
   modifiers' flags): Copyright (c) Oracle and/or its affiliates, under the GNU General Public
   License version 2 with the Classpath Exception (text below; the file carries their notice).
+- `arbace/repr/java/decls.ae` and `arbace/repr/java/scope.ae` (repr/java's native attribution, its
+  declarations and scope tiers, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9a"): Arbace forms
+  reimplementing, for the native parser's trees, https://github.com/openjdk/jdk26u at `baf63fb`,
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/`'s `comp/Check.java` (`checkFlags`,
+  `implicitEnumFinalFlag`), `comp/Resolve.java` (`findType`, `findTypeVar`, `findImmediateMemberType`,
+  `findInheritedMemberType`, `findMemberType`, `findGlobalType`, `findVar`, `findField`,
+  `findIdentInPackage`, `isAccessible`), `comp/TypeEnter.java` (`attribSuperTypes`, `baseEnv`,
+  `getCanonicalConstructorDecl`), `comp/MemberEnter.java` (`visitMethodDef`, `visitVarDef`), `comp/Enter.java`
+  (`visitClassDef`'s flags and enclosing type), `comp/ConstFold.java`, `comp/Annotate.java`
+  (`attributeAnnotationValue` and its helpers), `code/Types.java` (`asSuper`, `asOuterSuper`,
+  `asEnclosingSuper`, the substitution of type arguments), `code/Symbol.java` (`markAbstractIfNeeded`),
+  `code/Flags.java` (the flags and masks), `comp/Attr.java` (the environments of its visit methods, the
+  match bindings' scopes, `findJumpTarget`, `checkIdInternal`'s type of a class name) with
+  `comp/MatchBindingsComputer.java`, and `comp/Flow.java`'s `AliveAnalyzer` as far as the bindings'
+  scopes need it: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License
+  version 2 with the Classpath Exception (text below; each file carries the notice).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`

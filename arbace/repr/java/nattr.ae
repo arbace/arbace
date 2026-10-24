@@ -1,0 +1,377 @@
+(ns arbace.repr.java.nattr
+  "The native attribution provider (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN9a\"): the scope
+  and declarations tiers' facts answered without javac, from the native parser's trees
+  (arbace.repr.java.scope's walk over arbace.repr.java.decls's declarations, with the platform's
+  class files), behind arbace.repr.java.attr; and their check against javac on Arbace's answers,
+  fact by fact.
+
+  Each fact the provider answers is asked of javac too (its twin's answer, by position): both are
+  rendered as data (`jdata-*`, `ndata-*`: symbols by their identity and declared properties, types
+  structurally, annotation values) and compared, the outcome counted by fact (:equal, :differ;
+  :declined when the provider leaves a fact of its tiers to javac: an inferred type, a diamond), the
+  first differences kept with their positions. The converter is then given the native answer
+  `realize`d as javac's objects (a symbol by its declaration's twin or by name in javac's Symtab, a
+  type built from the native one, an annotation's value constructed): the answers' further
+  properties that the converter reads from javac's objects (a symbol's members, a local's constant
+  value) stay javac's (the model behind the answers, the next step: JFS74)."
+  (:require [arbace.repr.java.decls :as d]
+            [arbace.repr.java.scope :as sc]
+            [arbace.repr.java.jtypes :as jt]
+            [arbace.string :as str])
+  (:import [com.sun.tools.javac.tree JCTree JCTree$JCVariableDecl JCTree$JCMethodDecl JCTree$JCClassDecl]
+           [com.sun.tools.javac.code Symbol Symbol$VarSymbol Symbol$MethodSymbol Symbol$ClassSymbol
+            Symbol$PackageSymbol Symbol$ModuleSymbol Symbol$TypeVariableSymbol Type Type$ClassType
+            Type$ArrayType Type$TypeVar Type$WildcardType Type$IntersectionClassType Type$UnionClassType
+            Type$MethodType Type$ForAll Attribute Attribute$Constant Attribute$Class Attribute$Enum
+            Attribute$Array Attribute$Compound Attribute$Error Attribute$TypeCompound BoundKind
+            TypeAnnotationPosition Kinds$Kind]
+           [com.sun.tools.javac.util Pair]
+           [java.util IdentityHashMap]))
+
+(set! *warn-on-reflection* true)
+
+;;; ------------------------------------------------------------------------------------------
+;;; The provider of a unit
+
+(defn provider
+  "The provider for native unit `uctx` (entered in its registry) paired with javac's unit by `index`
+  (arbace.repr.java.attr/index's); its answers walked now. `check` an atom of the run's outcomes
+  {fact {outcome n}}, `diffs` an atom of the first differences."
+  [uctx index check diffs]
+  (let [ans (sc/walk-unit uctx)
+        ^IdentityHashMap tw (:twins index)
+        sym->native (IdentityHashMap.)]
+    (doseq [^java.util.Map$Entry e (.entrySet tw)]
+      (let [n (.getKey e) j (.getValue e)]
+        (cond
+          (instance? JCTree$JCVariableDecl j) (when-let [s (.-sym ^JCTree$JCVariableDecl j)] (.put sym->native s n))
+          (instance? JCTree$JCClassDecl j) (when-let [s (.-sym ^JCTree$JCClassDecl j)] (.put sym->native s n))
+          (instance? JCTree$JCMethodDecl j)
+          (when-let [s (.-sym ^JCTree$JCMethodDecl j)]
+            (.put sym->native s n)))))
+    {:uctx uctx :reg (:reg uctx) :ans ans :twins tw :sym->native sym->native :check check :diffs diffs
+     :file (:file uctx)}))
+
+(defn answer "The native answers of node `t`." [p t] (.get ^IdentityHashMap (:ans p) t))
+
+(def ^:dynamic *max-diffs* 400)
+
+(def ^:private keep-declined? (some? (System/getenv "REPR_JAVA_ATTR_DECLINED")))
+
+(defn record!
+  "Count outcome `o` (:equal, :differ, :declined) of fact `id`; keep a difference's data."
+  [p id o t ndata jdata]
+  (swap! (:check p) update-in [id o] (fnil inc 0))
+  (when (or (= o :differ) (and (= o :declined) keep-declined?))
+    (swap! (:diffs p) (fn [ds] (if (< (count ds) *max-diffs*)
+                                 (conj ds {:fact id :file (:file p) :pos (:pos t) :tag (:tag t)
+                                           :native ndata :javac jdata})
+                                 ds)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Data: javac's answers and the native ones, rendered alike
+
+(def ^:private CMASK
+  (bit-or 0xfff d/SYNTHETIC d/ANNOTATION d/ENUM d/DEPRECATED d/DEFAULT d/SEALED d/NON_SEALED
+          d/DEPRECATED_ANNOTATION d/DEPRECATED_REMOVAL d/RECORD))
+(def ^:private MMASK
+  (bit-or 0xfff d/SYNTHETIC d/DEPRECATED d/VARARGS d/DEFAULT d/DEPRECATED_ANNOTATION d/DEPRECATED_REMOVAL
+          d/RECORD d/BRIDGE d/COMPACT_RECORD_CONSTRUCTOR d/GENERATEDCONSTR d/ANONCONSTR))
+(def ^:private FMASK
+  (bit-or 0xfff d/SYNTHETIC d/ENUM d/DEPRECATED d/HASINIT d/DEPRECATED_ANNOTATION d/DEPRECATED_REMOVAL
+          d/RECORD d/GENERATED_MEMBER))
+(def ^:private LMASK (bit-or 0xfff d/PARAMETER d/HASINIT d/VARARGS d/UNION))
+
+(defn- local-sym? [^Symbol s]
+  (and (instance? Symbol$VarSymbol s)
+       (let [ok (str (.kind (.owner s)))]
+         (or (= "MTH" ok) (= "VAR" ok) (not (#{"TYP" "PCK"} ok))))))
+
+(defn jcid "A javac class symbol's identity: its flat name; a local class's its declaration's position." [p ^Symbol c]
+  (if (and (instance? Symbol$ClassSymbol c) (.isDirectlyOrIndirectlyLocal ^Symbol$ClassSymbol c))
+    (if-let [n (.get ^IdentityHashMap (:sym->native p) c)] [:local (:pos n)] [:local-unknown (str (.flatName ^Symbol$ClassSymbol c))])
+    (str (.flatName ^Symbol c))))
+
+(defn ncid "A native class symbol's identity (jcid's)." [c]
+  (if (d/local-class? c) [:local (:pos (:tree c))] (:flat c)))
+
+(declare jtype jcompound ntype ncompound)
+
+(defn- jtvar-owner [p ^Symbol o]
+  (cond
+    (instance? Symbol$ClassSymbol o) (jcid p o)
+    (instance? Symbol$MethodSymbol o) (if-let [n (.get ^IdentityHashMap (:sym->native p) o)]
+                                        [:m (:pos n)]
+                                        [:m (jcid p (.owner o)) (str (.name o))])
+    :else [:owner (str o)]))
+
+(defn- ntvar-owner [o]
+  (case (:sk o)
+    :class (ncid o)
+    :method (if-let [t (:tree o)] [:m (:pos t)] [:m (ncid (:owner o)) (:name o)])
+    [:owner (str o)]))
+
+(defn- janns [p ^Type t] (mapv #(jcompound p %) (.getAnnotationMirrors t)))
+
+(defn jtype
+  "javac type `t` as data."
+  [p ^Type t]
+  (when t
+    (let [tg (jt/tag-name t)]
+      (case tg
+        ("BYTE" "SHORT" "CHAR" "INT" "LONG" "FLOAT" "DOUBLE" "BOOLEAN" "VOID") (keyword (str/lower-case tg))
+        "BOT" :null
+        "ARRAY" [:array (jtype p (.-elemtype ^Type$ArrayType t)) (janns p t)]
+        "TYPEVAR" (if (instance? com.sun.tools.javac.code.Type$CapturedType t)
+                    [:captured]
+                    [:tvar (str (.name (.-tsym t))) (jtvar-owner p (.owner (.-tsym t))) (janns p t)])
+        "WILDCARD" (let [w ^Type$WildcardType t]
+                     (condp = (.-kind w)
+                       BoundKind/UNBOUND [:wild :unbound nil]
+                       BoundKind/EXTENDS [:wild :extends (jtype p (.-type w))]
+                       BoundKind/SUPER [:wild :super (jtype p (.-type w))]))
+        "CLASS" (cond
+                  (instance? Type$IntersectionClassType t)
+                  [:inter (mapv #(jtype p %) (.getExplicitComponents ^Type$IntersectionClassType t))]
+                  (instance? Type$UnionClassType t)
+                  [:union (mapv #(jtype p %) (.getAlternativeTypes ^Type$UnionClassType t))]
+                  :else
+                  (let [o (.getEnclosingType t)]
+                    [:class (jcid p (.-tsym t)) (mapv #(jtype p %) (.getTypeArguments t))
+                     (when (= "CLASS" (jt/tag-name o)) (jtype p o)) (janns p t)]))
+        [:other tg]))))
+
+(defn ntype
+  "Native type `t` (arbace.repr.java.decls's) as data."
+  [t]
+  (cond
+    (nil? t) nil
+    (keyword? t) t
+    :else
+    (case (:k t)
+      :class [:class (ncid (:c t)) (mapv ntype (:args t)) (some-> (:outer t) ntype) (mapv ncompound (:anns t))]
+      :array [:array (ntype (:e t)) (mapv ncompound (:anns t))]
+      :tvar [:tvar (:name (:tv t)) (ntvar-owner (:owner (:tv t))) (mapv ncompound (:anns t))]
+      :wild [:wild (:bk t) (when (:t t) (ntype (:t t)))]
+      :inter [:inter (mapv ntype (:ts t))]
+      :union [:union (mapv ntype (:ts t))]
+      :null :null
+      [:other t])))
+
+(defn- const-data [k v]
+  [k (case k
+       (:int :short :char :byte :boolean) (str (long v))
+       :long (str (long v))
+       :float (str (Float/floatToIntBits (float v)))
+       :double (str (Double/doubleToLongBits (double v)))
+       (str v))])
+
+(defn- jvalue [p ^Attribute a]
+  (cond
+    (instance? Attribute$Constant a)
+    (let [tg (jt/tag-name (.-type a))
+          k (if (= tg "CLASS") :string (keyword (str/lower-case tg)))]
+      (into [:const] (const-data k (.-value ^Attribute$Constant a))))
+    (instance? Attribute$Class a) [:class (jtype p (.getValue ^Attribute$Class a))]
+    (instance? Attribute$Enum a) [:enum (jcid p (.-tsym (.-type a))) (str (.-name ^Symbol (.-value ^Attribute$Enum a)))]
+    (instance? Attribute$Array a) [:array (mapv #(jvalue p %) (.-values ^Attribute$Array a))]
+    (instance? Attribute$Compound a) (jcompound p a)
+    :else [:error]))
+
+(defn jcompound [p ^Attribute$Compound c]
+  [:ann (jcid p (.-tsym (.-type c)))
+   (mapv (fn [^Pair pr] [(str (.-name ^Symbol (.-fst pr))) (jvalue p (.-snd pr))]) (.-values c))])
+
+(defn- nvalue [v]
+  (cond
+    (:const v) (into [:const] (apply const-data (:const v)))
+    (:class v) [:class (ntype (:class v))]
+    (:enum v) [:enum (ncid (:enum v)) (:name v)]
+    (:array v) [:array (mapv nvalue (:values v))]
+    (:compound v) (ncompound (:compound v))
+    :else [:error]))
+
+(defn ncompound [c]
+  (when c [:ann (ncid (:c c)) (mapv (fn [[n v]] [n (nvalue v)]) (:values c))]))
+
+(defn- jflags [^Symbol s mask] (bit-and (.flags s) (long mask)))
+
+(defn- jtparams [p tvs]
+  (mapv (fn [^Type tv] [(str (.name (.-tsym tv))) (mapv #(jtype p %) (.getBounds jt/*types* tv))]) tvs))
+
+(defn- ntparams [tvs] (mapv (fn [tv] [(:name tv) (mapv ntype (d/tvar-bounds tv))]) tvs))
+
+(defn jlocal-id [p ^Symbol s]
+  (let [n (.get ^IdentityHashMap (:sym->native p) s)]
+    (if (map? n) [:local (:pos n)] [:local-unknown (str (.name s))])))
+
+(defn nlocal-id [e] [:local (:pos (:decl e))])
+
+(defn jdata
+  "javac's symbol `s` as data (a declaration's: its identity, flags and declared type)."
+  [p ^Symbol s decl?]
+  (cond
+    (nil? s) nil
+    (instance? Symbol$VarSymbol s)
+    (if (local-sym? s)
+      [:local (jlocal-id p s) (str (.name s)) (jflags s LMASK) (when decl? (jtype p (.-type s)))]
+      [:field (jcid p (.owner s)) (str (.name s)) (if decl? (jflags s FMASK) 0) (when decl? (jtype p (.-type s)))])
+    (instance? Symbol$MethodSymbol s)
+    (let [m ^Symbol$MethodSymbol s
+          t (.-type m)]
+      [:method (jcid p (.owner m)) (str (.name m)) (jflags m MMASK)
+       [:mt (jtparams p (.getTypeArguments t)) (mapv #(jtype p %) (.getParameterTypes t))
+        (jtype p (.getReturnType t)) (mapv #(jtype p %) (.getThrownTypes t))]
+       (mapv #(str (.name ^Symbol %)) (.-params m))
+       (some->> (.-defaultValue m) (jvalue p))])
+    (instance? Symbol$ClassSymbol s)
+    (let [c ^Symbol$ClassSymbol s]
+      [:class (jcid p c) (jflags c CMASK) (jtparams p (.getTypeArguments (.-type c)))
+       (jtype p (.supertype jt/*types* (.-type c))) (mapv #(jtype p %) (.interfaces jt/*types* (.-type c)))])
+    (instance? Symbol$PackageSymbol s) [:package (str (.getQualifiedName ^Symbol$PackageSymbol s))]
+    (instance? Symbol$ModuleSymbol s) [:module (str (.-name s))]
+    :else [:other (str s)]))
+
+(defn ndata-local
+  "Native local entry `e` as data (jdata's of its symbol); its type nil when inferred (var, an
+  implicit lambda parameter)."
+  [e]
+  (let [d (:decl e)
+        t (d/vartype-of (:env e) d)
+        fl (let [fl (if (= :binding (:kind e))
+                        ;; a BindingSymbol's: its modifiers' flags, HASINIT
+                        (bit-or (long (get-in d [:mods :flags])) d/HASINIT)
+                        (d/check-flags :var (get-in d [:mods :flags]) {:owner-kind :local}))
+                   fl (if (:init d) (bit-or fl d/HASINIT) fl)
+                   fl (if (= :resource (:kind e)) (bit-or fl d/FINAL) fl)
+                   fl (if (= :TYPEUNION (get-in d [:vartype :tag])) (bit-or fl d/FINAL d/UNION) fl)]
+               fl)]
+    [:local (nlocal-id e) (:name e) (bit-and (long fl) LMASK) (ntype t)]))
+
+(defn ndata-field "Native field `f` as data (jdata's of its symbol)." [f]
+  [:field (ncid (:owner f)) (:name f) (bit-and (d/field-flags f) (long FMASK)) (ntype (d/field-type f))])
+
+(defn ndata-method "Native method `m` as data (jdata's of its symbol)." [p m]
+  (let [mt (d/method-type m)
+        d (:tree m)]
+    [:method (ncid (:owner m)) (:name m) (bit-and (d/method-flags m) (long MMASK))
+     [:mt (ntparams (:tparams mt)) (mapv ntype (:params mt)) (ntype (:ret mt)) (mapv ntype (:throws mt))]
+     (mapv :name (:params d))
+     (when-let [dv (:defaultValue d)]
+       (nvalue (d/annotation-value (d/method-env m) (:ret mt) dv)))]))
+
+(defn ndata-class
+  "Native class `c` as data (jdata's of its symbol); nil for an anonymous class of a diamond, whose
+  supertype is inferred."
+  [c]
+  (when-not (and (:anon? c) (= :TYPEAPPLY (get-in c [:newclass :clazz :tag]))
+                 (empty? (get-in c [:newclass :clazz :arguments])))
+  [:class (ncid c) (bit-and (d/class-flags c) (long CMASK)) (ntparams (d/class-tparams c))
+   (ntype (d/class-supertype c)) (mapv ntype (d/class-interfaces c))]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Realization: native answers as javac's objects
+
+(defn- module-sym ^Symbol$ModuleSymbol [m]
+  (if m (.getModule jt/*syms* (jt/jname m)) (.-unnamedModule jt/*syms*)))
+
+(defn- twin-of [p n] (.get ^IdentityHashMap (:twins p) n))
+
+(defn rl-class
+  "javac's class symbol for native class `c`: its declaration's twin (a class of this unit), else
+  Symtab's of its module and flat name."
+  ^Symbol$ClassSymbol [p c]
+  (or (when-let [t (and (:src c) (twin-of p (:tree c)))] (.-sym ^JCTree$JCClassDecl t))
+      (when-not (d/local-class? c)
+        (let [m (module-sym (if (:src c) (:module (:reg c)) (:module c)))
+              s (.getClass jt/*syms* m (jt/jname (:flat c)))]
+          (when s (try (.complete s) (catch Throwable _ nil)) s)))
+      (throw (ex-info (str "repr/java nattr: no javac class " (:flat c)) {:flat (:flat c)}))))
+
+(defn rl-method ^Symbol$MethodSymbol [p m]
+  (or (when-let [t (and (:tree m) (twin-of p (:tree m)))] (.-sym ^JCTree$JCMethodDecl t))
+      (let [c (rl-class p (:owner m))]
+        (first (filter #(instance? Symbol$MethodSymbol %) (.getSymbolsByName (.members c) (jt/jname (:name m))))))))
+
+(defn rl-local
+  "javac's variable symbol for native local entry `e`: its declaration's twin's (a compact
+  constructor's implicit parameter: its constructor's)."
+  ^Symbol$VarSymbol [p e]
+  (.-sym ^JCTree$JCVariableDecl (twin-of p (:decl e))))
+
+(defn rl-field ^Symbol$VarSymbol [p f]
+  (or (when-let [t (and (:tree f) (twin-of p (:tree f)))] (.-sym ^JCTree$JCVariableDecl t))
+      (let [c (rl-class p (:owner f))]
+        (first (filter #(= "VAR" (str (.kind ^Symbol %))) (.getSymbolsByName (.members c) (jt/jname (:name f))))))))
+
+(declare rl-type rl-compound)
+
+(defn- prim-type ^Type [k]
+  (let [s jt/*syms*]
+    (case k
+      :int (.-intType s) :long (.-longType s) :short (.-shortType s) :byte (.-byteType s)
+      :char (.-charType s) :float (.-floatType s) :double (.-doubleType s) :boolean (.-booleanType s)
+      :void (.-voidType s) :null (.-botType s))))
+
+(defn rl-type
+  "javac's type for native type `t`."
+  ^Type [p t]
+  (let [^Type base
+        (if (keyword? t)
+          (prim-type t)
+          (case (:k t)
+            :class (let [c (rl-class p (:c t))
+                         ct (.-type c)
+                         args (mapv #(rl-type p %) (:args t))
+                         o (some->> (:outer t) (rl-type p))]
+                     (cond
+                       (and (empty? args) (d/raw? t)) (.erasure jt/*types* ct)
+                       (and (= (ntype (assoc t :anns [])) (ntype (d/this-type (:c t))))) ct
+                       :else (Type$ClassType. (or o (.getEnclosingType ct))
+                                              (com.sun.tools.javac.util.List/from ^objects (into-array Type args)) c)))
+            :array (.makeArrayType jt/*types* (rl-type p (:e t)))
+            :tvar (let [tv (:tv t) o (:owner tv)]
+                    (nth (vec (if (= :method (:sk o))
+                                (.getTypeArguments (.-type (rl-method p o)))
+                                (.getTypeArguments (.-type (rl-class p o)))))
+                         (:idx tv)))
+            :wild (Type$WildcardType. ^Type (if (:t t) (rl-type p (:t t)) (.-objectType jt/*syms*))
+                                      (case (:bk t) :extends BoundKind/EXTENDS :super BoundKind/SUPER :unbound BoundKind/UNBOUND)
+                                      (.-boundClass jt/*syms*))
+            :inter (.makeIntersectionType jt/*types* (com.sun.tools.javac.util.List/from ^objects (into-array Type (map #(rl-type p %) (:ts t)))))
+            :null (.-botType jt/*syms*)))]
+    (if (and (map? t) (seq (:anns t)))
+      (.annotatedType base (com.sun.tools.javac.util.List/from
+                            ^objects (into-array Attribute$TypeCompound
+                                                 (for [a (:anns t)] (Attribute$TypeCompound. (rl-compound p a) TypeAnnotationPosition/unknown)))))
+      base)))
+
+(defn- boxed-value [k v]
+  (case k
+    (:int :short :char :byte :boolean) (Integer/valueOf (int v))
+    :long (Long/valueOf (long v))
+    :float (Float/valueOf (float v))
+    :double (Double/valueOf (double v))
+    v))
+
+(defn- rl-value ^Attribute [p v]
+  (cond
+    (:const v) (let [[k x] (:const v)] (Attribute$Constant. (rl-type p (:type v)) (boxed-value k x)))
+    (:class v) (Attribute$Class. jt/*types* (rl-type p (:class v)))
+    (:enum v) (let [c (rl-class p (:enum v))]
+                (Attribute$Enum. (rl-type p (:type v))
+                                 (first (filter #(= "VAR" (str (.kind ^Symbol %))) (.getSymbolsByName (.members c) (jt/jname (:name v)))))))
+    (:array v) (Attribute$Array. (rl-type p (:array v)) ^"[Lcom.sun.tools.javac.code.Attribute;" (into-array Attribute (map #(rl-value p %) (:values v))))
+    (:compound v) (rl-compound p (:compound v))
+    :else (Attribute$Error. (.-errType jt/*syms*))))
+
+(defn rl-compound
+  "javac's annotation for native compound `c`."
+  ^Attribute$Compound [p c]
+  (let [jc (rl-class p (:c c))]
+    (Attribute$Compound. (.-type jc)
+                         (com.sun.tools.javac.util.List/from
+                          ^objects (into-array Pair
+                                               (for [[n v] (:values c)]
+                                                 (Pair. (first (filter #(instance? Symbol$MethodSymbol %) (.getSymbolsByName (.members jc) (jt/jname n))))
+                                                        (rl-value p v))))))))

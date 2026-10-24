@@ -1,0 +1,299 @@
+(ns arbace.repr.java.classfile
+  "The platform's class files as declarations (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN9a\"):
+  what javac's ClassReader takes from a class file to complete a class symbol, read without javac,
+  for the native attribution's declarations tier (arbace.repr.java.decls). Arbace's own reader, after
+  jrt.classfile (test/jrt/classfile.ae, JN7), which reads the code; this one reads the declarations:
+  the class's flags, superclass, interfaces and generic Signature, its InnerClasses entries, its fields
+  (with their ConstantValue and Signature), its methods (with their Signature), its annotations (with
+  their values: an annotation type's @Retention and @Target) and whether it is a record, and parses
+  JVMS 4.7.9.1's signatures into data.
+
+  (parse bytes) is
+    {:this \"a/b/C\" :super \"a/b/S\" or nil :interfaces [\"a/b/I\" ...] :flags n :signature s or nil
+     :inner [{:inner \"a/b/C$D\" :outer \"a/b/C\" or nil :name \"D\" or nil :flags n} ...]
+     :fields [{:name :desc :flags :signature :const v}] :methods [{:name :desc :flags :signature}]
+     :annotations [{:type \"La/b/A;\" :values {name value}}] :record? b :permitted [\"a/b/P\" ...]}
+  an element value being {:tag \\s :value v} (a constant: its tag JVMS 4.7.16.1's), {:tag \\e :type d :name n},
+  {:tag \\c :class d}, {:tag \\@ :annotation a} or {:tag \\[ :values [...]}. The flags are the class
+  file's access flags (JVMS tables 4.1-B, 4.5-A, 4.6-A, 4.7.6-A).
+
+  (class-signature s), (field-signature s), (method-signature s) parse signatures (and a field's or a
+  method's descriptor) into {:tparams [[name [bound ...]] ...] :super t :interfaces [t ...]}, a type, and
+  {:tparams ... :params [t ...] :ret t :throws [t ...]}: a type is a primitive keyword (:int, :void,
+  ...), [:class \"a.b.C$D\" [arg ...] outer-or-nil] (flat names), [:array t], [:tvar \"T\"] or a type
+  argument [:wild :extends|:super t] / [:wild :unbound].")
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------
+;; bytes
+
+(defn- u1 ^long [^bytes b ^long i] (bit-and (long (aget b i)) 0xff))
+(defn- u2 ^long [^bytes b ^long i] (bit-or (bit-shift-left (u1 b i) 8) (u1 b (inc i))))
+(defn- u4 ^long [^bytes b ^long i] (bit-or (bit-shift-left (u2 b i) 16) (u2 b (+ i 2))))
+(defn- s4 ^long [^bytes b ^long i] (long (unchecked-int (u4 b i))))
+
+(defn- mutf8
+  "The modified UTF-8 of n bytes at i (JVMS 4.4.7) as a string."
+  [^bytes b ^long i ^long n]
+  (let [sb (StringBuilder.)
+        end (+ i n)]
+    (loop [j i]
+      (when (< j end)
+        (let [c (u1 b j)]
+          (cond
+            (< c 0x80) (do (.append sb (char c)) (recur (inc j)))
+            (= (bit-and c 0xe0) 0xc0)
+            (do (.append sb (char (bit-or (bit-shift-left (bit-and c 0x1f) 6)
+                                          (bit-and (u1 b (inc j)) 0x3f))))
+                (recur (+ j 2)))
+            :else
+            (do (.append sb (char (bit-or (bit-shift-left (bit-and c 0x0f) 12)
+                                          (bit-shift-left (bit-and (u1 b (inc j)) 0x3f) 6)
+                                          (bit-and (u1 b (+ j 2)) 0x3f))))
+                (recur (+ j 3)))))))
+    (str sb)))
+
+;; ---------------------------------------------------------------------------------------
+;; the constant pool
+
+(defn- read-pool
+  "The constant pool's entries: an object array indexed by entry (nil at 0 and after a long or a
+  double), each [tag ...operands], utf8 entries as strings; and the offset after it."
+  [^bytes b]
+  (let [n (u2 b 8)
+        out (object-array n)]
+    (loop [k 1 i 10]
+      (if (>= k n)
+        [out i]
+        (let [tag (u1 b i)]
+          (case (int tag)
+            1 (let [len (u2 b (inc i))]
+                (aset out k (mutf8 b (+ i 3) len))
+                (recur (inc k) (long (+ (+ i 3) len))))
+            3 (do (aset out k [:integer (s4 b (inc i))]) (recur (inc k) (+ i 5)))
+            4 (do (aset out k [:float (Float/intBitsToFloat (unchecked-int (u4 b (inc i))))]) (recur (inc k) (+ i 5)))
+            5 (do (aset out k [:long (bit-or (bit-shift-left (u4 b (inc i)) 32) (u4 b (+ i 5)))]) (recur (+ k 2) (+ i 9)))
+            6 (do (aset out k [:double (Double/longBitsToDouble (bit-or (bit-shift-left (u4 b (inc i)) 32) (u4 b (+ i 5))))])
+                  (recur (+ k 2) (+ i 9)))
+            7 (do (aset out k [:class (u2 b (inc i))]) (recur (inc k) (+ i 3)))
+            8 (do (aset out k [:string (u2 b (inc i))]) (recur (inc k) (+ i 3)))
+            (9 10 11 12 17 18) (recur (inc k) (+ i 5))
+            15 (recur (inc k) (+ i 4))
+            (16 19 20) (recur (inc k) (+ i 3))
+            (throw (ex-info (str "class file: constant pool tag " tag " at " i) {:tag tag :offset i}))))))))
+
+(defn- utf ^String [^objects pool ^long k] (aget pool k))
+(defn- class-name [^objects pool ^long k] (when (pos? k) (utf pool (second (aget pool k)))))
+
+(defn- const-value
+  "The value of a ConstantValue's (or a constant element value's) entry."
+  [^objects pool ^long k]
+  (let [e (aget pool k)]
+    (if (string? e)
+      e
+      (let [[tag a] e]
+        (case tag
+          :string (utf pool a)
+          (:integer :float :long :double) a)))))
+
+;; ---------------------------------------------------------------------------------------
+;; attributes
+
+(defn- attributes
+  "The attributes at offset i: [{name [start length]} offset-after]."
+  [^objects pool ^bytes b ^long i]
+  (let [n (u2 b i)]
+    (loop [k 0 i (+ i 2) out {}]
+      (if (= k n)
+        [out i]
+        (let [len (u4 b (+ i 2))]
+          (recur (inc k) (long (+ (+ i 6) len)) (assoc out (utf pool (u2 b i)) [(+ i 6) len])))))))
+
+(declare read-annotation)
+
+(defn- read-value
+  "element_value at i (JVMS 4.7.16.1): [value offset-after]."
+  [^objects pool ^bytes b ^long i]
+  (let [t (char (u1 b i))]
+    (case t
+      (\B \C \D \F \I \J \S \Z \s) [{:tag t :value (const-value pool (u2 b (inc i)))} (+ i 3)]
+      \e [{:tag t :type (utf pool (u2 b (inc i))) :name (utf pool (u2 b (+ i 3)))} (+ i 5)]
+      \c [{:tag t :class (utf pool (u2 b (inc i)))} (+ i 3)]
+      \@ (let [[a j] (read-annotation pool b (inc i))] [{:tag t :annotation a} j])
+      \[ (let [n (u2 b (inc i))]
+           (loop [k 0 j (+ i 3) out []]
+             (if (= k n)
+               [{:tag t :values out} j]
+               (let [[v j] (read-value pool b j)] (recur (inc k) (long j) (conj out v)))))))))
+
+(defn- read-annotation
+  "annotation at i: [{:type :values} offset-after]."
+  [^objects pool ^bytes b ^long i]
+  (let [n (u2 b (+ i 2))]
+    (loop [k 0 j (+ i 4) vals {}]
+      (if (= k n)
+        [{:type (utf pool (u2 b i)) :values vals} j]
+        (let [nm (utf pool (u2 b j))
+              [v j] (read-value pool b (+ j 2))]
+          (recur (inc k) (long j) (assoc vals nm v)))))))
+
+(defn- annotations
+  "The annotations of a member's or the class's attributes (visible and invisible)."
+  [^objects pool ^bytes b attrs]
+  (vec (for [an ["RuntimeVisibleAnnotations" "RuntimeInvisibleAnnotations"]
+             :let [[i _] (get attrs an)]
+             :when i
+             a (let [n (u2 b i)]
+                 (loop [k 0 j (+ i 2) out []]
+                   (if (= k n)
+                     out
+                     (let [[a j] (read-annotation pool b j)] (recur (inc k) j (conj out a))))))]
+         a)))
+
+(defn- members
+  "The n members (fields or methods) from offset i: [[{:name :desc :flags} attrs] ...] and the offset after them."
+  [^objects pool ^bytes b ^long i]
+  (let [n (u2 b i)]
+    (loop [k 0 j (+ i 2) out []]
+      (if (= k n)
+        [out j]
+        (let [[attrs after] (attributes pool b (+ j 6))]
+          (recur (inc k) (long after)
+                 (conj out [{:name (utf pool (u2 b (+ j 2))) :desc (utf pool (u2 b (+ j 4))) :flags (u2 b j)} attrs])))))))
+
+(defn- signature [^objects pool ^bytes b attrs]
+  (when-let [[i _] (get attrs "Signature")] (utf pool (u2 b i))))
+
+(defn parse
+  "The class file in bytes `b` as declarations (the namespace's docstring)."
+  [^bytes b]
+  (when-not (= (u4 b 0) 0xcafebabe)
+    (throw (ex-info "not a class file" {})))
+  (let [[pool i] (read-pool b)
+        flags (u2 b i)
+        this (class-name pool (u2 b (+ i 2)))
+        super (class-name pool (u2 b (+ i 4)))
+        ni (u2 b (+ i 6))
+        ifaces (mapv #(class-name pool (u2 b (+ i 8 (* 2 %)))) (range ni))
+        [fields i] (members pool b (+ i 8 (* 2 ni)))
+        [methods i] (members pool b i)
+        [cattrs _] (attributes pool b i)]
+    {:this this :super super :interfaces ifaces :flags flags
+     :signature (signature pool b cattrs)
+     :inner (if-let [[i _] (get cattrs "InnerClasses")]
+              (vec (for [k (range (u2 b i))
+                         :let [j (+ i 2 (* 8 k))]]
+                     {:inner (class-name pool (u2 b j)) :outer (class-name pool (u2 b (+ j 2)))
+                      :name (let [n (u2 b (+ j 4))] (when (pos? n) (utf pool n))) :flags (u2 b (+ j 6))}))
+              [])
+     :fields (mapv (fn [[m attrs]]
+                     (assoc m :signature (signature pool b attrs)
+                            :const (when-let [[ci _] (get attrs "ConstantValue")] (const-value pool (u2 b ci)))))
+                   fields)
+     :methods (mapv (fn [[m attrs]] (assoc m :signature (signature pool b attrs))) methods)
+     :annotations (annotations pool b cattrs)
+     :record? (contains? cattrs "Record")
+     :permitted (if-let [[i _] (get cattrs "PermittedSubclasses")]
+                  (mapv #(class-name pool (u2 b (+ i 2 (* 2 %)))) (range (u2 b i)))
+                  [])}))
+
+(defn read-file
+  "The class file at path (a string or a java.io.File) as declarations."
+  [f]
+  (parse (java.nio.file.Files/readAllBytes (.toPath (java.io.File. (str f))))))
+
+;; ---------------------------------------------------------------------------------------
+;; signatures (JVMS 4.7.9.1) and descriptors (JVMS 4.3)
+
+(def prim-of
+  {\B :byte \C :char \D :double \F :float \I :int \J :long \S :short \Z :boolean \V :void})
+
+(defn- sig-reader [^String s] (object-array [s (long-array 1)]))
+(defn- pk ^long [^objects r] (aget ^longs (aget r 1) 0))
+(defn- peekc [^objects r] (let [^String s (aget r 0) i (pk r)] (when (< i (count s)) (.charAt s (int i)))))
+(defn- nextc [^objects r] (let [c (peekc r)] (aset ^longs (aget r 1) 0 (inc (pk r))) c))
+(defn- expect [^objects r c] (let [d (nextc r)] (when-not (= c d) (throw (ex-info (str "signature: " c " expected in " (aget r 0)) {})))))
+(defn- ident
+  "An identifier up to one of the characters `stops`."
+  [^objects r stops]
+  (let [^String s (aget r 0) i (pk r)
+        j (long (loop [j i] (if (and (< j (count s)) (not (contains? stops (.charAt s (int j))))) (recur (inc j)) j)))]
+    (aset ^longs (aget r 1) 0 j)
+    (subs s i j)))
+
+(declare ref-type type-args)
+
+(defn- class-type
+  "ClassTypeSignature after its L: [:class flat args outer]."
+  [^objects r]
+  (let [pkg+name (ident r #{\< \. \;})
+        flat (.replace ^String pkg+name \/ \.)]
+    (loop [t [:class flat (type-args r) nil]]
+      (case (nextc r)
+        \; t
+        \. (let [n (ident r #{\< \. \;})
+                 [_ of _ _] t]
+             (recur [:class (str of "$" n) (type-args r) t]))))))
+
+(defn- type-args [^objects r]
+  (if (= \< (peekc r))
+    (do (nextc r)
+        (loop [out []]
+          (if (= \> (peekc r))
+            (do (nextc r) out)
+            (recur (conj out (case (peekc r)
+                               \* (do (nextc r) [:wild :unbound])
+                               \+ (do (nextc r) [:wild :extends (ref-type r)])
+                               \- (do (nextc r) [:wild :super (ref-type r)])
+                               (ref-type r)))))))
+    []))
+
+(defn- any-type [^objects r]
+  (let [c (nextc r)]
+    (case c
+      \L (class-type r)
+      \T (let [n (ident r #{\;})] (nextc r) [:tvar n])
+      \[ [:array (any-type r)]
+      (or (prim-of c) (throw (ex-info (str "signature: a type expected in " (aget r 0)) {}))))))
+
+(defn- ref-type [^objects r] (any-type r))
+
+(defn- type-params [^objects r]
+  (if (= \< (peekc r))
+    (do (nextc r)
+        (loop [out []]
+          (if (= \> (peekc r))
+            (do (nextc r) out)
+            (let [n (ident r #{\:})
+                  bounds (loop [bs []]
+                           (if (= \: (peekc r))
+                             (do (nextc r)
+                                 (if (#{\: \>} (peekc r))
+                                   (recur bs) ;; no class bound
+                                   (recur (conj bs (ref-type r)))))
+                             bs))]
+              (recur (conj out [n bounds]))))))
+    []))
+
+(defn class-signature
+  "A class's Signature as {:tparams :super :interfaces}."
+  [^String s]
+  (let [r (sig-reader s)
+        tps (type-params r)
+        sup (ref-type r)]
+    {:tparams tps :super sup
+     :interfaces (loop [out []] (if (peekc r) (recur (conj out (ref-type r))) out))}))
+
+(defn field-signature "A field's Signature or descriptor as a type." [^String s] (any-type (sig-reader s)))
+
+(defn method-signature
+  "A method's Signature or descriptor as {:tparams :params :ret :throws}."
+  [^String s]
+  (let [r (sig-reader s)
+        tps (type-params r)
+        _ (expect r \()
+        ps (loop [out []] (if (= \) (peekc r)) (do (nextc r) out) (recur (conj out (any-type r)))))
+        ret (any-type r)
+        th (loop [out []] (if (= \^ (peekc r)) (do (nextc r) (recur (conj out (any-type r)))) out))]
+    {:tparams tps :params ps :ret ret :throws th}))
