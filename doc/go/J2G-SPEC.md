@@ -1413,8 +1413,9 @@ replaces the type-word compare):
 a `Dyn`. A proxy of a class `C` must be a Go value of `C_I`, since translated code uses it as a
 `C` (`(PrintWriter. w)` over a proxy of `Writer`), so for each class of a fixed list,
 `arbace.j2g.model/proxy-supers` (`java.io.Writer`, `Reader`, `PushbackReader`, `InputStream`,
-`OutputStream`, `BufferedWriter` (pprint's tests), `arbace.lang.APersistentMap`, and jrt's
-hand-written `ThreadLocal`; each must be translated or hand-written, in the world and not
+`OutputStream`, `BufferedWriter` (pprint's tests), `arbace.lang.APersistentMap`, jrt's
+hand-written `ThreadLocal`, and `java.util.BitSet` (Clojure's suite, `java-interop`'s
+`test-proxy-super`; REAP4, doc/FULL-SUPPORT-SURVEY.md, "As built: REAP4"); each must be translated or hand-written, in the world and not
 final; a translated one is non-leaf by being listed, amendment Z1), j2g writes a Go type
 **`DynSub_C`** in `j2g_dyn.go`:
 
@@ -1440,7 +1441,7 @@ such as `ThreadLocal.initialValue`, the fn `(factory name)`). `setMethod` on a p
 that has a slot sets only the slot, so reflection through `C`'s member reaches the Go method
 and `proxy-super`'s reflective call runs `C`'s implementation. The natives work on both kinds of
 object through the Go interface `dynObject`. A proxy of a class outside the list, or of a leaf
-class (`BitSet`: making it non-leaf would change every use), throws
+class (a listed class is not one), throws
 `UnsupportedOperationException` "proxy of C is not in the Go build" when evaluated, so code
 naming it loads. jrt's stack traces leave out their dispatch frames as they do `Dyn`'s.
 
