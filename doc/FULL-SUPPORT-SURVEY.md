@@ -732,6 +732,141 @@ RPS12 (gc on the originals the reference of goi's check and of AOT), RPS13 (`bin
 the language's reference; `--full` as it is, its box steps regression checks), RPS17 (the lines
 layout, the action's gc flags, errorcheck programs from mode `:full`). REAP1 and REAP2 started.
 
+## As built: REAP2 (2026-10-24)
+
+Branch `reap2-goi-aot`, from main `37422a67`. Go's AOT level is a level of goi's check (RPS10):
+`bin/goi check --aot [--record] [--jobs N] [--only REGEX]`, its reference
+`test/goi/check-aot-linux-amd64.edn`, its known differences `test/goi/check-aot-known.edn` (11
+programs, each with its reason), its classes `test/goi/divergences-aot.edn` in
+`test/goi/divergences.edn`'s format (RPS3), judged by `bin/goi divergences --aot`, which the whole
+check runs after it (`make goi-check-aot`, `make goi-divergences-aot`); `bin/gate --full` runs it
+as the step `goi-aot` after the step `goi` (the gate's executable the tools' host, so that
+`arbace.build.go` runs compiled).
+
+**What it does.** One corpus, goi's (1,837 programs: 1,051 run programs, 127 run directory
+tests, 659 errorcheck programs), each at the AOT level:
+
+- *Run programs*: the action's words split as Go's test driver splits them (`splitQuoted`: `xargs`'
+  quoting), `-t` the time limit as goi's (10 s, the action's `-t`, `test/goi/timeouts.txt`; three
+  times that for gc), its other flags passed to both builds as go build's (RPS17: `-gcflags=...`,
+  `-tags=...`; `-goexperiment` and `-godebug` would be a skip, none in the corpus); the program's
+  package file and forms directory copied alone into a forms root and built by `bin/build-go
+  --layout lines --go-flag FLAG... --print-cache DIR` (`arbace.build.go`: the module printed,
+  `go build -trimpath`), run in `$GOROOT/test` with the action's arguments, standard input an
+  empty file; against gc's reference (below): status, standard output, standard error to the first
+  `goroutine ` line, signal addresses normalized. The executable is deleted after its run.
+- *Directory tests* (RPS11): the test's forms (`linux-dirtest`) copied into a forms root and made a
+  module (`aot_dir_root`): under rundir the packages' paths are gc's `-D test` paths already
+  (`test/a`), so the module is `test`, the main package at its root, and each local import
+  (`"./a"`) printed as the path the forms' `:local-imports` resolve it to; under runindir the
+  module is the directory's name, the forms' paths already; `program.edn`'s go line the main
+  package's language version (runindir's `go.mod`, `-gomodversion`); the main package the one goi
+  runs, other main packages dropped; the packages' assembly files (`:other-files`, left by the
+  converter in the test's directory) copied from it; files named `*_test.go`, which the test driver
+  compiles as any other and go build leaves out, renamed `*_test_.go` (two tests). rundir's flags
+  become `-gcflags=test/...=FLAGS` and `-ldflags=...` (the driver's split at `-ldflags`). Against
+  the golden output, as goi's directory tests (the driver's criterion).
+- *Errorcheck programs* (RPS17): every flag of the action passed to `go tool compile` as the test
+  driver passes them (`-d=ssa/check/on` added to the first `-d=` or alone; `-goexperiment`'s
+  GOEXPERIMENT), so gc's later phases' flags (`-m`, `-l`, `-live`, `-race`, `-std`, `-+`, `-d=...`)
+  and line directives are judgeable; gc's reference the original compiled so and judged by `gocmp
+  errorcheck` (one gc's own errors do not pass is skipped); then the program's forms of mode `:full`
+  (the new corpus `linux-errtest-full`, `bin/repr-go read --full --corpus linux-errtest`, made when
+  missing, 88 s) printed by `bin/repr-go print` and compiled the same way, judged against the
+  original's `// ERROR` comments.
+
+**The reference (RPS12).** `gc_ref`: the original's files (the forms' `:files`) built by `go build`
+in the program's directory in GOPATH mode with the action's flags, run as above; whether gc's
+output is the golden `.out` recorded beside it (`golden`: ok, differs, none); cached in
+`.tmp/goi-check/gcref` by the original files', the flags', the arguments' and the toolchain's
+hashes. goi's own check (`check_one`) takes the same reference since this milestone (until now
+gc's build of the forms printed by repr/go), and the box's check too (it shares `check_one`).
+goi's errorcheck reference was already the originals'. `bin/goi`'s `< /dev/null` inputs are an
+empty file, `.tmp/goi-check/empty`.
+
+**Shipped code.** `arbace.build.go` takes `--go-flag FLAG` (repeated: passed to go build before
+`-o`; doc/go/BUILD.md): the one change under `arbace/`, so it joins the next re-seed; until then a
+host whose embedded copy differs evaluates the checkout's (`bin/gate --full`'s step passes the
+gate's executable, which embeds it).
+
+**Numbers** (the gate's executable of this branch, 8 jobs; `test/goi/check-aot-linux-amd64.edn`):
+
+| programs | pass | known | unsupported | skip | fail, error |
+|---|---:|---:|---:|---:|---:|
+| run programs | 1,045 | 6 | 0 | 0 | 0 |
+| directory tests | 126 | 1 | 0 | 0 | 0 |
+| errorcheck programs | 514 | 4 | 137 | 4 | 0 |
+| **all** | **1,685 of 1,837** | 11 | 137 | 4 | 0 |
+
+The 13 run programs §5.1 skipped for gc's flags pass now (`-gcflags=-d=checkptr` and the rest, the
+flag on both builds), and the 6 §5.1 failed are the 6 known; §5.1's 1,032 + 13 = 1,045. Of the
+errorcheck programs 124 pass that goi sets apart (gc's flags 107: 55 `-m`, 9 `-l`, 5 `-race`, 5
+`-live`, 4 `-m=2`, ...; line directives 4; errors of gc's phases after type checking 13), and
+the 16 §5.2 failed with mode `:lines` pass from mode `:full` but one (`return.go`). The 152 not
+passing, by class (`bin/goi divergences --aot`, 7 classes):
+
+| class | kind | programs | decided |
+|---|---|---:|---|
+| invalid programs without forms (go/parser rejects 73, the converter 64: GC47) | design | 137 | GC47, G1, GPS9, GPS43 |
+| gc's own errors no longer pass the test | design | 4 | GR7b |
+| positions mode `:lines` does not keep: a call split over lines (`devirtualization_nil_panics`, `issue29504`), `//line` (`issue22662`) | design | 3 | RPS17 (a) |
+| runs of the go command (`issue21317`, `linkobj`) and `runtime.GOROOT` under `-trimpath` (`winbatch`) | design | 3 | §1.1, GR4 (goi's class) |
+| the printer refusing the forms of invalid programs (`ddd1`, `bug217`, `makenew`) | deferred | 3 | **pending** (RPS32) |
+| the forms of invalid programs that say another program (`return.go`: a final expression statement printed as a return) | design | 1 | GC49 (goi's class) |
+| go build's `-complete` (`issue9608`: a bodiless function in a package without assembly, eliminated as dead code under the driver's compile) | design | 1 | **pending** (RPS31) |
+
+Across the levels (RPS16's findings, not classes): 137 programs pass at goi's level and not at
+the AOT level (135 invalid programs goi judges on gc's syntax errors or their raw forms, which have
+no final forms to print, and `ddd1`, `makenew`); 198 pass at the AOT level and not at goi's (gc's
+flags, assembly, `go:linkname`, frames, memory, speed: goi's design classes).
+
+**goi's reference switched: no program moved.** `bin/goi check --jobs 8` on gc's runs of the
+originals gives `test/goi/check-linux-amd64.edn` byte for byte (1,618 pass, 138 unsupported, 63
+known, 18 skipped; 0 fail, 0 error), so it is not re-recorded: the programs where the original and
+the printed forms run differently under gc (positions, `//line`, the go command's logs) were
+already known for goi, whose frames are its own (`fixedbugs/issue22662.go`, `issue29504.go`,
+`issue21317.go`, `linkobj.go` in `test/goi/check-known.edn`), and `devirtualization_nil_panics.go`
+and `winbatch.go` pass at goi's level against either reference. The essential subset 801 of 801.
+The box's references (`check-box-*.edn`) were not run again (no box run in this milestone); their
+programs share the switched reference.
+
+**Time** (8 jobs, the host shared): the AOT check 554 to 582 s for 1,837 programs (two runs; 2.5 job-seconds a
+program; 670 s with the first conversion of `linux-errtest-full`), goi's whole check 260 s; gc's
+references are made once (the first run 508 s, both levels then share them).
+
+**Proposals** (the user's to decide; RPS30-RPS39 are REAP2's):
+
+- **RPS30 The positions class.**
+  - Options: (a) by design as decided (RPS17's lines layout: the AOT level checks the printer's
+    layout too); (b) the run programs built from their forms of mode `:full` (the original text: the
+    3 pass, but the level then checks the printer's `:full` mode, which `roundtrip --text` already
+    proves byte for byte); (c) both: the lines layout the check, the 3 known programs built from
+    `:full` as well.
+  - *Recommended: (a)*: the 3 are the forms' model (statements' lines), already goi's class.
+- **RPS31 go build's `-complete`.**
+  - Options: (a) by design: a module build always compiles a package without assembly with
+    `-complete`, as a user's program is built; (b) the check adds an empty `.s` file to a package
+    with a bodiless function (go build then omits `-complete`, as the driver's compile).
+  - *Recommended: (a)*: (b) tests the harness, not Arbace; the test is about gc's dead code
+    elimination under its own driver.
+- **RPS32 The printer refusing invalid forms.**
+  - Options: (a) deferred, the printer taught to print the three as written (a spread outside a
+    call's arguments, a method without a receiver, `new`/`make` without a type), in REAP6 or after
+    the milestone; (b) by design: the forms of invalid programs are outside the printer's contract
+    (goi judges them; the AOT level has nothing to compile).
+  - *Recommended: (a)*: mode `:full` claims the text; a few lines in the printer.
+- **RPS33 REAP8's essential subset of the AOT level.**
+  - Options: (a) about 240 programs (every directory test, the 13 flagged run programs, the 124
+    flagged errorcheck programs' half, a sample of the rest), about 75 s at 8 jobs on gc's cached
+    references; (b) the essential subset of goi's (801 programs, about 4 minutes); (c) none, the
+    level in `--full` only.
+  - *Recommended: (a)*: it covers the level's own paths (modules, flags, mode `:full`) within RPS15's
+    "a few minutes".
+- **RPS34 The box's references under the switched reference.**
+  - Options: (a) re-recorded at REAP9's `bin/gate --full` run if they move (none is expected: no
+    program of the linux check moved); (b) the box kept on the printed forms' reference.
+  - *Recommended: (a)*: one reference (RPS16).
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail
