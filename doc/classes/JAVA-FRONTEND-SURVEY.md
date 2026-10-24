@@ -3936,7 +3936,26 @@ the seed is stale for this change: a re-seed carries it (not done here).
 
 ### JFS65 (b).5 The checks
 
-@@CHECKS@@
+- `bin/j2g-check` (amd64): 9,036 steps, 8,972 pass, 17 fail, 47 need core, the 17 the same steps as
+  the base's (`317927c0`, run in `basetree/`): its slice's environment (`Properties.setProperty` not
+  translated, `lib/tzdb.dat` missing: FxDates, FxStreams' print streams, FxCode's `tVarargs`, six
+  oracle class cases initializing through them); FxArrays' 5 cases pass on both. `test/j2g/check.ae`
+  did not load on stage 0 (`arbace.pprint/pprint` unresolved: the report's pprint without its
+  require); it requires `arbace.pprint` now.
+- `bin/diffcheck`: 12,749 of 12,772 cases agree, the 23 known (the Java pair 729 of 731): FxArrays
+  interpreted and translated agree; FxArrays sorting first renumbered the two known fixture cases
+  (`test/j2g/fixtures:2`, `:10` now `:3`, `:11`, the same `load-file`s), `test/diffcheck/known.edn`
+  updated.
+- `bin/javac-vendor check`: j2g translates javac's world, no failures (54 s).
+- `bin/javac-vendor classes baseline samples jdk java.base` on the new tool: every corpus byte for
+  byte as the JVM's javac, java.base also as the build's classes (248 s).
+- `bin/repr-java parse-check` on the new tool: every corpus's trees equal (samples 14, baseline 183,
+  jdk 838, javac 824, jdk26u 12,809, mutants 8,000, tests 37,797).
+- `bin/gate` (essential): on the branch at `f2289818` (this section's commit but this list), passes
+  in 9m57s (go-build cached from the diffcheck run's build of the same key; go-smoke, suite-go 777
+  tests with no regression, oracle-go 53 known mismatches as recorded, diffcheck as above, goi-check
+  801 of 801, generated, j2g-edge verify: `jdk/edge.edn` unchanged, j2g asks no new JDK class).
+- not run: `bin/gate --full` (the user's rule), `bin/arbace-go --fixpoint`, the box.
 
 ### JFS65 (b).6 Proposals
 
