@@ -824,6 +824,123 @@ The user decided every proposal as recommended:
 - JCS14 (a): JC1, then JC4, then JC2; JC1 started 2026-10-24.
 - JCS15 (a): j2g names classes outside the runtime and the JDK, and their Go files, by binary name.
 
+## As built: JC4 (2026-10-24)
+
+Branch `java-interp-jc4`, from main `549c5c49`. JC1's tool was not on main yet, so the measurement
+is this section's own (the worktree's `.tmp/jc4/`, not tracked): §5.1's way on two samples of
+jdk26u's tests, each put in a package of its own (`package tNNNN; ` prepended), compiled and run by
+the JDK twice (10 s; stdout compared only when the two runs agree), read by repr/java on main's
+javac tool executable (`REPR_JAVA_STALE_OK=1`), loaded as the REPL loads a package (file by file,
+`(require 'tNNNN)`, then `main`; 60 s, 8 jobs), before on main's gate executable and after on this
+branch's.
+
+**The causes, traced** (the survey's §6.2 guessed them from the symptoms):
+
+- *A private method on another instance* — and on `this` too: the reduction of §6.2 passes only
+  because its first call is not private; `this.run()` of a private `run` fails the same way. The
+  analysis gives a private instance method's call the kind `:virtual` (javac's `invokevirtual` of
+  a nestmate's private method, JVMS 5.4.6), and the builder (`arbace.classes.interp`, `:invoke`)
+  made every `:virtual` call a `CallV`, which looks the receiver's class's vtable up; private
+  methods are not in the vtable (`vtable!`, rightly), so it fell to reflection, whose method
+  (`real-method`) an interpreted owner does not have: `AbstractMethodError`. Now a private
+  instance method of an interpreted owner is called directly (`CallI`, the method itself, the
+  receiver in its slot), as CLASSFORMS-REPL §2.2 says; also for an unbound method reference to it
+  (`P::run`). Bound references already did so.
+- *`Object`'s methods through an interface of the world*: javac qualifies `m.toString()` by the
+  receiver's static type, `java/util/Map` (JLS 13.1), and `real-method` looked `toString` up in
+  `Map`'s Class, which does not list `Object`'s methods: no method, `AbstractMethodError` when the
+  receiver is of the world. Now an interface's lookup falls back to `Object`'s public methods
+  (JLS 9.2), and an interpreted owner's to `Object`'s.
+- *`clone` of an interpreted `Cloneable` class*: `super.clone()` was a `SuperCall` of `Object`
+  (`UnsupportedOperationException: super call of java.lang.Object.clone() is not in the Go
+  build`), an unqualified `clone()` a reflective call of `Object.clone` on a `Dyn`
+  (`CloneNotSupportedException`). Now both reach `Rt/cloneOf` (`Compiler$CF`): for an object of an
+  interpreted class whose superclasses are interpreted up to `Object`, a new object of its class
+  with its fields copied (shallow, as `Object.clone`), `CloneNotSupportedException` with the class's
+  name when it is not `Cloneable` (`Klass.implementsClass`); any other object as before.
+- *The source lookup* (JCS8 (b)): `arbace.classes.analyze/*source-lookup*` was false on Go and
+  `enter-from-source!` read `ClassLoader.getResource`'s URL, which jrt does not have. Now it is
+  true everywhere (j2g binds it false, as before) and reads `RT/resourceAsStream` (ARBACE_PATH,
+  then the embedded sources). Measured, it recovered none of the sample's tests: they are one
+  Java file each, and a class of a later *form of the same file* (repr/java writes a file's
+  top-level classes as consecutive `defclass`es) is not `p/C.ae`. So the lookup also tries the
+  file being loaded (`*file*`): its later forms are entered as declarations, as javac compiles a
+  file's classes together (SPEC §9.2 (3), amended; JCS31). That recovered 7.
+
+Changed: `arbace/classes/interp.ae` (the builder: `private-method`, `real-method`, `clone`'s
+`ObjectCall`), `arbace/lang/Compiler.ae` (`Compiler$CF`: `Rt/cloneOf`, `Klass.worldSuper`,
+`implementsClass`, `ObjectCall`'s and `CallV.reflect`'s `clone`), `arbace/classes/analyze.ae` (the
+lookup). They are embedded namespaces and the runtime: the shipped program changes, the re-seed
+batched (not done here).
+
+**Numbers.**
+
+| sample | tests (pass on the JDK, read) | before | after | of the bugs' classes before | after |
+|---|---:|---:|---:|---:|---:|
+| A: every single-file plain `@run main` test of `jdk/java/lang`, `jdk/java/util`, `langtools/tools/javac` and `hotspot/jtreg/compiler` (no `@library`, `@modules`, `@requires`, `@build`, `@compile`; HotSpot's VM options dropped) | 324 of 354 | 205 | **221** | 9 | 8 pass, 1 moved (`Proxy/Boxing`: a `ClassCastException` of `Proxy`'s, the world) |
+| B: tests found by grepping for the patterns (private instance methods, `Cloneable` with `clone()`, interface-typed receivers of `toString`/`getClass`) | 24 of 27 | 2 | **13** | 11 | 11 pass |
+
+Sample A by step: the three fixes 205 → 215 (8 of the bugs' tests, 2 HotSpot tests that had timed
+out at 60 s and did not this time), the lookup 215 → 221 (7 tests whose class of a later form was
+unknown or unresolved: `LambdaInSuperCallCapturingOuterThis` 1-3, `CheckNoClassCastException`, three
+HotSpot tests; one timeout the other way). No test passing before fails after. Of sample B's 11
+not passing after, every one is in another class of §6.1 (serialization, `PhantomReference`,
+`System.runFinalization`, extending `Thread`, an `AbstractMap` constructor, qualified `super`, a
+lambda's conversion, a multi-file test).
+
+What remains of §6.1's REPL classes: a superclass (or a static initializer's class) of a later form
+of the same file or `do` (sample A: `PvtMbrsNotInherit1`, its `OtherClass` declared by the lookup,
+not yet defined when the subclass is laid out): JCS30.
+
+**Regression cases.** The oracle's `test/oracle/forms/defclass.ae` gains 14 cases at its end
+(private methods on `this`, another instance and from a nested class; `Object`'s methods through
+`Map`, `Collection`, `List`, `CharSequence` and an interpreted interface; `clone` by `super.clone()`
+and `this.clone()`, of a subclass, and of a class not `Cloneable`), recorded on the frozen JVM
+(`bin/oracle record forms/defclass.ae`, 213 → 227 cases): main's executable fails 6 of them, this
+branch's none; diffcheck's Java pair runs them interpreted against j2g's translation. The smoke
+test (`bin/arbace-go --smoke`) gains "Java forms: a class of a later file of the package (the
+source lookup)": `jl.A` names `jl.B`, loaded after it (main's executable: `Unknown type: B`).
+
+**Checks** (the essential `bin/gate` at the code's head `2572f76b`, passed in 9m21s): the smoke
+test with the new check; Clojure's suite on the test build, no regressions; the oracle 22,672 of
+22,725, its 53 known mismatches as recorded (the 14 new `defclass` cases among the matches);
+diffcheck's Java pair 737 of 739 cases agree (723 before, the 14 new ones agreeing), its two known
+disagreements, Clojure's pair 12,020 of 12,041 as recorded; goi's essential check 801 of 801;
+the generated variants; j2g's edge. `test/diffcheck/known.edn` unchanged.
+
+## Proposals of JC4 (JCS30-JCS33)
+
+- **JCS30 A superclass of a later form.** A file's (or a `do`'s) classes are defined form by
+  form; a subclass whose superclass is a later form fails, though the lookup now declares it.
+  - Options: (a) a file of Java forms is loaded as one compilation: `load` gathers a file's
+    consecutive top-level `defclass`es into one `define!` (supertypes first, as `define!` already
+    orders one compilation's classes), the other forms in place; (b) repr/java writes a Java
+    file's top-level classes as one `defclasses` form, so that the file is one compilation by
+    construction, and a top-level `do` of Java forms is one `define!` (SPEC §9.2 (2)'s `do`
+    taken further: defined, not only declared, together); (c) leave (5 to 9 tests of the survey's
+    sample, a class of their own).
+  - *Recommended: (b)*: it changes nothing of how a file loads, javac's unit (the compilation
+    unit) becomes the forms' unit, and a hand-written `do` of mutually dependent classes works the
+    same way; repr/java's change is JFS's, so it is the converter's agent's (JC5 with JCS11).
+- **JCS31 The lookup in the file being loaded.** Built here beyond SPEC §9.2 (3) as decided
+  (JCS8 (b) said `p/C.ae`).
+  - Options: (a) keep it, SPEC §9.2 (3) amended (done on the branch); (b) `p/C.ae` only, the
+    file's later forms left to JCS30.
+  - *Recommended: (a)*: it is what javac does for a file's classes, it recovered 7 of sample A's
+    324 where `p/C.ae` recovered none, and JCS30 (b) would make it redundant only for converted
+    files, not for hand-written ones.
+- **JCS32 `clone` of an interpreted class extending the world.** `Rt/cloneOf` copies interpreted
+  objects whose superclasses are interpreted up to `Object`; a `Cloneable` subclass of a world
+  class (a `DynSub`) still throws `UnsupportedOperationException`.
+  - Options: (a) a native of `Compiler$CFGo` (`arbace.j2g.dyncf`) copying a `DynSub`'s world part
+    with its Go value and the fields; (b) leave until a test needs it (none of either sample did).
+  - *Recommended: (b)*.
+- **JCS33 The check's load.** JCS8 decided the one-`do` load in the check until the lookup works.
+  - Options: (a) JC1's `interp` level loads file by file now (as a user's `require`), the
+    one-`do` load kept as a mode for comparison; (b) keep the one-`do` load as the check's.
+  - *Recommended: (a)*, when JC1's tool and this branch are both on main: the check then
+    measures what a user gets, and the difference between the two loads is JCS30's measure.
+
 ## 10. Risks
 
 - **The world is the long tail.** 60% of the non-passing interpreted tests are library classes;

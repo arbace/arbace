@@ -76,9 +76,10 @@
 (declare enter-from-source!)
 
 (def ^:dynamic *source-lookup*
-  "Whether class names that resolve to nothing are looked up as p/C.ae sources (§9.2): not in
-  the Go build yet (doc/go/CLASSFORMS-REPL.md)."
-  (not TypeReference/go-build?))
+  "Whether class names that resolve to nothing are looked up as p/C.ae sources (§9.2): on the
+  path the loader reads (the Go build's ARBACE_PATH and embedded sources, RT/resourceAsStream;
+  since JC4, doc/classes/JAVA-CONFORMANCE-SURVEY.md, JCS8 (b)); j2g binds it false."
+  true)
 
 (defn- class-exists? [n]
   (boolean (or (decl n) (env/known? n)
@@ -4186,9 +4187,9 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; source path (§9.2): declarations of classes from p/C.ae, without compiling their code
 
-(defn- read-source-forms [url]
+(defn- read-source-forms [^java.io.InputStream in]
   (with-open [r (arbace.lang.LineNumberingPushbackReader.
-                  (java.io.InputStreamReader. (.openStream ^java.net.URL url) "UTF-8"))]
+                  (java.io.InputStreamReader. in "UTF-8"))]
     (binding [*read-eval* false]
       (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof :read-cond :allow} r)))))))
 
@@ -4224,10 +4225,57 @@
     "import" (import-classes! *ns* f)
     (eval f)))
 
+(defn- enter-file!
+  "Enters the Java forms of the source file in (an InputStream) as declarations when the file
+  declares top-level class top (enter-from-source!); returns whether it does."
+  [top in]
+  (let [forms (read-source-forms in)
+        ns-form (first (filter #(and (seq? %) (#{'in-ns 'ns 'arbace.core/in-ns} (first %))) forms))
+        ns-name* (when ns-form (let [x (second ns-form)] (if (seq? x) (second x) x)))
+        class-forms* (for [f forms
+                           f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
+                           :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
+                       (rest f))
+        ;; only a file that declares the class is its source: decided before evaluating anything
+        declares? (and (symbol? ns-name*)
+                       (some (fn [[nm & _ :as cf]]
+                               (and (symbol? nm)
+                                    (= top (let [s (str nm)
+                                                 pkg (get (first (p/split-options (cond-> (rest cf) (vector? (second cf)) rest))) :package)]
+                                             (cond (some? pkg) (str (when (seq (str pkg)) (str (str/replace (str pkg) "." "/") "/")) s)
+                                                   (str/includes? s ".") (str/replace s "." "/")
+                                                   :else (str (str/replace (munge (name ns-name*)) "." "/") "/" s))))))
+                             class-forms*))
+        ns (when declares?
+             (binding [*ns* *ns*]
+             (doseq [f forms
+                     :when (and (seq? f) (#{'in-ns 'ns 'import 'arbace.core/in-ns 'arbace.core/import}
+                                            (first f)))]
+               (eval-ns-form! f))
+             *ns*))
+        class-forms (for [f forms
+                          f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
+                          :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
+                      (rest f))
+        from (count @(:order *unit*))
+        names (doall (for [cf (when ns class-forms)]
+                       (let [parsed (p/parse-class {:ns ns :nesting :top} cf)
+                             tn (top-name ns parsed)]
+                         (when-not (or (decl tn) (env/known? tn))
+                           (declare-class! {:nesting :top} parsed)))))
+        new (subvec @(:order *unit*) from)]
+    (doseq [c new] (update-decl! c assoc :declared-only true))
+    (doseq [c new] (resolve-header! c))
+    (doseq [c new] (resolve-members! c))
+    ;; their bridges too, which subclasses being compiled must see (as in class files)
+    (doseq [c (supertypes-first new)] (add-bridges! c))
+    (boolean declares?)))
+
 (defn enter-from-source!
-  "Looks up the top-level class of internal name n as a source p/C.ae on the class path. Its
-  namespace and import forms are evaluated and its Java forms entered as declarations only
-  (headers and members), so code being compiled can refer to them. Returns n when found."
+  "Looks up the top-level class of internal name n as a source p/C.ae on the class path, else in
+  the file being loaded (*file*: a later form of it, as javac compiles a file's classes together;
+  JC4). Its namespace and import forms are evaluated and its Java forms entered as declarations
+  only (headers and members), so code being compiled can refer to them. Returns n when found."
   [n]
   (let [top (first (str/split n #"\$"))
         tried (or (:source-tried *unit*) (atom #{}))]
@@ -4235,49 +4283,15 @@
       (swap! tried conj top)
       ;; the converter names the file of a class p/C that would clash with namespace p.C's file
       ;; p/C_class.ae (CONVERTER-NOTES, amendment 8)
-      (when-let [url (or (.getResource (arbace.lang.RT/baseLoader) (str top "_class.ae"))
-                         (.getResource (arbace.lang.RT/baseLoader) (str top ".ae")))]
-        (let [forms (read-source-forms url)
-              ns-form (first (filter #(and (seq? %) (#{'in-ns 'ns 'arbace.core/in-ns} (first %))) forms))
-              ns-name* (when ns-form (let [x (second ns-form)] (if (seq? x) (second x) x)))
-              class-forms* (for [f forms
-                                 f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
-                                 :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
-                             (rest f))
-              ;; only a file that declares the class is its source: decided before evaluating anything
-              declares? (and (symbol? ns-name*)
-                             (some (fn [[nm & _ :as cf]]
-                                     (and (symbol? nm)
-                                          (= top (let [s (str nm)
-                                                       pkg (get (first (p/split-options (cond-> (rest cf) (vector? (second cf)) rest))) :package)]
-                                                   (cond (some? pkg) (str (when (seq (str pkg)) (str (str/replace (str pkg) "." "/") "/")) s)
-                                                         (str/includes? s ".") (str/replace s "." "/")
-                                                         :else (str (str/replace (munge (name ns-name*)) "." "/") "/" s))))))
-                                   class-forms*))
-              ns (when declares?
-                   (binding [*ns* *ns*]
-                   (doseq [f forms
-                           :when (and (seq? f) (#{'in-ns 'ns 'import 'arbace.core/in-ns 'arbace.core/import}
-                                                  (first f)))]
-                     (eval-ns-form! f))
-                   *ns*))
-              class-forms (for [f forms
-                                f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
-                                :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
-                            (rest f))
-              from (count @(:order *unit*))
-              names (doall (for [cf (when ns class-forms)]
-                             (let [parsed (p/parse-class {:ns ns :nesting :top} cf)
-                                   tn (top-name ns parsed)]
-                               (when-not (decl tn)
-                                 (declare-class! {:nesting :top} parsed)))))
-              new (subvec @(:order *unit*) from)]
-          (doseq [c new] (update-decl! c assoc :declared-only true))
-          (doseq [c new] (resolve-header! c))
-          (doseq [c new] (resolve-members! c))
-          ;; their bridges too, which subclasses being compiled must see (as in class files)
-          (doseq [c (supertypes-first new)] (add-bridges! c))
-          (when (decl n) n))))))
+      (when (some (fn [nm]
+                    (when-let [in (cond (nil? nm) nil
+                                        ;; a file loaded by its path (load-file)
+                                        (str/starts-with? nm "/") (try (java.io.FileInputStream. ^String nm) (catch Exception _ nil))
+                                        :else (arbace.lang.RT/resourceAsStream (arbace.lang.RT/baseLoader) nm))]
+                      (enter-file! top in)))
+                  [(str top "_class.ae") (str top ".ae")
+                   (let [f (str *file*)] (when (str/ends-with? f ".ae") f))])
+        (when (decl n) n)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; access$NNN accessors (§5.6, §6): protected members of a superclass in another package used

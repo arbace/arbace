@@ -208,9 +208,13 @@
     (or (when-let [sc (.-superClass k)] (find-method sc mname desc))
         (some #(find-method % mname desc) (seq (.-interfaces k)))
         (when (.-sup k) (real-method (.-iname (.-sup k)) mname desc))
-        (some #(real-method (.-iname ^arbace.lang.Compiler$CF$Klass %) mname desc) (seq (.-ifaces k))))
+        (some #(real-method (.-iname ^arbace.lang.Compiler$CF$Klass %) mname desc) (seq (.-ifaces k)))
+        (find-method Object mname desc))
     (if-let [c (env/load-class owner)]
-      (find-method c mname desc)
+      (or (find-method c mname desc)
+          ;; an interface's members include Object's public methods (JLS 9.2), which its Class
+          ;; does not list: Map's toString, Collection's getClass
+          (when (.isInterface c) (find-method Object mname desc)))
       (when (sibling? owner) (pending! owner)))))
 
 (defn find-field ^Field [^Class c fname]
@@ -496,6 +500,12 @@
 
 (defn- ptypes [desc] (char-array (map tc (first (t/parse-method-desc desc)))))
 
+(defn- has? [flags f] (not (zero? (bit-and (or flags 0) f))))
+(def ^:private ACC_STATIC 0x0008)
+(def ^:private ACC_PRIVATE 0x0002)
+(def ^:private ACC_ABSTRACT 0x0400)
+(def ^:private ACC_INTERFACE 0x0200)
+
 (defn method-of
   "The Meth of interpreted class k declaring or inheriting method key (non-virtual lookup:
   its own, then its superclasses', then its interfaces' defaults and statics)."
@@ -504,6 +514,14 @@
     (or (.declared k key)
         (method-of (.-sup k) key)
         (some #(method-of % key) (seq (.-ifaces k))))))
+
+(defn- private-method
+  "The Meth of interpreted class k's private instance method key, or nil: a private method is
+  not virtual (javac's invokevirtual of a nestmate's private method, JVMS 5.4.6), so a call of it
+  on any receiver calls it directly (CLASSFORMS-REPL §2.2)."
+  ^arbace.lang.Compiler$CF$Meth [^arbace.lang.Compiler$CF$Klass k key]
+  (when-let [^arbace.lang.Compiler$CF$Meth m (and k (.declared k key))]
+    (when (and (has? (.-flags m) ACC_PRIVATE) (not (.-isStatic m))) m)))
 
 (defmethod build-op :invoke [ctx an]
   (let [{:keys [kind owner name desc target args]} an
@@ -528,7 +546,7 @@
         (cond
           (and k (method-of k key))
           (arbace.lang.Compiler$CF$CallI. (char (tc ty)) (method-of k key) tn (arg-nodes ctx args desc))
-          (and (#{"toString" "hashCode" "equals"} name)
+          (and (#{"toString" "hashCode" "equals" "clone"} name)
                (= (real-method owner name desc) (find-method Object name desc)))
           (arbace.lang.Compiler$CF$ObjectCall. (char (tc ty)) name tn (when (seq args) (coerce ctx (first args) "Ljava/lang/Object;")))
           :else
@@ -539,10 +557,13 @@
       :else
       (let [tt (a/value-type (:type target))
             tn (coerce ctx target (if (t/array? tt) tt (t/internal->desc owner)))
-            rm (real-method owner name desc)]
-        (if (or k (nil? rm) true)
+            rm (real-method owner name desc)
+            pm (private-method k key)]
+        (cond
+          pm (arbace.lang.Compiler$CF$CallI. (char (tc ty)) pm tn (arg-nodes ctx args desc))
+          (or k (nil? rm) true)
           (arbace.lang.Compiler$CF$CallV. (char (tc ty)) key rm tn (arg-nodes ctx args desc) (ptypes desc))
-          (arbace.lang.Compiler$CF$CallR. (char (tc ty)) rm tn (arg-nodes ctx args desc) (ptypes desc)))))))
+          :else (arbace.lang.Compiler$CF$CallR. (char (tc ty)) rm tn (arg-nodes ctx args desc) (ptypes desc)))))))
 
 (defn- ctor-meth [^arbace.lang.Compiler$CF$Klass k desc]
   (or (.get (.-ctors k) desc) (fail (str "No constructor " desc " in " (.-name k)))))
@@ -813,11 +834,6 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; classes: Klass objects, field layouts, methods
 
-(defn- has? [flags f] (not (zero? (bit-and (or flags 0) f))))
-(def ^:private ACC_STATIC 0x0008)
-(def ^:private ACC_PRIVATE 0x0002)
-(def ^:private ACC_ABSTRACT 0x0400)
-(def ^:private ACC_INTERFACE 0x0200)
 
 (defn host ^arbace.lang.Compiler$CF$Host [] arbace.lang.Compiler$CF$Rt/HOST)
 
@@ -1250,10 +1266,12 @@
                                                         (arbace.lang.Compiler$CF$Local. \L (int recv)) (conv-args params mps))
                         (arbace.lang.Compiler$CF$CallV. (char (tc mret)) key (real-method owner name desc)
                                                         (arbace.lang.Compiler$CF$Local. \L (int recv)) (conv-args params mps) (ptypes desc)))
-               :unbound (let [target (value-convert (first params) (first ips) (t/internal->desc owner))]
-                          (arbace.lang.Compiler$CF$CallV. (char (tc mret)) key (real-method owner name desc) target
-                                              (nodes (map (fn [n p tp] (value-convert n p tp)) (rest params) (rest ips) mps))
-                                              (ptypes desc)))
+               :unbound (let [target (value-convert (first params) (first ips) (t/internal->desc owner))
+                              rest-args (nodes (map (fn [n p tp] (value-convert n p tp)) (rest params) (rest ips) mps))]
+                          (if-let [pm (private-method ok key)]
+                            (arbace.lang.Compiler$CF$CallI. (char (tc mret)) pm target rest-args)
+                            (arbace.lang.Compiler$CF$CallV. (char (tc mret)) key (real-method owner name desc) target
+                                                rest-args (ptypes desc))))
                :new (if ok
                       (arbace.lang.Compiler$CF$NewI. ok (ctor-meth ok desc) (conv-args params mps) (int-array []) (nodes []))
                       (let [ctor (doto (.getDeclaredConstructor (internal->class owner) (params-of desc)) (.setAccessible true))]

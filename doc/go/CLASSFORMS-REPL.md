@@ -289,8 +289,18 @@ java.security and java.text.
 - Assertions are always disabled (the JVM's
   default); javac's accessors are not made (no access checks at run time); serializable lambdas
   cannot be deserialized; varargs method references; annotations of classes of the world
-  (`getAnnotation`) and the source path lookup (§9.2) at the REPL; `defmodule` and `defpackage`
-  write nothing (no class files).
+  (`getAnnotation`); `defmodule` and `defpackage` write nothing (no class files). The source path
+  lookup (§9.2) works on Go since JC4 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4"):
+  `p/C.ae` on ARBACE_PATH or among the embedded sources (`RT/resourceAsStream`), then the file
+  being loaded.
+- Fixed by JC4 (found by jdk26u's tests): a private instance method called on any receiver
+  (`p.run()`, `this.run()`: the builder's `:invoke` of kind `:virtual`, javac's `invokevirtual`
+  of a nestmate's private method, is a `CallI` of the method itself, as §2.2 says; before, a
+  `CallV` found no private method in the vtable and ended in `AbstractMethodError`), `Object`'s
+  methods called through an interface of the world (`Map.toString()`: `real-method` falls back
+  to `Object`'s, JLS 9.2), and `Object.clone` of an interpreted `Cloneable` object (`Rt/cloneOf`:
+  a shallow copy of its fields; `CloneNotSupportedException` for a class not `Cloneable`; a class
+  with a superclass of the world still not, J2G-SPEC §5.12's `DynSub` part).
 - **Speed**: frames are allocated per call and arguments of reflective calls boxed. Not covered
   by step 7: its remedies (direct invokers of the member tables, closures; step 7b) were done
   for the evaluator only (step 7a's runtime changes apply to all Go code); open.

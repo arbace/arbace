@@ -1358,7 +1358,12 @@ from
 3. **sources**: a class name that resolves to nothing is looked up as `p/C.ae` on the source
    path (javac's `-sourcepath` behaviour); the file's namespace form is evaluated and its
    top-level Java forms are entered, declarations only, without compiling their bodies or
-   evaluating anything else. The bodies are compiled when the file itself is loaded.
+   evaluating anything else. The bodies are compiled when the file itself is loaded. When no
+   `p/C.ae` declares it, the file being loaded (`*file*`) is looked up the same way, so that a
+   class of a later form of the same file is known, as javac compiles a file's classes together
+   (JC4, doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4"; on Go since then, the path being
+   ARBACE_PATH and the embedded sources). A class entered this way that is needed before its form
+   is defined (a superclass) is still an error: §9.2's rule for a top-level `do`.
 
 Bytecode refers to classes by name and the JVM resolves names lazily, so a class can be defined
 before the classes it refers to exist, as long as it is not used before. With 3, loading

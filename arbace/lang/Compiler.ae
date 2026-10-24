@@ -6120,6 +6120,22 @@
 
       (method ^:public ^:static setHost ^void [^Host h] (set! HOST h))
 
+      ;; Object.clone of o when it is an object of an interpreted class whose superclasses are
+      ;; interpreted up to Object: a new object of its class, its fields o's (a shallow copy,
+      ;; JLS 20.1.6 of old); CloneNotSupportedException when its class is not Cloneable. nil for
+      ;; any other object (Object.clone of the world, or a superclass of the world's part)
+      (method ^:public ^:static cloneOf [o]
+        (let [k (.klassOf HOST o)]
+          (when (or (nil? k) (.-fnClass k) (not (identical? (.worldSuper k) Object))) (return nil))
+          (when (not (.implementsClass k Cloneable))
+            (throw (CloneNotSupportedException. (.-name k))))
+          (let [c (.alloc HOST k)]
+            (loop [^int i 0]
+              (when (< i (.-nfields k))
+                (.setField HOST c i (.field HOST o i))
+                (recur (unchecked-inc-int i))))
+            c)))
+
       ;; the deepest nesting of interpreted calls on one thread before StackOverflowError
       ;; (J2G-SPEC §10.5: Go's stack overflow is fatal)
       (field ^:public ^:static ^:final ^int MAX_DEPTH 10000)
@@ -7251,6 +7267,24 @@
                       (if (.isSubclassOf (aget ifaces i) k) true (recur (unchecked-inc-int i)))
                       false)))))
 
+      ;; the nearest superclass of the world
+      (method ^:public worldSuper ^Class [this]
+        (if (some? sup) (.worldSuper sup) superClass))
+
+      ;; whether the class is a subtype of c, a class or interface of the world
+      (method ^:public implementsClass ^boolean [this ^Class c]
+        (cond
+          (and (some? superClass) (.isAssignableFrom c superClass)) true
+          (and (some? sup) (.implementsClass sup c)) true
+          :else (or (loop [^int i 0]
+                      (if (and (some? interfaces) (< i (alength interfaces)))
+                          (if (.isAssignableFrom c (aget interfaces i)) true (recur (unchecked-inc-int i)))
+                          false))
+                    (loop [^int i 0]
+                      (if (and (some? ifaces) (< i (alength ifaces)))
+                          (if (.implementsClass (aget ifaces i) c) true (recur (unchecked-inc-int i)))
+                          false)))))
+
       (method ^:public virtual ^Meth [this ^String key]
         (cast Meth (.get vtable key)))
 
@@ -7588,6 +7622,10 @@
           (when (nil? vs) (return nil))
           (when (nil? rm)
             (throw (AbstractMethodError. (java-str (.getName (.getClass o)) "." key))))
+          ;; Object.clone of an interpreted object (this.clone() without an override)
+          (when (and (identical? (.getDeclaringClass rm) Object) (.equals (.getName rm) "clone"))
+            (let [c (Rt/cloneOf o)]
+              (when (some? c) (return c))))
           (try
             (.invoke rm o vs)
             (catch Throwable e (throw (Rt/unwrap e))))))
@@ -7653,7 +7691,7 @@
                   (.invoke rm o vs)
                   (catch Throwable e (throw (Rt/unwrap e)))))))))
 
-    ;; a super call of Object's toString, hashCode or equals
+    ;; a super call of Object's toString, hashCode, equals or clone
     (defclass ^:public ^:static ObjectCall
       :extends Node
       (field ^:public ^:final ^String name)
@@ -7667,7 +7705,14 @@
       (method ^:public eval [this ^Frame f]
         (let [o (.eval target f)
               a (if (some? arg) (.eval arg f) nil)]
-          (if (== (.-jump f) 0) (.objectMethod Rt/HOST name o a) nil))))
+          (cond
+            (not (== (.-jump f) 0)) nil
+            (.equals name "clone")
+            (let [c (Rt/cloneOf o)]
+              (if (some? c)
+                  c
+                  (.superCall Rt/HOST o Object "clone()Ljava/lang/Object;" (new Object/1 0))))
+            :else (.objectMethod Rt/HOST name o a)))))
 
     ;; a Clojure var's value, a call of it
     (defclass ^:public ^:static VarDeref
