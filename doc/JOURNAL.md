@@ -1406,3 +1406,14 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   in the child: the first try named the child's pid), renamed into place. Two views refreshed at once
   from no list: both made, the list as before. The essential gate on `eb1c7f70` with the fix passed
   (21m35s).
+
+## 2026-10-24: GPS56 (c) on the Mac: tamago/goroot converted in the box byte for byte
+
+- The user ran the conversion-only bundle (`arbace-box-mac-arm64-convert.tar.gz`, `45115525`) on an M2
+  Max (12 CPUs, 96 GB, macOS 26.7.1) with `./mac.sh convert` and returned `mac-results.tar.gz`
+  (`check`, `sign`, `convert`: status 0). PASS, 13 of 13: both reads at once in 12-vCPU, 13 GiB guests
+  on Hypervisor.framework (the first 12-vCPU guests there), tamago/arm64 110.9 s and tamago/amd64
+  111.0 s, assembled and merged 1.4 s: `tamago/goroot` `0445b850…` = the commit's, byte for byte, in
+  112.5 s, 25,019 MiB resident at most; every digest equal to Linux's (the forms `47a3c126…`,
+  `76a4a414…`; GOROOT/src's digest the pin `415d2301…`). GP8's arm64 criterion met on hardware
+  (doc/go/GO-PARSER-SURVEY.md, "On the Mac (2026-10-24)").

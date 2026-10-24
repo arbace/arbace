@@ -134,7 +134,8 @@ The current state of the work. This file is rewritten as things change. For the 
     parsed in 0.5 s, the executable +1.06 MB; GPS45-GPS49 decided as built); the seed remade after GP6, JN7,
     JFS48 (b) and GP7 (`d7303cf8…`) and verified; GP8 done (2026-10-23: the box converts `tamago/goroot`
     byte for byte on amd64, 167 s, a part of std in the emulated arm64 VM; GPS50-GPS56 decided as
-    built): the Go parser plan GP1-GP8 complete. `bin/gate --full` on main: see the Java line.
+    built; on the Mac 2026-10-24: the whole tree in the box byte for byte, 112.5 s): the Go parser plan
+    GP1-GP8 complete. `bin/gate --full` on main: see the Java line.
   - Done: the Java front end's survey (doc/classes/JAVA-FRONTEND-SURVEY.md, merged): recommended
     javac itself as Java forms run by Arbace (JF1-JF6, 13-20 days, the JVM out of repr/java), a
     native front end later; JFS1-JFS11 decided as recommended (the user, 2026-10-20), the

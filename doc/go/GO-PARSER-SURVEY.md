@@ -2400,3 +2400,15 @@ The user decided GPS60-GPS65 as built:
 - GPS63 (a): goi's own branch checks kept for the REPL, dropped under `--gc-front` only.
 - GPS64 (a): `bug217.go` known.
 - GPS65 (a): the essential subset's rule applied (801 programs).
+
+## On the Mac (2026-10-24): GPS56 (c), the whole tree in the box
+
+The conversion-only bundle (built at `45115525`) run by `./mac.sh convert` on an M2 Max (12 CPUs,
+96 GB, macOS 26.7.1, Hypervisor.framework): PASS, 13 checks of 13. Both reads at once, each 6 threads
+in a 12-vCPU, 13 GiB guest (the spawns' budget 26 GiB and 24 vCPUs; the driver 6 GiB, 4 vCPUs):
+std for tamago/arm64 in 110.9 s (378 dumps, the forms `47a3c126…`) and for tamago/amd64 in 111.0 s
+(379 dumps, `76a4a414…`), assembled and merged in 1.4 s: `tamago/goroot` `0445b850…`, byte for byte
+the commit's, in 112.5 s, the launchers 25,019 MiB resident at most. Every digest (the sources, GOROOT's
+text and its digest, both forms, the tree) equals Linux's. The amd64 box took 166.7 s with 8 threads
+a read; the phases summed per read on the Mac: native 6, raw 132, annotate 61, convert 48, layout 183 s.
+GP8's exit criterion on arm64 is now met on hardware, not only by the emulated VM's part of std.
