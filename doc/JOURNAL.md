@@ -1503,3 +1503,13 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   survey records what each script did and every number; JC1 builds the check anew as
   `bin/java-check` (JCS7), so only the scratch is gone. A worktree's scratch named by a survey is
   to be kept (copied to main's `.tmp/`) before its worktree goes.
+
+## 2026-10-24: JC4 started beside JC1 (the user)
+
+- The user chose JC4 now, beside JC1 (JCS14 (a) had it after JC1): the interpreter's bugs of the
+  conformance survey's §6.2 (a private method called on another instance throwing
+  `AbstractMethodError`, an `Object` method through a world interface, `clone` of an interpreted
+  `Cloneable`) and JCS8 (b)'s source lookup at the REPL on Go, from the survey's reductions and
+  jdk26u's tests, measured with JC1's `bin/java-check` once it merges; on the branch
+  `java-interp-jc4` from `549c5c49`, in `arbace/lang/` and `arbace/classes/`. A runtime change: the
+  batched re-seed. Proposals: JC1's JCS16-JCS29, JC4's from JCS30.
