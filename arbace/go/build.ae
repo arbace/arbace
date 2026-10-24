@@ -99,6 +99,12 @@
 
 (defn- compiled? [path] (boolean (and path ((:compiled? *ctx*) path))))
 
+(defn- tstr
+  "Go's text of checker type ty without its spellings (uint8, int32, aliases resolved: GC157), as
+  gc's runtime names types."
+  [ty]
+  (t/type-str (t/canon ty)))
+
 ;;; Kinds and types
 
 (def ^:private int-kws #{:bool :int8 :int16 :int32 :int64 :int :uint8 :uint16 :uint32 :uint64 :uint :uintptr
@@ -259,10 +265,10 @@
       :bool 1 :int 2 :int8 3 :int16 4 :int32 5 :int64 6 :uint 7 :uint8 8 :uint16 9 :uint32 10
       :uint64 11 :uintptr 12 :float32 13 :float64 14 :complex64 15 :complex128 16 :string 24
       :unsafe-pointer 26
-      (unsupported! (str "a named type of " (t/type-str u)) "an invalid type"))
+      (unsupported! (str "a named type of " (tstr u)) "an invalid type"))
     (case (nth u 0)
       :array 17 :chan 18 :func 19 :interface 20 :map 21 :pointer 22 :slice 23 :struct 25
-      (unsupported! (str "a named type of " (t/type-str u)) "an invalid type"))))
+      (unsupported! (str "a named type of " (tstr u)) "an invalid type"))))
 
 (defn- local-gen-of [ty]
   (let [i (t/info ty)]
@@ -345,7 +351,9 @@
 (defn desc
   "The descriptor (a *goi.Type) of checker type ty, one per type in the build."
   [ty]
-  (let [^HashMap types (:types *ctx*)]
+  (let [^HashMap types (:types *ctx*)
+        ;; the checker's spellings (byte, rune, aliases: GC157) are the types they denote
+        ty (t/canon ty)]
     (or (.get types ty)
         (if *iface-pending*
           (desc1 ty)
@@ -376,10 +384,10 @@
                     (:untyped-bool :untyped-int :untyped-rune :untyped-float :untyped-complex :untyped-string)
                     (desc (t/default-type ty))
                     :unsafe-pointer (op "TBasic" "unsafe.Pointer")
-                    (:untyped-nil :invalid) (unsupported! (str "a value of type " (t/type-str ty)) "an invalid type")
+                    (:untyped-nil :invalid) (unsupported! (str "a value of type " (tstr ty)) "an invalid type")
                     (op "TBasic" (name ty)))
                   (t/named? ty) (named-desc ty)
-                  (t/tparam? ty) (throw (ex-info (str "goi's builder: the type parameter " (t/type-str ty) " of an uninstantiated tree") {}))
+                  (t/tparam? ty) (throw (ex-info (str "goi's builder: the type parameter " (tstr ty) " of an uninstantiated tree") {}))
                   :else
                   (case (nth ty 0)
                     :pointer (op "TPtr" (desc (nth ty 1)))
@@ -391,11 +399,11 @@
                     :struct (let [[ns ds ts ps es] (struct-parts ty)] (op "TStruct" ns ds ts ps es))
                     :interface (if (and (empty? (nth ty 1)) (nil? (nth ty 2)))
                                  (op "TBasic" "any")
-                                 (let [d (op "TIface" (t/type-str ty))]
+                                 (let [d (op "TIface" (tstr ty))]
                                    (.put types ty d)
                                    (set-iface-methods! d ty)
                                    d))
-                    (unsupported! (str "the type " (t/type-str ty)) "GR6")))]
+                    (unsupported! (str "the type " (tstr ty)) "GR6")))]
           (.put types ty d)
           d))))
 
@@ -431,7 +439,7 @@
       (= :string b) [:S (go-string-node v)]
       (#{:float32 :float64} b) [:F (op "ConstF" (c/to-double v))]
       (int-kws b) [:I (op "ConstI" (int-bits (if (and (not (integer? v)) (c/int-val v)) (c/int-val v) v)))]
-      :else (unsupported! (str "a constant of type " (t/type-str ty)) "GR3"))))
+      :else (unsupported! (str "a constant of type " (tstr ty)) "GR3"))))
 
 ;;; The function's state
 
@@ -729,7 +737,7 @@ GR9a)."
       ;; channel types too (a channel's frame value is its channel, of any direction: §8.2)
       (and (vector? uF) (#{:func :chan} (nth uF 0))) [:R (exk x :R)]
       (= fk :R) [:R (op "ConvR" (exk x :R) (desc T))]
-      :else (unsupported! (str "the conversion " (t/type-str F) " to " (t/type-str T)) "GR3"))))
+      :else (unsupported! (str "the conversion " (tstr F) " to " (tstr T)) "GR3"))))
 
 ;;; Places (§4.4)
 
@@ -789,7 +797,7 @@ GR9a)."
       (op "ArrayElemP" (value-place x) (exk (:index n) :I) (desc (:type x)) (uidx? (:index n)))
       (and (vector? u) (= :pointer (nth u 0)))
       (op "ArrayElemP" (op "DerefP" (exk x :R)) (exk (:index n) :I) (desc (nth u 1)) (uidx? (:index n)))
-      :else (unsupported! (str "indexing " (t/type-str (:type x))) "GR3"))))
+      :else (unsupported! (str "indexing " (tstr (:type x))) "GR3"))))
 
 (defn place
   "The place (a P node) of addressable node n."
@@ -1375,7 +1383,7 @@ GR9a)."
         msig (:type md)
         params (vec (map-indexed (fn [i p] (local-obj (str "p" i) p)) (nth msig 1)))
         sel (cond-> (selection (local-ref rcv) r) (seq (:targs n)) (assoc :targs (:targs n) :type msig))
-        nm (str (t/type-str T) "." (:name md) "-fm")
+        nm (str (tstr T) "." (:name md) "-fm")
         cell (op "FuncCell" nm (:name *ctx*) nil)
         code (build-code {:op :func :params (into [rcv] params) :results (mapv (fn [t] {:type t}) (nth sig 2))
                           :sig sig :body (thunk-body sel params msig)}
@@ -1446,7 +1454,7 @@ GR9a)."
                             [key mcell recv d sig])
                           :else
                           (let [ctx *ctx*
-                                tnm (str (t/type-str ty) "." nm)
+                                tnm (str (tstr ty) "." nm)
                                 cell (op "FuncCell" tnm (:name *ctx*) nil)
                                 {:keys [recv]} (slot-layout sig ty)]
                             (if-let [code (when (:eager *ctx*)
@@ -1574,7 +1582,7 @@ GR9a)."
                   [:I (op "ThenI" (op "StmtT" (expr-stmt-of (ex x))) (op "ConstI" (long (nth (t/under (nth u 1)) 1))))]
                   (and (vector? u) (= :array (nth u 0)))
                   [:I (op "ThenI" (op "StmtT" (expr-stmt-of (ex x))) (op "ConstI" (long (nth u 1))))]
-                  :else (unsupported! (str "len of " (t/type-str (:type x))) "GR4"))))
+                  :else (unsupported! (str "len of " (tstr (:type x))) "GR4"))))
       "cap" (let [x (first args) u (t/under (:type x))]
               (value
                 (cond
@@ -1585,7 +1593,7 @@ GR9a)."
                   [:I (op "ThenI" (op "StmtT" (expr-stmt-of (ex x))) (op "ConstI" (long (nth (t/under (nth u 1)) 1))))]
                   (and (vector? u) (= :array (nth u 0)))
                   [:I (op "ThenI" (op "StmtT" (expr-stmt-of (ex x))) (op "ConstI" (long (nth u 1))))]
-                  :else (unsupported! (str "cap of " (t/type-str (:type x))) "GR4"))))
+                  :else (unsupported! (str "cap of " (tstr (:type x))) "GR4"))))
       "append" (let [[s & more] args
                      st (:type n)
                      el (nth (t/under st) 1)]
@@ -2614,7 +2622,7 @@ GR9a)."
                 (assoc (dissoc n :iface) :op :method :method m :recv x :recv-adjust adj :path (:index r) :via (:via r)
                        :recv-type (:recv-type r)))
       :iface-method (assoc n :method (:obj r) :iface (:iface r) :recv x :path (:index r) :via (:via r))
-      (throw (ex-info (str "goi's builder: no method " (:name mm) " of " (t/type-str T)) {})))))
+      (throw (ex-info (str "goi's builder: no method " (:name mm) " of " (tstr T)) {})))))
 
 (defn inst-tree
   "The checked tree of a generic declaration for the type arguments of map m (type parameter ->
@@ -2710,6 +2718,7 @@ GR9a)."
   LinkString), an assertion's message: named types by package path, a function-scoped one with its
   ·N, an instance's and a generic function's local type's type arguments in brackets (GR9c)."
   [ty]
+  (let [ty (t/canon ty)]
   (cond
     (keyword? ty) (case ty :uint8 "uint8" :int32 "int32" (get t/basic-names ty (name ty)))
     (t/named? ty) (let [i (t/info ty)
@@ -2736,7 +2745,7 @@ GR9a)."
                                                     (str (if (:embedded f) "" (str (:name f) " ")) (rt-name (:type f))
                                                          (when (:tag f) (str " " (pr-str (c/value-text (:tag f))))))))
                        " }")))
-      (t/type-str ty))))
+      (tstr ty)))))
 
 (defn- rt-sig
   "A signature's text as gc's runtime writes it: (params) results."
@@ -2835,7 +2844,7 @@ GR9a)."
         ;; reflect forms' goiNilType (the list's :replace) of the same signature
         (if-let [nx (some-> (:pkg-scope *ctx*) (apply ["reflect"]) (get "goiNilType"))]
           (throw (ex-info "goi: TypeFor of an interpreted interface" {::nil-type nx}))
-          (unsupported! (str "reflect.TypeFor of the interpreted interface " (t/type-str ty)
+          (unsupported! (str "reflect.TypeFor of the interpreted interface " (tstr ty)
                              ": its reflect type is any (§5.2)") "G8")))))
   (let [k [x (mapv desc targs)]
         ^java.util.concurrent.ConcurrentHashMap reg instances]

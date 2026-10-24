@@ -48,16 +48,18 @@
    :untyped-string "untyped string" :untyped-nil "untyped nil" :invalid "invalid type"
    :byte "byte" :rune "rune"})
 
-;;; Spellings (the resolve mode, doc/go/GO-PARSER-SURVEY.md GP4)
+;;; Spellings (GC157 (b), doc/go/GOI-SPEC.md "As built: GC157"; first the resolve mode's, GP4)
 ;;
 ;; go/types keeps the universe's byte and rune apart from uint8 and int32 (other *Basic objects of
-;; the same kind, identical to them), and the converter writes the types it records (:inst,
-;; :tag) as go/types spells them. In the resolve mode the checker's types do too: byte and rune
-;; are :byte and :rune, and types are identical when they are canonically equal (same?, canon).
-;; Outside it no type is spelled, and same? is =.
+;; the same kind, identical to them), and an alias as an Alias node every operation unaliases. The
+;; checker's types do too while it checks (*spelled*, bound by check-package in every mode): byte
+;; and rune are :byte and :rune, an alias of a basic type a keyword of its own (kw-alias), an
+;; alias of any other type the type it denotes with its name in the metadata (::alias, which =
+;; ignores). Types are identical when they are canonically equal (same?, canon); what is built
+;; from them (goi's builder, the table) takes them canonical (canon: uint8, int32, no alias).
 
 (def ^:dynamic *spelled*
-  "Whether types keep go/types' spellings of byte and rune (the resolve mode)."
+  "Whether the checker makes types with go/types' spellings of byte, rune and aliases."
   false)
 
 (def ^:private kw-aliases
@@ -66,11 +68,12 @@
   (java.util.concurrent.ConcurrentHashMap.))
 
 (defn kw-alias
-  "The keyword spelling alias object x (named name, of package pkg) of basic type actual (made
-  once per object)."
-  [x name pkg actual]
+  "The keyword spelling alias object x (named name, of package pkg named pkg-name; local: declared
+  in a function) of basic type actual (made once per object)."
+  [x name pkg pkg-name local actual]
   (let [k (keyword "arbace.go.check.types" (str "a" (System/identityHashCode x) "-" name))]
-    (.putIfAbsent ^java.util.concurrent.ConcurrentHashMap kw-aliases k {:actual actual :name name :pkg pkg :obj x})
+    (.putIfAbsent ^java.util.concurrent.ConcurrentHashMap kw-aliases k
+                  {:actual actual :name name :pkg pkg :pkg-name pkg-name :local local :obj x})
     k))
 
 (defn kw-alias-info [k] (when (namespace k) (.get ^java.util.concurrent.ConcurrentHashMap kw-aliases k)))
@@ -85,37 +88,68 @@
 
 (declare canon)
 
+(defn- map-same
+  "(mapv f v), or v itself when f changes no element (no allocation)."
+  [f v]
+  (let [n (count v)]
+    (loop [i 0]
+      (if (< i n)
+        (let [x (nth v i) c (f x)]
+          (if (identical? x c)
+            (recur (inc i))
+            (into (conj (subvec v 0 i) c) (map f) (subvec v (inc i)))))
+        v))))
+
+(defn- canon-member [m] (let [ty (:type m) c (canon ty)] (if (identical? ty c) m (assoc m :type c))))
+
 (defn- canon-vec [t]
-  (case (nth t 0)
-    (:named :tparam) t
-    (:pointer :slice) (let [e (nth t 1) c (canon e)] (if (identical? e c) t (with-meta [(nth t 0) c] (meta t))))
-    :array (let [e (nth t 2) c (canon e)] (if (identical? e c) t (with-meta [:array (nth t 1) c] (meta t))))
-    :chan (let [e (nth t 2) c (canon e)] (if (identical? e c) t (with-meta [:chan (nth t 1) c] (meta t))))
-    :map (let [k (nth t 1) v (nth t 2) ck (canon k) cv (canon v)]
-           (if (and (identical? k ck) (identical? v cv)) t (with-meta [:map ck cv] (meta t))))
-    :func (let [[_ ps rs v] t cps (mapv canon ps) crs (mapv canon rs)]
-            (if (and (= ps cps) (every? true? (map identical? ps cps)) (every? true? (map identical? rs crs)))
-              t
-              (with-meta [:func cps crs v] (meta t))))
-    :struct (with-meta [:struct (mapv #(update % :type canon) (nth t 1))] (meta t))
-    :interface (with-meta [:interface (mapv #(update % :type canon) (nth t 1)) (nth t 2)] (meta t))
-    :tuple (with-meta (into [:tuple] (map canon (rest t))) (meta t))
+  (let [re (fn [c] (with-meta c (meta t)))]
+    (case (nth t 0)
+      (:named :tparam) t
+      (:pointer :slice) (let [e (nth t 1) c (canon e)] (if (identical? e c) t (re [(nth t 0) c])))
+      :array (let [e (nth t 2) c (canon e)] (if (identical? e c) t (re [:array (nth t 1) c])))
+      :chan (let [e (nth t 2) c (canon e)] (if (identical? e c) t (re [:chan (nth t 1) c])))
+      :map (let [k (nth t 1) v (nth t 2) ck (canon k) cv (canon v)]
+             (if (and (identical? k ck) (identical? v cv)) t (re [:map ck cv])))
+      :func (let [[_ ps rs v] t cps (map-same canon ps) crs (map-same canon rs)]
+              (if (and (identical? ps cps) (identical? rs crs)) t (re [:func cps crs v])))
+      :struct (let [fs (nth t 1) c (map-same canon-member fs)] (if (identical? fs c) t (re [:struct c])))
+      :interface (let [ms (nth t 1) c (map-same canon-member ms)]
+                   (if (identical? ms c) t (re [:interface c (nth t 2)])))
+      :tuple (let [xs (subvec t 1) c (map-same canon xs)] (if (identical? xs c) t (re (into [:tuple] c))))
+      t)))
+
+(defn alias-of
+  "The alias a type is spelled by ({:name :pkg :obj}), or nil."
+  [t]
+  (cond
+    (keyword? t) (when (namespace t) (kw-alias-info t))
+    (vector? t) (::alias (meta t))
+    :else nil))
+
+(defn unalias
+  "t without its alias's name (go/types' Unalias): the type it denotes."
+  [t]
+  (if (and (vector? t) (::alias (meta t)))
+    (vary-meta t dissoc ::alias)
     t))
 
 (defn canon
-  "t with its spellings (byte, rune) made canonical, deeply (named types and type parameters
-  are their own: identity)."
+  "t with its spellings made canonical, deeply: uint8 for byte, int32 for rune, an alias the
+  type it denotes (named types and type parameters are their own: identity); t itself when it
+  has none."
   [t]
   (cond
-    (not *spelled*) t
     (keyword? t) (canon-kw t)
-    (vector? t) (canon-vec t)
+    (vector? t) (canon-vec (unalias t))
     :else t))
 
 (defn same?
-  "Whether types x and y are identical: equal, or (the resolve mode) canonically equal."
+  "Whether types x and y are identical: equal, or canonically equal."
   [x y]
-  (or (= x y) (and *spelled* (= (canon x) (canon y)))))
+  (or (= x y)
+      (let [cx (canon x) cy (canon y)]
+        (and (not (and (identical? cx x) (identical? cy y))) (= cx cy)))))
 
 ;;; Named types and type parameters
 
@@ -166,7 +200,7 @@
     (keyword? t) (canon-kw t)
     (identical? :named (nth t 0)) (let [u (named-under t)] (if (keyword? u) (canon-kw u) u))
     (identical? :tparam (nth t 0)) (tparam-iface t)
-    :else t))
+    :else (unalias t)))
 
 ;;; Predicates
 
@@ -545,11 +579,19 @@
       (str base "[" (str/join "," (map type-str (:targs i))) "]")
       base)))
 
+(defn- alias-str
+  "An alias's name, qualified as a named type's (types2's Alias)."
+  [a]
+  (if (and (:pkg a) (not= (:pkg a) *qualify*) (not (:local a)))
+    (str (:pkg-name a) "." (:name a))
+    (:name a)))
+
 (defn type-str
-  "Go's text of a type."
+  "Go's text of a type (an alias by its name, byte and rune as such)."
   [t]
   (cond
-    (keyword? t) (or (get basic-names t) (some-> (kw-alias-info t) :name) (name t))
+    (keyword? t) (or (get basic-names t) (some-> (kw-alias-info t) alias-str) (name t))
+    (::alias (meta t)) (alias-str (::alias (meta t)))
     (named? t) (named-str t)
     (tparam? t) (:name (info t))
     :else
