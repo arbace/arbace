@@ -292,18 +292,21 @@ Prior art:
   blobs and refs in a host directory (`ARBACE_BOX_STORE`, `arbace-box --store DIR`, which is also
   its tool), the namespace `arbace.box` over it in the box and natively.
 - `test/java/`, `bin/java-check`: Java's conformance check (doc/classes/JAVA-CONFORMANCE-SURVEY.md,
-  JC1-JC8, "As built: JC1"), as goi's `bin/goi check` is Go's: jdk26u's jtreg tests read in place at the
-  platform's pin (corpora by area and category, `test/java/corpora.edn`: `jdk/java/*` but AWT,
+  JC1-JC8, "As built: JC1", "As built: JC2"), as goi's `bin/goi check` is Go's: jdk26u's jtreg tests read in place at the
+  platform's pin (corpora by area and category, `test/java/corpora.edn`: `jdk/java/*` but AWT and beans,
   `langtools/tools/javac`, `hotspot/jtreg/compiler`'s plain, `@compile` and JIT-option runs) and Arbace's
   own JLS programs (`test/java/jls/`), each test's files put in a package of their own (`package tNNNNN; `
   before the first line), the JDK's runs recorded as data (`test/java/ref-jdk26.edn`, `--record-ref` with
   the system's JDK; the check needs no JVM), the levels `read` (repr/java on javac's tool executable),
-  `interp` (the classes defined as one top-level `do` per package and `main` run on the executable,
-  `test/java/run.ae`; status and stdout's digest against the JDK's) and `classes` (javac on Arbace's
-  class files against the JDK javac's), results against `test/java/check-LEVEL.edn` (`--record`),
+  `interp` (each package required file by file as the REPL loads it, `--load do` the one-`do` mode, and
+  `main` run on the executable, `test/java/run.ae`; status and stdout's digest, also with identity hash
+  codes masked, against the JDK's), `compiled` (JC2, "As built: JC2": the tests translated by j2g in
+  shards of programs, `bin/j2g --program` with the build's compiled namespaces and `bin/build-go`, a
+  test j2g refuses or whose Go does not compile taken out, each `main` run on its program) and `classes`
+  (javac on Arbace's class files against the JDK javac's), results against `test/java/check-LEVEL.edn` (`--record`),
   every test not passing in a class of `test/java/divergences.edn`; the namespace `java.check`
   (`test/java/check.ae`) on the tools' host; the essential subset's forms committed in `test/java/forms/`
-  (`--forms verify|update`). `j2g` is JC2's level, `diagnostics` JC3's.
+  (`--forms verify|update`). `diagnostics` is JC3's level.
 - `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env
   world`, `check`, `simulate`), the subset Arbace uses, and what apk does not provide (jdk26u,
   TamaGo's Go, Go's module cache: only `bin/gate --full`'s vendoring checks need it). No build
@@ -342,7 +345,7 @@ Prior art:
   that wrote it, JFS32), `bin/repr-java parse-check` (the native parser's trees equal to javac on
   Arbace's, JN8), `bin/repr-java front-check` (the converter's forms from the native trees equal to
   javac's trees', JFS66 (b)), `bin/repr-java attr-check` (the native provider's facts equal to javac on
-  Arbace's, JN9a), `bin/java-check --levels read,interp,classes` (Java's conformance check, every
+  Arbace's, JN9a), `bin/java-check --levels read,interp,classes,compiled` (Java's conformance check, every
   corpus, then `--forms verify`: the essential tests' forms read afresh); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
