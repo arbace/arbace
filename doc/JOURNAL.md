@@ -1503,3 +1503,42 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   survey records what each script did and every number; JC1 builds the check anew as
   `bin/java-check` (JCS7), so only the scratch is gone. A worktree's scratch named by a survey is
   to be kept (copied to main's `.tmp/`) before its worktree goes.
+
+## 2026-10-24: JC1, `bin/java-check`: Java's conformance check with its interpreted level
+
+- Built on the branch `java-check-jc1` from main `549c5c49`, as planned in
+  doc/classes/JAVA-CONFORMANCE-SURVEY.md (JCS1-JCS15 as decided); "As built: JC1" there has the details
+  and the numbers. `bin/java-check` (bash: the processes, as `bin/goi check`) and the namespace
+  `java.check` (`test/java/check.ae`, on the tools' host, JCS7 (a): jtreg's tags, the categories,
+  the ids, the reference, the plans, the report and the classes); `test/java/run.ae`, the interpreted
+  runs on the executable under test (a test's packages each defined as one top-level `do`, JCS8 (a)).
+- The corpus (JCS2 (b)): jdk26u's jtreg tests read in place from `/root/jdk26u` at
+  `baf63fbe42b8758448fee570a9d9bb914272d259` (the platform's pin; `test/`: `jdk/java/*` but `awt`,
+  `langtools/tools/javac`, `hotspot/jtreg/compiler`, their run-plain, run-compile and run-jitopts
+  tests, `test/java/corpora.edn`), nothing of them copied but the essential subset's converted forms;
+  and eleven programs of Arbace's own in `test/java/jls/` (the hand-curated JLS corpus, started).
+  The reference recorded with the system's JDK (OpenJDK 26.0.2.1 built from jdk26u):
+  `test/java/ref-jdk26.edn`, 3,218 tests, 2,967 passing on the JDK (JCS5 (b): the check needs no JVM).
+- Results, the gate's executable of `549c5c49` (`gate_key` `881effe6…`), javac's tool of 04:35
+  (key `bf740cf0…`, the checkout's `22385f97…`: `REPR_JAVA_STALE_OK=1`, javac's world unchanged since,
+  repr/java's namespaces loaded from the checkout where they differ): read 2,965, class files byte for
+  byte 2,965, interpreted 1,364 (46.0%; on the survey's four areas as its §5.3); every test not
+  passing in one of the 36 classes of `test/java/divergences.edn`, recorded as
+  `test/java/check-{read,interp,classes}.edn`. New findings: three interpreter bugs from the JLS
+  corpus (a `finally`'s `return` not replacing a thrown exception; an overload chosen by the run-time
+  class instead of a cast's static type; a constant string expression not interned), repr/java's
+  converter overflowing its stack on `UncommonTrapStackBang.java`, javac on Arbace refusing the
+  charset alias `utf8`. Recorded, not fixed (JC4, JC5).
+- The essential subset (JCS13 (a)): `test/java/essential.txt`, 428 tests passing in under a second,
+  their forms committed in `test/java/forms/` (1.0 MB; GPL-2.0 as jdk26u's `test/`, LICENSE.md;
+  `bin/java-check --forms verify|update`), so the essential gate needs no javac: `bin/java-check
+  --essential` in `bin/gate`'s essential step (28 s), the whole check and `--forms verify` in
+  `--full`'s java chain. Makefile targets `java-check`, `java-check-essential`, `java-check-ref`;
+  CLAUDE.md's layout and gate paragraphs. The shipped program is unchanged (nothing under `arbace/`,
+  `go/`, `overlay/`, `jdk/`).
+- Alternatives considered: the forms read on every essential run (needs javac's tool in the
+  essential gate: minutes and a heavy slot; JCS21 (b)); test ids by digest (JCS23 (b)); per-file loads
+  instead of one `do` (JCS8 (c), the survey's 36 fewer passes).
+- Proposals JCS16-JCS25 (the survey's "As built: JC1"); JCS30 on are JC4's.
+- The agent's slips: one throwaway command used `pgrep -f` (as a no-op operand, nothing stopped),
+  one used a process substitution `source <(...)` to try a function; neither in a committed script.
