@@ -2301,7 +2301,12 @@ runs it compiled in the executable it checks.
 (801 of 801); `bin/goi divergences` (above); `bin/goi annotations` (its five corpora: 0 errors,
 every count as recorded); `bin/repr-go syntax-errors --decls` over the 659 error tests (above);
 `bin/generated-check` (the copy of gc's syntax and the dumper as generated: the driver is
-hand-written, outside it); `make check-makefile`; the essential `bin/gate` (below). Not run:
+hand-written, outside it); `make check-makefile`; the essential `bin/gate` at `d5ed2259` passed
+(its build anew, 6 m: the smoke test, Clojure's suite with no regressions, the oracle 22,658 of
+22,711 against its 53 known, the differential check 12,743 of 12,766 against its 23 known, goi's
+essential check 801 of 801, the generated files, `bin/j2g-edge verify`; its first run's
+`j2g-edge` failed on the worktree's first frozen view, two views' refreshes writing the one
+`jar.list.new` at once, `bin/lib/frozen.bash`; the second run, the list made, passed in 2 m 6 s). Not run:
 `bin/gate --full`, the box (no errorcheck program runs in the box).
 
 **Proposals (GPS60-GPS65; each built as recommended).**
