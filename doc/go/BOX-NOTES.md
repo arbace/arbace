@@ -3574,3 +3574,10 @@ directories and the C toolchain (`gcc`, `cc`, `clang`, `ld`, `as`, `readelf`, `o
   (b) split the line into Arbace's and jdk26u's builds. Recommended (a).
 
 **Decided (2026-10-16, the user):** GW4-GW9 (a), as built; GW4 applied by the lead (CLAUDE.md).
+
+## The Mac's bundle of the conversion (2026-10-24)
+
+`bin/box-mac-bundle --convert` packs GP8's conversion alone for the Mac (`./mac.sh convert`:
+tamago/goroot converted in the box on Hypervisor.framework, its two reads at once, against the
+digests of `bin/box-convert`'s host step); doc/go/GO-PARSER-SURVEY.md, "Mac bundle: the
+conversion (2026-10-24)".

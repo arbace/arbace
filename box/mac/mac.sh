@@ -28,6 +28,21 @@
 #                        each a spawned guest), timed (HV7); the image must equal the one built on
 #                        Linux by the host's tools (rebuild/expected.txt), byte for byte; then booted
 #                        by its ref
+#   ./mac.sh convert     GP8 (doc/go/GO-PARSER-SURVEY.md, GPS56 (c); the bundle of bin/box-mac-bundle
+#                        --convert): check and sign, then tamago/goroot converted in the box from the
+#                        store convert/store (the commit's sources, the ref src; TamaGo's GOROOT/src
+#                        text, goroot.text; the bundle's guest put as arbace.arm64): the driver
+#                        (arbace.box.convert/steps) in a 6 GiB guest spawns std's two reads at once
+#                        (tamago/amd64, tamago/arm64: repr/go's native reader, goi's checker, the
+#                        converter), then the assembling and merging; every digest against
+#                        convert/expected.edn (the same steps on Linux by the native executable),
+#                        PASS or FAIL, the times, the launchers' resident memory at most (sampled
+#                        each 2 s); then mac-results.tar.gz. Budgets: CONVERT_JOBS (each read's
+#                        threads, default half the Mac's CPUs), CONVERT_CPUS (each read's vCPUs,
+#                        default the Mac's CPUs: twice the threads, GPS54), CONVERT_RAM (each
+#                        read's guest, default 13GiB), CONVERT_SERIAL=1 (one read after the other;
+#                        the default when the Mac has under 40 GiB); CONVERT_DRY=1 checks the
+#                        bundle and prints the command without running it
 #   ./mac.sh clock       HV6: an idle box's wall clock against the Mac's, once a minute for an hour
 #   ./mac.sh all         check, sign, hv, checklist, goi, rebuild, with clock running beside them (an
 #                        hour from its start), then mac-results.tar.gz
@@ -39,7 +54,9 @@ res=$here/mac-results
 mkdir -p "$res"
 export TMPDIR="$here/.tmp"
 mkdir -p "$TMPDIR"
-B=$here/arbace-box
+# MAC_LAUNCHER, MAC_GUEST: another launcher and guest (convert's run on Linux, the bundle's check)
+B=${MAC_LAUNCHER:-$here/arbace-box}
+G=${MAC_GUEST:-$here/arbace-box.elf}
 fails=0 oks=0
 
 # t SECONDS CMD...: CMD, ended after SECONDS (status 124), as Linux's timeout (macOS has none)
@@ -288,6 +305,80 @@ do_rebuild() {
   [ $fails -eq 0 ]
 }
 
+# the conversion (GP8): convert/store holds the sources (the ref src) and GOROOT's text
+# (goroot.text); convert/expected.edn the digests the same steps gave on Linux
+# xfield FILE KEY: KEY's string in FILE (a map printed on one line, or one key a line)
+xfield() { sed -n "s/.*:$2 \"\([^\"]*\)\".*/\1/p" "$1" | head -1; }
+# rss_sum: the resident KiB of the launchers (this one, its spawner and the spawned guests'),
+# summed: Hypervisor.framework's guest memory is the launcher process's
+sha256() { if [ -n "$(command -v shasum)" ]; then shasum -a 256; else sha256sum; fi | cut -c1-64; }
+rss_sum() { ps -A -o rss=,comm= 2> "$TMPDIR/ps.err" | awk -v b="arbace-box" '{ n = split($NF, p, "/") } p[n] == b { s += $1 } END { print s + 0 }'; }
+do_convert() {
+  local m ncpu jobs cpus ram ram_mib serial spawn_ram spawn_cpus e st d0 d k want got peak sampler pin img x=convert/expected.edn
+  [ -s "$x" ] && [ -d convert/store ] || { echo "no convert/ in the bundle (bin/box-mac-bundle --convert)"; return 1; }
+  fails=0 oks=0
+  export ARBACE_BOX_STORE_MAX=off
+  m=$(sysctl -n hw.memsize 2> "$TMPDIR/sysctl.err" || echo 0)
+  ncpu=$(sysctl -n hw.ncpu 2> "$TMPDIR/sysctl.err" || echo 8)
+  jobs=${CONVERT_JOBS:-$(( ncpu / 2 > 0 ? ncpu / 2 : 1 ))}
+  cpus=${CONVERT_CPUS:-$(( jobs * 2 > 32 ? 32 : jobs * 2 ))}
+  ram=${CONVERT_RAM:-13GiB}
+  serial=false
+  if [ "${CONVERT_SERIAL:-}" = 1 ] || { [ -z "${CONVERT_SERIAL:-}" ] && [ "$m" -lt $((40 << 30)) ]; }; then serial=true; fi
+  # the spawns' budget: both reads at once (one when serial); the assembling's 4 GiB, 1 vCPU after
+  case $ram in *GiB) ram_mib=$(( ${ram%GiB} * 1024 )) ;; *MiB) ram_mib=${ram%MiB} ;; *) echo "CONVERT_RAM=$ram: GiB or MiB"; return 1 ;; esac
+  if $serial; then spawn_ram=$(( ram_mib > 4096 ? ram_mib : 4096 ))MiB spawn_cpus=$cpus
+  else spawn_ram=$(( ram_mib * 2 ))MiB spawn_cpus=$(( cpus * 2 )); fi
+  pin=$(xfield "$x" pin)
+  echo "== the conversion in the box (GP8): the commit $(xfield "$x" commit)"
+  echo "hw.memsize $m, $ncpu CPUs; each read $jobs threads, $cpus vCPUs, $ram; serial $serial; the spawns' budget $spawn_ram, $spawn_cpus vCPUs; the driver 6 GiB, 4 vCPUs"
+  echo "convert: hw.memsize $m, $ncpu CPUs, jobs $jobs, cpus $cpus, ram $ram, serial $serial, spawn $spawn_ram $spawn_cpus" >> "$res/measures.txt"
+  # the bundle: its store's trees are those the expected digests were made from
+  check "the store's sources (ref src) are the commit's" "$(xfield "$x" src)" "$("$B" --store convert/store ref src 2>&1)"
+  check "the store's GOROOT text (ref goroot.text) is Linux's" "$(xfield "$x" text)" "$("$B" --store convert/store ref goroot.text 2>&1)"
+  img=$("$B" --store convert/store put "$G" arbace.arm64 2>&1)
+  check "the image arbace.arm64 is the bundle's guest" "$(sha256 < "$G")" "$img"
+  e="(require (quote arbace.box.convert)) (let [r (arbace.box.convert/steps \"src\" \"goroot.text\" {:ref \"converted.mac.arm64\" :host \"arbace.arm64\" :jobs $jobs :cpus $cpus :ram $(( ram_mib * 1048576 )) :serial $serial :pin \"$pin\"})] (arbace.box/put! \"converted.mac.arm64.steps\" (pr-str r)) (prn r) (System/exit (if (false? (:equal r)) 1 0)))"
+  echo "ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=$spawn_ram ARBACE_BOX_SPAWN_CPUS=$spawn_cpus ARBACE_BOX_RAM=6GiB ARBACE_BOX_CPUS=4 ARBACE_BOX_IMAGE=ref:arbace.arm64 $B --store convert/store -e '$e'" > "$res/convert-command.txt"
+  if [ "${CONVERT_DRY:-}" = 1 ]; then
+    echo "CONVERT_DRY=1: the command (mac-results/convert-command.txt):"; cat "$res/convert-command.txt"
+    echo "== the conversion's bundle: $oks ok, $fails failed (not run)"
+    [ $fails -eq 0 ]; return
+  fi
+  # the launchers' resident memory, each 2 s, at most
+  rm -f "$TMPDIR/convert-peak"
+  ( p=0; while :; do r=$(rss_sum); [ "$r" -gt "$p" ] && p=$r && echo "$p" > "$TMPDIR/convert-peak"; echo "$(date +%s) $r" >> "$res/convert-rss.txt"; sleep 2; done ) &
+  sampler=$!
+  vm_stat > "$res/convert-vmstat-before.txt" 2>&1
+  d0=$(ms)
+  ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=$spawn_ram ARBACE_BOX_SPAWN_CPUS=$spawn_cpus \
+    ARBACE_BOX_RAM=6GiB ARBACE_BOX_CPUS=4 ARBACE_BOX_IMAGE=ref:arbace.arm64 t 14400 "$B" --store convert/store -e "$e" 2>&1 | tee "$res/convert-run.log"
+  st=${PIPESTATUS[0]}
+  d=$(ms)
+  kill $sampler; wait $sampler 2> "$TMPDIR/sampler.err"
+  vm_stat > "$res/convert-vmstat-after.txt" 2>&1
+  sysctl vm.swapusage >> "$res/convert-vmstat-after.txt" 2>&1
+  peak=0
+  [ -s "$TMPDIR/convert-peak" ] && peak=$(cat "$TMPDIR/convert-peak")
+  "$B" --store convert/store get converted.mac.arm64.steps > "$res/convert-steps.edn" 2> "$res/convert-steps.err"
+  echo "convert: $(( (d - d0) / 1000 )) s, status $st, the launchers resident at most $(( peak / 1024 )) MiB" | tee -a "$res/measures.txt"
+  grep -E '^convert: (read|assembled|tamago)' "$res/convert-run.log" | sed 's/^/  /' | tee -a "$res/measures.txt"
+  check "the conversion in the box ran" "0" "$st"
+  for k in src text digest forms-amd64 forms-arm64 goroot expected; do
+    want=$(xfield "$x" "$k"); got=$(xfield "$res/convert-steps.edn" "$k")
+    check "$k on the Mac = on Linux ($want)" "$want" "$got"
+  done
+  check "the tree converted on the Mac = the commit's tamago/goroot (:equal)" "yes" "$(grep -q ':equal true' "$res/convert-steps.edn" && echo yes)"
+  check "the ref converted.mac.arm64" "$(xfield "$x" goroot)" "$("$B" --store convert/store ref converted.mac.arm64 2>&1)"
+  echo "== the conversion: $oks ok, $fails failed"
+  if [ $fails -eq 0 ]; then
+    echo "PASS: tamago/goroot converted in the box on the Mac = the commit's, byte for byte: $(xfield "$x" goroot) ($(( (d - d0) / 1000 )) s, at most $(( peak / 1024 )) MiB resident)"
+  else
+    echo "FAIL: the conversion on the Mac: $fails of $((oks + fails)) checks failed (tamago/goroot $(xfield "$res/convert-steps.edn" goroot), expected $(xfield "$x" goroot))"
+  fi
+  [ $fails -eq 0 ]
+}
+
 # HV6 (doc/go/HOST-VM-SURVEY.md): an idle box (1 vCPU) prints its wall clock every minute for an
 # hour, each line stamped with the Mac's on arrival: guest minus Mac, in ms
 do_clock() {
@@ -313,6 +404,18 @@ cmd=${1:-}
 case $cmd in
   check|sign|hv|checklist|goi|rebuild|clock) step "$cmd" ;;
   goi-one) goi_one "$@" ;;
+  convert)
+    # the bundle of bin/box-mac-bundle --convert: check, sign, the conversion, mac-results.tar.gz
+    rm -rf "$res"; mkdir -p "$res"
+    s=0
+    if [ "${CONVERT_DRY:-}" = 1 ]; then step convert || s=1; exit $s; fi
+    step check || s=1
+    step sign || s=1
+    [ $s = 0 ] && { step convert || s=1; }
+    tar -czf mac-results.tar.gz mac-results
+    echo "mac.sh: $(cat "$res/status.txt" | tr '\n' ' ')" >&2
+    echo "mac.sh: send back $here/mac-results.tar.gz" >&2
+    exit $s ;;
   all)
     rm -rf "$res"; mkdir -p "$res"
     s=0
