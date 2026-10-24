@@ -4278,7 +4278,10 @@ On the final tool (key `db72d5ad...`), one after another, the host shared:
   baseline,samples,jdk --text`: as the references (663 s)
 - the updates of JFS75 (b).5: only the three provenance files' `:repr-java` and `:host` changed
 - `make check-makefile`: passes
-- GATE
+- `bin/gate` (essential): on the branch at `11c3733d` (this section's commit but this line), passes in
+  19m56s (go-build 602 s, afresh; go-smoke, suite-go with no regression, oracle-go 53 known
+  mismatches as recorded, diffcheck 23 known as recorded, goi-check 801 of 801, generated, j2g-edge
+  verify: `jdk/edge.edn` the JVM's answer)
 - not run: `bin/gate --full` (the user's rule), `bin/repr-java check --suite`, `bin/javac-vendor
   verify` and `classes` (the converted forms and javac's world are unchanged: the updates show the
   forms byte for byte)
