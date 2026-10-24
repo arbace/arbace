@@ -2234,3 +2234,39 @@ The user decided GPS50-GPS56 as built:
 - GPS54 (a): a read's guest twice its threads in vCPUs, a spawn budget of 32.
 - GPS55 (a): `arbace.box.convert` embedded and compiled.
 - GPS56 (a) now, a part of std in the emulated VM; (c), the whole tree on the Mac, at its next run.
+
+## Mac bundle: the conversion (2026-10-24)
+
+GPS56 (c), the whole of `tamago/goroot` converted in the box on the Mac, natively on
+Hypervisor.framework: a bundle of the conversion alone, by the user's choice (its two reads at
+once; the Mac, an M2 Max with 12 CPUs and 96 GB, has room for about 32 GB at most).
+
+- `bin/box-mac-bundle --convert` (`make mac-bundle-convert`) packs
+  `target/arbace-go/arbace-box-mac-arm64-convert.tar.gz`: the darwin/arm64 launcher, the arm64
+  guest, hv.test, the entitlements, `mac.sh`, `box/mac/README-convert.txt` as README.txt, VERSION,
+  and `convert/`: `store`, the store `bin/box-convert prepare` makes (the commit's sources, the ref
+  `src`; TamaGo's GOROOT text, `goroot.text`; the image is the bundle's guest, put as
+  `arbace.arm64` on the Mac), and `expected.edn`, the host step's digests (`bin/box-convert --arch
+  arm64 prepare host` on HEAD's executables, its new `host.verified`, as `bin/box-rebuild`'s) and
+  the pin of GOROOT/src. Neither the rebuild's store nor goi's programs, so neither's
+  prerequisites; the freshness rules as before (`bin/lib/fresh.bash`: the guest, the store tool,
+  the host step, all HEAD's).
+- `./mac.sh convert`: check and sign, then the driver (`arbace.box.convert/steps`, 6 GiB, 4
+  vCPUs) with `ARBACE_BOX_SPAWN=1` spawns the two reads at once; each digest of the run (the
+  sources, the text, GOROOT/src's digest, each architecture's forms, the tree and the expected
+  tree) against `expected.edn`, PASS or FAIL, the times, the launchers' resident memory at most
+  (`ps` each 2 s, summed: the framework's guest memory is the launcher process's), then
+  `mac-results.tar.gz` (the steps' logs and statuses, `convert-steps.edn`, the run's log, the
+  command, the samples, `vm_stat` before and after).
+- The budgets: each read half the Mac's CPUs in threads (6 on the M2 Max) and twice that in
+  vCPUs (12, GPS54: the collector's cores beside the threads; the 12 threads of the two reads are
+  the Mac's 12 cores), 13 GiB each (`GOMEMLIMIT` 12 GiB; on amd64 the two reads in 16 GiB guests
+  held 20.0 GB at most), the spawns' budget 26 GiB and 24 vCPUs: at most about 28 GB with the
+  driver, under the user's 32. `CONVERT_JOBS`, `CONVERT_CPUS`, `CONVERT_RAM`, `CONVERT_SERIAL=1`
+  (the default under 40 GiB) change them; `CONVERT_DRY=1` checks the bundle alone.
+- Checked on Linux at `45115525` (the bundle's commit): the host step, the same digests as GP8's
+  (`76a4a414…` tamago/amd64, `47a3c126…` tamago/arm64, the tree `0445b850…` = the commit's
+  `tamago/goroot`; GOROOT/src's digest the pin `415d2301…`), 151 s; the tarball, 81,200,804
+  bytes, extracted and run by its own `./mac.sh convert` with the amd64 launcher and guest in
+  place of the Mac's (`MAC_LAUNCHER`, `MAC_GUEST`; codesign a stand-in), 4 threads and 8 vCPUs a
+  read: PASS, every digest equal, 238 s, the launchers 19.8 GB resident at most.
