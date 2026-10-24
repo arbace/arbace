@@ -3982,8 +3982,9 @@ the seed is stale for this change: a re-seed carries it (not done here).
 ### JFS65 (b).7 Sources and scratch
 
 - Go 1.27.1 (TamaGo's, `/root/tamago-go`): `cmd/compile`'s inlining budget (80) as `-m=2` reports it.
-- The worktree's `.tmp/`: `jfs65/` (`basetree/`, `317927c0` as `git archive` gives it with its own
-  tool build, the base; `base/arbace`, the base's shipped executable, main's build of the same
-  `aot.key`; the tool builds' logs `base-build-java.log`, `new-build-java.log`,
+- The worktree's `.tmp/`: `jfs65/` (the tool builds' logs `base-build-java.log`, `new-build-java.log`,
   `new2-build-java.log`; the profiles `base-parse.pprof`, `new-parse.pprof`, `new2-parse.pprof`;
-  `w.clj`, `w2.clj`, `w3.clj`, the workloads, `w.out`, `w2.out`, `perf*`; the checks' logs).
+  `w.clj`, `w2.clj`, `w3.clj`, the workloads, `w.out`, `w2.out`, `perf*`; the checks' logs). The base
+  (`basetree/`, `317927c0` as `git archive` gives it, with its own tool build; `base/arbace`, main's
+  shipped executable of the same `aot.key`) was removed after the measurements, for the host's disk;
+  `git archive 317927c0` and `bin/arbace-go --build-java` in it make it again.
