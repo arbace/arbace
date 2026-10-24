@@ -4117,3 +4117,13 @@ fact by `attr-check` as JN9a's, its known differences empty.
   `split.md`)), `repr-java-attr-check/`, `repr-java-front-check/`, `repr-java-jdk/`,
   `repr-java-check/`, `repr-java-parse-check/`, `repr-java-roundtrip/`, `jrt/`, `javac-vendor/`,
   `clojure-tests/`.
+
+## Decided (2026-10-24): JFS74-JFS78
+
+- JFS74 (a), as built: `bin/repr-java attr-check`'s default corpora in `bin/gate --full`'s java chain
+  (`repr-java-attr`), jdk26u opt-in (`--corpus all`).
+- JFS75 (b), first: the converter's reads of javac's model (`Symbol`, `Type`, `Types`, `Attribute`)
+  behind an interface over both models, `decls`' symbols and types the native one.
+- JFS76 (a), as built: the declined facts left to javac.
+- JFS77 (a): JFS75 (b), then JN9b (members and expression types), decided after it on its numbers.
+- JFS78 (a), as built: the provider only beside javac, inside the check, until a consumer is named.

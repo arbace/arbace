@@ -1427,3 +1427,24 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   - a survey of Java's conformance (no counterpart of `$GOROOT/test` for interpreting and compiling
     Java: a corpus, today's coverage by `arbace.classes.interp` and j2g, a plan), on the branch
     `java-conformance-survey` from `317927c0`.
+
+## 2026-10-24: JN9a merged, JFS74-JFS78 decided (the user)
+
+- JN9a (branch `java-frontend-jn9a` from `bd3ba0bb`, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built:
+  JN9a"): a native attribution provider (`arbace/repr/java/{classfile,decls,scope,nattr}.ae`, ports of
+  javac's Check, Resolve, TypeEnter, MemberEnter, Enter, Annotate, ConstFold, Attr's environments and
+  Flow's liveness from jdk26u `baf63fbe`) answers the scope and declarations tiers; every answer is
+  compared with javac on Arbace's: 0 different over the samples, the baseline, jdk, javac and jdk26u
+  (5,425,925 equal, 28,585 declined: `var` and implicit lambda parameters' types, diamonds), the forms
+  equal; `bin/repr-java attr-check` (`--attr native`), in `--full`'s java chain as `repr-java-attr`.
+  Within it JFS71 (facts asked in jdk26u 15.15M → 13.54M) and JFS72 (b) (jdk26u's forms as hashes,
+  `test/repr/java/expected/jdk26u.sha256`, `check --jdk` compares them; unchanged by JFS71). The rest
+  of JN9 re-estimated 7-14 days (was 15-27). No shipped code changed; no re-seed.
+- At the merge (`350f1bab`): the conflicts kept both (the survey; `bin/gate`'s report list: main's
+  essential `j2g-edge`, the branch's `repr-java-attr`), and `bin/lib/repr-java/host.bash`'s
+  `repr_java_provenance_same` compares through temporary files instead of process substitution
+  (the rule against `/dev/fd`; the line predated the branch). The agent reports its slips: repr/java's
+  sources edited under its own running checks (every affected check redone clean), a process
+  substitution and a `2>/dev/null` of its own. The essential gate on `350f1bab` passed (14m03s).
+- Decided (the user): JFS74 (a), JFS75 (b) first, JFS76 (a), JFS77 (a) (JFS75 (b), then JN9b),
+  JFS78 (a); JFS75 (b) started now, on the branch `java-model` from main.
