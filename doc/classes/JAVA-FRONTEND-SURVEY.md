@@ -21,7 +21,8 @@ with JFS51-JFS54; JFS52 (b), `FlagsEnum` on the tool: "As built: JFS52 (b) (2026
 JFS55-JFS58; JN8, the native parser: "As built: JN8 (2026-10-23)", with JFS59-JFS66; JFS66 (b), the
 converter on an interface over both front ends and the split measured: "As built: JFS66 (b)
 (2026-10-23)", with JFS67-JFS71; JFS70 (b), the pins independent of the javac run's history: "As
-built: JFS70 (2026-10-23)", at the end, with JFS72.
+built: JFS70 (2026-10-23)", with JFS72; JFS65 (b), j2g's checked array casts as a type switch: "As
+built: JFS65 (b) (2026-10-24)", at the end, with JFS80-JFS82.
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -4353,3 +4354,160 @@ On the final tool (key `db72d5ad...`), one after another, the host shared:
   `repr-java-attr-check/` (`attr.md`, `split.md`), `repr-java-attr-check-jdk26u/` (the run that found
   JFS75 (b).2's file), `repr-java-front-check/`, `repr-java-jdk/`, `repr-java-check/`,
   `repr-java-parse-check/`, `repr-java-roundtrip/`, `jrt/`, `javac-vendor/`, `clojure-tests/`.
+
+## As built: JFS65 (b) (2026-10-24)
+
+JFS65 (b), j2g's checked casts to array types as a type switch on the array's Go type rather than
+`Class.isInstance` (JN8.5: 17% of the native parser's time compiled), on the branch
+`j2g-array-casts` from main `317927c0`, in about a working day, most of it builds and checks
+queued on the shared host. A change to j2g and jrt, so to every compiled program that casts to an
+array type: the shipped program changes (a re-seed, not done here).
+
+### JFS65 (b).1 What it was
+
+Every checkcast to an array type (javac's `(char[]) o`, the analyzer's erasure casts, c2j's casts of
+a hinted local or argument, `^chars`, `^objects`, the dynamic classes' results, `dyn.ae`, and the
+functional interfaces' adapters, `fromfn.ae`) was j2g's generic helper of jrt's package:
+
+```clojure
+((inst J2g_CastArray (* CharArray)) x (.ArrayClass Prim_char))
+```
+
+that is, at each call the array class (`ArrayClass`, an atomic load behind a call), then in
+`J2g_CastArray` the nil test, `Class.isInstance` (the class's `IsInstance` hook, then
+`isAssignableFrom` of `GetClass(x)`: a type switch, the assertion to `Object_I`, the interface call
+`GetClass__Class`, which itself calls `ArrayClass`), then Go's assertion through the generic
+dictionary. `instanceof` of an array type was `(.IsInstance_O__Z (.ArrayClass ...) x)` alike. A CPU
+profile of `bin/repr-java parse --javac --time` over `java/util` on javac's tool (the base tool, built
+from `317927c0`): `J2g_CastArray[go.shape.*uint8]` 15.3% cumulative, `GetClass` 9.2%, `IsInstance_O__Z`
+13.9% (most of it under the casts), `ArrayClass` 3.2% flat at the call sites.
+
+### JFS65 (b).2 What it is
+
+jrt's own functions (`go/arbace/jrt/array.ae`, hand-written Go forms), one per array kind, named as
+the classes' `C_Cast` and `C_InstanceOf` (J2G-SPEC §5.7, §5.9):
+
+| Java | j2g's Go form | fast path | out of line |
+|---|---|---|---|
+| `(int[]) x` (and the 7 other primitive arrays) | `(jrt/IntArray_Cast x)` | Go's comma-ok assertion to `*IntArray`; `nil` for `nil` | `ClassCastException` (`arrayCastFailed`, `jrt.ClassCast`'s message) |
+| `(Object[]) x` | `(jrt/ObjectArray_Cast x)` | the assertion to `*RefArray`: every reference array is an `Object[]` | the exception |
+| `(T[]) x`, `T` another reference type (`String[]`, `int[][]`: `T` is `int[]`) | `(jrt/RefArray_Cast x T_class)` | the assertion and `Comp == T_class` | `refArrayCast`: `Class.isInstance` of `T[]`'s class (covariance: a `String[]` as `CharSequence[]`, a subclass's array as its superclass's), the exception |
+| `x instanceof int[]`, `Object[]`, `T[]` | `IntArray_InstanceOf`, `ObjectArray_InstanceOf`, `RefArray_InstanceOf` | the same | `refArrayIsInstance`: `Class.isInstance` |
+
+The fast paths are within gc's inlining budget (`-gcflags=-m=2` on the printed jrt: cost 80 of 80 for
+`RefArray_Cast`, `RefArray_InstanceOf`, `ObjectArray_Cast`; 9 for the `_InstanceOf`s of a Go type;
+`RefArray_Cast` was 84, not inlined, while it also tested `comp == Object_class`, which is why
+`Object[]` has its own function, j2g deciding it statically). j2g's `arbace.j2g.model/array-test`
+writes all of them (`code.ae`'s `cast-val` and `instance-val`, `dyn.ae`, `fromfn.ae`);
+`J2g_CastArray` is gone from j2g's support file. The semantics are Java's as before: `null` casts to
+any array type; a failed cast's message is HotSpot's, `class [I cannot be cast to class [C ([I and
+[C are in module java.base of loader 'bootstrap')`, the same function making it; the JVM's
+covariance by `Class.isInstance`, which the fast path never contradicts (an array whose component
+class is `T`'s is a `T[]`; a `*RefArray` is an `Object[]`; a primitive array's Go type is its class).
+The one Go type per array kind (§5.9) is what makes the switch decide: only a reference array of
+another component class needs the class hierarchy.
+
+The regression fixture `test/j2g/fixtures/FxArrays.ae` (`j2g.fixtures.FxArrays`, recorded on the
+frozen jar by `bin/j2g-check --record-fixtures`): every cast and `instanceof` of 21 array types (the
+8 primitive, `Object[]`, `Object[][]`, `String[]`, `CharSequence[]`, `Comparable[]`, `Number[]`,
+`Integer[]`, `int[][]`, `long[][]`, `String[][]`, `CharSequence[][]`, a fixture class's array and its
+subclass's) over 18 values (an array of each kind, a string, an `Integer`), the exceptions' messages
+(but for a fixture class's loader, which the JVM recording names as its `DynamicClassLoader @hash`
+and the Go build `'app'`), `null` cast to each, and a cast's result used (an element read, an
+`Object[]`-typed `String[]` refusing an `Integer` with `ArrayStoreException`). It passes on the base
+(`317927c0`'s j2g) and on the change: the semantics did not move.
+
+### JFS65 (b).3 Speed
+
+The host shared (load 11-37 during the runs), each pair alternated, the minimum of the runs:
+
+| | base (`317927c0`) | JFS65 (b) | |
+|---|---:|---:|---:|
+| the native parser compiled in javac's tool, java.base (3,097 files, 46.0 M chars, one thread; `bin/repr-java parse --javac --time`, 3 runs each) | 49.0 s (0.94 M chars/s) | 37.3 s (1.23 M chars/s) | -24% |
+| the same over `java/util` (370 files, 9.62 M chars, 2 runs each) | 11.1 s | 7.8 s | -30% |
+| javac on Arbace's parse in the same runs (`JavacTask.parse`, java.base) | 5.3 s | 5.5 s | noise |
+| javac on Arbace compiling java.base (`bin/javac-vendor classes jdk java.base`, one run each, base first; the JVM's javac in the same runs 28.6 s and 25.0 s) | 89.3 s (3.1 times the JVM's) | 76.9 s (3.1 times) | noise |
+| the shipped program, hinted arrays through the evaluator (`aget`/`aset` on `^longs`, `^objects`, `^chars`, `areduce`, 100,000 elements; 3 runs each) | 7.6-65.5 ms | 6.0-52.0 ms | -19 to -22% |
+| the same, `into-array` of 10,000 (arbace.core's, compiled) | 32.1 ms | 18.6 ms | -42% |
+| the same, general workloads without array casts (`sort`, `reduce`, `assoc` into a map, `str`): user instructions over the script (`perf stat`) | 20.72 G | 20.72-20.79 G | none |
+
+With the change the casts leave the profile: over `java/util` `LongArray_Cast` 0.6% and
+`RefArray_Cast` 0.7% where not inlined, `GetClass` 1.6% (from 9.2%), `IsInstance_O__Z` below the
+listing. The native parser compiled is now about 7 times javac on Arbace's parse (from 9, JN8.5).
+`bin/j2g-perf` does not apply: it lives on the branch `arbace-for-golang` only (J2G-NOTES.md, 5), its
+workloads timed against the JVM's.
+
+### JFS65 (b).4 The shipped program's change
+
+j2g's output changes wherever a program casts to an array type or tests one, and jrt gains the 19
+functions: the shipped executable 151,773,344 bytes (the gate's build) against 151,711,904
+(+61,440), javac's tool 217,956,512 against 217,764,000 (+192,512: the fast paths inlined at their
+sites). `bin/lib/version.bash`'s runtime key changes (`go/`, `arbace/j2g` in the build's keys), so
+the seed is stale for this change: a re-seed carries it (not done here).
+
+### JFS65 (b).5 The checks
+
+- `bin/j2g-check` (amd64): 9,036 steps, 8,972 pass, 17 fail, 47 need core, the 17 the same steps as
+  the base's (`317927c0`, run in `basetree/`): its slice's environment (`Properties.setProperty` not
+  translated, `lib/tzdb.dat` missing: FxDates, FxStreams' print streams, FxCode's `tVarargs`, six
+  oracle class cases initializing through them); FxArrays' 5 cases pass on both. `test/j2g/check.ae`
+  did not load on stage 0 (`arbace.pprint/pprint` unresolved: the report's pprint without its
+  require); it requires `arbace.pprint` now.
+- `bin/diffcheck`: 12,749 of 12,772 cases agree, the 23 known (the Java pair 729 of 731): FxArrays
+  interpreted and translated agree; FxArrays sorting first renumbered the two known fixture cases
+  (`test/j2g/fixtures:2`, `:10` now `:3`, `:11`, the same `load-file`s), `test/diffcheck/known.edn`
+  updated.
+- `bin/javac-vendor check`: j2g translates javac's world, no failures (54 s).
+- `bin/javac-vendor classes baseline samples jdk java.base` on the new tool: every corpus byte for
+  byte as the JVM's javac, java.base also as the build's classes (248 s).
+- `bin/repr-java parse-check` on the new tool: every corpus's trees equal (samples 14, baseline 183,
+  jdk 838, javac 824, jdk26u 12,809, mutants 8,000, tests 37,797).
+- `bin/gate` (essential): on the branch at `f2289818` (this section's commit but this list), passes
+  in 9m57s (go-build cached from the diffcheck run's build of the same key; go-smoke, suite-go 777
+  tests with no regression, oracle-go 53 known mismatches as recorded, diffcheck as above, goi-check
+  801 of 801, generated, j2g-edge verify: `jdk/edge.edn` unchanged, j2g asks no new JDK class).
+- not run: `bin/gate --full` (the user's rule), `bin/arbace-go --fixpoint`, the box.
+
+### JFS65 (b).6 Proposals
+
+- **JFS80 The other checked casts.**
+  - Options: (a) as built: casts to classes and interfaces stay `C_Cast` (a Go assertion, already a
+    type switch, J2G-SPEC §5.7); (b) the dynamic check of an interface's cast (`jrt.IsDynamic`, a
+    header load) skipped where the static world shows no dynamic class can implement the interface;
+    (c) c2j's repeated casts of one hinted local hoisted (one cast per binding, not per use: the
+    parser's state and the lexer's arrays are cast at every `aget`).
+  - *Recommended: (a)*: after this change no cast shows in the parser's profile above 1%; (c) when a
+    profile shows the casts again (it is c2j's, and a cast is now a few instructions).
+- **JFS81 The re-seed.**
+  - Options: (a) the change carried by the next re-seed with whatever else is on main; (b) a re-seed
+    of its own after the merge, so that the tools' host (stage 0) runs j2g, repr/go and goi at the new
+    speed (their code casts arrays: repr/go's printer and goi's frames are `Object[]`-heavy).
+  - *Recommended: (a)*: the tools' host gains as the program does, but nothing waits on it.
+- **JFS82 A regression test of the speed.**
+  - Options: (a) none, as built (the numbers here, measured by hand); (b) the parser's
+    `parse --time` over java.base recorded in `parse-check`'s report and compared with a stored
+    ceiling (a slowdown of more than, say, 30% failing it), noise permitting on a shared host.
+  - *Recommended: (a)*: wall times on the shared host vary by ±20%, a ceiling would fail on load,
+    not on a regression.
+
+### JFS65 (b).7 Sources and scratch
+
+- Go 1.27.1 (TamaGo's, `/root/tamago-go`): `cmd/compile`'s inlining budget (80) as `-m=2` reports it.
+- The worktree's `.tmp/`: `jfs65/` (the tool builds' logs `base-build-java.log`, `new-build-java.log`,
+  `new2-build-java.log`; the profiles `base-parse.pprof`, `new-parse.pprof`, `new2-parse.pprof`;
+  `w.clj`, `w2.clj`, `w3.clj`, the workloads, `w.out`, `w2.out`, `perf*`; the checks' logs). The base
+  (`basetree/`, `317927c0` as `git archive` gives it, with its own tool build; `base/arbace`, main's
+  shipped executable of the same `aot.key`) was removed after the measurements, for the host's disk;
+  `git archive 317927c0` and `bin/arbace-go --build-java` in it make it again.
+
+## Decided (2026-10-24): JFS79-JFS82, JFS90-JFS94
+
+The user decided as recommended:
+- JFS79 (b): javac's generated members (default and canonical constructors, a record's members, an
+  enum's `values`/`valueOf`) in `decls`, checked by a members fact, inside JN9b.
+- JFS80 (a): the other casts as they are. JFS81 (a): the next batched re-seed carries JFS65 (b).
+  JFS82 (a): no speed regression test.
+- JFS90 (b): a method's `isMemberOf` native inside JN9b. JFS91 (a): local classes' names javac's until
+  JN9d. JFS92: a package's classes native when a javac-free read is the aim ((a) until then).
+- JFS93 (a): JN9b next, with JFS79 and JFS90 inside it. JFS94 (b): from JN9b, attr-check fails on a
+  bridge outside a known list.

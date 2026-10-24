@@ -1063,7 +1063,8 @@ inlines most of them. §13.6 measures the code size.
   conversion.
 - Assertions are always comma-ok forms inside these functions: a failing `x.(T)` panics in Go
   with a `*runtime.TypeAssertionError`, and on a nil interface, where Java's checkcast succeeds.
-- `instance?` and `cast` of array types compare the array's component class (§5.9).
+- `instance?` and `cast` of array types are jrt's type switch on the array's Go type (§5.9),
+  comparing a reference array's component class.
 - **The dynamic flag** (amendment O4, accepted 2026-10-10): bit 31 of the header's low word
   marks the objects of classes made at run time (set by `MarkDynamic` when j2g's `Dyn` and
   `DynSub_C` objects are made, before they are published; the identity hash keeps 31 bits,
@@ -1158,6 +1159,21 @@ header if `C` implements `Cloneable`, else `CloneNotSupportedException`), and `R
   int)` is `jrt.Array_NewInstance_Class_I__O` (amendment J3, accepted 2026-10-08).
 - `getClass` of an array is the array class for its component (jrt creates array classes on
   demand, with Java's names `[I`, `[Ljava.lang.String;`).
+- **Checked casts and `instance?` of array types** (JFS65 (b), 2026-10-24;
+  doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JFS65 (b)"): checkcast `int[]` is
+  `(jrt/IntArray_Cast x)`, Go's comma-ok assertion to `*jrt.IntArray` (`nil` for `nil`), and its
+  kin for the eight primitive arrays; checkcast `Object[]` is `(jrt/ObjectArray_Cast x)`, the
+  assertion to `*jrt.RefArray` alone (every reference array is an `Object[]`, an `int[][]` too);
+  checkcast `T[]` of another reference type `T` is `(jrt/RefArray_Cast x T_class)` (`int[][]`:
+  `(.ArrayClass jrt/Prim_int)`), the assertion and then `Comp == T_class`, else, out of line,
+  `Class.isInstance` of `T[]`'s class, which decides covariance (a `String[]` cast to
+  `CharSequence[]`, a `FxSub[]` to `FxBase[]`). A failure throws `jrt.ClassCast`'s
+  `ClassCastException` with HotSpot's message; `instance?` is `IntArray_InstanceOf`,
+  `ObjectArray_InstanceOf` and `RefArray_InstanceOf` alike. The fast paths are within gc's
+  inlining budget (cost 80 at most of 80; the failures and `Class.isInstance` out of line). Before, every
+  such cast was the generic `J2g_CastArray[T](x, cls)`: the array class made at the call site,
+  then `Class.isInstance` (`GetClass` through `Object_I`, `isAssignableFrom`) and the assertion,
+  17% of the native Java parser's time compiled (JN8.5).
 
 ### 5.10 Generics
 
@@ -3076,7 +3092,7 @@ and T11, T13, T14 (threads and the host), accepted 2026-10-08.
 | threads | **`CurrentThread`** (`*Thread`), `Thread`, **`RunMain`**, **`Go`**, **`RunnableOf`**, **`WaitNonDaemon`**, **`Thread_defaultHandler`** (§8.4) |
 | the host | **`Host`**, **`HostFile`**, **`HostFileInfo`**, **`OSHost`**, **`SetHost`**, **`CurrentHost`**, **`Stdin`**, **`Stdout`**, **`Stderr`** (§9.4); the natives of jrt's own Java (§9.1): *`HostFiles_Open0_String_I_String1__I_native`*, *`HostFiles_Read0_I_B1_I_I__I_native`*, *`HostFiles_Write0_I_B1_I_I__V_native`*, *`HostFiles_Available0_I__I_native`*, *`HostFiles_Skip0_I_J__J_native`*, *`HostFiles_Close0_I__V_native`* |
 | run-time classes | *`Dynamic`* (`DynImplements`), *`DefineDynamic`*, *`Class.Descriptor`* (§5.12) |
-| j2g's helpers (`j2g_support.go`, written by j2g into jrt's package) | *`J2g_Missing`* (§4.1), *`J2g_NotTranslated`*, *`J2g_NotNull`*, *`J2g_Truth`* (a `Boolean` or `Object` condition), *`J2g_CastArray`*, *`J2g_Discard`* (§5.7), *`J2g_RefP`*, *`J2g_ObjectClone`*, *`J2g_ObjHash`*, *`J2g_ObjEquals`*, *`J2g_DoubleBits`*, *`J2g_FloatBits`* (§7.13); *`String_Format_String_O1__String`* and its `Locale` overload; jrt's members with translated values (K2, below): *`System_in`*, *`System_out`*, *`System_err`*, *`System_SetIn_InputStream__V`*, *`System_SetOut_PrintStream__V`*, *`System_SetErr_PrintStream__V`*, *`String_CASE_INSENSITIVE_ORDER`*, and `String`'s Go methods *`Split_String__String1`*, *`Split_String_I__String1`*, *`ReplaceAll_String_String__String`*, *`ReplaceFirst_String_String__String`*, *`Matches_String__Z`*; jrt's members naming translated classes (S4, below): *`String_Join_CharSequence_Iterable__String`*, `String`'s Go methods *`Formatted_O1__String`*, *`Lines__Stream`*, *`DescribeConstable__Optional`*, *`J2g_PrintStackTraceWriter`*, *`J2g_PrintStackTraceStream`*, *`J2g_SystemGetenv`*, and the default-method forwarders of §5.4 |
+| j2g's helpers (`j2g_support.go`, written by j2g into jrt's package) | *`J2g_Missing`* (§4.1), *`J2g_NotTranslated`*, *`J2g_NotNull`*, *`J2g_Truth`* (a `Boolean` or `Object` condition), *`J2g_Discard`* (§5.7; *`J2g_CastArray`* until JFS65 (b), §5.9), *`J2g_RefP`*, *`J2g_ObjectClone`*, *`J2g_ObjHash`*, *`J2g_ObjEquals`*, *`J2g_DoubleBits`*, *`J2g_FloatBits`* (§7.13); *`String_Format_String_O1__String`* and its `Locale` overload; jrt's members with translated values (K2, below): *`System_in`*, *`System_out`*, *`System_err`*, *`System_SetIn_InputStream__V`*, *`System_SetOut_PrintStream__V`*, *`System_SetErr_PrintStream__V`*, *`String_CASE_INSENSITIVE_ORDER`*, and `String`'s Go methods *`Split_String__String1`*, *`Split_String_I__String1`*, *`ReplaceAll_String_String__String`*, *`ReplaceFirst_String_String__String`*, *`Matches_String__Z`*; jrt's members naming translated classes (S4, below): *`String_Join_CharSequence_Iterable__String`*, `String`'s Go methods *`Formatted_O1__String`*, *`Lines__Stream`*, *`DescribeConstable__Optional`*, *`J2g_PrintStackTraceWriter`*, *`J2g_PrintStackTraceStream`*, *`J2g_SystemGetenv`*, and the default-method forwarders of §5.4 |
 | natives of `arbace.lang` and of the JDK's variants (hand-written, §9.1) | *`Reflector_AdaptFn_Class_O__O_native`*; the evaluator's (M6 and step 5): *`Compiler_Evaluator_SetTraceHook_Supplier__V_native`*, *`Compiler_Evaluator_MonitorEnter_O__V_native`*, *`Compiler_Evaluator_MonitorExit_O__V_native`*, *`Compiler_Evaluator_CheckCast_Class_O__O_native`*, *`RT_HostResource_String__B1_native`*; `UUID`'s variant's natives (M7) were removed with SC4; java.security's (SC4, SC7): *`HostRandom_Fill0_B1_I_I__V_native`*, *`MD5_GoBlocks_I1_B1_I_I__V_native`* and the other digests' (P1's `RT_HostWriter_...` and `RT_HostReader_...` natives are gone with amendment K2, §9.4) |
 
 The hand-written classes (`Object`, `String`, `StringBuilder`, `Class`, `Throwable`, `Enum`,
