@@ -1577,3 +1577,26 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - Decided (the user): JCS30 (b), JCS31 (a), JCS32 (b), JCS33 (a), as recommended.
 - Disk at 85% (the user): JC4's worktree removed after its cited scratch was kept; the agents asked to
   delete their intermediate builds (j2g-array-casts' worktree 14 GB → 1.1 GB).
+
+## 2026-10-24: JFS75 (b) built: the converter's model behind an interface (branch `java-model`)
+
+- On the branch `java-model` from main `d36a03c9` (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built:
+  JFS75 (b)"): `arbace/repr/java/model.ae`, `arbace.repr.java.model`, 90 reads of symbols, types and
+  annotation values over javac's model (Symbol, Type, Types, Attribute) or the native one (`decls`'
+  symbols and types); `convert.ae` and `resolve.ae` read the answers only through it. With the native
+  provider the answers are no longer realized as javac objects (nattr's `rl-type`, `rl-compound`,
+  `rl-value` removed); javac's symbols of the unit's declarations are their native twins'
+  (`nattr/canon`), a relation of a native type with a javac one is answered natively (`nativize`),
+  and a read the native tiers cannot answer finds javac's symbol of the same declaration (a bridge:
+  a method's `isMemberOf`, inferred and union local types, local classes' javac names, a package's
+  classes, a diamond's anonymous supertypes). Each read counted by model in attr-check (`attr.md`).
+  Ported from jdk26u `baf63fbe` (`code/Symbol.java`, `code/Types.java`, `comp/ConstFold.java`):
+  isStatic, outermostClass, isMemberOf of fields, isSubClass, isAccessibleIn, hiddenIn,
+  isSignaturePolymorphic, getRetention, erasure's exceptions. `decls` gained a final local's constant
+  (it had none), ConstFold's coercion of constant variables (a boolean field's was none) and the
+  absence of `lushrl` folding (found by jdk26u's `MontgomeryIntegerPolynomialP256`).
+- Every corpus's forms unchanged (attr-check `--corpus all`, check, `check --jdk`, roundtrip
+  `--text`, front-check, parse-check; the three updates byte for byte but `:repr-java`, `:host`);
+  in jdk26u 62.7% of the model's reads native, 99.4% of the native answers' reads; attr-check 5%
+  slower. Proposals JFS79, JFS90-JFS94 (JFS80-JFS89 left to the j2g branch); JN9b re-estimated 2-3
+  days. No shipped code changed; no re-seed.

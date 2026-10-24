@@ -122,18 +122,21 @@
                                        {})))
                      {:full full :tree n :index idx})
                    {:full full})
+            prov (when nunit
+                   (try (nattr/provider nunit (:index opts) check diffs)
+                        (catch Throwable e
+                          ;; the walk failed: javac answers this unit
+                          (swap! check update-in [:nattr/walk :differ] (fnil inc 0))
+                          (swap! diffs conj {:fact :nattr/walk :file src
+                                             :native (str (.getName (class e)) ": " (.getMessage e))
+                                             :trace (vec (take 8 (filter #(re-find #"arbace" %) (map str (.getStackTrace e)))))})
+                          nil)))
             u (binding [attr/*measure* split?
                         attr/*counts* (when split? stats)
-                        attr/*provider* (when nunit
-                                          (try (nattr/provider nunit (:index opts) check diffs)
-                                               (catch Throwable e
-                                                 ;; the walk failed: javac answers this unit
-                                                 (swap! check update-in [:nattr/walk :differ] (fnil inc 0))
-                                                 (swap! diffs conj {:fact :nattr/walk :file src
-                                                                    :native (str (.getName (class e)) ": " (.getMessage e))
-                                                                    :trace (vec (take 8 (filter #(re-find #"arbace" %) (map str (.getStackTrace e)))))})
-                                                 nil)))]
+                        attr/*provider* prov]
                 (cv/convert-unit cu opts))]
+        ;; the model's reads (arbace.repr.java.model), by read and how answered
+        (when prov (swap! check #(merge-with (partial merge-with +) % (nattr/reads prov))))
         (assoc u :source src :ms (quot (- (System/nanoTime) t0) 1000000)))
       (catch Throwable e
         {:failure true :source src
@@ -279,9 +282,13 @@
 (defn- attr-report
   "The native provider's check: {:facts {fact {outcome n}} :diffs [...]}, and a line of its totals."
   [check diffs]
-  (let [tot (apply merge-with + (vals check))]
-    {:facts (into (sorted-map) check)
-     :totals tot
+  (let [model? #(= "model" (namespace %))
+        facts (into (sorted-map) (remove (comp model? key) check))
+        reads (into (sorted-map) (filter (comp model? key) check))]
+    {:facts facts
+     :totals (apply merge-with + {} (vals facts))
+     :model reads
+     :model-totals (apply merge-with + {} (vals reads))
      :diffs (vec (take 2000 diffs))}))
 
 (defn finish
@@ -295,7 +302,7 @@
     (let [r (attr-report (:check attr) (:diffs attr))]
       (io/make-parents (io/file out "repr-java-attr.edn"))
       (spit (io/file out "repr-java-attr.edn") (with-out-str (pp/pprint r)))
-      (println (format "native attribution: %s" (pr-str (:totals r))))))
+      (println (format "native attribution: %s; the model's reads: %s" (pr-str (:totals r)) (pr-str (:model-totals r))))))
   (let [written (write-output out units)
         reads (when check (vec (pmap (fn [{:keys [path text]}] (assoc (readable text) :path path)) written)))
         unreadable (vec (filter :core reads))
