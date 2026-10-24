@@ -182,9 +182,11 @@
       (println "aot: not loaded:" n err))
     (when-let [err (try-require 'clojure.test.generative.runner)]
       (println "aot: not loaded: clojure.test.generative.runner" err))
-    (let [ok ((resolve 'suite-aot.hook/compile!) out)]
-      (real-shutdown-agents)
-      (System/exit (if ok 0 1)))))
+    ;; a source c2j does not compile loads from source at the AOT level (bin/clojure-tests
+    ;; compares them with the reference's :not-compiled)
+    ((resolve 'suite-aot.hook/compile!) out)
+    (real-shutdown-agents)
+    (System/exit 0)))
 
 (defn- outcomes
   "A results file's outcome per test: {[ns test] :pass|:fail|:skip}, a namespace without tests

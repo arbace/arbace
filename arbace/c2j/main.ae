@@ -342,7 +342,11 @@
     (contains? classes c) (if (= :holder (:kind (get classes c)))
                             c
                             (subs c 0 (max 0 (.lastIndexOf c "."))))
-    :else c))
+    ;; a holder: a namespace's (its own package), else one made for a class nesting under a
+    ;; name that is no class (a reify in a method of the record RecordToTest__, named
+    ;; RecordToTest$reify__N): its package's (Clojure's suite, REAP3)
+    (or (not (str/includes? c ".")) (find-ns (symbol c)) (find-ns (symbol (arbace.lang.Compiler/demunge c)))) c
+    :else (subs c 0 (.lastIndexOf c "."))))
 
 (defn- package-name
   "The Go package of the compiled classes of namespace or package n (class-ns)."
@@ -417,6 +421,35 @@
                                  true)))]
             [id [cname (:variadic rec) (:prims rec) (:specs rec)]]))))
 
+(defn- package-graph
+  "The Go packages' graph (package → the set of packages its forms' classes name) of the tree's
+  top-level forms tops ([package form]), by pkg-of-class."
+  [tops pkg-of-class]
+  (let [g (atom {})]
+    (doseq [[p f] tops
+            :let [acc (java.util.HashSet.)]]
+      (form-refs f acc)
+      (doseq [c acc
+              :let [q (pkg-of-class c)]
+              :when (and q (not= q p))]
+        (swap! g update p (fnil conj #{}) q)))
+    @g))
+
+(defn- cycle-merge
+  "The packages of graph g in a cycle with others: package → the first by name of its strongly
+  connected component (only those of components of more than one)."
+  [g]
+  (let [reach (fn [a] (loop [todo [a] seen #{}]
+                        (if-let [n (peek todo)]
+                          (if (seen n) (recur (pop todo) seen) (recur (into (pop todo) (get g n)) (conj seen n)))
+                          seen)))
+        rs (into {} (for [p (keys g)] [p (reach p)]))]
+    (into {}
+          (for [[p r] rs
+                :let [scc (sort (filter #(and (contains? r %) (contains? (get rs % #{}) p)) (keys rs)))]
+                :when (> (count scc) 1)]
+            [p (first scc)]))))
+
 (defn- linker
   "The resolution of link markers (arbace.c2j.emit/link-form) by plan (link-plan): the guarded
   direct call, or the generic one. Counts the sites in links (:linked, :generic)."
@@ -443,8 +476,19 @@
         dir (io/file out)
         tops (e/class-forms classes pools)
         jfs (java-forms-classes (set (keys classes)))
-        loader-files (for [r ok] [(file-name (:name (:loader r))) (:src r) (:form (:loader r))])
-        class-files (for [h tops] [(file-name (str (second h))) nil h])
+        ;; file names unique ignoring case: j2g names each Go file after its Java forms file,
+        ;; and Go refuses two files of a package whose names differ in case only (deftypes T
+        ;; and t of one namespace, Clojure's suite: REAP3); a later one numbered
+        uniq (let [seen (atom #{})]
+               (fn [^String f]
+                 (let [stem (subs f 0 (- (count f) 3))
+                       f' (loop [k 0]
+                            (let [c (if (zero? k) f (str stem "__f" k ".ae"))]
+                              (if (contains? @seen (str/lower-case c)) (recur (inc k)) c)))]
+                   (swap! seen conj (str/lower-case f'))
+                   f')))
+        loader-files (mapv (fn [r] [(uniq (file-name (:name (:loader r)))) (:src r) (:form (:loader r))]) ok)
+        class-files (mapv (fn [h] [(uniq (file-name (str (second h)))) nil h]) tops)
         ;; the top-level classes of Java's unnamed package (a namespace of one segment's,
         ;; e/unnamed-package), imported by every file of the tree, so that a class in a package
         ;; names them (none in the shipped program's tree)
@@ -454,15 +498,22 @@
                         (symbol nm)))
         ns-forms (cons '(in-ns 'arbace) (when (seq unnamed) [(cons 'import unnamed)]))
         ;; each compiled top-level class's Go package (packages.edn, below)
-        top-pkgs (merge (into {} (for [t (concat (map (comp :name :loader) ok) (map #(str (second %)) tops))]
-                                   [t (package-name (class-ns classes t))]))
-                        (into {} (for [r jfs, n (:names r)] [n (package-name (:ns r))])))
+        top-pkgs0 (merge (into {} (for [t (concat (map (comp :name :loader) ok) (map #(str (second %)) tops))]
+                                    [t (package-name (class-ns classes t))]))
+                         (into {} (for [r jfs, n (:names r)] [n (package-name (:ns r))])))
+        top-forms (fn [pkg-of-class]
+                    (concat (for [[_ _ f] loader-files] [(pkg-of-class (str (second f))) f])
+                            (for [[_ _ f] class-files] [(pkg-of-class (str (second f))) f])
+                            (for [r jfs] [(pkg-of-class (first (:names r))) (second (java-forms-file r))])))
+        ;; packages whose classes name each other in a cycle, which Go refuses (a source
+        ;; defining two namespaces, protocols.clj's clojure.test-clojure.protocols.other: its
+        ;; loader names the second's classes, they the first's), made one, the first by name
+        ;; (none in the shipped tree; Clojure's suite, REAP3)
+        merged (cycle-merge (package-graph (top-forms #(or (get top-pkgs0 %) (get top-pkgs0 (top-of %))))
+                                           #(or (get top-pkgs0 %) (get top-pkgs0 (top-of %)))))
+        top-pkgs (into {} (for [[t p] top-pkgs0] [t (get merged p p)]))
         pkg-of-class (fn [^String c] (or (get top-pkgs c) (get top-pkgs (top-of c))))
-        plan (link-plan sites classes fn-names
-                        (concat (for [[_ _ f] loader-files] [(pkg-of-class (str (second f))) f])
-                                (for [[_ _ f] class-files] [(pkg-of-class (str (second f))) f])
-                                (for [r jfs] [(package-name (:ns r)) (second (java-forms-file r))]))
-                        pkg-of-class)]
+        plan (link-plan sites classes fn-names (top-forms pkg-of-class) pkg-of-class)]
     (binding [*link* (linker plan links)]
       (.mkdirs (io/file dir "arbace"))
       (with-open [w (io/writer (io/file dir "arbace.ae"))]
@@ -512,16 +563,14 @@
     ;; each top-level class's Go package (j2g's names/compiled-packages, SA142): its namespace's,
     ;; aot_ and the munged name (a holder: its own name; a loader: its source's; a deftype or
     ;; an interface: its package)
-    (let [ns-of (partial class-ns classes)
-          tops (concat (map (comp :name :loader) ok) (map #(str (second %)) tops))
-          pkg package-name]
+    (let [tops (concat (map (comp :name :loader) ok) (map #(str (second %)) tops))]
       (spit (io/file dir "packages.edn")
             (with-out-str
               (prn (into (sorted-map)
                          (concat
-                           (for [t tops] [(str/replace t "." "/") (pkg (ns-of t))])
+                           (for [t tops] [(str/replace t "." "/") (get top-pkgs t)])
                            ;; the Java forms compiler's: their namespace's package
-                           (for [r jfs, n (:names r)] [(str/replace n "." "/") (pkg (:ns r))])))))))
+                           (for [r jfs, n (:names r)] [(str/replace n "." "/") (get top-pkgs n)])))))))
     (let [report (cond-> {:compiled (vec (sort (map :src ok)))
                           :failed (into (sorted-map) (for [r results :when (:error r)] [(:src r) (:error r)]))
                           :classes (count (remove #(= :holder (:kind %)) (vals classes)))

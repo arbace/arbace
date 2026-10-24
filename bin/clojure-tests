@@ -25,7 +25,9 @@
 #                    two levels compared (the runner's levels mode: what passes at one level and
 #                    not at the other, against test/arbace-go-results.edn, and both levels' totals
 #                    against upstream's, test/baseline-results.edn: a finding, RPS16, not a
-#                    regression)
+#                    regression). CLOJURE_TESTS_AOT_EXES: a directory holding the executables
+#                    (arbace, arbace-tests) to compile and translate with in place of the gate's
+#                    (measurements: tools changed in the checkout are loaded from it)
 #   --java-fixtures OUT  only convert the suite's Java fixtures (test/java), renamed as for
 #                    the Go build, into Java forms under OUT with repr/java (bin/repr-java, on
 #                    javac's tool executable, its only host since JN6; run CLOJURE_TESTS_RUN,
@@ -398,14 +400,19 @@ flock -u 9
 aot_build() {
   local ab=$work/aot-build gexe texe key t0 overlay
   mkdir -p "$ab"
-  (cd "$root" && bin/arbace-go --gate-build) > "$ab/gate-build.log" 2>&1 \
-    || { tail -20 "$ab/gate-build.log"; echo "clojure-tests --aot: bin/arbace-go --gate-build failed" >&2; return 1; }
-  gexe=$root/.tmp/arbace-go-gate/amd64/arbace texe=$root/.tmp/arbace-go-gate/amd64/arbace-tests
+  local exes=${CLOJURE_TESTS_AOT_EXES:-}
+  if [ -z "$exes" ]; then
+    (cd "$root" && bin/arbace-go --gate-build) > "$ab/gate-build.log" 2>&1 \
+      || { tail -20 "$ab/gate-build.log"; echo "clojure-tests --aot: bin/arbace-go --gate-build failed" >&2; return 1; }
+    exes=$root/.tmp/arbace-go-gate/amd64
+  fi
+  gexe=$exes/arbace texe=$exes/arbace-tests
   key=$( { sha256sum < "$gexe"; sha256sum < "$texe"
            (cd "$suite" && find test src -type f | LC_ALL=C sort | xargs -d '\n' sha256sum)
            echo "$repr_clojure_stamp $deps"
            (cd "$root" && sha256sum test/suite_aot_hook.ae test/run_clojure_tests.clj bin/clojure-tests "$expected"
-            find test/suite-go test/java-fixtures -type f | LC_ALL=C sort | xargs -d '\n' sha256sum); } \
+            # the checkout's tools (c2j, j2g, ...), which the executables load from it when they differ
+            find arbace test/suite-go test/java-fixtures -type f | LC_ALL=C sort | xargs -d '\n' sha256sum); } \
          | sha256sum | cut -c1-64)
   if [ -x "$ab/arbace-aot" ] && [ "$(cat "$ab/key" 2>/dev/null)" = "$key" ]; then
     echo "   the cached program (key ${key:0:12})"; return 0
@@ -418,6 +425,16 @@ aot_build() {
      "$texe" "$runner" compile "$ab/namespaces.txt" "$ab/aot" "$expected") > "$ab/compile.log" 2>&1 \
     || { tail -20 "$ab/compile.log"; echo "clojure-tests --aot: the compiling failed ($ab/compile.log)" >&2; return 1; }
   grep '^aot:' "$ab/compile.log" | head -40
+  [ -f "$ab/aot/packages.edn" ] || { echo "clojure-tests --aot: nothing compiled ($ab/compile.log)" >&2; return 1; }
+  # the sources c2j did not compile (they load from source): the reference's :not-compiled
+  grep '^aot: not compiled: ' "$ab/compile.log" | cut -d' ' -f4 | LC_ALL=C sort > "$ab/not-compiled.txt"
+  host_run -e "(doseq [s (sort (keys (:not-compiled (read-string (slurp \"$expected\")))))] (println s))" \
+    > "$ab/not-compiled-expected.txt" || return 1
+  if ! diff "$ab/not-compiled-expected.txt" "$ab/not-compiled.txt" > "$ab/not-compiled.diff"; then
+    cat "$ab/not-compiled.diff"
+    echo "clojure-tests --aot: the sources c2j does not compile are not the reference's :not-compiled ($ab/compile.log)" >&2
+    return 1
+  fi
   echo "   compiled: $(( $(date +%s) - t0 )) s"
   t0=$(date +%s)
   (cd "$root" && J2G_GO_EXE=$gexe REPR_GO_EXE=$gexe bin/j2g --program --input "$root/test/java-fixtures/forms" \
