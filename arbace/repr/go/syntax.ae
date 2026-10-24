@@ -5,7 +5,7 @@
 
   A driver package of Go forms, arbace/repr/go/gcsyntax (go/arbace/repr/go/gcsyntax.ae,
   hand-written), parses the file as gc's noder does (noder.LoadPackage: syntax.Parse with an
-  error handler and CheckBranches, no pragma handler) and keeps the errors as base.ErrorfAt and
+  error handler, CheckBranches and noder's pragma handler, ported since GPS41 (c)) and keeps the errors as base.ErrorfAt and
   base.FlushErrors print them: one error beginning with \"syntax error\" per line (the last one's
   line), one of equal other errors per line, sorted by position, an error equal to the one
   before it printed once; each as gc prints it with -C, FILE:LINE: MESSAGE, FILE the name given.
@@ -19,10 +19,19 @@
   rule would not let the program import; GP7). Since GP7 the driver is listed in goi's table and
   compiled with the copy into the program; on an executable whose table does not list it (the
   tools' host until the re-seed that carries GP7) goi loads both from ARBACE_PATH and interprets
-  them (load!, about 3 s), as GP6 built."
+  them (load!, about 3 s), as GP6 built; and so when the table's driver is of another Revision
+  than the checkout's (a host built before a change to it), under the path
+  arbace/repr/go/gcsyntaxsrc (a listed path's calls are the table's).
+
+  GPS41 (c), GPS39 (b): the driver also reports noder's pragmas' errors during the parse
+  (file-errors), and gc's writer's checks of the declarations after the type checker
+  (decl-errors: misplaced directives, go:embed, go:linkname), which gc reports only when neither
+  the parse nor the type checker did; goi's errorcheck merges them with its checker's errors in
+  place of its own branch errors (arbace.go.run --errorcheck --gc-front)."
   (:require [arbace.string :as str]
             [arbace.go.repl :as repl])
-  (:import [java.io File]))
+  (:import [java.io File]
+           [arbace.lang RT]))
 
 (def syntax-path "cmd/compile/internal/syntax")
 
@@ -53,28 +62,74 @@
 
 (def ^:private loaded (atom nil))
 
+(defn- checkout-revision
+  "The checkout's driver (ARBACE_PATH's go/arbace/repr/go/gcsyntax): {:package text :errors text
+  :revision n}, or nil when ARBACE_PATH has none."
+  []
+  (let [rd (fn [p] (when-let [in (RT/resourceAsStream nil p)] (slurp in)))
+        pkg (rd "go/arbace/repr/go/gcsyntax.ae")
+        errs (rd "go/arbace/repr/go/gcsyntax/errors.ae")]
+    (when (and pkg errs)
+      {:package pkg :errors errs
+       :revision (some-> (re-find #"\(go/const \^\{:val (\d+)[^}]*\} Revision " errs) second Long/parseLong)})))
+
+(defn- load-checkout!
+  "The checkout's driver interpreted by goi under the path arbace/repr/go/gcsyntaxsrc (namespace
+  go.arbace.repr.go.gcsyntaxsrc): a listed package's own path is the table's, its calls compiled;
+  returns its namespace's name."
+  [{:keys [package errors]}]
+  (let [rn (fn [^String t]
+             (-> t
+                 (str/replace "go.arbace.repr.go.gcsyntax" "go.arbace.repr.go.gcsyntaxsrc")
+                 (str/replace (str ":path \"" driver-path "\"") (str ":path \"" driver-path "src\""))
+                 (str/replace "(load \"gcsyntax/errors\")" "")))]
+    (load-string (rn package))
+    (load-string (rn errors))
+    (repl/after-load (str "go/" driver-path "src") true)
+    "go.arbace.repr.go.gcsyntaxsrc"))
+
 (defn load!
   "The driver (arbace/repr/go/gcsyntax), once per process: compiled when goi's table lists it
-  (GP7), else loaded with gc's syntax (the renamed copy) from ARBACE_PATH and interpreted by goi;
-  returns {:errors fn :ms ms :compiled bool}."
+  (GP7) and its Revision is the checkout's; else loaded with gc's syntax (the renamed copy) from
+  ARBACE_PATH and interpreted by goi (a listed but older driver, the tools' host built before a
+  change to it, under the path arbace/repr/go/gcsyntaxsrc: GPS41 (c)); returns {:errors fn
+  :decls fn :ms ms :compiled bool}."
   []
   (locking loaded
     (or @loaded
         (let [t0 (System/nanoTime)
-              compiled (repl/listed? driver-path)
-              _ (require 'go.arbace.repr.go.gcsyntax)
-              f (resolve 'go.arbace.repr.go.gcsyntax/Errors)]
-          (when-not f (throw (ex-info (str "the driver " driver-path " has no Errors") {})))
-          (reset! loaded {:errors @f :ms (/ (- (System/nanoTime) t0) 1e6) :compiled compiled})))))
+              listed (repl/listed? driver-path)
+              co (when listed (checkout-revision))
+              compiled (and listed
+                            (do (require 'go.arbace.repr.go.gcsyntax)
+                                (or (nil? co)
+                                    (= (:revision co)
+                                       (some-> (resolve 'go.arbace.repr.go.gcsyntax/Revision) deref long)))))
+              nsn (cond compiled "go.arbace.repr.go.gcsyntax"
+                        listed (load-checkout! co)
+                        :else (do (require 'go.arbace.repr.go.gcsyntax) "go.arbace.repr.go.gcsyntax"))
+              f (resolve (symbol nsn "Errors"))
+              d (resolve (symbol nsn "DeclErrors"))]
+          (when-not (and f d) (throw (ex-info (str "the driver " driver-path " has no Errors or DeclErrors") {})))
+          (reset! loaded {:errors @f :decls @d :ms (/ (- (System/nanoTime) t0) 1e6) :compiled compiled})))))
 
 (defn file-errors
-  "gc's syntax errors of the Go file at path, as gc prints them with -C (FILE:LINE: MESSAGE, FILE
-  name): {:lines [line ...] :syntax? bool}, :syntax? whether one is a syntax error (gc stops
-  after them; else types2 would go on)."
+  "gc's errors of the Go file at path before its type checker (its syntax's: the parse and the
+  branches, noder's pragmas'), as gc prints them with -C (FILE:LINE: MESSAGE, FILE name):
+  {:lines [line ...] :syntax? bool}, :syntax? whether one is a syntax error (gc stops after them;
+  else types2 would go on)."
   [^String path ^String name]
   (let [^String r ((:errors (load!)) path name)]
     {:lines (vec (remove str/blank? (str/split-lines (subs r 1))))
      :syntax? (= \S (.charAt r 0))}))
+
+(defn decl-errors
+  "gc's checks of the declarations of the Go file at path after its type checker (noder's writer:
+  misplaced directives, go:embed, go:linkname, functions' directives), at language version lang
+  (gc's -lang, go1.N; nil: the latest), as file-errors prints them: [line ...]. gc reports them
+  when neither the parse nor the type checker reports an error; none when the parse does."
+  [^String path ^String name lang]
+  (vec (remove str/blank? (str/split-lines ((:decls (load!)) path name (or lang ""))))))
 
 (defn errors-text
   "The syntax errors of the files of a job (dir, file names) as gc prints them, one text."
@@ -84,29 +139,43 @@
      :syntax? (boolean (some :syntax? rs))}))
 
 (defn -main
-  "[--out DIR] FILE...: each Go file's syntax errors as gc prints them with -C (its base name),
-  by gc's syntax (load!: compiled, or interpreted by goi); on standard output, or with --out into
-  DIR/FILE.txt each (FILE as given, relative), a summary on standard error."
+  "[--out DIR] [--decls] [--lang goV] FILE...: each Go file's errors of gc's front end before its
+  type checker (syntax errors, branches, pragmas) as gc prints them with -C (its base name), by
+  gc's syntax and the driver (load!: compiled, or interpreted by goi); with --decls also its
+  declarations' checks after the type checker (decl-errors, at language version goV), after a
+  line `# after type checking` when there are any; on standard output, or with --out into
+  DIR/FILE.txt each (FILE as given, relative), the declarations' into DIR/FILE.decls.txt; a
+  summary on standard error."
   [& args]
   (let [[opts files] (loop [opts {} as args]
                        (case (first as)
                          "--out" (recur (assoc opts :out (second as)) (drop 2 as))
+                         "--decls" (recur (assoc opts :decls true) (rest as))
+                         "--lang" (recur (assoc opts :lang (second as)) (drop 2 as))
                          [opts as]))
         {:keys [ms compiled]} (load!)
         t0 (System/nanoTime)
+        text (fn [ls] (apply str (for [l ls] (str l "\n"))))
         rs (doall
              (for [^String f files]
-               (let [{:keys [lines syntax?] :as r} (file-errors f (.getName (File. f)))]
+               (let [n (.getName (File. f))
+                     {:keys [lines syntax?] :as r} (file-errors f n)
+                     ds (when (:decls opts) (decl-errors f n (:lang opts)))]
                  (if-let [out (:out opts)]
                    (let [o (File. (str out "/" f ".txt"))]
                      (.mkdirs (.getParentFile o))
-                     (spit o (apply str (for [l lines] (str l "\n")))))
-                   (doseq [l lines] (println l)))
-                 r)))]
+                     (spit o (text lines))
+                     (when (:decls opts) (spit (File. (str out "/" f ".decls.txt")) (text ds))))
+                   (do (doseq [l lines] (println l))
+                       (when (seq ds)
+                         (println "# after type checking")
+                         (doseq [l ds] (println l)))))
+                 (assoc r :decls ds))))]
     (flush)
     (binding [*out* *err*]
-      (println (format "gc's syntax errors: %d files, %d with errors, %d with a syntax error (gc stops after them); gc's syntax %s in %.2f s, the files in %.2f s"
+      (println (format "gc's front end's errors: %d files, %d with errors, %d with a syntax error (gc stops after them)%s; the driver %s in %.2f s, the files in %.2f s"
                        (count rs) (count (filter (comp seq :lines) rs)) (count (filter :syntax? rs))
+                       (if (:decls opts) (format ", %d with errors of the declarations' checks" (count (filter (comp seq :decls) rs))) "")
                        (if compiled "compiled (goi's table), its namespace made" "loaded by goi")
                        (/ ms 1e3) (/ (- (System/nanoTime) t0) 1e9))))
     (shutdown-agents)

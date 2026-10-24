@@ -586,6 +586,14 @@ makes the final forms. A source whose `:answers` is a HashMap is checked so
   cycle, `isComplete`), `package _`; and, in both modes, `-lang`'s `unsafe.Add`/`Slice` (go1.17),
   `SliceData`/`String`/`StringData` (go1.20), type parameters (go1.18) and an embedded duplicate
   method (go1.14, at the embedding's line).
+- **gc's front end beside the checker (GPS39 (b), GPS41 (c)).** `arbace.go.run --errorcheck
+  --gc-front FILE` (goi's check gives every error test its Go file) drops the checker's own
+  branch errors (`:BranchError`, as types2's `IgnoreBranchErrors`) and merges, by position, the
+  errors gc reports while parsing FILE (gc's syntax's branch checks, noder's pragmas':
+  `arbace.repr.go.syntax/file-errors`, the driver `go/arbace/repr/go/gcsyntax`); when neither
+  reports one, the declarations' checks of noder's writer (misplaced directives, `go:embed`,
+  `go:linkname`, at the `-lang` given: `decl-errors`), as gc reports them only after a clean type
+  check. The checker still checks branches for its terminating analysis and at the REPL.
 - **Dependencies.** Each configuration's standard library is one session over the loader's std
   jobs (their raw forms checked on demand, in dependency order); a corpus's own packages, a
   directory test's, test variants (`p [p.test]`, an external test's import of p) are sessions

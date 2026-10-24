@@ -164,6 +164,16 @@ covers what.
   same tree's `src/cmd/compile/internal/syntax/`), its namespace and import path renamed
   `arbace/repr/go/internal/syntax` by `arbace.repr.go.syntax/copy-texts`, nothing else changed:
   Copyright The Go Authors, under Go's BSD 3-Clause License (text below); each file's notice kept.
+- `go/arbace/repr/go/gcsyntax/errors.ae` (doc/go/GO-PARSER-SURVEY.md, "As built: GPS41 (c)"):
+  besides Arbace's own driver, a port of gc's noder's pragma handling from TamaGo's go1.27.1 tree
+  (above: `VERSION` "go1.27.1"): `src/cmd/compile/internal/noder/noder.go` (`pragma`,
+  `checkUnusedDuringParse`, `isCgoGeneratedFile`, `safeArg`, `parseGoEmbed`, `checkEmbed`),
+  `lex.go` (`pragmaFlag`, `pragcgo`, `pragmaFields`, `isSpace`, `isQuoted`), `writer.go`
+  (`collectDecls`' and `checkPragmas`' checks, `funcExt`'s of a function's directives) and
+  `src/cmd/compile/internal/ir/node.go` (the `PragmaFlag` bits), written in Go, adapted (gc's
+  configuration fixed: package `p`, linux/amd64, outside the standard library and the runtime)
+  and read into Go forms by `bin/repr-go read`: Copyright The Go Authors, under Go's BSD 3-Clause
+  License (text below).
 - `x509roots/` (`x509roots/go/arbace/x509roots/fallback/bundle.ae` and `bundle/`, with
   `bundle/bundle.der`; x509roots/README.md, doc/go/BOX-NOTES.md "TLS (option 2)"): the package
   `bundle` of the module `golang.org/x/crypto/x509roots/fallback`, https://go.googlesource.com/crypto
