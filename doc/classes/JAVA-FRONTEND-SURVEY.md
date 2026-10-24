@@ -3837,3 +3837,274 @@ The user decided JFS72 (b): jdk26u's forms recorded as hashes (`test/repr/java/e
     originals made on every jdk run (about a minute of the generators on the tool).
   - *Recommended: (a)*: the copied files are the ones edited by hand (jrt's own Java); the
     generated ones change only with the inputs the key names.
+
+## As built: JN9a (2026-10-24)
+
+JN9a (JFS69 (b)'s first tier), with JFS72 (b) and JFS71 within it, on the branch `java-frontend-jn9a`
+from main `bd3ba0bb`, in about a working day. A native attribution provider answers, behind
+`arbace.repr.java.attr`, every fact of the scope and declarations tiers (and the syntax tier's
+literal types) of the native parser's trees **without javac**: locals, parameters, pattern variables
+and jump targets; class, method and field symbols with javac's flags, declared types with names
+resolved, whether a qualifier names a type or a package, annotation values, the modifiers as Enter
+leaves them, the unit's package; the platform's classes read from their class files by a reader of
+Arbace's own. Each native answer is checked against javac on Arbace's answer for the same tree,
+fact by fact: `bin/repr-java attr-check` (front-check `--attr native`) over every corpus, the
+samples, the baseline, the jdk corpus, javac's sources and jdk26u's 68 modules, **6,660,390 facts equal,
+none different** (the known differences, `test/repr/java/attr-check-known.edn`, are none), and the
+converter given the native answers for those tiers and javac's for the rest writes **every corpus's
+forms byte for byte as from javac's trees**. The provider alone wrote 344,337 of jdk26u's 2,258,047 lists
+(15.2%: the whole of the lists the first three tiers write, JFS66 (b).4's 15.0% grown by JFS71). jdk26u's forms are recorded as hashes
+(`test/repr/java/expected/jdk26u.sha256`, JFS72 (b)), `check --jdk` comparing them. The JVM ran only
+the frozen v4 jar, for javac's edge in `bin/javac-vendor convert`; Go only TamaGo's go1.27.1, without
+cgo; the tools' host was the worktree's stage 0 (the seed's).
+
+### JN9a.1 What was built
+
+| file | lines | what |
+|---|---:|---|
+| `arbace/repr/java/classfile.ae` | 299 | `arbace.repr.java.classfile`: a class file's declarations as data (flags, superclass, interfaces, Signature, InnerClasses, fields with their ConstantValue and Signature, methods with their Signature, annotations with their values, Record, PermittedSubclasses), and JVMS 4.7.9.1's signatures parsed; after `jrt.classfile` (JN7), which reads code |
+| `arbace/repr/java/decls.ae` | 1,635 | `arbace.repr.java.decls`, the declarations tier: a run's registry (its units' classes, the sources javac would find on the source path or in a patched module's directories, the platform's classes from their class files, each made on first use); class, field, method and type variable symbols with memoized parts (flags as javac's: Check.checkFlags, Enter's, TypeEnter's, MemberEnter's, Annotate's DEPRECATED, an enum's ABSTRACT; headers: type parameters, superclass, interfaces as TypeEnter makes them; members; declared types); types as data (class types with their arguments and enclosing type, arrays, type variables, wildcards, intersections, type annotations), erasure, substitution, asSuper, asOuterSuper, asEnclosingSuper; environments as data and Resolve's lookups (findType, findVar, findField, member types, imports: single, on demand, static, the unit's package and java.lang); a type tree's type (Attr.attribType, checkId's for a class name); constants (ConstFold) and annotation values (Annotate) |
+| `arbace/repr/java/scope.ae` | 593 | `arbace.repr.java.scope`, the scope tier: a unit's native tree walked with javac's environments (Attr's for blocks, loops, switches with addVars, lambdas, try resources and catch parameters, the match bindings of patterns with their flow scoping, Flow's liveness as far as the bindings need it, findJumpTarget), its answers recorded by node (an IdentityHashMap), the expensive ones (types, annotation values) as delays |
+| `arbace/repr/java/nattr.ae` | 377 | `arbace.repr.java.nattr`, the provider: a unit's answers, javac's and the native ones rendered alike as data (symbols by identity, flags under a mask per kind, declared types, annotation values), the outcomes counted, and the native answers realized as javac's objects for the converter (a symbol by its declaration's twin or by module and flat name in javac's Symtab, a type built from the native one, an annotation's value constructed) |
+| `arbace/repr/java/attr.ae` | 528 (was 349) | each fact of the native tiers asked of the provider when there is one (`*provider*`): the native answer checked against javac's and given to the converter; `local-of` and `type-expr?` (JFS71); `note!` marks a frame whose facts javac answered (`:provider/javac`), for the split's share |
+| `arbace/repr/java/convert.ae` | 3,189 (was 3,184) | JFS71's narrowed questions (JN9a.4) |
+| `arbace/repr/java.ae` | 475 (was 404) | `read`/`read-jdk --attr native`: the run's native units parsed and entered in a registry before any is converted (the module a source module-info names, a patched module's directories, the source path); `OUT/repr-java-attr.edn` |
+| `arbace/repr/java/split.ae` | 382 (was 308) | the share of lists the provider wrote alone; `split attr OUT KNOWN DIR...`, the outcomes by corpus, tier and fact (`attr.md`, `attr.edn`), the differences beyond the known |
+| `bin/lib/repr-java/front-check` | 192 (was 161) | `--attr native` (`bin/repr-java attr-check`): the reads with the provider, its outcomes summed, the known differences in `test/repr/java/attr-check-known.edn` |
+| `test/repr/java/jdk.bash`, `bin/lib/repr-java/check` | | JFS72 (b) (JN9a.5) |
+
+The platform is what javac on Arbace attributes against (the exploded modules of
+`jdk/javac/platform.sha256`, REPR_JAVA_PLATFORM); a package's module is the one whose directory holds
+it, the run's own module first. A run's sources are entered before any unit is walked, so that a
+unit's names resolve to the other units' classes; a class the run does not convert but javac reads
+from source (the source path of `read`, the other chunks of a patched module with
+`REPR_JAVA_PATCH_ALL`) is parsed and entered on first use, as javac's ClassFinder prefers the
+sources it is given (they are newer than the platform's class files).
+
+### JN9a.2 The facts, the answers, the check
+
+The provider answers the facts `arbace.repr.java.split`'s catalogue puts in the syntax, scope and
+declarations tiers, asked through `attr`:
+
+| fact | the native answer | data compared with javac's |
+|---|---|---|
+| `scope/*` of a name (`sym`, `local-of`: ident, assigned, capture, hoist, refers, local-names) | the local variable entry the name denotes (Resolve.findVar over the environment's levels: locals, then the class's fields, inherited ones too, an inaccessible field not hiding), or not a local | the local's declaration (its position), or `[:nonlocal]` |
+| `scope/local-decl`, `param`, `lambda-param`, `binding`, `enter/field-decl`, `method-decl`, `class-decl` | the declaration's symbol | identity, name, flags under a mask (the modifiers and javac's bits the converter reads: VARARGS, ENUM, RECORD, COMPACT_RECORD_CONSTRUCTOR, GENERATEDCONSTR, DEPRECATED, DEPRECATED_ANNOTATION, HASINIT, DEFAULT, SEALED, ...), declared type; a method's type parameters with their bounds, parameter types, return and thrown types, parameter names and default value; a class's type parameters, superclass and interfaces |
+| `scope/jump-target` | the statement left | its position and tag |
+| `names/type-tree`, `names/record-pattern`, `types/this`, `types/class-literal`, `types/literal` | the type | the type as data, its annotations included |
+| `names/type-expr` (JFS71) | whether the qualifier names a type or a package (JLS 6.5, as Attr's KindSelector VAL \| TYP) | the boolean |
+| `annotations/attribute` | the annotation's value (Annotate.attributeAnnotationValue: constants folded and coerced to the element's type, classes, enum constants, arrays, nested annotations) | the value as data |
+| `enter/flags` | the modifiers' flags as Enter and Attr leave them on the tree | the long |
+| `names/package` | the unit's package | its name |
+
+A fact the provider cannot answer within its tiers it **declines** (javac answers, the outcome
+counted): a `var` local's and an implicit lambda parameter's type (inferred), a diamond's type tree and
+an anonymous class of a diamond (its supertype inferred), a qualified creation's class through an
+expression (`o.new C() {}`, `o` not a variable), a name whose lookup crosses such a class, an
+annotation javac takes off a record component. The answers' further properties that the converter
+reads from the realized javac objects (a class's members, a local's constant value, a symbol's
+erasure) are javac's: the converter's model is still javac's `Symbol`, `Type` and `Types` (JFS75).
+
+What javac does that the corpora showed and the provider follows (each found by a fact that differed,
+then fixed): the ABSTRACT an enum gets when a constant body implements its abstract method
+(`markAbstractIfNeeded`); RECORD on a record's canonical constructor; FIELD_INIT_TYPE_ANNOTATIONS_QUEUED
+(bit 53) on a field's modifiers when it has an initializer, shared by the declarators of one declaration
+(`int a = 1, b;`); a pattern variable's flags (its modifiers', HASINIT, no checkFlags); a TYPE_USE
+declaration annotation on the declared type (an array's element type), on a catch union's first
+alternative's tree but not on the union; `import T.*` imports T's own member classes, a static import
+also inherited ones (Scope's SymbolImporter), and only accessible ones (typeImportFilter); a private
+member class found through its site class; a rule case's statements and body are one tree that the
+native parser freezes as two copies, both asked; a compact constructor's parameters are the parser's
+(not TypeEnter's); `o.super(...)`'s qualifier is an expression; Object's supertype is javac's NONE.
+
+### JN9a.3 The check: `bin/repr-java attr-check`
+
+`bin/repr-java attr-check [--corpus C,...]` is front-check (JFS66 (b).3) with `--attr native`: each
+corpus read with `--front both --split --attr native`, javac attributing once, the converter writing
+the forms of javac's trees and of the native trees with the native provider; the forms must be equal
+(but `test/repr/java/attr-check-known.edn`'s files) and no fact differ beyond that file's counts; the
+outcomes summed by corpus, tier and fact (`.tmp/repr-java-attr-check/attr.md`), the split with the
+provider's share (`split.md`). Makefile `repr-java-attr-check`, in `make verify`, and in `bin/gate
+--full`'s java chain after `repr-java-front` (`repr-java-attr`, JFS74 (a)). On the final tool (key
+`9aef633f...`), the host shared:
+
+| corpus | read as | forms files | equal | facts equal / different / declined | wall (front-check's) |
+|---|---|---:|---:|---:|---:|
+| `samples` | `bin/repr-java check` | 17 | 17 | 1,618 / 0 / 12 | 3 s (2 s) |
+| `baseline` | `bin/repr-java check` | 189 | 189 | 156,291 / 0 / 14 | 59 s (50 s) |
+| `jdk` | `bin/jrt-convert`'s convert step (read-jdk, 4 chunks, `REPR_JAVA_PATCH_ALL`) | 911 | 911 | 585,764 / 0 / 2,469 | 174 s (161 s) |
+| `javac` | `bin/javac-vendor convert` (read-jdk per module, 8 chunks; `buildtools` by read) | 1,828 | 1,828 | 490,792 / 0 / 2,828 | 170 s (149 s) |
+| `jdk26u` (`--corpus all`) | `bin/repr-java check --jdk` (read-jdk per module, 4 chunks) | 13,788 | 13,788 | 5,425,925 / 0 / 28,585 | 1,336 s (about 19 minutes, JFS66 (b).3) |
+
+By tier (equal / different / declined):
+
+| tier | samples | baseline | jdk | javac | jdk26u |
+|---|---:|---:|---:|---:|---:|
+| syntax | 128 / 0 / 0 | 13,647 / 0 / 0 | 78,820 / 0 / 0 | 52,729 / 0 / 0 | 536,151 / 0 / 0 |
+| scope | 871 / 0 / 8 | 84,353 / 0 / 10 | 308,991 / 0 / 1,302 | 242,494 / 0 / 1,657 | 2,715,734 / 0 / 20,628 |
+| declarations | 619 / 0 / 4 | 58,291 / 0 / 4 | 197,953 / 0 / 1,167 | 195,569 / 0 / 1,171 | 2,174,040 / 0 / 7,957 |
+
+By fact, in jdk26u (equal / declined; none different): `types/literal` 536,151; `scope/ident`
+969,565; `scope/local-decl` 647,980 / 12,896 (`var`); `scope/local-names` 507,277; `scope/param`
+220,689; `scope/assigned` 183,733; `scope/capture` 69,026; `scope/refers` 68,093; `scope/hoist`
+22,619; `scope/jump-target` 22,433; `scope/binding` 4,245 / 15; `scope/lambda-param` 74 / 7,717
+(implicit); `names/type-expr` 601,702; `enter/method-decl` 561,805; `enter/flags` 295,856;
+`enter/field-decl` 285,307; `names/type-tree` 188,905 / 7,375 (diamonds); `annotations/attribute`
+86,779 / 8 (record components); `enter/class-decl` 81,264 / 574 (anonymous classes of diamonds and
+of qualified creations); `types/this` 49,161; `names/package` 12,730; `types/class-literal` 10,508;
+`names/record-pattern` 23. The whole run of the five corpora took 29 minutes on the final tool (the
+host shared). The provider's cost is in the native conversion, the second of each corpus's two: the
+corpora's walls grew 8-18% against front-check's (javac's attribution answering both).
+
+### JN9a.4 JFS71: the converter's eager queries narrowed
+
+The converter asked a symbol where it only compared locals; those questions are now asked as such,
+`attr/local-of` (the local a name or declaration denotes, or nil: the scope tier) and
+`attr/type-expr?` (whether a qualifier names a type or package: a boolean), and their answers are the
+same as before for every tree (the updates and `check --jdk` byte for byte, JN9a.6):
+
+| site | before | now |
+|---|---|---|
+| hoisting (`hoistable-increments`) | the symbol of every name in an expression with postfix increments (950,509 in jdk26u, `:names/hoist`, `:overload/hoist`) | a candidate's local by scope and the uses of that local counted by scope; the names' symbols asked only for a field candidate in an expression without effects |
+| `captured-mutables`, `assigned-syms`, `step-update`, `assigns-only?`, `refs-sym?`, `*local-names*` | the symbol, then `local?` | `local-of` |
+| `type-expr?` | TreeInfo.symbol's kind | `type-expr?` (`:names/type-expr`) |
+| a case label naming a constant | the symbol's kind | none: a constant label's name is a variable's |
+| a try resource's name | its symbol's name | the tree's name |
+| `ident`, `select` | the symbol first, also for `this`, `super`, `.class` | after those cases |
+
+In jdk26u the facts asked went from 15,148,757 (JFS66 (b).4) to 13,544,011, the members tier's from
+1,286,625 to 556,811 (the hoisting's and the comparisons' symbols), the overload tier's from 2,494,035
+to 2,090,879; the first three tiers' share of the facts from 39.1% to 40.3%, and the lists they write
+alone from 15.0% to 15.2% (the first two tiers' from 2.3% to 2.5%).
+
+### JN9a.5 JFS72 (b): jdk26u's forms recorded
+
+`test/repr/java/expected/jdk26u.sha256` holds the SHA-256 of each of jdk26u's 13,566 forms files
+(68 modules; their first line without `JDK_SRC`), 1.6 MB; `bin/repr-java check --jdk` compares the
+converted modules' lines with it, `check --jdk --update` (or `check --update --jdk`) rewrites them. It
+was recorded on the base tool (key `bf740cf0...`, main's converter) before any converter change, so
+that `check --jdk` on the final tool shows JFS71's narrowing kept jdk26u's forms: 13,566 files of 68
+modules, as expected (559 s).
+
+### JN9a.6 The shipped program's change
+
+None in code: `arbace/repr/java` is not in the shipped program (j2g's `embed.ae` leaves it out;
+javac's tool embeds it, now with `classfile`, `decls`, `scope` and `nattr`: 220,930,208 bytes against
+JFS70's 216,879,264), and `go/`, `overlay/`, `jdk/forms`, `jdk/data` and `jdk/edge.edn` are unchanged.
+The provenance files' `:repr-java` (`bin/lib/repr-java/host.bash`'s `repr_java_reader_hash`, which
+hashes `attr` and `convert`) moved from `c40d75a6...` to `16970302...`, written by the updates on the
+final tool (key `9aef633f...`): `bin/clojure-tests --java-fixtures update` (15 forms files),
+`bin/jrt-convert update` (911 forms files, 10 data files), `bin/javac-vendor convert` (914 forms
+files; its edge on the frozen v4 jar: 223 classes beyond `jdk/edge.edn`'s): every forms file byte for
+byte as committed, only `:repr-java` and `:host` changed in `jdk/provenance.edn`,
+`jdk/javac/provenance.edn` and `test/java-fixtures/provenance.edn`. The reader hash does not name the
+provider's namespaces (`classfile`, `decls`, `scope`, `nattr`): they change no forms of a read with
+javac's attribution, as `parse` and `split` do not. `jdk/provenance.edn` is in the runtime key
+(`bin/lib/version.bash`), so the version map the executable carries changes, as at JFS70. No re-seed.
+
+### JN9a.7 The checks
+
+All on the final tool (key `9aef633f...`), one after another, the host shared:
+
+- `bin/repr-java attr-check --corpus all`: JN9a.3's table; every corpus's forms equal and every fact
+  equal, the known differences none (1,746 s)
+- `bin/repr-java front-check`: every default corpus equal (364 s); `bin/repr-java parse-check`: every
+  corpus's trees as javac's (the parser unchanged; 205 s)
+- `bin/repr-java check`: the baseline's 189 files as `baseline.sha256`, the samples' 11 and the
+  module's 6 as `test/repr/java/expected` (27 s)
+- `bin/repr-java check --jdk`: 68 modules converted, 0 with failures, the 13,566 forms files as
+  `test/repr/java/expected/jdk26u.sha256` (recorded on the base tool; 559 s)
+- `bin/repr-java roundtrip --corpus baseline,samples,jdk --text`: as the references (606 s; the
+  converter's JFS71 change)
+- the updates of JN9a.6: only the three provenance files' `:repr-java` and `:host` changed
+- `make check-makefile`: passes
+- @@GATE
+- not run: `bin/gate --full` (the user's rule), `bin/repr-java check --suite`, `bin/javac-vendor
+  verify` and `classes` (the converted forms and javac's world are unchanged: the updates show the
+  forms byte for byte)
+
+### JN9a.8 What it means for the next tiers
+
+JN9a took about a working day against JFS66 (b).6's 4-7 days (JN8 four and a half hours against 4-6),
+the port again following javac's code (Check, Resolve, TypeEnter, MemberEnter, Annotate, ConstFold,
+the scoping of Attr) and the check finding what a reading missed (JN9a.2's list: a dozen javac
+behaviours, each fixed in minutes once a fact named it). The re-estimate of the rest, by the same
+ratio and from what JN9a showed:
+
+- **The model behind the answers** (JFS75): the converter reads about 70 methods of javac's `Symbol`,
+  `Type`, `Types` and `Attribute` on the answers (JFS66 (b).1); JN9a's answers are realized as
+  javac's objects so that it can. Before the next tier, those reads move behind an interface over
+  either model (as `tree` did for the trees), the native model being `decls`' symbols and types: 1-2
+  days, checked as JN9a is (the forms byte for byte with the native model for the scope and
+  declarations tiers).
+- **JN9b, members and expression types** (Attr's expressions, Types' subtyping, capture, lub and
+  memberType, ConstFold over expressions, Operators): 6-10 days estimated, now 2-4: the declarations,
+  the lookups (findVar, findField, member types, imports) and the walk with its environments exist;
+  what is new is the expression typing and Types' relations. With it 69% of the lists (JFS66 (b).4).
+- **JN9c, overload resolution** (Resolve's three phases, most specific): 3-5 estimated, now 1-2.
+- **JN9d, inference** (Infer, DeferredAttr, ArgumentAttr; the declined `var` types, implicit lambda
+  parameters and diamonds join it): 6-12 estimated, now 3-6, the open tail of §8 R6 unchanged.
+
+So about 7-14 working days for the rest (JFS66 (b).6: 15-27 after JN9a), each tier checked fact by
+fact by `attr-check` as JN9a's, its known differences empty.
+
+### JN9a.9 Proposals
+
+- **JFS74 The fact check in the gates.**
+  - Options: (a) `bin/repr-java attr-check` (its default corpora: samples, baseline, jdk, javac) in
+    `bin/gate --full`'s java chain after `repr-java-front`, on the tool the javac step built (built:
+    `repr-java-attr`, about 7 minutes), jdk26u opt-in (`--corpus all`, about 22 minutes more); (b) out
+    of every gate, a command and the Makefile's target; (c) jdk26u in `--full` too.
+  - *Recommended: (a)*: it is the provider's check and every later tier's harness, at the cost of one
+    more front-check; front-check then checks nothing attr-check does not (the same reads but the
+    provider), and could leave the chain, but it is the check of the index and of javac's answers by
+    position, which the provider's realization relies on.
+- **JFS75 The model behind the answers.**
+  - Options: (a) as built: the native answers realized as javac's objects, the converter reading
+    javac's model on them (a class's members, a local's constant value, erasure, subtyping); (b) the
+    converter's reads of the answers behind an interface over both models (`jtypes`, `resolve` and
+    the converter's interop on `Symbol`, `Type`, `Types`, `Attribute`), `decls`' symbols and types
+    the native model, the realization then gone for the native tiers; (c) (b) only with JN9b, the
+    model's reads of types then asked by the new tier anyway.
+  - *Recommended: (b), first*: the converter's 70-odd reads of the model are what a javac-free
+    converter must answer whatever the tiers, and moving them is mechanical, checked by the forms;
+    JN9b then plugs into the native model directly.
+- **JFS76 The declined facts.**
+  - Options: (a) as built: a `var` local's type, an implicit lambda parameter's, a diamond's type tree
+    and an anonymous class of a diamond or of a qualified creation through an expression left to
+    javac (28,585 facts in jdk26u, 0.2% of its facts); (b) the cases whose answer needs no inference
+    answered now from the declarations (a `var` initialized by a literal, `new C(...)` of a non-generic
+    class, a local; `o.new C()` with `o` a method's result whose declared return type is known): a
+    part of the types tier taken early.
+  - *Recommended: (a)*: the declined facts are the types and inference tiers' by nature, and an early
+    part of them would be redone by JN9b and JN9d.
+- **JFS77 Next.**
+  - Options: (a) JFS75 (b), then JN9b (members and expression types), decided after it on its
+    numbers; (b) stop at JN9a: the native declarations serve tools (an outline of a Java tree without
+    javac, Java in the box without javac's world) and javac on Arbace stays the front end; (c) JN9b
+    on javac's model (the realization extended to expression types), JFS75 later.
+  - *Recommended: (a)*, if a javac-free converter is still the aim (JFS69 (b)); (b) otherwise: JN9a
+    is complete on its own.
+- **JFS78 The native declarations outside the check.**
+  - Options: (a) as built: the provider runs only beside javac (`--attr native`, its answers checked);
+    (b) also without javac, on the tools' host (`decls` and `scope` need no javac: `classfile`'s reader
+    and the native parser): a command giving a Java tree's declarations (classes, members, flags,
+    declared types, resolved names) as data, for tools that need Java's names without javac's world
+    (an editor's, the box's); (c) (b) in the shipped program.
+  - *Recommended: (a)* until such a consumer is named; (b) is a small command then (the walk and the
+    registry run on the tools' host today, as the scratch scripts of JN9a.10 show).
+
+### JN9a.10 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`):
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/{Check,Resolve,TypeEnter,MemberEnter,Enter,Annotate,ConstFold,Attr,MatchBindingsComputer,Flow}.java`,
+  `code/{Flags,Types,Symbol,Scope,Symtab,Attribute,Type,TypeAnnotationPosition}.java`
+  (`Scope.FilterImportScope`, `SymbolImporter`: what an import brings), `jvm/ClassReader.java`
+  (`adjustClassFlags`, `adjustMethodFlags`), `tree/TreeInfo.java` (`symbol`).
+- The worktree's `.tmp/`: `jn9a/` (the tool builds' logs `build1.log`, `build2.log`, the base tool
+  `arbace-javac.base`, the scratch scripts `diffs.ae` (a run's differences by fact), `walk.ae` and
+  `anon.ae` (a unit's answers on the tools' host), `run-s1.sh`, the first runs `s1`, `mod`, `base`,
+  `ac-*.log`, and `final/` (the final tool's checks: their logs, `summary.txt`, `attr.md`, `attr.edn`,
+  `split.md`)), `repr-java-attr-check/`, `repr-java-front-check/`, `repr-java-jdk/`,
+  `repr-java-check/`, `repr-java-parse-check/`, `repr-java-roundtrip/`, `jrt/`, `javac-vendor/`,
+  `clojure-tests/`.
