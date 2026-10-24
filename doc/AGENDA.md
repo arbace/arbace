@@ -172,8 +172,10 @@ The current state of the work. This file is rewritten as things change. For the 
     attribution provider for the scope and declarations tiers, every fact equal to javac on Arbace's
     over every corpus, jdk26u's 5,425,925, 0.2% declined to javac by design; JFS71 and JFS72 (b) within
     it; `bin/repr-java attr-check` in `--full`; the rest re-estimated 7-14 days; JFS74-JFS78 decided:
-    JFS75 (b) next, then JN9b). Running: JFS75 (b), the converter's model behind an interface
-    (`java-model`); JFS65 (b), j2g's array casts (`j2g-array-casts`); the Java conformance survey
+    JFS75 (b) next, then JN9b). JFS75 (b) built (`java-model`, to merge: the converter reads the
+    answers through `arbace.repr.java.model`, javac's model or the native one, the realization gone;
+    every corpus's forms unchanged; 62.7% of jdk26u's model reads native, 99.4% of those of the native
+    tiers' answers; JFS79, JFS90-JFS94 proposed, JN9b re-estimated 2-3 days). Running: JFS65 (b), j2g's array casts (`j2g-array-casts`); the Java conformance survey
     (`java-conformance-survey`). The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
   - GC157 (`byte`, `rune` and aliases as names in the checker's types) and go:embed (GS14 (a));
