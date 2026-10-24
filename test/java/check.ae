@@ -315,13 +315,18 @@
         (str/replace (.getCanonicalPath (io/file ".")) ".")
         (str/replace #"[\x00-\x08\x0b-\x1f\x7f]" "?"))))
 
+(def ^:private key-order
+  "The order of a main action's keys in the reference."
+  (let [ks [:main :args :timeout :exit :out :out-len :out-masked :err :det :det-masked]]
+    (fn [k] (let [i (.indexOf ^java.util.List ks k)] (if (neg? i) 99 i)))))
+
 (defn- edn-map
   "A map (a vector of [key value]; a value that is a vector of maps printed likewise) printed with its keys in the order given (one test a line, diffable)."
   [kvs]
   (str "{" (str/join " " (for [[k v] kvs :when (some? v)]
                             (str k " " (cond (string? v) (q v)
                                              (and (vector? v) (every? map? v) (seq v))
-                                             (str "[" (str/join " " (map #(edn-map (vec %)) v)) "]")
+                                             (str "[" (str/join " " (map #(edn-map (sort-by (comp key-order key) (vec %))) v)) "]")
                                              :else (pr-str v)))))
        "}"))
 
@@ -340,12 +345,17 @@
                           base (second (first (pm "root")))
                           rs (vec (for [[i tmo cls & args] runs
                                         :let [r #(slurp1 (str d "/run" i "." %))
-                                              e1 (r "exit") e2 (r "exit2") o1 (r "out") o2 (r "out2")]]
-                                    {:main cls :args (vec args) :timeout (Long/parseLong tmo)
-                                     :exit (some-> e1 Long/parseLong) :out (some-> o1 (subs 0 16))
-                                     :out-len (some-> (r "len") Long/parseLong)
-                                     :err (or (clean (r "err1") work id base) "")
-                                     :det (and (= e1 e2) (= o1 o2))}))
+                                              e1 (r "exit") e2 (r "exit2") o1 (r "out") o2 (r "out2")
+                                              m1 (r "masked") m2 (r "masked2")
+                                              ;; masking changed stdout (JCS17 (b))
+                                              masked? (and m1 o1 (not= (subs m1 0 16) (subs o1 0 16)))]]
+                                    (cond-> {:main cls :args (vec args) :timeout (Long/parseLong tmo)
+                                             :exit (some-> e1 Long/parseLong) :out (some-> o1 (subs 0 16))
+                                             :out-len (some-> (r "len") Long/parseLong)
+                                             :err (or (clean (r "err1") work id base) "")
+                                             :det (and (= e1 e2) (= o1 o2))}
+                                      masked? (assoc :out-masked (subs m1 0 16)
+                                                     :det-masked (and (= e1 e2) (= m1 m2))))))
                           status* (cond (g "skip") [:skip (g "skip")]
                                        (empty? (lines (str d "/sources.txt"))) [:skip (str "the source set: " (or (slurp1 (str d "/sources.err")) "javac failed"))]
                                        (= "!" (ffirst ren)) [:skip (second (first ren))]
@@ -363,7 +373,11 @@
                           [:unnamed (when (= :pass (first status)) (vec (for [[_ dst p] ren :when (= p "1")] dst)))]
                           [:classes (when (= :pass (first status)) (some-> (slurp1 (str d "/classes.sha")) (subs 0 16)))]
                           [:runs (when (#{:pass :fail} (first status)) rs)]]))
-        kept (for [[id t] (sort-by key old) :when (not (some #{id} ids))] (edn-map (for [k ref-keys] [k (t k)])))
+        ;; the tests of the corpora this run did not record (--only) kept; a test the corpora no
+        ;; longer take (an area excluded, JCS16 (b)) dropped, its id not taken again
+        scanned (set (keep #(not-empty (nth (str/split % #"\t" -1) 3 "")) (lines (str work "/scan.tsv"))))
+        idset (set ids)
+        kept (for [[id t] (sort-by key old) :when (and (not (idset id)) (scanned id))] (edn-map (for [k ref-keys] [k (t k)])))
         all (sort (concat tests kept))]
     (write-lines ref
                  (concat [";; The JDK's runs of bin/java-check's corpora (doc/classes/JAVA-CONFORMANCE-SURVEY.md, JCS5 (b),"
@@ -403,7 +417,9 @@
                            (for [[src dst] (:files t)]
                              (str "file\t" src "\t" dst "\t" (if (some #{dst} (:unnamed t)) (str "package " (first (str/split dst #"/")) "; ") "")))
                            (for [[i r] (map-indexed vector (:runs t))]
-                             (str/join "\t" (concat ["run" i (:exit r) (:out r) (:out-len r) (if (:det r) "1" "0") (:main r)] (:args r)))))))
+                             (str/join "\t" (concat ["run" i (:exit r) (:out r) (:out-len r) (if (:det r) "1" "0")
+                                                      (or (:out-masked r) "-") (if (:det-masked r) "1" "0") (:main r)]
+                                                     (:args r)))))))
     (write-lines (str work "/run.list") (map :id ts))
     (println (str "java-check plan: " (count ts) " tests"))))
 
@@ -488,12 +504,153 @@
     (shutdown-agents)
     (System/exit (if (seq @problems) 1 0))))
 
+;; ---------------------------------------------------------------------------------------------
+;; the compiled level (JC2): the tests' forms translated by j2g into programs, shard by shard
+
+(defn- form-files
+  "A test's Java forms files under its forms directory: [rel text], the package files (an ns
+  form) left out (j2g's input reader skips them, w/source-files)."
+  [^String dir]
+  (let [root (io/file dir)]
+    (for [^File f (sort-by #(.getPath ^File %) (file-seq root))
+          :when (and (.isFile f) (str/ends-with? (.getName f) ".ae"))
+          :let [text (slurp f)]
+          :when (not (re-find #"(?m)^\(ns[\s)]" text))]
+      [(subs (.getPath f) (inc (count (.getPath root)))) text])))
+
+(defn- top-classes
+  "The internal names of a Java forms file's top-level classes (as j2g's world reads them:
+  arbace.j2g.world/top-names): its in-ns's package, each defclass's name."
+  [^String text]
+  (let [nsn (second (re-find #"\(in-ns\s+'([\w.$-]+)\)" text))]
+    (for [[_ n] (re-seq #"(?m)^\(defclass\s+(?:\^\S+\s+)*([\w.$]+)" text)]
+      (if (str/includes? n ".")
+        (str/replace n "." "/")
+        (str (when nsn (str (str/replace nsn "." "/") "/")) n)))))
+
+(defn- go-stem
+  "The Go name j2g gives a test's class (J_..._J, arbace.j2g.names/user-class?), or with file? its
+  Go file's stem."
+  ([^String internal] (go-stem internal false))
+  ([^String internal file?] (str "J_" (str/replace (str/replace internal "/" "_") "$" "_") (when-not file? "_J"))))
+
+(defn shards
+  "Puts the tests of WORK/run.list whose forms were read (WORK/run/ID/forms.dir) into shards of at
+  most SIZE tests, WORK/j2g/sK/tests.txt: one j2g program each (survey §7.2). A test goes into the
+  first shard with room where none of its files' places holds another text (packaged tests share
+  packages: compiler.c2's classes are many tests'); WORK/j2g/owners.tsv: ID, then class (a
+  top-level class's internal name), file (a forms file's place) or go (the Go names j2g gives them,
+  nm/user-class?) and the key."
+  [work size]
+  (let [size (Long/parseLong (str size))
+        ids (lines (str work "/run.list"))
+        shards (atom [])
+        owners (atom [])]
+    (doseq [id ids
+            :let [fd (io/file work "run" id "forms.dir")]
+            :when (.isFile fd)
+            :let [files (vec (form-files (str/trim (slurp fd))))]]
+      (doseq [[rel text] files]
+        (swap! owners conj [id "file" rel])
+        (swap! owners conj [id "go" (go-stem (subs rel 0 (- (count rel) 3)) true)])
+        (doseq [c (top-classes text)]
+          (swap! owners conj [id "class" c])
+          (swap! owners conj [id "go" (go-stem c)])))
+      (let [fits? (fn [sh] (and (< (count (:tests sh)) size)
+                                (every? (fn [[rel text]] (let [t (get (:files sh) rel)] (or (nil? t) (= t text)))) files)))
+            k (or (first (keep-indexed (fn [i sh] (when (fits? sh) i)) @shards))
+                  (do (swap! shards conj {:files {} :tests []}) (dec (count @shards))))]
+        (swap! shards update k (fn [sh] (-> sh (update :tests conj id) (update :files into files))))))
+    (doseq [[k sh] (map-indexed vector @shards)]
+      (write-lines (str work "/j2g/s" k "/tests.txt") (:tests sh)))
+    (write-lines (str work "/j2g/owners.tsv") (map #(str/join "\t" %) (distinct @owners)))
+    (println (str "java-check shards: " (count ids) " tests, " (reduce + (map (comp count :tests) @shards))
+                  " read, in " (count @shards) " shards (" (str/join ", " (map (comp count :tests) @shards)) ")"))))
+
+(defn- refused-ids [shard] (set (map first (tsv (str shard "/refused.tsv")))))
+
+(defn merge-shard
+  "SHARD's forms tree (SHARD/forms): the files of its tests (SHARD/tests.txt) but those refused
+  (SHARD/refused.tsv); SHARD/built.txt, the tests in it."
+  [work shard]
+  (let [gone (refused-ids shard)
+        ids (remove gone (lines (str shard "/tests.txt")))
+        out (io/file shard "forms")]
+    (when (.exists out)
+      (doseq [^File f (reverse (file-seq out))] (.delete f)))
+    (doseq [id ids
+            [rel text] (form-files (str/trim (slurp (io/file work "run" id "forms.dir"))))
+            :let [f (io/file out rel)]
+            :when (not (.isFile f))]
+      (io/make-parents f)
+      (spit f text))
+    (write-lines (str shard "/built.txt") ids)
+    (println (str "java-check merge: " (count ids) " tests in " out))))
+
+(defn- owner-index [work shard]
+  (let [ids (set (lines (str shard "/built.txt")))
+        rows (filter #(ids (first %)) (tsv (str work "/j2g/owners.tsv")))]
+    (reduce (fn [m [id k v]] (update-in m [k v] (fnil conj #{}) id)) {} rows)))
+
+(defn- attribute
+  "The tests a failure names: by its class (its top-level class's owners), a forms file, or the
+  Go names (J_...) in its text, each the owners' whose Go name it starts with."
+  [ix ^String n ^String msg]
+  (let [top (first (str/split (str n) #"\$"))
+        by-class (get-in ix ["class" top])
+        by-file (some (fn [[rel ids]] (when (str/ends-with? (str n) (str "/" rel)) ids)) (get ix "file"))
+        gos (get ix "go")
+        by-go (set (for [tok (re-seq #"J_[A-Za-z0-9_]+" (str n " " msg))
+                         [g ids] gos
+                         :when (or (= tok g) (str/starts-with? tok (str g "_")))
+                         id ids]
+                     id))]
+    (or (not-empty by-class) by-file (not-empty by-go))))
+
+(defn- refuse! [shard ix found what]
+  (let [old (refused-ids shard)
+        un (atom [])
+        new (atom (sorted-map))]
+    (doseq [[n msg] found
+            :let [ids (attribute ix n msg)]]
+      (if (seq ids)
+        (doseq [id ids :when (and (not (old id)) (not (@new id)))]
+          (swap! new assoc id (str what n ": " (str/replace (str msg) #"\s+" " "))))
+        (swap! un conj [n msg])))
+    (when (seq @new)
+      (spit (io/file shard "refused.tsv")
+            (apply str (for [[id r] @new] (str id "\t" (subs r 0 (min 400 (count r))) "\n"))) :append true))
+    (doseq [[n msg] (take 20 @un)] (println (str "   not attributed: " n ": " (subs (str msg) 0 (min 300 (count (str msg)))))))
+    (println (str "java-check refused: " (count @new) " tests, " (count @un) " not attributed"))))
+
+(defn refusals
+  "j2g's refusals of SHARD (SHARD/out/report.edn: :analysis-failures, :errors), each a test's
+  that owns the class it names, appended to SHARD/refused.tsv (ID, j2g's reason)."
+  [work shard]
+  (let [r (read-edn (io/file shard "out" "report.edn"))]
+    (refuse! shard (owner-index work shard) (concat (:analysis-failures r) (:errors r)) "j2g: ")))
+
+(defn goerrors
+  "The Go compiler's errors of SHARD's build (LOG: go build -gcflags=-e's output), each the test's
+  whose Go file (J_..., nm/user-class?) or Go names it names, appended to SHARD/refused.tsv."
+  [work shard log]
+  (let [errs (for [l (lines log)
+                   :let [[_ path msg] (re-matches #"^(\S+?\.(?:go|ae)):\d+(?::\d+)?: (.*)$" l)]
+                   :when path]
+               [(let [b (.getName (io/file path))] (str/replace b #"(_j2g)?\.(go|ae)$" "")) msg])
+        errs (for [[stem msg] errs] [stem (str stem ": " msg)])]
+    (refuse! shard (owner-index work shard) errs "Go does not compile: ")))
+
 (defn -main [cmd & args]
   (case cmd
     "scan" (apply scan args)
     "rename" (apply rename args)
     "gather" (apply gather args)
     "plan" (apply plan args)
-    "report" (apply report args))
+    "report" (apply report args)
+    "shards" (apply shards args)
+    "merge" (apply merge-shard args)
+    "refusals" (apply refusals args)
+    "goerrors" (apply goerrors args))
   (shutdown-agents)
   (System/exit 0))
