@@ -1498,3 +1498,8 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   A document alone: the essential gate at `114fa076` stands for it.
 - Decided (the user): JCS1-JCS15 as recommended (the survey's "Decided (2026-10-24)"); JC1 started on
   the branch `java-check-jc1` from main, then JC4, then JC2.
+- Correction: removing the survey's worktree (`git worktree remove --force`) also removed its
+  untracked `.tmp/jc/` (the measurement's scripts of the survey's Appendix A and its data). The
+  survey records what each script did and every number; JC1 builds the check anew as
+  `bin/java-check` (JCS7), so only the scratch is gone. A worktree's scratch named by a survey is
+  to be kept (copied to main's `.tmp/`) before its worktree goes.
