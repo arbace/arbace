@@ -1513,3 +1513,21 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   jdk26u's tests, measured with JC1's `bin/java-check` once it merges; on the branch
   `java-interp-jc4` from `549c5c49`, in `arbace/lang/` and `arbace/classes/`. A runtime change: the
   batched re-seed. Proposals: JC1's JCS16-JCS29, JC4's from JCS30.
+
+## 2026-10-24: the next milestone's goal, full support for Clojure, Java and Go (the user)
+
+- The user set the next milestone: full support, read, eval, AOT and print, for Clojure, Java and Go.
+  Decided with it:
+  - the criterion is goi's v1 rule (`arbace-interprets-go1.27.1-v1`): each language's conformance
+    corpus at each level against its reference, none failing, every program that does not pass in
+    a recorded class with its reason (by design, or deferred and named);
+  - Java's read is javac on Arbace (complete today); JN9b-JN9d (a javac-free converter) go on beside
+    the milestone and do not gate it;
+  - Go's AOT is Arbace's build of Go forms (repr/go's print, Go's toolchain: `arbace.build.go`),
+    checked over `$GOROOT/test` against gc as goi's check is;
+  - on the host (linux/amd64) alone, of forms only: the box's subsets and each language's text at
+    the REPL (GPS11 for Go) are not the milestone's.
+  The state at the decision: Clojure's suite on the test build 20,487 assertions pass, 11 fail, 3
+  errors, diffcheck's Clojure pair 21 known; Java (the conformance survey's sample) interpreted 60%,
+  by j2g 67%; Go's goi 1,610 of 1,837, none failing; every bridge's round trip byte for byte. A survey
+  of the milestone (the matrix, each cell's corpus, reference, check and gaps, the plan) next.
