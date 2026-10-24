@@ -2412,3 +2412,175 @@ the commit's, in 112.5 s, the launchers 25,019 MiB resident at most. Every diges
 text and its digest, both forms, the tree) equals Linux's. The amd64 box took 166.7 s with 8 threads
 a read; the phases summed per read on the Mac: native 6, raw 132, annotate 61, convert 48, layout 183 s.
 GP8's exit criterion on arm64 is now met on hardware, not only by the emulated VM's part of std.
+
+## As built: GPS49 (c) (2026-10-24)
+
+GPS49 (c), the native read's raw conversion profiled (and the layout phase, the other large one),
+is built on branch `go-raw-speed` from main `8a879ec0`, whose seed (`3ab3b603`) carries GP1-GP7
+compiled. The executables measured were built in the worktree by `bin/arbace-go --build` (amd64):
+*before*, from `8a879ec0`; *after*, from the change's head; each the tools' host of its own
+reads (`REPR_GO_EXE`, `ARBACE_HOST_EXE`), the profiles Go's (`ARBACE_CPUPROFILE`, read with
+TamaGo's `go tool pprof`). The shared 64-core amd64 machine, a re-seed's fixpoint, javac's and
+another Go agent's work beside them (load 10 to 30); every read at 8 jobs (`REPR_GO_JOBS=8`).
+
+**The profile.** A read of `fmt` and `unicode/utf8` (linux/amd64) on the before program: 95.7
+CPU-s, of which 44% Go's collector (`gcDrain`); the raw conversions (`prep`, every package of
+`fmt`'s configuration the checker asks for) 13.5 CPU-s in `convert-file`, **8.2 of them in
+`source-text`**, almost all in `basic-lit-extents`: mode `:full` (the raw conversions' mode)
+reads each file's text for what the tree does not keep (comments, white space, semicolons), and
+finds the basic literals' extents by `tree-seq` over the file's whole tree, whose nested lazy
+sequences cost about 20 µs a node; `parse-pos` (a regular expression `#"\d+:\d+"` for every
+string of every node, through `positions`, `max-pos`, `line-of`) 2.6 CPU-s. A read of ten
+packages (`fmt` ... `net/http`): `convert-file` 41.5 CPU-s, `basic-lit-extents` 28.6, `parse-pos`
+8.8. So the raw conversion cost several times the final one for three reasons: (1) it runs in
+mode `:full`, which a read's `:lines` conversion does not, and `:full`'s source text was the
+expensive part; (2) the session converts raw every package of the configuration the checker
+reaches, the final conversion only the corpus's (for std's corpus the same set, for `tamago/cmd`
+or a few packages many more); (3) `parse-pos`'s matcher, in both. The layout phase (the layout,
+the write and the read-back check, 3.2 times the conversion over std) had its own: the check's
+`diff` compared each subtree's data again at every level (the tree's depth times the work: 31.7
+CPU-s over std with the first changes), the forms prepared twice (for the text and for the check),
+the report's node counts by `tree-seq` (`arbace.repr.go.read/nodes`), and `printable?`'s set of
+character types made at every code point of every string literal's text (`string-text`, 16.9
+CPU-s over std). The annotation (`node-index`, `rebuild`) paid for a variadic `conj` per field.
+
+**The changes** (no output changes; the commits `93482d80` and this record):
+
+| where | what |
+|---|---|
+| `arbace.repr.go.convert` | `basic-lit-extents` an eager walk in `tree-seq`'s order; `parse-pos` a hand scan of the digits (`Long/parseLong` kept for more than 18 characters); `convert-package`'s option `:source-text false`: mode `:full` without the files' text beyond the tree (the `go/file` form's private `::full`) |
+| `arbace.repr.go.annotate` | a read's raw conversions with `:source-text false` (the checker's source, `cform`, leaves the private keys out); `native-check` (`-main check`) keeps the text, which `conform` compares; `node-index` and `rebuild` build a node's path once, and skip the fields that are not collections |
+| `arbace.repr.go` | `convert-data`: each file's forms prepared once for its text and its read-back check, the layout's notes counted twice as before; `diff`: the data compared once at the top, the children by their metadata and lines alone (equal data make equal children) |
+| `arbace.repr.go.layout` | `write-prepared` (the text of prepared forms; `write-file` calls it); the children written in one pass, without `map-indexed` |
+| `arbace.repr.go.lit` | `printable?`: printable ASCII at once, the unprintable types' set made once |
+| `arbace.repr.go.read` | `nodes` an eager walk in `tree-seq`'s order (a vector) |
+
+The first build of the change had one regression, found by the next measure: `(long (.charAt s
+i))` in `parse-pos` resolves `RT/longCast` of a `char` by reflection (the compiler's warning:
+"argument types: char"), 164 CPU-s of a 178 s read; `(int ...)` resolves it. The changed files
+load without reflection warnings of their own (`*warn-on-reflection*`; the three left are
+`lit.ae`'s `BigDecimal` constructors and `go.ae`'s `getBytes`, as before).
+
+**Before and after** (the same machine and inputs, the summed phases as `bin/repr-go read` prints
+them: seconds summed over the jobs, wall time of each job, so contention and the collector's
+pauses count; CPU user plus system):
+
+| read | wall | CPU | native | raw | annotate | convert | layout |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `read --goos linux fmt unicode/utf8`, before | 46.8 s | 97.9 s | 2.0 | 30.6 | 0.3 | 0.3 | 1.0 |
+| after | **27.1 s** | **51.3 s** | 1.7 | **10.8** | 0.3 | 0.2 | 0.3 |
+| `read --corpus amd64` (std tamago/amd64, 379 packages), before | 139.0 s | 1,284 s | 8.7 | 169.0 | 76.0 | 65.8 | 211.4 |
+| after | **72.0 s** | **568 s** | 8.5 | **51.6** | 52.9 | 44.6 | **58.3** |
+| `read --corpus cmd-linux-amd64` (`tamago/cmd`'s 105 packages), before | 477.3 s | 1,905 s | 16.5 | 287.4 | 117.6 | 69.0 | 230.0 |
+| after | **249.7 s** | **831 s** | 14.1 | **80.4** | 80.4 | 49.4 | **68.2** |
+
+So the raw conversion over std is 1.16 times the final one (51.6 s against 44.6; before 2.6
+times, GP7's 3.5 at 32 jobs), the layout 1.3 times (before 3.2), whole reads take half the wall
+time and 44% of the CPU, a read of a few packages 58%. What the raw phase still has beyond the
+final conversion is the checker's source (`raw-source`: `cform`, `collect-forms`) and mode
+`:full`'s parentheses and positions. Every output is the before program's byte for byte: the
+three reads' trees (`diff -r`), their summaries (`.tsv` but the times) and reports (but the
+times).
+
+What is left: the collector, 48% of the CPU over std after the change (`gcBgMarkWorker`; the
+checked sessions and the trees held while their jobs run are many small objects), then the
+checker's walk of the session, the annotation (`node-index`'s `positions`, the type table) and the
+conversion proper. With `GOGC=400` std's read takes 398 CPU-s against 572 (-30%), 70.6 s wall
+against 73.6, at most 11.6 GB resident against 7.0 (GPS59).
+
+**A read of a few packages and GPS49 (b).** After the change `read fmt unicode/utf8` takes 27.1 s;
+a read of `unicode/utf8` alone (which imports nothing) 3.9 s, the executable's start, the loader
+and the read's fixed costs. So about 23 s of the 27 is `fmt`'s session: its imports' native dumps,
+raw conversions and checking, which a cache of the configuration's checked standard library would
+replace by loading it (plus `fmt`'s own check, about a second). A whole corpus gains nothing
+(std's read is its session) or its standard library's part (`tamago/cmd`'s). GPS58 below.
+
+**Which numbers need a re-seed.** The after column is the program built from the change; the
+changed namespaces are embedded (`arbace.repr.go`, `.convert`, `.annotate`, `.layout`, `.lit`,
+`.read`), so until a re-seed carries them stage 0 loads them from the checkout, evaluated
+(RT.toolSource): on stage 0 (`3ab3b603`'s) the change evaluated reads `fmt` in 48.5 s (78 CPU-s)
+and std in 135.5 s (942 CPU-s; raw 151.9, annotate 99.3, convert 142.1, layout 113.5), about the
+before column's wall time, the evaluator's cost eating the gains, the forms the same. After a
+re-seed it runs at the after column's speed.
+
+**Checks** (at `93482d80`, the after program as the host of repr/go and goi, 8 jobs where a knob
+allows, `OMP_NUM_THREADS=8` for the scripts that count `nproc`):
+- `bin/repr-go native-check` over the 22 corpora, all of them, since the raw conversion changed
+  (the helper's dumps of main's last fresh run, copied): 12,275 dumps, E-tree 12,275 equal, raw
+  forms 12,158 resolved (117 raw only, as GP4), E-ann 12,158 of 12,158, E-forms 12,158 of 12,158
+  (`:lines` and `:full`), 0 not known; 58 min wall at 8 jobs, 400 CPU-min, at most 28.8 GB
+  resident (GP7: 107 min at 32 jobs, 919 CPU-min, 30.2 GB);
+- `bin/repr-go roundtrip amd64`: no regressions (package 373 tree, 372 export and code, 1 skipped
+  each; test 1,707 of 1,707 each), 170 s (convert and print 112.8 s, check 57.2 s; GP7: 183 s,
+  138 and 45 at 64 jobs);
+- `bin/goi check --essential`: 797 of 797 pass, no regression, 5 m 26 s (its programs 16 at a
+  time, its own default);
+- `bin/tamago-vendor verify`: `tamago/` the conversion byte for byte, 4 m 1 s (GP5: 8 m 43 s);
+  `bin/toolchain-vendor verify`: `tamago/cmd` byte for byte, 13 m 4 s (GP5: 31 m 37 s);
+- the three reads above, before and after: trees, summaries and reports equal; the stage 0 reads
+  equal to them too;
+- the essential `bin/gate` passed at the head: its build anew (stage 0's executable and test build
+  of the change), the smoke test, Clojure's suite with no regressions, the oracle 22,658 of
+  22,711 against its 53 known, the differential check 12,743 of 12,766 against its 23 known, goi's
+  essential check 797 of 797, the generated files, `bin/j2g-edge verify`. Its first run failed in
+  `j2g-edge` alone, before the JVM ran: `bin/lib/frozen.bash` refreshes the views `tools` and
+  `test` under a lock each, both writing the shared `.tmp/frozen-view/jar.list.new` when the list
+  is missing (a fresh worktree), and one view's `mv` took the other's file; the second run (the
+  list made) passed. A fix (the temporary list named per view, or one lock for the list) is the
+  gate's own, not made here (made on main meanwhile, `c555f949`: each refresh its own
+  `jar.list.new.$BASHPID`). The proposals numbered GPS60 and GPS61 on the branch are GPS66 and
+  GPS67 here (GPS60-GPS65 were GPS41 (c)'s, merged first).
+
+**Proposals (GPS57-GPS59, GPS66, GPS67; each built as recommended).**
+
+- **GPS57 The raw conversions' file text.** The raw conversions run in mode `:full`; its text
+  beyond the tree (`source-text`) is read only by the layout and by `conform`.
+  - (a) a read converts raw without it (`:source-text false`), `native-check` with it (as built):
+    the whole of `source-text` saved in a read (not measured apart from the eager walk, which
+    made the rest of it a scan of each file's bytes);
+  - (b) always with it, one path for both: a scan of every file of the session per read, the
+    checker's source the same.
+
+  *Recommended: (a)*: no output and no check depends on it, `conform` still compares the text.
+- **GPS58 GPS49 (b), the standard library's checked sessions cached on disk.** A read of a few
+  packages is now 27 s, of which about 23 s its configuration's session (the imports' dumps, raw
+  conversions and checks), about 4 s fixed; whole corpora gain nothing (std) or their standard
+  library's part (`tamago/cmd`, the vendoring tools' reads).
+  - (a) not built now (as built): the reads that matter (the vendoring tools', goi's corpora,
+    `native-check`, the box's) are whole corpora, which the change halved;
+  - (b) built: per configuration (GOROOT, GOOS, GOARCH, tags, language) and the key of the
+    checker's, the converter's and the loader's sources, the checked packages' records
+    (types, objects and scopes: an identity graph) written in a format kept in step with the
+    checker's state, and their raw forms' answers; a read of a few packages about 5 to 8 s;
+  - (c) a resident session: one process keeping each configuration's checked standard library
+    in memory across reads (the REPL, or `bin/repr-go` as a server), no format to keep, a read of
+    a few packages about as (b) after the first.
+
+  *Recommended: (a)*, then (c) if reads of a few packages become frequent (an editor, goi at the
+  REPL), before (b): (b)'s format is the cost GPS37 named, for 20 s a read.
+- **GPS59 The collector.** Half of a read's CPU is Go's collector (GOGC 200, the executable's
+  default since `jrt`'s tuning). With `GOGC=400` std's read takes 30% less CPU (398 CPU-s against
+  572), 4% less wall time, and 11.6 GB resident against 7.0 at 8 jobs.
+  - (a) the default kept (as built): memory is what the shared machine runs short of (GP7's
+    unbounded prefetch and an earlier full gate were killed by the system's memory limit);
+  - (b) `bin/repr-go` exporting `GOGC=400` for `read` and `native-check` when unset: the CPU
+    saved, the memory spent where 32 jobs already reach 30 GB;
+  - (c) a memory limit (`GOMEMLIMIT`) with a high GOGC: the collector runs late until the limit.
+
+  *Recommended: (a)*; `GOGC=400` stays the caller's choice (bin/lib/repr-go-host.bash says so).
+- **GPS66 The next costs of a read** (for a later step).
+  - (a) none now (as built);
+  - (b) the raw conversion's positions shared with the annotation (`positions` computed for the
+    same nodes by the raw conversion and by `node-index`), the converter's node counts
+    (`count-node!`, an atom per node) in a mutable counter, the checker's source (`cform`) made in
+    the raw conversion's walk: a few percent each;
+  - (c) fewer, larger objects in the session (the collector's half).
+
+  *Recommended: (a)*: what is left is spread thin; (c) belongs to the checker's own design.
+- **GPS67 The re-seed.** The program's embedded namespaces changed; stage 0 evaluates them until a
+  re-seed, at about the old speed.
+  - (a) batched into the next re-seed (as built);
+  - (b) a re-seed for this change alone.
+
+  *Recommended: (a)*: nothing is slower meanwhile, and the next re-seed brings the after column.
+

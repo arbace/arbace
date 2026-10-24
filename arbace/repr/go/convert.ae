@@ -29,6 +29,7 @@
 (def ^:dynamic *text-dir* nil)     ; the directory of the Go files (mode :full reads them)
 (def ^:dynamic *src* nil)          ; mode :full: the bytes of the Go file converted, when read
 (def ^:dynamic *raw* false)        ; raw mode (GP3): no annotation read, the typed decisions open
+(def ^:dynamic *source-text* true) ; mode :full: the file's text beyond the tree read (source-text)
 
 (defn note! [k] (when *stats* (swap! *stats* update-in [:notes k] (fnil inc 0))))
 (defn count-node! [n] (when *stats* (swap! *stats* update-in [:nodes (first n)] (fnil inc 0))))
@@ -50,10 +51,27 @@
 
 (defn unparen [n] (if (= :paren-expr (nt n)) (recur (:x (nf n))) n))
 
-(defn parse-pos [^String s]
-  (when (and s (re-matches #"\d+:\d+" s))
-    (let [i (.indexOf s ":")]
-      [(Long/parseLong (subs s 0 i)) (Long/parseLong (subs s (inc i)))])))
+(defn parse-pos
+  "[line col] of a position string \"L:C\" (digits, a colon, digits), else nil. Scanned by hand:
+  it runs for every string of every node (positions, max-pos), where the regular expression
+  #\"\\d+:\\d+\" cost a matcher each (GPS49 (c))."
+  [^String s]
+  (when s
+    (let [n (.length s)]
+      (loop [i 0 colon -1 l 0 c 0]
+        (if (< i n)
+          (let [ch (int (.charAt s i))]
+            (cond
+              (and (>= ch 48) (<= ch 57)) (if (neg? colon)
+                                            (recur (inc i) colon (unchecked-add (unchecked-multiply 10 l) (- ch 48)) c)
+                                            (recur (inc i) colon l (unchecked-add (unchecked-multiply 10 c) (- ch 48))))
+              (and (== ch 58) (neg? colon) (pos? i)) (recur (inc i) i l c)
+              :else nil))
+          (when (and (pos? colon) (< (inc colon) n))
+            (if (> n 18)
+              ;; digits a long may not hold (accumulated unchecked above): Long/parseLong's, as before
+              [(Long/parseLong (subs s 0 colon)) (Long/parseLong (subs s (inc colon)))]
+              [l c])))))))
 
 (defn pos-line [s] (first (parse-pos s)))
 
@@ -1670,13 +1688,21 @@
      :space (persistent! space)
      :tail (text tail-start n)}))
 
-(defn- basic-lit-extents [ast]
-  (for [x (tree-seq coll? (fn [x] (if (map? x) (vals x) (seq x))) ast)
-        :when (and (seq? x) (= :basic-lit (first x)) (map? (second x)))
-        :let [{:keys [value-pos value-end]} (second x)
-              a (parse-pos value-pos) b (parse-pos value-end)]
-        :when (and a b)]
-    [a b]))
+(defn- basic-lit-extents
+  "The [start end] positions of the basic literals in ast, in preorder. An eager walk: tree-seq's
+  nested lazy sequences cost two thirds of a raw conversion (GPS49 (c))."
+  [ast]
+  (let [acc (java.util.ArrayList.)
+        walk (fn walk [x]
+               (cond
+                 (map? x) (run! walk (vals x))
+                 (coll? x) (do (when (and (seq? x) (= :basic-lit (first x)) (map? (second x)))
+                                 (let [{:keys [value-pos value-end]} (second x)
+                                       a (parse-pos value-pos) b (parse-pos value-end)]
+                                   (when (and a b) (.add acc [a b]))))
+                               (run! walk x))))]
+    (walk ast)
+    (vec acc)))
 
 (defn convert-file
   "The forms of one Go file of the dump: {:name :forms [...] :comments {line [text]}
@@ -1759,7 +1785,7 @@
         file-form (if-not *full*
                     file-form
                     (let [src (when *text-dir* (java.io.File. ^String *text-dir* ^String name))
-                          st (if (and src (.isFile src))
+                          st (if (and *source-text* src (.isFile src))
                                (source-text (java.nio.file.Files/readAllBytes (.toPath src))
                                             (:comments fe) (basic-lit-extents ast))
                                {:comments (vec (sort (for [g (:comments fe) [p t] (:list g)]
@@ -1900,7 +1926,10 @@
   "Converts a dump. opts: :positions (:lines or :full), :ns (the namespace symbol, default from
   the import path), :namespaces ({path ns-sym} of other packages whose namespace is not their
   path's: a directory test's), :src-dir (the package's source directory, for file-name
-  collisions), :raw (raw mode: the typed decisions open; with :positions :full).
+  collisions), :raw (raw mode: the typed decisions open; with :positions :full), :source-text
+  (false: mode :full without the file's text beyond the tree, the go/file form's private ::full
+  comments, spaces and semicolons, which only the layout and conform read: the native read's raw
+  conversions for the checker, GPS49 (c)).
   Returns {:ns sym :package form :files [{:name :stem :forms :comments :unplaced}] :stats}."
   [dump opts]
   (let [stats (atom {})
@@ -1911,6 +1940,7 @@
               *raw* (boolean (:raw opts))
               *full* (= :full (:positions opts))
               *text-dir* (:text-dir opts)
+              *source-text* (not (false? (:source-text opts)))
               ty/*table* (:type-table dump)
               ty/*pkg* (:package dump)
               ty/*namespaces* (or (:namespaces opts) {})

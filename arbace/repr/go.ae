@@ -45,28 +45,36 @@
   (when (instance? arbace.lang.IObj x)
     (dissoc (meta x) :line :column)))
 
+(declare diff-meta)
+
 (defn diff
   "The first difference between the in-memory form x (prepared) and the form r read back, or
   nil: [path what expected actual]."
   [x r path]
   (let [dx (data-of x)]
-    (cond
-      (not= dx r) [path :data dx r]
-      :else
-      (or (let [em (expected-meta x)
-                rm (or (read-meta r) {})]
-            (when (and (or (seq em) (seq rm)) (not= (data-of em) (data-of rm)))
-              [path :meta em rm]))
-          (when (and (seq? x) (= layout/*mode* :lines) (not (:arbace.repr.go.convert/raw (meta x))))
-            (let [want (or (:line (meta x)) (:arbace.repr.go.convert/l (meta x)))
-                  got (:line (meta r))]
-              (when (and want got (not= want got))
-                [path :line want got])))
-          (when (and (seq? x) (:arbace.repr.go.convert/deref (meta x)))
-            (diff (second x) (second r) (conj path 1)))
-          (when (and (or (seq? x) (vector? x)) (not (:arbace.repr.go.convert/deref (meta x))))
-            (first (keep identity (map-indexed (fn [i [a b]] (diff a b (conj path i)))
-                                               (map vector x r)))))))))
+    (if (not= dx r)
+      [path :data dx r]
+      ;; the data equal, so are every child's: the children are compared by their metadata and
+      ;; lines alone (each child's data compared again cost the depth of the tree, GPS49 (c))
+      (diff-meta x r path))))
+
+(defn- diff-meta
+  "diff of x and r whose data are equal: their metadata and lines, then their children's."
+  [x r path]
+  (or (let [em (expected-meta x)
+            rm (or (read-meta r) {})]
+        (when (and (or (seq em) (seq rm)) (not= (data-of em) (data-of rm)))
+          [path :meta em rm]))
+      (when (and (seq? x) (= layout/*mode* :lines) (not (:arbace.repr.go.convert/raw (meta x))))
+        (let [want (or (:line (meta x)) (:arbace.repr.go.convert/l (meta x)))
+              got (:line (meta r))]
+          (when (and want got (not= want got))
+            [path :line want got])))
+      (when (and (seq? x) (:arbace.repr.go.convert/deref (meta x)))
+        (diff-meta (second x) (second r) (conj path 1)))
+      (when (and (or (seq? x) (vector? x)) (not (:arbace.repr.go.convert/deref (meta x))))
+        (first (keep identity (map-indexed (fn [i [a b]] (diff-meta a b (conj path i)))
+                                           (map vector x r)))))))
 
 (defn read-all [^String text]
   (binding [*read-eval* false]
@@ -222,9 +230,14 @@
         files (binding [layout/*mode* positions
                         layout/*stats* layout-stats]
                 (vec (for [fl (:files r)]
-                       (let [text (layout/write-file (:forms fl) (:comments fl))
+                       ;; prepared once, for the text and its check (GPS49 (c)); its layout
+                       ;; notes counted as often as before, once more for the check
+                       (let [st (atom {})
+                             prepared (binding [layout/*stats* st] (layout/prepare (:forms fl)))
+                             _ (dotimes [_ (if check 2 1)] (swap! layout-stats #(merge-with + % @st)))
+                             text (layout/write-prepared prepared (:comments fl))
                              bad (when check
-                                   (check-text text (layout/prepare (:forms fl))))]
+                                   (check-text text prepared))]
                          (assoc fl :text text :bad bad)))))
         pkg-text (layout/write-package ns-sym (:package r)
                                        (map #(str last-seg "/" (:stem %)) files))
