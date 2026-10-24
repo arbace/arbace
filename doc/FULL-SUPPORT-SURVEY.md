@@ -795,3 +795,120 @@ worktree goes, as the journal's correction of 2026-10-24 asks):
 | `summary.md`, `matrix.md`, `plan.md`, ... | this survey's drafts |
 | the worktree's `target/arbace-go/amd64/arbace-tests` | §5.3's evaluated test build (93.9 MB), and `.tmp/clojure-tests/evaluated/` its suite run |
 | `work/`, `ework/` | per program: the outputs of both sides (`gc/out`, `gc/err`, `a.out`, `a.err`, the build logs; `ref.out`, `aot.out`, the judges) |
+
+## As built: REAP3 (2026-10-25)
+
+Clojure's AOT level (RPS4 (a), RPS16) and F2.4's limit fixed (RPS6 (a)), on the branch
+`reap3-clojure-aot` from main `407ed654`. Measured on the worktree's own builds (the gate's
+executables of the branch, `bin/arbace-go --gate-build`), every heavy run in the host's heavy slots,
+at 8 jobs.
+
+### `bin/clojure-tests --aot`
+
+- **What it does.** The suite and its test libraries translated by repr/clojure exactly as for the
+  eval level (`RUN/suite`, `lib-arbace/`), then: (1) the gate's executables (`--gate-build`;
+  `CLOJURE_TESTS_AOT_EXES` names others, for measurements); (2) the runner's new `compile` mode on
+  the test build (`arbace-tests`, which holds the Java fixtures the suite names), under
+  `ARBACE_COMPILE`, `ARBACE_PREPARE`, `ARBACE_NO_AOT`, `ARBACE_NO_IMAGE`: the reference's skipped
+  tests not compiled (the run's `skip-at-load!`), every test namespace of the list required in the
+  run's order, then test.generative's runner, each suite source **recorded as an embedded one is**
+  (`test/suite_aot_hook.ae`'s `:record` mode: `arbace.core/load`, a `^:redef` var that `load-one`
+  calls through, replaced by a fn that loads a source found on `ARBACE_PATH` and not embedded through
+  `Compiler$Image/load`, so that its units reach `Compiler$AST`), then `arbace.c2j.main/run` over every
+  recorded unit; (3) `bin/j2g --program --input test/java-fixtures/forms --input` the tree, on the
+  gate's executable (the checkout's runtime, as bin/diffcheck's); (4) `bin/build-go --line-file` into
+  `RUN/aot-build/arbace-aot`; steps 2-4 cached by the key of the executables, the translated suite and
+  libraries, `arbace/` (the tools the executables load from the checkout when they differ), the
+  hook, the runner, the reference and the script. Then each test namespace runs on it, loaded **through
+  its compiled loader** (the hook's `:compiled` mode: a source on `ARBACE_PATH` whose
+  `SCRIPTBASE__init` the program holds runs it by `Compiler$AOT/load`, as `RT.load` runs an embedded
+  source's; one without loads from source), test.generative likewise, against
+  `test/arbace-go-aot-results.edn`; then the runner's new `levels` mode lists what passes at one level
+  and not at the other (RPS16: a finding, printed, not a regression) and both levels' totals beside
+  the JVM baseline's (`RUN/levels.txt`). The sources c2j does not compile are compared with the
+  reference's `:not-compiled` (none).
+- **Corpus.** 155 sources compiled, 0 failed: the suite's 77 (the 76 test namespaces' and their
+  fixtures, `clojure/test_helper.clj`), its libraries' 26 (test.check, test.generative, data.generators,
+  tools.namespace, tools.reader, java.classpath), and the 52 runtime namespaces they load; 14,841
+  classes; j2g analyzes 19,178 classes with no failure; the program 252,903,104 bytes.
+- **Result (the reference).** 76 namespaces run, all load; **778 tests, 20,520 assertions: 20,489
+  pass, 28 fail, 3 errors**; test.generative **27 of 27**; 9 namespaces and 5 tests skipped. Upstream:
+  809 tests, 20,750 assertions, all passing. The eval level (`test/arbace-go-results.edn`): 777 tests,
+  20,506 pass, 11 fail, 3 errors.
+- **Every non-pass in a class** (`test/clojure/divergences-aot-suite.edn`, REAP1's format; 23 cases, 0
+  without a class, checked with REAP1's case strings): by design `:out-for-good`,
+  `:fixtures-excluded-upstream`, `:class-files`, `:q1-evaluated` (primitive-return-decl and
+  incorrect-primitive-type-hint-throws evaluate their code at run time, `eval-in-temp-ns` and
+  `load-string`: the evaluator's Q1 at the AOT level too); deferred and decided `:d6-namespaces-cut`,
+  `:xml-stream`, `:fiprims`, `:proxy-bitset` (REAP4); **deferred, pending the user**: `:fn-fields`
+  (clearing, 2 tests, 19 assertions: RPS41) and `:compiled-trace-lines` (test-compiler-line-numbers,
+  5 of 16 forms: RPS42).
+- **The two levels' disagreements** (the levels mode): clearing's `test-clearing` and `test-nested`
+  fail compiled only (a compiled fn's closed-over values are its code object's fields, SA141, so
+  reflection over the fn's class finds none: the fn reads as cleared before its call);
+  `seq-and-transducer` runs and passes compiled only (200,000 test.check trials in 75 s, where the
+  evaluator needs 1,700 s and the eval level skips it: RPS43). The same outcome with other counts:
+  test-compiler-line-numbers fails 5 forms compiled (unboxed field and method, field assignments) and
+  7 evaluated (field accesses, assignments, IFn casts), none in both.
+- **Time.** On a cached gate build: the translation 1-2 min, the compiling 167 s, j2g 66 s, the build
+  19 s (repr/go's print cache warm), the namespaces 190 s of processes at 8 a time (2 minutes), the
+  specs 60 s: about 8 minutes cold, 4 cached (the program's key unchanged).
+
+### F2.4 fixed (RPS6 (a))
+
+The edge of the compiled tree: what j2g's analysis of the Java forms compiler's classes lacked in a
+program that never loaded their namespace.
+
+- **The namespace's vars.** `arbace.classes.native`'s record of a compilation (`compiled`, while the
+  program prepares) keeps `:vars`: every symbol of its forms that resolves to a var in the namespace
+  then, with the var's namespace, name and the metadata the analysis reads (`:tag`, `:arglists`,
+  `:dynamic`, `:macro`, `:private`), but `arbace.core`'s by their own names; c2j writes them in the
+  class's file as `(c2j/refer-vars [[symbol ns name meta] ...])` after its `in-ns` and `import`; j2g's
+  world (`arbace.j2g.world/refer-vars!`, a namespace form beside `in-ns` and `import` in `enter!`)
+  interns each var its namespace lacks (with that metadata), refers an unqualified symbol to it (in
+  place of `arbace.core`'s mapping the namespace had replaced), and aliases a qualified one's
+  namespace. A var or mapping the program has is kept. The shipped tree has no such class: its
+  files do not change.
+- **The macros' namespace.** `arbace.classes.analyze/macroexpand1` expands a macro in the code's
+  namespace (`(:ns actx)`) when it is not `*ns*`: `deftype` names its class after `*ns*`, so j2g (in
+  `user`) analyzed `user.InFn` for `native.nested_deftype.InFn`.
+- **The compiler's classes.** A `deftype*` in code handed to the Java forms compiler is analyzed by
+  `arbace.lang.Compiler` (`analyze-clj-special`), its class made then, recorded by its event but in no
+  unit's tree: c2j now emits it from the event (`unit-method`, after the unit's code, when its class
+  is not emitted yet: none of the shipped tree's); and in j2g's world (`env/*from-source*`) a
+  `deftype*` whose class the tree holds (that one, or the Java forms compiler's own file for a deftype
+  whose methods use the code forms) is not made again (`Unknown type: arbace.lang.IType` before).
+- **diffcheck.** The 11 cases pass: **12,774 of 12,786 agree, 12 disagree** (Clojure's pair 12,031
+  of 12,041, the Java forms' 743 of 745), all recorded; the F2.4 group removed from
+  `test/diffcheck/known.edn` (12 cases left in 5 groups). j2g's report: no analysis failure (10
+  before). `jforms-excluded.edn`'s `dcf.defclass.Clj` and `native.nested_deftype.Host`, hand-written
+  `defclass` forms of the Java forms' pair (not the Java forms compiler's records), stay excluded
+  (RPS46).
+
+### What the compiled suite needed (c2j, j2g, the image)
+
+Found by compiling the suite, fixed (each small, none changing the shipped tree's forms but the
+changed namespaces' own code; checked below):
+
+| where | what | the suite's case |
+|---|---|---|
+| the image (`go/arbace/cmd/arbace/image.ae`) | a unit the image cannot encode (a fn in a def's metadata) leaves its source out of the image (`image: X not recorded`), the units still recorded for c2j; was a fatal panic | api, compilation, numbers, reader ... (test.generative's `defspec`) |
+| c2j `emit-value`, `pool-kind` | a record or deftype literal (`#my.Rec{...}`) made again from its reader text (the JVM's `Rec/create`, `T.`) | protocols, compilation |
+| c2j `qualified-method-expr` | a qualified method as a value (`String/.length`, `File/.isDirectory`): its field overload, or its thunk analyzed at emit time as `QualifiedMethodExpr.buildThunk` does; one tagged with a functional interface adapted to it | java-interop, method-thunks, param-tags |
+| c2j `constant`, `emit-value` | a constant holding an evaluated fn (test.generative's generators in a var's metadata): made where used by its code, as the JVM's `emitValue` makes a new instance | api, compilation, data-structures, edn, numbers, reader, reducers |
+| c2j `emit-fn-class!` | a fn whose name ends a binary-name segment with `$` (`dec$`: `ns$dec$`) given a name (`ns$dec$_`) | transducers |
+| c2j `emit-deftype-class!` | a deftype redefined (CLJ-979's `Y`): the last definition is the class, as the JVM's AOT keeps the last class file (RPS44); a field named `this` (the receiver `this__`) | compilation, protocols |
+| c2j `ret-body` | nil unboxed (`(fn ^long [^long a])`): as an `Object` local, so that Go does not lose its type (`nil.LongValue__J`) | java-interop, compilation |
+| c2j `emit-binding-init` | a let or loop local tagged with a functional interface: its init adapted (`FISupport.maybeEmitFIAdapter`) | java-interop, generated-all-fi-adapters-in-let |
+| c2j `emit-assign` | a final field assigned: by reflection, which refuses it as the evaluator does (the Java forms assigned `PersistentHashMap/EMPTY`) | compilation |
+| c2j `runtime-class?` | a class an `eval` made while a namespace loaded (no event): named by reflection where used (`Compiler$AST/dynamic`, a new native over jrt's `dynamicClasses`) | compilation.examples' `X` |
+| c2j `class-ns`, `run*` | a holder for a class nesting under a name that is no class (`RecordToTest$reify__N`) in its package; packages whose classes name each other in a cycle (a source defining two namespaces, protocols' `protocols.other`) merged; file names unique ignoring case (deftypes `T` and `t`) | protocols, java-interop |
+| j2g `translate-loop` | a loop variable only `recur` assigns (`(loop [_ iter] ...)`) is not marked used, so `fold-items` gives it its `_ =` (Go: declared and not used) | data-structures-interop |
+
+### Changes to the shipped program
+
+`arbace/c2j/emit.ae`, `arbace/c2j/main.ae`, `arbace/classes/native.ae`, `arbace/classes/analyze.ae`
+(`macroexpand1`, `analyze-clj-special`), `arbace/j2g/world.ae` (`refer-vars!`, `enter!`),
+`arbace/j2g/code.ae` (`translate-loop`), `arbace/lang/Compiler.ae` (one native declaration,
+`Compiler$AST/dynamic`), `go/arbace/jrt/natives.ae` (its Go), `go/arbace/cmd/arbace/image.ae`
+(`Unit`, `End`, the encoder's `broken`). The second batched re-seed (§7) carries them.
