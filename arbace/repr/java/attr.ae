@@ -372,10 +372,15 @@
     :else (keyword "overload" (str "declared-" site))))
 
 (defn method-type
-  "The instantiated type of the method `meth` (an APPLY's meth tree) calls, `m` its symbol."
+  "The instantiated type of the method `meth` (an APPLY's meth tree) calls, `m` its symbol; with the
+  native provider the types tier's for a method without type parameters of its own."
   [meth m]
-  (note! (instantiation-fact m false "method-type"))
-  (.-type (twin meth)))
+  (let [fact (instantiation-fact m false "method-type")
+        jmt (.-type (twin meth))]
+    (if (and (native? meth) (not= "infer" (namespace fact)))
+      (native-fact fact meth (fn [] (let [mt (ex/call-method-type *provider* meth)] [(na/nmtype-data mt) mt]))
+                   jmt #(na/jmtype-data *provider* %))
+      (do (note! fact) jmt))))
 
 (defn constructor-type "NEWCLASS: the instantiated type of its constructor, `m` (or the one it calls)." [t m]
   (note! (instantiation-fact m (tr/diamond? t) "constructor-type"))
@@ -392,15 +397,22 @@
              JCTree$JCMethodInvocation (.-varargsElement ^JCTree$JCMethodInvocation j)
              JCTree$JCNewClass (.-varargsElement ^JCTree$JCNewClass j)
              JCTree$JCMemberReference (.-varargsElement ^JCTree$JCMemberReference j))]
-    (when *measure*
-      (note! (cond
-               (nil? ve) :overload/arity
-               (let [ps (.getParameterTypes (.type (jm m)))
-                     l (when (seq ps) (last ps))]
-                 (and (instance? Type$ArrayType l) (not (generic-type? (.-elemtype ^Type$ArrayType l)))))
-               :overload/declared-varargs-element
-               :else (instantiation-fact m (tr/diamond? t) "varargs-element"))))
-    ve))
+    (let [fact (cond
+                 (nil? ve) :overload/arity
+                 (let [ps (.getParameterTypes (.type (jm m)))
+                       l (when (seq ps) (last ps))]
+                   (and (instance? Type$ArrayType l) (not (generic-type? (.-elemtype ^Type$ArrayType l)))))
+                 :overload/declared-varargs-element
+                 :else (instantiation-fact m (tr/diamond? t) "varargs-element"))]
+      (if (and ve (native? t) (instance? JCTree$JCMethodInvocation j) (not= "infer" (namespace fact)))
+        ;; a variable arity call's element (whether the call is of variable arity: overload
+        ;; resolution's phase 3, javac's): the last parameter's at the site (the types tier's)
+        (native-fact fact t (fn [] (let [mt (ex/call-method-type *provider* (:meth t))
+                                         e (:e (last (:params mt)))]
+                                     (ex/lean!)
+                                     [(na/ntype e) e]))
+                     ve #(na/jtype *provider* %))
+        (do (when *measure* (note! fact)) ve)))))
 
 (defn fn-target "LAMBDA, REFERENCE: the functional interface type javac inferred." [t]
   (note! :infer/target) (.-target ^JCTree$JCFunctionalExpression (twin t)))
