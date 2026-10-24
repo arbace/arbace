@@ -172,6 +172,22 @@
     (= :inter (:k t)) (mapcat #(site-classes p %) (:ts t))
     :else []))
 
+(defn- anon-diamond?
+  "An anonymous class of a diamond (its supertype inferred: the inference tier's)?"
+  [c]
+  (and (:anon? c) (= :TYPEAPPLY (get-in c [:newclass :clazz :tag]))
+       (empty? (get-in c [:newclass :clazz :arguments]))))
+
+(defn- check-site!
+  "Decline a member's type at a site whose class, or a class enclosing it, is an anonymous class of a
+  diamond (its supertype, through which members are inherited, is inferred)."
+  [site]
+  (loop [t site]
+    (when (ty/class-t? t)
+      (when (some anon-diamond? (take-while some? (iterate d/encl-class (:c t))))
+        (d/decline! "a member through an anonymous class of a diamond (inferred)"))))
+  site)
+
 (defn- ident-site
   "visitIdent's site of member `s` (a field or method, of class `owner`): the type of the innermost
   enclosing class of `env` from which s is accessible."
@@ -327,21 +343,6 @@
                                         (.put :flags (long d/PUBLIC)))}))
           (.get array-clones reg))))
 
-(def ^:private ^java.util.Map clones (java.util.concurrent.ConcurrentHashMap.))
-
-(defn- interface-clone
-  "Object's method `om` as a member of interface `c` (MethodSymbol.clone(c)): its flags and type, `c`
-  its owner; one per method and interface."
-  [om c]
-  (let [k [om c]]
-    (or (.get clones k)
-        (let [mt (d/method-type om) fl (d/method-flags om) tps (d/method-tparams om)
-              m (d/sym (assoc (.-m ^arbace.repr.java.decls.Sym om)
-                              :owner c :clone-of om
-                              :memo (doto (java.util.HashMap.) (.put :type mt) (.put :flags fl) (.put :tparams tps))))]
-          (.putIfAbsent clones k m)
-          (.get clones k)))))
-
 (defn nmethod
   "The native method symbol of javac's method symbol `js` (a method of a class the native registry
   holds, found by owner, name and erased parameter types), or nil. `canon` maps javac's symbols of the
@@ -361,13 +362,13 @@
               (or (first (filter (fn [m] (and (= n (:name m))
                                               (= want (mapv nerased-key (:params (d/method-type m))))))
                                  (:methods (d/members oc))))
-                  ;; Object's method as a member of an interface: javac's clone of it with the
-                  ;; interface as owner (MethodSymbol.clone, Resolve's)
-                  (when (d/interface? oc)
-                    (when-let [om (first (filter (fn [m] (and (= n (:name m))
-                                                              (= want (mapv nerased-key (:params (d/method-type m))))))
-                                                 (:methods (d/members (d/class-named (reg p) "java.lang.Object")))))]
-                      (interface-clone om oc))))
+                  ;; a method of a supertype with oc as owner: javac's clone of it (MethodSymbol.clone,
+                  ;; Resolve's: a static import's inherited method, an interface's Object method)
+                  (when-let [om (some (fn [c] (first (filter (fn [m] (and (= n (:name m))
+                                                                          (= want (mapv nerased-key (:params (d/method-type m))))))
+                                                             (:methods (d/members c)))))
+                                      (rest (ty/erased-supers (d/this-type oc))))]
+                    (d/member-clone om oc)))
               :else nil)))))))
 
 (defn method-of
@@ -389,7 +390,7 @@
   (if (= :val (role p t)) (ty/capture (reg p) x) x))
 
 (defn- field-type-at [p env site f]
-  (ty/member-type (reg p) site f))
+  (ty/member-type (reg p) (check-site! site) f))
 
 (defn- name-type
   "The type of name `t` (IDENT or SELECT) denoting non-local symbol `s`, `site` its site's type."
@@ -524,7 +525,7 @@
                          (#{"java.lang.invoke.MethodHandle" "java.lang.invoke.VarHandle"} (:flat (:owner m))))
                 (d/decline! "a signature polymorphic call"))
             [site qtype] (call-site p t m)
-            mt (ty/member-type (reg p) site m)
+            mt (ty/member-type (reg p) (check-site! site) m)
             ret (:ret mt)
             ret (if (unchecked-call? p mt (:args t) (d/has? (d/method-flags m) d/VARARGS)) (d/erasure ret) ret)
             ret (cond
@@ -551,7 +552,7 @@
             [s qt]))))))
 
 (defn- call-member-type [p t m]
-  (ty/member-type (reg p) (first (call-site p t m)) m))
+  (ty/member-type (reg p) (check-site! (first (call-site p t m))) m))
 
 (defn call-method-type
   "The instantiated method type (javac's `.type` of the call's meth tree: memberType at the site,
@@ -566,7 +567,7 @@
                      ct (d/this-type c)]
                  (if (= "super" (:name meth)) (d/supertype ct) ct))
                (first (call-site p t m)))
-        mt (ty/member-type (reg p) site m)
+        mt (ty/member-type (reg p) (check-site! site) m)
         mt (if (unchecked-call? p mt (:args t) (d/has? (d/method-flags m) d/VARARGS))
              (assoc mt :ret (d/erasure (:ret mt)) :throws (mapv d/erasure (:throws mt)))
              mt)]
@@ -650,17 +651,9 @@
         :return (:ret (d/method-type (second x)))
         :elem (let [at (etype p (second x))]
                 (if (= :array (:k at)) (:e at) (d/decline! "an element's target")))
-        :arg (let [[_ app i] x
-                   m (method-of p app)
-                   mt (d/method-type m)]
-               (when (seq (:tparams mt)) (d/decline! "a generic method's argument (inferred)"))
-               (let [ps (:params (call-member-type p app m))
-                     n (count ps)
-                     ^JCTree j (.get ^IdentityHashMap (:twins p) app)
-                     varargs? (some? (when j (.-varargsElement ^com.sun.tools.javac.tree.JCTree$JCMethodInvocation j)))]
-                 (if (and varargs? (>= i (dec n)))
-                   (:e (last ps))
-                   (nth ps i))))
+        ;; an argument's target is the method's formal as deferred attribution checks it
+        ;; (DeferredAttr, ArgumentAttr: the overload and inference tiers')
+        :arg (d/decline! "a poly argument's target (deferred attribution)")
         (d/decline! "an unknown target")))))
 
 (defn- arm-const [p t] (some-> (d/const-value (env-of p t) t) second))
