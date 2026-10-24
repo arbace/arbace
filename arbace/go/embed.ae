@@ -1,0 +1,268 @@
+(ns arbace.go.embed
+  "goi's go:embed (doc/go/GOI-SPEC.md \"As built: GS14\", GS14 (a)): the files a //go:embed
+  variable embeds, read from its package's forms directory when the package loads (SPEC.md §9.6,
+  amendment B2: the package file's path without .ae), as the go command and gc find them: the
+  directive's patterns (gc's noder, parseGoEmbed), each matched against the directory as the go
+  command matches it (cmd/go/internal/load, resolveEmbed: path.Match's globs, a directory's files
+  below it but hidden ones, unless all:), the variable's files gathered as gc's embedFileList
+  gathers them (an embed.FS's directories too, sorted by directory, then name), with gc's and the
+  go command's errors. The value itself is the builder's (arbace.go.repl/define!)."
+  (:require [arbace.string :as str])
+  (:import (java.io File)
+           (java.nio.file Files)
+           (java.security MessageDigest)))
+
+;;; The directive's patterns (gc's noder.go, parseGoEmbed)
+
+(defn- space? [c] (Character/isWhitespace (char c)))
+
+(defn- unquote-go
+  "Go's strconv.Unquote of a double-quoted string q (its escapes), or nil when it is not one."
+  [^String q]
+  (try
+    (let [s (subs q 1 (dec (count q)))
+          sb (StringBuilder.)]
+      (loop [i 0]
+        (if (>= i (count s))
+          (str sb)
+          (let [c (.charAt s i)]
+            (cond
+              (= c \") nil
+              (not= c \\) (do (.append sb c) (recur (inc i)))
+              :else
+              (let [e (.charAt s (inc i))]
+                (case e
+                  \n (do (.append sb \newline) (recur (+ i 2)))
+                  \t (do (.append sb \tab) (recur (+ i 2)))
+                  \r (do (.append sb \return) (recur (+ i 2)))
+                  (\\ \" \') (do (.append sb e) (recur (+ i 2)))
+                  \a (do (.append sb (char 7)) (recur (+ i 2)))
+                  \b (do (.append sb (char 8)) (recur (+ i 2)))
+                  \f (do (.append sb (char 12)) (recur (+ i 2)))
+                  \v (do (.append sb (char 11)) (recur (+ i 2)))
+                  \x (do (.append sb (char (Long/parseLong (subs s (+ i 2) (+ i 4)) 16))) (recur (+ i 4)))
+                  \u (do (.append sb (char (Long/parseLong (subs s (+ i 2) (+ i 6)) 16))) (recur (+ i 6)))
+                  nil)))))))
+    (catch Exception _ nil)))
+
+(defn parse-patterns
+  "The patterns of a //go:embed directive's text after go:embed: [patterns nil], or [nil message]
+  (gc's messages)."
+  [^String args]
+  (loop [args (str/trim args) acc []]
+    (if (= "" args)
+      [acc nil]
+      (let [c (.charAt args 0)
+            [path rest err]
+            (case c
+              \` (let [i (str/index-of args "`" 1)]
+                   (if (nil? i)
+                     [nil nil (str "invalid quoted string in //go:embed: " args)]
+                     [(subs args 1 i) (subs args (inc i)) nil]))
+              \" (let [end (loop [i 1]
+                             (cond
+                               (>= i (count args)) nil
+                               (= \\ (.charAt args i)) (recur (+ i 2))
+                               (= \" (.charAt args i)) i
+                               :else (recur (inc i))))]
+                   (if (nil? end)
+                     [nil nil (str "invalid quoted string in //go:embed: " args)]
+                     (if-let [q (unquote-go (subs args 0 (inc end)))]
+                       [q (subs args (inc end)) nil]
+                       [nil nil (str "invalid quoted string in //go:embed: " (subs args 0 (inc end)))])))
+              (let [i (or (some #(when (space? (.charAt args %)) %) (range (count args))) (count args))]
+                [(subs args 0 i) (subs args i) nil]))]
+        (cond
+          err [nil err]
+          (and (not= "" rest) (not (space? (.charAt ^String rest 0))))
+          [nil (str "invalid quoted string in //go:embed: " rest)]
+          :else (recur (str/trim rest) (conj acc path)))))))
+
+(defn directive-patterns
+  "The patterns of a variable's :go/embed (one directive's text, or a vector of them), or a
+  message."
+  [v]
+  (let [texts (if (vector? v) v [v])]
+    (reduce (fn [[acc _] t]
+              (let [[ps err] (parse-patterns (str t))]
+                (cond
+                  err (reduced [nil err])
+                  (empty? ps) (reduced [nil "usage: //go:embed pattern..."])
+                  :else [(into acc ps) nil])))
+            [[] nil] texts)))
+
+;;; Matching (path.Match; cmd/go's resolveEmbed)
+
+(defn- glob-regex
+  "A segment of a path.Match pattern as a regex, or nil when it is malformed (ErrBadPattern)."
+  [^String p]
+  (let [sb (StringBuilder.)
+        n (count p)]
+    (loop [i 0]
+      (if (>= i n)
+        (try (re-pattern (str sb)) (catch Exception _ nil))
+        (let [c (.charAt p i)]
+          (case c
+            \* (do (.append sb "[^/]*") (recur (inc i)))
+            \? (do (.append sb "[^/]") (recur (inc i)))
+            \\ (if (< (inc i) n)
+                 (do (.append sb (java.util.regex.Pattern/quote (str (.charAt p (inc i))))) (recur (+ i 2)))
+                 nil)
+            \[ (let [end (loop [j (inc i)]
+                           (cond (>= j n) nil
+                                 (= \\ (.charAt p j)) (recur (+ j 2))
+                                 (and (= \] (.charAt p j)) (> j (inc i))
+                                      (not (and (= j (+ i 2)) (= \^ (.charAt p (inc i)))))) j
+                                 :else (recur (inc j))))]
+                 (if (nil? end)
+                   nil
+                   (let [body (subs p (inc i) end)
+                         neg (str/starts-with? body "^")
+                         body (if neg (subs body 1) body)
+                         cls (str/join (map (fn [ch] (if (contains? #{\[ \] \& \^ \\} ch) (str "\\" ch) (str ch)))
+                                            (str/replace body "\\" "")))]
+                     (.append sb (str "[" (when neg "^") cls (when neg "/") "]"))
+                     (recur (inc end)))))
+            (do (.append sb (java.util.regex.Pattern/quote (str c))) (recur (inc i)))))))))
+
+(defn- valid-path?
+  "io/fs's ValidPath: slash-separated elements, none empty, . or .."
+  [^String p]
+  (or (= p ".")
+      (every? #(not (contains? #{"" "." ".."} %)) (str/split p #"/" -1))))
+
+(def ^:private reserved
+  #{"CON" "PRN" "AUX" "NUL" "COM1" "COM2" "COM3" "COM4" "COM5" "COM6" "COM7" "COM8" "COM9"
+    "LPT1" "LPT2" "LPT3" "LPT4" "LPT5" "LPT6" "LPT7" "LPT8" "LPT9"})
+
+(defn- bad-name?
+  "cmd/go's isBadEmbedName: a name a module cannot hold (golang.org/x/mod's CheckFilePath's
+  element rules: its characters, Windows' reserved names) or a version control directory."
+  [^String n]
+  (or (contains? #{"" ".bzr" ".hg" ".git" ".svn"} n)
+      (some (fn [c] (not (or (Character/isLetterOrDigit (char c)) (str/includes? "!#$%&()+,-.=@[]^_{}~ " (str c))))) n)
+      (contains? reserved (str/upper-case (first (str/split n #"\." 2))))
+      (str/ends-with? n ".")))
+
+(defn- sorted-children [^File d]
+  (sort-by #(.getName ^File %) (seq (.listFiles d))))
+
+(defn- glob
+  "The files and directories of dir matching glob (its segments path.Match's), as their paths
+  relative to dir, sorted as filepath.Glob gives them; nil when the pattern is malformed."
+  [^File dir ^String glob]
+  (let [segs (str/split glob #"/")
+        rxs (map #(when (re-find #"[*?\[\\]" %) (glob-regex %)) segs)]
+    (when-not (some (fn [[s rx]] (and (re-find #"[*?\[\\]" s) (nil? rx))) (map vector segs rxs))
+      (reduce (fn [paths [s rx]]
+                (vec (for [p paths
+                           :let [f (if (= p "") dir (File. dir ^String p))]
+                           :when (.isDirectory f)
+                           c (if rx
+                               (filter #(re-matches rx (.getName ^File %)) (sorted-children f))
+                               (let [c (File. f ^String s)] (when (.exists c) [c])))]
+                       (if (= p "") (.getName ^File c) (str p "/" (.getName ^File c))))))
+              [""] (map vector segs rxs)))))
+
+(defn- embed-error [pattern msg] (throw (ex-info (str "pattern " pattern ": " msg) {::error true})))
+
+(defn resolve-pattern
+  "The files pattern names in the forms directory dir, sorted (cmd/go's resolveEmbed), or an
+  error (ex-info, the go command's message)."
+  [^File dir ^String pattern]
+  (let [[all glob-p] (if (str/starts-with? pattern "all:") [true (subs pattern 4)] [false pattern])
+        _ (when (or (= glob-p ".") (not (valid-path? glob-p)) (str/starts-with? glob-p "/") (str/ends-with? glob-p "/")
+                    (= "" glob-p))
+            (embed-error pattern "invalid pattern syntax"))
+        matches (glob dir glob-p)
+        _ (when (nil? matches) (embed-error pattern "invalid pattern syntax"))
+        list (volatile! [])]
+    (doseq [rel matches
+            :let [f (File. dir ^String rel)
+                  what (if (.isDirectory f) "directory" "file")]]
+      ;; the directories along its path: not another module's, valid names
+      (loop [segs (str/split rel #"/") acc []]
+        (when (seq segs)
+          (let [d (conj acc (first segs))
+                dp (str/join "/" d)
+                df (File. dir ^String dp)]
+            (when (.isFile (File. df "go.mod"))
+              (embed-error pattern (str "cannot embed " what " " rel ": in different module")))
+            (when (bad-name? (first segs))
+              (embed-error pattern (if (= dp rel)
+                                     (str "cannot embed " what " " rel ": invalid name " (first segs))
+                                     (str "cannot embed " what " " rel ": in invalid directory " (first segs)))))
+            (recur (rest segs) d))))
+      (cond
+        (.isFile f) (vswap! list conj rel)
+        (.isDirectory f)
+        (let [n (volatile! 0)]
+          (letfn [(walk [^File d ^String drel]
+                    (doseq [^File c (sorted-children d)
+                            :let [nm (.getName c) crel (str drel "/" nm)]]
+                      (cond
+                        (or (bad-name? nm) (and (not all) (or (str/starts-with? nm ".") (str/starts-with? nm "_"))))
+                        (when (and (.isFile c) (bad-name? nm) (not (or (str/starts-with? nm ".") (str/starts-with? nm "_"))))
+                          (embed-error pattern (str "cannot embed file " crel ": invalid name " nm)))
+                        (.isDirectory c) (when-not (.isFile (File. c "go.mod")) (walk c crel))
+                        (.isFile c) (do (vswap! n inc) (vswap! list conj crel)))))]
+            (walk f rel))
+          (when (zero? @n)
+            (embed-error pattern (str "cannot embed directory " rel ": contains no embeddable files"))))
+        :else (embed-error pattern (str "cannot embed irregular file " rel))))
+    (when (empty? @list) (embed-error pattern "no matching files found"))
+    (vec (sort (distinct @list)))))
+
+;;; A variable's files (gc's staticdata/embed.go)
+
+(defn- name-split [^String n]
+  (let [n (if (str/ends-with? n "/") (subs n 0 (dec (count n))) n)
+        i (str/last-index-of n "/")]
+    (if (nil? i) ["." n] [(subs n 0 i) (subs n (inc i))])))
+
+(defn- file-less
+  "gc's embedFileLess: by directory, then by name."
+  [x y]
+  (let [[xd xe] (name-split x) [yd ye] (name-split y)]
+    (or (neg? (compare xd yd)) (and (= xd yd) (neg? (compare xe ye))))))
+
+(defn- sha256-hex [^bytes bs]
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md bs)))))
+
+(defn files
+  "The files of a variable embedding patterns from forms directory dir, kind :fs (with their
+  directories, a final slash) or :string, :bytes (one): [[name bytes-or-nil] ...] in gc's
+  order. hashes: the package's :embed-files, path -> SHA-256 (nil: unchecked). Throws an
+  ex-info with the go command's or gc's message."
+  [^File dir patterns kind hashes type-text]
+  (let [names (distinct (mapcat #(resolve-pattern dir %) patterns))
+        names (if (= kind :fs)
+                (distinct (concat names (for [n names
+                                              d (rest (take-while #(not= "." %) (iterate #(first (name-split %)) n)))]
+                                          (str d "/"))))
+                names)
+        names (sort (comparator file-less) names)]
+    (when (and (not= kind :fs) (> (count names) 1))
+      (throw (ex-info (str "invalid go:embed: multiple files for type " type-text) {::error true})))
+    (vec (for [^String n names]
+           (if (str/ends-with? n "/")
+             [n nil]
+             (let [bs (Files/readAllBytes (.toPath (File. dir n)))
+                   h (get hashes n)]
+               (when (and h (not= (sha256-hex bs) (str h)))
+                 (throw (ex-info (str "embedded file " n ": sha256 " (sha256-hex bs) ", the forms say " h) {::error true})))
+               [n bs]))))))
+
+(defn check-decl
+  "gc's checkEmbed (noder.go) of a package-level variable declaration embedding: the message of
+  its first violation, or nil. names: its variables' count; init?: whether it has an initializer;
+  typed?: a type; embed-imported?: its file imports embed; minor: its language version's."
+  [{:keys [embed-imported? names init? typed? minor lang]}]
+  (cond
+    (not embed-imported?) "go:embed requires import \"embed\" (or import _ \"embed\", if package is not used)"
+    (> names 1) "go:embed cannot apply to multiple vars"
+    init? "go:embed cannot apply to var with initializer"
+    (not typed?) "go:embed cannot apply to var without type"
+    (and minor (< (long minor) 16)) (str "go:embed requires go1.16 or later (-lang was set to " lang "; check go.mod)")
+    :else nil))

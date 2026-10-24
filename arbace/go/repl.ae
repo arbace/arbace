@@ -18,6 +18,7 @@
             [arbace.go.check.load :as load]
             [arbace.go.build :as b]
             [arbace.go.generic :as gen]
+            [arbace.go.embed :as embed]
             [arbace.repr.go.print :as rp])
   (:import (arbace.lang GoInterp GoFn GoGenericFn GoVar GoType Namespace)
            (java.io File)))
@@ -135,6 +136,9 @@
         st (or (get @packages path) (let [st (new-state path (str nm) ns-sym)] (swap! packages assoc path st) st))]
     (swap! st assoc :name (rp/name-text nm) :ns ns-sym :opts opts :package-path path
            :config (merge @config (:config opts) (when (:lang opts) {:lang (:lang opts)})))
+    ;; the package file being loaded: its forms directory holds its embedded files (GS14)
+    (when (and (:files opts) (string? *file*) (not (#{"NO_SOURCE_PATH" "NO_SOURCE_FILE"} *file*)))
+      (swap! st assoc :load-file *file*))
     (when (:files opts)
       ;; a package file: the load of its files starts (§2.3), its declarations queued
       (swap! st assoc :loading true :files []))
@@ -258,12 +262,81 @@
 
 ;;; Defining a checked package: cells, descriptors, vars
 
+(defn- package-file
+  "The package file of state s: a program's (:pf), else the file its load read (:load-file: a
+  path, or a resource's on ARBACE_PATH's directories), or nil."
+  ^File [s]
+  (or (when-let [pf (:pf s)] (File. ^String pf))
+      (when-let [^String lf (:load-file s)]
+        (let [f (File. lf)]
+          (if (.isAbsolute f)
+            f
+            (or (some (fn [^String d] (let [g (File. d lf)] (when (.isFile g) g)))
+                      (remove #(str/starts-with? % "store:") (some-> (System/getenv "ARBACE_PATH") (str/split #":"))))
+                (when (.isFile f) f)))))))
+
+(defn- embed-kind
+  "The kind of a go:embed variable's type (gc's embedKind): :fs, :string, :bytes, or nil."
+  [ty]
+  (let [u (t/under ty)]
+    (cond
+      (and (t/named? ty) (= "embed" (:pkg (t/info ty))) (= "FS" (:name (t/info ty)))) :fs
+      (= :string u) :string
+      (and (vector? u) (= :slice (nth u 0)) (= :uint8 (t/under (nth u 1)))) :bytes
+      :else nil)))
+
+(defn- embed-trees
+  "The initializers of the package's //go:embed variables (GS14 (a)): each its value from the
+  files of its package's forms directory, read now ({:op :var-init}, the value a builder node);
+  gc's and the go command's errors thrown as check errors."
+  [s decls]
+  (let [fail (fn [d msg]
+               (let [er {:file (:name (:file d)) :line (or (e/o (:obj d) :line) 1) :msg msg}]
+                 (throw (ex-info (str "Go check errors in package " (:path s) ":\n" (error-text [er])) {:go/errors [er]}))))
+        hashes (into {} (for [[f h] (get-in s [:opts :embed-files])] [(str f) h]))]
+    (vec
+      (for [d decls
+            :when (= :var (:kind d))
+            :let [nf (:form d)
+                  ge (or (when (instance? arbace.lang.IMeta nf) (:go/embed (meta nf)))
+                         (when (seq? nf) (some #(when (instance? arbace.lang.IMeta %) (:go/embed (meta %))) nf)))]
+            :when ge
+            :let [x (:obj d)
+                  fi (:file d)
+                  imports (for [spec (:imports fi)] (if (vector? spec) (second spec) spec))
+                  msg (embed/check-decl {:embed-imported? (some #{"embed"} imports)
+                                         :names (count (or (:lhs d) [x]))
+                                         :init? (= :var-init (:op (:tree d)))
+                                         :typed? true
+                                         :minor (:lang fi) :lang (str "go1." (:lang fi))})
+                  _ (when msg (fail d msg))
+                  [patterns perr] (embed/directive-patterns ge)
+                  _ (when perr (fail d perr))
+                  ty (e/o x :type)
+                  kind (embed-kind ty)
+                  _ (when-not kind (fail d (str "go:embed cannot apply to var of type " (t/type-str ty))))
+                  pf (package-file s)
+                  _ (when-not pf (fail d "go:embed: the package has no forms directory (a package file's, GS14)"))
+                  dir (File. (str/replace (.getPath pf) #"\.ae$" ""))
+                  fs (try (embed/files dir patterns kind hashes (t/type-str ty))
+                          (catch Exception ex
+                            (if (:arbace.go.embed/error (ex-data ex)) (fail d (ex-message ex)) (throw ex))))
+                  node (case kind
+                         :string {:k :S :node (b/op "ConstSB" (second (first fs)))}
+                         :bytes {:k :R :node (b/op "BytesFromStr" (b/op "ConstSB" (second (first fs))) (b/desc ty))}
+                         :fs (let [bs (java.io.ByteArrayOutputStream.)]
+                               (doseq [[_ ^bytes b] fs :when b] (.write bs b 0 (alength b)))
+                               {:k :R :node (b/op "ConstR" (b/op "EmbedFS" (object-array (map first fs)) (.toByteArray bs)
+                                                                 (object-array (for [[_ ^bytes b] fs] (long (if b (alength b) 0))))))}))]]
+        {:op :var-init :lhs [x] :line (e/o x :line)
+         :rhs [(assoc node :op :arbace.go.build/node :type ty)]}))))
+
 (defn- type-key
   "The structure of a type, its interpreted named types by name and generation (a named type's
   generation is new when this changes: §2.5)."
   [ty gen-of]
   (cond
-    (keyword? ty) ty
+    (keyword? ty) (t/canon-kw ty)
     (t/named? ty) (let [i (t/info ty)] [:named (:pkg i) (:name i) (when (gen-of ty) (gen-of ty))])
     (t/tparam? ty) [:tparam (:name (t/info ty))]
     :else (case (nth ty 0)
@@ -542,7 +615,8 @@
           ;; the initializers (in initialization order)
           (let [var-trees (into {} (for [d decls :when (= :var (:kind d)) :when (= :var-init (:op (:tree d)))]
                                      [(first (:lhs (:tree d))) (:tree d)]))
-                ordered (keep #(get var-trees (first %)) (:order r))
+                ;; the embedded variables first: gc's are static data (GS14)
+                ordered (concat (embed-trees old decls) (keep #(get var-trees (first %)) (:order r)))
                 inits (b/op "FuncCell" "init.vars" (:name old) nil)
                 ordered (if-let [names (or init-names only)]
                           (filter #(some (fn [x] (contains? names (e/o x :name))) (:lhs %)) ordered)
