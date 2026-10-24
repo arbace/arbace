@@ -1700,3 +1700,25 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   failures", the amendments of 2026-10-10), doc/go/EVAL-PLAN.md (Q1), doc/FUTAMURA-SURVEY.md (F2, F3.3),
   doc/go/GO-PARSER-SURVEY.md (GP3, GP6, GPS9, GPS17), doc/go/ROUNDTRIP.md, doc/go/PRINTER-NOTES.md
   (G2F6), doc/REPR-CLOJURE.md; `java-check-jc1`'s `test/java/check.ae` (its classify, its kinds).
+
+## 2026-10-24: JC1 and REAP1 merged, RPS18-RPS29 and JCS16-JCS25 decided; JC2 and the first batched re-seed started (the user)
+
+- JC1 (branch `java-check-jc1`, merged `cd66f652`; its own entry above): `bin/java-check`, jdk26u's
+  jtreg tests and `test/java/jls` against the JDK's recorded runs (`test/java/ref-jdk26.edn`): of the
+  2,967 passing on the JDK, read 2,965, class files 2,965, interpreted 1,364; the essential subset
+  (428, its forms committed) in the essential gate. Decided (the user): JCS16 (b), JCS17 (b), JCS18 (c),
+  JCS19 (b), JCS20-JCS23 (a), JCS24 (c), JCS25 (a); JCS16, JCS17, JCS19 and JCS33 (a) built with JC2.
+- REAP1 (branch `reap1-classes`, merged `45c41a46`; its own entry above): `bin/reap`, the REAP matrix
+  from the committed references, every non-pass in a class (`test/reap/cells.edn`, `test/reap/main.ae`;
+  the classes files under `test/clojure/`, `test/java/`, `test/repr/go/`), in the essential gate.
+  Decided (the user): RPS18 (b) (SL5 built in REAP4), RPS19 (a), RPS20 (a), RPS21 (a), RPS22 (c),
+  RPS23-RPS29 (a); the four `:pending` classes now cite the decisions. The essential gate on `45c41a46`
+  passed; the matrix: Clojure read 908 / 2 / 0, eval 21,026 / 79 / 14; Java read 5,930 / 0 / 4, eval
+  1,364 / 278 / 1,325; Go read 12,158 / 204 / 0, eval 1,618 / 219 / 0, print 2,584+ / 141 / 0 (pass /
+  by design / deferred); 8 of 12 cells checked, 0 problems.
+- JC2 started (branch `java-check-jc2` from `45c41a46`): the compiled level, j2g's findings, and JC1's
+  decided follow-ups. The first batched re-seed started at `45c41a46` (the fixpoint in a detached
+  worktree): GPS41 (c), GPS49 (c), GC157 and go:embed, JC4, JFS65 (b).
+- Noticed: committed scripts of `bin/` still use `/dev/null` (123 places) and process substitution
+  (about 40: `bin/seed`, `bin/repr-haskell`, `bin/repr-rust`, ...), against the working rule for
+  commands; left as they are for now, a sweep offered to the user.
