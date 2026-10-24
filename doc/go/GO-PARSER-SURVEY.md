@@ -2341,7 +2341,15 @@ allows, `OMP_NUM_THREADS=8` for the scripts that count `nproc`):
   `bin/toolchain-vendor verify`: `tamago/cmd` byte for byte, 13 m 4 s (GP5: 31 m 37 s);
 - the three reads above, before and after: trees, summaries and reports equal; the stage 0 reads
   equal to them too;
-- the essential `bin/gate` at the head (below).
+- the essential `bin/gate` passed at the head: its build anew (stage 0's executable and test build
+  of the change), the smoke test, Clojure's suite with no regressions, the oracle 22,658 of
+  22,711 against its 53 known, the differential check 12,743 of 12,766 against its 23 known, goi's
+  essential check 797 of 797, the generated files, `bin/j2g-edge verify`. Its first run failed in
+  `j2g-edge` alone, before the JVM ran: `bin/lib/frozen.bash` refreshes the views `tools` and
+  `test` under a lock each, both writing the shared `.tmp/frozen-view/jar.list.new` when the list
+  is missing (a fresh worktree), and one view's `mv` took the other's file; the second run (the
+  list made) passed. A fix (the temporary list named per view, or one lock for the list) is the
+  gate's own, not made here.
 
 **Proposals (GPS57-GPS61; each built as recommended).**
 
