@@ -1829,7 +1829,8 @@ record components, type parameters, signers, `getResource*`, `toGenericString`).
 - `java.util.stream.Tripwire` is `Stream_Tripwire` in Go (the rename table; `java.util.Tripwire`
   has the plain name).
 - `J2g_CastArray` throws `ClassCastException` with HotSpot's message (`jrt.ClassCast`), not
-  `Class.cast`'s (`(longs (int-array [1]))`).
+  `Class.cast`'s (`(longs (int-array [1]))`); since JFS65 (b) (2026-10-24) jrt's array casts
+  (`LongArray_Cast`, `RefArray_Cast`, J2G-SPEC §5.9) keep that message.
 
 # Semaphore (step 5 follow-up)
 

@@ -99,7 +99,8 @@ overlay) builds it.
   `tLazySeq` caught the second rule missing).
 - **Typed `null` constants and `J2g_*` helpers** (`j2g_support.go` in jrt): `J2g_Missing`,
   `J2g_NotTranslated`, `J2g_NotNull`, `J2g_Truth` (a `Boolean`/`Object` condition),
-  `J2g_CastArray`, `J2g_Discard`, `J2g_RefP`, `J2g_ObjectClone`, and for records
+  `J2g_CastArray` (until JFS65 (b), 2026-10-24: jrt's `IntArray_Cast`, `ObjectArray_Cast`,
+  `RefArray_Cast` and kin since, J2G-SPEC §5.9), `J2g_Discard`, `J2g_RefP`, `J2g_ObjectClone`, and for records
   `J2g_ObjHash`, `J2g_ObjEquals`, `J2g_DoubleBits`, `J2g_FloatBits`.
 - **Records** get `toString`, `hashCode` and `equals` as `java.lang.runtime.ObjectMethods`
   makes them (`Name[c=v, ...]`, `31 * h + hash(c)`, same class and equal components).
