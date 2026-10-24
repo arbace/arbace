@@ -1531,3 +1531,7 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   errors, diffcheck's Clojure pair 21 known; Java (the conformance survey's sample) interpreted 60%,
   by j2g 67%; Go's goi 1,610 of 1,837, none failing; every bridge's round trip byte for byte. A survey
   of the milestone (the matrix, each cell's corpus, reference, check and gaps, the plan) next.
+- The milestone's name (the user): REAP (Read, Eval, AOT, Print; after REPL), tagged
+  `arbace-reaps-3-crops-v1`, an annotated tag naming the three crops and their versions (Clojure
+  at its vendored revision, Java 26, Go 1.27.1); considered: `arbace-reaps-clojure-java-go-v1`,
+  `arbace-reaps-java26-go1.27.1-v1`.
