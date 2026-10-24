@@ -1478,3 +1478,23 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   a process substitution, and goi's checks at its default 16 jobs (`OMP_NUM_THREADS` does not cap
   them). The essential gate on `114fa076` passed (24m24s; goi 801 of 801).
 - Decided (the user): GPS57 (a), GPS58 (a), GPS59 (a), GPS66 (a), GPS67 (a), all as built.
+
+## 2026-10-24: the Java conformance survey merged, JCS1-JCS15 decided, JC1 started (the user)
+
+- The survey (branch `java-conformance-survey` from `317927c0`, merged `0e381e12`, a document alone):
+  doc/classes/JAVA-CONFORMANCE-SURVEY.md. Java forms are checked today only by cases Arbace chose
+  (diffcheck's Java pair, j2g's fixtures, the suite's fixtures, the oracle's, javac on Arbace's class
+  files); nothing runs third-party Java against the JDK's run as goi's check does with `$GOROOT/test`.
+  jdk26u's `test/` (at the platform's pin) has 26,271 jtreg tests, 5,182 plain `@run main` usable now.
+  A sample of 2,428 (`jdk/java/lang`, `jdk/java/util`, `langtools/tools/javac`, `hotspot/jtreg/compiler`),
+  each in its own package: 2,121 pass on the JDK; all read by repr/java and their class files equal to
+  the JDK javac's; interpreted 1,279 (60%), compiled by j2g as one program 1,427 (67%); golden
+  diagnostics 1,116 of 1,211 by javac on Arbace (the JDK's 1,157; mostly `--release N`). Failures:
+  505 of the interpreter's the world (jrt's missing classes), 73 interpreter bugs (a private method on
+  another instance throwing `AbstractMethodError`, 58), 79 analysis gaps, 2 a repr/java bug (arrays of
+  more than nine dimensions); j2g's own findings (an unknown annotation type stopping the run, Go file
+  names colliding by case, simple names colliding in `lang`). Plan JC1-JC8, 18-29 days. The agent's
+  slips: `go env GOCACHE` once (possibly the host's go, a query), a `pgrep -f`, `/dev/null` redirects.
+  A document alone: the essential gate at `114fa076` stands for it.
+- Decided (the user): JCS1-JCS15 as recommended (the survey's "Decided (2026-10-24)"); JC1 started on
+  the branch `java-check-jc1` from main, then JC4, then JC2.

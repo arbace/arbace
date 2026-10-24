@@ -805,6 +805,25 @@ fixes. JC2 can run beside JC4 and JC5; JC6 and JC7 are as large as the world dec
   - *Recommended: (a)*: user Java compiled into a program and the check both need it, and it is
     j2g's naming alone (no package boundaries to cross, unlike (b)).
 
+## Decided (2026-10-24): JCS1-JCS15
+
+The user decided every proposal as recommended:
+- JCS1 (a): the milestones JC1-JC8, the concurrency amendments' JC1-JC10 of 2026-10-10 a separate, closed record.
+- JCS2 (b): jdk26u's jtreg tests read in place, and a small hand-curated JLS corpus; ECJ's tests (c) after JC1-JC5.
+- JCS3 (a): the status and stdout byte for byte against the JDK's run, status only for a test nondeterministic on the JDK.
+- JCS4 (a): `package tNNNNN; ` prepended, the JDK's reference run on the renamed sources.
+- JCS5 (b): the references recorded as data (`test/java/ref-jdk26.edn`, `--record-ref`), the check needing no JVM.
+- JCS6 (a): the levels `classes`, `read`, `interp`, `j2g`, `diagnostics`.
+- JCS7 (a): `bin/java-check`, its namespace under `test/java/`, on the tools' host.
+- JCS8 (b) as JC4's work, (a) (a test's files as one `do`) in the check until then.
+- JCS9 (b): every missing class deferred, decided class by class by JC6's ranking; J2G-SPEC §12 stands.
+- JCS10 (a): HotSpot's JIT tests in, their JIT, heap and logging options dropped.
+- JCS11 (c): case by case, the converter for javac's decisions, the analysis for what hand-written forms need.
+- JCS12 (b): the converter writes a type of more than nine dimensions as a string tag.
+- JCS13 (a): the essential subset in the essential gate, every corpus at every level in `--full`.
+- JCS14 (a): JC1, then JC4, then JC2; JC1 started 2026-10-24.
+- JCS15 (a): j2g names classes outside the runtime and the JDK, and their Go files, by binary name.
+
 ## 10. Risks
 
 - **The world is the long tail.** 60% of the non-passing interpreted tests are library classes;
