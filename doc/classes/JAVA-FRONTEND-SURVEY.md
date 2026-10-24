@@ -4018,7 +4018,11 @@ All on the final tool (key `9aef633f...`), one after another, the host shared:
   converter's JFS71 change)
 - the updates of JN9a.6: only the three provenance files' `:repr-java` and `:host` changed
 - `make check-makefile`: passes
-- @@GATE
+- `bin/gate` (essential): on the branch at `61d38abd` (this section's commit but this line), passes in
+  18m30s (go-build 478 s, afresh; go-smoke, suite-go 777 tests with no regression, oracle-go 53 known
+  mismatches as recorded, diffcheck 12,743 of 12,766 cases agree with the 23 known, goi-check 797 of
+  797, generated); and `bin/j2g-edge verify` (main's essential gate holds it since this branch left
+  main): `jdk/edge.edn` is the JVM's answer (5m32s)
 - not run: `bin/gate --full` (the user's rule), `bin/repr-java check --suite`, `bin/javac-vendor
   verify` and `classes` (the converted forms and javac's world are unchanged: the updates show the
   forms byte for byte)
