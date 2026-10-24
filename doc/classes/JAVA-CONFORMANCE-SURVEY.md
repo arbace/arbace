@@ -1387,8 +1387,12 @@ passing at the levels read, classes, interp and compiled.
 **Not done** (proposed): the compiled level in the essential gate (JCS41, REAP8's); the two levels'
 disagreements as data (JCS45).
 
-**Checks**: the essential `bin/gate` at the branch's head (below); `bin/reap` 0 problems;
-`bin/java-check --essential` 428 of 428 (file by file).
+**Checks**: the essential `bin/gate` at the branch's code head `48b0bfb3` passed in 28m05s (the
+executables built afresh, 18 min: j2g changed): the smoke test, Clojure's suite on the test build with
+no regressions, the oracle 22,672 of 22,725 as recorded, diffcheck (Clojure's pair 12,020 of 12,041,
+the Java forms' pair 743 of 745, as recorded: the fixtures' and corpora's classes now named `J_..._J`),
+goi's essential check 801 of 801, Java's essential check 428 of 428 (file by file), the generated
+variants, j2g's edge, `bin/reap` 0 problems.
 
 ### Proposals (JCS40-JCS49)
 
