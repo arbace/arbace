@@ -1375,3 +1375,34 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   alone (`:describe`, `:commit`: built at another commit); the program printed is the same.
 - It carries GP8's `arbace.box.convert`, GP7's forms-check fix, JFS58's and GP8's edges, and the
   provenance moved by JN8, JFS66 (b) and JFS70.
+
+## 2026-10-24: the Mac bundle's conversion; GPS41 (c) merged, GPS60-GPS65 decided as built; frozen_view's race fixed
+
+- **The Mac bundle, conversion only** (the user: "i am ready for my next Mac session"; a conversion-only
+  bundle, its two reads at once): branch `box-mac-convert` (`45115525`, `ba5ecaf5`), merged into main
+  at `b7b4b618`: `bin/box-mac-bundle --convert` (`make mac-bundle-convert`), `box/mac/mac.sh convert`
+  (`CONVERT_JOBS`, `CONVERT_CPUS`, `CONVERT_RAM`, `CONVERT_SERIAL`, `CONVERT_DRY`),
+  `box/mac/README-convert.txt`; `bin/box-convert`'s host step writes `host.verified`. The tarball
+  `arbace-box-mac-arm64-convert.tar.gz` (81,200,804 bytes, sha256 `96052afa…`, built at `45115525`):
+  budgets for an M2 Max (12 CPUs, 96 GB): 6 threads and 12 vCPUs a read, 13 GiB guests, both reads at
+  once (about 28 GB). On Linux: the host step's digests (the tree `0445b850…`, the forms
+  `76a4a414…` and `47a3c126…`), and the extracted bundle's own `mac.sh convert` with the amd64
+  launcher and guest as stand-ins: PASS, 238 s, 19.8 GB at most. The essential gate passed on the
+  branch and on main (11m34s). Too large to send (30 MiB limit): the user copies it from the worktree.
+- **GPS41 (c) with GPS39 (b)** (branch `go-pragmas`, `d5ed2259`, `0668e8c8`; doc/go/GO-PARSER-SURVEY.md,
+  "As built: GPS41 (c)"), merged at `eb1c7f70` (the survey's two new sections side by side): gc's
+  noder pragmas (`pragma`, `checkUnusedDuringParse`; `lex.go`'s `pragcgo`, `pragmaFlag`, `pragmaFields`;
+  from TamaGo's go1.27.1 `src/cmd/compile/internal/noder`, LICENSE.md) and the writer's declaration
+  checks (`DeclErrors`) in the driver `go/arbace/repr/go/gcsyntax`, its `Revision` constant;
+  `arbace.go.run --errorcheck --gc-front` merging gc's parse errors by position, goi's branch errors
+  dropped there. `bin/goi check`: 1,610 of 1,837 pass (1,604), 140 unsupported, 69 known, none fail;
+  the class "errors of gc's phases after type checking" 13 (the back end's); essential 801.
+  Decided (the user): GPS60-GPS65 as built, over a build-recorded hash now and fixing `bug217.go`
+  next. The shipped program changed (`arbace.go.run`, `arbace.repr.go.syntax`, the driver): the next
+  re-seed.
+- **`bin/lib/frozen.bash`'s race** (both agents' first gates on a fresh worktree: `mv: cannot stat
+  .tmp/frozen-view/jar.list.new`): each kind's refresh holds its own lock but all wrote `jar.list.new`;
+  now each writes its own `jar.list.new.$BASHPID`, named before the fork (a redirection expands
+  in the child: the first try named the child's pid), renamed into place. Two views refreshed at once
+  from no list: both made, the list as before. The essential gate on `eb1c7f70` with the fix passed
+  (21m35s).

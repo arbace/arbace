@@ -2389,3 +2389,14 @@ essential check 801 of 801, the generated files, `bin/j2g-edge verify`; its firs
   - (b) none added.
 
   *Recommended: (a)*.
+
+## Decided (2026-10-24): GPS60-GPS65
+
+The user decided GPS60-GPS65 as built:
+- GPS60 (a): gc's front end's errors merged in `arbace.go.run --gc-front`, at the action's `-lang`.
+- GPS61 (a): a listed driver stale on the tools' host found by its hand-raised `Revision`, the
+  checkout's interpreted meanwhile; (b), a build-recorded hash per listed package, when a second needs it.
+- GPS62 (a): the writer's `collectDecls` checks and `funcExt`'s three ported.
+- GPS63 (a): goi's own branch checks kept for the REPL, dropped under `--gc-front` only.
+- GPS64 (a): `bug217.go` known.
+- GPS65 (a): the essential subset's rule applied (801 programs).

@@ -93,7 +93,10 @@ frozen_view() {
     flock 9
     list=$root/.tmp/frozen-view/jar.list
     if [ ! -s "$list" ] || [ "$jar" -nt "$list" ]; then
-      unzip -Z1 "$jar" > "$list.new" && mv "$list.new" "$list" || exit 1
+      # each kind's refresh holds its own lock, and two kinds may write the list at once: each its
+      # own new file, renamed into place (2026-10-24: one's mv found the other's moved)
+      f=$list.new.$BASHPID   # named before the fork: a redirection expands in the child
+      unzip -Z1 "$jar" > "$f" && mv "$f" "$list" || exit 1
     fi
     find -L "$view" -type l -delete 2> /dev/null   # links whose target is gone
     (cd "$root/test" && find . -name '*.ae' -printf '%P\n') | while read -r f; do
