@@ -1,0 +1,403 @@
+#!/bin/bash
+# Java's conformance check (doc/classes/JAVA-CONFORMANCE-SURVEY.md, JC1, "As built: JC1"; JCS2-JCS13):
+# jdk26u's jtreg tests, read in place at the platform's pin, each put in a package of its own
+# (`package tNNNNN; ` before the first line of its files of the unnamed package, JCS4 (a)), run at
+# Arbace's levels against the JDK's run of the same renamed sources, recorded as data (JCS5 (b):
+# test/java/ref-jdk26.edn), so that the check itself needs no JVM. As bin/goi check is Go's. The
+# data side is the namespace java.check (test/java/check.ae, on the tools' host, JCS7 (a)); the
+# interpreted runs are test/java/run.ae's, on the executable under test.
+#
+#   bin/java-check [--levels L,...] [--jobs N] [--timeout S] [--only REGEX] [--corpus C,...] [--record]
+#                      the check: every test test/java/ref-jdk26.edn passes on the JDK (of the corpora
+#                      C, test/java/corpora.edn; whose id or jtreg name REGEX finds), at the levels L
+#                      (default read,interp; JCS6 (a)):
+#                        read     repr/java's read of the renamed sources on javac's tool executable
+#                                 (REPR_JAVA_EXE, bin/repr-java), every file converted (cached in
+#                                 .tmp/java-check/forms by the sources, javac's options, the reader's
+#                                 sources and the tool's key)
+#                        interp   each main action of the test interpreted (arbace.classes.interp) on
+#                                 the executable (JAVA_CHECK_EXE, else the gate's
+#                                 .tmp/arbace-go-gate/amd64/arbace, else target/arbace-go/amd64/arbace):
+#                                 the test's classes defined as one top-level do per package (JCS8 (a)),
+#                                 its main called; pass when the status and stdout (its SHA-256 and
+#                                 length) are the JDK's, the status alone for a test whose two JDK runs
+#                                 differ (JCS3 (a)); load-failed, fail, differ, timeout otherwise,
+#                                 stderr's first line the reason
+#                        classes  javac on Arbace's class files (bin/repr-java javac, -g:none -nowarn
+#                                 -XDsuppressNotes -proc:none -implicit:none and the test's options)
+#                                 against the JDK javac's, by the digest of their listing
+#                      (j2g is JC2's, diagnostics JC3's.) Results in .tmp/java-check/results.tsv,
+#                      against test/java/check-LEVEL.edn (as recorded, new, now passing; a test
+#                      passing there and not now fails the check), every test not passing in a class
+#                      of test/java/divergences.edn (none in no class), the numbers by area; --record
+#                      writes check-LEVEL.edn. Default 8 jobs; --timeout, each interpreted action's
+#                      seconds (default 20, the definition included); --load do|files (JAVA_CHECK_LOAD):
+#                      how interp defines a test's classes, do (the default until JC4's source lookup
+#                      is on main beside this: a top-level do per package, JCS8 (a)) or files (each
+#                      package's namespace required as the REPL loads it, file by file: JCS33 (a)'s
+#                      default once both are; do stays as the comparison mode)
+#   bin/java-check --essential [--jobs N]
+#                      the essential gate's (JCS13 (a)): the tests of test/java/essential.txt at the
+#                      level interp, from their forms committed in test/java/forms/ID (no javac:
+#                      the read level is the whole check's); every one must pass
+#   bin/java-check --record-ref [--jobs N] [--only REGEX]
+#                      the reference (JCS5 (b)), with the JDK (the system's javac and java, OpenJDK 26
+#                      built from jdk26u): the corpora's tests scanned (java.check/scan: jtreg's tags,
+#                      the survey's §3.1 categories), each test's source set as javac -sourcepath DIR
+#                      parses it, the files renamed, compiled by the JDK's javac (as the test's
+#                      @compile options say; and with -g:none ... for the classes level), each main
+#                      action run twice (in an empty directory, -Dtest.src=DIR -Dtest.classes=...,
+#                      HotSpot's JIT options dropped, -Xmx2g, 60 s); written as test/java/ref-jdk26.edn.
+#                      JDK names the jdk26u checkout (default /root/jdk26u), its commit the platform's
+#   bin/java-check --forms verify|update
+#                      the essential tests' forms (test/java/forms/ID, test/java/forms/provenance.edn):
+#                      read afresh on javac's tool executable and compared byte for byte (verify), or
+#                      written (update)
+#   bin/java-check scan
+#                      the categories of the corpora's areas (java.check/scan), printed as a table
+#
+# Environment: JDK (jdk26u, default /root/jdk26u), JAVA_CHECK_EXE (the executable that interprets),
+# REPR_JAVA_EXE (javac's tool executable, bin/repr-java's), ARBACE_HOST_EXE (the tools' host).
+set -euo pipefail
+export CGO_ENABLED=0
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
+. "$root/bin/lib/renamed-env.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+
+jdk=${JDK:-/root/jdk26u}
+jdktest=$jdk/test
+work=$root/.tmp/java-check
+ref=$root/test/java/ref-jdk26.edn
+corpora=$root/test/java/corpora.edn
+pin=baf63fbe42b8758448fee570a9d9bb914272d259 # jdk/javac/platform.sha256's commit of jdk26u
+jc() { arbace_tool -p "$root/test" -m java.check "$@"; }
+
+check_pin() {
+  local c
+  c=$(git -C "$jdk" rev-parse HEAD 2>&1) || { echo "java-check: no jdk26u checkout $jdk (JDK)" >&2; return 1; }
+  grep -q "$c" "$root/jdk/javac/platform.sha256" || { echo "java-check: $jdk is at $c, not the platform's pin (jdk/javac/platform.sha256)" >&2; return 1; }
+}
+
+# the classes' digest: the SHA-256 of the sha256sum listing of the class files under DIR
+classes_sha() { (cd "$1" && find . -name '*.class' | LC_ALL=C sort | xargs -r -d '\n' sha256sum) | sha256sum | cut -c1-64; }
+first_line() { tr -d '\r' < "$1" | grep -v '^$' | head -1 | tr '\t' ' ' | cut -c1-300; }
+classes_opts=(-g:none -nowarn -XDsuppressNotes -proc:none -implicit:none)
+
+# ---------------------------------------------------------------------------------------------
+# the reference
+
+# record_sources ID: the test's source set, javac -verbose -sourcepath DIR's parsed files
+record_sources() {
+  local id=$1 d=$work/record/$1 dir opts=() files=() k a b
+  dir=$(awk -F'\t' '$1=="dir"{print $2}' "$d/plan.tsv")
+  grep -q '^skip' "$d/plan.tsv" && return 0
+  while IFS=$'\t' read -r k a b; do
+    case $k in
+      javac) [ "$a" = -Werror ] || opts+=("$a") ;;
+      compile) files+=("$a") ;;
+      build|run) [ "$k" = run ] && a=$b
+                 [ -f "$dir/${a//.//}.java" ] && files+=("${a//.//}.java") ;;
+    esac
+  done < "$d/plan.tsv"
+  rm -rf "$d/s1"; mkdir -p "$d/s1"
+  if (cd "$dir" && javac -J-Xmx1g -verbose -implicit:class -sourcepath . -d "$d/s1" -nowarn ${opts[@]+"${opts[@]}"} "${files[@]}") > "$d/s1.log" 2>&1; then
+    # explicit files as SimpleFileObject[PATH], the source path's as DirectoryFileObject[.:REL]
+    sed -n -e 's|^\[parsing started SimpleFileObject\[\(.*\)\]\]$|\1|p' -e 's|^\[parsing started DirectoryFileObject\[\.:\(.*\)\]\]$|\1|p' "$d/s1.log" \
+      | sed -e "s|^$dir/||" -e 's|^\./||' | { grep -v '^/' || true; } | LC_ALL=C sort -u > "$d/sources.txt"
+  else
+    : > "$d/sources.txt"; grep -m1 'error' "$d/s1.log" | cut -c1-300 > "$d/sources.err" || true
+  fi
+  rm -rf "$d/s1"
+}
+
+# record_runs ID: the renamed sources compiled by the JDK's javac and each main action run twice
+record_runs() {
+  local id=$1 d=$work/record/$1 dir rel dst pre opts=() files=() i tmo cls k st x
+  dir=$(awk -F'\t' '$1=="dir"{print $2}' "$d/plan.tsv")
+  [ -s "$d/rename.tsv" ] || return 0
+  grep -q '^!' "$d/rename.tsv" && return 0
+  while IFS=$'\t' read -r k rel; do [ "$k" = javac ] && opts+=("$rel"); done < "$d/plan.tsv"
+  rm -rf "$d/src" "$d/classes" "$d/classes-g0"; mkdir -p "$d/src" "$d/classes" "$d/classes-g0"
+  while IFS=$'\t' read -r rel dst pre; do
+    mkdir -p "$(dirname "$d/src/$dst")"
+    { [ "$pre" = 1 ] && printf 'package %s; ' "$id"; cat "$dir/$rel"; } > "$d/src/$dst"
+    files+=("$dst")
+  done < "$d/rename.tsv"
+  st=0; (cd "$d/src" && javac -J-Xmx1g -nowarn -XDsuppressNotes -implicit:none -d "$d/classes" ${opts[@]+"${opts[@]}"} "${files[@]}") > "$d/javac.log" 2>&1 || st=$?
+  echo $st > "$d/javac.exit"
+  [ "$st" = 0 ] || { grep -m1 'error' "$d/javac.log" | cut -c1-300 > "$d/javac.err1" || true; return 0; }
+  # the classes level's reference: -g:none and the options bin/javac-vendor classes compiles with
+  (cd "$d/src" && javac -J-Xmx1g "${classes_opts[@]}" -d "$d/classes-g0" ${opts[@]+"${opts[@]}"} "${files[@]}") > "$d/javac-g0.log" 2>&1 \
+    && classes_sha "$d/classes-g0" > "$d/classes.sha"
+  rm -rf "$d/classes-g0"
+  : > "$work/empty"
+  while IFS=$'\t' read -r -a x; do
+    i=${x[0]}; cls=${x[2]}
+    for k in "" 2; do
+      rm -rf "$d/w"; mkdir -p "$d/w"
+      st=0; (cd "$d/w" && timeout -k 5 60 java -Xmx2g -cp "$d/classes" -Dtest.src="$dir" -Dtest.classes="$d/classes" \
+               "$cls" "${x[@]:3}" < "$work/empty" > "$d/out" 2> "$d/err") || st=$?
+      echo $st > "$d/run$i.exit$k"
+      sha256sum < "$d/out" | cut -c1-64 > "$d/run$i.out$k"
+      if [ -z "$k" ]; then stat -c %s "$d/out" > "$d/run$i.len"; first_line "$d/err" > "$d/run$i.err1"; fi
+    done
+  done < "$d/runs.tsv"
+  rm -rf "$d/w" "$d/out" "$d/err"
+}
+
+record_ref() {
+  local jobs=8 only="" t0=$SECONDS
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --jobs) jobs=$2; shift 2 ;;
+      --only) only=$2; shift 2 ;;
+      *) echo "java-check --record-ref: unknown option $1" >&2; return 2 ;;
+    esac
+  done
+  check_pin
+  command -v javac > "$work.javac" 2>&1 && command -v java > "$work.java" 2>&1 || { echo "java-check --record-ref: no JDK (javac, java) on PATH" >&2; return 1; }
+  rm -rf "$work/record"; mkdir -p "$work"
+  echo "== java-check: scan ($jdktest)" >&2
+  jc scan "$jdktest" "$corpora" "$ref" "$work" > "$work/scan.txt"
+  head -1 "$work/scan.txt"
+  local list=$work/record.list
+  if [ -n "$only" ]; then
+    (cd "$work/record" && grep -lE "$only" */plan.tsv | cut -d/ -f1) > "$list.only" || true
+    grep -Fx -f "$list.only" "$list" > "$list.o" || true; mv "$list.o" "$list"
+  fi
+  echo "== java-check: the source sets of $(wc -l < "$list") tests (javac -verbose -sourcepath), $jobs at a time" >&2
+  export -f record_sources record_runs classes_sha first_line
+  export work classes_opts_s="${classes_opts[*]}"
+  xargs -a "$list" -P "$jobs" -I{} bash -c 'record_sources "$1"' _ {}
+  jc rename "$work" > "$work/rename.txt"
+  echo "== java-check: the JDK's javac and runs, twice ($((SECONDS - t0)) s)" >&2
+  xargs -a "$list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); record_runs "$1"' _ {}
+  jc gather "$work" "$ref" "$corpora"
+  echo "java-check --record-ref: $((SECONDS - t0)) s"
+}
+
+# ---------------------------------------------------------------------------------------------
+# the check
+
+run_exe() {
+  local e
+  for e in "${JAVA_CHECK_EXE:-}" "$root/.tmp/arbace-go-gate/amd64/arbace" "$root/target/arbace-go/amd64/arbace"; do
+    [ -n "$e" ] && [ -x "$e" ] && { echo "$e"; return 0; }
+  done
+  echo "java-check: no executable (JAVA_CHECK_EXE, bin/arbace-go --gate-build or --build)" >&2; return 1
+}
+
+# read_opts: javac's options for repr/java's read (the source level and the encoding; the rest
+# change javac's output, not the forms)
+read_opts() {
+  local o next=""
+  for o in "$@"; do
+    case $next in
+      keep) echo "--javac"; echo "$o"; next=""; continue ;;
+      drop) next=""; continue ;;
+    esac
+    case $o in
+      -source|-encoding) echo "--javac"; echo "$o"; next=keep ;;
+      --release|-target) next=drop ;;
+    esac
+  done
+}
+
+# check_one ID: the test's levels; prints ID<TAB>LEVEL<TAB>RESULT<TAB>REASON per level
+check_one() {
+  local id=$1 p=$work/run/$1 dir rel dst pre k x forms key st reason r i tmo opts=() files=() res
+  # the test's directory: under jdk26u's test/, or the checkout's (Arbace's own corpus)
+  case $(awk -F'\t' '$1=="root"{print $2}' "$p/plan.tsv") in
+    checkout) dir=$root/$(awk -F'\t' '$1=="dir"{print $2}' "$p/plan.tsv") ;;
+    *) dir=$jdktest/$(awk -F'\t' '$1=="dir"{print $2}' "$p/plan.tsv") ;;
+  esac
+  while IFS=$'\t' read -r k rel; do [ "$k" = javac ] && opts+=("$rel"); done < "$p/plan.tsv"
+  if [ -n "$from_committed" ]; then
+    forms=$root/test/java/forms/$id
+  else
+    rm -rf "$p/src"; mkdir -p "$p/src"
+    while IFS=$'\t' read -r k rel dst pre; do
+      [ "$k" = file ] || continue
+      mkdir -p "$(dirname "$p/src/$dst")"
+      { printf '%s' "$pre"; cat "$dir/$rel"; } > "$p/src/$dst"
+      files+=("$dst")
+    done < "$p/plan.tsv"
+  fi
+  case ",$levels," in
+    *,read,*|*,interp,*)
+      if [ -z "$from_committed" ]; then
+        ro=()
+        while IFS= read -r k; do [ -n "$k" ] && ro+=("$k"); done <<< "$(read_opts ${opts[@]+"${opts[@]}"})"
+        key=$( { echo "$reader_key"; printf '%s\n' ${ro[@]+"${ro[@]}"}; (cd "$p/src" && find . -type f | LC_ALL=C sort | xargs -d '\n' sha256sum); } | sha256sum | cut -c1-24)
+        forms=$work/forms/$key
+        echo "$key" > "$p/forms.key"
+        # one reader per key: two descriptions of one file share their source set
+        exec 7> "$forms.lock"; flock 7
+        if [ ! -f "$forms.result" ]; then
+          rm -rf "$forms" "$forms.tmp"
+          st=0
+          (cd "$root" && bin/repr-java read ${ro[@]+"${ro[@]}"} "$forms.tmp" "$p/src") > "$forms.log" 2>&1 || st=$?
+          if [ "$st" = 0 ] && grep -q ' converted, 0 failed, 0 javac errors' "$forms.log"; then
+            mv "$forms.tmp" "$forms"; printf 'pass\t\n' > "$forms.result"
+          else
+            reason=$( { grep -m1 '^FAILED ' "$forms.log" | sed 's|^FAILED [^ ]* ||'; grep -m1 -E 'error|Exception|failed' "$forms.log"; } | head -1 | tr '\t' ' ' | cut -c1-300)
+            rm -rf "$forms.tmp"; printf 'fail\t%s\n' "${reason:-status $st}" > "$forms.result"
+          fi
+        fi
+        flock -u 7; exec 7>&-
+        case ",$levels," in *,read,*) printf '%s\tread\t%s\n' "$id" "$(cat "$forms.result")" | sed -e "s|$p|RUN|g" -e "s|$root|.|g" ;; esac
+      fi ;;
+  esac
+  case ",$levels," in
+    *,interp,*)
+      res=""
+      if [ -z "$from_committed" ] && ! grep -q '^pass' "$forms.result"; then
+        res="unread	the read failed"
+      fi
+      local t0=$SECONDS
+      while [ -z "$res" ] && IFS=$'\t' read -r -a x; do
+        [ "${x[0]}" = run ] || continue
+        i=${x[1]}
+        rm -rf "$p/w"; mkdir -p "$p/w"
+        st=0; (cd "$p/w" && ARBACE_PATH=$forms timeout -k 5 "$timeout" "$rexe" "$root/test/java/run.ae" --load "$load" "$forms" "${x[6]}" -Dtest.src="$dir" -Dtest.classes="$p/w" -- "${x[@]:7}" \
+                 < "$work/empty" > "$p/out$i" 2> "$p/err$i") || st=$?
+        if [ "$st" = 126 ] && grep -q '^java-check: load-failed: ' "$p/err$i"; then
+          res="load-failed	$(grep -m1 '^java-check: load-failed: ' "$p/err$i" | sed 's/^java-check: load-failed: //' | tr '\t' ' ' | cut -c1-400)"
+        elif [ "$st" = 124 ] || [ "$st" = 137 ]; then
+          res="timeout	$timeout s"
+        elif [ "$st" != "${x[2]}" ]; then
+          res="fail	status $st (the JDK's ${x[2]}): $(first_line "$p/err$i")"
+        elif [ "${x[5]}" = 1 ] && { [ "$(sha256sum < "$p/out$i" | cut -c1-16)" != "${x[3]}" ] || [ "$(stat -c %s "$p/out$i")" != "${x[4]}" ]; }; then
+          res="differ	stdout differs ($(stat -c %s "$p/out$i") bytes, the JDK's ${x[4]}): $(head -c 2000 "$p/out$i" | tr '\t\n' '  ' | cut -c1-120)"
+        fi
+        [ -n "$res" ] && [ "$i" != 0 ] && res="${res%%	*}	action $i: ${res#*	}"
+      done < "$p/plan.tsv"
+      # the reason without this run's places (the recorded results name no checkout)
+      echo $((SECONDS - t0)) > "$p/interp.secs"
+      printf '%s\tinterp\t%s\n' "$id" "${res:-pass	}" | sed -e "s|$forms|FORMS|g" -e "s|$p|RUN|g" -e "s|$root|.|g" -e "s|$jdktest/||g"
+      rm -rf "$p/w" ;;
+  esac
+  case ",$levels," in
+    *,classes,*)
+      rm -rf "$p/classes"; mkdir -p "$p/classes"
+      st=0; (cd "$p/src" && "$root/bin/repr-java" javac "${classes_opts[@]}" -d "$p/classes" ${opts[@]+"${opts[@]}"} "${files[@]}") > "$p/javac.log" 2>&1 || st=$?
+      if [ "$st" != 0 ]; then
+        printf '%s\tclasses\tfail\tjavac on Arbace: %s\n' "$id" "$(grep -m1 -E 'error|release' "$p/javac.log" | tr '\t' ' ' | cut -c1-300)"
+      elif [ "$(classes_sha "$p/classes" | cut -c1-16)" = "$(awk -F'\t' '$1=="classes"{print $2}' "$p/plan.tsv")" ]; then
+        printf '%s\tclasses\tpass\t\n' "$id"
+      else
+        printf '%s\tclasses\tdiffer\tthe class files differ from the JDK javac'"'"'s\n' "$id"
+      fi
+      rm -rf "$p/classes" ;;
+  esac
+}
+
+check() {
+  local jobs=8 only="" corpus="" record="" essential="" t0=$SECONDS
+  levels=read,interp timeout=20 from_committed="" load=${JAVA_CHECK_LOAD:-do}
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --levels) levels=$2; shift 2 ;;
+      --jobs) jobs=$2; shift 2 ;;
+      --timeout) timeout=$2; shift 2 ;;
+      --load) load=$2; shift 2 ;;
+      --only) only=$2; shift 2 ;;
+      --corpus) corpus=$2; shift 2 ;;
+      --record) record=1; shift ;;
+      --essential) essential=1; shift ;;
+      *) echo "java-check: unknown option $1 (bin/java-check --help)" >&2; return 2 ;;
+    esac
+  done
+  rexe=$(run_exe) || return 1
+  mkdir -p "$work/forms"; : > "$work/empty"
+  rm -rf "$work/run"
+  local pargs=()
+  [ -n "$only" ] && pargs+=(--only "$only")
+  [ -n "$corpus" ] && pargs+=(--corpus "$corpus")
+  if [ -n "$essential" ]; then
+    levels=interp from_committed=1
+    pargs+=(--list "$root/test/java/essential.txt")
+  else
+    check_pin
+    case ",$levels," in *,read,*|*,interp,*|*,classes,*)
+      . "$root/bin/lib/repr-java/host.bash"
+      reader_key="$(repr_java_reader_hash) $(repr_java_host)" || return 1 ;;
+    esac
+  fi
+  jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
+  echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
+  export -f check_one read_opts first_line classes_sha
+  export root work jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
+  xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
+  echo "java-check: $(wc -l < "$work/run.list") tests in $((SECONDS - t0)) s"
+  local rargs=()
+  [ -n "$record" ] && rargs+=(--record)
+  [ -n "$essential" ] && rargs+=(--essential "$root/test/java/essential.txt")
+  { [ -n "$only" ] || [ -n "$corpus" ]; } && rargs+=(--partial)
+  jc report "$ref" "$work" "$root/test/java/divergences.edn" "$root/test/java" "$levels" ${rargs[@]+"${rargs[@]}"}
+}
+
+# ---------------------------------------------------------------------------------------------
+# the essential tests' committed forms
+
+forms_cmd() {
+  local mode=${1:?usage: bin/java-check --forms verify|update} out=$root/test/java/forms id f n=0
+  check_pin
+  . "$root/bin/lib/repr-java/host.bash"
+  reader_key="$(repr_java_reader_hash) $(repr_java_host)" || return 1
+  check --levels read --only "^($(grep -v '^#' "$root/test/java/essential.txt" | awk '{print $1}' | paste -sd'|')) " > "$work/forms-read.txt" 2>&1 || true
+  tail -3 "$work/forms-read.txt"
+  rm -rf "$work/forms-new"; mkdir -p "$work/forms-new"
+  grep -v '^#' "$root/test/java/essential.txt" | awk 'NF{print $1}' > "$work/essential.list"
+  local key
+  while read -r id; do
+    key=$(cat "$work/run/$id/forms.key" 2>&1)
+    [ -d "$work/forms/$key" ] || { echo "java-check --forms: $id was not read ($work/forms/$key.log)" >&2; return 1; }
+    cp -r "$work/forms/$key" "$work/forms-new/$id"
+    n=$((n + 1))
+  done < "$work/essential.list"
+  # the first line's source: the test's file in jdk26u's test/ (or the checkout's test/java/jls), not
+  # the scratch copy's
+  local f1 t dst origin
+  find "$work/forms-new" -name '*.ae' | LC_ALL=C sort > "$work/forms-new.list"
+  while read -r f1; do
+    # (the reading test's scratch path: a test of the same sources may have read them)
+    t=${f1#$work/forms-new/}; t=${t%%/*}
+    dst=$(sed -n "1s|^;; Converted from $work/run/t[0-9]*/src/\(.*\) by arbace\.repr\.java\..*|\1|p" "$f1")
+    [ -n "$dst" ] || continue
+    origin=$(awk -F'\t' -v d="$dst" '$1=="root"{r=$2} $1=="dir"{dir=$2} $1=="file" && $3==d {f=$2} END{print (r=="checkout" ? "" : "jdk26u test/") dir "/" f}' "$work/run/$t/plan.tsv")
+    sed -i "1s|^;; Converted from .* by arbace\.repr\.java\.|;; Converted from $origin (the test $t, renamed: $dst) by arbace.repr.java.|" "$f1"
+  done < "$work/forms-new.list"
+  if grep -rlF "$root" "$work/forms-new" | head -3 | grep .; then echo "java-check --forms: the forms above name the checkout" >&2; return 1; fi
+  {
+    echo ";; The provenance of test/java/forms/ (bin/java-check --forms): the essential tests' forms"
+    echo ";; (test/java/essential.txt), read by repr/java from jdk26u's tests renamed (JCS4 (a))."
+    echo "{:jdk26u {:repo \"https://github.com/openjdk/jdk26u\" :commit \"$pin\" :path \"test\"}"
+    echo " :jdk \"$(repr_java_platform)\""
+    echo " :converter {:repr-java \"$(repr_java_reader_hash)\""
+    echo "             :host \"$(repr_java_host)\"}"
+    echo " :tests $n :files $(find "$work/forms-new" -name '*.ae' | wc -l)}"
+  } > "$work/forms-new/provenance.edn"
+  if [ "$mode" = verify ]; then
+    if diff -r -x provenance.edn "$out" "$work/forms-new" > "$work/forms.diff" &&
+       repr_java_provenance_same "$out/provenance.edn" "$work/forms-new/provenance.edn"; then
+      echo "verify: test/java/forms is the conversion, byte for byte ($n tests)"; return 0
+    fi
+    diff -r "$out" "$work/forms-new" > "$work/forms.diff" || true
+    echo "verify: test/java/forms differs from a fresh conversion ($work/forms.diff)"; head -30 "$work/forms.diff"; return 1
+  fi
+  rm -rf "$out"; cp -r "$work/forms-new" "$out"
+  echo "update: test/java/forms written ($n tests, $(find "$out" -name '*.ae' | wc -l) files): commit it"
+}
+
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+case ${1:-} in
+  -h|--help|help) usage ;;
+  --record-ref) shift; record_ref "$@" ;;
+  --forms) shift; forms_cmd "$@" ;;
+  scan) check_pin; mkdir -p "$work/scan"; jc scan "$jdktest" "$corpora" "$ref" "$work/scan" ;;
+  *) check "$@" ;;
+esac

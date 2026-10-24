@@ -1,0 +1,124 @@
+;; bin/java-check's interpreted level (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC1"):
+;; one test's Java forms defined by the interpreter (arbace.classes.interp) and one of its main
+;; actions run, on the executable under test (not the tools' host: the runtime must be the
+;; checkout's). A script, run as
+;;
+;;   EXE test/java/run.ae [--load do|files] ROOT MAIN [-DNAME=VALUE]... -- [ARG...]
+;;
+;; ROOT is the test's forms as repr/java wrote them (a namespace file per Java package, PKG.ae,
+;; loading its class files PKG/C.ae). The classes are defined as one top-level do per package
+;; (JCS8 (a), until JC4's source lookup): the package's namespace form, then each class file's
+;; other forms (in-ns, import) in the order the namespace file loads them, then every defclass of
+;; the package in one do, entered together before any body is analyzed (SPEC §9.2, 2), as javac
+;; compiles a test's files together; with --load files (JCS33 (a), once JC4's source lookup is on
+;; main), each package's namespace is required as the REPL loads it, file by file (ROOT on
+;; ARBACE_PATH, bin/java-check's --load). Packages are defined in the order of their imports of each
+;; other (a package another one imports first), the rest by name. Then MAIN's main is called with
+;; the ARGs, the -D properties set first (jtreg's test.src, test.classes). An uncaught exception
+;; is printed as the JVM's launcher prints it ("Exception in thread \"main\" " and the trace) and
+;; the status is 1, as the JVM's; System.exit's status is the test's. A definition that fails
+;; prints "java-check: load-failed: " and its last cause and exits 126.
+(ns java.check.run
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-all [^File f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (loop [acc []]
+      (let [x (read {:eof ::eof} r)]
+        (if (= x ::eof) acc (recur (conj acc x)))))))
+
+(defn- head [x] (when (seq? x) (first x)))
+
+(defn- defclass? [x] (contains? '#{defclass defclasses} (head x)))
+
+(defn- cause
+  "The last cause of a definition's failure: its class and message (an ExceptionInfo's message
+  alone), the compiler's wrappers left out."
+  [^Throwable e]
+  (let [^Throwable c (last (take 16 (take-while some? (iterate #(.getCause ^Throwable %) e))))
+        m (.getMessage c)]
+    (if (instance? arbace.lang.ExceptionInfo c)
+      (str m)
+      (str (.getName (class c)) (when m (str ": " m))))))
+
+(defn- one-line [s] (str/replace (str s) #"\s*\n\s*" " "))
+
+(defn- packages
+  "The test's packages: [ns-symbol namespace-file class-files], every PKG.ae under ROOT whose first
+  form is an ns form, its class files in the order of its loads."
+  [^File root]
+  (let [files (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ".ae")) (file-seq root))]
+    (for [^File f (sort-by #(.getPath ^File %) files)
+          :let [forms (read-all f) n (first forms)]
+          :when (= 'ns (head n))]
+      [(second n) forms
+       ;; a load's path is the namespace's directory's (Clojure's), or the root's with a leading /
+       (for [l forms :when (= 'load (head l)) :let [p (str (second l))]]
+         (if (str/starts-with? p "/") (File. root (str (subs p 1) ".ae")) (File. (.getParentFile f) (str p ".ae"))))])))
+
+(defn- imports-of
+  "The packages a package's class files import (the first segments of import specs' names)."
+  [class-forms]
+  (set (for [x class-forms :when (= 'import (head x))
+             spec (rest x)
+             :let [s (if (and (seq? spec) (= 'quote (first spec))) (second spec) spec)
+                   p (cond (sequential? s) (str (first s))
+                           (symbol? s) (let [t (str s) i (.lastIndexOf t ".")] (when (pos? i) (subs t 0 i))))]
+             :when p]
+         p)))
+
+(defn- order
+  "Packages in dependency order: one that another imports before it; ties by name."
+  [pkgs]
+  (let [by (into {} (for [[n :as p] pkgs] [(str n) p]))
+        deps (into {} (for [[n _ cfs] pkgs]
+                        [(str n) (disj (set (filter by (imports-of (mapcat read-all cfs)))) (str n))]))]
+    (loop [done [] left (sort (keys by))]
+      (if (empty? left)
+        (map by done)
+        (let [ready (filter #(every? (set done) (deps %)) left)
+              nxt (or (first ready) (first left))]
+          (recur (conj done nxt) (remove #{nxt} left)))))))
+
+(defn- require! [pkgs]
+  (doseq [[n] (order pkgs)] (require n)))
+
+(defn- define! [pkgs]
+  (doseq [[n ns-forms cfs] (order pkgs)]
+    (binding [*ns* *ns*]
+      (doseq [x ns-forms :when (not= 'load (head x))] (eval x))
+      (let [classes (vec (for [cf cfs
+                               x (read-all cf)
+                               :let [_ (when-not (defclass? x) (eval x))]
+                               :when (defclass? x)]
+                           x))]
+        (in-ns n)
+        (when (seq classes) (eval (cons 'do classes)))))))
+
+(defn -main [& argv]
+  (let [[mode [root main & more]] (if (= "--load" (first argv)) [(second argv) (drop 2 argv)] ["do" argv])
+        [props [_ & args]] (split-with #(not= "--" %) more)]
+    (doseq [p props :let [[_ k v] (re-matches #"-D([^=]+)=(.*)" p)] :when k]
+      (System/setProperty k v))
+    (when-not
+      (try ((if (= mode "files") require! define!) (packages (File. ^String root))) true
+           (catch Throwable e
+             (.println System/err (str "java-check: load-failed: " (one-line (cause e))))
+             (.flush System/err)
+             false))
+      (System/exit 126))
+    (try
+      (eval (list (symbol main "main") (list 'into-array 'String (vec args))))
+      (catch Throwable e
+        (.flush System/out)
+        (.print System/err "Exception in thread \"main\" ")
+        (.printStackTrace ^Throwable e)
+        (.flush System/err)
+        (System/exit 1)))
+    (.flush System/out)
+    (.flush System/err)
+    (System/exit 0)))
+
+(apply -main *command-line-args*)

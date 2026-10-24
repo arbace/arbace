@@ -187,8 +187,11 @@ The current state of the work. This file is rewritten as things change. For the 
     JFS75 (b) next, then JN9b). The Java conformance survey done (2026-10-24,
     doc/classes/JAVA-CONFORMANCE-SURVEY.md: jdk26u's jtreg tests the corpus; a sample of 2,121 tests
     passing on the JDK: read and class files 100%, interpreted 60%, compiled by j2g 67%; JC1-JC8, 18-29
-    days; JCS1-JCS15 decided as recommended). Running: JC1, `bin/java-check` with its interpreted level
-    (`java-check-jc1`); JFS75 (b), the converter's model behind an interface
+    days; JCS1-JCS15 decided as recommended). JC1 built (`java-check-jc1`, 2026-10-24: `bin/java-check`, jdk26u's
+    jtreg run tests and Arbace's own `test/java/jls` against the JDK's recorded runs, levels read,
+    interp, classes; 2,967 tests passing on the JDK: read 2,965, class files 2,965, interpreted 1,364
+    (46%), every other test in one of 36 classes; the essential subset, 428 tests in 28 s, in the
+    essential gate; JCS16-JCS25 proposed). Then JC4 (running: the interpreter's bugs), then JC2. JFS75 (b), the converter's model behind an interface
     (`java-model`); JFS65 (b), j2g's array casts (`j2g-array-casts`);. The seed remade after JFS52 (b) and JFS58 (`3ab3b603…`) and verified.
 - **After v1:**
   - done (2026-10-24): GC157 (b) and go:embed (GS14 (a), GC161 (b)): `bin/goi check` 1,618 of 1,837,

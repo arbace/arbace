@@ -32,8 +32,8 @@ does.
 
 Contents: Executive summary · 1 Today · 2 What goi's check is, and what Java's must be · 3 The
 corpora · 4 What "pass" means · 5 Measurements · 6 What the failures say · 7 The tool:
-`bin/java-check` · 8 Plan (JC1-JC8) · 9 Proposals (JCS1-JCS15) · 10 Risks · 11 Sources ·
-Appendix A: the scripts.
+`bin/java-check` · 8 Plan (JC1-JC8) · 9 Proposals (JCS1-JCS15) · Decided · As built: JC1
+(JCS16-JCS25) · 10 Risks · 11 Sources · Appendix A: the scripts.
 
 ## Executive summary
 
@@ -941,6 +941,214 @@ the generated variants; j2g's edge. `test/diffcheck/known.edn` unchanged.
   - *Recommended: (a)*, when JC1's tool and this branch are both on main: the check then
     measures what a user gets, and the difference between the two loads is JCS30's measure.
 
+## As built: JC1 (2026-10-24)
+
+Branch `java-check-jc1` from main `549c5c49`. `bin/java-check` is the check of §7.1 with the levels
+`read`, `interp` and `classes` (JCS6 (a); `j2g` is JC2's, `diagnostics` JC3's: the levels are a
+comma list, `check_one`'s cases, and the results are per level, so each lands as one more case),
+its data side the namespace `java.check` (`test/java/check.ae`, on the tools' host, JCS7 (a)), the
+interpreted runs `test/java/run.ae` (a script on the executable under test). Nothing under
+`arbace/`, `go/` or `overlay/` changed: the shipped program is the same, and so are the gate's
+keys (`test/java/` is in neither `gate_key` nor the javac tool's key).
+
+**What it is.**
+
+- *The corpora* (`test/java/corpora.edn`, JCS2 (b)): `jdk-run` (`jdk/java/*` but `awt`),
+  `langtools-run` (`langtools/tools/javac`), `hotspot-compiler` (`hotspot/jtreg/compiler`), each of
+  the categories run-plain, run-compile and run-jitopts, read in place from jdk26u's `test/` at the
+  platform's pin (checked against `jdk/javac/platform.sha256`); and `jls`, Arbace's own hand-curated
+  programs in `test/java/jls/` (11: evaluation order, string concatenation and the floating
+  digits, initialization order, numeric conversions, nested classes, lambdas and method references,
+  switches and patterns, exceptions and `finally`, overload resolution, generics and bridges, enums
+  and records; each a `main` printing what it checks, its expected output the JDK's run, as for
+  jdk26u's). `java.check/scan` reads jtreg's tags from each `.java` file's block comments (a tag is
+  an `@` after white space and one of jtreg's names; the actions in order, jtreg's default `@run main`
+  when there is none) and puts each description in the first category of §3.1 that fits
+  (`java.check/categorize`; its counts by area are within a few of §3.1's: `hotspot/jtreg/compiler`
+  83 run-plain and 649 run-jitopts as there, `java/lang` 355 run-plain for 359, `langtools` 357 for
+  356 and 222 run-compile for 267: `@run compile` and `@clean` actions count as other). Kept within a
+  category: `@compile` options that change javac's output but not the run's meaning (`-g`, `-XD...`,
+  `-Xlint`, `-Werror`, `-parameters`, `-source`, `--release`, `-encoding`); the JIT options dropped
+  (JCS10 (a)), and two main actions equal once they are dropped run once.
+- *Ids and renaming* (JCS4 (a)): each test of the corpora gets an id `tNNNNN`, kept by the reference
+  (`test/java/ref-jdk26.edn` is the registry: a new test takes the next free number); its source set
+  is what the JDK's `javac -verbose -implicit:class -sourcepath DIR` parses for its file, its `@compile`
+  files, `@build` classes and main classes; a file of the unnamed package gets `package ID; ` before
+  its first line and goes to `ID/`, one with a package keeps it; a main class without its package
+  takes the main file's (jtreg's `${test.main.class}`) or `ID.`.
+- *The reference* (`--record-ref`, JCS5 (b)): with the system's JDK (`javac`, `java` on the path,
+  OpenJDK 26 built from jdk26u), the renamed sources compiled as the test's `@compile` options say and
+  each main action run twice (an empty directory, `-Dtest.src=DIR -Dtest.classes=CLASSES`, `-Xmx2g`,
+  60 s), and compiled again with `-g:none -nowarn -XDsuppressNotes -proc:none -implicit:none` for the
+  classes level. Per test, one line of `test/java/ref-jdk26.edn` (1.5 MB): id, jtreg name, corpus,
+  category, the JDK's result (`:pass`, `:fail`, `:skip` with why), the directory, javac's options,
+  the source set and each file's place, the class files' digest, and per action the class, arguments,
+  jtreg's timeout, the status, stdout's SHA-256 (16 hex digits) and length, stderr's first line and
+  `:det` (the two runs agree). The check reads only this: no JVM.
+- *The levels*: `read`, `bin/repr-java read` of the renamed sources on javac's tool executable (the
+  test's `-source` and `-encoding` passed, `--release` dropped), cached in `.tmp/java-check/forms` by
+  the sources, those options, repr/java's reader hash and the tool's key; `interp`, per main action a
+  fresh process of the executable (`JAVA_CHECK_EXE`, the gate's by default) running `test/java/run.ae`:
+  the test's packages in the order of their imports of each other, each defined as one top-level `do`
+  of its `defclass`es after its namespace form and its files' `in-ns`/`import` forms (JCS8 (a)), then
+  `main` with the arguments and the `-D` properties; an uncaught exception printed as the JVM's
+  launcher prints it, status 1; a definition that fails `load-failed` with its last cause; pass when
+  the status and stdout's digest and length are the JDK's (the status alone for a test whose JDK
+  runs differ, JCS3 (a)), else `fail` (the status), `differ` (stdout), `timeout` (20 s an action, the
+  definition included), `unread`; `classes`, `bin/repr-java javac` with the reference's options, the
+  class files' digest against the JDK javac's.
+- *The load* (JCS8 (a), and the user's JCS33 (a) of JC4): `--load do|files` (`JAVA_CHECK_LOAD`), `do`
+  the default as built; `files` requires each package's namespace as the REPL loads it, file by
+  file, the forms' root on `ARBACE_PATH`. On the essential subset without JC4's source lookup,
+  `files` passes 412 of 428 (16 a class of a later file: SPEC §9.2, 3). Once JC1 and JC4 are both on
+  main, `files` becomes the default and the references are recorded again; `do` stays the
+  comparison mode.
+- *Results and classes*: `.tmp/java-check/results.tsv`, against `test/java/check-LEVEL.edn` (as
+  recorded, new or changed, now passing; a test passing there and not now is a regression; `--record`
+  writes them, a partial run updating its tests' lines); every test not passing in a class of
+  `test/java/divergences.edn` (36 classes: id, title, kind, why, where decided, regexps over
+  `RESULT REASON` or test ids, an optional level), none in no class; the numbers by area.
+- *The essential subset* (JCS13 (a)): `test/java/essential.txt`, 428 tests passing interpreted in
+  under a second and deterministic on the JDK, every k-th of each area (120 of HotSpot's, 140 of
+  langtools', 160 of `jdk/java`'s) and the 8 passing programs of `jls`; their forms committed in
+  `test/java/forms/ID` (1.0 MB, 880 files, `provenance.edn`; GPL-2.0 as jdk26u's `test/`, LICENSE.md),
+  so that the essential gate needs no javac (`bin/java-check --essential`: the level `interp` from them,
+  every one must pass); `--forms verify` (in `--full`) reads them afresh and compares byte for byte,
+  `--forms update` writes them. In `bin/gate`: `java-check` beside `goi-check` in the essential
+  step, and `java-check-full` (`--levels read,interp,classes`, then `--forms verify`) at the end of
+  the java chain. Makefile: `java-check`, `java-check-essential`, `java-check-ref`.
+
+**Measured** (the gate's executable of main `549c5c49`, `gate_key` `881effe6…`; javac's tool of
+04:35 the same day, key `bf740cf0…` for the checkout's `22385f97…`, run with `REPR_JAVA_STALE_OK=1`:
+javac's world has not changed since, repr/java's namespaces load from the checkout where they differ;
+8 jobs):
+
+| step | tests | wall |
+|---|---:|---:|
+| scan (10,978 descriptions under the areas) | 3,218 in the corpora | 7 s |
+| `--record-ref` (source sets, the JDK's javac twice, two runs) | 3,218 | 21 min |
+| the whole check, `read,interp,classes`, cold | 2,967 | 22 min |
+| the same, the read cached | 2,967 | 10.4 min |
+| `--essential` | 428 | 28 s |
+
+The reference: 3,218 tests, **2,967 pass on the JDK** (126 of them nondeterministic: status only),
+179 fail there under the runner (an unqualified name expected, a file under `test.classes`, a timeout
+over 60 s, `@run` options the corpus kept), 72 skipped (`@compile` of `.jasm` files, a substitution in
+arguments, a source set javac rejects alone). By corpus: `jdk-run` 1,744 of 1,896, `langtools-run`
+515 of 579, `hotspot-compiler` 697 of 732, `jls` 11 of 11.
+
+| level | hotspot compiler | java/lang | java/util | java/io | java/net | java/nio | java/beans | other java/* | langtools | jls | **all** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tests (pass on the JDK) | 697 | 354 | 375 | 256 | 154 | 151 | 246 | 208 | 515 | 11 | **2,967** |
+| read | 696 | 354 | 375 | 256 | 154 | 151 | 246 | 208 | 514 | 11 | **2,965** |
+| classes (byte for byte) | 697 | 353 | 375 | 256 | 154 | 151 | 246 | 208 | 514 | 11 | **2,965** |
+| interp | 521 | 145 | 147 | 80 | 49 | 6 | 0 | 76 | 332 | 8 | **1,364 (46.0%)** |
+
+("Other java/*": math 35 of 38, text 38 of 50, security 3 of 101, rmi 0 of 18, sql 0 of 1.) On the
+survey's four areas the interpreted numbers are §5.3's: `java/lang` 145 of 354 (41%; §5.3 39%),
+`java/util` 147 of 375 (39%), HotSpot's 521 of 697 (75%; 77% of §5.3's 862, which held its packaged
+tests the runner here takes as theirs), langtools 332 of 515 (64%; 62%). The whole is lower than
+§5's 60% because the corpus now holds `java/beans` (246, none passing), `java/nio` (6 of 151),
+`java/net` and `java/security`.
+
+The interpreted results by class (`interp`, 1,603 not passing; `bin/java-check` prints them):
+
+| class | kind | tests |
+|---|---|---:|
+| speed (20 s) | speed | 102 |
+| the interpreter: a private method on another instance (`AbstractMethodError`) | interp | 51 |
+| the interpreter: an `Object` method through a world type | interp | 13 |
+| the interpreter: `clone()` of an interpreted class | interp | 5 |
+| the interpreter: the JLS corpus's findings (below) | interp | 3 |
+| a superclass the Java forms cannot extend yet | interp | 82 |
+| a protected or inherited member of a world class | interp | 11 |
+| the REPL's model (a class of the `do` used before it is defined; another package's class) | repl | 11 |
+| the analysis (forms javac accepted, `arbace.classes.analyze` refuses) | analysis | 70 |
+| repr/java: arrays of more than nine dimensions | repr-java | 2 |
+| not read (the read level's failure) | harness | 2 |
+| serialization; AWT and Swing; class loading | design | 146; 17; 13 |
+| `java.beans` | world | 230 |
+| networking; security; `java.io`'s missing classes; NIO | world | 192; 91; 98; 44 |
+| reflection's annotations and types; zip and jar; javac's API; `java.lang.invoke`; management | world | 69; 59; 39; 34; 30 |
+| logging; threads' members; references; classfile; charsets and locales; stack walking | world | 27; 23; 15; 11; 10; 9 |
+| other JDK classes and members | world | 39 |
+| identity hash codes or traces in stdout; the run's environment | harness | 11; 2 |
+| other failures, each its own (to triage) | other | 41 |
+
+The read level's two failures: repr/java's converter overflows its stack on
+`compiler/uncommontrap/UncommonTrapStackBang.java` (a new repr/java finding, JCS24), and javac on Arbace
+refuses `-encoding utf8` (`Arguments.reportDiag`: the alias, not the charset); the classes level's
+two are `--release 8` and `--release 17` (no `ct.sym`, §5.5).
+
+**What the JLS corpus found at once** (three interpreter bugs no jtreg test of the sample isolates;
+`test/java/jls`, the class `:interp-jls`, JC4's):
+
+- `try { throw new RuntimeException("lost"); } finally { return "swallowed"; }` rethrows the exception
+  instead of returning (JLS 14.20.2: the `finally`'s abrupt completion replaces the `try`'s);
+- `v((Object) "s")` with `v(Object)` and `v(String)` calls `v(String)`: the overload chosen by the
+  argument's run-time class, not the cast's static type (JLS 15.12.2);
+- `static final String K = "k" + 1 + 2;` then `K == "k12"` is `false`: a constant expression's string
+  not interned (JLS 15.29, 3.10.5).
+
+The private-call bug of §6.2 is 51 tests here (58 in the survey's sample); the classes' sizes
+otherwise follow §6.1 with the wider corpus's world classes added.
+
+**Proposals (JCS16-JCS25).** JCS30 on are JC4's.
+
+- **JCS16 `java.beans` in the corpus.**
+  - Options: (a) as built: `jdk/java/beans` in `jdk-run`, its 246 tests in the world class
+    `:beans`; (b) `jdk/java/beans` excluded as `jdk/java/awt` is (`corpora.edn`'s `:exclude`): it is
+    `java.desktop`'s, the module J2G-SPEC §12 leaves out with AWT and Swing; (c) kept, the class
+    `:beans` made `:design`.
+  - *Recommended: (b)*: no test of it can pass without `java.desktop`; the number then says what the
+    Go build can run.
+- **JCS17 Identity hash codes in stdout.**
+  - Options: (a) as built: such a test `differ`s, the class `:identity` (11); (b) `--record-ref`
+    records also the digest of stdout with `@` and 6-8 hex digits masked, compared when the plain one
+    differs; (c) both sides run with a fixed identity hash (not available on the JDK).
+  - *Recommended: (b)*: the tests' meaning does not hang on the hash's digits.
+- **JCS18 The JDK's stdout for the differences.**
+  - Options: (a) as built: digests only, the reason our stdout's start; (b) the JDK's stdout of the
+    tests under 4 KB kept in a data file beside the reference, so a `differ` names the first
+    differing line; (c) the JDK at hand when triaging only (`--record-ref --only`).
+  - *Recommended: (c)* now, (b) if JC4's triage wants it often: the reference stays small.
+- **JCS19 The run's environment.**
+  - Options: (a) as built: the JDK's runs in `.tmp/java-check/record/ID/w`, `java.io.tmpdir` the
+    JVM's `/tmp`; the interpreter's in `.tmp/java-check/run/ID/w`, `TMPDIR`'s `.tmp/tmp`; (b) both in
+    a directory of the same name relative to a common root and `java.io.tmpdir` set alike
+    (`-Djava.io.tmpdir`, `TMPDIR`) at the next `--record-ref`.
+  - *Recommended: (b)*: two tests (`:environment`) and any later one printing a path.
+- **JCS20 Assertions.**
+  - Options: (a) as built: both sides without `-ea` (the JVM's default; jtreg's own runs commonly
+    enable them); (b) `-ea -esa` on the JDK and the interpreter's `java-assert*` enabled likewise.
+  - *Recommended: (a)* until JC4 says how the interpreter's assertions are switched: a test whose
+    assertions fail on one side only would read as Arbace's.
+- **JCS21 The essential subset's forms committed.**
+  - Options: (a) as built: `test/java/forms/` (1.0 MB, GPL-2.0, LICENSE.md), `--forms verify` in
+    `--full`; (b) none committed, the essential gate building javac's tool (minutes and a heavy
+    slot) or skipping without it; (c) the essential subset only `test/java/jls` (no GPL text, 8 tests).
+  - *Recommended: (a)*: as `test/java-fixtures/` is for the suite's fixtures; the essential gate
+    stays javac-free and takes 28 s.
+- **JCS22 The interpreted timeout.**
+  - Options: (a) as built: 20 s an action, the definition included, for every test; (b) jtreg's
+    timeout (120 s, `/timeout=N`) times a factor; (c) (a) and a list of tests with their own limits
+    (`test/java/timeouts.txt`, as goi's).
+  - *Recommended: (a)*, (c) once JC4 has the interpreter faster: 93 of the 102 timeouts are
+    HotSpot's warm-up loops, which no sensible limit lets through today.
+- **JCS23 Test ids.**
+  - Options: (a) as built: numbers in the scan's order, the reference the registry, a new test the
+    next number; (b) a digest of the jtreg name (stable without the registry, unreadable).
+  - *Recommended: (a)*.
+- **JCS24 repr/java's stack overflow on a deep expression.**
+  - Options: (a) the converter iterative over long binary chains (JC5); (b) the tool's goroutine
+    stack raised; (c) left in its class.
+  - *Recommended: (c)* now, (a) with JC5: one test, and the native parser's depth is the same question.
+- **JCS25 The JLS corpus.**
+  - Options: (a) grown by JLS chapter as JC4 and JC5 fix what it finds, each program Arbace's own,
+    its expected output the JDK's run; (b) frozen at JC1's eleven, ECJ's extracted tests later
+    (JCS2 (c)).
+  - *Recommended: (a)*: eleven programs found three bugs the 2,956 jtreg tests do not isolate.
+
 ## 10. Risks
 
 - **The world is the long tail.** 60% of the non-passing interpreted tests are library classes;
@@ -1010,3 +1218,13 @@ classes as one `defclasses`, a top-level `do` one definition; JC5's, with JCS11)
 also in the file being loaded, SPEC §9.2 (3) amended), JCS32 (b) (`clone` of an interpreted class
 extending a world class left until a test needs it), JCS33 (a) (JC1's interp level file by file once
 JC1 and JC4 are both on main, the one-`do` load kept as a comparison mode).
+
+## Decided (2026-10-24): JCS16-JCS25
+
+The user decided JC1's proposals as recommended: JCS16 (b) (`jdk/java/beans` excluded as `jdk/java/awt`
+is), JCS17 (b) (stdout's digest with identity hashes masked recorded too), JCS18 (c) (the JDK at hand
+when triaging, the reference small), JCS19 (b) (both sides run in like-named directories with the same
+tmpdir, at the next `--record-ref`), JCS20 (a), JCS21 (a), JCS22 (a), JCS23 (a), JCS24 (c) (repr/java's
+stack overflow in its class; the converter iterative with JC5), JCS25 (a) (the JLS corpus grown by
+chapter). JCS16, JCS17, JCS19 and JCS33 (a) (the interp level file by file, JC4 now on main) are built
+with JC2.

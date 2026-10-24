@@ -1,0 +1,499 @@
+(ns java.check
+  "bin/java-check's data side (doc/classes/JAVA-CONFORMANCE-SURVEY.md, \"As built: JC1\"; JCS7 (a):
+  a namespace under test/java/, evaluated on the tools' host). bin/java-check runs the processes
+  (the JDK's javac and java for the reference, repr/java's read on javac's tool executable, the
+  interpreter on the executable under test), this namespace reads and writes what they work from
+  and what they found:
+
+    scan JDKTEST CORPORA REF WORK
+        every test description (a comment holding @test) of the .java files under the corpora's
+        areas, jtreg's tags read from the text (the native parser keeps no block comments' text),
+        each put in the first category of the survey's §3.1 that fits; the corpora's tests get an
+        id (tNNNNN: REF's, else the next free) and WORK/record/ID/plan.tsv, the reference's plan;
+        WORK/scan.tsv, every description and its category; WORK/record.list
+    rename WORK
+        after the JDK's javac gave each planned test's source set (WORK/record/ID/sources.txt):
+        each file's place in the renamed tree (JCS4 (a): a file of the unnamed package gets
+        `package ID; ` before its first line and goes to ID/, one of a package keeps it),
+        WORK/record/ID/rename.tsv, and the main actions with their classes renamed, runs.tsv
+    gather WORK REF CORPORA
+        the JDK's results (WORK/record/ID/: javac's status, the class files' digest, each run's
+        status, stdout's digest and length, stderr's first line, twice) as the reference REF
+        (test/java/ref-jdk26.edn, JCS5 (b)), one test a line
+    plan REF WORK [--list FILE] [--only REGEX] [--corpus C,...]
+        the check's plan of every test REF passes on the JDK (or FILE's, the essential subset):
+        WORK/run/ID/plan.tsv and WORK/run.list
+    report REF WORK DIVERGENCES CHECKDIR LEVELS [--record] [--essential FILE] [--partial]
+        WORK/results.tsv (ID LEVEL RESULT REASON) against the recorded results
+        (CHECKDIR/check-LEVEL.edn): as recorded, new, now passing; a test passing there and not
+        now is a regression; every test not passing in a class of DIVERGENCES (its result and
+        reason matched, as test/goi/divergences.edn's), each class's count and the numbers by
+        area; --record writes the results as CHECKDIR/check-LEVEL.edn. Exit 1 on a regression,
+        an unclassified test or an essential test not passing."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader)))
+
+;; ---------------------------------------------------------------------------------------------
+;; files
+
+(defn- read-edn [f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(defn- lines [f]
+  (let [f (io/file f)]
+    (if (.isFile f) (remove str/blank? (str/split-lines (slurp f))) [])))
+
+(defn- tsv [f] (map #(str/split % #"\t" -1) (lines f)))
+
+(defn- write-lines [f ls]
+  (io/make-parents f)
+  (spit f (apply str (map #(str % "\n") ls))))
+
+(defn- q [s] (pr-str (str s)))
+
+;; ---------------------------------------------------------------------------------------------
+;; jtreg's tags (openjdk/jtreg's tag specification, as the survey's §3.1 reads it)
+
+(def ^:private tag-names
+  "The tags a test description is split at: jtreg's (an @ after white space; any other @word, as
+  in a summary's text, stays in the value before it)."
+  "test|bug|summary|author|run|build|compile|clean|ignore|library|modules|requires|key|comment|enablePreview|library")
+
+(def ^:private tag-re
+  (re-pattern (str "(?s)(?:^|\\s)@(" tag-names ")(?![\\w])(.*?)(?=\\s@(?:" tag-names ")(?![\\w])|\\z)")))
+
+(defn- strip-comments
+  "The Java text without its comments and string literals' contents (for the package declaration)."
+  [^String s]
+  (-> s
+      (str/replace #"(?s)/\*.*?\*/" " ")
+      (str/replace #"//[^\n]*" " ")))
+
+(defn package-of
+  "The package a Java file declares, or nil."
+  [^String text]
+  (when-let [[_ p] (re-find #"^\s*(?:@[\w.]+(?:\([^)]*\))?\s*)*package\s+([\w.]+)\s*;" (strip-comments text))]
+    p))
+
+(defn- descriptions
+  "The test descriptions of a file's text: each block comment whose first tag is @test, as a
+  vector of [tag value] in order (the value's white space folded)."
+  [^String text]
+  (for [c (re-seq #"(?s)/\*.*?\*/" text)
+        :let [body (->> (str/split-lines (subs c 2 (- (count c) 2)))
+                        (map #(str/replace % #"^\s*\*+" " "))
+                        (str/join "\n"))
+              parts (vec (for [[_ t v] (re-seq tag-re body)] [t (str/trim (str/replace v #"\s+" " "))]))]
+        :when (= "test" (first (first parts)))]
+    parts))
+
+(defn- action
+  "An action tag's value: {:kind main|compile|..., :modes [...], :opts [...], :rest [...]}."
+  [tag ^String v]
+  (let [[head & toks] (str/split (str/trim v) #"\s+")
+        [kind & modes] (str/split (or head "") #"/")]
+    (case tag
+      "run" (let [[opts more] (split-with #(str/starts-with? % "-") toks)]
+              {:tag :run :kind kind :modes (vec modes) :opts (vec opts) :class (first more) :args (vec (rest more))})
+      "compile" (let [moded (str/starts-with? (str head) "/")
+                      ts (if moded toks (cons head toks))]
+                  {:tag :compile :kind "compile"
+                   :modes (if moded (vec (remove str/blank? (str/split head #"/"))) [])
+                   :opts (vec (remove #(str/ends-with? % ".java") (remove str/blank? ts)))
+                   :files (vec (filter #(str/ends-with? % ".java") ts))})
+      "build" {:tag :build :classes (vec (str/split (str/trim v) #"\s+"))}
+      "clean" {:tag :clean})))
+
+(def ^:private jit-opt
+  "HotSpot's JIT, heap and logging options, dropped (JCS10 (a))."
+  #"^(-XX:.*|-Xcomp|-Xint|-Xbatch|-Xmixed|-Xlog(:.*)?|-Xmx.*|-Xms.*)$")
+
+(def ^:private compile-opt-with-value #{"-source" "--release" "-target" "-encoding"})
+
+(defn- compile-opts-ok?
+  "The @compile options the corpus keeps: what changes javac's output but not the run's
+  meaning, the source level and the encoding."
+  [opts]
+  (loop [[o & more] opts]
+    (cond (nil? o) true
+          (compile-opt-with-value o) (if (seq more) (recur (rest more)) false)
+          (re-matches #"-g(:.*)?|-Werror|-XD.*|-Xlint(:.*)?|-parameters|-nowarn|-doe" o) (recur more)
+          :else false)))
+
+(defn- run-mode-ok? [modes]
+  (every? #(or (= % "othervm") (re-matches #"timeout=\d+" %)) modes))
+
+(defn categorize
+  "A description's category (the survey's §3.1, the first that fits) and its actions."
+  [desc]
+  (let [has (fn [t] (some #(= t (first %)) desc))
+        acts (vec (for [[t v] desc :when (#{"run" "compile" "build" "clean"} t)] (action t v)))
+        runs (filter #(= :run (:tag %)) acts)
+        compiles (filter #(= :compile (:tag %)) acts)
+        mains (filter #(= "main" (:kind %)) runs)
+        all-modes (concat (mapcat :modes runs) (mapcat :modes compiles))
+        cat (cond
+              (or (has "ignore") (some #{"manual"} all-modes)) :manual-or-ignored
+              (some #(= "shell" (:kind %)) runs) :shell
+              (or (some #{"native"} all-modes) (some #(= "native" (:kind %)) runs)) :native
+              (some #(#{"testng" "junit"} (:kind %)) runs) :framework
+              (some #(= "driver" (:kind %)) runs) :driver
+              (some #(and (some #{"fail"} (:modes %)) (some (fn [m] (str/starts-with? m "ref=")) (:modes %))) compiles) :compile-fail-ref
+              (some #(some #{"fail"} (:modes %)) compiles) :compile-fail
+              (and (empty? runs) (seq compiles)) :compile-only
+              (has "library") :run-lib
+              (has "modules") :run-modules
+              (has "requires") :run-requires
+              (or (has "enablePreview") (has "clean")) :other
+              (some #(not= "main" (:kind %)) runs) :other
+              (not (every? #(run-mode-ok? (:modes %)) mains)) :other
+              (some #(seq (:modes %)) compiles) :other
+              (some #(not (re-matches jit-opt %)) (mapcat :opts mains)) :run-vmopts
+              (seq (mapcat :opts mains)) :run-jitopts
+              (seq compiles) :run-compile
+              :else :run-plain)]
+    {:category cat :actions acts}))
+
+;; ---------------------------------------------------------------------------------------------
+;; scan
+
+(defn- java-files [^File dir]
+  (->> (file-seq dir)
+       (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ".java")))
+       (sort-by #(.getPath ^File %))))
+
+(defn- corpus-of [corpora ^String path cat]
+  (some (fn [c] (when (and (some #(str/starts-with? path %) (:areas c))
+                           (not-any? #(str/starts-with? path %) (:exclude c []))
+                           (some #{cat} (:categories c)))
+                  (:id c)))
+        corpora))
+
+(defn- in-areas? [corpora ^String path]
+  (some (fn [c] (and (some #(str/starts-with? path %) (:areas c))
+                     (not-any? #(str/starts-with? path %) (:exclude c []))))
+        corpora))
+
+(defn area
+  "The survey's area of a test path: java/lang, java/util, ..., hotspot compiler, langtools, jls."
+  [^String path]
+  (cond (str/starts-with? path "jdk/java/") (str "java/" (second (re-find #"^jdk/java/([^/]+)" path)))
+        (str/starts-with? path "jdk/") (second (re-find #"^jdk/(.*?/[^/]+)/" path))
+        (str/starts-with? path "hotspot/jtreg/compiler/") "hotspot compiler"
+        (str/starts-with? path "langtools/") "langtools"
+        (str/starts-with? path "test/java/jls/") "jls"
+        :else (first (str/split path #"/"))))
+
+(defn- ref-tests [ref]
+  (if (.isFile (io/file ref)) (read-edn ref) []))
+
+(defn- id-num [id] (Long/parseLong (subs id 1)))
+
+(defn- test-key [path i n id] (cond id (str path "#" id) (> n 1) (str path "#id" i) :else path))
+
+(defn- roots
+  "Each corpus's root directory: jdk26u's test/ (JDKTEST), or the checkout (:root :checkout: its
+  areas are the checkout's paths)."
+  [corpora jdktest]
+  (into {} (for [c corpora] [(:id c) (if (= :checkout (:root c)) (.getCanonicalPath (io/file ".")) jdktest)])))
+
+(defn scan [jdktest corpora-file ref work]
+  (let [{:keys [corpora]} (read-edn corpora-file)
+        rts (roots corpora jdktest)
+        old (into {} (for [t (ref-tests ref)] [(:test t) (:id t)]))
+        next-id (atom (inc (reduce max 0 (map id-num (vals old)))))
+        rows (for [[croot cs] (group-by #(get rts (:id %)) corpora)
+                   :let [rootf (io/file croot)
+                         prefixes (distinct (mapcat :areas cs))]
+                   pre prefixes
+                   :let [d (io/file rootf pre)]
+                   :when (.isDirectory d)
+                   ^File f (java-files d)
+                   :let [path (subs (.getPath f) (inc (count (.getPath rootf))))]
+                   :when (in-areas? cs path)
+                   :let [text (slurp f)]
+                   :when (str/includes? text "@test")
+                   :let [ds (vec (descriptions text)) n (count ds)]
+                   [i d] (map-indexed vector ds)
+                   :let [tid (second (re-find #"^id=(\S+)" (second (first d))))
+                         {:keys [category actions]} (categorize d)]]
+               {:key (test-key path i n tid) :path path :root croot
+                :root-kind (:root (first cs) :jdk26u) :category category :actions actions
+                :corpus (corpus-of cs path category) :file f})
+        rows (distinct rows)
+        rows (vec (for [r (sort-by :key rows)]
+                    (assoc r :id (when (:corpus r)
+                                   (or (old (:key r))
+                                       (format "t%05d" (dec (swap! next-id inc))))))))
+        sel (filter :id rows)]
+    (write-lines (str work "/scan.tsv")
+                 (for [r rows] (str (:key r) "\t" (name (:category r)) "\t" (some-> (:corpus r) name) "\t" (or (:id r) ""))))
+    (doseq [r sel
+            :let [dir (.getParentFile ^File (:file r))
+                  acts (:actions r)
+                  base (str/replace (.getName ^File (:file r)) #"\.java$" "")
+                  ;; the main actions, those equal once their JIT options are dropped run once
+                  runs (or (seq (vals (into (sorted-map) (map-indexed (fn [i r] [[(:class r) (:args r)] (assoc r :i i)]) (filter #(= :run (:tag %)) acts)))))
+                           [{:class base :args [] :modes [] :opts []}])
+                  runs (sort-by #(:i % 0) runs)
+                  compiles (filter #(= :compile (:tag %)) acts)
+                  opts (distinct (mapcat :opts compiles))
+                  skip (cond (not (compile-opts-ok? opts)) (str "@compile options: " (str/join " " opts))
+                             (some #(str/includes? % "${") (mapcat :args runs)) "a substitution in @run's arguments")]]
+      (write-lines (str work "/record/" (:id r) "/plan.tsv")
+                   (concat [(str "key\t" (:key r)) (str "path\t" (:path r)) (str "corpus\t" (name (:corpus r)))
+                            (str "category\t" (name (:category r))) (str "dir\t" (.getPath dir))
+                            (str "root\t" (name (:root-kind r)) "\t" (:root r))]
+                           (when skip [(str "skip\t" skip)])
+                           (for [o opts] (str "javac\t" o))
+                           (distinct (cons (str "compile\t" (.getName ^File (:file r)))
+                                           (for [c compiles fl (:files c)] (str "compile\t" fl))))
+                           (for [a acts :when (= :build (:tag a)) c (:classes a)] (str "build\t" c))
+                           (for [ru runs]
+                             (str "run\t" (or (some #(second (re-matches #"timeout=(\d+)" %)) (:modes ru)) "120") "\t"
+                                  (str/replace (:class ru) "${test.main.class}" base) "\t" (str/join "\t" (:args ru)))))))
+    (write-lines (str work "/record.list") (map :id sel))
+    ;; the counts, by area and category
+    (let [cats (sort (distinct (map (comp name :category) rows)))
+          areas (sort (distinct (map (comp area :path) rows)))]
+      (println (str "java-check scan: " (count rows) " test descriptions under the corpora's areas, "
+                    (count sel) " in the corpora"))
+      (println (str "| area | " (str/join " | " cats) " | all |"))
+      (doseq [a areas :let [rs (filter #(= a (area (:path %))) rows)]]
+        (println (str "| " a " | " (str/join " | " (for [c cats] (count (filter #(= c (name (:category %))) rs)))) " | " (count rs) " |"))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; rename: the source set placed in the renamed tree
+
+(defn- plan-map [rows]
+  (reduce (fn [m [k & vs]] (update m k (fnil conj []) (vec vs))) {} rows))
+
+(defn rename [work]
+  (doseq [id (lines (str work "/record.list"))
+          :let [d (str work "/record/" id)
+                pm (plan-map (tsv (str d "/plan.tsv")))
+                dir (ffirst (pm "dir"))
+                srcs (lines (str d "/sources.txt"))]
+          :when (and (seq srcs) (not (pm "skip")))]
+    (let [placed (for [rel srcs
+                       :let [text (slurp (io/file dir rel))
+                             p (package-of text)
+                             base (.getName (io/file rel))]]
+                   [rel (if p (str (str/replace p "." "/") "/" base) (str id "/" base)) (if p "0" "1")])
+          dests (map second placed)
+          unnamed? (some #(= "1" (nth % 2)) placed)
+          main-file (first (map first (pm "compile")))
+          main-pkg (package-of (slurp (io/file dir main-file)))]
+      (if (not= (count dests) (count (distinct dests)))
+        (write-lines (str d "/rename.tsv") [(str "!\ttwo files of the source set at one place in the renamed tree")])
+        (write-lines (str d "/rename.tsv") (for [p placed] (str/join "\t" p))))
+      (write-lines (str d "/runs.tsv")
+                   (for [[i [tmo cls & args]] (map-indexed vector (pm "run"))]
+                     ;; a class without its package: the main file's package (jtreg's ${test.main.class}), or the test's
+                     (str/join "\t" (concat [i tmo (cond (str/includes? cls ".") cls
+                                                           main-pkg (str main-pkg "." cls)
+                                                           unnamed? (str id "." cls)
+                                                           :else cls)]
+                                            (remove str/blank? args)))))))
+  (println "java-check rename: done"))
+
+;; ---------------------------------------------------------------------------------------------
+;; gather: the reference as data (JCS5 (b))
+
+(defn- slurp1 [f] (let [f (io/file f)] (when (.isFile f) (str/trim (slurp f)))))
+
+(defn- clean
+  "A message without the run's places (the reference names no checkout or scratch directory) and
+  without control characters."
+  [^String s work id base]
+  (when s
+    (-> s
+        (str/replace (str work "/record/" id) "RUN")
+        (str/replace (str base "/") "")
+        (str/replace (.getCanonicalPath (io/file ".")) ".")
+        (str/replace #"[\x00-\x08\x0b-\x1f\x7f]" "?"))))
+
+(defn- edn-map
+  "A map (a vector of [key value]; a value that is a vector of maps printed likewise) printed with its keys in the order given (one test a line, diffable)."
+  [kvs]
+  (str "{" (str/join " " (for [[k v] kvs :when (some? v)]
+                            (str k " " (cond (string? v) (q v)
+                                             (and (vector? v) (every? map? v) (seq v))
+                                             (str "[" (str/join " " (map #(edn-map (vec %)) v)) "]")
+                                             :else (pr-str v)))))
+       "}"))
+
+(def ^:private ref-keys [:id :test :corpus :category :jdk :why :root :dir :javac :files :unnamed :classes :runs])
+
+(defn gather [work ref corpora-file]
+  (let [old (into {} (for [t (ref-tests ref)] [(:id t) t]))
+        ids (lines (str work "/record.list"))
+        tests (for [id ids
+                    :let [d (str work "/record/" id)
+                          pm (plan-map (tsv (str d "/plan.tsv")))
+                          g #(ffirst (pm %))
+                          ren (tsv (str d "/rename.tsv"))
+                          runs (tsv (str d "/runs.tsv"))
+                          jst (slurp1 (str d "/javac.exit"))
+                          base (second (first (pm "root")))
+                          rs (vec (for [[i tmo cls & args] runs
+                                        :let [r #(slurp1 (str d "/run" i "." %))
+                                              e1 (r "exit") e2 (r "exit2") o1 (r "out") o2 (r "out2")]]
+                                    {:main cls :args (vec args) :timeout (Long/parseLong tmo)
+                                     :exit (some-> e1 Long/parseLong) :out (some-> o1 (subs 0 16))
+                                     :out-len (some-> (r "len") Long/parseLong)
+                                     :err (or (clean (r "err1") work id base) "")
+                                     :det (and (= e1 e2) (= o1 o2))}))
+                          status* (cond (g "skip") [:skip (g "skip")]
+                                       (empty? (lines (str d "/sources.txt"))) [:skip (str "the source set: " (or (slurp1 (str d "/sources.err")) "javac failed"))]
+                                       (= "!" (ffirst ren)) [:skip (second (first ren))]
+                                       (not= "0" jst) [:fail (str "javac: " (or (slurp1 (str d "/javac.err1")) "failed"))]
+                                       :else (if-let [b (first (filter #(not= 0 (:exit %)) rs))]
+                                               [:fail (str "status " (:exit b) ": " (:err b))]
+                                               [:pass nil]))
+                          status [(first status*) (clean (second status*) work id base)]]]
+                (edn-map [[:id id] [:test (g "key")] [:corpus (keyword (g "corpus"))] [:category (keyword (g "category"))]
+                          [:jdk (first status)] [:why (second status)]
+                          [:root (when (= "checkout" (g "root")) :checkout)]
+                          [:dir (subs (g "dir") (inc (count (second (first (pm "root"))))))]
+                          [:javac (vec (map first (pm "javac")))]
+                          [:files (when (= :pass (first status)) (vec (map #(vec (take 2 %)) ren)))]
+                          [:unnamed (when (= :pass (first status)) (vec (for [[_ dst p] ren :when (= p "1")] dst)))]
+                          [:classes (when (= :pass (first status)) (some-> (slurp1 (str d "/classes.sha")) (subs 0 16)))]
+                          [:runs (when (#{:pass :fail} (first status)) rs)]]))
+        kept (for [[id t] (sort-by key old) :when (not (some #{id} ids))] (edn-map (for [k ref-keys] [k (t k)])))
+        all (sort (concat tests kept))]
+    (write-lines ref
+                 (concat [";; The JDK's runs of bin/java-check's corpora (doc/classes/JAVA-CONFORMANCE-SURVEY.md, JCS5 (b),"
+                          ";; \"As built: JC1\"): per test of jdk26u's jtreg tests (at the platform's pin, read in place),"
+                          ";; renamed into a package of its own (JCS4 (a)), its id, its jtreg name, corpus and category (§3.1),"
+                          ";; the JDK's result (:pass, :fail or :skip, with why), its directory under jdk26u's test/, javac's"
+                          ";; options, the source set (each file and its place in the renamed tree; :unnamed, the files"
+                          ";; given `package ID; `), the class files' digest (javac -g:none ..., the first 16 hex digits of"
+                          ";; the SHA-256 of their sha256sum listing) and each main action: its class, arguments, jtreg's"
+                          ";; timeout, the status, stdout's SHA-256 (16 hex digits) and length, stderr's first line, and"
+                          ";; whether two runs agreed (:det). Written by bin/java-check --record-ref with the JDK (the"
+                          ";; system's javac and java, OpenJDK 26 built from jdk26u); read with the Clojure reader."
+                          "["]
+                         (map #(str " " %) all)
+                         ["]"]))
+    (println (str "java-check gather: " (count tests) " tests recorded in " ref
+                  " (" (count (filter #(str/includes? % ":jdk :pass") tests)) " pass on the JDK)"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; plan: the check's per-test plan, from the reference
+
+(defn plan [ref work & opts]
+  (let [o (apply hash-map opts)
+        only (some-> (o "--only") re-pattern)
+        corp (some->> (o "--corpus") (#(str/split % #",")) (map keyword) set)
+        listed (some->> (o "--list") lines (remove #(str/starts-with? % "#")) (map #(first (str/split % #"\s+"))) set)
+        ts (for [t (ref-tests ref)
+                 :when (= :pass (:jdk t))
+                 :when (or (nil? listed) (listed (:id t)))
+                 :when (or (nil? corp) (corp (:corpus t)))
+                 :when (or (nil? only) (re-find only (str (:id t) " " (:test t))))]
+             t)]
+    (doseq [t ts]
+      (write-lines (str work "/run/" (:id t) "/plan.tsv")
+                   (concat [(str "test\t" (:test t)) (str "dir\t" (:dir t)) (str "root\t" (name (:root t :jdk26u))) (str "classes\t" (:classes t))]
+                           (for [x (:javac t)] (str "javac\t" x))
+                           (for [[src dst] (:files t)]
+                             (str "file\t" src "\t" dst "\t" (if (some #{dst} (:unnamed t)) (str "package " (first (str/split dst #"/")) "; ") "")))
+                           (for [[i r] (map-indexed vector (:runs t))]
+                             (str/join "\t" (concat ["run" i (:exit r) (:out r) (:out-len r) (if (:det r) "1" "0") (:main r)] (:args r)))))))
+    (write-lines (str work "/run.list") (map :id ts))
+    (println (str "java-check plan: " (count ts) " tests"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; report
+
+(defn- classify
+  "A non-passing test's class: the first of its level (or of none) that names the test in :tests
+  or one of whose :match regexps finds \"RESULT REASON\"."
+  [classes level id result reason]
+  (let [s (str (name result) " " reason)]
+    (or (some (fn [c] (when (and (or (nil? (:level c)) (= level (:level c)))
+                                 (or (some #{id} (:tests c)) (some #(re-find % s) (:match c))))
+                        (:id c)))
+              classes)
+        :unclassified)))
+
+(defn- recorded [f]
+  (if (.isFile (io/file f))
+    (into {} (for [[id _ r reason] (read-edn f)] [id [r reason]]))
+    {}))
+
+(defn report [ref work divergences checkdir levels & opts]
+  (let [flags (set opts)
+        o (apply hash-map (remove #{"--record" "--partial"} opts))
+        record? (flags "--record")
+        partial? (or (flags "--partial") (some? (o "--essential")))
+        essential (some->> (o "--essential") lines (remove #(str/starts-with? % "#")) (map #(first (str/split % #"\s+"))) set)
+        tests (into {} (for [t (ref-tests ref)] [(:id t) t]))
+        classes (read-edn divergences)
+        results (for [[id lv r reason] (tsv (str work "/results.tsv"))] [id (keyword lv) (keyword r) (or reason "")])
+        problems (atom [])]
+    (doseq [lv (map keyword (str/split levels #","))
+            :let [rs (sort-by first (filter #(= lv (second %)) results))
+                  f (str checkdir "/check-" (name lv) ".edn")
+                  rec (recorded f)
+                  by (group-by #(nth % 2) rs)
+                  pass? #(= :pass (nth % 2))
+                  np (remove pass? rs)
+                  cls (group-by #(classify classes lv (first %) (nth % 2) (nth % 3)) np)
+                  regress (filter #(and (= :pass (first (rec (first %)))) (not (pass? %))) rs)
+                  now-pass (filter #(and (rec (first %)) (not= :pass (first (rec (first %)))) (pass? %)) rs)
+                  fresh (filter #(and (not (pass? %)) (not= :pass (first (rec (first %))))
+                                      (not= [(nth % 2) (nth % 3)] (rec (first %)))) rs)]
+            :when (seq rs)]
+      (println (str "java-check " (name lv) ": " (count rs) " tests: "
+                    (str/join ", " (for [[r xs] (sort-by (comp - count val) by)] (str (count xs) " " (name r))))))
+      (println (str "   against " (.getName (io/file f)) ": "
+                    (count (filter #(= [(nth % 2) (nth % 3)] (rec (first %))) rs)) " as recorded, "
+                    (count fresh) " new or changed, " (count now-pass) " now passing, " (count regress) " regressions"))
+      (doseq [x regress] (swap! problems conj (str "regression: " (first x) " " (:test (tests (first x))) ": " (name (nth x 2)) " " (nth x 3))))
+      (doseq [x (take 20 now-pass)] (println (str "   now passing: " (first x) " " (:test (tests (first x))))))
+      (doseq [c classes :let [n (count (get cls (:id c)))] :when (pos? n)]
+        (println (format "   %5d %s (%s)" n (:title c) (name (:kind c)))))
+      (when-let [u (seq (get cls :unclassified))]
+        (println (format "   %5d in no class" (count u)))
+        (doseq [x u] (swap! problems conj (str "in no class: " (first x) " " (:test (tests (first x))) ": " (name (nth x 2)) " " (nth x 3)))))
+      (when essential
+        (doseq [x rs :when (and (essential (first x)) (not (pass? x)))]
+          (swap! problems conj (str "essential: " (first x) " " (:test (tests (first x))) " does not pass: " (name (nth x 2)) " " (nth x 3)))))
+      ;; the numbers by area (the survey's §5 table)
+      (let [areas (sort (distinct (map #(area (:test (tests (first %)))) rs)))]
+        (println (str "   | " (name lv) " | " (str/join " | " areas) " | all |"))
+        (doseq [r (cons :tests (sort (keys by)))]
+          (println (str "   | " (name r) " | "
+                        (str/join " | " (for [a areas] (count (filter #(and (= a (area (:test (tests (first %)))))
+                                                                         (or (= r :tests) (= r (nth % 2)))) rs))))
+                        " | " (if (= r :tests) (count rs) (count (by r))) " |"))))
+      (when record?
+        (write-lines f (concat [(str ";; bin/java-check's results at the level " (name lv) " (doc/classes/JAVA-CONFORMANCE-SURVEY.md, \"As built: JC1\"):")
+                                ";; per test of test/java/ref-jdk26.edn the JDK passes, its jtreg name, its result and reason."
+                                ";; A test passing here and not in a run is a regression. bin/java-check --record writes it."
+                                "["]
+                               ;; a partial run (--only, --corpus, --essential) updates its tests' lines
+                               (let [now (into {} (for [[id _ r reason] rs] [id [r reason]]))
+                                     all (if partial? (merge rec now) now)]
+                                 (for [[id [r reason]] (sort-by key all)]
+                                   (str " [" (q id) " " (q (:test (tests id))) " " r " " (q reason) "]")))
+                               ["]"]))
+        (println (str "   recorded " f))))
+    (doseq [p @problems] (println (str "   " p)))
+    (shutdown-agents)
+    (System/exit (if (seq @problems) 1 0))))
+
+(defn -main [cmd & args]
+  (case cmd
+    "scan" (apply scan args)
+    "rename" (apply rename args)
+    "gather" (apply gather args)
+    "plan" (apply plan args)
+    "report" (apply report args))
+  (shutdown-agents)
+  (System/exit 0))

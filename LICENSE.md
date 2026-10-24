@@ -571,6 +571,16 @@ covers what.
   `abi` and the launcher's own package (the Eclipse Public License 1.0) and Go's runtime and
   standard library (Go's BSD 3-Clause License). A distribution of the box carries this file, as
   for the executables above.
+- `test/java/` (bin/java-check, Java's conformance check, doc/classes/JAVA-CONFORMANCE-SURVEY.md,
+  "As built: JC1"): its tools, data and the hand-curated programs of `test/java/jls/` are Arbace's
+  own, under the Eclipse Public License 1.0. jdk26u's jtreg tests are read in place from the
+  jdk26u checkout, not kept here, but for `test/java/forms/`: the essential subset's tests
+  (`test/java/essential.txt`) as Java forms, converted by repr/java from
+  https://github.com/openjdk/jdk26u at `baf63fb` (`test/`, each file put in a package of its own,
+  `package tNNNNN; ` before its first line; `test/java/forms/provenance.edn`; each form file's
+  first line names its source), under the GNU General Public License version 2 (the text below,
+  "OpenJDK (jdk26u)"), without the Classpath Exception, which jdk26u's `test/` does not carry.
+  They are inputs of the check, in no executable.
 - `seed/arbace-seed-go.tar.xz` (since S4, 2026-10-13; doc/STANDALONE-NOTES.md, "S4: the
   Go-source seed"): the seed of the bootstrap, Arbace's Go program as the Go-hosted fixpoint
   printed it, the source of the Go build's executables (above): the main package with its
