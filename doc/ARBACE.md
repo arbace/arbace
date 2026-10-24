@@ -21,7 +21,11 @@ code. Three kinds of things live here:
   declarations and scope tiers, `repr/java/decls.ae` and `scope.ae`, reimplement for the native trees
   parts of `comp/{Check,Resolve,TypeEnter,MemberEnter,Enter,ConstFold,Annotate,Attr,MatchBindingsComputer,Flow}.java`
   and `code/{Types,Symbol,Flags}.java` at the same commit (the functions each file's header and
-  LICENSE.md name), by hand on 2026-10-24, the files carrying their notice; "As built: JN9a";
+  LICENSE.md name), by hand on 2026-10-24, the files carrying their notice; "As built: JN9a"; and its
+  members and types tiers, `repr/java/expr.ae` and `types.ae`, with `decls.ae`'s generated members and
+  `nattr.ae`'s methods' `isMemberOf`, reimplement parts of `comp/{Attr,Operators,TypeEnter,Resolve}.java`
+  and `code/{Types,Symbol,Symtab}.java` at the same commit (LICENSE.md names the functions), by hand on
+  2026-10-24, the files carrying their notice; "As built: JN9b";
   `repr/java/classfile.ae`, `nattr.ae` are Arbace's own), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
   `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
   `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,

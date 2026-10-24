@@ -412,6 +412,24 @@ covers what.
   `comp/MatchBindingsComputer.java`, and `comp/Flow.java`'s `AliveAnalyzer` as far as the bindings'
   scopes need it: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License
   version 2 with the Classpath Exception (text below; each file carries the notice).
+- `arbace/repr/java/expr.ae` and `arbace/repr/java/types.ae` (repr/java's native attribution, its
+  members and types tiers, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9b"), and the generated
+  members and members' clones of `arbace/repr/java/decls.ae` and the methods' `isMemberOf` of
+  `arbace/repr/java/nattr.ae`: Arbace forms reimplementing, for the native parser's trees,
+  https://github.com/openjdk/jdk26u at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/`'s
+  `comp/Attr.java` (`visitIdent`, `visitSelect`, `selectSym`, `checkIdInternal`, `visitApply`,
+  `adjustMethodReturnType`, `checkMethod`'s unchecked erasure, `visitIndexed`, `visitParens`, `visitAssign`,
+  `visitAssignop`, `visitUnary`, `visitBinary`, `visitTypeCast`, `visitTypeTest`, `visitConditional`,
+  `isBooleanOrNumeric`, `condType`, `visitSwitchExpression`, `enumConstant`, `visitNewClass`'s and
+  `visitNewArray`'s types, `visitLiteral`), `comp/Operators.java` (the operator helpers, `unaryPromotion`,
+  `binaryPromotion`, `stringPromotion`), `code/Types.java` (`unboxedType`, `boxedClass`, `isSameType`,
+  `isSubtype`, `containsType`, `isAssignable`'s constants, `memberType`, `capture`, `glb`, `lub`,
+  `skipTypeVars`), `comp/TypeEnter.java` (`addEnumMembers`, `addRecordMembersIfNeeded`,
+  `BasicConstructorHelper`, `RecordConstructorHelper`), `comp/Resolve.java` (`findVar`'s and
+  `findFun`'s clones of imported members), `code/Symbol.java` (`MethodSymbol.isInheritedIn`,
+  `hiddenInInternal`, `isMemberOf`) and `code/Symtab.java` (`lengthVar`, `arrayCloneMethod`): Copyright (c)
+  Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath
+  Exception (text below; each file carries the notice).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`
