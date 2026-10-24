@@ -296,6 +296,43 @@
           :else own)))))
 
 ;;; ------------------------------------------------------------------------------------------
+;;; lub (Types.lub), for the cases with one minimal candidate
+
+(defn- erased-supers
+  "The classes of class type `t`'s supertypes (Types.closure of its erasure), `t`'s first."
+  [t]
+  (let [seen (java.util.LinkedHashSet.)]
+    (letfn [(walk [t] (when (and (class-t? t) (.add seen (:c t)))
+                        (walk (d/supertype (d/erasure t)))
+                        (run! walk (d/interfaces (d/erasure t)))))]
+      (walk t))
+    (vec seen)))
+
+(defn lub
+  "Types.lub of reference types `ts` (the null type left out) when it has one minimal erased candidate
+  and the arms' supertypes of it agree on its type arguments; nil otherwise (left to javac): the
+  intersection of several candidates and lci's merged arguments."
+  [reg ts]
+  (let [ts (remove #(= :null %) ts)
+        ts (map #(loop [t %] (if (tvar-t? t) (recur (upper-bound t)) t)) ts)]
+    (cond
+      (empty? ts) nil
+      (every? #(same-type? (first ts) %) ts) (first ts)
+      (every? class-t? ts)
+      (let [closures (map erased-supers ts)
+            common (filter (fn [c] (every? #(some (partial identical? c) %) (rest closures))) (first closures))
+            minimal (remove (fn [c] (some (fn [o] (and (not (identical? o c)) (d/as-super (d/this-type o) c))) common)) common)]
+        (when (= 1 (count minimal))
+          (let [c (first minimal)
+                sups (map #(d/as-super % c) ts)]
+            (cond
+              (some nil? sups) nil
+              (every? #(same-type? (first sups) %) sups) (first sups)
+              (not (d/generic-class? c)) (d/ctype c)
+              :else nil))))
+      :else nil)))
+
+;;; ------------------------------------------------------------------------------------------
 ;;; Attr.condType, for arms that are primitive or boxed
 
 (def ^:private prim-tags [:byte :char :short :int :long :float :double :boolean])
@@ -321,5 +358,6 @@
                         (map-indexed vector us))
                   (some (fn [cand] (when (every? #(prim-sub? % cand) us) cand)) prim-tags)))
             (let [bs (mapv #(if (prim? %) (boxed-type reg %) %) ts)]
-              (some (fn [[i t]] (when (every? (fn [[j u]] (or (= i j) (subtype? reg u t))) (map-indexed vector bs)) t))
-                    (map-indexed vector bs))))))))
+              (or (some (fn [[i t]] (when (every? (fn [[j u]] (or (= i j) (subtype? reg u t))) (map-indexed vector bs)) t))
+                        (map-indexed vector bs))
+                  (lub reg bs))))))))

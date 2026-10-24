@@ -312,6 +312,36 @@
       (= :class (:k t)) (:flat (:c t))
       :else (str t))))
 
+(def ^:private ^java.util.Map array-clones (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- array-clone
+  "Symtab's arrayCloneMethod: an array's clone(), of javac's array class (Array): ()Object (one per
+  registry)."
+  [reg]
+  (or (.get array-clones reg)
+      (do (.putIfAbsent array-clones reg
+                        (d/sym {:sk :method :name "clone" :owner (:owner array-length)
+                                :memo (doto (java.util.HashMap.)
+                                        (.put :type {:tparams [] :params [] :ret (d/object-type reg) :throws []})
+                                        (.put :tparams [])
+                                        (.put :flags (long d/PUBLIC)))}))
+          (.get array-clones reg))))
+
+(def ^:private ^java.util.Map clones (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- interface-clone
+  "Object's method `om` as a member of interface `c` (MethodSymbol.clone(c)): its flags and type, `c`
+  its owner; one per method and interface."
+  [om c]
+  (let [k [om c]]
+    (or (.get clones k)
+        (let [mt (d/method-type om) fl (d/method-flags om) tps (d/method-tparams om)
+              m (d/sym (assoc (.-m ^arbace.repr.java.decls.Sym om)
+                              :owner c :clone-of om
+                              :memo (doto (java.util.HashMap.) (.put :type mt) (.put :flags fl) (.put :tparams tps))))]
+          (.putIfAbsent clones k m)
+          (.get clones k)))))
+
 (defn nmethod
   "The native method symbol of javac's method symbol `js` (a method of a class the native registry
   holds, found by owner, name and erased parameter types), or nil. `canon` maps javac's symbols of the
@@ -325,10 +355,20 @@
           (let [oc (let [x (canon o)] (if (= :class (:sk x)) x (d/class-named (reg p) (str (.flatName ^Symbol$ClassSymbol o)))))
                 n (str (.-name js))
                 want (mapv erased-key (.getParameterTypes (.erasure js jt/*types*)))]
-            (when oc
-              (first (filter (fn [m] (and (= n (:name m))
-                                          (= want (mapv nerased-key (:params (d/method-type m))))))
-                             (:methods (d/members oc)))))))))))
+            (cond
+              (identical? o (.-arrayClass jt/*syms*)) (when (= "clone" n) (array-clone (reg p)))
+              oc
+              (or (first (filter (fn [m] (and (= n (:name m))
+                                              (= want (mapv nerased-key (:params (d/method-type m))))))
+                                 (:methods (d/members oc))))
+                  ;; Object's method as a member of an interface: javac's clone of it with the
+                  ;; interface as owner (MethodSymbol.clone, Resolve's)
+                  (when (d/interface? oc)
+                    (when-let [om (first (filter (fn [m] (and (= n (:name m))
+                                                              (= want (mapv nerased-key (:params (d/method-type m))))))
+                                                 (:methods (d/members (d/class-named (reg p) "java.lang.Object")))))]
+                      (interface-clone om oc))))
+              :else nil)))))))
 
 (defn method-of
   "The native method symbol of the method call APPLY `t` chose: javac's (overload resolution, the next
@@ -338,7 +378,7 @@
   (let [^JCTree j (.get ^IdentityHashMap (:twins p) (:meth t))
         js (when j (TreeInfo/symbol j))]
     (or (when (instance? Symbol$MethodSymbol js) (nmethod p #(na/canon p %) js))
-        (d/decline! "the call's method is not in the native model"))))
+        (d/decline! (str "the call's method is not in the native model: " (some-> js .-owner) "." js)))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions' types (Attr)
@@ -541,7 +581,7 @@
   (let [^com.sun.tools.javac.tree.JCTree$JCNewClass j (.get ^IdentityHashMap (:twins p) t)
         js (when j (.-constructor j))
         m (or (when (instance? Symbol$MethodSymbol js) (nmethod p #(na/canon p %) js))
-              (d/decline! "the constructor is not in the native model"))
+              (d/decline! (str "the call's method is not in the native model: " (some-> js .-owner) "." js)))
         _ (when (seq (:tparams (d/method-type m))) (d/decline! "a generic constructor (inferred)"))
         site (etype p t)
         mt (ty/member-type (reg p) site m)
@@ -659,7 +699,9 @@
     :INDEXED (let [at (etype p (:indexed t))
                    at (if (ty/tvar-t? at) (ty/upper-bound at) at)]
                (if (= :array (:k at))
-                 (let [e (:e at)] (if (= :var (role p t)) (ty/capture (reg p) e) e))
+                 ;; visitIndexed captures only where no value is expected (no context of the
+                 ;; converter's: KindSelector VAR contains VAL)
+                 (:e at)
                  (d/decline! "an indexed non-array")))
     (:LAMBDA :REFERENCE) (d/decline! "a lambda's or method reference's type (inferred)")
     :SWITCH_EXPRESSION (d/decline! "a switch expression's type")
@@ -691,4 +733,5 @@
 (defn econst
   "The constant value [kind value] of expression `t` (ConstFold over javac's constant types), or nil."
   [p t]
-  (d/const-value (env-of p t) t))
+  (when-not (enum-label p t)
+    (d/const-value (env-of p t) t)))
