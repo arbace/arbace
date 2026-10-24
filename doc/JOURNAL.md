@@ -1448,3 +1448,13 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   substitution and a `2>/dev/null` of its own. The essential gate on `350f1bab` passed (14m03s).
 - Decided (the user): JFS74 (a), JFS75 (b) first, JFS76 (a), JFS77 (a) (JFS75 (b), then JN9b),
   JFS78 (a); JFS75 (b) started now, on the branch `java-model` from main.
+
+## 2026-10-24: goi's items deferred from v1 started (the user)
+
+- Beside the five running agents (Go conversion speed, j2g's array casts, the Java conformance
+  survey, JFS75 (b)), the user chose (over Go text at the REPL, GPS11, and nothing more) goi's two
+  items deferred from `arbace-interprets-go1.27.1-v1`: GC157 (b), `byte`, `rune` and aliases as
+  written in the checker's messages (six errorcheck programs), and `go:embed`, GS14 (a) with
+  GC161 (b) (`embedfunc.go`, `embedvers.go`; the files read from the package's forms directory), on
+  the branch `goi-after-v1` from `d36a03c9`, in `arbace/go/` alone. The shipped program changes:
+  the batched re-seed.
