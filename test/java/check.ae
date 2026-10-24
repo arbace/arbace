@@ -520,10 +520,21 @@
 
 (defn- top-classes
   "The internal names of a Java forms file's top-level classes (as j2g's world reads them:
-  arbace.j2g.world/top-names): its in-ns's package, each defclass's name."
+  arbace.j2g.world/top-names): its in-ns's package, each defclass's name (the forms read, a
+  top-level do's too; a file the reader refuses, by its text)."
   [^String text]
-  (let [nsn (second (re-find #"\(in-ns\s+'([\w.$-]+)\)" text))]
-    (for [[_ n] (re-seq #"(?m)^\(defclass\s+(?:\^\S+\s+)*([\w.$]+)" text)]
+  (let [nsn (second (re-find #"\(in-ns\s+'([\w.$-]+)\)" text))
+        forms (try (with-open [r (PushbackReader. (java.io.StringReader. text))]
+                     (binding [*read-eval* false]
+                       (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof :read-cond :allow} r))))))
+                   (catch Throwable _ nil))
+        names (if forms
+                (for [f forms
+                      f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
+                      :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))) (symbol? (second f)))]
+                  (str (second f)))
+                (map second (re-seq #"(?m)^\(defclass\s+(?:\^(?:\{[^}]*\}|\S+)\s+)*([\w.$]+)" text)))]
+    (for [n names]
       (if (str/includes? n ".")
         (str/replace n "." "/")
         (str (when nsn (str (str/replace nsn "." "/") "/")) n)))))
@@ -596,8 +607,10 @@
   "The tests a failure names: by its class (its top-level class's owners), a forms file, or the
   Go names (J_...) in its text, each the owners' whose Go name it starts with."
   [ix ^String n ^String msg]
-  (let [top (first (str/split (str n) #"\$"))
-        by-class (get-in ix ["class" top])
+  (let [top (first (str/split (str n) #"[$.]"))
+        ;; the internal names in the failure's text (p/C, p/C$D, p/C.m()I: their top-level classes)
+        tops (cons top (for [t (re-seq #"[\w$]+(?:/[\w$]+)+" (str n " " msg))] (first (str/split t #"\$"))))
+        by-class (set (mapcat #(get-in ix ["class" %]) tops))
         by-file (some (fn [[rel ids]] (when (str/ends-with? (str n) (str "/" rel)) ids)) (get ix "file"))
         gos (get ix "go")
         by-go (set (for [tok (re-seq #"J_[A-Za-z0-9_]+" (str n " " msg))
@@ -638,7 +651,20 @@
                    :let [[_ path msg] (re-matches #"^(\S+?\.(?:go|ae)):\d+(?::\d+)?: (.*)$" l)]
                    :when path]
                [(let [b (.getName (io/file path))] (str/replace b #"(_j2g)?\.(go|ae)$" "")) msg])
-        errs (for [[stem msg] errs] [stem (str stem ": " msg)])]
+        ;; a JDK class a test extends becomes a non-leaf class (its Go interface type C_I, J2G-SPEC
+        ;; §5.3) that jrt's own code or j2g's support for it takes as a leaf (*C): the error is in
+        ;; jrt's files; the tests whose forms extend C are blamed (their files' Go stems added)
+        ids (lines (str shard "/built.txt"))
+        texts (delay (vec (for [id ids
+                                [rel text] (form-files (str/trim (slurp (io/file work "run" id "forms.dir"))))]
+                            [rel text])))
+        extenders (fn [c] (for [[rel text] @texts
+                                :when (re-find (re-pattern (str ":extends\\s+(?:[\\w.]+\\.)?" c "\\b")) text)]
+                            (go-stem (subs rel 0 (- (count rel) 3)) true)))
+        errs (for [[stem msg] errs
+                   :let [cs (distinct (map second (re-seq #"\b([A-Z]\w*)_I\b" msg)))
+                         ext (when (and (seq cs) (not (str/starts-with? stem "J_"))) (mapcat extenders cs))]]
+               [stem (str stem ": " msg (when (seq ext) (str " (extended by " (str/join " " (distinct ext)) ")")))])]
     (refuse! shard (owner-index work shard) errs "Go does not compile: ")))
 
 (defn -main [cmd & args]
