@@ -180,8 +180,13 @@
   max-errors printed, then gc's FILE:LINE: too many errors at the last one's position. raw:
   the forms are repr/go's raw forms of an invalid program (doc/go/CONVERTER-NOTES.md, \"Raw
   forms\"; doc/go/GO-PARSER-SURVEY.md GP6, GPS9 (b)), checked in the checker's resolve mode
-  (GOI-SPEC.md §3.10), its answers dropped."
-  [root ^File pf lang max-errors raw]
+  (GOI-SPEC.md §3.10), its answers dropped. front: the Go file the forms are of, whose errors of
+  gc's front end beside its type checker come from gc's syntax and noder's port
+  (arbace.repr.go.syntax, doc/go/GO-PARSER-SURVEY.md GPS39 (b), GPS41 (c)): the parse's (its
+  branch checks, noder's pragmas') in place of the checker's own branch errors (types2's
+  IgnoreBranchErrors), merged by position; when there are none and the checker reports none,
+  the declarations' checks of noder's writer (decl-errors)."
+  [root ^File pf lang max-errors raw front]
   (let [src (cond-> (load/package-source {:dir root} nil @repl/config pf)
               lang (assoc-in [:config :lang] lang)
               raw (-> (update :files (fn [fs] (mapv #(cond-> (update % :decls (fn [ds] (mapv raw-lines ds)))
@@ -200,7 +205,8 @@
     ;; as gc prints them (base.FlushErrors): sorted by position (the checker's are, by file and
     ;; line), an error equal to the one before it printed once; the converter's annotations are
     ;; go/types' over an invalid program, their disagreements not the program's errors
-    (let [errs (remove #(= :AnnotationMismatch (:code %)) errs)
+    (let [errs (cond->> (remove #(= :AnnotationMismatch (:code %)) errs)
+                 front (remove #(= :BranchError (:code %))))
           ;; gc's noder: a language version error names the version's origin
           file-lang (into {} (for [fi (:files src)] [(:name fi) (get-in fi [:opts :lang])]))
           vmsg (fn [e]
@@ -210,7 +216,20 @@
                        (str m " (file declares //go:build " fl ")")
                        (str m " (-lang was set to " (or lang (get-in src [:config :lang])) "; check go.mod)"))
                      m)))
-          lines (dedupe (for [e errs] (str (:file e) ":" (:line e) ": " (vmsg e))))
+          lines (for [e errs] (str (:file e) ":" (:line e) ": " (vmsg e)))
+          lines (if front
+                  (let [_ (require 'arbace.repr.go.syntax)
+                        name (.getName (File. ^String front))
+                        noder (:lines ((resolve 'arbace.repr.go.syntax/file-errors) front name))
+                        ;; base.FlushErrors: sorted by position (file, line), stable
+                        pos (fn [^String l] (let [[_ f n] (re-find #"^(.*?):([0-9]+): " l)]
+                                              [(or f "") (if n (Long/parseLong n) 0)]))
+                        merged (sort-by pos (concat lines noder))]
+                    (if (seq merged)
+                      merged
+                      ((resolve 'arbace.repr.go.syntax/decl-errors) front name lang)))
+                  lines)
+          lines (dedupe lines)
           ;; gc's base.ErrorfAt: at the max-errors-th error (after its repeats are dropped) the
           ;; errors are flushed and the compilation ends with too many errors at its position
           lines (if (and max-errors (>= (count lines) max-errors))
@@ -224,9 +243,10 @@
 
 (defn -main
   "bin/goi run's Arbace side: ROOT NS [ARG...]; --errorcheck [--lang goV] [--max-errors N] [--raw]
-  ROOT NS: the package's errors (errorcheck), checked at language version goV (gc's -lang) when
-  given, at most N of them then gc's too many errors (gc without -e); --raw: ROOT holds repr/go's
-  raw forms of the program (GP6), checked in the resolve mode."
+  [--gc-front FILE] ROOT NS: the package's errors (errorcheck), checked at language version goV
+  (gc's -lang) when given, at most N of them then gc's too many errors (gc without -e); --raw: ROOT
+  holds repr/go's raw forms of the program (GP6), checked in the resolve mode; --gc-front: the
+  errors of gc's front end beside its type checker from FILE, the program's Go file (GPS41 (c))."
   [& args]
   (when (= "--errorcheck" (first args))
     (let [[opts args] (loop [opts {} as (rest args)]
@@ -234,12 +254,13 @@
                           "--lang" (recur (assoc opts :lang (second as)) (drop 2 as))
                           "--max-errors" (recur (assoc opts :max (Long/parseLong (second as))) (drop 2 as))
                           "--raw" (recur (assoc opts :raw true) (rest as))
+                          "--gc-front" (recur (assoc opts :front (second as)) (drop 2 as))
                           [opts as]))
           lang (:lang opts)
           [root ns-name] args
           pf (File. (str root "/" (load/ns->file ns-name)))]
       (when-not (.isFile pf) (fail 126 "error" (str "no package file " pf)))
-      (System/exit (int (try (errorcheck root pf lang (:max opts) (:raw opts))
+      (System/exit (int (try (errorcheck root pf lang (:max opts) (:raw opts) (:front opts))
                              (catch Throwable ex
                                (let [d (ex-data ex)
                                      u (or (:goi/unsupported d)

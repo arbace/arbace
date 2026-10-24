@@ -1,46 +1,600 @@
+;; The pragma handling ported from src/cmd/compile/internal/noder (noder.go, lex.go, writer.go)
+;; and ir/node.go of TamaGo's go1.27.1 tree:
+;; Copyright 2009, 2016 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
 (in-ns 'go.arbace.repr.go.gcsyntax)
 
-(go/file "errors.go"
-  :doc "Package gcsyntax reports a Go file's syntax errors as gc does: cmd/compile/internal/syntax's, kept and ordered as gc's base.ErrorfAt and base.FlushErrors keep and order them (doc/go/GO-PARSER-SURVEY.md GP6).\n"
-  :imports [[bytes "bytes"] [os "os"] [sort "sort"] [strconv "strconv"] [strings "strings"]
-            [syntax "arbace/repr/go/internal/syntax"]])
+(go/file "errors.go" :doc "Package gcsyntax reports a Go file's errors of gc's front end that come before and beside its type checker, as gc reports them: cmd/compile/internal/syntax's (the parse, its branch checks), noder's pragmas', and the declarations' checks of noder's writer, kept and ordered as gc's base.ErrorfAt and base.FlushErrors keep and order them (doc/go/GO-PARSER-SURVEY.md GP6, GPS41 (c)).\n\nThe pragma handler, checkUnusedDuringParse, pragcgo and their helpers are ported from TamaGo's go1.27.1 src/cmd/compile/internal/noder/noder.go and lex.go, the declarations' checks from writer.go's collectDecls, checkPragmas and funcExt, and the pragma flags from ir/node.go, for gc compiling a package p (-p=p) for linux/amd64 outside the standard library and the runtime, no GOEXPERIMENT.\n" :imports [
+    [bytes "bytes"]
+    [fmt "fmt"]
+    [os "os"]
+    [filepath "path/filepath"]
+    [sort "sort"]
+    [strconv "strconv"]
+    [strings "strings"]
+    [unicode "unicode"]
+    [utf8 "unicode/utf8"]
 
-(go/type serr (struct ^uint line ^uint col ^string msg))
+    [syntax "arbace/repr/go/internal/syntax"]])
 
-(go/func Errors "Errors parses the Go file at path as gc's noder does (syntax.Parse, its errors to a handler, CheckBranches) and returns its errors as gc prints them with -C, a line each, name:LINE: MESSAGE, after a first character S when one of them is a syntax error (gc stops after the parse), else -.\n"
-  ^string [^string path ^string name]
-  (let [(values src err) (os/ReadFile path)]
-    (when (!= err nil) (return (+ "-" name ": " (.Error err) "\n")))
-    (let [errs (make (slice serr) 0)
-          syn false
-          lastSyntax (conv uint 0)
-          lastOther (conv uint 0)
-          lastMsg ""
-          h (fn [^error e]
-              (let [se (assert syntax/Error e)
-                    line (.Line (.-Pos se))
-                    msg (.-Msg se)]
-                ;; base.ErrorfAt: one syntax error per line, one of equal other errors
-                (cond
-                  (strings/HasPrefix msg "syntax error")
-                  (do (when (and (!= lastSyntax 0) (== line lastSyntax)) (return))
-                      (set! lastSyntax line)
-                      (set! syn true))
-                  :else
-                  (do (when (and (!= lastOther 0) (== line lastOther) (== msg lastMsg)) (return))
-                      (set! lastOther line)
-                      (set! lastMsg msg)))
-                (set! errs (append errs (lit serr :line line :col (.Col (.-Pos se)) :msg msg)))))]
-      (syntax/Parse (syntax/NewFileBase path) (bytes/NewReader src) h nil syntax/CheckBranches)
-      ;; base.FlushErrors: sorted by position, an error equal to the one before it once
-      (sort/SliceStable errs (fn ^bool [^int i ^int j]
-                               (let [a (aget errs i) b (aget errs j)]
-                                 (or (< (.-line a) (.-line b))
-                                     (and (== (.-line a) (.-line b)) (< (.-col a) (.-col b)))))))
-      (let [out "" prev ""]
-        (range [_ e errs]
-          (let [l (+ name ":" (strconv/FormatUint (conv uint64 (.-line e)) 10) ": " (.-msg e) "\n")]
-            (when (!= l prev) (set! out + l))
-            (set! prev l)))
-        (when syn (return (+ "S" out)))
-        (+ "-" out)))))
+(go/const ^{:val 2 :doc "Revision is the driver's revision, raised with every change to it: arbace.repr.go.syntax runs the checkout's driver, interpreted by goi, when a program's compiled one is of another revision (the tools' host built before the change).\n"} Revision 2)
+
+(go/const "gc's configuration: base.Ctxt.Pkgpath, buildcfg.GOOS and GOARCH\n"
+  [^{:val "p"} pkgpath "p"]
+  [^{:val "linux"} goos "linux"]
+  [^{:val "amd64"} goarch "amd64"])
+
+(go/type serr (struct
+    ^{:tag uint} line
+    ^{:tag uint} col
+    ^{:tag string} msg))
+
+(go/type errorList "errorList keeps errors as base.ErrorfAt does: one syntax error per line, one of equal other errors per line.\n" (struct
+    ^{:tag (slice serr)} errs
+    ^{:tag bool} syn
+    ^{:tag uint} lastSyntax
+    ^{:tag uint} lastOther
+    ^{:tag string} lastMsg))
+
+(go/method add [^{:tag (* errorList)} l ^syntax/Pos pos ^string msg]
+  (let [line (.Line pos)]
+    (if (strings/HasPrefix msg "syntax error") (do
+        (when (and (!= (.-lastSyntax l) 0) (== line (.-lastSyntax l)))
+          (return))
+
+        (set! (.-lastSyntax l) line)
+        (set! (.-syn l) true))
+      (do
+        (when (and (!= (.-lastOther l) 0) (== line (.-lastOther l)) (== msg (.-lastMsg l)))
+          (return))
+
+        (set! (.-lastOther l) line)
+        (set! (.-lastMsg l) msg)))
+
+    (set! (.-errs l) (append (.-errs l) (lit serr :line line :col (.Col pos) :msg msg)))))
+
+(go/method text "text: the errors as base.FlushErrors prints them with -C (sorted by position, an error equal to the one before it once), a line each, name:LINE: MESSAGE.\n" ^string [^{:tag (* errorList)} l ^string name]
+  (let [errs (.-errs l)]
+    (sort/SliceStable errs (fn ^bool [^int i ^int j]
+        (let [(values a b) (values (aget errs i) (aget errs j))]
+          (or (< (.-line a) (.-line b)) (and (== (.-line a) (.-line b)) (< (.-col a) (.-col b)))))))
+
+    (let [out ""
+        prev ""]
+      (range [_ e errs]
+        (let [s (+ name ":" (strconv/FormatUint (conv uint64 (.-line e)) 10) ": " (.-msg e) "\n")]
+          (when (!= s prev)
+            (set! out + s))
+
+          (set! prev s)))
+
+      out)))
+
+(go/const "pragma flags (ir.PragmaFlag)\n"
+  [^{:tag uint16 :val 1} Nointerface (<< 1 iota)]
+  [^{:val 2} Noescape]
+  [^{:val 4} Norace]
+  [^{:val 8} Nosplit]
+  [^{:val 16} Noinline]
+  [^{:val 32} NoCheckPtr]
+  [^{:val 64} CgoUnsafeArgs]
+  [^{:val 128} UintptrKeepAlive]
+  [^{:val 256} UintptrEscapes]
+  [^{:val 512} Systemstack]
+  [^{:val 1024} Nowritebarrier]
+  [^{:val 2048} Nowritebarrierrec]
+  [^{:val 4096} Yeswritebarrierrec]
+  [^{:val 8192} GoBuildPragma]
+  [^{:val 16384} RegisterParams])
+
+(go/const ^{:val 24575} funcPragmas (bit-or Nointerface Noescape Norace Nosplit Noinline NoCheckPtr RegisterParams CgoUnsafeArgs UintptrKeepAlive UintptrEscapes Systemstack Nowritebarrier Nowritebarrierrec Yeswritebarrierrec))
+
+(go/type pragmas "pragmas: the value stored in a syntax.Pragma during parsing (noder's *pragmas).\n" (struct
+    ^{:tag uint16} Flag
+    ^{:tag (slice pragmaPos)} Pos
+    ^{:tag (slice pragmaEmbed)} Embeds
+    ^{:tag (* syntax/Pos)} WasmImport
+    ^{:tag (* syntax/Pos)} WasmExport))
+
+(go/type pragmaPos (struct
+    ^{:tag uint16} Flag
+    ^{:tag syntax/Pos} Pos))
+
+(go/type pragmaEmbed (struct
+    ^{:tag syntax/Pos} Pos
+    ^{:tag (slice string)} Patterns))
+
+(go/type linkname (struct
+    ^{:tag syntax/Pos} pos
+    ^{:tag bool} std
+    ^{:tag string} local
+    ^{:tag string} remote))
+
+(go/type noder "noder: a file's parse (noder's noder).\n" (struct
+    ^{:tag errorList} errs
+    ^{:tag (* syntax/File)} file
+    ^{:tag (slice linkname)} linknames
+    ^{:tag (slice (slice string))} pragcgobuf))
+
+(go/method error [^{:tag (* noder)} p ^error err]
+  (let [e (assert syntax/Error err)]
+    (.add (.-errs p) (.-Pos e) (.-Msg e))))
+
+(go/func pragmaFlag ^uint16 [^string verb]
+  (switch verb
+    (case ["go:build"]
+      (return GoBuildPragma))
+    (case ["go:nointerface"])
+    ;; buildcfg.Experiment.FieldTrack: off
+    (case ["go:noescape"]
+      (return Noescape))
+    (case ["go:norace"]
+      (return Norace))
+    (case ["go:nosplit"]
+      (return (bit-or Nosplit NoCheckPtr)))
+    (case ["go:noinline"]
+      (return Noinline))
+    (case ["go:nocheckptr"]
+      (return NoCheckPtr))
+    (case ["go:systemstack"]
+      (return Systemstack))
+    (case ["go:nowritebarrier"]
+      (return Nowritebarrier))
+    (case ["go:nowritebarrierrec"]
+      (return (bit-or Nowritebarrierrec Nowritebarrier)))
+    (case ["go:yeswritebarrierrec"]
+      (return Yeswritebarrierrec))
+    (case ["go:cgo_unsafe_args"]
+      (return (bit-or CgoUnsafeArgs NoCheckPtr)))
+    (case ["go:uintptrkeepalive"]
+      (return UintptrKeepAlive))
+    (case ["go:uintptrescapes"]
+      (return (bit-or UintptrEscapes UintptrKeepAlive)))
+    (case ["go:registerparams"]
+      (return RegisterParams)))
+
+  0)
+
+(go/method checkUnusedDuringParse [^{:tag (* noder)} p ^{:tag (* pragmas)} pragma]
+  (range [_ pos (.-Pos pragma)]
+    (when (!= (bit-and (.-Flag pos) (.-Flag pragma)) 0)
+      (.error p (lit syntax/Error :Pos (.-Pos pos) :Msg "misplaced compiler directive"))))
+
+  (when (> (len (.-Embeds pragma)) 0)
+    (range [_ e (.-Embeds pragma)]
+      (.error p (lit syntax/Error :Pos (.-Pos e) :Msg "misplaced go:embed directive"))))
+
+  (when (!= (.-WasmImport pragma) nil)
+    (.error p (lit syntax/Error :Pos @(.-WasmImport pragma) :Msg "misplaced go:wasmimport directive")))
+
+  (when (!= (.-WasmExport pragma) nil)
+    (.error p (lit syntax/Error :Pos @(.-WasmExport pragma) :Msg "misplaced go:wasmexport directive"))))
+
+(go/method pragma "pragma: noder's pragma handler (base.Flag.Std and base.Flag.CompilingRuntime false, GOARCH not wasm).\n" ^syntax/Pragma [^{:tag (* noder)} p ^syntax/Pos pos ^bool blankLine ^string text ^syntax/Pragma old]
+  (let [(values pragma _) (assert (* pragmas) old)]
+    (when (== pragma nil)
+      (set! pragma (new pragmas)))
+
+    (when (== text "")
+      ;; unused pragma; only called with old != nil.
+      (.checkUnusedDuringParse p pragma)
+      (return nil))
+
+    (when (strings/HasPrefix text "line ")
+      ;; line directives are handled by syntax package
+      (panic "unreachable"))
+
+    (when (not blankLine)
+      ;; directive must be on line by itself
+      (.error p (lit syntax/Error :Pos pos :Msg "misplaced compiler directive"))
+      (return pragma))
+
+    (switch
+      (case [(strings/HasPrefix text "go:wasmimport ")]
+        (let [f (strings/Fields text)]
+          (when (!= (len f) 3)
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:wasmimport importmodule importname"))
+            (break))
+
+          (when (== goarch "wasm")
+            (set! (.-WasmImport pragma) (addr pos)))))
+
+      (case [(strings/HasPrefix text "go:wasmexport ")]
+        (let [f (strings/Fields text)]
+          (when (!= (len f) 2)
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:wasmexport exportname"))
+            (break))
+
+          (when (== goarch "wasm")
+            (set! (.-WasmExport pragma) (addr pos)))))
+
+      (case [(strings/HasPrefix text "go:linkname ") (strings/HasPrefix text "go:linknamestd ")]
+        (let [f (strings/Fields text)]
+          (when (not (and (<= 2 (len f)) (<= (len f) 3)))
+            (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "usage: //%s localname [linkname]" (aget f 0))))
+            (break))
+
+          (let [^string target (zero string)]
+            (if (== (len f) 3)
+              (set! target (aget f 2))
+
+              (set! target (+ pkgpath "." (aget f 1))))
+
+            (set! (.-linknames p) (append (.-linknames p) (lit linkname pos (== (aget f 0) "go:linknamestd") (aget f 1) target))))))
+
+      (case [(== text "go:embed") (strings/HasPrefix text "go:embed ")]
+        (let [(values args err) (parseGoEmbed (subslice text (len "go:embed")))]
+          (when (!= err nil)
+            (.error p (lit syntax/Error :Pos pos :Msg (.Error err))))
+
+          (when (== (len args) 0)
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:embed pattern..."))
+            (break))
+
+          (set! (.-Embeds pragma) (append (.-Embeds pragma) (lit pragmaEmbed pos args)))))
+
+      (case [(strings/HasPrefix text "go:cgo_import_dynamic ")]
+        ;; This is permitted for general use because Solaris
+        ;; code relies on it in golang.org/x/sys/unix and others.
+        (let [fields (pragmaFields text)]
+          (when (>= (len fields) 4)
+            (let [lib (strings/Trim (aget fields 3) "\"")]
+              (when (and (!= lib "") (not (safeArg lib)) (not (isCgoGeneratedFile pos)))
+                (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "invalid library name %q in cgo_import_dynamic directive" lib))))
+
+              (.pragcgo p pos text)
+              (set! (.-Flag pragma) bit-or (pragmaFlag "go:cgo_import_dynamic"))
+              (break)))
+
+          (.pragmaCgo p pos text pragma)))
+      (case [(strings/HasPrefix text "go:cgo_")]
+        (.pragmaCgo p pos text pragma))
+      (default
+        (.pragmaVerb p pos text pragma)))
+
+    pragma))
+
+(go/method pragmaCgo "pragmaCgo: noder's case \"go:cgo_\" and its fallthrough to the default.\n" [^{:tag (* noder)} p ^syntax/Pos pos ^string text ^{:tag (* pragmas)} pragma]
+  ;; For security, we disallow //go:cgo_* directives other
+  ;; than cgo_import_dynamic outside cgo-generated files.
+  (when (not (isCgoGeneratedFile pos))
+    (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "//%s only allowed in cgo-generated code" text))))
+
+  (.pragcgo p pos text)
+  (.pragmaVerb p pos text pragma)) ; because of //go:cgo_unsafe_args
+
+(go/method pragmaVerb "pragmaVerb: noder's default case (base.Flag.CompilingRuntime and base.Flag.Std false).\n" [^{:tag (* noder)} p ^syntax/Pos pos ^string text ^{:tag (* pragmas)} pragma]
+  (let [verb text]
+    (when [i (strings/Index text " ")] (>= i 0)
+      (set! verb (subslice verb _ i)))
+
+    (let [flag (pragmaFlag verb)
+        ^:const ^{:val 7680} runtimePragmas (bit-or Systemstack Nowritebarrier Nowritebarrierrec Yeswritebarrierrec)]
+      (when (!= (bit-and flag runtimePragmas) 0)
+        (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "//%s only allowed in runtime" verb))))
+
+      (when (== flag UintptrKeepAlive)
+        (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "//%s is only allowed in the standard library" verb))))
+
+      (set! (.-Flag pragma) bit-or flag)
+      (set! (.-Pos pragma) (append (.-Pos pragma) (lit pragmaPos flag pos))))))
+
+(go/func isCgoGeneratedFile "isCgoGeneratedFile reports whether pos is in a file generated by cgo, a file whose name begins with \"_cgo_\".\n" ^bool [^syntax/Pos pos]
+  (strings/HasPrefix (filepath/Base (.Filename (.Base (.Pos (.Base pos))))) "_cgo_"))
+
+(go/func safeArg "safeArg reports whether arg is a \"safe\" command-line argument.\n" ^bool [^string name]
+  (when (== name "")
+    (return false))
+
+  (let [c (aget name 0)]
+    (or (and (<= \0 c) (<= c \9)) (and (<= \A c) (<= c \Z)) (and (<= \a c) (<= c \z)) (== c \.) (== c \_) (== c \/) (>= c utf8/RuneSelf))))
+
+(go/func parseGoEmbed "parseGoEmbed parses the text following \"//go:embed\" to extract the glob patterns.\n" [^string args] :results [(slice string) error]
+  (let [^{:tag (slice string)} list (zero (slice string))]
+    (for [(set! args (strings/TrimSpace args))] (!= args "") (set! args (strings/TrimSpace args))
+      (let [^string path (zero string)]
+        (label :Switch
+          (switch (aget args 0)
+            (default
+              (let [i (len args)]
+                (range [j c args]
+                  (when (unicode/IsSpace c)
+                    (set! i j)
+                    (break)))
+
+                (set! path (subslice args _ i))
+                (set! args (subslice args i))))
+
+            (case [\`]
+              (let [i (strings/Index (subslice args 1) "`")]
+                (when (< i 0)
+                  (return nil (fmt/Errorf "invalid quoted string in //go:embed: %s" args)))
+
+                (set! path (subslice args 1 (+ 1 i)))
+                (set! args (subslice args (+ 1 i 1)))))
+
+            (case [\"]
+              (let [i 1]
+                (for [] (< i (len args)) (inc! i)
+                  (when (== (aget args i) \\)
+                    (inc! i)
+                    (continue))
+
+                  (when (== (aget args i) \")
+                    (let [(values q err) (strconv/Unquote (subslice args _ (+ i 1)))]
+                      (when (!= err nil)
+                        (return nil (fmt/Errorf "invalid quoted string in //go:embed: %s" (subslice args _ (+ i 1)))))
+
+                      (set! path q)
+                      (set! args (subslice args (+ i 1)))
+                      (break :Switch))))
+
+                (when (>= i (len args))
+                  (return nil (fmt/Errorf "invalid quoted string in //go:embed: %s" args)))))))
+
+        (when (!= args "")
+          (let [(values r _) (utf8/DecodeRuneInString args)]
+            (when (not (unicode/IsSpace r))
+              (return nil (fmt/Errorf "invalid quoted string in //go:embed: %s" args)))))
+
+        (set! list (append list path))))
+
+    (return list nil)))
+
+(go/func isSpace ^bool [^rune c]
+  (or (== c \space) (== c \tab) (== c \newline) (== c \return)))
+
+(go/func isQuoted ^bool [^string s]
+  (and (>= (len s) 2) (== (aget s 0) \") (== (aget s (- (len s) 1)) \")))
+
+(go/method pragcgo "pragcgo: lex.go's (buildcfg.GOOS linux).\n" [^{:tag (* noder)} p ^syntax/Pos pos ^string text]
+  (let [f (pragmaFields text)
+
+      verb (strings/TrimPrefix (aget f 0) "go:")]
+    (aset f 0 verb)
+
+    (switch verb
+      (case ["cgo_export_static" "cgo_export_dynamic"]
+        (switch
+          (case [(and (== (len f) 2) (not (isQuoted (aget f 1))))])
+          (case [(and (== (len f) 3) (not (isQuoted (aget f 1))) (not (isQuoted (aget f 2))))])
+          (default
+            (.error p (lit syntax/Error :Pos pos :Msg (fmt/Sprintf "usage: //go:%s local [remote]" verb)))
+            (return))))
+
+      (case ["cgo_import_dynamic"]
+        (switch
+          (case [(and (== (len f) 2) (not (isQuoted (aget f 1))))])
+          (case [(and (== (len f) 3) (not (isQuoted (aget f 1))) (not (isQuoted (aget f 2))))])
+          (case [(and (== (len f) 4) (not (isQuoted (aget f 1))) (not (isQuoted (aget f 2))) (isQuoted (aget f 3)))]
+            (aset f 3 (strings/Trim (aget f 3) "\""))
+            (when (and (== goos "aix") (!= (aget f 3) ""))
+              (let [n (strings/Split (aget f 3) "/")]
+                (when (or (!= (len n) 2) (not (strings/HasSuffix (aget n 0) ".a")) ^:go/paren (and (not (strings/HasSuffix (aget n 1) ".o")) (not (strings/Contains (aget n 1) ".so."))))
+                  (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:cgo_import_dynamic local [remote [\"lib.a/object.o\"]]"))
+                  (return)))))
+
+          (default
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:cgo_import_dynamic local [remote [\"library\"]]"))
+            (return))))
+
+      (case ["cgo_import_static"]
+        (switch
+          (case [(and (== (len f) 2) (not (isQuoted (aget f 1))))])
+          (default
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:cgo_import_static local"))
+            (return))))
+
+      (case ["cgo_dynamic_linker"]
+        (switch
+          (case [(and (== (len f) 2) (isQuoted (aget f 1)))]
+            (aset f 1 (strings/Trim (aget f 1) "\"")))
+          (default
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:cgo_dynamic_linker \"path\""))
+            (return))))
+
+      (case ["cgo_ldflag"]
+        (switch
+          (case [(and (== (len f) 2) (isQuoted (aget f 1)))]
+            (aset f 1 (strings/Trim (aget f 1) "\"")))
+          (default
+            (.error p (lit syntax/Error :Pos pos :Msg "usage: //go:cgo_ldflag \"arg\""))
+            (return))))
+
+      (default
+        (return)))
+
+    (set! (.-pragcgobuf p) (append (.-pragcgobuf p) f))))
+
+(go/func pragmaFields "pragmaFields is similar to strings.FieldsFunc(s, isSpace) but does not split when inside double quoted regions and always splits before the start and after the end of a double quoted region.\n" ^{:tag (slice string)} [^string s]
+  (let [^{:tag (slice string)} a (zero (slice string))
+      inQuote false
+      fieldStart -1] ; Set to -1 when looking for start of field.
+    (range [i c s]
+      (switch
+        (case [(== c \")]
+          (if inQuote (do
+              (set! inQuote false)
+              (set! a (append a (subslice s fieldStart (+ i 1))))
+              (set! fieldStart -1))
+            (do
+              (set! inQuote true)
+              (when (>= fieldStart 0)
+                (set! a (append a (subslice s fieldStart i))))
+
+              (set! fieldStart i))))
+
+        (case [(and (not inQuote) (isSpace c))]
+          (when (>= fieldStart 0)
+            (set! a (append a (subslice s fieldStart i)))
+            (set! fieldStart -1)))
+
+        (default
+          (when (== fieldStart -1)
+            (set! fieldStart i)))))
+
+    (when (and (not inQuote) (>= fieldStart 0)) ; Last field might end at the end of the string.
+      (set! a (append a (subslice s fieldStart))))
+
+    a))
+
+(go/func parse "parse parses the Go file at path as gc's noder does (noder.LoadPackage: syntax.Parse with its errors to a handler, noder's pragma handler, CheckBranches).\n" ^{:tag (* noder)} [^string path]
+  (let [p (addr (lit noder))
+      (values src err) (os/ReadFile path)]
+    (when (!= err nil)
+      (.error p (lit syntax/Error :Msg (.Error err)))
+      (return p))
+
+    (set! (values (.-file p) _) (syntax/Parse (syntax/NewFileBase path) (bytes/NewReader src) (.-error p) (.-pragma p) syntax/CheckBranches))
+    p))
+
+(go/func Errors "Errors parses the Go file at path as gc's noder does (syntax.Parse, its errors to a handler, noder's pragma handler, CheckBranches) and returns its errors as gc prints them with -C, a line each, name:LINE: MESSAGE, after a first character S when one of them is a syntax error (gc stops after the parse), else -.\n" ^string [^string path ^string name]
+  (let [p (parse path)]
+    (when (.-syn (.-errs p))
+      (return (+ "S" (.text (.-errs p) name))))
+
+    (+ "-" (.text (.-errs p) name))))
+
+(go/type collector "collector: writer.go's declCollector, its checks of pragmas and go:embed.\n" (struct
+    ^{:tag (* errorList)} errs
+    ^{:tag int} minor
+    ^{:tag string} lang
+    ^{:tag bool} withinFunc
+    ^{:tag (* bool)} importedEmbed
+    ^{:tag (* bool)} importedUnsafe
+    ^{:tag (* (slice (* syntax/FuncDecl)))} funcs))
+
+(go/method checkPragmas [^collector c ^syntax/Pragma p ^uint16 allowed ^bool embedOK]
+  (when (== p nil)
+    (return))
+
+  (let [pragma (assert (* pragmas) p)]
+    (range [_ pos (.-Pos pragma)]
+      (when (!= (bit-and-not (.-Flag pos) allowed) 0)
+        (.add (.-errs c) (.-Pos pos) "misplaced compiler directive")))
+
+    (when (not embedOK)
+      (range [_ e (.-Embeds pragma)]
+        (.add (.-errs c) (.-Pos e) "misplaced go:embed directive")))))
+
+(go/method Visit ^syntax/Visitor [^collector c ^syntax/Node n]
+  (type-switch [n n]
+    (case [(* syntax/File)]
+      (.checkPragmas c (.-Pragma n) GoBuildPragma false))
+    (case [(* syntax/ImportDecl)]
+      (.checkPragmas c (.-Pragma n) 0 false)
+      (when (!= (.-Path n) nil)
+        (when [(values path err) (strconv/Unquote (.-Value (.-Path n)))] (== err nil)
+          (switch path
+            (case ["embed"]
+              (set! @(.-importedEmbed c) true))
+            (case ["unsafe"]
+              (set! @(.-importedUnsafe c) true))))))
+
+    (case [(* syntax/ConstDecl)]
+      (.checkPragmas c (.-Pragma n) 0 false))
+    (case [(* syntax/FuncDecl)]
+      (.checkPragmas c (.-Pragma n) funcPragmas false)
+      (set! @(.-funcs c) (append @(.-funcs c) n)))
+    (case [(* syntax/TypeDecl)]
+      (.checkPragmas c (.-Pragma n) 0 false))
+    (case [(* syntax/VarDecl)]
+      (.checkPragmas c (.-Pragma n) 0 true)
+      (when [(values p ok) (assert (* pragmas) (.-Pragma n))] (and ok (> (len (.-Embeds p)) 0))
+        (when [msg (checkEmbed n @(.-importedEmbed c) (.-withinFunc c) (.-minor c) (.-lang c))] (!= msg "")
+          (.add (.-errs c) (.-Pos (aget (.-Embeds p) 0)) msg))))
+
+    (case [(* syntax/BlockStmt)]
+      (when (not (.-withinFunc c))
+        (set! (.-withinFunc c) true)
+        (return c))))
+
+  c)
+
+(go/func checkEmbed "checkEmbed: noder.go's, at language version go1.minor.\n" ^string [^{:tag (* syntax/VarDecl)} decl ^bool haveEmbed ^bool withinFunc ^int minor ^string lang]
+  (switch
+    (case [(not haveEmbed)]
+      (return "go:embed requires import \"embed\" (or import _ \"embed\", if package is not used)"))
+    (case [(> (len (.-NameList decl)) 1)]
+      (return "go:embed cannot apply to multiple vars"))
+    (case [(!= (.-Values decl) nil)]
+      (return "go:embed cannot apply to var with initializer"))
+    (case [(== (.-Type decl) nil)]
+      (return "go:embed cannot apply to var without type"))
+    (case [withinFunc]
+      (return "go:embed cannot apply to var inside func"))
+    (case [(< minor 16)]
+      (return (fmt/Sprintf "go:embed requires go1.16 or later (-lang was set to %s; check go.mod)" lang)))
+    (default
+      (return ""))))
+
+(go/func DeclErrors "DeclErrors returns the errors of the declarations' checks of gc's noder writer (collectDecls: misplaced directives, go:embed, go:linkname; funcExt: functions' directives) over the Go file at path, as Errors does, without its first character, at language version lang (gc's -lang, go1.N; empty: the latest); gc reports them when neither the parse nor the type checker reports an error. The package's scope is the file's: its functions and variables.\n" ^string [^string path ^string name ^string lang]
+  (let [p (parse path)]
+    (when (or (== (.-file p) nil) (> (len (.-errs (.-errs p))) 0))
+      (return ""))
+
+    (let [minor 27]
+      (when (strings/HasPrefix lang "go1.")
+        (when [(values n err) (strconv/Atoi (subslice lang (len "go1.")))] (== err nil)
+          (set! minor n)))
+
+      (let [errs (addr (lit errorList))
+          (values importedEmbed importedUnsafe) (values false false)
+          ^{:tag (slice (* syntax/FuncDecl))} funcs (zero (slice (* syntax/FuncDecl)))]
+        (syntax/Walk (.-file p) (lit collector :errs errs :minor minor :lang lang :importedEmbed (addr importedEmbed) :importedUnsafe (addr importedUnsafe) :funcs (addr funcs)))
+
+        ;; the package's scope: its functions (not methods, not init) and variables
+        (let [objs (lit (map string bool))]
+          (range [_ d (.-DeclList (.-file p))]
+            (type-switch [d d]
+              (case [(* syntax/FuncDecl)]
+                (when (and (== (.-Recv d) nil) (!= (.-Value (.-Name d)) "init") (!= (.-Value (.-Name d)) "_"))
+                  (aset objs (.-Value (.-Name d)) true)))
+
+              (case [(* syntax/VarDecl)]
+                (range [_ n (.-NameList d)]
+                  (when (!= (.-Value n) "_")
+                    (aset objs (.-Value n) true))))))
+
+          (let [linked (lit (map string bool))]
+            (range [_ l (.-linknames p)]
+              (let [directive "go:linkname"]
+                (when (.-std l)
+                  (set! directive "go:linknamestd"))
+
+                (when (not importedUnsafe)
+                  (.add errs (.-pos l) (fmt/Sprintf "//%s only allowed in Go files that import \"unsafe\"" directive))
+                  (continue))
+
+                (when (and (strings/Contains (.-remote l) "[") (strings/Contains (.-remote l) "]"))
+                  (.add errs (.-pos l) (fmt/Sprintf "//%s reference of an instantiation is not allowed" directive))
+                  (continue))
+
+                (cond (aget objs (.-local l))
+                  (if (not (aget linked (.-local l)))
+                    (aset linked (.-local l) true)
+
+                    (.add errs (.-pos l) (fmt/Sprintf "duplicate //%s for %s" directive (.-local l))))
+
+                  (>= minor 18)
+                  (.add errs (.-pos l) (fmt/Sprintf "//%s must refer to declared function or variable" directive)))))
+
+            ;; funcExt's checks of a function's directives
+            (range [_ decl funcs]
+              (let [^uint16 pragma (zero uint16)]
+                (when [(values pr ok) (assert (* pragmas) (.-Pragma decl))] ok
+                  (set! pragma (.-Flag pr)))
+
+                (when (and (!= (bit-and pragma Systemstack) 0) (!= (bit-and pragma Nosplit) 0))
+                  (.add errs ^{:go/via [decl node]} (.Pos decl) "go:nosplit and go:systemstack cannot be combined"))
+
+                (when (!= (.-Body decl) nil)
+                  (when (!= (bit-and pragma Noescape) 0)
+                    (.add errs ^{:go/via [decl node]} (.Pos decl) "can only use //go:noescape with external func implementations"))
+
+                  (when (and ^:go/paren (and (!= (bit-and pragma UintptrKeepAlive) 0) (== (bit-and pragma UintptrEscapes) 0)) (== (bit-and pragma Nosplit) 0))
+                    (.add errs ^{:go/via [decl node]} (.Pos decl) "go:uintptrkeepalive requires go:nosplit")))))
+
+            (.text errs name)))))))

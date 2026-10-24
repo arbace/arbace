@@ -2270,3 +2270,122 @@ once; the Mac, an M2 Max with 12 CPUs and 96 GB, has room for about 32 GB at mos
   bytes, extracted and run by its own `./mac.sh convert` with the amd64 launcher and guest in
   place of the Mac's (`MAC_LAUNCHER`, `MAC_GUEST`; codesign a stand-in), 4 threads and 8 vCPUs a
   read: PASS, every digest equal, 238 s, the launchers 19.8 GB resident at most.
+
+## As built: GPS41 (c) (2026-10-24)
+
+GPS41 (c) with GPS39 (b), gc's front end beside the type checker, is built on branch
+`go-pragmas` from main `8a879ec0` (seed `3ab3b603`, which carries GP7: the driver compiled in
+stage 0's table). goi's check ran on the worktree's build (`bin/arbace-go --build`); the shared
+64-core amd64 machine, a re-seed and two other agents beside it.
+
+**What exists.**
+
+| part | where | as built |
+|---|---|---|
+| noder's pragmas | `go/arbace/repr/go/gcsyntax/errors.ae` (the driver, 642 lines of forms) | TamaGo's go1.27.1 `src/cmd/compile/internal/noder/noder.go`'s `pragma`, `checkUnusedDuringParse`, `isCgoGeneratedFile`, `safeArg`, `parseGoEmbed`, and `lex.go`'s `pragmaFlag`, `pragcgo`, `pragmaFields`, with `ir/node.go`'s `PragmaFlag` bits, ported for gc compiling package `p` for linux/amd64 outside the standard library and the runtime (`base.Flag.Std`, `CompilingRuntime` false; GOARCH not wasm: the wasm directives checked, not kept), written in Go, checked by `go vet` and read into forms by `bin/repr-go read` (their `:line` and `:go/end` metadata dropped); `syntax.Parse` gets noder's pragma handler beside the error handler and `CheckBranches`, so `Errors` (the parse) has its errors too, kept as `base.ErrorfAt` keeps them |
+| the writer's checks | the same, `DeclErrors(path, name, lang)` | `writer.go`'s `collectDecls` over syntax's tree (`syntax.Walk`): `checkPragmas` (the flags a declaration allows: a file `//go:build`, a function `funcPragmas`, none elsewhere; `go:embed` on variables only), `checkEmbed` (an `embed` import, one variable, no value, a type, at package level, go1.16), the linknames (a file importing `unsafe`, no instantiation, a function or variable of the package, no duplicate; the package's scope the file's top-level functions and variables, an error only from go1.18), and `funcExt`'s three checks of a function's directives (`nosplit` with `systemstack`, `noescape` and `uintptrkeepalive` on a function with a body); none when the parse reports an error |
+| the stale driver | `Revision` (a constant of the driver, 2), `arbace.repr.go.syntax/load!` | a driver listed in the table whose `Revision` is not the checkout's (the tools' host built before a change to it: stage 0 now) is replaced by the checkout's, interpreted by goi under the path `arbace/repr/go/gcsyntaxsrc` (a listed path's calls are the table's: the checkout's under its own path fails with "not in the table of compiled packages"); about 3 s to load, as GP6's |
+| the command | `bin/repr-go syntax-errors [--out DIR] [--decls] [--lang goV] FILE...` | `--decls`: the writer's checks too, after a line `# after type checking` on standard output, or into `DIR/FILE.decls.txt` |
+| the merge | `arbace.go.run --errorcheck --gc-front FILE` (`errorcheck`'s `front`) | the checker's `:BranchError` errors dropped (types2's `IgnoreBranchErrors`), gc's parse's errors of FILE (`file-errors`: the branch checks, noder's pragmas) merged by position (file, line; stable), equal neighbours once; when both are empty, the writer's checks at the action's `-lang` (`decl-errors`); then `--max-errors` as before. The driver is the program's own (compiled in the executable under check). goi's checker keeps its branch checks for the terminating analysis and the REPL |
+| goi's check | `bin/goi check`'s `check_err` | every error test's checker run gets `--gc-front` with its Go file; the rest as GP6 built (gc's syntax errors judged alone on a syntax error or go/parser's rejection) |
+| the records | `test/goi/check-linux-amd64.edn`, `check-known.edn`, `divergences.edn`, `essential.txt` | the reference recorded (the six new passes, nothing else changed); `goto.go` no longer known, `bug217.go`'s reason amended; the class "errors of gc's phases after type checking" now the back end's 13 (its `:why`); 4 programs added to the essential subset by GPS44's rule (`directive.go`, `directive2.go`, `goto.go`, and the first of fixedbugs/'s three, `fixedbugs/issue18459.go`: 801) |
+
+**The numbers.** `bin/goi check` (all 1,837 programs, 8 jobs, 437 s), against the reference
+before:
+
+| | before | after |
+|---|---:|---:|
+| pass | 1,604 | **1,610** |
+| unsupported | 145 | 140 |
+| known | 70 | 69 |
+| skipped | 18 | 18 |
+| fail, error | 0 | 0 |
+
+The six: the class's five pragma programs (`directive.go`, `directive2.go`: misplaced
+directives, the second's during the parse, the first's by the writer's `checkPragmas`;
+`fixedbugs/issue18459.go`: `//go:nowritebarrier only allowed in runtime`;
+`fixedbugs/issue18882.go`: `//go:cgo_ldflag ... only allowed in cgo-generated code` and its
+usage; `fixedbugs/issue48230.go`: `checkEmbed`'s `go:embed requires import "embed"`) and
+`goto.go`, whose else blocks' lines gc's syntax has where the forms have none (`goto L jumps into
+block starting at FILE:246:9`, gc's words and columns). The 10 branch programs that passed on
+goi's own branch errors (`label.go`, `label1.go`, `switch4.go`, `fixedbugs/bug136.go`, `bug179.go`,
+`bug213.go`, `bug344.go`, `issue6500.go`, `issue7538a.go`, `issue14540.go`) pass on gc's.
+`fixedbugs/bug217.go` stays known: gc's two receiver errors are merged, but goi's forms take the
+second receiver for a parameter and report `undefined: d` beside them. `bin/goi divergences`:
+1,610 of 1,837 pass, the 227 others in 18 classes (gc's phases 13, the spellings' class 9).
+
+**The driver against gc.** Over the 659 error tests: the forms' driver (stage 0, interpreted) and
+the Go text it was read from (built by TamaGo's go as a scratch program) give the same errors,
+file for file, both phases; against GP6's driver the parse's errors differ in 6 files, all by
+noder's pragmas (the five above but `issue48230.go`, and `live_uintptrkeepalive.go`,
+`nowritebarrier.go`, `uintptrkeepalive.go`, unsupported by their flags); the writer's checks
+report in 7 (`directive.go`, `issue48230.go`, `embedfunc.go`, `linkname3.go`, `issue18331.go`,
+`issue48097.go`, `issue55889.go`), at the latest language version; gc's own output compared for
+the class's five, `embedfunc.go` (its line 12) and `issue55889.go` (at its `-lang=go1.17` none, as
+gc); `linkname3.go`'s four at the file's lines, gc's also at its line directive's (the driver's
+positions are absolute: line directives stay unsupported). 91 of the 659 files have errors of the parse (85 before), 57
+a syntax error (as before).
+
+**The program changes, for the re-seed.** `arbace.go.run` (`--gc-front`), `arbace.repr.go.syntax`
+(embedded), and the driver `go/arbace/repr/go/gcsyntax` (listed in the table: its new
+`DeclErrors` and `Revision` among the table's members): the executable 151,711,904 bytes
+(linux/amd64). Until a re-seed carries them, stage 0 runs the checkout's driver interpreted
+(the `Revision` rule) for `bin/repr-go syntax-errors` and the native read's messages; goi's check
+runs it compiled in the executable it checks.
+
+**Checks.** `bin/goi check --jobs 8` (above; recorded from its results); `bin/goi check --essential`
+(801 of 801); `bin/goi divergences` (above); `bin/goi annotations` (its five corpora: 0 errors,
+every count as recorded); `bin/repr-go syntax-errors --decls` over the 659 error tests (above);
+`bin/generated-check` (the copy of gc's syntax and the dumper as generated: the driver is
+hand-written, outside it); `make check-makefile`; the essential `bin/gate` at `d5ed2259` passed
+(its build anew, 6 m: the smoke test, Clojure's suite with no regressions, the oracle 22,658 of
+22,711 against its 53 known, the differential check 12,743 of 12,766 against its 23 known, goi's
+essential check 801 of 801, the generated files, `bin/j2g-edge verify`; its first run's
+`j2g-edge` failed on the worktree's first frozen view, two views' refreshes writing the one
+`jar.list.new` at once, `bin/lib/frozen.bash`; the second run, the list made, passed in 2 m 6 s). Not run:
+`bin/gate --full`, the box (no errorcheck program runs in the box).
+
+**Proposals (GPS60-GPS65; each built as recommended).**
+
+- **GPS60 Where gc's front end's errors and goi's are merged.**
+  - (a) in `arbace.go.run --errorcheck --gc-front FILE`: the program under check calls its own
+    compiled driver, at the action's `-lang`, and merges before `--max-errors` (as built);
+  - (b) in `bin/goi` from the files of `bin/repr-go syntax-errors`: no change to the program, but
+    the tools' host's driver (stage 0's, older until a re-seed), no `-lang` for the writer's checks
+    (`issue55889.go`'s `-lang=go1.17` would regress) and gc's limit of 10 errors counted apart.
+
+  *Recommended: (a)*.
+- **GPS61 A listed package of the program's own Go older on the tools' host** (the driver now;
+  the dumper and `arbace` alike).
+  - (a) a `Revision` constant raised by hand with each change; an older compiled driver replaced
+    by the checkout's, interpreted under a renamed path (as built);
+  - (b) the build records a hash of each listed program package's forms in the table, and a
+    loader compares it with the checkout's (no hand-kept number; for every such package);
+  - (c) none: the compiled driver until the next re-seed (`bin/repr-go syntax-errors` without the
+    pragmas meanwhile).
+
+  *Recommended: (a)* now, (b) when a second package needs it.
+- **GPS62 How much of noder's writer.**
+  - (a) `collectDecls`' checks (`checkPragmas`, `checkEmbed`, linknames over the file's scope) and
+    `funcExt`'s three checks of a function's directives, reported when nothing else is (as built);
+  - (b) only the parse's pragma errors (GPS41 (c)'s letter): `directive.go` and `issue48230.go`
+    stay unsupported.
+
+  *Recommended: (a)*: gc reports them before its back end, from syntax's tree alone.
+- **GPS63 goi's own branch checks.**
+  - (a) kept, dropped only where gc's syntax's are merged (errorcheck with `--gc-front`), as
+    types2 drops them (as built): the REPL and the terminating analysis keep them;
+  - (b) removed: the REPL's forms have no Go text for gc's syntax to parse.
+
+  *Recommended: (a)*.
+- **GPS64 `fixedbugs/bug217.go`.**
+  - (a) known, its reason amended (as built);
+  - (b) the converter's forms of a malformed receiver list kept as gc's syntax has them (one
+    receiver, the rest an error), a change to repr/go's forms for one invalid program.
+
+  *Recommended: (a)*.
+- **GPS65 The essential gate's share.**
+  - (a) GPS44's rule applied to the new passes (as built: 4 programs, 801);
+  - (b) none added.
+
+  *Recommended: (a)*.
