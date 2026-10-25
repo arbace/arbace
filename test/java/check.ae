@@ -181,8 +181,9 @@
   "The survey's area of a test path: java/lang, java/util, ..., hotspot compiler, langtools, jls."
   [^String path]
   (cond (str/starts-with? path "jdk/java/") (str "java/" (second (re-find #"^jdk/java/([^/]+)" path)))
-        (str/starts-with? path "jdk/") (second (re-find #"^jdk/(.*?/[^/]+)/" path))
+        (str/starts-with? path "jdk/") (or (second (re-find #"^jdk/(.*?/[^/]+)/" path)) (second (re-find #"^jdk/([^/]+)" path)))
         (str/starts-with? path "hotspot/jtreg/compiler/") "hotspot compiler"
+        (str/starts-with? path "hotspot/jtreg/runtime/") "hotspot runtime"
         (str/starts-with? path "langtools/") "langtools"
         (str/starts-with? path "test/java/jls/") "jls"
         :else (first (str/split path #"/"))))
@@ -375,10 +376,25 @@
                                              :else (pr-str v)))))
        "}"))
 
-(def ^:private ref-keys [:id :test :corpus :category :jdk :why :root :dir :javac :files :unnamed :classes :runs])
+(defn- non-det
+  "A main action's record with the digests the check does not compare given as \"-\" (JCS80 (a)): a
+  run the JDK's two runs did not agree on is judged on its status alone, or on stdout with identity
+  hash codes masked when only those runs agreed (:det-masked), so its plain digest (and, when the
+  masked runs did not agree either, its length and masked digest) would only move at each recording."
+  [r]
+  (cond (:det r) r
+        (:det-masked r) (assoc r :out "-")
+        :else (cond-> (assoc r :out "-" :out-len "-") (:out-masked r) (assoc :out-masked "-"))))
+
+(defn- ref-lines
+  "REF's test lines by id, as written (without the line's leading space)."
+  [ref]
+  (if (.isFile (io/file ref))
+    (into {} (for [l (lines ref) :let [[_ id] (re-find #"^ \{:id \"(t\d+)\"" l)] :when id] [id (subs l 1)]))
+    {}))
 
 (defn gather [work ref corpora-file]
-  (let [old (into {} (for [t (ref-tests ref)] [(:id t) t]))
+  (let [old (ref-lines ref)
         ids (lines (str work "/record.list"))
         tests (for [id ids
                     :let [d (str work "/record/" id)
@@ -394,13 +410,14 @@
                                               m1 (r "masked") m2 (r "masked2")
                                               ;; masking changed stdout (JCS17 (b))
                                               masked? (and m1 o1 (not= (subs m1 0 16) (subs o1 0 16)))]]
-                                    (cond-> {:main cls :args (vec args) :timeout (Long/parseLong tmo)
-                                             :exit (some-> e1 Long/parseLong) :out (some-> o1 (subs 0 16))
-                                             :out-len (some-> (r "len") Long/parseLong)
-                                             :err (or (clean (r "err1") work id base) "")
-                                             :det (and (= e1 e2) (= o1 o2))}
-                                      masked? (assoc :out-masked (subs m1 0 16)
-                                                     :det-masked (and (= e1 e2) (= m1 m2))))))
+                                    (non-det
+                                     (cond-> {:main cls :args (vec args) :timeout (Long/parseLong tmo)
+                                              :exit (some-> e1 Long/parseLong) :out (some-> o1 (subs 0 16))
+                                              :out-len (some-> (r "len") Long/parseLong)
+                                              :err (or (clean (r "err1") work id base) "")
+                                              :det (and (= e1 e2) (= o1 o2))}
+                                       masked? (assoc :out-masked (subs m1 0 16)
+                                                      :det-masked (and (= e1 e2) (= m1 m2)))))))
                           status* (cond (g "skip") [:skip (g "skip")]
                                        (empty? (lines (str d "/sources.txt"))) [:skip (str "the source set: " (or (slurp1 (str d "/sources.err")) "javac failed"))]
                                        (= "!" (ffirst ren)) [:skip (second (first ren))]
@@ -418,11 +435,12 @@
                           [:unnamed (when (= :pass (first status)) (vec (for [[_ dst p] ren :when (= p "1")] dst)))]
                           [:classes (when (= :pass (first status)) (some-> (slurp1 (str d "/classes.sha")) (subs 0 16)))]
                           [:runs (when (#{:pass :fail} (first status)) rs)]]))
-        ;; the tests of the corpora this run did not record (--only) kept; a test the corpora no
-        ;; longer take (an area excluded, JCS16 (b)) dropped, its id not taken again
+        ;; the tests of the corpora this run did not record (--only) kept, their lines byte for byte
+        ;; whatever their kind (JCS68 (a): a golden-diagnostics test's :actions too); a test the
+        ;; corpora no longer take (an area excluded, JCS16 (b)) dropped, its id not taken again
         scanned (set (keep #(not-empty (nth (str/split % #"\t" -1) 3 "")) (lines (str work "/scan.tsv"))))
         idset (set ids)
-        kept (for [[id t] (sort-by key old) :when (and (not (idset id)) (scanned id))] (edn-map (for [k ref-keys] [k (t k)])))
+        kept (for [[id l] (sort-by key old) :when (and (not (idset id)) (scanned id))] l)
         all (sort (concat tests kept))]
     (write-lines ref
                  (concat [";; The JDK's runs of bin/java-check's corpora (doc/classes/JAVA-CONFORMANCE-SURVEY.md, JCS5 (b),"
@@ -670,6 +688,27 @@
     (println (str "java-check gather-diag: " (count ids) " golden-diagnostics tests recorded ("
                   (count (filter #(str/includes? % ":jdk :pass") (vals recs))) " pass on the JDK)"))))
 
+(defn ref-unchanged
+  "After gather and gather-diag of a partial --record-ref (JCS68 (a)): every test line of BEFORE (the
+  reference before the run) whose test WORK/record.list did not plan is in REF byte for byte, and REF
+  holds no other new line; the header kept. Exit 1, naming the lines, otherwise."
+  [work before ref]
+  (let [planned (set (lines (str work "/record.list")))
+        b (ref-lines before) a (ref-lines ref)
+        scanned (set (keep #(not-empty (nth (str/split % #"\t" -1) 3 "")) (lines (str work "/scan.tsv"))))
+        changed (for [[id l] (sort-by key b) :when (and (not (planned id)) (scanned id) (not= l (a id)))] id)
+        added (for [id (sort (keys a)) :when (and (not (b id)) (not (planned id)))] id)
+        hb (remove #(re-find #"^ \{:id " %) (lines before))
+        ha (remove #(re-find #"^ \{:id " %) (lines ref))
+        bad (concat (for [id changed] (str id ": a test the run did not plan changed or vanished"))
+                    (for [id added] (str id ": a line no plan wrote"))
+                    (when (and (seq hb) (not= hb ha)) ["the header changed"]))]
+    (println (str "java-check ref-unchanged: " (count planned) " tests planned, "
+                  (count (filter #(not (planned %)) (keys b))) " other lines of the reference "
+                  (if (seq bad) "NOT kept" "kept byte for byte")))
+    (doseq [x bad] (println (str "   " x)))
+    (when (seq bad) (shutdown-agents) (System/exit 1))))
+
 (defn plan-diag
   "After plan: the golden-diagnostics tests' plans (WORK/run/ID/plan.tsv: kind, library, modules,
   preview, act I KIND MODES TOKEN..., exp I EXIT GOLDEN), and WORK/run.list kept to the tests of
@@ -864,6 +903,7 @@
     "plan" (apply plan args)
     "report" (apply report args)
     "gather-diag" (apply gather-diag args)
+    "ref-unchanged" (apply ref-unchanged args)
     "plan-diag" (apply plan-diag args)
     "shards" (apply shards args)
     "merge" (apply merge-shard args)
