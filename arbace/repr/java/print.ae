@@ -1389,7 +1389,9 @@
                          (not= (erase sc (second x)) (erase sc (if (array-sym? t) (let [n (parse-long (name t))] (if (= 1 n) (symbol (namespace t)) (symbol (namespace t) (str (dec n))))) (second t)))))
                   (str "(" (fi-instance-text env x) ") " (second (ex env x)))
                   (ex-text env x P-ASSIGN)))
-              (init [v] (str "{" (str/join ", " (map #(if (vector? %) (init %) (elem %)) v)) "}"))]
+              ;; a nested initializer; not the expression printer's pseudo-forms ([:postfix-of
+              ;; place setf], a hoisted increment: DksWithEmptyKeystore's index++ in a varargs array)
+              (init [v] (str "{" (str/join ", " (map #(if (and (vector? %) (not (keyword? (first %)))) (init %) (elem %)) v)) "}"))]
         (e P-POSTFIX (str "new " base (apply str (for [i (range (count ds))] (str (dim-ann i) "[]"))) (init (first args)))))
       (e P-POSTFIX (str "new " base
                         (apply str (for [i (range (count ds))]
@@ -2642,10 +2644,16 @@
       (if-else-lines head (st env a ctx) (when b? (st env b ctx)))))))
 
 (defn- if-instance-lines [env [_ [pat x] a b] ctx]
-  (let [{:keys [text] env' :env} (pattern-text env pat)
-        head (str "if (" (ex-text env x P-REL) " instanceof " text ")")
-        b? (or (some? b) (#{:return :yield} ctx))]
-    (if-else-lines head (st env' a ctx) (when b? (st env b ctx)))))
+  (if (and (symbol? pat) (contains? (:locals env) (name pat))
+           (is? b 'throw) (is? (second b) 'MatchException.))
+    ;; the converter's test again of a pattern binding already in Java's flow scope (a case's
+    ;; guard, a loop's condition when false: JC5's re-test, its else unreachable): the code in
+    ;; its scope alone, which Java scopes so (BindingsTest1, Guards, Unnamed, AnalysisGaps)
+    (st env a ctx)
+    (let [{:keys [text] env' :env} (pattern-text env pat)
+          head (str "if (" (ex-text env x P-REL) " instanceof " text ")")
+          b? (or (some? b) (#{:return :yield} ctx))]
+      (if-else-lines head (st env' a ctx) (when b? (st env b ctx))))))
 
 (defn- push-loop [env frame]
   (-> env (update :loops conj frame) (update :jstack conj frame)))
@@ -2874,6 +2882,16 @@
         (jump-form? x) (st env x :stmt)
         (and (seq? x) (= hn "while") (= true (second x))) (st env x :stmt)
         (is? x 'switch) (switch-lines env x nil :loop)
+        ;; a try that cannot complete normally (its body ends in a throw or a jump, each catch in
+        ;; a jump, no finally): no break after it, which Java finds unreachable (PBEInvalidParamsTest)
+        (and (is? x 'try)
+             (let [parts (rest x)
+                   abrupt? (fn [y] (or (jump-form? y) (is? y 'throw)))
+                   catches (filter #(is? % 'catch) parts)
+                   body (remove #(or (is? % 'catch) (is? % 'finally)) parts)]
+               (and (seq body) (not-any? #(is? % 'finally) parts) (abrupt? (last body))
+                    (every? #(abrupt? (last %)) catches))))
+        (st env x :stmt)
         :else (into (st env x :stmt) (break-lines env '(break) :stmt))))))
 
 (defn- temp-numbers
@@ -2991,6 +3009,14 @@
   (the erasure is the same)."
   [env coll t]
   (let [sc (:scope env)
+        ;; the converter's cast of a type variable's value to its Iterable bound (JCS66 (a),
+        ;; <T extends A & B<String>> for (String s : t)): Java's for-each over t itself, javac's
+        ;; TransTypes casting it to Iterable (IntersectIterator)
+        coll (if (and (is? coll 'cast) (= 3 (count coll)) (symbol? (nth coll 2))
+                      (let [lt (:tag (get (:locals env) (name (nth coll 2))))]
+                        (and (symbol? lt) (nil? (namespace lt)) (contains? (:tvars sc) (str lt)))))
+               (nth coll 2)
+               coll)
         ct (when (and t (not (prim-names (str t))) (not= "java.lang.Object" (erase sc t)))
              (type-of env coll))
         fn-coll? (and (seq? coll) (nil? (meta-tag coll)) (#{"lambda" "method-ref"} (str (head coll)))
@@ -3089,8 +3115,16 @@
     (nil? l) ["case null" env]
     (and (seq? l) (= [nil :default] (vec l))) ["case null, default" env]
     (vector? l) (let [[p kw g] l
-                      {:keys [text] env' :env} (pattern-text env p)]
-                  [(str "case " text (when (= kw :when) (str " when " (ex-text env' g P-ASSIGN)))) env'])
+                      {:keys [text] env' :env} (pattern-text env p)
+                      ;; the guard's && chain of instanceof patterns binds in the arm's body too
+                      ;; (JLS 6.3.4): its bindings join the body's scope
+                      gb (when (= kw :when)
+                           (loop [y g acc []]
+                             (if (and (is? y 'if-instance) (vector? (second y)) (false? (nth y 3 nil)))
+                               (recur (nth y 2) (conj acc (first (second y))))
+                               acc)))
+                      benv (reduce (fn [e b] (if (symbol? b) (:env (pattern-text e b)) e)) env' gb)]
+                  [(str "case " text (when (= kw :when) (str " when " (ex-text env' g P-ASSIGN)))) benv])
     (seq? l) [(str "case " (str/join ", " (map #(const-label-text env %) l))) env]
     :else [(str "case " (const-label-text env l)) env]))
 
