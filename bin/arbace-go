@@ -46,6 +46,20 @@
 #                                      (bin/lib/javac-key.bash: the provenance files repr/java
 #                                      writes on it name it, JFS30 (b)). Not shipped; in
 #                                      bin/gate --full's javac step
+#        bin/arbace-go --build-program DIR [--arch ARCH[,ARCH]] [-o OUT]
+#                                      a user's program (REAP7, doc/go/BUILD.md, "A user's
+#                                      program"): DIR's Clojure namespaces (src/, compiled by
+#                                      c2j), Java forms (java/, translated by j2g) and Go forms
+#                                      (go/: embedded, goi's; or, with no :main and no
+#                                      :main-class in DIR/program.edn, a Go program built by
+#                                      arbace.build.go alone) with the shipped build's compiled
+#                                      namespaces (reused when their key is the checkout's: else
+#                                      a --build first), into target/arbace-go/programs/NAME/
+#                                      ARCH/NAME (and OUT), cached by key; prints where it is.
+#                                      j2g runs under J2G_LOCK when set (bin/j2g)
+#        bin/arbace-go --build-program --check [NAME...]
+#                                      test/programs' samples built and run against their
+#                                      runs/ (stdout, exit code, stderr; each namespace compiled)
 #        bin/arbace-go --fixpoint      the Go-hosted fixpoint (standalone S3, S4;
 #                                      doc/STANDALONE-NOTES.md): G1 built by the host executable
 #                                      (stage 0 by default), G2 by G1 (j2g and repr/go on G1), G3 by
@@ -100,6 +114,10 @@
 #                     host when its runtime is the checkout's (one j2g run), else by a first
 #                     build of the program (two); 0: the namespaces evaluated (the image of
 #                     prepared namespaces), as before S6
+#   ARBACE_PROGRAM_BASE  --build-program: a shipped build to reuse (a --build's directory, or one
+#                     holding arbace, aot/ and aot.key, as .tmp/arbace-go-gate/amd64), when its
+#                     compiled namespaces' key is the checkout's; ARBACE_PROGRAM_KEEP=1 keeps the
+#                     program's intermediate trees (c2j's, j2g's, the work modules)
 #   ARBACE_HOST_EXE   the executable that runs the build's Arbace tools, j2g and repr/go (bin/lib/
 #                     host.bash; default stage 0, target/seed/<arch>/arbace, which bin/seed --build
 #                     makes from the seed when missing); J2G_GO_EXE and REPR_GO_EXE name one per tool
@@ -471,6 +489,258 @@ build_java() {
   build || return 1
   for a in ${arches//,/ }; do echo "$jkey" > "$dir/$a/$exe.key"; done
   echo "arbace-go: javac's tool build in $(since "$t0") (key ${jkey:0:12}, $exe.key)" >&2
+}
+
+# ---------------------------------------------------------------------------------------
+# A user's program (REAP7, doc/FULL-SUPPORT-SURVEY.md, "As built: REAP7"; doc/go/BUILD.md, "A
+# user's program"): bin/arbace-go --build-program DIR, the tool bin/clojure-tests --aot and
+# bin/java-check's compiled level build for their corpora, made general. DIR:
+#   program.edn  {:main NS} (a Clojure program: NS's -main), {:main-class CLASS} (a Java forms
+#                program: CLASS's static main), or neither (a Go program); :name, the executable's
+#                name (default DIR's); a Go program's :module and :go (bin/build-go's)
+#   src/         Clojure namespaces (.ae, .clj, .cljc) and resources, as a directory of the class
+#                path: compiled by c2j (the namespaces) and embedded
+#   java/        Java forms (doc/classes/SPEC.md §9.2: a package's ns file, its classes' files),
+#                translated by j2g: classes of the program, which namespaces import
+#   go/          Go forms (doc/go/SPEC.md §4.1): with :main or :main-class, namespaces of Go forms
+#                (go.P) embedded as go/..., interpreted by goi at run time; without, a Go program
+#                built by arbace.build.go alone
+#   runs/        the program's runs for --check (bin/build-go test's format)
+# The executable: target/arbace-go/programs/NAME/ARCH/NAME (-o OUT: there too), cached by the key
+# of what it is built from (programs/NAME/key)
+
+programs=$dir/programs
+
+# program_edn DIR: program.edn's :main, :main-class and :name, one per line (empty when absent),
+# read by the tools' host with the Clojure reader; status 1 on an unknown key
+program_edn() {
+  local exe
+  exe=$(. "$root/bin/lib/host.bash" && arbace_host_exe) || return 1
+  "$exe" -e "(let [f (java.io.File. \"$1/program.edn\")
+      m (if (.isFile f) (read-string (slurp f)) {})
+      bad (remove #{:main :main-class :name :module :go} (keys m))]
+  (when-not (map? m) (println \"program.edn: not a map\") (System/exit 1))
+  (when (seq bad) (println \"program.edn: unknown keys\" (vec bad)) (System/exit 1))
+  (when (and (:main m) (:main-class m)) (println \"program.edn: :main and :main-class\") (System/exit 1))
+  (doseq [k [:main :main-class :name]] (println (str (get m k \"\")))))"
+}
+
+# program_base: the shipped build whose compiled namespaces the program reuses (sets base_exe,
+# base_aot): ARBACE_PROGRAM_BASE (a --build's directory, or a directory holding arbace, aot/ and
+# aot.key, as the gate's cache), else target/arbace-go, else the gate's cache .tmp/arbace-go-gate/
+# amd64, the first whose compiled namespaces' key is the checkout's (aot_key: the runtime and
+# Arbace's sources) and whose executable's runtime is the checkout's; else a --build for the
+# host's architecture first
+program_base() {
+  local k rk c e
+  k=$(aot_key); rk=$(arbace_runtime_key "$root")
+  for c in ${ARBACE_PROGRAM_BASE:-} "$dir" "$root/.tmp/arbace-go-gate/amd64"; do
+    e=$c/$(host_arch)/arbace; [ -x "$e" ] || e=$c/arbace
+    [ -x "$e" ] && [ -f "$c/aot/packages.edn" ] && [ -f "$c/aot.key" ] && [ "$(cat "$c/aot.key")" = "$k" ] || continue
+    mkdir -p "$programs"
+    [ "$(env -u ARBACE_NO_AOT "$e" -e '(print (:runtime *arbace-version*))' 2> "$programs/.runtime.err")" = "$rk" ] || continue
+    base_exe=$e base_aot=$c/aot
+    echo "== the shipped build's compiled namespaces: $base_aot (key ${k:0:12}; $base_exe)" >&2
+    return 0
+  done
+  echo "== no shipped build of the checkout's compiled namespaces (key ${k:0:12}): --build for $(host_arch) first" >&2
+  (arches=$(host_arch) build) || return 1
+  base_exe=$dir/$(host_arch)/arbace base_aot=$dir/aot
+}
+
+# program_key SRC W: what the executable of SRC is built from (beside the base's executable and
+# compiled namespaces): SRC's files, goi's table, the runtime and the build's scripts
+program_key() {
+  { sha256sum < "$base_exe"; cat "$base_aot/../aot.key"; echo "$base_aot"
+    cat "$dir/gotable/key"
+    (cd "$1" && find . -type f ! -path './runs/*' | LC_ALL=C sort | xargs -d '\n' sha256sum)
+    arbace_runtime_key "$root"
+    (cd "$root" && find x509roots jdk/edge.edn -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
+     sha256sum bin/arbace-go bin/j2g bin/build-go)
+    cat "${ARBACE_GOROOT:-/root/tamago-go}/VERSION"; echo "${ARBACE_GO_SYMBOLS:-}"; } | sha256sum | cut -c1-64
+}
+
+# build_program DIR [--arch ARCH[,ARCH]] [-o OUT]
+build_program() {
+  local src="" out="" parch main cls name w t0 t1 a nss jnss usrc go_prog
+  parch=$(host_arch)
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --arch) parch=$2; shift 2 ;;
+      -o) out=$2; shift 2 ;;
+      -*) echo "arbace-go --build-program: unknown option $1" >&2; return 2 ;;
+      *) [ -z "$src" ] || { echo "arbace-go --build-program: one DIR" >&2; return 2; }; src=$1; shift ;;
+    esac
+  done
+  [ -n "$src" ] && [ -d "$src" ] || { echo "arbace-go --build-program: no program directory ${src:-(none)}" >&2; return 2; }
+  src=$(cd "$src" && pwd)
+  t0=$(date +%s)
+  mkdir -p "$programs"
+  local edn=$programs/.program-edn.$$
+  if ! program_edn "$src" > "$edn" 2>&1; then
+    echo "arbace-go --build-program: $src/$(head -1 "$edn")" >&2; rm -f "$edn"; return 1
+  fi
+  { read -r main; read -r cls; read -r name; } < "$edn"
+  rm -f "$edn"
+  [ -n "$name" ] || name=$(basename "$src")
+  w=$programs/$name
+  mkdir -p "$w"
+  link_flags || return 1
+  if [ -z "$main" ] && [ -z "$cls" ]; then
+    # a Go program: arbace.build.go alone
+    [ -d "$src/go" ] || { echo "arbace-go --build-program: $src: no :main, no :main-class and no go/" >&2; return 1; }
+    for a in src java; do
+      [ ! -d "$src/$a" ] || { echo "arbace-go --build-program: $src/$a/ needs :main or :main-class (program.edn)" >&2; return 1; }
+    done
+    for a in ${parch//,/ }; do
+      mkdir -p "$w/$a"
+      echo "== bin/build-go $a (a Go program: $src)" >&2
+      (cd "$root" && bin/build-go --line-file --arch "$a" --work "$w/work-$a" -o "$w/$a/$name" \
+         --print-cache "$root/.tmp/repr-go-print-cache" --go-flag "-ldflags=-s -w" "$src") > "$w/build-$a.log" 2>&1 \
+        || { grep -v '^==' "$w/build-$a.log" | tail -20 >&2; echo "arbace-go: $name: $a: the build failed ($w/build-$a.log)" >&2; return 1; }
+      program_done "$a" ""
+    done
+    return 0
+  fi
+  # an Arbace program: the shipped build's compiled namespaces, the program's compiled by c2j,
+  # j2g, bin/build-go
+  program_base || return 1
+  echo "== bin/goi table (on $base_exe)" >&2
+  (cd "$root" && GOI_EXE=$base_exe bin/goi table --out "$dir/gotable") > "$w/gotable.log" 2>&1 \
+    || { tail -20 "$w/gotable.log" >&2; echo "arbace-go: goi's table failed ($w/gotable.log)" >&2; return 1; }
+  local key; key=$(program_key "$src")
+  local cached=1
+  for a in ${parch//,/ }; do [ -x "$w/$a/$name" ] || cached=; done
+  if [ -n "$cached" ] && [ -f "$w/key" ] && [ "$(cat "$w/key")" = "$key" ]; then
+    echo "== the cached program (key ${key:0:12})" >&2
+    for a in ${parch//,/ }; do program_done "$a" cached; done
+    return 0
+  fi
+  rm -rf "$w/key" "$w/aot" "$w/j2g" "$w"/work-*
+  local j2g_in=(--input "$base_aot")
+  if [ -n "$main" ]; then
+    [ -d "$src/src" ] || { echo "arbace-go --build-program: $src: :main $main but no src/" >&2; return 1; }
+    j2g_in+=(--entry-arg -m --entry-arg "$main" --resources "$src/src")
+  else
+    j2g_in+=(--entry "$cls")
+  fi
+  [ ! -d "$src/go" ] || j2g_in+=(--resources "$src/go=go")
+  if [ -d "$src/src" ]; then
+    # the program's namespaces (src/'s, and go/'s that they load) compiled by c2j on the base's
+    # executable, as bin/arbace-go --build-java compiles repr/java's reader: the runtime's from
+    # their compiled loaders, the program's sources (ARBACE_PATH_FIRST) recorded as embedded ones,
+    # java/'s packages loaded first (their classes, which the namespaces import); only the
+    # program's units compiled (src/'s and go/'s)
+    t1=$(date +%s)
+    echo "== the program's namespaces compiled (arbace.c2j, on $base_exe)" >&2
+    nss=$(cd "$src/src" && grep -rlE '^\(ns( |$)' --include='*.ae' --include='*.clj' --include='*.cljc' . | LC_ALL=C sort \
+            | sed 's|^\./||; s/\.\(ae\|cljc\|clj\)$//; s|/|.|g; s/_/-/g' | tr '\n' ' ')
+    jnss=$( [ -d "$src/java" ] && cd "$src/java" && grep -rlE '^\(ns( |$)' --include='*.ae' . | LC_ALL=C sort \
+            | sed 's|^\./||; s/\.ae$//; s|/|.|g; s/_/-/g' | tr '\n' ' ')
+    usrc=$( { (cd "$src/src" && find . -type f -name '*.ae' -o -type f -name '*.clj' -o -type f -name '*.cljc') | sed 's|^\./||'
+              [ ! -d "$src/go" ] || (cd "$src/go" && find . -type f -name '*.ae') | sed 's|^\./|go/|'; } \
+            | LC_ALL=C sort | sed 's/.*/"&"/' | tr '\n' ' ')
+    printf '(doseq [n (quote [%s])] (require n))
+(doseq [n (quote [%s])]
+  (try (require n) (catch Throwable e (println "aot: not loaded:" n (.getMessage e)) (System/exit 1))))
+(require (quote arbace.c2j.main))
+(let [srcs (vec (distinct (filter #{%s} (map #(aget ^objects %% 0) (arbace.lang.Compiler$AST/units)))))
+      r (arbace.c2j.main/run "%s" srcs)]
+  (println "aot:" (count (:compiled r)) "sources compiled," (:classes r) "classes;" (count (:failed r)) "failed")
+  (doseq [[s m] (:failed r)] (println "aot: not compiled:" s m))
+  (shutdown-agents)
+  (System/exit 0))
+' "$jnss" "$nss" "$usrc" "$w/aot" > "$w/compile.ae"
+    (cd "$src" && GOGC=${GOGC:-400} ARBACE_COMPILE=1 ARBACE_NO_IMAGE=1 ARBACE_PATH_FIRST=1 \
+       ARBACE_PATH=$src/src${jnss:+:$src/java}:$src ARBACE_AOT_ROOT=$root ARBACE_PREPARE=$w/compile.image \
+       "$base_exe" "$w/compile.ae") > "$w/compile.log" 2>&1 \
+      || { tail -20 "$w/compile.log" >&2; echo "arbace-go: $name: the namespaces were not compiled ($w/compile.log)" >&2; return 1; }
+    grep '^aot:' "$w/compile.log" >&2
+    [ -f "$w/aot/packages.edn" ] || { echo "arbace-go: $name: c2j compiled nothing ($w/compile.log)" >&2; return 1; }
+    echo "   compiled: $(since "$t1")" >&2
+    j2g_in+=(--input "$w/aot")
+  fi
+  [ ! -d "$src/java" ] || j2g_in+=(--input "$src/java")
+  t1=$(date +%s)
+  echo "== bin/j2g --program ${j2g_in[*]} (on $base_exe)" >&2
+  (cd "$root" && J2G_GO_EXE=$base_exe bin/j2g --program "${j2g_in[@]}" --gotable "$dir/gotable" --out "$w/j2g") \
+    > "$w/j2g.log" 2>&1 \
+    || { tail -20 "$w/j2g.log" >&2; echo "arbace-go: $name: j2g failed ($w/j2g.log)" >&2; return 1; }
+  grep '^j2g: error\|analysis failure' "$w/j2g.log" | head -20 >&2
+  echo "   j2g: $(since "$t1")" >&2
+  local overlay; overlay=$(cd "$root" && bin/jrt overlay | tail -1) || return 1
+  for a in ${parch//,/ }; do
+    t1=$(date +%s)
+    mkdir -p "$w/$a"
+    echo "== bin/build-go $a" >&2
+    (cd "$root" && REPR_GO_EXE=$base_exe bin/build-go --line-file --arch "$a" --work "$w/work-$a" -o "$w/$a/$name" \
+       --print-cache "$root/.tmp/repr-go-print-cache" --overlay "$overlay" --root "$root/x509roots" \
+       --go-flag "${ldflags[0]}" "$w/j2g/prog") > "$w/build-$a.log" 2>&1 \
+      || { grep -v '^==' "$w/build-$a.log" | tail -20 >&2; echo "arbace-go: $name: $a: the build failed ($w/build-$a.log)" >&2; return 1; }
+    echo "   build-go $a: $(since "$t1")" >&2
+  done
+  echo "$key" > "$w/key"
+  # the intermediate trees removed (hundreds of MB; ARBACE_PROGRAM_KEEP=1 keeps them)
+  [ "${ARBACE_PROGRAM_KEEP:-}" = 1 ] || rm -rf "$w/aot" "$w/j2g" "$w"/work-* "$w/compile.image"
+  for a in ${parch//,/ }; do program_done "$a" ""; done
+  echo "arbace-go: $name built in $(since "$t0")" >&2
+}
+
+# program_done ARCH CACHED: the executable copied to -o OUT when given, and where it is printed
+program_done() {
+  local exe=$w/$1/$name
+  if [ -n "$out" ]; then
+    mkdir -p "$(dirname "$out")" && cp -f "$exe" "$out.new.$$" && mv -f "$out.new.$$" "$out" || return 1
+    exe=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
+  fi
+  echo "arbace-go: the program $name ($1${2:+, $2}): $exe ($(stat -c %s "$exe") bytes)"
+}
+
+# check_programs [NAME...]: test/programs' samples (default all), each built (--build-program, for
+# the host's architecture) and run on its runs/NAME.args (arguments, one per line), stdin NAME.in
+# (none: empty): stdout must equal NAME.out, the exit code NAME.code (default 0), stderr begin with
+# NAME.err (none: empty); an Arbace program's runs with ARBACE_LOAD_TIMES=1, and none of its
+# sources may load from source (each ran compiled)
+check_programs() {
+  local pdir=$root/test/programs t p n b st code want out_dir names=("$@") fails=0 total=0 bad loads
+  [ ${#names[@]} -gt 0 ] || names=($(cd "$pdir" && ls -d */ | tr -d /))
+  out_dir=$root/.tmp/programs-check
+  rm -rf "$out_dir"; mkdir -p "$out_dir"
+  : > "$out_dir/empty.in"
+  for p in "${names[@]}"; do
+    [ -d "$pdir/$p" ] || { echo "arbace-go --build-program --check: no sample $pdir/$p" >&2; return 2; }
+    echo "== $p"
+    if ! build_program "$pdir/$p" > "$out_dir/$p.build" 2> "$out_dir/$p.build.log"; then
+      tail -20 "$out_dir/$p.build.log"; echo "  FAIL $p: not built ($out_dir/$p.build.log)"; fails=$((fails+1)); total=$((total+1)); continue
+    fi
+    local exe; exe=$(sed -n 's/^arbace-go: the program .*: \(.*\) ([0-9]* bytes)$/\1/p' "$out_dir/$p.build" | tail -1)
+    grep '^   \|^aot:\|^arbace-go:' "$out_dir/$p.build.log" "$out_dir/$p.build" | sed 's/^[^:]*://; s/^/  /'
+    for t in "$pdir/$p"/runs/*.args; do
+      [ -e "$t" ] || continue
+      n=$(basename "$t" .args) b=${t%.args} bad=
+      mapfile -t args < "$t"
+      local in=$b.in; [ -f "$in" ] || in=$out_dir/empty.in
+      ARBACE_LOAD_TIMES=1 timeout 120 "$exe" "${args[@]}" < "$in" > "$out_dir/$p.$n.out" 2> "$out_dir/$p.$n.err.raw"; code=$?
+      grep -v '^load .* [0-9]* ms$' "$out_dir/$p.$n.err.raw" > "$out_dir/$p.$n.err"
+      want=0; [ -f "$b.code" ] && want=$(cat "$b.code")
+      [ "$code" = "$want" ] || bad="exit $code, not $want"
+      cmp -s "$b.out" "$out_dir/$p.$n.out" || bad="$bad${bad:+; }stdout differs (diff $b.out $out_dir/$p.$n.out)"
+      if [ -f "$b.err" ]; then
+        head -c "$(stat -c %s "$b.err")" "$out_dir/$p.$n.err" | cmp -s "$b.err" - || bad="$bad${bad:+; }stderr does not begin with $b.err"
+      elif [ -s "$out_dir/$p.$n.err" ]; then
+        bad="$bad${bad:+; }stderr not empty ($out_dir/$p.$n.err)"
+      fi
+      # the program's own sources ran compiled: none loaded from source
+      loads=$( { [ ! -d "$pdir/$p/src" ] || (cd "$pdir/$p/src" && find . -type f | sed 's|^\./||')
+                 [ ! -d "$pdir/$p/src" ] || [ ! -d "$pdir/$p/go" ] || (cd "$pdir/$p/go" && find . -type f | sed 's|^\./|go/|'); } \
+               | while read -r f; do grep -F "load $f " "$out_dir/$p.$n.err.raw"; done)
+      [ -z "$loads" ] || bad="$bad${bad:+; }loaded from source: $(echo "$loads" | tr '\n' ' ')"
+      total=$((total+1))
+      if [ -z "$bad" ]; then echo "  ok   $p $n"; else echo "  FAIL $p $n: $bad"; fails=$((fails+1)); fi
+    done
+  done
+  echo "arbace-go --build-program --check: $((total - fails)) of $total passed"
+  [ $fails = 0 ]
 }
 
 # prepare EXE IMAGE: run the executable once with ARBACE_PREPARE, requiring every namespace
@@ -893,6 +1163,9 @@ case ${1:-} in
   --build) if [ "${2:-}" = --box ]; then box_build; else [ "${2:-}" = --pgo ] && pgo=1; build; fi ;;
   --build-tests) build_tests "${2:-}" ;;
   --build-java) shift; build_java "$@" ;;
+  --build-program)
+    shift
+    if [ "${1:-}" = --check ]; then shift; check_programs "$@"; else build_program "$@"; fi ;;
   --image) image ;;
   --smoke)
     if [ "${2:-}" = --box ]; then box_smoke; exit; fi
