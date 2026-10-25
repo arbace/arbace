@@ -1904,3 +1904,22 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   queued, not running (REAP8); `2>/dev/null` in several agents' wait loops.
 - Started (the user): REAP5b (the printer: RPS60-RPS63), REAP7 (`bin/arbace-go --build-program`), the
   harness follow-ups (JCS70, JCS71, RPS74 (b), RPS77 (b)); the catch-all triage left to JC6.
+
+## 2026-10-25: JN9c merged, JFS102-JFS109 decided; JN9d started (the user)
+
+- JN9c (branch `java-jn9c` from `840e514b`, merged `7b6ed2f1`; beside REAP, not gating it): overload
+  resolution in the native attribution provider, `arbace/repr/java/overload.ae` ported from jdk26u's Resolve
+  at `baf63fbe` (the three phases, most specific, mergeAbstracts, findMethod's interface phases, findFun
+  over enclosing classes and static imports, the access checks; errors as javac's kinds); `expr.ae`'s
+  choice native with javac's as the lean's fallback; the facts `overload/method`, `overload/constructor`,
+  `overload/anon-super-ctor`, `overload/arity` native and checked; ClassReader's default methods and inner
+  constructors' descriptors in `decls.ae`; JFS100 (b) (the declines' reasons summed in `attr.md`). Declined,
+  javac's still (JN9d's): poly arguments, generic candidates passing the arity check (21,525 calls),
+  explicit type arguments, diamonds, signature-polymorphic calls, qualified creations. `attr-check --corpus
+  all`: 13,193,153 facts equal, none different, the forms byte for byte as javac's trees'; leaned answers in
+  jdk26u 903,905 to 53,316; lists written alone 63.4% to 95.9% (baseline 99.1%, javac 93.0%); 2,378 s (was
+  2,056). `front-check`, `parse-check`, `check`, `check --jdk`, `roundtrip --text` as recorded; the
+  provenance files' `:repr-java` and `:host` moved (reader hash `a2daae6b`); javac's tool 226,652,320 bytes;
+  the shipped program's code unchanged. Merged cleanly; the essential gate on `7b6ed2f1` passed (16m11s).
+- Decided (the user): JFS102 (b), JFS103 (b), JFS104 (b), JFS105 (a), JFS106 (b), JFS107 (b), JFS108 (b),
+  JFS109 (a); JN9d started now, beside the REAP work.

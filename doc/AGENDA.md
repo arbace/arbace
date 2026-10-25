@@ -115,8 +115,9 @@ The current state of the work. This file is rewritten as things change. For the 
   RPS55 (jrt's `java.lang.Module`, java.javadoc 4 of 5; RPS80-RPS82), REAP8 (the essential subsets: Go AOT
   248, Java compiled 420, Clojure compiled 15 namespaces; the gate +32 s cold; RPS70-RPS78), REAP5 (Java's
   print level: 2,104 of 2,722; RPS60-RPS69), JC2b (JCS42 (b)-JCS48: interp 1,462, compiled 1,636;
-  JCS70-JCS79). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JC5 (the
-  analysis' gaps), JN9c (overload resolution), REAP5b (the printer: RPS60-RPS63), REAP7 (`bin/arbace-go
+  JCS70-JCS79), JN9c (beside REAP: overload resolution native, jdk26u's lists written alone 95.9%;
+  JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JC5 (the
+  analysis' gaps), JN9d (inference, beside REAP), REAP5b (the printer: RPS60-RPS63), REAP7 (`bin/arbace-go
   --build-program`), the harness follow-ups (JCS70, JCS71, RPS74 (b), RPS77 (b)). Next: JC6 after JC5 (the
   world ranked and decided, the catch-all classes "other, to triage" split and named, JCS72-JCS74,
   JCS77); the second batched re-seed (REAP2's `--go-flag`, REAP3, REAP4, JC2's and JC2b's j2g, JC5,

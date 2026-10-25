@@ -5064,3 +5064,13 @@ largest decline (21,525).
   `attr.edn`, `split.md`, `gate.log`), `repr-java-attr-check/`, `repr-java-front-check/`, `repr-java-jdk/`,
   `repr-java-check/`, `repr-java-parse-check/`, `repr-java-roundtrip/`, `jrt/`, `javac-vendor/`,
   `clojure-tests/`.
+
+## Decided (2026-10-25): JFS102-JFS109
+
+The user decided JN9c's proposals as recommended: JFS102 (b) (generic candidates: Infer's applicability
+from standalone argument types, JN9d's first step), JFS103 (b) (anonymous classes' constructors in decls'
+members), JFS104 (b) (the anonymous creation's constructor type native, with JFS103), JFS105 (a) (error
+kinds as data), JFS106 (b) (a fact checking the platform classes' members against javac's ClassSymbols),
+JFS107 (b) (`deftype Sym` in a namespace of its own, so decls reloads from the checkout), JFS108 (b)
+(signature-polymorphic calls native, in JN9d), JFS109 (a) (JN9d next, JFS107 first; started now, beside
+the REAP work).
