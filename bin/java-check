@@ -72,7 +72,11 @@
 #                      (JAVA_CHECK_LOAD): how interp defines a test's classes, files (the default) or
 #                      do (a top-level do per package, JCS8 (a): the comparison mode). Each side runs
 #                      in .tmp/java-check/w/ID with java.io.tmpdir and TMPDIR .tmp/java-check/tmp/ID
-#                      (JCS19 (b)), as the JDK's runs did
+#                      (JCS19 (b)), as the JDK's runs did, and stdout is judged with those places
+#                      and the checkout masked (W, TMP, WORK, ROOT; JCS70 (a)). A would-be
+#                      regression (interp, compiled) is run again once; a test whose second run
+#                      passes is flaky, no regression when a :flaky class of the level names it
+#                      (JCS71 (a))
 #   bin/java-check --essential [--jobs N]
 #                      the essential gate's (JCS13 (a)): the tests of test/java/essential.txt at the
 #                      level interp, from their forms committed in test/java/forms/ID (no javac:
@@ -90,8 +94,8 @@
 #                      parses it, the files renamed, compiled by the JDK's javac (as the test's
 #                      @compile options say; and with -g:none ... for the classes level), each main
 #                      action run twice (in an empty .tmp/java-check/w/ID, -Dtest.src=DIR -Dtest.classes=...,
-#                      HotSpot's JIT options dropped, -Xmx2g, 60 s; stdout's digest also with identity
-#                      hash codes masked, JCS17 (b)); the golden-diagnostics tests' actions by the JDK's javac in place,
+#                      HotSpot's JIT options dropped, -Xmx2g, 60 s; stdout's digest and length with the
+#                      run's places masked, JCS70 (a), also with identity hash codes masked, JCS17 (b)); the golden-diagnostics tests' actions by the JDK's javac in place,
 #                      each output's digest and whether it is the golden file's; written as
 #                      test/java/ref-jdk26.edn (--only REGEX: the plans it finds, the other tests' lines kept;
 #                      kind.diagnostics, the golden tests).
@@ -139,6 +143,12 @@ mask_hashes() { sed -E 's/@[0-9a-f]{6,8}/@HASH/g'; }
 # (--record-ref) and Arbace's (JCS19 (b)): WORK/w/ID and WORK/tmp/ID, java.io.tmpdir and TMPDIR the
 # latter, test.classes WORK/classes/ID
 run_dirs() { echo "$work/w/$1 $work/tmp/$1"; }
+# mask_dirs W TMP: stdout with the run's places masked before its digest and length, on both sides
+# (JCS70 (a)): the test's working and temporary directories (run_dirs) W and TMP, then the scratch
+# WORK and the checkout ROOT they sit under, so that a test printing them (CheckTempDir,
+# UserDirChangedTest) is judged on what it computed, not on where it ran; an output naming none
+# is unchanged byte for byte (its digest the reference's before JCS70)
+mask_dirs() { LC_ALL=C sed -e "s|$1|W|g" -e "s|$2|TMP|g" -e "s|$work|WORK|g" -e "s|$root|ROOT|g"; }
 
 # ---------------------------------------------------------------------------------------------
 # the reference
@@ -201,13 +211,16 @@ record_runs() {
       st=0; (cd "$w" && TMPDIR=$tmp timeout -k 5 60 java -Xmx2g -cp "$cls_dir" -Dtest.src="$dir" -Dtest.classes="$cls_dir" \
                -Djava.io.tmpdir="$tmp" "$cls" "${x[@]:3}" < "$work/empty" > "$d/out" 2> "$d/err") || st=$?
       echo $st > "$d/run$i.exit$k"
-      sha256sum < "$d/out" | cut -c1-64 > "$d/run$i.out$k"
+      # the run's directories masked (JCS70 (a)); a mark when they were in stdout
+      mask_dirs "$w" "$tmp" < "$d/out" > "$d/out.m"
+      cmp -s "$d/out" "$d/out.m" || echo 1 > "$d/run$i.dirs$k"
+      sha256sum < "$d/out.m" | cut -c1-64 > "$d/run$i.out$k"
       # identity hash codes masked (JCS17 (b))
-      mask_hashes < "$d/out" | sha256sum | cut -c1-64 > "$d/run$i.masked$k"
-      if [ -z "$k" ]; then stat -c %s "$d/out" > "$d/run$i.len"; first_line "$d/err" > "$d/run$i.err1"; fi
+      mask_hashes < "$d/out.m" | sha256sum | cut -c1-64 > "$d/run$i.masked$k"
+      if [ -z "$k" ]; then stat -c %s "$d/out.m" > "$d/run$i.len"; first_line "$d/err" > "$d/run$i.err1"; fi
     done
   done < "$d/runs.tsv"
-  rm -rf "$w" "$tmp" "$cls_dir" "$d/out" "$d/err"
+  rm -rf "$w" "$tmp" "$cls_dir" "$d/out" "$d/out.m" "$d/err"
 }
 
 record_ref() {
@@ -231,8 +244,8 @@ record_ref() {
     grep -Fx -f "$list.only" "$list" > "$list.o" || true; mv "$list.o" "$list"
   fi
   echo "== java-check: the source sets of $(wc -l < "$list") tests (javac -verbose -sourcepath), $jobs at a time" >&2
-  export -f record_sources record_runs classes_sha first_line mask_hashes run_dirs
-  export work classes_opts_s="${classes_opts[*]}"
+  export -f record_sources record_runs classes_sha first_line mask_hashes mask_dirs run_dirs
+  export root work classes_opts_s="${classes_opts[*]}"
   xargs -a "$list" -P "$jobs" -I{} bash -c 'record_sources "$1"' _ {}
   jc rename "$work" > "$work/rename.txt"
   echo "== java-check: the JDK's javac and runs, twice ($((SECONDS - t0)) s)" >&2
@@ -395,12 +408,14 @@ read_opts() {
 # line: run I EXIT OUT LEN DET MASKED DET-MASKED MAIN ARG...); prints RESULT<TAB>REASON, nothing
 # when it passes: the status, and stdout's digest and length when the JDK's two runs agreed
 # (JCS3 (a)); stdout with identity hash codes masked when the plain digest differs, or alone when
-# only the masked runs agreed (JCS17 (b))
+# only the masked runs agreed (JCS17 (b)); stdout always with the run's directories masked
+# (mask_dirs, run_actions' w and tmp: JCS70 (a)), as the reference's
 judge() {
   local st=$1 out=$2 err=$3 sha len msha want
   if [ "$st" = 124 ] || [ "$st" = 137 ]; then printf 'timeout\t%s s\n' "$timeout"; return 0; fi
   if [ "$st" != "${x[2]}" ]; then printf 'fail\tstatus %s (the JDK'"'"'s %s): %s\n' "$st" "${x[2]}" "$(first_line "$err")"; return 0; fi
   [ "${x[5]}" = 1 ] || [ "${x[7]}" = 1 ] || return 0
+  mask_dirs "$w" "$tmp" < "$out" > "$out.m"; mv "$out.m" "$out"
   sha=$(sha256sum < "$out" | cut -c1-16); len=$(stat -c %s "$out")
   [ "${x[5]}" = 1 ] && [ "$sha" = "${x[3]}" ] && [ "$len" = "${x[4]}" ] && return 0
   msha=$(mask_hashes < "$out" | sha256sum | cut -c1-16)
@@ -443,6 +458,35 @@ run_actions() {
   rm -rf "$w" "$tmp"
 }
 
+# again LEVEL RESULTS RUNNER: JCS71 (a): each would-be regression of RESULTS (a test of LEVEL not
+# passing that test/java/check-LEVEL.edn records :pass or :flaky) run again once by RUNNER (an
+# exported function taking the test's id and printing its result line, as check_one's); a test
+# whose second run passes is reported flaky (its first result and reason kept in the reason), which
+# java.check's report takes as no regression when a :flaky class of test/java/divergences.edn
+# names it, and as a test in no class otherwise; a test failing again keeps its first result
+again() {
+  local level=$1 res=$2 runner=$3 ids=$2.again
+  [ -s "$res" ] || return 0
+  sed -n 's/^ \["\(t[0-9]*\)" "[^"]*" :\(pass\|flaky\) .*/\1/p' "$root/test/java/check-$level.edn" > "$ids.rec"
+  awk -F'\t' -v l="$level" '$2 == l && $3 != "pass" { print $1 }' "$res" | { grep -Fx -f "$ids.rec" || true; } > "$ids"
+  if [ -s "$ids" ]; then
+    echo "== java-check $level: $(wc -l < "$ids") would-be regressions run again (JCS71 (a)): $(tr '\n' ' ' < "$ids")" >&2
+    xargs -a "$ids" -P "$jobs" -I{} bash -c "$runner"' "$1"' _ {} > "$ids.tsv"
+    awk -F'\t' -v l="$level" 'NR == FNR { if ($2 == l && $3 == "pass") ok[$1] = 1; next }
+      $2 == l && ($1 in ok) { print $1 "\t" $2 "\tflaky\t" $3 " " $4 "; passed when run again (JCS71 (a))"; next } { print }' \
+      "$ids.tsv" "$res" > "$res.a" && mv "$res.a" "$res"
+    awk -F'\t' -v l="$level" '$2 == l && $3 == "flaky" { print "java-check " l ": flaky: " $1 " " $4 }' "$res" >&2
+  fi
+  rm -f "$ids" "$ids.rec" "$ids.tsv"
+}
+
+# interp_one ID: the test's interp level again (again's runner: check_one's forms, run_actions)
+interp_one() {
+  local id=$1 p=$work/run/$1 dir
+  dir=$(test_dir "$p")
+  run_actions interp "$rexe" "$load" "$(cat "$p/forms.dir")"
+}
+
 # test_dir RUN: the test's directory: under jdk26u's test/, or the checkout's (Arbace's own corpus)
 test_dir() {
   case $(awk -F'\t' '$1=="root"{print $2}' "$1/plan.tsv") in
@@ -458,6 +502,9 @@ compiled_one() {
   dir=$(test_dir "$p")
   run_actions compiled "$2" none ""
 }
+
+# compiled_one_on EXE ID: compiled_one with its arguments in again's order
+compiled_one_on() { compiled_one "$2" "$1" | sed -e "s|$root|.|g"; }
 
 # compiled_shard K DIR: the tests of shard K (DIR/tests.txt, java.check/shards: WORK/j2g/sK, or a
 # half of a split one, run_shard) translated by
@@ -507,6 +554,8 @@ compiled_shard() {
       xargs -a "$s/built.txt" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/prog"
     fi
   } | sed -e "s|$root|.|g" > "$s/results.tsv"
+  # a would-be regression run again once on the program, before it goes (JCS71 (a))
+  [ -x "$s/prog" ] && again compiled "$s/results.tsv" "compiled_one_on $s/prog"
   rm -rf "$s/prog" "$s/forms"
 }
 
@@ -692,12 +741,13 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
-  export -f check_one read_opts first_line classes_sha judge run_actions run_dirs mask_hashes test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
+  export -f check_one read_opts first_line classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
   export root work jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
+  case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
   case ",$levels," in
     *,compiled,*)
-      export -f compiled_one
+      export -f compiled_one compiled_one_on again
       export jobs
       compiled_level > "$work/results-compiled.tsv" || return 1
       LC_ALL=C sort -o "$work/results.tsv" "$work/results.tsv" "$work/results-compiled.tsv" ;;
@@ -931,7 +981,7 @@ essential_compiled() {
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f compiled_one run_actions judge first_line mask_hashes run_dirs test_dir
+  export -f compiled_one run_actions judge first_line mask_hashes mask_dirs run_dirs test_dir
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"
   # a timeout runs again once, alone, with twice the limit (JCS47 (a)): beside the gate's other
