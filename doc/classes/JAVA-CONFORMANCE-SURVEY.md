@@ -2223,3 +2223,17 @@ variable to its `Iterable` bound in for-each), JCS67 (a) and (c) (the world's pu
 edge's constants too), JCS68 (a) (a partial `--record-ref` keeps the other tests' lines byte for byte,
 checked), JCS69 (a), then (b) (`:j2g-unresolved` until the messages name the class, then the analysis
 failing at the unresolved class). The classes `:analysis` and `:j2g-unresolved` cite this.
+
+**After the merge with main** (JC2b, REAP5, REAP5b, REAP8, RPS55, JN9c, the harness follow-ups; javac's tool
+built from the merged checkout, `bin/arbace-go --build-java`): `bin/jrt-convert update`, `bin/javac-vendor
+convert` and `bin/clojure-tests --java-fixtures update` left every forms file as it was; the provenance files
+moved only in `:repr-java` and `:host`, and `jdk/javac/provenance.edn` in `:jdk-edge` too, with
+`jdk/javac/edge.edn` 717 lines shorter (javac's world's edge is recorded less what `jdk/edge.edn` answers
+alike, which now holds the cut classes' infos). The levels recorded again (`--levels
+read,interp,compiled,print --record`): read 2,722, interp **1,546**, compiled **1,694**, print 2,132 (8 now
+passing, 8 not: the printer on JC5's new forms, a cast around a conditional, an `unchecked-short`, a field of
+`Outer.super`, a constructor's casts to an intersection's bound: REAP5b's printer to follow, each in its
+`:print-*` class), of 2,723; `test/java/levels-known.edn` recorded (7 new disagreements, 23 resolved).
+`:j2g-unresolved` keeps 169 tests: JCS44's import-named refusals did not change these messages (JCS69 (b)).
+`bin/repr-java check --jdk --update`: 103 of jdk26u's 13,566 files' hashes changed (the files of several
+top-level classes, JCS30 (b), and the converter's new casts).
