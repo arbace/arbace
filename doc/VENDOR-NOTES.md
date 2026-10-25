@@ -1049,6 +1049,19 @@ step 4 (2026-10-07); the others came with later work, as each says:
     `arbace.lang.GoReify` (new in `GoInterp.ae`), whose `goiReify` gives goi the reify type and
     the fns (`arbace.go/reify-type`, `reify-data`); `GoBridge` gains `reifyOf`. Without a Go
     spec, `reify` expands as upstream's.
+30. **SL5: D6's namespaces back, embedded with their classes cut** (2026-10-24; REAP4,
+    doc/FULL-SUPPORT-SURVEY.md, "As built: REAP4"; the user's RPS18 (b), EVAL-NOTES.md's SL5).
+    `arbace/inspector.ae`, `arbace/xml.ae`, `arbace/java/browse.ae` and `arbace/java/javadoc.ae`
+    are restored from main before S4 (`ac66b276^`, the `.ae` files item 23 removed; the JVM's
+    are on `arbace-for-java-26`) and embedded in the Go build (`arbace.j2g.embed/excluded` no
+    longer lists them): the classes they name and the world lacks (Swing, AWT, SAX,
+    `arbace.lang.XMLHandler`) are cut classes (J2G-SPEC §4.1, amendment M3), whose members throw
+    "not in the Go build". `inspector` and `xml` lose hand change 17's check of the JVM's module;
+    `xml`'s `content-handler` is nil when its `XMLHandler` or its proxy of `ContentHandler`
+    throws `UnsupportedOperationException` (the Go build: `parse` then throws at
+    `SAXParserFactory`). `arbace.java.browse-ui` (a Swing window) stays out: `browse-url` reaches
+    it only after the browser commands and `java.awt.Desktop` fail. Clojure's suite's `metadata`
+    and `java.javadoc` namespaces run (`test/arbace-go-results.edn`).
 
 ## Dialect divergences
 
@@ -1106,9 +1119,10 @@ the runtime-visible renames are listed once, as repr/clojure's mechanical part.
   deftypes are made at run time with no class file, so annotations in their metadata are carried
   by none; `add-classpath` throws, `*loader*` is nil, and no `DynamicClassLoader` exists;
   `:direct-linking` is ignored; `arbace.reflect`'s `AsmReflector` throws; the namespaces
-  `arbace.repl.deps`, `arbace.java.basis`, `arbace.tools.deps.interop`, `arbace.java.browse`,
-  `arbace.java.browse-ui`, `arbace.java.javadoc`, `arbace.inspector` and `arbace.xml` do not
-  exist.
+  `arbace.repl.deps`, `arbace.java.basis`, `arbace.tools.deps.interop` and
+  `arbace.java.browse-ui` do not exist; `arbace.java.browse`, `arbace.java.javadoc`,
+  `arbace.inspector` and `arbace.xml` exist (since hand change 30), their Swing, AWT and SAX
+  classes cut.
 
 ## Spec (2026-10-07)
 

@@ -884,6 +884,132 @@ milestone), RPS33 (a) (REAP8's essential subset of the AOT level, about 240 prog
 RPS34 (a) (the box's references re-recorded at REAP9's `bin/gate --full` run if they move). The two
 `:pending` classes of `test/goi/divergences-aot.edn` now cite this.
 
+## As built: REAP4 (2026-10-24)
+
+Branch `reap4-clojure-eval`, from main `407ed654`: RPS5 (a) as decided (journal 2026-10-24), and
+SL5 (EVAL-NOTES.md's proposal of 2026-10-10, "not taken" then), added to REAP4 by the user's RPS18
+(b). The runtime changes (`arbace/lang/Compiler.ae`, the proxy superclasses, the embedded
+namespaces) reach stage 0 with the second batched re-seed, not this branch.
+
+**The boxed NaN's identity: fixed.** Traced, the cause is not Go's boxing: jrt's `Double.valueOf`
+boxes anew as the JVM's does (`(identical? (Double/valueOf ##NaN) (Double/valueOf ##NaN))` is false
+on both). The reader's `##NaN` (`LispReader$SymbolicValueReader`'s static `specials` map) is one
+Double, on the JVM too, so every `##NaN` read is the same object. The JVM's compiled code makes a
+constant collection in the class's static initializer by `emitValue`, each Double element boxed
+anew by `Double.valueOf`; the evaluator's `Evaluator.constant` (`ConstantExpr.evalIn`, made once
+per constant) rebuilt the collections but kept their numbers themselves. So `[##NaN ##NaN]` held
+one Double twice: the oracle's class script `^{:sig [Object Object]} (Util/equiv ##NaN ##NaN)`
+(its arguments come in a constant map, `(oracle.driver/step {... :args [##NaN ##NaN]})`) took
+`Util.equiv`'s identity short-cut, and in user code `(= [##NaN] [##NaN])`, `(= #{##NaN} #{##NaN})`,
+`(contains? #{##NaN} ##NaN)` were true where the JVM answers false. The fix: `Evaluator.constant`
+boxes an Integer, Long, Double or Character anew by its `valueOf`, as `emitValue` does (a
+`NumberExpr` itself stays one constant per site on both: `(identical? ##NaN ##NaN)` is true on
+the JVM too). c2j's compiled constants already did (`arbace.c2j.emit/emit-value`). Regression
+cases: 15 forms appended to `test/oracle/forms/numbers.ae` (identity and equality of NaN, Inf,
+characters and longs in constant vectors, lists, maps and sets, in fns and at the top level),
+recorded on the frozen jar (`bin/oracle record forms/numbers`: 822 cases to 837); the Go build
+passes all 837 and the class script's 614. The case leaves `test/oracle/known-go-amd64-frozen.edn`
+(53 known to 52) and `known-go-box-amd64.edn` (not run here: the box's oracle subset is `--full`'s).
+
+**`java.util.BitSet` among the proxy superclasses: fixed.** `arbace.j2g.model/proxy-supers` lists
+it (J2G-SPEC §5.12 amended: the list, and a listed class is not a leaf): j2g writes
+`DynSub_BitSet`, BitSet's uses become its class interface, `proxy-super flip` reaches BitSet's
+implementation. `java-interop`'s `test-proxy-super` passes (3 assertions; the namespace 299 of
+302). No hand-written jrt code names BitSet; the executable's size: see below.
+
+**SL5: D6's namespaces embedded with their classes cut.** `arbace/inspector.ae`, `arbace/xml.ae`,
+`arbace/java/browse.ae`, `arbace/java/javadoc.ae` restored from `ac66b276^` (S4 removed them; the
+JVM's are on `arbace-for-java-26`), embedded (`arbace.j2g.embed/excluded` no longer lists them),
+hand change 30 (VENDOR-NOTES.md): hand change 17's module checks gone, `arbace.xml`'s
+`content-handler` nil when `XMLHandler` or its proxy throws. The classes they name and the world
+lacks are cut (J2G-SPEC §4.1, M3), with one change to make it so: the cut candidates' packages
+take `org.xml.sax` and `org.w3c.dom` (java.xml's) beside `java`, `javax`, `jdk`, `sun`
+(`arbace.j2g.embed/cut-candidates`, `with-member-types`). `jdk/edge.edn` recorded afresh (`bin/j2g-edge
+update`: the cut classes' member tables and their member types, 1.29 MB to 1.93 MB; j2g's input,
+not shipped). `arbace.java.browse-ui` (a Swing window) is not restored: `browse-url` reaches it only
+after the browser commands and `java.awt.Desktop` fail. Results: `metadata` **53 of 53** (6 tests);
+`java.javadoc` **2 of 5**, its 3 errors: `Class.getModule` (jrt has no `java.lang.Module`; 2:
+`java.lang.String`'s and `Map$Entry`'s URLs) and `Class/forName "java.sql.Connection"`, a class
+the Go build lacks (D6: java.sql; 1). `clojure-xml` stays skipped: `arbace.xml` loads but `parse`
+throws at `SAXParserFactory` (cut), its one test an error. SL5's estimate (half a day; "javadoc
+(5) would pass") held for the embedding; the javadoc test needs a jrt class besides (RPS55).
+
+**Numbers.** Clojure's suite on the test build, before (main `407ed654`) and after:
+
+| | before | after |
+|---|---:|---:|
+| namespaces run (all load) | 76 | 78 |
+| tests | 777 | 784 |
+| assertions | 20,520 | 20,580 |
+| pass | 20,506 | **20,564** |
+| fail, error | 11, 3 | 11, 5 |
+| namespaces skipped | 9 | 7 |
+| test.generative | 27 of 27 | 27 of 27 |
+
+The 16 not passing: `compilation` 10 (Q1's boxed primitive fns 3, by design; trace lines 7,
+deferred), `java-interop` 3 (FIPrims, deferred), `java.javadoc` 3 (RPS55). The oracle (essential gate): **22,688 of
+22,740** (the 15 new cases with it; 55 by V11), 52 known, 0 new. diffcheck: 12,778 of 12,801
+agree, its 23 known, 0 new (the new forms compiled agree: c2j's constants were the JVM's). The
+executable 153.5 MB (153,469,088 bytes; main's build of the same evening 152.4 MB, of a later
+main: the embedded namespaces, their cut classes and `DynSub_BitSet` together about 1 MB). The
+essential `bin/gate` passed at the branch's head (11m26s; the builds cached from the runs above).
+
+**Deferred by RPS5 (a)**, their references' comments citing it (`test/arbace-go-results.edn`):
+the evaluator's line numbers in stack traces (`compilation`'s `test-compiler-line-numbers`, 7
+assertions), FIPrims through interfaces made at run time (`java-interop`'s
+`test-invoke-fiprim-rets`, `test-match-prim-args-only-to-2`: 1 fail, 2 errors), `javax.xml.stream`
+(`reflect`'s `invoke-checks-accessibility`, skipped), `seq-and-transducer` (`transducers`, skipped:
+speed). For REAP1's `test/clojure/divergences.edn` (not written here), the classes: **by design**
+`evaluator-boxed-primitive-fns` (Q1: `primitive-return-decl` 2, `incorrect-primitive-type-hint-throws`
+1); **deferred (RPS5 (a), journal 2026-10-24)** `evaluator-trace-lines` (7), `fiprims-runtime-interfaces`
+(2 tests), `javax-xml-stream` (1 skipped test), `seq-and-transducer-speed` (1 skipped test); **by
+design (D6)** `sax-cut` (`clojure-xml`, skipped, now loading), `java-sql-cut` (javadoc's
+`java.sql.Connection`, 1); **deferred or fixed (RPS55)** `class-get-module` (javadoc, 2). The
+BitSet and NaN entries are gone (fixed); `metadata` and `java.javadoc` are no longer skipped.
+
+### Proposals RPS50-RPS59
+
+- **RPS50 The constants' boxes.** (a) every Integer, Long, Double and Character of a constant
+  collection boxed anew, as `emitValue` (built); (b) Doubles only (the NaN case); (c) the reader's
+  `##NaN` a new Double per read (diverges from the JVM's reader, which shares). *Recommended: (a)*:
+  it is the JVM's rule, and c2j's already.
+- **RPS51 Where the evaluator's constants are checked.** (a) the oracle's forms (built: 15 cases)
+  and diffcheck's pair, which runs the same forms compiled; (b) also a unit test of
+  `Evaluator.constant`. *Recommended: (a)*: the oracle is the JVM's answer, diffcheck c2j's.
+- **RPS52 The proxy superclasses.** (a) a fixed list grown by need (built: BitSet); (b) every
+  non-final translated class proxyable (a `DynSub_C` each, every class non-leaf: size and speed);
+  (c) BitSet by design out. *Recommended: (a)*: a proxy of a JDK class is rare outside the suite.
+- **RPS53 The evaluator's lines in stack traces (7).** (a) deferred past the milestone (RPS5
+  (a)), REAP3's compiled suite showing whether the AOT level passes them; (b) frames per field
+  access, assignment and `IFn` cast in the evaluator (a `line` per Code node, F7's generated
+  nodes regenerated); (c) by design. *Recommended: (a)*, then (b) if REAP3's level passes.
+- **RPS54 FIPrims through run-time interfaces (2 tests).** (a) deferred (RPS5 (a)); (b) the
+  interfaces `definterface` makes carry `@FunctionalInterface`-equivalent data so `FISupport` and
+  jrt's adapters see them. *Recommended: (a)*.
+- **RPS55 `java.javadoc`'s three.** (a) a hand-written `java.lang.Module` in jrt (`getName`,
+  `isNamed`, `toString`, `getDescriptor` throwing) and `Class.getModule` (java.base for the
+  world's JDK and jrt classes, the unnamed module for Arbace's and the run time's; javac's tool
+  world's modules by its sources' list), the manifest and member tables regenerated
+  (`bin/jrt manifest`), the edge again: 2 of the 3 pass, about half a day and two build cycles;
+  the third (`java.sql.Connection`) by design (D6); (b) all three recorded: `class-get-module`
+  deferred, `java-sql-cut` by design. *Recommended: (a)* for the milestone (Clojure's own test
+  passing beats a class), the java.sql assertion by design.
+- **RPS56 `arbace.xml` and `clojure-xml`.** (a) by design, D6's SAX cut (the namespace loads,
+  `parse` throws; the test skipped); (b) java.xml's SAX parser in the shipped world (javac's tool
+  world holds it since JN7: the classes, `overlay/jdk/javac/closure.txt`), `clojure-xml`'s test
+  passing, the executable larger. *Recommended: (a)*, (b) if the user wants `arbace.xml` working
+  at the REPL.
+- **RPS57 `arbace.java.browse-ui`.** (a) not restored (built): Swing is cut and its one fn
+  needs a window; (b) restored and embedded, its proxy of `HyperlinkListener` expanding to a
+  throw. *Recommended: (a)*.
+- **RPS58 The cut candidates' packages.** (a) `org.xml.sax` and `org.w3c.dom` beside `java`,
+  `javax`, `jdk`, `sun` (built); (b) any class the JVM has. *Recommended: (a)*: (b) would cut a
+  library's own classes that a source names before the library is on `ARBACE_PATH`.
+- **RPS59 The survey's account of the NaN case.** (a) corrected here (the cause is the
+  evaluator's constants, not Go's box; EVAL-NOTES.md's and J2G-NOTES.md's lines left as dated
+  records, the journal's entry at the merge naming the correction); (b) those notes edited too.
+  *Recommended: (a)*.
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail
