@@ -1961,3 +1961,9 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   checkout and re-records the levels there. Decided (the user): JCS60-JCS64 (a), JCS65 (a), JCS66 (a),
   JCS67 (a) and (c), JCS68 (a), JCS69 (a) then (b).
 - Started (the user): REAP7b (RPS92 (b), RPS93 (c), RPS94 (c), RPS98 (c)).
+
+## 2026-10-25: after the milestone, the scripts' sweep before any C23 work (the user)
+
+- Decided (the user): after `arbace-reaps-3-crops-v1`, the scripts' sweep of `/dev/null` and process
+  substitution comes first; any C23 work (its survey included) starts after it. This corrects the entry
+  "after the milestone, C23 at parity the main effort" above, which had the sweep queued beside C23.
