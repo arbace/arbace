@@ -1839,7 +1839,7 @@ unchanged). Every heavy run in the host's heavy slots, at 8 jobs. Scratch in `.t
   (also before the identity hash codes' mask, JCS17 (b)), `judge` for the levels interp and
   compiled and the essential runs. `record_runs` leaves a mark (`WORK/record/ID/runI.dirs[2]`) when
   the mask changed a run's stdout.
-- *The reference re-recorded*: a whole `--record-ref` (36 min, of it 13 min waiting for a slot;
+- *The reference re-recorded*: a whole `--record-ref` (36 min, about 14 of them waiting for a slot;
   1,304 s its own clock) marked **22 tests** whose stdout names the run's places (`CheckTempDir`,
   `UserDirChangedTest`, `GetResource`, `MHIllegalAccess`, `RuntimeMXBean`'s two, `GetURLsTest`,
   `GetContentType`, `FileChannel`'s `LongTransferTest` and `MapTest`, `FullRead`, `UriImportExport`,
