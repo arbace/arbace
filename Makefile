@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
   gate gate-full reap suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-check-aot goi-divergences goi-divergences-aot java-check java-check-compiled java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -89,6 +89,8 @@ suite: ## Clojure's suite on the test build (bin/clojure-tests, CLOJURE_TESTS_GO
 	CLOJURE_TESTS_GO=$(CLOJURE_TESTS_GO) bin/clojure-tests
 suite-aot: ## Clojure's suite compiled by c2j into its own program, against its reference and the eval level's (bin/clojure-tests --aot; heavy: j2g's whole-program run)
 	bin/clojure-tests --aot
+suite-aot-essential: ## its essential subset, as bin/gate runs it: test/clojure/essential-aot.txt's namespaces compiled alone into their own program (bin/clojure-tests --aot --essential -j 8)
+	bin/clojure-tests --aot --essential -j 8
 oracle: ## the executable against the frozen JVM's results (bin/oracle check)
 	bin/oracle check 'target/arbace-go/amd64/arbace -' --timeout 900 \
 	  --expected test/oracle/known-go-amd64-frozen.edn
@@ -192,12 +194,16 @@ goi-check: ## goi's check: GOROOT/test's run programs interpreted against gc, it
 	bin/goi check
 goi-check-aot: ## Go's AOT level: goi's corpora built by arbace.build.go and run, errorcheck programs printed from mode :full and compiled by gc, against gc on the originals; test/goi/check-aot-linux-amd64.edn (bin/goi check --aot --jobs 8)
 	bin/goi check --aot --jobs 8
+goi-check-aot-essential: ## its essential subset, as bin/gate runs it: test/goi/essential-aot.txt's programs (bin/goi check --aot --essential --jobs 8)
+	bin/goi check --aot --essential --jobs 8
 goi-divergences: ## v1's divergences: every program of goi's check not passing in a class of test/goi/divergences.edn, by design or deferred (bin/goi divergences; bin/goi check runs it)
 	bin/goi divergences
 java-check: ## Java's conformance check: jdk26u's jtreg run tests read by repr/java and interpreted (file by file), against the JDK's recorded runs (test/java/ref-jdk26.edn), every test not passing in a class of test/java/divergences.edn (bin/java-check; after `make build-java`)
 	bin/java-check
 java-check-compiled: ## its compiled level: the tests translated by j2g in shards of programs and run (bin/java-check --levels compiled; after `make build`, which leaves the compiled namespaces)
 	bin/java-check --levels compiled
+java-check-compiled-essential: ## its essential subset, as bin/gate runs it: the essential tests that pass compiled, in one program cached by key (bin/java-check --essential-compiled)
+	bin/java-check --essential-compiled
 java-check-essential: ## its essential subset: test/java/essential.txt's tests interpreted from their committed forms (bin/java-check --essential, as bin/gate)
 	bin/java-check --essential
 java-check-diagnostics: ## its diagnostics level: langtools' golden-diagnostics tests compiled by javac on Arbace in place, the output against the golden files as jtreg compares them (bin/java-check --levels diagnostics; after `make build-java`)
