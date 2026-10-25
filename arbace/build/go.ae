@@ -117,7 +117,7 @@
          more (for [r roots
                     pkg (root-packages (File. (str r)) print-cache)
                     :when (not= "main" (str (:name pkg)))]
-                pkg)
+                (assoc pkg :other-root true))
          pkgs (vec (concat own more))]
      (doseq [[path ps] (group-by :path pkgs) :when (> (count ps) 1)]
        (fail (str "two package files for " path ": "
@@ -374,8 +374,15 @@
                         (= path module) (assoc pkg :dir "")
                         (str/starts-with? path (str module "/"))
                         (assoc pkg :dir (subs path (inc (count module))))
+                        ;; a package of another root (--root) outside the module: a module of
+                        ;; its own, its path's first element, printed under _modules/ and
+                        ;; required by a replace (a user's Go packages beside Arbace's module
+                        ;; arbace, bin/arbace-go --build-program, REAP7b)
+                        (and (:other-root pkg) (not= module "std"))
+                        (assoc pkg :dir (str "_modules/" path) :module (first (str/split path #"/")))
                         :else (fail (str "package " path " is not in the module " module))))))]
     {:module module :go (str golang) :packages pkgs
+     :modules (vec (sort (distinct (keep :module pkgs))))
      :main (first (filter #(= "main" (str (:name %))) pkgs))})))
 
 ;; ---------------------------------------------------------------------------------------
@@ -454,10 +461,17 @@
   module cache. Packages are printed in parallel. With print-cache (a directory) and the
   environment's REPR_GO_HOST_ID, a package printed before by the same host from the same forms is
   taken from the cache (standalone S6: a build reprints only what changed)."
-  [{:keys [module packages] golang :go} ^File dir ^File out {:keys [layout line-file tests goos goroot goos-dir print-cache]}]
+  [{:keys [module packages modules] golang :go} ^File dir ^File out {:keys [layout line-file tests goos goroot goos-dir print-cache]}]
   (.mkdirs out)
+  ;; the other roots' modules (program's :modules): each its go.mod under _modules/
+  (doseq [m modules]
+    (.mkdirs (File. out (str "_modules/" m)))
+    (spit (File. out (str "_modules/" m "/go.mod")) (str "module " m "\n\ngo " golang "\n")))
   (when-not (= module "std")
     (spit (File. out "go.mod") (str "module " module "\n\ngo " golang "\n"
+                                    (when (seq modules)
+                                      (str "\n// the other roots' packages outside the module, each path's first element a module\n"
+                                           (str/join (for [m modules] (str "require " m " v0.0.0\nreplace " m " => ./_modules/" m "\n")))))
                                     (when (= goos "tamago")
                                       (str "\n// GOOSPKG, the runtime's goos (TamaGo's): imported by no package\nrequire "
                                            (:path tamago-goos) " " (:version tamago-goos) "\n"
@@ -469,6 +483,7 @@
     (spit (File. out "go.sum") (tamago-go-sum goroot)))
   (vec
     (concat (when-not (= module "std") ["go.mod"])
+          (for [m modules] (str "_modules/" m "/go.mod"))
           (apply concat (pmap
             (fn [pkg]
               (let [pdir (if (= "" (:dir pkg)) out (File. out ^String (:dir pkg)))
