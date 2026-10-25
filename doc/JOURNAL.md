@@ -1923,3 +1923,18 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   the shipped program's code unchanged. Merged cleanly; the essential gate on `7b6ed2f1` passed (16m11s).
 - Decided (the user): JFS102 (b), JFS103 (b), JFS104 (b), JFS105 (a), JFS106 (b), JFS107 (b), JFS108 (b),
   JFS109 (a); JN9d started now, beside the REAP work.
+
+## 2026-10-25: the harness follow-ups merged, JCS80-JCS84 decided (the user)
+
+- The harness follow-ups (branch `harness-followups` from `6f3a93ad`, merged): JCS70 (a) (`mask_dirs`: the
+  test's working directory, its temp directory, the check's scratch and the checkout masked in stdout on
+  both sides before the digest; the JDK's reference re-recorded for the 22 tests whose stdout names them, by
+  splicing their lines from a full `--record-ref` run into the committed file, the other 4,158 lines byte for
+  byte, as `--only` would write), JCS71 (a) (a would-be regression run again once; a flip `flaky`, not a
+  regression; class `:flaky` naming Test8267042 and List/LockStep at the compiled level), RPS74 (b)
+  (`test/clojure/essential-aot-skipped.edn`: `seq-and-transducer` skipped in the compiled suite's subset only;
+  the cached step 1m56s to 36 s), RPS77 (b) (the subset's work and j2g trees removed after its build, 366 MB
+  less). Java interp 1,464, compiled 1,638 (CheckTempDir and UserDirChangedTest pass). No shipped code. The
+  essential gate passed on the branch (4m41s, then 2m50s cached) and on the merge. Decided (the user):
+  JCS80 (a), JCS81 (b), JCS82 (a), JCS83 (b), JCS84 (a). The agent's slips: one `2>/dev/null` in a wait
+  loop; main's gate cache copied into the worktree.

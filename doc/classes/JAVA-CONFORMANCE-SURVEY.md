@@ -1912,3 +1912,11 @@ Clojure subset's programs made anew (their keys hold the changed scripts), then 
   - Options: (a) the JDK's reason masked as stdout is; (b) as built.
   - *Recommended: (a)* at JCS80's recording: the reference then does not depend on the checkout at
     all.
+
+## Decided (2026-10-25): JCS80-JCS84
+
+The user decided the harness follow-ups' proposals as recommended: JCS80 (a) (at the next full recording
+of the JDK's runs, `"-"` for the stdout digest of runs the JDK's own two runs disagreed on), JCS81 (b)
+(no rerun in `--essential-compiled` until one of its tests flips), JCS82 (a) (only would-be regressions
+run again), JCS83 (b) (the path marker in the scratch only), JCS84 (a) (the JDK's path-dependent failure
+reasons masked, at JCS80's recording).

@@ -118,7 +118,8 @@ The current state of the work. This file is rewritten as things change. For the 
   JCS70-JCS79), JN9c (beside REAP: overload resolution native, jdk26u's lists written alone 95.9%;
   JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JC5 (the
   analysis' gaps), JN9d (inference, beside REAP), REAP5b (the printer: RPS60-RPS63), REAP7 (`bin/arbace-go
-  --build-program`), the harness follow-ups (JCS70, JCS71, RPS74 (b), RPS77 (b)). Next: JC6 after JC5 (the
+  --build-program`). Done since: the harness follow-ups (JCS70 masked paths, JCS71 `:flaky`, RPS74 (b),
+  RPS77 (b); interp 1,464, compiled 1,638; JCS80-JCS84, JCS80 and JCS84 at the next full recording). Next: JC6 after JC5 (the
   world ranked and decided, the catch-all classes "other, to triage" split and named, JCS72-JCS74,
   JCS77); the second batched re-seed (REAP2's `--go-flag`, REAP3, REAP4, JC2's and JC2b's j2g, JC5,
   RPS55's jrt); REAP9. After the milestone: the scripts' sweep of `/dev/null` and
