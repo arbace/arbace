@@ -111,14 +111,14 @@ The current state of the work. This file is rewritten as things change. For the 
   pass, none fail; RPS30-RPS34), the first batched re-seed (`916770d0…`), JC3 (the diagnostics level:
   1,101 of 1,194 golden tests; JCS50-JCS55), JN9b (the native provider's members and types tiers;
   JFS95-JFS101), REAP4 (the boxed NaN, `BitSet`, SL5; RPS50-RPS59), JC2 (the compiled level: 1,632 of
-  2,722; JCS40-JCS49), REAP3 (the suite compiled: 20,489 of 20,520 assertions, F2.4 fixed; RPS40-RPS49).
-  The matrix: 11 of 12 cells checked (Java's print is REAP5's), 0 problems, none pending. Running (from
+  2,722; JCS40-JCS49), REAP3 (the suite compiled: 20,489 of 20,520 assertions, F2.4 fixed; RPS40-RPS49),
+  RPS55 (jrt's `java.lang.Module`, java.javadoc 4 of 5; RPS80-RPS82). The matrix: 11 of 12 cells checked (Java's print is REAP5's), 0 problems, none pending. Running (from
   the gated main of 2026-10-25): REAP5 (Java's print level), JC5 (the analysis' gaps, JCS12 (b), JCS30
   (b), JCS40 (a), JCS42's captures), REAP8 (the essential subsets: RPS33, RPS40 (b), JCS41 (a); the
-  compiled suite re-recorded), JC2b (JCS42 (b)-JCS48), RPS55 (jrt's `java.lang.Module`), JN9c (overload
-  resolution). Next: JC6 after JC5 and JC2b; REAP7; the second batched re-seed (REAP2's `--go-flag`,
-  REAP3, REAP4, JC2's j2g, JC5, RPS55); REAP9. After the milestone: the scripts' sweep of `/dev/null` and
-  process substitution (the user, 2026-10-24).
+  compiled suite re-recorded), JC2b (JCS42 (b)-JCS48), JN9c (overload resolution). Next: JC6 after JC5 and JC2b; REAP7; the second batched re-seed (REAP2's `--go-flag`,
+  REAP3, REAP4, JC2's j2g, JC5, JC2b, RPS55's jrt); REAP9. After the milestone: the scripts' sweep of `/dev/null` and
+  process substitution (the user, 2026-10-24); then C23 joins REAP, the next language after Clojure, Java and Go
+  (the user, 2026-10-25).
 
 - **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,
   the user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):
