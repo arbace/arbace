@@ -1667,15 +1667,16 @@ not the runtime); stage 0 of main the tools' host. 8 jobs, the whole run in one 
   (`imported`: `(import '(java.net DatagramSocket))`, `(import 'java.net.X)`), and a failure of a class of
   that file whose message is `Unable to resolve class|symbol: X`, `Unknown type|class: X` names the import
   after the name: `Unable to resolve class: DatagramSocket (the import java.net.DatagramSocket)`,
-  `Unknown type: RandomAccessFile (the import java.io.RandomAccessFile)`. The shipped program's failures'
-  messages change likewise (its `report.edn`), not its Go.
+  `Unknown type: RandomAccessFile (the import java.io.RandomAccessFile)`. The messages change, not the
+  Go.
 
 *The shipped translation*: `bin/j2g --program` with main's goi table and compiled namespaces
 (`target/arbace-go/gotable`, `target/arbace-go/aot`) on the branch's j2g, against main's shipped run
 (`target/arbace-go/j2g`): with `_VALUES` in the reserved list 48 files of `gen/` differed, only in
 `C__VALUES` → `C__VALUES_f` (`.tmp/ship-gen.full`); without it (the branch) the generated tree is
 main's byte for byte, the program root too but the image (`image.bin`, which `bin/arbace-go` fills
-afterwards) and the embedded sources (`res/`, the checkout's j2g); the report's failures name imports.
+afterwards) and the embedded sources (`res/`, the checkout's j2g); `report.edn` but its times (the
+shipped world has no failure naming an unresolved class; `.tmp/ship-gen2.diff`, empty).
 `bin/j2g-edge verify` passes (the gate). The compiled j2g in the next build changes, as any j2g change does.
 
 **bin/java-check** (`bin/java-check`, `test/java/check.ae`):
