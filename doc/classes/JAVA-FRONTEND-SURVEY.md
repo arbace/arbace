@@ -4811,8 +4811,8 @@ reading missed (JN9b.2's list: ten javac behaviours, each a fact that differed).
   Exceptions attribute's thrown types).
 - The worktree's `.tmp/`: `jn9b/` (`draft/`, the patches and this section's drafts; the tool builds' logs
   `build0.log` (the base tool), `build1.log`, `build2.log` (the final tool); `diffs.ae`, `differ.ae`,
-  `why.ae` (a run's declines, differences, decline reasons); `snap/`, a detached worktree of the branch
-  for the checks run while the checkout changed; `final/` (the final tool's checks: `run.sh`, their logs,
+  `why.ae` (a run's declines, differences, decline reasons; `snap/`, a detached worktree of the branch
+  for the checks run while the checkout changed, removed); `why.txt` (JN9b.7's decline reasons); `final/` (the final tool's checks: `run.sh`, their logs,
   `summary.txt`, `attr.md`, `attr.edn`, `split.md`, `gate.log`)), `repr-java-attr-check/`,
   `repr-java-front-check/`, `repr-java-jdk/`, `repr-java-check/`, `repr-java-parse-check/`,
   `repr-java-roundtrip/`, `jrt/`, `javac-vendor/`, `clojure-tests/`.
