@@ -301,12 +301,33 @@
       (or (ex/nmethod p #(na/canon p %) s) s)
       c)))
 
+(defn- choice-fact
+  "The overload tier's fact `id` of native tree `t`: (cf) gives the choice ({:sym m} or {:error kind},
+  arbace.repr.java.expr/choice's), checked against javac's method `js`; javac's in the native model
+  where it declines (native-method)."
+  [id t cf ^Symbol js]
+  (let [p *provider*
+        v (native-fact id t
+                       (fn [] (let [r (cf)]
+                                (if-let [m (:sym r)]
+                                  [(na/nmethod-id m) m]
+                                  [[:error (:error r)] ::failed])))
+                       js #(na/jmethod-id p %))]
+    (cond
+      (instance? Symbol v) (native-method p v)
+      ;; an array's clone(): javac's (its class, Symtab's arrayClass, is not in the native model)
+      (= "Array" (:flat (:owner v))) js
+      :else v)))
+
 (defn symbol-of
-  "TreeInfo.symbol of tree `t`, the fact `site` classed as sym's."
+  "TreeInfo.symbol of tree `t`, the fact `site` classed as sym's; with the native provider a call's
+  method is the overload tier's (JN9c)."
   [t site]
   (let [s (TreeInfo/symbol (twin t))]
-    (when *measure* (note! (keyword (sym-class s false) (name site))))
-    (if (native? t) (native-method *provider* s) s)))
+    (if (and (native? t) (instance? Symbol$MethodSymbol s) (:apply (nans t)))
+      (choice-fact (keyword "overload" (name site)) t #(ex/choice *provider* (:apply (nans t))) s)
+      (do (when *measure* (note! (keyword (sym-class s false) (name site))))
+          (if (native? t) (native-method *provider* s) s)))))
 
 (def ^:private native-type-facts
   #{:names/type-tree :types/literal :types/this :types/class-literal :names/record-pattern
@@ -362,9 +383,20 @@
                        jtv #(na/jtype p %))))
       (do (note! fact) jtv))))
 
-(defn constructor "NEWCLASS: the constructor chosen." [t]
-  (note! :overload/constructor)
-  (let [s (.-constructor ^JCTree$JCNewClass (twin t))] (if (native? t) (native-method *provider* s) s)))
+(defn constructor
+  "NEWCLASS: the constructor chosen (an anonymous class's: its own, TypeEnter's, calling the
+  superclass constructor chosen); with the native provider the overload tier's (JN9c)."
+  [t]
+  (let [s (.-constructor ^JCTree$JCNewClass (twin t))]
+    (if (native? t)
+      (if (tr/f t :def)
+        (let [p *provider*]
+          (choice-fact :overload/constructor t
+                       #(let [c (:class (nans (tr/f t :def)))]
+                          (if c {:sym (ex/anon-ctor-choice p t c)} (d/decline! "an anonymous class")))
+                       s))
+        (choice-fact :overload/constructor t #(ex/choice *provider* t) s))
+      (do (note! :overload/constructor) s))))
 
 (defn- jm
   "javac's method symbol for method `m` (a native one's by its declaration's twin): the measurement's
@@ -428,13 +460,18 @@
                    (and (instance? Type$ArrayType l) (not (generic-type? (.-elemtype ^Type$ArrayType l)))))
                  :overload/declared-varargs-element
                  :else (instantiation-fact m (tr/diamond? t) "varargs-element"))]
-      (if (and ve (native? t) (instance? JCTree$JCMethodInvocation j) (not= "infer" (namespace fact)))
-        ;; a variable arity call's element (whether the call is of variable arity: overload
-        ;; resolution's phase 3, javac's): the last parameter's at the site (the types tier's)
-        (native-fact fact t (fn [] (let [mt (ex/call-method-type *provider* (:meth t))
-                                         e (:e (last (:params mt)))]
-                                     (ex/lean!)
-                                     [(na/ntype e) e]))
+      (if (and (native? t) (not= "infer" (namespace fact))
+               (or (instance? JCTree$JCMethodInvocation j)
+                   (and (instance? JCTree$JCNewClass j) (not (tr/f t :def)) (not (tr/f t :encl)) (not (tr/diamond? t)))))
+        ;; whether the call is of variable arity (overload resolution's phase 3, the overload tier's,
+        ;; JN9c) and its element: the last parameter's at the site (the types tier's)
+        (native-fact fact t (fn [] (if (ex/call-varargs? *provider* t (some? ve))
+                                     (let [mt (if (instance? JCTree$JCMethodInvocation j)
+                                                (ex/call-method-type *provider* (:meth t))
+                                                (ex/ctor-method-type *provider* t))
+                                           e (:e (last (:params mt)))]
+                                       [(na/ntype e) e])
+                                     [nil nil]))
                      ve #(na/jtype *provider* %))
         (do (when *measure* (note! fact)) ve)))))
 
@@ -527,12 +564,24 @@
                      jp #(when % [:package (str (.getQualifiedName ^Symbol$PackageSymbol %))])))
       (do (note! :names/package) jp))))
 
+(declare anon-super-ctor*)
+
 (defn anon-super-ctor
   "The superclass constructor that the constructor javac made for the anonymous class declared by
-  `cd` calls (a node only javac's tree has: TypeEnter's), else `fallback`."
+  `cd` calls (a node only javac's tree has: TypeEnter's), else `fallback`; with the native provider
+  the overload tier's (JN9c: the constructor chosen at the created class type)."
   [cd fallback]
-  (note! :overload/anon-super-ctor)
-  (or (some-> (some (fn [d]
+  (let [c (when (native? cd) (:class (nans cd)))
+        js (anon-super-ctor* cd)]
+    (if (and c js (:newclass c))
+      (choice-fact :overload/anon-super-ctor cd #(ex/anon-super-choice *provider* (:newclass c) c) js)
+      (do (note! :overload/anon-super-ctor)
+          (or (some-> js (#(if (native? cd) (na/canon *provider* %) %))) fallback)))))
+
+(defn- anon-super-ctor*
+  "javac's superclass constructor the anonymous class constructor of `cd` calls, or nil."
+  [cd]
+  (some (fn [d]
               (when (and (instance? JCTree$JCMethodDecl d) (= "<init>" (str (.-name ^JCTree$JCMethodDecl d)))
                          (.-body ^JCTree$JCMethodDecl d))
                 (some (fn [st]
@@ -543,9 +592,7 @@
                                 (when (and (instance? Symbol$MethodSymbol s) (= "<init>" (str (.-name ^Symbol s))))
                                   s))))))
                       (.-stats (.-body ^JCTree$JCMethodDecl d)))))
-            (.-defs ^JCTree$JCClassDecl (twin cd)))
-              (#(if (native? cd) (na/canon *provider* %) %)))
-      fallback))
+            (.-defs ^JCTree$JCClassDecl (twin cd))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; The split: the output's lists by the facts their writing asked

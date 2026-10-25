@@ -430,6 +430,28 @@ covers what.
   `hiddenInInternal`, `isMemberOf`) and `code/Symtab.java` (`lengthVar`, `arrayCloneMethod`): Copyright (c)
   Oracle and/or its affiliates, under the GNU General Public License version 2 with the Classpath
   Exception (text below; each file carries the notice).
+- `arbace/repr/java/overload.ae` (repr/java's native attribution, its overload tier,
+  doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9c"), with the overload tier's choice in
+  `arbace/repr/java/expr.ae` and ClassReader's method flags and inner constructors in
+  `arbace/repr/java/decls.ae`: Arbace forms reimplementing, for the native parser's trees,
+  https://github.com/openjdk/jdk26u at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/`'s
+  `comp/Resolve.java` (`isAccessible` of classes and members, `isProtectedAccessible`, `isInnerSubClass`,
+  `notOverriddenIn`, `rawInstantiate` without inference, `resolveMethodCheck`'s `argumentsAcceptable` and
+  `checkArg`, `MethodCheckContext.compatible`, `MethodResultInfo.check`, `selectBest`, `mostSpecific`,
+  `signatureMoreSpecific`, `adjustArgs`, `MostSpecificCheck`, `ambiguityError`, `mergeAbstracts`,
+  `findMethodInScope`, `findMethod` with `InterfaceLookupPhase` and `superclasses`, `findFun`,
+  `lookupMethod`, `shouldStop`, `mergeResults`, `resolveMethod`, `resolveQualifiedMethod`,
+  `resolveConstructor`, `findConstructor`), `comp/Attr.java` (`visitApply`'s and `visitNewClass`'s
+  resolution sites), `comp/ArgumentAttr.java` (which arguments are standalone), `code/Types.java`
+  (`isSubtypeUnchecked`, `isConvertible`, `cvarUpperBound`, `cvarLowerBound`, `hasSameArgs`,
+  `isSubSignature`, `overrideEquivalent`, `returnTypeSubstitutable`, `resultSubtype`,
+  `covariantReturnType`, `mergeAbstracts`, `implementation`, `isDerivedRaw`, `rank`, `closure`, `insert`,
+  `union`), `code/Symbol.java` (`MethodSymbol.overrides`, `isOverridableIn`, `TypeSymbol.precedes`),
+  `comp/Check.java` (`intersect`, `importAccessible`), `code/Scope.java` (the order of a static import's
+  members), `comp/TypeEnter.java` (`AnonClassConstructorHelper`, `staticImportFilter`) and
+  `jvm/ClassReader.java` (`readMethod`'s default methods and inner constructors): Copyright (c) Oracle
+  and/or its affiliates, under the GNU General Public License version 2 with the Classpath Exception
+  (text below; each file carries the notice).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`
