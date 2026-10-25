@@ -1137,6 +1137,17 @@ The cached gate's wall does not move: its longest steps are `suite-go` (2m12s-2m
 (about 2 minutes), beside which the subset now takes a third of its old time; the 80 s come off the
 slot the gate shares with the other checks.
 
+## Decided (2026-10-25): RPS90-RPS99
+
+The user decided REAP7's proposals: RPS90 (a) (DIR's layout as built), RPS91 (a) (`:main NS` or
+`:main-class CLASS`), RPS92 (b) now (a program's Go forms compiled: printed into the module and listed in
+a goi table of the program's own, for the milestone; REAP7b), RPS93 (c) (a Java package's namespace
+embedded as a no-op loader, with a warning at build time when `src/` requires one), RPS94 (c) (`.clj` and
+`.cljc` sources translated into `.ae` by repr/clojure first), RPS95 (a), then (b) at the re-seed (stage 0
+a base once `bin/seed --build` keeps its `aot/`), RPS96 (a), RPS97 (a), then (b) after the milestone
+(one library for the three harnesses), RPS98 (c) (the essential gate builds `mixed`, the rest in
+`--full`), RPS99 (a).
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail
