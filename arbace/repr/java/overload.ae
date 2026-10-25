@@ -420,6 +420,8 @@
          true
          (catch Throwable e (if (inf/error? e) false (throw e))))))
 
+(def ^:private trace? (seq (System/getenv "REPR_JAVA_INFER_TRACE")))
+
 (defn- instantiate
   "rawInstantiate of method `m` at `site` for argument types `as` (types, or deferred types of poly
   expressions): its member type when applicable, else nil; a generic method's applicability Infer's
@@ -464,7 +466,10 @@
         (let [[fresh sm] (inf/new-instances (:tparams mt) (:tsubst mt))]
           (try (inf/instantiate-method {:tvars fresh :mt (msubst-mt mt sm) :r nil :msym m :as as
                                         :phase [boxing? varargs?] :trees (:arg-trees ctx)})
-               (catch Throwable e (if (inf/error? e) nil (throw e))))))
+               (catch Throwable e
+                 (if (inf/error? e)
+                   (do (when trace? (binding [*out* *err*] (println "inapplicable" (:name m) [boxing? varargs?] (.getMessage e)))) nil)
+                   (throw e))))))
       (some deferred-arg? as) (when (check-args ctx m mt as boxing? varargs?) mt)
       :else (when (acceptable? r as (:params mt) boxing? varargs?) mt))))
 
@@ -587,10 +592,16 @@
                 ;; Resolve's applicable candidates logged, with the phase (the method reference's static kind)
                 (when (and mt *cands*) (.add ^java.util.ArrayList *cands* [*phase* s]))
                 mt)
-        (case (kind best)
-          :absent {:kind :wrong-mth :sym s}
-          (:hidden :wrong-mth) {:kind :wrong-mths}
-          best)
+        ;; whether the candidate failed by arity (ReferenceLookupResult.canIgnore's arity mismatch)
+        (let [n (count (:params (d/method-type s)))
+              k (count as)
+              arity? (if varargs? (< k (dec n)) (not= k n))]
+          (case (kind best)
+            :absent {:kind :wrong-mth :sym s :arity? arity?}
+            :hidden {:kind :wrong-mths :all-arity? false}
+            :wrong-mth {:kind :wrong-mths :all-arity? (and (:arity? best) arity?)}
+            :wrong-mths (assoc best :all-arity? (and (:all-arity? best) arity?))
+            best))
         (if-not (accessible? ctx site s)
           (case (kind best)
             :absent {:kind :hidden :sym s}
@@ -1098,7 +1109,8 @@
 (defn- can-ignore? "ReferenceLookupResult.canIgnore (an arity mismatch, a method not found)." [res]
   (case (kind (:sym res))
     :absent true
-    (:wrong-mth :wrong-mths) (d/decline! "a method reference's inapplicable candidates")
+    :wrong-mth (boolean (:arity? (:sym res)))
+    :wrong-mths (boolean (:all-arity? (:sym res)))
     false))
 
 (defn- choose

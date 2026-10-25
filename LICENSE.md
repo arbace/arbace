@@ -454,8 +454,8 @@ covers what.
   (text below; each file carries the notice).
 - `arbace/repr/java/infer.ae` (repr/java's native attribution, its inference tier,
   doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9d"), with the inference tier's poly expressions,
-  lambdas, method references, record patterns and local class names in `arbace/repr/java/expr.ae`,
-  its diamonds, method references and functional descriptors in `arbace/repr/java/overload.ae`, and
+  lambdas, method references, record patterns and local class names in `arbace/repr/java/expr.ae`, its
+  diamonds, method references and functional descriptors in `arbace/repr/java/overload.ae`, and
   ClassReader's synthetic members and deprecation flags in `arbace/repr/java/decls.ae`: Arbace forms
   reimplementing, for the native parser's trees, https://github.com/openjdk/jdk26u at `baf63fb`,
   `src/jdk.compiler/share/classes/com/sun/tools/javac/`'s `comp/Infer.java` (`instantiateMethod`,
@@ -470,19 +470,21 @@ covers what.
   `visitLambda`, `getTargetInfo`, `lambdaBodyResult`, `checkLambdaCompatible`, `visitReference`,
   `checkReferenceCompatible`, `visitNewClass`'s diamonds and qualified creations,
   `visitAnonymousClassDefinition`, `visitRecordPattern`, `visitBindingPattern`, `visitTypeUnion`,
-  `visitForeachLoop`'s element, `condType`), `comp/Resolve.java` (`resolveDiamond`, `findDiamond`,
-  `resolveMemberReference`, `getMemberReference`, the reference lookup helpers and choosers,
-  `ReferenceLookupResult`, `findPolymorphicSignatureInstance`, `MethodReferenceCheck`,
-  `arityMethodCheck`, `nilMethodCheck`), `comp/Check.java` (`checkLocalVarType`, `localClassName`,
-  `checkType`), `comp/TypeEnter.java` (`BasicConstructorHelper`, `getDefaultConstructorHelper`),
-  `code/Type.java` (`UndetVar`), `code/Types.java` (`isSubtype`, `isSuperType`, `isSameType`,
-  `containsType`, `containedBy`, `asSuper`, `supertype`, `interfaces`, `closure`, `intersect`, `merge`,
-  `closureMin`, `lub`, `glb`, `upward` with `TypeProjection`, `captures`, `findDescriptorType`,
-  `findDescriptorSymbol`, `removeWildcards`, `interfaceCandidates`, `prune`, `overridesObjectMethod`,
-  `membersClosure`, `newInstances`), `code/Symbol.java` (`TypeSymbol.precedes`), `jvm/ClassReader.java`
-  (`enterMember`, the @Deprecated flags), `tree/TreeInfo.java` (`isExpressionStatement`) and
-  `util/GraphUtils.java` (`tarjan`): Copyright (c) Oracle and/or its affiliates, under the GNU General
-  Public License version 2 with the Classpath Exception (text below; each file carries the notice).
+  `visitForeachLoop`'s element, `condType`, `checkExConstraints`, `handleSwitch`'s pattern switch and
+  unconditional pattern), `comp/Flow.java` (`AliveAnalyzer`'s case liveness, `isExhaustive`),
+  `comp/Resolve.java` (`resolveDiamond`, `findDiamond`, `resolveMemberReference`, `getMemberReference`,
+  the reference lookup helpers and choosers, `ReferenceLookupResult`, `findPolymorphicSignatureInstance`,
+  `MethodReferenceCheck`, `arityMethodCheck`, `nilMethodCheck`), `comp/Check.java` (`checkLocalVarType`,
+  `localClassName`, `checkType`, `isChecked`), `comp/TypeEnter.java` (`BasicConstructorHelper`,
+  `getDefaultConstructorHelper`), `code/Type.java` (`UndetVar`), `code/Types.java` (`isSubtype`,
+  `isSuperType`, `isSameType`, `containsType`, `containedBy`, `asSuper`, `supertype`, `interfaces`,
+  `closure`, `intersect`, `merge`, `closureMin`, `lub`, `glb`, `upward` with `TypeProjection`, `captures`,
+  `findDescriptorType`, `findDescriptorSymbol`, `removeWildcards`, `interfaceCandidates`, `prune`,
+  `overridesObjectMethod`, `membersClosure`, `newInstances`), `code/Symbol.java` (`TypeSymbol.precedes`),
+  `jvm/ClassReader.java` (`enterMember`, the @Deprecated flags), `tree/TreeInfo.java`
+  (`isExpressionStatement`) and `util/GraphUtils.java` (`tarjan`): Copyright (c) Oracle and/or its
+  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below;
+  each file carries the notice).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`

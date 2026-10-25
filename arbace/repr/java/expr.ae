@@ -772,6 +772,9 @@
       (let [n (count ps)]
         (boolean
          (some (fn [[i arg]]
+                 ;; a lambda or method reference is checked structurally, not converted (its type is
+                 ;; its target)
+                 (when-not (#{:LAMBDA :REFERENCE} (:tag (skip-parens arg)))
                  (let [at (etype p arg)
                        f (cond (< i (dec n)) (nth ps i)
                                (not varargs?) (nth ps i nil)
@@ -781,7 +784,7 @@
                                          (:e l))))]
                    (when (and f (map? f) (not (keyword? at)) (not (ty/reifiable? f)))
                      (and (not (ty/subtype? (reg p) at f))
-                          (ty/subtype? (reg p) (d/erasure at) (d/erasure f))))))
+                          (ty/subtype? (reg p) (d/erasure at) (d/erasure f)))))))
                (map-indexed vector args)))))))
 
 (declare checked-mtype arg-context args-checked!)
@@ -1076,7 +1079,9 @@
   "The type of poly conditional or switch expression `t`: its target (pt), an argument's as its method
   check gives it (captured)."
   [p t]
-  (let [x (:pt (ans p t))]
+  ;; through parentheses and enclosing conditionals' arms (:same: the argument's result info, a
+  ;; conditional context of it)
+  (let [x (loop [y t] (let [x (:pt (ans p y))] (if (= :same (first x)) (recur (second x)) x)))]
     (if (= :arg (first x))
       (arg-checked-target p (nth x 1) (nth x 2))
       (pt p t))))
@@ -1309,7 +1314,9 @@
                         tg (inf/as-inst ic (:pt r))]
                     ;; a poly conditional's or switch's type: its target as MethodResultInfo.check gives
                     ;; it, captured (the arguments' result info)
-                    (.put m a (assoc (.get m a) :target tg
+                    ;; (:arg-target: a lambda's or method reference's own :target is its instantiated
+                    ;; functional interface, recorded by its check)
+                    (.put m a (assoc (.get m a) :arg-target tg
                                      :checked-target (if (:method? r) (ty/capture (reg p) tg) tg)))))]
     (if (inf/free? ic (:pt r)) (inf/add-listener! ic [(:pt r)] f) (f nil))))
 
@@ -1407,7 +1414,7 @@
   [p outer i]
   (let [a (nth (:args outer) i)]
     (args-checked! p outer)
-    (or (:target (.get (polys p) a)) (d/decline! "a poly argument's target (deferred attribution)"))))
+    (or (:arg-target (.get (polys p) a)) (d/decline! "a poly argument's target (deferred attribution)"))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Lambdas (Attr.visitLambda, getTargetInfo, lambdaBodyResult, checkLambdaCompatible;
@@ -1438,6 +1445,22 @@
                     :else (doseq [[k v] x :when (and (not= k :mods) (or (map? v) (vector? v)))] (walk v))))]
           (walk (:stats b)))
         @out))))
+
+(defn- lambda-return-stmts
+  "The return statements of lambda `lam`'s block body (not entering classes and lambdas)."
+  [lam]
+  (let [out (volatile! [])]
+    (letfn [(walk [x]
+              (cond
+                (vector? x) (run! walk x)
+                (not (map? x)) nil
+                (#{:CLASSDEF :LAMBDA} (:tag x)) nil
+                (= :RETURN (:tag x)) (vswap! out conj x)
+                :else (doseq [[k v] x :when (and (not= k :mods) (or (map? v) (vector? v)))] (walk v))))]
+      (walk (:stats (:body lam))))
+    @out))
+
+(declare body-can-complete?)
 
 (defn- instantiate-fi
   "Infer.instantiateFunctionalInterface of functional interface type `fi` for explicit parameter
@@ -1561,7 +1584,15 @@
                         :compat (if (and void? (not= :BLOCK (:tag (:body lam)))) :void-expr :assign)})]
         (when-not (and void? (= :BLOCK (:tag (:body lam))))
           (doseq [e (lambda-returns lam)]
-            (inf/ri-check rr (arg-type p e)))))
+            (inf/ri-check rr (arg-type p e))))
+        ;; a block body's void and value compatibility (Attr.visitReturn's unexpected or missing return
+        ;; value, checkLambdaCompatible's body that can complete normally for a non-void descriptor)
+        (when (= :BLOCK (:tag (:body lam)))
+          (let [rets (lambda-return-stmts lam)]
+            (if void?
+              (when (some :expr rets) (inf/error! "unexpected return value in lambda"))
+              (do (when (some #(nil? (:expr %)) rets) (inf/error! "missing return value in lambda"))
+                  (when (body-can-complete? p lam) (inf/error! "missing return value in lambda (it completes normally)")))))))
       (when ps
         (doseq [[a b] (map vector (:params desc) ps)]
           (when-not (inf/same-type? (inf/as-undet ic a) b) (inf/error! "incompatible arg types in lambda"))))
@@ -1728,8 +1759,90 @@
             (first nodes))]
     (:stuck (:sp n))))
 
+(defn- unrelated-interfaces?
+  "MostSpecificCheckContext.unrelatedInterfaces of `t` and `s` (through intersections)."
+  [t s]
+  (cond
+    (= :inter (:k t)) (every? #(unrelated-interfaces? % s) (filter #(d/interface? (:c %)) (:ts t)))
+    (= :inter (:k s)) (every? #(unrelated-interfaces? t %) (filter #(d/interface? (:c %)) (:ts s)))
+    :else (and (nil? (inf/as-super t (:c s))) (nil? (inf/as-super s (:c t))))))
+
+(defn- unrelated-fis? [p t s]
+  (and (functional? p t) (functional? p s) (unrelated-interfaces? t s)))
+
+(declare fi-most-specific?)
+
+(defn- speculative-tree?
+  "Has poly argument `t` (through parentheses) a speculative tree for the overload phase's check
+  against formal `req` in `ic` (DeferredType.speculativeTree: not stuck by OverloadStuckPolicy)?"
+  [p t req ic]
+  (let [sp (stuck-policy p (skip-parens t) req ic true)]
+    (not (or (seq (:stuck sp)) (:ostuck sp)))))
+
+(defn- return-checker
+  "MostSpecificFunctionReturnChecker of tree `t` for returns `tr` (m1's descriptor's) and `sr`: true
+  when t's results make m1's more specific."
+  [p t tr sr ic]
+  (let [t (skip-parens t)
+        prim? (fn [x] (keyword? x))
+        void? (fn [x] (= :void x))]
+    (case (:tag t)
+      :CONDEXPR (and (return-checker p (:truepart t) tr sr ic) (return-checker p (:falsepart t) tr sr ic))
+      :LAMBDA (cond
+                (void? sr) true
+                (void? tr) false
+                :else
+                (let [rs (lambda-returns t)]
+                  (cond
+                    (and (seq rs) (unrelated-fis? p tr sr)) (every? #(fi-most-specific? p tr sr % ic) rs)
+                    (and (seq rs) (not= (prim? tr) (prim? sr)))
+                    (every? (fn [e] (let [rp (and (not (poly-kind p e)) (prim? (etype p e)))]
+                                      (and (= rp (prim? tr)) (not= rp (prim? sr)))))
+                            rs)
+                    :else (binding [inf/*reg* (reg p)] (inf/subtype? tr (inf/as-undet ic sr) false)))))
+      :REFERENCE (cond
+                   (void? sr) true
+                   (void? tr) false
+                   (not= (prim? tr) (prim? sr))
+                   (let [s (mref-sym p t)
+                         rp (and (= :unoverloaded (mref-overload-kind p t))
+                                 (prim? (:ret (d/method-type s))))]
+                     (and (= rp (prim? tr)) (not= rp (prim? sr))))
+                   :else (binding [inf/*reg* (reg p)] (inf/subtype? tr (inf/as-undet ic sr) false)))
+      false)))
+
+(defn- fi-most-specific?
+  "MostSpecificCheckContext.functionalInterfaceMostSpecific of unrelated functional interfaces `t` (m1's
+  formal) and `s` (m2's, with m2's inference variables in `ic`) for poly argument tree `tree`."
+  [p t s tree ic]
+  (binding [inf/*reg* (reg p)]
+    (let [rg (reg p)
+          td (ov/descriptor-type rg (ty/capture rg t))
+          tdn (ov/descriptor-type rg t)
+          sd (ov/descriptor-type rg s)]
+      (when (or (seq (:tparams td)) (seq (:tparams sd))) (d/decline! "a generic functional descriptor (most specific)"))
+      (and (= (count (:params td)) (count (:params sd)))
+           (every? true? (map (fn [tp tpn sp]
+                                (let [su (inf/as-undet ic sp)]
+                                  (boolean (and (inf/subtype? su tp) (inf/same-type? tpn su)))))
+                              (:params td) (:params tdn) (:params sd)))
+           (return-checker p tree (:ret td) (:ret sd) ic)))))
+
+(defn- most-specific-fi
+  "The :most-specific-fi hook: for unrelated functional interfaces `found` (m1's formal) and `req`
+  (m2's) and a poly argument with a speculative tree, functionalInterfaceMostSpecific; else nil."
+  [found req dt r]
+  (let [p (:p dt)
+        ic (:ic r)
+        t (:tree dt)]
+    (when (and (#{:lambda :mref :cond} (:kind dt))
+               (unrelated-fis? p found req)
+               (speculative-tree? p t req ic))
+      (fi-most-specific? p found req t ic))))
+
 (alter-var-root #'inf/*deferred*
-                (constantly {:check (fn [dt r] (deferred-check* dt r))
+                (constantly {:most-specific-fi (fn [f q dt r] (most-specific-fi f q dt r))
+                             :check (fn [dt r] (deferred-check* dt r))
                              :process (fn [n dac] (process-node n dac))
                              :pick (fn [dac] (pick-node dac))
                              :stuck-vars (fn [n] (:stuck (:sp n)))
@@ -1924,7 +2037,7 @@
         a (ans p t)
         sp-mt (d/method-type sp)
         obj (d/object-type rg)
-        ps (mapv (fn [at]
+        ps (mapv (fn [at a]
                    (letfn [(m [x] (cond (= :null x) (d/ctype (d/class-named rg "java.lang.Void"))
                                         (and (map? x) (= :class (:k x))) (d/erasure x)
                                         (and (map? x) (= :array (:k x))) (d/array-of (m (:e x)))
@@ -1938,8 +2051,13 @@
                                     (inf/check-partial (poly-call-pmt p (skip-parens (:tree at)))
                                                        (inf/ri {:pt obj :compat :loose :method? true})))
                             (d/decline! "a signature polymorphic call's poly argument"))
-                          at))))
-                 (arg-types p t))
+                          ;; any call without type arguments is ArgumentAttr's ResolvedMethodType: its
+                          ;; speculative type MethodResultInfo.check's (a captured variable's upper bound)
+                          (let [x (skip-parens a)]
+                            (if (and (= :APPLY (:tag x)) (empty? (:typeargs x)) (not= :void at))
+                              (binding [inf/*reg* rg] (ty/capture rg (inf/cvar-upper at)))
+                              at))))))
+                 (arg-types p t) (:args t))
         ret (cond
               (:cast-of a) (d/erasure (or (some-> (:type (ans p (:clazz (:cast-of a)))) deref) (d/decline! "the cast's type")))
               (:exec a) :void

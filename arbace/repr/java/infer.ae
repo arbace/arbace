@@ -71,6 +71,7 @@
 (defn error!
   "Throw javac's InferenceException (an inapplicable method)."
   [why]
+  (tr "error" why)
   (throw (ex-info (str "repr/java infer: " why) {::error true})))
 
 (defn error? [e] (boolean (::error (ex-data e))))
@@ -210,16 +211,28 @@
   [t]
   (d/tvar-bounds (:tv t)))
 
+(defn- throws-tvar?
+  "Is type variable symbol `s` (a fresh instance's original) flagged THROWS: a method's type parameter
+  in that method's throws clause (MemberEnter, ClassReader's signature)?"
+  [s]
+  (let [s (or (:fresh-of s) s)
+        o (:owner s)]
+    (boolean
+     (when (and o (= :method (:sk o)))
+       (let [ts (try (:throws (d/method-type o)) (catch Throwable _ nil))]
+         (some #(and (map? %) (= :tvar (:k %)) (identical? s (:tv %))) ts))))))
+
 (defn new-undet
   "An inference variable for type variable type `tv` (UndetVar's constructor: its declared bounds as
-  upper bounds, a captured variable's lower bound), its listener the incorporation engine."
+  upper bounds, a captured variable's lower bound; Infer.fromTypeVarFun: THROWS for a type variable of
+  a throws clause), its listener the incorporation engine."
   [tv]
   (let [st (HashMap.)
         u {:k :undet :uv (d/sym {:sk :undet :qtype tv :st st})}
         bs (tvar-declared-bounds tv)]
     (.put st :upper ()) (.put st :lower ()) (.put st :eq ())
     (.put st :actions (ArrayDeque.))
-    (.put st :kind (if (captured? tv) :captured :normal))
+    (.put st :kind (cond (captured? tv) :captured (throws-tvar? (:tv tv)) :throws :else :normal))
     (.put st :declared (count bs))
     (.put st :listener :engine)
     (doseq [b (reverse bs)] (add-bound! u :upper b true))
@@ -304,10 +317,23 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Relations (Types), inference variables taking bounds
 
-(defn wild-upper "Types.wildUpperBound." [t]
+(defn wild-upper
+  "Types.wildUpperBound (a `?` or `? super` wildcard whose formal is known, :formal: the formal's
+  declared upper bound, as WildcardType.bound's)."
+  [t]
   (if (wild? t)
-    (if (#{:super :unbound} (:bk t)) (obj) (recur (:t t)))
+    (if (#{:super :unbound} (:bk t))
+      (if-let [f (:formal t)] (ty/upper-bound (d/tvar-type f)) (obj))
+      (recur (:t t)))
     t))
+
+(defn- with-formals
+  "Type arguments `as` of class `c`, each wildcard knowing its formal (WildcardType.bound)."
+  [c as]
+  (let [fs (d/class-tparams c)]
+    (if (= (count fs) (count as))
+      (mapv (fn [a f] (if (and (map? a) (= :wild (:k a))) (assoc a :formal f) a)) as fs)
+      as)))
 
 (defn- wild-lower "Types.wildLowerBound." [t]
   (if (wild? t)
@@ -463,7 +489,7 @@
         (nil? sup) false
         (not (class-t? sup)) (subtype-nc sup s)
         :else (and (class-t? s) (identical? (:c sup) (:c s))
-                   (or (not (parameterized? s)) (contains-list? (:args s) (:args sup)))
+                   (or (not (parameterized? s)) (contains-list? (with-formals (:c s) (:args s)) (with-formals (:c s) (:args sup))))
                    (let [so (:outer s) po (:outer sup)]
                      (cond (nil? so) true
                            (nil? po) false
@@ -548,7 +574,7 @@
                            (or (nil? to) (nil? so)) false
                            :else (same-type? to so)))
                    (= (count (:args t)) (count (:args s)))
-                   (every? identity (map contains-equiv? (:args t) (:args s)))))
+                   (every? identity (map contains-equiv? (with-formals (:c t) (:args t)) (with-formals (:c t) (:args s))))))
       :array (and (array? s) (contains-equiv? (:e t) (:e s)))
       :union (and (= :union (:k s)) (eq-list (:ts t) (:ts s)))
       :null (= :null s)
@@ -1346,10 +1372,16 @@
       ;; ExpressionLambdaReturnContext of a void descriptor: an expression statement (checked by the
       ;; structure, the walk's)
       :void-expr (boolean (:expr-stmt? r))
-      :most-specific (let [[f q] (if (and (:loose? r) (not= (prim? found) (prim? req)))
-                                   [(if (prim? found) (boxed found) (unboxed found)) q]
-                                   [f q])]
-                       (subtype? f q false))
+      ;; MostSpecificCheckContext.compatible: unrelated functional interfaces for a poly argument
+      ;; attributed speculatively compared by their descriptors (the hook's), else by subtyping
+      :most-specific (let [h (:most-specific-fi *deferred*)
+                           x (when (and h (deferred? (:actual r))) (h found req (:actual r) r))]
+                       (if (some? x)
+                         x
+                         (let [[f q] (if (and (:loose? r) (not= (prim? found) (prim? req)))
+                                       [(if (prim? found) (boxed found) (unboxed found)) q]
+                                       [f q])]
+                           (subtype? f q false))))
       :mref (let [f (as-undet (:pending r) f)
                   q (if (and (undet? f) (prim? q)) (boxed q) q)]
               (if (:strict? r) (subtype-unchecked? f q) (convertible? f q))))))
@@ -1361,7 +1393,9 @@
     (cond
       (= :none pt) found
       (compatible? r found pt) found
-      :else (error! "inconvertible types"))))
+      :else (do (when trace? (tr "inconvertible" (pr-str ((resolve 'arbace.repr.java.nattr/ntype) (as-undet (:ic r) found))) "to"
+                                 (pr-str ((resolve 'arbace.repr.java.nattr/ntype) (as-undet (:ic r) pt)))))
+                (error! "inconvertible types")))))
 
 (defn ri-check
   "ResultInfo.check of `found` (a type or a deferred type): a MethodResultInfo's checks the upper bound
@@ -1518,7 +1552,7 @@
   (if (and dac (= :check (:mode dac)))
     (let [rs (concat [(:ret mt)]
                      (mapcat (fn [n] (concat ((:stuck-vars *deferred*) n) ((:dep-vars *deferred*) n))) (:nodes dac)))
-          thrown (filter #(:throws? (:tv %)) (ic-vars (:ic dac)))]
+          thrown (filter #(throws-tvar? (:tv %)) (ic-vars (:ic dac)))]
       (concat rs (remove (fn [t] (some #(eq-ign % t) rs)) thrown)))
     [(:ret mt)]))
 
@@ -1602,7 +1636,16 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; instantiateMethod
 
+(declare instantiate-method*)
+
 (defn instantiate-method
+  "instantiate-method*, traced."
+  [m]
+  (let [x (instantiate-method* m)]
+    (when trace? (tr "instantiated" (:name (:msym m)) (pr-str ((resolve 'arbace.repr.java.nattr/ntype) (:ret x)))))
+    x))
+
+(defn instantiate-method*
   "Infer.instantiateMethod: the type variables `tvars` (fresh) of method type `mt` inferred from
   argument types `as` (types or deferred types) in phase `phase`, the target result `r` (nil during
   overload resolution; :pt :any-poly for a partially inferred type), method check `mc`. Returns the
