@@ -1751,3 +1751,66 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   FULL-SUPPORT-SURVEY.md, "Decided (2026-10-24): RPS30-RPS34"); the two `:pending` classes cite them.
 - JC3 started (branch `java-check-jc3` from `0050e92a`; the user): Java's front end's levels in
   `bin/java-check`, `diagnostics` beside JC1's `read` and `classes`; proposals JCS50-JCS59.
+
+## 2026-10-25: JC3, JN9b, REAP4, JC2 and REAP3 merged; JCS40-JCS55, RPS40-RPS59 and JFS95-JFS101 decided; six milestones started (the user)
+
+- JC3 (branch `java-check-jc3` from `0050e92a`, merged `3745075c`): `bin/java-check --levels diagnostics`,
+  langtools' 1,212 golden-diagnostics tests (compile-fail-ref, the corpus `langtools-diagnostics`) run in
+  place by javac on Arbace as jtreg runs them (@build and @compile in order, @library, @modules,
+  @enablePreview, the substitutions), the output against the golden file line by line; the JDK's runs
+  recorded in `test/java/ref-jdk26.edn` (1,194 pass on the JDK); javac on Arbace 1,101 of 1,194 (59 fail,
+  34 differ: `--release` without ct.sym 44, processors from class files 25, doclint 8, the closed world 4,
+  javac on Arbace's file manager 8 and command line 4), `test/java/check-diagnostics.edn`; in `bin/gate
+  --full`'s java chain; `make java-check-diagnostics`; the Java read cell's third source. Numbers on a
+  javac tool of an older key (javac's world unchanged since). Essential gate on `3745075c` passed (2m46s).
+  Decided (the user): JCS50 (a) with (b) first, JCS51 (a), JCS52 (a), JCS53 (a), JCS54 (a), JCS55 (b).
+- JN9b (branch `java-jn9b`, merged): the native attribution provider's members and types tiers,
+  `arbace/repr/java/expr.ae` (from javac's Attr, Operators, Resolve) and `types.ae` (from Types), jdk26u at
+  `baf63fbe`; a call's type computed after javac's overload choice (the lean, until JN9c); TypeEnter's
+  generated members in `decls` (JFS79), `isMemberOf` native (JFS90), the bridges' known list (JFS94).
+  `attr-check --corpus all`: 11,440,693 facts equal, 0 different, 84,239 declined; lists written alone
+  63.4% (was 15.2%), the model's reads native 97.4%; bridges 48,519 (was 257,451), all known. Forms
+  unchanged; javac's tool 224,006,304 bytes; the shipped program's code unchanged. Decided (the user):
+  JFS95-JFS99 (a), JFS100 (b), JFS101 (a).
+- REAP4 (branch `reap4-clojure-eval`, merged `8124b0be`): the boxed NaN's identity: the cause was the
+  evaluator's constants (`Evaluator.constant` kept a constant collection's numbers as the same objects,
+  where the JVM's `emitValue` boxes each anew; the reader's `##NaN` is shared on the JVM too), fixed by
+  boxing each Integer, Long, Double and Character anew; 15 oracle forms added (`numbers.ae`, 837 cases),
+  the known mismatches 53 to 52. `java.util.BitSet` among j2g's proxy superclasses (J2G-SPEC §5.12). SL5
+  (RPS18 (b)): `arbace.inspector`, `arbace.xml`, `arbace.java.browse`, `arbace.java.javadoc` restored from
+  `ac66b276^` and embedded (VENDOR-NOTES hand change 30), `org.xml.sax` and `org.w3c.dom` among the cut
+  packages, `jdk/edge.edn` updated; metadata 53 of 53, java.javadoc 2 of 5. The suite 20,564 of 20,580
+  assertions (78 namespaces). Survey conflict resolved by keeping both; Clojure's eval classes updated
+  (`:proxy-bitset`, `:nan-identity`, `:d6-namespaces-cut` dropped; `:javadoc-url` added).
+- JC2 (branch `java-check-jc2` from `45c41a46`, merged `71ed1d18`): `bin/java-check --levels compiled`, the
+  tests translated by j2g in shards (`bin/j2g --program` with the build's compiled namespaces,
+  `bin/build-go`), refused tests taken out with j2g's or Go's reason; 1,632 of 2,722 (60.0%) against
+  interpreted 1,426; j2g's fixes (user classes named `J_<binary name>_J`, a class's failure in `fis` its
+  own, a refused forms file its own, run-time exceptions of constant indices and divisors, record patterns,
+  `instanceof null`, empty records); JC1's follow-ups JCS16 (b) (`jdk/java/beans` excluded), JCS17 (b)
+  (identity hashes masked), JCS19 (b) (each test's own directory), JCS33 (a) (`--load files`), the
+  references re-recorded; `test/java/jls/RuntimeConstants.java`; the Java AOT cell. Merge conflicts in nine
+  files: both levels kept in `bin/java-check` and `test/java/check.ae`; the compiled level made to skip the
+  golden-diagnostics tests (they would have counted as unread); the id `t06426` taken by both branches, so
+  JC3's golden-diagnostics tests renumbered `t06427`-`t07638` (ids only: they run in place, unrenamed).
+  Decided (the user): JCS40 (a), JCS41 (a), JCS42 (b), JCS43-JCS47 (a), JCS48 (a) and (b), JCS49 (a).
+- REAP3 (branch `reap3-clojure-aot` from `407ed654`, merged `e9aa12af`): `bin/clojure-tests --aot`, the
+  suite and its libraries compiled by c2j with the runtime's namespaces they load (156 sources, 15,219
+  classes), j2g and `bin/build-go` making the program with the Java fixtures, each namespace loaded through
+  its compiled loader (`test/suite_aot_hook.ae`); 20,489 of 20,520 assertions (`test/arbace-go-aot-results.edn`,
+  recorded before REAP4's merge); the two levels' disagreements listed; `suite-aot` in `bin/gate --full`.
+  F2.4's limit fixed (RPS6 (a)): the Java forms compiler records the vars its forms name, c2j writes
+  `(c2j/refer-vars ...)`, j2g interns them; diffcheck's 11 F2.4 cases pass. c2j's fixes found by the suite
+  (record and deftype literals, fn constants, qualified methods as values, a deftype defined twice, Go
+  package cycles merged, file names unique ignoring case...). `bin/arbace-go --fixpoint` held on the branch.
+  Its classes appended to `test/clojure/divergences-aot.edn` (RPS45 (a)), `:f2.4-limit` dropped. Decided
+  (the user): RPS40 (b), RPS41-RPS47 (a), RPS48 (a) then (b), RPS49 (a); REAP4's RPS50-RPS59 (a).
+- The essential gate on `566f549d` (the four merges) passed (21m07s): the suite no regressions, the oracle
+  52 known, diffcheck 12,789 of 12,801 (12 known), goi 801 of 801, Java 428 of 428, `j2g-edge verify`;
+  the matrix 11 of 12 cells checked, 0 problems; no class pending.
+- The agents' slips (none committed): `/dev/null` and `/dev/zero` in throwaway commands (JC2, REAP3),
+  `<(...)` once each (JC2, REAP3), `pgrep -f` once as a read (REAP4, JN9b), `ps | grep` (JC2), editing
+  j2g's sources during a j2g run (JC2), small checks outside heavy (JN9b); mine: one `2>/dev/null` in a
+  status check (2026-10-24).
+- Started (the user), from this commit: REAP5 (Java's print level), JC5 (the analysis' gaps), REAP8 (the
+  essential subsets), JC2b (JCS42 (b)-JCS48), RPS55 (jrt's `java.lang.Module`), JN9c (overload resolution).

@@ -108,12 +108,16 @@ The current state of the work. This file is rewritten as things change. For the 
   read 2,965 and interpreted 1,364 of 2,967 jtreg and JLS tests passing on the JDK; JCS16-JCS25
   decided), JC4 (the interpreter's private calls, `Object` methods through world interfaces, `clone`,
   the REPL's source lookup on Go; JCS30-JCS33 decided), REAP2 (`bin/goi check --aot`: 1,685 of 1,837
-  pass, none fail, 7 classes; goi's reference gc on the originals; RPS30-RPS34 decided), the first
-  batched re-seed (`916770d0…`: GPS41 (c), GPS49 (c), GC157 and go:embed, JC4, JFS65 (b)); the matrix
-  9 of 12 cells checked, 0 problems. Running: REAP3 (Clojure's suite compiled, F2.4), REAP4 (NaN,
-  `BitSet`, SL5), JN9b, JC2 (the compiled level, JC1's follow-ups), JC3 (the front end's levels:
-  `diagnostics`). Next: REAP5 after JC3, JC5 after JC2, REAP7 and REAP8 after REAP3 and JC2; the second
-  re-seed after REAP3, REAP4, JC5 and REAP2's `arbace/build/go.ae` (`--go-flag`). After the milestone: the scripts' sweep of `/dev/null` and
+  pass, none fail; RPS30-RPS34), the first batched re-seed (`916770d0…`), JC3 (the diagnostics level:
+  1,101 of 1,194 golden tests; JCS50-JCS55), JN9b (the native provider's members and types tiers;
+  JFS95-JFS101), REAP4 (the boxed NaN, `BitSet`, SL5; RPS50-RPS59), JC2 (the compiled level: 1,632 of
+  2,722; JCS40-JCS49), REAP3 (the suite compiled: 20,489 of 20,520 assertions, F2.4 fixed; RPS40-RPS49).
+  The matrix: 11 of 12 cells checked (Java's print is REAP5's), 0 problems, none pending. Running (from
+  the gated main of 2026-10-25): REAP5 (Java's print level), JC5 (the analysis' gaps, JCS12 (b), JCS30
+  (b), JCS40 (a), JCS42's captures), REAP8 (the essential subsets: RPS33, RPS40 (b), JCS41 (a); the
+  compiled suite re-recorded), JC2b (JCS42 (b)-JCS48), RPS55 (jrt's `java.lang.Module`), JN9c (overload
+  resolution). Next: JC6 after JC5 and JC2b; REAP7; the second batched re-seed (REAP2's `--go-flag`,
+  REAP3, REAP4, JC2's j2g, JC5, RPS55); REAP9. After the milestone: the scripts' sweep of `/dev/null` and
   process substitution (the user, 2026-10-24).
 
 - **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,

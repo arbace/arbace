@@ -156,7 +156,10 @@ Prior art:
     `arbace.repr.java.classfile`, no javac) and `arbace.repr.java.scope` (locals, pattern bindings, jump
     targets), `read --front native|both --attr native`, each native answer checked against javac's;
     `bin/repr-java attr-check` (front-check `--attr native`): the facts equal fact by fact and the forms
-    still javac's trees', against `test/repr/java/attr-check-known.edn` ("As built: JN9a"); `bin/repr-java
+    still javac's trees', against `test/repr/java/attr-check-known.edn` ("As built: JN9a"); since JN9b the
+    members and types tiers too (`arbace.repr.java.expr`, `arbace.repr.java.types`: names in code, every
+    expression's type, after javac's overload choice until JN9c; the known file's `:bridges`, "As built:
+    JN9b"); `bin/repr-java
     check --jdk` compares jdk26u's forms with their hashes, `test/repr/java/expected/jdk26u.sha256`
     (`--update` rewrites them, JFS72 (b)), and Java forms → Java (`print`, `arbace.repr.java.print`; the
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →
@@ -311,7 +314,9 @@ Prior art:
   (javac on Arbace's class files against the JDK javac's), results against `test/java/check-LEVEL.edn` (`--record`),
   every test not passing in a class of `test/java/divergences.edn`; the namespace `java.check`
   (`test/java/check.ae`) on the tools' host; the essential subset's forms committed in `test/java/forms/`
-  (`--forms verify|update`). `diagnostics` is JC3's level.
+  (`--forms verify|update`); `diagnostics` (JC3, "As built: JC3"): langtools' golden-diagnostics tests
+  (compile-fail-ref, the corpus `langtools-diagnostics`), run in place by javac on Arbace as jtreg runs
+  them, the output against the golden file line by line (`test/java/check-diagnostics.edn`).
 - `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env
   world`, `check`, `simulate`), the subset Arbace uses, and what apk does not provide (jdk26u,
   TamaGo's Go, Go's module cache: only `bin/gate --full`'s vendoring checks need it). No build
@@ -350,7 +355,7 @@ Prior art:
   that wrote it, JFS32), `bin/repr-java parse-check` (the native parser's trees equal to javac on
   Arbace's, JN8), `bin/repr-java front-check` (the converter's forms from the native trees equal to
   javac's trees', JFS66 (b)), `bin/repr-java attr-check` (the native provider's facts equal to javac on
-  Arbace's, JN9a), `bin/java-check --levels read,interp,classes,compiled` (Java's conformance check, every
+  Arbace's, JN9a), `bin/java-check --levels read,interp,classes,compiled,diagnostics` (Java's conformance check, every
   corpus, then `--forms verify`: the essential tests' forms read afresh); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then

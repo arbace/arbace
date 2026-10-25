@@ -1620,3 +1620,13 @@ variants, j2g's edge, `bin/reap` 0 problems.
     rename; (c) `--qualify`'s prefixes too closed by `_J`.
   - *Recommended: (a)*, (c) when javac's tool is next rebuilt (its names are the tool's, not the
     shipped program's).
+
+## Decided (2026-10-25): JCS40-JCS49
+
+The user decided JC2's proposals as recommended: JCS40 (a) (the file-by-file findings in JC5 with JCS30
+(b)), JCS41 (a) (REAP8: the essential tests compiled in one cached program in the essential gate), JCS42
+(b) (the leaf assumption a refusal, the capture bugs in JC5), JCS43 (a) (j2g's derived suffixes
+reserved), JCS44 (a) (refusals name the import), JCS45 (a) (`test/java/levels-known.edn`, failing on a
+new disagreement), JCS46 (a) (the compiled namespaces' runtime key checked), JCS47 (a) (a timeout run
+again once at twice the limit), JCS48 (a) and (b) (shards of 500, a shard whose j2g dies split), JCS49 (a)
+(`J_..._J`). The three `:pending` classes cite this.

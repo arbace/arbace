@@ -4816,3 +4816,11 @@ reading missed (JN9b.2's list: ten javac behaviours, each a fact that differed).
   `summary.txt`, `attr.md`, `attr.edn`, `split.md`, `gate.log`)), `repr-java-attr-check/`,
   `repr-java-front-check/`, `repr-java-jdk/`, `repr-java-check/`, `repr-java-parse-check/`,
   `repr-java-roundtrip/`, `jrt/`, `javac-vendor/`, `clojure-tests/`.
+
+## Decided (2026-10-25): JFS95-JFS101
+
+The user decided JN9b's proposals as recommended: JFS95 (a) (the lean on javac's overload choice kept
+until JN9c, counted as leaned), JFS96 (a) (`:types/result` counted by the type it reads), JFS97 (a)
+(javac's chosen method handed over as the native model's), JFS98 (a) (the declined facts left to JN9c
+and JN9d), JFS99 (a) (`enter/members` a checked fact only), JFS100 (b) (the declines' reasons always
+summed in `attr.md`), JFS101 (a) (JN9c next, then JN9d; started beside the REAP work).

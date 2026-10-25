@@ -1010,6 +1010,20 @@ BitSet and NaN entries are gone (fixed); `metadata` and `java.javadoc` are no lo
   records, the journal's entry at the merge naming the correction); (b) those notes edited too.
   *Recommended: (a)*.
 
+## Decided (2026-10-25): RPS40-RPS59
+
+The user decided REAP3's and REAP4's proposals as recommended. REAP3's: RPS40 (b) (REAP8's subset of
+the compiled suite, about 15 namespaces compiled alone, with (a)'s cached path), RPS41 (a) (`:fn-fields`
+deferred, (b) in jrt after the milestone), RPS42 (a) (compiled frames' lines deferred beside the eval
+level's), RPS43 (a) (`seq-and-transducer` run at the AOT level), RPS44 (a) (a redefined deftype: the last
+definition wins, as the JVM's AOT), RPS45 (a) (the compiled suite's classes appended to
+`test/clojure/divergences-aot.edn`, done at the merge), RPS46 (a) (diffcheck's two excluded defclasses
+given the vars edge), RPS47 (a) (qualified methods' thunks analyzed at emit time), RPS48 (a), then (b)
+once RPS40's subset lands, RPS49 (a) (the second batched re-seed). REAP4's: RPS50 (a), RPS51 (a), RPS52
+(a), RPS53 (a), RPS54 (a), RPS55 (a) (a hand-written `java.lang.Module` and `Class.getModule` in jrt for
+the milestone; the `java.sql` assertion by design), RPS56 (a) (SAX by design), RPS57 (a), RPS58 (a),
+RPS59 (a). The `:pending` classes cite this.
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail
