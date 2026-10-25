@@ -1854,3 +1854,10 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   printed and accepted, a fixed point, the same tokens and the same objects at `-O0`, C-lisp's round
   trip), 49 of 49 (doc/C23.md); the preprocessor out (whim's texts have only `#include`). No evaluator of C
   forms seen there: C's eval and AOT are open questions for C23's survey after the milestone.
+
+## 2026-10-25: after the milestone, C23 at parity the main effort (the user)
+
+- Decided (the user): after `arbace-reaps-3-crops-v1`, the main effort is bringing C23 to parity with
+  Clojure, Java and Go: read, eval, AOT and print, each cell meeting the milestone's rule (none fails,
+  every non-pass in a recorded class). Its survey first (the prior art go-whim's, entry above; the open
+  questions C's eval and AOT on TamaGo's toolchain alone); the scripts' sweep stays queued beside it.
