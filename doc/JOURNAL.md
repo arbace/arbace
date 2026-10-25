@@ -1967,3 +1967,12 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - Decided (the user): after `arbace-reaps-3-crops-v1`, the scripts' sweep of `/dev/null` and process
   substitution comes first; any C23 work (its survey included) starts after it. This corrects the entry
   "after the milestone, C23 at parity the main effort" above, which had the sweep queued beside C23.
+
+## 2026-10-25: the milestone's plan kept whole (the user)
+
+- Considered: a shortcut to the tag (JC6 cut to naming the "other, to triage" catch-alls and recording the
+  world's classes deferred, the corpus widening of RPS7 moved after the tag; about half a day to a day
+  sooner). Decided (the user): the plan kept as decided, JC6 whole (the corpus widened, the world ranked and
+  decided area by area, the decided items scheduled with it), so that the three crops are complete at
+  `arbace-reaps-3-crops-v1`: after the milestone the work opens a new topic, C23's support (after the
+  scripts' sweep), and should not have to come back to them.
