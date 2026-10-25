@@ -20,6 +20,7 @@
             [arbace.repr.java.jtypes :as jt]
             [arbace.repr.java.decls :as d]
             [arbace.repr.java.nattr :as na]
+            [arbace.repr.java.expr :as ex]
             [arbace.string :as str])
   (:import [com.sun.tools.javac.tree JCTree TreeInfo JCTree$JCIdent JCTree$JCFieldAccess
             JCTree$JCVariableDecl JCTree$JCMethodDecl JCTree$JCClassDecl JCTree$JCMemberReference
@@ -130,6 +131,13 @@
        (.add *frame* id)
        (when (and *provider* (not native?)) (.add *frame* :provider/javac))))))
 
+(defn note-result!
+  "Record the converter's decision by a converted operand's type `t` (:types/result): with the native
+  provider javac's when `t` is javac's answer (a javac type, but a primitive one, which the converter
+  also makes itself), else the native tiers' (a native type, :lit-int, :null)."
+  [t]
+  (note! :types/result (or (not (instance? Type t)) (jt/prim? t))))
+
 ;;; ------------------------------------------------------------------------------------------
 ;;; The native provider: its answer, checked against javac's
 
@@ -141,21 +149,26 @@
   declaration of the unit as its native twin: nattr/canon)."
   [id t nf jans jd]
   (let [p *provider*
-        r (try (nf)
-               (catch Throwable e
-                 (if (:arbace.repr.java.decls/decline (ex-data e))
-                   nil
-                   [[::failed (str (.getName (class e)) ": " (.getMessage e))] ::failed])))]
+        leaned (volatile! false)
+        why (volatile! nil)
+        r (binding [ex/*leaned* leaned]
+            (try (nf)
+                 (catch Throwable e
+                   (if (:arbace.repr.java.decls/decline (ex-data e))
+                     (do (vreset! why (.getMessage e)) nil)
+                     [[::failed (str (.getName (class e)) ": " (.getMessage e))] ::failed]))))
+        native? (not @leaned)]
     (if (nil? r)
-      (do (na/record! p id :declined t nil nil) (note! id) (na/canon p jans))
+      (do (na/record! p id :declined t @why nil) (note! id) (na/canon p jans))
       (let [[nd v] r
             jdv (jd jans)]
+        (when @leaned (na/record! p id :leaned t nil nil))
         (if (and (not (identical? v ::failed)) (= nd jdv))
-          (do (na/record! p id :equal t nd jdv) (note! id true) v)
+          (do (na/record! p id :equal t nd jdv) (note! id native?) v)
           (do (na/record! p id :differ t nd jdv)
               (if (identical? v ::failed)
                 (do (note! id) (na/canon p jans))
-                (do (note! id true) v))))))))
+                (do (note! id native?) v))))))))
 
 (defn- native? [t] (and *provider* (not (instance? JCTree t))))
 
@@ -205,11 +218,18 @@
       (cond
         (:local a) (native-fact id t (fn [] [[:local (na/nlocal-id (:local a))] (:local a)]) s #(use-data p %))
         (and (:nonlocal a) (local-sym? s)) (native-fact id t (fn [] [[:nonlocal] ::failed]) s #(use-data p %))
+        ;; the members tier (JN9b): a field, a class or a package named; a method is the overload tier's
+        (and (:nonlocal a) (not (instance? Symbol$MethodSymbol s)))
+        (native-fact id t (fn [] (when-let [x (ex/name-sym p t)] [(na/name-data x) x])) s #(na/jname-data p %))
         :else (do (note! id) (na/canon p s)))
       :VARDEF
       (cond
-        (:local a) (native-fact id t (fn [] (let [nd (na/ndata-local (:local a))]
-                                              (when (nth nd 4) [nd (:local a)])))
+        (:local a) (native-fact id t (fn [] (let [e (:local a)
+                                                  nd (na/ndata-local e)]
+                                              (if (nth nd 4)
+                                                [nd e]
+                                                ;; a `var`'s type: its initializer's (the types tier's, JN9b)
+                                                [(assoc nd 4 (na/ntype (ex/local-type p e))) e])))
                                 s #(na/jdata p % true))
         (:field a) (native-fact id t (fn [] [(na/ndata-field (:field a)) (:field a)]) s #(na/jdata p % true))
         :else (do (note! id) (na/canon p s)))
@@ -217,7 +237,8 @@
                    (native-fact id t (fn [] [(na/ndata-method p m) m]) s #(na/jdata p % true))
                    (do (note! id) (na/canon p s)))
       :CLASSDEF (if-let [c (:class a)]
-                  (native-fact id t (fn [] (when-let [nd (na/ndata-class c)] [nd c])) s #(na/jdata p % true))
+                  (do (na/check-members! p t c s)
+                      (native-fact id t (fn [] (when-let [nd (na/ndata-class c)] [nd c])) s #(na/jdata p % true)))
                   (do (note! id) (na/canon p s)))
       :MODULEDEF (if-let [m (:module a)]
                    ;; a module's symbol: javac's (the converter reads none of it)
@@ -268,14 +289,29 @@
         (native-fact :names/type-expr t (fn [] (when-let [x (:type-expr? a)] (let [b @x] [b b]))) jb identity))
       (do (note! :names/type-expr) jb))))
 
+(defn- native-method
+  "javac's symbol `s` in the native model: the unit's declarations' (canon), and a method chosen by
+  javac's overload resolution (the overload tier's, JN9c's) found in the native model by owner, name
+  and erased parameters (arbace.repr.java.expr/nmethod), so that the model's reads of it are native;
+  else `s`."
+  [p s]
+  (let [c (na/canon p s)]
+    (if (and (identical? c s) (instance? Symbol$MethodSymbol s)
+             (not (identical? (.-owner ^Symbol s) (.-arrayClass jt/*syms*))))
+      (or (ex/nmethod p #(na/canon p %) s) s)
+      c)))
+
 (defn symbol-of
   "TreeInfo.symbol of tree `t`, the fact `site` classed as sym's."
   [t site]
   (let [s (TreeInfo/symbol (twin t))]
     (when *measure* (note! (keyword (sym-class s false) (name site))))
-    (if (native? t) (na/canon *provider* s) s)))
+    (if (native? t) (native-method *provider* s) s)))
 
-(def ^:private native-type-facts #{:names/type-tree :types/literal :types/this :types/class-literal :names/record-pattern})
+(def ^:private native-type-facts
+  #{:names/type-tree :types/literal :types/this :types/class-literal :names/record-pattern
+    ;; the types tier (JN9b)
+    :types/expr :types/qualifier :types/constant :types/new :types/new-array :types/ident})
 
 (defn- native-type
   "The native provider's type of native tree `t` for fact `fact`: [native-type] or nil (declined)."
@@ -307,6 +343,10 @@
                                               (d/erasure q))]
                                            nil)])))
       :names/record-pattern (when-let [x (:record-type a)] (when-let [ty @x] [ty]))
+      (:types/expr :types/qualifier :types/new :types/new-array :types/ident) [(ex/etype *provider* t)]
+      :types/constant (let [ty (ex/etype *provider* t)
+                            c (ex/econst *provider* t)]
+                        [(if c {:k :ctype :t ty :const c} ty)])
       nil)))
 
 (defn type-of
@@ -315,13 +355,16 @@
   (let [jtv (.-type (twin t))]
     (if (and (native? t) (native-type-facts fact))
       (let [p *provider*]
-        (native-fact fact t (fn [] (when-let [[nt] (native-type t fact)] [(na/ntype nt) nt]))
-                     jtv #(na/jtype p %)))
+        (if (= fact :types/constant)
+          (native-fact fact t (fn [] (when-let [[nt] (native-type t fact)] [(na/nconst-type nt) nt]))
+                       jtv #(na/jconst-type p %))
+          (native-fact fact t (fn [] (when-let [[nt] (native-type t fact)] [(na/ntype nt) nt]))
+                       jtv #(na/jtype p %))))
       (do (note! fact) jtv))))
 
 (defn constructor "NEWCLASS: the constructor chosen." [t]
   (note! :overload/constructor)
-  (let [s (.-constructor ^JCTree$JCNewClass (twin t))] (if (native? t) (na/canon *provider* s) s)))
+  (let [s (.-constructor ^JCTree$JCNewClass (twin t))] (if (native? t) (native-method *provider* s) s)))
 
 (defn- jm
   "javac's method symbol for method `m` (a native one's by its declaration's twin): the measurement's
@@ -345,14 +388,27 @@
     :else (keyword "overload" (str "declared-" site))))
 
 (defn method-type
-  "The instantiated type of the method `meth` (an APPLY's meth tree) calls, `m` its symbol."
+  "The instantiated type of the method `meth` (an APPLY's meth tree) calls, `m` its symbol; with the
+  native provider the types tier's for a method without type parameters of its own."
   [meth m]
-  (note! (instantiation-fact m false "method-type"))
-  (.-type (twin meth)))
+  (let [fact (instantiation-fact m false "method-type")
+        jmt (.-type (twin meth))]
+    (if (and (native? meth) (not= "infer" (namespace fact)))
+      (native-fact fact meth (fn [] (let [mt (ex/call-method-type *provider* meth)] [(na/nmtype-data mt) mt]))
+                   jmt #(na/jmtype-data *provider* %))
+      (do (note! fact) jmt))))
 
-(defn constructor-type "NEWCLASS: the instantiated type of its constructor, `m` (or the one it calls)." [t m]
-  (note! (instantiation-fact m (tr/diamond? t) "constructor-type"))
-  (.-constructorType ^JCTree$JCNewClass (twin t)))
+(defn constructor-type
+  "NEWCLASS: the instantiated type of its constructor, `m` (or the one it calls); with the native
+  provider the types tier's for a constructor without type parameters of its own, of a class named
+  without a diamond, unqualified and without a body."
+  [t m]
+  (let [fact (instantiation-fact m (tr/diamond? t) "constructor-type")
+        jct (.-constructorType ^JCTree$JCNewClass (twin t))]
+    (if (and (native? t) (not= "infer" (namespace fact)) (not (tr/f t :encl)) (not (tr/f t :def)))
+      (native-fact fact t (fn [] (let [mt (ex/ctor-method-type *provider* t)] [(na/nmtype-data mt) mt]))
+                   jct #(na/jmtype-data *provider* %))
+      (do (note! fact) jct))))
 
 (defn varargs-element
   "APPLY, NEWCLASS, REFERENCE: the (inferred) element type of a variable arity call's array, nil
@@ -365,26 +421,39 @@
              JCTree$JCMethodInvocation (.-varargsElement ^JCTree$JCMethodInvocation j)
              JCTree$JCNewClass (.-varargsElement ^JCTree$JCNewClass j)
              JCTree$JCMemberReference (.-varargsElement ^JCTree$JCMemberReference j))]
-    (when *measure*
-      (note! (cond
-               (nil? ve) :overload/arity
-               (let [ps (.getParameterTypes (.type (jm m)))
-                     l (when (seq ps) (last ps))]
-                 (and (instance? Type$ArrayType l) (not (generic-type? (.-elemtype ^Type$ArrayType l)))))
-               :overload/declared-varargs-element
-               :else (instantiation-fact m (tr/diamond? t) "varargs-element"))))
-    ve))
+    (let [fact (cond
+                 (nil? ve) :overload/arity
+                 (let [ps (.getParameterTypes (.type (jm m)))
+                       l (when (seq ps) (last ps))]
+                   (and (instance? Type$ArrayType l) (not (generic-type? (.-elemtype ^Type$ArrayType l)))))
+                 :overload/declared-varargs-element
+                 :else (instantiation-fact m (tr/diamond? t) "varargs-element"))]
+      (if (and ve (native? t) (instance? JCTree$JCMethodInvocation j) (not= "infer" (namespace fact)))
+        ;; a variable arity call's element (whether the call is of variable arity: overload
+        ;; resolution's phase 3, javac's): the last parameter's at the site (the types tier's)
+        (native-fact fact t (fn [] (let [mt (ex/call-method-type *provider* (:meth t))
+                                         e (:e (last (:params mt)))]
+                                     (ex/lean!)
+                                     [(na/ntype e) e]))
+                     ve #(na/jtype *provider* %))
+        (do (when *measure* (note! fact)) ve)))))
 
 (defn fn-target "LAMBDA, REFERENCE: the functional interface type javac inferred." [t]
   (note! :infer/target) (.-target ^JCTree$JCFunctionalExpression (twin t)))
 
-(defn operator "BINARY, ASSIGNOP, UNARY: the operator symbol javac resolved." ^Symbol [t]
-  (note! :types/operator)
-  (let [j (twin t)]
-    (condp instance? j
-      JCTree$JCBinary (.-operator ^JCTree$JCBinary j)
-      JCTree$JCAssignOp (.-operator ^JCTree$JCAssignOp j)
-      JCTree$JCUnary (.-operator ^JCTree$JCUnary j))))
+(defn operator
+  "BINARY, ASSIGNOP, UNARY: the operator symbol javac resolved (with the native provider the types
+  tier's, Operators': a native method symbol {:operator true})."
+  [t]
+  (let [j (twin t)
+        js (condp instance? j
+             JCTree$JCBinary (.-operator ^JCTree$JCBinary j)
+             JCTree$JCAssignOp (.-operator ^JCTree$JCAssignOp j)
+             JCTree$JCUnary (.-operator ^JCTree$JCUnary j))]
+    (if (native? t)
+      (native-fact :types/operator t (fn [] (let [o (ex/operator *provider* t)] [(na/nop-data o) o]))
+                   js #(na/jop-data *provider* %))
+      (do (note! :types/operator) js))))
 
 (defn ref-kind "REFERENCE: the method reference's kind (JCMemberReference.ReferenceKind)." [t]
   (note! :overload/ref-kind) (.-kind ^JCTree$JCMemberReference (twin t)))

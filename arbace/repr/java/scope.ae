@@ -177,6 +177,7 @@
   (when (map? t)
     (case (:tag t)
       (:IDENT :SELECT) (do (put! t :nonlocal true)
+                           (put! t :env env)
                            (when (= :SELECT (:tag t)) (w-type-names env (:selected t))))
       (:ANNOTATED_TYPE) (do (w-annotations env (:annotations t)) (w-type-names env (:underlyingType t)))
       (:TYPE_ANNOTATION :ANNOTATION) (w-annotations env [t])
@@ -202,7 +203,7 @@
         (do (put! (:lhs arg) :nonlocal true) (w-expr env {:jumps ()} (:rhs arg)))
         (w-expr env {:jumps ()} arg)))))
 
-(defn- type-name?
+(defn type-name?
   "Does expression `q` (a qualifier) name a type or a package (JLS 6.5, as Attr's KindSelector VAL |
   TYP for a qualifier: TreeInfo.symbol's kind TYP or PCK)?"
   [env q]
@@ -230,12 +231,24 @@
       (put! cd :mods-flags (long (get-in cd [:mods :flags])))
       (w-class ctx c))))
 
+(defn- role!
+  "Record expression `t`'s role (arbace.repr.java.expr's: :var, :qual; :val by default)."
+  [t r]
+  (when (map? t) (put! t :role r)))
+
+(defn- pt!
+  "Record expression `t`'s target (javac's pt(), arbace.repr.java.expr's): [:local decl], [:field fsym],
+  [:assign lhs], [:return msym], [:arg apply i], [:elem newarray], [:type t], [:same parent],
+  [:unknown]; none recorded: no target (Type.noType)."
+  [t x]
+  (when (map? t) (put! t :pt x)))
+
 (defn w-expr
-  "Expression `t` in `env`; its match bindings."
+  "Expression `t` in `env`; its match bindings. Its environment is recorded (:env, the types tier's)."
   [env ctx t]
   (if-not (map? t)
     none
-    (case (:tag t)
+    (case (do (put! t :env env) (:tag t))
       :IDENT (do (w-name env ctx t) none)
       :SELECT (let [n (:name t) q (:selected t)]
                 (put! t :nonlocal true)
@@ -244,12 +257,16 @@
                   (#{"this" "super"} n) (do (w-type env q) (put! t :this-type [(keyword n) (:class ctx) (delay (:c (d/resolve-qualified env q #{:typ})))]))
                   :else (let [tn? (try (type-name? env q) (catch Throwable _ ::unknown))]
                           (when-not (= tn? ::unknown) (put! q :type-expr? (delay tn?)))
+                          (role! q :qual)
+                          (put! q :env env)
                           (if (true? tn?)
                             (w-type-names env q)
                             (w-expr env ctx q))))
                 none)
       :LITERAL (do (put! t :literal (:typetag t)) none)
-      :PARENS (w-expr env ctx (:expr t))
+      :PARENS (do (when-let [r (:role (.get *ans* t))] (role! (:expr t) r))
+                  (pt! (:expr t) [:same t])
+                  (w-expr env ctx (:expr t)))
       :APPLY (let [m (:meth t)]
                (run! #(w-type env %) (:typeargs t))
                (cond
@@ -262,6 +279,8 @@
                  (w-expr env ctx (:selected m))
                  :else (w-expr env ctx m))
                (when (= :SELECT (:tag m)) (put! m :nonlocal true))
+               (doseq [[i a] (map-indexed vector (:args t))] (pt! a [:arg t i]))
+               (put! m :apply t)
                (w-args env ctx (:args t))
                none)
       :NEWCLASS (do (w-expr env ctx (:encl t))
@@ -269,10 +288,13 @@
                     (if (:encl t)
                       (w-type-names env (:clazz t))
                       (w-type env (:clazz t)))
+                    (doseq [a (:args t)] (pt! a [:unknown]))
                     (w-args env ctx (:args t))
                     (w-class-body-new env ctx t)
                     none)
       :NEWARRAY (do (w-type env (:elemtype t))
+                    (doseq [a (:dims t)] (pt! a [:type :int]))
+                    (doseq [a (:elems t)] (pt! a [:elem t]))
                     (w-args env ctx (:dims t))
                     (w-args env ctx (:elems t))
                     (w-annotations env (:annotations t))
@@ -284,7 +306,10 @@
                       (if (#{:BINDINGPATTERN :RECORDPATTERN :ANYPATTERN} (:tag p))
                         {:t (w-pattern env ctx p) :f []}
                         (do (w-type env p) none))))
-      :CONDEXPR (let [b (w-expr env ctx (:cond t))]
+      :CONDEXPR (let [_ (pt! (:cond t) [:type :boolean])
+                      _ (pt! (:truepart t) [:same t])
+                      _ (pt! (:falsepart t) [:same t])
+                      b (w-expr env ctx (:cond t))]
                   (w-expr (bind-all env (:t b)) ctx (:truepart t))
                   (w-expr (bind-all env (:f b)) ctx (:falsepart t))
                   none)
@@ -305,8 +330,9 @@
                                 (put! p :mods-flags (long (get-in p [:mods :flags])))
                                 e)))
                     env' (bind-all env es)
-                    ctx' (assoc ctx :jumps ())
-                    b (:body t)]
+                    ctx' (assoc ctx :jumps () :method nil)
+                    b (:body t)
+                    _ (pt! b [:unknown])]
                 (if (= :BLOCK (:tag b)) (w-stmt env' ctx' b) (w-expr env' ctx' b))
                 none)
       :REFERENCE (let [q (:expr t)]
@@ -315,18 +341,21 @@
                      (w-type env q)
                      (if (#{:TYPEAPPLY :TYPEARRAY :ANNOTATED_TYPE} (:tag q))
                        (w-type env q)
-                       (w-expr env ctx q)))
+                       ;; memberReferenceQualifierResult: KindSelector VAL_TYP, not captured
+                       (do (role! q :qual) (w-expr env ctx q))))
                    none)
       :SWITCH_EXPRESSION (do (w-expr env ctx (:selector t))
                              (put! t :switch true)
                              (w-cases env (push-jump ctx t :switch-expr) (:cases t) t)
                              none)
-      :ASSIGN (do (w-expr env ctx (:lhs t)) (w-expr env ctx (:rhs t)) none)
-      :INDEXED (do (w-expr env ctx (:indexed t)) (w-expr env ctx (:index t)) none)
-      (:POS :NEG :COMPL :PREINC :PREDEC :POSTINC :POSTDEC) (do (w-expr env ctx (:arg t)) none)
+      :ASSIGN (do (role! (:lhs t) :var) (pt! (:rhs t) [:assign (:lhs t)]) (w-expr env ctx (:lhs t)) (w-expr env ctx (:rhs t)) none)
+      :INDEXED (do (pt! (:index t) [:type :int]) (w-expr env ctx (:indexed t)) (w-expr env ctx (:index t)) none)
+      (:POS :NEG :COMPL) (do (w-expr env ctx (:arg t)) none)
+      (:PREINC :PREDEC :POSTINC :POSTDEC) (do (role! (:arg t) :var) (w-expr env ctx (:arg t)) none)
       :ERRONEOUS none
       (if (and (:lhs t) (:rhs t))
-        (do (w-expr env ctx (:lhs t)) (w-expr env ctx (:rhs t)) none)
+        (do (when (.endsWith (name (:tag t)) "_ASG") (role! (:lhs t) :var))
+            (w-expr env ctx (:lhs t)) (w-expr env ctx (:rhs t)) none)
         none))))
 
 (defn w-pattern
@@ -359,6 +388,7 @@
     (when (and (:vartype d) (not= :VAR (:declKind d))) (w-type env (:vartype d)))
     (put! d :local e)
     (put! d :mods-flags (long (get-in d [:mods :flags])))
+    (pt! (:init d) (if (= :VAR (:declKind d)) [:unknown] [:local d]))
     (w-expr env' ctx (:init d))
     [e env']))
 
@@ -387,7 +417,8 @@
     (when cs
       (let [bindings (vec (mapcat (fn [l]
                                     (case (:tag l)
-                                      :CONSTANTCASELABEL (do (w-expr senv ctx (:expr l)) [])
+                                      :CONSTANTCASELABEL (do (put! (:expr l) :case-selector (:selector sw))
+                                                             (w-expr senv ctx (:expr l)) [])
                                       :PATTERNCASELABEL (w-pattern senv ctx (:pat l))
                                       []))
                                   (:labels c)))
@@ -400,7 +431,7 @@
             (w-stmts cenv ctx (:stats c))
             (if (#{:BLOCK :THROW :EXEC :IF :RETURN :SWITCH :TRY :YIELD :WHILELOOP :DOLOOP :FORLOOP :FOREACHLOOP :SYNCHRONIZED :LABELLED} (:tag b))
               (w-stmt cenv ctx b)
-              (w-expr cenv ctx b))
+              (do (when (= :SWITCH_EXPRESSION (:tag sw)) (pt! b [:same sw])) (w-expr cenv ctx b)))
             (recur more senv))
           (let [_ (w-stmts cenv ctx (:stats c))
                 ;; addVars: the case's local variables, by their entries
@@ -427,7 +458,8 @@
                   (w-class ctx c)
                   (d/bind env (:name s) c))
       :EXEC (do (w-expr env ctx (:expr s)) env)
-      :IF (let [b (w-expr env ctx (:cond s))
+      :IF (let [_ (pt! (:cond s) [:type :boolean])
+                b (w-expr env ctx (:cond s))
                 th (:thenpart s) el (:elsepart s)]
             (w-stmt (bind-all env (:t b)) ctx th)
             (when el (w-stmt (bind-all env (:f b)) ctx el))
@@ -439,17 +471,20 @@
                 (after-bindings env ctx s (cond (and at (not ae)) (:t b)
                                                 (and ae (not at)) (:f b)
                                                 :else [])))))
-      :WHILELOOP (let [b (w-expr env ctx (:cond s))]
+      :WHILELOOP (let [_ (pt! (:cond s) [:type :boolean])
+                       b (w-expr env ctx (:cond s))]
                    (w-stmt (bind-all env (:t b)) (push-jump ctx s :loop) (:body s))
                    (if (and (seq (:f b)) (not (breaks-to? s (:body s))))
                      (after-bindings env ctx s (:f b))
                      env))
       :DOLOOP (do (w-stmt env (push-jump ctx s :loop) (:body s))
-                  (let [b (w-expr env ctx (:cond s))]
+                  (let [_ (pt! (:cond s) [:type :boolean])
+                        b (w-expr env ctx (:cond s))]
                     (if (and (seq (:f b)) (not (breaks-to? s (:body s))))
                       (after-bindings env ctx s (:f b))
                       env)))
       :FORLOOP (let [e1 (w-stmts env ctx (:init s))
+                     _ (pt! (:cond s) [:type :boolean])
                      b (if (:cond s) (w-expr e1 ctx (:cond s)) none)
                      e2 (bind-all e1 (:t b))
                      ctx' (push-jump ctx s :loop)]
@@ -458,7 +493,8 @@
                  (if (and (seq (:f b)) (not (breaks-to? s (:body s))))
                    (after-bindings env ctx s (:f b))
                    env))
-      :FOREACHLOOP (do (w-expr env ctx (:expr s))
+      :FOREACHLOOP (do (put! (:var s) :foreach s)
+                       (w-expr env ctx (:expr s))
                        (let [[_ e'] (w-local-var env ctx (:var s) :for-each)]
                          (w-stmt e' (push-jump ctx s :loop) (:body s)))
                        env)
@@ -488,9 +524,10 @@
              (when (:finalizer s) (w-stmt env ctx (:finalizer s)))
              env)
       (:BREAK :CONTINUE) (do (put! s :target (jump-target ctx s)) env)
-      :YIELD (do (w-expr env ctx (:value s)) (put! s :target (jump-target ctx s)) env)
-      (:RETURN :THROW) (do (w-expr env ctx (:expr s)) env)
-      :ASSERT (do (w-expr env ctx (:cond s)) (w-expr env ctx (:detail s)) env)
+      :YIELD (do (pt! (:value s) (if-let [sw (jump-target ctx s)] [:same sw] [:unknown])) (w-expr env ctx (:value s)) (put! s :target (jump-target ctx s)) env)
+      :RETURN (do (pt! (:expr s) (if-let [m (:method ctx)] [:return m] [:unknown])) (w-expr env ctx (:expr s)) env)
+      :THROW (do (w-expr env ctx (:expr s)) env)
+      :ASSERT (do (pt! (:cond s) [:type :boolean]) (w-expr env ctx (:cond s)) (w-expr env ctx (:detail s)) env)
       :SKIP env
       env)))
 
@@ -506,7 +543,7 @@
   (let [cd (:tree c)
          benv (d/base-env c)
          cenv (d/class-env c)
-         ctx (assoc ctx :class c :jumps ())]
+         ctx (assoc ctx :class c :jumps () :method nil)]
      (put! cd :class c)
      (put! cd :mods-flags (d/mods-flags c))
      (w-annotations benv (get-in cd [:mods :annotations]))
@@ -532,12 +569,13 @@
                                    fl)))
            (w-annotations cenv (get-in m [:mods :annotations]))
            (w-type cenv (:vartype m))
+           (pt! (:init m) [:field f])
            (w-expr fenv (assoc ctx :static? (or static? (d/interface? c))) (:init m)))
          :METHODDEF
          (let [ms (member-of c m :methods)
                static? (d/has? (get-in m [:mods :flags]) d/STATIC)
                menv (d/method-env ms)
-               mctx (assoc ctx :static? static?)]
+               mctx (assoc ctx :static? static? :method ms)]
            (put! m :method ms)
            (put! m :mods-flags (long (get-in m [:mods :flags])))
            (w-annotations menv (get-in m [:mods :annotations]))

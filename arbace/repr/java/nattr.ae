@@ -1,3 +1,31 @@
+;; method-member-of? and its helpers reimplement, for the native model, jdk26u
+;; (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259)'s
+;; src/jdk.compiler/share/classes/com/sun/tools/javac/code/Symbol.java (MethodSymbol.isInheritedIn,
+;; isInheritedIn, hiddenInInternal, isMemberOf), whose notice follows (LICENSE.md, "OpenJDK (jdk26u)"):
+;;
+;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
 (ns arbace.repr.java.nattr
   "The native attribution provider (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN9a\"): the scope
   and declarations tiers' facts answered without javac, from the native parser's trees
@@ -51,13 +79,13 @@
           (when-let [s (.-sym ^JCTree$JCMethodDecl j)]
             (.put sym->native s n)))))
     {:uctx uctx :reg (:reg uctx) :ans ans :twins tw :sym->native sym->native :check check :diffs diffs
-     :file (:file uctx) :reads (java.util.HashMap.)}))
+     :file (:file uctx) :reads (java.util.HashMap.) :etypes (IdentityHashMap.)}))
 
 (defn answer "The native answers of node `t`." [p t] (.get ^IdentityHashMap (:ans p) t))
 
-(def ^:dynamic *max-diffs* 400)
-
 (def ^:private keep-declined? (some? (System/getenv "REPR_JAVA_ATTR_DECLINED")))
+
+(def ^:dynamic *max-diffs* (if keep-declined? 100000 400))
 
 (defn record!
   "Count outcome `o` (:equal, :differ, :declined) of fact `id`; keep a difference's data."
@@ -153,18 +181,20 @@
     (case (:k t)
       :class [:class (ncid (:c t)) (mapv ntype (:args t)) (some-> (:outer t) ntype) (mapv ncompound (:anns t))]
       :array [:array (ntype (:e t)) (mapv ncompound (:anns t))]
-      :tvar [:tvar (:name (:tv t)) (ntvar-owner (:owner (:tv t))) (mapv ncompound (:anns t))]
+      :tvar (if (:captured (:tv t))
+              [:captured]
+              [:tvar (:name (:tv t)) (ntvar-owner (:owner (:tv t))) (mapv ncompound (:anns t))])
       :wild [:wild (:bk t) (when (:t t) (ntype (:t t)))]
       :inter [:inter (mapv ntype (:ts t))]
       :union [:union (mapv ntype (:ts t))]
       :null :null
       [:other t])))
 
-(defn- const-data [k v]
+(defn const-data [k v]
   [k (case k
        (:int :short :char :byte :boolean) (str (long v))
        :long (str (long v))
-       :float (str (Float/floatToIntBits (float v)))
+       :float (str (Float/floatToIntBits (unchecked-float v)))
        :double (str (Double/doubleToLongBits (double v)))
        (str v))])
 
@@ -292,6 +322,8 @@
 
 (defn rl-method ^Symbol$MethodSymbol [p m]
   (or (when-let [t (and (:tree m) (twin-of p (:tree m)))] (.-sym ^JCTree$JCMethodDecl t))
+      ;; a member's clone with another owner (decls/member-clone): the member's
+      (when-let [o (:clone-of m)] (rl-method p o))
       (let [c (rl-class p (:owner m))]
         (first (filter #(instance? Symbol$MethodSymbol %) (.getSymbolsByName (.members c) (jt/jname (:name m))))))))
 
@@ -422,3 +454,153 @@
                       (when-let [a (first (filter #(= "Ljava/lang/annotation/Retention;" (:type %)) (:annotations (:cf c))))]
                         (let [v (get (:values a) "value")] (when (= \e (:tag v)) (:name v)))))]
               (if (#{"SOURCE" "CLASS" "RUNTIME"} n) n "CLASS")))))
+;;; ------------------------------------------------------------------------------------------
+;;; The members and types tiers' answers as data ("As built: JN9b")
+
+(defn name-data
+  "The native symbol a name in code denotes as data (jname-data's): a field by owner and name, a
+  class as a declaration's, a package by name."
+  [s]
+  (case (:sk s)
+    :field [:field (ncid (:owner s)) (:name s) 0 nil]
+    :class (ndata-class s)
+    :package [:package (:name s)]
+    [:other (str s)]))
+
+(defn jname-data "javac's symbol of a name in code as data." [p ^Symbol s]
+  (if (instance? Symbol$ClassSymbol s) (jdata p s true) (jdata p s false)))
+
+(defn- jconst [^Type t]
+  (when-let [v (.constValue t)]
+    (let [tg (jt/tag-name t)
+          k (if (= tg "CLASS") :string (keyword (str/lower-case tg)))]
+      (const-data k (if (instance? Boolean v) (if v 1 0) v)))))
+
+(defn nconst-type
+  "A native constant expression's type as data: its type and its constant ([kind value], nil for
+  none); `t` a type or {:k :ctype :t type :const [k v]}."
+  [t]
+  (if (and (map? t) (= :ctype (:k t)))
+    [(ntype (:t t)) (apply const-data (:const t))]
+    [(ntype t) nil]))
+
+(defn jconst-type "javac's type `t` with its constant as data (nconst-type's)." [p ^Type t]
+  [(jtype p t) (when t (jconst t))])
+
+(defn nmtype-data "A native instantiated method type as data: [:mt params ret throws]." [mt]
+  [:mt (mapv ntype (:params mt)) (ntype (:ret mt)) (mapv ntype (:throws mt))])
+
+(defn jmtype-data "javac's method type as data (nmtype-data's)." [p ^Type t]
+  [:mt (mapv #(jtype p %) (.getParameterTypes t)) (jtype p (.getReturnType t)) (mapv #(jtype p %) (.getThrownTypes t))])
+
+(defn nop-data "A native operator symbol as data: [:operator name params ret]." [o]
+  (let [mt (d/method-type o)]
+    [:operator (:name o) (mapv ntype (:params mt)) (ntype (:ret mt))]))
+
+(defn jop-data "javac's operator symbol as data (nop-data's)." [p ^Symbol o]
+  (let [t (.-type o)]
+    [:operator (str (.-name o)) (mapv #(jtype p %) (.getParameterTypes t)) (jtype p (.getReturnType t))]))
+
+;;; A class's members (JFS79): the native class's against javac's ClassSymbol.members()
+
+(defn- jerased-key [p ^Type t]
+  (let [tg (jt/tag-name t)]
+    (case tg
+      "ARRAY" [:array (jerased-key p (.-elemtype ^Type$ArrayType t))]
+      "CLASS" (jcid p (.-tsym t))
+      "TYPEVAR" (jerased-key p (.erasure t jt/*types*))
+      (str/lower-case tg))))
+
+(defn- nerased-key [t]
+  (let [t (d/erasure t)]
+    (cond
+      (keyword? t) (name t)
+      (= :array (:k t)) [:array (nerased-key (:e t))]
+      (= :class (:k t)) (ncid (:c t))
+      :else (str t))))
+
+(defn jmembers-data
+  "javac's class `c`'s members as data: a set of [:m name flags params ret], [:f name flags], [:c name]
+  (its anonymous constructor left out: the overload tier's), classes by their identities (jcid)."
+  [p ^Symbol$ClassSymbol c]
+  (into #{}
+        (keep (fn [^Symbol s]
+                (let [k (str (.kind s))]
+                  (case k
+                    "MTH" (when (zero? (bit-and (.flags s) d/ANONCONSTR))
+                            (let [t (.erasure s jt/*types*)]
+                              [:m (str (.-name s)) (bit-and (.flags s) (long MMASK))
+                               (mapv #(jerased-key p %) (.getParameterTypes t)) (jerased-key p (.getReturnType t))]))
+                    "VAR" [:f (str (.-name s)) (bit-and (.flags s) (long FMASK))]
+                    "TYP" [:c (str (.-name s))]
+                    nil)))
+              (.getSymbols (.members c)))))
+
+(defn nmembers-data "Native class `c`'s members as data (jmembers-data's)." [c]
+  (let [ms (d/members c)]
+    (into #{}
+          (concat
+           (for [m (:methods ms)]
+             (let [mt (d/method-type m)]
+               [:m (:name m) (bit-and (d/method-flags m) (long MMASK)) (mapv nerased-key (:params mt)) (nerased-key (:ret mt))]))
+           (for [f (:fields ms)] [:f (:name f) (bit-and (d/field-flags f) (long FMASK))])
+           (for [[n _] (:classes ms)] [:c n])))))
+
+(defn check-members!
+  "The fact :enter/members of class declaration `t` (native class `c`, javac's `js`): its members by
+  name, flags and erased signature, javac's TypeEnter's generated ones included; an anonymous class's
+  declined (its constructor is the overload tier's)."
+  [p t c ^Symbol js]
+  (when (instance? Symbol$ClassSymbol js)
+    (if (:anon? c)
+      (record! p :enter/members :declined t nil nil)
+      (let [nd (try (nmembers-data c) (catch Throwable e [:failed (str e)]))
+            jd (jmembers-data p js)]
+        (record! p :enter/members (if (= nd jd) :equal :differ) t
+                 (if (set? nd) (vec (remove (into #{} jd) nd)) nd) (vec (remove (into #{} (when (set? nd) nd)) jd)))))))
+
+;;; Symbol.isMemberOf of a method (JFS90)
+
+(defn- method-inherited-in?
+  "MethodSymbol.isInheritedIn of native method `m` in class `c` (Symbol.isInheritedIn, a public
+  interface method not static)."
+  [m c]
+  (let [fl (d/method-flags m)
+        o (:owner m)]
+    (case (int (bit-and fl 7))
+      1 (or (not (d/interface? o)) (identical? c o) (not (d/has? fl d/STATIC)))
+      2 (identical? o c)
+      4 (not (d/interface? c))
+      0 (loop [sup c]
+          (cond
+            (or (nil? sup) (identical? sup o)) (not (d/interface? c))
+            (not= (:pkg sup) (:pkg o)) false
+            :else (recur (let [st (d/supertype (d/this-type sup))] (when (and (map? st) (= :class (:k st))) (:c st))))))
+      true)))
+
+(defn- erased-params [m] (mapv nerased-key (:params (d/method-type m))))
+
+(defn- method-hidden
+  "Symbol.hiddenInInternal of native method `m` from class `cur`: `m`, a static method of the same
+  name and erased parameters that hides it, or nil."
+  [m cur]
+  (if (identical? cur (:owner m))
+    m
+    (or (first (filter #(and (= (:name m) (:name %)) (d/has? (d/method-flags %) d/STATIC)
+                             (= (erased-params m) (erased-params %)))
+                       (:methods (d/members cur))))
+        (let [t (d/this-type cur)]
+          (reduce (fn [hidden st]
+                    (if (and (map? st) (= :class (:k st)))
+                      (let [x (method-hidden m (:c st))]
+                        (cond (identical? x m) (reduced m) x x :else hidden))
+                      hidden))
+                  nil (cons (d/supertype t) (d/interfaces t)))))))
+
+(defn method-member-of?
+  "Symbol.isMemberOf of native method `m` in native class `c`: its owner, or a subclass that inherits
+  it and does not hide it."
+  [m c]
+  (or (identical? (:owner m) c)
+      (and (sub-class? c (:owner m)) (method-inherited-in? m c)
+           (identical? m (method-hidden m c)))))
