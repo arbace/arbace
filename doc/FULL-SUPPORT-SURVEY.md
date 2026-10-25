@@ -1156,6 +1156,14 @@ in-ns-only unit, mode `:full` printing from it), RPS84 (a) (the converter writin
 declared box type), all three converter work in JC6; RPS86 (a) (the rename as built, the `&&` fold with
 RPS64 later), RPS87 (a) (as built). `:print-full-empty-unit` cites this.
 
+## Decided (2026-10-25): RPS100-RPS109
+
+The user decided REAP7b's proposals as recommended: RPS100 (a) (one goi table per program), RPS101 (a)
+(a package outside module `arbace` a module of its own under `_modules/`), RPS102 (a) until the milestone,
+then (b) (a refused package a build error), RPS103 (b) (a `--full` sample whose Go package calls back an
+Arbace fn through `arbace.Invoke`), RPS104 (a), RPS105 (a), RPS106 (a), RPS107 (a), RPS108 (a), RPS109 (a)
+(the second batched re-seed).
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail

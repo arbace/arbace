@@ -1992,3 +1992,44 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   shipped code (the printer is evaluated on the tools' host). The essential gate on `8722cbd7` passed
   (16m08s). JC5, merging main, told to merge REAP5b's printer too. Decided (the user): RPS83 (a), RPS84 (a),
   RPS85 (a) (the converter's, in JC6), RPS86 (a), RPS87 (a).
+
+## 2026-10-25: REAP7b and JC5 merged, RPS100-RPS109 decided; JC6 and RPS103 started
+
+- REAP7b (branch `reap7b-programs` from `a24605e6`, merged `57d70a91`): RPS92 (b): a program's Go packages
+  listed in a goi table of its own (`bin/goi table --program-list FILE --program-root DIR`, `arbace.go.table`
+  checking each with goi's checker, a refused one in `report.edn`'s `:refused-program`), j2g's `--gotable`,
+  `bin/build-go --root DIR`, a package outside module `arbace` a module of its own under `_modules/` with
+  require/replace (`arbace.build.go`); `arbace/go.ae`'s `table-ns!` makes the vars a compiled constant pool
+  names before the package is required; the fallback (a refused package interpreted, with a warning) tested;
+  RPS93 (c) (j2g's `--java-namespaces DIR`, no-op loaders, the build-time warning), RPS94 (c) (`src/`'s
+  `.clj`/`.cljc` translated by repr/clojure first; hello-clojure gains a `.cljc`), RPS98 (c) (gate step
+  `programs`: `mixed`; `--full`'s `programs-full`). `mixed` proves its Go runs compiled (goi's interpreter
+  never loaded) and runs in 0.24 s (was 0.9 s); 8 of 8 runs. The essential gate cold 10m01s to 10m41s, cached
+  2m53s unchanged; on the merge it passed (20m23s). Shipped code: `arbace/go.ae`, `arbace/go/table.ae`,
+  `arbace/build/go.ae`, `arbace/j2g/main.ae`, `embed.ae`. Decided (the user): RPS100-RPS102 (a, RPS102 (b)
+  after the milestone), RPS103 (b), RPS104-RPS109 (a).
+- JC5 (branch `java-check-jc5`, main merged into it twice (d69fca88, ce0b9dc7: JC2b, REAP5, REAP8, RPS55,
+  JN9c, the harness follow-ups, REAP5b), merged `e8a42613`): the analysis' gaps, each of `:analysis`'s 70
+  interpreted tests traced and fixed in the converter, the analysis, the interpreter or j2g (boxing of
+  narrowed constants, the world's constants in `generics.edn`'s `:consts`, switches, lambdas' and method
+  references' casts and bridges, intersection types, pattern scopes, `Outer.super`, interned string constants,
+  local classes' captures); JCS30 (b) (a file's classes one `defclasses`; a top-level `do`'s Java forms one
+  compilation, its value its last class, JCS60 (a)), JCS40 (MissingBridge, also defined across REPL forms),
+  JCS12 (b), JCS24 (a) (`stmts` iterative), JCS42's captures; `test/java/jls/AnalysisGaps.java` (t07639). On
+  the merged code, javac's tool rebuilt (three builds killed by host-wide OOM, the fourth with
+  `GOMEMLIMIT=16GiB`), the provenance updates rerun: every forms file unchanged, `:repr-java` and `:host`
+  moved, and `jdk/javac/provenance.edn`'s `:jdk-edge` (javac's edge 717 lines shorter: `jdk/edge.edn` now
+  answers the cut classes); the levels re-recorded: read 2,722, interp 1,546 (was 1,464 on main), compiled
+  1,694 (was 1,638), print 2,132 (8 now passing, 8 moved into `:print-*` classes by JC5's new forms: for
+  JC6); `levels-known.edn` 7 new, 23 resolved; `check --jdk --update`: 103 of 13,566 hashes. Classes:
+  `:analysis` 3 and 3, `:interp-files`, `:repr-java-dims`, `:read-stack-overflow` emptied, `:j2g-unresolved`
+  169 (JCS69 (a)), `:j2g-go` 2. The essential gate passed on the branch (13m05s) and on the merge (18m17s).
+  Shipped code (the second re-seed): `arbace/classes/` (analyze, interp, env, go), `arbace/lang/Compiler.ae`,
+  `arbace/j2g/` (dyncf, out, decls, world), `jdk/edge.edn`, `jdk/forms` (4 files re-wrapped).
+- Memory: whole-program j2g runs and javac's tool builds (about 20 GiB each) were killed by the kernel
+  several times today beside the other heavy slot (REAP7's and REAP7b's gate runs, JC5's tool builds); each
+  passed when rerun alone or with `GOMEMLIMIT`.
+- The matrix: Java read 6,543 / 0 / 96, eval 1,546 / 239 / 938, AOT 1,694 / 110 / 919, print 2,132 / 490 /
+  101; 12 of 12 cells, 0 problems.
+- Started: JC6 whole (on Opus; the user's choice of models, 2026-10-25), with the converter's RPS83-RPS85,
+  JCS62, JCS65-JCS67 (c), JCS72-JCS74, JCS77 and the print level's 8 cases; RPS103 (b) (on Sonnet).
