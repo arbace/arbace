@@ -7,10 +7,12 @@
 ;; supertypes Types' asSuper, asOuterSuper, asEnclosingSuper and substitution; an enum's ABSTRACT
 ;; Symbol's markAbstractIfNeeded; the generated members TypeEnter's addEnumMembers,
 ;; addRecordMembersIfNeeded, BasicConstructorHelper and RecordConstructorHelper; member-clone
-;; Symbol's clone as Resolve's findVar and findFun use it: of jdk26u (https://github.com/openjdk/jdk26u at
-;; baf63fbe42b8758448fee570a9d9bb914272d259), src/jdk.compiler/share/classes/com/sun/tools/javac/
-;; comp/{Check,Resolve,TypeEnter,MemberEnter,ConstFold,Enter,Annotate}.java and
-;; code/{Flags,Types,Symbol}.java, whose notice
+;; Symbol's clone as Resolve's findVar and findFun use it; a class file's default methods' flags and a
+;; member inner class's constructor ClassReader's readMethod and adjustMethodParams: of jdk26u
+;; (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259),
+;; src/jdk.compiler/share/classes/com/sun/tools/javac/
+;; comp/{Check,Resolve,TypeEnter,MemberEnter,ConstFold,Enter,Annotate}.java,
+;; code/{Flags,Types,Symbol}.java and jvm/ClassReader.java, whose notice
 ;; follows (LICENSE.md, "OpenJDK (jdk26u)"):
 ;;
 ;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
@@ -307,6 +309,12 @@
         fl (bit-and fl (bit-not 0x20))
         fl (if (has? fl 0x8000) (bit-and fl (bit-not 0x8000)) fl)]
     (cond-> fl
+      ;; ClassReader.readMethod: an interface with a default method is DEFAULT (JN9c)
+      (and (has? fl INTERFACE)
+           (some (fn [m] (let [mf (long (:flags m))]
+                           (and (not (has? mf (bit-or ABSTRACT STATIC PRIVATE))) (not= "<clinit>" (:name m)))))
+                 (:methods cfd)))
+      (bit-or DEFAULT)
       (some #(= "Ljava/lang/Deprecated;" (:type %)) (:annotations cfd)) (bit-or DEPRECATED DEPRECATED_ANNOTATION)
       (:record? cfd) (bit-or RECORD)
       (seq (:permitted cfd)) (bit-or SEALED))))
@@ -1019,7 +1027,13 @@
               (bit-or fl (deprecated-flags (:mods d) (method-env m))))
             (let [fl (long (:flags m))
                   fl (if (has? fl 0x40) (bit-or (bit-and fl (bit-not 0x40)) BRIDGE) fl)
-                  fl (if (has? fl 0x80) (bit-or (bit-and fl (bit-not 0x80)) VARARGS) fl)]
+                  fl (if (has? fl 0x80) (bit-or (bit-and fl (bit-not 0x80)) VARARGS) fl)
+                  ;; ClassReader.readMethod: an interface's method with a body, not static or
+                  ;; private, is DEFAULT | ABSTRACT (JN9c)
+                  fl (if (and (interface? (:owner m)) (not (has? fl ABSTRACT)) (not= "<clinit>" (:name m))
+                              (not (has? fl (bit-or STATIC PRIVATE))))
+                       (bit-or fl DEFAULT ABSTRACT)
+                       fl)]
               fl)))
         0))
 
@@ -1091,7 +1105,13 @@
                   sig (cf/method-signature (or (:signature m) (:desc m)))
                   tvs (merge (cf-tvar-scope c) (into {} (map (juxt :name identity) (method-tparams m))))]
               {:tparams (method-tparams m)
-               :params (mapv #(cf-type (:reg c) tvs %) (:params sig))
+               ;; ClassReader.readMethod: a member inner class's constructor read from its descriptor
+               ;; without its enclosing instance's parameter (adjustMethodParams; JN9c)
+               :params (mapv #(cf-type (:reg c) tvs %)
+                             (if (and (= "<init>" (:name m)) (nil? (:signature m)) (seq (:params sig))
+                                      (seq (:name c)) (inner-class? c))
+                               (rest (:params sig))
+                               (:params sig)))
                :ret (cf-type (:reg c) tvs (:ret sig))
                ;; ClassReader: the Signature's thrown types, else the Exceptions attribute's
                :throws (if (seq (:throws sig))
@@ -1171,7 +1191,7 @@
 
 (declare resolve-qualified)
 
-(defn- import-scope
+(defn import-scope
   "The unit's imports, resolved: {:named {simple [csym]} :static-named [[csym name] ...]
   :star [package-name-or-csym ...] :static-star [csym ...]}; java.lang on demand first."
   [uctx]

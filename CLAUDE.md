@@ -158,8 +158,9 @@ Prior art:
     `bin/repr-java attr-check` (front-check `--attr native`): the facts equal fact by fact and the forms
     still javac's trees', against `test/repr/java/attr-check-known.edn` ("As built: JN9a"); since JN9b the
     members and types tiers too (`arbace.repr.java.expr`, `arbace.repr.java.types`: names in code, every
-    expression's type, after javac's overload choice until JN9c; the known file's `:bridges`, "As built:
-    JN9b"); `bin/repr-java
+    expression's type; the known file's `:bridges`, "As built: JN9b"); since JN9c the overload tier
+    (`arbace.repr.java.overload`: Resolve's three phases and most specific, every call that needs no
+    inference; `attr.md` sums the declines by reason, "As built: JN9c"); `bin/repr-java
     check --jdk` compares jdk26u's forms with their hashes, `test/repr/java/expected/jdk26u.sha256`
     (`--update` rewrites them, JFS72 (b)), and Java forms → Java (`print`, `arbace.repr.java.print`; the
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →

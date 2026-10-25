@@ -25,7 +25,11 @@ code. Three kinds of things live here:
   members and types tiers, `repr/java/expr.ae` and `types.ae`, with `decls.ae`'s generated members and
   `nattr.ae`'s methods' `isMemberOf`, reimplement parts of `comp/{Attr,Operators,TypeEnter,Resolve}.java`
   and `code/{Types,Symbol,Symtab}.java` at the same commit (LICENSE.md names the functions), by hand on
-  2026-10-24, the files carrying their notice; "As built: JN9b";
+  2026-10-24, the files carrying their notice; "As built: JN9b"; and its overload tier,
+  `repr/java/overload.ae`, with `expr.ae`'s choice and `decls.ae`'s ClassReader method flags, reimplements
+  parts of `comp/{Resolve,Attr,ArgumentAttr,Check,TypeEnter}.java`, `code/{Types,Symbol,Scope}.java` and
+  `jvm/ClassReader.java` at the same commit (LICENSE.md names the functions), by hand on 2026-10-25, the
+  files carrying their notice; "As built: JN9c";
   `repr/java/classfile.ae`, `nattr.ae` are Arbace's own), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
   `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
   `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,
