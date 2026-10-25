@@ -25,6 +25,20 @@
 ;;       Go build, which has no java.io.File for tools.namespace to search directories with), and
 ;;       with EXPECTED its skipped tests not compiled (as in run). Writes {:tests n :failures n
 ;;       :failing #{spec} :load-errors #{ns}} to OUT.
+;;   compile NSLIST OUT [EXPECTED]
+;;       (Clojure's suite compiled, bin/clojure-tests --aot; doc/FULL-SUPPORT-SURVEY.md, REAP3) On the
+;;       compiling program (ARBACE_COMPILE, ARBACE_PREPARE): the namespaces of NSLIST required as run
+;;       requires them (EXPECTED's skipped tests not compiled), and test.generative's runner, each
+;;       suite source recorded as the program records an embedded one (CLOJURE_TESTS_AOT's hook,
+;;       test/suite_aot_hook.ae), then every recorded unit (the runtime's and the suite's) compiled
+;;       by arbace.c2j into the directory OUT. With CLOJURE_TESTS_AOT set, run and generative load
+;;       the suite's sources through their compiled loaders (the same hook).
+;;   levels A B UPSTREAM
+;;       The two levels' results compared (RPS16: a finding, not a class): the namespaces, tests and
+;;       specs of the results file A (the AOT level's) that pass at one level and not the other, or
+;;       run at one only, against the results file B (the eval level's), and the totals of both and
+;;       of UPSTREAM (test/baseline-results.edn, the frozen JVM baseline's run: upstream's suite on the
+;;       JDK passes every one of its assertions).
 ;;   report OUT EXPECTED RESULTS NSS
 ;;       Read the OUT/<ns>.edn results of the namespaces NSS (a space-separated string) and
 ;;       OUT/generative.edn, print per-namespace counts and totals, write all results to RESULTS
@@ -90,8 +104,17 @@
                               `(def ~name)
                               (apply deftest form env name body)))))))))
 
+(defn- aot-hook!
+  "With CLOJURE_TESTS_AOT (the file test/suite_aot_hook.ae), the suite's sources loaded as the
+  level mode (:record, :compiled) asks: bin/clojure-tests --aot."
+  [mode]
+  (when-let [f (System/getenv "CLOJURE_TESTS_AOT")]
+    (load-file f)
+    ((resolve 'suite-aot.hook/install!) mode)))
+
 (defn- run-ns [ns-sym out nslist expected]
   (skip-at-load! expected)
+  (aot-hook! :compiled)
   (let [nss       (map symbol (re-seq #"\S+" (slurp-file nslist)))
         load-errs (into {} (for [n (distinct (concat nss [ns-sym]))
                                  :let [err (try-require n)]
@@ -120,6 +143,7 @@
 
 (defn- run-generative [dir out nslist expected]
   (skip-at-load! expected)
+  (aot-hook! :compiled)
   (require 'clojure.test.generative.runner)
   (let [config    (resolve 'clojure.test.generative.runner/config)
         get-tests (resolve 'clojure.test.generative.runner/get-tests)
@@ -146,6 +170,58 @@
       (spit-file out (pr-str summary)))
     (shutdown-agents)
     (System/exit 0)))
+
+(defn- compile-suite [nslist out expected]
+  (skip-at-load! expected)
+  (aot-hook! :record)
+  ;; a namespace's (shutdown-agents) would stop the agents of those loaded after it: kept for
+  ;; the end, as bin/diffcheck's compiling does
+  (let [real-shutdown-agents shutdown-agents
+        nss (map symbol (re-seq #"\S+" (slurp-file nslist)))]
+    (alter-var-root #'shutdown-agents (constantly (fn [] nil)))
+    (doseq [n nss :let [err (try-require n)] :when err]
+      (println "aot: not loaded:" n err))
+    (when-let [err (try-require 'clojure.test.generative.runner)]
+      (println "aot: not loaded: clojure.test.generative.runner" err))
+    ;; a source c2j does not compile loads from source at the AOT level (bin/clojure-tests
+    ;; compares them with the reference's :not-compiled)
+    ((resolve 'suite-aot.hook/compile!) out)
+    (real-shutdown-agents)
+    (System/exit 0)))
+
+(defn- outcomes
+  "A results file's outcome per test: {[ns test] :pass|:fail|:skip}, a namespace without tests
+  as [ns nil], test.generative's specs as [:generative spec]."
+  [r]
+  (let [skipped-tests (:skipped-tests r)]
+    (merge
+      (into {} (for [[n _] (:skipped r)] [[n nil] :skip]))
+      (into {} (for [[n ts] skipped-tests, [t _] ts] [[n (symbol (str n) (str t))] :skip]))
+      (into {} (for [[n res] (:namespaces r)
+                     :when (:load-error res)]
+                 [[n nil] :load-error]))
+      (into {} (for [[n res] (:namespaces r), [t c] (:failing res)]
+                 [[n t] (if (pos? (:error c 0)) :error :fail)]))
+      (into {} (for [s (:failing (:generative r))] [[:generative s] :fail])))))
+
+(defn- totals [r]
+  (let [rs (vals (:namespaces r)) sum (fn [k] (reduce + (keep k rs)))]
+    {:tests (sum :test) :assertions (+ (sum :pass) (sum :fail) (sum :error)) :pass (sum :pass)
+     :fail (sum :fail) :error (sum :error) :specs (:tests (:generative r))
+     :specs-failing (count (:failing (:generative r)))}))
+
+(defn- levels [a-file b-file upstream-file]
+  (let [a (read-edn a-file) b (read-edn b-file) u (read-edn upstream-file)
+        oa (outcomes a) ob (outcomes b)
+        ks (sort-by str (distinct (concat (keys oa) (keys ob))))
+        diffs (for [k ks :let [x (get oa k :pass) y (get ob k :pass)] :when (not= x y)] [k x y])]
+    (doseq [[label r] [["baseline" u] ["eval" b] ["AOT" a]]]
+      (println (format "%-9s %s" label (pr-str (totals r)))))
+    (println (str "levels: " (count diffs) " tests, namespaces or specs with another outcome at AOT ("
+                  a-file ") than at eval (" b-file ")"))
+    (doseq [[[n t] x y] diffs]
+      (println (format "  %-70s AOT %-10s eval %s" (str (if (= :generative n) "spec " "") (or t n)) (name x) (name y))))
+    (shutdown-agents)))
 
 (defn- regressions
   "Why the actual result r of a namespace is worse than the expected one e, or nil."
@@ -237,4 +313,6 @@
                    (shutdown-agents))
     "run"        (run-ns (symbol a) b c d)
     "generative" (run-generative a b c d)
+    "compile"    (compile-suite a b c)
+    "levels"     (levels a b c)
     "report"     (report a b c d)))

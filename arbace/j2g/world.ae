@@ -70,6 +70,32 @@
           (throw (ex-info (str "j2g: continuations of no Java form: " (pr-str (sort u))) {})))
         ps))))
 
+(defn- refer-vars!
+  "c2j's (c2j/refer-vars [[symbol namespace name metadata]...]) in the file of the Java forms
+  compiler's classes (arbace.c2j.main's java-forms-file; REAP3, RPS6 (a)): the vars their Clojure
+  code named in namespace ns when the program prepared it, which this program has not loaded,
+  made so that the analysis resolves each symbol to its var as there: the var interned (with
+  the metadata the analysis reads) when its namespace lacks it, an unqualified symbol referred
+  to it, a qualified one's namespace aliased. A var or mapping the program has is kept (but a
+  mapping to arbace.core's var, which the namespace replaced)."
+  [ns entries]
+  (doseq [[s vns vname m] entries]
+    (let [vsym (symbol vns vname)
+          v (or (find-var vsym)
+                (let [v (intern (create-ns (symbol vns)) (symbol vname))]
+                  (alter-meta! v merge m)
+                  (when (:dynamic m) (.setDynamic ^arbace.lang.Var v true))
+                  v))]
+      (cond
+        (= v (try (ns-resolve ns s) (catch Throwable _ nil))) nil
+        (nil? (namespace s)) (let [cur (get (ns-map ns) s)]
+                               ;; (arbace.core's by default, which the namespace's own replaced)
+                               (when (or (nil? cur) (and (var? cur) (= "arbace.core" (str (ns-name (.ns ^arbace.lang.Var cur))))))
+                                 (.refer ^arbace.lang.Namespace ns s v)))
+        (and (not= (namespace s) vns) (nil? (get (ns-aliases ns) (symbol (namespace s)))))
+        (.addAlias ^arbace.lang.Namespace ns (symbol (namespace s)) (the-ns (symbol vns)))
+        :else nil))))
+
 (defn- ns-of-forms [forms]
   (let [f (first (filter #(and (seq? %) (symbol? (first %)) (= "in-ns" (name (first %)))) forms))]
     (when f (let [n (second f)] (if (seq? n) (second n) n)))))
@@ -335,8 +361,10 @@
                                              acc
                                              (binding [*ns* *ns*]
                                                (doseq [fm forms
-                                                       :when (and (seq? fm) (symbol? (first fm)) (#{"in-ns" "import"} (name (first fm))))]
-                                                 (a/eval-ns-form! fm))
+                                                       :when (and (seq? fm) (symbol? (first fm)) (#{"in-ns" "import" "refer-vars"} (name (first fm))))]
+                                                 (if (= "refer-vars" (name (first fm)))
+                                                   (refer-vars! *ns* (second fm))
+                                                   (a/eval-ns-form! fm)))
                                                (let [nsobj *ns*]
                                                  (into acc (for [cf (class-forms forms)] [file ns nsobj cf]))))))
                                          [] ps)

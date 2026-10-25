@@ -102,6 +102,8 @@
               (swap! registered assoc n r)
               r))))))
 
+(declare dynamic-class-cached?)
+
 (defn- runtime-class?
   "Is class c made at run time (a Dyn class: an evaluated fn's, deftype's, interface's, proxy's)
   rather than a class of the program, or one the program does not register by name (java.sql's,
@@ -115,7 +117,8 @@
       ;; made with an event, it is made again before the unit runs (unit-method)
       (when (.isAssignableFrom arbace.lang.IProxy c)
         (when-let [ps (:unit-proxies ctx)] (swap! ps conj c))
-        true)))
+        true)
+      (dynamic-class-cached? c)))
 
 (defn- public? [^Class c]
   (java.lang.reflect.Modifier/isPublic (.getModifiers c)))
@@ -156,7 +159,7 @@
           (swap! cls update :consts conj [s ctype v alias])
           s))))
 
-(declare emit-value)
+(declare emit-value fn-instance)
 
 (defn- emit-list-array [ctx xs]
   (list 'new 'java.lang.Object/1 (mapv #(emit-value ctx %) xs)))
@@ -171,6 +174,19 @@
   (if (or (Double/isNaN d) (Double/isInfinite d))
     (list 'java.lang.Double/longBitsToDouble (Double/doubleToRawLongBits d))
     d))
+
+(defn- type-literal
+  "The text the reader makes record or deftype v of again: a record's print-dup (#my.Rec{...}),
+  a deftype's constructor literal of its fields (#my.T[...]), as the JVM's emitValue calls Rec's
+  create and T's constructor (a literal of Clojure's suite, REAP3)."
+  ^String [v]
+  (binding [*print-dup* true]
+    (if (instance? IRecord v)
+      (pr-str v)
+      (let [c (class v)
+            fields (for [f (arbace.lang.Reflector/invokeStaticMethod c "getBasis" (object-array 0))]
+                     (arbace.lang.Reflector/getInstanceField v (munge (name f))))]
+        (str "#" (.getName ^Class c) (pr-str (vec fields)))))))
 
 (defn emit-value
   "Code making constant value v (ObjExpr.emitValue), its metadata included."
@@ -204,8 +220,16 @@
                                          (list (with-meta 'arbace.lang.Symbol/intern {:param-tags '[java.lang.String java.lang.String]})
                                                nil (str (.-name ^Namespace v))))
                                    false]
-          (instance? IRecord v) (fail (str "a record as a constant: " (class v)))
-          (instance? IType v) (fail (str "a deftype as a constant: " (class v)))
+          ;; a record or deftype read as a literal (#my.Rec{...}, #my.T[...]): read again from
+          ;; its print-dup text, as the JVM's emitValue makes it (Rec/create of the map, T's
+          ;; constructor of the fields; Clojure's suite, REAP3)
+          (or (instance? IRecord v) (instance? IType v))
+          [(list (with-meta 'arbace.lang.RT/readString {:param-tags '[java.lang.String]}) (type-literal v)) false]
+          ;; (constant: an evaluated fn as a value, its code's new fn; none closing over locals)
+          (instance? arbace.lang.Compiler$EvalFn v)
+          (let [n (node (.-fe ^arbace.lang.Compiler$EvalFn v))]
+            (when (seq (:closes n)) (fail (str "a fn closing over locals as a constant: " (:name n))))
+            [(fn-instance ctx n (IdentityHashMap.)) false])
           (map? v) [(list (with-meta 'arbace.lang.RT/map {:param-tags '[java.lang.Object/1]})
                           (emit-list-array ctx (mapcat identity v)))
                     true]
@@ -264,8 +288,8 @@
     (keyword? v) :keyword
     (var? v) :var
     (instance? Namespace v) :ns
-    (instance? IRecord v) (fail (str "a record as a constant: " (class v)))
-    (instance? IType v) (fail (str "a deftype as a constant: " (class v)))
+    ;; (emit-value: read again from its print-dup text)
+    (or (instance? IRecord v) (instance? IType v)) :read
     (map? v) :map
     (vector? v) :vector
     (instance? PersistentHashSet v) :set
@@ -337,7 +361,7 @@
         :set (if (empty? v) (.append sb \E) (arr \S (vec (seq v))))
         :list (arr \L (vec v))
         :pattern (do (.append sb \p) (pool-str sb (str v)))
-        :read (let [s (binding [*print-dup* true] (pr-str v))]
+        :read (let [s (if (instance? IType v) (type-literal v) (binding [*print-dup* true] (pr-str v)))]
                 (when (or (empty? s) (str/starts-with? s "#<"))
                   (fail (str "can't embed unreadable object in code: " s)))
                 (.append sb \r) (pool-str sb s)))
@@ -391,9 +415,47 @@
   initialize without it."
   #{})
 
+(def ^:dynamic *event-classes*
+  "The names of the classes the recorded units' events make (arbace.c2j.main's compile-all):
+  compiled, or made at run time again by their units."
+  #{})
+
+(def ^:private dynamic-cache (atom {}))
+
+(defn- dynamic-class?*
+  "Was class c made at run time while the program prepared, by no recorded event (a deftype an
+  eval made while a namespace loaded: Clojure's suite's compilation.examples, REAP3)? The class
+  is made again when that code runs, not compiled."
+  [^Class c]
+  (let [n (destub (.getName c))]
+    (and (not (contains? *event-classes* n))
+         (not (contains? *late-classes* n))
+         (try (boolean (arbace.lang.Reflector/invokeStaticMethod
+                         "arbace.lang.Compiler$AST" "dynamic" (object-array [c])))
+              ;; a program older than AST.dynamic
+              (catch Throwable _ false)))))
+
+(defn- dynamic-class-cached? [^Class c]
+  (let [k [c *event-classes* *late-classes*]]
+    (if-some [r (get @dynamic-cache k)] r (let [r (dynamic-class?* c)] (swap! dynamic-cache assoc k r) r))))
+
+(defn- holds-fn?
+  "Does constant v hold an evaluated fn (in a collection or its metadata)?"
+  [v]
+  (cond
+    (instance? arbace.lang.Compiler$EvalFn v) true
+    (map? v) (or (boolean (some holds-fn? (mapcat identity v))) (holds-fn? (meta v)))
+    (coll? v) (or (boolean (some holds-fn? v)) (holds-fn? (meta v)))
+    :else false))
+
+
 (defn- constant [ctx v]
   (cond
     (or (nil? v) (string? v)) v
+    ;; a fn a macro put in the code as a value (test.generative's defspec, its generators in
+    ;; the var's metadata): made where used, by its code, as the JVM's emitValue makes one
+    ;; (a new instance of its class, #=(ns$f. )); not a pool's (Clojure's suite, REAP3)
+    (holds-fn? v) (emit-value ctx v)
     ;; a class made at run time may not exist yet when the class holding the constant is
     ;; initialized: looked up where used
     (and (class? v) (or (runtime-class? v ctx) (contains? *late-classes* (destub (.getName ^Class v)))))
@@ -434,7 +496,8 @@
 (defn- field-sym [b] (symbol (str ".-" (:name b))))
 
 (defn- field-read [ctx lb b]
-  (list (field-sym b) 'this))
+  ;; (a deftype's receiver is this__ when a field is named this: emit-deftype-class!)
+  (list (field-sym b) (if (= 'this__ (:self-sym ctx)) 'this__ 'this)))
 
 ;; ---------------------------------------------------------------------------------------
 ;; expressions
@@ -504,7 +567,8 @@
                 (prim-call ctx e p #(unbox-arg ctx % p))
                 (let [f (emit ctx e)
                     jc (:class n)]
-                (if (and (fi? p) (not (and jc (.isAssignableFrom p jc))))
+                ;; (a qualified method tagged with the interface is a fn too, its thunk: REAP3)
+                (if (and (fi? p) (or (= "qualified-method" (:op n)) (not (and jc (.isAssignableFrom p jc)))))
                   ;; Clojure 1.12: a fn passed where a functional interface is expected
                   (unbox-arg ctx (list 'arbace.lang.Compiler$Evaluator/fiAdapt (constant ctx p) f) p)
                   (unbox-arg ctx f p)))))))
@@ -1286,16 +1350,21 @@
                 (if (closed? ctx lb)
                   (list 'set! (field-read ctx lb b) (if (:bindingPrim b) (emit-unboxed ctx val) (emit ctx val)))
                   (fail "set! of a local that is no field")))
+      ;; a final field: set by reflection, which refuses it as the evaluator does (the JVM's
+      ;; putstatic or putfield of a final field throws; Java forms would assign it: REAP3)
       "instance-field" (let [^java.lang.reflect.Field f (:field tn)]
-                         (if (field-ok? ctx f)
+                         (if (and (field-ok? ctx f) (not (java.lang.reflect.Modifier/isFinal (.getModifiers f))))
                            (list 'set! (list (symbol (str ".-" (.getName f)))
                                              (list 'cast (type-sym (.getDeclaringClass f)) (emit ctx (:target tn))))
                                  (first (typed-args ctx [(.getType f)] [val])))
                            (list 'arbace.lang.Reflector/setInstanceField (emit ctx (:target tn)) (:fieldName tn)
                                  (emit ctx val))))
       "static-field" (let [^java.lang.reflect.Field f (:field tn)]
-                       (list 'set! (symbol (str (type-sym (.getDeclaringClass f))) (.getName f))
-                             (first (typed-args ctx [(.getType f)] [val]))))
+                       (if (java.lang.reflect.Modifier/isFinal (.getModifiers f))
+                         (list (with-meta 'arbace.lang.Reflector/setStaticField {:param-tags '[java.lang.Class java.lang.String java.lang.Object]})
+                               (constant ctx (.getDeclaringClass f)) (.getName f) (emit ctx val))
+                         (list 'set! (symbol (str (type-sym (.getDeclaringClass f))) (.getName f))
+                               (first (typed-args ctx [(.getType f)] [val])))))
       (fail (str "set! of " (:op tn))))))
 
 (defn- coll-call [sym es ctx]
@@ -1305,10 +1374,16 @@
   "A let or loop binding [sym init] of LocalBinding lb (LetExpr.doEmit)."
   [ctx lb init]
   (let [b (node lb)
-        p (:bindingPrim b)]
-    (if p
-      [(tagged (local-sym b) p) (emit-unboxed ctx init)]
-      [(tagged (local-sym b) Object) (emit ctx init)])))
+        p (:bindingPrim b)
+        ;; an object local tagged with a functional interface: its init adapted to it, as
+        ;; LetExpr.doEmit (FISupport.maybeEmitFIAdapter) and the evaluator (Evaluator.fiTarget)
+        ;; do (Clojure's suite, REAP3)
+        fi (when-not p (arbace.lang.Compiler$Evaluator/fiTarget lb))]
+    (cond
+      p [(tagged (local-sym b) p) (emit-unboxed ctx init)]
+      fi [(tagged (local-sym b) Object)
+          (list 'arbace.lang.Compiler$Evaluator/fiAdapt (constant ctx fi) (emit ctx init))]
+      :else [(tagged (local-sym b) Object) (emit ctx init)])))
 
 (defn- emit-let [ctx n unboxed?]
   (let [bis (map node (:bindingInits n))
@@ -1554,6 +1629,35 @@
       (.applyTo g (^{:param-tags [java.lang.Object/1]} arbace.lang.ArraySeq/create (array-of as)))
       (.invoke g (splice as)))))
 
+(defn- qualified-method-expr
+  "A qualified method as a value (String/.length, String/new, Math/abs: QualifiedMethodExpr)
+  as the expression the compiler emits for it: its field overload when it prefers it, else its
+  thunk (QualifiedMethodExpr.buildThunk: a fn of an arity per overload, or of its param-tags',
+  calling the method), analyzed now in the unit's namespace (Clojure's suite, REAP3)."
+  [n]
+  (let [^Class c (:c n)
+        ms (:methodSymbol n)
+        kind (:kind n)]
+    (if (and (:fieldOverload n) (nil? (:param-tags (meta ms))))
+      (:fieldOverload n)
+      (let [mname (:methodName n)
+            arities (if (some? (:hintedSig n))
+                      #{(count (:hintedSig n))}
+                      (into (sorted-set)
+                            (if (= kind "CTOR")
+                              (map #(.getParameterCount ^java.lang.reflect.Constructor %) (.getConstructors c))
+                              (map #(.getParameterCount ^java.lang.reflect.Method %)
+                                   (filter #(and (= mname (.getName ^java.lang.reflect.Method %))
+                                                 (= (= kind "STATIC")
+                                                    (java.lang.reflect.Modifier/isStatic (.getModifiers ^java.lang.reflect.Method %))))
+                                           (.getMethods c))))))
+            self (when (= kind "INSTANCE") ['this])
+            form (list* 'fn* (symbol (str "invoke__" (.getSimpleName c) "_" (name ms)))
+                        (for [a arities
+                              :let [ps (vec (concat self (map #(symbol (str "arg" (inc %))) (range a))))]]
+                          (list ps (list* ms ps))))]
+        (arbace.lang.Compiler/analyze arbace.lang.Compiler$C/EXPRESSION form)))))
+
 (def ^:private box-of
   {Long/TYPE 'java.lang.Long/valueOf Double/TYPE 'java.lang.Double/valueOf
    Integer/TYPE 'java.lang.Integer/valueOf Boolean/TYPE 'java.lang.Boolean/valueOf
@@ -1616,6 +1720,7 @@
                             (list 'instance? (type-sym c) (emit ctx (:expr n)))))
             "invoke" (emit-invoke ctx n false)
             "fn" (fn-instance ctx n (IdentityHashMap.))
+            "qualified-method" (emit ctx (qualified-method-expr n))
             "new-instance" (if (:isDeftype n)
                              ;; deftype*: the class, made once; its value nil (ObjExpr.emit)
                              (do (emit-deftype-class! ctx n) nil)
@@ -1688,6 +1793,14 @@
       "do" (throws? (last (:exprs n)))
       false)))
 
+(defn- nil-valued?
+  "Is node n nil itself, or a do ending in it?"
+  [n]
+  (case (:op n)
+    "nil" true
+    "do" (let [es (:exprs n)] (or (empty? es) (nil-valued? (node (last es)))))
+    false))
+
 (defn- ret-body
   "A deftype's method body as returned in type ret (ObjMethod.emitBody): unboxed when it can be,
   else boxed then cast or unboxed as ASM's unbox does."
@@ -1707,7 +1820,13 @@
        (or
         ;; a call of a primitive fn returning ret: its unboxed value (F6)
         (and (#{Long/TYPE Double/TYPE} ret) (prim-call ctx body ret num))
-        (let [f (emit ctx body)]
+        (let [f (emit ctx body)
+              ;; nil as an Object: unboxed, a nil literal cast to Number would lose its type
+              ;; in Go (nil.LongValue__J); the JVM's unboxing of nil throws, as this does
+              ;; (an empty ^long fn, (fn ^long [^long a]): Clojure's suite, REAP3)
+              f (if (and (.isPrimitive ret) (not= ret Void/TYPE) (nil-valued? n))
+                  (list 'let [(with-meta 'nil__ {:tag 'java.lang.Object}) nil] 'nil__)
+                  f)]
         (cond
           (throws? body) f
           (= ret Void/TYPE) f
@@ -1810,25 +1929,36 @@
   its fields, constructors, getBasis (and create for a record), and methods
   (NewInstanceExpr.compile, emitStatics)."
   [ctx ox]
-  (let [cname (destub (:name ox))]
-    (when-not (contains? @(:classes ctx) cname)
+  (let [cname (destub (:name ox))
+        ^IdentityHashMap named (:fn-names ctx)
+        prev (get @(:classes ctx) cname)]
+    ;; a deftype of a name defined before (a defrecord evaluated again, Clojure's suite's
+    ;; CLJ-979): the later one is the class, as the JVM's AOT keeps the last class file of a
+    ;; name; the earlier one's member classes (its lookup thunks) go with it (REAP3)
+    (when (or (nil? prev)
+              (and (some? (:self ox)) (not= ::pending prev) (not= cname (.get named (:self ox)))))
+      (when (some? prev)
+        (swap! (:classes ctx) (fn [cs] (into {} (remove #(str/starts-with? (key %) (str cname "$")) cs)))))
+      (when (some? (:self ox)) (.put named (:self ox) cname))
       (swap! (:classes ctx) assoc cname ::pending)
       (let [cls (pool ctx cname)
             fields (vec (keys (:closes ox)))
-            ;; its methods' this is this, also when the deftype is in a fn's code (self there)
-            ctx' (assoc (dissoc ctx :spec-locals) :cls cls :objx ox :once false :closed (identity-set fields) :self-sym 'this)
+            ;; its methods' this is this, also when the deftype is in a fn's code (self there);
+            ;; this__ when a field is named this (a record's field, Clojure's suite: REAP3)
+            this (if (some #(= "this" (:name (node %))) fields) 'this__ 'this)
+            ctx' (assoc (dissoc ctx :spec-locals) :cls cls :objx ox :once false :closed (identity-set fields) :self-sym this)
             fbs (mapv node fields)
             ftype (fn [b] (or (:bindingPrim b) Object))
             fsym (fn [b] (symbol (:name b)))
             hinted (:hintedFields ox)
             nh (count hinted)
             drops (:altCtorDrops ox)
-            ctor (list* 'constructor (with-meta (vec (cons 'this (map #(tagged (fsym %) (ftype %)) fbs))) {:public true})
+            ctor (list* 'constructor (with-meta (vec (cons this (map #(tagged (fsym %) (ftype %)) fbs))) {:public true})
                         '(super.)
-                        (for [b fbs] (list 'set! (list (field-sym b) 'this) (fsym b))))
+                        (for [b fbs] (list 'set! (list (field-sym b) this) (fsym b))))
             alt-ctors (when (pos? drops)
                         (let [n (count fbs)
-                              ps (fn [k] (vec (cons 'this (map #(tagged (fsym %) (ftype %)) (take k fbs)))))]
+                              ps (fn [k] (vec (cons this (map #(tagged (fsym %) (ftype %)) (take k fbs)))))]
                           [(list 'constructor (with-meta (ps (- n drops)) {:public true})
                                  (list* 'this. (concat (map fsym (take (- n drops) fbs)) [nil nil (list 'unchecked-int 0) (list 'unchecked-int 0)])))
                            (list 'constructor (with-meta (ps (- n 2)) {:public true})
@@ -1860,7 +1990,7 @@
                           :let [mn (node m)
                                 als (:argLocals mn)
                                 ptypes (map #(:c (node (:init (node %)))) als)
-                                ps (vec (cons 'this (map (fn [lb c] (tagged (local-sym (node lb)) c)) als ptypes)))]]
+                                ps (vec (cons this (map (fn [lb c] (tagged (local-sym (node lb)) c)) als ptypes)))]]
                       (vary-meta
                         (list 'method (with-meta (symbol (:name mn)) {:public true}) (tagged ps (:retClass mn))
                               (method-body ctx' mn ps))
@@ -1879,7 +2009,9 @@
   [ctx ox]
   (let [^IdentityHashMap named (:fn-names ctx)
         known (.get named (:self ox))
-        base (destub (:name ox))
+        ;; a $ ending a segment of the binary name (a fn named dec$: ns$dec$) would nest a
+        ;; class without a name: given one (ns$dec$_; Clojure's suite, REAP3)
+        base (str/replace (destub (:name ox)) #"\$(?=\$|\z)" "\\$_")
         ;; two fns of one name (a defn evaluated again in its source, as core's bootstrap
         ;; definitions are: the JVM's AOT keeps the last class file of the name): the later one
         ;; numbered
@@ -2063,6 +2195,16 @@
         ;; the events, then the code
         ns-events (doall ns-events)
         code (deep code)
+        ;; a deftype the compiler made in code it handed to the Java forms compiler (a deftype*
+        ;; in a fn using the code forms, analyze-clj-special) is in no unit's tree but its event:
+        ;; emitted from it, as from the tree (REAP3, RPS6 (a), the compiler's classes; none in the
+        ;; shipped tree, every deftype's class being emitted by its code first)
+        _ (doseq [ev events
+                  :let [ev (vec ev)]
+                  ;; (its NewInstanceExpr, as Compiler$Image's replay takes it)
+                  :when (and (= "type" (first ev)) (string? (nth ev 1)) (some? (nth ev 2))
+                             (not (contains? @(:classes ctx) (destub (nth ev 1)))))]
+            (emit-deftype-class! ctx (node (nth ev 2))))
         ;; the proxy classes made at run time before this unit was analyzed, which its code
         ;; names (runtime-class?): made again unless they are (arbace.core's define-proxy, as
         ;; get-proxy-class makes them, by their name: the namespace then may have been another)

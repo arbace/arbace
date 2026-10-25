@@ -88,7 +88,12 @@ Prior art:
 - `bin/clojure-tests` runs Clojure's upstream test suite against a Clojure, by default the
   frozen baseline on the JVM (`test/baseline-results.edn`), or with `CLOJURE_TESTS_GO` the Go
   build's test executable (`test/arbace-go-results.edn`; repr/clojure's translation and the report on the
-  tools' host).
+  tools' host); `--aot` (REAP3, doc/FULL-SUPPORT-SURVEY.md, "As built: REAP3"): Clojure's AOT level, the
+  suite and its libraries compiled by c2j with the runtime's namespaces on the gate's test build, j2g and
+  `bin/build-go` making their program with the Java fixtures (`.tmp/clojure-tests/aot/aot-build`, cached
+  by key), each namespace loaded through its compiled loader (`test/suite_aot_hook.ae`), against
+  `test/arbace-go-aot-results.edn` (classes `test/clojure/divergences-aot-suite.edn`), the two levels'
+  disagreements listed (`bin/gate --full`'s `suite-aot`).
 - `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
   read, eval, AOT and print for Clojure, Java and Go, judged from the checks' recorded results
   alone (no runs): the cells and their sources in `test/reap/cells.edn`, the judging in
@@ -349,7 +354,7 @@ Prior art:
   corpus, then `--forms verify`: the essential tests' forms read afresh); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
-  `bin/arbace-go --fixpoint`; repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
+  `bin/arbace-go --fixpoint`, then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
   `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), repr/haskell's
   (`bin/repr-haskell roundtrip --iface --text --layout`: GHC's trees and lines over GHC 9.14.1's
   boot libraries, in the braces and the layout layouts, then their interfaces compiled at `-O1`,

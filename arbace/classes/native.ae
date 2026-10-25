@@ -28,11 +28,42 @@
   (ARBACE_COMPILE, Compiler$AST; the back end arbace.c2j), the Java forms compiled here, in
   order: {:ns the namespace's name, :imports its class imports then (symbol -> binary name),
   :forms the Java forms (each the rest of a defclass form), :names the top-level classes'
-  binary names}. The back end puts them in the compiled tree, so that a deftype, a fn (a reify
+  binary names, :vars the vars the forms' symbols name in the namespace then (form-vars)}. The back end puts them in the compiled tree, so that a deftype, a fn (a reify
   in it) or a defclass using the Java forms is a class of the compiled program, as the
   namespace's other classes are (Futamura F2.6, doc/FUTAMURA-SURVEY.md \"F3 and the back end's
   limits as built\"). Else nil."
   (when (System/getenv "ARBACE_COMPILE") (atom [])))
+
+(defn- symbols
+  "The symbols occurring in form (any position, qualified or not)."
+  [form]
+  (cond
+    (symbol? form) #{form}
+    (or (seq? form) (vector? form) (set? form)) (reduce into #{} (map symbols form))
+    (map? form) (reduce into #{} (map symbols (mapcat identity form)))
+    :else #{}))
+
+(defn- form-vars
+  "The vars the symbols of forms name in namespace ns, after their compilation: [[symbol var's
+  namespace var's name metadata] ...] sorted, the metadata the analysis of Clojure code reads (its
+  :tag, :arglists, :dynamic, :macro, :private) where printable. j2g's analysis of the compiled
+  classes, in a program that has not loaded ns, refers them so, as the edge of the compiled tree
+  (REAP3, RPS6 (a): the namespace's own vars, its aliases' and referred ones)."
+  [ns forms]
+  (vec (sort-by (comp str first)
+                (for [s (symbols forms)
+                      :let [v (try (ns-resolve ns s) (catch Throwable _ nil))]
+                      ;; arbace.core's, by its own names, are every program's
+                      :when (and (var? v)
+                                 (not (and (= "arbace.core" (str (ns-name (.ns ^arbace.lang.Var v))))
+                                           (contains? #{nil "arbace.core"} (namespace s)))))
+                      :let [m (meta v)
+                            tag (:tag m)]]
+                  [(with-meta s nil) (str (ns-name (.ns ^arbace.lang.Var v))) (str (.sym ^arbace.lang.Var v))
+                   (cond-> (select-keys m [:dynamic :macro :private])
+                     (or (symbol? tag) (string? tag)) (assoc :tag tag)
+                     (instance? Class tag) (assoc :tag (symbol (.getName ^Class tag)))
+                     (and (seq? (:arglists m)) (every? vector? (:arglists m))) (assoc :arglists (:arglists m)))]))))
 
 (defn- compile-and-load!
   "compiler/compile-and-load!, its classes recorded in compiled."
@@ -46,7 +77,8 @@
                                    :when (not (identical? c (get arbace.lang.RT/DEFAULT_IMPORTS sym)))]
                                [sym (.getName c)]))
               :forms (vec forms)
-              :names (mapv first loaded)}))
+              :names (mapv first loaded)
+              :vars (form-vars ns forms)}))
     loaded))
 
 (defn compile-top

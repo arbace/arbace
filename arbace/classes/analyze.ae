@@ -1158,7 +1158,13 @@
       form
       (let [v (resolve-var actx op)]
         (if (and v (:macro (meta v)))
-          (apply @v form (zipmap (keys (:locals actx)) (repeat nil)) (rest form))
+          ;; in the namespace of the code, as the compiler expands it (deftype's class name is
+          ;; *ns*'s): j2g analyzes a namespace's classes in its own, user (REAP3, RPS6 (a))
+          (let [ns (:ns actx)
+                expand #(apply @v form (zipmap (keys (:locals actx)) (repeat nil)) (rest form))]
+            (if (and (instance? arbace.lang.Namespace ns) (not (identical? ns *ns*)))
+              (binding [*ns* ns] (expand))
+              (expand)))
           form)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -2991,10 +2997,14 @@
     ;; wherever that compiler analyzes deftype* (handing it to arbace.classes.native's
     ;; compile-deftype when its methods use Java forms), in a fresh class loader as `eval`
     ;; binds one; its value is nil
-    deftype* (do (push-thread-bindings {arbace.lang.Compiler/LOADER (arbace.lang.RT/makeClassLoader)
-                                        #'*ns* (:ns actx)})
-                 (try (arbace.lang.Compiler/analyze arbace.lang.Compiler$C/EXPRESSION form)
-                      (finally (pop-thread-bindings)))
+    ;; In j2g's world (env/*from-source*) the class is the compiled tree's when it holds it (c2j
+    ;; emits a deftype the compiler made in such code from its event, the Java forms compiler's
+    ;; one is its own file): not made again (REAP3, RPS6 (a))
+    deftype* (do (when-not (env/from-source? (str/replace (str (nth form 2)) "." "/"))
+                   (push-thread-bindings {arbace.lang.Compiler/LOADER (arbace.lang.RT/makeClassLoader)
+                                          #'*ns* (:ns actx)})
+                   (try (arbace.lang.Compiler/analyze arbace.lang.Compiler$C/EXPRESSION form)
+                        (finally (pop-thread-bindings))))
                  (analyze actx nil))
     ;; ImportExpr: imports the class into the current namespace at run time, its value the class
     arbace.core/import* (analyze actx (list '. (list 'arbace.core/cast 'arbace.lang.Namespace
