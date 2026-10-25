@@ -1,0 +1,331 @@
+(ns java.print
+  "bin/java-check's print level (doc/FULL-SUPPORT-SURVEY.md, \"As built: REAP5\"; RPS9 (a)): the data
+  side of repr/java's printer over the conformance corpus, on the tools' host beside java.check.
+  bin/java-check runs the processes (repr/java's reads and javac on Arbace on javac's tool
+  executable); this namespace prints the forms and judges what the processes left:
+
+    print WORK LIST INDEX
+        each test of LIST (ids, one a line) whose read passed (WORK/run/ID/forms.dir, its forms F1)
+        printed by arbace.repr.java.print, the lines layout, into WORK/run/ID/print/lines, and its
+        forms of mode :full (WORK/run/ID/full.dir, bin/repr-java read --full) in the full layout
+        into WORK/run/ID/print/full; INDEX (jdk/forms) loaded once, the declarations the printer
+        consults (bin/repr-java print --index); per test WORK/run/ID/print/print.tsv (pass, or fail
+        and the first file's failure)
+    judge WORK LIST
+        each test's print result from its steps, in order (the first that does not pass is the
+        result, the others named after it, \"(also: ...)\"):
+          print    the printer printed every file (print.tsv)
+          javac    javac on Arbace accepts the printed Java (print/javac.exit, javac.err1)
+          forms    the printed Java read again (print/f2.dir: F2) holds F1's forms, as data,
+                   metadata included (arbace.repr.java.roundtrip/compare-forms: the ae files'
+                   text after their first line, else their forms)
+          text     mode :full printed back is the renamed source, byte for byte, file by file
+          classes  javac on Arbace's class files of the printed Java (-g:none) against the
+                   original's (print/classes.res: pass, or differ with the two trees), the
+                   differing class files' code compared instruction by instruction (Arbace's own
+                   reading, after jrt.classfile) and the differences named as bin/repr-java
+                   roundtrip names them (arbace.repr.java.roundtrip/class-differences): a value's
+                   control flow, an increment's place, a local's initializer, a switch's arms
+        prints ID<TAB>print<TAB>RESULT<TAB>REASON per test, and the steps' counts on stderr"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.repr.java.print :as pr]
+            [arbace.repr.java.roundtrip :as rt]
+            [jrt.classfile])
+  (:import (java.io File)))
+
+;; ---------------------------------------------------------------------------------------------
+;; files
+
+(defn- lines [f] (let [f (io/file f)] (if (.isFile f) (vec (remove str/blank? (str/split-lines (slurp f)))) [])))
+(defn- slurp1 [f] (let [f (io/file f)] (when (.isFile f) (str/trim (slurp f)))))
+(defn- one-line [s n] (let [s (str/replace (str s) #"[\t\r\n]+" " ")] (if (> (count s) n) (subs s 0 n) s)))
+
+(defn- files-under
+  "The relative paths of the files under dir whose names end with ext, sorted."
+  [dir ext]
+  (let [base (io/file dir)]
+    (if (.isDirectory base)
+      (sort (for [^File f (file-seq base)
+                  :when (and (.isFile f) (str/ends-with? (.getName f) ext))]
+              (str (.relativize (.toPath base) (.toPath f)))))
+      [])))
+
+(defn- bytes-of ^bytes [f] (java.nio.file.Files/readAllBytes (.toPath (io/file f))))
+
+;; ---------------------------------------------------------------------------------------------
+;; print
+
+(defn- print-units
+  "Prints units into out in the layout (\"lines\" or \"full\"), the index's declarations and
+  packages beside the units' own (as bin/repr-java print --index does, the index's declared once);
+  nil, or [path message] of the first unit that fails."
+  [{:keys [pk decls]} units out layout]
+  (let [pk (merge-with into pk (pr/package-classes units))]
+    (binding [pr/*pkg-classes* pk
+              pr/*decls* (merge decls (binding [pr/*pkg-classes* pk] (pr/declare-units units)))]
+      (some (fn [u]
+              (try
+                (let [text (if (and (= "full" layout) (:java/file (meta (first (:forms u)))))
+                             (pr/java-text-full u)
+                             (pr/java-text u))
+                      o (io/file out (pr/out-path u))]
+                  (io/make-parents o)
+                  (spit o text)
+                  nil)
+                (catch Throwable t
+                  [(:path u) (str (.getName (class t)) ": " (.getMessage t))])))
+            units))))
+
+(defn print-tests [work list index]
+  (let [t0 (System/nanoTime)
+        iu (pr/load-units [index])
+        ipk (pr/package-classes iu)
+        idx {:pk ipk :decls (binding [pr/*pkg-classes* ipk] (pr/declare-units iu))}
+        ids (lines list)
+        rs (doall
+            (pmap (fn [id]
+                    (let [p (str work "/run/" id)
+                          f1 (slurp1 (str p "/forms.dir"))
+                          ff (slurp1 (str p "/full.dir"))
+                          out (str p "/print")
+                          r (cond
+                              (nil? f1) nil
+                              :else
+                              (let [load (fn [d] (try (pr/load-units [d])
+                                                      (catch Throwable t [:unread (str d ": " (.getName (class t)) ": " (.getMessage t))])))
+                                    run (fn [d dir layout]
+                                          (let [us (load d)]
+                                            (if (= :unread (first us))
+                                              [(str "the forms not read: " (second us)) ""]
+                                              (print-units idx us dir layout))))
+                                    e1 (run f1 (str out "/lines") "lines")
+                                    e2 (when (and (nil? e1) ff) (run ff (str out "/full") "full"))]
+                                (cond e1 (str "fail\tthe lines layout: " (one-line (str (first e1) ": " (second e1)) 300))
+                                      e2 (str "fail\tthe full layout: " (one-line (str (first e2) ": " (second e2)) 300))
+                                      :else "pass\t")))]
+                      (when r
+                        (io/make-parents (io/file out "print.tsv"))
+                        (spit (str out "/print.tsv") (str r "\n")))
+                      r))
+                  ids))]
+    (println (str "java-print print: " (count (remove nil? rs)) " tests printed (" (count (filter #(and % (str/starts-with? % "fail")) rs))
+                  " failed), the index " index " (" (count iu) " files), "
+                  (format "%.1f" (/ (- (System/nanoTime) t0) 1e9)) " s"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; class files: each method's code as lines, instruction by instruction
+
+(def ^:private read-pool @#'jrt.classfile/read-pool)
+(def ^:private attributes @#'jrt.classfile/attributes)
+(def ^:private skip-members @#'jrt.classfile/skip-members)
+(def ^:private insn-length @#'jrt.classfile/insn-length)
+(def ^:private member-ref @#'jrt.classfile/member-ref)
+(def ^:private constant @#'jrt.classfile/constant)
+(def ^:private bootstrap-methods @#'jrt.classfile/bootstrap-methods)
+
+(defn- u1 ^long [^bytes b ^long i] (bit-and (long (aget b i)) 0xff))
+(defn- u2 ^long [^bytes b ^long i] (bit-or (bit-shift-left (u1 b i) 8) (u1 b (inc i))))
+(defn- s2 ^long [^bytes b ^long i] (long (unchecked-short (u2 b i))))
+(defn- s4 ^long [^bytes b ^long i] (long (unchecked-int (bit-or (bit-shift-left (u2 b i) 16) (u2 b (+ i 2))))))
+
+(def ^:private mnemonics
+  "JVMS 6.5's mnemonics by opcode (0x00-0xc9)."
+  (let [n4 (fn [p] (map #(str p "_" %) (range 4)))]
+    (vec (concat
+          ["nop" "aconst_null" "iconst_m1" "iconst_0" "iconst_1" "iconst_2" "iconst_3" "iconst_4" "iconst_5"
+           "lconst_0" "lconst_1" "fconst_0" "fconst_1" "fconst_2" "dconst_0" "dconst_1" "bipush" "sipush"
+           "ldc" "ldc_w" "ldc2_w" "iload" "lload" "fload" "dload" "aload"]
+          (mapcat n4 ["iload" "lload" "fload" "dload" "aload"])
+          ["iaload" "laload" "faload" "daload" "aaload" "baload" "caload" "saload"
+           "istore" "lstore" "fstore" "dstore" "astore"]
+          (mapcat n4 ["istore" "lstore" "fstore" "dstore" "astore"])
+          ["iastore" "lastore" "fastore" "dastore" "aastore" "bastore" "castore" "sastore"
+           "pop" "pop2" "dup" "dup_x1" "dup_x2" "dup2" "dup2_x1" "dup2_x2" "swap"
+           "iadd" "ladd" "fadd" "dadd" "isub" "lsub" "fsub" "dsub" "imul" "lmul" "fmul" "dmul"
+           "idiv" "ldiv" "fdiv" "ddiv" "irem" "lrem" "frem" "drem" "ineg" "lneg" "fneg" "dneg"
+           "ishl" "lshl" "ishr" "lshr" "iushr" "lushr" "iand" "land" "ior" "lor" "ixor" "lxor" "iinc"
+           "i2l" "i2f" "i2d" "l2i" "l2f" "l2d" "f2i" "f2l" "f2d" "d2i" "d2l" "d2f" "i2b" "i2c" "i2s"
+           "lcmp" "fcmpl" "fcmpg" "dcmpl" "dcmpg" "ifeq" "ifne" "iflt" "ifge" "ifgt" "ifle"
+           "if_icmpeq" "if_icmpne" "if_icmplt" "if_icmpge" "if_icmpgt" "if_icmple" "if_acmpeq" "if_acmpne"
+           "goto" "jsr" "ret" "tableswitch" "lookupswitch" "ireturn" "lreturn" "freturn" "dreturn" "areturn" "return"
+           "getstatic" "putstatic" "getfield" "putfield" "invokevirtual" "invokespecial" "invokestatic"
+           "invokeinterface" "invokedynamic" "new" "newarray" "anewarray" "arraylength" "athrow" "checkcast"
+           "instanceof" "monitorenter" "monitorexit" "wide" "multianewarray" "ifnull" "ifnonnull" "goto_w" "jsr_w"]))))
+
+(defn- operand
+  "The instruction at pc's operands as text (javap's, the constant pool's indices resolved)."
+  [pool bsms ^bytes b ^long c0 ^long pc ^long op]
+  (let [cref (fn [k] (pr-str (constant pool bsms k)))
+        mref (fn [k] (let [{:keys [owner name desc]} (member-ref pool k)] (str owner "." name ":" desc)))
+        cls (fn [k] (let [[_ n] (nth pool k)] (second (nth pool n))))]
+    (cond
+      (#{0x15 0x16 0x17 0x18 0x19 0x36 0x37 0x38 0x39 0x3a 0xa9} op) (str (u1 b (+ c0 pc 1)))
+      (= op 0x10) (str (unchecked-byte (u1 b (+ c0 pc 1))))
+      (= op 0x11) (str (s2 b (+ c0 pc 1)))
+      (= op 0x12) (cref (u1 b (+ c0 pc 1)))
+      (#{0x13 0x14} op) (cref (u2 b (+ c0 pc 1)))
+      (= op 0x84) (str (u1 b (+ c0 pc 1)) " " (unchecked-byte (u1 b (+ c0 pc 2))))
+      (or (<= 0x99 op 0xa8) (#{0xc6 0xc7} op)) (str "L" (+ pc (s2 b (+ c0 pc 1))))
+      (#{0xc8 0xc9} op) (str "L" (+ pc (s4 b (+ c0 pc 1))))
+      (<= 0xb2 op 0xb9) (mref (u2 b (+ c0 pc 1)))
+      (= op 0xba) (let [[_ bi nat] (nth pool (u2 b (+ c0 pc 1)))
+                        [_ n d] (nth pool nat)]
+                    (str bi " " (second (nth pool n)) ":" (second (nth pool d))))
+      (#{0xbb 0xbd 0xc0 0xc1} op) (cls (u2 b (+ c0 pc 1)))
+      (= op 0xc5) (str (cls (u2 b (+ c0 pc 1))) " " (u1 b (+ c0 pc 3)))
+      (= op 0xbc) (str (u1 b (+ c0 pc 1)))
+      (#{0xaa 0xab} op)
+      (let [p (+ pc 1 (mod (- 3 pc) 4))
+            dflt (+ pc (s4 b (+ c0 p)))]
+        (if (= op 0xaa)
+          (let [lo (s4 b (+ c0 p 4)) hi (s4 b (+ c0 p 8))]
+            (str "default L" dflt " " (str/join " " (for [k (range (inc (- hi lo)))]
+                                                      (str (+ lo k) ":L" (+ pc (s4 b (+ c0 p 12 (* 4 k)))))))))
+          (let [n (s4 b (+ c0 p 4))]
+            (str "default L" dflt " " (str/join " " (for [k (range n)]
+                                                      (str (s4 b (+ c0 p 8 (* 8 k))) ":L" (+ pc (s4 b (+ c0 p 12 (* 8 k)))))))))))
+      (= op 0xc4) (let [op2 (u1 b (+ c0 pc 1))]
+                    (str (get mnemonics op2 op2) " " (u2 b (+ c0 pc 2))
+                         (when (= op2 0x84) (str " " (s2 b (+ c0 pc 4))))))
+      :else "")))
+
+(defn- code-lines
+  "The class file's methods' code as lines \"NAME DESC: MNEMONIC OPERANDS\" (javap -c's, without the
+  instructions' offsets and with the constant pool resolved), in the methods' order."
+  [f]
+  (let [b (bytes-of f)
+        [pool i] (read-pool b)
+        ni (u2 b (+ i 6))
+        [_ i] (skip-members pool b (+ i 8 (* 2 ni)))
+        [methods i] (skip-members pool b i)
+        [cattrs _] (attributes pool b i)
+        bsms (bootstrap-methods pool b cattrs)]
+    (vec (for [j methods
+               :let [nm (second (nth pool (u2 b (+ j 2))))
+                     desc (second (nth pool (u2 b (+ j 4))))
+                     [attrs _] (attributes pool b (+ j 6))
+                     [c _] (get attrs "Code")]
+               :when c
+               :let [len (bit-or (bit-shift-left (u2 b (+ c 4)) 16) (u2 b (+ c 6)))
+                     c0 (+ c 8)]
+               line (loop [pc 0 out []]
+                      (if (>= pc len)
+                        out
+                        (let [op (u1 b (+ c0 pc))]
+                          (recur (+ pc (insn-length b c0 pc))
+                                 (conj out (str nm " " desc ": " (get mnemonics op (str "op" op)) " "
+                                                (operand pool bsms b c0 pc op)))))))]
+           line))))
+
+(defn class-differences
+  "Short reasons for the differences of class file c in the trees c1 and c2, named as
+  arbace.repr.java.roundtrip/class-differences names javap's."
+  [c1 c2 c]
+  (let [a (code-lines (io/file c1 c)) b (code-lines (io/file c2 c))]
+    (if (= a b)
+      ["the constant pool's order or an attribute (the same code)"]
+      (let [ds (set (remove str/blank? (concat (remove (set b) a) (remove (set a) b))))
+            has (fn [re] (some #(re-find re %) ds))]
+        (cond-> []
+          (has #": (goto|goto_w|[ailfd]?return) ") (conj "a value's control flow: ?: or a switch expression on one side, if or a switch statement on the other")
+          (has #": iinc ") (conj "an increment's place (i++ in an expression or as a statement)")
+          (has #": ([ail]const_0|aconst_null|lconst_0|fconst_0|dconst_0) ") (conj "a local's initializer (Java's default value written or not)")
+          (has #": (lookupswitch|tableswitch) ") (conj "a switch's arms (fall-through repeated)")
+          true (#(if (empty? %) [(if (seq ds) (str "code: " (str/trim (first (sort ds)))) "the order of the code (the same instructions)")] %)))))))
+
+(defn- classes-result
+  "pass, or differ and the reason: the class trees c1 (the original's) and c2 (the printed Java's)."
+  [c1 c2]
+  (let [a (set (files-under c1 ".class")) b (set (files-under c2 ".class"))]
+    (cond
+      (not= a b) (str "differ\tclasses: " (count (remove b a)) " class files only in the original's ("
+                      (str/join " " (take 3 (sort (remove b a)))) "), " (count (remove a b)) " only in the printed Java's ("
+                      (str/join " " (take 3 (sort (remove a b)))) ")")
+      :else (let [bad (sort (remove #(java.util.Arrays/equals (bytes-of (io/file c1 %)) (bytes-of (io/file c2 %))) a))]
+              (if (empty? bad)
+                "pass\t"
+                (str "differ\tclasses: " (count bad) " of " (count a) " class files differ: "
+                     (str/join "; " (distinct (mapcat #(try (class-differences c1 c2 %)
+                                                            (catch Throwable t [(str "unread: " (.getMessage t))]))
+                                                      bad)))
+                     " (" (str/join " " (take 3 bad)) ")"))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; judge
+
+(defn- text-result
+  "pass, or differ and the first file whose full layout's print is not the renamed source."
+  [p]
+  (let [src (str p "/src") out (str p "/print/full")
+        orig (files-under src ".java") printed (set (files-under out ".java"))
+        missing (remove printed orig)
+        bad (filter #(and (printed %) (not (java.util.Arrays/equals (bytes-of (io/file src %)) (bytes-of (io/file out %))))) orig)]
+    (cond
+      (seq missing) (str "differ\ttext: " (count missing) " of " (count orig) " files not printed (" (first missing) ")")
+      (seq bad) (let [f (first bad)
+                      la (str/split-lines (slurp (io/file src f))) lb (str/split-lines (slurp (io/file out f)))
+                      n (or (first (keep-indexed (fn [i [x y]] (when (not= x y) i)) (map vector la lb)))
+                            (min (count la) (count lb)))]
+                  (str "differ\ttext: " (count bad) " of " (count orig) " files differ from the source, " f
+                       " at line " (inc n) ": " (one-line (get lb n "nothing") 100) " (the source: " (one-line (get la n "nothing") 100) ")"))
+      :else "pass\t")))
+
+(defn- forms-result
+  "pass, or differ and the first file whose forms F2 does not hold as F1's."
+  [f1 f2]
+  (let [rs (rt/compare-forms f1 f2)
+        bad (filter (fn [[_ r]] (#{:fail :missing} (:forms r))) rs)]
+    (if (empty? bad)
+      "pass\t"
+      (let [[path r] (first bad)]
+        (str "differ\tforms: " (count bad) " of " (count rs) " files, " path " " (one-line (or (:why r) (name (:forms r))) 300))))))
+
+(def ^:private steps [:print :javac :forms :text :classes])
+
+(defn- test-steps
+  "{step [RESULT REASON]} of a test's print level, nil for a step not taken."
+  [work id]
+  (let [p (str work "/run/" id)
+        pp (str p "/print")
+        split (fn [s] (let [[r why] (str/split s #"\t" 2)] [r (or why "")]))
+        prt (some-> (slurp1 (str pp "/print.tsv")) split)
+        full-err (slurp1 (str p "/full.err"))
+        jx (slurp1 (str pp "/javac.exit"))
+        f2 (slurp1 (str pp "/f2.dir"))
+        f2-err (slurp1 (str pp "/f2.err"))
+        cls (slurp1 (str pp "/classes.res"))]
+    (cond-> {}
+      prt (assoc :print prt)
+      full-err (assoc :text ["fail" (str "text: the read --full failed: " full-err)])
+      jx (assoc :javac (if (= jx "0") ["pass" ""] ["fail" (str "javac rejects the printed Java: " (or (slurp1 (str pp "/javac.err1")) (str "status " jx)))]))
+      f2 (assoc :forms (split (forms-result (slurp1 (str p "/forms.dir")) f2)))
+      (and (nil? f2) f2-err) (assoc :forms ["fail" (str "forms: the printed Java not read: " f2-err)])
+      (and (= "pass" (first prt)) (nil? full-err) (.isDirectory (io/file pp "full"))) (assoc :text (split (text-result p)))
+      cls (assoc :classes (if (= cls "pass") ["pass" ""] (split (classes-result (str pp "/c1") (str pp "/c2"))))))))
+
+(defn judge [work list]
+  (let [ids (lines list)
+        all (doall (pmap (fn [id] [id (test-steps work id)]) ids))
+        counts (atom {})]
+    (doseq [[id st] all]
+      (doseq [s steps :let [[r] (get st s)] :when r] (swap! counts update-in [s r] (fnil inc 0)))
+      (let [bad (filter #(and (get st %) (not= "pass" (first (get st %)))) steps)
+            [r why] (if (seq bad) (get st (first bad)) ["pass" ""])
+            r (if (and (empty? bad) (not= (set steps) (set (keys st)))) "fail" r)
+            why (if (and (empty? bad) (not= (set steps) (set (keys st))))
+                  (str "steps not taken: " (str/join " " (map name (remove (set (keys st)) steps))))
+                  why)
+            also (rest bad)]
+        (println (str id "\tprint\t" r "\t" (one-line why 600)
+                      (when (seq also) (str " (also: " (str/join ", " (map name also)) ")"))))))
+    (binding [*out* *err*]
+      (println (str "java-print judge: " (count all) " tests; by step: "
+                    (str/join "; " (for [s steps] (str (name s) " " (str/join ", " (for [[r n] (sort (get @counts s))] (str n " " r)))))))))))
+
+(defn -main [cmd & args]
+  (case cmd
+    "print" (apply print-tests args)
+    "judge" (apply judge args))
+  (shutdown-agents)
+  (System/exit 0))

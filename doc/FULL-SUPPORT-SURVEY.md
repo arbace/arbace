@@ -1468,3 +1468,183 @@ minutes; a subset saves only by compiling less. RPS40.
     own now.
   - *Recommended: (a)*: no build needs them before the milestone's run (stage 0 builds the program
     from the checkout's back end, `compiled-back-end`).
+
+## As built: REAP5 (2026-10-25)
+
+Java's print level (§3.6, RPS9 (a), RPS16), on the branch `reap5-java-print` from main `840e514b`.
+Measured on main's javac tool executable (`target/arbace-go/amd64/arbace-javac`, key `bf740cf0…`,
+`REPR_JAVA_STALE_OK=1`, as JC1-JC3 ran: javac's world has not changed since, repr/java's
+namespaces load from the checkout where they differ) and the worktree's stage 0 as the tools'
+host, 8 jobs, every run in the host's heavy slots. No shipped code changed (`arbace/`, `go/`,
+`overlay/`, `jdk/` untouched; no file of `gate_key` or of javac's tool key): no re-seed.
+
+**The level.** `bin/java-check --levels print` (the shell side a section of its own in
+`bin/java-check`, `print_level`, hooked after the compiled level; the data side the new namespace
+`java.print`, `test/java/print.ae`, on the tools' host beside `java.check`). For each run test
+whose read passed (its forms F1, the read level's cache):
+
+1. *print*: F1 printed by `arbace.repr.java.print` in the lines layout with `jdk/forms` as its
+   index (`bin/repr-java print --layout lines --index jdk/forms`'s output, byte for byte on the
+   samples compared; the index loaded and declared once for the run, the tests' own declarations
+   added per test), and the test's sources read in mode `:full` (`read --full`, cached in
+   `.tmp/java-check/forms-full` by the sources, the options and the reader) printed in the full
+   layout: one host process for every test, 24 s for 2,720;
+2. *javac*: javac on Arbace (`bin/repr-java javac`, the classes level's options `-g:none -nowarn
+   -XDsuppressNotes -proc:none -implicit:none` and the test's) accepts the printed Java;
+3. *forms*: the printed Java read again (F2, on the tool, cached as the read level's) holds F1's
+   forms, as data, metadata included (`arbace.repr.java.roundtrip/compare-forms`: the ae files'
+   text after their first line, else their forms);
+4. *text*: mode `:full` printed back is the renamed source, byte for byte, file by file;
+5. *classes*: the printed Java's class files against the original's: the JDK javac's digest (the
+   reference's, which javac on Arbace's of the original equals at the classes level), and when they
+   differ against javac on Arbace's class files of the original, the differing ones compared
+   method by method, instruction by instruction (Arbace's own reading of the code, after
+   `jrt.classfile`: the check needs no JVM, so not `javap`), the differences named as
+   `bin/repr-java roundtrip` names them (a value's control flow, a local's initializer, a switch's
+   arms, an increment's place, the order of code or of the constant pool).
+
+A test's result is the first step not passing in that order (`fail` for print and javac, `differ`
+for forms, text and classes), the others after it as "(also: ...)"; `java.print judge` prints the
+steps' counts. Results in `test/java/check-print.edn` (`--record`; level `:print`, the name
+REAP1's `cells.edn` guessed, RPS29), classes in `test/java/divergences.edn` (`:level :print`, put
+before the classes of no level, whose regexps would take the printed Java's messages). In
+`bin/gate --full`'s java chain: `java-check-full` runs `--levels
+read,interp,classes,compiled,diagnostics,print`. Makefile: `java-check-print`. Cost: the mode
+`:full` reads 12.9 min cold (cached after), the printing 24 s, javac and the read of the printed
+Java 13.7 min (2,720 tests): about 27 min cold, 14.6 min with the `:full` reads cached.
+
+**Numbers** (2,722 run tests the JDK passes, JC1's corpora):
+
+| step | took it | pass | not |
+|---|---:|---:|---:|
+| print (lines and full layouts) | 2,720 | 2,718 | 2 (arrays of 50 and 255 dimensions: F1 does not read back, `:repr-java-dims`) |
+| javac accepts the printed Java | 2,718 | 2,625 | 93 |
+| the read again: forms equal | 2,625 | 2,577 | 48 |
+| mode `:full`: text byte for byte | 2,720 | 2,717 | 3 (the two arrays' `:full` read; FirstChar's empty unit) |
+| class files the original's | 2,625 | 2,121 | 504 |
+| **the level** | 2,722 | **2,104** | 618 |
+
+By class (the first step not passing): **by design** 472 (`:print-classes`: the forms do not
+record the source's choice; of the class files' reasons, per test (a test may name several), 344 a value's control flow, 69 a local's
+initializer, 65 a switch's arms, 3 an increment's place, 46 the constant pool's order or an
+attribute, 21 the order of the code, 58 another instruction (one the overload-choosing cast, below; the rest taken as the converter's
+restructuring of loops and `if`s as PRINTER-NOTES.md has them)); **deferred, decided** 36: Java's type
+arguments in code 30 (`:print-type-arguments`, RPS9 (a): the conformance corpus's kin of the 39 jdk
+files), `--release` 2 (`:print-release`, JCS50 (a)), the dimensions 2 (`:repr-java-dims`, JCS12
+(b)), the read failed 2 (`:read-failed`); **pending** 110: the printer's syntax 45
+(`:print-syntax`, RPS60), the printed Java read to other forms 47 (`:print-forms`, RPS64),
+conversions 9 (`:print-conversions`, RPS61), javac's other refusals 7 (`:print-javac-other`, RPS62),
+an empty unit 1 (`:print-empty-unit`, RPS63), the overload-choosing cast 1 (`:print-overload-cast`,
+RPS65). `bin/reap`: Java print **2,104 / 472 / 146 (110 pending)**, 12 of 12 cells checked, 0
+problems.
+
+**What the level found that the round trip's corpora did not.**
+
+- *The printer's syntax* (45): an array creation as an operand (`new byte[n][0] = 0` where Java needs
+  `(new byte[n])[0]`: HotSpot's generated fuzz tests, `cannot find symbol` and `unexpected type`), a
+  switch expression or a lambda as a receiver (`switch (i) {...}.g()`, `(Integer) (() -> ...).get()`:
+  the cast to the functional interface gone), an array type in a method reference (`int::1/.clone`
+  for `int[]::clone`, the forms' `int/1` spelled through), local and anonymous classes' names
+  (`Outer.Inner1.1.this`, `T.1 o1`), a qualified inner class creation (`new Outer().new
+  X.Outer.Inner()`). The jdk corpus has few of these shapes; jtreg's tests are written to reach them.
+- *The read again* (47): a negative literal and a negation trade places (a float literal of F1
+  read back as `unchecked-negate-float` of one, 9; two int negations read back as literals), an int widened to a float constant written in decimal where the float
+  is not that value (`float f = 16777217;` as `1.6777217E7f`, read as 16777216), a literal's overload
+  (`(long 1)`), casts the converter adds or drops on raw iterators and boxes, a local's `:mutable`
+  tag, `when` against `if`, a loop label's or a temporary's name.
+- *A cast the forms lose* (1, the JLS corpus's `Overloads`): `v((Object) "s")` is read as
+  `v("s")`, so the printed Java (and the interpreter, `:interp-jls`) calls `v(String)`; the print
+  level saw it in the class files (`invokestatic v:(Ljava/lang/Object;)…` against
+  `(Ljava/lang/String;)…`), the forms step passing (F1 lost it at the read). Of the other "another
+  instruction" differences, the one looked at closely (`java/io/LineNumberReader/MarkReset`)
+  is a loop's `continue` printed as the `if`'s other arm: the converter's restructuring; the rest are
+  taken as such by the by-design class (RPS66).
+- *An empty compilation unit* (1): `langtools/tools/javac/unicode/FirstChar.java` holds a comment
+  and its package line only; its converted file holds `(in-ns ...)` alone, which the printer takes
+  for a namespace file, so no Java file is printed and the read again lacks the package's `load`.
+- *Mode `:full`*: 2,717 of 2,720 tests printed back byte for byte (the three above), the printed
+  full layout taken whole (no member edited).
+
+**Scratch** (the worktree's `.tmp/`, kept for the merge): `print-full.log` (the whole run's log, with
+the steps' counts), `print-results-1.tsv` (its `results.tsv`, both levels), `print-np.tsv` (the 618
+non-passes with their reasons), `read-cold.log` (the read level's cold run).
+
+### Proposals (RPS60-RPS69)
+
+- **RPS60 The printer's syntax (45 tests, `:print-syntax`).**
+  - Options: (a) fixed in `arbace.repr.java.print` within the milestone: parentheses around an
+    array creation, a switch expression, a conditional, an assignment or a cast lambda in operand and
+    receiver places (JLS 15's primary rules), `int[]::clone` for an array type's method reference,
+    local and anonymous classes named as the converter keeps them, a qualified inner class creation
+    written with its simple name; the samples (`test/repr/java/java`) taking a case of each, the round
+    trip's references recorded again; (b) deferred after the milestone, the class kept.
+  - *Recommended: (a)*: printer-only work (no shipped code, no re-seed), about a day, and the level
+    would pass them; the round trip gains the samples.
+- **RPS61 Conversions (9, `:print-conversions`).**
+  - Options: (a) the printer writes the cast an assignment context needs where the forms' value is
+    another primitive or box than the target's (`(int) x.byteValue()` into an `Integer`,
+    `Byte.valueOf((byte) 0)` into a `Byte[]`, a `char` label's constant as a char), from the
+    declarations it already consults; (b) deferred with the type arguments to JFS75 (b)'s model.
+  - *Recommended: (a)*: the printer knows the targets' types (its index); with RPS60's work.
+- **RPS62 javac's other refusals (7, `:print-javac-other`).**
+  - Options: (a) triaged one by one with RPS60 (a pattern binding's scope in a nested `if`, three
+    locals whose names differ by supplementary characters printed alike (`_abc`), a missing `return`
+    after a switch, a lambda's capture of a local the printer reassigns, a repeated type annotation,
+    the import of a package-private class, a raw `new DiagnosticCollector()` whose unchecked warning
+    fails `-Werror`: a lost diamond, RPS9's kind), each fixed or given a
+    class of its own; (b) the class kept deferred as one, after the milestone.
+  - *Recommended: (a)*, (b) for any that turns out to need the forms' model.
+- **RPS63 An empty compilation unit (1, `:print-empty-unit`).**
+  - Options: (a) `arbace.repr.java.print/unit` keeps a converted file of a Java origin that holds only
+    `in-ns` and prints its package line (and mode `:full` its record: the comment and the line); (b)
+    by design: a file with no declarations is not Java's to print.
+  - *Recommended: (a)*: a few lines, and mode `:full`'s promise (the file back byte for byte) holds
+    for it.
+- **RPS64 The printed Java read to other forms (47, `:print-forms`).**
+  - Options: (a) deferred, decided kind by kind after the milestone: the converter folding a negated
+    literal (`-1.0f` one literal, as javac's tree has it, JC5's converter work), the printer writing a
+    float constant exactly (`1.6777216E7f`), the literal's overload and casts as RPS61's, the
+    restructurings (when/if, labels, temporaries) by design; (b) by design all (the read normalizes;
+    F2 means what F1 means: the class files equal the original's for 16 of them, the other 31 differ
+    by the classes above); (c) fixed now in the converter
+    and the printer.
+  - *Recommended: (a)*: the literals are cheap and belong to JC5's converter changes; the
+    restructurings' kind is the class files' (by design), but which is which needs the per-kind look.
+- **RPS65 The overload-choosing cast (1, `:print-overload-cast`).**
+  - Options: (a) the converter keeps a cast that changes the overload javac chose (javac's
+    attribution knows the method symbol; the cast is a widening the forms elide), in JC5, with the
+    interpreter's `:interp-jls` case passing; (b) deferred after the milestone.
+  - *Recommended: (a)*: it is a meaning lost at the read, not a print matter; JC5 owns the converter.
+- **RPS66 How the class files are compared.**
+  - Options: (a) as built: the JDK javac's digest first, then javac on Arbace's class files of the
+    original, the differences named by Arbace's own reading of the code (no JVM), every difference
+    by design when the forms step passed; (b) (a), and `--record-ref` also compiling and running the
+    printed Java on the JDK (the printer run at recording time), so a class-file difference is judged
+    by the run's behaviour too; (c) (a) with the code compared after the converter's known
+    restructurings are normalized (a branch's layout), so only unnamed instructions remain.
+  - *Recommended: (a)*, (b) at the next recording of the reference: the print level found the
+    overload cast only because the class files differed; behaviour is the stronger check, and the
+    reference is the JDK's anyway.
+- **RPS67 The print level in the gates.**
+  - Options: (a) as built: in `bin/gate --full`'s `java-check-full` only (it needs javac's tool and
+    about 15 minutes); (b) an essential subset (REAP8's), the essential tests' committed forms printed
+    and judged at the forms and text levels without javac.
+  - *Recommended: (a)*: the forms level needs the read (javac's tool) and the text level the `:full`
+    forms; neither is in the essential gate's means. REAP8 may revisit with RPS15.
+- **RPS68 One result per test.**
+  - Options: (a) as built: the first step not passing (print, javac, forms, text, classes), the others
+    named "(also: ...)", the steps' counts in the run's log; (b) one level per step (`print-forms`,
+    `print-text`, `print-classes`, each a `check-*.edn` and a source of the cell), every step's
+    non-passes classed.
+  - *Recommended: (a)*: one cell, one row per test, as the other levels; the order puts the steps
+    whose failures are bugs before the classes' by-design differences. (b) if the user wants the text
+    level's 2,717 in `bin/reap`.
+- **RPS69 The printer's index.**
+  - Options: (a) as built: `jdk/forms` as the index, its declarations made once per run without the
+    tests' packages (equal to `bin/repr-java print --index jdk/forms` on the samples compared; a test
+    in a package `jdk/forms` declares would see the index's declarations made without its classes);
+    (b) `bin/repr-java print` per test (7 s each: about 5 hours a run); (c) no index.
+  - *Recommended: (a)*: the same output in 24 s; (c) would drop the generic classes' knowledge the
+    printer's casts need.
+
+**The checks.** The essential gate at the branch's head: GATE_RESULT.
