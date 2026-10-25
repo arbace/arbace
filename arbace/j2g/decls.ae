@@ -75,11 +75,27 @@
   "binding id -> Go form reading the captured local from the class's field (local and
   anonymous classes), for code of class n."
   [n tsym]
-  (let [d (a/decl n)]
-    (if (and d (#{:local :anon} (:nesting d)))
-      (into {} (for [b (:captures @(:state d))]
-                 [(:id b) (list (symbol (str ".-" (nm/field-name (capture-field-name n b)))) tsym)]))
-      {})))
+  (let [d (a/decl n)
+        own (if (and d (#{:local :anon} (:nesting d)))
+              (into {} (for [b (:captures @(:state d))]
+                         [(:id b) (list (symbol (str ".-" (nm/field-name (capture-field-name n b)))) tsym)]))
+              {})
+        ;; a member class of a local class (or of its member) reads the local class's captured
+        ;; values through its enclosing instances, javac's this$0.val$x (JC5)
+        outer (loop [c n x tsym acc {}]
+                (let [cd (a/decl c)
+                      o (:outer cd)
+                      od (some-> o a/decl)]
+                  (if (and cd od (:outer-instance? cd) (m/in-world? o))
+                    (let [x' (c/outer-field x c)
+                          acc (if (#{:local :anon} (:nesting od))
+                                (into acc (for [b (:captures @(:state od))]
+                                            [(:id b) (list (symbol (str ".-" (nm/field-name (capture-field-name o b))))
+                                                           (if (m/leaf? o) x' (list (symbol (str ".Self_" (m/go-name o))) x')))]))
+                                acc)]
+                      (recur o x' acc))
+                    acc)))]
+    (merge outer own)))
 
 (defn member-line
   "The Java forms line of method or constructor m (its member form's), or nil."
@@ -267,7 +283,10 @@
                                           ;; Resolve.MethodReferenceLookupHelper reaches Resolve.this)
                                           [(reduce c/outer-field (:outer-param info) p)])
                                         (when (:enum-body d) (:enum-params info))
-                                        (map (fn [b] (c/use-sym! (c/binding-sym b))) (:params info)))))
+                                        (map (fn [b] (c/use-sym! (c/binding-sym b))) (:params info))
+                                        ;; a local superclass's captured values, passed on (JC5)
+                                        (when (and sd (#{:local :anon} (:nesting sd)))
+                                          (for [b (:captures @(:state sd))] (:x (c/local-val {:op :local :b b})))))))
                 :else
                 (let [[ps _] (t/parse-method-desc (:desc sctor))
                       lead (concat (when (and sd (:outer-instance? sd)) [[(:outer node) (str "L" (:outer sd) ";")]]))
