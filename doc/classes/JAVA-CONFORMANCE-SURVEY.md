@@ -1845,8 +1845,8 @@ unchanged). Every heavy run in the host's heavy slots, at 8 jobs. Scratch in `.t
   `GetContentType`, `FileChannel`'s `LongTransferTest` and `MapTest`, `FullRead`, `UriImportExport`,
   `StoreDeadlock`, eight of `java.util.logging`'s and javac's `T7005371`). The whole run moved
   1,364 lines: besides the 22, **1,311 only in the digests of runs the JDK's two runs did not agree
-  on** (`:det false`, never compared: JCS80), 13 whose `:det` drew otherwise, 18 in a failing test's
-  reason or a stderr line. So `test/java/ref-jdk26.edn` is the committed file with those 22 tests'
+  on** (`:det false`, never compared: JCS80), 13 whose `:det` drew otherwise, 18 in other
+  fields (a JDK failure's reason among them, JCS84). So `test/java/ref-jdk26.edn` is the committed file with those 22 tests'
   lines taken from the run (what `--only` writes, without a second run): 22 lines changed, the other
   4,158 byte for byte (`.tmp/hf/ref-full-run.edn`, `.tmp/hf/dirs-ids.txt`).
 - *The levels re-recorded*: `--levels read,interp,compiled --only` the 22 and the two flaky tests
