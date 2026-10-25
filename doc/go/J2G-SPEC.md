@@ -707,7 +707,14 @@ overridden method's name. That is what lets Go's method sets do Java's dispatch 
 start with `F_`, Java's methods contain `__`, constructors start with `Ctor`; so `Ref` (§5.6),
 the markers `Is_J` and the accessors `Self_C` (§5.3, §5.5) are free. Per class, the package
 members `C_class`, `C_Init`, `C_init`, `C_clinit` (the static initializer, §6.2),
-`C_InstanceOf`, `C_Cast`, `C_New...` and `Up_C_I` (§5.6) are generated.
+`C_InstanceOf`, `C_Cast`, `C_New...` and `Up_C_I` (§5.6) are generated. **Reserved suffixes**
+(JCS43 (a), doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC2b"): a static field (or enum
+constant) whose munged name is one of the suffixes j2g derives package members from (`class`,
+`Init`, `init`, `clinit`, `clinit_pK`, `I`, `InstanceOf`, `Cast`, `members`, `New...`, `Fn...`;
+after any `_f` of its own; an enum's `C__VALUES` is its own field `$VALUES`) gets `_f` appended, as locals get `_`: `static int init` of
+`C` is `C_init_f`, beside `C`'s initialization state `C_init` (`arbace.j2g.names/reserved-member`).
+Static methods need no mark: their names hold the descriptor's `__` and return code, which no
+derived suffix does.
 
 **Package-private methods across packages.** A package-private method is not overridden by a
 method of a subclass in another package (JVMS 5.4.5); with the same Go name it would be. When
@@ -959,6 +966,13 @@ until the translated `Number` joins the build, and then embed `Number` (non-leaf
 become `Number_I` values where the static type is `Number`) (amendment T12, accepted
 2026-10-08). **Done** (amendment S3, accepted 2026-10-09): they embed `Number` and define its
 methods themselves (`atomic.ae`; `(pos? (AtomicInteger. 1))` casts to `Number`).
+
+**Leaves j2g's support code needs** (JCS42 (b), doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As
+built: JC2b"): j2g's own support functions take a few translated JDK classes' values as `*C`
+(`Throwable.printStackTrace(PrintStream|PrintWriter)`'s, which call `NN` on the stream; the
+reflection entry of `Runtime.exec(String[], String[], File)`, which asserts `*File`). A class of
+the world extending one of them (`arbace.j2g.checks/support-leaves`) is refused, an error of
+`report.edn` naming the class it extends, rather than translated into Go gc rejects.
 
 A hand-written class is non-leaf where the world extends it, as the manifest's generator
 declares (`test/jrt/manifest.ae`). Since amendment S3 (accepted 2026-10-09) these include
