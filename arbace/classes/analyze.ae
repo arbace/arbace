@@ -44,6 +44,15 @@
   (let [i (env/info o)]
     (if (and i (:outer-instance? i)) (inc (outer-level (:outer i))) 0)))
 
+(defn capture-field-name
+  "The name of the field of local or anonymous class n holding captured local b: val$x, a $
+  appended while the class declares a field of that name (SynthName1's own val$prm1; javac's
+  Lower names its proxies apart)."
+  [n b]
+  (let [own (set (map :name (:fields (decl n))))]
+    (loop [nm (str "val$" (:sym b))]
+      (if (contains? own nm) (recur (str nm "$")) nm))))
+
 (defn this0-name
   "javac's name of class n's outer instance field: this$N, N the outer class's nesting level."
   [n]
@@ -918,7 +927,10 @@
       (t/prim? to)
       (when loose
         (when-let [p (t/unbox-of from)] (when (widens? p to) :unbox)))
-      :else (when (env/assignable? from to) :none))))
+      :else (when (or (env/assignable? from to)
+                      ;; a value of an intersection type: any of its bounds (bound-node)
+                      (some #(env/assignable? % to) (:bounds node)))
+              :none))))
 
 (defn unify
   "The type of a value that is one of two branches' values."
@@ -948,8 +960,10 @@
     :if (and (or (= :none (:type (:then node))) (literal-tail? (:then node)))
              (or (= :none (:type (:else node))) (literal-tail? (:else node))))
     :switch (every? #(or (= :none (:type %)) (literal-tail? %))
-                    (cons (or (:default node) {:op :none}) (map :body (:cases node))))
+                    (cons (or (:default node) {:op :none :type (when (= :pattern (:kind node)) :none)}) (map :body (:cases node))))
     :try (every? #(or (= :none (:type %)) (literal-tail? %)) (cons (:body node) (map :body (:catches node))))
+    ;; a switch expression's yields (a label's breaks, repr/java's yield)
+    :label (every? #(or (= :none (:type %)) (literal-tail? %)) (cons (:body node) @(:breaks (:target node))))
     false))
 
 (defn literal-tail-vals
@@ -967,6 +981,8 @@
                       (cons (:default node) (map :body (:cases node))))
       :try (mapcat #(when-not (= :none (:type %)) (literal-tail-vals %))
                    (cons (:body node) (map :body (:catches node))))
+      :label (mapcat #(when-not (= :none (:type %)) (literal-tail-vals %))
+                     (cons (:body node) @(:breaks (:target node))))
       nil)))
 
 (declare convert-node)
@@ -1239,6 +1255,10 @@
       (t/prim? d) node
       (#{:null :none} (:type node)) node
       ;; the tag gives the static type, also a supertype (Clojure's hint)
+      ;; (an array creation's type is its array class: a supertype's tag is a cast, javac's
+      ;; ^Object (new C/1 n) of a conditional's branch)
+      (and (t/ref? (:type node)) (env/assignable? (:type node) d) (#{:new-array :array-init} (:op node)))
+      {:op :cast :class d :expr node :type d}
       (and (t/ref? (:type node)) (env/assignable? (:type node) d)) (assoc node :type d)
       ;; branches that all convert to it (javac's lub can be sharper than theirs): no cast
       (and (t/ref? d) (branching-tail? node)
@@ -1457,10 +1477,21 @@
     :monitor (branching-tail? (:body node))
     false))
 
+(defn bound-node
+  "Node, a value of an intersection type (:bounds), as a value of its bound that converts to
+  `to` (a cast to it, javac's TransTypes), or node."
+  [node to]
+  (if-let [bs (and (:bounds node) (t/ref? to) (not (env/assignable? (value-type (:type node)) to)) (:bounds node))]
+    (if-let [b (first (filter #(env/assignable? % to) bs))]
+      {:op :cast :class b :expr node :type b}
+      node)
+    node))
+
 (defn convert-node
   "Converts node to type `to` (an assignment conversion; a const is converted at compile time)."
   [node to & {:keys [what] :or {what "value"}}]
-  (let [from (:type node)
+  (let [node (bound-node node to)
+        from (:type node)
         c (conversion node from to)]
     (cond
       (and (or (nil? c) (and (= c :narrow-const) (not= :const (:op node)))
@@ -1472,8 +1503,11 @@
       (case (:op node)
         :switch (let [cs (mapv #(update % :body convert-node to :what what) (:cases node))
                       d (some-> (:default node) (convert-node to :what what))]
-                  (when-not d (fail (str "switch without default has no value of type " to)))
-                  (assoc node :cases cs :default d :type (unify-nodes (cons d (map :body cs)))))
+                  ;; a pattern switch without default is exhaustive by an unconditional
+                  ;; pattern or a sealed hierarchy (JLS 14.11.1.1; javac checked it)
+                  (when-not (or d (= :pattern (:kind node)))
+                    (fail (str "switch without default has no value of type " to)))
+                  (assoc node :cases cs :default d :type (unify-nodes (cond->> (map :body cs) d (cons d)))))
         (:label :loop) (let [b (convert-node (:body node) to :what what)]
                          (doseq [v @(:breaks (:target node))]
                            (when-not (conversion v (:type v) to)
@@ -1740,7 +1774,14 @@
                         init-node (analyze (if (lambda-form? init) (assoc actx :pending-var sym) actx) init)
                         type (binding-type actx sym init-node loop?)
                         init-node (bind-init actx sym init-node type)
-                        cval (when (and (:const m) (= :const (:op init-node))) init-node)
+                        cval (when (:const m)
+                               (if (= :const (:op init-node))
+                                 init-node
+                                 ;; a constant expression the plain analysis leaves a field read
+                                 ;; or an operation (Long/MAX_VALUE, Double/MAX_EXPONENT - 1):
+                                 ;; folded as a constant's (JLS 4.12.4, 15.29)
+                                 (analyze-const-form (scope-of actx) init type true)))
+                        init-node (if (and cval (not= :const (:op init-node))) cval init-node)
                         b (make-binding actx sym type :mutable (boolean (:mutable m)) :cval cval
                                         :loop-local loop?
                                         :sig (when-let [tg (:tag m)]
@@ -1828,7 +1869,12 @@
         bn (if lp
              (analyze (assoc actx2 :label-loop kw) lp)
              (analyze-body actx2 body))
-        bt (unify-nodes (cons bn @(:breaks target)))]
+        bt (unify-nodes (cons bn @(:breaks target)))
+        ;; a switch expression's yields (repr/java's label) of int literals: an int, as above
+        bt (if (and (= bt "J") (not (:clojure actx))
+                    (literal-tail? {:op :label :target target :body bn}))
+             "I" bt)
+        bn (literal-branch bn bt)]
     {:op :label :target target :body bn :type bt}))
 
 (defn- analyze-break [actx [_ & args]]
@@ -1887,7 +1933,7 @@
 
 ;; set! -----------------------------------------------------------------------------------------------
 
-(declare analyze-field-access super-node)
+(declare analyze-field-access super-node field-super-node)
 
 (defn- analyze-set! [actx [_ target v]]
   (cond
@@ -1922,7 +1968,7 @@
 
     (and (seq? target) (let [h (first target)] (and (symbol? h) (str/starts-with? (name h) ".-"))))
     (let [fname (subs (name (first target)) 2)
-          tn (if (= 'super (second target)) (super-node actx) (analyze actx (second target)))]
+          tn (or (field-super-node actx (second target)) (analyze actx (second target)))]
       (analyze-field-access actx tn fname (fn [f owner]
                                             {:op :set-field :field f :owner owner :target tn
                                              :val (convert-node (analyze actx v) (:desc f)) :type (:desc f)})))
@@ -2437,6 +2483,20 @@
   (let [d (decl! (:class actx))]
     (assoc (this-node actx) :type (t/internal->desc (:super d)) :super true)))
 
+(defn- field-super-node
+  "The receiver of a field read or written through super or Outer/super (Outer.super.f: the
+  field of Outer's superclass on the enclosing instance, JLS 15.11.2), or nil for another
+  target."
+  [actx target]
+  (cond
+    (= 'super target) (super-node actx)
+    (and (symbol? target) (namespace target) (= "super" (name target)))
+    (let [cn (or (resolve-class actx (symbol (namespace target))) (fail (str "Unknown class " target)))]
+      (if (= cn (:class actx))
+        (super-node actx)
+        (assoc (outer-this-node actx cn) :type (t/internal->desc (:super (decl! cn))))))
+    :else nil))
+
 (defn- receiver-class
   "If form names a class (not a local), its internal name."
   [actx form]
@@ -2503,6 +2563,9 @@
         (let [st (super-node actx)]
           (analyze-method-call actx st mname args :special true :param-tags param-tags)))
 
+      (and (symbol? target) (namespace target) (= "super" (name target)) (str/starts-with? mname "-"))
+      (analyze-field-access actx (field-super-node actx target) (subs mname 1))
+
       (and (symbol? target) (namespace target) (= "super" (name target)))
       (let [cn (or (resolve-class actx (symbol (namespace target))) (fail (str "Unknown class " target)))
             d (decl! (:class actx))]
@@ -2536,9 +2599,29 @@
 
 (declare outer-instance-for)
 
+(defn- capture-local-super!
+  "A constructor of a subclass of local class cn calls cn's constructor, which takes cn's
+  captured values: the subclass (or anonymous class) passes them on, so it captures them too
+  (javac's Lower.freevars of a local superclass); also the enclosing locals cn's form names, as
+  for a creation in its own body (analyze-new)."
+  [actx cn]
+  (when-let [cd (decl cn)]
+    (when (= :local (:nesting cd))
+      (let [st @(:state cd)
+            ls (:locals (:creation-actx st))]
+        (doseq [b (concat (reverse (:captures st))
+                          (distinct (keep #(when (symbol? %) (get ls %)) (flatten (seq (:spec st))))))
+                :when (and (not (:mutable b)) (not (:cval b)) (not (:receiver b)))]
+          (local-ref actx b))))))
+
 (defn ctor-call-node
   "A call of constructor of class cn with args; kind :new, :super or :this."
   [actx cn args kind & {:keys [outer param-tags arg-nodes]}]
+  ;; the super constructor of a local class (SubClass extends LocalClass, a member of it):
+  ;; the subclass passes the local class's captured values on, so it captures them too
+  ;; (javac's Lower.freevars of a local superclass); its form's enclosing locals as for a
+  ;; creation in its own body (analyze-new)
+  (when (= kind :super) (capture-local-super! actx cn))
   (let [arg-nodes (or arg-nodes (mapv #(analyze actx %) args))
         cands (ctor-candidates (:class actx) cn)
         _ (when (empty? cands) (fail (str "No accessible constructor of " (str/replace cn "/" "."))))
@@ -2592,7 +2675,9 @@
                        n))]
     (cond
       (or (and (symbol? cls) (namespace cls) (re-matches #"[1-9]" (name cls)))
-          (and (seq? cls) (= 'array (first cls))))
+          (and (seq? cls) (= 'array (first cls)))
+          ;; an array of more than nine dimensions, as the JVM names its class (JCS12 (b))
+          (and (string? cls) (str/starts-with? cls "[")))
       (anns (array-new actx (actx-desc actx cls) args))
       (nil? cn) (fail (str "Unable to resolve class: " cls))
       :else
@@ -2604,7 +2689,16 @@
           (when (= :local (:nesting cd))
             ;; javac adds them in its freevars order, the reverse of the constructor's
             ;; (Lower.FreeVarCollector.addFreeVars)
-            (doseq [b (reverse (:captures @(:state cd)))] (local-ref actx b))))
+            (doseq [b (reverse (:captures @(:state cd)))] (local-ref actx b))
+            ;; created inside its own body (new Local1() in a lambda of Local1's constructor):
+            ;; its captures may not all be known yet, as javac's free variables are before
+            ;; Lower; the enclosing locals its form names are captured here too
+            (when (some #(= cn (:class %)) (take-while some? (iterate :parent (:frame actx))))
+              (let [st @(:state cd)
+                    ls (:locals (:creation-actx st))]
+                (doseq [b (distinct (keep #(when (symbol? %) (get ls %)) (flatten (seq (:spec st)))))
+                        :when (and (not (:mutable b)) (not (:cval b)) (not (:receiver b)))]
+                  (local-ref actx b))))))
         (let [outer (when (needs-outer-instance? cn) (outer-instance-for actx cn))
               arg-nodes (when (reflect? actx) (mapv #(analyze actx %) args))]
          (or-reflect
@@ -2661,9 +2755,14 @@
         ;; javac casts an array's clone() once, to the cast's type
         xn (if (:array-clone xn) (assoc xn :no-cast true) xn)]
     (if (and (seq? cls) (= '& (first cls)))
-      (reduce (fn [n [i c]] {:op :cast :class (actx-desc actx c) :expr n :type (actx-desc actx c)
-                             :type-anns (code-type-anns actx c) :type-arg i})
-              xn (map-indexed vector (rest cls)))
+      ;; an intersection cast: a checkcast to each bound, the first bound's (the erasure, JLS
+      ;; 4.6) outermost; the node keeps every bound (:bounds), so that a context needing another
+      ;; bound converts to it by a cast, as javac's TransTypes does
+      (let [bs (vec (map-indexed vector (rest cls)))
+            n (reduce (fn [n [i c]] {:op :cast :class (actx-desc actx c) :expr n :type (actx-desc actx c)
+                                     :type-anns (code-type-anns actx c) :type-arg i})
+                      xn (concat (rest bs) (take 1 bs)))]
+        (assoc n :bounds (mapv #(actx-desc actx (second %)) bs)))
       (let [cd (actx-desc actx cls)]
         (cond
           (t/prim? cd) (analyze-conversion actx cd x true)
@@ -3131,8 +3230,9 @@
       :enum {:op :ctor-call :kind :super :class "java/lang/Enum" :enum-args true
              :ctor {:name "<init>" :desc "(Ljava/lang/String;I)V" :owner "java/lang/Enum"} :args [] :type "V"}
       (if (and (= :anon (:nesting d)) (:anon-super-ctor d))
-        {:op :ctor-call :kind :super :class (:super d) :ctor (:anon-super-ctor d) :anon-args true
-         :args [] :type "V"}
+        (do (capture-local-super! actx (:super d))
+            {:op :ctor-call :kind :super :class (:super d) :ctor (:anon-super-ctor d) :anon-args true
+             :args [] :type "V"})
         (when-let [sup (:super d)]
          (let [sd (decl sup)]
           (when (and sd (:outer-instance? sd) (#{:local :anon} (:nesting sd)))
@@ -3309,7 +3409,12 @@
   "Generic view of class n: {:tparams [sym] :supers [tnode] :methods [{:name :desc :params [tnode]
   :bounds {}}]}."
   [n]
-  (if-let [d (decl n)]
+  (if-let [d (or (decl n)
+                 ;; a class the interpreter defined earlier (a superclass of an earlier form:
+                 ;; MissingBridge's GenObject<T>): its declaration, kept with the class, has
+                 ;; the generic signatures jrt's reflection does not (JCS40, the bridge)
+                 (let [dd (get @env/defined n)]
+                   (when (and dd (contains? dd :super-t) (contains? dd :tparams)) dd)))]
     {:tparams (mapv :sym (:tparams d))
      :supers (cons (:super-t d) (:interfaces-t d))
      :methods (for [m (:methods d) :when (not= "<init>" (:name m)) :when (not (:bridge-of m))]
@@ -3627,7 +3732,7 @@
                                      :local-classes lc :enclosing-method (:method-info actx)}
                                     parsed)
                     (swap! (state n) assoc :creation-frame (:frame actx) :creation-actx actx
-                           :prologue (and (not (:static actx)) (prologue? actx)))
+                           :prologue (and (not (:static actx)) (prologue? actx)) :spec spec)
                     (process-classes! from)
                     actx))
                 actx specs)]
@@ -3735,7 +3840,7 @@
 (defn analyze-for-each [actx [_ [sym coll :as bv] & body]]
   (when-not (and (vector? bv) (= 2 (count bv)) (symbol? sym))
     (fail "for-each needs a binding vector [x coll]"))
-  (let [cn (analyze actx coll)
+  (let [cn (bound-node (analyze actx coll) "Ljava/lang/Iterable;")
         ct (value-type (:type cn))
         array? (t/array? ct)
         _ (when-not (or array? (and (t/ref? ct) (env/assignable? ct "Ljava/lang/Iterable;")))
@@ -3827,7 +3932,16 @@
                  :when (has? (:flags m) Opcodes/ACC_ABSTRACT)
                  :when (not (has? (:flags m) Opcodes/ACC_STATIC))]
              m)
-        ms (vec ms)]
+        ms (vec ms)
+        ;; erased descriptors of one method (K<String>'s m(T) and M's m(String), JLS 9.9):
+        ;; the most specific is the SAM, the others its bridges (LambdaMetafactory's)
+        params-of #(first (t/parse-method-desc (:desc %)))
+        specific (when (and (> (count ms) 1) (apply = (map :name ms)) (apply = (map (comp count params-of) ms)))
+                   (first (filter (fn [m] (every? (fn [o] (every? true? (map (fn [a b] (or (= a b) (and (t/ref? a) (t/ref? b) (env/assignable? a b))))
+                                                                            (params-of m) (params-of o))))
+                                                  ms))
+                                  ms)))
+        ms (if specific [(assoc specific :bridges (vec (distinct (remove #{(:desc specific)} (map :desc ms)))))] ms)]
     (when-not (= 1 (count ms))
       (fail (str (str/replace n "/" ".") " is not a functional interface (abstract methods: "
                  (pr-str (map :name ms)) ")")))
@@ -3911,7 +4025,16 @@
                                [(with-local a b) (conj bs b)]))
                            [lactx []] (map vector params ps))
         bn (analyze-body lactx body)
-        bn (if (= "V" ret) bn (convert-node bn ret :what "lambda value"))
+        bt (value-type (:type bn))
+        ;; the lambda javac makes of a reference to a generic method (variable arity
+        ;; adaptation): its erased result checked against the descriptor's (LambdaToMethod's
+        ;; checkcast), unboxed through the wrapper for a primitive one
+        bn (cond (= "V" ret) bn
+                 (and (:ref-lambda actx) (t/ref? bt) (t/ref? ret) (nil? (conversion bn bt ret)))
+                 {:op :cast :class ret :expr bn :type ret}
+                 (and (:ref-lambda actx) (t/ref? bt) (t/prim? ret) (nil? (conversion bn bt ret)))
+                 (convert-node {:op :cast :class (boxed-desc ret) :expr bn :type (boxed-desc ret)} ret :what "lambda value")
+                 :else (convert-node bn ret :what "lambda value"))
         lname (or lname (serial-lambda-name! actx fin sam boundary))
         node {:op :lambda :fi fin :markers markers :serializable ser :intersection inter
               :sam sam :inst-desc (t/method-desc ps ret)
@@ -3923,12 +4046,20 @@
 
 (defn- arg-stub [d] {:op :local :type d :b {:id -1 :type d}})
 
+(defn- desc-tag
+  "A tag naming descriptor d: a primitive's name, an array's C/N, a class's name."
+  [d]
+  (cond (or (t/prim? d) (= "V" d)) (symbol (t/prim-desc->name d))
+        (t/array? d) (let [e (loop [e d] (if (t/array? e) (recur (t/elem-type e)) e))]
+                       (symbol (str (desc-tag e)) (str (t/array-dims d))))
+        :else (symbol (t/desc->class-name d))))
+
 (defn- ref-as-lambda
   "javac makes a lambda method for references it cannot express as a method handle (variable
   arity adaptation): the equivalent lambda form."
   [actx fi ps ret call-fn]
-  (let [args (vec (map-indexed (fn [i p] (with-meta (symbol (str "a$" i)) {:tag (symbol (if (t/prim? p) (t/prim-desc->name p) (t/desc->class-name p)))})) ps))
-        rtag (symbol (if (or (t/prim? ret) (= "V" ret)) (t/prim-desc->name ret) (t/desc->class-name ret)))]
+  (let [args (vec (map-indexed (fn [i p] (with-meta (symbol (str "a$" i)) {:tag (desc-tag p)})) ps))
+        rtag (desc-tag ret)]
     (analyze (assoc actx :ref-lambda true) (list 'lambda* fi (with-meta args {:tag rtag}) (call-fn args)))))
 
 (defn- ref-owner
@@ -3936,6 +4067,28 @@
   methods referenced through an interface are named by the interface (javac's binaryQualifier)."
   [cn m]
   (if (and (= "java/lang/Object" (:owner m)) (env/interface? cn)) cn (:owner m)))
+
+(defn- select-ref
+  "select-method for a method reference's instantiated parameter types, [m varargs? cast?]:
+  when none applies, the only fixed-arity candidate of that arity, cast? true (a parameter of
+  an intersection type erased to another bound than the method's: javac makes a lambda that
+  casts the arguments, LambdaToMethod)."
+  [actx cands stubs what param-tags]
+  (try (conj (select-method actx cands stubs what param-tags) false)
+       (catch arbace.lang.ExceptionInfo e
+         (let [n (count stubs)
+               fit (filter #(and (= n (count (first (t/parse-method-desc (:desc %)))))
+                                 (not (has? (:flags %) Opcodes/ACC_VARARGS)))
+                           cands)]
+           (if (and (= 1 (count fit)) (re-find #"^No matching" (str (ex-message e))))
+             [(first fit) false true]
+             (throw e))))))
+
+(defn- cast-args
+  "The argument symbols cast to method m's reference parameter types."
+  [m args]
+  (mapv (fn [a p] (if (t/ref? p) (list 'cast (symbol (t/desc->class-name p)) a) a))
+        args (first (t/parse-method-desc (:desc m)))))
 
 (defn analyze-method-ref [actx [_ fi & more :as form]]
   (let [[sig more] (if (vector? (first more)) [(first more) (rest more)] [nil more])
@@ -3954,8 +4107,13 @@
         [sps sret] (t/parse-method-desc (:desc sam))
         ps (if sig (mapv #(actx-desc actx %) sig) sps)
         ret (if-let [tg (and sig (:tag (meta sig)))] (actx-desc actx tg) sret)
-        cn (or (resolve-class actx (symbol (namespace msym))) (fail (str "Unknown class " (namespace msym))))
-        mname (name msym)
+        ;; a method of an array type (int/1/.clone: the reader's namespace int, name 1/.clone)
+        arr (when-let [[_ dims nm] (re-matches #"(\d+)/(.+)" (name msym))]
+              [(actx-desc actx (symbol (namespace msym) dims)) nm])
+        cn (if arr
+             "java/lang/Object"
+             (or (resolve-class actx (symbol (namespace msym))) (fail (str "Unknown class " (namespace msym)))))
+        mname (if arr (second arr) (name msym))
         param-tags (:param-tags (meta msym))
         base {:op :method-ref :fi fin :markers markers :serializable ser :intersection inter
               :sam sam :inst-desc (t/method-desc ps ret) :class (:class actx)
@@ -3969,19 +4127,36 @@
                    node)]
     (register
     (cond
+      ;; a reference to an array's method (int[]::clone, arr::clone): javac makes a lambda
+      ;; (LambdaToMethod: an array's methods have no handle of their own)
+      arr
+      (let [mn (if (str/starts-with? mname ".") (subs mname 1) mname)
+            at (first arr)]
+        (if recv
+          (let [sym (gensym "rec$")
+                b (make-binding actx sym at)
+                rn (analyze actx recv)
+                lam (ref-as-lambda (with-local actx b) fi ps ret
+                                   (fn [args] (list* '. sym (symbol mn) args)))]
+            {:op :let :bindings [[b {:op :null-checked :expr rn :type (:type rn)}]] :body lam :type (:type lam)})
+          (ref-as-lambda actx fi ps ret
+                         (fn [[r & args]] (list* '. (vary-meta r assoc :tag (symbol (namespace msym) (first (str/split (name msym) #"/"))))
+                                                 (symbol mn) args)))))
+
       (or (= recv 'super) (and (symbol? recv) (namespace recv) (= "super" (name recv))))
       ;; javac makes a lambda method for super::m and I.super::m
-      (let [args (vec (map #(with-meta (gensym "a$") {:tag (symbol (if (t/prim? %) (t/prim-desc->name %) (t/desc->class-name %)))}) ps))]
-        (analyze actx (list 'lambda* fi (with-meta args {:tag (symbol (if (or (t/prim? ret) (= "V" ret)) (t/prim-desc->name ret) (t/desc->class-name ret)))})
+      (let [args (vec (map #(with-meta (gensym "a$") {:tag (desc-tag %)}) ps))]
+        (analyze (assoc actx :ref-lambda true) (list 'lambda* fi (with-meta args {:tag (desc-tag ret)})
                             (list* '. recv (symbol (subs mname (if (str/starts-with? mname ".") 1 0))) args))))
 
       (= mname "new")
-      (let [[m va] (select-method actx (filter #(env/accessible? (:class actx) %) (env/constructors cn))
-                                  (mapv arg-stub ps) (str "constructor of " cn) param-tags)]
+      (let [[m va cast?] (select-ref actx (filter #(env/accessible? (:class actx) %) (env/constructors cn))
+                                     (mapv arg-stub ps) (str "constructor of " cn) param-tags)]
         ;; javac makes a lambda for variable arity adaptation and for classes that need an outer
         ;; instance or captured values
-        (if (or va (needs-outer-instance? cn) (= :local (:nesting (decl cn))))
-          (ref-as-lambda actx fi ps ret (fn [args] (list* 'new (symbol (str/replace cn "/" ".")) args)))
+        (if (or va cast? (needs-outer-instance? cn) (= :local (:nesting (decl cn))))
+          (ref-as-lambda actx fi ps ret (fn [args] (list* 'new (symbol (str/replace cn "/" "."))
+                                                          (if cast? (cast-args m args) args))))
           (assoc base :kind :new :owner cn :name "<init>" :desc (:desc m))))
 
       recv
@@ -4011,19 +4186,21 @@
       (str/starts-with? mname ".")
       (let [mn (subs mname 1)
             cands (->> (env/member-methods cn mn) (remove static-flag?) (filter #(env/accessible? (:class actx) %)))
-            [m va] (select-method actx cands (mapv arg-stub (rest ps)) (str "method " mn) param-tags)]
+            [m va cast?] (select-ref actx cands (mapv arg-stub (rest ps)) (str "method " mn) param-tags)]
         (when (empty? ps) (fail "An unbound method reference needs the receiver as first parameter"))
-        (if va
-          (ref-as-lambda actx fi ps ret (fn [[r & args]] (list* '. r (with-meta (symbol mn) {:param-tags (:param-tags (meta msym))}) args)))
+        (if (or va cast?)
+          (ref-as-lambda actx fi ps ret (fn [[r & args]] (list* '. r (with-meta (symbol mn) {:param-tags (:param-tags (meta msym))})
+                                                               (if cast? (cast-args m args) args))))
         (let [owner (ref-owner cn m)]
           (assoc base :kind :unbound :owner owner :name mn :desc (:desc m)
                  :itf (env/interface? owner)))))
 
       :else
       (let [cands (->> (env/member-methods cn mname) (filter static-flag?) (filter #(env/accessible? (:class actx) %)))
-            [m va] (select-method actx cands (mapv arg-stub ps) (str "static method " mname) param-tags)]
-        (if va
-          (ref-as-lambda actx fi ps ret (fn [args] (list* '. (symbol (str/replace cn "/" ".")) (with-meta (symbol mname) {:param-tags param-tags}) args)))
+            [m va cast?] (select-ref actx cands (mapv arg-stub ps) (str "static method " mname) param-tags)]
+        (if (or va cast?)
+          (ref-as-lambda actx fi ps ret (fn [args] (list* '. (symbol (str/replace cn "/" ".")) (with-meta (symbol mname) {:param-tags param-tags})
+                                                          (if cast? (cast-args m args) args))))
         (assoc base :kind :static :owner (:owner m) :name mname :desc (:desc m) :itf (env/interface? (:owner m)))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -4122,6 +4299,10 @@
         ;; int's range)
         sn (cond
              (and (= :const (:op sn)) (:literal sn) (fits? "I" (:val sn))) (const-node "I" (int (:val sn)))
+             ;; a conditional of int literals ((if c 0 1)) is an int, as an operand's (§5.4)
+             (and (not (:clojure actx)) (= "J" (:type sn)) (not= :const (:op sn))
+                  (some->> (literal-tail-vals sn) (every? #(fits? "I" %))))
+             (convert-node sn "I")
              (and (:clojure actx) int-labels? (= "J" (prim-type sn)))
              {:op :invoke :kind :static :owner (t/lang-class "RT") :itf false :name "intCast"
               :desc "(J)I" :target nil :args [(unboxed sn)] :type "I"}
@@ -4135,7 +4316,28 @@
                        [(partition 2 clauses) nil])
         null-label? #(or (nil? %) (and (seq? %) (some nil? %)))
         enum? (enum-class? st)
+        ;; a qualified enum constant label (E/A) in a pattern switch on another type (JLS
+        ;; 14.11.1, Java 21): the pattern E with the guard that the value is that constant
+        enum-const (fn [l]
+                     (when (and (symbol? l) (namespace l) (not enum?))
+                       (when-let [en (resolve-class actx (symbol (namespace l)))]
+                         (let [f (env/find-field en (name l))]
+                           (when (and f (has? (:flags f) Opcodes/ACC_ENUM)) l)))))
+        enum-pattern (fn [l]
+                       (let [ls (if (seq? l) l [l])]
+                         (when (and (seq ls) (every? enum-const ls)
+                                    (every? #(= (namespace (first ls)) (namespace %)) ls))
+                           (let [g (gensym "enum$")]
+                             [(with-meta g {:tag (symbol (namespace (first ls)))})
+                              :when (if (next ls)
+                                      (cons 'or (map #(list 'identical? g %) ls))
+                                      (list 'identical? g (first ls)))]))))
+        pairs (if (some (fn [[l]] (enum-pattern l)) pairs)
+                (map (fn [[l b :as pr]] (if-let [v (enum-pattern l)] [v b] pr)) pairs)
+                pairs)
         kind (cond (some (fn [[l]] (or (vector? l) (null-label? l))) pairs) :pattern
+                   ;; a switch of a default alone, on a reference (Java 21: any type)
+                   (and (empty? pairs) (t/ref? st)) :pattern
                    (#{"I" "S" "B" "C"} (prim-type sn)) :int
                    (= st t/string-desc) :string
                    enum? :enum
@@ -4185,6 +4387,11 @@
         default-arm? (some (fn [c] (some :default (:labels c))) cases)
         bodies (concat (map :body cases) (when-not default-arm? [(or default (const-node :null nil))]))
         ty (unify-nodes bodies)
+        ;; a switch expression of int literals is an int (javac's type for it; Clojure's case
+        ;; is not a switch)
+        ty (if (and (= ty "J") (not (:clojure actx)) (some #(not= :none (:type %)) bodies)
+                    (every? #(or (= :none (:type %)) (literal-tail? %)) bodies))
+             "I" ty)
         cases (mapv #(update % :body literal-branch ty) cases)
         default (some-> default (literal-branch ty))]
     {:op :switch :kind kind :sel sel-node :sel-type (if (= kind :int) "I" st) :cases cases :default default
@@ -4244,6 +4451,8 @@
         ns-name* (when ns-form (let [x (second ns-form)] (if (seq? x) (second x) x)))
         class-forms* (for [f forms
                            f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
+                           ;; a defclasses' classes (a file's top-level classes, JCS30 (b))
+                           f (if (and (seq? f) (symbol? (first f)) (= "defclasses" (name (first f)))) (rest f) [f])
                            :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
                        (rest f))
         ;; only a file that declares the class is its source: decided before evaluating anything
@@ -4381,9 +4590,18 @@
         node))
     node))
 
+(def ^:dynamic *accessors*
+  "Are javac's accessors made (j2g's world, as javac compiles)? The interpreter, which calls
+  members directly (accessorize the identity), binds it false."
+  true)
+
 (defn outer-super-call
-  "(.m Outer/super args) from a nested class or lambda: javac's access$N01 accessor in Outer."
+  "(.m Outer/super args) from a nested class or lambda: javac's access$N01 accessor in Outer;
+  without *accessors*, the special call itself on the enclosing instance."
   [actx o mname args param-tags]
+  (if-not *accessors*
+    (analyze-method-call actx (assoc (outer-this-node actx o) :type (t/internal->desc (:super (decl! o))) :super true)
+                         mname args :special true :param-tags param-tags)
   (let [d (decl! o)
         sup (:super d)
         on (outer-this-node actx o)
@@ -4397,7 +4615,7 @@
         nm (add-accessor! o 1 desc
                           {:insn :invokespecial :owner sup :name mname :desc (:desc m) :itf false})]
     {:op :invoke :kind :static :owner o :itf false :name nm :desc desc :target nil
-     :args (into [on] (convert-args m arg-nodes va)) :type r}))
+     :args (into [on] (convert-args m arg-nodes va)) :type r})))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Clojure data and vars in class bodies (§5.13): constants in private static synthetic fields

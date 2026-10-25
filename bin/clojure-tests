@@ -40,7 +40,10 @@
 #                    test/clojure/essential-aot.txt compiled alone (with their test libraries and the
 #                    runtime's namespaces they load) into their own program (CLOJURE_TESTS_RUN
 #                    defaults to aot-essential, cached by its key as --aot's), each run on it against
-#                    the same reference; no test.generative, no levels compared
+#                    the same reference, less the subset's own skipped tests
+#                    (test/clojure/essential-aot-skipped.edn: transducers' seq-and-transducer,
+#                    RPS74 (b)); no test.generative, no levels compared; its work module and j2g
+#                    tree removed after the build (RPS77 (b))
 #   --java-fixtures OUT  only convert the suite's Java fixtures (test/java), renamed as for
 #                    the Go build, into Java forms under OUT with repr/java (bin/repr-java, on
 #                    javac's tool executable, its only host since JN6; run CLOJURE_TESTS_RUN,
@@ -498,12 +501,35 @@ aot_build() {
     > "$ab/build.log" 2>&1 \
     || { grep -v '^==' "$ab/build.log" | tail -20; echo "clojure-tests --aot: the build failed ($ab/build.log)" >&2; return 1; }
   echo "   build-go: $(( $(date +%s) - t0 )) s"
+  # the essential subset's work module and j2g tree removed (RPS77 (b)): a cache hit reads only the
+  # program and its key, a miss translates and prints anew (repr/go's print cache warm), as the Java
+  # subset's (bin/java-check --essential-compiled)
+  [ -z "${ess_list:-}" ] || rm -rf "$ab/work" "$ab/j2g"
   echo "$key" > "$ab/key"
 }
 
 # 3. build
 rm -rf "${work:?}/classes" "${suite:?}/target" "${work:?}/tmp"
 mkdir -p "$work/classes" "$suite/target/test-classes" "$work/tmp"
+# --aot --essential: the subset's reference (RPS74 (b)), the AOT reference with
+# test/clojure/essential-aot-skipped.edn's tests skipped too (each skipped test's namespace one
+# test less, its :failing entry gone, its :pass the same), written into RUN/expected-essential.edn
+# and passed on to the namespaces' processes; the subset's program is keyed by it (aot_build)
+if [ -n "${ess_list:-}" ]; then
+  ess_overlay=$root/test/clojure/essential-aot-skipped.edn
+  host_run -e "(let [r (read-string (slurp \"$expected\")) o (read-string (slurp \"$ess_overlay\"))
+      r (reduce-kv (fn [r n ts]
+                     (let [new (remove #(contains? (get-in r [:skipped-tests n]) %) (keys ts))
+                           qs (map #(symbol (str n) (str %)) new)]
+                       (-> r (update-in [:skipped-tests n] merge ts)
+                           (update-in [:namespaces n] #(cond-> (update % :test - (count new))
+                                                         (:failing %) (update :failing (fn [f] (apply dissoc f qs))))))))
+                   r o)]
+  (spit \"$work/expected-essential.edn\" (pr-str r)))" || { echo "clojure-tests --aot --essential: the subset's reference not written" >&2; exit 1; }
+  expected=$work/expected-essential.edn CLOJURE_TESTS_EXPECTED=$work/expected-essential.edn
+  export CLOJURE_TESTS_EXPECTED
+  echo "   the subset's reference: $expected (the AOT reference less $(basename "$ess_overlay")'s tests, RPS74 (b))"
+fi
 if [ -n "$aot" ]; then
   step "[$run] the suite compiled by c2j with the runtime's namespaces, the program built by j2g and bin/build-go ($go_exe)"
   aot_build || exit 1

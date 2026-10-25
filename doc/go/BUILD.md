@@ -280,3 +280,95 @@ Arbace's JVM: about 2-3 s).
 | hello | arm64 | 2,350,285 | yes | yes | 2 of 2, under qemu-aarch64 |
 | multi | amd64 | 2,433,452 | yes | yes | 3 of 3 |
 | multi | arm64 | 2,372,712 | yes | yes | 3 of 3, under qemu-aarch64 |
+
+## A user's program (REAP7, 2026-10-25; REAP7b)
+
+`bin/arbace-go --build-program DIR` builds a user's program into one static executable: its
+Clojure namespaces compiled by c2j, its Java forms and the compiled namespaces translated by j2g
+with the runtime's (the shipped build's compiled namespaces reused), its Go forms compiled
+through a goi table of its own (REAP7b), the
+module built by `arbace.build.go` (this document's build); or, for a program of Go forms alone, that
+build alone. It is the tool `bin/clojure-tests --aot` (REAP3) and `bin/java-check`'s compiled level
+(JC2) build for their corpora, made general (doc/FULL-SUPPORT-SURVEY.md, "As built: REAP7", "As
+built: REAP7b").
+
+```sh
+bin/arbace-go --build-program DIR [--arch ARCH[,ARCH]] [-o OUT]
+bin/arbace-go --build-program --check [NAME...]        # test/programs' samples (make programs-check;
+                                                       # bin/gate runs mixed, --full all of them)
+make program DIR=...
+```
+
+```
+DIR/
+  program.edn     {:main hello.core}         a Clojure program: the namespace whose -main runs
+                  {:main-class hello.Main}   a Java forms program: the class whose static main runs
+                  {}, or no file             a Go program (go/ alone)
+                  :name "hello"              the executable's name (default: DIR's name)
+                  :module, :go               a Go program's go.mod lines (the build's program.edn)
+  src/            Clojure namespaces (.ae, .clj, .cljc) and resources: a directory of the class path
+  java/           Java forms (doc/classes/SPEC.md §9.2): each package's ns file and its classes' files
+  go/             Go forms (SPEC.md §4.1): an Arbace program's namespaces of Go forms (go.P), or the
+                  Go program
+  runs/           the samples' runs (NAME.args, .in, .out, .err, .code: "The test programs" below)
+```
+
+- **The entry.** `:main NS` runs `NS/-main` with the command line (the program's main package puts
+  `-m NS` before it: j2g's `--entry-arg`); `:main-class CLASS` calls `CLASS.main(String[])` directly,
+  as `java CLASS` does (j2g's `--entry`, which makes it a root). Neither starts rlwrap: the command
+  line is the program's own. Without either, `go/` must hold a main package and `src/` and `java/`
+  must be absent: the program is `bin/build-go DIR`'s.
+- **Clojure.** Every namespace of `src/` (a file whose line begins `(ns`) is required on the shipped
+  build's executable (the runtime's namespaces from their compiled loaders; the program's sources
+  recorded as embedded ones, `ARBACE_PATH_FIRST`), `java/`'s package namespaces first, so that the
+  namespaces' imports of its classes resolve; then c2j compiles the units of the program's own
+  sources (`src/`'s, and the `go/` sources they load when goi interprets them), as `--build-java` compiles repr/java's
+  reader. `src/`'s files are embedded at their paths (j2g's `--resources DIR`): at run time `RT.load`
+  finds each namespace embedded and runs its compiled loader, as for the runtime's; a source c2j did
+  not compile (printed `aot: not compiled:`) loads from its embedded text, evaluated. When `src/`
+  holds `.clj` or `.cljc` files, `bin/repr-clojure read -o programs/NAME/src src/` translates the
+  tree first (the vendored Clojure's names, a `.cljc`'s conditionals resolved for `:clj`: repr/clojure's
+  rules, as `bin/clojure-tests` translates the suite), and that tree is compiled and embedded
+  (RPS94 (c)).
+- **Java forms.** `java/` is one of j2g's `--input` trees: its classes are the program's, translated
+  with the runtime's (named `J_<binary name>_J`, J2G-SPEC §4.4). A namespace imports them
+  (`(:import (mixed.text Words))`), as a JVM program imports its jar's classes. Each package's
+  namespace is embedded as a no-op loader, `(ns P)` (j2g's `--java-namespaces DIR`), so that code
+  written at the REPL, which requires the package first, builds unchanged; a namespace of `src/`
+  requiring one is warned of at build time (`aot: warning: ... requires the Java package ...`;
+  RPS93 (c)).
+- **Go forms.** In an Arbace program `go/`'s packages are compiled (RPS92 (b)): `bin/goi table
+  --program-list programs/NAME/gotable-program.edn --program-root DIR --configs linux/ARCH` writes a
+  table of the program's own (`programs/NAME/gotable`: goi's list and `go/`'s packages, each checked
+  by goi's checker as std's are), j2g takes it (`--gotable`), and `bin/build-go --root DIR` prints
+  `go/`'s packages into the module: a package outside the module `arbace` (`mixed/caps`) is a module
+  of its own, its path's first element, printed under `_modules/` and required by a `replace` in
+  `go.mod` (`arbace.build.go`). A namespace requiring `go.mixed.caps` then gets the table's namespace
+  (`RT.load` asks the table first), whose vars call the compiled Go functions: goi interprets
+  nothing of it. A package that does not check for the table is left out of it (`report.edn`'s
+  `:refused-program`, a warning at build time): `go/` is then embedded under `go/` (`--resources
+  DIR/go=go`) and goi interprets that package, as REAP7 built every one (RPS92 (a), the fallback).
+  A Go program (no entry) is built by `arbace.build.go` alone: no Arbace runtime, a few MB.
+- **The base.** The shipped build whose compiled namespaces (`aot/`) the program reuses:
+  `ARBACE_PROGRAM_BASE`, else `target/arbace-go`, else the gate's cache `.tmp/arbace-go-gate/amd64`,
+  the first whose `aot.key` is the checkout's (`aot_key`: the runtime key and Arbace's sources) and
+  whose executable's runtime is the checkout's; else a `--build` for the host's architecture first.
+  Its executable compiles the namespaces and runs j2g and repr/go (`J2G_GO_EXE`, `REPR_GO_EXE`), as
+  the compiled suite's does; j2g waits for `J2G_LOCK` when it is set (`bin/j2g`).
+- **The output.** `target/arbace-go/programs/NAME/ARCH/NAME` (and `-o OUT`), stripped (`-s -w`,
+  `ARBACE_GO_SYMBOLS=1` keeps the symbols) and linked with Arbace's version as `--build`'s; no image
+  of prepared namespaces (the namespaces are compiled). The last line printed names it. It is cached
+  by a key (`programs/NAME/key`: the base's executable and compiled namespaces, goi's table (the
+  program's own with `go/`), DIR's
+  files but `runs/`, the runtime, the build's scripts, Go's version): a build whose key is unchanged
+  takes seconds. The intermediate trees (c2j's, j2g's, the work modules: about 300 MB) are removed
+  after the build (`ARBACE_PROGRAM_KEEP=1` keeps them).
+- **The samples** (`test/programs/`): `hello-clojure` (three namespaces, one a `.cljc` file, a
+  record, a protocol, a transducer, standard input), `hello-java` (a package of two classes, an
+  interface and nested classes, `java.io`'s readers, `TreeMap`), `hello-go` (a module of two
+  packages), `mixed` (a namespace calling a Go forms package, compiled, and a Java forms class, which
+  calls back a Clojure fn; it requires the Java package's namespace and prints `mixed/caps compiled`
+  when the package is in the program's table and goi's interpreter, `arbace.go.repl`, was never
+  loaded).
+  `--check` builds each for the host's architecture and runs its runs as `bin/build-go test` does,
+  an Arbace program's with `ARBACE_LOAD_TIMES=1`: none of its own sources may load from source.

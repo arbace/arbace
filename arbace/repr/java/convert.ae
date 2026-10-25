@@ -97,6 +97,14 @@
      (cond
        (and (identical? in-scope c) (not (str/blank? simple)))
        (if (pos? dims) (symbol simple (str dims)) (symbol simple))
+       ;; a member of a local class out of its scope (Cltype7.Inclass7 after Cltype7's body):
+       ;; Outer$Member, the outer named as it is here
+       (and (m/local-class? c) (not (m/anonymous? c)) (some-> (m/owner c) m/class-sym?)
+            (not (m/anonymous? (m/owner c))))
+       (let [o (class-ref env (m/owner c))]
+         (if (symbol? o)
+           (if (pos? dims) (symbol (str o "$" simple) (str dims)) (symbol (str o "$" simple)))
+           (f/->CRef (m/binary-name c) dims nil (shadow-set env))))
        (and (m/local-class? c) (not (m/anonymous? c))) ;; a local class not in scope by name: should not happen
        (do (note! :warn/local-class-out-of-scope)
            (if (pos? dims) (symbol simple (str dims)) (symbol simple)))
@@ -129,6 +137,17 @@
     (annotate
      (cond
        (#{"BOOLEAN" "BYTE" "SHORT" "INT" "LONG" "CHAR" "FLOAT" "DOUBLE" "VOID"} tg) (m/prim-sym t)
+       ;; more than nine dimensions: the reader's C/N takes 1-9; the JVM's name of the array
+       ;; class as a string tag (Clojure's), which the analysis reads (JCS12 (b))
+       (and (m/array? t)
+            (> (count (take-while m/array? (iterate m/elemtype t))) 9)
+            (not (some #(seq (type-ann-items env % true)) (take-while some? (iterate #(when (m/array? %) (m/elemtype %)) t)))))
+       (let [ts (take-while m/array? (iterate m/elemtype t))
+             e (erasure (m/elemtype (last ts)))]
+         (str (apply str (repeat (count ts) "["))
+              (if (prim? e)
+                ({"BOOLEAN" "Z" "BYTE" "B" "SHORT" "S" "INT" "I" "LONG" "J" "CHAR" "C" "FLOAT" "F" "DOUBLE" "D"} (tag-name e))
+                (str "L" (m/binary-name (m/tsym e)) ";"))))
        (m/array? t)
        (let [ef (type-form* env (m/elemtype t) elem?)]
          (cond
@@ -331,7 +350,7 @@
   "True when evaluating `form` twice is the same as once: a local, this, a literal."
   [form]
   (or (and (symbol? form) (not (namespace form)))
-      (and (instance? CRef form) (= "this" (:member form)))
+      (and (instance? CRef form) (#{"this" "super"} (:member form)))
       (string? form) (number? form) (char? form) (boolean? form) (nil? form) (keyword? form)))
 
 (defn- strip-do [forms]
@@ -422,10 +441,34 @@
                (if (and explicit? (not (same? u target))) (list (widen-op (tag-name target)) v) v)))))
        :else ;; reference target
        (cond
-         (= t :lit-int) (box-call env form (int-type))
-         (prim? t) (if explicit? (box-call env form t) form)
-         (subtype? t target) form
-         :else (cast-form env form target))))))
+         ;; a constant narrowed then boxed (JLS 5.2): Byte b = 1 is Byte.valueOf((byte) 1)
+         (= t :lit-int) (let [u (m/unboxed target)]
+                          (if (and u (#{"BYTE" "SHORT" "CHAR"} (tag-name u)))
+                            (box-call env (list (narrow-op (tag-name u)) form) u)
+                            (box-call env form (int-type))))
+         (prim? t) (let [u (m/unboxed target)]
+                     (cond
+                       ;; a constant of another type narrowed then boxed (JLS 5.2): Byte b = 'a'
+                       (and u (#{"BYTE" "SHORT" "CHAR"} (tag-name u)) (not (same? t u)))
+                       (box-call env (list (narrow-op (tag-name u)) form) u)
+                       ;; a number written as a literal (+43) is a long to the analysis
+                       (or explicit? (and (number? form) (not (#{"LONG" "DOUBLE"} (tag-name t)))))
+                       (box-call env form t)
+                       :else form))
+         ;; a conditional or switch of javac's intersection type (the lub of classes sharing
+         ;; interfaces): the compiler unifies its branches by their class chain, Object; the
+         ;; target is written as a cast
+         (and (not (m/object? target)) (seq? form)
+              (some-> (:jtree x) tr/skip-parens (#(or (tr/is? % :CONDEXPR) (tr/is? % :SWITCH_EXPRESSION))))
+              (some-> (:jtree x) (attr/type-of :types/expr) m/components))
+         (cast-form env form target)
+         ;; (a type variable of an intersection bound, H extends B & A, is erased to B: as A
+         ;; it is cast, as javac's TransTypes does)
+         (subtype? (if (m/tvar? t) (erasure t) t) target) form
+         (and (not (m/tvar? t)) (or (m/tvar? target) (m/components target))
+              (subtype? t (erasure target)))
+         form
+         :else (cast-form env form (if (or (m/tvar? target) (m/components target)) (erasure target) target)))))))
 
 (defn coerce-r
   "Like coerce, returning a result with the target as type."
@@ -724,9 +767,16 @@
     (cond
       poly? (repeat n nil)
       varargs-elem (concat (map erasure (butlast ps)) (repeat (erasure varargs-elem)))
-      :else (map erasure ps))))
+      :else (let [ds (erased-params m)]
+              ;; an instantiated parameter whose erasure is not the declared one's subtype (a
+              ;; method's <H extends A & B> taking a caller's H of another bound order): the
+              ;; declared erasure, which TransTypes casts to
+              (map (fn [p i]
+                     (let [e (erasure p) d (when (< i (count ds)) (nth ds i))]
+                       (if (and d (not (prim? e)) (not (prim? d)) (not (subtype? e d))) d e)))
+                   ps (range))))))
 
-(defn- arg-node [x] (res/arg-node (:t x) (:vals x)))
+(defn- arg-node [x] (res/arg-node (or (:stub-t x) (:t x)) (:vals x)))
 
 (defn call-args
   "Convert argument trees to [forms types nodes] for method `m`: the nodes are the arguments
@@ -1100,7 +1150,10 @@
     (note! (keyword "op" tg))
     (case tg
       "NOT" (r (if (has-patterns? (tr/f t :arg)) (pattern-bool env t) (list (h env 'not) (test-form env x))) result)
-      "POS" (r (coerce env x p) result)
+      ;; unary numeric promotion written out (+b of a byte is an int: JLS 15.15.3)
+      "POS" (if (= :lit-int (:t x))
+              x ;; +1: the literal itself, an int constant
+              (r (coerce env x p (and (prim? (:t x)) (not (same? (:t x) p)))) result))
       "NEG" (if (and (number? (:f x)) false)
               x
               (r (list (h env (case (tag-name p)
@@ -1210,8 +1263,13 @@
     (cond
       (tr/is? t :IDENT)
       (let [x (ident env t)
-            f (:f x)]
-        {:get f :set (fn [v] (list 'set! f v)) :t (:t x) :binds []})
+            f (:f x)
+            ;; a field of a type variable (d = getD() of a D d), as for a select below
+            vt (:t x)
+            jt (erasure (attr/type-of t :types/expr))
+            generic? (and jt vt (m/type? vt) (not (prim? vt)) (not (prim? jt)) (not (subtype? vt jt)))]
+        {:get (if generic? (cast-form env f jt) f) :set (fn [v] (list 'set! f v))
+         :t (if generic? jt vt) :binds [] :set-t (when generic? vt)})
       (tr/is? t :SELECT)
       (let [fa t
             sym (attr/sym fa :select)
@@ -1227,8 +1285,16 @@
                 [qf binds] (if (and want-pure? (not (pure? qf)))
                              (let [s (gensym! env "o")] [s [s qf]])
                              [qf []])
-                acc (list (symbol (str ".-" nm)) qf)]
-            {:get acc :set (fn [v] (list 'set! acc v)) :t (var-type sym) :binds binds})))
+                acc (list (symbol (str ".-" nm)) qf)
+                ;; a field of a type variable read as its instantiation (val.n++ of a T n as
+                ;; an Integer): javac's checkcast written out
+                vt (var-type sym)
+                jt (erasure (attr/type-of t :types/expr))
+                generic? (and jt (not (prim? vt)) (not (prim? jt)) (not (subtype? vt jt)))]
+            {:get (if generic? (cast-form env acc jt) acc) :set (fn [v] (list 'set! acc v))
+             :t (if generic? jt vt) :binds binds
+             ;; the type the compiler gives the set!'s value: the field's erased one
+             :set-t (when generic? vt)})))
       (tr/is? t :INDEXED)
       (let [aa t
             af (coerce env (ex env (tr/f aa :indexed)) (erasure (attr/type-of (tr/f aa :indexed) :types/expr)))
@@ -1246,7 +1312,10 @@
   (let [p (place env (tr/f t :lhs) false)
         v (coerce env (ex env (tr/f t :rhs)) (erasure (attr/type-of (tr/f t :lhs) :types/expr)))]
     (note! :form/set!)
-    (r (with-binds (:binds p) ((:set p) v)) (erasure (attr/type-of (tr/f t :lhs) :types/expr)))))
+    (r (with-binds (:binds p) ((:set p) v))
+       ;; the value of an assignment to a field of a generic type (y = d = getD(), d a D) is
+       ;; the field's erased type to the compiler: javac's type is then written as a cast
+       (or (:set-t p) (erasure (attr/type-of (tr/f t :lhs) :types/expr))))))
 
 (defn- narrow-to
   "Form `f` of type `from` converted to the variable type `to` as Java's compound assignment
@@ -1291,7 +1360,7 @@
               (list (h env 'java-str) (:get p) (concat-operand env (tr/f t :rhs) rhs))
               (narrow-to env (binary-op env base [pa pb] (erasure result) cur rhs) (erasure result) lt))]
     (note! (keyword "op" tg))
-    (r (with-binds (:binds p) ((:set p) val)) lt)))
+    (r (with-binds (:binds p) ((:set p) val)) (or (:set-t p) lt))))
 
 (defn- inc-dec [env t value?]
   (let [tg (tr/tag-name t)
@@ -1320,7 +1389,7 @@
          (let [old (gensym! env "old")]
            (list 'let (into (vec (:binds p)) [old g]) setf old))
          (with-binds (:binds p) setf)))
-       lt)))
+       (if (and value? (not post?) (:set-t p)) (:set-t p) lt))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Casts, instanceof, conditionals
@@ -1376,7 +1445,12 @@
       ;; javac emits no checkcast for an upcast, except to an array type (Gen.visitTypeCast
       ;; asks asSuper, which arrays answer only for Object and the array interfaces)
       (and (subtype? from te) (not (and (m/array? te) (not (same? from te)))))
-      (if (same? from te) x (r (hint env (:f x) te) te))
+      (if (same? from te)
+        x
+        (let [f (hint env (:f x) te)]
+          ;; a literal takes no hint: its own type stays the compiler's ((Object) "s" chooses
+          ;; v(Object) by a pin, call-args)
+          (if (identical? f (:f x)) (assoc (r f te) :stub-t from) (r f te))))
       (type-annotated? target) (r (list (h env 'cast) (code-type-form env target) (:f x)) te)
       :else (r (cast-form env (:f x) te) te))))
 
@@ -1394,9 +1468,12 @@
       (note! :form/binding-pattern)
       (swap! penv (fn [e] (-> e (assoc-in [:locals sym] s) (update :names conj nm))))
       (let [s (if (mutable? sym) (m+ s :mutable) s)]
-        (if implicit?
-          s
-          (tag s (type-form env (m/stype sym))))))
+        (cond
+          (not implicit?) (tag s (type-form env (m/stype sym)))
+          ;; var of a record component of a type variable (Box<String>(var s)): the
+          ;; compiler sees the component's erasure, javac's inferred type is written
+          (not (m/object? (erasure (m/stype sym)))) (tag s (erased-form env (erasure (m/stype sym))))
+          :else s)))
     (tr/is? p :RECORDPATTERN)
     (let [rp p]
       (note! :form/record-pattern)
@@ -1891,16 +1968,39 @@
       (conv env e)
       (cond-form env c (fn [env'] (conv env' e)) (fn [env'] (cond-chain-form env' more decl))))))
 
-(declare local-class-binding foldable-if? cond-form dup-sides)
+(declare local-class-binding foldable-if? cond-form dup-sides match-exception-default pattern-instanceof?)
+
+(declare stmts-1)
 
 (defn stmts
-  "Convert the statement sequence `ss` in `ctx` to a vector of forms."
+  "Convert the statement sequence `ss` in `ctx` to a vector of forms. Iterative over the
+  statements that convert one by one and over a run of local declarations, so that a long
+  method (UncommonTrapStackBang's ten thousand locals) does not exhaust the stack (JCS24 (a))."
   [env ctx ss]
-  (let [ss (vec (remove #(tr/is? % :SKIP) ss))]
+  (loop [acc [] ss (vec (remove #(tr/is? % :SKIP) ss))]
     (if (empty? ss)
-      (vec (:fall ctx))
-      (let [s (first ss)
-            more (subvec ss 1)]
+      (into acc (:fall ctx))
+      (let [r (stmts-1 env ctx ss)]
+        (if (map? r)
+          (recur (into acc (:prefix r)) (:more r))
+          (into acc r))))))
+
+(defn- plain-vardef?
+  "Is statement s a local declaration stmts-1 converts as one binding of a let (not
+  predeclared, not assigned by the if after it, not assigning itself in its initializer)?"
+  [s nxt]
+  (and (tr/is? s :VARDEF)
+       (let [sym (attr/sym s :local-decl)]
+         (and (not (contains? *predeclared* sym))
+              (not (and (nil? (tr/f s :init)) nxt (assigns-only? nxt sym)))
+              (not (and (tr/f s :init) (refs-sym? (tr/f s :init) sym)))))))
+
+(defn- stmts-1
+  "One step of stmts over the nonempty `ss`: the whole sequence's forms (a vector), or {:prefix
+  v :more ss'}, the first statement's forms and the statements after it."
+  [env ctx ss]
+  (let [s (first ss)
+        more (subvec ss 1)]
         (attr/framed (tr/tag s)
         (cond
           ;; a local declared in one switch case and used in another: declared before the
@@ -1913,6 +2013,21 @@
                     [(list 'set! x (coerce env (ex env (tr/f d :init)) (erasure (m/stype sym))))]
                     [])
                   (stmts env ctx more)))
+          ;; a run of local declarations: one let over the rest of the block, its bindings in
+          ;; order (as the nested lets below merge), without recursion per declaration
+          (and (plain-vardef? s (first more)) (plain-vardef? (first more) (second more))
+               (= 'let (h env 'let)))
+          (loop [env env bv [] ss ss]
+            (let [d (first ss)]
+              (if (and d (plain-vardef? d (second ss)) (= 'let (h env 'let)))
+                (let [[sf init-f env'] (attr/framed (tr/tag d)
+                                         (binding-for env d (when (tr/f d :init) (ex env (tr/f d :init)))))]
+                  (recur env' (conj bv sf init-f) (subvec ss 1)))
+                (let [body (stmts env ctx ss)]
+                  (if (and (= 1 (count body)) (seq? (first body)) (= 'let (first (first body))))
+                    (let [[_ bv2 & bbody] (first body)]
+                      [(apply list 'let (into bv bv2) bbody)])
+                    [(apply list 'let bv (if (empty? body) [nil] body))])))))
           ;; local variables: a let over the rest of the block
           (tr/is? s :VARDEF)
           (let [d s
@@ -1931,8 +2046,14 @@
                                              (when-not (m/object? decl) [[:tag tg]])))
                          init]
                         (or (seq (stmts env' ctx (subvec more 1))) [nil]))])
-              (let [[sf init-f env'] (binding-for env d (when (tr/f d :init) (ex env (tr/f d :init))))
-                    body (stmts env' ctx more)]
+              (let [self-ref? (and (tr/f d :init) (refs-sym? (tr/f d :init) sym))
+                    ;; an initializer that assigns the local itself (int r = switch (i) { case
+                    ;; ... -> { r = 1; yield r; } }, JLS 6.3: in scope in its own initializer):
+                    ;; declared with its default value, then assigned
+                    [sf init-f env'] (binding-for env d (when (and (tr/f d :init) (not self-ref?)) (ex env (tr/f d :init))))
+                    body (cond->> (stmts env' ctx more)
+                           self-ref? (into [(list 'set! (get-in env' [:locals sym])
+                                                  (coerce env' (ex env' (tr/f d :init)) (erasure (m/stype sym))))]))]
                 ;; merge directly nested lets
                 (if (and (= 1 (count body)) (seq? (first body)) (= 'let (first (first body))))
                   (let [[_ bv & bbody] (first body)]
@@ -1953,6 +2074,29 @@
                 [(apply list (h env 'letclass) (into [bind] bv) bbody)])
               :else
               [(apply list (h env 'letclass) [bind] (if (empty? body) [nil] body))]))
+          ;; a loop whose condition's pattern variables when false are in scope after it
+          ;; (while (!(o instanceof String s)) ...; s.length(), JLS 6.3.2.3): the rest of the
+          ;; block in their scope, the instanceof tested again (its expression pure)
+          (let [lp (loop [x s] (if (tr/is? x :LABELLED) (recur (tr/f x :body)) x))]
+            (and (seq more) (#{:WHILELOOP :DOLOOP :FORLOOP} (tr/tag lp)) (tr/f lp :cond)
+                 (let [{:keys [f]} (pattern-binds (tr/f lp :cond))]
+                   (some (fn [v] (some #(refs-sym? % v) more)) f))))
+          (let [lp (loop [x s] (if (tr/is? x :LABELLED) (recur (tr/f x :body)) x))
+                {:keys [f]} (pattern-binds (tr/f lp :cond))
+                tests (->> (tree-seq tr/tree? tree-children (tr/f lp :cond))
+                           (filter pattern-instanceof?)
+                           (filter (fn [x] (some (fn [v] (and (contains? f v) (some #(refs-sym? % v) more)))
+                                                 (pattern-vars (tr/f x :pattern))))))
+                es (map #(:f (ex env (tr/f % :expr))) tests)]
+            (if (every? pure? es)
+              (do (note! :flow/loop-pattern-scope)
+                  (into (stmt env ctx s)
+                        [(reduce (fn [form [x e]]
+                                   (list (h env 'if-instance) [(pattern-form env (atom env) (tr/f x :pattern)) e] form
+                                         match-exception-default))
+                                 (do-form (stmts env ctx more))
+                                 (reverse (map vector tests es)))]))
+              (into (stmt env ctx s) (stmts env ctx more))))
           (empty? more) (stmt env ctx s)
           ;; if whose pattern variables are in scope in the rest of the block
           (and (tr/is? s :IF) (has-patterns? (tr/f s :cond))
@@ -1984,7 +2128,7 @@
               [(cond-form env (tr/f i :cond) (fn [e] (do-form (stmts e ctx (into [a] more))))
                           (fn [e] (do-form (stmts e ctx [b]))))]))
           :else
-          (into (stmt env ctx0 s) (stmts env ctx more))))))))
+          {:prefix (stmt env ctx0 s) :more more}))))
 
 (defn- ends-in-jump?
   "True when statement `t` ends (on every path that ends) in a jump that `ctx` makes
@@ -2370,12 +2514,36 @@
                 [g])))
           groups))
 
+(declare match-exception-default)
+
+(defn- guard-bindings
+  "Body form `f` of arm `g`, in the scope of the pattern variables its guard introduces when true
+  (case String s when o instanceof Integer i -> ... i ..., JLS 6.3.4): each instanceof of the
+  guard whose variable the body reads tested again around the body (its expression a local or
+  this: no second effect), as SPEC §5.8's if-instance scopes them."
+  [env g f]
+  (let [guard (:guard g)
+        body (concat (when (:rule g) [(:rule g)]) (:stats g))
+        tests (when guard
+                (->> (tree-seq tr/tree? tree-children guard)
+                     (filter pattern-instanceof?)
+                     (filter (fn [x] (some (fn [v] (some #(refs-sym? % v) body))
+                                           (pattern-vars (tr/f x :pattern)))))))]
+    (reduce (fn [f x]
+              (let [e (:f (ex env (tr/f x :expr)))]
+                (if (pure? e)
+                  (do (note! :flow/guard-binding)
+                      (list (h env 'if-instance) [(pattern-form env (atom env) (tr/f x :pattern)) e] f
+                            match-exception-default))
+                  f)))
+            f (reverse tests))))
+
 (defn- switch-arms
   "Convert the arms; `body-fn` converts one arm's body given its env."
   [env sel-type groups body-fn]
   (let [arms (for [g (split-pattern-groups groups)]
                (let [[lbl env'] (arm-label env sel-type g)]
-                 [lbl (body-fn env' g)]))
+                 [lbl (guard-bindings env' g (body-fn env' g))]))
         defaults (filter #(or (= :default (first %)) (and (seq? (first %)) (= :default (second (first %))))) arms)
         others (remove (set defaults) arms)]
     [others (first defaults)]))
@@ -2571,6 +2739,13 @@
         kind (str (attr/ref-kind t))
         m (attr/sym t :method-ref)
         qt (erasure (attr/type-of (tr/f t :expr) :types/qualifier))
+        ;; an intersection qualifier ((A & AB) o)::b) erases to its first bound, which need not
+        ;; have the method: its declaring class is written (the receiver cast to it)
+        qt (if (and m (#{"BOUND" "UNBOUND"} (str (attr/ref-kind t))) (not (m/array? qt))
+                    (m/class-sym? (m/tsym qt)) (m/owner m)
+                    (not (subtype? qt (erasure (m/stype (m/owner m))))))
+             (erasure (m/stype (m/owner m)))
+             qt)
         fi (fi-form env target)]
     (note! :form/method-ref)
     (if (= kind "ARRAY_CTOR")
@@ -3013,6 +3188,18 @@
 (defn- package-decl "JCCompilationUnit.getPackage." [u]
   (let [d (first (tr/f u :defs))] (when (tr/is? d :PACKAGEDEF) d)))
 
+(defn- defclasses-form
+  "Top-level forms with two or more defclass forms gathered into one (defclasses ...) where the
+  first stood."
+  [forms]
+  (let [cls? #(and (seq? %) (= 'defclass (first %)))]
+    (if (< (count (filter cls? forms)) 2)
+      forms
+      (let [i (first (keep-indexed (fn [i f] (when (cls? f) i)) forms))]
+        (vec (concat (take i (remove cls? forms))
+                     [(apply list 'defclasses (filter cls? forms))]
+                     (drop i (remove cls? forms))))))))
+
 (defn convert-unit
   "Convert compilation unit `cu`, javac's attributed one; with (:tree opts) the native parser's tree
   of the same text instead, its attribution javac's by position ((:index opts), attr/index). Returns
@@ -3062,7 +3249,11 @@
                                                        :at (mapv #(first (some (fn [it] (when (and (vector? it) (= [:java :at] (subvec it 0 2))) (nth it 2)))
                                                                                (f/items %)))
                                                                  forms)}])
-                      forms)]
+                      forms)
+              ;; a file's top-level classes are one compilation, as javac compiles them: two
+              ;; or more written as one defclasses (JCS30 (b), doc/classes/JAVA-CONFORMANCE-SURVEY.md,
+              ;; "As built: JC5")
+              forms (defclasses-form forms)]
           (cond-> {:package pkg-name :file file :forms forms
                    :supers (set (for [d (type-decls u)
                                       :when (tr/is? d :CLASSDEF)

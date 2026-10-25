@@ -30,6 +30,16 @@
                        calling goroutine the thread main (jrt.RunMain) and calls
                        arbace.lang.Main.main(args) (RT's initialization first); build it with
                        bin/build-go --line-file DIR/prog
+    --entry CLASS      with --program, the main package's main calls CLASS's static
+                       main(String[]) (a root) in place of arbace.lang.Main's: a Java forms
+                       program (bin/arbace-go --build-program, REAP7); no rlwrap
+    --entry-arg ARG    with --program, ARG put before the command line's arguments
+                       (repeated, in order): -m NS for a namespace's -main; no rlwrap
+    --resources DIR[=PREFIX]
+                       with --program, every file under DIR embedded too, at its path relative
+                       to DIR (after PREFIX/ when given), as a directory of the class path: a
+                       user's namespaces (.ae, .clj, .cljc) join the embedded sources, other
+                       files the resource data (bin/arbace-go --build-program, REAP7)
     --edge FILE        the classes outside the forms, as data (default jdk/edge.edn:
                        doc/STANDALONE-NOTES.md, S2): j2g loads no class, reflects on none and
                        runs no ASM
@@ -93,6 +103,13 @@
       ;; embed/sources: javac's tool embeds repr/java's reader, compiled by c2j,
       ;; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN4")
       "--embed" (recur (rest more) (update opts :embed (fnil conj []) (first more)))
+      ;; --program: a user's program (bin/arbace-go --build-program, REAP7): its entry, the
+      ;; arguments before the command line's, its source and resource directories
+      "--entry" (recur (rest more) (-> opts (assoc :entry (first more)) (update :roots conj (str (first more) "#main"))))
+      "--entry-arg" (recur (rest more) (update opts :entry-args (fnil conj []) (first more)))
+      "--resources" (recur (rest more) (update opts :resources (fnil conj []) (first more)))
+      ;; --program: a Java forms tree's package namespaces embedded as no-op loaders (REAP7b, RPS93)
+      "--java-namespaces" (recur (rest more) (update opts :java-namespaces (fnil conj []) (first more)))
       "--record-edge" (recur (rest more) (assoc opts :record-edge (first more)))
       "--jvm-reflection" (recur more (assoc opts :jvm-reflection true))
       (throw (ex-info (str "j2g: unknown option " a) {})))))
@@ -304,6 +321,33 @@
    '(load "arbace/rlwrap_linux")
    '(load "arbace/rlwrap_other")])
 
+(defn- program-entry-main
+  "A user's program's main (program-main-forms with an entry): Main's start but rlwrap, the
+  command line after entry-args, entry's main (default arbace.lang.Main's)."
+  [entry entry-args]
+  (let [internal (str/replace (or entry "arbace.lang.Main") "." "/")
+        pkg (nm/pkg-of internal)
+        _ (when-not (= :lang pkg)
+            (throw (ex-info (str "j2g: --entry " entry ": not a class of the program's Java forms") {})))
+        call (symbol "lang" (nm/static-method-name (nm/go-class-name internal) "main" "([Ljava/lang/String;)V"))
+        n (count entry-args)]
+    (list 'go/func 'main []
+          '(when (!= arbaceVersion "")
+             (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion)))
+          '(let [(values sub err) (fs/Sub resources "res")]
+             (when (== err nil)
+               (jrt/SetHost (jrt/ProgramHost sub))))
+          '(setupImage imageData)
+          (concat
+            (list 'let ['args (list 'jrt/NewRefArray 'jrt/String_class (list 'conv 'int32 (list '+ n '(- (len os/Args) 1))))])
+            (for [[i a] (map-indexed vector entry-args)]
+              (list 'aset '(.-A args) i (list 'jrt/Str a)))
+            [(list 'range '[i a (subslice os/Args 1)]
+                   (list 'aset '(.-A args) (list '+ 'i n) '(jrt/Str a)))
+             (list 'let ['status (list 'jrt/RunMain (list 'fn [] (list call 'args)))]
+                   '(finishImage)
+                   '(os/Exit status))]))))
+
 (defn- program-main-forms
   "main: first rlwrap for an interactive REPL (execRlwrap, which replaces the process when it
   applies), then the system property arbace.version from arbaceVersion (when the link set it),
@@ -311,8 +355,11 @@
   doc/go/BOX-NOTES.md),
   then the command line as a String[], then arbace.lang.Main.main inside jrt.RunMain
   (the thread main, uncaught exceptions printed as the JVM prints them, status 1), its status
-  the process's. With gotable?, the main package imports goi's table (its registration)."
-  [gotable?]
+  the process's. With gotable?, the main package imports goi's table (its registration).
+  With entry (a class's binary name) its static main(String[]) is called in place of Main's,
+  with entry-args (strings) those arguments put before the command line's: a user's program
+  (bin/arbace-go --build-program, REAP7), whose command line is its own (no rlwrap)."
+  [gotable? & [entry entry-args]]
   [(list 'go/file "main.go" :imports (vec (concat '[[embed "embed"] [fs "io/fs"] [os "os"] [jrt "arbace/jrt"] [lang "arbace/lang"]]
                                                  (when gotable? '[[_ "arbace/gotable"]])
                                                  ;; the compiled namespaces' packages, for their classes' registration (S6)
@@ -327,20 +374,22 @@
    '(go/var ^{:tag string
               :doc "arbaceVersion is Arbace's version, the map *arbace-version* reads from the system property arbace.version: empty in j2g's output, set by bin/arbace-go's link (go build -ldflags -X main.arbaceVersion=...).\n"}
       arbaceVersion)
-   '(go/func main []
-      (execRlwrap)
-      (when (!= arbaceVersion "")
-        (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion)))
-      (let [(values sub err) (fs/Sub resources "res")]
-        (when (== err nil)
-          (jrt/SetHost (jrt/ProgramHost sub))))
-      (setupImage imageData)
-      (let [args (jrt/NewRefArray jrt/String_class (conv int32 (- (len os/Args) 1)))]
-        (range [i a (subslice os/Args 1)]
-          (aset (.-A args) i (jrt/Str a)))
-        (let [status (jrt/RunMain (fn [] (lang/Main_Main_String1__V args)))]
-          (finishImage)
-          (os/Exit status))))])
+   (if (or entry (seq entry-args))
+     (program-entry-main entry entry-args)
+     '(go/func main []
+        (execRlwrap)
+        (when (!= arbaceVersion "")
+          (jrt/System_SetProperty_String_String__String (jrt/Str "arbace.version") (jrt/Str arbaceVersion)))
+        (let [(values sub err) (fs/Sub resources "res")]
+          (when (== err nil)
+            (jrt/SetHost (jrt/ProgramHost sub))))
+        (setupImage imageData)
+        (let [args (jrt/NewRefArray jrt/String_class (conv int32 (- (len os/Args) 1)))]
+          (range [i a (subslice os/Args 1)]
+            (aset (.-A args) i (jrt/Str a)))
+          (let [status (jrt/RunMain (fn [] (lang/Main_Main_String1__V args)))]
+            (finishImage)
+            (os/Exit status)))))])
 
 (defn- source-top
   "The name a Go file is named after (§4.3): in arbace/lang the Java forms file of top-level
@@ -492,10 +541,15 @@
         ;; the converted JDK: --jdk, else $JRT_CONV, else the committed forms (jdk/README.md)
         jdk (or (:jdk opts) (System/getenv "JRT_CONV") "jdk/forms")
         opts (if (:program opts)
-               (let [srcs (embed/sources root-dir (:embed opts))]
+               (let [srcs (embed/sources root-dir (:embed opts))
+                     ;; the JDK's resource data, next to the converted JDK (jdk/data)
+                     data (embed/data (str (.getParent (io/file jdk)) "/data"))
+                     ;; a user's program's directories (--resources, REAP7)
+                     [usrcs udata] (embed/user-resources (:resources opts) (into (set (keys srcs)) (keys data)))
+                     srcs (merge srcs usrcs)
+                     srcs (merge srcs (embed/package-loaders (:java-namespaces opts) (into (set (keys srcs)) (keys data))))]
                  (assoc opts :embedded srcs :cut-candidates (sort (embed/cut-candidates srcs))
-                        ;; the JDK's resource data, next to the converted JDK (jdk/data)
-                        :embedded-data (embed/data (str (.getParent (io/file jdk)) "/data"))))
+                        :embedded-data (merge data udata)))
                opts)
         ;; the second round's inputs: the compiled namespaces' trees (their packages.edn)
         late? (fn [i] (or (= i (:await opts)) (.isFile (io/file i "packages.edn"))))
@@ -950,7 +1004,7 @@
                       "The main package's embedded sources (j2g --program): data, not Go forms.\n")
               (write! (str prog-dir "/go/arbace/cmd/arbace/main.ae")
                       (str ";; Generated by j2g --program (J2G-SPEC §10.6).\n(in-ns 'go.arbace.cmd.arbace)\n\n"
-                           (str/join "\n\n" (map out/form-text (program-main-forms (some? (:gotable opts))))) "\n"))
+                           (str/join "\n\n" (map out/form-text (program-main-forms (some? (:gotable opts)) (:entry opts) (:entry-args opts)))) "\n"))
               ;; the image of prepared namespaces (EXEC-NOTES.md): its encoding (hand-written
               ;; forms of the main package), the program's types, and an empty image, which
               ;; bin/arbace-go --build replaces

@@ -391,3 +391,25 @@ All as recommended:
 recorded text, edited ones anew (JF1); the declaration the unit printed anew (JF2); source choices
 held as text only (JF3); the text level in `bin/gate --full` (JF4); a 32-bit `String.hashCode` of
 a canonical text for edits (JF5).
+
+## The conformance corpus's syntax (REAP5b, 2026-10-25)
+
+Java's print level (`bin/java-check --levels print`, doc/FULL-SUPPORT-SURVEY.md, "As built: REAP5")
+found shapes the round trip's corpora did not hold; the printer since writes (doc/FULL-SUPPORT-SURVEY.md,
+"As built: REAP5b", RPS60-RPS63): an indexed array creation in parentheses; a switch expression as a
+unary expression (parenthesized as a receiver, its lambda arms cast when standalone); a lambda or method
+reference cast to its interface, with the type arguments its tags give, as a receiver, as an argument
+for a parameter declared of another type, as an `Object[]` element and as a for-each's `Iterable`; an
+assignment as a conditional's false branch in parentheses; `obj.m()` for `(do obj (C/m))` only for a
+reference `obj`; `int[]::clone` and `T::get`; local classes by simple name, their member classes as
+`Local.Member`, an anonymous class's type as `var` and its `this` unqualified; `o.new Inner() {...}`;
+an inner class of a generic class's literal qualified; a package-private class's member class through
+the public subclass the file imports; supplementary identifier characters as Unicode escapes; the casts
+assignment contexts need between primitives and boxes (JLS 5.2); a pattern binding rebound in its name's
+scope renamed (`i_1`); a loop whose pattern binding escapes it as that loop, in a block with the
+statements after it when a later one binds the name again; a labeled switch giving the method's value
+as `return switch`; a captured local assigned in a `try` whose `catch`es rethrow without initializer; a
+declaration's TYPE_USE annotation the converter also keeps on a qualified type's outer class once; `new
+C<>()` for a parameterized target; and a converted file holding only its `in-ns` (a Java file without
+declarations) as its package line. Their cases are the samples' `PrintSyntax.java` (the samples corpus
+since: 15 Java files, 18 converted files).

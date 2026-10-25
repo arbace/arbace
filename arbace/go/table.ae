@@ -25,8 +25,12 @@
   Usage (bin/goi table): arbace -m arbace.go.table --list FILE --out DIR
                          [--config GOOS/GOARCH=ROOT[,OVERLAY]]... [--no-invokers]
                          [--min-sharing N] [--no-docs]
+                         [--program-list FILE --program-root DIR]
   ROOT holds the configuration's forms as SPEC.md §4.1 lays them out (go/strings.ae ...);
-  OVERLAY, files laid over them (tamago/goroot/arch/ARCH)."
+  OVERLAY, files laid over them (tamago/goroot/arch/ARCH). A user's program (bin/arbace-go
+  --build-program, REAP7b): FILE, {:packages [path ...]}, its Go packages listed after the list's,
+  their forms DIR/go/... (a path the configuration's root does not hold); one that does not check
+  is left out (report.edn's :refused-program), and the program interprets it."
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
             [arbace.repr.go.print :as gp]
@@ -1078,6 +1082,11 @@ of function types, elements of composites), each with its data."
   repr/go's (GP7, under arbace/repr/)."
   {:dir "."})
 
+(def ^:private user-root
+  "A user's program's root of Go forms (--program-root DIR: DIR/go/..., bin/arbace-go
+  --build-program, REAP7b, RPS92 (b)), whose packages --program-list lists, or nil."
+  (atom nil))
+
 (defn program-path?
   "Whether import path p is one of the program's packages of Go forms in go/ that the table may
   list or they import: arbace (§7.3) and repr/go's native reader's (arbace/repr/..., GP7)."
@@ -1086,11 +1095,12 @@ of function types, elements of composites), each with its data."
 
 (defn- source-of
   "The source of listed package path (or of one it imports): the root's, the program's own go/'s
-  (program-path?)."
+  (program-path?), else a user's program's (--program-root) when the root has none."
   [root path config]
   (if (program-path? path)
     (load/package-source program-root path config)
-    (load/package-source root path config)))
+    (or (load/package-source root path config)
+        (when-let [u @user-root] (load/package-source u path config)))))
 
 (defn load-env
   "The listed packages (and the list's :resolve ones) in one configuration, checked by goi's
@@ -1101,8 +1111,27 @@ of function types, elements of composites), each with its data."
                       (if (= "amd64" (:goarch cfg)) {:goamd64 "v1"} {:goarm64 "v8.0"}))
         session (ck/session (fn [path _] (source-of root path config)))
         paths (vec (distinct (concat (:packages list-cfg) (:resolve list-cfg))))
-        ;; the packages checked in parallel, each its imports first (the session's cache)
-        checked (with-checker (doall (pmap #(ck/ensure-package session % nil []) paths)))
+        ;; the packages checked in parallel, each its imports first (the session's cache); a
+        ;; user's program's package that does not check is left out, with why (:refused-program)
+        user (set (:program-packages list-cfg))
+        refused (atom (sorted-map))
+        checked (with-checker (doall (pmap (fn [p]
+                                             (if (user p)
+                                               (try (let [cp (ck/ensure-package session p nil [])
+                                                          errs (when cp (:errors (:result @cp)))]
+                                                      (cond
+                                                        (nil? cp) (do (swap! refused assoc p "no files in this configuration") nil)
+                                                        ;; the checker's errors are its result's, not thrown
+                                                        (seq errs) (let [{:keys [file line msg]} (first errs)]
+                                                                     (swap! refused assoc p (str file ":" line ": " msg
+                                                                                                 (when (next errs) (str " (and " (count (next errs)) " more)"))))
+                                                                     nil)
+                                                        :else cp))
+                                                    (catch Throwable ex
+                                                      (swap! refused assoc p (or (.getMessage ex) (str ex)))
+                                                      nil))
+                                               (ck/ensure-package session p nil [])))
+                                           paths)))
         pkgs (into {} (for [[p cp] (map vector paths checked)
                             :when cp
                             :let [pk (source-package (source-of root p config))]]
@@ -1111,7 +1140,8 @@ of function types, elements of composites), each with its data."
         ;; checks them when a program imports them)
         cls (classify list-cfg config root)
         pkgs (into pkgs (for [p (:interpret cls)] [p (source-package (get (:sources cls) p))]))]
-    {:cfg cfg :session session :pkgs pkgs :interpret (:interpret cls) :refused (:refused cls)}))
+    {:cfg cfg :session session :pkgs pkgs :interpret (:interpret cls) :refused (:refused cls)
+     :refused-program @refused}))
 
 (defn config-table
   "The members of one configuration's listed packages: {:members {path members}}."
@@ -1216,15 +1246,27 @@ of function types, elements of composites), each with its data."
 
 (defn run
   "Generates the table and the digests (the namespace's doc string)."
-  [{:keys [list-file out configs no-invokers min-sharing no-docs]}]
-  (with-checker (run* list-file out configs no-invokers min-sharing no-docs)))
+  [{:keys [list-file out configs no-invokers min-sharing no-docs program-list program-root]}]
+  (reset! user-root (when program-root {:dir program-root}))
+  (with-checker (run* list-file out configs no-invokers min-sharing no-docs program-list)))
 
 (defn- run*
-  [list-file out configs no-invokers min-sharing no-docs]
+  [list-file out configs no-invokers min-sharing no-docs program-list]
   (let [t0 (System/currentTimeMillis)
         list-cfg (read-string (slurp list-file))
+        ;; a user's program's packages (--program-list FILE, {:packages [path ...]}: bin/arbace-go
+        ;; --build-program, REAP7b): listed after the list's, each that checks in every
+        ;; configuration (the others left out: report.edn's :refused-program)
+        user-paths (when program-list (vec (:packages (read-string (slurp program-list)))))
+        list-cfg (cond-> list-cfg
+                   (seq user-paths) (-> (update :packages #(vec (distinct (concat % user-paths))))
+                                        (assoc :program-packages user-paths)))
         all-cfgs (mapv :cfg configs)
         envs (vec (for [{:keys [cfg root]} configs] (load-env list-cfg cfg root)))
+        refused-program (apply merge (sorted-map) (map :refused-program envs))
+        _ (doseq [[p why] refused-program]
+            (println (str "goi table: the program's package " p " is not listed (interpreted): " why)))
+        list-cfg (update list-cfg :packages #(vec (remove (set (keys refused-program)) %)))
         tables (mapv #(config-table list-cfg %) envs)
         ;; the signatures of every configuration: key -> {:cfgs #{} :method? :ftype :env}
         sig-entries (volatile! (sorted-map))
@@ -1473,7 +1515,10 @@ of function types, elements of composites), each with its data."
                                                                                  :when (ip path)]
                                                                              path)))]]
                                            [(cfg-name (:cfg env)) (vec named)]))
-                  :seconds (quot (- (System/currentTimeMillis) t0) 1000)}]
+                  :seconds (quot (- (System/currentTimeMillis) t0) 1000)}
+          report (cond-> report
+                   (seq user-paths) (assoc :program (vec (remove refused-program user-paths))
+                                           :refused-program refused-program))]
       (write! (io/file out "report.edn") (str (form-text (dissoc report :seconds)) "\n"))
       (println (str "goi table: " (:packages report) " packages, " (:signatures report) " signatures, "
                     (:invokers report) " invokers, " (:adapters report) " adapters, " (count (:stubs report)) " stub families ("
@@ -1495,6 +1540,9 @@ of function types, elements of composites), each with its data."
       "--no-invokers" (recur more (assoc opts :no-invokers true))
       "--no-docs" (recur more (assoc opts :no-docs true))
       "--min-sharing" (recur (rest more) (assoc opts :min-sharing (Long/parseLong (first more))))
+      ;; a user's program's packages and their root (REAP7b, RPS92 (b))
+      "--program-list" (recur (rest more) (assoc opts :program-list (first more)))
+      "--program-root" (recur (rest more) (assoc opts :program-root (first more)))
       (throw (ex-info (str "goi table: unknown option " a) {})))))
 
 (defn -main [& args]

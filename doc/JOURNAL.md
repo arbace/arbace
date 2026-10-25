@@ -1923,3 +1923,124 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   the shipped program's code unchanged. Merged cleanly; the essential gate on `7b6ed2f1` passed (16m11s).
 - Decided (the user): JFS102 (b), JFS103 (b), JFS104 (b), JFS105 (a), JFS106 (b), JFS107 (b), JFS108 (b),
   JFS109 (a); JN9d started now, beside the REAP work.
+
+## 2026-10-25: the harness follow-ups merged, JCS80-JCS84 decided (the user)
+
+- The harness follow-ups (branch `harness-followups` from `6f3a93ad`, merged): JCS70 (a) (`mask_dirs`: the
+  test's working directory, its temp directory, the check's scratch and the checkout masked in stdout on
+  both sides before the digest; the JDK's reference re-recorded for the 22 tests whose stdout names them, by
+  splicing their lines from a full `--record-ref` run into the committed file, the other 4,158 lines byte for
+  byte, as `--only` would write), JCS71 (a) (a would-be regression run again once; a flip `flaky`, not a
+  regression; class `:flaky` naming Test8267042 and List/LockStep at the compiled level), RPS74 (b)
+  (`test/clojure/essential-aot-skipped.edn`: `seq-and-transducer` skipped in the compiled suite's subset only;
+  the cached step 1m56s to 36 s), RPS77 (b) (the subset's work and j2g trees removed after its build, 366 MB
+  less). Java interp 1,464, compiled 1,638 (CheckTempDir and UserDirChangedTest pass). No shipped code. The
+  essential gate passed on the branch (4m41s, then 2m50s cached) and on the merge. Decided (the user):
+  JCS80 (a), JCS81 (b), JCS82 (a), JCS83 (b), JCS84 (a). The agent's slips: one `2>/dev/null` in a wait
+  loop; main's gate cache copied into the worktree.
+
+## 2026-10-25: REAP7 merged, RPS90-RPS99 decided; JC5's merge sent back; REAP7b started (the user)
+
+- REAP7 (branch `reap7-build-program` from `6f3a93ad`, merged `79136f28`): `bin/arbace-go --build-program DIR`,
+  a user's program: `program.edn` (`:main NS` for a Clojure program, `:main-class CLASS` for a Java forms
+  program, neither for a Go program; `:name`, `:module`, `:go`), `src/`, `java/`, `go/`, `runs/`; the base's
+  compiled namespaces reused (`ARBACE_PROGRAM_BASE`, `target/arbace-go`, the gate's cache, by `aot.key` and
+  `:runtime`, else a `--build`), goi's table, c2j of the program's own units on the base, `bin/j2g --program`
+  (new options `--entry`, `--entry-arg`, `--resources`; `arbace.j2g.embed/user-resources`), `bin/build-go`;
+  a Go program by `bin/build-go` alone; Go forms in an Arbace program embedded and interpreted by goi; output
+  `target/arbace-go/programs/NAME/ARCH/NAME`, cached by key; `--check` over `test/programs/` (hello-clojure,
+  hello-java, hello-go, mixed: 8 of 8 runs; about 3-4 minutes a program, j2g about 20 GiB); `make program`,
+  `make programs-check`; doc/go/BUILD.md "A user's program". Shipped code: `arbace/j2g/main.ae`, `embed.ae`
+  (the shipped translation unchanged but j2g's own classes). On the branch the gate's `suite-aot-essential`
+  j2g run was killed for memory beside another heavy slot's (rerun alone: passed); on the merge the gate
+  passed whole (16m47s). Decided (the user): RPS90 (a), RPS91 (a), RPS92 (b) now (for the milestone),
+  RPS93 (c), RPS94 (c), RPS95 (a) then (b), RPS96 (a), RPS97 (a) then (b), RPS98 (c), RPS99 (a).
+- JC5's merge into main conflicted in seven files (the three provenance files, `check-interp.edn`,
+  `check-compiled.edn`, `divergences.edn`, the survey): both sides re-recorded the levels on different code.
+  Aborted; JC5 merges main into its branch, reruns the provenance updates on a tool of the combined
+  checkout and re-records the levels there. Decided (the user): JCS60-JCS64 (a), JCS65 (a), JCS66 (a),
+  JCS67 (a) and (c), JCS68 (a), JCS69 (a) then (b).
+- Started (the user): REAP7b (RPS92 (b), RPS93 (c), RPS94 (c), RPS98 (c)).
+
+## 2026-10-25: after the milestone, the scripts' sweep before any C23 work (the user)
+
+- Decided (the user): after `arbace-reaps-3-crops-v1`, the scripts' sweep of `/dev/null` and process
+  substitution comes first; any C23 work (its survey included) starts after it. This corrects the entry
+  "after the milestone, C23 at parity the main effort" above, which had the sweep queued beside C23.
+
+## 2026-10-25: the milestone's plan kept whole (the user)
+
+- Considered: a shortcut to the tag (JC6 cut to naming the "other, to triage" catch-alls and recording the
+  world's classes deferred, the corpus widening of RPS7 moved after the tag; about half a day to a day
+  sooner). Decided (the user): the plan kept as decided, JC6 whole (the corpus widened, the world ranked and
+  decided area by area, the decided items scheduled with it), so that the three crops are complete at
+  `arbace-reaps-3-crops-v1`: after the milestone the work opens a new topic, C23's support (after the
+  scripts' sweep), and should not have to come back to them.
+
+## 2026-10-25: REAP5b merged, RPS83-RPS87 decided (the user)
+
+- REAP5b (branch `reap5b-printer` from `6f3a93ad`, merged `8722cbd7`): repr/java's printer
+  (`arbace/repr/java/print.ae`), RPS60-RPS63: an indexed array creation parenthesized, a switch expression
+  of unary precedence, a lambda or method reference cast to its interface where its context does not type
+  it, `int[]::clone`, local classes by simple name, an anonymous class's type `var`, `o.new Inner(){}`;
+  JLS 5.2's casts between primitives and boxes; javac's 7 other refusals each fixed (pattern-binding
+  renames, `return switch` from a labeled switch, which had dropped values, a repeated TYPE_USE annotation
+  printed once, supplementary identifiers as `\u` escapes...); an in-ns-only unit's package line. The sample
+  `test/repr/java/java/sample/PrintSyntax.java`; the round trip's baseline and jdk byte for byte as their
+  references. The print level 2,104 to 2,132 of 2,722 (javac refuses 93 to 32); `:print-syntax`,
+  `:print-conversions`, `:print-javac-other`, `:print-empty-unit` emptied; `:print-full-empty-unit` new. No
+  shipped code (the printer is evaluated on the tools' host). The essential gate on `8722cbd7` passed
+  (16m08s). JC5, merging main, told to merge REAP5b's printer too. Decided (the user): RPS83 (a), RPS84 (a),
+  RPS85 (a) (the converter's, in JC6), RPS86 (a), RPS87 (a).
+
+## 2026-10-25: REAP7b and JC5 merged, RPS100-RPS109 decided; JC6 and RPS103 started
+
+- REAP7b (branch `reap7b-programs` from `a24605e6`, merged `57d70a91`): RPS92 (b): a program's Go packages
+  listed in a goi table of its own (`bin/goi table --program-list FILE --program-root DIR`, `arbace.go.table`
+  checking each with goi's checker, a refused one in `report.edn`'s `:refused-program`), j2g's `--gotable`,
+  `bin/build-go --root DIR`, a package outside module `arbace` a module of its own under `_modules/` with
+  require/replace (`arbace.build.go`); `arbace/go.ae`'s `table-ns!` makes the vars a compiled constant pool
+  names before the package is required; the fallback (a refused package interpreted, with a warning) tested;
+  RPS93 (c) (j2g's `--java-namespaces DIR`, no-op loaders, the build-time warning), RPS94 (c) (`src/`'s
+  `.clj`/`.cljc` translated by repr/clojure first; hello-clojure gains a `.cljc`), RPS98 (c) (gate step
+  `programs`: `mixed`; `--full`'s `programs-full`). `mixed` proves its Go runs compiled (goi's interpreter
+  never loaded) and runs in 0.24 s (was 0.9 s); 8 of 8 runs. The essential gate cold 10m01s to 10m41s, cached
+  2m53s unchanged; on the merge it passed (20m23s). Shipped code: `arbace/go.ae`, `arbace/go/table.ae`,
+  `arbace/build/go.ae`, `arbace/j2g/main.ae`, `embed.ae`. Decided (the user): RPS100-RPS102 (a, RPS102 (b)
+  after the milestone), RPS103 (b), RPS104-RPS109 (a).
+- JC5 (branch `java-check-jc5`, main merged into it twice (d69fca88, ce0b9dc7: JC2b, REAP5, REAP8, RPS55,
+  JN9c, the harness follow-ups, REAP5b), merged `e8a42613`): the analysis' gaps, each of `:analysis`'s 70
+  interpreted tests traced and fixed in the converter, the analysis, the interpreter or j2g (boxing of
+  narrowed constants, the world's constants in `generics.edn`'s `:consts`, switches, lambdas' and method
+  references' casts and bridges, intersection types, pattern scopes, `Outer.super`, interned string constants,
+  local classes' captures); JCS30 (b) (a file's classes one `defclasses`; a top-level `do`'s Java forms one
+  compilation, its value its last class, JCS60 (a)), JCS40 (MissingBridge, also defined across REPL forms),
+  JCS12 (b), JCS24 (a) (`stmts` iterative), JCS42's captures; `test/java/jls/AnalysisGaps.java` (t07639). On
+  the merged code, javac's tool rebuilt (three builds killed by host-wide OOM, the fourth with
+  `GOMEMLIMIT=16GiB`), the provenance updates rerun: every forms file unchanged, `:repr-java` and `:host`
+  moved, and `jdk/javac/provenance.edn`'s `:jdk-edge` (javac's edge 717 lines shorter: `jdk/edge.edn` now
+  answers the cut classes); the levels re-recorded: read 2,722, interp 1,546 (was 1,464 on main), compiled
+  1,694 (was 1,638), print 2,132 (8 now passing, 8 moved into `:print-*` classes by JC5's new forms: for
+  JC6); `levels-known.edn` 7 new, 23 resolved; `check --jdk --update`: 103 of 13,566 hashes. Classes:
+  `:analysis` 3 and 3, `:interp-files`, `:repr-java-dims`, `:read-stack-overflow` emptied, `:j2g-unresolved`
+  169 (JCS69 (a)), `:j2g-go` 2. The essential gate passed on the branch (13m05s) and on the merge (18m17s).
+  Shipped code (the second re-seed): `arbace/classes/` (analyze, interp, env, go), `arbace/lang/Compiler.ae`,
+  `arbace/j2g/` (dyncf, out, decls, world), `jdk/edge.edn`, `jdk/forms` (4 files re-wrapped).
+- Memory: whole-program j2g runs and javac's tool builds (about 20 GiB each) were killed by the kernel
+  several times today beside the other heavy slot (REAP7's and REAP7b's gate runs, JC5's tool builds); each
+  passed when rerun alone or with `GOMEMLIMIT`.
+- The matrix: Java read 6,543 / 0 / 96, eval 1,546 / 239 / 938, AOT 1,694 / 110 / 919, print 2,132 / 490 /
+  101; 12 of 12 cells, 0 problems.
+- Started: JC6 whole (on Opus; the user's choice of models, 2026-10-25), with the converter's RPS83-RPS85,
+  JCS62, JCS65-JCS67 (c), JCS72-JCS74, JCS77 and the print level's 8 cases; RPS103 (b) (on Sonnet).
+
+## 2026-10-25: RPS103's sample merged; the first Sonnet agent
+
+- RPS103 (b) (branch `programs-callback` from `e0f5a2bc`, merged; its tree the gated branch head):
+  `test/programs/callback/`, a Clojure `-main` calling the program's compiled Go package `callback/relay`,
+  which imports Arbace's package `arbace` and calls an anonymous fn (`arbace.Call`, `arbace.Long`) and a var
+  (`arbace.Var`, `arbace.GoStr`) back; its runs prove the package compiled (goi's interpreter never loaded).
+  The import resolved to the main module from `_modules/` with no build change. `--build-program --check`: 10
+  of 10 runs (5 samples, 11 min); in `bin/gate --full`'s `programs-full`. The essential gate passed on the
+  branch (22m12s). No shipped code. The agent ran on Sonnet (the user's split of models, 2026-10-25): no
+  slips reported, nothing to correct at the merge.

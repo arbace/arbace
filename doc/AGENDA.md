@@ -116,13 +116,19 @@ The current state of the work. This file is rewritten as things change. For the 
   248, Java compiled 420, Clojure compiled 15 namespaces; the gate +32 s cold; RPS70-RPS78), REAP5 (Java's
   print level: 2,104 of 2,722; RPS60-RPS69), JC2b (JCS42 (b)-JCS48: interp 1,462, compiled 1,636;
   JCS70-JCS79), JN9c (beside REAP: overload resolution native, jdk26u's lists written alone 95.9%;
-  JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JC5 (the
-  analysis' gaps), JN9d (inference, beside REAP), REAP5b (the printer: RPS60-RPS63), REAP7 (`bin/arbace-go
-  --build-program`), the harness follow-ups (JCS70, JCS71, RPS74 (b), RPS77 (b)). Next: JC6 after JC5 (the
+  JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JN9d
+  (inference, beside REAP), JC6 (whole, on Opus). Done since: RPS103 (b) (the sample `callback`, on
+  Sonnet), JC5 (the analysis' gaps: interp 1,546, compiled 1,694 on the merged code; JCS60-JCS69),
+  REAP7b (a program's Go compiled through its own goi table, Java package loaders, `.clj`/`.cljc`, `mixed` in
+  the essential gate; RPS100-RPS109), REAP7 (`bin/arbace-go --build-program DIR`: four samples,
+  8 of 8; RPS90-RPS99), REAP5b (the printer: the print level 2,104 to 2,132; RPS83-RPS87, the
+  converter's three in JC6), the harness follow-ups (JCS70 masked paths, JCS71 `:flaky`, RPS74 (b),
+  RPS77 (b); interp 1,464, compiled 1,638; JCS80-JCS84, JCS80 and JCS84 at the next full recording). Next: after JC6 (the user, 2026-10-25: no shortcut; the
   world ranked and decided, the catch-all classes "other, to triage" split and named, JCS72-JCS74,
   JCS77); the second batched re-seed (REAP2's `--go-flag`, REAP3, REAP4, JC2's and JC2b's j2g, JC5,
   RPS55's jrt); REAP9. After the milestone: the scripts' sweep of `/dev/null` and
-  process substitution (the user, 2026-10-24); then the main effort: C23 at parity with Clojure, Java and Go (read, eval,
+  process substitution (the user, 2026-10-24), done before any C23 work (the user, 2026-10-25); then the
+  main effort: C23 at parity with Clojure, Java and Go (read, eval,
   AOT and print, the milestone's rule; the user, 2026-10-25), its survey first, its prior art go-whim's C front end, canonical printer, C-lisp and C23
   conformance test (`../go-whim` at `80c49bf5`, crefactor/; journal 2026-10-25).
 

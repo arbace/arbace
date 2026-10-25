@@ -262,7 +262,20 @@ Prior art:
   `--patch-module` against the same platform. `bin/arbace-go` builds
   (`--build`, `--build-tests`, `--pgo`, by the tools' host; the test build's Java
   fixtures committed as forms in `test/java-fixtures/`, `bin/clojure-tests --java-fixtures update`,
-  `verify`), smoke-tests and runs it. Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
+  `verify`), smoke-tests and runs it; `--build-program DIR` (REAP7, doc/go/BUILD.md, "A user's
+  program"; `make program DIR=...`) builds a user's program: `DIR/program.edn`'s entry (`:main NS`, its
+  `-main`; `:main-class CLASS`, its `main`; neither: `go/` a Go program, `arbace.build.go` alone),
+  `src/`'s namespaces compiled by c2j and embedded (its `.clj` and `.cljc` translated into `.ae` by
+  repr/clojure first, REAP7b), `java/`'s Java forms and the compiled namespaces translated by j2g with
+  the shipped build's compiled namespaces (reused when their `aot.key` is the checkout's, else a
+  `--build` first; j2g's `--entry`, `--entry-arg`, `--resources`, `--java-namespaces`: the packages'
+  namespaces no-op loaders), `go/`'s Go packages compiled (REAP7b: listed in a goi table of the
+  program's own, `bin/goi table --program-list FILE --program-root DIR`, and printed into the module by
+  `bin/build-go --root DIR`, a package outside the module `arbace` a module of its own under
+  `_modules/`; one that does not check for the table embedded for goi), into
+  `target/arbace-go/programs/NAME/ARCH/NAME`, cached by key; `--build-program --check` (`make
+  programs-check`) builds and runs the samples of `test/programs/` (Clojure, Java forms, Go forms,
+  mixed) against their runs (`bin/gate` the `mixed` sample, `make programs-essential`; `--full` all). Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
   default since S6; `ARBACE_AOT=0`: evaluated from the image of prepared namespaces, as before):
   by the host when its runtime (`bin/lib/version.bash`'s `arbace_runtime_key`: `arbace/lang`,
   `go`, `overlay/jdk`, `jdk` but j2g's edge) is the checkout's, one j2g run, started as the host
@@ -351,7 +364,7 @@ Prior art:
   since GP7 repr/go's generated Go forms, the dumper `go/arbace/repr/go/godump` and the renamed copy of gc's
   syntax `go/arbace/repr/go/internal/syntax`, regenerated and compared with the committed files), and since 2026-10-24 `bin/j2g-edge verify` on the
   frozen JVM (j2g's edge recorded afresh: an embedded namespace's new JDK class makes `jdk/edge.edn`
-  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds), and since REAP8 the new levels' essential subsets (doc/FULL-SUPPORT-SURVEY.md, "As built: REAP8"): `bin/goi check --aot --essential` (`test/goi/essential-aot.txt`), `bin/java-check --essential-compiled` (the essential tests that pass compiled, one program cached by key) and `bin/clojure-tests --aot --essential` (`test/clojure/essential-aot.txt`'s namespaces compiled alone, cached by key), the whole-program j2g runs one at a time (`bin/j2g`'s `J2G_LOCK`). `bin/gate --full` adds, concurrently: the Go build afresh with its
+  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds), and since REAP8 the new levels' essential subsets (doc/FULL-SUPPORT-SURVEY.md, "As built: REAP8"): `bin/goi check --aot --essential` (`test/goi/essential-aot.txt`), `bin/java-check --essential-compiled` (the essential tests that pass compiled, one program cached by key) and `bin/clojure-tests --aot --essential` (`test/clojure/essential-aot.txt`'s namespaces compiled alone, cached by key), and since REAP7b `bin/arbace-go --build-program --check mixed` (a user's program of the three languages, its Go package compiled through its own goi table, built on the gate's executable, cached by key, and run; `--full` all of `test/programs/`), the whole-program j2g runs one at a time (`bin/j2g`'s `J2G_LOCK`). `bin/gate --full` adds, concurrently: the Go build afresh with its
   smoke test, then javac's forms and javac on Arbace (`bin/javac-vendor check`, `build`, `verify`:
   javac's forms read afresh by javac on Arbace, `classes baseline samples jdk java.base`), then,
   beside the rest of that chain, repr/java's checks on the tool just built (JN5, JFS9): `bin/repr-java
@@ -366,7 +379,7 @@ Prior art:
   corpus, then `--forms verify`: the essential tests' forms read afresh); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then
-  `bin/arbace-go --fixpoint`, then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
+  `bin/arbace-go --fixpoint`, then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3), then `bin/arbace-go --build-program --check` (every sample, REAP7b); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
   `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), repr/haskell's
   (`bin/repr-haskell roundtrip --iface --text --layout`: GHC's trees and lines over GHC 9.14.1's
   boot libraries, in the braces and the layout layouts, then their interfaces compiled at `-O1`,
