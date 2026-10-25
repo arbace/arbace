@@ -1932,3 +1932,177 @@ of 22,740 (52 known), diffcheck 12,789 of 12,801 (12 known), goi's and Java's es
 the generated variants, j2g's edge, `bin/reap` (12 of 12 cells, 0 problems). `bin/java-check
 --levels print --only ...` alone (the read level's cache, not its rows) gives the recorded rows.
 `bin/gate --full` was not run (the policy until the milestone).
+
+## As built: REAP7 (2026-10-25)
+
+The user's AOT entry (RPS14 (a)), on the branch `reap7-build-program` from main `6f3a93ad`:
+`bin/arbace-go --build-program DIR` (`make program DIR=...`), the tool `bin/clojure-tests --aot`
+(REAP3) and `bin/java-check`'s compiled level (JC2) build for their corpora, made general. Measured on
+the branch's own shipped build (`bin/arbace-go --build`, amd64, its host main's gate executable),
+every heavy run in the host's heavy slots, at 8 jobs (`J2G_JOBS=8`, `GOMAXPROCS=8`).
+
+### The design
+
+- **DIR's layout** (doc/go/BUILD.md, "A user's program"): `program.edn` (read with the Clojure
+  reader: `:main NS`, a Clojure program, `NS/-main` the entry; `:main-class CLASS`, a Java forms
+  program, `CLASS.main(String[])` the entry; neither, a Go program; `:name`, the executable's name,
+  default DIR's; a Go program's `:module` and `:go`, `bin/build-go`'s; any other key an error);
+  `src/` the Clojure namespaces and resources (a directory of the class path), `java/` the Java forms
+  (SPEC §9.2's packages), `go/` Go forms (SPEC §4.1), `runs/` the samples' runs (`bin/build-go
+  test`'s format).
+- **A Clojure or Java forms program.** (1) The base: the shipped build whose compiled namespaces it
+  reuses, `ARBACE_PROGRAM_BASE`, else `target/arbace-go`, else the gate's cache
+  `.tmp/arbace-go-gate/amd64`, the first whose `aot.key` is the checkout's (`aot_key`: the runtime key
+  and Arbace's sources, as the test build's reuse, SA157) and whose executable's `:runtime` is the
+  checkout's; else `--build` for the host's architecture first. (2) goi's table, `bin/goi table`
+  (cached by its key, the build's). (3) With `src/`: on the base's executable, `java/`'s package
+  namespaces required, then every namespace of `src/`, under `ARBACE_COMPILE`, `ARBACE_NO_IMAGE`,
+  `ARBACE_PATH_FIRST` (the program's `.ae` sources recorded as embedded ones; the runtime's
+  namespaces from their compiled loaders, as `--build-java` compiles repr/java's reader), then
+  `arbace.c2j.main/run` over the units of the program's own sources (`src/`'s and the `go/` sources
+  they load) into `programs/NAME/aot`. (4) `bin/j2g --program --input BASE/aot [--input
+  programs/NAME/aot] [--input DIR/java] --gotable ... [--resources DIR/src] [--resources DIR/go=go]`
+  with the entry (`--entry-arg -m --entry-arg NS`, or `--entry CLASS`), on the base's executable
+  (`J2G_GO_EXE`; under `J2G_LOCK` when set, bin/j2g's); (5) `bin/build-go --line-file` with jrt's
+  overlay, `x509roots`, the print cache and the link's flags (`-s -w`, Arbace's version). No image
+  of prepared namespaces: every namespace is compiled.
+- **A Go program.** `bin/build-go --line-file DIR` alone (stripped): no Arbace runtime.
+- **j2g's three options** (`arbace/j2g/main.ae`, `embed.ae`; the shipped program's j2g, so the next
+  batched re-seed): `--entry CLASS` (the main package's `main` calls `CLASS`'s static `main`, a root,
+  in place of `arbace.lang.Main`'s), `--entry-arg ARG` (arguments before the command line's), both
+  without rlwrap (the command line is the program's); `--resources DIR[=PREFIX]` (every file under
+  DIR embedded at its relative path: sources join the embedded sources, so that `RT.load` finds them
+  embedded and runs their compiled loaders and the cut classes cover the classes they name; other
+  files the resource data; a path embedded already is an error). Without them j2g's output is as
+  before: the branch's shipped translation against main's, both of the same runtime, differs only in
+  `arbace.j2g.main`'s and `arbace.j2g.embed`'s own compiled classes and embedded sources (`diff -rq`
+  of the program trees: 10 files); the main package's `main.ae` and `arbace.ae` byte for byte.
+- **The output.** `target/arbace-go/programs/NAME/ARCH/NAME` (`--arch`, default the host's; `-o OUT`
+  a copy), the last line printed naming it; cached by the key of the base's executable and compiled
+  namespaces, goi's table, DIR's files but `runs/`, the runtime, x509roots, j2g's edge, the scripts
+  and Go's version; the intermediate trees (c2j's, j2g's about 315 MB, the work modules) removed
+  after the build (`ARBACE_PROGRAM_KEEP=1` keeps them).
+- **The check.** `bin/arbace-go --build-program --check [NAME...]` (`make programs-check`): each
+  sample of `test/programs/` built and run on its runs (stdout equal, the exit code, stderr's start),
+  an Arbace program's with `ARBACE_LOAD_TIMES=1`: none of its own sources may load from source (each
+  ran its compiled loader).
+
+### The samples and their results
+
+| sample | what | c2j | j2g | build | executable | runs |
+|---|---|---|---|---|---|---|
+| `hello-clojure` | two namespaces (a record, a protocol extended, a transducer, `slurp *in*`, `frequencies`), `-main`, `System/exit` | 2 sources, 19 classes, 1 s | 140 s | 88 s | 154,288,288 B | 2 of 2; 0.14 s |
+| `hello-java` | package `hello`: `Main` (`ArrayList`, `TreeMap`, `BufferedReader` over `System.in`, `while`, `for-each`) and `Shapes` (a nested interface and two static classes, an array of them) | none | 143 s | 96 s | 154,144,928 B | 2 of 2; 0.07 s |
+| `hello-go` | module `example.com/hellogo`, two packages (`bufio`, a method `String`, two results) | none | none | seconds | 1,536,160 B | 2 of 2 |
+| `mixed` | `mixed.main` requires the Go forms package `mixed/caps` (`strings` from goi's table) and imports the Java forms class `mixed.text.Words`, which calls back a Clojure fn (`IFn`) | 3 sources (the `go/` package's loader among them), 6 classes, 1 s | 137 s | 34 s | 154,206,368 B | 2 of 2; 0.9 s (goi checks the package at load) |
+
+**8 of 8 runs pass**; no source of a sample loads from source (no `load` line of `ARBACE_LOAD_TIMES`
+at all: the runtime's namespaces are compiled too). One expectation was wrong at first (`hello-java`
+with no arguments exits 1, the size of its list holding "world"; the JVM's would too). A build is
+about 3 to 4 minutes in a free heavy slot (c2j a second, j2g 140 s at 20 GiB, the build 35-95 s with
+repr/go's print cache warm or cold); the whole check cached (keys unchanged) 6.5 s. The base's
+`--build` (one j2g run, the host compiling the namespaces) was needed once, because the branch's j2g
+changes change the compiled namespaces' key; a checkout whose `target/arbace-go` or gate cache is
+current builds without it.
+
+**What the samples showed.** Nothing of c2j, j2g or the runtime needed a fix: a Clojure namespace
+importing a Java forms class that was interpreted when c2j compiled it, and a Go forms namespace
+compiled by c2j and interpreted by goi, run as at the REPL. The limits found are design choices,
+proposed below: a Java package's namespace is not embedded (a namespace imports its classes; at the
+REPL one requires the package first, RPS93); `.clj` and `.cljc` sources are embedded but not
+compiled (RPS94); Go forms in an Arbace program are interpreted (RPS92).
+
+### Changes
+
+Shipped: `arbace/j2g/main.ae` (`--entry`, `--entry-arg`, `--resources`; `program-entry-main`),
+`arbace/j2g/embed.ae` (`user-resources`). Scripts: `bin/arbace-go` (`--build-program`, `--check`:
+new functions and two lines of dispatch), `Makefile` (`program`, `programs-check`). Samples:
+`test/programs/`. Docs: doc/go/BUILD.md ("A user's program"), CLAUDE.md's `bin/arbace-go` paragraph.
+
+### Proposals (RPS90-RPS99)
+
+- **RPS90 DIR's layout.**
+  - Options: (a) as built: `program.edn` (`:main`, `:main-class`, `:name`, a Go program's `:module`
+    and `:go`) beside `src/`, `java/`, `go/` and `runs/`, the language of each tree by its directory;
+    (b) one source root, each file's language by its forms (`ns` with `go/package`, `defclass`, the
+    rest Clojure), as `ARBACE_PATH` holds them at the REPL; (c) a `deps.edn`-like `:paths` map.
+  - *Recommended: (a)*: the three trees go to three different tools (c2j, j2g's inputs, goi's
+    embedded namespaces or `arbace.build.go`), and a directory each says which without reading a
+    file; (b) would make a Java package namespace and a Clojure one indistinguishable to the build.
+- **RPS91 The entry.**
+  - Options: (a) as built: `:main NS` (`-m NS` before the command line, through `arbace.lang.Main`),
+    `:main-class CLASS` (its `main(String[])` called directly, as `java CLASS`), neither for a Go
+    program; j2g's `--entry` and `--entry-arg`; (b) a `:main` symbol whose kind is found (a namespace
+    on `src/`, else a class of `java/`); (c) `:main-class` through `arbace.lang.Main` too (`-e`).
+  - *Recommended: (a)*: explicit, and a Java program does not start Clojure's runtime it does not ask
+    for; (b) is a convenience that can come later without changing (a)'s files.
+- **RPS92 Go forms in an Arbace program.**
+  - Options: (a) as built: embedded and interpreted by goi (their std imports compiled, from goi's
+    table), the namespaces' loaders compiled by c2j where it can; (b) compiled: the program's Go
+    packages printed into the module (`bin/build-go --root`) and listed in a table of the program's
+    own (`bin/goi table` with an extra list and root), so that goi calls them compiled as it calls
+    std; (c) both, (b) when the package type-checks for the table.
+  - *Recommended: (b) after the milestone, (a) now*: (a) is what the REPL does and works today; (b) is
+    the real AOT of Go inside an Arbace program but needs the table generator to take a user's root
+    (about a day) and costs a table build per program.
+- **RPS93 Java package namespaces at run time.**
+  - Options: (a) as built: not embedded; a namespace imports the classes (`:import`), a `(require
+    'pkg)` of a Java package fails at run time; (b) the package namespaces embedded as empty loaders
+    (their `require` a no-op once the classes are the program's); (c) (b) and the warning at build
+    time when `src/` requires one.
+  - *Recommended: (c)*: code written at the REPL requires the package first (the smoke test's `jl`);
+    a no-op loader makes that code build unchanged (a few lines in j2g's `--resources` handling).
+- **RPS94 `.clj` and `.cljc` sources.**
+  - Options: (a) as built: embedded, loaded from source (`ARBACE_PATH_FIRST` records a `.ae` only);
+    (b) `ARBACE_PATH_FIRST` taking `.clj` and `.cljc` too (RT.load's three suffixes), so they are
+    compiled; (c) translated by repr/clojure into `.ae` first (`bin/repr-clojure read`), as the
+    compiled suite does.
+  - *Recommended: (c)*: the dialects' divergences are repr/clojure's table's; a Clojure library then
+    builds as the suite does; (b) is a shipped change to `RT.load` (a re-seed) for less.
+- **RPS95 The base's reuse.**
+  - Options: (a) as built: `ARBACE_PROGRAM_BASE`, `target/arbace-go`, the gate's cache, the first
+    whose `aot.key` and runtime are the checkout's, else a `--build` (about 3 to 5 minutes); (b) the
+    seed's stage 0 as a base too, when its compiled namespaces are kept with it (`bin/seed --build`
+    leaves none today); (c) always a `--build` first.
+  - *Recommended: (a)*, (b) at the next re-seed: a user with a fresh clone has stage 0 and no shipped
+    build; stage 0's `aot/` kept would spare the first build.
+- **RPS96 The image of prepared namespaces.**
+  - Options: (a) as built: none (every namespace compiled; a source c2j does not compile is
+    evaluated from its text at load); (b) the program prepared once and linked with its image, as
+    `--build` does (a second link, seconds), so that the evaluated rest replays.
+  - *Recommended: (a)*: the samples load nothing from source; (b) when a user's program has sources
+    c2j refuses.
+- **RPS97 The other harnesses on it.**
+  - Options: (a) `bin/clojure-tests --aot` and `bin/java-check`'s compiled level keep their own
+    builds (the suite's hook, the shards and refusals are theirs); (b) both call `--build-program`'s
+    functions (the base, the compile, j2g, the build) as a library (`bin/lib/program.bash`); (c) both
+    lay their corpora out as DIRs.
+  - *Recommended: (b) after the milestone*: one place for the base's key and the build's flags; (a)
+    until then, since the harnesses are being changed concurrently (JC5, the follow-ups).
+- **RPS98 The samples' check in the gates.**
+  - Options: (a) in the essential gate (`bin/arbace-go --build-program --check`, concurrent with the
+    others): one j2g whole-program run per Arbace sample (three, about 2-3 minutes each under the
+    gate's `J2G_LOCK`), cached by key, so seconds when nothing changed; (b) in `bin/gate --full` only;
+    (c) the essential gate builds the `mixed` sample only (it holds the three languages), the rest
+    in `--full`.
+  - *Recommended: (c)*: the mixed program exercises c2j, j2g's Java inputs, `--entry-arg`,
+    `--resources` and goi's embedded packages; one j2g run (about 2 minutes, cached when the gate's
+    key holds) is the essential gate's price; `hello-java`'s `--entry` and the Go program in
+    `--full`.
+- **RPS99 The output.**
+  - Options: (a) as built: `target/arbace-go/programs/NAME/ARCH/NAME`, `-o OUT` a copy, the
+    intermediate trees removed; (b) `DIR/target/NAME` (beside the program, as a project's build
+    directory); (c) (a) with `--arch` defaulting to `ARBACE_GO_ARCHES`.
+  - *Recommended: (a)*: the checkout's target/ is where builds live and is ignored; a program
+    directory may be read-only (test/programs).
+
+**The checks.** The essential `bin/gate` at the branch's head (the gate's executables built afresh,
+865 s, the `gate_key` changed): every step passed but `suite-aot-essential`, whose j2g run was
+killed by the kernel for memory (a 20 GiB run beside the other heavy slot; it uses none of j2g's
+new options); that step run again alone in a heavy slot passed (15 namespaces, 7,243 of 7,273 as
+recorded, no regressions; 299 s, 20 GiB). The rest: the smoke test, the suite on the test build
+20,566 of 20,580 as recorded, the oracle 22,688 of 22,740 (52 known), diffcheck 12,789 of 12,801 (12
+known), goi's essential checks (801 and 248 of 248 compiled), Java's (428 interpreted, 420 compiled),
+the generated variants, j2g's edge (no new JDK class named), `bin/reap` (12 of 12 cells, 0 problems).
+`bin/arbace-go --build-program --check`: 8 of 8. `bin/gate --full` was not run (the policy until the
+milestone).
