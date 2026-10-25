@@ -26,7 +26,8 @@
     report REF WORK DIVERGENCES CHECKDIR LEVELS [--record] [--essential FILE] [--partial]
         WORK/results.tsv (ID LEVEL RESULT REASON) against the recorded results
         (CHECKDIR/check-LEVEL.edn): as recorded, new, now passing; a test passing there and not
-        now is a regression; every test not passing in a class of DIVERGENCES (its result and
+        now is a regression (unless its result is flaky: bin/java-check ran it again and the
+        second run passed, JCS71 (a); a test recorded flaky counts as passing); every test not passing in a class of DIVERGENCES (its result and
         reason matched, as test/goi/divergences.edn's), each class's count and the numbers by
         area; --record writes the results as CHECKDIR/check-LEVEL.edn. Exit 1 on a regression,
         an unclassified test or an essential test not passing."
@@ -503,7 +504,8 @@
           at (fn [lv] (into {} (for [[id l r reason] results :when (= l lv)] [id [r reason]])))
           ri (at :interp) rc (at :compiled)
           ids (sort (filter rc (keys ri)))
-          side (fn [id] (let [pi (= :pass (first (ri id))) pc (= :pass (first (rc id)))]
+          ;; a flaky result passed on its second run (JCS71 (a))
+          side (fn [id] (let [pi (#{:pass :flaky} (first (ri id))) pc (#{:pass :flaky} (first (rc id)))]
                           (cond (and pi pc) :both (and pi (not pc)) :interp (and pc (not pi)) :compiled :else :neither)))
           by (group-by side ids)
           dis (sort (concat (by :interp) (by :compiled)))
@@ -551,8 +553,13 @@
                   pass? #(= :pass (nth % 2))
                   np (remove pass? rs)
                   cls (group-by #(classify classes lv (first %) (nth % 2) (nth % 3)) np)
-                  regress (filter #(and (= :pass (first (rec (first %)))) (not (pass? %))) rs)
-                  now-pass (filter #(and (rec (first %)) (not= :pass (first (rec (first %)))) (pass? %)) rs)
+                  ;; JCS71 (a): a would-be regression run again whose second run passed is
+                  ;; :flaky (bin/java-check's again), no regression, and a test recorded :flaky
+                  ;; passes in the record's sense; its class names it (a :flaky class's :tests)
+                  pass-like? #(#{:pass :flaky} %)
+                  regress (filter #(and (pass-like? (first (rec (first %)))) (not (pass-like? (nth % 2)))) rs)
+                  flaky (filter #(= :flaky (nth % 2)) rs)
+                  now-pass (filter #(and (rec (first %)) (not (pass-like? (first (rec (first %))))) (pass? %)) rs)
                   fresh (filter #(and (not (pass? %)) (not= :pass (first (rec (first %))))
                                       (not= [(nth % 2) (nth % 3)] (rec (first %)))) rs)]
             :when (seq rs)]
@@ -560,16 +567,18 @@
                     (str/join ", " (for [[r xs] (sort-by (comp - count val) by)] (str (count xs) " " (name r))))))
       (println (str "   against " (.getName (io/file f)) ": "
                     (count (filter #(= [(nth % 2) (nth % 3)] (rec (first %))) rs)) " as recorded, "
-                    (count fresh) " new or changed, " (count now-pass) " now passing, " (count regress) " regressions"))
+                    (count fresh) " new or changed, " (count now-pass) " now passing, " (count regress) " regressions"
+                    (when (seq flaky) (str ", " (count flaky) " flaky (run again, JCS71 (a))"))))
       (doseq [x regress] (swap! problems conj (str "regression: " (first x) " " (:test (tests (first x))) ": " (name (nth x 2)) " " (nth x 3))))
       (doseq [x (take 20 now-pass)] (println (str "   now passing: " (first x) " " (:test (tests (first x))))))
+      (doseq [x flaky] (println (str "   flaky: " (first x) " " (:test (tests (first x))) ": " (nth x 3))))
       (doseq [c classes :let [n (count (get cls (:id c)))] :when (pos? n)]
         (println (format "   %5d %s (%s)" n (:title c) (name (:kind c)))))
       (when-let [u (seq (get cls :unclassified))]
         (println (format "   %5d in no class" (count u)))
         (doseq [x u] (swap! problems conj (str "in no class: " (first x) " " (:test (tests (first x))) ": " (name (nth x 2)) " " (nth x 3)))))
       (when essential
-        (doseq [x rs :when (and (essential (first x)) (not (pass? x)))]
+        (doseq [x rs :when (and (essential (first x)) (not (pass? x)) (not= :flaky (nth x 2)))]
           (swap! problems conj (str "essential: " (first x) " " (:test (tests (first x))) " does not pass: " (name (nth x 2)) " " (nth x 3)))))
       ;; the numbers by area (the survey's §5 table)
       (let [areas (sort (distinct (map #(area (:test (tests (first %)))) rs)))]
