@@ -158,8 +158,9 @@ Prior art:
     `bin/repr-java attr-check` (front-check `--attr native`): the facts equal fact by fact and the forms
     still javac's trees', against `test/repr/java/attr-check-known.edn` ("As built: JN9a"); since JN9b the
     members and types tiers too (`arbace.repr.java.expr`, `arbace.repr.java.types`: names in code, every
-    expression's type, after javac's overload choice until JN9c; the known file's `:bridges`, "As built:
-    JN9b"); `bin/repr-java
+    expression's type; the known file's `:bridges`, "As built: JN9b"); since JN9c the overload tier
+    (`arbace.repr.java.overload`: Resolve's three phases and most specific, every call that needs no
+    inference; `attr.md` sums the declines by reason, "As built: JN9c"); `bin/repr-java
     check --jdk` compares jdk26u's forms with their hashes, `test/repr/java/expected/jdk26u.sha256`
     (`--update` rewrites them, JFS72 (b)), and Java forms → Java (`print`, `arbace.repr.java.print`; the
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →
@@ -316,7 +317,10 @@ Prior art:
   (`test/java/check.ae`) on the tools' host; the essential subset's forms committed in `test/java/forms/`
   (`--forms verify|update`); `diagnostics` (JC3, "As built: JC3"): langtools' golden-diagnostics tests
   (compile-fail-ref, the corpus `langtools-diagnostics`), run in place by javac on Arbace as jtreg runs
-  them, the output against the golden file line by line (`test/java/check-diagnostics.edn`).
+  them, the output against the golden file line by line (`test/java/check-diagnostics.edn`); `print` (REAP5,
+  doc/FULL-SUPPORT-SURVEY.md, "As built: REAP5"): each test's forms printed back to Java by repr/java's
+  printer (`test/java/print.ae`), javac on Arbace accepting it, read again to the same forms, mode `:full`
+  printed back byte for byte, its class files against the original's (`test/java/check-print.edn`).
 - `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env
   world`, `check`, `simulate`), the subset Arbace uses, and what apk does not provide (jdk26u,
   TamaGo's Go, Go's module cache: only `bin/gate --full`'s vendoring checks need it). No build
@@ -344,7 +348,7 @@ Prior art:
   since GP7 repr/go's generated Go forms, the dumper `go/arbace/repr/go/godump` and the renamed copy of gc's
   syntax `go/arbace/repr/go/internal/syntax`, regenerated and compared with the committed files), and since 2026-10-24 `bin/j2g-edge verify` on the
   frozen JVM (j2g's edge recorded afresh: an embedded namespace's new JDK class makes `jdk/edge.edn`
-  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds). `bin/gate --full` adds, concurrently: the Go build afresh with its
+  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds), and since REAP8 the new levels' essential subsets (doc/FULL-SUPPORT-SURVEY.md, "As built: REAP8"): `bin/goi check --aot --essential` (`test/goi/essential-aot.txt`), `bin/java-check --essential-compiled` (the essential tests that pass compiled, one program cached by key) and `bin/clojure-tests --aot --essential` (`test/clojure/essential-aot.txt`'s namespaces compiled alone, cached by key), the whole-program j2g runs one at a time (`bin/j2g`'s `J2G_LOCK`). `bin/gate --full` adds, concurrently: the Go build afresh with its
   smoke test, then javac's forms and javac on Arbace (`bin/javac-vendor check`, `build`, `verify`:
   javac's forms read afresh by javac on Arbace, `classes baseline samples jdk java.base`), then,
   beside the rest of that chain, repr/java's checks on the tool just built (JN5, JFS9): `bin/repr-java
@@ -355,7 +359,7 @@ Prior art:
   that wrote it, JFS32), `bin/repr-java parse-check` (the native parser's trees equal to javac on
   Arbace's, JN8), `bin/repr-java front-check` (the converter's forms from the native trees equal to
   javac's trees', JFS66 (b)), `bin/repr-java attr-check` (the native provider's facts equal to javac on
-  Arbace's, JN9a), `bin/java-check --levels read,interp,classes,compiled,diagnostics` (Java's conformance check, every
+  Arbace's, JN9a), `bin/java-check --levels read,interp,classes,compiled,diagnostics,print` (Java's conformance check, every
   corpus, then `--forms verify`: the essential tests' forms read afresh); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then

@@ -1024,6 +1024,119 @@ once RPS40's subset lands, RPS49 (a) (the second batched re-seed). REAP4's: RPS5
 the milestone; the `java.sql` assertion by design), RPS56 (a) (SAX by design), RPS57 (a), RPS58 (a),
 RPS59 (a). The `:pending` classes cite this.
 
+## As built: RPS55 (2026-10-25)
+
+Branch `jrt-module-rps55`, from main `840e514b`: RPS55 (a) as decided. A runtime change (jrt): it
+reaches stage 0 with the second batched re-seed (RPS49 (a)), not this branch.
+
+**`java.lang.Module` in jrt.** `go/arbace/jrt/module.ae` (doc/go/JRT-NOTES.md, "Modules"): a
+hand-written leaf class in the manifest (`test/jrt/manifest.ae`'s list) with `getName`, `isNamed`,
+`getClassLoader` and `toString` (the JDK's texts), two instances: java.base (the bootstrap loader,
+`getClassLoader` null) and the application loader's unnamed module. `Class.getModule` places a class
+by `classPlace`, the rule `ClassCastException`'s messages and `Class.getClassLoader` already follow:
+java.base for the primitive types and the `java.`, `javax.`, `jdk.`, `sun.` classes (every JDK source
+of the shipped world is java.base's: `jdk/sources.txt`, 839 of 839), the unnamed module for Arbace's
+and the run time's; an array in its element type's. `getDescriptor` is **not** built: its type,
+`java.lang.module.ModuleDescriptor`, is outside the world (as `getLayer`'s and `getPackages'`), the
+suite does not call it, and a use is j2g's stub that throws (Reflector's "No matching method" at the
+REPL), which is what "throwing" asked. javac's tool world: its `getModule` calls (plugins, annotation
+processors, the source launcher) each go on to a `Module` member jrt does not have, so they throw as
+before, one call later; its `ToolProvider` is a variant that does not ask; javac's world is placed by
+the same prefix rule, not by its sources' list (RPS80).
+
+**Regenerated.** `bin/jrt manifest`: `manifest.edn` (`Class` 58 of 170 JDK members, `Module` 4 of 69),
+`manifest_test.ae`, `reflect_tables.ae`. `bin/jrt test` (`TestClassLoaders` with the modules' checks,
+`TestReflect*`) passes on amd64. Nothing of `overlay/jdk/java.base` changed, so no `bin/jrt-convert
+update`; `bin/j2g-edge update` left `jdk/edge.edn` **unchanged** (`java/lang/Module` stays among the edge's
+classes, the JVM's answers about it as before: the manifest adds j2g's declaration of it), and `verify`
+passes.
+
+**Numbers.** Clojure's suite on the test build (the essential gate's run): `java.javadoc` **4 of 5**
+(2 of 5 before), its one error `Class/forName "java.sql.Connection"` (`ClassNotFoundException`), by
+design (D6); the whole suite 78 namespaces, 784 tests, 20,580 assertions: **20,566 pass** (20,564),
+11 fail, **3 errors** (5); re-recorded in `test/arbace-go-results.edn`. The class `:javadoc-url`
+(`test/clojure/divergences.edn`) narrowed to the java.sql assertion, now `:design` (D6, RPS55 (a)),
+matching `(fail 0, error 1)` only. `bin/reap`: 0 problems. The oracle unchanged: 22,688 of 22,740,
+52 known, 0 new. diffcheck 12,789 of 12,801, 12 known, 0 new. The executable 153,874,592 bytes, 8 KB
+more than main's gate build of the same day (153,866,400). The essential `bin/gate` passed (25m06s, the
+builds afresh).
+
+### Proposals RPS80-RPS89
+
+- **RPS80 The modules of javac's tool world.** (a) the prefix rule for both worlds (built): exact for
+  the shipped world, javac's world's `javax.tools`, `javax.lang.model` (java.compiler), `javax.xml`
+  (java.xml) said to be java.base and `com.sun.tools.javac` unnamed; (b) a package-to-module table
+  generated from `jdk/sources.txt` and `jdk/javac/sources.txt` (about 150 packages) into jrt, each
+  named module a `Module` instance, the build tools unnamed; (c) the module per class in `ClassInfo`,
+  written by j2g from the forms' provenance. *Recommended: (a)*: nothing in javac's world reads a
+  module's name on a path the tool runs, and (b) is an hour when something does.
+- **RPS81 Module's other members.** (a) the four built, the rest j2g's stubs (built); (b) also
+  `getPackages` (the registry's packages of the module) and `getResourceAsStream` (the class path's
+  resources, as `Class.getResourceAsStream`), which libraries use for their own resources;
+  (c) `getDescriptor` with a hand-written `ModuleDescriptor` (name only). *Recommended: (a)*, (b) when
+  a library loaded at the REPL needs it.
+- **RPS82 The AOT level's java.javadoc.** `test/arbace-go-aot-results.edn` still records
+  `java.javadoc` as skipped ("not in the Go build", before REAP4's SL5) and
+  `test/clojure/divergences-aot.edn`'s class matches only that skip; `bin/clojure-tests --divergences`
+  of the eval level's results reports `javadoc-url-test` (and `seq-and-transducer`) "in no class of
+  divergences-aot.edn", as it did before this branch (3 then, 2 now). (a) at the next `--aot`
+  re-record (RPS40's subset, REAP8), the namespace's run recorded and the java.sql class added to
+  `divergences-aot.edn`; (b) the class added here without a run. *Recommended: (a)*: a class is
+  written from a recorded run.
+
+## Decided (2026-10-25): RPS80-RPS82
+
+The user decided RPS55's proposals as recommended: RPS80 (a) (the prefix rule for the modules of both
+worlds; a package-to-module table when something reads a module's name), RPS81 (a) (Module's four
+members, the rest j2g's stubs; `getPackages` and `getResourceAsStream` when a library at the REPL needs
+them), RPS82 (a) (java.javadoc recorded at the AOT level, its java.sql class added, at REAP8's `--aot`
+re-record).
+
+## Decided (2026-10-25): RPS60-RPS78
+
+The user decided REAP5's and REAP8's proposals as recommended. REAP5's: RPS60 (a) (the printer's syntax
+fixed for the milestone, REAP5b), RPS61 (a) (the casts assignment contexts need, with RPS60), RPS62 (a)
+(javac's other refusals triaged with RPS60), RPS63 (a) (an in-ns-only unit's package line kept), RPS64
+(a) (the printed Java read to other forms deferred and decided per kind), RPS65 (a) (the overload-choosing
+cast kept by the converter, in JC5), RPS66 (a), then (b) at the next reference recording, RPS67 (a) (the
+print level in `--full` only), RPS68 (a), RPS69 (a). REAP8's: RPS70 (a) (Go's AOT subset a committed list
+by its rule, regenerated at each re-record), RPS71 (a), RPS72 (a), RPS73 (a) (one whole-program j2g at a
+time, `J2G_LOCK`), RPS74 (b) (`seq-and-transducer` skipped in the compiled suite's subset only), RPS75 (a),
+RPS76 (a), RPS77 (b) (the Clojure subset's work trees removed after its build), RPS78 (a). The six
+`:pending` classes of the print level cite this.
+
+## As built: harness follow-ups (2026-10-25)
+
+Branch `harness-followups`, from main `6f3a93ad`, with JCS70 (a) and JCS71 (a)
+(doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: harness follow-ups"). No shipped code changes.
+Logs in `.tmp/hf/` (`gate-before-1.txt`, `gate-before-cached.txt`, `gate-after-1.txt`,
+`gate-after-cached.txt`, the subset's `suite-aot-essential-*.log`).
+
+- **RPS74 (b)**: `test/clojure/essential-aot-skipped.edn` lists the tests the subset skips beyond the
+  reference's `:skipped-tests` (`{NS {TEST REASON}}`): transducers' `seq-and-transducer`. `bin/clojure-tests
+  --aot --essential` writes the subset's reference, `RUN/expected-essential.edn`: the AOT reference
+  with them skipped, the namespace's `:test` one less each and the test's `:failing` entry gone, its
+  `:pass` the same (a listed test must make no assertion when it passes, as `seq-and-transducer`,
+  whose `is` runs only on a failure: one that does shows as a regression), passed to the namespaces'
+  processes (`CLOJURE_TESTS_EXPECTED`) and in the program's key (the skipped test is not compiled
+  either). The whole `--aot` still runs it (RPS43 (a)). The subset: **338 tests** (339), 7,273
+  assertions, 7,243 pass, as before; transducers 18 tests, 108 of 108, **0.9 s** (104 s in the
+  cached run before).
+- **RPS77 (b)**: after the subset's build, its work module and j2g tree (`aot-build/work`,
+  `aot-build/j2g`) are removed; a hit reads only the program and its key, a miss translates and
+  prints anew (repr/go's print cache warm). The subset's cache **618 MB → 252 MB (366 MB less)**; the
+  whole `--aot` keeps its trees.
+
+| essential gate | before (base `6f3a93ad`) | after (`2b73e0d9`) |
+|---|---:|---:|
+| cached: the gate | 2m47s | **2m50s** |
+| cached: `suite-aot-essential` | 1m56s | **0m36s** |
+| the subset's program made anew (its key changed) | — | 4m24s (c2j 101 s, j2g 68 s, build 62 s) |
+
+The cached gate's wall does not move: its longest steps are `suite-go` (2m12s-2m16s) and `go-smoke`
+(about 2 minutes), beside which the subset now takes a third of its old time; the 80 s come off the
+slot the gate shares with the other checks.
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail
@@ -1468,3 +1581,354 @@ minutes; a subset saves only by compiling less. RPS40.
     own now.
   - *Recommended: (a)*: no build needs them before the milestone's run (stage 0 builds the program
     from the checkout's back end, `compiled-back-end`).
+
+## As built: REAP8 (2026-10-25)
+
+Branch `reap8-essential`, from main `840e514b`, main merged at `af1e916f` (RPS55: jrt's
+`java.lang.Module`). The essential subsets of the three new checks in the essential `bin/gate`
+(RPS15), as decided: RPS33 (a), RPS40 (b) with (a)'s cached path, RPS48 (a) for the subset and (b) for
+the whole suite, JCS41 (a). Every heavy run in the host's heavy slots, at 8 jobs; the times below are
+the gate's own clock (the slots' queue not counted). No shipped code changes: the scripts of `bin/`,
+data under `test/`, the Makefile; so no re-seed. The measurements' logs are in `.tmp/reap8/` (the
+gates' `gate-before-cold.txt`, `gate-before-cached.txt`, `gate-after-cold.txt`, `gate-after-cold2.txt`,
+`gate-after-cached.txt`; the subsets' first runs; the whole `--aot` runs `aot-full-head.txt`,
+`aot-full-b.txt`, `aot-full-merged.txt`).
+
+### What the essential gate runs now
+
+Three steps beside the old ones in step 4, concurrently:
+
+- **`goi-aot-essential`**: `bin/goi check --aot --essential --jobs 8` (RPS33 (a)), after `goi-check`
+  in one chain (both read `$GOROOT/test`'s corpora when they are missing, and the AOT level also
+  converts `linux-errtest-full`, 88 s, once), the gate's executable the tools' host (as `--full`'s
+  `goi-aot`). Its list `test/goi/essential-aot.txt`, **248 programs**, made by the rule its header
+  states from `test/goi/check-aot-linux-amd64.edn` and goi's reference: every directory test that
+  passes (126: the modules, local imports rewritten, RPS11), every run program passing with gc's
+  flags (13: goi skips them), every second errorcheck program that passes and goi sets apart (62 of
+  124: gc's later phases' flags, line directives, errors after type checking; printed from mode
+  `:full`), every fourth run program passing here and known at goi's level (11 of 41: frames, memory,
+  speed), and of goi's essential list's programs passing at both levels every 25th run program (22)
+  and every 10th errorcheck program (14). **248 of 248 pass, 69-71 s** (gc's references cached in
+  `.tmp/goi-check/gcref`, which depend on the toolchain only); the step 77 s in the gate.
+- **`java-compiled`**: `bin/java-check --essential-compiled --jobs 8` (JCS41 (a)): the tests of
+  `test/java/essential.txt` that `test/java/check-compiled.edn` passes (derived at each run: **420 of
+  428**; the 8 others are JC2's "only interpreted" kind: `Runtime.exec`'s overloads, reflection over
+  non-public members and `getMethods`' order, `strictfp` by reflection, `TestSyntheticNullChecks`,
+  escape analysis's `ClassCastException`, and `CaptureVariablesAnonymous`, Go that does not compile:
+  JCS42), from their committed forms, in **one program**: the tests' forms merged by `java.check`'s
+  `shards` and `merge` (one shard: their files' places do not collide), `bin/j2g --program` with the
+  compiled namespaces (the gate's, below; their `aot.key` checked against the checkout's: JCS46 (a)'s
+  check for this step), `bin/build-go`; cached in `.tmp/java-check/essential-compiled/prog` by the key
+  of the host executable, the namespaces' key, `arbace/`, `go/`, `overlay/`, `jdk/`, `x509roots/`, the
+  tests' forms and list, the scripts (`bin/j2g`, `bin/build-go`, `bin/jrt`, `bin/java-check`,
+  `test/java/check.ae`) and Go's version. Every test must pass: no refusal rounds (a refusal, a build
+  failure or a run not passing fails the step). A timeout runs again once, alone, at twice the limit
+  (JCS47 (a); the first cold gate run timed out eight `java/net` tests of a fraction of a second while
+  j2g and two builds ran beside them). Its own scratch, `.tmp/java-check/essential-compiled`, so that it
+  runs beside `--essential`. Cold: j2g 70-90 s, the build 200 s (repr/go's print cache cold for the
+  tests' packages; less when warm), the runs 13 s; **cached 14 s**; j2g's peak resident 20 GB.
+- **`suite-aot-essential`**: `bin/clojure-tests --aot --essential -j 8` (RPS40 (b)): the 15 namespaces
+  of `test/clojure/essential-aot.txt` (protocols, compilation, java-interop, data-structures,
+  clearing, reducers, transducers, method-thunks, param-tags, generated-all-fi-adapters-in-let,
+  numbers, sequences, vars, macros, special) compiled **alone**, with their test libraries and the
+  runtime's namespaces they load (RPS48 (a)'s shape for the subset), into their own program
+  (`.tmp/clojure-tests/aot-essential/aot-build`, cached by `--aot`'s key plus the list), each
+  process requiring the subset's namespaces only, against the same reference
+  (`test/arbace-go-aot-results.edn`); no test.generative, no levels compared (the whole `--aot`'s).
+  **339 tests, 7,273 assertions: 7,243 pass, 28 fail, 2 errors**, the reference's for these
+  namespaces (clearing's 19, compilation's 8, java-interop's FIPrims 3). Compiled: 95 sources, 9,997
+  classes in 53 s; j2g 54 s (14,077 classes); the build 56 s; the runs about 80 s, transducers'
+  `seq-and-transducer` 75 of them (RPS43 (a)); the step 5m29s-5m43s in the cold gate (the translation of
+  the suite, 1-2 minutes, included), 1m53s cached; j2g's peak resident 20 GB.
+- **One j2g at a time** (`J2G_LOCK`, a one-line hook in `bin/j2g`: when set, j2g holds the lock
+  file until it exits): diffcheck's, `java-compiled`'s and `suite-aot-essential`'s whole-program runs
+  take up to `GOMEMLIMIT` (20 GiB) each, so the gate serializes them (about 4 minutes of j2g cold,
+  none cached); their builds and runs overlap. The gate unsets it before `--full`'s chains, which run
+  as before.
+- **The gate's cache keeps the compiled namespaces**: `bin/arbace-go --gate-build` copies `aot/` and
+  `aot.key` (77 MB) beside the cached executables (`.tmp/arbace-go-gate/amd64/`), the namespaces
+  `java-compiled` translates with; `target/arbace-go/aot` is the fallback.
+
+Makefile: `goi-check-aot-essential`, `java-check-compiled-essential`, `suite-aot-essential`.
+
+### The essential gate's time
+
+| | before (main `840e514b`) | after (this branch) |
+|---|---:|---:|
+| cold (a fresh `.tmp/` and `target/`: the executables built afresh, every cache empty; Go's build cache warm) | 20m51s | **21m23s** |
+| cached (nothing changed since the last run) | 2m29s | **2m42s** |
+
+Cold, the build (`go-build`, 10-13 minutes) comes first and dominates; then the checks' phase, before
+7m20s (diffcheck's cold program the longest), after 7m52s: diffcheck 7m52s (its j2g waiting for the
+lock), goi's chain 7m52s (`goi-check` 5m10s reading the corpora, then `goi-aot-essential` 2m42s making
+gc's references and `linux-errtest-full`), `suite-aot-essential` 5m29s, `java-compiled` 3m06s. Cached,
+goi's chain is the longest (1m10s and 1m19s), then the suite (2m08s) and the Clojure subset (1m53s:
+the translation's check and the runs, transducers' 75 s); `java-compiled` 22 s. RPS15's "present time
+plus a few minutes" holds: 32 s more cold, 13 s more cached. (A first cold run, before
+`java-compiled`'s retry, failed on its eight `java/net` timeouts: 22m52s.)
+
+### The whole compiled suite: the reference re-recorded
+
+`bin/clojure-tests --aot` on this branch: (1) at the base, before any change, against the reference
+REAP3 recorded before REAP4's merge: **no regression; it moved**: java-interop's `test-proxy-super`
+passes (BitSet among the proxy superclasses, REAP4: 296 to 299 of 302, one error less); metadata and
+java.javadoc were still skipped by the reference's `:skipped` though SL5 embeds them. (2) With RPS48
+(b) (below) and the two namespaces run: 78 namespaces, 785 tests, 20,580 assertions, 20,547 pass;
+metadata 53 of 53, java.javadoc 2 of 5 as at the eval level then; nothing else moved. (3) After main's
+merge (RPS55's Module), the record: **78 namespaces, 785 tests, 20,580 assertions: 20,549 pass, 28
+fail, 3 errors**, test.generative 27 of 27 (java.javadoc 4 of 5, its java.sql assertion), against
+REAP3's 778 tests, 20,520 assertions, 20,489 pass; the levels' disagreements clearing's two and
+`seq-and-transducer` (the javadoc and metadata ones gone). `test/arbace-go-aot-results.edn` written from it
+(metadata and java.javadoc recorded, RPS82 (a)); `test/clojure/divergences-aot.edn`: `:proxy-bitset`
+dropped (fixed), `:d6-namespaces-cut` replaced by `:javadoc-url` (the java.sql assertion, by design,
+D6, citing RPS55 (a) and RPS82 (a), as the eval level's class); `bin/reap` 0 problems.
+
+**RPS48 (b) built for the whole `--aot`**: every embedded namespace of the runtime (listed as
+bin/diffcheck lists them, `arbace.j2g.embed/sources`) required before the suite's in the compiling
+run, so that the program's runtime is the shipped build's: 235 sources compiled (156 before),
+22,838 classes (15,219); the compiling 125 s (76), j2g 132 s (73), the build 91 s; peak resident 21.7
+GB; no test moved by it. The essential subset keeps (a)'s shape (RPS40 (b)'s "with the runtime's
+namespaces they load").
+
+### Proposals (RPS70-RPS79)
+
+- **RPS70 The AOT subset's list.**
+  - Options: (a) as built: a committed list made by its stated rule, regenerated by the rule when
+    the AOT reference is recorded again; (b) derived at run time from the reference by the rule (no
+    list to keep, but the subset moves with every re-record); (c) goi's essential list's own
+    programs only.
+  - *Recommended: (a)*: the subset stays what the gate has proved, a re-record does not change the
+    gate silently, and the list is goi's essential list's kind.
+- **RPS71 Java's compiled subset.**
+  - Options: (a) as built: derived at each run from `test/java/essential.txt` and
+    `test/java/check-compiled.edn`'s passes (420); (b) a committed list; (c) every essential test,
+    the 8 not passing compiled as known.
+  - *Recommended: (a)*: the compiled level's reference already decides which pass, and the essential
+    tests' forms are committed; a test that starts passing compiled joins at the next record.
+- **RPS72 A failure in Java's compiled subset.**
+  - Options: (a) as built: any refusal, build failure or run not passing fails the step; (b) the
+    whole level's rounds (a refused test taken out, the rest built again) with the refused test
+    failing the step afterwards.
+  - *Recommended: (a)*: every test of the subset passed compiled when recorded, so a refusal is a
+    regression; the rounds cost a second j2g pass the gate does not need to name it.
+- **RPS73 The whole-program j2g runs in the essential gate.**
+  - Options: (a) as built: one at a time (`J2G_LOCK`), builds and runs overlapping; (b) concurrently
+    with `GOMEMLIMIT` lowered for each (more GC, about the same time, the host's memory shared with
+    the other slot); (c) diffcheck, the Java and the Clojure subsets in one chain (simpler, about 4
+    minutes more cold).
+  - *Recommended: (a)*: three 20 GiB runs beside the suite, the oracle and another heavy slot do not
+    fit 62 GB; the lock costs only the j2g passes' serialization.
+- **RPS74 `seq-and-transducer` in the Clojure subset.**
+  - Options: (a) kept (as built: 75 s of the subset's runs, cold and cached); (b) skipped in the
+    subset only (a subset overlay of `:skipped-tests`), its whole-suite run kept (RPS43 (a)); (c)
+    transducers out of the subset.
+  - *Recommended: (b)*: the cached gate's longest new part is that one test's 200,000 trials, which
+    the whole `--aot` runs in `--full`; transducers' other 18 tests stay.
+- **RPS75 RPS48 (b) for the whole compiled suite.**
+  - Options: (a) as built: every embedded namespace prepared and compiled first (the program's
+    runtime the shipped one's; about 3 minutes more, j2g's peak 21.7 GB); (b) back to the 53
+    namespaces the suite loads.
+  - *Recommended: (a)*: decided (RPS48), measured, no outcome moved; `--full` only.
+- **RPS76 The gate's cached compiled namespaces.**
+  - Options: (a) as built: `--gate-build` keeps `aot/` beside its executables (77 MB), the Java
+    subset's input; (b) the Java subset compiles its own namespaces (c2j, as diffcheck: minutes more
+    cold); (c) `target/arbace-go/aot` only, with its key checked.
+  - *Recommended: (a)*: the gate's executables and their namespaces are one build; (c) breaks
+    whenever a `bin/arbace-go --build` of other sources replaced the target tree.
+- **RPS77 The programs' caches on disk.** The gate keeps three cached programs besides its executables:
+  diffcheck's (1.2 GB with its trees), the Clojure subset's (about 620 MB with its work module) and
+  the Java subset's (220 MB).
+  - Options: (a) as built: each kept until its key changes; (b) the Clojure subset's work module and
+    j2g tree removed after its build, as the Java subset does (about 400 MB less, the next miss
+    printing anew from repr/go's print cache).
+  - *Recommended: (b)*: the trees are not read on a hit.
+- **RPS78 The levels' disagreements of the subset.**
+  - Options: (a) as built: none (the subset runs at the AOT level only; the whole `--aot` lists them
+    in `--full`); (b) the subset's namespaces compared with the eval level's reference too.
+  - *Recommended: (a)*: a disagreement is a finding, not a regression (RPS16), and the eval level's
+    suite runs beside it.
+
+## As built: REAP5 (2026-10-25)
+
+Java's print level (§3.6, RPS9 (a), RPS16), on the branch `reap5-java-print` from main `840e514b`.
+Measured on main's javac tool executable (`target/arbace-go/amd64/arbace-javac`, key `bf740cf0…`,
+`REPR_JAVA_STALE_OK=1`, as JC1-JC3 ran: javac's world has not changed since, repr/java's
+namespaces load from the checkout where they differ) and the worktree's stage 0 as the tools'
+host, 8 jobs, every run in the host's heavy slots. No shipped code changed (`arbace/`, `go/`,
+`overlay/`, `jdk/` untouched; no file of `gate_key` or of javac's tool key): no re-seed.
+
+**The level.** `bin/java-check --levels print` (the shell side a section of its own in
+`bin/java-check`, `print_level`, hooked after the compiled level; the data side the new namespace
+`java.print`, `test/java/print.ae`, on the tools' host beside `java.check`). For each run test
+whose read passed (its forms F1, the read level's cache):
+
+1. *print*: F1 printed by `arbace.repr.java.print` in the lines layout with `jdk/forms` as its
+   index (`bin/repr-java print --layout lines --index jdk/forms`'s output, byte for byte on the
+   samples compared; the index loaded and declared once for the run, the tests' own declarations
+   added per test), and the test's sources read in mode `:full` (`read --full`, cached in
+   `.tmp/java-check/forms-full` by the sources, the options and the reader) printed in the full
+   layout: one host process for every test, 24 s for 2,720;
+2. *javac*: javac on Arbace (`bin/repr-java javac`, the classes level's options `-g:none -nowarn
+   -XDsuppressNotes -proc:none -implicit:none` and the test's) accepts the printed Java;
+3. *forms*: the printed Java read again (F2, on the tool, cached as the read level's) holds F1's
+   forms, as data, metadata included (`arbace.repr.java.roundtrip/compare-forms`: the ae files'
+   text after their first line, else their forms);
+4. *text*: mode `:full` printed back is the renamed source, byte for byte, file by file;
+5. *classes*: the printed Java's class files against the original's: the JDK javac's digest (the
+   reference's, which javac on Arbace's of the original equals at the classes level), and when they
+   differ against javac on Arbace's class files of the original, the differing ones compared
+   method by method, instruction by instruction (Arbace's own reading of the code, after
+   `jrt.classfile`: the check needs no JVM, so not `javap`), the differences named as
+   `bin/repr-java roundtrip` names them (a value's control flow, a local's initializer, a switch's
+   arms, an increment's place, the order of code or of the constant pool).
+
+A test's result is the first step not passing in that order (`fail` for print and javac, `differ`
+for forms, text and classes), the others after it as "(also: ...)"; `java.print judge` prints the
+steps' counts. Results in `test/java/check-print.edn` (`--record`; level `:print`, the name
+REAP1's `cells.edn` guessed, RPS29), classes in `test/java/divergences.edn` (`:level :print`, put
+before the classes of no level, whose regexps would take the printed Java's messages). In
+`bin/gate --full`'s java chain: `java-check-full` runs `--levels
+read,interp,classes,compiled,diagnostics,print`. Makefile: `java-check-print`. Cost: the mode
+`:full` reads 12.9 min cold (cached after), the printing 24 s, javac and the read of the printed
+Java 13.7 min (2,720 tests): about 27 min cold, 14.6 min with the `:full` reads cached.
+
+**Numbers** (2,722 run tests the JDK passes, JC1's corpora):
+
+| step | took it | pass | not |
+|---|---:|---:|---:|
+| print (lines and full layouts) | 2,720 | 2,718 | 2 (arrays of 50 and 255 dimensions: F1 does not read back, `:repr-java-dims`) |
+| javac accepts the printed Java | 2,718 | 2,625 | 93 |
+| the read again: forms equal | 2,625 | 2,577 | 48 |
+| mode `:full`: text byte for byte | 2,720 | 2,717 | 3 (the two arrays' `:full` read; FirstChar's empty unit) |
+| class files the original's | 2,625 | 2,121 | 504 |
+| **the level** | 2,722 | **2,104** | 618 |
+
+By class (the first step not passing): **by design** 472 (`:print-classes`: the forms do not
+record the source's choice; of the class files' reasons, per test (a test may name several), 344 a value's control flow, 69 a local's
+initializer, 65 a switch's arms, 3 an increment's place, 46 the constant pool's order or an
+attribute, 21 the order of the code, 58 another instruction (one the overload-choosing cast, below; the rest taken as the converter's
+restructuring of loops and `if`s as PRINTER-NOTES.md has them)); **deferred, decided** 36: Java's type
+arguments in code 30 (`:print-type-arguments`, RPS9 (a): the conformance corpus's kin of the 39 jdk
+files), `--release` 2 (`:print-release`, JCS50 (a)), the dimensions 2 (`:repr-java-dims`, JCS12
+(b)), the read failed 2 (`:read-failed`); **pending** 110: the printer's syntax 45
+(`:print-syntax`, RPS60), the printed Java read to other forms 47 (`:print-forms`, RPS64),
+conversions 9 (`:print-conversions`, RPS61), javac's other refusals 7 (`:print-javac-other`, RPS62),
+an empty unit 1 (`:print-empty-unit`, RPS63), the overload-choosing cast 1 (`:print-overload-cast`,
+RPS65). `bin/reap`: Java print **2,104 / 472 / 146 (110 pending)**, 12 of 12 cells checked, 0
+problems.
+
+**What the level found that the round trip's corpora did not.**
+
+- *The printer's syntax* (45): an array creation as an operand (`new byte[n][0] = 0` where Java needs
+  `(new byte[n])[0]`: HotSpot's generated fuzz tests, `cannot find symbol` and `unexpected type`), a
+  switch expression or a lambda as a receiver (`switch (i) {...}.g()`, `(Integer) (() -> ...).get()`:
+  the cast to the functional interface gone), an array type in a method reference (`int::1/.clone`
+  for `int[]::clone`, the forms' `int/1` spelled through), local and anonymous classes' names
+  (`Outer.Inner1.1.this`, `T.1 o1`), a qualified inner class creation (`new Outer().new
+  X.Outer.Inner()`). The jdk corpus has few of these shapes; jtreg's tests are written to reach them.
+- *The read again* (47): a negative literal and a negation trade places (a float literal of F1
+  read back as `unchecked-negate-float` of one, 9; two int negations read back as literals), an int widened to a float constant written in decimal where the float
+  is not that value (`float f = 16777217;` as `1.6777217E7f`, read as 16777216), a literal's overload
+  (`(long 1)`), casts the converter adds or drops on raw iterators and boxes, a local's `:mutable`
+  tag, `when` against `if`, a loop label's or a temporary's name.
+- *A cast the forms lose* (1, the JLS corpus's `Overloads`): `v((Object) "s")` is read as
+  `v("s")`, so the printed Java (and the interpreter, `:interp-jls`) calls `v(String)`; the print
+  level saw it in the class files (`invokestatic v:(Ljava/lang/Object;)…` against
+  `(Ljava/lang/String;)…`), the forms step passing (F1 lost it at the read). Of the other "another
+  instruction" differences, the one looked at closely (`java/io/LineNumberReader/MarkReset`)
+  is a loop's `continue` printed as the `if`'s other arm: the converter's restructuring; the rest are
+  taken as such by the by-design class (RPS66).
+- *An empty compilation unit* (1): `langtools/tools/javac/unicode/FirstChar.java` holds a comment
+  and its package line only; its converted file holds `(in-ns ...)` alone, which the printer takes
+  for a namespace file, so no Java file is printed and the read again lacks the package's `load`.
+- *Mode `:full`*: 2,717 of 2,720 tests printed back byte for byte (the three above), the printed
+  full layout taken whole (no member edited).
+
+**Scratch** (the worktree's `.tmp/`, kept for the merge): `print-full.log` (the whole run's log, with
+the steps' counts), `print-results-1.tsv` (its `results.tsv`, both levels), `print-np.tsv` (the 618
+non-passes with their reasons), `read-cold.log` (the read level's cold run).
+
+### Proposals (RPS60-RPS69)
+
+- **RPS60 The printer's syntax (45 tests, `:print-syntax`).**
+  - Options: (a) fixed in `arbace.repr.java.print` within the milestone: parentheses around an
+    array creation, a switch expression, a conditional, an assignment or a cast lambda in operand and
+    receiver places (JLS 15's primary rules), `int[]::clone` for an array type's method reference,
+    local and anonymous classes named as the converter keeps them, a qualified inner class creation
+    written with its simple name; the samples (`test/repr/java/java`) taking a case of each, the round
+    trip's references recorded again; (b) deferred after the milestone, the class kept.
+  - *Recommended: (a)*: printer-only work (no shipped code, no re-seed), about a day, and the level
+    would pass them; the round trip gains the samples.
+- **RPS61 Conversions (9, `:print-conversions`).**
+  - Options: (a) the printer writes the cast an assignment context needs where the forms' value is
+    another primitive or box than the target's (`(int) x.byteValue()` into an `Integer`,
+    `Byte.valueOf((byte) 0)` into a `Byte[]`, a `char` label's constant as a char), from the
+    declarations it already consults; (b) deferred with the type arguments to JFS75 (b)'s model.
+  - *Recommended: (a)*: the printer knows the targets' types (its index); with RPS60's work.
+- **RPS62 javac's other refusals (7, `:print-javac-other`).**
+  - Options: (a) triaged one by one with RPS60 (a pattern binding's scope in a nested `if`, three
+    locals whose names differ by supplementary characters printed alike (`_abc`), a missing `return`
+    after a switch, a lambda's capture of a local the printer reassigns, a repeated type annotation,
+    the import of a package-private class, a raw `new DiagnosticCollector()` whose unchecked warning
+    fails `-Werror`: a lost diamond, RPS9's kind), each fixed or given a
+    class of its own; (b) the class kept deferred as one, after the milestone.
+  - *Recommended: (a)*, (b) for any that turns out to need the forms' model.
+- **RPS63 An empty compilation unit (1, `:print-empty-unit`).**
+  - Options: (a) `arbace.repr.java.print/unit` keeps a converted file of a Java origin that holds only
+    `in-ns` and prints its package line (and mode `:full` its record: the comment and the line); (b)
+    by design: a file with no declarations is not Java's to print.
+  - *Recommended: (a)*: a few lines, and mode `:full`'s promise (the file back byte for byte) holds
+    for it.
+- **RPS64 The printed Java read to other forms (47, `:print-forms`).**
+  - Options: (a) deferred, decided kind by kind after the milestone: the converter folding a negated
+    literal (`-1.0f` one literal, as javac's tree has it, JC5's converter work), the printer writing a
+    float constant exactly (`1.6777216E7f`), the literal's overload and casts as RPS61's, the
+    restructurings (when/if, labels, temporaries) by design; (b) by design all (the read normalizes;
+    F2 means what F1 means: the class files equal the original's for 16 of them, the other 31 differ
+    by the classes above); (c) fixed now in the converter
+    and the printer.
+  - *Recommended: (a)*: the literals are cheap and belong to JC5's converter changes; the
+    restructurings' kind is the class files' (by design), but which is which needs the per-kind look.
+- **RPS65 The overload-choosing cast (1, `:print-overload-cast`).**
+  - Options: (a) the converter keeps a cast that changes the overload javac chose (javac's
+    attribution knows the method symbol; the cast is a widening the forms elide), in JC5, with the
+    interpreter's `:interp-jls` case passing; (b) deferred after the milestone.
+  - *Recommended: (a)*: it is a meaning lost at the read, not a print matter; JC5 owns the converter.
+- **RPS66 How the class files are compared.**
+  - Options: (a) as built: the JDK javac's digest first, then javac on Arbace's class files of the
+    original, the differences named by Arbace's own reading of the code (no JVM), every difference
+    by design when the forms step passed; (b) (a), and `--record-ref` also compiling and running the
+    printed Java on the JDK (the printer run at recording time), so a class-file difference is judged
+    by the run's behaviour too; (c) (a) with the code compared after the converter's known
+    restructurings are normalized (a branch's layout), so only unnamed instructions remain.
+  - *Recommended: (a)*, (b) at the next recording of the reference: the print level found the
+    overload cast only because the class files differed; behaviour is the stronger check, and the
+    reference is the JDK's anyway.
+- **RPS67 The print level in the gates.**
+  - Options: (a) as built: in `bin/gate --full`'s `java-check-full` only (it needs javac's tool and
+    about 15 minutes); (b) an essential subset (REAP8's), the essential tests' committed forms printed
+    and judged at the forms and text levels without javac.
+  - *Recommended: (a)*: the forms level needs the read (javac's tool) and the text level the `:full`
+    forms; neither is in the essential gate's means. REAP8 may revisit with RPS15.
+- **RPS68 One result per test.**
+  - Options: (a) as built: the first step not passing (print, javac, forms, text, classes), the others
+    named "(also: ...)", the steps' counts in the run's log; (b) one level per step (`print-forms`,
+    `print-text`, `print-classes`, each a `check-*.edn` and a source of the cell), every step's
+    non-passes classed.
+  - *Recommended: (a)*: one cell, one row per test, as the other levels; the order puts the steps
+    whose failures are bugs before the classes' by-design differences. (b) if the user wants the text
+    level's 2,717 in `bin/reap`.
+- **RPS69 The printer's index.**
+  - Options: (a) as built: `jdk/forms` as the index, its declarations made once per run without the
+    tests' packages (equal to `bin/repr-java print --index jdk/forms` on the samples compared; a test
+    in a package `jdk/forms` declares would see the index's declarations made without its classes);
+    (b) `bin/repr-java print` per test (7 s each: about 5 hours a run); (c) no index.
+  - *Recommended: (a)*: the same output in 24 s; (c) would drop the generic classes' knowledge the
+    printer's casts need.
+
+**The checks.** The essential `bin/gate` at the branch's head: passed (9m17s; the gate's
+executables main's, the same `gate_key`): the suite 20,564 of 20,580 as recorded, the oracle 22,688
+of 22,740 (52 known), diffcheck 12,789 of 12,801 (12 known), goi's and Java's essential checks,
+the generated variants, j2g's edge, `bin/reap` (12 of 12 cells, 0 problems). `bin/java-check
+--levels print --only ...` alone (the read level's cache, not its rows) gives the recorded rows.
+`bin/gate --full` was not run (the policy until the milestone).

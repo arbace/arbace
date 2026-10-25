@@ -26,7 +26,8 @@
     report REF WORK DIVERGENCES CHECKDIR LEVELS [--record] [--essential FILE] [--partial]
         WORK/results.tsv (ID LEVEL RESULT REASON) against the recorded results
         (CHECKDIR/check-LEVEL.edn): as recorded, new, now passing; a test passing there and not
-        now is a regression; every test not passing in a class of DIVERGENCES (its result and
+        now is a regression (unless its result is flaky: bin/java-check ran it again and the
+        second run passed, JCS71 (a); a test recorded flaky counts as passing); every test not passing in a class of DIVERGENCES (its result and
         reason matched, as test/goi/divergences.edn's), each class's count and the numbers by
         area; --record writes the results as CHECKDIR/check-LEVEL.edn. Exit 1 on a regression,
         an unclassified test or an essential test not passing."
@@ -486,6 +487,54 @@
     (into {} (for [[id _ r reason] (read-edn f)] [id [r reason]]))
     {}))
 
+;; the two back ends against each other (JCS45 (a), "As built: JC2b"): a test passing at one of
+;; the levels interp and compiled and not at the other is a finding (diffcheck's kind, RPS16 (a)),
+;; recorded in CHECKDIR/levels-known.edn; a new one fails the check
+
+(defn- levels-against!
+  "When RESULTS hold both the interp and the compiled level: their disagreements (one passes, the
+  other not) printed against CHECKDIR/levels-known.edn ([id test interp-result compiled-result],
+  with the results' reasons), a new one (or one whose passing side changed) a problem, one that
+  agrees now printed as resolved; with record? the file written (a partial run updates its tests'
+  entries)."
+  [checkdir tests results lvs record? partial? problems]
+  (when (and (lvs :interp) (lvs :compiled))
+    (let [f (str checkdir "/levels-known.edn")
+          known (if (.isFile (io/file f)) (into {} (for [e (read-edn f)] [(first e) e])) {})
+          at (fn [lv] (into {} (for [[id l r reason] results :when (= l lv)] [id [r reason]])))
+          ri (at :interp) rc (at :compiled)
+          ids (sort (filter rc (keys ri)))
+          ;; a flaky result passed on its second run (JCS71 (a))
+          side (fn [id] (let [pi (#{:pass :flaky} (first (ri id))) pc (#{:pass :flaky} (first (rc id)))]
+                          (cond (and pi pc) :both (and pi (not pc)) :interp (and pc (not pi)) :compiled :else :neither)))
+          by (group-by side ids)
+          dis (sort (concat (by :interp) (by :compiled)))
+          entry (fn [id] [id (:test (tests id)) (first (ri id)) (second (ri id)) (first (rc id)) (second (rc id))])
+          known-side (fn [e] (if (= :pass (nth e 2)) :interp :compiled))
+          fresh (remove #(and (known %) (= (side %) (known-side (known %)))) dis)
+          resolved (filter #(and (known %) (#{:both :neither} (side %))) ids)]
+      (println (str "java-check levels interp and compiled: " (count ids) " tests: " (count (by :both [])) " pass both, "
+                    (count (by :compiled [])) " only compiled, " (count (by :interp [])) " only interpreted, "
+                    (count (by :neither [])) " neither; against " (.getName (io/file f)) ": "
+                    (- (count dis) (count fresh)) " as recorded, " (count fresh) " new, " (count resolved) " resolved"))
+      (doseq [id resolved] (println (str "   resolved: " id " " (:test (tests id)) " (now " (name (side id)) ")")))
+      ;; a new one fails the check, but for a run recording them (printed then)
+      (doseq [id fresh :let [[_ t ir ire cr cre] (entry id)
+                             m (str "levels: " id " " t ": interp " (name ir) " " ire ", compiled " (name cr) " " cre)]]
+        (if record? (println (str "   new " m)) (swap! problems conj m)))
+      (when record?
+        (let [now (into {} (for [id dis] [id (entry id)]))
+              all (if partial? (merge (apply dissoc known ids) now) now)]
+          (write-lines f (concat [";; The tests passing at one of bin/java-check's levels interp and compiled and not at the other"
+                                  ";; (doc/classes/JAVA-CONFORMANCE-SURVEY.md, JCS45 (a), \"As built: JC2b\"): [id jtreg-name"
+                                  ";; interp-result interp-reason compiled-result compiled-reason]. A run of both levels fails on a"
+                                  ";; disagreement not here (or whose passing side changed); bin/java-check --record writes it."
+                                  "["]
+                                 (for [[_ [id t ir ire cr cre]] (sort-by key all)]
+                                   (str " [" (q id) " " (q t) " " ir " " (q ire) " " cr " " (q cre) "]"))
+                                 ["]"]))
+          (println (str "   recorded " f)))))))
+
 (defn report [ref work divergences checkdir levels & opts]
   (let [flags (set opts)
         o (apply hash-map (remove #{"--record" "--partial"} opts))
@@ -504,8 +553,13 @@
                   pass? #(= :pass (nth % 2))
                   np (remove pass? rs)
                   cls (group-by #(classify classes lv (first %) (nth % 2) (nth % 3)) np)
-                  regress (filter #(and (= :pass (first (rec (first %)))) (not (pass? %))) rs)
-                  now-pass (filter #(and (rec (first %)) (not= :pass (first (rec (first %)))) (pass? %)) rs)
+                  ;; JCS71 (a): a would-be regression run again whose second run passed is
+                  ;; :flaky (bin/java-check's again), no regression, and a test recorded :flaky
+                  ;; passes in the record's sense; its class names it (a :flaky class's :tests)
+                  pass-like? #(#{:pass :flaky} %)
+                  regress (filter #(and (pass-like? (first (rec (first %)))) (not (pass-like? (nth % 2)))) rs)
+                  flaky (filter #(= :flaky (nth % 2)) rs)
+                  now-pass (filter #(and (rec (first %)) (not (pass-like? (first (rec (first %))))) (pass? %)) rs)
                   fresh (filter #(and (not (pass? %)) (not= :pass (first (rec (first %))))
                                       (not= [(nth % 2) (nth % 3)] (rec (first %)))) rs)]
             :when (seq rs)]
@@ -513,16 +567,18 @@
                     (str/join ", " (for [[r xs] (sort-by (comp - count val) by)] (str (count xs) " " (name r))))))
       (println (str "   against " (.getName (io/file f)) ": "
                     (count (filter #(= [(nth % 2) (nth % 3)] (rec (first %))) rs)) " as recorded, "
-                    (count fresh) " new or changed, " (count now-pass) " now passing, " (count regress) " regressions"))
+                    (count fresh) " new or changed, " (count now-pass) " now passing, " (count regress) " regressions"
+                    (when (seq flaky) (str ", " (count flaky) " flaky (run again, JCS71 (a))"))))
       (doseq [x regress] (swap! problems conj (str "regression: " (first x) " " (:test (tests (first x))) ": " (name (nth x 2)) " " (nth x 3))))
       (doseq [x (take 20 now-pass)] (println (str "   now passing: " (first x) " " (:test (tests (first x))))))
+      (doseq [x flaky] (println (str "   flaky: " (first x) " " (:test (tests (first x))) ": " (nth x 3))))
       (doseq [c classes :let [n (count (get cls (:id c)))] :when (pos? n)]
         (println (format "   %5d %s (%s)" n (:title c) (name (:kind c)))))
       (when-let [u (seq (get cls :unclassified))]
         (println (format "   %5d in no class" (count u)))
         (doseq [x u] (swap! problems conj (str "in no class: " (first x) " " (:test (tests (first x))) ": " (name (nth x 2)) " " (nth x 3)))))
       (when essential
-        (doseq [x rs :when (and (essential (first x)) (not (pass? x)))]
+        (doseq [x rs :when (and (essential (first x)) (not (pass? x)) (not= :flaky (nth x 2)))]
           (swap! problems conj (str "essential: " (first x) " " (:test (tests (first x))) " does not pass: " (name (nth x 2)) " " (nth x 3)))))
       ;; the numbers by area (the survey's §5 table)
       (let [areas (sort (distinct (map #(area (:test (tests (first %)))) rs)))]
@@ -544,6 +600,7 @@
                                    (str " [" (q id) " " (q (:test (tests id))) " " r " " (q reason) "]")))
                                ["]"]))
         (println (str "   recorded " f))))
+    (levels-against! checkdir tests results (set (map keyword (str/split levels #","))) record? partial? problems)
     (doseq [p @problems] (println (str "   " p)))
     (shutdown-agents)
     (System/exit (if (seq @problems) 1 0))))

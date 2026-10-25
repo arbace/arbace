@@ -1631,6 +1631,296 @@ new disagreement), JCS46 (a) (the compiled namespaces' runtime key checked), JCS
 again once at twice the limit), JCS48 (a) and (b) (shards of 500, a shard whose j2g dies split), JCS49 (a)
 (`J_..._J`). The three `:pending` classes cite this.
 
+## As built: JC2b (2026-10-25)
+
+Branch `java-check-jc2b`, from main `840e514b`: JC2's decided follow-ups (JCS42 (b), JCS43 (a), JCS44
+(a), JCS45 (a), JCS46 (a), JCS47 (a), JCS48 (a) and (b), JCS49 (a)), then the whole check run again at
+the levels read, interp and compiled with one j2g (JC2's compiled numbers came from two). The
+executables: main's gate build of `566f549d` interprets and hosts j2g (`JAVA_CHECK_EXE`, `J2G_GO_EXE`;
+j2g's changed namespaces load from the checkout, evaluated); javac's tool executable of main
+(`REPR_JAVA_STALE_OK=1`: its key covers `arbace/`, which j2g's changes touch, not the reader); the
+compiled namespaces main's shipped build's (`target/arbace-go/aot`, its runtime the checkout's: j2g is
+not the runtime); stage 0 of main the tools' host. 8 jobs, the whole run in one heavy slot.
+
+**j2g** (`arbace/j2g/`; the shipped program's j2g changes: the re-seed's):
+
+- *JCS42 (b), the leaves of j2g's support code*: `arbace.j2g.checks/support-leaves` names the
+  translated JDK classes j2g's own support functions take as `*C` where gc then rejects the Go:
+  `java.io.PrintStream` and `java.io.PrintWriter` (`Throwable.printStackTrace`'s support functions call
+  `NN` on the stream, `out/support-forms`). A class of the world extending one (directly or not) is an
+  error of `report.edn` naming it, `t04334/ClearErrorStream: extends java.io.PrintStream, which j2g's
+  support code takes as a leaf (Throwable.printStackTrace(PrintStream)'s support function has
+  *PrintStream; J2G-SPEC §5.3, JCS42 (b))`, so the check refuses its test at j2g's round, before a
+  build (J2G-SPEC §5.3 amended). `java.io.File` was in the first list (`Runtime.exec`'s reflection entry
+  asserts `*File`) and refused `jdk/java/io/File/Cons.java`, which passed: that assertion compiles either
+  way and fails only for a subclass's value passed to that entry by reflection, so `File` is not a support
+  leaf (the shard was run again, `--shard 1`; JCS73).
+- *JCS43 (a), reserved suffixes*: a static field or enum constant whose munged name is one of the
+  suffixes j2g derives package members from (`class`, `Init`, `init`, `clinit`, `clinit_pK`, `I`,
+  `InstanceOf`, `Cast`, `members`, `New...`, `Fn...`, after any `_f` of its own) gets `_f`
+  (`arbace.j2g.names/reserved-member`, through `static-field-name` and `code/static-place`; J2G-SPEC §4.4
+  amended). `TestLargeCompilation`'s `static int init` is `J_..._J_init_f` beside `J_..._J_init`, and
+  the test passes. A first list held `_VALUES`: an enum's `C__VALUES` is its own `$VALUES` field, not a
+  derived name, and the shipped translation's check (below) found 48 files renamed by it; taken out.
+  Static methods need no mark: their mangled names hold `__` and the return code, no derived suffix does.
+- *JCS44 (a), the import named*: `arbace.j2g.world/load-world` reads each forms file's import list
+  (`imported`: `(import '(java.net DatagramSocket))`, `(import 'java.net.X)`), and a failure of a class of
+  that file whose message is `Unable to resolve class|symbol: X`, `Unknown type|class: X` names the import
+  after the name: `Unable to resolve class: DatagramSocket (the import java.net.DatagramSocket)`,
+  `Unknown type: RandomAccessFile (the import java.io.RandomAccessFile)`. The messages change, not the
+  Go.
+
+*The shipped translation*: `bin/j2g --program` with main's goi table and compiled namespaces
+(`target/arbace-go/gotable`, `target/arbace-go/aot`) on the branch's j2g, against main's shipped run
+(`target/arbace-go/j2g`): with `_VALUES` in the reserved list 48 files of `gen/` differed, only in
+`C__VALUES` → `C__VALUES_f` (`.tmp/ship-gen.full`); without it (the branch) the generated tree is
+main's byte for byte, the program root too but the image (`image.bin`, which `bin/arbace-go` fills
+afterwards) and the embedded sources (`res/`, the checkout's j2g); `report.edn` but its times (the
+shipped world has no failure naming an unresolved class; `.tmp/ship-gen2.diff`, empty).
+`bin/j2g-edge verify` passes (the gate). The compiled j2g in the next build changes, as any j2g change does.
+
+**bin/java-check** (`bin/java-check`, `test/java/check.ae`):
+
+- *JCS45 (a), the two levels against each other*: a run holding the levels interp and compiled prints
+  their disagreements (a test passing at one only) against `test/java/levels-known.edn` (`[id
+  jtreg-name interp-result interp-reason compiled-result compiled-reason]`, `java.check/levels-against!`):
+  as recorded, new, resolved; a new one (or one whose passing side changed) fails the check, `--record`
+  writes the file (a partial run updates its tests' entries) and prints the new ones instead.
+- *JCS46 (a), the compiled namespaces' runtime*: `aot.key` hashes the runtime's key with Arbace's
+  sources and cannot be read back, so the tree's runtime is the one the executable built with it has
+  (`AOT/../amd64/arbace`'s `*arbace-version*` `:runtime`), checked against `arbace_runtime_key`
+  (`aot_fresh`): a tree of another runtime is refused with the build to run (`bin/arbace-go --build`),
+  `JAVA_CHECK_AOT_STALE_OK=1` warns instead. j2g's and the namespaces' sources are not the runtime's.
+- *JCS47 (a)*: an action that times out is run again once at twice the limit before it counts; its
+  reason `20 s, then 40 s` (both levels, `run_actions`).
+- *JCS48 (a) and (b)*: shards of 500 tests by default; a shard whose j2g dies (no `report.edn`:
+  `compiled_shard`'s status 3) is split in two halves (`DIR/h1`, `DIR/h2`) and each run again likewise,
+  down to `JAVA_CHECK_SPLIT_MIN` tests (default 25; `run_shard`). No j2g died in the run below; the split
+  was exercised with a `JAVA_CHECK_HEAVY` prefix that kills the first j2g (`.tmp/fakeheavy.sh`, four
+  tests, `JAVA_CHECK_SPLIT_MIN=2`: the shard split, both halves translated, built and run, the four results
+  those of the whole run; `.tmp/split.log`).
+- *JCS49 (a)*: `J_..._J` as built.
+
+**Numbers** (each level against the JDK's recorded runs, 2,722 tests; before: JC2's records):
+
+| level | hotspot compiler | java/lang | java/util | java/io | java/net | java/nio | java/text | java/math | java/security | other java/* | langtools | jls | **all** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tests (pass on the JDK) | 697 | 354 | 375 | 256 | 154 | 151 | 50 | 38 | 101 | 19 | 515 | 12 | **2,722** |
+| read | 696 | 354 | 375 | 256 | 154 | 151 | 50 | 38 | 101 | 19 | 514 | 12 | **2,720** |
+| interp, JC2 | 531 | 153 | 160 | 83 | 49 | 6 | 38 | 35 | 3 | 0 | 359 | 9 | **1,426** |
+| **interp, JC2b** | **564** | **155** | **162** | **81** | **49** | **6** | **39** | **35** | **3** | **0** | **359** | **9** | **1,462 (53.7%)** |
+| compiled, JC2 | 640 | 162 | 207 | 93 | 57 | 7 | 42 | 36 | 8 | 0 | 369 | 11 | **1,632** |
+| **compiled, JC2b** | **644** | **163** | **208** | **91** | **57** | **7** | **42** | **36** | **8** | **0** | **369** | **11** | **1,636 (60.1%)** |
+| compiled: refused | 18 | 102 | 89 | 103 | 66 | 133 | 0 | 0 | 83 | 18 | 113 | 0 | 725 |
+| compiled: fail | 21 | 84 | 69 | 59 | 30 | 11 | 7 | 2 | 8 | 1 | 31 | 0 | 323 |
+| compiled: differ | 7 | 1 | 4 | 3 | 1 | 0 | 1 | 0 | 1 | 0 | 1 | 1 | 20 |
+| compiled: timeout (20 s, then 40 s) | 6 | 4 | 5 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 16 |
+| interp: timeout (20 s, then 40 s) | 72 | 2 | 4 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 79 (117) |
+
+What moved, test by test against JC2's records: *interp* 38 timeouts now pass (JCS47: 36 of them
+HotSpot's, near the limit on the loaded host) and 2 passes now differ (below); *compiled* 7 timeouts now
+pass, `TestLargeCompilation` (refused, JCS43) passes, 3 passes now differ and 1 fails (below). The
+compiled run took 41 min for six shards, two j2g rounds each (the leaf refusals now come at j2g's round,
+not after a build), the whole run 71 min.
+
+*The four new non-passes are the harness's, not j2g's*: `jdk/java/io/File/CheckTempDir.java` and
+`UserDirChangedTest.java` print the run's temporary and working directories, whose path has the
+checkout's in it: the reference was recorded in JC2's worktree (`.tmp/worktrees/java-check-jc2`), this
+run's is one character longer (both levels: `:environment`, JCS70); `compiler/c1/Test8267042.java`'s
+output depends on two threads' timing (`differ`, 174 bytes against 137, on the loaded host; the
+interp level differed in JC2 already); `jdk/java/util/List/LockStep.java` serializes a list when its
+`Random` says so (`maybe(4)`), so it passes or reaches `ObjectOutputStream`, cut, by chance
+(`:serialization`; JCS71). They are recorded as they are.
+
+**Classes** (`test/java/divergences.edn`): `:j2g-world`, 420 compiled tests in JC2, is 11 after the
+world classes (moved there: the refusals naming an import fall in the world classes by package, as the
+interp level's run-time throws do: networking +121, security +64, `java.io` +61, zip and jar +29,
+`java.lang.management` +24, reflection +18, javac's API +17, `java.lang.invoke` +14, logging +14,
+serialization +11, NIO +10, threads +10, `java.lang.classfile` +9, references +4, stack +2, desktop and
+class loading +1 each); what is left names no import (`ProcessHandle`, `StackWalker` and other java.lang
+classes, a test's own nested names: JCS72). `:j2g-go` 11 → 8 (the capture bugs and their kin, JC5's; the
+three subclasses of `PrintStream`/`PrintWriter` now `:j2g-leaf`, new, kind `:j2g`, decided JCS42 (b)).
+`:j2g-names` is gone (its one test passes). No class is `:pending` for JC2b's decisions;
+`:interp-files` stays pending on JCS40 (JC5).
+
+*The two levels against each other* (`test/java/levels-known.edn`, 224 entries): **1,437 pass both,
+199 only compiled, 25 only interpreted**, 1,061 neither. The 25 are JC2's 26 less `TestLargeCompilation`:
+`Runtime.exec`'s overloads (5), `ForkJoinPool.submit` (2), `Date.toInstant` (1), reflection over
+non-public members and nested classes (7), `strictfp`'s methods by reflection (2), `CopyMethods`'
+initialization, `TestSyntheticNullChecks`, `SamConversion`'s `test3`, `LambdaTest5`'s goroutine stack,
+two escape-analysis tests and the Go j2g writes that gc refuses (2, `:j2g-go`).
+
+**REAP**: `bin/reap` 0 problems (11 of 12 cells checked); Java's row: read 6,541 / 0 / 97, eval 1,462 /
+238 / 1,022, **AOT 1,636 / 111 / 975**.
+
+**Checks**: the essential `bin/gate` at `fb8af1aa` passed in 24m49s (the executables built afresh: j2g changed): the smoke test, Clojure's suite with no regressions, the oracle 22,688 of 22,740 as recorded, diffcheck 12,789 of 12,801 as recorded (the Java forms' pair 743 of 745), goi's essential check 801 of 801, Java's essential check 428 of 428, the generated variants, j2g's edge (`bin/j2g-edge verify`), `bin/reap` 0 problems.
+
+### Proposals (JCS70-JCS79)
+
+- **JCS70 The run's directories in stdout** (`CheckTempDir`, `UserDirChangedTest`: their stdout holds the
+  scratch's path, so the result depends on where the checkout is).
+  - Options: (a) the run directories' paths masked in stdout on both sides (`W`, `TMP`, as the reasons
+    already are) before the digest, the reference recorded again; (b) the runs always in one fixed
+    directory whatever the checkout (`JAVA_CHECK_RUN_ROOT`), the reference recorded there; (c) left in
+    `:environment`.
+  - *Recommended: (a)*: the digest then compares what the program computed, not where it ran; (b) ties
+    every run to one directory, which two worktrees cannot share at once.
+- **JCS71 Tests the JDK's two runs agreed on that are not deterministic** (`LockStep`'s random
+  serialization, `Test8267042`'s threads).
+  - Options: (a) a test passing in the record and not now is run again once before it counts as a
+    regression (JCS47's rule widened), a flip reported as `flaky` and listed in a class `:flaky` by name;
+    (b) the reference records three runs, `:det` from all of them; (c) as built (the record moves).
+  - *Recommended: (a)*: cheap (a handful of reruns a run), and it names the flaky tests instead of
+    hiding them; (b) costs a whole reference run and still misses 1-in-4 events.
+- **JCS72 java.lang's classes in j2g's refusals** (the 11 left in `:j2g-world`: no import names them).
+  - Options: (a) the message names `java.lang.X` when X is a class of java.base's `java.lang` listed as
+    data (the platform's module listing, `jdk/javac/platform.sha256`'s tree, recorded into the edge);
+    (b) left in `:j2g-world` (11 tests); (c) repr/java writes java.lang's classes into the import list.
+  - *Recommended: (b)* until JC6 ranks the world: 11 tests, and (a) needs a listing j2g does not hold.
+- **JCS73 `File` in `Runtime.exec`'s reflection entry** (`(inst As (* File))`: a subclass's value
+  passed by reflection fails the assertion).
+  - Options: (a) the entry converts through `File_Cast` (the class's interface type when non-leaf), as the
+    `PrintStream` entries do; (b) as built.
+  - *Recommended: (a)*, a one-line change in `out/support-table-forms`, with JCS74.
+- **JCS74 The support leaves themselves** (3 tests refused for extending `PrintStream`/`PrintWriter`).
+  - Options: (a) the support functions typed by `m/go-type` (the interface type when non-leaf) with a nil
+    check in place of `NN`, as `System.out`'s variables already are, the refusal then dropped; (b) the
+    refusal kept (as built).
+  - *Recommended: (a)* in JC6 or with JC5's j2g work: the refusal was the honest stopgap; the fix is small
+    and turns 3 refusals into runs.
+- **JCS75 A known disagreement whose reasons change** (the known file matches by test and passing side).
+  - Options: (a) printed (`changed`), not failing; (b) failing as a new one; (c) as built (silent).
+  - *Recommended: (a)*: a changed reason on the failing side is news (a different bug), not a regression.
+- **JCS76 The compiled namespaces' runtime read from the executable beside them** (JCS46 as built).
+  - Options: (a) `bin/arbace-go` writes the runtime key beside `aot.key` (`aot.runtime`), the check reading
+    it first, at the next change of the build's scripts (it changes the gate's cache key); (b) as built.
+  - *Recommended: (a)*: a tree copied without its executable then still names its runtime.
+- **JCS77 The 25 only interpreted** (`levels-known.edn`): each a kind of JC5's or JC6's.
+  - Options: (a) triaged into the plans: `Runtime.exec`'s and `ForkJoinPool.submit`'s cut overloads and
+    `Date.toInstant` to JC6 (rooted by the program's reflection, 8 tests), reflection over non-public
+    members and `strictfp` to JC5's j2g work (9), the rest one by one; (b) left as findings.
+  - *Recommended: (a)*: they are what diffcheck's corpus misses, and each fixed one is a gain at AOT.
+- **JCS78 Where the timeouts stand** (79 interp, 16 compiled after JCS47's second chance).
+  - Options: (a) the `:speed` class split by level and kept as the interpreter's measure (JC4's work);
+    (b) a higher interp limit for HotSpot's JIT tests (their loops); (c) as built.
+  - *Recommended: (c)* now, (a) when JC4 takes the interpreter's speed up: the second chance already
+    removed the load's noise (38 flips).
+- **JCS79 The split's floor** (`JAVA_CHECK_SPLIT_MIN`, 25).
+  - Options: (a) 25 (as built); (b) down to one test, a test whose j2g dies alone then `error`; (c) no floor.
+  - *Recommended: (a)*: a shard of 25 that still kills j2g is a j2g bug to look at, not to split around.
+
+## Decided (2026-10-25): JCS70-JCS79
+
+The user decided JC2b's proposals as recommended: JCS70 (a) (the run directories masked in stdout before
+the digest, the reference re-recorded), JCS71 (a) (a would-be regression run again once, a flip reported
+`flaky` and named in a `:flaky` class), JCS72 (b) (the java.lang names left in `:j2g-world` until JC6),
+JCS73 (a) and JCS74 (a) (`File_Cast`, then j2g's support code typed by Go type with a nil check and the
+leaf refusal dropped, in JC6 or JC5's j2g work), JCS75 (a) (a known disagreement whose reasons change
+printed as changed), JCS76 (a) (`aot.runtime` beside `aot.key` at the next change to the build scripts),
+JCS77 (a) (the 25 only interpreted triaged into JC6 and JC5), JCS78 (c), JCS79 (a).
+
+## As built: harness follow-ups (2026-10-25)
+
+Branch `harness-followups`, from main `6f3a93ad`: JCS70 (a) and JCS71 (a) in `bin/java-check` and
+`test/java/check.ae`, beside FULL-SUPPORT-SURVEY's RPS74 (b) and RPS77 (b) in `bin/clojure-tests`
+(doc/FULL-SUPPORT-SURVEY.md, "As built: harness follow-ups"). No shipped code changes (scripts of
+`bin/`, data and the check's namespace under `test/`): no re-seed. The executables: this worktree's
+gate build (identical inputs to main's, its key `35fa15f1e4ed`) interprets and hosts j2g, its `aot/`
+the compiled namespaces (`JAVA_CHECK_AOT`, with `JAVA_CHECK_AOT_STALE_OK=1`: the gate's tree has no
+executable beside it to read the runtime from, JCS76, and its `aot.key` is the checkout's, which
+`--essential-compiled` checks); main's javac tool (`REPR_JAVA_STALE_OK=1`: the reader's sources
+unchanged). Every heavy run in the host's heavy slots, at 8 jobs. Scratch in `.tmp/hf/`.
+
+- *JCS70 (a), the run's places masked*: `mask_dirs W TMP` replaces, in that order, the test's
+  working directory (`WORK/w/ID`) by `W`, its temporary one (`WORK/tmp/ID`) by `TMP`, the scratch
+  (`.tmp/java-check`, or `JAVA_CHECK_WORK`) by `WORK` and the checkout by `ROOT` (`LC_ALL=C sed`:
+  an output naming none is unchanged byte for byte, a missing last newline and NUL bytes kept). Both
+  sides take stdout through it before the digest and the length: `record_runs` for the reference
+  (also before the identity hash codes' mask, JCS17 (b)), `judge` for the levels interp and
+  compiled and the essential runs. `record_runs` leaves a mark (`WORK/record/ID/runI.dirs[2]`) when
+  the mask changed a run's stdout.
+- *The reference re-recorded*: a whole `--record-ref` (36 min, about 14 of them waiting for a slot;
+  1,304 s its own clock) marked **22 tests** whose stdout names the run's places (`CheckTempDir`,
+  `UserDirChangedTest`, `GetResource`, `MHIllegalAccess`, `RuntimeMXBean`'s two, `GetURLsTest`,
+  `GetContentType`, `FileChannel`'s `LongTransferTest` and `MapTest`, `FullRead`, `UriImportExport`,
+  `StoreDeadlock`, eight of `java.util.logging`'s and javac's `T7005371`). The whole run moved
+  1,364 lines: besides the 22, **1,311 only in the digests of runs the JDK's two runs did not agree
+  on** (`:det false`, never compared: JCS80), 13 whose `:det` drew otherwise, 18 in other
+  fields (a JDK failure's reason among them, JCS84). So `test/java/ref-jdk26.edn` is the committed file with those 22 tests'
+  lines taken from the run (what `--only` writes, without a second run): 22 lines changed, the other
+  4,158 byte for byte (`.tmp/hf/ref-full-run.edn`, `.tmp/hf/dirs-ids.txt`).
+- *The levels re-recorded*: `--levels read,interp,compiled --only` the 22 and the two flaky tests
+  (19 of them the JDK passes; 24 min, one shard, 9 refused, the second j2g round none):
+  **`CheckTempDir` and `UserDirChangedTest` pass at interp and compiled** (`:environment` before,
+  JC2b's "four new non-passes"); `StoreDeadlock`'s reason names the new length (compiled); nothing
+  else moved; read as recorded; `levels-known.edn` unchanged (the two pass both).
+- *JCS71 (a), a would-be regression run again*: `again LEVEL RESULTS RUNNER` takes the tests of the
+  level not passing that `check-LEVEL.edn` records `:pass` (or `:flaky`), runs each once more
+  (`interp_one` after the interp level; `compiled_one_on` in `compiled_shard` before the program is
+  removed), and a test whose second run passes gets the result **`flaky`**, its first result and
+  reason kept (`flaky  differ stdout differs (174 bytes, ...); passed when run again (JCS71 (a))`); a
+  test failing again keeps its first result, a regression. The report (`java.check/report`): a
+  `flaky` result is no regression and a test recorded `:flaky` counts as passing (so its next
+  failures are no regression either); the counts line adds `N flaky`, each printed by name; an
+  essential test that is `flaky` does not fail `--essential`; the levels' comparison takes `flaky`
+  as passing. A `flaky` test must be in a class like any non-pass: **`:flaky`** (kind `:harness`,
+  `:level :compiled`, `:decided` JCS71 (a)) names `t03289` (`compiler/c1/Test8267042`) and
+  `t05565` (`jdk/java/util/List/LockStep`) by `:tests`, before the classes whose regexps would take
+  their failures (`:serialization`, `:other`); an unnamed flip is in no class and fails the check
+  until a class names it. At the level compiled only: both tests' interp results are deterministic
+  (Test8267042's 45 bytes every run, LockStep's `ObjectInputStream` load failure), and a flip at
+  another level gets that level's class. Exercised on a fabricated record and results
+  (`.tmp/hf/flaky/`: the named flip no regression, an unnamed flip in no class, a test failing twice
+  a regression); no real test flipped in the runs above.
+
+**Numbers** (2,722 tests): interp 1,462 → **1,464**, compiled 1,636 → **1,638** (`CheckTempDir`,
+`UserDirChangedTest`); `:environment` 2 → 0 at both levels; `:flaky` 2 at compiled (from
+`:serialization` and `:other`). `bin/reap` 0 problems; Java's row: eval 1,464 / 238 / 1,020, **AOT
+1,638 / 110 / 974** (LockStep from `:serialization`, by design, to `:flaky`, deferred).
+
+**Checks**: the essential `bin/gate` at `2b73e0d9` passed, 4m41s with `java-compiled`'s and the
+Clojure subset's programs made anew (their keys hold the changed scripts), then **2m50s cached**
+(2m47s at the base): Java's essential check 428 of 428 as recorded, `java-compiled` 420 of 420.
+
+### Proposals (JCS80-JCS89)
+
+- **JCS80 The digest of runs the JDK's two runs did not agree on** (`:det false`: 1,311 lines a whole
+  `--record-ref` moves for nothing, so a re-recording cannot be committed whole).
+  - Options: (a) such a run's `:out`, `:out-len` and `:masked` recorded as `"-"` (the check compares
+    only its status), at the next whole recording; (b) as built (`--only`, or a splice, for each
+    re-recording).
+  - *Recommended: (a)*: the reference then moves only where a judged fact moved, and a whole
+    re-recording becomes reviewable; (b) keeps every re-recording a hand-picked list.
+- **JCS81 JCS71's rule in `--essential-compiled`** (its runs have only JCS47's timeout retry).
+  - Options: (a) `again` there too, a flip passing the step when a `:flaky` class names it; (b) as
+    built.
+  - *Recommended: (b)* until a test of the subset flips: its 420 tests are deterministic so far,
+    and a gate step that tolerates flips needs the class file in its cache key.
+- **JCS82 A test recorded failing that passes now** (LockStep's kind: a flaky test recorded on its
+  failing side shows as "now passing", unnamed).
+  - Options: (a) as built: only would-be regressions run again, the flaky ones named by hand; (b)
+    a now-passing test run again too, a flip `flaky`.
+  - *Recommended: (a)*: a new pass costs nothing and is recorded at the next `--record`; a test that
+    then fails is caught by (a)'s rule.
+- **JCS83 The places' mark as data** (`runI.dirs`, which tests' stdout names the run's places, left in
+  the scratch).
+  - Options: (a) recorded in the reference (`:places true` on the run); (b) as built.
+  - *Recommended: (b)*: with the mask the place no longer matters to the judgement; the mark serves
+    a re-recording's list (as here) and the scratch has it.
+- **JCS84 The JDK's own path-dependent failures** (`MaskSyntheticModifierTest`'s `:jdk :fail` reason
+  names a length that depends on the checkout's path; such a test is not run by the check).
+  - Options: (a) the JDK's reason masked as stdout is; (b) as built.
+  - *Recommended: (a)* at JCS80's recording: the reference then does not depend on the checkout at
+    all.
+
+## Decided (2026-10-25): JCS80-JCS84
+
+The user decided the harness follow-ups' proposals as recommended: JCS80 (a) (at the next full recording
+of the JDK's runs, `"-"` for the stdout digest of runs the JDK's own two runs disagreed on), JCS81 (b)
+(no rerun in `--essential-compiled` until one of its tests flips), JCS82 (a) (only would-be regressions
+run again), JCS83 (b) (the path marker in the scratch only), JCS84 (a) (the JDK's path-dependent failure
+reasons masked, at JCS80's recording).
+
 ## As built: JC5 (2026-10-25)
 
 Branch `java-check-jc5`, from main `840e514b` (JC1-JC4, JC2, JC3 on it). JC5 is §8's "the analysis'

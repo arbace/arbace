@@ -46,6 +46,7 @@ case alone does not tell them apart, the step does.
 | Resources by URL | `gofix`, 2026-10-10 | |
 | Security | `gosec`, 2026-10-10 | |
 | Text and locales | `gotext`, 2026-10-10 and 11 | |
+| Modules | `jrt-module-rps55`, 2026-10-25 | |
 
 Each part's amendments were accepted by the user (J2G-SPEC §16 names them by series); the
 measurements in each part are its branch's, before merging main unless it says otherwise.
@@ -57,7 +58,7 @@ measurements in each part are its branch's, before merging main unless it says o
 | `object.ae`, `class.ae`, `array.ae`, `enum.ae`, `volatile.ae`, `throwable.ae`, `numconv.ae`, `math.ae`, `fdlibm.ae`, `string.ae`, `stringbuilder.ae`, `codec.ae` | the object model, classes, arrays, exceptions, numbers, strings | phase 1 |
 | `monitor.ae`, `threadid.ae`, `thread.ae`, `threadlocal.ae`, `atomic.ae`, `locks.ae`, `executor.ae`, `forkjoin.ae`, `reference.ae`, `unsafe.ae`, `varhandle.ae`, `standin_timeunit.ae`, `standin_executor.ae` | threads and concurrency | phase 2a; "Semaphore"; "Concurrency" |
 | `host.ae`, `system.ae`, `tooloptions.ae` | the host interface, `System`, `Runtime`, `JAVA_TOOL_OPTIONS` | phase 2a; "Sockets" |
-| `reflect.ae`, `reflect_array.ae`, `reflect_tables.ae`, `members.ae`, `classloader.ae`, `standin_reflect.ae` | reflection over the member tables, the class loaders | phase 2b; "Size" (SZ3) |
+| `reflect.ae`, `reflect_array.ae`, `reflect_tables.ae`, `members.ae`, `classloader.ae`, `module.ae`, `standin_reflect.ae` | reflection over the member tables, the class loaders, `Module` | phase 2b; "Size" (SZ3); "Modules" |
 | `charset.ae`, `locale.ae`, `date.ae`, `text.ae`, `standin_locale.ae` | charsets, `String`'s locale overloads, `Date`, `CDS`' natives | phase 2b; "Text and locales" |
 | `access.ae`, `vm.ae`, `natives.ae`, `dyn.ae`, `image.ae`, `tuning.ae` | `SharedSecrets`, `VM`, the translated classes' natives; the evaluator's `Dyn`, the image, the Go runtime's settings | J2G-NOTES.md; EVAL-PLAN.md, EVAL-NOTES.md; EXEC-NOTES.md; SPEED-NOTES.md |
 | `files.ae`, `filesystem.ae`, `hostfs.ae`, `hostfs_linux.ae` | the standard streams' and files' natives, `java.io.File` over the host | phase 2C; "Files" |
@@ -3932,3 +3933,44 @@ part: `java/util/ResourceBundle.java` (`Control`), `java/util/Calendar.java`,
 `src/java.base/share/data/lsrdata/language-subtag-registry.txt`. The JDK build's outputs
 compared against: `build/linux-x86_64-server-release/support/gensrc/java.base/`,
 `support/gensrc/jdk.localedata/` and `jdk/modules/java.base/`.
+
+# Modules: `java.lang.Module` and `Class.getModule` (branch `jrt-module-rps55`)
+
+RPS55 (a) (doc/FULL-SUPPORT-SURVEY.md, "As built: RPS55"): Clojure's `arbace.java.javadoc`
+(embedded since REAP4's SL5) fills `*core-java-api*`'s `%s` with `(.getName (.getModule klass))`,
+and jrt had no `java.lang.Module`: `Class.getModule` was not in the manifest, so the compiled
+namespace's call was j2g's operation-level stub and the evaluator's a missing method.
+
+**What is built.** `go/arbace/jrt/module.ae`: `Module`, a hand-written leaf class (public final,
+no interfaces: `AnnotatedElement` is cut with annotations, §12), in the manifest
+(`test/jrt/manifest.ae`'s `hand-written`) with four of the JDK's 69 members: `getName`,
+`isNamed`, `getClassLoader`, `toString` (the JDK's text: `module java.base`, `unnamed module @`
+and the identity hash in hexadecimal). Two instances exist: **java.base**, of the bootstrap loader
+(`getClassLoader` null), and the application loader's **unnamed module**. `Class.getModule`
+(`GetModule__Module`, beside `getClassLoader`, phase 2b) answers by `classPlace`, the rule
+`ClassCastException`'s messages and `getClassLoader` already follow: java.base for the primitive
+types and the classes whose names start `java.`, `javax.`, `jdk.`, `sun.`, the unnamed module for
+the rest (Arbace's, the compiled namespaces', the run time's); an array is in its element type's.
+The rule is exact for the shipped world: every JDK source it translates is java.base's
+(`jdk/sources.txt`, 839 of 839) and jrt's own Java (`overlay/jdk/java.base`) is too. Cut classes
+(registered by name, no members) are placed by the same prefix rule.
+
+**Not built.** `getDescriptor` (`java.lang.module.ModuleDescriptor`), `getLayer` (`ModuleLayer`),
+`getPackages` (a `Set`), `getResourceAsStream`, `canRead`, `isExported`, `isOpen`, `addReads`,
+`addExports`, `addOpens`, `addUses`, the annotations: their types are outside jrt or their meaning
+is the module system's, which the closed world does not have. A use in translated code is j2g's
+stub (`UnsupportedOperationException("j2g: ...")` when reached); at the REPL, Reflector's "No
+matching method". **javac's tool world** shares jrt: there `Class.getModule` places
+`javax.tools`, `javax.lang.model` (java.compiler's), `javax.xml` (java.xml's) in java.base and
+`com.sun.tools.javac` in the unnamed module, not as `jdk/javac/sources.txt` lists them. Its uses
+of `getModule` are in plugin, annotation-processor and source-launcher paths
+(`BasicJavacTask.initPlugin`, `JavacProcessingEnvironment`, `JavacFileManager.getServiceLoader`'s
+`addUses`, `JavacRoundEnvironment`, `MemoryContext`), each followed by a `Module` member jrt
+does not have, so they throw as before, one call later; its `ToolProvider` is a variant that does
+not ask (`overlay/jdk/javac/variants/ToolProvider.ae`). A table by the sources' lists is RPS80 (b).
+
+**The generated files.** `bin/jrt manifest` regenerated `manifest.edn` (`Class` 58 of 170 JDK
+members, `Module` 4 of 69), `manifest_test.ae` and `reflect_tables.ae` (Module's table, Class's
+`getModule` entry). `reflect_test.ae`'s `TestClassLoaders` checks both modules (names, loaders,
+texts, primitives and arrays).
+

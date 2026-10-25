@@ -4,9 +4,10 @@
 ;; selectSym, checkIdInternal, visitApply and adjustMethodReturnType, checkMethod's unchecked
 ;; erasure, visitIndexed, visitParens, visitAssign, visitAssignop, visitUnary, visitBinary,
 ;; visitTypeCast, visitTypeTest, visitConditional and isBooleanOrNumeric, visitNewClass's and
-;; visitNewArray's types, visitLiteral) and Operators.java (resolveUnary, resolveBinary: the
-;; operator helpers' tests and lookups, stringPromotion), whose notice follows (LICENSE.md, "OpenJDK
-;; (jdk26u)"):
+;; visitNewArray's types, visitLiteral; visitApply's and visitNewClass's resolution sites: the
+;; site, select super, the anonymous class's superclass constructor), ArgumentAttr.java (which
+;; arguments are standalone) and Operators.java (resolveUnary, resolveBinary: the operator helpers'
+;; tests and lookups, stringPromotion), whose notice follows (LICENSE.md, "OpenJDK (jdk26u)"):
 ;;
 ;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
 ;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -41,13 +42,16 @@
 
   An expression's role is javac's expected kind: :val (a value, the default: names captured), :var (an
   assignment's or increment's target: not captured), :qual (a selection's qualifier, KindSelector VAL |
-  TYP: not captured). A call's result needs the method overload resolution chose, the next tier's
-  (JN9c): until it is native it is javac's (`method-of`: javac's symbol of the call, found in the
-  native model by owner, name and erased parameters), and an answer that needed it is marked in
-  `*leaned*`. What needs inference (a generic method's call, a diamond, a lambda, a method reference,
-  a poly conditional, a `var`'s type) or a least upper bound is declined (decls/decline!)."
+  TYP: not captured). A call's result needs the method overload resolution chose: the overload tier's
+  (JN9c, arbace.repr.java.overload: `choice`, over the arguments' standalone types); where that needs
+  inference (a poly argument, a generic candidate) it is javac's (`method-of`: javac's symbol of the
+  call, found in the native model by owner, name and erased parameters), and an answer that needed
+  it is marked in `*leaned*`. What needs inference (a generic method's call, a diamond, a lambda, a
+  method reference, a poly conditional, a `var`'s type) or a least upper bound is declined
+  (decls/decline!)."
   (:require [arbace.repr.java.decls :as d]
             [arbace.repr.java.types :as ty]
+            [arbace.repr.java.overload :as ov]
             [arbace.repr.java.scope :as sc]
             [arbace.repr.java.nattr :as na]
             [arbace.repr.java.jtypes :as jt]
@@ -373,15 +377,173 @@
                     (d/member-clone om oc)))
               :else nil)))))))
 
-(defn method-of
-  "The native method symbol of the method call APPLY `t` chose: javac's (overload resolution, the next
-  tier's), marked in *leaned*; declined when the native model does not hold it."
+(defn- javac-method-of
+  "The native method symbol of javac's choice for call APPLY `t`, marked in *leaned*; declined when the
+  native model does not hold it."
   [p t]
   (lean!)
   (let [^JCTree j (.get ^IdentityHashMap (:twins p) (:meth t))
         js (when j (TreeInfo/symbol j))]
     (or (when (instance? Symbol$MethodSymbol js) (nmethod p #(na/canon p %) js))
         (d/decline! (str "the call's method is not in the native model: " (some-> js .-owner) "." js)))))
+
+(defn- javac-ctor-of
+  "The native method symbol of javac's constructor for NEWCLASS `t`, marked in *leaned*."
+  [p t]
+  (lean!)
+  (let [^com.sun.tools.javac.tree.JCTree$JCNewClass j (.get ^IdentityHashMap (:twins p) t)
+        js (when j (.-constructor j))]
+    (or (when (instance? Symbol$MethodSymbol js) (nmethod p #(na/canon p %) js))
+        (d/decline! (str "the call's method is not in the native model: " (some-> js .-owner) "." js)))))
+
+;;; The overload tier (JN9c): the native choice
+
+(defn- leaning
+  "(f) memoized in the provider's IdentityHashMap `k` by node `t` (a decline too), a lean on javac's
+  higher tiers remembered with it (as etype's)."
+  [p k t f]
+  (let [^IdentityHashMap cache (get p k)
+        hit (.get cache t)]
+    (if hit
+      (let [[v leaned?] hit]
+        (when leaned? (lean!))
+        (if (instance? Throwable v) (throw v) v))
+      (let [outer *leaned*
+            mine (volatile! false)
+            [v ex] (binding [*leaned* mine]
+                     (try [(f) nil]
+                          (catch Throwable e
+                            (if (:arbace.repr.java.decls/decline (ex-data e)) [e e] (throw e)))))]
+        (.put cache t [v @mine])
+        (when (and @mine outer) (vreset! outer true))
+        (if ex (throw ex) v)))))
+
+(defn- arg-types
+  "The standalone types of call `t`'s arguments (ArgumentAttr's for arguments that are no poly
+  expressions; a poly one's declines the call: its type is the inference tier's)."
+  [p t]
+  (mapv #(etype p %) (:args t)))
+
+(defn- in-anon-diamond? [env]
+  (some (fn [c] (some anon-diamond? (take-while some? (iterate d/encl-class c)))) (keep :class (:levels env))))
+
+(defn- array-clone-fn [p] (fn [] (array-clone (reg p))))
+
+(defn- result
+  "A resolution's result as the choice: {:sym method :varargs? b}, an error {:error kind}; a signature
+  polymorphic method declined (its instance is Infer's)."
+  [{:keys [sym phase]}]
+  (if (ov/method? sym)
+    (do (when (and (d/has? (d/method-flags sym) d/NATIVE)
+                   (#{"java.lang.invoke.MethodHandle" "java.lang.invoke.VarHandle"} (:flat (:owner sym))))
+          (d/decline! "a signature polymorphic call"))
+        {:sym sym :varargs? (= :varity phase)})
+    {:error (:kind sym)}))
+
+(defn- created-type
+  "The class type NEWCLASS `t` creates when the overload tier chooses its constructor: declined for a
+  diamond, a qualified creation."
+  [p t]
+  (let [clazz (:clazz t)
+        bare (loop [x clazz] (if (= :ANNOTATED_TYPE (:tag x)) (recur (:underlyingType x)) x))]
+    (cond
+      (and (= :TYPEAPPLY (:tag bare)) (empty? (:arguments bare))) (d/decline! "a diamond (inferred)")
+      (:encl t) (d/decline! "a qualified creation")
+      :else (or (some-> (:type (ans p clazz)) deref) (d/decline! "the created type")))))
+
+(defn- choice*
+  [p t]
+  (let [env (env-of p t)
+        ac (array-clone-fn p)]
+    (when (seq (:typeargs t)) (d/decline! "explicit type arguments"))
+    (when (in-anon-diamond? env) (d/decline! "a call in an anonymous class of a diamond (inferred)"))
+    (case (:tag t)
+      :APPLY
+      (let [meth (:meth t) n (:name meth)]
+        (cond
+          (#{"this" "super"} n)
+          (let [c (env-class env)
+                site (if (= "super" n) (d/supertype (d/this-type c)) (d/this-type c))]
+            (when-not (ty/class-t? site) (d/decline! "a constructor call's site"))
+            (result (ov/resolve-constructor env site (arg-types p t) ac {:select-super? true})))
+          (= :IDENT (:tag meth))
+          (result (ov/resolve-method env nil n (arg-types p t) ac {}))
+          :else
+          (let [q (:selected meth)
+                site (if (true? (type-expr? p q))
+                       (etype p q)
+                       (let [s (ty/capture (reg p) (etype p q))]
+                         (if (ty/tvar-t? s) (ty/skip-type-vars (reg p) s true) s)))
+                _ (check-site! site)
+                _ (when-not (or (ty/class-t? site) (= :array (:k site))) (d/decline! "a call's site"))
+                sq (skip-parens q)
+                super? (or (and (= :IDENT (:tag sq)) (= "super" (:name sq)))
+                           (and (= :SELECT (:tag sq)) (= "super" (:name sq))))]
+            (result (ov/resolve-method env site n (arg-types p t) ac {:select-super? super?})))))
+      :NEWCLASS
+      (do (when (:def t) (d/decline! "an anonymous class's constructor"))
+          (let [site (created-type p t)]
+            (when-not (ty/class-t? site) (d/decline! "the created type"))
+            (result (ov/resolve-constructor env site (arg-types p t) ac {}))))
+      (d/decline! "not a call"))))
+
+(defn choice
+  "The overload tier's choice for call `t` (APPLY, NEWCLASS without a body): {:sym the method
+  symbol :varargs? a call of variable arity}, or {:error kind} (an error javac would report);
+  memoized, declined where it needs inference."
+  [p t]
+  (leaning p :choices t #(choice* p t)))
+
+(defn anon-super-choice
+  "The superclass constructor anonymous class `c` (of NEWCLASS `t`) calls (Attr.visitNewClass: resolved
+  at the created class type as from super; Object's for an interface): {:sym ...} or {:error ...}."
+  [p t c]
+  (leaning p :choices (:def t)
+           (fn []
+             (when (seq (:typeargs t)) (d/decline! "explicit type arguments"))
+             (let [env (env-of p t)
+                   _ (when (in-anon-diamond? env) (d/decline! "a creation in an anonymous class of a diamond (inferred)"))
+                   site (created-type p t)]
+               (when-not (ty/class-t? site) (d/decline! "the created type"))
+               (if (d/interface? (:c site))
+                 (let [o (d/class-named (reg p) "java.lang.Object")]
+                   {:sym (first (filter #(and (= "<init>" (:name %)) (empty? (:params (d/method-type %))))
+                                        (:methods (d/members o))))
+                    :varargs? false})
+                 (result (ov/resolve-constructor env site (arg-types p t) (array-clone-fn p) {:select-super? true})))))))
+
+(defn anon-ctor-choice
+  "The constructor of anonymous class `c` NEWCLASS `t` calls (TypeEnter's, over the superclass
+  constructor chosen): a method symbol, declined where that is."
+  [p t c]
+  (let [r (anon-super-choice p t c)]
+    (if-let [m (:sym r)]
+      (ov/anon-constructor (reg p) c m (created-type p t) nil)
+      (d/decline! "the superclass constructor"))))
+
+(defn method-of
+  "The native method symbol of the method call APPLY `t` chose: the overload tier's; where it declines
+  (inference), javac's, marked in *leaned*."
+  [p t]
+  (let [r (try (choice p t)
+               (catch Throwable e (if (:arbace.repr.java.decls/decline (ex-data e)) nil (throw e))))]
+    (or (:sym r) (javac-method-of p t))))
+
+(defn ctor-of
+  "The native constructor NEWCLASS `t` (without a body) calls: the overload tier's, else javac's
+  (leaned)."
+  [p t]
+  (let [r (try (choice p t)
+               (catch Throwable e (if (:arbace.repr.java.decls/decline (ex-data e)) nil (throw e))))]
+    (or (:sym r) (javac-ctor-of p t))))
+
+(defn call-varargs?
+  "Is call `t` (APPLY, NEWCLASS without a body) of variable arity (resolved in the third phase)? The
+  overload tier's; where it declines javac's `javac?`, leaned."
+  [p t javac?]
+  (let [r (try (choice p t)
+               (catch Throwable e (if (:arbace.repr.java.decls/decline (ex-data e)) nil (throw e))))]
+    (if (:sym r) (:varargs? r) (do (lean!) javac?))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Expressions' types (Attr)
@@ -580,14 +742,10 @@
 
 (defn ctor-method-type
   "The instantiated type of the constructor NEWCLASS `t` calls (javac's constructorType): memberType of
-  the constructor overload resolution chose (javac's, marked) at the created type, erased by an
-  unchecked call: {:k :mtype ...}."
+  the constructor overload resolution chose (the overload tier's, else javac's, marked) at the created
+  type, erased by an unchecked call: {:k :mtype ...}."
   [p t]
-  (lean!)
-  (let [^com.sun.tools.javac.tree.JCTree$JCNewClass j (.get ^IdentityHashMap (:twins p) t)
-        js (when j (.-constructor j))
-        m (or (when (instance? Symbol$MethodSymbol js) (nmethod p #(na/canon p %) js))
-              (d/decline! (str "the call's method is not in the native model: " (some-> js .-owner) "." js)))
+  (let [m (ctor-of p t)
         _ (when (seq (:tparams (d/method-type m))) (d/decline! "a generic constructor (inferred)"))
         site (etype p t)
         mt (ty/member-type (reg p) site m)

@@ -1,0 +1,794 @@
+;; The overload resolution reimplements, for the native trees, jdk26u
+;; (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259)'s
+;; src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Resolve.java (isAccessible of classes and
+;; of members, isProtectedAccessible, isInnerSubClass, notOverriddenIn, rawInstantiate without
+;; inference, resolveMethodCheck's argumentsAcceptable and checkArg, MethodCheckContext.compatible,
+;; MethodResultInfo.check, selectBest, mostSpecific, signatureMoreSpecific, adjustArgs, MostSpecificCheck,
+;; ambiguityError, AmbiguityError.mergeAbstracts, findMethodInScope and its LookupFilter, findMethod with
+;; its InterfaceLookupPhase and superclasses, findFun, the import scopes' methods, lookupMethod,
+;; LookupHelper.shouldStop, MethodResolutionPhase.mergeResults, resolveMethod, resolveQualifiedMethod,
+;; resolveConstructor, findConstructor), code/Types.java (isSubtypeUnchecked, isConvertible,
+;; cvarUpperBound, cvarLowerBound, hasSameArgs, isSubSignature, overrideEquivalent,
+;; returnTypeSubstitutable, resultSubtype, covariantReturnType, mergeAbstracts with its
+;; MostSpecificReturnCheck, implementation, isDerivedRaw, rank, closure, insert, union), code/Symbol.java
+;; (MethodSymbol.overrides, isOverridableIn, TypeSymbol.precedes, baseSymbol), comp/Check.java (intersect,
+;; importAccessible), code/Scope.java (SymbolImporter's order of a static import's members) and
+;; comp/TypeEnter.java (AnonClassConstructorHelper, staticImportFilter), whose notice follows (LICENSE.md,
+;; "OpenJDK (jdk26u)"):
+;;
+;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+(ns arbace.repr.java.overload
+  "The native attribution's overload tier (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As built: JN9c\"):
+  the method or constructor a call chooses, as javac's Resolve chooses it: the candidates of the
+  site's classes and interfaces (findMethod), of the enclosing classes and the static imports for an
+  unqualified call (findFun), each checked for applicability by strict, then loose, then variable
+  arity invocation (the three phases of lookupMethod), the most specific of the applicable and
+  accessible ones (mostSpecific, mergeAbstracts), the errors as javac's kinds.
+
+  The arguments' types are given (arbace.repr.java.expr's, standalone: a poly argument has none, and
+  the call is declined). What needs inference is declined (decls/decline!): a candidate with type
+  parameters of its own that passes the phase's arity check (its applicability is Infer's), explicit
+  type arguments. A result is a method symbol (arbace.repr.java.decls's) or an error
+  {:kind :absent|:wrong-mth|:wrong-mths|:hidden|:ambiguous|:static ...}, with the phase it was found
+  in (:varity: a call of variable arity)."
+  (:require [arbace.repr.java.decls :as d]
+            [arbace.repr.java.types :as ty]
+            [arbace.repr.java.nattr :as na]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;;; ------------------------------------------------------------------------------------------
+;;; Results: a method symbol or an error (Resolve's ResolveError kinds)
+
+(defn method? "A method symbol (not an error)?" [x] (and (some? x) (identical? :method (:sk x))))
+
+(defn- err? [x] (not (method? x)))
+
+(defn- kind [x] (if (method? x) :mth (:kind x)))
+
+(def ^:private absent {:kind :absent})
+
+(defn- exists?
+  "Symbol.exists of a result: a method; of the errors those but SymbolNotFoundError and AccessError
+  (an inapplicable method exists: findFun stops at the innermost class with one)."
+  [x]
+  (or (method? x) (contains? #{:wrong-mth :wrong-mths :ambiguous :static} (:kind x)) (boolean (:bad-varargs x))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Classes and types
+
+(defn- reg [ctx] (:reg (:env ctx)))
+
+(defn- object-class [reg] (d/class-named reg "java.lang.Object"))
+
+(defn- flags ^long [m] (d/method-flags m))
+
+(defn- abstract? [m] (d/has? (flags m) d/ABSTRACT))
+
+(defn- static? [m] (d/has? (flags m) d/STATIC))
+
+(defn- ctor? [m] (= "<init>" (:name m)))
+
+(defn- class-of
+  "The class symbol of site type `t` (a class type's; an array's: javac's array class, :array)."
+  [t]
+  (cond
+    (ty/class-t? t) (:c t)
+    (and (map? t) (= :array (:k t))) :array
+    :else nil))
+
+(defn jsupertype
+  "types.supertype of class type `t` as javac's: an interface's is Object."
+  [reg t]
+  (or (d/supertype t)
+      (when (and (ty/class-t? t) (d/interface? (:c t))) (d/object-type reg))))
+
+(defn- super-class "The class of class `c`'s supertype (javac's: an interface's Object), or nil." [reg c]
+  (let [st (jsupertype reg (d/this-type c))]
+    (cond (ty/class-t? st) (:c st)
+          (ty/tvar-t? st) (class-of (ty/skip-type-vars reg st false))
+          :else nil)))
+
+(defn- iface-classes [c] (keep #(when (ty/class-t? %) (:c %)) (d/interfaces (d/this-type c))))
+
+(defn- sub-class? [c base] (na/sub-class? c base))
+
+(defn- pkg-of [c] (:pkg c))
+
+(defn- cvar-upper "Types.cvarUpperBound." [t]
+  (if (ty/captured? t) (recur (ty/upper-bound t)) t))
+
+(defn- cvar-lower "Types.cvarLowerBound: a captured variable's lower bound (the null type for none)." [t]
+  (if (ty/captured? t)
+    (let [l (:lower (:tv t))] (if l (recur l) :null))
+    t))
+
+(defn- elemtype [t] (when (and (map? t) (= :array (:k t))) (:e t)))
+
+(defn- subtype? [reg s t] (ty/subtype? reg s t))
+
+(defn subtype-unchecked?
+  "Types.isSubtypeUnchecked of `t` (already captured) and `s`: subtyping, through a type variable's
+  bound, or unchecked conversion of a raw supertype."
+  [reg t s]
+  (cond
+    (and (elemtype t) (elemtype s))
+    (let [et (elemtype t) es (elemtype s)]
+      (if (ty/prim? et) (ty/same-type? et es) (subtype-unchecked? reg et es)))
+    (subtype? reg t s) true
+    (ty/tvar-t? t) (subtype-unchecked? reg (ty/upper-bound t) s)
+    (and (ty/class-t? s) (not (d/raw? s)))
+    (let [t2 (d/as-super t (:c s))] (boolean (and t2 (d/raw? t2))))
+    :else false))
+
+(defn convertible?
+  "Types.isConvertible (loose invocation): the same primitiveness by subtyping (unchecked), else
+  boxing or unboxing first."
+  [reg t s]
+  (let [tp (ty/prim? t) sp (ty/prim? s)]
+    (cond
+      (= tp sp) (subtype-unchecked? reg t s)
+      tp (subtype? reg (ty/boxed-type reg t) s)
+      :else (let [u (ty/unboxed-type t)] (boolean (and u (subtype? reg u s)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Method types: same arguments, subsignature (Types)
+
+(defn- merasure [mt]
+  {:tparams [] :params (mapv d/erasure (:params mt)) :ret (d/erasure (:ret mt)) :throws (mapv d/erasure (:throws mt))})
+
+(defn- tvars-map [from to] (zipmap from (map d/tvar-type to)))
+
+(defn- same-types? [as bs] (and (= (count as) (count bs)) (every? true? (map ty/same-type? as bs))))
+
+(defn- same-args?
+  "Types.hasSameArgs (strict) of method types `t` and `s`: the same parameter types, a generic one's
+  after its type variables are renamed to the other's (with the same bounds)."
+  [t s]
+  (let [tt (:tparams t) st (:tparams s)]
+    (cond
+      (and (empty? tt) (empty? st)) (same-types? (:params t) (:params s))
+      (and (seq tt) (seq st))
+      (and (= (count tt) (count st))
+           (let [m (tvars-map st tt)]
+             (and (every? true? (map (fn [a b] (same-types? (d/tvar-bounds a) (mapv #(d/subst % m) (d/tvar-bounds b)))) tt st))
+                  (same-types? (:params t) (mapv #(d/subst % m) (:params s))))))
+      :else false)))
+
+(defn sub-signature? "Types.isSubSignature." [t s]
+  (or (same-args? t s) (same-args? t (merasure s))))
+
+(defn- override-equivalent? "Types.overrideEquivalent." [t s]
+  (or (same-args? t s) (same-args? t (merasure s)) (same-args? (merasure t) s)))
+
+(defn- covariant-return? "Types.covariantReturnType." [reg t s]
+  (or (ty/same-type? t s)
+      (and (not (keyword? t)) (not (keyword? s)) (convertible? reg t s))))
+
+(defn- result-subtype? "Types.resultSubtype." [reg t s]
+  (covariant-return? reg (:ret t) (d/subst (:ret s) (tvars-map (:tparams s) (:tparams t)))))
+
+(defn- return-substitutable? "Types.returnTypeSubstitutable." [reg t s]
+  (if (same-args? t s)
+    (result-subtype? reg t s)
+    (covariant-return? reg (:ret t) (d/erasure (:ret s)))))
+
+(defn- mtype-at [reg site m] (ty/member-type reg site m))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Overriding (Symbol.overrides, Types.implementation)
+
+(defn- overridable-in?
+  "MethodSymbol.isOverridableIn of `m` in class `origin`."
+  [m origin]
+  (let [fl (flags m)]
+    (case (int (bit-and fl 7))
+      2 false
+      1 (or (not (d/interface? (:owner m))) (not (static? m)))
+      4 (not (d/interface? origin))
+      0 (and (= (pkg-of (:owner m)) (pkg-of origin)) (not (d/interface? origin)))
+      false)))
+
+(defn overrides?
+  "MethodSymbol.overrides of `m` over `other` seen as members of class `origin` (`check?` the result
+  type too), requireConcreteIfInherited."
+  [reg m other origin check?]
+  (cond
+    (ctor? m) false
+    (identical? m other) true
+    :else
+    (let [o (:owner m)]
+      (or (when (and (overridable-in? other o) (d/as-super (d/this-type o) (:owner other)))
+            (let [mt (mtype-at reg (d/this-type o) m) ot (mtype-at reg (d/this-type o) other)]
+              (and (sub-signature? mt ot) (or (not check?) (return-substitutable? reg mt ot)))))
+          (when (and (not (abstract? m))
+                     (or (abstract? other) (d/has? (flags other) d/DEFAULT))
+                     (overridable-in? other origin)
+                     (na/method-member-of? m origin))
+            (let [mt (mtype-at reg (d/this-type origin) m) ot (mtype-at reg (d/this-type origin) other)]
+              (and (sub-signature? mt ot) (or (not check?) (result-subtype? reg mt ot)))))
+          false))))
+
+(defn- named-methods
+  "The methods of class `c` named `n` as its members scope gives them (the newest first), not
+  synthetic (LookupFilter)."
+  [c n]
+  (if (= :array c)
+    []
+    (get (d/memo c :ov-methods
+                 (fn [] (group-by :name (reverse (remove #(d/has? (flags %) d/SYNTHETIC) (:methods (d/members c)))))))
+         n [])))
+
+(defn- derived-raw?
+  "Types.isDerivedRaw of class `c`'s type: a raw supertype among its supertypes."
+  [reg c]
+  (d/memo c :ov-derived-raw
+          (fn []
+            (let [t (d/this-type c)
+                  sups (cons (jsupertype reg t) (d/interfaces t))]
+              (boolean (some (fn [s] (and (ty/class-t? s) (or (d/raw? s) (derived-raw? reg (:c s))))) sups))))))
+
+(defn implementation
+  "MethodSymbol.implementation of `ms` in class `origin` (checkResult): the first class of origin's
+  superclass chain with a method that overrides ms (a concrete one first), through a raw supertype's
+  superclass when origin is derived raw; nil for none (memoized on origin)."
+  [reg ms origin]
+  (d/memo origin [:ov-impl ms]
+          (fn []
+            (or (loop [c origin seen #{}]
+                  (when (and c (not= :array c) (not (seen c)))
+                    (let [cands (filter #(overrides? reg % ms origin true) (named-methods c (:name ms)))
+                          best (or (first (remove abstract? cands)) (last cands))]
+                      (or best (recur (super-class reg c) (conj seen c))))))
+                (when (and (derived-raw? reg origin) (not (d/interface? origin)))
+                  (when-let [s (super-class reg origin)] (implementation reg ms s)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Access (Resolve.isAccessible)
+
+(defn- inherited-in?
+  "Symbol.isInheritedIn of method `m` in class `c` (MethodSymbol's for a public one)."
+  [m c]
+  (if (= :array c)
+    (not= 2 (bit-and (flags m) 7))
+    (let [fl (flags m) o (:owner m)]
+      (case (int (bit-and fl 7))
+        1 (or (not (d/interface? o)) (identical? c o) (not (static? m)))
+        2 (identical? o c)
+        4 (not (d/interface? c))
+        0 (and (loop [sup c seen #{}]
+                 (cond
+                   (or (nil? sup) (identical? sup o) (seen sup)) true
+                   (not= (pkg-of sup) (pkg-of o)) false
+                   :else (recur (let [st (d/supertype (d/this-type sup))] (when (ty/class-t? st) (:c st))) (conj seen sup))))
+               (not (d/interface? c)))
+        true))))
+
+(defn- class-accessible?
+  "Resolve.isAccessible of class `c` from the context's class (a public class taken as readable)."
+  [ctx c]
+  (let [ec (:encl-class ctx)
+        fl (d/class-flags c)]
+    (case (int (bit-and fl 7))
+      2 (and ec (identical? (d/outermost ec) (d/outermost (or (d/encl-class c) c))))
+      0 (= (:pkg ctx) (pkg-of c))
+      4 (or (= (:pkg ctx) (pkg-of c))
+            (let [o (d/encl-class c)]
+              (boolean (some #(and o (sub-class? % o)) (take-while some? (iterate d/encl-class ec))))))
+      true)))
+
+(defn- type-accessible? [ctx t]
+  (cond
+    (elemtype t) (let [e (cvar-upper (elemtype t))] (if (keyword? e) true (recur ctx e)))
+    (ty/class-t? t) (class-accessible? ctx (:c t))
+    :else true))
+
+(defn- not-overridden-in?
+  "Resolve.notOverriddenIn of method `m` at `site`: not an instance method an implementation in the
+  site's class hides."
+  [ctx site m]
+  (if (or (ctor? m) (static? m))
+    true
+    (let [sc (class-of site)
+          r (reg ctx)
+          s2 (when (and sc (not= :array sc)) (implementation r m sc))]
+      (or (nil? s2) (identical? s2 m) (identical? (:owner m) (:owner s2))
+          (and (d/interface? (:owner m)) (= "java.lang.Object" (:flat (:owner s2))))
+          (not (sub-signature? (mtype-at r site s2) (mtype-at r site m)))))))
+
+(defn- protected-accessible?
+  "Resolve.isProtectedAccessible of protected `m` from class `c` at `site`."
+  [m c site]
+  (let [new-site (if (ty/tvar-t? site) (ty/upper-bound site) site)
+        nsc (class-of new-site)]
+    (loop [c c]
+      (cond
+        (nil? c) false
+        (and (sub-class? c (:owner m)) (not (d/interface? c))
+             (or (static? m)
+                 (cond (= :array nsc) (= "java.lang.Object" (:flat c))
+                       (nil? nsc) false
+                       (= :inter (:k new-site)) (some #(and (ty/class-t? %) (sub-class? (:c %) c)) (:ts new-site))
+                       :else (sub-class? nsc c))))
+        true
+        :else (recur (d/encl-class c))))))
+
+(defn accessible?
+  "Resolve.isAccessible of method `m` at `site` from the context (its class :encl-class, its package
+  :pkg, :select-super? for a selection from super)."
+  [ctx site m]
+  (let [sc (class-of site)]
+    (if (and (ctor? m) (not (identical? (:owner m) sc)))
+      false
+      (let [ec (:encl-class ctx)
+            o (:owner m)
+            same-pkg? (= (:pkg ctx) (pkg-of o))]
+        (case (int (bit-and (flags m) 7))
+          2 (and ec (or (identical? ec o) (identical? (d/outermost ec) (d/outermost o)))
+                 (inherited-in? m sc))
+          0 (and same-pkg? (type-accessible? ctx site) (inherited-in? m sc) (not-overridden-in? ctx site m))
+          4 (and (or same-pkg? (protected-accessible? m ec site)
+                     (and (:select-super? ctx) (not (static? m))))
+                 (type-accessible? ctx site)
+                 (not-overridden-in? ctx site m))
+          (and (type-accessible? ctx site) (not-overridden-in? ctx site m)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Applicability (rawInstantiate without inference, resolveMethodCheck)
+
+(defn- arity-ok?
+  "The arity check of argumentsAcceptable: as many arguments as formals, or for variable arity at
+  least all but the last."
+  [nformals nargs varargs?]
+  (if varargs? (>= nargs (dec nformals)) (= nformals nargs)))
+
+(defn- arg-ok?
+  "checkArg: MethodResultInfo.check of actual `a` against formal `f`: capture of its upper bound (a
+  captured variable's), not void, compatible strictly (subtyping, unchecked) or loosely (boxing)."
+  [reg a f strict?]
+  (let [u (if (identical? a f) a (cvar-upper a))
+        c (ty/capture reg u)]
+    (and (not= :void c)
+         (if strict? (subtype-unchecked? reg c f) (convertible? reg c f)))))
+
+(defn- acceptable?
+  "argumentsAcceptable of argument types `as` for formals `fs` in phase (boxing?, varargs?)."
+  [reg as fs boxing? varargs?]
+  (let [n (count fs)
+        strict? (not boxing?)]
+    (and (arity-ok? n (count as) varargs?)
+         (if varargs?
+           (let [fixed (dec n)
+                 elt (elemtype (nth fs fixed))]
+             (and (every? true? (map #(arg-ok? reg %1 %2 strict?) (take fixed as) (take fixed fs)))
+                  elt
+                  (every? #(arg-ok? reg % elt strict?) (drop fixed as))))
+           (every? true? (map #(arg-ok? reg %1 %2 strict?) as fs))))))
+
+(defn- instantiate
+  "rawInstantiate of method `m` at `site` for argument types `as`: its member type when applicable,
+  else nil; declined for a generic method that passes the arity check (Infer's)."
+  [ctx site m as boxing? varargs?]
+  (let [r (reg ctx)
+        mt (mtype-at r site m)]
+    (if (seq (:tparams mt))
+      (if (arity-ok? (count (:params mt)) (count as) varargs?)
+        (d/decline! "a generic method's applicability (inferred)")
+        nil)
+      (when (acceptable? r as (:params mt) boxing? varargs?) mt))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The most specific (mostSpecific, signatureMoreSpecific)
+
+(defn- adjust-args
+  "Resolve.adjustArgs: a variable arity method's last formal as its element, repeated to `n`."
+  [args m n varargs?]
+  (if (and varargs? (d/has? (flags m) d/VARARGS))
+    (let [e (elemtype (last args))
+          xs (conj (vec (butlast args)) e)]
+      (into xs (repeat (- n (count xs)) e)))
+    (vec args)))
+
+(defn- more-specific?
+  "signatureMoreSpecific: is `m1` more specific than `m2` for the actuals `as` at `site`: m2
+  applicable, by subtyping (MostSpecificCheck, strict), to m1's formals (their lower bounds)."
+  [ctx site as m1 m2 varargs?]
+  (let [r (reg ctx)
+        mt1 (mtype-at r site m1)
+        n (max (count (:params (d/method-type m1))) (count as) (count (:params (d/method-type m2))))
+        args (adjust-args (mapv cvar-lower (:params mt1)) m1 n varargs?)
+        mt2 (mtype-at r site m2)]
+    (when (seq (:tparams mt2)) (d/decline! "a generic method's specificity (inferred)"))
+    (when (seq (:tparams mt1)) (d/decline! "a generic method's specificity (inferred)"))
+    (let [f2 (adjust-args (:params mt2) m2 (count args) varargs?)]
+      (and (<= (count f2) (count args))
+           (every? true? (map #(subtype? r %1 %2) args f2))))))
+
+(defn- base-symbol [m] (or (:clone-of m) m))
+
+(defn- flatten-amb [x] (if (= :ambiguous (kind x)) (:syms x) [x]))
+
+(defn- ambiguity
+  "Resolve.ambiguityError(m1, m2): an AmbiguityError, its symbols m2's then m1's."
+  [m1 m2]
+  {:kind :ambiguous :syms (vec (concat (flatten-amb m2) (flatten-amb m1)))})
+
+(declare most-specific)
+
+(defn- most-specific*
+  [ctx site as m1 m2 varargs?]
+  (if (identical? m1 m2)
+    m1
+    (let [r (reg ctx)
+          a (more-specific? ctx site as m1 m2 varargs?)
+          b (more-specific? ctx site as m2 m1 varargs?)]
+      (cond
+        (and a b)
+        (let [mt1 (mtype-at r site m1) mt2 (mtype-at r site m2)
+              o1 (:owner m1) o2 (:owner m2)
+              br1 (d/has? (flags m1) d/BRIDGE) br2 (d/has? (flags m2) d/BRIDGE)]
+          (cond
+            (not (override-equivalent? mt1 mt2)) (ambiguity m1 m2)
+            (not= br1 br2) (if br1 m2 m1)
+            (identical? (base-symbol m1) (base-symbol m2)) m1
+            (and (not (identical? o1 o2)) (d/as-super (d/this-type o1) o2)
+                 (or (not (d/interface? o1)) (d/interface? o2))
+                 (overrides? r m1 m2 o1 false))
+            m1
+            (and (not (identical? o1 o2)) (d/as-super (d/this-type o2) o1)
+                 (or (not (d/interface? o2)) (d/interface? o1))
+                 (overrides? r m2 m1 o2 false))
+            m2
+            (and (abstract? m1) (not (abstract? m2))) m2
+            (and (abstract? m2) (not (abstract? m1))) m1
+            :else (ambiguity m1 m2)))
+        a m1
+        b m2
+        :else (ambiguity m1 m2)))))
+
+(defn- most-specific
+  "Resolve.mostSpecific of new candidate `m1` and the best so far `m2` (a method or an ambiguity)."
+  [ctx site as m1 m2 varargs?]
+  (if (= :ambiguous (kind m2))
+    (let [rs (mapv #(most-specific ctx site as m1 % varargs?) (:syms m2))
+          all-m1? (every? #(identical? % m1) rs)
+          all-them? (every? true? (map identical? rs (:syms m2)))]
+      (cond
+        all-m1? m1
+        (not all-them?) (assoc m2 :syms (vec (cons m1 (:syms m2))))
+        :else m2))
+    (most-specific* ctx site as m1 m2 varargs?)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; selectBest, findMethodInScope
+
+(defn- select-best
+  "Resolve.selectBest of candidate `s` at `site` against the best so far."
+  [ctx site as s best boxing? varargs?]
+  (let [sc (class-of site)]
+    (cond
+      (or (and (not (identical? sc (:owner s))) (not (inherited-in? s sc)))
+          (not (not-overridden-in? ctx site s)))
+      best
+      (and varargs? (not (d/has? (flags s) d/VARARGS)))
+      (if (err? best) (assoc best :bad-varargs true) best)
+      :else
+      (if-not (instantiate ctx site s as boxing? varargs?)
+        (case (kind best)
+          :absent {:kind :wrong-mth :sym s}
+          (:hidden :wrong-mth) {:kind :wrong-mths}
+          best)
+        (if-not (accessible? ctx site s)
+          (case (kind best)
+            :absent {:kind :hidden :sym s}
+            (:wrong-mth :hidden) {:kind :wrong-mths}
+            best)
+          (if (and (err? best) (not= :ambiguous (kind best)))
+            s
+            (most-specific ctx site as s best varargs?)))))))
+
+(defn- find-in-scope [ctx site as ms best boxing? varargs?]
+  (reduce (fn [best s] (select-best ctx site as s best boxing? varargs?)) best ms))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The closure of the interfaces (Types.closure, rank, TypeSymbol.precedes)
+
+(defn- rank [reg c]
+  (if (= "java.lang.Object" (:flat c))
+    0
+    (d/memo c :ov-rank
+            (fn [] (inc (reduce max (if-let [s (super-class reg c)] (rank reg s) 0)
+                                (map #(rank reg %) (iface-classes c))))))))
+
+(defn- qname [c] (str/replace (str (:flat c)) "$" "."))
+
+(defn- precedes? [reg a b]
+  (and (not (identical? a b))
+       (let [ra (rank reg a) rb (rank reg b)]
+         (or (< rb ra) (and (= ra rb) (neg? (compare (qname a) (qname b))))))))
+
+(defn- insert [reg cl c]
+  (cond
+    (empty? cl) (list c)
+    (identical? c (first cl)) cl
+    (precedes? reg c (first cl)) (cons c cl)
+    :else (cons (first cl) (insert reg (rest cl) c))))
+
+(defn- union [reg a b]
+  (cond
+    (empty? a) b
+    (empty? b) a
+    (precedes? reg (first a) (first b)) (cons (first a) (union reg (rest a) b))
+    (precedes? reg (first b) (first a)) (cons (first b) (union reg a (rest b)))
+    :else (cons (first a) (union reg (rest a) (rest b)))))
+
+(defn- closure "Types.closure of class `c`'s type, as its classes." [reg c]
+  (d/memo c :ov-closure
+          (fn []
+            (let [s (super-class reg c)
+                  cl (if s (insert reg (closure reg s) c) (list c))]
+              (doall (reduce (fn [cl i] (union reg cl (closure reg i))) cl (iface-classes c)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; mergeAbstracts (Types.mergeAbstracts, Check.intersect)
+
+(defn- subset? [reg t ts] (some #(subtype? reg t %) ts))
+
+(defn- incl [reg t ts] (if (subset? reg t ts) ts (cons t (remove #(subtype? reg % t) ts))))
+
+(defn- intersect "Check.intersect of thrown types." [reg ts1 ts2]
+  (let [acc (reduce (fn [acc t] (if (subset? reg t ts2) (incl reg t acc) acc)) () ts1)]
+    (reduce (fn [acc t] (if (subset? reg t ts1) (incl reg t acc) acc)) acc ts2)))
+
+(defn- return-check [reg check t s]
+  (case check
+    :basic (let [rt (:ret t) rs (d/subst (:ret s) (tvars-map (:tparams s) (:tparams t)))]
+             (or (ty/same-type? rt rs) (and (not (keyword? rt)) (not (keyword? rs)) (subtype? reg rt rs))))
+    :rts (return-substitutable? reg t s)))
+
+(defn- with-thrown
+  "A method symbol as `s` with thrown types `ts` (mergeAbstracts' MethodSymbol whose baseSymbol is s)."
+  [s ts]
+  (d/sym (assoc (.-m ^arbace.repr.java.decls.Sym s)
+                :clone-of (base-symbol s)
+                :memo (doto (java.util.HashMap.)
+                        (.put :type (assoc (d/method-type s) :throws (vec ts)))
+                        (.put :flags (flags s))
+                        (.put :tparams (d/method-tparams s))))))
+
+(defn- merge-abstracts
+  "AmbiguityError.mergeAbstracts at `site`: the abstract method (all of the same erased parameters)
+  that is a subsignature of the others with the most specific return type, its thrown types those all
+  allow; nil when there is none."
+  [ctx amb site]
+  (let [r (reg ctx)
+        ms (reverse (:syms amb))
+        erased (mapv d/erasure (:params (d/method-type (first ms))))]
+    (when (every? (fn [s] (and (abstract? s) (= erased (mapv d/erasure (:params (d/method-type s)))))) ms)
+      (let [should-erase? (some #(seq (:tparams (d/method-type %))) ms)]
+        (some (fn [check]
+                (some (fn [s]
+                        (let [mt (mtype-at r site s)]
+                          (when (every? (fn [s2] (or (identical? s s2)
+                                                     (let [mt2 (mtype-at r site s2)]
+                                                       (and (sub-signature? mt mt2) (return-check r check mt mt2)))))
+                                        ms)
+                            (let [thrown (reduce (fn [acc s2]
+                                                   (if (identical? s s2)
+                                                     acc
+                                                     (let [mt2 (mtype-at r site s2)
+                                                           t2 (cond
+                                                                (and (empty? (:tparams mt)) should-erase?) (mapv d/erasure (:throws mt2))
+                                                                (seq (:tparams mt)) (mapv #(d/subst % (tvars-map (:tparams mt2) (:tparams mt))) (:throws mt2))
+                                                                :else (:throws mt2))]
+                                                       (intersect r acc t2))))
+                                                 (:throws mt) ms)]
+                              (if (and (empty? thrown) (empty? (:throws mt))) s (with-thrown s thrown))))))
+                      ms))
+              [:basic :rts])))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; findMethod
+
+(defn- array-clone-of [ctx] ((:array-clone ctx)))
+
+(defn- find-method*
+  [ctx site name as boxing? varargs?]
+  (let [r (reg ctx)
+        sc (class-of site)]
+    (if (= :array sc)
+      ;; javac's array class: its clone(), then Object's members (its supertypes declare none else)
+      (let [best (if (= "clone" name)
+                   (select-best ctx site as (array-clone-of ctx) absent boxing? varargs?)
+                   absent)]
+        (if (= "clone" name)
+          best
+          (find-in-scope ctx (d/object-type r) as (named-methods (object-class r) name) best boxing? varargs?)))
+      (let [iface? (d/interface? sc)
+            supers (if iface? [sc] (loop [c sc acc [] seen #{}] (if (or (nil? c) (seen c)) acc (recur (super-class r c) (conj acc c) (conj seen c)))))
+            ctor? (= "<init>" name)
+            [best itypes]
+            (reduce (fn [[best itypes iphase] s]
+                      (let [best (find-in-scope ctx site as (named-methods s name) best boxing? varargs?)]
+                        (if ctor?
+                          (reduced [best itypes iphase])
+                          (let [iphase (if (and (= iphase :abstract-ok)
+                                                (d/has? (d/class-flags s) (bit-or d/ABSTRACT d/INTERFACE d/ENUM)))
+                                         :abstract-ok
+                                         :default-ok)
+                                itypes (reduce (fn [it i] (update it iphase #(union r (closure r i) %))) itypes (iface-classes s))]
+                            [best itypes iphase]))))
+                    [absent {:abstract-ok () :default-ok ()} :abstract-ok]
+                    supers)]
+        (if ctor?
+          best
+          (let [concrete (if (and (method? best) (not (abstract? best))) best absent)
+                best (reduce (fn [best [iph i]]
+                               (if (or (not (d/interface? i))
+                                       (and (= iph :default-ok) (not (d/has? (d/class-flags i) d/DEFAULT))))
+                                 best
+                                 (let [b (find-in-scope ctx site as (named-methods i name) best boxing? varargs?)]
+                                   (if (and (not (identical? concrete b)) (method? concrete) (method? b)
+                                            (sub-signature? (d/method-type concrete) (d/method-type b)))
+                                     concrete
+                                     b))))
+                             best
+                             (concat (map (fn [i] [:abstract-ok i]) (:abstract-ok itypes))
+                                     (map (fn [i] [:default-ok i]) (:default-ok itypes))))]
+            (if (and iface? (err? best))
+              (let [b (find-in-scope ctx site as (named-methods (object-class r) name) best boxing? varargs?)]
+                (if (method? b) (d/member-clone b sc) b))
+              best)))))))
+
+(defn find-method
+  "Resolve.findMethod of `name` at `site` for argument types `as` in phase (boxing?, varargs?): an
+  ambiguity of abstract methods merged."
+  [ctx site name as boxing? varargs?]
+  (let [best (find-method* ctx site name as boxing? varargs?)]
+    (if (= :ambiguous (kind best))
+      (or (merge-abstracts ctx best site) best)
+      best)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; findFun: the enclosing classes, then the static imports
+
+(defn- import-accessible? "Check.importAccessible of method `m` from package `pkg`." [m pkg]
+  (case (int (bit-and (flags m) 7))
+    2 false
+    (0 4) (= pkg (pkg-of (:owner m)))
+    true))
+
+(defn- imported-methods
+  "The static methods named `n` a static import of class `c` brings (SymbolImporter: c's, then its
+  interfaces' last first, then its superclass's, each with theirs), members of c, accessible from
+  package `pkg`."
+  [reg c n pkg]
+  (let [seen (java.util.HashSet.)]
+    (letfn [(from [k acc]
+              (if (or (nil? k) (not (.add seen k)))
+                acc
+                (let [acc (from (super-class reg k) acc)
+                      acc (reduce (fn [acc i] (from i acc)) acc (iface-classes k))]
+                  (cons (named-methods k n) acc))))]
+      (filter #(and (static? %) (import-accessible? % pkg) (na/method-member-of? % c))
+              (apply concat (from c ()))))))
+
+(defn- env-classes [env] (distinct (keep :class (:levels env))))
+
+(defn- find-fun
+  "Resolve.findFun of `name` for argument types `as`: the first enclosing class with such a method
+  (one that exists), else the single static imports' methods, else the on-demand ones'."
+  [ctx env name as boxing? varargs?]
+  (or (some (fn [c]
+              (let [s (find-method (assoc ctx :encl-class c) (d/this-type c) name as boxing? varargs?)]
+                (when (exists? s) s)))
+            (env-classes env))
+      (let [r (reg ctx)
+            imps (d/import-scope (:uctx env))
+            pkg (:pkg ctx)
+            imported (fn [best entries]
+                       (reduce (fn [best c]
+                                 (reduce (fn [best m]
+                                           (let [m (d/member-clone m c)
+                                                 site (d/this-type c)]
+                                             (select-best ctx site as m best boxing? varargs?)))
+                                         best (imported-methods r c name pkg)))
+                               best entries))
+            best (imported absent (keep (fn [[c n]] (when (= n name) c)) (:static-named imps)))]
+        (if (exists? best)
+          best
+          (imported best (:static-star imps))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; lookupMethod: the three phases
+
+(def ^:private phases [[:basic false false] [:box true false] [:varity true true]])
+
+(defn- should-stop? [best] (or (not (err? best)) (#{:ambiguous :static} (kind best))))
+
+(defn- merge-varity
+  "MethodResolutionPhase.VARARITY's mergeResults."
+  [best sym]
+  (if-not (err? sym)
+    sym
+    (case (kind best)
+      (:wrong-mth :wrong-mths) (case (kind sym)
+                                 :wrong-mth (if (= :wrong-mths (kind best)) best sym)
+                                 :absent best
+                                 sym)
+      best)))
+
+(defn lookup-method
+  "Resolve.lookupMethod over the phases of `lookup` ((lookup boxing? varargs?) gives a phase's
+  result): {:sym the method or the error, :phase the phase it was found in}."
+  [lookup]
+  (loop [[[ph b v] & more :as ps] phases best absent pending nil]
+    (if (or (empty? ps) (should-stop? best))
+      {:sym best :phase pending}
+      (let [sym (lookup b v)
+            best' (if (= ph :varity) (merge-varity best sym) sym)]
+        (recur more best' (if (identical? best best') pending ph))))))
+
+(defn context
+  "A resolution context in `env` (javac's Env: its class, package; `extra` :select-super?)."
+  [env array-clone extra]
+  (merge {:env env :reg (:reg env) :encl-class (some :class (:levels env)) :pkg (:pkg (:uctx env))
+          :array-clone array-clone}
+         extra))
+
+(defn resolve-method
+  "Resolve.resolveMethod (`site` nil: an unqualified call, findFun) or resolveQualifiedMethod (at
+  `site`) of `name` for argument types `as` in `env`."
+  [env site name as array-clone extra]
+  (let [ctx (context env array-clone extra)]
+    (lookup-method (if site
+                     (fn [b v] (find-method ctx site name as b v))
+                     (fn [b v] (find-fun ctx env name as b v))))))
+
+(defn resolve-constructor
+  "Resolve.resolveConstructor at class type `site` for argument types `as` in `env`."
+  [env site as array-clone extra]
+  (let [ctx (context env array-clone extra)]
+    (lookup-method (fn [b v] (find-method ctx site "<init>" as b v)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; An anonymous class's constructor (TypeEnter.AnonClassConstructorHelper)
+
+(defn anon-constructor
+  "The constructor TypeEnter gives anonymous class `c` calling superclass constructor `sup` at the
+  created type `ct` (its member type there; the enclosing instance's type `encl` first for a
+  qualified creation): ANONCONSTR, the super constructor's VARARGS."
+  [reg c sup ct encl]
+  (d/memo c :ov-anon-ctor
+          (fn []
+            (let [mt (ty/member-type reg ct sup)
+                  ps (vec (concat (when encl [encl]) (:params mt)))]
+              (d/sym {:sk :method :name "<init>" :owner c :generated true :anon-super sup
+                      :memo (doto (java.util.HashMap.)
+                              (.put :type {:tparams [] :params ps :ret :void :throws (:throws mt)})
+                              (.put :tparams [])
+                              (.put :flags (long (bit-or d/ANONCONSTR d/GENERATEDCONSTR
+                                                         (bit-and (flags sup) d/VARARGS)))))})))))

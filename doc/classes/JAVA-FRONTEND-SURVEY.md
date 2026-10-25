@@ -4824,3 +4824,253 @@ until JN9c, counted as leaned), JFS96 (a) (`:types/result` counted by the type i
 (javac's chosen method handed over as the native model's), JFS98 (a) (the declined facts left to JN9c
 and JN9d), JFS99 (a) (`enter/members` a checked fact only), JFS100 (b) (the declines' reasons always
 summed in `attr.md`), JFS101 (a) (JN9c next, then JN9d; started beside the REAP work).
+
+## As built: JN9c (2026-10-25)
+
+JN9c (JFS69 (b)'s third tier, decided by JFS101 (a)), with JFS100 (b) inside it, on the branch `java-jn9c`
+from main `840e514b`, in about a working day (most of it the shared heavy slots' queue and three tool
+builds). The native attribution provider now **chooses the method and the constructor of every call that
+needs no inference**, as javac's Resolve chooses them: the candidates of the site's classes and interfaces
+(`findMethod`, with its interface phases and the "concrete" rule), of the enclosing classes and the static
+imports for an unqualified call (`findFun`), each checked for applicability by strict, loose and variable
+arity invocation (the three phases of `lookupMethod`), the most specific of the applicable and accessible
+ones (`mostSpecific`, `signatureMoreSpecific`, `mergeAbstracts`), errors as javac's kinds (absent,
+inapplicable, inaccessible, ambiguous). The lean on javac's overload choice (JFS95 (a)) is gone wherever no
+inference is needed: in jdk26u the answers leaned on javac went from **903,905 to 53,316**, and the facts the
+overload tier answers natively from 552,892 (all leaned) to **2,001,666** (49,591 leaned), checked by
+`bin/repr-java attr-check --corpus all`: over the samples, the baseline, the jdk corpus, javac's sources
+and jdk26u's 68 modules **13,193,153 facts equal, none different**, no bridge beyond the known list, and the
+converter given the native answers writes **every corpus's forms byte for byte as from javac's trees**. The
+provider alone now writes **95.9% of jdk26u's lists** (JN9b: 63.4%). What needs inference is declined as
+JFS76 (a) and JFS98 (a) decided (a poly argument, a generic candidate that passes the arity check, explicit
+type arguments, a diamond, a signature polymorphic call), and then the provider leans on javac's choice as
+before. The JVM ran only the frozen v4 jar, for javac's edge in `bin/javac-vendor convert`; Go only
+TamaGo's go1.27.1, without cgo; the tools' host was the worktree's stage 0 (the seed's).
+
+### JN9c.1 What was built
+
+| file | lines | what |
+|---|---:|---|
+| `arbace/repr/java/overload.ae` | 794 (new) | `arbace.repr.java.overload`, the overload tier: Resolve's `isAccessible` of classes and members (`isProtectedAccessible`, `isInnerSubClass`, `notOverriddenIn` with Types' `implementation`, `isDerivedRaw`), `rawInstantiate` without inference (`resolveMethodCheck`'s `argumentsAcceptable` and `checkArg`, `MethodResultInfo.check`'s capture of the upper bound, `MethodCheckContext.compatible`: `isSubtypeUnchecked` strictly, `isConvertible` loosely), `selectBest`, `mostSpecific` (`signatureMoreSpecific`, `adjustArgs`, `MostSpecificCheck`, the same signature's rules: bridges, the base symbol, overriding, abstract), `ambiguityError` and `mergeAbstracts` (Types' with `MostSpecificReturnCheck` and Check's `intersect` of the thrown types), `findMethodInScope` and its `LookupFilter`, `findMethod` (`superclasses`, `InterfaceLookupPhase`, the interfaces' `closure` ordered by `rank` and `precedes`, the concrete rule, an interface's Object methods as clones), `findFun` (the enclosing classes, then the single and on-demand static imports in `SymbolImporter`'s order, `staticImportFilter`, `importAccessible`), `lookupMethod`'s phases (`shouldStop`, `mergeResults`), `resolveMethod`, `resolveQualifiedMethod`, `resolveConstructor`; Types' `hasSameArgs`, `isSubSignature`, `overrideEquivalent`, `returnTypeSubstitutable`, `resultSubtype`, `covariantReturnType`; Symbol's `overrides`, `isOverridableIn`; TypeEnter's `AnonClassConstructorHelper` (an anonymous class's constructor) |
+| `arbace/repr/java/expr.ae` | 919 (was 761) | `choice`: a call's resolution (APPLY: unqualified, qualified at the qualifier's captured type through its type variables, `this(...)` and `super(...)` with select-super; NEWCLASS at the created type), over the arguments' standalone types (ArgumentAttr's: a poly argument has none and the call is declined), memoized with its lean as `etype`; `method-of`, `ctor-of`, `call-varargs?`: the choice, else javac's, leaned; `anon-super-choice` (Attr.visitNewClass: the superclass constructor at the created class type, select-super; Object's for an interface) and `anon-ctor-choice`; `ctor-method-type` over the native constructor |
+| `arbace/repr/java/attr.ae` | 649 (was 602) | `choice-fact`: the overload tier's facts native, checked against javac's (`symbol-of` of a call's method, `constructor`, an anonymous class's own and `anon-super-ctor`), an error javac would report as data (`[:error kind]`, a difference); `varargs-element`: whether a call is of variable arity and its element native for calls and creations (`:overload/arity` included) |
+| `arbace/repr/java/decls.ae` | 1,764 (was 1,744) | ClassReader's `readMethod`: a class file interface's method with a body, not static or private, is DEFAULT \| ABSTRACT and its interface DEFAULT; a member inner class's constructor read from its descriptor without the enclosing instance's parameter (`adjustMethodParams`); `import-scope` public |
+| `arbace/repr/java/types.ae` | 383 (was 378) | `same-type?`: type arguments compared as `containsTypeEquivalent` for `?` and `? extends Object` |
+| `arbace/repr/java/nattr.ae` | 632 (was 606) | `nmethod-id`, `jmethod-id` (a chosen method as data: owner, name, erased parameters); `record!` counts each decline by its reason (JFS100 (b)); the provider's `:choices` |
+| `arbace/repr/java.ae`, `arbace/repr/java/split.ae` | 484, 417 | the declines' reasons summed (`:why` in `repr-java-attr.edn`), `attr.md`'s table of declines by fact and reason (JFS100 (b)) |
+
+### JN9c.2 The facts, the answers, the check
+
+| fact | the native answer | data compared with javac's |
+|---|---|---|
+| `overload/method` (`symbol-of` of an APPLY's meth: a call's method, `this(...)`/`super(...)`'s constructor) | the method lookupMethod chooses, or an error | `[:method owner name erased-parameters]` (the owner a clone's: a static import's, an interface's Object method's), an error `[:error kind]` |
+| `overload/constructor` (NEWCLASS) | the constructor resolveConstructor chooses at the created type; an anonymous class's own, TypeEnter's over the superclass constructor chosen | the same |
+| `overload/anon-super-ctor` | the superclass constructor an anonymous class's constructor calls | the same |
+| `overload/arity`, `overload/declared-varargs-element`, `types/member-varargs-element` (calls and, new, creations) | whether the choice was made in the third phase, and the element of the last formal at the site | the element type, nil for a call of fixed arity |
+
+The facts after the choice (`overload/declared-method-type`, `types/member-method-type`, `types/expr` of a
+call, and every fact over an expression with a call in it) are unchanged in their computation (JN9b's);
+they are now native where the choice is, *leaned* only where it is javac's. A choice javac's model needs
+(an array's `clone()`, of Symtab's `arrayClass`) is handed to the converter as javac's symbol, the fact
+still checked. What javac does that the corpora showed and the provider follows (each found by a fact that
+differed, then fixed):
+
+- `findFun` stops at the innermost enclosing class that has a method of the name even when it is not
+  applicable: `InapplicableSymbolError.exists()` is true (only `SymbolNotFoundError` and `AccessError` are
+  not), so an inner class's inapplicable inherited method hides an applicable one of the outer class in
+  that phase (`JTextComponent`'s accessible context's `firePropertyChange(String, int, int)`: javac takes
+  `AccessibleContext`'s in the loose phase, not `JComponent`'s in the strict one).
+- `isSameType` compares a class type's arguments by `containsTypeEquivalent`: `Map<?,?>` and
+  `Map<? extends Object, ? extends Object>` are the same type, so a method declared with the one overrides
+  one declared with the other (`Provider.putAll`, `Properties.replaceAll`): without it `notOverriddenIn`
+  kept the overridden method and the call was ambiguous.
+- ClassReader gives a class file interface's default method DEFAULT | ABSTRACT and its interface DEFAULT
+  (the interface phases' DEFAULT_OK, the concrete rule and `mostSpecific`'s abstract rule read them), and
+  reads a member inner class's constructor without the enclosing instance's parameter of its descriptor.
+
+### JN9c.3 The check and the numbers
+
+On the final tool (key `18d12685...`), the host shared, `bin/repr-java attr-check --corpus all` against
+the base tool's run (key `abe3444d...`, main's sources, which reproduced JN9b's numbers to the fact):
+
+| corpus | forms files equal | facts equal / different / declined (leaned on javac) | wall (base) |
+|---|---:|---:|---:|
+| `samples` | 17 of 17 | 2,448 / 0 / 76 (11; base 104) | 6 s (7 s) |
+| `baseline` | 189 of 189 | 315,089 / 0 / 360 (221; base 25,741) | 77 s (76 s) |
+| `jdk` | 911 of 911 | 1,096,768 / 0 / 16,598 (6,305; base 74,022) | 218 s (247 s) |
+| `javac` | 1,828 of 1,828 | 1,027,107 / 0 / 23,923 (8,470; base 86,674) | 232 s (216 s) |
+| `jdk26u` | 13,788 of 13,788 | 10,751,741 / 0 / 145,401 (53,316; base 903,905) | 1,839 s (1,501 s) |
+
+The whole `--corpus all` took 2,378 s against the base's 2,056 s (16% more; jdk26u 22% more: the
+resolution of every call, the host shared). The facts counted grew because the overload tier's are now
+answered (before, `overload/method`, `overload/constructor`, `overload/arity` and `overload/anon-super-ctor`
+were javac's, counted only in the split). By tier in jdk26u (equal / different / declined, leaned):
+
+| tier | JN9c | JN9b (the base) |
+|---|---:|---:|
+| scope | 2,726,388 / 0 / 9,974 (360) | 2,726,389 / 0 / 9,974 (6,933) |
+| members | 556,242 / 0 / 569 (18) | 556,242 / 0 / 569 (2,796) |
+| types | 2,680,134 / 0 / 53,982 (3,347) | 2,680,096 / 0 / 53,987 (341,284) |
+| overload | 2,001,666 / 0 / 68,201 (49,591) | 552,892 / 0 / 7,034 (552,892) |
+| total | 10,751,741 / 0 / 145,401 (53,316) | 9,302,930 / 0 / 84,239 (903,905) |
+
+By fact, jdk26u's overload tier: `overload/method` 721,217 / 51,575 declined (989 leaned: a call whose
+choice is native but an argument's type needed javac's choice of a call inside it), `overload/arity`
+646,496 (41,875 leaned), `overload/constructor` 78,241 / 9,274, `overload/anon-super-ctor` 2,052 / 307,
+`overload/declared-method-type` 472,142 / 6,865 (5,336 leaned), `overload/declared-constructor-type`
+73,544 / 15 (915), `overload/declared-varargs-element` 7,974 / 165 (410).
+
+| | samples | baseline | jdk | javac | jdk26u |
+|---|---:|---:|---:|---:|---:|
+| lists the provider wrote alone | 87.5% (JN9b 73.2%) | 99.1% (61.5%) | 95.9% (70.4%) | 93.0% (60.7%) | 95.9% (2,165,829 of 2,258,047; JN9b 63.4%) |
+| model reads native / javac / bridge | 13,657 / 1,141 / 33 | 1,974,065 / 6,020 / 378 | 6,409,655 / 175,291 / 4,339 | 6,540,650 / 239,650 / 5,451 | 64,300,046 / 1,634,167 / 48,519 |
+| native share of the model's reads | 92.1% (92.1%) | 99.7% (99.7%) | 97.3% (97.1%) | 96.4% (96.4%) | 97.4% (97.4%) |
+
+The model's reads moved little: JFS97 (a) had already handed javac's choice over as the native model's
+method, so the reads of the chosen method were native before; what JN9c changes is whose choice it is. The
+bridges are the known list's, unchanged (48,519 in jdk26u).
+
+What the overload tier declines in jdk26u, by reason (JFS100 (b), `attr.md`'s new table; a decline's first
+reason met): `overload/method` a generic candidate that passes the arity check (its applicability is
+Infer's) 21,525, a `var` local's or an implicit lambda parameter's type in an argument 8,360, a lambda or
+method reference argument 7,648, a generic method's call as an argument 6,995, a poly argument
+(conditional, switch expression) 1,847, a call inside an anonymous class of a diamond 1,509, a signature
+polymorphic call 1,317, a name the members tier does not resolve 693, a diamond argument 604, a
+multi-catch parameter 429, a `var`'s upward projection 296, explicit type arguments 165, the rest under
+200; `overload/constructor` a diamond 7,619 and its arguments' as above; `overload/anon-super-ctor` a
+diamond 239. Every one is the inference tier's (JN9d) but the members tier's unresolved names and the
+multi-catch parameters (JFS98 (a)).
+
+### JN9c.4 JFS100 (b): the declines' reasons
+
+`nattr/record!` counts each decline under `:why/<fact>` by its reason, the decline's message without the
+names it gives (`decline-reason`); `repr-java-attr.edn` carries them as `:why`, `split attr` sums them and
+`attr.md` ends with a table by fact and reason, per corpus. `REPR_JAVA_ATTR_DECLINED` still keeps the
+declines' positions in the diffs (a debugging aid).
+
+### JN9c.5 The shipped program's change
+
+None in code: `arbace/repr/java` is not in the shipped program (j2g's `embed.ae` leaves it out; javac's
+tool embeds it, now with `overload`: 226,652,320 bytes against the base tool's 225,738,912), and `go/`,
+`overlay/`, `jdk/forms`, `jdk/data` and `jdk/edge.edn` are unchanged. The reader hash
+(`repr_java_reader_hash`: `arbace/repr/java.ae` and `attr` changed) moved from `079c57b8...` to
+`a2daae6b...`, written by the updates on the final tool: `bin/clojure-tests --java-fixtures update` (15
+forms files), `bin/jrt-convert update` (911 forms files, 10 data files), `bin/javac-vendor convert` (914
+forms files; its edge on the frozen v4 jar: 223 classes beyond `jdk/edge.edn`'s): every forms file byte for
+byte as committed, only `:repr-java` and `:host` changed in `jdk/provenance.edn`, `jdk/javac/provenance.edn`
+and `test/java-fixtures/provenance.edn`. `overload` is not in the reader hash, as `decls`, `scope`, `nattr`,
+`expr` and `types` are not. `jdk/provenance.edn` is in the runtime key, so the version map the executable
+carries changes, as at JN9b. No re-seed. The tools were built for amd64 only (`ARBACE_GO_ARCHES=amd64`).
+
+### JN9c.6 The checks
+
+All on the final tool, one after another, the host shared:
+
+- `bin/repr-java attr-check --corpus all`: JN9c.3's table; every corpus's forms equal and every fact
+  equal, no bridge beyond the known (2,378 s)
+- `bin/repr-java front-check`: every default corpus equal (403 s); `bin/repr-java parse-check`: every
+  corpus's trees as javac's (195 s)
+- `bin/repr-java check`: the baseline, the samples and the module as expected (27 s)
+- `bin/repr-java check --jdk`: 68 modules converted, 0 with failures, the 13,566 forms files as
+  `test/repr/java/expected/jdk26u.sha256` (580 s)
+- `bin/repr-java roundtrip --corpus baseline,samples,jdk --text`: as the references (777 s)
+- the updates of JN9c.5: only the three provenance files' `:repr-java` and `:host` changed
+- `bin/gate` (essential): on the branch at `1243821e` (the code and the provenance as final; this section's commit changes only `doc/`), passes in 27m17s (go-build 17m57s afresh, go-smoke, suite-go with no regression, oracle-go 52 known mismatches as recorded, diffcheck 12,789 of 12,801 cases agree with the 12 known, goi-check 801 of 801, java-check 428 of 428, generated, j2g-edge verify: `jdk/edge.edn` the JVM's answer, reap)
+- not run: `bin/gate --full` (the user's rule), `bin/repr-java check --suite`, `bin/javac-vendor verify`
+  and `classes` (the converted forms and javac's world are unchanged: the updates show the forms byte
+  for byte)
+
+### JN9c.7 What it means for the next tier
+
+JN9c took about a working day against JN9b.10's 1-1.5 days; the port followed Resolve's code closely and
+the check found three javac behaviours a reading had missed (JN9c.2), each a fact that differed. One cost
+of the iteration is worth naming: the base tool loads a changed namespace from the checkout, but `decls`
+defines the native symbols' type (`deftype Sym`), and a reloaded `decls` makes the compiled model's
+`instance?` checks fail, so a change to `decls` needs a tool build (about 25 minutes) to be tried (JFS107).
+
+What is left of javac in jdk26u's conversion is the inference tier's (JN9d: 53,316 leaned answers, the
+declines of JN9c.3 and JN9b.7), the flow tier's few facts (`flow/case-completes`, `exhaustive`,
+`unconditional-pattern`: 33,946 asked), whether a switch is a pattern switch (`types/pattern-switch`, 4,813), the anonymous creation's constructor type and the method
+references' kinds and methods. JN9d (Infer's applicability and instantiation, DeferredAttr and ArgumentAttr
+for the poly arguments, diamonds, lambdas and method references, `var` projections, local classes'
+numbering): re-estimated 3-5 days (JN9b.10's), its first step the generic candidates' applicability, the
+largest decline (21,525).
+
+### JN9c.8 Proposals
+
+- **JFS102 The generic candidates.**
+  - Options: (a) as built: a call is declined when a candidate with type parameters of its own passes the
+    phase's arity check (its applicability is Infer's), 21,525 calls in jdk26u, most of whose chosen method
+    is not generic; (b) JN9d's first step: Infer's applicability for a candidate whose inference variables
+    are bounded by the standalone argument types alone (no target, no poly argument), which decides most of
+    them without the rest of inference; (c) an approximation now (a generic candidate's formals' erasure).
+  - *Recommended: (b), first in JN9d*: it is Infer's own work and the inference tier needs it anyway; (c)
+    would choose differently from javac where the bounds matter, and the check would only hide it.
+- **JFS103 The anonymous class's constructor in its members.**
+  - Options: (a) as built: the anonymous class's constructor made on demand for the `constructor` fact
+    (`overload/anon-constructor`), not among the class's members, so `enter/members` still declines every
+    anonymous class (4,718 in jdk26u); (b) decls' members of an anonymous class with that constructor,
+    through a hook to the overload tier's choice of the superclass constructor, `enter/members` checked for
+    them.
+  - *Recommended: (b)*: a few hours, and the members fact then covers every class.
+- **JFS104 An anonymous creation's constructor type.**
+  - Options: (a) as built: `constructor-type` of a creation with a body stays javac's (`types/member-*`,
+    `overload/declared-constructor-type` not asked natively there); (b) native: the anonymous constructor's
+    type at the created type (TypeEnter's, its enclosing instance's type first for a qualified creation).
+  - *Recommended: (b)*, with JFS103: the same constructor, its type follows.
+- **JFS105 The errors.**
+  - Options: (a) as built: javac's error kinds as data (absent, inapplicable, inaccessible, ambiguous,
+    static), an error answer counted as a difference: the corpora compile, so none occurs, and any would
+    be the port's bug; (b) also check the errors against javac's on invalid code (JC3's diagnostics corpus,
+    the parser's mutants), the kinds and the candidates.
+  - *Recommended: (a)* until a javac-free front end must report errors; (b) is then the check of that
+    front end's diagnostics, a step of its own.
+- **JFS106 The class files' members.**
+  - Options: (a) as built: ClassReader's two behaviours the overload tier needed (default methods'
+    flags, inner constructors' parameters) in `decls`, found by resolution; (b) a fact checking the
+    platform classes' members (flags, erased signatures) against javac's ClassSymbols, as `enter/members`
+    does the units' classes, for the classes the run reads.
+  - *Recommended: (b)*: `decls`' class-file side was checked only through the facts that used it, and two
+    divergences surfaced late; a members fact on the platform's classes is cheap and finds the rest.
+- **JFS107 Iterating on `decls`.**
+  - Options: (a) as built: a change to `decls` needs a tool build to be tried (its `deftype Sym` reloaded
+    from the checkout is a new class the compiled model does not know); (b) the symbol type in a namespace
+    of its own (`arbace.repr.java.sym`) that changes rarely, so `decls` reloads like the others.
+  - *Recommended: (b)*: a mechanical move, and it saves a build per `decls` change in JN9d.
+- **JFS108 Signature polymorphic calls.**
+  - Options: (a) as built: declined (1,317 calls in jdk26u: `MethodHandle.invoke*`, `VarHandle`'s); (b)
+    native: Infer's `instantiatePolymorphicSignatureInstance` (the parameters the arguments' types, the
+    result the cast's or Object), a small part taken from JN9d.
+  - *Recommended: (b), in JN9d*: it is Infer's, small, and with JN9d's poly checks at hand.
+- **JFS109 Next.**
+  - Options: (a) JN9d (inference: JFS102 (b) first, then poly arguments, diamonds, lambdas and method
+    references, `var` projections, local classes' numbering), re-estimated 3-5 days, with JFS103, JFS104,
+    JFS107 (b) and JFS108 (b) inside it; (b) stop at JN9c: the provider writes 95.9% of jdk26u's lists alone,
+    javac answers inference.
+  - *Recommended: (a)*, if a javac-free converter is still the aim (JFS69 (b)); JFS107 (b) first, as it
+    makes JN9d's iteration cheaper.
+
+### JN9c.9 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`):
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/{Resolve,Attr,ArgumentAttr,Check,TypeEnter}.java`,
+  `code/{Types,Symbol,Scope}.java`, `jvm/ClassReader.java` (`readMethod`, `adjustMethodParams`).
+- The worktree's `.tmp/`: `jn9c/` (`build0.log`, `build1.log`, `build2.log`: the base, the intermediate and
+  the final tool's builds; `base/`: the base tool's `attr-check --corpus all`, `base-all.log`, `attr.md`,
+  `attr.edn`, `split.md`; `b1/`: the intermediate tool's run, with the two jdk26u differences of JN9c.2's
+  first item; `s1.log`-`s3.log`: the runs on the base tool with the changed namespaces evaluated; `t1/`,
+  `t2/`: the small reproductions; `diffs.ae`: a run's differences; `decls.jn9c.ae`: decls while it could
+  not be reloaded; `final/`: the final tool's checks, `run.sh`, their logs, `summary.txt`, `attr.md`,
+  `attr.edn`, `split.md`, `gate.log`), `repr-java-attr-check/`, `repr-java-front-check/`, `repr-java-jdk/`,
+  `repr-java-check/`, `repr-java-parse-check/`, `repr-java-roundtrip/`, `jrt/`, `javac-vendor/`,
+  `clojure-tests/`.
+
+## Decided (2026-10-25): JFS102-JFS109
+
+The user decided JN9c's proposals as recommended: JFS102 (b) (generic candidates: Infer's applicability
+from standalone argument types, JN9d's first step), JFS103 (b) (anonymous classes' constructors in decls'
+members), JFS104 (b) (the anonymous creation's constructor type native, with JFS103), JFS105 (a) (error
+kinds as data), JFS106 (b) (a fact checking the platform classes' members against javac's ClassSymbols),
+JFS107 (b) (`deftype Sym` in a namespace of its own, so decls reloads from the checkout), JFS108 (b)
+(signature-polymorphic calls native, in JN9d), JFS109 (a) (JN9d next, JFS107 first; started now, beside
+the REAP work).

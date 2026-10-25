@@ -1814,3 +1814,127 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   status check (2026-10-24).
 - Started (the user), from this commit: REAP5 (Java's print level), JC5 (the analysis' gaps), REAP8 (the
   essential subsets), JC2b (JCS42 (b)-JCS48), RPS55 (jrt's `java.lang.Module`), JN9c (overload resolution).
+
+## 2026-10-25: RPS55 merged, RPS80-RPS82 decided (the user)
+
+- RPS55 (a) (branch `jrt-module-rps55` from `840e514b`, merged): jrt's `java.lang.Module`
+  (`go/arbace/jrt/module.ae`, a hand-written final class of the manifest: `getName`, `isNamed`,
+  `getClassLoader`, `toString` with the JDK's texts; two instances, java.base and the app loader's
+  unnamed module) and `Class.getModule` by `classPlace`'s rule (java.base for primitives and
+  `java.`/`javax.`/`jdk.`/`sun.` classes, exact for the shipped world's 839 java.base sources; the unnamed
+  module otherwise; an array its element's); `getDescriptor` j2g's stub. `bin/jrt manifest` regenerated
+  (`manifest.edn`, `manifest_test.ae`, `reflect_tables.ae`), `TestClassLoaders` checks the modules;
+  `jdk/edge.edn` unchanged (`bin/j2g-edge update`, `verify`). The suite 20,566 of 20,580 assertions (was
+  20,564; errors 5 to 3), java.javadoc 4 of 5, re-recorded; `:javadoc-url` narrowed to the java.sql
+  assertion, by design (D6); the oracle and diffcheck unchanged; the executable 8 KB larger. The essential
+  gate passed on the branch head (25m06s, then 2m31s), whose tree the merge is. Shipped code (the second
+  re-seed): `go/arbace/jrt.ae`, `jrt/module.ae`, `manifest.edn`, `manifest_test.ae`, `reflect_tables.ae`.
+  The agent's slips: `bin/jrt manifest` (the frozen JVM, a few cores) and seconds-long reads outside heavy.
+- Decided (the user): RPS80 (a), RPS81 (a), RPS82 (a) (java.javadoc at the AOT level recorded at REAP8's
+  re-record), as recommended.
+
+## 2026-10-25: C23 the next language of REAP (the user)
+
+- Decided (the user): after the milestone `arbace-reaps-3-crops-v1`, the next language to join Arbace's
+  REAP (read, eval, AOT, print) is C23 (ISO/IEC 9899:2024). Not started; no survey yet. Haskell and Rust
+  stay bridges (repr/haskell, repr/rust: read and print on the host's GHC and rustc), outside the matrix.
+
+## 2026-10-25: go-whim, the prior art of C23's REAP (the user)
+
+- The user: go-whim (`../go-whim`, at `80c49bf5`; the pilot Arbace vendored the box from and no longer
+  depends on) holds most of what C23 needs for REAP's read and print. Studied, not vendored yet:
+  `crefactor/cc`, a fork of modernc.org/cc/v4 v4.29.7 (BSD-3-Clause, The CC Authors) with C23's
+  productions added (`c23.go`: `[[...]]` attributes in every position, `constexpr`, `_BitInt(N)`,
+  `typeof_unqual`, `static_assert` without a message, digit separators, `u8'a'`; hooks marked `go-whim`),
+  and a `Host` given instead of asked of a compiler (`host.go`, for a program with no compiler);
+  `crefactor/cemit`, a canonical printer (one spelling per construct); `crefactor/clisp`, C-lisp, C23 as
+  s-expressions and back, byte for byte on canonical text (`ToC(ToLisp(x)) == cemit.Canonical(x)`;
+  `crefactor/clisp/SPEC.md`, doc/C-LISP.md); `crefactor/c23conf`, a conformance test of one file per
+  feature (49, N3220's subclauses) judged in six stages against gcc 15.2's `-std=c23` (accepted, parsed,
+  printed and accepted, a fixed point, the same tokens and the same objects at `-O0`, C-lisp's round
+  trip), 49 of 49 (doc/C23.md); the preprocessor out (whim's texts have only `#include`). No evaluator of C
+  forms seen there: C's eval and AOT are open questions for C23's survey after the milestone.
+
+## 2026-10-25: after the milestone, C23 at parity the main effort (the user)
+
+- Decided (the user): after `arbace-reaps-3-crops-v1`, the main effort is bringing C23 to parity with
+  Clojure, Java and Go: read, eval, AOT and print, each cell meeting the milestone's rule (none fails,
+  every non-pass in a recorded class). Its survey first (the prior art go-whim's, entry above; the open
+  questions C's eval and AOT on TamaGo's toolchain alone); the scripts' sweep stays queued beside it.
+
+## 2026-10-25: REAP8, REAP5 and JC2b merged, the matrix 12 of 12; RPS60-RPS78 and JCS70-JCS79 decided; REAP5b, REAP7 and the harness follow-ups started (the user)
+
+- REAP8 (branch `reap8-essential` from `840e514b`, main merged into it for RPS55; merged `de5cb07a`): the
+  essential subsets in the essential gate: `bin/goi check --aot --essential` (`test/goi/essential-aot.txt`,
+  248 programs by the rule in its header: every passing directory test, the 13 run programs with gc's
+  flags, every second of the 124 errorcheck programs goi sets apart, every fourth of the 41 known run
+  programs, 36 of goi's essential list; 67-71 s at 8 jobs), `bin/java-check --essential-compiled` (the
+  essential tests `check-compiled.edn` passes, 420 of 428, from their committed forms in one program cached
+  by key; the compiled namespaces' `aot.key` checked; a timeout run again at twice the limit), `bin/clojure-tests
+  --aot --essential` (`test/clojure/essential-aot.txt`, 15 namespaces compiled alone: 7,243 of 7,273
+  assertions as the reference's); `J2G_LOCK`, one whole-program j2g (about 20 GiB) at a time in the
+  essential phase; `--gate-build` keeps `aot/` and `aot.key`; RPS48 (b): every embedded namespace prepared and
+  compiled into the whole `--aot`'s program (235 sources, 22,838 classes, no test moved). The AOT reference
+  re-recorded on the merged head: 785 tests, 20,580 assertions, 20,549 pass (BitSet's proxy, SL5's metadata
+  53 of 53 and java.javadoc 4 of 5 now run); `:proxy-bitset` dropped, `:d6-namespaces-cut` replaced by a
+  by-design `:javadoc-url` (RPS82 (a)). The essential gate before/after: cold 20m51s/21m23s, cached
+  2m29s/2m42s. No shipped code. The gate on `de5cb07a` passed (17m04s). Decided: RPS70-RPS73 (a), RPS74
+  (b), RPS75 (a), RPS76 (a), RPS77 (b), RPS78 (a).
+- REAP5 (branch `reap5-java-print` from `840e514b`, merged `678e15ba`): `bin/java-check --levels print`,
+  per test five steps (the read level's forms printed in the lines layout with `--index jdk/forms`, javac
+  on Arbace accepting the printed Java, read again to the same forms, mode `:full` printed back byte for
+  byte, the class files against the original's, judged by `jrt.classfile`, no JVM), namespace `java.print`
+  (`test/java/print.ae`), `test/java/check-print.edn`; 2,104 of 2,722 pass (javac refuses 93 printed files,
+  48 read to other forms, 504 class files differ: 472 by design, RPS9 (a)); in `bin/gate --full`'s java chain;
+  `make java-check-print`. It found printer bugs (an array creation as an operand, a switch expression or
+  lambda as a receiver, `int[]::clone`, local and anonymous class names, qualified inner creation) and a cast
+  the converter loses (`v((Object) "s")` read as `v("s")`, another overload). The matrix: 12 of 12 cells
+  checked. No shipped code. Decided: RPS60-RPS65 (a), RPS66 (a) then (b), RPS67-RPS69 (a).
+- JC2b (branch `java-check-jc2b` from `840e514b`, merged `6d8b8e27`): JCS42 (b) (j2g refuses a subclass of
+  `PrintStream`/`PrintWriter`, its support code's leaves, `arbace.j2g.checks`), JCS43 (a) (`_f` on a static
+  field or enum constant meeting a derived suffix), JCS44 (a) (refusals name the import: `:j2g-world` 420 to
+  11, the rest into the package classes), JCS45 (a) (`test/java/levels-known.edn`), JCS46 (a) (the runtime of
+  the compiled namespaces checked), JCS47 (a), JCS48 (a, b) (shards of 500, a shard whose j2g dies split, to
+  25); the shipped program's translation unchanged (checked against main's `target/arbace-go/j2g`); interp
+  1,462 (was 1,426: 38 timeouts pass on the retry), compiled 1,636 (was 1,632). Merged cleanly after REAP5.
+  The gate on `6d8b8e27` passed (16m28s; all subsets). Decided: JCS70 (a), JCS71 (a), JCS72 (b), JCS73-JCS77
+  (a), JCS78 (c), JCS79 (a).
+- The agents' slips (none committed): `pgrep -x` in a wait loop (REAP5), `<(...)` once (JC2b), a scratch draft
+  with `<(...)` never run (REAP8), stage 0 built in a worktree (REAP5), edits to scripts while own runs were
+  queued, not running (REAP8); `2>/dev/null` in several agents' wait loops.
+- Started (the user): REAP5b (the printer: RPS60-RPS63), REAP7 (`bin/arbace-go --build-program`), the
+  harness follow-ups (JCS70, JCS71, RPS74 (b), RPS77 (b)); the catch-all triage left to JC6.
+
+## 2026-10-25: JN9c merged, JFS102-JFS109 decided; JN9d started (the user)
+
+- JN9c (branch `java-jn9c` from `840e514b`, merged `7b6ed2f1`; beside REAP, not gating it): overload
+  resolution in the native attribution provider, `arbace/repr/java/overload.ae` ported from jdk26u's Resolve
+  at `baf63fbe` (the three phases, most specific, mergeAbstracts, findMethod's interface phases, findFun
+  over enclosing classes and static imports, the access checks; errors as javac's kinds); `expr.ae`'s
+  choice native with javac's as the lean's fallback; the facts `overload/method`, `overload/constructor`,
+  `overload/anon-super-ctor`, `overload/arity` native and checked; ClassReader's default methods and inner
+  constructors' descriptors in `decls.ae`; JFS100 (b) (the declines' reasons summed in `attr.md`). Declined,
+  javac's still (JN9d's): poly arguments, generic candidates passing the arity check (21,525 calls),
+  explicit type arguments, diamonds, signature-polymorphic calls, qualified creations. `attr-check --corpus
+  all`: 13,193,153 facts equal, none different, the forms byte for byte as javac's trees'; leaned answers in
+  jdk26u 903,905 to 53,316; lists written alone 63.4% to 95.9% (baseline 99.1%, javac 93.0%); 2,378 s (was
+  2,056). `front-check`, `parse-check`, `check`, `check --jdk`, `roundtrip --text` as recorded; the
+  provenance files' `:repr-java` and `:host` moved (reader hash `a2daae6b`); javac's tool 226,652,320 bytes;
+  the shipped program's code unchanged. Merged cleanly; the essential gate on `7b6ed2f1` passed (16m11s).
+- Decided (the user): JFS102 (b), JFS103 (b), JFS104 (b), JFS105 (a), JFS106 (b), JFS107 (b), JFS108 (b),
+  JFS109 (a); JN9d started now, beside the REAP work.
+
+## 2026-10-25: the harness follow-ups merged, JCS80-JCS84 decided (the user)
+
+- The harness follow-ups (branch `harness-followups` from `6f3a93ad`, merged): JCS70 (a) (`mask_dirs`: the
+  test's working directory, its temp directory, the check's scratch and the checkout masked in stdout on
+  both sides before the digest; the JDK's reference re-recorded for the 22 tests whose stdout names them, by
+  splicing their lines from a full `--record-ref` run into the committed file, the other 4,158 lines byte for
+  byte, as `--only` would write), JCS71 (a) (a would-be regression run again once; a flip `flaky`, not a
+  regression; class `:flaky` naming Test8267042 and List/LockStep at the compiled level), RPS74 (b)
+  (`test/clojure/essential-aot-skipped.edn`: `seq-and-transducer` skipped in the compiled suite's subset only;
+  the cached step 1m56s to 36 s), RPS77 (b) (the subset's work and j2g trees removed after its build, 366 MB
+  less). Java interp 1,464, compiled 1,638 (CheckTempDir and UserDirChangedTest pass). No shipped code. The
+  essential gate passed on the branch (4m41s, then 2m50s cached) and on the merge. Decided (the user):
+  JCS80 (a), JCS81 (b), JCS82 (a), JCS83 (b), JCS84 (a). The agent's slips: one `2>/dev/null` in a wait
+  loop; main's gate cache copied into the worktree.
