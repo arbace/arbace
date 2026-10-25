@@ -1371,3 +1371,15 @@ line: the last two classes (12 tests) are the only ones whose fix is Arbace's ow
 
 The scratch this section cites (the worktree's `.tmp/`, not tracked): `jc3-record.log` (the
 reference's run), `jc3-diag.log` (the check's run), `jc3-diagnostics-results.tsv` (its results).
+
+## Decided (2026-10-25): JCS50-JCS55
+
+The user decided JC3's proposals as recommended: JCS50 (a) with (b) as its first step (`--release 26`
+accepted as `-source`/`-target 26`, then the JDK build's pinned `lib/ct.sym` in the platform, served
+as `JDKPlatformProvider` does), JCS51 (a) (processors deferred, then given as sources, defined by the
+interpreter and handed to javac's processing environment as instances), JCS52 (a) (jdk.javadoc's
+doclint added to javac's world through `bin/javac-vendor convert`), JCS53 (a) (Arbace's `Main` calling
+javac's own `Main.compile` with Arbace's file manager, file objects behaving as `PathFileObject`;
+non-UTF-8 `-encoding` and a jar on `--module-path` stay refused), JCS54 (a) (the diagnostics corpus
+widened to every `ref=` action), JCS55 (b) (the runner learns `@clean`, `/module=M` and jtreg's working
+directory, `.jcod` left out). The five `:pending` classes of the diagnostics level cite this.
