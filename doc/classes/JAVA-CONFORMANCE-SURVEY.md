@@ -1818,3 +1818,97 @@ JCS73 (a) and JCS74 (a) (`File_Cast`, then j2g's support code typed by Go type w
 leaf refusal dropped, in JC6 or JC5's j2g work), JCS75 (a) (a known disagreement whose reasons change
 printed as changed), JCS76 (a) (`aot.runtime` beside `aot.key` at the next change to the build scripts),
 JCS77 (a) (the 25 only interpreted triaged into JC6 and JC5), JCS78 (c), JCS79 (a).
+
+## As built: harness follow-ups (2026-10-25)
+
+Branch `harness-followups`, from main `6f3a93ad`: JCS70 (a) and JCS71 (a) in `bin/java-check` and
+`test/java/check.ae`, beside FULL-SUPPORT-SURVEY's RPS74 (b) and RPS77 (b) in `bin/clojure-tests`
+(doc/FULL-SUPPORT-SURVEY.md, "As built: harness follow-ups"). No shipped code changes (scripts of
+`bin/`, data and the check's namespace under `test/`): no re-seed. The executables: this worktree's
+gate build (identical inputs to main's, its key `35fa15f1e4ed`) interprets and hosts j2g, its `aot/`
+the compiled namespaces (`JAVA_CHECK_AOT`, with `JAVA_CHECK_AOT_STALE_OK=1`: the gate's tree has no
+executable beside it to read the runtime from, JCS76, and its `aot.key` is the checkout's, which
+`--essential-compiled` checks); main's javac tool (`REPR_JAVA_STALE_OK=1`: the reader's sources
+unchanged). Every heavy run in the host's heavy slots, at 8 jobs. Scratch in `.tmp/hf/`.
+
+- *JCS70 (a), the run's places masked*: `mask_dirs W TMP` replaces, in that order, the test's
+  working directory (`WORK/w/ID`) by `W`, its temporary one (`WORK/tmp/ID`) by `TMP`, the scratch
+  (`.tmp/java-check`, or `JAVA_CHECK_WORK`) by `WORK` and the checkout by `ROOT` (`LC_ALL=C sed`:
+  an output naming none is unchanged byte for byte, a missing last newline and NUL bytes kept). Both
+  sides take stdout through it before the digest and the length: `record_runs` for the reference
+  (also before the identity hash codes' mask, JCS17 (b)), `judge` for the levels interp and
+  compiled and the essential runs. `record_runs` leaves a mark (`WORK/record/ID/runI.dirs[2]`) when
+  the mask changed a run's stdout.
+- *The reference re-recorded*: a whole `--record-ref` (36 min, of it 13 min waiting for a slot;
+  1,304 s its own clock) marked **22 tests** whose stdout names the run's places (`CheckTempDir`,
+  `UserDirChangedTest`, `GetResource`, `MHIllegalAccess`, `RuntimeMXBean`'s two, `GetURLsTest`,
+  `GetContentType`, `FileChannel`'s `LongTransferTest` and `MapTest`, `FullRead`, `UriImportExport`,
+  `StoreDeadlock`, eight of `java.util.logging`'s and javac's `T7005371`). The whole run moved
+  1,364 lines: besides the 22, **1,311 only in the digests of runs the JDK's two runs did not agree
+  on** (`:det false`, never compared: JCS80), 13 whose `:det` drew otherwise, 18 in a failing test's
+  reason or a stderr line. So `test/java/ref-jdk26.edn` is the committed file with those 22 tests'
+  lines taken from the run (what `--only` writes, without a second run): 22 lines changed, the other
+  4,158 byte for byte (`.tmp/hf/ref-full-run.edn`, `.tmp/hf/dirs-ids.txt`).
+- *The levels re-recorded*: `--levels read,interp,compiled --only` the 22 and the two flaky tests
+  (19 of them the JDK passes; 24 min, one shard, 9 refused, the second j2g round none):
+  **`CheckTempDir` and `UserDirChangedTest` pass at interp and compiled** (`:environment` before,
+  JC2b's "four new non-passes"); `StoreDeadlock`'s reason names the new length (compiled); nothing
+  else moved; read as recorded; `levels-known.edn` unchanged (the two pass both).
+- *JCS71 (a), a would-be regression run again*: `again LEVEL RESULTS RUNNER` takes the tests of the
+  level not passing that `check-LEVEL.edn` records `:pass` (or `:flaky`), runs each once more
+  (`interp_one` after the interp level; `compiled_one_on` in `compiled_shard` before the program is
+  removed), and a test whose second run passes gets the result **`flaky`**, its first result and
+  reason kept (`flaky  differ stdout differs (174 bytes, ...); passed when run again (JCS71 (a))`); a
+  test failing again keeps its first result, a regression. The report (`java.check/report`): a
+  `flaky` result is no regression and a test recorded `:flaky` counts as passing (so its next
+  failures are no regression either); the counts line adds `N flaky`, each printed by name; an
+  essential test that is `flaky` does not fail `--essential`; the levels' comparison takes `flaky`
+  as passing. A `flaky` test must be in a class like any non-pass: **`:flaky`** (kind `:harness`,
+  `:level :compiled`, `:decided` JCS71 (a)) names `t03289` (`compiler/c1/Test8267042`) and
+  `t05565` (`jdk/java/util/List/LockStep`) by `:tests`, before the classes whose regexps would take
+  their failures (`:serialization`, `:other`); an unnamed flip is in no class and fails the check
+  until a class names it. At the level compiled only: both tests' interp results are deterministic
+  (Test8267042's 45 bytes every run, LockStep's `ObjectInputStream` load failure), and a flip at
+  another level gets that level's class. Exercised on a fabricated record and results
+  (`.tmp/hf/flaky/`: the named flip no regression, an unnamed flip in no class, a test failing twice
+  a regression); no real test flipped in the runs above.
+
+**Numbers** (2,722 tests): interp 1,462 → **1,464**, compiled 1,636 → **1,638** (`CheckTempDir`,
+`UserDirChangedTest`); `:environment` 2 → 0 at both levels; `:flaky` 2 at compiled (from
+`:serialization` and `:other`). `bin/reap` 0 problems; Java's row: eval 1,464 / 238 / 1,020, **AOT
+1,638 / 110 / 974** (LockStep from `:serialization`, by design, to `:flaky`, deferred).
+
+**Checks**: the essential `bin/gate` at `2b73e0d9` passed, 4m41s with `java-compiled`'s and the
+Clojure subset's programs made anew (their keys hold the changed scripts), then **2m50s cached**
+(2m47s at the base): Java's essential check 428 of 428 as recorded, `java-compiled` 420 of 420.
+
+### Proposals (JCS80-JCS89)
+
+- **JCS80 The digest of runs the JDK's two runs did not agree on** (`:det false`: 1,311 lines a whole
+  `--record-ref` moves for nothing, so a re-recording cannot be committed whole).
+  - Options: (a) such a run's `:out`, `:out-len` and `:masked` recorded as `"-"` (the check compares
+    only its status), at the next whole recording; (b) as built (`--only`, or a splice, for each
+    re-recording).
+  - *Recommended: (a)*: the reference then moves only where a judged fact moved, and a whole
+    re-recording becomes reviewable; (b) keeps every re-recording a hand-picked list.
+- **JCS81 JCS71's rule in `--essential-compiled`** (its runs have only JCS47's timeout retry).
+  - Options: (a) `again` there too, a flip passing the step when a `:flaky` class names it; (b) as
+    built.
+  - *Recommended: (b)* until a test of the subset flips: its 420 tests are deterministic so far,
+    and a gate step that tolerates flips needs the class file in its cache key.
+- **JCS82 A test recorded failing that passes now** (LockStep's kind: a flaky test recorded on its
+  failing side shows as "now passing", unnamed).
+  - Options: (a) as built: only would-be regressions run again, the flaky ones named by hand; (b)
+    a now-passing test run again too, a flip `flaky`.
+  - *Recommended: (a)*: a new pass costs nothing and is recorded at the next `--record`; a test that
+    then fails is caught by (a)'s rule.
+- **JCS83 The places' mark as data** (`runI.dirs`, which tests' stdout names the run's places, left in
+  the scratch).
+  - Options: (a) recorded in the reference (`:places true` on the run); (b) as built.
+  - *Recommended: (b)*: with the mask the place no longer matters to the judgement; the mark serves
+    a re-recording's list (as here) and the scratch has it.
+- **JCS84 The JDK's own path-dependent failures** (`MaskSyntheticModifierTest`'s `:jdk :fail` reason
+  names a length that depends on the checkout's path; such a test is not run by the check).
+  - Options: (a) the JDK's reason masked as stdout is; (b) as built.
+  - *Recommended: (a)* at JCS80's recording: the reference then does not depend on the checkout at
+    all.

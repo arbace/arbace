@@ -1105,6 +1105,38 @@ time, `J2G_LOCK`), RPS74 (b) (`seq-and-transducer` skipped in the compiled suite
 RPS76 (a), RPS77 (b) (the Clojure subset's work trees removed after its build), RPS78 (a). The six
 `:pending` classes of the print level cite this.
 
+## As built: harness follow-ups (2026-10-25)
+
+Branch `harness-followups`, from main `6f3a93ad`, with JCS70 (a) and JCS71 (a)
+(doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: harness follow-ups"). No shipped code changes.
+Logs in `.tmp/hf/` (`gate-before-1.txt`, `gate-before-cached.txt`, `gate-after-1.txt`,
+`gate-after-cached.txt`, the subset's `suite-aot-essential-*.log`).
+
+- **RPS74 (b)**: `test/clojure/essential-aot-skipped.edn` lists the tests the subset skips beyond the
+  reference's `:skipped-tests` (`{NS {TEST REASON}}`): transducers' `seq-and-transducer`. `bin/clojure-tests
+  --aot --essential` writes the subset's reference, `RUN/expected-essential.edn`: the AOT reference
+  with them skipped, the namespace's `:test` one less each and the test's `:failing` entry gone, its
+  `:pass` the same (a listed test must make no assertion when it passes, as `seq-and-transducer`,
+  whose `is` runs only on a failure: one that does shows as a regression), passed to the namespaces'
+  processes (`CLOJURE_TESTS_EXPECTED`) and in the program's key (the skipped test is not compiled
+  either). The whole `--aot` still runs it (RPS43 (a)). The subset: **338 tests** (339), 7,273
+  assertions, 7,243 pass, as before; transducers 18 tests, 108 of 108, **0.9 s** (104 s in the
+  cached run before).
+- **RPS77 (b)**: after the subset's build, its work module and j2g tree (`aot-build/work`,
+  `aot-build/j2g`) are removed; a hit reads only the program and its key, a miss translates and
+  prints anew (repr/go's print cache warm). The subset's cache **618 MB → 252 MB (366 MB less)**; the
+  whole `--aot` keeps its trees.
+
+| essential gate | before (base `6f3a93ad`) | after (`2b73e0d9`) |
+|---|---:|---:|
+| cached: the gate | 2m47s | **2m50s** |
+| cached: `suite-aot-essential` | 1m56s | **0m36s** |
+| the subset's program made anew (its key changed) | — | 4m24s (c2j 101 s, j2g 68 s, build 62 s) |
+
+The cached gate's wall does not move: its longest steps are `suite-go` (2m12s-2m16s) and `go-smoke`
+(about 2 minutes), beside which the subset now takes a third of its old time; the 80 s come off the
+slot the gate shares with the other checks.
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail
