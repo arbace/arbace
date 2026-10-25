@@ -969,10 +969,12 @@ methods themselves (`atomic.ae`; `(pos? (AtomicInteger. 1))` casts to `Number`).
 
 **Leaves j2g's support code needs** (JCS42 (b), doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As
 built: JC2b"): j2g's own support functions take a few translated JDK classes' values as `*C`
-(`Throwable.printStackTrace(PrintStream|PrintWriter)`'s, which call `NN` on the stream; the
-reflection entry of `Runtime.exec(String[], String[], File)`, which asserts `*File`). A class of
-the world extending one of them (`arbace.j2g.checks/support-leaves`) is refused, an error of
-`report.edn` naming the class it extends, rather than translated into Go gc rejects.
+(`Throwable.printStackTrace(PrintStream|PrintWriter)`'s, which call `NN` on the stream). A class
+of the world extending one of them (`arbace.j2g.checks/support-leaves`) is refused, an error of
+`report.edn` naming the class it extends, rather than translated into Go gc rejects. (The
+reflection entry of `Runtime.exec(String[], String[], File)` asserts `*File` too, which compiles
+either way: a subclass of `File` is translated, and only its value passed to that entry by
+reflection would fail.)
 
 A hand-written class is non-leaf where the world extends it, as the manifest's generator
 declares (`test/jrt/manifest.ae`). Since amendment S3 (accepted 2026-10-09) these include
