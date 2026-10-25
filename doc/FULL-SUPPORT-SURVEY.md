@@ -1084,6 +1084,14 @@ builds afresh).
   `divergences-aot.edn`; (b) the class added here without a run. *Recommended: (a)*: a class is
   written from a recorded run.
 
+## Decided (2026-10-25): RPS80-RPS82
+
+The user decided RPS55's proposals as recommended: RPS80 (a) (the prefix rule for the modules of both
+worlds; a package-to-module table when something reads a module's name), RPS81 (a) (Module's four
+members, the rest j2g's stubs; `getPackages` and `getResourceAsStream` when a library at the REPL needs
+them), RPS82 (a) (java.javadoc recorded at the AOT level, its java.sql class added, at REAP8's `--aot`
+re-record).
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail

@@ -1814,3 +1814,21 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   status check (2026-10-24).
 - Started (the user), from this commit: REAP5 (Java's print level), JC5 (the analysis' gaps), REAP8 (the
   essential subsets), JC2b (JCS42 (b)-JCS48), RPS55 (jrt's `java.lang.Module`), JN9c (overload resolution).
+
+## 2026-10-25: RPS55 merged, RPS80-RPS82 decided (the user)
+
+- RPS55 (a) (branch `jrt-module-rps55` from `840e514b`, merged): jrt's `java.lang.Module`
+  (`go/arbace/jrt/module.ae`, a hand-written final class of the manifest: `getName`, `isNamed`,
+  `getClassLoader`, `toString` with the JDK's texts; two instances, java.base and the app loader's
+  unnamed module) and `Class.getModule` by `classPlace`'s rule (java.base for primitives and
+  `java.`/`javax.`/`jdk.`/`sun.` classes, exact for the shipped world's 839 java.base sources; the unnamed
+  module otherwise; an array its element's); `getDescriptor` j2g's stub. `bin/jrt manifest` regenerated
+  (`manifest.edn`, `manifest_test.ae`, `reflect_tables.ae`), `TestClassLoaders` checks the modules;
+  `jdk/edge.edn` unchanged (`bin/j2g-edge update`, `verify`). The suite 20,566 of 20,580 assertions (was
+  20,564; errors 5 to 3), java.javadoc 4 of 5, re-recorded; `:javadoc-url` narrowed to the java.sql
+  assertion, by design (D6); the oracle and diffcheck unchanged; the executable 8 KB larger. The essential
+  gate passed on the branch head (25m06s, then 2m31s), whose tree the merge is. Shipped code (the second
+  re-seed): `go/arbace/jrt.ae`, `jrt/module.ae`, `manifest.edn`, `manifest_test.ae`, `reflect_tables.ae`.
+  The agent's slips: `bin/jrt manifest` (the frozen JVM, a few cores) and seconds-long reads outside heavy.
+- Decided (the user): RPS80 (a), RPS81 (a), RPS82 (a) (java.javadoc at the AOT level recorded at REAP8's
+  re-record), as recommended.
