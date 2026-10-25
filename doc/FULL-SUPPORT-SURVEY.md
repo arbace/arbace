@@ -2063,3 +2063,14 @@ new functions and two lines of dispatch), `Makefile` (`program`, `programs-check
     directory); (c) (a) with `--arch` defaulting to `ARBACE_GO_ARCHES`.
   - *Recommended: (a)*: the checkout's target/ is where builds live and is ignored; a program
     directory may be read-only (test/programs).
+
+**The checks.** The essential `bin/gate` at the branch's head (the gate's executables built afresh,
+865 s, the `gate_key` changed): every step passed but `suite-aot-essential`, whose j2g run was
+killed by the kernel for memory (a 20 GiB run beside the other heavy slot; it uses none of j2g's
+new options); that step run again alone in a heavy slot passed (15 namespaces, 7,243 of 7,273 as
+recorded, no regressions; 299 s, 20 GiB). The rest: the smoke test, the suite on the test build
+20,566 of 20,580 as recorded, the oracle 22,688 of 22,740 (52 known), diffcheck 12,789 of 12,801 (12
+known), goi's essential checks (801 and 248 of 248 compiled), Java's (428 interpreted, 420 compiled),
+the generated variants, j2g's edge (no new JDK class named), `bin/reap` (12 of 12 cells, 0 problems).
+`bin/arbace-go --build-program --check`: 8 of 8. `bin/gate --full` was not run (the policy until the
+milestone).
