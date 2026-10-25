@@ -6,7 +6,7 @@
 # only under .tmp/clojure-tests/.
 #
 # Usage: bin/clojure-tests [-j JOBS] [--no-generative|--generative] [NAMESPACE...]
-#        bin/clojure-tests --aot [-j JOBS] [--no-generative|--generative] [NAMESPACE...]
+#        bin/clojure-tests --aot [--essential] [-j JOBS] [--no-generative|--generative] [NAMESPACE...]
 #        bin/clojure-tests --java-fixtures verify|update|OUT
 #        bin/clojure-tests --divergences [RESULTS]
 #   -j JOBS          parallel test processes (default: number of CPUs)
@@ -21,7 +21,8 @@
 #                    no run, seconds
 #   --aot            Clojure's AOT level (doc/FULL-SUPPORT-SURVEY.md, REAP3, RPS4 (a)): the suite
 #                    translated as for CLOJURE_TESTS_GO, its namespaces and test libraries
-#                    prepared and compiled by c2j with the runtime's on the gate's test build
+#                    prepared and compiled by c2j with the runtime's on the gate's test build (every
+#                    embedded namespace prepared first, RPS48 (b): the program's runtime the shipped one's)
 #                    (bin/arbace-go --gate-build's arbace-tests; the runner's compile mode, the
 #                    suite's sources recorded by test/suite_aot_hook.ae), j2g and bin/build-go
 #                    making the program with the suite's Java fixtures (as the test build:
@@ -35,6 +36,11 @@
 #                    regression). CLOJURE_TESTS_AOT_EXES: a directory holding the executables
 #                    (arbace, arbace-tests) to compile and translate with in place of the gate's
 #                    (measurements: tools changed in the checkout are loaded from it)
+#   --aot --essential  the essential gate's subset (REAP8, RPS40 (b)): the namespaces of
+#                    test/clojure/essential-aot.txt compiled alone (with their test libraries and the
+#                    runtime's namespaces they load) into their own program (CLOJURE_TESTS_RUN
+#                    defaults to aot-essential, cached by its key as --aot's), each run on it against
+#                    the same reference; no test.generative, no levels compared
 #   --java-fixtures OUT  only convert the suite's Java fixtures (test/java), renamed as for
 #                    the Go build, into Java forms under OUT with repr/java (bin/repr-java, on
 #                    javac's tool executable, its only host since JN6; run CLOJURE_TESTS_RUN,
@@ -145,11 +151,24 @@ fi
 aot=
 if [ "${1:-}" = --aot ]; then
   aot=1; shift
+  # --essential: REAP8's subset (RPS40 (b)), its own run and program
+  ess_list=
+  if [ "${1:-}" = --essential ]; then ess_list=$root/test/clojure/essential-aot.txt; shift; : "${CLOJURE_TESTS_RUN:=aot-essential}"; fi
   : "${CLOJURE_TESTS_RUN:=aot}" "${CLOJURE_TESTS_EXPECTED:=$root/test/arbace-go-aot-results.edn}"
   CLOJURE_TESTS_GO=$base/$CLOJURE_TESTS_RUN/aot-build/arbace-aot
   CLOJURE_TESTS_AOT=$root/test/suite_aot_hook.ae
   export CLOJURE_TESTS_AOT CLOJURE_TESTS_EXPECTED
 fi
+# ess_filter FILE: with --aot --essential, FILE's namespaces (a list in the suite's order) cut to
+# test/clojure/essential-aot.txt's, each of which must be there
+ess_filter() {
+  [ -n "${ess_list:-}" ] || return 0
+  grep -v '^#' "$ess_list" | grep . > "$1.ess"
+  grep -Fx -f "$1.ess" "$1" > "$1.cut" || true
+  [ "$(wc -l < "$1.cut")" = "$(wc -l < "$1.ess")" ] \
+    || { echo "clojure-tests --aot --essential: $(basename "$ess_list") names namespaces the suite does not run: $(grep -Fxv -f "$1.cut" "$1.ess" | tr '\n' ' ')" >&2; return 1; }
+  mv "$1.cut" "$1"; rm -f "$1.ess"
+}
 # rename mode (the Clojure under test is Arbace's): the Go build and the Java fixtures
 rename=
 go_exe=${CLOJURE_TESTS_GO:-}
@@ -292,6 +311,7 @@ while [ $# -gt 0 ]; do
     *) only+=("$1"); shift ;;
   esac
 done
+[ -z "${ess_list:-}" ] || generative=0
 
 step() { echo "== $*"; }
 
@@ -424,7 +444,7 @@ aot_build() {
   key=$( { sha256sum < "$gexe"; sha256sum < "$texe"
            (cd "$suite" && find test src -type f | LC_ALL=C sort | xargs -d '\n' sha256sum)
            echo "$repr_clojure_stamp $deps"
-           (cd "$root" && sha256sum test/suite_aot_hook.ae test/run_clojure_tests.clj bin/clojure-tests "$expected"
+           (cd "$root" && sha256sum test/suite_aot_hook.ae test/run_clojure_tests.clj bin/clojure-tests "$expected" ${ess_list:+"$ess_list"}
             # the checkout's tools (c2j, j2g, ...), which the executables load from it when they differ
             find arbace test/suite-go test/java-fixtures -type f | LC_ALL=C sort | xargs -d '\n' sha256sum); } \
          | sha256sum | cut -c1-64)
@@ -433,10 +453,25 @@ aot_build() {
   fi
   rm -rf "$ab/key" "$ab/arbace-aot" "$ab/aot" "$ab/j2g"
   host_run "$runner" list test "$expected" > "$ab/namespaces.txt" || return 1
+  ess_filter "$ab/namespaces.txt" || return 1
+  # what the compiling requires: the whole suite's after every embedded namespace of the runtime,
+  # prepared first as bin/diffcheck's compiling does, so that the program's runtime is the shipped
+  # build's (RPS48 (b)); the essential subset's alone, with the runtime's namespaces it loads
+  # (RPS40 (b))
+  if [ -z "${ess_list:-}" ]; then
+    ARBACE_PATH=$root "$gexe" -e '(require (quote arbace.j2g.embed) (quote arbace.string))
+(doseq [[p text] (sort (arbace.j2g.embed/sources "."))
+        :when (and (arbace.string/starts-with? p "arbace/") (arbace.string/ends-with? p ".ae") (re-find #"(?m)^\(ns( |$)" text))]
+  (println (-> (subs p 0 (- (count p) 3)) (arbace.string/replace "/" ".") (arbace.string/replace "_" "-"))))' > "$ab/runtime-nss.txt" \
+      || { echo "clojure-tests --aot: the runtime's namespaces not listed" >&2; return 1; }
+    cat "$ab/runtime-nss.txt" "$ab/namespaces.txt" > "$ab/compile-nss.txt"
+  else
+    cp "$ab/namespaces.txt" "$ab/compile-nss.txt"
+  fi
   t0=$(date +%s)
   (cd "$suite" && env GOGC=${GOGC:-400} ARBACE_COMPILE=1 ARBACE_NO_AOT=1 ARBACE_NO_IMAGE=1 \
      ARBACE_PREPARE="$ab/compile.image" ARBACE_PATH="$(go_path):$root" ARBACE_AOT_ROOT="$root" TMPDIR=$work/tmp \
-     "$texe" "$runner" compile "$ab/namespaces.txt" "$ab/aot" "$expected") > "$ab/compile.log" 2>&1 \
+     "$texe" "$runner" compile "$ab/compile-nss.txt" "$ab/aot" "$expected") > "$ab/compile.log" 2>&1 \
     || { tail -20 "$ab/compile.log"; echo "clojure-tests --aot: the compiling failed ($ab/compile.log)" >&2; return 1; }
   grep '^aot:' "$ab/compile.log" | head -40
   [ -f "$ab/aot/packages.edn" ] || { echo "clojure-tests --aot: nothing compiled ($ab/compile.log)" >&2; return 1; }
@@ -512,6 +547,7 @@ else
   (cd "$suite" && java -cp "$(test_cp)" $main_class "$runner" list test "$expected" "$work/timeouts.txt") \
     > "$work/namespaces.txt"
 fi
+ess_filter "$work/namespaces.txt" || exit 1
 if [ ${#only[@]} -gt 0 ]; then
   printf '%s\n' "${only[@]}" > "$work/selected.txt"
 else
@@ -542,6 +578,7 @@ fi
 if [ -n "$aot" ]; then
   status=0
   host_run "$runner" report "$work/out" "$expected" "$work/results.edn" "$(tr '\n' ' ' < "$work/selected.txt")" || status=$?
+  [ -z "${ess_list:-}" ] || exit $status
   step "[$run] the two levels: $work/results.edn (AOT) against test/arbace-go-results.edn (eval)"
   host_run "$runner" levels "$work/results.edn" "$root/test/arbace-go-results.edn" "$root/test/baseline-results.edn" \
     | tee "$work/levels.txt"

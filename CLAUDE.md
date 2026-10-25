@@ -344,7 +344,7 @@ Prior art:
   since GP7 repr/go's generated Go forms, the dumper `go/arbace/repr/go/godump` and the renamed copy of gc's
   syntax `go/arbace/repr/go/internal/syntax`, regenerated and compared with the committed files), and since 2026-10-24 `bin/j2g-edge verify` on the
   frozen JVM (j2g's edge recorded afresh: an embedded namespace's new JDK class makes `jdk/edge.edn`
-  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds). `bin/gate --full` adds, concurrently: the Go build afresh with its
+  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds), and since REAP8 the new levels' essential subsets (doc/FULL-SUPPORT-SURVEY.md, "As built: REAP8"): `bin/goi check --aot --essential` (`test/goi/essential-aot.txt`), `bin/java-check --essential-compiled` (the essential tests that pass compiled, one program cached by key) and `bin/clojure-tests --aot --essential` (`test/clojure/essential-aot.txt`'s namespaces compiled alone, cached by key), the whole-program j2g runs one at a time (`bin/j2g`'s `J2G_LOCK`). `bin/gate --full` adds, concurrently: the Go build afresh with its
   smoke test, then javac's forms and javac on Arbace (`bin/javac-vendor check`, `build`, `verify`:
   javac's forms read afresh by javac on Arbace, `classes baseline samples jdk java.base`), then,
   beside the rest of that chain, repr/java's checks on the tool just built (JN5, JFS9): `bin/repr-java
