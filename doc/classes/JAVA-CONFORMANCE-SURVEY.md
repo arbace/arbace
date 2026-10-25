@@ -1753,7 +1753,7 @@ two escape-analysis tests and the Go j2g writes that gc refuses (2, `:j2g-go`).
 **REAP**: `bin/reap` 0 problems (11 of 12 cells checked); Java's row: read 6,541 / 0 / 97, eval 1,462 /
 238 / 1,022, **AOT 1,636 / 111 / 975**.
 
-**Checks**: the essential `bin/gate` (see the branch's report).
+**Checks**: the essential `bin/gate` at `fb8af1aa` passed in 24m49s (the executables built afresh: j2g changed): the smoke test, Clojure's suite with no regressions, the oracle 22,688 of 22,740 as recorded, diffcheck 12,789 of 12,801 as recorded (the Java forms' pair 743 of 745), goi's essential check 801 of 801, Java's essential check 428 of 428, the generated variants, j2g's edge (`bin/j2g-edge verify`), `bin/reap` 0 problems.
 
 ### Proposals (JCS70-JCS79)
 
