@@ -1976,3 +1976,19 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   decided area by area, the decided items scheduled with it), so that the three crops are complete at
   `arbace-reaps-3-crops-v1`: after the milestone the work opens a new topic, C23's support (after the
   scripts' sweep), and should not have to come back to them.
+
+## 2026-10-25: REAP5b merged, RPS83-RPS87 decided (the user)
+
+- REAP5b (branch `reap5b-printer` from `6f3a93ad`, merged `8722cbd7`): repr/java's printer
+  (`arbace/repr/java/print.ae`), RPS60-RPS63: an indexed array creation parenthesized, a switch expression
+  of unary precedence, a lambda or method reference cast to its interface where its context does not type
+  it, `int[]::clone`, local classes by simple name, an anonymous class's type `var`, `o.new Inner(){}`;
+  JLS 5.2's casts between primitives and boxes; javac's 7 other refusals each fixed (pattern-binding
+  renames, `return switch` from a labeled switch, which had dropped values, a repeated TYPE_USE annotation
+  printed once, supplementary identifiers as `\u` escapes...); an in-ns-only unit's package line. The sample
+  `test/repr/java/java/sample/PrintSyntax.java`; the round trip's baseline and jdk byte for byte as their
+  references. The print level 2,104 to 2,132 of 2,722 (javac refuses 93 to 32); `:print-syntax`,
+  `:print-conversions`, `:print-javac-other`, `:print-empty-unit` emptied; `:print-full-empty-unit` new. No
+  shipped code (the printer is evaluated on the tools' host). The essential gate on `8722cbd7` passed
+  (16m08s). JC5, merging main, told to merge REAP5b's printer too. Decided (the user): RPS83 (a), RPS84 (a),
+  RPS85 (a) (the converter's, in JC6), RPS86 (a), RPS87 (a).

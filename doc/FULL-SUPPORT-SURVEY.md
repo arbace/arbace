@@ -1148,6 +1148,14 @@ a base once `bin/seed --build` keeps its `aot/`), RPS96 (a), RPS97 (a), then (b)
 (one library for the three harnesses), RPS98 (c) (the essential gate builds `mixed`, the rest in
 `--full`), RPS99 (a).
 
+## Decided (2026-10-25): RPS83-RPS87
+
+The user decided REAP5b's proposals as recommended: RPS83 (a) (the converter's `:java/file` on an
+in-ns-only unit, mode `:full` printing from it), RPS84 (a) (the converter writing `Integer/TYPE` and
+`Character/TYPE`, the printer still reading the old spelling), RPS85 (a) (the converter keeping a local's
+declared box type), all three converter work in JC6; RPS86 (a) (the rename as built, the `&&` fold with
+RPS64 later), RPS87 (a) (as built). `:print-full-empty-unit` cites this.
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail
