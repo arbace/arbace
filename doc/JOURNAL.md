@@ -1832,3 +1832,9 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   The agent's slips: `bin/jrt manifest` (the frozen JVM, a few cores) and seconds-long reads outside heavy.
 - Decided (the user): RPS80 (a), RPS81 (a), RPS82 (a) (java.javadoc at the AOT level recorded at REAP8's
   re-record), as recommended.
+
+## 2026-10-25: C23 the next language of REAP (the user)
+
+- Decided (the user): after the milestone `arbace-reaps-3-crops-v1`, the next language to join Arbace's
+  REAP (read, eval, AOT, print) is C23 (ISO/IEC 9899:2024). Not started; no survey yet. Haskell and Rust
+  stay bridges (repr/haskell, repr/rust: read and print on the host's GHC and rustc), outside the matrix.
