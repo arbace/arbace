@@ -1024,6 +1024,66 @@ once RPS40's subset lands, RPS49 (a) (the second batched re-seed). REAP4's: RPS5
 the milestone; the `java.sql` assertion by design), RPS56 (a) (SAX by design), RPS57 (a), RPS58 (a),
 RPS59 (a). The `:pending` classes cite this.
 
+## As built: RPS55 (2026-10-25)
+
+Branch `jrt-module-rps55`, from main `840e514b`: RPS55 (a) as decided. A runtime change (jrt): it
+reaches stage 0 with the second batched re-seed (RPS49 (a)), not this branch.
+
+**`java.lang.Module` in jrt.** `go/arbace/jrt/module.ae` (doc/go/JRT-NOTES.md, "Modules"): a
+hand-written leaf class in the manifest (`test/jrt/manifest.ae`'s list) with `getName`, `isNamed`,
+`getClassLoader` and `toString` (the JDK's texts), two instances: java.base (the bootstrap loader,
+`getClassLoader` null) and the application loader's unnamed module. `Class.getModule` places a class
+by `classPlace`, the rule `ClassCastException`'s messages and `Class.getClassLoader` already follow:
+java.base for the primitive types and the `java.`, `javax.`, `jdk.`, `sun.` classes (every JDK source
+of the shipped world is java.base's: `jdk/sources.txt`, 839 of 839), the unnamed module for Arbace's
+and the run time's; an array in its element type's. `getDescriptor` is **not** built: its type,
+`java.lang.module.ModuleDescriptor`, is outside the world (as `getLayer`'s and `getPackages'`), the
+suite does not call it, and a use is j2g's stub that throws (Reflector's "No matching method" at the
+REPL), which is what "throwing" asked. javac's tool world: its `getModule` calls (plugins, annotation
+processors, the source launcher) each go on to a `Module` member jrt does not have, so they throw as
+before, one call later; its `ToolProvider` is a variant that does not ask; javac's world is placed by
+the same prefix rule, not by its sources' list (RPS80).
+
+**Regenerated.** `bin/jrt manifest`: `manifest.edn` (`Class` 58 of 170 JDK members, `Module` 4 of 69),
+`manifest_test.ae`, `reflect_tables.ae`. `bin/jrt test` (`TestClassLoaders` with the modules' checks,
+`TestReflect*`) passes on amd64. Nothing of `overlay/jdk/java.base` changed, so no `bin/jrt-convert
+update`; `bin/j2g-edge update` left `jdk/edge.edn` **unchanged** (`java/lang/Module` stays among the edge's
+classes, the JVM's answers about it as before: the manifest adds j2g's declaration of it), and `verify`
+passes.
+
+**Numbers.** Clojure's suite on the test build (the essential gate's run): `java.javadoc` **4 of 5**
+(2 of 5 before), its one error `Class/forName "java.sql.Connection"` (`ClassNotFoundException`), by
+design (D6); the whole suite 78 namespaces, 784 tests, 20,580 assertions: **20,566 pass** (20,564),
+11 fail, **3 errors** (5); re-recorded in `test/arbace-go-results.edn`. The class `:javadoc-url`
+(`test/clojure/divergences.edn`) narrowed to the java.sql assertion, now `:design` (D6, RPS55 (a)),
+matching `(fail 0, error 1)` only. `bin/reap`: 0 problems. The oracle unchanged: 22,688 of 22,740,
+52 known, 0 new. diffcheck 12,789 of 12,801, 12 known, 0 new. The executable 153,874,592 bytes, 8 KB
+more than main's gate build of the same day (153,866,400). The essential `bin/gate` passed (25m06s, the
+builds afresh).
+
+### Proposals RPS80-RPS89
+
+- **RPS80 The modules of javac's tool world.** (a) the prefix rule for both worlds (built): exact for
+  the shipped world, javac's world's `javax.tools`, `javax.lang.model` (java.compiler), `javax.xml`
+  (java.xml) said to be java.base and `com.sun.tools.javac` unnamed; (b) a package-to-module table
+  generated from `jdk/sources.txt` and `jdk/javac/sources.txt` (about 150 packages) into jrt, each
+  named module a `Module` instance, the build tools unnamed; (c) the module per class in `ClassInfo`,
+  written by j2g from the forms' provenance. *Recommended: (a)*: nothing in javac's world reads a
+  module's name on a path the tool runs, and (b) is an hour when something does.
+- **RPS81 Module's other members.** (a) the four built, the rest j2g's stubs (built); (b) also
+  `getPackages` (the registry's packages of the module) and `getResourceAsStream` (the class path's
+  resources, as `Class.getResourceAsStream`), which libraries use for their own resources;
+  (c) `getDescriptor` with a hand-written `ModuleDescriptor` (name only). *Recommended: (a)*, (b) when
+  a library loaded at the REPL needs it.
+- **RPS82 The AOT level's java.javadoc.** `test/arbace-go-aot-results.edn` still records
+  `java.javadoc` as skipped ("not in the Go build", before REAP4's SL5) and
+  `test/clojure/divergences-aot.edn`'s class matches only that skip; `bin/clojure-tests --divergences`
+  of the eval level's results reports `javadoc-url-test` (and `seq-and-transducer`) "in no class of
+  divergences-aot.edn", as it did before this branch (3 then, 2 now). (a) at the next `--aot`
+  re-record (RPS40's subset, REAP8), the namespace's run recorded and the java.sql class added to
+  `divergences-aot.edn`; (b) the class added here without a run. *Recommended: (a)*: a class is
+  written from a recorded run.
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail
