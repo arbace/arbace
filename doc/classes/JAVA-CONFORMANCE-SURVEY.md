@@ -2210,3 +2210,16 @@ re-runs and the essential forms' update), `rj-check2.log`, `front-check.log`, `r
     messages name the class and join `:j2g-world`'s areas; (b) the analysis fails at the unresolved
     class itself ("Unable to resolve class") instead of at the conversion after it.
   - *Recommended: (a), then (b)*: the conversion's message is a symptom; the cause is the class.
+
+## Decided (2026-10-25): JCS60-JCS69
+
+The user decided JC5's proposals as recommended: JCS60 (a) (a top-level `do` of grouped Java forms
+evaluates to its last class, as built), JCS61 (a) (the analysis' fixes ride the re-seed; j2g calls no
+analysis function the seed lacks), JCS62 (a) (with JC6: the prologue's outer instance beyond one level),
+JCS63 (a) (a lambda's bridges published by the interpreter and written by j2g), JCS64 (a) (a flow-scoped
+pattern's expression with effects bound to a temporary, then re-tested), JCS65 (a) (a shadowed
+qualifier written by its declaring class's binary name), JCS66 (a) (the converter casting a type
+variable to its `Iterable` bound in for-each), JCS67 (a) and (c) (the world's public constants, and the
+edge's constants too), JCS68 (a) (a partial `--record-ref` keeps the other tests' lines byte for byte,
+checked), JCS69 (a), then (b) (`:j2g-unresolved` until the messages name the class, then the analysis
+failing at the unresolved class). The classes `:analysis` and `:j2g-unresolved` cite this.
