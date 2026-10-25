@@ -663,6 +663,7 @@ the reflection tables can refer to everything. Java names are kept verbatim wher
 |---|---|
 | class, interface, enum, record `p.Outer$Inner` | `Outer_Inner`: the binary name after the package, `$` → `_`; `X` prepended when the first character is not an upper-case letter |
 | anonymous and local classes `Outer$1`, `Outer$1Local` | `Outer_1`, `Outer_1Local` (the analyzer's javac names) |
+| a class outside Arbace's runtime and the JDK in `arbace/lang` (a user's Java forms, the conformance check's tests, diffcheck's corpora, the fixtures: `arbace.j2g.names/user-class?`; JCS15 (a), doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC2") `p.q.Outer$Inner` | `J_p_q_Outer_Inner_J`: its whole binary name between `J_` and `_J` (as a compiled namespace's class is between `A_` and `_A`), so that two packages' `Basic`s never meet in `lang` and a suffix (`_New`, a static member's `_Name`) cannot make another class's name; its Go file `J_p_q_Outer.go`, the forms file's path, so that `pack/SuperClass` and `mypackage/Superclass` are not one file on a case-insensitive file system |
 | the interface type of a non-leaf class `C` (§5.3) | `C_I` |
 | the adapter of a functional interface `F` (§7.11) | `F_Fn` |
 

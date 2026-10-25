@@ -393,6 +393,33 @@
       (vec out)
       (recur (dec i) (boolean (or acc (nth flags i))) (conj out acc)))))
 
+(defn- const-num
+  "The number a Go form is when it is a numeric constant (a literal, or a literal converted)."
+  [x]
+  (cond (number? x) x
+        (and (seq? x) (= 'conv (first x)) (number? (last x))) (last x)))
+
+(defn- non-const
+  "x, of Go type ty, through a function literal's call, which is not a constant: where gc refuses
+  a constant that Java takes at run time (doc/classes/JAVA-CONFORMANCE-SURVEY.md §5.4, JC2)."
+  [x ty]
+  (list (list 'fn (with-meta [] {:tag ty}) (list 'return x))))
+
+(defn- index-x
+  "An array index as Go takes it: a constant negative index (a[-1], which Java throws at run time
+  as ArrayIndexOutOfBoundsException, and gc refuses at compile time) not a constant."
+  [x]
+  (let [c (const-num x)]
+    (if (and c (neg? c)) (non-const x 'int32) x)))
+
+(defn- divisor-x
+  "A divisor as Go takes it: a constant zero (x / 0, which Java throws at run time as
+  ArithmeticException for integers, or makes an infinity or NaN for floating point, and gc
+  refuses at compile time) not a constant."
+  [x ty]
+  (let [c (const-num x)]
+    (if (and c (zero? c)) (non-const x ty) x)))
+
 (defn operands
   "Translates nodes left to right as operands of one Go expression (or call), each converted
   to its type in `wants` (a desc or nil). An operand is moved to a temporary when a later
@@ -780,7 +807,7 @@
           :bool= (let [[a b] (operands (:args node) ["Z" "Z"])] (v (list '== (:x a) (:x b)) "Z"))
           :aget (let [[a i] (operands [(:array node) (:index node)] [nil "I"])
                       et (t/elem-type (:t a))
-                      el (list 'aget (list '.-A (:x a)) (:x i))]
+                      el (list 'aget (list '.-A (:x a)) (index-x (:x i)))]
                   (v (if (or (t/prim? et) (= et "Ljava/lang/Object;"))
                        el
                        (list (list 'inst (jsym "As") (gotype et)) el))
@@ -865,18 +892,18 @@
           :mul (list (jsym "Math_MultiplyExact_J_J__J") a b)
           :inc (list (jsym "Math_IncrementExact_J__J") a)
           :dec (list (jsym "Math_DecrementExact_J__J") a)
-          :div (list '/ a b)
-          :rem (list '% a b))
+          :div (list '/ a (divisor-x b (gotype ty)))
+          :rem (list '% a (divisor-x b (gotype ty))))
         (case o
           :add (list '+ a b)
           :sub (list '- a b)
           :mul (if (#{"F" "D"} ty) (fmul a b) (list '* a b))
-          :div (list '/ a b)
+          :div (list '/ a (divisor-x b (gotype ty)))
           :rem (if (#{"F" "D"} ty)
                  (if (= ty "F")
                    (list 'conv 'float32 (list 'math/Mod (list 'conv 'float64 a) (list 'conv 'float64 b)))
                    (list 'math/Mod a b))
-                 (list '% a b))
+                 (list '% a (divisor-x b (gotype ty))))
           :neg (list '- a)
           :inc (list '+ a 1)
           :dec (list '- a 1)
@@ -1469,7 +1496,7 @@
                                         [nil "I" (let [et (t/elem-type (vt (:array node)))] (if (t/prim? et) et "Ljava/lang/Object;"))])
                     et (t/elem-type (:t a))]
                 (emit! (if (t/prim? et)
-                         (list 'aset (list '.-A (:x a)) (:x i) (:x val))
+                         (list 'aset (list '.-A (:x a)) (index-x (:x i)) (:x val))
                          (list '.Store (:x a) (:x i) (:x val))))))
         (:invoke :new :var-invoke) (let [x (expr-op node)] (emit! (:x x)))
         :throw (let [x (expr-as (:expr node) "Ljava/lang/Throwable;")]
@@ -1637,7 +1664,7 @@
                     [a i val] (operands [(:array node) (:index node) (:val node)] [nil "I" et])
                     val (hoist-value val)]
                 (emit! (if (t/prim? et)
-                         (list 'aset (list '.-A (:x a)) (:x i) (:x val))
+                         (list 'aset (list '.-A (:x a)) (index-x (:x i)) (:x val))
                          (list '.Store (:x a) (:x i) (coerce (:x val) et "Ljava/lang/Object;" false))))
                 (assign-value! (coerce (:x val) et (ctx-desc ctx) false) ctx))
         :assert (do (translate-ctx node {:k :stmt}) (assign-value! nil ctx))
@@ -1809,6 +1836,10 @@
                                    (decl! c (gotype ct) nil)
                                    (use-sym! c)
                                    (accessor-call! r (:class p) accessor c)
+                                   ;; a component no pattern reads (_, an unconditional pattern
+                                   ;; without a binding) is assigned only: gc's "declared and not
+                                   ;; used" (doc/classes/JAVA-CONFORMANCE-SURVEY.md, JC2)
+                                   (when-not (:b pattern) (emit! (list 'set! '_ c)))
                                    (match-pattern! pattern c ct #(comps (rest cs))))))
                              (:comps p)))))]
     (if (:test p)
@@ -1820,7 +1851,10 @@
   matches (after match-pattern!)."
   [p x vt]
   (doseq [b (pattern-bindings p)]
-    (decl! (binding-sym b) (gotype (:type b)) nil))
+    (decl! (binding-sym b) (gotype (:type b)) nil)
+    ;; a binding the code after the match does not read is assigned only by the match: gc's
+    ;; "declared and not used" (val instanceof R(var c) for its truth alone; JC2)
+    (emit! (list 'set! '_ (binding-sym b))))
   (let [ok (tmp)]
     (decl! ok 'bool false)
     (use-sym! ok)
@@ -1853,6 +1887,9 @@
           else (with-block #(translate-ctx (:else node) ctx))]
       (emit! (list 'if ok (cons 'do then) (cons 'do else))))
   (let [x (hoist-value (expr (:expr node)))
+        ;; the null constant's temporary, which the test (false) does not read: gc's declared
+        ;; and not used (x instanceof T t with x null; doc/classes/JAVA-CONFORMANCE-SURVEY.md, JC2)
+        _ (when (and (= :null (:t x)) (symbol? (:x x))) (emit! (list 'set! '_ (:x x))))
         p (:pattern node)
         xn {:op ::go :x (:x x) :t (:t x) :nn (:nn x)}
         test (:x (instance-val {:class (:class p) :expr xn}))

@@ -33,7 +33,8 @@ does.
 Contents: Executive summary · 1 Today · 2 What goi's check is, and what Java's must be · 3 The
 corpora · 4 What "pass" means · 5 Measurements · 6 What the failures say · 7 The tool:
 `bin/java-check` · 8 Plan (JC1-JC8) · 9 Proposals (JCS1-JCS15) · Decided · As built: JC1
-(JCS16-JCS25) · 10 Risks · 11 Sources · Appendix A: the scripts · As built: JC3 (JCS50-JCS55).
+(JCS16-JCS25) · 10 Risks · 11 Sources · Appendix A: the scripts · As built: JC4 (JCS30-JCS33) ·
+As built: JC2 (JCS40-JCS49) · As built: JC3 (JCS50-JCS55).
 
 ## Executive summary
 
@@ -1244,7 +1245,7 @@ shipped program, javac's tool and the gate's keys are the same.
 - *The corpus* `langtools-diagnostics` (`test/java/corpora.edn`): every `compile-fail-ref` test
   (§3.1's category: a `@compile/fail/ref=F` action) under jdk26u's `test/langtools/`: 1,212 tests,
   1,203 of `tools/javac` and 9 of `tools/doclint` (§3.1's measurement counted 1,211 by its
-  own scan). Ids `t06426`-`t07637`,
+  own scan). Ids `t06427`-`t07638` (renumbered by one at the merge with JC2, whose JLS program took `t06426`),
   after JC1's.
 - *Run as jtreg runs them, in place*: a golden file names the test's files and classes
   (`T.java:10:5: compiler.err...`), so these tests are not renamed (JCS4 (a) is the run levels').
@@ -1383,3 +1384,239 @@ javac's own `Main.compile` with Arbace's file manager, file objects behaving as 
 non-UTF-8 `-encoding` and a jar on `--module-path` stay refused), JCS54 (a) (the diagnostics corpus
 widened to every `ref=` action), JCS55 (b) (the runner learns `@clean`, `/module=M` and jtreg's working
 directory, `.jcod` left out). The five `:pending` classes of the diagnostics level cite this.
+
+## As built: JC2 (2026-10-24)
+
+Branch `java-check-jc2`, from main `45c41a46` (JC1, JC4, REAP1, JFS65 (b), JFS75 (b) on it). The
+compiled level of `bin/java-check` (§7.2, §8's JC2), j2g's findings of §5.4, and JC1's decided
+follow-ups (JCS16 (b), JCS17 (b), JCS19 (b), JCS33 (a)). The executables: the gate's build of main
+`45c41a46` (its `gate_key` equal to the branch's before the j2g changes) interprets and hosts j2g
+(`J2G_GO_EXE`; j2g's changed namespaces load from the checkout, evaluated); javac's tool executable of
+main (key `bf740cf0…`, `REPR_JAVA_STALE_OK=1`, as JC1 ran); the compiled namespaces are main's shipped
+build's (`target/arbace-go/aot`, its `aot_key` `6437f7c9…` the branch's before the j2g changes); the
+JDK the system's OpenJDK 26.0.2.1. 8 jobs; every j2g run and build in one of the host's heavy slots (a
+whole compiled run holds one).
+
+**JC1's follow-ups.**
+
+- *JCS16 (b)*: `jdk/java/beans` is excluded as `jdk/java/awt` is (`test/java/corpora.edn`); the
+  reference drops the tests the corpora no longer take (`java.check/gather`: a test of the old
+  reference that the scan no longer selects is not kept): 2,951 tests, **2,721 passing on the JDK**
+  (2,967 less beans' 246), and since JC2's own JLS program 2,952 and 2,722.
+- *JCS17 (b)*: `--record-ref` records, beside stdout's digest, its digest with identity hash codes
+  (`@` and 6 to 8 hex digits) masked, `:out-masked`, where masking changes it (39 actions), and
+  `:det-masked` where only the masked runs agreed (33); the check compares the masked digest when the
+  plain one differs, or alone when only the masked runs agreed (`judge`, shared by the levels).
+- *JCS19 (b)*: both sides run in `.tmp/java-check/w/ID`, `java.io.tmpdir` and `TMPDIR`
+  `.tmp/java-check/tmp/ID`, `test.classes` `.tmp/java-check/classes/ID` (`run_dirs`); the reference
+  recorded again (27 min): no test's status changed, 15 changed their determinism.
+- *JCS33 (a)*: the interp level loads file by file by default (`--load files`: each package
+  required as the REPL loads it, JC4's source lookup finding a later file's or form's class); `--load
+  do` stays the comparison mode. `check-interp.edn` recorded again from the file-by-file run.
+
+**The compiled level** (`--levels compiled`; `make java-check-compiled`; `bin/gate --full`'s
+`java-check-full` runs `read,interp,classes,compiled`):
+
+1. the tests whose read passed are put into shards (`java.check/shards`, `--shard-size`, default 700;
+   500 for the numbers below): a test goes into the first shard with room where none of its forms
+   files' places holds another text (packaged tests share packages: `compiler.c2`'s classes are many
+   tests'), and `owners.tsv` records each test's files, top-level classes (read with the reader) and
+   their Go names;
+2. per shard, `bin/j2g --program` with the shard's forms tree and the shipped build's compiled
+   namespaces (`JAVA_CHECK_AOT`, default `target/arbace-go/aot`; goi's table only with
+   `JAVA_CHECK_GOTABLE`, as diffcheck's program has none): every public member of every test class is
+   a root (`--program`'s REPL world), every `main` among them. j2g's `:analysis-failures` and `:errors`
+   (`report.edn`) are attributed to the tests owning the class, file or Go name they name
+   (`java.check/refusals`), those tests are `refused` with j2g's reason and the shard is translated
+   again without them, until j2g refuses none;
+3. `bin/build-go`; when it fails, `go build -gcflags=arbace/lang=-e` in its work module lists every Go
+   error of `lang`, each attributed by its file (`J_<path>.go`) or the Go names in it
+   (`java.check/goerrors`; an error in jrt's files naming `C_I`, a JDK class a test extends, blames the
+   tests extending it), those tests `refused` ("Go does not compile") and the shard translated again;
+4. each test's main actions run on the program (`test/java/run.ae --load none`: the classes are the
+   program's) in the same directories, judged as interp's actions; the program and its trees removed.
+   A shard that fails without a test to blame gives its tests `error` (no class takes it: the report
+   fails); `--shard K,...` runs those shards again, the others' results kept.
+
+Measured: the whole level in 41 min of one heavy slot (6 shards, 15 j2g passes of 80-140 s, 9 builds of
+70-110 s, the runs 1-2.5 min a shard); a program is about 280 MB.
+
+**j2g's findings of §5.4, fixed** (`arbace/j2g/`; the shipped program's j2g changes, so the
+second batched re-seed; the runtime's own translation does not change but where noted):
+
+- *one input class stopped the whole run*: `fromfn/functional?` forced an annotation type's
+  annotations, which throw when a meta-annotation names a class outside the world; a class whose
+  annotations do not resolve is now not functional (`fromfn.ae`). And a forms file the reader refuses
+  (an array type of more than nine dimensions, `String/50`) stopped j2g's read: it is now that file's
+  failure, `[file "read: ..."]` among the analysis failures (`world.ae`), its test refused;
+- *names* (JCS15 (a)): a class outside the runtime and the JDK in `lang` (`names/user-class?`: of
+  package `lang` and not under `arbace/`: a user's Java forms, the check's tests, diffcheck's corpora,
+  the fixtures) is named by its binary name between `J_` and `_J` (`t06216.Overloads` is
+  `J_t06216_Overloads_J`; `names.ae`), its Go file `J_<path>.go` (`out.ae`), J2G-SPEC §4.4 amended.
+  The closing `_J` is needed: with `Jv_` alone (as `--qualify` names, JCS15's words) the first run
+  found `p.C`'s static `b(short)` and `p.C$B`'s static `s()` both `Jv_p_C_B_S__String`; the same
+  collision existed in the simple names, `C_B_S__String`. No collision of simple names, of
+  case-insensitive file names or of a test's file with the runtime's remains in the corpus;
+- *Go that does not compile*: a constant negative array index (`a[-1]`, `a[-2] = 5`) and a constant
+  zero divisor (`x / 0`, `x % 0`, `y / 0L`, floating point's) go through a function literal's call,
+  which is not a constant, so that Java's run-time exception (or infinity) happens at run time
+  (`code.ae`: `index-x`, `divisor-x`); a record pattern's bindings and the components no pattern reads
+  are read once (`_ = c`), a record without components' `equals` reads no `other` (`decls.ae`),
+  `x instanceof T t` of the null literal reads its temporary (gc's "declared and not used").
+
+What is left of §5.4's Go kinds (11 tests, the class `:j2g-go`, JCS42): a local class's captured
+values missing from its constructor call when made inside an anonymous or another local class (3), a
+captured variable undefined in a lambda or a nested local class (2), an `any` returned as `int32` (1),
+`finalize` called on an outer class that does not declare it (1), a member through a null constant
+(`OneCaseSwitches`, 1), and a test's subclass of `PrintStream`/`PrintWriter`, which j2g's support code
+for `System.out` and the reflection tables take as leaves (3). §5.4's "unnamed-package main" (13) was
+the measurement's runner's: JC1's renaming puts every main in a package. j2g's other refusals of the
+corpus: a Go name declared twice (a static field `init` and the class's `C_init`, 1; JCS43), a
+package-private method redeclared in another package (J2G-SPEC §4.4's rule, 1), the edge's facts (23).
+
+**Numbers** (each level against the JDK's recorded runs; the compiled numbers of shards 0-4 are of
+the j2g of `892feb07`, shard 5's (langtools' patterns and the JLS programs) of `38657bff`, which adds
+the record and null fixes; interp is the gate executable of main, file by file):
+
+| level | hotspot compiler | java/lang | java/util | java/io | java/net | java/nio | java/text | java/math | java/security | other java/* | langtools | jls | **all** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tests (pass on the JDK) | 697 | 354 | 375 | 256 | 154 | 151 | 50 | 38 | 101 | 19 | 515 | 12 | **2,722** |
+| read, classes | 696, 697 | 354, 353 | 375 | 256 | 154 | 151 | 50 | 38 | 101 | 19 | 514 | 12 | **2,720, 2,720** |
+| interp, file by file (the default) | 531 | 153 | 160 | 83 | 49 | 6 | 38 | 35 | 3 | 0 | 359 | 9 | **1,426 (52.4%)** |
+| interp, one `do` (JC1's) | 533 | 153 | 161 | 83 | 49 | 6 | 38 | 35 | 3 | 0 | 360 | 8 of 11 | **1,429 of 2,721** |
+| **compiled (j2g)** | **640** | **162** | **207** | **93** | **57** | **7** | **42** | **36** | **8** | **0** | **369** | **11** | **1,632 (60.0%)** |
+| compiled: refused | 19 | 102 | 89 | 103 | 66 | 133 | 0 | 0 | 83 | 18 | 113 | 0 | 726 |
+| compiled: fail | 21 | 84 | 68 | 59 | 30 | 11 | 7 | 2 | 8 | 1 | 31 | 0 | 322 |
+| compiled: differ | 6 | 1 | 4 | 1 | 1 | 0 | 1 | 0 | 1 | 0 | 1 | 1 | 17 |
+| compiled: timeout (20 s) | 10 | 5 | 7 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 23 |
+| compiled: unread | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 2 |
+
+("Other java/*": rmi 18, sql 1.) On the survey's four areas (§5.4: java/lang 151, java/util 204,
+HotSpot 705 of its 862, langtools 367) the compiled numbers are 162, 207, 640 of 697 and 369. JC1's
+interp was 1,364 of 2,967 with beans; without them and with JC4's fixes it is 1,426.
+
+*File by file against one `do`* (2,721 tests): 1,425 and 1,429; the difference is three tests that
+pass only as one `do` (`:interp-files`, JCS40: `MissingBridge`'s bridge, which an interface call through
+`TestInterface` needs, is missing when its superclass is an earlier form; `cr6714694`'s and `cr6711117`'s
+`Object[][]` field reads as the class `java.lang.Object;` when the file is loaded) and timeouts on the
+loaded host (13 HotSpot tests and two others near the 20 s limit flipped between the runs and against
+JC1's record: JCS47).
+
+*The compiled level's non-passes by class* (`bin/java-check`'s report, 1,090): the world, by j2g's
+refusal of a JDK class the forms, jrt and the edge do not have (`:j2g-world`, 420), and as run-time
+throws in the interp level's world classes (serialization 74, other JDK classes and members 40, NIO
+35, reflection 34, networking 21, zip and jar 19, `java.lang.invoke` 16, `java.io` 10, threads 9,
+charsets 9, class loading 8, security 7, stack walking 5, references 3), the edge's facts 23; the
+analysis 230 (j2g's analysis is the interpreter's: `Cannot convert`, `No matching method`, switches,
+intersection types); j2g's own 13 (`:j2g-go` 11, names 1, package-private override 1); speed 23; the
+JLS corpus's `StringConcat` (an interned constant, 1); a protected member of a world class (2); repr/java's
+arrays of more than nine dimensions 2, unread 2; identity hash codes in traces 3; other failures to triage
+81 (Calendar's and Date's fields, `ExceptionInInitializerError`s, `Runtime.exec`'s cut overloads,
+`NullPointerException`s of reflection over non-public members).
+
+*The two levels against each other* (2,722 tests): **1,400 pass both, 232 only compiled, 26 only
+interpreted**, 1,064 neither. Only compiled: the interpreter's limits (extendable superclasses, protected
+members, its speed: 112 of them HotSpot's, which j2g runs well under the limit), its analysis' refusals
+are the same on both sides. Only interpreted (diffcheck's kind of finding, RPS16 (a), listed in JCS45):
+`Runtime.exec`'s overloads (5), `ForkJoinPool.submit` (2) and `Date.toInstant` (1: reached by the
+interpreter's reflection, cut in the translation), reflection over non-public members and nested classes
+(`Class.cast`'s `newInstance`, `getDeclaredField`'s and `getDeclaredMethod`'s exceptions, `getMethods`'
+order, `DefaultAccessibility`, `T8034044`'s static flag, `TwrMultiCatch`'s `newInstance`; 7), `strictfp`'s
+methods by reflection (2), `CopyMethods`' class initialization, `TestSyntheticNullChecks`' assertion,
+`SamConversion`'s untranslated `test3`, `LambdaTest5`'s goroutine stack overflow, two escape-analysis
+tests (an output, a `ClassCastException`), and j2g's refusals of three (Go that does not compile 2, the
+name collision 1). These are the survey's §5.4 twenty again, on the widened corpus.
+
+**REAP.** `bin/reap` now judges Java AOT from `test/java/check-compiled.edn` (level `:compiled`, RPS29
+(a): the plug-in's names kept), with diffcheck's exclusions (`test/diffcheck/jforms-excluded.edn`) a
+source beside it (RPS27 (a), the reader `:jforms-excluded`; its classes in
+`test/java/divergences-diffcheck.edn`: F2.4's kin 4, deferred to REAP3; the corpus's own classes 12, by
+design); the kind `:j2g` maps to deferred. The matrix's Java row: read 5,440 / 0 / 4, eval 1,426 / 276 /
+1,020 (3 pending), **AOT 1,632 / 105 / 985 (12 pending)**; 9 of 12 cells checked, **0 problems**. Pending
+(the user's): `:interp-files` (3, JCS40), `:j2g-go` (11, JCS42), `:j2g-names` (1, JCS43).
+
+**The JLS corpus** grows by `test/java/jls/RuntimeConstants.java` (JLS 15.10.4, 15.17.2, 14.30, 8.10.3:
+what a compiler must leave to run time, each of j2g's Go fixes above as a case), recorded on the JDK,
+passing at the levels read, classes, interp and compiled.
+
+**Not done** (proposed): the compiled level in the essential gate (JCS41, REAP8's); the two levels'
+disagreements as data (JCS45).
+
+**Checks**: the essential `bin/gate` at the branch's code head `48b0bfb3` passed in 28m05s (the
+executables built afresh, 18 min: j2g changed): the smoke test, Clojure's suite on the test build with
+no regressions, the oracle 22,672 of 22,725 as recorded, diffcheck (Clojure's pair 12,020 of 12,041,
+the Java forms' pair 743 of 745, as recorded: the fixtures' and corpora's classes now named `J_..._J`),
+goi's essential check 801 of 801, Java's essential check 428 of 428 (file by file), the generated
+variants, j2g's edge, `bin/reap` 0 problems.
+
+### Proposals (JCS40-JCS49)
+
+- **JCS40 The file-by-file load's findings** (`:interp-files`: `MissingBridge`, `cr6714694`,
+  `cr6711117`).
+  - Options: (a) with JCS30 (b) in JC5: a file's classes one `defclasses`, one compilation, as the
+    one-`do` load that passes them; (b) the interpreter fixed form by form now: the bridge a subclass
+    needs added when the subclass is defined after its superclass, and the source lookup's array
+    descriptor traced; (c) left in their class.
+  - *Recommended: (a)*, (b)'s lookup trace with it: JCS30 (b) is decided and makes the file one unit; a
+    hand-written REPL session defining the superclass first then needs (b)'s bridge, so JC5 checks it
+    there too.
+- **JCS41 The compiled level in the essential gate** (JCS13 (a), RPS15).
+  - Options: (a) REAP8: the essential subset's tests that pass compiled (from their committed forms)
+    in one program cached by a key of j2g's sources, the runtime and the forms, as diffcheck caches its
+    program (seconds when unchanged; a j2g pass and a build, about 4 minutes and a heavy slot, when they
+    change), every one must pass; (b) `--full` only (as built); (c) diffcheck's program carries them, its
+    Java forms' pair gaining the essential tests as cases.
+  - *Recommended: (a)*: the only compiled check of whole Java programs then guards every change to j2g,
+    which diffcheck's Java pair (723 cases of Arbace's own) does not cover.
+- **JCS42 The Go j2g still writes that gc refuses** (`:j2g-go`, 11 tests).
+  - Options: (a) each fixed in j2g in JC5, beside the analysis (the captured values and variables are
+    the analysis' facts of local classes and lambdas), and `PrintStream`/`PrintWriter` through their
+    interface types in j2g's support forms; (b) the leaf assumption made a refusal (j2g refuses a
+    subclass of a JDK class its support code needs as a leaf, naming it), the rest fixed in JC5; (c)
+    deferred, decided with JC6.
+  - *Recommended: (b)*: a refusal is honest at once and cheap; the capture bugs are real
+    miscompilations of ordinary Java (a local class made in an anonymous class) and belong with JC5.
+- **JCS43 A class's member names meeting j2g's derived names** (`:j2g-names`: a static field `init`
+  and `C_init`; an anonymous class's `GetClass__Class` twice).
+  - Options: (a) j2g reserves its suffixes: a static field or method whose Go name would be one j2g
+    derives (`_init`, `_Init`, `_class`, `_New`...) gets a mark (`_f`), as locals get `_`; (b) a rename
+    table entry per case; (c) left in the class.
+  - *Recommended: (a)*: a rule, as J2G-SPEC §4.4's locals have, not a table that grows by test.
+- **JCS44 The world as j2g names it.** j2g's refusals name a JDK class by its simple name ("Unable
+  to resolve class: DatagramSocket", 420 tests in one class), where the interp level's run-time throws
+  name the package (its world classes by area).
+  - Options: (a) the analysis' message names the import that would have declared the class
+    (`java.net.DatagramSocket`, from the namespace's import list), so that one set of world classes
+    serves both levels; (b) the compiled class split by a table of simple names; (c) as built.
+  - *Recommended: (a)*: JC6 ranks the world's classes by tests gained, which needs both levels' tests in
+    the same classes.
+- **JCS45 The two levels' disagreements** (232 only compiled, 26 only interpreted).
+  - Options: (a) `bin/java-check` prints them when a run has both levels and records them in
+    `test/java/levels-known.edn` (test, both results), failing on a new one, as diffcheck's known file
+    does (RPS16 (a): a finding, not a class); (b) printed only; (c) in this survey's prose (as built).
+  - *Recommended: (a)*: the 26 are the cases diffcheck's corpus misses, and a new one is a regression
+    of one back end against the other.
+- **JCS46 The compiled namespaces the level takes.** It uses `target/arbace-go/aot` without looking at
+  its key.
+  - Options: (a) the runtime's part of `aot.key` (`arbace_runtime_key`) checked against the checkout's,
+    a stale tree refused with the build to run (j2g's own sources changing the key is expected: the
+    compiled j2g in the tree does not matter to the tests' programs); (b) as built; (c) the check
+    compiles the namespaces itself (c2j, as diffcheck does: minutes more a run).
+  - *Recommended: (a)*.
+- **JCS47 Timeouts on a loaded host.** Fifteen tests near the 20 s limit flipped between runs (the
+  interp level, the host's other heavy work).
+  - Options: (a) a timeout run again once, with twice the limit, before it counts; (b) the limit per
+    level from a quiet run's times plus a margin; (c) as built (JCS22 (a)).
+  - *Recommended: (a)*: the record stops moving with the host's load; the speed class keeps the
+    tests that are slow.
+- **JCS48 Shard size.** One shard of 700 tests (`java/*`, 17,555 classes) was killed once in j2g
+  (the host's memory, beside two other agents' heavy jobs); the numbers above are of shards of 500.
+  - Options: (a) 500 the default; (b) a shard whose j2g dies split in two and run again; (c) 700.
+  - *Recommended: (a) and (b)*.
+- **JCS49 The user classes' Go names.** Built as `J_<binary name>_J`, where JCS15 (a) said "as
+  `--qualify` does" (`Jv_<binary name>`).
+  - Options: (a) as built: `J_..._J`, the closing mark making a class's derived names unable to meet
+    another class's (the `Overloads` collision above); (b) `Jv_` as `--qualify`, the collision a
+    rename; (c) `--qualify`'s prefixes too closed by `_J`.
+  - *Recommended: (a)*, (c) when javac's tool is next rebuilt (its names are the tool's, not the
+    shipped program's).
