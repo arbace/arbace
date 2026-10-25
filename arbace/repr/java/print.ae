@@ -148,7 +148,10 @@
                             :let [[p & cs] (quoted g)]
                             c cs]
                         [(str c) (str p "." c)]))
-        body (vec (remove #(or (is? % 'in-ns) (is? % 'import) (is? % 'ns) (is? % 'load)) forms))]
+        body (vec (remove #(or (is? % 'in-ns) (is? % 'import) (is? % 'ns) (is? % 'load)) forms))
+        ;; a defclasses (a file's top-level classes, JCS30 (b)): its classes, each a top-level
+        ;; class of the file
+        body (vec (mapcat #(if (is? % 'defclasses) (rest %) [%]) body))]
     (when (seq body)
       {:path path :origin (origin-of text) :pkg (or pkg "") :imports imports :forms body
        :radix (radix-map text)})))
@@ -466,11 +469,23 @@
 (defn- array-sym? [s]
   (and (symbol? s) (namespace s) (re-matches #"\d+" (name s))))
 
+(defn- str-array-sym
+  "A string tag naming an array class as the JVM does (\"[[...Ljava.lang.String;\": more than
+  nine dimensions, JCS12 (b)) as the symbol C/N, else t."
+  [t]
+  (if-let [[_ ds e] (and (string? t) (re-matches #"(\[+)(L[^;]+;|[ZBSICJFD])" t))]
+    (symbol (if (str/starts-with? e "L")
+              (subs e 1 (dec (count e)))
+              ({"Z" "boolean" "B" "byte" "S" "short" "I" "int" "J" "long" "C" "char" "F" "float" "D" "double"} e))
+            (str (count ds)))
+    t))
+
 (defn- dims-of
   "[base dim-annotation-maps] of type form `t`: the element type and the annotations of each
   array dimension, outermost first."
   [t]
   (cond
+    (string? t) (dims-of (str-array-sym t))
     (array-sym? t) [(symbol (namespace t))
                     (vec (cons (meta t) (repeat (dec (parse-long (name t))) nil)))]
     (is? t 'array) (let [[b ds] (dims-of (second t))] [b (vec (cons (meta t) ds))])
@@ -579,6 +594,7 @@
    (cond
      (> depth 8) "java.lang.Object"
      (nil? t) "java.lang.Object"
+     (string? t) (erase scope (str-array-sym t) depth)
      (symbol? t)
      (let [n (str t)]
        (cond
@@ -935,7 +951,7 @@
             (conversion-types hn) (conversion-types hn)
             (= hn "java-str") "java.lang.String"
             (= hn "cast") (erase (:scope env) (first args))
-            (= hn "new") (let [t (first args)] (erase (:scope env) (if (is? t 'array) t (if (array-sym? t) t t))))
+            (= hn "new") (let [t (str-array-sym (first args))] (erase (:scope env) (if (is? t 'array) t (if (array-sym? t) t t))))
             (and (str/ends-with? hn ".") (> (count hn) 1) (not (#{"this." "super."} hn)))
             (class-binary (:scope env) (symbol (subs hn 0 (dec (count hn)))))
             (= hn ".new") (class-binary (:scope env) (second args))
@@ -1708,7 +1724,8 @@
           (= hn "set!")
           (let [[p v] args] (assign-text env p (place-text env p) v true))
           (= hn "new")
-          (let [[t & more] args]
+          (let [[t & more] args
+                t (str-array-sym t)]
             (if (or (array-sym? t) (is? t 'array))
               (array-new-text env t more)
               (new-text env t more)))

@@ -44,6 +44,15 @@
   (let [i (env/info o)]
     (if (and i (:outer-instance? i)) (inc (outer-level (:outer i))) 0)))
 
+(defn capture-field-name
+  "The name of the field of local or anonymous class n holding captured local b: val$x, a $
+  appended while the class declares a field of that name (SynthName1's own val$prm1; javac's
+  Lower names its proxies apart)."
+  [n b]
+  (let [own (set (map :name (:fields (decl n))))]
+    (loop [nm (str "val$" (:sym b))]
+      (if (contains? own nm) (recur (str nm "$")) nm))))
+
 (defn this0-name
   "javac's name of class n's outer instance field: this$N, N the outer class's nesting level."
   [n]
@@ -2590,6 +2599,21 @@
 
 (declare outer-instance-for)
 
+(defn- capture-local-super!
+  "A constructor of a subclass of local class cn calls cn's constructor, which takes cn's
+  captured values: the subclass (or anonymous class) passes them on, so it captures them too
+  (javac's Lower.freevars of a local superclass); also the enclosing locals cn's form names, as
+  for a creation in its own body (analyze-new)."
+  [actx cn]
+  (when-let [cd (decl cn)]
+    (when (= :local (:nesting cd))
+      (let [st @(:state cd)
+            ls (:locals (:creation-actx st))]
+        (doseq [b (concat (reverse (:captures st))
+                          (distinct (keep #(when (symbol? %) (get ls %)) (flatten (seq (:spec st))))))
+                :when (and (not (:mutable b)) (not (:cval b)) (not (:receiver b)))]
+          (local-ref actx b))))))
+
 (defn ctor-call-node
   "A call of constructor of class cn with args; kind :new, :super or :this."
   [actx cn args kind & {:keys [outer param-tags arg-nodes]}]
@@ -2597,15 +2621,7 @@
   ;; the subclass passes the local class's captured values on, so it captures them too
   ;; (javac's Lower.freevars of a local superclass); its form's enclosing locals as for a
   ;; creation in its own body (analyze-new)
-  (when (= kind :super)
-    (when-let [cd (decl cn)]
-      (when (= :local (:nesting cd))
-        (let [st @(:state cd)
-              ls (:locals (:creation-actx st))]
-          (doseq [b (concat (reverse (:captures st))
-                            (distinct (keep #(when (symbol? %) (get ls %)) (flatten (seq (:spec st))))))
-                  :when (and (not (:mutable b)) (not (:cval b)) (not (:receiver b)))]
-            (local-ref actx b))))))
+  (when (= kind :super) (capture-local-super! actx cn))
   (let [arg-nodes (or arg-nodes (mapv #(analyze actx %) args))
         cands (ctor-candidates (:class actx) cn)
         _ (when (empty? cands) (fail (str "No accessible constructor of " (str/replace cn "/" "."))))
@@ -2659,7 +2675,9 @@
                        n))]
     (cond
       (or (and (symbol? cls) (namespace cls) (re-matches #"[1-9]" (name cls)))
-          (and (seq? cls) (= 'array (first cls))))
+          (and (seq? cls) (= 'array (first cls)))
+          ;; an array of more than nine dimensions, as the JVM names its class (JCS12 (b))
+          (and (string? cls) (str/starts-with? cls "[")))
       (anns (array-new actx (actx-desc actx cls) args))
       (nil? cn) (fail (str "Unable to resolve class: " cls))
       :else
@@ -3212,8 +3230,9 @@
       :enum {:op :ctor-call :kind :super :class "java/lang/Enum" :enum-args true
              :ctor {:name "<init>" :desc "(Ljava/lang/String;I)V" :owner "java/lang/Enum"} :args [] :type "V"}
       (if (and (= :anon (:nesting d)) (:anon-super-ctor d))
-        {:op :ctor-call :kind :super :class (:super d) :ctor (:anon-super-ctor d) :anon-args true
-         :args [] :type "V"}
+        (do (capture-local-super! actx (:super d))
+            {:op :ctor-call :kind :super :class (:super d) :ctor (:anon-super-ctor d) :anon-args true
+             :args [] :type "V"})
         (when-let [sup (:super d)]
          (let [sd (decl sup)]
           (when (and sd (:outer-instance? sd) (#{:local :anon} (:nesting sd)))
@@ -4427,6 +4446,8 @@
         ns-name* (when ns-form (let [x (second ns-form)] (if (seq? x) (second x) x)))
         class-forms* (for [f forms
                            f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
+                           ;; a defclasses' classes (a file's top-level classes, JCS30 (b))
+                           f (if (and (seq? f) (symbol? (first f)) (= "defclasses" (name (first f)))) (rest f) [f])
                            :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
                        (rest f))
         ;; only a file that declares the class is its source: decided before evaluating anything

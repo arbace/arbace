@@ -137,6 +137,17 @@
     (annotate
      (cond
        (#{"BOOLEAN" "BYTE" "SHORT" "INT" "LONG" "CHAR" "FLOAT" "DOUBLE" "VOID"} tg) (m/prim-sym t)
+       ;; more than nine dimensions: the reader's C/N takes 1-9; the JVM's name of the array
+       ;; class as a string tag (Clojure's), which the analysis reads (JCS12 (b))
+       (and (m/array? t)
+            (> (count (take-while m/array? (iterate m/elemtype t))) 9)
+            (not (some #(seq (type-ann-items env % true)) (take-while some? (iterate #(when (m/array? %) (m/elemtype %)) t)))))
+       (let [ts (take-while m/array? (iterate m/elemtype t))
+             e (erasure (m/elemtype (last ts)))]
+         (str (apply str (repeat (count ts) "["))
+              (if (prim? e)
+                ({"BOOLEAN" "Z" "BYTE" "B" "SHORT" "S" "INT" "I" "LONG" "J" "CHAR" "C" "FLOAT" "F" "DOUBLE" "D"} (tag-name e))
+                (str "L" (m/binary-name (m/tsym e)) ";"))))
        (m/array? t)
        (let [ef (type-form* env (m/elemtype t) elem?)]
          (cond
@@ -1953,14 +1964,37 @@
 
 (declare local-class-binding foldable-if? cond-form dup-sides match-exception-default pattern-instanceof?)
 
+(declare stmts-1)
+
 (defn stmts
-  "Convert the statement sequence `ss` in `ctx` to a vector of forms."
+  "Convert the statement sequence `ss` in `ctx` to a vector of forms. Iterative over the
+  statements that convert one by one and over a run of local declarations, so that a long
+  method (UncommonTrapStackBang's ten thousand locals) does not exhaust the stack (JCS24 (a))."
   [env ctx ss]
-  (let [ss (vec (remove #(tr/is? % :SKIP) ss))]
+  (loop [acc [] ss (vec (remove #(tr/is? % :SKIP) ss))]
     (if (empty? ss)
-      (vec (:fall ctx))
-      (let [s (first ss)
-            more (subvec ss 1)]
+      (into acc (:fall ctx))
+      (let [r (stmts-1 env ctx ss)]
+        (if (map? r)
+          (recur (into acc (:prefix r)) (:more r))
+          (into acc r))))))
+
+(defn- plain-vardef?
+  "Is statement s a local declaration stmts-1 converts as one binding of a let (not
+  predeclared, not assigned by the if after it, not assigning itself in its initializer)?"
+  [s nxt]
+  (and (tr/is? s :VARDEF)
+       (let [sym (attr/sym s :local-decl)]
+         (and (not (contains? *predeclared* sym))
+              (not (and (nil? (tr/f s :init)) nxt (assigns-only? nxt sym)))
+              (not (and (tr/f s :init) (refs-sym? (tr/f s :init) sym)))))))
+
+(defn- stmts-1
+  "One step of stmts over the nonempty `ss`: the whole sequence's forms (a vector), or {:prefix
+  v :more ss'}, the first statement's forms and the statements after it."
+  [env ctx ss]
+  (let [s (first ss)
+        more (subvec ss 1)]
         (attr/framed (tr/tag s)
         (cond
           ;; a local declared in one switch case and used in another: declared before the
@@ -1973,6 +2007,21 @@
                     [(list 'set! x (coerce env (ex env (tr/f d :init)) (erasure (m/stype sym))))]
                     [])
                   (stmts env ctx more)))
+          ;; a run of local declarations: one let over the rest of the block, its bindings in
+          ;; order (as the nested lets below merge), without recursion per declaration
+          (and (plain-vardef? s (first more)) (plain-vardef? (first more) (second more))
+               (= 'let (h env 'let)))
+          (loop [env env bv [] ss ss]
+            (let [d (first ss)]
+              (if (and d (plain-vardef? d (second ss)) (= 'let (h env 'let)))
+                (let [[sf init-f env'] (attr/framed (tr/tag d)
+                                         (binding-for env d (when (tr/f d :init) (ex env (tr/f d :init)))))]
+                  (recur env' (conj bv sf init-f) (subvec ss 1)))
+                (let [body (stmts env ctx ss)]
+                  (if (and (= 1 (count body)) (seq? (first body)) (= 'let (first (first body))))
+                    (let [[_ bv2 & bbody] (first body)]
+                      [(apply list 'let (into bv bv2) bbody)])
+                    [(apply list 'let bv (if (empty? body) [nil] body))])))))
           ;; local variables: a let over the rest of the block
           (tr/is? s :VARDEF)
           (let [d s
@@ -2073,7 +2122,7 @@
               [(cond-form env (tr/f i :cond) (fn [e] (do-form (stmts e ctx (into [a] more))))
                           (fn [e] (do-form (stmts e ctx [b]))))]))
           :else
-          (into (stmt env ctx0 s) (stmts env ctx more))))))))
+          {:prefix (stmt env ctx0 s) :more more}))))
 
 (defn- ends-in-jump?
   "True when statement `t` ends (on every path that ends) in a jump that `ctx` makes
@@ -3133,6 +3182,18 @@
 (defn- package-decl "JCCompilationUnit.getPackage." [u]
   (let [d (first (tr/f u :defs))] (when (tr/is? d :PACKAGEDEF) d)))
 
+(defn- defclasses-form
+  "Top-level forms with two or more defclass forms gathered into one (defclasses ...) where the
+  first stood."
+  [forms]
+  (let [cls? #(and (seq? %) (= 'defclass (first %)))]
+    (if (< (count (filter cls? forms)) 2)
+      forms
+      (let [i (first (keep-indexed (fn [i f] (when (cls? f) i)) forms))]
+        (vec (concat (take i (remove cls? forms))
+                     [(apply list 'defclasses (filter cls? forms))]
+                     (drop i (remove cls? forms))))))))
+
 (defn convert-unit
   "Convert compilation unit `cu`, javac's attributed one; with (:tree opts) the native parser's tree
   of the same text instead, its attribution javac's by position ((:index opts), attr/index). Returns
@@ -3182,7 +3243,11 @@
                                                        :at (mapv #(first (some (fn [it] (when (and (vector? it) (= [:java :at] (subvec it 0 2))) (nth it 2)))
                                                                                (f/items %)))
                                                                  forms)}])
-                      forms)]
+                      forms)
+              ;; a file's top-level classes are one compilation, as javac compiles them: two
+              ;; or more written as one defclasses (JCS30 (b), doc/classes/JAVA-CONFORMANCE-SURVEY.md,
+              ;; "As built: JC5")
+              forms (defclasses-form forms)]
           (cond-> {:package pkg-name :file file :forms forms
                    :supers (set (for [d (type-decls u)
                                       :when (tr/is? d :CLASSDEF)
