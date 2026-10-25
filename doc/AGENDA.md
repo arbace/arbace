@@ -118,7 +118,8 @@ The current state of the work. This file is rewritten as things change. For the 
   compiled suite re-recorded), JC2b (JCS42 (b)-JCS48), JN9c (overload resolution). Next: JC6 after JC5 and JC2b; REAP7; the second batched re-seed (REAP2's `--go-flag`,
   REAP3, REAP4, JC2's j2g, JC5, JC2b, RPS55's jrt); REAP9. After the milestone: the scripts' sweep of `/dev/null` and
   process substitution (the user, 2026-10-24); then C23 joins REAP, the next language after Clojure, Java and Go
-  (the user, 2026-10-25).
+  (the user, 2026-10-25), its prior art go-whim's C front end, canonical printer, C-lisp and C23
+  conformance test (`../go-whim` at `80c49bf5`, crefactor/; journal 2026-10-25).
 
 - **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,
   the user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):

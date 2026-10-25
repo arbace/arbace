@@ -1838,3 +1838,19 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - Decided (the user): after the milestone `arbace-reaps-3-crops-v1`, the next language to join Arbace's
   REAP (read, eval, AOT, print) is C23 (ISO/IEC 9899:2024). Not started; no survey yet. Haskell and Rust
   stay bridges (repr/haskell, repr/rust: read and print on the host's GHC and rustc), outside the matrix.
+
+## 2026-10-25: go-whim, the prior art of C23's REAP (the user)
+
+- The user: go-whim (`../go-whim`, at `80c49bf5`; the pilot Arbace vendored the box from and no longer
+  depends on) holds most of what C23 needs for REAP's read and print. Studied, not vendored yet:
+  `crefactor/cc`, a fork of modernc.org/cc/v4 v4.29.7 (BSD-3-Clause, The CC Authors) with C23's
+  productions added (`c23.go`: `[[...]]` attributes in every position, `constexpr`, `_BitInt(N)`,
+  `typeof_unqual`, `static_assert` without a message, digit separators, `u8'a'`; hooks marked `go-whim`),
+  and a `Host` given instead of asked of a compiler (`host.go`, for a program with no compiler);
+  `crefactor/cemit`, a canonical printer (one spelling per construct); `crefactor/clisp`, C-lisp, C23 as
+  s-expressions and back, byte for byte on canonical text (`ToC(ToLisp(x)) == cemit.Canonical(x)`;
+  `crefactor/clisp/SPEC.md`, doc/C-LISP.md); `crefactor/c23conf`, a conformance test of one file per
+  feature (49, N3220's subclauses) judged in six stages against gcc 15.2's `-std=c23` (accepted, parsed,
+  printed and accepted, a fixed point, the same tokens and the same objects at `-O0`, C-lisp's round
+  trip), 49 of 49 (doc/C23.md); the preprocessor out (whim's texts have only `#include`). No evaluator of C
+  forms seen there: C's eval and AOT are open questions for C23's survey after the milestone.
