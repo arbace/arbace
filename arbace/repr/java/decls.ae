@@ -8,7 +8,9 @@
 ;; Symbol's markAbstractIfNeeded; the generated members TypeEnter's addEnumMembers,
 ;; addRecordMembersIfNeeded, BasicConstructorHelper and RecordConstructorHelper; member-clone
 ;; Symbol's clone as Resolve's findVar and findFun use it; a class file's default methods' flags and a
-;; member inner class's constructor ClassReader's readMethod and adjustMethodParams: of jdk26u
+;; member inner class's constructor ClassReader's readMethod and adjustMethodParams; a class file's
+;; synthetic members and @Deprecated flags ClassReader's enterMember and annotation completion (JN9d):
+;; of jdk26u
 ;; (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259),
 ;; src/jdk.compiler/share/classes/com/sun/tools/javac/
 ;; comp/{Check,Resolve,TypeEnter,MemberEnter,ConstFold,Enter,Annotate}.java,
@@ -73,7 +75,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare sym has? memo new-memo platform-index read-class-file registry module-of-package package-exists? unit-top-class source-file-class platform-class class-named class-in-package lang csym class-flags cf-class-flags class-file-csym outer interface? class-static? encl-class outermost local-class? source-class source-interfaces-raw enum-unimplemented? mods-flags deprecated-flags source-class-flags implicit-enum-final check-flags tree-name-of enter-members! unit-package enter-unit! unit-env push-class bind decl-env class-env base-env ctype array-of tvar-sym tvar-bounds tvar-type inner-class? enclosing-instance-class this-type object-type generic-class? erasure raw? subst-map subst supertype interfaces as-super as-outer-super as-enclosing-super class-tparams class-supertype class-interfaces source-tparams decline! expr-decl-type anon-creation-type source-supertype source-interfaces cf-tvar-scope cf-sig cf-tparams cf-supertype cf-interfaces cf-type field-sym method-sym members fields-named member-class source-members local-class cf-members field-flags method-flags canonical-ctor method-tparams method-env method-type field-type env-class subclass? accessible? find-inherited-member-type find-member-type found find-field import-scope star-type named-type method-tvar? find-type find-var resolve-qualified env-site class-type-at type-of-tree annotation-targets type-use-annotations with-annotations vartype-of skip-parens num-rank promote as-kind jfloat->int const-string field-constant local-constant literal-const fold-binary const-value annotation-type annotation-is? element-type enum-class? annotation-class? class-class? string-type? annotation-value annotation-compound)
+(declare cf-deprecated sym has? memo new-memo platform-index read-class-file registry module-of-package package-exists? unit-top-class source-file-class platform-class class-named class-in-package lang csym class-flags cf-class-flags class-file-csym outer interface? class-static? encl-class outermost local-class? source-class source-interfaces-raw enum-unimplemented? mods-flags deprecated-flags source-class-flags implicit-enum-final check-flags tree-name-of enter-members! unit-package enter-unit! unit-env push-class bind decl-env class-env base-env ctype array-of tvar-sym tvar-bounds tvar-type inner-class? enclosing-instance-class this-type object-type generic-class? erasure raw? subst-map subst supertype interfaces as-super as-outer-super as-enclosing-super class-tparams class-supertype class-interfaces source-tparams decline! expr-decl-type anon-creation-type source-supertype source-interfaces cf-tvar-scope cf-sig cf-tparams cf-supertype cf-interfaces cf-type field-sym method-sym members fields-named member-class source-members local-class cf-members field-flags method-flags canonical-ctor method-tparams method-env method-type field-type env-class subclass? accessible? find-inherited-member-type find-member-type found find-field import-scope star-type named-type method-tvar? find-type find-var resolve-qualified env-site class-type-at type-of-tree annotation-targets type-use-annotations with-annotations vartype-of skip-parens num-rank promote as-kind jfloat->int const-string field-constant local-constant literal-const fold-binary const-value annotation-type annotation-is? element-type enum-class? annotation-class? class-class? string-type? annotation-value annotation-compound)
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Symbols: maps by identity (their parts refer to the registry and to each other); their type is
@@ -310,21 +312,23 @@
                            (and (not (has? mf (bit-or ABSTRACT STATIC PRIVATE))) (not= "<clinit>" (:name m)))))
                  (:methods cfd)))
       (bit-or DEFAULT)
-      (some #(= "Ljava/lang/Deprecated;" (:type %)) (:annotations cfd)) (bit-or DEPRECATED DEPRECATED_ANNOTATION)
+      true (bit-or (cf-deprecated (:annotations cfd)))
       (:record? cfd) (bit-or RECORD)
       (seq (:permitted cfd)) (bit-or SEALED))))
 
 (defn class-file-csym
-  "The class symbol of the platform's class file at `path` (nil for a local or anonymous class's)."
+  "The class symbol of the platform's class file at `path` (a local or anonymous class's as ClassReader
+  enters a class a signature names: by its flat name, its owner the package, :cf-local)."
   [reg ^String flat module path]
   (let [cfd (read-class-file path)
         own (some #(when (= (some-> (:inner %) (str/replace "/" ".")) flat) %) (:inner cfd))
         i (.lastIndexOf flat ".")
-        pkg (if (neg? i) "" (subs flat 0 i))]
-    (when-not (and own (nil? (:outer own)))
-      (csym {:flat flat :pkg pkg :module module :cf cfd :reg reg
-             :name (if own (:name own) (subs flat (inc i)))
-             :outer-flat (some-> (:outer own) (str/replace "/" "."))}))))
+        pkg (if (neg? i) "" (subs flat 0 i))
+        local? (and own (nil? (:outer own)))]
+    (csym {:flat flat :pkg pkg :module module :cf cfd :reg reg
+           :name (if (and own (not local?)) (:name own) (subs flat (inc i)))
+           :cf-local local?
+           :outer-flat (when-not local? (some-> (:outer own) (str/replace "/" ".")))})))
 
 (defn outer
   "The class `c` is a member of, or nil."
@@ -775,9 +779,15 @@
               (let [r (resolve-qualified env t #{:val})] (when-let [f (:field r)] (field-type f))))
     nil))
 
+(def ^:dynamic *anon-diamond-type*
+  "The inferred class type of an anonymous class of a diamond (fn [c]: the inference tier's, JN9d), or
+  nil (then declined)."
+  nil)
+
 (defn- anon-creation-type
-  "The class type anonymous class `c`'s creation names (its NEWCLASS's clazz; a diamond's raw, its
-  arguments inferred; of a qualified creation o.new C() {}, C a member of o's declared type)."
+  "The class type anonymous class `c`'s creation names (its NEWCLASS's clazz; a diamond's inferred
+  (*anon-diamond-type*'s, JN9d); of a qualified creation o.new C() {}, C a member of o's declared
+  type)."
   [c]
   (let [nc (:newclass c)
         env (decl-env c)
@@ -793,7 +803,9 @@
             (assoc t :args (mapv #(type-of-tree env %) (:arguments clazz)))
             t)))
       (if diamond?
-        (erasure (type-of-tree env (:clazz clazz)))
+        (if *anon-diamond-type*
+          (*anon-diamond-type* c)
+          (decline! "an anonymous class of a diamond's supertype (inferred)"))
         (type-of-tree env (:clazz nc))))))
 
 (defn- source-supertype
@@ -889,6 +901,20 @@
           m
           (memo c :members-all #(update m :methods into g)))))))
 
+(def ^:dynamic *anon-ctor*
+  "The constructor of an anonymous class (fn [c]: TypeEnter's AnonClassConstructorHelper over the
+  superclass constructor the overload tier chooses, JFS103 (b)), or nil."
+  nil)
+
+(defn members-all
+  "Class `c`'s members as javac's members() holds them: an anonymous class's with its constructor
+  (*anon-ctor*'s; declined without it)."
+  [c]
+  (let [m (members c)]
+    (if (:anon? c)
+      (update m :methods conj (if *anon-ctor* (*anon-ctor* c) (decline! "an anonymous class's constructor")))
+      m)))
+
 (defn fields-named [c n] (filter #(= n (:name %)) (:fields (members c))))
 (defn member-class [c n] (get (:classes (members c)) n))
 
@@ -978,10 +1004,28 @@
       (enter c))
     c))
 
+(defn- cf-deprecated
+  "ClassReader's flags from a class file member's (or class's) @Deprecated: DEPRECATED |
+  DEPRECATED_ANNOTATION, DEPRECATED_REMOVAL for forRemoval (JFS106 (b))."
+  ^long [anns]
+  (if-let [a (first (filter #(= "Ljava/lang/Deprecated;" (:type %)) anns))]
+    (let [fr (get (:values a) "forRemoval")]
+      (bit-or DEPRECATED DEPRECATED_ANNOTATION
+              (if (and (= \Z (:tag fr)) (not (zero? (long (:value fr))))) DEPRECATED_REMOVAL 0)))
+    0))
+
+(defn- cf-entered?
+  "ClassReader.enterMember: a synthetic member is not entered, but a bridge and a lambda method."
+  [m method?]
+  (let [fl (long (:flags m))]
+    (or (not (has? fl SYNTHETIC))
+        (and method? (has? fl 0x40))
+        (str/starts-with? (str (:name m)) "lambda$"))))
+
 (defn- cf-members [c]
   (let [cfd (:cf c) reg (:reg c)]
-    {:fields (vec (for [f (:fields cfd)] (field-sym (assoc f :owner c))))
-     :methods (vec (for [m (:methods cfd)] (method-sym (assoc m :owner c))))
+    {:fields (vec (for [f (:fields cfd) :when (cf-entered? f false)] (field-sym (assoc f :owner c))))
+     :methods (vec (for [m (:methods cfd) :when (cf-entered? m true)] (method-sym (assoc m :owner c))))
      :classes (into {} (for [e (:inner cfd)
                              :when (and (:name e) (= (:outer e) (:this cfd)))
                              :let [m (class-named reg (str/replace (:inner e) "/" "."))]
@@ -1002,7 +1046,7 @@
                   fl (if (:init d) (bit-or fl HASINIT) fl)
                   fl (if (has? fl RECORD) (bit-and fl (bit-not VARARGS)) fl)]
               (bit-or fl (deprecated-flags (:mods d) (class-env c))))
-            (long (:flags f))))
+            (bit-or (long (:flags f)) (cf-deprecated (:annotations f)))))
         0))
 
 (defn method-flags
@@ -1029,7 +1073,7 @@
                               (not (has? fl (bit-or STATIC PRIVATE))))
                        (bit-or fl DEFAULT ABSTRACT)
                        fl)]
-              fl)))
+              (bit-or fl (cf-deprecated (:annotations m))))))
         0))
 
 (defn canonical-ctor
@@ -1385,6 +1429,27 @@
 
 (declare annotation-compound)
 
+(declare type-of-tree)
+
+(defn type-apply-outer
+  "Attr.visitTypeApply's enclosing type of TYPEAPPLY `t` whose class tree's type is `ct` (the generic
+  outer type recovered: the site's, as its outer supertype)."
+  [env t ct]
+  (let [o (:outer ct)
+        clazz (loop [x (:clazz t)] (if (= :ANNOTATED_TYPE (:tag x)) (recur (:underlyingType x)) x))]
+    (if (and o (= :class (:k o)))
+      (let [site (case (:tag clazz)
+                   :IDENT (env-site env)
+                   :SELECT (if (#{:IDENT :SELECT} (:tag (:selected clazz)))
+                             (let [q (resolve-qualified env (:selected clazz) #{:typ :pck})]
+                               (when (:c q) (type-of-tree env (:selected clazz))))
+                             ;; a member of a parameterized type: Outer<T>.Inner<U>
+                             (type-of-tree env (:selected clazz))))]
+        (if (and site (not= site o))
+          (or (when (= :class (:k site)) (as-outer-super site (:c o))) (erasure o))
+          (or site (erasure o))))
+      o)))
+
 (defn type-of-tree
   "The type of type tree `t` in `env` (Attr.attribType), nil when it is not one this tier gives (a
   diamond's)."
@@ -1410,17 +1475,7 @@
                 (throw (ex-info (str "repr/java decls: no type " (tree-name-of t)) {:pos (:pos t)}))))
     :TYPEAPPLY (let [ct (type-of-tree env (:clazz t))
                      args (mapv #(type-of-tree env %) (:arguments t))
-                     o (:outer ct)
-                     clazz (loop [x (:clazz t)] (if (= :ANNOTATED_TYPE (:tag x)) (recur (:underlyingType x)) x))
-                     o (if (and o (= :class (:k o)))
-                         (let [site (case (:tag clazz)
-                                      :IDENT (env-site env)
-                                      :SELECT (let [q (resolve-qualified env (:selected clazz) #{:typ :pck})]
-                                                (when (:c q) (type-of-tree env (:selected clazz)))))]
-                           (if (and site (not= site o))
-                             (or (when (= :class (:k site)) (as-outer-super site (:c o))) (erasure o))
-                             (or site (erasure o))))
-                         o)]
+                     o (type-apply-outer env t ct)]
                  (when (or (seq args) (empty? (:arguments t)))
                    (if (empty? (:arguments t))
                      nil ;; a diamond: its type is inferred

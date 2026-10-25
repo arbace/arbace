@@ -1,0 +1,1835 @@
+;; The inference variables, their bounds and incorporation, the graph solver, the inference context
+;; and instantiateMethod reimplement, for the native types, jdk26u
+;; (https://github.com/openjdk/jdk26u at baf63fbe42b8758448fee570a9d9bb914272d259)'s
+;; src/jdk.compiler/share/classes/com/sun/tools/javac/comp/Infer.java (instantiateMethod,
+;; PartiallyInferredMethodType.check, generateReturnConstraints, needsEagerInstantiation,
+;; generateReferenceToTargetConstraint, instantiateAsUninferredVars, the incorporation actions
+;; CheckBounds, CheckInst, SubstBounds, CheckUpperBounds, PropagateBounds and the incorporation
+;; engine, doIncorporation and its cache, getParameterizedSupers, the inference steps, the graph
+;; solver with its inference graph, LeafSolver and BestLeafSolver), comp/InferenceContext.java
+;; (asUndetVar, asInstType, free, restvars, save, rollback, dupTo, min with its ReachabilityVisitor,
+;; solve, solveAny, solveBasic, the free type listeners), code/Type.java (UndetVar: its bounds,
+;; addBound, substBounds, dup, setInst), code/Types.java (isSubtype, isSuperType, isSameType,
+;; containsType, containedBy, isSubtypeUnchecked, isConvertible, asSuper, supertype, interfaces,
+;; closure, insert, union, intersect, merge, closureMin, compoundMin, lub, erasedSupertypes, glb,
+;; glbFlattened, rank, getBounds, newInstances, wildUpperBound, wildLowerBound, cvarUpperBound,
+;; cvarLowerBound), code/Symbol.java (TypeSymbol.precedes) and util/GraphUtils.java (tarjan),
+;; whose notice follows (LICENSE.md, "OpenJDK (jdk26u)"):
+;;
+;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
+;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+;;
+;; This code is free software; you can redistribute it and/or modify it
+;; under the terms of the GNU General Public License version 2 only, as
+;; published by the Free Software Foundation.  Oracle designates this
+;; particular file as subject to the "Classpath" exception as provided
+;; by Oracle in the LICENSE file that accompanied this code.
+;;
+;; This code is distributed in the hope that it will be useful, but WITHOUT
+;; ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+;; FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+;; version 2 for more details (a copy is included in the LICENSE file that
+;; accompanied this code).
+;;
+;; You should have received a copy of the GNU General Public License version
+;; 2 along with this work; if not, write to the Free Software Foundation,
+;; Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+;;
+;; Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+;; or visit www.oracle.com if you need additional information or have any
+;; questions.
+
+(ns arbace.repr.java.infer
+  "The native attribution's inference tier, its engine (doc/classes/JAVA-FRONTEND-SURVEY.md, \"As
+  built: JN9d\"): javac's Infer over arbace.repr.java.decls's types. An inference variable is a type
+  {:k :undet :uv u}, `u` a symbol whose :st (a HashMap) holds its bounds (:upper, :eq, :lower: lists,
+  the newest first, as javac's), its instantiation (:inst), its incorporation actions and kind; the
+  bounds are kept in terms of the type variables (javac's toTypeVarMap). An inference context is a
+  symbol {:sk :ic :st HashMap} of the variables (fresh type variable symbols, Types.newInstances) and
+  their undetermined variables, with its free type listeners.
+
+  The relations here are javac's Types' as inference needs them, with inference variables taking
+  bounds as javac's UndetVar does (isSubtype, isSameType, containsType and their kin), and lub and glb
+  in full (JFS98). A failed inference throws an ex-info with ::error (javac's InferenceException: the
+  method is inapplicable); what the port does not follow throws decls/decline!."
+  (:require [arbace.repr.java.decls :as d]
+            [arbace.repr.java.types :as ty])
+  (:import [java.util HashMap ArrayList ArrayDeque LinkedHashMap LinkedHashSet IdentityHashMap]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:dynamic *reg* "The registry inference runs against." nil)
+
+(def ^:private trace? (seq (System/getenv "REPR_JAVA_INFER_TRACE")))
+
+(defn- tr [& xs] (when trace? (binding [*out* *err*] (apply println "infer:" xs))))
+
+(def ^:dynamic *warn*
+  "The warner of the method check (javac's Warner): a volatile {:unchecked :silent} or nil."
+  nil)
+
+(defn error!
+  "Throw javac's InferenceException (an inapplicable method)."
+  [why]
+  (throw (ex-info (str "repr/java infer: " why) {::error true})))
+
+(defn error? [e] (boolean (::error (ex-data e))))
+
+(defn- obj [] (d/object-type *reg*))
+
+(defn- named [n] (d/ctype (d/class-named *reg* n)))
+
+(defn- object-class? [c] (and c (= "java.lang.Object" (:flat c))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Types: the kinds
+
+(defn undet? [t] (and (map? t) (identical? :undet (:k t))))
+(defn- inter? [t] (and (map? t) (identical? :inter (:k t))))
+(defn- array? [t] (and (map? t) (identical? :array (:k t))))
+(defn- wild? [t] (and (map? t) (identical? :wild (:k t))))
+(defn- class-t? [t] (ty/class-t? t))
+(defn- tvar-t? [t] (ty/tvar-t? t))
+(defn- prim? [t] (ty/prim? t))
+(defn- captured? [t] (ty/captured? t))
+(defn- interface-t? [t]
+  (cond (class-t? t) (d/interface? (:c t))
+        :else false))
+
+(defn upper-bound "A type variable's upper bound (one type, an intersection for several)." [t]
+  (ty/upper-bound t))
+
+(defn- lower-of [t] (or (:lower (:tv t)) :null))
+
+(declare eq-ign)
+
+(defn- eq-list [as bs]
+  (and (= (count as) (count bs))
+       (loop [as (seq as) bs (seq bs)]
+         (cond (nil? as) true
+               (eq-ign (first as) (first bs)) (recur (next as) (next bs))
+               :else false))))
+
+(defn eq-ign
+  "Type.equalsIgnoreMetadata, structurally (type variables and inference variables by identity,
+  annotations ignored)."
+  [a b]
+  (or (identical? a b)
+      (and (map? a) (map? b) (identical? (:k a) (:k b))
+           (case (:k a)
+             :tvar (identical? (:tv a) (:tv b))
+             :undet (identical? (:uv a) (:uv b))
+             :class (and (identical? (:c a) (:c b)) (eq-list (:args a) (:args b))
+                         (let [oa (:outer a) ob (:outer b)] (if (and oa ob) (eq-ign oa ob) (and (nil? oa) (nil? ob)))))
+             :array (eq-ign (:e a) (:e b))
+             :wild (and (identical? (:bk a) (:bk b))
+                        (let [ta (:t a) tb (:t b)] (if (and ta tb) (eq-ign ta tb) (and (nil? ta) (nil? tb)))))
+             (:inter :union) (eq-list (:ts a) (:ts b))
+             false))))
+
+(defn contains-tvar?
+  "Type.contains: does type `t` mention one of the type variable symbols of the set `tvs` (an
+  inference variable by its type variable)?"
+  [t ^java.util.Set tvs]
+  (and (map? t)
+       (case (:k t)
+         :tvar (.contains tvs (:tv t))
+         :undet (.contains tvs (:tv (:qtype (:uv t))))
+         :class (or (some #(contains-tvar? % tvs) (:args t)) (some-> (:outer t) (contains-tvar? tvs)))
+         :array (contains-tvar? (:e t) tvs)
+         :wild (some-> (:t t) (contains-tvar? tvs))
+         (:inter :union) (some #(contains-tvar? % tvs) (:ts t))
+         :mtype (or (some #(contains-tvar? % tvs) (:params t)) (contains-tvar? (:ret t) tvs)
+                    (some #(contains-tvar? % tvs) (:throws t)))
+         false)))
+
+(defn- id-set ^java.util.Set [xs] (let [s (java.util.Collections/newSetFromMap (IdentityHashMap.))] (doseq [x xs] (.add s x)) s))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Inference variables (Type.UndetVar)
+
+(defn- uv-st ^HashMap [u] (:st (:uv u)))
+
+(defn qtype "An inference variable's type variable (a type)." [u] (:qtype (:uv u)))
+
+(defn uv-bounds
+  "Bounds of kind `ib` (:upper :eq :lower) of inference variable `u`, the newest first."
+  [u ib]
+  (or (.get (uv-st u) ib) ()))
+
+(defn uv-all-bounds [u] (concat (uv-bounds u :upper) (uv-bounds u :lower) (uv-bounds u :eq)))
+
+(defn inst "The instantiation of inference variable `u`, or nil." [u] (.get (uv-st u) :inst))
+
+(defn- kind-of [u] (.get (uv-st u) :kind))
+
+(defn uv-captured? [u] (identical? :captured (kind-of u)))
+
+(defn- uv-throws? [u] (identical? :throws (kind-of u)))
+
+(defn- actions ^ArrayDeque [u] (.get (uv-st u) :actions))
+
+(declare allparams notify-bound! same-type? subtype? subtype-unchecked? lub glb glb* as-super closure-min
+         closure-collect param-supers subst-types as-undet as-inst free? ic-undets)
+
+(defn- to-tvar-map
+  "UndetVar.toTypeVarMap: inference variables replaced by their instantiation, else their type
+  variable."
+  [t]
+  (if-not (map? t)
+    t
+    (case (:k t)
+      :undet (or (inst t) (qtype t))
+      :class (assoc t :args (mapv to-tvar-map (:args t)) :outer (some-> (:outer t) to-tvar-map))
+      :array (assoc t :e (to-tvar-map (:e t)))
+      :wild (assoc t :t (some-> (:t t) to-tvar-map))
+      (:inter :union) (assoc t :ts (mapv to-tvar-map (:ts t)))
+      t)))
+
+(defn add-bound!
+  "UndetVar.addBound of kind `ib` with `bound` (javac's private addBound: `update` for the declared
+  bounds and substitutions)."
+  ([u ib bound] (add-bound! u ib bound false))
+  ([u ib bound update?]
+   (if (and (uv-captured? u) (not update?))
+     (when (and (undet? bound) (not (uv-captured? bound)))
+       (add-bound! bound ({:upper :lower :lower :upper :eq :eq} ib) u false))
+     (let [b2 (to-tvar-map bound)
+           prev (uv-bounds u ib)]
+       (when-not (and (tvar-t? bound) (identical? (:tv bound) (:tv (qtype u))))
+         (when-not (some #(same-type? % b2) prev)
+           ;; beyond javac's practice (a runaway of the port's): declined
+           (when (> (count prev) 64) (d/decline! "an inference beyond the port's limits (bounds)"))
+           (.put (uv-st u) ib (conj prev b2))
+           (notify-bound! u ib b2 false)))))))
+
+(defn- uv-type [u] u)
+
+(defn- tvar-declared-bounds
+  "Types.getBounds of type variable type `t`: its upper bound's components."
+  [t]
+  (d/tvar-bounds (:tv t)))
+
+(defn new-undet
+  "An inference variable for type variable type `tv` (UndetVar's constructor: its declared bounds as
+  upper bounds, a captured variable's lower bound), its listener the incorporation engine."
+  [tv]
+  (let [st (HashMap.)
+        u {:k :undet :uv (d/sym {:sk :undet :qtype tv :st st})}
+        bs (tvar-declared-bounds tv)]
+    (.put st :upper ()) (.put st :lower ()) (.put st :eq ())
+    (.put st :actions (ArrayDeque.))
+    (.put st :kind (if (captured? tv) :captured :normal))
+    (.put st :declared (count bs))
+    (.put st :listener :engine)
+    (doseq [b (reverse bs)] (add-bound! u :upper b true))
+    (when (and (captured? tv) (not= :null (lower-of tv)))
+      (add-bound! u :lower (lower-of tv) true))
+    u))
+
+(defn set-inst!
+  "UndetVar.setInst, its listener told (the incorporation engine: SubstBounds first)."
+  [u t]
+  (.put (uv-st u) :inst t)
+  (when (identical? :engine (.get (uv-st u) :listener))
+    (.addFirst (actions u) [:subst-bounds u])))
+
+(defn- incorporation-actions
+  "IncorporationEngine.getIncorporationActions."
+  [u ib t update?]
+  (let [acts (cond-> [] (inst u) (conj [:check-inst u #{ib}]))
+        acts (conj acts [:check-bounds u t ib])]
+    (if update?
+      acts
+      (cond-> acts
+        (= ib :upper) (conj [:check-upper u t])
+        true (conj [:propagate u t ib])))))
+
+(defn- notify-bound! [u ib bound update?]
+  (let [l (.get (uv-st u) :listener)]
+    (cond
+      (nil? l) nil
+      (identical? :engine l) (when-not (uv-captured? u)
+                               (doseq [a (incorporation-actions u ib bound update?)] (.addLast (actions u) a)))
+      :else (l u ib bound update?))))
+
+(defn- dup-action [a u2]
+  (case (first a)
+    :check-bounds (let [[_ _ t ib] a] [:check-bounds u2 t ib])
+    :check-inst (let [[_ _ to] a] [:check-inst u2 to])
+    :subst-bounds [:subst-bounds u2]
+    :check-upper (let [[_ _ t] a] [:check-upper u2 t])
+    :propagate (let [[_ _ t ib] a] [:propagate u2 t ib])))
+
+(defn uv-dup-to!
+  "UndetVar.dupTo: `u`'s bounds (re-added without listener), instantiation, actions and kind on `u2`."
+  [u u2]
+  (let [st2 (uv-st u2)]
+    (.put st2 :listener nil)
+    (doseq [ib [:lower :eq :upper]]
+      (.put st2 ib ())
+      ;; re-added in their order (addBound prepends: the newest first, as getBounds gives them)
+      (doseq [b (reverse (uv-bounds u ib))] (add-bound! u2 ib b true)))
+    (.put st2 :inst (inst u))
+    (.put st2 :listener (.get (uv-st u) :listener))
+    (.put st2 :actions (let [q (ArrayDeque.)] (doseq [a (actions u)] (.addLast q (dup-action a u2))) q))
+    (.put st2 :kind (kind-of u))
+    u2))
+
+(defn uv-dup "UndetVar.dup." [u]
+  (let [u2 (new-undet (qtype u))]
+    (uv-dup-to! u u2)))
+
+(defn- subst-bounds!
+  "UndetVar.substBounds: the bounds mentioning type variables `from` with `to` substituted (re-added
+  as updates; the listener told after)."
+  [u from to]
+  (let [m (zipmap from to)
+        fs (id-set from)
+        changed (ArrayList.)
+        prev-l (.get (uv-st u) :listener)]
+    (try
+      (.put (uv-st u) :listener (fn [_ ib t _] (.add changed [ib t])))
+      (doseq [ib [:upper :lower :eq]]
+        (let [bs (uv-bounds u ib)
+              keep (filter #(not (contains-tvar? % fs)) bs)
+              deps (filter #(contains-tvar? % fs) bs)]
+          (.put (uv-st u) ib (apply list keep))
+          (doseq [dep deps]
+            (add-bound! u ib (d/subst dep m) true))))
+      (finally
+        (.put (uv-st u) :listener prev-l)
+        (doseq [[ib t] changed] (notify-bound! u ib t true))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Relations (Types), inference variables taking bounds
+
+(defn wild-upper "Types.wildUpperBound." [t]
+  (if (wild? t)
+    (if (#{:super :unbound} (:bk t)) (obj) (recur (:t t)))
+    t))
+
+(defn- wild-lower "Types.wildLowerBound." [t]
+  (if (wild? t)
+    (if (#{:extends :unbound} (:bk t)) :null (recur (:t t)))
+    t))
+
+(defn cvar-upper "Types.cvarUpperBound." [t]
+  (if (captured? t) (recur (upper-bound t)) t))
+
+(defn cvar-lower "Types.cvarLowerBound." [t]
+  (if (captured? t) (let [l (lower-of t)] (if (= :null l) :null (recur l))) t))
+
+(defn supertype*
+  "Types.supertype: a class type's superclass type (an interface's Object), an intersection's first
+  class component (Object for interfaces only), a type variable's, an array's; nil for none."
+  [t]
+  (cond
+    (class-t? t) (or (d/supertype t)
+                     (when (d/interface? (:c t)) (obj)))
+    (inter? t) (let [f (first (:ts t))] (if (interface-t? f) (obj) f))
+    (tvar-t? t) (let [u (upper-bound t)]
+                  (if (or (tvar-t? u) (and (not (inter? u)) (not (interface-t? u))))
+                    u
+                    (supertype* u)))
+    (array? t) (let [e (:e t)]
+                 (if (or (prim? e) (and (class-t? e) (object-class? (:c e))))
+                   {:k :inter :ts [(named "java.io.Serializable") (named "java.lang.Cloneable")]}
+                   (d/array-of (supertype* e))))
+    :else nil))
+
+(defn interfaces*
+  "Types.interfaces: a class type's interfaces, an intersection's interface components, a type
+  variable's."
+  [t]
+  (cond
+    (class-t? t) (vec (d/interfaces t))
+    (inter? t) (let [f (first (:ts t))] (if (interface-t? f) (vec (:ts t)) (vec (rest (:ts t)))))
+    (tvar-t? t) (let [u (upper-bound t)]
+                  (cond (inter? u) (interfaces* u)
+                        (interface-t? u) [u]
+                        :else []))
+    :else []))
+
+(def ^:private ^:dynamic *seen-super* nil)
+
+(defn as-super
+  "Types.asSuper of `t` and symbol `c` (a class symbol or a type variable symbol)."
+  [t c]
+  (cond
+    (and (= :class (:sk c)) (object-class? c)) (obj)
+    (nil? t) nil
+    (or (class-t? t) (inter? t))
+    (if (and (class-t? t) (identical? (:c t) c))
+      t
+      (let [k (if (class-t? t) (:c t) t)
+            seen (or *seen-super* (id-set []))]
+        (when (.add ^java.util.Set seen k)
+          (try
+            (binding [*seen-super* seen]
+              (or (let [st (supertype* t)]
+                    (when (or (class-t? st) (tvar-t? st) (inter? st)) (as-super st c)))
+                  (when (and (= :class (:sk c)) (d/interface? c))
+                    (some #(as-super % c) (interfaces* t)))))
+            (finally (.remove ^java.util.Set seen k))))))
+    (array? t) (when (= :class (:sk c))
+                 (let [ct (d/this-type c)] (when (subtype? t ct) ct)))
+    (tvar-t? t) (if (identical? (:tv t) c) t (as-super (upper-bound t) c))
+    :else nil))
+
+(defn- tsym "A type's symbol: a class type's class, a type variable's symbol." [t]
+  (cond (class-t? t) (:c t) (tvar-t? t) (:tv t) :else nil))
+
+(defn- parameterized? "Type.isParameterized: allparams not empty." [t]
+  (and (class-t? t) (or (seq (:args t)) (some-> (:outer t) parameterized?))))
+
+(defn raw? [t] (and (class-t? t) (d/raw? t)))
+
+(declare contains-type? same-type-visit contains-equiv?)
+
+(def ^:private subrange
+  {:byte #{:byte :short :int :long :float :double} :char #{:char :int :long :float :double}
+   :short #{:short :int :long :float :double} :int #{:int :long :float :double}
+   :long #{:long :float :double} :float #{:float :double} :double #{:double}})
+
+(defn supertype-of?
+  "Types.isSuperType of `t` and `s` (an inference variable takes the lower bound `s`)."
+  [t s]
+  (if (undet? t)
+    (do (when-not (or (eq-ign t s) (and (tvar-t? s) (identical? (:tv s) (:tv (qtype t)))) (= :null s))
+          (add-bound! t :lower s))
+        true)
+    (subtype? s t)))
+
+(declare glb2)
+
+(defn- mentions-undet?
+  "Does type `t` mention an inference variable (in its arguments, bounds or enclosing type)?"
+  [t]
+  (and (map? t)
+       (case (:k t)
+         :undet true
+         :class (or (some mentions-undet? (:args t)) (mentions-undet? (:outer t)))
+         :array (mentions-undet? (:e t))
+         :wild (mentions-undet? (:t t))
+         :inter (some mentions-undet? (:ts t))
+         false)))
+
+(defn- capture-t
+  "Types.capture; a wildcard bound mentioning inference variables glb'd as the inference tier does
+  (Types.glb's subtyping adds their bounds)."
+  [t]
+  (if (mentions-undet? t)
+    (ty/capture *reg* t glb2)
+    (ty/capture *reg* t)))
+
+(declare subtype-visit)
+
+(defn subtype?
+  "Types.isSubtype of `t` and `s` (`capture?`, javac's default, captures `t`)."
+  ([t s] (subtype? t s true))
+  ([t s capture?]
+   (cond
+     (eq-ign t s) true
+     (undet? s) (supertype-of? s t)
+     (inter? s) (every? #(subtype? t % capture?) (cons (supertype* s) (interfaces* s)))
+     :else
+     (let [lower (when-not (or (undet? t) (inter? t)) (cvar-lower (wild-lower s)))]
+       (if (and lower (not (identical? lower s)) (not= :null lower))
+         (subtype? (if capture? (capture-t t) t) lower false)
+         (subtype-visit (if capture? (capture-t t) t) s))))))
+
+(defn- subtype-nc [t s] (subtype? t s false))
+
+(defn- contains-list? [ts ss]
+  (and (= (count ts) (count ss))
+       (every? identity (map contains-type? ts ss))))
+
+(defn- subtype-visit [t s]
+  (cond
+    (keyword? t) (case t
+                   :null (or (= :null s) (class-t? s) (inter? s) (array? s) (tvar-t? s))
+                   (:boolean :void) (identical? t s)
+                   (boolean (and (keyword? s) (contains? (subrange t) s))))
+    (undet? t) (cond
+                 (or (eq-ign t s) (and (tvar-t? s) (identical? (:tv s) (:tv (qtype t))))) true
+                 (= :null s) false
+                 :else (do (add-bound! t :upper s) true))
+    (tvar-t? t) (subtype-nc (upper-bound t) s)
+    (or (class-t? t) (inter? t))
+    (let [c (tsym s)
+          sup (when c (as-super t c))]
+      (cond
+        (nil? sup) false
+        (not (class-t? sup)) (subtype-nc sup s)
+        :else (and (class-t? s) (identical? (:c sup) (:c s))
+                   (or (not (parameterized? s)) (contains-list? (:args s) (:args sup)))
+                   (let [so (:outer s) po (:outer sup)]
+                     (cond (nil? so) true
+                           (nil? po) false
+                           :else (subtype-nc po so))))))
+    (array? t) (cond
+                 (array? s) (if (prim? (:e t)) (same-type? (:e t) (:e s)) (subtype-nc (:e t) (:e s)))
+                 (class-t? s) (contains? #{"java.lang.Object" "java.lang.Cloneable" "java.io.Serializable"} (:flat (:c s)))
+                 :else false)
+    :else false))
+
+(defn- unb-wild? [w] (= :unbound (:bk w)))
+(defn- extends-bound? [w] (contains? #{:extends :unbound} (:bk w)))
+(defn- super-bound? [w] (contains? #{:super :unbound} (:bk w)))
+(defn- wtype [w] (or (:t w) (obj)))
+
+(defn- same-wildcard? "Types.isSameWildcard." [t s]
+  (and (wild? s) (identical? (:bk t) (:bk s)) (eq-ign (wtype t) (wtype s))))
+
+(defn- capture-of? "Types.isCaptureOf." [s t]
+  (and (captured? s) (same-wildcard? t (:wildcard (:tv s)))))
+
+(defn- contained-by?
+  "Types.containedBy of `t` (an inference variable) and `s`."
+  [t s]
+  (if (undet? t)
+    (if (wild? s)
+      (do (case (:bk s)
+            :unbound nil
+            :extends (add-bound! t :upper (wild-upper s))
+            :super (add-bound! t :lower (wild-lower s)))
+          true)
+      (same-type? t s))
+    (contains-type? s t)))
+
+(defn contains-type?
+  "Types.containsType: does type argument `t` contain `s`?"
+  [t s]
+  (cond
+    (undet? t) (if (wild? s) false (same-type? t s))
+    (wild? t) (if (undet? s)
+                (contained-by? s t)
+                (or (same-wildcard? t s)
+                    (capture-of? s t)
+                    (and (or (extends-bound? t) (subtype-nc (wild-lower t) (wild-lower s)))
+                         (or (super-bound? t) (subtype-nc (wild-upper s) (wild-upper t))))))
+    :else (if (undet? s) (contained-by? s t) (same-type? t s))))
+
+(defn- contains-equiv? "Types.containsTypeEquivalent." [t s]
+  (or (same-type? t s) (and (contains-type? t s) (contains-type? s t))))
+
+(defn same-type?
+  "Types.isSameType (an inference variable takes the equality bound)."
+  [t s]
+  (cond
+    (eq-ign t s) true
+    (undet? t) (cond
+                 (wild? s) false
+                 (or (eq-ign t s) (and (tvar-t? s) (identical? (:tv s) (:tv (qtype t))))) true
+                 :else (do (add-bound! t :eq s) true))
+    (undet? s) (same-type? s t)
+    (keyword? t) (identical? t s)
+    :else
+    (case (:k t)
+      :tvar (cond (tvar-t? s) (identical? (:tv t) (:tv s))
+                  (and (wild? s) (= :super (:bk s))) (same-type? t (wild-upper s))
+                  :else false)
+      :wild (and (wild? s)
+                 (or (identical? (:bk t) (:bk s)) (and (extends-bound? t) (extends-bound? s)))
+                 (same-type? (wtype t) (wtype s)))
+      (:class :inter)
+      (cond
+        (and (wild? s) (= :super (:bk s))) (and (same-type? t (wild-upper s)) (same-type? t (wild-lower s)))
+        (and (inter? t) (inter? s))
+        (and (same-type? (supertype* t) (supertype* s))
+             (let [tm (into {} (map (fn [i] [(:c i) i]) (interfaces* t)))
+                   sis (interfaces* s)]
+               (and (= (count tm) (count sis))
+                    (every? (fn [si] (when-let [ti (get tm (:c si))] (same-type? ti si))) sis))))
+        :else (and (class-t? t) (class-t? s) (identical? (:c t) (:c s))
+                   (let [to (:outer t) so (:outer s)]
+                     (cond (and (nil? to) (nil? so)) true
+                           (or (nil? to) (nil? so)) false
+                           :else (same-type? to so)))
+                   (= (count (:args t)) (count (:args s)))
+                   (every? identity (map contains-equiv? (:args t) (:args s)))))
+      :array (and (array? s) (contains-equiv? (:e t) (:e s)))
+      :union (and (= :union (:k s)) (eq-list (:ts t) (:ts s)))
+      :null (= :null s)
+      false)))
+
+(defn- reifiable? [t] (ty/reifiable? t))
+
+(defn- warn-unchecked! [s]
+  (when *warn*
+    (if (reifiable? s)
+      (vswap! *warn* assoc :silent true)
+      (vswap! *warn* assoc :unchecked true))))
+
+(defn unchecked-warned? "Has the warner a non-silent unchecked warning?" []
+  (boolean (some-> *warn* deref :unchecked)))
+
+(defn- subtype-unchecked-internal [t s capture?]
+  (cond
+    (and (array? t) (array? s))
+    (if (prim? (:e t)) (same-type? (:e t) (:e s)) (subtype-unchecked-internal (:e t) (:e s) false))
+    (subtype? t s capture?) true
+    (tvar-t? t) (subtype-unchecked-internal (upper-bound t) s false)
+    (not (raw? s))
+    (let [c (tsym s)
+          t2 (when c (as-super t c))]
+      (if (and t2 (raw? t2))
+        (do (warn-unchecked! s) true)
+        false))
+    :else false))
+
+(defn subtype-unchecked? "Types.isSubtypeUnchecked." [t s]
+  (subtype-unchecked-internal t s true))
+
+(defn- boxed [t] (ty/boxed-type *reg* t))
+
+(defn- unboxed [t] (ty/unboxed-type t))
+
+(defn- boxed-or-type [t] (if (prim? t) (boxed t) t))
+
+(defn convertible?
+  "Types.isConvertible (loose invocation: boxing and unboxing; inference variables boxed)."
+  [t s]
+  (let [tp (prim? t) sp (prim? s)]
+    (cond
+      (= tp sp) (subtype-unchecked? t s)
+      (undet? t) (subtype? t (boxed-or-type s))
+      (undet? s) (subtype? (boxed-or-type t) s)
+      tp (subtype? (boxed t) s)
+      :else (let [u (unboxed t)] (boolean (and u (subtype? u s)))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Closures, lub, glb
+
+(defn- rank [t]
+  (cond
+    (class-t? t) (let [c (:c t)]
+                   (if (object-class? c)
+                     0
+                     (d/memo c :infer-rank
+                             (fn [] (let [tt (d/this-type c)]
+                                      (inc (reduce max (if-let [s (supertype* tt)] (rank s) 0)
+                                                   (map rank (interfaces* tt)))))))))
+    (tvar-t? t) (inc (reduce max (if-let [s (supertype* t)] (rank s) 0) (map rank (interfaces* t))))
+    :else 0))
+
+(defn- qname [c] (.replace (str (:flat c)) "$" "."))
+
+(defn- precedes?
+  "TypeSymbol.precedes of the symbols of types `a` and `b`."
+  [a b]
+  (let [sa (tsym a) sb (tsym b)]
+    (cond
+      (and sa (identical? sa sb)) false
+      (and (class-t? a) (class-t? b)) (let [ra (rank a) rb (rank b)]
+                                        (or (< rb ra) (and (= ra rb) (neg? (compare (qname (:c a)) (qname (:c b)))))))
+      (and (tvar-t? a) (tvar-t? b)) (subtype? (d/tvar-type (:tv a)) (d/tvar-type (:tv b)))
+      :else (tvar-t? a))))
+
+(defn- same-sym? [a b] (let [x (tsym a)] (and x (identical? x (tsym b)))))
+
+(defn insert "Types.insert." ([cl t] (insert cl t same-sym?))
+  ([cl t skip?]
+   (cond
+     (empty? cl) (list t)
+     (skip? t (first cl)) cl
+     (precedes? t (first cl)) (cons t cl)
+     :else (cons (first cl) (insert (rest cl) t skip?)))))
+
+(defn union "Types.union." ([a b] (union a b same-sym?))
+  ([a b skip?]
+   (cond
+     (empty? a) b
+     (empty? b) a
+     (skip? (first a) (first b)) (cons (first a) (union (rest a) (rest b) skip?))
+     (precedes? (first b) (first a)) (cons (first b) (union a (rest b) skip?))
+     :else (cons (first a) (union (rest a) b skip?)))))
+
+(defn closure
+  "Types.closure of type `t`: its supertypes ordered by precedes."
+  [t]
+  (let [st (supertype* t)
+        cl (if-not (inter? t)
+             (cond (class-t? st) (insert (closure st) t)
+                   (tvar-t? st) (cons t (closure st))
+                   :else (list t))
+             (closure st))]
+    (reduce (fn [cl i] (union cl (closure i))) cl (interfaces* t))))
+
+(declare merge-types)
+
+(def ^:private ^:dynamic *merge-cache* nil)
+
+(defn intersect "Types.intersect of two closures." [cl1 cl2]
+  (cond
+    (identical? cl1 cl2) cl1
+    (or (empty? cl1) (empty? cl2)) ()
+    (precedes? (first cl1) (first cl2)) (intersect (rest cl1) cl2)
+    (precedes? (first cl2) (first cl1)) (intersect cl1 (rest cl2))
+    (same-type? (first cl1) (first cl2)) (cons (first cl1) (intersect (rest cl1) (rest cl2)))
+    (and (class-t? (first cl1)) (class-t? (first cl2)) (identical? (:c (first cl1)) (:c (first cl2))))
+    (let [a (first cl1) b (first cl2)]
+      (cond
+        (and (parameterized? a) (parameterized? b)) (cons (merge-types a b) (intersect (rest cl1) (rest cl2)))
+        (or (raw? a) (raw? b)) (cons (d/erasure a) (intersect (rest cl1) (rest cl2)))
+        :else (intersect (rest cl1) (rest cl2))))
+    :else (intersect (rest cl1) (rest cl2))))
+
+(defn- merge-types "Types.merge of two parameterizations of one class." [c1 c2]
+  (let [^java.util.ArrayList cache (or *merge-cache* (java.util.ArrayList.))]
+    (binding [*merge-cache* cache]
+      (assoc c1 :anns []
+             :args (mapv (fn [a1 a2]
+                           (cond
+                             (contains-type? a1 a2) a1
+                             (contains-type? a2 a1) a2
+                             :else
+                             (let [pair [c1 c2]
+                                   seen? (some (fn [[x y]] (and (eq-ign x c1) (eq-ign y c2))) cache)]
+                               (if seen?
+                                 {:k :wild :bk :unbound :t nil}
+                                 (do (.add cache pair)
+                                     (try {:k :wild :bk :extends :t (lub [(wild-upper a1) (wild-upper a2)])}
+                                          (finally (.remove cache pair))))))))
+                         (:args c1) (:args c2))))))
+
+(defn closure-min "Types.closureMin." [cl]
+  (let [skip (java.util.ArrayList.)]
+    (loop [cl (seq cl) classes [] ifaces []]
+      (if-not cl
+        (into classes ifaces)
+        (let [cur (first cl)
+              keep? (and (not (some #(identical? % cur) skip))
+                         (or (not (tvar-t? cur))
+                             (not (some #(subtype-nc % cur) (rest cl)))))]
+          (if keep?
+            (do (doseq [t (rest cl)] (when (subtype-nc cur t) (.add skip t)))
+                (if (interface-t? cur)
+                  (recur (next cl) classes (conj ifaces cur))
+                  (recur (next cl) (conj classes cur) ifaces)))
+            (recur (next cl) classes ifaces)))))))
+
+(defn make-intersection "Types.makeIntersectionType of `bounds` (javac's explicit components)." [bounds]
+  {:k :inter :ts (vec bounds)})
+
+(defn- compound-min [cl]
+  (if (empty? cl)
+    (obj)
+    (let [c (closure-min cl)]
+      (cond (empty? c) nil
+            (empty? (rest c)) (first c)
+            :else (make-intersection c)))))
+
+(defn erased-supertypes "Types.erasedSupertypes." [t]
+  (map (fn [s] (if (tvar-t? s) s (d/erasure s))) (closure t)))
+
+(def ^:private array-super
+  (fn [] {:k :inter :ts [(named "java.io.Serializable") (named "java.lang.Cloneable")]}))
+
+(defn- elemtype* [t]
+  (cond (array? t) (:e t)
+        (tvar-t? t) (elemtype* (upper-bound t))
+        (wild? t) (elemtype* (wild-upper t))
+        :else nil))
+
+(defn lub
+  "Types.lub of types `ts`: :null when there is none, :error for a primitive among them."
+  [ts]
+  (let [ts (vec ts)
+        kinds (mapv (fn [t]
+                      (cond
+                        (or (class-t? t) (inter? t)) 2
+                        (array? t) 1
+                        (tvar-t? t) (if (array? (loop [u (upper-bound t)] (if (tvar-t? u) (recur (upper-bound u)) u))) 1 2)
+                        :else (if (prim? t) :prim 0)))
+                    ts)]
+    (if (some #(= :prim %) kinds)
+      :error
+      (case (int (reduce bit-or 0 kinds))
+        0 :null
+        1 (let [els (mapv elemtype* ts)]
+            (if (some prim? els)
+              (if (every? #(same-type? (first ts) %) (rest ts)) (first ts) (array-super))
+              (d/array-of (lub els))))
+        2 (let [start (count (take-while #(not (or (class-t? %) (inter? %) (tvar-t? %))) ts))
+                t0 (nth ts start)
+                cl (reduce (fn [cl t] (if (or (class-t? t) (inter? t) (tvar-t? t)) (intersect cl (erased-supertypes t)) cl))
+                           (erased-supertypes t0) (subvec ts (inc start)))
+                mec (closure-min cl)
+                cands (mapcat (fn [es]
+                                (let [c (tsym es)]
+                                  (reduce (fn [lci t]
+                                            (let [st (as-super t c)]
+                                              (intersect lci (if st (list st) ()))))
+                                          (list (as-super t0 c))
+                                          (subvec ts (inc start)))))
+                              mec)]
+            (compound-min cands))
+        ;; lub(A, B[]) is lub(A, arraySuperType)
+        (lub (concat (reverse (keep-indexed (fn [i t] (when (not= 1 (nth kinds i)) t)) ts)) [(array-super)]))))))
+
+(defn glb2 "Types.glb of two types." [t s]
+  (cond
+    (nil? s) t
+    (or (prim? t) (prim? s)) :error
+    (subtype-nc t s) t
+    (subtype-nc s t) s
+    :else (glb* (union (closure t) (closure s)) t)))
+
+(defn glb* "Types.glbFlattened." [flat errt]
+  (let [bounds (closure-min flat)]
+    (cond
+      (empty? bounds) (obj)
+      (empty? (rest bounds)) (first bounds)
+      :else
+      (let [classes (remove interface-t? bounds)
+            cvars (filter #(let [l (cvar-lower %)] (and (not (identical? l %)) (not= :null l))) classes)
+            lowers (map cvar-lower cvars)]
+        (if (> (count classes) 1)
+          (if (empty? lowers)
+            :error
+            (glb (concat (remove (fn [b] (some #(identical? % b) cvars)) bounds) lowers)))
+          (make-intersection bounds))))))
+
+(defn glb "Types.glb of a list." [ts]
+  (reduce (fn [t1 t2] (if (= :error t1) (reduced t1) (glb2 t1 t2))) (first ts) (rest ts)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Inference contexts (InferenceContext)
+
+(defn- ic-st ^HashMap [ic] (:st ic))
+
+(defn new-ic
+  "An inference context of type variable types `tvars` (InferenceContext: each with its inference
+  variable)."
+  ([tvars] (new-ic tvars (mapv new-undet tvars)))
+  ([tvars undets]
+   (let [st (HashMap.)]
+     (.put st :vars (vec tvars))
+     (.put st :undets (vec undets))
+     (.put st :listeners (LinkedHashMap.))
+     (.put st :capture-cache (IdentityHashMap.))
+     (.put st :parent nil)
+     (d/sym {:sk :ic :st st}))))
+
+(def empty-ic "Infer.emptyContext." (new-ic []))
+
+(defn ic-vars [ic] (.get (ic-st ic) :vars))
+(defn ic-undets [ic] (.get (ic-st ic) :undets))
+
+(defn- ivar-set ^java.util.Set [ic] (id-set (map :tv (ic-vars ic))))
+
+(defn free? "InferenceContext.free: does `t` (a type or a list) mention the context's variables?" [ic t]
+  (let [s (ivar-set ic)]
+    (if (sequential? t) (some #(contains-tvar? % s) t) (contains-tvar? t s))))
+
+(defn free-vars-in "InferenceContext.freeVarsIn (in the context's order)." [ic ts]
+  (let [ts (if (sequential? ts) ts [ts])]
+    (vec (distinct (for [t ts iv (ic-vars ic) :when (contains-tvar? t (id-set [(:tv iv)]))] iv)))))
+
+(defn as-undet "InferenceContext.asUndetVar: the context's variables replaced by their inference variables." [ic t]
+  (let [vs (ic-vars ic)]
+    (if (empty? vs) t (d/subst t (zipmap (map :tv vs) (ic-undets ic))))))
+
+(defn as-tvar "InferenceContext.asTypeVar." [t]
+  (if-not (map? t)
+    t
+    (case (:k t)
+      :undet (qtype t)
+      :class (assoc t :args (mapv as-tvar (:args t)) :outer (some-> (:outer t) as-tvar))
+      :array (assoc t :e (as-tvar (:e t)))
+      :wild (assoc t :t (some-> (:t t) as-tvar))
+      (:inter :union) (assoc t :ts (mapv as-tvar (:ts t)))
+      t)))
+
+(defn- inst-types [ic] (mapv (fn [u] (or (inst u) (qtype u))) (ic-undets ic)))
+
+(defn as-inst
+  "InferenceContext.asInstType: the context's (and its parents') variables replaced by their
+  instantiations (a variable not instantiated stays)."
+  [ic t]
+  (let [m (loop [ic ic m {}]
+            (if ic
+              (recur (.get (ic-st ic) :parent) (merge (zipmap (map :tv (ic-vars ic)) (inst-types ic)) m))
+              m))]
+    (if (empty? m) t (d/subst t m))))
+
+(defn- msubst [mt f] (assoc mt :params (mapv f (:params mt)) :ret (f (:ret mt)) :throws (mapv f (:throws mt))))
+
+(defn as-inst-mt [ic mt] (msubst mt #(as-inst ic %)))
+
+(defn restvars "InferenceContext.restvars." [ic]
+  (vec (keep (fn [u] (when-not (inst u) (qtype u))) (ic-undets ic))))
+
+(defn instvars [ic] (vec (keep (fn [u] (when (inst u) (qtype u))) (ic-undets ic))))
+
+(defn undet-of "The inference variable of variable `v` (a type variable type) in `ic`, or nil." [ic v]
+  (some (fn [u] (when (identical? (:tv (qtype u)) (:tv v)) u)) (ic-undets ic)))
+
+(defn add-var! "InferenceContext.addVar (prepended)." [ic tv]
+  (let [st (ic-st ic)]
+    (.put st :undets (vec (cons (new-undet tv) (.get st :undets))))
+    (.put st :vars (vec (cons tv (.get st :vars))))))
+
+(defn add-listener! "InferenceContext.addFreeTypeListener of types `ts`." [ic ts f]
+  (.put ^LinkedHashMap (.get (ic-st ic) :listeners) f (free-vars-in ic ts)))
+
+(defn notify-change!
+  "InferenceContext.notifyChange: the listeners whose variables are all inferred (in `inferred`, by
+  default those instantiated) run and are removed."
+  ([ic] (notify-change! ic (let [rv (id-set (map :tv (restvars ic)))] (remove #(.contains rv (:tv %)) (ic-vars ic)))))
+  ([ic inferred]
+   (let [^LinkedHashMap ls (.get (ic-st ic) :listeners)
+         inf (id-set (map :tv inferred))
+         pending (id-set (map :tv (remove #(.contains inf (:tv %)) (ic-vars ic))))
+         first-ex (volatile! nil)]
+     (doseq [[f vs] (vec (seq ls))]
+       (when-not (some #(.contains pending (:tv %)) vs)
+         (try (f ic) (.remove ls f)
+              (catch Throwable e
+                (if (error? e) (when-not @first-ex (vreset! first-ex e)) (throw e))))))
+     (when @first-ex (throw @first-ex)))))
+
+(defn save "InferenceContext.save." [ic] (mapv uv-dup (ic-undets ic)))
+
+(defn rollback! "InferenceContext.rollback to `saved`." [ic saved]
+  (let [st (ic-st ic)]
+    (loop [saved (seq saved) us (seq (.get st :undets)) nus [] nvs []]
+      (if (and saved us)
+        (let [u (first us) s (first saved)]
+          (if (identical? (:tv (qtype u)) (:tv (qtype s)))
+            (do (uv-dup-to! s u)
+                (recur (next saved) (next us) (conj nus u) (conj nvs (qtype u))))
+            (recur saved (next us) nus nvs)))
+        (do (.put st :undets nus) (.put st :vars nvs))))))
+
+(defn dup-to!
+  "InferenceContext.dupTo `that` (`clone?` the variables' copies): the variables propagated, their
+  listeners told when they are inferred there."
+  ([ic that] (dup-to! ic that false))
+  ([ic that clone?]
+   (let [st (ic-st that)
+         have (id-set (map :tv (.get st :vars)))
+         hu (id-set (map :uv (.get st :undets)))
+         us (if clone? (save ic) (ic-undets ic))]
+     (.put st :vars (into (.get st :vars) (remove #(.contains have (:tv %)) (ic-vars ic))))
+     (.put st :undets (into (.get st :undets) (remove #(.contains hu (:uv %)) us)))
+     (doseq [t (ic-vars ic)]
+       (.put ^LinkedHashMap (.get st :listeners) (fn [_] (notify-change! ic)) [t])))))
+
+(defn cached-capture "InferenceContext.cachedCapture of `t` for tree `tree`." [ic tree t read-only?]
+  (let [^IdentityHashMap cache (.get (ic-st ic) :capture-cache)]
+    (or (when tree (.get cache tree))
+        (let [r (capture-t t)]
+          (when (and tree (not (identical? r t)) (not read-only?)) (.put cache tree r))
+          r))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Incorporation (Infer's incorporation actions and engine)
+
+(def ^:private ^:dynamic *inc-cache* nil)
+
+(defn- inc-op [op a b ic]
+  (let [k [op (as-tvar a) (as-tvar b)]
+        ^ArrayList cache *inc-cache*
+        hit (when cache (some (fn [[kk v]] (when (and (identical? (first kk) op) (same-type? (second kk) (second k)) (same-type? (nth kk 2) (nth k 2))) [v])) cache))]
+    (if hit
+      (first hit)
+      (let [r (case op :subtype (subtype-unchecked? a b) :same (same-type? a b))]
+        (when cache (.add cache [k r]))
+        r))))
+
+(defn- less-than? "InferenceBound.lessThan." [a b]
+  (cond (identical? a b) false
+        (= b :upper) true
+        (= b :lower) false
+        :else (not= a :upper)))
+
+(defn- check-bound [s t ib-s ib-t ic]
+  (cond (less-than? ib-s ib-t) (inc-op :subtype s t ic)
+        (less-than? ib-t ib-s) (inc-op :subtype t s ic)
+        :else (inc-op :same s t ic)))
+
+(def ^:private all-ibs [:lower :eq :upper])
+
+(defn- check-bounds! [ic u t from tos]
+  (let [t (as-undet ic t)]
+    (doseq [to tos
+            b (uv-bounds u to)]
+      (let [b (as-undet ic b)]
+        (when-not (check-bound t b from to ic)
+          (error! (str "incompatible bounds " from " " to)))))))
+
+(defn- bound-filter [ic t] (and (not= :error t) (not (free? ic t)) (not= :null t)))
+
+(defn- check-compatible-uppers! [ic u]
+  (let [his (filter #(bound-filter ic %) (uv-bounds u :upper))
+        hb (cond (empty? his) (obj) (empty? (rest his)) (first his) :else (glb his))]
+    (when (or (nil? hb) (= :error hb)) (error! "incompatible upper bounds"))))
+
+(defn- apply-action! [ic a]
+  (case (first a)
+    :check-bounds (let [[_ u t ib] a]
+                    (check-bounds! ic u t ib (if (= ib :eq) all-ibs (remove #{ib} all-ibs))))
+    :check-inst (let [[_ u to] a]
+                  (check-bounds! ic u (inst u) :eq (filter to all-ibs)))
+    :subst-bounds (let [[_ u] a]
+                    (doseq [u2 (ic-undets ic)]
+                      (subst-bounds! u2 [(:tv (qtype u))] [(inst u)])
+                      (check-compatible-uppers! ic u2))
+                    (check-bounds! ic u (inst u) :eq all-ibs))
+    :check-upper (let [[_ u t] a
+                       bl (closure-collect (uv-bounds u :upper))]
+                   (doseq [b2 bl]
+                     (when (and (not (identical? t b2)) (not (wild? t)) (not (wild? b2)))
+                       (doseq [[s1 s2] (param-supers t b2)]
+                         (loop [p1 (allparams s1) p2 (allparams s2)]
+                           (when (and (seq p1) (seq p2))
+                             (when (and (not (wild? (first p1))) (not (wild? (first p2))))
+                               (when-not (inc-op :same (as-undet ic (first p1)) (as-undet ic (first p2)) ic)
+                                 (error! "incompatible upper bounds")))
+                             (recur (rest p1) (rest p2))))))))
+    :propagate (let [[_ u t ib] a
+                     ut (as-undet ic t)]
+                 (when (and (undet? ut) (not (uv-captured? ut)))
+                   (add-bound! ut ({:upper :lower :lower :upper :eq :eq} ib) u)
+                   (doseq [ib2 (if (= ib :eq) all-ibs [ib])
+                           b (uv-bounds ut ib2)]
+                     (add-bound! u ib2 b)))
+                 (doseq [ib2 (if (= ib :eq) [:eq] (remove #{ib} all-ibs))
+                         l (uv-bounds u ib2)]
+                   (let [ul (as-undet ic l)]
+                     (when (and (undet? ul) (not (uv-captured? ul)))
+                       (add-bound! ul ib (as-inst ic t))))))))
+
+(defn- allparams [t]
+  (if (class-t? t)
+    (concat (some-> (:outer t) allparams) (:args t))
+    []))
+
+(defn do-incorporation!
+  "Infer.doIncorporation: the variables' pending actions run, one per variable a round, until none."
+  [ic]
+  (binding [*inc-cache* (ArrayList.)]
+    (loop [round 0]
+      (when (> round 2000) (d/decline! "an inference beyond the port's limits (incorporation rounds)"))
+      (when (< round 10000)
+        (let [progress (volatile! false)]
+          (doseq [u (ic-undets ic)]
+            (when-let [a (.pollFirst (actions u))]
+              (vreset! progress true)
+              (apply-action! ic a)))
+          (when @progress (recur (inc round))))))))
+
+(defn- closure-collect
+  "types.closureCollector(true, isSameType) of `ts`: inserted into a closure (same types skipped),
+  then its minimum."
+  [ts]
+  (closure-min (reduce (fn [cl t] (insert cl t same-type?)) () ts)))
+
+(defn param-supers
+  "Infer.getParameterizedSupers of `t` and `s`: pairs of their supertypes for the parameterized
+  components of their lub."
+  [t s]
+  (let [l (lub [t s])]
+    (if (or (= :error l) (= :null l) (nil? l))
+      []
+      (vec (for [sup (if (inter? l) (concat (when-let [st (supertype* l)] (when-not (interface-t? st) [st])) (interfaces* l)) [l])
+                 :when (parameterized? sup)]
+             [(as-super t (:c sup)) (as-super s (:c sup))])))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The thrown types' constraints (Attr.checkExConstraints, JLS 18.2.5)
+
+(defn checked-exception?
+  "Check.isChecked of exception type `t`: not a subtype of RuntimeException or Error."
+  [t]
+  (not (or (subtype-nc t (named "java.lang.RuntimeException")) (subtype-nc t (named "java.lang.Error")))))
+
+(defn ex-constraints!
+  "Attr.checkExConstraints of the types a lambda body or a referenced method throws (`thrown-by`)
+  against the function type's thrown types `thrown-at` in `ic`: each checked type not under a proper
+  one a subtype of every non-proper one, these marked thrown (UndetVar.setThrow); false when a checked
+  type is uncaught and every thrown type is proper."
+  [ic thrown-by thrown-at]
+  (let [non-proper (filter #(free? ic %) thrown-at)
+        proper (remove #(free? ic %) thrown-at)
+        uncaught (remove (fn [x] (some #(subtype? x %) proper)) (filter checked-exception? thrown-by))]
+    (if (and (empty? non-proper) (seq uncaught))
+      false
+      (let [nps (map #(as-undet ic %) non-proper)]
+        (doseq [x uncaught np nps] (subtype? x np))
+        (doseq [np nps :when (undet? np)]
+          (when (uv-captured? np) (throw (IllegalStateException. "an inference variable both captured and thrown")))
+          (.put (uv-st np) :kind :throws))
+        true))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Solving (Infer's inference steps and graph solver)
+
+(defn- filter-bounds [ic u ib] (filter #(bound-filter ic %) (uv-bounds u ib)))
+
+(defn- runtime-exception [] (named "java.lang.RuntimeException"))
+
+(defn- step-accepts? [step ic u]
+  (case step
+    :throws (and (uv-throws? u)
+                 (every? #(subtype? (runtime-exception) %) (filter #(not (free? ic %)) (uv-bounds u :upper))))
+    :captured (and (uv-captured? u) (not (free? ic (concat (uv-bounds u :upper) (uv-bounds u :lower)))))
+    (:eq :lower :upper) (and (seq (filter-bounds ic u step)) (not (uv-captured? u)))))
+
+(defn- step-solve [step ic u]
+  (case step
+    :eq (first (filter-bounds ic u :eq))
+    :lower (let [lo (filter-bounds ic u :lower)
+                 t (if (empty? (rest lo)) (first lo) (lub lo))]
+             (if (or (prim? t) (= :error t) (= :null t) (nil? t)) (error! "no unique minimal instance") t))
+    :throws (runtime-exception)
+    :upper (let [hi (filter-bounds ic u :upper)
+                 t (if (empty? (rest hi)) (first hi) (glb hi))]
+             (if (or (prim? t) (= :error t) (nil? t)) (error! "no unique maximal instance") t))
+    :captured (let [up (if (seq (filter-bounds ic u :upper)) (step-solve :upper ic u) (obj))
+                    lo (if (seq (filter-bounds ic u :lower)) (step-solve :lower ic u) :null)
+                    prev (:tv (qtype u))]
+                (d/tvar-type (d/sym {:sk :tvar :name (:name prev) :owner (:owner prev) :captured true
+                                     :wildcard (:wildcard prev) :lower (when-not (= :null lo) lo)
+                                     :bounds-fn (fn [] [up]) :memo (HashMap.)})))))
+
+;; an EnumSet: in InferenceStep's order (EQ, LOWER, THROWS, UPPER, CAPTURED)
+(def ^:private graph-steps [[:eq] [:eq :lower] [:eq :lower :throws :upper :captured]])
+
+(defn- solve-basic! [ic vars steps]
+  (let [rv (id-set (map :tv (restvars ic)))]
+    (vec (for [v vars
+               :when (.contains rv (:tv v))
+               :let [u (undet-of ic v)
+                     step (first (filter #(step-accepts? % ic u) steps))]
+               :when step]
+           (do (set-inst! u (step-solve step ic u)) v)))))
+
+;; The inference graph: nodes {:data ArrayList of type variable types, :deps LinkedHashSet of nodes}
+
+(defn- node [v] (d/sym {:sk :node :data (doto (ArrayList.) (.add v)) :deps (LinkedHashSet.)}))
+
+(defn- ndata ^ArrayList [n] (:data n))
+(defn- ndeps ^LinkedHashSet [n] (:deps n))
+
+(defn- tarjan
+  "GraphUtils.tarjan of `nodes`: their strongly connected components (lists, javac's order)."
+  [nodes]
+  (let [index (IdentityHashMap.) low (IdentityHashMap.) counter (volatile! 0)
+        stack (java.util.LinkedList.) on-stack (IdentityHashMap.) sccs (ArrayList.)]
+    (letfn [(visit [v]
+              (.put index v @counter) (.put low v @counter) (vswap! counter inc)
+              (.addFirst stack v) (.put on-stack v true)
+              (doseq [n (vec (ndeps v))]
+                (cond
+                  (not (.containsKey index n)) (do (visit n) (.put low v (min (long (.get low v)) (long (.get low n)))))
+                  (.containsKey on-stack n) (.put low v (min (long (.get low v)) (long (.get index n))))))
+              (when (= (long (.get low v)) (long (.get index v)))
+                (let [cyc (ArrayList.)]
+                  (loop []
+                    (let [n (.removeFirst stack)]
+                      (.remove on-stack n)
+                      (.add cyc n)
+                      (when-not (identical? n v) (recur))))
+                  (.add sccs (vec cyc)))))]
+      (doseq [n nodes] (when-not (.containsKey index n) (visit n))))
+    (vec sccs)))
+
+(defn- graph-changed! [n from to]
+  (when (.remove (ndeps n) from)
+    (when to (.add (ndeps n) to))))
+
+(defn- merge-nodes! [root others]
+  (doseq [n others]
+    (.addAll (ndata root) (ndata n))
+    (.addAll (ndeps root) (ndeps n)))
+  (let [d2 (LinkedHashSet.)
+        mine (id-set (map :tv (ndata root)))]
+    (doseq [dd (ndeps root)]
+      (if (.contains mine (:tv (first (ndata dd)))) (.add d2 root) (.add d2 dd)))
+    (.clear (ndeps root))
+    (.addAll (ndeps root) d2)))
+
+(defn- init-graph
+  "InferenceGraph.initNodes: a node per variable left, its dependencies those its bounds mention,
+  the cycles merged."
+  [ic]
+  (let [nodes (mapv node (restvars ic))]
+    (doseq [ni nodes nj nodes]
+      (let [i (first (ndata ni)) j (first (ndata nj))]
+        (when-not (identical? (:tv i) (:tv j))
+          (let [u (undet-of ic i)]
+            (when (some #(contains-tvar? % (id-set [(:tv j)])) (uv-all-bounds u))
+              (.add (ndeps ni) nj))))))
+    (let [acyclic (ArrayList.)]
+      (doseq [scc (tarjan nodes)]
+        (when (> (count scc) 1)
+          (let [root (first scc)]
+            (merge-nodes! root (rest scc))
+            (doseq [n scc] (doseq [m nodes] (graph-changed! m n root)))))
+        (.add acyclic (first scc)))
+      acyclic)))
+
+(defn- delete-node! [^ArrayList nodes n]
+  (.remove nodes n)
+  (doseq [m nodes] (graph-changed! m n nil)))
+
+(defn- leaf? [n] (every? #(identical? % n) (ndeps n)))
+
+(defn- tree-to-leafs [n ^IdentityHashMap cache]
+  (or (.get cache n)
+      (let [r (if (leaf? n)
+                [(list n) (count (ndata n))]
+                (reduce (fn [[p c] n2]
+                          (if (identical? n2 n)
+                            [p c]
+                            (let [[sp sc] (tree-to-leafs n2 cache)] [(concat sp p) (+ c sc)])))
+                        [(list n) (count (ndata n))]
+                        (vec (ndeps n))))]
+        (.put cache n r)
+        r)))
+
+(defn- pick-node [strategy nodes]
+  (case (:kind strategy)
+    :leaf (if (empty? nodes) (error! "no node") (first nodes))
+    :best (let [cache (IdentityHashMap.)
+                want (id-set (map :tv (:vars strategy)))
+                best (reduce (fn [best n]
+                               (if (some #(.contains want (:tv %)) (ndata n))
+                                 (let [[p c] (tree-to-leafs n cache)]
+                                   (if (< c (second best)) [p c] best))
+                                 best))
+                             [nil Long/MAX_VALUE] nodes)]
+            (if (nil? (first best))
+              (throw (ex-info "repr/java infer: no node found" {::no-node true}))
+              (first (first best))))))
+
+(declare instantiate-as-uninferred!)
+
+(defn- graph-solve! [ic strategy done?]
+  (do-incorporation! ic)
+  (let [nodes (init-graph ic)]
+    (tr "solve" (count (ic-vars ic)) (:kind strategy) (count nodes))
+    (loop []
+      (when-not (done?)
+        (let [n (pick-node strategy nodes)
+              vars (vec (ndata n))
+              saved (save ic)]
+          (try
+            (loop []
+              (when (some (let [rv (id-set (map :tv (restvars ic)))] #(.contains rv (:tv %))) vars)
+                (if-let [_ (some (fn [steps] (seq (solve-basic! ic vars steps))) graph-steps)]
+                  (do (do-incorporation! ic) (recur))
+                  (error! "no progress"))))
+            (catch Throwable e
+              (if (error? e)
+                (do (rollback! ic saved)
+                    (instantiate-as-uninferred! ic vars)
+                    (do-incorporation! ic))
+                (throw e))))
+          (delete-node! nodes n)
+          (recur))))))
+
+(defn solve!
+  "InferenceContext.solve: every variable."
+  [ic]
+  (graph-solve! ic {:kind :leaf} #(empty? (restvars ic))))
+
+(defn solve-vars!
+  "InferenceContext.solve(vars): until none of `vars` is free."
+  [ic vars]
+  (graph-solve! ic {:kind :best :vars vars} #(not (free? ic (mapv (fn [v] (as-inst ic v)) vars)))))
+
+(defn solve-any!
+  "InferenceContext.solveAny: at least one of `vars`."
+  [ic vars]
+  (let [rv (id-set (map :tv (restvars ic)))
+        vs (filterv #(.contains rv (:tv %)) vars)]
+    ;; done: one of the variables left (BestLeafSolver's varsToSolve, the filtered list) inferred
+    (graph-solve! ic {:kind :best :vars vs}
+                  #(let [iv (id-set (map :tv (instvars ic)))] (some (fn [v] (.contains iv (:tv v))) vs)))))
+
+(defn instantiate-as-uninferred!
+  "Infer.instantiateAsUninferredVars: cyclic variables as fresh type variables bounded by the glb of
+  their upper bounds, the others by that glb (Object for none)."
+  [ic vars]
+  (let [vs (id-set (map :tv vars))
+        todo (ArrayList.)]
+    (doseq [v vars]
+      (let [u (undet-of ic v)
+            ups (uv-bounds u :upper)]
+        (cond
+          (some #(contains-tvar? % vs) ups)
+          (let [fresh (d/sym {:sk :tvar :name (:name (:tv v)) :owner (:owner (:tv v)) :synthetic true
+                              :memo (HashMap.) :bounds-fn (let [b (vec ups)] (fn [] b))})]
+            (.add todo [u fresh])
+            (set-inst! u (d/tvar-type fresh)))
+          (seq ups) (set-inst! u (glb ups))
+          :else (set-inst! u (obj)))))
+    (doseq [[u fresh] todo]
+      (let [b (glb (map #(as-inst ic %) (d/tvar-bounds fresh)))]
+        (.put ^HashMap (:memo fresh) :bounds [b])
+        (when (= :error b) (error! "glb of the bounds"))))))
+
+(defn bounded-vars "InferenceContext.boundedVars." [ic]
+  (vec (keep (fn [u] (let [ups (uv-bounds u :upper)
+                           decl (take-last (.get (uv-st u) :declared) ups)]
+                       (when (or (> (count ups) (count decl)) (seq (uv-bounds u :eq)) (seq (uv-bounds u :lower)))
+                         (qtype u))))
+             (ic-undets ic))))
+
+(defn- sym-map* [s] (into {} (keep (fn [k] (when-some [v (get s k)] [k v])) [:sk :name :owner :idx :tree])))
+
+(defn new-instances
+  "Types.newInstances of type variable symbols `tvs`: fresh type variables (their names and owners
+  the same), their bounds substituted; returns [fresh-types map] with `map` the substitution."
+  ([tvs] (new-instances tvs nil))
+  ([tvs base]
+  (let [fresh (volatile! nil)
+        m (fn [] (merge base (zipmap tvs @fresh)))
+        fs (mapv (fn [tv]
+                   (d/tvar-type
+                    (d/sym (assoc (sym-map* tv)
+                                  :fresh-of tv
+                                  :memo (HashMap.)
+                                  ;; the bounds at the site (memberType's substitution `base`) too
+                                  :bounds-fn (fn [] (mapv #(d/subst % (m)) (d/tvar-bounds tv)))))))
+                 tvs)]
+    (vreset! fresh fs)
+    [fs (zipmap tvs fs)])))
+
+
+;;; ------------------------------------------------------------------------------------------
+;;; Deferred attribution contexts and the method checks (DeferredAttr, Resolve)
+
+(def ^:dynamic *deferred*
+  "The poly expressions' hooks (arbace.repr.java.expr's): {:check (fn [dt ri]) the check of a deferred
+  argument type against a result, :stuck (fn [dt ri]) its stuck policy, :process (fn [node dac])}."
+  nil)
+
+(defn deferred? [t] (and (map? t) (identical? :deferred (:k t))))
+
+(defn new-dac
+  "A DeferredAttrContext: mode (:speculative, :check), the method, the phase [boxing? varargs?], the
+  inference context and the parent context (nil: the empty one)."
+  [mode msym phase ic parent]
+  {:mode mode :msym msym :phase phase :ic ic :parent parent :nodes (ArrayList.)})
+
+(defn inside-overload? "DeferredAttrContext.insideOverloadPhase." [dac]
+  (cond (nil? dac) false
+        (= :speculative (:mode dac)) true
+        :else (recur (:parent dac))))
+
+(defn ri
+  "A ResultInfo: target `pt` (a type, :none, :any-poly), its check context's inference context and
+  deferred attribution context, `compat` how a found type is compatible (:strict, :loose, :assign,
+  :most-specific), `method?` a MethodResultInfo (an argument's: the found type's upper bound captured
+  first), `tree` for the capture cache."
+  [m]
+  (merge {:pt :none :ic empty-ic :dac nil :compat :assign :method? false} m))
+
+(defn compatible?
+  "The check context's compatible: MethodCheckContext's (strict: isSubtypeUnchecked, loose:
+  isConvertible, its inference variables), Check.basicHandler's (isAssignable), MostSpecificCheck's
+  (subtyping without capture)."
+  [r found req]
+  (let [ic (:ic r)
+        f (as-undet ic found)
+        q (as-undet ic req)]
+    (case (:compat r)
+      :strict (subtype-unchecked? f q)
+      :loose (convertible? f q)
+      :assign (convertible? f q)
+      ;; ExpressionLambdaReturnContext of a void descriptor: an expression statement (checked by the
+      ;; structure, the walk's)
+      :void-expr (boolean (:expr-stmt? r))
+      :most-specific (let [[f q] (if (and (:loose? r) (not= (prim? found) (prim? req)))
+                                   [(if (prim? found) (boxed found) (unboxed found)) q]
+                                   [f q])]
+                       (subtype? f q false))
+      :mref (let [f (as-undet (:pending r) f)
+                  q (if (and (undet? f) (prim? q)) (boxed q) q)]
+              (if (:strict? r) (subtype-unchecked? f q) (convertible? f q))))))
+
+(defn check-type
+  "Check.checkType of `found` against `r`'s target: compatible, else an inference failure."
+  [r found]
+  (let [pt (:pt r)]
+    (cond
+      (= :none pt) found
+      (compatible? r found pt) found
+      :else (error! "inconvertible types"))))
+
+(defn ri-check
+  "ResultInfo.check of `found` (a type or a deferred type): a MethodResultInfo's checks the upper bound
+  captured (not void) and a deferred type through its hook."
+  [r found]
+  (cond
+    (deferred? found) ((:check *deferred*) found r)
+    (:method? r) (let [u (if (identical? found (:pt r)) found (cvar-upper found))
+                       c (cached-capture (:ic r) (:tree r) u true)]
+                   (when (= :void c) (error! "void argument"))
+                   (check-type r c))
+    :else (check-type r found)))
+
+(defn- method-check-ri
+  "Resolve's methodCheckResult: the MethodResultInfo of formal `to` in `dac` for method check `mc`."
+  [mc dac to actual tree]
+  (let [[boxing? _] (:phase dac)]
+    (case (:kind mc)
+      :resolve (ri {:pt to :ic (:ic dac) :dac dac :compat (if boxing? :loose :strict) :method? true :tree tree})
+      :mref (ri {:pt to :ic (:ic dac) :dac dac :compat :mref :strict? (not boxing?) :pending (:pending mc)
+                 :method? true :tree tree})
+      :most-specific (ri {:pt to :ic (:ic dac) :dac dac :compat :most-specific :method? true :actual actual}))))
+
+(defn- elemtype [t] (when (array? t) (:e t)))
+
+(defn adjust-formals
+  "Resolve.adjustArgs: a variable arity method's (`m`) last formal as its element, repeated to `n`."
+  [fs m n varargs?]
+  (if (and varargs? (d/has? (d/method-flags m) d/VARARGS))
+    (let [e (elemtype (last fs))
+          xs (conj (vec (butlast fs)) e)]
+      (into xs (repeat (- n (count xs)) e)))
+    (vec fs)))
+
+(defn arguments-acceptable!
+  "Resolve's argumentsAcceptable of argument types `as` (types or deferred types) for formals `fs` in
+  `dac` by method check `mc` ({:kind :resolve|:arity|:most-specific|:mref ...}); `trees` the argument
+  trees (the capture cache's keys); an inapplicable method throws (error!)."
+  [dac mc as fs trees]
+  (let [[_ varargs?] (:phase dac)
+        n (count fs)
+        fixed (if varargs? (dec n) n)
+        as (vec as)
+        trees (vec trees)]
+    (if (= :most-specific (:kind mc))
+      ;; MostSpecificCheck.argumentsAcceptable: m2's formals adjusted to m1's (the actuals here), no
+      ;; arity check
+      (let [fs2 (adjust-formals fs (:msym dac) (count as) varargs?)]
+        (doseq [[i f2] (map-indexed vector fs2)]
+          (ri-check (method-check-ri mc dac f2 (nth (:actuals mc) i nil) nil) (nth as i))))
+    (do
+    (when (and (not varargs?) (not= (count as) n)) (error! "arity mismatch"))
+    (when (< (count as) fixed) (error! "arity mismatch"))
+    (when-not (= :arity (:kind mc))
+      (let [actuals (:actuals mc)]
+        (dotimes [i fixed]
+          (ri-check (method-check-ri mc dac (nth fs i) (nth actuals i nil) (nth trees i nil)) (nth as i)))
+        (when varargs?
+          (let [elt (elemtype (nth fs fixed))]
+            (when-not elt (error! "varargs formal"))
+            (doseq [i (range fixed (count as))]
+              (ri-check (method-check-ri mc dac elt (nth actuals i nil) (nth trees i nil)) (nth as i)))))))))))
+
+(defn complete!
+  "DeferredAttrContext.complete: its stuck deferred nodes processed (by the hook) until none; inside
+  the overload phase those left are given up, else a stuck variable solved to unstick them."
+  [dac]
+  (let [^ArrayList nodes (:nodes dac)]
+    (loop [k 0]
+      (tr "complete" k (.size nodes))
+      (when (> k 1000) (d/decline! "an inference beyond the port's limits (deferred nodes)"))
+      (when-not (.isEmpty nodes)
+        (let [progress (volatile! false)]
+          (doseq [n (vec nodes)]
+            (when ((:process *deferred*) n dac)
+              (.remove nodes n)
+              (vreset! progress true)))
+          (cond
+            @progress (recur (inc k))
+            (inside-overload? dac) nil
+            :else (let [stuck ((:pick *deferred*) dac)]
+                    (tr "unstick" (mapv (fn [v] [(:name (:tv v)) (some? (some-> (undet-of (:ic dac) v) inst))]) stuck)
+                        (mapv (fn [v] (:name (:tv v))) (restvars (:ic dac))))
+                    (when (try (solve-any! (:ic dac) stuck) true
+                               (catch Throwable e (if (::no-node (ex-data e)) false (throw e))))
+                      (notify-change! (:ic dac))
+                      (recur (inc k))))))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Return constraints (Infer.generateReturnConstraints) and propagation
+
+(defn- unboxable? [t] (and (not (keyword? t)) (some? (unboxed t))))
+
+(defn- common-super-diff? [t s]
+  (some (fn [[a b]] (not (same-type? a b))) (param-supers t s)))
+
+(defn capture-changes?
+  "Would Types.capture change type `t` (a wildcard among its or its enclosing types' arguments)?"
+  [t]
+  (and (class-t? t)
+       (or (some wild? (:args t)) (some-> (:outer t) capture-changes?))))
+
+(defn needs-eager?
+  "Infer.needsEagerInstantiation of inference variable `from` for target `to` (JLS 18.5.2)."
+  [from to ic]
+  (if (prim? to)
+    (boolean (some unboxable? (concat (uv-bounds from :lower) (uv-bounds from :eq) (uv-bounds from :upper))))
+    (or (and (not (capture-changes? to))
+             (or (some capture-changes? (concat (uv-bounds from :eq) (uv-bounds from :lower)))
+                 (let [lo (uv-bounds from :lower)]
+                   (some (fn [a] (some (fn [b] (and (not (identical? a b)) (not (free? ic a)) (not (free? ic b))
+                                                    (common-super-diff? a b)))
+                                       lo))
+                         lo))))
+        (and (parameterized? to)
+             (some (fn [t] (let [sup (as-super t (:c to))] (and sup (raw? sup))))
+                   (concat (uv-bounds from :eq) (uv-bounds from :lower))))
+        false)))
+
+(defn- ref-to-target-constraint
+  "Infer.generateReferenceToTargetConstraint."
+  [tree from to r ic]
+  (solve-vars! ic [(qtype from)])
+  (notify-change! ic)
+  (let [c (cached-capture (:ic r) tree (inst from) true)]
+    (if (convertible? c (as-undet (:ic r) to)) (obj) to)))
+
+(defn return-constraints!
+  "Infer.generateReturnConstraints of method type `mt` in `ic` against result `r`: the return type
+  (captured when it mentions the variables and the target's context is an inference one, its
+  captured variables added); throws when incompatible."
+  [tree r mt ic]
+  (let [rs-ic (:ic r)
+        from0 (:ret mt)
+        from (if (and (free? ic from0) (not (identical? rs-ic empty-ic)))
+               (let [c (capture-t from0)]
+                 (doseq [a (:args c)] (when (captured? a) (add-var! ic a)))
+                 c)
+               from0)
+        qtype (as-undet ic from)
+        to (:pt r)
+        [qtype to] (cond
+                     (= :void qtype) [qtype :void]
+                     (= :none to) [qtype (if (prim? from) from (obj))]
+                     (undet? qtype) [qtype (if (needs-eager? qtype to ic) (ref-to-target-constraint tree qtype to r ic) to)]
+                     (free? rs-ic to) [(as-undet ic (cached-capture rs-ic tree from (not (:update-tree? r true)))) to]
+                     :else [qtype to])]
+    (binding [*warn* (volatile! {})]
+      (when-not (compatible? r qtype (as-undet rs-ic to))
+        (error! "no conforming instance")))
+    from))
+
+(defn- root-vars [mt dac]
+  (if (and dac (= :check (:mode dac)))
+    (let [rs (concat [(:ret mt)]
+                     (mapcat (fn [n] (concat ((:stuck-vars *deferred*) n) ((:dep-vars *deferred*) n))) (:nodes dac)))
+          thrown (filter #(:throws? (:tv %)) (ic-vars (:ic dac)))]
+      (concat rs (remove (fn [t] (some #(eq-ign % t) rs)) thrown)))
+    [(:ret mt)]))
+
+(defn- reachability
+  "InferenceContext.ReachabilityVisitor from `roots`: {:min [tvar ...] :equiv set :min-map}."
+  [ic roots]
+  (let [mins (LinkedHashMap.) equiv (LinkedHashMap.) min-map (LinkedHashMap.)]
+    (letfn [(equiv? [from t bk]
+              (let [u (as-undet ic t)]
+                (every? (fn [ib]
+                          (let [b1 (cond->> (uv-bounds from ib) (= ib bk) (remove #(eq-ign % t)))
+                                b2 (cond->> (uv-bounds u ib) (= ib ({:upper :lower :lower :upper :eq :eq} bk)) (remove #(eq-ign % (qtype from))))
+                                has (fn [xs y] (some #(eq-ign % y) xs))]
+                            (and (every? #(has b1 %) b2) (every? #(has b2 %) b1))))
+                        all-ibs)))
+            (visit-uv [u]
+              (let [q (qtype u)]
+                (when-not (.containsKey mins (:tv q))
+                  (.put mins (:tv q) q)
+                  (let [^LinkedHashMap deps (or (.get min-map (:tv q)) (doto (LinkedHashMap.) (.put (:tv q) q)))]
+                    (doseq [bk all-ibs b (uv-bounds u bk)]
+                      (let [ub (as-undet ic b)]
+                        (cond
+                          (not (undet? ub)) (visit ub)
+                          (equiv? u b bk) (do (.put deps (:tv b) b) (.put equiv (:tv b) b))
+                          :else (visit ub))))
+                    (.put min-map (:tv q) deps)))))
+            (visit [t]
+              (when (map? t)
+                (case (:k t)
+                  :undet (visit-uv t)
+                  :wild (some-> (:t t) visit)
+                  :tvar (let [u (as-undet ic t)] (when (undet? u) (visit-uv u)))
+                  :array (visit (:e t))
+                  :class (do (some-> (:outer t) visit) (run! visit (:args t)))
+                  nil)))]
+      (run! visit roots))
+    {:min (vec (.values mins)) :equiv equiv :min-map min-map}))
+
+(defn ic-min
+  "InferenceContext.min of `ic` for `roots`: the variables they reach (their equivalent ones dropped),
+  listeners forwarding their instantiations; `solve?` the unreachable ones solved after."
+  [ic roots solve?]
+  (cond
+    (= (count roots) (count (ic-vars ic))) ic
+    (some captured? (ic-vars ic)) ic
+    :else
+    (let [{:keys [min ^LinkedHashMap equiv ^LinkedHashMap min-map]} (reachability ic roots)]
+      (if (= (count min) (count (ic-vars ic)))
+        ic
+        (let [mset (id-set (map :tv min))
+              redundant (remove #(.contains mset (:tv %)) (ic-vars ic))
+              rset (id-set (map :tv redundant))
+              us (mapv (fn [v]
+                         (let [u (undet-of ic v)
+                               u2 (uv-dup u)]
+                           (doseq [ib all-ibs]
+                             (.put (uv-st u2) ib (apply list (remove #(and (tvar-t? %) (.contains rset (:tv %))) (uv-bounds u ib)))))
+                           u2))
+                       min)
+              mic (new-ic min us)]
+          (doseq [t min]
+            (add-listener! mic [t]
+                           (fn [c]
+                             (let [it (as-inst c t)]
+                               (doseq [eq (vals (.get min-map (:tv t)))]
+                                 (set-inst! (undet-of ic eq) it))
+                               (do-incorporation! ic)
+                               (notify-change! ic)))))
+          (when solve?
+            (let [unreachable (remove #(.containsKey equiv (:tv %)) redundant)]
+              (add-listener! mic min (fn [_] (solve-vars! ic (vec unreachable)) (notify-change! ic)))))
+          mic)))))
+
+(defn- should-propagate? [restype r ic]
+  (and (not (identical? (:ic r) empty-ic))
+       (free? ic restype)
+       (or (not (some #(eq-ign % restype) (ic-vars ic)))
+           (not (needs-eager? (as-undet ic restype) (:pt r) ic)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; instantiateMethod
+
+(defn instantiate-method
+  "Infer.instantiateMethod: the type variables `tvars` (fresh) of method type `mt` inferred from
+  argument types `as` (types or deferred types) in phase `phase`, the target result `r` (nil during
+  overload resolution; :pt :any-poly for a partially inferred type), method check `mc`. Returns the
+  instantiated method type; {:k :partial ...} for :any-poly; a method type with free variables when
+  they propagate to the target's context. Throws (error!) when inapplicable."
+  [{:keys [tvars mt r msym as phase mc trees tree] :or {mc {:kind :resolve}}}]
+  (let [ic (new-ic tvars)
+        dac (new-dac (if (and r (not= :any-poly (:pt r))) :check :speculative) msym phase ic (:dac r))
+        warn (volatile! {})]
+    ;; the method's warner throughout (javac's doIncorporation(inferenceContext, warn): an unchecked
+    ;; conversion found by incorporation counts too)
+    (binding [*warn* warn]
+    (try
+      (arguments-acceptable! dac mc as (:params mt) trees)
+      (cond
+        (and r (= :any-poly (:pt r)))
+        (do (do-incorporation! ic)
+            {:k :partial :mt mt :ic ic :tree tree :unchecked (boolean (:unchecked @warn)) :msym msym})
+        :else
+        (let [prop (when r
+                     (do-incorporation! ic)
+                     (when-not (:unchecked @warn)
+                       (let [p? (should-propagate? (:ret mt) r ic)
+                             mic (if p? (ic-min ic (root-vars mt dac) true) ic)
+                             nr (return-constraints! tree r mt mic)]
+                         (if p?
+                           (do (dup-to! mic (:ic r))
+                               (when-not (identical? mic ic) (.put (ic-st (:ic r)) :parent ic))
+                               (complete! dac)
+                               {:mt (assoc mt :ret nr) :propagated true})
+                           {:mt (assoc mt :ret nr)}))))]
+          (if (:propagated prop)
+            (assoc (:mt prop) :propagated ic :unchecked (boolean (:unchecked @warn)))
+            (let [mt (or (:mt prop) mt)]
+              (complete! dac)
+              (solve! ic)
+              (assoc (as-inst-mt ic mt) :unchecked (boolean (:unchecked @warn)))))))
+      (finally
+        (if r (notify-change! ic) (notify-change! ic (bounded-vars ic))))))))
+
+(defn check-partial
+  "PartiallyInferredMethodType.check of `pmt` against result `r`: its return constraints (propagated
+  to the target's context when it is an inference one, a copy inside the overload phase), else solved
+  and the instantiated return type checked; the context rolled back after."
+  [pmt r]
+  (let [ic (:ic pmt)
+        mt (:mt pmt)
+        saved (save ic)]
+    (try
+      (or (when-not (:unchecked pmt)
+            (let [p? (should-propagate? (:ret mt) r ic)
+                  mic (if p? (ic-min ic [(:ret mt)] false) ic)
+                  nr (return-constraints! (:tree pmt) r mt mic)]
+              (when p?
+                (dup-to! mic (:ic r) (inside-overload? (:dac r)))
+                nr)))
+          (do (solve! ic)
+              (let [ret (:ret (as-inst-mt ic mt))
+                    ret (if (:unchecked pmt) (d/erasure ret) ret)]
+                (ri-check r ret))))
+      (finally (rollback! ic saved)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Projections (Types.upward, captures, TypeProjection), for a `var`'s type (Check.checkLocalVarType)
+
+(defn captures
+  "Types.captures: the captured type variables type `t` mentions (with those of their bounds), their
+  symbols in an identity set."
+  [t]
+  (let [seen (id-set [])]
+    (letfn [(scan [t]
+              (when (map? t)
+                (case (:k t)
+                  :inter (run! scan (:ts t))
+                  :class (do (some-> (:outer t) scan) (run! scan (:args t)))
+                  :array (scan (:e t))
+                  :wild (some-> (:t t) scan)
+                  :tvar (when (and (:captured (:tv t)) (.add seen (:tv t)))
+                          (scan (upper-bound t))
+                          (scan (lower-of t)))
+                  nil)))]
+      (scan t))
+    seen))
+
+(declare project)
+
+(defn- project-arg
+  "TypeProjection.mapTypeArgument of type argument `t` of class type `site` (its formal's bound
+  `decl-bound`)."
+  [vars seen site decl-bound t kind]
+  (if-not (contains-tvar? t vars)
+    t
+    (if (wild? t)
+      (case (:bk t)
+        :extends (let [b (project vars seen (:t t) kind)] (if (= :null b) :null {:k :wild :bk :extends :t b}))
+        :super (let [b (project vars seen (:t t) (if (= kind :up) :down :up))]
+                 (if (= :null b) {:k :wild :bk :unbound :t nil} {:k :wild :bk :super :t b}))
+        {:k :wild :bk :unbound :t nil})
+      (if (= kind :down)
+        :null
+        (let [upper (project vars seen t :up)
+              lower (project vars seen t :down)
+              formals (id-set (d/class-tparams (:c site)))]
+          (cond
+            (and (not (same-type? upper (obj)))
+                 (or (contains-tvar? decl-bound formals) (not (subtype? decl-bound upper))))
+            {:k :wild :bk :extends :t upper}
+            (not= :null lower) {:k :wild :bk :super :t lower}
+            :else {:k :wild :bk :unbound :t nil}))))))
+
+(defn- project [vars ^java.util.Set seen t kind]
+  (if-not (map? t)
+    t
+    (case (:k t)
+      :inter (let [cs (mapv #(project vars seen % kind) (:ts t))]
+               (if (every? true? (map identical? cs (:ts t))) t (make-intersection cs)))
+      :class (let [outer (:outer t)
+                   outer1 (when outer (project vars seen outer kind))
+                   formals (d/class-tparams (:c t))
+                   args (loop [as (:args t) fs formals out []]
+                          (if (empty? as)
+                            out
+                            (let [a2 (project-arg vars seen t (upper-bound (d/tvar-type (first fs))) (first as) kind)]
+                              (if (= :null a2) :null (recur (rest as) (rest fs) (conj out a2))))))]
+               (cond (= :null args) :null
+                     (and (identical? outer outer1) (every? true? (map identical? args (:args t)))) t
+                     :else (assoc t :outer outer1 :args args :anns [])))
+      :array (let [e (project vars seen (:e t) kind)]
+               (cond (identical? e (:e t)) t (= :null e) :null :else (assoc t :e e :anns [])))
+      :tvar (if (.contains ^java.util.Set vars (:tv t))
+              (if (.add seen (:tv t))
+                (try (project vars seen (if (= kind :up) (upper-bound t) (lower-of t)) kind)
+                     (finally (.remove seen (:tv t))))
+                (if (= kind :up) (obj) :null))
+              t)
+      t)))
+
+(defn upward
+  "Types.upward of type `t` for its captured variables (Check.checkLocalVarType: a `var`'s type)."
+  [t]
+  (project (captures t) (id-set []) t :up))
+
+(defn check-args!
+  "Resolve.rawInstantiate without inference: argumentsAcceptable in `dac`, then its deferred nodes
+  completed (dc.complete())."
+  [dac mc as fs trees]
+  (arguments-acceptable! dac mc as fs trees)
+  (complete! dac))
+
+(defn upward-of
+  "Types.upward of `t` for the type variable symbols `vars` (a set)."
+  [t vars]
+  (project vars (id-set []) t :up))
+
+(defn instantiate-pattern-type
+  "Infer.instantiatePatternType (JLS 18.5.5): the parameterization of record class `c` a pattern of
+  the raw `c` matching expression type `et` infers, or nil."
+  [et c]
+  (if (and (class-t? et) (identical? (:c et) c))
+    et
+    (let [this (d/this-type c)
+          params0 (vec (concat (loop [o (:outer this) acc ()] (if (class-t? o) (recur (:outer o) (concat (:args o) acc)) acc))
+                               (:args this)))
+          state (loop [todo [et] params params0 caps [] exprs []]
+                  (if (empty? todo)
+                    [params caps exprs]
+                    (let [cur (first todo) todo (vec (rest todo))]
+                      (cond
+                        (inter? cur) (recur (into (vec (:ts cur)) todo) params caps exprs)
+                        (class-t? cur) (let [cp (capture-t cur)
+                                             cs (filter captured? (:args cp))]
+                                         (recur todo (into (vec (reverse cs)) params) (into (vec (reverse cs)) caps) (into [cp] exprs)))
+                        (tvar-t? cur) (recur (into [(ty/skip-type-vars *reg* cur false)] todo) params caps exprs)
+                        :else (recur todo params caps (into [cur] exprs))))))
+          [params caps exprs] state
+          ic (new-ic params)
+          pt (as-undet ic this)
+          ets (map #(as-undet ic %) exprs)]
+      (doseq [cv caps] (.put (uv-st (undet-of ic cv)) :kind :normal))
+      (try
+        (when (every? (fn [e] (or (not (parameterized? e))
+                                  (let [pe (as-super pt (:c e))] (and pe (same-type? pe e)))))
+                      ets)
+          (do-incorporation! ic)
+          (let [fresh (ArrayList.) todo (ArrayList.)
+                vs (id-set (map :tv params))]
+            (doseq [v params]
+              (let [u (undet-of ic v)
+                    eqs (filter-bounds ic u :eq)]
+                (if (seq eqs)
+                  (set-inst! u (first eqs))
+                  (let [ups (uv-bounds u :upper)
+                        rec? (some #(contains-tvar? % vs) ups)
+                        upper (cond rec? (make-intersection ups) (seq ups) (glb ups) :else (obj))
+                        los (uv-bounds u :lower)
+                        lower (cond (empty? los) nil (empty? (rest los)) (first los) :else (lub los))
+                        vt (d/sym {:sk :tvar :name "" :owner nil :synthetic true :lower lower :memo (HashMap.)
+                                   :bounds-fn (let [b upper] (fn [] (if (inter? b) (vec (:ts b)) [b])))})]
+                    (when rec? (.add todo [u vt]))
+                    (.add fresh vt)
+                    (set-inst! u (d/tvar-type vt))))))
+            (doseq [[u vt] todo]
+              (let [b (glb (map #(as-inst ic %) (d/tvar-bounds vt)))]
+                (.put ^HashMap (:memo vt) :bounds [b])))
+            (upward-of (as-inst ic this) (id-set fresh))))
+        (catch Throwable e (if (error? e) nil (throw e)))))))
+
+(defn pick-stuck
+  "DeferredAttrContext.pickDeferredNode of the stuck nodes `nodes` (each with its stuck and output
+  variables, (stuck n) and (deps n)) in `ic`: the stuck graph (a node depends on another whose output
+  variables reach its input ones in the inference graph), its first strongly connected component's
+  node when single, else the first node."
+  [ic nodes stuck deps]
+  (do-incorporation! ic)
+  (let [g (init-graph ic)
+        find (fn [v] (first (filter #(some (fn [x] (identical? (:tv x) (:tv v))) (ndata %)) g)))
+        closure (fn [n] (let [seen (LinkedHashSet.)]
+                          (letfn [(walk [n] (when (.add seen n) (run! walk (vec (ndeps n)))))] (walk n))
+                          seen))
+        influences? (fn [a b] ;; can a's outputs influence b's inputs
+                      (some (fn [iv] (when-let [in (find iv)]
+                                       (let [cl (closure in)]
+                                         (some (fn [ov] (when-let [on (find ov)] (.contains ^LinkedHashSet cl on))) (deps a)))))
+                            (stuck b)))
+        sns (mapv (fn [n] (d/sym {:sk :node :data (doto (ArrayList.) (.add n)) :deps (LinkedHashSet.)})) nodes)]
+    (doseq [s1 sns s2 sns]
+      (when (and (not (identical? s1 s2)) (influences? (first (ndata s2)) (first (ndata s1))))
+        (.add (ndeps s1) s2)))
+    (let [first-scc (first (tarjan sns))]
+      (if (= 1 (count first-scc)) (first (ndata (first first-scc))) (first nodes)))))

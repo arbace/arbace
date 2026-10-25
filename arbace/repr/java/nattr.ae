@@ -78,10 +78,29 @@
           (instance? JCTree$JCMethodDecl j)
           (when-let [s (.-sym ^JCTree$JCMethodDecl j)]
             (.put sym->native s n)))))
-    {:uctx uctx :reg (:reg uctx) :ans ans :twins tw :sym->native sym->native :check check :diffs diffs
-     :file (:file uctx) :reads (java.util.HashMap.) :etypes (IdentityHashMap.) :choices (IdentityHashMap.)}))
+    (doto {:uctx uctx :reg (:reg uctx) :ans ans :twins tw :sym->native sym->native :check check :diffs diffs
+     :file (:file uctx) :reads (java.util.HashMap.) :etypes (IdentityHashMap.) :choices (IdentityHashMap.)
+     :checked (IdentityHashMap.) :polys (IdentityHashMap.) :pmts (IdentityHashMap.) :args-checked (IdentityHashMap.) :lambdas (IdentityHashMap.) :mrefs (IdentityHashMap.) :mref-kinds (IdentityHashMap.) :pattern-components (IdentityHashMap.)
+     :local-flats (java.util.HashMap.)}
+      (as-> p (let [^java.util.Map m (:memo uctx)] (locking m (.put m :provider (java.lang.ref.WeakReference. p))))))))
 
-(defn answer "The native answers of node `t`." [p t] (.get ^IdentityHashMap (:ans p) t))
+(defn provider-of
+  "The provider of native unit `uctx` (once made: a weak reference in its memo, the registry keeping
+  its units)."
+  [uctx]
+  (when uctx
+    (let [^java.util.Map m (:memo uctx)]
+      (some-> ^java.lang.ref.WeakReference (locking m (.get m :provider)) .get))))
+
+(defn answer
+  "The native answers of node `t` (a name the walk could not resolve looked up again: :retry-lookup)."
+  [p t]
+  (let [a (.get ^IdentityHashMap (:ans p) t)]
+    (if-let [r (:retry-lookup a)]
+      (if-let [[k x] @r] (assoc a k x) a)
+      a)))
+
+(defn- answer0 "The native answers of node `t`." [p t] (.get ^IdentityHashMap (:ans p) t))
 
 (def ^:private keep-declined? (some? (System/getenv "REPR_JAVA_ATTR_DECLINED")))
 
@@ -147,10 +166,19 @@
                                         [:m (jcid p (.owner o)) (str (.name o))])
     :else [:owner (str o)]))
 
+(def ^:dynamic *unit-file*
+  "The file of the unit whose facts are rendered (a method of another file's source is named as a
+  class file's is, as javac's side names it: jtvar-owner), nil: every source method by position."
+  nil)
+
 (defn- ntvar-owner [o]
   (case (:sk o)
     :class (ncid o)
-    :method (if-let [t (:tree o)] [:m (:pos t)] [:m (ncid (:owner o)) (:name o)])
+    :method (if-let [t (and (:tree o)
+                            (or (nil? *unit-file*) (= *unit-file* (:file (:uctx (:owner o)))))
+                            (:tree o))]
+              [:m (:pos t)]
+              [:m (ncid (:owner o)) (:name o)])
     [:owner (str o)]))
 
 (defn- janns [p ^Type t] (mapv #(jcompound p %) (.getAnnotationMirrors t)))
@@ -192,7 +220,9 @@
     (keyword? t) t
     :else
     (case (:k t)
-      :class [:class (ncid (:c t)) (mapv ntype (:args t)) (some-> (:outer t) ntype) (mapv ncompound (:anns t))]
+      :class (if-let [alts (:union-alts t)]
+               [:union (mapv ntype alts)]
+               [:class (ncid (:c t)) (mapv ntype (:args t)) (some-> (:outer t) ntype) (mapv ncompound (:anns t))])
       :array [:array (ntype (:e t)) (mapv ncompound (:anns t))]
       :tvar (if (:captured (:tv t))
               [:captured]
@@ -309,10 +339,8 @@
   "Native class `c` as data (jdata's of its symbol); nil for an anonymous class of a diamond, whose
   supertype is inferred."
   [c]
-  (when-not (and (:anon? c) (= :TYPEAPPLY (get-in c [:newclass :clazz :tag]))
-                 (empty? (get-in c [:newclass :clazz :arguments])))
   [:class (ncid c) (bit-and (d/class-flags c) (long CMASK)) (ntparams (d/class-tparams c))
-   (ntype (d/class-supertype c)) (mapv ntype (d/class-interfaces c))]))
+   (ntype (d/class-supertype c)) (mapv ntype (d/class-interfaces c))])
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; javac's symbols of native declarations (the model's bridges, arbace.repr.java.model/javac-of)
@@ -478,6 +506,8 @@
     :field [:field (ncid (:owner s)) (:name s) 0 nil]
     :class (ndata-class s)
     :package [:package (:name s)]
+    ;; a type variable: as javac's TypeVariableSymbol prints (jdata's :other)
+    :tvar [:other (:name s)]
     [:other (str s)]))
 
 (defn jname-data "javac's symbol of a name in code as data." [p ^Symbol s]
@@ -540,17 +570,16 @@
         (keep (fn [^Symbol s]
                 (let [k (str (.kind s))]
                   (case k
-                    "MTH" (when (zero? (bit-and (.flags s) d/ANONCONSTR))
-                            (let [t (.erasure s jt/*types*)]
-                              [:m (str (.-name s)) (bit-and (.flags s) (long MMASK))
-                               (mapv #(jerased-key p %) (.getParameterTypes t)) (jerased-key p (.getReturnType t))]))
+                    "MTH" (let [t (.erasure s jt/*types*)]
+                            [:m (str (.-name s)) (bit-and (.flags s) (long MMASK))
+                             (mapv #(jerased-key p %) (.getParameterTypes t)) (jerased-key p (.getReturnType t))])
                     "VAR" [:f (str (.-name s)) (bit-and (.flags s) (long FMASK))]
                     "TYP" [:c (str (.-name s))]
                     nil)))
               (.getSymbols (.members c)))))
 
 (defn nmembers-data "Native class `c`'s members as data (jmembers-data's)." [c]
-  (let [ms (d/members c)]
+  (let [ms (d/members-all c)]
     (into #{}
           (concat
            (for [m (:methods ms)]
@@ -559,18 +588,25 @@
            (for [f (:fields ms)] [:f (:name f) (bit-and (d/field-flags f) (long FMASK))])
            (for [[n _] (:classes ms)] [:c n])))))
 
+(def anon-ctor-hook
+  "The overload tier's anonymous class constructor (fn [p c], arbace.repr.java.expr's), for the
+  members fact (JFS103 (b))."
+  (atom nil))
+
 (defn check-members!
   "The fact :enter/members of class declaration `t` (native class `c`, javac's `js`): its members by
-  name, flags and erased signature, javac's TypeEnter's generated ones included; an anonymous class's
-  declined (its constructor is the overload tier's)."
+  name, flags and erased signature, javac's TypeEnter's generated ones included, an anonymous class's
+  constructor the overload tier's (JFS103 (b); declined where that is)."
   [p t c ^Symbol js]
   (when (instance? Symbol$ClassSymbol js)
-    (if (:anon? c)
-      (record! p :enter/members :declined t nil nil)
-      (let [nd (try (nmembers-data c) (catch Throwable e [:failed (str e)]))
-            jd (jmembers-data p js)]
-        (record! p :enter/members (if (= nd jd) :equal :differ) t
-                 (if (set? nd) (vec (remove (into #{} jd) nd)) nd) (vec (remove (into #{} (when (set? nd) nd)) jd)))))))
+    (let [nd (try (binding [d/*anon-ctor* (when-let [h @anon-ctor-hook] #(h p %))] (nmembers-data c))
+                  (catch Throwable e
+                    (if (:arbace.repr.java.decls/decline (ex-data e)) ::declined [:failed (str e)])))]
+      (if (identical? nd ::declined)
+        (record! p :enter/members :declined t (str "an anonymous class's constructor") nil)
+        (let [jd (jmembers-data p js)]
+          (record! p :enter/members (if (= nd jd) :equal :differ) t
+                   (if (set? nd) (vec (remove (into #{} jd) nd)) nd) (vec (remove (into #{} (when (set? nd) nd)) jd))))))))
 
 ;;; Symbol.isMemberOf of a method (JFS90)
 
@@ -630,3 +666,29 @@
   (when s
     [:method (jcid p (.owner s)) (str (.name s))
      (mapv #(jerased-key p %) (.getParameterTypes (.erasure s jt/*types*)))]))
+
+;;; The platform classes' members (JFS106 (b)): the class files the run read against javac's ClassSymbols
+
+(defn check-platform-members!
+  "The fact :enter/platform-members: each platform class (read from its class file) whose members the
+  run's native provider has read, once per registry, its members by name, flags and erased signature
+  against javac's ClassSymbol of the same module and flat name (ClassReader's members)."
+  [p]
+  (let [reg (:reg p)
+        ^java.util.Map done (d/memo reg :platform-members-checked #(java.util.concurrent.ConcurrentHashMap.))]
+    (doseq [c (vec (.values ^java.util.Map (:classes reg)))
+            :when (and (instance? java.util.Map (:memo c)) (= :class (:sk c)) (not (:src c))
+                       (.containsKey ^java.util.Map (:memo c) :members))
+            :when (nil? (.putIfAbsent done c true))]
+      ;; a member whose signature names a class file's local class (a lambda method's) declined
+      (let [nd (try (nmembers-data c) (catch Throwable e [:failed (str "a class file's local class" (when keep-declined? (str ": " e)))]))
+            jd (try (jmembers-data p (rl-class p c)) (catch Throwable e [:failed (str e)]))]
+        (record! p :enter/platform-members
+                 (cond (and (vector? nd) (= :failed (first nd))) :declined
+                       (= nd jd) :equal
+                       :else :differ)
+                 {:pos (:flat c) :tag :CLASS}
+                 (cond (set? nd) (vec (remove (into #{} (when (set? jd) jd)) nd))
+                       (vector? nd) (second nd)
+                       :else nd)
+                 (if (set? jd) (vec (remove (into #{} (when (set? nd) nd)) jd)) jd))))))
