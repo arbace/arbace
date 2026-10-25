@@ -924,8 +924,17 @@ changed namespaces' own code; checked below):
   names no JDK class the edge lacks).
 - `bin/clojure-tests --aot` against `test/arbace-go-aot-results.edn`: no regressions (on the gate's
   build of the head: 20,489 of 20,520, 27 of 27 specs, the levels' three disagreements above).
-- The shipped program's translation: FINAL-TREE-CHECK.
-- `bin/arbace-go --fixpoint`: FINAL-FIXPOINT.
+- The shipped program's translation: the branch's build (the gate's, `bin/arbace-go --build`)
+  against main `407ed654`'s, built the same way from a copy of its tree: c2j's tree differs in the
+  changed namespaces' own classes only (`arbace.c2j.emit`, `arbace.c2j.main`, `arbace.classes.analyze`,
+  `arbace.classes.native`, `arbace.j2g.code`, `arbace.j2g.world`) and in `arbace.j2g.main`'s
+  auto-gensyms' numbers; j2g's Go forms of the program in those packages, the embedded sources, the
+  image's Go (`image.ae`), jrt's `natives.ae` and `arbace/lang`'s `Compiler.ae` (the new native
+  `Compiler$AST/dynamic`, the lines after it) and `j2g_classes.ae` (its reflection entry): every
+  other file byte for byte. So j2g's changes (the macros' namespace, `refer-vars!`, the loop
+  variables) leave the program's own translation as it was.
+- `bin/arbace-go --fixpoint`: holds, G1 = G2 = G3 byte for byte (152,711,328 bytes, j2g's
+  programs equal by `diff -r`); stage 0 = G1 not, as expected until the re-seed (RPS49).
 
 ### The essential subset (REAP8, proposed; not added)
 
