@@ -143,6 +143,8 @@
   [path ^String text]
   (let [forms (read-all text)
         pkg (some (fn [f] (when (is? f 'in-ns) (str (quoted (second f))))) forms)
+        ;; mode :full of a Java file without declarations: the record on its in-ns (RPS83 (a))
+        file-record (some (fn [f] (when (is? f 'in-ns) (:java/file (meta f)))) forms)
         imports (into {}
                       (for [f forms :when (is? f 'import)
                             g (rest f)
@@ -157,8 +159,9 @@
               ;; a Java file without declarations (its package line and comments alone): the
               ;; converter's file holds its in-ns alone, which Java's file is again
               (and pkg (some-> (origin-of text) (str/includes? ".java"))))
-      {:path path :origin (origin-of text) :pkg (or pkg "") :imports imports :forms body
-       :radix (radix-map text)})))
+      (cond-> {:path path :origin (origin-of text) :pkg (or pkg "") :imports imports :forms body
+               :radix (radix-map text)}
+        file-record (assoc :file-record file-record)))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; The index: what the printer knows about the classes of the corpus and of --index
@@ -1591,6 +1594,21 @@
 
 (defn- same-form? [a b] (= a b))
 
+(defn- read-of?
+  "Is `a` a read of place `p`: the place itself, or its read cast to its instantiation when the
+  place is declared of a type variable ((cast String (.-x foo)) of a Foo<X>'s X x: the
+  converter's cast, which Java's compound assignment and increment leave implicit; T6869075,
+  QualBoxedPostOp2, \"As built: JC6\")?"
+  [env a p]
+  (or (same-form? a p)
+      (and (is? a 'cast) (= 3 (count a)) (same-form? (nth a 2) p)
+           ;; the field's declared form in its own class (a type variable is not a class there)
+           (let [f (or (decl-form-of env p)
+                       (when (and (seq? p) (= 2 (count p)) (symbol? (first p)) (str/starts-with? (name (first p)) ".-"))
+                         (some-> (recv-jtype env (second p)) (find-field (subs (name (first p)) 2)) :form)))]
+             (and (symbol? f) (nil? (namespace f)) (not (str/includes? (str f) "."))
+                  (nil? (class-binary (:scope env) f)))))))
+
 (defn compound
   "For (set! P V) or (aset A I V): [place-text op rhs-form] when V is P op rhs (Java's compound
   assignment, its narrowing written out by the converter), [place-text \"++\"/\"--\" nil] for an
@@ -1603,15 +1621,15 @@
         inner (if narrow? (second v) v)
         h (str (head inner))]
     (cond
-      (and (seq? inner) (incs h) (= 2 (count inner)) (same-form? (second inner) place)
+      (and (seq? inner) (incs h) (= 2 (count inner)) (read-of? env (second inner) place)
            (or (not narrow?) (#{"unchecked-inc-int" "unchecked-dec-int"} h)))
       [(incs h) nil]
       (and (seq? inner) (#{"unchecked-add-float" "unchecked-subtract-float"} h) (= 3 (count inner))
-           (same-form? (second inner) place) (= 1 (nth inner 2)) (not narrow?))
+           (read-of? env (second inner) place) (= 1 (nth inner 2)) (not narrow?))
       [(if (= h "unchecked-add-float") "++" "--") nil]
-      (and (seq? inner) (compound-ops h) (= 3 (count inner)) (same-form? (second inner) place))
+      (and (seq? inner) (compound-ops h) (= 3 (count inner)) (read-of? env (second inner) place))
       [(str (compound-ops h) "=") (nth inner 2) h]
-      (and (seq? inner) (= h "java-str") (= 3 (count inner)) (same-form? (second inner) place) (not narrow?))
+      (and (seq? inner) (= h "java-str") (= 3 (count inner)) (read-of? env (second inner) place) (not narrow?))
       ["+=" (nth inner 2) "java-str"]
       ;; boolean &= |= with the converter's temporaries
       (and (is? inner 'let) (let [[_ bv body & more] inner]
@@ -1696,7 +1714,10 @@
   (let [v (if (is? setf 'set!) (nth setf 2) (nth setf 3))
         [op _] (compound env place v)]
     (if (#{"++" "--"} op)
-      (e P-POSTFIX (str (place-text env place) op))
+      ;; the assignment's place: the old value's read may be cast (a field of a type variable
+      ;; read as its instantiation, (cast Integer (.-i Outer/super)): QualBoxedPostOp2), which
+      ;; Java cannot increment
+      (e P-POSTFIX (str (place-text env (if (is? setf 'set!) (second setf) place)) op))
       ;; not an increment: the old value, then the assignment, Java has no such expression
       (throw (ex-info "unsupported postfix" {:setf setf})))))
 
@@ -1784,6 +1805,40 @@
            (every? (set (rest (second y))) (mapcat #(if (is? % '&) (rest %) [%]) types)))
       y
       :else nil)))
+
+(defn- intersection-cond-cast
+  "For (cast T (if c ^T a ^T b)), or (cast U (cast T (if c ^T a ^T b))), the casts and hints the
+  converter wrote for a conditional of javac's intersection type (the lub of branches of classes
+  sharing T and U, JC5): the bare conditional, whose type Java infers again, when each branch's
+  own type (its hint removed) has every cast's type among its supertypes; else nil
+  (doc/classes/JAVA-CONFORMANCE-SURVEY.md, \"As built: JC6\": T4954546, T5073060a)."
+  [env x]
+  (loop [y x ts []]
+    (if (and (is? y 'cast) (= 3 (count y)))
+      (recur (nth y 2) (conj ts (erase (:scope env) (second y))))
+      (cond
+        ;; a switch expression's values (switch sel k v ... default), untagged
+        (and (seq ts) (every? some? ts) (is? y 'switch) (odd? (count y)) (> (count y) 3))
+        (let [vs (concat (take-nth 2 (drop 3 y)) [(last y)])]
+          (when (every? (fn [z] (and (not (and (instance? arbace.lang.IMeta z) (meta-tag z)))
+                                     (let [zt (type-of env z)]
+                                       (and zt (decl-of zt) (not-any? #{zt} ts)
+                                            (every? (set (supertypes zt)) ts)))))
+                        vs)
+            y))
+        (and (seq ts) (every? some? ts) (is? y 'if) (= 4 (count y)))
+        (let [t (peek ts)
+              [_ c a b] y
+              bare (fn [z] (when (and (instance? arbace.lang.IObj z) (some-> (meta-tag z) (#(erase (:scope env) %)) (= t)))
+                             (let [z' (vary-meta z dissoc :tag)
+                                   zt (type-of env z')]
+                               (when (and zt (decl-of zt) (not-any? #{zt} ts)
+                                          (every? (set (supertypes zt)) ts))
+                                 z'))))
+              a' (bare a) b' (bare b)]
+          (when (and a' b')
+            (with-meta (list (head y) c a' b') (meta y))))
+        :else nil))))
 
 (defn- class-literal-type-text
   "The type of class literal `x`.class: an inner class of a generic class by its qualified name
@@ -1907,6 +1962,8 @@
                                            (map #(ex-text env % (inc P-ADD)) (rest args))))))
           (and (= hn "cast") (intersection-fn-cast x))
           (ex env (intersection-fn-cast x))
+          (and (= hn "cast") (intersection-cond-cast env x))
+          (ex env (intersection-cond-cast env x))
           (= hn "cast")
           (let [[t v] args
                 ;; a cast javac would leave out (of a literal already of its type) goes through
@@ -3691,7 +3748,7 @@
 (defn java-text-full
   "The Java source of unit `u` in the full layout (its first form holds the record of its file)."
   [{:keys [pkg forms] :as u}]
-  (let [{:keys [text at]} (:java/file (meta (first forms)))]
+  (let [{:keys [text at]} (or (:java/file (meta (first forms))) (:file-record u))]
     (binding [*full* {:text text}]
       (if (= at (mapv #(first (full/span %)) forms))
         (with-file-scope u
@@ -3744,7 +3801,7 @@
                      (for [u units]
                        (try
                          (let [text (cond
-                                      (and (= "full" layout) (:java/file (meta (first (:forms u)))))
+                                      (and (= "full" layout) (or (:java/file (meta (first (:forms u)))) (:file-record u)))
                                       (binding [*anew* anew] (java-text-full u))
                                       (= "declarations" layout) (binding [*declarations* true] (java-text u))
                                       :else (java-text u))
