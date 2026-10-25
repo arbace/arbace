@@ -1900,3 +1900,161 @@ of 22,740 (52 known), diffcheck 12,789 of 12,801 (12 known), goi's and Java's es
 the generated variants, j2g's edge, `bin/reap` (12 of 12 cells, 0 problems). `bin/java-check
 --levels print --only ...` alone (the read level's cache, not its rows) gives the recorded rows.
 `bin/gate --full` was not run (the policy until the milestone).
+
+## As built: REAP5b (2026-10-25)
+
+RPS60-RPS63 (a), on the branch `reap5b-printer` from main `6f3a93ad`: repr/java's printer
+(`arbace.repr.java.print`) fixed so that javac on Arbace accepts the printed Java of the 62 tests of
+`:print-syntax` (45), `:print-conversions` (9), `:print-javac-other` (7) and `:print-empty-unit` (1).
+Measured as REAP5 was: main's javac tool executable (`target/arbace-go/amd64/arbace-javac`, key
+`bf740cf0…`, `REPR_JAVA_STALE_OK=1`: javac's world is unchanged, repr/java's namespaces load from the
+checkout), main's stage 0 as the tools' host, 8 jobs, every run in the host's heavy slots. Only the
+printer changed (`arbace/repr/java/print.ae`, evaluated from the checkout on the tools' host; not
+embedded in the shipped program): no converter change, no shipped code (`go/`, `overlay/`, `jdk/`, the
+program's `arbace/` untouched), no re-seed. The javac tool's key moves (it embeds `arbace/repr/java`),
+as for any repr/java change; nothing reads the printer there.
+
+**The fixes**, each with its case in the samples (`test/repr/java/java/sample/PrintSyntax.java`, new:
+the round trip's forms, ae and text levels pass it; below, "The checks"):
+
+- *Parentheses and casts Java's grammar needs* (RPS60): an array creation indexed is `(new byte[n])[0]`;
+  a switch expression is a unary expression (JLS 15.15), so a receiver or a postfix operand puts it in
+  parentheses, `(switch (x) {...}).trim()`, and a standalone one (a receiver) gives its lambda arms
+  their casts; a lambda or method reference as a receiver, as an argument for a parameter declared of
+  another type (`Object`, not a type variable), as an element of an `Object[]` initializer or as a
+  for-each's `Iterable` is cast to its interface with the type arguments the lambda's instantiated
+  tags give (`((Supplier<Integer>) () -> 3).get()`, `(Iterable<Integer>) s::iterator`; raw when the
+  tags give none); an assignment as a conditional's false branch is parenthesized; `(do obj (C/m))`
+  is `obj.m()` only when `obj` is a reference (`(x = 1).isTrue()` and `sb.setLength(45).valueOf(45)`
+  were `x = 1; ... isTrue()`); the intersection cast of a method reference's receiver lambda,
+  `((A & B & AB & C) () -> ...)::b`, as the converter's nested casts give it.
+- *Names* (RPS60): an array type's method reference, `int[]::clone` (the converter's `int/1/.clone`
+  reads as namespace `int`, name `1/.clone`); a type variable's method reference, `T::get` (the forms
+  name its erasure, which does not declare `get`); a local class by its simple name and its member
+  classes outside it as `Local.Member`; an anonymous class's type as `var`, its `this` unqualified
+  (`Outer$Inner1$1/this`); `o.new Inner() {...}` with the simple name; an inner class of a generic
+  class's literal qualified (`Outer.Inner.class`: by simple name Java takes it as `Outer<T>.Inner` in
+  a static context); a member class of a package-private class named through the public subclass the
+  file imports (`Named.X`, an `import static a.Named.X` of `a.Private$X`); identifiers with
+  supplementary characters kept apart as Unicode escapes (`𐐀abc`, not `_abc`); the
+  converter's `Int/TYPE` and `Char/TYPE` in an annotation's value as `int.class`, `char.class`
+  (RPS84).
+- *Conversions* (RPS61): the casts assignment contexts need (JLS 5.2), from the printer's index: a
+  primitive into another primitive's box, `(int) x.byteValue()` into an `Integer`; a box into a narrower
+  primitive or another box, `(byte) (int) i`; an int literal for an `Integer`, `Short`, `Byte` or
+  `Character` target without its `L`; a narrowed compound assignment on a box written out
+  (`b = (byte) (b + i)`: `(Byte) (int)` is no cast); a constant variable left to Java's narrowing.
+- *javac's other refusals* (RPS62), the seven: a pattern binding rebound in the scope of one of its
+  name, where the converter nested a `&&` chain's `if-instance`s (Guards), renamed `i_1`; a loop whose
+  pattern binding escapes into the statements after it (`while (!(o instanceof String s)) {}`, and
+  the do-while's) printed as that loop, in a block of its own with the statements after it when a
+  later one binds the name again (BindingsTest1, the block the forms do not keep); a labeled switch
+  whose breaks give the method's value, `return switch (...) {...}` (ExpressionSwitchBreaks1: it lost
+  the values before); a local a lambda captures declared without initializer when a `try` assigns it
+  and its `catch`es rethrow (AccessControlTest; for captured locals only, which keeps the round trip's
+  class files, RPS87); a declaration's TYPE_USE annotation that the converter also keeps on a
+  qualified type's outer class written once (`@TypeAnno("O") public Outer<..>.Inner<..> foo2()`); the
+  package-private class above (T6225935); `new C<>()` for a parameterized target whose class the index
+  does not declare generic (javax.tools' `DiagnosticCollector`: the raw `new` warned under `-Werror`).
+  None needed the forms' model.
+- *An empty compilation unit* (RPS63): a converted file of a Java origin holding only its `in-ns` is a
+  unit without forms, printed as its package line, so the read again gives the package's namespace
+  its `load` (FirstChar's forms step passes). Its mode `:full` record is not in the forms: the
+  converter writes `:java/file` on a unit's first form and this unit has none, so the full layout
+  prints the package line alone and the text step differs (`:print-full-empty-unit`, `:pending`,
+  RPS83).
+- Also: the host's bridge methods are left out of its declarations (`clone()Object` beside the
+  covariant one), and a class neither the index nor the host declares has no known `clone()` type
+  (URICertStoreParameters' `p1.clone()` was `Object`).
+
+**Numbers** (2,722 run tests the JDK passes; REAP5's in parentheses):
+
+| step | took it | pass | not |
+|---|---:|---:|---:|
+| print (lines and full layouts) | 2,720 | 2,718 (2,718) | 2 (the dimensions) |
+| javac accepts the printed Java | 2,718 | 2,686 (2,625) | 32 (93): 30 type arguments, 2 `--release` |
+| the read again: forms equal | 2,686 | 2,618 (2,577) | 68 (48) |
+| mode `:full`: text byte for byte | 2,720 | 2,717 (2,717) | 3 (the two arrays; FirstChar) |
+| class files the original's | 2,686 | 2,149 (2,121) | 537 (504) |
+| **the level** | 2,722 | **2,132** (2,104) | 590 (618) |
+
+By class: by design 484 (`:print-classes`, 472: the tests javac now accepts whose class files differ
+by the forms' known kinds); deferred, decided 105: type arguments 30 (`:print-type-arguments`: REAP5's
+30 but TargetType05, now at the forms step, and RemoveMicroBenchmark, `Stream.<Collection<Integer>>of`,
+moved from `:print-syntax` by `:tests`), the printed Java read to other forms 68 (`:print-forms`, 47:
+the 21 javac refused before, below), `--release` 2, the dimensions 2, the read failed 2, the overload
+cast 1; **pending** 1 (`:print-full-empty-unit`, RPS83). `:print-syntax`, `:print-conversions`,
+`:print-javac-other` and `:print-empty-unit` are gone. `bin/reap`: Java print **2,132 / 484 / 106 (1
+pending)**, 12 of 12 cells, 0 problems. Of the 62 tests: 28 pass, 21 differ at the forms step, 12 at
+the classes step (by design), 1 at the text step (FirstChar).
+
+The 21 now at the forms step (`:print-forms`, RPS64's kinds): the casts of the conversions where the
+converter's forms type a box otherwise than its declaration (`Byte x = 1;` is
+`(let [x (Integer/valueOf 1)] ...)`: an `Integer` to the forms, so `x = (byte) x` needs `(int)` and reads
+back with it; TestByteBoxing, TestShortBoxing, TestRemoveUnreachableCCP, the three
+TestLoadSliceWithMultipleMemoryInputStates, TestDuplicateSimpleLoopBackedge, Big, TargetType05:
+RPS85); the renamed binding (Guards, RPS86); a `long` literal's negation, a float constant's digits, a
+byte's cast to byte (HotSpot's generated fuzz tests, six), an unexpanded temporary (`o_3`, Test6712835), a label's name
+(ExpressionSwitchBreaks1), `when` against `when-instance` (BindingsTest1), a for-each binding's and a
+switch's local's tag (IteratorMicroBenchmark, ExpressionSwitchEmbedding).
+
+**The round trip** (`bin/repr-java roundtrip --corpus baseline,samples,jdk --text`): the baseline and
+jdk corpora as their references, byte for byte at every level (baseline forms 189, ae 182, classes 143
+of 183, text 183; jdk forms 874, ae 816, classes 473 of 838, text 838, anew 799); the samples 18
+converted files (17 and `PrintSyntax.ae`): forms 18, ae 18, classes 12 of 15 (`PrintSyntax`'s class
+files differ by a known kind, a value's control flow), text 15 of 15, anew 15; references
+recorded again (`--record`) for the new sample alone. A first version counted a `catch` that rethrows
+as assigning for every local, not only captured ones: jdk's classes 478 (six more files' locals
+declared as written) but `CollatorProviderImpl` one less, the baseline's 145, and at the print level's classes step 9
+tests more passing and 13 fewer; the rule stays the captured locals' (RPS87). `bin/repr-java check
+--update` wrote the sample's expected forms (`test/repr/java/expected/java/sample/PrintSyntax.ae`, the
+package's namespace file); `parse-check`, `front-check` and `attr-check --corpus samples` pass with it
+(a qualified anonymous creation, `new Outer().new In() {}`, was left out of the sample: the native
+attribution provider declines it, JN9c's; java-check's AnonymousInSuperCallTest and MissingCast2 hold
+it); `bin/javac-vendor classes samples` compares it as the others.
+
+**Scratch** (the worktree's `.tmp/`, for the merge): `print-full.log` (the level's last run, with the
+steps' counts), `print-results-1.tsv` (the first run's `results.tsv`, before RPS87's restriction and
+the two regressions' fixes), `print-np-after.tsv` (the non-passes but the classes step), `run62-after.log`
+(the 62 tests alone), `roundtrip1.log` (the first round trip), `roundtrip2.log` (the recording),
+`reap-entries-before.txt` (`bin/reap --entries` at the base).
+
+### Proposals (RPS83-RPS87)
+
+- **RPS83 An empty unit's mode `:full` record (1, `:print-full-empty-unit`).**
+  - Options: (a) the converter writes `:java/file` (the text, no starts) on the `in-ns` of a unit without
+    declarations (convert.ae's `(and *full* (seq forms))`), in JC5 or after it, and the printer's full
+    layout prints a unit without forms from it; (b) by design: a file without declarations has no form
+    to hold its text, its package line is printed.
+  - *Recommended: (a)*: mode `:full`'s promise (every file back byte for byte) then holds for it; a few
+    lines on each side, the converter's in the converter's owner's hands.
+- **RPS84 The converter's `Int/TYPE` and `Char/TYPE`.**
+  - Options: (a) the converter writes `Integer/TYPE` and `Character/TYPE` for `int.class` and
+    `char.class` in an annotation's value (convert.ae's `attr-value`, `str/capitalize` of the primitive's
+    name), in JC5, the expected forms written again where they change, the printer's reading of the
+    old spelling kept for forms written before; (b) as built: the printer reads them.
+  - *Recommended: (a)*: the forms name classes that do not exist, which the interpreter and j2g would
+    meet in an annotation's value (Primitives passes the print level only by the printer's reading).
+- **RPS85 A box the forms type otherwise than its declaration (9 of `:print-forms`).**
+  - Options: (a) the converter tags such a local with its declared box, or boxes its initializer to it
+    (`Byte x = 1` as `^Byte x (Byte/valueOf (unchecked-byte 1))`), in JC5, so the printer needs no
+    cast and the forms step passes; (b) as built: the printer's casts, the tests at the forms step,
+    RPS64 deciding the kind.
+  - *Recommended: (a)*: the forms are wrong about `x`'s type (an `Integer` to the interpreter), which
+    is a meaning lost at the read.
+- **RPS86 A pattern binding rebound in the scope of its name (Guards).**
+  - Options: (a) as built: renamed (`i_1`), javac accepting, the forms step differing by the name; (b)
+    the printer folds the converter's nested `if-instance`s of a `&&` chain back into the condition
+    (its else branches equal), giving the source's forms; (c) the converter keeps the `&&` chain.
+  - *Recommended: (a)* now, (b) with RPS64's decision on restructurings: (b) is the printer's alone but
+    needs the else branches' equality, which the fuzz-like tests make large.
+- **RPS87 A local declared without initializer.**
+  - Options: (a) as built: definite assignment counts a rethrowing `catch` only for a local a lambda or
+    class captures (where Java needs the declaration without initializer), the round trip's references
+    unchanged; (b) for every local: six more jdk files' and two of the baseline's class files the
+    original's, one jdk file fewer, and at the print level 9 tests more and 13 fewer; (c) the converter records whether the source
+    wrote the initializer (JF3's kind, `:full` mode's text has it).
+  - *Recommended: (a)*: the forms do not say which the source wrote, and (b) trades one way for the
+    other; (c) with JF3.
+
+**The checks.** See below.
