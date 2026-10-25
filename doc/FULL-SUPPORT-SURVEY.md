@@ -1647,4 +1647,9 @@ non-passes with their reasons), `read-cold.log` (the read level's cold run).
   - *Recommended: (a)*: the same output in 24 s; (c) would drop the generic classes' knowledge the
     printer's casts need.
 
-**The checks.** The essential gate at the branch's head: GATE_RESULT.
+**The checks.** The essential `bin/gate` at the branch's head: passed (9m17s; the gate's
+executables main's, the same `gate_key`): the suite 20,564 of 20,580 as recorded, the oracle 22,688
+of 22,740 (52 known), diffcheck 12,789 of 12,801 (12 known), goi's and Java's essential checks,
+the generated variants, j2g's edge, `bin/reap` (12 of 12 cells, 0 problems). `bin/java-check
+--levels print --only ...` alone (the read level's cache, not its rows) gives the recorded rows.
+`bin/gate --full` was not run (the policy until the milestone).
