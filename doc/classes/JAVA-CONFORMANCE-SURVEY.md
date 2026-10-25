@@ -1826,6 +1826,20 @@ constants), `out.ae` (cut classes' superclasses), `decls.ae` (captures), `world.
 `jdk/javac/provenance.edn`; `test/java-fixtures/forms` (1). The provenance files name javac's tool
 that wrote them, main's stale one (`bf740cf0…`, as JC1-JC3's runs): the re-seed's tool writes them again.
 
+**Checks**: the essential `bin/gate` at the branch's head passed in 19m04s (the executables built afresh by
+stage 0): the smoke test; Clojure's suite on the test build, no regressions; the oracle 22,688 of 22,740, its
+52 known mismatches as recorded (a first run, before JCS60 (a), had the six `native.ae` cases of a `do`'s
+value new); diffcheck as recorded (Clojure's pair 12,046 of 12,056, the Java forms' pair 743 of 745); goi's
+essential check 801 of 801; Java's essential check 428 of 428 from the forms written afresh; the generated
+variants; j2g's edge (verify passed, after the update above); `bin/reap` 0 problems (Java: eval 1,514, AOT
+1,681). The `--full` gate's checks of repr/java were run one by one as above; the rest of `--full` was not.
+
+The scratch this section cites (the worktree's `.tmp/jc5/`, not tracked): `check2.log` (the whole check's
+run, `--record`), `results-run2.tsv` (its results), `chain1.log`, `chain2.log` (the capture tests' compiled
+re-runs and the essential forms' update), `rj-check2.log`, `front-check.log`, `roundtrip.log`,
+`roundtrip-text.log` (repr/java's checks), `jrt-update.log`, `javac-convert.log`, `edge-update.log`,
+`fixtures.log` (the conversions afresh), `gate2.log` (the gate).
+
 ### Proposals (JCS60-JCS69)
 
 - **JCS60 A top-level `do`'s value.** The evaluator now defines a top-level `do`'s consecutive Java
