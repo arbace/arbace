@@ -2017,7 +2017,8 @@ it); `bin/javac-vendor classes samples` compares it as the others.
 steps' counts), `print-results-1.tsv` (the first run's `results.tsv`, before RPS87's restriction and
 the two regressions' fixes), `print-np-after.tsv` (the non-passes but the classes step), `run62-after.log`
 (the 62 tests alone), `roundtrip1.log` (the first round trip), `roundtrip2.log` (the recording),
-`reap-entries-before.txt` (`bin/reap --entries` at the base).
+`reap-entries-before.txt` (`bin/reap --entries` at the base), `gate.log`, `gate-1.log` (the gate's two runs),
+`oracle-rerun.log`.
 
 ### Proposals (RPS83-RPS87)
 
@@ -2057,4 +2058,15 @@ the two regressions' fixes), `print-np-after.tsv` (the non-passes but the classe
   - *Recommended: (a)*: the forms do not say which the source wrote, and (b) trades one way for the
     other; (c) with JF3.
 
-**The checks.** See below.
+**The checks.** The essential `bin/gate` at the branch's head (`c82dcaed`, the printer and the records):
+passed, run again (3m13s, its builds cached) after a first run whose `oracle-go` step failed on the
+frozen jar's build, made at once by that step and `j2g-edge` in a fresh worktree (the oracle alone then
+passed, as recorded): the suite 20,566 of 20,580 as recorded, the oracle 22,688 of 22,740 (52 known),
+diffcheck 12,789 of 12,801 (12 known), goi's 801 and 248, Java's essential 428 interpreted and 420
+compiled, the compiled suite's subset 7,243 of 7,273 as recorded, the generated variants, j2g's edge,
+`bin/reap` (12 of 12 cells, 0 problems, 1 pending). Beside it, as above: `bin/java-check --levels
+read,print` (all 2,722, its report recorded with `--record`: `check-print.edn`; `check-read.edn`
+unchanged), `bin/repr-java roundtrip --corpus baseline,samples,jdk --text --record`, `bin/repr-java
+check --update`, `parse-check`, `front-check`, `attr-check --corpus samples`, `bin/javac-vendor
+classes samples` (11 files, 40 classes, byte for byte). `bin/gate --full` was not run (the policy until
+the milestone).
