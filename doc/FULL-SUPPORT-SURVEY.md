@@ -2369,6 +2369,20 @@ jobs, one j2g at a time.
   (`clojure.string`, a reader conditional `#?(:clj ... :cljs ... :default ...)`), printing `== HELLO
   (clj) ==`.
 
+- **A Go package importing Arbace's (RPS103 (b)).** The sample `callback` (`test/programs/callback`):
+  `callback.main` requires the package `callback/relay`, a module of its own under `_modules/` that
+  imports the package `arbace` of the main module (`[arbace "arbace"]`): `relay.Apply` calls an
+  anonymous Clojure fn through `arbace.Call` and `relay.Named` resolves a var with `arbace.Var` and
+  calls it (`callback.main/shout`), the result read back with `arbace.Long` and `arbace.GoStr`. The
+  import resolved without a fix (Go's build list holds the main module, whose `go.mod` `require`s and
+  `replace`s `callback`), the package is compiled through the program's table (`callback/relay` in
+  `(arbace.go/packages)`, goi's interpreter never loaded: the runs print `callback/relay compiled`), and
+  `Hooks` is set in the compiled program. Its two runs pass (`apply 42`, `HELLO, WORLD!`); c2j 1 source,
+  5 classes, j2g 63 s, the build 61 s. Not in the essential gate; `bin/gate --full`'s `programs-full`
+  runs it with the other samples (the whole `--check`: 10 of 10 runs pass). (The first spelling `(int x)` for a conversion was refused by the
+  table, `annotation conv ... forms say a call`, and the build then stopped at the package's `require`
+  by the fallback; Go forms spell it `(conv int x)`.)
+
 ### Results
 
 | sample | c2j | j2g | build | executable | runs |
