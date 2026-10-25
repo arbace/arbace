@@ -316,7 +316,10 @@ Prior art:
   (`test/java/check.ae`) on the tools' host; the essential subset's forms committed in `test/java/forms/`
   (`--forms verify|update`); `diagnostics` (JC3, "As built: JC3"): langtools' golden-diagnostics tests
   (compile-fail-ref, the corpus `langtools-diagnostics`), run in place by javac on Arbace as jtreg runs
-  them, the output against the golden file line by line (`test/java/check-diagnostics.edn`).
+  them, the output against the golden file line by line (`test/java/check-diagnostics.edn`); `print` (REAP5,
+  doc/FULL-SUPPORT-SURVEY.md, "As built: REAP5"): each test's forms printed back to Java by repr/java's
+  printer (`test/java/print.ae`), javac on Arbace accepting it, read again to the same forms, mode `:full`
+  printed back byte for byte, its class files against the original's (`test/java/check-print.edn`).
 - `doc/ALPINE.md`: the host's Alpine packages as one minimal `apk add` line (`bin/alpine-env
   world`, `check`, `simulate`), the subset Arbace uses, and what apk does not provide (jdk26u,
   TamaGo's Go, Go's module cache: only `bin/gate --full`'s vendoring checks need it). No build
@@ -355,7 +358,7 @@ Prior art:
   that wrote it, JFS32), `bin/repr-java parse-check` (the native parser's trees equal to javac on
   Arbace's, JN8), `bin/repr-java front-check` (the converter's forms from the native trees equal to
   javac's trees', JFS66 (b)), `bin/repr-java attr-check` (the native provider's facts equal to javac on
-  Arbace's, JN9a), `bin/java-check --levels read,interp,classes,compiled,diagnostics` (Java's conformance check, every
+  Arbace's, JN9a), `bin/java-check --levels read,interp,classes,compiled,diagnostics,print` (Java's conformance check, every
   corpus, then `--forms verify`: the essential tests' forms read afresh); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
   (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
   subset and `bin/box-suite`, then

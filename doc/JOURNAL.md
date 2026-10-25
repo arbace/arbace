@@ -1861,3 +1861,46 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   Clojure, Java and Go: read, eval, AOT and print, each cell meeting the milestone's rule (none fails,
   every non-pass in a recorded class). Its survey first (the prior art go-whim's, entry above; the open
   questions C's eval and AOT on TamaGo's toolchain alone); the scripts' sweep stays queued beside it.
+
+## 2026-10-25: REAP8, REAP5 and JC2b merged, the matrix 12 of 12; RPS60-RPS78 and JCS70-JCS79 decided; REAP5b, REAP7 and the harness follow-ups started (the user)
+
+- REAP8 (branch `reap8-essential` from `840e514b`, main merged into it for RPS55; merged `de5cb07a`): the
+  essential subsets in the essential gate: `bin/goi check --aot --essential` (`test/goi/essential-aot.txt`,
+  248 programs by the rule in its header: every passing directory test, the 13 run programs with gc's
+  flags, every second of the 124 errorcheck programs goi sets apart, every fourth of the 41 known run
+  programs, 36 of goi's essential list; 67-71 s at 8 jobs), `bin/java-check --essential-compiled` (the
+  essential tests `check-compiled.edn` passes, 420 of 428, from their committed forms in one program cached
+  by key; the compiled namespaces' `aot.key` checked; a timeout run again at twice the limit), `bin/clojure-tests
+  --aot --essential` (`test/clojure/essential-aot.txt`, 15 namespaces compiled alone: 7,243 of 7,273
+  assertions as the reference's); `J2G_LOCK`, one whole-program j2g (about 20 GiB) at a time in the
+  essential phase; `--gate-build` keeps `aot/` and `aot.key`; RPS48 (b): every embedded namespace prepared and
+  compiled into the whole `--aot`'s program (235 sources, 22,838 classes, no test moved). The AOT reference
+  re-recorded on the merged head: 785 tests, 20,580 assertions, 20,549 pass (BitSet's proxy, SL5's metadata
+  53 of 53 and java.javadoc 4 of 5 now run); `:proxy-bitset` dropped, `:d6-namespaces-cut` replaced by a
+  by-design `:javadoc-url` (RPS82 (a)). The essential gate before/after: cold 20m51s/21m23s, cached
+  2m29s/2m42s. No shipped code. The gate on `de5cb07a` passed (17m04s). Decided: RPS70-RPS73 (a), RPS74
+  (b), RPS75 (a), RPS76 (a), RPS77 (b), RPS78 (a).
+- REAP5 (branch `reap5-java-print` from `840e514b`, merged `678e15ba`): `bin/java-check --levels print`,
+  per test five steps (the read level's forms printed in the lines layout with `--index jdk/forms`, javac
+  on Arbace accepting the printed Java, read again to the same forms, mode `:full` printed back byte for
+  byte, the class files against the original's, judged by `jrt.classfile`, no JVM), namespace `java.print`
+  (`test/java/print.ae`), `test/java/check-print.edn`; 2,104 of 2,722 pass (javac refuses 93 printed files,
+  48 read to other forms, 504 class files differ: 472 by design, RPS9 (a)); in `bin/gate --full`'s java chain;
+  `make java-check-print`. It found printer bugs (an array creation as an operand, a switch expression or
+  lambda as a receiver, `int[]::clone`, local and anonymous class names, qualified inner creation) and a cast
+  the converter loses (`v((Object) "s")` read as `v("s")`, another overload). The matrix: 12 of 12 cells
+  checked. No shipped code. Decided: RPS60-RPS65 (a), RPS66 (a) then (b), RPS67-RPS69 (a).
+- JC2b (branch `java-check-jc2b` from `840e514b`, merged `6d8b8e27`): JCS42 (b) (j2g refuses a subclass of
+  `PrintStream`/`PrintWriter`, its support code's leaves, `arbace.j2g.checks`), JCS43 (a) (`_f` on a static
+  field or enum constant meeting a derived suffix), JCS44 (a) (refusals name the import: `:j2g-world` 420 to
+  11, the rest into the package classes), JCS45 (a) (`test/java/levels-known.edn`), JCS46 (a) (the runtime of
+  the compiled namespaces checked), JCS47 (a), JCS48 (a, b) (shards of 500, a shard whose j2g dies split, to
+  25); the shipped program's translation unchanged (checked against main's `target/arbace-go/j2g`); interp
+  1,462 (was 1,426: 38 timeouts pass on the retry), compiled 1,636 (was 1,632). Merged cleanly after REAP5.
+  The gate on `6d8b8e27` passed (16m28s; all subsets). Decided: JCS70 (a), JCS71 (a), JCS72 (b), JCS73-JCS77
+  (a), JCS78 (c), JCS79 (a).
+- The agents' slips (none committed): `pgrep -x` in a wait loop (REAP5), `<(...)` once (JC2b), a scratch draft
+  with `<(...)` never run (REAP8), stage 0 built in a worktree (REAP5), edits to scripts while own runs were
+  queued, not running (REAP8); `2>/dev/null` in several agents' wait loops.
+- Started (the user): REAP5b (the printer: RPS60-RPS63), REAP7 (`bin/arbace-go --build-program`), the
+  harness follow-ups (JCS70, JCS71, RPS74 (b), RPS77 (b)); the catch-all triage left to JC6.

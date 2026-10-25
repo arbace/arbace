@@ -1092,6 +1092,19 @@ members, the rest j2g's stubs; `getPackages` and `getResourceAsStream` when a li
 them), RPS82 (a) (java.javadoc recorded at the AOT level, its java.sql class added, at REAP8's `--aot`
 re-record).
 
+## Decided (2026-10-25): RPS60-RPS78
+
+The user decided REAP5's and REAP8's proposals as recommended. REAP5's: RPS60 (a) (the printer's syntax
+fixed for the milestone, REAP5b), RPS61 (a) (the casts assignment contexts need, with RPS60), RPS62 (a)
+(javac's other refusals triaged with RPS60), RPS63 (a) (an in-ns-only unit's package line kept), RPS64
+(a) (the printed Java read to other forms deferred and decided per kind), RPS65 (a) (the overload-choosing
+cast kept by the converter, in JC5), RPS66 (a), then (b) at the next reference recording, RPS67 (a) (the
+print level in `--full` only), RPS68 (a), RPS69 (a). REAP8's: RPS70 (a) (Go's AOT subset a committed list
+by its rule, regenerated at each re-record), RPS71 (a), RPS72 (a), RPS73 (a) (one whole-program j2g at a
+time, `J2G_LOCK`), RPS74 (b) (`seq-and-transducer` skipped in the compiled suite's subset only), RPS75 (a),
+RPS76 (a), RPS77 (b) (the Clojure subset's work trees removed after its build), RPS78 (a). The six
+`:pending` classes of the print level cite this.
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail

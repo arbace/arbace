@@ -1808,3 +1808,13 @@ two escape-analysis tests and the Go j2g writes that gc refuses (2, `:j2g-go`).
 - **JCS79 The split's floor** (`JAVA_CHECK_SPLIT_MIN`, 25).
   - Options: (a) 25 (as built); (b) down to one test, a test whose j2g dies alone then `error`; (c) no floor.
   - *Recommended: (a)*: a shard of 25 that still kills j2g is a j2g bug to look at, not to split around.
+
+## Decided (2026-10-25): JCS70-JCS79
+
+The user decided JC2b's proposals as recommended: JCS70 (a) (the run directories masked in stdout before
+the digest, the reference re-recorded), JCS71 (a) (a would-be regression run again once, a flip reported
+`flaky` and named in a `:flaky` class), JCS72 (b) (the java.lang names left in `:j2g-world` until JC6),
+JCS73 (a) and JCS74 (a) (`File_Cast`, then j2g's support code typed by Go type with a nil check and the
+leaf refusal dropped, in JC6 or JC5's j2g work), JCS75 (a) (a known disagreement whose reasons change
+printed as changed), JCS76 (a) (`aot.runtime` beside `aot.key` at the next change to the build scripts),
+JCS77 (a) (the 25 only interpreted triaged into JC6 and JC5), JCS78 (c), JCS79 (a).
