@@ -827,10 +827,11 @@ at 8 jobs.
   and not at the other (RPS16: a finding, printed, not a regression) and both levels' totals beside
   the JVM baseline's (`RUN/levels.txt`). The sources c2j does not compile are compared with the
   reference's `:not-compiled` (none).
-- **Corpus.** 155 sources compiled, 0 failed: the suite's 77 (the 76 test namespaces' and their
-  fixtures, `clojure/test_helper.clj`), its libraries' 26 (test.check, test.generative, data.generators,
-  tools.namespace, tools.reader, java.classpath), and the 52 runtime namespaces they load; 14,841
-  classes; j2g analyzes 19,178 classes with no failure; the program 252,903,104 bytes.
+- **Corpus.** 156 sources compiled, 0 failed: the suite's 77 (the 76 test namespaces' and their
+  fixtures), its libraries' 26 (test.check, test.generative, data.generators, tools.namespace,
+  tools.reader, java.classpath, `clojure/test_helper.clj` among them), and the 53 runtime namespaces
+  they load; 15,219 classes; j2g analyzes 19,562 classes with no failure; the program 256,771,080
+  bytes.
 - **Result (the reference).** 76 namespaces run, all load; **778 tests, 20,520 assertions: 20,489
   pass, 28 fail, 3 errors**; test.generative **27 of 27**; 9 namespaces and 5 tests skipped. Upstream:
   809 tests, 20,750 assertions, all passing. The eval level (`test/arbace-go-results.edn`): 777 tests,
@@ -850,9 +851,11 @@ at 8 jobs.
   evaluator needs 1,700 s and the eval level skips it: RPS43). The same outcome with other counts:
   test-compiler-line-numbers fails 5 forms compiled (unboxed field and method, field assignments) and
   7 evaluated (field accesses, assignments, IFn casts), none in both.
-- **Time.** On a cached gate build: the translation 1-2 min, the compiling 167 s, j2g 66 s, the build
-  19 s (repr/go's print cache warm), the namespaces 190 s of processes at 8 a time (2 minutes), the
-  specs 60 s: about 8 minutes cold, 4 cached (the program's key unchanged).
+- **Time.** On the gate's build of the head (the back end compiled, `compiled-back-end`): the
+  translation 1-2 minutes, the compiling 76 s (167 s with a back end the executables load from the
+  checkout, evaluated), j2g 73 s, the build 76 s (19 s with repr/go's print cache warm), the
+  namespaces 186 s of processes at 8 a time (about 2 minutes), the specs 60 s: about 7 to 8 minutes,
+  4 when the program's key is unchanged.
 
 ### F2.4 fixed (RPS6 (a))
 
@@ -912,3 +915,90 @@ changed namespaces' own code; checked below):
 `arbace/j2g/code.ae` (`translate-loop`), `arbace/lang/Compiler.ae` (one native declaration,
 `Compiler$AST/dynamic`), `go/arbace/jrt/natives.ae` (its Go), `go/arbace/cmd/arbace/image.ae`
 (`Unit`, `End`, the encoder's `broken`). The second batched re-seed (§7) carries them.
+
+### The checks
+
+- The essential gate (`bin/gate`) at the branch's head: passed (14m13s): the suite on the test build
+  20,506 of 20,520 as recorded, the oracle 22,672 of 22,725 (53 known), diffcheck 12,774 of 12,786
+  (12 known), goi's essential check, the generated variants, j2g's edge as recorded (the new code
+  names no JDK class the edge lacks).
+- `bin/clojure-tests --aot` against `test/arbace-go-aot-results.edn`: no regressions (on the gate's
+  build of the head: 20,489 of 20,520, 27 of 27 specs, the levels' three disagreements above).
+- The shipped program's translation: FINAL-TREE-CHECK.
+- `bin/arbace-go --fixpoint`: FINAL-FIXPOINT.
+
+### The essential subset (REAP8, proposed; not added)
+
+The compiling, j2g and the build cost about 4.2 minutes whatever the namespaces run (the
+compiling is the runtime's 53 namespaces and the suite's prepare, j2g the program's), the runs 2 to 3
+minutes; a subset saves only by compiling less. RPS40.
+
+### Proposals (RPS40-RPS49)
+
+- **RPS40 The AOT level in the essential gate (REAP8's subset).**
+  - Options: (a) the whole `--aot` in the essential gate, beside the suite-go step (about 8 minutes on
+    a change to `arbace/` or the suite, its program cached by key otherwise: then the runs, about 3
+    minutes); (b) a subset: about 15 namespaces chosen for the compiled code's risks (protocols,
+    compilation, java-interop, data-structures, clearing, reducers, transducers, method-thunks,
+    param-tags, generated-all-fi-adapters-in-let, numbers, sequences, vars, macros, special) compiled
+    alone with their libraries (the runtime's namespaces they load), estimated 4-5 minutes cold, 1.5
+    cached (not measured); (c) `--full` only (as built).
+  - *Recommended: (b)*, with (a)'s cached path: the compiled suite found eleven back-end bugs no other
+    check had (§ the table above), and a subset keeps the essential gate within RPS15's few minutes.
+- **RPS41 Compiled fns' closed-over fields (`:fn-fields`, clearing's 2 tests).**
+  - Options: (a) deferred, named (as recorded, pending); (b) fixed in jrt: a Dyn fn class
+    (`Compiler$AOT/fnClass`) reports its code object's fields as its own to reflection
+    (`getDeclaredFields`, `Field.get` reading through the fn), so that a test of locals clearing sees
+    them; (c) by design: the fn's representation (SA141) is the AOT level's, and clearing itself is
+    the JVM's.
+  - *Recommended: (a)*, (b) after the milestone: the clearing the tests check is right (c2j clears as
+    `ObjExpr.emitLocal`); only reflection over the fn's own fields differs.
+- **RPS42 Compiled frames' lines (`:compiled-trace-lines`, 5 forms).**
+  - Options: (a) deferred, beside the eval level's `:trace-lines` (RPS5 (a)); (b) fixed in c2j: the
+    field access's, assignment's and unboxed call's own line on their Java forms (`:c2j/line` of the
+    inner form, as the JVM's emit marks it), checked by the suite; (c) by design.
+  - *Recommended: (a)*, (b) with the eval level's after the milestone: both levels' frames are a
+    design change of their own kind (frames per expression).
+- **RPS43 `seq-and-transducer` at the AOT level.**
+  - Options: (a) run at the AOT level (as built: 75 s), skipped at the eval level only (its class
+    there stays deferred: speed); (b) skipped at both, for the two references' symmetry.
+  - *Recommended: (a)*: the level runs it within the namespace's time, and a pass is a pass.
+- **RPS44 A deftype defined twice in compiled code.**
+  - Options: (a) as built: the last definition is the class, as the JVM's AOT keeps the last class
+    file (CLJ-979's test asks for it), code compiled against an earlier one failing where it runs, as
+    on the JVM; (b) each definition its own class, the earlier ones renamed (`Y__1`), compiled code
+    naming the one it was analyzed against (closer to the evaluator, unlike the JVM's AOT).
+  - *Recommended: (a)*: the AOT level's reference is the JVM's AOT semantics (the suite's CLJ-979),
+    and (b) needs class identity in c2j's naming throughout.
+- **RPS45 The classes' file.**
+  - Options: (a) at the merge, `test/clojure/divergences-aot-suite.edn` appended to REAP1's
+    `test/clojure/divergences-aot.edn` (its `:f2.4-limit` dropped, F2.4 being fixed), and the suite's
+    source of the `[:clojure :aot]` cell read (`test/reap/cells.edn`: its `:until "REAP3"` dropped);
+    (b) the cell given two classes files (`bin/reap` taking a vector).
+  - *Recommended: (a)*: one file per check's cell, as RPS3 (a) decided.
+- **RPS46 The Java forms' pair's excluded classes `dcf.defclass.Clj`, `native.nested_deftype.Host`.**
+  - Options: (a) given the same edge: `test/diffcheck/gen.ae` records the vars each hand-written
+    `defclass` names (as `arbace.classes.native` does for the Java forms compiler's) as
+    `(c2j/refer-vars ...)` in its Java forms file, both classes back in the pair; (b) left excluded
+    (their reasons in `jforms-excluded.edn`).
+  - *Recommended: (a)*: small (the generator and the exclusion file), and it closes F2.4 for the Java
+    forms' own corpus.
+- **RPS47 Qualified methods as values compiled.**
+  - Options: (a) as built: c2j analyzes the value's thunk at emit time as
+    `QualifiedMethodExpr.buildThunk` does (its arities from reflection, or its param-tags), and a value
+    tagged with a functional interface is adapted to it at the call (FISupport); (b) the thunk analyzed
+    while the program prepares (a field of the node, `Compiler.ae`), c2j reading it.
+  - *Recommended: (a)*: it leaves the evaluator untouched (REAP4's file), and its output is the JVM's.
+- **RPS48 The runtime's part of the compiled suite's program.**
+  - Options: (a) as built: the runtime's namespaces the suite loads (53) compiled with it, the others
+    evaluated if loaded; (b) every embedded namespace prepared first and compiled, as bin/diffcheck's
+    compiling does, so that the program's runtime is the shipped build's (about 2 minutes more, a
+    larger j2g run).
+  - *Recommended: (b)* when the subset of RPS40 lands, (a) until then: no namespace the suite loads is
+    evaluated either way.
+- **RPS49 The re-seed.**
+  - Options: (a) REAP3's changes to the shipped program (c2j, j2g, the analysis, the image, a jrt
+    native) ride the second batched re-seed with REAP4 and JC5, as §7 planned; (b) a re-seed of their
+    own now.
+  - *Recommended: (a)*: no build needs them before the milestone's run (stage 0 builds the program
+    from the checkout's back end, `compiled-back-end`).
