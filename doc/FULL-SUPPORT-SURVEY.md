@@ -2117,3 +2117,187 @@ known), goi's essential checks (801 and 248 of 248 compiled), Java's (428 interp
 the generated variants, j2g's edge (no new JDK class named), `bin/reap` (12 of 12 cells, 0 problems).
 `bin/arbace-go --build-program --check`: 8 of 8. `bin/gate --full` was not run (the policy until the
 milestone).
+
+## As built: REAP7b (2026-10-25)
+
+The user's decisions on REAP7 (RPS92 (b) for the milestone, RPS93 (c), RPS94 (c), RPS98 (c)), on
+the branch `reap7b-programs` from main `a24605e6`. Every heavy run in the host's heavy slots, at 8
+jobs, one j2g at a time.
+
+### What was built
+
+- **A program's Go packages compiled (RPS92 (b)).** `bin/arbace-go --build-program` lists `go/`'s
+  packages (each package file's `go/package :path`) in `programs/NAME/gotable-program.edn` and makes a
+  goi table of the program's own: `bin/goi table --out programs/NAME/gotable --configs linux/ARCH
+  --program-list FILE --program-root DIR`, goi's list (`go/arbace/gotable.edn`) with the program's
+  packages after it. The generator (`arbace.go.table`) reads a path its configuration's root does not
+  hold from DIR's forms (`source-of`, the atom `user-root`), checks the program's packages with goi's
+  checker as it checks std's, and lists each that checks (`report.edn`'s `:program`); one that does not
+  is left out with the checker's message (`:refused-program`, printed `goi table: the program's package
+  P is not listed (interpreted): ...`). The table's key (bin/goi) covers the list and DIR's `go/` files.
+  j2g takes the program's table (`--gotable`), and `bin/build-go --root DIR` prints `go/`'s packages into
+  the module. A package outside the module `arbace` (`mixed/caps`) is a module of its own: its path's
+  first element, printed under `_modules/M/` with a `go.mod` of its own and required by `require M
+  v0.0.0` and `replace M => ./_modules/M` in the main `go.mod` (`arbace.build.go`'s `program` and
+  `print-module`: a package of another root outside the module was an error before; the main module's
+  own packages unchanged). At run time `RT.load` asks the table first (VENDOR-NOTES.md, hand change 26):
+  `(require 'go.mixed.caps)` makes the table's namespace, whose vars call the compiled Go functions,
+  and the `go/` sources are neither embedded nor compiled by c2j. One runtime fix was needed: a compiled
+  namespace's constant pool interns the vars it names (`RT/var`) when its loader class is initialized,
+  before its `ns` form requires the package, so `go.mixed.caps/Shout` existed unbound when
+  `arbace.go/table-ns!` made the namespace, and its resolver, which answers only absent names, never
+  bound it; `table-ns!` now makes the members whose vars are interned and unbound already (six lines of
+  `arbace/go.ae`). **The fallback (RPS92 (a))**: with a refused package `go/` is embedded under `go/`
+  (`--resources DIR/go=go`) and its sources are c2j's units, as REAP7 built every package; the build
+  warns (`arbace-go: NAME: warning: Go packages that do not check for the table, interpreted by goi:
+  P`). The checker records its errors in the package's result rather than throwing them, so the
+  generator reads them there (the first, with the count of the rest). Since goi's checker is the
+  table's, a refused package fails the same way when goi loads it at run time: the fallback keeps a
+  program building whose broken package it does not require, and moves the error from the build to
+  the package's `require`. Tried on a copy of `mixed` with a second package, `mixed/bad`, whose
+  `Bad` returns `"x"` as an `int` (`.tmp/fallback/`): before the fix the table listed it (the errors
+  were not read) and gc refused the build (`_modules/mixed/bad/bad.ae:5: cannot use "x" (untyped string
+  constant) as int value in return statement`); after it, `goi table: the program's package mixed/bad
+  is not listed (interpreted): bad.go:5: cannot use "x" ...`, the build warns, embeds `go/` and
+  compiles 3 sources (6 classes), and the program runs as `mixed` does, `mixed/caps compiled` (162 s).
+- **Java package namespaces (RPS93 (c)).** j2g's `--java-namespaces DIR` (`arbace.j2g.embed/
+  package-loaders`): every file of DIR whose first form is `(ns P)` (SPEC.md §9.2's package files) is
+  embedded at its path as the no-op loader `(ns P)`, beside the program's sources (a path taken is left
+  as it is); `--build-program` passes `java/`. The compile step reads each `src/` namespace's `ns` form
+  and warns of a `:require` of a Java package (`aot: warning: mixed.main requires the Java package
+  mixed.text (a no-op loader in the program: its classes are the program's, RPS93)`). The loader is
+  evaluated from its text at run time (`load mixed/text.ae 18 ms` with `ARBACE_LOAD_TIMES=1`).
+- **`.clj` and `.cljc` sources (RPS94 (c)).** When `src/` holds one, `bin/repr-clojure read -q -o
+  programs/NAME/src src/` translates the tree first (the other files copied), and that tree is
+  compiled and embedded (removed after the build with the other intermediate trees); the check's "no
+  source loaded from source" maps `x.clj`/`x.cljc` to `x.ae`.
+- **The gates (RPS98 (c)).** `bin/gate`'s step `programs`, concurrent with the others under
+  `J2G_LOCK`: `bin/arbace-go --build-program --check mixed` with `ARBACE_PROGRAM_BASE` the gate's cache
+  (its executable and compiled namespaces); `bin/gate --full`'s `programs-full`, every sample, in the
+  Go chain after `suite-aot`. `make programs-essential` runs the gate's.
+- **The samples.** `mixed`: `mixed.main` requires `mixed.text` (the Java package's namespace) and
+  prints `mixed/caps compiled` when `mixed/caps` is in the program's table (`(arbace.go/packages)`) and
+  goi's interpreter state `arbace.go.repl`, which every interpreted package's macros load, was never
+  loaded (`find-ns`), else `interpreted`: its runs expect `compiled`, so the gate proves that no goi
+  interpretation of the package happens. `hello-clojure`: a third namespace, `hello.fmt`, a `.cljc` file
+  (`clojure.string`, a reader conditional `#?(:clj ... :cljs ... :default ...)`), printing `== HELLO
+  (clj) ==`.
+
+### Results
+
+| sample | c2j | j2g | build | executable | runs |
+|---|---|---|---|---|---|
+| `hello-clojure` (now with `hello/fmt.cljc`) | 3 sources (the `.cljc`'s `.ae` among them), 22 classes, 1 s | 77 s | 31 s | 154,435,744 B | 2 of 2 |
+| `hello-java` | none | 76 s | 93 s | 154,255,520 B | 2 of 2 |
+| `hello-go` | none | none | seconds | 1,536,160 B | 2 of 2 |
+| `mixed` (its Go package compiled) | 1 source, 4 classes, 4 s | 123 s | 145 s | 154,280,096 B | 2 of 2; 0.24 s; `mixed/caps compiled` |
+
+**8 of 8 runs pass** (`bin/arbace-go --build-program --check`, on the gate's executable), none of the
+programs' own sources loading from source; `mixed`'s runs print `mixed/caps compiled`, and its build
+warns of the Java package's `require`.
+
+The mixed program's own table: 97 packages (goi's 96 and `mixed/caps`), 85 s for linux/amd64 on the
+gate's executable (58 s alone in a slot), 101 files, cached by its key; c2j now compiles 1 source (4
+classes; REAP7: 3 sources, the package's loader among them); its run takes 0.24 s against REAP7's 0.9 s
+(goi no longer checks the package at load). Cold (its key changed, the print cache cold): table 85 s,
+c2j 4 s, j2g 123 s, the build 145 s, 360 s in all; with the print cache warm (the gate's run 5): j2g 69
+s, the build 6 s, 153 s.
+
+**The essential gate, before and after** (`bin/gate` through the heavy slots; its own reported wall
+time). Before: main's head `a24605e6` in a worktree of its own; after: the branch's head. "Cold":
+the gate's cache of executables removed (`.tmp/arbace-go-gate`; two Go-hosted builds), the other
+caches warm.
+
+| essential gate | before (`a24605e6`) | after (`reap7b-programs`) |
+|---|---:|---:|
+| cached | 2m53s | **2m53s** (`programs` 3 s) |
+| cold (the gate's cache removed; the mixed program cached: its key holds, the executables rebuilt byte for byte) | 10m01s | 10m41s (`programs` 2 s) |
+| cold, the mixed program's cache removed too | — | **10m28s** (`programs` 2m33s: table 85 s, j2g 69 s, the build 6 s) |
+
+The step costs nothing in wall time: cached it takes seconds, and cold it runs beside `go-smoke`,
+`suite-go` and the rest, after the executables' build, which is most of a cold gate. The first runs in
+each worktree, with every cache cold, are not comparable and not in the table (before: 26m33s, its
+`go-smoke` failing on its REPL-under-rlwrap timing under load, passing in the next two runs; after:
+18m41s, `java-compiled`'s j2g killed by the kernel for memory beside the other heavy slot, as in
+REAP7's run, passing in the next four). The final run at the branch's head (`687051a0`, the
+checker's errors fix: every key changed, the executables, diffcheck's, java-compiled's,
+suite-aot-essential's and the mixed program's caches cold, beside another agent's heavy slot): **passed**,
+22m51s (go-build 12m24s, diffcheck 10m13s, programs 3m52s).
+
+### Changes
+
+Shipped (the next batched re-seed): `arbace/go.ae` (`table-ns!`: the early-interned vars made),
+`arbace/go/table.ae` (`--program-list`, `--program-root`, `:refused-program`), `arbace/build/go.ae`
+(the other roots' modules under `_modules/`), `arbace/j2g/main.ae` and `arbace/j2g/embed.ae`
+(`--java-namespaces`, `package-loaders`). Scripts: `bin/arbace-go` (`build_program`: repr/clojure, the
+program's table, the fallback, the warning; `program_key` takes the table; `check_programs`' load
+mapping), `bin/goi` (`table`'s two options and key), `bin/gate` (`programs`, `programs-full`),
+`Makefile` (`programs-essential`; the `program` and `programs-check` lines). Samples:
+`test/programs/mixed`, `test/programs/hello-clojure` (`src/hello/fmt.cljc`). Docs: doc/go/BUILD.md ("A
+user's program"), CLAUDE.md (the `bin/arbace-go` paragraph and the gate's).
+
+### Proposals (RPS100-RPS109)
+
+- **RPS100 The program's table.**
+  - Options: (a) as built: goi's whole list with the program's packages, one configuration per
+    architecture built, per program (85 s, cached by its key: the list, the forms, DIR's `go/`); (b) a
+    second table package of the program's packages alone (`arbace/gotable2`, its digest merged at
+    registration), the shipped build's table reused; (c) the program's packages in the shipped table
+    when the program is built from a checkout's `--build` (no extra table).
+  - *Recommended: (a)*: one generator, one table and one digest per program, 85 s once per change of
+    `go/`; (b) spares the 85 s but splits goi's registry and digest in two (a runtime change), worth it
+    only for programs whose `go/` changes often.
+- **RPS101 Packages outside the module `arbace`.**
+  - Options: (a) as built: each path's first element a module under `_modules/`, `require` and
+    `replace` in `go.mod`; (b) `program.edn`'s `:go-module PATH` naming the user's module, its packages
+    under it (as a Go programmer's `go.mod`); (c) the packages renamed into the module (`arbace/user/...`).
+  - *Recommended: (a)*: no file to write and the import paths stay the user's; (b) when a program's
+    packages need a module path of their own (a dependency's `go.mod`), compatible with (a).
+- **RPS102 The fallback.**
+  - Options: (a) as built: a package goi's checker refuses is left to goi (`go/` embedded), the build
+    warns; (b) a refused package is an error at build time (the build stops with the checker's
+    message); (c) (a) with the refused packages' sources alone embedded.
+  - *Recommended: (b) after the milestone, (a) until then*: the checker is goi's, so the fallback only
+    moves the error from the build to the `require`; an error at build time is what a user of
+    `go build` expects; (a) is what the user asked for the milestone.
+- **RPS103 A program's Go package importing Arbace's.**
+  - Options: (a) as built and not exercised: a package of `go/` importing the package `arbace` (Go
+    forms' API, §7.3) or `arbace/goi` resolves to the main module from `_modules/`' module (Go's build
+    list holds the main module), untested; (b) a sample (`mixed/caps` calling back an Arbace fn through
+    `arbace.Invoke`) in `--full`'s check.
+  - *Recommended: (b)*: the API is what makes the three languages one program; one more package in a
+    sample, no new mechanism.
+- **RPS104 The Java packages' loaders.**
+  - Options: (a) as built: `(ns P)` embedded and evaluated at run time (18 ms on `mixed`'s first
+    `require`); (b) compiled by c2j with the program's units (no evaluation); (c) `RT.load` answering a
+    package of the program's classes itself (a runtime change).
+  - *Recommended: (a)*: one form, evaluated once; (b) if a program's start time matters.
+- **RPS105 The warning.**
+  - Options: (a) as built: `aot: warning: NS requires the Java package P` at build time; (b) no
+    warning (the no-op loader makes the `require` harmless); (c) an error unless `program.edn` allows it.
+  - *Recommended: (a)*: the user decided (c) of RPS93, the warning, and it costs a read of each `ns` form.
+- **RPS106 The `.clj` and `.cljc` translation.**
+  - Options: (a) as built: the whole `src/` translated into `programs/NAME/src` when it holds one
+    `.clj` or `.cljc`, the rest copied; (b) only the `.clj` and `.cljc` files translated, the tree
+    overlaid; (c) repr/clojure's translation cached by its sources' hash, as `bin/clojure-tests` caches
+    the suite's libraries.
+  - *Recommended: (a)*: seconds on a program's sources, and an `.ae` in `src/` renamed by repr/clojure's
+    rules too is what the suite does; (c) for large libraries.
+- **RPS107 The proof that Go runs compiled.**
+  - Options: (a) as built: the sample prints `compiled` when its package is in the table and
+    `arbace.go.repl` was never loaded; (b) the check's own: `--check` runs each Arbace sample with a
+    goi flag (an environment variable making goi print each package it interprets) and fails on any;
+    (c) both.
+  - *Recommended: (a)*: no runtime change; (b) needs one in goi (a re-seed) for what the sample shows.
+- **RPS108 The samples in the gates.**
+  - Options: (a) as built (RPS98 (c)): `mixed` in the essential gate, all four in `--full`; (b)
+    `hello-clojure` in the essential gate too (repr/clojure's translation, a second j2g run when its
+    key changes).
+  - *Recommended: (a)*: the essential gate's cold wall did not move with one sample, and the
+    translation is repr/clojure's, checked by its own steps in `--full`.
+- **RPS109 The re-seed.**
+  - Options: (a) the shipped changes (`arbace/go.ae`, `arbace/go/table.ae`, `arbace/build/go.ae`,
+    `arbace/j2g/`) with the next batched re-seed; (b) a re-seed for them now.
+  - *Recommended: (a)*: the tools run them from the checkout (a namespace whose source differs from
+    the embedded copy), and a program's runtime is its base's, built from the checkout, `table-ns!`'s
+    fix with it; stage 0 needs them only when it becomes a base (RPS95 (b)).
