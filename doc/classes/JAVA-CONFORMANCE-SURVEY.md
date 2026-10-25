@@ -1737,8 +1737,9 @@ analysis, `arbace/classes/analyze.ae`; I: the interpreter, `arbace/classes/inter
   readers splice it: the analysis' source lookup (`enter-file!`), j2g's world (`read-forms`), the Java
   printer (`unit`), the check's owners. A top-level `do`'s consecutive Java forms are one compilation
   too (`Compiler$ClassFormsExpr/grouped`, the evaluator's top-level `do`): `(do (defclass B :extends
-  A) (defclass A))` defines both, and such a `do` evaluates to the vector of its classes when they end
-  it. In jdk/forms 4 files change (`URL`, `URLConnection`, `AttributedString`, `ImmutableCollections`:
+  A) (defclass A))` defines both, and such a `do` still evaluates to its last class (the grouped
+  compilation's vector's last element: the oracle's `native.ae` cases of a top-level `do`, and a REPL
+  printing it, showed the vector first; JCS60). In jdk/forms 4 files change (`URL`, `URLConnection`, `AttributedString`, `ImmutableCollections`:
   wrapped and re-indented, nothing else), in jdk/javac 1, in the essential tests' forms 27.
 - *JCS40*: `MissingBridge` passes file by file (its file one `defclasses`), and a REPL session
   defining `GenObject<T>` in one form and `MissingBridge` in a later one gets the bridge too: the
@@ -1828,13 +1829,15 @@ that wrote them, main's stale one (`bf740cf0…`, as JC1-JC3's runs): the re-see
 ### Proposals (JCS60-JCS69)
 
 - **JCS60 A top-level `do`'s value.** The evaluator now defines a top-level `do`'s consecutive Java
-  forms as one compilation (JCS30 (b)); a `do` that ends with them evaluates to the vector of their
-  classes, as `defclasses` does, where it evaluated to its last class.
+  forms as one compilation (JCS30 (b)); built first, a `do` that ended with them evaluated to the
+  vector of their classes, as `defclasses` does, and the oracle's six cases of `native.ae` (a `do`'s
+  value, a REPL printing it) differed from the frozen reference: the branch now builds (a), to be
+  confirmed.
   - Options: (a) the last class, as a `do`'s value is its last form's (the grouped compilation's
     vector's last element); (b) as built, the vector; (c) group only `defclass` forms written inside a
     `defclasses`, leaving `do` as before (SPEC §9.2 (2) then says so).
-  - *Recommended: (a)*: a `do` keeps Clojure's meaning and only its compilation unit changes; one line
-    in `ClassFormsExpr/grouped`, with the next runtime change.
+  - *Recommended: (a)* (as built): a `do` keeps Clojure's meaning and only its compilation unit
+    changes; one call in `ClassFormsExpr/grouped`.
 - **JCS61 The analysis j2g runs with.** j2g's namespaces load from the checkout when they differ from
   the host's (RT.toolSource), the analysis' (`arbace.classes.*`) do not: before a re-seed, j2g on stage 0
   translates with the seed's analysis, so the analysis' fixes reach the compiled level and the
