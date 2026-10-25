@@ -12,7 +12,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests build-java smoke repl fixpoint goi-table goi-table-size \
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
-  program programs-check gate gate-full reap suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
+  program programs-check programs-essential gate gate-full reap suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
   check-makefile
@@ -45,10 +45,12 @@ repl: ## Arbace's REPL (bin/arbace-go, built first when needed)
 	bin/arbace-go
 fixpoint: ## G1 by stage 0, G2 by G1, G3 by G2; G2 = G3 required (bin/arbace-go --fixpoint)
 	bin/arbace-go --fixpoint
-program: ## a user's program of DIR=...: its namespaces, Java forms and Go forms built into one executable (bin/arbace-go --build-program DIR)
+program: ## a user's program of DIR=...: its namespaces (.ae, and .clj, .cljc translated by repr/clojure), Java forms and Go forms (compiled through its own goi table) built into one executable (bin/arbace-go --build-program DIR)
 	bin/arbace-go --build-program $(DIR)
-programs-check: ## the samples of test/programs (Clojure, Java forms, Go forms, mixed) built and run against their runs (bin/arbace-go --build-program --check)
+programs-check: ## the samples of test/programs (Clojure, Java forms, Go forms, mixed) built and run against their runs, as bin/gate --full (bin/arbace-go --build-program --check)
 	bin/arbace-go --build-program --check
+programs-essential: ## the mixed sample alone, as bin/gate runs it (bin/arbace-go --build-program --check mixed)
+	bin/arbace-go --build-program --check mixed
 goi-table: ## goi's table of compiled packages and its digests (bin/goi table; the build runs it)
 	bin/goi table
 goi-table-size: ## the table's size in the executable, the invokers' part (bin/goi table --size; after `make build`)
