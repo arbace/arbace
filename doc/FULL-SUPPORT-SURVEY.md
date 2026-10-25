@@ -1544,7 +1544,10 @@ Branch `reap8-essential`, from main `840e514b`, main merged at `af1e916f` (RPS55
 (RPS15), as decided: RPS33 (a), RPS40 (b) with (a)'s cached path, RPS48 (a) for the subset and (b) for
 the whole suite, JCS41 (a). Every heavy run in the host's heavy slots, at 8 jobs; the times below are
 the gate's own clock (the slots' queue not counted). No shipped code changes: the scripts of `bin/`,
-data under `test/`, the Makefile; so no re-seed.
+data under `test/`, the Makefile; so no re-seed. The measurements' logs are in `.tmp/reap8/` (the
+gates' `gate-before-cold.txt`, `gate-before-cached.txt`, `gate-after-cold.txt`, `gate-after-cold2.txt`,
+`gate-after-cached.txt`; the subsets' first runs; the whole `--aot` runs `aot-full-head.txt`,
+`aot-full-b.txt`, `aot-full-merged.txt`).
 
 ### What the essential gate runs now
 
@@ -1590,8 +1593,8 @@ Three steps beside the old ones in step 4, concurrently:
   **339 tests, 7,273 assertions: 7,243 pass, 28 fail, 2 errors**, the reference's for these
   namespaces (clearing's 19, compilation's 8, java-interop's FIPrims 3). Compiled: 95 sources, 9,997
   classes in 53 s; j2g 54 s (14,077 classes); the build 56 s; the runs about 80 s, transducers'
-  `seq-and-transducer` 75 of them (RPS43 (a)); the step 5m43s in the cold gate (the translation of
-  the suite, 1-2 minutes, included), CACHED_SUITE cached; j2g's peak resident 20 GB.
+  `seq-and-transducer` 75 of them (RPS43 (a)); the step 5m29s-5m43s in the cold gate (the translation of
+  the suite, 1-2 minutes, included), 1m53s cached; j2g's peak resident 20 GB.
 - **One j2g at a time** (`J2G_LOCK`, a one-line hook in `bin/j2g`: when set, j2g holds the lock
   file until it exits): diffcheck's, `java-compiled`'s and `suite-aot-essential`'s whole-program runs
   take up to `GOMEMLIMIT` (20 GiB) each, so the gate serializes them (about 4 minutes of j2g cold,
@@ -1607,14 +1610,17 @@ Makefile: `goi-check-aot-essential`, `java-check-compiled-essential`, `suite-aot
 
 | | before (main `840e514b`) | after (this branch) |
 |---|---:|---:|
-| cold (the executables built afresh, every cache empty but gc's references) | 20m51s | COLD_AFTER |
-| cached (nothing changed since the last run) | 2m29s | CACHED_AFTER |
+| cold (a fresh `.tmp/` and `target/`: the executables built afresh, every cache empty; Go's build cache warm) | 20m51s | **21m23s** |
+| cached (nothing changed since the last run) | 2m29s | **2m42s** |
 
 Cold, the build (`go-build`, 10-13 minutes) comes first and dominates; then the checks' phase, before
-7m20s (diffcheck's cold program the longest), after CHECKS_AFTER (diffcheck waiting for the j2g lock
-behind the others; `java-compiled` and `suite-aot-essential` about 6 minutes each). RPS15's "present
-time plus a few minutes" holds cold; cached, the subsets add the Clojure subset's runs (about 80 s,
-the transducers namespace) and Java's 14 s, in parallel with the suite and the smoke test.
+7m20s (diffcheck's cold program the longest), after 7m52s: diffcheck 7m52s (its j2g waiting for the
+lock), goi's chain 7m52s (`goi-check` 5m10s reading the corpora, then `goi-aot-essential` 2m42s making
+gc's references and `linux-errtest-full`), `suite-aot-essential` 5m29s, `java-compiled` 3m06s. Cached,
+goi's chain is the longest (1m10s and 1m19s), then the suite (2m08s) and the Clojure subset (1m53s:
+the translation's check and the runs, transducers' 75 s); `java-compiled` 22 s. RPS15's "present time
+plus a few minutes" holds: 32 s more cold, 13 s more cached. (A first cold run, before
+`java-compiled`'s retry, failed on its eight `java/net` timeouts: 22m52s.)
 
 ### The whole compiled suite: the reference re-recorded
 
@@ -1624,7 +1630,10 @@ passes (BitSet among the proxy superclasses, REAP4: 296 to 299 of 302, one error
 java.javadoc were still skipped by the reference's `:skipped` though SL5 embeds them. (2) With RPS48
 (b) (below) and the two namespaces run: 78 namespaces, 785 tests, 20,580 assertions, 20,547 pass;
 metadata 53 of 53, java.javadoc 2 of 5 as at the eval level then; nothing else moved. (3) After main's
-merge (RPS55's Module), the record: AOT_RECORD. `test/arbace-go-aot-results.edn` written from it
+merge (RPS55's Module), the record: **78 namespaces, 785 tests, 20,580 assertions: 20,549 pass, 28
+fail, 3 errors**, test.generative 27 of 27 (java.javadoc 4 of 5, its java.sql assertion), against
+REAP3's 778 tests, 20,520 assertions, 20,489 pass; the levels' disagreements clearing's two and
+`seq-and-transducer` (the javadoc and metadata ones gone). `test/arbace-go-aot-results.edn` written from it
 (metadata and java.javadoc recorded, RPS82 (a)); `test/clojure/divergences-aot.edn`: `:proxy-bitset`
 dropped (fixed), `:d6-namespaces-cut` replaced by `:javadoc-url` (the java.sql assertion, by design,
 D6, citing RPS55 (a) and RPS82 (a), as the eval level's class); `bin/reap` 0 problems.
