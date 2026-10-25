@@ -2033,3 +2033,14 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   101; 12 of 12 cells, 0 problems.
 - Started: JC6 whole (on Opus; the user's choice of models, 2026-10-25), with the converter's RPS83-RPS85,
   JCS62, JCS65-JCS67 (c), JCS72-JCS74, JCS77 and the print level's 8 cases; RPS103 (b) (on Sonnet).
+
+## 2026-10-25: RPS103's sample merged; the first Sonnet agent
+
+- RPS103 (b) (branch `programs-callback` from `e0f5a2bc`, merged; its tree the gated branch head):
+  `test/programs/callback/`, a Clojure `-main` calling the program's compiled Go package `callback/relay`,
+  which imports Arbace's package `arbace` and calls an anonymous fn (`arbace.Call`, `arbace.Long`) and a var
+  (`arbace.Var`, `arbace.GoStr`) back; its runs prove the package compiled (goi's interpreter never loaded).
+  The import resolved to the main module from `_modules/` with no build change. `--build-program --check`: 10
+  of 10 runs (5 samples, 11 min); in `bin/gate --full`'s `programs-full`. The essential gate passed on the
+  branch (22m12s). No shipped code. The agent ran on Sonnet (the user's split of models, 2026-10-25): no
+  slips reported, nothing to correct at the merge.

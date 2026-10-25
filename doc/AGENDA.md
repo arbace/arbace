@@ -117,7 +117,8 @@ The current state of the work. This file is rewritten as things change. For the 
   print level: 2,104 of 2,722; RPS60-RPS69), JC2b (JCS42 (b)-JCS48: interp 1,462, compiled 1,636;
   JCS70-JCS79), JN9c (beside REAP: overload resolution native, jdk26u's lists written alone 95.9%;
   JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JN9d
-  (inference, beside REAP), JC6 (whole, on Opus), RPS103 (b) (a sample, on Sonnet). Done since: JC5 (the analysis' gaps: interp 1,546, compiled 1,694 on the merged code; JCS60-JCS69),
+  (inference, beside REAP), JC6 (whole, on Opus). Done since: RPS103 (b) (the sample `callback`, on
+  Sonnet), JC5 (the analysis' gaps: interp 1,546, compiled 1,694 on the merged code; JCS60-JCS69),
   REAP7b (a program's Go compiled through its own goi table, Java package loaders, `.clj`/`.cljc`, `mixed` in
   the essential gate; RPS100-RPS109), REAP7 (`bin/arbace-go --build-program DIR`: four samples,
   8 of 8; RPS90-RPS99), REAP5b (the printer: the print level 2,104 to 2,132; RPS83-RPS87, the
