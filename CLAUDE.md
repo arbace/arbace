@@ -92,7 +92,7 @@ Prior art:
   suite and its libraries compiled by c2j with the runtime's namespaces on the gate's test build, j2g and
   `bin/build-go` making their program with the Java fixtures (`.tmp/clojure-tests/aot/aot-build`, cached
   by key), each namespace loaded through its compiled loader (`test/suite_aot_hook.ae`), against
-  `test/arbace-go-aot-results.edn` (classes `test/clojure/divergences-aot-suite.edn`), the two levels'
+  `test/arbace-go-aot-results.edn` (classes `test/clojure/divergences-aot.edn`), the two levels'
   disagreements listed (`bin/gate --full`'s `suite-aot`).
 - `bin/reap` (and `make reap`; REAP1, doc/FULL-SUPPORT-SURVEY.md, RPS3, RPS13): the REAP matrix,
   read, eval, AOT and print for Clojure, Java and Go, judged from the checks' recorded results
