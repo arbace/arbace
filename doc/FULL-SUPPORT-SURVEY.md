@@ -1536,3 +1536,160 @@ minutes; a subset saves only by compiling less. RPS40.
     own now.
   - *Recommended: (a)*: no build needs them before the milestone's run (stage 0 builds the program
     from the checkout's back end, `compiled-back-end`).
+
+## As built: REAP8 (2026-10-25)
+
+Branch `reap8-essential`, from main `840e514b`, main merged at `af1e916f` (RPS55: jrt's
+`java.lang.Module`). The essential subsets of the three new checks in the essential `bin/gate`
+(RPS15), as decided: RPS33 (a), RPS40 (b) with (a)'s cached path, RPS48 (a) for the subset and (b) for
+the whole suite, JCS41 (a). Every heavy run in the host's heavy slots, at 8 jobs; the times below are
+the gate's own clock (the slots' queue not counted). No shipped code changes: the scripts of `bin/`,
+data under `test/`, the Makefile; so no re-seed.
+
+### What the essential gate runs now
+
+Three steps beside the old ones in step 4, concurrently:
+
+- **`goi-aot-essential`**: `bin/goi check --aot --essential --jobs 8` (RPS33 (a)), after `goi-check`
+  in one chain (both read `$GOROOT/test`'s corpora when they are missing, and the AOT level also
+  converts `linux-errtest-full`, 88 s, once), the gate's executable the tools' host (as `--full`'s
+  `goi-aot`). Its list `test/goi/essential-aot.txt`, **248 programs**, made by the rule its header
+  states from `test/goi/check-aot-linux-amd64.edn` and goi's reference: every directory test that
+  passes (126: the modules, local imports rewritten, RPS11), every run program passing with gc's
+  flags (13: goi skips them), every second errorcheck program that passes and goi sets apart (62 of
+  124: gc's later phases' flags, line directives, errors after type checking; printed from mode
+  `:full`), every fourth run program passing here and known at goi's level (11 of 41: frames, memory,
+  speed), and of goi's essential list's programs passing at both levels every 25th run program (22)
+  and every 10th errorcheck program (14). **248 of 248 pass, 69-71 s** (gc's references cached in
+  `.tmp/goi-check/gcref`, which depend on the toolchain only); the step 77 s in the gate.
+- **`java-compiled`**: `bin/java-check --essential-compiled --jobs 8` (JCS41 (a)): the tests of
+  `test/java/essential.txt` that `test/java/check-compiled.edn` passes (derived at each run: **420 of
+  428**; the 8 others are JC2's "only interpreted" kind: `Runtime.exec`'s overloads, reflection over
+  non-public members and `getMethods`' order, `strictfp` by reflection, `TestSyntheticNullChecks`,
+  escape analysis's `ClassCastException`, and `CaptureVariablesAnonymous`, Go that does not compile:
+  JCS42), from their committed forms, in **one program**: the tests' forms merged by `java.check`'s
+  `shards` and `merge` (one shard: their files' places do not collide), `bin/j2g --program` with the
+  compiled namespaces (the gate's, below; their `aot.key` checked against the checkout's: JCS46 (a)'s
+  check for this step), `bin/build-go`; cached in `.tmp/java-check/essential-compiled/prog` by the key
+  of the host executable, the namespaces' key, `arbace/`, `go/`, `overlay/`, `jdk/`, `x509roots/`, the
+  tests' forms and list, the scripts (`bin/j2g`, `bin/build-go`, `bin/jrt`, `bin/java-check`,
+  `test/java/check.ae`) and Go's version. Every test must pass: no refusal rounds (a refusal, a build
+  failure or a run not passing fails the step). A timeout runs again once, alone, at twice the limit
+  (JCS47 (a); the first cold gate run timed out eight `java/net` tests of a fraction of a second while
+  j2g and two builds ran beside them). Its own scratch, `.tmp/java-check/essential-compiled`, so that it
+  runs beside `--essential`. Cold: j2g 70-90 s, the build 200 s (repr/go's print cache cold for the
+  tests' packages; less when warm), the runs 13 s; **cached 14 s**; j2g's peak resident 20 GB.
+- **`suite-aot-essential`**: `bin/clojure-tests --aot --essential -j 8` (RPS40 (b)): the 15 namespaces
+  of `test/clojure/essential-aot.txt` (protocols, compilation, java-interop, data-structures,
+  clearing, reducers, transducers, method-thunks, param-tags, generated-all-fi-adapters-in-let,
+  numbers, sequences, vars, macros, special) compiled **alone**, with their test libraries and the
+  runtime's namespaces they load (RPS48 (a)'s shape for the subset), into their own program
+  (`.tmp/clojure-tests/aot-essential/aot-build`, cached by `--aot`'s key plus the list), each
+  process requiring the subset's namespaces only, against the same reference
+  (`test/arbace-go-aot-results.edn`); no test.generative, no levels compared (the whole `--aot`'s).
+  **339 tests, 7,273 assertions: 7,243 pass, 28 fail, 2 errors**, the reference's for these
+  namespaces (clearing's 19, compilation's 8, java-interop's FIPrims 3). Compiled: 95 sources, 9,997
+  classes in 53 s; j2g 54 s (14,077 classes); the build 56 s; the runs about 80 s, transducers'
+  `seq-and-transducer` 75 of them (RPS43 (a)); the step 5m43s in the cold gate (the translation of
+  the suite, 1-2 minutes, included), CACHED_SUITE cached; j2g's peak resident 20 GB.
+- **One j2g at a time** (`J2G_LOCK`, a one-line hook in `bin/j2g`: when set, j2g holds the lock
+  file until it exits): diffcheck's, `java-compiled`'s and `suite-aot-essential`'s whole-program runs
+  take up to `GOMEMLIMIT` (20 GiB) each, so the gate serializes them (about 4 minutes of j2g cold,
+  none cached); their builds and runs overlap. The gate unsets it before `--full`'s chains, which run
+  as before.
+- **The gate's cache keeps the compiled namespaces**: `bin/arbace-go --gate-build` copies `aot/` and
+  `aot.key` (77 MB) beside the cached executables (`.tmp/arbace-go-gate/amd64/`), the namespaces
+  `java-compiled` translates with; `target/arbace-go/aot` is the fallback.
+
+Makefile: `goi-check-aot-essential`, `java-check-compiled-essential`, `suite-aot-essential`.
+
+### The essential gate's time
+
+| | before (main `840e514b`) | after (this branch) |
+|---|---:|---:|
+| cold (the executables built afresh, every cache empty but gc's references) | 20m51s | COLD_AFTER |
+| cached (nothing changed since the last run) | 2m29s | CACHED_AFTER |
+
+Cold, the build (`go-build`, 10-13 minutes) comes first and dominates; then the checks' phase, before
+7m20s (diffcheck's cold program the longest), after CHECKS_AFTER (diffcheck waiting for the j2g lock
+behind the others; `java-compiled` and `suite-aot-essential` about 6 minutes each). RPS15's "present
+time plus a few minutes" holds cold; cached, the subsets add the Clojure subset's runs (about 80 s,
+the transducers namespace) and Java's 14 s, in parallel with the suite and the smoke test.
+
+### The whole compiled suite: the reference re-recorded
+
+`bin/clojure-tests --aot` on this branch: (1) at the base, before any change, against the reference
+REAP3 recorded before REAP4's merge: **no regression; it moved**: java-interop's `test-proxy-super`
+passes (BitSet among the proxy superclasses, REAP4: 296 to 299 of 302, one error less); metadata and
+java.javadoc were still skipped by the reference's `:skipped` though SL5 embeds them. (2) With RPS48
+(b) (below) and the two namespaces run: 78 namespaces, 785 tests, 20,580 assertions, 20,547 pass;
+metadata 53 of 53, java.javadoc 2 of 5 as at the eval level then; nothing else moved. (3) After main's
+merge (RPS55's Module), the record: AOT_RECORD. `test/arbace-go-aot-results.edn` written from it
+(metadata and java.javadoc recorded, RPS82 (a)); `test/clojure/divergences-aot.edn`: `:proxy-bitset`
+dropped (fixed), `:d6-namespaces-cut` replaced by `:javadoc-url` (the java.sql assertion, by design,
+D6, citing RPS55 (a) and RPS82 (a), as the eval level's class); `bin/reap` 0 problems.
+
+**RPS48 (b) built for the whole `--aot`**: every embedded namespace of the runtime (listed as
+bin/diffcheck lists them, `arbace.j2g.embed/sources`) required before the suite's in the compiling
+run, so that the program's runtime is the shipped build's: 235 sources compiled (156 before),
+22,838 classes (15,219); the compiling 125 s (76), j2g 132 s (73), the build 91 s; peak resident 21.7
+GB; no test moved by it. The essential subset keeps (a)'s shape (RPS40 (b)'s "with the runtime's
+namespaces they load").
+
+### Proposals (RPS70-RPS79)
+
+- **RPS70 The AOT subset's list.**
+  - Options: (a) as built: a committed list made by its stated rule, regenerated by the rule when
+    the AOT reference is recorded again; (b) derived at run time from the reference by the rule (no
+    list to keep, but the subset moves with every re-record); (c) goi's essential list's own
+    programs only.
+  - *Recommended: (a)*: the subset stays what the gate has proved, a re-record does not change the
+    gate silently, and the list is goi's essential list's kind.
+- **RPS71 Java's compiled subset.**
+  - Options: (a) as built: derived at each run from `test/java/essential.txt` and
+    `test/java/check-compiled.edn`'s passes (420); (b) a committed list; (c) every essential test,
+    the 8 not passing compiled as known.
+  - *Recommended: (a)*: the compiled level's reference already decides which pass, and the essential
+    tests' forms are committed; a test that starts passing compiled joins at the next record.
+- **RPS72 A failure in Java's compiled subset.**
+  - Options: (a) as built: any refusal, build failure or run not passing fails the step; (b) the
+    whole level's rounds (a refused test taken out, the rest built again) with the refused test
+    failing the step afterwards.
+  - *Recommended: (a)*: every test of the subset passed compiled when recorded, so a refusal is a
+    regression; the rounds cost a second j2g pass the gate does not need to name it.
+- **RPS73 The whole-program j2g runs in the essential gate.**
+  - Options: (a) as built: one at a time (`J2G_LOCK`), builds and runs overlapping; (b) concurrently
+    with `GOMEMLIMIT` lowered for each (more GC, about the same time, the host's memory shared with
+    the other slot); (c) diffcheck, the Java and the Clojure subsets in one chain (simpler, about 4
+    minutes more cold).
+  - *Recommended: (a)*: three 20 GiB runs beside the suite, the oracle and another heavy slot do not
+    fit 62 GB; the lock costs only the j2g passes' serialization.
+- **RPS74 `seq-and-transducer` in the Clojure subset.**
+  - Options: (a) kept (as built: 75 s of the subset's runs, cold and cached); (b) skipped in the
+    subset only (a subset overlay of `:skipped-tests`), its whole-suite run kept (RPS43 (a)); (c)
+    transducers out of the subset.
+  - *Recommended: (b)*: the cached gate's longest new part is that one test's 200,000 trials, which
+    the whole `--aot` runs in `--full`; transducers' other 18 tests stay.
+- **RPS75 RPS48 (b) for the whole compiled suite.**
+  - Options: (a) as built: every embedded namespace prepared and compiled first (the program's
+    runtime the shipped one's; about 3 minutes more, j2g's peak 21.7 GB); (b) back to the 53
+    namespaces the suite loads.
+  - *Recommended: (a)*: decided (RPS48), measured, no outcome moved; `--full` only.
+- **RPS76 The gate's cached compiled namespaces.**
+  - Options: (a) as built: `--gate-build` keeps `aot/` beside its executables (77 MB), the Java
+    subset's input; (b) the Java subset compiles its own namespaces (c2j, as diffcheck: minutes more
+    cold); (c) `target/arbace-go/aot` only, with its key checked.
+  - *Recommended: (a)*: the gate's executables and their namespaces are one build; (c) breaks
+    whenever a `bin/arbace-go --build` of other sources replaced the target tree.
+- **RPS77 The programs' caches on disk.** The gate keeps three cached programs besides its executables:
+  diffcheck's (1.2 GB with its trees), the Clojure subset's (about 620 MB with its work module) and
+  the Java subset's (220 MB).
+  - Options: (a) as built: each kept until its key changes; (b) the Clojure subset's work module and
+    j2g tree removed after its build, as the Java subset does (about 400 MB less, the next miss
+    printing anew from repr/go's print cache).
+  - *Recommended: (b)*: the trees are not read on a hit.
+- **RPS78 The levels' disagreements of the subset.**
+  - Options: (a) as built: none (the subset runs at the AOT level only; the whole `--aot` lists them
+    in `--full`); (b) the subset's namespaces compared with the eval level's reference too.
+  - *Recommended: (a)*: a disagreement is a finding, not a regression (RPS16), and the eval level's
+    suite runs beside it.
