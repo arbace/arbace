@@ -62,15 +62,40 @@
   [(list 'panic (list (m/jrt-sym (m/pkg n) "J2g_NotTranslated")
                       (str (str/replace n "/" ".") "." name desc)))])
 
+(defn- capture-field-name
+  "The name of the field of local or anonymous class n holding captured local b: val$x, a $
+  appended while the class declares a field of that name (as arbace.classes.analyze/
+  capture-field-name; here too, since j2g may run on a host whose analysis predates it)."
+  [n b]
+  (let [own (set (map :name (:fields (a/decl n))))]
+    (loop [nm (str "val$" (:sym b))]
+      (if (contains? own nm) (recur (str nm "$")) nm))))
+
 (defn- captured-fields
   "binding id -> Go form reading the captured local from the class's field (local and
   anonymous classes), for code of class n."
   [n tsym]
-  (let [d (a/decl n)]
-    (if (and d (#{:local :anon} (:nesting d)))
-      (into {} (for [b (:captures @(:state d))]
-                 [(:id b) (list (symbol (str ".-" (nm/field-name (str "val$" (:sym b))))) tsym)]))
-      {})))
+  (let [d (a/decl n)
+        own (if (and d (#{:local :anon} (:nesting d)))
+              (into {} (for [b (:captures @(:state d))]
+                         [(:id b) (list (symbol (str ".-" (nm/field-name (capture-field-name n b)))) tsym)]))
+              {})
+        ;; a member class of a local class (or of its member) reads the local class's captured
+        ;; values through its enclosing instances, javac's this$0.val$x (JC5)
+        outer (loop [c n x tsym acc {}]
+                (let [cd (a/decl c)
+                      o (:outer cd)
+                      od (some-> o a/decl)]
+                  (if (and cd od (:outer-instance? cd) (m/in-world? o))
+                    (let [x' (c/outer-field x c)
+                          acc (if (#{:local :anon} (:nesting od))
+                                (into acc (for [b (:captures @(:state od))]
+                                            [(:id b) (list (symbol (str ".-" (nm/field-name (capture-field-name o b))))
+                                                           (if (m/leaf? o) x' (list (symbol (str ".Self_" (m/go-name o))) x')))]))
+                                acc)]
+                      (recur o x' acc))
+                    acc)))]
+    (merge outer own)))
 
 (defn member-line
   "The Java forms line of method or constructor m (its member form's), or nil."
@@ -172,7 +197,7 @@
         [(tag (symbol (nm/field-name (a/this0-name n))) (gt pkg (str "L" (:outer d) ";")))])
       (when (#{:local :anon} (:nesting d))
         (for [b (:captures @(:state d)) :when (m/desc-in-world? (:type b))]
-          (tag (symbol (nm/field-name (str "val$" (:sym b)))) (gt pkg (:type b))))))))
+          (tag (symbol (nm/field-name (capture-field-name n b))) (gt pkg (:type b))))))))
 
 (defn iface-method-elem [pkg mm]
   (let [[ps r] (t/parse-method-desc (:desc mm))]
@@ -258,7 +283,10 @@
                                           ;; Resolve.MethodReferenceLookupHelper reaches Resolve.this)
                                           [(reduce c/outer-field (:outer-param info) p)])
                                         (when (:enum-body d) (:enum-params info))
-                                        (map (fn [b] (c/use-sym! (c/binding-sym b))) (:params info)))))
+                                        (map (fn [b] (c/use-sym! (c/binding-sym b))) (:params info))
+                                        ;; a local superclass's captured values, passed on (JC5)
+                                        (when (and sd (#{:local :anon} (:nesting sd)))
+                                          (for [b (:captures @(:state sd))] (:x (c/local-val {:op :local :b b})))))))
                 :else
                 (let [[ps _] (t/parse-method-desc (:desc sctor))
                       lead (concat (when (and sd (:outer-instance? sd)) [[(:outer node) (str "L" (:outer sd) ";")]]))
@@ -301,8 +329,10 @@
                   :cap-params (zipmap (map :id caps) cap-ps)}
             body (binding [c/*f* (assoc c/*f* :method-fn fid :outer-param outer-p
                                         :ctor-call-fn (ctor-call-translator pkg n info)
-                                        ;; captured locals come from the constructor's parameters
-                                        :captured (zipmap (map :id caps) cap-ps))]
+                                        ;; captured locals come from the constructor's parameters;
+                                        ;; an enclosing local class's through this$0, set before
+                                        ;; the super call (JC5)
+                                        :captured (merge (captured-fields n 't) (zipmap (map :id caps) cap-ps)))]
                    (if-not (or reached (:derived mm) (nil? ab))
                      (stub-body n "<init>" (:desc mm))
                      (c/with-block
@@ -312,7 +342,7 @@
                            (when calls-super
                              ;; captures and the outer instance first, as javac stores them
                              (doseq [[b p] (map vector caps cap-ps)]
-                               (c/emit! (list 'set! (list (symbol (str ".-" (nm/field-name (str "val$" (:sym b))))) 't) p)))
+                               (c/emit! (list 'set! (list (symbol (str ".-" (nm/field-name (capture-field-name n b)))) 't) p)))
                              (when outer-p
                                (let [od (str "L" (:outer d) ";")]
                                  (c/emit! (if (m/pointer-desc? od)

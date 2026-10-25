@@ -227,6 +227,8 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; locals
 
+(declare this0-index)
+
 (defn local-node
   "The node reading binding b in ctx: its slot, the receiver, or a captured value (a field of
   the receiver: local and anonymous classes' val$x)."
@@ -249,7 +251,22 @@
             (and (:outer-param b) k (>= (:self ctx) 0) (get (:field-index (.-info k)) "this$0"))
             (arbace.lang.Compiler$CF$SelfField. (char (tc ty)) (int (:self ctx)) (int (get (:field-index (.-info k)) "this$0")))
             :else
-            (fail (str "Local not available here: " (:sym b)))))))))
+            ;; a member class of a local class (or of its subclass) reads the local class's
+            ;; captured value through its enclosing instances (javac's this$0.val$x)
+            (or (when (and k (>= (:self ctx) 0))
+                  (loop [c (.-iname k) path []]
+                    (let [d (a/decl c)
+                          o (:outer d)
+                          ok (some-> o klass)]
+                      (when (and ok (get (:field-index (.-info (klass c))) "this$0"))
+                        (if-let [j (get (:capture-index (.-info ok)) (:id b))]
+                          (arbace.lang.Compiler$CF$GetField.
+                            (char (tc ty))
+                            (arbace.lang.Compiler$CF$OuterPath. (arbace.lang.Compiler$CF$Local. \L (int (:self ctx)))
+                                                                (int-array (map this0-index (conj path c))))
+                            (int j))
+                          (recur o (conj path c)))))))
+                (fail (str "Local not available here: " (:sym b))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; conversions (emit-convert)
@@ -286,6 +303,10 @@
                      (if (#{"Ljava/lang/Object;" (t/internal->desc (t/box-of from))} to)
                        b
                        (arbace.lang.Compiler$CF$CheckCast. (desc->class to) (klass (t/desc->internal to)) b)))
+    ;; from a type that is not a wrapper (a generic T): the value's own wrapper unboxed and
+    ;; widened (LambdaMetafactory's return conversion: a Short as an int)
+    (and (t/prim? to) (not= "Z" to) (nil? (get t/unbox-of from)))
+    (arbace.lang.Compiler$CF$Unbox. (char (tc to)) \L n)
     (t/prim? to) (let [w (t/internal->desc (t/box-of to))
                        n (if (= from w) n (arbace.lang.Compiler$CF$CheckCast. (desc->class w) nil n))]
                    (arbace.lang.Compiler$CF$Unbox. (char (tc to)) (char (tc to)) n))
@@ -314,8 +335,12 @@
   (fail (str "The Go build's Java forms do not support " (:op an) " yet")))
 
 (defmethod build-op :const [ctx an]
-  (let [ty (:type an)]
-    (konst ty (if (t/prim? ty) (a/const-of-type ty (:val an)) (:val an)))))
+  (let [ty (:type an)
+        v (:val an)]
+    ;; a string constant is interned (JLS 3.10.5, 15.29: "k" + 1 == "k1", s.intern() == "k1")
+    (konst ty (cond (t/prim? ty) (a/const-of-type ty v)
+                    (string? v) (.intern ^String v)
+                    :else v))))
 
 (defmethod build-op :none [ctx an] (konst :null nil))
 
@@ -881,7 +906,7 @@
           own (vec (remove #(has? (:flags %) ACC_STATIC) (:fields d)))
           this0? (:outer-instance? d)
           caps (when (#{:local :anon} (:nesting d)) (vec (:captures st)))
-          names (concat (map :name own) (when this0? ["this$0"]) (map #(str "val$" (:sym %)) caps))
+          names (concat (map :name own) (when this0? ["this$0"]) (map #(a/capture-field-name n %) caps))
           descs (concat (map :desc own) (when this0? [(t/internal->desc (:outer d))]) (map :type caps))
           n-own (count names)
           defaults (object-array (concat (when sk (seq (.-defaults sk))) (map zero-of descs)))
@@ -1032,6 +1057,16 @@
   (or (#{"java/lang/Object" "java/lang/Record"} cn)
       (and (.-fnClass k) (#{(t/lang-class "AFunction") (t/lang-class "RestFn")} cn))))
 
+(defn- local-super-fields
+  "[[index node] ...]: a local superclass cn's (Klass sk) captured values, passed on by the
+  subclass's constructor, which captured them too (analyze/capture-local-super!)."
+  [ctx cn ^arbace.lang.Compiler$CF$Klass sk]
+  (when (= :local (:nesting (a/decl cn)))
+    (for [b (:captures (.-info sk))
+          :let [i (get (:capture-index (.-info sk)) (:id b))]
+          :when i]
+      [i (local-node ctx b)])))
+
 (defn- ctor-call-node
   "The node of a constructor's call (its super or this call), and after a super call the
   instance initializers."
@@ -1052,7 +1087,9 @@
             args (concat (enum-arg-nodes ctx) (map #(local-node ctx %) (:params ab)))]
         (concat
           (cond
-            sk [(arbace.lang.Compiler$CF$CtorCall. (ctor-meth sk cdesc) self (nodes args) (int-array []) (nodes []))]
+            sk (let [xs (local-super-fields ctx cn sk)]
+                 [(arbace.lang.Compiler$CF$CtorCall. (ctor-meth sk cdesc) self (nodes args)
+                                                     (int-array (map first xs)) (nodes (map second xs)))])
             (trivial-super? k cn) nil
             :else [(arbace.lang.Compiler$CF$SuperCtor. (internal->class cn) cdesc self (nodes args) (ptypes cdesc))])
           (inits)))
@@ -1064,9 +1101,11 @@
       (let [cn (:class call)
             sk (klass cn)
             cdesc (:desc (:ctor call))
-            xs (when (and sk (:outer call))
-                 (when-let [i (get (:field-index (.-info sk)) "this$0")]
-                   [[i (node ctx (:outer call))]]))]
+            xs (concat
+                 (when (and sk (:outer call))
+                   (when-let [i (get (:field-index (.-info sk)) "this$0")]
+                     [[i (node ctx (:outer call))]]))
+                 (when sk (local-super-fields ctx cn sk)))]
         (concat
           (cond
             sk [(arbace.lang.Compiler$CF$CtorCall. (ctor-meth sk cdesc) self
@@ -1209,11 +1248,14 @@
 (defn- lambda-done!
   "k (a lambda's class) with its method mt: defined by the host, the method published. Its
   interfaces' default methods made at run time are its own too, as a class's (vtable!; F2.5)."
-  [^arbace.lang.Compiler$CF$Klass k ^arbace.lang.Compiler$CF$Meth mt]
+  [^arbace.lang.Compiler$CF$Klass k ^arbace.lang.Compiler$CF$Meth mt & [bridges]]
   (set! (.-self mt) (int -1))
   (vtable! k)
   (.put (.-methods k) (.key mt) mt)
   (.put (.-vtable k) (.key mt) mt)
+  ;; the SAM's bridges (another erased descriptor of the method: arbace.classes.analyze/find-sam)
+  (doseq [d bridges]
+    (.put (.-vtable k) (str (.-name mt) d) mt))
   (set! (.-cls k) (.define (host) k))
   (publish! k)
   k)
@@ -1235,7 +1277,7 @@
     (set! (.-cslots mt) (int-array (concat (when inst? [self]) cslots)))
     (set! (.-ctypes mt) (char-array (concat (when inst? [\L]) (map #(tc (:type %)) caps))))
     (finish! lctx mt body)
-    (lambda-done! k mt)
+    (lambda-done! k mt (:bridges sam))
     (arbace.lang.Compiler$CF$MakeLambda. k (nodes (concat (when inst? [(arbace.lang.Compiler$CF$Local. \L (int (:self ctx)))])
                                               (map #(local-node ctx %) caps))))))
 
@@ -1288,7 +1330,7 @@
       (set! (.-ctypes mt) (char-array [\L])))
     (finish! lctx mt body)
     (set! (.-self mt) (int -1))
-    (lambda-done! k mt)
+    (lambda-done! k mt (:bridges sam))
     (arbace.lang.Compiler$CF$MakeLambda. k (nodes (when bound?
                                         [(let [r (node ctx (:recv an))]
                                            (if (:null-check an) (arbace.lang.Compiler$CF$NullChecked. r) r))])))))
@@ -1407,6 +1449,7 @@
                       :switch-holders (atom {}) :source-tried (atom #{})
                       :assert-holders (atom {}) :holder-first (atom {})}]
     (with-redefs [a/accessorize (fn [_ node] node)]
+     (binding [a/*accessors* false]
       (let [names (analyze-forms ns forms siblings)
             order (vec (remove #(or (:declared-only (a/decl %)) (:switch-holder (a/decl %))) @(:order a/*unit*)))
             sorted (#'a/supertypes-first order)
@@ -1454,7 +1497,7 @@
           (swap! registry merge ks)
           ;; the classes of earlier forms of the do whose members' types name these (SA90 (b))
           (doseq [n order] (republish! n ks))
-          (mapv (fn [n] [(str/replace n "/" ".") (.-cls ^arbace.lang.Compiler$CF$Klass (ks n))]) names))))))
+          (mapv (fn [n] [(str/replace n "/" ".") (.-cls ^arbace.lang.Compiler$CF$Klass (ks n))]) names)))))))
 
 (defn compile-and-load!
   "arbace.classes.compiler/compile-and-load! of the Go build (arbace.classes.native's

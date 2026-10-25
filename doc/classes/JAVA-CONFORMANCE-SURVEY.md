@@ -1920,3 +1920,320 @@ of the JDK's runs, `"-"` for the stdout digest of runs the JDK's own two runs di
 (no rerun in `--essential-compiled` until one of its tests flips), JCS82 (a) (only would-be regressions
 run again), JCS83 (b) (the path marker in the scratch only), JCS84 (a) (the JDK's path-dependent failure
 reasons masked, at JCS80's recording).
+
+## As built: JC5 (2026-10-25)
+
+Branch `java-check-jc5`, from main `840e514b` (JC1-JC4, JC2, JC3 on it). JC5 is §8's "the analysis'
+gaps": every test of §6.3's kind (the interp level's class `:analysis`, 70 tests; the compiled level's,
+230, of which 174 were not the analysis at all, below) traced to its cause and fixed where javac's
+decision is the converter's (repr/java writes it out) or where hand-written Java forms meet the same
+rule (the analysis learns it), JCS11 (c); with it the decided items that belong here: JCS12 (b),
+JCS24 (a), JCS30 (b), JCS40 (a) with (b)'s bridge and descriptor trace, and JCS42 (b)'s capture half.
+The executables: this branch's gate build (`bin/arbace-go --gate-build`, host main's gate build); javac's
+tool executable main's `target/arbace-go/amd64/arbace-javac` (key `bf740cf0…`, `REPR_JAVA_STALE_OK=1`,
+as JC1-JC3 ran; repr/java's namespaces load from the checkout, so the converter's changes run); the JDK
+the system's 26.0.2.1; 8 jobs, every heavy run in one of the host's slots.
+
+**The causes, and where each was fixed** (C: the converter, `arbace/repr/java/convert.ae`; A: the
+analysis, `arbace/classes/analyze.ae`; I: the interpreter, `arbace/classes/interp.ae`; J: j2g):
+
+- *Constants narrowed, then boxed* (JLS 5.2: `Byte x = 1`, `Character c = 'a'`, `Short s = 2`;
+  `ints[0] = +43` into an `Integer[]`): C. The converter boxed an int literal as `Integer/valueOf`
+  whatever the target, and left a non-literal constant of another primitive type to the analysis,
+  which does not narrow; now `(Byte/valueOf (unchecked-byte 1))`, a number written as a literal boxed
+  explicitly when it is not a long or a double (the reader's types), `+1` the literal itself and `+b`
+  its promotion written out (`TestByteBoxing`, `TestShortBoxing`, `TestRemoveUnreachableCCP`,
+  `Boxing1`, `Boxing4`, `T6816548`, `Arrays/Big`, the three `TestLoadSliceWithMultipleMemoryInputStates`,
+  `cr6646020`'s `indexOf(String, +byte)`, `Bug4958050`'s `int amount = +1`).
+- *Constant locals and labels of other classes' constants* (`final long n = Long.MAX_VALUE`, `final int
+  r = Double.MAX_EXPONENT - Double.MIN_EXPONENT + 1`, `case Integer.MIN_VALUE`): A and J. A `^:const`
+  local whose initializer the plain analysis leaves a field read or an operation is folded by
+  `analyze-const-form`, as a label is; but on Go jrt's reflection has no `ConstantValue`, so the
+  world's constants were unknown to the interpreter at all: `j2g --program` now writes the public and
+  protected constants of the world's public classes into `arbace/classes/generics.edn` (`:consts`,
+  `arbace.j2g.dyncf/generics-text`), which `arbace.classes.env/reflect-info` reads on Go
+  (`arbace.classes.go/world-const`) (`InputStream/Skip`, `StrictMath/PowTests`, `ExhaustingTests`,
+  `SwitchNull`).
+- *Switches*: a pattern switch without default (exhaustive by an unconditional pattern or a sealed
+  hierarchy) taking a value; a switch of a default alone on a reference; a qualified enum constant as
+  a label of a pattern switch on another type (Java 21's `case E.A`: a type pattern of `E` guarded by
+  identity); a selector that is a conditional of int literals; and a switch expression (or its label,
+  repr/java's `yield`) whose values are all int literals typed int, as javac types it, so that
+  `id(switch ...)` takes `id(int)`, not `id(Object)`: A. `int r = switch (i) { ... r = 1; ... }` (the
+  local in scope in its own initializer, JLS 6.3): C, declared with its default value, then assigned
+  (`NullSwitch`, `Switches`, `Unnamed`, `TypedDeconstructionPatternExc`, `SwitchEnumConstants`,
+  `EnumSwitchQualified`, `ExpressionSwitchBugs`, `ExpressionSwitchBugsInGen`).
+- *Lambdas and method references*: the lambda javac makes of a reference (variable arity, `super::m`)
+  casts its erased result to the descriptor's (A); a reference to a method whose parameters, of an
+  intersection type, erase to another bound than the method's is made a lambda casting its arguments,
+  as LambdaToMethod does (A, `select-ref`); a reference to an array's method (`int[]::clone`, `a::clone`)
+  likewise (A; such lambdas' parameters tagged `int/1`, not `[I`); a functional interface whose method
+  has two erased descriptors (`K<String>`'s `m(T)` and `M`'s `m(String)`, JLS 9.9) has the most specific
+  as its SAM and the others as bridges (A, `find-sam`; I registers them); LambdaMetafactory's return
+  conversion of a non-wrapper (a `T` that is a `Short`, as an `int`) unboxes the value's own wrapper
+  (I, `value-convert`) (`LambdaReturnUnboxing`, `MethodReferenceGenericTarget`, `TargetType35`,
+  `MethodReference36`, `MethodReference49`, `MethodReferenceArrayClone`, `IntersectionParameterTypeTest`
+  1-2, `MethodReferenceIntersection` 1-4, `LambdaTest6` and `BridgeMethod` to their reflection).
+- *Intersection types*: an intersection cast keeps its bounds (`:bounds`), the first bound's checkcast
+  outermost (the erasure), a context needing another bound converting to it by a cast (A,
+  `bound-node`: assignment, arguments, `for-each`); `((A & B) o)::b` names the declaring class (C);
+  a conditional or switch of javac's intersection type is cast to the type its context needs (C); an
+  argument of a type variable with an intersection bound is cast to the declared parameter's erasure
+  (C, `arg-targets`) (`IntersectionOrderTest` 1-2, `IntersectionTypeReceiverTest` 1-2,
+  `CovariantIntersectIterator`, `ExpressionSwitchEmbedding`).
+- *Fields of a type variable in expressions* (`y = d = getD()`, `val.n++`, `foo.x += 1` of a `T x`):
+  C, the read cast to javac's type and the assignment's value typed as the compiler sees it, so the
+  outer context casts (`VerifyErrorWithDoubleAssignmentTest`, `T6614974`, `T6751514`, `T6869075`).
+- *Outer.super*: a field read or written through `Outer.super` or `C.super` (A, `field-super-node`);
+  `Outer.super.m()` in the interpreter a special call on the enclosing instance rather than javac's
+  accessor (A, `*accessors*`, bound false by the interpreter, which makes no accessors); the qualifier
+  `X/super` pure, not bound to a local (C) (`QualBoxedPostOp` 1-3, `Closure5`, `SuperField`, `SuperMeth`).
+- *Local classes' captured values*: a local class created inside its own body (a lambda of its
+  constructor making another) captures what its form names before its body is analyzed (A); a member
+  or anonymous subclass of a local class passes the superclass's captured values on, so it captures them
+  too (javac's `Lower.freevars`; A `capture-local-super!`, I `local-super-fields`); a member class of a
+  local class reads them through its enclosing instances (I, `local-node`); a captured value's field
+  named apart from a declared one (`SynthName1`'s own `val$prm1`; A, I and J) (`SingleLocalTest`,
+  `UnverifiableInitForNestedLocalClassTest`, `WhichImplicitThis9`, `LambdaConv30`).
+- *Pattern variables' scope* (JLS 6.3): a variable a case's guard introduces is in scope in its body
+  (`case String s when o instanceof Integer i -> i`), and a loop's condition's when-false variables
+  after the loop (`while (!(o instanceof String s)) ...; s.length()`): C, the rest of the block (or the
+  case body) in an `if-instance` of the same test, as SPEC §5.8 scopes them, when its expression is
+  pure (a local, `this`): the test runs twice (`BindingsTest1`, `Guards`, `Unnamed`).
+- *A var binding of a record pattern* of a generic component (`Box<String>(var s)`): C, javac's type as
+  the tag (`GenericRecordDeconstructionPattern`); *a member of a local class out of its scope*
+  (`Cltype7.Inclass7` after `Cltype7`'s body): C, `Cltype7$Inclass7` (`NestedCapture04`).
+- *An array creation hinted to a supertype* (`^Object (new C/1 n)`, a conditional's branch): the hint set
+  the node's type, and the interpreter took the component from it ("Class not found: java.lang.Object;",
+  "ava.lang.Object;" for two dimensions): A, a cast instead. This is JCS40's "array descriptor":
+  `cr6711117`, `cr6714694` and `cr6716441` failed file by file only because the one-`do` load took
+  another path to the same node.
+- *A multi-catch's type through a cut class* (`catch (NoSuchFieldException | SecurityException e)`
+  then `new RuntimeException(e)`: `SecurityException`, outside the translated world, registered with
+  `Object` as its superclass, so the lub was `Object`): J, a cut class's superclass its first ancestor
+  in the world (`arbace/j2g/out.ae`, `cut-forms`) (`TestFieldReflectValueOf`,
+  `TestMethodReflectValueOf`; `TypeNotPresentException`, `LongBuffer` then reach the world classes they
+  need).
+- *Constant strings interned* (JLS 3.10.5, 15.29: `"_" + c + "_" == "_a_"` after `intern()`, `K ==
+  "k12"`): I (`Boxing1`, the JLS corpus's `StringConcat`); *a literal's upcast* (`v((Object) "s")`)
+  keeps the literal's own type for the converter's pin decision, so `v(Object)` is pinned (C; the JLS
+  corpus's `Overloads`).
+
+**The decided items.**
+
+- *JCS30 (b)*: repr/java writes a file's top-level classes, when there are two or more, as one
+  `(defclasses ...)` (`convert-unit`, laid out as a body form); a file is one compilation as javac's,
+  so a superclass of a later class of the file is defined first (`define!` orders supertypes). Its
+  readers splice it: the analysis' source lookup (`enter-file!`), j2g's world (`read-forms`), the Java
+  printer (`unit`), the check's owners. A top-level `do`'s consecutive Java forms are one compilation
+  too (`Compiler$ClassFormsExpr/grouped`, the evaluator's top-level `do`): `(do (defclass B :extends
+  A) (defclass A))` defines both, and such a `do` still evaluates to its last class (the grouped
+  compilation's vector's last element: the oracle's `native.ae` cases of a top-level `do`, and a REPL
+  printing it, showed the vector first; JCS60). In jdk/forms 4 files change (`URL`, `URLConnection`, `AttributedString`, `ImmutableCollections`:
+  wrapped and re-indented, nothing else), in jdk/javac 1, in the essential tests' forms 27.
+- *JCS40*: `MissingBridge` passes file by file (its file one `defclasses`), and a REPL session
+  defining `GenObject<T>` in one form and `MissingBridge` in a later one gets the bridge too: the
+  analysis takes an earlier-defined interpreted class's generic signatures from its declaration kept
+  with the class (`class-generics`), as jrt's reflection has none. The array descriptor: above.
+- *JCS12 (b)*: a type of more than nine dimensions is written as the JVM's name of its class, a string
+  tag (`^{:tag "[[[[[[[[[[Ljava.lang.String;"}`, `(new "[[...;" 2)`), which the analysis and the Java
+  printer read (`TestArrayManyDimensions`, `Test255`).
+- *JCS24 (a)*: the converter's statements loop is iterative over statements converted one by one and
+  over runs of local declarations (one `let`, as the nested lets merged before), so
+  `UncommonTrapStackBang`'s ten thousand locals convert in 2.6 s instead of overflowing the stack; the
+  output is unchanged (the frames of the split measure are the same multiset).
+- *JCS42 (b)'s capture half*: the local classes' captures above; `WhichImplicitThis9`, `LambdaConv30`,
+  `UnverifiableInitForNestedLocalClassTest` and `SynthName1` pass interpreted (the leaf-class refusal
+  half is JC2b's).
+
+**A trap found on the way**: j2g runs on the tools' host, whose `arbace.classes.*` are its own compiled
+copies (they are not tool sources, `RT.toolSource`), while j2g's namespaces load from the checkout: j2g
+code calling an analysis function the host lacks fails the build (`No such var`). j2g's copy of
+`capture-field-name` is its own for that reason; and the analysis' fixes reach j2g's translations (the
+compiled level, the runtime's own build) only on a host built from these sources: the gate's
+executable for the compiled level here, stage 0 after the re-seed (JCS61).
+
+**Numbers** (`bin/java-check --levels read,interp,compiled --record`, the whole corpus, 2,723 tests
+passing on the JDK with the JLS corpus's new `AnalysisGaps` (`test/java/jls/AnalysisGaps.java`, `t07639`:
+one case of each kind above, the JDK's run recorded, `--record-ref --only`); shards of 500; 8 jobs):
+
+| level | hotspot compiler | java/io | java/lang | java/math | java/net | java/nio | java/text | java/util | jls | langtools | **all** | JC2's |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tests | 697 | 256 | 354 | 38 | 154 | 151 | 50 | 375 | 13 | 515 | **2,723** | 2,722 |
+| read | 697 | 256 | 354 | 38 | 154 | 151 | 50 | 375 | 13 | 514 | **2,722** | 2,720 |
+| interp | 549 | 82 | 158 | 35 | 49 | 6 | 39 | 164 | 12 | 417 | **1,514 (55.6%)** | 1,426 |
+| compiled | 645 | 91 | 162 | 36 | 57 | 7 | 42 | 208 | 12 | 413 | **1,681 (61.7%)** | 1,632 |
+
+(java/rmi, java/security and java/sql as JC2's: 0, 3 and 0 interpreted, 0, 8 and 0 compiled.) The read
+level's two failures of JC1 are fixed (`UncommonTrapStackBang`, JCS24; `TestArrayManyDimensions`' and
+`Test255`'s arrays, JCS12); its one left is javac on Arbace refusing `-encoding utf8`. Interpreted, 90
+tests pass that did not (the analysis' 67, the file-by-file load's 3, the JLS corpus's 2, and those whose
+failure was behind an analysis refusal: HotSpot's vector tests, `TestImplicitNullCheckDominance`,
+`Test7199742`...), 3 do not that did: a HotSpot timeout near the limit (JCS47's kind) and two tests that
+print the run's directories (`CheckTempDir`, `UserDirChangedTest`: this worktree's paths are longer than
+the reference's; `:environment`). Compiled, 56 pass that did not (52 in the whole run, 4 more in the re-run of the capture
+tests after j2g's capture fix: `WhichImplicitThis9`, `CaptureVariablesAnonymous`, `LambdaConv30`,
+`UnverifiableInitForNestedLocalClassTest`); the 7 that did not are timeouts on the loaded host (5),
+`Test8267042`'s thread interleaving and the two directory tests. `AnalysisGaps` passes read and interp;
+compiled it stops, as `SuperMeth` does, at j2g's refusal of `Outer.super.m()` (javac's `access$N01`
+with an `invokespecial`, "an outer class's super call": the class `other`).
+
+*The classes.* Interpreted: `:analysis` 70 → 3, `:interp-files` 3 → 0 (removed), `:repr-java-dims` 2 → 0
+(removed), `:read-stack-overflow` → 0 (removed), `:interp-jls` 3 → 1 (`Exceptions`' finally, JC4's),
+`:repl-sibling` 11 → 4 (the classes of a later form now defined with their file), `other` 41 → 35.
+Compiled: `:analysis` 230 → 3; 169 of them are the new world class `:j2g-unresolved` (JCS69: j2g's analysis
+stopping at a JDK class the world lacks, which the interp level fails at run time on the same class), the
+rest pass or reach their world classes; `:j2g-go` 11 → 5 after the capture half (the subset re-run below:
+`PrintStream`/`PrintWriter` as leaves 3, JC2b's; `OneCaseSwitches`' member through a null constant and
+`ProtectedAccess_3`'s `finalize` of an outer class, JCS42's rest).
+
+*What is left of §6.3* (the class `:analysis`, `:decided :pending`): `MultiLevelOuterInstance` (JCS62),
+`CyclicInheritance4` (JCS65), `IntersectIterator` (JCS66); and the reflection of a lambda's bridges,
+`LambdaTest6` and `BridgeMethod` (JCS63), now in the reflection class.
+
+*repr/java's checks*: `bin/repr-java check` as expected (the baseline's 189 files by their digests, the
+samples, the module); `front-check` the native trees' forms equal javac's in every corpus (samples,
+baseline, jdk, javac); `roundtrip --corpus baseline,samples,jdk --text` every level as its reference
+(baseline forms 189, ae 182, classes 143, text 183; samples 17, 17, 12, 14; jdk forms 874, ae 816,
+classes 473, record 911, text 838, anew 799): no reference changed. The converted output changed only in
+the files of two or more top-level classes (now one `defclasses`): `bin/jrt-convert update` (jdk/forms: 4
+files), `bin/javac-vendor convert` (jdk/javac: 1, and javac's world's edge recorded afresh, below),
+`bin/clojure-tests --java-fixtures update` (1), `bin/java-check --forms update` (the essential tests'
+forms); `test/repr/java/expected` and the round trip's references are unchanged; jdk26u's hashes
+(`test/repr/java/expected/jdk26u.sha256`, `check --jdk`, not run here) will differ in the files of several
+top-level classes: `check --jdk --update` with the re-seed's checks.
+
+*j2g's edge*: a cut class is now registered with its first superclass in the world, which j2g asks the
+edge for: `bin/j2g-edge update` adds the infos of 19 cut classes to `jdk/edge.edn` (716 lines: AWT's,
+`SQLException`, `BasicPermission`, NIO's channels...), `bin/javac-vendor convert` 699 lines to
+`jdk/javac/edge.edn`; no other line changes.
+
+*The shipped files changed* (the second re-seed's): `arbace/classes/analyze.ae`, `interp.ae`, `env.ae`,
+`go.ae`; `arbace/lang/Compiler.ae` (`ClassFormsExpr/grouped`); `arbace/j2g/dyncf.ae` (the world's
+constants), `out.ae` (cut classes' superclasses), `decls.ae` (captures), `world.ae` (`defclasses`);
+`arbace/repr/java/convert.ae`, `layout.ae`, `print.ae`, `full.ae`; `jdk/forms` (4 files),
+`jdk/edge.edn`, `jdk/provenance.edn`, `jdk/javac/forms` (1), `jdk/javac/edge.edn`,
+`jdk/javac/provenance.edn`; `test/java-fixtures/forms` (1). The provenance files name javac's tool
+that wrote them, main's stale one (`bf740cf0…`, as JC1-JC3's runs): the re-seed's tool writes them again.
+
+**Checks**: the essential `bin/gate` at the branch's head passed in 19m04s (the executables built afresh by
+stage 0): the smoke test; Clojure's suite on the test build, no regressions; the oracle 22,688 of 22,740, its
+52 known mismatches as recorded (a first run, before JCS60 (a), had the six `native.ae` cases of a `do`'s
+value new); diffcheck as recorded (Clojure's pair 12,046 of 12,056, the Java forms' pair 743 of 745); goi's
+essential check 801 of 801; Java's essential check 428 of 428 from the forms written afresh; the generated
+variants; j2g's edge (verify passed, after the update above); `bin/reap` 0 problems (Java: eval 1,514, AOT
+1,681). The `--full` gate's checks of repr/java were run one by one as above; the rest of `--full` was not.
+
+The scratch this section cites (the worktree's `.tmp/jc5/`, not tracked): `check2.log` (the whole check's
+run, `--record`), `results-run2.tsv` (its results), `chain1.log`, `chain2.log` (the capture tests' compiled
+re-runs and the essential forms' update), `rj-check2.log`, `front-check.log`, `roundtrip.log`,
+`roundtrip-text.log` (repr/java's checks), `jrt-update.log`, `javac-convert.log`, `edge-update.log`,
+`fixtures.log` (the conversions afresh), `gate2.log` (the gate).
+
+### Proposals (JCS60-JCS69)
+
+- **JCS60 A top-level `do`'s value.** The evaluator now defines a top-level `do`'s consecutive Java
+  forms as one compilation (JCS30 (b)); built first, a `do` that ended with them evaluated to the
+  vector of their classes, as `defclasses` does, and the oracle's six cases of `native.ae` (a `do`'s
+  value, a REPL printing it) differed from the frozen reference: the branch now builds (a), to be
+  confirmed.
+  - Options: (a) the last class, as a `do`'s value is its last form's (the grouped compilation's
+    vector's last element); (b) as built, the vector; (c) group only `defclass` forms written inside a
+    `defclasses`, leaving `do` as before (SPEC §9.2 (2) then says so).
+  - *Recommended: (a)* (as built): a `do` keeps Clojure's meaning and only its compilation unit
+    changes; one call in `ClassFormsExpr/grouped`.
+- **JCS61 The analysis j2g runs with.** j2g's namespaces load from the checkout when they differ from
+  the host's (RT.toolSource), the analysis' (`arbace.classes.*`) do not: before a re-seed, j2g on stage 0
+  translates with the seed's analysis, so the analysis' fixes reach the compiled level and the
+  runtime's own translation only through a host built from the checkout (this branch's numbers use the
+  gate's executable), and j2g code may not call an analysis function the seed lacks.
+  - Options: (a) as built: the fixes ride the re-seed, and j2g keeps to the analysis functions the seed
+    has (a rule in J2G-SPEC §1); (b) `arbace/classes/` made tool sources too, the checkout's analysis
+    loaded when it differs (evaluated: j2g's analysis of the program slower until the next build, and
+    the interpreter's copy then differs from j2g's within one process); (c) the gate's builds by a
+    first host built from the checkout (minutes more on every analysis change).
+  - *Recommended: (a)*: the re-seed is batched anyway; (b) mixes two analyses in one program.
+- **JCS62 An anonymous class in an early construction context, two levels out**
+  (`MultiLevelOuterInstance`: `this(new A() { ... MultiLevelOuterInstance.this.g() ... })` in an inner
+  class's constructor, JLS 8.1.3 since Java 22).
+  - Options: (a) the analysis' `outer-this-node` reaches an outer instance beyond the constructor's
+    class through the constructor's outer-instance parameter, as it does for one level; (b) left in the
+    class (one test).
+  - *Recommended: (a)* with JC6: the parameter path exists, the hop count is the missing part.
+- **JCS63 A lambda's bridges in reflection and in j2g** (`LambdaTest6`, `BridgeMethod`: the SAM's
+  other erased descriptors are called now, but `getDeclaredMethods` of the lambda's class lists one `m`).
+  - Options: (a) the interpreter publishes a bridge method per descriptor (a Meth of that descriptor
+    calling the SAM's body), j2g writes them as Go methods of the lambda's type, as LambdaMetafactory's
+    `FLAG_BRIDGES`; (b) the vtable only (as built), the two tests in the reflection class.
+  - *Recommended: (a)*: a call through the other interface type is a real program's (`K<String> k =
+    km; k.m(s)`), and j2g's lambda would not implement `K` without it.
+- **JCS64 Flow-scoped pattern variables of an expression with effects.** The converter re-tests a
+  guard's or a loop condition's `instanceof` around the code in its variables' scope when the tested
+  expression is a local or `this`; any other expression is left as before (the analysis then refuses).
+  - Options: (a) the expression bound to a temporary before the statement (a `let` around the loop or
+    the switch, the `instanceof` testing the temporary), then re-tested; (b) as built, pure expressions
+    only.
+  - *Recommended: (a)*: the same scope rule for every expression; none of the corpus's tests needs it
+    yet.
+- **JCS65 A member type named through a shadowing member** (`CyclicInheritance4`: `class Y extends
+  AX.Z { class AX extends AX1 { } }`: javac's `AX.Z` is `AX1.Z`, written `AX$Z`).
+  - Options: (a) the converter writes a class reference whose qualifying class is shadowed at the site
+    by its declaring class's binary name (`AX1$Z`); (b) left (one test, a compiler test of cycles).
+  - *Recommended: (a)*: class references already carry the shadowing names (`CRef`'s `shadow`); the
+    qualified-member path should consult them too.
+- **JCS66 A type variable's second bound in for-each** (`IntersectIterator`: `<T extends A & B<String>>
+  for (String s : t)`, `t` erased to `A`).
+  - Options: (a) the converter casts the expression to the bound that is `Iterable` (TransTypes'
+    cast), as it now does for arguments (`arg-targets`); (b) the analysis keeps type variables' bounds
+    (`:bounds` of a binding, as for intersection casts) and `bound-node` finds it.
+  - *Recommended: (a)*: the converter has javac's bound, the analysis would need the type variable's
+    bounds on every local.
+- **JCS67 The world's constants.** `generics.edn`'s `:consts` hold the public and protected static final
+  primitive and String fields of the world's public classes (j2g's world: what the program translates).
+  - Options: (a) as built; (b) every class's constants, the package-private ones too (a test in
+    `java.util` naming a package-private constant is the JDK's own, not a user's); (c) the edge's
+    constants too (`jdk/edge.edn` records `:const` for the classes outside the forms).
+  - *Recommended: (a) and (c)*: a constant of a cut class (`java.sql.Types`) is as constant; (b) is not
+    reachable from user code.
+- **JCS68 `--record-ref --only` and the golden-diagnostics tests.** Recording JC5's JLS program alone
+  (`bin/java-check --record-ref --only AnalysisGaps`) rewrote every golden-diagnostics test's line
+  without its `:actions` (the reference was then put back by hand with the new line alone).
+  - Options: (a) `java.check/gather` keeps the lines of the tests a partial run did not plan byte for
+    byte, whatever their kind (as JC3 meant: "gather keeps the other tests' lines byte for byte"), with
+    a check that a partial `--record-ref` changes no other line; (b) a partial `--record-ref` refused
+    unless it names a kind.
+  - *Recommended: (a)*.
+- **JCS69 The compiled level's unresolved world classes.** 174 of the compiled level's 230 `:analysis`
+  tests were j2g's analysis stopping at a JDK class the world lacks (`Cannot convert value of method
+  of type :null to `, an empty target); they are now the world class `:j2g-unresolved`.
+  - Options: (a) as built, until JCS44 (a) (JC2b) makes j2g's refusals name the import: then these
+    messages name the class and join `:j2g-world`'s areas; (b) the analysis fails at the unresolved
+    class itself ("Unable to resolve class") instead of at the conversion after it.
+  - *Recommended: (a), then (b)*: the conversion's message is a symptom; the cause is the class.
+
+## Decided (2026-10-25): JCS60-JCS69
+
+The user decided JC5's proposals as recommended: JCS60 (a) (a top-level `do` of grouped Java forms
+evaluates to its last class, as built), JCS61 (a) (the analysis' fixes ride the re-seed; j2g calls no
+analysis function the seed lacks), JCS62 (a) (with JC6: the prologue's outer instance beyond one level),
+JCS63 (a) (a lambda's bridges published by the interpreter and written by j2g), JCS64 (a) (a flow-scoped
+pattern's expression with effects bound to a temporary, then re-tested), JCS65 (a) (a shadowed
+qualifier written by its declaring class's binary name), JCS66 (a) (the converter casting a type
+variable to its `Iterable` bound in for-each), JCS67 (a) and (c) (the world's public constants, and the
+edge's constants too), JCS68 (a) (a partial `--record-ref` keeps the other tests' lines byte for byte,
+checked), JCS69 (a), then (b) (`:j2g-unresolved` until the messages name the class, then the analysis
+failing at the unresolved class). The classes `:analysis` and `:j2g-unresolved` cite this.
+
+**After the merge with main** (JC2b, REAP5, REAP5b, REAP8, RPS55, JN9c, the harness follow-ups; javac's tool
+built from the merged checkout, `bin/arbace-go --build-java`): `bin/jrt-convert update`, `bin/javac-vendor
+convert` and `bin/clojure-tests --java-fixtures update` left every forms file as it was; the provenance files
+moved only in `:repr-java` and `:host`, and `jdk/javac/provenance.edn` in `:jdk-edge` too, with
+`jdk/javac/edge.edn` 717 lines shorter (javac's world's edge is recorded less what `jdk/edge.edn` answers
+alike, which now holds the cut classes' infos). The levels recorded again (`--levels
+read,interp,compiled,print --record`): read 2,722, interp **1,546**, compiled **1,694**, print 2,132 (8 now
+passing, 8 not: the printer on JC5's new forms, a cast around a conditional, an `unchecked-short`, a field of
+`Outer.super`, a constructor's casts to an intersection's bound: REAP5b's printer to follow, each in its
+`:print-*` class), of 2,723; `test/java/levels-known.edn` recorded (7 new disagreements, 23 resolved).
+`:j2g-unresolved` keeps 169 tests: JCS44's import-named refusals did not change these messages (JCS69 (b)).
+`bin/repr-java check --jdk --update`: 103 of jdk26u's 13,566 files' hashes changed (the files of several
+top-level classes, JCS30 (b), and the converter's new casts).
