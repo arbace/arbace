@@ -259,7 +259,15 @@ Prior art:
   `--patch-module` against the same platform. `bin/arbace-go` builds
   (`--build`, `--build-tests`, `--pgo`, by the tools' host; the test build's Java
   fixtures committed as forms in `test/java-fixtures/`, `bin/clojure-tests --java-fixtures update`,
-  `verify`), smoke-tests and runs it. Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
+  `verify`), smoke-tests and runs it; `--build-program DIR` (REAP7, doc/go/BUILD.md, "A user's
+  program"; `make program DIR=...`) builds a user's program: `DIR/program.edn`'s entry (`:main NS`, its
+  `-main`; `:main-class CLASS`, its `main`; neither: `go/` a Go program, `arbace.build.go` alone),
+  `src/`'s namespaces compiled by c2j and embedded, `java/`'s Java forms and the compiled namespaces
+  translated by j2g with the shipped build's compiled namespaces (reused when their `aot.key` is the
+  checkout's, else a `--build` first; j2g's `--entry`, `--entry-arg`, `--resources`), `go/`'s Go forms
+  embedded for goi, into `target/arbace-go/programs/NAME/ARCH/NAME`, cached by key; `--build-program
+  --check` (`make programs-check`) builds and runs the samples of `test/programs/` (Clojure, Java forms,
+  Go forms, mixed) against their runs. Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
   default since S6; `ARBACE_AOT=0`: evaluated from the image of prepared namespaces, as before):
   by the host when its runtime (`bin/lib/version.bash`'s `arbace_runtime_key`: `arbace/lang`,
   `go`, `overlay/jdk`, `jdk` but j2g's edge) is the checkout's, one j2g run, started as the host

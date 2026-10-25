@@ -1137,6 +1137,17 @@ The cached gate's wall does not move: its longest steps are `suite-go` (2m12s-2m
 (about 2 minutes), beside which the subset now takes a third of its old time; the 80 s come off the
 slot the gate shares with the other checks.
 
+## Decided (2026-10-25): RPS90-RPS99
+
+The user decided REAP7's proposals: RPS90 (a) (DIR's layout as built), RPS91 (a) (`:main NS` or
+`:main-class CLASS`), RPS92 (b) now (a program's Go forms compiled: printed into the module and listed in
+a goi table of the program's own, for the milestone; REAP7b), RPS93 (c) (a Java package's namespace
+embedded as a no-op loader, with a warning at build time when `src/` requires one), RPS94 (c) (`.clj` and
+`.cljc` sources translated into `.ae` by repr/clojure first), RPS95 (a), then (b) at the re-seed (stage 0
+a base once `bin/seed --build` keeps its `aot/`), RPS96 (a), RPS97 (a), then (b) after the milestone
+(one library for the three harnesses), RPS98 (c) (the essential gate builds `mixed`, the rest in
+`--full`), RPS99 (a).
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail
@@ -1932,3 +1943,347 @@ of 22,740 (52 known), diffcheck 12,789 of 12,801 (12 known), goi's and Java's es
 the generated variants, j2g's edge, `bin/reap` (12 of 12 cells, 0 problems). `bin/java-check
 --levels print --only ...` alone (the read level's cache, not its rows) gives the recorded rows.
 `bin/gate --full` was not run (the policy until the milestone).
+
+## As built: REAP7 (2026-10-25)
+
+The user's AOT entry (RPS14 (a)), on the branch `reap7-build-program` from main `6f3a93ad`:
+`bin/arbace-go --build-program DIR` (`make program DIR=...`), the tool `bin/clojure-tests --aot`
+(REAP3) and `bin/java-check`'s compiled level (JC2) build for their corpora, made general. Measured on
+the branch's own shipped build (`bin/arbace-go --build`, amd64, its host main's gate executable),
+every heavy run in the host's heavy slots, at 8 jobs (`J2G_JOBS=8`, `GOMAXPROCS=8`).
+
+### The design
+
+- **DIR's layout** (doc/go/BUILD.md, "A user's program"): `program.edn` (read with the Clojure
+  reader: `:main NS`, a Clojure program, `NS/-main` the entry; `:main-class CLASS`, a Java forms
+  program, `CLASS.main(String[])` the entry; neither, a Go program; `:name`, the executable's name,
+  default DIR's; a Go program's `:module` and `:go`, `bin/build-go`'s; any other key an error);
+  `src/` the Clojure namespaces and resources (a directory of the class path), `java/` the Java forms
+  (SPEC §9.2's packages), `go/` Go forms (SPEC §4.1), `runs/` the samples' runs (`bin/build-go
+  test`'s format).
+- **A Clojure or Java forms program.** (1) The base: the shipped build whose compiled namespaces it
+  reuses, `ARBACE_PROGRAM_BASE`, else `target/arbace-go`, else the gate's cache
+  `.tmp/arbace-go-gate/amd64`, the first whose `aot.key` is the checkout's (`aot_key`: the runtime key
+  and Arbace's sources, as the test build's reuse, SA157) and whose executable's `:runtime` is the
+  checkout's; else `--build` for the host's architecture first. (2) goi's table, `bin/goi table`
+  (cached by its key, the build's). (3) With `src/`: on the base's executable, `java/`'s package
+  namespaces required, then every namespace of `src/`, under `ARBACE_COMPILE`, `ARBACE_NO_IMAGE`,
+  `ARBACE_PATH_FIRST` (the program's `.ae` sources recorded as embedded ones; the runtime's
+  namespaces from their compiled loaders, as `--build-java` compiles repr/java's reader), then
+  `arbace.c2j.main/run` over the units of the program's own sources (`src/`'s and the `go/` sources
+  they load) into `programs/NAME/aot`. (4) `bin/j2g --program --input BASE/aot [--input
+  programs/NAME/aot] [--input DIR/java] --gotable ... [--resources DIR/src] [--resources DIR/go=go]`
+  with the entry (`--entry-arg -m --entry-arg NS`, or `--entry CLASS`), on the base's executable
+  (`J2G_GO_EXE`; under `J2G_LOCK` when set, bin/j2g's); (5) `bin/build-go --line-file` with jrt's
+  overlay, `x509roots`, the print cache and the link's flags (`-s -w`, Arbace's version). No image
+  of prepared namespaces: every namespace is compiled.
+- **A Go program.** `bin/build-go --line-file DIR` alone (stripped): no Arbace runtime.
+- **j2g's three options** (`arbace/j2g/main.ae`, `embed.ae`; the shipped program's j2g, so the next
+  batched re-seed): `--entry CLASS` (the main package's `main` calls `CLASS`'s static `main`, a root,
+  in place of `arbace.lang.Main`'s), `--entry-arg ARG` (arguments before the command line's), both
+  without rlwrap (the command line is the program's); `--resources DIR[=PREFIX]` (every file under
+  DIR embedded at its relative path: sources join the embedded sources, so that `RT.load` finds them
+  embedded and runs their compiled loaders and the cut classes cover the classes they name; other
+  files the resource data; a path embedded already is an error). Without them j2g's output is as
+  before: the branch's shipped translation against main's, both of the same runtime, differs only in
+  `arbace.j2g.main`'s and `arbace.j2g.embed`'s own compiled classes and embedded sources (`diff -rq`
+  of the program trees: 10 files); the main package's `main.ae` and `arbace.ae` byte for byte.
+- **The output.** `target/arbace-go/programs/NAME/ARCH/NAME` (`--arch`, default the host's; `-o OUT`
+  a copy), the last line printed naming it; cached by the key of the base's executable and compiled
+  namespaces, goi's table, DIR's files but `runs/`, the runtime, x509roots, j2g's edge, the scripts
+  and Go's version; the intermediate trees (c2j's, j2g's about 315 MB, the work modules) removed
+  after the build (`ARBACE_PROGRAM_KEEP=1` keeps them).
+- **The check.** `bin/arbace-go --build-program --check [NAME...]` (`make programs-check`): each
+  sample of `test/programs/` built and run on its runs (stdout equal, the exit code, stderr's start),
+  an Arbace program's with `ARBACE_LOAD_TIMES=1`: none of its own sources may load from source (each
+  ran its compiled loader).
+
+### The samples and their results
+
+| sample | what | c2j | j2g | build | executable | runs |
+|---|---|---|---|---|---|---|
+| `hello-clojure` | two namespaces (a record, a protocol extended, a transducer, `slurp *in*`, `frequencies`), `-main`, `System/exit` | 2 sources, 19 classes, 1 s | 140 s | 88 s | 154,288,288 B | 2 of 2; 0.14 s |
+| `hello-java` | package `hello`: `Main` (`ArrayList`, `TreeMap`, `BufferedReader` over `System.in`, `while`, `for-each`) and `Shapes` (a nested interface and two static classes, an array of them) | none | 143 s | 96 s | 154,144,928 B | 2 of 2; 0.07 s |
+| `hello-go` | module `example.com/hellogo`, two packages (`bufio`, a method `String`, two results) | none | none | seconds | 1,536,160 B | 2 of 2 |
+| `mixed` | `mixed.main` requires the Go forms package `mixed/caps` (`strings` from goi's table) and imports the Java forms class `mixed.text.Words`, which calls back a Clojure fn (`IFn`) | 3 sources (the `go/` package's loader among them), 6 classes, 1 s | 137 s | 34 s | 154,206,368 B | 2 of 2; 0.9 s (goi checks the package at load) |
+
+**8 of 8 runs pass**; no source of a sample loads from source (no `load` line of `ARBACE_LOAD_TIMES`
+at all: the runtime's namespaces are compiled too). One expectation was wrong at first (`hello-java`
+with no arguments exits 1, the size of its list holding "world"; the JVM's would too). A build is
+about 3 to 4 minutes in a free heavy slot (c2j a second, j2g 140 s at 20 GiB, the build 35-95 s with
+repr/go's print cache warm or cold); the whole check cached (keys unchanged) 6.5 s. The base's
+`--build` (one j2g run, the host compiling the namespaces) was needed once, because the branch's j2g
+changes change the compiled namespaces' key; a checkout whose `target/arbace-go` or gate cache is
+current builds without it.
+
+**What the samples showed.** Nothing of c2j, j2g or the runtime needed a fix: a Clojure namespace
+importing a Java forms class that was interpreted when c2j compiled it, and a Go forms namespace
+compiled by c2j and interpreted by goi, run as at the REPL. The limits found are design choices,
+proposed below: a Java package's namespace is not embedded (a namespace imports its classes; at the
+REPL one requires the package first, RPS93); `.clj` and `.cljc` sources are embedded but not
+compiled (RPS94); Go forms in an Arbace program are interpreted (RPS92).
+
+### Changes
+
+Shipped: `arbace/j2g/main.ae` (`--entry`, `--entry-arg`, `--resources`; `program-entry-main`),
+`arbace/j2g/embed.ae` (`user-resources`). Scripts: `bin/arbace-go` (`--build-program`, `--check`:
+new functions and two lines of dispatch), `Makefile` (`program`, `programs-check`). Samples:
+`test/programs/`. Docs: doc/go/BUILD.md ("A user's program"), CLAUDE.md's `bin/arbace-go` paragraph.
+
+### Proposals (RPS90-RPS99)
+
+- **RPS90 DIR's layout.**
+  - Options: (a) as built: `program.edn` (`:main`, `:main-class`, `:name`, a Go program's `:module`
+    and `:go`) beside `src/`, `java/`, `go/` and `runs/`, the language of each tree by its directory;
+    (b) one source root, each file's language by its forms (`ns` with `go/package`, `defclass`, the
+    rest Clojure), as `ARBACE_PATH` holds them at the REPL; (c) a `deps.edn`-like `:paths` map.
+  - *Recommended: (a)*: the three trees go to three different tools (c2j, j2g's inputs, goi's
+    embedded namespaces or `arbace.build.go`), and a directory each says which without reading a
+    file; (b) would make a Java package namespace and a Clojure one indistinguishable to the build.
+- **RPS91 The entry.**
+  - Options: (a) as built: `:main NS` (`-m NS` before the command line, through `arbace.lang.Main`),
+    `:main-class CLASS` (its `main(String[])` called directly, as `java CLASS`), neither for a Go
+    program; j2g's `--entry` and `--entry-arg`; (b) a `:main` symbol whose kind is found (a namespace
+    on `src/`, else a class of `java/`); (c) `:main-class` through `arbace.lang.Main` too (`-e`).
+  - *Recommended: (a)*: explicit, and a Java program does not start Clojure's runtime it does not ask
+    for; (b) is a convenience that can come later without changing (a)'s files.
+- **RPS92 Go forms in an Arbace program.**
+  - Options: (a) as built: embedded and interpreted by goi (their std imports compiled, from goi's
+    table), the namespaces' loaders compiled by c2j where it can; (b) compiled: the program's Go
+    packages printed into the module (`bin/build-go --root`) and listed in a table of the program's
+    own (`bin/goi table` with an extra list and root), so that goi calls them compiled as it calls
+    std; (c) both, (b) when the package type-checks for the table.
+  - *Recommended: (b) after the milestone, (a) now*: (a) is what the REPL does and works today; (b) is
+    the real AOT of Go inside an Arbace program but needs the table generator to take a user's root
+    (about a day) and costs a table build per program.
+- **RPS93 Java package namespaces at run time.**
+  - Options: (a) as built: not embedded; a namespace imports the classes (`:import`), a `(require
+    'pkg)` of a Java package fails at run time; (b) the package namespaces embedded as empty loaders
+    (their `require` a no-op once the classes are the program's); (c) (b) and the warning at build
+    time when `src/` requires one.
+  - *Recommended: (c)*: code written at the REPL requires the package first (the smoke test's `jl`);
+    a no-op loader makes that code build unchanged (a few lines in j2g's `--resources` handling).
+- **RPS94 `.clj` and `.cljc` sources.**
+  - Options: (a) as built: embedded, loaded from source (`ARBACE_PATH_FIRST` records a `.ae` only);
+    (b) `ARBACE_PATH_FIRST` taking `.clj` and `.cljc` too (RT.load's three suffixes), so they are
+    compiled; (c) translated by repr/clojure into `.ae` first (`bin/repr-clojure read`), as the
+    compiled suite does.
+  - *Recommended: (c)*: the dialects' divergences are repr/clojure's table's; a Clojure library then
+    builds as the suite does; (b) is a shipped change to `RT.load` (a re-seed) for less.
+- **RPS95 The base's reuse.**
+  - Options: (a) as built: `ARBACE_PROGRAM_BASE`, `target/arbace-go`, the gate's cache, the first
+    whose `aot.key` and runtime are the checkout's, else a `--build` (about 3 to 5 minutes); (b) the
+    seed's stage 0 as a base too, when its compiled namespaces are kept with it (`bin/seed --build`
+    leaves none today); (c) always a `--build` first.
+  - *Recommended: (a)*, (b) at the next re-seed: a user with a fresh clone has stage 0 and no shipped
+    build; stage 0's `aot/` kept would spare the first build.
+- **RPS96 The image of prepared namespaces.**
+  - Options: (a) as built: none (every namespace compiled; a source c2j does not compile is
+    evaluated from its text at load); (b) the program prepared once and linked with its image, as
+    `--build` does (a second link, seconds), so that the evaluated rest replays.
+  - *Recommended: (a)*: the samples load nothing from source; (b) when a user's program has sources
+    c2j refuses.
+- **RPS97 The other harnesses on it.**
+  - Options: (a) `bin/clojure-tests --aot` and `bin/java-check`'s compiled level keep their own
+    builds (the suite's hook, the shards and refusals are theirs); (b) both call `--build-program`'s
+    functions (the base, the compile, j2g, the build) as a library (`bin/lib/program.bash`); (c) both
+    lay their corpora out as DIRs.
+  - *Recommended: (b) after the milestone*: one place for the base's key and the build's flags; (a)
+    until then, since the harnesses are being changed concurrently (JC5, the follow-ups).
+- **RPS98 The samples' check in the gates.**
+  - Options: (a) in the essential gate (`bin/arbace-go --build-program --check`, concurrent with the
+    others): one j2g whole-program run per Arbace sample (three, about 2-3 minutes each under the
+    gate's `J2G_LOCK`), cached by key, so seconds when nothing changed; (b) in `bin/gate --full` only;
+    (c) the essential gate builds the `mixed` sample only (it holds the three languages), the rest
+    in `--full`.
+  - *Recommended: (c)*: the mixed program exercises c2j, j2g's Java inputs, `--entry-arg`,
+    `--resources` and goi's embedded packages; one j2g run (about 2 minutes, cached when the gate's
+    key holds) is the essential gate's price; `hello-java`'s `--entry` and the Go program in
+    `--full`.
+- **RPS99 The output.**
+  - Options: (a) as built: `target/arbace-go/programs/NAME/ARCH/NAME`, `-o OUT` a copy, the
+    intermediate trees removed; (b) `DIR/target/NAME` (beside the program, as a project's build
+    directory); (c) (a) with `--arch` defaulting to `ARBACE_GO_ARCHES`.
+  - *Recommended: (a)*: the checkout's target/ is where builds live and is ignored; a program
+    directory may be read-only (test/programs).
+
+**The checks.** The essential `bin/gate` at the branch's head (the gate's executables built afresh,
+865 s, the `gate_key` changed): every step passed but `suite-aot-essential`, whose j2g run was
+killed by the kernel for memory (a 20 GiB run beside the other heavy slot; it uses none of j2g's
+new options); that step run again alone in a heavy slot passed (15 namespaces, 7,243 of 7,273 as
+recorded, no regressions; 299 s, 20 GiB). The rest: the smoke test, the suite on the test build
+20,566 of 20,580 as recorded, the oracle 22,688 of 22,740 (52 known), diffcheck 12,789 of 12,801 (12
+known), goi's essential checks (801 and 248 of 248 compiled), Java's (428 interpreted, 420 compiled),
+the generated variants, j2g's edge (no new JDK class named), `bin/reap` (12 of 12 cells, 0 problems).
+`bin/arbace-go --build-program --check`: 8 of 8. `bin/gate --full` was not run (the policy until the
+milestone).
+
+## As built: REAP5b (2026-10-25)
+
+RPS60-RPS63 (a), on the branch `reap5b-printer` from main `6f3a93ad`: repr/java's printer
+(`arbace.repr.java.print`) fixed so that javac on Arbace accepts the printed Java of the 62 tests of
+`:print-syntax` (45), `:print-conversions` (9), `:print-javac-other` (7) and `:print-empty-unit` (1).
+Measured as REAP5 was: main's javac tool executable (`target/arbace-go/amd64/arbace-javac`, key
+`bf740cf0…`, `REPR_JAVA_STALE_OK=1`: javac's world is unchanged, repr/java's namespaces load from the
+checkout), main's stage 0 as the tools' host, 8 jobs, every run in the host's heavy slots. Only the
+printer changed (`arbace/repr/java/print.ae`, evaluated from the checkout on the tools' host; not
+embedded in the shipped program): no converter change, no shipped code (`go/`, `overlay/`, `jdk/`, the
+program's `arbace/` untouched), no re-seed. The javac tool's key moves (it embeds `arbace/repr/java`),
+as for any repr/java change; nothing reads the printer there.
+
+**The fixes**, each with its case in the samples (`test/repr/java/java/sample/PrintSyntax.java`, new:
+the round trip's forms, ae and text levels pass it; below, "The checks"):
+
+- *Parentheses and casts Java's grammar needs* (RPS60): an array creation indexed is `(new byte[n])[0]`;
+  a switch expression is a unary expression (JLS 15.15), so a receiver or a postfix operand puts it in
+  parentheses, `(switch (x) {...}).trim()`, and a standalone one (a receiver) gives its lambda arms
+  their casts; a lambda or method reference as a receiver, as an argument for a parameter declared of
+  another type (`Object`, not a type variable), as an element of an `Object[]` initializer or as a
+  for-each's `Iterable` is cast to its interface with the type arguments the lambda's instantiated
+  tags give (`((Supplier<Integer>) () -> 3).get()`, `(Iterable<Integer>) s::iterator`; raw when the
+  tags give none); an assignment as a conditional's false branch is parenthesized; `(do obj (C/m))`
+  is `obj.m()` only when `obj` is a reference (`(x = 1).isTrue()` and `sb.setLength(45).valueOf(45)`
+  were `x = 1; ... isTrue()`); the intersection cast of a method reference's receiver lambda,
+  `((A & B & AB & C) () -> ...)::b`, as the converter's nested casts give it.
+- *Names* (RPS60): an array type's method reference, `int[]::clone` (the converter's `int/1/.clone`
+  reads as namespace `int`, name `1/.clone`); a type variable's method reference, `T::get` (the forms
+  name its erasure, which does not declare `get`); a local class by its simple name and its member
+  classes outside it as `Local.Member`; an anonymous class's type as `var`, its `this` unqualified
+  (`Outer$Inner1$1/this`); `o.new Inner() {...}` with the simple name; an inner class of a generic
+  class's literal qualified (`Outer.Inner.class`: by simple name Java takes it as `Outer<T>.Inner` in
+  a static context); a member class of a package-private class named through the public subclass the
+  file imports (`Named.X`, an `import static a.Named.X` of `a.Private$X`); identifiers with
+  supplementary characters kept apart as Unicode escapes (`𐐀abc`, not `_abc`); the
+  converter's `Int/TYPE` and `Char/TYPE` in an annotation's value as `int.class`, `char.class`
+  (RPS84).
+- *Conversions* (RPS61): the casts assignment contexts need (JLS 5.2), from the printer's index: a
+  primitive into another primitive's box, `(int) x.byteValue()` into an `Integer`; a box into a narrower
+  primitive or another box, `(byte) (int) i`; an int literal for an `Integer`, `Short`, `Byte` or
+  `Character` target without its `L`; a narrowed compound assignment on a box written out
+  (`b = (byte) (b + i)`: `(Byte) (int)` is no cast); a constant variable left to Java's narrowing.
+- *javac's other refusals* (RPS62), the seven: a pattern binding rebound in the scope of one of its
+  name, where the converter nested a `&&` chain's `if-instance`s (Guards), renamed `i_1`; a loop whose
+  pattern binding escapes into the statements after it (`while (!(o instanceof String s)) {}`, and
+  the do-while's) printed as that loop, in a block of its own with the statements after it when a
+  later one binds the name again (BindingsTest1, the block the forms do not keep); a labeled switch
+  whose breaks give the method's value, `return switch (...) {...}` (ExpressionSwitchBreaks1: it lost
+  the values before); a local a lambda captures declared without initializer when a `try` assigns it
+  and its `catch`es rethrow (AccessControlTest; for captured locals only, which keeps the round trip's
+  class files, RPS87); a declaration's TYPE_USE annotation that the converter also keeps on a
+  qualified type's outer class written once (`@TypeAnno("O") public Outer<..>.Inner<..> foo2()`); the
+  package-private class above (T6225935); `new C<>()` for a parameterized target whose class the index
+  does not declare generic (javax.tools' `DiagnosticCollector`: the raw `new` warned under `-Werror`).
+  None needed the forms' model.
+- *An empty compilation unit* (RPS63): a converted file of a Java origin holding only its `in-ns` is a
+  unit without forms, printed as its package line, so the read again gives the package's namespace
+  its `load` (FirstChar's forms step passes). Its mode `:full` record is not in the forms: the
+  converter writes `:java/file` on a unit's first form and this unit has none, so the full layout
+  prints the package line alone and the text step differs (`:print-full-empty-unit`, `:pending`,
+  RPS83).
+- Also: the host's bridge methods are left out of its declarations (`clone()Object` beside the
+  covariant one), and a class neither the index nor the host declares has no known `clone()` type
+  (URICertStoreParameters' `p1.clone()` was `Object`).
+
+**Numbers** (2,722 run tests the JDK passes; REAP5's in parentheses):
+
+| step | took it | pass | not |
+|---|---:|---:|---:|
+| print (lines and full layouts) | 2,720 | 2,718 (2,718) | 2 (the dimensions) |
+| javac accepts the printed Java | 2,718 | 2,686 (2,625) | 32 (93): 30 type arguments, 2 `--release` |
+| the read again: forms equal | 2,686 | 2,618 (2,577) | 68 (48) |
+| mode `:full`: text byte for byte | 2,720 | 2,717 (2,717) | 3 (the two arrays; FirstChar) |
+| class files the original's | 2,686 | 2,149 (2,121) | 537 (504) |
+| **the level** | 2,722 | **2,132** (2,104) | 590 (618) |
+
+By class: by design 484 (`:print-classes`, 472: the tests javac now accepts whose class files differ
+by the forms' known kinds); deferred, decided 105: type arguments 30 (`:print-type-arguments`: REAP5's
+30 but TargetType05, now at the forms step, and RemoveMicroBenchmark, `Stream.<Collection<Integer>>of`,
+moved from `:print-syntax` by `:tests`), the printed Java read to other forms 68 (`:print-forms`, 47:
+the 21 javac refused before, below), `--release` 2, the dimensions 2, the read failed 2, the overload
+cast 1; **pending** 1 (`:print-full-empty-unit`, RPS83). `:print-syntax`, `:print-conversions`,
+`:print-javac-other` and `:print-empty-unit` are gone. `bin/reap`: Java print **2,132 / 484 / 106 (1
+pending)**, 12 of 12 cells, 0 problems. Of the 62 tests: 28 pass, 21 differ at the forms step, 12 at
+the classes step (by design), 1 at the text step (FirstChar).
+
+The 21 now at the forms step (`:print-forms`, RPS64's kinds): the casts of the conversions where the
+converter's forms type a box otherwise than its declaration (`Byte x = 1;` is
+`(let [x (Integer/valueOf 1)] ...)`: an `Integer` to the forms, so `x = (byte) x` needs `(int)` and reads
+back with it; TestByteBoxing, TestShortBoxing, TestRemoveUnreachableCCP, the three
+TestLoadSliceWithMultipleMemoryInputStates, TestDuplicateSimpleLoopBackedge, Big, TargetType05:
+RPS85); the renamed binding (Guards, RPS86); a `long` literal's negation, a float constant's digits, a
+byte's cast to byte (HotSpot's generated fuzz tests, six), an unexpanded temporary (`o_3`, Test6712835), a label's name
+(ExpressionSwitchBreaks1), `when` against `when-instance` (BindingsTest1), a for-each binding's and a
+switch's local's tag (IteratorMicroBenchmark, ExpressionSwitchEmbedding).
+
+**The round trip** (`bin/repr-java roundtrip --corpus baseline,samples,jdk --text`): the baseline and
+jdk corpora as their references, byte for byte at every level (baseline forms 189, ae 182, classes 143
+of 183, text 183; jdk forms 874, ae 816, classes 473 of 838, text 838, anew 799); the samples 18
+converted files (17 and `PrintSyntax.ae`): forms 18, ae 18, classes 12 of 15 (`PrintSyntax`'s class
+files differ by a known kind, a value's control flow), text 15 of 15, anew 15; references
+recorded again (`--record`) for the new sample alone. A first version counted a `catch` that rethrows
+as assigning for every local, not only captured ones: jdk's classes 478 (six more files' locals
+declared as written) but `CollatorProviderImpl` one less, the baseline's 145, and at the print level's classes step 9
+tests more passing and 13 fewer; the rule stays the captured locals' (RPS87). `bin/repr-java check
+--update` wrote the sample's expected forms (`test/repr/java/expected/java/sample/PrintSyntax.ae`, the
+package's namespace file); `parse-check`, `front-check` and `attr-check --corpus samples` pass with it
+(a qualified anonymous creation, `new Outer().new In() {}`, was left out of the sample: the native
+attribution provider declines it, JN9c's; java-check's AnonymousInSuperCallTest and MissingCast2 hold
+it); `bin/javac-vendor classes samples` compares it as the others.
+
+**Scratch** (the worktree's `.tmp/`, for the merge): `print-full.log` (the level's last run, with the
+steps' counts), `print-results-1.tsv` (the first run's `results.tsv`, before RPS87's restriction and
+the two regressions' fixes), `print-np-after.tsv` (the non-passes but the classes step), `run62-after.log`
+(the 62 tests alone), `roundtrip1.log` (the first round trip), `roundtrip2.log` (the recording),
+`reap-entries-before.txt` (`bin/reap --entries` at the base), `gate.log`, `gate-1.log` (the gate's two runs),
+`oracle-rerun.log`.
+
+### Proposals (RPS83-RPS87)
+
+- **RPS83 An empty unit's mode `:full` record (1, `:print-full-empty-unit`).**
+  - Options: (a) the converter writes `:java/file` (the text, no starts) on the `in-ns` of a unit without
+    declarations (convert.ae's `(and *full* (seq forms))`), in JC5 or after it, and the printer's full
+    layout prints a unit without forms from it; (b) by design: a file without declarations has no form
+    to hold its text, its package line is printed.
+  - *Recommended: (a)*: mode `:full`'s promise (every file back byte for byte) then holds for it; a few
+    lines on each side, the converter's in the converter's owner's hands.
+- **RPS84 The converter's `Int/TYPE` and `Char/TYPE`.**
+  - Options: (a) the converter writes `Integer/TYPE` and `Character/TYPE` for `int.class` and
+    `char.class` in an annotation's value (convert.ae's `attr-value`, `str/capitalize` of the primitive's
+    name), in JC5, the expected forms written again where they change, the printer's reading of the
+    old spelling kept for forms written before; (b) as built: the printer reads them.
+  - *Recommended: (a)*: the forms name classes that do not exist, which the interpreter and j2g would
+    meet in an annotation's value (Primitives passes the print level only by the printer's reading).
+- **RPS85 A box the forms type otherwise than its declaration (9 of `:print-forms`).**
+  - Options: (a) the converter tags such a local with its declared box, or boxes its initializer to it
+    (`Byte x = 1` as `^Byte x (Byte/valueOf (unchecked-byte 1))`), in JC5, so the printer needs no
+    cast and the forms step passes; (b) as built: the printer's casts, the tests at the forms step,
+    RPS64 deciding the kind.
+  - *Recommended: (a)*: the forms are wrong about `x`'s type (an `Integer` to the interpreter), which
+    is a meaning lost at the read.
+- **RPS86 A pattern binding rebound in the scope of its name (Guards).**
+  - Options: (a) as built: renamed (`i_1`), javac accepting, the forms step differing by the name; (b)
+    the printer folds the converter's nested `if-instance`s of a `&&` chain back into the condition
+    (its else branches equal), giving the source's forms; (c) the converter keeps the `&&` chain.
+  - *Recommended: (a)* now, (b) with RPS64's decision on restructurings: (b) is the printer's alone but
+    needs the else branches' equality, which the fuzz-like tests make large.
+- **RPS87 A local declared without initializer.**
+  - Options: (a) as built: definite assignment counts a rethrowing `catch` only for a local a lambda or
+    class captures (where Java needs the declaration without initializer), the round trip's references
+    unchanged; (b) for every local: six more jdk files' and two of the baseline's class files the
+    original's, one jdk file fewer, and at the print level 9 tests more and 13 fewer; (c) the converter records whether the source
+    wrote the initializer (JF3's kind, `:full` mode's text has it).
+  - *Recommended: (a)*: the forms do not say which the source wrote, and (b) trades one way for the
+    other; (c) with JF3.
+
+**The checks.** The essential `bin/gate` at the branch's head (`c82dcaed`, the printer and the records):
+passed, run again (3m13s, its builds cached) after a first run whose `oracle-go` step failed on the
+frozen jar's build, made at once by that step and `j2g-edge` in a fresh worktree (the oracle alone then
+passed, as recorded): the suite 20,566 of 20,580 as recorded, the oracle 22,688 of 22,740 (52 known),
+diffcheck 12,789 of 12,801 (12 known), goi's 801 and 248, Java's essential 428 interpreted and 420
+compiled, the compiled suite's subset 7,243 of 7,273 as recorded, the generated variants, j2g's edge,
+`bin/reap` (12 of 12 cells, 0 problems, 1 pending). Beside it, as above: `bin/java-check --levels
+read,print` (all 2,722, its report recorded with `--record`: `check-print.edn`; `check-read.edn`
+unchanged), `bin/repr-java roundtrip --corpus baseline,samples,jdk --text --record`, `bin/repr-java
+check --update`, `parse-check`, `front-check`, `attr-check --corpus samples`, `bin/javac-vendor
+classes samples` (11 files, 40 classes, byte for byte). `bin/gate --full` was not run (the policy until
+the milestone).

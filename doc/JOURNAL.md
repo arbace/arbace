@@ -1938,3 +1938,32 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   essential gate passed on the branch (4m41s, then 2m50s cached) and on the merge. Decided (the user):
   JCS80 (a), JCS81 (b), JCS82 (a), JCS83 (b), JCS84 (a). The agent's slips: one `2>/dev/null` in a wait
   loop; main's gate cache copied into the worktree.
+
+## 2026-10-25: REAP7 merged, RPS90-RPS99 decided; JC5's merge sent back; REAP7b started (the user)
+
+- REAP7 (branch `reap7-build-program` from `6f3a93ad`, merged `79136f28`): `bin/arbace-go --build-program DIR`,
+  a user's program: `program.edn` (`:main NS` for a Clojure program, `:main-class CLASS` for a Java forms
+  program, neither for a Go program; `:name`, `:module`, `:go`), `src/`, `java/`, `go/`, `runs/`; the base's
+  compiled namespaces reused (`ARBACE_PROGRAM_BASE`, `target/arbace-go`, the gate's cache, by `aot.key` and
+  `:runtime`, else a `--build`), goi's table, c2j of the program's own units on the base, `bin/j2g --program`
+  (new options `--entry`, `--entry-arg`, `--resources`; `arbace.j2g.embed/user-resources`), `bin/build-go`;
+  a Go program by `bin/build-go` alone; Go forms in an Arbace program embedded and interpreted by goi; output
+  `target/arbace-go/programs/NAME/ARCH/NAME`, cached by key; `--check` over `test/programs/` (hello-clojure,
+  hello-java, hello-go, mixed: 8 of 8 runs; about 3-4 minutes a program, j2g about 20 GiB); `make program`,
+  `make programs-check`; doc/go/BUILD.md "A user's program". Shipped code: `arbace/j2g/main.ae`, `embed.ae`
+  (the shipped translation unchanged but j2g's own classes). On the branch the gate's `suite-aot-essential`
+  j2g run was killed for memory beside another heavy slot's (rerun alone: passed); on the merge the gate
+  passed whole (16m47s). Decided (the user): RPS90 (a), RPS91 (a), RPS92 (b) now (for the milestone),
+  RPS93 (c), RPS94 (c), RPS95 (a) then (b), RPS96 (a), RPS97 (a) then (b), RPS98 (c), RPS99 (a).
+- JC5's merge into main conflicted in seven files (the three provenance files, `check-interp.edn`,
+  `check-compiled.edn`, `divergences.edn`, the survey): both sides re-recorded the levels on different code.
+  Aborted; JC5 merges main into its branch, reruns the provenance updates on a tool of the combined
+  checkout and re-records the levels there. Decided (the user): JCS60-JCS64 (a), JCS65 (a), JCS66 (a),
+  JCS67 (a) and (c), JCS68 (a), JCS69 (a) then (b).
+- Started (the user): REAP7b (RPS92 (b), RPS93 (c), RPS94 (c), RPS98 (c)).
+
+## 2026-10-25: after the milestone, the scripts' sweep before any C23 work (the user)
+
+- Decided (the user): after `arbace-reaps-3-crops-v1`, the scripts' sweep of `/dev/null` and process
+  substitution comes first; any C23 work (its survey included) starts after it. This corrects the entry
+  "after the milestone, C23 at parity the main effort" above, which had the sweep queued beside C23.
