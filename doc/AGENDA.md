@@ -117,11 +117,12 @@ The current state of the work. This file is rewritten as things change. For the 
   print level: 2,104 of 2,722; RPS60-RPS69), JC2b (JCS42 (b)-JCS48: interp 1,462, compiled 1,636;
   JCS70-JCS79), JN9c (beside REAP: overload resolution native, jdk26u's lists written alone 95.9%;
   JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JC5 (the
-  analysis' gaps), JN9d (inference, beside REAP), REAP5b (the printer: RPS60-RPS63), REAP7b (RPS92 (b): a
+  analysis' gaps), JN9d (inference, beside REAP), REAP7b (RPS92 (b): a
   program's Go forms compiled; RPS93 (c), RPS94 (c), RPS98 (c)), JC5's merge of main (its levels
   re-recorded on the combined code). Done since: REAP7 (`bin/arbace-go --build-program DIR`: four samples,
-  8 of 8; RPS90-RPS99), the harness follow-ups (JCS70 masked paths, JCS71 `:flaky`, RPS74 (b),
-  RPS77 (b); interp 1,464, compiled 1,638; JCS80-JCS84, JCS80 and JCS84 at the next full recording). Next: JC6 after JC5 (the
+  8 of 8; RPS90-RPS99), REAP5b (the printer: the print level 2,104 to 2,132; RPS83-RPS87, the
+  converter's three in JC6), the harness follow-ups (JCS70 masked paths, JCS71 `:flaky`, RPS74 (b),
+  RPS77 (b); interp 1,464, compiled 1,638; JCS80-JCS84, JCS80 and JCS84 at the next full recording). Next: JC6 after JC5, whole (the user, 2026-10-25: no shortcut; the
   world ranked and decided, the catch-all classes "other, to triage" split and named, JCS72-JCS74,
   JCS77); the second batched re-seed (REAP2's `--go-flag`, REAP3, REAP4, JC2's and JC2b's j2g, JC5,
   RPS55's jrt); REAP9. After the milestone: the scripts' sweep of `/dev/null` and
