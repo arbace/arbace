@@ -299,6 +299,42 @@
   (doseq [l (levels names deps)]
     (m/par-mapv (m/jobs) f l)))
 
+;; the refusals' names (doc/classes/JAVA-CONFORMANCE-SURVEY.md, JCS44 (a), "As built: JC2b"): the
+;; analysis names a class it cannot resolve by the simple name the code wrote; the namespace's
+;; import list says which class that was meant to be
+
+(defn- imported
+  "The classes a Java forms file's import forms name: simple name -> qualified name
+  ((import '(java.net DatagramSocket)), (import 'java.net.DatagramSocket))."
+  [forms]
+  (into {} (for [f forms
+                 :when (and (seq? f) (symbol? (first f)) (= "import" (name (first f))))
+                 spec (rest f)
+                 :let [spec (if (and (seq? spec) (= 'quote (first spec))) (second spec) spec)]
+                 [pkg simple] (cond (and (sequential? spec) (symbol? (first spec)))
+                                    (for [c (rest spec) :when (symbol? c)] [(str (first spec)) (str c)])
+                                    (symbol? spec)
+                                    (let [x (str spec) i (.lastIndexOf x ".")]
+                                      (when (pos? i) [[(subs x 0 i) (subs x (inc i))]])))]
+             [simple (str pkg "." simple)])))
+
+(def ^:private unresolved-re
+  #"(Unable to resolve (?:class|symbol)|Unknown (?:type|class)): ([A-Za-z_][\w]*)")
+
+(defn- name-import
+  "A failure's message with the import that would have declared the class it could not resolve
+  named after it (\"Unable to resolve class: DatagramSocket (the import java.net.DatagramSocket)\"),
+  from imports (simple -> qualified, its file's); else as it is."
+  [imports ^String msg]
+  (if-let [[whole _ simple] (re-find unresolved-re msg)]
+    (if-let [q (get imports simple)]
+      (let [i (+ (.indexOf msg ^String whole) (count whole))
+            ;; past the rest of the name (DatagramSocket/new, AX$Z)
+            j (loop [j i] (if (and (< j (count msg)) (not (Character/isWhitespace (.charAt msg j)))) (recur (inc j)) j))]
+        (str (subs msg 0 j) " (the import " q ")" (subs msg j)))
+      msg)
+    msg))
+
 (defn load-world
   "Reads, enters and analyzes the Java forms of the inputs, each {:root :dirs|:tree|:files},
   with the Go-build variants of the variant files applied. Returns the world:
@@ -533,7 +569,13 @@
      :source-of (into {} (for [{:keys [file ns forms]} @parsed :when ns
                                n (top-names ns forms)]
                            [n (str file)]))
-     :failed (vec (sort-by (juxt first second) @failed)) :variants @applied :erased erased}))
+     :failed (let [imports (into {} (for [{:keys [file forms ns]} @parsed :when ns] [(str file) (imported forms)]))
+                   file-of (into {} (for [{:keys [file ns forms]} @parsed :when ns n (top-names ns forms)] [n (str file)]))]
+               (vec (sort-by (juxt first second)
+                             (for [[n msg] @failed
+                                   :let [f (or (get imports (str n)) (get imports (get file-of (top-of (str n)))))]]
+                               [n (if f (name-import f (str msg)) msg)]))))
+     :variants @applied :erased erased}))
 
 (defmacro with-world
   "Runs body with the world's class environment bound (analyzer and env functions see it)."

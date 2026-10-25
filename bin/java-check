@@ -26,11 +26,13 @@
 #                                 differs or only the masked runs agreed (JCS17 (b)); load-failed,
 #                                 fail, differ, timeout otherwise, stderr's first line the reason
 #                        compiled the tests translated by j2g (JC2, survey §7.2): in shards of
-#                                 --shard-size tests (default 700; --shard K,...: those shards again, the
-#                                 others' results kept from the last run), each
+#                                 --shard-size tests (default 500, JCS48 (a); a shard whose j2g dies
+#                                 split in two and run again, JCS48 (b); --shard K,...: those shards
+#                                 again, the others' results kept from the last run), each
 #                                 one program (bin/j2g --program with the tests' forms and the
 #                                 shipped build's compiled namespaces, JAVA_CHECK_AOT, default
-#                                 target/arbace-go/aot; bin/build-go), a test whose classes j2g
+#                                 target/arbace-go/aot, refused when not of the checkout's runtime,
+#                                 JCS46 (a); bin/build-go), a test whose classes j2g
 #                                 refuses or whose Go does not compile taken out (refused, j2g's or
 #                                 Go's reason) and the shard translated again; each main action run
 #                                 on the program and judged as interp's; JAVA_CHECK_HEAVY, a command
@@ -61,8 +63,12 @@
 #                      against test/java/check-LEVEL.edn (as recorded, new, now passing; a test
 #                      passing there and not now fails the check), every test not passing in a class
 #                      of test/java/divergences.edn (none in no class), the numbers by area; --record
-#                      writes check-LEVEL.edn. Default 8 jobs; --timeout, each action's seconds
-#                      (default 20, the interpreter's definition included); --load files|do
+#                      writes check-LEVEL.edn. A run of the levels interp and compiled prints their
+#                      disagreements (a test passing at one only) against test/java/levels-known.edn
+#                      (JCS45 (a)): a new one fails the check, --record writes the file. Default 8
+#                      jobs; --timeout, each action's seconds (default 20, the interpreter's
+#                      definition included; a timeout is run again once at twice the limit before
+#                      it counts, JCS47 (a)); --load files|do
 #                      (JAVA_CHECK_LOAD): how interp defines a test's classes, files (the default) or
 #                      do (a top-level do per package, JCS8 (a): the comparison mode). Each side runs
 #                      in .tmp/java-check/w/ID with java.io.tmpdir and TMPDIR .tmp/java-check/tmp/ID
@@ -408,21 +414,27 @@ judge() {
 # none: the program's own, compiled), in the run's directories (run_dirs, JCS19 (b)), judged;
 # prints ID<TAB>LEVEL<TAB>RESULT<TAB>REASON, the first action not passing its result
 run_actions() {
-  local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp
+  local level=$1 exe=$2 mode=$3 fdir=$4 res="" i st w tmp lim
   local -a x
   read -r w tmp <<< "$(run_dirs "$id")"
   while [ -z "$res" ] && IFS=$'\t' read -r -a x; do
     [ "${x[0]}" = run ] || continue
     i=${x[1]}
-    rm -rf "$w" "$tmp"; mkdir -p "$w" "$tmp"
-    st=0; (cd "$w" && env TMPDIR="$tmp" ${fdir:+ARBACE_PATH=$fdir} timeout -k 5 "$timeout" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
-             -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" -Djava.io.tmpdir="$tmp" -- "${x[@]:9}" \
-             < "$work/empty" > "$p/out$i" 2> "$p/err$i") || st=$?
-    if [ "$st" = 126 ] && grep -q '^java-check: load-failed: ' "$p/err$i"; then
-      res="load-failed	$(grep -m1 '^java-check: load-failed: ' "$p/err$i" | sed 's/^java-check: load-failed: //' | tr '\t' ' ' | cut -c1-400)"
-    else
-      res=$(judge "$st" "$p/out$i" "$p/err$i")
-    fi
+    # a timeout is run again once at twice the limit before it counts (JCS47 (a): the host's load
+    # moved the tests near the limit between runs)
+    for lim in "$timeout" "$((timeout * 2))"; do
+      rm -rf "$w" "$tmp"; mkdir -p "$w" "$tmp"
+      st=0; (cd "$w" && env TMPDIR="$tmp" ${fdir:+ARBACE_PATH=$fdir} timeout -k 5 "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
+               -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" -Djava.io.tmpdir="$tmp" -- "${x[@]:9}" \
+               < "$work/empty" > "$p/out$i" 2> "$p/err$i") || st=$?
+      if [ "$st" = 126 ] && grep -q '^java-check: load-failed: ' "$p/err$i"; then
+        res="load-failed	$(grep -m1 '^java-check: load-failed: ' "$p/err$i" | sed 's/^java-check: load-failed: //' | tr '\t' ' ' | cut -c1-400)"
+      else
+        res=$(judge "$st" "$p/out$i" "$p/err$i")
+      fi
+      case $res in timeout*) ;; *) break ;; esac
+    done
+    case $res in timeout*) res="timeout	$timeout s, then $((timeout * 2)) s" ;; esac
     [ -n "$res" ] && [ "$i" != 0 ] && res="${res%%	*}	action $i: ${res#*	}"
   done < "$p/plan.tsv"
   # the reason without this run's places (the recorded results name no checkout)
@@ -447,16 +459,17 @@ compiled_one() {
   run_actions compiled "$2" none ""
 }
 
-# compiled_shard K: the tests of shard K (WORK/j2g/sK/tests.txt, java.check/shards) translated by
+# compiled_shard K DIR: the tests of shard K (DIR/tests.txt, java.check/shards: WORK/j2g/sK, or a
+# half of a split one, run_shard) translated by
 # j2g into one program (--program: every public member of the tests' classes a root, every main
 # among them; the shipped build's compiled namespaces as the test build takes them, without goi's
 # table unless JAVA_CHECK_GOTABLE names one, as diffcheck's program), refused tests taken out and the rest translated again until j2g refuses none (a refusal
 # is its test's result, never the shard's: survey §7.2), then built by bin/build-go, a test whose
 # Go does not compile taken out likewise (go build -gcflags=-e, every error of package lang), and
 # each test's actions run on the program; the program and its trees removed after the runs. Prints
-# the results (ID compiled RESULT REASON) into WORK/j2g/sK/results.tsv
+# the results (ID compiled RESULT REASON) into DIR/results.tsv
 compiled_shard() {
-  local k=$1 s=$work/j2g/s$1 round st n overlay
+  local k=$1 s=$2 round st n overlay
   overlay=$(bin/jrt overlay | tail -1) || return 1
   : > "$s/refused.tsv"
   for round in 1 2 3 4 5 6 7 8; do
@@ -466,7 +479,8 @@ compiled_shard() {
     rm -rf "$s/out" "$s/work" "$s/prog"
     st=0; J2G_GO_EXE=$rexe REPR_GO_EXE=$rexe $heavy bin/j2g --program --input "$s/forms" --input "$aot" ${gotable:+--gotable "$gotable"} --out "$s/out" > "$s/j2g$round.log" 2>&1 || st=$?
     if [ ! -f "$s/out/report.edn" ]; then
-      tail -20 "$s/j2g$round.log" >&2; echo "java-check compiled: shard $k: j2g failed ($s/j2g$round.log)" >&2; return 1
+      # j2g died (no report: the host's memory, JCS48): status 3, the caller splits the shard
+      tail -20 "$s/j2g$round.log" >&2; echo "java-check compiled: shard $k: j2g failed ($s/j2g$round.log)" >&2; return 3
     fi
     jc refusals "$work" "$s" > "$s/refusals$round.log"; cat "$s/refusals$round.log" >&2
     n=$(sed -n 's/^java-check refused: \([0-9]*\) tests.*/\1/p' "$s/refusals$round.log")
@@ -496,6 +510,54 @@ compiled_shard() {
   rm -rf "$s/prog" "$s/forms"
 }
 
+# run_shard K DIR: shard K (DIR/tests.txt) by compiled_shard, its results in DIR/results.tsv; a
+# shard whose j2g dies (compiled_shard's status 3) split in two halves (DIR/h1, DIR/h2) and each
+# run again likewise (JCS48 (b)), down to JAVA_CHECK_SPLIT_MIN tests (default 25); a shard that
+# fails otherwise (a j2g or build failure no test is blamed for) gives its tests the result error:
+# the other shards go on, the report fails on them (no class takes error)
+run_shard() {
+  local k=$1 d=$2 st=0 n h
+  rm -f "$d/results.tsv"; rm -rf "$d/h1" "$d/h2"
+  compiled_shard "$k" "$d" || st=$?
+  [ "$st" = 0 ] && return 0
+  n=$(wc -l < "$d/tests.txt")
+  if [ "$st" = 3 ] && [ "$n" -gt "${JAVA_CHECK_SPLIT_MIN:-25}" ]; then
+    echo "== java-check compiled: shard $k: j2g died, split in two ($n tests)" >&2
+    rm -rf "$d/out" "$d/work" "$d/prog" "$d/forms"
+    mkdir -p "$d/h1" "$d/h2"
+    head -n $((n / 2)) "$d/tests.txt" > "$d/h1/tests.txt"
+    tail -n +$((n / 2 + 1)) "$d/tests.txt" > "$d/h2/tests.txt"
+    for h in 1 2; do run_shard "$k.$h" "$d/h$h"; done
+    cat "$d/h1/results.tsv" "$d/h2/results.tsv" > "$d/results.tsv"
+    return 0
+  fi
+  awk -F'\t' '{print $1 "\tcompiled\terror\tthe shard failed (" FILENAME ")"}' "$d/tests.txt" | sed -e "s|$root|.|g" > "$d/results.tsv"
+}
+
+# aot_fresh: the compiled namespaces' tree was made from the checkout's runtime (JCS46 (a)):
+# arbace_runtime_key (bin/lib/version.bash) against the tree's: the runtime of the executable
+# bin/arbace-go --build made with it (AOT/../amd64/arbace's *arbace-version* :runtime; aot.key
+# hashes the runtime's key with Arbace's sources, so it cannot be read back). j2g's own sources and the namespaces' are not the runtime's: a tree of other
+# ones serves (the tests' programs do not call the compiled j2g). JAVA_CHECK_AOT_STALE_OK=1 warns
+# instead of refusing
+aot_fresh() {
+  local want have="" src=""
+  . "$root/bin/lib/version.bash"
+  want=$(arbace_runtime_key "$root")
+  if [ -x "$(dirname "$aot")/amd64/arbace" ]; then
+    src=$(dirname "$aot")/amd64/arbace
+    have=$(env -u ARBACE_NO_AOT "$src" -e '(print (:runtime *arbace-version*))' 2> "$work/aot-runtime.err") || have=""
+  fi
+  [ "${have:-}" = "$want" ] && return 0
+  if [ "${JAVA_CHECK_AOT_STALE_OK:-}" = 1 ]; then
+    echo "java-check compiled: warning: the compiled namespaces $aot are not of the checkout's runtime (${have:-unknown}${src:+, $src}; the checkout's $want); used anyway (JAVA_CHECK_AOT_STALE_OK=1)" >&2
+    return 0
+  fi
+  echo "java-check compiled: the compiled namespaces $aot are not of the checkout's runtime (its key ${have:-unknown}${src:+, from $src}; the checkout's $want)" >&2
+  echo "java-check compiled: build them: bin/arbace-go --build (or JAVA_CHECK_AOT names a tree of this runtime; JAVA_CHECK_AOT_STALE_OK=1 to use it anyway)" >&2
+  return 1
+}
+
 # compiled_level: the compiled level of the tests WORK/run.list holds (their read level passed),
 # in shards of SHARD_SIZE tests (--shard-size), one after another (a j2g run takes up to 20 GiB);
 # their results appended to WORK/results.tsv; unread tests 'unread'
@@ -504,6 +566,7 @@ compiled_level() {
   goroot=${ARBACE_GOROOT:-/root/tamago-go}
   [ -f "$aot/packages.edn" ] || { echo "java-check compiled: no compiled namespaces $aot (bin/arbace-go --build, or JAVA_CHECK_AOT)" >&2; return 1; }
   [ -z "$gotable" ] || [ -d "$gotable" ] || { echo "java-check compiled: no goi table $gotable (JAVA_CHECK_GOTABLE)" >&2; return 1; }
+  aot_fresh || return 1
   # --shard K: that shard again, the others' results kept (the same plan makes the same shards)
   [ -n "$shard_only" ] || rm -rf "$work/j2g"
   mkdir -p "$work/j2g"
@@ -511,11 +574,7 @@ compiled_level() {
   local s
   for s in $(cd "$work/j2g" && ls -d s* | sed 's/^s//' | sort -n); do
     if [ -z "$shard_only" ] || [[ ",$shard_only," == *",$s,"* ]]; then
-      rm -f "$work/j2g/s$s/results.tsv"
-      # a shard that fails (a j2g or build failure no test is blamed for) gives its tests the
-      # result error: the other shards go on, the report fails on them (no class takes error)
-      compiled_shard "$s" || awk -F'\t' '{print $1 "\tcompiled\terror\tthe shard failed (" FILENAME ")"}' "$work/j2g/s$s/tests.txt" \
-        | sed -e "s|$root|.|g" > "$work/j2g/s$s/results.tsv"
+      run_shard "$s" "$work/j2g/s$s"
     fi
     cat "$work/j2g/s$s/results.tsv"
   done
@@ -597,7 +656,7 @@ check_one() {
 
 check() {
   local only="" corpus="" record="" essential=""
-  jobs=8 t0=$SECONDS shard_size=${JAVA_CHECK_SHARD_SIZE:-700} shard_only=""
+  jobs=8 t0=$SECONDS shard_size=${JAVA_CHECK_SHARD_SIZE:-500} shard_only=""
   levels=read,interp timeout=20 from_committed="" load=${JAVA_CHECK_LOAD:-files}
   while [ $# -gt 0 ]; do
     case $1 in
