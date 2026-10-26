@@ -98,6 +98,8 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; The same type, subtyping
 
+(declare wild-equivalent?)
+
 (defn same-type?
   "Types.isSameType: the same type, type annotations aside (type variables by identity, captured ones
   too; wildcards by kind and bound)."
@@ -112,7 +114,13 @@
            (case k
              :class (and (identical? (:c a) (:c b))
                          (= (count (:args a)) (count (:args b)))
-                         (every? true? (map same-type? (:args a) (:args b)))
+                         (let [fs (d/class-tparams (:c a))
+                               fs (if (= (count fs) (count (:args a))) fs (repeat nil))]
+                           (every? true? (map (fn [x y f]
+                                                (or (same-type? x y)
+                                                    (and (map? x) (= :wild (:k x)) (map? y) (= :wild (:k y))
+                                                         (wild-equivalent? (:reg (:c a)) f x y))))
+                                              (:args a) (:args b) fs)))
                          (if (and (:outer a) (:outer b)) (same-type? (:outer a) (:outer b)) true))
              :array (same-type? (:e a) (:e b))
              :tvar (identical? (:tv a) (:tv b))
@@ -189,6 +197,22 @@
                :else (subtype? reg (:t t) s)))
     (same-type? t s)))
 
+(defn- wild-contains?
+  "Types.containsType of wildcards `t` and `s`, type arguments of formal `f` (WildcardType.bound: an
+  unbounded or super wildcard's upper bound the formal's declared bound)."
+  [reg f t s]
+  (let [up (fn [w] (if (= :extends (:bk w)) (:t w) (if f (upper-bound (d/tvar-type f)) (d/object-type reg))))
+        lo (fn [w] (if (= :super (:bk w)) (:t w) :null))
+        ext? (fn [w] (contains? #{:extends :unbound} (:bk w)))
+        sup? (fn [w] (contains? #{:super :unbound} (:bk w)))]
+    (boolean (and (or (ext? t) (subtype? reg (lo t) (lo s)))
+                  (or (sup? t) (subtype? reg (up s) (up t)))))))
+
+(defn- wild-equivalent?
+  "Types.containsTypeEquivalent of wildcards `a` and `b` of formal `f`: each contains the other."
+  [reg f a b]
+  (and reg (wild-contains? reg f a b) (wild-contains? reg f b a)))
+
 (defn assignable-const?
   "Types.isAssignable's constant case: an int constant `v` that fits primitive `t` (byte, char, short,
   int), or its box."
@@ -228,11 +252,14 @@
             {:k :inter :ts (vec ts)})))
 
 (defn capture
-  "Types.capture of class type `t`: its wildcard arguments replaced by fresh captured type variables."
-  [reg t]
+  "Types.capture of class type `t`: its wildcard arguments replaced by fresh captured type variables
+  (`glb-fn` the glb of a bounded wildcard's bound and its formal's: the inference tier's when the type
+  mentions inference variables)."
+  ([reg t] (capture reg t (fn [a b] (glb reg a b))))
+  ([reg t glb-fn]
   (let [t (if (and (class-t? t) (:outer t))
             ;; the enclosing type captured first (as Types.capture, for Outer<?>.Inner)
-            (assoc t :outer (capture reg (:outer t)))
+            (assoc t :outer (capture reg (:outer t) glb-fn))
             t)]
   (if-not (and (class-t? t) (seq (:args t)) (some #(and (map? %) (= :wild (:k %))) (:args t)))
     t
@@ -252,13 +279,13 @@
                                              :lower (when (= :super (:bk a)) (:t a))
                                              :bounds-fn (fn [] (let [u (ui)]
                                                                  [(case (:bk a)
-                                                                    :extends (glb reg (:t a) u)
+                                                                    :extends (glb-fn (:t a) u)
                                                                     u)]))
                                              :memo (java.util.HashMap.)})]
                               (d/tvar-type tv))
                             a)))]
           (vreset! S caps)
-          (assoc t :args caps)))))))
+          (assoc t :args caps))))))))
 
 (defn skip-type-vars
   "Types.skipTypeVars: through type variables to their upper bounds; `capture?` captures the result."
@@ -271,10 +298,11 @@
 (defn- allparams-empty? [t] (loop [t t] (cond (not (class-t? t)) true (seq (:args t)) false :else (recur (:outer t)))))
 
 (defn- msubst
-  "Method type `mt` (decls' {:tparams :params :ret :throws}) with map `m` substituted."
+  "Method type `mt` (decls' {:tparams :params :ret :throws}) with map `m` substituted (kept as :tsubst,
+  for its type parameters' bounds: javac's memberType substitutes a ForAll's bounds too)."
   [mt m]
   (assoc mt :params (mapv #(d/subst % m) (:params mt)) :ret (d/subst (:ret mt) m)
-            :throws (mapv #(d/subst % m) (:throws mt))))
+            :throws (mapv #(d/subst % m) (:throws mt)) :tsubst m))
 
 (defn- merase [mt]
   (assoc mt :tparams [] :params (mapv d/erasure (:params mt)) :ret (d/erasure (:ret mt))

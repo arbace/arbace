@@ -151,12 +151,16 @@
   (let [p *provider*
         leaned (volatile! false)
         why (volatile! nil)
-        r (binding [ex/*leaned* leaned]
+        r (binding [ex/*leaned* leaned na/*unit-file* (:file p)]
             (try (nf)
                  (catch Throwable e
                    (if (:arbace.repr.java.decls/decline (ex-data e))
                      (do (vreset! why (.getMessage e)) nil)
-                     [[::failed (str (.getName (class e)) ": " (.getMessage e))] ::failed]))))
+                     (do (when (seq (System/getenv "REPR_JAVA_INFER_TRACE"))
+                           (binding [*out* *err*]
+                             (println "failed" id (:pos t) e)
+                             (doseq [f (take 40 (.getStackTrace e))] (println "  " (str f)))))
+                         [[::failed (str (.getName (class e)) ": " (.getMessage e))] ::failed])))))
         native? (not @leaned)]
     (if (nil? r)
       (do (na/record! p id :declined t @why nil) (note! id) (na/canon p jans))
@@ -208,6 +212,8 @@
 (defn- use-data "A name's symbol as data for the scope tier: the local it denotes, or :nonlocal." [p ^Symbol s]
   (if (local-sym? s) [:local (na/jlocal-id p s)] [:nonlocal]))
 
+(declare native-method)
+
 (defn- native-sym
   "The native provider's symbol of native tree `t` (javac's `s`), fact `id`: a local's (scope), a
   declaration's (declarations); the rest javac's."
@@ -240,6 +246,12 @@
                   (do (na/check-members! p t c s)
                       (native-fact id t (fn [] (when-let [nd (na/ndata-class c)] [nd c])) s #(na/jdata p % true)))
                   (do (note! id) (na/canon p s)))
+      :REFERENCE (let [v (native-fact id t (fn [] (let [m (ex/mref-sym p t)] [(na/nmethod-id m) m]))
+                                      s #(na/jmethod-id p %))]
+                   (cond (instance? Symbol v) (native-method p v)
+                         ;; an array constructor: javac's (its class, Symtab's arrayClass, is not native)
+                         (= "Array" (:flat (:owner v))) s
+                         :else v))
       :MODULEDEF (if-let [m (:module a)]
                    ;; a module's symbol: javac's (the converter reads none of it)
                    (native-fact id t (fn [] [[:module m] s]) s #(na/jdata p % true))
@@ -332,14 +344,20 @@
 (def ^:private native-type-facts
   #{:names/type-tree :types/literal :types/this :types/class-literal :names/record-pattern
     ;; the types tier (JN9b)
-    :types/expr :types/qualifier :types/constant :types/new :types/new-array :types/ident})
+    :types/expr :types/qualifier :types/constant :types/new :types/new-array :types/ident
+    ;; the inference tier (JN9d): a signature polymorphic call's result
+    :infer/poly-result})
 
 (defn- native-type
   "The native provider's type of native tree `t` for fact `fact`: [native-type] or nil (declined)."
   [t fact]
   (let [a (nans t) reg (:reg *provider*)]
     (case fact
-      :names/type-tree (when-let [x (:type a)] (when-let [ty @x] [ty]))
+      :names/type-tree (when-let [x (:type a)]
+                         (if-let [ty @x]
+                           [ty]
+                           ;; a diamond's class tree: the inferred class type (Attr.visitNewClass, JN9d)
+                           (when-let [nc (:diamond-of a)] [(ex/diamond-clazz-type *provider* nc)])))
       :types/literal (when-let [tg (:literal a)]
                        [(case tg
                           :CLASS (d/ctype (d/class-named reg "java.lang.String"))
@@ -363,8 +381,9 @@
                                               (d/ctype (d/class-named reg (str "java.lang." ({:int "Integer" :char "Character" :void "Void"} q (str/capitalize (name q))))))
                                               (d/erasure q))]
                                            nil)])))
-      :names/record-pattern (when-let [x (:record-type a)] (when-let [ty @x] [ty]))
-      (:types/expr :types/qualifier :types/new :types/new-array :types/ident) [(ex/etype *provider* t)]
+      :names/record-pattern (when-let [x (:record-type a)]
+                              (if-let [ty @x] [ty] [(ex/record-pattern-type *provider* t)]))
+      (:types/expr :types/qualifier :types/new :types/new-array :types/ident :infer/poly-result) [(ex/etype *provider* t)]
       :types/constant (let [ty (ex/etype *provider* t)
                             c (ex/econst *provider* t)]
                         [(if c {:k :ctype :t ty :const c} ty)])
@@ -425,7 +444,8 @@
   [meth m]
   (let [fact (instantiation-fact m false "method-type")
         jmt (.-type (twin meth))]
-    (if (and (native? meth) (not= "infer" (namespace fact)))
+    ;; a generic method's (infer/method-type) is the inference tier's (JN9d)
+    (if (native? meth)
       (native-fact fact meth (fn [] (let [mt (ex/call-method-type *provider* meth)] [(na/nmtype-data mt) mt]))
                    jmt #(na/jmtype-data *provider* %))
       (do (note! fact) jmt))))
@@ -437,8 +457,13 @@
   [t m]
   (let [fact (instantiation-fact m (tr/diamond? t) "constructor-type")
         jct (.-constructorType ^JCTree$JCNewClass (twin t))]
-    (if (and (native? t) (not= "infer" (namespace fact)) (not (tr/f t :encl)) (not (tr/f t :def)))
-      (native-fact fact t (fn [] (let [mt (ex/ctor-method-type *provider* t)] [(na/nmtype-data mt) mt]))
+    ;; a generic constructor's and a diamond's (infer/constructor-type) the inference tier's (JN9d)
+    (if (native? t)
+      ;; an anonymous creation's: its own constructor's type at its class (JFS104 (b))
+      (native-fact fact t (fn [] (let [mt (if (tr/f t :def)
+                                            (ex/anon-ctor-method-type *provider* t)
+                                            (ex/ctor-method-type *provider* t))]
+                                   [(na/nmtype-data mt) mt]))
                    jct #(na/jmtype-data *provider* %))
       (do (note! fact) jct))))
 
@@ -460,23 +485,37 @@
                    (and (instance? Type$ArrayType l) (not (generic-type? (.-elemtype ^Type$ArrayType l)))))
                  :overload/declared-varargs-element
                  :else (instantiation-fact m (tr/diamond? t) "varargs-element"))]
-      (if (and (native? t) (not= "infer" (namespace fact))
+      (if (and (native? t)
                (or (instance? JCTree$JCMethodInvocation j)
-                   (and (instance? JCTree$JCNewClass j) (not (tr/f t :def)) (not (tr/f t :encl)) (not (tr/diamond? t)))))
+                   (instance? JCTree$JCMemberReference j)
+                   (and (instance? JCTree$JCNewClass j) (not= "infer" (namespace fact))
+                        (not (tr/f t :def)) (not (tr/f t :encl)) (not (tr/diamond? t)))))
         ;; whether the call is of variable arity (overload resolution's phase 3, the overload tier's,
         ;; JN9c) and its element: the last parameter's at the site (the types tier's)
-        (native-fact fact t (fn [] (if (ex/call-varargs? *provider* t (some? ve))
+        (native-fact fact t (fn [] (if (instance? JCTree$JCMemberReference j)
+                                     (let [e (ex/mref-varargs-element *provider* t)] [(na/ntype e) e])
+                                     (if (ex/call-varargs? *provider* t (some? ve))
                                      (let [mt (if (instance? JCTree$JCMethodInvocation j)
                                                 (ex/call-method-type *provider* (:meth t))
                                                 (ex/ctor-method-type *provider* t))
                                            e (:e (last (:params mt)))]
                                        [(na/ntype e) e])
-                                     [nil nil]))
+                                     [nil nil])))
                      ve #(na/jtype *provider* %))
         (do (when *measure* (note! fact)) ve)))))
 
-(defn fn-target "LAMBDA, REFERENCE: the functional interface type javac inferred." [t]
-  (note! :infer/target) (.-target ^JCTree$JCFunctionalExpression (twin t)))
+(defn fn-target
+  "LAMBDA, REFERENCE: the functional interface type javac inferred (with the native provider a
+  lambda's the inference tier's, JN9d)."
+  [t]
+  (let [jt (.-target ^JCTree$JCFunctionalExpression (twin t))]
+    (if (native? t)
+      (native-fact :infer/target t (fn [] (let [x (if (= :LAMBDA (tr/tag t))
+                                                    (ex/lambda-target *provider* t)
+                                                    (ex/mref-target *provider* t))]
+                                            [(na/ntype x) x]))
+                   jt #(na/jtype *provider* %))
+      (do (note! :infer/target) jt))))
 
 (defn operator
   "BINARY, ASSIGNOP, UNARY: the operator symbol javac resolved (with the native provider the types
@@ -492,8 +531,14 @@
                    js #(na/jop-data *provider* %))
       (do (note! :types/operator) js))))
 
-(defn ref-kind "REFERENCE: the method reference's kind (JCMemberReference.ReferenceKind)." [t]
-  (note! :overload/ref-kind) (.-kind ^JCTree$JCMemberReference (twin t)))
+(defn ref-kind
+  "REFERENCE: the method reference's kind (JCMemberReference.ReferenceKind; with the native provider
+  its name, the inference tier's, JN9d)."
+  [t]
+  (let [jk (.-kind ^JCTree$JCMemberReference (twin t))]
+    (if (native? t)
+      (native-fact :overload/ref-kind t (fn [] (let [k (ex/mref-kind *provider* t)] [k k])) jk #(str %))
+      (do (note! :overload/ref-kind) jk))))
 
 (defn jump-target
   "BREAK, CONTINUE, YIELD: the statement it leaves or continues (Attr's findJumpTarget), a tree of
@@ -512,28 +557,38 @@
       (do (note! :scope/jump-target) jt))))
 
 (defn pattern-switch? "SWITCH, SWITCH_EXPRESSION: a pattern switch (Attr's)." [t]
-  (note! :types/pattern-switch)
-  (let [j (twin t)]
-    (if (instance? JCTree$JCSwitch j) (.-patternSwitch ^JCTree$JCSwitch j) (.-patternSwitch ^JCTree$JCSwitchExpression j))))
+  (let [j (twin t)
+        jp (if (instance? JCTree$JCSwitch j) (.-patternSwitch ^JCTree$JCSwitch j) (.-patternSwitch ^JCTree$JCSwitchExpression j))]
+    (if (native? t)
+      (native-fact :types/pattern-switch t (fn [] (let [b (ex/pattern-switch? *provider* t)] [b b])) jp identity)
+      (do (note! :types/pattern-switch) jp))))
 
 (defn unconditional-pattern? "SWITCH, SWITCH_EXPRESSION: has an unconditional pattern (Attr's)." [t]
-  (note! :flow/unconditional-pattern)
-  (let [j (twin t)]
-    (if (instance? JCTree$JCSwitch j) (.-hasUnconditionalPattern ^JCTree$JCSwitch j)
-        (.-hasUnconditionalPattern ^JCTree$JCSwitchExpression j))))
+  (let [j (twin t)
+        ju (if (instance? JCTree$JCSwitch j) (.-hasUnconditionalPattern ^JCTree$JCSwitch j)
+               (.-hasUnconditionalPattern ^JCTree$JCSwitchExpression j))]
+    (if (native? t)
+      (native-fact :flow/unconditional-pattern t (fn [] (let [b (ex/unconditional-pattern? *provider* t)] [b b])) ju identity)
+      (do (note! :flow/unconditional-pattern) ju))))
 
 (defn exhaustive? "SWITCH: exhaustive (Flow's)." [t]
-  (note! :flow/exhaustive) (.-isExhaustive ^JCTree$JCSwitch (twin t)))
+  (let [je (.-isExhaustive ^JCTree$JCSwitch (twin t))]
+    (if (native? t)
+      (native-fact :flow/exhaustive t (fn [] (let [b (ex/switch-exhaustive? *provider* t)] [b b])) je identity)
+      (do (note! :flow/exhaustive) je))))
 
 (defn completes-normally? "CASE: its statements can complete normally (Flow's)." [t]
-  (note! :flow/case-completes) (.-completesNormally ^JCTree$JCCase (twin t)))
+  (let [jc (.-completesNormally ^JCTree$JCCase (twin t))]
+    (if (native? t)
+      (native-fact :flow/case-completes t (fn [] (let [b (ex/case-completes? *provider* t)] [b b])) jc identity)
+      (do (note! :flow/case-completes) jc))))
 
 (defn attribute
   "ANNOTATION: its value as Annotate computed it (Attribute$Compound), nil for none (and for a native
   annotation javac took off the modifiers, as javac's tree then has none)."
   [t]
   (if (and *dropped* (.containsKey *dropped* t))
-    (do (if (native? t) (na/record! *provider* :annotations/attribute :declined t nil nil) nil)
+    (do (if (native? t) (na/record! *provider* :annotations/attribute :declined t "an annotation javac took off the modifiers (a record component's)" nil) nil)
         (note! :annotations/attribute)
         nil)
     (let [ja (.-attribute ^JCTree$JCAnnotation (twin t))]

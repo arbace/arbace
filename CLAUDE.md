@@ -160,7 +160,10 @@ Prior art:
     members and types tiers too (`arbace.repr.java.expr`, `arbace.repr.java.types`: names in code, every
     expression's type; the known file's `:bridges`, "As built: JN9b"); since JN9c the overload tier
     (`arbace.repr.java.overload`: Resolve's three phases and most specific, every call that needs no
-    inference; `attr.md` sums the declines by reason, "As built: JN9c"); `bin/repr-java
+    inference; `attr.md` sums the declines by reason, "As built: JN9c"); since JN9d the inference tier
+    (`arbace.repr.java.infer`: Infer's inference with InferenceContext, DeferredAttr's and ArgumentAttr's
+    poly arguments, lambdas, method references, diamonds, signature polymorphic calls; the switch facts;
+    the symbols' type in `arbace.repr.java.sym`; `REPR_JAVA_INFER_TRACE` traces it, "As built: JN9d"); `bin/repr-java
     check --jdk` compares jdk26u's forms with their hashes, `test/repr/java/expected/jdk26u.sha256`
     (`--update` rewrites them, JFS72 (b)), and Java forms → Java (`print`, `arbace.repr.java.print`; the
     `.ae` writer is `arbace.repr.java.layout`) on the tools' host, with its round trip Java →

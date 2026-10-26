@@ -13,8 +13,12 @@
 ;; MostSpecificReturnCheck, implementation, isDerivedRaw, rank, closure, insert, union), code/Symbol.java
 ;; (MethodSymbol.overrides, isOverridableIn, TypeSymbol.precedes, baseSymbol), comp/Check.java (intersect,
 ;; importAccessible), code/Scope.java (SymbolImporter's order of a static import's members) and
-;; comp/TypeEnter.java (AnonClassConstructorHelper, staticImportFilter), whose notice follows (LICENSE.md,
-;; "OpenJDK (jdk26u)"):
+;; comp/TypeEnter.java (AnonClassConstructorHelper, BasicConstructorHelper, staticImportFilter); and, the
+;; inference tier's (JN9d), Resolve.java's resolveDiamond, findDiamond, resolveMemberReference,
+;; getMemberReference, the reference lookup helpers, ReferenceLookupResult, the reference choosers,
+;; arityMethodCheck and nilMethodCheck, and Types.java's findDescriptorSymbol, findDescriptorType,
+;; removeWildcards, interfaceCandidates, prune, overridesObjectMethod and membersClosure, whose notice
+;; follows (LICENSE.md, "OpenJDK (jdk26u)"):
 ;;
 ;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
 ;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -55,6 +59,7 @@
   in (:varity: a call of variable arity)."
   (:require [arbace.repr.java.decls :as d]
             [arbace.repr.java.types :as ty]
+            [arbace.repr.java.infer :as inf]
             [arbace.repr.java.nattr :as na]
             [arbace.string :as str]))
 
@@ -99,6 +104,16 @@
     (ty/class-t? t) (:c t)
     (and (map? t) (= :array (:k t))) :array
     :else nil))
+
+(defn- inter-site-class
+  "For a member `m` at intersection site `t`: the class whose inheritance and overriding stand for the
+  intersection's synthetic class (its class component, else Object), for a public member; a member of
+  another access declined."
+  [reg t m]
+  (when-not (= 1 (bit-and (d/method-flags m) 7))
+    (d/decline! "an intersection's member that is not public"))
+  (let [f (first (:ts t))]
+    (if (d/interface? (:c f)) (d/class-named reg "java.lang.Object") (:c f))))
 
 (defn jsupertype
   "types.supertype of class type `t` as javac's: an interface's is Object."
@@ -312,8 +327,8 @@
   [ctx site m]
   (if (or (ctor? m) (static? m))
     true
-    (let [sc (class-of site)
-          r (reg ctx)
+    (let [r (reg ctx)
+          sc (if (and (map? site) (= :inter (:k site))) (inter-site-class r site m) (class-of site))
           s2 (when (and sc (not= :array sc)) (implementation r m sc))]
       (or (nil? s2) (identical? s2 m) (identical? (:owner m) (:owner s2))
           (and (d/interface? (:owner m)) (= "java.lang.Object" (:flat (:owner s2))))
@@ -340,8 +355,8 @@
   "Resolve.isAccessible of method `m` at `site` from the context (its class :encl-class, its package
   :pkg, :select-super? for a selection from super)."
   [ctx site m]
-  (let [sc (class-of site)]
-    (if (and (ctor? m) (not (identical? (:owner m) sc)))
+  (let [sc (if (and (map? site) (= :inter (:k site))) (inter-site-class (reg ctx) site m) (class-of site))]
+    (if (and (ctor? m) (not (identical? (:owner m) sc)) (not (and (= :array sc) (:array-ctor m))))
       false
       (let [ec (:encl-class ctx)
             o (:owner m)
@@ -388,17 +403,75 @@
                   (every? #(arg-ok? reg % elt strict?) (drop fixed as))))
            (every? true? (map #(arg-ok? reg %1 %2 strict?) as fs))))))
 
+(defn- deferred-arg? [a] (inf/deferred? a))
+
+(defn- msubst-mt [mt m]
+  (assoc mt :tparams [] :params (mapv #(d/subst % m) (:params mt)) :ret (d/subst (:ret mt) m)
+            :throws (mapv #(d/subst % m) (:throws mt))))
+
+(defn- check-args
+  "argumentsAcceptable of argument types `as` (some deferred: the poly expressions') against method
+  type `mt` of `m` without inference: true when applicable."
+  [ctx m mt as boxing? varargs?]
+  (binding [inf/*reg* (reg ctx)]
+    (try (let [dac (inf/new-dac :speculative m [boxing? varargs?] inf/empty-ic nil)]
+           (inf/arguments-acceptable! dac {:kind :resolve} as (:params mt) (:arg-trees ctx))
+           (inf/complete! dac))
+         true
+         (catch Throwable e (if (inf/error? e) false (throw e))))))
+
+(def ^:private trace? (seq (System/getenv "REPR_JAVA_INFER_TRACE")))
+
 (defn- instantiate
-  "rawInstantiate of method `m` at `site` for argument types `as`: its member type when applicable,
-  else nil; declined for a generic method that passes the arity check (Infer's)."
+  "rawInstantiate of method `m` at `site` for argument types `as` (types, or deferred types of poly
+  expressions): its member type when applicable, else nil; a generic method's applicability Infer's
+  (JFS102 (b): its variables inferred from the arguments, javac's instantiateMethod without a target),
+  explicit type arguments substituted after their bounds are checked."
   [ctx site m as boxing? varargs?]
   (let [r (reg ctx)
-        mt (mtype-at r site m)]
-    (if (seq (:tparams mt))
-      (if (arity-ok? (count (:params mt)) (count as) varargs?)
-        (d/decline! "a generic method's applicability (inferred)")
-        nil)
-      (when (acceptable? r as (:params mt) boxing? varargs?) mt))))
+        mt (mtype-at r site m)
+        targs (:typeargs ctx)
+        mc (or (:mcheck ctx) {:kind :resolve})]
+    (cond
+      ;; nilMethodCheck (getMemberReference's): every candidate applicable
+      (= :nil (:kind mc)) (if (seq (:tparams mt)) (assoc mt :tparams []) mt)
+      ;; arityMethodCheck, MethodReferenceCheck: through Infer's argumentsAcceptable
+      (#{:arity :mref} (:kind mc))
+      (binding [inf/*reg* r]
+        (let [[fresh sm] (if (and (seq (:tparams mt)) (not (seq targs))) (inf/new-instances (:tparams mt) (:tsubst mt)) [[] {}])
+              mt2 (cond (seq targs) (msubst-mt mt (zipmap (:tparams mt) targs))
+                        (seq fresh) (msubst-mt mt sm)
+                        :else mt)]
+          (try (if (seq fresh)
+                 (inf/instantiate-method {:tvars fresh :mt mt2 :r nil :msym m :as as :mc mc
+                                          :phase [boxing? varargs?] :trees (:arg-trees ctx)})
+                 (let [dac (inf/new-dac :speculative m [boxing? varargs?] inf/empty-ic nil)]
+                   (inf/arguments-acceptable! dac mc as (:params mt2) (:arg-trees ctx))
+                   (inf/complete! dac)
+                   mt2))
+               (catch Throwable e (if (inf/error? e) nil (throw e))))))
+      (and (seq (:tparams mt)) (seq targs))
+      (when (and (= (count targs) (count (:tparams mt)))
+                 (let [sm (merge (:tsubst mt) (zipmap (:tparams mt) targs))]
+                   (binding [inf/*reg* r]
+                     (every? true? (map (fn [tv a] (every? #(inf/subtype-unchecked? a (d/subst % sm)) (d/tvar-bounds tv)))
+                                        (:tparams mt) targs)))))
+        (let [mt2 (msubst-mt mt (zipmap (:tparams mt) targs))]
+          (when (if (some deferred-arg? as)
+                  (check-args ctx m mt2 as boxing? varargs?)
+                  (acceptable? r as (:params mt2) boxing? varargs?))
+            mt2)))
+      (seq (:tparams mt))
+      (binding [inf/*reg* r]
+        (let [[fresh sm] (inf/new-instances (:tparams mt) (:tsubst mt))]
+          (try (inf/instantiate-method {:tvars fresh :mt (msubst-mt mt sm) :r nil :msym m :as as
+                                        :phase [boxing? varargs?] :trees (:arg-trees ctx)})
+               (catch Throwable e
+                 (if (inf/error? e)
+                   (do (when trace? (binding [*out* *err*] (println "inapplicable" (:name m) [boxing? varargs?] (.getMessage e)))) nil)
+                   (throw e))))))
+      (some deferred-arg? as) (when (check-args ctx m mt as boxing? varargs?) mt)
+      :else (when (acceptable? r as (:params mt) boxing? varargs?) mt))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; The most specific (mostSpecific, signatureMoreSpecific)
@@ -414,18 +487,34 @@
 
 (defn- more-specific?
   "signatureMoreSpecific: is `m1` more specific than `m2` for the actuals `as` at `site`: m2
-  applicable, by subtyping (MostSpecificCheck, strict), to m1's formals (their lower bounds)."
+  applicable, by subtyping (MostSpecificCheck, strict), to m1's formals (their lower bounds); a
+  generic m2 by inference (no unchecked conversion allowed)."
   [ctx site as m1 m2 varargs?]
+  (if (#{:nil :arity} (:kind (:mcheck ctx)))
+    ;; AbstractMethodCheck.mostSpecificCheck: nilMethodCheck, every method more specific
+    true
   (let [r (reg ctx)
         mt1 (mtype-at r site m1)
         n (max (count (:params (d/method-type m1))) (count as) (count (:params (d/method-type m2))))
         args (adjust-args (mapv cvar-lower (:params mt1)) m1 n varargs?)
         mt2 (mtype-at r site m2)]
-    (when (seq (:tparams mt2)) (d/decline! "a generic method's specificity (inferred)"))
-    (when (seq (:tparams mt1)) (d/decline! "a generic method's specificity (inferred)"))
-    (let [f2 (adjust-args (:params mt2) m2 (count args) varargs?)]
-      (and (<= (count f2) (count args))
-           (every? true? (map #(subtype? r %1 %2) args f2))))))
+    (if (or (seq (:tparams mt2)) (some deferred-arg? as))
+      (binding [inf/*reg* r]
+        (let [[fresh sm] (if (seq (:tparams mt2)) (inf/new-instances (:tparams mt2) (:tsubst mt2)) [[] {}])
+              mt2 (msubst-mt mt2 sm)
+              mc {:kind :most-specific :actuals (vec as)}]
+          (try
+            (if (seq fresh)
+              (let [res (inf/instantiate-method {:tvars fresh :mt mt2 :r nil :msym m2 :as args
+                                                 :phase [false varargs?] :mc mc})]
+                (and res (not (:unchecked res))))
+              (do (inf/arguments-acceptable! (inf/new-dac :speculative m2 [false varargs?] inf/empty-ic nil)
+                                             mc args (:params mt2) nil)
+                  true))
+            (catch Throwable e (if (inf/error? e) false (throw e))))))
+      (let [f2 (adjust-args (:params mt2) m2 (count args) varargs?)]
+        (and (<= (count f2) (count args))
+             (every? true? (map #(subtype? r %1 %2) args f2))))))))
 
 (defn- base-symbol [m] (or (:clone-of m) m))
 
@@ -485,10 +574,13 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; selectBest, findMethodInScope
 
+(def ^:dynamic *cands* "The applicable candidates logged ([phase method]), or nil." nil)
+(def ^:dynamic *phase* "The phase being looked up." nil)
+
 (defn- select-best
   "Resolve.selectBest of candidate `s` at `site` against the best so far."
   [ctx site as s best boxing? varargs?]
-  (let [sc (class-of site)]
+  (let [sc (if (and (map? site) (= :inter (:k site))) (inter-site-class (reg ctx) site s) (class-of site))]
     (cond
       (or (and (not (identical? sc (:owner s))) (not (inherited-in? s sc)))
           (not (not-overridden-in? ctx site s)))
@@ -496,11 +588,20 @@
       (and varargs? (not (d/has? (flags s) d/VARARGS)))
       (if (err? best) (assoc best :bad-varargs true) best)
       :else
-      (if-not (instantiate ctx site s as boxing? varargs?)
-        (case (kind best)
-          :absent {:kind :wrong-mth :sym s}
-          (:hidden :wrong-mth) {:kind :wrong-mths}
-          best)
+      (if-not (let [mt (instantiate ctx site s as boxing? varargs?)]
+                ;; Resolve's applicable candidates logged, with the phase (the method reference's static kind)
+                (when (and mt *cands*) (.add ^java.util.ArrayList *cands* [*phase* s]))
+                mt)
+        ;; whether the candidate failed by arity (ReferenceLookupResult.canIgnore's arity mismatch)
+        (let [n (count (:params (d/method-type s)))
+              k (count as)
+              arity? (if varargs? (< k (dec n)) (not= k n))]
+          (case (kind best)
+            :absent {:kind :wrong-mth :sym s :arity? arity?}
+            :hidden {:kind :wrong-mths :all-arity? false}
+            :wrong-mth {:kind :wrong-mths :all-arity? (and (:arity? best) arity?)}
+            :wrong-mths (assoc best :all-arity? (and (:all-arity? best) arity?))
+            best))
         (if-not (accessible? ctx site s)
           (case (kind best)
             :absent {:kind :hidden :sym s}
@@ -572,7 +673,7 @@
 (defn- with-thrown
   "A method symbol as `s` with thrown types `ts` (mergeAbstracts' MethodSymbol whose baseSymbol is s)."
   [s ts]
-  (d/sym (assoc (.-m ^arbace.repr.java.decls.Sym s)
+  (d/sym (assoc (.-m ^arbace.repr.java.sym.Sym s)
                 :clone-of (base-symbol s)
                 :memo (doto (java.util.HashMap.)
                         (.put :type (assoc (d/method-type s) :throws (vec ts)))
@@ -627,9 +728,21 @@
         (if (= "clone" name)
           best
           (find-in-scope ctx (d/object-type r) as (named-methods (object-class r) name) best boxing? varargs?)))
-      (let [iface? (d/interface? sc)
-            supers (if iface? [sc] (loop [c sc acc [] seen #{}] (if (or (nil? c) (seen c)) acc (recur (super-class r c) (conj acc c) (conj seen c)))))
+      (let [inter (when (and (map? site) (= :inter (:k site))) (:ts site))
+            ;; an intersection (a type variable's bounds): its synthetic class first (no members,
+            ;; ABSTRACT, INTERFACE when every component is one), its interfaces the components after
+            ;; its class, its supertype the class component (Object when none)
+            icls (when inter (let [f (first inter)] (when-not (d/interface? (:c f)) (:c f))))
+            sc (if inter (or icls (object-class r)) sc)
+            iface? (if inter (nil? icls) (d/interface? sc))
+            supers (cond
+                     (and inter iface?) []
+                     iface? [sc]
+                     :else (loop [c sc acc [] seen #{}] (if (or (nil? c) (seen c)) acc (recur (super-class r c) (conj acc c) (conj seen c)))))
             ctor? (= "<init>" name)
+            init-itypes (reduce (fn [it i] (update it :abstract-ok #(union r (closure r (:c i)) %)))
+                                {:abstract-ok () :default-ok ()}
+                                (if icls (rest inter) inter))
             [best itypes]
             (reduce (fn [[best itypes iphase] s]
                       (let [best (find-in-scope ctx site as (named-methods s name) best boxing? varargs?)]
@@ -641,7 +754,7 @@
                                          :default-ok)
                                 itypes (reduce (fn [it i] (update it iphase #(union r (closure r i) %))) itypes (iface-classes s))]
                             [best itypes iphase]))))
-                    [absent {:abstract-ok () :default-ok ()} :abstract-ok]
+                    [absent init-itypes :abstract-ok]
                     supers)]
         (if ctor?
           best
@@ -659,7 +772,8 @@
                              (concat (map (fn [i] [:abstract-ok i]) (:abstract-ok itypes))
                                      (map (fn [i] [:default-ok i]) (:default-ok itypes))))]
             (if (and iface? (err? best))
-              (let [b (find-in-scope ctx site as (named-methods (object-class r) name) best boxing? varargs?)]
+              (let [_ (when inter (d/decline! "an intersection's Object method"))
+                    b (find-in-scope ctx site as (named-methods (object-class r) name) best boxing? varargs?)]
                 (if (method? b) (d/member-clone b sc) b))
               best)))))))
 
@@ -745,12 +859,12 @@
   "Resolve.lookupMethod over the phases of `lookup` ((lookup boxing? varargs?) gives a phase's
   result): {:sym the method or the error, :phase the phase it was found in}."
   [lookup]
-  (loop [[[ph b v] & more :as ps] phases best absent pending nil]
+  (loop [[[ph b v] & more :as ps] phases best absent pending nil last nil]
     (if (or (empty? ps) (should-stop? best))
-      {:sym best :phase pending}
-      (let [sym (lookup b v)
+      {:sym best :phase pending :last last}
+      (let [sym (binding [*phase* ph] (lookup b v))
             best' (if (= ph :varity) (merge-varity best sym) sym)]
-        (recur more best' (if (identical? best best') pending ph))))))
+        (recur more best' (if (identical? best best') pending ph) ph)))))
 
 (defn context
   "A resolution context in `env` (javac's Env: its class, package; `extra` :select-super?)."
@@ -780,8 +894,10 @@
 (defn anon-constructor
   "The constructor TypeEnter gives anonymous class `c` calling superclass constructor `sup` at the
   created type `ct` (its member type there; the enclosing instance's type `encl` first for a
-  qualified creation): ANONCONSTR, the super constructor's VARARGS."
-  [reg c sup ct encl]
+  qualified creation): ANONCONSTR (not `based?`: an interface's, BasicConstructorHelper's), the super
+  constructor's VARARGS."
+  ([reg c sup ct encl] (anon-constructor reg c sup ct encl true))
+  ([reg c sup ct encl based?]
   (d/memo c :ov-anon-ctor
           (fn []
             (let [mt (ty/member-type reg ct sup)
@@ -790,5 +906,328 @@
                       :memo (doto (java.util.HashMap.)
                               (.put :type {:tparams [] :params ps :ret :void :throws (:throws mt)})
                               (.put :tparams [])
-                              (.put :flags (long (bit-or d/ANONCONSTR d/GENERATEDCONSTR
-                                                         (bit-and (flags sup) d/VARARGS)))))})))))
+                              ;; BasicConstructorHelper's flags: the class's access (a true enum's
+                              ;; PRIVATE), GENERATEDCONSTR; ANONCONSTR, the super constructor's VARARGS
+                              ;; checked as MemberEnter checks the generated tree's (an enum's
+                              ;; constructor PRIVATE)
+                              (.put :flags (long (bit-or (let [cf (d/class-flags c)]
+                                                           (d/check-flags :method
+                                                                          (bit-or (if (and (d/has? cf d/ENUM)
+                                                                                           (= "java.lang.Enum" (some-> (d/class-supertype c) :c :flat)))
+                                                                                    d/PRIVATE
+                                                                                    (bit-and cf 7))
+                                                                                  d/GENERATEDCONSTR)
+                                                                          {:owner-flags cf :ctor? true}))
+                                                         (if based? d/ANONCONSTR 0)
+                                                         (bit-and (flags sup) d/VARARGS)))))}))))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Diamonds (Resolve.resolveDiamond, findDiamond), JN9d
+
+(defn- diamond-ctor
+  "findDiamond's synthesized constructor of constructor `ctor` at diamond site `site` (class `c`'s type
+  with its own type variables): generic in the class's type variables and the constructor's, returning
+  the site type; its base symbol `ctor`."
+  [c site ctor]
+  (d/memo ctor [:ov-diamond (:flat c) site]
+          (fn []
+            (let [mt (d/method-type ctor)]
+              (d/sym {:sk :method :name "<init>" :owner c :diamond-of ctor
+                      :memo (doto (java.util.HashMap.)
+                              (.put :type {:tparams (vec (concat (d/class-tparams c) (:tparams mt)))
+                                           :params (:params mt) :ret site :throws (:throws mt)})
+                              (.put :tparams (vec (concat (d/class-tparams c) (d/method-tparams ctor))))
+                              (.put :flags (flags ctor)))})))))
+
+(defn resolve-diamond
+  "Resolve.resolveDiamond at diamond site `site` (the class type with its own type variables as
+  arguments) for argument types `as`: the constructors of the class (Object's for an interface),
+  each as findDiamond synthesizes it, chosen as lookupMethod chooses; {:sym the synthesized method or
+  the error, :phase}."
+  [env site as array-clone extra]
+  (let [ctx (context env array-clone extra)
+        c (:c site)
+        tc (if (d/interface? c) (object-class (reg ctx)) c)
+        ctors (map #(diamond-ctor c site %) (remove #(d/has? (flags %) d/SYNTHETIC) (named-methods tc "<init>")))]
+    (lookup-method (fn [b v] (find-in-scope ctx site as ctors absent b v)))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Functional interfaces (Types.findDescriptorSymbol, findDescriptorType, removeWildcards,
+;;; interfaceCandidates, prune, overridesObjectMethod, membersClosure), JN9d
+
+(defn- closure-methods
+  "The methods of Types.membersClosure(t) in its iteration order: the class's own (the newest first),
+  then its supertype's closure, then its interfaces' (the last first)."
+  [reg t]
+  (let [seen (java.util.HashSet.)]
+    (letfn [(walk [t]
+              (cond
+                (ty/tvar-t? t) (walk (ty/upper-bound t))
+                (not (ty/class-t? t)) []
+                :else
+                (let [c (:c t)]
+                  (if-not (.add seen c)
+                    []
+                    (try
+                      (vec (concat (reverse (:methods (d/members c)))
+                                   (walk (jsupertype reg t))
+                                   (mapcat walk (reverse (d/interfaces t)))))
+                      (finally (.remove seen c)))))))]
+      (walk t))))
+
+(defn- prune "Types.prune." [ms]
+  (filter (fn [m1] (not-any? (fn [m2] (and (not (identical? m1 m2)) (not (identical? (:owner m2) (:owner m1)))
+                                            (d/as-super (d/this-type (:owner m2)) (:owner m1))))
+                             ms))
+          ms))
+
+(defn interface-candidates
+  "Types.interfaceCandidates of method `ms` at `site`."
+  [reg site ms]
+  (let [sc (:c site)
+        mt (mtype-at reg site ms)]
+    (loop [[s & more :as ss] (seq (closure-methods reg site)) cands ()]
+      (if-not ss
+        (prune cands)
+        (if (and (= (:name s) (:name ms)) (not (d/has? (flags s) d/SYNTHETIC))
+                 (inherited-in? s sc)
+                 (override-equivalent? (mtype-at reg site s) mt))
+          (if (and (not (d/interface? sc)) (not (d/interface? (:owner s))))
+            (list s)
+            (recur more (if (some #(identical? % s) cands) cands (cons s cands))))
+          (recur more cands))))))
+
+(defn- overrides-object-method? [reg origin m]
+  (some #(overrides? reg m % origin true) (named-methods (object-class reg) (:name m))))
+
+(defn find-descriptor
+  "Types.findDescriptorSymbol of class `c`: the abstract method of functional interface `c` (its
+  candidates override-equivalent; several merged as mergeDescriptors, declined), nil when `c` is not
+  a functional interface (memoized)."
+  [reg c]
+  (d/memo c :ov-descriptor
+          (fn []
+            (when (and (d/interface? c) (not (d/has? (d/class-flags c) d/ANNOTATION))
+                       (not (d/has? (d/class-flags c) d/SEALED)))
+              (let [site (d/this-type c)
+                    abstracts (reduce (fn [acc m]
+                                        (if-not (and (= d/ABSTRACT (bit-and (flags m) (bit-or d/ABSTRACT d/DEFAULT)))
+                                                     (not (overrides-object-method? reg c m))
+                                                     (not (some-> (first (interface-candidates reg site m)) flags (d/has? d/DEFAULT))))
+                                          acc
+                                          (let [mt (mtype-at reg site m)]
+                                            (cond
+                                              (empty? acc) [m]
+                                              (and (= (:name m) (:name (first acc)))
+                                                   (override-equivalent? mt (mtype-at reg site (first acc))))
+                                              (if (some (fn [a] (and (sub-class? (:owner a) (:owner m))
+                                                                     (sub-signature? (mtype-at reg site a) mt)))
+                                                        acc)
+                                                acc
+                                                (conj acc m))
+                                              :else (reduced ::not-functional)))))
+                                      [] (closure-methods reg site))]
+                (cond
+                  (= ::not-functional abstracts) nil
+                  (empty? abstracts) nil
+                  (= 1 (count abstracts)) (first abstracts)
+                  :else (d/decline! "a functional interface's descriptors merged")))))))
+
+(declare contains-tvar-set?)
+
+(defn remove-wildcards
+  "Types.removeWildcards: the non-wildcard parameterization of class type `t` (JLS 9.9)."
+  [reg t]
+  (if-not (and (ty/class-t? t) (some #(= :wild (:k %)) (filter map? (:args t))))
+    t
+    (let [c (:c t)
+          formals (d/class-tparams c)
+          fset (set formals)
+          targs (mapv (fn [f a]
+                        (let [bound (ty/upper-bound (d/tvar-type f))]
+                          (if (and (map? a) (= :wild (:k a)))
+                            (if (some #(contains-tvar-set? bound %) formals)
+                              (or (:t a) (d/object-type reg))
+                              (case (:bk a)
+                                :unbound bound
+                                :extends (binding [inf/*reg* reg] (inf/glb2 bound (:t a)))
+                                :super (:t a)))
+                            a)))
+                      formals (:args t))]
+      (d/subst (d/this-type c) (zipmap formals targs)))))
+
+(defn- contains-tvar-set? [t tv]
+  (inf/contains-tvar? t (doto (java.util.HashSet.) (.add tv))))
+
+(declare marker-interface?)
+
+(defn descriptor-type
+  "Types.findDescriptorType of functional interface type `t`: its descriptor's member type at its
+  non-wildcard parameterization; nil when `t` is not a functional interface (an intersection's: its one
+  functional component's, the others marker interfaces; else declined)."
+  [reg t]
+  (cond
+    (= :inter (:k t)) (let [[f & more :as fs] (filter #(and (ty/class-t? %) (find-descriptor reg (:c %))) (:ts t))]
+                        (if (and f (empty? more)
+                                 (every? #(or (identical? % f) (and (ty/class-t? %) (marker-interface? reg (:c %)))) (:ts t)))
+                          (descriptor-type reg f)
+                          (d/decline! "an intersection target's descriptor")))
+    (not (ty/class-t? t)) nil
+    :else (when-let [m (find-descriptor reg (:c t))]
+            (mtype-at reg (remove-wildcards reg t) m))))
+
+
+;;; ------------------------------------------------------------------------------------------
+;;; Method references (Resolve.resolveMemberReference, getMemberReference, the reference lookup
+;;; helpers, ReferenceLookupResult's static kinds, the basic and structural reference choosers), JN9d
+
+(defn- array-ctor
+  "ArrayConstructorReferenceLookupHelper's constructor of array type `site`: public, (int) -> site."
+  [reg site]
+  (d/sym {:sk :method :name "<init>" :owner (d/sym {:sk :class :flat "Array" :name "Array" :memo (java.util.HashMap.)})
+          :array-ctor true
+          :memo (doto (java.util.HashMap.)
+                  (.put :type {:tparams [] :params [:int] :ret site :throws []})
+                  (.put :tparams [])
+                  (.put :flags (long d/PUBLIC)))}))
+
+(defn- static-kind
+  "ReferenceLookupResult's static kind of result `res` ({:sym :last} with the candidates `cands`)."
+  [res cands static-sel?]
+  (let [s (:sym res)]
+    (cond
+      (and (method? s) (not static-sel?)) (if (static? s) :static :non-static)
+      (or (method? s) (= :ambiguous (kind s)))
+      (reduce (fn [k [ph m]]
+                (if (= ph (:last res))
+                  (let [k2 (if (static? m) :static :non-static)]
+                    (cond (= k :undefined) k2 (= k k2) k :else :both))
+                  k))
+              :undefined cands)
+      :else :undefined)))
+
+(defn- can-ignore? "ReferenceLookupResult.canIgnore (an arity mismatch, a method not found)." [res]
+  (case (kind (:sym res))
+    :absent true
+    :wrong-mth (boolean (:arity? (:sym res)))
+    :wrong-mths (boolean (:all-arity? (:sym res)))
+    false))
+
+(defn- choose
+  "The reference choosers (basic: Attr's; structural: the overload phase's structural check) of the
+  bound and unbound searches' results."
+  [chooser bound unbound]
+  (let [succ? #(not= :undefined (:sk %))
+        err (fn [x] {:sym {:kind :bad-mref :of x} :sk :undefined})]
+    (if (nil? unbound)
+      (case chooser
+        :basic (if (or (not (succ? bound)) (= :non-static (:sk bound))) bound (err bound))
+        :structural (if (or (not (succ? bound)) (not= :static (:sk bound))) bound (err bound)))
+      (case chooser
+        :basic (cond
+                 (and (succ? bound) (static? (:sym bound)) (or (not (succ? unbound)) (= :static (:sk unbound)))) bound
+                 (and (succ? unbound) (not (static? (:sym unbound))) (or (not (succ? bound)) (= :non-static (:sk bound)))) unbound
+                 (and (succ? bound) (succ? unbound)) (err bound)
+                 (or (succ? bound) (succ? unbound)) (err bound)
+                 :else (if (and (can-ignore? bound) (not (can-ignore? unbound))) unbound bound))
+        :structural (cond
+                      (and (succ? bound) (not= :non-static (:sk bound))) bound
+                      (and (succ? unbound) (not= :static (:sk unbound))) unbound
+                      (or (succ? bound) (succ? unbound)) (err bound)
+                      :else (if (and (can-ignore? bound) (not (can-ignore? unbound))) unbound bound))))))
+
+(defn- reference-lookup
+  "A reference lookup helper's lookupMethod at `site` for `name` and argument types `as`: {:sym :phase
+  :last :sk} (its static kind)."
+  [ctx site name as static-sel?]
+  (let [cands (java.util.ArrayList.)
+        res (binding [*cands* cands]
+              (lookup-method
+               (cond
+                 (and (= "<init>" name) (= :array (:k site)))
+                 (fn [b v] (find-in-scope ctx site as [(array-ctor (reg ctx) site)] absent b v))
+                 (and (= "<init>" name) (:diamond-site ctx))
+                 (let [c (:c site)
+                       tc (if (d/interface? c) (object-class (reg ctx)) c)
+                       ctors (map #(diamond-ctor c site %) (remove #(d/has? (flags %) d/SYNTHETIC) (named-methods tc "<init>")))]
+                   (fn [b v] (find-in-scope ctx site as ctors absent b v)))
+                 :else (fn [b v] (find-method ctx site name as b v)))))]
+    (assoc res :sk (static-kind res cands static-sel?))))
+
+(defn resolve-reference
+  "Resolve.resolveMemberReference of method reference `name` (\"<init>\" for a constructor's) at the
+  qualifier's type `site` for the descriptor's parameter types `as`: the bound search (the method
+  reference lookup helper: the site's type variables skipped and captured; a constructor's at a raw
+  class's diamond site, an array's constructor), the unbound one for a static selector (its first
+  argument the receiver), chosen by `chooser` (:basic, :structural). `mc` the method check, `pending`
+  the descriptor's inference context. Returns {:sym :phase :kind (javac's ReferenceKind name) :site
+  (the chosen helper's)}."
+  [env site name as static-sel? super? mc chooser pending array-clone]
+  (binding [inf/*reg* (:reg env)]
+    (let [ctx (context env array-clone {:mcheck mc :select-super? super?})
+          r (reg ctx)
+          ctor? (= "<init>" name)
+          [bsite dctx] (cond
+                         (not ctor?) [(ty/skip-type-vars r site true) ctx]
+                         (= :array (:k site)) [site ctx]
+                         (d/raw? site) [(assoc site :args (mapv d/tvar-type (d/class-tparams (:c site))) :anns [])
+                                        (assoc ctx :diamond-site true)]
+                         :else [site ctx])
+          bound (assoc (reference-lookup dctx bsite name as static-sel?) :site bsite :helper :bound)
+          unbound (when (and (not ctor?) static-sel?)
+                    (if (and (seq as) (or (= :none (first as))
+                                          (inf/subtype-unchecked? (inf/as-undet pending (first as)) site)))
+                      (let [usite (ty/skip-type-vars r site true)
+                            usite (if (and (d/raw? site) (not= :none (first as)))
+                                    (ty/skip-type-vars r (inf/as-super (first as) (:c site)) true)
+                                    usite)]
+                        (assoc (reference-lookup ctx usite name (vec (rest as)) static-sel?) :site usite :helper :unbound))
+                      {:sym absent :sk :undefined :helper :none}))
+          best (choose chooser bound unbound)
+          s (:sym best)]
+      (when (and (method? s) (d/has? (flags s) d/NATIVE)
+                 (#{"java.lang.invoke.MethodHandle" "java.lang.invoke.VarHandle"} (:flat (:owner s))))
+        (d/decline! "a signature polymorphic method reference"))
+      (assoc best
+             :kind (when (method? s)
+                     (cond
+                       (= :unbound (:helper best)) "UNBOUND"
+                       (:array-ctor s) "ARRAY_CTOR"
+                       ctor? (if (:outer (:site best)) "IMPLICIT_INNER" "TOPLEVEL")
+                       (static? s) "STATIC"
+                       super? "SUPER"
+                       :else "BOUND"))))))
+
+(defn reference-overload-kind
+  "ArgumentAttr.visitReference's overload kind of method reference `name` at `site`: the lookup with
+  nilMethodCheck (getMemberReference): :unoverloaded for one method neither generic nor of variable
+  arity (nor a raw static selector's), else :overloaded (an ambiguity: javac's ERROR, as overloaded)."
+  [env site name static-sel? super? array-clone]
+  (binding [inf/*reg* (:reg env)]
+    (let [ctx (context env array-clone {:mcheck {:kind :nil} :select-super? super?})
+          r (reg ctx)
+          site (ty/capture r site)
+          ctor? (= "<init>" name)
+          [bsite dctx] (cond
+                         (not ctor?) [(ty/skip-type-vars r site true) ctx]
+                         (= :array (:k site)) [site ctx]
+                         (d/raw? site) [(assoc site :args (mapv d/tvar-type (d/class-tparams (:c site))) :anns [])
+                                        (assoc ctx :diamond-site true)]
+                         :else [site ctx])
+          res (reference-lookup dctx bsite name [] static-sel?)
+          s (:sym res)]
+      (cond
+        (not (method? s)) :overloaded
+        (or (seq (:tparams (d/method-type (or (:diamond-of s) s)))) (:diamond-of s)) :overloaded
+        (d/has? (flags s) d/VARARGS) :overloaded
+        (and static-sel? (d/raw? site) (not= :array (:k site))) :overloaded
+        :else :unoverloaded))))
+
+(defn marker-interface?
+  "An interface without abstract methods but Object's (a marker of an intersection target: Serializable,
+  Cloneable)?"
+  [reg c]
+  (and (d/interface? c)
+       (not-any? #(and (= d/ABSTRACT (bit-and (flags %) (bit-or d/ABSTRACT d/DEFAULT)))
+                       (not (overrides-object-method? reg c %)))
+                 (closure-methods reg (d/this-type c)))))

@@ -29,7 +29,13 @@ code. Three kinds of things live here:
   `repr/java/overload.ae`, with `expr.ae`'s choice and `decls.ae`'s ClassReader method flags, reimplements
   parts of `comp/{Resolve,Attr,ArgumentAttr,Check,TypeEnter}.java`, `code/{Types,Symbol,Scope}.java` and
   `jvm/ClassReader.java` at the same commit (LICENSE.md names the functions), by hand on 2026-10-25, the
-  files carrying their notice; "As built: JN9c";
+  files carrying their notice; "As built: JN9c"; and its inference tier, `repr/java/infer.ae`, with
+  `expr.ae`'s poly expressions, lambdas, method references, record patterns and local class names,
+  `overload.ae`'s diamonds, method references and functional descriptors and `decls.ae`'s ClassReader
+  members, reimplements parts of `comp/{Infer,InferenceContext,DeferredAttr,ArgumentAttr,Attr,Resolve,Check,TypeEnter}.java`,
+  `code/{Type,Types,Symbol}.java`, `jvm/ClassReader.java`, `tree/TreeInfo.java` and `util/GraphUtils.java`
+  at the same commit (LICENSE.md names the functions), by hand on 2026-10-25, the files carrying their
+  notice; "As built: JN9d" (`repr/java/sym.ae`, the native symbols' type, JFS107 (b), is Arbace's own);
   `repr/java/classfile.ae`, `nattr.ae` are Arbace's own), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
   `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
   `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,

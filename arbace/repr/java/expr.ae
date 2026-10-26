@@ -7,7 +7,14 @@
 ;; visitNewArray's types, visitLiteral; visitApply's and visitNewClass's resolution sites: the
 ;; site, select super, the anonymous class's superclass constructor), ArgumentAttr.java (which
 ;; arguments are standalone) and Operators.java (resolveUnary, resolveBinary: the operator helpers'
-;; tests and lookups, stringPromotion), whose notice follows (LICENSE.md, "OpenJDK (jdk26u)"):
+;; tests and lookups, stringPromotion); and, the inference tier's (JN9d), Attr.java's checkMethod
+;; instantiation, visitLambda, getTargetInfo, lambdaBodyResult, checkLambdaCompatible, visitReference,
+;; checkReferenceCompatible, visitNewClass's diamonds and qualified creations, visitRecordPattern,
+;; visitBindingPattern, visitTypeUnion, visitForeachLoop's element and condType's lub, ArgumentAttr.java's
+;; argument types, DeferredAttr.java's stuck policies, StructuralStuckChecker and deferred nodes,
+;; Infer.java's instantiateFunctionalInterface and instantiatePolymorphicSignatureInstance,
+;; Resolve.java's findPolymorphicSignatureInstance, Check.java's localClassName and checkLocalVarType and
+;; TreeInfo.java's isExpressionStatement, whose notice follows (LICENSE.md, "OpenJDK (jdk26u)"):
 ;;
 ;; Copyright (c) 1999, 2025, Oracle and/or its affiliates. All rights reserved.
 ;; DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
@@ -52,9 +59,11 @@
   (:require [arbace.repr.java.decls :as d]
             [arbace.repr.java.types :as ty]
             [arbace.repr.java.overload :as ov]
+            [arbace.repr.java.infer :as inf]
             [arbace.repr.java.scope :as sc]
             [arbace.repr.java.nattr :as na]
             [arbace.repr.java.jtypes :as jt]
+            [arbace.repr.java.parse :as parse]
             [arbace.string :as str])
   (:import [com.sun.tools.javac.tree JCTree TreeInfo]
            [com.sun.tools.javac.code Symbol Symbol$MethodSymbol Symbol$ClassSymbol Type Type$ArrayType]
@@ -69,7 +78,7 @@
 
 (defn lean! "Mark the answer being computed as needing javac's higher tiers." [] (when *leaned* (vreset! *leaned* true)))
 
-(defn- ans [p t] (.get ^IdentityHashMap (:ans p) t))
+(defn- ans [p t] (na/answer p t))
 
 (defn- reg [p] (:reg p))
 
@@ -91,7 +100,7 @@
   (d/sym {:sk :field :name "length" :owner (d/sym {:sk :class :flat "Array" :name "Array" :memo (doto (java.util.HashMap.) (.put :flags (long (bit-or d/PUBLIC d/FINAL))))})
           :memo (doto (java.util.HashMap.) (.put :type :int) (.put :flags (long (bit-or d/PUBLIC d/FINAL))))}))
 
-(declare etype etype* name-sym name-sym* method-of site-classes method-accessible? call-site call-member-type pt anon-diamond?)
+(declare pattern-target mref-check mref-info anon-diamond-type mref-target mref-overload-kind mref-structural! lambda-target lambda-param-type diamond-tree? etype etype* name-sym name-sym* method-of site-classes method-accessible? call-site call-member-type pt anon-diamond?)
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; this, super
@@ -104,12 +113,10 @@
       :this (d/this-type (if x @x c))
       :super (if x
                (let [q @x]
-                 (when (anon-diamond? c) (d/decline! "an anonymous class of a diamond's supertype (inferred)"))
                  (if (d/interface? q)
                    (d/as-super (d/this-type c) q)
                    (d/supertype (d/this-type q))))
-               (do (when (anon-diamond? c) (d/decline! "an anonymous class of a diamond's supertype (inferred)"))
-                   (d/supertype (d/this-type c))))
+               (d/supertype (d/this-type c)))
       nil)))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -151,11 +158,15 @@
         (cond (:local r) nil
               (:field r) (:field r)
               (:c r) (:c r)
+              ;; a type variable (a cast's type named in code)
+              (:tv r) (:tv r)
               (:pck r) (d/sym {:sk :package :name (:pck r)})
               :else (d/decline! (str "no symbol " n))))
       :SELECT
       (let [q (:selected t)]
-        (if (true? (type-expr? p q))
+        ;; a qualifier naming a type or a package names one by its own qualifier too (the walk marks
+        ;; the outermost: java.lang.reflect.Array of java.lang.reflect.Array.newInstance)
+        (if (or (true? (type-expr? p q)) (true? (type-expr? p t)))
           (let [r (d/resolve-qualified env t kinds)]
             (cond (:field r) (:field r)
                   (:c r) (:c r)
@@ -185,13 +196,9 @@
        (empty? (get-in c [:newclass :clazz :arguments]))))
 
 (defn- check-site!
-  "Decline a member's type at a site whose class, or a class enclosing it, is an anonymous class of a
-  diamond (its supertype, through which members are inherited, is inferred)."
+  "A member's site (an anonymous class of a diamond's supertype is inferred, JN9d: decls asks the
+  inference tier)."
   [site]
-  (loop [t site]
-    (when (ty/class-t? t)
-      (when (some anon-diamond? (take-while some? (iterate d/encl-class (:c t))))
-        (d/decline! "a member through an anonymous class of a diamond (inferred)"))))
   site)
 
 (defn- ident-site
@@ -398,9 +405,13 @@
 
 ;;; The overload tier (JN9c): the native choice
 
+(def ^:private ^:dynamic *active*
+  "The [key node] computations under way (a cycle among them is declined, not recursed into)."
+  nil)
+
 (defn- leaning
   "(f) memoized in the provider's IdentityHashMap `k` by node `t` (a decline too), a lean on javac's
-  higher tiers remembered with it (as etype's)."
+  higher tiers remembered with it (as etype's); a cycle declined."
   [p k t f]
   (let [^IdentityHashMap cache (get p k)
         hit (.get cache t)]
@@ -410,53 +421,126 @@
         (if (instance? Throwable v) (throw v) v))
       (let [outer *leaned*
             mine (volatile! false)
-            [v ex] (binding [*leaned* mine]
+            ^java.util.Map act (or *active* (java.util.HashMap.))
+            ak [k (System/identityHashCode t)]
+            ;; a computation re-entered a few times may end (a memo met on the way); more is a cycle
+            _ (when (> (count (filter #(identical? t %) (.get act ak))) 3)
+                (d/decline! (str "a cycle in the inference tier's computations (" k ")"
+                                 (when (seq (System/getenv "REPR_JAVA_INFER_TRACE"))
+                                   (vec (take 40 (keep #(let [s (str %)] (when (re-find #"repr.java" s) (subs s 0 (min 90 (count s))))) (.getStackTrace (Throwable.)))))))))
+            _ (.put act ak (cons t (.get act ak)))
+            [v ex] (binding [*leaned* mine *active* act]
                      (try [(f) nil]
                           (catch Throwable e
-                            (if (:arbace.repr.java.decls/decline (ex-data e)) [e e] (throw e)))))]
+                            (if (:arbace.repr.java.decls/decline (ex-data e)) [e e] (throw e)))
+                          (finally (.put act ak (rest (.get act ak))))))]
         (.put cache t [v @mine])
         (when (and @mine outer) (vreset! outer true))
         (if ex (throw ex) v)))))
 
+(declare poly-kind)
+
+(defn- arg-type
+  "The argument type of argument `a` (ArgumentAttr.attribArg): a standalone expression's type, a poly
+  expression's deferred type {:k :deferred :kind :call|:cond :tree a :p p} (a generic method's call
+  without explicit type arguments, a conditional whose arms are not both boolean or numeric; JN9d)."
+  [p a]
+  (if-let [k (poly-kind p a)]
+    {:k :deferred :kind k :tree a :p p}
+    (etype p a)))
+
 (defn- arg-types
-  "The standalone types of call `t`'s arguments (ArgumentAttr's for arguments that are no poly
-  expressions; a poly one's declines the call: its type is the inference tier's)."
+  "The argument types of call `t`'s arguments (arg-type's)."
   [p t]
-  (mapv #(etype p %) (:args t)))
+  (mapv #(arg-type p %) (:args t)))
 
 (defn- in-anon-diamond? [env]
   (some (fn [c] (some anon-diamond? (take-while some? (iterate d/encl-class c)))) (keep :class (:levels env))))
 
 (defn- array-clone-fn [p] (fn [] (array-clone (reg p))))
 
+(declare sig-poly-instance)
+
 (defn- result
-  "A resolution's result as the choice: {:sym method :varargs? b}, an error {:error kind}; a signature
-  polymorphic method declined (its instance is Infer's)."
-  [{:keys [sym phase]}]
-  (if (ov/method? sym)
-    (do (when (and (d/has? (d/method-flags sym) d/NATIVE)
-                   (#{"java.lang.invoke.MethodHandle" "java.lang.invoke.VarHandle"} (:flat (:owner sym))))
-          (d/decline! "a signature polymorphic call"))
-        {:sym sym :varargs? (= :varity phase)})
-    {:error (:kind sym)}))
+  "A resolution's result as the choice: {:sym method :varargs? b :phase}, an error {:error kind}; a
+  signature polymorphic method's instance (Resolve.findPolymorphicSignatureInstance, JFS108 (b)) in
+  the basic phase, for call `t`."
+  ([r] (result nil nil r))
+  ([p t {:keys [sym phase]}]
+   (if (ov/method? sym)
+     (if (and (d/has? (d/method-flags sym) d/NATIVE)
+              (#{"java.lang.invoke.MethodHandle" "java.lang.invoke.VarHandle"} (:flat (:owner sym))))
+       (if (and p t (= :APPLY (:tag t)))
+         {:sym (sig-poly-instance p t sym) :varargs? false :phase :basic}
+         (d/decline! "a signature polymorphic call"))
+       (if-let [b (:diamond-of sym)]
+         ;; a diamond's synthesized constructor: its base symbol is the choice (Attr.visitNewClass)
+         {:sym b :diamond sym :varargs? (= :varity phase) :phase phase}
+         {:sym sym :varargs? (= :varity phase) :phase phase}))
+     {:error (:kind sym)})))
+
+(defn- typearg-types
+  "The types of call `t`'s explicit type arguments (Attr.attribAnyTypes), nil for none."
+  [p t]
+  (when (seq (:typeargs t))
+    (mapv #(or (some-> (:type (ans p %)) deref) (d/decline! "a type argument")) (:typeargs t))))
+
+(defn- call-extra [p t extra]
+  (assoc extra :typeargs (typearg-types p t) :arg-trees (:args t)))
+
+(defn- qualified-class-type
+  "The class type qualified creation o.new C(...) names (Attr.visitNewClass: C a member of the type of
+  `o`, at it; its explicit type arguments; `args?` false for a diamond's bare class)."
+  [p t args?]
+  (let [env (env-of p t)
+        et (etype p (:encl t))
+        clazz (:clazz t)
+        _ (when (= :ANNOTATED_TYPE (:tag clazz)) (d/decline! "an annotated qualified creation"))
+        id (if (= :TYPEAPPLY (:tag clazz)) (:clazz clazz) clazz)
+        _ (when-not (= :IDENT (:tag id)) (d/decline! "a qualified creation's class"))
+        _ (when-not (ty/class-t? et) (d/decline! "a qualified creation's qualifier"))
+        m (d/find-member-type env et (:name id) (:c et))
+        _ (when-not (and m (= :class (:sk m))) (d/decline! "a qualified creation's class"))
+        ct (d/class-type-at m et)
+        ;; Attr.visitTypeApply: the enclosing type the qualifier's (asOuterSuper)
+        ct (if (and (= :TYPEAPPLY (:tag clazz)) (ty/class-t? (:outer ct)))
+             (assoc ct :outer (or (d/as-outer-super et (:c (:outer ct))) (d/erasure (:outer ct))))
+             ct)]
+    (if (and args? (= :TYPEAPPLY (:tag clazz)) (seq (:arguments clazz)))
+      (assoc ct :args (mapv #(d/type-of-tree env %) (:arguments clazz)))
+      ct)))
+
+(defn diamond-site
+  "Attr.visitNewClass's site of diamond NEWCLASS `t`: the class type with its own type variables as
+  arguments (the named class's enclosing type kept)."
+  [p t]
+  (let [clazz (:clazz t)
+        _ (when (= :ANNOTATED_TYPE (:tag clazz)) (d/decline! "an annotated diamond"))
+        base (if (:encl t)
+               (qualified-class-type p t false)
+               ;; the class tree's type as the names tier gave it (Attr.checkId: a member class's
+               ;; enclosing type at the site's)
+               (let [env (env-of p t)
+                     ct (d/type-of-tree env (:clazz clazz))]
+                 (cond-> ct (ty/class-t? ct) (assoc :outer (d/type-apply-outer env clazz ct)))))]
+    (when-not (ty/class-t? base) (d/decline! "the created type"))
+    (assoc base :args (mapv d/tvar-type (d/class-tparams (:c base))) :anns [])))
 
 (defn- created-type
-  "The class type NEWCLASS `t` creates when the overload tier chooses its constructor: declined for a
-  diamond, a qualified creation."
+  "The class type NEWCLASS `t` creates when the overload tier chooses its constructor (a diamond's
+  site, its type variables as arguments): declined for a qualified creation."
   [p t]
   (let [clazz (:clazz t)
         bare (loop [x clazz] (if (= :ANNOTATED_TYPE (:tag x)) (recur (:underlyingType x)) x))]
     (cond
-      (and (= :TYPEAPPLY (:tag bare)) (empty? (:arguments bare))) (d/decline! "a diamond (inferred)")
-      (:encl t) (d/decline! "a qualified creation")
+      (and (= :TYPEAPPLY (:tag bare)) (empty? (:arguments bare))) (diamond-site p t)
+      (:encl t) (qualified-class-type p t true)
       :else (or (some-> (:type (ans p clazz)) deref) (d/decline! "the created type")))))
 
 (defn- choice*
   [p t]
   (let [env (env-of p t)
         ac (array-clone-fn p)]
-    (when (seq (:typeargs t)) (d/decline! "explicit type arguments"))
-    (when (in-anon-diamond? env) (d/decline! "a call in an anonymous class of a diamond (inferred)"))
     (case (:tag t)
       :APPLY
       (let [meth (:meth t) n (:name meth)]
@@ -465,9 +549,9 @@
           (let [c (env-class env)
                 site (if (= "super" n) (d/supertype (d/this-type c)) (d/this-type c))]
             (when-not (ty/class-t? site) (d/decline! "a constructor call's site"))
-            (result (ov/resolve-constructor env site (arg-types p t) ac {:select-super? true})))
+            (result (ov/resolve-constructor env site (arg-types p t) ac (call-extra p t {:select-super? true}))))
           (= :IDENT (:tag meth))
-          (result (ov/resolve-method env nil n (arg-types p t) ac {}))
+          (result p t (ov/resolve-method env nil n (arg-types p t) ac (call-extra p t {})))
           :else
           (let [q (:selected meth)
                 site (if (true? (type-expr? p q))
@@ -475,16 +559,18 @@
                        (let [s (ty/capture (reg p) (etype p q))]
                          (if (ty/tvar-t? s) (ty/skip-type-vars (reg p) s true) s)))
                 _ (check-site! site)
-                _ (when-not (or (ty/class-t? site) (= :array (:k site))) (d/decline! "a call's site"))
+                _ (when-not (or (ty/class-t? site) (#{:array :inter} (:k site))) (d/decline! "a call's site"))
                 sq (skip-parens q)
                 super? (or (and (= :IDENT (:tag sq)) (= "super" (:name sq)))
                            (and (= :SELECT (:tag sq)) (= "super" (:name sq))))]
-            (result (ov/resolve-method env site n (arg-types p t) ac {:select-super? super?})))))
+            (result p t (ov/resolve-method env site n (arg-types p t) ac (call-extra p t {:select-super? super?}))))))
       :NEWCLASS
-      (do (when (:def t) (d/decline! "an anonymous class's constructor"))
+      (do (when (and (:def t) (not (diamond-tree? t))) (d/decline! "an anonymous class's constructor"))
           (let [site (created-type p t)]
             (when-not (ty/class-t? site) (d/decline! "the created type"))
-            (result (ov/resolve-constructor env site (arg-types p t) ac {}))))
+            (if (diamond-tree? t)
+              (result (ov/resolve-diamond env site (arg-types p t) ac (call-extra p t {:select-super? (boolean (:def t))})))
+              (result (ov/resolve-constructor env site (arg-types p t) ac (call-extra p t {}))))))
       (d/decline! "not a call"))))
 
 (defn choice
@@ -500,17 +586,19 @@
   [p t c]
   (leaning p :choices (:def t)
            (fn []
-             (when (seq (:typeargs t)) (d/decline! "explicit type arguments"))
              (let [env (env-of p t)
-                   _ (when (in-anon-diamond? env) (d/decline! "a creation in an anonymous class of a diamond (inferred)"))
                    site (created-type p t)]
                (when-not (ty/class-t? site) (d/decline! "the created type"))
-               (if (d/interface? (:c site))
+               (cond
+                 ;; a diamond's: the superclass constructor the diamond's inference chose
+                 (diamond-tree? t) (let [r (choice p t)] (if (:sym r) (dissoc r :diamond) r))
+                 (d/interface? (:c site))
                  (let [o (d/class-named (reg p) "java.lang.Object")]
                    {:sym (first (filter #(and (= "<init>" (:name %)) (empty? (:params (d/method-type %))))
                                         (:methods (d/members o))))
-                    :varargs? false})
-                 (result (ov/resolve-constructor env site (arg-types p t) (array-clone-fn p) {:select-super? true})))))))
+                    :varargs? false :phase :basic})
+                 :else
+                 (result (ov/resolve-constructor env site (arg-types p t) (array-clone-fn p) (call-extra p t {:select-super? true}))))))))
 
 (defn anon-ctor-choice
   "The constructor of anonymous class `c` NEWCLASS `t` calls (TypeEnter's, over the superclass
@@ -518,7 +606,12 @@
   [p t c]
   (let [r (anon-super-choice p t c)]
     (if-let [m (:sym r)]
-      (ov/anon-constructor (reg p) c m (created-type p t) nil)
+      (let [ct (if (diamond-tree? t) (anon-diamond-type p t) (created-type p t))]
+        (ov/anon-constructor (reg p) c m ct
+                             ;; a qualified creation's: the qualifier's type first (TypeEnter's encl)
+                             (when (:encl t) (etype p (:encl t)))
+                             ;; an interface's, not a diamond: no constructor chosen, BasicConstructorHelper's
+                             (not (and (not (diamond-tree? t)) (ty/class-t? ct) (d/interface? (:c ct))))))
       (d/decline! "the superclass constructor"))))
 
 (defn method-of
@@ -584,13 +677,25 @@
   (let [dcl (:decl e)]
     (cond
       (nil? dcl) (d/decline! "a local without a declaration")
+      ;; a `var` binding of a record pattern: its component's type (Attr.visitRecordPattern, JN9d)
+      (and (= :binding (:kind e)) (or (nil? (:vartype dcl)) (= :VAR (:declKind dcl))))
+      (pattern-target p (:binding-pattern (ans p dcl)))
+      ;; an implicit lambda parameter's: its descriptor's parameter type (JN9d)
+      (and (= :lambda-param (:kind e)) (or (nil? (:vartype dcl)) (= :VAR (:declKind dcl))))
+      (lambda-param-type p dcl)
       (and (:vartype dcl) (not= :VAR (:declKind dcl)))
       (let [vt (d/type-of-tree (:env e) (:vartype dcl))]
-        (if (= :union (:k vt)) (d/decline! "a multi-catch parameter's type (a lub)") vt))
+        (if (= :union (:k vt))
+          ;; Attr.visitTypeUnion: a UnionClassType, the lub of the alternatives as its class type
+          ;; (JN9d; its alternatives kept for its data)
+          (let [l (binding [inf/*reg* (reg p)] (inf/lub (:ts vt)))]
+            (if (ty/class-t? l) (assoc l :union-alts (:ts vt)) (d/decline! "a multi-catch parameter's type (an intersection lub)")))
+          vt))
       (and (= :VAR (:declKind dcl)) (:init dcl) (#{:local :resource} (:kind e)))
       (let [it (etype p (:init dcl))]
-        (cond (captured-in? it) (d/decline! "a var's upward projection")
-              (or (= :null it) (= :void it)) (d/decline! "a var's null type")
+        (cond (or (= :null it) (= :void it)) (d/decline! "a var's null type")
+              ;; Check.checkLocalVarType: its upward projection (JN9d)
+              (captured-in? it) (binding [inf/*reg* (reg p)] (inf/upward it))
               :else it))
       (and (= :VAR (:declKind dcl)) (= :for-each (:kind e)) (:foreach (ans p dcl)))
       (let [xt (etype p (:expr (:foreach (ans p dcl))))
@@ -601,9 +706,10 @@
                          (cond (nil? b) (d/decline! "a for-each's element")
                                (empty? (:args b)) (object-type p)
                                :else (first (:args b)))))]
-        (if (or (captured-in? el) (and (map? el) (= :wild (:k el))))
-          (d/decline! "a var's upward projection")
-          el))
+        (binding [inf/*reg* (reg p)]
+          ;; Attr.visitForeachLoop: an Iterable's argument's wildUpperBound, its upward projection
+          (let [el (inf/wild-upper el)]
+            (if (captured-in? el) (inf/upward el) el))))
       :else (d/decline! "an inferred local type"))))
 
 (defn- ident-type [p t]
@@ -632,7 +738,8 @@
                                      nil)))
                         (d/decline! "a class literal"))
       (#{"this" "super"} n) (or (this-type-of p t) (d/decline! "C.this"))
-      (true? (type-expr? p q))
+      ;; (a qualifier naming a type or a package names one by its own qualifier too)
+      (or (true? (type-expr? p q)) (true? (type-expr? p t)))
       (let [s (name-sym p t)]
         (case (:sk s)
           :field (cap p t (d/field-type s))
@@ -665,6 +772,9 @@
       (let [n (count ps)]
         (boolean
          (some (fn [[i arg]]
+                 ;; a lambda or method reference is checked structurally, not converted (its type is
+                 ;; its target)
+                 (when-not (#{:LAMBDA :REFERENCE} (:tag (skip-parens arg)))
                  (let [at (etype p arg)
                        f (cond (< i (dec n)) (nth ps i)
                                (not varargs?) (nth ps i nil)
@@ -674,8 +784,12 @@
                                          (:e l))))]
                    (when (and f (map? f) (not (keyword? at)) (not (ty/reifiable? f)))
                      (and (not (ty/subtype? (reg p) at f))
-                          (ty/subtype? (reg p) (d/erasure at) (d/erasure f))))))
+                          (ty/subtype? (reg p) (d/erasure at) (d/erasure f)))))))
                (map-indexed vector args)))))))
+
+(declare checked-mtype arg-context args-checked!)
+
+(defn- generic-method? [m] (seq (:tparams (d/method-type m))))
 
 (defn- apply-type [p t]
   (let [meth (:meth t)
@@ -683,15 +797,12 @@
     (if (#{"this" "super"} mname)
       :void
       (let [m (method-of p t)
-            mt0 (d/method-type m)
-            _ (when (seq (:tparams mt0)) (d/decline! "a generic method's call (inferred)"))
-            _ (when (and (d/has? (d/method-flags m) d/NATIVE)
-                         (#{"java.lang.invoke.MethodHandle" "java.lang.invoke.VarHandle"} (:flat (:owner m))))
-                (d/decline! "a signature polymorphic call"))
             [site qtype] (call-site p t m)
-            mt (ty/member-type (reg p) (check-site! site) m)
-            ret (:ret mt)
-            ret (if (unchecked-call? p mt (:args t) (d/has? (d/method-flags m) d/VARARGS)) (d/erasure ret) ret)
+            ret (if (generic-method? m)
+                  ;; Attr.checkMethod's instantiated type (Infer's, JN9d), erased by an unchecked call
+                  (:ret (checked-mtype p t m (check-site! site)))
+                  (let [mt (ty/member-type (reg p) (check-site! site) m)]
+                    (if (unchecked-call? p mt (:args t) (d/has? (d/method-flags m) d/VARARGS)) (d/erasure (:ret mt)) (:ret mt))))
             ret (cond
                   (and (= "getClass" (:name m)) (empty? (:args t))
                        (let [o (:owner m)] (or (= "java.lang.Object" (:flat o)) (d/interface? o))))
@@ -723,35 +834,140 @@
 
 (defn call-method-type
   "The instantiated method type (javac's `.type` of the call's meth tree: memberType at the site,
-  erased by an unchecked call) of the call whose meth tree is `meth`, a method without type
-  parameters of its own: {:k :mtype :params :ret :throws}."
+  erased by an unchecked call; a generic method's inferred, JN9d) of the call whose meth tree is
+  `meth`: {:k :mtype :params :ret :throws}."
   [p meth]
   (let [t (or (:apply (ans p meth)) (d/decline! "no call"))
         m (method-of p t)
-        _ (when (seq (:tparams (d/method-type m))) (d/decline! "a generic method's type (inferred)"))
         site (if (#{"this" "super"} (:name meth))
                (let [c (env-class (env-of p t))
                      ct (d/this-type c)]
                  (if (= "super" (:name meth)) (d/supertype ct) ct))
                (first (call-site p t m)))
-        mt (ty/member-type (reg p) (check-site! site) m)
-        mt (if (unchecked-call? p mt (:args t) (d/has? (d/method-flags m) d/VARARGS))
-             (assoc mt :ret (d/erasure (:ret mt)) :throws (mapv d/erasure (:throws mt)))
-             mt)]
+        mt (if (generic-method? m)
+             (checked-mtype p t m (check-site! site))
+             (let [mt (ty/member-type (reg p) (check-site! site) m)]
+               (if (unchecked-call? p mt (:args t) (d/has? (d/method-flags m) d/VARARGS))
+                 (assoc mt :ret (d/erasure (:ret mt)) :throws (mapv d/erasure (:throws mt)))
+                 mt)))]
     {:k :mtype :params (:params mt) :ret (:ret mt) :throws (:throws mt)}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; A generic method's instantiation (Attr.checkMethod, Infer.instantiateMethod with the target)
+
+(declare pt)
+
+(defn- phase-of [r] (case (:phase r) :basic [false false] :box [true false] :varity [true true] nil))
+
+(defn- expr-statement?
+  "TreeInfo.isExpressionStatement: an increment, an assignment, a call, a creation."
+  [t]
+  (or (contains? #{:PREINC :PREDEC :POSTINC :POSTDEC :ASSIGN :APPLY :NEWCLASS :ERRONEOUS} (:tag t))
+      (and (keyword? (:tag t)) (str/ends-with? (name (:tag t)) "_ASG"))))
+
+(defn target-ri
+  "The ResultInfo of poly expression `t` from its target (javac's pt(): none, a type), declined where
+  the target is the inference tier's beyond these."
+  [p t]
+  (let [x (:pt (ans p t))
+        tp (pt p t)]
+    (inf/ri {:pt tp :expr-stmt? (expr-statement? t)
+             ;; ExpressionLambdaReturnContext of a void descriptor: an expression statement
+             :compat (if (and (= :lambda-return (first x)) (= :void tp) (not= :BLOCK (:tag (:body (second x)))))
+                       :void-expr
+                       :assign)})))
+
+(defn- msubst [mt m]
+  (assoc mt :tparams [] :params (mapv #(d/subst % m) (:params mt)) :ret (d/subst (:ret mt) m)
+            :throws (mapv #(d/subst % m) (:throws mt))))
+
+(defn- call-msite
+  "The method of call `t` (APPLY, NEWCLASS) as inference instantiates it (a diamond's synthesized
+  constructor) with its site and phase: [m site phase]."
+  [p t]
+  (let [ch (try (choice p t)
+                (catch Throwable e (if (:arbace.repr.java.decls/decline (ex-data e)) nil (throw e))))
+        ph (or (phase-of ch) (d/decline! "a generic method's call (javac's choice: its phase)"))
+        m (:sym ch)]
+    (case (:tag t)
+      :APPLY [m (if (#{"this" "super"} (:name (:meth t)))
+                  (let [c (env-class (env-of p t)) ct (d/this-type c)]
+                    (if (= "super" (:name (:meth t))) (d/supertype ct) ct))
+                  (check-site! (first (call-site p t m))))
+              ph]
+      :NEWCLASS (if (:diamond ch)
+                  [(:diamond ch) (diamond-site p t) ph]
+                  [m (created-type p t) ph]))))
+
+(def ^:private trace? (seq (System/getenv "REPR_JAVA_INFER_TRACE")))
+
+(defn- instantiate-call
+  "Call `t`'s generic method (or diamond constructor) instantiated against result `r` (Attr.checkMethod:
+  Resolve.checkMethod's rawInstantiate: its explicit type arguments substituted, else
+  Infer.instantiateMethod): the method type, {:k :partial ...} for :any-poly, free when propagated."
+  [p t r]
+  (when trace? (binding [*out* *err*] (println "infer" (:file p) (:pos t) (:pt r))))
+  (let [[m site ph] (call-msite p t)
+        mt (ty/member-type (reg p) site m)
+        targs (typearg-types p t)]
+    (if targs
+      (let [mt (msubst mt (zipmap (:tparams mt) targs))]
+        ;; rawInstantiate without inference: the arguments checked (their poly ones attributed after
+        ;; the choice)
+        (if (and r (not= :any-poly (:pt r)))
+          (let [warn (volatile! {})]
+            (binding [inf/*reg* (reg p) inf/*warn* warn]
+              (inf/check-args! (inf/new-dac :check m ph inf/empty-ic (:dac r)) {:kind :resolve}
+                               (arg-types p t) (:params mt) (:args t)))
+            (assoc mt :unchecked (boolean (:unchecked @warn))))
+          (assoc mt :unchecked (if (some inf/deferred? (arg-types p t))
+                                 (d/decline! "an explicitly typed call's poly arguments (speculative)")
+                                 (unchecked-call? p mt (:args t) (second ph))))))
+      (binding [inf/*reg* (reg p)]
+        (let [[fresh sm] (inf/new-instances (:tparams mt) (:tsubst mt))]
+          (inf/instantiate-method {:tvars fresh :mt (msubst mt sm) :r r :msym m
+                                   :as (arg-types p t) :phase ph :trees (:args t) :tree t}))))))
+
+(defn- erase-unchecked
+  "Attr.checkMethod: an unchecked call's return and thrown types erased."
+  [mt]
+  (if (:unchecked mt)
+    (assoc mt :ret (d/erasure (:ret mt)) :throws (mapv d/erasure (:throws mt)))
+    mt))
+
+(defn checked-mtype
+  "The instantiated type of the generic method or constructor (or diamond) that call `t` (APPLY,
+  NEWCLASS) chose, against the call's target (a poly argument's by its call's inference, recorded
+  there), erased by an unchecked call: {:params :ret :throws}; memoized, its lean remembered."
+  [p t _m _site]
+  (leaning p :checked t
+           (fn []
+             (if-let [[outer _] (and (not (typearg-types p t)) (arg-context p t))]
+               ;; a poly argument: instantiated by its call's inference (recorded there)
+               (do (args-checked! p outer)
+                   (or (:mt (.get ^IdentityHashMap (:polys p) t))
+                       (d/decline! "a generic method's call (its argument context)")))
+               ;; an explicitly typed call as an argument is standalone (ArgumentAttr: unknownExprInfo)
+               (let [res (instantiate-call p t (if (and (typearg-types p t) (arg-context p t))
+                                                 (inf/ri {:pt :none})
+                                                 (target-ri p t)))]
+                 (when (:propagated res) (d/decline! "a generic method's call (propagated)"))
+                 (erase-unchecked res))))))
 
 (defn ctor-method-type
   "The instantiated type of the constructor NEWCLASS `t` calls (javac's constructorType): memberType of
   the constructor overload resolution chose (the overload tier's, else javac's, marked) at the created
-  type, erased by an unchecked call: {:k :mtype ...}."
+  type, erased by an unchecked call; a generic constructor's and a diamond's inferred (JN9d), a
+  diamond's returning void: {:k :mtype ...}."
   [p t]
   (let [m (ctor-of p t)
-        _ (when (seq (:tparams (d/method-type m))) (d/decline! "a generic constructor (inferred)"))
-        site (etype p t)
-        mt (ty/member-type (reg p) site m)
-        mt (if (unchecked-call? p mt (:args t) (d/has? (d/method-flags m) d/VARARGS))
-             (assoc mt :ret (d/erasure (:ret mt)) :throws (mapv d/erasure (:throws mt)))
-             mt)]
+        mt (if (or (diamond-tree? t) (generic-method? m))
+             (assoc (checked-mtype p t m nil) :ret :void)
+             (let [site (etype p t)
+                   mt (ty/member-type (reg p) site m)]
+               (if (unchecked-call? p mt (:args t) (d/has? (d/method-flags m) d/VARARGS))
+                 (assoc mt :ret (d/erasure (:ret mt)) :throws (mapv d/erasure (:throws mt)))
+                 mt)))]
     {:k :mtype :params (:params mt) :ret (:ret mt) :throws (:throws mt)}))
 
 (defn- new-class-type [p t]
@@ -759,10 +975,26 @@
         bare (loop [x clazz] (if (= :ANNOTATED_TYPE (:tag x)) (recur (:underlyingType x)) x))
         diamond? (and (= :TYPEAPPLY (:tag bare)) (empty? (:arguments bare)))]
     (cond
-      diamond? (d/decline! "a diamond (inferred)")
       (:def t) (if-let [c (:class (ans p (:def t)))] (d/this-type c) (d/decline! "an anonymous class"))
-      (:encl t) (d/decline! "a qualified creation")
+      ;; Attr.visitNewClass: the diamond's inferred class type (JN9d)
+      diamond? (:ret (checked-mtype p t nil nil))
+      (:encl t) (qualified-class-type p t true)
       :else (or (some-> (:type (ans p clazz)) deref) (d/decline! "the created type")))))
+
+(defn diamond-clazz-type
+  "The type of diamond NEWCLASS `t`'s class tree (Attr.visitNewClass: the constructor type's return
+  type as checkId gives it, not captured: a poly argument's propagated to its call's inference keeps
+  its variables)."
+  [p t]
+  (when-not (diamond-tree? t) (d/decline! "not a diamond"))
+  (let [mt (checked-mtype p t nil nil)]
+    (or (:free-ret (.get ^IdentityHashMap (:polys p) t)) (:ret mt))))
+
+(defn anon-diamond-type
+  "The inferred class type of anonymous class of a diamond NEWCLASS `t` (Attr.visitNewClass: its
+  class tree's type, the anonymous class's supertype or interface)."
+  [p t]
+  (:ret (checked-mtype p t nil nil)))
 
 (defn- new-array-type [p t]
   (if-let [et (:elemtype t)]
@@ -794,8 +1026,16 @@
                               (etype p (:selected meth)))]
                    (pob (:ret (ty/member-type (reg p) site m))))))
       :NEWCLASS (let [bare (loop [x (:clazz t)] (case (:tag x) :ANNOTATED_TYPE (recur (:underlyingType x)) :TYPEAPPLY (recur (:clazz x)) x))]
-                  (pob (or (some-> (:type (ans p bare)) deref) (d/decline! "the created class"))))
+                  ;; the class name with its type arguments removed, attributed speculatively
+                  (if (:encl t)
+                    ;; a qualified creation's class is an inner class: neither primitive nor a box
+                    false
+                    (pob (or (some-> (:type (ans p bare)) deref)
+                             (try (d/type-of-tree (env-of p t) bare) (catch Throwable _ nil))
+                             (d/decline! "the created class")))))
       (pob (etype p t)))))
+
+(declare arg-target lambda-desc)
 
 (defn pt
   "javac's target type (pt()) of expression `t` from the walk's record: a type, :none (no target:
@@ -815,21 +1055,46 @@
         :elem (let [at (etype p (second x))]
                 (if (= :array (:k at)) (:e at) (d/decline! "an element's target")))
         ;; an argument's target is the method's formal as deferred attribution checks it
-        ;; (DeferredAttr, ArgumentAttr: the overload and inference tiers')
-        :arg (d/decline! "a poly argument's target (deferred attribution)")
+        ;; (DeferredAttr, ArgumentAttr), instantiated by the call's inference (JN9d)
+        :arg (let [[_ outer i] x] (arg-target p outer i))
+        ;; a lambda's return: its descriptor's return type (JN9d)
+        :lambda-return (:ret (lambda-desc p (second x)))
+        ;; a lambda or method reference cast: the cast's type
+        :cast (or (some-> (:type (ans p (:clazz (second x)))) deref) (d/decline! "the cast's type"))
         (d/decline! "an unknown target")))))
 
 (defn- arm-const [p t] (some-> (d/const-value (env-of p t) t) second))
+
+(defn- cond-lub
+  "Attr.condType's last step (JFS98): the lub of the arms' types, boxed, the null type left out (the
+  full lub, arbace.repr.java.infer's)."
+  [p ts]
+  (binding [inf/*reg* (reg p)]
+    (let [l (inf/lub (remove #(= :null %) (map #(if (ty/prim? %) (ty/boxed-type (reg p) %) %) ts)))]
+      (if (or (nil? l) (= :error l)) (d/decline! "a conditional's lub") l))))
+
+(declare arg-checked-target)
+
+(defn- poly-target
+  "The type of poly conditional or switch expression `t`: its target (pt), an argument's as its method
+  check gives it (captured)."
+  [p t]
+  ;; through parentheses and enclosing conditionals' arms (:same: the argument's result info, a
+  ;; conditional context of it)
+  (let [x (loop [y t] (let [x (:pt (ans p y))] (if (= :same (first x)) (recur (second x)) x)))]
+    (if (= :arg (first x))
+      (arg-checked-target p (nth x 1) (nth x 2))
+      (pt p t))))
 
 (defn- cond-type [p t]
   (if (and (boolean-or-numeric? p (:truepart t)) (boolean-or-numeric? p (:falsepart t)))
     (let [ts [(etype p (:truepart t)) (etype p (:falsepart t))]]
       (or (ty/cond-type (reg p) ts [(arm-const p (:truepart t)) (arm-const p (:falsepart t))])
-          (d/decline! "a conditional's lub")))
-    (let [x (pt p t)]
+          (cond-lub p ts)))
+    (let [x (poly-target p t)]
       (if (= :none x)
         (let [ts [(etype p (:truepart t)) (etype p (:falsepart t))]]
-          (or (ty/cond-type (reg p) ts [nil nil]) (d/decline! "a conditional's lub")))
+          (or (ty/cond-type (reg p) ts [nil nil]) (cond-lub p ts)))
         x))))
 
 (defn- yields
@@ -845,17 +1110,95 @@
                 (= :YIELD (:tag x)) (do (when (identical? sw (:target (ans p x))) (vswap! out conj (:value x)))
                                         (walk (:value x)))
                 :else (doseq [[k v] x :when (and (not= k :mods) (or (map? v) (vector? v)))] (walk v))))]
-      (doseq [c (:cases sw)] (walk (:stats c))))
+      (doseq [c (:cases sw)]
+        (let [st (:stats c)]
+          (if (and (= :RULE (:caseKind c)) (= 1 (count st)) (= :YIELD (:tag (first st))) (:body c))
+            ;; a rule's expression: its body (the tree the converter reads; its synthetic yield's value
+            ;; is the same expression)
+            (do (vswap! out conj (:body c)) (walk (:body c)))
+            (walk st)))))
     @out))
+
+(defn case-completes?
+  "Flow.aliveAfter of CASE `c` (Attr.handleSwitch's completesNormally): can its statements complete
+  normally (the walk's liveness, Flow's AliveAnalyzer)?"
+  [p c]
+  (binding [sc/*ans* (:ans p)]
+    (every? #(sc/alive? nil %) (:stats c))))
+
+(def ^:private strict-subranges
+  "TypeTag.isStrictSubRangeOf, less isUnconditionallyExactTypeBased's exclusions (int to float, long to
+  float and double)."
+  {:byte #{:short :int :long :float :double} :short #{:int :long :float :double}
+   :char #{:int :long :float :double} :int #{:long :double} :long #{} :float #{:double}})
+
+(defn- unconditionally-exact?
+  "Types.isUnconditionallyExactTypeBased of `source` to `target`."
+  [p source target]
+  (let [r (reg p)]
+    (cond
+      (ty/same-type? source target) true
+      (keyword? target) (boolean (and (keyword? source) (contains? (get strict-subranges source #{}) target)))
+      :else (let [e (d/erasure source)]
+              (boolean (ty/subtype? r (if (keyword? e) (ty/boxed-type r e) e) target))))))
+
+(defn unconditional-pattern?
+  "Attr.handleSwitch's hasUnconditionalPattern of SWITCH or SWITCH_EXPRESSION `t`: a default, or an
+  unguarded case's type pattern (not a record pattern) its selector's type is unconditionally exact
+  for (JN9d)."
+  [p t]
+  (let [st (etype p (:selector t))
+        labels (for [c (:cases t) l (:labels c)] [c l])]
+    (boolean
+     (or (some (fn [[_ l]] (= :DEFAULTCASELABEL (:tag l))) labels)
+         (some (fn [[c l]]
+                 (when (= :PATTERNCASELABEL (:tag l))
+                   (let [pat (:pat l)
+                         g (:guard c)
+                         unguarded? (or (nil? g) (= [:boolean 1] (d/const-value (env-of p g) g)))]
+                     (when (and unguarded? (not= :RECORDPATTERN (:tag pat)))
+                       (let [pt (case (:tag pat)
+                                  :BINDINGPATTERN (or (some-> (:type (ans p (:vartype (:var pat)))) deref)
+                                                      (d/decline! "a pattern's type"))
+                                  (d/decline! "a pattern's type"))]
+                         (unconditionally-exact? p st (d/erasure pt)))))))
+               labels)))))
+
+(declare pattern-switch?)
+
+(defn switch-exhaustive?
+  "Flow.AliveAnalyzer.visitSwitch's isExhaustive of SWITCH `t`: an unconditional pattern (or default),
+  or a switch expected to be exhaustive (a pattern switch, a null label: TreeInfo.expectedExhaustive),
+  which compiling code is (the corpora compile: Flow's exhaustiveness is then true, JN9d)."
+  [p t]
+  (boolean
+   (or (unconditional-pattern? p t)
+       (pattern-switch? p t))))
+
+(defn pattern-switch?
+  "Attr.handleSwitch's patternSwitch of SWITCH or SWITCH_EXPRESSION `t`: its selector's type neither an
+  enum's, String, nor assignable to int (a primitive or boxed byte, short, char or int), or a case label
+  a pattern or null (JN9d)."
+  [p t]
+  (let [st (etype p (:selector t))
+        enum? (and (ty/class-t? st) (d/has? (d/class-flags (:c st)) d/ENUM))
+        string? (and (ty/class-t? st) (= "java.lang.String" (:flat (:c st))))
+        int? (contains? #{:byte :short :char :int} (ty/unboxed-or-type st))]
+    (boolean
+     (or (not (or enum? string? int?))
+         (some (fn [l] (or (= :PATTERNCASELABEL (:tag l))
+                           (and (= :CONSTANTCASELABEL (:tag l))
+                                (let [e (:expr l)] (and (= :LITERAL (:tag e)) (identical? :BOT (:typetag e)))))))
+               (mapcat :labels (:cases t)))))))
 
 (defn- switch-type
   "Attr.visitSwitchExpression's type: its target's (a poly switch), else condType of its yields'."
   [p t]
-  (let [x (pt p t)]
+  (let [x (poly-target p t)]
     (if (= :none x)
       (let [vs (yields p t)
             ts (mapv #(etype p %) vs)]
-        (or (ty/cond-type (reg p) ts (mapv #(arm-const p %) vs)) (d/decline! "a switch expression's lub")))
+        (or (ty/cond-type (reg p) ts (mapv #(arm-const p %) vs)) (cond-lub p ts)))
       x)))
 
 (defn etype*
@@ -885,8 +1228,12 @@
                  ;; converter's: KindSelector VAR contains VAL)
                  (:e at)
                  (d/decline! "an indexed non-array")))
-    (:LAMBDA :REFERENCE) (d/decline! "a lambda's or method reference's type (inferred)")
+    :LAMBDA (lambda-target p t)
+    :REFERENCE (mref-target p t)
     :SWITCH_EXPRESSION (switch-type p t)
+    ;; a type tree (a method reference's qualifier): its type
+    (:TYPEARRAY :TYPEAPPLY :TYPEIDENT :ANNOTATED_TYPE)
+    (or (some-> (:type (ans p t)) deref) (d/decline! "a type tree"))
     (cond
       (str/ends-with? (name (:tag t)) "_ASG") (do (operator p t) (etype p (:lhs t)))
       (and (:lhs t) (:rhs t)) (:ret (d/method-type (operator p t)))
@@ -917,3 +1264,1005 @@
   [p t]
   (when-not (enum-label p t)
     (d/const-value (env-of p t) t)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Poly arguments (ArgumentAttr, DeferredAttr: their overload checks and their check after the
+;;; choice), JN9d
+
+(defn- polys ^IdentityHashMap [p] (:polys p))
+
+(defn- diamond-tree? [t]
+  (let [bare (loop [x (:clazz t)] (if (= :ANNOTATED_TYPE (:tag x)) (recur (:underlyingType x)) x))]
+    (and (= :TYPEAPPLY (:tag bare)) (empty? (:arguments bare)))))
+
+(defn- poly-kind
+  "ArgumentAttr's argument kind of `a` when it is a poly expression: :call (a generic method's call
+  without explicit type arguments, ResolvedMethodType; a diamond, ResolvedConstructorType), :cond (a
+  conditional not boolean or numeric, ConditionalType), :lambda, through parentheses; nil for a
+  standalone expression; declined for the kinds the tier does not answer yet."
+  [p a]
+  (case (:tag a)
+    :PARENS (poly-kind p (:expr a))
+    :APPLY (when (and (empty? (:typeargs a)) (not (#{"this" "super"} (:name (:meth a)))))
+             (let [r (choice p a)]
+               (when (and (:sym r) (generic-method? (:sym r))) :call)))
+    :CONDEXPR (when-not (and (boolean-or-numeric? p (:truepart a)) (boolean-or-numeric? p (:falsepart a))) :cond)
+    :NEWCLASS (when (diamond-tree? a) :call)
+    :LAMBDA :lambda
+    :REFERENCE :mref
+    :SWITCH_EXPRESSION :switch
+    nil))
+
+(defn- call-site-of
+  "The site and the instantiable method type of generic call `t` choosing `m`."
+  [p t m]
+  (let [[site _] (call-site p t m)]
+    (check-site! site)))
+
+(defn- poly-call-pmt
+  "The partially inferred method type of generic call (or diamond) `t` (Attr.checkMethod with the target
+  anyPoly: ArgumentAttr's speculative tree), memoized."
+  [p t]
+  (leaning p :pmts t #(instantiate-call p t (inf/ri {:pt :any-poly}))))
+
+(defn- record-target!
+  "Record argument `a`'s target (the formal it is checked against) once the context's variables are
+  inferred."
+  [p a r]
+  (let [ic (:ic r)
+        f (fn [_] (let [^IdentityHashMap m (polys p)
+                        tg (inf/as-inst ic (:pt r))]
+                    ;; a poly conditional's or switch's type: its target as MethodResultInfo.check gives
+                    ;; it, captured (the arguments' result info)
+                    ;; (:arg-target: a lambda's or method reference's own :target is its instantiated
+                    ;; functional interface, recorded by its check)
+                    (.put m a (assoc (.get m a) :arg-target tg
+                                     :checked-target (if (:method? r) (ty/capture (reg p) tg) tg)))))]
+    (if (inf/free? ic (:pt r)) (inf/add-listener! ic [(:pt r)] f) (f nil))))
+
+(defn- check-call-in
+  "Generic call (or diamond) `t` checked against result `r` after the choice (DeferredType.complete in
+  CHECK mode: Attr.visitApply, visitNewClass and checkMethod with `r`): its instantiation propagated
+  to `r`'s context (or solved there), its final method type recorded when that context's variables are
+  inferred; returns its return type."
+  [p t r]
+  (let [res (instantiate-call p t r)
+        ic (:ic r)
+        fin (fn [_] (let [^IdentityHashMap m (polys p)]
+                      (.put m t (assoc (.get m t) :mt (erase-unchecked (assoc (inf/as-inst-mt ic res) :unchecked (:unchecked res)))))))]
+    (if (:propagated res)
+      (do ;; a diamond's class tree keeps the return type with the variables (Attr.visitNewClass sets
+          ;; it before they are inferred)
+          (let [^IdentityHashMap m (polys p)] (.put m t (assoc (.get m t) :free-ret (:ret res))))
+          (inf/add-listener! ic (concat (:params res) [(:ret res)] (:throws res)) fin))
+      (fin nil))
+    (:ret res)))
+
+(reset! na/anon-ctor-hook
+        (fn [p c]
+          (let [t (:newclass c)]
+            (when-not t (d/decline! "an anonymous class without its creation"))
+            (anon-ctor-choice p t c))))
+
+
+
+(defn- arg-context
+  "The call and argument index whose argument `t` is, through parentheses and conditional arms (the
+  :same targets), or nil."
+  [p t]
+  (loop [t t]
+    (let [x (:pt (ans p t))]
+      (case (first x)
+        :same (recur (second x))
+        ;; a lambda's return: the lambda's argument context (its returns are checked with it)
+        :lambda-return (recur (second x))
+        :arg [(nth x 1) (nth x 2)]
+        nil))))
+
+(defn- outer-formals
+  "The formals of the method (or constructor) call `c` chose and its phase, non-generic: its member
+  type at the call's site."
+  [p c]
+  (let [ch (choice p c)
+        m (or (:sym ch) (d/decline! "the call's method (javac's)"))
+        ph (or (phase-of ch) (d/decline! "the call's phase"))]
+    [m ph]))
+
+(defn- args-checked!
+  "Call `c`'s poly arguments checked after its choice (Attr.checkMethod's rawInstantiate in CHECK
+  mode): a generic method's by its instantiation, a non-generic one's against its formals; their
+  types and targets recorded (memoized)."
+  [p c]
+  (leaning p :args-checked c
+           (fn []
+             (case (:tag c)
+               :APPLY (let [[m ph] (outer-formals p c)]
+                        (if (generic-method? m)
+                          (checked-mtype p c m (call-site-of p c m))
+                          (let [site (if (#{"this" "super"} (:name (:meth c)))
+                                       (let [ec (env-class (env-of p c)) ct (d/this-type ec)]
+                                         (if (= "super" (:name (:meth c))) (d/supertype ct) ct))
+                                       (call-site-of p c m))
+                                mt (ty/member-type (reg p) site m)]
+                            (binding [inf/*reg* (reg p)]
+                              (inf/check-args! (inf/new-dac :check m ph inf/empty-ic nil)
+                                                         {:kind :resolve} (arg-types p c) (:params mt) (:args c))))))
+               :NEWCLASS (let [[m ph] (if (and (:def c) (not (diamond-tree? c)))
+                                        (let [r (anon-super-choice p c (:class (ans p (:def c))))]
+                                          [(:sym r) (or (phase-of r) (d/decline! "the call's phase"))])
+                                        (outer-formals p c))]
+                           (cond
+                             (or (diamond-tree? c) (and (not (:def c)) (generic-method? m)))
+                             (checked-mtype p c nil nil)
+                             ;; an anonymous class's arguments: against its constructor's parameters
+                             (:def c)
+                             (let [ac (anon-ctor-choice p c (:class (ans p (:def c))))
+                                   ps (:params (d/method-type ac))]
+                               (binding [inf/*reg* (reg p)]
+                                 (inf/check-args! (inf/new-dac :check ac ph inf/empty-ic nil)
+                                                            {:kind :resolve} (arg-types p c) (vec (if (:encl c) (rest ps) ps)) (:args c))))
+                             :else
+                           (let [mt (ty/member-type (reg p) (etype p c) m)]
+                             (binding [inf/*reg* (reg p)]
+                               (inf/check-args! (inf/new-dac :check m ph inf/empty-ic nil)
+                                                          {:kind :resolve} (arg-types p c) (:params mt) (:args c))))))
+               (d/decline! "an argument's call"))
+             true)))
+
+(defn- arg-target
+  "The target of argument `i` of call `outer` (the instantiated formal it was checked against)."
+  [p outer i]
+  (let [a (nth (:args outer) i)]
+    (args-checked! p outer)
+    (or (:arg-target (.get (polys p) a)) (d/decline! "a poly argument's target (deferred attribution)"))))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Lambdas (Attr.visitLambda, getTargetInfo, lambdaBodyResult, checkLambdaCompatible;
+;;; Infer.instantiateFunctionalInterface; ArgumentAttr's ExplicitLambdaType; DeferredAttr's stuck
+;;; policies, StructuralStuckChecker and the deferred nodes), JN9d
+
+(defn- explicit-lambda? [lam] (= :EXPLICIT (:paramKind lam)))
+
+(defn- lambda-param-types
+  "The declared types of explicit lambda `lam`'s parameters (TreeInfo.types of its params)."
+  [p lam]
+  (mapv (fn [prm] (d/vartype-of (env-of p lam) prm)) (:params lam)))
+
+(defn- lambda-returns
+  "The expressions a lambda body returns (an expression body; LambdaReturnScanner's returns, not
+  entering classes and lambdas)."
+  [lam]
+  (let [b (:body lam)]
+    (if (not= :BLOCK (:tag b))
+      [b]
+      (let [out (volatile! [])]
+        (letfn [(walk [x]
+                  (cond
+                    (vector? x) (run! walk x)
+                    (not (map? x)) nil
+                    (#{:CLASSDEF :LAMBDA} (:tag x)) nil
+                    (= :RETURN (:tag x)) (when (:expr x) (vswap! out conj (:expr x)))
+                    :else (doseq [[k v] x :when (and (not= k :mods) (or (map? v) (vector? v)))] (walk v))))]
+          (walk (:stats b)))
+        @out))))
+
+(defn- lambda-return-stmts
+  "The return statements of lambda `lam`'s block body (not entering classes and lambdas)."
+  [lam]
+  (let [out (volatile! [])]
+    (letfn [(walk [x]
+              (cond
+                (vector? x) (run! walk x)
+                (not (map? x)) nil
+                (#{:CLASSDEF :LAMBDA} (:tag x)) nil
+                (= :RETURN (:tag x)) (vswap! out conj x)
+                :else (doseq [[k v] x :when (and (not= k :mods) (or (map? v) (vector? v)))] (walk v))))]
+      (walk (:stats (:body lam))))
+    @out))
+
+(declare body-can-complete?)
+
+(defn- instantiate-fi
+  "Infer.instantiateFunctionalInterface of functional interface type `fi` for explicit parameter
+  types `ps`: a wildcard-parameterized target's type arguments inferred from the descriptor's
+  parameters; then its compatibility with `fi` in context `ic` (the bounds JLS 18.2.1 propagates)."
+  [p fi ps ic]
+  (let [rg (reg p)]
+    (if-not (inf/capture-changes? fi)
+      fi
+      (binding [inf/*reg* rg]
+        (let [c (:c fi)
+              formals (mapv d/tvar-type (d/class-tparams c))
+              fic (inf/new-ic formals)
+              desc (ov/descriptor-type rg (d/this-type c))
+              _ (when-not desc (d/decline! "no descriptor"))
+              _ (when (not= (count (:params desc)) (count ps)) (inf/error! "incompatible arg types in lambda"))
+              _ (doseq [[a b] (map vector (:params desc) ps)]
+                  (when-not (inf/same-type? (inf/as-undet fic a) b) (inf/error! "no suitable functional interface instance")))
+              fset (java.util.HashSet. (map :tv formals))
+              insts (mapv (fn [u actual]
+                            (or (first (filter #(not (inf/contains-tvar? % fset)) (inf/uv-bounds u :eq))) actual))
+                          (inf/ic-undets fic) (:args fi))
+              _ (doseq [[u t] (map vector (inf/ic-undets fic) insts)] (inf/set-inst! u t))
+              owntype (inf/as-inst fic (d/this-type c))]
+          (inf/compatible? (inf/ri {:ic ic :compat :assign}) owntype fi)
+          owntype)))))
+
+(defn- target-info
+  "Attr.getTargetInfo of lambda (or method reference) `t` for target `pt` (its context `ic`; explicit
+  parameter types `ps` or nil): {:target :desc}; an intersection target declined."
+  [p t pt ps ic]
+  ;; not a functional interface: FunctionDescriptorLookupError, reported (the method inapplicable)
+  (when-not (or (ty/class-t? pt) (= :inter (:k pt))) (inf/error! "not a functional interface"))
+  (let [rg (reg p)
+        one (fn [b] (ov/remove-wildcards rg (if ps (try (instantiate-fi p b ps ic)
+                                                       (catch Throwable e (if (inf/error? e) b (throw e))))
+                                               b)))
+        ;; an intersection: each explicit component instantiated and without wildcards
+        tgt (if (= :inter (:k pt))
+              (inf/make-intersection (mapv one (:ts pt)))
+              (if ps (ov/remove-wildcards rg (instantiate-fi p pt ps ic)) (ov/remove-wildcards rg pt)))
+        desc (or (ov/descriptor-type rg tgt) (inf/error! "not a functional interface"))]
+    (when (and (= :LAMBDA (:tag t)) (seq (:tparams desc))) (d/decline! "a generic lambda target"))
+    {:target tgt :desc desc}))
+
+(defn- record-lambda!
+  "Record lambda `lam`'s parameter types now, its target and descriptor when context `ic`'s variables
+  are inferred (setFunctionalInfo's listener)."
+  [p lam ti params ic]
+  (let [^IdentityHashMap ps (:polys p)]
+    (.put ps lam (merge (.get ps lam) {:params params}))
+    (let [f (fn [_] (.put ps lam (merge (.get ps lam) {:target (inf/as-inst ic (:target ti))
+                                                       :desc (inf/as-inst-mt ic (:desc ti))})))]
+      (if (inf/free? ic (concat [(:target ti)] (:params (:desc ti)) [(:ret (:desc ti))]))
+        (inf/add-listener! ic (concat [(:target ti)] (:params (:desc ti)) [(:ret (:desc ti))]) f)
+        (f nil)))))
+
+(defn- catch-types
+  "The types catch clause `c` catches (a multi-catch's alternatives)."
+  [p c]
+  (let [vt (:vartype (:param c))
+        ty (fn [x] (or (some-> (:type (ans p x)) deref) (d/decline! "a catch clause's type")))]
+    (if (= :TYPEUNION (:tag vt))
+      (mapv ty (:alternatives vt))
+      [(ty vt)])))
+
+(defn- lambda-thrown
+  "The checked types lambda `lam`'s body throws (Flow.analyzeLambdaThrownTypes, its parts that need no
+  flow of definite assignment): its calls', creations' and throw statements' (not entering classes and
+  lambdas), a try statement's body's less those a catch clause catches, with its catch clauses' and
+  finally block's; declined for a try with resources, a rethrown catch parameter (precise rethrow) and
+  a finally block that cannot complete normally."
+  [p lam]
+  (letfn [(checked [ts] (filter inf/checked-exception? ts))
+          (walk [x]
+            (cond
+              (vector? x) (vec (mapcat walk x))
+              (not (map? x)) []
+              (#{:CLASSDEF :LAMBDA} (:tag x)) []
+              :else
+              (case (:tag x)
+                :TRY
+                (do (when (seq (:resources x)) (d/decline! "a lambda's thrown types (a try with resources: Flow's analysis)"))
+                    (when (and (:finalizer x) (not (binding [sc/*ans* (:ans p)] (sc/alive? (env-of p lam) (:finalizer x)))))
+                      (d/decline! "a lambda's thrown types (a finally block that cannot complete: Flow's analysis)"))
+                    (let [caught (mapcat #(catch-types p %) (:catchers x))
+                          body (remove (fn [t] (some #(inf/subtype? t %) caught)) (walk (:body x)))]
+                      (vec (concat body
+                                   (mapcat #(walk (:body %)) (:catchers x))
+                                   (when (:finalizer x) (walk (:finalizer x)))))))
+                (let [own (case (:tag x)
+                            :APPLY (checked (:throws (call-method-type p (:meth x))))
+                            :NEWCLASS (checked (:throws (ctor-method-type p x)))
+                            :THROW (let [e (skip-parens (:expr x))]
+                                     (when (and (= :IDENT (:tag e))
+                                                (= :catch (:kind (:local (ans p e)))))
+                                       (d/decline! "a lambda's thrown types (a rethrown catch parameter: Flow's analysis)"))
+                                     (checked [(etype p e)]))
+                            [])]
+                  (into (vec own)
+                        (mapcat (fn [[k v]] (when (and (not= k :mods) (or (map? v) (vector? v))) (walk v))) x))))))]
+    (walk (:body lam))))
+
+(defn- lambda-check
+  "Lambda `lam` attributed against result `r` (Attr.visitLambda in CHECK mode, its target's inference
+  variables but those of its return free): its parameters' types, its returns checked against the
+  descriptor's return type (FunctionalReturnContext; an expression body of a void descriptor checked
+  as a statement), its explicit parameters the same types as the descriptor's; recorded."
+  [p lam r]
+  (binding [inf/*reg* (reg p)]
+    (let [ic (:ic r)
+          ps (when (explicit-lambda? lam) (lambda-param-types p lam))
+          ti (target-info p lam (:pt r) ps ic)
+          desc (:desc ti)
+          params (or ps (:params desc))]
+      (when (not= (count (:params desc)) (count (:params lam))) (inf/error! "incompatible arg types in lambda"))
+      ;; recorded after the choice only (CHECK mode; the overload phase's are speculative)
+      (when (not= :speculative (:mode (:dac r))) (record-lambda! p lam ti params ic))
+      (let [void? (= :void (:ret desc))
+            rr (inf/ri {:pt (:ret desc) :ic ic :dac (:dac r) :expr-stmt? (expr-statement? (:body lam))
+                        :compat (if (and void? (not= :BLOCK (:tag (:body lam)))) :void-expr :assign)})]
+        (when-not (and void? (= :BLOCK (:tag (:body lam))))
+          (doseq [e (lambda-returns lam)]
+            (inf/ri-check rr (arg-type p e))))
+        ;; a block body's void and value compatibility (Attr.visitReturn's unexpected or missing return
+        ;; value, checkLambdaCompatible's body that can complete normally for a non-void descriptor)
+        (when (= :BLOCK (:tag (:body lam)))
+          (let [rets (lambda-return-stmts lam)]
+            (if void?
+              (when (some :expr rets) (inf/error! "unexpected return value in lambda"))
+              (do (when (some #(nil? (:expr %)) rets) (inf/error! "missing return value in lambda"))
+                  (when (body-can-complete? p lam) (inf/error! "missing return value in lambda (it completes normally)")))))))
+      (when ps
+        (doseq [[a b] (map vector (:params desc) ps)]
+          (when-not (inf/same-type? (inf/as-undet ic a) b) (inf/error! "incompatible arg types in lambda"))))
+      ;; the thrown types' bounds of the descriptor's free thrown variables (not speculatively)
+      (when (and (not= :speculative (:mode (:dac r))) (inf/free? ic (:throws desc)))
+        (when-not (inf/ex-constraints! ic (lambda-thrown p lam) (:throws desc))
+          (inf/error! "incompatible thrown types in lambda")))
+      (:target ti))))
+
+;; The stuck policies (CheckStuckPolicy, OverloadStuckPolicy)
+
+(defn- functional? [p t] (and (ty/class-t? t) (some? (ov/find-descriptor (reg p) (:c t)))))
+
+(defn- ivar? [ic t] (and (ty/tvar-t? t) (some #(identical? (:tv %) (:tv t)) (inf/ic-vars ic))))
+
+(defn- stuck-policy
+  "DeferredAttr's stuck policy of poly argument `t` for target `pt` in context `ic` (`overload?` the
+  overload phase's): {:stuck [vars] :dep [vars] :ostuck bool} (PolyScanner: conditionals,
+  parentheses, lambdas with their returns, method references, switch expressions' yields)."
+  [p t pt ic overload?]
+  (let [stuck (java.util.LinkedHashMap.) dep (java.util.LinkedHashMap.) ostuck (volatile! false)
+        add (fn [^java.util.LinkedHashMap m vs] (doseq [v vs] (.put m (:tv v) v)))]
+    (letfn [(scan [t pt]
+              (when (map? t)
+                (case (:tag t)
+                  :PARENS (scan (:expr t) pt)
+                  :CONDEXPR (do (scan (:truepart t) pt) (scan (:falsepart t) pt))
+                  :LAMBDA (do (when (ivar? ic pt) (add stuck [pt]))
+                              (when (functional? p pt)
+                                (let [desc (binding [inf/*reg* (reg p)] (ov/descriptor-type (reg p) pt))
+                                      free (inf/free-vars-in ic (:params desc))]
+                                  (when (and (not (explicit-lambda? t)) (seq free))
+                                    (add stuck free)
+                                    (add dep (inf/free-vars-in ic [(:ret desc)]))
+                                    (add dep (inf/free-vars-in ic (:throws desc))))
+                                  (doseq [e (lambda-returns t)] (scan e (:ret desc)))))
+                              (when (and overload? (not (explicit-lambda? t))) (vreset! ostuck true)))
+                  :REFERENCE (cond
+                               (ivar? ic pt) (add stuck [pt])
+                               (functional? p pt)
+                               (let [desc (binding [inf/*reg* (reg p)] (ov/descriptor-type (reg p) pt))
+                                     free (inf/free-vars-in ic (:params desc))
+                                     ovl? (not= :unoverloaded (mref-overload-kind p t))]
+                                 (when (and (seq free) ovl?)
+                                   (add stuck free)
+                                   (add dep (inf/free-vars-in ic [(:ret desc)]))
+                                   (add dep (inf/free-vars-in ic (:throws desc))))
+                                 (when (and overload? ovl?) (vreset! ostuck true)))
+                               :else nil)
+                  :SWITCH_EXPRESSION (doseq [v (yields p t)] (scan v pt))
+                  nil)))]
+      (scan t pt))
+    {:stuck (vec (.values stuck)) :dep (vec (.values dep)) :ostuck @ostuck}))
+
+(defn- stuck? [sp] (or (seq @(:live sp)) (:ostuck sp)))
+
+(defn- body-can-complete?
+  "Can lambda `lam`'s block body complete normally (Flow's AliveAnalyzer, the walk's)?"
+  [p lam]
+  ;; the jump targets the walk answered (its answers' map, as during the walk)
+  (binding [sc/*ans* (:ans p)]
+    (sc/alive? (env-of p lam) (:body lam))))
+
+(defn- structural-check!
+  "StructuralStuckChecker.check of stuck argument `t` against target `pt` (the overload phase): a
+  lambda's arity and void or value compatibility, through conditionals and parentheses."
+  [p t pt ic]
+  (when (map? t)
+    (case (:tag t)
+      :PARENS (structural-check! p (:expr t) pt ic)
+      :CONDEXPR (do (structural-check! p (:truepart t) pt ic) (structural-check! p (:falsepart t) pt ic))
+      :REFERENCE (binding [inf/*reg* (reg p)] (mref-structural! p t pt ic))
+      :SWITCH_EXPRESSION (doseq [v (yields p t)] (structural-check! p v pt ic))
+      :LAMBDA (when-not (ivar? ic pt)
+                (let [desc (or (binding [inf/*reg* (reg p)] (ov/descriptor-type (reg p) pt)) (inf/error! "not a functional interface"))
+                      void? (= :void (:ret desc))]
+                  (when (not= (count (:params desc)) (count (:params t))) (inf/error! "incompatible arg types in lambda"))
+                  (if (not= :BLOCK (:tag (:body t)))
+                    (when (and void? (not (expr-statement? (:body t))))
+                      (inf/error! "missing return value"))
+                    (let [rets (let [out (volatile! {:void true :value true})]
+                                 (letfn [(walk [x]
+                                           (cond (vector? x) (run! walk x)
+                                                 (not (map? x)) nil
+                                                 (#{:CLASSDEF :LAMBDA :NEWCLASS} (:tag x)) nil
+                                                 (= :RETURN (:tag x)) (if (:expr x) (vswap! out assoc :void false) (vswap! out assoc :value false))
+                                                 :else (doseq [[k v] x :when (and (not= k :mods) (or (map? v) (vector? v)))] (walk v))))]
+                                   (walk (:stats (:body t))))
+                                 @out)]
+                      (if void?
+                        (when-not (:void rets) (inf/error! "unexpected return value"))
+                        (when-not (and (:value rets) (not (body-can-complete? p t)))
+                          (inf/error! "missing return value")))))))
+      nil)))
+
+(defn- complete-deferred
+  "DeferredType.complete of `dt` against result `r` (not stuck)."
+  [dt r]
+  (let [p (:p dt)
+        a (:tree dt)
+        t (skip-parens a)
+        check? (= :check (:mode (:dac r)))]
+    (when check? (record-target! p a r))
+    (case (:kind dt)
+      :call (if check?
+              (check-call-in p t r)
+              (inf/check-partial (poly-call-pmt p t) r))
+      :cond (do (doseq [arm [(:truepart t) (:falsepart t)]]
+                  (inf/ri-check r (arg-type p arm)))
+                (:pt r))
+      :lambda (if (or check? (explicit-lambda? t))
+                (lambda-check p t r)
+                (d/decline! "an implicit lambda attributed speculatively"))
+      :mref (mref-check p t r)
+      ;; SwitchExpressionType: each yield's value checked against the target
+      :switch (do (doseq [v (yields p t)] (inf/ri-check r (arg-type p v)))
+                  (:pt r)))))
+
+(defn- deferred-check*
+  "DeferredType.check of `dt` against `r`: its stuck policy (none without a target; the overload
+  phase's inside it, else CheckStuckPolicy); a stuck argument deferred to `r`'s context's nodes (not
+  pertinent to applicability inside the overload phase), else completed."
+  [dt r]
+  (let [p (:p dt)
+        pt (:pt r)
+        dac (:dac r)
+        overload? (or (= :speculative (:mode dac)) (inf/inside-overload? dac))
+        sp (when (and (not= :none pt) (contains? #{:lambda :cond :mref :switch} (:kind dt)))
+             (stuck-policy p (skip-parens (:tree dt)) pt (:ic r) overload?))]
+    (if (and sp (or (seq (:stuck sp)) (:ostuck sp)))
+      (let [live (volatile! (set (map :tv (:stuck sp))))
+            node {:dt dt :r r :sp (assoc sp :live live)}]
+        (when (and (seq (:stuck sp)) (not overload?))
+          (inf/add-listener! (:ic r) (:stuck sp) (fn [_] (vreset! live #{}))))
+        (.add ^java.util.ArrayList (:nodes dac) node)
+        :none)
+      (complete-deferred dt r))))
+
+(defn- process-node
+  "DeferredAttrNode.process in `dac`: inside the overload phase the structural check; after the choice
+  a node still stuck moved to the parent context when that holds its variables, else waiting; one no
+  longer stuck checked against its target instantiated."
+  [node dac]
+  (let [{:keys [dt r sp]} node
+        p (:p dt)]
+    (case (:mode dac)
+      :speculative (do (structural-check! p (skip-parens (:tree dt)) (:pt r) (:ic r)) true)
+      :check (if (or (seq @(:live sp)) (:ostuck sp))
+               (let [par (:parent dac)]
+                 (if (and par (some (fn [v] (some #(identical? (:tv %) (:tv v)) (inf/ic-vars (:ic par)))) (:stuck sp)))
+                   (do (.add ^java.util.ArrayList (:nodes par) (assoc node :r (assoc r :ic (:ic par) :dac par)))
+                       true)
+                   false))
+               (do (complete-deferred dt (assoc r :pt (inf/as-inst (:ic dac) (:pt r))))
+                   true)))))
+
+(defn- pick-node
+  "DeferredAttrContext.pickDeferredNode: the stuck variables of the node to unstick (the stuck graph's,
+  arbace.repr.java.infer/pick-stuck)."
+  [dac]
+  (let [nodes (vec (:nodes dac))
+        n (if (> (count nodes) 1)
+            (inf/pick-stuck (:ic dac) nodes #(:stuck (:sp %)) #(:dep (:sp %)))
+            (first nodes))]
+    (:stuck (:sp n))))
+
+(defn- unrelated-interfaces?
+  "MostSpecificCheckContext.unrelatedInterfaces of `t` and `s` (through intersections)."
+  [t s]
+  (cond
+    (= :inter (:k t)) (every? #(unrelated-interfaces? % s) (filter #(d/interface? (:c %)) (:ts t)))
+    (= :inter (:k s)) (every? #(unrelated-interfaces? t %) (filter #(d/interface? (:c %)) (:ts s)))
+    :else (and (nil? (inf/as-super t (:c s))) (nil? (inf/as-super s (:c t))))))
+
+(defn- unrelated-fis? [p t s]
+  (and (functional? p t) (functional? p s) (unrelated-interfaces? t s)))
+
+(declare fi-most-specific? mref-sym mref-overload-kind)
+
+(defn- speculative-tree?
+  "Has poly argument `t` (through parentheses) a speculative tree for the overload phase's check
+  against formal `req` in `ic` (DeferredType.speculativeTree: not stuck by OverloadStuckPolicy)?"
+  [p t req ic]
+  (let [sp (stuck-policy p (skip-parens t) req ic true)]
+    (not (or (seq (:stuck sp)) (:ostuck sp)))))
+
+(defn- return-checker
+  "MostSpecificFunctionReturnChecker of tree `t` for returns `tr` (m1's descriptor's) and `sr`: true
+  when t's results make m1's more specific."
+  [p t tr sr ic]
+  (let [t (skip-parens t)
+        prim? (fn [x] (keyword? x))
+        void? (fn [x] (= :void x))]
+    (case (:tag t)
+      :CONDEXPR (and (return-checker p (:truepart t) tr sr ic) (return-checker p (:falsepart t) tr sr ic))
+      :LAMBDA (cond
+                (void? sr) true
+                (void? tr) false
+                :else
+                (let [rs (lambda-returns t)]
+                  (cond
+                    (and (seq rs) (unrelated-fis? p tr sr)) (every? #(fi-most-specific? p tr sr % ic) rs)
+                    (and (seq rs) (not= (prim? tr) (prim? sr)))
+                    (every? (fn [e] (let [rp (and (not (poly-kind p e)) (prim? (etype p e)))]
+                                      (and (= rp (prim? tr)) (not= rp (prim? sr)))))
+                            rs)
+                    :else (binding [inf/*reg* (reg p)] (inf/subtype? tr (inf/as-undet ic sr) false)))))
+      :REFERENCE (cond
+                   (void? sr) true
+                   (void? tr) false
+                   (not= (prim? tr) (prim? sr))
+                   (let [s (mref-sym p t)
+                         rp (and (= :unoverloaded (mref-overload-kind p t))
+                                 (prim? (:ret (d/method-type s))))]
+                     (and (= rp (prim? tr)) (not= rp (prim? sr))))
+                   :else (binding [inf/*reg* (reg p)] (inf/subtype? tr (inf/as-undet ic sr) false)))
+      false)))
+
+(defn- fi-most-specific?
+  "MostSpecificCheckContext.functionalInterfaceMostSpecific of unrelated functional interfaces `t` (m1's
+  formal) and `s` (m2's, with m2's inference variables in `ic`) for poly argument tree `tree`."
+  [p t s tree ic]
+  (binding [inf/*reg* (reg p)]
+    (let [rg (reg p)
+          td (ov/descriptor-type rg (ty/capture rg t))
+          tdn (ov/descriptor-type rg t)
+          sd (ov/descriptor-type rg s)]
+      (when (or (seq (:tparams td)) (seq (:tparams sd))) (d/decline! "a generic functional descriptor (most specific)"))
+      (and (= (count (:params td)) (count (:params sd)))
+           (every? true? (map (fn [tp tpn sp]
+                                (let [su (inf/as-undet ic sp)]
+                                  (boolean (and (inf/subtype? su tp) (inf/same-type? tpn su)))))
+                              (:params td) (:params tdn) (:params sd)))
+           (return-checker p tree (:ret td) (:ret sd) ic)))))
+
+(defn- most-specific-fi
+  "The :most-specific-fi hook: for unrelated functional interfaces `found` (m1's formal) and `req`
+  (m2's) and a poly argument with a speculative tree, functionalInterfaceMostSpecific; else nil."
+  [found req dt r]
+  (let [p (:p dt)
+        ic (:ic r)
+        t (:tree dt)]
+    (when (and (#{:lambda :mref :cond} (:kind dt))
+               (unrelated-fis? p found req)
+               (speculative-tree? p t req ic))
+      (fi-most-specific? p found req t ic))))
+
+(alter-var-root #'inf/*deferred*
+                (constantly {:most-specific-fi (fn [f q dt r] (most-specific-fi f q dt r))
+                             :check (fn [dt r] (deferred-check* dt r))
+                             :process (fn [n dac] (process-node n dac))
+                             :pick (fn [dac] (pick-node dac))
+                             :stuck-vars (fn [n] (:stuck (:sp n)))
+                             :dep-vars (fn [n] (:dep (:sp n)))}))
+
+(defn- lambda-info
+  "Lambda `lam`'s final target, descriptor and parameter types (Attr.visitLambda's): an argument's by its
+  call's inference (recorded there, javac's CHECK attribution), else from its target (getTargetInfo);
+  memoized."
+  [p lam]
+  (leaning p :lambdas lam
+           (fn []
+             (if-let [[outer _] (arg-context p lam)]
+               (do (args-checked! p outer)
+                   (let [x (.get (polys p) lam)]
+                     (if (and x (:target x)) x (d/decline! "a lambda's target (its argument context)"))))
+               (let [x (pt p lam)
+                     _ (when (= :none x) (d/decline! "a lambda without a target"))
+                     ps (when (explicit-lambda? lam) (lambda-param-types p lam))
+                     ti (binding [inf/*reg* (reg p)] (target-info p lam x ps inf/empty-ic))]
+                 {:target (:target ti) :desc (:desc ti) :params (or ps (:params (:desc ti)))})))))
+
+(defn lambda-target "Lambda `lam`'s type (Attr.visitLambda: its target, `.type` and `.target`)." [p lam]
+  (:target (lambda-info p lam)))
+
+(defn lambda-desc "Lambda `lam`'s descriptor (its target's functional descriptor, instantiated)." [p lam]
+  (:desc (lambda-info p lam)))
+
+(defn lambda-param-type
+  "The type of implicit lambda parameter declaration `dcl` (its descriptor's parameter type, as javac
+  sets it before the body's attribution)."
+  [p dcl]
+  (let [[lam i] (or (:lambda-of (ans p dcl)) (d/decline! "a lambda parameter"))
+        rec (.get (polys p) lam)]
+    (nth (or (:params rec) (:params (lambda-info p lam))) i)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Method references (Attr.visitReference, checkReferenceCompatible; ArgumentAttr.visitReference's
+;;; overload kind), JN9d
+
+(defn- static-selector?
+  "TreeInfo.isStaticSelector of method reference `t`'s qualifier: a type."
+  [p t]
+  (let [q (:expr t)]
+    (boolean (or (#{:TYPEAPPLY :TYPEARRAY :ANNOTATED_TYPE :TYPEIDENT} (:tag q)) (true? (type-expr? p q))))))
+
+(defn- mref-qual-type
+  "The method reference's qualifier's type (memberReferenceQualifierResult: a type's, or the
+  expression's, not captured)."
+  [p t]
+  (let [q (:expr t)]
+    (if (static-selector? p t)
+      (or (some-> (:type (ans p q)) deref)
+          (let [x (etype p q)] x))
+      (etype p q))))
+
+(defn- mref-super? [t]
+  (let [q (skip-parens (:expr t))]
+    (and (#{:IDENT :SELECT} (:tag q)) (= "super" (:name q)))))
+
+(defn- mref-overload-kind [p t]
+  (leaning p :mref-kinds t
+           #(ov/reference-overload-kind (env-of p t) (mref-qual-type p t)
+                                        (if (= :NEW (:mode t)) "<init>" (:name t))
+                                        (static-selector? p t) (mref-super? t) (array-clone-fn p))))
+
+(defn- record-mref!
+  "Record method reference `t`'s resolution now, its target and referent type when `ic`'s variables
+  are inferred."
+  [p t info ti ref-type ic]
+  (let [^IdentityHashMap ps (:polys p)]
+    (.put ps t (merge (.get ps t) info))
+    (let [ts (concat [(:target ti) (:ret ref-type)] (:params ref-type))
+          f (fn [_] (.put ps t (merge (.get ps t) {:target (inf/as-inst ic (:target ti))
+                                                   :desc (inf/as-inst-mt ic (:desc ti))
+                                                   :ref-type (inf/as-inst-mt ic ref-type)})))]
+      (if (inf/free? ic ts) (inf/add-listener! ic ts f) (f nil)))))
+
+(defn- mref-check
+  "Method reference `t` attributed against result `r` (Attr.visitReference): its target's descriptor,
+  the reference resolved for its parameter types (the descriptor's context rolled back after), the
+  referenced method checked (Attr.checkId's checkMethod: a generic one inferred against the
+  descriptor's return type), its return type compatible with the descriptor's; recorded."
+  [p t r]
+  (binding [inf/*reg* (reg p)]
+    (let [ic (:ic r)
+          rg (reg p)
+          ti (target-info p t (:pt r) nil ic)
+          desc (:desc ti)
+          as (:params desc)
+          ctor? (= :NEW (:mode t))
+          qt (mref-qual-type p t)
+          mc (if (inf/free? ic as) {:kind :mref :pending ic} {:kind :resolve})
+          saved (inf/save ic)
+          res (try (ov/resolve-reference (env-of p t) qt (if ctor? "<init>" (:name t)) as (static-selector? p t)
+                                         (mref-super? t) mc :basic ic (array-clone-fn p))
+                   (finally (inf/rollback! ic saved)))
+          s (:sym res)
+          ;; a resolution error: reported (the method inapplicable)
+          _ (when-not (ov/method? s) (inf/error! "a method reference's resolution error"))
+          unbound? (= "UNBOUND" (:kind res))
+          ph (or (case (:phase res) :basic [false false] :box [true false] :varity [true true] nil) [false false])
+          void? (= :void (:ret desc))
+          cpt (if void? :none (:ret desc))
+          cas (if unbound? (vec (rest as)) as)
+          site (:site res)
+          mt (ty/member-type rg site s)
+          rmc {:kind :mref :pending ic}
+          ref-type (if (seq (:tparams mt))
+                     (let [[fresh sm] (inf/new-instances (:tparams mt) (:tsubst mt))
+                           x (inf/instantiate-method {:tvars fresh :mt (msubst mt sm)
+                                                      :r (inf/ri {:pt cpt :ic ic :dac (:dac r) :compat :assign})
+                                                      :msym s :as cas :phase ph :mc rmc})]
+                       (erase-unchecked x))
+                     (let [warn (volatile! {})]
+                       (binding [inf/*warn* warn]
+                         (inf/check-args! (inf/new-dac :check s ph inf/empty-ic (:dac r)) rmc cas (:params mt) nil))
+                       (erase-unchecked (assoc mt :unchecked (:unchecked @warn)))))
+          ;; an unbound receiver's constraints regenerated (lost to the rollback above)
+          _ (when (and unbound? (inf/free? ic (first as)))
+              (when-not (inf/subtype? (inf/as-undet ic (first as)) qt)
+                (inf/error! "a method reference's unbound receiver")))
+          ret (:ret ref-type)
+          ret (cond
+                (and (= "getClass" (:name s)) (empty? cas)
+                     (let [o (:owner s)] (or (= "java.lang.Object" (:flat o)) (d/interface? o))))
+                (d/ctype (:c ret) [{:k :wild :bk :extends :t (d/erasure site)}] nil)
+                (and (= "clone" (:name s)) (= "Array" (:flat (:owner s))) (= :array (:k site))) site
+                :else ret)
+          ref-type (assoc ref-type :ret ret)
+          res-type (if (and ctor? (not (and (ty/class-t? qt) (d/raw? qt)))) qt ret)]
+      (when (and (not void?) (not= :void res-type))
+        (when-not (inf/compatible? (inf/ri {:ic ic :compat :assign}) (ty/capture rg res-type) (:ret desc))
+          (inf/error! "incompatible return type in method reference")))
+      (when (not= :speculative (:mode (:dac r)))
+        (when-not (inf/ex-constraints! ic (:throws ref-type) (:throws desc))
+          (inf/error! "incompatible thrown types in method reference"))
+        (record-mref! p t {:sym (or (:diamond-of s) s) :kind (:kind res) :varargs? (= :varity (:phase res))} ti ref-type ic))
+      (:target ti))))
+
+(defn- mref-info
+  "Method reference `t`'s resolution, target and referent type: an argument's by its call's inference
+  (recorded there), else from its target; memoized."
+  [p t]
+  (leaning p :mrefs t
+           (fn []
+             (if-let [[outer _] (arg-context p t)]
+               (do (args-checked! p outer)
+                   (let [x (.get (polys p) t)]
+                     (if (and x (:target x)) x (d/decline! "a method reference's target (its argument context)"))))
+               (let [x (pt p t)]
+                 (when (= :none x) (d/decline! "a method reference without a target"))
+                 (mref-check p t (inf/ri {:pt x}))
+                 (or (.get (polys p) t) (d/decline! "a method reference")))))))
+
+(defn mref-target "Method reference `t`'s type (its target)." [p t] (:target (mref-info p t)))
+(defn mref-sym "The method method reference `t` refers to (`.sym`)." [p t] (:sym (mref-info p t)))
+(defn mref-kind "Method reference `t`'s kind (JCMemberReference.ReferenceKind's name)." [p t] (:kind (mref-info p t)))
+(defn mref-varargs-element
+  "The variable arity element of method reference `t`'s referent (nil when not of variable arity)."
+  [p t]
+  (let [x (mref-info p t)]
+    (when (:varargs? x) (:e (last (:params (:ref-type x)))))))
+
+(defn- mref-structural!
+  "StructuralStuckChecker.visitReference: the reference resolved by arity alone (structural chooser),
+  inapplicable when no method fits."
+  [p t pt ic]
+  (when-not (ivar? ic pt)
+    (let [desc (or (ov/descriptor-type (reg p) pt) (inf/error! "not a functional interface"))
+          res (ov/resolve-reference (env-of p t) (mref-qual-type p t) (if (= :NEW (:mode t)) "<init>" (:name t))
+                                    (mapv (constantly :none) (:params desc)) (static-selector? p t) (mref-super? t)
+                                    {:kind :arity} :structural ic (array-clone-fn p))]
+      (when (#{:wrong-mth :wrong-mths :absent :static :bad-mref} (:kind (:sym res)))
+        (inf/error! "incompatible method reference")))))
+
+
+;;; ------------------------------------------------------------------------------------------
+;;; Signature polymorphic calls (Infer.instantiatePolymorphicSignatureInstance,
+;;; Resolve.findPolymorphicSignatureInstance), JFS108 (b)
+
+(def ^:private ^java.util.Map sig-poly-cache (java.util.concurrent.ConcurrentHashMap.))
+
+(defn sig-poly-instance
+  "The instance of signature polymorphic method `sp` for call `t`: its parameters the arguments' types
+  (ImplicitArgType: classes erased, the null type Void), its result a cast's erased type (the call cast,
+  through parentheses), void (an expression statement's), else `sp`'s (kept when it is not Object),
+  `sp`'s thrown types; ABSTRACT | HYPOTHETICAL and `sp`'s access and static flags, one per owner and
+  type (polymorphicSignatureScope)."
+  [p t sp]
+  (let [rg (reg p)
+        a (ans p t)
+        sp-mt (d/method-type sp)
+        obj (d/object-type rg)
+        ps (mapv (fn [at a]
+                   (letfn [(m [x] (cond (= :null x) (d/ctype (d/class-named rg "java.lang.Void"))
+                                        (and (map? x) (= :class (:k x))) (d/erasure x)
+                                        (and (map? x) (= :array (:k x))) (d/array-of (m (:e x)))
+                                        :else x))]
+                     ;; a deferred argument: its speculative type against the Object... formal's
+                     ;; element (DeferredTypeMap's)
+                     (m (if (inf/deferred? at)
+                          (case (:kind at)
+                            (:cond :switch) obj
+                            :call (binding [inf/*reg* rg]
+                                    (inf/check-partial (poly-call-pmt p (skip-parens (:tree at)))
+                                                       (inf/ri {:pt obj :compat :loose :method? true})))
+                            (d/decline! "a signature polymorphic call's poly argument"))
+                          ;; any call without type arguments is ArgumentAttr's ResolvedMethodType: its
+                          ;; speculative type MethodResultInfo.check's (a captured variable's upper bound)
+                          (let [x (skip-parens a)]
+                            (if (and (= :APPLY (:tag x)) (empty? (:typeargs x)) (not= :void at))
+                              (binding [inf/*reg* rg] (ty/capture rg (inf/cvar-upper at)))
+                              at))))))
+                 (arg-types p t) (:args t))
+        ret (cond
+              (:cast-of a) (d/erasure (or (some-> (:type (ans p (:clazz (:cast-of a)))) deref) (d/decline! "the cast's type")))
+              (:exec a) :void
+              :else (:ret sp-mt))
+        spr (:ret sp-mt)
+        ret (if (and (ty/class-t? spr) (= "java.lang.Object" (:flat (:c spr))))
+              ret
+              (if (ty/same-type? spr ret) ret spr))
+        k [sp (mapv na/ntype ps) (na/ntype ret)]]
+    (or (.get sig-poly-cache k)
+        (let [m (d/sym {:sk :method :name (:name sp) :owner (:owner sp) :sig-poly-of sp
+                        :memo (doto (java.util.HashMap.)
+                                (.put :type {:tparams [] :params ps :ret ret :throws (:throws sp-mt)})
+                                (.put :tparams [])
+                                (.put :flags (long (bit-or d/ABSTRACT (bit-shift-left 1 37)
+                                                           (bit-and (d/method-flags sp) (bit-or 7 d/STATIC))))))})]
+          (.putIfAbsent sig-poly-cache k m)
+          (.get sig-poly-cache k)))))
+
+(alter-var-root #'d/*anon-diamond-type*
+                (constantly (fn [c]
+                              (let [p (na/provider-of (:uctx c))]
+                                (when-not (and p (:newclass c)) (d/decline! "an anonymous class of a diamond's supertype (inferred)"))
+                                (anon-diamond-type p (:newclass c))))))
+
+(defn anon-ctor-method-type
+  "The constructor type of anonymous creation NEWCLASS `t` (Attr.visitAnonymousClassDefinition's
+  checkId: its constructor's type at the anonymous class's type, erased by an unchecked call):
+  {:k :mtype ...} (JFS104 (b))."
+  [p t]
+  (let [c (or (:class (ans p (:def t))) (d/decline! "an anonymous class"))
+        m (anon-ctor-choice p t c)
+        mt (d/method-type m)
+        mt (if (unchecked-call? p mt (:args t) (d/has? (d/method-flags m) d/VARARGS))
+             (assoc mt :ret (d/erasure (:ret mt)) :throws (mapv d/erasure (:throws mt)))
+             mt)]
+    {:k :mtype :params (:params mt) :ret (:ret mt) :throws (:throws mt)}))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Record patterns (Attr.visitRecordPattern, visitBindingPattern; Infer.instantiatePatternType), JN9d
+
+(declare record-pattern-type)
+
+(defn- record-components [c]
+  (filter #(not (d/has? (d/field-flags %) d/STATIC)) (:fields (d/members c))))
+
+(defn- component-types
+  "The expected types of record pattern `rp`'s components: their member types at its captured type,
+  upward projected."
+  [p rp]
+  (leaning p :pattern-components rp
+           (fn []
+             (binding [inf/*reg* (reg p)]
+               (let [rt (record-pattern-type p rp)
+                     site (ty/capture (reg p) rt)]
+                 (when-not (d/has? (d/class-flags (:c rt)) d/RECORD) (d/decline! "not a record"))
+                 (mapv (fn [f] (let [t (ty/member-type (reg p) site f)] (inf/upward t)))
+                       (record-components (:c rt))))))))
+
+(defn pattern-target
+  "The type pattern `pt` is attributed against: a nested pattern's its record's component's, else the
+  matched expression's (instanceof's, the switch's selector's)."
+  [p pat]
+  (let [[k x] (:pattern-of (ans p pat))]
+    (cond
+      (= :expr k) (etype p x)
+      (map? k) (nth (component-types p k) x)
+      :else (d/decline! "a pattern's target"))))
+
+(defn record-pattern-type
+  "Record pattern `rp`'s type: its deconstructor's, a raw generic record's inferred from its target
+  (Infer.instantiatePatternType)."
+  [p rp]
+  (let [t (or (some-> (:type (ans p (:deconstructor rp))) deref) (d/decline! "a record pattern's type"))]
+    (if (and (ty/class-t? t) (d/raw? t) (seq (d/class-tparams (:c t))))
+      (binding [inf/*reg* (reg p)]
+        (or (inf/instantiate-pattern-type (pattern-target p rp) (:c t)) (d/decline! "a record pattern's inference")))
+      t)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Local classes' names (Check.localClassName: numbered per enclosing class and simple name in the
+;;; order Attr enters them, speculative attribution's entries removed), JFS91
+
+(defn- deferred-arg?
+  "Is argument `a` attributed after its call's choice (ArgumentAttr's processArg kinds: a call without
+  type arguments, a diamond, parentheses, a conditional, a switch expression, a lambda, a method
+  reference; their speculative attribution's classes removed)?"
+  [p a]
+  (case (:tag a)
+    :APPLY (empty? (:typeargs a))
+    :NEWCLASS (diamond-tree? a)
+    (:PARENS :CONDEXPR :SWITCH_EXPRESSION :LAMBDA :REFERENCE) true
+    false))
+
+(defn- stuck-arg?
+  "Is deferred argument `a` (of call `c` choosing generic method `m` at `site`, formal `f`) left by
+  the method check until the variables of its descriptor's parameters are solved (an implicit lambda,
+  an overloaded method reference)?"
+  [p c a f m]
+  (let [a (skip-parens a)]
+    (and (generic-method? m)
+         (case (:tag a)
+           :LAMBDA (not (explicit-lambda? a))
+           :REFERENCE (not= :unoverloaded (try (mref-overload-kind p a) (catch Throwable _ :overloaded)))
+           false)
+         (ty/class-t? f)
+         (let [desc (try (ov/descriptor-type (reg p) f) (catch Throwable _ nil))
+               tvs (java.util.HashSet. ^java.util.Collection (d/method-tparams m))]
+           (and desc (some #(inf/contains-tvar? % tvs) (:params desc)))))))
+
+(declare order-walk)
+
+(defn- call-formals [p c]
+  (try (let [ch (choice p c)
+             m (:sym ch)]
+         (when m
+           [m (:params (d/method-type m)) (= :varity (:phase ch))]))
+       (catch Throwable _ nil)))
+
+(defn- walk-deferred
+  "The deferred arguments of call `c` in the order its method check attributes them: the others first
+  (in order), the stuck ones after."
+  [p c emit as]
+  (let [[m fs var?] (call-formals p c)
+        formal (fn [i] (when fs (let [n (count fs)]
+                                  (if (and var? (>= i (dec n))) (some-> (last fs) :e) (nth fs i nil)))))
+        stuck (filter (fn [[i a]] (and m (stuck-arg? p c a (formal i) m))) as)
+        free (remove (fn [x] (some #(identical? (second %) (second x)) stuck)) as)]
+    (doseq [[_ a] (concat free stuck)] (order-walk p a emit))))
+
+(defn- order-walk
+  "Walk tree `t` in the order Attr attributes it, telling `emit` each class declaration entered (a
+  local class statement, an anonymous class); not entering classes' bodies (their classes are their
+  own enclosing classes')."
+  [p t emit]
+  (cond
+    (vector? t) (doseq [x t] (order-walk p x emit))
+    (not (map? t)) nil
+    :else
+    (case (:tag t)
+      :CLASSDEF (emit t)
+      (:APPLY :NEWCLASS)
+      (let [args (vec (map-indexed vector (:args t)))
+            defer (filter (fn [[_ a]] (deferred-arg? p a)) args)
+            dset (set (map first defer))]
+        (when (= :NEWCLASS (:tag t)) (order-walk p (:encl t) emit))
+        (doseq [[i a] args :when (not (dset i))] (order-walk p a emit))
+        (case (:tag t)
+          :APPLY (let [meth (:meth t)]
+                   (when (= :SELECT (:tag meth))
+                     (let [q (:selected meth)]
+                       (when-not (true? (type-expr? p q)) (order-walk p q emit))))
+                   (walk-deferred p t emit defer))
+          :NEWCLASS (if (:def t)
+                      (if (diamond-tree? t)
+                        (do (walk-deferred p t emit defer) (emit (:def t)))
+                        (do (emit (:def t)) (walk-deferred p t emit defer)))
+                      (walk-deferred p t emit defer))))
+      :LAMBDA (order-walk p (:body t) emit)
+      :REFERENCE (let [q (:expr t)] (when-not (true? (type-expr? p q)) (order-walk p q emit)))
+      ;; a rule case: its labels, guard and statements (its body is the same tree as javac's, a copy of
+      ;; the statement's in the native tree: walked once)
+      :CASE (do (order-walk p (:labels t) emit) (order-walk p (:guard t) emit) (order-walk p (:stats t) emit))
+      (doseq [k (get parse/fields (:tag t))
+              :let [v (get t k)]
+              :when (or (map? v) (vector? v))
+              :when (not= k :mods)]
+        (order-walk p v emit)))))
+
+(defn- class-numbering
+  "Class `c`'s local and anonymous classes (those it encloses directly) numbered as javac's
+  localClassName: per simple name, from 1, in Attr's order: {tree n}."
+  [p c]
+  (d/memo c :local-numbering
+          (fn []
+            (let [out (IdentityHashMap.)
+                  counts (java.util.HashMap.)
+                  emit (fn [cd] (let [n (or (:name cd) "")
+                                      i (inc (long (or (.get counts n) 0)))]
+                                  (.put counts n i)
+                                  (.put out cd i)))]
+              (doseq [d (:defs (:tree c))]
+                (case (:tag d)
+                  :VARDEF (order-walk p (:init d) emit)
+                  :METHODDEF (do (order-walk p (:defaultValue d) emit) (order-walk p (:body d) emit))
+                  :BLOCK (order-walk p (:stats d) emit)
+                  nil))
+              out))))
+
+(defn local-flat
+  "javac's flat name of local (or anonymous) class `c`, or of a class declared in one: its enclosing
+  class's, `$`, its number among its enclosing class's local classes of its simple name, its name."
+  [p c]
+  (cond
+    (not (d/local-class? c)) (:flat c)
+    (:local? c) (let [e (or (:encl c) (d/decline! "a local class's enclosing class"))
+                      cd (:tree c)
+                      n (or (.get ^IdentityHashMap (class-numbering p e) cd) (d/decline! "a local class's number"))]
+                  (str (local-flat p e) "$" n (or (:name cd) "")))
+    :else (str (local-flat p (d/encl-class c)) "$" (:name (:tree c)))))
+
+(defn- arg-checked-target
+  "The type argument `i` of call `outer` (a poly conditional, a switch expression) gets from its method
+  check (MethodResultInfo.check of its target: captured)."
+  [p outer i]
+  (let [a (nth (:args outer) i)]
+    (args-checked! p outer)
+    (or (:checked-target (.get (polys p) a)) (d/decline! "a poly argument's target (deferred attribution)"))))

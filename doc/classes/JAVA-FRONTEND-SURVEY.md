@@ -5074,3 +5074,372 @@ kinds as data), JFS106 (b) (a fact checking the platform classes' members agains
 JFS107 (b) (`deftype Sym` in a namespace of its own, so decls reloads from the checkout), JFS108 (b)
 (signature-polymorphic calls native, in JN9d), JFS109 (a) (JN9d next, JFS107 first; started now, beside
 the REAP work).
+
+## As built: JN9d (2026-10-25)
+
+JN9d (JFS69 (b)'s fourth tier, decided by JFS109 (a)), with JFS102 (b), JFS103 (b), JFS104 (b), JFS106
+(b), JFS107 (b) and JFS108 (b) inside it, on the branch `java-jn9d` from main `9c47edcd`, in about a
+working day and a half (much of it the shared heavy slots' queue and four tool builds, one killed by the
+host's memory). The native attribution provider now answers the **inference tier**: the applicability and
+instantiation of generic methods and constructors as javac's Infer computes them (inference variables and
+their bounds, incorporation, the graph solver, the return type against the target, propagation into an
+enclosing call's inference, thrown variables), the poly arguments as ArgumentAttr and DeferredAttr treat
+them (generic calls, diamonds, conditionals, switch expressions, lambdas, method references; stuck or not,
+speculatively in the overload phase and in CHECK mode after it), explicit type arguments, diamonds
+(`findDiamond`, an anonymous class's), lambdas' and method references' targets and descriptors, method
+references' resolution and kinds, signature polymorphic calls, `var`'s upward projection, local classes'
+numbering, record patterns' inferred types, the anonymous creation's constructor type and members, and,
+beyond the inference tier, the switch facts Attr and Flow give (a pattern switch, an unconditional
+pattern, exhaustiveness, a case that completes normally). The lean on javac is **gone** where the provider
+answers: in jdk26u the answers that took javac's choice went from **53,316 to 35**, and in the other
+corpora from 15,007 to none. `bin/repr-java attr-check --corpus all`: over the samples, the baseline, the
+jdk corpus, javac's sources and jdk26u's 68 modules **13,528,529** facts equal (JN9c: 13,193,153), **none
+different**, no bridge beyond the known list, and every corpus's forms byte for byte as from javac's
+trees. What the provider still declines is **169 facts** (JN9c: 186,358), 161 of them in jdk26u, each
+counted with its reason: a cycle among the inference tier's memoized computations (139), a multi-catch
+parameter whose lub is an intersection (14), an annotation javac took off a record component's modifiers
+(16, 8 of them in the jdk corpus). The provider alone now writes **99.5% of jdk26u's lists** (JN9c:
+95.9%). The JVM ran only the frozen v4 jar, for javac's edge in `bin/javac-vendor convert`; Go only
+TamaGo's go1.27.1, without cgo; the tools' host was the worktree's stage 0 (the seed's).
+
+### JN9d.1 JFS107 (b): the symbols' type, first
+
+`deftype Sym` (the native symbols: a map with a mutable memo) moved from `decls` into a namespace of its
+own, `arbace.repr.java.sym` (`sym`, `sym?`, `sym-map`; Arbace's own, 21 lines); `decls`' `sym` delegates
+to it, and `model` and `overload` name `arbace.repr.java.sym.Sym`. Proved before anything else, on the
+base tool (main's sources with the move, key `e6c4416f...`): a change to `decls` (JFS103 (b)'s
+`members-all` and `*anon-ctor*`) evaluated from the checkout on that tool, `bin/repr-java attr-check
+--corpus samples` all equal (2,448 / 0 / 76, as JN9c), where before the move a reloaded `decls` made the
+compiled model's `instance?` checks fail. Every later change to `decls` in JN9d was tried on a built tool
+without rebuilding it.
+
+### JN9d.2 What was built
+
+| file | lines | what |
+|---|---:|---|
+| `arbace/repr/java/infer.ae` | 1,835 (new) | `arbace.repr.java.infer`, the inference tier's engine: Infer's inference variables (UndetVar: bounds by kind, newest first, the incorporation actions queue), the incorporation engine (CheckBounds, EqCheckLegacy, CheckInst, SubstBounds, CheckUpperBounds, PropagateBounds, the incorporation cache) and the relations it needs over types with inference variables (Types' `isSubtype`, `isSuperType`, `isSameType`, `containsType`, `isSubtypeUnchecked` with its warner, `isConvertible`, `asSuper`, `supertype`, `interfaces`, `closure`, `union`, `intersect`, `merge`, `closureMin`, `lub`, `glb`, `upward`, `captures`), the graph solver (Tarjan's components, the leaf and best-leaf strategies, the inference steps EQ, LOWER, THROWS, UPPER, CAPTURED in InferenceStep's order), `instantiateAsUninferredVars`, InferenceContext (`asUndetVar`, `asInstType`, `save`, `rollback`, `dupTo`, `min` with its ReachabilityVisitor, free-type listeners), `instantiateMethod` (`newInstances`, `argumentsAcceptable` through the deferred types' checks, PartiallyInferredMethodType's `check`, `generateReturnConstraints`, `needsEagerInstantiation`, `generateReferenceToTargetConstraint`, propagation), the method checks' compatibility (strict, loose, assignment, a void expression lambda's, most specific's, a method reference's), `instantiatePatternType`, the stuck graph of DeferredAttr's `pickDeferredNode`, Attr's `checkExConstraints`; its limits (more than 64 bounds on a variable, 2,000 incorporation rounds) decline the inference as beyond the port |
+| `arbace/repr/java/expr.ae` | 2,147 (was 919) | the inference tier's attribution: ArgumentAttr's argument types (deferred: a call without explicit type arguments, a diamond, a conditional, a switch expression, a lambda, a method reference), the standalone and poly kinds, `checkMethod`'s instantiation against the call's target (Attr's result infos: an argument's by its call's inference, recorded when its context's variables are instantiated; an explicitly typed call standalone, its poly arguments checked after the choice), the unchecked call's erasure; lambdas (explicit or implicit, `getTargetInfo`, `instantiateFunctionalInterface`, `removeWildcards`, the descriptor, the returns against its return type, a void descriptor's expression statement, the thrown types' constraints with the body's thrown types where they need no definite assignment), DeferredAttr's stuck policies and structural checks, method references (the qualifier's type, unbound and bound lookups, the overload kind, the referenced method instantiated against the descriptor, the unbound receiver's constraint), diamonds' sites (visitTypeApply's enclosing type) and anonymous diamonds' supertypes, signature polymorphic instances (JFS108 (b)), record patterns' component types and inferred deconstructors, `var`'s upward projection and for-each element, multi-catch parameters' lub, local classes' flat names (Check.localClassName in Attr's order of entering them, poly arguments' anonymous classes after the call), the anonymous creation's constructor type (JFS104 (b)), the switch facts (`pattern-switch?`, `unconditional-pattern?`, `switch-exhaustive?`, `case-completes?`); a cycle among its memoized computations declined |
+| `arbace/repr/java/overload.ae` | 1,221 (was 794) | generic candidates' applicability through Infer (JFS102 (b)), explicit type arguments with their bounds, the deferred arguments' checks, most specific with generic and deferred candidates; `resolveDiamond` and `findDiamond`'s constructors (per site); method references (`resolveMemberReference`'s lookups, the static kinds, the basic and structural choosers, the reference kinds, the overload kind's arity check); functional interfaces (`findDescriptorSymbol`, `findDescriptorType` with an intersection's marker interfaces, `interfaceCandidates`, `prune`, `membersClosure`); an intersection site's lookup (a type variable with several bounds); an enum's anonymous constant's constructor PRIVATE, an interface's anonymous class's without ANONCONSTR |
+| `arbace/repr/java/attr.ae` | 704 (was 649) | the inference facts native (`method-type`, `constructor-type`, `varargs-element` of generic calls, diamonds and anonymous creations; `fn-target`, `ref-kind`, a reference's symbol; the poly result), the names of a diamond's and a record pattern's type trees, the switch facts (`pattern-switch?`, `unconditional-pattern?`, `exhaustive?`, `completes-normally?`), a dropped annotation's decline with its reason |
+| `arbace/repr/java/nattr.ae` | 694 (was 632) | the provider's new caches (its weak reference in the unit's memo), the anonymous class's constructor in its members (JFS103 (b)), `check-platform-members!` (JFS106 (b): `:enter/platform-members`), a type variable of another file's method named as javac names it, a union as its alternatives |
+| `arbace/repr/java/decls.ae` | 1,814 (was 1,764) | JFS107 (b)'s move; `members-all` with the anonymous class's constructor (JFS103 (b)); `anon-creation-type`'s hook to the inference tier; `type-apply-outer` (visitTypeApply's enclosing type); ClassReader's `enterMember` (synthetic members skipped) and its @Deprecated flags; a class file's local or anonymous class entered by its flat name as ClassReader enters one a signature names |
+| `arbace/repr/java/scope.ae` | 660 (was 631) | the targets the inference tier reads: a creation's arguments, a lambda's body and returns, a cast of a lambda or method reference, a pattern's (`:pattern-of`), a binding pattern's var; a `var`'s initializer without a target; a name or qualifier left to a later lookup (through an anonymous class of a diamond) |
+| `arbace/repr/java/model.ae` | 909 (was 872) | the native readings: a functional descriptor, a signature polymorphic instance, a local class's flat and binary name (checked once per class, `:names/local-class`), a multi-catch parameter's type, the inner creation's method type without its outer instance, an anonymous class of a diamond's supertypes |
+| `arbace/repr/java/sym.ae` | 21 (new) | JFS107 (b) |
+| `arbace/repr/java/types.ae`, `classfile.ae`, `split.ae`, `java.ae` | 387, 304, 419, 487 | a memberType's substitution kept for its type parameters' bounds, capture with the inference tier's glb; a class file's members' annotations; the new facts in the catalogue; the platform members' check after a unit's conversion |
+
+### JN9d.3 The facts
+
+| fact | tier | the native answer | data compared with javac's |
+|---|---|---|---|
+| `infer/method-type` (a generic method's call's meth) | inference | the instantiated method type (Attr.checkMethod over Infer.instantiateMethod against the call's target, erased by an unchecked call) | the method type as data |
+| `infer/constructor-type` (a diamond, a generic constructor, an anonymous creation) | inference | the constructor's instantiated type (an anonymous creation's: its constructor's at the anonymous class's type, JFS104 (b)) | the same |
+| `infer/varargs-element` | inference | a generic call's variable arity element | the element type |
+| `infer/target` (LAMBDA, REFERENCE) | inference | the functional interface type javac sets on the lambda or reference | the type |
+| `infer/poly-result` | inference | a poly expression's type in its argument position | the type |
+| `names/local-class` | inference | a local or anonymous class's flat name, numbered as Attr enters them | the name |
+| `overload/method-ref`, `overload/ref-kind` | overload | a method reference's method and kind | the method as data, the kind's name |
+| `enter/platform-members` (once per platform class the run reads) | declarations | the class file's members by name, flags and erased signature (JFS106 (b)) | javac's ClassSymbol's members |
+| `types/pattern-switch` | types | Attr.handleSwitch's patternSwitch | the boolean |
+| `flow/unconditional-pattern`, `flow/exhaustive`, `flow/case-completes` | flow | Attr's hasUnconditionalPattern; Flow's isExhaustive (for compiling code: an unconditional pattern or a switch expected to be exhaustive); the case's liveness (the walk's AliveAnalyzer) | the booleans |
+
+The facts of JN9b and JN9c whose answer needed a choice javac made by inference (`overload/method`,
+`overload/arity`, `types/expr` of a generic call, `scope/lambda-param`, and every fact over an expression
+with such a call in it) are now native where they leaned. What javac does that the corpora showed and the
+provider follows, each found by a fact that differed (or failed), then fixed:
+
+- ArgumentAttr's kinds are syntactic: every method call without explicit type arguments in an argument
+  position is a deferred `ResolvedMethodType` (generic or not), a lambda without parameters is explicit,
+  and an explicitly typed generic call is standalone (its poly arguments checked after the choice, at the
+  explicit instantiation, their unchecked conversions erasing the call's result).
+- An argument the target cannot type (a lambda or method reference against a non-functional formal, a
+  method reference whose resolution fails) makes the candidate inapplicable: an error of the check, not a
+  decline.
+- A void descriptor accepts an expression lambda only when its body is an expression statement
+  (TreeInfo.isExpressionStatement).
+- A `var`'s initializer has no target (Type.noType), so a generic call there is inferred standalone.
+- Unchecked conversions arise inside incorporation (the warner passed through the bounds' checks), and an
+  unchecked call's return and thrown types are erased.
+- A method's type parameters' bounds are substituted at the site (memberType substitutes a ForAll's bounds
+  too); a capture of a type mentioning inference variables takes glb through Types' subtyping, which adds
+  bounds (`Class<? extends U>` captured against `Class<? extends ClassLoader>`).
+- The inference steps of the last graph phase are an EnumSet, so THROWS comes before UPPER: a thrown
+  variable without other bounds is RuntimeException, once checkExConstraints has marked it (a lambda's
+  body's checked exceptions, a referenced method's thrown types).
+- A method reference's resolution is rolled back (`save`/`rollback`) and the unbound receiver's constraint
+  regenerated after it (Attr.visitReference), which is where `comparing(P::name)` gets `T <: P`.
+- A diamond's class tree keeps the inference variables when its constructor type is propagated into the
+  enclosing call (Attr.visitNewClass sets it before they are instantiated); a diamond's site has the
+  enclosing type visitTypeApply recovers (`Hashtable<K,V>.Enumerator<T>`), and findDiamond's synthesized
+  constructors are per site.
+- A poly conditional or switch argument's type is its target as MethodResultInfo.check gives it, captured;
+  a rule case's expression is the case's body (its synthetic yield's value is the same tree in javac, a
+  copy in the native tree).
+- A qualified creation's enclosing type is the qualifier's type's asOuterSuper; an anonymous class of a
+  diamond takes its supertype from the inference of its creation, so its members and the names through it
+  wait for it.
+- An enum constant's body's constructor is PRIVATE (Check.checkFlags), and an anonymous class implementing
+  an interface has BasicConstructorHelper's constructor, without ANONCONSTR.
+- ClassReader skips synthetic members when it enters them and sets the deprecation flags from
+  `@Deprecated`; a local or anonymous class a class file's signature names is entered by its flat name,
+  its owner the package.
+- A type variable bounded by several types is looked up as its intersection's synthetic class (no members,
+  its interfaces the bounds after the class).
+- The qualifiers of a type qualifier name types or packages too (`java.lang.reflect.Array.newInstance`).
+- A type variable of a method of another file of the unit is named as a class file's method's (`[:m owner
+  name]`), as javac's side names it.
+- A method's type variable in its throws clause is THROWS from its declaration (MemberEnter, ClassReader's
+  signature: Infer.fromTypeVarFun), so `orElseThrow(() -> new X())` and `<E extends Exception> ... throws
+  E` called without constraints infer RuntimeException.
+- A block lambda is void-compatible only without `return e;` and value-compatible only when it cannot
+  complete normally (Attr.visitReturn, checkLambdaCompatible), which decides `submit(Runnable)` against
+  `submit(Callable)`; and unrelated functional interfaces are compared by their descriptors in most
+  specific (MostSpecificCheckContext.functionalInterfaceMostSpecific and its return checker), not by
+  subtyping.
+- A wildcard's upper bound is its formal's declared bound when it is `?` or `? super` (WildcardType.bound),
+  so `Attribute<? extends Attribute<?>>` and `Attribute<?>` are the same type argument
+  (containsTypeEquivalent), in both tiers.
+- A class file's superclass and interfaces without a signature are erased with their enclosing type (an
+  inner class's supertype keeps its outer).
+- A signature polymorphic call's argument that is a call takes MethodResultInfo.check's upper bound of a
+  captured variable; a lambda or method reference argument is not converted, so it does not make a
+  non-generic call unchecked (its returns' conversions aside).
+- A poly conditional's captured target reaches it through parentheses and enclosing arms; a lambda's
+  recorded target is its instantiated functional interface, not its argument's formal.
+- A method reference lookup's error is ignorable when every candidate failed by arity
+  (ReferenceLookupResult.canIgnore).
+
+### JN9d.4 The check and the numbers
+
+On the final tool (key `bd463814dc88...`), the host shared with other work, `bin/repr-java attr-check
+--corpus all` (with `GOGC=100`: the first final tool's run of the jdk corpus, at Arbace's default of 200, where
+a read of java.base peaks near 40 GB, was killed by the host's memory with the other heavy slot busy; JFS116),
+against JN9c.3's run:
+
+| corpus | forms files equal | facts equal / different / declined (leaned on javac) | JN9c | wall (JN9c) |
+|---|---:|---:|---:|---:|
+| `samples` | 17 of 17 | 2,634 / 0 / 0 (0) | 2,448 / 0 / 76 (11) | 12 s (6 s) |
+| `baseline` | 189 of 189 | 317,731 / 0 / 0 (0) | 315,089 / 0 / 360 (221) | 104 s (77 s) |
+| `jdk` | 911 of 911 | 1,123,925 / 0 / 8 (0) | 1,096,768 / 0 / 16,598 (6,305) | 336 s (218 s) |
+| `javac` | 1,828 of 1,828 | 1,065,850 / 0 / 0 (0) | 1,027,107 / 0 / 23,923 (8,470) | 267 s (232 s) |
+| `jdk26u` | 13,788 of 13,788 | 11,018,389 / 0 / 161 (35) | 10,751,741 / 0 / 145,401 (53,316) | 2,009 s (1,839 s) |
+
+The whole `--corpus all` took 2,732 s against JN9c's 2,378 s (15% more; jdk26u 9% more, the jdk corpus
+54%: its generic code is the inference tier's), its peak resident memory 29.1 GB. The facts counted grew
+because the inference tier's are answered (before, `infer/*`, `names/local-class`, `overload/method-ref`,
+`overload/ref-kind`, `enter/platform-members` and the switch facts were javac's, counted only in the
+split). By tier in jdk26u (equal / different / declined, leaned):
+
+| tier | JN9d | JN9c |
+|---|---:|---:|
+| syntax | 536,151 / 0 / 0 | (not in the table) |
+| scope | 2,736,358 / 0 / 5 | 2,726,388 / 0 / 9,974 (360) |
+| declarations | 2,295,649 / 0 / 8 | (not in the table) |
+| flow | 33,946 / 0 / 0 | (javac's) |
+| members | 556,807 / 0 / 4 | 556,242 / 0 / 569 (18) |
+| types | 2,738,889 / 0 / 67 (3) | 2,680,134 / 0 / 53,982 (3,347) |
+| overload | 2,078,502 / 0 / 34 (32) | 2,001,666 / 0 / 68,201 (49,591) |
+| inference | 42,087 / 0 / 43 | (javac's) |
+| total | 11,018,389 / 0 / 161 (35) | 10,751,741 / 0 / 145,401 (53,316) |
+
+By fact, jdk26u's inference tier: `infer/method-type` 22,150 / 29 declined, `infer/target` 8,878 / 14,
+`infer/constructor-type` 7,679, `names/local-class` 2,416, `infer/poly-result` 786,
+`infer/varargs-element` 178; `overload/method-ref` and `overload/ref-kind` 3,012 each;
+`enter/platform-members` 31,822 (the classes the runs read, JFS106 (b)); `types/pattern-switch` 4,813;
+`flow/case-completes` 32,674, `flow/unconditional-pattern` 1,163, `flow/exhaustive` 109.
+
+| | samples | baseline | jdk | javac | jdk26u |
+|---|---:|---:|---:|---:|---:|
+| lists the provider wrote alone | 96.5% (JN9c 87.5%) | 99.9% (99.1%) | 99.5% (95.9%) | 99.2% (93.0%) | 99.5% (2,247,464 of 2,258,047; JN9c 95.9%) |
+| model reads native / javac / bridge | 14,728 / 82 / 15 | 1,976,227 / 3,835 / 183 | 6,558,815 / 23,868 / 880 | 6,762,918 / 12,099 / 828 | 65,771,160 / 183,165 / 13,053 |
+| native share of the model's reads | 99.3% (92.1%) | 99.8% (99.7%) | 99.6% (97.3%) | 99.8% (96.4%) | 99.7% (97.4%) |
+
+The bridges are within the known list (attr-check fails otherwise): in jdk26u 13,053 (JN9c 48,519), of
+them 12,730 the package members (`:model/package-members`, one per file), 312 a constant's value, 11 a
+type; the local classes' names (JFS91's bridge) and an anonymous class of a diamond's supertypes are
+native now. What the lists the provider does not write alone still ask is javac's answer of a declined
+fact (above) or a javac-only read of the model (its javac column).
+
+The declines in all the corpora, by reason (`attr.md`'s table): a cycle among the inference tier's
+memoized computations, `(:checked)` or `(:args-checked)` (139 facts in jdk26u: a computation re-entered
+more than three times, where javac's order of attribution reaches the same answer without the re-entry;
+JFS113), a multi-catch parameter whose lub is an intersection (14), an annotation javac moved off a record
+component's modifiers to its field or accessor (8 in the jdk corpus, 8 in jdk26u: javac's tree no longer
+has it).
+
+### JN9d.5 The shipped program's change
+
+None in code: `arbace/repr/java` is not in the shipped program (j2g's `embed.ae` leaves it out; javac's
+tool embeds it, now with `infer` and `sym`: 230,387,872 bytes against JN9c's 226,652,320), and `go/`,
+`overlay/`, `jdk/forms`, `jdk/data` and `jdk/edge.edn` are unchanged. The reader hash
+(`repr_java_reader_hash`: `arbace/repr/java.ae`, `attr` and `model` changed) moved from `a2daae6b...` to
+`4b477c57...`, written by the updates on the final tool: `bin/clojure-tests --java-fixtures update`,
+`bin/jrt-convert update`, `bin/javac-vendor convert` (its edge on the frozen v4 jar): every forms and data
+file byte for byte as committed, only `:repr-java` and `:host` changed in `jdk/provenance.edn`,
+`jdk/javac/provenance.edn` and `test/java-fixtures/provenance.edn`. One more file came out different and
+is not committed: `bin/javac-vendor convert` writes `jdk/javac/edge.edn` without `java/lang/Module`, which
+REAP4 (`6453bfbc`) recorded into `jdk/edge.edn` without converting javac's edge again (javac's edge is
+what its world asks beyond `jdk/edge.edn`); that is main's, and committing it here would change the tool's
+key (`jdk/javac/edge.edn` is among its inputs) after the provenance named it (JFS119's (a) takes it with
+the next tool build; `.tmp/jn9d/final/javac-edge.edn` has the converted file). No re-seed. The tools were
+built for amd64 only (`ARBACE_GO_ARCHES=amd64`).
+
+### JN9d.6 The checks
+
+All on the final tool, one after another (`.tmp/jn9d/final/final.sh`), the host shared:
+
+- `bin/repr-java attr-check --corpus all`: JN9d.4's table; every corpus's forms equal and every fact
+  equal, no bridge beyond the known (2,732 s; on the first final tool, key `26bb2629...`, it found
+  jdk26u's 53 differing facts and 2 differing forms files that the commit `f9c68130` fixed, and its jdk
+  corpus was killed by the host's memory)
+- `bin/repr-java front-check`: every default corpus equal (403 s); `bin/repr-java parse-check`: every
+  corpus's trees as javac's (274 s)
+- `bin/repr-java check`: the baseline, the samples and the module as expected (30 s)
+- `bin/repr-java check --jdk`: 68 modules converted, 0 with failures, the 13,566 forms files as
+  `test/repr/java/expected/jdk26u.sha256` (658 s)
+- `bin/repr-java roundtrip --corpus baseline,samples,jdk --text`: as the references (the jdk corpus's 39
+  known `:anew` rejections included; 691 s)
+- the updates of JN9d.5: only the three provenance files' `:repr-java` and `:host` changed (and javac's
+  edge, main's, not committed)
+- `bin/gate` (essential): on the branch at `4b317ac2` (the code and the provenance as final; this section's
+  commit changes only `doc/`), passes in 31m35s (go-build 17m31s afresh, go-smoke, suite-go with no
+  regression, oracle-go 52 known mismatches as recorded, diffcheck 12,789 of 12,801 cases agree with the 12
+  known, goi-check 801 of 801, goi-aot-essential 248 of 248, java-check 428 of 428, java-compiled 420 of 420,
+  suite-aot-essential, generated, j2g-edge verify: `jdk/edge.edn` the JVM's answer, reap 12 of 12 cells)
+- not run: `bin/gate --full` (the user's rule), `bin/repr-java check --suite`, `bin/javac-vendor verify`
+  and `classes` (the converted forms and javac's world are unchanged: the updates show the forms byte for
+  byte)
+
+### JN9d.7 What it means
+
+JN9d took about a working day and a half against JN9c.7's 3-5 days. The port followed Infer's code closely
+(the incorporation and the solver are its structure); most of the time went to what javac does around it,
+in Attr, ArgumentAttr, DeferredAttr and Resolve, that a reading had missed: JN9d.3's list, each item a
+fact that differed. Two things helped: JFS107 (b), so that every change to `decls` was tried on a built
+tool, and the trace (`REPR_JAVA_INFER_TRACE`), which shows the bounds, the errors and the cycles. Two
+cost: the evaluated namespaces run about twice as slow as compiled ones, so a corpus run on a tool built
+before the change takes longer than one on the final tool; and a forward reference that the tool's
+compiled copy hid only showed in the next tool build (a fresh load, `.tmp/jn9d/loadfresh.sh`, finds them
+first).
+
+The provider now answers every fact the corpora ask but 169, javac's choices are taken nowhere but 35
+calls of jdk26u (their arguments' facts declined), and it writes 99.5% of jdk26u's lists alone. What javac
+still does in a native read is parse and attribute every file beside the provider, answer the declines,
+and give the model the reads of JN9d.4's javac and bridge columns. A read without javac (JFS111) is the
+step left for the provider to be the converter's front end; its prerequisites are JFS110's declines and
+JFS112's reads, both small.
+
+### JN9d.8 Proposals
+
+- **JFS110 The remaining declines.**
+  - Options: (a) as built: each counted with its reason in `attr.md` (JN9d.4's table: 139 cycles among the
+    inference tier's computations, 14 multi-catch parameters whose lub is an intersection, 16 annotations
+    javac took off a record component's modifiers), javac's answer taken for it; (b) port what each needs:
+    the cycles first (javac's order of attribution, DeferredAttr's nodes, in place of the memoized
+    computations' re-entry), an intersection lub for a multi-catch parameter, TypeEnter's propagation of a
+    record component's annotations to its field, accessor and parameter by their targets (the dropped
+    annotations); then what no corpus asks yet but a read without javac would meet: a non-public member at
+    an intersection site, a lambda's thrown types through a try with resources, a rethrown catch parameter
+    or a finally block that cannot complete (Flow's analysis); (c) leave them: they are a few hundred in
+    jdk26u's millions.
+  - *Recommended: (b), but only with JFS111*: none of them matters while javac runs beside the provider; a
+    javac-free read needs each one, and they are small ports one by one.
+- **JFS111 A read without javac.**
+  - Options: (a) as built: the native provider runs beside javac on Arbace, every fact it answers checked
+    against javac's (`--front native --attr native` still parses and attributes every file with javac, and
+    takes its answer where the provider declines); (b) a read mode that does not run javac at all (`read
+    --front native --attr native --no-javac`): the native parser's trees, the provider's answers alone, a
+    file whose conversion meets a decline converted again with javac (counted), so the forms stay javac's
+    where the provider cannot answer; (c) the same without the fallback, a decline an error.
+  - *Recommended: (b)*: it is what JFS69 (b) aimed at, the corpora show the provider answers nearly
+    everything, and the fallback keeps every corpus's forms byte for byte while the declines of JFS110 go.
+    Its check: the forms of `--no-javac` against javac's, file for file, and the time without javac.
+- **JFS112 The model's last javac reads.**
+  - Options: (a) as built: 99.7% (65,771,160) of jdk26u's model reads are native; the rest (183,165) read
+    javac's objects that reach the model through facts javac still answers (the declines) and javac-only
+    paths, and 13,053 bridge (the package members, `:model/package-members`, 12,730; a constant's value,
+    312); (b) trace each read kind's javac objects to their source and nativize them, the package members
+    first.
+  - *Recommended: (b), with JFS111*: a read without javac cannot read javac's objects; until then they
+    cost nothing.
+- **JFS113 The inference port's limits.**
+  - Options: (a) as built: an inference with a variable of more than 64 bounds or more than 2,000
+    incorporation rounds, and a computation re-entered more than three times (a cycle among the memoized
+    computations), is declined (the cycles of JN9d.4, 139 facts in jdk26u; the size limits fired in none);
+    (b) remove the limits (javac has none: a runaway is the port's bug, and a decline hides it); (c) keep
+    them and make attr-check fail when one fires.
+  - *Recommended: (c)*: the size limits stop a bug from exhausting memory (the first jdk run without them
+    did: the deferred nodes' loop of a bug), and a check that fails on them still finds the bug; the cycle
+    limit's declines are JFS110's to remove.
+- **JFS114 Flow's exhaustiveness.**
+  - Options: (a) as built: `flow/exhaustive` native for compiling code (an unconditional pattern, or a
+    switch expected to be exhaustive, which javac then requires to be); (b) Flow's exhaustiveness proper
+    (sealed hierarchies, record patterns' components, enum constants), so that invalid code gets javac's
+    answer too.
+  - *Recommended: (a)* until the converter must read code javac rejects (JFS105 (a)'s stance); (b) is the
+    diagnostics' work.
+- **JFS115 The time.**
+  - Options: (a) as built: `attr-check --corpus all` 2,732 s, 15% more than JN9c's (the jdk corpus 54%
+    more, jdk26u 9%), the inference tier's cost while javac's attribution still runs beside it; (b)
+    profile the inference tier on jdk26u (the evaluator-free tool: `ARBACE_CPUPROFILE`) and cut what it
+    repeats (the deferred arguments' checks in each phase, the incorporation of large contexts).
+  - *Recommended: (b), after JFS111*: without javac, the provider's time is the read's time, and the
+    profile is then worth reading.
+- **JFS116 The memory.**
+  - Options: (a) as built: a read of java.base with 4 threads peaks at about 38-40 GB, with or without the
+    inference tier (the base tool's run: 38.6 GB, JN9d's code evaluated on it 40.3 GB; `--corpus all` with
+    `GOGC=100`: 29.1 GB): javac's attribution of the module and the native trees of 838 files held at
+    once; (b) measure where it goes (`ARBACE_MEMPROFILE`) and release each unit's answers after its
+    conversion.
+  - *Recommended: (b)*: the host has 62 GB and two heavy slots; a read that takes most of it blocks the
+    other slot.
+- **JFS117 The inference trace.**
+  - Options: (a) as built: `REPR_JAVA_INFER_TRACE` prints the inference's steps, the cycles' stacks and a
+    failed fact's stack to stderr (a debugging aid, off by default, no cost when off); (b) remove it.
+  - *Recommended: (a)*: it found most of JN9d.3's behaviours, and it costs one test of a constant.
+- **JFS118 Documenting the provider.**
+  - Options: (a) as built: the provider's tiers are documented in this survey's As built sections and the
+    namespaces' docstrings; (b) a reference, `doc/classes/NATIVE-ATTR.md`: the tiers, each fact with its
+    javac source, the declines' reasons, how attr-check judges them.
+  - *Recommended: (b)*: four tiers on, the survey's sections are history, and a reference is what the next
+    tier (JFS111) needs to start from.
+- **JFS119 Next.**
+  - Options: (a) JFS111 (b), the read without javac, with JFS110 (b) and JFS112 (b) inside it (and javac's
+    edge converted again with its tool build, JN9d.5), estimated 1-2 days; (b) stop at JN9d: javac stays
+    as the provider's check and its fallback.
+  - *Recommended: (a)*, if a javac-free converter is still the aim (JFS69 (b)): the provider now answers
+    every fact the corpora ask but a few hundred, and the read without javac is the step that makes it the
+    converter's front end.
+
+### JN9d.9 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`):
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/{Infer,InferenceContext,DeferredAttr,ArgumentAttr,Attr,Resolve,Check,TypeEnter,Flow}.java`,
+  `code/{Type,Types,Symbol}.java`, `jvm/ClassReader.java`, `tree/TreeInfo.java`, `util/GraphUtils.java`.
+- The worktree's `.tmp/jn9d/` (scratch, not tracked): `build1.log.keep`, `build2.log`, `build3.log`,
+  `build4.log` (the base tool's build, an intermediate tool's, the first final tool's and the final
+  tool's); `p107-samples.log`, `p107-samples-attr.md`, `decls107.patch` (JFS107 (b)'s proof);
+  `r9base-attr/` (the base tool's jdk corpus: `attr.md`, `split.md`, `jdk.time` with its peak memory);
+  `r8-attr/` (the first jdk corpus run that converted, JN9d's code evaluated on the base tool, its
+  differences); `r10-attr/` (the intermediate tool's default corpora); `final-b3/` (the first final tool's
+  checks, with jdk26u's differences); `final/` (the final tool's checks: `final.sh`, their logs,
+  `summary.txt`, `attr.md`, `attr.edn`, `split.md`, `javac-edge.edn`); `q*/`, `j*/`, `m*/` (the small
+  reproductions, the java.base batches and the single files of jdk26u's modules: `q1.sh`, `qjdk.sh`,
+  `qmod.sh`); `facts.ae`, `why.ae` (a run's differences and declines by reason); `snaprun.sh`, `two.sh`,
+  `jdk.sh`, `build.sh`, `load.sh`, `loadfresh.sh` (the snapshot runs, the load checks); `gate.log` (the
+  essential gate).
+
+### JN9d.10 After merging main (JC5, REAP7b, JC6)
+
+main was merged twice (`0234d262`, `3aacf8d0`); the tool rebuilt from the merged checkout (key `0cb23c6e...`,
+231,776,416 bytes). The merge showed one more native fact differing in the samples (PrintSyntax.java,
+REAP5b's: anonymous classes in switch rule arms numbered twice, the rule's body and its yield's value being
+copies in the native tree), fixed by `1afd9b5f`. On the merged tool `bin/repr-java attr-check --corpus all`
+(GOGC=100, 2,283 s, 29.4 GB peak): every corpus's forms byte for byte and every fact equal, **14,416,929
+facts** (JC5's converter asks more), 171 declined (140 cycles, 14 multi-catch intersection lubs, 16 dropped
+record-component annotations, 1 a package's type in the samples), 35 leaned (jdk26u); lists written alone
+99.5% of jdk26u's; model reads 99.7% native in jdk26u. `front-check`, `parse-check`, `check`, `check --jdk`
+(the hashes as main's), `roundtrip --corpus baseline,samples,jdk --text` pass; the updates (fixtures,
+`jrt-convert`, `javac-vendor convert`, `java-check --forms update`) changed only the four provenance files'
+`:repr-java` (`3d54bdd5...`) and `:host`, javac's edge now main's (its `java/lang/Module` gone with JC5); the
+essential gate passed at `0ce59afd` (25m44s).

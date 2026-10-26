@@ -97,7 +97,8 @@
 ;;; Liveness (Flow.AliveAnalyzer, JLS 14.22), for the bindings an if or a loop introduces
 
 (defn- const-true? [env c]
-  (or (nil? c) (= [:boolean 1] (d/const-value env c))))
+  ;; (no `env`: the condition's own, the walk's answer)
+  (or (nil? c) (= [:boolean 1] (d/const-value (or env (:env (.get *ans* c)) (d/decline! "a condition's environment")) c))))
 
 (defn- breaks-to?
   "Flow.breaksToTree: is there a break (or a yield, for a switch expression) in `body` whose target
@@ -167,9 +168,13 @@
       (do (put! t :nonlocal true) (put! t :this-type [(keyword n) (:class ctx)]))
       ;; a name this tier cannot resolve (a lookup through a class whose supertype is the types
       ;; tier's) is left without an answer: javac's
-      (when-let [[k x] (try [(d/find-var env n)] (catch Throwable _ nil))]
+      (if-let [[k x] (try [(d/find-var env n)] (catch Throwable _ nil))]
         (let [[k x] k]
-          (if (= k :local) (put! t :local x) (put! t :nonlocal true)))))))
+          (if (= k :local) (put! t :local x) (put! t :nonlocal true)))
+        ;; asked again later (a class whose supertype the inference tier gives: an anonymous class of a
+        ;; diamond, JN9d)
+        (put! t :retry-lookup (delay (try (let [[k x] (d/find-var env n)] (if (= k :local) [:local x] [:nonlocal true]))
+                                          (catch Throwable _ nil))))))))
 
 (defn- w-type-names
   "The names inside type tree `t`: not locals; its annotations."
@@ -256,7 +261,11 @@
                   (= n "class") (do (w-type env q) (put! t :class-literal (delay (d/type-of-tree env q))))
                   (#{"this" "super"} n) (do (w-type env q) (put! t :this-type [(keyword n) (:class ctx) (delay (:c (d/resolve-qualified env q #{:typ})))]))
                   :else (let [tn? (try (type-name? env q) (catch Throwable _ ::unknown))]
-                          (when-not (= tn? ::unknown) (put! q :type-expr? (delay tn?)))
+                          (if (= tn? ::unknown)
+                            ;; asked again later (as :retry-lookup)
+                            (put! q :type-expr? (delay (try (type-name? env q)
+                                                            (catch Throwable _ (d/decline! "a qualifier through an anonymous class of a diamond")))))
+                            (put! q :type-expr? (delay tn?)))
                           (role! q :qual)
                           (put! q :env env)
                           (if (true? tn?)
@@ -288,7 +297,8 @@
                     (if (:encl t)
                       (w-type-names env (:clazz t))
                       (w-type env (:clazz t)))
-                    (doseq [a (:args t)] (pt! a [:unknown]))
+                    (put! (:clazz t) :diamond-of t)
+                    (doseq [[i a] (map-indexed vector (:args t))] (pt! a [:arg t i]))
                     (w-args env ctx (:args t))
                     (w-class-body-new env ctx t)
                     none)
@@ -300,9 +310,18 @@
                     (w-annotations env (:annotations t))
                     (run! #(w-annotations env %) (:dimAnnotations t))
                     none)
-      :TYPECAST (do (w-type env (:clazz t)) (w-expr env ctx (:expr t)) none)
+      :TYPECAST (do (w-type env (:clazz t))
+                    ;; Attr.visitTypeCast: a lambda or method reference (through parentheses) is a poly
+                    ;; expression whose target is the cast's type
+                    (let [x (loop [x (:expr t)] (if (= :PARENS (:tag x)) (recur (:expr x)) x))]
+                      (when (#{:LAMBDA :REFERENCE} (:tag x))
+                        (pt! (:expr t) [:cast t]))
+                      ;; a signature polymorphic call's result: the cast's (JFS108 (b))
+                      (put! x :cast-of t))
+                    (w-expr env ctx (:expr t)) none)
       :TYPETEST (do (w-expr env ctx (:expr t))
                     (let [p (:pattern t)]
+                      (put! p :pattern-of [:expr (:expr t)])
                       (if (#{:BINDINGPATTERN :RECORDPATTERN :ANYPATTERN} (:tag p))
                         {:t (w-pattern env ctx p) :f []}
                         (do (w-type env p) none))))
@@ -321,8 +340,9 @@
             {:t [] :f (into (:f a) (:f b))})
       :NOT (let [b (w-expr env ctx (:arg t))] {:t (:f b) :f (:t b)})
       :LAMBDA (let [ps (:params t)
-                    es (vec (for [p ps]
+                    es (vec (for [[i p] (map-indexed vector ps)]
                               (let [e (local-entry p :lambda-param env)]
+                                (put! p :lambda-of [t i])
                                 (w-annotations env (get-in p [:mods :annotations]))
                                 (when (and (:vartype p) (not= :VAR (:declKind p)))
                                   (w-type env (:vartype p)))
@@ -330,9 +350,10 @@
                                 (put! p :mods-flags (long (get-in p [:mods :flags])))
                                 e)))
                     env' (bind-all env es)
-                    ctx' (assoc ctx :jumps () :method nil)
+                    ctx' (assoc ctx :jumps () :method nil :lambda t)
                     b (:body t)
-                    _ (pt! b [:unknown])]
+                    ;; an expression body's target: the descriptor's return type (JN9d)
+                    _ (pt! b [:lambda-return t])]
                 (if (= :BLOCK (:tag b)) (w-stmt env' ctx' b) (w-expr env' ctx' b))
                 none)
       :REFERENCE (let [q (:expr t)]
@@ -363,13 +384,16 @@
   [env ctx p]
   (case (:tag p)
     :BINDINGPATTERN (let [v (:var p)
-                          e (local-entry v :binding env)]
+                          e (local-entry v :binding env)
+                          _ (put! v :binding-pattern p)]
                       (w-annotations env (get-in v [:mods :annotations]))
                       (when (and (:vartype v) (not= :VAR (:declKind v))) (w-type env (:vartype v)))
                       (put! v :local e)
                       (put! v :mods-flags (long (get-in v [:mods :flags])))
                       (if (= "_" (:name v)) [] [e]))
     :RECORDPATTERN (do (w-type env (:deconstructor p))
+                       ;; each nested pattern's target: this record's component (JN9d)
+                       (doseq [[i n] (map-indexed vector (:nested p))] (put! n :pattern-of [p i]))
                        (put! p :record-type (delay (let [t (d/type-of-tree env (:deconstructor p))]
                                                      (when-not (and (= :class (:k t)) (d/raw? t)) t))))
                        (vec (mapcat #(w-pattern env ctx %) (:nested p))))
@@ -388,7 +412,8 @@
     (when (and (:vartype d) (not= :VAR (:declKind d))) (w-type env (:vartype d)))
     (put! d :local e)
     (put! d :mods-flags (long (get-in d [:mods :flags])))
-    (pt! (:init d) (if (= :VAR (:declKind d)) [:unknown] [:local d]))
+    ;; a `var`'s initializer has no target (Attr.visitVarDef: Type.noType)
+    (when-not (= :VAR (:declKind d)) (pt! (:init d) [:local d]))
     (w-expr env' ctx (:init d))
     [e env']))
 
@@ -419,7 +444,8 @@
                                     (case (:tag l)
                                       :CONSTANTCASELABEL (do (put! (:expr l) :case-selector (:selector sw))
                                                              (w-expr senv ctx (:expr l)) [])
-                                      :PATTERNCASELABEL (w-pattern senv ctx (:pat l))
+                                      :PATTERNCASELABEL (do (put! (:pat l) :pattern-of [:expr (:selector sw)])
+                                                            (w-pattern senv ctx (:pat l)))
                                       []))
                                   (:labels c)))
             g (when (:guard c) (w-expr (bind-all senv bindings) ctx (:guard c)))
@@ -457,7 +483,7 @@
                                        {:static-context? (:static? ctx)})]
                   (w-class ctx c)
                   (d/bind env (:name s) c))
-      :EXEC (do (w-expr env ctx (:expr s)) env)
+      :EXEC (do (put! (:expr s) :exec true) (w-expr env ctx (:expr s)) env)
       :IF (let [_ (pt! (:cond s) [:type :boolean])
                 b (w-expr env ctx (:cond s))
                 th (:thenpart s) el (:elsepart s)]
@@ -525,7 +551,10 @@
              env)
       (:BREAK :CONTINUE) (do (put! s :target (jump-target ctx s)) env)
       :YIELD (do (pt! (:value s) (if-let [sw (jump-target ctx s)] [:same sw] [:unknown])) (w-expr env ctx (:value s)) (put! s :target (jump-target ctx s)) env)
-      :RETURN (do (pt! (:expr s) (if-let [m (:method ctx)] [:return m] [:unknown])) (w-expr env ctx (:expr s)) env)
+      :RETURN (do (pt! (:expr s) (cond (:lambda ctx) [:lambda-return (:lambda ctx)]
+                                       (:method ctx) [:return (:method ctx)]
+                                       :else [:unknown]))
+                  (w-expr env ctx (:expr s)) env)
       :THROW (do (w-expr env ctx (:expr s)) env)
       :ASSERT (do (pt! (:cond s) [:type :boolean]) (w-expr env ctx (:cond s)) (w-expr env ctx (:detail s)) env)
       :SKIP env
@@ -543,7 +572,7 @@
   (let [cd (:tree c)
          benv (d/base-env c)
          cenv (d/class-env c)
-         ctx (assoc ctx :class c :jumps () :method nil)]
+         ctx (assoc ctx :class c :jumps () :method nil :lambda nil)]
      (put! cd :class c)
      (put! cd :mods-flags (d/mods-flags c))
      (w-annotations benv (get-in cd [:mods :annotations]))
@@ -575,7 +604,7 @@
          (let [ms (member-of c m :methods)
                static? (d/has? (get-in m [:mods :flags]) d/STATIC)
                menv (d/method-env ms)
-               mctx (assoc ctx :static? static? :method ms)]
+               mctx (assoc ctx :static? static? :method ms :lambda nil)]
            (put! m :method ms)
            (put! m :mods-flags (long (get-in m [:mods :flags])))
            (w-annotations menv (get-in m [:mods :annotations]))
