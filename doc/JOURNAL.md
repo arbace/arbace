@@ -2089,3 +2089,15 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   since the first re-seed: REAP2's `--go-flag`, REAP3, REAP4, JC2, JC2b, JC5, JC6, RPS55, REAP7, REAP7b. Nothing
   killed or retried. The essential gate on `220465ba` (stage 0 from the new seed) passed (15m56s). Logs in
   `.tmp/reseed2-scratch/`. JC6b's jrt changes ride REAP9's final re-seed.
+
+## 2026-10-26: the gate made efficient, between the scripts' sweep and C23 (the user)
+
+- The user: `bin/gate --full` is overkill as it stands. Agreed reading: most of its steps are proofs that the
+  record reproduces (the fixpoint, `jrt-convert verify`, `javac-vendor verify`, the vendoring checks, the box's
+  guests byte-identical), the rest the full corpora whose subsets the essential gate runs; the waste is steps
+  rerun when nothing they read changed (the Haskell and Rust round trips, the box, the toolchain on a j2g
+  change), duplicated builds (a fresh build beside the fixpoint's G1, javac's tool more than once), the 20 GiB
+  jobs colliding, and corpus sizes. Decided (the user): after the milestone, between the scripts' sweep and
+  C23, a survey and a milestone making the gate efficient: a key per `--full` step over its declared inputs
+  and a recorded pass, an unchanged step skipped; the builds shared; the large jobs scheduled one at a time;
+  and a clean, uncached `--full` at each milestone's tag, the proof a tag claims (REAP9's run is that, as now).
