@@ -968,13 +968,13 @@ become `Number_I` values where the static type is `Number`) (amendment T12, acce
 methods themselves (`atomic.ae`; `(pos? (AtomicInteger. 1))` casts to `Number`).
 
 **Leaves j2g's support code needs** (JCS42 (b), doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As
-built: JC2b"): j2g's own support functions take a few translated JDK classes' values as `*C`
-(`Throwable.printStackTrace(PrintStream|PrintWriter)`'s, which call `NN` on the stream). A class
-of the world extending one of them (`arbace.j2g.checks/support-leaves`) is refused, an error of
-`report.edn` naming the class it extends, rather than translated into Go gc rejects. (The
-reflection entry of `Runtime.exec(String[], String[], File)` asserts `*File` too, which compiles
-either way: a subclass of `File` is translated, and only its value passed to that entry by
-reflection would fail.)
+built: JC2b"): j2g's own support functions took a few translated JDK classes' values as `*C`
+(`Throwable.printStackTrace(PrintStream|PrintWriter)`'s, which called `NN` on the stream), and a
+class of the world extending one of them was refused. **Since JC6** (JCS73 (a), JCS74 (a), "As
+built: JC6") none: the support functions are typed by the class's Go type (`m/go-type`: its
+interface when the world extends it) with a nil check in place of `NN`, as `System.out`'s
+variables are, and the reflection entry of `Runtime.exec(String[], String[], File)` converts its
+`File` by `File_Cast`; a subclass of `PrintStream`, `PrintWriter` or `File` is translated.
 
 A hand-written class is non-leaf where the world extends it, as the manifest's generator
 declares (`test/jrt/manifest.ae`). Since amendment S3 (accepted 2026-10-09) these include

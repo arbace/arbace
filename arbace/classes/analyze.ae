@@ -1087,23 +1087,36 @@
   context's anonymous class reads Attr.this's chk before super(...)), which captures the
   parameter as it captures a local."
   [actx target]
-  (let [frames (take-while some? (iterate :parent (:frame actx)))
-        lambdas (take-while #(or (= :lambda (:kind %))
-                                 (and (:class %) (not= (:class %) target) (prologue-class? (:class %))))
-                            frames)
-        f (nth frames (count lambdas) nil)
-        b (some-> f :outer-param deref)]
-    (if (and (seq lambdas) f (:ctor f) b (not= (:class f) target))
-      (let [base (local-ref actx b)
-            hops (loop [o (:outer (decl! (:class f))) hops []]
-                   (cond (nil? o) (fail (str "No enclosing instance of type " (str/replace target "/" ".") " in scope"))
-                         (= o target) hops
-                         :else (let [d (decl! o)]
-                                 (when-not (:outer-instance? d)
-                                   (fail (str "No enclosing instance of type " (str/replace target "/" ".") " in scope")))
-                                 (swap! (:state d) assoc :uses-this0 true)
-                                 (recur (:outer d) (conj hops o)))))]
-        {:op :outer-param-path :base base :path hops :type (t/internal->desc target)})
+  (let [prologue-ctor (fn [frame]
+                        ;; the constructor frame whose outer instance parameter code at `frame`
+                        ;; reaches, through lambdas and classes of its prologue, and that parameter
+                        (let [frames (take-while some? (iterate :parent frame))
+                              skip (take-while #(or (= :lambda (:kind %))
+                                                    (and (:class %) (not= (:class %) target) (prologue-class? (:class %))))
+                                               frames)
+                              f (nth frames (count skip) nil)
+                              b (some-> f :outer-param deref)]
+                          (when (and f (:ctor f) b (not= (:class f) target)) [(seq skip) f b])))
+        [skipped f b] (prologue-ctor (:frame actx))]
+    (if (and skipped f)
+      (let [no (fn [] (fail (str "No enclosing instance of type " (str/replace target "/" ".") " in scope")))
+            [b hops] (loop [b b o (:outer (decl! (:class f))) hops []]
+                       (cond (nil? o) (no)
+                             (= o target) [b hops]
+                             :else (let [d (decl! o)]
+                                     (if (:outer-instance? d)
+                                       (do (swap! (:state d) assoc :uses-this0 true)
+                                           (recur b (:outer d) (conj hops o)))
+                                       ;; a class of another constructor's prologue (an anonymous
+                                       ;; class in this(...)'s argument): no enclosing instance of
+                                       ;; its own, but it captures that constructor's outer
+                                       ;; instance parameter, from which the path goes on (JLS 8.1.3;
+                                       ;; JCS62 (a), MultiLevelOuterInstance)
+                                       (if-let [[_ f2 b2] (when (prologue-class? o)
+                                                            (prologue-ctor (:creation-frame @(:state d))))]
+                                         (recur b2 (:outer (decl! (:class f2))) [])
+                                         (no))))))]
+        {:op :outer-param-path :base (local-ref actx b) :path hops :type (t/internal->desc target)})
       (outer-this-node* actx target))))
 
 (defn- outer-this-node*
