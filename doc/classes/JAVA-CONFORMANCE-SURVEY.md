@@ -34,7 +34,8 @@ Contents: Executive summary · 1 Today · 2 What goi's check is, and what Java's
 corpora · 4 What "pass" means · 5 Measurements · 6 What the failures say · 7 The tool:
 `bin/java-check` · 8 Plan (JC1-JC8) · 9 Proposals (JCS1-JCS15) · Decided · As built: JC1
 (JCS16-JCS25) · 10 Risks · 11 Sources · Appendix A: the scripts · As built: JC4 (JCS30-JCS33) ·
-As built: JC2 (JCS40-JCS49) · As built: JC3 (JCS50-JCS55).
+As built: JC2 (JCS40-JCS49) · As built: JC3 (JCS50-JCS55) · As built: JC2b (JCS70-JCS79) · As built:
+harness follow-ups (JCS80-JCS89) · As built: JC5 (JCS60-JCS69) · As built: JC6 (JCS90-JCS99).
 
 ## Executive summary
 

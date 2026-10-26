@@ -316,10 +316,11 @@ Prior art:
 - `test/java/`, `bin/java-check`: Java's conformance check (doc/classes/JAVA-CONFORMANCE-SURVEY.md,
   JC1-JC8, "As built: JC1", "As built: JC2"), as goi's `bin/goi check` is Go's: jdk26u's jtreg tests read in place at the
   platform's pin (corpora by area and category, `test/java/corpora.edn`: `jdk/java/*` but AWT and beans,
+  since JC6 ("As built: JC6") the rest of `jdk/` but its desktop parts and `hotspot/jtreg/runtime`,
   `langtools/tools/javac`, `hotspot/jtreg/compiler`'s plain, `@compile` and JIT-option runs) and Arbace's
   own JLS programs (`test/java/jls/`), each test's files put in a package of their own (`package tNNNNN; `
   before the first line), the JDK's runs recorded as data (`test/java/ref-jdk26.edn`, `--record-ref` with
-  the system's JDK; the check needs no JVM), the levels `read` (repr/java on javac's tool executable),
+  the system's JDK, `--only` keeping and checking every other line; the check needs no JVM), the levels `read` (repr/java on javac's tool executable),
   `interp` (each package required file by file as the REPL loads it, `--load do` the one-`do` mode, and
   `main` run on the executable, `test/java/run.ae`; status and stdout's digest, also with identity hash
   codes masked, against the JDK's), `compiled` (JC2, "As built: JC2": the tests translated by j2g in
