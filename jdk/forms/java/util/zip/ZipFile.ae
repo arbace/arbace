@@ -1,0 +1,1450 @@
+;; Converted from overlay/jdk/java.base/java/util/zip/ZipFile.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.util.zip)
+
+(import '(java.io Closeable
+                  EOFException
+                  File
+                  IOException
+                  InputStream
+                  RandomAccessFile
+                  UncheckedIOException)
+        '(java.nio.charset Charset)
+        '(java.nio.file InvalidPathException NoSuchFileException)
+        '(java.util ArrayDeque
+                    ArrayList
+                    Arrays
+                    BitSet
+                    Collections
+                    Deque
+                    Enumeration
+                    HashMap
+                    Iterator
+                    List
+                    Map
+                    NoSuchElementException
+                    Objects
+                    Set
+                    Spliterator
+                    Spliterators$AbstractSpliterator
+                    WeakHashMap)
+        '(java.util.function Consumer Function IntFunction)
+        '(java.util.jar JarEntry JarFile)
+        '(java.util.stream Stream StreamSupport)
+        '(jdk.internal.access JavaUtilZipFileAccess)
+        '(jdk.internal.jrt ZipAccess)
+        '(jdk.internal.util ArraysSupport DecimalDigits)
+        '(jdk.internal.vm.annotation Stable)
+        '(sun.nio.cs UTF_8))
+
+(defclass ^:public ZipFile
+  :implements [ZipConstants Closeable]
+
+  (field ^:private ^:final ^String filePath)
+
+  (field ^:private ^:final ^String fileName)
+
+  (field ^:private ^:final ^ZipCoder zipCoder)
+
+  (field ^:private ^:volatile ^boolean closeRequested)
+
+  (field ^:private ^:final ^{Stable true} ^CleanableResource res)
+
+  (field ^:private ^:static ^:final ^int STORED ZipEntry/STORED)
+
+  (field ^:private ^:static ^:final ^int DEFLATED ZipEntry/DEFLATED)
+
+  (field ^:public ^:static ^:final ^int OPEN_READ 0x1)
+
+  (field ^:public ^:static ^:final ^int OPEN_DELETE 0x4)
+
+  (field ^:private ^:static ^:final ^boolean DISABLE_ZIP64_EXTRA_VALIDATION
+    (ZipFile/getDisableZip64ExtraFieldValidation))
+
+  (constructor :throws [IOException] ^:public [this ^String name]
+    (this. (File. name) OPEN_READ))
+
+  (constructor :throws [IOException] ^:public [this ^File file ^int mode]
+    (this. file mode UTF_8/INSTANCE))
+
+  (constructor :throws [ZipException IOException] ^:public [this ^File file]
+    (this. file OPEN_READ))
+
+  (constructor :throws [IOException] ^:public [this ^:mutable ^File file ^int mode ^Charset charset]
+    (when (or (== (bit-and-int mode OPEN_READ) 0)
+              (not (== (bit-and-int mode (bit-not-int (bit-or-int OPEN_READ OPEN_DELETE))) 0)))
+      (throw (IllegalArgumentException. (java-str "Illegal mode: 0x" (Integer/toHexString mode)))))
+    (let [name (.getPath file)]
+      (set! file (File. name))
+      (Objects/requireNonNull charset "charset")
+      (set! (.-filePath this) name)
+      (set! (.-fileName this) (.getName file))
+      (set! (.-zipCoder this) (ZipCoder/get charset))
+      (set! (.-res this) (CleanableResource. this zipCoder file mode))))
+
+  (constructor :throws [IOException] ^:public [this ^String name ^Charset charset]
+    (this. (File. name) OPEN_READ charset))
+
+  (constructor :throws [IOException] ^:public [this ^File file ^Charset charset]
+    (this. file OPEN_READ charset))
+
+  (method ^:public getComment ^String [this]
+    (locking this
+      (.ensureOpen this)
+      (when (some? (.-comment (.-zsrc res)))
+        (try (.toString zipCoder (.-comment (.-zsrc res))) (catch IllegalArgumentException iae nil)))))
+
+  (method ^:public getEntry ^ZipEntry [this ^String name]
+    (Objects/requireNonNull name "name")
+    (let [^:mutable ^ZipEntry entry nil]
+      (locking this
+        (.ensureOpen this)
+        (let [pos (.getEntryPos (.-zsrc res) name true zipCoder)]
+          (when (some? pos) (set! entry (.getZipEntry this (.-name pos) (.-pos pos))))))
+      entry))
+
+  (method ^:public getInputStream :throws [IOException] ^InputStream [this ^ZipEntry entry]
+    (Objects/requireNonNull entry "entry")
+    (let [^:mutable ^int pos 0
+          ^:mutable ^ZipFileInputStream in nil
+          zsrc (.-zsrc res)
+          ^{:tag (Set InputStream)} istreams (.-istreams res)]
+      (locking this
+        (.ensureOpen this)
+        (if (Objects/equals lastEntryName (.-name entry))
+            (set! pos lastEntryPos)
+            (let [entryPos (.getEntryPos zsrc (.-name entry) false zipCoder)]
+              (if (some? entryPos) (set! pos (.-pos entryPos)) (set! pos -1))))
+        (when-not (== pos -1)
+          (set! in (ZipFileInputStream. (.-cen zsrc) pos (.-locOffset entry)))
+          (switch (ZipUtils/CENHOW (.-cen zsrc) pos)
+            STORED (do (locking istreams (.add istreams in)) in)
+            DEFLATED
+              (let [^:mutable inputBufSize (ZipUtils/CENSIZ (.-cen zsrc) pos)]
+                (when (or (> inputBufSize 65536) (<= inputBufSize 0)) (set! inputBufSize 8192))
+                (let [^InputStream is (ZipFileInflaterInputStream.
+                                        in
+                                        res
+                                        (unchecked-int inputBufSize))]
+                  (locking istreams (.add istreams is))
+                  is))
+            (throw (ZipException. "invalid compression method")))))))
+
+  (method ^:private ^:static zipCoderFor ^ZipCoder [^:final ^byte/1 cen ^:final ^int pos
+                                                    ^:final ^ZipCoder fallback]
+    (cond
+      (.isUTF8 fallback) fallback
+      (not (== (bit-and-int (ZipUtils/CENFLG cen pos) ZipConstants64/USE_UTF8) 0)) ZipCoder/UTF8
+      :else fallback))
+
+  (defclass ^:private ^:static InflaterCleanupAction
+    :implements [Runnable]
+
+    (field ^:private ^:final ^Inflater inf)
+
+    (field ^:private ^:final ^CleanableResource res)
+
+    (constructor [this ^Inflater inf ^CleanableResource res]
+      (set! (.-inf this) inf)
+      (set! (.-res this) res))
+
+    (method ^:public run ^void [this] (.releaseInflater res inf)))
+
+  (defclass ^:private ZipFileInflaterInputStream
+    :extends InflaterInputStream
+
+    (field ^:private ^:volatile ^boolean closeRequested)
+
+    (field ^:private ^boolean eof false)
+
+    (field ^:private ^:final ^InflaterCleanupAction cleanup)
+
+    (field ^:private ^boolean cleaned)
+
+    (constructor [this ^ZipFileInputStream zfin ^CleanableResource res ^int inputBufSize]
+      (this. zfin res (.getInflater res) inputBufSize))
+
+    (constructor ^:private [this ^ZipFileInputStream zfin ^CleanableResource res ^Inflater inf
+                            ^int inputBufSize]
+      (super. zfin inf inputBufSize)
+      (set! (.-cleanup this) (InflaterCleanupAction. inf res)))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (when-not closeRequested
+        (set! closeRequested true)
+        (.close super)
+        (locking (.-istreams res) (.remove (.-istreams res) this))
+        (locking this (when cleaned (return)) (set! cleaned true))
+        (.run cleanup)))
+
+    (method ^:protected fill :throws [IOException] ^void [this]
+      (when eof (throw (EOFException. "Unexpected end of ZLIB input stream")))
+      (set! (.-len this) (.read (.-in this) (.-buf this) 0 (alength (.-buf this))))
+      (when (== (.-len this) -1) (aset (.-buf this) 0 0) (set! (.-len this) 1) (set! eof true))
+      (.setInput (.-inf this) (.-buf this) 0 (.-len this)))
+
+    (method ^:public available :throws [IOException] ^int [this]
+      (if closeRequested
+          0
+          (let [avail (unchecked-subtract (.size (cast ZipFileInputStream (.-in this)))
+                                          (.getBytesWritten (.-inf this)))]
+            (if (> avail (long Integer/MAX_VALUE)) Integer/MAX_VALUE (unchecked-int avail))))))
+
+  (method ^:public getName ^String [this] filePath)
+
+  (method ^:public toString ^String [this]
+    (java-str (.-fileName this) "@" (Integer/toHexString (System/identityHashCode this))))
+
+  (defclass ^:private ZipEntryIterator
+    :implements [(Enumeration T) (Iterator T)]
+    :type-params [(T extends ZipEntry)]
+
+    (field ^:private ^int i 0)
+
+    (field ^:private ^:final ^int entryCount)
+
+    (constructor ^:public [this ^int entryCount]
+      (set! (.-entryCount this) entryCount))
+
+    (method ^:public hasMoreElements ^boolean [this] (.hasNext this))
+
+    (method ^:public hasNext ^boolean [this] (< i entryCount))
+
+    (method ^:public nextElement ^T [this] (.next this))
+
+    (method ^:public next ^T [this]
+      (locking ZipFile/this
+        (.ensureOpen ZipFile/this)
+        (when-not (.hasNext this) (throw (NoSuchElementException.)))
+        (let [pos (.getEntryPos (.-zsrc res)
+                                (unchecked-multiply-int
+                                  (let [old-1 i] (set! i (unchecked-inc-int i)) old-1)
+                                  3))]
+          (.getZipEntry ZipFile/this (.getEntryName ZipFile/this pos) pos))))
+
+    (method ^:public asIterator ^{:tag (Iterator T)} [this] this))
+
+  (method ^:public entries ^{:tag (Enumeration (? extends ZipEntry))} [this]
+    (locking this (.ensureOpen this) (ZipEntryIterator. (.-total (.-zsrc res)))))
+
+  (method ^:private jarEntries ^{:tag (Enumeration JarEntry)} [this]
+    (locking this (.ensureOpen this) (ZipEntryIterator. (.-total (.-zsrc res)))))
+
+  (defclass ^:private EntrySpliterator
+    :extends (Spliterators$AbstractSpliterator T)
+    :type-params [T]
+
+    (field ^:private ^int index)
+
+    (field ^:private ^:final ^int fence)
+
+    (field ^:private ^:final ^{:tag (IntFunction T)} gen)
+
+    (constructor [this ^int index ^int fence ^{:tag (IntFunction T)} gen]
+      (super. (long fence)
+              (bit-or-int (bit-or-int (bit-or-int Spliterator/ORDERED Spliterator/DISTINCT)
+                                      Spliterator/IMMUTABLE)
+                          Spliterator/NONNULL))
+      (set! (.-index this) index)
+      (set! (.-fence this) fence)
+      (set! (.-gen this) gen))
+
+    (method ^:public tryAdvance ^boolean [this ^{:tag (Consumer (? super T))} action]
+      (when (nil? action) (throw (NullPointerException.)))
+      (if (and (>= index 0) (< index fence))
+          (do
+            (locking ZipFile/this
+              (.ensureOpen ZipFile/this)
+              (.accept action
+                       (.apply gen
+                               (.getEntryPos (.-zsrc res)
+                                             (unchecked-multiply-int
+                                               (let [old-2 index]
+                                                 (set! index (unchecked-inc-int index))
+                                                 old-2)
+                                               3)))))
+            true)
+          false)))
+
+  (method ^:public stream ^{:tag (Stream (? extends ZipEntry))} [this]
+    (locking this
+      (.ensureOpen this)
+      (StreamSupport/stream
+        (EntrySpliterator. 0
+                           (.-total (.-zsrc res))
+                           (lambda IntFunction ^ZipEntry [^int pos]
+                             (.getZipEntry this (.getEntryName this pos) pos)))
+        false)))
+
+  (method ^:private getEntryName ^String [this ^int pos]
+    (let [cen (.-cen (.-zsrc res))
+          nlen (ZipUtils/CENNAM cen pos)
+          zc (ZipFile/zipCoderFor cen pos zipCoder)]
+      (.toString zc cen (unchecked-add-int pos ZipFile/CENHDR) nlen)))
+
+  (method ^:private entryNameStream ^{:tag (Stream String)} [this]
+    (locking this
+      (.ensureOpen this)
+      (StreamSupport/stream
+        (EntrySpliterator. 0
+                           (.-total (.-zsrc res))
+                           (method-ref IntFunction ^String [int] this ZipFile/.getEntryName))
+        false)))
+
+  (method ^:private jarStream ^{:tag (Stream JarEntry)} [this]
+    (locking this
+      (.ensureOpen this)
+      (StreamSupport/stream
+        (EntrySpliterator. 0
+                           (.-total (.-zsrc res))
+                           (lambda IntFunction ^JarEntry [^int pos]
+                             (cast JarEntry (.getZipEntry this (.getEntryName this pos) pos))))
+        false)))
+
+  (field ^:private ^String lastEntryName)
+
+  (field ^:private ^int lastEntryPos)
+
+  (method ^:private getZipEntry ^ZipEntry [this ^String name ^int pos]
+    (let [cen (.-cen (.-zsrc res))
+          ^ZipEntry e (if-instance [^JarFile jarFile this]
+                        ^ZipEntry (.entryFor (ZipAccess/javaUtilJarAccess) jarFile name)
+                        (ZipEntry. name))]
+      (set! (.-flag e) (ZipUtils/CENFLG cen pos))
+      (set! (.-xdostime e) (ZipUtils/CENTIM cen pos))
+      (set! (.-crc e) (ZipUtils/CENCRC cen pos))
+      (set! (.-size e) (ZipUtils/CENLEN cen pos))
+      (set! (.-csize e) (ZipUtils/CENSIZ cen pos))
+      (set! (.-method e) (ZipUtils/CENHOW cen pos))
+      (when (== (ZipUtils/CENVEM_FA cen pos) ZipUtils/FILE_ATTRIBUTES_UNIX)
+        (set! (.-externalFileAttributes e) (bit-and-int (ZipUtils/CENATX_PERMS cen pos) 0xFFFF)))
+      (set! (.-locOffset e) (ZipUtils/CENOFF cen pos))
+      (let [nlen (ZipUtils/CENNAM cen pos)
+            elen (ZipUtils/CENEXT cen pos)
+            clen (ZipUtils/CENCOM cen pos)]
+        (when-not (== elen 0)
+          (let [start (unchecked-add-int (unchecked-add-int pos ZipFile/CENHDR) nlen)]
+            (.setExtra0 e (Arrays/copyOfRange cen start (unchecked-add-int start elen)) true false)))
+        (when-not (== clen 0)
+          (let [start (unchecked-add-int
+                        (unchecked-add-int (unchecked-add-int pos ZipFile/CENHDR) nlen)
+                        elen)
+                zc (ZipFile/zipCoderFor cen pos zipCoder)]
+            (set! (.-comment e) (.toString zc cen start clen))))
+        (set! lastEntryName (.-name e))
+        (set! lastEntryPos pos)
+        e)))
+
+  (method ^:public size ^int [this]
+    (locking this (.ensureOpen this) (.-total (.-zsrc res))))
+
+  (defclass ^:private ^:static CleanableResource
+    :implements [Runnable]
+
+    (field ^:final ^{:tag (Set InputStream)} istreams)
+
+    (field ^{:tag (Deque Inflater)} inflaterCache)
+
+    (field ^:private ^boolean cleaned)
+
+    (field ^Source zsrc)
+
+    (constructor :throws [IOException] [this ^ZipFile zf ^ZipCoder zipCoder ^File file ^int mode]
+      (java-assert (some? zipCoder) "null ZipCoder")
+      (set! (.-istreams this) (Collections/newSetFromMap (WeakHashMap.)))
+      (set! (.-inflaterCache this) (ArrayDeque.))
+      (set! (.-zsrc this) (Source/get file (not (== (bit-and-int mode OPEN_DELETE) 0)) zipCoder)))
+
+    (method clean ^void [this]
+      (locking this (when cleaned (return)) (set! cleaned true))
+      (.run this))
+
+    (method getInflater ^Inflater [this]
+      (let [^:mutable ^Inflater inf nil]
+        (locking inflaterCache
+          (when (some? (set! inf (cast Inflater (.poll inflaterCache)))) (return inf)))
+        (Inflater. true)))
+
+    (method releaseInflater ^void [this ^Inflater inf]
+      (let [^{:tag (Deque Inflater)} inflaters (.-inflaterCache this)]
+        (when (some? inflaters)
+          (locking inflaters
+            (when (identical? inflaters (.-inflaterCache this))
+              (.reset inf)
+              (.add inflaters inf)
+              (return))))
+        (.end inf)))
+
+    (method ^:public run ^void [this]
+      (let [^:mutable ^IOException ioe nil
+            ^{:tag (Deque Inflater)} inflaters (.-inflaterCache this)]
+        (when (some? inflaters)
+          (locking inflaters
+            (let [^:mutable ^Inflater inf nil]
+              (while (some? (set! inf (cast Inflater (.poll inflaters)))) (.end inf))
+              (set! (.-inflaterCache this) nil))))
+        (when (some? istreams)
+          (locking istreams
+            (when-not (.isEmpty istreams)
+              (let [copy (cast InputStream/1 (.toArray istreams (new InputStream/1 0)))]
+                (.clear istreams)
+                (for-each [^InputStream is copy]
+                  (try
+                    (.close is)
+                    (catch IOException e (if (nil? ioe) (set! ioe e) (.addSuppressed ioe e)))))))))
+        (when (some? zsrc)
+          (locking zsrc
+            (try
+              (Source/release zsrc)
+              (set! zsrc nil)
+              (catch IOException e (if (nil? ioe) (set! ioe e) (.addSuppressed ioe e))))))
+        (when (some? ioe) (throw (UncheckedIOException. ioe))))))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when-not closeRequested
+      (set! closeRequested true)
+      (locking this (try (.clean res) (catch UncheckedIOException ioe (throw (.getCause ioe)))))))
+
+  (method ^:private ensureOpen ^void [this]
+    (when closeRequested (throw (IllegalStateException. "zip file closed")))
+    (when (nil? (.-zsrc res)) (throw (IllegalStateException. "The object is not initialized."))))
+
+  (method ^:private ensureOpenOrZipException :throws [IOException] ^void [this]
+    (when closeRequested (throw (ZipException. "ZipFile closed"))))
+
+  (defclass ^:private ZipFileInputStream
+    :extends InputStream
+
+    (field ^:private ^:volatile ^boolean closeRequested)
+
+    (field ^:private ^long pos)
+
+    (field ^:private ^long startingPos)
+
+    (field ^:protected ^long rem)
+
+    (field ^:protected ^long size)
+
+    (constructor [this ^byte/1 cen ^int cenpos ^long locOffset]
+      (set! rem (ZipUtils/CENSIZ cen cenpos))
+      (set! size (ZipUtils/CENLEN cen cenpos))
+      (if (== locOffset -1) (set! pos (ZipUtils/CENOFF cen cenpos)) (set! pos locOffset))
+      (when (or (or (== rem ZipConstants64/ZIP64_MAGICVAL) (== size ZipConstants64/ZIP64_MAGICVAL))
+                (== pos ZipConstants64/ZIP64_MAGICVAL))
+        (.checkZIP64 this cen cenpos))
+      (set! pos (unchecked-negate (unchecked-add pos (.-locpos (.-zsrc (.-res ZipFile/this)))))))
+
+    (method ^:private checkZIP64 ^void [this ^byte/1 cen ^int cenpos]
+      (let [^:mutable off (unchecked-add-int (unchecked-add-int cenpos ZipConstants/CENHDR)
+                                             (ZipUtils/CENNAM cen cenpos))
+            end (unchecked-add-int off (ZipUtils/CENEXT cen cenpos))]
+        (while (< (unchecked-add-int off 4) end)
+          (let [tag (ZipUtils/get16 cen off)
+                ^:mutable sz (ZipUtils/get16 cen (unchecked-add-int off 2))]
+            (set! off (unchecked-add-int off 4))
+            (when (> (unchecked-add-int off sz) end) (break))
+            (when (== tag ZipConstants64/EXTID_ZIP64)
+              (when (== size ZipConstants64/ZIP64_MAGICVAL)
+                (when (or (< sz 8) (> (unchecked-add-int off 8) end)) (break))
+                (set! size (ZipUtils/get64S cen off))
+                (set! sz (unchecked-subtract-int sz 8))
+                (set! off (unchecked-add-int off 8)))
+              (when (== rem ZipConstants64/ZIP64_MAGICVAL)
+                (when (or (< sz 8) (> (unchecked-add-int off 8) end)) (break))
+                (set! rem (ZipUtils/get64S cen off))
+                (set! sz (unchecked-subtract-int sz 8))
+                (set! off (unchecked-add-int off 8)))
+              (when (== pos ZipConstants64/ZIP64_MAGICVAL)
+                (when (or (< sz 8) (> (unchecked-add-int off 8) end)) (break))
+                (set! pos (ZipUtils/get64S cen off))
+                (set! sz (unchecked-subtract-int sz 8))
+                (set! off (unchecked-add-int off 8)))
+              (break))
+            (set! off (unchecked-add-int off sz))))))
+
+    (method ^:private initDataOffset :throws [IOException] ^long [this]
+      (when (<= pos 0)
+        (let [loc (new byte/1 ZipConstants/LOCHDR)]
+          (set! pos (unchecked-negate pos))
+          (let [len (.readFullyAt (.-zsrc (.-res ZipFile/this)) loc 0 (alength loc) pos)]
+            (when-not (== len ZipConstants/LOCHDR)
+              (throw (ZipException. "ZipFile error reading zip file")))
+            (when-not (== (ZipUtils/LOCSIG loc) ZipConstants/LOCSIG)
+              (throw (ZipException. "ZipFile invalid LOC header (bad signature)")))
+            (set! pos
+                  (unchecked-add pos
+                                 (unchecked-add-int
+                                   (unchecked-add-int ZipConstants/LOCHDR (ZipUtils/LOCNAM loc))
+                                   (ZipUtils/LOCEXT loc))))
+            (set! startingPos pos))))
+      pos)
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^:mutable ^int len]
+      (locking ZipFile/this
+        (.ensureOpenOrZipException ZipFile/this)
+        (.initDataOffset this)
+        (when (== rem 0) (return -1))
+        (when (> len rem) (set! len (unchecked-int rem)))
+        (when (<= len 0) (return 0))
+        (set! len (.readAt (.-zsrc (.-res ZipFile/this)) b off len pos))
+        (when (> len 0) (set! pos (unchecked-add pos len)) (set! rem (unchecked-subtract rem len))))
+      (when (== rem 0) (.close this))
+      len)
+
+    (method ^:public read :throws [IOException] ^int [this]
+      (let [b (new byte/1 1)] (if (== (.read this b 0 1) 1) (bit-and-int (aget b 0) 0xff) -1)))
+
+    (method ^:public skip :throws [IOException] ^long [this ^:mutable ^long n]
+      (locking ZipFile/this
+        (.initDataOffset this)
+        (let [newPos (unchecked-add pos n)]
+          (cond
+            (> n 0) (when (or (< newPos 0) (> n rem)) (set! n rem))
+            (< newPos startingPos) (set! n (unchecked-subtract startingPos pos)))
+          (set! pos (unchecked-add pos n))
+          (set! rem (unchecked-subtract rem n))))
+      (when (== rem 0) (.close this))
+      n)
+
+    (method ^:public available ^int [this]
+      (if (> rem Integer/MAX_VALUE) Integer/MAX_VALUE (unchecked-int rem)))
+
+    (method ^:public size ^long [this] size)
+
+    (method ^:public close ^void [this]
+      (when-not closeRequested
+        (set! closeRequested true)
+        (set! rem 0)
+        (locking (.-istreams res) (.remove (.-istreams res) this)))))
+
+  (method ^:private getManifestAndSignatureRelatedFiles ^{:tag (List String)} [this]
+    (locking this
+      (.ensureOpen this)
+      (let [zsrc (.-zsrc res)
+            metanames (.-signatureMetaNames zsrc)
+            ^:mutable ^{:tag (List String)} files nil]
+        (when (>= (.-manifestPos zsrc) 0)
+          (set! files (ArrayList.))
+          (.add files (.getEntryName this (.-manifestPos zsrc))))
+        (when (some? metanames)
+          (when (nil? files) (set! files (ArrayList.)))
+          (loop [^int i 0]
+            (when (< i (alength metanames))
+              (.add files (.getEntryName this (aget metanames i)))
+              (recur (unchecked-inc-int i)))))
+        (if (nil? files) (List/of) files))))
+
+  (method ^:private getManifestNum ^int [this]
+    (locking this (.ensureOpen this) (.-manifestNum (.-zsrc res))))
+
+  (method ^:private getManifestName ^String [this ^boolean onlyIfSignatureRelatedFiles]
+    (locking this
+      (.ensureOpen this)
+      (let [zsrc (.-zsrc res)
+            pos (.-manifestPos zsrc)]
+        (when (and (>= pos 0)
+                   (or (not onlyIfSignatureRelatedFiles) (some? (.-signatureMetaNames zsrc))))
+          (return (.getEntryName this pos)))))
+    nil)
+
+  (method ^:private getMetaInfVersions ^BitSet [this ^String name]
+    (locking this
+      (.ensureOpen this)
+      (cast BitSet
+            (.getOrDefault (.-metaVersions (.-zsrc res)) (ZipCoder/hash name) EMPTY_VERSIONS))))
+
+  (field ^:private ^:static ^:final ^BitSet EMPTY_VERSIONS (BitSet.))
+
+  (method ^:static getDisableZip64ExtraFieldValidation ^boolean []
+    (let [^:mutable ^boolean result false
+          value (System/getProperty "jdk.util.zip.disableZip64ExtraFieldValidation")]
+      (if (nil? value)
+          (set! result false)
+          (set! result (or (.isEmpty value) (.equalsIgnoreCase value "true"))))
+      result))
+
+  (static-initializer
+    (ZipAccess/setJavaUtilZipFileAccess
+      (anon JavaUtilZipFileAccess []
+        (method ^:public startsWithLocHeader ^boolean [this ^ZipFile zip]
+          (.-startsWithLoc (.-zsrc (.-res zip))))
+
+        (method ^:public getManifestAndSignatureRelatedFiles ^{:tag (List String)} [this
+                                                                                    ^JarFile jar]
+          (.getManifestAndSignatureRelatedFiles ^ZipFile jar))
+
+        (method ^:public getManifestNum ^int [this ^JarFile jar]
+          (.getManifestNum ^ZipFile jar))
+
+        (method ^:public getManifestName ^String [this ^JarFile jar
+                                                  ^boolean onlyIfHasSignatureRelatedFiles]
+          (.getManifestName ^ZipFile jar onlyIfHasSignatureRelatedFiles))
+
+        (method ^:public getMetaInfVersions ^BitSet [this ^JarFile jar ^String name]
+          (.getMetaInfVersions ^ZipFile jar name))
+
+        (method ^:public entries ^{:tag (Enumeration JarEntry)} [this ^ZipFile zip]
+          (.jarEntries zip))
+
+        (method ^:public stream ^{:tag (Stream JarEntry)} [this ^ZipFile zip]
+          (.jarStream zip))
+
+        (method ^:public entryNameStream ^{:tag (Stream String)} [this ^ZipFile zip]
+          (.entryNameStream zip))
+
+        (method ^:public getExternalFileAttributes ^int [this ^ZipEntry ze]
+          (.-externalFileAttributes ze))
+
+        (method ^:public setExternalFileAttributes ^void [this ^ZipEntry ze
+                                                          ^int externalFileAttributes]
+          (set! (.-externalFileAttributes ze) externalFileAttributes)))))
+
+  (defclass ^:static ^:record EntryPos [^String name ^int pos])
+
+  (defclass ^:private ^:static Source
+    (field ^:private ^:static ^:final ^int META_INF_LEN 9)
+
+    (field ^:private ^:static ^:final ^int META_INF_VERSIONS_LEN 19)
+
+    (field ^:private ^:static ^:final ^int MAX_CEN_SIZE ArraysSupport/SOFT_MAX_ARRAY_LENGTH)
+
+    (field ^:private ^:final ^Key key)
+
+    (field ^:private ^int refs 1)
+
+    (field ^:private ^RandomAccessFile zfile)
+
+    (field ^:private ^byte/1 cen)
+
+    (field ^:private ^long locpos)
+
+    (field ^:private ^byte/1 comment)
+
+    (field ^:private ^int manifestPos -1)
+
+    (field ^:private ^int manifestNum 0)
+
+    (field ^:private ^int/1 signatureMetaNames)
+
+    (field ^:private ^{:tag (Map Integer BitSet)} metaVersions)
+
+    (field ^:private ^:final ^boolean startsWithLoc)
+
+    (field ^:private ^int/1 entries)
+
+    (method ^:private checkAndAddEntry :throws [ZipException] ^int [this ^:final ^int pos
+                                                                    ^:final ^int index
+                                                                    ^:final ^ZipCoder zipCoder]
+      (let [cen (.-cen this)]
+        (when-not (== (ZipUtils/CENSIG cen pos) ZipConstants/CENSIG)
+          (Source/zerror "invalid CEN header (bad signature)"))
+        (let [method (ZipUtils/CENHOW cen pos)
+              flag (ZipUtils/CENFLG cen pos)]
+          (when-not (== (bit-and-int flag 1) 0)
+            (Source/zerror "invalid CEN header (encrypted entry)"))
+          (when (and (not (== method STORED)) (not (== method DEFLATED)))
+            (Source/zerror (java-str "invalid CEN header (bad compression method: " method ")")))
+          (let [entryPos (unchecked-add-int pos ZipConstants/CENHDR)
+                nlen (ZipUtils/CENNAM cen pos)
+                elen (ZipUtils/CENEXT cen pos)
+                clen (ZipUtils/CENCOM cen pos)
+                headerSize (unchecked-add-int
+                             (unchecked-add-int (unchecked-add-int ZipConstants/CENHDR nlen) clen)
+                             elen)]
+            (when (or (> headerSize 0xFFFF)
+                      (> pos (unchecked-subtract-int (alength cen) headerSize)))
+              (Source/zerror "invalid CEN header (bad header size)"))
+            (cond
+              (and (> elen 0) (not DISABLE_ZIP64_EXTRA_VALIDATION))
+                (.checkExtraFields this pos (unchecked-add-int entryPos nlen) elen)
+              (and (== elen 0)
+                   (or (or (or (== (ZipUtils/CENSIZ cen pos) ZipConstants64/ZIP64_MAGICVAL)
+                               (== (ZipUtils/CENLEN cen pos) ZipConstants64/ZIP64_MAGICVAL))
+                           (== (ZipUtils/CENOFF cen pos) ZipConstants64/ZIP64_MAGICVAL))
+                       (== (ZipUtils/CENDSK cen pos) ZipConstants64/ZIP64_MAGICCOUNT)))
+                (Source/zerror "Invalid CEN header (invalid zip64 extra len size)"))
+            (try
+              (let [hash (.checkedHash zipCoder cen entryPos nlen)
+                    hsh (unchecked-remainder-int (bit-and-int hash 0x7fffffff) tablelen)
+                    next (aget table hsh)]
+                (aset table hsh index)
+                (aset entries index hash)
+                (aset entries (unchecked-add-int index 1) next)
+                (aset entries (unchecked-add-int index 2) pos)
+                (when (> clen 0)
+                  (let [start (unchecked-add-int (unchecked-add-int entryPos nlen) elen)]
+                    (.toString zipCoder cen start clen))))
+              (catch Exception e (Source/zerror "invalid CEN header (bad entry name or comment)")))
+            nlen))))
+
+    (method ^:private checkExtraFields :throws [ZipException] ^void [this ^int cenPos
+                                                                     ^int startingOffset
+                                                                     ^int extraFieldLen]
+      (when (> extraFieldLen 0xFFFF) (Source/zerror "invalid extra field length"))
+      (let [extraEndOffset (unchecked-add-int startingOffset extraFieldLen)]
+        (when (> extraEndOffset (alength cen))
+          (Source/zerror "Invalid CEN header (extra data field size too long)"))
+        (let [^:mutable currentOffset startingOffset]
+          (while (<= (unchecked-add-int currentOffset Integer/BYTES) extraEndOffset)
+            (let [tag (ZipUtils/get16 cen currentOffset)]
+              (set! currentOffset (unchecked-add-int currentOffset Short/BYTES))
+              (let [tagBlockSize (ZipUtils/get16 cen currentOffset)]
+                (set! currentOffset (unchecked-add-int currentOffset Short/BYTES))
+                (let [tagBlockEndingOffset (unchecked-add (long currentOffset) tagBlockSize)]
+                  (when (> tagBlockEndingOffset extraEndOffset)
+                    (Source/zerror
+                      (String/format
+                        "Invalid CEN header (invalid extra data field size for tag: 0x%04x at %d)"
+                        (new Object/1 [tag cenPos]))))
+                  (when (== tag ZipConstants64/EXTID_ZIP64)
+                    (let [csize (ZipUtils/CENSIZ cen cenPos)
+                          size (ZipUtils/CENLEN cen cenPos)
+                          locoff (ZipUtils/CENOFF cen cenPos)
+                          diskNo (ZipUtils/CENDSK cen cenPos)]
+                      (.checkZip64ExtraFieldValues
+                        this
+                        currentOffset
+                        tagBlockSize
+                        csize
+                        size
+                        locoff
+                        diskNo)))
+                  (set! currentOffset (unchecked-add-int currentOffset tagBlockSize)))))))))
+
+    (method ^:private checkZip64ExtraFieldValues :throws [ZipException] ^void [this
+                                                                               ^:mutable ^int off
+                                                                               ^:mutable ^int blockSize
+                                                                               ^long csize
+                                                                               ^long size
+                                                                               ^long locoff
+                                                                               ^int diskNo]
+      (let [cen (.-cen this)]
+        (if (== blockSize 0)
+            (when (or (or (or (== csize ZipConstants64/ZIP64_MAGICVAL)
+                              (== size ZipConstants64/ZIP64_MAGICVAL))
+                          (== locoff ZipConstants64/ZIP64_MAGICVAL))
+                      (== diskNo ZipConstants64/ZIP64_MAGICCOUNT))
+              (Source/zerror "Invalid CEN header (invalid zip64 extra data field size)"))
+            (do
+              (when-not (Source/isZip64ExtBlockSizeValid blockSize csize size locoff diskNo)
+                (Source/zerror "Invalid CEN header (invalid zip64 extra data field size)"))
+              (when (== size ZipConstants64/ZIP64_MAGICVAL)
+                (if (>= blockSize Long/BYTES)
+                    (do
+                      (when (< (ZipUtils/get64S cen off) 0)
+                        (Source/zerror "Invalid zip64 extra block size value"))
+                      (set! off (unchecked-add-int off Long/BYTES))
+                      (set! blockSize (unchecked-subtract-int blockSize Long/BYTES)))
+                    (Source/zerror "Invalid Zip64 extra block, missing size")))
+              (when (== csize ZipConstants64/ZIP64_MAGICVAL)
+                (if (>= blockSize Long/BYTES)
+                    (do
+                      (when (< (ZipUtils/get64S cen off) 0)
+                        (Source/zerror "Invalid zip64 extra block compressed size value"))
+                      (set! off (unchecked-add-int off Long/BYTES))
+                      (set! blockSize (unchecked-subtract-int blockSize Long/BYTES)))
+                    (Source/zerror "Invalid Zip64 extra block, missing compressed size")))
+              (when (== locoff ZipConstants64/ZIP64_MAGICVAL)
+                (if (>= blockSize Long/BYTES)
+                    (when (< (ZipUtils/get64S cen off) 0)
+                      (Source/zerror "Invalid zip64 extra block LOC OFFSET value"))
+                    (Source/zerror "Invalid Zip64 extra block, missing LOC offset value")))))))
+
+    (method ^:private ^:static isZip64ExtBlockSizeValid ^boolean [^int blockSize ^long csize
+                                                                  ^long size ^long locoff
+                                                                  ^int diskNo]
+      (let [expectedBlockSize (unchecked-add-int
+                                (unchecked-add-int
+                                  (unchecked-add-int
+                                    (if (== csize ZipConstants64/ZIP64_MAGICVAL) Long/BYTES 0)
+                                    (if (== size ZipConstants64/ZIP64_MAGICVAL) Long/BYTES 0))
+                                  (if (== locoff ZipConstants64/ZIP64_MAGICVAL) Long/BYTES 0))
+                                (if (== diskNo ZipConstants64/ZIP64_MAGICCOUNT) Integer/BYTES 0))]
+        (== expectedBlockSize blockSize)))
+
+    (method ^:private getEntryHash ^int [this ^int index]
+      (aget entries index))
+
+    (method ^:private getEntryNext ^int [this ^int index]
+      (aget entries (unchecked-add-int index 1)))
+
+    (method ^:private getEntryPos ^int [this ^int index]
+      (aget entries (unchecked-add-int index 2)))
+
+    (field ^:private ^:static ^:final ^int ZIP_ENDCHAIN -1)
+
+    (field ^:private ^int total)
+
+    (field ^:private ^int/1 table)
+
+    (field ^:private ^int tablelen)
+
+    (defclass ^:private ^:static Key
+      (field ^:private ^:final ^String canonicalPath)
+
+      (field ^:private ^:final ^long lastModified)
+
+      (field ^:private ^:final ^File file)
+
+      (field ^:private ^:final ^Charset charset)
+
+      (constructor ^:public [this ^File file ^String canonicalPath ^long lastModified
+                             ^Charset charset]
+        (set! (.-canonicalPath this) canonicalPath)
+        (set! (.-lastModified this) lastModified)
+        (set! (.-file this) file)
+        (set! (.-charset this) charset))
+
+      (method ^:public hashCode ^int [this]
+        (let [^:mutable ^long t (.hashCode charset)]
+          (set! t (unchecked-add t lastModified))
+          (unchecked-add-int (Long/hashCode t) (.hashCode canonicalPath))))
+
+      (method ^:public equals ^boolean [this obj]
+        (if-instance [^Key key obj]
+          (cond
+            (not (.equals charset (.-charset key))) false
+            (not (== lastModified (.-lastModified key))) false
+            :else (.equals canonicalPath (.-canonicalPath key)))
+          false)))
+
+    (field ^:private ^:static ^:final ^{:tag (HashMap Key Source)} files (HashMap.))
+
+    (method ^:static get :throws [IOException] ^Source [^File file ^boolean toDelete
+                                                        ^ZipCoder zipCoder]
+      (let [^:mutable ^Key key nil]
+        (when (>= (.indexOf (.getPath file) \u0000) 0)
+          (throw (IOException. (InvalidPathException. (.getPath file) "Nul character not allowed"))))
+        (when-not (.exists file) (throw (NoSuchFileException. (.getPath file))))
+        (set! key (Key. file (.getCanonicalPath file) (.lastModified file) (.charset zipCoder)))
+        (let [^:mutable ^Source src nil]
+          (locking files
+            (set! src (cast Source (.get files key)))
+            (when (some? src) (set! (.-refs src) (unchecked-inc-int (.-refs src))) (return src)))
+          (set! src (Source. key toDelete zipCoder))
+          (locking files
+            (let [prev (cast Source (.putIfAbsent files key src))]
+              (if (some? prev)
+                  (do (.close src) (set! (.-refs prev) (unchecked-inc-int (.-refs prev))) prev)
+                  src))))))
+
+    (method ^:static release :throws [IOException] ^void [^Source src]
+      (locking files
+        (when (and (some? src) (== (set! (.-refs src) (unchecked-dec-int (.-refs src))) 0))
+          (.remove files (.-key src))
+          (.close src))))
+
+    (constructor :throws [IOException] ^:private [this ^Key key ^boolean toDelete ^ZipCoder zipCoder]
+      (set! (.-key this) key)
+      (if toDelete
+          (do (set! (.-zfile this) (RandomAccessFile. (.-file key) "r")) (.delete (.-file key)))
+          (set! (.-zfile this) (RandomAccessFile. (.-file key) "r")))
+      (try
+        (.initCEN this -1 zipCoder)
+        (let [buf (new byte/1 4)]
+          (.readFullyAt this buf 0 4 0)
+          (set! (.-startsWithLoc this) (== (ZipUtils/LOCSIG buf) ZipConstants/LOCSIG)))
+        (catch IOException x (try (.close (.-zfile this)) (catch IOException xx)) (throw x))))
+
+    (method ^:private close :throws [IOException] ^void [this]
+      (.close zfile)
+      (set! zfile nil)
+      (set! cen nil)
+      (set! entries nil)
+      (set! table nil)
+      (set! manifestPos -1)
+      (set! manifestNum 0)
+      (set! signatureMetaNames nil)
+      (set! metaVersions nil))
+
+    (field ^:private ^:static ^:final ^int BUF_SIZE 8192)
+
+    (method ^:private ^:final readFullyAt :throws [IOException] ^int [this ^byte/1 buf
+                                                                      ^:mutable ^int off ^int len
+                                                                      ^long pos]
+      (locking zfile
+        (.seek zfile pos)
+        (let [^:mutable N len]
+          (while (> N 0)
+            (let [n (Math/min BUF_SIZE N)]
+              (.readFully zfile buf off n)
+              (set! off (unchecked-add-int off n))
+              (set! N (unchecked-subtract-int N n))))
+          len)))
+
+    (method ^:private ^:final readAt :throws [IOException] ^int [this ^byte/1 buf ^int off ^int len
+                                                                 ^long pos]
+      (locking zfile (.seek zfile pos) (.read zfile buf off len)))
+
+    (defclass ^:private ^:static End
+      (field ^long centot)
+
+      (field ^long cenlen)
+
+      (field ^long cenoff)
+
+      (field ^long endpos))
+
+    (method ^:private findEND :throws [IOException] ^End [this]
+      (let [ziplen (.length zfile)]
+        (when (<= ziplen 0) (Source/zerror "zip file is empty"))
+        (let [end (End.)
+              buf (new byte/1 ZipUtils/READBLOCKSZ)
+              minHDR (if (> (unchecked-subtract ziplen ZipUtils/END_MAXLEN) 0)
+                         (unchecked-subtract ziplen ZipUtils/END_MAXLEN)
+                         0)
+              minPos (unchecked-subtract minHDR
+                                         (unchecked-subtract-int (alength buf) ZipConstants/ENDHDR))]
+          (loop [pos (unchecked-subtract ziplen (alength buf))]
+            (when (>= pos minPos)
+              (let [^:mutable ^int off 0]
+                (when (< pos 0)
+                  (set! off (unchecked-int (unchecked-negate pos)))
+                  (Arrays/fill buf 0 off (unchecked-byte 0)))
+                (let [len (unchecked-subtract-int (alength buf) off)]
+                  (when-not (== (.readFullyAt this buf off len (unchecked-add pos off)) len)
+                    (Source/zerror "zip END header not found"))
+                  (loop [^int i (unchecked-subtract-int (alength buf) ZipConstants/ENDHDR)]
+                    (if (>= i 0)
+                        (if (== (ZipUtils/get32 buf i) ZipConstants/ENDSIG)
+                            (let [endbuf (Arrays/copyOfRange
+                                           buf
+                                           i
+                                           (unchecked-add-int i ZipConstants/ENDHDR))]
+                              (set! (.-centot end) (ZipUtils/ENDTOT endbuf))
+                              (set! (.-cenlen end) (ZipUtils/ENDSIZ endbuf))
+                              (set! (.-cenoff end) (ZipUtils/ENDOFF endbuf))
+                              (set! (.-endpos end) (unchecked-add pos i))
+                              (let [comlen (ZipUtils/ENDCOM endbuf)]
+                                (when-not (== (unchecked-add
+                                                (unchecked-add (.-endpos end) ZipConstants/ENDHDR)
+                                                comlen)
+                                              ziplen)
+                                  (let [sbuf (new byte/1 4)
+                                        cenpos (unchecked-subtract (.-endpos end) (.-cenlen end))
+                                        locpos (unchecked-subtract cenpos (.-cenoff end))]
+                                    (when (or
+                                            (or
+                                              (or
+                                                (or
+                                                  (or (< cenpos 0) (< locpos 0))
+                                                  (not
+                                                    (==
+                                                      (.readFullyAt
+                                                        this
+                                                        sbuf
+                                                        0
+                                                        (alength sbuf)
+                                                        cenpos)
+                                                      4)))
+                                                (not
+                                                  (== (ZipUtils/get32 sbuf 0) ZipConstants/CENSIG)))
+                                              (not
+                                                (==
+                                                  (.readFullyAt this sbuf 0 (alength sbuf) locpos)
+                                                  4)))
+                                            (not (== (ZipUtils/get32 sbuf 0) ZipConstants/LOCSIG)))
+                                      (continue (unchecked-dec-int i)))))
+                                (when (> comlen 0)
+                                  (set! comment (new byte/1 comlen))
+                                  (when-not (==
+                                              (.readFullyAt
+                                                this
+                                                comment
+                                                0
+                                                comlen
+                                                (unchecked-add (.-endpos end) ZipConstants/ENDHDR))
+                                              comlen)
+                                    (Source/zerror "zip comment read failed")))
+                                (try
+                                  (let [loc64 (new byte/1 ZipConstants64/ZIP64_LOCHDR)]
+                                    (when (or (or
+                                                (< (.-endpos end) ZipConstants64/ZIP64_LOCHDR)
+                                                (not
+                                                  (==
+                                                    (.readFullyAt
+                                                      this
+                                                      loc64
+                                                      0
+                                                      (alength loc64)
+                                                      (unchecked-subtract
+                                                        (.-endpos end)
+                                                        ZipConstants64/ZIP64_LOCHDR))
+                                                    (alength loc64))))
+                                              (not
+                                                (==
+                                                  (ZipUtils/get32 loc64 0)
+                                                  ZipConstants64/ZIP64_LOCSIG)))
+                                      (return end))
+                                    (let [end64pos (ZipUtils/ZIP64_LOCOFF loc64)
+                                          end64buf (new byte/1 ZipConstants64/ZIP64_ENDHDR)]
+                                      (when (or (not
+                                                  (==
+                                                    (.readFullyAt
+                                                      this
+                                                      end64buf
+                                                      0
+                                                      (alength end64buf)
+                                                      end64pos)
+                                                    (alength end64buf)))
+                                                (not
+                                                  (==
+                                                    (ZipUtils/get32 end64buf 0)
+                                                    ZipConstants64/ZIP64_ENDSIG)))
+                                        (return end))
+                                      (let [cenlen64 (ZipUtils/ZIP64_ENDSIZ end64buf)
+                                            cenoff64 (ZipUtils/ZIP64_ENDOFF end64buf)
+                                            centot64 (ZipUtils/ZIP64_ENDTOT end64buf)]
+                                        (when (or
+                                                (or
+                                                  (and
+                                                    (not (== cenlen64 (.-cenlen end)))
+                                                    (not
+                                                      (==
+                                                        (.-cenlen end)
+                                                        ZipConstants64/ZIP64_MAGICVAL)))
+                                                  (and
+                                                    (not (== cenoff64 (.-cenoff end)))
+                                                    (not
+                                                      (==
+                                                        (.-cenoff end)
+                                                        ZipConstants64/ZIP64_MAGICVAL))))
+                                                (and
+                                                  (not (== centot64 (.-centot end)))
+                                                  (not
+                                                    (==
+                                                      (.-centot end)
+                                                      ZipConstants64/ZIP64_MAGICCOUNT))))
+                                          (return end))
+                                        (set! (.-cenlen end) cenlen64)
+                                        (set! (.-cenoff end) cenoff64)
+                                        (set! (.-centot end) centot64)
+                                        (set! (.-endpos end) end64pos))))
+                                  (catch IOException x))
+                                (return end)))
+                            (recur (unchecked-dec-int i)))
+                        nil))
+                  (recur (unchecked-subtract pos
+                                             (unchecked-subtract-int
+                                               (alength buf)
+                                               ZipConstants/ENDHDR)))))))
+          (throw (ZipException. "zip END header not found")))))
+
+    (method ^:private initCEN :throws [IOException] ^void [this ^:final ^int knownTotal
+                                                           ^:final ^ZipCoder zipCoder]
+      (let [^:mutable ^byte/1 cen nil]
+        (if (== knownTotal -1)
+            (let [end (.findEND this)]
+              (when (== (.-endpos end) 0)
+                (set! locpos 0)
+                (set! total 0)
+                (set! entries (new int/1 0))
+                (set! (.-cen this) nil)
+                (return))
+              (when (> (.-cenlen end) (.-endpos end))
+                (Source/zerror "invalid END header (bad central directory size)"))
+              (let [cenpos (unchecked-subtract (.-endpos end) (.-cenlen end))]
+                (set! locpos (unchecked-subtract cenpos (.-cenoff end)))
+                (when (< locpos 0)
+                  (Source/zerror "invalid END header (bad central directory offset)"))
+                (when (> (.-cenlen end) MAX_CEN_SIZE)
+                  (Source/zerror "invalid END header (central directory size too large)"))
+                (when (or (< (.-centot end) 0)
+                          (> (.-centot end) (unchecked-divide (.-cenlen end) ZipConstants/CENHDR)))
+                  (Source/zerror "invalid END header (total entries count too large)"))
+                (set! cen (set! (.-cen this) (new byte/1 (unchecked-int (.-cenlen end)))))
+                (when-not (== (.readFullyAt this cen 0 (alength cen) cenpos) (.-cenlen end))
+                  (Source/zerror "read CEN tables failed"))
+                (set! (.-total this) (Math/toIntExact (.-centot end)))))
+            (do (set! cen (.-cen this)) (set! (.-total this) knownTotal)))
+        (let [entriesLength (unchecked-multiply-int (.-total this) 3)]
+          (set! entries (new int/1 entriesLength))
+          (let [tablelen (bit-or-int (unchecked-divide-int total 2) 1)]
+            (set! (.-tablelen this) tablelen)
+            (let [table (new int/1 tablelen)]
+              (set! (.-table this) table)
+              (Arrays/fill table ZIP_ENDCHAIN)
+              (let [^:mutable ^{:tag (ArrayList Integer)} signatureNames nil
+                    ^:mutable ^int idx 0
+                    ^:mutable ^int pos 0]
+                (set! manifestNum 0)
+                (let [limit (unchecked-subtract-int (alength cen) ZipConstants/CENHDR)]
+                  (while (<= pos limit)
+                    (when (>= idx entriesLength)
+                      (.initCEN this (Source/countCENHeaders cen) zipCoder)
+                      (return))
+                    (let [entryPos (unchecked-add-int pos ZipConstants/CENHDR)
+                          entryZipCoder (ZipFile/zipCoderFor cen pos zipCoder)
+                          nlen (.checkAndAddEntry this pos idx entryZipCoder)]
+                      (set! idx (unchecked-add-int idx 3))
+                      (when (Source/isMetaName cen entryPos nlen)
+                        (if (.isManifestName this
+                                             (unchecked-add-int entryPos META_INF_LEN)
+                                             (unchecked-subtract-int nlen META_INF_LEN))
+                            (do
+                              (set! manifestPos pos)
+                              (set! manifestNum (unchecked-inc-int manifestNum)))
+                            (do
+                              (when (.isSignatureRelated this entryPos nlen)
+                                (when (nil? signatureNames) (set! signatureNames (ArrayList. 4)))
+                                (.add signatureNames pos))
+                              (let [version (.getMetaVersion
+                                              this
+                                              (unchecked-add-int entryPos META_INF_LEN)
+                                              (unchecked-subtract-int nlen META_INF_LEN))]
+                                (when (> version 0)
+                                  (try
+                                    (let [prefixLen (unchecked-add-int
+                                                      META_INF_VERSIONS_LEN
+                                                      (DecimalDigits/stringSize version))
+                                          hashCode (.checkedHash
+                                                     entryZipCoder
+                                                     cen
+                                                     (unchecked-add-int entryPos prefixLen)
+                                                     (unchecked-subtract-int nlen prefixLen))]
+                                      (when (nil? metaVersions) (set! metaVersions (HashMap.)))
+                                      (.set (cast
+                                              BitSet
+                                              (.computeIfAbsent
+                                                metaVersions
+                                                hashCode
+                                                (lambda Function ^BitSet [^Integer _] (BitSet.))))
+                                            version))
+                                    (catch Exception e
+                                      (Source/zerror
+                                        "invalid CEN header (bad entry name or comment)"))))))))
+                      (set! pos (.nextEntryPos this pos entryPos nlen))))
+                  (set! (.-total this) (unchecked-divide-int idx 3))
+                  (when (some? signatureNames)
+                    (let [len (.size signatureNames)]
+                      (set! signatureMetaNames (new int/1 len))
+                      (loop [^int j 0]
+                        (when (< j len)
+                          (aset signatureMetaNames
+                                j
+                                (.intValue (cast Integer (.get signatureNames j))))
+                          (recur (unchecked-inc-int j))))))
+                  (when (nil? metaVersions) (set! metaVersions (Map/of)))
+                  (when-not (== pos (alength cen))
+                    (Source/zerror "invalid CEN header (bad header size)")))))))))
+
+    (method ^:private nextEntryPos ^int [this ^int pos ^int entryPos ^int nlen]
+      (unchecked-add-int
+        (unchecked-add-int (unchecked-add-int entryPos nlen) (ZipUtils/CENCOM cen pos))
+        (ZipUtils/CENEXT cen pos)))
+
+    (method ^:private ^:static zerror :throws [ZipException] ^void [^String msg]
+      (throw (ZipException. msg)))
+
+    (method ^:private getEntryPos ^EntryPos [this ^:final ^String name ^:final ^boolean addSlash
+                                             ^:final ^ZipCoder zipCoder]
+      (when-not (== total 0)
+        (let [hsh (ZipCoder/hash name)
+              ^:mutable idx (aget table
+                                  (unchecked-remainder-int (bit-and-int hsh 0x7fffffff) tablelen))
+              ^:mutable ^int dirPos -1]
+          (while (not (== idx ZIP_ENDCHAIN))
+            (when (== (.getEntryHash this idx) hsh)
+              (let [pos (.getEntryPos this idx)
+                    noff (unchecked-add-int pos ZipConstants/CENHDR)
+                    nlen (ZipUtils/CENNAM cen pos)
+                    zc (ZipFile/zipCoderFor cen pos zipCoder)]
+                (switch (.compare zc name cen noff nlen addSlash)
+                  ZipCoder/EXACT_MATCH (return (EntryPos. name pos))
+                  ZipCoder/DIRECTORY_MATCH (set! dirPos pos)
+                  ZipCoder/NO_MATCH nil)))
+            (set! idx (.getEntryNext this idx)))
+          (when-not (== dirPos -1) (EntryPos. (java-str name "/") dirPos)))))
+
+    (method ^:private ^:static isMetaName ^boolean [^byte/1 name ^:mutable ^int off ^int len]
+      (and (and (and (and (and (and (and (and (and
+                                                (and
+                                                  (> len META_INF_LEN)
+                                                  (not
+                                                    (==
+                                                      (aget
+                                                        name
+                                                        (unchecked-subtract-int
+                                                          (unchecked-add-int off len)
+                                                          1))
+                                                      \/)))
+                                                (==
+                                                  (bit-or-int
+                                                    (aget
+                                                      name
+                                                      (let [old-3 off]
+                                                        (set! off (unchecked-inc-int off))
+                                                        old-3))
+                                                    0x20)
+                                                  \m))
+                                              (==
+                                                (bit-or-int
+                                                  (aget
+                                                    name
+                                                    (let [old-4 off]
+                                                      (set! off (unchecked-inc-int off))
+                                                      old-4))
+                                                  0x20)
+                                                \e))
+                                         (== (bit-or-int
+                                               (aget
+                                                 name
+                                                 (let [old-5 off]
+                                                   (set! off (unchecked-inc-int off))
+                                                   old-5))
+                                               0x20)
+                                             \t))
+                                    (== (bit-or-int
+                                          (aget name
+                                                (let [old-6 off]
+                                                  (set! off (unchecked-inc-int off))
+                                                  old-6))
+                                          0x20)
+                                        \a))
+                               (== (aget name
+                                         (let [old-7 off] (set! off (unchecked-inc-int off)) old-7))
+                                   \-))
+                          (== (bit-or-int (aget name
+                                                (let [old-8 off]
+                                                  (set! off (unchecked-inc-int off))
+                                                  old-8))
+                                          0x20)
+                              \i))
+                     (== (bit-or-int (aget name
+                                           (let [old-9 off]
+                                             (set! off (unchecked-inc-int off))
+                                             old-9))
+                                     0x20)
+                         \n))
+                (== (bit-or-int (aget name
+                                      (let [old-10 off] (set! off (unchecked-inc-int off)) old-10))
+                                0x20)
+                    \f))
+           (== (aget name off) \/)))
+
+    (method ^:private isManifestName ^boolean [this ^:mutable ^int off ^int len]
+      (let [name cen]
+        (and (and (and (and (and (and (and (and (and
+                                                  (and
+                                                    (and
+                                                      (== len 11)
+                                                      (==
+                                                        (bit-or-int
+                                                          (aget
+                                                            name
+                                                            (let [old-11 off]
+                                                              (set! off (unchecked-inc-int off))
+                                                              old-11))
+                                                          0x20)
+                                                        \m))
+                                                    (==
+                                                      (bit-or-int
+                                                        (aget
+                                                          name
+                                                          (let [old-12 off]
+                                                            (set! off (unchecked-inc-int off))
+                                                            old-12))
+                                                        0x20)
+                                                      \a))
+                                                  (==
+                                                    (bit-or-int
+                                                      (aget
+                                                        name
+                                                        (let [old-13 off]
+                                                          (set! off (unchecked-inc-int off))
+                                                          old-13))
+                                                      0x20)
+                                                    \n))
+                                                (==
+                                                  (bit-or-int
+                                                    (aget
+                                                      name
+                                                      (let [old-14 off]
+                                                        (set! off (unchecked-inc-int off))
+                                                        old-14))
+                                                    0x20)
+                                                  \i))
+                                           (== (bit-or-int
+                                                 (aget
+                                                   name
+                                                   (let [old-15 off]
+                                                     (set! off (unchecked-inc-int off))
+                                                     old-15))
+                                                 0x20)
+                                               \f))
+                                      (== (bit-or-int
+                                            (aget
+                                              name
+                                              (let [old-16 off]
+                                                (set! off (unchecked-inc-int off))
+                                                old-16))
+                                            0x20)
+                                          \e))
+                                 (== (bit-or-int
+                                       (aget name
+                                             (let [old-17 off]
+                                               (set! off (unchecked-inc-int off))
+                                               old-17))
+                                       0x20)
+                                     \s))
+                            (== (bit-or-int (aget
+                                              name
+                                              (let [old-18 off]
+                                                (set! off (unchecked-inc-int off))
+                                                old-18))
+                                            0x20)
+                                \t))
+                       (== (aget name (let [old-19 off] (set! off (unchecked-inc-int off)) old-19))
+                           \.))
+                  (== (bit-or-int (aget
+                                    name
+                                    (let [old-20 off] (set! off (unchecked-inc-int off)) old-20))
+                                  0x20)
+                      \m))
+             (== (bit-or-int (aget name off) 0x20) \f))))
+
+    (method ^:private isSignatureRelated ^boolean [this ^int off ^int len]
+      (let [^:mutable signatureRelated false
+            name cen]
+        (cond
+          (== (aget name (unchecked-subtract-int (unchecked-add-int off len) 3)) \.)
+            (let [b1 (bit-or-int (aget name (unchecked-subtract-int (unchecked-add-int off len) 2))
+                                 0x20)
+                  b2 (bit-or-int (aget name (unchecked-subtract-int (unchecked-add-int off len) 1))
+                                 0x20)]
+              (when (or (and (== b1 \e) (== b2 \c)) (and (== b1 \s) (== b2 \f)))
+                (set! signatureRelated true)))
+          (== (aget name (unchecked-subtract-int (unchecked-add-int off len) 4)) \.)
+            (let [b1 (bit-or-int (aget name (unchecked-subtract-int (unchecked-add-int off len) 3))
+                                 0x20)
+                  b2 (bit-or-int (aget name (unchecked-subtract-int (unchecked-add-int off len) 2))
+                                 0x20)
+                  b3 (bit-or-int (aget name (unchecked-subtract-int (unchecked-add-int off len) 1))
+                                 0x20)]
+              (when (and (and (or (== b1 \r) (== b1 \d)) (== b2 \s)) (== b3 \a))
+                (set! signatureRelated true))))
+        (when (and signatureRelated
+                   (.hasSlash this
+                              name
+                              (unchecked-add-int off META_INF_LEN)
+                              (unchecked-add-int off len)))
+          (set! signatureRelated false))
+        signatureRelated))
+
+    (method ^:private hasSlash ^boolean [this ^byte/1 name ^int start ^int end]
+      (loop [^int i start]
+        (when (< i end)
+          (let [^int c (aget name i)] (if (== c \/) (return true) (recur (unchecked-inc-int i))))))
+      false)
+
+    (method ^:private getMetaVersion ^int [this ^:mutable ^int off ^int len]
+      (let [name cen
+            nend (unchecked-add-int off len)]
+        (if (not (and (and (and (and (and (and (and
+                                                 (and
+                                                   (and
+                                                     (and
+                                                       (> len 10)
+                                                       (not
+                                                         (==
+                                                           (aget
+                                                             name
+                                                             (unchecked-subtract-int
+                                                               (unchecked-add-int off len)
+                                                               1))
+                                                           \/)))
+                                                     (==
+                                                       (bit-or-int
+                                                         (aget
+                                                           name
+                                                           (let [old-21 off]
+                                                             (set! off (unchecked-inc-int off))
+                                                             old-21))
+                                                         0x20)
+                                                       \v))
+                                                   (==
+                                                     (bit-or-int
+                                                       (aget
+                                                         name
+                                                         (let [old-22 off]
+                                                           (set! off (unchecked-inc-int off))
+                                                           old-22))
+                                                       0x20)
+                                                     \e))
+                                                 (==
+                                                   (bit-or-int
+                                                     (aget
+                                                       name
+                                                       (let [old-23 off]
+                                                         (set! off (unchecked-inc-int off))
+                                                         old-23))
+                                                     0x20)
+                                                   \r))
+                                               (==
+                                                 (bit-or-int
+                                                   (aget
+                                                     name
+                                                     (let [old-24 off]
+                                                       (set! off (unchecked-inc-int off))
+                                                       old-24))
+                                                   0x20)
+                                                 \s))
+                                          (== (bit-or-int
+                                                (aget
+                                                  name
+                                                  (let [old-25 off]
+                                                    (set! off (unchecked-inc-int off))
+                                                    old-25))
+                                                0x20)
+                                              \i))
+                                     (== (bit-or-int
+                                           (aget
+                                             name
+                                             (let [old-26 off]
+                                               (set! off (unchecked-inc-int off))
+                                               old-26))
+                                           0x20)
+                                         \o))
+                                (== (bit-or-int (aget
+                                                  name
+                                                  (let [old-27 off]
+                                                    (set! off (unchecked-inc-int off))
+                                                    old-27))
+                                                0x20)
+                                    \n))
+                           (== (bit-or-int (aget
+                                             name
+                                             (let [old-28 off]
+                                               (set! off (unchecked-inc-int off))
+                                               old-28))
+                                           0x20)
+                               \s))
+                      (== (aget name (let [old-29 off] (set! off (unchecked-inc-int off)) old-29))
+                          \/)))
+            0
+            (let [^:mutable ^int version 0]
+              (while (< off nend)
+                (let [c (aget name (let [old-30 off] (set! off (unchecked-inc-int off)) old-30))]
+                  (when (== c \/) (return version))
+                  (when (or (< c \0) (> c \9)) (return 0))
+                  (set! version
+                        (unchecked-subtract-int
+                          (unchecked-add-int (unchecked-multiply-int version 10) c)
+                          \0))
+                  (when (<= version 0) (return 0))))
+              0))))
+
+    (method ^:private ^:static countCENHeaders :throws [ZipException] ^int [^byte/1 cen]
+      (let [^:mutable ^int count 0]
+        (let [^:mutable ^int p 0]
+          (while (<= p (unchecked-subtract-int (alength cen) ZipConstants/CENHDR))
+            (let [headerSize (unchecked-add-int
+                               (unchecked-add-int
+                                 (unchecked-add-int ZipConstants/CENHDR (ZipUtils/CENNAM cen p))
+                                 (ZipUtils/CENEXT cen p))
+                               (ZipUtils/CENCOM cen p))]
+              (when (> p (unchecked-subtract-int (alength cen) headerSize))
+                (Source/zerror "invalid CEN header (bad header size)"))
+              (set! p (unchecked-add-int p headerSize))
+              (set! count (unchecked-inc-int count)))))
+        count))))

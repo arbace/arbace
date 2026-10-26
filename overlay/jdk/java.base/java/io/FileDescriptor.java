@@ -6,9 +6,17 @@
  * host's standard streams, the others files the host opened. The static initializer gives
  * HostFiles the setting of a descriptor's number (the JDK's FileDescriptor gives SharedSecrets its
  * JavaIOFileDescriptorAccess so), which ProcessImpl uses for its pipes (JRT-NOTES.md "Processes").
+ * Since JC6b (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC6b") also jdk26u's attach and
+ * closeAll, through which jdk26u's RandomAccessFile closes the streams sharing its descriptor;
+ * they are transcribed from jdk26u (https://github.com/openjdk/jdk26u at baf63fb,
+ * src/java.base/share/classes/java/io/FileDescriptor.java; Copyright (c) Oracle and/or its
+ * affiliates, GPL 2 with the Classpath Exception: LICENSE.md).
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package java.io;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import jdk.internal.jrt.HostFiles;
 
@@ -19,6 +27,11 @@ import jdk.internal.jrt.HostFiles;
 public final class FileDescriptor {
 
     private int fd;
+
+    /** The streams sharing the descriptor (attach), and whether closeAll ran (jdk26u's). */
+    private Closeable parent;
+    private List<Closeable> otherParents;
+    private boolean closed;
 
     /** An invalid descriptor. */
     public FileDescriptor() {
@@ -68,6 +81,54 @@ public final class FileDescriptor {
             set(-1);
             if (n > 2) {
                 HostFiles.close(n);
+            }
+        }
+    }
+
+    /** Attaches a stream that shares the descriptor (jdk26u's attach). */
+    synchronized void attach(Closeable c) {
+        if (parent == null) {
+            // first caller gets to do this
+            parent = c;
+        } else if (otherParents == null) {
+            otherParents = new ArrayList<>();
+            otherParents.add(parent);
+            otherParents.add(c);
+        } else {
+            otherParents.add(c);
+        }
+    }
+
+    /**
+     * Closes the streams attached, then releaser, once (jdk26u's closeAll): the first exception
+     * thrown, the others suppressed.
+     */
+    @SuppressWarnings("try")
+    synchronized void closeAll(Closeable releaser) throws IOException {
+        if (!closed) {
+            closed = true;
+            IOException ioe = null;
+            try (releaser) {
+                if (otherParents != null) {
+                    for (Closeable referent : otherParents) {
+                        try {
+                            referent.close();
+                        } catch(IOException x) {
+                            if (ioe == null) {
+                                ioe = x;
+                            } else {
+                                ioe.addSuppressed(x);
+                            }
+                        }
+                    }
+                }
+            } catch(IOException ex) {
+                if (ioe != null)
+                    ex.addSuppressed(ioe);
+                ioe = ex;
+            } finally {
+                if (ioe != null)
+                    throw ioe;
             }
         }
     }

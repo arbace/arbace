@@ -2,11 +2,15 @@
 ;; HostFiles.java, doc/go/JRT-NOTES.md "Phase 2C"), the file table under the FileDescriptor,
 ;; FileInputStream and FileOutputStream written for jrt: handles 0, 1 and 2 are the host's
 ;; standard streams (Stdin, Stdout, Stderr), the others the files the host opened (Host.Open)
-;; and the program's ends of its children's pipes (process.ae, doc/go/JRT-NOTES.md "Processes").
+;; and the program's ends of its children's pipes (process.ae, doc/go/JRT-NOTES.md "Processes");
+;; since JC6b (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC6b") also the files that
+;; java.io.RandomAccessFile opens, read, writes, seeks and resizes (overlay/jdk/variants/
+;; RandomAccessFile.ae).
 (in-ns 'go.arbace.jrt)
 
 (go/file "files.go"
-  :imports [[errors "errors"] [io "io"] [fs "io/fs"] [os "os"] [sync "sync"] [unsafe "unsafe"]])
+  :imports [[errors "errors"] [io "io"] [fs "io/fs"] [os "os"] [strings "strings"] [sync "sync"]
+            [unsafe "unsafe"]])
 
 (go/func byteView "byteView is n bytes of b from off as Go's []byte (shared, not copied).\n"
   ^{:tag (slice byte)} [^{:tag (* ByteArray)} b ^int32 off ^int32 n]
@@ -31,6 +35,19 @@
   ^Throwable_I [^error err]
   (IOException_New_String (Str (.Error err))))
 
+(go/func lastErrorText
+  "lastErrorText is the text JNU_ThrowIOExceptionWithLastError gives a host error: the
+system's reason (a path error's own, the operation and path dropped), its first letter upper
+case as the C library's strerror writes it.\n"
+  ^string [^error err]
+  (let [(values pe ok) (assert (* fs/PathError) err)]
+    (when ok
+      (set! err (.-Err pe))))
+  (let [t (.Error err)]
+    (when (== (len t) 0)
+      (return t))
+    (+ (strings/ToUpper (subslice t 0 1)) (subslice t 1))))
+
 (go/func fileErrorText
   "fileErrorText is the reason the JVM's FileNotFoundException gives in parentheses.\n"
   ^string [^error err]
@@ -38,22 +55,23 @@
     (errors/Is err fs/ErrNotExist) (return "No such file or directory")
     (errors/Is err fs/ErrPermission) (return "Permission denied")
     (errors/Is err os/ErrExist) (return "File exists"))
-  (let [(values pe ok) (assert (* fs/PathError) err)]
-    (when ok
-      (return (.Error (.-Err pe))))
-    (.Error err)))
+  (lastErrorText err))
 
 (go/func HostFiles_Open0_String_I_String1__I_native
   "HostFiles_Open0_String_I_String1__I_native opens path for reading (mode 0), writing (1:
-created or truncated) or appending (2): its handle, or -1 with the reason in error[0].\n"
+created or truncated), appending (2), or reading and writing, created if missing (3; 4 and 5
+with every write synchronous, O_SYNC: RandomAccessFile's \"rws\" and \"rwd\"): its handle, or
+-1 with the reason in error[0].\n"
   ^int32 [^{:tag (* String)} path ^int32 mode ^{:tag (* RefArray)} error]
   (let [flag os/O_RDONLY]
     (switch mode
       (case [1] (set! flag (bit-or os/O_WRONLY os/O_CREATE os/O_TRUNC)))
-      (case [2] (set! flag (bit-or os/O_WRONLY os/O_CREATE os/O_APPEND))))
+      (case [2] (set! flag (bit-or os/O_WRONLY os/O_CREATE os/O_APPEND)))
+      (case [3] (set! flag (bit-or os/O_RDWR os/O_CREATE)))
+      (case [4 5] (set! flag (bit-or os/O_RDWR os/O_CREATE os/O_SYNC))))
     (let [name (.String path)]
-      (when (== mode 0)
-        ;; the JVM refuses to open a directory for reading
+      (when (or (== mode 0) (>= mode 3))
+        ;; the JVM refuses to open a directory (io_util_md.c's handleOpen: EISDIR)
         (let [(values fi err) (.Stat (CurrentHost) name)]
           (when (and (== err nil) (.-IsDir fi))
             (aset (.-A error) 0 (Str "Is a directory"))
@@ -162,3 +180,68 @@ end, as the JVM's lseek), the standard input reads them.\n"
           (when (!= err nil)
             (break)))))
     done))
+
+(go/func HostFiles_Position0_I__J_native
+  "HostFiles_Position0_I__J_native is the position of handle h's file (lseek(fd, 0,
+SEEK_CUR)).\n"
+  ^int64 [^int32 h]
+  (let [f (hostFile h)
+        (values pos err) (.Seek f 0 io/SeekCurrent)]
+    (when (!= err nil)
+      (panic (IOException_New_String (Str (lastErrorText err)))))
+    pos))
+
+(go/func HostFiles_Seek0_I_J__V_native
+  "HostFiles_Seek0_I_J__V_native sets the position of handle h's file to pos.\n"
+  [^int32 h ^int64 pos]
+  (let [f (hostFile h)
+        (values _ err) (.Seek f pos io/SeekStart)]
+    (when (!= err nil)
+      (panic (IOException_New_String (Str (lastErrorText err)))))))
+
+(go/func HostFiles_Length0_I__J_native
+  "HostFiles_Length0_I__J_native is the length of handle h's file: its size by fstat when the
+host's file tells it (the position untouched, as jdk26u's IO_GetLength: another thread may be
+reading), else its end by seeking, the position restored.\n"
+  ^int64 [^int32 h]
+  (let [f (hostFile h)
+        (values st isStat) (assert (interface (Stat [] :results [fs/FileInfo error])) f)]
+    (when isStat
+      (let [(values fi serr) (.Stat st)]
+        (when (== serr nil)
+          (return (.Size fi))))))
+  (let [f (hostFile h)
+        (values cur err) (.Seek f 0 io/SeekCurrent)]
+    (when (!= err nil)
+      (panic (IOException_New_String (Str (lastErrorText err)))))
+    (let [(values end err2) (.Seek f 0 io/SeekEnd)]
+      (when (!= err2 nil)
+        (panic (IOException_New_String (Str (lastErrorText err2)))))
+      (.Seek f cur io/SeekStart)
+      end)))
+
+(go/func HostFiles_SetLength0_I_J__V_native
+  "HostFiles_SetLength0_I_J__V_native truncates or extends handle h's file to n bytes, as
+jdk26u's RandomAccessFile.setLength0: the position kept, or moved to the new end when it was
+beyond it; a host file that cannot be resized fails as ftruncate would.\n"
+  [^int32 h ^int64 n]
+  (let [f (hostFile h)
+        (values tr ok) (assert (interface (Truncate ^error [^int64 size])) f)]
+    (when (not ok)
+      (panic (IOException_New_String (Str "setLength failed"))))
+    (let [(values cur err) (.Seek f 0 io/SeekCurrent)]
+      (when (!= err nil)
+        (panic (IOException_New_String (Str (lastErrorText err)))))
+      (when (< n 0)
+        (panic (IOException_New_String (Str "Invalid argument"))))
+      (let [terr (.Truncate tr n)]
+        (when (!= terr nil)
+          (panic (IOException_New_String (Str (lastErrorText terr))))))
+      (let [^int64 to cur
+            ^int whence io/SeekStart]
+        (when (> cur n)
+          (set! to 0)
+          (set! whence io/SeekEnd))
+        (let [(values _ serr) (.Seek f to whence)]
+          (when (!= serr nil)
+            (panic (IOException_New_String (Str (lastErrorText serr))))))))))

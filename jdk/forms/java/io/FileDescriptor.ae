@@ -2,10 +2,17 @@
 
 (in-ns 'java.io)
 
-(import '(jdk.internal.jrt HostFiles HostFiles$DescriptorAccess))
+(import '(java.util ArrayList List)
+        '(jdk.internal.jrt HostFiles HostFiles$DescriptorAccess))
 
 (defclass ^:public ^:final FileDescriptor
   (field ^:private ^int fd)
+
+  (field ^:private ^Closeable parent)
+
+  (field ^:private ^{:tag (List Closeable)} otherParents)
+
+  (field ^:private ^boolean closed)
 
   (constructor ^:public [this] (set! fd -1))
 
@@ -31,4 +38,25 @@
     (HostFiles/register this fd))
 
   (method ^:synchronized close :throws [IOException] ^void [this]
-    (let [n fd] (when-not (== n -1) (.set this -1) (when (> n 2) (HostFiles/close n))))))
+    (let [n fd] (when-not (== n -1) (.set this -1) (when (> n 2) (HostFiles/close n)))))
+
+  (method ^:synchronized attach ^void [this ^Closeable c]
+    (cond
+      (nil? parent) (set! parent c)
+      (nil? otherParents)
+        (do (set! otherParents (ArrayList.)) (.add otherParents parent) (.add otherParents c))
+      :else (.add otherParents c)))
+
+  (method ^:synchronized closeAll :throws [IOException] ^void [this ^Closeable releaser]
+    (when-not closed
+      (set! closed true)
+      (let [^:mutable ^IOException ioe nil]
+        (try
+          (with-resources [releaser releaser]
+            (when (some? otherParents)
+              (for-each [^Closeable referent otherParents]
+                (try
+                  (.close referent)
+                  (catch IOException x (if (nil? ioe) (set! ioe x) (.addSuppressed ioe x)))))))
+          (catch IOException ex (when (some? ioe) (.addSuppressed ex ioe)) (set! ioe ex))
+          (finally (when (some? ioe) (throw ioe))))))))

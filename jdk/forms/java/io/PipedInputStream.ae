@@ -1,0 +1,159 @@
+;; Converted from jdk26u src/java.base/share/classes/java/io/PipedInputStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.io)
+
+(import '(java.util Objects))
+
+(defclass ^:public PipedInputStream
+  :extends InputStream
+
+  (field ^boolean closedByWriter)
+
+  (field ^:volatile ^boolean closedByReader)
+
+  (field ^boolean connected)
+
+  (field ^Thread readSide)
+
+  (field ^Thread writeSide)
+
+  (field ^:private ^:static ^:final ^int DEFAULT_PIPE_SIZE 1024)
+
+  (field ^:protected ^:static ^:final ^int PIPE_SIZE DEFAULT_PIPE_SIZE)
+
+  (field ^:protected ^byte/1 buffer)
+
+  (field ^:protected ^int in -1)
+
+  (field ^:protected ^int out 0)
+
+  (constructor :throws [IOException] ^:public [this ^PipedOutputStream src]
+    (this. src DEFAULT_PIPE_SIZE))
+
+  (constructor :throws [IOException] ^:public [this ^PipedOutputStream src ^int pipeSize]
+    (.initPipe this pipeSize)
+    (.connect this src))
+
+  (constructor ^:public [this] (.initPipe this DEFAULT_PIPE_SIZE))
+
+  (constructor ^:public [this ^int pipeSize] (.initPipe this pipeSize))
+
+  (method ^:private initPipe ^void [this ^int pipeSize]
+    (when (<= pipeSize 0) (throw (IllegalArgumentException. "Pipe Size <= 0")))
+    (set! buffer (new byte/1 pipeSize)))
+
+  (method ^:public connect :throws [IOException] ^void [this ^PipedOutputStream src]
+    (.connect src this))
+
+  (method ^:protected ^:synchronized receive :throws [IOException] ^void [this ^int b]
+    (.checkStateForReceive this)
+    (set! writeSide (Thread/currentThread))
+    (when (== in out) (.awaitSpace this))
+    (when (< in 0) (set! in 0) (set! out 0))
+    (aset buffer
+          (let [old-1 in] (set! in (unchecked-inc-int in)) old-1)
+          (unchecked-byte (bit-and-int b 0xFF)))
+    (when (>= in (alength buffer)) (set! in 0)))
+
+  (method ^:synchronized receive :throws [IOException] ^void [this ^byte/1 b ^:mutable ^int off
+                                                              ^int len]
+    (.checkStateForReceive this)
+    (set! writeSide (Thread/currentThread))
+    (let [^:mutable bytesToTransfer len]
+      (while (> bytesToTransfer 0)
+        (when (== in out) (.awaitSpace this))
+        (let [^:mutable ^int nextTransferAmount 0]
+          (cond
+            (< out in) (set! nextTransferAmount (unchecked-subtract-int (alength buffer) in))
+            (< in out)
+              (if (== in -1)
+                  (do
+                    (set! in (set! out 0))
+                    (set! nextTransferAmount (unchecked-subtract-int (alength buffer) in)))
+                  (set! nextTransferAmount (unchecked-subtract-int out in))))
+          (when (> nextTransferAmount bytesToTransfer) (set! nextTransferAmount bytesToTransfer))
+          (java-assert (> nextTransferAmount 0))
+          (System/arraycopy b off buffer in nextTransferAmount)
+          (set! bytesToTransfer (unchecked-subtract-int bytesToTransfer nextTransferAmount))
+          (set! off (unchecked-add-int off nextTransferAmount))
+          (set! in (unchecked-add-int in nextTransferAmount))
+          (when (>= in (alength buffer)) (set! in 0))))))
+
+  (method ^:private checkStateForReceive :throws [IOException] ^void [this]
+    (cond
+      (not connected) (throw (IOException. "Pipe not connected"))
+      (or closedByWriter closedByReader) (throw (IOException. "Pipe closed"))
+      (and (some? readSide) (not (.isAlive readSide))) (throw (IOException. "Read end dead"))))
+
+  (method ^:private awaitSpace :throws [IOException] ^void [this]
+    (while (== in out)
+      (.checkStateForReceive this)
+      (.notifyAll this)
+      (try (.wait this 1000) (catch InterruptedException ex (throw (InterruptedIOException.))))))
+
+  (method ^:synchronized receivedLast ^void [this]
+    (set! closedByWriter true)
+    (.notifyAll this))
+
+  (method ^:public ^:synchronized read :throws [IOException] ^int [this]
+    (cond
+      (not connected) (throw (IOException. "Pipe not connected"))
+      closedByReader (throw (IOException. "Pipe closed"))
+      (and (and (and (some? writeSide) (not (.isAlive writeSide))) (not closedByWriter)) (< in 0))
+        (throw (IOException. "Write end dead")))
+    (set! readSide (Thread/currentThread))
+    (let [^:mutable ^int trials 2]
+      (while (< in 0)
+        (when closedByWriter (return -1))
+        (when (and (and (some? writeSide) (not (.isAlive writeSide)))
+                   (< (set! trials (unchecked-dec-int trials)) 0))
+          (throw (IOException. "Pipe broken")))
+        (.notifyAll this)
+        (try (.wait this 1000) (catch InterruptedException ex (throw (InterruptedIOException.)))))
+      (let [ret (bit-and-int (aget buffer
+                                   (let [old-2 out] (set! out (unchecked-inc-int out)) old-2))
+                             0xFF)]
+        (when (>= out (alength buffer)) (set! out 0))
+        (when (== in out) (set! in -1))
+        ret)))
+
+  (method ^:public ^:synchronized read :throws [IOException] ^int [this ^byte/1 b ^int off
+                                                                   ^:mutable ^int len]
+    (when (nil? b) (throw (NullPointerException.)))
+    (Objects/checkFromIndexSize off len (alength b))
+    (if (== len 0)
+        0
+        (let [c (.read this)]
+          (if (< c 0)
+              -1
+              (do
+                (aset b off (unchecked-byte c))
+                (let [^:mutable ^int rlen 1]
+                  (while (and (>= in 0) (> len 1))
+                    (let [^:mutable ^int available (if (> in out)
+                                                       (Math/min
+                                                         (unchecked-subtract-int
+                                                           (alength buffer)
+                                                           out)
+                                                         (unchecked-subtract-int in out))
+                                                       (unchecked-subtract-int (alength buffer) out))]
+                      (when (> available (unchecked-subtract-int len 1))
+                        (set! available (unchecked-subtract-int len 1)))
+                      (System/arraycopy buffer out b (unchecked-add-int off rlen) available)
+                      (set! out (unchecked-add-int out available))
+                      (set! rlen (unchecked-add-int rlen available))
+                      (set! len (unchecked-subtract-int len available))
+                      (when (>= out (alength buffer)) (set! out 0))
+                      (when (== in out) (set! in -1))))
+                  rlen))))))
+
+  (method ^:public ^:synchronized available :throws [IOException] ^int [this]
+    (cond
+      (< in 0) 0
+      (== in out) (alength buffer)
+      (> in out) (unchecked-subtract-int in out)
+      :else (unchecked-subtract-int (unchecked-add-int in (alength buffer)) out)))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (set! closedByReader true)
+    (locking this (set! in -1))))

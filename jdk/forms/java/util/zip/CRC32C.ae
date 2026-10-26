@@ -1,0 +1,354 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/zip/CRC32C.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.util.zip)
+
+(import '(java.nio ByteBuffer ByteOrder)
+        '(jdk.internal.misc Unsafe)
+        '(jdk.internal.util Preconditions)
+        '(jdk.internal.vm.annotation IntrinsicCandidate))
+
+(defclass ^:public ^:final CRC32C
+  :implements [Checksum]
+
+  (field ^:private ^:static ^:final ^int CRC32C_POLY 0x1EDC6F41)
+
+  (field ^:private ^:static ^:final ^int REVERSED_CRC32C_POLY (Integer/reverse CRC32C_POLY))
+
+  (field ^:private ^:static ^:final ^Unsafe UNSAFE (Unsafe/getUnsafe))
+
+  (field ^:private ^:static ^:final ^int/1 byteTable)
+
+  (field ^:private ^:static ^:final ^int/2 byteTables (new int/2 8 256))
+
+  (field ^:private ^:static ^:final ^int/1 byteTable0 (aget byteTables 0))
+
+  (field ^:private ^:static ^:final ^int/1 byteTable1 (aget byteTables 1))
+
+  (field ^:private ^:static ^:final ^int/1 byteTable2 (aget byteTables 2))
+
+  (field ^:private ^:static ^:final ^int/1 byteTable3 (aget byteTables 3))
+
+  (field ^:private ^:static ^:final ^int/1 byteTable4 (aget byteTables 4))
+
+  (field ^:private ^:static ^:final ^int/1 byteTable5 (aget byteTables 5))
+
+  (field ^:private ^:static ^:final ^int/1 byteTable6 (aget byteTables 6))
+
+  (field ^:private ^:static ^:final ^int/1 byteTable7 (aget byteTables 7))
+
+  (static-initializer
+    (loop [^int index 0]
+      (when (< index (alength (aget byteTables 0)))
+        (let [^:mutable r index]
+          (loop [^int i 0]
+            (if (< i Byte/SIZE)
+                (if (not (== (bit-and-int r 1) 0))
+                    (do
+                      (set! r (bit-xor-int (unsigned-bit-shift-right-int r 1) REVERSED_CRC32C_POLY))
+                      (recur (unchecked-inc-int i)))
+                    (do (set! r (unsigned-bit-shift-right-int r 1)) (recur (unchecked-inc-int i))))
+                nil))
+          (aset (aget byteTables 0) index r)
+          (recur (unchecked-inc-int index)))))
+    (loop [^int index 0]
+      (when (< index (alength (aget byteTables 0)))
+        (let [^:mutable r (aget byteTables 0 index)]
+          (loop [^int k 1]
+            (when (< k (alength byteTables))
+              (set! r
+                    (bit-xor-int (aget byteTables 0 (bit-and-int r 0xFF))
+                                 (unsigned-bit-shift-right-int r 8)))
+              (aset (aget byteTables k) index r)
+              (recur (unchecked-inc-int k))))
+          (recur (unchecked-inc-int index)))))
+    (if (identical? (ByteOrder/nativeOrder) ByteOrder/LITTLE_ENDIAN)
+        (set! byteTable (aget byteTables 0))
+        (do
+          (set! byteTable (new int/1 (alength byteTable0)))
+          (System/arraycopy byteTable0 0 byteTable 0 (alength byteTable0))
+          (for-each [^int/1 table byteTables]
+            (loop [^int index 0]
+              (when (< index (alength table))
+                (aset table index (Integer/reverseBytes (aget table index)))
+                (recur (unchecked-inc-int index))))))))
+
+  (field ^:private ^int crc (unchecked-int 0xFFFFFFFF))
+
+  (constructor ^:public [this])
+
+  (method ^:public update ^void [this ^int b]
+    (set! crc
+          (bit-xor-int (unsigned-bit-shift-right-int crc 8)
+                       (aget byteTable (bit-and-int (bit-xor-int crc (bit-and-int b 0xFF)) 0xFF)))))
+
+  (method ^:public update ^void [this ^byte/1 b ^int off ^int len]
+    (when (nil? b) (throw (NullPointerException.)))
+    (Preconditions/checkFromIndexSize off len (alength b) Preconditions/AIOOBE_FORMATTER)
+    (set! crc (CRC32C/updateBytes crc b off (unchecked-add-int off len))))
+
+  (method ^:public update ^void [this ^ByteBuffer buffer]
+    (let [pos (.position buffer)
+          limit (.limit buffer)]
+      (java-assert (<= pos limit))
+      (let [rem (unchecked-subtract-int limit pos)]
+        (when-not (<= rem 0)
+          (cond
+            (.isDirect buffer)
+              (do
+                (.acquireSession ZipUtils/NIO_ACCESS buffer)
+                (try
+                  (set! crc
+                        (CRC32C/updateDirectByteBuffer
+                          crc
+                          (.getBufferAddress ZipUtils/NIO_ACCESS buffer)
+                          pos
+                          limit))
+                  (finally (.releaseSession ZipUtils/NIO_ACCESS buffer))))
+            (.hasArray buffer)
+              (set! crc
+                    (CRC32C/updateBytes crc
+                                        (.array buffer)
+                                        (unchecked-add-int pos (.arrayOffset buffer))
+                                        (unchecked-add-int limit (.arrayOffset buffer))))
+            :else
+              (let [b (new byte/1 (^[int int] Math/min (.remaining buffer) 4096))]
+                (while (.hasRemaining buffer)
+                  (let [length (Math/min (.remaining buffer) (alength b))]
+                    (.get buffer b 0 length)
+                    (.update this b 0 length)))))
+          (.position buffer limit)))))
+
+  (method ^:public reset ^void [this]
+    (set! crc (unchecked-int 0xFFFFFFFF)))
+
+  (method ^:public getValue ^long [this]
+    (bit-and (bit-not-int crc) 0xFFFFFFFF))
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} updateBytes ^int [^:mutable ^int crc
+                                                                          ^byte/1 b
+                                                                          ^:mutable ^int off
+                                                                          ^int end]
+    (when (and (>= (unchecked-subtract-int end off) 8) (== Unsafe/ARRAY_BYTE_INDEX_SCALE 1))
+      (let [alignLength (bit-and (unchecked-subtract
+                                   8
+                                   (bit-and (unchecked-add Unsafe/ARRAY_BYTE_BASE_OFFSET off) 0x7))
+                                 0x7)]
+        (let [alignEnd (unchecked-add off alignLength)]
+          (while (< off alignEnd)
+            (set! crc
+                  (bit-xor-int (unsigned-bit-shift-right-int crc 8)
+                               (aget byteTable (bit-and-int (bit-xor-int crc (aget b off)) 0xFF))))
+            (set! off (unchecked-inc-int off))))
+        (when (identical? (ByteOrder/nativeOrder) ByteOrder/BIG_ENDIAN)
+          (set! crc (Integer/reverseBytes crc)))
+        (while (< off (unchecked-subtract-int end Long/BYTES))
+          (let [^:mutable ^int firstHalf 0
+                ^:mutable ^int secondHalf 0]
+            (if (== Unsafe/ADDRESS_SIZE 4)
+                (do
+                  (set! firstHalf
+                        (.getInt UNSAFE b (unchecked-add Unsafe/ARRAY_BYTE_BASE_OFFSET off)))
+                  (set! secondHalf
+                        (.getInt UNSAFE
+                                 b
+                                 (unchecked-add (unchecked-add Unsafe/ARRAY_BYTE_BASE_OFFSET off)
+                                                Integer/BYTES))))
+                (let [value (.getLong UNSAFE b (unchecked-add Unsafe/ARRAY_BYTE_BASE_OFFSET off))]
+                  (if (identical? (ByteOrder/nativeOrder) ByteOrder/LITTLE_ENDIAN)
+                      (do
+                        (set! firstHalf (unchecked-int value))
+                        (set! secondHalf (unchecked-int (unsigned-bit-shift-right value 32))))
+                      (do
+                        (set! firstHalf (unchecked-int (unsigned-bit-shift-right value 32)))
+                        (set! secondHalf (unchecked-int value))))))
+            (set! crc (bit-xor-int crc firstHalf))
+            (if (identical? (ByteOrder/nativeOrder) ByteOrder/LITTLE_ENDIAN)
+                (set! crc
+                      (bit-xor-int (bit-xor-int (bit-xor-int
+                                                  (bit-xor-int
+                                                    (bit-xor-int
+                                                      (bit-xor-int
+                                                        (bit-xor-int
+                                                          (aget byteTable7 (bit-and-int crc 0xFF))
+                                                          (aget
+                                                            byteTable6
+                                                            (bit-and-int
+                                                              (unsigned-bit-shift-right-int crc 8)
+                                                              0xFF)))
+                                                        (aget
+                                                          byteTable5
+                                                          (bit-and-int
+                                                            (unsigned-bit-shift-right-int crc 16)
+                                                            0xFF)))
+                                                      (aget
+                                                        byteTable4
+                                                        (unsigned-bit-shift-right-int crc 24)))
+                                                    (aget byteTable3 (bit-and-int secondHalf 0xFF)))
+                                                  (aget
+                                                    byteTable2
+                                                    (bit-and-int
+                                                      (unsigned-bit-shift-right-int secondHalf 8)
+                                                      0xFF)))
+                                                (aget
+                                                  byteTable1
+                                                  (bit-and-int
+                                                    (unsigned-bit-shift-right-int secondHalf 16)
+                                                    0xFF)))
+                                   (aget byteTable0 (unsigned-bit-shift-right-int secondHalf 24))))
+                (set!
+                  crc
+                  (bit-xor-int (bit-xor-int (bit-xor-int
+                                              (bit-xor-int
+                                                (bit-xor-int
+                                                  (bit-xor-int
+                                                    (bit-xor-int
+                                                      (aget
+                                                        byteTable0
+                                                        (bit-and-int secondHalf 0xFF))
+                                                      (aget
+                                                        byteTable1
+                                                        (bit-and-int
+                                                          (unsigned-bit-shift-right-int
+                                                            secondHalf
+                                                            8)
+                                                          0xFF)))
+                                                    (aget
+                                                      byteTable2
+                                                      (bit-and-int
+                                                        (unsigned-bit-shift-right-int secondHalf 16)
+                                                        0xFF)))
+                                                  (aget
+                                                    byteTable3
+                                                    (unsigned-bit-shift-right-int secondHalf 24)))
+                                                (aget byteTable4 (bit-and-int crc 0xFF)))
+                                              (aget
+                                                byteTable5
+                                                (bit-and-int
+                                                  (unsigned-bit-shift-right-int crc 8)
+                                                  0xFF)))
+                                            (aget
+                                              byteTable6
+                                              (bit-and-int
+                                                (unsigned-bit-shift-right-int crc 16)
+                                                0xFF)))
+                               (aget byteTable7 (unsigned-bit-shift-right-int crc 24))))))
+          (set! off (unchecked-add-int off Long/BYTES)))
+        (when (identical? (ByteOrder/nativeOrder) ByteOrder/BIG_ENDIAN)
+          (set! crc (Integer/reverseBytes crc)))))
+    (while (< off end)
+      (set! crc
+            (bit-xor-int (unsigned-bit-shift-right-int crc 8)
+                         (aget byteTable (bit-and-int (bit-xor-int crc (aget b off)) 0xFF))))
+      (set! off (unchecked-inc-int off)))
+    crc)
+
+  (method ^:private ^:static ^{IntrinsicCandidate true} updateDirectByteBuffer ^int [^:mutable ^int crc
+                                                                                     ^long address
+                                                                                     ^:mutable ^int off
+                                                                                     ^int end]
+    (when (>= (unchecked-subtract-int end off) 8)
+      (let [alignLength (bit-and-int (unchecked-subtract-int
+                                       8
+                                       (unchecked-int (bit-and (unchecked-add address off) 0x7)))
+                                     0x7)]
+        (let [alignEnd (unchecked-add-int off alignLength)]
+          (while (< off alignEnd)
+            (set! crc
+                  (bit-xor-int (unsigned-bit-shift-right-int crc 8)
+                               (aget byteTable
+                                     (bit-and-int
+                                       (bit-xor-int
+                                         crc
+                                         (.getByte UNSAFE (unchecked-add address off)))
+                                       0xFF))))
+            (set! off (unchecked-inc-int off))))
+        (when (identical? (ByteOrder/nativeOrder) ByteOrder/BIG_ENDIAN)
+          (set! crc (Integer/reverseBytes crc)))
+        (while (<= off (unchecked-subtract-int end Long/BYTES))
+          (let [firstHalf (.getInt UNSAFE (unchecked-add address off))
+                secondHalf (.getInt UNSAFE
+                                    (unchecked-add (unchecked-add address off) Integer/BYTES))]
+            (set! crc (bit-xor-int crc firstHalf))
+            (if (identical? (ByteOrder/nativeOrder) ByteOrder/LITTLE_ENDIAN)
+                (set! crc
+                      (bit-xor-int (bit-xor-int (bit-xor-int
+                                                  (bit-xor-int
+                                                    (bit-xor-int
+                                                      (bit-xor-int
+                                                        (bit-xor-int
+                                                          (aget byteTable7 (bit-and-int crc 0xFF))
+                                                          (aget
+                                                            byteTable6
+                                                            (bit-and-int
+                                                              (unsigned-bit-shift-right-int crc 8)
+                                                              0xFF)))
+                                                        (aget
+                                                          byteTable5
+                                                          (bit-and-int
+                                                            (unsigned-bit-shift-right-int crc 16)
+                                                            0xFF)))
+                                                      (aget
+                                                        byteTable4
+                                                        (unsigned-bit-shift-right-int crc 24)))
+                                                    (aget byteTable3 (bit-and-int secondHalf 0xFF)))
+                                                  (aget
+                                                    byteTable2
+                                                    (bit-and-int
+                                                      (unsigned-bit-shift-right-int secondHalf 8)
+                                                      0xFF)))
+                                                (aget
+                                                  byteTable1
+                                                  (bit-and-int
+                                                    (unsigned-bit-shift-right-int secondHalf 16)
+                                                    0xFF)))
+                                   (aget byteTable0 (unsigned-bit-shift-right-int secondHalf 24))))
+                (set!
+                  crc
+                  (bit-xor-int (bit-xor-int (bit-xor-int
+                                              (bit-xor-int
+                                                (bit-xor-int
+                                                  (bit-xor-int
+                                                    (bit-xor-int
+                                                      (aget
+                                                        byteTable0
+                                                        (bit-and-int secondHalf 0xFF))
+                                                      (aget
+                                                        byteTable1
+                                                        (bit-and-int
+                                                          (unsigned-bit-shift-right-int
+                                                            secondHalf
+                                                            8)
+                                                          0xFF)))
+                                                    (aget
+                                                      byteTable2
+                                                      (bit-and-int
+                                                        (unsigned-bit-shift-right-int secondHalf 16)
+                                                        0xFF)))
+                                                  (aget
+                                                    byteTable3
+                                                    (unsigned-bit-shift-right-int secondHalf 24)))
+                                                (aget byteTable4 (bit-and-int crc 0xFF)))
+                                              (aget
+                                                byteTable5
+                                                (bit-and-int
+                                                  (unsigned-bit-shift-right-int crc 8)
+                                                  0xFF)))
+                                            (aget
+                                              byteTable6
+                                              (bit-and-int
+                                                (unsigned-bit-shift-right-int crc 16)
+                                                0xFF)))
+                               (aget byteTable7 (unsigned-bit-shift-right-int crc 24))))))
+          (set! off (unchecked-add-int off Long/BYTES)))
+        (when (identical? (ByteOrder/nativeOrder) ByteOrder/BIG_ENDIAN)
+          (set! crc (Integer/reverseBytes crc)))))
+    (while (< off end)
+      (set! crc
+            (bit-xor-int (unsigned-bit-shift-right-int crc 8)
+                         (aget byteTable
+                               (bit-and-int (bit-xor-int
+                                              crc
+                                              (.getByte UNSAFE (unchecked-add address off)))
+                                            0xFF))))
+      (set! off (unchecked-inc-int off)))
+    crc))

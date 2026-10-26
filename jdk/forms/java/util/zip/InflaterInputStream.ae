@@ -1,62 +1,96 @@
-;; Converted from overlay/jdk/java.base/java/util/zip/InflaterInputStream.java by arbace.repr.java. Regenerate rather than edit.
+;; Converted from jdk26u src/java.base/share/classes/java/util/zip/InflaterInputStream.java by arbace.repr.java. Regenerate rather than edit.
 
 (in-ns 'java.util.zip)
 
-(import '(java.io ByteArrayInputStream EOFException FilterInputStream IOException InputStream)
+(import '(java.io EOFException FilterInputStream IOException InputStream)
         '(java.util Objects))
 
 (defclass ^:public InflaterInputStream
   :extends FilterInputStream
 
-  (field ^:private ^:static ^:final ^String UNEXPECTED_EOF "Unexpected end of ZLIB input stream")
+  (field ^:protected ^Inflater inf)
 
-  (field ^:private ^ByteArrayInputStream inflated)
+  (field ^:protected ^byte/1 buf)
 
-  (field ^:private ^boolean closed)
+  (field ^:protected ^int len)
 
-  (constructor ^:public [this ^InputStream in]
-    (super. in)
-    (when (nil? in) (throw (NullPointerException.))))
+  (field ^:private ^boolean closed false)
+
+  (field ^:private ^boolean reachEOF false)
 
   (method ^:private ensureOpen :throws [IOException] ^void [this]
     (when closed (throw (IOException. "Stream closed"))))
 
-  (method ^:private inflated :throws [IOException] ^ByteArrayInputStream [this]
-    (when (nil? inflated)
-      (let [error (new String/1 1)
-            data (InflaterInputStream/inflate0 (.readAllBytes (.-in this)) error)]
-        (when (nil? data)
-          (when (.equals UNEXPECTED_EOF (aget error 0)) (throw (EOFException. UNEXPECTED_EOF)))
-          (throw (ZipException. (aget error 0))))
-        (set! inflated (ByteArrayInputStream. data))))
-    inflated)
+  (constructor ^:public [this ^InputStream in ^Inflater inf ^int size]
+    (super. in)
+    (cond
+      (or (nil? in) (nil? inf)) (throw (NullPointerException.))
+      (<= size 0) (throw (IllegalArgumentException. "buffer size <= 0")))
+    (set! (.-inf this) inf)
+    (set! buf (new byte/1 size)))
+
+  (constructor ^:public [this ^InputStream in ^Inflater inf]
+    (this. in inf 512))
+
+  (field ^boolean usesDefaultInflater false)
+
+  (constructor ^:public [this ^InputStream in]
+    (this. in ^Inflater (when (some? in) (Inflater.)))
+    (set! usesDefaultInflater true))
+
+  (field ^:private ^:final ^byte/1 singleByteBuf (new byte/1 1))
 
   (method ^:public read :throws [IOException] ^int [this]
     (.ensureOpen this)
-    (.read (.inflated this)))
+    (if (== (.read this singleByteBuf 0 1) -1) -1 (Byte/toUnsignedInt (aget singleByteBuf 0))))
 
   (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
     (.ensureOpen this)
+    (when (nil? b) (throw (NullPointerException.)))
     (Objects/checkFromIndexSize off len (alength b))
-    (if (== len 0) 0 (.read (.inflated this) b off len)))
+    (if (== len 0)
+        0
+        (try
+          (let [^:mutable ^int n 0]
+            (loop []
+              (when (or (.finished inf) (.needsDictionary inf)) (set! reachEOF true) (return -1))
+              (when (and (.needsInput inf) (not (.hasPendingOutput inf))) (.fill this))
+              (when (== (set! n (.inflate inf b off len)) 0) (recur)))
+            n)
+          (catch DataFormatException e
+            (let [s (.getMessage e)]
+              (throw (ZipException. ^String (if (some? s) s "Invalid ZLIB data format"))))))))
 
   (method ^:public available :throws [IOException] ^int [this]
     (.ensureOpen this)
-    (if (> (.available (.inflated this)) 0) 1 0))
+    (cond reachEOF 0 (.finished inf) (do (set! reachEOF true) 0) :else 1))
 
   (method ^:public skip :throws [IOException] ^long [this ^long n]
     (when (< n 0) (throw (IllegalArgumentException. "negative skip length")))
     (.ensureOpen this)
-    (.skip (.inflated this) n))
+    (let [max (unchecked-int (Math/min n Integer/MAX_VALUE))
+          ^:mutable ^int total 0
+          b (new byte/1 (^[int int] Math/min max 512))]
+      (while (< total max)
+        (let [^:mutable len (unchecked-subtract-int max total)]
+          (when (> len (alength b)) (set! len (alength b)))
+          (set! len (.read this b 0 len))
+          (when (== len -1) (set! reachEOF true) (break))
+          (set! total (unchecked-add-int total len))))
+      total))
 
   (method ^:public close :throws [IOException] ^void [this]
-    (when-not closed (set! closed true) (.close (.-in this))))
+    (when-not closed (when usesDefaultInflater (.end inf)) (.close (.-in this)) (set! closed true)))
+
+  (method ^:protected fill :throws [IOException] ^void [this]
+    (.ensureOpen this)
+    (set! len (.read (.-in this) buf 0 (alength buf)))
+    (when (== len -1) (throw (EOFException. "Unexpected end of ZLIB input stream")))
+    (.setInput inf buf 0 len))
 
   (method ^:public markSupported ^boolean [this] false)
 
-  (method ^:public ^:synchronized mark ^void [this ^int readlimit])
+  (method ^:public mark ^void [this ^int readlimit])
 
-  (method ^:public ^:synchronized reset :throws [IOException] ^void [this]
-    (throw (IOException. "mark/reset not supported")))
-
-  (method ^:private ^:static ^:native inflate0 ^byte/1 [^byte/1 input ^String/1 error]))
+  (method ^:public reset :throws [IOException] ^void [this]
+    (throw (IOException. "mark/reset not supported"))))

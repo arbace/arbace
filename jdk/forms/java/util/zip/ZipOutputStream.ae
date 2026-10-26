@@ -1,0 +1,542 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/zip/ZipOutputStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.util.zip)
+
+(import '(java.io IOException OutputStream)
+        '(java.nio.charset Charset)
+        '(java.util HashSet Objects Vector)
+        '(sun.nio.cs UTF_8))
+
+(defclass ^:public ZipOutputStream
+  :extends DeflaterOutputStream
+  :implements [ZipConstants]
+
+  (field ^:private ^:static ^:final ^boolean inhibitZip64
+    (Boolean/getBoolean "jdk.util.zip.inhibitZip64"))
+
+  (defclass ^:private ^:static XEntry
+    (field ^:final ^ZipEntry entry)
+
+    (field ^:final ^long offset)
+
+    (constructor ^:public [this ^ZipEntry entry ^long offset]
+      (set! (.-entry this) entry)
+      (set! (.-offset this) offset)))
+
+  (field ^:private ^XEntry current)
+
+  (field ^:private ^{:tag (Vector XEntry)} xentries (Vector.))
+
+  (field ^:private ^{:tag (HashSet String)} names (HashSet.))
+
+  (field ^:private ^CRC32 crc (CRC32.))
+
+  (field ^:private ^long written 0)
+
+  (field ^:private ^long locoff 0)
+
+  (field ^:private ^byte/1 comment)
+
+  (field ^:private ^int method DEFLATED)
+
+  (field ^:private ^boolean finished)
+
+  (field ^:private ^boolean closed false)
+
+  (field ^:private ^:final ^ZipCoder zc)
+
+  (method ^:private ^:static version :throws [ZipException] ^int [^ZipEntry e]
+    (switch (.-method e)
+      DEFLATED 20
+      STORED 10
+      (throw (ZipException. "unsupported compression method"))))
+
+  (method ^:private ensureOpen :throws [IOException] ^void [this]
+    (when closed (throw (IOException. "Stream closed"))))
+
+  (field ^:public ^:static ^:final ^int STORED ZipEntry/STORED)
+
+  (field ^:public ^:static ^:final ^int DEFLATED ZipEntry/DEFLATED)
+
+  (constructor ^:public [this ^OutputStream out]
+    (this. out UTF_8/INSTANCE))
+
+  (constructor ^:public [this ^OutputStream out ^Charset charset]
+    (super. out ^Deflater (when (some? out) (Deflater. Deflater/DEFAULT_COMPRESSION true)))
+    (when (nil? charset) (throw (NullPointerException. "charset is null")))
+    (set! (.-zc this) (ZipCoder/get charset))
+    (set! (.-usesDefaultDeflater this) true))
+
+  (method ^:public setComment ^void [this ^String comment]
+    (let [^:mutable ^byte/1 bytes nil]
+      (when (some? comment)
+        (set! bytes (.getBytes zc comment))
+        (when (> (alength bytes) 0xffff)
+          (throw (IllegalArgumentException. "ZIP file comment too long"))))
+      (set! (.-comment this) bytes)))
+
+  (method ^:public setMethod ^void [this ^int method]
+    (when (and (not (== method DEFLATED)) (not (== method STORED)))
+      (throw (IllegalArgumentException. "invalid compression method")))
+    (set! (.-method this) method))
+
+  (method ^:public setLevel ^void [this ^int level]
+    (.setLevel (.-def this) level))
+
+  (method ^:public putNextEntry :throws [IOException] ^void [this ^ZipEntry e]
+    (.ensureOpen this)
+    (when (some? current) (.closeEntry this))
+    (when (== (.-xdostime e) -1) (.setTime e (System/currentTimeMillis)))
+    (when (== (.-method e) -1) (set! (.-method e) method))
+    (set! (.-flag e) 0)
+    (switch (.-method e)
+      DEFLATED
+        (when (or (or (or (== (.-size e) -1) (== (.-csize e) -1)) (== (.-crc e) -1))
+                  (not (.-csizeSet e)))
+          (set! (.-flag e) 8))
+      STORED
+        (do
+          (cond
+            (== (.-size e) -1) (set! (.-size e) (.-csize e))
+            (== (.-csize e) -1) (set! (.-csize e) (.-size e))
+            :else
+              (when-not (== (.-size e) (.-csize e))
+                (throw (ZipException. "STORED entry where compressed != uncompressed size"))))
+          (when (or (== (.-size e) -1) (== (.-crc e) -1))
+            (throw (ZipException. "STORED entry missing size, compressed size, or crc-32"))))
+      (throw (ZipException. "unsupported compression method")))
+    (when-not (.add names (.-name e))
+      (throw (ZipException. (java-str "duplicate entry: " (.-name e)))))
+    (when (.isUTF8 zc) (set! (.-flag e) (bit-or-int (.-flag e) ZipConstants64/USE_UTF8)))
+    (when-not (ZipEntry/isCENHeaderValid (.-name e) (.-extra e) (.-comment e))
+      (throw (ZipException. "invalid CEN header (bad header size)")))
+    (set! current (XEntry. e written))
+    (.add xentries current)
+    (.writeLOC this current))
+
+  (method ^:public closeEntry :throws [IOException] ^void [this]
+    (.ensureOpen this)
+    (when (some? current)
+      (try
+        (let [e (.-entry current)]
+          (switch (.-method e)
+            DEFLATED
+              (do
+                (.finish (.-def this))
+                (while (not (.finished (.-def this))) (.deflate this))
+                (if (== (bit-and-int (.-flag e) 8) 0)
+                    (do
+                      (when-not (== (.-size e) (.getBytesRead (.-def this)))
+                        (throw (ZipException.
+                                 (java-str "invalid entry size (expected "
+                                           (.-size e)
+                                           " but got "
+                                           (.getBytesRead (.-def this))
+                                           " bytes)"))))
+                      (when-not (== (.-csize e) (.getBytesWritten (.-def this)))
+                        (throw (ZipException.
+                                 (java-str "invalid entry compressed size (expected "
+                                           (.-csize e)
+                                           " but got "
+                                           (.getBytesWritten (.-def this))
+                                           " bytes)"))))
+                      (when-not (== (.-crc e) (.getValue crc))
+                        (throw (ZipException.
+                                 (java-str "invalid entry CRC-32 (expected 0x"
+                                           (Long/toHexString (.-crc e))
+                                           " but got 0x"
+                                           (Long/toHexString (.getValue crc))
+                                           ")")))))
+                    (do
+                      (set! (.-size e) (.getBytesRead (.-def this)))
+                      (set! (.-csize e) (.getBytesWritten (.-def this)))
+                      (set! (.-crc e) (.getValue crc))
+                      (.writeEXT this e)))
+                (.reset (.-def this))
+                (set! written (unchecked-add written (.-csize e))))
+            STORED
+              (do
+                (when-not (== (.-size e) (unchecked-subtract written locoff))
+                  (throw (ZipException.
+                           (java-str "invalid entry size (expected "
+                                     (.-size e)
+                                     " but got "
+                                     (unchecked-subtract written locoff)
+                                     " bytes)"))))
+                (when-not (== (.-crc e) (.getValue crc))
+                  (throw (ZipException.
+                           (java-str "invalid entry crc-32 (expected 0x"
+                                     (Long/toHexString (.-crc e))
+                                     " but got 0x"
+                                     (Long/toHexString (.getValue crc))
+                                     ")")))))
+            (throw (ZipException. "invalid compression method")))
+          (.reset crc)
+          (set! current nil))
+        (catch IOException e
+          (when (and (and (.shouldFinish (.-def this)) (.-usesDefaultDeflater this))
+                     (not (instance? ZipException e)))
+            (.end (.-def this)))
+          (throw e)))))
+
+  (method ^:public ^:synchronized write :throws [IOException] ^void [this ^byte/1 b ^int off
+                                                                     ^int len]
+    (.ensureOpen this)
+    (Objects/checkFromIndexSize off len (alength b))
+    (when-not (== len 0)
+      (when (nil? current) (throw (ZipException. "no current ZIP entry")))
+      (let [entry (.-entry current)]
+        (switch (.-method entry)
+          DEFLATED (.write super b off len)
+          STORED
+            (do
+              (set! written (unchecked-add written len))
+              (when (> (unchecked-subtract written locoff) (.-size entry))
+                (throw (ZipException. "attempt to write past end of STORED entry")))
+              (.write (.-out this) b off len))
+          (throw (ZipException. "invalid compression method")))
+        (.update crc b off len))))
+
+  (method ^:public finish :throws [IOException] ^void [this]
+    (.ensureOpen this)
+    (when-not finished
+      (when (some? current) (.closeEntry this))
+      (let [off written]
+        (for-each [^XEntry xentry xentries] (.writeCEN this xentry))
+        (.writeEND this off (unchecked-subtract written off))
+        (set! finished true))))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when-not closed (.close super) (set! closed true)))
+
+  (method ^:private writeLOC :throws [IOException] ^void [this ^XEntry xentry]
+    (let [e (.-entry xentry)
+          flag (.-flag e)
+          ^:mutable hasZip64 false
+          ^:mutable elen (.getExtraLen this (.-extra e))]
+      (.writeInt this ZipOutputStream/LOCSIG)
+      (if (== (bit-and-int flag 8) 8)
+          (do
+            (.writeShort this (ZipOutputStream/version e))
+            (.writeShort this flag)
+            (.writeShort this (.-method e))
+            (.writeInt this (.-xdostime e))
+            (.writeInt this 0)
+            (.writeInt this 0)
+            (.writeInt this 0))
+          (do
+            (if (or (>= (.-csize e) ZipConstants64/ZIP64_MAGICVAL)
+                    (>= (.-size e) ZipConstants64/ZIP64_MAGICVAL))
+                (do (set! hasZip64 true) (.writeShort this 45))
+                (.writeShort this (ZipOutputStream/version e)))
+            (.writeShort this flag)
+            (.writeShort this (.-method e))
+            (.writeInt this (.-xdostime e))
+            (.writeInt this (.-crc e))
+            (if hasZip64
+                (do
+                  (.writeInt this ZipConstants64/ZIP64_MAGICVAL)
+                  (.writeInt this ZipConstants64/ZIP64_MAGICVAL)
+                  (set! elen (unchecked-add-int elen 20)))
+                (do (.writeInt this (.-csize e)) (.writeInt this (.-size e))))))
+      (let [nameBytes (.getBytes zc (.-name e))]
+        (.writeShort this (alength nameBytes))
+        (let [^:mutable ^int elenEXTT 0
+              ^:mutable ^int flagEXTT 0
+              ^:mutable umtime -1
+              ^:mutable uatime -1
+              ^:mutable uctime -1]
+          (when (some? (.-mtime e))
+            (set! elenEXTT (unchecked-add-int elenEXTT 4))
+            (set! flagEXTT (bit-or-int flagEXTT ZipConstants64/EXTT_FLAG_LMT))
+            (set! umtime (ZipUtils/fileTimeToUnixTime (.-mtime e))))
+          (when (some? (.-atime e))
+            (set! elenEXTT (unchecked-add-int elenEXTT 4))
+            (set! flagEXTT (bit-or-int flagEXTT ZipConstants64/EXTT_FLAG_LAT))
+            (set! uatime (ZipUtils/fileTimeToUnixTime (.-atime e))))
+          (when (some? (.-ctime e))
+            (set! elenEXTT (unchecked-add-int elenEXTT 4))
+            (set! flagEXTT (bit-or-int flagEXTT ZipConstants64/EXTT_FLAT_CT))
+            (set! uctime (ZipUtils/fileTimeToUnixTime (.-ctime e))))
+          (when-not (== flagEXTT 0)
+            (if (or (or (> umtime ZipUtils/UPPER_UNIXTIME_BOUND)
+                        (> uatime ZipUtils/UPPER_UNIXTIME_BOUND))
+                    (> uctime ZipUtils/UPPER_UNIXTIME_BOUND))
+                (set! elen (unchecked-add-int elen 36))
+                (set! elen (unchecked-add-int elen (unchecked-add-int elenEXTT 5)))))
+          (.writeShort this elen)
+          (.writeBytes this nameBytes 0 (alength nameBytes))
+          (when hasZip64
+            (.writeShort this ZipConstants64/EXTID_ZIP64)
+            (.writeShort this 16)
+            (.writeLong this (.-size e))
+            (.writeLong this (.-csize e)))
+          (when-not (== flagEXTT 0)
+            (if (or (or (> umtime ZipUtils/UPPER_UNIXTIME_BOUND)
+                        (> uatime ZipUtils/UPPER_UNIXTIME_BOUND))
+                    (> uctime ZipUtils/UPPER_UNIXTIME_BOUND))
+                (do
+                  (.writeShort this ZipConstants64/EXTID_NTFS)
+                  (.writeShort this 32)
+                  (.writeInt this 0)
+                  (.writeShort this 0x0001)
+                  (.writeShort this 24)
+                  (.writeLong this
+                              (if (nil? (.-mtime e))
+                                  ZipUtils/WINDOWS_TIME_NOT_AVAILABLE
+                                  (ZipUtils/fileTimeToWinTime (.-mtime e))))
+                  (.writeLong this
+                              (if (nil? (.-atime e))
+                                  ZipUtils/WINDOWS_TIME_NOT_AVAILABLE
+                                  (ZipUtils/fileTimeToWinTime (.-atime e))))
+                  (.writeLong this
+                              (if (nil? (.-ctime e))
+                                  ZipUtils/WINDOWS_TIME_NOT_AVAILABLE
+                                  (ZipUtils/fileTimeToWinTime (.-ctime e)))))
+                (do
+                  (.writeShort this ZipConstants64/EXTID_EXTT)
+                  (.writeShort this (unchecked-add-int elenEXTT 1))
+                  (.writeByte this flagEXTT)
+                  (when (some? (.-mtime e)) (.writeInt this umtime))
+                  (when (some? (.-atime e)) (.writeInt this uatime))
+                  (when (some? (.-ctime e)) (.writeInt this uctime)))))
+          (.writeExtra this (.-extra e))
+          (set! locoff written)))))
+
+  (method ^:private writeEXT :throws [IOException] ^void [this ^ZipEntry e]
+    (.writeInt this ZipOutputStream/EXTSIG)
+    (.writeInt this (.-crc e))
+    (if (or (>= (.-csize e) ZipConstants64/ZIP64_MAGICVAL)
+            (>= (.-size e) ZipConstants64/ZIP64_MAGICVAL))
+        (do (.writeLong this (.-csize e)) (.writeLong this (.-size e)))
+        (do (.writeInt this (.-csize e)) (.writeInt this (.-size e)))))
+
+  (method ^:private versionMadeBy ^int [this ^ZipEntry e ^int version]
+    (if (< (.-externalFileAttributes e) 0)
+        version
+        (bit-or-int ZipUtils/VERSION_MADE_BY_BASE_UNIX (bit-and-int version 0xff))))
+
+  (method ^:private writeCEN :throws [IOException] ^void [this ^XEntry xentry]
+    (let [e (.-entry xentry)
+          flag (.-flag e)
+          version (ZipOutputStream/version e)
+          ^:mutable csize (.-csize e)
+          ^:mutable size (.-size e)
+          ^:mutable offset (.-offset xentry)
+          ^:mutable ^int elenZIP64 0
+          ^:mutable hasZip64 false]
+      (when (>= (.-csize e) ZipConstants64/ZIP64_MAGICVAL)
+        (set! csize ZipConstants64/ZIP64_MAGICVAL)
+        (set! elenZIP64 (unchecked-add-int elenZIP64 8))
+        (set! hasZip64 true))
+      (when (>= (.-size e) ZipConstants64/ZIP64_MAGICVAL)
+        (set! size ZipConstants64/ZIP64_MAGICVAL)
+        (set! elenZIP64 (unchecked-add-int elenZIP64 8))
+        (set! hasZip64 true))
+      (when (>= (.-offset xentry) ZipConstants64/ZIP64_MAGICVAL)
+        (set! offset ZipConstants64/ZIP64_MAGICVAL)
+        (set! elenZIP64 (unchecked-add-int elenZIP64 8))
+        (set! hasZip64 true))
+      (.writeInt this ZipOutputStream/CENSIG)
+      (if hasZip64
+          (do (.writeShort this (.versionMadeBy this e 45)) (.writeShort this 45))
+          (do (.writeShort this (.versionMadeBy this e version)) (.writeShort this version)))
+      (.writeShort this flag)
+      (.writeShort this (.-method e))
+      (.writeInt this (.-xdostime e))
+      (.writeInt this (.-crc e))
+      (.writeInt this csize)
+      (.writeInt this size)
+      (let [nameBytes (.getBytes zc (.-name e))
+            nlen (alength nameBytes)]
+        (.writeShort this nlen)
+        (let [^:mutable elen (.getExtraLen this (.-extra e))]
+          (when hasZip64 (set! elen (unchecked-add-int elen (unchecked-add-int elenZIP64 4))))
+          (let [^:mutable ^int clen 0
+                ^:mutable ^byte/1 commentBytes nil]
+            (when (some? (.-comment e))
+              (set! commentBytes (.getBytes zc (.-comment e)))
+              (set! clen (alength commentBytes)))
+            (let [headerSize (unchecked-add
+                               (unchecked-add (unchecked-add (long ZipOutputStream/CENHDR) nlen)
+                                              clen)
+                               elen)]
+              (when (> headerSize 0xFFFF)
+                (throw (ZipException. "invalid CEN header (bad header size)")))
+              (let [^:mutable ^int flagEXTT 0
+                    ^:mutable umtime -1
+                    ^:mutable uatime -1
+                    ^:mutable uctime -1]
+                (when (some? (.-mtime e))
+                  (set! flagEXTT (bit-or-int flagEXTT ZipConstants64/EXTT_FLAG_LMT))
+                  (set! umtime (ZipUtils/fileTimeToUnixTime (.-mtime e))))
+                (when (some? (.-atime e))
+                  (set! flagEXTT (bit-or-int flagEXTT ZipConstants64/EXTT_FLAG_LAT))
+                  (set! uatime (ZipUtils/fileTimeToUnixTime (.-atime e))))
+                (when (some? (.-ctime e))
+                  (set! flagEXTT (bit-or-int flagEXTT ZipConstants64/EXTT_FLAT_CT))
+                  (set! uctime (ZipUtils/fileTimeToUnixTime (.-ctime e))))
+                (when-not (== flagEXTT 0)
+                  (if (or (or (> umtime ZipUtils/UPPER_UNIXTIME_BOUND)
+                              (> uatime ZipUtils/UPPER_UNIXTIME_BOUND))
+                          (> uctime ZipUtils/UPPER_UNIXTIME_BOUND))
+                      (set! elen (unchecked-add-int elen 36))
+                      (do
+                        (set! elen (unchecked-add-int elen 5))
+                        (when (some? (.-mtime e)) (set! elen (unchecked-add-int elen 4))))))
+                (.writeShort this elen)
+                (.writeShort this clen)
+                (.writeShort this 0)
+                (.writeShort this 0)
+                (.writeInt this
+                           (if (> (.-externalFileAttributes e) 0)
+                               (bit-shift-left-int (.-externalFileAttributes e) 16)
+                               0))
+                (.writeInt this offset)
+                (.writeBytes this nameBytes 0 nlen)
+                (when hasZip64
+                  (.writeShort this ZipConstants64/EXTID_ZIP64)
+                  (.writeShort this elenZIP64)
+                  (when (== size ZipConstants64/ZIP64_MAGICVAL) (.writeLong this (.-size e)))
+                  (when (== csize ZipConstants64/ZIP64_MAGICVAL) (.writeLong this (.-csize e)))
+                  (when (== offset ZipConstants64/ZIP64_MAGICVAL)
+                    (.writeLong this (.-offset xentry))))
+                (when-not (== flagEXTT 0)
+                  (if (or (or (> umtime ZipUtils/UPPER_UNIXTIME_BOUND)
+                              (> uatime ZipUtils/UPPER_UNIXTIME_BOUND))
+                          (> uctime ZipUtils/UPPER_UNIXTIME_BOUND))
+                      (do
+                        (.writeShort this ZipConstants64/EXTID_NTFS)
+                        (.writeShort this 32)
+                        (.writeInt this 0)
+                        (.writeShort this 0x0001)
+                        (.writeShort this 24)
+                        (.writeLong this
+                                    (if (nil? (.-mtime e))
+                                        ZipUtils/WINDOWS_TIME_NOT_AVAILABLE
+                                        (ZipUtils/fileTimeToWinTime (.-mtime e))))
+                        (.writeLong this
+                                    (if (nil? (.-atime e))
+                                        ZipUtils/WINDOWS_TIME_NOT_AVAILABLE
+                                        (ZipUtils/fileTimeToWinTime (.-atime e))))
+                        (.writeLong this
+                                    (if (nil? (.-ctime e))
+                                        ZipUtils/WINDOWS_TIME_NOT_AVAILABLE
+                                        (ZipUtils/fileTimeToWinTime (.-ctime e)))))
+                      (do
+                        (.writeShort this ZipConstants64/EXTID_EXTT)
+                        (if (some? (.-mtime e))
+                            (do
+                              (.writeShort this 5)
+                              (.writeByte this flagEXTT)
+                              (.writeInt this umtime))
+                            (do (.writeShort this 1) (.writeByte this flagEXTT))))))
+                (.writeExtra this (.-extra e))
+                (when (some? commentBytes) (.writeBytes this commentBytes 0 clen)))))))))
+
+  (method ^:private writeEND :throws [IOException] ^void [this ^long off ^long len]
+    (let [^:mutable hasZip64 false
+          ^:mutable xlen len
+          ^:mutable xoff off]
+      (when (>= xlen ZipConstants64/ZIP64_MAGICVAL)
+        (set! xlen ZipConstants64/ZIP64_MAGICVAL)
+        (set! hasZip64 true))
+      (when (>= xoff ZipConstants64/ZIP64_MAGICVAL)
+        (set! xoff ZipConstants64/ZIP64_MAGICVAL)
+        (set! hasZip64 true))
+      (let [^:mutable count (.size xentries)]
+        (when (>= count ZipConstants64/ZIP64_MAGICCOUNT)
+          (set! hasZip64 (let [a-1 hasZip64 b-2 (not inhibitZip64)] (or a-1 b-2)))
+          (when hasZip64 (set! count ZipConstants64/ZIP64_MAGICCOUNT)))
+        (when hasZip64
+          (let [off64 written]
+            (.writeInt this ZipConstants64/ZIP64_ENDSIG)
+            (.writeLong this (unchecked-subtract-int ZipConstants64/ZIP64_ENDHDR 12))
+            (.writeShort this 45)
+            (.writeShort this 45)
+            (.writeInt this 0)
+            (.writeInt this 0)
+            (.writeLong this (.size xentries))
+            (.writeLong this (.size xentries))
+            (.writeLong this len)
+            (.writeLong this off)
+            (.writeInt this ZipConstants64/ZIP64_LOCSIG)
+            (.writeInt this 0)
+            (.writeLong this off64)
+            (.writeInt this 1)))
+        (.writeInt this ZipOutputStream/ENDSIG)
+        (.writeShort this 0)
+        (.writeShort this 0)
+        (.writeShort this count)
+        (.writeShort this count)
+        (.writeInt this xlen)
+        (.writeInt this xoff)
+        (if (some? comment)
+            (do (.writeShort this (alength comment)) (.writeBytes this comment 0 (alength comment)))
+            (.writeShort this 0)))))
+
+  (method ^:private getExtraLen ^int [this ^byte/1 extra]
+    (if (nil? extra)
+        0
+        (let [^:mutable ^int skipped 0
+              len (alength extra)
+              ^:mutable ^int off 0]
+          (while (<= (unchecked-add-int off 4) len)
+            (let [tag (ZipUtils/get16 extra off)
+                  sz (ZipUtils/get16 extra (unchecked-add-int off 2))]
+              (when (or (< sz 0) (> (unchecked-add-int (unchecked-add-int off 4) sz) len)) (break))
+              (when (or (== tag ZipConstants64/EXTID_EXTT) (== tag ZipConstants64/EXTID_ZIP64))
+                (set! skipped (unchecked-add-int skipped (unchecked-add-int sz 4))))
+              (set! off (unchecked-add-int off (unchecked-add-int sz 4)))))
+          (unchecked-subtract-int len skipped))))
+
+  (method ^:private writeExtra :throws [IOException] ^void [this ^byte/1 extra]
+    (when (some? extra)
+      (let [len (alength extra)
+            ^:mutable ^int off 0]
+        (while (<= (unchecked-add-int off 4) len)
+          (let [tag (ZipUtils/get16 extra off)
+                sz (ZipUtils/get16 extra (unchecked-add-int off 2))]
+            (when (or (< sz 0) (> (unchecked-add-int (unchecked-add-int off 4) sz) len))
+              (.writeBytes this extra off (unchecked-subtract-int len off))
+              (return))
+            (when (and (not (== tag ZipConstants64/EXTID_EXTT))
+                       (not (== tag ZipConstants64/EXTID_ZIP64)))
+              (.writeBytes this extra off (unchecked-add-int sz 4)))
+            (set! off (unchecked-add-int off (unchecked-add-int sz 4)))))
+        (when (< off len) (.writeBytes this extra off (unchecked-subtract-int len off))))))
+
+  (method ^:private writeByte :throws [IOException] ^void [this ^int v]
+    (let [out (.-out this)]
+      (.write out (bit-and-int v 0xff))
+      (set! written (unchecked-add written 1))))
+
+  (method ^:private writeShort :throws [IOException] ^void [this ^int v]
+    (let [out (.-out this)]
+      (.write out (bit-and-int (unsigned-bit-shift-right-int v 0) 0xff))
+      (.write out (bit-and-int (unsigned-bit-shift-right-int v 8) 0xff))
+      (set! written (unchecked-add written 2))))
+
+  (method ^:private writeInt :throws [IOException] ^void [this ^long v]
+    (let [out (.-out this)]
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 0) 0xff)))
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 8) 0xff)))
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 16) 0xff)))
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 24) 0xff)))
+      (set! written (unchecked-add written 4))))
+
+  (method ^:private writeLong :throws [IOException] ^void [this ^long v]
+    (let [out (.-out this)]
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 0) 0xff)))
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 8) 0xff)))
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 16) 0xff)))
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 24) 0xff)))
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 32) 0xff)))
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 40) 0xff)))
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 48) 0xff)))
+      (.write out (unchecked-int (bit-and (unsigned-bit-shift-right v 56) 0xff)))
+      (set! written (unchecked-add written 8))))
+
+  (method ^:private writeBytes :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+    (.write (.-out super) b off len)
+    (set! written (unchecked-add written len))))
