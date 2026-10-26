@@ -2155,3 +2155,23 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   (doc/IOS-REPL-SURVEY.md) parked: fine as they are, not forgotten, revisited later piece by piece; the work
   focuses on the three crops and C23. Everything of them leaves `bin/gate --full`, already for REAP9's run (the
   tag claims the three crops); their scripts, targets and files stay, run by hand.
+
+## 2026-10-26: the final re-seed; the parked steps out of `--full`; REAP9's full gate: 2 steps to fix
+
+- The final re-seed (branch `reseed-3` at `1cab756c`, commit `efdd2fe1`, merged `15ec5547`; on Sonnet): the
+  fixpoint: host `30c75b94` (154,796,192 bytes) != G1 = G2 = G3 = `45df0046` (156,426,400); `bin/seed --make`:
+  18,798,868 bytes, 2,093 files, SHA-256 `b4ac198d`; `bin/seed --verify`: printed again at `1cab756c`, the same
+  tree (`3795dd49`) and archive, stage 0 = G1 = G2 = G3 = `45df0046`, 2,226 s. It carries JC6b's jrt.
+- The parked sub-projects' steps out of `bin/gate --full` (branch `gate-park`, merged `9b46fb30`; on Sonnet):
+  `box-forms`, `box-smoke`, `box-oracle`, `box-suite`, `box-goi`, `repr-haskell`, `repr-rust`, `toolchain`, and in
+  `repr-go` `bin/box-vendor roundtrip`, `kvm-tests`, `purego-check` and `bin/tamago-vendor verify`; the scripts
+  and targets kept; CLAUDE.md's `bin/gate` paragraph names them parked. The essential gate passed (37m05s).
+- My slip: with REAP9's `bin/gate --full` just started in main, I ran `bin/reap` there, which built stage 0 into
+  the same `target/seed`; the gate's stage 0 failed in 11 s on the race (`prepare failed`). Rerun with nothing
+  else in main.
+- REAP9's `bin/gate --full` on `9b46fb30`: 168m44s, 35 of 37 steps ok (the fixpoint 23m52s, javac,
+  repr-go-native, goi, goi-aot, the compiled suite, the programs...); failed: `repr-java-roundtrip` (12 jdk-corpus
+  files new with JC6b differ at the classes level, as JC6b never ran the round trip; StreamTokenizer also at the
+  ae level) and `java-check-full` (t04272 UserDirChangedTest, path-dependent in main's checkout; t04819
+  EnqueuePollRace and t05565 LockStep failing twice; t04602 ExecWithInput flaky in no class). Being fixed on
+  branch `reap9-fixes` (on Sonnet); the clean full gate then runs again.
