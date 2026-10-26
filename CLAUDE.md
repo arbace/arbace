@@ -237,7 +237,7 @@ Prior art:
   own Java and j2g variants for that world in `overlay/jdk/javac/`; since JN7 also the JDK build's
   tools `bin/jrt-convert`'s generate step runs on the tool, `make/jdk/src/classes/build/tools` as
   module `buildtools`, with java.xml's SAX parser and the JDK classes they need beyond the
-  program's, `overlay/jdk/javac/closure.txt`, and jrt's own zlib `Deflater`; since JFS48 (b) the
+  program's, `overlay/jdk/javac/closure.txt`, and jrt's zlib ports (`Deflater` since JN7, in the shipped world since JC6b with `Inflater`); since JFS48 (b) the
   langtools tools `make/langtools/tools/{compileproperties,propertiesparser}`, which generate
   jdk.compiler's resource bundles and `CompilerProperties`/`LauncherProperties` on the tool in
   `convert`'s generate step, compared with the build tree's, and since JFS52 (b) `flagsgenerator`,
