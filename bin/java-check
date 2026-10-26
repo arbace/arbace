@@ -95,10 +95,12 @@
 #                      @compile options say; and with -g:none ... for the classes level), each main
 #                      action run twice (in an empty .tmp/java-check/w/ID, -Dtest.src=DIR -Dtest.classes=...,
 #                      HotSpot's JIT options dropped, -Xmx2g, 60 s; stdout's digest and length with the
-#                      run's places masked, JCS70 (a), also with identity hash codes masked, JCS17 (b)); the golden-diagnostics tests' actions by the JDK's javac in place,
+#                      run's places masked, JCS70 (a), also with identity hash codes masked, JCS17 (b);
+#                      "-" for the digests of a run the two runs disagreed on, JCS80 (a); stderr's first
+#                      line with the places masked, JCS84 (a)); the golden-diagnostics tests' actions by the JDK's javac in place,
 #                      each output's digest and whether it is the golden file's; written as
-#                      test/java/ref-jdk26.edn (--only REGEX: the plans it finds, the other tests' lines kept;
-#                      kind.diagnostics, the golden tests).
+#                      test/java/ref-jdk26.edn (--only REGEX: the plans it finds, the other tests' lines kept
+#                      byte for byte and checked to be, JCS68 (a); kind.diagnostics, the golden tests).
 #                      JDK names the jdk26u checkout (default /root/jdk26u), its commit the platform's
 #   bin/java-check --forms verify|update
 #                      the essential tests' forms (test/java/forms/ID, test/java/forms/provenance.edn):
@@ -136,6 +138,8 @@ classes_sha() { (cd "$1" && find . -name '*.class' | LC_ALL=C sort | xargs -r -d
 since_t0() { echo "$((SECONDS - t0)) s"; }
 first_line() { tr -d '\r' < "$1" | grep -v '^$' | head -1 | tr '\t' ' ' | cut -c1-300; }
 classes_opts=(-g:none -nowarn -XDsuppressNotes -proc:none -implicit:none)
+# root_cause ERR: "; caused by: C" for stderr's last "Caused by:" line, else nothing
+root_cause() { local c; c=$(tr -d '\r' < "$1" | grep '^Caused by: ' | tail -1 | sed 's/^Caused by: //' | tr '\t' ' ' | cut -c1-200); [ -z "$c" ] || printf '; caused by: %s' "$c"; }
 # stdout with identity hash codes masked (JCS17 (b)): an @ and 6 to 8 hex digits, as
 # Object.toString writes them
 mask_hashes() { sed -E 's/@[0-9a-f]{6,8}/@HASH/g'; }
@@ -217,7 +221,8 @@ record_runs() {
       sha256sum < "$d/out.m" | cut -c1-64 > "$d/run$i.out$k"
       # identity hash codes masked (JCS17 (b))
       mask_hashes < "$d/out.m" | sha256sum | cut -c1-64 > "$d/run$i.masked$k"
-      if [ -z "$k" ]; then stat -c %s "$d/out.m" > "$d/run$i.len"; first_line "$d/err" > "$d/run$i.err1"; fi
+      # stderr's first line (the JDK's failure reason) with the run's places masked as stdout is (JCS84 (a))
+      if [ -z "$k" ]; then stat -c %s "$d/out.m" > "$d/run$i.len"; first_line "$d/err" | mask_dirs "$w" "$tmp" > "$d/run$i.err1"; fi
     done
   done < "$d/runs.tsv"
   rm -rf "$w" "$tmp" "$cls_dir" "$d/out" "$d/out.m" "$d/err"
@@ -254,8 +259,11 @@ record_ref() {
   export -f record_diag diag_actions diag_root diag_norm diag_first_diff
   : > "$work/empty"
   xargs -a "$list" -P "$jobs" -I{} bash -c 'record_diag "$1"' _ {}
+  cp "$ref" "$work/ref-before.edn"
   jc gather "$work" "$ref" "$corpora"
   jc gather-diag "$work" "$ref"
+  # a partial run (--only) changes no line but its plans' (JCS68 (a))
+  [ -z "$only" ] || jc ref-unchanged "$work" "$work/ref-before.edn" "$ref"
   echo "java-check --record-ref: $((SECONDS - t0)) s"
 }
 
@@ -413,7 +421,10 @@ read_opts() {
 judge() {
   local st=$1 out=$2 err=$3 sha len msha want
   if [ "$st" = 124 ] || [ "$st" = 137 ]; then printf 'timeout\t%s s\n' "$timeout"; return 0; fi
-  if [ "$st" != "${x[2]}" ]; then printf 'fail\tstatus %s (the JDK'"'"'s %s): %s\n' "$st" "${x[2]}" "$(first_line "$err")"; return 0; fi
+  # the reason: stderr's first line, and its root cause when it has one (the last "Caused by:"
+  # line: an ExceptionInInitializerError's, a wrapping RuntimeException's), so that the classes
+  # take the cause (JC6, the catch-alls named)
+  if [ "$st" != "${x[2]}" ]; then printf 'fail\tstatus %s (the JDK'"'"'s %s): %s%s\n' "$st" "${x[2]}" "$(first_line "$err")" "$(root_cause "$err")"; return 0; fi
   [ "${x[5]}" = 1 ] || [ "${x[7]}" = 1 ] || return 0
   mask_dirs "$w" "$tmp" < "$out" > "$out.m"; mv "$out.m" "$out"
   sha=$(sha256sum < "$out" | cut -c1-16); len=$(stat -c %s "$out")
@@ -741,7 +752,7 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
-  export -f check_one read_opts first_line classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
+  export -f check_one read_opts first_line root_cause classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
   export root work jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
   case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
@@ -981,7 +992,7 @@ essential_compiled() {
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f compiled_one run_actions judge first_line mask_hashes mask_dirs run_dirs test_dir
+  export -f compiled_one run_actions judge first_line root_cause mask_hashes mask_dirs run_dirs test_dir
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"
   # a timeout runs again once, alone, with twice the limit (JCS47 (a)): beside the gate's other

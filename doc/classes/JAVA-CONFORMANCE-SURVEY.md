@@ -34,7 +34,8 @@ Contents: Executive summary · 1 Today · 2 What goi's check is, and what Java's
 corpora · 4 What "pass" means · 5 Measurements · 6 What the failures say · 7 The tool:
 `bin/java-check` · 8 Plan (JC1-JC8) · 9 Proposals (JCS1-JCS15) · Decided · As built: JC1
 (JCS16-JCS25) · 10 Risks · 11 Sources · Appendix A: the scripts · As built: JC4 (JCS30-JCS33) ·
-As built: JC2 (JCS40-JCS49) · As built: JC3 (JCS50-JCS55).
+As built: JC2 (JCS40-JCS49) · As built: JC3 (JCS50-JCS55) · As built: JC2b (JCS70-JCS79) · As built:
+harness follow-ups (JCS80-JCS89) · As built: JC5 (JCS60-JCS69) · As built: JC6 (JCS90-JCS99).
 
 ## Executive summary
 
@@ -2237,3 +2238,415 @@ passing, 8 not: the printer on JC5's new forms, a cast around a conditional, an 
 `:j2g-unresolved` keeps 169 tests: JCS44's import-named refusals did not change these messages (JCS69 (b)).
 `bin/repr-java check --jdk --update`: 103 of jdk26u's 13,566 files' hashes changed (the files of several
 top-level classes, JCS30 (b), and the converter's new casts).
+
+## As built: JC6 (2026-10-25)
+
+Branch `java-check-jc6`, from main `e0f5a2bc` (JC5, REAP7b, the harness follow-ups on it). §8's JC6: the
+corpus widened (RPS7 (a), JCS10's categories), every level run and recorded on it, the world's classes
+ranked by tests at stake per jrt change and proposed (JCS90-JCS99, below: decided by the user, none built),
+the catch-alls `:other` and `:world-other` taken apart into named classes, and the items decided for JC6:
+JCS62 (a), JCS65 (a), JCS66 (a), JCS67 (c), JCS68 (a), JCS73 (a), JCS74 (a), JCS77 (a), JCS80 (a), JCS84
+(a), RPS83 (a), RPS84 (a), RPS85 (a) and the print level's eight cases of JC5's forms. JCS72 (b) stays
+(`:j2g-world`, JCS9x below decide the world). The executables: this branch's gate build (`bin/arbace-go
+--gate-build`, by stage 0) interprets and hosts j2g (`JAVA_CHECK_EXE`, `J2G_GO_EXE`), its `aot/` the
+compiled namespaces (`JAVA_CHECK_AOT`, `JAVA_CHECK_AOT_STALE_OK=1` as the harness follow-ups ran);
+javac's tool executable built from this checkout (`bin/arbace-go --build-java`, key `c6512fc6…`) for the
+records, the conversions and repr/java's checks (the first runs, for the triage, on main's tool with
+`REPR_JAVA_STALE_OK=1`); the JDK the system's 26.0.2.1 for `--record-ref`; 8 jobs, shards of 500, every
+heavy run in one of the host's slots, `GOMEMLIMIT=16GiB` (the host's memory beside other agents' builds).
+
+**The corpus widened** (`test/java/corpora.edn`; RPS7 (a)). Two corpora more, of the categories run-plain,
+run-compile and run-jitopts as JC1's (JCS10 (a)): `:jdk-other`, every area of jdk26u's `test/jdk/` outside
+`jdk/java/` (`com/`, `javax/`, `jdk/`, `sun/`, `build/`, `demo/`, `jni/`, `lib/`, `native_sanity/`,
+`performance/`, `sanity/`, `security/`, `tools/`) but its desktop parts (`javax/{accessibility,imageio,
+print,sound,swing}`, `sun/awt`, `sun/java2d`, `com/sun/java/swing`, `sanity/client`, `lib/client`:
+java.desktop's, J2G-SPEC §12, as `jdk/java/awt` and `jdk/java/beans` are), and `:hotspot-runtime`
+(`hotspot/jtreg/runtime/`). The scan (16,544 descriptions under the areas) takes **683 tests more**
+(`t07640`-`t08322`; 4,848 in the corpora, the 1,212 golden-diagnostics tests among them), **597 passing
+on the JDK** (`java.check/area` gains `hotspot runtime`; a path under `jdk/` of one directory is its own
+area):
+
+| area | tests | pass on the JDK | | area | tests | pass on the JDK |
+|---|---:|---:|---|---|---:|---:|
+| `com/sun` (crypto, management, net, nio, security, jdi) | 142 | 138 | | `sun/security` | 115 | 108 |
+| `javax/crypto` | 49 | 48 | | `sun/nio` | 42 | 42 |
+| `javax/net` | 50 | 47 | | `sun/net` | 26 | 26 |
+| `javax/security` | 37 | 33 | | `sun/management`, `sun/jvmstat` | 13 | 0 |
+| `javax/management` | 25 | 24 | | `sun/text`, `sun/util` | 6 | 6 |
+| `javax/xml` | 20 | 20 | | `jdk/internal`, `jdk/nio`, `jdk/lambda`, `jdk/dynalink`, `jdk/security` | 11 | 8 |
+| `javax/naming`, `javax/script` | 24 | 23 | | `tools/launcher`, `tools/jlink` | 13 | 12 |
+| `javax/smartcardio`, `javax/sql`, `javax/rmi` | 8 | 7 | | `build`, `demo/jfc` | 2 | 0 |
+| `hotspot/jtreg/runtime` | 100 | 55 | | **all** | **683** | **597** |
+
+The JDK's 86 non-passes under the runner are the runner's kinds again: 54 skipped (37 `@compile` of
+`.jasm`/`.jcod` files or options the corpus does not keep, 17 source sets `javac -sourcepath` rejects alone:
+`sun.management`, `sun.jvmstat`, `sun.security.krb5` not exported, `org.testng`), 32 failing (2 at javac,
+27 with status 1: a VM flag or a property the test reads back, the machine's providers and network, an
+unqualified class name; 3 timeouts at 60 s, TLS and RMI).
+
+**The reference** (`--record-ref --only $'corpus\t(jdk-other|hotspot-runtime)'`, 670 s at 8 jobs; JCS68 (a),
+JCS80 (a), JCS84 (a) first):
+
+- *JCS68 (a)*: `java.check/gather` keeps the line of every test the run did not plan as it is in the
+  reference, byte for byte (`ref-lines`; before, it rewrote them from the keys a run test has, which lost a
+  golden-diagnostics test's `:actions`), and a partial `--record-ref` ends with `java.check/ref-unchanged`:
+  every unplanned line of the reference before the run (`WORK/ref-before.edn`) must be in the new one byte
+  for byte, no line no plan wrote, the header the same, else the run fails naming the lines. The recording
+  above: "683 tests planned, 4165 other lines of the reference kept byte for byte".
+- *JCS80 (a)*: a run the JDK's two runs did not agree on is recorded with `"-"` for the digests the check
+  does not compare (`java.check/non-det`): `:out` always, and `:out-len` and `:out-masked` too when the
+  masked runs did not agree either (`:det-masked` true keeps both, its masked digest is compared). The 131
+  lines of the committed reference with such runs (134 runs) were converted once, mechanically, before the
+  recording (`.tmp/jc6/jcs80.py`: the same rule on the existing fields; the check's judgement of them is
+  unchanged, `judge` compares nothing of a `:det false` run but its status); a whole re-recording then
+  moves only judged facts.
+- *JCS84 (a)*: stderr's first line, the JDK's failure reason, is taken through `mask_dirs` as stdout is
+  (the run's directories, the scratch and the checkout). MaskSyntheticModifierTest's reason, "length 73",
+  is a length computed from a path, which no mask reaches: it is not re-recorded here (the partial run
+  keeps its line, JCS68 (a)); a whole recording from another checkout would move it (JCS99 (d)).
+
+**The harness, for the catch-alls**: a failure's reason (`judge`) is stderr's first line and, when stderr
+has one, its last `Caused by:` line, `; caused by: C` (`root_cause`): an `ExceptionInInitializerError`'s or
+a wrapping `RuntimeException`'s root, which is what the classes need (`jdk.internal.foreign`,
+`URLEncoder.encode`, a test's own exception). And `java.check/shards` puts a test in a shard only where
+none of its top-level classes is another file's (the forms' places alone let `pkg/A.ae` of one test and
+`pkg/B.ae`'s `defclasses` holding `pkg.A` of another meet: `MethodReferencePackagePrivateQualifier`,
+passing at JC5, was refused in the widened corpus's first compiled run, a regression of the harness).
+
+**The decided items** (C: the converter, `arbace/repr/java/convert.ae`, `names.ae`; P: the printer,
+`print.ae`; A: the analysis, `arbace/classes/analyze.ae`; J: j2g; R: jrt):
+
+- *RPS83 (a)*, C and P: a Java file without declarations (a comment and its package line: langtools'
+  `unicode/FirstChar.java`) read in mode `:full` records its text on its `in-ns`, `^{:java/file {:text …
+  :at []}} (in-ns 'p)` (`convert-unit`'s `:file-record`, `names/unit-text`); the printer's `unit` takes it,
+  and the full layout prints the file back from it, byte for byte (`java-text-full`). FirstChar passes the
+  print level; `:print-full-empty-unit` is gone.
+- *RPS84 (a)*, C: an annotation's value `int.class`, `char.class` is `Integer/TYPE`, `Character/TYPE`, as
+  a class literal's (`attr-value`); `void.class` stays `void`. The printer's reading of the old spellings is
+  kept (forms written before). `annotations/pos/Primitives` passes print as before, now from the right forms.
+- *RPS85 (a)*, C: a local whose initializer is a primitive boxed into a reference type other than its box
+  (`Object o = 1;`, `Number n = i;`) is tagged with its declared type, `^Object o (Integer/valueOf 1)`
+  (`binding-for`: the boxed form's type is the box's, so `local-tag` sees it differ), and the forms type
+  it as Java does: `o.toString()` is `Object.toString`'s call, javac compiles the printed Java to the
+  original's class files (the three `TestLoadSliceWithMultipleMemoryInputStates` pass print). With it, a
+  byte constant boxed into a `Short` is widened, `(short fb)`, not narrowed (`coerce`; T6816548 passes print).
+- *JCS65 (a)*, C: a class's supertypes are named outside its body in Java and inside it by the analysis,
+  so a reference there whose simple name, or whose outermost class's simple name, a member class of the
+  class claims is written by its binary name: `class Y extends AX.Z { class AX extends AX1 {} }` is
+  `:extends t05885.AX$Z` (`class-header`'s scope for the supertypes; `names/resolver` and `imports-form`
+  consult a member's outermost name). CyclicInheritance4 passes interp and compiled.
+- *JCS66 (a)*, C and P: a for-each over a type variable whose erasure is not `Iterable`, iterated by
+  another bound (`<T extends A & B<String>>`), casts to that bound, `(for-each [^String s (cast B t)] …)`;
+  the printer prints the type variable's local itself, `for (String s : t)`, javac's TransTypes casting it
+  to `Iterable` as in the original (IntersectIterator: compiled and print pass; interp now stops at its
+  `ArrayList` subclass, `:interp-extends`).
+- *JCS62 (a)*, A: `outer-this-node` goes on through a class of another constructor's prologue (an
+  anonymous class in `this(...)`'s argument, which has no enclosing instance of its own) by that
+  constructor's outer instance parameter, which the class captures (`prologue-ctor`).
+  MultiLevelOuterInstance passes interp; compiled, j2g names the two captured `this$0` parameters' fields
+  alike (`F_val_this_0 redeclared`, `:j2g-capture-names`, JCS98).
+- *JCS67 (c)*, J: `generics.edn`'s `:consts` hold the edge's constants too: the public and protected
+  static final primitive and String fields with a `:const` of the edge's public classes outside the
+  translated set (`dyncf/generics-text`), as `jdk/edge.edn` records them (AWT's masks, `java.sql.Types`).
+- *JCS73 (a)* and *JCS74 (a)*, J: `Runtime.exec`'s reflection entry converts its `File` by `File_Cast`;
+  `Throwable.printStackTrace(PrintStream|PrintWriter)`'s support functions are typed by `m/go-type` with
+  a nil check in place of `NN`, and `System.out`'s and `System.err`'s reflection getters give the
+  interface value when `PrintStream` is not a leaf; the leaf refusal (`checks/support-leaves`,
+  `leaf-subclasses`) is dropped, J2G-SPEC §5.3 amended. ClearErrorStream, ClearErrorWriter and
+  `PrintWriter/SubClass` pass compiled; `:j2g-leaf` is gone.
+- *JCS77 (a)*, J and R: of the 25 only interpreted, JC6's eight (`Runtime.exec`'s overloads,
+  `ForkJoinPool.submit`, `Date.toInstant`): a call of a hand-written class's member that jrt cannot write
+  (it names translated classes) is translated to j2g's support function, the receiver first, as the REPL's
+  reflection entries reach them (`m/support-call-helpers`, generalizing `throwable-print-helper`;
+  `J2g_RuntimeExec_*`, `J2g_DateToInstant` (a `Timestamp`'s own `toInstant` when it has one), and the static
+  `J2g_DateFrom`); jrt's `ForkJoinPool` gains its covariant `submit(Callable)`, `submit(Runnable)`,
+  `submit(Runnable, T)` (`forkjoin.ae`). Zombies, BadEnvp, ExecEmptyString, LotsOfDestroys, LotsOfOutput,
+  ConcurrentRead, Starvation, Uniprocessor, JavatimeTest and the new `sun/util/resources/cldr/Bug8134384`
+  pass compiled. The rest of the 25 are triaged into the classes below: reflection over non-public members and
+  `strictfp` (`:j2g-reflection`, JC5's j2g work, not done there), `CopyMethods`, `TestSyntheticNullChecks`,
+  `IntersectionOrderTest2`, `MethodReferenceGenericTarget` (`:j2g-findings`), `SamConversion`
+  (`:j2g-coercion`), `LambdaTest5` (`:j2g-deep-stack`), `OneCaseSwitches` (`:j2g-go`), `SuperMeth` and
+  `AnalysisGaps` (`:j2g-outer-super`), `Switches` (`:j2g-pattern-label`), the escape-analysis tests
+  (`:identity-sum`, `:j2g-findings`).
+- *The print level's eight* (P): `T4954546`, `T5073060a` (a conditional, and since JC6 a switch
+  expression, of javac's intersection type: the converter's casts and branch hints printed as the bare
+  conditional when every branch's own type has every cast's type among its supertypes,
+  `intersection-cond-cast`); `T6816548` (C, above); `QualBoxedPostOp2`, `T6869075` (an increment or a
+  compound assignment of a field of a type variable, read through the converter's cast: the place is the
+  assignment's, `read-of?`, `postfix-text`); `ExpressionSwitchBugsInGen` (the switch expression, above):
+  all six pass the print level. `MethodReferenceIntersection1-2` are the forms' model's: a lambda's
+  parameter of a type variable with an intersection bound is typed by its erasure in the forms, and the
+  converter's cast to the constructor's other bound is not Java the inference takes (`:print-type-arguments`,
+  RPS9 (a), where its regexp already put them). JC5's re-tests of a flow-scoped pattern binding also made
+  javac refuse four printed files (`BindingsTest1`, `Guards`, `Unnamed`, `AnalysisGaps`: "variable s is
+  already defined"): the printer prints an `if-instance` of a binding already in scope whose else is the
+  converter's `MatchException` as its code alone (`if-instance-lines`), and a case's guard's `&&` chain of
+  patterns binds in the arm's body (`case-head`); AnalysisGaps and Unnamed pass, BindingsTest1 and Guards
+  differ at the forms step by REAP5b's known kinds (`when` against `when-instance`, RPS86's rename). Two of
+  the new tests found the printer: a hoisted increment inside a varargs array's initializer printed as an
+  initializer (`{:postfix-of …}`: DksWithEmptyKeystore) and a `break` after a `try` that cannot complete
+  normally (PBEInvalidParamsTest: "unreachable statement", `loop-tail`); both pass.
+
+**Numbers** (`bin/java-check --levels read,interp,classes,compiled,diagnostics,print --record`, the whole
+corpus, 4,514 tests: 3,320 run tests and 1,194 golden-diagnostics tests passing on the JDK; one heavy slot,
+about 2 h 50 min; a flaky test counted passing, JCS71 (a)):
+
+| level | JC5's (2,723 run tests) | JC6, JC5's tests | JC6, the 597 new | **JC6, all 3,320** |
+|---|---:|---:|---:|---:|
+| read | 2,722 | 2,722 | 597 | **3,319** |
+| classes (javac on Arbace, byte for byte) | 2,720 of 2,722 | 2,721 | 597 | **3,318** |
+| interp | 1,546 | 1,548 | 53 | **1,601 (48.2%)** |
+| compiled | 1,694 | 1,709 | 58 | **1,767 (53.2%)** |
+| print | 2,132 | 2,143 | 441 | **2,584 (77.8%)** |
+| diagnostics (1,194 golden tests, not widened) | 1,101 | 1,101 | — | **1,101** |
+
+The new tests are the library's: of the 597, 53 pass interpreted and 58 compiled (security 359 of them
+stop at the world, networking 213, the rest below); read, classes and print hold them as JC1's corpus
+(the front end is javac's to the byte on every new test). On JC5's tests: interp +2 and compiled +15 are
+the decided items' (CyclicInheritance4, MultiLevelOuterInstance interpreted; JCS74's and JCS77's eleven,
+IntersectIterator compiled; 16 now passing compiled, TestReduceAllocationAndJVMStates among them, and
+LockStep, flaky by its `Random`, passing this time), less one flip of the host (HugeToString, below); print
++11 (six of the eight cases, T6751514 with T6869075's compound assignment, FirstChar, the three
+TestLoadSlice). `test/java/levels-known.edn`: 1,574 pass both, 193
+only compiled, 27 only interpreted (21 new disagreements, 9 resolved: the new tests' `Thread` subclasses
+and Nestmates' reflection, MultiLevelOuterInstance compiled, VTableTest's package-private override).
+HugeToString (`jdk/java/util/BitSet`, a 1 GB `BitSet`'s `toString`) timed out at 20 s and 40 s compiled on
+the loaded host where it passed in JC5's run (recorded as a timeout; interpreted it was flaky).
+
+**The world ranked** (JCS9 (b), RPS8 (a)): every class of the world, of design and of the interpreter's
+limits, by the tests it takes on the widened corpus (the first cause a test stops at: what building the
+area would let through at most, its later causes unknown until then), interpreted, compiled (j2g's
+symptom classes `:j2g-unresolved`, `:j2g-world` and `:j2g-edge` counted in the area of the test's
+interpreted class, which names the class j2g stopped at), and either; the work estimated as the
+repository's surveys estimate (working days, the closure's conversion, jrt's Go, the edge and the checks),
+the ratio the tests at stake per day. `.tmp/jc6/scripts/rank.py` over `.tmp/jc6/cls-final1.tsv`.
+
+| rank | area (class) | interp | compiled | either | what building it takes | days | tests/day | proposal |
+|---:|---|---:|---:|---:|---|---:|---:|---|
+| 1 | security (`:security`) | 350 | 352 | 359 | java.security's providers and keystores, javax.crypto with SunJCE, X.509, PKCS: hundreds of pure-Java classes into the closure, the Go build's SecureRandom seed | 10-15 | 24-36 | JCS90 |
+| 2 | networking (`:net`) | 204 | 196 | 213 | datagrams and multicast, NIO channels and selectors over Go's net, URL protocols, network interfaces; the HTTP client after | 8-12 | 18-27 | JCS91 |
+| 3 | serialization (`:serialization`) | 163 | 139 | 163 | — by design (J2G-SPEC §12, 2026-10-10) | — | — | decided |
+| 4 | `java.io` (`:io`) | 104 | 101 | 110 | RandomAccessFile (Go's os.File), DataOutputStream, Piped streams, StreamTokenizer, Pushback, LineNumberReader: jdk26u's pure Java into the closure | 2-3 | 37-55 | JCS92 |
+| 5 | NIO (`:nio`) | 85 | 91 | 100 | FileChannel, direct and mapped buffers, Files' attributes and walkers, the charsets' coders | 5-7 | 14-20 | JCS92 |
+| 6 | reflection (`:reflection`) | 89 | 81 | 94 | annotations at run time and generic signatures (J2G-SPEC §12's R16 reversed), Proxy over Dyn, parameters | 5-8 | 12-19 | JCS94 |
+| 7 | extendable superclasses (`:interp-extends`) | 93 | 7 | 93 | the interpreter's DynSub for Thread, the collections, streams, AssertionError, TimeZone (j2g compiles them already) | 3-5 | 19-31 | JCS98 |
+| 8 | zip and jar (`:zip`) | 65 | 67 | 68 | Inflater, Deflater and the checksums over Go's compress/flate and hash/crc32 (jrt's own Deflater of javac's world), ZipFile, the jar files | 3-4 | 17-23 | JCS93 |
+| 9 | management (`:management`) | 65 | 67 | 67 | java.lang.management's MXBeans over Go's runtime metrics; JMX (javax.management) beside | 4-6 (MXBeans 2) | 11-17 | JCS95 |
+| 10 | TLS (`:tls`) | 56 | 56 | 56 | javax.net.ssl over Go's crypto/tls: SSLContext, SSLSocket, then SSLEngine's buffers | 6-10 | 6-9 | JCS90 |
+| 11 | protected members (`:interp-protected`) | 38 | 8 | 46 | the interpreter's reflection over a world class's protected members and constructors (an anonymous subclass's super call) | 2-3 | 15-23 | JCS98 |
+| 12 | `java.lang.invoke` (`:invoke`) | 41 | 38 | 42 | MethodHandles at run time over reflection (findVirtual, findStatic, invoke); no invokedynamic | 4-6 | 7-10 | JCS94 |
+| 13 | javac's API (`:javac-api`) | 39 | 39 | 40 | — in javac's tool executable, not the shipped program; the tests could run on the tool | 1 (the check) | 40 | JCS95 |
+| 14 | logging (`:logging`) | 28 | 31 | 31 | java.util.logging's pure Java into the closure, System.Logger over it | 1-2 | 15-31 | JCS95 |
+| 15 | threads (`:threads`) | 24 | 25 | 29 | thread groups, Timer, Phaser's and FutureTask's members, ScopedValue | 2-3 | 10-15 | JCS96 |
+| 16 | XML (`:xml`) | 20 | 22 | 22 | — by design (J2G-SPEC §12) | — | — | decided |
+| 17 | class loading (`:classloading`) | 12 | 19 | 21 | — by design (J2G-SPEC §12), modules and packages as run-time objects with it | — | — | decided |
+| 18 | charsets and locales (`:charsets-locales`) | 19 | 20 | 20 | sun.nio.cs's tables (Big5, EUC, the UTF-32s), the stream coders, Lithuanian casing | 3-4 | 5-7 | JCS92 |
+| 19 | `java.lang.classfile` (`:classfile`) | 14 | 18 | 18 | the class-file API's pure Java (several hundred classes) | 3-5 | 4-6 | JCS95 |
+| 20 | references (`:references`) | 15 | 11 | 16 | weak and phantom references cleared by Go's collector (Go's weak pointers, runtime.AddCleanup), the reference queue | 2-3 | 5-8 | JCS96 |
+| 21 | j2g's reflection (`:j2g-reflection`) | 0 | 15 | 15 | j2g's member tables for the program's own non-public members | 1-2 | 8-15 | JCS98 |
+| 22 | jrt's dates (`:jrt-dates`) | 10 | 13 | 13 | jrt's Date, Calendar, TimeZone, DateFormat case by case | 2-3 | 4-7 | JCS96 |
+| 23 | javax.script (`:scripting`) | 12 | 12 | 12 | the API alone (no engine ships with the JDK), ServiceLoader's engines | 1 | 12 | JCS97 |
+| 24 | small members (`:util-classes`, `:system-properties`, `:random`, `:jrt-strings`, `:jrt-io`, `:jrt-math`, `:text-data`) | 29 | 33 | 34 | Scanner, Calendar.Builder, PropertyResourceBundle, ToolProvider, String.transform; the JVM's identity properties; RandomGeneratorFactory with a static list; StringBuffer's capacity; Bidi's data | 3-4 | 9-11 | JCS96 |
+| 25 | stack walking (`:stack`) | 9 | 9 | 10 | StackWalker over the interpreter's and Go's frames, line numbers | 3-4 | 3 | JCS94 |
+| 26 | JNDI (`:naming`) | 8 | 8 | 8 | javax.naming's pure Java, LDAP names | 1-2 | 4-8 | JCS91 |
+| 27 | foreign memory (`:foreign`) | 5 | 5 | 5 | the FFM API over Go's unsafe (MemorySegment, Arena; CRC32's and Unsafe's paths) | 5+ | 1 | JCS95 |
+| 28 | JDBC's rest (`:sql`), JDI (`:jdi`), smart cards (`:smartcardio`), desktop (`:desktop`) | 11 | 11 | 11 | rowsets' pure Java; JDI and PC/SC need a JVM and a reader | 1 / — | — | JCS97 |
+
+What the ranking says: four areas hold most of the tests at stake (security, networking, `java.io` with
+NIO, reflection: 856 of the 1,452 tests the ranked classes outside design take at either level), and `java.io`'s missing classes
+are the best ratio by far (110 tests for two or three days of mostly pure Java); logging and javac's API
+(run where javac is) are cheap; TLS, `java.lang.invoke`, the class-file API and foreign memory are dear
+per test.
+
+### Proposals (JCS90-JCS99): the world decided
+
+Each area: (a) by design (out of the Go build, as serialization, AWT and class loading are: J2G-SPEC
+§12 names it, its tests a `:design` class), (b) deferred by name (its class stays `:world`, the proposal
+says what building it takes), (c) built now (a follow-up of JC6's, sent back to this milestone's agent).
+None is built here; the new classes cite their proposal and are `:pending` until the user decides.
+
+- **JCS90 Security, crypto and TLS** (`:security` 359 tests, `:tls` 56; jdk26u's `java/security`,
+  `javax/crypto`, `javax/security`, `sun/security`, `com/sun/crypto`, `javax/net/ssl`).
+  - Options: (a) by design: the Go build's security is Go's (crypto/tls under jrt's sockets, the digests
+    the runtime needs), and Java's provider architecture stays out; (b) deferred: java.security's and
+    javax.crypto's pure Java with SunJCE and the `sun.security.provider` algorithms into the closure
+    (10-15 days, X.509 and the keystores with them), then javax.net.ssl over Go's crypto/tls (6-10 days);
+    (c) the first half built now.
+  - *Recommended: (b)*, the provider half first when the world is next widened: the largest area by far
+    (415 tests), pure Java mostly (no natives but SecureRandom's seed), and what a Java program's
+    cryptography needs; TLS over Go's own stack is a design of its own (SSLEngine's buffers), after it.
+- **JCS91 Networking and JNDI** (`:net` 213, `:naming` 8).
+  - Options: (a) by design beyond TCP sockets; (b) deferred: DatagramSocket and MulticastSocket, NIO's
+    channels and selectors over Go's net (the poller's model: a goroutine per blocking channel), URL
+    protocols, NetworkInterface (8-12 days), the HTTP client after; JNDI's pure Java (1-2 days);
+    (c) datagrams and channels now.
+  - *Recommended: (b)*: the second area, but much of it (multicast, interfaces, the HTTP client's tests'
+    servers) needs a network the sandbox does not have; channels first, with NIO (JCS92).
+- **JCS92 `java.io`, NIO and the charsets** (`:io` 110, `:nio` 100, `:charsets-locales` 20).
+  - Options: (a) by design beyond the streams jrt has; (b) deferred; (c) built now: `java.io`'s missing
+    classes (RandomAccessFile over Go's os.File, DataOutputStream, the Piped streams, StreamTokenizer,
+    PushbackInputStream, LineNumberReader: jdk26u's own Java into the closure, `bin/jrt-convert update`,
+    the edge, 2-3 days), then NIO's FileChannel, direct buffers and Files' attributes (5-7 days), the
+    charsets' tables after (3-4).
+  - *Recommended: (c) for `java.io`, (b) for NIO and the charsets*: `java.io` is the best ratio of the
+    whole ranking (110 tests at stake for 2-3 days), its classes are what ordinary programs use, and most
+    are plain Java over the streams jrt already has.
+- **JCS93 Zip and jar** (`:zip` 68).
+  - Options: (a) by design; (b) deferred: Inflater, Deflater, CRC32C, Adler32 over Go's compress/flate
+    and hash/crc32 (javac's world has jrt's own Deflater already), ZipFile and ZipInputStream, jar files
+    and the `jar:` URL (3-4 days); (c) built now.
+  - *Recommended: (b), next after `java.io`*: 68 tests and a common need (resources, archives), but
+    ZipFile wants RandomAccessFile first (JCS92).
+- **JCS94 Reflection, annotations, `java.lang.invoke`, stack walking** (`:reflection` 94, `:invoke` 42,
+  `:stack` 10).
+  - Options: (a) by design: no annotations at run time and no generic signatures (J2G-SPEC §12, R16),
+    no MethodHandles, as now; (b) deferred: annotations and generic signatures kept in j2g's member tables
+    and the interpreter's Dyn (R16 reversed), Proxy over Dyn for interpreted handlers, MethodHandles over
+    reflection, StackWalker over the interpreter's and Go's frames (12-18 days in all); (c) annotations
+    now.
+  - *Recommended: (b)*: a design change of the world's model (R16, accepted 2026-10-08), which wants its
+    own amendment rather than a JC6 follow-up; annotations first when it comes (most of the 94).
+- **JCS95 Management, logging, the class-file API, foreign memory, javac's API** (`:management` 67,
+  `:logging` 31, `:classfile` 18, `:foreign` 5, `:javac-api` 40).
+  - Options: (a) by design: JMX, the class-file API, foreign memory; javac's API in javac's tool only;
+    (b) deferred each; (c) built now: java.util.logging (its pure Java into the closure, 1-2 days) and the
+    javac-API tests run on javac's tool executable instead of the shipped program (the check's change: a
+    test naming `com.sun.tools.javac`, `javax.tools` or `com.sun.source` interpreted on `arbace-javac`,
+    which holds javac's world; 1 day).
+  - *Recommended: (c) for logging and for javac's API on the tool, (a) for JMX (`javax.management`), the
+    class-file API and foreign memory, (b) for java.lang.management's MXBeans*: logging is cheap and
+    ordinary; the javac-API tests are javac's, which Arbace has; JMX, `java.lang.classfile` and FFM are
+    JVM-centred APIs a standalone Arbace does not owe (MXBeans over Go's runtime metrics are cheap later).
+- **JCS96 jrt's own classes and small members** (`:threads` 29, `:references` 16, `:jrt-dates` 13,
+  `:util-classes` 10, `:random` 6, `:system-properties` 6, `:jrt-strings` 4, `:text-data` 3, `:jrt-io`
+  1, `:jrt-math` 1).
+  - Options: (a) by design: jrt is the closure Arbace needs; (b) deferred each by name; (c) built now in
+    one batch: the JVM's identity properties (`java.version`, `java.vm.specification.vendor`,
+    `java.runtime.version`; Runtime.Version), Scanner, Calendar.Builder, PropertyResourceBundle,
+    String.transform, RandomGeneratorFactory with a static list of algorithms, StringBuffer's capacity
+    and an append's bounds, FileInputStream.skip(-n), thread groups' and Timer's members; jrt's dates case
+    by case; weak references cleared by Go's weak pointers (3-5 days).
+  - *Recommended: (c)* for the small members and the properties (cheap, each a real behaviour a program
+    sees), (b) for jrt's dates and the references (each a design of jrt's own Date and of Go's collector).
+- **JCS97 By design: the JVM's tools and the hardware** (`:jdi` 4, `:smartcardio` 2; and `:scripting` 12,
+  `:sql` 4).
+  - Options: (a) by design: JDI (it attaches to a JVM through JDWP) and javax.smartcardio (a PC/SC
+    reader) out of the Go build for good, J2G-SPEC §12 amended; javax.script and javax.sql's rowsets
+    deferred (pure Java, small); (b) all deferred; (c) javax.script's API now.
+  - *Recommended: (a)*: there is no JVM to debug and no card reader in the sandbox; the script API
+    without an engine is little use (the JDK ships none), its tests find engines by ServiceLoader (class
+    loading, by design).
+- **JCS98 The back ends' own findings and limits** (not the world: `:interp-extends` 93,
+  `:interp-protected` 46, `:j2g-reflection` 15; the named findings of the catch-alls, below:
+  `:class-init` 3, `:interp-synchronized`, `:interp-default-method`, `:interp-thread-local`,
+  `:local-class-names`, `:boxed-foreach`, `:record-pattern-null`, `:bridge-order`, `:j2g-outer-super` 3,
+  `:j2g-pattern-label` 2, `:j2g-coercion`, `:j2g-deep-stack`, `:j2g-findings` 7, `:j2g-capture-names`).
+  - Options: (a) deferred to a JC4b milestone of the back ends: the interpreter's DynSub for `Thread`,
+    the collections and the rest of `:interp-extends`, its reflection over protected members, j2g's member
+    tables for non-public members, each finding fixed with a regression form in the oracle's
+    `defclass.ae` or diffcheck's corpus; (b) each fixed in JC6's follow-up now; (c) left in their classes
+    after the milestone.
+  - *Recommended: (a)*: they are Arbace's own code, not the world, and the interpreter's two limits
+    alone hold 139 tests; a milestone of their own keeps JC6 the world's decision, as JC4 and JC5 were
+    for the interpreter's bugs and the analysis.
+- **JCS99 The harness's new classes** (`:flaky-timeout`, `:memory-limit`, `:clock`, `:identity-sum`).
+  - Options: (a) as built: a timeout that passed when run again is no regression and in a class of its
+    own (JCS71's rule at every level, by its result), TestOutOfMemory's missing heap limit, a file's
+    last-modified time in stdout and sums of identity hash codes by name; (b) the interpreted timeout
+    raised for HotSpot's tests on a loaded host (JCS78's (b)); (c) these tests' digests recorded as `"-"`
+    (status only) at the next recording, as JCS80 (a) does for the JDK's own non-determinism; (d) a whole
+    `--record-ref` from a fixed directory at the milestone (MaskSyntheticModifierTest's path-length
+    reason, JCS84 (a)'s limit).
+  - *Recommended: (a) and (c)*: the four are the runner's, not Arbace's; (c) makes the reference say so
+    and removes them from the classes; (d) at JC8.
+
+**The catch-alls named** (`test/java/divergences.edn`). `:other` ("other failures ..., to triage": 49
+interpreted, 113 compiled in the widened corpus's first runs) and `:world-other` ("other JDK classes and
+members": 143 and 49) are gone: no test is in a bin. Each of their tests was run again with its root cause
+in the reason (above; `.tmp/jc6/results-triage-*.tsv`), its source looked at where the message did not
+say, and put in a class of one cause:
+
+- *world areas split out* (`:world`, JCS9 (b), the proposals above): `:tls` (javax.net.ssl and the
+  socket factories, 56), `:scripting` (12), `:naming` (8), `:sql` (rowsets, `java.sql.Time`, 4),
+  `:smartcardio` (2), `:jdi` (4), `:foreign` (FFM and what reaches it: `CRC32`, `Unsafe`, 5), `:random`
+  (6), `:system-properties` (the JVM's identity, 6), `:util-classes` (Scanner, Calendar.Builder,
+  PropertyResourceBundle, ToolProvider, String.transform, System.inheritedChannel,
+  TypeNotPresentException: 10); and `:xml` (`:design`, J2G-SPEC §12: 22). The existing areas' patterns
+  widened: `:reflection` (Proxy's tests, `getClasses`, the enclosing method and constructor,
+  MalformedParametersException, Field's primitive accessors), `:serialization` (the tests that print only
+  "serialization", `registerValidation`), `:classloading` (`java.lang.Package`, `ModuleLayer`,
+  `java.lang.module`, `Class.forName` of a one-letter name, `URLClassLoader.addURL`), `:zip` (CRC32C),
+  `:references` ("reference was not cleared"), `:net` (SCTP), `:charsets-locales` (an encoding not
+  recognized, Formatter's UTF-16BE), `:interp-protected` (a world class's protected constructor: an
+  anonymous `AbstractList`, `Calendar`, `BreakIterator`, `LocaleServiceProvider`), `:j2g-unresolved`
+  (j2g's analysis stopping at a member of a class it refused: an inherited static field, a superclass's
+  constructor, an enum constant's, a `set!` target); a compiled run that prints only its own message
+  (`An Unexpected exception occurred`, `Setup failure`) is in the area its interpreted run names, by
+  `:tests` (24 tests).
+- *jrt's own classes* (`:world`, JCS96): `:jrt-dates` (13), `:jrt-strings` (StringBuffer, 4), `:jrt-math`
+  (Math.pow, 1), `:jrt-io` (FileInputStream.skip, 1), `:text-data` (Bidi, collation rules, 3).
+- *the back ends' findings* (JCS98): the interpreter's `:interp-synchronized` (wait in a synchronized
+  method from a thread), `:interp-default-method` (the most specific default through a superclass),
+  `:interp-thread-local`; both back ends' `:class-init` (interfaces with default methods initialized with
+  their class, NoClassDefFoundError after a failed initializer: 3); the analysis' `:local-class-names`
+  (two local classes `Local`, one in an anonymous class), `:boxed-foreach`, `:record-pattern-null`,
+  `:bridge-order`, and `:lambda-bridges` (JCS63 (a), decided); j2g's `:j2g-outer-super` (3),
+  `:j2g-pattern-label` (2), `:j2g-coercion`, `:j2g-deep-stack`, `:j2g-findings` (7: diffcheck's kind, a
+  translation the interpreter runs right), `:j2g-reflection` (15: j2g's tables hold public members),
+  `:j2g-capture-names` (JCS62's compiled half).
+- *the harness's* (JCS99): `:flaky-timeout` (JCS71's run again passing a timeout, at any level),
+  `:memory-limit` (TestOutOfMemory), `:clock` (GetHeaderFields), `:identity-sum` (Test6909839's and
+  Test6689060's sums of identity hash codes, which HotSpot gives deterministically); `:flaky` names
+  EnqueuePollRace (the collector enqueued 99 of 100 references once).
+
+Also: `:diag-file-manager`'s and `:diag-command-line`'s `:tests` named the tests one id early (JC3's ids,
+renumbered by one at the merge with JC2), so four golden-diagnostics tests were in no class in a run of
+that level: renamed (`t07442`, `t07462`; `t06660`, `t07527`). `:analysis` (JC5's remainder), `:j2g-leaf`
+and `:print-full-empty-unit` are gone, their tests passing (or in `:j2g-capture-names`).
+
+**repr/java's checks** on javac's tool built from the checkout (`bin/arbace-go --build-java`, built again
+after each printer fix: the tool's key covers `arbace/`): `bin/repr-java check` as expected after
+`check --update` wrote the samples' expected forms (`Features.ae`: RPS85's `^Object prim`; `PrintSyntax.ae`:
+JC5's forms, its pattern re-test, `Supplier/.get`'s qualifier and an intersection receiver's casts, which
+the merge of JC5 and REAP5b had left unrecorded) and the baseline's digests unchanged; `front-check` the
+native trees' forms equal javac's in every corpus; `roundtrip --corpus baseline,samples,jdk --text` every
+level as its references (baseline forms 189, ae 182, classes 143 of 183, text 183, anew 183; samples 18, 18,
+12 of 15, 15, 15, the anew print of PrintSyntax accepted again since the printer's loop fix; jdk forms 874,
+ae 816, classes 473 of 838, record 911, text 838, anew 799); `check --jdk --update`: 4 of jdk26u's files'
+hashes moved (DHKEM, xerces' `Field` and `Selector`, jlink's `SystemModulesPlugin`: RPS85's tags);
+`bin/jrt-convert update`, `bin/javac-vendor convert`, `bin/clojure-tests --java-fixtures update`,
+`bin/java-check --forms update`: no forms file changed, the provenance files only their `:repr-java` and
+`:host` (the tool of key `c6512fc6…`, built before the printer's two last fixes, which no conversion
+reads); `bin/j2g-edge verify` passes (`jdk/edge.edn` unchanged: JCS67 (c) reads the edge's recorded
+constants, the support functions ask nothing new of the JVM).
+
+**REAP**: `bin/reap` 12 of 12 cells, **0 problems**; Java: read 7,738 / 3 / 93, eval 1,600 / 280 / 1,440
+(142 pending), AOT 1,767 / 150 / 1,403 (82 pending), print 2,584 / 637 / 99; the pending classes are JCS90-JCS99's
+alone.
+
+*The shipped files changed* (the second re-seed's): `arbace/classes/analyze.ae` (JCS62); `arbace/j2g/`
+`code.ae`, `model.ae`, `out.ae`, `main.ae`, `checks.ae` (JCS73, JCS74, JCS77), `dyncf.ae` (JCS67);
+`arbace/repr/java/convert.ae`, `names.ae` (RPS83, RPS84, RPS85, JCS65, JCS66, T6816548), `print.ae` (the
+printer's cases; on the tools' host and embedded in javac's tool); `go/arbace/jrt/forkjoin.ae` (ForkJoinPool's
+covariant submits); `jdk/provenance.edn`, `jdk/javac/provenance.edn`, `test/java-fixtures/provenance.edn`,
+`test/java/forms/provenance.edn`; doc/go/J2G-SPEC.md §5.3. The check's own (no re-seed): `bin/java-check`,
+`test/java/check.ae`, `print.ae`, `corpora.edn`, `ref-jdk26.edn`, `divergences.edn`, `check-*.edn`,
+`levels-known.edn`; `test/repr/java/expected/`.
+
+**Checks**: the essential `bin/gate` at the branch's head passed in 24m33s (the executables built afresh,
+stage 0 too: `arbace/`, `go/` changed): the smoke test; Clojure's suite on the test build, no regressions;
+the oracle 22,688 of 22,740, its 52 known mismatches as recorded; diffcheck as recorded; goi's essential
+check and its AOT subset (248 of 248); Java's essential check 428 of 428 interpreted (from the forms written
+again) and 423 of 423 compiled; the compiled suite's subset as recorded; the programs (2 of 2); the
+generated variants; j2g's edge (verify passed); `bin/reap` 12 of 12 cells, 0 problems. `bin/gate --full`
+was not run (the policy until the milestone); its repr/java and java-check steps were run one by one as
+above.
+
+The scratch this section cites (the worktree's `.tmp/jc6/`, not tracked): `record-new.keep.log` (the
+partial `--record-ref`), `jcs80.py` (the reference's conversion), `read1.log`, `interp1.log`,
+`compiled1.log`, `print1.log` (the widened corpus's first runs), `results-*1.tsv`, `results-triage-*.tsv`,
+`triage-*.log` (the catch-alls' runs with root causes), `scripts/classify.py`, `scripts/rank.py`,
+`scripts/newdiv.py` (the classes' classification, the ranking, the new classes), `cls-final1.tsv`,
+`rank-final.tsv` (the final classification and ranking), `final1.log` (the whole check, `--record`),
+`results-final1.tsv`, `f2-*.log`, `f3-*.log`, `chain-*.log`, `rj-*.log`, `rj2-*.log`, `conv-*.log`
+(repr/java's checks, the conversions), `build-java.log`, `gate-build1.log`, `gate.log`.

@@ -256,7 +256,11 @@
         v))
     :class (let [t (m/class-of a)]
              (if (prim? t)
-               (member (cref (str "java.lang." (str/capitalize (str (m/prim-sym t))))) "TYPE")
+               ;; int.class as Integer/TYPE, char.class as Character/TYPE (RPS84 (a)), as a class
+               ;; literal's are
+               (member (cref (str "java.lang." ({"int" "Integer" "char" "Character" "void" "Void"}
+                                                (str (m/prim-sym t)) (str/capitalize (str (m/prim-sym t))))))
+                       "TYPE")
                (erased-form env t)))
     :enum (let [[c n] (m/enum-of a)] (member (class-ref env c) n))
     :array (mapv #(attr-value env % nil) (m/array-of a))
@@ -450,7 +454,9 @@
                      (cond
                        ;; a constant of another type narrowed then boxed (JLS 5.2): Byte b = 'a'
                        (and u (#{"BYTE" "SHORT" "CHAR"} (tag-name u)) (not (same? t u)))
-                       (box-call env (list (narrow-op (tag-name u)) form) u)
+                       ;; a byte constant into a Short is widened (JLS 5.1.2), as an explicit
+                       ;; (short) cast is written (T6816548; "As built: JC6")
+                       (box-call env (list (if (m/widens? t u) (widen-op (tag-name u)) (narrow-op (tag-name u))) form) u)
                        ;; a number written as a literal (+43) is a long to the analysis
                        (or explicit? (and (number? form) (not (#{"LONG" "DOUBLE"} (tag-name t)))))
                        (box-call env form t)
@@ -1906,7 +1912,17 @@
         const? (and (m/has-flag? sym Flags/FINAL) (m/const-value sym))
         mut? (or (nil? init) (mutable? sym))
         init-f (if init (coerce env init decl) (default-value decl))
-        init-t (if init (if (identical? init-f (:f init)) (:t init) decl) nil)
+        ;; a primitive boxed into a reference type other than its box (Object o = 1, Number n =
+        ;; i): the boxed form's type is the box's, not the declaration's, so the local is tagged
+        ;; with its declared type (local-tag) and the forms type it as Java does (RPS85 (a))
+        init-t (if init
+                 (cond (identical? init-f (:f init)) (:t init)
+                       (and (not (prim? decl)) (or (= :lit-int (:t init)) (prim? (:t init))))
+                       (let [u (m/unboxed decl)
+                             p (if (= :lit-int (:t init)) (int-type) (:t init))]
+                         (m/boxed (if (and u (#{"BYTE" "SHORT" "CHAR"} (tag-name u))) u p)))
+                       :else decl)
+                 nil)
         tg (or (local-tag env d init-t)
                (when (and loop? (prim? decl) (not (#{"LONG" "DOUBLE" "BOOLEAN"} (tag-name decl))))
                  (m/prim-sym decl))
@@ -2391,7 +2407,16 @@
                                           (type-form env (if (tr/var-decl? d) (erasure vt) vt)))]
                                  (when-not (and (m/object? vt) (empty? (f/items tf)))
                                    [[:tag tf]]))))
-        coll (coerce env (ex env (tr/f t :expr)) (erasure (attr/type-of (tr/f t :expr) :types/expr)))
+        et (attr/type-of (tr/f t :expr) :types/expr)
+        coll (coerce env (ex env (tr/f t :expr)) (erasure et))
+        ;; a type variable whose erasure (its first bound) is not Iterable, iterated by another
+        ;; bound (<T extends A & B<String>>, B an Iterable): cast to that bound, as TransTypes
+        ;; does (JCS66 (a))
+        coll (let [it (.iterableType jt/*syms*)]
+               (if-let [b (when (and (m/tvar? et) (not (subtype? (erasure et) it)))
+                            (some #(when (subtype? % it) (erasure %)) (m/components (m/skip-type-vars et))))]
+                 (cast-form env coll b)
+                 coll))
         env' (push-loop (add-local env sym s) {:tree t :kind :for-each})
         body (stmts env' {:fall [] :jumps {[:continue t] []} :vpos nil} [(tr/f t :body)])]
     (note! :form/for-each)
@@ -3047,6 +3072,13 @@
         mods (concat (modifier-items env cd :drop (when (#{"INTERFACE" "ANNOTATION_TYPE"} k) [:abstract]))
                      [(deprecated-item c (tr/f cd :mods))] [kind-kw])
         nm (apply m+ (symbol (str (tr/f cd :name))) mods)
+        ;; the supertypes are Java's names outside the class's body, the analysis resolves them
+        ;; with its member classes in scope: a reference whose name a member class claims
+        ;; (class Y extends AX.Z { class AX ... }) is written by its binary name (JCS65 (a))
+        senv (let [ms (map m/simple-name (m/member-classes c))]
+               (if (seq ms)
+                 (-> env (update :scope #(apply dissoc % ms)) (update :names (fnil into #{}) ms))
+                 env))
         ext (tr/f cd :extending)
         impl (seq (tr/f cd :implementing))
         perm (seq (tr/f cd :permitting))
@@ -3065,11 +3097,11 @@
                 comps)
         opts (concat
               (when (and ext (not (#{"INTERFACE" "ANNOTATION_TYPE"} k)))
-                [:extends (type-form env (attr/type-of ext :names/type-tree))])
+                [:extends (type-form senv (attr/type-of ext :names/type-tree))])
               (when impl
                 [(if (#{"INTERFACE" "ANNOTATION_TYPE"} k) :extends :implements)
-                 (mapv #(type-form env (attr/type-of % :names/type-tree)) impl)])
-              (when perm [:permits (mapv #(type-form env (attr/type-of % :names/type-tree)) perm)])
+                 (mapv #(type-form senv (attr/type-of % :names/type-tree)) impl)])
+              (when perm [:permits (mapv #(type-form senv (attr/type-of % :names/type-tree)) perm)])
               (when-let [tp (type-params env (tr/f cd :typarams))] [:type-params tp]))]
     (note! (keyword "class" (or (some-> kind-kw name) "class")))
     [nm comps opts]))
@@ -3266,7 +3298,10 @@
                    :pkg-classes (when pkg (m/pkg-class-names pkg))
                    :classes (vec (for [d (type-decls u) :when (tr/is? d :CLASSDEF)]
                                    (str (tr/f d :name))))}
-            split (assoc :split split)))))))
+            split (assoc :split split)
+            ;; mode :full of a file without declarations (its package line and comments): the
+            ;; file's record on its in-ns (names/unit-text), as no form holds it (RPS83 (a))
+            (and *full* (empty? forms)) (assoc :file-record {:text *text* :at []})))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Simplification of the output: when, when-not, cond, spliced do

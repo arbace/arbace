@@ -421,6 +421,45 @@
      (jrt-default-forwarders)
      ;; ForkJoinPool's ExecutorService methods over translated types (JC7)
      (fjp-support-forms)
+     ;; Runtime.exec's overloads and Date.toInstant for translated calls (m/support-call-helpers;
+     ;; JCS77 (a)): as the REPL's reflection entries below do
+     (when (and (m/translated? "jdk/internal/jrt/RuntimeExec") (m/hand-written? "java/lang/Runtime"))
+       (for [d m/runtime-exec-descs
+             :let [[ps r] (t/parse-method-desc d)
+                   pn (vec (for [i (range (count ps))] (symbol (str "p" i))))
+                   base (nm/method-base "exec" d)]]
+         (list 'go/func (symbol (str "J2g_Runtime" base))
+               (str "J2g_Runtime" base " is Runtime.exec" d ": jrt's own Java RuntimeExec's.\n")
+               (vary-meta (vec (cons (tag 'rt (m/go-type :jrt "Ljava/lang/Runtime;")) (map #(tag %1 (m/go-type :jrt %2)) pn ps)))
+                          assoc :tag (m/go-type :jrt r))
+               '(NN rt)
+               (list 'return (apply list (symbol (str "RuntimeExec_" base)) pn)))))
+     (when (and (m/translated? "java/time/Instant") (m/hand-written? "java/util/Date"))
+       [(list 'go/type 'J2g_DateInstant
+              "J2g_DateInstant is a Date subclass's own toInstant (java.sql.Timestamp's).\n"
+              (list 'interface (list 'ToInstant__Instant (with-meta [] {:tag (m/go-type :jrt "Ljava/time/Instant;")}))))
+        (list 'go/func 'J2g_DateToInstant
+              "J2g_DateToInstant is Date.toInstant(): its time as an Instant, or a subclass's own.\n"
+              (with-meta [(tag 'd (m/go-type :jrt "Ljava/util/Date;"))] {:tag (m/go-type :jrt "Ljava/time/Instant;")})
+              '(when (== d nil) (panic (NPE)))
+              '(let [(values x ok) (assert J2g_DateInstant d)]
+                 (when ok (return (.ToInstant__Instant x))))
+              '(return (Instant_OfEpochMilli_J__Instant (.GetTime__J d))))
+        ;; jdk26u's Date.from: toEpochMilli's ArithmeticException the cause of an
+        ;; IllegalArgumentException, as the reflection entry below
+        (list 'go/func 'J2g_DateFrom
+              "J2g_DateFrom is Date.from(Instant).\n"
+              (with-meta [(tag 'i (m/go-type :jrt "Ljava/time/Instant;"))] {:tag (m/go-type :jrt "Ljava/util/Date;")})
+              (list 'let [(tag 'd (m/go-type :jrt "Ljava/util/Date;")) nil
+                          'exc '((fn [] :results [^Throwable_I exc]
+                                   (defer (Catch (addr exc)))
+                                   (set! d (Date_New_J (.ToEpochMilli__J (NN i))))
+                                   (return nil)))]
+                    '(when (!= exc nil)
+                       (when (ArithmeticException_InstanceOf exc)
+                         (panic (IllegalArgumentException_New_Throwable exc)))
+                       (panic exc))
+                    '(return d)))])
      ;; String's members over translated classes (jrt's String cannot name them): Constable's
      ;; describeConstable once Optional is in the world, and lines() once streams are
      (when (and (m/translated? "java/util/Optional") (m/translated? "java/lang/constant/Constable"))
@@ -527,12 +566,18 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
        (list 'go/func 'J2g_PrintStackTraceWriter
              "J2g_PrintStackTraceWriter is Throwable.printStackTrace(PrintWriter): the trace's text printed.\n"
              [(tag 't 'Throwable_I) (tag 'w (m/go-type :jrt "Ljava/io/PrintWriter;"))]
-             '(.Print_String__V (NN w) (StackTraceString t))))
+             ;; typed by the class's Go type (its interface when the world extends it), so a
+             ;; nil check rather than NN (JCS74 (a))
+             '(when (== w nil) (panic (NPE)))
+             '(.Print_String__V w (StackTraceString t))))
      (when (m/translated? "java/io/PrintStream")
        (list 'go/func 'J2g_PrintStackTraceStream
              "J2g_PrintStackTraceStream is Throwable.printStackTrace(PrintStream).\n"
              [(tag 't 'Throwable_I) (tag 's (m/go-type :jrt "Ljava/io/PrintStream;"))]
-             '(.Print_String__V (NN s) (StackTraceString t))))
+             ;; typed by the class's Go type (its interface when the world extends it), so a
+             ;; nil check rather than NN (JCS74 (a))
+             '(when (== s nil) (panic (NPE)))
+             '(.Print_String__V s (StackTraceString t))))
      (when (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
        (list 'go/func 'J2g_SystemGetenv
              "J2g_SystemGetenv is System.getenv(): the host's environment as an unmodifiable map.\n"
@@ -989,7 +1034,8 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                   (let [s '((inst As (* String)) (aget args 0))
                         a0 '((inst As (* RefArray)) (aget args 0))
                         a1 '((inst As (* RefArray)) (aget args 1))
-                        f2 '((inst As (* File)) (aget args 2))
+                        ;; File's Go type, its interface when the world extends it (JCS73 (a))
+                        f2 '(File_Cast (aget args 2))
                         sa '(.ArrayClass String_class)]
                     [(list 'set! '(.-Methods (.Info Runtime_class))
                            (list 'append '(.-Methods (.Info Runtime_class))
@@ -1064,14 +1110,17 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
                   [(list 'set! '(.-Methods (.Info String_class))
                          (apply list 'append '(.-Methods (.Info String_class)) str-ms))])
                 (when streams?
-                  ['(set! (.-Fields (.Info System_class))
-                          (append (.-Fields (.Info System_class))
-                                  (lit FieldInfo :Name "err" :Type PrintStream_class :Modifiers 0x19
-                                       :Get (fn ^any [^any o] (.Ref System_err)))
-                                  (lit FieldInfo :Name "in" :Type InputStream_class :Modifiers 0x19
+                  ;; a leaf PrintStream's pointer as an any, nil-preserving; its interface value
+                  ;; when the world extends it (JCS74 (a))
+                  [(let [ref (fn [v] (if (m/pointer-desc? "Ljava/io/PrintStream;") (list '.Ref v) v))]
+                     (list 'set! '(.-Fields (.Info System_class))
+                           (list 'append '(.-Fields (.Info System_class))
+                                 (list 'lit 'FieldInfo :Name "err" :Type 'PrintStream_class :Modifiers 0x19
+                                       :Get (list 'fn (with-meta '[^any o] {:tag 'any}) (ref 'System_err)))
+                                 '(lit FieldInfo :Name "in" :Type InputStream_class :Modifiers 0x19
                                        :Get (fn ^any [^any o] System_in))
-                                  (lit FieldInfo :Name "out" :Type PrintStream_class :Modifiers 0x19
-                                       :Get (fn ^any [^any o] (.Ref System_out)))))
+                                 (list 'lit 'FieldInfo :Name "out" :Type 'PrintStream_class :Modifiers 0x19
+                                       :Get (list 'fn (with-meta '[^any o] {:tag 'any}) (ref 'System_out))))))
                    (list 'set! '(.-Methods (.Info System_class))
                          (list 'append '(.-Methods (.Info System_class))
                                (sig "setErr" '[PrintStream_class] 'Prim_void 0x9
