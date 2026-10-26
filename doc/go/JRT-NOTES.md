@@ -47,6 +47,7 @@ case alone does not tell them apart, the step does.
 | Security | `gosec`, 2026-10-10 | |
 | Text and locales | `gotext`, 2026-10-10 and 11 | |
 | Modules | `jrt-module-rps55`, 2026-10-25 | |
+| java.io, zip and jar | `java-check-jc6b`, 2026-10-26 | |
 
 Each part's amendments were accepted by the user (J2G-SPEC §16 names them by series); the
 measurements in each part are its branch's, before merging main unless it says otherwise.
@@ -73,6 +74,7 @@ measurements in each part are its branch's, before merging main unless it says o
 | `store.ae`, `store_linux.ae` | (since S3) the store of blobs and refs: the box's over the monitor, natively a directory | BOX-NOTES.md, S3 |
 | `spawn.ae`, `spawn_linux.ae`, `spawn_tamago.ae` | (since S7) tool guests, `SpawnHost` | BOX-NOTES.md, S7 |
 | `tls.ae` | (since the box) TLS over Go's `crypto/tls`, `jdk.internal.jrt.HostNet`'s natives | BOX-NOTES.md, "TLS (option 2)" |
+| `checksum.ae` | (since JC6b) `Adler32`'s and `CRC32C`'s natives | "java.io, zip and jar" |
 
 `overlay/jdk/java.base/` holds jrt's own Java (40 files; 43 as of 2026-10-15),
 `overlay/jdk/variants/` the Go-build variants of jdk26u's classes (69); each part names those it added.
@@ -3973,4 +3975,119 @@ not ask (`overlay/jdk/javac/variants/ToolProvider.ae`). A table by the sources' 
 members, `Module` 4 of 69), `manifest_test.ae` and `reflect_tables.ae` (Module's table, Class's
 `getModule` entry). `reflect_test.ae`'s `TestClassLoaders` checks both modules (names, loaders,
 texts, primitives and arrays).
+
+# java.io, zip and jar (JC6b, branch `java-check-jc6b`)
+
+The user's decisions JCS92 (c) and JCS93 (c) (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided
+(2026-10-26): JCS90-JCS99", "As built: JC6b"): java.io's classes jrt lacked, then zip and jar, in the
+shipped program's world. The rule as elsewhere: jdk26u's own Java into the closure where it is plain
+Java over classes jrt has (`test/jrt/jrt_sources.ae`'s `io-sources`, `zip-sources`), variants where
+a member reaches what is cut, jrt's own Java where jdk26u's class is mostly native glue, and jrt's
+Go only for natives.
+
+## java.io
+
+**Translated from jdk26u** (`io-sources`): `RandomAccessFile`, `DataOutput`, `DataOutputStream`,
+`UTFDataFormatException`, `PipedInputStream`, `PipedOutputStream`, `PipedReader`, `PipedWriter`,
+`StreamTokenizer`, `PushbackInputStream`, `LineNumberInputStream`, `SequenceInputStream`,
+`CharArrayWriter`, `StringBufferInputStream`, `FilterWriter`, the serialization API's
+`OptionalDataException`, `NotActiveException`, `WriteAbortedException`, `ObjectInputValidation`,
+`InvalidClassException`, `SyncFailedException` (serialization itself stays out, J2G-SPEC §12), and
+`DataOutputStream.writeUTF`'s `jdk.internal.util.ModifiedUtf` and
+`java.lang.runtime.ExactConversionsSupport`. `DataOutput`, `DataOutputStream`,
+`UTFDataFormatException`, `FilterWriter`, `ModifiedUtf` and `ExactConversionsSupport` were javac's
+world's (`bin/javac-vendor`'s `base_files`, JN3) and leave its list: javac's tool build has them
+from the program's world now.
+
+**`RandomAccessFile`** (variant `overlay/jdk/variants/RandomAccessFile.ae`): its natives read the
+descriptor's field through JNI; each is a method over jrt's file table, `jdk.internal.jrt.HostFiles`,
+whose `open` gains the modes `READ_WRITE` ("rw": `O_RDWR|O_CREAT`), `READ_WRITE_SYNC` ("rws") and
+`READ_WRITE_DSYNC` ("rwd"; both `O_SYNC`: Go's `os` has no `O_DSYNC`, the stronger guarantee is
+kept), and `position`, `seek`, `length` and `setLength` (`files.ae`: `length` by the file's `Stat`
+when the host's file has one, so a concurrent read's position is untouched as by the JDK's fstat;
+`setLength` truncates through the file's `Truncate` and moves a position past the new end to it, as
+jdk26u's `setLength0`). The results are the JDK's: a directory refused as "Is a directory" in every
+mode, `readBytes0`'s and `writeBytes0`'s null and bounds checks before the descriptor's, "Stream
+Closed", "Negative seek offset"; an error's text is the system's reason first letter upper case, as
+the C library's `strerror` writes it (`lastErrorText`). The writes take no `Blocker` (a goroutine
+blocked in a write pins no carrier); `close` has no channel to close; `getChannel` stays an
+operation-level stub (`FileChannel` is NIO's, JCS92 (b)). jrt's `FileDescriptor` gains jdk26u's
+`attach` and `closeAll` (the streams sharing a descriptor closed with it), and `FileCleanable` is
+jrt's own, registering nothing (no cleaner: a file is closed when its stream is).
+
+**`InputStreamReader`** (jrt's own): the end of the input is seen anew by each read, as jdk26u's
+`StreamDecoder` sees it, so a file read to its end that grows is read on (GrowAfterEOF).
+
+## zip
+
+**`Inflater`: zlib's inflate ported to Java** (jrt's own, `overlay/jdk/java.base/java/util/zip/
+Inflater.java`), as JN7 ported deflate for `Deflater`: inflate.c's state machine and inftrees.c's
+`inflate_table` line by line for the paths jdk26u's `Inflater` takes (the zlib format with window
+bits 15 and the check value validated, the raw format, a preset dictionary; not gzip, which
+`GZIPInputStream` parses itself, and not `inflate_fast`, whose output and consumption are the slow
+path's), each call zlib's `inflate(Z_PARTIAL_FLUSH)` with its result read as jdk26u's `Inflater.c`
+reads it (the input used, the output written, finished, the dictionary needed; a data error a
+`DataFormatException` with zlib's message, the bytes used before it counted). The alternative the
+task named, Go's `compress/flate` behind natives, was not taken: Go's reader pulls its input and
+keeps an error, while `Inflater` is pushed input in pieces, says `needsInput` and `getRemaining`
+exactly and must stop where its input ends and go on when more is given; that would need a
+goroutine per inflater and still differ in when output appears (Go's flate hands output out when
+its window fills or a block ends) and in the messages. The port gives zlib's behaviour byte for
+byte.
+
+**`Deflater`** moves from `overlay/jdk/javac/java.base` (JN7) to the shipped program's
+`overlay/jdk/java.base`, and gains the paths jdk26u's `Deflater` takes that JN7 left out: level 0
+(`deflate_stored`), `HUFFMAN_ONLY` (`deflate_huff`), a preset dictionary
+(`deflateSetDictionary`, with `PRESET_DICT` and the dictionary's Adler-32 in the zlib header), a
+change of level or strategy (`deflateParams`, which jdk26u's glue calls instead of `deflate` while
+`setParams` is pending, flushing with `Z_BLOCK` when the compress function or strategy changes),
+`deflateReset` keeping the configuration, `_tr_flush_block`'s forced stored block at level 0, and
+`ByteBuffer` input and output (through their arrays, else copied; no direct buffers in the Go
+build). Checked against the system's zlib 1.3.2 (Python's `zlib`, the same release jdk26u bundles):
+the compressed bytes of a 56,904-byte input at levels 1, 3, 6, 9 with each strategy, and at level 0
+with the same call pattern, are zlib's byte for byte, and every level and strategy inflates back by
+the port (`.tmp/jc6b/z1.ae`, `z2.ae`, `z3.ae`).
+
+**Translated from jdk26u** (`zip-sources`): `Adler32` and `CRC32C` (variants: their bulk updates
+are jrt's natives, `checksum.ae`: zlib's adler32, and Go's `hash/crc32` with the Castagnoli table;
+the direct buffers' paths cut), `CheckedInputStream`, `CheckedOutputStream`, `DataFormatException`,
+`DeflaterInputStream`, `DeflaterOutputStream` (javac's world's until now, `closure.txt`),
+`GZIPInputStream`, `GZIPOutputStream`, `InflaterInputStream` (replacing jrt's own of "The JDK's
+resource data", which inflated the whole input through Go's `compress/zlib` at its first read; its
+native is gone: `CharacterName`'s `uniName.dat` is now read through the port), `InflaterOutputStream`,
+`ZipCoder` (variant: its UTF-8 coder's strict decoding and encoding are jrt's own
+`jdk.internal.jrt.Utf8Coder`, JavaLangAccess's `newStringOrThrow`/`getBytesUTF8OrThrow` in the JDK),
+`ZipConstants`, `ZipConstants64`, `ZipEntry`, `ZipError`, `ZipInputStream`, `ZipOutputStream`,
+`ZipUtils` (variant: no `JavaNioAccess`), with `java.nio.file.attribute.FileTime` (ZipEntry's
+times) and `java.nio.charset`'s `CharacterCodingException`, `MalformedInputException`,
+`UnmappableCharacterException`.
+
+**`ZipFile`** (jrt's own, jdk26u's transcribed, `overlay/jdk/java.base/java/util/zip/ZipFile.java`):
+no `Cleaner` (a zip file, its `Source` and its inflaters' streams are released when closed, not
+when unreachable), no `PerfCounter`, a `Source`'s key the file's canonical path and modification
+time (the JDK's: its file key and attributes, through `java.nio.file`'s attribute views, which jrt
+does not have; a missing file is `NoSuchFileException` as there), no Windows branch, and the access
+objects of `SharedSecrets` kept by `jdk.internal.jrt.ZipAccess` (jrt's `SharedSecrets` holds
+`JavaLangAccess` alone).
+
+## jar
+
+**Translated from jdk26u**: `Attributes`, `JarEntry` (variant: its copy constructor without the
+certificates, java.security's), `JarException`, `JarInputStream`, `JarOutputStream`, `Manifest`,
+`JavaUtilJarAccessImpl`; and the `jar:` URL's connection: `java.net.JarURLConnection`,
+`sun.net.www.protocol.jar`'s `JarURLConnection` (j2g's rename table: `Jar_JarURLConnection`),
+`JarFileFactory` (variant: no Windows branch) and `URLJarFile` (variant: opened at the base
+version), `sun.net.util.URLUtil`. **`JarFile`** is jrt's own, jdk26u's transcribed: jars are read as
+unsigned (no signature verification: `java.security`'s certificates, PKCS #7 and digests are JCS90's,
+deferred), no `ScopedValue`, `Runtime.Version`'s feature numbers as ints (`java.lang.Runtime.Version`
+is outside the world, so are the members naming it: `baseVersion`, `runtimeVersion`, `getVersion`,
+the four-argument constructor), and `JarVerifier` and `sun.security.util.ManifestEntryVerifier` are
+jrt's own, verifying nothing, so that `Manifest` and `JarInputStream` run jdk26u's code.
+
+## Not done
+
+`FileChannel` and `getChannel` (NIO, JCS92 (b)); the cleanup of unreachable streams, zip files and
+inflaters (Go's collector, JCS96 (b)); signed jars (JCS90 (b)); the `jrt:` URL (the run-time image);
+a multi-release jar opened at the runtime's version; MIME types of `URLConnection.getFileNameMap`
+("Files"); `FileInputStream.skip` of a negative count (`:jrt-io`, JCS96 (b)).
 

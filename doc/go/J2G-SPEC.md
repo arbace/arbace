@@ -333,7 +333,8 @@ outside the world; with sockets, below, the variant is gone and they are the JDK
 `URLConnection` (no MIME table), `sun.net.www.ParseUtil` and `URI` (`decode` without
 `CharsetDecoder`), the `file:` handler (no `Proxy`), `HexFormat`, `jdk.internal.util.Exceptions`
 (the JDK's default `jdk.includeInExceptions`). Connections other than `file:`,
-`RandomAccessFile`, channels and `java.nio`'s coders stay outside the world.
+channels and `java.nio`'s coders stay outside the world (`RandomAccessFile` and the `jar:`
+connection are in it since JC6b, below).
 
 **Sockets in the closed world** (amendments NT1-NT5, accepted 2026-10-10; JRT-NOTES.md, "Sockets
 (go-net)"). D6's cut of sockets is reversed: jdk26u's `ServerSocket`, `Socket`, `SocketImpl`,
@@ -365,7 +366,8 @@ its static initializer (`SharedSecrets`' `JavaNioAccess`), `ScopedMemoryAccess` 
 natives (`closeScope0` throws). jrt's own Java gains `java.util.zip.InflaterInputStream` (RD3),
 the `InputStream` constructor only, which inflates its whole input at the first read through a
 native over Go's `compress/zlib`, so that `CharacterName` reads `uniName.dat` unchanged; the
-VM's `Inflater` stays outside the world. `bin/jrt-convert` also makes the data these classes read
+VM's `Inflater` stays outside the world. (Since JC6b, below: jdk26u's `InflaterInputStream` over
+jrt's own `Inflater`, and RD3's class and native are gone.) `bin/jrt-convert` also makes the data these classes read
 (RD4): `uniName.dat` as the JDK build's `Gendata.gmk` makes it, ICU's `nfc.nrm` and `nfkc.nrm`,
 into `.tmp/jrt/data`, compared with the build's module image; the program embeds them (§10.3).
 
@@ -441,6 +443,20 @@ Linux's branches of `initStreams` and `destroy`), `Process` (no `Blocker`; the n
 gives `HostFiles` the setting of its number. `Runtime.exec`'s six overloads are in `Runtime`'s
 member table through jrt's own Java `jdk.internal.jrt.RuntimeExec` (§11, PR4). Code kept from
 jdk26u in the variants, `RuntimeExec` and jrt's process natives is recorded in LICENSE.md (PR6).
+
+**java.io, zip and jar in the closed world** (JC6b: the user's decisions JCS92 (c) and JCS93 (c),
+doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (2026-10-26): JCS90-JCS99", "As built: JC6b";
+JRT-NOTES.md, "java.io, zip and jar"). jdk26u's `RandomAccessFile` (variant: its natives over
+`HostFiles`' modes and position, seek, length and resize, §9.1; no `Blocker`; `getChannel` an
+operation-level stub), the data, piped, pushback, sequence and line-number streams,
+`StreamTokenizer`, `CharArrayWriter`, `FilterWriter`; java.util.zip's checksums (`Adler32`'s and
+`CRC32C`'s bulk updates jrt's natives), streams, `ZipEntry`, `ZipInputStream`, `ZipOutputStream`;
+java.util.jar's streams, `Manifest`, `Attributes`; the `jar:` connection; and jrt's own Java:
+`Inflater` and `Deflater` (zlib's inflate and deflate ported to Java, byte for byte zlib 1.3.2's),
+`ZipFile` and `JarFile` (jdk26u's without the `Cleaner`, the file attributes, the signature
+verification and `Runtime.Version`), `JarVerifier` verifying nothing (jars are read as unsigned),
+`FileCleanable` registering nothing. jrt's `FileDescriptor` gains jdk26u's `attach` and
+`closeAll`. Code kept from jdk26u is recorded in LICENSE.md.
 
 **java.security's basics in the closed world** (amendments SC4, SC5, accepted 2026-10-10;
 JRT-NOTES.md, "Security"; JRT-SOURCES.md, "Security"). `MessageDigest` and its streams,
@@ -758,7 +774,9 @@ since jrt's `ByteArray` is `byte[]` (§5.9) (amendment C6, accepted 2026-10-09);
 `Normalizer` (amendment RD5, accepted 2026-10-10); `sun/util/calendar/Era` → `Calendar_Era`,
 since `java.time.chrono.Era` is `Era` (amendment TM7, accepted 2026-10-10);
 `sun/security/provider/SecureRandom` → `Sun_SecureRandom`, since `java.security.SecureRandom` is
-`SecureRandom` (amendment SC2, accepted 2026-10-10).
+`SecureRandom` (amendment SC2, accepted 2026-10-10); `sun/net/www/protocol/jar/JarURLConnection` →
+`Jar_JarURLConnection`, since `java.net.JarURLConnection` is `JarURLConnection` (JC6b,
+doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC6b": the `jar:` URL's connection in the world).
 The check runs after translation (`arbace.j2g.checks`) over every Go package's package-level
 names and every type's method names, across j2g's generated files **and jrt's hand-written
 ones** (the stand-in files excepted, since replaced stand-ins are removed, §4.3); a collision is

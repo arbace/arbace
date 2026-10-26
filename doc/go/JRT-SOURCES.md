@@ -568,6 +568,42 @@ here and in J2G-SPEC §4.1, §10.3), from jdk26u at `baf63fb`,
 - **Result**: 867 files with `JRT_LOCALES=common` (2,310 with `all`), all converted and compiled to
   javac's class shapes, 862 identical and the 5 known differences, 2,144 classes.
 
+## java.io, zip and jar (JC6b, 2026-10-26)
+
+java.io's missing classes, zip and jar in the Go build (JRT-NOTES.md, "java.io, zip and jar";
+doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC6b"; the user's decisions JCS92 (c) and
+JCS93 (c)), from jdk26u at `baf63fb`, `test/jrt/jrt_sources.ae`'s `io-sources` and `zip-sources`:
+
+- **Sources added** (`src/java.base/share/classes`): java.io's `RandomAccessFile`, `DataOutput`,
+  `DataOutputStream`, `UTFDataFormatException`, the four piped streams, `StreamTokenizer`,
+  `PushbackInputStream`, `LineNumberInputStream`, `SequenceInputStream`, `CharArrayWriter`,
+  `StringBufferInputStream`, `FilterWriter`, six of serialization's exceptions and interfaces;
+  `jdk/internal/util/ModifiedUtf`, `java/lang/runtime/ExactConversionsSupport`; java.util.zip's
+  `Adler32`, `CRC32C`, the checked, deflater, inflater and GZIP streams, `DataFormatException`,
+  `ZipCoder`, `ZipConstants`, `ZipConstants64`, `ZipEntry`, `ZipError`, `ZipInputStream`,
+  `ZipOutputStream`, `ZipUtils`; java.util.jar's `Attributes`, `JarEntry`, `JarException`,
+  `JarInputStream`, `JarOutputStream`, `Manifest`, `JavaUtilJarAccessImpl`;
+  `java/nio/file/attribute/FileTime`, java.nio.charset's three coding exceptions,
+  `jdk/internal/access`'s `JavaUtilZipFileAccess` and `JavaUtilJarAccess`; the `jar:` connection
+  (`java/net/JarURLConnection`, `sun/net/www/protocol/jar/JarURLConnection`, `JarFileFactory`,
+  `URLJarFile`, `sun/net/util/URLUtil`).
+- **jrt's own Java** (KIND `overlay`): `java/util/zip/Inflater.java`, `Deflater.java` (moved from
+  `overlay/jdk/javac`), `ZipFile.java`, `java/util/jar/JarFile.java`, `JarVerifier.java`,
+  `sun/security/util/ManifestEntryVerifier.java`, `java/io/FileCleanable.java`,
+  `jdk/internal/jrt/ZipAccess.java`, `Utf8Coder.java` (new); `java/io/FileDescriptor.java`
+  (`attach`, `closeAll`), `jdk/internal/jrt/HostFiles.java` (the read-write modes, position, seek,
+  length, setLength), `java/io/InputStreamReader.java` (the end of input per read); jrt's own
+  `java/util/zip/InflaterInputStream.java` is gone (jdk26u's is translated).
+- **Variants**: `RandomAccessFile`, `Adler32`, `CRC32C`, `ZipCoder`, `ZipUtils`, `JarEntry`,
+  `URLJarFile`, `JarFileFactory` (JRT-NOTES.md).
+- **Natives** (jrt's Go): `HostFiles`' `position0`, `seek0`, `length0`, `setLength0` and the new
+  modes of `open0` (`files.ae`); `Adler32`'s `update`, `updateBytes`, `CRC32C.hostUpdateBytes`
+  (`checksum.ae`); `InflaterInputStream.inflate0` (`natives.ae`) is gone.
+- **Result** (`bin/jrt-convert`): 906 Java files (839 lines of `jdk/sources.txt` before, 906 now:
+  815 of `share`, 6 `unix`, 31 generated, 51 of jrt's own), all converted and compiled by javac,
+  982 forms files; `bin/javac-vendor`'s list loses the six java.io and helper files and
+  `DeflaterOutputStream`, javac's world's `Deflater` moving to the program's.
+
 ## The committed forms (standalone S1, 2026-10-12)
 
 The user's decision D2 (doc/STANDALONE-SURVEY.md §4.2, §9.1 S1) reverses "regenerated on every
