@@ -61,6 +61,12 @@ public class Pins {
     return m + k + Math.abs(-1) + Long.valueOf(7) + Integer.valueOf(8);
   }
 
+  /* A compound assignment on a long whose conditional operand has integer literal arms: the arms are longs. */
+  static long conditional(boolean b, long u) {
+    u += b ? 2L : 1L;
+    return u;
+  }
+
   static List<String> collections() {
     List<String> xs = new ArrayList<>(10);
     xs.add("a");
