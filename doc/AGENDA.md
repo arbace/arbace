@@ -116,8 +116,11 @@ The current state of the work. This file is rewritten as things change. For the 
   248, Java compiled 420, Clojure compiled 15 namespaces; the gate +32 s cold; RPS70-RPS78), REAP5 (Java's
   print level: 2,104 of 2,722; RPS60-RPS69), JC2b (JCS42 (b)-JCS48: interp 1,462, compiled 1,636;
   JCS70-JCS79), JN9c (beside REAP: overload resolution native, jdk26u's lists written alone 95.9%;
-  JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JC6b (java.io and
-  zip: JCS92 (c), JCS93 (c), on Opus). Done since: the second batched re-seed (`0120bd38…`, the fixpoint of
+  JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: a trial of `bin/gate
+  --full` (on Sonnet, before REAP9). Next: REAP9 (one clean `bin/gate --full` on the final head, the user,
+  2026-10-26; the fixpoint and the final re-seed with JC6b's jrt; the v1 divergences recorded; the annotated
+  tag; the journal reset). Done since: JC6b (java.io, zip and jar in jrt: interp 1,683, compiled 1,869;
+  JCS100-JCS109), the second batched re-seed (`0120bd38…`, the fixpoint of
   `988d4e90`, verified; on Sonnet), JC6 (the corpus
   widened, 683 tests; the world ranked and decided, JCS90-JCS99; the catch-alls named), JN9d (beside REAP: the
   inference tier, lists written alone 99.5%; JFS110-JFS119, JN9e after the tag), RPS103 (b) (the sample `callback`, on

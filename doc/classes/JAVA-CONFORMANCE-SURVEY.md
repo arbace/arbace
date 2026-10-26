@@ -2836,3 +2836,13 @@ and zip tests), `z1.ae`, `z2.ae`, `z3.ae` with `z1.out`-`z3.out` (the codec chec
 `results-full1.tsv` (the whole check), `scripts/classify.py`, `cls-full2.tsv`, `class-counts-full2.txt`
 (the classification), `reap1.log`, `gate.log`, `conv-verify.log`.
 
+
+## Decided (2026-10-26): JCS100-JCS109
+
+The user decided JC6b's proposals as recommended: JCS100 (b) (NIO's file channels deferred with NIO), JCS101
+(a) for jrt's flush at exit, by design, (b) for its other stream behaviours, deferred with JCS96, JCS102 (b)
+(a Cleaner for unreachable zip files and streams, with JCS96's references), JCS103 (a) (the JDK's own tools a
+test runs, a harness class), JCS104 (b) (two threads' output order recorded status only), JCS105 (b), JCS106
+(a) (the `jrt:` URL by design: no run-time image), JCS107 (a) (Inflater a Java port of zlib, not over
+compress/flate), JCS108 (b) (signed jars with JCS90's providers), JCS109 (a) (the interpreter's superclasses
+JC6b exposed, in JC4b). The five `:pending` classes cite this.

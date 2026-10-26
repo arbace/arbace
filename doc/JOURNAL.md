@@ -2101,3 +2101,28 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   C23, a survey and a milestone making the gate efficient: a key per `--full` step over its declared inputs
   and a recorded pass, an unchanged step skipped; the builds shared; the large jobs scheduled one at a time;
   and a clean, uncached `--full` at each milestone's tag, the proof a tag claims (REAP9's run is that, as now).
+
+## 2026-10-26: JC6b merged, JCS100-JCS109 decided; REAP9's full gate one clean run (the user)
+
+- JC6b (branch `java-check-jc6b` from `988d4e90`, merged): java.io's missing classes and zip/jar in the Go
+  build's world (JCS92 (c), JCS93 (c)): RandomAccessFile (jdk26u's with a variant, its natives over jrt's file
+  table), DataOutputStream and its kin moved from javac's world, the piped streams, StreamTokenizer,
+  PushbackInputStream, LineNumberInputStream, SequenceInputStream, CharArrayWriter from jdk26u unchanged;
+  `Inflater` jrt's own Java, a port of zlib 1.3.2's inflate (JCS107 (a): not over compress/flate, whose reader
+  cannot report `needsInput`/`getRemaining` exactly); JN7's `Deflater` moved into the shipped world and
+  completed (its output the system zlib 1.3.2's byte for byte at levels 0, 1, 3, 6, 9); Adler32 and CRC32C with
+  Go natives (`checksum.ae`); the GZIP, Checked, Inflater/Deflater and Zip streams; ZipFile and JarFile
+  transcribed into jrt's own Java (no Cleaner, no signature verification: jars read as unsigned); the `jar:`
+  URL's connection. Origins jdk26u at `baf63fbe` and zlib 1.3.2, in LICENSE.md. Java interp 1,600 to 1,683,
+  compiled 1,767 to 1,869 (java.io 84 to 134 and 96 to 151; zip 1 to 26 and 32; jar 0 to 9); `:io` emptied;
+  Clojure's suite and the oracle unchanged; the executable +1.06% (156,426,400 bytes). Shipped code (REAP9's
+  re-seed): overlay/jdk/java.base and variants, go/arbace/jrt (files, natives, checksum, the manifest and
+  tables), arbace/j2g/names.ae, jdk/ and jdk/javac/ (forms, sources, provenance, edge). CLAUDE.md's line on
+  jrt's zlib ports corrected at the merge. The essential gate on `0b3b5dc2` passed (25m37s). The disk reached
+  99% during JC6b's runs (the trial's worktree and a 34 GB Go build cache); Go's build cache trimmed by hand
+  three times today (entries unused for an hour, as `gocache_trim` does at 90 minutes). Decided (the user):
+  JCS100 (b), JCS101 (a) and (b), JCS102 (b), JCS103 (a), JCS104 (b), JCS105 (b), JCS106 (a), JCS107 (a), JCS108
+  (b), JCS109 (a).
+- Decided (the user): REAP9 runs `bin/gate --full` once, whole and clean, on the final head: the tag's
+  proof. Considered: reusing the trial's results for the steps JC6b and the re-seed do not touch (2-4 hours
+  sooner, a proof of two runs).
