@@ -234,6 +234,10 @@ The current state of the work. This file is rewritten as things change. For the 
     no deferred class left; GC166-GC174 decided as built;
   - staging shared with Futamura's F7 (G16);
   - speed (F10's inline caches, specialization), which would bring the speed-bound programs back;
+- Parked (the user, 2026-10-26), revisited later piece by piece: the box (with the KU series below, its Mac
+  bundle and arm64 VM, tamago/ and tamago/cmd/'s forms), repr/haskell, repr/rust, the macOS user interface
+  (the Moshi Go note below) and the iOS app (doc/IOS-REPL-SURVEY.md); out of `bin/gate --full` from REAP9 on,
+  their scripts kept. The focus: the three crops and C23.
 - Parked (the user, 2026-10-18): KU3 (processes on arm64). A safety classifier stopped both
   agents before they wrote anything. The worktree `ku3` is kept, clean at `80294e9a`. Its
   findings: TamaGo's arm64 `osInit` reads ID_AA64ISAR0_EL1, ID_AA64ISAR1_EL1 and

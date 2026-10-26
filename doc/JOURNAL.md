@@ -2137,3 +2137,21 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   Clojure's last deferred cases: RPS41 (b), RPS42, RPS53, RPS54; JN9e: JFS110-JFS119), about 1.5-2 weeks.
   Considered: the gate and the small ones only (days); also the deferred JDK areas (JCS90-JCS96) and JC7
   (weeks to months): left for later.
+
+## 2026-10-26: the full gate trial; the box, Haskell, Rust, the macOS UI and the iOS app parked (the user)
+
+- The trial of `bin/gate --full` (worktree `fullgate` at `220465ba`, on Sonnet): 215m51s, 4 of about 45 steps
+  failed, all load: `java-check-full` (12 interpreted tests timing out at 20 s and then 40 s while JC6b's
+  20 GiB jobs ran in the other slot; all 12 pass compiled), `repr-go-native` (killed for memory; rerun alone
+  with `GOMEMLIMIT=18GiB`: 22 corpora, 12,275 dumps, every level equal), `goi` (one program, bug358, timed out:
+  1,617 pass, 0 fail), `repr-go` (the box's `TestGoGuestSMP` failed once, its guest's run 28 s; rerun alone three
+  times: passed, 7-14 s; the checks the `&&` chain then skipped, `bin/box-vendor purego-check`,
+  `bin/tamago-vendor verify`, `bin/x509roots-vendor verify` and `check`, passed alone). Everything else passed:
+  the fixpoint (23m48s), the box's steps, javac, the vendoring checks, the round trips of repr/java, repr/go,
+  repr/haskell, repr/rust and repr/clojure, the compiled suite, the programs. Hence REAP9's clean run with
+  nothing else running on the host.
+- Decided (the user): the box (with its KU series, its Mac bundle and arm64 VM, tamago/ and tamago/cmd/'s
+  forms), repr/haskell, repr/rust, the macOS user interface (the note on Moshi Go, 2026-10-13) and the iOS app
+  (doc/IOS-REPL-SURVEY.md) parked: fine as they are, not forgotten, revisited later piece by piece; the work
+  focuses on the three crops and C23. Everything of them leaves `bin/gate --full`, already for REAP9's run (the
+  tag claims the three crops); their scripts, targets and files stay, run by hand.
