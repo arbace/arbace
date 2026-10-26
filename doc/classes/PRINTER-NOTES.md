@@ -413,3 +413,21 @@ declaration's TYPE_USE annotation the converter also keeps on a qualified type's
 C<>()` for a parameterized target; and a converted file holding only its `in-ns` (a Java file without
 declarations) as its package line. Their cases are the samples' `PrintSyntax.java` (the samples corpus
 since: 15 Java files, 18 converted files).
+
+### REAP9: the jdk corpus after JC6b (2026-10-26)
+
+The milestone's full gate failed `repr-java-roundtrip`: `jdk/forms` had grown from 911 to 982
+converted files (JC6b's java.io, java.net, java.nio.file.attribute, java.util.jar and java.util.zip
+closure, `sun/net/www/protocol/jar`, `jdk/internal/jrt/Utf8Coder`, `ModifiedUtf`...) and the round trip
+had not run on them: some 45 entries were unexpected, almost all in the known kinds of the class level
+(control flow: an early `return` or a guard restructured, `?:` against `if`; an increment's place,
+`StreamTokenizer`'s `ctype[low++] |= ...`; fall-through), recorded in `jdk-known.edn`
+and `jdk.edn` (`bin/repr-java roundtrip --corpus baseline,samples,jdk --text --record`; the text level's
+`jdk-text.edn` grew to 982 files, all pass). `StreamTokenizer`'s `ae` difference is the integer radix
+(`\a 0x7` written `7`), the known kind. Two forms-level kinds got their own reasons in
+`arbace.repr.java.roundtrip/reason`: the number of a generated temporary (`Inflater`: `old-5` against
+`old-6`, shifted by the other differences of the file) and a `c ? x : null` read back as `when`
+(`URLJarFile`). One was a printer defect and is fixed: `utflen += c >= 0x800 ? 2L : 1L` on a long
+printed its arms as ints (`ModifiedUtf`, forms `2` against `(long 2)`); `assign-text` now takes a
+compound assignment's right side through `long-literal-text`, as the binary operators do. Its case is
+`Pins.conditional` in the samples (`test/repr/java/java/sample/Pins.java`, expected forms updated).
