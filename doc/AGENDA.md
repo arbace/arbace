@@ -134,10 +134,12 @@ The current state of the work. This file is rewritten as things change. For the 
   JCS77); the second batched re-seed (REAP2's `--go-flag`, REAP3, REAP4, JC2's and JC2b's j2g, JC5,
   RPS55's jrt); REAP9. After the milestone: the scripts' sweep of `/dev/null` and
   process substitution (the user, 2026-10-24), done before any C23 work (the user, 2026-10-25); then the
-  gate made efficient (a survey first: a key per `--full` step over its declared inputs and a recorded pass, so
-  an unchanged step is skipped; one build for the fresh build and the fixpoint's G1, one javac tool; the 20 GiB
-  jobs one at a time; a clean, uncached `--full` at each milestone's tag as the reproducibility proof; the
-  user, 2026-10-26); then the main effort: C23 at parity with Clojure, Java and Go (read, eval,
+  milestone `arbace-reaps-3-crops-v2` (the user, 2026-10-26; an annotated tag, the journal reset again): the gate made
+  efficient (a survey first: a key per `--full` step over its declared inputs and a recorded pass, an unchanged step
+  skipped; the builds shared; the 20 GiB jobs one at a time; a clean, uncached `--full` at each tag), REAP's small
+  leftovers (RPS32, RPS102 (b), RPS95 (b), RPS97 (b), JCS76, RPS64 by kind, RPS86 (b), RPS80 (b), RPS81 (b)) and its
+  medium ones (JC4b: JCS98, JCS109, JCS62's compiled half; Clojure's last deferred: RPS41 (b), RPS42, RPS53, RPS54;
+  JN9e: JFS110-JFS119); the deferred JDK areas (JCS90-JCS96) and JC7 later; then the main effort: C23 at parity with Clojure, Java and Go (read, eval,
   AOT and print, the milestone's rule; the user, 2026-10-25), its survey first, its prior art go-whim's C front end, canonical printer, C-lisp and C23
   conformance test (`../go-whim` at `80c49bf5`, crefactor/; journal 2026-10-25).
 

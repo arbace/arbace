@@ -2126,3 +2126,14 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
 - Decided (the user): REAP9 runs `bin/gate --full` once, whole and clean, on the final head: the tag's
   proof. Considered: reusing the trial's results for the steps JC6b and the re-seed do not touch (2-4 hours
   sooner, a proof of two runs).
+
+## 2026-10-26: the milestone `arbace-reaps-3-crops-v2` between the scripts' sweep and C23 (the user)
+
+- The user: an interim milestone only for the gate's efficiency is thin; REAP's leftover work goes there too.
+  Decided (the user): after `arbace-reaps-3-crops-v1` and the scripts' sweep, before C23, the milestone
+  `arbace-reaps-3-crops-v2` (an annotated tag as v1's, main's journal starting over again): the gate made
+  efficient (entry above), REAP's small decided leftovers (RPS32, RPS102 (b), RPS95 (b), RPS97 (b), JCS76, RPS64
+  per kind, RPS86 (b), RPS80 (b), RPS81 (b)) and its medium ones (JC4b: JCS98, JCS109, JCS62's compiled half;
+  Clojure's last deferred cases: RPS41 (b), RPS42, RPS53, RPS54; JN9e: JFS110-JFS119), about 1.5-2 weeks.
+  Considered: the gate and the small ones only (days); also the deferred JDK areas (JCS90-JCS96) and JC7
+  (weeks to months): left for later.
