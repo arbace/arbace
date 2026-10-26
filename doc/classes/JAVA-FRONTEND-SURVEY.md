@@ -5428,3 +5428,18 @@ JFS112's reads, both small.
   `qmod.sh`); `facts.ae`, `why.ae` (a run's differences and declines by reason); `snaprun.sh`, `two.sh`,
   `jdk.sh`, `build.sh`, `load.sh`, `loadfresh.sh` (the snapshot runs, the load checks); `gate.log` (the
   essential gate).
+
+### JN9d.10 After merging main (JC5, REAP7b, JC6)
+
+main was merged twice (`0234d262`, `3aacf8d0`); the tool rebuilt from the merged checkout (key `0cb23c6e...`,
+231,776,416 bytes). The merge showed one more native fact differing in the samples (PrintSyntax.java,
+REAP5b's: anonymous classes in switch rule arms numbered twice, the rule's body and its yield's value being
+copies in the native tree), fixed by `1afd9b5f`. On the merged tool `bin/repr-java attr-check --corpus all`
+(GOGC=100, 2,283 s, 29.4 GB peak): every corpus's forms byte for byte and every fact equal, **14,416,929
+facts** (JC5's converter asks more), 171 declined (140 cycles, 14 multi-catch intersection lubs, 16 dropped
+record-component annotations, 1 a package's type in the samples), 35 leaned (jdk26u); lists written alone
+99.5% of jdk26u's; model reads 99.7% native in jdk26u. `front-check`, `parse-check`, `check`, `check --jdk`
+(the hashes as main's), `roundtrip --corpus baseline,samples,jdk --text` pass; the updates (fixtures,
+`jrt-convert`, `javac-vendor convert`, `java-check --forms update`) changed only the four provenance files'
+`:repr-java` (`3d54bdd5...`) and `:host`, javac's edge now main's (its `java/lang/Module` gone with JC5); the
+essential gate passed at `0ce59afd` (25m44s).
