@@ -1,18 +1,23 @@
 /*
- * Arbace (overlay/jdk/javac, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN7"): jrt's
- * java.util.zip.Deflater for the world of javac's tool build, written for jrt in place of
- * jdk26u's, whose compression is zlib's C code behind native methods: the Go build has no zlib,
- * and Go's compress/flate writes other bytes. The JDK build's tools that run on Arbace write
- * zlib streams that must be the JDK's byte for byte (build.tools.generatecharacter.CharacterName's
- * uniName.dat, through DeflaterOutputStream), so the compressor here is zlib's own deflate,
- * ported to Java from zlib 1.3.2 as jdk26u bundles it (src/java.base/share/native/libzip/zlib:
- * deflate.c, deflate.h, trees.c; the host JDK's system zlib is the same release), line by line
- * for the paths it supports: the zlib and raw formats, levels 1 to 9 and the default (6), the
- * default and filtered strategies, the flush modes NO_FLUSH, SYNC_FLUSH, FULL_FLUSH and finish;
- * not a preset dictionary, level 0 (stored), HUFFMAN_ONLY or a change of the parameters after
- * the first deflate call (they throw UnsupportedOperationException). The public API is
- * jdk26u's (https://github.com/openjdk/jdk26u at baf63fb), its JNI glue
- * (src/java.base/share/native/libzip/Deflater.c) followed in deflate's return value.
+ * Arbace (overlay/jdk, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN7"; since JC6b,
+ * doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC6b", in the shipped program's world, moved
+ * from overlay/jdk/javac): jrt's java.util.zip.Deflater, written for jrt in place of jdk26u's,
+ * whose compression is zlib's C code behind native methods: the Go build has no zlib, and Go's
+ * compress/flate writes other bytes. The JDK build's tools that run on Arbace write zlib streams
+ * that must be the JDK's byte for byte (build.tools.generatecharacter.CharacterName's uniName.dat,
+ * through DeflaterOutputStream), and so must a program's archives, so the compressor here is
+ * zlib's own deflate, ported to Java from zlib 1.3.2 as jdk26u bundles it
+ * (src/java.base/share/native/libzip/zlib: deflate.c, deflate.h, trees.c; the host JDK's system
+ * zlib is the same release), line by line for the paths jdk26u's Deflater takes: the zlib and
+ * raw formats, levels 0 (deflate_stored) to 9 and the default (6), the default, filtered and
+ * Huffman-only (deflate_huff) strategies, a preset dictionary (deflateSetDictionary), a change of
+ * the level or strategy (deflateParams, as jdk26u's glue calls it), the flush modes NO_FLUSH,
+ * SYNC_FLUSH, FULL_FLUSH and finish; not the gzip format (GZIPOutputStream writes its own header
+ * and trailer). The public API is jdk26u's documented java.util.zip.Deflater
+ * (https://github.com/openjdk/jdk26u at baf63fb), its JNI glue
+ * (src/java.base/share/native/libzip/Deflater.c) followed in the results; ByteBuffer input and
+ * output are read and written through their arrays when they have them, else copied (the Go
+ * build has no direct buffers).
  *
  * zlib: Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler, under the zlib License
  * (LICENSE.md). Arbace's port: Copyright (c) the Arbace authors, under the same zlib License.
@@ -20,7 +25,10 @@
 package java.util.zip;
 
 import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.util.Objects;
+
+import jdk.internal.util.Preconditions;
 
 /** zlib's compressor (a port of zlib 1.3.2's deflate, as above). */
 public class Deflater implements AutoCloseable {
@@ -38,19 +46,20 @@ public class Deflater implements AutoCloseable {
     public static final int FULL_FLUSH = 3;
     private static final int FINISH = 4;
 
+    private static final byte[] EMPTY = new byte[0];
+
     private ZState zs;
-    private byte[] inputArray = new byte[0];
+    private ByteBuffer input;
+    private byte[] inputArray = EMPTY;
     private int inputPos, inputLim;
     private int level, strategy;
     private boolean setParams;
     private boolean finish, finished;
     private long bytesRead, bytesWritten;
-    private final boolean nowrap;
 
     public Deflater(int level, boolean nowrap) {
         this.level = level;
         this.strategy = DEFAULT_STRATEGY;
-        this.nowrap = nowrap;
         this.zs = new ZState(level, DEFAULT_STRATEGY, nowrap);
     }
 
@@ -63,8 +72,9 @@ public class Deflater implements AutoCloseable {
     }
 
     public void setInput(byte[] input, int off, int len) {
-        Objects.checkFromIndexSize(off, len, input.length);
+        Preconditions.checkFromIndexSize(off, len, input.length, Preconditions.AIOOBE_FORMATTER);
         synchronized (this) {
+            this.input = null;
             this.inputArray = input;
             this.inputPos = off;
             this.inputLim = off + len;
@@ -76,21 +86,56 @@ public class Deflater implements AutoCloseable {
     }
 
     public void setInput(ByteBuffer input) {
-        throw new UnsupportedOperationException("Deflater.setInput(ByteBuffer) on Arbace");
+        Objects.requireNonNull(input);
+        synchronized (this) {
+            this.input = input;
+            this.inputArray = null;
+        }
     }
 
     public void setDictionary(byte[] dictionary, int off, int len) {
-        throw new UnsupportedOperationException("Deflater.setDictionary on Arbace");
+        Preconditions.checkFromIndexSize(off, len, dictionary.length, Preconditions.AIOOBE_FORMATTER);
+        synchronized (this) {
+            ensureOpen();
+            setDictionary0(dictionary, off, len);
+        }
     }
 
     public void setDictionary(byte[] dictionary) {
         setDictionary(dictionary, 0, dictionary.length);
     }
 
+    public void setDictionary(ByteBuffer dictionary) {
+        synchronized (this) {
+            int position = dictionary.position();
+            int remaining = Math.max(dictionary.limit() - position, 0);
+            ensureOpen();
+            if (dictionary.hasArray()) {
+                setDictionary0(dictionary.array(), dictionary.arrayOffset() + position, remaining);
+            } else {
+                byte[] copy = new byte[remaining];
+                dictionary.get(position, copy, 0, remaining);
+                setDictionary0(copy, 0, remaining);
+            }
+            dictionary.position(position + remaining);
+        }
+    }
+
+    /** deflateSetDictionary, its result read as Deflater.c's checkSetDictionaryResult. */
+    private void setDictionary0(byte[] b, int off, int len) {
+        if (zs.deflateSetDictionary(b, off, len) != ZState.Z_OK) {
+            throw new IllegalArgumentException();
+        }
+    }
+
     public void setStrategy(int strategy) {
         switch (strategy) {
-            case DEFAULT_STRATEGY: case FILTERED: case HUFFMAN_ONLY: break;
-            default: throw new IllegalArgumentException();
+            case DEFAULT_STRATEGY:
+            case FILTERED:
+            case HUFFMAN_ONLY:
+                break;
+            default:
+                throw new IllegalArgumentException();
         }
         synchronized (this) {
             if (this.strategy != strategy) {
@@ -114,7 +159,8 @@ public class Deflater implements AutoCloseable {
 
     public boolean needsInput() {
         synchronized (this) {
-            return inputLim == inputPos;
+            ByteBuffer input = this.input;
+            return input == null ? inputLim == inputPos : ! input.hasRemaining();
         }
     }
 
@@ -139,47 +185,103 @@ public class Deflater implements AutoCloseable {
     }
 
     public int deflate(ByteBuffer output) {
-        throw new UnsupportedOperationException("Deflater.deflate(ByteBuffer) on Arbace");
+        return deflate(output, NO_FLUSH);
     }
 
     public int deflate(byte[] output, int off, int len, int flush) {
-        Objects.checkFromIndexSize(off, len, output.length);
+        Preconditions.checkFromIndexSize(off, len, output.length, Preconditions.AIOOBE_FORMATTER);
         if (flush != NO_FLUSH && flush != SYNC_FLUSH && flush != FULL_FLUSH) {
             throw new IllegalArgumentException();
         }
         synchronized (this) {
             ensureOpen();
-            if (finish) {
-                flush = FINISH;
-            }
-            if (setParams) {
-                // deflateParams before the stream has started is a new configuration (zlib's
-                // deflateParams with last_flush == -2); later it would flush a block
-                if (!zs.fresh()) {
-                    throw new UnsupportedOperationException("Deflater: parameters changed after deflate on Arbace");
-                }
-                zs = new ZState(level, strategy, nowrap);
-                setParams = false;
-            }
-            ZState s = zs;
-            s.nextIn = inputArray; s.nextInIndex = inputPos; s.availIn = inputLim - inputPos;
-            s.nextOut = output; s.nextOutIndex = off; s.availOut = len;
-            int res = s.deflate(flush);
-            int read = (inputLim - inputPos) - s.availIn;
-            int written = len - s.availOut;
-            if (res == ZState.Z_STREAM_END) {
-                finished = true;
-            }
-            s.nextIn = null; s.nextOut = null;
-            inputPos += read;
-            bytesWritten += written;
-            bytesRead += read;
-            return written;
+            return deflate0(output, off, len, flush);
         }
     }
 
     public int deflate(ByteBuffer output, int flush) {
-        throw new UnsupportedOperationException("Deflater.deflate(ByteBuffer, int) on Arbace");
+        if (output.isReadOnly()) {
+            throw new ReadOnlyBufferException();
+        }
+        if (flush != NO_FLUSH && flush != SYNC_FLUSH && flush != FULL_FLUSH) {
+            throw new IllegalArgumentException();
+        }
+        synchronized (this) {
+            ensureOpen();
+            int outputPos = output.position();
+            int outputRem = Math.max(output.limit() - outputPos, 0);
+            int written;
+            if (output.hasArray()) {
+                written = deflate0(output.array(), output.arrayOffset() + outputPos, outputRem, flush);
+            } else {
+                byte[] out = new byte[outputRem];
+                written = deflate0(out, 0, outputRem, flush);
+                output.put(outputPos, out, 0, written);
+            }
+            output.position(outputPos + written);
+            return written;
+        }
+    }
+
+    /**
+     * One call of jdk26u's glue (Deflater.c's doDeflate and checkDeflateStatus): deflateParams
+     * when the level or strategy changed, else zlib's deflate with the flush mode (FINISH once
+     * finish was called); the input's position, the counts and the state updated as jdk26u's
+     * Deflater updates them.
+     */
+    private int deflate0(byte[] output, int off, int len, int flush) {
+        ByteBuffer input = this.input;
+        if (finish) {
+            flush = FINISH;
+        }
+        boolean params = setParams;
+        byte[] in;
+        int inOff, inLen, inputPos;
+        if (input == null) {
+            inputPos = this.inputPos;
+            in = inputArray; inOff = inputPos; inLen = inputLim - inputPos;
+        } else {
+            inputPos = input.position();
+            inLen = Math.max(input.limit() - inputPos, 0);
+            if (input.hasArray()) {
+                in = input.array(); inOff = input.arrayOffset() + inputPos;
+            } else {
+                in = new byte[inLen]; inOff = 0;
+                input.get(inputPos, in, 0, inLen);
+            }
+        }
+        ZState s = zs;
+        s.nextIn = in; s.nextInIndex = inOff; s.availIn = inLen;
+        s.nextOut = output; s.nextOutIndex = off; s.availOut = len;
+        int res;
+        try {
+            res = params ? s.deflateParams(level, strategy) : s.deflate(flush);
+        } finally {
+            s.nextIn = null; s.nextOut = null;
+        }
+        int read = inLen - s.availIn;
+        int written = len - s.availOut;
+        if (params) {
+            if (res == ZState.Z_OK) {
+                setParams = false;
+            } else if (res != ZState.Z_BUF_ERROR) {
+                throw new InternalError("unknown error in checkDeflateStatus, setParams case");
+            }
+        } else {
+            if (res == ZState.Z_STREAM_END) {
+                finished = true;
+            } else if (res != ZState.Z_OK && res != ZState.Z_BUF_ERROR) {
+                throw new InternalError("unknown error in checkDeflateStatus");
+            }
+        }
+        if (input != null) {
+            input.position(inputPos + read);
+        } else {
+            this.inputPos = inputPos + read;
+        }
+        bytesWritten += written;
+        bytesRead += read;
+        return written;
     }
 
     public int getAdler() {
@@ -189,6 +291,7 @@ public class Deflater implements AutoCloseable {
         }
     }
 
+    @Deprecated(since = "23")
     public int getTotalIn() {
         return (int) getBytesRead();
     }
@@ -200,6 +303,7 @@ public class Deflater implements AutoCloseable {
         }
     }
 
+    @Deprecated(since = "23")
     public int getTotalOut() {
         return (int) getBytesWritten();
     }
@@ -214,11 +318,11 @@ public class Deflater implements AutoCloseable {
     public void reset() {
         synchronized (this) {
             ensureOpen();
-            zs = new ZState(level, strategy, nowrap);
-            setParams = false;
+            zs.deflateReset();
             finish = false;
             finished = false;
-            inputArray = new byte[0];
+            input = null;
+            inputArray = EMPTY;
             inputPos = inputLim = 0;
             bytesRead = bytesWritten = 0;
         }
@@ -226,8 +330,13 @@ public class Deflater implements AutoCloseable {
 
     public void end() {
         synchronized (this) {
+            if (zs == null) {
+                return;
+            }
             zs = null;
-            inputArray = null;
+            input = null;
+            inputArray = EMPTY;
+            inputPos = inputLim = 0;
         }
     }
 
@@ -242,12 +351,20 @@ public class Deflater implements AutoCloseable {
         }
     }
 
+    /** Whether finish was called (jdk26u's package-private shouldFinish, ZipOutputStream's). */
+    boolean shouldFinish() {
+        synchronized (this) {
+            return finish;
+        }
+    }
+
     /**
      * zlib's z_stream and deflate_state in one (deflate.h), with deflate.c's and trees.c's
      * functions for the supported paths, in zlib's names.
      */
     private static final class ZState {
-        static final int Z_OK = 0, Z_STREAM_END = 1, Z_BUF_ERROR = -5;
+        static final int Z_OK = 0, Z_STREAM_END = 1, Z_STREAM_ERROR = -2, Z_BUF_ERROR = -5;
+        static final int PRESET_DICT = 0x20, MAX_STORED = 65535;
         static final int Z_NO_FLUSH = 0, Z_PARTIAL_FLUSH = 1, Z_SYNC_FLUSH = 2, Z_FULL_FLUSH = 3,
                 Z_FINISH = 4, Z_BLOCK = 5;
         static final int Z_FILTERED = 1;
@@ -354,9 +471,8 @@ public class Deflater implements AutoCloseable {
         int strstart, match_start, lookahead;
         int prev_length;
         int max_chain_length, max_lazy_match;
-        final int level, strategy;
+        int level, strategy;
         int good_match, nice_match;
-        final boolean slow;
 
         // trees: the dynamic trees' freq/code and dad/len unions as two arrays each
         final short[] dyn_ltree_fc = new short[HEAP_SIZE], dyn_ltree_dl = new short[HEAP_SIZE];
@@ -394,11 +510,9 @@ public class Deflater implements AutoCloseable {
         /** deflateInit2 (window bits 15, or -15 raw; memLevel 8), then deflateReset. */
         ZState(int level, int strategy, boolean nowrap) {
             if (level == DEFAULT_COMPRESSION) level = 6;
-            if (level == 0) {
-                throw new UnsupportedOperationException("Deflater: level 0 (stored) on Arbace");
-            }
-            if (strategy == HUFFMAN_ONLY) {
-                throw new UnsupportedOperationException("Deflater: HUFFMAN_ONLY on Arbace");
+            if (level < 0 || level > 9 || strategy < 0 || strategy > HUFFMAN_ONLY) {
+                // deflateInit2's Z_STREAM_ERROR, Deflater.c's IllegalArgumentException
+                throw new IllegalArgumentException();
             }
             int memLevel = 8;
             wrap = nowrap ? 0 : 1;
@@ -420,21 +534,28 @@ public class Deflater implements AutoCloseable {
             sym_end = (lit_bufsize - 1) * 3;
             this.level = level;
             this.strategy = strategy;
-            this.slow = CONFIG[level][4] == 1;
             l_desc = new TreeDesc(dyn_ltree_fc, dyn_ltree_dl, static_ltree_len, extra_lbits, LITERALS + 1, L_CODES, MAX_BITS);
             d_desc = new TreeDesc(dyn_dtree_fc, dyn_dtree_dl, static_dtree_len, extra_dbits, 0, D_CODES, MAX_BITS);
             bl_desc = new TreeDesc(bl_tree_fc, bl_tree_dl, null, extra_blbits, 0, BL_CODES, MAX_BL_BITS);
+            deflateReset();
+        }
+
+        /** deflateReset: deflateResetKeep, then lm_init. */
+        void deflateReset() {
             // deflateResetKeep
             totalIn = totalOut = 0;
             pending = 0;
             pending_out = 0;
+            if (wrap < 0) {
+                wrap = -wrap;   // was made negative by deflate(..., Z_FINISH)
+            }
             status = INIT_STATE;
             adler = 1;
             last_flush = -2;
             _tr_init();
             // lm_init
             window_size = 2 * w_size;
-            // CLEAR_HASH: head is zero
+            clearHash();
             max_lazy_match = CONFIG[level][1];
             good_match = CONFIG[level][0];
             nice_match = CONFIG[level][2];
@@ -448,8 +569,95 @@ public class Deflater implements AutoCloseable {
             ins_h = 0;
         }
 
-        boolean fresh() {
-            return last_flush == -2;
+        /** The compress function of a level (configuration_table's func): 0 stored, 1 fast, 2 slow. */
+        static int func(int level) {
+            return level == 0 ? 0 : CONFIG[level][4] == 1 ? 2 : 1;
+        }
+
+        /** deflateParams (level already in 0..9 or DEFAULT_COMPRESSION). */
+        int deflateParams(int level, int strategy) {
+            if (level == DEFAULT_COMPRESSION) level = 6;
+            if (level < 0 || level > 9 || strategy < 0 || strategy > HUFFMAN_ONLY) {
+                return Z_STREAM_ERROR;
+            }
+            if ((strategy != this.strategy || func(this.level) != func(level)) && last_flush != -2) {
+                // flush the last buffer
+                int err = deflate(Z_BLOCK);
+                if (err == Z_STREAM_ERROR)
+                    return err;
+                if (availIn != 0 || (strstart - block_start) + lookahead != 0)
+                    return Z_BUF_ERROR;
+            }
+            if (this.level != level) {
+                if (this.level == 0 && matches != 0) {
+                    if (matches == 1)
+                        slide_hash();
+                    else
+                        clearHash();
+                    matches = 0;
+                }
+                this.level = level;
+                max_lazy_match = CONFIG[level][1];
+                good_match = CONFIG[level][0];
+                nice_match = CONFIG[level][2];
+                max_chain_length = CONFIG[level][3];
+            }
+            this.strategy = strategy;
+            return Z_OK;
+        }
+
+        /** deflateSetDictionary. */
+        int deflateSetDictionary(byte[] dictionary, int off, int dictLength) {
+            int str, n;
+            int wrap = this.wrap;
+            if (wrap == 2 || (wrap == 1 && status != INIT_STATE) || lookahead != 0)
+                return Z_STREAM_ERROR;
+            // when using zlib wrappers, compute Adler-32 for provided dictionary
+            if (wrap == 1)
+                adler = adler32(adler, dictionary, off, dictLength) & 0xffffffffL;
+            this.wrap = 0;                  // avoid computing Adler-32 in read_buf
+            // if dictionary would fill window, just replace the history
+            if (dictLength >= w_size) {
+                if (wrap == 0) {            // already empty otherwise
+                    clearHash();
+                    strstart = 0;
+                    block_start = 0;
+                    insert = 0;
+                }
+                off += dictLength - w_size; // use the tail
+                dictLength = w_size;
+            }
+            // insert dictionary into window and hash
+            byte[] savedIn = nextIn;
+            int savedIndex = nextInIndex, avail = availIn;
+            nextIn = dictionary;
+            nextInIndex = off;
+            availIn = dictLength;
+            fill_window();
+            while (lookahead >= MIN_MATCH) {
+                str = strstart;
+                n = lookahead - (MIN_MATCH - 1);
+                do {
+                    ins_h = updateHash(ins_h, window[str + MIN_MATCH - 1] & 0xff);
+                    prev[str & w_mask] = head[ins_h];
+                    head[ins_h] = (short) str;
+                    str++;
+                } while (--n != 0);
+                strstart = str;
+                lookahead = MIN_MATCH - 1;
+                fill_window();
+            }
+            strstart += lookahead;
+            block_start = strstart;
+            insert = lookahead;
+            lookahead = 0;
+            match_length = prev_length = MIN_MATCH - 1;
+            match_available = false;
+            nextIn = savedIn;
+            nextInIndex = savedIndex;
+            availIn = avail;
+            this.wrap = wrap;
+            return Z_OK;
         }
 
         static int adler32(long adler, byte[] buf, int off, int len) {
@@ -600,7 +808,7 @@ public class Deflater implements AutoCloseable {
             int old_flush;
             if (availOut == 0) return Z_BUF_ERROR;
             if (status == FINISH_STATE && flush != Z_FINISH) {
-                throw new IllegalStateException("Deflater: deflate after finish");
+                return Z_STREAM_ERROR;  // zlib: deflate after finish without Z_FINISH
             }
             old_flush = last_flush;
             last_flush = flush;
@@ -621,7 +829,7 @@ public class Deflater implements AutoCloseable {
             if (status == INIT_STATE) {
                 int header = (DEFLATED + ((w_bits - 8) << 4)) << 8;
                 int level_flags;
-                if (level < 2)
+                if (strategy >= HUFFMAN_ONLY || level < 2)
                     level_flags = 0;
                 else if (level < 6)
                     level_flags = 1;
@@ -630,8 +838,14 @@ public class Deflater implements AutoCloseable {
                 else
                     level_flags = 3;
                 header |= (level_flags << 6);
+                if (strstart != 0) header |= PRESET_DICT;
                 header += 31 - (header % 31);
                 putShortMSB(header);
+                // save the adler32 of the preset dictionary
+                if (strstart != 0) {
+                    putShortMSB((int) (adler >>> 16));
+                    putShortMSB((int) (adler & 0xffff));
+                }
                 adler = 1;
                 status = BUSY_STATE;
                 flush_pending();
@@ -641,7 +855,9 @@ public class Deflater implements AutoCloseable {
                 }
             }
             if (availIn != 0 || lookahead != 0 || (flush != Z_NO_FLUSH && status != FINISH_STATE)) {
-                int bstate = slow ? deflate_slow(flush) : deflate_fast(flush);
+                int bstate = level == 0 ? deflate_stored(flush)
+                        : strategy == HUFFMAN_ONLY ? deflate_huff(flush)
+                        : func(level) == 2 ? deflate_slow(flush) : deflate_fast(flush);
                 if (bstate == finish_started || bstate == finish_done) {
                     status = FINISH_STATE;
                 }
@@ -756,6 +972,165 @@ public class Deflater implements AutoCloseable {
 
         static int d_code(int dist) {
             return dist < 256 ? _dist_code[dist] & 0xff : _dist_code[256 + (dist >> 7)] & 0xff;
+        }
+
+        /** deflate_stored: level 0, the input copied as stored blocks. */
+        int deflate_stored(int flush) {
+            int min_block = Math.min(pending_buf.length - 5, w_size);
+            boolean last = false;
+            int len, left, have;
+            int used = availIn;
+            do {
+                len = MAX_STORED;
+                have = (bi_valid + 42) >> 3;        // bytes in header
+                if (availOut < have)                // need room for header
+                    break;
+                have = availOut - have;             // maximum stored block length that fits
+                left = strstart - block_start;      // window bytes
+                if (len > (long) left + availIn)
+                    len = left + availIn;           // limit len to the input
+                if (len > have)
+                    len = have;                     // limit len to the output
+                if (len < min_block && ((len == 0 && flush != Z_FINISH) ||
+                                        flush == Z_NO_FLUSH ||
+                                        len != left + availIn))
+                    break;
+                last = flush == Z_FINISH && len == left + availIn;
+                _tr_stored_block(null, 0, 0, last);
+                // replace the lengths in the dummy stored block with len
+                pending_buf[pending - 4] = (byte) len;
+                pending_buf[pending - 3] = (byte) (len >> 8);
+                pending_buf[pending - 2] = (byte) ~len;
+                pending_buf[pending - 1] = (byte) (~len >> 8);
+                flush_pending();
+                // copy uncompressed bytes from the window to next_out
+                if (left != 0) {
+                    if (left > len)
+                        left = len;
+                    System.arraycopy(window, block_start, nextOut, nextOutIndex, left);
+                    nextOutIndex += left;
+                    availOut -= left;
+                    totalOut += left;
+                    block_start += left;
+                    len -= left;
+                }
+                // copy uncompressed bytes directly from next_in to next_out
+                if (len != 0) {
+                    read_buf(nextOut, nextOutIndex, len);
+                    nextOutIndex += len;
+                    availOut -= len;
+                    totalOut += len;
+                }
+            } while (!last);
+
+            used -= availIn;                        // number of input bytes directly copied
+            if (used != 0) {
+                if (used >= w_size) {               // supplant the previous history
+                    matches = 2;                    // clear hash
+                    System.arraycopy(nextIn, nextInIndex - w_size, window, 0, w_size);
+                    strstart = w_size;
+                    insert = strstart;
+                } else {
+                    if (window_size - strstart <= used) {
+                        // slide the window down
+                        strstart -= w_size;
+                        System.arraycopy(window, w_size, window, 0, strstart);
+                        if (matches < 2)
+                            matches++;              // add a pending slide_hash()
+                        if (insert > strstart)
+                            insert = strstart;
+                    }
+                    System.arraycopy(nextIn, nextInIndex - used, window, strstart, used);
+                    strstart += used;
+                    insert += Math.min(used, w_size - insert);
+                }
+                block_start = strstart;
+            }
+            if (high_water < strstart)
+                high_water = strstart;
+
+            // if the last block was written to next_out, then done
+            if (last)
+                return finish_done;
+
+            // if flushing and all input has been consumed, then done
+            if (flush != Z_NO_FLUSH && flush != Z_FINISH && availIn == 0 && strstart == block_start)
+                return block_done;
+
+            // fill the window with any remaining input
+            have = window_size - strstart;
+            if (availIn > have && block_start >= w_size) {
+                // slide the window down
+                block_start -= w_size;
+                strstart -= w_size;
+                System.arraycopy(window, w_size, window, 0, strstart);
+                if (matches < 2)
+                    matches++;                      // add a pending slide_hash()
+                have += w_size;                     // more space now
+                if (insert > strstart)
+                    insert = strstart;
+            }
+            if (have > availIn)
+                have = availIn;
+            if (have != 0) {
+                read_buf(window, strstart, have);
+                strstart += have;
+                insert += Math.min(have, w_size - insert);
+            }
+            if (high_water < strstart)
+                high_water = strstart;
+
+            // write a stored block to pending instead, if worthy or flushing and it fits
+            have = (bi_valid + 42) >> 3;           // bytes in header
+            have = Math.min(pending_buf.length - have, MAX_STORED);
+            min_block = Math.min(have, w_size);
+            left = strstart - block_start;
+            if (left >= min_block ||
+                ((left != 0 || flush == Z_FINISH) && flush != Z_NO_FLUSH &&
+                 availIn == 0 && left <= have)) {
+                len = Math.min(left, have);
+                last = flush == Z_FINISH && availIn == 0 && len == left;
+                _tr_stored_block(window, block_start, len, last);
+                block_start += len;
+                flush_pending();
+            }
+            return last ? finish_started : need_more;
+        }
+
+        /** deflate_huff: Huffman coding alone (HUFFMAN_ONLY). */
+        int deflate_huff(int flush) {
+            boolean bflush;
+            for (;;) {
+                // make sure that we have a literal to write
+                if (lookahead == 0) {
+                    fill_window();
+                    if (lookahead == 0) {
+                        if (flush == Z_NO_FLUSH)
+                            return need_more;
+                        break;                      // flush the current block
+                    }
+                }
+                // output a literal byte
+                match_length = 0;
+                bflush = tallyLit(window[strstart] & 0xff);
+                lookahead--;
+                strstart++;
+                if (bflush) {
+                    flushBlockOnly(false);
+                    if (availOut == 0) return need_more;
+                }
+            }
+            insert = 0;
+            if (flush == Z_FINISH) {
+                flushBlockOnly(true);
+                if (availOut == 0) return finish_started;
+                return finish_done;
+            }
+            if (sym_next != 0) {
+                flushBlockOnly(false);
+                if (availOut == 0) return need_more;
+            }
+            return block_done;
         }
 
         int deflate_fast(int flush) {
@@ -1261,13 +1636,17 @@ public class Deflater implements AutoCloseable {
         void _tr_flush_block(byte[] buf, int off, int stored_len, boolean last) {
             long opt_lenb, static_lenb;
             int max_blindex = 0;
-            build_tree(l_desc);
-            build_tree(d_desc);
-            max_blindex = build_bl_tree();
-            opt_lenb = (opt_len + 3 + 7) >>> 3;
-            static_lenb = (static_len + 3 + 7) >>> 3;
-            if (static_lenb <= opt_lenb)
-                opt_lenb = static_lenb;
+            if (level > 0) {
+                build_tree(l_desc);
+                build_tree(d_desc);
+                max_blindex = build_bl_tree();
+                opt_lenb = (opt_len + 3 + 7) >>> 3;
+                static_lenb = (static_len + 3 + 7) >>> 3;
+                if (static_lenb <= opt_lenb)
+                    opt_lenb = static_lenb;
+            } else {
+                opt_lenb = static_lenb = stored_len + 5;    // force a stored block
+            }
             if (stored_len + 4 <= opt_lenb && buf != null) {
                 _tr_stored_block(buf, off, stored_len, last);
             } else if (static_lenb == opt_lenb) {

@@ -1,0 +1,296 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/zip/ZipInputStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.util.zip)
+
+(import '(java.io EOFException IOException InputStream OutputStream PushbackInputStream)
+        '(java.nio.charset Charset)
+        '(java.util Objects)
+        '(sun.nio.cs UTF_8))
+
+(defclass ^:public ZipInputStream
+  :extends InflaterInputStream
+  :implements [ZipConstants]
+
+  (field ^:private ^ZipEntry entry)
+
+  (field ^:private ^int flag)
+
+  (field ^:private ^CRC32 crc (CRC32.))
+
+  (field ^:private ^long remaining)
+
+  (field ^:private ^byte/1 tmpbuf (new byte/1 512))
+
+  (field ^:private ^:static ^:final ^int STORED ZipEntry/STORED)
+
+  (field ^:private ^:static ^:final ^int DEFLATED ZipEntry/DEFLATED)
+
+  (field ^:private ^boolean closed false)
+
+  (field ^:private ^boolean entryEOF false)
+
+  (field ^:private ^ZipCoder zc)
+
+  (field ^:private ^boolean expect64BitDataDescriptor)
+
+  (method ^:private ensureOpen :throws [IOException] ^void [this]
+    (when closed (throw (IOException. "Stream closed"))))
+
+  (constructor ^:public [this ^InputStream in] (this. in UTF_8/INSTANCE))
+
+  (constructor ^:public [this ^InputStream in ^Charset charset]
+    (super. (PushbackInputStream. in 512) (Inflater. true) 512)
+    (set! (.-usesDefaultInflater this) true)
+    (when (nil? in) (throw (NullPointerException. "in is null")))
+    (when (nil? charset) (throw (NullPointerException. "charset is null")))
+    (set! (.-zc this) (ZipCoder/get charset)))
+
+  (method ^:public getNextEntry :throws [IOException] ^ZipEntry [this]
+    (.ensureOpen this)
+    (when (some? entry) (.closeEntry this))
+    (.reset crc)
+    (.reset (.-inf this))
+    (when (some? (set! entry (.readLOC this)))
+      (when (== (.-method entry) STORED) (set! remaining (.-size entry)))
+      (set! entryEOF false)
+      entry))
+
+  (method ^:public closeEntry :throws [IOException] ^void [this]
+    (.ensureOpen this)
+    (while (not (== (.read this tmpbuf 0 (alength tmpbuf)) -1)))
+    (set! entryEOF true))
+
+  (method ^:public available :throws [IOException] ^int [this]
+    (.ensureOpen this)
+    (if entryEOF 0 1))
+
+  (method ^:public read :throws [IOException] ^int [this] (.read super))
+
+  (method ^:public readAllBytes :throws [IOException] ^byte/1 [this]
+    (.readAllBytes super))
+
+  (method ^:public readNBytes :throws [IOException] ^byte/1 [this ^int len]
+    (.readNBytes super len))
+
+  (method ^:public readNBytes :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (.readNBytes super b off len))
+
+  (method ^:public skipNBytes :throws [IOException] ^void [this ^long n]
+    (.skipNBytes super n))
+
+  (method ^:public transferTo :throws [IOException] ^long [this ^OutputStream out]
+    (.transferTo super out))
+
+  (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^:mutable ^int len]
+    (.ensureOpen this)
+    (Objects/checkFromIndexSize off len (alength b))
+    (cond
+      (== len 0) 0
+      (nil? entry) -1
+      :else
+        (switch (.-method entry)
+          DEFLATED
+            (do
+              (set! len (.read super b off len))
+              (if (== len -1)
+                  (do (.readEnd this entry) (set! entryEOF true) (set! entry nil))
+                  (.update crc b off len))
+              len)
+          STORED
+            (if (<= remaining 0)
+                (do (set! entryEOF true) (set! entry nil) -1)
+                (do
+                  (when (> len remaining) (set! len (unchecked-int remaining)))
+                  (set! len (.read (.-in this) b off len))
+                  (when (== len -1) (throw (ZipException. "unexpected EOF")))
+                  (.update crc b off len)
+                  (set! remaining (unchecked-subtract remaining len))
+                  (when (and (== remaining 0) (not (== (.-crc entry) (.getValue crc))))
+                    (throw (ZipException.
+                             (java-str "invalid entry CRC (expected 0x"
+                                       (Long/toHexString (.-crc entry))
+                                       " but got 0x"
+                                       (Long/toHexString (.getValue crc))
+                                       ")"))))
+                  len))
+          (throw (ZipException. "invalid compression method")))))
+
+  (method ^:public skip :throws [IOException] ^long [this ^long n]
+    (when (< n 0) (throw (IllegalArgumentException. "negative skip length")))
+    (.ensureOpen this)
+    (let [max (unchecked-int (Math/min n Integer/MAX_VALUE))
+          ^:mutable ^int total 0]
+      (while (< total max)
+        (let [^:mutable len (unchecked-subtract-int max total)]
+          (when (> len (alength tmpbuf)) (set! len (alength tmpbuf)))
+          (set! len (.read this tmpbuf 0 len))
+          (when (== len -1) (set! entryEOF true) (break))
+          (set! total (unchecked-add-int total len))))
+      total))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when-not closed (.close super) (set! closed true)))
+
+  (field ^:private ^byte/1 b (new byte/1 256))
+
+  (method ^:private readLOC :throws [IOException] ^ZipEntry [this]
+    (try (.readFully this tmpbuf 0 ZipInputStream/LOCHDR) (catch EOFException e (return nil)))
+    (when-not (not (== (ZipUtils/get32 tmpbuf 0) ZipInputStream/LOCSIG))
+      (set! flag (ZipUtils/get16 tmpbuf ZipInputStream/LOCFLG))
+      (let [^:mutable len (ZipUtils/get16 tmpbuf ZipInputStream/LOCNAM)
+            ^:mutable blen (alength b)]
+        (when (> len blen)
+          (loop [] (set! blen (unchecked-multiply-int blen 2)) (when (> len blen) (recur)))
+          (set! b (new byte/1 blen)))
+        (.readFully this b 0 len)
+        (let [^:mutable ^String entryName nil]
+          (try
+            (set! entryName
+                  (if (not (== (bit-and-int flag ZipConstants64/USE_UTF8) 0))
+                      (ZipCoder/toStringUTF8 b len)
+                      (.toString zc b len)))
+            (catch Exception ex
+              (throw (cast ZipException
+                           (.initCause (ZipException. "invalid LOC header (bad entry name)") ex)))))
+          (let [e (.createZipEntry this entryName)]
+            (when (== (bit-and-int flag 1) 1)
+              (throw (ZipException. "encrypted ZIP entry not supported")))
+            (set! (.-method e) (ZipUtils/get16 tmpbuf ZipInputStream/LOCHOW))
+            (set! (.-xdostime e) (ZipUtils/get32 tmpbuf ZipInputStream/LOCTIM))
+            (set! expect64BitDataDescriptor false)
+            (let [csize (ZipUtils/get32 tmpbuf ZipInputStream/LOCSIZ)
+                  size (ZipUtils/get32 tmpbuf ZipInputStream/LOCLEN)]
+              (if (== (bit-and-int flag 8) 8)
+                  (when-not (== (.-method e) DEFLATED)
+                    (throw (ZipException. "only DEFLATED entries can have EXT descriptor")))
+                  (do
+                    (set! (.-crc e) (ZipUtils/get32 tmpbuf ZipInputStream/LOCCRC))
+                    (set! (.-csize e) csize)
+                    (set! (.-size e) size)))
+              (set! len (ZipUtils/get16 tmpbuf ZipInputStream/LOCEXT))
+              (when (> len 0)
+                (let [extra (new byte/1 len)]
+                  (.readFully this extra 0 len)
+                  (.setExtra0 e
+                              extra
+                              (or (== (.-csize e) ZipConstants64/ZIP64_MAGICVAL)
+                                  (== (.-size e) ZipConstants64/ZIP64_MAGICVAL))
+                              true)
+                  (set! expect64BitDataDescriptor
+                        (.expect64BitDataDescriptor this extra flag csize size))))
+              e))))))
+
+  (method ^:protected createZipEntry ^ZipEntry [this ^String name]
+    (ZipEntry. name))
+
+  (method ^:private readEnd :throws [IOException] ^void [this ^ZipEntry e]
+    (let [n (.getRemaining (.-inf this))]
+      (when (> n 0)
+        (.unread (cast PushbackInputStream (.-in this))
+                 (.-buf this)
+                 (unchecked-subtract-int (.-len this) n)
+                 n))
+      (when (== (bit-and-int flag 8) 8)
+        (if (or (or (> (.getBytesWritten (.-inf this)) ZipConstants64/ZIP64_MAGICVAL)
+                    (> (.getBytesRead (.-inf this)) ZipConstants64/ZIP64_MAGICVAL))
+                expect64BitDataDescriptor)
+            (do
+              (.readFully this tmpbuf 0 ZipConstants64/ZIP64_EXTHDR)
+              (let [sig (ZipUtils/get32 tmpbuf 0)]
+                (if (not (== sig ZipInputStream/EXTSIG))
+                    (do
+                      (set! (.-crc e) sig)
+                      (set! (.-csize e)
+                            (ZipUtils/get64S tmpbuf
+                                             (unchecked-subtract-int
+                                               ZipConstants64/ZIP64_EXTSIZ
+                                               ZipConstants64/ZIP64_EXTCRC)))
+                      (set! (.-size e)
+                            (ZipUtils/get64S tmpbuf
+                                             (unchecked-subtract-int
+                                               ZipConstants64/ZIP64_EXTLEN
+                                               ZipConstants64/ZIP64_EXTCRC)))
+                      (.unread (cast PushbackInputStream (.-in this))
+                               tmpbuf
+                               (unchecked-subtract-int
+                                 ZipConstants64/ZIP64_EXTHDR
+                                 ZipConstants64/ZIP64_EXTCRC)
+                               ZipConstants64/ZIP64_EXTCRC))
+                    (do
+                      (set! (.-crc e) (ZipUtils/get32 tmpbuf ZipConstants64/ZIP64_EXTCRC))
+                      (set! (.-csize e) (ZipUtils/get64S tmpbuf ZipConstants64/ZIP64_EXTSIZ))
+                      (set! (.-size e) (ZipUtils/get64S tmpbuf ZipConstants64/ZIP64_EXTLEN))))))
+            (do
+              (.readFully this tmpbuf 0 ZipInputStream/EXTHDR)
+              (let [sig (ZipUtils/get32 tmpbuf 0)]
+                (if (not (== sig ZipInputStream/EXTSIG))
+                    (do
+                      (set! (.-crc e) sig)
+                      (set! (.-csize e)
+                            (ZipUtils/get32 tmpbuf
+                                            (unchecked-subtract-int
+                                              ZipInputStream/EXTSIZ
+                                              ZipInputStream/EXTCRC)))
+                      (set! (.-size e)
+                            (ZipUtils/get32 tmpbuf
+                                            (unchecked-subtract-int
+                                              ZipInputStream/EXTLEN
+                                              ZipInputStream/EXTCRC)))
+                      (.unread (cast PushbackInputStream (.-in this))
+                               tmpbuf
+                               (unchecked-subtract-int ZipInputStream/EXTHDR ZipInputStream/EXTCRC)
+                               ZipInputStream/EXTCRC))
+                    (do
+                      (set! (.-crc e) (ZipUtils/get32 tmpbuf ZipInputStream/EXTCRC))
+                      (set! (.-csize e) (ZipUtils/get32 tmpbuf ZipInputStream/EXTSIZ))
+                      (set! (.-size e) (ZipUtils/get32 tmpbuf ZipInputStream/EXTLEN))))))))
+      (when-not (== (.-size e) (.getBytesWritten (.-inf this)))
+        (throw (ZipException.
+                 (java-str "invalid entry size (expected "
+                           (.-size e)
+                           " but got "
+                           (.getBytesWritten (.-inf this))
+                           " bytes)"))))
+      (when-not (== (.-csize e) (.getBytesRead (.-inf this)))
+        (throw (ZipException.
+                 (java-str "invalid entry compressed size (expected "
+                           (.-csize e)
+                           " but got "
+                           (.getBytesRead (.-inf this))
+                           " bytes)"))))
+      (when-not (== (.-crc e) (.getValue crc))
+        (throw (ZipException.
+                 (java-str "invalid entry CRC (expected 0x"
+                           (Long/toHexString (.-crc e))
+                           " but got 0x"
+                           (Long/toHexString (.getValue crc))
+                           ")"))))))
+
+  (method ^:private expect64BitDataDescriptor ^boolean [this ^byte/1 extra ^int flag ^long csize
+                                                        ^long size]
+    (cond
+      (== (bit-and-int flag 8) 0) false
+      (and (not (== csize ZipConstants64/ZIP64_MAGICVAL))
+           (not (== size ZipConstants64/ZIP64_MAGICVAL)))
+        false
+      :else
+        (let [headerSize (unchecked-multiply-int 2 Short/BYTES)]
+          (when (some? extra)
+            (let [^:mutable ^int i 0]
+              (while (< (unchecked-add-int i headerSize) (alength extra))
+                (let [id (ZipUtils/get16 extra i)
+                      dsize (ZipUtils/get16 extra (unchecked-add-int i Short/BYTES))]
+                  (when (> (unchecked-add-int (unchecked-add-int i headerSize) dsize)
+                           (alength extra))
+                    (return false))
+                  (when (== id ZipConstants64/EXTID_ZIP64) (return true))
+                  (set! i (unchecked-add-int i (unchecked-add-int headerSize dsize)))))))
+          false)))
+
+  (method ^:private readFully :throws [IOException] ^void [this ^byte/1 b ^:mutable ^int off
+                                                           ^:mutable ^int len]
+    (while (> len 0)
+      (let [n (.read (.-in this) b off len)]
+        (when (== n -1) (throw (EOFException.)))
+        (set! off (unchecked-add-int off n))
+        (set! len (unchecked-subtract-int len n))))))

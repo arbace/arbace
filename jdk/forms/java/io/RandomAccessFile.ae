@@ -1,0 +1,357 @@
+;; Converted from jdk26u src/java.base/share/classes/java/io/RandomAccessFile.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.io)
+
+(import '(java.nio.channels FileChannel)
+        '(jdk.internal.access JavaIORandomAccessFileAccess SharedSecrets)
+        '(jdk.internal.event FileReadEvent FileWriteEvent)
+        '(jdk.internal.misc Blocker)
+        '(jdk.internal.util ByteArray)
+        '(sun.nio.ch FileChannelImpl))
+
+(defclass ^:public RandomAccessFile
+  :implements [DataOutput DataInput Closeable]
+
+  (field ^:private ^:static ^:final ^int O_RDONLY 1)
+
+  (field ^:private ^:static ^:final ^int O_RDWR 2)
+
+  (field ^:private ^:static ^:final ^int O_SYNC 4)
+
+  (field ^:private ^:static ^:final ^int O_DSYNC 8)
+
+  (field ^:private ^:static ^:final ^int O_TEMPORARY 16)
+
+  (field ^:private ^:static ^boolean jfrTracing)
+
+  (field ^:private ^:final ^FileDescriptor fd)
+
+  (field ^:private ^:final ^boolean rw)
+
+  (field ^:private ^:final ^boolean sync)
+
+  (field ^:private ^:final ^String path)
+
+  (field ^:private ^:final closeLock (Object.))
+
+  (field ^:private ^:final ^byte/1 buffer (new byte/1 Long/BYTES))
+
+  (field ^:private ^:volatile ^FileChannel channel)
+
+  (field ^:private ^:volatile ^boolean closed)
+
+  (constructor :throws [FileNotFoundException] ^:public [this ^String pathname ^String mode]
+    (this. ^File (when (some? pathname) (File. pathname)) mode))
+
+  (constructor :throws [FileNotFoundException] ^:public [this ^File file ^String mode]
+    (this. file mode false))
+
+  (constructor :throws [FileNotFoundException] ^:private [this ^File file ^String mode
+                                                          ^boolean openAndDelete]
+    (let [^String name (when (some? file) (.getPath file))
+          ^:mutable ^int imode -1
+          ^:mutable rw false
+          ^:mutable sync false]
+      (if (.equals mode "r")
+          (set! imode O_RDONLY)
+          (when (.startsWith mode "rw")
+            (set! imode O_RDWR)
+            (set! rw true)
+            (when (> (.length mode) 2)
+              (cond
+                (.equals mode "rws") (do (set! imode (bit-or-int imode O_SYNC)) (set! sync true))
+                (.equals mode "rwd") (do (set! imode (bit-or-int imode O_DSYNC)) (set! sync true))
+                :else (set! imode -1)))))
+      (set! (.-rw this) rw)
+      (set! (.-sync this) sync)
+      (when openAndDelete (set! imode (bit-or-int imode O_TEMPORARY)))
+      (when (< imode 0)
+        (throw (IllegalArgumentException.
+                 (java-str "Illegal mode \""
+                           mode
+                           "\" must be one of \"r\", \"rw\", \"rws\", or \"rwd\""))))
+      (when (nil? name) (throw (NullPointerException.)))
+      (when (.isInvalid file) (throw (FileNotFoundException. "Invalid file path")))
+      (set! fd (FileDescriptor.))
+      (.attach fd this)
+      (set! path name)
+      (.open this name imode)
+      (FileCleanable/register fd)))
+
+  (method ^:public ^:final getFD :throws [IOException] ^FileDescriptor [this]
+    fd)
+
+  (method ^:public ^:final getChannel ^FileChannel [this]
+    (let [^:mutable fc (.-channel this)]
+      (when (nil? fc)
+        (locking this
+          (set! fc (.-channel this))
+          (when (nil? fc)
+            (set! fc (FileChannelImpl/open fd path true rw sync false this))
+            (set! (.-channel this) fc)
+            (when closed (try (.close fc) (catch IOException ioe (throw (InternalError. ioe))))))))
+      fc))
+
+  (method ^:private ^:native open0 :throws [FileNotFoundException] ^void [this ^String name
+                                                                          ^int mode])
+
+  (method ^:private open :throws [FileNotFoundException] ^void [this ^String name ^int mode]
+    (.open0 this name mode))
+
+  (method ^:public read :throws [IOException] ^int [this]
+    (if (and jfrTracing (FileReadEvent/enabled)) (.traceRead0 this) (.read0 this)))
+
+  (method ^:private ^:native read0 :throws [IOException] ^int [this])
+
+  (method ^:private traceRead0 :throws [IOException] ^int [this]
+    (let [^:mutable ^int result 0
+          ^:mutable bytesRead 0
+          start (FileReadEvent/timestamp)]
+      (try
+        (set! result (.read0 this))
+        (if (< result 0) (set! bytesRead -1) (set! bytesRead 1))
+        (finally (FileReadEvent/offer start path bytesRead)))
+      result))
+
+  (method ^:private readBytes :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (if (and jfrTracing (FileReadEvent/enabled))
+        (.traceReadBytes0 this b off len)
+        (.readBytes0 this b off len)))
+
+  (method ^:private ^:native readBytes0 :throws [IOException] ^int [this ^byte/1 b ^int off ^int len])
+
+  (method ^:private traceReadBytes0 :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (let [^:mutable ^int bytesRead 0
+          start (FileReadEvent/timestamp)]
+      (try
+        (set! bytesRead (.readBytes0 this b off len))
+        (finally (FileReadEvent/offer start path bytesRead)))
+      bytesRead))
+
+  (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^int len]
+    (.readBytes this b off len))
+
+  (method ^:public read :throws [IOException] ^int [this ^byte/1 b]
+    (.readBytes this b 0 (alength b)))
+
+  (method ^:public ^:final readFully :throws [IOException] ^void [this ^byte/1 b]
+    (.readFully this b 0 (alength b)))
+
+  (method ^:public ^:final readFully :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+    (let [^:mutable ^int n 0]
+      (loop []
+        (let [count (.read this b (unchecked-add-int off n) (unchecked-subtract-int len n))]
+          (when (< count 0) (throw (EOFException.)))
+          (set! n (unchecked-add-int n count)))
+        (when (< n len) (recur)))))
+
+  (method ^:public skipBytes :throws [IOException] ^int [this ^int n]
+    (let [^:mutable ^long pos 0
+          ^:mutable ^long len 0
+          ^:mutable ^long newpos 0]
+      (if (<= n 0)
+          0
+          (do
+            (set! pos (.getFilePointer this))
+            (set! len (.length this))
+            (set! newpos (unchecked-add pos n))
+            (when (> newpos len) (set! newpos len))
+            (.seek this newpos)
+            (unchecked-int (unchecked-subtract newpos pos))))))
+
+  (method ^:public write :throws [IOException] ^void [this ^int b]
+    (if (and jfrTracing (FileWriteEvent/enabled)) (.traceImplWrite this b) (.implWrite this b)))
+
+  (method ^:private implWrite :throws [IOException] ^void [this ^int b]
+    (let [attempted (Blocker/begin sync)] (try (.write0 this b) (finally (Blocker/end attempted)))))
+
+  (method ^:private traceImplWrite :throws [IOException] ^void [this ^int b]
+    (let [^:mutable bytesWritten 0
+          start (FileWriteEvent/timestamp)]
+      (try
+        (.implWrite this b)
+        (set! bytesWritten 1)
+        (finally (FileWriteEvent/offer start path bytesWritten)))))
+
+  (method ^:private ^:native write0 :throws [IOException] ^void [this ^int b])
+
+  (method ^:private writeBytes :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+    (if (and jfrTracing (FileWriteEvent/enabled))
+        (.traceImplWriteBytes this b off len)
+        (.implWriteBytes this b off len)))
+
+  (method ^:private implWriteBytes :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+    (let [attempted (Blocker/begin sync)]
+      (try (.writeBytes0 this b off len) (finally (Blocker/end attempted)))))
+
+  (method ^:private traceImplWriteBytes :throws [IOException] ^void [this ^byte/1 b ^int off
+                                                                     ^int len]
+    (let [^:mutable bytesWritten 0
+          start (FileWriteEvent/timestamp)]
+      (try
+        (.implWriteBytes this b off len)
+        (set! bytesWritten len)
+        (finally (FileWriteEvent/offer start path bytesWritten)))))
+
+  (method ^:private ^:native writeBytes0 :throws [IOException] ^void [this ^byte/1 b ^int off
+                                                                      ^int len])
+
+  (method ^:public write :throws [IOException] ^void [this ^byte/1 b]
+    (.writeBytes this b 0 (alength b)))
+
+  (method ^:public write :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+    (.writeBytes this b off len))
+
+  (method ^:public ^:native getFilePointer :throws [IOException] ^long [this])
+
+  (method ^:public seek :throws [IOException] ^void [this ^long pos]
+    (when (< pos 0) (throw (IOException. "Negative seek offset")))
+    (.seek0 this pos))
+
+  (method ^:private ^:native seek0 :throws [IOException] ^void [this ^long pos])
+
+  (method ^:public length :throws [IOException] ^long [this]
+    (.length0 this))
+
+  (method ^:private ^:native length0 :throws [IOException] ^long [this])
+
+  (method ^:public setLength :throws [IOException] ^void [this ^long newLength]
+    (.setLength0 this newLength))
+
+  (method ^:private ^:native setLength0 :throws [IOException] ^void [this ^long newLength])
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when-not closed
+      (locking closeLock (when closed (return)) (set! closed true))
+      (let [fc channel]
+        (when (some? fc) (.close fc))
+        (.closeAll fd
+                   (anon Closeable []
+                     (method ^:public close :throws [IOException] ^void [this] (.close fd)))))))
+
+  (method ^:public ^:final readBoolean :throws [IOException] ^boolean [this]
+    (not (== (.readUnsignedByte this) 0)))
+
+  (method ^:public ^:final readByte :throws [IOException] ^byte [this]
+    (unchecked-byte (.readUnsignedByte this)))
+
+  (method ^:public ^:final readUnsignedByte :throws [IOException] ^int [this]
+    (let [ch (.read this)] (when (< ch 0) (throw (EOFException.))) ch))
+
+  (method ^:public ^:final readShort :throws [IOException] ^short [this]
+    (unchecked-short (.readUnsignedShort this)))
+
+  (method ^:public ^:final readUnsignedShort :throws [IOException] ^int [this]
+    (.readFully this buffer 0 Short/BYTES)
+    (unchecked-add-int (bit-and-int (aget buffer 1) 0xff)
+                       (bit-shift-left-int (bit-and-int (aget buffer 0) 0xff) 8)))
+
+  (method ^:public ^:final readChar :throws [IOException] ^char [this]
+    (unchecked-char (.readUnsignedShort this)))
+
+  (method ^:public ^:final readInt :throws [IOException] ^int [this]
+    (.readFully this buffer 0 Integer/BYTES)
+    (ByteArray/getInt buffer 0))
+
+  (method ^:public ^:final readLong :throws [IOException] ^long [this]
+    (.readFully this buffer 0 Long/BYTES)
+    (ByteArray/getLong buffer 0))
+
+  (method ^:public ^:final readFloat :throws [IOException] ^float [this]
+    (.readFully this buffer 0 Float/BYTES)
+    (ByteArray/getFloat buffer 0))
+
+  (method ^:public ^:final readDouble :throws [IOException] ^double [this]
+    (.readFully this buffer 0 Double/BYTES)
+    (ByteArray/getDouble buffer 0))
+
+  (method ^:public ^:final readLine :throws [IOException] ^String [this]
+    (when (and jfrTracing (FileReadEvent/enabled))
+      (let [^:mutable bytesRead 0
+            start (FileReadEvent/timestamp)]
+        (try
+          (let [result (.implReadLine this)]
+            (set! bytesRead (if (nil? result) 0 (.length result)))
+            (return result))
+          (finally (FileReadEvent/offer start path bytesRead)))))
+    (.implReadLine this))
+
+  (method ^:private ^:final implReadLine :throws [IOException] ^String [this]
+    (let [input (StringBuilder.)
+          ^:mutable ^int c -1
+          ^:mutable eol false]
+      (while (not eol)
+        (switch (set! c (.read0 this))
+          (-1 \newline) (set! eol true)
+          \return
+            (do
+              (set! eol true)
+              (let [cur (.getFilePointer this)]
+                (when-not (== (.read0 this) \newline) (.seek this cur))))
+          (.append input (unchecked-char c))))
+      (when-not (and (== c -1) (== (.length input) 0)) (.toString input))))
+
+  (method ^:public ^:final readUTF :throws [IOException] ^String [this]
+    (DataInputStream/readUTF this))
+
+  (method ^:public ^:final writeBoolean :throws [IOException] ^void [this ^boolean v]
+    (.write this (if v 1 0)))
+
+  (method ^:public ^:final writeByte :throws [IOException] ^void [this ^int v]
+    (.write this v))
+
+  (method ^:public ^:final writeShort :throws [IOException] ^void [this ^int v]
+    (aset buffer 1 (unchecked-byte v))
+    (aset buffer 0 (unchecked-byte (unsigned-bit-shift-right-int v 8)))
+    (.write this buffer 0 Short/BYTES))
+
+  (method ^:public ^:final writeChar :throws [IOException] ^void [this ^int v]
+    (.writeShort this v))
+
+  (method ^:public ^:final writeInt :throws [IOException] ^void [this ^int v]
+    (ByteArray/setInt buffer 0 v)
+    (.write this buffer 0 Integer/BYTES))
+
+  (method ^:public ^:final writeLong :throws [IOException] ^void [this ^long v]
+    (ByteArray/setLong buffer 0 v)
+    (.write this buffer 0 Long/BYTES))
+
+  (method ^:public ^:final writeFloat :throws [IOException] ^void [this ^float v]
+    (ByteArray/setFloat buffer 0 v)
+    (.write this buffer 0 Float/BYTES))
+
+  (method ^:public ^:final writeDouble :throws [IOException] ^void [this ^double v]
+    (ByteArray/setDouble buffer 0 v)
+    (.write this buffer 0 Double/BYTES))
+
+  (method ^:public ^:final writeBytes :throws [IOException] ^void [this ^String s]
+    (let [len (.length s) b (new byte/1 len)] (.getBytes s 0 len b 0) (.writeBytes this b 0 len)))
+
+  (method ^:public ^:final writeChars :throws [IOException] ^void [this ^String s]
+    (let [clen (.length s)
+          blen (unchecked-multiply-int 2 clen)
+          b (new byte/1 blen)
+          c (new char/1 clen)]
+      (.getChars s 0 clen c 0)
+      (let [^:mutable ^int i 0
+            ^:mutable ^int j 0]
+        (while (< i clen)
+          (aset b j (unchecked-byte (unsigned-bit-shift-right-int (aget c i) 8)))
+          (set! j (unchecked-inc-int j))
+          (aset b j (unchecked-byte (unsigned-bit-shift-right-int (aget c i) 0)))
+          (set! j (unchecked-inc-int j))
+          (set! i (unchecked-inc-int i))))
+      (.writeBytes this b 0 blen)))
+
+  (method ^:public ^:final writeUTF :throws [IOException] ^void [this ^String str]
+    (DataOutputStream/writeUTF str this))
+
+  (method ^:private ^:static ^:native initIDs ^void [])
+
+  (static-initializer
+    (RandomAccessFile/initIDs)
+    (SharedSecrets/setJavaIORandomAccessFileAccess
+      (anon JavaIORandomAccessFileAccess []
+        (method ^:public openAndDelete :throws [IOException] ^RandomAccessFile [this ^File file
+                                                                                ^String mode]
+          (RandomAccessFile. file mode true))))))

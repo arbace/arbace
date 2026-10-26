@@ -1,0 +1,135 @@
+;; Converted from jdk26u src/java.base/share/classes/java/util/zip/GZIPInputStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'java.util.zip)
+
+(import '(java.io ByteArrayInputStream
+                  EOFException
+                  FilterInputStream
+                  IOException
+                  InputStream
+                  SequenceInputStream)
+        '(java.util Objects))
+
+(defclass ^:public GZIPInputStream
+  :extends InflaterInputStream
+
+  (field ^:protected ^CRC32 crc (CRC32.))
+
+  (field ^:protected ^boolean eos)
+
+  (field ^:private ^boolean closed false)
+
+  (method ^:private ensureOpen :throws [IOException] ^void [this]
+    (when closed (throw (IOException. "Stream closed"))))
+
+  (constructor :throws [IOException] ^:public [this ^InputStream in ^int size]
+    (super. in (GZIPInputStream/createInflater in size) size)
+    (set! (.-usesDefaultInflater this) true)
+    (try (.readHeader this in) (catch IOException ioe (.end (.-inf this)) (throw ioe))))
+
+  (method ^:private ^:static createInflater ^Inflater [^InputStream in ^int size]
+    (Objects/requireNonNull in)
+    (when (<= size 0) (throw (IllegalArgumentException. "buffer size <= 0")))
+    (Inflater. true))
+
+  (constructor :throws [IOException] ^:public [this ^InputStream in]
+    (this. in 512))
+
+  (method ^:public read :throws [IOException] ^int [this ^byte/1 buf ^int off ^int len]
+    (.ensureOpen this)
+    (if eos
+        -1
+        (let [n (.read super buf off len)]
+          (if (== n -1)
+              (if (.readTrailer this) (set! eos true) (return (.read this buf off len)))
+              (.update crc buf off n))
+          n)))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when-not closed (.close super) (set! eos true) (set! closed true)))
+
+  (field ^:public ^:static ^:final ^int GZIP_MAGIC 0x8b1f)
+
+  (field ^:private ^:static ^:final ^int FTEXT 1)
+
+  (field ^:private ^:static ^:final ^int FHCRC 2)
+
+  (field ^:private ^:static ^:final ^int FEXTRA 4)
+
+  (field ^:private ^:static ^:final ^int FNAME 8)
+
+  (field ^:private ^:static ^:final ^int FCOMMENT 16)
+
+  (method ^:private readHeader :throws [IOException] ^int [this ^InputStream this_in]
+    (let [in (CheckedInputStream. this_in crc)]
+      (.reset crc)
+      (when-not (== (.readUShort this in) GZIP_MAGIC) (throw (ZipException. "Not in GZIP format")))
+      (when-not (== (.readUByte this in) 8)
+        (throw (ZipException. "Unsupported compression method")))
+      (let [flg (.readUByte this in)]
+        (.skipBytes this in 6)
+        (let [^:mutable n (unchecked-add-int (unchecked-add-int 2 2) 6)]
+          (when (== (bit-and-int flg FEXTRA) FEXTRA)
+            (let [m (.readUShort this in)]
+              (.skipBytes this in m)
+              (set! n (unchecked-add-int n (unchecked-add-int m 2)))))
+          (when (== (bit-and-int flg FNAME) FNAME)
+            (loop [] (set! n (unchecked-inc-int n)) (when-not (== (.readUByte this in) 0) (recur))))
+          (when (== (bit-and-int flg FCOMMENT) FCOMMENT)
+            (loop [] (set! n (unchecked-inc-int n)) (when-not (== (.readUByte this in) 0) (recur))))
+          (when (== (bit-and-int flg FHCRC) FHCRC)
+            (let [v (bit-and-int (unchecked-int (.getValue crc)) 0xffff)]
+              (when-not (== (.readUShort this in) v) (throw (ZipException. "Corrupt GZIP header")))
+              (set! n (unchecked-add-int n 2))))
+          (.reset crc)
+          n))))
+
+  (method ^:private readTrailer :throws [IOException] ^boolean [this]
+    (let [^:mutable in (.-in this)
+          n (.getRemaining (.-inf this))]
+      (when (> n 0)
+        (set! in
+              (SequenceInputStream.
+                (ByteArrayInputStream. (.-buf this) (unchecked-subtract-int (.-len this) n) n)
+                (anon FilterInputStream [in]
+                  (method ^:public close :throws [IOException] ^void [this])))))
+      (when (or (not (== (.readUInt this in) (.getValue crc)))
+                (not (== (.readUInt this in) (bit-and (.getBytesWritten (.-inf this)) 0xffffffff))))
+        (throw (ZipException. "Corrupt GZIP trailer")))
+      (if (or (> (.available (.-in this)) 0) (> n 26))
+          (let [^:mutable ^int m 8]
+            (try
+              (set! m (unchecked-add-int m (.readHeader this in)))
+              (catch IOException ze (return true)))
+            (.reset (.-inf this))
+            (when (> n m)
+              (.setInput (.-inf this)
+                         (.-buf this)
+                         (unchecked-add-int (unchecked-subtract-int (.-len this) n) m)
+                         (unchecked-subtract-int n m)))
+            false)
+          true)))
+
+  (method ^:private readUInt :throws [IOException] ^long [this ^InputStream in]
+    (let [^long s (.readUShort this in)]
+      (bit-or (bit-shift-left (long (.readUShort this in)) 16) s)))
+
+  (method ^:private readUShort :throws [IOException] ^int [this ^InputStream in]
+    (let [b (.readUByte this in)] (bit-or-int (bit-shift-left-int (.readUByte this in) 8) b)))
+
+  (method ^:private readUByte :throws [IOException] ^int [this ^InputStream in]
+    (let [b (.read in)]
+      (when (== b -1) (throw (EOFException.)))
+      (when (or (< b -1) (> b 255))
+        (throw (IOException. (java-str (.getName (.getClass (.-in this)))
+                                       ".read() returned value out of range -1..255: "
+                                       b))))
+      b))
+
+  (field ^:private ^byte/1 tmpbuf (new byte/1 128))
+
+  (method ^:private skipBytes :throws [IOException] ^void [this ^InputStream in ^:mutable ^int n]
+    (while (> n 0)
+      (let [len (.read in tmpbuf 0 (if (< n (alength tmpbuf)) n (alength tmpbuf)))]
+        (when (== len -1) (throw (EOFException.)))
+        (set! n (unchecked-subtract-int n len))))))

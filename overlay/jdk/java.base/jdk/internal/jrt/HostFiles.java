@@ -22,6 +22,12 @@ public final class HostFiles {
     public static final int WRITE = 1;
     /** Open for writing, created or appended to. */
     public static final int APPEND = 2;
+    /** Open for reading and writing, created if missing (RandomAccessFile's mode "rw"). */
+    public static final int READ_WRITE = 3;
+    /** As READ_WRITE, every write synchronous with its data and metadata ("rws", O_SYNC). */
+    public static final int READ_WRITE_SYNC = 4;
+    /** As READ_WRITE, every write synchronous with its data ("rwd", O_DSYNC). */
+    public static final int READ_WRITE_DSYNC = 5;
 
     private static final IdentityHashMap<FileDescriptor, Integer> handles = new IdentityHashMap<>();
 
@@ -72,7 +78,7 @@ public final class HostFiles {
         }
     }
 
-    /** Opens path in mode (READ, WRITE or APPEND): its handle. */
+    /** Opens path in mode (READ, WRITE, APPEND, READ_WRITE, READ_WRITE_SYNC or READ_WRITE_DSYNC): its handle. */
     public static int open(String path, int mode) throws FileNotFoundException {
         String[] error = new String[1];
         int h = open0(path, mode, error);
@@ -112,7 +118,34 @@ public final class HostFiles {
         return skip0(checked(h), n);
     }
 
+    /** The position of handle h's file (RandomAccessFile.getFilePointer). */
+    public static long position(int h) throws IOException {
+        return position0(checked(h));
+    }
+
+    /** Sets the position of handle h's file to pos (>= 0). */
+    public static void seek(int h, long pos) throws IOException {
+        seek0(checked(h), pos);
+    }
+
+    /** The length of handle h's file. */
+    public static long length(int h) throws IOException {
+        return length0(checked(h));
+    }
+
+    /**
+     * Sets the length of handle h's file, truncated or extended, the position moved to the new end
+     * when it was beyond it (RandomAccessFile.setLength, as jdk26u's setLength0).
+     */
+    public static void setLength(int h, long len) throws IOException {
+        setLength0(checked(h), len);
+    }
+
     private static native int open0(String path, int mode, String[] error);
+    private static native long position0(int h) throws IOException;
+    private static native void seek0(int h, long pos) throws IOException;
+    private static native long length0(int h) throws IOException;
+    private static native void setLength0(int h, long len) throws IOException;
     private static native void close0(int h) throws IOException;
     private static native void write0(int h, byte[] b, int off, int len) throws IOException;
     private static native int read0(int h, byte[] b, int off, int len) throws IOException;

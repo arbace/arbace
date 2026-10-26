@@ -119,6 +119,9 @@ public class InputStreamReader extends Reader {
                 cbuf[off + n++] = pending;
                 pending = 0;
             }
+            // the end of the input is seen anew by each read, as jdk26u's StreamDecoder sees it
+            // (a file read to its end may grow: java/io/InputStreamReader/GrowAfterEOF)
+            eof = false;
             for (;;) {
                 n = decode(cbuf, off, len, n);
                 if (n > 0 && (n == len || !inReady()))

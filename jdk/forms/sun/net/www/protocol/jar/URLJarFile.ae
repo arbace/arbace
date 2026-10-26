@@ -1,0 +1,122 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/protocol/jar/URLJarFile.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.protocol.jar)
+
+(import '(java.io File IOException)
+        '(java.net URL)
+        '(java.nio.file CopyOption Files StandardCopyOption)
+        '(java.nio.file.attribute FileAttribute)
+        '(java.security CodeSigner)
+        '(java.security.cert Certificate)
+        '(java.util Map)
+        '(java.util.jar Attributes JarEntry JarFile Manifest)
+        '(java.util.zip ZipEntry ZipFile)
+        '(sun.net.www ParseUtil))
+
+(defclass ^:public URLJarFile
+  :extends JarFile
+
+  (field ^:private ^URLJarFileCloseController closeController nil)
+
+  (field ^:private ^Manifest superMan)
+
+  (field ^:private ^Attributes superAttr)
+
+  (field ^:private ^{:tag (Map String Attributes)} superEntries)
+
+  (method ^:static getJarFile :throws [IOException] ^JarFile [^URL url
+                                                              ^URLJarFileCloseController closeController]
+    (if (ParseUtil/isLocalFileURL url)
+        (let [^Runtime$Version version (if (.equals "runtime" (.getRef url))
+                                           (JarFile/runtimeVersion)
+                                           (JarFile/baseVersion))]
+          (URLJarFile. url closeController version))
+        (URLJarFile/retrieve url closeController)))
+
+  (constructor :throws [IOException] ^:private [this ^File file
+                                                ^URLJarFileCloseController closeController
+                                                ^Runtime$Version version]
+    (super. file true (bit-or-int ZipFile/OPEN_READ ZipFile/OPEN_DELETE) version)
+    (set! (.-closeController this) closeController))
+
+  (constructor :throws [IOException] ^:private [this ^URL url
+                                                ^URLJarFileCloseController closeController
+                                                ^Runtime$Version version]
+    (super. (File. (ParseUtil/decode (.getFile url))) true ZipFile/OPEN_READ version)
+    (set! (.-closeController this) closeController))
+
+  (method ^:public getEntry ^ZipEntry [this ^String name]
+    (let [ze (.getEntry super name)]
+      (if (some? ze)
+          (if (instance? JarEntry ze)
+              (URLJarFileEntry. (cast JarEntry ze))
+              (throw (InternalError.
+                       (java-str (.getClass super)
+                                 " returned unexpected entry type "
+                                 (.getClass ze)))))
+          nil)))
+
+  (method ^:public getManifest :throws [IOException] ^Manifest [this]
+    (when-not (not (.isSuperMan this))
+      (let [man (Manifest.)
+            attr (.getMainAttributes man)]
+        (.putAll attr (cast Map (.clone superAttr)))
+        (when (some? superEntries)
+          (let [^{:tag (Map String Attributes)} entries (.getEntries man)]
+            (for-each [^String key (.keySet superEntries)]
+              (let [at (cast Attributes (.get superEntries key))]
+                (.put entries key (cast Attributes (.clone at)))))))
+        man)))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when (some? closeController) (.close closeController this))
+    (.close super))
+
+  (method ^:private ^:synchronized isSuperMan :throws [IOException] ^boolean [this]
+    (when (nil? superMan) (set! superMan (.getManifest super)))
+    (if (some? superMan)
+        (do
+          (set! superAttr (.getMainAttributes superMan))
+          (set! superEntries (.getEntries superMan))
+          true)
+        false))
+
+  (method ^:private ^:static retrieve :throws [IOException] ^JarFile [^:final ^URL url
+                                                                      ^:final ^URLJarFileCloseController closeController]
+    (let [^Runtime$Version version (if (.equals "runtime" (.getRef url))
+                                       (JarFile/runtimeVersion)
+                                       (JarFile/baseVersion))]
+      (with-resources [in (.getInputStream (.openConnection url))]
+        (let [tmpFile (Files/createTempFile "jar_cache" nil (new FileAttribute/1 []))]
+          (try
+            (Files/copy in tmpFile (new CopyOption/1 [StandardCopyOption/REPLACE_EXISTING]))
+            (let [^JarFile jarFile (URLJarFile. (.toFile tmpFile) closeController version)]
+              (.deleteOnExit (.toFile tmpFile))
+              jarFile)
+            (catch Throwable thr
+              (try (Files/delete tmpFile) (catch IOException ioe (.addSuppressed thr ioe)))
+              (throw thr)))))))
+
+  (defclass ^:private URLJarFileEntry
+    :extends JarEntry
+
+    (field ^:private ^:final ^JarEntry je)
+
+    (constructor [this ^JarEntry je] (super. je) (set! (.-je this) je))
+
+    (method ^:public getAttributes :throws [IOException] ^Attributes [this]
+      (when (.isSuperMan URLJarFile/this)
+        (let [^{:tag (Map String Attributes)} e (.-superEntries URLJarFile/this)]
+          (when (some? e)
+            (let [a (cast Attributes (.get e (.getName this)))]
+              (when (some? a) (return (cast Attributes (.clone a))))))))
+      nil)
+
+    (method ^:public getCertificates ^Certificate/1 [this]
+      (let [certs (.getCertificates je)] (when (some? certs) (.clone certs))))
+
+    (method ^:public getCodeSigners ^CodeSigner/1 [this]
+      (let [csg (.getCodeSigners je)] (when (some? csg) (.clone csg)))))
+
+  (defclass ^:public ^:interface URLJarFileCloseController
+    (method ^:public close ^void [this ^JarFile jarFile])))

@@ -35,7 +35,8 @@ corpora · 4 What "pass" means · 5 Measurements · 6 What the failures say · 7
 `bin/java-check` · 8 Plan (JC1-JC8) · 9 Proposals (JCS1-JCS15) · Decided · As built: JC1
 (JCS16-JCS25) · 10 Risks · 11 Sources · Appendix A: the scripts · As built: JC4 (JCS30-JCS33) ·
 As built: JC2 (JCS40-JCS49) · As built: JC3 (JCS50-JCS55) · As built: JC2b (JCS70-JCS79) · As built:
-harness follow-ups (JCS80-JCS89) · As built: JC5 (JCS60-JCS69) · As built: JC6 (JCS90-JCS99).
+harness follow-ups (JCS80-JCS89) · As built: JC5 (JCS60-JCS69) · As built: JC6 (JCS90-JCS99) ·
+As built: JC6b (JCS100-JCS109).
 
 ## Executive summary
 
@@ -2664,3 +2665,174 @@ before the milestone), JCS97's javax.script and rowsets, JCS98 (a): a milestone 
 limits and findings after the milestone. By design (a): JCS95's JMX, java.lang.classfile and FFM, JCS97's
 JDI and smartcardio. JCS99 (a) and (c): the harness's classes as built, their tests' digests recorded as
 `"-"`. Every class of `test/java/divergences.edn` cites this.
+
+## As built: JC6b (2026-10-26)
+
+Branch `java-check-jc6b`, from main `988d4e90` (JC6 and JN9d merged, JCS90-JCS99 decided). The user's
+JCS92 (c) and JCS93 (c): java.io's missing classes, then zip and jar, in the shipped program's world
+(jrt), the whole corpus run again at the levels interp and compiled and recorded, the classes shrunk.
+How each class came in is doc/go/JRT-NOTES.md's "java.io, zip and jar" (the closure's lists
+doc/go/JRT-SOURCES.md's, J2G-SPEC §4.1's paragraph, LICENSE.md's entries). The executables: javac's tool
+built from this branch's start (`bin/arbace-go --build-java`, key `0cb23c6e…`, amd64; repr/java is
+unchanged on the branch, so it reads and converts as a fresh one would: `REPR_JAVA_STALE_OK=1` for the
+key's other inputs, overlay/ and jdk/, which the conversions themselves change) for the conversions and the
+read level; `bin/arbace-go --build` (amd64, by stage 0) for the interpreter, j2g's host and the compiled
+namespaces (`JAVA_CHECK_EXE`, `J2G_GO_EXE`, `JAVA_CHECK_AOT`); 8 jobs, every heavy run in one of the host's
+slots, `GOMEMLIMIT=16-18GiB`.
+
+**What came in, and how** (jdk26u at `baf63fb`):
+
+| class (or group) | how |
+|---|---|
+| `RandomAccessFile` | jdk26u's, variant: its natives over jrt's file table (`HostFiles`: the "rw", "rws", "rwd" modes, position, seek, length by fstat, setLength; jrt's Go `files.ae`); jrt's `FileDescriptor` gains jdk26u's `attach`/`closeAll`, `FileCleanable` is jrt's own (no cleaner) |
+| `DataOutput`, `DataOutputStream`, `UTFDataFormatException`, `FilterWriter`, `ModifiedUtf`, `ExactConversionsSupport` | jdk26u's, moved from javac's world into the program's (`bin/javac-vendor`'s list) |
+| the piped streams and readers, `StreamTokenizer`, `PushbackInputStream`, `LineNumberInputStream`, `SequenceInputStream`, `CharArrayWriter`, `StringBufferInputStream`, six of serialization's exceptions | jdk26u's, unchanged |
+| `Inflater` | jrt's own Java: zlib 1.3.2's inflate ported (JCS107 below: not over Go's `compress/flate`) |
+| `Deflater` | jrt's own Java (JN7's zlib port), moved from javac's world, completed: level 0, `HUFFMAN_ONLY`, dictionaries, `deflateParams`, buffers; zlib's bytes, checked against the system's zlib 1.3.2 |
+| `Adler32`, `CRC32C` | jdk26u's, variants: bulk updates jrt's natives (`checksum.ae`: zlib's adler32, Go's `hash/crc32` Castagnoli) |
+| the GZIP, checked, deflater and inflater streams, `ZipEntry`, `ZipInputStream`, `ZipOutputStream`, `ZipCoder`, `ZipUtils` | jdk26u's (variants `ZipCoder`: strict UTF-8 through jrt's `Utf8Coder`; `ZipUtils`: no `JavaNioAccess`); jdk26u's `InflaterInputStream` replaces jrt's whole-input one and its Go native |
+| `ZipFile`, `JarFile` | jrt's own Java: jdk26u's transcribed without the `Cleaner`, the file attributes, `Runtime.Version` and the signature verification (jars read as unsigned: `JarVerifier`, `ManifestEntryVerifier` jrt's own, verifying nothing) |
+| `Manifest`, `Attributes`, `JarEntry` (variant: no certificates), `JarInputStream`, `JarOutputStream` | jdk26u's |
+| the `jar:` URL's connection | jdk26u's `JarURLConnection` (both), `JarFileFactory`, `URLJarFile` (variants), `URLUtil`; j2g's rename table gains `Jar_JarURLConnection` |
+
+`bin/jrt-convert update` (906 Java files, 982 forms files, every file converted, javac's classes; 839 lines
+of `jdk/sources.txt` before, 907 now), `bin/j2g-edge update` (the edge records the new classes' outside
+references), `bin/javac-vendor convert` (javac's world drops the moved files: 903 forms files), `bin/jrt
+manifest` (no hand-written class changed; it also writes JC6's three covariant `ForkJoinPool.submit`s,
+which main's manifest lacked). `bin/jrt test` passes on amd64. The executable: 154,792,096 bytes on main,
+**156,426,400** here (+1,634,304, +1.06%).
+
+**Numbers** (`bin/java-check --levels read,interp,compiled --jobs 8 --record`, the whole corpus, 3,320 run
+tests passing on the JDK; one heavy slot, 1 h 31 min on a loaded host, load 30-38):
+
+| level | JC6 (main) | **JC6b** | of which java.io | zip, jar, `jar:` |
+|---|---:|---:|---:|---:|
+| read | 3,319 | 3,319 | | |
+| interp | 1,600 | **1,683** (50.7%; 8 more flaky, passing when run again) | `jdk/java/io` 84 → 134 | `zip` 1 → 26, `jar` 0 → 9, `jar:` 1 → 4, the intrinsics' zip tests 0 → 1 |
+| compiled | 1,767 | **1,869** (56.3%; 1 more flaky) | `jdk/java/io` 96 → 151 | `zip` 1 → 32, `jar` 0 → 9, `jar:` 1 → 4, 0 → 1 |
+
+Of JC6's `:io` class (110 tests at either level), 57 pass now at one level at least (50 interpreted, 46
+compiled); of `:zip`'s 68, 45 (39, 35). `test/java/levels-known.edn`: 1,665 pass both, 205 only compiled,
+26 only interpreted (12 new disagreements, the new classes' tests whose interpreted runs stop at the
+interpreter's limits, 1 resolved). The one regression is the host's: `jdk/java/util/BitSet/HugeToString`
+(a 1 GB `BitSet`'s `toString`) timed out compiled at 20 s and 40 s again, as in JC6's run on a loaded host
+(it passed in JC5's; recorded as a timeout, `:speed`); `GCRetention` passed when run again (flaky). No test
+of java.io or zip passing before fails now; the whole corpus's other areas are as recorded.
+
+**What the remaining tests stop at** (the first cause; `.tmp/jc6b/cls-full2.tsv`): of `:io`'s, NIO
+(`FileChannel`, `getChannel`: 25 tests name a file channel, in `:nio` and `:net`), serialization (18), the
+interpreter's extendable superclasses (8: the tests subclass `ByteArrayInputStream`, `FilterOutputStream`,
+`Thread`), j2g's world and edge (16, compiled), security (7), the new classes below; of `:zip`'s, signed jars
+(`:security`, 12: `getCertificates`, `getCodeSigners`, a bad signature not refused), NIO (9: direct and
+read-only buffers), the interpreter's superclasses (4: tests subclassing `Deflater`, `Inflater`), FFM (5:
+`ByteBuffer.allocateDirect` behind CRC32C's tests), speed (4: the intrinsics' checksum loops), the `jar:`
+connection's headers (4), class loading, references, the `jrt:` URL (1 each).
+
+**The classes** (`test/java/divergences.edn`): `:io` is gone (every test passing or in a class of its cause);
+`:zip` is now the `jrt:` URL alone (JCS106, pending). The cause classes gained their tests: `:serialization`
+(`ObjectInputFilter`; ReadParams, WriteParams, ValidateClass), `:nio` (`getChannel()`, a stream's
+`CharsetDecoder`/`CharsetEncoder` constructor), `:security` (two signed-jar tests), `:reflection`
+(Writer/Append's `getExceptionTypes`; its `Proxy` pattern no longer takes `java.net.Proxy`), `:threads`
+(WriterLoop compiled). New, pending: `:jrt-streams` (JCS101), `:url-headers` (JCS105), `:jvm-tools`
+(JCS103, harness), `:thread-order` (JCS104, harness, compiled). **REAP**: `bin/reap` 12 of 12 cells,
+**0 problems**; Java: read 7,738 / 3 / 93, eval 1,683 / 324 / 1,313 (7 pending), AOT 1,869 / 180 / 1,271 (10
+pending), print 2,584 / 637 / 99 (JC6: eval 1,600 / 280 / 1,440, AOT 1,767 / 150 / 1,403).
+
+*The shipped files changed* (the third re-seed's, REAP9): `overlay/jdk/java.base/` (`java/io/FileDescriptor`,
+`FileCleanable`, `InputStreamReader`; `java/util/zip/Inflater`, `Deflater`, `ZipFile`; `java/util/jar/JarFile`,
+`JarVerifier`; `sun/security/util/ManifestEntryVerifier`; `jdk/internal/jrt/HostFiles`, `ZipAccess`,
+`Utf8Coder`; `java/util/zip/InflaterInputStream` removed), `overlay/jdk/variants/` (`RandomAccessFile`,
+`Adler32`, `CRC32C`, `ZipCoder`, `ZipUtils`, `JarEntry`, `URLJarFile`, `JarFileFactory`),
+`overlay/jdk/javac/` (`java.base/java/util/zip/Deflater.java` removed, `closure.txt`), `go/arbace/jrt/`
+(`files.ae`, `natives.ae`, `checksum.ae` new; `manifest.edn`, `manifest_test.ae`, `reflect_tables.ae`
+regenerated), `arbace/j2g/names.ae` (the rename), `jdk/` (forms, `sources.txt`, `provenance.edn`, `edge.edn`;
+`jdk/javac/` forms, sources, provenance, edge), `test/jrt/jrt_sources.ae`, `bin/javac-vendor`. The check's own
+(no re-seed): `test/java/check-read.edn`, `check-interp.edn`, `check-compiled.edn`, `levels-known.edn`,
+`divergences.edn`. Docs: this section, JRT-NOTES.md, JRT-SOURCES.md, J2G-SPEC §4.1 and §4.4, LICENSE.md.
+
+### Proposals (JCS100-JCS109)
+
+- **JCS100 NIO's file channels** (`FileChannel`, `RandomAccessFile.getChannel`, the file streams'
+  `getChannel`, `FileLock`, mapped buffers; 25 tests of JC6's `:io` alone, more in `:nio`).
+  - Options: (a) by design: no channels; (b) deferred with JCS92 (b)'s NIO; (c) now: jdk26u's
+    `FileChannel` API over jrt's file table (`sun.nio.ch.FileChannelImpl` jrt's own, positional reads and
+    writes, truncate, force, transfers; locks as no-ops or `flock`; no mapping).
+  - *Recommended: (b)*, first of NIO's parts when JCS92 (b) is taken up: RandomAccessFile is in now, so
+    the channels are the next file API programs use; mapped buffers need direct buffers, a design of their
+    own.
+- **JCS101 jrt's own streams' remaining differences** (`:jrt-streams`: DataInputStream/OpsAfterClose's
+  output 12 bytes shorter than the JDK's, CounterOverflow's one byte flushed at exit where the JDK's
+  System.out is not; and `:jrt-io`'s negative skip, JCS96).
+  - Options: (a) by design: jrt flushes the standard streams at exit (output is not lost), the rest
+    deferred; (b) deferred with JCS96's small members; (c) now.
+  - *Recommended: (a) for the flush at exit, (b) for the others*: a program's last bytes reaching its
+    output is the better behaviour, and no ordinary program relies on losing them; the messages and
+    `skip(-n)` are small members of jrt's own `FileInputStream`.
+- **JCS102 Cleaning up unreachable streams, zip files and inflaters** (the `Cleaner` that jdk26u's
+  `ZipFile`, its inflater streams and `FileCleanable` register with; ManyEntries' `runFinalization`,
+  ClearStaleZipFileInputStreams once the interpreter extends `Thread`).
+  - Options: (a) by design: close what you open (as now: a zip file, its streams and a
+    `RandomAccessFile` hold their descriptors until closed); (b) deferred with JCS96 (b)'s references:
+    `Cleaner` over Go's `runtime.AddCleanup`; (c) now.
+  - *Recommended: (b)*: the same mechanism as weak and phantom references; until then a leaked zip file
+    keeps its descriptor, which only long-running programs that never close notice.
+- **JCS103 The JDK tools a test runs** (`:jvm-tools`, harness: DeleteOnExit runs java.home's `bin/java`;
+  B6896088 and B6449504 open jars their jtreg actions make with the jar tool).
+  - Options: (a) as built, a harness class; (b) the runner runs a test's jar actions (jtreg's `@run main
+    ... JarUtils`, the `jar` tool) at `--record-ref` and keeps the jars beside the reference; (c) the runner
+    runs them on Arbace (its own `JarOutputStream`, now in the world).
+  - *Recommended: (a)*, (c) when the runner next grows: three tests, and the java launcher is not Arbace's
+    to provide.
+- **JCS104 Two threads' output order** (`:thread-order`, harness, compiled: the piped streams'
+  Constructors tests).
+  - Options: (a) as built, a harness class; (b) their digests recorded as `"-"`, status only, as JCS99 (c)
+    does for the harness's other order- and time-dependent tests; (c) jrt's `Thread.start` yields to the
+    new thread's start, as HotSpot's latency happens to order them.
+  - *Recommended: (b)*: the JDK's order is HotSpot's timing, not Java's semantics; (c) would slow every
+    thread start for two tests.
+- **JCS105 URLConnection's MIME types and header dates** (`:url-headers`: GetContentType, GetLastModified
+  through the `jar:` connection).
+  - Options: (a) by design; (b) deferred with JCS96: jdk26u's `content-types.properties` as a resource
+    (`sun.net.www.MimeTable`) and `Date.parse` in jrt's `Date`; (c) now.
+  - *Recommended: (b)*: small members, each a behaviour a program sees, in JCS96's batch.
+- **JCS106 The `jrt:` URL** (`:zip`, 1 test: URItoURLTest).
+  - Options: (a) by design: the Go build has no run-time image (the program is one executable; its
+    classes are not files); (b) deferred: a `jrt:` file system over the member tables (class names, no
+    class files).
+  - *Recommended: (a)*: a `jrt:` URL names a class file of the JDK's image, which the Go build does not
+    have and J2G-SPEC §12 already excludes (no class files).
+- **JCS107 Inflater as a port of zlib, not over Go's `compress/flate`** (an amendment of the task's plan).
+  - Options: (a) as built: zlib's inflate ported to Java, as JN7's deflate; (b) jdk26u's `Inflater`
+    with natives over Go's `compress/flate`, a goroutine per inflater feeding Go's reader the pieces of
+    input it is given.
+  - *Recommended: (a)*: `Inflater`'s contract (input pushed in pieces, `needsInput`, `getRemaining`, output
+    as soon as it is decoded, zlib's messages, `needsDictionary`) is zlib's push API, which Go's pull reader
+    does not have (it hands output out when its window fills or a block ends and keeps an error); the port
+    is zlib's behaviour byte for byte and pure Java, as the compressor already was.
+- **JCS108 Signed jars** (`:security`'s jar tests: certificates, code signers, a bad signature refused).
+  - Options: (a) by design: jars are read as unsigned; (b) with JCS90 (b)'s provider half: jdk26u's
+    `JarVerifier`, `SignatureFileVerifier` and PKCS #7 into the closure.
+  - *Recommended: (b)*: verification is the provider architecture's first user; until then (a)'s
+    behaviour is what the JDK does for a jar whose signatures it cannot read.
+- **JCS109 The interpreter's superclasses JC6b exposed** (`:interp-extends`: tests subclassing
+  `ByteArrayInputStream`, `FilterOutputStream`, `StringWriter`, `FileInputStream`, `Deflater`, `Inflater`;
+  12 of the io and zip tests).
+  - Options: (a) into JC4b with JCS98 (a)'s DynSub work; (b) now.
+  - *Recommended: (a)*: the same limit as `Thread` and the collections (j2g compiles them already: the
+    compiled level passes most of them).
+
+**Checks**: the essential `bin/gate` at the branch's records commit passed in 32m45s (the executables built
+afresh by stage 0): the smoke test; Clojure's suite on the test build, no regressions; the oracle 22,688 of
+22,740, its 52 known mismatches as recorded; diffcheck 12,789 of 12,801, its 12 known as recorded; goi's
+essential checks; Java's essential check 428 of 428 interpreted and 423 of 423 compiled; the compiled
+suite's subset as recorded; the programs; the generated variants; j2g's edge (verify passed); `bin/reap`
+12 of 12 cells, 0 problems. `bin/jrt-convert verify`: `jdk/` is the conversion byte for byte (982 forms
+files). `bin/gate --full` was not run (the policy until the milestone).
+
+The scratch this section cites (the worktree's `.tmp/jc6b/`, not tracked): `before-io-zip.tsv` (JC6's io
+and zip tests), `z1.ae`, `z2.ae`, `z3.ae` with `z1.out`-`z3.out` (the codec checks against zlib),
+`conv-*.log`, `edge-*.log`, `jv-convert-*.log`, `build-*.log` (the conversions and builds),
+`jc-io1.log`, `jc-iozip1.log`, `jc-iozip-c1.log`, `jc-jar*.log` (the targeted runs), `full1.log`,
+`results-full1.tsv` (the whole check), `scripts/classify.py`, `cls-full2.tsv`, `class-counts-full2.txt`
+(the classification), `reap1.log`, `gate.log`, `conv-verify.log`.
+
