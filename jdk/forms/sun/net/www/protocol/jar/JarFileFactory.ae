@@ -1,0 +1,116 @@
+;; Converted from jdk26u src/java.base/share/classes/sun/net/www/protocol/jar/JarFileFactory.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.net.www.protocol.jar)
+
+(import '(java.io FileNotFoundException IOException)
+        '(java.net URL URLConnection)
+        '(java.util HashMap)
+        '(java.util.jar JarFile)
+        '(jdk.internal.util Exceptions Exceptions$SensitiveInfo OperatingSystem)
+        '(sun.net.util URLUtil)
+        '(sun.net.www ParseUtil))
+
+(defclass JarFileFactory
+  :implements [URLJarFile$URLJarFileCloseController]
+
+  (field ^:private ^:static ^:final ^{:tag (HashMap String JarFile)} fileCache (HashMap.))
+
+  (field ^:private ^:static ^:final ^{:tag (HashMap JarFile URL)} urlCache (HashMap.))
+
+  (field ^:private ^:static ^:final ^JarFileFactory instance (JarFileFactory.))
+
+  (constructor ^:private [this])
+
+  (method ^:public ^:static getInstance ^JarFileFactory [] instance)
+
+  (method getConnection :throws [IOException] ^URLConnection [this ^JarFile jarFile]
+    (let [^:mutable ^URL u nil]
+      (locking instance (set! u (cast URL (.get urlCache jarFile))))
+      (when (some? u) (.openConnection u))))
+
+  (method ^:public get :throws [IOException] ^JarFile [this ^URL url]
+    (.get this url true))
+
+  (method getOrCreate :throws [IOException] ^JarFile [this ^URL url ^boolean useCaches]
+    (if (= useCaches false)
+        (.get this url false)
+        (let [patched (.urlFor this url)]
+          (if (not (ParseUtil/isLocalFileURL patched))
+              (.get this url useCaches)
+              (let [^:mutable ^JarFile result nil]
+                (locking instance (set! result (.getCachedJarFile this patched)))
+                (when (nil? result) (set! result (URLJarFile/getJarFile patched this)))
+                (when (nil? result)
+                  (throw (FileNotFoundException.
+                           (Exceptions/formatMsg
+                             "%s"
+                             (new Exceptions$SensitiveInfo/1
+                                  [(Exceptions/filterJarName (.toString url))])))))
+                result)))))
+
+  (method closeIfNotCached :throws [IOException] ^boolean [this ^:mutable ^URL url ^JarFile jarFile]
+    (set! url (.urlFor this url))
+    (let [^:mutable ^JarFile result nil]
+      (locking instance (set! result (.getCachedJarFile this url)))
+      (when-not (identical? result jarFile) (.close jarFile))
+      (not (identical? result jarFile))))
+
+  (method cacheIfAbsent ^boolean [this ^:mutable ^URL url ^JarFile jarFile]
+    (try (set! url (.urlFor this url)) (catch IOException x (return false)))
+    (let [^:mutable ^JarFile cached nil]
+      (locking instance
+        (let [key (.urlKey this url)]
+          (set! cached (cast JarFile (.get fileCache key)))
+          (when (nil? cached) (.put fileCache key jarFile) (.put urlCache jarFile url))))
+      (or (nil? cached) (identical? cached jarFile))))
+
+  (method ^:private urlFor :throws [IOException] ^URL [this ^:mutable ^URL url]
+    (if (not (OperatingSystem/isWindows))
+        url
+        (do
+          (when (.equalsIgnoreCase (.getProtocol url) "file")
+            (let [host (.getHost url)
+                  isLocalFile (and (ParseUtil/isLocalFileURL url) (not (.equals "~" host)))]
+              (when-not isLocalFile
+                (let [_unused (set! url (URL. "file" "" (java-str "//" host (.getPath url))))] nil))))
+          url)))
+
+  (method get :throws [IOException] ^JarFile [this ^:mutable ^URL url ^boolean useCaches]
+    (set! url (.urlFor this url))
+    (let [^:mutable ^JarFile result nil
+          ^:mutable ^JarFile local_result nil]
+      (if useCaches
+          (do
+            (locking instance (set! result (.getCachedJarFile this url)))
+            (when (nil? result)
+              (set! local_result (URLJarFile/getJarFile url this))
+              (locking instance
+                (set! result (.getCachedJarFile this url))
+                (cond
+                  (nil? result)
+                    (do
+                      (.put fileCache (.urlKey this url) local_result)
+                      (.put urlCache local_result url)
+                      (set! result local_result))
+                  (some? local_result) (.close local_result)))))
+          (set! result (URLJarFile/getJarFile url this)))
+      (when (nil? result)
+        (throw (FileNotFoundException.
+                 (Exceptions/formatMsg "%s"
+                                       (new Exceptions$SensitiveInfo/1
+                                            [(Exceptions/filterJarName (.toString url))])))))
+      result))
+
+  (method ^:public close ^void [this ^JarFile jarFile]
+    (locking instance
+      (let [urlRemoved (cast URL (.remove urlCache jarFile))]
+        (when (some? urlRemoved) (.remove fileCache (.urlKey this urlRemoved))))))
+
+  (method ^:private getCachedJarFile ^JarFile [this ^URL url]
+    (java-assert (Thread/holdsLock instance))
+    (cast JarFile (.get fileCache (.urlKey this url))))
+
+  (method ^:private urlKey ^String [this ^URL url]
+    (let [^:mutable urlstr (URLUtil/urlNoFragString url)]
+      (when (.equals "runtime" (.getRef url)) (set! urlstr (java-str urlstr "#runtime")))
+      urlstr)))
