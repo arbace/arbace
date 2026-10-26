@@ -9,7 +9,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`916770d0…`, 2026-10-24: the first batched re-seed), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`0120bd38…`, 2026-10-26: the second batched re-seed), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
@@ -117,7 +117,8 @@ The current state of the work. This file is rewritten as things change. For the 
   print level: 2,104 of 2,722; RPS60-RPS69), JC2b (JCS42 (b)-JCS48: interp 1,462, compiled 1,636;
   JCS70-JCS79), JN9c (beside REAP: overload resolution native, jdk26u's lists written alone 95.9%;
   JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JC6b (java.io and
-  zip: JCS92 (c), JCS93 (c), on Opus), the second batched re-seed (on Sonnet). Done since: JC6 (the corpus
+  zip: JCS92 (c), JCS93 (c), on Opus). Done since: the second batched re-seed (`0120bd38…`, the fixpoint of
+  `988d4e90`, verified; on Sonnet), JC6 (the corpus
   widened, 683 tests; the world ranked and decided, JCS90-JCS99; the catch-alls named), JN9d (beside REAP: the
   inference tier, lists written alone 99.5%; JFS110-JFS119, JN9e after the tag), RPS103 (b) (the sample `callback`, on
   Sonnet), JC5 (the analysis' gaps: interp 1,546, compiled 1,694 on the merged code; JCS60-JCS69),

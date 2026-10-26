@@ -2076,3 +2076,16 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   small members before the tag (JC6's recommendation, about 1-1.5 weeks). JFS110-JFS119 as recommended,
   JN9e after the tag. `test/java/divergences.edn`'s classes cite JCS90-JCS99: none pending.
 - Started: JC6b (java.io, zip; on Opus) and the second batched re-seed (on Sonnet).
+
+## 2026-10-26: the second batched re-seed
+
+- The second batched re-seed (branch `reseed-2` at `988d4e90`, commit `10083319`, merged `220465ba`; on
+  Sonnet): `bin/arbace-go --fixpoint`: host `e1471263` (152,404,128 bytes) != G1 `fc998f89` (154,792,096) !=
+  G2 = G3 `30c75b94` (154,796,192): the fixpoint holds (G2 = G3); G1 differs from G2 here, where the first
+  re-seed had G1 = G2: the host's runtime (the first re-seed's) is not the checkout's, so G1, built by the host,
+  is not yet built by the checkout's own code. `bin/seed --make`: `seed/arbace-seed-go.tar.xz` 18,702,580 bytes,
+  2,024 files, SHA-256 `0120bd38` (was `916770d0`). `bin/seed --verify`: printed again at `988d4e90`, the same
+  tree (`3e95ef3a`) and archive, stage 0 = G1 = G2 = G3 = `30c75b94`, 1,362 s. It carries every shipped change
+  since the first re-seed: REAP2's `--go-flag`, REAP3, REAP4, JC2, JC2b, JC5, JC6, RPS55, REAP7, REAP7b. Nothing
+  killed or retried. The essential gate on `220465ba` (stage 0 from the new seed) passed (15m56s). Logs in
+  `.tmp/reseed2-scratch/`. JC6b's jrt changes ride REAP9's final re-seed.
