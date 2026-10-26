@@ -2821,12 +2821,18 @@ regenerated), `arbace/j2g/names.ae` (the rename), `jdk/` (forms, `sources.txt`, 
   - *Recommended: (a)*: the same limit as `Thread` and the collections (j2g compiles them already: the
     compiled level passes most of them).
 
-**Checks**: GATE_RESULT
+**Checks**: the essential `bin/gate` at the branch's records commit passed in 32m45s (the executables built
+afresh by stage 0): the smoke test; Clojure's suite on the test build, no regressions; the oracle 22,688 of
+22,740, its 52 known mismatches as recorded; diffcheck 12,789 of 12,801, its 12 known as recorded; goi's
+essential checks; Java's essential check 428 of 428 interpreted and 423 of 423 compiled; the compiled
+suite's subset as recorded; the programs; the generated variants; j2g's edge (verify passed); `bin/reap`
+12 of 12 cells, 0 problems. `bin/jrt-convert verify`: `jdk/` is the conversion byte for byte (982 forms
+files). `bin/gate --full` was not run (the policy until the milestone).
 
 The scratch this section cites (the worktree's `.tmp/jc6b/`, not tracked): `before-io-zip.tsv` (JC6's io
 and zip tests), `z1.ae`, `z2.ae`, `z3.ae` with `z1.out`-`z3.out` (the codec checks against zlib),
 `conv-*.log`, `edge-*.log`, `jv-convert-*.log`, `build-*.log` (the conversions and builds),
 `jc-io1.log`, `jc-iozip1.log`, `jc-iozip-c1.log`, `jc-jar*.log` (the targeted runs), `full1.log`,
 `results-full1.tsv` (the whole check), `scripts/classify.py`, `cls-full2.tsv`, `class-counts-full2.txt`
-(the classification), `reap1.log`, `gate.log`.
+(the classification), `reap1.log`, `gate.log`, `conv-verify.log`.
 
