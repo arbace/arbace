@@ -5443,3 +5443,11 @@ record-component annotations, 1 a package's type in the samples), 35 leaned (jdk
 `jrt-convert`, `javac-vendor convert`, `java-check --forms update`) changed only the four provenance files'
 `:repr-java` (`3d54bdd5...`) and `:host`, javac's edge now main's (its `java/lang/Module` gone with JC5); the
 essential gate passed at `0ce59afd` (25m44s).
+
+## Decided (2026-10-26): JFS110-JFS119
+
+The user decided JN9d's proposals as recommended, the next step after the milestone `arbace-reaps-3-crops-v1`:
+JFS110 (b) (the remaining declines ported, cycles first), JFS111 (b) (a read with no javac beside it, a
+counted per-file fallback to javac where a decline is met), JFS112 (b) (the model's last javac reads made
+native), JFS113 (c), JFS114 (a), JFS115 (b) after JFS111, JFS116 (b) (each unit's answers released after its
+conversion), JFS117 (a), JFS118 (b) (`doc/classes/NATIVE-ATTR.md`), JFS119 (a): JN9e, after the tag.

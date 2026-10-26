@@ -116,14 +116,16 @@ The current state of the work. This file is rewritten as things change. For the 
   248, Java compiled 420, Clojure compiled 15 namespaces; the gate +32 s cold; RPS70-RPS78), REAP5 (Java's
   print level: 2,104 of 2,722; RPS60-RPS69), JC2b (JCS42 (b)-JCS48: interp 1,462, compiled 1,636;
   JCS70-JCS79), JN9c (beside REAP: overload resolution native, jdk26u's lists written alone 95.9%;
-  JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JN9d
-  (inference, beside REAP), JC6 (whole, on Opus). Done since: RPS103 (b) (the sample `callback`, on
+  JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: JC6b (java.io and
+  zip: JCS92 (c), JCS93 (c), on Opus), the second batched re-seed (on Sonnet). Done since: JC6 (the corpus
+  widened, 683 tests; the world ranked and decided, JCS90-JCS99; the catch-alls named), JN9d (beside REAP: the
+  inference tier, lists written alone 99.5%; JFS110-JFS119, JN9e after the tag), RPS103 (b) (the sample `callback`, on
   Sonnet), JC5 (the analysis' gaps: interp 1,546, compiled 1,694 on the merged code; JCS60-JCS69),
   REAP7b (a program's Go compiled through its own goi table, Java package loaders, `.clj`/`.cljc`, `mixed` in
   the essential gate; RPS100-RPS109), REAP7 (`bin/arbace-go --build-program DIR`: four samples,
   8 of 8; RPS90-RPS99), REAP5b (the printer: the print level 2,104 to 2,132; RPS83-RPS87, the
   converter's three in JC6), the harness follow-ups (JCS70 masked paths, JCS71 `:flaky`, RPS74 (b),
-  RPS77 (b); interp 1,464, compiled 1,638; JCS80-JCS84, JCS80 and JCS84 at the next full recording). Next: after JC6 (the user, 2026-10-25: no shortcut; the
+  RPS77 (b); interp 1,464, compiled 1,638; JCS80-JCS84, JCS80 and JCS84 at the next full recording). Next: after JC6b (the user, 2026-10-25: no shortcut; the
   world ranked and decided, the catch-all classes "other, to triage" split and named, JCS72-JCS74,
   JCS77); the second batched re-seed (REAP2's `--go-flag`, REAP3, REAP4, JC2's and JC2b's j2g, JC5,
   RPS55's jrt); REAP9. After the milestone: the scripts' sweep of `/dev/null` and

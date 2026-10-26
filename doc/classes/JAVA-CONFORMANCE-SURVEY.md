@@ -2650,3 +2650,17 @@ partial `--record-ref`), `jcs80.py` (the reference's conversion), `read1.log`, `
 `rank-final.tsv` (the final classification and ranking), `final1.log` (the whole check, `--record`),
 `results-final1.tsv`, `f2-*.log`, `f3-*.log`, `chain-*.log`, `rj-*.log`, `rj2-*.log`, `conv-*.log`
 (repr/java's checks, the conversions), `build-java.log`, `gate-build1.log`, `gate.log`.
+
+## Decided (2026-10-26): JCS90-JCS99
+
+The user decided JC6's world: built before the milestone, JCS92 (c) for java.io (RandomAccessFile over Go's
+os.File, DataOutputStream, the piped streams, StreamTokenizer, PushbackInputStream, LineNumberReader) and
+JCS93 (c), zip and jar after it (Inflater, Deflater and the checksums over compress/flate and hash/crc32,
+then ZipFile and jar files): JC6b. Deferred by name (b): JCS90 (security, crypto, TLS), JCS91 (networking,
+JNDI), JCS92's NIO and charsets, JCS94 (reflection, annotations, invoke, StackWalker: its own amendment, as
+it reverses J2G-SPEC's R16), JCS95's java.util.logging, javac's API tests on `arbace-javac` and
+java.lang.management's MXBeans, JCS96 (jrt's small members, its dates, weak references; the batch not built
+before the milestone), JCS97's javax.script and rowsets, JCS98 (a): a milestone JC4b for the back ends' own
+limits and findings after the milestone. By design (a): JCS95's JMX, java.lang.classfile and FFM, JCS97's
+JDI and smartcardio. JCS99 (a) and (c): the harness's classes as built, their tests' digests recorded as
+`"-"`. Every class of `test/java/divergences.edn` cites this.

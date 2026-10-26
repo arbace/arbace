@@ -2044,3 +2044,35 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   of 10 runs (5 samples, 11 min); in `bin/gate --full`'s `programs-full`. The essential gate passed on the
   branch (22m12s). No shipped code. The agent ran on Sonnet (the user's split of models, 2026-10-25): no
   slips reported, nothing to correct at the merge.
+
+## 2026-10-26: JC6 and JN9d merged; JCS90-JCS99 and JFS110-JFS119 decided; JC6b and the second re-seed started (the user)
+
+- JC6 (branch `java-check-jc6` from `e0f5a2bc`, merged `328744bf`): the Java corpora widened (`:jdk-other`:
+  `test/jdk/` beyond `jdk/java/` but the desktop's; `:hotspot-runtime`): 683 tests (t07640-t08322), 597
+  passing on the JDK, recorded with `--only` (JCS68 (a): the other 4,165 lines checked byte for byte; JCS80
+  (a): `"-"` for `:det false` runs' stdout; JCS84 (a)); every level recorded over 3,320 tests: read 3,319,
+  classes 3,318, interp 1,601, compiled 1,767, print 2,584, diagnostics 1,101; the world ranked by tests per
+  jrt change (security 359, net 213, serialization 163, java.io 110, NIO 100, reflection 94...); the catch-alls
+  `:other` and `:world-other` replaced by named classes (a failure's reason now carries stderr's last
+  `Caused by:`); the decided items RPS83-RPS85, JCS62 (interp; its compiled half in JCS98), JCS65, JCS66,
+  JCS67 (c), JCS73, JCS74 (the leaf refusal dropped), JCS77 done; six of the print level's eight cases fixed;
+  the diagnostics classes' `:tests` ids corrected (one off since the JC2/JC3 merge). Shipped code:
+  `arbace/classes/analyze.ae`, `arbace/j2g/{code,model,out,main,checks,dyncf}.ae`, `arbace/repr/java/{convert,
+  names,print}.ae`, `go/arbace/jrt/forkjoin.ae`. On main the essential gate failed first at `programs` (the
+  `mixed` sample's j2g killed for memory beside JN9d's gate in the other slot), then passed (3m18s).
+- JN9d (branch `java-jn9d`, main merged into it twice, merged `c2a5524b`; beside REAP): JFS107 (b) (`deftype
+  Sym` in `arbace.repr.java.sym`, decls reloads from the checkout); the inference tier, `arbace/repr/java/infer.ae`
+  ported from jdk26u's Infer at `baf63fbe` (JFS102-JFS104, JFS106, JFS108, the full lub, native switch facts);
+  on the merged tool `attr-check --corpus all`: 14,416,929 facts equal, none different, the forms byte for
+  byte; jdk26u's leaned answers 35 (JN9c 53,316), declines 171 (186,358: 140 inference cycles, 14 multi-catch
+  intersection lubs, 16 record-component annotations, 1 a package's type); lists written alone 99.5%; the
+  model's reads native 99.7%; 2,283 s, peak 29.4 GB (GOGC=100). The provenance rewritten on the merged tool
+  (`:repr-java` `3d54bdd5`, `:host`; the fourth file `test/java/forms/provenance.edn` too). javac's tool
+  changed, the shipped program's code not. The essential gate on `c2a5524b` passed (15m57s).
+- Decided (the user): JCS92 (c) (java.io) and JCS93 (c) (zip and jar) built before the milestone (JC6b);
+  JCS90, JCS91, JCS92's NIO and charsets, JCS94, JCS95's logging, javac API and MXBeans, JCS96, JCS97's script
+  and rowsets deferred (b); JCS98 (a) (JC4b after the milestone); JCS95's JMX, classfile and FFM, JCS97's JDI
+  and smartcardio by design; JCS99 (a) and (c). Considered and not taken: logging, javac's API tests and the
+  small members before the tag (JC6's recommendation, about 1-1.5 weeks). JFS110-JFS119 as recommended,
+  JN9e after the tag. `test/java/divergences.edn`'s classes cite JCS90-JCS99: none pending.
+- Started: JC6b (java.io, zip; on Opus) and the second batched re-seed (on Sonnet).
