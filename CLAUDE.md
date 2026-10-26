@@ -377,21 +377,16 @@ Prior art:
   Arbace's, JN8), `bin/repr-java front-check` (the converter's forms from the native trees equal to
   javac's trees', JFS66 (b)), `bin/repr-java attr-check` (the native provider's facts equal to javac on
   Arbace's, JN9a), `bin/java-check --levels read,interp,classes,compiled,diagnostics,print` (Java's conformance check, every
-  corpus, then `--forms verify`: the essential tests' forms read afresh); the box's guests from `tamago/`'s forms byte-identical to TamaGo's originals'
-  (`bin/arbace-go --build --box`, `bin/tamago-vendor check`), the box's smoke test, its oracle's
-  subset and `bin/box-suite`, then
+  corpus, then `--forms verify`: the essential tests' forms read afresh); then
   `bin/arbace-go --fixpoint`, then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3), then `bin/arbace-go --build-program --check` (every sample, REAP7b); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
-  `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), repr/haskell's
-  (`bin/repr-haskell roundtrip --iface --text --layout`: GHC's trees and lines over GHC 9.14.1's
-  boot libraries, in the braces and the layout layouts, then their interfaces compiled at `-O1`,
-  then mode `:full` printed back byte for byte, and `test`; on the host's GHC), repr/clojure's
-  (`bin/repr-clojure check`, `--suite`, `--roundtrip`), repr/rust's (`bin/repr-rust roundtrip --iface --text --pretty`: rustc's trees and
-  lines over std's five crates, then rustdoc's JSON of the crates without spans, then the pretty
-  layout's trees, then mode `:full` printed back byte for byte, and `test`; on the host's rustc;
-  `REPR_RUST_CORPORA=all` adds RR4's corpora and the UI suite, `'all --run --std'` the behaviour level, `'all --code'` the lowered and code levels), the box's vendoring checks (`bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
-  `bin/tamago-vendor verify`, `bin/x509roots-vendor verify`, `check`; goi (`bin/goi
-  annotations`, `test --gc`, `check --jobs 8`, then `check --aot --jobs 8`, after repr/go's round trips); Go's toolchain as forms
-  (`bin/toolchain-vendor verify`, `check`). Run it when the Java forms'
+  `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), repr/clojure's
+  (`bin/repr-clojure check`, `--suite`, `--roundtrip`), `bin/x509roots-vendor verify`, `check`; goi (`bin/goi
+  annotations`, `test --gc`, `check --jobs 8`, then `check --aot --jobs 8`, after repr/go's round trips). Parked by the user, 2026-10-26, and out
+  of `--full` (kept as they are, run by hand with their scripts and Makefile targets, revisited later
+  piece by piece): the box (`bin/arbace-go --build --box` with `bin/tamago-vendor check`, the box's smoke test, oracle
+  subset, `bin/box-suite`, `bin/goi check --box`, `bin/box-vendor roundtrip`, `kvm-tests`, `purego-check`),
+  `tamago/` and `tamago/cmd/` (`bin/tamago-vendor verify`, `bin/toolchain-vendor verify`, `check`), repr/haskell
+  and repr/rust (`bin/repr-haskell`, `bin/repr-rust` round trips). Run it when the Java forms'
   front end, repr/java, repr/go, j2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or repr/java, `bin/jrt-convert update` first; after a change to what j2g asks of the JVM,
   `bin/j2g-edge update`). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`

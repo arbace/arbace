@@ -61,13 +61,13 @@ box: ## the guest images and the launcher arbace-box (bin/arbace-go --build --bo
 	bin/arbace-go --build --box
 box-smoke: ## the box's smoke test on /dev/kvm (bin/arbace-go --smoke --box)
 	bin/arbace-go --smoke --box
-box-oracle: ## the oracle's subset in the box, against its known mismatches (as bin/gate --full)
+box-oracle: ## the oracle's subset in the box, against its known mismatches (parked: not in bin/gate --full since 2026-10-26)
 	ARBACE_BOX_NET=loopback bin/oracle check 'target/arbace-go/box-amd64/arbace-box -' -j 8 \
 	  --timeout 900 --exclude forms/files. --exclude forms/processes. \
 	  --expected test/oracle/known-go-box-amd64.edn
 box-suite: ## Clojure's suite's subset in the box (bin/box-suite; after `make suite`)
 	bin/box-suite
-box-goi: ## goi's check in the box: test/goi/box.txt's programs in the guest against gc (bin/goi check --box, as bin/gate --full)
+box-goi: ## goi's check in the box: test/goi/box.txt's programs in the guest against gc (bin/goi check --box, parked: not in bin/gate --full since 2026-10-26)
 	bin/goi check --box
 box-tools: ## the tool guests (gc, the linker, the assembler) from tamago/cmd (bin/box-tools build)
 	bin/box-tools build
