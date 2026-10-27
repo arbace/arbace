@@ -64,7 +64,7 @@ frozen_clojure() {
   # one extraction at a time: concurrent checks (bin/gate) share .tmp/frozen
   exec 8> "$root/.tmp/frozen.lock"
   flock 8
-  if [ "$(cat "$dir/.rev" 2>/dev/null)" != "$rev" ]; then
+  if [ "$([ -f "$dir/.rev" ] && cat "$dir/.rev")" != "$rev" ]; then
     tmp=$(mktemp -d "$root/.tmp/frozen.XXXXXX") || { flock -u 8; return 1; }
     if ! git -C "$root" archive --format=tar "$rev" clojure | tar -x -C "$tmp"; then
       echo "could not extract clojure/ from $tag" >&2

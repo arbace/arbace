@@ -157,14 +157,14 @@ seed_go_field() { sed -n "s/^[{ ]:$2 //p" "$1" | head -1; }
 
 seed_go_build() {
   local archive=$1 out=$2; shift 2
-  local src=$out/src s goroot want have version ovl f a exe0 image nss t0
+  local src=$out/src chk s goroot want have version ovl f a exe0 image nss t0
   goroot=$(seed_go_goroot)
   rm -rf "$out"; mkdir -p "$out"
   xz -dc "$archive" | tar -C "$out" -xf - || { echo "bin/seed: cannot unpack $archive" >&2; return 1; }
   mv "$out/$seed_go_top" "$src"
   s=$src/SEED.edn
   [ "$(seed_go_field "$s" format)" = "$seed_go_format" ] || { echo "bin/seed: $archive: format $(seed_go_field "$s" format), not $seed_go_format" >&2; return 1; }
-  seed_go_toolchain_check "$s" > /dev/null || return 1
+  chk=$(seed_go_toolchain_check "$s") || return 1
   version=$(seed_go_field "$s" version)
   # the overlay file for this GOROOT (bin/jrt overlay's, with the seed's files: overlay/PKG/F.go
   # for GOROOT/src/PKG/F.go; a seed before GR9a has overlay/runtime/ only)

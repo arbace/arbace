@@ -46,13 +46,14 @@ arbace_stale() {
 }
 
 arbace_fresh() {
-  local who=$1 f=$2 want=$3 cmd=$4 v c d desc wd=false
+  local who=$1 f=$2 want=$3 cmd=$4 v c d desc wd=false discard=${TMPDIR:-$root/.tmp/tmp}/fresh.discard
+  mkdir -p "${discard%/*}"
   [ -e "$f" ] || { echo "$who: no $f; build it: $cmd" >&2; exit 1; }
   v=$(arbace_exe_version "$f") || { arbace_stale "$who" "$f" "it carries no version of Arbace" "$cmd"; return 0; }
   c=$(sed -E 's/.*:commit "([0-9a-f]{40})".*/\1/' <<< "$v")
   d=$(sed -E 's/.*:dirty (true|false).*/\1/' <<< "$v")
   desc=$(sed -E 's/^\{:describe "([^"]*)".*/\1/' <<< "$v")
-  case $(git -C "$root" describe --tags --always --dirty 2>/dev/null) in *-dirty) wd=true ;; esac
+  case $(git -C "$root" describe --tags --always --dirty 2>"$discard") in *-dirty) wd=true ;; esac
   if [ "$c" != "$want" ]; then
     arbace_stale "$who" "$f" "built from $desc (${c:0:12}), not from the commit ${want:0:12}" "$cmd"
   elif [ "$d" = true ] && [ "$wd" = false ]; then

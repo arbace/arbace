@@ -130,6 +130,7 @@ set -uo pipefail
 export CGO_ENABLED=0 # Go's builds never use cgo (doc/go/BOX-NOTES.md, "... cgo dropped", 2026-10-16)
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
+discard=$TMPDIR/arbace-go.discard # stderr of probes whose failures are expected (a file, not the null device)
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 . "$root/bin/lib/gocache.bash"
 dir=$root/target/arbace-go
@@ -208,7 +209,7 @@ build() {
     (cd "$root" && bin/j2g --program "${j2g_args[@]}" --gotable "$dir/gotable" --await "$dir/aot$variant" --out "$dir/j2g$variant") > "$dir/j2g$variant.log" 2>&1 &
     j2g_pid=$!
     if ! host_compile "$hostexe" "$dir/aot$variant"; then
-      kill "$j2g_pid" 2>/dev/null; wait "$j2g_pid" 2>/dev/null
+      kill "$j2g_pid" 2>"$discard"; wait "$j2g_pid" 2>"$discard"
       return 1
     fi
     aot_key_write "$dir/aot$variant"
@@ -262,7 +263,7 @@ build() {
     # spaces (a program older than S6: RT.ID_SPACE, SA143), so that the second run translates as
     # a one-run build's host would
     local host2=$hostexe
-    if [ "$(env -u ARBACE_NO_AOT "$hostexe" -e '(print (some? (try (.getField arbace.lang.RT "ID_SPACE") (catch Throwable _ nil))))' 2>/dev/null)" != true ]; then
+    if [ "$(env -u ARBACE_NO_AOT "$hostexe" -e '(print (some? (try (.getField arbace.lang.RT "ID_SPACE") (catch Throwable _ nil))))' 2>"$discard")" != true ]; then
       cp "$dir/$(host_arch)/$exe" "$dir/aot-host$variant"
       host2=$dir/aot-host$variant
     fi
@@ -296,7 +297,7 @@ aot_reusable() {
   [ -f "$dir/aot/packages.edn" ] && [ -f "$dir/aot.key" ] || return 1
   aot_key=$(aot_key)
   [ "$(cat "$dir/aot.key")" = "$aot_key" ] || return 1
-  [ "$(env -u ARBACE_NO_AOT "$1" -e '(print (some? (try (.getField arbace.lang.RT "ID_SPACE") (catch Throwable _ nil))))' 2>/dev/null)" = true ]
+  [ "$(env -u ARBACE_NO_AOT "$1" -e '(print (some? (try (.getField arbace.lang.RT "ID_SPACE") (catch Throwable _ nil))))' 2>"$discard")" = true ]
 }
 
 # host_compile HOST OUT: the checkout's namespaces compiled to Java forms into OUT by HOST, when
@@ -309,7 +310,7 @@ host_compiles() {
   local host=$1 key hkey
   . "$root/bin/lib/version.bash"
   key=$(arbace_runtime_key "$root")
-  hkey=$(env -u ARBACE_NO_AOT "$host" -e '(print (:runtime *arbace-version*))' 2>/dev/null)
+  hkey=$(env -u ARBACE_NO_AOT "$host" -e '(print (:runtime *arbace-version*))' 2>"$discard")
   # ARBACE_AOT_ONEPASS=force: one run whatever the host (measurements; not for a fixpoint)
   if [ "$key" != "$hkey" ] && [ "${ARBACE_AOT_ONEPASS:-}" != force ]; then
     echo "== the namespaces compiled after a first build (the host's runtime is not the checkout's)" >&2
@@ -472,7 +473,7 @@ build_java() {
     # repr/java's reader compiled into the tool (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built:
     # JN4", JFS28): by a first tool build when the compiled reader's tree is not of this key
     rkey=$(reader_key)
-    if [ "$(cat "$dir/aot-reader.key" 2>/dev/null)" != "$rkey" ] || [ ! -f "$dir/aot-reader/packages.edn" ]; then
+    if [ "$(cat "$dir/aot-reader.key" 2>"$discard")" != "$rkey" ] || [ ! -f "$dir/aot-reader/packages.edn" ]; then
       echo "== javac's tool build, first (the host that compiles repr/java's reader): ${j2g_args[*]}" >&2
       rm -f "$dir/aot-reader.key"
       saved=("${j2g_args[@]}")
@@ -978,7 +979,7 @@ EOF
     run_for 5 "$a" -e '(send (agent 1) inc)' > "$t/agents.txt" 2>&1; st=$?
     check "agents without shutdown-agents keep the process (killed after 5 s)" "124" "$st"
     check "... without Go's deadlock crash" "" "$(grep -o 'fatal error.*' "$t/agents.txt")"
-    run_for 60 "$a" -e '(do (send (agent 1) inc) (deref (future 2)) (shutdown-agents))' > /dev/null 2>&1; st=$?
+    run_for 60 "$a" -e '(do (send (agent 1) inc) (deref (future 2)) (shutdown-agents))' > "$t/agents-ok.txt" 2>&1; st=$?
     check "agents with shutdown-agents end the process" "0" "$st"
     # the store (doc/go/BOX-NOTES.md, S3), a directory natively; snapshots of a named directory
     native() { run "$a" "$@"; }
@@ -999,7 +1000,7 @@ EOF
     # pseudo-terminal: amd64 only (under qemu-aarch64 rlwrap would run the arm64 executable
     # directly), when python3 and rlwrap are installed. The checks above run without a
     # terminal, so without rlwrap
-    if [ "$a" = amd64 ] && command -v python3 > /dev/null && command -v rlwrap > /dev/null; then
+    if [ "$a" = amd64 ] && [ -n "$(command -v python3)" ] && [ -n "$(command -v rlwrap)" ]; then
       "$root/test/arbace-go-rlwrap.py" "$dir/$a/arbace" "$t" || fails=$((fails+1))
     else
       echo "  skip the REPL under rlwrap (amd64, python3 and rlwrap needed)"
@@ -1036,7 +1037,7 @@ gate_build() {
   local cache=$root/.tmp/arbace-go-gate key t0
   t0=$(date +%s)
   key=$(gate_key)
-  if [ -x "$cache/amd64/arbace" ] && [ -x "$cache/amd64/arbace-tests" ] && [ "$(cat "$cache/key" 2>/dev/null)" = "$key" ]; then
+  if [ -x "$cache/amd64/arbace" ] && [ -x "$cache/amd64/arbace-tests" ] && [ "$(cat "$cache/key" 2>"$discard")" = "$key" ]; then
     echo "arbace-go: the cached executables (their inputs unchanged, key ${key:0:12})"
   else
     echo "arbace-go: building the executables (key ${key:0:12})"
@@ -1199,7 +1200,7 @@ box_append() {
   n=$(stat -c %s "$2")
   p=$(( (65536 - $(stat -c %s "$1") % 65536) % 65536 ))
   for i in 0 1 2 3 4 5 6 7; do len+=$(printf '\\x%02x' $(( (n >> (8 * i)) & 255 ))); done
-  { cat "$1"; head -c "$p" /dev/zero; cat "$2"; printf "$len"; printf 'WHIMGST1'; } > "$3.new" \
+  { cat "$1"; printf "%*s" "$p" "" | tr " " "\\0"; cat "$2"; printf "$len"; printf 'WHIMGST1'; } > "$3.new" \
     && chmod +x "$3.new" && mv -f "$3.new" "$3"
 }
 

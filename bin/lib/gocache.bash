@@ -4,12 +4,13 @@
 # progress; j2g's programs, the round trips and parallel agents fill the cache by tens of GB in
 # hours. Sourced by bin/gate and bin/arbace-go; prints one line.
 gocache_trim() {
-  local go=${1:-go} gocache before keep=${ARBACE_GOCACHE_KEEP_MIN:-90}
-  gocache=$("$go" env GOCACHE 2>/dev/null || true)
+  local go=${1:-go} gocache before keep=${ARBACE_GOCACHE_KEEP_MIN:-90} discard=${TMPDIR:-$root/.tmp/tmp}/gocache.discard
+  mkdir -p "${discard%/*}"
+  gocache=$("$go" env GOCACHE 2>"$discard" || true)
   [ -n "$gocache" ] && [ -d "$gocache" ] || return 0
   before=$(du -sm "$gocache" | cut -f1)
-  find "$gocache" -type f -mmin +"$keep" -delete 2>/dev/null || true
-  find "$gocache" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+  find "$gocache" -type f -mmin +"$keep" -delete 2>"$discard" || true
+  find "$gocache" -mindepth 1 -type d -empty -delete 2>"$discard" || true
   echo "   Go build cache trimmed (entries unused for $keep min): $before MB -> $(du -sm "$gocache" | cut -f1) MB"
 }
 
@@ -17,8 +18,9 @@ gocache_trim() {
 # S6) trimmed alike, of entries unused for ARBACE_GOCACHE_KEEP_MIN minutes, and its collect
 # indexes (DIR/collect/, files: arbace.build.go's root-packages)
 build_go_print_cache_trim() {
-  local keep=${ARBACE_GOCACHE_KEEP_MIN:-90}
+  local keep=${ARBACE_GOCACHE_KEEP_MIN:-90} discard=${TMPDIR:-$root/.tmp/tmp}/gocache.discard
   [ -d "$1" ] || return 0
-  find "$1" -mindepth 2 -maxdepth 2 -type d -mmin +"$keep" -exec rm -rf {} + 2>/dev/null || true
-  [ -d "$1/collect" ] && find "$1/collect" -type f -mmin +"$keep" -delete 2>/dev/null || true
+  mkdir -p "${discard%/*}"
+  find "$1" -mindepth 2 -maxdepth 2 -type d -mmin +"$keep" -exec rm -rf {} + 2>"$discard" || true
+  [ -d "$1/collect" ] && find "$1/collect" -type f -mmin +"$keep" -delete 2>"$discard" || true
 }

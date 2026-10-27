@@ -53,8 +53,8 @@ frozen_jar() {
     flock 9
     if [ ! -f "$jar" ]; then
       wt=$dir/wt
-      git -C "$root" worktree remove --force "$wt" 2> /dev/null; rm -rf "$wt"
-      git -C "$root" worktree add --detach "$wt" "$tag" > /dev/null 2>&1 || { echo "frozen_jar: no worktree of $tag" >&2; exit 1; }
+      git -C "$root" worktree remove --force "$wt" 2> "$dir/discard"; rm -rf "$wt"
+      git -C "$root" worktree add --detach "$wt" "$tag" > "$dir/discard" 2>&1 || { echo "frozen_jar: no worktree of $tag" >&2; exit 1; }
       find "$wt/clojure" -name '*.class' -exec touch {} +
       echo "frozen_jar: building the frozen jar of $tag (log $dir/$tag.log)" >&2
       "$wt/bin/build-arbace" > "$dir/$tag.log" 2>&1; st=$?
@@ -63,7 +63,7 @@ frozen_jar() {
       [ $st = 0 ] || { echo "frozen_jar: the build of $tag failed, see $dir/$tag.log" >&2; exit 1; }
     fi
   ) 9> "$dir/.lock" || return 1
-  want=$(sed -n "s/^\([0-9a-f]\{64\}\)  $tag.jar\$/\1/p" "$root/test/oracle/frozen-jar.sha256" 2>/dev/null)
+  want=$(sed -n "s/^\([0-9a-f]\{64\}\)  $tag.jar\$/\1/p" "$root/test/oracle/frozen-jar.sha256" 2>"$dir/discard")
   got=$(sha256sum "$jar" | cut -d' ' -f1)
   if [ -z "$want" ]; then
     echo "frozen_jar: warning: no pinned hash for $tag.jar in test/oracle/frozen-jar.sha256 (it is $got)" >&2
@@ -76,7 +76,7 @@ frozen_jar() {
 # frozen_link DIR FILE: DIR/FILE's .clj link to the checkout's FILE (.ae), unless there
 frozen_link() {
   local l=$1/${2%.ae}.clj
-  [ "$(readlink "$l" 2>/dev/null)" = "$3/$2" ] && return
+  [ "$([ -L "$l" ] && readlink "$l")" = "$3/$2" ] && return
   mkdir -p "$(dirname "$l")"
   ln -sfn "$3/$2" "$l"
 }
@@ -98,7 +98,7 @@ frozen_view() {
       f=$list.new.$BASHPID   # named before the fork: a redirection expands in the child
       unzip -Z1 "$jar" > "$f" && mv "$f" "$list" || exit 1
     fi
-    find -L "$view" -type l -delete 2> /dev/null   # links whose target is gone
+    find -L "$view" -type l -delete 2> "$root/.tmp/frozen-view/discard"   # links whose target is gone
     (cd "$root/test" && find . -name '*.ae' -printf '%P\n') | while read -r f; do
       frozen_link "$view" "$f" "$root/test"
     done
