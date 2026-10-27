@@ -32,16 +32,19 @@
 # analyze a checkout's namespaces alike, so a build's host of that key compiles them (one j2g
 # run).
 arbace_runtime_key() {
+  local discard=${TMPDIR:-$1/.tmp/tmp}/version.discard
+  mkdir -p "${discard%/*}"
   (cd "$1" && find arbace/lang go overlay/jdk jdk -type f ! -path jdk/edge.edn ! -path 'jdk/javac/*' \
-       ! -path 'overlay/jdk/javac/*' 2>/dev/null \
+       ! -path 'overlay/jdk/javac/*' 2>"$discard" \
      | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64)
 }
 
 arbace_version() {
-  local r top d c dirty=false
+  local r top d c dirty=false discard=${TMPDIR:-$1/.tmp/tmp}/version.discard
   r=$(cd "$1" && pwd -P) || return 1
-  top=$(git -C "$r" rev-parse --show-toplevel 2>/dev/null) && top=$(cd "$top" && pwd -P)
-  if [ -n "$top" ] && [ "$top" = "$r" ] && c=$(git -C "$r" rev-parse HEAD 2>/dev/null); then
+  mkdir -p "${discard%/*}"
+  top=$(git -C "$r" rev-parse --show-toplevel 2>"$discard") && top=$(cd "$top" && pwd -P)
+  if [ -n "$top" ] && [ "$top" = "$r" ] && c=$(git -C "$r" rev-parse HEAD 2>"$discard"); then
     d=$(git -C "$r" describe --tags --always --dirty) || return 1
     case $d in *-dirty) dirty=true ;; esac
   elif [ -f "$r/VERSION" ] && ! grep -q '\$Format:' "$r/VERSION"; then
