@@ -127,3 +127,38 @@ git history:
   stage 0: a fresh `target/` built every sample, 11 of 11), JCS76 (a) (`aot.runtime` beside `aot.key`, read by
   `bin/java-check`'s `aot_fresh`). Shipped code: none but the tool's printer (run from the checkout). The
   essential gate on `7ff11474` passed (31m03s); the matrix 12 of 12, 0 problems.
+
+## 2026-10-27: JN9e and JC4b merged; JFS120-JFS129 and JCS110-JCS119 decided (the user)
+
+- JN9e (branch `java-jn9e`, merged `d52c5509`; on Opus): repr/java reads Java without javac. `bin/repr-java read
+  --no-javac` (and `read-jdk`) parses natively and converts with the native provider's answers alone; whatever
+  would ask javac stops the unit and its file is read by javac (the fallback, counted by reason,
+  `OUT/repr-java-nojavac.edn`). `bin/repr-java nojavac-check --corpus all`: 14,650 files, every one native, no
+  fallback, the forms javac's byte for byte (2,315 s; peak 8.4 GB against javac's read's 38-40 GB on java.base).
+  attr-check `--corpus all`: 14,503,922 facts equal, none different, none declined (JN9d.10: 171), no bridges
+  (jdk26u's 13,053 before). JFS110 (b) (the declines ported: inference cycles, multi-catch lub, record components'
+  annotations, ...), JFS112 (b), JFS113 (c), JFS117 (a), JFS118 (b) (`doc/classes/NATIVE-ATTR.md`). javac's tool
+  changed (repr/java embedded); the shipped program did not. Survey: doc/classes/JAVA-FRONTEND-SURVEY.md,
+  "As built: JN9e"; scratch `.tmp/jn9e/`. Decided (the user): JFS120-JFS129 as recommended: JN9f (the vendoring
+  tools' read `--no-javac`, nojavac-check in `--full`, a jtreg read level without javac, the bridges emptied, then
+  repr/java embedded in the shipped program, in v2 with its re-seed).
+- JC4b (branch `java-check-jc4b`, merged `359cfe9b`; on Opus): the Java back ends' own limits (JCS98 (a), JCS109
+  (a), JCS62's compiled half): 42 more world classes extendable by the interpreter (`arbace.j2g.model/class-supers`),
+  their protected members, superinterfaces with default methods initialized (JLS 12.4.2), `Outer.super.m()` in
+  j2g, constant labels over a box, the most specific default method, synchronized methods' monitors, a member
+  class shadowing a local one, record patterns never matching null, bridges for reordered bounds; the JLS program
+  `test/java/jls/BackEnds.java`. Java's interp 1,683 → 1,790, compiled 1,869 → 1,881, none lost (6 timeouts on
+  the loaded host recorded `:flaky`). The executable +17.6 MB (174,010,528 bytes). Shipped files changed (for the
+  re-seed): arbace/classes/{analyze,env,go,interp}.ae, arbace/j2g/{model,dyn,dyncf,code,decls,reach}.ae,
+  arbace/lang/Compiler.ae. Survey: doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4b"; scratch
+  `.tmp/jc4b/`. Decided (the user): JCS110-JCS119 as recommended: JC4c in v2 (JCS111-JCS113, JCS116-JCS118),
+  JCS114/JCS115 in JN9f, the size kept and a shared dispatch later.
+- The essential gate on `b60d3075` (both merged) passed (23m31s); the matrix 12 of 12, 0 problems: Java 7,739/3/93,
+  1,790/329/1,202, 1,881/181/1,259, 2,584/637/99.
+- The host's memory: JC4b's runs and GT1-GT3's `--full` overlapped (j2g's 17-20 GB beside each other), against
+  the one-20-GiB-job rule. Since: a host lock `.tmp/big.lock` (flock) every job above about 8 GB holds, the agents'
+  rules in `.tmp/agent-rules.md`; GT6 makes it the gate's own. GT1-GT3's first `--full` failed (276m31s:
+  `jrt-convert`, `java-check-full`), its agent on it.
+- Started beside GT1-GT3 (worktrees from `b60d3075`): JC4c and JN9f (on Opus), Clojure's last deferred cases
+  (RPS41 (b), RPS42, RPS53, RPS54) and small leftovers B (RPS64 per kind, RPS86 (b), RPS80 (b), RPS81 (b)) on
+  Sonnet.
