@@ -30,7 +30,7 @@ arbace_host_exe() {
       have=$([ -f "$root/target/seed/seed.sha256" ] && cat "$root/target/seed/seed.sha256")
       if [ ! -x "$exe" ] || [ "$want" != "$have" ]; then
         echo "== stage 0: bin/seed --build --arch $a (the host of Arbace's tools)" >&2
-        "$root/bin/seed" --build --arch "$a" >&2 || exit 1
+        SEED_BUILD_LOCKED=1 "$root/bin/seed" --build --arch "$a" >&2 || exit 1
       fi
     ) 9> "$root/.tmp/seed-build.lock" || { echo "no stage 0: bin/seed --build failed" >&2; return 1; }
   fi

@@ -1,0 +1,241 @@
+(ns gate.plan
+  "bin/gate's planner (doc/GATE-SURVEY.md, GT2, GTS2 (a), GTS3 (a), GTS6 (a), GTS7 (a), \"As built:
+  GT1-GT3\"): reads the steps test/gate/steps.edn declares, computes each step's key over its
+  declared inputs and decides, against the store of passes, which steps run.
+
+  A check's key is the SHA-256 of its material, one line per input: the step's declaration (but
+  :doc, :summary and :mem-gib), the gate's logic (bin/gate, this file), each host's identity, each
+  pin's and each input file's SHA-256, each declared environment variable's value. Never the
+  commit. A pass of that key in the store (STORE/NAME/KEY.edn, bin/gate writes it) skips the step.
+  A build runs when a check that runs needs it; an :always step runs.
+
+  -main plan ROOT LOGS STORE MODE [--rerun]
+      MODE essential or full; LOGS holds files.sha256 (sha256sum's lines of the checkout's files,
+      bin/gate's) and hosts.edn ({:gate ID ...}); writes LOGS/plan.tsv (one step a line, the
+      columns NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER SUMMARY-N SUMMARY-RE WHY CMD, '-' for an
+      empty one; GATE_STEPS names another table, for the gate's own tests), LOGS/plan/NAME.inputs (each step's material) and prints the plan: each step,
+      its decision and why. --rerun: every check runs (passes are still recorded)
+  -main why ROOT LOGS STORE NAME
+      after a plan: the step's material, its passes, and what changed since the latest one"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File PushbackReader)
+           (java.security MessageDigest)))
+
+(defn- read-file [^String f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(defn- sha256 [^String s]
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (.update md (.getBytes s "UTF-8"))
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md)))))
+
+(defn- files-table
+  "{path sha} from sha256sum's lines"
+  [f]
+  (into (sorted-map)
+        (for [l (str/split-lines (slurp f)) :when (> (count l) 66)]
+          [(subs l 66) (subs l 0 64)])))
+
+(defn- glob-re [^String g]
+  (re-pattern (str "^"
+                   (-> g
+                       (str/replace "." "\\.")
+                       (str/replace "**" "\u0000")
+                       (str/replace "*" "[^/]*")
+                       (str/replace "\u0000" ".*"))
+                   "$")))
+
+(defn- rule-matcher [^String r]
+  (cond
+    (str/ends-with? r "/") (fn [p] (str/starts-with? p r))
+    (str/includes? r "*") (let [re (glob-re r)] (fn [p] (boolean (re-find re p))))
+    :else (fn [p] (= p r))))
+
+(defn- expand
+  "the rules of an :inputs vector, groups expanded, in order: [[include? pattern] ...]"
+  [groups inputs]
+  (vec (mapcat (fn [x]
+                 (if (keyword? x)
+                   (let [g (get groups x)]
+                     (when-not g (throw (ex-info (str "steps.edn: no group " x) {})))
+                     (expand groups g))
+                   (let [s (str x)]
+                     (if (str/starts-with? s "!") [[false (subs s 1)]] [[true s]]))))
+               inputs)))
+
+(defn- matching
+  "the files of PATHS the rules select (the last rule that matches a file decides), memoized per
+  pattern in CACHE"
+  [cache paths rules]
+  (reduce (fn [acc [inc? pat]]
+            (let [m (or (get @cache pat)
+                        (let [f (rule-matcher pat)
+                              v (set (filter f paths))]
+                          (swap! cache assoc pat v)
+                          v))]
+              (if inc? (into acc m) (reduce disj acc m))))
+          #{} rules))
+
+(def ^:private unkeyed #{:doc :summary :mem-gib})
+
+(defn- material
+  "the lines a step's key is the hash of"
+  [step rules files hosts cache]
+  (let [decl (into (sorted-map) (apply dissoc step unkeyed))
+        logic ["bin/gate" "test/gate/plan.ae"]
+        sel (sort (matching cache (keys files) rules))]
+    (concat
+     [(str "step " (:name step))
+      (str "decl " (pr-str decl))]
+     (for [f logic] (str "logic " (get files f "missing") " " f))
+     (for [h (:hosts step)]
+       (str "host " (name h) " " (or (get hosts h) (throw (ex-info (str "hosts.edn: no host " h) {})))))
+     (for [p (:pins step)] (str "pin " (get files p "missing") " " p))
+     (for [e (:env step)] (let [v (System/getenv (str e))] (str "env " e (if v (str "=" v) " unset"))))
+     (for [f sel] (str "file " (get files f) " " f)))))
+
+(defn- passes
+  "the step's recorded passes in STORE, the latest first: [{...the record... :file F}]"
+  [store nm]
+  (let [d (File. (str store "/" nm))
+        fs (when (.isDirectory d) (.listFiles d))]
+    (->> fs
+         (filter #(str/ends-with? (.getName ^File %) ".edn"))
+         (keep #(try (assoc (read-file (.getPath ^File %)) :file (.getPath ^File %)) (catch Throwable _ nil)))
+         (sort-by #(str (:date %)))
+         reverse)))
+
+(defn- subject [^String l]
+  ;; "file SHA PATH" and "pin SHA PATH": PATH; "host NAME ID": host NAME; "env X=v": env X
+  (let [w (str/split l #" ")]
+    (case (first w)
+      ("file" "pin" "logic") (str/join " " (drop 2 w))
+      "host" (str "host " (second w))
+      "env" (str "env " (first (str/split (second w) #"=")))
+      (first w))))
+
+(defn- changes
+  "what differs between the material lines NOW and an earlier pass's THEN: the subjects"
+  [now then]
+  (let [a (set now) b (set then)
+        changed (concat (remove b now) (remove a then))]
+    (vec (distinct (map subject changed)))))
+
+(defn- short-list [xs]
+  (let [n (count xs)]
+    (str (str/join ", " (take 6 xs)) (when (> n 6) (str " (+" (- n 6) " more)")))))
+
+(defn- pass-desc [p]
+  (str "passed at " (subs (str (:key p)) 0 12) ", " (subs (str (:commit p) "        ") 0 8) ", " (:date p)
+       ", " (:worktree p)))
+
+(defn- dash [x] (let [s (str x)] (if (str/blank? s) "-" s)))
+
+(defn plan [root logs store mode rerun?]
+  (let [{:keys [groups steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
+        files (files-table (str logs "/files.sha256"))
+        hosts (read-file (str logs "/hosts.edn"))
+        phases (if (= mode "full") #{:pre :build :essential :full} #{:pre :build :essential})
+        steps (filter #(phases (:phase %)) steps)
+        cache (atom {})
+        pdir (File. (str logs "/plan"))
+        _ (.mkdirs pdir)
+        ;; the checks' decisions
+        decided
+        (vec (for [s steps
+                   :let [nm (str (:name s)) kind (or (:kind s) :check)]]
+               (if (not= kind :check)
+                 {:step s :name nm :kind kind}
+                 (let [lines (material s (expand groups (:inputs s)) files hosts cache)
+                       text (str (str/join "\n" lines) "\n")
+                       key (sha256 text)
+                       _ (spit (str logs "/plan/" nm ".inputs") text)
+                       ps (passes store nm)
+                       hit (first (filter #(= (:key %) key) ps))
+                       nfiles (count (filter #(str/starts-with? % "file ") lines))]
+                   (cond
+                     (and hit (not rerun?))
+                     {:step s :name nm :kind kind :key key :decision "skip" :why (pass-desc hit)}
+                     :else
+                     {:step s :name nm :kind kind :key key :decision "run"
+                      :why (str "key " (subs key 0 12) ", " nfiles " files; "
+                                (cond
+                                  hit "a pass at this key, rerun (--rerun)"
+                                  (empty? ps) "never passed"
+                                  :else (let [p (first ps)
+                                              then (try (str/split-lines (slurp (str/replace (:file p) #"\.edn$" ".inputs")))
+                                                        (catch Throwable _ nil))]
+                                          (if then
+                                            (str "changed since the pass at " (subs (str (:key p)) 0 12) " (" (:date p) "): "
+                                                 (short-list (changes lines then)))
+                                            (str "no pass at this key (the latest " (subs (str (:key p)) 0 12) ")")))))})))))
+        by-name (into {} (map (juxt :name identity) decided))
+        ;; the builds: needed by a check that runs, or by a needed build
+        needed (loop [need (set (mapcat #(map str (:needs (:step %))) (filter #(= "run" (:decision %)) decided)))]
+                 (let [more (into need (mapcat #(map str (:needs (:step (by-name %)))) need))]
+                   (if (= more need) need (recur more))))
+        decided (vec (for [d decided]
+                       (case (:kind d)
+                         :always (assoc d :decision "always" :why "every run")
+                         :build (if (needed (:name d))
+                                  (assoc d :decision "build"
+                                         :why (str "needed by "
+                                                   (short-list (for [x decided
+                                                                     :when (some #{(:name d)} (map str (:needs (:step x))))
+                                                                     :when (or (= "run" (:decision x)) (needed (:name x)))]
+                                                                 (:name x)))))
+                                  (assoc d :decision "none" :why "not needed: no step that runs needs it"))
+                         d)))]
+    (spit (str logs "/plan.tsv")
+          (apply str
+                 (for [{:keys [step name decision key why]} decided
+                       :let [[sre sn] (:summary step)]]
+                   (str (str/join "\t" [name decision (dash key) (subs (str (:phase step)) 1)
+                                        (dash (or (:chain step) name))
+                                        (dash (str/join "," (map str (:needs step))))
+                                        (dash (:start-after step))
+                                        (dash sn) (dash sre) (dash why) (:cmd step)])
+                        "\n"))))
+    (let [freq (frequencies (map :decision decided))]
+      (println (str "gate plan (" mode "): " (count decided) " steps; "
+                    (str/join ", " (for [k ["always" "build" "run" "skip" "none"] :when (freq k)]
+                                     (str (freq k) " " k))))))
+    (doseq [{:keys [name decision why]} decided]
+      (println (format "   %-6s %-20s %s" (if (= decision "none") "-" decision) name why)))))
+
+(defn why [root logs store nm]
+  (let [f (File. (str logs "/plan/" nm ".inputs"))]
+    (when-not (.isFile f)
+      (println (str "gate why: no material for " nm " (not a check of the plan: bin/gate --plan [--full] first)"))
+      (System/exit 2))
+    (let [now (str/split-lines (slurp f))
+          ps (passes store nm)
+          key (sha256 (str (str/join "\n" now) "\n"))]
+      (println (str nm ": key " key ", " (count now) " lines of material (" (.getPath f) ")"))
+      (doseq [l now :when (not (str/starts-with? l "file "))] (println (str "   " l)))
+      (println (str "   " (count (filter #(str/starts-with? % "file ") now)) " input files"))
+      (if (empty? ps)
+        (println (str "passes: none in " store "/" nm))
+        (do
+          (println (str "passes (" (count ps) "), the latest first:"))
+          (doseq [p (take 5 ps)]
+            (println (str "   " (subs (str (:key p)) 0 12) " " (:date p) " " (:commit p) " " (:worktree p)
+                          " " (:secs p) " s, cpu " (:cpu-s p) " s, peak " (:maxrss-kib p) " KiB"
+                          (when (= (:key p) key) "  <- this key: the step is skipped"))))
+          (let [p (first ps)
+                then (try (str/split-lines (slurp (str/replace (:file p) #"\.edn$" ".inputs"))) (catch Throwable _ nil))]
+            (when (and then (not= (:key p) key))
+              (let [a (set now) b (set then)]
+                (println (str "since the latest pass (" (subs (str (:key p)) 0 12) "):"))
+                (doseq [l (remove b now)] (println (str "   + " l)))
+                (doseq [l (remove a then)] (println (str "   - " l)))))))))))
+
+(defn -main [& args]
+  (case (first args)
+    "plan" (let [[_ root logs store mode & more] args]
+             (plan root logs store mode (some #{"--rerun"} more)))
+    "why" (let [[_ root logs store nm] args] (why root logs store nm))
+    (do (println "usage: gate.plan plan ROOT LOGS STORE MODE [--rerun] | why ROOT LOGS STORE NAME")
+        (System/exit 2))))
