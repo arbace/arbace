@@ -30,7 +30,7 @@ arbace_javac_key() {
 
 arbace_javac_fresh() {
   local who=$1 e=$2 k want
-  k=$(cat "$e.key" 2>/dev/null)
+  k=$([ ! -f "$e.key" ] || cat "$e.key")
   want=$(arbace_javac_key "$root")
   if [ -z "$k" ] || [ "$k" != "$want" ]; then
     if [ "${REPR_JAVA_STALE_OK:-}" = 1 ]; then
