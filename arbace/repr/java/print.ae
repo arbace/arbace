@@ -1980,7 +1980,10 @@
               ;; literal, which the converter widens again as it did
               (and (= t "float") (number? a) (= hn "float") (== (double a) (Math/rint (double a)))
                    (< (Math/abs (double a)) 9.2e18)
-                   (or (neg? (double a)) (not= (double a) (double (float (double a))))))
+                   ;; not a float literal's digits (1.2345679E8f is the form's 1.2345679E8, an int's widening
+                   ;; would hold 123456792 or the int's own digits that Float.toString does not give back)
+                   (or (neg? (double a))
+                       (not= (double a) (Double/parseDouble (Float/toString (float (double a)))))))
               (let [n (long (double a))] (int-lit n (not (int-range? n))))
               (and (= t "float") (number? a) (= hn "float")) (e P-PRIMARY (float-literal a))
               ;; an int or long constant widened to double ((double 1163089569715148800)): its own literal, which
@@ -2609,6 +2612,8 @@
             ;; a ^:mutable local with Java's default value never assigned: Java declared it
             ;; without initializer
             no-init? (and (:mutable m) (default-value? init) (tag-of s)
+                          ;; a box's default is null: Boolean As = false is written
+                          (or (nil? init) (not (box-prims (erase (:scope env) (tag-of s)))))
                           (or (tag-only-without-init? s init)
                               (not (assigned? s (concat (map second more) body)))
                               (and (binding [*da-catch-jumps* (captured? s (concat (map second more) body))]
@@ -2681,31 +2686,46 @@
 ;; so a pattern binding is not rebound in the scope of its own name (Guards). Only a chain with a pattern
 ;; is folded: the forms read back are the same, as the converter expands the && again.
 (defn- norm-cond
-  "Form `f` with its `cond`s as nested `if`s, to compare the else branches the converter repeated."
+  "Form `f` with its `cond`s and `when`s as nested `if`s, to compare the else branches the converter repeated."
   [f]
   (cond
     (and (seq? f) (is? f 'cond))
     (norm-cond (reduce (fn [else [c v]] (if (= :else c) v (list 'if c v else))) nil (reverse (partition 2 (rest f)))))
+    (and (seq? f) (is? f 'when) (= 3 (count f))) (norm-cond (list 'if (second f) (nth f 2) nil))
+    (and (seq? f) (is? f 'when-instance) (= 3 (count f))) (norm-cond (list 'if-instance (second f) (nth f 2) nil))
     (seq? f) (apply list (map norm-cond f))
     (vector? f) (mapv norm-cond f)
     :else f))
 
+(defn- cond->if
+  "A `cond` form as its first clause's `if` (the rest a `cond` again); the form itself otherwise."
+  [f]
+  (cond
+    (and (is? f 'cond) (odd? (count f)) (> (count f) 2))
+    (let [[c v & more] (rest f)]
+      (if (= :else c) v (list 'if c v (if (seq more) (apply list 'cond more) nil))))
+    (and (is? f 'when) (= 3 (count f))) (list 'if (second f) (nth f 2) nil)
+    (and (is? f 'when-instance) (= 3 (count f))) (list 'if-instance (second f) (nth f 2) nil)
+    :else f))
+
 (defn- and-chain
   "[texts env' then pattern?] for the tests of then-branch `a` of an if whose else is `b` that repeat `b` as
-  their else: the && operands to add after the if's own test, the env of their bindings, the branch left."
+  their else: the && operands to add after the if's own test, the env of their bindings, the branch left
+  (a sub-form of `a`, with its metadata)."
   [env a b]
   (let [nb (norm-cond b)]
-    (loop [env env f (norm-cond a) texts [] pat? false]
-      (cond
-        (and (is? f 'if) (#{3 4} (count f)) (= nb (norm-cond (nth f 3 nil))) (expr-form? env (second f))
-             (not (is? (second f) 'if-instance)))
-        (recur env (nth f 2) (conj texts (ex-text env (second f) (inc P-AND))) pat?)
-        (and (is? f 'if-instance) (#{3 4} (count f)) (= nb (norm-cond (nth f 3 nil))) (vector? (second f))
-             (not (and (symbol? (first (second f))) (contains? (:locals env) (name (first (second f)))))))
-        (let [[pat y] (second f)
-              {:keys [text] env' :env} (pattern-text env pat)]
-          (recur env' (nth f 2) (conj texts (str (ex-text env y P-REL) " instanceof " text)) true))
-        :else [texts env f pat?]))))
+    (loop [env env f a texts [] pat? false]
+      (let [f (cond->if f)]
+        (cond
+          (and (is? f 'if) (#{3 4} (count f)) (= nb (norm-cond (nth f 3 nil))) (expr-form? env (second f))
+               (not (is? (second f) 'if-instance)))
+          (recur env (nth f 2) (conj texts (ex-text env (second f) (inc P-AND))) pat?)
+          (and (is? f 'if-instance) (#{3 4} (count f)) (= nb (norm-cond (nth f 3 nil))) (vector? (second f))
+               (not (and (symbol? (first (second f))) (contains? (:locals env) (name (first (second f)))))))
+          (let [[pat y] (second f)
+                {:keys [text] env' :env} (pattern-text env pat)]
+            (recur env' (nth f 2) (conj texts (str (ex-text env y P-REL) " instanceof " text)) true))
+          :else [texts env f pat?])))))
 
 (defn- if-lines [env c a b ctx]
   (if (and (#{:return :yield} ctx)
