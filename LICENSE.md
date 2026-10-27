@@ -504,6 +504,22 @@ covers what.
   (`isExpressionStatement`) and `util/GraphUtils.java` (`tarjan`): Copyright (c) Oracle and/or its
   affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below;
   each file carries the notice).
+- The native attribution's read without javac and its last declines (doc/classes/JAVA-FRONTEND-SURVEY.md,
+  "As built: JN9e"), in `arbace/repr/java/expr.ae` (a lambda's thrown types through a try statement's
+  resources, catch clauses and finally block, a call returned by a lambda its outer call checks, a
+  type variable named as a qualifier, a multi-catch parameter's intersection lub), `overload.ae` (an
+  intersection site's non-public members), `decls.ae` (a package's top-level class names, a record
+  accessor's deprecation), `attr.ae` (a record component's annotations taken off its field) and
+  `model.ae` (a `var` local's constant): Arbace forms reimplementing, for the native parser's trees,
+  https://github.com/openjdk/jdk26u at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/`'s
+  `comp/Flow.java` (`FlowAnalyzer.visitTry`, `visitThrow`'s precise rethrow), `comp/Check.java`
+  (`validateAnnotation`'s record members, `getApplicableTargets`, `subset`, `incl`, `intersect`),
+  `code/ClassFinder.java` (`fillIn`, `includeClassFile`), `code/Types.java` (`makeIntersectionType`),
+  `code/Symbol.java` (`isInheritedIn`, `packge`), `comp/Attr.java` (`visitIdent`, `visitTypeUnion`,
+  `visitVarDef`'s lazy constant, `attribLazyConstantValue`), `comp/TypeEnter.java` (the record
+  members' original annotations) and `comp/MemberEnter.java` (`handleDeprecatedAnnotations`):
+  Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
+  Classpath Exception (text below; each file carries the notice).
 - `decodeUTF16` and `encodeUTF16` in `go/arbace/jrt/codec.ae`, and `indent`, `stripIndent` and
   `translateEscapes` in `go/arbace/jrt/string.ae`: jrt's hand-written Go forms following the code
   of https://github.com/openjdk/jdk26u at `baf63fb`
