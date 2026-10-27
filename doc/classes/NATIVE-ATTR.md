@@ -212,6 +212,13 @@ when an inference size limit fired.
 A read without javac is not checked fact by fact (there is no javac answer to compare with): its check
 is the forms. attr-check is what checks the facts; the two are run on the same tool.
 
+## What it assumes
+
+The provider answers as javac does for code that compiles: javac's errors are not ported (JFS105 (a),
+JFS114 (a), JFS127). On code javac rejects, a read beside javac shows it (javac's errors in the run's
+report); a read without javac may convert it without a word, unless the parse fails (a fallback) or an
+answer it needs is not defined (a decline, hence a fallback). The vendoring tools' sources compile.
+
 ## Tracing
 
 `REPR_JAVA_INFER_TRACE=1` prints the inference's steps (bounds, errors), a cycle's stack and a failed
