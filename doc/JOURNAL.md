@@ -66,3 +66,8 @@ git history:
   `tamago-vendor`, `box-vendor`, `net-check`, `bin/lib/{store,tls}-checks.bash`), `repr-haskell` and
   `repr-rust` with their lib files (their checks need KVM or the host's GHC and rustc); `tools/rsdump/rsdump.rs`
   is Rust source.
+- Corrected (the user, the same day): the parked sub-projects' scripts are swept too, a fourth batch
+  (`sweep-parked`, on Sonnet): the box's 11 files and repr/haskell's and repr/rust's 5, checked where the
+  host can run them (KVM tests, the box's smoke test and suite, `bin/tamago-vendor verify`, `bin/repr-haskell
+  test`, `bin/repr-rust test`), the rest by syntax (the box's rebuild, the arm64 VM, the Mac bundle).
+  `tools/rsdump/rsdump.rs`'s `<(` is Rust's syntax, not a process substitution.
