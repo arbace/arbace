@@ -819,7 +819,7 @@ passing, by class (`bin/goi divergences --aot`, 7 classes):
 | gc's own errors no longer pass the test | design | 4 | GR7b |
 | positions mode `:lines` does not keep: a call split over lines (`devirtualization_nil_panics`, `issue29504`), `//line` (`issue22662`) | design | 3 | RPS17 (a) |
 | runs of the go command (`issue21317`, `linkobj`) and `runtime.GOROOT` under `-trimpath` (`winbatch`) | design | 3 | §1.1, GR4 (goi's class) |
-| the printer refusing the forms of invalid programs (`ddd1`, `bug217`, `makenew`) | deferred | 3 | **pending** (RPS32) |
+| the printer refusing the forms of invalid programs (`ddd1`, `bug217`, `makenew`) | deferred | 3 | done (RPS32 (a), "As built: v2 small leftovers A") |
 | the forms of invalid programs that say another program (`return.go`: a final expression statement printed as a return) | design | 1 | GC49 (goi's class) |
 | go build's `-complete` (`issue9608`: a bodiless function in a package without assembly, eliminated as dead code under the driver's compile) | design | 1 | **pending** (RPS31) |
 
@@ -1317,6 +1317,42 @@ the parked sub-projects' steps out of it (the box, tamago/, the toolchain's form
 repr/rust: the user, 2026-10-26); the fixpoint and the seed `b4ac198d` verified (stage 0 = G1 = G2 = G3 =
 `45df0046`). What comes next: the scripts' sweep, then `arbace-reaps-3-crops-v2` (the efficient gate,
 REAP's small and medium leftovers), then C23 (doc/AGENDA.md).
+
+## As built: v2 small leftovers A (2026-10-27)
+
+Branch `v2-small-a`, from main `2e8629c7`, for `arbace-reaps-3-crops-v2`: four of the user's decided leftovers.
+
+- *RPS32 (a), the printer*: `arbace/repr/go/print_code.ae` prints as written what it refused: `make` and `new`
+  with no argument, with a type alone or with more than the type argument (`new(int, 2)`), and a spread in them
+  (`new(int...)`, `make([]byte, n...)`; `spread-or`), and a method without a receiver or with several
+  (`func () x()`, `func (a b, c d) x()`: in mode `:full` the parameters named before the receiver list's closing
+  parenthesis are its entries). The three programs print byte for byte as the originals (`ddd1`, `makenew`,
+  `bug217`). `bin/goi check --aot --only` on them: 3 pass (were known); their lines of
+  `test/goi/check-aot-linux-amd64.edn` re-recorded by hand (`--record` with `--only` writes only the selection),
+  `check-aot-known.edn` loses the three, the class `:printer-invalid` of `test/goi/divergences-aot.edn` is
+  removed (empty). Go AOT: by design 149 cases in 6 classes, deferred 0 (were deferred 3 in 1 class); `bin/repr-go
+  roundtrip amd64` (no regressions against `roundtrip-amd64.edn`) and `--text amd64` (1705 of 1708 identical, 3 known)
+  unchanged.
+- *RPS102 (b), the fallback gone*: `build_program` stops when `report.edn`'s `:refused-program` is not empty, printing
+  `PACKAGE: the checker's first error`; the embedding of `go/` (`--resources DIR/go=go`), its c2j units and the warning
+  are removed. The test of the fallback becomes `test/programs-fail/bad-go` (a package returning a string as an `int`,
+  `expected-error` holding the message): `--check` builds it, requires the failure and the message (`bin/arbace-go
+  --build-program --check bad-go` alone; with no names all of `test/programs` and then `test/programs-fail`); the
+  essential gate's `programs` step runs `mixed bad-go` (the failure is at goi's table, before j2g: seconds).
+- *RPS95 (b), stage 0 as a base*: `bin/seed --build` (without `--no-aot`) has stage 0 compile the checkout's namespaces
+  into `target/seed/aot` with `aot.key` and `aot.runtime` (`bin/arbace-go --compile-aot HOST OUT`, `seed_aot`: when
+  stage 0's runtime is the checkout's, else nothing and a note; 173 s, 130 sources, 11,980 classes); `program_base`
+  takes `target/seed` last in its list, and when the sources of `arbace/` moved but the runtime did not it compiles
+  stage 0's again (`seed_aot`) before falling back to a `--build`. A fresh clone with stage 0 only builds a program
+  without a `--build`: the five samples and `bad-go` (`--build-program --check`, 11 of 11) on stage 0 as the base,
+  no `target/arbace-go`. The gate's stage 0 step runs `--no-aot` (its `--gate-build` makes its own).
+- *JCS76 (a), `aot.runtime`*: `aot_key_write` writes the runtime key beside `aot.key`; `--gate-build` copies it into the
+  cache; `bin/java-check`'s `aot_fresh` reads it first and falls back to the executable's runtime for a tree made
+  before.
+
+Shipped code (`arbace/`): `arbace/repr/go/print_code.ae` only (a tool, run from the checkout over the embedded copy; no
+runtime, no `go/`, `overlay/` or `jdk/` change), so the runtime key is unchanged (`55012cc3...`) and the re-seed may
+carry it. The gate's cache key moves with the scripts.
 
 ## 9. Risks
 

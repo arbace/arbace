@@ -345,14 +345,18 @@ DIR/
   of its own, its path's first element, printed under `_modules/` and required by a `replace` in
   `go.mod` (`arbace.build.go`). A namespace requiring `go.mixed.caps` then gets the table's namespace
   (`RT.load` asks the table first), whose vars call the compiled Go functions: goi interprets
-  nothing of it. A package that does not check for the table is left out of it (`report.edn`'s
-  `:refused-program`, a warning at build time): `go/` is then embedded under `go/` (`--resources
-  DIR/go=go`) and goi interprets that package, as REAP7 built every one (RPS92 (a), the fallback).
+  nothing of it. A package goi's checker refuses for the table is a build error, as `go build` refuses a package that does
+  not compile (RPS102 (b); until the v2 milestone `go/` was embedded and goi interpreted the package):
+  the build stops with the checker's message. `test/programs-fail/bad-go` is the test of it
+  (`--check` and the essential gate build it and require the message in `expected-error`).
   A Go program (no entry) is built by `arbace.build.go` alone: no Arbace runtime, a few MB.
 - **The base.** The shipped build whose compiled namespaces (`aot/`) the program reuses:
   `ARBACE_PROGRAM_BASE`, else `target/arbace-go`, else the gate's cache `.tmp/arbace-go-gate/amd64`,
-  the first whose `aot.key` is the checkout's (`aot_key`: the runtime key and Arbace's sources) and
-  whose executable's runtime is the checkout's; else a `--build` for the host's architecture first.
+  then stage 0, `target/seed` (`bin/seed --build` compiles the checkout's namespaces with it into `aot/`,
+  `aot.key` and `aot.runtime` when its runtime is the checkout's; `--no-aot` skips; a program build
+  compiles them again when the sources moved and the runtime did not, RPS95 (b)), the first whose
+  `aot.key` is the checkout's (`aot_key`: the runtime key and Arbace's sources) and whose
+  executable's runtime is the checkout's; else a `--build` for the host's architecture first.
   Its executable compiles the namespaces and runs j2g and repr/go (`J2G_GO_EXE`, `REPR_GO_EXE`), as
   the compiled suite's does; j2g waits for `J2G_LOCK` when it is set (`bin/j2g`).
 - **The output.** `target/arbace-go/programs/NAME/ARCH/NAME` (and `-o OUT`), stripped (`-s -w`,

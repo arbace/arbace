@@ -74,9 +74,15 @@
 #                                      and link them again with it
 #        bin/arbace-go --gate-build    the essential bin/gate's builds: the executable and the
 #                                      test build (amd64), cached in .tmp/arbace-go-gate/amd64/
-#                                      (arbace, arbace-tests; and the compiled namespaces, aot/
-#                                      and aot.key, since REAP8) and built again only when what
+#                                      (arbace, arbace-tests; and the compiled namespaces, aot/,
+#                                      aot.key and aot.runtime, since REAP8) and built again only when what
 #                                      they are built from changed (gate_key), by stage 0
+#        bin/arbace-go --compile-aot HOST OUT
+#                                      the checkout's namespaces compiled by HOST (an executable
+#                                      of the checkout's runtime) into OUT/aot, with OUT/aot.key
+#                                      and OUT/aot.runtime: stage 0's, made by bin/seed --build
+#                                      (RPS95 (b)), so that --build-program has a base without a
+#                                      --build; status 1: HOST's runtime is not the checkout's
 #        bin/arbace-go --gate          --gate-build, then --smoke on the cached executable
 #        bin/arbace-go --smoke         the smoke test: -e, a script, the REPL on stdin, an
 #                                      error's exit status, for each of $ARBACE_GO_ARCHES; on
@@ -287,8 +293,27 @@ aot_key() {
      | sha256sum | cut -c1-64)
 }
 
-# aot_key_write DIR: records the key of the tree DIR just made, in DIR.key
-aot_key_write() { aot_key > "$1.key"; }
+# aot_key_write DIR: records the key of the tree DIR just made, in DIR.key, and beside it the runtime
+# key it was made with, in DIR.runtime (JCS76 (a): aot_key hashes the runtime with Arbace's
+# sources, so it cannot be read back; a tree copied without its executable still names its
+# runtime, which bin/java-check's compiled level reads)
+aot_key_write() { aot_key > "$1.key"; arbace_runtime_key "$root" > "$1.runtime"; }
+
+# seed_aot HOST OUT: stage 0's compiled namespaces (RPS95 (b)): HOST, an executable of the
+# checkout's runtime, compiles the checkout's namespaces into OUT/aot and records OUT/aot.key and
+# OUT/aot.runtime, so that OUT, bin/seed --build's directory, serves --build-program as a base
+# (program_base). Status 1: HOST's runtime is not the checkout's (nothing made); 2: the compiling
+# failed. One at a time (the log is shared)
+seed_aot() {
+  local host=$1 out=$2 variant=-seed
+  mkdir -p "$dir" "$root/.tmp"
+  (
+    flock 9
+    host_compiles "$host" 2>&1 || exit 1
+    host_compile "$host" "$out/aot" || exit 2
+    aot_key_write "$out/aot"
+  ) 9> "$root/.tmp/seed-aot.lock"
+}
 
 # aot_reusable HOST: does the shipped build's tree ($dir/aot) hold what the test build would
 # compile (its key the checkout's)? Not when HOST has no id spaces (a program older than S6:
@@ -504,7 +529,8 @@ build_java() {
 #   java/        Java forms (doc/classes/SPEC.md §9.2: a package's ns file, its classes' files),
 #                translated by j2g: classes of the program, which namespaces import
 #   go/          Go forms (doc/go/SPEC.md §4.1): with :main or :main-class, namespaces of Go forms
-#                (go.P) embedded as go/..., interpreted by goi at run time; without, a Go program
+#                (go.P) compiled through a goi table of the program's own (a package goi's checker refuses is a
+#                build error); without, a Go program
 #                built by arbace.build.go alone
 #   runs/        the program's runs for --check (bin/build-go test's format)
 # The executable: target/arbace-go/programs/NAME/ARCH/NAME (-o OUT: there too), cached by the key
@@ -529,13 +555,14 @@ program_edn() {
 # program_base: the shipped build whose compiled namespaces the program reuses (sets base_exe,
 # base_aot): ARBACE_PROGRAM_BASE (a --build's directory, or a directory holding arbace, aot/ and
 # aot.key, as the gate's cache), else target/arbace-go, else the gate's cache .tmp/arbace-go-gate/
-# amd64, the first whose compiled namespaces' key is the checkout's (aot_key: the runtime and
-# Arbace's sources) and whose executable's runtime is the checkout's; else a --build for the
-# host's architecture first
+# amd64, then stage 0, target/seed (bin/seed --build keeps its compiled namespaces, RPS95 (b)), the
+# first whose compiled namespaces' key is the checkout's (aot_key: the runtime and Arbace's
+# sources) and whose executable's runtime is the checkout's; else stage 0's compiled again when its
+# runtime is the checkout's (seed_aot), else a --build for the host's architecture first
 program_base() {
   local k rk c e
   k=$(aot_key); rk=$(arbace_runtime_key "$root")
-  for c in ${ARBACE_PROGRAM_BASE:-} "$dir" "$root/.tmp/arbace-go-gate/amd64"; do
+  for c in ${ARBACE_PROGRAM_BASE:-} "$dir" "$root/.tmp/arbace-go-gate/amd64" "$root/target/seed"; do
     e=$c/$(host_arch)/arbace; [ -x "$e" ] || e=$c/arbace
     [ -x "$e" ] && [ -f "$c/aot/packages.edn" ] && [ -f "$c/aot.key" ] && [ "$(cat "$c/aot.key")" = "$k" ] || continue
     mkdir -p "$programs"
@@ -544,6 +571,16 @@ program_base() {
     echo "== the shipped build's compiled namespaces: $base_aot (key ${k:0:12}; $base_exe)" >&2
     return 0
   done
+  # stage 0 (bin/seed --build) of the checkout's runtime, its compiled namespaces made before the
+  # sources of arbace/ changed or never (RPS95 (b)): compiled again by it, no --build first
+  e=$root/target/seed/$(host_arch)/arbace
+  if [ -x "$e" ] && [ "$(env -u ARBACE_NO_AOT "$e" -e '(print (:runtime *arbace-version*))' 2> "$programs/.runtime.err")" = "$rk" ]; then
+    echo "== stage 0's compiled namespaces made (its runtime is the checkout's; $root/target/seed/aot)" >&2
+    if (seed_aot "$e" "$root/target/seed") >&2; then
+      base_exe=$e base_aot=$root/target/seed/aot
+      return 0
+    fi
+  fi
   echo "== no shipped build of the checkout's compiled namespaces (key ${k:0:12}): --build for $(host_arch) first" >&2
   (arches=$(host_arch) build) || return 1
   base_exe=$dir/$(host_arch)/arbace base_aot=$dir/aot
@@ -622,9 +659,9 @@ build_program() {
   fi
   # goi's table: with go/, a table of the program's own (RPS92 (b)): its Go packages listed with
   # the list's, compiled into the program (printed into the module by bin/build-go --root DIR); a
-  # package that does not check for the table is left to goi (embedded as go/..., interpreted, as
-  # REAP7 built them: RPS92 (a), the fallback)
-  local gotable=$dir/gotable configs="" goi_interp=
+  # package that does not check for the table is a build error (RPS102 (b); the interpreted
+  # fallback of RPS92 (a) is gone)
+  local gotable=$dir/gotable configs="" goi_refused=
   if [ -d "$src/go" ]; then
     gotable=$w/gotable
     for a in ${parch//,/ }; do configs+=${configs:+,}linux/$a; done
@@ -635,13 +672,16 @@ build_program() {
     (cd "$root" && GOI_EXE=$base_exe bin/goi table --out "$gotable" --configs "$configs" \
        --program-list "$w/gotable-program.edn" --program-root "$src") > "$w/gotable.log" 2>&1 \
       || { tail -20 "$w/gotable.log" >&2; echo "arbace-go: $name: goi's table failed ($w/gotable.log)" >&2; return 1; }
-    goi_interp=$(env -u ARBACE_NO_AOT "$base_exe" -e "(apply print (keys (:refused-program (read-string (slurp \"$gotable/report.edn\")))))" 2> "$w/gotable-report.err") \
+    # a package goi's checker refuses for the table is a build error, as `go build` refuses a
+    # package that does not compile (RPS102 (b)); the checker's message, the first error
+    goi_refused=$(env -u ARBACE_NO_AOT "$base_exe" -e "(doseq [[p w] (:refused-program (read-string (slurp \"$gotable/report.edn\")))] (println (str p \": \" w)))" 2> "$w/gotable-report.err") \
       || { cat "$w/gotable-report.err" >&2; return 1; }
-    if [ -n "$goi_interp" ]; then
-      echo "arbace-go: $name: warning: Go packages that do not check for the table, interpreted by goi: $goi_interp ($gotable/report.edn)" >&2
-    else
-      echo "   the Go packages compiled: $(sed 's/^{:packages \[//; s/\]}$//' "$w/gotable-program.edn")" >&2
+    if [ -n "$goi_refused" ]; then
+      printf '%s\n' "$goi_refused" >&2
+      echo "arbace-go: $name: the Go packages above do not check (goi's checker, as go build's compiler would refuse them; $gotable/report.edn)" >&2
+      return 1
     fi
+    echo "   the Go packages compiled: $(sed 's/^{:packages \[//; s/\]}$//' "$w/gotable-program.edn")" >&2
   else
     echo "== bin/goi table (on $base_exe)" >&2
     (cd "$root" && GOI_EXE=$base_exe bin/goi table --out "$gotable") > "$w/gotable.log" 2>&1 \
@@ -665,17 +705,16 @@ build_program() {
   fi
   if [ -d "$src/go" ]; then
     go_root=(--root "$src")
-    [ -z "$goi_interp" ] || j2g_in+=(--resources "$src/go=go")
   fi
   # java/'s package namespaces embedded as no-op loaders (RPS93 (c))
   [ ! -d "$src/java" ] || j2g_in+=(--java-namespaces "$src/java")
   if [ -n "$ssrc" ]; then
-    # the program's namespaces (src/'s, and go/'s that they load when goi interprets them)
+    # the program's namespaces (src/'s)
     # compiled by c2j on the base's executable, as bin/arbace-go --build-java compiles repr/java's
     # reader: the runtime's from their compiled loaders, the program's sources
     # (ARBACE_PATH_FIRST) recorded as embedded ones, java/'s packages loaded first (their
-    # classes, which the namespaces import); only the program's units compiled (src/'s, and
-    # go/'s interpreted ones); a namespace of src/ requiring a Java package's namespace warned
+    # classes, which the namespaces import); only the program's units compiled (src/'s);
+    # a namespace of src/ requiring a Java package's namespace warned
     # of (RPS93: a no-op loader in the program)
     t1=$(date +%s)
     echo "== the program's namespaces compiled (arbace.c2j, on $base_exe)" >&2
@@ -683,8 +722,7 @@ build_program() {
             | sed 's|^\./||; s/\.ae$//; s|/|.|g; s/_/-/g' | tr '\n' ' ')
     jnss=$( [ -d "$src/java" ] && cd "$src/java" && grep -rlE '^\(ns( |$)' --include='*.ae' . | LC_ALL=C sort \
             | sed 's|^\./||; s/\.ae$//; s|/|.|g; s/_/-/g' | tr '\n' ' ')
-    usrc=$( { (cd "$ssrc" && find . -type f -name '*.ae') | sed 's|^\./||'
-              [ ! -d "$src/go" ] || [ -z "$goi_interp" ] || (cd "$src/go" && find . -type f -name '*.ae') | sed 's|^\./|go/|'; } \
+    usrc=$( (cd "$ssrc" && find . -type f -name '*.ae') | sed 's|^\./||' \
             | LC_ALL=C sort | sed 's/.*/"&"/' | tr '\n' ' ')
     printf '(doseq [n (quote [%s])] (require n))
 (let [jns (set (quote [%s]))
@@ -767,7 +805,22 @@ check_programs() {
   out_dir=$root/.tmp/programs-check
   rm -rf "$out_dir"; mkdir -p "$out_dir"
   : > "$out_dir/empty.in"
+  # the samples that must not build (test/programs-fail, RPS102 (b)): all of them with every sample
+  [ $# -gt 0 ] || names+=($(cd "$root/test/programs-fail" 2>"$discard" && ls -d */ 2>"$discard" | tr -d /))
   for p in "${names[@]}"; do
+    if [ ! -d "$pdir/$p" ] && [ -d "$root/test/programs-fail/$p" ]; then
+      # a build error expected: the build fails and its messages hold expected-error's text
+      echo "== $p (must not build)"
+      total=$((total+1))
+      if build_program "$root/test/programs-fail/$p" > "$out_dir/$p.build" 2> "$out_dir/$p.build.log"; then
+        echo "  FAIL $p: built, a build error was expected"; fails=$((fails+1))
+      elif grep -qF -f "$root/test/programs-fail/$p/expected-error" "$out_dir/$p.build.log"; then
+        echo "  ok   $p: the build failed as expected: $(sed -n 1p "$root/test/programs-fail/$p/expected-error")"
+      else
+        tail -20 "$out_dir/$p.build.log"; echo "  FAIL $p: the build failed, but not with the expected error ($out_dir/$p.build.log)"; fails=$((fails+1))
+      fi
+      continue
+    fi
     [ -d "$pdir/$p" ] || { echo "arbace-go --build-program --check: no sample $pdir/$p" >&2; return 2; }
     echo "== $p"
     if ! build_program "$pdir/$p" > "$out_dir/$p.build" 2> "$out_dir/$p.build.log"; then
@@ -1047,7 +1100,7 @@ gate_build() {
     mkdir -p "$cache/amd64"
     cp "$dir/amd64/arbace" "$dir/amd64/arbace-tests" "$cache/amd64/"
     # the compiled namespaces they hold (REAP8: bin/java-check --essential-compiled's program)
-    cp -r "$dir/aot" "$cache/amd64/aot" && cp "$dir/aot.key" "$cache/amd64/aot.key"
+    cp -r "$dir/aot" "$cache/amd64/aot" && cp "$dir/aot.key" "$cache/amd64/aot.key" && cp "$dir/aot.runtime" "$cache/amd64/aot.runtime"
     echo "$key" > "$cache/key"
     echo "   built in $(since "$t0")"
   fi
@@ -1226,6 +1279,10 @@ case ${1:-} in
   --build-program)
     shift
     if [ "${1:-}" = --check ]; then shift; check_programs "$@"; else build_program "$@"; fi ;;
+  --compile-aot)
+    # --compile-aot HOST OUT: stage 0's compiled namespaces (seed_aot; bin/seed --build's)
+    [ $# = 3 ] || { echo "usage: bin/arbace-go --compile-aot HOST OUT" >&2; exit 2; }
+    seed_aot "$2" "$3" ;;
   --image) image ;;
   --smoke)
     if [ "${2:-}" = --box ]; then box_smoke; exit; fi

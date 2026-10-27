@@ -49,8 +49,8 @@ program: ## a user's program of DIR=...: its namespaces (.ae, and .clj, .cljc tr
 	bin/arbace-go --build-program $(DIR)
 programs-check: ## the samples of test/programs (Clojure, Java forms, Go forms, mixed) built and run against their runs, as bin/gate --full (bin/arbace-go --build-program --check)
 	bin/arbace-go --build-program --check
-programs-essential: ## the mixed sample alone, as bin/gate runs it (bin/arbace-go --build-program --check mixed)
-	bin/arbace-go --build-program --check mixed
+programs-essential: ## the mixed sample and the one that must not build, as bin/gate runs them (bin/arbace-go --build-program --check mixed bad-go)
+	bin/arbace-go --build-program --check mixed bad-go
 goi-table: ## goi's table of compiled packages and its digests (bin/goi table; the build runs it)
 	bin/goi table
 goi-table-size: ## the table's size in the executable, the invokers' part (bin/goi table --size; after `make build`)
