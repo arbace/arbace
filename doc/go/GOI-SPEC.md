@@ -4818,3 +4818,8 @@ The user decided GC166-GC174 as built: GC166 (a) (go/types' approach through GP4
 GC167 (a) (the forms directory; store entries when a program in the box embeds), GC168 (a),
 GC169 (a), GC170 (a), GC171 (a), GC172 (a), GC173 (a), GC174 (a) (the essential subset unchanged,
 the box's check at the next `--full`).
+
+## REAP v1 (2026-10-27)
+
+This language's cells of the REAP matrix at the tag `arbace-reaps-3-crops-v1`, with every class by name, are
+in doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences".

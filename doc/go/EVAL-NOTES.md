@@ -1527,3 +1527,8 @@ holds it (the emit methods each evaluation mirrors), `clojure.main`'s error tria
 (`arbace/main.ae`); openjdk/jdk26u `src/java.base/share/classes/java/util/GregorianCalendar.java`
 (the default cutover) and HotSpot's `AbstractMethodError` and checkcast messages (from the JVM);
 H. Hinnant, "chrono-Compatible Low-Level Date Algorithms" (civil-from-days, days-from-civil).
+
+## REAP v1 (2026-10-27)
+
+This language's cells of the REAP matrix at the tag `arbace-reaps-3-crops-v1`, with every class by name, are
+in doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences".

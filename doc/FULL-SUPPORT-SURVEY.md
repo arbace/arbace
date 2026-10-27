@@ -1164,6 +1164,160 @@ then (b) (a refused package a build error), RPS103 (b) (a `--full` sample whose 
 Arbace fn through `arbace.Invoke`), RPS104 (a), RPS105 (a), RPS106 (a), RPS107 (a), RPS108 (a), RPS109 (a)
 (the second batched re-seed).
 
+## REAP v1's divergences (2026-10-27, the tag `arbace-reaps-3-crops-v1`)
+
+The milestone's record: read, eval, AOT and print for Clojure (`98d735fab02f`, 1.13.0-master-SNAPSHOT),
+Java 26 (jdk26u `baf63fbe`) and Go 1.27.1, on the host (linux/amd64), forms only. The rule (goi's v1
+rule): none fails, every non-pass in a recorded class, by design or deferred and named, each citing where
+it was decided. `bin/reap` judges the matrix from the checks' recorded results (`test/reap/cells.edn`,
+`test/reap/main.ae`); its output at the tag: 12 of 12 cells checked, 0 problems, no class pending.
+
+| | read | eval | AOT | print |
+|---|---|---|---|---|
+| Clojure | 908 / 2 / 0 | 21,049 / 80 / 5 | 804 / 28 / 6 | 1,031+ / 0 / 0 |
+| Java | 7,738 / 3 / 93 | 1,683 / 325 / 1,312 | 1,869 / 181 / 1,270 | 2,584 / 637 / 99 |
+| Go | 12,158 / 204 / 0 | 1,618 / 219 / 0 | 1,685 / 149 / 3 | 2,584+ / 141 / 0 |
+
+Pass / by design / deferred, summed over each cell's sources (a cell's checks: Clojure's suite and its
+compiled suite, the oracle, diffcheck's pairs, repr/clojure's rules; Java's `bin/java-check` levels over
+3,320 jtreg and JLS tests and 1,194 golden-diagnostics tests; Go's `bin/goi check` and `--aot` over
+`$GOROOT/test`'s 1,837 programs, repr/go's native reader and round trips). The classes, cell by cell
+(the classes files are the authority; the counts are cases, a case counted once per source naming it):
+
+- **Clojure read**: by design 2 cases in 1 classes (`one-way-rules`); deferred 0 in 0 classes.
+- **Clojure eval**: by design 80 cases in 11 classes (`class-files`, `javadoc-url`, `out-for-good`, `q1-boxed-prims`, `identity-hash`, `locales`, `main-since-v4`, `method-invoke-message`, `security-manager`, `security-providers`, `serialization`); deferred 5 in 4 classes:
+  - `fiprims` (2): FIPrims through interfaces definterface makes at run time
+  - `seq-and-transducer` (1): speed: transducers' seq-and-transducer (200,000 test.check trials)
+  - `trace-lines` (1): the evaluator's stack traces: lines of field accesses, assignments, IFn casts
+  - `xml-stream` (1): javax.xml.stream (reflect's invoke-checks-accessibility)
+- **Clojure AOT**: by design 38 cases in 9 classes (`class-files`, `javadoc-url`, `out-for-good`, `q1-evaluated`, `compiled-loader-line`, `identity-hash`, `interned-at-load`, `q1-compiled-prims`, `shared-symbols`); deferred 6 in 4 classes:
+  - `fiprims` (2): FIPrims through interfaces definterface makes at run time
+  - `fn-fields` (2): a compiled fn's closed-over values are its code object's fields, not its class's
+  - `compiled-trace-lines` (1): compiled frames' lines: an unboxed field access or method call, field assignments
+  - `xml-stream` (1): javax.xml.stream (reflect's invoke-checks-accessibility)
+- **Java read**: by design 3 cases in 1 classes (`classloading`); deferred 93 in 7 classes:
+  - `diag-release` (44): javac on Arbace: --release N, any N (no ct.sym in its platform)
+  - `diag-processors` (25): javac on Arbace: annotation processors from class files ("Could not instantiate an instance of processor", proc.processor.cant.instantiate)
+  - `diag-doclint` (8): javac on Arbace: -Xdoclint (compiler.warn.doclint.not.available)
+  - `diag-file-manager` (8): javac on Arbace's file manager (jdk.internal.jrt.javac.FileManager, not javac's BaseFileManager): file names in full in raw diagnostics, no source.no.system.modules.path warning for -source N, -source 8's platform classes, a module-info's error twice
+  - `diag-command-line` (4): javac on Arbace's command line (jdk.internal.jrt.javac.Main, javac's API underneath, not javac's Main): -XDexpectKeys, the error count after a plug-in error, -encoding ascii, --module-path a jar
+  - `read-platform` (3): javac on Arbace: options its platform lacks (--release N without ct.sym, the charset alias utf8)
+  - `diag-closed-world` (1): javac on Arbace: a JDK class outside javac's closed world reached (java.lang.annotation.Annotation, java.lang.Module): the compiler's crash
+- **Java eval**: by design 325 cases in 11 classes (`classfile`, `classloading`, `desktop`, `flaky-timeout`, `foreign`, `jdi`, `serialization`, `smartcardio`, `speed`, `xml`, `zip`); deferred 1314 in 45 classes:
+  - `security` (361): security (KeyStore, certificates, providers, permissions, key generators)
+  - `net` (232): networking (datagrams, multicast, NIO channels and selectors, URL protocols, HTTP client, network interfaces, RMI)
+  - `interp-extends` (105): a superclass the Java forms cannot extend yet (Thread, ArrayList, AtomicReference, streams...)
+  - `nio` (93): NIO buffers, files and charsets' coders (direct buffers, FileChannel, FileTime, Charset's encoders)
+  - `reflection` (81): annotations and reflection's types and metadata (getAnnotation, getTypeParameters, generic types, Proxy, AccessFlag, isLocalClass, canonical and InnerClasses names, javac's synthetic members)
+  - `management` (65): java.lang.management, JMX
+  - `tls` (58): TLS (javax.net.ssl, javax.net socket factories, HTTPS)
+  - `interp-protected` (41): a protected or inherited member of a world class (setChanged, AQS' getState, clearError, findLoadedClass, GregorianCalendar.computeTime, a world superclass's field; since JC6 a protected constructor: AbstractList's, Calendar's, BreakIterator's)
+  - `invoke` (41): java.lang.invoke (MethodHandle, MethodHandles, CallSite, LambdaConversionException)
+  - `javac-api` (39): javac's API (com.sun.tools.javac.Main, javax.tools, com.sun.source): javac's tool, not the shipped program
+  - `logging` (28): java.util.logging, System.Logger
+  - `threads` (25): threads and concurrency's members jrt lacks (thread groups, platform threads, ForkJoinPool's, FutureTask's, Phaser's, ScopedValue, Timer)
+  - `charsets-locales` (20): charsets and locales (UTF-16LE's and UTF-32's coders, EUC-JP, US-ASCII's aliases, Lithuanian casing, number systems)
+  - `references` (16): references, finalization, collection (PhantomReference, Cleaner, runFinalization, a referent not collected)
+  - `scripting` (12): javax.script (ScriptEngineManager, ScriptEngine, Invocable)
+  - `jrt-dates` (10): jrt's dates: Date, Calendar, GregorianCalendar, TimeZone and DateFormat behaving otherwise than the JDK's (fields after getTime, far dates in UTC, zone names, week dates, the Buddhist calendar, ISO 8601 zones)
+  - `util-classes` (10): java.util and java.lang members jrt lacks: Scanner, Calendar.Builder, PropertyResourceBundle, spi.ToolProvider, String.transform, System.inheritedChannel, TypeNotPresentException
+  - `repl-sibling` (9): the REPL's model: a class of the do used before it is defined, a test's class named as a java.lang class
+  - `stack` (9): StackWalker, stack traces and their line numbers
+  - `naming` (8): JNDI (javax.naming: InitialContext, LdapName, Rdn, directory attributes)
+  - `random` (6): java.util.random (RandomGeneratorFactory and the algorithms by name)
+  - `system-properties` (6): the JVM's identifying system properties (java.version, java.vm.specification.vendor, java.runtime.version) and Runtime.Version
+  - `sql` (4): JDBC beyond the Go build's java.sql (javax.sql.rowset, java.sql.Time)
+  - `class-init` (3): class initialization of interfaces (JLS 12.4.1: an interface with default methods initialized with its implementing class, in order; NoClassDefFoundError after a failed initialization)
+  - `identity` (3): stdout prints identity hash codes or traces (Object.toString, a stack trace to stdout): the same on each side's runs, not between them
+  - `jrt-strings` (3): jrt's StringBuffer: its capacity, its synchronized methods and an append's bounds
+  - `jvm-tools` (3): a JDK tool the test runs or its jtreg actions ran: the java launcher (java.home's bin/java), a jar the jar tool made
+  - `text-data` (3): java.text's data jrt lacks: Bidi's (ICU's ubidi data), collation rules of other locales
+  - `lambda-bridges` (2): a lambda's bridges in reflection (getDeclaredMethods lists one m)
+  - `url-headers` (2): URLConnection's headers jrt answers otherwise: no MIME type (getFileNameMap has no table), no last-modified date (Date.parse is not jrt's)
+  - `interp-world-limits` (2): the interpreter's known limits: a run-time class extending java.io.StringReader, java.lang.invoke's MethodHandles
+  - `boxed-foreach` (1): for-each over an Iterable<Float> into a float with an int's arithmetic (BoxedForeach)
+  - `bridge-order` (1): a generic method's bridges with reordered bounds (ReorderedBoundsTest)
+  - `clock` (1): stdout names the run's clock (a file's last-modified time made by the run)
+  - `identity-sum` (1): stdout prints sums of identity hash codes (Test6909839's ((c) ? a : b).hashCode() totals)
+  - `interp-default-method` (1): the interpreter: a default method inherited through a superclass and an interface overriding it (B extends A implements I2, A implements I1, I2 extends I1)
+  - `interp-jls` (1): the interpreter: the JLS corpus's finding: finally's return swallowing an exception
+  - `interp-synchronized` (1): the interpreter: wait() in a synchronized method called from a thread (IllegalMonitorStateException: current thread is not owner)
+  - `interp-thread-local` (1): the interpreter: ThreadLocal.initialValue overridden by an interpreted subclass, read on another thread
+  - `jrt-io` (1): jrt's FileInputStream.skip of a negative count
+  - `jrt-math` (1): jrt's Math.pow at large exponents
+  - `jrt-streams` (1): jrt's own streams otherwise than the JDK's: a closed DataInputStream over a FileInputStream (OpsAfterClose's output 12 bytes shorter), the standard output flushed at exit (CounterOverflow: the JDK's System.out is not flushed)
+  - `local-class-names` (1): two local classes of one name in one method, one inside an anonymous class (NameCollision2)
+  - `read-failed` (1): not interpreted or compiled: the read level failed (the test's class at that level)
+  - `record-pattern-null` (1): a record pattern over a null component (DeconstructionDesugaring: MatchException wrapping a NullPointerException)
+- **Java AOT**: by design 193 cases in 10 classes (`classfile`, `classloading`, `desktop`, `flaky-timeout`, `foreign`, `serialization`, `speed`, `xml`, `zip`, `jforms-corpus-own`); deferred 1274 in 51 classes:
+  - `j2g-unresolved` (305): j2g: a class whose analysis stops at a type the world does not have (Cannot convert ... of type :null to, an empty message): the world, not the analysis
+  - `security` (242): security (KeyStore, certificates, providers, permissions, key generators)
+  - `net` (156): networking (datagrams, multicast, NIO channels and selectors, URL protocols, HTTP client, network interfaces, RMI)
+  - `j2g-world` (95): j2g: a JDK class outside the closed world named by the test whose package the refusal does not name (a java.lang class, which no import names; Unable to resolve, Unknown type: the forms, jrt and the edge do not have it)
+  - `nio` (88): NIO buffers, files and charsets' coders (direct buffers, FileChannel, FileTime, Charset's encoders)
+  - `reflection` (72): annotations and reflection's types and metadata (getAnnotation, getTypeParameters, generic types, Proxy, AccessFlag, isLocalClass, canonical and InnerClasses names, javac's synthetic members)
+  - `management` (45): java.lang.management, JMX
+  - `invoke` (36): java.lang.invoke (MethodHandle, MethodHandles, CallSite, LambdaConversionException)
+  - `j2g-edge` (30): j2g: a JDK class's facts the edge does not record (generic signatures, enum constants of Thread$State, AtomicReference...)
+  - `charsets-locales` (22): charsets and locales (UTF-16LE's and UTF-32's coders, EUC-JP, US-ASCII's aliases, Lithuanian casing, number systems)
+  - `threads` (21): threads and concurrency's members jrt lacks (thread groups, platform threads, ForkJoinPool's, FutureTask's, Phaser's, ScopedValue, Timer)
+  - `javac-api` (17): javac's API (com.sun.tools.javac.Main, javax.tools, com.sun.source): javac's tool, not the shipped program
+  - `logging` (16): java.util.logging, System.Logger
+  - `j2g-reflection` (15): j2g's reflection: members of the program's own classes that are not public (getDeclaredField of a private field, newInstance of a nested class, strictfp and private methods, a nested enum's static flag, the declared members' count and order)
+  - `jrt-dates` (13): jrt's dates: Date, Calendar, GregorianCalendar, TimeZone and DateFormat behaving otherwise than the JDK's (fields after getTime, far dates in UTC, zone names, week dates, the Buddhist calendar, ISO 8601 zones)
+  - `references` (9): references, finalization, collection (PhantomReference, Cleaner, runFinalization, a referent not collected)
+  - `interp-protected` (8): a protected or inherited member of a world class (setChanged, AQS' getState, clearError, findLoadedClass, GregorianCalendar.computeTime, a world superclass's field; since JC6 a protected constructor: AbstractList's, Calendar's, BreakIterator's)
+  - `stack` (8): StackWalker, stack traces and their line numbers
+  - `j2g-findings` (7): j2g's translation found wrong: an intersection's lambda cast (IntersectionOrderTest2), javac's synthetic null checks (TestSyntheticNullChecks), a generic record's deconstruction (GenericRecordDeconstructionPattern), a deconstruction's exception (TypedDeconstructionPatternExc), CopyMethods' class initialization, a store moved out of a loop (TestMoveStoresOutOfLoops)
+  - `random` (6): java.util.random (RandomGeneratorFactory and the algorithms by name)
+  - `system-properties` (6): the JVM's identifying system properties (java.version, java.vm.specification.vendor, java.runtime.version) and Runtime.Version
+  - `util-classes` (4): java.util and java.lang members jrt lacks: Scanner, Calendar.Builder, PropertyResourceBundle, spi.ToolProvider, String.transform, System.inheritedChannel, TypeNotPresentException
+  - `jforms-namespace-body` (4): diffcheck's exclusions: Clojure in a class body naming the namespace's vars or a deftype made in the body
+  - `class-init` (3): class initialization of interfaces (JLS 12.4.1: an interface with default methods initialized with its implementing class, in order; NoClassDefFoundError after a failed initialization)
+  - `identity` (3): stdout prints identity hash codes or traces (Object.toString, a stack trace to stdout): the same on each side's runs, not between them
+  - `j2g-outer-super` (3): j2g: Outer.super.m() (javac's access$N01 with an invokespecial)
+  - `jrt-strings` (3): jrt's StringBuffer: its capacity, its synchronized methods and an append's bounds
+  - `jvm-tools` (3): a JDK tool the test runs or its jtreg actions ran: the java launcher (java.home's bin/java), a jar the jar tool made
+  - `text-data` (3): java.text's data jrt lacks: Bidi's (ICU's ubidi data), collation rules of other locales
+  - `identity-sum` (2): stdout prints sums of identity hash codes (Test6909839's ((c) ? a : b).hashCode() totals)
+  - `j2g-go` (2): j2g: Go that does not compile (a local class's captured values missing from its constructor call, a captured variable undefined in a lambda or a nested local class, an any returned as int32, finalize of a class that does not declare it, a member through a null constant)
+  - `j2g-pattern-label` (2): j2g: a constant label in a pattern switch (case E.A on another type, Java 21)
+  - `j2g-pp-override` (2): j2g: a package-private method redeclared by a class of another package (Go would override it)
+  - `jrt-streams` (2): jrt's own streams otherwise than the JDK's: a closed DataInputStream over a FileInputStream (OpsAfterClose's output 12 bytes shorter), the standard output flushed at exit (CounterOverflow: the JDK's System.out is not flushed)
+  - `lambda-bridges` (2): a lambda's bridges in reflection (getDeclaredMethods lists one m)
+  - `thread-order` (2): the order of two threads' output lines: a thread started and the starting thread print at once, HotSpot runs the started one later, Go's scheduler at once
+  - `tls` (2): TLS (javax.net.ssl, javax.net socket factories, HTTPS)
+  - `url-headers` (2): URLConnection's headers jrt answers otherwise: no MIME type (getFileNameMap has no table), no last-modified date (Date.parse is not jrt's)
+  - `boxed-foreach` (1): for-each over an Iterable<Float> into a float with an int's arithmetic (BoxedForeach)
+  - `bridge-order` (1): a generic method's bridges with reordered bounds (ReorderedBoundsTest)
+  - `clock` (1): stdout names the run's clock (a file's last-modified time made by the run)
+  - `flaky` (1): flaky: the result depends on the threads' timing or a Random's draw; passed when run again (JCS71 (a)), or fails by chance
+  - `j2g-capture-names` (1): j2g: the outer instance two levels out in a constructor's prologue (MultiLevelOuterInstance's anonymous class in this(...)'s argument: two captured this$0 parameters, F_val_this_0 redeclared; named apart, the second's parameter undefined in the Go)
+  - `j2g-coercion` (1): j2g: a lambda's return of an Object to an int (SamConversion's test3)
+  - `j2g-deep-stack` (1): j2g: deep recursion beyond the goroutine stack (LambdaTest5)
+  - `jrt-io` (1): jrt's FileInputStream.skip of a negative count
+  - `jrt-math` (1): jrt's Math.pow at large exponents
+  - `local-class-names` (1): two local classes of one name in one method, one inside an anonymous class (NameCollision2)
+  - `read-failed` (1): not interpreted or compiled: the read level failed (the test's class at that level)
+  - `record-pattern-null` (1): a record pattern over a null component (DeconstructionDesugaring: MatchException wrapping a NullPointerException)
+  - `sql` (1): JDBC beyond the Go build's java.sql (javax.sql.rowset, java.sql.Time)
+- **Java print**: by design 637 cases in 1 classes (`print-classes`); deferred 99 in 4 classes:
+  - `print-forms` (64): print: the printed Java read again gives other forms (a literal's sign, width or rounding; a cast or a local's tag; a restructured if, loop, label, try or temporary)
+  - `print-type-arguments` (32): print: javac rejects the printed Java for want of Java's type arguments in code (inference, captured and type-variable types, generic conversions)
+  - `print-release` (2): print: javac on Arbace refuses --release N (no ct.sym in its platform), as for the original (the classes level)
+  - `read-failed` (1): not interpreted or compiled: the read level failed (the test's class at that level)
+- **Go read**: by design 204 cases in 3 classes (`goos-other-boards`, `invalid-programs`, `parser-rejects`); deferred 0 in 0 classes.
+- **Go eval**: by design 219 cases in 16 classes (`call-depth`, `foreign-code`, `frames`, `gc-flags`, `gc-phases`, `gc-reference`, `gc-std`, `line-directives`, `memory`, `no-forms`, `race`, `speed`, `spellings`, `std-out-of-scope`, `toolchain`, `unsafe-layout`); deferred 0 in 0 classes.
+- **Go AOT**: by design 149 cases in 6 classes (`gc-reference`, `go-build-complete`, `no-forms`, `positions`, `spellings`, `toolchain`); deferred 3 in 1 classes:
+  - `printer-invalid` (3): the printer refusing the forms of invalid programs
+- **Go print**: by design 141 cases in 4 classes (`unsafe`, `compile-only-dirtests`, `tests-embed-sources`, `empty-decl-group`); deferred 0 in 0 classes.
+
+The gate at the tag: `GATE_FULL_SERIAL=1 bin/gate --full` on `5cfb1f4a`, every step passed (227m17s),
+the parked sub-projects' steps out of it (the box, tamago/, the toolchain's forms, repr/haskell,
+repr/rust: the user, 2026-10-26); the fixpoint and the seed `b4ac198d` verified (stage 0 = G1 = G2 = G3 =
+`45df0046`). What comes next: the scripts' sweep, then `arbace-reaps-3-crops-v2` (the efficient gate,
+REAP's small and medium leftovers), then C23 (doc/AGENDA.md).
+
 ## 9. Risks
 
 - **Java is the long pole.** JC1-JC6 are 14-22 days of the 24-41, and the world's long tail

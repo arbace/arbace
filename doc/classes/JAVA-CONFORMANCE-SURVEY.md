@@ -2858,3 +2858,8 @@ with the checkout's path length: the reference was recorded in a longer one), `E
 `:unstable true`; `test/java/check.ae` takes a would-be regression named by `:tests` in an
 `:unstable` class of the level as no regression, whatever its second run says (before, only a
 second run that passed made a flaky test). The masks are unchanged.
+
+## REAP v1 (2026-10-27)
+
+This language's cells of the REAP matrix at the tag `arbace-reaps-3-crops-v1`, with every class by name, are
+in doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences".

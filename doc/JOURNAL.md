@@ -2175,3 +2175,27 @@ GPS27-GPS31 (doc/go/GO-PARSER-SURVEY.md, "As built: GP4"), each (a):
   ae level) and `java-check-full` (t04272 UserDirChangedTest, path-dependent in main's checkout; t04819
   EnqueuePollRace and t05565 LockStep failing twice; t04602 ExecWithInput flaky in no class). Being fixed on
   branch `reap9-fixes` (on Sonnet); the clean full gate then runs again.
+
+## 2026-10-27: REAP9, the milestone `arbace-reaps-3-crops-v1`
+
+- REAP9's full gate. On `f75d89d3` (after the fixes: the round trip's references for JC6b's 45 new jdk files,
+  all of the known kinds, StreamTokenizer's of the integer-radix kind; a printer fix, a compound assignment's
+  `long` arms, with `Pins.conditional` as its sample; the nondeterministic Java tests named in `:flaky` and
+  `:environment`, both marked `:unstable`: a test they name is no regression whatever its second run says)
+  `bin/gate --full` failed 3 steps in 219m17s, all load, with nothing else on the host: the gate's four
+  chains at once overload it (java-check-full's 20 GiB j2g shards, repr-go-native's reads killed for memory,
+  timeouts in Java's interpreted level and goi). Decided (the user): `GATE_FULL_SERIAL=1` (`c216272a`), the
+  chains one after another, then one clean run. On `c216272a` (serial) every step passed but
+  `java-check-full`, on two disagreements of its levels not in `levels-known.edn` (PipedReader/Constructors,
+  JC6b's, the interpreter not extending Thread; HugeToString, a compiled timeout); recorded (`5cfb1f4a`). On
+  `5cfb1f4a`, `GATE_FULL_SERIAL=1 bin/gate --full`: every step passed, 227m17s (java-check-full 71m42s,
+  repr-go-native 51m01s, the fixpoint 20m45s, javac 12m07s).
+- The record: doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences": the matrix (Clojure read 908 / 2 / 0, eval
+  21,049 / 80 / 5, AOT 804 / 28 / 6, print 1,031+ / 0 / 0; Java read 7,738 / 3 / 93, eval 1,683 / 325 / 1,312,
+  AOT 1,869 / 181 / 1,270, print 2,584 / 637 / 99; Go read 12,158 / 204 / 0, eval 1,618 / 219 / 0, AOT 1,685 /
+  149 / 3, print 2,584+ / 141 / 0) and each cell's classes, the deferred by name; pointers from
+  doc/go/GOI-SPEC.md, doc/classes/JAVA-CONFORMANCE-SURVEY.md and doc/go/EVAL-NOTES.md; CLAUDE.md's direction
+  names the milestone and the parked sub-projects, its gate paragraph `GATE_FULL_SERIAL`.
+- The tag `arbace-reaps-3-crops-v1`, annotated, on this entry's commit: Clojure `98d735fab02f`
+  (1.13.0-master-SNAPSHOT), Java 26 (jdk26u `baf63fbe`), Go 1.27.1; the seed `b4ac198d`. Then this journal
+  starts over (the user's goal: "reach arbace-reaps-3-crops-v1 milestone, then reset the journal").

@@ -32,7 +32,10 @@ Direction:
   main (tag `arbace-interprets-go1.27.1-v1`, 2026-10-20): `$GOROOT/test`'s programs against gc,
   1,471 of 1,837 pass, none fail, the rest in the recorded classes of `bin/goi divergences`
   (doc/go/GOI-SPEC.md, "v1's divergences"); the same in the box on amd64 and in the emulated arm64
-  VM. Now: doc/AGENDA.md.
+  VM. Then REAP, read, eval, AOT and print for Clojure, Java and Go, a milestone on main (tag
+  `arbace-reaps-3-crops-v1`, 2026-10-27): the matrix of `bin/reap`, 12 of 12 cells checked, none failing,
+  every non-pass in a recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences"). Parked (the user,
+  2026-10-26): the box, repr/haskell, repr/rust, the macOS UI, the iOS app. Now: doc/AGENDA.md.
 - Long term: Arbace is a standalone ecosystem, not binary compatible with Java. Java stays
   usable at the source level through repr/java. The language is Clojure extended with an idiomatic
   representation of Java (the Java forms), and later of Go: the Arbace language. The goal is a
@@ -389,7 +392,8 @@ Prior art:
   and repr/rust (`bin/repr-haskell`, `bin/repr-rust` round trips). Run it when the Java forms'
   front end, repr/java, repr/go, j2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or repr/java, `bin/jrt-convert update` first; after a change to what j2g asks of the JVM,
-  `bin/j2g-edge update`). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`
+  `bin/j2g-edge update`). `GATE_FULL_SERIAL=1` runs `--full`'s chains one after another (at once they overload a 62 GB host:
+  REAP9's runs, 2026-10-26). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`
   first trims Go's build cache of entries unused for 90 minutes (`bin/lib/gocache.bash`,
   `ARBACE_GOCACHE_KEEP_MIN`). No build may use the host's `go`: only TamaGo's (`ARBACE_GOROOT`).
 
@@ -401,11 +405,13 @@ Prior art:
   was done, why, and what alternatives were considered. Name sources precisely, including
   repo, path and commit/tag for anything studied or vendored. Never edit or delete past entries.
   Correct them with a new entry. Write it so the progress could be recreated from it. At each
-  freeze, and after the milestones `arbace-inside-itself-v1` and `arbace-interprets-go1.27.1-v1`,
+  freeze, and after the milestones `arbace-inside-itself-v1`, `arbace-interprets-go1.27.1-v1` and
+  `arbace-reaps-3-crops-v1`,
   main's journal started over, by the user's decision: the history up to 2026-10-08 is on
   `arbace-for-java-26`, from then to 2026-10-11 on `arbace-for-golang`, from then to 2026-10-15 at
   the tag `arbace-inside-itself-v1`, from then to 2026-10-20 at the tag
-  `arbace-interprets-go1.27.1-v1`, and all of it in git.
+  `arbace-interprets-go1.27.1-v1`, from then to 2026-10-27 at the tag `arbace-reaps-3-crops-v1`, and all of
+  it in git.
 - When vendoring code from prior art, record its origin (repo, path, revision) in the journal and
   next to the vendored code (for `arbace/`, which holds only `.ae` files: `doc/ARBACE.md`), and
   its license in `LICENSE.md`.
