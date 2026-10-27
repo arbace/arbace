@@ -1352,19 +1352,25 @@
                   (fail "set! of a local that is no field")))
       ;; a final field: set by reflection, which refuses it as the evaluator does (the JVM's
       ;; putstatic or putfield of a final field throws; Java forms would assign it: REAP3)
+      ;; the store on the field's own line (InstanceFieldExpr.emitAssign marks it after the
+      ;; value: RPS42)
       "instance-field" (let [^java.lang.reflect.Field f (:field tn)]
-                         (if (and (field-ok? ctx f) (not (java.lang.reflect.Modifier/isFinal (.getModifiers f))))
-                           (list 'set! (list (symbol (str ".-" (.getName f)))
-                                             (list 'cast (type-sym (.getDeclaringClass f)) (emit ctx (:target tn))))
-                                 (first (typed-args ctx [(.getType f)] [val])))
-                           (list 'arbace.lang.Reflector/setInstanceField (emit ctx (:target tn)) (:fieldName tn)
-                                 (emit ctx val))))
+                         (line-meta
+                           (if (and (field-ok? ctx f) (not (java.lang.reflect.Modifier/isFinal (.getModifiers f))))
+                             (list 'set! (list (symbol (str ".-" (.getName f)))
+                                               (list 'cast (type-sym (.getDeclaringClass f)) (emit ctx (:target tn))))
+                                   (first (typed-args ctx [(.getType f)] [val])))
+                             (list 'arbace.lang.Reflector/setInstanceField (emit ctx (:target tn)) (:fieldName tn)
+                                   (emit ctx val)))
+                           tn))
       "static-field" (let [^java.lang.reflect.Field f (:field tn)]
-                       (if (java.lang.reflect.Modifier/isFinal (.getModifiers f))
-                         (list (with-meta 'arbace.lang.Reflector/setStaticField {:param-tags '[java.lang.Class java.lang.String java.lang.Object]})
-                               (constant ctx (.getDeclaringClass f)) (.getName f) (emit ctx val))
-                         (list 'set! (symbol (str (type-sym (.getDeclaringClass f))) (.getName f))
-                               (first (typed-args ctx [(.getType f)] [val])))))
+                       (line-meta
+                         (if (java.lang.reflect.Modifier/isFinal (.getModifiers f))
+                           (list (with-meta 'arbace.lang.Reflector/setStaticField {:param-tags '[java.lang.Class java.lang.String java.lang.Object]})
+                                 (constant ctx (.getDeclaringClass f)) (.getName f) (emit ctx val))
+                           (list 'set! (symbol (str (type-sym (.getDeclaringClass f))) (.getName f))
+                                 (first (typed-args ctx [(.getType f)] [val]))))
+                         tn))
       (fail (str "set! of " (:op tn))))))
 
 (defn- coll-call [sym es ctx]
@@ -1434,20 +1440,24 @@
         k (:variadic (get @(:classes ctx) cname))
         f (symbol cname "fn-class")
         c (gsym ctx "fncls__")
+        b (gsym ctx "fnbody__")
         ;; the fn's class, made at run time on the first fn of this code and kept in the code
-        ;; class's static field (SA154: no static initializer per fn class)
+        ;; class's static field (SA154: no static initializer per fn class); given the first
+        ;; code object's closed-over fields as its own (RPS41; none to give when it closes over
+        ;; nothing)
         cls (list 'let [(tagged c 'java.lang.Class) f]
                   (list 'if (list 'nil? c)
                         (let [d (symbol (str c "d"))]
                           (list 'let [(tagged d 'java.lang.Class)
-                                      (list (with-meta 'arbace.lang.Compiler$AOT/fnClass {:param-tags '[java.lang.String boolean]})
-                                            cname (boolean k))]
+                                      (list (with-meta 'arbace.lang.Compiler$AOT/fnClass {:param-tags '[java.lang.String boolean java.lang.Object]})
+                                            cname (boolean k) (when (seq (:closes ox)) b))]
                                 (list 'set! f d)
                                 d))
                         c))]
-    (if k
-      (list 'new 'arbace.lang.Compiler$AOTRestFn body cls nil (list 'unchecked-int k))
-      (list 'new 'arbace.lang.Compiler$AOTFn body cls nil))))
+    (list 'let [(tagged b 'java.lang.Object) body]
+          (if k
+            (list 'new 'arbace.lang.Compiler$AOTRestFn b cls nil (list 'unchecked-int k))
+            (list 'new 'arbace.lang.Compiler$AOTFn b cls nil)))))
 
 (defn- fn-instance
   "A new fn or reify (ox, its node)."
@@ -1623,7 +1633,7 @@
    xs (children args 20)
    line (static int line)
    clear (eval-static boolean (and tailPosition (not (.-canBeDirect (.-objx cc)))))]
-  (call-site line [g (cast arbace.lang.IFn (run :o fx)) as (run-all :o xs)]
+  (call-site line [g (cast arbace.lang.IFn (at-line line (run :o fx))) as (run-all :o xs)]
     (eval-only (when clear (Compiler$CodeRun/clearThis f)))
     (static-if (many? xs)
       (.applyTo g (^{:param-tags [java.lang.Object/1]} arbace.lang.ArraySeq/create (array-of as)))
@@ -1726,8 +1736,11 @@
                              (do (emit-deftype-class! ctx n) nil)
                              (fn-instance ctx n (IdentityHashMap.)))
             "do" (let [es (:exprs n)]
-                   (if (empty? es)
-                     nil
+                   (cond
+                     (empty? es) nil
+                     ;; a do of one form is the form, on its own line (RPS42)
+                     (nil? (next es)) (emit ctx (first es))
+                     :else
                      (concat (list 'do)
                              (keep (fn [x] (let [xn (node x)]
                                              (when-not (= "local" (:op xn)) (emit ctx x))))
@@ -1755,7 +1768,9 @@
         "instance-field" (emit-instance-field ctx n true)
         "if" (emit-if ctx n true)
         "do" (let [es (:exprs n)]
-               (concat (list 'do) (map #(emit ctx %) (butlast es)) [(emit-unboxed ctx (last es))]))
+               (if (nil? (next es))
+                 (emit-unboxed ctx (first es))
+                 (concat (list 'do) (map #(emit ctx %) (butlast es)) [(emit-unboxed ctx (last es))])))
         "let" (emit-let ctx n true)
         "letfn" (emit-letfn ctx n true)
         "try" (emit-try ctx n true)
@@ -1801,6 +1816,21 @@
     "do" (let [es (:exprs n)] (or (empty? es) (nil-valued? (node (last es)))))
     false))
 
+(defn- form-line
+  "The line of emitted form f: its own, else (a do) that of its last form, or nil."
+  [f]
+  (or (:c2j/line (meta f))
+      (when (and (seq? f) (= 'do (first f)) (next f)) (form-line (last f)))))
+
+(defn- with-line-of
+  "Form w, a wrapper of form f (a conversion of its value), on f's line: the statement made of
+  it is the one the JVM's line table puts at f's own mark (RPS42: an unboxed field or method
+  call returned as the method's ^long, whose NPE the frame gives the call's line)."
+  [w f]
+  (if-let [l (form-line f)]
+    (vary-meta w assoc :c2j/line l)
+    w))
+
 (defn- ret-body
   "A deftype's method body as returned in type ret (ObjMethod.emitBody): unboxed when it can be,
   else boxed then cast or unboxed as ASM's unbox does."
@@ -1810,13 +1840,17 @@
     (if (and (.isPrimitive ret) (not= ret Void/TYPE) (can-prim? n))
       (cond
         (= bc ret) (emit-unboxed ctx body)
-        (and (= ret Long/TYPE) (= bc Integer/TYPE)) (emit-unboxed ctx body)
-        (and (= ret Double/TYPE) (= bc Float/TYPE)) (emit-unboxed ctx body)
+        ;; the widening written out, on the body's line: the analysis would give an implicit one
+        ;; the method's (RPS42: an unboxed method call returned as ^long)
+        (and (= ret Long/TYPE) (= bc Integer/TYPE))
+        (let [f (emit-unboxed ctx body)] (with-line-of (list 'long f) f))
+        (and (= ret Double/TYPE) (= bc Float/TYPE))
+        (let [f (emit-unboxed ctx body)] (with-line-of (list 'double f) f))
         (and (= ret Integer/TYPE) (= bc Long/TYPE))
         (list (with-meta 'arbace.lang.RT/intCast {:param-tags '[long]}) (emit-unboxed ctx body))
         (and (= ret Float/TYPE) (= bc Double/TYPE)) (list 'unchecked-float (emit-unboxed ctx body))
         :else (fail (str "mismatched primitive return, expected " ret ", had " bc)))
-      (let [num (fn [f] (list (symbol (str "." (.getName ret) "Value")) (list 'cast 'java.lang.Number f)))]
+      (let [num (fn [f] (with-line-of (list (symbol (str "." (.getName ret) "Value")) (list 'cast 'java.lang.Number f)) f))]
        (or
         ;; a call of a primitive fn returning ret: its unboxed value (F6)
         (and (#{Long/TYPE Double/TYPE} ret) (prim-call ctx body ret num))
@@ -1831,8 +1865,8 @@
           (throws? body) f
           (= ret Void/TYPE) f
           (= ret Object) f
-          (= ret Boolean/TYPE) (list '.booleanValue (list 'cast 'java.lang.Boolean f))
-          (= ret Character/TYPE) (list '.charValue (list 'cast 'java.lang.Character f))
+          (= ret Boolean/TYPE) (with-line-of (list '.booleanValue (list 'cast 'java.lang.Boolean f)) f)
+          (= ret Character/TYPE) (with-line-of (list '.charValue (list 'cast 'java.lang.Character f)) f)
           (.isPrimitive ret) (num f)
           (or (runtime-class? ret ctx) (not (public? ret))) f
           :else (list 'cast (type-sym ret) f))))))))

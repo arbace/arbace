@@ -2691,3 +2691,111 @@ user's program"), CLAUDE.md (the `bin/arbace-go` paragraph and the gate's).
   - *Recommended: (a)*: the tools run them from the checkout (a namespace whose source differs from
     the embedded copy), and a program's runtime is its base's, built from the checkout, `table-ns!`'s
     fix with it; stage 0 needs them only when it becomes a base (RPS95 (b)).
+
+## As built: Clojure's deferred cases (2026-10-27)
+
+Branch `v2-clojure-deferred`, from main `b60d3075`, for `arbace-reaps-3-crops-v2`: the four Clojure cases
+the milestone's agenda lists as deferred, RPS41 (b) as decided (2026-10-25), and RPS42, RPS53 and RPS54
+in their (b) options, which each proposal's recommendation held for after the milestone ("(b) with the
+eval level's after the milestone"; RPS54's (a) was the milestone's, its (b) the way past it). These are
+runtime changes, listed below: they reach stage 0 with the v2 re-seed.
+
+### What was built
+
+- **RPS41 (b), `:fn-fields`.** A compiled fn's class (`Compiler$AOT/fnClass`, one `Class` per code,
+  made at run time) now reflects the code object's closed-over fields. `fn-wrap` (c2j) binds the code
+  object before the class is looked up and passes it to `fnClass` when the code closes over something;
+  `fnClass` calls the native `Compiler$Dyn/defineAOTFnFields` (`arbace/j2g/dyn.ae`, as `defineFnField`
+  is), which asks jrt's `AOTFnFields` (`go/arbace/jrt/class.ae`) to read the Go struct of the code
+  object with `reflect`: each field `F_x` is a `FieldInfo` named `x`, typed by its Go kind (a primitive
+  class or Object), whose `Get` reads the field of the fn's code object (`F_body` of `AOTFn` or
+  `AOTRestFn`). The cost is one reflection per code that closes over a value, at its first fn;
+  codes that close over nothing (most top-level `defn`s) pass `nil` and do nothing. The clearing is
+  c2j's own, unchanged. Clearing: 3 tests, 12 of 31 assertions passing before at the AOT level, 31 of 31
+  now.
+- **RPS42 (b), `:compiled-trace-lines`.** The five forms of `test-compiler-line-numbers` that gave
+  another line than the JVM's, in c2j (`arbace/c2j/emit.ae`): (1) a field assignment, `set!` of an
+  instance field (typed, reflected) or of a static one (final: reflection refuses it), carries the
+  target's own line (`InstanceFieldExpr.emitAssign` marks its line after the value), where it carried
+  the method's; (2) an unboxed field or method call returned as the fn's `^long`: the conversion
+  wrapper `ret-body` makes (`.longValue (cast Number ...)`, `.booleanValue ...`, `(long ...)` for an
+  `int` returned as `long`) is on the body's line (`with-line-of`), and a `do` of one form is the form
+  (`emit`, `emit-unboxed`), so the frame's statement is the call's. Before: 5 of the 16 forms failing at
+  the AOT level; now none. Every compiled statement of that kind has its call's line, the runtime's
+  too.
+- **RPS53 (b), the evaluator's lines.** The seven forms the evaluator gave the enclosing call's line:
+  `CodeHostField.run` and `CodeAssign` (kinds 4 and 5) call `Evaluator/at` with the field expression's
+  line after the target (and the value) are evaluated, as the JVM's emit marks it; the `invoke` kind
+  sets the frame's line between its function and the cast to `IFn` (`InvokeExpr.emit` marks it there)
+  through a new template directive, `(at-line line x)` in `arbace.c2j.node` (the emitter ignores it,
+  the evaluator's half is `(let [at__ x] (set! (.-line f) line) at__)`), `CompilerNodes.ae`
+  regenerated (`test/c2j/gen_nodes.ae`, deterministic, byte for byte under `bin/generated-check`).
+- **RPS54 (b), FIPrims.** The Go build gives an interface `gen-interface` makes at run time no
+  annotation data, and `ClassInfo.FromFn` (jrt's adapter) is j2g's for the world's interfaces only.
+  `gen-interface` (`arbace/genclass.ae`) now, for an interface marked `^{java.lang.FunctionalInterface
+  true}` with one method of at most ten parameters (what `FISupport.maybeFIMethod` accepts), expands to
+  a registration of the adapter (`Compiler$FISupport/register c (fn [f] (reify C (m [_ a0 ...] (f a0
+  ...))))`) followed by the class; `FISupport` keeps the registry (`maybeFIMethod` also accepts a
+  registered class) and `Reflector.boxArg` adapts through it before the runtime's `adaptFn`. The adapter
+  is a `reify`, so it is a compiled class at the AOT level (the interface is a compiled class there,
+  where j2g's `FromFn` excludes compiled packages) and a run-time class at the eval level, with one code
+  for both. Before: the two tests failed at both levels; now they pass.
+
+### Numbers
+
+- Clojure's suite on the test build (`test/arbace-go-results.edn`): 784 tests, 20,580 assertions,
+  20,576 pass (before: 20,566), 3 fail, 1 error (the evaluator's boxed fns, 3, Q1; `java.sql.Connection`'s,
+  D6); compilation 114 to 121 of 124 assertions, java-interop 299 to 302 of 302.
+- The AOT level (`bin/clojure-tests --aot`, `test/arbace-go-aot-results.edn`): 785 tests, 20,580
+  assertions, 20,576 pass, 3 fail, 1 error (before: 20,549, 28 fail, 3 errors); the two levels now
+  disagree on one test only, `seq-and-transducer` (speed, skipped at the eval level). The AOT essential
+  subset (`--aot --essential`): 15 namespaces, 7,270 of 7,273 assertions, the three being Q1's.
+- `bin/reap`: Clojure eval 21,052 pass / 80 by design / 2 deferred (was 5 deferred: the 3 tests),
+  Clojure AOT 809 / 28 / 1 (was 6 deferred), 12 of 12 cells checked, 0 problems. The classes
+  `:trace-lines`, `:fiprims` (eval) and `:fiprims`, `:compiled-trace-lines`, `:fn-fields` (AOT) are
+  removed from `test/clojure/divergences.edn` and `divergences-aot.edn`; what is still deferred is
+  `seq-and-transducer` (speed) and `xml-stream` (`javax.xml.stream`, out of the world).
+
+### Shipped files changed (for the v2 re-seed)
+
+`arbace/lang/Compiler.ae` (`Dyn.defineAOTFnFields`, `AOT.fnClass`'s `body`, `FISupport`, `CodeHostField`,
+`CodeAssign`, `StaticFieldExpr.line` public), `arbace/lang/Reflector.ae` (`boxArg`), `arbace/genclass.ae`
+(`gen-interface`), `arbace/lang/go/CompilerNodes.ae` (generated), `arbace/c2j/emit.ae`, `arbace/c2j/node.ae`
+(the compiled runtime's code: `fn-wrap`, the lines), `arbace/j2g/dyn.ae` (the native), `go/arbace/jrt/class.ae`
+(`AOTFnFields`, `aotFieldClass`). `jdk/` is not touched.
+
+### Proposals
+
+- **RPS130 Reflecting a compiled fn's fields.**
+  - Options: (a) as built: jrt reads the code object's Go struct with `reflect` at the first fn of a code
+    that closes over something; (b) c2j emits an accessor per code (a method `field(i)` and a table of
+    names and types), no reflection, a larger executable; (c) the member table filled lazily at the first
+    `getDeclaredFields` of a fn class (a hook in `EnsureMembers`).
+  - *Recommended: (a)*: no code per fn, a reflection only where a fn closes over a value; (c) if the
+    reflection at startup shows in a profile (core's closures made at load are a few hundred).
+- **RPS131 A form of one `do`.**
+  - Options: (a) as built: `emit` and `emit-unboxed` return the form of a `do` of one form (the line
+    of the form, not of its parent), c2j's whole output smaller by the `do`s; (b) only `ret-body` unwraps
+    (the wrapper keeps the `do`, its line the last form's); (c) the `do` keeps its form and takes the
+    line of its last form when it has one only.
+  - *Recommended: (a)*: the Java forms' `(do x)` is `x`, and the compiled runtime has the same lines
+    as the test programs.
+- **RPS132 The evaluator's `IFn` cast.**
+  - Options: (a) as built: the line is set between the function and the cast (`at-line`), the order the
+    JVM keeps (the cast before the arguments); (b) the cast after the arguments, one `set!` for both
+    (simpler, a non-`IFn` function with arguments that throw would throw theirs first).
+  - *Recommended: (a)*: the order is the JVM's, and the directive is two lines.
+- **RPS133 FIPrims for the world's interfaces made at run time through jrt.**
+  - Options: (a) as built: Clojure's adapter, a `reify` registered by `gen-interface`; (b) `FromFn` of
+    interfaces made at run time (`Dyn.defineInterface`) set by jrt, with a Dyn class adapter, for every
+    interface a program defines at run time and for `definterface` without Clojure's macros; (c) j2g's
+    `FromFn` for the compiled interfaces (`compiled-pkg?` taken out of `fromfn/fis`).
+  - *Recommended: (a)*: it is what Clojure's `FISupport` does (an adapter made at run time for the
+    interface), nothing in j2g; (c) if `Class.isAnnotationPresent(FunctionalInterface)` should be true
+    of compiled interfaces for Java forms programs too (the Java forms' annotations, JC's area).
+- **RPS134 The remaining deferred cases.**
+  - Options: (a) `seq-and-transducer` stays deferred (speed: 200,000 trials) and `xml-stream` (`javax.xml.stream`
+    is not in the world); (b) `xml-stream` by design with the SAX cut (D6: `java.xml` stays out of the
+    shipped world), the test skipped for good.
+  - *Recommended: (b)* for `xml-stream`: it follows RPS56's decision (SAX by design); `seq-and-transducer`
+    stays a speed matter.
