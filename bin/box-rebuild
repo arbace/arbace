@@ -134,7 +134,7 @@ prepare() {
     mkdir -p "$s"
     src=$(git -C "$root" archive --format=tar "$rev" $src_dirs | "$launcher" --store "$s" tree tar - src) || return 1
     ARBACE_BOX_LAUNCHER=$launcher "$root/bin/box-tools" put "$s" "$arch" > "$dir/tools.txt" || return 1
-    "$launcher" --store "$s" put "$guest" "arbace.$arch" > /dev/null || return 1
+    "$launcher" --store "$s" put "$guest" "arbace.$arch" > "$dir/discard.log" || return 1
     gt=$("$launcher" --store "$s" tree put "$gotable" gotable) || return 1
   done
   echo "$c" > "$dir/prepared.commit"
@@ -174,7 +174,7 @@ box() {
     ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.$arch \
     "$launcher" --store "$bs" -e "$(rebuild_expr "rebuilt.box.$arch" "$opts")" 2>&1 | tee "$dir/box.log"
   st=${PIPESTATUS[0]}
-  "$launcher" --store "$bs" get "rebuilt.box.$arch.steps" > "$dir/box-steps.edn" 2>/dev/null
+  "$launcher" --store "$bs" get "rebuilt.box.$arch.steps" > "$dir/box-steps.edn" 2> "$dir/discard.log"
   echo "box-rebuild: the box's run: status $st ($(since "$t0"))"
   return $st
 }
@@ -183,7 +183,7 @@ box() {
 vm_box() {
   local vmrun=$root/bin/box-arm64-vm vl=$root/target/arbace-go/box-arm64/arbace-box st
   fresh "$vl" "ARBACE_BOX_ARCHES=arm64 bin/arbace-go --build --box" "$(prepared_commit)"
-  "$vmrun" status > /dev/null 2>&1 || { echo "box-rebuild: start the VM first (bin/box-arm64-vm start; MEM)" >&2; return 1; }
+  "$vmrun" status > "$dir/discard.log" 2>&1 || { echo "box-rebuild: start the VM first (bin/box-arm64-vm start; MEM)" >&2; return 1; }
   echo "== the rebuild in the box (arm64, in the aarch64 VM)"
   : > "$dir/box.log"
   tar -C "$dir" -cf "$dir/box-store.tar" box || return 1
@@ -192,18 +192,18 @@ vm_box() {
   # the run detached in the VM (hours: every instruction is emulated), its log followed from here
   printf '%s\n' '#!/bin/sh' "cd /h && ARBACE_BOX_STORE_MAX=off ARBACE_BOX_SPAWN=1 ARBACE_BOX_SPAWN_RAM=${ARBACE_BOX_SPAWN_RAM:-20GiB} ARBACE_BOX_SPAWN_CPUS=${ARBACE_BOX_SPAWN_CPUS:-16} ARBACE_BOX_RAM=6GiB ARBACE_BOX_IMAGE=ref:arbace.arm64 ./arbace-box --store box -e '$(rebuild_expr rebuilt.box.arm64 "$1" | sed "s/'/'\\\\''/g")' > rebuild.log 2>&1; echo \$? > rebuild.status" > "$dir/vm-rebuild.sh"
   "$vmrun" put "$dir/vm-rebuild.sh" || return 1
-  "$vmrun" sh 'rm -f rebuild.status rebuild.log; chmod +x vm-rebuild.sh; nohup ./vm-rebuild.sh > /dev/null 2>&1 &' || return 1
+  "$vmrun" sh 'rm -f rebuild.status rebuild.log; chmod +x vm-rebuild.sh; nohup ./vm-rebuild.sh > vm-rebuild.out 2>&1 &' || return 1
   local n=0
-  until "$vmrun" sh 'test -f rebuild.status' 2> /dev/null; do
+  until "$vmrun" sh 'test -f rebuild.status' 2> "$dir/discard.log"; do
     sleep 60
-    "$vmrun" sh "tail -n +$((n + 1)) rebuild.log" 2> /dev/null | tee -a "$dir/box.log" | grep -v '^compile\|^asm' || true
+    "$vmrun" sh "tail -n +$((n + 1)) rebuild.log" 2> "$dir/discard.log" | tee -a "$dir/box.log" | grep -v '^compile\|^asm' || true
     n=$(wc -l < "$dir/box.log")
   done
   "$vmrun" sh "tail -n +$((n + 1)) rebuild.log" | tee -a "$dir/box.log"
   st=$("$vmrun" sh 'cat rebuild.status')
   "$vmrun" sh 'tar -cf box-store.tar box' && "$vmrun" exec cat box-store.tar > "$dir/box-store.tar" \
     && rm -rf "$bs" && tar -C "$dir" -xf "$dir/box-store.tar" && rm -f "$dir/box-store.tar" || return 1
-  "$launcher" --store "$bs" get "rebuilt.box.arm64.steps" > "$dir/box-steps.edn" 2>/dev/null
+  "$launcher" --store "$bs" get "rebuilt.box.arm64.steps" > "$dir/box-steps.edn" 2> "$dir/discard.log"
   return $st
 }
 
@@ -225,7 +225,7 @@ host() {
              (arbace.box/ref \"arbace.$arch\") {:exe \"$native\" :env [\"HOME=/tmp\"]}}})}"
   ARBACE_BOX_STORE=$hs ARBACE_BOX_LAUNCHER=$launcher "$native" -e "$(rebuild_expr "rebuilt.host.$arch" "$opts")" 2>&1 | tee "$dir/host.log"
   st=${PIPESTATUS[0]}
-  "$launcher" --store "$hs" get "rebuilt.host.$arch.steps" > "$dir/host-steps.edn" 2>/dev/null
+  "$launcher" --store "$hs" get "rebuilt.host.$arch.steps" > "$dir/host-steps.edn" 2> "$dir/discard.log"
   rm -rf "$dir/host-work"
   # what bin/box-mac-bundle requires of the expected image: made by the commit's executables
   if [ "$st" = 0 ]; then
@@ -281,7 +281,7 @@ smoke() {
   local n p i len=""
   n=$(stat -c %s "$img"); p=$(( (65536 - $(stat -c %s "$root/target/arbace-go/box-$arch/arbace-box.bin") % 65536) % 65536 ))
   for i in 0 1 2 3 4 5 6 7; do len+=$(printf '\\x%02x' $(( (n >> (8 * i)) & 255 ))); done
-  { cat "$root/target/arbace-go/box-$arch/arbace-box.bin"; head -c "$p" /dev/zero; cat "$img"; printf "$len"; printf 'WHIMGST1'; } > "$dir/arbace-box"
+  { cat "$root/target/arbace-go/box-$arch/arbace-box.bin"; printf '%*s' "$p" '' | tr ' ' '\0'; cat "$img"; printf "$len"; printf 'WHIMGST1'; } > "$dir/arbace-box"
   chmod +x "$dir/arbace-box"
   "$root/bin/box-smoke" --arch "$arch" --native "$native" "$dir/arbace-box"
 }
