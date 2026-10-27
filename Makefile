@@ -12,7 +12,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests build-java smoke repl fixpoint goi-table goi-table-size \
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
-  program programs-check programs-essential gate gate-full reap suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
+  program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-why reap suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
   check-makefile
@@ -85,10 +85,16 @@ arm64-vm-goi: ## goi's check in the arm64 box in the emulated aarch64 VM: every 
 	bin/box-arm64-vm goi
 
 ## Checks
-gate: ## the essential gate, for every change to main (bin/gate)
+gate: ## the essential gate, for every change to main; a check that passed at its key is skipped (bin/gate)
 	bin/gate
-gate-full: ## the full gate, at milestones (bin/gate --full)
+gate-full: ## the full gate, one step after another, at milestones (bin/gate --full)
 	bin/gate --full
+gate-full-parallel: ## the full gate's chains concurrently (GATE_FULL_PARALLEL=1 bin/gate --full)
+	GATE_FULL_PARALLEL=1 bin/gate --full
+gate-plan: ## the full gate's plan: each step run, skipped, built or not needed, and why (bin/gate --full --plan)
+	bin/gate --full --plan
+gate-why: ## why STEP=... runs: its key's inputs, its passes, what changed since the latest (bin/gate --why STEP)
+	bin/gate --why $(STEP)
 reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
 	bin/reap
 suite: ## Clojure's suite on the test build (bin/clojure-tests, CLOJURE_TESTS_GO)

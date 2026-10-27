@@ -57,3 +57,21 @@ arbace_version() {
   fi
   printf '{:describe "%s" :commit "%s" :dirty %s :runtime "%s"}\n' "$d" "$c" "$dirty" "$(arbace_runtime_key "$r")"
 }
+
+# arbace_embedded_sources ROOT: Arbace's sources a shipped build reads, one path a line, sorted
+# (doc/GATE-SURVEY.md, GTS5 (a), "As built: GT1-GT3"): arbace/ less the namespaces no executable
+# embeds and nothing of the build reads, repr/java, repr/haskell and repr/rust (arbace/j2g/embed.ae's
+# excluded; javac's tool embeds repr/java itself: bin/arbace-go's reader_key names it)
+arbace_embedded_sources() {
+  (cd "$1" && find arbace -type f ! -path arbace/repr/java.ae ! -path 'arbace/repr/java/*' \
+       ! -path arbace/repr/haskell.ae ! -path 'arbace/repr/haskell/*' ! -path arbace/repr/rust.ae \
+       ! -path 'arbace/repr/rust/*' | LC_ALL=C sort)
+}
+
+# arbace_aot_key ROOT: the key of a build's compiled namespaces (bin/arbace-go's aot_key, the
+# shipped build's aot.key; bin/java-check's --essential-compiled compares it): the runtime key
+# and the embedded sources (the namespaces compiled and c2j, which compiles them)
+arbace_aot_key() {
+  (cd "$1" && { arbace_runtime_key "$1"; arbace_embedded_sources "$1" | xargs -d '\n' sha256sum; } \
+     | sha256sum | cut -c1-64)
+}
