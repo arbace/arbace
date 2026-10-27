@@ -5704,3 +5704,15 @@ for the read without javac (JFS123).
   build), `final/` (the final tool's checks: `summary.txt`, their logs, `attr.md`, `attr.edn`, `split.md`,
   `nojavac.md`, `nojavac.edn`), `prof/` (JFS115's profile: `cpu-top.txt`, `cpu-cum.txt`, `mem-inuse.txt`,
   `mem-alloc.txt`), `gate.log`, `snap.sh`, `run-nj.sh`, `nj26.sh`, `final.sh`, `prof.sh`.
+
+## Decided (2026-10-27): JFS120-JFS129
+
+The user decided JN9e's proposals as recommended, inside the milestone `arbace-reaps-3-crops-v2`: JFS120 (b)
+(`--no-javac` the vendoring tools' read, the fallback counted, the provenance naming the read; (c) once a
+release's corpora have stayed at no fallback), JFS121 (b) (nojavac-check in `bin/gate --full` beside
+attr-check), JFS122 (a) (the fallback per file), JFS123 (b) (a read level of `bin/java-check` without javac,
+fallbacks counted by reason, forms against javac's), JFS124 (c) then (b) (more threads, then less
+allocation), JFS125 (a) (the 8.4 GB peak kept), JFS126 (b) (repr/java embedded in the shipped program,
+`read --no-javac` there, a fallback the error "javac's tool needed"; in v2, with its re-seed), JFS127 (a)
+(the provider assumes compiling code, as NATIVE-ATTR.md notes), JFS128 (b) (the known file's bridges
+emptied), JFS129 (a) then (b): JN9f, JFS120 (b), JFS121 (b), JFS123 (b), JFS128 (b), then JFS126 (b).
