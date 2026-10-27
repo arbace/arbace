@@ -112,3 +112,18 @@ git history:
   Plan GT1-GT7, 8-12 days. Decided (the user): GTS1-GTS20 as recommended (GTS4 (b)/(c) in GT5, GTS13 (b) in GT6).
 - Started: GT1-GT3 (the measure, the keyed steps and the planner, the shared builds; on Opus); GT4 and GT6
   after; GT5 after JC4b and JN9e merge; GT7 at the tag.
+
+## 2026-10-27: REAP's small leftovers A merged
+
+- Small leftovers A (branch `v2-small-a`, merged `7ff11474`; on Sonnet): RPS32 (a) (repr/go's printer,
+  `arbace/repr/go/print_code.ae`, prints as written `make`/`new` without a type or with more arguments, a spread
+  inside them, a method without or with several receivers: ddd1, makenew and bug217 byte for byte; their AOT
+  results pass; `:printer-invalid` and their known entries gone: Go's AOT cell 1,688 / 149 / 0, no deferred
+  case left in Go's row), RPS102 (b) (`--build-program`: a Go package goi's checker refuses for the program's
+  table a build error; the interpreted fallback removed; `test/programs-fail/bad-go` expects the failure; the
+  gate's `programs` step `mixed bad-go`), RPS95 (b) (`bin/seed --build` has stage 0 compile the checkout's
+  namespaces into `target/seed/aot` with `aot.key` and `aot.runtime` when its runtime is the checkout's,
+  `--no-aot` not, the gate's stage 0 `--no-aot`; `bin/arbace-go --compile-aot HOST OUT`; `program_base` takes
+  stage 0: a fresh `target/` built every sample, 11 of 11), JCS76 (a) (`aot.runtime` beside `aot.key`, read by
+  `bin/java-check`'s `aot_fresh`). Shipped code: none but the tool's printer (run from the checkout). The
+  essential gate on `7ff11474` passed (31m03s); the matrix 12 of 12, 0 problems.
