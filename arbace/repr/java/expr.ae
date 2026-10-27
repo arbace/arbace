@@ -1575,6 +1575,38 @@
                 :else (some (fn [[k v]] (when (and (not= k :mods) (or (map? v) (vector? v))) (walk v))) x)))]
       (boolean (walk x)))))
 
+(defn- checking?
+  "Is the check of call `outer`'s arguments (its :checked or :args-checked computation) under way?"
+  [outer]
+  (when-let [^java.util.Map act *active*]
+    (let [h (System/identityHashCode outer)]
+      (boolean (or (some #(identical? outer %) (.get act [:checked h]))
+                   (some #(identical? outer %) (.get act [:args-checked h])))))))
+
+(defn- call-thrown
+  "The thrown types of call `t` (APPLY, NEWCLASS) for a lambda's thrown types: its instantiated
+  type's; while the call whose argument it is (through a lambda's return) is being checked, as when
+  the lambda being checked returns it (Flow.analyzeLambdaThrownTypes on the lambda's speculative
+  body, the call's type partially inferred in the outer call's context), its method's declared thrown
+  types at the site, when they name none of its type variables (JN9e: not re-entering the outer
+  call's memoized check, javac's order of attribution)."
+  [p t]
+  (let [[outer _] (arg-context p t)]
+    (if (and outer (checking? outer))
+      (let [m (if (= :APPLY (:tag t)) (method-of p t) (ctor-of p t))
+            mt (d/method-type m)
+            tvs (set (:tparams mt))
+            free? (fn free? [x] (cond (keyword? x) false
+                                      (= :tvar (:k x)) (contains? tvs (:tv x))
+                                      (map? x) (some free? (concat (:args x) (when (:outer x) [(:outer x)]) (when (:e x) [(:e x)])))
+                                      :else false))]
+        (if (some free? (:throws mt))
+          (d/decline! "a lambda's thrown types (a generic thrown type of a call its outer call checks)")
+          (:throws mt)))
+      (if (= :APPLY (:tag t))
+        (:throws (call-method-type p (:meth t)))
+        (:throws (ctor-method-type p t))))))
+
 (defn- lambda-thrown
   "The checked types lambda `lam`'s body throws (Flow.analyzeLambdaThrownTypes, its parts that need no
   flow of definite assignment): its calls', creations' and throw statements' (not entering classes and
@@ -1619,8 +1651,8 @@
                         (walk prec (:finalizer x)))
                       (vec (concat rest-thrown catch-thrown))))
                   (let [own (case (:tag x)
-                              :APPLY (checked (:throws (call-method-type p (:meth x))))
-                              :NEWCLASS (checked (:throws (ctor-method-type p x)))
+                              :APPLY (checked (call-thrown p x))
+                              :NEWCLASS (checked (call-thrown p x))
                               :THROW (let [e (skip-parens (:expr x))
                                            l (when (= :IDENT (:tag e)) (:local (ans p e)))
                                            pr (when l (some #(when (identical? l (first %)) (second %)) prec))]

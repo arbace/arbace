@@ -275,7 +275,7 @@
                                       s #(na/jmethod-id p %))]
                    (cond (instance? Symbol v) (native-method p v)
                          ;; an array constructor: javac's (its class, Symtab's arrayClass, is not native)
-                         (= "Array" (:flat (:owner v))) (if d/*no-javac* v @s)
+                         (= "Array" (:flat (:owner v))) v
                          :else v))
       :MODULEDEF (if-let [m (:module a)]
                    ;; a module's symbol: javac's (the converter reads none of it)
@@ -349,7 +349,7 @@
     (cond
       (instance? Symbol v) (native-method p v)
       ;; an array's clone(): javac's (its class, Symtab's arrayClass, is not in the native model)
-      (= "Array" (:flat (:owner v))) (if d/*no-javac* v @js)
+      (= "Array" (:flat (:owner v))) v
       :else v)))
 
 (defn symbol-of
@@ -455,8 +455,13 @@
   site's type arguments (:types, Types.memberType)."
   [m diamond? site]
   (cond
-    d/*no-javac* (cond (or diamond? (seq (d/method-tparams m))) (keyword "infer" site)
-                       :else (keyword "types" (str "member-" site)))
+    ;; a native method (an array's clone, a read without javac): its native type
+    (not (instance? Symbol m))
+    (let [mt (d/method-type m)
+          generic? (fn [t] (not= t (d/erasure t)))]
+      (cond (or diamond? (seq (:tparams mt))) (keyword "infer" site)
+            (or (some generic? (:params mt)) (generic? (:ret mt))) (keyword "types" (str "member-" site))
+            :else (keyword "overload" (str "declared-" site))))
     (or (own-type-params? m) diamond?) (keyword "infer" site)
     (generic-type? (.type (jm m))) (keyword "types" (str "member-" site))
     :else (keyword "overload" (str "declared-" site))))
@@ -505,9 +510,12 @@
     (let [fact (cond
                  d/*no-javac* (keyword "overload" "varargs-element")
                  (nil? @ve) :overload/arity
-                 (let [ps (.getParameterTypes (.type (jm m)))
-                       l (when (seq ps) (last ps))]
-                   (and (instance? Type$ArrayType l) (not (generic-type? (.-elemtype ^Type$ArrayType l)))))
+                 (if (instance? Symbol m)
+                   (let [ps (.getParameterTypes (.type (jm m)))
+                         l (when (seq ps) (last ps))]
+                     (and (instance? Type$ArrayType l) (not (generic-type? (.-elemtype ^Type$ArrayType l)))))
+                   (let [l (last (:params (d/method-type m)))]
+                     (and (map? l) (= :array (:k l)) (= (:e l) (d/erasure (:e l))))))
                  :overload/declared-varargs-element
                  :else (instantiation-fact m (tr/diamond? t) "varargs-element"))]
       (if (and (native? t)
