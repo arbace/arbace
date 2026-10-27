@@ -952,6 +952,13 @@
     (type-expr x)
     (expr0 x 1)))
 
+(defn- spread-or
+  "x, or x... when x is (spread y) (an invalid program's), printed by pr; f has the ellipsis."
+  [f x pr]
+  (if (and (seq? x) (= (op x) "spread"))
+    (do (pr (second x)) (ptok "..." (fp f :ellipsis)))
+    (pr x)))
+
 (defn- print-pl
   "A literal of mode :full (wrap-full) at its position, in its spelling and parentheses."
   [f]
@@ -1031,17 +1038,21 @@
         "values" (fail "values outside a return, an assignment or a binding" f)
         "spread" (fail "spread outside the arguments of a call" f)
         "zero" (fail "zero outside a var binding" f)
-        "make" (let [[_ t & xs] f
-                     depth (if (> (count (rest f)) 1) (inc depth) depth)]
+        ;; an invalid program's make and new (RPS32 (a)): no argument, a type alone or more than
+        ;; the type argument, a spread (x...) as written
+        "make" (let [xs (rest f)
+                     depth (if (> (count xs) 1) (inc depth) depth)]
                  (with-parens (when (e/full?) (:go/parens (meta (first f)))) #(name-tok (first f)))
                  (binding [*header* false]
-                   (element-list "(" ")" (cons t xs)
-                                 (fn [x i] (if (zero? i) (type-expr x) (expr0 x depth)))
+                   (element-list "(" ")" xs
+                                 (fn [x i] (spread-or f x (if (zero? i) type-expr #(expr0 % depth))))
                                  {:parent f :offset 1 :open-pos (fp f :lparen) :close-pos (fp f :rparen)})))
-        "new" (let [[_ x] f]
+        "new" (let [xs (rest f)
+                    depth (if (> (count xs) 1) (inc depth) depth)]
                 (with-parens (when (e/full?) (:go/parens (meta (first f)))) #(name-tok (first f)))
                 (binding [*header* false]
-                  (element-list "(" ")" [x] (fn [x _] (new-arg x))
+                  (element-list "(" ")" xs
+                                (fn [x i] (spread-or f x (if (zero? i) new-arg #(expr0 % depth))))
                                 {:parent f :offset 1 :open-pos (fp f :lparen) :close-pos (fp f :rparen)})))
         (cond
           (contains? stmt-heads o) (fail "a statement in an expression position" f)
@@ -1672,6 +1683,14 @@
         m (meta nm)
         extern? (:extern m)
         [recv params] (if method? [(first params) (with-meta (vec (rest params)) (meta params))] [nil params])
+        ;; an invalid program's receivers (RPS32 (a)), mode :full: the entries before the
+        ;; receiver list's closing parenthesis belong to it (none: func () x())
+        rcl (when method? (fp params :recv-closing))
+        [recvs params] (if (and rcl (seq params))
+                         (let [in? (fn [x] (when-let [p (fp x :name-pos)] (neg? (compare p rcl))))
+                               [a b] (split-with in? params)]
+                           [(vec a) (with-meta (vec b) (meta params))])
+                         [[] params])
         res (results-entries params results)]
     (binding [*generic* (boolean (or tps (and recv (generic-type? (if (tagged? recv) (:tag (meta recv)) recv)))))
               *return-pos* (fp f :return)]
@@ -1679,9 +1698,11 @@
         (ptok "func" (fp f :func)) (sp)
         (when method?
           (ptok "(" (fp params :recv-opening))
-          (if (tagged? recv)
-            (do (name-tok recv) (sp) (type-expr (:tag (meta recv))))
-            (type-expr recv))
+          (doseq [[i r] (map-indexed vector (when (some? recv) (cons recv recvs)))]
+            (when (pos? i) (tok ",") (sp))
+            (if (tagged? r)
+              (do (name-tok r) (sp) (type-expr (:tag (meta r))))
+              (type-expr r)))
           (ptok ")" (fp params :recv-closing)) (sp))
         (name-tok nm)
         (when tps (type-params tps))
