@@ -766,3 +766,229 @@ The user decided every proposal as recommended: GTS1 (a), GTS2 (a), GTS3 (a), GT
 GT5, GTS5-GTS12 (a), GTS13 (a) now and (b) in GT6, GTS14-GTS20 (a). The order: GT1-GT3 first (the measure,
 the keyed steps, the shared builds), then GT4 and GT6, GT5 after JC4b and JN9e merge (it changes
 `bin/java-check`, `bin/repr-java` and `bin/repr-go`), GT7 at `arbace-reaps-3-crops-v2`'s tag.
+
+## As built: GT1-GT3 (2026-10-27)
+
+Branch `gate-gt1-3`, from main `fb2610fa`, main merged at `7ff11474` (v2-small-a). The decided proposals
+GTS2 (a), GTS3 (a), GTS4 (a), GTS5 (a), GTS6 (a), GTS7 (a), GTS10 (a), GTS11 (a), GTS12 (a), GTS13 (a)
+and GTS15 (a) are built; GT4 (the audit, the canary), GT5 (inner keys), GT6's lock and limits and GT7 (the
+clean run) are not.
+
+**GT1, measured.** Every step runs under busybox `time -v -o .tmp/gate/NAME.time`; `NAME.mem` holds its wall
+and CPU seconds (user + system of the step and its waited-for descendants) and its largest process's peak
+RSS (`wait4`'s `ru_maxrss`), and, from the sampler, the peak of its process tree's summed RSS. The sampler,
+a loop of `bin/gate` every 5 s, reads `/proc/meminfo` and `/proc/*/stat` (no `ps`) and appends to
+`.tmp/gate/mem.tsv` the lines `TIME WHAT KIB`: the host's `MemAvailable`, the gate's whole process tree, and
+each running step's tree (the step's PID in `NAME.pid` while it runs). The summary prints each step as
+`ok NAME (wall, cpu C, peak P GiB (tree T GiB))`, then the gate's largest tree and the host's lowest
+`MemAvailable`.
+
+**GT2, keyed steps.**
+
+- *The table*, `test/gate/steps.edn` (the Clojure reader's format): `:groups` (named input lists:
+  `:lib` bin/lib's top-level scripts; `:tools` the checkout's namespaces a tool loads instead of its embedded
+  copy, `arbace/` less the runtime's Java forms and the namespaces no executable embeds; `:build`, `:repr-go`,
+  `:goi`, `:java`, `:repr-java`, `:suite`) and `:steps`, 37 of them in the order they run: 3 `:pre`
+  (`makefile`, `seed`, `stage0`: always run, before the plan), 1 build of the essential phase (`go-build`),
+  13 essential checks, 20 of `--full` (the build `javac-tool` and 19 checks). A step: `:name`, `:phase`,
+  `:kind` (`:check`, keyed; `:build`, run when needed; `:always`), `:chain` and `:start-after` (the concurrent
+  order), `:needs`, `:cmd` (run by `bash -c` with `GATE_CACHE`, `GATE_EXE`, `GATE_TESTS`, `GATE_JAVAC_DIR`,
+  `GATE_JAVAC`, `GATE_JOBS`), `:hosts`, `:inputs` (`dir/`, globs with `*` and `**`, files, group keywords,
+  `!` to take files back out; the last matching rule wins), `:pins`, `:env`, `:heavy`, `:mem-gib`,
+  `:summary` (the summary's regex and line count). The commands are the table's: `bin/gate` holds none but
+  the three `:pre` steps' (the planner runs on stage 0, which they make).
+- *The key* (GTS2 (a)): the SHA-256 of the step's *material*, one line per input: `step NAME`; `decl` (the
+  step's declaration printed as a sorted map, less `:doc`, `:summary` and `:mem-gib`); `logic` (the digests
+  of `bin/gate` and `test/gate/plan.ae`); `host H ID` per host; `pin SHA PATH`; `env X=V` (or `unset`);
+  `file SHA PATH` per selected file. Never the commit. The files' digests come from one table bash makes
+  per run, `.tmp/gate/files.sha256` (`find` over the checkout but `.git`, `.tmp`, `target`, `.claude`, then
+  `sha256sum`: 7,820 files in 0.1 s), so a dirty tree keys as it is. The hosts' identities, in
+  `.tmp/gate/hosts.edn`: `:gate` (`bin/arbace-go --gate-key`), `:javac` (`arbace_javac_key`), `:stage0` (the
+  seed's and Go's pins), `:frozen` (the jar's pin), `:jdk` (the system JDK's `release` file, the reference
+  javac), `:go` (TamaGo's `VERSION`).
+- *The planner*, `gate.plan` (`test/gate/plan.ae`) on stage 0 (`arbace_tool -p test`, as `bin/reap`), 1.4 s
+  for the 37 steps: each check's material and key, `.tmp/gate/plan/NAME.inputs`; the store looked up; the
+  builds marked needed when a check that runs needs them (transitively); `plan.tsv` for bash (name,
+  decision, key, phase, chain, needs, start-after, summary, why, command) and the plan printed: each step
+  `always`, `build`, `run`, `skip` or `-` (not needed), and why: `never passed`; `changed since the pass at
+  KEY (DATE): FILES...` (the material's lines that differ from the latest pass's, by subject: a path, `host
+  javac`, `env X`, `decl`); `passed at KEY, COMMIT, DATE, WORKTREE`.
+- *The store* (GTS6 (a), GTS7 (a)): `ARBACE_GATE_STORE`, default the main checkout's `.tmp/gate-pass/` (from
+  `git rev-parse --git-common-dir`), shared by the worktrees; per pass `STORE/NAME/KEY.edn` (`{:step :key
+  :commit :dirty :worktree :date :secs :cpu-s :maxrss-kib :tree-peak-kib :log-sha256}`), `KEY.log` (the
+  log) and `KEY.inputs` (the material, which `--why` and the plan's reasons diff against). Written by bash
+  after a check passes (the record by `mv`, atomic); a failure is never recorded.
+- *`bin/gate`*: `[--full] [--rerun]` (`--rerun`: every check runs and records), `[--full] --plan` (into
+  `.tmp/gate-plan/`, a running gate's logs untouched), `--why STEP` (the material but its files, the passes,
+  every line changed since the latest one). Skipped: `skipped NAME (passed at KEY, COMMIT, DATE, WORKTREE)`;
+  a build not needed: `- NAME (not needed: ...)`; a check whose `:needs` did not pass: `FAILED NAME (not run:
+  X did not pass)`. `GATE_STEPS` names another table (the gate's own tests: a toy table of `sleep`s, a
+  failing step, a `:needs` and a `:start-after` exercised the executor before the real runs).
+- *`gate_key` narrowed* (GTS5 (a)): `arbace/` less repr/java, repr/haskell and repr/rust
+  (`arbace_embedded_sources`, `bin/lib/version.bash`), `jdk/` less `jdk/javac/` and `jdk/provenance.edn`,
+  `overlay/` less `overlay/jdk/javac/`, `test/java-fixtures/` less its provenance, `bin/lib` less the check
+  scripts of repr/java, repr/haskell and repr/rust. The compiled namespaces' key follows it (`arbace_aot_key`:
+  the runtime key and the embedded sources; `bin/java-check --essential-compiled` reads the same function),
+  `reader_key` names repr/java's sources itself, and `arbace_runtime_key` leaves `jdk/provenance.edn` out
+  too: with it in, a rewritten provenance kept the gate's executables (`gate_key` unchanged) but made their
+  runtime "not the checkout's", and `java-check-full` refused their compiled namespaces (found by the second
+  `--full` attempt, below).
+- *The provenance files* are inputs of the verify that compares them alone (`javac-verify`,
+  `jrt-convert`, `java-fixtures`; `test/java/forms/provenance.edn` of `java-check-full`'s `--forms verify`),
+  not of the other steps: repr/java's every change rewrites them.
+
+**GT3, shared builds.**
+
+- *G1 the gate's build* (GTS10 (a)): `--gate-build` keeps j2g's program (`amd64/j2g`) and the version map
+  (`version.edn`) beside the executables; `bin/arbace-go --fixpoint --g1 DIR` takes DIR's executable and j2g
+  tree as G1 when DIR's key is the checkout's `gate_key`, else builds G1 as before; `bin/gate`'s fixpoint
+  passes `.tmp/arbace-go-gate` (`GATE_FRESH_G1=1`: G1 built, the clean run's hook). `go-build-full` is gone:
+  javac's tool build and Java's compiled level take the gate's executable and compiled namespaces
+  (`ARBACE_AOT_BASE`, `JAVA_CHECK_AOT`; `aot_fresh` finds the executable beside a cache's `aot/`).
+- *javac's tool by its key* (GTS11 (a)): `bin/javac-vendor tool DIR --host EXE --aot-base DIR` keeps
+  `.tmp/gate-javac/arbace-javac` while its key is the checkout's `arbace_javac_key`, else builds it
+  (`--build-java`, amd64, j2g on the gate's executable, the gate's compiled namespaces) and copies its j2g
+  log and report beside it; `bin/javac-vendor check --from DIR` reads that run's verdict (the tool of the
+  checkout's key, no class failing its analysis): javac's world translated once (twice when `reader_key`
+  changed: the first tool build that compiles repr/java's reader, as before). The old `javac` step is four:
+  `javac-tool` (a build), `javac-check`, `javac-verify`, `javac-classes`.
+- *Stage 0 by its pins* (GTS12 (a)): `bin/seed --build` keeps `target/seed` when it holds the executables
+  recorded with the seed's SHA-256, `seed/goroot.sha256`'s, `ARBACE_GOROOT` and the architectures
+  (`target/seed/pins`); `--force` or `ARBACE_SEED_FORCE=1` builds it. One build at a time: `--build` takes
+  `.tmp/seed-build.lock`, the lock `bin/lib/host.bash` holds when it calls it (`SEED_BUILD_LOCKED=1`). After
+  main's RPS95 (b) the compiled namespaces `--build` makes are kept likewise while their `aot.key` is the
+  checkout's; the gate's stage 0 is `--no-aot`.
+- *Serial by default* (GTS13 (a)): `--full`'s steps one after another in the table's order;
+  `GATE_FULL_PARALLEL=1` runs them by chain, the java chain after `javac-tool` (`GATE_FULL_SERIAL` accepted, a
+  no-op). The Makefile: `gate-full-parallel`, `gate-plan`, `gate-why STEP=...`.
+
+**The runs** (`.tmp/heavy`, beside other agents' 20-40 GB jobs; the host's `MemAvailable` fell to 0.8 GiB).
+
+| run | commit | what ran | result | time |
+|---|---|---|---|---:|
+| essential 1 | `fc524cd2` | all 13 checks, the executables built (`gate_key` narrowed: a miss) | passed | 25m14s |
+| essential 2 | `fc524cd2` | nothing changed: 13 skipped, `go-build` not needed | passed | **0m06s** |
+| `--full` 1 | `c715efe7` | all 37 (every key new: `bin/lib/version.bash` changed); javac's tool built with the reader's first build | 2 failed (below) | 276m31s |
+| `--full` 2 | `47eec789` | the two failures and the 7 steps whose inputs the fix touched: 9 run, 28 skipped; the tool kept | passed | 75m14s |
+| `--full` 3 | `47eec789` | nothing changed: 32 skipped, both builds not needed | passed | **0m04s** |
+
+The first `--full`, step by step (serial; the essential steps, then `--full`'s; wall m:s, CPU minutes, the
+largest process's peak RSS and the sampled tree's, GiB):
+
+| step | wall | CPU min | peak | tree | |
+|---|---:|---:|---:|---:|---|
+| go-build | 9:50 | 82 | 18.8 | 18.8 |  |
+| go-smoke | 2:15 | 2 | 0.7 | 0.6 |  |
+| suite-go | 2:16 | 27 | 6.5 | 10.9 |  |
+| oracle-go | 1:09 | 2 | 0.5 | 0.6 |  |
+| diffcheck | 9:40 | 95 | 26.3 | 26.3 |  |
+| goi-check | 1:37 | 12 | 0.6 | 1.9 |  |
+| goi-aot-essential | 1:27 | 5 | 0.5 | 0.4 |  |
+| java-check | 0:41 | 4 | 0.4 | 0.0 |  |
+| java-compiled | 6:02 | 37 | 18.5 | 17.7 |  |
+| suite-aot-essential | 5:09 | 25 | 19.4 | 19.3 |  |
+| programs | 2:48 | 30 | 18.7 | 18.7 |  |
+| generated | 0:03 | 0 | 0.4 | 0.0 |  |
+| j2g-edge | 1:30 | 11 | 2.9 | 1.9 |  |
+| reap | 0:02 | 0 | 0.4 | 0.0 |  |
+| javac-tool | 8:47 | 99 | 19.9 | 25.6 |  |
+| javac-check | 0:00 | 0 | 0.0 | 0.0 |  |
+| javac-verify | 2:21 | 10 | 7.9 | 7.7 |  |
+| javac-classes | 3:04 | 7 | 3.2 | 3.2 |  |
+| repr-java | 3:03 | 88 | 11.1 | 11.4 |  |
+| repr-java-roundtrip | 9:25 | 29 | 28.1 | 28.1 |  |
+| jrt-convert | 4:51 | 11 | 25.2 | 24.2 | failed |
+| java-fixtures | 0:27 | 0 | 1.0 | 0.6 |  |
+| repr-java-parse | 4:41 | 43 | 2.0 | 2.0 |  |
+| repr-java-front | 9:43 | 28 | 28.8 | 28.8 |  |
+| repr-java-attr | 13:03 | 40 | 40.1 | 40.1 |  |
+| java-check-full | 91:04 | 1011 | 35.0 | 38.2 | failed |
+| fixpoint | 12:37 | 64 | 19.0 | 18.8 |  |
+| suite-aot | 8:37 | 115 | 22.5 | 21.5 |  |
+| programs-full | 6:31 | 69 | 19.0 | 18.6 |  |
+| repr-go | 8:57 | 161 | 11.4 | 26.4 |  |
+| repr-go-native | 52:49 | 488 | 27.7 | 27.7 |  |
+| goi | 8:06 | 39 | 5.0 | 5.0 |  |
+| goi-aot | 7:56 | 29 | 1.2 | 0.6 |  |
+| repr-clojure | 0:54 | 3 | 0.5 | 0.5 |  |
+
+Against REAP9's run 4 (§2.1): the fixpoint 20:45 to **12:37** (G1 not built; G1 = G2 = G3 byte for byte, G1
+having been built at the same commit); `go-build-full` (4:56) gone; javac's 12:07 is now `javac-tool` 8:47
+(two translations of javac's world here, `reader_key` having changed; 8:27 and one translation in an
+earlier attempt, 0:00 when kept, as in `--full` 2) plus `javac-check` 0:00 (the tool build's report),
+`javac-verify` 2:21 and `javac-classes` 3:04; stage 0 0:00 (kept by its pins; 2:03 in run 4). The rest
+moved with the host's load: the runs shared it with other agents' 20-40 GB jobs, `diffcheck` and
+`suite-aot` ran on caches that missed, `java-check-full` took 91:04 (70:07 in `--full` 2, 71:42 in run 4).
+**Memory** (GT1's first measurements): above 25 GiB `repr-java-attr` 40.1, `java-check-full` 35.0 (tree
+38.2), `repr-java-front` 28.8, `repr-java-roundtrip` 28.1, `repr-go-native` 27.7, `diffcheck` 26.3,
+`jrt-convert` 25.2 (27.4 in `--full` 2); about 19-22 GiB every whole-program j2g (`go-build`,
+`java-compiled`, `suite-aot-essential`, `programs`, `javac-tool`, `fixpoint`, `suite-aot`, `programs-full`);
+the lights under 12 GiB. The first essential run's gate tree reached 44.9 GiB (its concurrent j2g steps
+under `J2G_LOCK` beside the suite's 12 processes) with the host's `MemAvailable` at 1.1 GiB.
+
+The second `--full` was right after the first but for one commit (the fourth provenance file, below); the
+third, with nothing changed, skipped every check in 4 seconds (after waiting for the host's big-job lock).
+A doc-only change afterwards (this section): `bin/gate --full --plan` ran every check `skip`
+("gate plan (full): 37 steps; 3 always, 32 skip, 2 none", in about 5 s).
+
+**Slips and findings.** The four provenance files' `:repr-java` hash was stale on main since `8d621e91`
+(the scripts' sweep edited `bin/repr-java`, which `repr_java_reader_hash` covers, without rewriting them):
+`javac-vendor verify` and `java-check --forms verify` failed on it; the hashes were brought to the reader's
+(the forms verified equal byte for byte), and main's JN9e merge rewrote them since. `jrt-convert` was
+killed by the kernel in the first full run (its read at 25.4 GB with the host's `MemAvailable` at 2.2 GB:
+another agent's job beside it); rerun alone in the second, it passed. Two full attempts were stopped by
+hand to fix the gate (the provenance, then the runtime key): their essential passes stayed valid.
+
+## Proposals (GTS21-GTS29)
+
+- **GTS21 Stale provenance caught early.**
+  - Options: (a) an essential step `provenance` (seconds): the `:repr-java` hash of the four provenance
+    files (`jdk/`, `jdk/javac/`, `test/java-fixtures/`, `test/java/forms/`) equal to
+    `repr_java_reader_hash`, keyed on the reader's sources and the four files; (b) left to the verifies of
+    `--full`.
+  - *Recommended: (a)*: the staleness of `8d621e91` (a script's edit inside the reader's hash) passed every
+    essential gate and failed two `--full` steps a day later; the check is a hash comparison.
+- **GTS22 The gate's logic in every key.**
+  - Options: (a) the logic narrowed to what decides a step's outcome: `test/gate/plan.ae` and a runner
+    `bin/lib/gate-run.bash` (`step`, `run_one`, the pass record), with `bin/gate`'s header, summary and
+    option parsing out of the keys; (b) as built: `bin/gate` and the planner in every key.
+  - *Recommended: (a)*: today a comment in `bin/gate` reruns every step (four hours); the header is most of
+    the file and changes with every step added.
+- **GTS23 `bin/lib`'s scripts in every key.**
+  - Options: (a) each step's libraries declared (its scripts' `.` lines: `tmpdir`, `host`, `tools`,
+    `version`, ...), confirmed by GT4's audit; (b) as built: `bin/lib/*.bash` in every step (`:lib`).
+  - *Recommended: (a) with GT4*: the runtime key's fix in `version.bash` cost a full rerun; the audit names
+    which steps read which library.
+- **GTS24 The gate's executables shared by the worktrees.**
+  - Options: (a) `.tmp/arbace-go-gate` keyed by `gate_key` in the main checkout's `.tmp/` (as the store),
+    one directory per key, the last few kept; (b) per checkout, as built.
+  - *Recommended: (a)*: a worktree whose checks all skip already needs no build, but one check that runs
+    there rebuilds the executables (10-15 minutes, 20 GiB) that main's checkout holds at the same key.
+- **GTS25 The heavy steps under the host's lock, per step.**
+  - Options: (a) a `:heavy` step's command run under `GATE_HEAVY_CMD` (the host's slot or big-job lock,
+    `flock .tmp/big.lock`), the gate itself not: the table makes it one line in `run_one`; (b) the whole
+    gate under the lock, as the host's rule asks today; (c) GT6's `ARBACE_HEAVY_LOCK` inside the tools.
+  - *Recommended: (a) now, (c) in GT6*: the third `--full`, four seconds of work, waited 100 minutes for the
+    lock; `:heavy` and the measured peaks (`:mem-gib`, below) are in the table already.
+- **GTS26 The measured peaks into the table.**
+  - Options: (a) `:mem-gib` of every step from the first `--full`'s `.mem` files (§"The runs"), `:heavy`
+    for every step above 8 GiB, refreshed at each clean run (GT7); (b) by hand when a step is killed.
+  - *Recommended: (a)*: GT6's scheduler (GTS13 (b)) and GTS25 read them; three steps the table had as light
+    (`repr-java-attr` 40 GiB, `java-check-full` 35, `repr-java-roundtrip` 28) are among the heaviest.
+- **GTS27 The store's growth.**
+  - Options: (a) `bin/gate --prune`: per step the last 5 passes and every pass younger than 30 days kept
+    (the logs are most of it: 37 steps' logs about 60 MB a `--full`); (b) none.
+  - *Recommended: (a)*: the store only saves time; old keys never match again once their inputs moved.
+- **GTS28 javac's world translated twice when `reader_key` changes.**
+  - Options: (a) `reader_key` over repr/java's sources, c2j's, the runtime key and javac's world, not every
+    embedded source (`aot_key`), so that an embedded namespace's change keeps the compiled reader; (b) as
+    built.
+  - *Recommended: (a), once checked*: the reader's compiled units name the runtime's classes and c2j's
+    output, not the other namespaces' code; to be confirmed by building the tool from a kept reader after
+    an unrelated namespace's change (a byte-for-byte check against a fresh one).
+- **GTS29 The table checked.**
+  - Options: (a) the planner fails on an input rule that matches no file (a typo or a moved path), a
+    `:needs` or `:start-after` naming no step, a host absent from `hosts.edn`, a `:cmd`'s `bin/` script
+    missing, as `make check-makefile` checks the Makefile; (b) as built: unknown groups and hosts fail,
+    the rest silently selects nothing.
+  - *Recommended: (a)*: a rule that matches nothing makes a key that never changes, a stale pass waiting.
