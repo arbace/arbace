@@ -564,7 +564,6 @@
             ;; a receiver that cannot be translated (a field of a class outside the closed world:
             ;; JN7's xerces), so neither can the call
             (let [t (:target node)] (when (and (map? t) (:op t)) (missing-reason t)))
-            (when (and (= :special (:kind node)) (:outer-super node)) "an outer class's super call")
             (when (and (m/hand-written? mowner) (not= mowner "java/lang/Object")
                        (not (m/throwable-print-helper mowner (:name node) (:desc node))))
               (let [base (nm/method-base (:name node) (:desc node))]
@@ -1144,6 +1143,11 @@
                      (:x av) (:x iv) (map :x vs))]
         (vh-result x (case m :set "V" et) r)))))
 
+(def ^:private box-prims
+  "A box class's descriptor -> its primitive's Go type (a constant label's Box)."
+  {"Ljava/lang/Integer;" "int32" "Ljava/lang/Character;" "uint16" "Ljava/lang/Short;" "int16"
+   "Ljava/lang/Byte;" "int8" "Ljava/lang/Long;" "int64"})
+
 (defn invoke-val [node]
   (let [{:keys [kind owner name desc]} node
         mm (:method node)
@@ -1184,6 +1188,32 @@
                               (m/class-sym (pkg) mowner (str "_" base "_NoInit"))
                               :else (m/class-sym (pkg) mowner (str "_" base)))
                    (map :x args))))
+
+      ;; Outer.super.m() (javac's access$N01 holds an invokespecial on the outer instance):
+      ;; the super call with the outer instance as the receiver, through its class's struct
+      ;; (JC4b)
+      (and (= kind :special) (:outer-super node))
+      (let [[tv & args] (operands (cons (:target node) (:args node)) (cons nil ps))
+            oc (t/desc->internal (:t tv))
+            ox (if (:nn tv) (:x tv) (list (jsym "NN") (:x tv)))
+            ostruct (if (m/leaf? oc) ox (list (symbol (str ".Self_" (m/go-name oc))) ox))
+            sstruct (list (symbol (str ".-" (m/go-name (:super (a/decl oc))))) ostruct)]
+        (cond
+          (m/interface? mowner)
+          (rv (apply list (m/class-sym (pkg) mowner (str "_" base)) ox (map :x args)))
+          (= mowner "java/lang/Object")
+          (case name
+            "toString" (rv (list (jsym "Object_toString") ox))
+            "hashCode" (rv (list (jsym "IdentityHash") ox))
+            "equals" (rv (list '== (coerce ox (:t tv) "Ljava/lang/Object;" true) (:x (first args))))
+            (fail (str "an outer class's super call of Object." name)))
+          (m/hand-written? mowner)
+          (let [ms (arbace.j2g.jrt/struct-methods (:jrt m/*w*) (m/go-name mowner))]
+            (if (contains? ms (nm/impl-name base))
+              (rv (apply list (symbol (str ".Impl_" base)) sstruct ox (map :x args)))
+              (rv (apply list (symbol (str "." base)) sstruct (map :x args)))))
+          :else
+          (rv (apply list (symbol (str ".Impl_" base)) sstruct ox (map :x args)))))
 
       (= kind :special)
       (let [[_ args] (args-for desc (:args node))
@@ -2001,9 +2031,15 @@
                          (cond
                            (:enum l) (list '== (:x sel) (m/class-sym (pkg) (t/desc->internal st) (str "_" (:enum l))))
                            :else (let [c (:const l)]
-                                   (if (string? c)
+                                   (cond
+                                     (string? c)
                                      (list '.Equals_O__Z (use-sym! (string-lit c)) (coerce (:x sel) st "Ljava/lang/Object;" false))
-                                     (missing-expr "a constant pattern label" "Z")))))
+                                     ;; a constant of a box's primitive (case 1 on an Integer, case 'a'
+                                     ;; on a Character: JLS 14.11.1; JC4b): the box's equals
+                                     (and (or (number? c) (char? c)) (box-prims st))
+                                     (list '.Equals_O__Z (:x sel)
+                                           (list (jsym "Box") (list 'conv (symbol (box-prims st)) (if (char? c) (int c) c))))
+                                     :else (missing-expr "a constant pattern label" "Z")))))
             arms (with-block
                    (fn []
                      (if null-ci

@@ -123,7 +123,16 @@
         (let [n (str/replace s "." "/")] (when (class-exists? n) n))
 
         :else
-        (or (get (:local-classes scope) sym)
+        (or (when-let [lc (get (:local-classes scope) sym)]
+              ;; a member class of a class nested in the local class's method shadows it (JLS
+              ;; 6.4.1: the anonymous class's own Local in NameCollision2; JC4b): the classes
+              ;; from the scope's out to the one whose method declares the local class
+              (let [home (some-> (decl lc) :outer)]
+                (or (loop [c (:class scope)]
+                      (when-let [d (and c (not= c home) (decl c))]
+                        (or (get (:member-classes d) s)
+                            (recur (:outer d)))))
+                    lc)))
             (loop [c (:class scope)]
               (when-let [d (and c (decl c))]
                 (or (when (= s (:simple d)) (when (not= :anon (:nesting d)) c))
@@ -3492,6 +3501,25 @@
                         (apply dissoc (:bounds m) (keys env))))]
     (mapv #(t/erase bounds (t/subst env %)) (:params m))))
 
+(defn- param-keys
+  "The parameters of method m of class c, as a member of class n, for matching an override:
+  erased, but a parameter of one of m's own type variables with several bounds as the set of its
+  bounds' erasures (JLS 8.4.4: <T extends A & B> and <T extends B & A> are the same type
+  parameter; javac's bridge then calls the reordered override: ReorderedBoundsTest, JC4b)."
+  [n envs c m]
+  (let [env (if (= c n) {} (or (get envs c) {}))
+        bounds (if (= c n)
+                 (merge (:bounds (decl n)) (:bounds m))
+                 (merge (:bounds (decl n))
+                        (apply dissoc (:bounds m) (keys env))))]
+    (mapv (fn [p]
+            (let [p (t/subst env p)
+                  bs (when (= :tvar (:t p)) (get (:bounds m) (:sym p)))]
+              (if (next bs)
+                (set (map #(t/erase bounds %) bs))
+                (t/erase bounds p))))
+          (:params m))))
+
 (defn add-bridges!
   "Adds javac's bridge methods to class n (TransTypes.addBridgeIfNeeded): for each method meth
   of a supertype whose implementation in n has another erasure, unless a bridge with meth's
@@ -3541,7 +3569,8 @@
                                                       (or (= c n) (not (has? (:flags mm) Opcodes/ACC_PRIVATE)))
                                                       (or (= c n) (has? (:flags mm) (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_PROTECTED))
                                                           (= (t/package-of c) (t/package-of n)))
-                                                      (= mps (erased-params n envs c mm)))
+                                                      (or (= mps (erased-params n envs c mm))
+                                                          (= (param-keys n envs s meth) (param-keys n envs c mm))))
                                              (assoc mm :impl-owner c)))
                                          (members c)))
                                  chain)]
@@ -4262,8 +4291,9 @@
                                      acc {:owner rn :name (:name c) :desc (str "()" (:desc c))}]
                                  [(conj cps {:accessor acc :pattern p}) actx]))
                              [[] actx] (map vector comps (rest form)))]
-      [{:kind :record :class rd :comps cps
-        :test (not (and (t/ref? st) (env/assignable? st rd)))} actx])
+      ;; a record pattern never matches null (JLS 14.30.2): tested even when the static
+      ;; type is the record's, so that a null component fails a nested one (JC4b)
+      [{:kind :record :class rd :comps cps :test true} actx])
 
     :else (fail (str "Bad pattern: " (pr-str form)))))
 

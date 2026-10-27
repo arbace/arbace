@@ -279,13 +279,19 @@ java.security and java.text.
   `OutputStream`, `APersistentMap`, `ThreadLocal`, `BufferedWriter`): a class extending another
   class of the world is refused when defined ("cannot extend ... yet"). Leaf classes
   (`UnsupportedOperationException`) cannot get a DynSub type without changing their translation.
-  Each addition costs about 0.5 MB.
+  Each addition costs about 0.5 MB. Since JC4b (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built:
+  JC4b") the list is `arbace.j2g.model/class-supers` with 42 more classes (`Thread`, the
+  collections, the streams, `AssertionError`, `Calendar`, `Observable`, `AbstractQueuedSynchronizer`
+  ...; translated leaves among them made non-leaves), about 16 MB of the executable, and their
+  protected instance members are reachable (the world's signatures' `:protected`,
+  `Host.superCall`, `Host.superField`); jrt's hand-written leaves (`WeakReference`,
+  `AtomicReference`) still are not.
 - **Stack traces** show no interpreted frames (the evaluator's do, EVAL-NOTES "Stack traces");
   `CF$Frame` would need the method and the line.
 - **Reflection's view**: `getDeclaredMethods` of an interpreted class lists the inherited methods
   it was given for dispatch; protected and package-private members of classes of the world are
   not reachable (jrt's member tables list public ones), so Java forms using them fail when
-  defined.
+  defined, but for the extendable classes' protected instance members since JC4b (above).
 - Assertions are always disabled (the JVM's
   default); javac's accessors are not made (no access checks at run time); serializable lambdas
   cannot be deserialized; varargs method references; annotations of classes of the world
