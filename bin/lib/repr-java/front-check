@@ -10,8 +10,9 @@
 # converter's code (WORK/static.edn). Run through bin/repr-java front-check (from the repository root);
 # writes only under .tmp/repr-java-front-check/ (REPR_JAVA_FRONT_WORK).
 #
-# Usage: bin/repr-java front-check [--corpus C,...] [--attr native]
+# Usage: bin/repr-java front-check [--corpus C,...] [--attr native | --no-javac]
 #        bin/repr-java attr-check [--corpus C,...]   (front-check --attr native)
+#        bin/repr-java nojavac-check [--corpus C,...] (front-check --no-javac)
 # With --attr native (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9a"; bin/repr-java attr-check), the
 # native trees' scope and declarations tiers are answered by the native provider (arbace.repr.java.nattr:
 # arbace.repr.java.decls and arbace.repr.java.scope over the native trees and the platform's class
@@ -22,6 +23,15 @@
 # (WORK/split.md); work under .tmp/repr-java-attr-check/. Since JN9b the provider answers the members
 # and types tiers too (arbace.repr.java.expr, arbace.repr.java.types), and the model's reads that bridge
 # (a native object's read answered by javac's symbol) must be the known file's :bridges (JFS94 (b)).
+# With --no-javac (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9e"; bin/repr-java nojavac-check), each
+# corpus is read twice: by javac's trees (read --front javac, the reference, into .../javac) and without
+# javac (read --no-javac: the native parser's trees and the native provider's answers alone, a file that
+# meets what only javac answers converted again with javac, counted: OUT/repr-java-nojavac.edn, into
+# .../native), the forms equal byte for byte (but test/repr/java/nojavac-check-known.edn's files), the
+# reads without javac timed (their wall times summed in WORK/CORPUS.time; the peak memory, each read's
+# process's own, in its repr-java-nojavac.edn); the files, fallbacks by reason,
+# time and memory summed by corpus (WORK/nojavac.md, nojavac.edn); an inference size limit that fired
+# (JFS113 (c)) fails it; work under .tmp/repr-java-nojavac-check/.
 # Corpora (default samples,baseline,jdk,javac; all adds jdk26u):
 #   samples   test/repr/java/java and test/repr/java/module (14 files), as bin/repr-java check reads them
 #   baseline  the frozen clojure/ (183 files), as bin/repr-java check reads it
@@ -46,16 +56,23 @@ cd "$root"
 
 corpora=samples,baseline,jdk,javac
 attr=
+nojavac=
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) corpora=$2; shift 2 ;;
+    --no-javac) nojavac=1; shift ;;
     --attr) attr=$2; shift 2
             [ "$attr" = native ] || { echo "front-check: --attr native (or none)" >&2; exit 2; } ;;
-    *) sed -n '12,13p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '12,14p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 [ "$corpora" = all ] && corpora=samples,baseline,jdk,javac,jdk26u
-if [ -n "$attr" ]; then
+if [ -n "$nojavac" ]; then
+  [ -z "$attr" ] || { echo "front-check: --attr native or --no-javac, not both" >&2; exit 2; }
+  work=${REPR_JAVA_FRONT_WORK:-$root/.tmp/repr-java-nojavac-check}
+  known=test/repr/java/nojavac-check-known.edn
+  attr_opts=()
+elif [ -n "$attr" ]; then
   work=${REPR_JAVA_FRONT_WORK:-$root/.tmp/repr-java-attr-check}
   known=test/repr/java/attr-check-known.edn
   attr_opts=(--attr native)
@@ -89,7 +106,14 @@ same() {
 read_both() {
   local d=$1; shift
   rm -rf "$d"; mkdir -p "$d"
-  bin/repr-java read --check --front both --split "${attr_opts[@]}" --native-out "$d/native" "$d/javac" "$@" > "$d.log" 2>&1
+  if [ -n "$nojavac" ]; then
+    bin/repr-java read --check --front javac "$d/javac" "$@" > "$d.log" 2>&1
+    local t0; t0=$(date +%s.%N)
+    bin/repr-java read --check --no-javac "$d/native" "$@" >> "$d.log" 2>&1
+    awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN {printf "%.1f\n", b - a}' > "$d.time"
+  else
+    bin/repr-java read --check --front both --split "${attr_opts[@]}" --native-out "$d/native" "$d/javac" "$@" > "$d.log" 2>&1
+  fi
   same "$d" "$d.log"
 }
 
@@ -98,7 +122,14 @@ read_both() {
 read_jdk() {
   local d=$1 m=$2 src=$3 threads=$4 all=${5:-}
   rm -rf "$d"; mkdir -p "$d"
-  jdk_read "$threads" "$all" --front both --split "${attr_opts[@]}" --native-out "$d/native" "$d/javac" "$m" "$src" > "$d.log" 2>&1
+  if [ -n "$nojavac" ]; then
+    jdk_read "$threads" "$all" --front javac "$d/javac" "$m" "$src" > "$d.log" 2>&1
+    local t0; t0=$(date +%s.%N)
+    jdk_read "$threads" "$all" --no-javac "$d/native" "$m" "$src" >> "$d.log" 2>&1
+    awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN {printf "%.1f\n", b - a}' > "$d.time"
+  else
+    jdk_read "$threads" "$all" --front both --split "${attr_opts[@]}" --native-out "$d/native" "$d/javac" "$m" "$src" > "$d.log" 2>&1
+  fi
   same "$d" "$d.log"
 }
 
@@ -156,6 +187,10 @@ for c in ${corpora//,/ }; do
     *) echo "front-check: no corpus $c (samples, baseline, jdk, javac, jdk26u)" >&2; exit 2 ;;
   esac
   n=$(find "$work/$c" -name '*.ae' -path '*/javac/*' | wc -l)
+  # the reads without javac's time: wall times summed, the peak the largest
+  if [ -n "$nojavac" ]; then
+    find "$work/$c" -maxdepth 2 -name '*.time' -exec cat {} + | awk '{w+=$1} END {printf "%.1f\n", w}' > "$work/$c.time"
+  fi
   # the differing files against the known ones (test/repr/java/front-check-known.edn)
   find "$work/$c" -maxdepth 2 -name '*.differ' -exec cat {} + | LC_ALL=C sort > "$work/$c.differ"
   arbace_tool -e "(let [k (get (read-string (slurp \"$known\")) :$c)] (doseq [f (sort (if (map? k) (:forms k) k))] (println f)))" \
@@ -169,16 +204,24 @@ for c in ${corpora//,/ }; do
   else
     verdict=equal
   fi
-  echo "$c: $n forms files from javac's trees, the native trees' $verdict [$((SECONDS - t0)) s]"
+  echo "$c: $n forms files from javac's trees, the native trees'${nojavac:+ (read without javac)} $verdict [$((SECONDS - t0)) s]"
   case $verdict in DIFFERENT*) LC_ALL=C comm -23 "$work/$c.differ" "$work/$c.known" | head -20 ;; esac
   for l in $(find "$work/$c" -maxdepth 2 -name '*.log' | LC_ALL=C sort); do echo "  ${l#"$work/"}: $(summary_line "$l")"; done
 done
 # the split, by corpus, and the static split of the converter's code
 dirs=()
 for c in ${corpora//,/ }; do [ -d "$work/$c" ] && dirs+=("$work/$c"); done
-arbace_tool -m arbace.repr.java.split summary "$work" "${dirs[@]}" > "$work/split.log" 2>&1 || { tail -5 "$work/split.log"; status=1; }
-arbace_tool -m arbace.repr.java.split static > "$work/static.edn" 2>&1 || status=1
-echo "the split: $work/split.md; the static split: $work/static.edn"
+if [ -z "$nojavac" ]; then
+  arbace_tool -m arbace.repr.java.split summary "$work" "${dirs[@]}" > "$work/split.log" 2>&1 || { tail -5 "$work/split.log"; status=1; }
+  arbace_tool -m arbace.repr.java.split static > "$work/static.edn" 2>&1 || status=1
+  echo "the split: $work/split.md; the static split: $work/static.edn"
+fi
+if [ -n "$nojavac" ]; then
+  arbace_tool -m arbace.repr.java.split nojavac "$work" "${dirs[@]}" > "$work/nojavac.log" 2>&1 || status=1
+  cat "$work/nojavac.log"
+  grep -q '^nojavac: .* beyond the known' "$work/nojavac.log" && status=1
+  echo "the read without javac: $work/nojavac.md"
+fi
 if [ -n "$attr" ]; then
   # the native provider's check: its outcomes by corpus, no fact different beyond the known counts
   arbace_tool -m arbace.repr.java.split attr "$work" "$known" "${dirs[@]}" > "$work/attr.log" 2>&1 || status=1
@@ -186,7 +229,9 @@ if [ -n "$attr" ]; then
   grep -q '^attr: .* beyond the known' "$work/attr.log" && status=1
   echo "the native provider's outcomes: $work/attr.md"
 fi
-if [ -n "$attr" ]; then
+if [ -n "$nojavac" ]; then
+  [ $status = 0 ] && echo "nojavac-check: the reads without javac's forms equal javac's, in every corpus" || echo "nojavac-check: FAILED"
+elif [ -n "$attr" ]; then
   [ $status = 0 ] && echo "attr-check: the native provider's facts equal javac's, and the forms, in every corpus" || echo "attr-check: FAILED"
 else
   [ $status = 0 ] && echo "front-check: the native trees' forms equal javac's in every corpus" || echo "front-check: FAILED"

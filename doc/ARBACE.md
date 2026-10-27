@@ -36,6 +36,12 @@ code. Three kinds of things live here:
   `code/{Type,Types,Symbol}.java`, `jvm/ClassReader.java`, `tree/TreeInfo.java` and `util/GraphUtils.java`
   at the same commit (LICENSE.md names the functions), by hand on 2026-10-25, the files carrying their
   notice; "As built: JN9d" (`repr/java/sym.ae`, the native symbols' type, JFS107 (b), is Arbace's own);
+  and its read without javac and last declines, in `expr.ae`, `overload.ae`, `decls.ae`, `attr.ae` and
+  `model.ae`, reimplement parts of `comp/{Flow,Check,Attr,TypeEnter,MemberEnter}.java` and
+  `code/{ClassFinder,Types,Symbol}.java` at the same commit (LICENSE.md names the functions), by hand on
+  2026-10-27, the files carrying their notice; "As built: JN9e" (the read without javac itself,
+  `repr/java.ae`'s `convert-units-nojavac`, `resolve.ae`'s native class infos and `split.ae`'s summary,
+  is Arbace's own);
   `repr/java/classfile.ae`, `nattr.ae` are Arbace's own), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
   `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
   `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,

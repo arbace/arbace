@@ -32,6 +32,12 @@
                          platform's class files) and javac for the rest, each native answer
                          checked against javac's, the outcomes by fact and the first differences
                          into OUT/repr-java-attr.edn (of the native conversion)
+      --no-javac         a read without javac (JFS111 (b), \"As built: JN9e\"): the native parser's
+                         trees, the native provider's answers alone (with --front native --attr
+                         native implied); a file whose conversion meets what only javac answers
+                         is converted again with javac (counted by reason), so that the forms stay
+                         javac's; the files, fallbacks, time and peak memory into
+                         OUT/repr-java-nojavac.edn
 
   bin/repr-java read-jdk [options] OUT MODULE SRC [PATH...]
     The same for a module of the JDK itself (java.base: jdk/, bin/jrt-convert), attributed with
@@ -146,10 +152,10 @@
          :error (str (.getName (class e)) ": " (.getMessage e))
          :trace (vec (take 12 (filter #(re-find #"arbace" %) (map str (.getStackTrace e)))))}))))
 
-(defn- native-units
-  "The native units of javac's `units`, parsed and entered in a registry of the run (javac options
+(defn- registry-units
+  "The native trees `trees` ([tree source] pairs) entered in a registry of the run (javac options
   `opts`: the source path or the patched module's directories, and the module, are the registry's)."
-  [units opts]
+  [trees opts]
   (let [{:keys [sp module patch]} (loop [[a b & more :as os] opts acc {}]
                                     (case a
                                       nil acc
@@ -159,14 +165,19 @@
                                       (recur (next os) acc)))
         dirs (concat (when patch (str/split patch (re-pattern (java.util.regex.Pattern/quote File/pathSeparator))))
                      (when sp (str/split sp (re-pattern (java.util.regex.Pattern/quote File/pathSeparator)))))
-        trees (mapv (fn [^com.sun.tools.javac.tree.JCTree$JCCompilationUnit cu]
-                      (let [src (.getName (.getSourceFile cu))]
-                        [(parse/parse (javac/source-text cu) src) src]))
-                    units)
         ;; sources with a module declaration are that module's
         module (or module (some (fn [[t _]] (some #(when (= :MODULEDEF (:tag %)) (decls/tree-name-of (:qualId %))) (:defs t))) trees))
         reg (decls/registry {:platform (System/getenv "REPR_JAVA_PLATFORM") :module module :source-dirs dirs})]
-    (mapv (fn [[t src]] (decls/enter-unit! reg {:tree t :file src})) trees)))
+    (mapv (fn [[t src]] (when t (decls/enter-unit! reg {:tree t :file src}))) trees)))
+
+(defn- native-units
+  "The native units of javac's `units`, parsed and entered in a registry of the run (registry-units)."
+  [units opts]
+  (registry-units (mapv (fn [^com.sun.tools.javac.tree.JCTree$JCCompilationUnit cu]
+                          (let [src (.getName (.getSourceFile cu))]
+                            [(parse/parse (javac/source-text cu) src) src]))
+                        units)
+                  opts))
 
 (defn convert-units
   "Analyze the Java `files` with javac options `opts` and convert every compilation unit (in mode
@@ -202,6 +213,79 @@
           :javac (run false split stats)
           :native (run true split stats)
           :both (assoc (run false false stats) :native (run true split nstats)))))))
+
+(defn- peak-rss
+  "The process's peak resident memory in bytes (VmHWM), or nil."
+  []
+  (try (some->> (slurp "/proc/self/status") (re-find #"VmHWM:\s+(\d+) kB") second Long/parseLong (* 1024))
+       (catch Throwable _ nil)))
+
+(defn convert-units-nojavac
+  "A read without javac (`--no-javac`, JFS111 (b), \"As built: JN9e\"): the Java `files` parsed by the
+  native parser, entered in a registry of the run (javac options `opts`: its source path or patched
+  module), each unit converted with the native provider's answers alone (arbace.repr.java.decls's
+  *no-javac*); a unit whose conversion meets what only javac answers (a declined fact, a javac-only
+  read of the model, a lean on javac's choice, a parse error or a failure) is converted again with
+  javac (convert-units on those files, javac's trees: the fallback, counted by reason). Returns
+  convert-units' map with :nojavac {:files :native :fallbacks [{:source :reason}] :ms}."
+  [files opts rename & [full split]]
+  (let [t0 (System/nanoTime)
+        texts (mapv (fn [f] (try (slurp f :encoding "UTF-8") (catch Throwable _ nil))) files)
+        parsed (mapv (fn [f text]
+                       (try [(parse/parse text f) f nil]
+                            (catch Throwable e [nil f (str "the native parser: " (.getName (class e)))])))
+                     files texts)
+        nunits (registry-units (mapv (fn [[t f]] [t f]) parsed) opts)
+        stats (atom {})
+        check (atom {})
+        diffs (atom [])
+        results
+        (binding [jt/*rename* (rename-fn rename)
+                  cv/*stats* stats]
+          (vec (map (fn [[t src perr] text nunit]
+                      (if perr
+                        {:fallback perr :source src}
+                        (try
+                          (let [t1 (System/nanoTime)
+                                prov (nattr/provider nunit nil check diffs)
+                                u (binding [decls/*no-javac* true
+                                            attr/*measure* split
+                                            attr/*counts* (when split stats)
+                                            attr/*provider* prov]
+                                    (cv/convert-unit nil {:full full :tree t :text text :source src}))]
+                            (swap! check #(merge-with (partial merge-with +) % (nattr/reads prov)))
+                            (assoc u :source src :ms (quot (- (System/nanoTime) t1) 1000000)))
+                          (catch Throwable e
+                            (when (seq (System/getenv "REPR_JAVA_NOJAVAC_TRACE"))
+                              (binding [*out* *err*]
+                                (println "fallback" src (decls/javac-needed-reason e))
+                                (doseq [f (take 30 (filter #(re-find #"arbace" (str %)) (.getStackTrace e)))] (println "  " (str f)))))
+                            {:fallback (decls/javac-needed-reason e) :source src}))))
+                    parsed texts nunits)))
+        fallbacks (filterv :fallback results)
+        native-ms (quot (- (System/nanoTime) t0) 1000000)
+        fb (when (seq fallbacks)
+             (convert-units (mapv :source fallbacks) opts rename full :javac split))]
+    {:units (into (vec (remove :fallback results)) (:units fb))
+     :failures (vec (:failures fb))
+     :errors (vec (:errors fb))
+     :stats (merge-with + @stats (:stats fb))
+     :attr-check @check :attr-diffs @diffs
+     :nojavac {:files (count files) :native (- (count files) (count fallbacks))
+               :fallbacks (mapv #(select-keys % [:source :fallback]) fallbacks)
+               :native-ms native-ms
+               :ms (quot (- (System/nanoTime) t0) 1000000)}}))
+
+(defn- nojavac-report
+  "Write OUT/repr-java-nojavac.edn: the read without javac's files, fallbacks by reason, time and peak
+  memory; print its line."
+  [out nj]
+  (let [by (frequencies (map :fallback (:fallbacks nj)))
+        r (assoc nj :by-reason (into (sorted-map) by) :peak-rss (peak-rss))]
+    (io/make-parents (io/file out "repr-java-nojavac.edn"))
+    (spit (io/file out "repr-java-nojavac.edn") (with-out-str (pp/pprint r)))
+    (println (format "no javac: %d files, %d native, %d fallbacks to javac; %s"
+                     (:files nj) (:native nj) (count (:fallbacks nj)) (pr-str by)))))
 
 (defn- out-file-name
   "The output file name for unit `u`: the Java file's base name, with _class appended when the
@@ -340,7 +424,7 @@
     {:failures failures :unreadable unreadable :errors errors}))
 
 (defn convert
-  [out root paths {:keys [rename javac-opts check origins front native-out split attr]}]
+  [out root paths {:keys [rename javac-opts check origins front native-out split attr no-javac]}]
   (let [root (.getCanonicalPath (io/file root))
         paths (if (seq paths)
                 (map #(if (.isAbsolute (io/file %)) % (str root "/" %)) paths)
@@ -351,7 +435,9 @@
         origin-names (when origins (with-open [r (PushbackReader. (io/reader origins))] (binding [*read-eval* false] (read r))))
         t0 (System/nanoTime)
         front (keyword (or front "javac"))
-        r (convert-units files (into ["-sourcepath" root] javac-opts) rename *full* front split (= attr "native"))
+        r (if no-javac
+            (convert-units-nojavac files (into ["-sourcepath" root] javac-opts) rename *full* split)
+            (convert-units files (into ["-sourcepath" root] javac-opts) rename *full* front split (= attr "native")))
         origin (fn [units]
                  (if origin-names
                    (vec (for [u units
@@ -361,6 +447,7 @@
                    units))
         {:keys [units failures errors stats]} r
         nat (when (= front :native) r)
+        _ (when-let [nj (:nojavac r)] (nojavac-report out nj))
         res (finish out files (origin units) failures errors stats check t0 (and split (not= front :both))
                     (when (and nat (:attr-check nat)) {:check (:attr-check nat) :diffs (:attr-diffs nat)}))]
     (if-let [n (:native r)]
@@ -387,7 +474,7 @@
   part of module `module` against the running JDK's compiled classes. The files are copied
   into patch directories under .tmp, one per chunk of packages, so javac takes everything else
   from the system image; the chunks are converted in parallel."
-  [out module module-src paths {:keys [javac-opts check origins front native-out split attr] :as opts}]
+  [out module module-src paths {:keys [javac-opts check origins front native-out split attr no-javac] :as opts}]
   (let [src (.getCanonicalPath (io/file module-src))
         ;; the name each converted file's header gives its source: the original file, not the
         ;; copy in the numbered patch directory (which depends on the chunking); with
@@ -433,11 +520,12 @@
                                              (for [[j _] work :when (not= j i)] (.getCanonicalPath (patch-of j))))))
                      copies (get copies-of i)]
                  (try
-                   (convert-units copies
-                                  (into ["--patch-module" (str module "=" ppath)
-                                         "-implicit:none" "--enable-preview" "-source" "26"]
-                                        javac-opts)
-                                  (:rename opts) full? front split (= attr "native"))
+                   (let [jopts (into ["--patch-module" (str module "=" ppath)
+                                      "-implicit:none" "--enable-preview" "-source" "26"]
+                                     javac-opts)]
+                     (if no-javac
+                       (convert-units-nojavac copies jopts (:rename opts) full? split)
+                       (convert-units copies jopts (:rename opts) full? front split (= attr "native"))))
                    (catch Throwable e
                      {:failures (mapv (fn [f] {:failure true :source f :error (str "javac: " e)}) copies)}))))
         futures (mapv (fn [w] (.submit pool ^java.util.concurrent.Callable (fn [] (task w)))) work)
@@ -450,8 +538,17 @@
                   :errors (vec (mapcat :errors results))
                   :stats (apply merge-with + (map :stats results))
                   :attr-check (apply merge-with (partial merge-with +) (keep :attr-check results))
-                  :attr-diffs (vec (mapcat :attr-diffs results))})
+                  :attr-diffs (vec (mapcat :attr-diffs results))
+                  :nojavac (when no-javac
+                             (let [njs (keep :nojavac results)]
+                               {:files (reduce + (map :files njs)) :native (reduce + (map :native njs))
+                                :fallbacks (vec (for [nj njs f (:fallbacks nj)]
+                                                  (update f :source #(get origin-by-copy (.getCanonicalPath (io/file %)) %))))
+                                :native-ms (reduce + (map :native-ms njs)) :ms (reduce + (map :ms njs))
+                                :wall-ms (quot (- (System/nanoTime) t0) 1000000)
+                                :threads (Integer/parseInt (or (System/getenv "REPR_JAVA_THREADS") "12"))}))})
         {:keys [units failures errors stats] :as g} (gather results)
+        _ (when-let [nj (:nojavac g)] (nojavac-report out nj))
         res (finish out files units failures errors stats check t0 (and split (not= front :both))
                     (when (and (= front :native) (= attr "native")) {:check (or (:attr-check g) {}) :diffs (:attr-diffs g)}))]
     (when (= front :both)
@@ -476,6 +573,7 @@
           "--native-out" (recur more (assoc opts :native-out b) pos)
           "--split" (recur (rest args) (assoc opts :split true) pos)
           "--attr" (recur more (assoc opts :attr b) pos)
+          "--no-javac" (recur (rest args) (assoc opts :no-javac true) pos)
           (recur (rest args) opts (conj pos a)))))))
 
 (defn -main [cmd & args]

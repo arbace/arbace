@@ -76,7 +76,12 @@
   method a call's overload resolution chose), or nil."
   nil)
 
-(defn lean! "Mark the answer being computed as needing javac's higher tiers." [] (when *leaned* (vreset! *leaned* true)))
+(defn lean!
+  "Mark the answer being computed as needing javac's higher tiers (in a read without javac: the file's
+  fallback)."
+  []
+  (when d/*no-javac* (d/javac-needed! "a lean on javac's choice"))
+  (when *leaned* (vreset! *leaned* true)))
 
 (defn- ans [p t] (na/answer p t))
 
@@ -689,7 +694,8 @@
           ;; Attr.visitTypeUnion: a UnionClassType, the lub of the alternatives as its class type
           ;; (JN9d; its alternatives kept for its data)
           (let [l (binding [inf/*reg* (reg p)] (inf/lub (:ts vt)))]
-            (if (ty/class-t? l) (assoc l :union-alts (:ts vt)) (d/decline! "a multi-catch parameter's type (an intersection lub)")))
+            ;; an intersection lub too: javac's UnionClassType over the IntersectionClassType (JN9e)
+            (if (or (ty/class-t? l) (= :inter (:k l))) (assoc l :union-alts (:ts vt)) (d/decline! "a multi-catch parameter's type (an intersection lub)")))
           vt))
       (and (= :VAR (:declKind dcl)) (:init dcl) (#{:local :resource} (:kind e)))
       (let [it (etype p (:init dcl))]
@@ -724,6 +730,8 @@
               (case (:sk s)
                 :field (cap p t (field-type-at p env (ident-site env s) s))
                 :class (d/class-type-at s (some-> (env-class env) d/this-type))
+                ;; a type variable named as a method reference's qualifier (E::get, JN9e)
+                :tvar (d/tvar-type s)
                 (d/decline! "a package's type"))))))
 
 (defn- select-type [p t]
@@ -1527,42 +1535,132 @@
       (mapv ty (:alternatives vt))
       [(ty vt)])))
 
+(defn- tsubset? "Check.subset: `t` a subtype of one of `ts`." [t ts] (boolean (some #(inf/subtype? t %) ts)))
+
+(defn- tincl "Check.incl." [t ts] (if (tsubset? t ts) ts (cons t (remove #(inf/subtype? % t) ts))))
+
+(defn- tintersect "Check.intersect." [ts1 ts2]
+  (as-> () ts
+    (reduce (fn [ts t] (if (tsubset? t ts2) (tincl t ts) ts)) ts ts1)
+    (reduce (fn [ts t] (if (tsubset? t ts1) (tincl t ts) ts)) ts ts2)))
+
+(defn- resource-close-thrown
+  "The types a try's resource `r`'s close() throws (Flow.FlowAnalyzer.visitTry: each AutoCloseable
+  supertype of the resource's type, close() resolved at it, its thrown types as a member of it)."
+  [p env r]
+  (let [reg (reg p)
+        rt (if (= :VARDEF (:tag r)) (local-type p (or (:local (ans p r)) (d/decline! "a resource"))) (etype p r))
+        ac (d/class-named reg "java.lang.AutoCloseable")
+        sups (if (= :inter (:k rt)) (:ts rt) [rt])]
+    (vec (for [sup sups
+               :when (d/as-super sup ac)
+               :let [site (ty/skip-type-vars reg sup false)
+                     m (:sym (ov/resolve-method env site "close" [] (array-clone-fn p) {:typeargs [] :arg-trees []}))]
+               :when (ov/method? m)
+               t (:throws (ty/member-type reg sup m))]
+           t))))
+
+(defn- assigned-in?
+  "Is local entry `e` assigned in tree `x` (not effectively final: an assignment, a compound
+  assignment, an increment or decrement of it)?"
+  [p e x]
+  (let [it? (fn [l] (let [l (skip-parens l)] (and (= :IDENT (:tag l)) (identical? e (:local (ans p l))))))]
+    (letfn [(walk [x]
+              (cond
+                (vector? x) (some walk x)
+                (not (map? x)) false
+                (and (#{:ASSIGN} (:tag x)) (it? (:lhs x))) true
+                (and (:tag x) (str/ends-with? (name (:tag x)) "_ASG") (it? (:lhs x))) true
+                (and (#{:PREINC :PREDEC :POSTINC :POSTDEC} (:tag x)) (it? (:arg x))) true
+                :else (some (fn [[k v]] (when (and (not= k :mods) (or (map? v) (vector? v))) (walk v))) x)))]
+      (boolean (walk x)))))
+
+(defn- checking?
+  "Is the check of call `outer`'s arguments (its :checked or :args-checked computation) under way?"
+  [outer]
+  (when-let [^java.util.Map act *active*]
+    (let [h (System/identityHashCode outer)]
+      (boolean (or (some #(identical? outer %) (.get act [:checked h]))
+                   (some #(identical? outer %) (.get act [:args-checked h])))))))
+
+(defn- call-thrown
+  "The thrown types of call `t` (APPLY, NEWCLASS) for a lambda's thrown types: its instantiated
+  type's; while the call whose argument it is (through a lambda's return) is being checked, as when
+  the lambda being checked returns it (Flow.analyzeLambdaThrownTypes on the lambda's speculative
+  body, the call's type partially inferred in the outer call's context), its method's declared thrown
+  types at the site, when they name none of its type variables (JN9e: not re-entering the outer
+  call's memoized check, javac's order of attribution)."
+  [p t]
+  (let [[outer _] (arg-context p t)]
+    (if (and outer (checking? outer))
+      (let [m (if (= :APPLY (:tag t)) (method-of p t) (ctor-of p t))
+            mt (d/method-type m)
+            tvs (set (:tparams mt))
+            free? (fn free? [x] (cond (keyword? x) false
+                                      (= :tvar (:k x)) (contains? tvs (:tv x))
+                                      (map? x) (some free? (concat (:args x) (when (:outer x) [(:outer x)]) (when (:e x) [(:e x)])))
+                                      :else false))]
+        (if (some free? (:throws mt))
+          (d/decline! "a lambda's thrown types (a generic thrown type of a call its outer call checks)")
+          (:throws mt)))
+      (if (= :APPLY (:tag t))
+        (:throws (call-method-type p (:meth t)))
+        (:throws (ctor-method-type p t))))))
+
 (defn- lambda-thrown
   "The checked types lambda `lam`'s body throws (Flow.analyzeLambdaThrownTypes, its parts that need no
   flow of definite assignment): its calls', creations' and throw statements' (not entering classes and
-  lambdas), a try statement's body's less those a catch clause catches, with its catch clauses' and
-  finally block's; declined for a try with resources, a rethrown catch parameter (precise rethrow) and
-  a finally block that cannot complete normally."
+  lambdas), a try statement's (Flow.FlowAnalyzer.visitTry, JN9e): its resources' initializers' and
+  close() methods' with its body's, less those a catch clause catches, with its catch clauses' (a
+  rethrown final or effectively final catch parameter's precise types: the caught types the try can
+  throw) and its finally block's (alone when the block cannot complete normally)."
   [p lam]
-  (letfn [(checked [ts] (filter inf/checked-exception? ts))
-          (walk [x]
-            (cond
-              (vector? x) (vec (mapcat walk x))
-              (not (map? x)) []
-              (#{:CLASSDEF :LAMBDA} (:tag x)) []
-              :else
-              (case (:tag x)
-                :TRY
-                (do (when (seq (:resources x)) (d/decline! "a lambda's thrown types (a try with resources: Flow's analysis)"))
-                    (when (and (:finalizer x) (not (binding [sc/*ans* (:ans p)] (sc/alive? (env-of p lam) (:finalizer x)))))
-                      (d/decline! "a lambda's thrown types (a finally block that cannot complete: Flow's analysis)"))
-                    (let [caught (mapcat #(catch-types p %) (:catchers x))
-                          body (remove (fn [t] (some #(inf/subtype? t %) caught)) (walk (:body x)))]
-                      (vec (concat body
-                                   (mapcat #(walk (:body %)) (:catchers x))
-                                   (when (:finalizer x) (walk (:finalizer x)))))))
-                (let [own (case (:tag x)
-                            :APPLY (checked (:throws (call-method-type p (:meth x))))
-                            :NEWCLASS (checked (:throws (ctor-method-type p x)))
-                            :THROW (let [e (skip-parens (:expr x))]
-                                     (when (and (= :IDENT (:tag e))
-                                                (= :catch (:kind (:local (ans p e)))))
-                                       (d/decline! "a lambda's thrown types (a rethrown catch parameter: Flow's analysis)"))
-                                     (checked [(etype p e)]))
-                            [])]
-                  (into (vec own)
-                        (mapcat (fn [[k v]] (when (and (not= k :mods) (or (map? v) (vector? v))) (walk v))) x))))))]
-    (walk (:body lam))))
+  (let [reg (reg p)
+        env (env-of p lam)
+        unchecked [(d/ctype (d/class-named reg "java.lang.RuntimeException")) (d/ctype (d/class-named reg "java.lang.Error"))]]
+    (letfn [(checked [ts] (filter inf/checked-exception? ts))
+            (walk [prec x]
+              (cond
+                (vector? x) (vec (mapcat #(walk prec %) x))
+                (not (map? x)) []
+                (#{:CLASSDEF :LAMBDA} (:tag x)) []
+                :else
+                (case (:tag x)
+                  :TRY
+                  (let [body (vec (concat (walk prec (:resources x))
+                                          (checked (mapcat #(resource-close-thrown p env %) (:resources x)))
+                                          (walk prec (:body x))))
+                        in-try (concat body unchecked)
+                        [catch-thrown caught]
+                        (reduce (fn [[acc cit] c]
+                                  (let [ctypes (catch-types p c)
+                                        e (:local (ans p (:param c)))
+                                        rethrown (remove #(tsubset? % cit) in-try)
+                                        precise (when (and e (or (d/has? (long (get-in c [:param :mods :flags] 0)) d/FINAL)
+                                                                 (= :TYPEUNION (:tag (:vartype (:param c))))
+                                                                 (not (assigned-in? p e (:body c)))))
+                                                  [e (tintersect ctypes rethrown)])]
+                                    [(into acc (walk (if precise (cons precise prec) prec) (:body c)))
+                                     (reduce #(tincl %2 %1) cit ctypes)]))
+                                [[] ()] (:catchers x))
+                        rest-thrown (remove #(tsubset? % caught) body)]
+                    (if (:finalizer x)
+                      (if (binding [sc/*ans* (:ans p)] (sc/alive? env (:finalizer x)))
+                        (vec (concat rest-thrown catch-thrown (walk prec (:finalizer x))))
+                        ;; a finally block that cannot complete normally: its own thrown types alone
+                        (walk prec (:finalizer x)))
+                      (vec (concat rest-thrown catch-thrown))))
+                  (let [own (case (:tag x)
+                              :APPLY (checked (call-thrown p x))
+                              :NEWCLASS (checked (call-thrown p x))
+                              :THROW (let [e (skip-parens (:expr x))
+                                           l (when (= :IDENT (:tag e)) (:local (ans p e)))
+                                           pr (when l (some #(when (identical? l (first %)) (second %)) prec))]
+                                       (if pr (checked pr) (checked [(etype p e)])))
+                              [])]
+                    (into (vec own)
+                          (mapcat (fn [[k v]] (when (and (not= k :mods) (or (map? v) (vector? v))) (walk prec v))) x))))))]
+      (walk () (:body lam)))))
 
 (defn- lambda-check
   "Lambda `lam` attributed against result `r` (Attr.visitLambda in CHECK mode, its target's inference

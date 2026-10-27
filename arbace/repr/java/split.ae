@@ -65,6 +65,8 @@
    :names/type-tree [:declarations "Attr.attribType, TypeEnter" "a type tree's type (names resolved, type arguments, annotations)"]
    :names/type-expr [:declarations "Attr.visitIdent, visitSelect (KindSelector)" "whether a qualifier names a type or package (JLS 6.5)"]
    :names/package [:declarations "Enter.visitTopLevel" "the unit's package symbol and its classes"]
+   :names/package-classes [:members "ClassFinder.fillIn, includeClassFile" "the top-level class names of the unit's package, on every location (JFS112 (b), JN9e)"]
+   :annotations/dropped [:declarations "Check.validateAnnotation" "a record component's annotation taken off its field's modifiers (JFS110 (b), JN9e)"]
    :names/record-pattern [:declarations "Attr.visitRecordPattern" "a record pattern's record type"]
    :names/local-class [:inference "Check.localClassName, Attr's order" "a local or anonymous class's flat name, numbered as Attr enters them (checked once per class, JFS91 (b))"]
    :types/this [:declarations "Attr.visitIdent, visitSelect" "the type of this, super, C.this"]
@@ -86,6 +88,7 @@
    :types/expr [:types "Attr (attribExpr, check)" "an expression's type (erased by the converter)"]
    :types/qualifier [:types "Attr.visitSelect" "a qualifier's type (the site of a member)"]
    :types/constant [:types "Attr, ConstFold" "an expression's constant value (folded labels, while(true), concatenation operands)"]
+   :types/var-constant [:types "Attr.visitVarDef, attribLazyConstantValue" "a final `var` local's constant value at its inferred type (JFS112 (b), JN9e)"]
    :types/operator [:types "Attr.visitBinary, Operators.resolveBinary" "the operator resolved by the operand types (its parameter types)"]
    :types/new [:types "Attr.visitNewClass" "a new instance's class type"]
    :types/new-array [:types "Attr.visitNewArray" "a new array's type"]
@@ -384,6 +387,53 @@
     (str sb)))
 
 ;;; ------------------------------------------------------------------------------------------
+;;; The read without javac (JFS111 (b), "As built: JN9e"): its files, fallbacks, time and memory
+
+(defn- nojavac-files [dir]
+  (for [^File f (file-seq (io/file dir))
+        :when (and (.isFile f) (= "repr-java-nojavac.edn" (.getName f)))]
+    f))
+
+(defn nojavac-summarize
+  "The reads without javac under `dir` (their repr-java-nojavac.edn), summed: {:files :native
+  :fallbacks n :by-reason {reason n} :sources [...]}; with the corpus's time file `time` (its reads'
+  wall time) its :wall-s, and the reads' largest peak memory :peak-kb."
+  [dir time]
+  (let [rs (map read-edn (nojavac-files dir))
+        w (when (.isFile (io/file time)) (str/trim (slurp time)))
+        kb (some->> (seq (keep :peak-rss rs)) (apply max) (#(quot % 1024)))]
+    (cond-> {:files (reduce + (map :files rs))
+             :native (reduce + (map :native rs))
+             :fallbacks (reduce + (map (comp count :fallbacks) rs))
+             :by-reason (into (sorted-map) (apply merge-with + {} (map :by-reason rs)))
+             :sources (vec (sort (for [r rs f (:fallbacks r)] (str (:source f) " " (:fallback f)))))}
+      w (assoc :wall-s (Double/parseDouble w))
+      kb (assoc :peak-kb kb))))
+
+(defn nojavac-markdown [sums]
+  (let [cs (sort (keys sums))
+        sb (StringBuilder.)
+        line (fn [& xs] (.append sb (apply str xs)) (.append sb "\n"))]
+    (line "The read without javac (`read --no-javac`): files, read natively, fallbacks to javac, wall time, peak memory:")
+    (line "")
+    (line "| corpus | files | native | fallbacks | wall | peak |")
+    (line "|---|---:|---:|---:|---:|---:|")
+    (doseq [c cs :let [s (sums c)]]
+      (line "| " c " | " (fmt (:files s)) " | " (fmt (:native s)) " (" (pct (:native s) (:files s)) ") | " (fmt (:fallbacks s))
+            " | " (if (:wall-s s) (format "%.0f s" (:wall-s s)) "-") " | " (if (:peak-kb s) (format "%.1f GB" (/ (:peak-kb s) 1e6)) "-") " |"))
+    (let [rows (for [c cs [r n] (:by-reason (sums c))] [r c n])
+          by (reduce (fn [m [r c n]] (update-in m [r c] (fnil + 0) n)) {} rows)]
+      (when (seq by)
+        (line "")
+        (line "The fallbacks by reason (the first thing met that only javac answers):")
+        (line "")
+        (line "| reason | " (str/join " | " cs) " |")
+        (line "|---|" (str/join "" (repeat (count cs) "---:|")))
+        (doseq [[r m] (sort-by (fn [[r m]] [(- (reduce + (vals m))) r]) by)]
+          (line "| " (str/replace r "|" "\\|") " | " (str/join " | " (map #(fmt (get m % 0)) cs)) " |"))))
+    (str sb)))
+
+;;; ------------------------------------------------------------------------------------------
 
 (defn -main [cmd & args]
   (case cmd
@@ -395,6 +445,16 @@
                 (spit (io/file out "split.md") md)
                 (print md))
     "static" (pp/pprint (static-split converter-files))
+    "nojavac" (let [[out & dirs] args
+                    sums (into (sorted-map) (for [d dirs] [(.getName (io/file d)) (nojavac-summarize d (str d ".time"))]))
+                    md (nojavac-markdown sums)]
+                (io/make-parents (io/file out "nojavac.edn"))
+                (spit (io/file out "nojavac.edn") (with-out-str (pp/pprint sums)))
+                (spit (io/file out "nojavac.md") md)
+                (print md)
+                ;; JFS113 (c): an inference size limit that fired fails the check
+                (doseq [[c s] sums [r n] (:by-reason s) :when (str/includes? r "beyond the port's limits")]
+                  (println (str "nojavac: " c ": " r " " n " times (JFS113 (c)), beyond the known"))))
     "attr" (let [[out known & dirs] args
                  known (read-edn known)
                  sums (into (sorted-map) (for [d dirs] [(.getName (io/file d)) (attr-summarize d)]))
@@ -415,5 +475,8 @@
                      :let [n (get o :differ 0)
                            k (get-in known [(keyword c) :facts f] 0)]
                      :when (pos? n)]
-               (println (str "attr: " c ": " f " " n " different" (if (> n k) (str ", beyond the known " k) " (known)"))))))
+               (println (str "attr: " c ": " f " " n " different" (if (> n k) (str ", beyond the known " k) " (known)"))))
+             ;; JFS113 (c): the inference's size limits stop a runaway; one that fired fails the check
+             (doseq [[c s] sums [k rs] (:why s) [r n] rs :when (str/includes? r "beyond the port's limits")]
+               (println (str "attr: " c ": " k " " r " " n " times (JFS113 (c)), beyond the known")))))
   (flush))

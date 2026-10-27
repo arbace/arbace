@@ -213,6 +213,29 @@
        ;; a package that has only subpackages exists for javac as a prefix of a known one
        (some #(str/starts-with? % (str pkg ".")) (keys (:index reg))))))
 
+(defn package-class-names
+  "The simple names of the top-level classes of package `pkg` (dotted) as javac's ClassFinder lists the
+  package's members (ClassFinder.fillIn, includeClassFile; JFS112 (b), \"As built: JN9e\"): a .java
+  file's base name in the package's directory of each source directory, a class file's (without `$`)
+  in the run's module's platform directory, and the top-level classes the run's units declare there
+  (Enter's, a file's secondary classes too); package-info and module-info left out. A member class
+  file (`A$B`), which javac may list too, is not a top-level name."
+  [reg ^String pkg]
+  (let [rel (str/replace pkg "." "/")
+        names-in (fn [^File d ext]
+                   (for [^File f (or (.listFiles d) (make-array File 0))
+                         :let [n (.getName f)]
+                         :when (and (.isFile f) (str/ends-with? n ext))
+                         :let [b (subs n 0 (- (count n) (count ext)))]
+                         :when (and (not (#{"package-info" "module-info"} b)) (not (str/includes? b "$")))]
+                     b))]
+    (into (into #{} (keys (or (.get ^ConcurrentHashMap (:unit-classes reg) pkg) {})))
+          (concat
+           (mapcat #(names-in (File. (str % (when (seq rel) "/") rel)) ".java") (:source-dirs reg))
+           (when-let [m (:module reg)]
+             (when (some #{m} (get (:index reg) pkg))
+               (names-in (File. (str (:platform reg) "/" m (when (seq rel) "/") rel)) ".class")))))))
+
 (defn- unit-top-class [reg pkg simple]
   (get (.get ^ConcurrentHashMap (:unit-classes reg) pkg) simple))
 
@@ -764,6 +787,32 @@
   [why]
   (throw (ex-info (str "repr/java decls: declined: " why) {::decline true})))
 
+(def ^:dynamic *no-javac*
+  "A read without javac (`read --no-javac`, JFS111 (b), \"As built: JN9e\"): no javac beside the native
+  provider, so that what would ask javac (a declined fact, a javac-only read of the model, a lean on
+  javac's choice) stops the unit's conversion with `javac-needed!`, and the file is converted again
+  with javac (the fallback, counted by reason)."
+  false)
+
+(defn javac-needed!
+  "In a read without javac: stop the unit's conversion, its file to be converted with javac; `why` the
+  reason (a key of the fallbacks' table)."
+  [why]
+  (throw (ex-info (str "repr/java: javac needed: " why) {::javac-needed why})))
+
+(defn javac-needed-reason
+  "The fallback reason of throwable `e` (javac-needed!'s, a decline's, or the exception's class and the
+  converter's frame it came from)."
+  [^Throwable e]
+  (let [d (ex-data e)]
+    (cond
+      (::javac-needed d) (::javac-needed d)
+      (::decline d) (str "declined: " (first (str/split (str/replace (.getMessage e) #"^repr/java decls: declined: " "") #": " 2)))
+      :else (str (.getName (class e)) " at "
+                 (or (some #(let [s (str %)] (when (re-find #"repr\.java" s) (str/replace s #"\(.*$" "")))
+                           (.getStackTrace e))
+                     "?")))))
+
 (defn expr-decl-type
   "The declared type of expression `t` when it names a variable (a local's, a field's) or is this or
   C.this; nil otherwise (an expression's type is the types tier's)."
@@ -994,7 +1043,10 @@
           (for [f comps
                 :when (not (#{"hashCode" "toString" "getClass" "notify" "notifyAll" "wait" "clone" "finalize"} (:name f)))
                 :when (not (declared? (:name f) []))]
-            (generated-method c (:name f) (bit-or PUBLIC GENERATED_MEMBER) [] (field-type f)))))))))
+            ;; the component's @Deprecated, propagated to the accessor (TypeEnter's originalAnnos,
+            ;; MemberEnter's handleDeprecatedAnnotations; JN9e)
+            (generated-method c (:name f) (bit-or PUBLIC GENERATED_MEMBER) [] (field-type f)
+                              {:extra-flags (bit-and (field-flags f) (bit-or DEPRECATED DEPRECATED_ANNOTATION DEPRECATED_REMOVAL))}))))))))
 
 (defn local-class
   "The class symbol of local or anonymous class declaration `cd` in environment `env` (inside class
@@ -1586,7 +1638,7 @@
 
 (declare const-value)
 
-(defn- const-as
+(defn const-as
   "Constant [k v] as a variable of type `t` holds it (ConstFold.coerce): nil when the kinds do not
   convert."
   [k v t]
