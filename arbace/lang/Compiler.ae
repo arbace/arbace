@@ -6391,6 +6391,10 @@
       ;; c's implementation of method key (name and descriptor) on o (super.m())
       (method ^:public superCall [this o ^Class c ^String key ^Object/1 args]
         (throw (UnsupportedOperationException. (java-str "superclass " (.getName c)))))
+      ;; a protected instance field of o's nearest superclass of the world (or of its
+      ;; superclasses), read, or written with v when set (JC4b)
+      (method ^:public superField [this o ^String name ^boolean set v]
+        (throw (UnsupportedOperationException. (java-str "field " name))))
       ;; k is an enum: its constants are values()'s
       (method ^:public setEnum ^void [this ^Klass k ^Meth values] nil)
       ;; k is a member class of outer (simple: its simple name, nil for an anonymous class)
@@ -7309,6 +7313,9 @@
       (field ^Thread initThread)
       ;; a Clojure fn's class (arbace.lang.AFunction, RestFn): its objects are FnObj
       (field ^:public ^boolean fnClass)
+      ;; an interface that declares a default method: initialized with a class implementing it
+      ;; (JLS 12.4.1, 12.4.2 step 7; JC4b)
+      (field ^:public ^boolean hasDefaults)
       ;; the builder's description, for the host (reflection) and for later compilations
       (field ^:public info)
 
@@ -7341,6 +7348,17 @@
                           (if (.implementsClass (aget ifaces i) c) true (recur (unchecked-inc-int i)))
                           false)))))
 
+      ;; the superinterfaces of class k that declare a default method initialized, in JLS
+      ;; 12.4.2's order: each direct superinterface's superinterfaces before it
+      (method ^:public ^:static initDefaults ^void [^Klass k]
+        (when (some? (.-ifaces k))
+          (loop [^int i 0]
+            (when (< i (alength (.-ifaces k)))
+              (let [j (aget (.-ifaces k) i)]
+                (Klass/initDefaults j)
+                (when (.-hasDefaults j) (.init j)))
+              (recur (unchecked-inc-int i))))))
+
       (method ^:public virtual ^Meth [this ^String key]
         (cast Meth (.get vtable key)))
 
@@ -7363,6 +7381,7 @@
           (set! initThread (Thread/currentThread)))
         (try
           (when (some? sup) (.init sup))
+          (when (not iface) (Klass/initDefaults this))
           (when (some? clinit)
             (let [f (Frame. clinitR clinitP (Rt/depth))]
               (.exec clinit f)))
@@ -7677,6 +7696,14 @@
         (let [vs (Rt/boxed args ptypes f)]
           (when (nil? vs) (return nil))
           (when (nil? rm)
+            ;; a protected method of the nearest superclass of the world of an interpreted
+            ;; object (its DynSub_C's implementation), which reflection does not list (JC4b)
+            (let [k (.klassOf Rt/HOST o)
+                  c (if (some? k) (.worldSuper k) nil)]
+              (when (some? c)
+                (try
+                  (return (.superCall Rt/HOST o c key vs))
+                  (catch UnsupportedOperationException _ nil))))
             (throw (AbstractMethodError. (java-str (.getName (.getClass o)) "." key))))
           ;; Object.clone of an interpreted object (this.clone() without an override)
           (when (and (identical? (.getDeclaringClass rm) Object) (.equals (.getName rm) "clone"))
@@ -8494,6 +8521,31 @@
           (let [vs (Rt/boxed args ptypes f)]
             (if (nil? vs) nil (.superCall Rt/HOST o c key vs))))))
 
+    ;; a protected instance field of a superclass of the world, on an object of an interpreted
+    ;; subclass (Host.superField: its DynSub_C's field), read, or written when v (JC4b)
+    (defclass ^:public ^:static SuperField
+      :extends Node
+      (field ^:public ^:final ^String name)
+      (field ^:public ^:final ^Node target)
+      (field ^:public ^:final ^Node v)
+      (constructor ^:public [this ^char t ^String name ^Node target ^Node v]
+        (set! (.-t this) t)
+        (set! (.-name this) name)
+        (set! (.-target this) target)
+        (set! (.-v this) v))
+      (method ^:public eval [this ^Frame f]
+        (let [o (.eval target f)]
+          (when (not (== (.-jump f) 0)) (return nil))
+          (when (nil? o) (throw (NullPointerException.)))
+          (if (some? v)
+              (let [x (switch (Rt/kind (.-t this))
+                        \J (Rt/box (.-t this) (.evalJ v f))
+                        \D (Rt/boxD (.-t this) (.evalD v f))
+                        (.eval v f))]
+                (when (== (.-jump f) 0) (.superField Rt/HOST o name true x))
+                x)
+              (.superField Rt/HOST o name false nil)))))
+
     ;; a record's equals (op 0), hashCode (1), toString (2), as ObjectMethods makes them:
     ;; the components' fields (index, type), names for toString
     (defclass ^:public ^:static RecordOp
@@ -8639,6 +8691,14 @@
       (method ^:public superCall [this o ^Class c ^String key ^Object/1 args]
         (CFGo/superCall o c key args))
 
+      (method ^:public superField [this o ^String name ^boolean set v]
+        (when (nil? o) (throw (NullPointerException.)))
+        (let [k (.klassOf this o)
+              c (if (some? k) (.worldSuper k) nil)]
+          (when (nil? c)
+            (throw (UnsupportedOperationException. (java-str "field " name " of " (.getName (.getClass o)) " is not in the Go build"))))
+          (CFGo/superField o c name set v)))
+
       (method ^:public setEnum ^void [this ^CF$Klass k ^CF$Meth values]
         (CFGo/setEnum (.-cls k)
                       (anon AFn []
@@ -8677,6 +8737,7 @@
     (method ^:public ^:static ^:native canExtend ^boolean [^Class c])
     (method ^:public ^:static ^:native superCtor ^void [o ^Class c ^String desc ^Object/1 args])
     (method ^:public ^:static ^:native superCall [o ^Class c ^String key ^Object/1 args])
+    (method ^:public ^:static ^:native superField [o ^Class c ^String name ^boolean set v])
     ;; a member class's enclosing class and simple name
     (method ^:public ^:static ^:native setOuter ^void [^Class c ^Class outer ^String simple])
     ;; the members published so far forgotten (and reflection's lists computed from them)

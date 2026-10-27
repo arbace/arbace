@@ -31,6 +31,8 @@
   (symbol (str (m/go-name api-class) "_" (nm/method-base mname desc) "_native")))
 
 
+(declare protected-field?)
+
 ;; ---------------------------------------------------------------------------------------------
 ;; superclasses of the world (arbace.j2g.dyn/sub-supers): an interpreted class extending C (or
 ;; extending an interpreted class that does) has DynSub_C objects. For each C: the allocation
@@ -98,7 +100,34 @@
                              (list 'let ['t (list 'assert recv 'o)]
                                    (if (= "V" r)
                                      (list 'do call '(return nil))
-                                     (list 'return (list 'jrt/Box call)))))])))])))
+                                     (list 'return (list 'jrt/Box call)))))])))
+       ;; the protected instance fields of n and its superclasses (Host.superField, JC4b)
+       (list 'go/var (tag (symbol (str "dynCfFields_" g)) '(map string (func [any bool any] [any])))
+             (apply list 'lit '(map string (func [any bool any] [any]))
+                    (let [seen (atom #{})]
+                      (doall
+                        (for [c (m/superclass-chain n)
+                              :when (and c (not= c "java/lang/Object") (not (m/hand-written? c)))
+                              f (sort-by :name (m/fields-of c))
+                              :when (protected-field? f)
+                              :when (not (@seen (:name f)))
+                              :let [_ (swap! seen conj (:name f))
+                                    d (:desc f)
+                                    place (list (symbol (str ".-" (nm/field-name (:name f))))
+                                                (list (symbol (str ".-" (m/go-name c))) 't))]]
+                          [(:name f)
+                           (let [vol (c/volatile-field? f)
+                                 rd (if vol (c/volatile-read place d) place)]
+                             (list 'fn (with-meta [(tag 'o 'any) (tag 'set 'bool) (tag 'x 'any)] {:tag 'any})
+                                   (list 'let ['t (list 'assert recv 'o)]
+                                         (list 'when 'set
+                                               (if vol (c/volatile-write place d (from-object d 'x)) (list 'set! place (from-object d 'x)))
+                                               '(return nil))
+                                         (cond
+                                           (t/prim? d) (list 'return (list 'jrt/Box rd))
+                                           ;; a nil pointer is a null, not a non-nil any
+                                           (m/pointer-desc? d) (list 'let ['v rd] '(when (== v nil) (return nil)) '(return v))
+                                           :else (list 'return rd)))))])))))])))
 
 (defn subs-forms
   "The forms of the superclasses of the world, and cfSubFor (nil when c has none)."
@@ -117,7 +146,16 @@
                       (list 'case [(m/class-sym :lang p "_class")]
                             (list 'return (symbol (str "dynCfNew_" g)) (symbol (str "dynCfCtors_" g))
                                   (symbol (str "dynCfSupers_" g))))))
-             '(return nil nil nil))])))
+             '(return nil nil nil))
+       (list 'go/func 'cfFieldsFor
+             "cfFieldsFor: the protected instance fields of superclass c of the world and its
+superclasses, by name (nil: c has no DynSub type).\n"
+             (with-meta [(tag 'c '(* jrt/Class))] {:tag '(map string (func [any bool any] [any]))})
+             (apply list 'switch 'c
+                    (for [p cs :let [g (sub-name p)]]
+                      (list 'case [(m/class-sym :lang p "_class")]
+                            (list 'return (symbol (str "dynCfFields_" g))))))
+             '(return nil))])))
 
 (defn forms
   "The forms of j2g_cf.go (package arbace/lang)."
@@ -230,6 +268,14 @@ or CF$FnObj, whose getClass is their class).\n"
               (panic (jrt/Thrown (jrt/UnsupportedOperationException_New_String
                                    (jrt/Str (+ "super call of " (.-Name (.Info c)) "." (.String key) " is not in the Go build"))))))
             (f o (.-A args))))
+   (list 'go/func (native-name "superField" "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;ZLjava/lang/Object;)Ljava/lang/Object;")
+         (with-meta [(tag 'o 'any) (tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'set 'bool) (tag 'x 'any)] {:tag 'any})
+         '(let [f (aget (cfFieldsFor c) (.String (jrt/NN name)))]
+            (when (== f nil)
+              (panic (jrt/Thrown (jrt/UnsupportedOperationException_New_String
+                                   (jrt/Str (+ "field " (.-Name (.Info c)) "." (.String name) " is not in the Go build"))))))
+            (when (== o nil) (panic (jrt/Thrown (jrt/NPE))))
+            (f o set x)))
    (list 'go/func (native-name "setOuter" "(Ljava/lang/Class;Ljava/lang/Class;Ljava/lang/String;)V")
          [(tag 'c '(* jrt/Class)) (tag 'outer '(* jrt/Class)) (tag 'simple '(* jrt/String))]
          '(let [info (.Info c)]
@@ -333,6 +379,49 @@ value.\n"
 (defn- strip-anns [x]
   (walk/postwalk (fn [y] (if (and (map? y) (:anns y)) (dissoc y :anns) y)) x))
 
+(def ^:private ACC_PROTECTED 0x0004)
+
+(defn- protected-field?
+  "Is instance field f of translated class c reachable through dynCfFields: protected, not
+  public, not static, of a type in the world?"
+  [f]
+  (let [fl (or (:flags f) 0)]
+    (and (pos? (bit-and fl ACC_PROTECTED)) (zero? (bit-and fl 0x0009)) (m/desc-in-world? (:desc f)))))
+
+(defn protected-chain
+  "The classes whose protected members an interpreted subclass of the extendable classes may
+  use: the superclass chains of dyn/proxy-classes, Object excluded, sorted."
+  [T]
+  (sort (distinct (for [p (dyn/proxy-classes T)
+                        c (m/superclass-chain p)
+                        :when (and c (not= c "java/lang/Object"))]
+                    c))))
+
+(defn- protected-members
+  "[[n {:methods [[name desc flags]] :fields [...] :ctors [[desc flags]]}]] of protected-chain:
+  the protected instance methods and constructors (of types in the world), and the protected
+  instance fields of translated classes (protected-field?)."
+  [T]
+  (for [c (protected-chain T)
+        :let [prot? (fn [x] (let [fl (or (:flags x) 0)]
+                              (and (pos? (bit-and fl ACC_PROTECTED)) (zero? (bit-and fl 0x1009)))))
+              ms (vec (for [mm (sort-by (juxt :name :desc) (m/methods-of c))
+                            :when (and (prot? mm) (not= "<init>" (:name mm)) (not= "<clinit>" (:name mm))
+                                       (m/mdesc-in-world? (:desc mm)))]
+                        [(:name mm) (:desc mm) (:flags mm)]))
+              cs (vec (for [mm (sort-by :desc (m/methods-of c))
+                            :when (and (prot? mm) (= "<init>" (:name mm)) (m/mdesc-in-world? (:desc mm)))]
+                        [(:desc mm) (:flags mm)]))
+              fs (when-not (m/hand-written? c)
+                   (vec (for [f (sort-by :name (m/fields-of c)) :when (protected-field? f)]
+                          [(:name f) (:desc f) (:flags f)])))
+              e (cond-> {}
+                  (seq ms) (assoc :methods ms)
+                  (seq cs) (assoc :ctors cs)
+                  (seq fs) (assoc :fields fs))]
+        :when (seq e)]
+    [c e]))
+
 (defn generics-text
   "The generic view (class-generics) of the classes of T that are generic or have generic
   supertypes, as text read by arbace.classes.go/generics: {internal-name {:tparams [sym]
@@ -393,7 +482,12 @@ value.\n"
                                            [(:name f) (if (char? v) (int v) v)]))]
                           :when (seq cs)]
                       [n cs])
-        consts (sort-by first (concat consts edge-consts))]
+        consts (sort-by first (concat consts edge-consts))
+        ;; the protected members of the extendable classes and their superclasses, which jrt's
+        ;; reflection (public members) does not list: an interpreted subclass's calls of them
+        ;; (Host.superCall, its DynSub_C's implementations), its accesses of their fields
+        ;; (Host.superField, dynCfFields_G) and its constructors' super calls (JC4b)
+        protected (protected-members T)]
     (binding [*print-length* nil *print-level* nil *print-meta* false]
       (str ";; Written by j2g --program (arbace.j2g.dyncf/generics-text): the generic signatures of the\n"
            ";; classes of the world, for the Java forms' analysis (doc/go/CLASSFORMS-REPL.md), and under\n"
@@ -401,4 +495,6 @@ value.\n"
            (str/join "\n " (for [[n g] entries] (str (pr-str n) " " (pr-str g))))
            "\n :consts {"
            (str/join "\n  " (for [[n cs] consts] (str (pr-str n) " " (pr-str cs))))
+           "}\n :protected {"
+           (str/join "\n  " (for [[n ms] protected] (str (pr-str n) " " (pr-str ms))))
            "}}\n"))))

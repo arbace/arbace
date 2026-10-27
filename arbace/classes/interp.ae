@@ -560,10 +560,12 @@
             (let [d (or (:cast-to an) owner)] (arbace.lang.Compiler$CF$CheckCast. (desc->class d) nil n))))
 
       (= kind :static)
-      (if k
-        (arbace.lang.Compiler$CF$CallI. (char (tc ty)) (or (method-of k key) (fail (str "No method " key " in " owner)))
-                            nil (arg-nodes ctx args desc))
-        (arbace.lang.Compiler$CF$CallR. (char (tc ty)) (or (real-method owner name desc) (fail (str "No method " owner "." key)))
+      (if-let [mt (and k (method-of k key))]
+        (arbace.lang.Compiler$CF$CallI. (char (tc ty)) mt nil (arg-nodes ctx args desc))
+        ;; for an interpreted owner, a static method a class of the world declares, named
+        ;; through the subclass (sleep() in a subclass of Thread: JLS 8.4.8, JC4b)
+        (arbace.lang.Compiler$CF$CallR. (char (tc ty)) (or (real-method owner name desc)
+                                                         (fail (if k (str "No method " key " in " owner) (str "No method " owner "." key))))
                             nil (arg-nodes ctx args desc) (ptypes desc)))
 
       (= kind :special)
@@ -691,17 +693,28 @@
                                               (fail (str "No field " owner "." fname)))
                            nil (coerce ctx (:val an) ty)))))
 
+(defn- super-field
+  "A protected instance field f of a class of the world, which reflection does not list, on an
+  object of an interpreted subclass (CF$SuperField: its DynSub_C's field, JC4b); k the
+  interpreted class the access names, or nil. A field the analysis knows only from the world's
+  signatures' :protected (arbace.classes.go)."
+  [ctx k f ty tn v]
+  (when (and k (nil? (.worldSuper ^arbace.lang.Compiler$CF$Klass k)))
+    (fail (str "No field " (:name f) " in " (.-iname ^arbace.lang.Compiler$CF$Klass k))))
+  (arbace.lang.Compiler$CF$SuperField. (char (tc ty)) (:name f) tn v))
+
 (defmethod build-op :get-field [ctx an]
   (let [f (:field an)
         owner (:owner an)
         ty (:desc f)
         tn (coerce ctx (:target an) (t/internal->desc owner))]
     (if-let [k (klass owner)]
-      (arbace.lang.Compiler$CF$GetField. (char (tc ty)) tn (int (or (field-index k (:name f))
-                                                        (fail (str "No field " (:name f) " in " owner)))))
-      (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) (or (find-field (internal->class owner) (:name f))
-                                              (fail (str "No field " owner "." (:name f))))
-                           tn nil))))
+      (if-let [i (field-index k (:name f))]
+        (arbace.lang.Compiler$CF$GetField. (char (tc ty)) tn (int i))
+        (super-field ctx k f ty tn nil))
+      (if-let [fd (find-field (internal->class owner) (:name f))]
+        (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) fd tn nil)
+        (super-field ctx nil f ty tn nil)))))
 
 (defmethod build-op :set-field [ctx an]
   (let [f (:field an)
@@ -710,11 +723,12 @@
         tn (coerce ctx (:target an) (t/internal->desc owner))
         v (coerce ctx (:val an) ty)]
     (if-let [k (klass owner)]
-      (arbace.lang.Compiler$CF$SetField. (char (tc ty)) tn (int (or (field-index k (:name f))
-                                                        (fail (str "No field " (:name f) " in " owner))))
-                             v)
-      (let [fd (or (find-field (internal->class owner) (:name f)) (fail (str "No field " owner "." (:name f))))]
-        (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) fd tn v)))))
+      (if-let [i (field-index k (:name f))]
+        (arbace.lang.Compiler$CF$SetField. (char (tc ty)) tn (int i) v)
+        (super-field ctx k f ty tn v))
+      (if-let [fd (find-field (internal->class owner) (:name f))]
+        (arbace.lang.Compiler$CF$FieldR. (char (tc ty)) fd tn v)
+        (super-field ctx nil f ty tn v)))))
 
 (defmethod build-op :var-deref [ctx an]
   (let [f (:field an)
@@ -822,6 +836,18 @@
         br (fn [b] (if (#{:none :null "V"} ty) (node ctx b) (coerce ctx b ty)))]
     (arbace.lang.Compiler$CF$IfInstance. (char (tc ty)) e pt (br (:then an)) (br (:else an)))))
 
+(defn- box-const
+  "Constant v (a char or a number) as an object of box desc d, or nil when d is no box."
+  [d v]
+  (let [n (if (char? v) (long (int v)) (long v))]
+    (case d
+      "Ljava/lang/Character;" (Character/valueOf (char n))
+      "Ljava/lang/Integer;" (Integer/valueOf (int n))
+      "Ljava/lang/Short;" (Short/valueOf (short n))
+      "Ljava/lang/Byte;" (Byte/valueOf (byte n))
+      "Ljava/lang/Long;" (Long/valueOf n)
+      nil)))
+
 (defmethod build-op :switch [ctx an]
   (let [ty (vt an)
         expr? (not (#{:none :null "V"} ty))
@@ -850,6 +876,13 @@
                            (nodes arms) (when-let [d (:default an)] (arm d)) keys (int null-arm) (int dflt-arm)
                            (into-array arbace.lang.Compiler$CF$Pat (or pats []))
                            (object-array (map (fn [[_ l]] (cond (:enum l) (str (:enum l))
+                                                                ;; a constant of a pattern switch over a box is
+                                                                ;; of that box (case 'a' on a Character: JLS
+                                                                ;; 14.11.1; JC4b)
+                                                                (and (= kind :pattern) (contains? l :const)
+                                                                     (or (char? (:const l)) (number? (:const l)))
+                                                                     (box-const (a/value-type (:type (:sel an))) (:const l)))
+                                                                (box-const (a/value-type (:type (:sel an))) (:const l))
                                                                 (contains? l :const) (let [v (:const l)] (if (char? v) (Integer/valueOf (int v)) v))
                                                                 :else nil))
                                               labels))
@@ -884,6 +917,10 @@
     (set! (.-iname k) n)
     (set! (.-flags k) (int (:flags d)))
     (set! (.-iface k) (has? (:flags d) ACC_INTERFACE))
+    (set! (.-hasDefaults k) (boolean (and (.-iface k)
+                                          (some #(and (not= "<clinit>" (:name %)) (not= "<init>" (:name %))
+                                                      (not (has? (:flags %) (bit-or ACC_STATIC ACC_ABSTRACT ACC_PRIVATE))))
+                                                (:methods d)))))
     (set! (.-fnClass k) (boolean (and (:clojure-fn (:meta d))
                                       (#{(t/lang-class "AFunction") (t/lang-class "RestFn")} (:super d)))))
     k))
@@ -953,9 +990,16 @@
     (when-let [sk (.-sup k)] (.putAll vt (.-vtable sk)))
     (doseq [^arbace.lang.Compiler$CF$Klass i (.-ifaces k)
             [key ^arbace.lang.Compiler$CF$Meth m] (.-vtable i)]
-      (when-not (and (.containsKey vt key)
-                     (not (has? (.-flags ^arbace.lang.Compiler$CF$Meth (.get vt key)) ACC_ABSTRACT)))
-        (.put vt key m)))
+      (let [^arbace.lang.Compiler$CF$Meth old (.get vt key)]
+        (when (or (nil? old)
+                  (has? (.-flags old) ACC_ABSTRACT)
+                  ;; an interface's default inherited through the superclass that a more
+                  ;; specific interface of this class overrides (JLS 8.4.8, 9.4.1.3: B extends A
+                  ;; implements I2, A implements I1, I2 extends I1: I2.m; JC4b)
+                  (and (.-iface (.-k old)) (not (has? (.-flags m) ACC_ABSTRACT))
+                       (not (identical? (.-k old) (.-k m)))
+                       (.isSubclassOf (.-k m) (.-k old))))
+          (.put vt key m))))
     (doseq [[key ^arbace.lang.Compiler$CF$Meth m] (.-methods k)]
       (when-not (has? (.-flags m) (bit-or ACC_STATIC ACC_PRIVATE))
         (.put vt key m)))))
@@ -1011,8 +1055,13 @@
             tk (klass (:owner target))
             key (str (:name m) (:desc target))
             call (if (:special m)
-                   (arbace.lang.Compiler$CF$CallI. (char (tc tr)) (or (method-of (or tk (.-sup k)) key) (fail (str "No bridge target " key)))
-                                       this-node (nodes args))
+                   (if-let [mt (method-of (or tk (.-sup k)) key)]
+                     (arbace.lang.Compiler$CF$CallI. (char (tc tr)) mt this-node (nodes args))
+                     ;; a method of the nearest superclass of the world (javac's bridge of an
+                     ;; inherited public method, LinkedHashSet's reversed(): JC4b)
+                     (if-let [c (and (nil? tk) (.worldSuper k))]
+                       (arbace.lang.Compiler$CF$SuperCall. (char (tc tr)) c key this-node (nodes args) (char-array (map tc tps)))
+                       (fail (str "No bridge target " key))))
                    (arbace.lang.Compiler$CF$CallV. (char (tc tr)) key (real-method (:owner target) (:name m) (:desc target))
                                        this-node (nodes args) (char-array (map tc tps))))]
         [slots (value-convert call tr br)])
@@ -1173,7 +1222,16 @@
         ab
         (let [ctx (if (:recv ab) (ctx-for n (:ret m) (:recv ab)) (new-ctx n (:ret m)))
               _ (params! ctx mt (:params ab))
-              body (node ctx (:body ab))]
+              body (node ctx (:body ab))
+              ;; a synchronized method holds the monitor of its receiver, or of its class when
+              ;; static, while it runs (JLS 8.4.3.6; JC4b: the interpreter took none)
+              body (if (has? (:flags m) 0x0020)
+                     (arbace.lang.Compiler$CF$Monitor. (char (tc (:ret m)))
+                                           (if static?
+                                             (konst "Ljava/lang/Class;" (.-cls k))
+                                             (arbace.lang.Compiler$CF$Local. \L (int (:self ctx))))
+                                           body)
+                     body)]
           (finish! ctx mt body))
 
         (has? (:flags m) 0x0100)

@@ -10,6 +10,7 @@
             [arbace.repr.java.jtypes :as jt]
             [arbace.repr.java.model :as m :refer [erasure prim? same? subtype? tag-name]]
             [arbace.repr.java.resolve :as res]
+            [arbace.repr.java.decls :as d]
             [arbace.string :as str])
   (:import [arbace.repr.java.forms CRef]
            [com.sun.tools.javac.tree JCTree JCTree$JCCompilationUnit JCTree$JCClassDecl
@@ -114,7 +115,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Types as forms (§4.3)
 
-(declare type-form annotation-items)
+(declare type-form annotation-items object-type)
 
 (defn- array-dims [t]
   (loop [t t n 0]
@@ -180,7 +181,7 @@
                              (symbol (m/simple-name c)))
                            anns))
            self))
-       :else (do (note! :warn/odd-type) (class-ref env (.tsym (jt/object-type)))))
+       :else (do (note! :warn/odd-type) (class-ref env (.tsym (object-type)))))
      ;; the annotations of an inner type of a generic outer go on its element of (.. ...)
      (when-not (and (m/class-type? t) (m/class-type? (m/enclosing-type t))
                     (m/allparams? (m/enclosing-type t))
@@ -341,8 +342,9 @@
 
 (defn- r [f t] {:f f :t t})
 
-(defn- int-type ^Type [] (.intType jt/*syms*))
-(defn- bool-type ^Type [] (.booleanType jt/*syms*))
+(defn- int-type [] (if attr/*provider* :int (.intType jt/*syms*)))
+(defn- bool-type [] (if attr/*provider* :boolean (.booleanType jt/*syms*)))
+(defn- object-type [] (if attr/*provider* (d/object-type (:reg attr/*provider*)) (jt/object-type)))
 
 (defn atype
   "The Arbace type of result `x` as a javac type (int for :lit-int, nil for :null)."
@@ -728,7 +730,7 @@
 (defn- methods-named
   "All methods named `nm` in type `site` and its supertypes, one per erased signature."
   [env site nm ctor?]
-  (let [site (if (m/array? site) (jt/object-type) site)
+  (let [site (if (m/array? site) (object-type) site)
         classes (if ctor?
                   (when (m/class-type? site) [(m/tsym site)])
                   (cond-> (m/closure-classes site)
@@ -870,7 +872,7 @@
              (= callee "this") (apply list (head 'this.) afs)
              qual (apply list (head '.super) qf afs)
              :else (apply list (head 'super.) afs))
-           (jt/object-type)))
+           (object-type)))
       :else
       (let [static? (m/static? m)
             [recv site head-class]
@@ -2412,7 +2414,7 @@
         ;; a type variable whose erasure (its first bound) is not Iterable, iterated by another
         ;; bound (<T extends A & B<String>>, B an Iterable): cast to that bound, as TransTypes
         ;; does (JCS66 (a))
-        coll (let [it (.iterableType jt/*syms*)]
+        coll (let [it (if attr/*provider* (d/ctype (d/class-named (:reg attr/*provider*) "java.lang.Iterable")) (.iterableType jt/*syms*))]
                (if-let [b (when (and (m/tvar? et) (not (subtype? (erasure et) it)))
                             (some #(when (subtype? % it) (erasure %)) (m/components (m/skip-type-vars et))))]
                  (cast-form env coll b)
@@ -3237,12 +3239,13 @@
   of the same text instead, its attribution javac's by position ((:index opts), attr/index). Returns
   {:package p :forms [..] :file name :classes [names]} (with attr/*measure* also :split)."
   [^JCTree$JCCompilationUnit cu opts]
-  (count-kinds! cu)
+  (when cu (count-kinds! cu))
   (let [u (or (:tree opts) cu)
         idx (:index opts)]
-    (binding [*text* (str (.getCharContent (.getSourceFile cu) true))
+    ;; without javac (cu nil, a read without javac, JFS111 (b)): the native tree, its text and source
+    (binding [*text* (if cu (str (.getCharContent (.getSourceFile cu) true)) (:text opts))
               *full* (when (:full opts) (atom 0))
-              tr/*end-positions* (.endPositions cu)
+              tr/*end-positions* (when cu (.endPositions cu))
               attr/*twins* (:twins idx)
               attr/*natives* (:natives idx)
               attr/*dropped* (:dropped idx)
@@ -3257,7 +3260,7 @@
         (let [env (base-env opts)
               pkg (attr/packge u)
               pkg-name (if pkg (m/package-name pkg) "")
-              file (.getName (java.io.File. (.getName (.getSourceFile cu))))
+              file (.getName (java.io.File. (if cu (.getName (.getSourceFile cu)) ^String (:source opts))))
               forms (vec (for [d (type-decls u)
                                :when (not (tr/is? d :SKIP))]
                            (case (tr/tag d)

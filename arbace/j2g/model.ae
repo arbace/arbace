@@ -204,12 +204,39 @@
    ;; java-interop's test-proxy-super: proxy-super of a translated class's method (REAP4)
    "java/util/BitSet"])
 
-(def ^:private proxy-super? (set proxy-supers))
+(def class-supers
+  "The classes besides proxy-supers that the classes of Java forms made at the REPL may extend
+  (doc/go/CLASSFORMS-REPL.md; arbace.j2g.dyn/class-supers): each gets its DynSub_C as the
+  proxies' superclasses do, so a translated one is not a leaf either (§5.3). Since JC4b the
+  superclasses jdk26u's tests extend (doc/classes/JAVA-CONFORMANCE-SURVEY.md, \"As built: JC4b\")."
+  ["java/lang/Throwable" "java/lang/Exception" "java/lang/RuntimeException" "java/lang/Error"
+   "java/lang/IllegalArgumentException" "java/lang/IllegalStateException"
+   "java/lang/Enum" "java/lang/Record" "arbace/lang/AFn"
+   ;; JC4b: classes of the world that were not leaves already
+   "java/lang/Thread" "java/io/FilterOutputStream" "java/io/FileInputStream" "java/util/HashMap"
+   "java/util/Vector" "java/util/LinkedList" "java/util/TimeZone" "java/net/URLStreamHandler"
+   "java/lang/Process" "java/net/SocketImpl"
+   "java/io/FilterInputStream" "java/util/AbstractCollection" "java/util/AbstractList"
+   "java/util/AbstractMap" "java/util/AbstractSequentialList" "java/util/AbstractSet"
+   "java/util/concurrent/locks/AbstractQueuedSynchronizer" "java/util/Calendar"
+   ;; JC4b: leaves made classes with a class interface by being listed
+   "java/util/ArrayList" "java/util/LinkedHashMap" "java/util/LinkedHashSet"
+   "java/util/IdentityHashMap" "java/util/PriorityQueue" "java/io/ByteArrayInputStream"
+   "java/io/StringWriter" "java/io/File" "java/lang/AssertionError" "java/math/BigInteger"
+   "java/text/DateFormatSymbols" "java/util/concurrent/Phaser"
+   "java/util/concurrent/ScheduledThreadPoolExecutor" "java/util/zip/Deflater"
+   "java/util/zip/Inflater" "java/io/PrintStream" "java/io/PrintWriter" "java/io/DataOutputStream"
+   "java/util/Observable" "java/util/GregorianCalendar" "java/util/concurrent/ConcurrentSkipListMap"
+   "java/util/TreeMap" "java/util/TreeSet" "java/io/ByteArrayOutputStream"
+   "java/util/concurrent/locks/AbstractQueuedLongSynchronizer"
+   "java/util/concurrent/ConcurrentSkipListSet" "java/util/zip/GZIPOutputStream"])
+
+(def ^:private proxy-super? (set (concat proxy-supers class-supers)))
 
 (defn leaf?
   "Is class n a leaf (§5.3): its values are *C pointers. Interfaces are not; jrt's classes are
-  leaves when jrt gives them no class interface C_I; a translated class of proxy-supers is not
-  (its DynSub_C extends it)."
+  leaves when jrt gives them no class interface C_I; a translated class of proxy-supers or
+  class-supers is not (its DynSub_C extends it)."
   [n]
   (cond
     (= n "java/lang/Object") false
@@ -456,6 +483,27 @@
   [^String n]
   (let [i (.indexOf n "$")] (if (neg? i) n (subs n 0 i))))
 
+(declare trivial-init?)
+
+(defn init-superinterfaces
+  "The superinterfaces of class n initialized with it (JLS 12.4.2 step 7: those that declare a
+  default method, each direct superinterface's superinterfaces before it, in the order of the
+  declaration's lists), translated with non-trivial initialization; none for an interface (JC4b)."
+  [n]
+  (let [d (a/decl n)]
+    (when (and d (not (has? (:flags d) Opcodes/ACC_INTERFACE)))
+      (let [declares-default? (fn [j]
+                                (some #(and (not= "<clinit>" (:name %)) (not= "<init>" (:name %))
+                                            (not (has? (:flags %) (bit-or Opcodes/ACC_STATIC Opcodes/ACC_ABSTRACT Opcodes/ACC_PRIVATE))))
+                                      (:methods (a/decl j))))
+            walk (fn walk [j]
+                   (when (and (translated? j) (a/decl j))
+                     (concat (mapcat walk (:interfaces (a/decl j)))
+                             (when (declares-default? j) [j]))))]
+        (vec (distinct (for [j (mapcat walk (:interfaces d))
+                             :when (not (trivial-init? j))]
+                         j)))))))
+
 (defn trivial-init?
   "Does class n have trivial initialization (§6.2): no static initializer code, no
   non-constant static field initializer, a superclass with trivial initialization? jrt's
@@ -473,7 +521,8 @@
                              (empty? (:clj-consts st))
                              (not (:uses-assert st))
                              (not (:interface-assert st))
-                             (or (nil? (:super d)) (trivial-init? (:super d))))))]
+                             (or (nil? (:super d)) (trivial-init? (:super d)))
+                             (empty? (init-superinterfaces n)))))]
         (swap! cache assoc n r)
         r))))
 

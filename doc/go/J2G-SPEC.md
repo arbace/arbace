@@ -1501,8 +1501,14 @@ stand-in (§4.3).
 CLASSFORMS-REPL.md §2.3). `DynClass` gains a field `CF`, the `Compiler$CF$Klass` of a class of
 Java forms made at the REPL (nil for `deftype`, `reify`, `proxy`). The DynSub types are made for
 `arbace.j2g.dyn/class-supers` too (`Throwable`, `Exception`, `RuntimeException`, `Error`,
-`IllegalArgumentException`, `IllegalStateException`, `Enum`, `Record`, `AFn`; a leaf, such as
-`UnsupportedOperationException`, cannot have one), so these classes can be proxied as well. An
+`IllegalArgumentException`, `IllegalStateException`, `Enum`, `Record`, `AFn`; since JC4b,
+doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4b", the list is `arbace.j2g.model/class-supers`
+and adds 42 classes jdk26u's tests extend: `Thread`, the collections (`ArrayList`, `HashMap`,
+`LinkedHashMap`, `TreeMap`, the `Abstract*` bases...), the streams (`ByteArrayInputStream`,
+`FilterInputStream`, `PrintStream`, `PrintWriter`...), `AssertionError`, `Calendar`, `Observable`,
+`AbstractQueuedSynchronizer`...; a translated leaf the list names is no longer a leaf, as §5.3's
+proxy-supers; a hand-written jrt class without a class interface, such as `WeakReference`, cannot
+have one), so these classes can be proxied as well. An
 interpreted class extending one of `proxy-supers` or `class-supers` (`arbace.j2g.dyn/sub-supers`;
 or an interpreted class that does) has DynSub_C
 objects: j2g writes for each C, in `j2g_cf.go`, its allocation without a constructor
@@ -1511,7 +1517,15 @@ objects: j2g writes for each C, in `j2g_cf.go`, its allocation without a constru
 of its virtual methods (`dynCfSupers_C`, by name and descriptor: `super.m()`). The natives of
 `Compiler$CFGo` (`defineClass`, `alloc`, `klassOf`, `setMethod` with the members' modifiers and a
 virtual member table entry, `addCtor`, `addField`, `addStatic`, `canExtend`, `superCtor`,
-`superCall`, `setEnum`, `setOuter`) are `arbace.j2g.dyncf`'s.
+`superCall`, `setEnum`, `setOuter`; since JC4b `superField`) are `arbace.j2g.dyncf`'s. Since JC4b
+j2g also writes `dynCfFields_C` (C's and its translated superclasses' protected instance fields, by
+name: a getter and setter on the `DynSub_C`, the volatile ones through their atomics) and
+`generics.edn`'s `:protected` (the protected instance methods, constructors and fields of the
+extendable classes and their superclasses, which jrt's member tables, public members only, do not
+list): the analysis enters them into the classes' infos (`arbace.classes.go/protected-members`), the
+interpreter calls such a method through `Host.superCall` on the object's nearest superclass of the
+world (`CF$CallV`'s fallback) and reads and writes such a field through `Host.superField`
+(`CF$SuperField`).
 
 Functions (`fn*`) need no dynamic type: they are instances of ordinary evaluator classes (§10.2).
 
