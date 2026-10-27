@@ -52,3 +52,17 @@ git history:
   the three crops (prior art: go-whim's C front end). Subagents on Sonnet for as much as possible, Opus for the
   hard parts (the user, 2026-10-25/26). The user asked to settle after this entry, for a restart of the
   harness.
+
+## 2026-10-27: the scripts' sweep started; then `arbace-reaps-3-crops-v2` (the user)
+
+- The user: do the scripts' sweep, then start `arbace-reaps-3-crops-v2`. The sweep (decided 2026-10-24):
+  `/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/fd`, `/dev/zero` and process substitution out of the
+  committed scripts, one commit per script, each script's check rerun. Scope: the scripts of the three crops
+  and the build (what the gate runs), 29 files, about 90 uses, in three batches on Sonnet in parallel
+  (`sweep-build`: arbace-go, seed and bin/lib's build helpers, alpine-env, x509roots-vendor; `sweep-java`:
+  java-check, javac-vendor, jrt-convert, jrt, j2g-edge, repr-java and its lib; `sweep-go`: repr-go's lib,
+  generated-check, diffcheck, clojure-tests, repr-clojure's lib). Left as they are, with the parked
+  sub-projects (the user, 2026-10-26), to be swept when each is revisited: the box's scripts (`box-*`,
+  `tamago-vendor`, `box-vendor`, `net-check`, `bin/lib/{store,tls}-checks.bash`), `repr-haskell` and
+  `repr-rust` with their lib files (their checks need KVM or the host's GHC and rustc); `tools/rsdump/rsdump.rs`
+  is Rust source.
