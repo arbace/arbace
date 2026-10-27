@@ -1,7 +1,9 @@
 # Agenda
 
 The current state of the work. This file is rewritten as things change. For the history, see
-[JOURNAL.md](JOURNAL.md) (since 2026-10-20), the journals at the tags
+[JOURNAL.md](JOURNAL.md) (since 2026-10-27), the journals at the tags
+[`arbace-reaps-3-crops-v1`](https://github.com/arbace/arbace/blob/arbace-reaps-3-crops-v1/doc/JOURNAL.md)
+(2026-10-20 to 2026-10-27),
 [`arbace-interprets-go1.27.1-v1`](https://github.com/arbace/arbace/blob/arbace-interprets-go1.27.1-v1/doc/JOURNAL.md)
 (2026-10-15 to 2026-10-20) and
 [`arbace-inside-itself-v1`](https://github.com/arbace/arbace/blob/arbace-inside-itself-v1/doc/JOURNAL.md)
@@ -9,7 +11,7 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## State
 
-- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`0120bd38…`, 2026-10-26: the second batched re-seed), the
+- The bootstrap starts from the Go-source seed `seed/arbace-seed-go.tar.xz` (`b4ac198d…`, 2026-10-26: the milestone's final re-seed), the
   program printed by the Go-hosted fixpoint, its toolchain (TamaGo's go1.27.1) pinned by
   `seed/goroot.sha256`. `bin/seed --check`, `--build` (stage 0), `--make`, `--verify`.
 - Stage 0 hosts every Arbace tool (j2g, repr/go, build/go, c2a, the suite's runner), compiled into it;
@@ -97,52 +99,26 @@ The current state of the work. This file is rewritten as things change. For the 
 
 ## Next
 
-- **The milestone REAP** (the user, 2026-10-24; doc/FULL-SUPPORT-SURVEY.md): read, eval, AOT and print
-  for Clojure, Java and Go on the host, goi's v1 rule (none fails, every non-pass in a recorded class),
-  tag `arbace-reaps-3-crops-v1` (annotated: Clojure `98d735fab02f`, Java 26, Go 1.27.1). Six cells
-  meet the rule in substance (Clojure read and print, Java read, Go read, eval, print); Clojure's
-  eval 20,506 of 20,520 and Go's AOT 1,032 of 1,051 close; Clojure's AOT (the suite compiled, never
-  run), Java's eval, AOT and print the work. Plan REAP1-REAP9 with JC1-JC6 and JC8's record, 24-41
-  days; RPS1-RPS17 decided as recommended. Done: REAP1 (2026-10-24: `bin/reap`, the matrix from the
-  committed references, the classes as data per cell; RPS18-RPS29 decided), JC1 (`bin/java-check`:
-  read 2,965 and interpreted 1,364 of 2,967 jtreg and JLS tests passing on the JDK; JCS16-JCS25
-  decided), JC4 (the interpreter's private calls, `Object` methods through world interfaces, `clone`,
-  the REPL's source lookup on Go; JCS30-JCS33 decided), REAP2 (`bin/goi check --aot`: 1,685 of 1,837
-  pass, none fail; RPS30-RPS34), the first batched re-seed (`916770d0…`), JC3 (the diagnostics level:
-  1,101 of 1,194 golden tests; JCS50-JCS55), JN9b (the native provider's members and types tiers;
-  JFS95-JFS101), REAP4 (the boxed NaN, `BitSet`, SL5; RPS50-RPS59), JC2 (the compiled level: 1,632 of
-  2,722; JCS40-JCS49), REAP3 (the suite compiled: 20,489 of 20,520 assertions, F2.4 fixed; RPS40-RPS49),
-  RPS55 (jrt's `java.lang.Module`, java.javadoc 4 of 5; RPS80-RPS82), REAP8 (the essential subsets: Go AOT
-  248, Java compiled 420, Clojure compiled 15 namespaces; the gate +32 s cold; RPS70-RPS78), REAP5 (Java's
-  print level: 2,104 of 2,722; RPS60-RPS69), JC2b (JCS42 (b)-JCS48: interp 1,462, compiled 1,636;
-  JCS70-JCS79), JN9c (beside REAP: overload resolution native, jdk26u's lists written alone 95.9%;
-  JFS102-JFS109). The matrix: 12 of 12 cells checked, 0 problems, none pending. Running: a trial of `bin/gate
-  --full` (on Sonnet, before REAP9). Next: REAP9 (one clean `bin/gate --full` on the final head, the user,
-  2026-10-26; the fixpoint and the final re-seed with JC6b's jrt; the v1 divergences recorded; the annotated
-  tag; the journal reset). Done since: JC6b (java.io, zip and jar in jrt: interp 1,683, compiled 1,869;
-  JCS100-JCS109), the second batched re-seed (`0120bd38…`, the fixpoint of
-  `988d4e90`, verified; on Sonnet), JC6 (the corpus
-  widened, 683 tests; the world ranked and decided, JCS90-JCS99; the catch-alls named), JN9d (beside REAP: the
-  inference tier, lists written alone 99.5%; JFS110-JFS119, JN9e after the tag), RPS103 (b) (the sample `callback`, on
-  Sonnet), JC5 (the analysis' gaps: interp 1,546, compiled 1,694 on the merged code; JCS60-JCS69),
-  REAP7b (a program's Go compiled through its own goi table, Java package loaders, `.clj`/`.cljc`, `mixed` in
-  the essential gate; RPS100-RPS109), REAP7 (`bin/arbace-go --build-program DIR`: four samples,
-  8 of 8; RPS90-RPS99), REAP5b (the printer: the print level 2,104 to 2,132; RPS83-RPS87, the
-  converter's three in JC6), the harness follow-ups (JCS70 masked paths, JCS71 `:flaky`, RPS74 (b),
-  RPS77 (b); interp 1,464, compiled 1,638; JCS80-JCS84, JCS80 and JCS84 at the next full recording). Next: after JC6b (the user, 2026-10-25: no shortcut; the
-  world ranked and decided, the catch-all classes "other, to triage" split and named, JCS72-JCS74,
-  JCS77); the second batched re-seed (REAP2's `--go-flag`, REAP3, REAP4, JC2's and JC2b's j2g, JC5,
-  RPS55's jrt); REAP9. After the milestone: the scripts' sweep of `/dev/null` and
-  process substitution (the user, 2026-10-24), done before any C23 work (the user, 2026-10-25); then the
-  milestone `arbace-reaps-3-crops-v2` (the user, 2026-10-26; an annotated tag, the journal reset again): the gate made
-  efficient (a survey first: a key per `--full` step over its declared inputs and a recorded pass, an unchanged step
-  skipped; the builds shared; the 20 GiB jobs one at a time; a clean, uncached `--full` at each tag), REAP's small
-  leftovers (RPS32, RPS102 (b), RPS95 (b), RPS97 (b), JCS76, RPS64 by kind, RPS86 (b), RPS80 (b), RPS81 (b)) and its
-  medium ones (JC4b: JCS98, JCS109, JCS62's compiled half; Clojure's last deferred: RPS41 (b), RPS42, RPS53, RPS54;
-  JN9e: JFS110-JFS119); the deferred JDK areas (JCS90-JCS96) and JC7 later; then the main effort: C23 at parity with Clojure, Java and Go (read, eval,
-  AOT and print, the milestone's rule; the user, 2026-10-25), its survey first, its prior art go-whim's C front end, canonical printer, C-lisp and C23
-  conformance test (`../go-whim` at `80c49bf5`, crefactor/; journal 2026-10-25).
-
+- **Done: the milestone `arbace-reaps-3-crops-v1`** (2026-10-27, an annotated tag on main; the user's goal
+  of 2026-10-24): read, eval, AOT and print for Clojure (`98d735fab02f`), Java 26 (jdk26u `baf63fbe`) and Go
+  1.27.1 on the host, forms only; `bin/reap`: 12 of 12 cells checked, none failing, every non-pass in a
+  recorded class (doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences"): Clojure 908/2/0, 21,049/80/5,
+  804/28/6, 1,031+/0/0; Java 7,738/3/93, 1,683/325/1,312, 1,869/181/1,270, 2,584/637/99; Go 12,158/204/0,
+  1,618/219/0, 1,685/149/3, 2,584+/141/0 (read, eval, AOT, print: pass/by design/deferred).
+  `GATE_FULL_SERIAL=1 bin/gate --full` passed at `5cfb1f4a`; the seed `b4ac198d` verified. Its history: the
+  journal at the tag.
+- **Next, in the user's order:** (1) the scripts' sweep of `/dev/null` and process substitution in bin/ (one
+  commit per script, each script's check rerun); (2) the milestone `arbace-reaps-3-crops-v2` (an annotated tag,
+  the journal reset again): the gate made efficient (a survey first: a key per `--full` step over its declared
+  inputs and a recorded pass, the builds shared, the 20 GiB jobs one at a time, serial by default, a clean
+  `--full` at each tag), REAP's small leftovers (RPS32, RPS102 (b), RPS95 (b), RPS97 (b), JCS76, RPS64 per
+  kind, RPS86 (b), RPS80 (b), RPS81 (b)) and medium ones (JC4b: JCS98, JCS109, JCS62's compiled half;
+  Clojure's last deferred: RPS41 (b), RPS42, RPS53, RPS54; JN9e: JFS110-JFS119); (3) C23 at parity with
+  the three crops, its survey first (prior art: go-whim's C front end, canonical printer, C-lisp and
+  conformance test, `../go-whim` at `80c49bf5`). Later: the deferred JDK areas (JCS90-JCS96), JC7.
+- **Working rules added during REAP:** subagents on Sonnet for as much as possible, Opus for the hard parts
+  (the user, 2026-10-25/26); one 20 GiB job at a time on the host; Go's build cache trimmed when the disk
+  fills.
 - **Done: the milestone `arbace-interprets-go1.27.1-v1`** (the user's goal of 2026-10-19; the name,
   the user, 2026-10-20). Its run is done at main (journal, 2026-10-20, "the milestone run"):
   - goi is complete at the REPL for Go 1.27.1: GR7a-GR7c, GR8a-GR8b, GR9a-GR9d, GR10, the arm64

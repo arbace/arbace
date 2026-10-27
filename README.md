@@ -116,6 +116,15 @@ ARBACE_BOX_NET=loopback $B                             # with a network: loopbac
 ARBACE_BOX_ARCHES=amd64,arm64 bin/arbace-go --build --box && bin/box-arm64-vm check
 ```
 
+## Three crops: read, eval, AOT and print
+
+The tag `arbace-reaps-3-crops-v1` (2026-10-27, on main) marks REAP for Clojure, Java 26 and Go 1.27.1:
+each language read into Arbace's forms, evaluated at the REPL, compiled ahead of time into the static
+executable, and printed back to its source, checked against the language's own reference (Clojure's suite,
+jdk26u's jtreg tests and the JDK's runs, `$GOROOT/test` against gc). `bin/reap` prints the matrix; none of
+its 12 cells fails, and every case that does not pass is in a recorded class
+([doc/FULL-SUPPORT-SURVEY.md](doc/FULL-SUPPORT-SURVEY.md), "REAP v1's divergences").
+
 ## Go forms at the REPL
 
 The tag `arbace-interprets-go1.27.1-v1` (2026-10-20, on main) marks goi, Arbace's own interpreter
@@ -194,9 +203,9 @@ seed was printed from (the seed's `SEED.edn`).
 - [doc/AGENDA.md](doc/AGENDA.md): where the work stands and what comes next
 - [doc/go/FREEZE.md](https://github.com/arbace/arbace/blob/arbace-for-golang/doc/go/FREEZE.md)
   (on `arbace-for-golang`): Arbace for Golang: build, run, verify, the frozen branch
-- [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only (since 2026-10-20;
-  the earlier history at the tags `arbace-interprets-go1.27.1-v1` and `arbace-inside-itself-v1`
-  and on the frozen branches)
+- [doc/JOURNAL.md](doc/JOURNAL.md): every decision and action, append-only (since 2026-10-27;
+  the earlier history at the tags `arbace-reaps-3-crops-v1`, `arbace-interprets-go1.27.1-v1` and
+  `arbace-inside-itself-v1` and on the frozen branches)
 - [doc/classes/SPEC.md](doc/classes/SPEC.md): the Java forms
 - [doc/go/B1-PLAN.md](doc/go/B1-PLAN.md): the Go executable's plan; [doc/go/J2G-SPEC.md](doc/go/J2G-SPEC.md),
   its translation; [doc/go/EXEC-NOTES.md](doc/go/EXEC-NOTES.md), the executable;
