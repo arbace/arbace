@@ -61,7 +61,7 @@ Prior art:
   `seed/arbace-seed-go.tar.xz.sha256`; the Go toolchain that builds it (TamaGo's go1.27.1) pinned
   by `seed/goroot.sha256` (doc/STANDALONE-NOTES.md, "S4: the Go-source seed", "S4: the JVM
   removed"). `bin/seed --check` checks the hash; `--build` builds stage 0 from it with Go's
-  toolchain alone (`target/seed/<arch>/arbace`); `--make` packs a build (the fixpoint's G3, for a
+  toolchain alone (`target/seed/<arch>/arbace`, and when its runtime is the checkout's the checkout's namespaces compiled by it into `target/seed/aot`, `--no-aot` not); `--make` packs a build (the fixpoint's G3, for a
   seed to commit, rarely: a re-seed); `--verify` prints it again from its commit (the fixpoint from
   the seed's own stage 0) and requires the same tar and stage 0 = G1 = G2 = G3. Until S4 the seed
   was a jar (`arbace-for-java-26-v1`'s), and before that the frozen reference tree `clojure/`
@@ -270,12 +270,12 @@ Prior art:
   `-main`; `:main-class CLASS`, its `main`; neither: `go/` a Go program, `arbace.build.go` alone),
   `src/`'s namespaces compiled by c2j and embedded (its `.clj` and `.cljc` translated into `.ae` by
   repr/clojure first, REAP7b), `java/`'s Java forms and the compiled namespaces translated by j2g with
-  the shipped build's compiled namespaces (reused when their `aot.key` is the checkout's, else a
+  the shipped build's compiled namespaces (reused when their `aot.key` is the checkout's: `aot.runtime` beside it names their runtime, and stage 0's `target/seed/aot`, which `bin/seed --build` makes, serves as a base; else a
   `--build` first; j2g's `--entry`, `--entry-arg`, `--resources`, `--java-namespaces`: the packages'
-  namespaces no-op loaders), `go/`'s Go packages compiled (REAP7b: listed in a goi table of the
+  namespaces no-op loaders), `go/`'s Go packages compiled (a package goi's checker refuses is a build error, RPS102 (b); REAP7b: listed in a goi table of the
   program's own, `bin/goi table --program-list FILE --program-root DIR`, and printed into the module by
   `bin/build-go --root DIR`, a package outside the module `arbace` a module of its own under
-  `_modules/`; one that does not check for the table embedded for goi), into
+  `_modules/`), into
   `target/arbace-go/programs/NAME/ARCH/NAME`, cached by key; `--build-program --check` (`make
   programs-check`) builds and runs the samples of `test/programs/` (Clojure, Java forms, Go forms,
   mixed) against their runs (`bin/gate` the `mixed` sample, `make programs-essential`; `--full` all). Its namespaces are compiled to Go (`ARBACE_AOT=1`, the
