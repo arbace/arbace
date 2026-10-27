@@ -352,10 +352,13 @@ dump_corpus() {
   local c=$1 out=$2 name ed files dump_full=0
   [ "${3:-}" = --full ] && dump_full=1
   rm -rf "$out" "$out.err"; mkdir -p "$out"
+  local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
+  edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
     (cd "$srcroot" && run_helper dump "$out" "$ed" $files) 2>> "$out.err" || true
-  done < <(edition_plan "$c")
+  done < "$pl"
+  rm -f "$pl"
 }
 
 # prune_dumps DUMPS LOG: the dumps of the files the conversion's log names no error or misread for
@@ -449,12 +452,15 @@ roundtrip_one() {
   # candidate's, under the same relative paths: the spans name the same files)
   rm -rf "$orig" "$orig.err"; mkdir -p "$orig" "$cand.trees"
   local name ed files f
+  local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
+  edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
     (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
     # shellcheck disable=SC2086
     (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
-  done < <(edition_plan "$c")
+  done < "$pl"
+  rm -f "$pl"
   t4=$(date +%s)
   echo "== repr-rust roundtrip $c: compare ($((t4 - t3)) s parsing)" >&2
   arbace_tool -m arbace.repr.rust compare --corpus "$(corpus_file "$c")" --orig "$orig" --cand "$cand" \
@@ -548,6 +554,8 @@ run_level() {
 code_plan() {
   local c=$1 only=${2:-} name ed type croot externs cfgs envs libdir lib a m n e
   if [ "$corpus_kind" != crates ]; then
+    local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
+    iface_plan "$c" > "$pl"
     while IFS='|' read -r name ed type croot externs cfgs envs libdir; do
       if [ -n "$only" ] && ! [[ $name =~ $only ]]; then continue; fi
       lib=$host_sysroot/lib/rustlib/$target/lib
@@ -561,7 +569,8 @@ code_plan() {
       done
       for n in $cfgs; do a+=" --cfg ${n//\"/\\x22}"; done
       printf '%s\x1f%s\x1flib\x1f%s\x1f%s\n' "$name" "$croot" "$a" "$envs"
-    done < <(iface_plan "$c")
+    done < "$pl"
+    rm -f "$pl"
   fi
   arbace_tool -m arbace.repr.rust run-plan --corpus "$(corpus_file "$c")" -o "$work/code/$c.programs" ${only:+--only "$only"}
   while IFS=$'\x1f' read -r n f ed a _ _ e; do
@@ -711,12 +720,15 @@ pretty_level() {
     grep -v '^error' "$cand.print.log" | tail -3 >&2
   t1=$(date +%s)
   rm -rf "$orig" "$orig.err"; mkdir -p "$orig" "$cand.trees"
+  local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
+  edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
     (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
     # shellcheck disable=SC2086
     (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
-  done < <(edition_plan "$c")
+  done < "$pl"
+  rm -f "$pl"
   t2=$(date +%s)
   arbace_tool -m arbace.repr.rust compare --trees-only --corpus "$(corpus_file "$c")" --orig "$orig" --cand "$cand" \
     --forms-report "$forms.report.edn" --known "$root/test/rust/roundtrip-$c-pretty-known.edn" \
@@ -756,12 +768,15 @@ text_level() {
     --times "dump $((t1 - t0)) convert $((t2 - t1)) print $((t3 - t2))" || st=1
   echo "== repr-rust roundtrip $c: text level: the tree level of mode :full's printed files" >&2
   rm -rf "$orig" "$orig.err"; mkdir -p "$orig" "$cand.trees"
+  local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
+  edition_plan "$c" > "$pl"
   while IFS=$'\t' read -r name ed files; do
     # shellcheck disable=SC2086
     (cd "$srcroot" && run_helper tree "$orig" "$ed" $files) 2>> "$orig.err" || true
     # shellcheck disable=SC2086
     (cd "$cand" && run_helper tree "$cand.trees" "$ed" $(for f in $files; do [ -f "$f" ] && echo "$f"; done)) 2>> "$cand.trees.err" || true
-  done < <(edition_plan "$c")
+  done < "$pl"
+  rm -f "$pl"
   t4=$(date +%s)
   arbace_tool -m arbace.repr.rust compare --corpus "$(corpus_file "$c")" --orig "$orig" --cand "$cand" \
     --forms-report "$forms.report.edn" --known "$root/test/rust/roundtrip-$c-known.edn" \
@@ -831,20 +846,26 @@ iface_level() {
   cp -rs "$srcroot/." "$ib/src"
   # each corpus file a link to its printed file, but the .rs files a library reads as text
   # (the corpus's :text-files: examples a doc include_str!s), which stay the originals
+  local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
+  arbace_tool -e "(let [c (read-string (slurp \"$(corpus_file "$c")\"))]
+    (doseq [k (:crates c) :let [t (set (:text-files k))] f (:files k) :when (not (t f))] (println (:name k) f)))" > "$pl"
   while read -r _ f; do
     rm -f "$ib/src/$f"
     if [ -f "$cand/$f" ]; then ln -s "$cand/$f" "$ib/src/$f"; fi
-  done < <(arbace_tool -e "(let [c (read-string (slurp \"$(corpus_file "$c")\"))]
-    (doseq [k (:crates c) :let [t (set (:text-files k))] f (:files k) :when (not (t f))] (println (:name k) f)))")
+  done < "$pl"
+  rm -f "$pl"
   if [ "$corpus_kind" = crates ]; then
     crates_docs "$c" "$ib" || return 1
   else
+    local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
+    iface_plan "$c" > "$pl"
     while IFS='|' read -r name ed type croot externs cfgs envs libdir; do
       # at most 32 rustdoc runs at a time
       while [ "$(jobs -rp | wc -l)" -ge 32 ]; do wait -n || true; done
       rustdoc_json "$srcroot" "$ib/orig" "$name" "$ed" "$type" "$croot" "$externs" "$cfgs" "$envs" "$libdir" & pids+=($!)
       rustdoc_json "$ib/src" "$ib/cand" "$name" "$ed" "$type" "$croot" "$externs" "$cfgs" "$envs" "$libdir" & pids+=($!)
-    done < <(iface_plan "$c")
+    done < "$pl"
+    rm -f "$pl"
     for f in "${pids[@]}"; do wait "$f" || true; done
   fi
   t1=$(date +%s)
@@ -895,7 +916,10 @@ crates_docs() {
   : > "$cw/ws/src/lib.rs"
   cp "$lock" "$cw/ws/Cargo.lock"
   printf '[source.crates-io]\nreplace-with = "pinned"\n[source.pinned]\ndirectory = "%s"\n' "$cw/vendor" > "$cw/ws/.cargo/config.toml"
-  while read -r f; do specs+=(-p "$f"); done < <(sed -n 's/^c[0-9]* = { package = "\([^"]*\)", version = "=\([^"]*\)".*/\1@\2/p' "$cw/ws/Cargo.toml")
+  local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
+  sed -n 's/^c[0-9]* = { package = "\([^"]*\)", version = "=\([^"]*\)".*/\1@\2/p' "$cw/ws/Cargo.toml" > "$pl"
+  while read -r f; do specs+=(-p "$f"); done < "$pl"
+  rm -f "$pl"
   # cargo runs rustdoc through this wrapper: for a crate of the corpus (its manifest in the
   # directory source), the same command twice more, its paths in the directory source made the
   # corpus's extraction (orig/) and the mirror (cand/), its output IB/K/C/C.json and its log beside
@@ -935,11 +959,14 @@ EOF
      cargo doc --offline --locked --no-deps --keep-going -j "$jobs" "${specs[@]}") > "$cw/doc.log" 2>&1 || true
   echo "== repr-rust roundtrip $c: interface level: $(ls "$ib/orig" | wc -l) crates documented by cargo, from the originals and the printed files" >&2
   # a crate cargo did not document: a log that says so
+  local pl; pl=$(mktemp "$TMPDIR/repr-rust-plan.XXXXXX")
+  arbace_tool -e "(doseq [k (:crates (read-string (slurp \"$(corpus_file "$c")\"))) :when (:cargo (:iface k))] (println (:name k)))" > "$pl"
   while read -r name; do
     for k in orig cand; do
       [ -d "$ib/$k/$name" ] || { mkdir -p "$ib/$k/$name"; echo "repr-rust: cargo did not document $name ($cw/doc.log)" > "$ib/$k/$name/$name.log"; }
     done
-  done < <(arbace_tool -e "(doseq [k (:crates (read-string (slurp \"$(corpus_file "$c")\"))) :when (:cargo (:iface k))] (println (:name k)))")
+  done < "$pl"
+  rm -f "$pl"
 }
 
 cmd=${1:-}

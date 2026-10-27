@@ -21,12 +21,12 @@ store_checks() {
     "$(ARBACE_BOX_STORE=$s $run -e "$e" -e '(let [h (box/put "x")] (prn [(e #(box/ref ".x")) (e #(box/ref! "a/b" h)) (e #(box/ref (apply str (repeat 65 "a")))) (e #(box/ref (apply str (repeat 64 "a")))) (e #(box/get "ABC")) (e #(box/ref! "r" (apply str (repeat 64 "0")))) (e #(box/load-ref "none"))]))' 2>&1)"
   check "the store refuses a blob beyond ARBACE_BOX_STORE_MAX" "[:ok :too-large]" \
     "$(ARBACE_BOX_STORE=$s ARBACE_BOX_STORE_MAX=16 $run -e "$e" -e '(prn [(e #(box/put (apply str (repeat 16 "x")))) (e #(box/put (apply str (repeat 17 "x"))))])' 2>&1)"
-  ARBACE_BOX_STORE=$s $run -e "$e" -e '(box/put! "hello.ae" "(prn [:from-ref *command-line-args*])")' > /dev/null 2>&1
+  ARBACE_BOX_STORE=$s $run -e "$e" -e '(box/put! "hello.ae" "(prn [:from-ref *command-line-args*])")' > "$s.err" 2>&1
   check "a script run from a ref (ref:NAME)" '[:from-ref ("a" "b")]' "$(ARBACE_BOX_STORE=$s $run ref:hello.ae a b 2>&1)"
   check "an -i file from a ref" "$(printf '[:from-ref nil]\n:after')" "$(ARBACE_BOX_STORE=$s $run -i ref:hello.ae -e '(prn :after)' 2>&1)"
   ARBACE_BOX_STORE=$s $run ref:nope > "$s.err" 2>&1; st=$?
   check "a script from a ref that is not: status 1, the reason" "1 no ref nope" "$st $(grep -o 'no ref nope' "$s.err" | head -1)"
-  ARBACE_BOX_STORE=$s $run -e "$e" -e '(box/put! "st.lib.ae" "(ns st.lib) (defn f [] :lib)") (box/put! "p.st.two.ae" "(ns st.two (:require [st.lib])) (defn g [] [:two (st.lib/f)])")' > /dev/null 2>&1
+  ARBACE_BOX_STORE=$s $run -e "$e" -e '(box/put! "st.lib.ae" "(ns st.lib) (defn f [] :lib)") (box/put! "p.st.two.ae" "(ns st.two (:require [st.lib])) (defn g [] [:two (st.lib/f)])")' > "$s.err" 2>&1
   check "namespaces loaded from the store (ARBACE_PATH store:p.:store:)" "[:two :lib]" \
     "$(ARBACE_BOX_STORE=$s ARBACE_PATH=/none:store:p.:store: $run -e '(require (quote st.two)) (prn ((resolve (quote st.two/g))))' 2>&1)"
 }
