@@ -942,7 +942,10 @@ their Clojure meaning. New:
 - **`for-each`** is Java's enhanced `for`. On an array it loops over the array with an index; on
   an `Iterable` it calls `iterator()`, `hasNext()` and `next()`, casting each element to the
   binding's type if that is not `Object`, as javac does. A primitive binding over an `Iterable`
-  (`for (int x : ints)`) casts to the wrapper (`Integer`) and unboxes. (`doseq` stays Clojure's
+  (`for (int x : ints)`) casts to the wrapper (`Integer`) and unboxes; over the box of another
+  primitive (`for (float f : Iterable<Integer>)`, javac's cast to the erased type argument, then
+  unboxing and widening) the binding names that box, `(for-each [^float ^{:box Integer} f xs] ...)`
+  (JCS115 (a), "As built: JN9f"). (`doseq` stays Clojure's
   seq loop.)
 - In class bodies `loop` and `try` in expression position compile inline. (Clojure wraps them in
   a `fn` there; Java code has no such classes.)
@@ -975,7 +978,12 @@ label   = constant | (constant+) | [pattern] | [pattern :when guard] | nil | (ni
   value (`-2147483648`, not `(unchecked-int 0x80000000)`).
 - **Patterns** are vectors: `^T x` is a type pattern, `_` (alone or `^T _`) an unnamed one,
   `(R p*)` a record pattern with nested patterns, and an untyped symbol in a record pattern is
-  Java's `var`. `:when` adds a guard.
+  Java's `var`. `:when` adds a guard. A nested type pattern marked `^:unconditional` matches its
+  component without a test, `null` included: javac found it unconditional by the record pattern's
+  type arguments (`(Box ^String ^:unconditional s)` for `Box<String>(String s)` of a `record
+  Box<T>(T t)`, whose component's erased type is `Object`); the converter writes the mark where the
+  component's declared erasure alone would make it a test (JCS114 (a),
+  doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4b"; JAVA-FRONTEND-SURVEY.md, "As built: JN9f").
 - Without a default nothing happens when nothing matches, and the value is `nil`. Where Java
   requires exhaustiveness (switch expressions, pattern switches), javac adds a default that
   throws `MatchException`; the converter writes it:

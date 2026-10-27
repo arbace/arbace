@@ -183,11 +183,14 @@
 (defn registry
   "A run's registry: `platform` the platform's directory, `module` the module of the run's sources
   (nil: the unnamed module), `source-dirs` the directories javac finds more sources of it in (the
-  source path, a patched module's directories), searched in order."
-  [{:keys [platform module source-dirs]}]
+  source path, a patched module's directories), searched in order; `class-dirs` the class path's
+  directories (DIR/pkg/path/C.class, the unnamed module's classes after the platform's: javac's -cp,
+  JN9f)."
+  [{:keys [platform module source-dirs class-dirs]}]
   (sym
   {:platform platform :index (platform-index platform) :module module
    :source-dirs (vec source-dirs)
+   :class-dirs (vec class-dirs)
    :classes (ConcurrentHashMap.)       ; flat name -> csym (or ::none)
    :units (atom [])                    ; the units entered
    :unit-classes (ConcurrentHashMap.)  ; package -> {simple csym}, the units' top-level classes
@@ -209,7 +212,7 @@
   (boolean
    (or (contains? (:index reg) pkg)
        (.containsKey ^ConcurrentHashMap (:unit-classes reg) pkg)
-       (some (fn [d] (.isDirectory (File. (str d "/" (str/replace pkg "." "/"))))) (:source-dirs reg))
+       (some (fn [d] (.isDirectory (File. (str d "/" (str/replace pkg "." "/"))))) (concat (:source-dirs reg) (:class-dirs reg)))
        ;; a package that has only subpackages exists for javac as a prefix of a known one
        (some #(str/starts-with? % (str pkg ".")) (keys (:index reg))))))
 
@@ -234,7 +237,10 @@
            (mapcat #(names-in (File. (str % (when (seq rel) "/") rel)) ".java") (:source-dirs reg))
            (when-let [m (:module reg)]
              (when (some #{m} (get (:index reg) pkg))
-               (names-in (File. (str (:platform reg) "/" m (when (seq rel) "/") rel)) ".class")))))))
+               (names-in (File. (str (:platform reg) "/" m (when (seq rel) "/") rel)) ".class")))
+           ;; the unnamed module's: the class path's
+           (when-not (:module reg)
+             (mapcat #(names-in (File. (str % (when (seq rel) "/") rel)) ".class") (:class-dirs reg)))))))
 
 (defn- unit-top-class [reg pkg simple]
   (get (.get ^ConcurrentHashMap (:unit-classes reg) pkg) simple))
@@ -262,10 +268,16 @@
   (let [i (.lastIndexOf flat ".")
         pkg (if (neg? i) "" (subs flat 0 i))
         simple (subs flat (inc i))]
-    (when-let [m (module-of-package reg pkg)]
-      (let [path (str (:platform reg) "/" m "/" (str/replace pkg "." "/") (when (seq pkg) "/") simple ".class")]
-        (when (.isFile (File. path))
-          (class-file-csym reg flat m path))))))
+    (or (when-let [m (module-of-package reg pkg)]
+          (let [path (str (:platform reg) "/" m "/" (str/replace pkg "." "/") (when (seq pkg) "/") simple ".class")]
+            (when (.isFile (File. path))
+              (class-file-csym reg flat m path))))
+        ;; the class path's, the unnamed module's (JN9f)
+        (some (fn [d]
+                (let [path (str d "/" (str/replace pkg "." "/") (when (seq pkg) "/") simple ".class")]
+                  (when (.isFile (File. path))
+                    (class-file-csym reg flat nil path))))
+              (:class-dirs reg)))))
 
 (defn class-named
   "The class of flat name `flat` (a.b.C$D), from the run's sources, their directories or the

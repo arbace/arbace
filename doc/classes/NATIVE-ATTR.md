@@ -112,6 +112,7 @@ from it:
 | `types/new` | types | Attr.visitNewClass | a new instance's class type |
 | `types/new-array` | types | Attr.visitNewArray | a new array's type |
 | `types/operator` | types | Attr.visitBinary, Operators.resolveBinary | the operator resolved by the operand types (its parameter types) |
+| `types/record-components` | types | TransTypes.visitRecordPattern, TransPatterns | a record pattern's components' erased member types at its type, and declared (a nested type pattern unconditional by the type arguments, JCS114 (a), JN9f) |
 | `types/pattern-switch` | types | Attr.handleSwitch | whether a switch is a pattern switch (labels and selector type) |
 | `types/qualifier` | types | Attr.visitSelect | a qualifier's type (the site of a member) |
 | `types/result` | types | Attr (the operands' types) | a conversion decided by a converted operand's type (coerce, test-form) |

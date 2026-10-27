@@ -14,7 +14,9 @@
 # into $work/jdk26u.sha256, compared with test/repr/java/expected/jdk26u.sha256 (the lines of the
 # modules converted; a module of the record not converted is not compared); with --update (bin/repr-java
 # check --jdk --update, or check --update --jdk) the record's lines of the converted modules are
-# rewritten instead (commit it with the change that moved them, reviewed).
+# rewritten instead (commit it with the change that moved them, reviewed). Since JN9f (JFS120 (b)) the
+# modules are read without javac (read-jdk --no-javac: the native parser and provider, a file that falls
+# back read by javac, counted); REPR_JAVA_VENDOR_READ=javac reads them with javac's trees.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root"
@@ -42,13 +44,19 @@ has() { case ",$steps," in *",$1,"*) return 0 ;; esac; return 1; }
 convert_one() {
   local m=$1
   rm -rf "$work/conv/$m"
-  REPR_JAVA_THREADS=${JDK_THREADS:-4} bin/repr-java read-jdk --check "$work/conv/$m" "$m" \
+  REPR_JAVA_THREADS=${JDK_THREADS:-4} bin/repr-java read-jdk --check $ro "$work/conv/$m" "$m" \
     "$src/$m/share/classes" > "$work/log/convert-$m.log" 2>&1
-  echo "convert $m: $(tail -1 "$work/log/convert-$m.log")"
+  [ -f "$work/conv/$m/repr-java-nojavac.edn" ] && mv "$work/conv/$m/repr-java-nojavac.edn" "$work/log/nojavac-$m.edn"
+  echo "convert $m: $(tail -1 "$work/log/convert-$m.log")${ro:+; $(grep '^no javac: ' "$work/log/convert-$m.log" | sed 's/^no javac: /without javac: /')}"
 }
 
+# the read (JFS120 (b), doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9f"): without javac by default,
+# a file that falls back read by javac (counted: each module's "no javac:" line, the totals' fallbacks);
+# REPR_JAVA_VENDOR_READ=javac, javac's trees
+. bin/lib/repr-java/host.bash
+ro=$(repr_java_vendor_read_opts) || exit 1
 export -f convert_one
-export work src
+export work src ro
 mkdir -p "$work/log"
 
 if has convert; then
@@ -63,6 +71,11 @@ for m in $modules; do
   echo "$l" | grep -q " 0 failed, 0 javac errors, .* 0 unreadable" || { bad=$((bad + 1)); echo "$m: $l"; }
 done
 echo "$n modules converted, $bad with failures"
+if [ -n "$ro" ]; then
+  # the reads without javac: the files and the fallbacks, summed over the modules
+  cat $(for m in $modules; do echo "$work/log/convert-$m.log"; done) 2>"$work/log/cat.err" | grep '^no javac: ' |
+    awk '{f+=$3; nat+=$5; fb+=$7} END {printf "without javac: %d files, %d native, %d fallbacks to javac (the modules'"'"' logs, $work/log/convert-M.log)\n", f, nat, fb}'
+fi
 [ $bad = 0 ] || exit 1
 
 # the forms' hashes (JFS72 (b)): each module's files, their first line without $JDK_SRC

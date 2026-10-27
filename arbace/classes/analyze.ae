@@ -3889,6 +3889,10 @@
             (fail (str "for-each over a value of type " (pr-str ct) ", neither an array nor Iterable")))
         tag (:tag (meta sym))
         bt (cond tag (actx-desc actx tag) array? (t/elem-type ct) :else t/object-desc)
+        ;; ^{:box C}: a primitive binding over an Iterable whose element is another primitive's box
+        ;; (for (float f : Iterable<Integer>)): the element cast to C, unboxed, then widened, as
+        ;; javac's Lower casts it to the erased type argument (JCS115 (a), the converter's mark)
+        box (when-let [b (:box (meta sym))] (actx-desc actx b))
         aux (fn [nm ty] (make-binding actx (gensym nm) ty))
         hidden (if array?
                  {:arr (aux "arr$" ct) :len (aux "len$" "I") :i (aux "i$" "I")}
@@ -3908,7 +3912,8 @@
                 :args [] :type t/object-desc})
         elem (cond
                (or array? (= bt t/object-desc)) (convert-node elem bt :what "for-each element")
-               (t/prim? bt) (convert-node {:op :cast :class (boxed-desc bt) :expr elem :type (boxed-desc bt)} bt)
+               (t/prim? bt) (let [c (if (and box (not array?)) box (boxed-desc bt))]
+                              (convert-node {:op :cast :class c :expr elem :type c} bt))
                :else {:op :cast :class bt :expr elem :type bt})
         bactx (cond-> (-> actx (with-local b) (assoc :loop target :break-target target) (dissoc :label-loop))
                 (:label-loop actx) (assoc-in [:labels (:label-loop actx) :loop] target))
@@ -4266,8 +4271,13 @@
                    :else (fail (str "A type pattern needs a type: " form)))
           unnamed (= "_" (name form))
           b (when-not unnamed (make-binding actx form ty :mutable (boolean (:mutable (meta form)))))
+          ;; ^:unconditional: a record component's type pattern javac's attribution found
+          ;; unconditional by the record pattern's type arguments (Box<String>(String s) of a
+          ;; Box<T>, whose component's erased type is Object): not tested, so it matches null, as
+          ;; javac's TransPatterns lets it (JCS114 (a), the converter's mark)
           test (not (or (= ty st) (and (t/ref? ty) (t/ref? st) (env/assignable? st ty))
-                        (and (t/prim? ty) (= ty st))))]
+                        (and (t/prim? ty) (= ty st))
+                        (and component (t/ref? ty) (:unconditional (meta form)))))]
       (when (and (t/prim? ty) (not= ty st))
         (fail (str "Primitive pattern of type " ty " for a value of type " st " is not supported")))
       [{:kind :type :class ty :b b :test test} (if b (with-local actx b) actx)])
