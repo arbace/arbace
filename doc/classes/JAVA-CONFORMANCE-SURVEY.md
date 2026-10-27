@@ -3123,3 +3123,11 @@ targeted compiled run), `full1.log`, `results-full1.tsv` (the recording), `check
 `levels-known-before.edn` (main's records), `main-j2g-go/` and `j2g-diff-files.txt` (main's printed program and
 the files that differ), `repro/` (the Java forms the fixes were tried on), `build1.log`-`build4.log`,
 `recref1.log`, `recref2.log`, `edge-verify.log`, `gate.log`.
+
+## Decided (2026-10-27): JCS110-JCS119
+
+The user decided JC4b's proposals as recommended, inside the milestone `arbace-reaps-3-crops-v2`: JCS110 (a)
+then (c) (the 17.6 MB kept; the per-class subclass types shrunk by a shared generic dispatch later), JCS111 (a),
+JCS112 (a), JCS113 (a), JCS116 (a) with JCS117 (a), JCS118 (a): JC4c, before v2's re-seed; JCS114 (a) and
+JCS115 (a), the converter's, in JN9f (repr/java); JCS119 (a) and (c) (the limits kept, the full check on an
+idle host only, as GT6's limits will hold).
