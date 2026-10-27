@@ -20,14 +20,14 @@ arbace_host_exe() {
   a=$(arbace_host_arch)
   exe=$root/target/seed/$a/arbace
   seed=${ARBACE_SEED:-$root/seed/arbace-seed-go.tar.xz}
-  want=$(cut -d' ' -f1 "$seed.sha256" 2>/dev/null)
-  have=$(cat "$root/target/seed/seed.sha256" 2>/dev/null)
+  want=$([ -f "$seed.sha256" ] && cut -d' ' -f1 "$seed.sha256")
+  have=$([ -f "$root/target/seed/seed.sha256" ] && cat "$root/target/seed/seed.sha256")
   if [ ! -x "$exe" ] || [ -z "$want" ] || [ "$want" != "$have" ]; then
     mkdir -p "$root/.tmp"
     (
       # one stage 0 build at a time (concurrent tools share target/seed)
       flock 9
-      have=$(cat "$root/target/seed/seed.sha256" 2>/dev/null)
+      have=$([ -f "$root/target/seed/seed.sha256" ] && cat "$root/target/seed/seed.sha256")
       if [ ! -x "$exe" ] || [ "$want" != "$have" ]; then
         echo "== stage 0: bin/seed --build --arch $a (the host of Arbace's tools)" >&2
         "$root/bin/seed" --build --arch "$a" >&2 || exit 1
