@@ -28,13 +28,15 @@
 # G3 proves it), nor j2g's edge (jdk/edge.edn: j2g's data, not the runtime's), nor javac's
 # forms and the tool's own Java (jdk/javac, overlay/jdk/javac: the input of javac's tool build,
 # not the program's, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN2"), Go's runtime
-# patches, the roots and Go's pin. Two programs of one runtime key
+# patches, the roots and Go's pin; nor jdk/provenance.edn (since GT2: what repr/java wrote the forms
+# with, its sources' hash and the tool, not the runtime; gate_key leaves it out likewise, so that
+# a provenance rewritten keeps the gate's executables and their runtime the checkout's). Two programs of one runtime key
 # analyze a checkout's namespaces alike, so a build's host of that key compiles them (one j2g
 # run).
 arbace_runtime_key() {
   local discard=${TMPDIR:-$1/.tmp/tmp}/version.discard
   mkdir -p "${discard%/*}"
-  (cd "$1" && find arbace/lang go overlay/jdk jdk -type f ! -path jdk/edge.edn ! -path 'jdk/javac/*' \
+  (cd "$1" && find arbace/lang go overlay/jdk jdk -type f ! -path jdk/edge.edn ! -path 'jdk/javac/*' ! -path jdk/provenance.edn \
        ! -path 'overlay/jdk/javac/*' 2>"$discard" \
      | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64)
 }
