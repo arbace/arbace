@@ -85,7 +85,11 @@
 (defmacro ^:private rd
   "Count read `k` answered as `o` (:native, :javac, :bridge) when the native provider is on."
   [k o]
-  `(when-let [pr# attr/*provider*] (na/read! pr# ~k ~o)))
+  `(when-let [pr# attr/*provider*]
+     ~@(cond (= o :native) nil
+             (keyword? o) [`(when d/*no-javac* (d/javac-needed! ~(str "the model's read " k " (" (name o) ")")))]
+             :else [`(when (and d/*no-javac* (not= ~o :native)) (d/javac-needed! (str ~(str "the model's read " k " (") (name ~o) ")")))])
+     (na/read! pr# ~k ~o)))
 
 (defn canon
   "`s` in the unit's model: the native symbol of a declaration of the unit for javac's symbol of it
@@ -244,10 +248,10 @@
     (do (rd :model/owner :javac) (canon (.-owner ^Symbol s)))))
 
 (defn class-sym? [s]
-  (if (nsym? s) (do (rd :model/class? :native) (= :class (:sk s))) (do (rd :model/class? :javac) (jt/class-sym? s))))
+  (if (or (nil? s) (nsym? s)) (do (rd :model/class? :native) (= :class (:sk s))) (do (rd :model/class? :javac) (jt/class-sym? s))))
 
 (defn method-sym? [s]
-  (if (nsym? s) (do (rd :model/class? :native) (= :method (:sk s))) (do (rd :model/class? :javac) (instance? Symbol$MethodSymbol s))))
+  (if (or (nil? s) (nsym? s)) (do (rd :model/class? :native) (= :method (:sk s))) (do (rd :model/class? :javac) (instance? Symbol$MethodSymbol s))))
 
 (defn local?
   "Is the symbol a local variable (or parameter, pattern variable): a variable owned by a method or
@@ -280,6 +284,13 @@
   (let [^java.util.Map m (:local-flats (p))
         hit (locking m (.get m c))]
     (or hit
+        (when d/*no-javac*
+          ;; a read without javac: the native numbering alone (JFS111 (b))
+          (let [nn (or (ex/local-flat (p) c) (d/javac-needed! "a local class's flat name"))
+                r [:native nn]]
+            (na/record! (p) :names/local-class :native (:tree c) nn nil)
+            (locking m (.put m c r) (.put ^java.util.Map (:flat-locals (p)) nn c))
+            r))
         (let [jn (str (.flatName ^Symbol$ClassSymbol (javac-of c)))
               nn (try (ex/local-flat (p) c) (catch Throwable e (if (:arbace.repr.java.decls/decline (ex-data e)) nil (throw e))))
               r (cond (nil? nn) [:bridge jn] (= nn jn) [:native nn] :else [:bridge jn])]
@@ -359,12 +370,36 @@
       (if (instance? Type t) (jt/erasure t) (nerasure t)))
     (do (rd :model/erasure :javac) (.erasure ^Symbol s jt/*types*))))
 
+(defn- var-constant
+  "The constant value of `var` local entry `e` (d/local-constant's at its inferred type), or nil."
+  [e]
+  (let [dl (:decl e)]
+    (when (and (:init dl) (d/has? (long (get-in dl [:mods :flags])) d/FINAL))
+      (let [t (ex/local-type (p) e)]
+        (when (or (keyword? t) (and (map? t) (= :class (:k t)) (= "java.lang.String" (:flat (:c t)))))
+          (when-let [[k v] (d/const-value (:env e) (:init dl))]
+            (second (d/const-as k v t))))))))
+
 (defn const-value
   "A final local's constant value (`.getConstValue`), nil when it has none."
   [s]
   (if (nsym? s)
     (if (and (= :local (:sk s)) (nil? (d/vartype-of (:env s) (:decl s))))
-      (do (rd :model/const-value :bridge) (.getConstValue ^Symbol$VarSymbol (javac-of s)))
+      ;; a `var` local's: Attr's lazy constant value at its inferred type (JFS112 (b)), checked
+      ;; against javac's (:types/var-constant)
+      (let [nv (try (var-constant s)
+                    (catch Throwable e (if (:arbace.repr.java.decls/decline (ex-data e)) ::declined (throw e))))]
+        (cond
+          d/*no-javac* (if (identical? nv ::declined)
+                         (d/javac-needed! "declined :types/var-constant")
+                         (do (rd :model/const-value :native) (na/record! (p) :types/var-constant :native (:decl s) nil nil) nv))
+          :else (let [jv (.getConstValue ^Symbol$VarSymbol (javac-of s))]
+                  (cond
+                    (identical? nv ::declined) (do (rd :model/const-value :bridge)
+                                                   (na/record! (p) :types/var-constant :declined (:decl s) "a var's type" nil))
+                    (= nv jv) (do (rd :model/const-value :native) (na/record! (p) :types/var-constant :equal (:decl s) nv jv))
+                    :else (do (rd :model/const-value :bridge) (na/record! (p) :types/var-constant :differ (:decl s) (pr-str nv) (pr-str jv))))
+                  jv)))
       (do (rd :model/const-value :native) (second (d/local-constant s))))
     (do (rd :model/const-value :javac) (.getConstValue ^Symbol$VarSymbol s))))
 
@@ -486,14 +521,32 @@
     (do (rd :model/members :javac)
         (boolean (some-> (last (seq (.getRecordComponents ^Symbol$ClassSymbol c))) (.isVarargs))))))
 
+(declare javac-pkg-class-names)
+
 (defn pkg-class-names
   "The simple names of the classes of package `pkg` as javac's ClassFinder lists them (its members:
   the classes of the package's files on every location, which only javac's world knows: a bridge
   for a native package)."
   [pkg]
+  (if (nsym? pkg)
+    ;; the native listing (JFS112 (b)), checked against javac's once per unit (:names/package-classes)
+    (let [nn (d/package-class-names (reg) (:name pkg))]
+      (rd :model/package-members :native)
+      (if d/*no-javac*
+        (do (na/record! (p) :names/package-classes :native {:tag :TOPLEVEL :pos 0} nil nil) nn)
+        (let [jn (into #{} (remove #(str/includes? % "$")) (javac-pkg-class-names pkg))]
+          (na/record! (p) :names/package-classes (if (= nn jn) :equal :differ) {:tag :TOPLEVEL :pos 0}
+                      (vec (sort (remove jn nn))) (vec (sort (remove nn jn))))
+          (if (= nn jn) nn jn))))
+    (javac-pkg-class-names pkg)))
+
+(defn- javac-pkg-class-names
+  "pkg-class-names by javac's ClassFinder (its package symbol, or a native package's of the run's
+  module)."
+  [pkg]
   (let [^Symbol$PackageSymbol jp
         (if (nsym? pkg)
-          (do (rd :model/package-members :bridge)
+          (do
               (.getPackage jt/*syms* (if-let [m (:module (reg))] (.getModule jt/*syms* (jt/jname m)) (.-unnamedModule jt/*syms*))
                            (jt/jname (:name pkg))))
           (do (rd :model/package-members :javac) pkg))]

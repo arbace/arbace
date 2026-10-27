@@ -8,6 +8,9 @@
             [arbace.classes.env :as env]
             [arbace.repr.java.jtypes :as jt]
             [arbace.repr.java.model :as md]
+            [arbace.repr.java.decls :as d]
+            [arbace.repr.java.attr :as attr]
+            [arbace.repr.java.nattr :as na]
             [arbace.string :as str])
   (:import [com.sun.tools.javac.code Type Type$ArrayType Symbol Symbol$ClassSymbol
             Symbol$MethodSymbol Flags]))
@@ -153,11 +156,63 @@
           (swap! infos assoc c info)
           info)))))
 
+(def ^:private nregistries (java.util.WeakHashMap.))
+
+(defn- nclass-info
+  "class-info's of native class `c` (a read without javac, JFS111 (b), \"As built: JN9e\"): the class
+  infos from the native model (arbace.repr.java.decls), as javac's symbols give them."
+  [c]
+  (let [p attr/*provider*
+        reg (:reg p)
+        ^java.util.Map infos (locking nregistries
+                               (or (.get nregistries reg)
+                                   (let [m (java.util.HashMap.)] (.put nregistries reg m) m)))
+        hit (locking infos (.get infos c))]
+    (if hit
+      (if (identical? hit ::none) nil hit)
+      (let [n (internal c)
+            cls-of (fn [t] (when (and (map? t) (= :class (:k t))) (:c t)))
+            iface? (d/interface? c)
+            ms (binding [d/*anon-ctor* (when-let [h @na/anon-ctor-hook] #(h p %))] (d/members-all c))
+            info {:name n
+                  :flags (bit-and (d/class-flags c) 0x761F)
+                  :interface? iface?
+                  :super (when-not iface? (some-> (cls-of (d/supertype (d/this-type c))) internal))
+                  :interfaces (vec (keep #(some-> (cls-of %) internal) (d/interfaces (d/this-type c))))
+                  :nest-host (internal (d/outermost c))
+                  :outer (some-> (d/encl-class c) internal)
+                  :fields []
+                  :methods (vec (for [m (:methods ms)
+                                      :let [ps (md/erased-params m)
+                                            r (md/erased-ret m)
+                                            f (long (d/method-flags m))]]
+                                  {:name (:name m)
+                                   :desc (str "(" (apply str (map desc ps)) ")" (desc r))
+                                   :flags (bit-or (bit-and f 0x1D3F)
+                                                  (if (zero? (bit-and f (long d/VARARGS))) 0 0x80)
+                                                  (if (zero? (bit-and f (long d/BRIDGE))) 0 0x40))
+                                   :owner n}))}]
+        (locking infos (.put infos c info))
+        info))))
+
+(defn- nfind-class
+  "find-class's in the native model: the class of internal name `n` (a local class's by the flat
+  name the provider gave it)."
+  [n]
+  (let [p attr/*provider*
+        flat (str/replace n "/" ".")]
+    (or (locking (:flat-locals p) (.get ^java.util.Map (:flat-locals p) flat))
+        (d/class-named (:reg p) flat))))
+
 (def ^:private lookup
   (reify arbace.lang.ILookup
     (valAt [this k] (.valAt this k nil))
     (valAt [_ k nf]
-      (or (when (string? k) (some-> (find-class k) class-info)) nf))))
+      (or (when (string? k)
+            (if d/*no-javac*
+              (some-> (nfind-class k) nclass-info)
+              (some-> (find-class k) class-info)))
+          nf))))
 
 (def ^:private compile-set (reify arbace.lang.IDeref (deref [_] lookup)))
 
@@ -195,7 +250,7 @@
   [kind from site mname args]
   (when (every? some? args)
     (binding [env/*compile-set* compile-set
-              *module* (module-of from)]
+              *module* (when-not d/*no-javac* (module-of from))]
       (let [fname (internal from)
             sname (cond
                     (instance? Type site)
