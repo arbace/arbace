@@ -99,3 +99,16 @@ git history:
   (on Opus), REAP's small leftovers A (RPS32, RPS102 (b), RPS95 (b), JCS76; on Sonnet); a second wave after:
   Clojure's last deferred cases, RPS64 per kind, RPS86 (b), RPS80 (b), RPS81 (b), RPS97 (b) after the gate's
   design.
+
+## 2026-10-27: the gate's survey merged; GTS1-GTS20 decided; GT1-GT3 started (the user)
+
+- The gate's survey (branch `v2-gate-survey`, merged; on Opus): doc/GATE-SURVEY.md. Measured from REAP9's four
+  full gates: the serial `--full` 227 min, the java chain 48% of it (`java-check-full` 71.7 min, its compiled
+  level 45.2 in 7 shards), `repr-go-native` 51.0 (the tamago `cmd` and box corpora 31 of it), the fixpoint
+  20.8; the concurrent chains no faster (each step 1.3-2.3 times slower, the java chain the critical path);
+  nothing of `--full` ever skipped (94 of 185 commits since 2026-10-20 docs only); the program built three
+  times from the same sources; `gate_key` wider than the build reads. Estimates after the plan (quiet host): a
+  docs commit about 1 min, a classes file 2, repr/java 50-55, j2g 75-120; a tag's clean run about 280-290 min.
+  Plan GT1-GT7, 8-12 days. Decided (the user): GTS1-GTS20 as recommended (GTS4 (b)/(c) in GT5, GTS13 (b) in GT6).
+- Started: GT1-GT3 (the measure, the keyed steps and the planner, the shared builds; on Opus); GT4 and GT6
+  after; GT5 after JC4b and JN9e merge; GT7 at the tag.

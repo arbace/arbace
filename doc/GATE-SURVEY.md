@@ -759,3 +759,10 @@ shipped code: no re-seed.
 - Prior art for the ideas, not vendored: early cutoff and content keys as in Shake (Mitchell,
   "Shake before building", ICFP 2012; Mokhov, Mitchell and Peyton Jones, "Build systems à la
   carte", ICFP 2018) and Bazel's action cache; strace's `--seccomp-bpf` (strace 5.3).
+
+## Decided (2026-10-27): GTS1-GTS20
+
+The user decided every proposal as recommended: GTS1 (a), GTS2 (a), GTS3 (a), GTS4 (a), then (b) and (c) in
+GT5, GTS5-GTS12 (a), GTS13 (a) now and (b) in GT6, GTS14-GTS20 (a). The order: GT1-GT3 first (the measure,
+the keyed steps, the shared builds), then GT4 and GT6, GT5 after JC4b and JN9e merge (it changes
+`bin/java-check`, `bin/repr-java` and `bin/repr-go`), GT7 at `arbace-reaps-3-crops-v2`'s tag.
