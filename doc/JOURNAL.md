@@ -71,3 +71,31 @@ git history:
   host can run them (KVM tests, the box's smoke test and suite, `bin/tamago-vendor verify`, `bin/repr-haskell
   test`, `bin/repr-rust test`), the rest by syntax (the box's rebuild, the arm64 VM, the Mac bundle).
   `tools/rsdump/rsdump.rs`'s `<(` is Rust's syntax, not a process substitution.
+
+## 2026-10-27: the scripts' sweep done; `arbace-reaps-3-crops-v2` started
+
+- The scripts' sweep (four branches on Sonnet, merged): no `/dev/null`, `/dev/zero`, `/dev/stdin`,
+  `/dev/stdout`, `/dev/fd` or process substitution left in `bin/` or the Makefile; 45 files, one commit each:
+  `sweep-build` (12: arbace-go, seed, seed-go, host, tools, frozen, version, gocache, fresh, build-go/test,
+  alpine-env, x509roots-vendor), `sweep-java` (10: java-check, javac-vendor, jrt-convert, jrt, j2g-edge,
+  repr-java, its front-check, parse-check, roundtrip, javac-key), `sweep-go` (7: repr-go's check,
+  native-corpus, plan-check, generated-check, diffcheck, clojure-tests, repr-clojure's check), `sweep-parked`
+  (16: the box's eleven, repr-haskell and its test, repr-rust and its code-unit and run-program). The forms: a
+  discarded stream to a scratch file under TMPDIR or the run's work directory, a missing file tested with
+  `[ -f ]`, a `ls | head` a glob loop, `< /dev/null` an empty file, `head -c N /dev/zero` `printf '%*s' N '' |
+  tr ' ' '\0'`, a `<(cmd)` a file written first (a `done < <(plan)` loop: a plan command's failure now an
+  ordinary error), an awk `> "/dev/stderr"` a pipe to `cat 1>&2`. `/dev/kvm` kept (a device). Checks: each
+  script's own (seed --check and --build, x509roots verify, alpine-env check; java-check essential and
+  essential-compiled, j2g-edge verify, repr-java check, parse-check, front-check and roundtrip on the samples,
+  jrt overlay --check; repr-go native-check --headers, plan-check, generated-check, repr-clojure check; the
+  box's KVM tests, purego-check, tamago-vendor verify, the box built with its smoke test (112 ok) and two
+  suite namespaces, repr-haskell test and a pretty round trip, repr-rust test and a UI program at the tree,
+  behaviour and code levels); syntax only for box-arm64-vm, box-convert, box-rebuild, box-mac-bundle and
+  net-check. jrt-convert and javac-vendor verify matched every forms file, their provenance differing only in
+  the borrowed tool's key (REAP9's full gate passed both on a fresh tool). The essential gate on `938d67ce`
+  passed (12m44s). The agents' slips: a `/dev/null` and a `<(...)` in throwaway wait loops, one stray
+  `box-suite` run outside heavy (ended at once).
+- `arbace-reaps-3-crops-v2` started (the user): first wave, the gate's survey (on Opus), JN9e (on Opus), JC4b
+  (on Opus), REAP's small leftovers A (RPS32, RPS102 (b), RPS95 (b), JCS76; on Sonnet); a second wave after:
+  Clojure's last deferred cases, RPS64 per kind, RPS86 (b), RPS80 (b), RPS81 (b), RPS97 (b) after the gate's
+  design.
