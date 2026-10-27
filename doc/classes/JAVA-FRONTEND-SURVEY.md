@@ -22,7 +22,9 @@ JFS55-JFS58; JN8, the native parser: "As built: JN8 (2026-10-23)", with JFS59-JF
 converter on an interface over both front ends and the split measured: "As built: JFS66 (b)
 (2026-10-23)", with JFS67-JFS71; JFS70 (b), the pins independent of the javac run's history: "As
 built: JFS70 (2026-10-23)", with JFS72; JFS65 (b), j2g's checked array casts as a type switch: "As
-built: JFS65 (b) (2026-10-24)", at the end, with JFS80-JFS82.
+built: JFS65 (b) (2026-10-24)", at the end, with JFS80-JFS82; JN9a-JN9e, the native attribution
+provider and the read without javac: "As built: JN9a (2026-10-24)" to "As built: JN9e (2026-10-27)",
+with their proposals to JFS129 (the provider's reference: [NATIVE-ATTR.md](NATIVE-ATTR.md)).
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -5451,3 +5453,254 @@ JFS110 (b) (the remaining declines ported, cycles first), JFS111 (b) (a read wit
 counted per-file fallback to javac where a decline is met), JFS112 (b) (the model's last javac reads made
 native), JFS113 (c), JFS114 (a), JFS115 (b) after JFS111, JFS116 (b) (each unit's answers released after its
 conversion), JFS117 (a), JFS118 (b) (`doc/classes/NATIVE-ATTR.md`), JFS119 (a): JN9e, after the tag.
+
+## As built: JN9e (2026-10-27)
+
+JN9e (JFS111 (b), decided with JFS110-JFS119 as recommended), with JFS110 (b), JFS112 (b), JFS113 (c),
+JFS116 (b), JFS117 (a) and JFS118 (b) inside it and JFS115 (b) after it, on the branch `java-jn9e` from main
+`2e8629c7`, in about a working day (one tool build, about half an hour, and the corpora's runs in the shared heavy slots).
+repr/java now **reads Java without javac**: `bin/repr-java read --no-javac` (and `read-jdk --no-javac`)
+parses each file with the native parser, enters it in the run's registry, and converts it with the
+native provider's answers alone; whatever would ask javac (a node's javac twin, a declined fact, a lean on
+javac's choice, a javac or bridged read of the model, a parse error, a failure) stops the unit, and its
+file is read again by javac (the fallback, counted by reason). Over every corpus (the samples, the
+baseline, the jdk corpus, javac's sources and jdk26u's 68 modules, **14,650 files**) the read without
+javac reads **every file natively, no fallback**, and its forms are javac's **byte for byte, file for
+file** (`bin/repr-java nojavac-check --corpus all`). Beside javac, `bin/repr-java attr-check --corpus all`:
+**14,503,922 facts equal** (JN9d.10: 14,416,929), **none different, none declined** (JN9d.10: 171), **none
+leaned** (35), no model read bridged (jdk26u JN9d: 13,053). A read of jdk26u without javac takes 1,123 s
+on 4 threads and at most **8.4 GB** (a read of java.base beside javac: 38-40 GB, JFS116). The JVM ran
+only the frozen v4 jar, for javac's edge in `bin/javac-vendor convert`; Go only TamaGo's go1.27.1,
+without cgo; the tools' host was the worktree's stage 0 (the seed's).
+
+### JN9e.1 What was built
+
+| file | lines (main) | what |
+|---|---:|---|
+| `arbace/repr/java.ae` | 585 (487) | `--no-javac`: `convert-units-nojavac` (the files parsed and entered, each unit converted with `decls/*no-javac*`, the fallback's files read by javac in one `convert-units` run), `registry-units` (the registry of `native-units`, now shared), `OUT/repr-java-nojavac.edn` (files, native, fallbacks with reasons, times, the process's peak resident memory), read-jdk's chunks summed |
+| `arbace/repr/java/decls.ae` | 1,875 (1,823) | `*no-javac*`, `javac-needed!`, `javac-needed-reason`; `package-class-names` (JFS112 (b): ClassFinder's top-level names of a package: the source directories' `.java` files, the run's module's class files, the units' classes); a record accessor's `@Deprecated` (TypeEnter's original annotations, MemberEnter's deprecation flags); `const-as` public |
+| `arbace/repr/java/attr.ae` | 796 (704) | javac's answers lazy (each a delay, never forced without javac); `native-fact` without javac: the native answer, else `javac-needed!` with the fact and the reason; a fact's class from the native answer (`nsym-class`); the anonymous creation's variable arity element; a record component's annotations Check takes off its field (`record-dropped?`, the fact `:annotations/dropped`, JFS110 (b)); a native method's instantiation class; an array's clone and constructor native |
+| `arbace/repr/java/model.ae` | 962 (909) | `rd` stops a javac or bridged read without javac; `pkg-class-names` native, checked against javac's once per unit (`:names/package-classes`); a `var` local's constant at its inferred type (`:types/var-constant`); a local class's flat name native without javac, and recorded for the class infos |
+| `arbace/repr/java/resolve.ae` | 281 (226) | the Java forms compiler's class infos from the native model (`nclass-info`, `nfind-class`: flags, supertypes, nest host, outer class, members' erased descriptors, a local class by its provider-given flat name) whenever the native provider answers |
+| `arbace/repr/java/expr.ae` | 2,366 (2,268) | a lambda's thrown types (Flow.FlowAnalyzer.visitTry): a try's resources' initializers and close() (resolved at each AutoCloseable supertype), precise rethrow of a final or effectively final catch parameter (Check.intersect, incl, subset), a finally block that cannot complete; a call the lambda returns while its outer call is being checked throws its method's declared types (`call-thrown`: the cycles, JFS110 (b)); a multi-catch parameter's intersection lub; a type variable named as a method reference's qualifier; `lean!` stops a read without javac |
+| `arbace/repr/java/overload.ae` | 1,241 (1,233) | an intersection site's non-public members (Types.makeIntersectionType's synthetic class: not an interface, the unnamed package; a private member never inherited) |
+| `arbace/repr/java/convert.ae`, `nattr.ae` | 3,388, 696 | the converter's int, boolean, Object and Iterable types native with the provider, `convert-unit` without javac's unit; the provider without javac's index, its maps for record annotations and local classes' flat names; `twin-of` stops a read without javac |
+| `arbace/repr/java/split.ae` | 482 (419) | `split nojavac` (`nojavac.md`, `nojavac.edn`), JFS113 (c)'s failures in `attr` and `nojavac`, the new facts in the catalogue |
+| `bin/lib/repr-java/front-check`, `bin/repr-java`, `Makefile` | | `front-check --no-javac` (`bin/repr-java nojavac-check`, `make repr-java-nojavac-check`); `test/repr/java/nojavac-check-known.edn` (none) |
+| `doc/classes/NATIVE-ATTR.md` | 219 (new) | JFS118 (b): the provider's reference |
+
+### JN9e.2 JFS110 (b): the declines ported
+
+Each found by a small reproduction (`.tmp/jn9e/q1`-`q4`, `cy`) and checked fact by fact against javac:
+
+- **The cycles** (JN9d: 139 facts in jdk26u). A lambda's thrown types (Flow.analyzeLambdaThrownTypes)
+  walk its body, and a call the lambda returns is a poly argument of the call the lambda is an argument
+  of (`arg-context` through `:lambda-return`): its instantiation is that outer call's check, the one
+  under way, so the memoized computations re-entered each other until the cycle limit declined. javac
+  attributes the lambda's body inside the outer call's inference, the returned call's type partially
+  inferred, and Flow reads its thrown types from it; the port takes the call's method's declared thrown
+  types while the outer check is active (`checking?` over the active computations), and declines only
+  when they name the method's own type variables (none in the corpora). The read without javac met
+  them in 8 files of jdk.javadoc before the port; none after; attr-check counts no cycle.
+- **The multi-catch intersection lub** (14): javac's UnionClassType over the IntersectionClassType;
+  the native type keeps its alternatives (`:union-alts`) on the intersection, as data `[:union ...]`.
+- **The record components' annotations** (16): Check.validateAnnotation takes off a record component's
+  field the annotations whose targets are neither FIELD nor TYPE_USE (TypeEnter put them on every
+  record member); `record-dropped?` decides it natively, checked against javac's tree (`:annotations/dropped`:
+  8 in the jdk corpus, 10 in jdk26u, equal);
+  a component's `@Deprecated` now also deprecates its generated accessor (`:enter/members` differed on a
+  sample, none in the corpora).
+- **A type variable as a qualifier** (1, the samples' `E::get`): its type is the variable's.
+- **What a read without javac meets** (no corpus asked them beside javac): an intersection site's
+  non-public members (the members of `E1 | E2`'s lub `IOException & Tag`), a lambda's thrown types
+  through a try with resources, a rethrown catch parameter and a finally block that cannot complete
+  (Flow.FlowAnalyzer.visitTry, visitThrow), each on a reproduction against javac.
+
+### JN9e.3 JFS112 (b): the model's last javac reads
+
+The bridges of JN9d.4 (jdk26u: 12,730 package members, 312 constants, 11 types) are native: a unit's
+package's class names as ClassFinder lists them (checked against javac's in every unit: 14,650 equal), a
+`var` local's constant (`:types/var-constant`: 359 equal, 312 of them in jdk26u), the rest with the inference tier's answers. With
+the provider the converter's own types (int, boolean, Object, Iterable), the Java forms compiler's class
+infos for the param-tags decision (`arbace.repr.java.resolve`, which read javac's symbols outside the
+model and so were not counted before), an array's clone and constructor, and the facts' classes of a
+native method are native too. Left beside javac: 998 javac reads in the jdk corpus and 1,374 in jdk26u
+(of 8.3 and 81.7 million), all on paths a read without javac does not take (javac's answer kept for a
+name whose native answer is compared, a javac type the converter's coercions mix in); without javac
+there are none (a read without javac fails over on any).
+
+### JN9e.4 The numbers
+
+attr-check on the final tool (key `570a7bb8...`), `--corpus all`, GOGC=100, against JN9d (JN9d.4's run,
+and JN9d.10's totals after merging main):
+
+| corpus | forms files equal | facts equal / different / declined (leaned) | JN9d | wall (JN9d) |
+|---|---:|---:|---:|---:|
+| `samples` | 18 of 18 | 3,748 / 0 / 0 (0) | 2,634 / 0 / 0 (0) | 11 s (12 s) |
+| `baseline` | 189 of 189 | 339,088 / 0 / 0 (0) | 317,731 / 0 / 0 (0) | 131 s (104 s) |
+| `jdk` | 982 of 982 | 1,279,085 / 0 / 0 (0) | 1,123,925 / 0 / 8 (0) | 412 s (336 s) |
+| `javac` | 1,806 of 1,806 | 1,125,815 / 0 / 0 (0) | 1,065,850 / 0 / 0 (0) | 367 s (267 s) |
+| `jdk26u` | 13,788 of 13,788 | 11,756,186 / 0 / 0 (0) | 11,018,389 / 0 / 161 (35) | 2,592 s (2,009 s) |
+| total | | 14,503,922 / 0 / 0 (0) | 14,416,929 / 0 / 171 (35) (JN9d.10) | 3,518 s (2,283 s, JN9d.10) |
+
+The corpora grew with main (JC5's converter asks more facts; the jdk corpus is 906 files, javac's 816);
+the facts per corpus grew with the new facts (`:names/package-classes`, `:types/var-constant`,
+`:annotations/dropped`) and the facts that were declined. The run's peak resident memory 30.1 GB (JN9d.10:
+29.4 GB). By tier in jdk26u: syntax 536,151; scope 3,274,935; declarations 2,297,938; flow 33,946;
+members 569,541; types 2,916,507; overload 2,086,172; inference 40,996; all equal.
+
+| | samples | baseline | jdk | javac | jdk26u |
+|---|---:|---:|---:|---:|---:|
+| lists the provider wrote alone | 98.1% (JN9d 96.5%) | 100.0% (99.9%) | 99.5% (99.5%) | 99.4% (99.2%) | 99.6% (2,250,002 of 2,258,049; JN9d 99.5%) |
+| model reads native / javac / bridge | 38,618 / 0 / 0 | 2,346,364 / 0 / 0 | 8,319,602 / 998 / 0 | 8,147,749 / 0 / 0 | 81,688,421 / 1,374 / 0 |
+
+The read without javac, `bin/repr-java nojavac-check --corpus all` on the final tool (2,315 s; the reads
+without javac on 4 threads but the baseline's and the samples', the reference javac's reads beside them):
+
+| corpus | files | read natively | fallbacks | wall without javac | javac's read (the reference) | peak without javac |
+|---|---:|---:|---:|---:|---:|---:|
+| `samples` | 15 | 15 | 0 | 2 s | 2 s | 0.3 GB |
+| `baseline` | 183 | 183 | 0 | 56 s | 29 s | 1.1 GB |
+| `jdk` | 906 | 906 | 0 | 140 s | 109 s | 7.6 GB |
+| `javac` | 816 | 816 | 0 | 155 s | 89 s | 3.6 GB |
+| `jdk26u` | 12,730 | 12,730 | 0 | 1,123 s | 609 s | 8.4 GB |
+
+Every file's forms equal javac's. A read without javac costs about 1.3 to 1.9 times javac's own read
+(javac's parser and attribution, compiled Java forms translated to Go, against the native parser and
+provider, compiled Arbace), and a fifth of its memory: javac's attribution of a module's files holds
+every tree and symbol at once, the provider holds the registry (the trees and the symbols' memos) and
+one unit's answers (released after its conversion: the provider is dropped, its weak reference in the
+unit's memo, JFS116 (b)).
+
+JFS115 (b)'s profile (`ARBACE_CPUPROFILE`, `ARBACE_MEMPROFILE`; `.tmp/jn9e/prof/`): the jdk corpus read
+without javac on the final tool, 4 threads, GOGC=100: 214 s wall, 1,395 s of CPU. **Go's garbage
+collector takes about 60% of it** (`runtime.gcDrain` 842 s cumulative); of the rest, the converter's frames
+(`attr/framed*`) 195 s, the native parser 111 s, lazy sequences' realization about a quarter throughout.
+The run allocated 182 GB: string builders' buffers 37 GB (`sbuf.ensure`), function objects 19 GB, lazy
+sequences 20 GB, strings 15 GB. The heap at the end (10.7 GB in use at the last collection) is mostly the
+written forms' text (7.3 GB of strings under `arbace.repr.java.layout/form-text`), not the provider's:
+each unit's answers are gone with its provider. So the time without javac is allocation's, and GOGC or
+fewer intermediate sequences and strings are what would cut it (JFS124).
+
+### JN9e.5 JFS113 (c), JFS117 (a)
+
+The inference's size limits stay (64 bounds on a variable, 2,000 incorporation rounds, 1,000 deferred
+nodes); `bin/repr-java attr-check` and `nojavac-check` fail when one fires (`split attr` and `split
+nojavac` print it as beyond the known). None fired. `REPR_JAVA_INFER_TRACE` stays, and
+`REPR_JAVA_NOJAVAC_TRACE` prints each fallback's reason and stack.
+
+### JN9e.6 The shipped program's change
+
+None: `arbace/repr/java` is javac's tool's (231,776,416 bytes at JN9d.10, 233,865,376 now), not the
+shipped program's; `go/`, `overlay/`, `jdk/forms`, `jdk/data` and both edges are unchanged. The reader hash
+(`repr_java_reader_hash`) moved from `3d54bdd5...` to `ea669c97...`, written by the updates on the final
+tool: `bin/clojure-tests --java-fixtures update`, `bin/jrt-convert update`, `bin/javac-vendor convert` (its
+edge on the frozen v4 jar, as committed), `bin/java-check --forms update`: every forms and data file byte
+for byte, only `:repr-java` and `:host` changed in the provenance files. No re-seed; amd64 only.
+
+### JN9e.7 The checks
+
+On the final tool, one after another (`.tmp/jn9e/final.sh`), the host shared:
+
+- `bin/repr-java attr-check --corpus all`: JN9e.4's first table, every corpus's forms and facts equal (3,518 s)
+- `bin/repr-java nojavac-check --corpus all`: JN9e.4's second table (2,315 s)
+- `bin/repr-java front-check`: every default corpus equal (433 s); `parse-check`: every corpus's trees as
+  javac's (245 s)
+- `bin/repr-java check`: as expected (29 s); `check --jdk`: 68 modules, 0 with failures, the 13,566 forms
+  files as `test/repr/java/expected/jdk26u.sha256` (664 s)
+- `bin/repr-java roundtrip --corpus baseline,samples,jdk --text`: as the references (the jdk corpus's 39
+  known `:anew` rejections included; 672 s)
+- the updates of JN9e.6
+- `bin/gate` (essential): passes at `1ab8bf79` (the code and the provenance as final; the later commits
+  change only `test/java/forms/provenance.edn` and `doc/`) in 17m04s: go-build 7m31s afresh, go-smoke,
+  suite-go with no regression, oracle-go 52 known mismatches as recorded, diffcheck 12,789 of 12,801 cases
+  agree with the 12 known, goi-check 801 of 801, goi-aot-essential 248 of 248, java-check 428 of 428,
+  java-compiled, suite-aot-essential, programs 2 of 2, generated, j2g-edge verify, reap 12 of 12 cells
+- not run: `bin/gate --full` (the user's rule), `bin/repr-java check --suite`, `bin/javac-vendor verify` and
+  `classes` (the converted forms and javac's world unchanged: the updates show them byte for byte)
+
+### JN9e.8 What it means
+
+JFS69 (b)'s aim is reached for the corpora: the converter's front end is native, the parser and the
+attribution, javac only the reference that checks it (attr-check, nojavac-check) and the fallback for a
+file the port does not cover. What is left to javac is what no corpus asks: code that does not compile
+(the provider follows javac for compiling code, JFS105 (a), JFS114 (a)), a generic thrown type of a call
+its outer call checks, and javac's diagnostics. The corpora are jdk26u's own sources, the JDK's style;
+the jtreg tests of `bin/java-check` (the language's corners, 10,000 and more files) are the next corpus
+for the read without javac (JFS123).
+
+### JN9e.9 Proposals
+
+- **JFS120 The vendoring tools' read.**
+  - Options: (a) as built: `bin/jrt-convert`, `bin/javac-vendor convert`, `bin/clojure-tests --java-fixtures`
+    and `bin/repr-java check --jdk` read with javac's trees; the read without javac is checked beside them;
+    (b) make `--no-javac` their read (the fallback counted and printed; javac still runs for a file that
+    falls back), the provenance naming the read (`:read :native`); (c) the same with the fallback an error.
+  - *Recommended: (b)*: every file of their corpora reads natively and byte for byte, the read takes a
+    fifth of the memory (java.base: 7.6 GB against 38-40 GB), and the fallback keeps them correct where
+    a later Java source meets a gap; (c) when a release's corpora have stayed at no fallback.
+- **JFS121 nojavac-check in the gate.**
+  - Options: (a) as built: by hand (`make repr-java-nojavac-check`); (b) in `bin/gate --full` beside
+    attr-check (the default corpora, about 10 minutes on the final tool); (c) in place of attr-check.
+  - *Recommended: (b)*: it is the check of what JFS120 (b) would ship; attr-check stays, as it is the one
+    that judges the facts.
+- **JFS122 The fallback.**
+  - Options: (a) as built: per file, by reason, the file read again by javac in one run; (b) per unit's
+    fact, javac attributing only the files that fall back but the native answers kept elsewhere in the
+    unit (a mixed unit); (c) none: a decline an error (JFS111 (c)).
+  - *Recommended: (a)*: a file is the unit javac's forms are judged by, a mixed unit would need
+    javac's twin index again, and with no fallback in the corpora the fallback's cost is nil.
+- **JFS123 The jtreg tests read without javac.**
+  - Options: (a) as built: `bin/java-check --levels read` reads with javac's trees; (b) a level `read`
+    with `--no-javac` (or a level `nread`): each test read without javac, its fallbacks counted by reason,
+    the forms against javac's read; (c) leave it.
+  - *Recommended: (b)*: the jtreg corpora (jdk's and langtools' tests, Arbace's JLS programs) are the
+    language's corners the JDK's own sources do not exercise; their fallbacks are the next ports' list.
+- **JFS124 The time without javac (JFS115 continued).**
+  - Options: (a) as built: a read without javac is 1.3-1.9 times javac's read (jdk26u: 1,123 s against
+    609 s on 4 threads); (b) cut what the profile shows (JN9e.4: the collector takes 60% of the CPU; string builders, function objects and lazy sequences most of the 182 GB allocated); (c) more threads (the
+    memory now allows 8 or more chunks at once).
+  - *Recommended: (c) then (b)*: (c) is a setting (by the 4-thread peak, a read at 8 threads should stay near twice 8.4 GB, still under half of javac's; to be measured), (b) is
+    work on code that is now the read's own path.
+- **JFS125 The memory.**
+  - Options: (a) as built: the provider drops each unit's answers after its conversion; a read without
+    javac peaks at 8.4 GB (jdk26u's modules, 4 threads), 7.6 GB for java.base's closure; (b) release the
+    registry's parsed trees of the units already converted (only their declarations needed after).
+  - *Recommended: (a)*: the peak is a fifth of javac's; (b) only if JFS124 (c)'s threads need it.
+- **JFS126 A reader without javac's world.**
+  - Options: (a) as built: repr/java runs on javac's tool executable (233 MB, javac's world translated),
+    even without javac; (b) embed `arbace/repr/java` in the shipped program too, `read --no-javac` there,
+    its fallback an error ("javac's tool needed") (the tool stays for the fallback and the checks); (c)
+    leave the reader in the tool.
+  - *Recommended: (b)*: it gives the REPL Java's reader (Java source loaded as Java forms) without
+    javac's world, the step towards a self-sustaining Arbace; its cost is the shipped program's size.
+- **JFS127 Code that does not compile.**
+  - Options: (a) as built: the provider answers as javac does for compiling code; on code javac rejects
+    it may answer where javac reports an error (no fallback triggers); (b) a read without javac checks
+    the errors the converter's facts depend on (Attr's and Check's errors in the tiers ported) and falls
+    back on them; (c) the diagnostics ported (JC3's golden files natively).
+  - *Recommended: (a)*, with a note in NATIVE-ATTR.md: the vendoring reads compile, and the REPL's
+    Java (JFS126 (b)) would be judged by its run; (c) is a project of its own.
+- **JFS128 The known file's bridges.**
+  - Options: (a) as built: `test/repr/java/attr-check-known.edn` still lists the five bridges of JN9b-JN9d,
+    none of which bridged; (b) empty the list, so that any bridge fails attr-check.
+  - *Recommended: (b)*: no corpus bridges any more, and a bridge is now a gap of a read without javac.
+- **JFS129 Next.**
+  - Options: (a) JFS120 (b), JFS121 (b), JFS123 (b), JFS128 (b), about a day; (b) JFS126 (b), a reader in
+    the shipped program, after (a); (c) stop at JN9e.
+  - *Recommended: (a) then (b)*: (a) makes the native read the vendoring tools' own and widens its
+    corpus; (b) is what the native front end is for.
+
+### JN9e.10 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`):
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/{Flow,Check,Attr,TypeEnter,MemberEnter}.java`,
+  `code/{ClassFinder,Types,Symbol}.java` (LICENSE.md, doc/ARBACE.md).
+- The worktree's `.tmp/jn9e/` (scratch, not tracked): `q1`-`q4` (the reproductions: a type variable
+  qualifier, record annotations, a multi-catch intersection, lambdas' thrown types; `q.sh`), `cy/` (the
+  cycles' 8 files of jdk.javadoc, `run.sh`, `trace.log`), `n26a/`, `n26a.log` (the survey of jdk26u read
+  without javac, before the cycles' port: the 8 fallbacks), `nj1.log`, `nj2.log` (the first nojavac-check
+  runs), `ac1.log`-`ac4.log` (attr-checks of the samples and the baseline), `build1.log` (the final tool's
+  build), `final/` (the final tool's checks: `summary.txt`, their logs, `attr.md`, `attr.edn`, `split.md`,
+  `nojavac.md`, `nojavac.edn`), `prof/` (JFS115's profile: `cpu-top.txt`, `cpu-cum.txt`, `mem-inuse.txt`,
+  `mem-alloc.txt`), `gate.log`, `snap.sh`, `run-nj.sh`, `nj26.sh`, `final.sh`, `prof.sh`.
