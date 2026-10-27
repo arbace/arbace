@@ -15,7 +15,7 @@ tls_server() {
 }
 tls_server_stop() {
   [ -n "${TLS_SERVER_FD:-}" ] && exec {TLS_SERVER_FD}>&-
-  [ -n "${TLS_SERVER_PID:-}" ] && kill "$TLS_SERVER_PID" 2>/dev/null
+  [ -n "${TLS_SERVER_PID:-}" ] && kill "$TLS_SERVER_PID" 2> "${TMPDIR:-.}/tls-checks.err"
   TLS_SERVER_FD="" TLS_SERVER_PID=""
 }
 
