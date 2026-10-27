@@ -1120,6 +1120,14 @@
       (str op "(" t ")")
       (str op t))))
 
+;; The negation of an integer literal the converter kept as a negation (a hex, octal or binary literal, or
+;; -(1): javac folds only a decimal literal after the sign): written -(1), which javac's parser does not
+;; fold, so the printed Java reads back to the negation (RPS64).
+(defn- negate-text [env a long?]
+  (if (integer? a)
+    (str "-(" (int-literal a long?) ")")
+    (unary-text "-" (ex env a))))
+
 (defn- binop-text [env op-name a b]
   (let [[op p] (binops op-name)
         a-t (if (and (long-shifts op-name) (integer? a)) (wrap (int-lit a true) p) (operand env op-name a p))
@@ -1645,10 +1653,22 @@
       ["^=" (nth (second inner) 2) nil]
       :else nil)))
 
+(def ^:dynamic *temps-expanded*
+  "True while the assignment of a let of temporaries is printed: the converter made the temporaries for a
+  compound assignment on a place with an impure part, so the compound operator is the source's."
+  false)
+
+(defn- impure-index-place?
+  "Is place form `p` an array element with an index that is not a variable or a constant? Written out
+  (a[e] = a[e] + 1), the converter reads it with no temporary, as it was; a[e] += 1 it reads with one."
+  [p]
+  (and (is? p 'aget) (some seq? (nnext p))))
+
 (defn- assign-text
   "Java's assignment of `v` to place text `pt` for place form `place` (a value)."
   [env place pt v value?]
-  (if-let [[op rhs opn] (let [c (compound env place v)]
+  (if-let [[op rhs opn] (let [c (when-not (and (impure-index-place? place) (not *temps-expanded*))
+                                  (compound env place v))]
                           ;; a narrowed compound assignment on a box (Byte b; b += i) is not
                           ;; Java's ((Byte) (int) cannot be cast): b = (byte) (b + i)
                           (when-not (and c (not (#{"++" "--"} (first c))) (box-prims (type-of env place))
@@ -1703,7 +1723,15 @@
           ;; assignment (or a prefix increment) on a place with an impure part
           (and (= 1 (count body)) (or (is? last-f 'set!) (is? last-f 'aset))
                (every? #(re-matches #"(o|arr|i|_)-\d+" (name (first %))) pairs))
-          [:assign (subst tm last-f)]
+          ;; a static field assigned through an expression, (let [_-1 (cast Bar b)] (set! Bar/si 6)): Java's
+          ;; ((Bar) b).si = 6, whose qualifier is evaluated and dropped (AccessMethodsLHS, NullStaticQualifier)
+          (let [q (when (and (is? last-f 'set!) (symbol? (second last-f)) (namespace (second last-f)) (= 1 (count pairs))
+                             (re-matches #"_-\d+" (name (ffirst pairs)))
+                             (not (mentions-sym? (nth last-f 2) (ffirst pairs))))
+                    (second (first pairs)))]
+            (if q
+              [:assign (list 'set! (list (symbol (str ".-" (name (second last-f)))) q) (nth last-f 2))]
+              [:assign (subst tm last-f)]))
           ;; hoisted postfix increments before a return value: (let [i-1 i] (set! i ..) form)
           (and (seq effects) (every? #(or (is? % 'set!) (is? % 'aset)) effects)
                (= (count effects) (count pairs)))
@@ -1914,8 +1942,8 @@
                         (ex env (reduce (fn [a b] (list h a b)) args)))
           (cmpops hn)
           (let [[a b] args
-                ;; a comparison's float promotion is the converter's (float-compare-operand)
-                un (fn [y] (if (is? y 'unchecked-float) (second y) y))
+                ;; a comparison's float promotion is the converter's (float-compare-operand), not a double's cast to float
+                un (fn [y] (if (and (is? y 'unchecked-float) (not= "double" (type-of env (second y)))) (second y) y))
                 [a b] (if (or (is? a 'unchecked-float) (is? b 'unchecked-float)) [(un a) (un b)] [a b])
                 p (if (#{"==" "=" "identical?"} hn) P-EQ P-REL)]
             (e p (str (ex-text env a p) " " (cmpops hn) " " (ex-text env b (inc p)))))
@@ -1926,7 +1954,7 @@
             (cond
               (and (seq? a) (#{"==" "=" "identical?"} (str (head a))) (= 3 (count a)) (nil? (meta-tag a)))
               (let [[_ p q] a
-                    un (fn [y] (if (is? y 'unchecked-float) (second y) y))
+                    un (fn [y] (if (and (is? y 'unchecked-float) (not= "double" (type-of env (second y)))) (second y) y))
                     [p q] (if (or (is? p 'unchecked-float) (is? q 'unchecked-float)) [(un p) (un q)] [p q])]
                 (e P-EQ (str (ex-text env p P-EQ) " != " (ex-text env q (inc P-EQ)))))
               :else (e P-UNARY (unary-text "!" (ex env a)))))
@@ -1936,9 +1964,9 @@
               (e p (str (ex-text env (first args) p) " " op " " (ex-text env (second args) (inc p))))
               (ex env (reduce (fn [a b] (list h a b)) args))))
           (#{"unchecked-negate-int" "unchecked-negate-float"} hn)
-          (e P-UNARY (unary-text "-" (ex env (first args))))
+          (e P-UNARY (negate-text env (first args) false))
           (= "unchecked-negate" hn)
-          (e P-UNARY (unary-text "-" (if (integer? (first args)) (int-lit (first args) true) (ex env (first args)))))
+          (e P-UNARY (negate-text env (first args) true))
           (= "bit-not-int" hn) (e P-UNARY (unary-text "~" (ex env (first args))))
           (= "bit-not" hn)
           (e P-UNARY (unary-text "~" (if (integer? (first args)) (int-lit (first args) true) (ex env (first args)))))
@@ -1947,7 +1975,18 @@
           (let [a (first args)
                 t (conversions hn)]
             (cond
+              ;; an int or long constant widened to float (float f = 16777217; = -1): the form holds the
+              ;; integer's value, which a float literal would round (or, negative, read as a negation): the integer's own
+              ;; literal, which the converter widens again as it did
+              (and (= t "float") (number? a) (= hn "float") (== (double a) (Math/rint (double a)))
+                   (< (Math/abs (double a)) 9.2e18)
+                   (or (neg? (double a)) (not= (double a) (double (float (double a))))))
+              (let [n (long (double a))] (int-lit n (not (int-range? n))))
               (and (= t "float") (number? a) (= hn "float")) (e P-PRIMARY (float-literal a))
+              ;; an int or long constant widened to double ((double 1163089569715148800)): its own literal, which
+              ;; the converter widens again; (unchecked-double 77) is a cast (double) 77
+              (and (= t "double") (integer? a) (= hn "double")) (int-lit a (not (int-range? a)))
+              (and (= t "double") (integer? a)) (e P-UNARY (str "(double) " (wrap (int-lit a (not (int-range? a))) P-UNARY)))
               (and (= t "double") (number? a)) (e P-PRIMARY (double-literal a))
               ;; (long 1): only the converter's literal branches of an int ?: in a compound
               ;; assignment to a long (javac's constants of the operator's type)
@@ -2050,7 +2089,7 @@
                              p (if (= op "&") P-BAND P-BOR)]
                          (e p (str (ex-text env a p) " " op " " (ex-text env b (inc p)))))
                 :postfix (let [[place setf] more] (postfix-text env place setf))
-                :assign (ex env (first more))
+                :assign (binding [*temps-expanded* true] (ex env (first more)))
                 :before (ex env (first more)))
               ;; the converter's capture rebinding (let [x x] form): just the form
               (if (and (every? (fn [[s i]] (= s i)) (partition 2 bv)) (= 1 (count body)))
@@ -2637,6 +2676,37 @@
          (every? (fn [t] (let [g (last (second t))] (or (local? env g) (not (calls? x))))) (temps x)))))
 
 
+;; A && chain the converter expanded (RPS86 (b)): (if a (if-instance [p x] (if c T E) E) E) with the else
+;; branch E repeated in each failing exit, printed as the source wrote it, if (a && x instanceof P && c),
+;; so a pattern binding is not rebound in the scope of its own name (Guards). Only a chain with a pattern
+;; is folded: the forms read back are the same, as the converter expands the && again.
+(defn- norm-cond
+  "Form `f` with its `cond`s as nested `if`s, to compare the else branches the converter repeated."
+  [f]
+  (cond
+    (and (seq? f) (is? f 'cond))
+    (norm-cond (reduce (fn [else [c v]] (if (= :else c) v (list 'if c v else))) nil (reverse (partition 2 (rest f)))))
+    (seq? f) (apply list (map norm-cond f))
+    (vector? f) (mapv norm-cond f)
+    :else f))
+
+(defn- and-chain
+  "[texts env' then pattern?] for the tests of then-branch `a` of an if whose else is `b` that repeat `b` as
+  their else: the && operands to add after the if's own test, the env of their bindings, the branch left."
+  [env a b]
+  (let [nb (norm-cond b)]
+    (loop [env env f (norm-cond a) texts [] pat? false]
+      (cond
+        (and (is? f 'if) (#{3 4} (count f)) (= nb (norm-cond (nth f 3 nil))) (expr-form? env (second f))
+             (not (is? (second f) 'if-instance)))
+        (recur env (nth f 2) (conj texts (ex-text env (second f) (inc P-AND))) pat?)
+        (and (is? f 'if-instance) (#{3 4} (count f)) (= nb (norm-cond (nth f 3 nil))) (vector? (second f))
+             (not (and (symbol? (first (second f))) (contains? (:locals env) (name (first (second f)))))))
+        (let [[pat y] (second f)
+              {:keys [text] env' :env} (pattern-text env pat)]
+          (recur env' (nth f 2) (conj texts (str (ex-text env y P-REL) " instanceof " text)) true))
+        :else [texts env f pat?]))))
+
 (defn- if-lines [env c a b ctx]
   (if (and (#{:return :yield} ctx)
            (or (hoistable-temp? env a) (hoistable-temp? env b))
@@ -2648,9 +2718,13 @@
     ;; (when (some? x) a) is the converter's simplification of (if (nil? x) nil a), Java's
     ;; if (x == null) return null; written so
     (if-lines env (list 'nil? (second c)) nil a ctx)
-    (let [head (str "if (" (ex-text env c P-ASSIGN) ")")
+    (let [[texts env' a' pat?] (and-chain env a b)
+          fold? (and (seq texts) pat?)
+          head (str "if (" (if fold? (str/join " && " (cons (ex-text env c P-AND) texts)) (ex-text env c P-ASSIGN)) ")")
           b? (or (some? b) (#{:return :yield} ctx))]
-      (if-else-lines head (st env a ctx) (when b? (st env b ctx)))))))
+      (if fold?
+        (if-else-lines head (st env' a' ctx) (when b? (st env b ctx)))
+        (if-else-lines head (st env a ctx) (when b? (st env b ctx))))))))
 
 (defn- if-instance-lines [env [_ [pat x] a b] ctx]
   (if (and (symbol? pat) (contains? (:locals env) (name pat))
@@ -2660,9 +2734,10 @@
     ;; its scope alone, which Java scopes so (BindingsTest1, Guards, Unnamed, AnalysisGaps)
     (st env a ctx)
     (let [{:keys [text] env' :env} (pattern-text env pat)
-          head (str "if (" (ex-text env x P-REL) " instanceof " text ")")
+          [texts env'' a'] (and-chain env' a b)
+          head (str "if (" (str/join " && " (cons (str (ex-text env x P-REL) " instanceof " text) texts)) ")")
           b? (or (some? b) (#{:return :yield} ctx))]
-      (if-else-lines head (st env' a ctx) (when b? (st env b ctx))))))
+      (if-else-lines head (st env'' a' ctx) (when b? (st env b ctx))))))
 
 (defn- push-loop [env frame]
   (-> env (update :loops conj frame) (update :jstack conj frame)))
@@ -3215,7 +3290,7 @@
                         place (apply list 'aget a (butlast more))]
                     (second (assign-text env place (place-text env place) (last more) false)))
     (and (is? x 'let) (= :assign (first (expand-temps env x))))
-    (stmt-expr-text env (second (expand-temps env x)))
+    (binding [*temps-expanded* true] (stmt-expr-text env (second (expand-temps env x))))
     :else (ex-text env (strip-tag x) P-ASSIGN)))
 
 (defn- fi-cast-text
@@ -3418,6 +3493,15 @@
         (if (identical? outer outer') t (list '.. outer' inner))))
     t))
 
+;; A try that ends a void body with `return;` in its block: the source has a `return;` after the try too (the
+;; converter drops a body's last return, but keeps the one in the try, T6978574); the printer writes it.
+(defn- trailing-try-return?
+  [body]
+  (let [l (last body)]
+    (and (is? l 'try)
+         (let [blk (take-while #(not (and (seq? %) (#{"catch" "finally"} (str (head %))))) (rest l))]
+           (and (seq blk) (is? (last blk) 'return) (= 1 (count (last blk))))))))
+
 (defn- method-lines [env [_ nm & more] ckind]
   (let [m (meta nm)
         [opts [pv & body]] (split-opts more)
@@ -3451,7 +3535,8 @@
           (cond
             abstract? [(str head ";")]
             *declarations* (block head ["throw null;"])
-            :else (block head (body-lines env' body (if void? :stmt :return)))))))
+            :else (block head (cond-> (body-lines env' body (if void? :stmt :return))
+                                (and void? (trailing-try-return? body)) (conj "return;")))))))
 
 (defn- ctor-lines [env [_ & more] ckind]
   (let [[opts [pv & body]] (split-opts more)
@@ -3476,7 +3561,8 @@
                                   (body-lines env' [c] :stmt)
                                   [])
                                 ["throw null;"]))
-                        (body-lines env' body :stmt))))))
+                        (cond-> (body-lines env' body :stmt)
+                          (trailing-try-return? body) (conj "return;")))))))
 
 (defn- field-lines [env [_ nm & init] & [ckind]]
   (let [m (meta nm)
@@ -3504,7 +3590,8 @@
                          lines (if (seq members)
                                  (let [env' (class-frame-env env nil members nil nil :anon)]
                                    (conj (pop (block head (member-lines env' members :class))) (str "}" sep)))
-                                 [(str head sep)])]
+                                 ;; (V []): a constant with an empty class body, V {} (a plain V is a symbol)
+                                 [(str head (when (and (seq? c) (empty? args)) " {}") sep)])]
                      (into (vec (javadoc m)) lines)))
                  (range n) cs))))
 
