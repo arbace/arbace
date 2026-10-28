@@ -831,6 +831,15 @@ where Arbace converts exactly as javac does, and are explicit elsewhere.
   bounds the operand is not known to have.
 - Boxing calls `valueOf` of the matching wrapper, as javac does. Clojure today boxes a `long` with
   `Numbers.num`, which returns the same `Long`; only the call changes, not the meaning.
+- **Constants the printed Java would retype** (RPS151 (a), doc/FULL-SUPPORT-SURVEY.md; "As built: JN9f").
+  Where the analysis would convert implicitly but Java's literal for the form is another type's, the
+  converter writes the conversion: a `long` constant widened to `float` or `double` as an `int`
+  constant's widening is written (`f3 += -2061721519L`: `(unchecked-add-float f3 (float
+  -2.061721519E9))`; `double d = 3858573493713776640L`: `(double 3858573493713776640)`), a `long`
+  constant into a reference other than `Long` boxed (`new R6(0L, 0)` of `R6(Object, Object)`:
+  `(R6. (Long/valueOf 0) (Integer/valueOf 0))`), and a primitive conditional with a literal branch
+  into a reference boxed whole (`return c ? 1 : x;` of an `Integer` method: `(Integer/valueOf (if c 1
+  x))`, javac's Lower boxing the conditional).
 - **Erasure casts.** javac inserts a `checkcast` where an erased generic type is used at a more
   specific type. Arbace does not know generic types in code, so the converter writes the casts
   javac's `TransTypes` inserts:
@@ -982,7 +991,9 @@ label   = constant | (constant+) | [pattern] | [pattern :when guard] | nil | (ni
   component without a test, `null` included: javac found it unconditional by the record pattern's
   type arguments (`(Box ^String ^:unconditional s)` for `Box<String>(String s)` of a `record
   Box<T>(T t)`, whose component's erased type is `Object`); the converter writes the mark where the
-  component's declared erasure alone would make it a test (JCS114 (a),
+  component's declared erasure alone would make it a test. A non-null component of another class
+  (heap pollution: a `Box<Integer>` passed as a `Box<String>`) throws `ClassCastException` at the
+  binding, javac's checkcast of the erased component (JCS114 (a),
   doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4b"; JAVA-FRONTEND-SURVEY.md, "As built: JN9f").
 - Without a default nothing happens when nothing matches, and the value is `nil`. Where Java
   requires exhaustiveness (switch expressions, pattern switches), javac adds a default that
