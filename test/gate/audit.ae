@@ -1,0 +1,142 @@
+(ns gate.audit
+  "bin/gate --audit's comparison (doc/GATE-SURVEY.md, GT4, GTS8 (a), \"As built: GT4, GT6\"): the paths
+  a step's command touched under strace (OP<TAB>PATH lines, test/gate/audit.awk's) against the inputs
+  the step declares in test/gate/steps.edn.
+
+  -main ROOT PLANDIR STEP PATHS
+      PLANDIR holds files.sha256 (the checkout's files, bin/gate's) and hosts.edn; prints the report
+      and exits 1 when the step read a file of the checkout it does not declare (an open or an execve
+      of a file the step's key does not cover); a directory listed with no declared file below it is
+      advisory
+
+  A file is declared when the step's :inputs select it (groups expanded, the last rule that matches
+  wins), it is one of the step's :pins, or it is the gate's own logic (every key holds that). Not
+  counted: what the step wrote or derived (.tmp/, target/), .git/ (the commit is not in a key; the
+  version stamp is its business), files that are not in the checkout's table. A file only stat'ed is
+  listed apart (its existence, not its content, was asked). Reads outside the checkout are
+  summarized by directory: the pinned roots (TamaGo's go, the JDK build tree) belong to :pins."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [gate.plan])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-file [^String f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(def ^:private expand @#'gate.plan/expand)
+(def ^:private matching @#'gate.plan/matching)
+(def ^:private files-table @#'gate.plan/files-table)
+
+;; what a host's identity covers: the files its key (bin/arbace-go's gate_key, bin/lib/javac-key.bash's
+;; arbace_javac_key, the pins) is a hash of. A step on that host reads them (the build's sources, the
+;; scripts that build) without declaring them again.
+(def ^:private seed-pins ["seed/arbace-seed-go.tar.xz.sha256" "seed/goroot.sha256"])
+(def ^:private build-scripts ["bin/arbace-go" "bin/j2g" "bin/repr-go" "bin/build-go" "bin/jrt" "bin/seed" "bin/goi"])
+(def ^:private host-files
+  {:gate (concat ["arbace/" "!arbace/repr/java.ae" "!arbace/repr/java/" "!arbace/repr/haskell.ae" "!arbace/repr/haskell/"
+                  "!arbace/repr/rust.ae" "!arbace/repr/rust/" "go/" "overlay/" "!overlay/jdk/javac/" "jdk/" "!jdk/javac/"
+                  "!jdk/provenance.edn" "x509roots/" "bin/lib/" "!bin/lib/repr-java/" "!bin/lib/repr-haskell/"
+                  "!bin/lib/repr-rust/" "test/java-fixtures/" "!test/java-fixtures/provenance.edn"]
+                 seed-pins build-scripts)
+   :javac (concat ["arbace/" "go/" "overlay/" "jdk/" "!jdk/provenance.edn" "!jdk/javac/provenance.edn" "x509roots/"
+                   "bin/lib/" "!bin/lib/repr-java/" "!bin/lib/repr-go/" "!bin/lib/repr-clojure/" "!bin/lib/repr-haskell/"
+                   "!bin/lib/repr-rust/" "!bin/lib/frozen.bash"]
+                  seed-pins build-scripts)
+   :stage0 seed-pins
+   :frozen ["test/oracle/frozen-jar.sha256"]
+   :go [] :jdk []})
+
+(defn- parent [^String p] (let [i (.lastIndexOf p "/")] (if (pos? i) (subs p 0 i) "")))
+
+(defn- grouped
+  "undeclared paths as lines: a directory with more than 6 of them is one line with its count and
+  the first three"
+  [paths]
+  (let [byd (group-by parent paths)]
+    (mapcat (fn [[d ps]]
+              (if (> (count ps) 6)
+                [(str "   " d "/ (" (count ps) " files: " (str/join ", " (map #(subs % (inc (count d))) (take 3 ps))) ", ...)")]
+                (map #(str "   " %) ps)))
+            (sort-by key byd))))
+
+(def ^:private system-roots
+  ["/usr/" "/lib/" "/lib64/" "/bin/" "/sbin/" "/etc/" "/proc/" "/sys/" "/dev/" "/run/" "/var/" "/opt/"
+   "/root/.cache/go-build/" "/root/.config/" "/root/go/pkg/"])
+
+(defn -main [root plandir nm paths-file]
+  (let [{:keys [groups steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
+        step (first (filter #(= nm (str (:name %))) steps))
+        _ (when-not step (println (str "gate audit: no step " nm)) (System/exit 2))
+        files (files-table (str plandir "/files.sha256"))
+        cache (atom {})
+        rules (expand groups (:inputs step))
+        selected (into (matching cache (keys files) rules)
+                       (matching cache (keys files) (expand {} (vec (mapcat host-files (:hosts step))))))
+        implicit (set (concat ["bin/lib/gate-run.bash" "test/gate/plan.ae"] (:pins step)))
+        declared? (fn [f] (or (contains? selected f) (contains? implicit f)))
+        dirs (into #{} (mapcat (fn [f] (take-while seq (iterate parent (parent f)))) (keys files)))
+        sel-dirs (into #{} (mapcat (fn [f] (take-while seq (iterate parent (parent f)))) (concat selected implicit)))
+        lines (remove str/blank? (str/split-lines (slurp paths-file)))
+        ops (reduce (fn [m l] (let [[op p] (str/split l #"\t" 2)] (update m p (fnil conj #{}) op))) {} lines)
+        prefix (str root "/")
+        under (fn [p] (when (str/starts-with? p prefix) (subs p (count prefix))))
+        in-root (keep (fn [[p o]] (when-let [r (under p)] [r o])) ops)
+        read-files (atom #{})
+        undecl-read (atom []) undecl-stat (atom []) undecl-dir (atom [])
+        wrote (atom []) scratch (atom 0) git (atom 0) other (atom 0)]
+    (doseq [[r o] in-root]
+      (cond
+        (or (str/starts-with? r ".tmp/") (str/starts-with? r "target/") (= r ".tmp") (= r "target")) (swap! scratch inc)
+        (or (str/starts-with? r ".git/") (= r ".git")) (swap! git inc)
+        (contains? files r)
+        (cond
+          (or (o "R") (o "X")) (do (swap! read-files conj r)
+                                   (when-not (declared? r) (swap! undecl-read conj r)))
+          (o "W") (swap! wrote conj r)
+          (o "S") (do (swap! read-files conj r)
+                      (when-not (declared? r) (swap! undecl-stat conj r))))
+        (contains? dirs r)
+        (when (and (o "D") (not (contains? sel-dirs r))) (swap! undecl-dir conj r))
+        :else (swap! other inc)))
+    ;; outside the checkout
+    (let [outside (remove (fn [[p _]] (or (str/starts-with? p prefix) (= p (subs prefix 0 (dec (count prefix)))))) ops)
+          outside (remove (fn [[p _]] (some #(str/starts-with? p %) system-roots)) outside)
+          outside (filter (fn [[_ o]] (or (o "R") (o "X") (o "D"))) outside)
+          roots (frequencies (map (fn [[p _]] (let [w (remove str/blank? (str/split p #"/"))]
+                                               (str "/" (str/join "/" (take 3 w)))))
+                                  outside))]
+      (println (str "== audit " nm ": " (count selected) " declared files (+ " (count (:pins step)) " pins), "
+                    (count in-root) " paths of the checkout touched: " (count @read-files) " tracked files read, "
+                    @scratch " in .tmp/ or target/, " @git " in .git/"))
+      (let [u (sort @undecl-read)]
+        (println (str "UNDECLARED reads (opened or executed): " (count u)))
+        (doseq [l (grouped u)] (println l)))
+      ;; a directory listing (a find, a tree walk) depends on the set of files: advisory, since a new file
+      ;; in a listed directory changes no key; the topmost directories are listed
+      (let [all (set @undecl-dir)
+            top (sort (remove #(contains? all (parent %)) all))]
+        (when (seq top)
+          (println (str "directory listings, no declared file below (advisory): " (count all) " directories, topmost: "
+                        (str/join ", " (take 12 top)) (when (> (count top) 12) ", ...")))))
+      (when (seq @undecl-stat)
+        (println (str "stat only, undeclared (their existence, not their content): " (count @undecl-stat) " files")))
+      (when (seq @wrote)
+        (println (str "written checked-in files: " (count @wrote)))
+        (doseq [l (grouped (sort @wrote))] (println l)))
+      (when (seq roots)
+        (println "outside the checkout (read):")
+        (doseq [[r n] (sort-by key roots)] (println (str "   " r " (" n " paths)"))))
+      ;; declared rules whose files the step never read: candidates to narrow
+      (let [idle (for [[inc? pat] rules
+                       :when inc?
+                       :let [m (matching cache (keys files) [[true pat]])
+                             n (count (filter @read-files m))]
+                       :when (and (pos? (count m)) (zero? n))]
+                   (str "   " pat " (" (count m) " files)"))]
+        (when (seq idle)
+          (println (str "declared, never read (candidates to narrow): " (count idle)))
+          (doseq [l idle] (println l))))
+      (let [bad (count @undecl-read)]
+        (println (if (zero? bad) (str "audit " nm ": ok") (str "audit " nm ": " bad " undeclared")))
+        (System/exit (if (zero? bad) 0 1))))))

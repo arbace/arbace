@@ -117,6 +117,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/renamed-env.bash"
 . "$root/bin/lib/tools.bash"
+. "$root/bin/lib/limit.bash" # limited: CPU-time limits with a wall cap (GT6)
 cd "$root"
 
 jdk=${JDK:-/root/jdk26u}
@@ -390,7 +391,7 @@ check_diag() {
 
 run_exe() {
   local e
-  for e in "${JAVA_CHECK_EXE:-}" "$root/.tmp/arbace-go-gate/amd64/arbace" "$root/target/arbace-go/amd64/arbace"; do
+  for e in "${JAVA_CHECK_EXE:-}" "${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate}/amd64/arbace" "$root/target/arbace-go/amd64/arbace"; do
     [ -n "$e" ] && [ -x "$e" ] && { echo "$e"; return 0; }
   done
   echo "java-check: no executable (JAVA_CHECK_EXE, bin/arbace-go --gate-build or --build)" >&2; return 1
@@ -420,7 +421,7 @@ read_opts() {
 # (mask_dirs, run_actions' w and tmp: JCS70 (a)), as the reference's
 judge() {
   local st=$1 out=$2 err=$3 sha len msha want
-  if [ "$st" = 124 ] || [ "$st" = 137 ]; then printf 'timeout\t%s s\n' "$timeout"; return 0; fi
+  if [ "$st" = 124 ] || [ "$st" = 137 ] || [ "$st" = 152 ]; then printf 'timeout\t%s s\n' "$timeout"; return 0; fi
   # the reason: stderr's first line, and its root cause when it has one (the last "Caused by:"
   # line: an ExceptionInInitializerError's, a wrapping RuntimeException's), so that the classes
   # take the cause (JC6, the catch-alls named)
@@ -450,7 +451,7 @@ run_actions() {
     # moved the tests near the limit between runs)
     for lim in "$timeout" "$((timeout * 2))"; do
       rm -rf "$w" "$tmp"; mkdir -p "$w" "$tmp"
-      st=0; (cd "$w" && env TMPDIR="$tmp" ${fdir:+ARBACE_PATH=$fdir} timeout -k 5 "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
+      st=0; (cd "$w" && export TMPDIR="$tmp" && { [ -z "$fdir" ] || export ARBACE_PATH=$fdir; } && limited "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
                -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" -Djava.io.tmpdir="$tmp" -- "${x[@]:9}" \
                < "$work/empty" > "$p/out$i" 2> "$p/err$i") || st=$?
       if [ "$st" = 126 ] && grep -q '^java-check: load-failed: ' "$p/err$i"; then
@@ -758,7 +759,7 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
-  export -f check_one read_opts first_line root_cause classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
+  export -f limited limited_cpu check_one read_opts first_line root_cause classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
   export root work jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
   case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
@@ -952,7 +953,7 @@ essential_compiled() {
   work=$work/essential-compiled
   local s=$work/prog aot=${JAVA_CHECK_AOT:-} goroot=${ARBACE_GOROOT:-/root/tamago-go}
   if [ -z "$aot" ]; then
-    for aot in "$root/.tmp/arbace-go-gate/amd64/aot" "$root/target/arbace-go/aot"; do [ -f "$aot/packages.edn" ] && break; done
+    for aot in "${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate}/amd64/aot" "$root/target/arbace-go/aot"; do [ -f "$aot/packages.edn" ] && break; done
   fi
   [ -f "$aot/packages.edn" ] || { echo "java-check --essential-compiled: no compiled namespaces $aot (bin/arbace-go --gate-build, or JAVA_CHECK_AOT)" >&2; return 1; }
   # the compiled namespaces' key (bin/arbace-go's aot_key: the runtime and the embedded sources,
@@ -999,7 +1000,7 @@ essential_compiled() {
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f compiled_one run_actions judge first_line root_cause mask_hashes mask_dirs run_dirs test_dir
+  export -f limited limited_cpu compiled_one run_actions judge first_line root_cause mask_hashes mask_dirs run_dirs test_dir
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"
   # a timeout runs again once, alone, with twice the limit (JCS47 (a)): beside the gate's other

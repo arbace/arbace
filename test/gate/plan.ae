@@ -1,10 +1,12 @@
 (ns gate.plan
   "bin/gate's planner (doc/GATE-SURVEY.md, GT2, GTS2 (a), GTS3 (a), GTS6 (a), GTS7 (a), \"As built:
-  GT1-GT3\"): reads the steps test/gate/steps.edn declares, computes each step's key over its
-  declared inputs and decides, against the store of passes, which steps run.
+  GT1-GT3\", \"As built: GT4, GT6\"): reads the steps test/gate/steps.edn declares, validates the
+  table (GTS29 (a)), computes each step's key over its declared inputs and decides, against the
+  store of passes, which steps run.
 
   A check's key is the SHA-256 of its material, one line per input: the step's declaration (but
-  :doc, :summary and :mem-gib), the gate's logic (bin/gate, this file), each host's identity, each
+  :doc, :summary, :mem-gib, :heavy and :audit-cmd), the gate's logic (the runner bin/lib/gate-run.bash, this file: GTS22
+  (a); bin/gate's header, summary and option parsing are not in a key), each host's identity, each
   pin's and each input file's SHA-256, each declared environment variable's value. Never the
   commit. A pass of that key in the store (STORE/NAME/KEY.edn, bin/gate writes it) skips the step.
   A build runs when a check that runs needs it; an :always step runs.
@@ -12,8 +14,9 @@
   -main plan ROOT LOGS STORE MODE [--rerun]
       MODE essential or full; LOGS holds files.sha256 (sha256sum's lines of the checkout's files,
       bin/gate's) and hosts.edn ({:gate ID ...}); writes LOGS/plan.tsv (one step a line, the
-      columns NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER SUMMARY-N SUMMARY-RE WHY CMD, '-' for an
-      empty one; GATE_STEPS names another table, for the gate's own tests), LOGS/plan/NAME.inputs (each step's material) and prints the plan: each step,
+      columns NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM-GIB BUDGET-S SUMMARY-N SUMMARY-RE
+      WHY AUDIT-CMD CMD, '-' for an empty one; BUDGET-S: three times the longest of the step's last three passes,
+      GTS17 (a); GATE_STEPS names another table, for the gate's own tests), LOGS/plan/NAME.inputs (each step's material) and prints the plan: each step,
       its decision and why. --rerun: every check runs (passes are still recorded)
   -main why ROOT LOGS STORE NAME
       after a plan: the step's material, its passes, and what changed since the latest one"
@@ -78,13 +81,13 @@
               (if inc? (into acc m) (reduce disj acc m))))
           #{} rules))
 
-(def ^:private unkeyed #{:doc :summary :mem-gib})
+(def ^:private unkeyed #{:doc :summary :mem-gib :heavy :audit-cmd})
 
 (defn- material
   "the lines a step's key is the hash of"
   [step rules files hosts cache]
   (let [decl (into (sorted-map) (apply dissoc step unkeyed))
-        logic ["bin/gate" "test/gate/plan.ae"]
+        logic ["bin/lib/gate-run.bash" "test/gate/plan.ae"]
         sel (sort (matching cache (keys files) rules))]
     (concat
      [(str "step " (:name step))
@@ -133,13 +136,71 @@
 
 (defn- dash [x] (let [s (str x)] (if (str/blank? s) "-" s)))
 
+;; GTS29 (a): the table checked. A rule that matches no file (a typo, a moved path) makes a key that
+;; never changes, a stale pass waiting.
+(defn- check-rules
+  "the problems of one :inputs vector: an unknown group, a rule (a step's own or a group's own) that
+  matches no file"
+  [groups label inputs paths cache]
+  (for [x inputs
+        :let [s (if (keyword? x) nil (str x))
+              pat (when s (if (str/starts-with? s "!") (subs s 1) s))]
+        :when (if (keyword? x)
+                (not (contains? groups x))
+                (empty? (matching cache paths [[true pat]])))]
+    (if (keyword? x)
+      (str label ": no group " x)
+      (str label ": input rule " s " matches no file"))))
+
+(defn- validate
+  "the problems of the table, as strings: a duplicate step, a :needs or :start-after naming no step,
+  a host absent from hosts.edn, an unknown group, an input rule or pin matching no file, a :cmd's bin/
+  script missing, an unknown :phase or :kind"
+  [groups steps files hosts cache]
+  (let [names (map (comp str :name) steps)
+        known (set names)
+        paths (keys files)
+        ok-script? (fn [t] (contains? files t))]
+    (vec
+     (concat
+      (for [[n c] (frequencies names) :when (> c 1)] (str "step " n " is declared " c " times"))
+      (mapcat
+       (fn [s]
+         (let [nm (str (:name s))]
+           (concat
+            (when-not (#{:pre :build :essential :full} (:phase s)) [(str nm ": unknown :phase " (:phase s))])
+            (when-not (contains? #{nil :check :build :always} (:kind s)) [(str nm ": unknown :kind " (:kind s))])
+            (for [x (:needs s) :when (not (known (str x)))] (str nm ": :needs names no step: " x))
+            (when (and (:start-after s) (not (known (str (:start-after s)))))
+              [(str nm ": :start-after names no step: " (:start-after s))])
+            (for [h (:hosts s) :when (not (contains? hosts h))] (str nm ": host " h " is not in hosts.edn"))
+            (for [p (:pins s) :when (not (contains? files p))] (str nm ": pin " p " is not a file"))
+            (for [t (re-seq #"(?:^|[ \"=;&|(])(bin/[A-Za-z0-9._-]+)" (str (:cmd s)))
+                  :let [sc (second t)]
+                  :when (not (ok-script? sc))]
+              (str nm ": :cmd runs " sc ", which is not a file"))
+            (check-rules groups nm (:inputs s) paths cache))))
+       steps)
+      (mapcat (fn [[g rules]] (check-rules groups (str "group " g) rules paths cache)) groups)))))
+
+(defn- budget
+  "three times the longest of the step's last three passes (seconds, at least 120), or nil (GTS17 (a))"
+  [ps]
+  (let [ss (keep :secs (take 3 ps))]
+    (when (seq ss) (max 120 (* 3 (apply max ss))))))
+
 (defn plan [root logs store mode rerun?]
   (let [{:keys [groups steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
         files (files-table (str logs "/files.sha256"))
         hosts (read-file (str logs "/hosts.edn"))
         phases (if (= mode "full") #{:pre :build :essential :full} #{:pre :build :essential})
-        steps (filter #(phases (:phase %)) steps)
         cache (atom {})
+        problems (validate groups steps files hosts cache)
+        _ (when (seq problems)
+            (println (str "gate plan: " root "/test/gate/steps.edn has " (count problems) " problem(s):"))
+            (doseq [p problems] (println (str "   " p)))
+            (System/exit 1))
+        steps (filter #(phases (:phase %)) steps)
         pdir (File. (str logs "/plan"))
         _ (.mkdirs pdir)
         ;; the checks' decisions
@@ -153,13 +214,14 @@
                        key (sha256 text)
                        _ (spit (str logs "/plan/" nm ".inputs") text)
                        ps (passes store nm)
+                       bud (budget ps)
                        hit (first (filter #(= (:key %) key) ps))
                        nfiles (count (filter #(str/starts-with? % "file ") lines))]
                    (cond
                      (and hit (not rerun?))
-                     {:step s :name nm :kind kind :key key :decision "skip" :why (pass-desc hit)}
+                     {:step s :name nm :kind kind :key key :decision "skip" :why (pass-desc hit) :budget bud :hit hit}
                      :else
-                     {:step s :name nm :kind kind :key key :decision "run"
+                     {:step s :name nm :kind kind :key key :decision "run" :budget bud
                       :why (str "key " (subs key 0 12) ", " nfiles " files; "
                                 (cond
                                   hit "a pass at this key, rerun (--rerun)"
@@ -171,6 +233,22 @@
                                             (str "changed since the pass at " (subs (str (:key p)) 0 12) " (" (:date p) "): "
                                                  (short-list (changes lines then)))
                                             (str "no pass at this key (the latest " (subs (str (:key p)) 0 12) ")")))))})))))
+        ;; the canary (GT4, GTS8 (a), survey 4.4 (d)): one skipped check runs anyway, the light one (not
+        ;; :heavy, its pass under five minutes) whose pass is oldest, so that a declaration that misses an
+        ;; input is found within a few gates; GATE_CANARY=0 turns it off
+        canary (when-not (or rerun? (= "0" (System/getenv "GATE_CANARY")))
+                 (->> decided
+                      (filter #(and (= "skip" (:decision %)) (not (:heavy (:step %)))
+                                    (<= (or (:secs (:hit %)) 0) 300)))
+                      (sort-by #(str (:date (:hit %))))
+                      first))
+        decided (mapv (fn [d]
+                        (if (and canary (= (:name d) (:name canary)))
+                          (assoc d :decision "run"
+                                 :why (str "canary: the oldest pass of the light checks (" (:date (:hit d))
+                                           "), run again to prove it still holds (GATE_CANARY=0: not)"))
+                          d))
+                      decided)
         by-name (into {} (map (juxt :name identity) decided))
         ;; the builds: needed by a check that runs, or by a needed build
         needed (loop [need (set (mapcat #(map str (:needs (:step %))) (filter #(= "run" (:decision %)) decided)))]
@@ -190,13 +268,14 @@
                          d)))]
     (spit (str logs "/plan.tsv")
           (apply str
-                 (for [{:keys [step name decision key why]} decided
+                 (for [{:keys [step name decision key why budget]} decided
                        :let [[sre sn] (:summary step)]]
                    (str (str/join "\t" [name decision (dash key) (subs (str (:phase step)) 1)
                                         (dash (or (:chain step) name))
                                         (dash (str/join "," (map str (:needs step))))
                                         (dash (:start-after step))
-                                        (dash sn) (dash sre) (dash why) (:cmd step)])
+                                        (if (:heavy step) "yes" "-") (dash (:mem-gib step)) (dash budget)
+                                        (dash sn) (dash sre) (dash why) (dash (:audit-cmd step)) (:cmd step)])
                         "\n"))))
     (let [freq (frequencies (map :decision decided))]
       (println (str "gate plan (" mode "): " (count decided) " steps; "
