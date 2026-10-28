@@ -213,6 +213,7 @@ seed was printed from (the seed's `SEED.edn`).
   [doc/go/SPEED-NOTES.md](doc/go/SPEED-NOTES.md), its speed; [doc/go/BOX-SURVEY.md](doc/go/BOX-SURVEY.md)
   and [doc/go/BOX-NOTES.md](doc/go/BOX-NOTES.md), the box (B1b); the rest of `doc/go/`, the notes of each part
 - [doc/REPR-CLOJURE.md](doc/REPR-CLOJURE.md): repr/clojure, Clojure source translated into Arbace's
+- [doc/C23-SURVEY.md](doc/C23-SURVEY.md): the survey for C23 at parity with the three crops (C forms, repr/c, ci, AOT; proposals CS1-CS24)
 - [doc/G2C-SURVEY.md](doc/G2C-SURVEY.md): the survey for repr/go (then g2c, from 2026-10-11 to 2026-10-17 g2a), Go as Arbace forms
 - [doc/STANDALONE-SURVEY.md](doc/STANDALONE-SURVEY.md) and [doc/STANDALONE-NOTES.md](doc/STANDALONE-NOTES.md):
   the standalone Arbace, the Go-hosted bootstrap and the seed
