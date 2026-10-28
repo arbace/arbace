@@ -178,3 +178,29 @@ git history:
   run, 28 skipped); `--full` 3, nothing changed: 4 s. The essential gate on merged main: 24 s (3 run, 13 skipped).
   Heaviest steps (peak GiB): attr-check 40.1, java-check-full 35.0, front-check 28.8, roundtrip 28.1, repr-go-native
   27.7, diffcheck 26.3. Scratch: `.tmp/gt1-3/`. Decided (the user): GTS21-GTS29 as recommended, into GT4-GT6.
+
+## 2026-10-28: Clojure's last deferred cases and small leftovers B merged; RPS130-RPS134, RPS150-RPS154 decided (the user)
+
+- Clojure's deferred cases (branch `v2-clojure-deferred`; on Sonnet; doc/FULL-SUPPORT-SURVEY.md, "As built: Clojure's
+  deferred cases"): RPS41 (b) (a compiled fn's class reflects its code object's closed-over fields, jrt's
+  `AOTFnFields`), RPS42 (b) (c2j's field assignments and unboxed returns on their own lines), RPS53 (b) (the
+  evaluator's field nodes and `invoke` set the frame's line, the template directive `(at-line line x)`), RPS54 (b)
+  (`gen-interface` registers a `reify` adapter with `FISupport` for a `^FunctionalInterface`). The options (b) of
+  RPS42, RPS53 and RPS54 taken from their recommendations ("(b) after the milestone"). Eval 20,566 → 20,576
+  assertions, AOT 20,549 → 20,576; `clearing` at AOT 12 → 31 of 31; Clojure's deferred: eval 5 → 2, AOT 6 → 1.
+  Shipped files (for the re-seed): arbace/lang/{Compiler,Reflector}.ae, arbace/genclass.ae,
+  arbace/lang/go/CompilerNodes.ae, arbace/c2j/{emit,node}.ae, arbace/j2g/dyn.ae, go/arbace/jrt/class.ae,
+  jdk/edge.edn (`Compiler$FISupport` public).
+- Small leftovers B (branch `v2-small-b`; on Sonnet; "As built: v2 small leftovers B"): RPS64 per kind and RPS86 (b)
+  in repr/java's printer (`arbace/repr/java/print.ae`: widened constants as the integer's literal, negated
+  non-decimal literals, a static field through an expression qualified, `a[e] = a[e] + 1` written out, a `&&`
+  chain with a pattern as one condition, ...; `:print-forms` split into `:print-shapes` and `:print-erasure` by
+  design and 5 deferred); RPS80 (b) (`bin/jrt modules` generates `go/arbace/jrt/module_table.ae`, `Class.getModule`
+  by package first); RPS81 (b) stopped at a design (RPS150: needs j2g support forms, JC4c's files). Java's print
+  2,584 → 2,597, its deferred 99 → 41. Shipped: go/arbace/jrt/{module,module_table}.ae, go/arbace/jrt.ae.
+- The essential gate on both merges passed (21m34s, 17 run; the gate's processes at most 43.4 GiB); the matrix 12 of
+  12, 0 problems: Clojure 908/2/0, 21,052/80/2, 809/28/1, 1,031+/0/0; Java print 2,597/683/41.
+- Decided (the user): RPS130-RPS134 and RPS150-RPS154 as recommended (RPS134 (b): `xml-stream` by design; RPS150
+  after JC4c, in v2; RPS151, the converter's widening, in JN9f).
+- JN9f filled the disk (100%) and lost its context; I trimmed Go's cache (14 GB → less) and sent it the remaining
+  steps. A slip of mine: I committed `ee8ee304` (docs only) in main while its gate ran there.
