@@ -2911,3 +2911,65 @@ design with the SAX cut, after RPS56; `seq-and-transducer` stays deferred, a spe
 keeps a constant's widening, in JN9f: the 5 deferred `:print-forms` tests), RPS152 (`:print-shapes` and
 `:print-erasure` by design), RPS153 (an enum constant with arguments and an empty body by design for now), RPS154
 (no other consumer of the module table).
+
+## As built: RPS97 (b) (2026-10-28)
+
+RPS97 (b), decided by the user: `bin/clojure-tests --aot` and `bin/java-check`'s compiled level call
+`--build-program`'s functions as one library, `bin/lib/program.bash`, extracted from `bin/arbace-go`.
+
+### What was built
+
+- `bin/lib/program.bash`: the base (`program_base`, with `aot_key`, `aot_key_write`, `seed_aot`,
+  `host_compiles`, `host_compile`, `host_arch`, moved unchanged from `bin/arbace-go`), the linker's flags
+  (`link_flags`), and new: `program_aot_current AOTDIR` (the base's test: `packages.edn` and `AOTDIR.key` the
+  checkout's `arbace_aot_key`; `program_base` and `--essential-compiled` both use it), `program_overlay`,
+  `program_j2g EXE LOG OUT ARG...` (`bin/j2g --program ARG... --out OUT` on EXE, `$program_heavy` a prefix for a
+  heavy slot) and `program_build_go EXE ARCH WORK OUT LOG PROG [ARG...]` (`bin/build-go` with the flags every
+  program build shares: `--line-file`, repr/go's print cache, the overlay, `--root x509roots`; ARG... beside them).
+  The base's functions use the caller's `$root`, `$dir`, `$programs`, `$discard`, `since` and `build`, as
+  `bin/arbace-go` defines them (stated at the library's head); j2g's and build-go's need `$root` alone.
+- `bin/arbace-go` sources it; `build_program`'s j2g and build-go runs are the two functions (its `--root "$src"` and
+  `--go-flag` the ARG...). `bin/clojure-tests --aot`'s `aot_build` (j2g on the fixtures and the suite compiled,
+  build-go for amd64) and `bin/java-check`'s `compiled_shard` and `essential_compiled` (their rounds, refusals,
+  go-errors pass and runs stay theirs; `$heavy` as `program_heavy`) call them. The cache keys of the three
+  harnesses and `program_key` now hash `bin/lib/program.bash`.
+- `test/gate/steps.edn`: the `:build` group lists `bin/lib/program.bash` (the other steps read it through `:lib`),
+  in a commit of its own.
+- One difference, deliberate: `program_j2g` sets `REPR_GO_EXE` beside `J2G_GO_EXE` for every caller (the two
+  harnesses already did; `--build-program` set `J2G_GO_EXE` alone). `bin/j2g` reads `J2G_GO_EXE` only and
+  `REPR_GO_EXE` names the same executable build-go gets, so no output changes (the results below).
+
+### Results
+
+Behaviour unchanged, on the worktree of this change:
+
+- `bin/clojure-tests --aot --essential`: 15 namespaces, 7,273 assertions, 7,270 passing, no regressions against
+  the subset's reference. `bin/java-check --essential-compiled`: 423 of 423 pass.
+- `bin/clojure-tests --aot` (the full suite): 78 namespaces, 20,580 assertions, 20,576 passing, no regressions
+  against `test/arbace-go-aot-results.edn`.
+- `bin/java-check --levels compiled` (no `--record`, JAVA_CHECK_AOT the gate's compiled namespaces): 3,321
+  tests, 1,880 pass, 977 refused, 413 fail, 26 differ, 22 timeout, 2 flaky, 1 unread; against
+  `test/java/check-compiled.edn` 3,312 as recorded, 0 regressions. The changed lines are timing, not the build:
+  t03900 passed (recorded flaky), t05445 and t05565 flaky (recorded pass), t07649 `differ` (recorded `timeout`,
+  an out-of-memory test under the host's load). The read level used the previous day's javac tool
+  (`REPR_JAVA_STALE_OK=1`; the checkout's own was not built here).
+- `bin/arbace-go --build-program --check`: 11 of 11 (every sample and the failing one). `make check-makefile`
+  passes. The essential gate passed (17 steps run, 10m35s).
+
+### Proposals (RPS160-RPS169)
+
+- **RPS160 The sample builds' shared steps.**
+  - Options: (a) as built: the three harnesses share the base and the two calls, and each keeps its
+    own compile step (the suite's `compile` mode of the runner, `--build-program`'s generated `compile.ae`);
+    (b) the compile step too as `program_compile` (the namespaces to compile, the `ARBACE_PATH` and the units
+    filter as arguments); (c) the harnesses lay their corpora out as DIRs (RPS97 (c)).
+  - *Recommended: (a)*: the two compile steps differ in what they load (the suite's embedded runtime after a
+    prepare, against a program's `src/` first), and a shared function would take most of its body as arguments;
+    (b) when a fourth harness needs it.
+- **RPS161 The base for the harnesses.**
+  - Options: (a) as built: `bin/clojure-tests --aot` uses the gate's executables and `bin/java-check` the
+    gate's or `target/arbace-go/aot`, each by its own lookup; (b) both call `program_base` (the
+    candidate order of `--build-program`, stage 0's compiled namespaces as a last base).
+  - *Recommended: (b)*, in a change of its own: it would let a fresh clone run the compiled levels
+    without a `--build`, but the suite also needs the gate's test build, and the lookups' errors are the
+    gate's messages today.
