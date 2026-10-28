@@ -162,3 +162,19 @@ git history:
 - Started beside GT1-GT3 (worktrees from `b60d3075`): JC4c and JN9f (on Opus), Clojure's last deferred cases
   (RPS41 (b), RPS42, RPS53, RPS54) and small leftovers B (RPS64 per kind, RPS86 (b), RPS80 (b), RPS81 (b)) on
   Sonnet.
+
+## 2026-10-28: GT1-GT3 merged (the keyed gate); GTS21-GTS29 decided (the user)
+
+- GT1-GT3 (branch `gate-gt1-3`, merged `b518a8f8`; on Opus; doc/GATE-SURVEY.md, "As built: GT1-GT3"): the gate's
+  37 steps as data (`test/gate/steps.edn`: command, needs, declared inputs, hosts, pins, environment), the planner
+  `test/gate/plan.ae` on stage 0 keying each check over them (never the commit) and skipping one passed at its key
+  in the shared store (`ARBACE_GATE_STORE`, main's `.tmp/gate-pass/`); `--plan`, `--why STEP`, `--rerun`; each step
+  measured (busybox `time -v`, a 5 s sampler, `.tmp/gate/NAME.mem`, `mem.tsv`); `gate_key` narrowed (repr/java,
+  javac's world and the provenance files out); the fixpoint's G1 the gate's build (12:37, was 20:45), javac's tool
+  once per `arbace_javac_key` (`bin/javac-vendor tool`, `check --from`), stage 0 kept by its pins; `--full` serial by
+  default (`GATE_FULL_PARALLEL=1`). Runs: `--full` 1 failed (276m31s: `jrt-convert` killed for memory beside another
+  agent's job; `java-check-full` on main's stale `:repr-java` provenance hashes, stale since the sweep's edit of
+  `bin/repr-java`, and a runtime-key bug, `jdk/provenance.edn` now out of both keys); `--full` 2 passed (75m14s, 9
+  run, 28 skipped); `--full` 3, nothing changed: 4 s. The essential gate on merged main: 24 s (3 run, 13 skipped).
+  Heaviest steps (peak GiB): attr-check 40.1, java-check-full 35.0, front-check 28.8, roundtrip 28.1, repr-go-native
+  27.7, diffcheck 26.3. Scratch: `.tmp/gt1-3/`. Decided (the user): GTS21-GTS29 as recommended, into GT4-GT6.

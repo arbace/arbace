@@ -992,3 +992,12 @@ hand to fix the gate (the provenance, then the runtime key): their essential pas
     missing, as `make check-makefile` checks the Makefile; (b) as built: unknown groups and hosts fail,
     the rest silently selects nothing.
   - *Recommended: (a)*: a rule that matches nothing makes a key that never changes, a stale pass waiting.
+
+## Decided (2026-10-28): GTS21-GTS29
+
+The user decided GT1-GT3's proposals as recommended, folded into GT4-GT6: GTS21 (an essential step checking the
+provenance files' `:repr-java` hash against the reader's), GTS22 (the gate's logic in every key narrowed to the
+planner and a runner library), GTS23 (each step's `bin/lib` libraries declared, with GT4's audit), GTS24 (the
+gate's executables shared across worktrees by `gate_key`), GTS25 (only `:heavy` steps under the host's lock,
+`GATE_HEAVY_CMD`), GTS26 (the measured peaks in `:mem-gib`/`:heavy`), GTS27 (`bin/gate --prune`), GTS28
+(`reader_key` narrowed), GTS29 (the planner validates the table).
