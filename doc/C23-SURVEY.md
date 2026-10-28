@@ -1065,3 +1065,24 @@ The worktree's `.tmp/c23/` (kept):
   answer and the first line of a refusal.
 - `pp23.c`, `va.c`, `elif.c`, `emb.c`, `hca.c` — E3's inputs; `t.c` — E5's C23 program.
 - Reproduce E2: `cd .tmp/c23 && TMPDIR=$PWD/tmp ./probe/probe runs 1 FILE...` (eight jobs; gcc on PATH).
+
+## Decided (2026-10-28): CS1-CS24
+
+The user decided the survey's proposals, C23 to start after `arbace-reaps-3-crops-v2`'s tag:
+
+- **CS4: (b), cc ported to Arbace**, not vendored as Go forms: the front end (cc's lexer, preprocessor,
+  parser and the C23 delta) rewritten in Arbace code, as repr/java's native parser was a port of javac's
+  (JN8), its trees checked against cc's as JN8's against javac's (cc, go-whim's `crefactor/cc`, kept as the
+  oracle, run from the host's module cache or `../go-whim`, not vendored). C2 and C3 grow by the port.
+- **CS22: left open until C1.** A port is a derivative of cc (BSD-3, The CC Authors, stated in LICENSE.md
+  with the port's origin); the statement for go-whim's own parts (the C23 delta, cemit's and clisp's rules,
+  c23conf) is the user's to make when C1 brings them in.
+- **CS3: (a)**, ISO C23 with the earlier standards a file's `:std` names and the GNU extensions musl and the
+  corpora need, the rest read and printed but out of eval and AOT by design.
+- **CS9: (a)** (one flat 64-bit address space per program), **CS11: (a)** and **CS12: (a)** (musl 1.2.6 as C
+  forms, its release tarball fetched into `.tmp/` and pinned by SHA-256), **CS14: (a)** (gcc 15.2 at `-O0` the
+  judge, `-O2` the witness, the runs recorded as data), **CS15: (a)** (gcc 15.2's source tarball fetched and
+  pinned), **CS2: (a)** (the tag `arbace-reaps-4-crops-v1`), **CS5: (a)** (the preprocessor inside read),
+  **CS17: (a)** (`arbace.repr.c`, ci, `crt`, cf2g).
+- The rest as recommended: CS1 (a), CS6 (a), CS7 (a), CS8 (a), CS10 (a), CS13 (a), CS16 (a), CS18 (a),
+  CS19 (a), CS20 (a), CS21 (a), CS23 (a), CS24 (a).
