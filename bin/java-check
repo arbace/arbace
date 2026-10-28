@@ -83,6 +83,19 @@
 #                      regression (interp, compiled) is run again once; a test whose second run
 #                      passes is flaky, no regression when a :flaky class of the level names it
 #                      (JCS71 (a))
+#   bin/java-check ... --save DIR
+#                      the runs alone (GT5, doc/GATE-SURVEY.md, "As built: GT5": bin/gate's levels, each a
+#                      step keyed by what it reads): no judgment; DIR/results.tsv the results (ID LEVEL
+#                      RESULT REASON), and with the level read DIR/forms.sha256 (ID<TAB>the digest of its
+#                      forms, their first line, which names the scratch they were read in, left out; -
+#                      when the read failed), the forms' digest that the later levels' keys hold (an early
+#                      cutoff: a reader change that reads the same forms keeps them). Status 0 when the
+#                      levels ran, whatever their results
+#   bin/java-check --judge [--essential] [--record] [--partial] RESULTS...
+#                      the judgment alone (GT5): the RESULTS files (--save's results.tsv) judged as a run
+#                      of their levels is, against test/java/check-LEVEL.edn, test/java/divergences.edn and
+#                      test/java/levels-known.edn (seconds: a classes file's change runs nothing again);
+#                      --essential as --essential's run is judged
 #   bin/java-check --essential [--jobs N]
 #                      the essential gate's (JCS13 (a)): the tests of test/java/essential.txt at the
 #                      level interp, from their forms committed in test/java/forms/ID (no javac:
@@ -116,6 +129,8 @@
 #                      the categories of the corpora's areas (java.check/scan), printed as a table
 #
 # Environment: JDK (jdk26u, default /root/jdk26u), JAVA_CHECK_EXE (the executable that interprets),
+# JAVA_CHECK_FORMS (the read level's cache of forms, default WORK/forms; bin/gate's: the main checkout's,
+# shared by the worktrees, keyed by the sources, the options, the reader's sources and the tool's key),
 # REPR_JAVA_EXE (javac's tool executable, bin/repr-java's), ARBACE_HOST_EXE (the tools' host).
 set -euo pipefail
 export CGO_ENABLED=0
@@ -129,6 +144,7 @@ cd "$root"
 jdk=${JDK:-/root/jdk26u}
 jdktest=$jdk/test
 work=${JAVA_CHECK_WORK:-$root/.tmp/java-check} # the scratch (JAVA_CHECK_WORK: another, for a run beside one)
+formsc=${JAVA_CHECK_FORMS:-$work/forms} # the read level's cache of forms (GT5: bin/gate shares the main checkout's)
 ref=$root/test/java/ref-jdk26.edn
 corpora=$root/test/java/corpora.edn
 pin=baf63fbe42b8758448fee570a9d9bb914272d259 # jdk/javac/platform.sha256's commit of jdk26u
@@ -682,7 +698,7 @@ check_one() {
         ro=()
         while IFS= read -r k; do [ -n "$k" ] && ro+=("$k"); done <<< "$(read_opts ${opts[@]+"${opts[@]}"})"
         key=$( { echo "$reader_key"; printf '%s\n' ${ro[@]+"${ro[@]}"}; (cd "$p/src" && find . -type f | LC_ALL=C sort | xargs -d '\n' sha256sum); } | sha256sum | cut -c1-24)
-        forms=$work/forms/$key
+        forms=$formsc/$key
         echo "$key" > "$p/forms.key"
         # one reader per key: two descriptions of one file share their source set
         exec 7> "$forms.lock"; flock 7
@@ -690,22 +706,38 @@ check_one() {
           rm -rf "$forms" "$forms.tmp"
           st=0
           (cd "$root" && bin/repr-java read ${ro[@]+"${ro[@]}"} "$forms.tmp" "$p/src") > "$forms.log" 2>&1 || st=$?
+          # GTS35 (a): the result written to a temporary and renamed, once complete; a read killed by a
+          # signal (status above 128: an OOM kill, the audit's) is no result and is not cached
           if [ "$st" = 0 ] && grep -q ' converted, 0 failed, 0 javac errors' "$forms.log"; then
-            mv "$forms.tmp" "$forms"; printf 'pass\t\n' > "$forms.result"
+            mv "$forms.tmp" "$forms"; printf 'pass\t\n' > "$forms.result.$$" && mv "$forms.result.$$" "$forms.result"
+          elif [ "$st" -gt 128 ]; then
+            rm -rf "$forms.tmp"; printf 'fail\tthe read was killed (status %s), not cached\n' "$st" > "$p/read.result"
           else
             reason=$( { grep -m1 '^FAILED ' "$forms.log" | sed 's|^FAILED [^ ]* ||'; grep -m1 -E 'error|Exception|failed' "$forms.log"; } | head -1 | tr '\t' ' ' | cut -c1-300)
-            rm -rf "$forms.tmp"; printf 'fail\t%s\n' "${reason:-status $st}" > "$forms.result"
+            rm -rf "$forms.tmp"; printf 'fail\t%s\n' "${reason:-status $st}" > "$forms.result.$$" && mv "$forms.result.$$" "$forms.result"
           fi
         fi
         flock -u 7; exec 7>&-
-        grep -q '^pass' "$forms.result" && echo "$forms" > "$p/forms.dir"
-        case ",$levels," in *,read,*) printf '%s\tread\t%s\n' "$id" "$(cat "$forms.result")" | sed -e "s|$p|RUN|g" -e "s|$root|.|g" ;; esac
+        [ -f "$forms.result" ] || cp "$p/read.result" "$forms.result.$$"
+        if [ -f "$forms.result" ]; then res=$forms.result; else res=$forms.result.$$; fi
+        grep -q '^pass' "$res" && echo "$forms" > "$p/forms.dir"
+        # --save (GT5): the forms' digest, their first line (the scratch they were read in) left out
+        if [ -n "${save:-}" ]; then
+          if grep -q '^pass' "$res"; then
+            (cd "$forms" && find . -type f ! -name 'repr-java-*.edn' | LC_ALL=C sort | xargs -r -d '\n' \
+               awk 'FNR == 1 { print "@@ " FILENAME; if (/^;; Converted from /) next } { print }') | sha256sum | cut -c1-64 > "$p/forms.sha"
+          else
+            echo - > "$p/forms.sha"
+          fi
+        fi
+        case ",$levels," in *,read,*) printf '%s\tread\t%s\n' "$id" "$(cat "$res")" | sed -e "s|$p|RUN|g" -e "s|$root|.|g" ;; esac
+        rm -f "$forms.result.$$"
       fi ;;
   esac
   case ",$levels," in *,nread,*) [ -z "$from_committed" ] && nread_one "$id" "$p" "$key" "$forms" ;; esac
   case ",$levels," in
     *,interp,*)
-      if [ -z "$from_committed" ] && ! grep -q '^pass' "$forms.result"; then
+      if [ -z "$from_committed" ] && ! grep -qs '^pass' "$forms.result"; then
         printf '%s\tinterp\tunread\tthe read failed\n' "$id"
       else
         local t0=$SECONDS
@@ -737,7 +769,7 @@ check_one() {
 # (a forms file differs: its path), fail (the read failed), unread (javac's read failed)
 nread_one() {
   local id=$1 p=$2 key=$3 forms=$4 nf st reason d
-  if ! grep -q '^pass' "$forms.result"; then printf '%s\tnread\tunread\tthe read failed\n' "$id"; return 0; fi
+  if ! grep -qs '^pass' "$forms.result"; then printf '%s\tnread\tunread\tthe read failed\n' "$id"; return 0; fi
   mkdir -p "$work/forms-nojavac"
   nf=$work/forms-nojavac/$key
   exec 6> "$nf.lock"; flock 6
@@ -745,21 +777,27 @@ nread_one() {
     rm -rf "$nf" "$nf.tmp"
     st=0
     (cd "$root" && bin/repr-java read --no-javac ${ro[@]+"${ro[@]}"} "$nf.tmp" "$p/src") > "$nf.log" 2>&1 || st=$?
+    # GTS35 (a): a read killed by a signal is no result: not cached (the .new result renamed below)
+    if [ "$st" -gt 128 ]; then
+      rm -rf "$nf.tmp"; flock -u 6; exec 6>&-
+      printf '%s\tnread\tfail\tthe read was killed (status %s), not cached\n' "$id" "$st"; return 0
+    fi
     if [ "$st" != 0 ] || ! grep -q ' converted, 0 failed, 0 javac errors' "$nf.log"; then
       reason=$( { grep -m1 '^FAILED ' "$nf.log" | sed 's|^FAILED [^ ]* ||'; grep -m1 -E 'error|Exception|failed' "$nf.log"; } | head -1 | tr '\t' ' ' | cut -c1-300)
-      printf 'fail\t%s\n' "${reason:-status $st}" > "$nf.result"
+      printf 'fail\t%s\n' "${reason:-status $st}" > "$nf.result.new"
     # (each file's first line names the source it was read from: the test whose read filled the cache)
     elif ! diff -r -x 'repr-java-*.edn' -I '^;; Converted from ' "$forms" "$nf.tmp" > "$nf.diff" 2>&1; then
       d=$( { grep -m1 '^diff ' "$nf.diff" | awk '{print $NF}'; grep -m1 '^Only in ' "$nf.diff"; } | head -1 | sed "s|$nf.tmp/||; s|$forms/||" | cut -c1-200)
-      printf 'differ\tthe forms differ from the read level'"'"'s: %s\n' "$d" > "$nf.result"
+      printf 'differ\tthe forms differ from the read level'"'"'s: %s\n' "$d" > "$nf.result.new"
     elif grep -q '^no javac: .* [1-9][0-9]* fallbacks to javac' "$nf.log"; then
       # the reasons: the "no javac:" line's map, {"reason" n, ...}, as "reason n; reason n"
       reason=$(grep -m1 '^no javac: ' "$nf.log" | sed -e 's/^[^{]*{//' -e 's/}$//' -e 's/" \([0-9][0-9]*\)\(, \)\{0,1\}/ \1; /g' -e 's/"//g' -e 's/; $//' | tr '\t' ' ' | cut -c1-300)
-      printf 'fallback\t%s\n' "$reason" > "$nf.result"
+      printf 'fallback\t%s\n' "$reason" > "$nf.result.new"
     else
-      printf 'pass\t\n' > "$nf.result"
+      printf 'pass\t\n' > "$nf.result.new"
     fi
     rm -rf "$nf.tmp"
+    mv "$nf.result.new" "$nf.result"
   fi
   flock -u 6; exec 6>&-
   printf '%s\tnread\t%s\n' "$id" "$(cat "$nf.result")" | sed -e "s|$p|RUN|g" -e "s|$root|.|g"
@@ -767,6 +805,7 @@ nread_one() {
 
 check() {
   local only="" corpus="" record="" essential=""
+  save=""
   jobs=8 t0=$SECONDS shard_size=${JAVA_CHECK_SHARD_SIZE:-500} shard_only=""
   levels=read,interp timeout=20 from_committed="" load=${JAVA_CHECK_LOAD:-files}
   while [ $# -gt 0 ]; do
@@ -781,12 +820,13 @@ check() {
       --shard) shard_only=$2; shift 2 ;;
       --record) record=1; shift ;;
       --essential) essential=1; shift ;;
+      --save) save=$2; shift 2 ;;
       *) echo "java-check: unknown option $1 (bin/java-check --help)" >&2; return 2 ;;
     esac
   done
   # the executable interprets and hosts j2g: the levels read, nread, classes, print and diagnostics need none
   case ",$levels," in *,interp,*|*,compiled,*) rexe=$(run_exe) || return 1 ;; *) rexe=none ;; esac
-  mkdir -p "$work/forms"; : > "$work/empty"
+  mkdir -p "$formsc"; : > "$work/empty"
   rm -rf "$work/run"
   local pargs=()
   [ -n "$only" ] && pargs+=(--only "$only")
@@ -805,7 +845,7 @@ check() {
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
   export -f limited limited_cpu check_one nread_one read_opts first_line root_cause classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
-  export root work jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
+  export root work formsc save jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
   case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
   case ",$levels," in
@@ -817,6 +857,20 @@ check() {
   esac
   case ",$levels," in *,print,*) print_level > "$work/results-print.tsv" || return 1; LC_ALL=C sort -o "$work/results.tsv" "$work/results.tsv" "$work/results-print.tsv" ;; esac
   echo "java-check: $(wc -l < "$work/run.list") tests in $((SECONDS - t0)) s"
+  # --save (GT5): the runs alone, their results and the forms' digests kept, judged by --judge
+  if [ -n "$save" ]; then
+    mkdir -p "$save"
+    cp "$work/results.tsv" "$save/results.tsv"
+    case ",$levels," in
+      *,read,*)
+        while read -r id; do
+          grep -q '^kind	diagnostics' "$work/run/$id/plan.tsv" && continue
+          printf '%s\t%s\n' "$id" "$( [ -f "$work/run/$id/forms.sha" ] && cat "$work/run/$id/forms.sha" || echo -)"
+        done < "$work/run.list" | LC_ALL=C sort > "$save/forms.sha256" ;;
+    esac
+    echo "java-check: the results of $levels saved in $save ($(wc -l < "$save/results.tsv") lines; judged by bin/java-check --judge)"
+    return 0
+  fi
   local rargs=()
   [ -n "$record" ] && rargs+=(--record)
   [ -n "$essential" ] && rargs+=(--essential "$root/test/java/essential.txt")
@@ -853,16 +907,21 @@ print_read() {
     rm -rf "$f" "$f.tmp"
     st=0
     (cd "$root" && bin/repr-java read "$@" ${ro[@]+"${ro[@]}"} "$f.tmp" "$src") > "$f.log" 2>&1 || st=$?
+    # GTS35 (a): the result renamed once complete; a read killed by a signal not cached
     if [ "$st" = 0 ] && grep -q ' converted, 0 failed, 0 javac errors' "$f.log"; then
-      mv "$f.tmp" "$f"; printf 'pass\t\n' > "$f.result"
+      mv "$f.tmp" "$f"; printf 'pass\t\n' > "$f.result.$$" && mv "$f.result.$$" "$f.result"
+    elif [ "$st" -gt 128 ]; then
+      rm -rf "$f.tmp"
     else
       reason=$( { grep -m1 '^FAILED ' "$f.log" | sed 's|^FAILED [^ ]* ||'; grep -m1 -E 'error|Exception|failed' "$f.log"; } | head -1 | tr '\t' ' ' | cut -c1-300)
-      rm -rf "$f.tmp"; printf 'fail\t%s\n' "${reason:-status $st}" > "$f.result"
+      rm -rf "$f.tmp"; printf 'fail\t%s\n' "${reason:-status $st}" > "$f.result.$$" && mv "$f.result.$$" "$f.result"
     fi
   fi
   flock -u 8; exec 8>&-
   rm -f "$link.dir" "$link.err"
-  if grep -q '^pass' "$f.result"; then echo "$f" > "$link.dir"; else cut -f2- "$f.result" > "$link.err"; fi
+  if grep -qs '^pass' "$f.result"; then echo "$f" > "$link.dir"
+  elif [ -f "$f.result" ]; then cut -f2- "$f.result" > "$link.err"
+  else echo "the read was killed (status $st), not cached" > "$link.err"; fi
 }
 
 # print_full_one ID: the test's sources read in mode :full (read --full), cached in WORK/forms-full
@@ -897,7 +956,7 @@ print_check_one() {
     echo differ > "$pp/classes.res"
   fi
   print_ro "$p"
-  print_read "$pp/f2" "$pp/lines" "$work/forms"
+  print_read "$pp/f2" "$pp/lines" "$formsc"
 }
 
 # print_level: the print level of the tests WORK/run.list holds (the read level's forms in
@@ -938,13 +997,13 @@ forms_cmd() {
   while read -r id; do
     key=
     [ ! -f "$work/run/$id/forms.key" ] || key=$(cat "$work/run/$id/forms.key")
-    if [ -z "$key" ] || [ ! -d "$work/forms/$key" ]; then
+    if [ -z "$key" ] || [ ! -d "$formsc/$key" ]; then
       # the read did not reach the test: say why (javac's tool missing or stale, the read's own failure)
-      echo "java-check --forms: $id was not read (the read level exited $rst; ${key:+$work/forms/$key.log, }$work/forms-read.txt):" >&2
+      echo "java-check --forms: $id was not read (the read level exited $rst; ${key:+$formsc/$key.log, }$work/forms-read.txt):" >&2
       grep -E 'java-check|repr_java_host|rebuild|error|no javac tool' "$work/forms-read.txt" | head -5 >&2
       return 1
     fi
-    cp -r "$work/forms/$key" "$work/forms-new/$id"
+    cp -r "$formsc/$key" "$work/forms-new/$id"
     n=$((n + 1))
   done < "$work/essential.list"
   # the first line's source: the test's file in jdk26u's test/ (or the checkout's test/java/jls), not
@@ -954,7 +1013,8 @@ forms_cmd() {
   while read -r f1; do
     # (the reading test's scratch path: a test of the same sources may have read them)
     t=${f1#$work/forms-new/}; t=${t%%/*}
-    dst=$(sed -n "1s|^;; Converted from $work/run/t[0-9]*/src/\(.*\) by arbace\.repr\.java\..*|\1|p" "$f1")
+    # (a shared cache's forms may have been read in another checkout's scratch: any .../run/tN/src/)
+    dst=$(sed -n "1s|^;; Converted from .*/run/t[0-9]*/src/\(.*\) by arbace\.repr\.java\..*|\1|p" "$f1")
     [ -n "$dst" ] || continue
     origin=$(awk -F'\t' -v d="$dst" '$1=="root"{r=$2} $1=="dir"{dir=$2} $1=="file" && $3==d {f=$2} END{print (r=="checkout" ? "" : "jdk26u test/") dir "/" f}' "$work/run/$t/plan.tsv")
     sed -i "1s|^;; Converted from .* by arbace\.repr\.java\.|;; Converted from $origin (the test $t, renamed: $dst) by arbace.repr.java.|" "$f1"
@@ -1073,8 +1133,29 @@ essential_compiled() {
 
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
+# judge [--essential] [--record] [--partial] RESULTS...: the judgment of saved runs (GT5)
+judge() {
+  local rargs=() f levels
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --essential) rargs+=(--essential "$root/test/java/essential.txt"); shift ;;
+      --record) rargs+=(--record); shift ;;
+      --partial) rargs+=(--partial); shift ;;
+      *) break ;;
+    esac
+  done
+  [ $# -gt 0 ] || { echo "java-check --judge: no results" >&2; return 2; }
+  rm -rf "$work/judge"; mkdir -p "$work/judge"
+  for f in "$@"; do [ -f "$f" ] || { echo "java-check --judge: no results $f" >&2; return 1; }; done
+  LC_ALL=C sort "$@" > "$work/judge/results.tsv"
+  levels=$(cut -f2 "$work/judge/results.tsv" | LC_ALL=C sort -u | paste -sd, -)
+  echo "java-check --judge: $(wc -l < "$work/judge/results.tsv") results at the levels $levels ($*)"
+  jc report "$ref" "$work/judge" "$root/test/java/divergences.edn" "$root/test/java" "$levels" ${rargs[@]+"${rargs[@]}"}
+}
+
 case ${1:-} in
   -h|--help|help) usage ;;
+  --judge) shift; judge "$@" ;;
   --record-ref) shift; record_ref "$@" ;;
   --forms) shift; forms_cmd "$@" ;;
   --essential-compiled) shift; essential_compiled "$@" ;;

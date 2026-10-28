@@ -3,11 +3,17 @@
   a step's command touched under strace (OP<TAB>PATH lines, test/gate/audit.awk's) against the inputs
   the step declares in test/gate/steps.edn.
 
-  -main ROOT PLANDIR STEP PATHS
+  -main ROOT PLANDIR STEP PATHS [LOADED]
       PLANDIR holds files.sha256 (the checkout's files, bin/gate's) and hosts.edn; prints the report
       and exits 1 when the step read a file of the checkout it does not declare (an open or an execve
       of a file the step's key does not cover); a directory listed with no declared file below it is
-      advisory
+      advisory. LOADED (GT5, GTS4 (c)): the namespaces the step's Arbace processes loaded, one
+      scriptbase a line (ARBACE_LOADED_LOG, RT.load): the audit fails on one of its :never-loads
+
+  Since GT5 a step's :uses cover the inputs of the steps they name (their outputs, in its key, are
+  a function of them), and a program host (:prog, :javac-prog) covers only the rest of what the
+  executables are built from (the build's scripts, bin/lib, overlay/go, x509roots, the pins): the
+  sources are in the program's units.
 
   A file is declared when the step's :inputs select it (groups expanded, the last rule that matches
   wins), it is one of the step's :pins, or it is the gate's own logic (every key holds that). Not
@@ -17,7 +23,7 @@
   summarized by directory: the pinned roots (TamaGo's go, the JDK build tree) belong to :pins."
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
-            [gate.plan])
+            [gate.plan :as plan])
   (:import (java.io File PushbackReader)))
 
 (defn- read-file [^String f]
@@ -43,6 +49,13 @@
                    "bin/lib/" "!bin/lib/repr-java/" "!bin/lib/repr-go/" "!bin/lib/repr-clojure/" "!bin/lib/repr-haskell/"
                    "!bin/lib/repr-rust/" "!bin/lib/frozen.bash"]
                   seed-pins build-scripts)
+   ;; GT5: the program hosts' rest (bin/arbace-go's gate_rest_key, bin/lib/javac-key.bash's
+   ;; arbace_javac_rest_key)
+   :prog (concat ["overlay/" "!overlay/jdk/" "x509roots/" "bin/lib/" "!bin/lib/repr-java/" "!bin/lib/repr-haskell/"
+                  "!bin/lib/repr-rust/"] seed-pins build-scripts)
+   :javac-prog (concat ["overlay/" "!overlay/jdk/" "x509roots/" "bin/lib/" "!bin/lib/repr-java/" "!bin/lib/repr-go/"
+                        "!bin/lib/repr-clojure/" "!bin/lib/repr-haskell/" "!bin/lib/repr-rust/" "!bin/lib/frozen.bash"]
+                       seed-pins build-scripts)
    :stage0 seed-pins
    :frozen ["test/oracle/frozen-jar.sha256"]
    :go [] :jdk []})
@@ -64,15 +77,30 @@
   ["/usr/" "/lib/" "/lib64/" "/bin/" "/sbin/" "/etc/" "/proc/" "/sys/" "/dev/" "/run/" "/var/" "/opt/"
    "/root/.cache/go-build/" "/root/.config/" "/root/go/pkg/"])
 
-(defn -main [root plandir nm paths-file]
+(defn -main [root plandir nm paths-file & [loaded-file]]
   (let [{:keys [groups steps]} (read-file (or (System/getenv "GATE_STEPS") (str root "/test/gate/steps.edn")))
-        step (first (filter #(= nm (str (:name %))) steps))
+        steps (plan/expand-parts steps)
+        by-name (into {} (map (juxt (comp str :name) identity) steps))
+        step (by-name nm)
         _ (when-not step (println (str "gate audit: no step " nm)) (System/exit 2))
         files (files-table (str plandir "/files.sha256"))
         cache (atom {})
-        rules (expand groups (:inputs step))
-        selected (into (matching cache (keys files) rules)
-                       (matching cache (keys files) (expand {} (vec (mapcat host-files (:hosts step))))))
+        never (:never-loads step)
+        rules (into (vec (expand groups (:inputs step))) (plan/never-rules never))
+        ;; the producers of its :uses: their inputs and hosts (GT5)
+        prods (keep #(by-name (first (str/split (str %) #"/" 2))) (:uses step))
+        own (into (matching cache (keys files) rules)
+                  (matching cache (keys files) (expand {} (vec (mapcat host-files (:hosts step))))))
+        selected (reduce into own
+                         (for [p prods]
+                           (into (matching cache (keys files) (expand groups (:inputs p)))
+                                 (matching cache (keys files) (expand {} (vec (mapcat host-files (:hosts p))))))))
+        loaded (when (and loaded-file (.isFile (File. (str loaded-file))))
+                 (into (sorted-set) (remove str/blank? (str/split-lines (slurp (str loaded-file))))))
+        ;; a namespace of :never-loads loaded (its scriptbase that prefix's path, or below it)
+        unloadable (sort (for [l loaded
+                               :when (some #(let [p (plan/ns-path (str %))] (or (= l p) (str/starts-with? l (str p "/")))) never)]
+                           l))
         implicit (set (concat ["bin/lib/gate-run.bash" "test/gate/plan.ae"] (:pins step)))
         declared? (fn [f] (or (contains? selected f) (contains? implicit f)))
         dirs (into #{} (mapcat (fn [f] (take-while seq (iterate parent (parent f)))) (keys files)))
@@ -142,6 +170,22 @@
         (when (seq idle)
           (println (str "declared, never read (candidates to narrow): " (count idle)))
           (doseq [l idle] (println l))))
-      (let [bad (count @undecl-read)]
-        (println (if (zero? bad) (str "audit " nm ": ok") (str "audit " nm ": " bad " undeclared")))
+      ;; GT5: files read that only its :uses' producers declare: sound when the step reads them to make
+      ;; the producers' output again (a cache keyed by them, as Java's levels read through the read's
+      ;; cache), not when it reads them for their own sake; advisory, to be looked at
+      (let [via (sort (remove #(or (contains? own %) (contains? implicit %)) (filter selected @read-files)))]
+        (when (seq via)
+          (println (str "read through its :uses' producers (covered by their keys; advisory): " (count via) " files"))
+          (doseq [l (take 12 (grouped via))] (println l))))
+      ;; GT5: the namespaces loaded, against :never-loads
+      (when loaded
+        (println (str "namespaces loaded: " (count loaded)
+                      (when (seq never) (str "; never-loads " (str/join " " (map str never)) ": "
+                                             (if (seq unloadable) (str (count unloadable) " LOADED: " (str/join ", " (take 12 unloadable)))
+                                                 "none loaded"))))))
+      (when (and (seq never) (not loaded))
+        (println "namespaces loaded: no record (ARBACE_LOADED_LOG: an executable before GT5 does not write it)"))
+      (let [bad (+ (count @undecl-read) (count unloadable))]
+        (println (if (zero? bad) (str "audit " nm ": ok")
+                     (str "audit " nm ": " (count @undecl-read) " undeclared" (when (seq unloadable) (str ", " (count unloadable) " never-loads loaded")))))
         (System/exit (if (zero? bad) 0 1))))))

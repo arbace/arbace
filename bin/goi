@@ -413,6 +413,16 @@ action_words() {
 # output then error) is the test's golden .out (ok, differs, or none). Cached in
 # .tmp/goi-check/gcref by the original files', the flags', the arguments' and the toolchain's
 # hashes. Sets ref; returns 1 (and prints the program's error line) when gc's build fails
+# ref_commit TMP REF MARKER (GTS35 (a), doc/GATE-SURVEY.md, "As built: GT5"): a reference made in
+# its own temporary TMP renamed to REF once complete (MARKER, a file of it, written last: what a reader
+# asks for); a REF without its marker (an older run killed while writing) is replaced; one another job
+# completed first stays, TMP dropped
+ref_commit() {
+  [ -d "$2" ] && [ ! -f "$2/$3" ] && rm -rf "${2:?}"
+  mv -T "$1" "$2" 2>"$1.mv.err" || rm -rf "${1:?}"
+  rm -f "$1.mv.err"
+}
+
 gc_ref() {
   local p=$1 f=$2 tmo=$3 g=$goroot/test/$1 files=() x key gst
   for x in $(sed -n 's/^ *:files \[\(.*\)\]$/\1/p' "$f" | tr -d '"'); do files+=("$x"); done
@@ -421,22 +431,22 @@ gc_ref() {
            echo "flags:"; printf '%s\n' ${bflags[@]+"${bflags[@]}"}; echo "args:"; printf '%s\n' ${args[@]+"${args[@]}"}; } | sha256sum | cut -c1-24)
   ref=$gcwork/gcref/$key
   [ -f "$ref/exit" ] && return 0
-  rm -rf "$ref.tmp"; mkdir -p "$ref.tmp"
-  if ! (cd "$(dirname "$g")" && env $(gc_env) "$goroot/bin/go" build ${bflags[@]+"${bflags[@]}"} -o "$ref.tmp/exe" "${files[@]}") > "$ref.tmp/build.log" 2>&1; then
-    printf '%s\terror\tgc reference: the original'"'"'s build failed: %s\n' "$p" "$(head -1 "$ref.tmp/build.log" | cut -c1-200)"; return 1
+  rt=$ref.tmp.$$; rm -rf "$rt"; mkdir -p "$rt"
+  if ! (cd "$(dirname "$g")" && env $(gc_env) "$goroot/bin/go" build ${bflags[@]+"${bflags[@]}"} -o "$rt/exe" "${files[@]}") > "$rt/build.log" 2>&1; then
+    printf '%s\terror\tgc reference: the original'"'"'s build failed: %s\n' "$p" "$(head -1 "$rt/build.log" | cut -c1-200)"; rm -rf "$rt"; return 1
   fi
-  gst=0; (cd "$goroot/test" && limited $((tmo * 3)) "$ref.tmp/exe" ${args[@]+"${args[@]}"} > "$ref.tmp/out" 2> "$ref.tmp/err.raw" < "$empty") || gst=$?
+  gst=0; (cd "$goroot/test" && limited $((tmo * 3)) "$rt/exe" ${args[@]+"${args[@]}"} > "$rt/out" 2> "$rt/err.raw" < "$empty") || gst=$?
   # a reference that timed out is no reference (GT6: it was cached as gc's status 124 and judged every later run)
-  case $gst in 124|137|152) rm -rf "$ref.tmp"; printf '%s\terror\tgc reference: the original timed out\n' "$p"; return 1 ;; esac
-  stderr_head "$ref.tmp/err.raw" > "$ref.tmp/err"
-  echo $gst > "$ref.tmp/exit"
+  case $gst in 124|137|152) rm -rf "$rt"; printf '%s\terror\tgc reference: the original timed out\n' "$p"; return 1 ;; esac
+  stderr_head "$rt/err.raw" > "$rt/err"
+  echo $gst > "$rt/exit"
   if [ -f "$goroot/test/${p%.go}.out" ]; then
-    if cat "$ref.tmp/out" "$ref.tmp/err.raw" | cmp -s - "$goroot/test/${p%.go}.out"; then echo ok; else echo differs; fi > "$ref.tmp/golden"
+    if cat "$rt/out" "$rt/err.raw" | cmp -s - "$goroot/test/${p%.go}.out"; then echo ok; else echo differs; fi > "$rt/golden"
   else
-    echo none > "$ref.tmp/golden"
+    echo none > "$rt/golden"
   fi
-  rm -f "$ref.tmp/exe"
-  rm -rf "$ref"; mv "$ref.tmp" "$ref"
+  rm -f "$rt/exe"
+  ref_commit "$rt" "$ref" exit
 }
 
 # aot_build ROOT OUT LOG [FLAG...]: the program of the forms root ROOT built by arbace.build.go
@@ -754,15 +764,15 @@ check_err() {
   key=$( { cat "$goroot/VERSION"; cat "$g"; printf '%s\n' "${goflags[@]}"; } | sha256sum | cut -c1-24)
   ref=$gcwork/eref/$key
   if [ ! -f "$ref/judge" ]; then
-    rm -rf "$ref.tmp"; mkdir -p "$ref.tmp"
-    st=0; (cd "$ref.tmp" && export $(gc_env) && limited $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
+    rt=$ref.tmp.$$; rm -rf "$rt"; mkdir -p "$rt"
+    st=0; (cd "$rt" && export $(gc_env) && limited $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
             -importcfg="$gcwork/importcfg" -o a.o ${goflags[@]+"${goflags[@]}"} -d=ssa/check/on "$g" > out 2>&1 < "$empty") || st=$?
-    rm -f "$ref.tmp/a.o"
-    case $st in 124|137|152) rm -rf "$ref.tmp"; printf '%s\terror\tgc reference: the compile timed out\n' "$p"; return ;; esac
-    echo $st > "$ref.tmp/exit"
-    "$gocmp" errorcheck $auto "$g" "$ref.tmp/out" > "$ref.tmp/judge" 2>&1 || true
-    if [ -n "$want" ] && [ "$st" = 0 ]; then echo "fail: compilation succeeded unexpectedly" > "$ref.tmp/judge"; fi
-    rm -rf "$ref"; mv "$ref.tmp" "$ref"
+    rm -f "$rt/a.o"
+    case $st in 124|137|152) rm -rf "$rt"; printf '%s\terror\tgc reference: the compile timed out\n' "$p"; return ;; esac
+    echo $st > "$rt/exit"
+    "$gocmp" errorcheck $auto "$g" "$rt/out" > "$rt/judge" 2>&1 || true
+    if [ -n "$want" ] && [ "$st" = 0 ]; then echo "fail: compilation succeeded unexpectedly" > "$rt/judge"; fi
+    ref_commit "$rt" "$ref" judge
   fi
   if [ "$(head -1 "$ref/judge")" != pass ]; then
     printf '%s\tskip\tgc'"'"'s own errorcheck does not pass here: %s\n' "$p" "$(sed -n 2,3p "$ref/judge" | tr '\t\n' '  ' | cut -c1-200)"; return
@@ -855,16 +865,16 @@ check_err_aot() {
   key=$( { echo aot; cat "$goroot/VERSION"; cat "$g"; printf '%s\n' "${goflags[@]}" "goexperiment=$goexp"; } | sha256sum | cut -c1-24)
   ref=$gcwork/earef/$key
   if [ ! -f "$ref/judge" ]; then
-    rm -rf "$ref.tmp"; mkdir -p "$ref.tmp"
-    st=0; (cd "$ref.tmp" && export $(gc_env) GOEXPERIMENT="$goexp" && limited $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
+    rt=$ref.tmp.$$; rm -rf "$rt"; mkdir -p "$rt"
+    st=0; (cd "$rt" && export $(gc_env) GOEXPERIMENT="$goexp" && limited $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
             -importcfg="$gcwork/importcfg" -o a.o "${goflags[@]}" "$g" > out 2>&1 < "$empty") || st=$?
-    rm -f "$ref.tmp/a.o"
-    case $st in 124|137|152) rm -rf "$ref.tmp"; printf '%s\terror\tgc reference: the compile timed out\n' "$p"; return ;; esac
-    echo $st > "$ref.tmp/exit"
-    "$gocmp" errorcheck $auto "$g" "$ref.tmp/out" > "$ref.tmp/judge" 2>&1 || true
-    if [ -n "$want" ] && [ "$st" = 0 ]; then echo "fail: compilation succeeded unexpectedly" > "$ref.tmp/judge"; fi
-    if [ -z "$want" ] && [ "$st" != 0 ]; then echo "fail: compilation failed unexpectedly" > "$ref.tmp/judge"; fi
-    rm -rf "$ref"; mv "$ref.tmp" "$ref"
+    rm -f "$rt/a.o"
+    case $st in 124|137|152) rm -rf "$rt"; printf '%s\terror\tgc reference: the compile timed out\n' "$p"; return ;; esac
+    echo $st > "$rt/exit"
+    "$gocmp" errorcheck $auto "$g" "$rt/out" > "$rt/judge" 2>&1 || true
+    if [ -n "$want" ] && [ "$st" = 0 ]; then echo "fail: compilation succeeded unexpectedly" > "$rt/judge"; fi
+    if [ -z "$want" ] && [ "$st" != 0 ]; then echo "fail: compilation failed unexpectedly" > "$rt/judge"; fi
+    ref_commit "$rt" "$ref" judge
   fi
   if [ "$(head -1 "$ref/judge")" != pass ]; then
     printf '%s\tskip\tgc'"'"'s own errorcheck does not pass here: %s\n' "$p" "$(sed -n 2,3p "$ref/judge" | tr '\t\n' '  ' | cut -c1-200)"; return

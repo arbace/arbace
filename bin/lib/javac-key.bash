@@ -29,6 +29,20 @@ arbace_javac_key() {
     cat "${ARBACE_GOROOT:-/root/tamago-go}/VERSION") | sha256sum | cut -c1-64
 }
 
+# arbace_javac_rest_key ROOT: arbace_javac_key's files less those that reach the tool only as the
+# program j2g makes (arbace/, go/, jdk/, overlay/jdk/; doc/GATE-SURVEY.md, GT5): with the tool's units
+# (DIR/units.tsv, bin/javac-vendor tool) bin/gate's program host :javac-prog
+arbace_javac_rest_key() {
+  (cd "$1" && {
+    find overlay x509roots bin/lib -type f ! -path 'overlay/jdk/*' \
+         ! -path 'bin/lib/repr-java/*' ! -path 'bin/lib/repr-go/*' ! -path 'bin/lib/repr-clojure/*' \
+         ! -path 'bin/lib/repr-haskell/*' ! -path 'bin/lib/repr-rust/*' ! -path bin/lib/frozen.bash \
+         ! -path bin/lib/gate-run.bash | LC_ALL=C sort
+    printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi
+  } | xargs -d '\n' sha256sum
+    cat "${ARBACE_GOROOT:-/root/tamago-go}/VERSION") | sha256sum | cut -c1-64
+}
+
 arbace_javac_fresh() {
   local who=$1 e=$2 k want
   k=$([ ! -f "$e.key" ] || cat "$e.key")

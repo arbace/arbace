@@ -38,6 +38,28 @@
 ;;   :audit-cmd a cheaper command for bin/gate --audit (GT4) that exercises the same code paths as :cmd on
 ;;              a few tests or corpora (the files a step reads in the checkout do not depend on how
 ;;              many tests it runs); not in the key
+;; Since GT5 (doc/GATE-SURVEY.md, "As built: GT5", the inner keys):
+;;   :heavy     true: the step under the lock as a whole (its tools take none: ARBACE_HEAVY_HELD=1);
+;;              :inner: not, its tools take the lock around their heavy process alone (bin/lib/heavy.bash:
+;;              bin/j2g, repr/go's native reader and converter, repr/java's corpus reads), its light work
+;;              beside the other steps (GTS31 (b))
+;;   :parts     [{:part P :inputs [...] :pins [...] :clean-only true ...} ...]: one step per part, NAME.P,
+;;              each keyed alone (the step's :inputs and the part's), {part} in :cmd its name; a :clean-only
+;;              part (a parked sub-project's corpus, GTS19 (a)) runs only with GATE_ALL_PARTS=1 (GT7's clean
+;;              run); :needs, :uses and :start-after naming the step name its parts
+;;   :outputs   true: the step writes into $GATE_OUT (.tmp/gate/out/NAME), kept with its pass and put back
+;;              when it is skipped
+;;   :uses      ["STEP" "STEP/FILE" ...]: earlier steps' outputs it reads ($GATE_OUTS/STEP), their digests in
+;;              its key (an early cutoff: a producer that ran and made the same output keeps it); implies
+;;              :needs; it is decided at the plan when its producers are skipped, else once they ran
+;;   :hosts     :prog, :javac-prog (GTS4 (b), (c)): the gate's executables, javac's tool, known by the
+;;              program j2g made of them (its units: bin/lib/prog-units.bash) and the rest of what they
+;;              are built from (bin/arbace-go --gate-rest-key, arbace_javac_rest_key), not by their sources;
+;;              a step on them declares the sources it reads itself (the audit holds it to that)
+;;   :never-loads  namespaces (and those below) the step never loads: their units out of its program
+;;              host's identity and their sources out of its files, so that a change to them (j2g's)
+;;              keeps its key; bin/gate --audit records the namespaces a step loads (ARBACE_LOADED_LOG)
+;;              and fails on one of these
 ;; The inputs are declared coarsely (whole trees); bin/gate --audit (GT4) runs a step under strace and fails
 ;; on a file of the checkout it reads that its declaration, its hosts' keys and the gate's logic do not
 ;; cover. A host covers the sources its key hashes (:gate gate_key's, :javac arbace_javac_key's, bin/lib
@@ -69,8 +91,21 @@
             "tools/godeps/" "tools/goplan/" "test/repr/go/" "go/arbace/repr/"]
   :goi ["bin/goi" "test/goi/" "go/" "tamago/goroot/"]
   :java ["bin/java-check" "test/java/"]
+  ;; what the runs of Java's check read (GT5): not its classes and records, which only its judgment reads
+  ;; (test/java/divergences*.edn, check-*.edn, levels-known.edn), nor the essential tests' forms and list
+  :java-run ["bin/java-check" "test/java/" "!test/java/divergences.edn" "!test/java/divergences-diffcheck.edn"
+             "!test/java/check-*.edn" "!test/java/levels-known.edn" "!test/java/forms/" "!test/java/essential.txt"]
+  ;; Java's judgment (bin/java-check --judge, on stage 0)
+  :java-judge ["bin/java-check" "test/java/check.ae" "test/java/ref-jdk26.edn" "test/java/corpora.edn"
+               "test/java/divergences.edn" "test/java/check-*.edn" "test/java/levels-known.edn"]
   :repr-java ["arbace/repr/java.ae" "arbace/repr/java/" "bin/repr-java" "bin/lib/repr-java/" "test/repr/java/"
               "jdk/" "!jdk/provenance.edn" "!jdk/javac/provenance.edn" "overlay/jdk/" "bin/lib/frozen.bash"]
+  ;; repr/java's tree checks per corpus (GT5): the common inputs, less each corpus's own data, which
+  ;; its part declares (:corpus-*)
+  :repr-java-checks [:repr-java "bin/lib/heavy.bash" "!test/repr/java/java/" "!test/repr/java/module/"]
+  :corpus-samples ["test/repr/java/java/" "test/repr/java/module/"]
+  :corpus-jdk ["bin/jrt-convert" "test/jrt/" "doc/go/java-surface.edn" "overlay/jdk/java.base/" "jdk/sources.txt"]
+  :corpus-javac ["jdk/javac/sources.txt" "overlay/jdk/javac/"]
   :suite ["bin/clojure-tests" "test/run_clojure_tests.clj" "test/suite-go/" "test/clojure/" "test/suite_aot_hook.ae"
           "test/baseline-results.edn" "test/arbace-go-results.edn" "test/arbace-go-aot-results.edn"
           "test/java-fixtures/" "!test/java-fixtures/provenance.edn" "bin/lib/repr-clojure/" "bin/repr-clojure" "test/repr/clojure/"]}
@@ -82,47 +117,62 @@
   {:name stage0 :phase :pre :kind :always :cmd "bin/seed --build --no-aot"
    :summary ["bin/seed: .*arbace|stage 0 in|stage 0 kept" 2]}
 
-  ;; ---- the essential phase's build: when a check that runs needs the executables
-  {:name go-build :heavy true :mem-gib 19 :phase :build :kind :build :cmd "bin/arbace-go --gate-build"
+  ;; ---- the builds: when a check that runs needs them, all before the checks (GT5: then planned again)
+  {:name go-build :heavy :inner :mem-gib 19 :phase :build :kind :build :cmd "bin/arbace-go --gate-build"
    :hosts [:gate]
    :summary ["cached executables|building the executables|built in|FAIL" 3]}
+  ;; javac's tool, built once per arbace_javac_key (GTS11 (a)) and kept in ARBACE_GATE_EXES/javac-KEY
+  {:name javac-tool :heavy true :mem-gib 26 :phase :full :chain go :kind :build :needs [go-build]
+   :cmd "bin/javac-vendor tool \"$GATE_JAVAC_DIR\" --host \"$GATE_EXE\" --aot-base \"$GATE_CACHE/amd64\""
+   :hosts [:javac] :summary ["^javac-vendor tool" 2]}
 
-  ;; ---- the essential checks, concurrently on the cached executables
+  ;; ---- the essential checks, concurrently on the cached executables. On :prog (GT5, GTS4 (b), (c)) the
+  ;; ones that never load j2g: a j2g change that leaves the program's other units alone keeps them
   {:name go-smoke :mem-gib 1 :phase :essential :needs [go-build] :cmd "bin/arbace-go --gate"
-   :hosts [:gate] :inputs ["bin/arbace-go" "test/arbace-go-rlwrap.py" "tools/tlsserver/" "test/net/"
-                    "test/goi/calls.ae" "test/goi/repl.ae" "test/goi/session.in" "test/goi/session.expected"
-                    "test/goi/repl-pkgs/" "test/goi/run/"]
+   :hosts [:prog] :never-loads [arbace.j2g]
+   :inputs ["bin/arbace-go" "test/arbace-go-rlwrap.py" "tools/tlsserver/" "test/net/"
+            "test/goi/calls.ae" "test/goi/repl.ae" "test/goi/session.in" "test/goi/session.expected"
+            "test/goi/repl-pkgs/" "test/goi/run/"]
    :summary ["ok|FAIL" 1]}
   {:name suite-go :heavy true :mem-gib 13 :phase :essential :needs [go-build]
    :cmd "env CLOJURE_TESTS_GO=\"$GATE_TESTS\" bin/clojure-tests -j \"$GATE_JOBS\""
-   :hosts [:gate :stage0] :inputs [:tools :suite] :env ["GATE_TEST_JOBS"]
+   :hosts [:prog :stage0] :never-loads [arbace.j2g] :inputs [:tools :suite] :env ["GATE_TEST_JOBS"]
    :summary ["TOTAL|regressions" 2]}
   {:name oracle-go :mem-gib 1 :phase :essential :needs [go-build]
    :cmd "bin/oracle check \"$GATE_EXE -\" --timeout 900 --expected test/oracle/known-go-amd64-frozen.edn"
-   :hosts [:gate :stage0] :inputs ["bin/oracle" "test/oracle/"] :summary ["^== " 2]}
-  {:name diffcheck :heavy true :mem-gib 25 :phase :essential :needs [go-build] :cmd "bin/diffcheck"
+   :hosts [:prog :stage0] :never-loads [arbace.j2g] :inputs [:lib-tools "bin/oracle" "test/oracle/"] :summary ["^== " 2]}
+  {:name diffcheck :heavy :inner :mem-gib 25 :phase :essential :needs [go-build] :cmd "bin/diffcheck"
    :hosts [:gate :stage0] :inputs [:tools :build "bin/diffcheck" "test/diffcheck/" "test/oracle/" "test/j2g/"]
    :summary ["^== |^diffcheck: the runs" 5]}
   {:name goi-check :mem-gib 2 :phase :essential :chain goi-essential :needs [go-build]
    :cmd "env GOI_RUN_EXE=\"$GATE_EXE\" bin/goi check --essential --jobs 8"
-   :hosts [:gate :stage0 :go] :pins ["seed/goroot.sha256"] :inputs [:tools :goi :repr-go]
+   :hosts [:prog :stage0 :go] :never-loads [arbace.j2g] :pins ["seed/goroot.sha256"] :inputs [:lib-tools :tools :goi :repr-go "bin/lib/limit.bash"]
    :summary ["^goi check( --aot)?:|regression|no reference|^goi divergences: linux" 3]}
   {:name goi-aot-essential :mem-gib 1 :phase :essential :chain goi-essential :needs [go-build]
    :cmd "env ARBACE_HOST_EXE=\"$GATE_EXE\" bin/goi check --aot --essential --jobs 8"
-   :hosts [:gate :stage0 :go] :pins ["seed/goroot.sha256"] :inputs [:tools :goi :repr-go :build]
+   :hosts [:prog :stage0 :go] :never-loads [arbace.j2g] :pins ["seed/goroot.sha256"]
+   :inputs [:lib-tools :tools :goi :repr-go :build "bin/lib/limit.bash"]
    :summary ["^goi check( --aot)?:|regression|no reference|^goi divergences: linux" 3]}
-  {:name java-check :mem-gib 1 :phase :essential :needs [go-build]
-   :cmd "env JAVA_CHECK_EXE=\"$GATE_EXE\" bin/java-check --essential --jobs 8"
-   :hosts [:gate :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :java]
-   :summary ["^java-check [a-z]*: [0-9]* tests:|^   against|regression:|in no class:|essential:|^verify:" 8]}
-  {:name java-compiled :heavy true :mem-gib 19 :phase :essential :needs [go-build]
+  ;; Java's essential check: the run (its results kept, GT5) and its judgment apart
+  {:name java-check :mem-gib 1 :phase :essential :chain java-essential :needs [go-build] :outputs true
+   :cmd "env JAVA_CHECK_EXE=\"$GATE_EXE\" bin/java-check --essential --jobs 8 --save \"$GATE_OUT\""
+   :hosts [:prog :stage0] :never-loads [arbace.j2g] :pins ["jdk/javac/platform.sha256"]
+   :inputs [:lib-tools :tools :java-run "bin/lib/limit.bash" "test/java/essential.txt" "test/java/forms/" "test/java/check-interp.edn"]
+   :summary ["^java-check:" 2]}
+  {:name java-check-judge :mem-gib 1 :phase :essential :chain java-essential :uses ["java-check"]
+   :cmd "bin/java-check --judge --essential \"$GATE_OUTS/java-check/results.tsv\""
+   :hosts [:stage0] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :java-judge "test/java/essential.txt"]
+   :summary ["^java-check [a-z]*: [0-9]* tests:|^   against|regression:|in no class:|essential:" 8]}
+  {:name java-compiled :heavy :inner :mem-gib 19 :phase :essential :needs [go-build]
    :cmd "env JAVA_CHECK_EXE=\"$GATE_EXE\" bin/java-check --essential-compiled --jobs 8"
-   :hosts [:gate :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :java :build "arbace/" "jdk/javac/" "overlay/jdk/javac/" "jdk/provenance.edn"]
+   :hosts [:gate :stage0] :pins ["jdk/javac/platform.sha256"]
+   :inputs [:tools :java-run :build "test/java/check-compiled.edn" "test/java/essential.txt" "test/java/forms/"
+            "arbace/" "jdk/javac/" "overlay/jdk/javac/" "jdk/provenance.edn"]
    :summary ["^java-check essential-compiled:|not passing|refused" 4]}
-  {:name suite-aot-essential :heavy true :mem-gib 20 :phase :essential :needs [go-build]
+  {:name suite-aot-essential :heavy :inner :mem-gib 20 :phase :essential :needs [go-build]
    :cmd "env CLOJURE_TESTS_AOT_EXES=\"$GATE_CACHE/amd64\" bin/clojure-tests --aot --essential -j 8"
    :hosts [:gate :stage0] :inputs [:tools :suite :build "arbace/" "test/java-fixtures/provenance.edn"] :summary ["TOTAL|regressions" 2]}
-  {:name programs :heavy true :mem-gib 19 :phase :essential :needs [go-build]
+  {:name programs :heavy :inner :mem-gib 19 :phase :essential :needs [go-build]
    :cmd "env ARBACE_PROGRAM_BASE=\"$GATE_CACHE/amd64\" bin/arbace-go --build-program --check mixed bad-go"
    :hosts [:gate :stage0 :go] :inputs [:tools :build "test/programs/mixed/" "test/programs-fail/bad-go/" "tamago/goroot/" "tools/godump/"]
    :summary ["^arbace-go --build-program --check:|FAIL|warning" 4]}
@@ -135,48 +185,45 @@
                                      "!jdk/javac/" "overlay/" "!overlay/jdk/javac/" "go/"]
    :summary ["^j2g-edge:" 1]}
   {:name reap :mem-gib 1 :phase :essential :cmd "bin/reap"
-   :hosts [:stage0] :inputs ["bin/lib/tmpdir.bash" "bin/lib/tools.bash" "bin/lib/host.bash" :tools "bin/reap" "test/reap/" "test/*.edn" "test/clojure/" "test/goi/"
-                             "test/repr/" "test/java/*.edn" "test/diffcheck/" "test/oracle/"]
+   :hosts [:stage0] :never-loads [arbace.j2g]
+   :inputs ["bin/lib/tmpdir.bash" "bin/lib/tools.bash" "bin/lib/host.bash" :tools "bin/reap" "test/reap/" "test/*.edn" "test/clojure/" "test/goi/"
+            "test/repr/" "test/java/*.edn" "test/diffcheck/" "test/oracle/"]
    :summary ["^\\| (Clojure|Java|Go) \\||^reap: [0-9]+ of" 4]}
 
   ;; GTS21 (a): the provenance files' :repr-java hash against the reader's (seconds, no executable)
   {:name provenance :phase :essential :mem-gib 1 :cmd "bin/provenance-check"
    :inputs ["bin/provenance-check" "bin/lib/repr-java/host.bash" "bin/lib/tmpdir.bash" "arbace/repr/java.ae"
             "arbace/repr/java/*.ae" "bin/repr-java" "jdk/provenance.edn" "jdk/javac/provenance.edn"
-            "jdk/edge.edn" "test/java-fixtures/provenance.edn" "test/java/forms/provenance.edn"]
+            "jdk/edge.edn" "test/java-fixtures/provenance.edn" "test/java/forms/provenance.edn" "jdk/javac/platform.sha256"]
    :summary ["^provenance-check" 4]}
 
   ;; ---- --full: one after another (GTS13 (a)); with GATE_FULL_PARALLEL=1 by chain
-  ;; javac's tool, built once per arbace_javac_key (GTS11 (a)) and kept in .tmp/gate-javac
-  {:name javac-tool :heavy true :mem-gib 26 :phase :full :chain go :kind :build :needs [go-build]
-   :cmd "bin/javac-vendor tool \"$GATE_JAVAC_DIR\" --host \"$GATE_EXE\" --aot-base \"$GATE_CACHE/amd64\""
-   :hosts [:javac] :summary ["^javac-vendor tool" 2]}
   ;; j2g translates javac's world: the tool build's own j2g report read (GTS11 (a))
   {:name javac-check :mem-gib 1 :phase :full :chain go :needs [javac-tool]
    :cmd "bin/javac-vendor check --from \"$GATE_JAVAC_DIR\""
    :hosts [:javac] :inputs ["bin/javac-vendor"] :summary ["^javac-vendor|^j2g: " 3]}
   {:name javac-verify :heavy true :mem-gib 8 :phase :full :chain go :needs [javac-tool]
    :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/javac-vendor verify"
-   :hosts [:javac :frozen] :pins ["jdk/javac/platform.sha256"] :inputs [:repr-java "bin/javac-vendor" "jdk/javac/provenance.edn"]
+   :hosts [:javac :frozen] :pins ["jdk/javac/platform.sha256"] :inputs [:repr-java "bin/javac-vendor" "bin/lib/heavy.bash" "jdk/javac/provenance.edn"]
    :summary ["^javac-vendor" 2]}
   {:name javac-classes :mem-gib 4 :phase :full :chain go :needs [javac-tool]
    :cmd "env JAVAC_EXE=\"$GATE_JAVAC\" REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/javac-vendor classes baseline samples jdk java.base"
    :hosts [:javac :jdk :stage0] :pins ["jdk/javac/platform.sha256"]
-   :inputs [:tools :repr-java "bin/javac-vendor" "bin/jrt-convert" "test/jrt/" "doc/go/java-surface.edn"]
+   :inputs [:tools :repr-java "bin/javac-vendor" "bin/jrt-convert" "bin/lib/heavy.bash" "test/jrt/" "doc/go/java-surface.edn"]
    :summary ["^javac-vendor|^   [a-z.-]*: " 11]}
-  ;; repr/java's checks on javac's tool executable (JFS9 (a), JN5)
+  ;; repr/java's checks on javac's tool executable (JFS9 (a), JN5); its tree checks per corpus (GT5)
   {:name repr-java :heavy true :mem-gib 12 :phase :full :chain java :start-after javac-tool :needs [javac-tool]
    :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" REPR_JAVA_TEST_JOBS=\"$GATE_JOBS\" bin/repr-java check --suite"
    :hosts [:javac :frozen :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :repr-java :suite]
    :env ["GATE_TEST_JOBS"] :summary ["TOTAL|regressions" 2]}
-  {:name repr-java-roundtrip :heavy true :mem-gib 29 :phase :full :chain java :needs [javac-tool]
-   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java roundtrip --corpus baseline,samples,jdk --text"
-   :audit-cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java roundtrip --corpus samples --text"
-   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :repr-java]}
+  {:name repr-java-roundtrip :heavy :inner :mem-gib 29 :phase :full :chain java :needs [javac-tool]
+   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java roundtrip --corpus {part} --text"
+   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :repr-java-checks]
+   :parts [{:part baseline} {:part samples :inputs [:corpus-samples]} {:part jdk :inputs [:corpus-jdk]}]}
   {:name jrt-convert :heavy true :mem-gib 28 :phase :full :chain java :needs [javac-tool]
    :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/jrt-convert verify"
    :hosts [:javac :stage0 :frozen] :pins ["jdk/javac/platform.sha256"]
-   :inputs [:tools :repr-java "bin/javac-vendor" "bin/jrt-convert" "bin/jrt" "test/jrt/" "doc/go/java-surface.edn" "jdk/provenance.edn"]
+   :inputs [:tools :repr-java "bin/javac-vendor" "bin/jrt-convert" "bin/jrt" "bin/lib/heavy.bash" "test/jrt/" "doc/go/java-surface.edn" "jdk/provenance.edn"]
    :summary ["^verify:|^jrt-convert:" 2]}
   {:name java-fixtures :mem-gib 1 :phase :full :chain java :needs [javac-tool]
    :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/clojure-tests --java-fixtures verify"
@@ -184,64 +231,125 @@
    :inputs [:tools :repr-java :suite "bin/javac-vendor" "test/java-fixtures/provenance.edn"]
    :summary ["^verify:" 1]}
   {:name repr-java-parse :mem-gib 2 :phase :full :chain java :needs [javac-tool]
-   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java parse-check"
-   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :repr-java "bin/jrt-convert" "doc/go/java-surface.edn" "test/jrt/"]
-   :summary ["^[a-z0-9]*: [0-9]* files|^parse-check:" 7]}
-  {:name repr-java-front :heavy true :mem-gib 29 :phase :full :chain java :needs [javac-tool]
-   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java front-check"
-   :audit-cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java front-check --corpus samples"
-   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :repr-java]
-   :summary ["^[a-z0-9]*: [0-9]* forms files|^front-check:" 5]}
-  {:name repr-java-attr :heavy true :mem-gib 41 :phase :full :chain java :needs [javac-tool]
-   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java attr-check"
-   :audit-cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java attr-check --corpus samples"
-   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :repr-java]
-   :summary ["^[a-z0-9]*: [0-9]* forms files|^attr: |^attr-check:" 8]}
+   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java parse-check --corpus {part}"
+   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :repr-java-checks]
+   :parts [{:part samples :inputs [:corpus-samples]} {:part baseline} {:part jdk :inputs [:corpus-jdk]}
+           {:part javac :inputs [:corpus-javac]} {:part jdk26u} {:part mutants} {:part tests}]
+   :summary ["^[a-z0-9]*: [0-9]* files|^parse-check:" 3]}
+  {:name repr-java-front :heavy :inner :mem-gib 29 :phase :full :chain java :needs [javac-tool]
+   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java front-check --corpus {part}"
+   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :repr-java-checks]
+   :parts [{:part samples :inputs [:corpus-samples]} {:part baseline} {:part jdk :inputs [:corpus-jdk]}
+           {:part javac :inputs [:corpus-javac]}]
+   :summary ["^[a-z0-9]*: [0-9]* forms files|^front-check:" 3]}
+  {:name repr-java-attr :heavy :inner :mem-gib 41 :phase :full :chain java :needs [javac-tool]
+   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java attr-check --corpus {part}"
+   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :repr-java-checks]
+   :parts [{:part samples :inputs [:corpus-samples]} {:part baseline} {:part jdk :inputs [:corpus-jdk]}
+           {:part javac :inputs [:corpus-javac]}]
+   :summary ["^[a-z0-9]*: [0-9]* forms files|^attr: |^attr-check:" 4]}
   ;; the read without javac (JFS121 (b), doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9f"): every
   ;; corpus read by javac's trees and by read --no-javac, the forms equal, the fallbacks against
   ;; test/repr/java/nojavac-check-known.edn; its peak 10.8 GB (the jdk corpus, GOMEMLIMIT=24GiB; JN9f)
-  {:name repr-java-nojavac :phase :full :chain java :needs [javac-tool]
-   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java nojavac-check"
-   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:lib :tools :repr-java] :heavy true :mem-gib 11
-   :summary ["^[a-z0-9]*: [0-9]* forms files|^nojavac: |^nojavac-check:" 8]}
-  ;; Java's conformance check, every corpus; its compiled level on the gate's compiled namespaces
-  {:name java-check-full :heavy true :mem-gib 39 :phase :full :chain java :needs [go-build javac-tool]
-   :cmd "env JAVA_CHECK_EXE=\"$GATE_EXE\" JAVA_CHECK_AOT=\"$GATE_CACHE/amd64/aot\" REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVAC_EXE=\"$GATE_JAVAC\" bin/java-check --levels read,interp,classes,compiled,diagnostics,print && env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/java-check --forms verify"
-   :hosts [:gate :javac :stage0 :go] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :java :repr-java :build]
-   :audit-cmd "env JAVA_CHECK_EXE=\"$GATE_EXE\" JAVA_CHECK_AOT=\"$GATE_CACHE/amd64/aot\" REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVAC_EXE=\"$GATE_JAVAC\" bin/java-check --levels read,interp,classes,compiled,diagnostics,print --only 'test/java/jls/(Lambdas|Nested)|jdk/java/lang/Boolean|langtools/tools/javac/(switchexpr|varargs)' && env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/java-check --forms verify"
-   :summary ["^java-check [a-z]*: [0-9]* tests:|^   against|regression:|in no class:|essential:|^verify:" 8]}
+  {:name repr-java-nojavac :heavy :inner :mem-gib 11 :phase :full :chain java :needs [javac-tool]
+   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java nojavac-check --corpus {part}"
+   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:lib :tools :repr-java-checks]
+   :parts [{:part samples :inputs [:corpus-samples]} {:part baseline} {:part jdk :inputs [:corpus-jdk]}
+           {:part javac :inputs [:corpus-javac]}]
+   :summary ["^[a-z0-9]*: [0-9]* forms files|^nojavac: |^nojavac-check:" 4]}
+  ;; Java's conformance check, every corpus, per level (GT5, GTS9 (a)): each level's runs a step keyed by
+  ;; what it reads, their results kept (--save), the levels after the read keyed by the read's forms
+  ;; (forms.sha256: an early cutoff), the judgment apart (java-judge: a classes file reruns it alone)
+  {:name java-read :heavy true :mem-gib 12 :phase :full :chain java :needs [javac-tool] :outputs true
+   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --levels read --save \"$GATE_OUT\""
+   :audit-cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --levels read --only 'test/java/jls/(Lambdas|Nested)|jdk/java/lang/Boolean' --save \"$GATE_OUT\""
+   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :java-run :repr-java]
+   :summary ["^java-check:" 2]}
+  {:name java-interp :mem-gib 2 :phase :full :chain java :needs [go-build javac-tool] :outputs true :uses ["java-read/forms.sha256"]
+   :cmd "env JAVA_CHECK_EXE=\"$GATE_EXE\" REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --levels interp --save \"$GATE_OUT\""
+   :audit-cmd "env JAVA_CHECK_EXE=\"$GATE_EXE\" REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --levels interp --only 'test/java/jls/(Lambdas|Nested)|jdk/java/lang/Boolean' --save \"$GATE_OUT\""
+   :hosts [:prog :stage0] :never-loads [arbace.j2g] :pins ["jdk/javac/platform.sha256"]
+   :inputs [:lib-tools :tools :java-run "bin/lib/limit.bash" "test/java/check-interp.edn"]
+   :summary ["^java-check:" 2]}
+  {:name java-classes :mem-gib 4 :phase :full :chain java :needs [javac-tool] :outputs true
+   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/java-check --levels classes --save \"$GATE_OUT\""
+   :audit-cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/java-check --levels classes --only 'test/java/jls/(Lambdas|Nested)|jdk/java/lang/Boolean' --save \"$GATE_OUT\""
+   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :java-run :repr-java]
+   :summary ["^java-check:" 2]}
+  {:name java-diagnostics :mem-gib 4 :phase :full :chain java :needs [javac-tool] :outputs true
+   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/java-check --levels diagnostics --save \"$GATE_OUT\""
+   :audit-cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/java-check --levels diagnostics --only 'langtools/tools/javac/(switchexpr|varargs)' --save \"$GATE_OUT\""
+   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :java-run :repr-java]
+   :summary ["^java-check:" 2]}
+  {:name java-compiled-full :heavy :inner :mem-gib 21 :phase :full :chain java :needs [go-build javac-tool] :outputs true
+   :uses ["java-read/forms.sha256"]
+   :cmd "env JAVA_CHECK_EXE=\"$GATE_EXE\" JAVA_CHECK_AOT=\"$GATE_CACHE/amd64/aot\" REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --levels compiled --save \"$GATE_OUT\""
+   :audit-cmd "env JAVA_CHECK_EXE=\"$GATE_EXE\" JAVA_CHECK_AOT=\"$GATE_CACHE/amd64/aot\" REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --levels compiled --only 'test/java/jls/(Lambdas|Nested)|jdk/java/lang/Boolean' --save \"$GATE_OUT\""
+   :hosts [:gate :stage0 :go] :pins ["jdk/javac/platform.sha256"]
+   :inputs [:tools :java-run :build "bin/lib/limit.bash" "test/java/check-compiled.edn"]
+   :summary ["^java-check:" 2]}
+  {:name java-print :heavy true :mem-gib 12 :phase :full :chain java :needs [javac-tool] :outputs true
+   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --levels print --save \"$GATE_OUT\""
+   :audit-cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --levels print --only 'test/java/jls/(Lambdas|Nested)|jdk/java/lang/Boolean' --save \"$GATE_OUT\""
+   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :java-run :repr-java]
+   :summary ["^java-check:" 2]}
+  {:name java-forms-verify :mem-gib 2 :phase :full :chain java :needs [javac-tool]
+   :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --forms verify"
+   :hosts [:javac :stage0] :pins ["jdk/javac/platform.sha256"]
+   :inputs [:tools :java-run :repr-java "test/java/essential.txt" "test/java/forms/"]
+   :summary ["^verify:" 1]}
+  {:name java-judge :mem-gib 2 :phase :full :chain java
+   :uses ["java-read/results.tsv" "java-interp/results.tsv" "java-classes/results.tsv" "java-diagnostics/results.tsv"
+          "java-compiled-full/results.tsv" "java-print/results.tsv"]
+   :cmd "bin/java-check --judge \"$GATE_OUTS\"/java-{read,interp,classes,diagnostics,compiled-full,print}/results.tsv"
+   :hosts [:stage0] :never-loads [arbace.j2g] :inputs [:lib-tools :tools :java-judge]
+   :summary ["^java-check [a-z]*: [0-9]* tests:|^   against|regression:|in no class:" 12]}
   ;; the fixpoint: G1 the gate's executable (GTS10 (a)), G2 by G1, G3 by G2
-  {:name fixpoint :heavy true :mem-gib 19 :phase :full :chain go :needs [go-build]
+  {:name fixpoint :heavy :inner :mem-gib 19 :phase :full :chain go :needs [go-build]
    :cmd "if [ -n \"${GATE_FRESH_G1:-}\" ]; then bin/arbace-go --fixpoint; else bin/arbace-go --fixpoint --g1 \"$GATE_CACHE\"; fi"
    :hosts [:gate :stage0] :inputs [:build] :env ["GATE_FRESH_G1"] :summary ["^fixpoint:" 9]}
-  {:name suite-aot :heavy true :mem-gib 23 :phase :full :chain go :needs [go-build]
+  {:name suite-aot :heavy :inner :mem-gib 23 :phase :full :chain go :needs [go-build]
    :cmd "env CLOJURE_TESTS_AOT_EXES=\"$GATE_CACHE/amd64\" bin/clojure-tests --aot -j \"$GATE_JOBS\""
    :hosts [:gate :stage0] :inputs [:tools :suite :build "arbace/" "test/java-fixtures/provenance.edn"] :env ["GATE_TEST_JOBS"]
    :summary ["TOTAL|regressions|^levels:" 3]}
-  {:name programs-full :heavy true :mem-gib 19 :phase :full :chain go :needs [go-build]
+  {:name programs-full :heavy :inner :mem-gib 19 :phase :full :chain go :needs [go-build]
    :cmd "env ARBACE_PROGRAM_BASE=\"$GATE_CACHE/amd64\" bin/arbace-go --build-program --check"
    :hosts [:gate :stage0 :go] :inputs [:tools :build "test/programs/" "test/programs-fail/" "tamago/goroot/" "tools/godump/"]
    :summary ["^arbace-go --build-program --check:|FAIL|warning" 4]}
-  ;; repr/go's round trips, its native reader's check, goi
+  ;; repr/go's round trips, its native reader's check per corpus (GT5), goi
   {:name repr-go :heavy true :mem-gib 27 :phase :full :chain repr-go
    :cmd "bin/repr-go roundtrip amd64 && bin/repr-go roundtrip linux/amd64 && bin/repr-go roundtrip --text amd64 && bin/repr-go roundtrip --dirs amd64 && bin/repr-go roundtrip --dirs linux/amd64 && bin/repr-go roundtrip --text --dirs amd64 && bin/x509roots-vendor verify && bin/x509roots-vendor check"
    :audit-cmd "bin/repr-go roundtrip --dirs amd64 && bin/x509roots-vendor verify && bin/x509roots-vendor check"
    :hosts [:stage0 :go] :pins ["seed/goroot.sha256"] :inputs [:lib :tools :repr-go :build "bin/x509roots-vendor"]
    :summary ["^package|^test |regressions|FAIL|^ok" 8]}
-  {:name repr-go-native :heavy true :mem-gib 28 :phase :full :chain repr-go :cmd "bin/repr-go native-check --fresh"
-   :audit-cmd "bin/repr-go native-check --fresh x509roots box purego"
+  ;; GTS19 (a): the parked sub-projects' corpora (TamaGo's configurations of the toolchain's tree, the box's
+  ;; trees) at the clean run only (GATE_ALL_PARTS=1), cmd-linux-amd64 every day
+  {:name repr-go-native :heavy :inner :mem-gib 28 :phase :full :chain repr-go
+   :cmd "env REPR_GO_NATIVE_REPORT=\"$PWD/.tmp/repr-go/native-check-{part}.report.edn\" bin/repr-go native-check --fresh {part}"
    :hosts [:stage0 :go] :pins ["seed/goroot.sha256"]
-   :inputs [:lib :tools :repr-go :goi "tamago/" "box/" "x509roots/"]
+   :inputs [:lib :tools :repr-go :goi]
+   :parts [{:part amd64} {:part arm64} {:part linux-amd64} {:part linux-arm64} {:part tests} {:part test} {:part test-arm64}
+           {:part linux-test} {:part linux-test-arm64} {:part dirtest} {:part dirtest-arm64} {:part linux-dirtest}
+           {:part linux-dirtest-arm64} {:part linux-errtest}
+           {:part goos-amd64 :inputs ["bin/tamago-vendor" "tamago/goos/"] :clean-only true}
+           {:part goos-arm64 :inputs ["bin/tamago-vendor" "tamago/goos/"] :clean-only true}
+           {:part cmd-linux-amd64 :inputs ["tamago/cmd/"]}
+           {:part cmd-tamago-amd64 :inputs ["tamago/cmd/"] :clean-only true}
+           {:part cmd-tamago-arm64 :inputs ["tamago/cmd/"] :clean-only true}
+           {:part box :inputs ["box/" "bin/box-vendor"] :clean-only true}
+           {:part purego :inputs ["bin/box-vendor"] :clean-only true}
+           {:part x509roots :inputs ["x509roots/" "bin/x509roots-vendor"]}]
    :summary ["^E-tree:|DIFF|FAIL" 4]}
   {:name goi :mem-gib 5 :phase :full :chain repr-go :needs [go-build]
    :cmd "bin/goi annotations && env GOI_RUN_EXE=\"$GATE_EXE\" bin/goi test --gc && env GOI_RUN_EXE=\"$GATE_EXE\" bin/goi check --jobs 8"
    :audit-cmd "bin/goi annotations && env GOI_RUN_EXE=\"$GATE_EXE\" bin/goi test --gc && env GOI_RUN_EXE=\"$GATE_EXE\" bin/goi check --essential --jobs 8"
-   :hosts [:gate :stage0 :go] :pins ["seed/goroot.sha256"] :inputs [:tools :goi :repr-go]
+   :hosts [:prog :stage0 :go] :never-loads [arbace.j2g] :pins ["seed/goroot.sha256"] :inputs [:lib-tools :tools :goi :repr-go "bin/lib/limit.bash"]
    :summary ["^goi check( --aot)?:|regression|no reference|^goi divergences: linux" 3]}
   {:name goi-aot :mem-gib 2 :phase :full :chain repr-go :needs [go-build]
    :cmd "env ARBACE_HOST_EXE=\"$GATE_EXE\" bin/goi check --aot --jobs 8"
    :audit-cmd "env ARBACE_HOST_EXE=\"$GATE_EXE\" bin/goi check --aot --essential --jobs 8"
-   :hosts [:gate :stage0 :go] :pins ["seed/goroot.sha256"] :inputs [:tools :goi :repr-go :build]
+   :hosts [:prog :stage0 :go] :never-loads [arbace.j2g] :pins ["seed/goroot.sha256"]
+   :inputs [:lib-tools :tools :goi :repr-go :build "bin/lib/limit.bash"]
    :summary ["^goi check( --aot)?:|regression|no reference|^goi divergences: linux" 3]}
   {:name repr-clojure :mem-gib 1 :phase :full :chain repr-clojure
    :cmd "bin/repr-clojure check && bin/repr-clojure check --suite && bin/repr-clojure check --roundtrip"
