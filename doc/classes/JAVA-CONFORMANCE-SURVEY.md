@@ -2864,6 +2864,18 @@ second run that passed made a flaky test). The masks are unchanged.
 This language's cells of the REAP matrix at the tag `arbace-reaps-3-crops-v1`, with every class by name, are
 in doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences".
 
+## REAP v2 (DRAFT, 2026-10-28)
+
+**DRAFT**, refreshed at the tag `arbace-reaps-3-crops-v2`. This language's cells of the REAP matrix on main `bf84a975`,
+with every class by name, are in doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences (DRAFT ...)". Since v1: read
+7,738 / 3 / 93 to 7,740 / 3 / 93, eval 1,683 / 325 / 1,312 to 1,807 / 329 / 1,186, AOT 1,869 / 181 / 1,270 to 1,913 /
+180 / 1,229, print 2,584 / 637 / 99 to 2,598 / 687 / 36. JC4b ("As built: JC4b") and JC4c ("As built: JC4c") removed
+`interp-default-method`, `interp-thread-local`, `class-init`, `local-class-names`, `record-pattern-null`, `bridge-order`,
+`j2g-outer-super`, `j2g-pattern-label`, `j2g-capture-names`, `lambda-bridges`, `j2g-coercion`, `j2g-findings` and shrank
+`interp-extends`, `interp-protected`, `j2g-reflection`; JN9f ("As built: JCS114 (a), JCS115 (a) in JN9f") removed
+`boxed-foreach`; v2's small leftovers B and RPS151 (a) split `print-forms` into `print-shapes` and `print-erasure`
+(by design). Still to land: JCS123 (b) (`j2g-reflection`'s last 2), and JCS120 (b) after the tag.
+
 ## As built: JC4b (2026-10-27)
 
 Branch `java-check-jc4b`, from main `2e8629c7` (the milestone `arbace-reaps-3-crops-v2` started). The user's
