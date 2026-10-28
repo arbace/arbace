@@ -1,0 +1,1654 @@
+;; Ported from modernc.org/cc/v4 v4.29.7 as go-whim carries it (https://github.com/arbace/go-whim at
+;; 80c49bf53cd6340487ac623f3d6d135b77ac1db6, crefactor/cc/cpp.go, with the parts of etc.go and cc.go it
+;; uses; go-whim's cpp.go is upstream's), whose notice follows (LICENSE.md, "cc (modernc.org/cc/v4) and
+;; go-whim's C23 delta"):
+;;
+;; Copyright 2021 The CC Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+;;
+;; Arbace's changes are licensed under the EPL-1.0, each marked "Arbace:" below: C23's directives and
+;; operators cc lacks (#elifdef, #elifndef, #embed, __has_embed, __VA_OPT__, __has_c_attribute, #warning)
+;; and the places where cc is wrong, the reference's behaviour (doc/C23-SURVEY.md, CS40 (a)).
+
+(ns arbace.repr.c.pp
+  "C's preprocessor, after cc's (modernc.org/cc/v4 cpp.go, go-whim's fork; doc/C23-SURVEY.md, \"As
+  built: C2\"): translation phase 4 over arbace.repr.c.lex's tokens. Each file is parsed into its
+  groups once (6.10: if-sections, control lines, text lines), then the groups are executed and the
+  text lines expanded by Prosser's algorithm with hide sets (cc's expand and subst, after
+  Spinellis' paper), giving the stream of tokens cc's Preprocess writes: each a Tok, the
+  separators' `\\space` tokens and each line's `\\newline` among them. The configuration is the
+  reference's, recorded (arbace.repr.c.host). `preprocess` gives the stream, its errors and
+  warnings, and the layer recorded so far (the directives with their positions, the conditional
+  groups taken or not, the main file's macro invocations), what doc/c/SPEC.md §9 and §10.2 need
+  of phases 1-4 (C3b settles their encoding)."
+  (:require [arbace.repr.c.lex :as lex]
+            [arbace.string :as str])
+  (:import [arbace.repr.c.lex Tok CFile]
+           [java.util ArrayList HashMap HashSet]))
+
+(set! *warn-on-reflection* true)
+
+(def ^:const max-include-level 200)
+
+(def protected-macros
+  #{"__DATE__" "__FILE__" "__LINE__" "__STDC_HOSTED__" "__STDC_MB_MIGHT_NEQ_WC__" "__STDC_VERSION__"
+    "__STDC__" "__TIME__" "__has_builtin" "__has_extension" "__has_feature" "defined"})
+
+;; ---------------------------------------------------------------------------------------------
+;; Token helpers
+
+(defn- ch [^Tok t] (.-ch t))
+(defn- src ^String [^Tok t] (.-src t))
+(defn- sep ^String [^Tok t] (.-sep t))
+(defn- has-sep? [^Tok t] (pos? (.length ^String (.-sep t))))
+(defn- blank? [^Tok t] (let [c (.-ch t)] (or (= c \space) (= c \newline))))
+
+(def sp-tok (Tok. \space " " "" nil 0 nil nil))
+
+(defn- pos-str ^String [^Tok t] (lex/position-string (or (lex/tok-position t) ["" 0 0])))
+
+(defn- num-tok ^Tok [^Tok at ^String s] (Tok. :PPNUMBER s "" (.-pf at) (.-po at) nil nil))
+
+(defn tokens->cpp
+  "tokens2CppTokens: a line's tokens with a `\\space` token before each one that has a separator
+  (but the first, with `skip-first-sep`)."
+  [toks skip-first-sep]
+  (let [out (ArrayList.)]
+    (loop [i 0 ts (seq toks)]
+      (when ts
+        (let [^Tok v (first ts)]
+          (when (and (or (not (zero? i)) (not skip-first-sep)) (has-sep? v))
+            (.add out sp-tok))
+          (.add out v)
+          (recur (inc i) (next ts)))))
+    out))
+
+(defn- trim
+  "toksTrim: the `\\space` tokens at both ends dropped."
+  [v]
+  (let [v (vec v)
+        n (count v)
+        i (loop [i 0] (if (and (< i n) (= (ch (v i)) \space)) (recur (inc i)) i))
+        j (loop [j n] (if (and (> j i) (= (ch (v (dec j))) \space)) (recur (dec j)) j))]
+    (subvec v i j)))
+
+;; hide sets: nil or a set of names (cc's hideSet; nil the empty one)
+(defn- hs-add [hs s] (conj (or hs #{}) s))
+(defn- hs-cup [h s] (cond (nil? h) s (nil? s) h :else (into h s)))
+(defn- hs-cap [h s] (if (or (nil? h) (nil? s)) nil (into #{} (filter s) h)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Token sequences (cc's tokenSequence: cppTokens, dequeue, tokenizer)
+
+;; Toks: cppTokens, its tokens held in reverse (the head last)
+(deftype Toks [^ArrayList a])
+;; Dq: dequeue, a stack of Toks over the Tkz at its bottom
+(deftype Dq [^ArrayList q])
+;; Tkz: the tokenizer, text lines read from the machine as needed
+(deftype Tkz [cpp ^ArrayList in ^longs h ^ArrayList out ^longs oh dq])
+
+(defn toks
+  "A Toks of the tokens of `coll`, in order."
+  ^Toks [coll]
+  (let [a (ArrayList. ^java.util.Collection (vec coll))]
+    (java.util.Collections/reverse a)
+    (Toks. a)))
+
+
+(declare next-line)
+
+(defn- tkz-fill [^Tkz t]
+  (.addAll ^ArrayList (.-in t) ^java.util.Collection (tokens->cpp (next-line (.-cpp t)) false)))
+
+(defn- tkz-peek ^Tok [^Tkz t ^long i]
+  (let [^ArrayList in (.-in t) ^longs h (.-h t)]
+    (loop []
+      (if (< (+ (aget h 0) i) (.size in))
+        (.get in (int (+ (aget h 0) i)))
+        (do (tkz-fill t) (recur))))))
+
+(defn- tkz-shift ^Tok [^Tkz t]
+  (let [^ArrayList in (.-in t) ^longs h (.-h t)]
+    (when (>= (aget h 0) (.size in))
+      (.clear in) (aset h 0 0)
+      (tkz-fill t))
+    (let [^Tok tok (.get in (int (aget h 0)))]
+      (when-not (= (.-ch tok) :eof) (aset h 0 (inc (aget h 0))))
+      (when (> (aget h 0) 4096)
+        (.clear (.subList in 0 (int (aget h 0)))) (aset h 0 0))
+      tok)))
+
+(defn- ts-peek ^Tok [ts ^long i]
+  (cond
+    (instance? Toks ts) (let [^ArrayList a (.-a ^Toks ts) n (.size a)]
+                          (if (< i n) (.get a (int (- n 1 i))) lex/eof-tok))
+    (instance? Tkz ts) (tkz-peek ts i)
+    :else (throw (ex-info "dequeue.peek" {}))))
+
+(defn- ts-peek-non-blank
+  "peekNonBlank: [the first token neither `\\space` nor `\\newline`, its index]."
+  [ts]
+  (cond
+    (instance? Toks ts)
+    (let [^ArrayList a (.-a ^Toks ts) n (.size a)]
+      (loop [i 0]
+        (if (< i n)
+          (let [^Tok v (.get a (int (- n 1 i)))]
+            (if (blank? v) (recur (inc i)) [v i]))
+          [lex/eof-tok -1])))
+    (instance? Tkz ts)
+    (loop [i 0] (let [t (tkz-peek ts i)] (if (blank? t) (recur (inc i)) [t i])))
+    :else
+    (let [^ArrayList q (.-q ^Dq ts) n (.size q)
+          e (.get q (dec n))]
+      (if (instance? Tkz e)
+        (ts-peek-non-blank e)
+        (let [^ArrayList a (.-a ^Toks e) m (.size a)]
+          (or (loop [i 0]
+                (when (< i m)
+                  (let [^Tok v (.get a (int (- m 1 i)))]
+                    (if (blank? v) (recur (inc i)) [v i]))))
+              ;; cc looks one level down only, and returns that level's index
+              (ts-peek-non-blank (.get q (- n 2)))))))))
+
+(defn- ts-shift ^Tok [ts]
+  (cond
+    (instance? Toks ts)
+    (let [^ArrayList a (.-a ^Toks ts) n (.size a)]
+      (if (zero? n)
+        lex/eof-tok
+        (let [^Tok t (.get a (dec n))]
+          (when-not (= (.-ch t) :eof) (.remove a (int (dec n))))
+          t)))
+    (instance? Tkz ts) (tkz-shift ts)
+    :else
+    (let [^ArrayList q (.-q ^Dq ts) n (.size q)
+          e (.get q (dec n))]
+      (if (instance? Tkz e)
+        (let [t (tkz-shift e)]
+          (when (= (ch t) :eof) (.remove q (int (dec n))))
+          t)
+        (let [t (ts-shift e)]
+          (when (or (= (ch t) :eof) (zero? (.size ^ArrayList (.-a ^Toks e))))
+            (.remove q (int (dec n))))
+          t)))))
+
+(defn- ts-skip [ts ^long n] (dotimes [_ n] (ts-shift ts)))
+
+(defn- ts-prepend
+  "prepend: the tokens of `v` (in order) before the rest of `ts`."
+  [ts v]
+  (cond
+    (instance? Toks ts) (let [^ArrayList a (.-a ^Toks ts)]
+                          (doseq [t (rseq (vec v))] (.add a t)))
+    (instance? Dq ts) (when (seq v) (.add ^ArrayList (.-q ^Dq ts) (toks v)))
+    :else (throw (ex-info "tokenizer.prepend" {}))))
+
+(defn- skip-blank [ts] (loop [] (when (= (ch (ts-peek ts 0)) \space) (ts-shift ts) (recur))))
+(defn- token ^Tok [^Toks ts] (skip-blank ts) (ts-peek ts 0))
+(defn- rune-of [^Toks ts] (ch (token ts)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The configuration (the host's answers: arbace.repr.c.host's config)
+
+;; :predefined the <predefined> source's text; :include the -I paths; :sys the system search list;
+;; :std the standard (:c23, :gnu17 ...); :has {[kind name] value}; :embed-dirs; :base the directory
+;; relative names are read from.
+
+;; ---------------------------------------------------------------------------------------------
+;; The machine's state
+
+(def ^:const TOS 0) (def ^:const INCLUDED 1) (def ^:const EOFLINE 2) (def ^:const TOK 3)
+(def ^:const CLOSED 4) (def ^:const SOURCES 5) (def ^:const COUNTER 6) (def ^:const TOKENIZER 7)
+(def ^:const DEPTH 8) (def ^:const MAIN 9)
+
+(deftype Cpp [cfg ^HashMap macros ^HashMap mstack ^HashMap groups ^HashSet undefs ^ArrayList stack
+              ^objects o ^ArrayList errs ^ArrayList warns ^ArrayList layer ^HashMap files ^HashSet once])
+
+(defn- eh [^Cpp c msg] (.add ^ArrayList (.-errs c) msg))
+(defn- slot [^Cpp c k] (aget ^objects (.-o c) k))
+(defn- slot! [^Cpp c k v] (aset ^objects (.-o c) k v))
+
+(defn- pop-tos! [^Cpp c]
+  (let [^ArrayList s (.-stack c) n (.size s)]
+    (if (pos? n)
+      (slot! c TOS (.remove s (int (dec n))))
+      (slot! c TOS nil))))
+
+(defn- push! [^Cpp c v]
+  (when-some [t (slot c TOS)] (.add ^ArrayList (.-stack c) t))
+  (slot! c TOS v))
+
+(deftype Included [^String using])
+
+;; ---------------------------------------------------------------------------------------------
+;; Paths (Go's path/filepath on Unix)
+
+(defn clean
+  "filepath.Clean."
+  ^String [^String p]
+  (if (= p "")
+    "."
+    (let [rooted (.startsWith p "/")
+          parts (reduce (fn [acc part]
+                          (cond
+                            (or (= part "") (= part ".")) acc
+                            (= part "..") (cond
+                                            (and (seq acc) (not= (peek acc) "..")) (pop acc)
+                                            rooted acc
+                                            :else (conj acc ".."))
+                            :else (conj acc part)))
+                        [] (str/split p #"/"))
+          s (str/join "/" parts)]
+      (cond rooted (str "/" s) (= s "") "." :else s))))
+
+(defn join ^String [& elems]
+  (let [es (remove #(= "" %) elems)]
+    (if (empty? es) "" (clean (str/join "/" es)))))
+
+(defn- dir-of
+  "filepath.Split's directory, cleaned."
+  ^String [^String p]
+  (let [i (.lastIndexOf p "/")] (clean (if (neg? i) "" (subs p 0 (inc i))))))
+
+(defn- resolve-file ^java.io.File [^Cpp c ^String name]
+  (let [f (java.io.File. name)]
+    (if (.isAbsolute f) f (java.io.File. (str (:base (.-cfg c))) name))))
+
+(defn- has-file? [^Cpp c ^String name]
+  (let [f (resolve-file c name)] (and (.exists f) (not (.isDirectory f)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The groups of a file (cppParser)
+
+;; A group is a vector of group parts: [:control line] [:text line] [:eof tok] [:nondir line] or an
+;; if-section {:if [line group] :elifs [[line group] ...] :else [line group] :endif line}; a line is
+;; the vector of its tokens, its new-line last.
+
+(def ^:private elif-verbs #{"elif" "elifdef" "elifndef"}) ; Arbace: C23's #elifdef, #elifndef
+
+(deftype Parser [^arbace.repr.c.lex.Scanner s ^objects line eh])
+
+(defn- p-rune
+  "cppParser.rune: the current line read (to its new-line), its first token's kind."
+  [^Parser p]
+  (let [^objects l (.-line p)]
+    (if (or (some? (aget l 0)) (some? (aget l 1)))
+      (ch (first (aget l 0)))
+      (let [out (ArrayList.)]
+        (loop []
+          (let [t (lex/scan (.-s p))]
+            (if (= (ch t) :eof)
+              (do (aset l 0 [t]) (aset l 1 true))
+              (do (.add out t)
+                  (if (= (ch t) \newline) (aset l 0 (vec out)) (recur))))))
+        (ch (first (aget l 0)))))))
+
+(defn- p-shift [^Parser p]
+  (let [^objects l (.-line p) r (aget l 0)]
+    (when-not (aget l 1) (aset l 0 nil))
+    r))
+
+(defn- p-verb ^String [^Parser p] (src (nth (aget ^objects (.-line p) 0) 1)))
+
+(declare p-group)
+
+(defn- line-directive
+  "A #line's alternative position, as cppParser.groupPart records it."
+  [gp]
+  (when (>= (count gp) 4)
+    (let [^Tok t2 (gp 2)
+          ln (if (= (src t2) "__LINE__")
+               (long (nth (lex/tok-position t2) 1))
+               (let [s (src t2)]
+                 (when (and (seq s) (every? #(Character/isDigit ^char %) s) (< (count s) 11))
+                   (let [v (Long/parseLong s)] (when (< v 2147483648) v)))))]
+      (when ln
+        (let [fname (if (= (ch (gp 3)) :STRINGLITERAL)
+                      (let [s (src (gp 3))] (subs s 1 (dec (count s))))
+                      (nth (lex/tok-position (gp 0)) 0))
+              ^Tok nl (peek gp)]
+          (lex/add-line-info (.-pf nl) (inc (.-po nl)) fname ln))))))
+
+(defn- p-group-part [^Parser p in-if]
+  (let [c (p-rune p)]
+    (cond
+      (= c \#)
+      (let [verb (p-verb p)]
+        (cond
+          (#{"if" "ifdef" "ifndef"} verb)
+          (let [ig [(p-shift p) (p-group p true)]
+                elifs (loop [acc []]
+                        (if (and (= (p-rune p) \#) (elif-verbs (p-verb p)))
+                          (recur (conj acc [(p-shift p) (p-group p true)]))
+                          acc))
+                eg (when (and (= (p-rune p) \#) (= (p-verb p) "else"))
+                     [(p-shift p) (p-group p true)])
+                endif (if (or (not= (p-rune p) \#) (not= (p-verb p) "endif"))
+                        (do ((.-eh p) (str (pos-str (first (aget ^objects (.-line p) 0))) ": expected #endif")) nil)
+                        (p-shift p))]
+            {:if ig :elifs elifs :else eg :endif endif})
+          ;; Arbace: #warning (C23), #embed (C23) are control lines
+          (#{"include" "include_next" "define" "undef" "line" "error" "pragma" "\n" "warning" "embed"} verb)
+          (let [gp (p-shift p)]
+            (when (= verb "line") (line-directive gp))
+            [:control gp])
+          (or (elif-verbs verb) (#{"else" "endif"} verb))
+          (if in-if
+            nil
+            (do ((.-eh p) (str (pos-str (first (aget ^objects (.-line p) 0))) ": unexpected #" verb))
+                [:nondir (p-shift p)]))
+          :else [:nondir (p-shift p)]))
+      (= c :eof) [:eof (first (p-shift p))]
+      :else [:text (p-shift p)])))
+
+(defn- p-group [^Parser p in-if]
+  (loop [acc (transient [])]
+    (let [g (p-group-part p in-if)]
+      (cond
+        (nil? g) (persistent! acc)
+        (and (vector? g) (= (g 0) :eof)) (persistent! (conj! acc g))
+        :else (recur (conj! acc g))))))
+
+(def ^:private file-cache
+  "The parsed groups of the files read so far, by path and content (shared by the translation units of
+  a run: a file's groups and its positions depend on its text alone)."
+  (java.util.concurrent.ConcurrentHashMap.))
+
+(def opened
+  "The paths of the files the preprocessor read (the token check records the headers' digests)."
+  (java.util.concurrent.ConcurrentHashMap/newKeySet))
+
+(defn- parse-file
+  "The groups of `name` (read from `file`), and its errors."
+  [^String name ^java.io.File file]
+  (.add ^java.util.Set opened (.getAbsolutePath file))
+  (let [bs (lex/read-bytes (.getPath file))
+        key [name (java.util.Arrays/hashCode bs) (alength bs)]]
+    (or (.get ^java.util.concurrent.ConcurrentHashMap file-cache key)
+        (let [errs (ArrayList.)
+              f (lex/new-file name bs)
+              p (Parser. (lex/scanner f (fn [m] (.add errs m))) (object-array 2) (fn [m] (.add errs m)))
+              g (p-group p false)
+              r [g (vec errs)]]
+          (.put ^java.util.concurrent.ConcurrentHashMap file-cache key r)
+          r))))
+
+(defn- group
+  "cpp.group: the groups of the source `name` (the text `text` when given), parsed once a unit; nil
+  when it cannot be read."
+  [^Cpp c ^String name text]
+  (or (.get ^HashMap (.-groups c) name)
+      (let [r (if text
+                (let [errs (ArrayList.)
+                      f (lex/new-file name (.getBytes ^String text "ISO-8859-1"))
+                      p (Parser. (lex/scanner f (fn [m] (.add errs m))) (object-array 2) (fn [m] (.add errs m)))]
+                  [(p-group p false) (vec errs)])
+                (let [f (resolve-file c name)]
+                  (when (and (.isFile f) (.canRead f))
+                    (parse-file name f))))]
+        (when r
+          (doseq [e (r 1)] (eh c e))
+          (.put ^HashMap (.-groups c) name (r 0))
+          (r 0)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Macros
+
+(defn- new-macro
+  [^Tok nm params rl min-args var-arg fn-like]
+  {:name nm :params (mapv src params) :ptoks params :rl (vec rl) :min min-args :var var-arg :fn fn-like})
+
+(defn- m-is
+  "Macro.is: the index of parameter `s` (__VA_ARGS__ the variable one's), -1."
+  ^long [m ^String s]
+  (let [ps (:params m)
+        i (.indexOf ^java.util.List ps s)]
+    (cond
+      (>= i 0) i
+      (get (:opt m) s) (long (get (:opt m) s)) ; Arbace: a __VA_OPT__ as subst's pseudo-argument
+      (and (>= (long (:var m)) 0) (= s "__VA_ARGS__")) (long (:var m))
+      :else -1)))
+
+(defn- go-quote
+  "Go's %q of a file name (its \\ and \" escaped, the rest as is: the names are of printable bytes)."
+  ^String [^String s]
+  (str "\"" (-> s (.replace "\\" "\\\\") (.replace "\"" "\\\"")) "\""))
+
+(defn- builtin-macro
+  "An object-like macro of one token, as cc makes __FILE__ and __LINE__: `t` respelled."
+  [^Tok t kind ^String text]
+  (new-macro t nil [(Tok. kind text (.-sep t) (.-pf t) (.-po t) nil nil)] 0 -1 false))
+
+(defn- macro
+  "cpp.macro: the macro `nm` names at `t`, the builtin ones made as cc makes them; nil."
+  [^Cpp c ^Tok t ^String nm]
+  (if-let [m (.get ^HashMap (.-macros c) nm)]
+    (case nm
+      "__FILE__" (builtin-macro t :STRINGLITERAL (go-quote (nth (lex/tok-position t) 0)))
+      "__LINE__" (builtin-macro t :PPNUMBER (str (nth (lex/tok-position t) 1)))
+      m)
+    (cond
+      (= nm "__COUNTER__")
+      (let [m (new-macro t nil [(Tok. :PPNUMBER (.-src t) (.-sep t) (.-pf t) (.-po t) nil nil)] 0 -1 false)]
+        (.put ^HashMap (.-macros c) nm m)
+        m)
+      (#{"defined" "__has_extension" "__has_feature" "__has_builtin"} nm) nil
+      ;; Arbace: gcc's builtin macros cc does not know
+      (= nm "__BASE_FILE__") (builtin-macro t :STRINGLITERAL (str "\"" (slot c MAIN) "\""))
+      (= nm "__INCLUDE_LEVEL__") (builtin-macro t :PPNUMBER (str (slot c DEPTH)))
+      (= nm "__FILE_NAME__") (let [f ^String (nth (lex/tok-position t) 0)]
+                               (builtin-macro t :STRINGLITERAL (go-quote (subs f (inc (.lastIndexOf f "/"))))))
+      (not (protected-macros nm)) nil
+      :else
+      (case nm
+        "__FILE__" (let [m (builtin-macro t :STRINGLITERAL (go-quote (nth (lex/tok-position t) 0)))]
+                     (.put ^HashMap (.-macros c) nm m) m)
+        "__LINE__" (let [m (builtin-macro t :PPNUMBER (str (nth (lex/tok-position t) 1)))]
+                     (.put ^HashMap (.-macros c) nm m) m)
+        ("__STDC__" "__STDC_VERSION__") nil
+        ;; __DATE__ and __TIME__ are predefined from the fixed epoch (CS43 (a)), the rest cc's todo
+        (do (eh c (str (pos-str t) ": unsupported builtin macro " nm)) nil)))))
+
+(def ^:private has-ops
+  ;; Arbace: the reference's __has_* operators, answered from its recorded answers
+  #{"__has_attribute" "__has_c_attribute" "__has_builtin" "__has_feature" "__has_extension"
+    "__has_cpp_attribute"})
+
+(defn- is-defined?
+  "cpp.isDefined: a macro, or one of the operators gcc reports as defined."
+  [^Cpp c ^Tok t ^String nm]
+  (boolean
+    (or (macro c t nm)
+        (#{"__has_include" "__has_include__" "__has_include_next"} nm)
+        ;; Arbace: gcc's other operators are defined too (cc: not)
+        (has-ops nm) (= nm "__has_embed"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expansion (cc's expand and subst; [1] Spinellis, pp. 1-3)
+
+(declare parse-defined parse-has parse-pragma parse-macro-args subst include-next-paths expression uv u?)
+
+(defn expand
+  "cpp.expand: the tokens of `ts` expanded into `w` (an ArrayList); `outer`: one token at a time
+  (the tokenizer's), `eval`: in a #if (defined and the __has_ operators)."
+  [^Cpp c outer eval ts ^ArrayList w]
+  (loop [ts ts]
+    (let [^Tok t (ts-shift ts)]
+      (if (= (.-ch t) :eof)
+        (when outer (.add w t))
+        (let [s (.-src t)
+              hs (.-hs t)
+              ret (fn [] (.add w t) (if outer nil ::more))]
+          (cond
+            (and eval (= s "defined")) (recur (parse-defined c ts))
+            (and eval (has-ops s)) (recur (parse-has c ts s))
+            ;; Arbace: gcc answers the attribute and builtin operators outside #if too (cc: an identifier)
+            (and (not eval) (#{"__has_attribute" "__has_c_attribute" "__has_builtin" "__has_cpp_attribute"} s)
+                 (= (ch (first (ts-peek-non-blank ts))) \())
+            (recur (parse-has c ts s))
+            (and (not eval) (= s "__has_embed") (= (ch (first (ts-peek-non-blank ts))) \())
+            (let [w (ArrayList.)
+                  body (loop [acc [] level 0]
+                         (let [x (ts-shift ts)]
+                           (cond
+                             (= (ch x) :eof) (conj acc x)
+                             (and (= (ch x) \)) (= level 1)) (conj acc x)
+                             (= (ch x) \() (recur (conj acc x) (inc level))
+                             (= (ch x) \)) (recur (conj acc x) (dec level))
+                             :else (recur (conj acc x) level))))
+                  _ (expand c false true (toks (cons t body)) w)
+                  v (expression c (toks w) true)]
+              (ts-prepend ts [(num-tok t (str (uv (or v 0))))])
+              (recur ts))
+            (= s "_Pragma") (do (parse-pragma c ts) (recur ts))
+            (and hs (contains? hs s)) (when (= (ret) ::more) (recur ts))
+            :else
+            (let [m (macro c t s)]
+              (cond
+                (nil? m) (when (= (ret) ::more) (recur ts))
+                (not (:fn m))
+                (let [m (if (= s "__COUNTER__")
+                          (let [n (long (or (slot c COUNTER) 0))]
+                            (slot! c COUNTER (inc n))
+                            (assoc m :rl [(Tok. :PPNUMBER (str n) (.-sep t) (.-pf t) (.-po t) nil nil)]))
+                          m)
+                      sub (subst c eval m (:rl m) nil nil (hs-add hs s) [])]
+                  (ts-prepend ts (mapv #(lex/with-pos-m % t m) sub))
+                  (recur ts))
+                :else
+                (let [[^Tok t2 skip] (ts-peek-non-blank ts)]
+                  (if (= (.-ch t2) \()
+                    (do (ts-skip ts (inc (long skip)))
+                        (let [[args ^Tok rparen ok] (parse-macro-args c ts)]
+                          (cond
+                            (not ok) (when (= (ret) ::more) (recur ts))
+                            (and (> (count args) (long (:min m))) (neg? (long (:var m))))
+                            (do (eh c (str (pos-str rparen) ": too many macro arguments"))
+                                (when (= (ret) ::more) (recur ts)))
+                            :else
+                            (let [sub (subst c eval m (:rl m) (:params m) args (hs-add (hs-cap hs (.-hs rparen)) s) [])]
+                              (ts-prepend ts (mapv #(lex/with-pos % t) sub))
+                              (recur ts)))))
+                    (when (= (ret) ::more) (recur ts))))))))))))
+
+(defn- one-zero ^Tok [^Tok t v]
+  (Tok. :PPNUMBER (if v "1" "0") "" (.-pf t) (.-po t) nil (.-hs t)))
+
+(defn- parse-defined
+  "cpp.parseDefined: `defined X`, `defined(X)` replaced by 1 or 0."
+  [^Cpp c ts]
+  (skip-blank ts)
+  (let [p (ts-peek ts 0)]
+    (letfn [(bad [^Tok p] (eh c (str (pos-str p) ": operator \"defined\" requires an identifier")) (ts-shift ts) ts)
+            (done [^Tok t] (ts-prepend ts [(one-zero t (is-defined? c t (src t)))]) ts)]
+      (cond
+        (= (ch p) \() (do (ts-shift ts) (skip-blank ts)
+                          (let [p (ts-peek ts 0)]
+                            (if (= (ch p) :IDENTIFIER)
+                              (let [t (ts-shift ts)]
+                                (skip-blank ts)
+                                (let [paren (ts-shift ts)]
+                                  (when-not (= (ch paren) \)) (eh c (str (pos-str paren) ": expected ')'"))))
+                                (done t))
+                              (bad p))))
+        (= (ch p) :IDENTIFIER) (done (ts-shift ts))
+        :else (bad p)))))
+
+(defn- has-answer
+  "Arbace: the reference's answer to `__op(name)`, recorded (arbace.repr.c.host); 0 when not."
+  ^long [^Cpp c ^String op ^String nm]
+  (let [has (:has (.-cfg c))
+        op (case op "__has_extension" "__has_feature" op)
+        v (get has [op nm])]
+    (if (some? v)
+      (long v)
+      (do (when-let [^java.util.Set miss (:missing (.-cfg c))] (.add miss [op nm]))
+          0))))
+
+(defn- parse-has
+  "Arbace (cc: parseHasFeature, its own answers for __has_feature and __has_builtin, 0 else): the
+  reference's __has_attribute, __has_c_attribute, __has_builtin, __has_feature, __has_extension:
+  `op ( name )`, the name an identifier or `vendor::name`, replaced by the recorded answer."
+  [^Cpp c ts ^String op]
+  (skip-blank ts)
+  (let [p (ts-peek ts 0)]
+    (if-not (= (ch p) \()
+      (do (eh c (str (pos-str p) ": operator \"" op "\" requires a parenthesized identifier")) ts)
+      (do (ts-shift ts)
+          (let [parts (loop [acc []]
+                        (let [t (ts-shift ts)]
+                          (cond
+                            (= (ch t) \)) acc
+                            (= (ch t) :eof) acc
+                            (= (ch t) \space) (recur acc)
+                            :else (recur (conj acc (src t))))))
+                nm (str/join parts)
+                v (has-answer c op nm)]
+            (ts-prepend ts [(Tok. :PPNUMBER (str v) "" (.-pf ^Tok p) (.-po ^Tok p) nil nil)])
+            ts)))))
+
+(defn- parse-macro-args
+  "cpp.parseMacroArgs: the arguments to the closing parenthesis, the new-lines dropped, each trimmed:
+  [args rparen ok]."
+  [^Cpp c ts]
+  (let [args (ArrayList.)]
+    (loop [arg [] level 0]
+      (let [^Tok t (ts-shift ts)
+            k (.-ch t)]
+        (cond
+          (= k \,) (if (zero? level) (do (.add args arg) (recur [] level)) (recur (conj arg t) level))
+          (= k \() (recur (conj arg t) (inc level))
+          (= k \)) (if (zero? level)
+                     (do (.add args arg)
+                         (let [as (mapv trim args)
+                               as (if (and (= 1 (count as)) (empty? (as 0))) [] as)]
+                           [as t true]))
+                     (recur (conj arg t) (dec level)))
+          (= k \newline) (recur arg level)
+          ;; an unterminated invocation: cc panics (todo), and so does the port, its stream kept to there
+          (= k :eof) (throw (ex-info "unterminated argument list invoking macro" {:panic true}))
+          :else (recur (conj arg t) level))))))
+
+(defn- var-args
+  "cpp.varArgs: the variable arguments joined by commas."
+  [^Tok t aps]
+  (let [comma (Tok. \, "," "" nil 0 nil nil)]
+    (loop [i 0 aps (seq aps) r []]
+      (if aps
+        (let [v (first aps)
+              r (if (zero? i) r
+                    (let [r (conj r comma)]
+                      (if (and (seq v) (has-sep? (first v))) (conj r sp-tok) r)))]
+          (recur (inc i) (next aps) (into r v)))
+        r))))
+
+(defn- ap-select
+  [m ^Tok t aps ^long i]
+  (if (and (:opt-base m) (>= i (long (:opt-base m))))
+    ((:opt-bodies m) (- i (long (:opt-base m))))
+  (if (or (neg? (long (:var m))) (not= (long (:var m)) i))
+    (if (< i (count aps)) (aps i) [])
+    (if (> i (count aps))
+      ;; cc: AP[i:] out of range, a panic (the port's stream stops there too)
+      (throw (ex-info "slice bounds out of range" {:panic true}))
+      (var-args t (subvec aps i))))))
+
+(defn- arg-empty?
+  "Whether the argument `k` has no tokens (cc: i >= len(AP) || len(AP[i]) == 0)."
+  [m aps ^long k]
+  (if (and (:opt-base m) (>= k (long (:opt-base m))))
+    (empty? ((:opt-bodies m) (- k (long (:opt-base m)))))
+    (or (>= k (count aps)) (empty? (aps k)))))
+
+(defn- single-token?
+  "Whether `text` lexes as one preprocessing token."
+  [^String text]
+  (let [[ts _] (lex/tokens (lex/new-file "<paste>" (.getBytes text "ISO-8859-1")))
+        ts (remove #(= (ch %) \newline) ts)]
+    (and (= 1 (count ts)) (= (src (first ts)) text))))
+
+(defn- glue
+  "cpp.glue: the last of `ls` pasted to the first of `rs`. Arbace: a placemarker (__VA_OPT__'s) pastes
+  to nothing; a paste that does not make one token leaves the two (gcc's recovery from the error;
+  cc joins their texts)."
+  [^Cpp c ls rs]
+  (let [ls (vec ls) rs (vec rs)]
+    (cond
+      (empty? ls) rs
+      (and (seq rs) (= (ch (rs 0)) :PLACEMARKER)) (into ls (subvec rs 1))
+      (= (ch (peek ls)) :PLACEMARKER) (into (pop ls) rs)
+      :else
+      (let [^Tok t (peek ls)
+            ^Tok r0 (if (seq rs) (rs 0) lex/eof-tok)
+            k (if (and (= (.-ch t) :IDENTIFIER) (= (.-src t) "L"))
+                (case (.-ch r0) :STRINGLITERAL :LONGSTRINGLITERAL :CHARCONST :LONGCHARCONST (.-ch t))
+                (.-ch t))
+            text (str (.-src t) (.-src r0))]
+        (if (and (seq rs) (pos? (.length ^String (.-src r0))) (not (single-token? text)))
+          (do (eh c (str (pos-str t) ": pasting \"" (.-src t) "\" and \"" (.-src r0)
+                         "\" does not give a valid preprocessing token"))
+              (-> ls (conj sp-tok) (into rs)))
+          (let [t2 (Tok. k text "" (.-pf t) (.-po t) (.-m t) (hs-cap (.-hs t) (.-hs r0)))]
+            (-> (pop ls) (conj t2) (into (if (seq rs) (subvec rs 1) [])))))))))
+
+(defn- stringize
+  "cpp.stringize: the spellings of `s0` as one string literal (6.10.4.2)."
+  ^Tok [^Tok t s0]
+  (let [s0 (remove #(= (ch %) :PLACEMARKER) s0)] ; Arbace: __VA_OPT__'s placemarkers
+  (if (empty? s0)
+    (Tok. :STRINGLITERAL "\"\"" "" (.-pf t) (.-po t) (.-m t) nil)
+    (let [^Tok r (first s0)
+          s (loop [acc [] last nil vs (seq s0)]
+              (if vs
+                (let [^Tok v0 (first vs)
+                      ^Tok v (if (= (.-ch v0) \newline) sp-tok v0)]
+                  (if (and (= (.-ch v) \space) (= last \space))
+                    (recur acc last (next vs))
+                    (recur (conj acc v) (.-ch v) (next vs))))
+                acc))
+          s (trim s)]
+      (if (empty? s)
+        (Tok. :STRINGLITERAL "\"\"" "" (.-pf r) (.-po r) (.-m r) (.-hs r))
+        (Tok. :STRINGLITERAL
+              (str "\""
+                   (apply str (map (fn [^Tok v]
+                                     (if (#{:CHARCONST :STRINGLITERAL :LONGCHARCONST :LONGSTRINGLITERAL} (.-ch v))
+                                       (-> (src v) (.replace "\\" "\\\\") (.replace "\"" "\\\""))
+                                       (.-src v)))
+                                   s))
+                   "\"")
+              "" (.-pf r) (.-po r) (.-m r) (.-hs r)))))))
+
+(defn- peek-non-blank-v
+  "cppTokens.peekNonBlank over a vector from `i`: [token index-from-i]."
+  [is ^long i]
+  (let [n (count is)]
+    (loop [k i]
+      (if (< k n)
+        (let [^Tok v (is k)] (if (blank? v) (recur (inc k)) [v (- k i)]))
+        [lex/eof-tok -1]))))
+
+(defn- va-opt
+  "Arbace: C23's __VA_OPT__ (6.10.5.2): at `i` (the token after __VA_OPT__) its parenthesized tokens,
+  [content next-index], or nil when no parenthesis follows."
+  [is ^long i]
+  (let [[^Tok t k] (peek-non-blank-v is i)]
+    (when (= (.-ch t) \()
+      (let [start (+ i (long k) 1)
+            n (count is)]
+        (loop [j start level 0]
+          (if (>= j n)
+            [(subvec is start) n]
+            (let [c (ch (is j))]
+              (cond
+                (= c \() (recur (inc j) (inc level))
+                (and (= c \)) (zero? level)) [(trim (subvec is start j)) (inc j)]
+                (= c \)) (recur (inc j) (dec level))
+                :else (recur (inc j) level)))))))))
+
+(defn- va-present?
+  "Arbace: whether the variable arguments have tokens once macro-expanded, for __VA_OPT__ (gcc's
+  reading of 6.10.5.2)."
+  [^Cpp c eval m aps]
+  (let [v (long (:var m))]
+    (and (>= v 0) (< v (count aps))
+         (let [w (ArrayList.)]
+           (expand c false eval (toks (var-args lex/eof-tok (subvec (vec aps) v))) w)
+           (boolean (some #(not (blank? %)) w))))))
+
+(defn- va-opt-split
+  "Arbace: C23's __VA_OPT__ (6.10.5.2) as a pseudo-argument: each __VA_OPT__ ( ... ) of `is` replaced by
+  one identifier, its index past the arguments, its body the parenthesized tokens substituted when the
+  variable arguments have tokens, else empty (a placemarker): [is m], `m` knowing them (m-is,
+  ap-select), so that # and ## treat them as they treat a parameter."
+  [^Cpp c eval m is fp aps]
+  (let [n (count is)]
+    (loop [i 0 out [] opt {} bodies []]
+      (if (>= i n)
+        [out (if (seq bodies) (assoc m :opt opt :opt-bodies bodies :opt-base (+ 1000000 (count aps))) m)]
+        (let [^Tok t (is i)]
+          (if-let [[content j] (when (and (= (.-ch t) :IDENTIFIER) (= (.-src t) "__VA_OPT__")) (va-opt is (inc i)))]
+            (let [k (count bodies)
+                  nm (str "__VA_OPT__\u0000" k)
+                  body (if (va-present? c eval m aps)
+                         (subst c eval (assoc (dissoc m :opt :opt-bodies :opt-base) :pm true) content fp aps nil [])
+                         [])]
+              (recur (long j) (conj out (Tok. :IDENTIFIER nm (.-sep t) (.-pf t) (.-po t) (.-m t) (.-hs t)))
+                     (assoc opt nm (+ 1000000 (count aps) k)) (conj bodies (trim body))))
+            (recur (inc i) (conj out t) opt bodies)))))))
+
+(defn subst
+  "cpp.subst: the replacement list `is` with the parameters `fp` replaced by the arguments `aps`
+  (expanded, stringized, pasted), the hide set `hs` added."
+  [^Cpp c eval m is fp aps hs os]
+  (let [aps (vec aps)
+        [is m] (if (>= (long (:var m)) 0) (va-opt-split c eval m (vec is) fp aps) [(vec is) m])
+        n (count is)
+        expanded (HashMap.)]
+    ;; a __VA_OPT__'s body is substituted already: its expansion is itself
+    (doseq [[_ k] (:opt m)] (.put expanded k ((:opt-bodies m) (- (long k) (long (:opt-base m))))))
+    (loop [i 0 os (vec os)]
+      (if (>= i n)
+        (into [] (comp (remove #(and (not (:pm m)) (= (ch %) :PLACEMARKER)))
+                       (map #(lex/with-hs % (hs-cup (.-hs ^Tok %) hs))))
+              os)
+        (let [^Tok t (is i)
+              i (inc i)
+              r (or
+                  (when (= (.-ch t) \#)
+                    (let [[^Tok t2 skip] (peek-non-blank-v is i)
+                          skip (long skip)]
+                      (when (and (= (.-ch t2) :IDENTIFIER) (>= (m-is m (.-src t2)) 0))
+                        [(+ i skip 1) (conj os (stringize t (ap-select m t2 aps (m-is m (.-src t2)))))])))
+                  (let [[^Tok t i space-deleted] (if (and (= (.-ch t) \space) (< i n) (= (ch (is i)) :PPPASTE))
+                                                   [(is i) (inc i) true]
+                                                   [t i false])]
+                    (cond
+                      (= (.-ch t) :PPPASTE)
+                      (let [[^Tok t2 skip] (peek-non-blank-v is i)
+                            skip (long skip)
+                            k (if (= (.-ch t2) :IDENTIFIER) (m-is m (.-src t2)) -1)]
+                        (cond
+                          ;; Arbace: ## # param, the stringized argument pasted (gcc; cc pastes the #)
+                          (and (= (.-ch t2) \#)
+                               (let [[^Tok t3 _] (peek-non-blank-v is (+ i skip 1))]
+                                 (and (= (.-ch t3) :IDENTIFIER) (>= (m-is m (.-src t3)) 0))))
+                          (let [[^Tok t3 skip3] (peek-non-blank-v is (+ i skip 1))]
+                            [(+ i skip 1 (long skip3) 1)
+                             (glue c os [(stringize t2 (ap-select m t3 aps (m-is m (.-src t3))))])])
+                          (>= k 0)
+                          (if (arg-empty? m aps k)
+                            [(+ i skip 1)
+                             (if (and (= (.-src t2) "__VA_ARGS__") (seq os) (= (ch (peek os)) \,)) (pop os) os)]
+                            [(+ i skip 1)
+                             (if (and (= (.-src t2) "__VA_ARGS__") space-deleted (seq os) (= (ch (peek os)) \,))
+                               (into os (ap-select m t2 aps k))
+                               (glue c os (ap-select m t2 aps k)))])
+                          :else [(+ i skip 1) (glue c os [t2])]))
+                      (= (.-ch t) :IDENTIFIER)
+                      (let [[^Tok t2 skip] (peek-non-blank-v is i)
+                            skip (long skip)
+                            k (m-is m (.-src t))]
+                        (cond
+                          (and (= (.-ch t2) :PPPASTE) (>= k 0))
+                          (if (arg-empty? m aps k)
+                            (let [i2 (+ i skip 1)
+                                  [^Tok t3 skip3] (peek-non-blank-v is i2)
+                                  j (m-is m (.-src t3))]
+                              (if (>= j 0)
+                                (let [sel (ap-select m t aps j)]
+                                  ;; Arbace: in a __VA_OPT__'s body, an empty paste is a placemarker
+                                  [(+ i2 (long skip3) 1) (if (and (:pm m) (empty? sel))
+                                                           (conj os (Tok. :PLACEMARKER "" "" (.-pf t) (.-po t) nil nil))
+                                                           (into os sel))])
+                                [i2 os]))
+                            [i (into os (ap-select m t aps k))])
+                          (and (or (seq fp) (>= (long (:var m)) 0)) (>= k 0))
+                          (let [v (or (.get expanded k)
+                                      (let [w (ArrayList.)]
+                                        (expand c false eval (toks (ap-select m t aps k)) w)
+                                        (let [v (vec w)] (.put expanded k v) v)))]
+                            ;; Arbace: in a __VA_OPT__'s body an empty argument is a placemarker (gcc)
+                            [i (if (and (:pm m) (empty? v))
+                                 (conj os (Tok. :PLACEMARKER "" "" (.-pf t) (.-po t) nil nil))
+                                 (into os v))])
+                          :else [i (conj os t)]))
+                      :else [i (conj os t)])))]
+          (recur (long (r 0)) (r 1)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; _Pragma and #pragma
+
+(defn- record! [^Cpp c entry] (.add ^ArrayList (.-layer c) entry))
+
+(defn- parse-pragma
+  "cpp.parsePragma: _Pragma ( string-literal ) destringized (6.10.11) into a #pragma control line,
+  executed next."
+  [^Cpp c ts]
+  (let [[^Tok t skip] (ts-peek-non-blank ts)]
+    (ts-skip ts (inc (long skip)))
+    (if-not (= (.-ch t) \()
+      (eh c (str (pos-str t) ": expected '('"))
+      (let [[^Tok t2 skip] (ts-peek-non-blank ts)
+            _ (ts-skip ts (inc (long skip)))
+            s (case (.-ch t2)
+                :STRINGLITERAL (.-src t2)
+                :LONGSTRINGLITERAL (subs (.-src t2) 1)
+                nil)]
+        (if-not s
+          (eh c (str (pos-str t2) ": expected string-literal"))
+          (let [[^Tok t3 skip] (ts-peek-non-blank ts)]
+            (ts-skip ts (inc (long skip)))
+            (when-not (= (.-ch t3) \)) (eh c (str (pos-str t3) ": expected '('")))
+            (let [s (-> (subs s 1 (dec (count s))) (.replace "\\\"" "\"") (.replace "\\\\" "\\"))
+                  f (lex/new-file "_Pragma_" (.getBytes ^String s "ISO-8859-1"))
+                  sc (lex/scanner f (fn [m] (eh c m)))
+                  line (loop [acc [(Tok. \# "#" "" (.-pf t) (.-po t) nil nil)
+                                   (Tok. :IDENTIFIER "pragma" "" (.-pf t) (.-po t) nil nil)]]
+                         (let [x (lex/scan0 sc)]
+                           ;; Arbace: the end of the text ends the line (cc's loops forever on _Pragma(""))
+                           (cond
+                             (= (ch x) \newline) (conj acc x)
+                             (= (ch x) :eof) (conj acc (Tok. \newline "\n" "" nil 0 nil nil))
+                             :else (recur (conj acc x)))))]
+              (push! c [:control line :operator]))))))))
+
+(defn- line-text
+  "A directive's tokens as text, single spaces where the source has separators."
+  ^String [line]
+  (let [b (StringBuilder.)]
+    (doseq [[i ^Tok t] (map-indexed vector line)
+            :when (not= (.-ch t) \newline)]
+      (when (and (pos? i) (has-sep? t)) (.append b " "))
+      (.append b (.-src t)))
+    (.toString b)))
+
+;; ---------------------------------------------------------------------------------------------
+;; #if's arithmetic (cpp.eval and the expression functions): values are Long (int64), UVal
+;; (uint64), or nil
+
+(deftype UVal [^long v])
+
+(defn- u? [x] (instance? UVal x))
+(defn- uv ^long [x] (if (instance? UVal x) (.-v ^UVal x) (long x)))
+(defn- typed? [x] (or (instance? Long x) (u? x)))
+(defn- is-non-zero? [x] (and (typed? x) (not (zero? (uv x)))))
+(defn- is-zero? [^Cpp c x]
+  (if (typed? x) (zero? (uv x)) (do (eh c "internal error: <nil>") false)))
+
+(defn- binop
+  "A binary operation as cc's type switches make it: both signed `fs`, else both unsigned `fu`
+  (each [x y] longs); an untyped operand leaves `lhs`."
+  [eval lhs rhs fs fu]
+  (if (and eval (typed? lhs) (typed? rhs))
+    (if (and (not (u? lhs)) (not (u? rhs)))
+      (fs (long lhs) (long rhs))
+      (fu (uv lhs) (uv rhs)))
+    lhs))
+
+(defn- relop [eval lhs rhs fs fu]
+  (if (if (and eval (typed? lhs) (typed? rhs))
+        (if (and (not (u? lhs)) (not (u? rhs))) (fs (long lhs) (long rhs)) (fu (uv lhs) (uv rhs)))
+        false)
+    1 0))
+
+(defn- ushl ^long [^long x ^long y] (if (or (neg? y) (>= y 64)) 0 (bit-shift-left x y)))
+(defn- sshr ^long [^long x ^long y] (if (or (neg? y) (>= y 64)) (if (neg? x) -1 0) (bit-shift-right x y)))
+(defn- ushr ^long [^long x ^long y] (if (or (neg? y) (>= y 64)) 0 (unsigned-bit-shift-right x y)))
+
+(declare expression conditional-expression)
+
+(defn- char-const-value
+  "charConstValue: a character constant's value (char signed, as on linux/amd64)."
+  ^long [^Cpp c ^Tok t]
+  (let [s (.-src t)
+        long? (= (.-ch t) :LONGCHARCONST)
+        s (cond long? (subs s 1) (.startsWith ^String s "u8") (subs s 2) :else s)
+        s (subs s 1 (dec (count s)))
+        byte? (not long?)
+        decode-esc (fn [^String s]
+                     ;; decodeEscapeSequence: [rune size], a negative rune a byte's value
+                     (if (= (count s) 1)
+                       [(long (int (.charAt s 0))) 1]
+                       (let [r (.charAt s 1)]
+                         (case r
+                           (\' \" \? \\) [(long (int r)) 2]
+                           \a [7 2] \b [8 2] \e [0x1b 2] \f [12 2] \n [10 2] \r [13 2] \t [9 2] \v [11 2]
+                           \x (loop [i 2 v 0 n 2]
+                                (if (and (< i (count s)) (< i 4) (Character/digit (.charAt s i) 16) (>= (Character/digit (.charAt s i) 16) 0))
+                                  (recur (inc i) (bit-or (bit-shift-left v 4) (Character/digit (.charAt s i) 16)) (inc n))
+                                  [(- (bit-and v 0xff)) n]))
+                           (\u \U) (let [q (fn [^long k] (Long/parseLong (subs s k (min (count s) (+ k 4))) 16))]
+                                     (try (if (= r \u) [(q 2) 6] [(bit-or (bit-shift-left (q 2) 16) (q 6)) 10])
+                                          (catch Exception _ [0 (count s)])))
+                           (if (or (< (int r) 48) (> (int r) 55))
+                             [(long (int r)) 2]
+                             (loop [i 1 v 0 n 1]
+                               (if (and (< i (count s)) (< i 4) (<= 48 (int (.charAt s i)) 55))
+                                 (recur (inc i) (bit-or (bit-shift-left v 3) (- (int (.charAt s i)) 48)) (inc n))
+                                 [(- v) n])))))))
+        [r byte?] (cond
+                    (= (count s) 1) [(long (int (.charAt s 0))) byte?]
+                    (and (pos? (count s)) (= (.charAt s 0) \\))
+                    (let [[r n] (decode-esc s)
+                          r (long r)]
+                      (when (not= (long n) (count s)) (eh c (str (pos-str t) ": invalid character constant")))
+                      [(if (neg? r) (- r) r)
+                       (and byte? (not (and (> (count s) 1) (#{\u \U} (.charAt s 1)))))])
+                    :else
+                    (let [bs (.getBytes ^String s "ISO-8859-1")
+                          [r n] (lex/decode-rune bs 0 (alength bs))]
+                      (when (not= (long n) (count s)) (eh c (str (pos-str t) ": invalid character constant")))
+                      [(long r) false]))]
+    (if (and byte? (>= r 0x80) (<= r 0xff)) (long (unchecked-byte r)) r)))
+
+(defn- int-const
+  "cpp.intConst: a pp-number's value, Long or UVal; Arbace: C23's binary constants, digit
+  separators and wb suffixes as gcc reads them."
+  [^Cpp c ^Tok t]
+  (let [s0 (src t)
+        s1 (.replace s0 "'" "")                           ; Arbace: digit separators (C23 6.4.4.1)
+        s (str/replace s1 #"(?i)(wb|uwb|u?wb)$" "")        ; Arbace: _BitInt's suffixes
+        wb (not= s s1)
+        s (str/replace s #"[uUlL]+$" "")
+        suffix (.toLowerCase ^String (subs s1 (count s)))
+        parse (fn [^String digits ^long radix]
+                (try (Long/parseUnsignedLong digits radix)
+                     (catch Exception _ (eh c (str (pos-str t) ": strconv.ParseUint: parsing \"" digits "\": invalid syntax")) nil)))
+        n (cond
+            (or (.startsWith s "0x") (.startsWith s "0X")) (parse (subs s 2) 16)
+            (or (.startsWith s "0b") (.startsWith s "0B")) (parse (subs s 2) 2) ; Arbace: C23 6.4.4.1
+            (.startsWith s "0") (parse s 8)
+            :else (parse s 10))]
+    (cond
+      (nil? n) 0
+      wb (if (.contains suffix "u") (UVal. n) n)
+      (#{"" "l" "ll"} suffix) (if (neg? (long n)) (UVal. n) n)
+      (#{"llu" "lu" "u" "ul" "ull"} suffix) (UVal. n)
+      :else (do (eh c (str (pos-str t) ": invalid integer suffix")) 0))))
+
+(defn- has-include?
+  "cpp.hasInclude: whether #include (or #include_next, `next`) would find `raw`."
+  [^Cpp c ^Tok t ^String raw next]
+  (let [quoted (and (.startsWith raw "\"") (.endsWith raw "\"") (> (count raw) 1))
+        angled (and (.startsWith raw "<") (.endsWith raw ">"))
+        nm (when (or quoted angled) (subs raw 1 (dec (count raw))))]
+    (cond
+      (nil? nm) (do (eh c (str (pos-str t) ": invalid argument")) false)
+      next (boolean (some #(has-file? c (join % nm)) (include-next-paths c)))
+      quoted (boolean (some (fn [v] (has-file? c (join (if (= v "") (let [f ^String (nth (lex/tok-position t) 0)
+                                                                         i (.lastIndexOf f "/")]
+                                                                     (if (neg? i) "" (subs f 0 (inc i))))
+                                                             v)
+                                                       nm)))
+                            (:include-paths (.-cfg c))))
+      :else (boolean (some #(has-file? c (join % nm)) (:sys (.-cfg c)))))))
+
+(declare embed-resource)
+
+(defn- primary-expression [^Cpp c ^Toks s eval]
+  (let [t (token s)]
+    (case (ch t)
+      (:CHARCONST :LONGCHARCONST) (do (ts-shift s) (char-const-value c t))
+      :IDENTIFIER
+      (do (ts-shift s)
+          (let [nm (src t)]
+            (cond
+              (#{"__has_include" "__has_include__" "__has_include_next" "__has_embed"} nm)
+              (if-not (= (ch (token s)) \()
+                (do (eh c (str (pos-str (token s)) ": expected '('"))
+                    (loop [] (ts-shift s) (case (ch (token s)) \) (do (ts-shift s) 0) :eof 0 (recur))))
+                (do (ts-shift s)
+                    (let [t1 (token s)
+                          arg (if (#{:STRINGLITERAL :HEADER_NAME} (ch t1))
+                                (do (ts-shift s) (src t1))
+                                (let [b (StringBuilder.)]
+                                  (loop [t1 t1]
+                                    (.append b (src t1))
+                                    (ts-shift s)
+                                    (let [t1 (token s)]
+                                      (if (or (#{\) :eof} (ch t1))
+                                              ;; Arbace: __has_embed's parameters follow the resource
+                                              (and (= nm "__has_embed") (= (ch t1) \>)))
+                                        (do (when (= (ch t1) \>) (.append b ">") (ts-shift s)) (.toString b))
+                                        (recur t1))))))]
+                      (if (= nm "__has_embed")
+                        ;; Arbace: C23's __has_embed (6.10.1): its parameters, balanced, to the parenthesis
+                        (let [params (loop [acc [] level 0]
+                                       (let [x (ts-shift s)]
+                                         (cond
+                                           (= (ch x) :eof) acc
+                                           (and (= (ch x) \)) (zero? level)) acc
+                                           (= (ch x) \() (recur (conj acc x) (inc level))
+                                           (= (ch x) \)) (recur (conj acc x) (dec level))
+                                           :else (recur (conj acc x) level))))]
+                          (embed-resource c t arg params true))
+                        (if (= (ch (token s)) \))
+                          (do (ts-shift s) (if (has-include? c t arg (= nm "__has_include_next")) 1 0))
+                          (do (eh c (str (pos-str (token s)) ": expected ')'")) 0))))))
+              ;; Arbace: true and false are 1 and 0 in C23's #if (6.10.1)
+              (and (= nm "true") (#{:c23 :gnu23} (:std (.-cfg c)))) 1
+              (= (rune-of s) \()
+              (loop [] (ts-shift s) (case (ch (token s)) (\) :eof) (do (ts-shift s) 0) (recur)))
+              :else 0)))
+      :PPNUMBER (do (ts-shift s) (int-const c t))
+      \( (do (ts-shift s)
+             (let [e (expression c s eval)]
+               (if (= (rune-of s) \))
+                 (do (ts-shift s) e)
+                 (do (eh c (str (pos-str t) ": unabalanced parenthesis")) 0))))
+      \# (do (eh c (str (pos-str t) ": assertions are a deprecated extension")) 0)
+      (do (eh c (str (pos-str t) ": internal error")) 0))))
+
+(defn- unary-expression [^Cpp c ^Toks s eval]
+  (case (ch (token s))
+    \+ (do (ts-shift s) (unary-expression c s eval))
+    \- (do (ts-shift s) (let [e (unary-expression c s eval)]
+                          (if (and eval (typed? e)) (if (u? e) (UVal. (- (uv e))) (unchecked-negate (long e))) e)))
+    \~ (do (ts-shift s) (let [e (unary-expression c s eval)]
+                          (if (and eval (typed? e)) (if (u? e) (UVal. (bit-not (uv e))) (bit-not (long e))) e)))
+    \! (do (ts-shift s) (let [e (unary-expression c s eval)]
+                          (if eval (if (and (typed? e) (zero? (uv e))) 1 0) e)))
+    (primary-expression c s eval)))
+
+(defn- left-assoc
+  "A left-associative level: `ops` maps a kind to [fs fu] or to a fn of [lhs rhs eval t]."
+  [^Cpp c ^Toks s eval next ops]
+  (loop [lhs (next c s eval)]
+    (let [t (token s)]
+      (if-let [f (ops (ch t))]
+        (do (ts-shift s)
+            (let [rhs (next c s eval)]
+              (recur (f lhs rhs eval t))))
+        lhs))))
+
+(defn- arith2
+  "A binary arithmetic operation: the signed result a Long, the unsigned an UVal."
+  [fs fu]
+  (fn [lhs rhs eval _]
+    (if (and eval (typed? lhs) (typed? rhs))
+      (if (and (not (u? lhs)) (not (u? rhs)))
+        (fs (long lhs) (long rhs))
+        (UVal. (long (fu (uv lhs) (uv rhs)))))
+      lhs)))
+
+(defn- divop [^Cpp c fs fu]
+  (fn [lhs rhs eval ^Tok t]
+    (if (and eval (typed? lhs) (typed? rhs))
+      (if (zero? (uv rhs))
+        (do (eh c (str (pos-str t) ": division by zero")) lhs)
+        (if (and (not (u? lhs)) (not (u? rhs)))
+          (fs (long lhs) (long rhs))
+          (UVal. (long (fu (uv lhs) (uv rhs))))))
+      lhs)))
+
+(defn- multiplicative-expression [^Cpp c s eval]
+  (left-assoc c s eval unary-expression
+              {\* (arith2 (fn [^long x ^long y] (unchecked-multiply x y)) (fn [^long x ^long y] (unchecked-multiply x y)))
+               \/ (divop c (fn [^long x ^long y] (if (and (= x Long/MIN_VALUE) (= y -1)) x (quot x y))) (fn [^long x ^long y] (Long/divideUnsigned x y)))
+               \% (divop c (fn [^long x ^long y] (if (= y -1) 0 (rem x y))) (fn [^long x ^long y] (Long/remainderUnsigned x y)))}))
+
+(defn- additive-expression [^Cpp c s eval]
+  (left-assoc c s eval multiplicative-expression
+              {\+ (arith2 (fn [^long x ^long y] (unchecked-add x y)) (fn [^long x ^long y] (unchecked-add x y)))
+               \- (arith2 (fn [^long x ^long y] (unchecked-subtract x y)) (fn [^long x ^long y] (unchecked-subtract x y)))}))
+
+(defn- shift-expression [^Cpp c s eval]
+  (left-assoc c s eval additive-expression
+              {:LSH (fn [lhs rhs eval _]
+                      ;; cc: x << uint(y), the result the left operand's type unless the right is unsigned and the left signed
+                      (if (and eval (typed? lhs) (typed? rhs))
+                        (cond
+                          (and (not (u? lhs)) (not (u? rhs))) (ushl (long lhs) (long rhs))
+                          (not (u? lhs)) (UVal. (ushl (long lhs) (uv rhs)))
+                          :else (UVal. (ushl (uv lhs) (uv rhs))))
+                        lhs))
+               :RSH (fn [lhs rhs eval _]
+                      (if (and eval (typed? lhs) (typed? rhs))
+                        (cond
+                          (and (not (u? lhs)) (not (u? rhs))) (sshr (long lhs) (long rhs))
+                          (not (u? lhs)) (UVal. (ushr (long lhs) (uv rhs)))
+                          :else (UVal. (ushr (uv lhs) (uv rhs))))
+                        lhs))}))
+
+(defn- rel [fs fu] (fn [lhs rhs eval _] (relop eval lhs rhs fs fu)))
+
+(defn- relational-expression [^Cpp c s eval]
+  (left-assoc c s eval shift-expression
+              {\< (rel < (fn [x y] (neg? (Long/compareUnsigned x y))))
+               \> (rel > (fn [x y] (pos? (Long/compareUnsigned x y))))
+               :LEQ (rel <= (fn [x y] (<= (Long/compareUnsigned x y) 0)))
+               :GEQ (rel >= (fn [x y] (>= (Long/compareUnsigned x y) 0)))}))
+
+(defn- equality-expression [^Cpp c s eval]
+  (left-assoc c s eval relational-expression
+              {:EQ (rel = =) :NEQ (rel not= not=)}))
+
+(defn- bitop [f] (arith2 f f))
+
+(defn- and-expression [^Cpp c s eval]
+  (left-assoc c s eval equality-expression {\& (bitop (fn [^long x ^long y] (bit-and x y)))}))
+(defn- exclusive-or-expression [^Cpp c s eval]
+  (left-assoc c s eval and-expression {\^ (bitop (fn [^long x ^long y] (bit-xor x y)))}))
+(defn- inclusive-or-expression [^Cpp c s eval]
+  (left-assoc c s eval exclusive-or-expression {\| (bitop (fn [^long x ^long y] (bit-or x y)))}))
+
+(defn- logical-and-expression [^Cpp c ^Toks s eval]
+  (loop [lhs (inclusive-or-expression c s eval) eval eval]
+    (if (= (rune-of s) :ANDAND)
+      (do (ts-shift s)
+          (let [eval (if (is-zero? c lhs) false eval)
+                rhs (inclusive-or-expression c s eval)]
+            (recur (if (or (is-zero? c lhs) (is-zero? c rhs)) 0 lhs) eval)))
+      lhs)))
+
+(defn- logical-or-expression [^Cpp c ^Toks s eval]
+  (loop [lhs (logical-and-expression c s eval) eval eval]
+    (if (= (rune-of s) :OROR)
+      (do (ts-shift s)
+          (let [eval (if (is-non-zero? lhs) false eval)
+                rhs (logical-and-expression c s eval)]
+            (recur (if (or (is-non-zero? lhs) (is-non-zero? rhs)) 1 lhs) eval)))
+      lhs)))
+
+(defn- conditional-expression [^Cpp c ^Toks s eval]
+  (let [e (logical-or-expression c s eval)]
+    (if (= (rune-of s) \?)
+      (do (ts-shift s)
+          (let [nz (is-non-zero? e)
+                e2 (conditional-expression c s nz)
+                t (token s)]
+            (if-not (= (ch t) \:)
+              (do (eh c (str (pos-str t) ": expected ':'")) e)
+              (do (ts-shift s)
+                  (let [e3 (conditional-expression c s (not nz))
+                        [e2 e3] (cond
+                                  (and (instance? Long e2) (u? e3)) [(UVal. (long e2)) e3]
+                                  (and (u? e2) (instance? Long e3)) [e2 (UVal. (long e3))]
+                                  :else [e2 e3])]
+                    (if nz e2 e3))))))
+      e)))
+
+(defn- expression [^Cpp c ^Toks s eval]
+  (loop []
+    (let [r (conditional-expression c s eval)]
+      (if (= (rune-of s) \,) (do (ts-shift s) (recur)) r))))
+
+(defn- eval-if
+  "cpp.eval: a #if's tokens expanded and evaluated: Long, UVal or nil."
+  [^Cpp c s0]
+  (let [w (ArrayList.)]
+    (expand c false true (toks (tokens->cpp s0 false)) w)
+    (let [p (toks w)]
+      (skip-blank p)
+      (if (zero? (.size ^ArrayList (.-a p)))
+        (do (eh c (str (pos-str (first s0)) ": expected expression")) 0)
+        (let [v (expression c p true)
+              t (token p)]
+          (if (#{:eof \#} (ch t))
+            v
+            (do (eh c (str (pos-str t) ": unexpected " (lex/kind-name (ch t)))) nil)))))))
+
+(defn- if-group?
+  "cpp.ifGroup: whether an #if, #ifdef or #ifndef's group is taken."
+  [^Cpp c line]
+  (let [ln (pop line)
+        verb (src (ln 1))]
+    (cond
+      (#{"ifdef" "ifndef" "elifdef" "elifndef"} verb)
+      (if (< (count ln) 3)
+        (do (eh c (str (pos-str (ln 1)) ": expected identifier")) false)
+        (let [d (is-defined? c (ln 2) (src (ln 2)))]
+          (if (#{"ifdef" "elifdef"} verb) d (not d))))
+      :else
+      (if (< (count ln) 3)
+        (do (eh c (str (pos-str (ln 1)) ": expected expression")) false)
+        (is-non-zero? (eval-if c (subvec ln 2)))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; #include, #include_next, #embed
+
+(defn include-next-paths
+  "cpp.includeNextPaths: the system paths after the one the current file was found in."
+  [^Cpp c]
+  (let [sys (:sys (.-cfg c))
+        ^Included cur (slot c INCLUDED)]
+    (or (when cur
+          (let [using (clean (.-using cur))
+                i (.indexOf ^java.util.List sys using)]
+            (when (>= i 0) (subvec sys (inc i)))))
+        sys)))
+
+(defn- include-arg
+  "cpp.includeArg: the header name of an #include's expanded tokens: \"...\", <...>, or \"\"."
+  ^String [s]
+  (let [^Tok t (first s)]
+    (case (ch t)
+      (:STRINGLITERAL :HEADER_NAME) (src t)
+      \< (let [b (StringBuilder. (src t))]
+           (loop [s (next s)]
+             (when s
+               (let [^Tok t (first s)]
+                 (.append b (src t))
+                 (when-not (= (ch t) \>) (recur (next s))))))
+           (.toString b))
+      "")))
+
+(defn- enter!
+  "A file's groups pushed after the included marker, as cpp.include does."
+  [^Cpp c g ^String using]
+  (push! c (slot c INCLUDED))
+  (slot! c INCLUDED (Included. using))
+  (push! c [:leave])
+  (slot! c DEPTH (inc (long (slot c DEPTH))))
+  (push! c g))
+
+(defn- include!
+  "cpp.include and cpp.includeNext: an #include's file found and entered (an error when not, the
+  unit closed as cc closes it)."
+  [^Cpp c line next]
+  (let [^Tok verb (line 1)]
+    (cond
+      (< (count line) 3) (eh c (str (pos-str verb) ": missing argument"))
+      (>= (long (slot c DEPTH)) max-include-level) ; Arbace: cc's own count is never above 1
+      (do (eh c (str (pos-str verb) ": #include nested depth " max-include-level " exceeds maximum"))
+          (slot! c CLOSED true))
+      :else
+      (let [w (ArrayList.)
+            _ (expand c false true (toks (tokens->cpp (subvec line 2) true)) w)
+            s (vec w)]
+        (if (empty? s)
+          (do (eh c (str (pos-str verb) ": #include expects \"FILENAME\" or <FILENAME>")) (slot! c CLOSED true))
+          (let [raw (include-arg s)
+                quoted (and (> (count raw) 1) (.startsWith raw "\"") (.endsWith raw "\""))
+                angled (and (> (count raw) 1) (.startsWith raw "<") (.endsWith raw ">"))
+                nm (when (or quoted angled) (subs raw 1 (dec (count raw))))
+                ^Tok s0 (s 0)]
+            (if-not nm
+              (do (eh c (str (pos-str s0) ": invalid argument")) (slot! c CLOSED true))
+              (let [paths (cond
+                            next (map (fn [v] [(clean v) (clean v)]) (include-next-paths c))
+                            quoted (map (fn [v] (let [d (if (or (= v "") (= v "@"))
+                                                          (dir-of (nth (lex/tok-position (line 2)) 0))
+                                                          v)]
+                                                  [d d]))
+                                        (:include-paths (.-cfg c)))
+                            :else (map (fn [v] [v v]) (:sys (.-cfg c))))
+                    found (some (fn [[dir using]]
+                                  (let [pth (join dir nm)]
+                                    (when-let [g (group c pth nil)] [g pth using])))
+                                paths)]
+                (if-let [[g pth using] found]
+                  (if (.contains ^HashSet (.-once c) pth)
+                    nil ; Arbace: #pragma once (gcc's), which cc ignores
+                    (enter! c g using))
+                  (do (eh c (str (pos-str s0) ": include file not found: " raw)) (slot! c CLOSED true)))))))))))
+
+(declare embed-params)
+
+(defn- param-value
+  "Arbace: an #embed parameter's integer, its tokens expanded and evaluated as #if's are."
+  ^long [^Cpp c body]
+  (let [w (ArrayList.)]
+    (expand c false true (toks body) w)
+    (let [p (toks w)]
+      (skip-blank p)
+      (let [v (if (zero? (.size ^ArrayList (.-a p))) 0 (or (expression c p true) 0))]
+        (cond
+          (u? v) (if (neg? (uv v)) Long/MAX_VALUE (uv v)) ; beyond any resource's length
+          (neg? (long v)) (do (eh c (str (pos-str (first body)) ": negative embed parameter operand")) 0)
+          :else (long v))))))
+
+(defn- embed-resource
+  "Arbace: C23's #embed resource (6.10.4) found: as `has?` (__has_embed) its answer (0 not found, 1
+  found, 2 empty), else its bytes (gnu::offset(N) skipped, limit(N) kept), nil when not found."
+  [^Cpp c ^Tok t ^String raw params has?]
+  (if (< (count raw) 2)
+    (if has? 0 nil)
+    (let [quoted (.startsWith raw "\"")
+          nm (subs raw 1 (dec (count raw)))
+          cur (nth (or (lex/tok-position t) ["" 0 0]) 0)
+          ;; gcc's search: a quoted name the current file's directory first, then the --embed-dirs; an
+          ;; absolute name itself
+          dirs (if (.startsWith nm "/")
+                 [""]
+                 (concat (when quoted [(dir-of cur)]) (:embed-dirs (.-cfg c))))
+          ps (embed-params params)
+          known #{"limit" "prefix" "suffix" "if_empty" "gnu::offset" "gnu::base64"}
+          ;; gcc: gnu::base64 only on "." and without limit or gnu::offset
+          b64 (when (and quoted (= nm ".") (contains? ps "gnu::base64")
+                         (not (contains? ps "limit")) (not (contains? ps "gnu::offset")))
+                (let [ts (filter #(= (ch %) :STRINGLITERAL) (get ps "gnu::base64"))]
+                  (try (.decode (java.util.Base64/getDecoder)
+                                ^String (apply str (map #(let [x (src %)] (subs x 1 (dec (count x)))) ts)))
+                       (catch Exception _ nil))))
+          ;; gcc: a parameter it does not know makes the resource not found
+          f (when (and (every? known (keys ps)) (or b64 (not (contains? ps "gnu::base64"))))
+              (if b64 :base64 (some (fn [d] (let [p (join d nm)] (when (has-file? c p) p))) dirs)))
+          limit (when-let [b (get ps "limit")] (param-value c b))
+          offset (when-let [b (get ps "gnu::offset")] (param-value c b))
+          bs (cond (= f :base64) b64 f (lex/read-bytes (.getPath (resolve-file c f))))
+          bs (if (and bs offset (pos? (long offset)))
+               (if (< (long offset) (alength ^bytes bs))
+                 (java.util.Arrays/copyOfRange ^bytes bs (int offset) (alength ^bytes bs))
+                 (byte-array 0))
+               bs)
+          bs (if (and bs limit (< (long limit) (alength ^bytes bs))) (java.util.Arrays/copyOf ^bytes bs (int limit)) bs)]
+      (if has?
+        (cond (nil? bs) 0 (zero? (alength ^bytes bs)) 2 :else 1)
+        bs))))
+
+(defn- embed-params
+  "Arbace: an #embed's parameters: {name tokens}, the tokens of prefix(...), suffix(...), if_empty(...)."
+  [toks]
+  (loop [ts (vec (remove #(= (ch %) \space) toks)) acc {}]
+    (if (empty? ts)
+      acc
+      (let [^Tok t (ts 0)
+            [nm ts] (if (and (= (ch t) :IDENTIFIER) (> (count ts) 3) (= (ch (ts 1)) \:) (= (ch (ts 2)) \:))
+                      [(str (src t) "::" (src (ts 3))) (subvec ts 4)]
+                      [(src t) (subvec ts 1)])
+            nm (str/join "::" (map #(str/replace % #"^__(.*)__$" "$1") (str/split nm #"::")))]
+        (if (and (seq ts) (= (ch (ts 0)) \())
+          (let [[body rest] (loop [i 1 level 0]
+                              (cond
+                                (>= i (count ts)) [(subvec ts 1) []]
+                                (= (ch (ts i)) \() (recur (inc i) (inc level))
+                                (and (= (ch (ts i)) \)) (zero? level)) [(subvec ts 1 i) (subvec ts (inc i))]
+                                (= (ch (ts i)) \)) (recur (inc i) (dec level))
+                                :else (recur (inc i) level)))]
+            (recur rest (assoc acc nm body)))
+          (recur ts (assoc acc nm [])))))))
+
+(defn- embed!
+  "Arbace: C23's #embed: its resource's bytes as a line of integer constants, with its prefix and
+  suffix, or if_empty's tokens (6.10.4)."
+  [^Cpp c line]
+  (let [^Tok verb (line 1)
+        w (ArrayList.)
+        _ (expand c false true (toks (tokens->cpp (subvec (pop line) 2) true)) w)
+        s (vec w)
+        raw (if (seq s) (include-arg s) "")
+        n-arg (if (and (seq s) (= (ch (s 0)) \<)) (inc (count (take-while #(not= (ch %) \>) s))) 1)
+        params (embed-params (drop n-arg s))
+        bs (when (seq raw) (embed-resource c (if (seq s) (s 0) verb) raw (drop n-arg s) false))
+        nl (peek line)]
+    (record! c {:directive "embed" :pos (lex/tok-position (line 0)) :text (line-text line) :resource raw})
+    (if (nil? bs)
+      (do (eh c (str (pos-str verb) ": " raw ": No such file or directory")) (slot! c CLOSED true))
+      (let [at (line 0)
+            nums (if (zero? (alength ^bytes bs))
+                   (get params "if_empty" [])
+                   (concat (get params "prefix" [])
+                           (interpose (Tok. \, "," "" (.-pf ^Tok at) (.-po ^Tok at) nil nil)
+                                      (map (fn [b] (num-tok at (str (bit-and (long b) 0xff)))) bs))
+                           (get params "suffix" [])))]
+        (push! c [:text (conj (vec nums) nl)])))))
+
+;; ---------------------------------------------------------------------------------------------
+;; #define, #undef
+
+(defn- parse-macro-params
+  "cpp.parseMacroParams: [params replacement-list min-args var-arg], nil params when malformed."
+  [^Cpp c ln]
+  (let [lpar (first ln)]
+    (loop [ln (subvec ln 1) fp [] min-args 0 va -1]
+      (if (empty? ln)
+        (do (eh c (str (pos-str lpar) ": macro paramater list is missing final ')'")) [nil [] -1 -1])
+        (let [^Tok t (ln 0)]
+          (case (.-ch t)
+            \) [fp (subvec ln 1) min-args va]
+            :IDENTIFIER
+            (let [fp (conj fp t) min-args (inc min-args) ln (subvec ln 1)]
+              (if (empty? ln)
+                (recur ln fp min-args va)
+                (case (ch (ln 0))
+                  \) (recur ln fp min-args va)
+                  \, (recur (subvec ln 1) fp min-args va)
+                  :DDD (if (>= va 0)
+                         (do (eh c (str (pos-str (ln 0)) ": multiple var arguments")) [nil [] -1 -1])
+                         (recur (subvec ln 1) fp min-args (dec (count fp))))
+                  (do (eh c (str (pos-str (ln 0)) ": unexpected " (lex/kind-name (ch (ln 0))))) [nil [] -1 -1]))))
+            :DDD
+            (if (>= va 0)
+              (do (eh c (str (pos-str t) ": multiple var arguments")) [nil [] -1 -1])
+              (let [va (count fp) ln (subvec ln 1)]
+                (if (and (seq ln) (not= (ch (ln 0)) \)))
+                  (recur [] fp min-args va)
+                  (recur ln fp min-args va))))
+            (do (eh c (str (pos-str t) ": unexpected " (lex/kind-name (.-ch t)))) [nil [] -1 -1])))))))
+
+(defn- define-macro! [^Cpp c ^Tok nm params rl min-args var-arg fn-like]
+  (let [s (src nm)]
+    (when (or (not (protected-macros s)) (= (nth (lex/tok-position nm) 0) "<predefined>"))
+      (.put ^HashMap (.-macros c) s (new-macro nm params rl min-args var-arg fn-like)))))
+
+(defn- define! [^Cpp c line]
+  (let [^Tok def (line 1)
+        ln (subvec line 2)]
+    (if (empty? ln)
+      (eh c (str (pos-str def) ": missing macro name"))
+      (let [nm (ln 0)
+            ln (subvec ln 1)]
+        (if (and (= (ch (ln 0)) \() (not (has-sep? (ln 0))))
+          (let [[fp rl0 min-args va] (parse-macro-params c (pop ln))]
+            (define-macro! c nm fp (tokens->cpp (trim rl0) true) min-args va true))
+          (define-macro! c nm nil (tokens->cpp (trim (pop ln)) true) -1 -1 false))))))
+
+(defn- undef! [^Cpp c line]
+  (when (>= (count line) 3)
+    (let [nm (src (line 2))]
+      (when-not (protected-macros nm)
+        (.add ^HashSet (.-undefs c) nm)
+        (.remove ^HashMap (.-macros c) nm)))))
+
+(defn- pragma! [^Cpp c x]
+  (let [x (vec x)
+        verb (src (x 2))
+        nm (fn [] (when (and (>= (count x) 6) (= (ch (x 3)) \() (= (ch (x 4)) :STRINGLITERAL) (= (ch (x 5)) \)))
+                    (let [s (src (x 4))] (subs s 1 (dec (count s))))))]
+    (case verb
+      "push_macro" (when-let [n (nm)]
+                     (.put ^HashMap (.-mstack c) n (conj (or (.get ^HashMap (.-mstack c) n) []) (.get ^HashMap (.-macros c) n))))
+      "pop_macro" (when-let [n (nm)]
+                    (let [s (.get ^HashMap (.-mstack c) n)]
+                      (when (seq s)
+                        (let [m (peek s)]
+                          (if (nil? m) (.remove ^HashMap (.-macros c) n) (.put ^HashMap (.-macros c) n m))
+                          (.put ^HashMap (.-mstack c) n (pop s))))))
+      ;; Arbace: #pragma once (gcc's; cc ignores it)
+      "once" (when-let [^CFile f (.-pf ^Tok (x 0))] (.add ^HashSet (.-once c) (.-name f)))
+      nil)))
+
+;; ---------------------------------------------------------------------------------------------
+;; The machine (cpp.nextLine)
+
+(defn- main-file? [^Cpp c ^Tok t] (when-let [^CFile f (.-pf t)] (= (.-name f) (slot c MAIN))))
+
+(defn- record-directive! [^Cpp c line & kvs]
+  (let [^Tok t (first line)]
+    (when (main-file? c t)
+      (record! c (into {:directive (src (second line)) :pos (lex/tok-position t) :text (line-text line)} (apply hash-map kvs))))))
+
+(defn next-line
+  "cpp.nextLine: the next text line, the directives before it executed."
+  [^Cpp c]
+  (loop []
+    (let [x (slot c TOS)]
+      (cond
+        (nil? x)
+        (let [srcs (slot c SOURCES)]
+          (if (empty? srcs)
+            [(slot c EOFLINE)]
+            (let [[nm text] (first srcs)]
+              (slot! c SOURCES (rest srcs))
+              (if-let [g (group c nm text)]
+                (push! c g)
+                (eh c (str "open " nm ": no such file or directory")))
+              (recur))))
+
+        (instance? Included x) (do (slot! c INCLUDED x) (pop-tos! c) (recur))
+
+        (map? x)
+        (cond
+          (:if x)
+          (let [[line g] (:if x)]
+            (if (if-group? c line)
+              (do (record-directive! c line :taken true) (slot! c TOS g))
+              (do (record-directive! c line :taken false)
+                  (cond
+                    (seq (:elifs x)) (slot! c TOS (assoc x :if nil))
+                    (:else x) (do (record-directive! c (first (:else x)) :taken true) (slot! c TOS (second (:else x))))
+                    :else (pop-tos! c))))
+            (recur))
+          (seq (:elifs x))
+          (let [[line g] (first (:elifs x))]
+            (if (if-group? c line)
+              (do (record-directive! c line :taken true) (slot! c TOS g))
+              (do (record-directive! c line :taken false) (slot! c TOS (update x :elifs rest))))
+            (recur))
+          (:else x) (do (record-directive! c (first (:else x)) :taken true) (slot! c TOS (second (:else x))) (recur))
+          :else (do (pop-tos! c) (recur)))
+
+        :else
+        (let [x ^arbace.lang.IPersistentVector x]
+          (if (or (empty? x) (not (keyword? (x 0))))
+            ;; a group
+            (if (empty? x)
+              (do (pop-tos! c) (recur))
+              (do (slot! c TOS (subvec x 1)) (push! c (x 0)) (recur)))
+            (case (x 0)
+              :leave (do (slot! c DEPTH (dec (long (slot c DEPTH)))) (pop-tos! c) (recur))
+              :text (do (pop-tos! c) (x 1))
+              :nondir (do (pop-tos! c) (record-directive! c (x 1)) (recur))
+              :eof (do (slot! c EOFLINE (x 1))
+                       (if (zero? (.size ^ArrayList (.-stack c)))
+                         [(x 1)]
+                         (do (pop-tos! c) (recur))))
+              :control
+              (let [line (x 1)]
+                (pop-tos! c)
+                (when (>= (count line) 3)
+                  (let [verb (src (line 1))]
+                    (when-not (= (count x) 3) (record-directive! c line))
+                    (case verb
+                      "define" (define! c line)
+                      "undef" (undef! c line)
+                      "include" (include! c line false)
+                      "include_next" (include! c line true)
+                      "pragma" (do (when (= (count x) 3)
+                                     (record! c {:directive "_Pragma" :pos (lex/tok-position (line 0)) :text (line-text line)}))
+                                   (pragma! c line))
+                      "line" nil
+                      "error" (eh c (str (pos-str (line 1)) ": "
+                                         (apply str (map-indexed (fn [i ^Tok v] (str (when (and (pos? i) (has-sep? v)) " ") (.-src v)))
+                                                                 (subvec (pop line) 2)))))
+                      ;; Arbace: #warning (C23 6.10.7), a warning of the read
+                      "warning" (.add ^ArrayList (.-warns c) (str (pos-str (line 1)) ": " (line-text (pop line))))
+                      "embed" (embed! c line)
+                      (eh c (str (pos-str (line 0)) ": unknown directive " verb)))))
+                (recur)))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The stream (cpp.rune, cpp.shift, tokenizer.token; cc's Preprocess)
+
+(defn- new-cpp ^Cpp [cfg sources ^String main]
+  (let [o (object-array 10)]
+    (aset o SOURCES sources)
+    (aset o DEPTH (Long/valueOf 0))
+    (aset o MAIN main)
+    (aset o EOFLINE lex/eof-tok)
+    (let [c (Cpp. (assoc cfg :include-paths (into [""] (concat (:include cfg) (:sys cfg))))
+                  (HashMap.) (HashMap.) (HashMap.) (HashSet.) (ArrayList.) o (ArrayList.) (ArrayList.)
+                  (ArrayList.) (HashMap.) (HashSet.))
+          q (ArrayList.)
+          tz (Tkz. c (ArrayList.) (long-array 1) (ArrayList.) (long-array 1) nil)]
+      (.add q tz)
+      (aset o TOKENIZER [tz (Dq. q)])
+      c)))
+
+(defn- next-token
+  "tokenizer.token: the next token of the stream."
+  ^Tok [^Cpp c]
+  (let [[^Tkz tz dq] (slot c TOKENIZER)
+        ^ArrayList out (.-out tz) ^longs oh (.-oh tz)]
+    (loop []
+      (when (>= (aget oh 0) (.size out))
+        (.clear out) (aset oh 0 0)
+        (expand c true false dq out)
+        (recur)))
+    (let [^Tok t (.get out (int (aget oh 0)))]
+      (when-not (= (.-ch t) :eof) (aset oh 0 (inc (aget oh 0))))
+      t)))
+
+(defn preprocess
+  "The translation unit of the file `name` (read relative to (:base cfg)) preprocessed as cc does it,
+  with `cfg`'s configuration: {:tokens [Tok ...] :errors [...] :warnings [...] :layer [...]}. The
+  tokens are the stream cc's Preprocess writes (with its `\\space` and `\\newline` tokens), the eof
+  not among them."
+  [cfg ^String name]
+  (let [c (new-cpp cfg [["<predefined>" (:predefined cfg)] [name nil]] name)
+        out (ArrayList.)]
+    (try
+      (loop []
+        (when-not (slot c CLOSED)
+          (let [t (next-token c)]
+            (when-not (= (ch t) :eof)
+              (.add out t)
+              (recur)))))
+      (catch StackOverflowError _ (slot! c CLOSED :panic) (eh c "stack overflow"))
+      (catch Exception e
+        (if (:panic (ex-data e)) (do (.add ^ArrayList (.-warns c) (str "panic: " (ex-message e))) (slot! c CLOSED :panic)) (throw e))))
+    {:tokens (vec out) :errors (vec (.-errs c)) :warnings (vec (.-warns c)) :layer (vec (.-layer c))
+     :panic (= (slot c CLOSED) :panic)}))
+
+(defn dump
+  "The preprocessed stream in tools/ccdump's mode pp: a line a token, then the errors."
+  ^String [r]
+  (let [b (StringBuilder.)]
+    (doseq [t (:tokens r)]
+      (.append b (lex/dump-line t false))
+      (.append b "\t")
+      (when-let [m (.-m ^Tok t)] (.append b (src (:name m))))
+      (.append b "\n"))
+    (doseq [e (:errors r)] (.append b "#error\t") (.append b (lex/esc e)) (.append b "\n"))
+    (when (:panic r) (.append b "#panic\n"))
+    (.toString b)))
+
+(defn text
+  "The stream as text, as cc's Preprocess writes it (a space where adjacent tokens would join)."
+  ^String [r]
+  (let [b (StringBuilder.)
+        joins #{[\# \#] [\& \&] [\+ \+] [\+ :PPNUMBER] [\- \-] [\- :PPNUMBER] [\. \.] [\. :PPNUMBER]
+                [\< \<] [\= \!] [\= \%] [\= \&] [\= \*] [\= \+] [\= \/] [\= \<] [\= \=] [\= \^] [\= \|]
+                [\> \-] [\> \>] [\| \|] [:DEC \-] [:IDENTIFIER :IDENTIFIER] [:INC \+]}]
+    (loop [prev nil ts (seq (:tokens r))]
+      (when ts
+        (let [^Tok t (first ts) k (.-ch t)]
+          (when (joins [k prev]) (.append b " "))
+          (if (and (= prev \space) (= k \space))
+            (recur prev (next ts))
+            (do (.append b (.-src t)) (recur k (next ts)))))))
+    (.toString b)))
