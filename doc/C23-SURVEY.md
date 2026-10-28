@@ -32,7 +32,8 @@ Words used throughout:
 Contents: Executive summary · 1 What parity means for C · 2 Prior art · 3 Measurements · 4 C forms ·
 5 repr/c: read and print · 6 eval: ci · 7 AOT · 8 The oracle and the corpora · 9 Licenses, the host,
 the box · 10 The fourth row · 11 Plan (C1-C9) · 12 Proposals (CS1-CS24) · 13 What the user decides
-first · 14 Risks · 15 Sources · Appendix A: the scratch.
+first · 14 Risks · 15 Sources · Appendix A: the scratch · Decided (2026-10-28): CS1-CS24 · C1: the plan
+after CS4 (b) (with CS30-CS43).
 
 ## Executive summary
 
@@ -1086,3 +1087,343 @@ The user decided the survey's proposals, C23 to start after `arbace-reaps-3-crop
   **CS17: (a)** (`arbace.repr.c`, ci, `crt`, cf2g).
 - The rest as recommended: CS1 (a), CS6 (a), CS7 (a), CS8 (a), CS10 (a), CS13 (a), CS16 (a), CS18 (a),
   CS19 (a), CS20 (a), CS21 (a), CS23 (a), CS24 (a).
+
+## C1: the plan after CS4 (b)
+
+C1, the spec, on the branch `c23-c1` from main `041b8242`, 2026-10-28: **doc/c/SPEC.md** (the C forms,
+for the user's acceptance, C1's exit criterion), **test/c/corpora.edn** (every corpus of §8.2 with its
+pin, and the gcc 15.2 groups it adds), and this section: the plan revised for CS4 (b), the oracle's setup,
+and proposals CS30-CS43. No code under `arbace/`, `go/` or `bin/` changed; nothing of go-whim, musl or
+gcc entered the tree (CS22 is open: CS37). The probes were light (gcc and clang on single files, the
+Arbace reader of the main checkout's stage 0 on the spec's forms blocks); the scratch is the worktree's
+`.tmp/c1/` (below).
+
+### C1.1 What C1 found
+
+- **F1 Two of §4's spellings do not read, three were ambiguous.** `(?: c a b)` (a symbol cannot end in
+  `:`) and `(array ^:static 3 T)` (a number cannot carry metadata) are refused by the reader; `(lit T 1
+  2)` for a compound literal clashed with CS7's `(lit unsigned 42)`, `(struct ^:anon {fields})` held
+  members in a map, and type symbols such as `bool`, `int128`, `float32`, `decimal64` are legal
+  identifiers of older C (`typedef int bool;`). SPEC §17.1 lists the twelve changes (A1-A12); every
+  forms block of the spec (23 blocks) reads with Arbace's reader, and its six C programs build with
+  gcc 15.2 (`-std=c23 -pedantic-errors -Wall`; the GNU one `-std=gnu23`) and print what §16 says.
+- **F2 gcc 15.2 has no `c2x-*` tests.** gcc 14 renamed them `c23-*`: `gcc.dg/c23-*.c` is 270 files (dg-do
+  compile 208 and one by default, run 50, preprocess 11; 102 with `dg-error`), `gcc.dg/cpp/c23-*.c` 16
+  (preprocess 10, compile 5, run 1), and 30 more `c23-*` in `gcc.dg/{atomic,dfp,format,torture}`. C23's
+  other tests are named by feature: `gnu23-*` (51), `#embed`'s `embed*` (47, in `gcc.dg/cpp` and
+  `c-c++-common/cpp`), `va-opt*` (12), `bitint-*` (201). CS33.
+- **F3 musl 1.2.6's headers are not C23's, and on the host they come first.** The reference's search
+  list is `/usr/include/fortify`, `/usr/include` (musl's), then gcc's `include`; musl's `<stddef.h>`
+  has no `nullptr_t` and no `unreachable()`, its `<stdarg.h>` no one-argument `va_start`, its
+  `<limits.h>` no `BITINT_MAXWIDTH`, and no `<stdbit.h>` exists (gcc's own headers have the first four;
+  `<stdckdint.h>` is gcc's). With gcc's include directory first (`-isystem`), a C23 file using them
+  builds. CS32.
+- **F4 gcc and clang evaluate a call's arguments in opposite orders.** `g(f(1), f(2), f(3))` calls
+  `f(3)` first under gcc 15.2 at `-O0` and `-O2`, `f(1)` first under clang 23. Unspecified (6.5), and
+  any program printing from its arguments' evaluation shows it. CS31.
+- **F5 `/root/musl` is not the 1.2.6 release.** Against the fetched tarball 34 files differ and one is
+  extra (`src/locale/gb18030utf.h`); the tarball's `include/` equals the host's `/usr/include` but for
+  `libintl.h` and `paths.h` (Alpine's patches). CS12 (a) stands: the tarball is the source.
+- **F6 Where the reference and clang part** (the classes' material, SPEC §9.1, §13.1, §14):
+  `__has_c_attribute` gives 202311 for every standard attribute under gcc, the papers' dates under clang
+  (and 0 for `unsequenced`); clang 23 rejects storage classes in a compound literal and `_Decimal64` on
+  the target; `(unsigned long)1e20` is 0 under gcc and 2^63 under clang; `enum { A0, A1 }` is `unsigned
+  int` under both.
+
+### C1.2 The plan, C2-C9
+
+CS4 (b) replaces the survey's C2 and C3 (cc vendored as Go forms, interpreted by goi, then listed in
+goi's table and compiled) by a port, as JN8 ported javac's lexer and parser: cc's lexer, preprocessor,
+parser and go-whim's C23 delta rewritten in Arbace namespaces, their output checked against cc's run as
+the oracle, tree for tree. The converter and the printer, which were C2's and C3's second halves, become
+C3b (CS42 (a): CS1's names kept). C4-C9 are as §11 had them.
+
+What is ported (go-whim `80c49bf5`, `crefactor/cc`; the delta is 461 added and 66 removed lines of
+`diff -ru` against upstream v4.29.7 in the upstream files, and `c23.go`'s 296):
+
+| cc's file | lines | into | what |
+|---|---:|---|---|
+| `scanner.go` | 1,026 | `arbace.repr.c.lex` | phases 1-3: splices, pp-tokens with their separators (white space and comments) and sources, digit separators, `u8'a'`; and what cc's scanner refuses (`u'x'`, `U"x"`, survey §2.1) |
+| `cpp.go` (with `#if`'s arithmetic from `value.go`) | 3,093 (+ about 300) | `arbace.repr.c.pp` | directives, macro expansion, `#if`, `__has_include`, include guards; and C23's directives cc lacks (E3): `#elifdef`, `#elifndef`, `#embed` and `__has_embed`, `__VA_OPT__`, `__has_c_attribute`, `#warning` |
+| `parser.go`, `c23.go`, the hooks in `ast.go` | 4,037 + 296 | `arbace.repr.c.parse` | the recursive descent with its typedef scopes, C23's productions |
+| `ast.go`, `ast2.go` (generated) | 5,652 | a table in `arbace.repr.c.tree` | 85 node types and their cases as data: each node a map of `:node`, `:case`, its tokens and children under cc's field names (JN8.1's trees as data) |
+| `cc.go`, `etc.go`, `host.go` (the parts the front end needs) | about 800 of 2,134 | `arbace.repr.c.host` | the configuration: predefined macros, include paths, the headers as files, from the recorded host data |
+
+About 9,500 lines of Go, by JN8's ratio (javac's lexer and parser into 3,414 lines) 4,000 to 6,000 lines
+of Arbace. The checker (`check.go`, `type.go`, `value.go`, `abi.go`, 10,849 lines) is not ported: C4's
+`arbace.c.check` is Arbace's own (CS8 (a)), cc's checker its oracle through the helper's `types` mode.
+
+| milestone | content | exit criteria | days |
+|---|---|---|---:|
+| **C1** the spec | doc/c/SPEC.md, test/c/corpora.edn, this section (done, on `c23-c1`) | the spec accepted by the user; CS30-CS43 decided | 1 |
+| **C2** the lexer and the preprocessor | `arbace.repr.c.lex`, `.pp`, `.host`; the host data recorded (`bin/repr-c host record`: the reference's predefined macros per standard, its search list and the headers' digests, its `__has_*` answers, under `test/c/host/`); `tools/ccdump` (below) with its `tokens` mode; `bin/repr-c pp FILE` and `pp-check` | every corpus file's token stream (kind, text, position, separator, whether from a macro) equal to cc's, or listed in `test/repr/c/pp-check-known.edn` where cc is wrong and gcc's `-E -P` text is the judge (CS40 (a)); tcc's 22 `pp` tests against `.expect`; gcc 15.2's `cpp/c23-*`, `embed*`, `va-opt*` preprocess tests against gcc's output | 3-5 |
+| **C3** the parser and the C23 delta | `arbace.repr.c.parse`, `.tree`; the helper's `tree` mode; `bin/repr-c parse FILE` and `parse-check` (JN8.3's shape: chunks, threads, `report.edn`, `files.tsv`, both dumps of a differing file) | every file of every corpus parsed by both, the trees equal node for node (case, every token's text and position) or known; mutants of the corpora (JN8's 8,000: tokens deleted, duplicated, swapped, inserted) accepted or refused alike, at the same first error position | 2-4 |
+| **C3b** repr/c read and print | `arbace.repr.c.convert` (trees into forms, SPEC §11.1; header units, the layer), `arbace.repr.c.print` (`:lines` by cemit's rules, CS23 (a); `:full`), `bin/repr-c read`, `print`, `roundtrip`, `check`; `test/c/c23/` and its judges re-made (CS38), widened to the preprocessor's C23 and clause 7's | E2's numbers reproduced on repr/c with no directive refusal (CS5 (a)); the round trip's levels 1-3 over every corpus, every exception classed; `:full` byte for byte; the c23 judges on every file | 4-6 |
+| **C4** the checker | as §11; `bin/ci annotations` against the helper's `types` mode (`cc.Translate`) | as §11 | 5-8 |
+| **C5** ci | as §11, with CS34's and CS35's arithmetic (`__int128` and `_BitInt` beyond 64 bits as limbs in `crt`; `long double` as `double`, musl read with `LDBL_MANT_DIG` 53, SPEC §12.5) | as §11; the class `long-double` recorded | 8-14 |
+| **C6** AOT | as §11 | as §11 | 6-10 |
+| **C7** C23's corpus and errors | as §11, over CS33's groups (`test/c/corpora.edn`'s `:gcc-*`, from the pinned tarball) | as §11 | 2-4 |
+| **C8** the fourth row | as §11 | as §11 | 1-2 |
+| **C9** the milestone | as §11 | as §11 | 1-2 |
+
+**Total: about 33 to 56 working days** (§11's 32 to 54). The port costs more than vendoring: about 9,500
+lines to port and check, against `bin/c-vendor` and goi's run of cc; it saves goi's interpretation of cc
+(the survey's §14 put it at minutes per corpus), listing cc and a generated dumper in goi's table, and the
+re-seed that would carry them. JN8 ran at about a tenth of its estimate (four and a half hours against
+4-6 days), and the surveys run under their estimates, so the low ends are the likelier. C5 stays at
+§11's 8-14: CS35 was decided without software `long double` (below, "Decided (2026-10-28): CS30-CS43").
+Speed: JN8's native parser ran at 0.9 M characters a
+second compiled and 0.1 to 0.16 M evaluated; the C corpora are about 10 MB after preprocessing (§5.1), so
+a corpus read evaluated on the tools' host is one to two minutes, and headers are lexed once per path
+(the token streams cached by file digest) (CS36 (a)).
+
+Where the port runs (CS36 (a)): evaluated from the checkout on the tools' host, as JN8's parser and
+repr/haskell's namespaces are, so C2-C4 change no shipped code and need no re-seed; at C5, when ci's
+`c/include` reads headers at the REPL, `arbace/repr/c` is embedded and compiled by c2j with the program,
+in the re-seed C5 needs anyway.
+
+### C1.3 The oracle: `tools/ccdump`
+
+cc runs as a helper beside the port, as `tools/godump` runs go/parser and go/types beside repr/go's
+native reader; nothing of cc or go-whim is vendored (CS4 (b), CS39 (a)):
+
+- **The helper** is Arbace's own Go program, `tools/ccdump` (module `arbace/tools/ccdump`, a few hundred
+  lines: `main.go`, `dump.go`), which imports `github.com/arbace/go-whim/crefactor/cc` and nothing of
+  it is copied. It reads a list of files with their `:std` and `:args` and the recorded host data, and
+  calls cc's `SetHost` (go-whim's `host.go`) with the data's predefined macros, include paths and an
+  `fs.FS` over the recorded headers: cc never runs gcc, and sees the headers the port sees.
+- **Modes**: `tokens` (`cc.Preprocess`: per token its kind's name, its source text, its separator, its
+  position, whether a macro made it); `tree` (`cc.Parse`: a reflection walk of the tree, one node a line:
+  the type's name, `Case`'s name, each `Token` field with its text and position, children in field order,
+  an absent child as `nil`; the port's `arbace.repr.c.parse/dump` prints its trees in the same format, so
+  the check compares lines, JN8.1's `parse/dump`); `types` (C4: `cc.Translate`, each expression's type,
+  each constant's value, each declaration's layout).
+- **The build** (`bin/repr-c ccdump-build`, into `.tmp/repr-c/ccdump/`): a generated `go.work` with
+  `use` of `tools/ccdump` and of `$GOWHIM/crefactor` (`GOWHIM`, default `../go-whim`); it requires the
+  checkout at `80c49bf53cd6340487ac623f3d6d135b77ac1db6` with `crefactor/cc`'s tree
+  `7df4827ccebe519cc06945dd5da4994b2b6d73d1` and no local change (`git status --porcelain crefactor/cc`
+  empty), the tree hashes recorded in `test/c/corpora.edn`'s `:go-whim-80c49bf5`; the dependencies
+  (`modernc.org/mathutil` v1.7.1, `strutil` v1.2.1, `sortutil` v1.2.1, `token` v1.1.0, `opt` v0.2.0,
+  `remyoudompheng/bigfft`) come from Go's module cache under `crefactor/go.sum`'s hashes,
+  `GOPROXY=off GOFLAGS=-mod=readonly`, with `/root/tamago-go/bin/go`, `CGO_ENABLED=0`. A build tag
+  `upstream` builds the same helper against `modernc.org/cc/v4` v4.29.7 from the module cache
+  (`h1:q+NXGJ0bK3b4TXFYQQVr9pYETGnmwFWkrUzJnMya/Tg=`), to tell a difference of the delta from one of
+  upstream's.
+- **Where it runs**: `pp-check`, `parse-check` and `bin/ci annotations` run it; `bin/gate --full` gains
+  them at C3b (CS19 (a)), and doc/ALPINE.md's list of what apk does not provide gains a go-whim checkout
+  at the pin, as it lists Go's module cache.
+- **Where cc is wrong** (E3's directives, the scanner's `u'x'`, cc's checker's gaps) the port follows the
+  reference, and each such file is listed in the check's known file with gcc's answer (CS40 (a)).
+
+### C1.4 go-whim's parts, and `test/c/c23/` (CS22 open)
+
+What the port and the checks would take from go-whim, listed and not copied:
+
+- `crefactor/cc`'s C23 delta: `c23.go` (296 lines), `host.go` (169), `check_export.go` (25), `fork_test.go`
+  (289), `README.md`, and the hooks marked `go-whim` in upstream's files (30 in `parser.go`, 27 in
+  `ast.go`, 10 in `check.go`, 6 in `cc.go`, 5 in `scanner.go`, and 1-2 in each of nine more). Ported in
+  C3 (the productions) and C2 (the scanner's), the port a derivative of cc (BSD-3, The CC Authors, a
+  LICENSE.md entry when C2 lands) and, for the delta, of go-whim's (CS37).
+- `crefactor/cemit` (2,528 lines) and `crefactor/clisp` (4,767 lines, `SPEC.md`): their rules ported into
+  `arbace.repr.c.print` and `.convert` (CS23 (a)); cemit run as the `:lines` print's oracle by a helper
+  mode like ccdump's.
+- `crefactor/c23conf`: `doc.go`, `conf_test.go`, `pptokens_test.go` (552 lines: the six judges, the
+  expected failures, `TestControl`'s four wrong prints) and `testdata/`'s 49 files, listed in
+  `test/c/corpora.edn` (`:c23conf`, each file's git blob at `80c49bf5`, its SHA-256 and its N3220
+  subclauses).
+
+`test/c/c23/` is re-made in C3b, once CS37 is answered (CS38): under CS37 (a) or (b), the 49 files are
+copied with their origin (go-whim, the commit, the path) recorded in `test/c/c23/README` and the journal,
+and LICENSE.md's entry; the judges are Arbace's (`bin/repr-c check --c23`): (1) the reference accepts
+the file (`-std=c23 -fsyntax-only`), (2) the port parses it with cc's tree, (3) the `:lines` print is
+accepted, (4) a fixpoint (read, print, read, print equal), (5) the same program: the `:full` print's
+pp-tokens one for one and the `:lines` print's object file byte for byte (`-O0 -fno-stack-protector -c`,
+the same base name), (6) forms → C → forms equal; the expected failures a map with reasons; the control's
+four wrong prints re-made as forms the judges must refuse. Under CS37 (c), 49 files of Arbace's own are
+written from N3220, one per subclause the manifest lists, without go-whim's texts. Either way the set is
+widened by Arbace's files for the preprocessor's C23 (`#embed`, `__has_include`, `__has_c_attribute`,
+`#elifdef`, `#elifndef`, `#warning`, `__VA_OPT__`) and clause 7's (what musl 1.2.6 has: CS32).
+
+### C1.5 Pins (test/c/corpora.edn)
+
+| pin | where | hash | checked |
+|---|---|---|---|
+| gcc 15.2.0 | `https://ftp.gnu.org/gnu/gcc/gcc-15.2.0/gcc-15.2.0.tar.xz`, fetched into `.tmp/c1/gcc/` (101,056,276 bytes) | SHA-256 `438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e` | its SHA-512 equals gcc.gnu.org's `sha512.sum` for the release (fetched from that host, not the tarball's); the `.sig` fetched, not verified (no gpg on the host); `gcc/BASE-VER` 15.2.0 |
+| musl 1.2.6 | `https://musl.libc.org/releases/musl-1.2.6.tar.gz`, fetched into `.tmp/c1/musl/` (1,082,499 bytes) | SHA-256 `d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a` | its SHA-512 equals Alpine's aports `main/musl/APKBUILD` (1.2.6-r6; its nine patches listed in the manifest); the `.asc` fetched, not verified (no gpg) |
+| ccorpus2 v1.6.0 | Go's module cache, `modernc.org/ccorpus2@v1.6.0/assets/` | `h1:JODbahvmixwZDoF1kZs/9Rj6aHA2vAPP7HKiNDq//xo=` (cc v4.29.7's `go.sum`, the cache's `ziphash`); zip SHA-256 `3b92d4cf...a4b168ed` | |
+| go-whim | `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, `crefactor/` | trees: `cc` `7df4827c`, `c23conf/testdata` `51e5218b`, `cemit` `c0f8bd96`, `clisp` `53686a78` | 49 files with their blobs |
+
+The manifest's 21 corpora: c23conf (49), ccorpus2's thirteen (c-torture execute 1,672 and its mirror
+1,632, compile 1,791, tcc's tests2 88 and pp 22, CompCert 24, MIR 315, cxgo 88 (§8.2 said 80),
+benchmarks game 52, SQLite, Lua 5.4.4, zlib 1.2.11 15, QuickJS 10) and gcc 15.2's seven groups (F2: 627
+files), 6,388 files in all, and six named but not fetched (clang's `test/C/C23`, c-testsuite, chibicc,
+csmith, YARPGen, Juliet).
+
+### C1.6 Proposals (CS30-CS43)
+
+Each with its options, the recommended one first; the spec follows the recommendations.
+
+- **CS30 Header declarations.**
+  - Options: (a) **header units**: each active inclusion's declarations in a unit of its own,
+    `c.h.DIGEST`, the digest of its forms, shared by the inclusions that give the same declarations
+    (SPEC §4.3); (b) each translation unit holds every declaration it sees, the headers' marked
+    `:c/from` and not printed; (c) the main file's declarations only, consumers looking names up in
+    musl's units of the default context.
+  - *Recommended: (a)*: a unit is self-contained through its `c/include` forms, headers are read and
+    checked once per context, and no context needs recording (the content is the key); (b) repeats
+    stdio's few hundred declarations in each of 6,000 files, (c) is wrong whenever a feature macro or
+    `NDEBUG` changes a header.
+- **CS31 The order of evaluation.**
+  - Options: (a) gcc 15.2's `-O0` order on x86-64 where the corpora show it: a call's arguments right
+    to left, an operator's operands left to right (F4); (b) left to right everywhere, a program whose
+    output depends on the order a class `unspecified-order`; (c) the order read from the reference's
+    object code per call.
+  - *Recommended: (a)*: parity is with gcc's runs, and its order is regular enough to state; (c) is
+    exact but makes eval depend on gcc.
+- **CS32 The reference's headers.**
+  - Options: (a) gcc's own include directory before musl's (`-isystem` it, in the host data's search list,
+    for the reference's runs and for the reader alike), so C23's freestanding headers are gcc's and the
+    rest musl 1.2.6's; clause 7's C23 additions musl lacks (`<stdbit.h>`, `memset_explicit`, ...) a class
+    `musl-1.2.6` (deferred); (b) Alpine's default order, musl's headers first, C23's `nullptr_t`,
+    `unreachable`, one-argument `va_start` and `BITINT_MAXWIDTH` classed; (c) headers of Arbace's own
+    over musl's, for both.
+  - *Recommended: (a)*: it is how gcc is configured where the libc does not ship freestanding headers
+    (glibc), and it needs no header of Arbace's; C23 programs can then use `unreachable()` and the
+    one-argument `va_start` from the headers, where c23conf's `unreachable.c` and `va_start.c` call the
+    builtins directly.
+- **CS33 The gcc 15.2 corpus.**
+  - Options: (a) the manifest's seven groups (F2): `gcc.dg/c23-*`, `cpp/c23-*`, the subdirectories'
+    `c23-*`, `gnu23-*`, `#embed`'s, `__VA_OPT__`'s and `_BitInt`'s tests, 627 files; (b) CS15's letter,
+    `c23-*` and `cpp/c23-*` (286), `c2x-*` being none; (c) (a) and `c2y-*` (52), C2y's drafts.
+  - *Recommended: (a)*: `#embed`, `__VA_OPT__` and `_BitInt` are C23's and their tests are named by
+    feature, not by standard.
+- **CS34 The floating-point environment.**
+  - Options: (a) round to nearest only: `fesetround` to another mode fails (returns nonzero),
+    `fetestexcept` reports no flag; a program needing more a class `fenv` (deferred; no file of the run
+    corpora calls them); (b) software IEEE arithmetic honouring modes and flags once a program calls
+    `fesetround` or `feclearexcept` (a slow path); (c) the host's FPU state through Go assembly.
+  - *Recommended: (a)*: Go's arithmetic is round to nearest and has no flags; (b) is real work no corpus
+    asks for yet; (c) puts assembly in `crt`.
+- **CS35 The extended arithmetic types.**
+  - Options: (a) `long double` as software x87 80-bit extended in `crt` (bit for bit at round to nearest
+    and 64-bit precision), `__int128` and `_BitInt(N)` beyond 64 bits as 64-bit limbs, in eval and AOT;
+    `_Decimal*`, `_Float16`, `_Float128`, `__bf16` out by design (SPEC §14); (b) `long double` computed as
+    `double` (stored in its 16 bytes), classed where results differ; (c) (a) and the decimal and binary128
+    types in software.
+  - *Recommended: (a)*: musl's `printf("%Lf")`, `strtold` and 56 c-torture files use `long double`, and
+    `__int128` and `_BitInt` are integer arithmetic the corpora (201 `bitint-*` tests) exercise; the
+    decimal types have no libc support in musl.
+- **CS36 Where the port runs.**
+  - Options: (a) evaluated from the checkout on the tools' host until C5, then embedded and compiled with
+    the program in C5's re-seed; (b) embedded from C2, compiled into each re-seed; (c) only ever
+    evaluated.
+  - *Recommended: (a)*: JN8's way, no shipped change before ci needs the reader at the REPL.
+- **CS37 CS22's statement: the license of go-whim's own parts.** The user is asked: *are go-whim's own
+  C parts (the C23 delta of `crefactor/cc`: `c23.go`, `host.go`, `check_export.go`, `fork_test.go` and
+  the hooks marked `go-whim`; `crefactor/cemit`; `crefactor/clisp`; `crefactor/c23conf` with its 49
+  files; `togo`'s rules if used), all of whose commits are yours, licensed to Arbace, and under which
+  license?*
+  - Options: (a) yes, under the EPL-1.0, as D8 licensed the box's parts: the port's LICENSE.md entry is
+    cc's BSD-3 (The CC Authors) for what derives from upstream and the EPL-1.0 for what derives from the
+    delta, c23conf's files under the EPL-1.0; (b) yes, under BSD-3 like cc, so the whole port is one
+    license; (c) no: the port derives from upstream cc v4.29.7 alone, the C23 productions re-derived from
+    N3220 and the reference without go-whim's text, cemit's and clisp's rules re-derived likewise, and
+    c23conf's files replaced by Arbace's own (CS38 (b)).
+  - *Recommended: (a)*: every commit is the user's, D8 is the precedent, and the port is then reviewable
+    against its sources; (b) is as good if the user prefers one license for the port.
+- **CS38 c23conf's re-making.**
+  - Options: (a) under CS37 (a) or (b): its 49 files copied into `test/c/c23/` with their origin, its six
+    judges re-made in Arbace over the forms (C1.4), widened by Arbace's own files; (b) under CS37 (c): 49
+    files of Arbace's own, one per subclause the manifest records, written from N3220, the same judges;
+    (c) read in place from a go-whim checkout (CS24 rejected it).
+  - *Recommended: (a)*, which CS37 (a) or (b) allows; (b) if CS37 is (c).
+- **CS39 The oracle's build.**
+  - Options: (a) `tools/ccdump` built against a go-whim checkout through a generated `go.work`, the
+    checkout's commit and tree verified, the dependencies from the module cache (C1.3); (b) against
+    upstream `modernc.org/cc/v4` v4.29.7 only, C23's productions judged by the reference alone; (c) cc
+    copied under `tools/` (CS4 (b) excludes it).
+  - *Recommended: (a)*, with (b)'s build as the `upstream` tag beside it.
+- **CS40 Where cc is wrong.**
+  - Options: (a) the port follows cc where cc is right and the reference where cc is wrong (E3's
+    directives, the scanner's refusals, the checker's gaps), each such file in the check's known file
+    with the reference's answer; (b) the port reproduces cc exactly first, the fixes after; (c) the
+    reference alone as the oracle (gcc's `-E` and `-fdump-tree-original`), cc not run.
+  - *Recommended: (a)*: the trees are cc's where cc parses C23, and the known file says where they are not.
+- **CS41 Parentheses in `:lines`.**
+  - Options: (a) kept (`^:c/paren`, `:c/aparen`), as cemit keeps the source's (SPEC §7.5); (b) dropped,
+    as Go forms' N1, the printer adding what precedence needs.
+  - *Recommended: (a)*: CS23 (a) compares the `:lines` print with cemit's, and a reader of the print
+    sees the source's grouping.
+- **CS42 The milestones' names.**
+  - Options: (a) C2 (the lexer and the preprocessor), C3 (the parser), C3b (read and print), the rest as
+    CS1 named them; (b) renumbered C1-C10; (c) C2a, C2b, C3.
+  - *Recommended: (a)*: CS1's names and the survey's references stay valid.
+- **CS43 The date macros.**
+  - Options: (a) `__DATE__`, `__TIME__` and `__TIMESTAMP__` from one fixed epoch (`SOURCE_DATE_EPOCH`,
+    which gcc honours), the same for the reader and the reference's recordings; (b) the reader's clock,
+    a program printing them classed.
+  - *Recommended: (a)*: a read is then reproducible from its record.
+
+### C1.7 Checks and scratch
+
+Run: gcc 15.2 and clang 23.1.4 on the probes and on the spec's six C programs (built, run, outputs as
+§16 says); the main checkout's stage 0 reading the spec's 23 forms blocks and `test/c/corpora.edn`
+(21 corpora, 6,388 files, every `:files` list its `:count`); the SHA-512 cross-checks of C1.5. Not run:
+any Arbace build, `bin/gate` (no code changed; the caller's instruction), gpg (absent).
+
+The worktree's `.tmp/c1/` (kept):
+
+- `gcc/` — `gcc-15.2.0.tar.xz`, `.sig`, `sha512.sum`, `gnu-keyring.gpg`, `listing.txt` (the tarball's
+  149,865 paths), `x/` (the C23 tests extracted, F2's counts).
+- `musl/` — `musl-1.2.6.tar.gz`, `.asc`, Alpine's `APKBUILD`, `x/` (the release extracted);
+  `musl-vs-root.txt`, `musl-vs-usrinclude.txt` (F5).
+- `probe/` — `types.c` (constant types, sizes, layout, `_BitInt`), `en.c` (enums, conversions),
+  `order.c` (F4, overflow, shifts), `pp.c` (`#embed`, `__VA_OPT__`, `#elifdef`, `__has_c_attribute`),
+  `c23lib.c` (F3), `div.c`, `ovf.c`, `mod.c`, `nul.c`, `ab.c` (statuses), the acceptance probes (`kr.c`
+  ... `ucn.c`, with `.gcc` and `.clang` logs), `sl.c`, `im.c`.
+- `examples/` — the spec's six C programs; `specc/` — the same extracted from the spec and rebuilt.
+- `scripts/` — `gen_manifest.py` (writes `test/c/corpora.edn` from `listing.txt` and `c23conf.txt`),
+  `readcheck.ae` (reads a Markdown file's `clojure` blocks); `c23conf.txt` (the 49 files' blobs, hashes
+  and subclauses); `cc-delta.diff` (upstream v4.29.7 against the fork).
+
+## Decided (2026-10-28): CS30-CS43
+
+The user decided C1's proposals (relayed by the coordinator, 2026-10-28):
+
+- **CS37: (a)**, go-whim's own C parts (the C23 delta of `crefactor/cc`: `c23.go`, `host.go`,
+  `check_export.go`, `fork_test.go` and the hooks marked `go-whim`; `crefactor/cemit`; `crefactor/clisp`;
+  `crefactor/c23conf` with its 49 files; `togo`'s rules if used) are licensed to Arbace under the EPL-1.0,
+  as D8 licensed the box's parts. **This settles CS22.** cc keeps its BSD-3 (Copyright (c) 2014 The CC
+  Authors), and so do its dependencies.
+- **CS38: (a)**, following CS37: c23conf's 49 files are copied into `test/c/c23/` and its judges re-made
+  in Arbace (C1.4).
+- **CS35: not the recommended option.** No software x87 arithmetic: `long double` is `double` (8 bytes,
+  align 8, `double`'s arithmetic) in eval and AOT, a distinct type for the checker. The reference's
+  `long double` is 16 bytes (align 16, x87 80-bit extended), so `sizeof(long double)`, the layouts that hold
+  one (`max_align_t` among them), `LDBL_*` and the values computed in `long double` differ from gcc's: a
+  run that differs because of it is in the recorded class `long-double` (by design, SPEC §12.5), and the
+  reader keeps the reference's configuration for corpus files (their `#if`s and the print's object code
+  stay gcc's) while musl, as ci's libc, is read with `long double` as `double` (`LDBL_MANT_DIG` 53, its
+  `arch/arm/bits/float.h`). The rest of CS35 stands: `__int128` and `_BitInt` beyond 64 bits are in (64-bit
+  limbs in `crt`), `_Decimal*`, `_Float16`, `_Float128`, `__bf16` out by design (SPEC §14). C5 stays at
+  8-14 days; the plan's total is 33 to 56 (C1.2).
+- **CS30, CS31, CS32, CS33, CS34, CS36, CS39, CS40, CS41, CS42, CS43: (a)**, as recommended: header units;
+  gcc's `-O0` order of evaluation; gcc's include directory before musl's; the seven gcc 15.2 groups; round to
+  nearest only; the port evaluated on the tools' host until C5; `tools/ccdump` through a generated `go.work`;
+  the reference where cc is wrong; parentheses kept in `:lines`; the milestones C2, C3, C3b; a fixed
+  `SOURCE_DATE_EPOCH`.
+
+What CS37 (a) allows, and when (nothing was copied at C1, `c23-c1` `009be3d7` and this section's commit):
+
+- **C2 and C3**: the port may follow go-whim's delta line for line where it derives from it (the scanner's
+  digit separators and `u8'a'` in C2; `c23.go`'s productions and the hooks in C3), its files carrying
+  cc's notice and the delta's origin; LICENSE.md gains, when the first ported file enters the tree, an
+  entry for `arbace/repr/c/` with cc's BSD-3 text (The CC Authors, modernc.org/cc/v4 v4.29.7) and the
+  EPL-1.0 for what derives from go-whim's delta (go-whim `80c49bf5`, `crefactor/cc`), and doc/ARBACE.md
+  the origin, as for every vendored `.ae`.
+- **C3b**: cemit's and clisp's rules ported into `arbace.repr.c.print` and `.convert` under the EPL-1.0
+  (their origin recorded likewise); c23conf's 49 files copied into `test/c/c23/` with their origin
+  (go-whim, the commit, the path, each file's blob as `test/c/corpora.edn` records it) in
+  `test/c/c23/README` and the journal, and a LICENSE.md entry naming them under the EPL-1.0; its judges
+  re-made in Arbace as C1.4 describes.
+
