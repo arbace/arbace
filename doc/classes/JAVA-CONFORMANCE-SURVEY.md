@@ -3288,7 +3288,18 @@ CLASSFORMS-REPL §7.
   - *Recommended: (b)*: two small j2g fixes; caller-sensitive access checks are the module system's kind, which
     the Go build leaves out (no access checks at run time, CLASSFORMS-REPL §7).
 
-**Checks**: GATE
+**Checks**: the essential `bin/gate` at the branch's head passed in about 50 minutes (the executables built afresh by
+stage 0, 177,287,328 bytes: the recording's executable predates `names/own-class?`, which changes no class of the
+shipped program nor of the conformance tests, only bin/diffcheck's `jf_` packages): the smoke test; Clojure's
+suite on the test build, no regressions; the oracle 22,688 of 22,740, its 52 known mismatches as recorded;
+diffcheck 12,795 of 12,807 (Java's pair 749 of 751 with FxBackEnds, Clojure's 12,046 of 12,056), its 12 known as
+recorded (FxCode's and FxVarHandles' cases renumbered, FxBackEnds coming first: `test/diffcheck/known.edn`);
+goi's essential checks (801, and the compiled subset); Java's essential check 428 of 428 interpreted and 426 of
+426 compiled; the compiled suite's subset as recorded; the programs (3 of 3); the generated variants; j2g's edge
+(verify passed, the edge as `bin/j2g-edge update` wrote it); `bin/reap` 12 of 12 cells, 0 problems. The first
+gate found diffcheck's FxBackEnds reflecting otherwise compiled (its classes are in diffcheck's own `jf_` Go
+packages, not `lang`): JCS117's own classes are `names/own-class?` since. `bin/gate --full` was not run (the
+policy until the milestone).
 
 The scratch this section cites (the worktree's `.tmp/jc4c/`, not tracked): `classes-before.txt` (main's tests of
 the decided classes), `check-*-before.edn`, `levels-known-before.edn` (main's records), `interp1.log`-`interp3.log`,
