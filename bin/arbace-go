@@ -69,14 +69,22 @@
 #                                      byte for byte; G1 = G2 and the host = G1 are reported (they
 #                                      hold when the host is stage 0 of a seed printed from these
 #                                      sources: bin/seed --verify); prints the hashes
+#        bin/arbace-go --fixpoint --g1 DIR
+#                                      the same with G1 given (GT3, doc/GATE-SURVEY.md, GTS10 (a)):
+#                                      DIR a --gate-build's cache (.tmp/arbace-go-gate: amd64/arbace,
+#                                      amd64/j2g, its key the checkout's gate_key), G2 and G3 built;
+#                                      bin/gate --full's (else G1 built as above: the clean run's)
 #        bin/arbace-go --image         prepare the namespaces again (the image of their analyzed
 #                                      forms, doc/go/EXEC-NOTES.md) with the built executables
 #                                      and link them again with it
 #        bin/arbace-go --gate-build    the essential bin/gate's builds: the executable and the
 #                                      test build (amd64), cached in .tmp/arbace-go-gate/amd64/
 #                                      (arbace, arbace-tests; and the compiled namespaces, aot/,
-#                                      aot.key and aot.runtime, since REAP8) and built again only when what
-#                                      they are built from changed (gate_key), by stage 0
+#                                      aot.key and aot.runtime, since REAP8; j2g's program, j2g/,
+#                                      since GT3) and built again only when what they are built
+#                                      from changed (gate_key, narrowed to what the builds read
+#                                      since GT2), by stage 0
+#        bin/arbace-go --gate-key      prints gate_key (bin/gate's host :gate)
 #        bin/arbace-go --compile-aot HOST OUT
 #                                      the checkout's namespaces compiled by HOST (an executable
 #                                      of the checkout's runtime) into OUT/aot, with OUT/aot.key
@@ -120,6 +128,9 @@
 #                     host when its runtime is the checkout's (one j2g run), else by a first
 #                     build of the program (two); 0: the namespaces evaluated (the image of
 #                     prepared namespaces), as before S6
+#   ARBACE_AOT_BASE   a directory holding aot/ and aot.key (the gate's .tmp/arbace-go-gate/amd64):
+#                     the compiled namespaces a test or javac's tool build reuses when their key is
+#                     the checkout's (default target/arbace-go; bin/javac-vendor tool's, GT3)
 #   ARBACE_PROGRAM_BASE  --build-program: a shipped build to reuse (a --build's directory, or one
 #                     holding arbace, aot/ and aot.key, as .tmp/arbace-go-gate/amd64), when its
 #                     compiled namespaces' key is the checkout's; ARBACE_PROGRAM_KEEP=1 keeps the
@@ -198,13 +209,13 @@ build() {
   # standalone S6, one j2g run (SA144): a host of the checkout's runtime (its version's
   # :runtime, bin/lib/version.bash) compiles the checkout's namespaces itself, as the program
   # built from them would
-  local saved1=("${j2g_args[@]}") onepass= j2g_pid=
+  local saved1=("${j2g_args[@]}") onepass= j2g_pid= aot_base=${ARBACE_AOT_BASE:-$dir}
   if [ "${ARBACE_AOT:-1}" = 1 ] && [ -z "${aot_phase2:-}" ] && [ -n "$variant" ] && aot_reusable "$hostexe"; then
     # the test build: the shipped build's compiled namespaces, when made from the same
     # namespaces and runtime (SA157)
-    echo "== the namespaces compiled: the shipped build's ($dir/aot, key ${aot_key:0:12})" >&2
+    echo "== the namespaces compiled: the shipped build's ($aot_base/aot, key ${aot_key:0:12})" >&2
     onepass=1
-    j2g_args+=(--input "$dir/aot")
+    j2g_args+=(--input "$aot_base/aot")
   elif [ "${ARBACE_AOT:-1}" = 1 ] && [ -z "${aot_phase2:-}" ] && host_compiles "$hostexe"; then
     # j2g started at once: it loads the runtime and analyzes it while the host compiles the
     # namespaces, and reads them when they are there (--await: DIR/aot.edn, the compiling's
@@ -287,11 +298,9 @@ build() {
 
 # aot_key: what the compiled namespaces' tree is a function of (standalone S6, SA144, SA157):
 # the runtime key (bin/lib/version.bash; the program that compiles them has that runtime) and
-# Arbace's sources (the namespaces compiled and the back end, arbace.c2j, which compiles them)
-aot_key() {
-  (cd "$root" && { arbace_runtime_key "$root"; find arbace -type f | LC_ALL=C sort | xargs -d '\n' sha256sum; } \
-     | sha256sum | cut -c1-64)
-}
+# Arbace's sources (the namespaces compiled and the back end, arbace.c2j, which compiles them):
+# bin/lib/version.bash's arbace_aot_key, the embedded ones since GT2 (doc/GATE-SURVEY.md, GTS5 (a))
+aot_key() { arbace_aot_key "$root"; }
 
 # aot_key_write DIR: records the key of the tree DIR just made, in DIR.key, and beside it the runtime
 # key it was made with, in DIR.runtime (JCS76 (a): aot_key hashes the runtime with Arbace's
@@ -315,13 +324,14 @@ seed_aot() {
   ) 9> "$root/.tmp/seed-aot.lock"
 }
 
-# aot_reusable HOST: does the shipped build's tree ($dir/aot) hold what the test build would
+# aot_reusable HOST: does the shipped build's tree ($aot_base/aot: ARBACE_AOT_BASE, a directory
+# holding aot/ and aot.key such as the gate's .tmp/arbace-go-gate/amd64, else $dir) hold what the test build would
 # compile (its key the checkout's)? Not when HOST has no id spaces (a program older than S6:
 # the test build then compiles as before, SA151); sets aot_key
 aot_reusable() {
-  [ -f "$dir/aot/packages.edn" ] && [ -f "$dir/aot.key" ] || return 1
+  [ -f "$aot_base/aot/packages.edn" ] && [ -f "$aot_base/aot.key" ] || return 1
   aot_key=$(aot_key)
-  [ "$(cat "$dir/aot.key")" = "$aot_key" ] || return 1
+  [ "$(cat "$aot_base/aot.key")" = "$aot_key" ] || return 1
   [ "$(env -u ARBACE_NO_AOT "$1" -e '(print (some? (try (.getField arbace.lang.RT "ID_SPACE") (catch Throwable _ nil))))' 2>"$discard")" = true ]
 }
 
@@ -440,10 +450,11 @@ build_tests() {
 }
 
 # reader_key: what repr/java's reader compiled for javac's tool ($dir/aot-reader) is a function of:
-# the compiled namespaces' key (aot_key: the runtime, Arbace's sources, c2j among them) and
+# the compiled namespaces' key (aot_key: the runtime, the embedded sources, c2j among them),
+# repr/java's own sources (which aot_key leaves out since GT2: no shipped build embeds them) and
 # javac's world, whose classes the reader's code names (jdk/javac, overlay/jdk/javac, the edges)
 reader_key() {
-  (cd "$root" && { aot_key; find jdk/javac overlay/jdk/javac jdk/edge.edn -type f | LC_ALL=C sort | xargs -d '\n' sha256sum; } \
+  (cd "$root" && { aot_key; find arbace/repr/java.ae arbace/repr/java jdk/javac overlay/jdk/javac jdk/edge.edn -type f | LC_ALL=C sort | xargs -d '\n' sha256sum; } \
      | sha256sum | cut -c1-64)
 }
 
@@ -1074,18 +1085,28 @@ EOF
 # overlays, the suite's Java fixtures' forms (the test build), the scripts of the build, the
 # seed and the toolchain's pins (stage 0, the host of j2g and repr/go, is built from the seed; or the
 # host executable ARBACE_HOST_EXE names), and Go's version
+# Since GT2 (doc/GATE-SURVEY.md, GTS5 (a)) narrowed to what the shipped and test builds read:
+# arbace/ less the namespaces no executable embeds (bin/lib/version.bash's arbace_embedded_sources:
+# repr/java, repr/haskell, repr/rust), jdk/ less javac's forms (jdk/javac/, javac's tool's input)
+# and the provenance repr/java writes (jdk/provenance.edn, test/java-fixtures/provenance.edn: they
+# name javac's tool), overlay/ less javac's world's (overlay/jdk/javac/), bin/lib less the check
+# scripts of repr/java, repr/haskell and repr/rust. bin/gate's checks name it as their host :gate
 gate_key() {
   (cd "$root" && {
-    find arbace go overlay jdk x509roots bin/lib test/java-fixtures -type f | sort
+    { arbace_embedded_sources "$root"
+      find go overlay jdk x509roots bin/lib test/java-fixtures -type f ! -path 'jdk/javac/*' ! -path jdk/provenance.edn \
+        ! -path 'overlay/jdk/javac/*' ! -path test/java-fixtures/provenance.edn ! -path 'bin/lib/repr-java/*' \
+        ! -path 'bin/lib/repr-haskell/*' ! -path 'bin/lib/repr-rust/*'; } | LC_ALL=C sort
     printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi
-  } | xargs sha256sum
+  } | xargs -d '\n' sha256sum
     [ -z "${ARBACE_HOST_EXE:-}" ] || sha256sum < "$ARBACE_HOST_EXE"
     cat "${ARBACE_GOROOT:-/root/tamago-go}/VERSION") | sha256sum | cut -c1-64
 }
 
 # gate_build: the essential bin/gate's builds (amd64), cached under .tmp/arbace-go-gate: the
 # executable (--build) and the test build (--build-tests), built again only when gate_key
-# changed. A hit takes seconds; a miss two Go-hosted builds. Prints where they are
+# changed; with the compiled namespaces (aot/, aot.key) and j2g's program (j2g/: the executable
+# is a G1 of the fixpoint, built by stage 0 from the sources gate_key hashes). A hit takes seconds; a miss two Go-hosted builds. Prints where they are
 gate_build() {
   local cache=$root/.tmp/arbace-go-gate key t0
   t0=$(date +%s)
@@ -1101,6 +1122,9 @@ gate_build() {
     cp "$dir/amd64/arbace" "$dir/amd64/arbace-tests" "$cache/amd64/"
     # the compiled namespaces they hold (REAP8: bin/java-check --essential-compiled's program)
     cp -r "$dir/aot" "$cache/amd64/aot" && cp "$dir/aot.key" "$cache/amd64/aot.key" && cp "$dir/aot.runtime" "$cache/amd64/aot.runtime"
+    # j2g's program of the executable: the fixpoint's G1 (GT3, GTS10 (a): --fixpoint --g1)
+    cp -r "$dir/j2g" "$cache/amd64/j2g"
+    arbace_version "$root" > "$cache/version.edn"
     echo "$key" > "$cache/key"
     echo "   built in $(since "$t0")"
   fi
@@ -1121,21 +1145,38 @@ gate() {
 # trees and the executables); G1 = G2 and host = G1 are reported: they hold when the host is
 # the fixpoint of these sources already (stage 0 of a seed printed from them)
 fixpoint() {
-  local fp=$root/target/arbace-go/fixpoint n prev status=0 t0 h host
+  local fp=$root/target/arbace-go/fixpoint n prev status=0 t0 h host g1=${1:-}
   [ "$(host_arch)" = amd64 ] || { echo "arbace-go: --fixpoint runs on amd64" >&2; return 1; }
   host=$(. "$root/bin/lib/host.bash" && arbace_host_exe) || return 1
+  if [ -n "$g1" ]; then
+    # G1 given (GT3, GTS10 (a)): the gate's cached build (--gate-build: amd64/arbace and j2g's
+    # program amd64/j2g), a build by the host from the sources gate_key hashes, when it is the
+    # checkout's; else built here as without --g1
+    if [ -x "$g1/amd64/arbace" ] && [ -f "$g1/amd64/j2g/report.edn" ] && [ "$(cat "$g1/key" 2>"$discard")" = "$(gate_key)" ]; then
+      echo "== G1: the gate's build, $g1 (key $(cut -c1-12 "$g1/key"))" >&2
+    else
+      echo "== G1: $g1 is not the checkout's gate build (bin/arbace-go --gate-build): G1 built here" >&2
+      g1=
+    fi
+  fi
   rm -rf "$fp"
   mkdir -p "$fp"
   cp "$host" "$fp/host"
   for n in 1 2 3; do
     t0=$(date +%s)
-    if [ $n = 1 ]; then prev=$fp/host; else prev=$fp/g$((n-1))/amd64/arbace; fi
-    echo "== G$n: built by $( [ $n = 1 ] && echo "the host ($host)" || echo "G$((n-1))")" >&2
-    (dir=$fp/g$n arches=amd64 J2G_GO_EXE=$prev REPR_GO_EXE=$prev build) || return 1
-    echo "   G$n in $(since "$t0"); j2g: $(grep -o ':times {[^}]*}' "$fp/g$n/j2g/report.edn")" >&2
+    if [ $n = 1 ] && [ -n "$g1" ]; then
+      mkdir -p "$fp/g1/amd64"
+      cp "$g1/amd64/arbace" "$fp/g1/amd64/arbace" && cp -r "$g1/amd64/j2g" "$fp/g1/j2g" || return 1
+    else
+      if [ $n = 1 ]; then prev=$fp/host; else prev=$fp/g$((n-1))/amd64/arbace; fi
+      echo "== G$n: built by $( [ $n = 1 ] && echo "the host ($host)" || echo "G$((n-1))")" >&2
+      (dir=$fp/g$n arches=amd64 J2G_GO_EXE=$prev REPR_GO_EXE=$prev build) || return 1
+      echo "   G$n in $(since "$t0"); j2g: $(grep -o ':times {[^}]*}' "$fp/g$n/j2g/report.edn")" >&2
+    fi
     # report.edn's times differ from run to run: the rest of it is compared
     sed -i 's/ :times {[^}]*}//' "$fp/g$n/j2g/report.edn"
   done
+  [ -n "$g1" ] && echo "fixpoint: G1 the gate's build ($g1, built at $(sed -n 's/.*:describe "\([^"]*\)".*/\1/p' "$g1/version.edn" 2>"$discard")); G1 = G2 byte for byte holds only when it was built at this commit"
   for n in 2 3; do
     if diff -r "$fp/g$((n-1))/j2g" "$fp/g$n/j2g" > "$fp/diff-j2g-$((n-1))-$n.txt"; then
       echo "fixpoint: j2g's program G$((n-1)) = G$n (diff -r)"
@@ -1272,7 +1313,8 @@ box_smoke() {
 case ${1:-} in
   --gate) gate ;;
   --gate-build) gate_build ;;
-  --fixpoint) fixpoint ;;
+  --fixpoint) if [ "${2:-}" = --g1 ]; then fixpoint "${3:?--fixpoint --g1 DIR}"; else fixpoint; fi ;;
+  --gate-key) gate_key ;;
   --build) if [ "${2:-}" = --box ]; then box_build; else [ "${2:-}" = --pgo ] && pgo=1; build; fi ;;
   --build-tests) build_tests "${2:-}" ;;
   --build-java) shift; build_java "$@" ;;

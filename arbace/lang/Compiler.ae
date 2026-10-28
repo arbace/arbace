@@ -1412,7 +1412,7 @@
 
     (field ^:public ^:final ^Symbol tag)
 
-    (field ^:final ^int line)
+    (field ^:public ^:final ^int line)
 
     (field ^:final ^int column)
 
@@ -1456,7 +1456,19 @@
       (let [c (.getJavaClass e)] (when (Util/isPrimitive c) (return c))))
     nil)
 
-  (defclass ^:static FISupport
+  (defclass ^:public ^:static FISupport
+    ;; the functional interfaces made at run time (gen-interface with ^FunctionalInterface), and
+    ;; the fn making an object of each from a fn: the Go build gives them no annotation data,
+    ;; so FISupport takes them from here (RPS54)
+    (field ^:private ^:static ^:final ^java.util.concurrent.ConcurrentHashMap ADAPTERS
+      (java.util.concurrent.ConcurrentHashMap.))
+
+    (method ^:public ^:static register ^void [^Class c ^IFn maker]
+      (.put ADAPTERS c maker))
+
+    (method ^:public ^:static adapterOf ^IFn [^Class c]
+      (cast IFn (.get ADAPTERS c)))
+
     (field ^:private ^:static ^:final ^IPersistentSet AFN_FIS
       (^[Object/1] RT/set Callable Runnable Comparator))
 
@@ -1464,7 +1476,8 @@
       (^[Object/1] RT/set "equals" "toString" "hashCode"))
 
     (method ^:static maybeFIMethod ^java.lang.reflect.Method [^Class target]
-      (when (and (and (some? target) (.isAnnotationPresent target FunctionalInterface))
+      (when (and (and (some? target) (or (.isAnnotationPresent target FunctionalInterface)
+                                         (.containsKey ADAPTERS target)))
                  (not (.contains AFN_FIS target)))
         (let [methods (.getMethods target)]
           (for-each [^java.lang.reflect.Method method methods]
@@ -9023,6 +9036,10 @@
     (method ^:public ^:static ^:native defineFnField ^void [^Class c ^String name ^int i
                                                             ^Class type])
 
+    ;; the class of the compiled fns of one code (AOT.fnClass) gets the closed-over fields of the
+    ;; code object body as its own, read through the fn (RPS41)
+    (method ^:public ^:static ^:native defineAOTFnFields ^void [^Class c body])
+
     (method ^:public ^:static ^:native newInstance [^Class c ^Object/1 fieldValues])
 
     (method ^:public ^:static ^:native getField [o ^int i])
@@ -10270,12 +10287,15 @@
     ;; code class caches it in a static field of its own, set by the code making the fn (SA154)
     (field ^:private ^:static ^:final ^java.util.HashMap FN_CLASSES (java.util.HashMap.))
 
-    (method ^:public ^:static fnClass ^Class [^String name ^boolean rest]
+    ;; (body, the code object of the fn being made, gives the class its closed-over fields,
+    ;; which reflection reads: Clojure's clearing tests, RPS41)
+    (method ^:public ^:static fnClass ^Class [^String name ^boolean rest body]
       (locking FN_CLASSES
         (let [c (.get FN_CLASSES name)]
           (if (some? c)
               (cast Class c)
               (let [d (Dyn/defineFnClass name (if rest AOTRestFn AOTFn))]
+                (when (some? body) (Dyn/defineAOTFnFields d body))
                 (.put FN_CLASSES name d)
                 d)))))
 
@@ -11549,17 +11569,24 @@
           (let [ife (cast InstanceFieldExpr target)
                 o (.run t f)
                 tc (.-targetClass ife)]
+            ;; the store on the field's own line, after the value (InstanceFieldExpr.emitAssign's
+            ;; mark: RPS53)
             (if (and (some? tc) (some? (.-field ife))
                      (not (identical? (Evaluator/destub tc) tc)))
                 (let [x (.run v f)]
+                  (Evaluator/at f (.-line ife) nil)
                   (Evaluator/checkCast (Evaluator/destub tc) o)
                   (when (nil? o) (throw (NullPointerException.)))
                   (Dyn/setField o (Evaluator/fieldIndex tc (.-fieldName ife)) x)
                   x)
-                (Reflector/setInstanceField o (.-fieldName ife) (.run v f))))
+                (let [x (.run v f)]
+                  (Evaluator/at f (.-line ife) nil)
+                  (Reflector/setInstanceField o (.-fieldName ife) x))))
         (== kind 5)
-          (let [sfe (cast StaticFieldExpr target)]
-            (Reflector/setStaticField (.-c sfe) (.-fieldName sfe) (.run v f)))
+          (let [sfe (cast StaticFieldExpr target)
+                x (.run v f)]
+            (Evaluator/at f (.-line sfe) nil)
+            (Reflector/setStaticField (.-c sfe) (.-fieldName sfe) x))
         :else (.evalAssign (cast AssignableExpr target) ve))))
 
   (defclass ^:public ^:static CodeKeywordInvoke
@@ -11709,6 +11736,9 @@
     (method ^:public run [this ^Frame f]
       (let [t (.run target f)
             tc (.-targetClass fe)]
+        ;; the field's own line for the access, after its target (InstanceFieldExpr.emit's mark:
+        ;; RPS53)
+        (Evaluator/at f (.-line fe) nil)
         (cond
           (or (nil? tc) (nil? (.-field fe)))
             (Reflector/invokeNoArgInstanceMember t (.-fieldName fe) (.-requireField fe))

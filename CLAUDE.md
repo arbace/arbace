@@ -349,11 +349,21 @@ Prior art:
   script of `bin/`, which holds the logic. Keep it in step with `bin/`: when a script's name or
   options change, or a script becomes an objective of the repo, update its target and `##` line;
   `make check-makefile` (the essential gate's first step) checks the scripts it runs exist.
-- `bin/gate` is the check every change to main must pass: the Makefile's scripts (`make
-  check-makefile`), the seed's hash, stage 0 built from
-  it (`bin/seed --build`), the executable and the test build by stage 0 (`bin/arbace-go
-  --gate-build`, cached in `.tmp/arbace-go-gate` and keyed by a hash of what they are built from:
-  `arbace/`, `go/`, `overlay/`, `jdk/`, `x509roots/`, the fixtures' forms, the build's scripts, the
+- `bin/gate` is the check every change to main must pass. Since GT1-GT3 (doc/GATE-SURVEY.md,
+  "As built: GT1-GT3") its steps are data, `test/gate/steps.edn` (each step's command, the steps it
+  needs, its declared inputs: files, hosts, pins, environment), and after stage 0 the planner
+  `test/gate/plan.ae` (on stage 0) keys each check over them, never the commit, and skips one that
+  passed at its key in the store of passes (`ARBACE_GATE_STORE`, default the main checkout's
+  `.tmp/gate-pass/`, shared by the worktrees: each pass with its commit, worktree, date, seconds,
+  peak memory, log); the builds (`go-build`, `javac-tool`) run when a check that runs needs them;
+  `bin/gate [--full] --plan` prints each step's decision and why, `bin/gate --why STEP` what changed
+  since its latest pass, `--rerun` runs every check; each step's wall and CPU seconds and peak RSS
+  (busybox `time -v`) in `.tmp/gate/NAME.mem`, a 5 s memory sampler's `.tmp/gate/mem.tsv`. The
+  steps: the Makefile's scripts (`make check-makefile`), the seed's hash, stage 0 built from
+  it (`bin/seed --build`, kept by the seed's and Go's pins), the executable and the test build by stage 0 (`bin/arbace-go
+  --gate-build`, cached in `.tmp/arbace-go-gate` and keyed by a hash of what they are built from,
+  `gate_key`: `arbace/` less repr/java, repr/haskell and repr/rust, `go/`, `overlay/` and `jdk/` less
+  javac's world and the provenance files, `x509roots/`, the fixtures' forms, the build's scripts, the
   seed's and Go's pins; seconds when unchanged, else two Go-hosted builds, about 8 minutes: the
   test build reuses the executable's compiled namespaces), then
   concurrently the smoke test, the per-form differential check (`bin/diffcheck`, Futamura F2, since
@@ -368,10 +378,12 @@ Prior art:
   since GP7 repr/go's generated Go forms, the dumper `go/arbace/repr/go/godump` and the renamed copy of gc's
   syntax `go/arbace/repr/go/internal/syntax`, regenerated and compared with the committed files), and since 2026-10-24 `bin/j2g-edge verify` on the
   frozen JVM (j2g's edge recorded afresh: an embedded namespace's new JDK class makes `jdk/edge.edn`
-  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds), and since REAP8 the new levels' essential subsets (doc/FULL-SUPPORT-SURVEY.md, "As built: REAP8"): `bin/goi check --aot --essential` (`test/goi/essential-aot.txt`), `bin/java-check --essential-compiled` (the essential tests that pass compiled, one program cached by key) and `bin/clojure-tests --aot --essential` (`test/clojure/essential-aot.txt`'s namespaces compiled alone, cached by key), and since REAP7b `bin/arbace-go --build-program --check mixed` (a user's program of the three languages, its Go package compiled through its own goi table, built on the gate's executable, cached by key, and run; `--full` all of `test/programs/`), the whole-program j2g runs one at a time (`bin/j2g`'s `J2G_LOCK`). `bin/gate --full` adds, concurrently: the Go build afresh with its
-  smoke test, then javac's forms and javac on Arbace (`bin/javac-vendor check`, `build`, `verify`:
-  javac's forms read afresh by javac on Arbace, `classes baseline samples jdk java.base`), then,
-  beside the rest of that chain, repr/java's checks on the tool just built (JN5, JFS9): `bin/repr-java
+  stale), and `bin/reap` (REAP1: the REAP matrix judged from the checks' recorded results, seconds), and since REAP8 the new levels' essential subsets (doc/FULL-SUPPORT-SURVEY.md, "As built: REAP8"): `bin/goi check --aot --essential` (`test/goi/essential-aot.txt`), `bin/java-check --essential-compiled` (the essential tests that pass compiled, one program cached by key) and `bin/clojure-tests --aot --essential` (`test/clojure/essential-aot.txt`'s namespaces compiled alone, cached by key), and since REAP7b `bin/arbace-go --build-program --check mixed` (a user's program of the three languages, its Go package compiled through its own goi table, built on the gate's executable, cached by key, and run; `--full` all of `test/programs/`), the whole-program j2g runs one at a time (`bin/j2g`'s `J2G_LOCK`). `bin/gate --full` adds, one after another (concurrently by chain with
+  `GATE_FULL_PARALLEL=1`): javac's tool (`bin/javac-vendor tool`, built once per `arbace_javac_key`
+  and kept in `.tmp/gate-javac`, j2g on the gate's executable) and javac on Arbace (`bin/javac-vendor
+  check --from`: the tool build's own j2g run, javac's world translated once; `verify`:
+  javac's forms read afresh by javac on Arbace, `classes baseline samples jdk java.base`), then
+  repr/java's checks on the tool (JN5, JFS9): `bin/repr-java
   check --suite`, `bin/repr-java roundtrip --corpus baseline,samples,jdk --text` (then mode `:full`
   printed back to the original Java, byte for byte; the classes level by javac on Arbace),
   `bin/jrt-convert verify` (`jdk/` converted afresh, byte for byte), `bin/clojure-tests
@@ -381,7 +393,7 @@ Prior art:
   javac's trees', JFS66 (b)), `bin/repr-java attr-check` (the native provider's facts equal to javac on
   Arbace's, JN9a), `bin/java-check --levels read,interp,classes,compiled,diagnostics,print` (Java's conformance check, every
   corpus, then `--forms verify`: the essential tests' forms read afresh); then
-  `bin/arbace-go --fixpoint`, then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3), then `bin/arbace-go --build-program --check` (every sample, REAP7b); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
+  `bin/arbace-go --fixpoint --g1 .tmp/arbace-go-gate` (G1 the gate's build, G2 and G3 built), then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3), then `bin/arbace-go --build-program --check` (every sample, REAP7b); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
   `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), repr/clojure's
   (`bin/repr-clojure check`, `--suite`, `--roundtrip`), `bin/x509roots-vendor verify`, `check`; goi (`bin/goi
   annotations`, `test --gc`, `check --jobs 8`, then `check --aot --jobs 8`, after repr/go's round trips). Parked by the user, 2026-10-26, and out
@@ -392,7 +404,7 @@ Prior art:
   and repr/rust (`bin/repr-haskell`, `bin/repr-rust` round trips). Run it when the Java forms'
   front end, repr/java, repr/go, j2g or jrt change (after a change to `overlay/jdk/java.base`, jrt's closure
   or repr/java, `bin/jrt-convert update` first; after a change to what j2g asks of the JVM,
-  `bin/j2g-edge update`). `GATE_FULL_SERIAL=1` runs `--full`'s chains one after another (at once they overload a 62 GB host:
+  `bin/j2g-edge update`). `--full` is serial by default since GT3 (GTS13 (a); at once its chains overload a 62 GB host:
   REAP9's runs, 2026-10-26). Logs in `.tmp/gate/`. Every gate run and every `bin/arbace-go --build`
   first trims Go's build cache of entries unused for 90 minutes (`bin/lib/gocache.bash`,
   `ARBACE_GOCACHE_KEEP_MIN`). No build may use the host's `go`: only TamaGo's (`ARBACE_GOROOT`).
