@@ -2911,3 +2911,47 @@ design with the SAX cut, after RPS56; `seq-and-transducer` stays deferred, a spe
 keeps a constant's widening, in JN9f: the 5 deferred `:print-forms` tests), RPS152 (`:print-shapes` and
 `:print-erasure` by design), RPS153 (an enum constant with arguments and an empty body by design for now), RPS154
 (no other consumer of the module table).
+
+## As built: RPS150 and JCS123 (b) (2026-10-28)
+
+Branch `v2-rps150`, from main `3aef964c`, for `arbace-reaps-3-crops-v2`: RPS150 (b) (decided "Decided (2026-10-28): RPS130-RPS134,
+RPS150-RPS154") and JCS123 (b) (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (2026-10-28): JCS120-JCS123").
+
+- *RPS150 (b), Module's support forms.* `out/support-forms` (arbace/j2g/out.ae) writes, beside `Class.getResourceAsStream`'s and
+  under the same conditions, two methods on jrt's `*Module`: `GetResourceAsStream_String__InputStream` (when `ByteArrayInputStream`
+  is translated: the name from the module's root, one leading `/` dropped, over `ResourceOrPath` as the embedded resources and
+  `ARBACE_PATH`, a `ByteArrayInputStream`; nil when absent) and `GetPackages__Set` (when `HashSet` is translated: a `HashSet` of
+  the packages of the registered classes whose `GetModule` is the module, and for a named module the packages of
+  module_table.ae; the unnamed package is not listed). `main.ae`: the scan registers both under `:methods "Module"`, and
+  `HashSet`'s `<init>` and `add` are roots when `HashSet` has Java forms. No manifest entry: `Class.getResourceAsStream` has none
+  either (an edge member jrt leaves undefined, j2g's support method), so the pattern is Class's exactly. Checked by a program
+  (`.tmp/rps150/prog`, `--build-program`, run: `.tmp/rps150/prog-run.out`): `String.class.getModule().getPackages()` holds
+  `java.lang` and `java.util` and not `hello`, the unnamed module's holds `hello` and not `java.lang`, a missing resource
+  (with or without `/`) is null; the print caches' `j2g_support.go` of the java-check runs compiled with it. No test of the
+  corpora calls either method (the sources searched), so no recorded result moves from this part.
+- *JCS123 (b), (i) getMethods' order.* `member-table-form` (out.ae) sorted a class's methods by name first; for an own interface
+  of a `--program` (`own` and `iface`) it now keeps declaration order, the order the JVM gives a class it loads in this
+  position (the edge's `:method-order` covers only archived JDK classes, whose order comes from the JVM and stays): t04530
+  (NonPublicStaticInitializer) passes compiled.
+- *JCS123 (b), (ii) the enum.* The cause was not the modifiers: the converter writes `V() {}` as `(V [])` (a constant with
+  arguments or a body is a list, a plain one a symbol), and `arbace.classes.parse` read a list without body forms as having no
+  body, so no `T8034044$En$1` existed and `En.V.getClass()` was `En`, which is static. `parse.ae` now reads `(V [])` with no
+  arguments and no pinned parameter tags as a constant with an empty body (a constant with arguments and no body is still
+  `(V [1])`, the shape of `V(1) {}` too: the forms cannot tell them apart, and the pinned empty-argument case with an empty
+  body stays without one). The anonymous class takes javac's InnerClasses flags (final, enum, not static): t05967 passes
+  compiled, interpreted as before. This is the Java forms' analysis, the executable's own: it moves the runtime of the re-seed,
+  and is not exercised by the host that runs j2g from the seed (the gate's build carries it). Not run: the whole compiled
+  level, so a test with an empty constant body beside others is checked only by the gate's subsets.
+- *The classes.* `:j2g-reflection` shrinks to t04863 (IllegalAccessInInvoke) and becomes `:design`: the Go build has no
+  run-time access checks, caller-sensitive checks left out by JCS123 (b).
+- *Numbers (`bin/reap`, before to after).* Java AOT 1,910 / 180 / 1,230 to 1,912 / 180 / 1,230 (t04530 and t05967 pass;
+  `levels-known.edn` loses both lines); read 7,740 / 3 / 93, eval 1,804 / 329 / 1,189 and print 2,597 / 683 / 41 unchanged
+  (the interpreted level already passed both); 12 of 12 cells, 0 problems. Records: `test/java/check-compiled.edn` (two
+  lines), `test/java/levels-known.edn`, `test/java/divergences.edn`.
+
+Shipped files changed (the re-seed): `arbace/j2g/out.ae`, `arbace/j2g/main.ae` (j2g's support forms and scan: they change the
+`j2g_support.go` of every program with `ByteArrayInputStream` or `HashSet` translated) and `arbace/classes/parse.ae` (the
+Java forms' analysis in the executable). No file of `go/`, `overlay/` or `jdk/`.
+
+Scratch (`.tmp/rps150/` of the worktree): `prog/` (the Module program) with `prog-build.log` and `prog-run.out`, `c4.log` to
+`c6.log` and `rec.log` (the java-check runs), `reap-after.log`, `gate-build.log`, `run-all.sh`, `record.sh`.
