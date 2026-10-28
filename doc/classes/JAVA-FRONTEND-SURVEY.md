@@ -5994,3 +5994,12 @@ and 265,011,360 (the final build, key `74dfa6c26ac6`). A re-seed carries the run
   the read levels, the levels of the moved tests), `jfs126.md` (the design's draft);
   `.tmp/java-check/forms-nojavac/` (the nread level's reads), `.tmp/repr-java-nojavac-check/nojavac.md`,
   `.tmp/repr-java-attr-check/attr.md`.
+
+## Decided (2026-10-28): JFS130-JFS134
+
+The user decided JN9f's proposals as recommended: JFS130 (a) (each reader namespace that names javac split into its
+native part and a javac part loaded only on the tool, through a protocol whose default is `javac-needed!`), JFS131
+(b) for java.base and (a) for the other modules (a declarations-only java.base embedded, the rest from a directory at
+run time), JFS132 (a) (`read --no-javac` on the shipped program and `load-java` at the REPL), JFS133 (a) (the 44
+fallbacks ported by class, the 6 that differ first), JFS134 (a) (the 6 differences first, started 2026-10-28 beside
+v2 on the branch `java-jfs133`; then JFS130-JFS132 as JN10, after `arbace-reaps-3-crops-v2`).

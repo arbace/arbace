@@ -391,7 +391,8 @@ Prior art:
   that wrote it, JFS32), `bin/repr-java parse-check` (the native parser's trees equal to javac on
   Arbace's, JN8), `bin/repr-java front-check` (the converter's forms from the native trees equal to
   javac's trees', JFS66 (b)), `bin/repr-java attr-check` (the native provider's facts equal to javac on
-  Arbace's, JN9a), `bin/java-check --levels read,interp,classes,compiled,diagnostics,print` (Java's conformance check, every
+  Arbace's, JN9a), `bin/repr-java nojavac-check` (since JN9f: the corpora read with no javac, every answer native,
+  the forms equal to javac's), `bin/java-check --levels read,interp,classes,compiled,diagnostics,print` (Java's conformance check, every
   corpus, then `--forms verify`: the essential tests' forms read afresh); then
   `bin/arbace-go --fixpoint --g1 .tmp/arbace-go-gate` (G1 the gate's build, G2 and G3 built), then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3), then `bin/arbace-go --build-program --check` (every sample, REAP7b); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
   `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), repr/clojure's
