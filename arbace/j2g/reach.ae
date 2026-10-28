@@ -517,6 +517,19 @@
     (swap! (.-fis st) conj fi)
     (reach-impls! st fi)))
 
+(defn- markers-st
+  "The marker interfaces of a lambda or method reference whose target is an intersection: used,
+  and their default methods (and their superinterfaces') reached, which its adapter implements
+  (out/adapter-forms; JCS118 (a), \"As built: JC4c\")."
+  [^State st markers]
+  (doseq [mk markers :when (use-st st mk)
+          c (m/all-supertypes mk)
+          :when (and (m/interface? c) (a/decl c))
+          mm (:methods (a/decl c))
+          :when (and (not (m/static? mm)) (not (m/private? mm)) (not (m/abstract-m? mm))
+                     (not= "<clinit>" (:name mm)))]
+    (reach* st [c (:name mm) (:desc mm)])))
+
 (defn lambda!
   "A lambda or method reference of functional interface fi: its adapter is an instance of fi,
   whose default methods virtual calls reach."
@@ -621,9 +634,9 @@
       :class-lit (use-desc! st (:class node))
       (:new-array :array-init) (use-desc! st (:type node))
       :try (doseq [c (:catches node) cls (:classes c)] (use-st st cls))
-      :lambda (do (when (use-st st (:fi node)) (lambda-st st (:fi node))) (doseq [mk (:markers node)] (use-st st mk)))
+      :lambda (do (when (use-st st (:fi node)) (lambda-st st (:fi node))) (markers-st st (:markers node)))
       :method-ref
-      (do (when (use-st st (:fi node)) (lambda-st st (:fi node))) (use-st st (:owner node))
+      (do (when (use-st st (:fi node)) (lambda-st st (:fi node))) (markers-st st (:markers node)) (use-st st (:owner node))
           (case (:kind node)
             :static (do (init* st (:owner node)) (reach* st [(:owner node) (:name node) (:desc node)]))
             :new (do (init* st (:owner node)) (reach* st [(:owner node) "<init>" (:desc node)])
@@ -650,6 +663,10 @@
                     (reach* st ["java/lang/AssertionError" "<init>" d])
                     (instantiate* st "java/lang/AssertionError")))
       :if-instance (walk-nodes (fn [_]) nil)
+      ;; javac's synthetic null check: Objects.requireNonNull (code's :null-checked)
+      :null-checked (when (and (a/decl "java/util/Objects") (use-st st "java/util/Objects"))
+                      (init* st "java/util/Objects")
+                      (reach* st ["java/util/Objects" "requireNonNull" "(Ljava/lang/Object;)Ljava/lang/Object;"]))
       (:var-deref :var-invoke)
       (do (use-st st (t/lang-class "Var"))
           (vcall (t/lang-class "Var") (if (= :var-deref (:op node)) "deref" "getRawRoot")
@@ -688,7 +705,7 @@
   "The ops scan-node! acts on (an accessor's call, an :invoke, may stand for a field access)."
   #{:invoke :new :ctor-call :get-static :set-static :get-field :set-field :cast :instance? :class-lit
     :new-array :array-init :try :lambda :method-ref :java-str :for-each :assert :if-instance
-    :var-deref :var-invoke :fi-adapter :switch})
+    :var-deref :var-invoke :fi-adapter :switch :null-checked})
 
 (defn- hw-owner?
   "Can a call of a method of class c need check-hw-call! (does jrt define c)?"

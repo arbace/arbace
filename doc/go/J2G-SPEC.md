@@ -1297,6 +1297,18 @@ The tables' entry types (jrt's `class.ae`):
   and their constants; an enum's `values`, `valueOf` and constants are ordinary members.
 - A `volatile` field that is not final has a `Set`, a volatile write (§8.2), as its `Get` is a
   volatile read (amendment M8, accepted 2026-10-09; the tables had no `Set` for them).
+- **Which members** (amendment JC4c, doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4c"):
+  the public ones, and the protected static methods (JCS112 (a): a subclass's static call of
+  the world through the analysis, which keeps it to subclasses; jrt's tables likewise,
+  `test/jrt/tables.ae`); in a `--program`, every member of the program's own classes
+  (`arbace.j2g.names/user-class?`: a user's, the conformance check's tests; JCS117 (a)), with its
+  modifiers, as the interpreter's view has them, a private method invoked as its `Impl_` (a
+  non-leaf class) or its function (an interface), and every such member a root of the
+  reachability; the shipped program has no such classes and its tables keep the public members.
+  A lambda adapter `F_Fn` (§7.11) has a table of its SAM and the SAM's bridges, its other erased
+  descriptors (`arbace.classes.analyze/find-sam`), which are Go methods of the adapter calling
+  `Fn`, the values converted through Object (JCS63 (a), JCS116 (a)); an adapter of an
+  intersection implements its markers' default methods too (JCS118 (a)).
 
 **The value convention** (amendment R11, accepted 2026-10-08). Invokers take and return values
 in their Go representation (§5.1), not boxed: a primitive as the Go value of its type (`bool`,
@@ -1507,8 +1519,10 @@ and adds 42 classes jdk26u's tests extend: `Thread`, the collections (`ArrayList
 `LinkedHashMap`, `TreeMap`, the `Abstract*` bases...), the streams (`ByteArrayInputStream`,
 `FilterInputStream`, `PrintStream`, `PrintWriter`...), `AssertionError`, `Calendar`, `Observable`,
 `AbstractQueuedSynchronizer`...; a translated leaf the list names is no longer a leaf, as §5.3's
-proxy-supers; a hand-written jrt class without a class interface, such as `WeakReference`, cannot
-have one), so these classes can be proxied as well. An
+proxy-supers; a hand-written jrt class without a class interface cannot have one: since JC4c,
+"As built: JC4c", jrt gives `WeakReference`, `SoftReference`, `AtomicReference` and
+`InheritableThreadLocal` theirs, and they are listed with `CopyOnWriteArraySet`), so these classes
+can be proxied as well. An
 interpreted class extending one of `proxy-supers` or `class-supers` (`arbace.j2g.dyn/sub-supers`;
 or an interpreted class that does) has DynSub_C
 objects: j2g writes for each C, in `j2g_cf.go`, its allocation without a constructor

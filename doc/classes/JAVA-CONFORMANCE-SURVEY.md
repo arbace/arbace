@@ -3131,3 +3131,167 @@ then (c) (the 17.6 MB kept; the per-class subclass types shrunk by a shared gene
 JCS112 (a), JCS113 (a), JCS116 (a) with JCS117 (a), JCS118 (a): JC4c, before v2's re-seed; JCS114 (a) and
 JCS115 (a), the converter's, in JN9f (repr/java); JCS119 (a) and (c) (the limits kept, the full check on an
 idle host only, as GT6's limits will hold).
+
+## As built: JC4c (2026-10-28)
+
+Branch `java-jc4c`, from main `b60d3075`. The user's JCS111 (a), JCS112 (a), JCS113 (a), JCS116 (a) with JCS117
+(a) and JCS118 (a) ("Decided (2026-10-27): JCS110-JCS119"); JCS114 and JCS115 are JN9f's. The executables: this
+branch's `bin/arbace-go --build` (amd64, by stage 0, the seed's `target/seed` copied from main's) interprets, hosts
+j2g and gives the compiled namespaces (`JAVA_CHECK_EXE`, `J2G_GO_EXE`, `JAVA_CHECK_AOT`); javac's tool main's
+(`REPR_JAVA_STALE_OK=1`: repr/java is unchanged); the system's JDK for the new JLS program's reference; 8 jobs,
+shards of 500, `GOMEMLIMIT=18GiB`, every heavy run under the host's big-job lock.
+
+**The fixes** (the shipped files they change at the end):
+
+- *JCS111 (a), jrt's hand-written leaves.* `WeakReference`, `SoftReference` (`go/arbace/jrt/reference.ae`),
+  `AtomicReference` (`atomic.ae`) and `InheritableThreadLocal` (`threadlocal.ae`) get class interfaces
+  (`WeakReference_I`, `SoftReference_I` over `Reference_I`; `AtomicReference_I` with every method, all final but
+  `toString`, which gets its `Impl_`; `InheritableThreadLocal_I` over `ThreadLocal_I`, `childValue`'s `Impl_`),
+  constructors taking `this` (`AtomicReference`'s `Ctor`, `Ctor_O`), casts and instance checks over the
+  interfaces; `bin/jrt manifest` regenerated `manifest.edn` and `reflect_tables.ae` (the invokers assert the
+  interfaces). `arbace.j2g.model/class-supers` lists them, with the translated `CopyOnWriteArraySet`,
+  `CopyOnWriteArrayList`, `RecursiveAction` and `RecursiveTask` (BiggernYours, Integrate and the new JLS program
+  extend them). Their generic views: `arbace.j2g.dyncf/generics-text` asks `class-generics` of the hand-written
+  extendable classes, so that `bin/j2g-edge update` recorded `AtomicReference`'s and `InheritableThreadLocal`'s
+  generics in `jdk/edge.edn` (j2g's bridges of `EarlyLocalTest5`'s `extends AtomicReference<...>`), and writes
+  them into `generics.edn` (the interpreter's: an `InheritableThreadLocal<String>` subclass's
+  `childValue(String)` overrides `childValue(T)`; `ThreadLocal`'s view is there now too).
+- *JCS112 (a), protected static methods.* j2g's member tables (`arbace.j2g.out/member-tables`) and jrt's
+  (`test/jrt/tables.ae`) list the protected static methods besides the public members, rooted in a
+  `--program` (`arbace.j2g.main/root-keys`); the analysis' access check keeps them to subclasses. jrt had
+  none, and Integrate's `getSurplusQueuedTaskCount` turned out public and missing: jrt's
+  `ForkJoinTask_GetSurplusQueuedTaskCount__I` (0: jrt's pool queues no forked task).
+- *JCS113 (a), the capture chain.* `arbace.classes.analyze/outer-this-node`: a class of another constructor's
+  prologue on the path to the outer instance captures that constructor's outer instance parameter itself
+  (`add-capture!`), javac's proxy, so the classes nested in it read it through their enclosing instances
+  (`this$0.val$this$0`); j2g's constructor reads the first hop through its outer instance parameter, `this$0`
+  not being set in `this(...)`'s arguments (`decls/captured-fields`); the interpreter reads a constructor's
+  outer instance parameter through `this$0` only in that constructor's class (`interp/local-node`).
+  MultiLevelOuterInstance passes compiled.
+- *JCS116 (a), a lambda's bridges.* The interpreter publishes a method per bridge descriptor (`lambda-done!`: a
+  `CF$Meth` of the bridge's descriptor running the SAM's body), and a lambda's class publishes the default
+  methods it inherits for dispatch only (`dispatch-only`, bit 30 of the flags, which `Compiler$CFGo`'s
+  `setMethod` native, `arbace.j2g.dyncf`, takes as a slot without a member table entry): `getDeclaredMethods`
+  lists the method and its bridges, as LambdaMetafactory's class. j2g's adapter `F_Fn` (`out/adapter-forms`)
+  gets the bridges as Go methods calling `Fn` (the values converted through Object) and a member table of the
+  SAM and its bridges. LambdaTest6 and BridgeMethod pass at both levels.
+- *JCS117 (a), the program's own members.* In a `--program`, a class of `arbace.j2g.names/user-class?` (a
+  user's, the tests) lists every member in its member table, with its modifiers (a private method invoked as
+  its `Impl_` or its interface function), every member a root; the shipped program has none of them (its
+  tables differ only by JCS112's entries). 12 tests pass compiled for it, among them CopyMethods and
+  TestMoveStoresOutOfLoops, which were `:j2g-findings` (both reflect on their package-private static methods).
+- *JCS118 (a), j2g's findings*, each with its case in `test/j2g/fixtures/FxBackEnds.ae` (diffcheck's Java pair,
+  its results by hand in `test/j2g/record_fixtures.ae`: the frozen jar's analysis refuses a functional
+  interface of two erased descriptors) and in the new JLS program:
+  - TestSyntheticNullChecks: javac's synthetic null check (`:null-checked`: `outer.new Inner()`, a bound
+    reference's receiver) is `Objects.requireNonNull` on the JVM, whose frame the NPE's stack trace shows; j2g's
+    `J2g_RequireNonNull`/`J2g_RequireNonNullP` (jrt's `j2g_support`) call it on null when `Objects` is
+    translated (`code`, reached by `reach`), else `NN` as before.
+  - IntersectionOrderTest2: the adapter of an intersection `(A & B & AB & C)` implements its markers' methods
+    (AB's defaults, reached by `reach/markers-st`; the abstract ones throw), so it is an `AB`.
+  - MethodReferenceGenericTarget: a method reference to `T id(T)` as an `int` method unboxes the value's own
+    wrapper and widens (`code/convert-ref-or-prim`, `J2g_UnboxWiden` over reflection's `Unbox`), as
+    LambdaMetafactory and the interpreter's `value-convert`.
+  - SamConversion (`:j2g-coercion`): a lambda body that completes abruptly (`throw`) of an `int` method is a
+    statement, then the zero (`code/expr-as`).
+  - CopyMethods, TestMoveStoresOutOfLoops: JCS117's.
+  - LambdaTest5 (`:j2g-deep-stack`) is not a limit: its `a3 = () -> a3.m()` expects `StackOverflowError`,
+    J2G-SPEC's V1 (Go's runtime ends the program at the stack's limit; a larger limit, the proposal's
+    `debug.SetMaxStack`, does not help an unbounded recursion): JCS121.
+  - The package-private override (`:j2g-pp-override`, AccessControlTest, VTableTest) needs member renaming,
+    which j2g lacks: not built, JCS122.
+
+**The regression cases**: Arbace's own JLS program `test/java/jls/BackEnds2.java` (`t08324`, the JDK's run
+recorded with `--record-ref --only BackEnds2`): the four jrt classes, `CopyOnWriteArraySet`, `RecursiveAction`
+with `getSurplusQueuedTaskCount`, the outer instance two levels out from two prologues' classes, a lambda's bridges
+listed and called, a class's own private members by reflection, the synthetic null check's frame, an intersection's
+lambda cast to `IAB`, the generic method reference as `int`, a throwing lambda of an `int` method; and the fixture
+`FxBackEnds`.
+
+**Numbers** (`bin/java-check --levels read,interp,compiled --jobs 8 --record`, the whole corpus, 3,322 run tests
+passing on the JDK, `t08324` the new one; the first run's shards 2-6 lost to the host's full disk, run again with
+`--shard 2,3,4,5,6`; HugeToString's compiled timeout and LargeFileAvailable's "No space available for temp file"
+of that hour run again with `--only`):
+
+| level | JC4b (main) | **JC4c** | gained | lost |
+|---:|---:|---:|---:|---:|
+| read | 3,320 | 3,321 | 1 (the new program) | |
+| interp | 1,790 | **1,804** (54.3%; 5 more flaky, timeouts passing when run again) | 18 | 0 (4 recorded flaky) |
+| compiled | 1,881 | **1,910** (57.5%; 1 more flaky) | 31 | 0 (1 recorded flaky, LockStep `:unstable`) |
+
+Interpreted, now passing: five HotSpot tests that timed out in JC4b's recording (the host), the eleven of `:interp-extends` (TestReferenceGetWithNull, ReferenceEnqueuePending,
+SoftReference/Bash, the two InheritableThreadLocal tests, the five EarlyLocalTests and SuperInitGood),
+LambdaTest6 and BridgeMethod (`:lambda-bridges`), BackEnds2. Compiled, now passing: the twelve of
+`:j2g-reflection` and `:j2g-findings` that JCS117 lets through (Cast, getDeclaredField/getDeclaredMethod
+Exceptions, DefaultAccessibility, TestFieldReflectValueOf, CopyMethods, TestMoveStoresOutOfLoops, FloatingPointChanges,
+StrictAbstract, TwrMultiCatch, the Nestmates privateMethods and privateStaticMethods TestReflection), the three
+other findings (TestSyntheticNullChecks, IntersectionOrderTest2, MethodReferenceGenericTarget), SamConversion,
+MultiLevelOuterInstance, the five AtomicReference tests and the two InheritableThreadLocal tests (the edge's
+generics), Integrate, BackEnds2, LambdaTest6 and BridgeMethod, and Test6689060, Test7196199 and
+PipedReader/Constructors (timing: they pass this time). No
+test passing before fails now. `test/java/levels-known.edn`: 1,802 pass both, 109 only compiled, 7 only
+interpreted; 23 disagreements resolved, 2 new, both interpreted timeouts of tests now passing compiled
+(TestMoveStoresOutOfLoops, Integrate: `:speed`). Interp's Integrate and TestMoveStoresOutOfLoops now reach their
+loops and time out (`:speed`).
+
+**The classes** (`test/java/divergences.edn`): gone, their tests passing, `:j2g-capture-names`, `:lambda-bridges`,
+`:j2g-coercion`, `:j2g-findings`; shrunk, `:interp-extends` (BiggernYours' `ConcurrentHashMap`, JCS120),
+`:interp-protected` (its ForkJoinTask case gone; the rest JCS120 or by design), `:j2g-reflection` (getMethods'
+order in NonPublicStaticInitializer, T8034044's local enum's modifiers, IllegalAccessInInvoke's access checks:
+JCS123); `:j2g-deep-stack` names V1 (JCS121), `:j2g-pp-override` the renaming j2g lacks (JCS122); `:reflection`
+takes jrt's missing `Field.getInt` (the Nestmates privateFields tests, which reach it now). **REAP**: `bin/reap`
+12 of 12 cells, **0 problems**; Java: read 7,740 / 3 / 93, eval 1,804 / 329 / 1,189, AOT 1,910 / 180 / 1,232, print
+2,584 / 637 / 99 (JC4b: eval 1,790 / 329 / 1,202, AOT 1,881 / 181 / 1,259).
+
+*The shipped program*: the executable is **177,283,232** bytes (JC4b's 174,010,528: +3,272,704, +1.9%): the nine
+new DynSub types (`WeakReference`, `SoftReference`, `AtomicReference`, `InheritableThreadLocal`,
+`CopyOnWriteArraySet`, `CopyOnWriteArrayList`, `RecursiveAction`, `RecursiveTask`; `ThreadLocal`'s was there) and
+their `dynCf*` tables, the lambda adapters' member tables and bridge methods, the protected static methods' table
+entries. j2g's translation of the shipped program changes by design: the jrt classes' uses are `C_I` now (the
+runtime's `AtomicReference` fields: `PersistentVector`'s `edit`, through the interface), the new DynSub types, the
+adapters' tables, `:null-checked` through `J2g_RequireNonNull`, `generics.edn`'s hand-written entries. The
+shipped files changed (the re-seed carries them): `arbace/classes/analyze.ae`, `interp.ae`; `arbace/j2g/code.ae`,
+`decls.ae`, `dyncf.ae`, `main.ae`, `model.ae`, `out.ae`, `reach.ae`; `go/arbace/jrt/atomic.ae`, `forkjoin.ae`,
+`reference.ae`, `threadlocal.ae`, `reflect_tables.ae`, `manifest.edn`, `manifest_test.ae` (generated);
+`jdk/edge.edn`. As JCS61 (a) says, the analysis' fix (JCS113) reaches j2g on stage 0 with the re-seed; this
+branch's compiled numbers are j2g on this branch's executable. Docs: this section, J2G-SPEC §5.11 and §5.12,
+CLASSFORMS-REPL §7.
+
+### Proposals (JCS120-JCS123)
+
+- **JCS120 The world's classes still not extendable** (`:interp-extends`' BiggernYours: `ConcurrentHashMap` and
+  kin; `:interp-protected`'s protected members of classes outside the list: `DeflaterOutputStream.def` through a
+  leaf, `AbstractQueuedLongSynchronizer$ConditionObject`'s constructor, `URLConnection`'s, `BreakIterator`'s).
+  - Options: (a) list them as JC4b and JC4c did, by the corpus' demand; (b) JCS110 (c) first (the shared generic
+    dispatch, so that a class costs a table, not a Go type of its own), then (a); (c) leave.
+  - *Recommended: (b)*: each class costs about 0.35 MB today; with (c) of JCS110 the list can grow to every
+    non-final class of the world that a program extends.
+- **JCS121 StackOverflowError from translated code** (`:j2g-deep-stack`, LambdaTest5; J2G-SPEC's V1).
+  - Options: (a) `overlay/go` patches `newstack`: past the limit it grows into the ceiling once and injects a call
+    of a jrt function that throws `StackOverflowError` into the goroutine (as asynchronous preemption injects
+    `asyncPreempt`), the panic unwinding as any Java exception; (b) a depth counter in translated methods (a cost
+    on every call); (c) leave V1.
+  - *Recommended: (c)*: V1 is a decision of the spec; (a) touches the Go runtime's stack growth and unwinding on
+    every architecture, the box's too, for one test; revisit with the runtime's next patch.
+- **JCS122 Package-private methods redeclared across packages** (`:j2g-pp-override`, AccessControlTest,
+  VTableTest; J2G-SPEC §4.4).
+  - Options: (a) member renaming in j2g: virtual methods keyed by name, descriptor and, for a package-private
+    one, its package; the family's Go names `_pp_<package>` in definitions, forwarders, class interfaces, the
+    calls that resolve to them, the DynSub types and the member tables; (b) leave (two tests; the shipped world
+    has none since TM7's variant).
+  - *Recommended: (b)*: (a) changes j2g's dispatch model throughout for a shape no program of the world has.
+- **JCS123 Reflection's rest** (`:j2g-reflection`: getMethods' order of an interface's abstract methods,
+  T8034044's local enum's modifiers, IllegalAccessInInvoke's access checks at both levels).
+  - Options: (a) the order as the JVM's (`:method-order` of the edge for the program's own classes), the local
+    class's modifiers from javac's InnerClasses flags, the caller-sensitive checks of `Method.invoke`,
+    `Field.get` (the caller's class from the stack); (b) the two j2g ones only; (c) leave.
+  - *Recommended: (b)*: two small j2g fixes; caller-sensitive access checks are the module system's kind, which
+    the Go build leaves out (no access checks at run time, CLASSFORMS-REPL §7).
+
+**Checks**: GATE
+
+The scratch this section cites (the worktree's `.tmp/jc4c/`, not tracked): `classes-before.txt` (main's tests of
+the decided classes), `check-*-before.edn`, `levels-known-before.edn` (main's records), `interp1.log`-`interp3.log`,
+`targeted1.log`, `results-targeted1.tsv` (the targeted runs), `full1.log` (the run the disk ended), `full2.log`,
+`results-full2.tsv` (the recording), `re1.log` (the two run again), `build1.log`-`build4.log`, `recref1.log`-`recref3.log`,
+`edge-update.log`, `manifest.log`, `recfix.log`, `reap1.log`, `lb.ae`, `lb2.ae` (the bridges' repro), `gate.log`.
