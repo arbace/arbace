@@ -22,7 +22,8 @@ arbace_javac_key() {
   (cd "$1" && {
     find arbace go overlay jdk x509roots bin/lib -type f ! -path jdk/provenance.edn ! -path jdk/javac/provenance.edn \
          ! -path 'bin/lib/repr-java/*' ! -path 'bin/lib/repr-go/*' ! -path 'bin/lib/repr-clojure/*' \
-         ! -path 'bin/lib/repr-haskell/*' ! -path 'bin/lib/repr-rust/*' ! -path bin/lib/frozen.bash | LC_ALL=C sort
+         ! -path 'bin/lib/repr-haskell/*' ! -path 'bin/lib/repr-rust/*' ! -path bin/lib/frozen.bash \
+         ! -path bin/lib/gate-run.bash | LC_ALL=C sort
     printf '%s\n' seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/arbace-go bin/j2g bin/repr-go bin/build-go bin/jrt bin/seed bin/goi
   } | xargs -d '\n' sha256sum
     cat "${ARBACE_GOROOT:-/root/tamago-go}/VERSION") | sha256sum | cut -c1-64

@@ -187,6 +187,7 @@ suite=$src
 [ -n "$rename" ] && suite=$work/suite
 . "$root/bin/lib/tools.bash"
 . "$root/bin/lib/host.bash"
+. "$root/bin/lib/limit.bash" # limited: CPU-time limits with a wall cap (GT6)
 # repr_clojure ARGS... (bin/repr-clojure read ARGS...), on the tools' host
 repr_clojure() { arbace_tool "${repr_clojure_sources[@]}" -m arbace.repr.clojure read "$@"; }
 # Translate a tree in place for the Clojure under test: the suite's and libraries' files keep
@@ -258,7 +259,7 @@ go_path() { local cp; cp=$(libcp); echo "$cp$suite/test:$root/test/suite-go"; }
 go_run() {
   local t=$1; shift
   # shellcheck disable=SC2086
-  (cd "$suite" && ARBACE_PATH=$(go_path) TMPDIR=$work/tmp GOGC=${GOGC:-400} timeout "$t" $go_exe "$@")
+  (cd "$suite" && ARBACE_PATH=$(go_path) TMPDIR=$work/tmp GOGC=${GOGC:-400} limited_cpu $((t * 2)) $((t * 4)) $go_exe "$@")
 }
 # host_run ARG...: the tools' host (bin/lib/host.bash), in the suite, on the suite's ARBACE_PATH:
 # the listing and the report with the Go build, whatever the build under test
@@ -447,7 +448,7 @@ aot_build() {
   if [ -z "$exes" ]; then
     (cd "$root" && bin/arbace-go --gate-build) > "$ab/gate-build.log" 2>&1 \
       || { tail -20 "$ab/gate-build.log"; echo "clojure-tests --aot: bin/arbace-go --gate-build failed" >&2; return 1; }
-    exes=$root/.tmp/arbace-go-gate/amd64
+    exes=${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate}/amd64
   fi
   gexe=$exes/arbace texe=$exes/arbace-tests
   key=$( { sha256sum < "$gexe"; sha256sum < "$texe"
@@ -588,6 +589,15 @@ fi
 step "[$run] run $(wc -l < "$work/selected.txt") test namespaces, $jobs at a time (logs in $work/out)$([ -n "$go_exe" ] && echo ", on $go_exe")"
 export CLOJURE_SRC=$clojure_src CLOJURE_TESTS_RUN=$run CLOJURE_TESTS_TIMEOUT=$timeout_s
 xargs -P "$jobs" -n 1 "$0" --run-one < "$work/selected.txt" | grep -v ' exit 0$' || true
+# a namespace that timed out among the others (its CPU limit or its wall cap, GT6: bin/lib/limit.bash)
+# runs again alone, the second run standing (GTS16 (a): the quiet retry)
+if [ -n "$go_exe" ]; then
+  cat "$work"/out/*.time 2> "$root/.tmp/clojure-tests.err" | awk '$2 == "exit" && ($3 == 124 || $3 == 137 || $3 == 152) { print $1 }' > "$work/timeouts.again"
+  if [ -s "$work/timeouts.again" ]; then
+    step "[$run] $(wc -l < "$work/timeouts.again") timed out, run again one at a time: $(tr '\n' ' ' < "$work/timeouts.again")"
+    xargs -P 1 -n 1 "$0" --run-one < "$work/timeouts.again" | grep -v ' exit 0$' || true
+  fi
+fi
 
 # 6. gen
 if [ $generative = 1 ] && [ ${#only[@]} -eq 0 ]; then

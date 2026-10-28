@@ -262,7 +262,10 @@
   "Runs the command (bash -c) with input on its standard input; the records it printed (read,
   normalized), the other lines of its standard output, its standard error and exit status."
   [cmd ^String input timeout-s]
-  (let [pb (doto (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String ["bash" "-c" cmd]))
+  ;; GT6, GTS16 (a): the limit is CPU time (ulimit -t, twice TIMEOUT-S: all of the process's threads),
+  ;; which a busy host barely moves; the wall time is only a cap (eight times TIMEOUT-S) for a run
+  ;; blocked without spending CPU. A run that hits either is run again alone by check
+  (let [pb (doto (ProcessBuilder. ^"[Ljava.lang.String;" (into-array String ["bash" "-c" (str "ulimit -t " (* 2 timeout-s) "; " cmd)]))
              (.directory (io/file root)))
         p (.start pb)
         errf (future (slurp (.getErrorStream p) :encoding "UTF-8"))
@@ -270,7 +273,7 @@
                          (.write w input))
                        (catch java.io.IOException _ nil)))
         outf (future (slurp (.getInputStream p) :encoding "UTF-8"))
-        finished (.waitFor p (long timeout-s) TimeUnit/SECONDS)]
+        finished (.waitFor p (long (* 8 timeout-s)) TimeUnit/SECONDS)]
     (when-not finished (.destroyForcibly p) (.waitFor p))
     (let [lines (str/split-lines @outf)
           recs (keep #(when (.startsWith ^String % "@@oracle ")
@@ -280,7 +283,7 @@
       {:records (vec recs)
        :noise (vec (remove #(.startsWith ^String % "@@oracle ") lines))
        :err @errf
-       :exit (if finished (.exitValue p) :timeout)})))
+       :exit (if finished (let [x (.exitValue p)] (if (#{137 152} x) :timeout x)) :timeout)})))
 
 ;; ----- the parts: their cases from a source file or an expected file, and the input to send
 
@@ -449,14 +452,22 @@
                    ;; the reference has no Go forms: goi's cases are the Go build's (S54)
                    :when (not (and (= cmd default-impl) (goi-source? src)))]
                [part src e])
-        rs (pool-map jobs (fn [[part src e]]
-                            (let [ks (result-keys part)
-                                  cases (mapv #(apply dissoc % :missing (remove #{:class :sig} ks)) (:cases e))
-                                  cases (if (= part "forms") (mapv #(dissoc % :class) cases) cases)
-                                  t0 (System/nanoTime)
-                                  r (run-file cmd part src cases timeout)]
-                              (assoc r :expected (:cases e) :ms (quot (- (System/nanoTime) t0) 1000000))))
-                     work)
+        run-one (fn [[part src e]]
+                  (let [ks (result-keys part)
+                        cases (mapv #(apply dissoc % :missing (remove #{:class :sig} ks)) (:cases e))
+                        cases (if (= part "forms") (mapv #(dissoc % :class) cases) cases)
+                        t0 (System/nanoTime)
+                        r (run-file cmd part src cases timeout)]
+                    (assoc r :expected (:cases e) :ms (quot (- (System/nanoTime) t0) 1000000))))
+        rs (pool-map jobs run-one work)
+        ;; GT6, GTS16 (a): a run that timed out among the others (the CPU limit or the wall cap) runs
+        ;; again alone, the second result standing
+        rs (mapv (fn [w r]
+                   (if (= :timeout (:exit r))
+                     (do (println (str "oracle: " (rel (second w)) " timed out among the others, run again alone"))
+                         (run-one w))
+                     r))
+                 work rs)
         report (StringBuilder.)
         total (atom 0) bad (atom 0) incomplete (atom 0) v11 (atom 0) ids (atom []) cut (atom (sorted-set))]
     (doseq [{:keys [src part cases expected done noise err exit ms]} rs]

@@ -77,3 +77,15 @@ arbace_aot_key() {
   (cd "$1" && { arbace_runtime_key "$1"; arbace_embedded_sources "$1" | xargs -d '\n' sha256sum; } \
      | sha256sum | cut -c1-64)
 }
+
+# arbace_reader_sources ROOT: the sources repr/java's reader is compiled with, one path a line, sorted
+# (bin/arbace-go's reader_key, GTS28 (a)): arbace/ less repr/java (named by reader_key itself) and
+# the namespaces the compilation never loads: j2g, repr/go, repr/clojure, repr/haskell, repr/rust, goi
+# (go.ae, go/), the Go build (build/) and the box (box.ae, box/)
+arbace_reader_sources() {
+  (cd "$1" && find arbace -type f ! -path arbace/repr/java.ae ! -path 'arbace/repr/java/*' \
+       ! -path 'arbace/j2g/*' ! -path arbace/repr/go.ae ! -path 'arbace/repr/go/*' ! -path arbace/repr/clojure.ae \
+       ! -path 'arbace/repr/clojure/*' ! -path arbace/repr/haskell.ae ! -path 'arbace/repr/haskell/*' \
+       ! -path arbace/repr/rust.ae ! -path 'arbace/repr/rust/*' ! -path arbace/go.ae ! -path 'arbace/go/*' \
+       ! -path 'arbace/build/*' ! -path arbace/box.ae ! -path 'arbace/box/*' | LC_ALL=C sort)
+}
