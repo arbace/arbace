@@ -3250,7 +3250,7 @@ their `dynCf*` tables, the lambda adapters' member tables and bridge methods, th
 entries. j2g's translation of the shipped program changes by design: the jrt classes' uses are `C_I` now (the
 runtime's `AtomicReference` fields: `PersistentVector`'s `edit`, through the interface), the new DynSub types, the
 adapters' tables, `:null-checked` through `J2g_RequireNonNull`, `generics.edn`'s hand-written entries. The
-shipped files changed (the re-seed carries them): `arbace/classes/analyze.ae`, `interp.ae`; `arbace/j2g/code.ae`,
+shipped files changed (the re-seed carries them): `arbace/classes/analyze.ae`, `interp.ae`; `arbace/j2g/code.ae`, `names.ae`,
 `decls.ae`, `dyncf.ae`, `main.ae`, `model.ae`, `out.ae`, `reach.ae`; `go/arbace/jrt/atomic.ae`, `forkjoin.ae`,
 `reference.ae`, `threadlocal.ae`, `reflect_tables.ae`, `manifest.edn`, `manifest_test.ae` (generated);
 `jdk/edge.edn`. As JCS61 (a) says, the analysis' fix (JCS113) reaches j2g on stage 0 with the re-seed; this
