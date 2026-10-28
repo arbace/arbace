@@ -2911,3 +2911,14 @@ design with the SAX cut, after RPS56; `seq-and-transducer` stays deferred, a spe
 keeps a constant's widening, in JN9f: the 5 deferred `:print-forms` tests), RPS152 (`:print-shapes` and
 `:print-erasure` by design), RPS153 (an enum constant with arguments and an empty body by design for now), RPS154
 (no other consumer of the module table).
+
+## As built: RPS151 (a) in JN9f (2026-10-28)
+
+Built in repr/java's JN9f (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9f", JN9f.7): the converter writes a
+`long` constant's widening to `float` or `double`, boxes a `long` constant into a reference other than `Long`, and
+boxes a primitive conditional with a literal branch into a reference whole (SPEC.md §5.5). The five tests of
+`:print-forms` pass the forms step: TargetType05 passes whole, Tester (cr6714694), TestStoreSunkToOuterLoop,
+DeconstructionDesugaring and BackEnds fall to the classes step (`:print-classes`, by design); the class is removed.
+Java print 2,597 / 683 / 41 to 2,598 / 687 / 36 (TypedDeconstructionPatternExc, JCS114's, now in `:print-erasure`).
+What moved: `jdk/forms` 3 files, `jdk/javac/forms` 3, `test/repr/java/expected/jdk26u.sha256` 30 of 13,566, the
+essential tests' forms 1, 21 jtreg tests' forms; none regressed at the levels read, interp, compiled and print.

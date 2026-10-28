@@ -23,8 +23,8 @@ converter on an interface over both front ends and the split measured: "As built
 (2026-10-23)", with JFS67-JFS71; JFS70 (b), the pins independent of the javac run's history: "As
 built: JFS70 (2026-10-23)", with JFS72; JFS65 (b), j2g's checked array casts as a type switch: "As
 built: JFS65 (b) (2026-10-24)", at the end, with JFS80-JFS82; JN9a-JN9e, the native attribution
-provider and the read without javac: "As built: JN9a (2026-10-24)" to "As built: JN9e (2026-10-27)",
-with their proposals to JFS129 (the provider's reference: [NATIVE-ATTR.md](NATIVE-ATTR.md)).
+provider and the read without javac: "As built: JN9a (2026-10-24)" to "As built: JN9f (2026-10-27,
+2026-10-28)", with their proposals to JFS134 (the provider's reference: [NATIVE-ATTR.md](NATIVE-ATTR.md)).
 
 Names. The milestones are numbered **JF1-JF9**, as the request named them, and the proposals
 **JFS1-JFS11**. JF1-JF5 are also the names of repr/java's printer choices of 2026-10-18
@@ -5716,3 +5716,281 @@ allocation), JFS125 (a) (the 8.4 GB peak kept), JFS126 (b) (repr/java embedded i
 `read --no-javac` there, a fallback the error "javac's tool needed"; in v2, with its re-seed), JFS127 (a)
 (the provider assumes compiling code, as NATIVE-ATTR.md notes), JFS128 (b) (the known file's bridges
 emptied), JFS129 (a) then (b): JN9f, JFS120 (b), JFS121 (b), JFS123 (b), JFS128 (b), then JFS126 (b).
+
+## As built: JN9f (2026-10-27, 2026-10-28)
+
+JN9f (JFS129 (a) then (b), decided with JFS120-JFS129 as recommended): JFS120 (b), JFS128 (b), JFS123 (b),
+JCS114 (a) and JCS115 (a) (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (2026-10-27): JCS110-JCS119"),
+JFS121 (b), and JFS126 (b) as a design (below: more than a few days' work, so stopped after the design and its
+proposals, as the decision's scope allowed), on the branch `java-jn9f` from main `b60d3075`, main merged at
+`ee8ee304` (GT1-GT3, v2's small leftovers B); after the merge also RPS151 (a) (doc/FULL-SUPPORT-SURVEY.md,
+"Decided (2026-10-28)": the converter keeps a constant's widening, the five deferred `:print-forms` tests) and
+JCS114's binding cast (JN9f.5). One tool build
+(2,537 s: the reader's key changed, so two builds, the first to compile the reader), after main's merge three
+more (1,829 s, 1,747 s, 1,139 s: RPS151's updates moved `jdk/forms`, then `jdk/javac/forms`, from which the tool is
+built, so each was read again by the tool built from them until nothing moved), the corpora's runs in the
+shared heavy slots under the host's big-job lock. The JVM ran only the frozen v4 jar (javac's edge in
+`bin/javac-vendor convert`, `bin/j2g-edge verify` in the gate); Go only TamaGo's go1.27.1, without cgo; the
+tools' host the worktree's stage 0 (main's, the seed's).
+
+**JCS114 and JCS115 are fixed at both run levels** (BoxedForeach, GenericRecordDeconstructionPattern and
+TypedDeconstructionPatternExc pass interpreted and compiled: interp 1,790 to 1,793, compiled 1,881 to 1,884), **the
+five deferred `:print-forms` tests pass the forms step** (RPS151 (a); the class is gone; Java print 2,597 / 683 / 41 to
+2,598 / 687 / 36), and **nojavac-check is a step of `bin/gate --full`**. **The vendoring tools now read without javac**: every file of their corpora reads natively, no fallback,
+and every forms file they write is byte for byte javac's read's (the committed ones, until RPS151 (a) changed the
+converter for both reads, JN9f.7); the provenance names
+the read (`:read :native`). **The bridges are gone from the known file**: attr-check passes with none.
+**The jtreg tests read without javac**: of Java's conformance check's 3,321 run tests, 3,276 read natively
+with javac's forms byte for byte (98.6%), 38 fall back to javac on a decline or a failure, 6 differ, 1 is not
+read by javac either; their 44 are the next ports' list, by class.
+
+### JN9f.1 What was built
+
+| file | what |
+|---|---|
+| `bin/lib/repr-java/host.bash` | `repr_java_vendor_read` (native, the default; `REPR_JAVA_VENDOR_READ=javac` the read with javac's trees), `repr_java_vendor_read_opts` (`--no-javac`), `repr_java_nojavac_take` (the read's report moved out of the forms' directory); `repr_java_reader_hash` covers the native front end too (classfile, decls, expr, infer, lex, nattr, overload, parse, scope, sym, types): the vendoring tools' forms are now theirs |
+| `bin/jrt-convert`, `bin/javac-vendor`, `bin/clojure-tests`, `test/repr/java/jdk.bash` | the read `--no-javac` (JFS120 (b)); each prints the read's "no javac:" line (files, native, fallbacks by reason; `check --jdk` the 68 modules' sum); the provenance's `:converter` gains `:read` |
+| `arbace/repr/java.ae`, `decls.ae` | the native registry takes javac's `-cp` directories (`:class-dirs`: a class path's classes, the unnamed module's, after the platform's; their packages and ClassFinder's names): the Java fixtures name the runtime's declarations on the class path, and read natively |
+| `test/repr/java/attr-check-known.edn` | `:bridges #{}` (JFS128 (b)) |
+| `bin/java-check`, `test/java/check-nread.edn`, `test/java/divergences.edn`, `Makefile` | the level `nread` (JFS123 (b)): `nread_one`, the read without javac of each run test's sources (cached in `WORK/forms-nojavac` by the read's key), against the read level's forms byte for byte (the files' first lines, which name the test whose read filled the cache, aside): pass, fallback (the reasons, the "no javac:" map), differ (the first file), fail, unread; five classes `:nread-*`; `make java-check-nread`. The script bug JN9e found: `--forms update` makes its work directory, and the levels without interp or compiled need no executable (`rexe` none) |
+| `arbace/repr/java/attr.ae`, `expr.ae`, `split.ae`, `doc/classes/NATIVE-ATTR.md` | the fact `:types/record-components` (JCS114 (a)): a record pattern's components' erased member types at its type (TransTypes' fullComponentTypes) and their declared erasures; javac's from the JCRecordPattern (`memberType` of each component), native from `component-types` (`record-component-erasures`) |
+| `arbace/repr/java/convert.ae`, `model.ae`, `layout.ae` | JCS114 (a): `unconditional-by-args?`, a nested type pattern TransPatterns lets match null (its component's full type a subtype of its type, boxed) where the declared erasure would not, written `^:unconditional`; JCS115 (a): `m/iterable-arg` (Lower.visitIterableForeachLoop's iteratorTarget), a primitive for-each binding over another primitive's box written `^{:box C}` (the layout's item `[:box C]`) |
+| `arbace/classes/analyze.ae` (shipped) | `analyze-pattern`: a component's type pattern `^:unconditional` is not tested; `analyze-for-each`: `^{:box C}` casts the element to C before the unboxing and widening |
+| `doc/classes/SPEC.md` | §5.7's for-each and §5.8's patterns: the two marks |
+
+### JN9f.2 JFS120 (b): the vendoring tools' read
+
+The four tools pass `--no-javac` to `bin/repr-java read` and `read-jdk`; a file that meets what only javac
+answers is read again by javac in the same run (JFS122 (a)), counted in the log's "no javac:" line, which each
+tool prints. The updates on the final tool (key `da018f22...`):
+
+| tool | files | native | fallbacks | forms against the committed |
+|---|---:|---:|---:|---|
+| `bin/jrt-convert update` (java.base's closure) | 906 | 906 | 0 | 982 of 982 equal |
+| `bin/javac-vendor convert` (javac's world, 6 modules) | 816 | 816 | 0 | `jdk/javac/forms` unchanged (its edge too) |
+| `bin/clojure-tests --java-fixtures update` | 12 | 12 | 0 | 15 of 15 equal |
+| `bin/repr-java check --jdk --update` (68 modules) | 12,730 | 12,730 | 0 | `jdk26u.sha256` unchanged (13,566 files) |
+
+(After main's merge and RPS151 (a) the four updates and `--forms update` ran again on the final tool, key
+`74dfa6c26ac6`: every file still native, no fallback; what moved is JN9f.7's, and the provenance files name that
+tool.) Before RPS151 only the provenance files changed: `:repr-java` (the reader's hash, now of the native front end too), `:read
+:native`, `:host`. `bin/java-check --forms update` (the essential tests' forms) still reads with javac's trees
+(it is the read level's, which nread is judged against): its 880 files unchanged, its provenance's hash and host
+new. The verifies are the updates' comparisons (each tool's update compares with the committed tree before
+writing it; the forms are the same bytes), and `bin/repr-java nojavac-check` (JN9f.4) reads the same corpora
+both ways.
+
+### JN9f.3 JFS128 (b): the bridges
+
+`attr-check-known.edn`'s `:bridges` is empty: a model read answered by javac's symbol of a native declaration
+fails attr-check. `bin/repr-java attr-check` (the default corpora) passes: no bridge, every fact equal (samples
+3,759, baseline 339,088, jdk 1,279,085, javac 1,125,805), the forms equal; the model's reads 998 javac (the jdk
+corpus's, as JN9e.3), none bridged.
+
+### JN9f.4 JFS123 (b): the jtreg tests read without javac
+
+`bin/java-check --levels read,nread --jobs 8 --record` over every corpus (533 s; the read level as recorded,
+3,320 of 3,321):
+
+| nread | tests |
+|---|---:|
+| pass (read natively, javac's forms byte for byte) | 3,276 (98.6%) |
+| fallback (javac's forms, a file read by javac) | 38 |
+| differ (the forms read without javac are not javac's) | 6 |
+| unread (javac's read fails: `:read-*`, as recorded) | 1 |
+
+By class (`test/java/divergences.edn`, the next ports):
+
+| class | tests | what |
+|---|---:|---|
+| `:nread-differ` | 6 | Numbers (a concatenation's folded constants), TypeAnnotationReflection and T8008769 (a nested type's and a creation's type annotations), Pos03 (an anonymous diamond's type), LambdaCannotCapturePatternVariables (a lambda's return boxed), ExpressionSwitchBugsInGen (a switch expression's intersection cast) |
+| `:nread-inference` | 20 | most specific of generic functional descriptors (MostSpecific15-27: 7), merged descriptors (LambdaConv16, LambdaTest6, BridgeMethod), an argument context (EarlyLocalTest8, T8058199, MethodReferenceIntersection1), an intersection target, a cycle (MostSpecific10), a choice absent or ambiguous (T6531075, T5073060a, MostSpecific29), an NPE in the overload tier (T6531090b) and in Switches' unconditional pattern, `no descriptor` (LostInterrupt) |
+| `:nread-constant` | 7 | HotSpot's c1/c2 tests: a double constant beyond long's range cast to long (ConstFold saturates, the native fold throws) |
+| `:nread-names` | 7 | a member class through a qualifier (`.Inner5.Inner6`, `X.Inner`), a qualified creation (`outer.new Inner()`: AnonymousInSuperCallTest, MissingCast2, T6569404a), `BiFunction` (AccessControlTest) |
+| `:nread-scope` | 4 | `:scope/assigned` (two annotation tests), `:scope/capture` in an early construction context (SuperInitGood), a local class's number |
+
+The corpora of nojavac-check read every file natively; the jtreg tests are the language's corners, and the
+first ones beyond the port. The 6 differences are the more important: there the read without javac answers
+where javac answers otherwise (nothing in a read without javac checks it), so a vendoring tool meeting such code
+would write other forms; the fallbacks are safe (javac reads the file).
+
+`bin/repr-java nojavac-check` (default corpora, 576 s): every corpus's forms equal, no fallback (samples 15,
+baseline 183, jdk 906, javac 816 files); the jdk corpus's peak 10.9 GB with GOMEMLIMIT=24GiB set by the run
+(JN9e: 7.6 GB at GOGC=100 alone: the limit lets the heap grow).
+
+### JN9f.5 JCS114 (a), JCS115 (a)
+
+- JCS114 (a): javac's TransPatterns tests a record pattern's nested type pattern against the component's full
+  type (TransTypes' `memberType` at the pattern's type, erased) and lets it match null when that type is a
+  subtype of the pattern's (boxed). The analysis knows the component's declared erasure (`Object` for a `T`),
+  so `Box<String>(String s)` was an `instanceof String` test that a null component failed. The converter asks
+  the new fact and writes `^:unconditional` where the full type says unconditional and the declared one does
+  not; the analysis then does not test it.
+- The binding's cast (after main's merge). Untested, the binding took any value: TypedDeconstructionPatternExc
+  (t06376) passes a `Pair<Integer, Integer>` as a `Pair<String, Integer>` and expects javac's
+  `ClassCastException` from the checkcast of the erased component (`String s = (String) $c`), and the
+  interpreter bound the `Integer`, failing later at `s.length()` (`IllegalArgumentException: object of type
+  java.lang.Integer is not an instance of java.lang.String`, the message the coordinator saw). The analysis
+  marks such a pattern `:cast` (a binding, unconditional by the mark, not by the static type); the
+  interpreter's `Pat` (`arbace/lang/Compiler.ae`, the field `checked`) casts the value to its class before the
+  binding, outside the accessor's `MatchException` wrapping, with the JVM's message (`Rt/HOST`'s `checkCast`);
+  j2g's binding was already a cast (`cast-val`). A null still matches.
+- JCS115 (a): javac's Lower casts a for-each's element to the erased type argument of the Iterable before a
+  primitive binding's unboxing (`for (float f : Iterable<Integer>)`: `(Integer) it.next()`, unboxed, widened);
+  the analysis cast to the binding's own box (`Float`). The converter writes `^{:box Integer}` where the type
+  argument's box is not the binding's, and the analysis casts to it. `for (int c : List<Character>)` had the
+  same bug (a `ClassCastException` from `Character` to `Integer`).
+
+Re-recorded on the gate's executable after main's merge (`bin/java-check --levels read,interp,compiled,print
+--record --only`, the 21 tests whose forms RPS151 moved and these four, 490 s): interp and compiled t06032, t06354,
+t06375 and t06376 pass (t06376 interpreted only with the binding's cast; t06375 passed already); none of the 25
+regressed at any level; `levels-known.edn` as recorded. `test/java/divergences.edn`: `:boxed-foreach` and
+`:record-pattern-findings` removed (their tests pass at every run level); t06376 at the print level is now in
+`:print-erasure` (the printer writes `switch ((Pair<String, Integer>) (Object) x)` raw, `(Pair) (Object) x`, so javac
+infers no type argument for `case Pair(String s, Integer i)` and the read gives no `^:unconditional`: Java's type
+arguments are not in the forms, RPS9).
+
+### JN9f.6 JFS121 (b): nojavac-check in `bin/gate --full`
+
+`test/gate/steps.edn` declares the step `repr-java-nojavac` beside `repr-java-attr` (phase `:full`, chain
+`java`, after `javac-tool`; hosts `:javac` and `:stage0`, the platform's pin, inputs `:lib :tools
+:repr-java`, `:heavy`, `:mem-gib 11`: the jdk corpus's 10.8 GB peak in JN9f.9's run, at the `GOMEMLIMIT=24GiB` the run sets, where JN9e measured 8.4 GB at `GOGC=100` alone, JFS125 (a); its summary the corpora's lines, the
+`nojavac:` lines and the verdict); `bin/gate`'s list of steps names it, GATE-SURVEY.md §"The table" lists it
+in the java chain. `bin/gate --full --plan` lists it (JN9f.9).
+
+### JN9f.7 RPS151 (a): a constant's widening kept
+
+The five deferred `:print-forms` tests (doc/FULL-SUPPORT-SURVEY.md, "As built: v2 small leftovers B") were
+three shapes where the forms leave a conversion to the analysis that the printed Java's literal types
+otherwise: the printer writes an integer form as an `int` literal when it fits, so a `long` constant read back
+as an `int` one.
+
+| test | Java | forms before | after |
+|---|---|---|---|
+| t03822 TestStoreSunkToOuterLoop | `f3 += -2061721519L` | `(unchecked-add-float f3 -2061721519)` | `... (float -2.061721519E9)` |
+| t03458 Tester (cr6714694) | `double var_72 = (double) 3858573493713776640L` printed `= 3858573493713776640L` | read back `^double var_72 3858573493713776640` | `(double 3858573493713776640)`, no tag |
+| t06350 DeconstructionDesugaring | `new R6(0L, 0)`, `R6(Object, Object)` | `(R6. 0 (Integer/valueOf 0))`, printed `new R6(0, ...)`: an `Integer` | `(R6. (Long/valueOf 0) ...)` |
+| t06270 TargetType05, t08323 BackEnds | `return c ? 1 : x;` of an `Integer` result | `(if c 1 x)`, printed as an `if` whose `return 1;` boxes alone | `(Integer/valueOf (if c 1 x))` |
+
+`coerce` (`arbace/repr/java/convert.ae`): a `long` constant widened to `float` is `(float D)` (D its double,
+when the double holds it exactly; else `(float N)`), to `double` the double in `int`'s range (an `int`
+literal's widening) and `(double N)` beyond it (the printer's literal then reads back to it); a `long`
+constant into a reference other than `Long` is boxed; a primitive conditional with a literal branch
+(`literal-branch?`) into a reference is boxed whole, as javac's Lower boxes it. SPEC.md §5.5 states them.
+
+What moved (the vendoring updates on the fresh tool, every file read natively): `jdk/forms` 3 files of 982
+(CompactNumberFormat, Parsed, Collectors: a `(Long/valueOf 1)` into a `List<Long>`, `^Long (Long/valueOf (if
+...))`, a lambda's `(Double/valueOf (if ...))`), `jdk/javac/forms` 3 of 903 (ExhaustivenessComputer,
+AbstractDiagnosticFormatter, XMLSecurityManager: `(Integer/valueOf (if ...))`), `test/repr/java/expected/
+jdk26u.sha256` 30 of 13,566, the essential tests' forms 1 (t06270), the Java fixtures none; of the jtreg run
+tests' forms 21 of 3,321 (the five, HotSpot's generated c2 fuzz tests t03453-t03457 and t03567, the c1/c2
+tests t04571, t04771-t04774, t05412, t05696-t05714, and t06402). Each is the same value with its conversion
+written; `jdk/forms` is the shipped world's (a re-seed carries it).
+
+### JN9f.8 JFS126 (b): the reader in the shipped program, a design
+
+JFS126 (b) decided embedding `arbace/repr/java` in the shipped program, `read --no-javac` there, a fallback
+the error "javac's tool needed". What the read needs at run time without javac's world:
+
+1. **The code.** The read's namespaces (`arbace.repr.java` and its parts) name javac's classes in 11 of them:
+   type hints, `instance?` tests that dispatch a fact between the two models (`(instance? Type t)`, `JCTree`),
+   static fields (`Flags/...`, `TypeTag/...`), imports. In a read without javac none of these objects exist,
+   but c2j must resolve every class symbol, static field and hinted member when it compiles the namespaces,
+   and the shipped program holds none of javac's classes. Counted: tree.ae 72 distinct javac names, jtree.ae
+   68 (javac's tree as data: not needed), convert.ae 68, attr.ae 28, nattr.ae 7, model.ae 7, javac.ae 6
+   (javac's driver: not needed), resolve.ae 4, jtypes.ae 3, expr.ae 3, java.ae 3; the native front end (lex,
+   parse, decls, scope, sym, types, overload, infer, classfile) none.
+2. **The platform.** The native provider reads the platform's declarations from class files
+   (`arbace.repr.java.classfile` over the exploded modules `REPR_JAVA_PLATFORM` names: jdk26u's build tree,
+   27,598 class files, java.base's 34 MB). The shipped program has none of them.
+3. **The size.** The compiled reader is 24 MB of Java forms (`target/arbace-go/aot-reader`, 132 files; the
+   shipped program's compiled namespaces 78 MB): by JN5's measure (8.4 MB of forms, +9.4 MB of executable)
+   about +27 MB, +16% of the 174.5 MB shipped program, the printer included.
+
+The design has three parts, each its proposal below: the read's javac half made separable (JFS130), the
+platform the shipped reader reads (JFS131), and the command and the REPL's entry (JFS132). Together about
+four to six days; none of it is built.
+
+### JN9f.9 The checks
+
+On the final tree (commit `2a2925fc` plus this record), in the worktree, under the host's big-job lock:
+
+- `bin/gate` (the essential gate, keyed: 17 steps run, none skipped, the runtime having changed): passed in
+  12m36s; Java's essential interp 428 of 428, essential-compiled 423 of 423, `bin/reap` 12 of 12 cells, 0
+  problems (Java eval 1,793 / 329 / 1,199, AOT 1,884 / 181 / 1,256, print 2,598 / 687 / 36).
+- `bin/repr-java nojavac-check` on the final tool: every corpus's forms equal, no fallback (samples 15, baseline
+  183, jdk 906, javac 816 files; 540 s); the jdk corpus's peak 10.8 GB.
+- `bin/gate --full --plan`: `repr-java-nojavac` planned to run beside `repr-java-attr` ("never passed").
+- The vendoring updates on the final tool (`bin/jrt-convert update`, `bin/javac-vendor convert`, `bin/clojure-tests
+  --java-fixtures update`, `bin/java-check --forms update`; `bin/repr-java check --jdk --update` on the tool before
+  the last two rebuilds, its reader the same) and `bin/jrt-convert verify` on the second: as JN9f.7 lists.
+- `bin/java-check --levels read,nread --record` over every test (591 s, on the second tool): read 3,320 of 3,321,
+  nread 3,276 / 38 / 6 / 1, both as recorded; the levels read, interp, compiled and print of the 25 tests of JN9f.5
+  and JN9f.7 (490 s).
+- Not run: the rest of `bin/gate --full` (javac on Arbace's checks, the roundtrips, attr-check, the whole
+  conformance check at interp, compiled, classes, diagnostics and print), which the coordinator runs serially at
+  the merge; attr-check and front-check last ran before main's merge (JN9f.3), the converter's change since
+  touches no fact.
+
+### JN9f.10 The shipped program's change
+
+`arbace/classes/analyze.ae` (JCS114 (a), JCS115 (a): the two marks honoured, `:cast`), `arbace/classes/
+interp.ae` (the `Pat`'s `checked`), `arbace/lang/Compiler.ae` (the runtime: `Pat`'s field and cast; with
+main's merge the runtime key changes), `jdk/forms` (3 files, RPS151 (a)); `arbace/repr/java` and
+`jdk/javac/forms` are javac's tool's. The shipped program 174,506,144 bytes; javac's tool 265,015,456 (build1)
+and 265,011,360 (the final build, key `74dfa6c26ac6`). A re-seed carries the runtime's and `jdk/`'s change; amd64 only.
+
+### JN9f.11 Proposals
+
+- **JFS130 The read's javac half (JFS126 (b), part 1).**
+  - Options: (a) split each namespace that names javac into its native part and a javac part loaded only on
+    the tool (`arbace.repr.java.javac-model`, `javac-tree`: the `instance?` branches, the hinted calls, the
+    imports), the native part asking the javac part through a protocol whose default (no javac part loaded)
+    is `javac-needed!`; jtree.ae and javac.ae stay the tool's; (b) stub declarations of the ~110 javac
+    classes the read names, printed from `jdk/javac/forms` by the declarations layout (bodies `throw null`),
+    in the shipped world only, so that c2j resolves them; (c) leave the reader in the tool.
+  - *Recommended: (a)*: the facts already dispatch on the model (`attr`'s `native?`, `model`'s `nsym?`), so
+    the split follows a line the code has; (b) is cheaper (a day against three) but ships dead javac names
+    and two worlds' classes under one name, which the closed world's checks would have to tell apart.
+- **JFS131 The shipped reader's platform (part 2).**
+  - Options: (a) a directory given at run time (`REPR_JAVA_PLATFORM`, as on the tool): not standalone;
+    (b) a declarations-only platform embedded (class files without code, as ct.sym's: java.base's 34 MB to
+    some 6-8 MB, the 68 modules several times that), read by `classfile` as now; (c) the provider reading the
+    runtime's own Java forms (`jdk/forms`, what jrt has) for the declarations, a reader beside `classfile`:
+    javac's answers then of jrt's world, not jdk26u's.
+  - *Recommended: (b) for java.base alone, (a) for the rest*: the REPL's Java is java.base's in the shipped
+    world (jrt is java.base's closure), the answers stay jdk26u's (attr-check's reference), and the size is
+    measured before the other modules are considered; (c) gives answers no check compares.
+- **JFS132 The command and the REPL (part 3).**
+  - Options: (a) `arbace -m arbace.repr.java read --no-javac OUT ROOT` on the shipped program and
+    `(load-java "Foo.java")` at the REPL (the forms loaded as Java forms are, `arbace.classes`), a fallback
+    the error "javac's tool needed: REASON"; (b) the command alone; (c) the REPL alone.
+  - *Recommended: (a)*: the REPL's entry is what JFS126 is for; the command is the check's (nread's forms
+    against the tool's, on the shipped program).
+- **JFS133 The jtreg tests' 44 (JFS123 (b)'s nread).**
+  - Options: (a) the next ports by class, the 6 that differ first (there the native read answers where javac
+    answers otherwise, unchecked), then `:nread-inference` (20), `:nread-names` (7), `:nread-constant` (7),
+    `:nread-scope` (4); (b) leave them falling back (safe: javac reads the file).
+  - *Recommended: (a), the 6 first*: a difference is a wrong answer a shipped reader (JFS130-JFS132) would
+    give without a fallback; the fallbacks can wait.
+- **JFS134 Next.**
+  - Options: (a) JFS133 (a)'s 6 differences, then JFS130-JFS132 as JN10, about a week; (b) JFS130-JFS132
+    first; (c) stop the native front end here.
+  - *Recommended: (a)*: the shipped reader should start from a read without known wrong answers.
+
+### JN9f.12 Sources and scratch
+
+- jdk26u at `baf63fbe42b8758448fee570a9d9bb914272d259` (`/root/jdk26u`):
+  `src/jdk.compiler/share/classes/com/sun/tools/javac/comp/{TransPatterns,TransTypes,Lower,Attr}.java`
+  (visitRecordPattern, unrollRecordPattern, visitIterableForeachLoop, visitConditional's boxing), `tree/JCTree.java`
+  (LICENSE.md, doc/ARBACE.md).
+- The worktree's `.tmp/jn9f/` (scratch, not tracked): `q1/` (the reproduction of JCS114/JCS115: `src/Q.java`,
+  its forms read with javac, without and both), `fx/` (the fixtures read without javac before the update),
+  `build.sh`, `build1.log` (the tool), `phase2.sh`, `p2/` (repr-java check, java-check read,nread, nojavac-check,
+  attr-check), `phase3.sh`, `p3/` (nread again, the updates), `phase4.sh`, `p4/` (the gate, the four tests at
+  interp and compiled; the compiled run that died on the full disk), `pr/` (the five `:print-forms` tests'
+  forms printed by hand, RPS151's diagnosis), `nav.ae` (a form at a path), `oldforms.txt`, `moved-tests.txt`
+  (the 21 tests whose forms RPS151 moved), `phase5.sh`-`phase7.sh`, `p5/`-`p7/` (the tool builds, the updates,
+  the read levels, the levels of the moved tests), `jfs126.md` (the design's draft);
+  `.tmp/java-check/forms-nojavac/` (the nread level's reads), `.tmp/repr-java-nojavac-check/nojavac.md`,
+  `.tmp/repr-java-attr-check/attr.md`.
