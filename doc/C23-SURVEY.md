@@ -1160,18 +1160,19 @@ of Arbace. The checker (`check.go`, `type.go`, `value.go`, `abi.go`, 10,849 line
 | **C3** the parser and the C23 delta | `arbace.repr.c.parse`, `.tree`; the helper's `tree` mode; `bin/repr-c parse FILE` and `parse-check` (JN8.3's shape: chunks, threads, `report.edn`, `files.tsv`, both dumps of a differing file) | every file of every corpus parsed by both, the trees equal node for node (case, every token's text and position) or known; mutants of the corpora (JN8's 8,000: tokens deleted, duplicated, swapped, inserted) accepted or refused alike, at the same first error position | 2-4 |
 | **C3b** repr/c read and print | `arbace.repr.c.convert` (trees into forms, SPEC §11.1; header units, the layer), `arbace.repr.c.print` (`:lines` by cemit's rules, CS23 (a); `:full`), `bin/repr-c read`, `print`, `roundtrip`, `check`; `test/c/c23/` and its judges re-made (CS38), widened to the preprocessor's C23 and clause 7's | E2's numbers reproduced on repr/c with no directive refusal (CS5 (a)); the round trip's levels 1-3 over every corpus, every exception classed; `:full` byte for byte; the c23 judges on every file | 4-6 |
 | **C4** the checker | as §11; `bin/ci annotations` against the helper's `types` mode (`cc.Translate`) | as §11 | 5-8 |
-| **C5** ci | as §11, with CS34's and CS35's arithmetic (`long double` as software x87 extended, `__int128` and `_BitInt` beyond 64 bits as limbs, in `crt`) | as §11 | 9-16 |
+| **C5** ci | as §11, with CS34's and CS35's arithmetic (`__int128` and `_BitInt` beyond 64 bits as limbs in `crt`; `long double` as `double`, musl read with `LDBL_MANT_DIG` 53, SPEC §12.5) | as §11; the class `long-double` recorded | 8-14 |
 | **C6** AOT | as §11 | as §11 | 6-10 |
 | **C7** C23's corpus and errors | as §11, over CS33's groups (`test/c/corpora.edn`'s `:gcc-*`, from the pinned tarball) | as §11 | 2-4 |
 | **C8** the fourth row | as §11 | as §11 | 1-2 |
 | **C9** the milestone | as §11 | as §11 | 1-2 |
 
-**Total: about 34 to 58 working days** (§11's 32 to 54). The port costs more than vendoring: about 9,500
+**Total: about 33 to 56 working days** (§11's 32 to 54). The port costs more than vendoring: about 9,500
 lines to port and check, against `bin/c-vendor` and goi's run of cc; it saves goi's interpretation of cc
 (the survey's §14 put it at minutes per corpus), listing cc and a generated dumper in goi's table, and the
 re-seed that would carry them. JN8 ran at about a tenth of its estimate (four and a half hours against
-4-6 days), and the surveys run under their estimates, so the low ends are the likelier. C5 grows by one
-to two days for CS35 (a)'s software `long double`. Speed: JN8's native parser ran at 0.9 M characters a
+4-6 days), and the surveys run under their estimates, so the low ends are the likelier. C5 stays at
+§11's 8-14: CS35 was decided without software `long double` (below, "Decided (2026-10-28): CS30-CS43").
+Speed: JN8's native parser ran at 0.9 M characters a
 second compiled and 0.1 to 0.16 M evaluated; the C corpora are about 10 MB after preprocessing (§5.1), so
 a corpus read evaluated on the tools' host is one to two minutes, and headers are lexed once per path
 (the token streams cached by file digest) (CS36 (a)).
@@ -1384,3 +1385,45 @@ The worktree's `.tmp/c1/` (kept):
 - `scripts/` — `gen_manifest.py` (writes `test/c/corpora.edn` from `listing.txt` and `c23conf.txt`),
   `readcheck.ae` (reads a Markdown file's `clojure` blocks); `c23conf.txt` (the 49 files' blobs, hashes
   and subclauses); `cc-delta.diff` (upstream v4.29.7 against the fork).
+
+## Decided (2026-10-28): CS30-CS43
+
+The user decided C1's proposals (relayed by the coordinator, 2026-10-28):
+
+- **CS37: (a)**, go-whim's own C parts (the C23 delta of `crefactor/cc`: `c23.go`, `host.go`,
+  `check_export.go`, `fork_test.go` and the hooks marked `go-whim`; `crefactor/cemit`; `crefactor/clisp`;
+  `crefactor/c23conf` with its 49 files; `togo`'s rules if used) are licensed to Arbace under the EPL-1.0,
+  as D8 licensed the box's parts. **This settles CS22.** cc keeps its BSD-3 (Copyright (c) 2014 The CC
+  Authors), and so do its dependencies.
+- **CS38: (a)**, following CS37: c23conf's 49 files are copied into `test/c/c23/` and its judges re-made
+  in Arbace (C1.4).
+- **CS35: not the recommended option.** No software x87 arithmetic: `long double` is `double` (8 bytes,
+  align 8, `double`'s arithmetic) in eval and AOT, a distinct type for the checker. The reference's
+  `long double` is 16 bytes (align 16, x87 80-bit extended), so `sizeof(long double)`, the layouts that hold
+  one (`max_align_t` among them), `LDBL_*` and the values computed in `long double` differ from gcc's: a
+  run that differs because of it is in the recorded class `long-double` (by design, SPEC §12.5), and the
+  reader keeps the reference's configuration for corpus files (their `#if`s and the print's object code
+  stay gcc's) while musl, as ci's libc, is read with `long double` as `double` (`LDBL_MANT_DIG` 53, its
+  `arch/arm/bits/float.h`). The rest of CS35 stands: `__int128` and `_BitInt` beyond 64 bits are in (64-bit
+  limbs in `crt`), `_Decimal*`, `_Float16`, `_Float128`, `__bf16` out by design (SPEC §14). C5 stays at
+  8-14 days; the plan's total is 33 to 56 (C1.2).
+- **CS30, CS31, CS32, CS33, CS34, CS36, CS39, CS40, CS41, CS42, CS43: (a)**, as recommended: header units;
+  gcc's `-O0` order of evaluation; gcc's include directory before musl's; the seven gcc 15.2 groups; round to
+  nearest only; the port evaluated on the tools' host until C5; `tools/ccdump` through a generated `go.work`;
+  the reference where cc is wrong; parentheses kept in `:lines`; the milestones C2, C3, C3b; a fixed
+  `SOURCE_DATE_EPOCH`.
+
+What CS37 (a) allows, and when (nothing was copied at C1, `c23-c1` `009be3d7` and this section's commit):
+
+- **C2 and C3**: the port may follow go-whim's delta line for line where it derives from it (the scanner's
+  digit separators and `u8'a'` in C2; `c23.go`'s productions and the hooks in C3), its files carrying
+  cc's notice and the delta's origin; LICENSE.md gains, when the first ported file enters the tree, an
+  entry for `arbace/repr/c/` with cc's BSD-3 text (The CC Authors, modernc.org/cc/v4 v4.29.7) and the
+  EPL-1.0 for what derives from go-whim's delta (go-whim `80c49bf5`, `crefactor/cc`), and doc/ARBACE.md
+  the origin, as for every vendored `.ae`.
+- **C3b**: cemit's and clisp's rules ported into `arbace.repr.c.print` and `.convert` under the EPL-1.0
+  (their origin recorded likewise); c23conf's 49 files copied into `test/c/c23/` with their origin
+  (go-whim, the commit, the path, each file's blob as `test/c/corpora.edn` records it) in
+  `test/c/c23/README` and the journal, and a LICENSE.md entry naming them under the EPL-1.0; its judges
+  re-made in Arbace as C1.4 describes.
+

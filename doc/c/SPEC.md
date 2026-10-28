@@ -886,8 +886,10 @@ whose type is not its default is `(lit T v)` (CS7 (a)). The spelling a value doe
   constant's type (6.4.4.3, round to nearest on the target). So `(lit float 0.1)` is `0.1f`, not the
   double 0.1 rounded again. The converter writes, of the literals that round to the constant's value at
   its type, the shortest: a double when one does (always for `float` and `double`), else a BigDecimal
-  with the digits needed (`long double`'s 64-bit significand, `_Float128`), or a ratio for a hexadecimal
-  constant whose decimal expansion is longer than 80 characters (Go forms' rule).
+  with the digits needed, or a ratio for a hexadecimal constant whose decimal expansion is longer than
+  80 characters (Go forms' rule). For `long double` "its type" is the reference's (x87, a 64-bit
+  significand), so the `:lines` print gives gcc the constant it read; a consumer rounds the value once
+  to `double`, which is `long double` in Arbace (§12.5, CS35).
 - An integral value keeps a decimal point or exponent (`1.0`, `16.0`), so its kind stays floating.
 - C has no literal for an infinity or a NaN: `INFINITY` and `NAN` are calls of `__builtin_inff` and
   `__builtin_nanf("")` with their macro recorded (§9.4).
@@ -1136,17 +1138,17 @@ states what a program can observe; how ci and `crt` implement it is GOI-SPEC's k
 | `__int128`, `unsigned-__int128` | 16 | 16 | |
 | `(bit-int N)` | 1 for N ≤ 8, 2 ≤ 16, 4 ≤ 32, 8 ≤ 64, else 8·⌈N/64⌉ | as its size up to 8, else 8 | the psABI's: two's complement, the unused high bits of the last unit unspecified on store (gcc 15.2 measured: `_BitInt(129)` is 24 bytes, align 8; `BITINT_MAXWIDTH` 65535) |
 | `float`, `double` | 4, 8 | 4, 8 | IEEE 754 binary32, binary64 |
-| `long-double` | 16 | 16 | x87 80-bit extended in the low 10 bytes, 6 bytes of padding |
+| `long-double` | 8 | 8 | IEEE 754 binary64, `double`'s (CS35, §12.5; the reference's is 16 bytes, align 16, x87 80-bit extended) |
 | `_Float128` | 16 | 16 | IEEE binary128 (out of eval, §14) |
 | `(complex T)` | 2·T | T's | real then imaginary |
 | `_Decimal32/64/128` | 4, 8, 16 | 4, 8, 16 | BID encoding (out of eval, §14) |
 | pointers | 8 | 8 | the address |
 | `wchar_t`, `char16_t`, `char32_t` | 4, 2, 4 | 4, 2, 4 | `int`, `unsigned short`, `unsigned` |
 | `size_t`, `ptrdiff_t`, `intptr_t` | 8 | 8 | `unsigned long`, `long`, `long` |
-| `max_align_t` | 16 | 16 | |
+| `max_align_t` | 16 | 8 | musl's `struct { long long __ll; long double __ld; }`: with `long double` as `double` (§12.5) its size is 16 and its alignment 8, the reference's 32 and 16; `malloc` still returns 16-byte aligned blocks (mallocng's unit) |
 
-Floating-point: `FLT_EVAL_METHOD` 0 (each operation rounds to its type; `long double` operations to the
-x87's 64-bit significand), round to nearest, IEEE 754 arithmetic (Annex F) for `float` and `double`.
+Floating-point: `FLT_EVAL_METHOD` 0 (each operation rounds to its type), round to nearest, IEEE 754
+arithmetic (Annex F) for `float`, `double` and `long double` (which is `double`, §12.5).
 The floating environment (`fesetround`, exception flags) is CS34's.
 
 ### 12.3 Layout
@@ -1172,10 +1174,45 @@ The SysV x86-64 psABI's, which gcc follows (cc's `abi.go` holds the same tables 
 ### 12.4 Values crossing into Arbace
 
 At the REPL (CS20 (a)): integers as `Long` (`BigInt` beyond, `__int128` and `_BitInt` included),
-floating values as `Double` (`long double` as a `BigDecimal` of its exact value), a pointer as a
+floating values as `Double` (`long double` included), a pointer as a
 `CPointer` (its address and type), a struct or array by its bytes on request; `(c/string p)` copies a
 NUL-terminated string out of the program's memory. From Arbace: numbers in range, strings copied into a
 fresh block. The C program's memory is its own: no Arbace object is ever in it.
+
+### 12.5 `long double` is `double` (CS35)
+
+The user's decision (2026-10-28, CS35): no software x87 arithmetic. In eval and AOT `long double` is a
+type of its own for the checker (`long-double`, distinct from `double` in `_Generic`, in compatibility
+and in conversions' ranks, 6.3.1.8) whose representation and arithmetic are `double`'s: 8 bytes,
+alignment 8, binary64, each operation rounded to 53 bits; `(complex long-double)` is 16 bytes, align 8.
+The reference's is the x87's (16 bytes, align 16, a 64-bit significand, exponents to ±16383), so these
+differ from gcc's runs:
+
+- `sizeof(long double)`, `alignof(long double)`, and the size, alignment and member offsets of every
+  struct, union or array that holds one (the layout rules of §12.3 applied to 8 and 8);
+  `max_align_t` among them (§12.2), and `_Alignof(max_align_t)`'s users;
+- values and output: the extra 11 bits of precision and the wider exponent range (`1.0L / 3`, `LDBL_MAX`,
+  `LDBL_MIN`, `LDBL_EPSILON`, `printf("%La")`, `%Lf` digits, `strtold`), and the integers a `long double`
+  holds exactly (up to 2^53, not 2^64);
+- the predefined macros and `<float.h>`'s `LDBL_*` of a corpus file: the reader preprocesses a corpus
+  file in the reference's configuration (`__SIZEOF_LONG_DOUBLE__` 16, `__LDBL_MANT_DIG__` 64, musl's
+  x86-64 `bits/float.h`: `LDBL_MANT_DIG` 64), so its `#if` groups and the `:lines` print's object code are
+  gcc's (§3.1's level 3 is unchanged); the constants it reads are x87 values (§8.3) that a consumer
+  rounds to `double` (`LDBL_MAX` to +∞, `LDBL_MIN` to 0, `LDBL_EPSILON` 2^-63 exactly), so a program that
+  tests them sees inconsistent limits, and is in the class;
+- musl itself, as ci's libc (C5), is read in a configuration of Arbace's where `long double` is
+  `double`: `__SIZEOF_LONG_DOUBLE__` 8, `__LDBL_*` as `__DBL_*`, and musl's own `bits/float.h` for a
+  target whose `long double` is `double` (its `arch/arm/bits/float.h`: `LDBL_MANT_DIG` 53), recorded in
+  the host data as a named configuration; musl's `LDBL_MANT_DIG == 53` paths (`frexpl`, `vfprintf`'s
+  `long double` formatting, `strtold`) then compute in `double`, as on such a target.
+
+A program whose status or output differs from the reference's because of it is in the class
+**`long-double`** (by design, citing CS35 and this section) in each level's divergences file (eval and
+AOT; read and print are unaffected, since the reader and the printer keep the reference's values and
+configuration). A run's difference is put in that class when the program declares or converts to a
+`long double` type (the checker records it per program), not by matching outputs; one that uses none and
+still differs is not this class's. The 56 c-torture/execute files that name `long double` are where the
+class is expected.
 
 ## 13. Undefined, unspecified and implementation-defined behaviour
 
@@ -1231,7 +1268,8 @@ store outside a live block, a `free` of what was not allocated, a null dereferen
 The reference's, all fixed by the target: `char` signed; `CHAR_BIT` 8; integers two's complement with
 no padding bits; conversion to a signed type modulo 2^N; `>>` arithmetic; plain `int` bit-fields
 signed; multi-character constants as §8.2; the source and execution character sets UTF-8; `wchar_t`
-`int`; `__STDC_IEC_559__` 1; the headers' answers are musl 1.2.6's with gcc's freestanding headers as
+`int`; `long double` the reference's x87 type at read and `double` in eval and AOT (§12.5);
+`__STDC_IEC_559__` 1; the headers' answers are musl 1.2.6's with gcc's freestanding headers as
 CS32 settles (musl 1.2.6's `<stddef.h>` defines no `nullptr_t` and no `unreachable`, its `<stdarg.h>` no
 one-argument `va_start`, its `<limits.h>` no `BITINT_MAXWIDTH`, and there is no `<stdbit.h>`: measured
 with the reference's default include order).
@@ -1254,8 +1292,9 @@ CS3 (a): what the reader reads and the printer prints, but ci and cf2g refuse by
 | the `cleanup`, `constructor`, `destructor` attributes | run order outside `main`: deferred to C5's list (a class `deferred` if a corpus file needs one) |
 | `#pragma` other than §9.2's | the layer's only |
 
-CS35 proposes which of `long double`, `__int128` and `_BitInt` beyond 64 bits are in for v1; this table
-assumes its recommendation ((a): all three in).
+CS35 (decided 2026-10-28): `__int128` and `_BitInt` beyond 64 bits are in (as 64-bit limbs in `crt`);
+`long double` is in as `double` (§12.5), not as x87 extended arithmetic, its differences the class
+`long-double`.
 
 ## 15. Coverage
 
@@ -1741,8 +1780,10 @@ The survey's CS30-CS43 (doc/C23-SURVEY.md, "C1: the plan after CS4 (b)") are thi
 questions; the spec follows each recommendation:
 
 - CS30 header units (§4.3); CS31 the order of evaluation (§13.3); CS32 the reference's headers (§13.4);
-  CS34 the floating environment (§12.2); CS35 the extended arithmetic types (§14); CS41 parentheses in
-  `:lines` (§7.5); CS43 the fixed epoch (§9.1).
+  CS34 the floating environment (§12.2); CS35 the extended arithmetic types (§12.5, §14); CS41
+  parentheses in `:lines` (§7.5); CS43 the fixed epoch (§9.1).
+- **Decided (2026-10-28)**: CS30-CS34 and CS36-CS43 as recommended, CS35 with `long double` as `double`
+  (§12.5): doc/C23-SURVEY.md, "Decided (2026-10-28): CS30-CS43".
 
 ## 18. Sources
 
