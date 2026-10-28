@@ -109,14 +109,14 @@ The current state of the work. This file is rewritten as things change. For the 
   journal at the tag.
 - **Now: the milestone `arbace-reaps-3-crops-v2`** (an annotated tag, the journal reset again). Done: the scripts'
   sweep; the keyed gate GT1-GT3 (doc/GATE-SURVEY.md); the small leftovers A and B; JC4b and JC4c; Clojure's last
-  deferred cases (only `seq-and-transducer`, speed, left); JN9e. Running: JN9f (repr/java's native read everywhere,
-  JCS114/JCS115, RPS151), GT4 with GT6 (the audit, the gate's own heavy lock and limits), RPS97 (b) (a shared
-  program library). Then: RPS150 with JCS123 (b), GT5 (inner keys), v2's re-seed, GT7's clean `bin/gate --full
-  --clean`, the divergences' record, the tag. The matrix now: Clojure 908/2/0, 21,052/80/2, 809/28/1, 1,031+/0/0;
-  Java 7,740/3/93, 1,804/329/1,189, 1,910/180/1,232, 2,597/683/41; Go 12,158/204/0, 1,618/219/0, 1,688/149/0,
-  2,584+/141/0.
-- **Next: C23 at parity with the three crops** (doc/C23-SURVEY.md, CS1-CS24 decided 2026-10-28): C1-C9, cc
-  ported to Arbace (CS4 (b)), musl 1.2.6 as C forms, gcc 15.2 the reference, the tag `arbace-reaps-4-crops-v1`.
+  deferred cases (only `seq-and-transducer`, speed, left); JN9e; JN9f. Running: GT4 with GT6 (the audit, the gate's
+  own heavy lock and limits), RPS97 (b) (a shared program library), RPS150 with JCS123 (b). Then: GT5 (inner keys),
+  v2's re-seed, GT7's clean `bin/gate --full --clean`, the divergences' record, the tag. The matrix now: Clojure
+  908/2/0, 21,052/81/1, 809/29/0, 1,031+/0/0; Java 7,740/3/93, 1,807/329/1,186, 1,913/180/1,229, 2,598/687/36; Go
+  12,158/204/0, 1,618/219/0, 1,688/149/0, 2,584+/141/0.
+- **Next: C23 at parity with the three crops** (doc/C23-SURVEY.md, CS1-CS43 decided; C1, the spec, done 2026-10-28: doc/c/SPEC.md): C2-C9, cc
+  ported to Arbace (CS4 (b)), musl 1.2.6 as C forms (`long double` as `double`, CS35), gcc 15.2 the reference, the tag
+  `arbace-reaps-4-crops-v1`. Beside v2: JFS133 (a)'s 6 differences (then JN10, JFS130-JFS132, after v2).
   Later: JCS120 (b), the deferred JDK areas (JCS90-JCS96), JC7.
 - **Working rules added during REAP:** subagents on Sonnet for as much as possible, Opus for the hard parts
   (the user, 2026-10-25/26); one 20 GiB job at a time on the host; Go's build cache trimmed when the disk

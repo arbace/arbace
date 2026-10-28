@@ -232,3 +232,43 @@ git history:
   CS5 (a), CS17 (a) (`arbace.repr.c`, ci, `crt`, cf2g), and CS1, CS6-CS8, CS10, CS13, CS16, CS18-CS21, CS23,
   CS24 (a). C23 starts after v2's tag.
 - Running: JN9f (Opus), GT4 with GT6 (Sonnet), RPS97 (b) (Sonnet).
+
+## 2026-10-28: JN9f merged; JFS130-JFS134 decided; C23's C1 merged, CS30-CS43 decided
+
+- JN9f (branch `java-jn9f`; on Opus; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9f"): JCS114 (a) and JCS115 (a)
+  (a record component's type pattern unconditional by the record pattern's type arguments, its binding cast as
+  javac's checkcast: the interpreter's `Pat` in `arbace/lang/Compiler.ae` gains `checked`, `arbace/classes/analyze.ae`
+  marks `:cast`; a primitive for-each over another primitive's box); RPS151 (a) (the converter, `arbace/repr/java/convert.ae`'s
+  `coerce`, writes a `long` constant widened to float/double, boxed into a non-`Long` reference, and a primitive
+  conditional with a literal branch boxed whole; `:print-forms` removed; jdk/forms 3 of 982, jdk/javac/forms 3 of 903,
+  `test/repr/java/expected/jdk26u.sha256` 30 of 13,566 regenerated, no value changed; javac's tool key `74dfa6c26ac6`);
+  JFS121 (b) (`repr-java-nojavac` in `--full`'s java chain, `:mem-gib` 11, measured 10.8 GB on the jdk corpus; every
+  corpus equal, 0 fallbacks); `bin/java-check --forms update` reports a failed read; JFS126 (b) designed (JN9f.8).
+  `:record-pattern-findings`, `:boxed-foreach` removed from `test/java/divergences.edn`. The merge's conflicts
+  (`test/java/divergences.edn`: each side had removed other classes, JC4c's `:lambda-bridges`, `:j2g-coercion`,
+  `:j2g-findings`, JN9f's two; JAVA-CONFORMANCE-SURVEY.md's two appended sections) resolved by keeping both sides'
+  removals and both sections. Shipped files for v2's re-seed: arbace/lang/Compiler.ae, arbace/classes/{analyze,interp}.ae,
+  jdk/forms (3 files). The essential gate on merged main passed (22m28s, 17 run, at most 46.9 GiB); the matrix 12 of 12, 0
+  problems: Java 7,740/3/93, 1,807/329/1,186, 1,913/180/1,229, 2,598/687/36. CLAUDE.md names the nojavac-check in
+  `--full`. Scratch: `.tmp/jn9f/`.
+- Decided (the user): JFS130-JFS134 as recommended; JFS133 (a)'s 6 differences started beside v2 (branch `java-jfs133`,
+  on Sonnet, no big lock but its gate), JFS130-JFS132 as JN10 after v2.
+- C23's C1 (branch `c23-c1`; on Opus; doc/C23-SURVEY.md, "C1: the plan after CS4 (b)"): `doc/c/SPEC.md` (C forms for
+  C23 and the admitted GNU extensions; its 23 forms blocks read by the Clojure-compatible reader; six worked examples
+  built by gcc 15.2), `test/c/corpora.edn` (21 corpora, 6,388 files, pinned: gcc-15.2.0.tar.xz SHA-256
+  `438fd996826b0c82485a29da03a72d71d6e3541a83ec702df4271f6fe025d24e`, its SHA-512 against gcc.gnu.org's `sha512.sum`;
+  musl-1.2.6.tar.gz `d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a`, its SHA-512 against Alpine
+  aports' APKBUILD 1.2.6-r6; the signatures fetched, not verified: no gpg on the host; ccorpus2 v1.6.0 by go.sum's
+  `h1:`; go-whim at `80c49bf53cd6340487ac623f3d6d135b77ac1db6` by tree hashes). Findings: gcc's C23 tests are `c23-*`
+  (no `c2x-*` since gcc 14); musl 1.2.6's headers lack C23's `nullptr_t`, `unreachable`, `<stdbit.h>`; `/root/musl` is
+  not the release (34 files differ). The oracle: `tools/ccdump`, Arbace's own helper importing go-whim's cc through a
+  generated `go.work`, not vendored. Plan after CS4 (b): 33-56 working days. The C1 merge's gate: 3 s (3 run, 13 skipped).
+  Nothing of go-whim, musl or gcc in the tree. Scratch: `.tmp/c1/`.
+- Decided (the user): CS37 (a), go-whim's own C parts (the C23 delta, cemit, clisp, c23conf, togo's rules if used)
+  licensed to Arbace under the EPL-1.0, as D8 for the box (CS22 settled; cc and its dependencies keep BSD-3; LICENSE.md
+  entries when the first of them enters the tree); CS35 not as recommended: `long double` is `double` in eval and AOT (no
+  software x87), the runs it changes in a class `long-double`, C5 8-14 days (the recommended (a) was a software
+  80-bit `long double`, C5 9-16); the rest (CS30-CS34, CS36, CS38-CS43) as recommended.
+- The big-job lock: GT4/GT6's audit held it for one block of every remaining step (2 h 14 min, under strace),
+  queuing main's gate and two agents; on my request it stopped the block, but its children kept the lock's fd until
+  killed by PID; the audits now take the lock one step per hold.
