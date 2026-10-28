@@ -3,13 +3,15 @@
 ;; Class.getModule answers: java.base, of the bootstrap loader, for the JDK's and jrt's classes
 ;; and the primitive types (the classes classPlace names so: every JDK class of the shipped world
 ;; is java.base's, jdk/sources.txt), and the application loader's unnamed module for the rest
-;; (Arbace's, the compiled namespaces', the run time's). Module's members beyond getName,
+;; (Arbace's, the compiled namespaces', the run time's); in javac's tool world (RPS80 (b)) the named
+;; modules of module_table.ae, a package-to-module table generated from the sources' lists by
+;; bin/jrt modules. Module's members beyond getName,
 ;; isNamed, getClassLoader and toString are not here (getDescriptor's ModuleDescriptor, getLayer's
 ;; ModuleLayer and getPackages' Set are outside jrt; j2g makes their uses stubs that throw).
 (in-ns 'go.arbace.jrt)
 
 (go/file "module.go"
-  :imports [[strconv "strconv"]])
+  :imports [[strconv "strconv"] [strings "strings"]])
 
 (go/type Module
   "Module is java.lang.Module (final): a name (nil for the unnamed module) and the loader.\n"
@@ -24,11 +26,44 @@
   [^{:tag (* Module)} javaBaseModule (addr (lit Module :name (Intern "java.base")))]
   [^{:tag (* Module)} unnamedModule (addr (lit Module :loader appLoader))])
 
+;; The named modules of javac's tool world (RPS80 (b)), by the package table module_table.ae (generated
+;; from the sources' lists): java.compiler of the platform loader, java.xml of the bootstrap loader,
+;; jdk.compiler and jdk.internal.opt of the application loader. The build tools of the tool's world
+;; (buildtools) are in no table: the unnamed module, as the prefix rule has them.
+(go/var ^{:tag (map string (* Module))} packageModule)
+
+(go/func buildPackageModules
+  "buildPackageModules reads module_table.ae's lines into packageModule: a package's Module, one
+instance per module.\n"
+  []
+  (set! packageModule (make (map string (* Module))))
+  (let [byName (make (map string (* Module)))]
+    (range [_ line (strings/Split modulePackages "\n")]
+      (let [f (strings/Fields line)]
+        (when (== (len f) 2)
+          (let [m (aget byName (aget f 1))]
+            (when (== m nil)
+              (set! m (addr (lit Module :name (Intern (aget f 1)))))
+              (cond
+                (== (aget f 1) "java.compiler") (set! (.-loader m) platformLoader)
+                (!= (aget f 1) "java.xml") (set! (.-loader m) appLoader))
+              (aset byName (aget f 1) m))
+            (aset packageModule (aget f 0) m)))))))
+
 (go/method GetModule__Module
-  "GetModule__Module is Class.getModule: java.base for the JDK's and jrt's classes and the
-primitive types, the application loader's unnamed module otherwise; an array is in its
-element type's module.\n"
+  "GetModule__Module is Class.getModule: the module of the class's package in module_table.ae's
+table (javac's tool world), else java.base for the JDK's and jrt's classes and the primitive
+types, the application loader's unnamed module otherwise; an array is in its element type's.\n"
   ^{:tag (* Module)} [^{:tag (* Class)} c]
+  (let [e c]
+    (while (!= (.-comp e) nil)
+      (set! e (.-comp e)))
+    (let [n (.-Name (.-info e))
+          i (strings/LastIndexByte n \.)]
+      (when (> i 0)
+        (let [m (aget packageModule (subslice n _ i))]
+          (when (!= m nil)
+            (return m))))))
   (when (== (classPlace c) "module java.base of loader 'bootstrap'")
     (return javaBaseModule))
   unnamedModule)
@@ -66,4 +101,5 @@ identity hash in hexadecimal.\n"
     v))
 
 (go/func init []
+  (buildPackageModules)
   (set! (.-IsInstance (.Info Module_class)) Module_InstanceOf))
