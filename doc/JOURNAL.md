@@ -204,3 +204,31 @@ git history:
   after JC4c, in v2; RPS151, the converter's widening, in JN9f).
 - JN9f filled the disk (100%) and lost its context; I trimmed Go's cache (14 GB → less) and sent it the remaining
   steps. A slip of mine: I committed `ee8ee304` (docs only) in main while its gate ran there.
+
+## 2026-10-28: JC4c merged; JCS120-JCS123 decided; the C23 survey merged, CS1-CS24 decided
+
+- JC4c (branch `java-jc4c`; on Opus; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4c"): JC4b's follow-ups,
+  JCS111-JCS113, JCS116-JCS118: jrt's hand-written leaves with class interfaces, protected statics, the capture
+  chain through a prologue's class, lambda bridges, a program's own members in reflection (`names/own-class?`,
+  diffcheck's Java forms in their `jf_` packages too), j2g's findings. Java interp 1,790 → 1,804 (deferred 1,202 →
+  1,189), compiled 1,881 → 1,910 (deferred 1,259 → 1,232), none lost; the executable 177,287,328 bytes. Shipped
+  files for v2's re-seed: those the section lists, `arbace/j2g/names.ae` among them. The essential gate on merged
+  main passed (22m34s, 17 run; the gate's processes at most 44.8 GiB): the matrix 12 of 12, 0 problems; Java
+  7,740/3/93, 1,804/329/1,189, 1,910/180/1,232, 2,597/683/41. Scratch: `.tmp/jc4c/`.
+- Decided (the user): JCS120-JCS123 as recommended: JCS120 (b) after v2 (JCS110 (c)'s shared dispatch first),
+  JCS121 (c) (V1 kept), JCS122 (b) (left), JCS123 (b) (j2g's two reflection fixes, with RPS150, before v2's
+  re-seed).
+- The C23 survey (branch `c23-survey`; on Opus; doc/C23-SURVEY.md, doc only): C forms, repr/c, ci and AOT at
+  parity with the three crops, prior art go-whim (`../go-whim` at `80c49bf5`: `crefactor/cc`, modernc cc v4.29.7
+  with a C23 delta; cemit; C-lisp; c23conf), musl, gcc 15.2, ccorpus2; the plan C1-C9, proposals CS1-CS24.
+  Scratch: `.tmp/c23/`.
+- Decided (the user): CS4 (b), not the recommended (a): cc ported to Arbace code rather than vendored as Go
+  forms, as repr/java's native parser was ported from javac (JN8), cc kept as the oracle; the survey's (a) was
+  vendoring through goi's table (GP1 → GP7), (c) a new parser, (d) clang's JSON as a helper. CS22 left open until
+  C1 (the port is cc's derivative under BSD-3; go-whim's own parts need the user's statement when C1 brings them
+  in). The rest as recommended: CS3 (a) (C23, the earlier standards, the GNU extensions musl and the corpora
+  need), CS9 (a) (flat 64-bit address space), CS11 (a), CS12 (a) (musl 1.2.6's release tarball, pinned), CS14 (a)
+  (gcc 15.2 `-O0` the judge), CS15 (a) (gcc 15.2's tarball fetched, pinned), CS2 (a) (`arbace-reaps-4-crops-v1`),
+  CS5 (a), CS17 (a) (`arbace.repr.c`, ci, `crt`, cf2g), and CS1, CS6-CS8, CS10, CS13, CS16, CS18-CS21, CS23,
+  CS24 (a). C23 starts after v2's tag.
+- Running: JN9f (Opus), GT4 with GT6 (Sonnet), RPS97 (b) (Sonnet).

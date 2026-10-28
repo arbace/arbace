@@ -107,15 +107,17 @@ The current state of the work. This file is rewritten as things change. For the 
   1,618/219/0, 1,685/149/3, 2,584+/141/0 (read, eval, AOT, print: pass/by design/deferred).
   `GATE_FULL_SERIAL=1 bin/gate --full` passed at `5cfb1f4a`; the seed `b4ac198d` verified. Its history: the
   journal at the tag.
-- **Next, in the user's order:** (1) the scripts' sweep of `/dev/null` and process substitution in bin/ (one
-  commit per script, each script's check rerun); (2) the milestone `arbace-reaps-3-crops-v2` (an annotated tag,
-  the journal reset again): the gate made efficient (a survey first: a key per `--full` step over its declared
-  inputs and a recorded pass, the builds shared, the 20 GiB jobs one at a time, serial by default, a clean
-  `--full` at each tag), REAP's small leftovers (RPS32, RPS102 (b), RPS95 (b), RPS97 (b), JCS76, RPS64 per
-  kind, RPS86 (b), RPS80 (b), RPS81 (b)) and medium ones (JC4b: JCS98, JCS109, JCS62's compiled half;
-  Clojure's last deferred: RPS41 (b), RPS42, RPS53, RPS54; JN9e: JFS110-JFS119); (3) C23 at parity with
-  the three crops, its survey first (prior art: go-whim's C front end, canonical printer, C-lisp and
-  conformance test, `../go-whim` at `80c49bf5`). Later: the deferred JDK areas (JCS90-JCS96), JC7.
+- **Now: the milestone `arbace-reaps-3-crops-v2`** (an annotated tag, the journal reset again). Done: the scripts'
+  sweep; the keyed gate GT1-GT3 (doc/GATE-SURVEY.md); the small leftovers A and B; JC4b and JC4c; Clojure's last
+  deferred cases (only `seq-and-transducer`, speed, left); JN9e. Running: JN9f (repr/java's native read everywhere,
+  JCS114/JCS115, RPS151), GT4 with GT6 (the audit, the gate's own heavy lock and limits), RPS97 (b) (a shared
+  program library). Then: RPS150 with JCS123 (b), GT5 (inner keys), v2's re-seed, GT7's clean `bin/gate --full
+  --clean`, the divergences' record, the tag. The matrix now: Clojure 908/2/0, 21,052/80/2, 809/28/1, 1,031+/0/0;
+  Java 7,740/3/93, 1,804/329/1,189, 1,910/180/1,232, 2,597/683/41; Go 12,158/204/0, 1,618/219/0, 1,688/149/0,
+  2,584+/141/0.
+- **Next: C23 at parity with the three crops** (doc/C23-SURVEY.md, CS1-CS24 decided 2026-10-28): C1-C9, cc
+  ported to Arbace (CS4 (b)), musl 1.2.6 as C forms, gcc 15.2 the reference, the tag `arbace-reaps-4-crops-v1`.
+  Later: JCS120 (b), the deferred JDK areas (JCS90-JCS96), JC7.
 - **Working rules added during REAP:** subagents on Sonnet for as much as possible, Opus for the hard parts
   (the user, 2026-10-25/26); one 20 GiB job at a time on the host; Go's build cache trimmed when the disk
   fills.
