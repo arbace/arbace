@@ -431,3 +431,35 @@ and `jdk.edn` (`bin/repr-java roundtrip --corpus baseline,samples,jdk --text --r
 printed its arms as ints (`ModifiedUtf`, forms `2` against `(long 2)`); `assign-text` now takes a
 compound assignment's right side through `long-literal-text`, as the binary operators do. Its case is
 `Pins.conditional` in the samples (`test/repr/java/java/sample/Pins.java`, expected forms updated).
+
+## RPS64 and RPS86 (b): the printed Java read to the forms it came from (v2 small leftovers B, 2026-10-27)
+
+The print level's forms step (`:print-forms`, 47 tests) taken kind by kind, doc/FULL-SUPPORT-SURVEY.md, "As built: v2
+small leftovers B". The printer's rules added, each making the printed Java read to the forms it was printed from:
+
+- *A constant widened to float or double*: `(float 1.445825238E9)`, `(float -1.0)`, `(double 1163089569715148800)` are an
+  int or long constant the converter widened (`float f = -1`, `v = 1445825238`), and print as the integer's own literal
+  (`1445825238`, `-1`, `1163089569715148800L`); a float literal's digits (`(float 1.2345679E8)` is `Float.toString`'s
+  of a float) stay `1.2345679E8f`. `(unchecked-double 77)` is a cast, `(double) 77`. A comparison's `(unchecked-float x)`
+  loses its cast only for an int or long `x` (the converter's promotion), not for a double (`TestFMA`).
+- *A negated integer literal*: javac's parser folds `-1` after the sign only for a decimal literal; the converter's
+  `(unchecked-negate-int 0x1)` (a hex, octal or binary literal, or `-(1)`) prints `-(1)`, which is not folded.
+- *A `&&` chain with a pattern* (Guards, RPS86 (b)): the converter expands `a && x instanceof P && c` into nested tests
+  repeating the else branch in each failing exit. `and-chain` follows the then-branch while the nested test's else
+  equals the outer one (`cond`s and `when`s compared as nested `if`s) and prints one condition,
+  `if (a && x instanceof P && c)`, the pattern's binding in the branch: the binding is not rebound in the scope of
+  its own name, so the printer's rename (`i_1`) stays only for a rebinding the source wrote. The fold applies only to a
+  chain with a pattern; the forms read back are the same, as the converter expands the chain again.
+- *A static field assigned through an expression*: `(let [_-1 (cast Bar b)] (set! Bar/si 6))` prints
+  `((Bar) b).si = 6`, whose qualifier Java evaluates and drops (it was printed `Bar.si = 6`, losing the evaluation).
+- *An enum constant with an empty class body*: `(V [])` prints `V {}` (a plain `V` is the symbol).
+- *The return after a try*: a void body ending in a `try` whose block ends in `return;` has a `return;` after it in the
+  source (the converter drops a body's last return but keeps the one in the try); written.
+- *A compound assignment on an array element with an impure index*: `a[e] = a[e] + 1` is written out unless the
+  converter's temporaries stood for it (`*temps-expanded*`), since `a[e] += 1` reads back with a temporary.
+- *A box's `false`*: `Boolean As = false` keeps its initializer (a box's default is null; only a primitive's default
+  value is dropped when the local is assigned before it is read).
+
+What is left of the 47 is by design or the converter's (the survey's classes `:print-shapes`, `:print-erasure`,
+`:print-forms`): the converter's shapes of one Java construct and its temporaries' names, Java's type arguments, and a
+constant's widening in a compound assignment or a box (RPS85).
