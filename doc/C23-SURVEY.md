@@ -1618,8 +1618,11 @@ corpora without SQLite; compiled (C5) the port should run some ten times faster.
 
 Run: `bin/repr-c check --tokens --judge-all` (every corpus, passing; C2.3), `--record` over the gcc
 corpora and SQLite, `bin/repr-c host record` and `host check`, `ccdump-build` and `--upstream` (the
-upstream comparison of C2.2), `make check-makefile`, the essential gate (below). Not run: anything of
-`--full` (nothing of it changed; repr/c has no step until C8).
+upstream comparison of C2.2), `make check-makefile`, and the essential gate at `d6a5a978`: every
+step ran (the embedding list's change makes a new gate key: the build in 16.5 minutes) and passed but
+`suite-aot-essential`, whose j2g run the kernel killed for memory while other agents' jobs ran (the
+host's MemAvailable at 6.6 GiB); run again, with the 12 other passes kept, it passed (`.tmp/c2/gate.log`,
+`gate2.log`). Not run: anything of `--full` (nothing of it changed; repr/c has no step until C8).
 
 Shipped files: none of `arbace/lang`, `go/`, `jdk/`, `overlay/`. `arbace/j2g/embed.ae`'s exclusion list
 gains `arbace/repr/c.ae` and `arbace/repr/c/` (as repr/haskell's and repr/rust's), so that no executable
