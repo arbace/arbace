@@ -1301,7 +1301,7 @@ The tables' entry types (jrt's `class.ae`):
   the public ones, and the protected static methods (JCS112 (a): a subclass's static call of
   the world through the analysis, which keeps it to subclasses; jrt's tables likewise,
   `test/jrt/tables.ae`); in a `--program`, every member of the program's own classes
-  (`arbace.j2g.names/user-class?`: a user's, the conformance check's tests; JCS117 (a)), with its
+  (`arbace.j2g.names/own-class?`: a user's, the conformance check's tests, diffcheck's Java forms; JCS117 (a)), with its
   modifiers, as the interpreter's view has them, a private method invoked as its `Impl_` (a
   non-leaf class) or its function (an interface), and every such member a root of the
   reachability; the shipped program has no such classes and its tables keep the public members.

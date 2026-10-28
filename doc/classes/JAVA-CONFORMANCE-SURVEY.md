@@ -3175,7 +3175,7 @@ shards of 500, `GOMEMLIMIT=18GiB`, every heavy run under the host's big-job lock
   lists the method and its bridges, as LambdaMetafactory's class. j2g's adapter `F_Fn` (`out/adapter-forms`)
   gets the bridges as Go methods calling `Fn` (the values converted through Object) and a member table of the
   SAM and its bridges. LambdaTest6 and BridgeMethod pass at both levels.
-- *JCS117 (a), the program's own members.* In a `--program`, a class of `arbace.j2g.names/user-class?` (a
+- *JCS117 (a), the program's own members.* In a `--program`, a class of `arbace.j2g.names/own-class?` (a
   user's, the tests) lists every member in its member table, with its modifiers (a private method invoked as
   its `Impl_` or its interface function), every member a root; the shipped program has none of them (its
   tables differ only by JCS112's entries). 12 tests pass compiled for it, among them CopyMethods and
