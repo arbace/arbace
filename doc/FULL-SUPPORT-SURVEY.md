@@ -2955,3 +2955,10 @@ Java forms' analysis in the executable). No file of `go/`, `overlay/` or `jdk/`.
 
 Scratch (`.tmp/rps150/` of the worktree): `prog/` (the Module program) with `prog-build.log` and `prog-run.out`, `c4.log` to
 `c6.log` and `rec.log` (the java-check runs), `reap-after.log`, `gate-build.log`, `run-all.sh`, `record.sh`.
+
+**The checks.** The essential `bin/gate` at commit `80e7e678` passed (17 steps run, 11m27s of wall time on warm caches for its
+builds, the lock waited separately): oracle 22,688 of 22,740 as recorded, diffcheck 12,795 of 12,807 as recorded, goi's 801
+and 248, Java's essential 428 of 428 interpreted and 428 of 428 compiled, the AOT suite subset, the programs (3 of 3), the
+generated variants, j2g's edge, `bin/reap` 12 of 12 cells with 0 problems (Java AOT 1,912 / 180 / 1,230). Log:
+`.tmp/rps150/gate.log` of the worktree. The ad hoc runs used main's stale `arbace-javac` (`REPR_JAVA_STALE_OK=1`, read level
+only) and the gate's own executable and compiled namespaces (`.tmp/arbace-go-gate`) for the compiled level.
