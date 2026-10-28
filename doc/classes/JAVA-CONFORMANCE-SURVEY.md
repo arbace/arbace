@@ -3306,3 +3306,13 @@ the decided classes), `check-*-before.edn`, `levels-known-before.edn` (main's re
 `targeted1.log`, `results-targeted1.tsv` (the targeted runs), `full1.log` (the run the disk ended), `full2.log`,
 `results-full2.tsv` (the recording), `re1.log` (the two run again), `build1.log`-`build4.log`, `recref1.log`-`recref3.log`,
 `edge-update.log`, `manifest.log`, `recfix.log`, `reap1.log`, `lb.ae`, `lb2.ae` (the bridges' repro), `gate.log`.
+
+## Decided (2026-10-28): JCS120-JCS123
+
+The user decided JC4c's proposals as recommended: JCS120 (b) (JCS110 (c)'s shared generic dispatch first, so that
+a class of the world costs a table rather than a Go type of its own, then the classes programs extend listed by
+the corpus' demand; after `arbace-reaps-3-crops-v2`), JCS121 (c) (V1 kept: no `StackOverflowError` from
+translated code; revisited with the runtime's next patch), JCS122 (b) (the cross-package package-private override
+left: two tests, none in the shipped world), JCS123 (b) (j2g's two: `getMethods`' order of an interface's
+abstract methods as the JVM's, a local class's modifiers from javac's InnerClasses flags; the caller-sensitive
+access checks left out, as the Go build has none at run time), with RPS150, before v2's re-seed.
