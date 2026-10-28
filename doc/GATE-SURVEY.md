@@ -79,7 +79,7 @@ those, four chains (concurrent, or one after another with `GATE_FULL_SERIAL=1`, 
 | chain | steps, in order |
 |---|---|
 | go | `go-build-full` (`bin/arbace-go --build`, `--smoke`), `javac` (`javac-vendor check`, `build`, `verify`, `classes`), then the java chain beside the rest: `fixpoint`, `suite-aot`, `programs-full` |
-| java (after javac) | `repr-java`, `repr-java-roundtrip`, `jrt-convert`, `java-fixtures`, `repr-java-parse`, `repr-java-front`, `repr-java-attr`, `java-check-full` |
+| java (after javac) | `repr-java`, `repr-java-roundtrip`, `jrt-convert`, `java-fixtures`, `repr-java-parse`, `repr-java-front`, `repr-java-attr`, `repr-java-nojavac` (JN9f), `java-check-full` |
 | repr-go | `repr-go` (six round trips, `x509roots-vendor verify`, `check`), `repr-go-native`, `goi` (`annotations`, `test --gc`, `check --jobs 8`), `goi-aot` |
 | repr-clojure | `repr-clojure` (`check`, `--suite`, `--roundtrip`) |
 

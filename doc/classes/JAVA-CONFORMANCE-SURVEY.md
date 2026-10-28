@@ -3316,3 +3316,15 @@ translated code; revisited with the runtime's next patch), JCS122 (b) (the cross
 left: two tests, none in the shipped world), JCS123 (b) (j2g's two: `getMethods`' order of an interface's
 abstract methods as the JVM's, a local class's modifiers from javac's InnerClasses flags; the caller-sensitive
 access checks left out, as the Go build has none at run time), with RPS150, before v2's re-seed.
+
+## As built: JCS114 (a), JCS115 (a) in JN9f (2026-10-28)
+
+Built in repr/java's JN9f (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9f", JN9f.5): the converter marks a
+record component's type pattern unconditional by the record pattern's type arguments (`^:unconditional`, the fact
+`:types/record-components`) and a primitive for-each binding over another primitive's box (`^{:box C}`); the
+analysis does not test the first, casting its binding instead (javac's checkcast: the interpreter's `Pat` in
+`arbace/lang/Compiler.ae`, a heap-polluted component's `ClassCastException`), and casts the second's element to C.
+BoxedForeach, GenericRecordDeconstructionPattern and TypedDeconstructionPatternExc pass interpreted and compiled
+(interp 1,790 to 1,793, compiled 1,881 to 1,884); `:boxed-foreach` and `:record-pattern-findings` are removed from
+`test/java/divergences.edn`, and TypedDeconstructionPatternExc's print level is in `:print-erasure` (its selector's
+cast printed raw).
