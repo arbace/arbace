@@ -5994,3 +5994,69 @@ and 265,011,360 (the final build, key `74dfa6c26ac6`). A re-seed carries the run
   the read levels, the levels of the moved tests), `jfs126.md` (the design's draft);
   `.tmp/java-check/forms-nojavac/` (the nread level's reads), `.tmp/repr-java-nojavac-check/nojavac.md`,
   `.tmp/repr-java-attr-check/attr.md`.
+
+## As built: JFS133 (a), the six differences (2026-10-28)
+
+JFS133 (a), decided by the user 2026-10-28: the six jtreg tests that the read without javac (`--attr native`,
+the level `nread` of `bin/java-check`) read to forms other than javac's, each a wrong native answer, unchecked
+until these tests. Each one's fact where the native provider answered otherwise than javac, and its fix (the
+provider's files only: `arbace/repr/java/{decls,expr,infer,overload}.ae`; no converter, no tool change).
+
+| Test | The fact | The fix |
+|---|---|---|
+| t03215 `jls/Numbers.java` (a concatenation `-7.5 % 2 + " " + ...`) | `:types/constant`: the double remainder was not folded (`fold-binary` had no `:MOD` for doubles, so the concatenation of constants had none, and `flatten-concat` flattened what javac keeps as one constant operand); the float case used `Math/IEEEremainder`, which is not Java's `%` | `decls.ae`: `java-rem`, Java's `%` on doubles (C's fmod: exact, the dividend's sign, NaN for a zero divisor or an infinite dividend, the dividend for an infinite divisor) over BigDecimal; used for the double and float cases |
+| t04723 `TypeAnnotationReflection` (`@TypeAnno("O") Outer<..>.@TypeAnno("I") Inner<..> foo2()`) | `:names/type-tree` of a method's result and of a field's type: a declaration annotation that is a type annotation went on the innermost written type, javac's `TypeAnnotations.typeWithAnnotations` puts it on the outermost enclosing type written in the source (the walk over the type tree: a selection steps to the enclosing type, a parameterized or annotated type to its class, and a selection beyond the nesting leaves the type) | `decls.ae`: `with-annotations` takes the type tree (`vartype-of`, the method's result), `annotate-outer` rebuilds the chain; the three-argument form is new, the old callers (a union's first alternative, arrays) keep their two |
+| t06002 `T8008769` (`Test<@A @B String> t0 = new Test<>()`) | `:names/type-tree` of a diamond's class tree: the inferred type kept the target's type annotations, javac's `UndetVar.addBound` stores `bound.map(toTypeVarMap).baseType()`, so an inferred type carries none of its own (it made the converter write `(new (Test ..))` for javac's `(Test.)`) | `infer.ae`: `add-bound!` takes `base-type` (the type without its own annotations, those of its type arguments stay) |
+| t06116 `Pos03` (`p.new Foo<>(1){}`, a qualified anonymous diamond) | the anonymous class's supertype (`anon-creation-type`): the qualified branch answered the member class raw (`Foo`), javac's is the diamond's inferred type (`Foo<Integer>`) | `decls.ae`: a diamond with a qualifier takes `*anon-diamond-type*` like an unqualified one |
+| t06357 `LambdaCannotCapturePatternVariables` (`return (y instanceof Integer z) ? z : 1;` of a lambda returning Integer) | `:types/expr` of the conditional: `Attr.isBooleanOrNumeric` attributes an arm speculatively in the conditional's own environment, where the conditional's pattern bindings are not in scope (visitConditional enters them for the real attribution only): `z` is erroneous there, so the conditional is a poly expression (typed by its target, each arm boxed), not a numeric standalone one (`int`, `z` unboxed) | `expr.ae`: `*cond-top*`, `binding-ident?`, `inner-binding?` and `spec-erroneous?` (a name of a binding, a selection, call, operator or index on one: an error type, as `Operators.resolveBinary` answers noOpSymbol for an erroneous operand): such an arm is not numeric; any other arm that names a binding of the conditional (an argument of a call) is declined (the fallback), the bodies of lambdas and classes not entered (attributed after the choice) |
+| t06405 `ExpressionSwitchBugsInGen` (`(switch ..).toString()` on `String`/`StringBuilder`) | `:overload/method`: an intersection (the lub `Object & Serializable & Comparable & CharSequence`) was looked up as an interface; javac's `Types.makeIntersectionType` gives its symbol ABSTRACT, PUBLIC, SYNTHETIC, COMPOUND and not INTERFACE, so `findMethod` runs the class chain first, finds `Object.toString` concrete, and keeps it over `CharSequence.toString` (the CR 6178365 branch); native found `CharSequence.toString` and cast the qualifier to `CharSequence` too | `overload.ae`: `find-method*`'s `iface?` is false for an intersection; its decline "an intersection's Object method" is gone (those calls are now answered) |
+
+The first full run found three regressions of the fifth fix (t03211 `jls/Generics`, t06349 `BindingsTest1`,
+t06354 `GenericRecordDeconstructionPattern` fell back where they had passed: `s.length() > 0`, `s == null ? 1 :
+s.length()`, a call on a binding's selection): the first version declined every arm naming a binding. The
+rule above (`spec-erroneous?`) answers them, as javac does. Not found by the 45 tests of the `:nread-*` classes:
+only by the whole level.
+
+### JFS133 (a): the numbers
+
+| Level `nread` (3,321 tests, 3,322 after t08324 joined the corpus) | pass | fallback | differ | unread |
+|---|---|---|---|---|
+| before (JN9f) | 3,276 | 38 | 6 | 1 |
+| after | 3,282 | 39 | 0 | 1 |
+
+The 39th fallback is t08324 `jls/BackEnds2`, a test the committed `check-nread.edn` did not hold yet ("declined
+:infer/target: a functional interface's descriptors merged", the class `:nread-inference`); the 38 of the
+`:nread-*` classes are as before (20 inference, now 21 with it; 7 constant, 7 names, 4 scope). `:nread-differ` has no test now and stays as
+a guard (`test/java/divergences.edn`: its title and why say so). The read level: 3,322 as recorded, none
+changed.
+
+### JFS133 (a): the checks
+
+- `bin/java-check --levels read,nread` on the six: 6 differ before, 6 pass after (each fix on its own test
+  first, `.tmp/jfs133/run0.log` to `run3.log`).
+- The 45 tests not passing in `test/java/check-nread.edn`, then the whole level (`--jobs 8`, under the big-job
+  lock; `.tmp/jfs133/full.log` with the three regressions, `full2.log` after their fix): 0 regressions, 3,282
+  pass; `--record` rewrote `test/java/check-nread.edn` (the six now `:pass`, t08324 new).
+- `bin/reap`: 12 of 12 cells checked, 0 with no check yet, 0 problems (`.tmp/jfs133/reap.log`).
+- The essential gate in the worktree under the lock (`.tmp/jfs133/gate.log`): passed (43 min, 8 steps run, 9 skipped).
+- Not run: `bin/repr-java attr-check` and `nojavac-check` over jdk26u's 68 modules (hours; the lock was busy
+  for most of a day). The whole `nread` level (3,321 tests of jdk26u's tests, the jls programs and javac's
+  sources) is the check that ran. The fixes touch four facts the corpora's code uses (a double remainder, a
+  declaration annotation on a nested type, an inferred type's annotations, an intersection's methods): the
+  next `bin/gate --full` runs `nojavac-check` and will say.
+
+Where the provider's code is shipped: `arbace/repr/java` is embedded by `bin/arbace-go --build-java` in javac's
+tool (not shipped) and evaluated from the checkout on the tools' host; it is inside `arbace_javac_key` (so the
+tool built before this change is stale for the provenance writers: `REPR_JAVA_STALE_OK=1` was used for these
+runs, the tool's reader being replaced by the checkout's via `ARBACE_PATH`) and outside the gate key of
+`bin/arbace-go` (`gate_key` excludes repr/java). The shipped program does not carry the native provider yet
+(JFS130-JFS132, JN10).
+
+Scratch: the worktree's `.tmp/jfs133/` (not tracked): `run0.log` (before: 6 differ), `run1.log`-`run5.log`
+(each step), `q1/` (the intersection reproduction `src/Q.java`, read with and without javac), `names.txt`,
+`full.log`, `full2.log`, `chain.sh`, `reap.log`, `gate.log`; `.tmp/java-check/forms-nojavac/` (the diffs).
+
+### JFS133 (a): proposals
+
+None open. JFS133 (b)'s rest (`:nread-inference` 21, `:nread-names` 7, `:nread-constant` 7, `:nread-scope` 4)
+stays as JFS133 lists it.
