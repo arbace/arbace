@@ -2899,3 +2899,15 @@ runtime changes, listed below: they reach stage 0 with the v2 re-seed.
     shipped world), the test skipped for good.
   - *Recommended: (b)* for `xml-stream`: it follows RPS56's decision (SAX by design); `seq-and-transducer`
     stays a speed matter.
+
+## Decided (2026-10-28): RPS130-RPS134, RPS150-RPS154
+
+The user decided the proposals of Clojure's deferred cases and of v2's small leftovers B as recommended, inside the
+milestone `arbace-reaps-3-crops-v2`: RPS130 (a) (a compiled fn's fields reflected from its Go struct), RPS131 (a)
+(a `do` of one form unwrapped), RPS132 (a) (the `IFn` cast before the arguments, the JVM's order), RPS133 (a)
+(FIPrims through Clojure's adapter, a `reify` registered by `gen-interface`, as built), RPS134 (b) (`xml-stream` by
+design with the SAX cut, after RPS56; `seq-and-transducer` stays deferred, a speed matter); RPS150 (Module's
+`getPackages` and `getResourceAsStream` as j2g support forms, after JC4c merges, in v2), RPS151 (the converter
+keeps a constant's widening, in JN9f: the 5 deferred `:print-forms` tests), RPS152 (`:print-shapes` and
+`:print-erasure` by design), RPS153 (an enum constant with arguments and an empty body by design for now), RPS154
+(no other consumer of the module table).
