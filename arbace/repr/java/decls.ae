@@ -855,14 +855,19 @@
         clazz (loop [x (:clazz nc)] (if (= :ANNOTATED_TYPE (:tag x)) (recur (:underlyingType x)) x))
         diamond? (and (= :TYPEAPPLY (:tag clazz)) (empty? (:arguments clazz)))]
     (if-let [encl (:encl nc)]
-      (let [et (expr-decl-type env encl)
-            n (tree-name-of (if (= :TYPEAPPLY (:tag clazz)) (:clazz clazz) clazz))
-            m (when (and et (= :class (:k et))) (found (find-member-type env et n (:c et))))]
-        (when-not m (decline! (str "the qualified creation of " n)))
-        (let [t (class-type-at m et)]
-          (if (and (= :TYPEAPPLY (:tag clazz)) (not diamond?))
-            (assoc t :args (mapv #(type-of-tree env %) (:arguments clazz)))
-            t)))
+      (if diamond?
+        ;; o.new C<>() {}: the inferred type as for an unqualified diamond (Attr.visitNewClass)
+        (if *anon-diamond-type*
+          (*anon-diamond-type* c)
+          (decline! "an anonymous class of a diamond's supertype (inferred)"))
+        (let [et (expr-decl-type env encl)
+              n (tree-name-of (if (= :TYPEAPPLY (:tag clazz)) (:clazz clazz) clazz))
+              m (when (and et (= :class (:k et))) (found (find-member-type env et n (:c et))))]
+          (when-not m (decline! (str "the qualified creation of " n)))
+          (let [t (class-type-at m et)]
+            (if (= :TYPEAPPLY (:tag clazz))
+              (assoc t :args (mapv #(type-of-tree env %) (:arguments clazz)))
+              t))))
       (if diamond?
         (if *anon-diamond-type*
           (*anon-diamond-type* c)
@@ -1210,7 +1215,7 @@
               {:tparams (method-tparams m)
                :params (mapv #(vartype-of e %) (:params d))
                :ret (if (:restype d)
-                      (with-annotations (type-of-tree e (:restype d)) (type-use-annotations e (get-in d [:mods :annotations])))
+                      (with-annotations (type-of-tree e (:restype d)) (type-use-annotations e (get-in d [:mods :annotations])) (:restype d))
                       :void)
                :throws (mapv #(type-of-tree e %) (:thrown d))})
             (let [c (:owner m)
@@ -1588,14 +1593,37 @@
              :when (and c (contains? (annotation-targets c) "TYPE_USE"))]
          (annotation-compound env a false))))
 
+(defn- annotate-outer
+  "Class type `t` with annotations `anns` on its `k`th enclosing type (0: `t` itself), as
+  TypeAnnotations.typeWithAnnotations(type, stopAt, annotations) rebuilds the chain."
+  [t anns k]
+  (if (or (zero? k) (not= :class (:k (:outer t))))
+    (assoc t :anns (into (vec anns) (:anns t)))
+    (assoc t :outer (annotate-outer (:outer t) anns (dec k)))))
+
 (defn with-annotations
   "Type `t` with type annotations `anns` where a declaration's go (TypeAnnotations.typeWithAnnotations):
-  an array's on its innermost element type, else on the type."
-  [t anns]
-  (cond
-    (or (empty? anns) (nil? t) (keyword? t)) t
-    (= :array (:k t)) (assoc t :e (with-annotations (:e t) anns))
-    :else (assoc t :anns (into (vec anns) (:anns t)))))
+  an array's on its innermost element type, else on the type; with the declared type's tree `tree`
+  the written type's outermost enclosing type (`@A Outer<String>.Inner` annotates Outer<String>), and
+  none when the tree names no enclosing type of a nested one (`@A java.util.Map.Entry`, an error for a
+  type annotation only, else the annotation stays a declaration's)."
+  ([t anns] (with-annotations t anns nil))
+  ([t anns tree]
+   (cond
+     (or (empty? anns) (nil? t) (keyword? t)) t
+     (= :array (:k t)) (assoc t :e (with-annotations (:e t) anns))
+     (and tree (= :class (:k t)))
+     ;; the walk over the type tree, an enclosing type for each selection (a selection beyond the
+     ;; nesting is javac's NONE: the type stays)
+     (loop [tr tree ty t k 0]
+       (case (:tag tr)
+         :SELECT (if (= :class (:k (:outer ty)))
+                   (recur (:selected tr) (:outer ty) (inc k))
+                   t)
+         :TYPEAPPLY (recur (:clazz tr) ty k)
+         :ANNOTATED_TYPE (recur (:underlyingType tr) ty k)
+         (annotate-outer t anns k)))
+     :else (assoc t :anns (into (vec anns) (:anns t))))))
 
 (defn vartype-of
   "The declared type of variable declaration `d` in `env` (MemberEnter.visitVarDef, with its TYPE_USE
@@ -1606,7 +1634,7 @@
       (let [t (type-of-tree env vt)
             anns (type-use-annotations env (get-in d [:mods :annotations]))]
         ;; a union's type annotations are on its alternatives' trees only
-        (if (= :union (:k t)) t (with-annotations t anns))))))
+        (if (= :union (:k t)) t (with-annotations t anns vt))))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Constants (ConstFold, for annotation values): [type value], type a primitive keyword or
@@ -1634,6 +1662,16 @@
       :float (unchecked-float (double v))
       :double (double v)
       v)))
+
+(defn- java-rem
+  "Java's % on doubles (JLS 15.17.3, C's fmod: the result takes the dividend's sign and is exact), not
+  IEEEremainder's; javac's ConstFold dmod and fmod."
+  [^double x ^double y]
+  (cond
+    (or (Double/isNaN x) (Double/isNaN y) (Double/isInfinite x) (zero? y)) Double/NaN
+    (or (Double/isInfinite y) (zero? x)) x
+    :else (let [r (.doubleValue (.remainder (java.math.BigDecimal. x) (java.math.BigDecimal. y)))]
+            (Math/copySign r x))))
 
 (defn- jfloat->int [^double d] (cond (Double/isNaN d) 0 :else (long d)))
 
@@ -1749,13 +1787,13 @@
                      :PLUS [:float (unchecked-float (+ x y))] :MINUS [:float (unchecked-float (- x y))]
                      :MUL [:float (unchecked-float (* x y))]
                      :DIV [:float (unchecked-float (/ (double x) (double y)))]
-                     :MOD [:float (unchecked-float (Math/IEEEremainder x y))]
+                     :MOD [:float (unchecked-float (java-rem (double x) (double y)))]
                      :EQ (cmp (== x y)) :NE (cmp (not (== x y))) :LT (cmp (< x y)) :GT (cmp (> x y))
                      :LE (cmp (<= x y)) :GE (cmp (>= x y)) nil))
           :double (let [x (double x) y (double y)]
                     (case tag
                       :PLUS [:double (+ x y)] :MINUS [:double (- x y)] :MUL [:double (* x y)]
-                      :DIV [:double (/ x y)]
+                      :DIV [:double (/ x y)] :MOD [:double (java-rem x y)]
                       :EQ (cmp (== x y)) :NE (cmp (not (== x y))) :LT (cmp (< x y)) :GT (cmp (> x y))
                       :LE (cmp (<= x y)) :GE (cmp (>= x y)) nil))
           nil)))))

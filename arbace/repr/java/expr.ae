@@ -1015,6 +1015,57 @@
         (d/array-of (:e x))
         (d/decline! "an array initializer's target")))))
 
+(def ^:dynamic *cond-top*
+  "The conditional whose arms boolean-or-numeric? examines (Attr.visitConditional's tree), or nil."
+  nil)
+
+(defn- binding-ident?
+  "Is `x` an identifier naming a pattern binding that the conditional `*cond-top*` declares?"
+  [p x]
+  (when-let [top *cond-top*]
+    (and (= :IDENT (:tag x))
+         (let [r (try (d/resolve-qualified (env-of p x) x #{:val})
+                      (catch Throwable e
+                        (if (:arbace.repr.java.decls/decline (ex-data e)) nil (throw e))))
+               l (:local r)
+               dcl (:decl l)]
+           (boolean (and l (= :binding (:kind l)) dcl
+                         (<= (long (:start top)) (long (:pos dcl)) (long (:end top)))))))))
+
+(defn- inner-binding?
+  "Does tree `t` name (by an identifier) a pattern binding that the conditional `*cond-top*` declares?
+  Attr.isBooleanOrNumeric attributes an arm speculatively in the conditional's own environment, where
+  the conditional's bindings are not in scope yet (visitConditional enters them for the real
+  attribution only): the name is erroneous there."
+  [p t]
+  (when *cond-top*
+    (letfn [(walk [x]
+              ;; (a lambda's or class's body is attributed after the choice: its errors leave the
+              ;; arm's type as it is)
+              (and (not (#{:LAMBDA :CLASSDEF} (:tag x)))
+                   (or (binding-ident? p x)
+                       (some walk (filter map? (vals x)))
+                       (some #(some walk (filter map? %)) (filter vector? (vals x))))))]
+      (boolean (walk t)))))
+
+(defn- spec-erroneous?
+  "Is the type of arm `x`, attributed speculatively in the conditional's environment, erroneous because
+  it starts from a binding the environment does not have (a name, a selection or call on one, an
+  operator on one, an index of one)? Attr gives such trees an error type: Operators.resolveBinary and
+  resolveUnary answer noOpSymbol for an erroneous operand, a selection from an erroneous site is
+  erroneous."
+  [p x]
+  (case (:tag x)
+    :PARENS (spec-erroneous? p (:expr x))
+    :IDENT (binding-ident? p x)
+    :SELECT (spec-erroneous? p (:selected x))
+    :APPLY (let [m (:meth x)] (and (= :SELECT (:tag m)) (spec-erroneous? p (:selected m))))
+    (:POS :NEG :COMPL :NOT :PREINC :PREDEC :POSTINC :POSTDEC) (spec-erroneous? p (:arg x))
+    :INDEXED (spec-erroneous? p (:indexed x))
+    (:PLUS :MINUS :MUL :DIV :MOD :SL :SR :USR :LT :GT :LE :GE :EQ :NE :BITAND :BITOR :BITXOR :AND :OR)
+    (boolean (or (spec-erroneous? p (:lhs x)) (spec-erroneous? p (:rhs x))))
+    false))
+
 (defn- boolean-or-numeric?
   "Attr.isBooleanOrNumeric of conditional arm `t`."
   [p t]
@@ -1025,8 +1076,11 @@
       :PARENS (boolean-or-numeric? p (:expr t))
       :CONDEXPR (and (boolean-or-numeric? p (:truepart t)) (boolean-or-numeric? p (:falsepart t)))
       :APPLY (let [meth (:meth t)]
-               (if (#{"this" "super"} (:name meth))
-                 false
+               (cond
+                 (#{"this" "super"} (:name meth)) false
+                 (spec-erroneous? p t) false
+                 (inner-binding? p t) (d/decline! "a conditional's arm calling with its binding")
+                 :else
                  (let [m (method-of p t)
                        env (env-of p t)
                        site (if (= :IDENT (:tag meth))
@@ -1041,7 +1095,12 @@
                     (pob (or (some-> (:type (ans p bare)) deref)
                              (try (d/type-of-tree (env-of p t) bare) (catch Throwable _ nil))
                              (d/decline! "the created class")))))
-      (pob (etype p t)))))
+      (cond
+        ;; the speculative attribution in the conditional's environment does not find the binding: the
+        ;; arm's type is erroneous, not numeric, so the conditional is a poly expression
+        (spec-erroneous? p t) false
+        (inner-binding? p t) (d/decline! "a conditional's arm naming its binding")
+        :else (pob (etype p t))))))
 
 (declare arg-target lambda-desc)
 
@@ -1095,7 +1154,7 @@
       (pt p t))))
 
 (defn- cond-type [p t]
-  (if (and (boolean-or-numeric? p (:truepart t)) (boolean-or-numeric? p (:falsepart t)))
+  (if (binding [*cond-top* t] (and (boolean-or-numeric? p (:truepart t)) (boolean-or-numeric? p (:falsepart t))))
     (let [ts [(etype p (:truepart t)) (etype p (:falsepart t))]]
       (or (ty/cond-type (reg p) ts [(arm-const p (:truepart t)) (arm-const p (:falsepart t))])
           (cond-lub p ts)))
@@ -1294,7 +1353,7 @@
     :APPLY (when (and (empty? (:typeargs a)) (not (#{"this" "super"} (:name (:meth a)))))
              (let [r (choice p a)]
                (when (and (:sym r) (generic-method? (:sym r))) :call)))
-    :CONDEXPR (when-not (and (boolean-or-numeric? p (:truepart a)) (boolean-or-numeric? p (:falsepart a))) :cond)
+    :CONDEXPR (when-not (binding [*cond-top* a] (and (boolean-or-numeric? p (:truepart a)) (boolean-or-numeric? p (:falsepart a)))) :cond)
     :NEWCLASS (when (diamond-tree? a) :call)
     :LAMBDA :lambda
     :REFERENCE :mref
