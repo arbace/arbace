@@ -284,14 +284,17 @@ java.security and java.text.
   collections, the streams, `AssertionError`, `Calendar`, `Observable`, `AbstractQueuedSynchronizer`
   ...; translated leaves among them made non-leaves), about 16 MB of the executable, and their
   protected instance members are reachable (the world's signatures' `:protected`,
-  `Host.superCall`, `Host.superField`); jrt's hand-written leaves (`WeakReference`,
-  `AtomicReference`) still are not.
+  `Host.superCall`, `Host.superField`). Since JC4c ("As built: JC4c") jrt's hand-written
+  `WeakReference`, `SoftReference`, `AtomicReference` and `InheritableThreadLocal` have class
+  interfaces and are listed, with the translated `CopyOnWriteArraySet`.
 - **Stack traces** show no interpreted frames (the evaluator's do, EVAL-NOTES "Stack traces");
   `CF$Frame` would need the method and the line.
 - **Reflection's view**: `getDeclaredMethods` of an interpreted class lists the inherited methods
   it was given for dispatch; protected and package-private members of classes of the world are
   not reachable (jrt's member tables list public ones), so Java forms using them fail when
-  defined, but for the extendable classes' protected instance members since JC4b (above).
+  defined, but for the extendable classes' protected instance members since JC4b (above) and the
+  world's protected static methods since JC4c (their member tables' entries, JCS112 (a)). A
+  lambda's class lists its method and its bridges (JC4c, JCS116 (a)).
 - Assertions are always disabled (the JVM's
   default); javac's accessors are not made (no access checks at run time); serializable lambdas
   cannot be deserialized; varargs method references; annotations of classes of the world

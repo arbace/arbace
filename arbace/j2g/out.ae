@@ -265,6 +265,8 @@
             (list 'when (list '== 'p nil) (list 'return nil))
             'p))))
 
+(declare arg-conv result-any dotted-desc member-table-form)
+
 (defn adapter-forms
   "The adapter F_Fn of functional interface fi (§7.11): its SAM calls Fn, default methods
   forward to their functions."
@@ -279,7 +281,38 @@
         ftype (if (= "V" r)
                 (list 'func (vec (map #(m/go-type pkg %) ps)))
                 (list 'func (vec (map #(m/go-type pkg %) ps)) [(m/go-type pkg r)]))
-        call (apply list (list '.-Fn 't) pn)]
+        call (apply list (list '.-Fn 't) pn)
+        ;; the SAM's bridges (its other erased descriptors, a/find-sam): methods of their own
+        ;; descriptors calling Fn, the arguments and the result converted through Object, as
+        ;; LambdaMetafactory's FLAG_BRIDGES (JCS63 (a), JCS116 (a), "As built: JC4c"); a bridge
+        ;; whose primitive parts differ from the SAM's is not one javac makes
+        to-any (fn [x d] (cond (t/prim? d) x (m/pointer-desc? d) (list (m/jrt-sym pkg "J2g_RefP") x) :else x))
+        from-any (fn [x d] (if (or (t/prim? d) (= d "Ljava/lang/Object;")) x
+                             (list (list 'inst (m/jrt-sym pkg "As") (m/go-type pkg d)) x)))
+        conv (fn [x from to] (cond (= from to) x
+                                   (or (t/prim? from) (t/prim? to)) nil
+                                   :else (from-any (to-any x from) to)))
+        bridges (for [bd (:bridges sam)
+                      :let [[bps br] (t/parse-method-desc bd)
+                            args (map (fn [p bp sp] (conv p bp sp)) pn bps ps)
+                            rc (when-not (= "V" r) (conv call r br))]
+                      :when (and (= (count bps) (count ps)) (every? some? args) (or (= "V" r) (some? rc)))]
+                  {:desc bd
+                   :form (list 'go/method (symbol (nm/method-base (:name sam) bd))
+                               (cond-> (vec (cons recv (map #(tag %1 (m/go-type pkg %2)) pn bps)))
+                                 (not= "V" br) (vary-meta assoc :tag (m/go-type pkg br)))
+                               (let [c (apply list (list '.-Fn 't) args)]
+                                 (if (= "V" r) c (list 'return (conv c r br)))))})
+        bridge-keys (set (for [b bridges] [(:name sam) (:desc b)]))
+        ;; its member table: the SAM and its bridges, public (Class.getDeclaredMethods of the
+        ;; lambda's class)
+        recv-of (list 'assert (list '* (symbol a)) 'this)
+        entry (fn [d] (let [[eps er] (t/parse-method-desc d)
+                            ecall (apply list (symbol (str "." (nm/method-base (:name sam) d))) recv-of
+                                         (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) eps))]
+                        {:line (str "M1 " (:name sam) " " (dotted-desc d))
+                         :body (if (= "V" er) [ecall '(return nil)] [(list 'return (result-any pkg er ecall))])}))
+        [tfns table] (member-table-form pkg a {:methods (map entry (cons (:desc sam) (map :desc bridges)))})]
     (concat
       [(list 'j2g/comment (str "---- the lambda adapter of " (str/replace fi "/" ".")
                                (apply str (map #(str " & " (str/replace % "/" ".")) markers))))
@@ -291,10 +324,18 @@
       (for [j (distinct (concat (cons fi (d/interface-closure fi))
                                 (mapcat #(cons % (d/interface-closure %)) markers)))]
         (list 'go/method (symbol (str "Is_" (m/go-name j))) [recv]))
-      ;; default methods of the interface and its superinterfaces
-      (for [[[name desc :as k] mm] (m/vmethods fi)
+      (map :form bridges)
+      ;; default methods of the interface and its superinterfaces, and of the markers of an
+      ;; intersection (their abstract methods throw): (A & B & AB & C)'s adapter is an AB, its
+      ;; b() AB's default (IntersectionOrderTest2; JCS118 (a), "As built: JC4c")
+      (for [[[name desc :as k] mm] (if (seq markers)
+                                                (into (sorted-map) (concat (mapcat m/vmethods (reverse markers)) (m/vmethods fi)))
+                                                (m/vmethods fi))
             :when (not= [name desc] [(:name sam) (:desc sam)])
-            :let [impl (m/impl-of fi k)
+            :when (not (bridge-keys [name desc]))
+            :let [impls (filter #(= :default (:kind %)) (keep #(m/impl-of % k) (cons fi markers)))
+                  impl (or (first (filter (fn [i] (every? #(env/subclass? (:owner i) (:owner %)) impls)) impls))
+                           (first impls))
                   [mps mr] (t/parse-method-desc desc)
                   mpn (vec (for [i (range (count mps))] (symbol (str "p" i))))
                   base (nm/method-base name desc)]]
@@ -318,7 +359,10 @@
                                      :Super (m/jrt-sym pkg "Object_class")
                                      :Interfaces (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class")))
                                                         (map #(m/class-sym pkg % "_class") (cons fi markers)))
-                                     :Go (str (nm/pkg-path pkg) "." a)))))])))
+                                     :Go (str (nm/pkg-path pkg) "." a)))))]
+      tfns
+      [(list 'go/var (tag (symbol (str a "_members")) (list '* (m/jrt-sym pkg "MemberTable"))) table)
+       (list 'go/func 'init [] (list 'set! (list '.-Table (list '.Info (symbol (str a "_class")))) (symbol (str a "_members"))))])))
 
 (def string-regex-methods
   "String's methods over java.util.regex, which j2g writes into jrt's j2g_support when Pattern is
@@ -520,6 +564,24 @@ when there is none.\n"
      (list 'go/func 'J2g_NotNull :type-params ['T] (with-meta [(tag 'x 'T)] {:tag 'T})
            (list 'when (list '== (list 'conv 'any 'x) nil) (list 'panic (list 'NPE)))
            'x)
+     ;; a generic value as a primitive (LambdaMetafactory's return conversion of a method
+     ;; reference to a method returning T): its own wrapper unboxed and widened, as reflection's
+     ;; Unbox (JCS118 (a), "As built: JC4c")
+     '(go/func J2g_UnboxWiden :type-params [T] ^T [^{:tag (* Class)} prim ^{:tag (* Class)} box ^any x]
+        (when (== x nil) (panic (NPE)))
+        (let [(values v ok) (Unbox prim x)]
+          (when (not ok) (panic (ClassCast x box)))
+          (assert T v)))
+     ;; javac's synthetic null checks (an outer instance's, a bound reference's receiver): the
+     ;; NPE thrown by Objects.requireNonNull, as on the JVM (JCS118 (a), "As built: JC4c")
+     (when (m/translated? "java/util/Objects")
+       (list 'go/func 'J2g_RequireNonNull :type-params ['T] (with-meta [(tag 'x 'T)] {:tag 'T})
+             (list 'when (list '== (list 'conv 'any 'x) nil) (list 'Objects_RequireNonNull_O__O nil))
+             'x))
+     (when (m/translated? "java/util/Objects")
+       (list 'go/func 'J2g_RequireNonNullP :type-params ['T] (with-meta [(tag 'p (list '* 'T))] {:tag (list '* 'T)})
+             (list 'when (list '== 'p nil) (list 'Objects_RequireNonNull_O__O nil))
+             'p))
      (apply list 'go/func 'J2g_Truth (with-meta [(tag 'x 'any)] {:tag 'bool})
             (remove nil?
                     [(list 'when (list '== 'x nil) (list 'return false))
@@ -755,15 +817,30 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
           rty (cond iface (symbol g) leaf (list '* (symbol g)) :else (symbol (str g "_I")))
           abstract (m/has? (:flags (a/decl n)) Opcodes/ACC_ABSTRACT)
           public? #(m/has? (:flags %) Opcodes/ACC_PUBLIC)
+          ;; a method's entry: public, or protected and static (a subclass's static call through
+          ;; the analysis, which keeps it to subclasses: JCS112 (a), "As built: JC4c")
+          ;; a --program's own classes (a user's, the conformance check's tests: nm/own-class?)
+          ;; list every member, with its modifiers, as the interpreter's do (JCS117 (a), "As built:
+          ;; JC4c"); the shipped program's classes are none of them
+          own (and *absent-members* (nm/own-class? n))
+          public? (if own (constantly true) public?)
+          listed? #(or (public? %) (and (m/has? (:flags %) Opcodes/ACC_PROTECTED) (m/static? %)))
           cls (fn [dd] (c/class-val dd))
           methods (for [mm (d/class-methods n)
-                        :when (and (public? mm) (not= "<init>" (:name mm)))
+                        :when (and (listed? mm) (not= "<init>" (:name mm)))
                         :let [[ps r] (t/parse-method-desc (:desc mm))
                               base (nm/method-base (:name mm) (:desc mm))
                               static (m/static? mm)
+                              private (m/private? mm)
                               args (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) ps)
+                              recv (list 'assert rty 'this)
                               call (cond static (apply list (symbol (str g "_" base)) args)
-                                         :else (apply list (symbol (str "." base)) (list 'assert rty 'this) args))
+                                         ;; private methods are not virtual (code/invoke-val): an
+                                         ;; interface's its function, a non-leaf class's its Impl_
+                                         (and private iface) (apply list (symbol (str g "_" base)) recv args)
+                                         (and private (not leaf))
+                                         (apply list (symbol (str ".Impl_" base)) (list (symbol (str ".Self_" g)) recv) recv args)
+                                         :else (apply list (symbol (str "." base)) recv args))
                               ]]
                     (do (run! cls ps) (cls r)
                         {:line (str "M" (bit-and (:flags mm) 0x1fff) " " (:name mm) " " (dotted-desc (:desc mm)))
@@ -785,7 +862,7 @@ element cast to CharSequence (the for loop's checkcast), then joined as the arra
           ;; Reflector's choice among applicable overloads follows, when that order is stable:
           ;; the class is on this JVM and in the JDK's CDS archive (archived-classes); else,
           ;; and after it, by descriptor
-          mms (concat (for [mm (d/class-methods n) :when (and (public? mm) (not= "<init>" (:name mm)))] mm)
+          mms (concat (for [mm (d/class-methods n) :when (and (listed? mm) (not= "<init>" (:name mm)))] mm)
                       (when *absent-members*
                         (let [present (set (map (juxt :name :desc) (d/class-methods n)))]
                           (for [mm (:methods (a/decl n))
