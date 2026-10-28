@@ -1427,3 +1427,209 @@ What CS37 (a) allows, and when (nothing was copied at C1, `c23-c1` `009be3d7` an
   `test/c/c23/README` and the journal, and a LICENSE.md entry naming them under the EPL-1.0; its judges
   re-made in Arbace as C1.4 describes.
 
+
+## As built: C2 (2026-10-28)
+
+C2, the lexer and the preprocessor, on the branch `c23-c2` from main `bf84a975`, in about one day of
+work (against C1.2's 3-5). `arbace.repr.c.lex` and `arbace.repr.c.pp` port cc's scanner and preprocessor
+(go-whim `80c49bf5`, `crefactor/cc`; go-whim's `cpp.go` is upstream v4.29.7's, its scanner carries the
+delta's digit separators and `u8'a'`) function by function, with C23's directives and operators cc lacks
+and the reference's behaviour where cc is wrong (CS40 (a)), and give the token stream cc's `Preprocess`
+gives. `bin/repr-c check --tokens` compares both levels, each file's own tokens (`lex`) and the
+preprocessed stream (`pp`), with cc's over every corpus of `test/c/corpora.edn` read in place: **every file
+of the 20 corpora (6,387 files, 18.2 MB of main files) gives cc's dump line for line, or is in the known
+file with its class and the reference's tokens**. The port runs evaluated on the tools' host (CS36 (a)):
+nothing shipped changed but the embedding list (below); no re-seed. Go only TamaGo's go1.27.1, no cgo.
+
+### C2.1 What was ported
+
+| Arbace | lines | ports (go-whim `crefactor/cc`) |
+|---|---:|---|
+| `arbace/repr/c/lex.ae` | 577 | `scanner.go` (1,026): the scanner's phases 1-3 (`rune`'s splices, `cppScan`'s states, `cppScan0`, the separators, comments, pp-numbers with the delta's separators, character constants and strings with `u8`), modernc.org/token's `File` (the line table, `#line`'s infos, `Position`), `runeName` and the tokCh names |
+| `arbace/repr/c/pp.ae` | 1,655 | `cpp.go` (3,093): `cppParser` (the groups), the token sequences (`cppTokens`, `dequeue`, `tokenizer`), `expand`/`subst`/`glue`/`stringize` with hide sets (Prosser's algorithm after Spinellis), `parseMacroArgs`, `varArgs`, `nextLine`'s machine, `#include`/`#include_next` with `included`, `__has_include`, `defined`, `_Pragma`, `push_macro`/`pop_macro`, `#if`'s arithmetic (int64/uint64 as cc's type switches make them), `intConst`, `charConstValue` and `decodeEscapeSequence` (`etc.go`), `tokens2CppTokens`, `toksTrim`, `Preprocess`'s text (`cc.go`) |
+| `arbace/repr/c/host.ae` | 104 | Arbace's: the recorded host, a file's dg-options (`-std`, `-ansi`, `-D`, `-U`, `-I`, `--embed-dir`, `-O`) |
+| `arbace/repr/c/ppcheck.ae` | 378 | Arbace's: the corpora, the lists, the check, the judge, the record, `bin/repr-c pp` |
+
+About 4,400 lines of Go (with the 300 of `etc.go` and `cc.go` the two use) into 2,232 of Arbace for the
+port proper, JN8's ratio. Both files carry cc's notice; go-whim's delta and Arbace's changes are marked
+(`go-whim`, `Arbace:`). LICENSE.md gains `arbace/repr/c/`'s entry and "cc (modernc.org/cc/v4) and go-whim's
+C23 delta: BSD 3-Clause License" (CS37 (a): cc's BSD-3, the delta and Arbace's changes EPL-1.0);
+doc/ARBACE.md the origin.
+
+The port's tokens are cc's: kind (cc's tokCh name, or the character), source text, separator (the white
+space and comments before it, splices taken out), position (cc's `token.Position`: the file and offset
+of the outermost invocation for a macro's tokens, `#line` applied, computed from each file's line table
+as cc's fset does) and the object-like macro that made it (cc's `Token.m`, which only object-like
+expansion sets). A file's texts are held as bytes (ISO-8859-1 strings, one char a byte), so nothing is
+lost to decoding. cc's behaviour is kept where the corpora cannot tell it from gcc's or show it right,
+its oddities included: one token after a failed `#include` before the stream closes; the separator lost
+after `#include MACRO`; `#include`'s level count, which never passes 1 in cc (the port counts truly, to
+200, so that a recursive include stops); arguments' new-lines dropped without a space; cc's panics
+(`D4(a)` of tcc's `11.c`, an unterminated invocation) as the port's, the stream kept to there. The
+groups of a file are parsed once a run (cached by name and content), so headers are lexed once.
+
+C23 and the reference where cc is wrong (each `Arbace:` in the files, each difference classed in the known
+file): `#elifdef`, `#elifndef`; `#warning` (a warning of the read); `#embed` (its header name lexed,
+`limit`, `prefix`, `suffix`, `if_empty`, `gnu::offset`, `gnu::base64`, unknown parameters not found,
+`--embed-dir`, negative operands refused) and `__has_embed` (in `#if` and outside it); `__VA_OPT__` (a
+pseudo-argument of `subst`, so that `#` and `##` treat it as a parameter; the variable arguments' presence
+after their expansion; placemarkers in its body where an empty argument stands, gcc's reading);
+`__has_c_attribute`, `__has_attribute`, `__has_builtin`, `__has_feature`, `__has_extension` from the
+recorded answers, `defined` of them true, the attribute and builtin ones outside `#if` too; `## #param`
+(the stringized argument pasted); a paste that makes no one token kept as two, with gcc's error; `u'x'`,
+`U'x'`, `u"x"`, `U"x"` as one token (the wide kinds); `true` in a C23 `#if`; binary constants, digit
+separators and `wb` suffixes in `#if` and in `#line`; `#pragma once`; `__BASE_FILE__`,
+`__INCLUDE_LEVEL__`, `__FILE_NAME__`.
+
+### C2.2 The oracle, the host, the command
+
+- **`tools/ccdump`** (C1.3, CS39 (a); 311 lines of Go): `main.go` (modes `lex`, the scanner's tokens of
+  each file, and `pp`, the preprocessed stream; one line a token: position, kind, source, separator, and
+  in `pp` the macro; errors and a panic after the tokens; the list of files as JSON lines; `-skip-done`
+  and `.current`, so that a hang is marked and the run resumed), `cc_whim.go` (go-whim's cc, configured
+  through `SetHost`: cc never runs gcc) and `cc_upstream.go` (the build tag `upstream`: modernc.org/cc/v4
+  v4.29.7, configured by a `Config` made as `NewConfig` makes it). cc gives its preprocessor's tokens only
+  to its parser, so `tools/ccdump/overlay/export.go`, Arbace's, is laid into cc's package by `go build
+  -overlay` (`ArbaceLex`, `ArbacePreprocess`: they call cc's own functions, nothing of cc copied, the
+  checkout untouched). `bin/repr-c ccdump-build [--upstream]` writes the `go.work` (tools/ccdump and
+  `$GOWHIM/crefactor`, default `../go-whim`) after checking the commit, `crefactor/cc`'s tree `7df4827c` and
+  no local change; the dependencies from Go's module cache, `GOPROXY=off GOFLAGS=-mod=readonly`; the
+  upstream build checks the module's ziphash and lays the exporter into a copy of it under `.tmp/` (the
+  module cache refuses `-overlay`). Upstream against go-whim (the delta's share of the oracle): the
+  same dumps but 2 of c23conf's 49 files, 5 of gcc-c23's 270, 1 of cpp/c23's 16 (pp), none of torture's.
+- **The host** (`bin/repr-c host record`, `check`; SPEC §9.1): `test/c/host/predefined/STD.h` for 13
+  standards (`gcc -std=STD -isystem GCC-INCLUDE -dM -E`, sorted, then `__DATE__` "Oct 28 2026",
+  `__TIME__` "00:00:00" and `__TIMESTAMP__` of the epoch 1793145600, 2026-10-28, as gcc gives the first
+  two with `SOURCE_DATE_EPOCH`, CS43 (a)); `search.txt` (gcc's include directory, then
+  `/usr/include/fortify` and `/usr/include`, CS32 (a)); `has.tsv` (263 answers: every `__has_*` name
+  the corpora and the headers spell, and those a check's run found missing); `headers.sha256` (the 198
+  headers the check read); `host.edn`. cc and the port get the same predefined text (the `<predefined>`
+  source) and search list; a file's `-D`/`-U`/`-O` are lines after it.
+- **`bin/repr-c`**: `host record|check`, `ccdump-build`, `gcc-tests` (gcc 15.2's tarball, fetched when
+  absent, checked against the pin, its testsuite extracted into `.tmp/repr-c/gcc-15.2.0/`), `lex FILE`,
+  `pp [--std S] [--text] [OPTION...] FILE`, and `check --tokens [--corpus C,...] [--level lex,pp]
+  [--record] [--judge-all]` (`bin/lib/repr-c/check`, `arbace.repr.c.ppcheck`). The judge where cc and
+  the port differ is the reference: `test/repr/c/pp-check-known.edn` lists each such file by level and
+  corpus with its class and, at `pp`, `:gcc`, the SHA-256 of gcc -E -P's tokens (lexed by the port's
+  lexer, one a line, `#pragma` lines dropped as cc's stream drops pragmas, `#embed`'s base64 lines as
+  their integers), which the port's tokens must give, or `:rejected` when gcc rejects the file (an
+  error test) and the port reports an error too. `--record` runs gcc on the differing files
+  (`SOURCE_DATE_EPOCH`, the file's modelled options, gcc's include directory first) and rewrites the
+  entries, the classes kept; a stale entry fails the check. gcc corpora's files are named by their
+  absolute paths, as DejaGnu gives them (`__FILE__`, `#embed __FILE__`). Make: `repr-c-host-record`,
+  `repr-c-host-check`, `repr-c-ccdump`, `repr-c-check`. No gate step (C8).
+
+### C2.3 The check's numbers
+
+`bin/repr-c check --tokens --judge-all`, every corpus read in place (Lua's tarball not: C5 extracts
+it), 8 threads:
+
+| corpus | files | lex: equal / known | pp: equal / known (gcc) | the reference on every file: agree / both reject / differ |
+|---|---:|---|---|---|
+| c23conf | 49 | 49 | 49 | 48 / 0 / 1 |
+| torture-execute | 1,672 | 1,672 | 1,672 | 1,672 |
+| torture-execute-mirror | 1,632 | 1,632 | 1,632 | 1,632 |
+| torture-compile | 1,791 | 1,791 | 1,791 | 1,789 / 2 |
+| tcc-tests2 | 88 | 88 | 88 | 87 / 0 / 1 |
+| tcc-pp | 22 | 22 | 22 | 20 / 0 / 2 |
+| compcert | 24 | 24 | 24 | 24 |
+| mir | 315 | 315 | 315 | 313 / 1 / 1 |
+| cxgo | 88 | 88 | 88 | 88 |
+| benchmarksgame | 52 | 52 | 52 | 46 / 6 |
+| sqlite | 2 | 2 | 1 / 1 | 2 |
+| zlib | 15 | 15 | 15 | 15 |
+| quickjs | 10 | 10 | 10 | 10 |
+| gcc-c23 | 270 | 269 / 1 | 264 / 6 | 261 / 9 |
+| gcc-cpp-c23 | 16 | 12 / 4 | 10 / 6 | 8 / 2 / 3, 3 gcc only rejects |
+| gcc-c23-sub | 30 | 30 | 30 | 30 |
+| gcc-gnu23 | 51 | 51 | 51 | 51 |
+| gcc-embed | 47 | 5 / 42 | 1 / 46 | 37 / 10 |
+| gcc-va-opt | 12 | 12 | 3 / 9 | 10 / 1, 1 gcc only rejects |
+| gcc-bitint | 201 | 201 | 201 | 201 |
+| **total** | **6,387** | **6,340 / 47** | **6,319 / 68** | **6,345 agree, 31 both reject** |
+
+No file fails; the known entries are 68 at `pp` and 47 at `lex`. `--judge-all` (informative, the status
+unchanged) runs gcc on every file: where the port follows cc the reference agrees but on 9 files, cc's
+gaps the port keeps (C2.6): UTF-8 identifiers (c23conf's `ident_utf8.c`, tcc's `83_utf8_in_identifiers.c`:
+gcc -E spells them as UCNs, so the digest differs though the identifiers are the same; and gcc's
+`c23-ucnid-1*.c`, UCNs in identifiers, which cc lexes as `\` and letters), trigraphs (mir's
+`lacc/comment.c` at `-std=c11`, `c23-trigraphs-2.c` with `-trigraphs`), tcc's `11.c` (cc's panic,
+the port's) and `13.S` (assembler, gcc's `assembler-with-cpp` lexing). gcc-only rejections (5) are error
+tests whose error the port's preprocessor does not diagnose (bad UCNs, `__VA_OPT__` misuse): C7's.
+
+### C2.4 The known differences, by class
+
+At `pp` (68): `:embed` 46 (gcc-embed), `:va-opt` 10 (gcc-va-opt's 9, gcc-cpp-c23's `c23-va-opt-1.c`),
+`:u-prefix` 5 (gcc-cpp-c23's 4 UCN and delimited-escape tests, gcc-c23's `c23-concat-1.c`),
+`:has-c-attribute` 2, `:has-gnu` 1 (sqlite3.c's `__has_attribute(fallthrough)`, which cc answers 0),
+`:digit-separators` 1 (`#line 1'2'3`), `:c23-colons` 1 (`: ## :`, one token to gcc in C23), `:error-test`
+2 (gcc rejects, the port reports an error: `c23-attr-syntax-6.c`, `c23-scope-1.c`). At `lex` (47):
+`:embed` 42 (`#embed`'s header name) and `:u-prefix` 5.
+Thirteen classes are defined, `:unclassified` empty. The classes are the known file's `:classes`.
+
+### C2.5 Speed
+
+Evaluated on the tools' host (stage 0, CS36 (a)), the port lexes about 40 KB a second on one thread; the
+check's port side, lexing and preprocessing each file and writing both dumps on 8 threads, took 868 s
+for the 6,387 files (18.2 MB of main files, the headers on top: the groups of a header parsed once a run):
+torture-execute's 1,672 files in 51 s, quickjs's 2.4 MB in 72 s, SQLite's amalgamation (10.3 MB) in 255 s.
+The whole `check --tokens --judge-all` takes 28.5 minutes of wall time (ccdump's runs and gcc's
+included: seconds). C1.2's estimate (a corpus read in one to two minutes evaluated) holds for the
+corpora without SQLite; compiled (C5) the port should run some ten times faster.
+
+### C2.6 What is left for C3 (and C3b)
+
+- **The parser** (`arbace.repr.c.parse`, `.tree`), ccdump's `tree` mode, `parse-check` (C1.2's C3).
+  The stream the parser reads is `preprocess`'s `:tokens` without the `\space` tokens.
+- **cc's lexical gaps the port keeps**, which the parser's check will meet again: trigraphs (phase 1,
+  which gcc applies at `-std=c89`..`c17` and with `-trigraphs`), UCNs in identifiers (`é`, and
+  gcc's spelling of UTF-8 identifiers), the error diagnostics of the preprocessor (bad UCNs, `#include`
+  of nothing, `__VA_OPT__` misuse: C7's error tests). CS50.
+- **The layer for `:full`** (C3b, SPEC §9, §10.2): the port records the directives with their position
+  and text (the main file's), each conditional group taken or not, `_Pragma`'s pragmas and `#embed`'s
+  resource (`preprocess`'s `:layer`), and every token keeps its separator; not yet the main file's
+  macro invocations' extents, the inactive groups' text spans, or the encoding, which SPEC §10.2 leaves to
+  C3b's round trip.
+- `#pragma` lines are not in the stream (cc's), but in the layer; C3b's `c/pragma` forms read them there.
+- The `-O`, `-D`, `-U`, `-I`, `--embed-dir` options are modelled; others that change predefined macros
+  (`-funsigned-char`, `-fopenmp`, `-ffast-math`) are not yet (no corpus file showed one).
+
+### C2.7 Proposals (CS50, CS51)
+
+- **CS50 cc's lexical gaps.** cc lacks trigraphs and UCNs in identifiers, and the port follows it (the
+  check's oracle agrees; gcc -E does not on 7 files).
+  - Options: (a) the port follows gcc in C3 (trigraphs in phase 1 at the standards gcc applies them,
+    UCNs in identifiers, gcc's spelling of UTF-8 identifiers in the judge's normalization), each file then
+    known at `lex`, `pp` and `parse` with its class; (b) keep cc's reading, the files classed as cc's
+    gaps in C3b's read level; (c) (a) for UCNs only (C23 keeps them; trigraphs left C23).
+  - *Recommended: (a)*: the reader's standard is the reference's (CS40 (a)), and both are small changes
+    to the lexer (phase 1 and `identifier`).
+- **CS51 The reference's tokens for every file.** The check judges by gcc only where cc differs;
+  `--judge-all` judges every file but needs gcc at check time.
+  - Options: (a) record gcc -E's digest of every file as data (`test/repr/c/pp-gcc.sha256`, about 6,400
+    lines, `--record` writing it), so that the check judges the port against the reference everywhere
+    without a compiler (CS14 (a)'s rule) and cc's agreement becomes a second judge; (b) keep the
+    reference for the differing files only, `--judge-all` by hand; (c) drop cc at `pp` and judge by gcc
+    alone.
+  - *Recommended: (a)*: it states parity with the reference itself, and the 9 files of C2.3 become
+    known entries instead of a note; cc stays the token-level oracle for kinds, separators and positions.
+
+### C2.8 Checks and scratch
+
+Run: `bin/repr-c check --tokens --judge-all` (every corpus, passing; C2.3), `--record` over the gcc
+corpora and SQLite, `bin/repr-c host record` and `host check`, `ccdump-build` and `--upstream` (the
+upstream comparison of C2.2), `make check-makefile`, the essential gate (below). Not run: anything of
+`--full` (nothing of it changed; repr/c has no step until C8).
+
+Shipped files: none of `arbace/lang`, `go/`, `jdk/`, `overlay/`. `arbace/j2g/embed.ae`'s exclusion list
+gains `arbace/repr/c.ae` and `arbace/repr/c/` (as repr/haskell's and repr/rust's), so that no executable
+embeds repr/c before C5 (CS36 (a)); `bin/lib/version.bash`'s `arbace_embedded_sources`, `bin/arbace-go`'s
+`gate_key` (and `bin/lib/repr-c/`) and `test/gate/steps.edn`'s `:tools` exclude it likewise. The change to
+`embed.ae` is a change to an embedded namespace: the next re-seed carries it; until then stage 0 loads
+it from the checkout (bin/lib/tools.bash).
+
+The worktree's `.tmp/c2/` (kept): `final.log` (the last full check with `--judge-all`), `run2.log`,
+`run3.log` (the earlier full runs), `up/` and `up-*.log` (upstream ccdump's dumps), `gdiff.ae` (the port's
+tokens against gcc's for one file), `t1/` (the first lexer comparison); `.tmp/repr-c-check/` (each
+corpus's lists, both dumps, `files.tsv`, `gcc-agree.tsv`, `report.edn`, gcc's outputs), `.tmp/repr-c/`
+(ccdump's builds, gcc 15.2's tarball and testsuite).
