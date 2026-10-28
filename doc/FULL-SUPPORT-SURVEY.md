@@ -2962,3 +2962,13 @@ and 248, Java's essential 428 of 428 interpreted and 428 of 428 compiled, the AO
 generated variants, j2g's edge, `bin/reap` 12 of 12 cells with 0 problems (Java AOT 1,912 / 180 / 1,230). Log:
 `.tmp/rps150/gate.log` of the worktree. The ad hoc runs used main's stale `arbace-javac` (`REPR_JAVA_STALE_OK=1`, read level
 only) and the gate's own executable and compiled namespaces (`.tmp/arbace-go-gate`) for the compiled level.
+
+**The full compiled level (before the re-seed).** `bin/java-check --levels compiled` (no `--record`, `--jobs 8`, the gate's
+executable and compiled namespaces, main's `arbace-javac` with `REPR_JAVA_STALE_OK=1`; `.tmp/rps150/full.log`,
+`full-results-compiled.tsv`): 3,322 tests, 1,913 pass (recorded 1,912), 968 refused, 395 fail, 23 timeout, 22 differ,
+1 unread; 3,315 as recorded. Five lines differ from `check-compiled.edn`, none about an enum constant: t04602 (recorded
+flaky) passes; t05565 (LockStep, recorded fail on ObjectOutputStream) passed in the full run and fails as recorded when run
+alone (the shard's world held the class); t05445 (HugeToString) timed out twice on the loaded host and passes alone
+(flaky by JCS71 (a)); t07649 (recorded timeout) is a differ with a long stdout, the same speed class; t08122 (Thread-4 against
+Thread-2 in the message) is the same failure. A rerun of t05445, t05565, t07649 and t04602 alone (`again.log`): 0 regressions.
+The parse.ae change produced no regression.
