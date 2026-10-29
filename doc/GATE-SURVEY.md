@@ -1185,3 +1185,15 @@ runner or the planner reruns every check once: merging this branch makes every p
   - Options: (a) one run of `GATE_FULL_PARALLEL=1 bin/gate --full` holding `big.lock` once from outside with `GATE_HEAVY_CMD="flock .tmp/own.lock"` (the private lock serializes the heavy steps, the big lock keeps the others off), recording the peaks, a quiet host; (b) the per-step lock on the shared host, as built, when the host is quiet; (c) GT7's clean run serves.
   - *Recommended: (a)*: it tests the exit criterion without five hours of queueing behind each step, and is what an agent can do while the rule stands.
 
+
+## Decided (2026-10-28): GTS30-GTS37
+
+The user decided GT4-GT6's proposals as recommended: GTS30 (a) (at GT7's clean run every step audited with its full
+command, the six GT4 left first, the reducer a program instead of busybox awk), GTS31 (b) (with GT5: `bin/j2g`, repr/go's
+reader and repr/java's corpus reads take `ARBACE_HEAVY_LOCK` around the heavy process only, unless `ARBACE_HEAVY_HELD`),
+GTS32 (a) (a FIFO ticket lock in front of `big.lock`), GTS33 (a) (the quiet CPU time recorded beside each reference, once a
+clean run has measured it), GTS34 (a) (`--prune` at the end of every `--full`), GTS35 (a) (goi's `gcref`, `eref` and `earef`,
+Java's forms cache and the print cache written to a temporary and renamed when complete), GTS36 (a) and (b) (every derived
+hash checked by `bin/provenance-check`, and the writers' updates rewriting them in the same commit), GTS37 (a) (one
+concurrent `--full` holding `big.lock` from outside with a private lock for the heavy steps). GTS30, GTS33 and GTS37 are runs
+at GT7's time; GT5 builds GTS31, GTS32, GTS34, GTS35, GTS36 (b) and the tooling GTS30 needs.
