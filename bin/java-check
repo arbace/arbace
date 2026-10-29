@@ -36,8 +36,9 @@
 #                                 split in two and run again, JCS48 (b); --shard K,...: those shards
 #                                 again, the others' results kept from the last run), each
 #                                 one program (bin/j2g --program with the tests' forms and the
-#                                 shipped build's compiled namespaces, JAVA_CHECK_AOT, default
-#                                 target/arbace-go/aot, refused when not of the checkout's runtime,
+#                                 shipped build's compiled namespaces: --build-program's base
+#                                 (bin/lib/program.bash's program_base, RPS161 (b)), or JAVA_CHECK_AOT
+#                                 (an override), refused when not of the checkout's runtime,
 #                                 JCS46 (a); bin/build-go), a test whose classes j2g
 #                                 refuses or whose Go does not compile taken out (refused, j2g's or
 #                                 Go's reason) and the shard translated again; each main action run
@@ -123,6 +124,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/renamed-env.bash"
 . "$root/bin/lib/tools.bash"
+. "$root/bin/lib/program.bash" # the compiled level's j2g and build-go calls, as --build-program's (RPS97 (b))
 . "$root/bin/lib/limit.bash" # limited: CPU-time limits with a wall cap (GT6)
 cd "$root"
 
@@ -535,14 +537,14 @@ compiled_one_on() { compiled_one "$2" "$1" | sed -e "s|$root|.|g"; }
 # the results (ID compiled RESULT REASON) into DIR/results.tsv
 compiled_shard() {
   local k=$1 s=$2 round st n overlay
-  overlay=$(bin/jrt overlay | tail -1) || return 1
+  overlay=$(program_overlay) || return 1
   : > "$s/refused.tsv"
   for round in 1 2 3 4 5 6 7 8; do
     jc merge "$work" "$s" > "$s/merge.log" || { cat "$s/merge.log"; return 1; }
     [ -s "$s/built.txt" ] || break
     echo "== java-check compiled: shard $k, round $round: j2g, $(wc -l < "$s/built.txt") tests ($(since_t0))" >&2
     rm -rf "$s/out" "$s/work" "$s/prog"
-    st=0; J2G_GO_EXE=$rexe REPR_GO_EXE=$rexe $heavy bin/j2g --program --input "$s/forms" --input "$aot" ${gotable:+--gotable "$gotable"} --out "$s/out" > "$s/j2g$round.log" 2>&1 || st=$?
+    st=0; program_heavy=$heavy program_j2g "$rexe" "$s/j2g$round.log" "$s/out" --input "$s/forms" --input "$aot" ${gotable:+--gotable "$gotable"} || st=$?
     if [ ! -f "$s/out/report.edn" ]; then
       # j2g died (no report: the host's memory, JCS48): status 3, the caller splits the shard
       tail -20 "$s/j2g$round.log" >&2; echo "java-check compiled: shard $k: j2g failed ($s/j2g$round.log)" >&2; return 3
@@ -552,8 +554,7 @@ compiled_shard() {
     [ "${n:-0}" = 0 ] || continue
     [ "$st" = 0 ] || { echo "java-check compiled: shard $k: j2g's errors not attributed to a test ($s/j2g$round.log)" >&2; return 1; }
     echo "== java-check compiled: shard $k, round $round: bin/build-go ($(since_t0))" >&2
-    st=0; REPR_GO_EXE=$rexe $heavy bin/build-go --line-file --arch amd64 --work "$s/work" -o "$s/prog" \
-            --print-cache "$root/.tmp/repr-go-print-cache" --overlay "$overlay" --root "$root/x509roots" "$s/out/prog" > "$s/build$round.log" 2>&1 || st=$?
+    st=0; program_heavy=$heavy program_build_go "$rexe" amd64 "$s/work" "$s/prog" "$s/build$round.log" "$s/out/prog" || st=$?
     [ "$st" = 0 ] && break
     # every Go error of the package lang: the tests whose Go does not compile
     (cd "$s/work/mod" && env GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off GOEXPERIMENT= \
@@ -601,6 +602,22 @@ run_shard() {
   awk -F'\t' '{print $1 "\tcompiled\terror\tthe shard failed (" FILENAME ")"}' "$d/tests.txt" | sed -e "s|$root|.|g" > "$d/results.tsv"
 }
 
+# java_check_base: sets aot, the compiled namespaces the compiled level's j2g runs take: JAVA_CHECK_AOT
+# when set (an explicit override), else the base of bin/arbace-go --build-program (bin/lib/program.bash's
+# program_base, RPS161 (b)): ARBACE_PROGRAM_BASE, target/arbace-go, the gate's cache, stage 0's, the
+# first of the checkout's key and runtime, else stage 0's compiled again, else a --build
+java_check_base() {
+  if [ -n "${JAVA_CHECK_AOT:-}" ]; then aot=$JAVA_CHECK_AOT; return 0; fi
+  local base_exe base_aot
+  dir=$root/target/arbace-go programs=$dir/programs
+  mkdir -p "$programs" "$TMPDIR"
+  discard=$TMPDIR/arbace-go.discard
+  since() { echo "$(( $(date +%s) - $1 )) s"; }
+  build() { (cd "$root" && ARBACE_GO_ARCHES=${arches:-amd64} bin/arbace-go --build) >&2; }
+  program_base >&2 || return 1
+  aot=$base_aot
+}
+
 # aot_fresh: the compiled namespaces' tree was made from the checkout's runtime (JCS46 (a)):
 # arbace_runtime_key (bin/lib/version.bash) against the tree's, read from AOT.runtime beside AOT.key
 # (bin/arbace-go writes it, JCS76 (a)), else, for a tree made before it, from the runtime of the
@@ -635,7 +652,8 @@ aot_fresh() {
 # in shards of SHARD_SIZE tests (--shard-size), one after another (a j2g run takes up to 20 GiB);
 # their results appended to WORK/results.tsv; unread tests 'unread'
 compiled_level() {
-  aot=${JAVA_CHECK_AOT:-$root/target/arbace-go/aot} gotable=${JAVA_CHECK_GOTABLE:-} heavy=${JAVA_CHECK_HEAVY:-}
+  gotable=${JAVA_CHECK_GOTABLE:-} heavy=${JAVA_CHECK_HEAVY:-}
+  java_check_base || return 1
   goroot=${ARBACE_GOROOT:-/root/tamago-go}
   [ -f "$aot/packages.edn" ] || { echo "java-check compiled: no compiled namespaces $aot (bin/arbace-go --build, or JAVA_CHECK_AOT)" >&2; return 1; }
   [ -z "$gotable" ] || [ -d "$gotable" ] || { echo "java-check compiled: no goi table $gotable (JAVA_CHECK_GOTABLE)" >&2; return 1; }
@@ -994,7 +1012,7 @@ forms_cmd() {
 # fails the check (no shard rounds, no refusals taken out). Its own scratch (WORK/essential-compiled),
 # so that it runs beside --essential.
 essential_compiled() {
-  local jobs=8 t0=$SECONDS id n st overlay key akey
+  local jobs=8 t0=$SECONDS id n st key akey
   while [ $# -gt 0 ]; do
     case $1 in
       --jobs) jobs=$2; shift 2 ;;
@@ -1004,16 +1022,14 @@ essential_compiled() {
   timeout=20 from_committed=1 levels=compiled load=none
   rexe=$(run_exe) || return 1
   work=$work/essential-compiled
-  local s=$work/prog aot=${JAVA_CHECK_AOT:-} goroot=${ARBACE_GOROOT:-/root/tamago-go}
-  if [ -z "$aot" ]; then
-    for aot in "${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate}/amd64/aot" "$root/target/arbace-go/aot"; do [ -f "$aot/packages.edn" ] && break; done
-  fi
-  [ -f "$aot/packages.edn" ] || { echo "java-check --essential-compiled: no compiled namespaces $aot (bin/arbace-go --gate-build, or JAVA_CHECK_AOT)" >&2; return 1; }
+  local s=$work/prog aot goroot=${ARBACE_GOROOT:-/root/tamago-go}
+  java_check_base || return 1
+  [ -f "$aot/packages.edn" ] || { echo "java-check --essential-compiled: no compiled namespaces $aot (bin/arbace-go --build, or JAVA_CHECK_AOT)" >&2; return 1; }
   # the compiled namespaces' key (bin/arbace-go's aot_key: the runtime and the embedded sources,
   # bin/lib/version.bash's arbace_aot_key) the checkout's (JCS46 (a))
   . "$root/bin/lib/version.bash"
   akey=$(arbace_aot_key "$root")
-  [ "$([ ! -f "$aot.key" ] || cat "$aot.key")" = "$akey" ] \
+  program_aot_current "$aot" \
     || { echo "java-check --essential-compiled: $aot was compiled from other sources ($aot.key; bin/arbace-go --gate-build or --build)" >&2; return 1; }
   mkdir -p "$work" "$s"; : > "$work/empty"
   # the subset: the essential tests the compiled level's reference passes
@@ -1026,7 +1042,7 @@ essential_compiled() {
   key=$( { sha256sum < "$rexe"; echo "$akey"; cat "$goroot/VERSION"; cat "$work/run.list"
            (cd "$root" && find arbace go overlay jdk x509roots -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
             sed "s|^|test/java/forms/|" "$work/run.list" | xargs -d '\n' -I{} find {} -type f | LC_ALL=C sort | xargs -d '\n' sha256sum
-            sha256sum bin/j2g bin/build-go bin/jrt bin/java-check test/java/check.ae); } | sha256sum | cut -c1-64)
+            sha256sum bin/j2g bin/build-go bin/jrt bin/java-check bin/lib/program.bash test/java/check.ae); } | sha256sum | cut -c1-64)
   if [ -x "$s/arbace-ec" ] && [ "$([ ! -f "$s/key" ] || cat "$s/key")" = "$key" ]; then
     echo "java-check --essential-compiled: the cached program (key ${key:0:12})" >&2
   else
@@ -1037,7 +1053,7 @@ essential_compiled() {
     : > "$s/shard/refused.tsv"
     jc merge "$work" "$s/shard" > "$s/merge.log" || { cat "$s/merge.log"; return 1; }
     echo "== java-check --essential-compiled: j2g, $(wc -l < "$s/shard/built.txt") tests ($(since_t0))" >&2
-    st=0; J2G_GO_EXE=$rexe REPR_GO_EXE=$rexe bin/j2g --program --input "$s/shard/forms" --input "$aot" --out "$s/shard/out" > "$s/j2g.log" 2>&1 || st=$?
+    st=0; program_heavy= program_j2g "$rexe" "$s/j2g.log" "$s/shard/out" --input "$s/shard/forms" --input "$aot" || st=$?
     [ -f "$s/shard/out/report.edn" ] || { tail -20 "$s/j2g.log" >&2; echo "java-check --essential-compiled: j2g failed ($s/j2g.log)" >&2; return 1; }
     jc refusals "$work" "$s/shard" > "$s/refusals.log"
     if [ -s "$s/shard/refused.tsv" ] || [ "$st" != 0 ]; then
@@ -1045,9 +1061,7 @@ essential_compiled() {
       echo "java-check --essential-compiled: j2g refused tests that pass compiled ($s/j2g.log)" >&2; return 1
     fi
     echo "== java-check --essential-compiled: bin/build-go ($(since_t0))" >&2
-    overlay=$(bin/jrt overlay | tail -1) || return 1
-    REPR_GO_EXE=$rexe bin/build-go --line-file --arch amd64 --work "$s/work" -o "$s/arbace-ec" \
-      --print-cache "$root/.tmp/repr-go-print-cache" --overlay "$overlay" --root "$root/x509roots" "$s/shard/out/prog" > "$s/build.log" 2>&1 \
+    program_heavy= program_build_go "$rexe" amd64 "$s/work" "$s/arbace-ec" "$s/build.log" "$s/shard/out/prog" \
       || { grep -v '^==' "$s/build.log" | tail -20 >&2; echo "java-check --essential-compiled: the build failed ($s/build.log)" >&2; return 1; }
     rm -rf "$s/shard/out" "$s/work" "$s/shard/forms"
     echo "$key" > "$s/key"

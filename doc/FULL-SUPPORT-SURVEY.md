@@ -3335,3 +3335,103 @@ without javac), JN9f, and RPS134 (b).
 | JFS133 (a)'s 6 | the six tests the native read answers otherwise than javac (`nread-differ`) | `nread-differ` 6 to 0 (beside the matrix); Java read unchanged |
 | the re-seed | `bin/seed --make` and `--verify` carrying every runtime change since `b4ac198d` (JC4b's and JC4c's j2g and analysis changes, Clojure's deferred cases, RPS80 (b), RPS150, JCS123 (b)) | the compiled numbers recorded on branch executables (JC4b, JC4c) become the seed's: Java AOT and, with `bin/clojure-tests --aot`, Clojure AOT re-recorded and read again |
 | GT7 | the clean `bin/gate --full --clean` at the tag (the clone, empty caches, the audit, the record in `test/gate/clean-arbace-reaps-3-crops-v2.edn`) | none; a failure or a flake there reopens the class it names |
+## As built: RPS97 (b) (2026-10-28)
+
+RPS97 (b), decided by the user: `bin/clojure-tests --aot` and `bin/java-check`'s compiled level call
+`--build-program`'s functions as one library, `bin/lib/program.bash`, extracted from `bin/arbace-go`.
+
+### What was built
+
+- `bin/lib/program.bash`: the base (`program_base`, with `aot_key`, `aot_key_write`, `seed_aot`,
+  `host_compiles`, `host_compile`, `host_arch`, moved unchanged from `bin/arbace-go`), the linker's flags
+  (`link_flags`), and new: `program_aot_current AOTDIR` (the base's test: `packages.edn` and `AOTDIR.key` the
+  checkout's `arbace_aot_key`; `program_base` and `--essential-compiled` both use it), `program_overlay`,
+  `program_j2g EXE LOG OUT ARG...` (`bin/j2g --program ARG... --out OUT` on EXE, `$program_heavy` a prefix for a
+  heavy slot) and `program_build_go EXE ARCH WORK OUT LOG PROG [ARG...]` (`bin/build-go` with the flags every
+  program build shares: `--line-file`, repr/go's print cache, the overlay, `--root x509roots`; ARG... beside them).
+  The base's functions use the caller's `$root`, `$dir`, `$programs`, `$discard`, `since` and `build`, as
+  `bin/arbace-go` defines them (stated at the library's head); j2g's and build-go's need `$root` alone.
+- `bin/arbace-go` sources it; `build_program`'s j2g and build-go runs are the two functions (its `--root "$src"` and
+  `--go-flag` the ARG...). `bin/clojure-tests --aot`'s `aot_build` (j2g on the fixtures and the suite compiled,
+  build-go for amd64) and `bin/java-check`'s `compiled_shard` and `essential_compiled` (their rounds, refusals,
+  go-errors pass and runs stay theirs; `$heavy` as `program_heavy`) call them. The cache keys of the three
+  harnesses and `program_key` now hash `bin/lib/program.bash`.
+- `test/gate/steps.edn`: the `:build` group lists `bin/lib/program.bash` (the other steps read it through `:lib`),
+  in a commit of its own.
+- One difference, deliberate: `program_j2g` sets `REPR_GO_EXE` beside `J2G_GO_EXE` for every caller (the two
+  harnesses already did; `--build-program` set `J2G_GO_EXE` alone). `bin/j2g` reads `J2G_GO_EXE` only and
+  `REPR_GO_EXE` names the same executable build-go gets, so no output changes (the results below).
+
+### Results
+
+Behaviour unchanged, on the worktree of this change:
+
+- `bin/clojure-tests --aot --essential`: 15 namespaces, 7,273 assertions, 7,270 passing, no regressions against
+  the subset's reference. `bin/java-check --essential-compiled`: 423 of 423 pass.
+- `bin/clojure-tests --aot` (the full suite): 78 namespaces, 20,580 assertions, 20,576 passing, no regressions
+  against `test/arbace-go-aot-results.edn`.
+- `bin/java-check --levels compiled` (no `--record`, JAVA_CHECK_AOT the gate's compiled namespaces): 3,321
+  tests, 1,880 pass, 977 refused, 413 fail, 26 differ, 22 timeout, 2 flaky, 1 unread; against
+  `test/java/check-compiled.edn` 3,312 as recorded, 0 regressions. The changed lines are timing, not the build:
+  t03900 passed (recorded flaky), t05445 and t05565 flaky (recorded pass), t07649 `differ` (recorded `timeout`,
+  an out-of-memory test under the host's load). The read level used the previous day's javac tool
+  (`REPR_JAVA_STALE_OK=1`; the checkout's own was not built here).
+- `bin/arbace-go --build-program --check`: 11 of 11 (every sample and the failing one). `make check-makefile`
+  passes. The essential gate passed (17 steps run, 10m35s).
+
+### Proposals (RPS160-RPS169)
+
+- **RPS160 The sample builds' shared steps.**
+  - Options: (a) as built: the three harnesses share the base and the two calls, and each keeps its
+    own compile step (the suite's `compile` mode of the runner, `--build-program`'s generated `compile.ae`);
+    (b) the compile step too as `program_compile` (the namespaces to compile, the `ARBACE_PATH` and the units
+    filter as arguments); (c) the harnesses lay their corpora out as DIRs (RPS97 (c)).
+  - *Recommended: (a)*: the two compile steps differ in what they load (the suite's embedded runtime after a
+    prepare, against a program's `src/` first), and a shared function would take most of its body as arguments;
+    (b) when a fourth harness needs it.
+- **RPS161 The base for the harnesses.**
+  - Options: (a) as built: `bin/clojure-tests --aot` uses the gate's executables and `bin/java-check` the
+    gate's or `target/arbace-go/aot`, each by its own lookup; (b) both call `program_base` (the
+    candidate order of `--build-program`, stage 0's compiled namespaces as a last base).
+  - *Recommended: (b)*, in a change of its own: it would let a fresh clone run the compiled levels
+    without a `--build`, but the suite also needs the gate's test build, and the lookups' errors are the
+    gate's messages today.
+
+## As built: RPS161 (b) (2026-10-28)
+
+RPS160 (a) decided (the two compile steps stay separate); RPS161 (b) done inside v2.
+
+- `bin/java-check`'s compiled level (`compiled_level`) and `--essential-compiled` set their compiled namespaces
+  with `java_check_base`: `JAVA_CHECK_AOT` when set (an explicit override, kept), else `program_base`
+  (`ARBACE_PROGRAM_BASE`, `target/arbace-go`, the gate's cache, stage 0's `target/seed`, the first whose `aot.key`
+  and executable's runtime are the checkout's; else stage 0's compiled again; else a `--build`). The two private
+  lookups (`target/arbace-go/aot`; the gate's, then `target/arbace-go/aot`) are gone, and so is the need
+  for the `JAVA_CHECK_AOT` workaround on a worktree with a gate build only. `java-check` defines the few globals
+  the base uses (`dir`, `programs`, `discard`, `since`, and `build` as `bin/arbace-go --build`).
+- `bin/clojure-tests --aot` does not use a base's compiled namespaces as an input (it compiles the runtime's
+  namespaces and the suite afresh on the gate's test build), so what it takes from the base is the test:
+  after `--gate-build`, `program_aot_current "$exes/aot"` must hold (the build's compiled namespaces are the
+  checkout's) or the run stops; `CLOJURE_TESTS_AOT_EXES` (an explicit executables directory) skips it.
+  Its executables stay the gate's, since only the gate's directory holds the test build `arbace-tests`.
+
+### Results
+
+On the branch before and after merging main (GT6, the provenance fix): `bin/clojure-tests --aot --essential` no
+regressions (7,273 assertions, 7,270 passing); `bin/java-check --essential-compiled` 423 of 423 (the base printed:
+`target/arbace-go/aot`, key the checkout's); full `bin/clojure-tests --aot` 78 namespaces, 20,580 assertions,
+20,576 passing, no regressions against `test/arbace-go-aot-results.edn`; full compiled level (no `--record`, the
+base from `program_base`, no `JAVA_CHECK_AOT`): 3,313 as recorded, 1 now passing, 1 regression, t05445
+(`HugeToString`, a timeout at 20 s and again at 40 s under the host's load; flaky in the previous run), which
+passed alone (`--only HugeToString`: 1 of 1 as recorded); `--build-program --check` 11 of 11; the essential gate
+(`.tmp/heavy bin/gate`, GT6) passed, 17 steps run, 1 skipped, 27m38s. The same compiled namespaces were used as
+with `JAVA_CHECK_AOT`, so no result moved because of the base's choice. (An earlier gate run of this task was
+killed: `flock big.lock .tmp/heavy` took the lock before a slot and deadlocked with other gates; the order is
+slot first.)
+
+### Proposals (RPS162)
+
+- **RPS162 The suite's executables from the base.**
+  - Options: (a) as built: the gate's executables (a test build is only there); (b) `program_base`'s executable
+    as j2g's host, the test build beside it when present, else `--build-tests`.
+  - *Recommended: (a)*: (b) would let a fresh clone run the suite's AOT level from stage 0 alone, but the
+    suite needs the test build anyway, and a different host binary gains nothing.
