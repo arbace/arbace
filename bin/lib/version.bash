@@ -62,12 +62,12 @@ arbace_version() {
 
 # arbace_embedded_sources ROOT: Arbace's sources a shipped build reads, one path a line, sorted
 # (doc/GATE-SURVEY.md, GTS5 (a), "As built: GT1-GT3"): arbace/ less the namespaces no executable
-# embeds and nothing of the build reads, repr/java, repr/haskell and repr/rust (arbace/j2g/embed.ae's
+# embeds and nothing of the build reads, repr/java, repr/haskell, repr/rust and repr/c (arbace/j2g/embed.ae's
 # excluded; javac's tool embeds repr/java itself: bin/arbace-go's reader_key names it)
 arbace_embedded_sources() {
   (cd "$1" && find arbace -type f ! -path arbace/repr/java.ae ! -path 'arbace/repr/java/*' \
        ! -path arbace/repr/haskell.ae ! -path 'arbace/repr/haskell/*' ! -path arbace/repr/rust.ae \
-       ! -path 'arbace/repr/rust/*' | LC_ALL=C sort)
+       ! -path 'arbace/repr/rust/*' ! -path arbace/repr/c.ae ! -path 'arbace/repr/c/*' | LC_ALL=C sort)
 }
 
 # arbace_aot_key ROOT: the key of a build's compiled namespaces (bin/arbace-go's aot_key, the

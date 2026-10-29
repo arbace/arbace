@@ -1,0 +1,186 @@
+#!/bin/bash
+# repr/c, C's bridge (doc/C23-SURVEY.md, doc/c/SPEC.md): so far (C2, "As built: C2") the port of cc's
+# lexer and preprocessor (arbace.repr.c.lex, arbace.repr.c.pp, arbace.repr.c.host; evaluated from the
+# checkout on the tools' host, CS36 (a)) and its oracle, cc itself run by Arbace's helper tools/ccdump
+# (C1.3, CS39 (a)), checked token for token over the corpora of test/c/corpora.edn read in place.
+#
+#   bin/repr-c host record     record the reference's answers under test/c/host/ (gcc 15.2: its
+#                              predefined macros per standard, gcc's include directory first, CS32 (a),
+#                              the date macros at the fixed epoch, CS43 (a); its search list; its
+#                              __has_* answers for every name the corpora and headers ask, and those a
+#                              check's run found missing; the headers' digests the checks read)
+#   bin/repr-c host check      the host's gcc still gives the recorded predefined macros and search
+#                              list, and the recorded headers their digests
+#   bin/repr-c ccdump-build [--upstream]
+#                              build tools/ccdump into .tmp/repr-c/ccdump/ (--upstream: against
+#                              modernc.org/cc/v4 v4.29.7, .tmp/repr-c/ccdump-upstream/): a generated
+#                              go.work using tools/ccdump and $GOWHIM/crefactor (default ../go-whim,
+#                              checked at test/c/corpora.edn's commit and tree, no local change), cc's
+#                              package given tools/ccdump/overlay/export.go by -overlay, the
+#                              dependencies from Go's module cache (GOPROXY=off), TamaGo's go, no cgo
+#   bin/repr-c gcc-tests       gcc 15.2's tarball (.tmp/repr-c/gcc-15.2.0.tar.xz, fetched when absent,
+#                              REPR_C_GCC_TARBALL another copy) checked against the pin and its
+#                              testsuite extracted into .tmp/repr-c/gcc-15.2.0/
+#   bin/repr-c lex FILE...     the port's lexer's tokens of each FILE, ccdump's mode lex
+#   bin/repr-c pp [--std S] [--text] [OPTION...] FILE...
+#                              the port's preprocessed stream of each FILE (ccdump's mode pp; --text:
+#                              as cc's Preprocess writes it), the reference's options -std, -D, -U, -I,
+#                              --embed-dir, -O applied
+#   bin/repr-c check --tokens [--corpus C,...] [--level lex,pp] [--record]
+#                              the token check (bin/lib/repr-c/check, its header): every file of the
+#                              corpora lexed and preprocessed by the port and by cc, the dumps equal
+#                              line for line, or the file in test/repr/c/pp-check-known.edn with its
+#                              class and the reference's stream (gcc -E's tokens) the port's
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+
+GCC_INCLUDE=${REPR_C_GCC_INCLUDE:-$(gcc -print-file-name=include 2>"$TMPDIR/repr-c-gcc.err" || true)}
+EPOCH=1793145600 # 2026-10-28 00:00:00 UTC (CS43 (a))
+host_dir=$root/test/c/host
+gowhim=${GOWHIM:-$(cd "$root/.." && pwd)/go-whim}
+case $root in */.tmp/worktrees/*) [ -n "${GOWHIM:-}" ] || gowhim=$(cd "${root%%/.tmp/worktrees/*}/.." && pwd)/go-whim ;; esac
+
+gcc_std() { if [ "$1" = c94 ]; then echo iso9899:199409; else echo "$1"; fi; }
+
+pin() { # pin KEY...: a value of test/c/corpora.edn
+  arbace_tool -e "(println (get-in (read-string (slurp \"$root/test/c/corpora.edn\")) $1))"
+}
+
+ccdump_build() {
+  local up= out work goroot=${ARBACE_GOROOT:-/root/tamago-go}
+  [ "${1:-}" = --upstream ] && up=1
+  out=$root/.tmp/repr-c/ccdump${up:+-upstream}
+  mkdir -p "$out"
+  if [ -n "$up" ]; then
+    local u
+    u=$(GOFLAGS= "$goroot/bin/go" env GOMODCACHE)/modernc.org/cc/v4@v4.29.7
+    [ -d "$u" ] || { echo "ccdump-build: no $u (modernc.org/cc/v4 v4.29.7 in Go's module cache)" >&2; return 1; }
+    have=$(cat "$(GOFLAGS= "$goroot/bin/go" env GOMODCACHE)/cache/download/modernc.org/cc/v4/@v/v4.29.7.ziphash")
+    [ "$have" = "h1:q+NXGJ0bK3b4TXFYQQVr9pYETGnmwFWkrUzJnMya/Tg=" ] \
+      || { echo "ccdump-build: modernc.org/cc/v4 v4.29.7's ziphash is $have, not the pin" >&2; return 1; }
+    # the module cache is read-only to -overlay: a copy of it to lay the exporter into
+    rm -rf "$out/cc"; cp -r "$u" "$out/cc"; chmod -R u+w "$out/cc"
+    work="use $out/cc"
+    overlay=$out/cc
+  else
+    local commit tree
+    commit=$(pin '[:pins :go-whim-80c49bf5 :commit]')
+    tree=$(pin '[:pins :go-whim-80c49bf5 :trees "crefactor/cc"]')
+    [ -d "$gowhim/crefactor/cc" ] || { echo "ccdump-build: no go-whim checkout at $gowhim (GOWHIM)" >&2; return 1; }
+    [ "$(git -C "$gowhim" rev-parse HEAD)" = "$commit" ] \
+      || { echo "ccdump-build: $gowhim is not at $commit" >&2; return 1; }
+    [ "$(git -C "$gowhim" rev-parse HEAD:crefactor/cc)" = "$tree" ] \
+      || { echo "ccdump-build: crefactor/cc's tree is not $tree" >&2; return 1; }
+    [ -z "$(git -C "$gowhim" status --porcelain crefactor)" ] \
+      || { echo "ccdump-build: $gowhim/crefactor has local changes" >&2; return 1; }
+    work="use $gowhim/crefactor"
+    overlay=$gowhim/crefactor/cc
+  fi
+  printf 'go 1.27.1\n\nuse %s\n%s\n' "$root/tools/ccdump" "$work" > "$out/go.work"
+  printf '{"Replace": {"%s/zz_arbace_export.go": "%s"}}\n' "$overlay" "$root/tools/ccdump/overlay/export.go" > "$out/overlay.json"
+  (cd "$root/tools/ccdump" && GOWORK=$out/go.work GOPROXY=off GOFLAGS=-mod=readonly CGO_ENABLED=0 GOTOOLCHAIN=local \
+     "$goroot/bin/go" build ${up:+-tags upstream} -trimpath -overlay "$out/overlay.json" -o "$out/ccdump" .)
+  echo "$out/ccdump"
+}
+
+gcc_tests() {
+  local tb=${REPR_C_GCC_TARBALL:-$root/.tmp/repr-c/gcc-15.2.0.tar.xz} dir=$root/.tmp/repr-c/gcc-15.2.0 want url
+  want=$(pin '[:pins :gcc-15.2.0 :sha256]')
+  if [ -f "$dir/.sha256" ] && [ "$(cat "$dir/.sha256")" = "$want" ]; then echo "$dir"; return; fi
+  mkdir -p "$root/.tmp/repr-c"
+  if [ ! -f "$tb" ]; then
+    url=$(pin '[:pins :gcc-15.2.0 :url]')
+    echo "== fetching $url" >&2
+    curl -fsSL -o "$tb.part" "$url" && mv "$tb.part" "$tb"
+  fi
+  [ "$(sha256sum "$tb" | cut -d' ' -f1)" = "$want" ] || { echo "gcc-tests: $tb is not the pinned tarball" >&2; return 1; }
+  rm -rf "$dir"; mkdir -p "$dir.x"
+  tar -xJf "$tb" -C "$dir.x" gcc-15.2.0/gcc/testsuite
+  mv "$dir.x/gcc-15.2.0" "$dir"; rmdir "$dir.x"
+  echo "$want" > "$dir/.sha256"
+  echo "$dir"
+}
+
+host_record() {
+  local gi=$GCC_INCLUDE s empty=$TMPDIR/repr-c-empty.c names=$TMPDIR/repr-c-has-names.txt
+  [ -d "$gi" ] || { echo "host record: no gcc include directory ($gi)" >&2; return 1; }
+  mkdir -p "$host_dir/predefined"
+  : > "$empty"
+  for s in $(arbace_tool -e '(require (quote arbace.repr.c.host)) (apply println arbace.repr.c.host/stds)'); do
+    LC_ALL=C gcc -std=$(gcc_std $s) -isystem "$gi" -dM -E "$empty" | LC_ALL=C sort > "$host_dir/predefined/$s.h"
+    # the date macros of the fixed epoch, as gcc gives them with SOURCE_DATE_EPOCH; __TIMESTAMP__ (gcc:
+    # the file's time) from the same epoch, in gcc's spelling
+    printf '__DATE__ __TIME__\n' > "$TMPDIR/repr-c-date.c"
+    read -r d1 d2 d3 t <<< "$(SOURCE_DATE_EPOCH=$EPOCH gcc -E -P "$TMPDIR/repr-c-date.c" | tr -d '"')"
+    { echo "#define __DATE__ \"$d1 $d2 $d3\""
+      echo "#define __TIME__ \"$t\""
+      echo "#define __TIMESTAMP__ \"$(TZ=UTC date -d @$EPOCH '+%a %b %e %H:%M:%S %Y')\""
+    } | sed 's/"\([A-Z][a-z]*\) \([0-9]\) /"\1  \2 /' >> "$host_dir/predefined/$s.h"
+  done
+  echo | LC_ALL=C gcc -std=c23 -isystem "$gi" -v -E - 2>&1 >"$TMPDIR/repr-c-v.out" \
+    | sed -n '/#include <...> search starts here:/,/End of search list/p' | sed '1d;$d; s/^ //' > "$host_dir/search.txt"
+  # the names the __has_ operators are asked: those the corpora and the headers spell, and those a
+  # check's run found missing
+  local roots=() r
+  roots+=("$(GOFLAGS= /root/tamago-go/bin/go env GOMODCACHE)/modernc.org/ccorpus2@v1.6.0/assets")
+  [ -d "$root/.tmp/repr-c/gcc-15.2.0" ] && roots+=("$root/.tmp/repr-c/gcc-15.2.0/gcc/testsuite")
+  [ -d "$gowhim/crefactor/c23conf/testdata" ] && roots+=("$gowhim/crefactor/c23conf/testdata")
+  while read -r r; do roots+=("$r"); done < "$host_dir/search.txt"
+  { grep -rhoE '__has_(c_attribute|attribute|builtin|feature|extension|cpp_attribute)[[:space:]]*\([[:space:]]*[A-Za-z_][A-Za-z_0-9]*([[:space:]]*::[[:space:]]*[A-Za-z_][A-Za-z_0-9]*)?' \
+      --include='*.[ch]' "${roots[@]}" 2>"$TMPDIR/repr-c-grep.err" || true
+    cat "$root"/.tmp/repr-c-check/*/missing.tsv 2>"$TMPDIR/repr-c-grep.err" | awk -F'\t' '{print $1 "(" $2}' || true
+  } | sed -E 's/[[:space:]]+//g' | LC_ALL=C sort -u > "$names"
+  awk -F'(' '{print $2 " " $1 "(" $2 ")"}' "$names" > "$TMPDIR/repr-c-has.c"
+  LC_ALL=C gcc -std=gnu23 -isystem "$gi" -E -P "$TMPDIR/repr-c-has.c" 2>"$TMPDIR/repr-c-has.err" > "$TMPDIR/repr-c-has.out" || true
+  paste -d' ' <(awk -F'(' '{print $1}' "$names") "$TMPDIR/repr-c-has.out" \
+    | awk '{ if (NF == 3 && $3 ~ /^[0-9]+$/) print $1 "\t" $2 "\t" $3 }' | LC_ALL=C sort -u > "$host_dir/has.tsv"
+  cat > "$host_dir/host.edn" <<EOF
+;; The reference's answers repr/c's preprocessor reads with (doc/c/SPEC.md §9.1; doc/C23-SURVEY.md,
+;; "As built: C2"), recorded by bin/repr-c host record: predefined/STD.h (gcc -std=STD -isystem
+;; GCC-INCLUDE -dM -E, sorted, then the date macros of :epoch), search.txt (the search list with gcc's
+;; include directory first, CS32 (a)), has.tsv (operator, name, gcc -std=gnu23's answer),
+;; headers.sha256 (the headers the token check read, bin/repr-c host check). Read with the Clojure reader.
+{:cc "$(gcc --version | head -1)"
+ :gcc-include "$gi"
+ :epoch $EPOCH
+ :source-date "$(TZ=UTC date -d @$EPOCH '+%Y-%m-%d %H:%M:%S UTC')"
+ :has-std "gnu23"}
+EOF
+  # the headers' digests: those the last check read
+  if ls "$root"/.tmp/repr-c-check/*/headers.txt >"$TMPDIR/repr-c-ls.out" 2>&1; then
+    cat "$root"/.tmp/repr-c-check/*/headers.txt | LC_ALL=C sort -u | xargs -r sha256sum > "$host_dir/headers.sha256"
+  fi
+  echo "host record: $(ls "$host_dir/predefined" | wc -l) standards, $(wc -l < "$host_dir/search.txt") search paths, $(wc -l < "$host_dir/has.tsv") __has answers, $( [ -f "$host_dir/headers.sha256" ] && wc -l < "$host_dir/headers.sha256" || echo 0) headers"
+}
+
+host_check() {
+  local gi=$GCC_INCLUDE s bad=0 empty=$TMPDIR/repr-c-empty.c
+  : > "$empty"
+  for f in "$host_dir"/predefined/*.h; do
+    s=$(basename "$f" .h)
+    LC_ALL=C gcc -std=$(gcc_std $s) -isystem "$gi" -dM -E "$empty" | LC_ALL=C sort > "$TMPDIR/repr-c-pre.h"
+    grep -v '^#define __\(DATE\|TIME\|TIMESTAMP\)__ ' "$f" | cmp -s - "$TMPDIR/repr-c-pre.h" \
+      || { echo "host check: $s's predefined macros differ"; bad=1; }
+  done
+  [ ! -f "$host_dir/headers.sha256" ] || sha256sum --quiet -c "$host_dir/headers.sha256" || bad=1
+  [ $bad = 0 ] && echo "host check: the recorded answers stand"
+  return $bad
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  host) case ${1:-} in
+          record) host_record ;;
+          check) host_check ;;
+          *) echo "host: record or check" >&2; exit 2 ;;
+        esac ;;
+  ccdump-build) ccdump_build "$@" ;;
+  gcc-tests) gcc_tests ;;
+  lex) arbace_tool -m arbace.repr.c.lex "$@" ;;
+  pp) arbace_tool -m arbace.repr.c.ppcheck pp "$host_dir" "$@" ;;
+  check) exec "$root/bin/lib/repr-c/check" "$@" ;;
+  *) sed -n '2,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac

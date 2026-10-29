@@ -42,7 +42,13 @@ code. Three kinds of things live here:
   2026-10-27, the files carrying their notice; "As built: JN9e" (the read without javac itself,
   `repr/java.ae`'s `convert-units-nojavac`, `resolve.ae`'s native class infos and `split.ae`'s summary,
   is Arbace's own);
-  `repr/java/classfile.ae`, `nattr.ae` are Arbace's own), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
+  `repr/java/classfile.ae`, `nattr.ae` are Arbace's own), `repr/c/` (repr/c, C's bridge,
+  `arbace.repr.c.*`; doc/C23-SURVEY.md, doc/c/SPEC.md: its lexer and preprocessor, `repr/c/lex.ae` and
+  `pp.ae`, are ports of modernc.org/cc/v4 v4.29.7 as go-whim carries it, https://github.com/arbace/go-whim
+  at `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, `crefactor/cc/scanner.go` and `cpp.go` with the parts of
+  `etc.go` and `cc.go` they use, ported by hand on 2026-10-28, the files carrying cc's notice, go-whim's
+  delta and Arbace's changes marked; "As built: C2"; `repr/c/host.ae` and `ppcheck.ae` are Arbace's own;
+  the oracle is the helper `tools/ccdump/`, which imports cc), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
   `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
   `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,
   `arbace.build.go`; doc/go/BUILD.md; until 2026-10-17 j2a, g2a and `arbace.g2a.build`) and
