@@ -315,3 +315,23 @@ git history:
 - The essential gate on merged main passed: 25m57s, 18 run, at most 23.8 GiB.
 - Decided (the user): CS50 (a), the port follows gcc in C3 (trigraphs, UCNs in identifiers); CS51 (a), gcc -E's digest
   of every file recorded as data. Scratch: `.tmp/c2/`, `.tmp/repr-c-check/`.
+
+## 2026-10-29: RPS97 (b) and RPS161 (b) merged; RPS160-RPS162 decided (the user)
+
+- RPS97 (b) and RPS161 (b) (branch `v2-rps97`, on Sonnet; doc/FULL-SUPPORT-SURVEY.md, "As built: RPS97 (b)", "As built:
+  RPS161 (b)").
+  - `bin/lib/program.bash` is now the shared library for building programs.
+  - `program_base` looks for a base in this order: `ARBACE_PROGRAM_BASE`, `target/arbace-go`, the gate's cache, stage 0's
+    `target/seed`, and finally a `--build`. `bin/java-check`'s compiled level and `--essential-compiled` take their base
+    from it; `JAVA_CHECK_AOT` still overrides.
+  - `bin/clojure-tests --aot` keeps the gate's executables and stops unless their compiled namespaces are current.
+- Checks:
+  - `--essential-compiled`: 423 of 423.
+  - The suite's AOT level: 20,576 of 20,580 assertions, no regressions.
+  - The full compiled level: as recorded, 1 newly passing. t05445 `HugeToString` timed out under host load and
+    passed alone. It is in the record's flaky-timeout class.
+  - `--build-program --check`: 11 of 11.
+- No shipped file changed.
+- The branch's gate after merging 9c89817d passed (27m38s). Main's gate on the merge passed from the store
+  (6 s, 4 run).
+- Decided (the user): RPS160 (a), RPS161 (b) inside v2, RPS162 (a) as built. Scratch: `.tmp/rps97/`.

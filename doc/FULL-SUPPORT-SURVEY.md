@@ -3435,3 +3435,13 @@ slot first.)
     as j2g's host, the test build beside it when present, else `--build-tests`.
   - *Recommended: (a)*: (b) would let a fresh clone run the suite's AOT level from stage 0 alone, but the
     suite needs the test build anyway, and a different host binary gains nothing.
+
+## Decided (2026-10-29): RPS160-RPS162
+
+The user's decisions:
+
+- **RPS160 (a):** the sample builds' two compile steps stay separate.
+- **RPS161 (b):** done inside v2. Java's compiled level and `--essential-compiled` take their base from
+  `bin/lib/program.bash`'s `program_base`.
+- **RPS162 (a):** as built. `bin/clojure-tests --aot` takes its executables from the gate's, where the test build is,
+  and checks their compiled namespaces with `program_aot_current`.
