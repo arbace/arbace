@@ -164,6 +164,17 @@
 #                                 the timeout's seconds, the status expected, and how to compare
 #                                 (one: the console up to the goroutines' traces; dir: as is);
 #                                 DIR/known.tsv, the known programs and their reasons
+#   bin/goi check --corpus nethttp [--record] [--jobs N] [--only REGEX] [--gc-only] [--update-want]
+#                                 the net/http corpus (NH1, doc/go/NET-HTTP-SURVEY.md, "As built: NH1"):
+#                                 test/nethttp's programs (a module, a package main each, listed in
+#                                 manifest.edn, loopback only), at the gc level built and run by gc
+#                                 (stdout against NAME/want.out, status 0, stderr empty;
+#                                 test/nethttp/check-gc-linux-amd64.edn), at goi's level their forms
+#                                 (bin/repr-go read ./..., cached by key) run by arbace.go.run against gc's
+#                                 run (test/nethttp/check-linux-amd64.edn, --record writes it); the
+#                                 non-passes in the classes of test/nethttp/divergences.edn
+#                                 (bin/goi divergences --nethttp); --gc-only: the gc level alone,
+#                                 --update-want: rewrites the want.out files from gc's runs
 #   bin/goi divergences [--aot] [--table | --programs]
 #                                 v1's divergences (GR10, GOI-SPEC.md "v1's divergences"): every
 #                                 program not passing in test/goi/check-linux-amd64.edn,
@@ -1188,6 +1199,147 @@ check() {
   fi
 }
 
+# nethttp_gc_env: Go's environment for gc's builds of test/nethttp (a module: the programs import only std)
+nethttp_gc_env() {
+  echo GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS=-mod=mod GOPROXY=off GOEXPERIMENT= CGO_ENABLED=0 \
+    GOOS=linux GOARCH=amd64 GOAMD64=v1 GOCACHE="${GOI_GOCACHE:-$(env GOROOT="$goroot" "$goroot/bin/go" env GOCACHE)}"
+}
+
+# nethttp_one NAME: one program of the net/http corpus (NH1, doc/go/NET-HTTP-SURVEY.md, "As built: NH1"),
+# interpreted by arbace.go.run (program mode) from its forms against gc's run of the original (the
+# gc level's output, $nwork/gc/NAME.*): exit status, standard output byte for byte, standard error up
+# to the goroutines' traces, as check_one compares. Prints NAME<TAB>RESULT<TAB>REASON.
+nethttp_one() {
+  local p=$1 r=$nwork/run/$1 st=0 reason cause
+  mkdir -p "$nwork/run"
+  (cd "$nwork" && limited_cpu "${NETHTTP_CPU:-120}" "${NETHTTP_WALL:-90}" "$rexe" -m arbace.go.run "$nforms" "go.nethttp.$p" > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
+  case $st in
+    125) printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.err.raw" | head -1)"; return ;;
+    126) printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.err.raw" | head -1 | cut -c1-300)"; return ;;
+    124|137|152) printf '%s\terror\ttimeout (%s s wall, %s s CPU)\n' "$p" "${NETHTTP_WALL:-90}" "${NETHTTP_CPU:-120}"; return ;;
+  esac
+  stderr_head "$r.err.raw" > "$r.err"
+  if [ "$st" = "$(cat "$nwork/gc/$p.exit")" ] && cmp -s "$r.out" "$nwork/gc/$p.out" && cmp -s "$r.err" "$nwork/gc/$p.err"; then
+    printf '%s\tpass\t\n' "$p"
+  else
+    reason="status $st (gc $(cat "$nwork/gc/$p.exit"))"
+    cmp -s "$r.out" "$nwork/gc/$p.out" || reason="$reason, stdout differs"
+    # the cause: the first panic, goi or fatal line of standard error, without the log's time and the ports
+    cause=$(grep -a -m1 -E 'goi:|panic:|fatal error|interface conversion' "$r.err" | sed -E 's/^[0-9]{4}\/[0-9]+\/[0-9]+ [0-9:]+ //; s/127\.0\.0\.1:[0-9]+/ADDR/g; s/\[::1\]:[0-9]+/ADDR/g' | cut -c1-240)
+    [ -z "$cause" ] || reason="$reason: $cause"
+    cmp -s "$r.err" "$nwork/gc/$p.err" || [ -n "$cause" ] || reason="$reason, stderr differs"
+    printf '%s\tfail\t%s\n' "$p" "$reason"
+  fi
+}
+
+# check_nethttp [--record] [--jobs N] [--only REGEX] [--gc-only] [--update-want]: the net/http corpus
+# (bin/goi check --corpus nethttp; NH1, doc/go/NET-HTTP-SURVEY.md, "As built: NH1"): test/nethttp's
+# programs (a module, one package main per directory, listed in manifest.edn), each
+#   - at the gc level: built by gc and run on loopback; passing when its status is 0, its standard
+#     error empty and its standard output the recorded one, NAME/want.out (--update-want rewrites them
+#     from gc's runs); results against test/nethttp/check-gc-linux-amd64.edn;
+#   - at goi's level: its forms (bin/repr-go read, linux/amd64, cached by key) run by arbace.go.run in a
+#     process of the executable (GOI_RUN_EXE), against gc's run; results against
+#     test/nethttp/check-linux-amd64.edn (a program passing there and not now fails the check; --record
+#     writes it), the non-passes in the classes of test/nethttp/divergences.edn (bin/goi divergences
+#     --nethttp, run after a whole check that passes).
+# Offline: loopback only. The work in .tmp/goi-check/nethttp.
+check_nethttp() {
+  local record="" jobs=${NETHTTP_JOBS:-4} only="" gconly="" updwant="" nd=$root/test/nethttp t0=$SECONDS p
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --record) record=1; shift ;;
+      --jobs) jobs=$2; shift 2 ;;
+      --only) only=$2; shift 2 ;;
+      --gc-only) gconly=1; shift ;;
+      --update-want) updwant=1; shift ;;
+      *) echo "bin/goi check --corpus nethttp: unknown option $1" >&2; return 2 ;;
+    esac
+  done
+  nwork=$root/.tmp/goi-check/nethttp empty=$root/.tmp/goi-check/empty
+  mkdir -p "$nwork/gc" "$(dirname "$empty")"
+  : > "$empty"
+  # the corpus: every directory with a main.go, the same set as the manifest's
+  local names
+  names=$(cd "$nd" && for d in */main.go; do echo "${d%/main.go}"; done | LC_ALL=C sort)
+  sed -n 's/^ *{:name "\([^"]*\)".*/\1/p' "$nd/manifest.edn" | LC_ALL=C sort > "$nwork/manifest.names"
+  echo "$names" > "$nwork/dir.names"
+  if ! cmp -s "$nwork/manifest.names" "$nwork/dir.names"; then
+    echo "bin/goi check --corpus nethttp: test/nethttp/manifest.edn and the program directories differ:" >&2
+    diff "$nwork/manifest.names" "$nwork/dir.names" | head >&2
+    return 1
+  fi
+  local list=$nwork/programs.txt
+  if [ -n "$only" ]; then echo "$names" | grep -E "$only" > "$list" || true; else echo "$names" > "$list"; fi
+  # the gc level: the whole module built once, each program run alone
+  echo "== goi check --corpus nethttp: gc builds $(echo "$names" | wc -l) programs" >&2
+  rm -rf "$nwork/gcbin"; mkdir -p "$nwork/gcbin"
+  (cd "$nd" && env $(nethttp_gc_env) "$goroot/bin/go" build -o "$nwork/gcbin/" ./...) > "$nwork/gc-build.log" 2>&1 \
+    || { tail "$nwork/gc-build.log" >&2; return 1; }
+  export -f limited limited_cpu stderr_head nethttp_one
+  : > "$nwork/gc.tsv"
+  while read -r p; do
+    local gst=0
+    (cd "$nd/$p" && limited 30 "$nwork/gcbin/$p" > "$nwork/gc/$p.out" 2> "$nwork/gc/$p.err.raw" < "$empty") || gst=$?
+    echo $gst > "$nwork/gc/$p.exit"
+    stderr_head "$nwork/gc/$p.err.raw" > "$nwork/gc/$p.err"
+    [ -z "$updwant" ] || cp "$nwork/gc/$p.out" "$nd/$p/want.out"
+    if [ "$gst" != 0 ]; then printf '%s\tfail\tgc status %s\n' "$p" "$gst"
+    elif [ -s "$nwork/gc/$p.err.raw" ]; then printf '%s\tfail\tgc wrote to standard error\n' "$p"
+    elif [ ! -f "$nd/$p/want.out" ]; then printf '%s\tfail\tno recorded output (want.out; --update-want)\n' "$p"
+    elif ! cmp -s "$nwork/gc/$p.out" "$nd/$p/want.out"; then printf '%s\tfail\tgc'"'"'s output differs from want.out\n' "$p"
+    else printf '%s\tpass\t\n' "$p"; fi
+  done < "$list" > "$nwork/gc.tsv"
+  nethttp_report gc "$nwork/gc.tsv" "$nd/check-gc-linux-amd64.edn" "$record" "gc's run of test/nethttp's programs on loopback" || return 1
+  [ -z "$gconly" ] || return 0
+  # goi's level: the forms, cached by the programs' and the converter's key
+  rexe=$(run_exe) || return 1
+  . "$root/bin/lib/host.bash"
+  hexe=$(arbace_host_exe) || return 1
+  local key
+  key=$( { cat "$goroot/VERSION"; (cd "$nd" && find . \( -name '*.go' -o -name go.mod \) | LC_ALL=C sort | xargs cat);
+           (cd "$root" && find arbace/repr/go.ae arbace/repr/go arbace/go/check.ae arbace/go/check arbace/box/plan.ae tools/godump go/arbace/repr -type f | LC_ALL=C sort | xargs sha256sum); } | sha256sum | cut -c1-24)
+  nforms=$nwork/forms
+  if [ ! -f "$nforms.key" ] || [ "$(cat "$nforms.key")" != "$key" ] || [ ! -d "$nforms/go" ]; then
+    echo "== bin/repr-go read --goos linux --goarch amd64 ./... in test/nethttp (.tmp/goi-check/nethttp/read.log)" >&2
+    rm -rf "$nforms" "$nforms.key"
+    (cd "$nd" && REPR_GO_EXE=$hexe "$root/bin/repr-go" read --goos linux --goarch amd64 --out "$nforms" ./...) > "$nwork/read.log" 2>&1 \
+      || { tail "$nwork/read.log" >&2; return 1; }
+    echo "$key" > "$nforms.key"
+  fi
+  echo "== goi check --corpus nethttp: $(wc -l < "$list") programs, $jobs at a time" >&2
+  export root rexe nwork nforms empty
+  xargs -a "$list" -P "$jobs" -I{} bash -c 'nethttp_one "$1"' _ {} | LC_ALL=C sort > "$nwork/results.tsv"
+  nethttp_report goi "$nwork/results.tsv" "$nd/check-linux-amd64.edn" "$record" "goi's check of test/nethttp (interpreted, net/http unlisted)" || return 1
+  if [ -z "$only" ] && [ -z "$record" ]; then
+    GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences --nethttp
+  fi
+  echo "goi check --corpus nethttp: $((SECONDS - t0)) s" >&2
+}
+
+# nethttp_report LEVEL TSV REF RECORD WHAT: the counts of a level's results, and either writes the
+# reference REF (RECORD) or fails on a regression (a program passing in REF and not now)
+nethttp_report() {
+  local level=$1 tsv=$2 ref=$3 record=$4 what=$5 total regress
+  total=$(wc -l < "$tsv")
+  echo "goi check --corpus nethttp ($level): $total programs: $(for r in pass fail error unsupported; do printf '%s %s, ' "$(awk -F'\t' -v r=$r '$2==r' "$tsv" | wc -l)" $r; done | sed 's/, $//')"
+  awk -F'\t' '$2=="fail" || $2=="error"' "$tsv" | head -8 | sed 's/^/   /' | cut -c1-240
+  if [ -n "$record" ]; then
+    { echo ";; $what (doc/go/NET-HTTP-SURVEY.md, \"As built: NH1\"): each program of test/nethttp and its result, pass,"
+      echo ";; fail, error, unsupported (with the reason). bin/goi check --corpus nethttp --record"
+      echo "["
+      awk -F'\t' '{ gsub(/\\/, "&&", $3); gsub(/"/, "\\\"", $3); printf " [\"%s\" :%s \"%s\"]\n", $1, $2, $3 }' "$tsv"
+      echo "]"; } > "$ref"
+    echo "   recorded ${ref#$root/}"
+    return 0
+  fi
+  [ -f "$ref" ] || { echo "   no reference ${ref#$root/} (bin/goi check --corpus nethttp --record)" >&2; return 1; }
+  sed -n 's/^ *\["\([^"]*\)" :pass.*/\1/p' "$ref" > "$nwork/ref-pass.$level"
+  regress=$(awk -F'\t' 'NR==FNR { p[$1] = 1; next } ($1 in p) && $2 != "pass" { print "   regression: " $1 ": " $2 " " $3 }' "$nwork/ref-pass.$level" "$tsv")
+  if [ -n "$regress" ]; then echo "$regress"; return 1; fi
+  echo "   no regression against $(basename "$ref")"
+}
+
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
 cmd=${1:-}
@@ -1239,7 +1391,7 @@ case $cmd in
   run)
     [ $# -ge 2 ] || { echo "usage: bin/goi run ROOT NS [ARG...]" >&2; exit 2; }
     exec "$(run_exe)" -m arbace.go.run "$@" ;;
-  check) check "$@" ;;
+  check) if [ "${1:-}" = --corpus ] && [ "${2:-}" = nethttp ]; then shift 2; check_nethttp "$@"; else check "$@"; fi ;;
   divergences) GOI_ROOT=$root arbace_tool -p "$root/test" -m goi.divergences "$@" ;;
   ""|-h|--help|help) usage ;;
   *) echo "bin/goi: unknown command $cmd (bin/goi --help)" >&2; exit 2 ;;
