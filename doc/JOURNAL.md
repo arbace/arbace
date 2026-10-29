@@ -350,3 +350,70 @@ git history:
 - The essential gate on d173baf6 passed: 26m49s, 18 run, at most 24.7 GiB.
 - GT5 changes a shipped file (arbace/lang/RT.ae, the loaded-namespaces log), so v2 re-seeds once more after GT5's merge.
   Scratch: `.tmp/reseed/`.
+
+## 2026-10-29: GT5 merged; GTS40-GTS42 decided (the user); C23's C3 started
+
+- GT5 (branch `gate-gt5`, on Opus; doc/GATE-SURVEY.md, "As built: GT5"):
+  - **Parts:** `:parts` gives one check per corpus.
+  - **Outputs and early cutoff:** `:outputs` keeps a step's output with its pass; `:uses` puts its producers' output
+    digests in the consumer's key.
+  - **Program hosts:** `:prog` and `:javac-prog` key a build by its units (j2g's Go forms by namespace,
+    `bin/lib/prog-units.bash`), less a step's `:never-loads`.
+  - **Java's check split per level:** `--save` runs the levels without judging and `--judge` only judges, so the
+    judgment is a step of its own.
+  - **The audit:** it logs the namespaces each step loads (`ARBACE_LOADED_LOG` in `RT.load`), and its reducer is
+    `tools/gateaudit`.
+  - **GTS31 (b):** the tools' own lock, `bin/lib/heavy.bash`.
+  - **GTS32 (a):** the FIFO ticket lock, `bin/heavy-lock`.
+  - **GTS34 (a):** `--prune` after every `--full`.
+  - **GTS35 (a):** atomic caches.
+  - **GTS36 (b):** `bin/j2g-edge update` rewrites `:jdk-edge`.
+- GT5's demonstrations:
+  - A classes file changed: only the judge and reap ran, 7 s.
+  - A comment in arbace/j2g/out.ae: only the `arbace.j2g.out` unit moved, and the gate took 14m57s against 56m56s with
+    every check run.
+- The merge was clean. Its only shipped change is arbace/lang/RT.ae.
+- Decided (the user): GTS40 (c), `go-build` and `fixpoint` are `:heavy true` again (50900e48); the per-process lock had
+  queued a build's four heavy processes, about three hours. GTS41 (c) at GT7, (a) until then. GTS42 (a), at GT7.
+- The essential gate on 50900e48 passed: 18m54s, 19 run, at most 45.0 GiB. Scratch: `.tmp/gt5/`.
+- C23's C3 started beside v2: repr/c's parser, with CS50 (a) and CS51 (a). Branch `c23-c3`, on Opus, the user's choice.
+  It changes no shipped file, stays light while `.tmp/gt7.quiet` exists, and merges after the tag.
+
+## 2026-10-29: REAP v2's second re-seed; GT7's tooling started
+
+- GT5 changed a shipped file, arbace/lang/RT.ae (the loaded-namespaces log), so v2 re-seeded a second time.
+  - `bin/arbace-go --fixpoint` on c560b8ec: G1 = G2 = G3 = 9b117777… (177,778,848 bytes); the host, the first re-seed's
+    stage 0 (a6a95bcb…), differs from G1.
+  - The new seed (00ec2bf5) is 19,006,840 bytes, SHA-256
+    `73b0d6372d651aa703931214600be44a8df5a285c3e140d85604528c4914cb40`.
+  - `bin/seed --verify` passed in 1,412 s: the tar printed again at c560b8ec byte for byte (4aad6d0f…), the same archive,
+    and stage 0 = G1 = G2 = G3.
+  - The essential gate passed: 15m12s, 19 run, at most 36.5 GiB. Both re-seeds took the lock through `bin/heavy-lock`.
+    Scratch: `.tmp/reseed2/`.
+- GT7's tooling started: `bin/gate --clean` did not exist yet. Branch `gate-gt7`, on Opus, builds:
+  - the clone with empty caches, every step audited, all parts (§7, GTS18 (a), GTS30 (a), GTS19 (a));
+  - Java's levels with the forms cache forced (GTS41 (c));
+  - the record `test/gate/clean-TAG.edn`;
+  - GTS37 (a)'s concurrent `--full`;
+  - GTS42 (a)'s demonstrations.
+  It proves the tooling on a clean essential gate. The `--full --clean` run itself is main's, on a quiet host
+  (`.tmp/gt7.quiet`).
+
+## 2026-10-29: JCS120 (b)'s and JN10's plans merged, JCS124-JCS125 and JFS135-JFS138 decided; the v2 record's draft refreshed; t04863 classed
+
+- Three light agents beside GT7's tooling (Sonnet, docs only, the user's choice):
+  - **JCS120 (b)'s plan** (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "JCS120 (b): the plan"): JCS110 (c)'s shared
+    dispatch first, then the classes listed by the corpora's demand. About 14 `:interp-protected` candidates. 6-8 days.
+  - **JN10's plan** (doc/classes/JAVA-FRONTEND-SURVEY.md, "JN10: the plan (JFS130-JFS132)"): the read closure apart
+    from javac, the platform as an interface with a committed java.base pack, the shipped read and the REPL's
+    `load-java`. 8 days, about 5.5 elapsed. The shipped program grows about 27 MB, so a re-seed is needed, batched
+    with C23's.
+  - **The v2 record's draft refreshed** (doc/FULL-SUPPORT-SURVEY.md): tables regenerated, the labels interp-clone,
+    thread-order, flaky-timeout and the "moved between classes" notes checked test by test against v1's check files,
+    and placeholders left for GT7. The refresh script moved to `.tmp/v2-record/`; the old one is kept in
+    `.tmp/v2-record.old/`. Scratch: `.tmp/v2-record2/`.
+- The record's finding: `:reflection`'s match took t04863 before the by-design `:j2g-reflection`. The user chose (b),
+  the class moved first. The gate passed (1m33s; only the judge, reap and the canary ran: GT5's early cutoff).
+  Java eval is now 1,807/330/1,185 and AOT 1,915/181/1,226.
+- Decided (the user), all as recommended: JCS124 (b), JCS125 (a) with (d); JFS135 (a), JFS136 (a), JFS137 (b) for the
+  gate and (a) at the tag, JFS138 (b) then (a).

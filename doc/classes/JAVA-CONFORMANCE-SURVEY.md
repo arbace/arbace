@@ -3340,3 +3340,300 @@ BoxedForeach, GenericRecordDeconstructionPattern and TypedDeconstructionPatternE
 (interp 1,790 to 1,793, compiled 1,881 to 1,884); `:boxed-foreach` and `:record-pattern-findings` are removed from
 `test/java/divergences.edn`, and TypedDeconstructionPatternExc's print level is in `:print-erasure` (its selector's
 cast printed raw).
+
+## JCS120 (b): the plan (2026-10-29)
+
+A plan only, written from the records at main `6ad08d82` (docs and reading; nothing run). The user decided JCS120 (b)
+("Decided (2026-10-28): JCS120-JCS123"): JCS110 (c)'s shared generic dispatch first, so that a class of the world
+costs a table rather than a Go type of its own, then the classes programs extend listed by the corpus' demand; after
+the tag `arbace-reaps-3-crops-v2`. JC4b ("As built: JC4b", the 51 classes, 17.6 MB) and JC4c ("As built: JC4c") made
+the classes extendable; what they leave is `:interp-extends` and `:interp-protected` in `test/java/divergences.edn`.
+
+**The cases it moves** (`test/java/check-interp.edn`, `check-compiled.edn`, `levels-known.edn` at main):
+
+- `:interp-extends` (`#"cannot extend \S+ yet"`): one test, **t05469** `jdk/java/util/Collection/BiggernYours.java`
+  (`ConcurrentHashMap`; interpreted `:load-failed`, compiled `:pass`). `ConcurrentHashMap` is translated (no jrt
+  file of its own), not final, not a leaf, and in no list.
+- `:interp-protected` (the analysis refuses before the interpreter's own check, so a test whose superclass is not
+  listed shows here, not as "cannot extend"; after listing, it moves on to the next cause). Interpreted, 25
+  `:load-failed` tests match the class' patterns or its title's classes:
+  - candidates for the protected constructors and members of classes not listed (about 14): the six
+    `java.security.Provider` tests (t05302, t05305, t05306 `(String, double, String)`, t05307, t05314, t05319), t05544
+    (`Hashtable/EqualsCast`, also a `Provider`), t05060 (`URLConnection`), t05378 (`BreakIterator`), t05577
+    (`LocaleServiceProvider`), t05627 (`ResourceBundle$Control`), t05722 (`AbstractQueuedLongSynchronizer$ConditionObject`),
+    t07915 (`javax.crypto.Mac`), t04998 (`ServerSocket(SocketImpl)`). Each is an upper bound: a test that passes the
+    analysis meets the next limit (t05060 compiled stops at `java.net.Proxy` not in the world, t05306 may need a
+    constructor jrt does not list, t04998 `SocketImpl`'s members). Expect 8 to 12 of them to pass.
+  - not moved, by design or other proposals: `ClassLoader`'s (t03295, t04538, t04539, t04540, t07643, t07735, t07736,
+    t07737: a class loader defines classes, which the closed world has none of), `Object.finalize` (t06387,
+    ProtectedAccess_3), and `Thread`'s constructors with a `ThreadGroup` (t05712, t07702: no matching constructor
+    in jrt's `Thread`, a jrt gap, not protection) and `StackTraceElement`'s (t04611).
+- Compiled: the same tests that pass compiled stay; the class lists of the translated program (the shipped one) grow.
+  No compiled test moves for the classes alone. t05302 and t05469 pass compiled already: they are the interpreted
+  level's catching up (`levels-known.edn`: 109 only compiled, 7 only interpreted).
+- Gains: interp 1,804 to about 1,813 (+9 to +13). The estimate is the corpus; the second target is a user's program
+  extending any non-final class of the world, which has no test.
+
+**The mechanism.** Today (`arbace/j2g/model.ae` `class-supers`, `arbace/j2g/dyn.ae` `sub-forms`/`method-form`,
+`arbace/j2g/dyncf.ae` `sub-forms`/`subs-forms`/`protected-chain`):
+
+- A class C in `class-supers` gets a Go type `DynSub_C` (embedding C's struct and `dynCore`, J2G-SPEC §5.12, SZ4),
+  a slot table `dynSlots_C`, an own-methods table `dynOwn_C`, a constructors function `dynCtors_C`, and, for the
+  interpreter, `dynCfNew_C`, `dynCfCtors_C`, `dynCfSupers_C` (a boxed closure per virtual method) and
+  `dynCfFields_C`. `dynSubFor` and `cfSubFor` are `switch`es over the class values; `canExtend` is `cfSubFor`
+  non-nil. Interfaces' methods already share `dynCore` (SZ4); what is repeated per class is the class's **own
+  virtual methods**: `method-form` writes for each a Go method (load the slot's fn, call its `invoke` with boxed
+  arguments, convert the result, else the fallback `.Impl_m t t args...`). The Go method per virtual method per
+  class is the 0.35 to 0.42 MB.
+- JCS110 (c) (not built; JC4b/JC4c did the list only): make the per-method body small and shared, and the class'
+  extras tables. Go needs the method on the type (the class interface `C_I` demands every virtual method), so the
+  method cannot go; its body can be one call. The design to confirm by the first step's measurement:
+  1. each method becomes `if f := t.D.Slots[i]; f == nil { return t.Impl_m(t, t, args) }; return dynInvokeN_SIG(t, i, ...)`,
+     where the slow half, boxing the arguments, calling `invoke` of the arity, honouring `dynSuper` and converting
+     the result, is a shared helper **per erased signature** (`dynCall_II_I`, `dynCall_O_O`...: a few hundred shapes
+     for the whole world, not per class), taking the fallback as the `Impl_` closure only on the marker path
+     (the marker answer re-enters through `dynCfSupers_C`'s boxed table or a per-shape closure);
+  2. the fast path (slot unset) keeps the direct `Impl_` call, so a subclass of `ArrayList` pays nothing for the
+     methods it does not override;
+  3. the tables (`dynSlots_C`, `dynOwn_C`, `dynCfSupers_C`) stay per class but as data where possible (a sorted
+     name list and a shared builder in place of a `map` literal built at init, which is code too), and
+     `dynCfSupers_C`'s closures go through the same per-shape helpers (a closure per method is as large as the
+     method, and today there are two per method: the `DynSub_C` method and the `dynCfSupers_C` closure).
+  Alternative if the measurement shows the tables dominate: (c2) `dynCfSupers_C` computed from the Go method values
+  by reflection on `C_I` at first use (jrt's reflection has the member tables) instead of generated closures.
+- Then the list by demand: add the classes of step 3 below to `model/class-supers` (`ConcurrentHashMap`, then those
+  the loop finds). Their protected members and constructors enter by themselves (`dyncf/protected-chain`,
+  `protected-members`, `generics.edn`'s `:protected`), so the analysis finds `Provider`'s constructors once the class
+  is listed.
+- A class without a class interface cannot be listed (a hand-written jrt class is a leaf, JCS111): the jrt leaves
+  among the candidates (check each: `ServerSocket`, `URLConnection`, `ResourceBundle$Control`, the `Mac`) are
+  translated or not by `go/arbace/jrt/manifest.edn`; one that is hand-written gets the JCS111 treatment (a
+  `C_I`, an `Impl_` per method, `bin/jrt manifest`) or stays in its class with its reason.
+
+**The files it changes**: `arbace/j2g/dyn.ae` (`method-form`, `sub-forms`, the shared helpers' forms in `forms`),
+`arbace/j2g/dyncf.ae` (`sub-forms` closures, `subs-forms`), `arbace/j2g/model.ae` (`class-supers`; `leaf?` follows), and
+the generated Go they print into the shipped program (`j2g_dyn.go`, `j2g_cf.go` of `arbace/lang`). Not changed: the
+interpreter (`arbace/classes/interp.ae`, `layout!`'s `canExtend` check reads the same table), the analysis, the
+Compiler (`arbace/lang/Compiler.ae`: the natives' names and signatures are the same). Possibly `go/arbace/jrt/*.ae`
+and `manifest.edn`, `reflect_tables.ae` (generated by `bin/jrt manifest`) for a hand-written candidate.
+`arbace/j2g/reach.ae` roots (`dyn/proxy-roots`) grow with the list, no code change.
+
+**The steps, in order:**
+
+1. *Measure* (no change): `bin/arbace-go --build` on main, then the size of `DynSub_*` methods and `dynCf*` tables by
+   `go tool nm -size -sort size` on the executable (TamaGo's go only), summed per kind: methods, `dynCfSupers`
+   closures, tables, constructors, fields. Result: where the 17.6 MB is, and a ceiling for (c). Decision gate: if the
+   methods and closures are under about 6 MB of it, (c) cannot pay for the rest and JCS124 (b) applies.
+2. *Shared dispatch, no list change* (JCS110 (c)): the shape helpers and slimmed methods in `dyn.ae`/`dyncf.ae`.
+   The shipped program changes, the classes do not: all of `bin/diffcheck`'s and the oracle's proxies and the 51
+   classes' tests must still pass, the executable must be smaller than 177,283,232 bytes by the measured amount
+   (target: at least 8 MB, i.e. half the 17.6 MB), and `go build`'s time must not grow.
+3. *The demand loop*: enumerate the world classes the corpus' tests extend and that are not listed. A static pass
+   over the 3,322 run tests' forms (their `extends` clauses against `model/in-world?` and `class-supers`; `bin/repr-java
+   read` forms are in `test/java/forms/` for the essential tests only, so by javac's names in the sources of
+   `.tmp/java-check`) gives the first list; then `bin/java-check --levels interp --jobs 8 --only 't05(469|3|06|60|78|77|27|22)|t07915|t04998'`
+   (the candidates above) to see the next cause of each; repeat per class (list, rebuild, run). Add `ConcurrentHashMap`
+   with the others that load, never a class for a test that stops on another limit.
+4. *The regression case*: `test/java/jls/BackEnds3.java` (the next `tNNNNN` is the check's, as `t08323`, `t08324`
+   were), a subclass of `ConcurrentHashMap`, of `Provider` with its protected constructors, a `BreakIterator`
+   subclass; the JDK's run recorded (`bin/java-check --record-ref --only BackEnds3`, the system's JDK). A fixture of
+   `FxBackEnds` for diffcheck's Java pair (`test/j2g/fixtures/FxBackEnds.ae`, `test/j2g/record_fixtures.ae`) when a
+   shared helper's shape needs a case (a `long`/`double`/array parameter, a `void` method, a 20-argument method
+   through `ApplyTo`).
+5. *Record and measure*: the whole corpus, interp and compiled, `--record`; `levels-known.edn`; `test/java/divergences.edn`
+   (`:interp-extends` removed if empty; `:interp-protected` reduced to `ClassLoader`'s, `Object.finalize`, the
+   `Thread` constructors, with its title and `:why` rewritten); `bin/reap`.
+6. *Docs*: this survey's "As built: JCS120 (b)", J2G-SPEC §5.12 (the shared helpers, the list), CLASSFORMS-REPL §7
+   (the list's size, the cost per class now).
+
+**The checks that prove it** (commands as CLAUDE.md names them): `bin/arbace-go --build` (stage 0; the executable's
+size recorded before and after, steps 1, 2 and 3) and `--build-tests`; `bin/arbace-go --smoke`; `bin/diffcheck` (via
+the gate: Java's pair 749 of 751 and the whole 12,795 of 12,807 unchanged, its 12 known as recorded);
+`bin/oracle` (22,688 of 22,740, 52 known; the proxies of the oracle's forms run through `DynSub` types);
+`bin/clojure-tests` on the test build (proxy tests: `java-interop`, `pprint`, no regression); `bin/java-check --levels read,interp,compiled --jobs 8
+--record` over the whole corpus under the big-job lock (the interp level must lose none, the compiled level none,
+as JC4b/JC4c recorded); `bin/java-check --essential` (428 of 428 interpreted, 426 of 426 compiled);
+`bin/j2g-edge verify` (no change expected: the classes are the forms'); `bin/generated-check`; `bin/reap` (12 of 12,
+0 problems); the essential `bin/gate` at the head (the checkout's gate, GT6's: no wrapping lock), and `bin/gate --full` only at a tag
+(the gate policy). Every heavy run under `/root/arbace/.tmp/heavy /root/arbace/bin/heavy-lock`, one whole-program j2g at a time,
+`GOMEMLIMIT=18GiB`, and none while `.tmp/gt7.quiet` exists.
+
+**Shipped files changed, and the re-seed.** The shipped program's j2g files change: `arbace/j2g/dyn.ae`, `dyncf.ae`,
+`model.ae` (and `go/arbace/jrt/*.ae`, `manifest.edn`, `reflect_tables.ae`, if a hand-written class is listed). j2g's
+translation of the shipped program changes by design: `j2g_dyn.go` and `j2g_cf.go` of `arbace/lang`, the types of
+the newly listed classes' uses from `*C` to `C_I` in every class that names them (as JC4b: 230 files of jrt, 40 of
+lang, 91 of the compiled namespaces; `ConcurrentHashMap` is named widely, so this one is large), the embedded
+sources of the changed namespaces. So it needs a **re-seed** (`bin/seed --make`, `--verify`: the fixpoint
+stage 0 = G1 = G2 = G3), **batched with the next one**; no re-seed is needed for the tests alone, whose compiled
+numbers are j2g on the branch's executable (JCS61 (a)). If the step 2 shrinks the program and the step 3 grows it, the
+re-seed carries both: do the two in one branch and one re-seed.
+
+**What to regenerate, and by which writer**: `jdk/` (the JDK forms) and the provenance files: none, no source of
+the JDK or `overlay/jdk` changes (verify with `bin/jrt-convert verify` only if a jrt class is touched, whose
+Go is hand-written and not a converted form); `jdk/edge.edn` by `bin/j2g-edge update` only if `bin/j2g-edge verify` says
+a newly reached class (a protected member's type, `Provider`'s) is named that the edge lacks (JC4c needed it for
+`AtomicReference`'s generics); `generics.edn` by j2g itself in the build (`:protected`); `manifest.edn` and
+`reflect_tables.ae` by `bin/jrt manifest` if jrt changes; the test records by `bin/java-check --record`,
+`levels-known.edn` by the same; the JLS program's JDK run by `--record-ref --only`.
+
+**The risks.**
+- *The Go dispatch's speed*: a subclass of `ArrayList` or `HashMap` in a hot loop pays the slot test and, when it
+  overrides, the helper's indirection; measure with the harness' speed tests (`:speed`: HugeToString, Integrate...)
+  before and after step 2; keep the direct `Impl_` fast path.
+- *Go's method-set rules*: a shared helper must return a value of the method's exact Go result type; one helper per
+  erased signature is a generic function per type pair, or a switch of generated shapes. Generics in Go 1.27.1 cannot
+  have type-parametered methods, so the shapes are generated functions (`dynCall_<shape>`), counted: if the world
+  has more than about 600 distinct shapes the saving shrinks (measure in step 1).
+- *The size may not be the methods'*: `dynCfSupers_C`'s closures, `dynSlots_C` map literals (init code) and
+  `dynCfFields_C` may be half of it; hence the decision gate of step 1.
+- *Larger `C_I` retypes*: listing `ConcurrentHashMap` (or `Provider`, `Hashtable`'s kin) makes every use of the
+  class a `C_I` call (an interface call, not a direct one) in the runtime: Clojure's own use of
+  `ConcurrentHashMap` (`arbace/lang/*`, `java.util.concurrent` in the compiler's caches and `RT`) slows, and the
+  runtime's `mdesc-classes` in j2g itself is one. Count the uses (`grep -c`) in step 3 before listing; if hot, keep
+  `ConcurrentHashMap` interpreted-only out and say so in JCS125.
+- *Reachability growth*: `dyn/proxy-roots` roots every constructor and virtual method of each listed class and its
+  chain, so listing `Provider` (security, services) or `URLConnection` pulls code into the shipped program that
+  the runtime does not use today; the program grows beyond the DynSub types (count it in step 3's rebuild).
+- *Chain gaps*: each candidate meets a second limit (a type not in the world: `Proxy`, `SocketImpl`'s members; a
+  jrt constructor missing); the loop must stop at the test's reason and not widen the world for one test.
+- *The gate's host*: heavy runs wait for the lock and the GT7 clean `--full`; no work during the quiet file.
+
+**The estimate**: 6 to 8 working days. Step 1 half a day; step 2 two to three days (the generator's rewrite, the
+helper shapes, two rebuilds and the proxies' checks, the speed check); step 3 one to two days (the loop, each
+iteration a rebuild of about 10 minutes plus the targeted interp run, the jrt cases); steps 4 and 5 one and a
+half days (the full corpus run is about 3 hours on a loaded host, compiled shards waiting for the lock); step 6 half a
+day. Three days if JCS124 (b) applies (no step 2).
+
+**Sonnet or Opus.** Step 2 is the hard part (Go-code generation whose result must be size-neutral in behaviour, the
+Go typing of shapes, the marker/`dynSuper` path, speed) and wants **Opus**, with a Sonnet subagent for step 1's
+measurement and for the run logs. Steps 3 to 6 (the loop, listing, jrt leaves of the JCS111 kind, the JLS program,
+records, docs) are a repeated, mechanical shape that JC4b/JC4c set: **Sonnet**. If JCS124 (b) applies, Sonnet only.
+
+### Proposals (JCS124-JCS125)
+
+- **JCS124 What step 2 must reach before the list grows** (the shared dispatch's size).
+  - Options: (a) JCS110 (c) first as decided, whatever it saves; (b) measure first (step 1) and build (c) only if the
+    methods and closures are at least a third of the 17.6 MB (a saving of 6 MB or more), else list by demand and
+    accept about 0.35 MB per class (10 classes: 3.5 MB, +2%); (c) as decided, plus the gate that no class is listed
+    unless the executable stays under 177,283,232 bytes (the size of JC4c).
+  - *Recommended: (b)*: the decision (JCS110 (c) first) assumed the methods are the size; the measurement costs half
+    a day, and (c) rewrites the generator the shipped program's two key files hang on. If the numbers support (c)
+    the plan above is unchanged; if not, the list alone is a short branch and the re-seed carries it.
+- **JCS125 Which candidates are listed** (the loop's stopping rule; the demand is 1 test for `:interp-extends`, about
+  10 for the protected constructors).
+  - Options: (a) every class a test of the corpus extends and the test then passes (the rule of JC4b); (b) (a), and
+    also the world's non-final public classes users extend most (`ConcurrentHashMap`, `Hashtable`, `Random`, `TimerTask`,
+    `Exception`'s family not yet listed, `Format`'s kin, `Number`, `Reader`/`Writer` kin, `URLConnection`,
+    `Provider`), about 30 more classes, 10 MB without (c); (c) none beyond `ConcurrentHashMap`, `Provider` and what
+    the corpus needs outright; (d) a class costing more than a measured bound (the reachability growth of the risks, or
+    uses in hot runtime paths) is left in `:interp-extends` with the reason.
+  - *Recommended: (a) with (d)*: the corpus is the only demand evidence we have; (b) is guessing and pays in size, and
+    (d) keeps a hot runtime class (`ConcurrentHashMap` is used by `arbace/lang` itself) from becoming an interface call
+    for one test: if it would, `BiggernYours` stays the one recorded case, its reason updated, and JCS120's rest
+    (Provider and kin) goes ahead.
+
+## Decided (2026-10-29): JCS124-JCS125
+
+The user decided both as recommended:
+
+- **JCS124 (b):** measure before building. The executable's size is split with `go tool nm -size` first, and
+  JCS110 (c)'s shared dispatch is built only if the per-class methods and closures are at least a third of the 17.6 MB.
+- **JCS125 (a) with (d):** the classes listed are those a corpus test extends and that then pass, less any class over a
+  measured cost bound. If listing `ConcurrentHashMap` slows the runtime's own use of it, BiggernYours stays the one
+  recorded case and the `Provider` group goes ahead.
+- Also (2026-10-29): `:j2g-reflection` now comes before `:reflection` in `test/java/divergences.edn`, so t04863 falls
+  into its by-design class; JCS123 (b) intended this, and the v2 record's refresh found the slip. Java eval is now
+  1,807/330/1,185 and AOT 1,915/181/1,226.
+
+## As measured: JCS124 (b) (2026-10-29)
+
+Step 1 of "JCS120 (b): the plan", read-only: nothing built or run but a 60-line Go program. **Verdict: the gate fails.**
+The per-class own methods and the `dynCfSupers_C` closures are about **1.7 MB (10%)** of the 17.6 MB, not a third, so
+JCS110 (c)'s shared dispatch is not built and JCS124 (b)'s other branch applies (list by demand). The measurement also
+found where the size is: the **promoted `dynCore` wrappers**, which no shared helper per signature touches (JCS126).
+
+**What the 17.6 MB counts.** It is the executable's growth over a branch (JC4b: main's 156,426,400 to 174,010,528
+bytes, "As built: JC4b"), the 42 DynSub types and their `dynCf*` tables, not a symbol sum; the 71 DynSub types of
+today's executable (the 51 classes and the 20 proxies' superclasses) cost about 23 MB by the sum below.
+
+**Method.** The executable measured is the gate's `.tmp/gate-exe/42175205476370977102/amd64/arbace` (177,778,848 bytes,
+byte-size equal to stage 0 of the seed); its generated Go is in the same key's `j2g/gen/go/arbace/lang/`
+(`j2g_dyn.ae`, `j2g_cf.ae`). Every executable is **stripped**, so `go tool nm -size` answers "no symbol section"
+(tried first, TamaGo's go). The function names survive in `.gopclntab`, so a program (`.tmp/jcs124/tool/main.go`, run
+with TamaGo's `go run`, one small build slipping the "no builds" limit, see below) walks the pclntab: per function its
+text size (`.text` 75,770,961 bytes, the functions' sum equal to it) and its pclntab bytes (the `_func` record, its
+name, its three pc tables and pcdata tables, each table charged to the first function that uses it): 54.3 MB of the
+`.gopclntab`'s 71.6 MB are attributable, the rest (file and compilation-unit tables, table sharing) is not, so the
+pclntab figures are lower bounds. `.tmp/jcs124/agg.py` classifies the functions: `(*DynSub_C).m` is *own* when `m` is a
+`go/method` of `DynSub_C` in `j2g_dyn.ae`, else *promoted from dynCore* when `m` is a method of `dynCore`, else
+promoted from `C`; the `dynCfSupers_C` closures are `lang.init.funcN`, N counting the `(fn ` of `j2g_cf.ae`'s
+`go/var`s in order (2,080 of them, exactly the 2,080 `init.funcN` of the binary, so the mapping is exact).
+
+| part | funcs | text MB | pclntab MB | total MB |
+| --- | ---: | ---: | ---: | ---: |
+| DynSub methods promoted from `dynCore` (the compiler's wrappers) | 101,514 | 3.70 | 15.82 | **19.52** |
+| DynSub own virtual methods (`method-form`) | 2,351 | 0.64 | 0.42 | 1.06 |
+| DynSub methods promoted from `C` | 121 | 0.00 | 0.02 | 0.02 |
+| `dynCfSupers_C` closures | 1,824 | 0.42 | 0.26 | **0.68** |
+| `dynCfCtors_C` closures, `dynCfFields_C` closures | 211, 45 | 0.06 | 0.04 | 0.09 |
+| `dynCtors_C`, `dynCfNew_C` | 282, 71 | 0.15 | 0.08 | 0.22 |
+| the tables' init code, upper bound (all of `lang.init`, `lang.init.N`, `lang.map.init.N`, not only dyn's) | 1,123 | 0.62 | 0.16 | 0.79 |
+| method entries in `.go.type`, estimate (16 bytes per method of `*DynSub_C`'s uncommon type, 104,339 methods) | | | | about 1.7 |
+| the shared `(*dynCore)` methods (once, not per class) | 1,443 | 0.73 | 0.27 | 1.00 |
+
+The tables' data (`dynSlots_C`, `dynOwn_C`, the closures' map entries, strings in `.rodata`) was not measured; it is
+small beside the rest (the maps are built at init from static arrays). The measured parts sum to about 23 MB for 71 types,
+**0.33 MB a type**: promoted wrappers 0.275 MB, own methods 0.015, closures 0.01, the rest 0.03 (the 0.35 MB the plan
+quotes).
+
+**The split the plan asked for.** The two parts (c) can touch, own methods plus `dynCfSupers_C` closures, are
+1.06 + 0.68 = **1.74 MB, 9.9% of 17.6 MB** (7.5% of the 23 MB), against the threshold of 5.9 MB. Including the other
+closures and constructors, 2.1 MB (12%). The bodies are 270 bytes of text for an own method, 230 for a closure.
+
+**What a shared helper per erased signature would save.** Each own method and closure keeps a Go entry (the method
+must exist; the closure is a table value) and loses the boxing, `invoke` and conversion body to the helper; the
+entries stay about a third of today's text and all of their pclntab records (names, `_func`). So at most
+(0.64 + 0.42) x 2/3 = about 0.7 MB of text and nothing of the pclntab: **0.7 to 1.0 MB in all, 4% to 6% of 17.6 MB**,
+and the ceiling if the bodies vanished entirely is the 1.74 MB. The plan's target (8 MB) is out of reach.
+
+**What the numbers say instead.** 101,514 of the 104,339 methods of DynSub types (97%), and 19.5 MB of the 23 MB, are
+wrappers the Go compiler writes for the methods `dynCore` promotes to each `DynSub_C`: `dynCore` has 2,076 methods
+(every interface's, by slot, SZ4), a DynSub type gets about 1,440 of them (the rest conflict with `C`'s own), each a 36
+byte wrapper with a 156 byte pclntab record (the name `arbace/lang.(*DynSub_Name).Method` is half of it). The linker
+keeps them because a call through each interface method name exists somewhere. Per type 1,443 wrappers, 0.275 MB; the
+type with the most (`ScheduledThreadPoolExecutor`, `AbstractQueuedLongSynchronizer`) 0.30 MB. A class listed costs
+this whatever the own methods do.
+
+**Top classes.** Promoted wrappers (text plus pclntab, 1,425 to 1,443 methods each, all 71 types within 0.28 to 0.30
+MB): `AbstractQueuedLongSynchronizer` 0.301, `ScheduledThreadPoolExecutor` 0.298, `IllegalArgumentException` 0.298,
+`AbstractQueuedSynchronizer` 0.295, `IllegalStateException` 0.293, `InheritableThreadLocal` 0.289. Own methods:
+`APersistentMap` 0.045 MB (72), `ConcurrentSkipListMap` 0.043 (85), `TreeMap` 0.036 (76),
+`ScheduledThreadPoolExecutor` 0.034 (70), `LinkedList` 0.033 (69). `dynCfSupers_C` closures:
+`ConcurrentSkipListMap` 0.029 MB (78), `ScheduledThreadPoolExecutor` 0.025 (64), `TreeMap` 0.024 (69), `LinkedList` 0.023
+(62), `Vector` 0.022 (59).
+
+**Scratch** (`.tmp/jcs124/` of the worktree `.tmp/worktrees/jcs124-measure`, ignored by git): `tool/main.go` (the
+pclntab walk), `funcs.txt` (size and name by `debug/gosym`), `funcs2.txt` (text size, pclntab bytes, name), `map.py`
+(closures to `j2g_cf.ae`), `agg.py` (the classification above). To redo: `cd tool && CGO_ENABLED=0
+/root/tamago-go/bin/go run . EXE > ../funcs2.txt`, then `python3 -I agg.py`.
+
+**Slips.** `go run` of the 60-line program builds (TamaGo's go, a second of CPU, a few MB) where the task said no
+builds; and one `cp ... /dev/null` while looking at the key file, against the rules' ban on /dev/null (harmless).
+
+### Proposals (JCS126)
+
+- **JCS126 What to do about the promoted `dynCore` wrappers** (97% of the methods, 85% of a class's cost).
+  - Options: (a) accept them: list by demand (JCS125) at about 0.3 MB a class (10 classes: 3 MB, +1.7%), as JCS124 (b)'s
+    branch says; (b) a spike to remove them, before the list grows past about 20 more classes: `DynSub_C` embeds a
+    `dynCore` that holds only the methods of the interfaces `C` implements (a per-class core generated with the type,
+    `ArrayList`'s about 150 methods, not 2,076), and a user class that also implements a world interface gets a
+    second generated Go type for that combination at run time's request, which the closed world cannot make, so the
+    spike must first count how many of the 2,076 interfaces tests combine with a DynSub superclass (a static pass over the
+    corpus' `extends`/`implements` clauses); (c) cut the pclntab share instead: name the wrappers shorter (the type
+    names `DynSub_C` to `D1`..`Dn`, a pclntab saving of about 40 of the 156 bytes, 0.8 MB, with no behaviour change; the
+    names show in stack traces of Go panics only); (d) JCS110 (c) as decided (about 0.7 to 1.0 MB, a day or more of Opus
+    work).
+  - *Recommended: (a), and (c) only if size matters later*: 0.3 MB a class is small beside 177 MB, the demand is
+    about ten classes, and (d) buys 5% of what it was thought to; (b) is a real design change with an open question
+    (interfaces added at run time) and deserves a spike only when the list is long. This leaves the plan's step 2 out
+    and the days saved (the plan's "three days if JCS124 (b) applies") are the schedule.

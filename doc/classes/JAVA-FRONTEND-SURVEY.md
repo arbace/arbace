@@ -6069,3 +6069,289 @@ Scratch: the worktree's `.tmp/jfs133/` (not tracked): `run0.log` (before: 6 diff
 
 None open. JFS133 (b)'s rest (`:nread-inference` 21, `:nread-names` 7, `:nread-constant` 7, `:nread-scope` 4)
 stays as JFS133 lists it.
+
+## JN10: the plan (JFS130-JFS132) (2026-10-29)
+
+A plan only: written after reading the code, with no build, no check and no lock taken. JN10 itself starts after the
+tag `arbace-reaps-3-crops-v2`, on a branch of its own from main. JFS126 (b) (decided 2026-10-27: the reader in the
+shipped program, `read --no-javac` there, a fallback the error "javac's tool needed") was designed in "As built:
+JN9f" (JN9f.8) as three parts, and the user decided them as recommended ("Decided (2026-10-28): JFS130-JFS134"):
+JFS130 (a), the read's javac half split off; JFS131 (b) for java.base and (a) for the rest, the platform; JFS132 (a),
+the command and the REPL's entry. JFS133 (a)'s six differences are built (the section above), so the reader starts
+from a read with no known wrong answer: `bin/java-check --levels read,nread` 3,282 pass, 39 fallbacks, 0 differ.
+
+Read for this plan: `arbace/repr/java.ae` (`convert-one`, `convert-units`, `convert-units-nojavac`,
+`registry-units`, the command), the 11 namespaces that name javac, `decls.ae`'s platform (`platform-index`,
+`registry`, `package-exists?`, `package-class-names`, `platform-class`), `classfile.ae` (`read-file`),
+`bin/arbace-go` (`reader_key`, `reader_compile`, `build_java`, `gate_key`), `bin/lib/version.bash`,
+`bin/lib/javac-key.bash`, `bin/lib/repr-java/host.bash` (`repr_java_reader_hash`), `bin/provenance-check`,
+`arbace/j2g/embed.ae` (`excluded`), `test/gate/steps.edn`, `bin/repr-java`, `bin/lib/repr-java/front-check`.
+
+### JN10.1 What the reading found
+
+- **javac's names, counted by site** (type hints, `instance?` tests, static fields, imports): `model.ae` about 140
+  (81 hints, 59 `instance?`, 61 uses of `jt/`: the javac branch of every read), `attr.ae` about 80, `nattr.ae` about 75,
+  `tree.ae` about 34 (its 60-odd imported tree classes), `convert.ae` about 46 (40 of them statics, `Flags/...`
+  constants), `resolve.ae` 18, `jtypes.ae` 29 (it only holds javac's `Types`, `Symtab`, `Check`, `Names` as dynamic
+  vars), `expr.ae` 9, `java.ae` 7 (`convert-one`'s `JCCompilationUnit`, `convert-units`' `Context`); `jtree.ae` and
+  `javac.ae` are javac's alone. The native front end (`lex`, `parse`, `decls`, `scope`, `sym`, `types`, `overload`,
+  `infer`, `classfile`) names none, `names`, `layout`, `full`, `forms` none, `print` only a comment. About 440 sites.
+- **The dispatch is already there.** The converter reads the tree through `tr/` (either tree), attribution through
+  `attr/` (`native?`) and symbols and types through `model/` (`nsym?`, `ntype?`, `javac-of`); in a read without javac
+  `convert-unit` is already called with a nil javac unit (`convert-units-nojavac`). `decls/javac-needed!` and
+  `javac-needed-reason` exist. So the split moves javac's branches; it does not add a model.
+- **The fallback is `convert-units`.** `convert-units-nojavac` ends in `(convert-units ... :javac)`, which needs
+  `javac/analyze`: that call is the one place the shipped program must replace by the error.
+- **The platform is plain files.** `decls.ae` reaches the platform through `java.io.File` in four places
+  (`platform-index`, `package-exists?`, `package-class-names`, `platform-class`) and `classfile/read-file`; the
+  native provider reads no `module-info` (it is only skipped in a package's listing). So an archive behind the same
+  four calls is enough. java.base's exploded directory is 34 MB, 27,598 class files in all 68 modules.
+- **The tool compiles the reader on itself** (`reader_compile`: c2j on a first tool build, because c2j must resolve
+  javac's classes); once the native part names none, the shipped build's own c2j run compiles it, and the tool only
+  needs the javac half compiled on it.
+- **Every key that lists repr/java as "not embedded"** has to change: `arbace/j2g/embed.ae` `excluded`,
+  `arbace_embedded_sources` and `arbace_reader_sources` (`bin/lib/version.bash`), `gate_key`'s and `reader_key`'s
+  readings, steps.edn's `:tools` group, `repr_java_reader_hash`'s file list (new files).
+
+### JN10.2 The design in one paragraph
+
+`arbace.repr.java` is cut in two. The **read closure** (the namespaces `java.ae` needs to read, minus javac's: `java`,
+`convert`, `forms`, `full`, `layout`, `names`, `tree`, `attr`, `model`, `nattr`, `resolve`, `expr`, `decls`, `infer`,
+`lex`, `overload`, `parse`, `scope`, `sym`, `types`, `classfile`, a new `platform`, and `javac-hook`) names no
+javac class and is embedded in the shipped program like any other namespace. The **javac half** (`javac`, `jtree`,
+`jtypes`, the new `javac-tree`, `javac-model`, `javac-read`, and `attr`'s index of javac nodes) stays on javac's tool,
+loaded there, and installs itself into `arbace.repr.java.javac-hook`, an atom of functions whose default for every
+entry is `(decls/javac-needed! "NAME")`. A branch of the closure tests the native model first (`map?`, `nsym?`,
+`ntype?`: the common case, as now) and otherwise calls the hook; on the tool the call is the javac branch that was
+there, on the shipped program it is `javac-needed!`, which `convert-units-nojavac` already turns into a fallback and
+which the shipped command turns into the error "javac's tool needed: REASON". The platform behind `registry` becomes
+a small interface (`index`, `list`, `exists?`, `bytes`) with two implementations: a directory (as now, the other
+modules, `REPR_JAVA_PLATFORM`) and a packed declarations-only archive (java.base, embedded); `platform-index` merges
+them.
+
+### JN10.3 Part 1: JFS130 (a), the read's javac half
+
+**Files that change** (all under `arbace/repr/`; a count of sites in JN10.1):
+
+| file | change |
+|---|---|
+| `java/javac_hook.ae` (new `arbace.repr.java.javac-hook`) | the atom `hooks` (`{:tree-of ... :model-of ... :index ...}`), `(call! name & args)` defaulting to `javac-needed!`, `(install! m)`; no javac name |
+| `java/tree.ae` | the 60-odd `JCTree$...` imports and the `instance? JCTree` branches of `tag`, `f`, `start`, `end`, `children`, `skip-parens`, `tree-name`, `full-name`, `diamond?` move to `java/javac_tree.ae` (new), installed as the hook's tree entries; `tree.ae` keeps the native (map) branch |
+| `java/attr.ae` | `attr/index` (the pairing of native nodes with javac's by tag and position), the `Symbol`/`Type` answers and `*measure*` stay the provider's; the javac-answered branch (`provider` nil) and the 55 hints go to `javac_model.ae`/`javac_tree.ae`; with `*provider*` bound the closure never reaches them |
+| `java/model.ae` | the 59 `instance?` branches and `javac-of`, `jt/` reads move to `java/javac_model.ae` (new, installed); `nsym?`, `ntype?`, `native?` and the native branch stay; the 10 `javac-of` bridges (reads of a javac symbol of the same declaration) are the hook's, so on the shipped program they fall back |
+| `java/nattr.ae` | the 52 hints and 24 `instance?` tests are for the javac-side facts it checks against (`check`, `diffs`): the checking half (`attr-check`, `check-platform-members!`'s javac comparison) moves to the javac half; `provider` and the native answers stay |
+| `java/convert.ae` | 40 static `Flags/...`, `TypeTag/...` uses become numeric constants in a new `java/jflags.ae` (javac's `Flags` values the converter reads, with a load-time assertion on the tool that each equals javac's), the 4 hints and 2 `instance?` go to the hook |
+| `java/resolve.ae`, `expr.ae`, `jtypes.ae` | `resolve.ae`'s javac reads (`Check.getCompiled`, `CompletionFailure`) to the hook; `expr.ae`'s `JCNewClass` twin lookup (line 406) to the hook; `jtypes.ae` is javac's alone (its dynamic vars are bound by `convert-units`) and leaves the closure: the closure's `jt/` references (model, nattr, resolve, expr: 77 sites) go with their javac branches |
+| `java.ae` | `convert-one`, `native-units`, `convert-units` (javac's `analyze`, the `Context` bindings) move to `java/javac_read.ae` (new; the tool's `read` default and `--front`, `--attr`, `--split`, `--javac`, `read-jdk`'s javac path); `convert-units-nojavac`, `registry-units`, `write-output`, the option parser stay; `convert-units-nojavac`'s fallback calls the hook (`:convert-units`), whose default is the error; the command loads `javac_read` when it exists (try `require`, tool only) |
+| `bin/lib/repr-java/host.bash` | `repr_java_reader_hash`'s file list gains `javac_hook`, `javac_tree`, `javac_model`, `javac_read`, `jflags`, `platform`; the header text names them |
+| `bin/arbace-go` | `reader_compile` compiles the javac half only (the closure is the base's: `--aot-base`); `reader_key` still hashes all of `arbace/repr/java`; `build_java`'s `--embed arbace/repr/java` names the javac half's files |
+| `arbace/j2g/embed.ae`, `bin/lib/version.bash` (`arbace_embedded_sources`, `arbace_reader_sources`), `gate_key` (reads `arbace_embedded_sources`), `test/gate/steps.edn` (`:tools`) | repr/java's read closure is no longer excluded; the javac half, `print`, `roundtrip`, `coverage`, `split` (unless the closure needs it) still are |
+
+**Steps, in order.**
+
+1. The inventory: `grep` the 11 namespaces for `com.sun.tools.javac` and `javax.tools` and write `javac-sites.txt` (scratch);
+   fix the closure's file list (the require graph of `java.ae` less the javac half). Add the light guard
+   `bin/repr-java closure-check` (the closure's files name no javac class; seconds; Makefile target `repr-java-closure-check`).
+2. `javac_hook.ae` and `jflags.ae`; the load-time assertion of `jflags` on the tool.
+3. `tree.ae`, then `attr.ae`: the two interfaces everything reads through. Tool check after each (`bin/repr-java
+   parse-check --corpus samples,baseline`, `front-check --corpus samples,baseline`).
+4. `model.ae`, `nattr.ae`, `resolve.ae`, `expr.ae`, `convert.ae`: one file at a time, `attr-check --corpus samples,baseline`
+   after each.
+5. `java.ae` and `javac_read.ae`; `bin/arbace-go --build-java` (two builds: the key changes; the first compiles the
+   javac half on a tool built with the closure from the base); `bin/repr-java check --suite`.
+6. The shipped side: `embed.ae`, `version.bash`, `gate_key` readings, steps.edn; `bin/arbace-go --gate-build` compiles
+   the closure with the shipped namespaces (a javac name left in it is a c2j error naming the file: the guard of the
+   build itself); `bin/arbace-go --smoke` plus a `(require 'arbace.repr.java)` line in the smoke script.
+
+**Checks that prove it** (the tool's results unchanged, byte for byte, is the whole claim of the part):
+`bin/repr-java parse-check`, `front-check`, `attr-check`, `nojavac-check` (every corpus, their known files unchanged:
+`test/repr/java/*-check-known.edn`), `bin/repr-java check --suite` and `check --jdk` (against
+`test/repr/java/expected/jdk26u.sha256`: not one forms file moves), `bin/java-check --levels read,nread` (3,282 / 39 / 0
+as recorded, `test/java/check-nread.edn`), `bin/javac-vendor check --from` and `verify`, `bin/provenance-check`, the
+essential `bin/gate`.
+
+### JN10.4 Part 2: JFS131, the shipped reader's platform
+
+**Files.**
+
+| file | change |
+|---|---|
+| `arbace/repr/java/platform.ae` (new) | the interface (`index`, `package-dir?`, `list-names`, `exists?`, `bytes`) and its two implementations: `dir-platform` (the code `decls.ae` has now) and `pack-platform` (an archive resource); `(composite & ps)` for java.base's pack and `REPR_JAVA_PLATFORM`'s directory (JFS131: (b) for java.base, (a) for the rest); the pack's writer `pack!` and reader; a pack read once, class entries inflated on demand (`arbace/j2g/zlib.ae`'s DEFLATE is j2g's; the runtime's `java.util.zip.Inflater` is jrt's port) |
+| `arbace/repr/java/decls.ae` | `platform-index`, `package-exists?`, `package-class-names`, `platform-class` call `platform.ae` instead of `File`; `registry`'s `:platform` is a platform object; `read-class-file` reads `(platform/bytes p path)`; `classfile/read-file` stays for the class path's directories |
+| `arbace/repr/java/classfile.ae` | `parse` unchanged; a `strip` function (drop `Code`, `LineNumberTable`, `StackMapTable`, `LocalVariable*`, debug attributes; keep what `parse` reads: flags, `Signature`, `InnerClasses`, `ConstantValue`, `Exceptions`, the annotations, `Record`, `PermittedSubclasses`, `Deprecated`), so that `(parse (strip b))` equals `(parse b)` |
+| `arbace/repr/java.ae`, `registry-units` | the registry's platform is the composite: java.base's embedded pack, then `REPR_JAVA_PLATFORM` if set (its java.base ignored); a read that needs another module with no directory fails with "javac's tool needed: platform module M" |
+| `jdk/platform/java.base.decls` (new, committed, deterministic), `jdk/platform/provenance.edn` (new: pin, writer, hash of the pack) | the pack: per class the stripped file, deflated, an index of `(package, class) -> offset`; written by `bin/repr-java platform-pack OUT` on the tools' host from the platform at `jdk/javac/platform.sha256`'s pin (`bin/javac-vendor platform-pin` says which directory) |
+| `arbace/j2g/embed.ae` / `bin/arbace-go --build-program`'s resources | `jdk/platform/` embedded as a resource (the `--resources` path j2g has; jdk/data's resources are the model), read by `Class.getResourceAsStream` in jrt |
+| `bin/repr-java` | the verb `platform-pack`, `platform-check`; `test/gate/steps.edn`, `Makefile` |
+
+**Steps.** (1) Measure: strip java.base's 34 MB and report the size raw and deflated (the survey's 6-8 MB estimate is
+unmeasured; JFS131 (b) is conditional on it, JN10.9's risk 6). (2) `platform.ae` with the directory implementation
+only, `decls.ae` through it; `attr-check` shows no change. (3) `strip` and `(parse (strip b)) = (parse b)` over every
+java.base class. (4) The pack writer and reader; `decls` over the pack equals `decls` over the directory. (5) The
+resource embedded in the shipped program; the composite.
+
+**Checks.** New `bin/repr-java platform-check`: (a) `(parse (strip b))` equal to `(parse b)` for every class of java.base
+(and, as a one-off, of all 68 modules) and the pack's entries equal to a fresh pack of the directory; (b) `attr-check`
+and `nojavac-check` over the pack for java.base and the directory for the rest equal to the directory alone (known files
+unchanged); the pack's hash against `jdk/platform/provenance.edn`. Then `bin/repr-java nojavac-check` on the final tool.
+
+### JN10.5 Part 3: JFS132 (a), the command and the REPL
+
+**Files.**
+
+| file | change |
+|---|---|
+| `arbace/repr/java.ae` | `-main` on the shipped program: `arbace -m arbace.repr.java read --no-javac OUT ROOT [PATH...]`; without `--no-javac` on the shipped program the error "repr/java: read needs javac's tool (use --no-javac, or javac's tool executable)"; a fallback file is reported (the file and the reason) and the exit status is non-zero, the files read natively are still written |
+| `arbace/repr/java/load.ae` (new `arbace.repr.java.load`), `arbace.core`-level entry `load-java` | `(load-java "Foo.java")`/`(load-java dir)`: read to a temporary directory with the native read, the files' source path the file's own directory, then loaded as Java forms are (SPEC §9.2: the package's ns file, `require`); errors (parse, fallback) as REPL exceptions with the reason; the REPL's `*source-path*` for sibling sources |
+| `bin/repr-java` | `shipped-check` (below) and `read` with `REPR_JAVA_HOST=shipped` (the executable `ARBACE_GO_EXE`/the gate's `$GATE_EXE`) |
+| `bin/lib/repr-java/front-check` | `--shipped` beside `--no-javac`: the same loop with the shipped program as the native side |
+| `test/repr/java/shipped-check-known.edn` (new) | by corpus: files that may fall back on the shipped program (expected: none that the tool's `nojavac` does not already list as fallbacks, `test/repr/java/nojavac-check-known.edn` being `{}` and the fallbacks counted by reason, not listed) |
+| `test/programs/` | a sample program whose `-main` calls `(load-java ...)` on a small Java file and runs its class (`bin/arbace-go --build-program --check`) |
+| `Makefile`, `CLAUDE.md`, `doc/go/BUILD.md`, `doc/classes/JAVA-FRONTEND-SURVEY.md` (the "As built: JN10") | `repr-java-shipped-check` target and `##` line; layout paragraphs (at JN10's close, not now) |
+
+**Steps.** (1) `-main` and the error path on the closure with the hook's defaults (this runs on stage 0 evaluated from
+the checkout before any shipped build: a fast loop). (2) `load.ae` and `load-java` over `arbace.classes`' loader.
+(3) `shipped-check`. (4) The sample program.
+
+**Checks.** `bin/repr-java shipped-check --corpus samples,baseline,jdk,javac` (each corpus read by javac's tool with
+`--no-javac` and by the shipped program, the forms equal file for file; a file that falls back on the tool errors on
+the shipped program with the same reason; the time and peak memory summed as nojavac-check does); the essential cut
+(`samples` read by `$GATE_EXE` against the committed `test/repr/java/expected` forms, no tool); `bin/arbace-go
+--build-program --check` (the new sample); `bin/java-check --levels read,interp` on a handful of tests loaded by
+`load-java` (the 45 essential tests read by the shipped program equal their committed forms in `test/java/forms/`).
+
+### JN10.6 What changes in shipped code, and the re-seed
+
+Changed in the shipped program: the 22-odd read-closure namespaces of `arbace/repr/java` (new in `arbace_embedded_sources`,
+so the compiled namespaces, `aot.key` and `gate_key` change), `jdk/platform/` (a resource), `arbace/j2g/embed.ae` and
+`bin/lib/version.bash` (the embedded list). The runtime (`arbace/lang`, `jdk/forms`, `overlay/jdk`, `go/`) does not
+change: the part needs no new runtime feature (the platform is read through `getResourceAsStream` and `Inflater`, both
+in jrt), so the runtime key is unchanged. **Size:** about +27 MB by JN5's measure (+16% of 174.5 MB) for the closure
+and a smaller figure without the printer; the seed grows with it (19 MB tar.xz now, about +3 MB).
+
+**Re-seed.** Not needed to build or to check: stage 0 builds the shipped program from the checkout, and the closure is
+compiled by that build (or loaded from the checkout, evaluated, on stage 0 until then, as the tools are). It is needed
+for `target/seed/aot` to be a base again (RPS95 (b): the aot key moves) and so that `bin/seed --verify` closes on a seed
+that carries the compiled reader. So: **one re-seed, batched with C23's** (doc/C23-SURVEY.md: C3's compiled reader
+is the first, C9's the last): if JN10 merges before C3's re-seed it goes in that one, else in C9's. The re-seed is amd64
+only (as JN9f's). Until it, every gate run rebuilds the executables (8 minutes) when the reader changes.
+
+### JN10.7 Provenance files and the gate
+
+**Provenance.** `repr_java_reader_hash` changes with the first edit of any listed file and with the new files, so
+the four files that name it are rewritten once, at the end, on the final tool, in this order, by their writers:
+`jdk/provenance.edn` by `bin/jrt-convert update`; `jdk/javac/provenance.edn` by `bin/javac-vendor convert` (also
+`jdk/javac/edge.edn` if javac's world's names changed, which they do not); `test/java-fixtures/provenance.edn` by
+`bin/clojure-tests --java-fixtures update`; `test/java/forms/provenance.edn` by `bin/java-check --forms update`.
+Each rewrites its forms too, and they must not move (the claim of part 1): a forms diff is a bug, not an update.
+During the work use `REPR_JAVA_STALE_OK=1` (as JN9f and JFS133 did) rather than rewrite per commit; `bin/provenance-check`
+last, in the same commit as the last reader change (GTS36 (b)). A new `jdk/platform/provenance.edn` records the pack
+(`bin/repr-java platform-pack` writes it; `platform-check` verifies it); `bin/provenance-check` learns it.
+
+**Gate steps** (test/gate/steps.edn):
+
+- new, essential, light: `repr-java-closure` (`bin/repr-java closure-check`, seconds, no executable).
+- new, essential, `:hosts [:prog :stage0]`, needs `go-build`: `repr-java-shipped` (`bin/repr-java shipped-check --essential`:
+  `samples` read by `$GATE_EXE` against the committed expected forms; no tool, no lock).
+- new, `--full`, chain `java`, after `javac-tool`, `:heavy :inner`, memory like `repr-java-nojavac` (11 GiB):
+  `repr-java-shipped-full` (`shipped-check --corpus {part}`), beside `repr-java-nojavac`.
+- changed: `:tools` group (repr/java's closure is no longer excluded), `go-build` (the key moves), `javac-tool`
+  (`arbace_javac_key` already hashes `arbace/`: rebuilt once), every step hosted on `:gate` or `:prog` (reruns once),
+  `repr-java-*` (inputs `:repr-java` gain `jdk/platform/` and the new script), `provenance` (inputs gain
+  `jdk/platform/`), `bin/gate`'s step list, GATE-SURVEY.md's table. Run `bin/gate --audit` on `smoke` (inside
+  `go-build`), `repr-java-shipped`, `repr-java-closure`, `provenance` (undeclared reads show here).
+- A consequence the decision did not weigh: from the merge on, an edit to the read closure changes `gate_key`, so
+  every repr/java edit costs the gate-build (about 8 minutes) and the checks on `:gate`: JFS137 below.
+
+### JN10.8 Estimate, concurrency, who does what
+
+| part | working days | who |
+|---|---|---|
+| 1 (JFS130) | 3.5 (the inventory 0.3, hook and flags 0.3, tree and attr 0.8, model, nattr, resolve, expr, convert 1.5, java.ae and the tool builds 0.6) | the hook protocol and `tree`/`attr`/`model` split: Opus (the dispatch order and what the tool must still do); `nattr` and `convert` hint and static removal, `jflags`, `closure-check`, the keys: Sonnet |
+| 2 (JFS131) | 2 (measure 0.2, `platform.ae` and `decls` 0.8, `strip` and the pack 0.6, embedding and composite 0.4) | `strip` (every attribute `parse` reads kept) and the equality check: Opus; the interface, the pack format, the resource, the writer verb: Sonnet |
+| 3 (JFS132) | 1.5 (`-main` 0.2, `load.ae` 0.5, `shipped-check` and the sample 0.8) | Sonnet; the REPL's `load-java` semantics over `arbace.classes` loading: Opus reviews |
+| integration | 1 (keys, steps.edn, the gate, the provenance rewrite, docs, the audit) | Sonnet; Opus for anything the tool's rebuilds show |
+| **total** | **8 sequential, about 5.5 elapsed** | |
+
+Part 2's `platform.ae` and the measurement run beside part 1 (they share only `decls.ae`'s four platform calls and
+`java.ae`'s `registry-units`: two small hunks, merged by hand). Part 3 needs part 1's hook (for the error path) and
+part 2's pack (for the composite) but its `-main`, `load.ae` and the checks' script can be written on stubs from the
+start; it is the last to finish. The heavy waits are the host's: two tool builds per change of the closure's key
+(about 30-40 minutes each; JN9f's 2,537 s), the corpora's checks under the big lock (jdk corpus 540 s, 10.8 GB), the
+`bin/gate --full`'s chain at the end, serial: the elapsed days above assume the lock is free. One branch, not three
+worktrees, for part 1; parts 2 and 3 in worktrees merged into it (the rules: one 20 GiB job at a time).
+
+### JN10.9 Risks
+
+1. **A javac name left in the closure** shows only when c2j compiles the shipped build (or the guard fails): the guard
+   `closure-check` makes it a seconds-long failure; a name reached through reflection (`Class/forName` on a string) the
+   grep misses, but the shipped build's smoke read (the essential step) meets it.
+2. **A silent change of the tool's answers** from the reordering of branches (native test first): the five checks
+   (parse, front, attr, nojavac, `check --suite`) on every corpus are byte-for-byte; any diff stops the part.
+3. **Speed.** A hook call on a hot accessor (`tr/f`) costs: measure `bin/repr-java parse --time` and nojavac's
+   total before and after on the tool (JN9e: 540 s for the corpora, the jdk corpus 10.8 GB); budget 5%, and keep
+   the native test inline so that only the javac model pays an indirection.
+4. **Reflection in the shipped build.** Dropping a type hint where the value is a map is harmless; dropping one on a
+   host class (`File`, `ConcurrentHashMap`) is not: `*warn-on-reflection*` is on in the namespaces, and the
+   guard counts its warnings in the closure (zero).
+5. **The shipped program's growth and the gate-build's time and memory** (+27 MB; the j2g run 2.5-3 minutes plus about
+   half a minute; `go-build`'s `:mem-gib 19` may need raising: re-measure, `.tmp/gate/go-build.mem`).
+6. **The pack's size is an estimate.** If java.base's declarations come to more than 12 MB deflated, JFS131 (b) is
+   reconsidered (the proposal recommended it on a measure that step 1 of part 2 makes): the fallback is the directory
+   (a), at no loss for the tool.
+7. **Answers of a stripped class differing** (an attribute `parse` reads that `strip` dropped, for instance
+   `RuntimeInvisibleAnnotations`): `platform-check`'s equality over all 27,598 classes is the proof.
+8. **Two worlds, one name**: the tool and the shipped program both hold `arbace.repr.java.*`; the tool's base now
+   includes the closure, and `reader_compile` must compile only the javac half, or a namespace is compiled twice.
+   `javac-tool` building on the gate's base is the test.
+9. **`load-java`'s scope.** Sibling sources and the source path (javac's `-sourcepath` is the file's directory), and
+   a class that needs a module not in the pack: the error, not a wrong answer.
+10. **Re-seed deferral**: until then, `bin/seed --verify` and `target/seed/aot` as a base are stale for the
+    reader's namespaces (known, cost only time).
+
+### JN10.10 Proposals
+
+- **JFS135 The platform pack's home and form.**
+  - Options: (a) committed in the repository as `jdk/platform/java.base.decls`, one deterministic file (stripped class
+    files deflated, with an index), written by `bin/repr-java platform-pack` from the platform at its pin, its hash in
+    `jdk/platform/provenance.edn` and checked by `bin/provenance-check`; (b) not committed, packed by the build from
+    the platform's directory (`REPR_JAVA_PLATFORM`) when it is set, else the shipped reader has none (a); (c) the
+    original class files embedded unstripped (34 MB for java.base).
+  - *Recommended: (a)*: the shipped build must not need jdk26u (CLAUDE.md: the build needs only TamaGo's Go); the repository
+    already commits `jdk/forms` (12 MB) and jdk/data; (b) makes the standalone build depend on the host; (c) is five times
+    the data for answers a pack gives equally (the equality check proves it).
+- **JFS136 What of repr/java the shipped program embeds.**
+  - Options: (a) the read closure only (the reader without the printer, round trip, coverage, split): about the 24 MB
+    of forms JN9f.8 counted less `print` (3,993 lines, the biggest namespace); (b) all of repr/java but javac's half,
+    the printer included (JN9f.8's +27 MB), so that Java forms print back to Java at the REPL; (c) the closure now, the
+    printer as its own later part.
+  - *Recommended: (a)*: JFS126 is for reading Java into the REPL; the printer's check is the tool's (roundtrip at the
+    classes level needs javac anyway); (c) is (a) with the door open, and costs nothing now.
+- **JFS137 The reader and the gate's key.**
+  - Options: (a) accept that an edit of the read closure changes `gate_key` (the gate-build, about 8 minutes, and the
+    steps hosted on `:gate` or `:prog` rerun once per edit); (b) hash the closure into the build's key only for releases
+    and the shipped checks, and keep the gate's executables keyed without it (the gate's shipped read check then runs on
+    an executable with the reader evaluated from the checkout, as the tools are, `bin/lib/tools.bash`); (c) leave the reader
+    out of the gate's executable and compile it only into releases.
+  - *Recommended: (b) for the gate, (a) for releases and the tag*: the reader is edited far more often than the runtime
+    (JN9e, JN9f, JFS133: each a week of edits to repr/java), and (a) in the gate would add eight minutes and a full rerun of
+    the :gate-hosted steps to each; (b) keeps the shipped check meaningful (the closure is evaluated on the gate's
+    executable, the compiled one is built and smoke-tested at the release and in `--full`). Whether the `:tools` group's
+    audit accepts this is part 3's first step to try; if not, (a).
+- **JFS138 Next.**
+  - Options: (a) JN10 as planned, three parts, one branch, after `arbace-reaps-3-crops-v2`, about 5.5 days elapsed; (b) part 2
+    first as its own small step (the platform behind an interface, the pack measured, no embedding), since it stands
+    alone and settles JFS131's size question before the split is begun; (c) later, after C23.
+  - *Recommended: (b), then (a)'s parts 1 and 3*: the pack's size is the one number the decision rests on and it takes
+    half a day to get; nothing in parts 1 and 3 depends on it.
+
+## Decided (2026-10-29): JFS135-JFS138
+
+The user decided all four as recommended:
+
+- **JFS135 (a):** the java.base pack is committed as `jdk/platform/java.base.decls`, deterministic, written by
+  `bin/repr-java platform-pack`.
+- **JFS136 (a):** the shipped program embeds the read closure only. The printer can be added later as a part of its own.
+- **JFS137 (b) for the gate, (a) at the tag:** the gate's executables are keyed without the closure, and the reader is
+  evaluated from the checkout. Releases and the tag embed it. If the audit rejects (b), (a) is used throughout.
+- **JFS138 (b) then (a):** part 2 (the pack) comes first as a small step to measure it, then parts 1 and 3.
