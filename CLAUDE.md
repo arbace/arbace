@@ -362,10 +362,26 @@ Prior art:
   that its declared inputs do not cover (the declarations are the audit's; `make gate-audit`), one skipped
   light check (the oldest pass) reruns each gate as the canary (`GATE_CANARY=0` not), `--prune` trims the
   store (the last 5 passes and 30 days per step), the planner fails on a table that names no file, step or
-  host, a step over three times its latest passes is flagged, the `:heavy` steps (measured peaks above
-  8 GiB, `:mem-gib`) run each under `GATE_HEAVY_CMD` (default `flock $ARBACE_HEAVY_LOCK`, by default the
-  main checkout's `.tmp/big.lock`) and the gate itself does not (a caller that holds the lock sets
-  `GATE_HEAVY_CMD=env`, else the gate waits for it), the executables and javac's tool are kept by key in
+  host, a step over three times its latest passes is flagged, the `:heavy true` steps (measured peaks above
+  8 GiB, `:mem-gib`) run each under `GATE_HEAVY_CMD` (default `bin/heavy-lock`: the host's big-job lock
+  `ARBACE_HEAVY_LOCK`, by default the main checkout's `.tmp/big.lock`, taken in turn, a FIFO of tickets in
+  front of the flock that plain `flock big.lock` users still exclude; GTS32 (a), `make gate-queue`) and the
+  gate itself does not (a caller that holds the lock sets `GATE_HEAVY_CMD=env`, else the gate waits for it),
+  the `:heavy :inner` ones not: their tools take the lock around their heavy process alone (since GT5,
+  GTS31 (b), `bin/lib/heavy.bash`: `bin/j2g`, repr/go's native reader and converter, repr/java's corpus
+  reads, under `ARBACE_HEAVY_CMD` unless `ARBACE_HEAVY_HELD`), their light work beside the other steps;
+  since GT5 (doc/GATE-SURVEY.md, "As built: GT5") the inner keys: a step's `:parts` are one check each
+  (native-check and repr/java's tree checks per corpus, `NAME.CORPUS`; the parked sub-projects' corpora
+  `:clean-only`, run with `GATE_ALL_PARTS=1`), a step's `:outputs` (`GATE_OUT`) are kept with its pass and put
+  back when it is skipped, a step's `:uses` (`GATE_OUTS`) put its producers' outputs' digests in its key (an
+  early cutoff, decided once they ran: the plan's `after`), Java's check is one step per level with its
+  judgment apart (`bin/java-check --save DIR`, `--judge RESULTS...`: a classes file reruns the judgment
+  alone), the program hosts `:prog` and `:javac-prog` know the gate's executables and javac's tool by the
+  units of the program j2g made (`bin/lib/prog-units.bash`, `units.tsv` beside the build) less a step's
+  `:never-loads` (`arbace.j2g`: a j2g change that leaves the translations alone reruns only j2g's steps), the
+  builds all run before the checks and the plan is made again after them, `bin/gate --audit` records the
+  namespaces a step loads (`ARBACE_LOADED_LOG`, RT.load) and fails on one of its `:never-loads`, its reducer
+  `tools/gateaudit` (Go, GTS30 (a)), and every `--full` ends with `--prune` (GTS34 (a)); the executables and javac's tool are kept by key in
   `ARBACE_GATE_EXES` (default the main checkout's `.tmp/gate-exe`), shared by the worktrees;
   the programs of goi, Java's interpreted level, the suite and the oracle run under CPU-time limits with
   a wall cap and a quiet retry (`bin/lib/limit.bash`); the runner's logic is `bin/lib/gate-run.bash`, in
@@ -405,8 +421,10 @@ Prior art:
   Arbace's, JN8), `bin/repr-java front-check` (the converter's forms from the native trees equal to
   javac's trees', JFS66 (b)), `bin/repr-java attr-check` (the native provider's facts equal to javac on
   Arbace's, JN9a), `bin/repr-java nojavac-check` (since JN9f: the corpora read with no javac, every answer native,
-  the forms equal to javac's), `bin/java-check --levels read,interp,classes,compiled,diagnostics,print` (Java's conformance check, every
-  corpus, then `--forms verify`: the essential tests' forms read afresh); then
+  the forms equal to javac's; these four by corpus since GT5), `bin/java-check --levels L --save` for each of
+  read, interp, classes, diagnostics, compiled and print (Java's conformance check, every corpus, a step a level
+  since GT5), then `--forms verify` (the essential tests' forms read afresh) and `bin/java-check --judge` (the
+  levels' results against the classes); then
   `bin/arbace-go --fixpoint --g1 .tmp/arbace-go-gate` (G1 the gate's build, G2 and G3 built), then `bin/clojure-tests --aot` (Clojure's suite compiled, REAP3), then `bin/arbace-go --build-program --check` (every sample, REAP7b); repr/go's round trips (`bin/repr-go roundtrip amd64`, `linux/amd64`, and
   `--text amd64`: mode `:full` printed back to the original text, byte for byte; then `bin/repr-go native-check --fresh`: the native reader's headers and trees equal to the helper's over every corpus, its raw forms resolved by the final ones, and the final forms of its dumps annotated by goi's checker equal to the helper's, as data and as `.ae` text in both modes), repr/clojure's
   (`bin/repr-clojure check`, `--suite`, `--roundtrip`), `bin/x509roots-vendor verify`, `check`; goi (`bin/goi

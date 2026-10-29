@@ -52,6 +52,13 @@ repr_go_run() {
       break
     fi
   done
+  # repr_go_heavy set (the native reader's and the converter's runs, bin/repr-go): under the host's
+  # big-job lock when the gate asks for it (GTS31 (b), bin/lib/heavy.bash)
+  if [ -n "${repr_go_heavy:-}" ]; then
+    . "$root/bin/lib/heavy.bash"
+    ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} heavy_run "$exe" -m "$ns" "$@"
+    return
+  fi
   ARBACE_PATH=$root${ARBACE_PATH:+:$ARBACE_PATH} "$exe" -m "$ns" "$@"
 }
 

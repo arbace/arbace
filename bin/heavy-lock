@@ -1,0 +1,79 @@
+#!/bin/bash
+# The host's big-job lock taken in turn (doc/GATE-SURVEY.md, GTS32 (a), "As built: GT5"): a FIFO of
+# tickets in front of the lock, flock(1) being unfair (an audit queued behind four gates waited three
+# hours). The lock itself stays a plain flock on ARBACE_HEAVY_LOCK (default the main checkout's
+# .tmp/big.lock), so that this and `flock big.lock CMD` exclude each other as before.
+#
+# Usage: bin/heavy-lock CMD [ARG...]
+#   Takes a ticket (LOCK.queue/TIME-PID, TIME the nanoseconds of the arrival: the order), waits until
+#   no earlier ticket is live (a ticket whose process is gone is removed by the next waiter), then
+#   flock LOCK and runs CMD with ARBACE_HEAVY_HELD=1 (the tools inside take no lock of their own:
+#   GTS31 (b), bin/lib/heavy.bash), its status the command's; the ticket goes when CMD ends.
+#   With ARBACE_HEAVY_HELD set already, CMD runs at once (the caller holds the lock).
+#
+# With plain flock: an agent running `flock LOCK CMD` takes no ticket. It competes with the head of
+# the queue alone, at the flock: it may come before the head (flock's unfairness, once), never
+# before the rest, and it never waits for the queue. Ticket holders among themselves are served in
+# order of arrival. The queue's state: `bin/heavy-lock --queue` lists the live tickets.
+# Environment: ARBACE_HEAVY_LOCK, HEAVY_LOCK_POLL (seconds between looks at the queue, default 2),
+# HEAVY_LOCK_WAITS (a file the seconds waited are appended to).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+main_root() {
+  local common
+  common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>"${TMPDIR:-$root/.tmp}/heavy-lock-git.err") \
+    && [ "$(basename "$common")" = .git ] && dirname "$common" || echo "$root"
+}
+lock=${ARBACE_HEAVY_LOCK:-$(main_root)/.tmp/big.lock}
+q=$lock.queue
+mkdir -p "$q" "$(dirname "$lock")" || exit 1
+
+# a process's start time (field 22 of /proc/PID/stat), so that a reused PID is not taken for the waiter
+starttime() { local s; s=$(cat "/proc/$1/stat" 2>"$q/.err") || return 1; s=${s##*) }; set -- $s; echo "${20}"; }
+# live TICKET: its process is the one that took it
+live() {
+  local pid st want
+  pid=${1##*-}
+  want=$(cat "$q/$1" 2>"$q/.err") || return 1
+  st=$(starttime "$pid") || return 1
+  [ "$st" = "$want" ]
+}
+# the live tickets in order, the dead removed
+tickets() {
+  local t
+  for t in $(ls "$q" | LC_ALL=C sort); do
+    case $t in .*) continue ;; esac
+    if live "$t"; then echo "$t"; else rm -f "${q:?}/$t"; fi
+  done
+}
+
+if [ "${1:-}" = --queue ]; then
+  for t in $(tickets); do
+    pid=${t##*-}
+    echo "$t $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>"$q/.err" | cut -c1-160)"
+  done
+  exit 0
+fi
+[ $# -gt 0 ] || { sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2; }
+[ -n "${ARBACE_HEAVY_HELD:-}" ] && exec "$@"
+
+t0=$(date +%s)
+me=$(date +%s%N)-$$
+starttime $$ > "$q/.$me" && mv "$q/.$me" "$q/$me" || exit 1
+trap 'rm -f "${q:?}/$me"' EXIT
+trap 'exit 143' TERM INT HUP
+poll=${HEAVY_LOCK_POLL:-2}
+announced=
+while :; do
+  head=$(tickets | head -1)
+  [ "$head" = "$me" ] && break
+  if [ -z "$announced" ]; then
+    echo "heavy-lock: waiting in turn for $lock ($(tickets | grep -n -x "$me" | cut -d: -f1) in the queue)" >&2
+    announced=1
+  fi
+  sleep "$poll"
+done
+# once the lock is held: the seconds waited appended to HEAVY_LOCK_WAITS when set (bin/gate's step's
+# .waits: the summary's "its tools waited ... for the lock"), then CMD
+flock "$lock" env ARBACE_HEAVY_HELD=1 ARBACE_HEAVY_LOCK="$lock" bash -c \
+  '[ -z "${HEAVY_LOCK_WAITS:-}" ] || echo $(( $(date +%s) - $1 )) >> "$HEAVY_LOCK_WAITS"; shift; exec "$@"' heavy-lock "$t0" "$@"

@@ -11,12 +11,21 @@
 #   gate_prune [--dry-run]  the store and the executables trimmed (GTS27 (a))
 #   gate_audit [STEP...] the strace audit of the declared inputs (GT4)
 #
-# The heavy lock (GT6, GTS25 (a)): a step the table marks :heavy runs under GATE_HEAVY_CMD, by
-# default `flock $ARBACE_HEAVY_LOCK` (ARBACE_HEAVY_LOCK, by default the main checkout's
-# .tmp/big.lock: the host's big-job lock that agents take), the gate itself not. The step's wall
-# time starts when it holds the lock; the wait is its .wait. A caller that holds the lock already
-# (flock .tmp/big.lock bin/gate) sets GATE_HEAVY_CMD=env, else the gate waits for itself. The step's
-# environment has ARBACE_HEAVY_HELD=1.
+# The heavy lock (GT6, GTS25 (a); GT5, GTS31 (b), GTS32 (a)): a step the table marks :heavy true runs
+# under GATE_HEAVY_CMD, by default bin/heavy-lock (the host's big-job lock ARBACE_HEAVY_LOCK, by default
+# the main checkout's .tmp/big.lock, taken in turn: a FIFO of tickets in front of the flock), the gate
+# itself not; its environment has ARBACE_HEAVY_HELD=1, so that its tools take no lock again. A step
+# marked :heavy :inner runs without it: its tools take the lock around their heavy process alone
+# (bin/lib/heavy.bash's heavy_run: bin/j2g, repr/go's reader, repr/java's corpus reads), under
+# ARBACE_HEAVY_CMD, which the gate sets to GATE_HEAVY_CMD; a light step likewise. The step's wall time
+# starts when it holds the lock; the wait is its .wait, the inner waits its .waits (bin/heavy-lock's,
+# HEAVY_LOCK_WAITS). A caller that holds the lock already (flock .tmp/big.lock bin/gate) sets
+# GATE_HEAVY_CMD=env: then ARBACE_HEAVY_HELD=1 for every step, nothing locks again.
+#
+# Outputs (GT5): a step with :outputs writes into GATE_OUT (.tmp/gate/out/NAME), kept with its pass
+# (STORE/NAME/KEY.out) and put back when it is skipped; a step whose :uses name them reads them under
+# GATE_OUTS, their digests in its key: known at the plan when the producers are skipped, else computed
+# here once they ran (the decision "after", an early cutoff).
 
 gate_env() {
   local common main
@@ -24,7 +33,11 @@ gate_env() {
     && [ "$(basename "$common")" = .git ] && main=$(dirname "$common") || main=$root
   store=${ARBACE_GATE_STORE:-$main/.tmp/gate-pass}
   export ARBACE_HEAVY_LOCK=${ARBACE_HEAVY_LOCK:-$main/.tmp/big.lock}
-  GATE_HEAVY_CMD=${GATE_HEAVY_CMD:-flock $ARBACE_HEAVY_LOCK}
+  GATE_HEAVY_CMD=${GATE_HEAVY_CMD:-$root/bin/heavy-lock}
+  # the tools' own lock around their heavy process (GTS31 (b), bin/lib/heavy.bash): the same command;
+  # GATE_HEAVY_CMD=env (the caller holds the lock): nothing locks again
+  export ARBACE_HEAVY_CMD=$GATE_HEAVY_CMD
+  [ "$GATE_HEAVY_CMD" = env ] && export ARBACE_HEAVY_HELD=1
   exes=${ARBACE_GATE_EXES:-$main/.tmp/gate-exe}
   mkdir -p "$(dirname "$ARBACE_HEAVY_LOCK")" "$exes" || return 1
   # the executables and javac's tool by the key of what they are built from, one directory each,
@@ -35,6 +48,9 @@ gate_env() {
   export ARBACE_GATE_CACHE=$exes/${gkey:0:20} GATE_CACHE=$exes/${gkey:0:20} GATE_JAVAC_DIR=$exes/javac-${jkey:0:20}
   export GATE_EXE=$GATE_CACHE/amd64/arbace GATE_TESTS=$GATE_CACHE/amd64/arbace-tests
   export GATE_JAVAC=$GATE_JAVAC_DIR/arbace-javac GATE_JOBS=${GATE_TEST_JOBS:-12}
+  # Java's check's cache of read forms, shared by the worktrees (GT5: keyed by the sources, the options,
+  # the reader's sources and the tool's key), so that a level that runs where the read was skipped finds it
+  export GATE_JAVA_FORMS=${GATE_JAVA_FORMS:-$main/.tmp/java-check/forms}
 }
 
 plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
@@ -45,8 +61,17 @@ plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
   rel=none
   jdk=$(command -v javac) && jdk=$(readlink -f "$jdk") && [ -f "${jdk%/bin/javac}/release" ] \
     && rel=$(sha256sum < "${jdk%/bin/javac}/release" | cut -c1-64)
+  # the program hosts (GT5, GTS4 (b), (c)): the units of the build at this key (units.tsv), pending
+  # when there is no build yet, none for a build made before the units were recorded
+  local pu=pending ju=pending
+  [ -x "$GATE_EXE" ] && { pu=none; [ -f "$GATE_CACHE/amd64/units.tsv" ] && pu=$GATE_CACHE/amd64/units.tsv; }
+  [ -x "$GATE_JAVAC" ] && { ju=none; [ -f "$GATE_JAVAC_DIR/units.tsv" ] && ju=$GATE_JAVAC_DIR/units.tsv; }
+  # the gate's own tests (a toy table, GATE_STEPS): units given
+  pu=${GATE_PROG_UNITS:-$pu} ju=${GATE_JAVAC_PROG_UNITS:-$ju}
   { printf '{:gate "%s"\n' "$gkey"
     printf ' :javac "%s"\n' "$jkey"
+    printf ' :prog-units "%s" :prog-rest "%s"\n' "$pu" "$("$root/bin/arbace-go" --gate-rest-key)"
+    printf ' :javac-prog-units "%s" :javac-prog-rest "%s"\n' "$ju" "$(arbace_javac_rest_key "$root")"
     printf ' :stage0 "%s"\n' "$(cat seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 | sha256sum | cut -c1-64)"
     printf ' :frozen "%s"\n' "$(sha256sum < test/oracle/frozen-jar.sha256 | cut -c1-64)"
     printf ' :jdk "%s"\n' "$rel"
@@ -82,14 +107,14 @@ sampler() {
   done
 }
 
-step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1); a heavy one under the lock (GT6)
+step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1); HEAVY yes: under the lock (GT6), inner: its tools lock (GT5)
   local name=$1 hv=$2 t0 t0w t1 pid st pre=(); shift 2; t0=$(date +%s)
   [ "$hv" = yes ] || hv=
-  rm -f "${logs:?}/${name:?}.start"
+  rm -f "${logs:?}/${name:?}.start" "${logs:?}/${name:?}.waits"
   [ -n "$hv" ] && read -r -a pre <<< "$GATE_HEAVY_CMD"
   # the lock first, then the clock: the start file is written once the step holds the lock
   "${pre[@]}" bash -c 'date +%s > "$1"; shift; exec "$@"' gate-step "$logs/$name.start" \
-    env ${hv:+ARBACE_HEAVY_HELD=1} /usr/bin/time -v -o "$logs/$name.time" "$@" > "$logs/$name.log" 2>&1 &
+    env ${hv:+ARBACE_HEAVY_HELD=1} HEAVY_LOCK_WAITS="$logs/$name.waits" /usr/bin/time -v -o "$logs/$name.time" "$@" > "$logs/$name.log" 2>&1 &
   pid=$!
   echo "$pid" > "$logs/$name.pid"
   wait "$pid"; st=$?
@@ -100,18 +125,24 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
   cpu=$(awk -F': ' '/User time|System time/ {s += $2} END {printf "%.1f", s}' "$logs/$name.time" 2>"$logs/$name.time.err")
   rss=$(awk -F': ' '/Maximum resident set size/ {print $2}' "$logs/$name.time" 2>"$logs/$name.time.err")
   tree=$(awk -F'\t' -v n="$name" '$2 == n && $3 > m {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/$name.time.err")
-  printf '{:step "%s" :wall-s %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s :wait-s %s}\n' \
-    "$name" "$(cat "$logs/$name.secs")" "${cpu:-0}" "${rss:-0}" "${tree:-0}" "$(cat "$logs/$name.wait")" > "$logs/$name.mem"
+  local iw=0
+  [ -f "$logs/$name.waits" ] && iw=$(awk '{s += $1} END {print s + 0}' "$logs/$name.waits")
+  printf '{:step "%s" :wall-s %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s :wait-s %s :inner-wait-s %s}\n' \
+    "$name" "$(cat "$logs/$name.secs")" "${cpu:-0}" "${rss:-0}" "${tree:-0}" "$(cat "$logs/$name.wait")" "$iw" > "$logs/$name.mem"
   return $st
 }
 mem_of() {  # mem_of NAME FIELD: a number of NAME.mem
   sed -n "s/.*:$2 \([0-9.]*\).*/\1/p" "$logs/$1.mem" 2>"$logs/mem-of.err"
 }
-record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
+record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a)), with its outputs (GT5)
   local name=$1 k=${key[$1]} d=$store/$1 tmp
   mkdir -p "$d" || return 1
   tmp=$d/.$k.$$
   cp "$logs/$name.log" "$d/$k.log" && cp "$logs/plan/$name.inputs" "$d/$k.inputs" || return 1
+  if [ "${outputs[$name]}" = yes ]; then
+    rm -rf "${d:?}/.$k.out.$$"
+    cp -a "$logs/out/$name" "$d/.$k.out.$$" && rm -rf "${d:?}/$k.out" && mv -T "$d/.$k.out.$$" "$d/$k.out" || return 1
+  fi
   printf '{:step "%s" :key "%s" :commit "%s" :dirty %s :worktree "%s" :date "%s"\n :secs %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s\n :log-sha256 "%s"}\n' \
     "$name" "$k" "$commit" "$dirty" "$root" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat "$logs/$name.secs")" \
     "$(mem_of "$name" cpu-s)" "$(mem_of "$name" maxrss-kib)" "$(mem_of "$name" tree-peak-kib)" \
@@ -119,27 +150,62 @@ record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
 }
 
 # the plan's steps, from plan.tsv: NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM BUDGET
-# SUMMARY-N SUMMARY-RE WHY AUDIT-CMD CMD
+# SUMMARY-N SUMMARY-RE WHY AUDIT-CMD OUTPUTS USES KIND CMD
 order=()
-declare -A dec key phase chain needs after heavy memgib budget sum_n sum_re why acmd cmd
-load_plan() {
-  local n d k p c ne a hv mg bu sn sre w ac cm
-  while IFS=$'\t' read -r n d k p c ne a hv mg bu sn sre w ac cm; do
+declare -A dec key phase chain needs after heavy memgib budget sum_n sum_re why acmd outputs uses kind cmd
+load_plan() {  # load_plan: plan.tsv into the arrays (again after a second plan: the order anew)
+  local n d k p c ne a hv mg bu sn sre w ac ou us ki cm
+  order=()
+  while IFS=$'\t' read -r n d k p c ne a hv mg bu sn sre w ac ou us ki cm; do
     order+=("$n"); dec[$n]=$d key[$n]=$k phase[$n]=$p chain[$n]=$c needs[$n]=${ne//,/ } after[$n]=$a
-    heavy[$n]=$hv memgib[$n]=$mg budget[$n]=$bu sum_n[$n]=$sn sum_re[$n]=$sre why[$n]=$w acmd[$n]=$ac cmd[$n]=$cm
+    heavy[$n]=$hv memgib[$n]=$mg budget[$n]=$bu sum_n[$n]=$sn sum_re[$n]=$sre why[$n]=$w acmd[$n]=$ac
+    outputs[$n]=$ou uses[$n]=${us//,/ } kind[$n]=$ki cmd[$n]=$cm
   done < "$logs/plan.tsv"
 }
 ok_status() { [ -f "$logs/$1.status" ] && case $(cat "$logs/$1.status") in 0|skip) return 0 ;; esac; return 1; }
-run_one() {  # run_one NAME: a step of the plan, as decided
-  local n=$1 x st
+# out_sha PATH: an output's digest, as gate.plan's out-digest: a file's SHA-256; a directory's, the
+# SHA-256 of sha256sum's lines of its files in order; missing
+out_sha() {
+  if [ -f "$1" ]; then sha256sum < "$1" | cut -c1-64
+  elif [ -d "$1" ]; then (cd "$1" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | xargs -r -d '\n' sha256sum) | sha256sum | cut -c1-64
+  else echo missing; fi
+}
+# pass_desc FILE: a pass record's "passed at KEY, COMMIT, DATE, WORKTREE", as gate.plan's
+pass_desc() {
+  sed -n -e 's/.*:key "\([0-9a-f]\{12\}\)[0-9a-f]*".*:commit "\([0-9a-f]\{0,8\}\)[^"]*".*:worktree "\([^"]*\)" :date "\([^"]*\)".*/passed at \1, \2, \4, \3/p' "$1"
+}
+# restore_out NAME: a skipped step's outputs put back from its pass
+restore_out() {
+  [ "${outputs[$1]}" = yes ] || return 0
+  rm -rf "${logs:?}/out/$1"; mkdir -p "$logs/out"
+  [ -d "$store/$1/${key[$1]}.out" ] && cp -a "$store/$1/${key[$1]}.out" "$logs/out/$1"
+}
+run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of the build phase is done)
+  local n=$1 x st u p
+  [ -f "$logs/$n.done" ] && return 0
   case ${dec[$n]} in
-    skip|none) echo "${dec[$n]}" > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
+    skip) restore_out "$n" || { echo "notrun its outputs" > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }
+          echo skip > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
+    none) echo none > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
   esac
   for x in ${needs[$n]}; do
     [ "$x" = - ] && continue
     ok_status "$x" || { echo "notrun $x" > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }
   done
-  step "$n" "${heavy[$n]}" bash -c "${cmd[$n]}"; st=$?
+  if [ "${dec[$n]}" = after ]; then
+    # GT5: the key once the producers ran, their outputs' digests appended to the plan's material
+    for u in ${uses[$n]}; do echo "uses $u $(out_sha "$logs/out/$u")" >> "$logs/plan/$n.inputs"; done
+    key[$n]=$(sha256sum < "$logs/plan/$n.inputs" | cut -c1-64)
+    if [ -f "$store/$n/${key[$n]}.edn" ] && [ -z "${rerun:-}" ]; then
+      why[$n]="cut off: its producers' outputs as at its pass; $(pass_desc "$store/$n/${key[$n]}.edn")"
+      dec[$n]=skip; echo "${why[$n]}" > "$logs/$n.why"
+      restore_out "$n" || { echo "notrun its outputs" > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }
+      echo skip > "$logs/$n.status"; touch "$logs/$n.done"; return 0
+    fi
+    dec[$n]=run
+  fi
+  if [ "${outputs[$n]}" = yes ]; then rm -rf "${logs:?}/out/$n"; mkdir -p "$logs/out/$n"; fi
+  GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out step "$n" "${heavy[$n]}" bash -c "${cmd[$n]}"; st=$?
   if [ $st = 0 ] && [ "${dec[$n]}" = run ]; then
     record_pass "$n" || echo "gate: warning: the pass of $n was not recorded in $store" >&2
   fi
@@ -152,6 +218,7 @@ report() {  # report NAME: a step's outcome, times, memory and summary lines
     echo "   FAILED  $n (not run: an earlier step failed)"; status=1; return
   fi
   st=$(cat "$logs/$n.status")
+  [ -f "$logs/$n.why" ] && why[$n]=$(cat "$logs/$n.why")
   case $st in
     skip) echo "   skipped  $n (${why[$n]})"; return ;;
     none) echo "   -  $n (not needed: no step that runs needs it)"; return ;;
@@ -162,6 +229,8 @@ report() {  # report NAME: a step's outcome, times, memory and summary lines
   w="$w, cpu $(mmss "${c:-0}"), peak $(gib "$(mem_of "$n" maxrss-kib)") (tree $(gib "$(mem_of "$n" tree-peak-kib)"))"
   wt=$(cat "$logs/$n.wait" 2>"$logs/count.err"); wt=${wt:-0}
   [ "$wt" -ge 5 ] && w="$w, waited $(mmss "$wt") for the lock"
+  wt=$(mem_of "$n" inner-wait-s); wt=${wt:-0}
+  [ "$wt" -ge 5 ] && w="$w, its tools waited $(mmss "$wt") for the lock"
   # GT6, GTS17 (a): a budget is a warning (three times the longest of its last passes), never a kill
   b=${budget[$n]:--}
   if [ "$b" != - ] && [ "$s" -gt "$b" ]; then w="$w; OVER ITS BUDGET of $(mmss "$b")"; fi
@@ -214,11 +283,11 @@ gate_prune() {  # gate_prune [--dry-run]
       [ -n "$f" ] || continue
       i=$((i + 1)); npass=$((npass + 1)); k=${f%.edn}
       if [ $i -le "$keep" ] || [ $(( now - $(stat -c %Y "$f") )) -lt $(( days * 86400 )) ]; then nkeep=$((nkeep + 1)); continue; fi
-      sz=$(cat "$k".edn "$k".log "$k".inputs 2>/dev/null | wc -c); freed=$((freed + sz))
+      sz=$(du -sb "$k".edn "$k".log "$k".inputs "$k".out 2>"$store/.prune.err" | awk '{s += $1} END {print s + 0}'); freed=$((freed + sz))
       echo "gate --prune: ${dry:+would remove }$n/$(basename "$k" | cut -c1-12) ($(stat -c %y "$f" | cut -c1-10), $sz bytes)"
-      [ -n "$dry" ] || rm -f "${k:?}.edn" "${k:?}.log" "${k:?}.inputs"
-    done < <(ls -t "$d"*.edn 2>/dev/null)
-    [ -n "$dry" ] || find "$d" -maxdepth 1 -name '.*' -type f -mmin +1440 -delete 2>/dev/null
+      [ -n "$dry" ] || rm -rf "${k:?}.edn" "${k:?}.log" "${k:?}.inputs" "${k:?}.out"
+    done <<< "$(ls -t "$d" | sed -n "s|^\([0-9a-f]*\.edn\)$|$d\1|p")"
+    [ -n "$dry" ] || find "$d" -maxdepth 1 -name '.*' -mmin +1440 -exec rm -rf {} + 2>"$store/.prune.err"
   done
   echo "gate --prune: $npass passes, $nkeep kept, $((npass - nkeep)) ${dry:+would be }removed ($freed bytes) in $store"
   for pat in gate javac; do
@@ -231,7 +300,7 @@ gate_prune() {  # gate_prune [--dry-run]
       [ $(( now - $(stat -c %Y "$f") )) -ge 86400 ] || continue
       echo "gate --prune: ${dry:+would remove }executables $f"
       [ -n "$dry" ] || rm -rf "${f:?}"
-    done < <(ls -dt "$exes"/* 2>/dev/null)
+    done <<< "$(ls -dt "$exes"/* 2>"$store/.prune.err")"
   done
 }
 
@@ -242,8 +311,21 @@ gate_prune() {  # gate_prune [--dry-run]
 # (test/gate/audit.ae) with the step's declared inputs
 gate_audit() {  # gate_audit [STEP...]: the checks named, else every check
   local d=${GATE_AUDIT_DIR:-$root/.tmp/gate-audit} n x names=("$@") st=0 t0 fifo hv=() ap
-  command -v strace > /dev/null || { echo "gate --audit: no strace" >&2; return 2; }
+  command -v strace > "$d.which" || { echo "gate --audit: no strace" >&2; return 2; }
   rm -rf "${d:?}/plan"; mkdir -p "$d"
+  # the reducer (GT5, GTS30 (a)): tools/gateaudit, the Go port of test/gate/audit.awk (23 times faster,
+  # the same lines), built by TamaGo's go when its sources changed; GATE_AUDIT_AWK=1: busybox awk
+  local red=() tg=${ARBACE_GOROOT:-/root/tamago-go} rk
+  if [ -z "${GATE_AUDIT_AWK:-}" ]; then
+    rk=$(cat "$root"/tools/gateaudit/*.go "$root/tools/gateaudit/go.mod" "$tg/VERSION" | sha256sum | cut -c1-64)
+    if [ "$(cat "$d/gateaudit.key" 2>"$d/gateaudit.err")" != "$rk" ] || [ ! -x "$d/gateaudit" ]; then
+      (cd "$root/tools/gateaudit" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
+         "$tg/bin/go" build -trimpath -o "$d/gateaudit.new" .) > "$d/gateaudit.err" 2>&1 \
+        && mv -f "$d/gateaudit.new" "$d/gateaudit" && echo "$rk" > "$d/gateaudit.key"
+    fi
+    if [ -x "$d/gateaudit" ] && [ "$(cat "$d/gateaudit.key" 2>"$d/gateaudit.err")" = "$rk" ]; then red=("$d/gateaudit" -root "$root")
+    else echo "gate --audit: tools/gateaudit did not build ($d/gateaudit.err): busybox awk reduces" >&2; fi
+  fi
   mode=full; logs=$d/plan
   run_plan "$d/plan" > "$d/plan.txt" 2>&1 || { cat "$d/plan.txt"; return 1; }
   load_plan
@@ -264,22 +346,38 @@ gate_audit() {  # gate_audit [STEP...]: the checks named, else every check
     # group stop, as the programs of $GOROOT/test that signal themselves are: an aborted trace is
     # not an audit, the step runs again (twice at most)
     acmd_run=${cmd[$n]}; [ "${acmd[$n]}" = - ] || acmd_run=${acmd[$n]}
+    # GT5: the outputs its :uses name, from their producers' passes
+    for x in ${uses[$n]}; do
+      [ "$x" = - ] && continue
+      case ${dec[${x%%/*}]} in
+        skip) restore_out "${x%%/*}" ;;
+        *) [ -e "$logs/out/${x%%/*}" ] || { echo "gate --audit: $n uses ${x%%/*}'s outputs, which have no pass at its key: bin/gate --full first" >&2; st=1; continue 2; } ;;
+      esac
+    done
+    if [ "${outputs[$n]}" = yes ]; then rm -rf "${logs:?}/out/$n"; mkdir -p "$logs/out/$n"; fi
+    rm -f "${d:?}/$n.loaded"
     for attempt in 1 2 3; do
       fifo=$d/$n.fifo; rm -f "${fifo:?}" "${d:?}/$n.paths"; mkfifo "$fifo"
-      awk -v root="$root" -v dbg="${GATE_AUDIT_SIGNALS:+$d/$n.signals}" -f "$root/test/gate/audit.awk" "$fifo" > "$d/$n.paths" 2> "$d/$n.awk.err" &
+      if [ ${#red[@]} -gt 0 ]; then
+        "${red[@]}" ${GATE_AUDIT_SIGNALS:+-signals "$d/$n.signals"} "$fifo" > "$d/$n.paths" 2> "$d/$n.awk.err" &
+      else
+        awk -v root="$root" -v dbg="${GATE_AUDIT_SIGNALS:+$d/$n.signals}" -f "$root/test/gate/audit.awk" "$fifo" > "$d/$n.paths" 2> "$d/$n.awk.err" &
+      fi
       ap=$!
       hv=(); [ "${heavy[$n]}" = yes ] && read -r -a hv <<< "$GATE_HEAVY_CMD"
       t0=$(date +%s); rm -f "${d:?}/$n.start"
       # the clock starts once the step holds the lock (the start file, as step() does)
       "${hv[@]}" strace -f $([ -n "${GATE_AUDIT_SIGNALS:-}" ] && echo -q || echo -qq) -y -s 4096 --seccomp-bpf -e "trace=${GATE_AUDIT_TRACE:-open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,clone3,fork,vfork}" -o "$fifo" \
-        env ARBACE_HEAVY_HELD=1 bash -c 'date +%s > "$1"; exec bash -c "$2"' gate-audit "$d/$n.start" "$acmd_run" > "$d/$n.log" 2>&1
+        env $([ "${heavy[$n]}" = yes ] && echo ARBACE_HEAVY_HELD=1) ARBACE_LOADED_LOG="$d/$n.loaded" GATE_OUT="$logs/out/$n" GATE_OUTS="$logs/out" \
+        bash -c 'date +%s > "$1"; exec bash -c "$2"' gate-audit "$d/$n.start" "$acmd_run" > "$d/$n.log" 2>&1
       echo $? > "$d/$n.status"; [ -f "$d/$n.start" ] && t0=$(cat "$d/$n.start"); echo $(( $(date +%s) - t0 )) > "$d/$n.secs"
       wait "$ap"; rm -f "${fifo:?}"
       grep -q '^strace: ptrace' "$d/$n.log" || break
       echo "== audit $n: strace aborted (attempt $attempt), $(mmss "$(cat "$d/$n.secs")") lost"
     done
     echo "== audit $n: exit $(cat "$d/$n.status") in $(mmss "$(cat "$d/$n.secs")"), $(wc -l < "$d/$n.paths") distinct (op, path) pairs"
-    arbace_tool -p "$root/test" -m gate.audit "$root" "$d/plan" "$n" "$d/$n.paths" | tee "$d/$n.report" || st=1
+    [ -f "$d/$n.loaded" ] && LC_ALL=C sort -u -o "$d/$n.loaded" "$d/$n.loaded"
+    arbace_tool -p "$root/test" -m gate.audit "$root" "$d/plan" "$n" "$d/$n.paths" "$d/$n.loaded" | tee "$d/$n.report" || st=1
     if [ "$(cat "$d/$n.status")" != 0 ]; then
       echo "audit $n: the step itself failed (exit $(cat "$d/$n.status"), $d/$n.log): what it read before failing is not an audit"; st=1
     fi
