@@ -132,6 +132,8 @@
 # Environment: JDK (jdk26u, default /root/jdk26u), JAVA_CHECK_EXE (the executable that interprets),
 # JAVA_CHECK_FORMS (the read level's cache of forms, default WORK/forms; bin/gate's: the main checkout's,
 # shared by the worktrees, keyed by the sources, the options, the reader's sources and the tool's key),
+# JAVA_CHECK_FORMS_ONLY=1 (GTS41 (c), bin/gate --clean: the levels that consume the read's output, run
+# without the read level, take their forms from that cache alone; a miss fails the run, never reads),
 # REPR_JAVA_EXE (javac's tool executable, bin/repr-java's), ARBACE_HOST_EXE (the tools' host).
 set -euo pipefail
 export CGO_ENABLED=0
@@ -720,7 +722,12 @@ check_one() {
         echo "$key" > "$p/forms.key"
         # one reader per key: two descriptions of one file share their source set
         exec 7> "$forms.lock"; flock 7
-        if [ ! -f "$forms.result" ]; then
+        if [ ! -f "$forms.result" ] && [ -n "${forms_only:-}" ]; then
+          # GTS41 (c), GT7: the read's cache forced (JAVA_CHECK_FORMS_ONLY=1): a level that consumes the
+          # read's output never reads; a miss is the test's failure and the run's (forms-misses)
+          printf 'fail\tthe forms cache missed (JAVA_CHECK_FORMS_ONLY=1): %s\n' "$forms" > "$p/read.result"
+          echo "$id $forms" >> "$work/forms-misses"
+        elif [ ! -f "$forms.result" ]; then
           rm -rf "$forms" "$forms.tmp"
           st=0
           (cd "$root" && bin/repr-java read ${ro[@]+"${ro[@]}"} "$forms.tmp" "$p/src") > "$forms.log" 2>&1 || st=$?
@@ -845,7 +852,10 @@ check() {
   # the executable interprets and hosts j2g: the levels read, nread, classes, print and diagnostics need none
   case ",$levels," in *,interp,*|*,compiled,*) rexe=$(run_exe) || return 1 ;; *) rexe=none ;; esac
   mkdir -p "$formsc"; : > "$work/empty"
-  rm -rf "$work/run"
+  rm -rf "$work/run"; rm -f "$work/forms-misses"
+  # GTS41 (c): JAVA_CHECK_FORMS_ONLY=1 forces the read's cache for the levels that consume its output
+  # (interp, compiled, print run without the read level); a run with the read level reads as ever
+  case ",$levels," in *,read,*|*,nread,*) forms_only= ;; *) forms_only=${JAVA_CHECK_FORMS_ONLY:-} ;; esac
   local pargs=()
   [ -n "$only" ] && pargs+=(--only "$only")
   [ -n "$corpus" ] && pargs+=(--corpus "$corpus")
@@ -863,7 +873,7 @@ check() {
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
   export -f limited limited_cpu check_one nread_one read_opts first_line root_cause classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
-  export root work formsc save jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
+  export root work formsc forms_only save jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
   case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
   case ",$levels," in
@@ -875,6 +885,10 @@ check() {
   esac
   case ",$levels," in *,print,*) print_level > "$work/results-print.tsv" || return 1; LC_ALL=C sort -o "$work/results.tsv" "$work/results.tsv" "$work/results-print.tsv" ;; esac
   echo "java-check: $(wc -l < "$work/run.list") tests in $((SECONDS - t0)) s"
+  if [ -s "$work/forms-misses" ]; then
+    echo "java-check: FAILED: $(wc -l < "$work/forms-misses") tests' forms not in the read's cache $formsc (JAVA_CHECK_FORMS_ONLY=1; $work/forms-misses), the first: $(head -1 "$work/forms-misses")" >&2
+    return 1
+  fi
   # --save (GT5): the runs alone, their results and the forms' digests kept, judged by --judge
   if [ -n "$save" ]; then
     mkdir -p "$save"

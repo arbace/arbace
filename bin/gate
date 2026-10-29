@@ -52,6 +52,41 @@
 #                                   younger than 30 days kept; the executables' directories but the
 #                                   newest 3 of each, older than a day, removed (GTS27)
 #        --rerun                    every check runs (and records its pass), as at a clean run
+#        bin/gate [--full] --plan --builds  the builds the plan needs run first, then the plan on their
+#                                   program units (GTS42 (a)'s demonstrations, bin/gate-demos)
+#        bin/gate [--full] --clean [--tag TAG]  (GT7, doc/GATE-SURVEY.md §7, "As built: GT7 (tooling)")
+#                                   the clean run at a tag: a fresh `git clone --shared` of HEAD's commit
+#                                   in .tmp/gate-clean/SHA, its own empty .tmp/, target/ and GOCACHE, the
+#                                   environment's Arbace and gate variables dropped (but ARBACE_GOROOT,
+#                                   ARBACE_HEAVY_LOCK, GATE_HEAVY_CMD, ARBACE_HEAVY_HELD, GATE_TEST_JOBS,
+#                                   JDK), the clone's bin/gate run there: the pins first (--pins), stage
+#                                   0, the executables and javac's tool built fresh (its ARBACE_GATE_EXES,
+#                                   its store: no pass read, every check run), serial, every step (the
+#                                   builds too) run under the audit (strace, the reducer tools/gateaudit,
+#                                   gate.audit: an undeclared read fails the gate and its pass is not
+#                                   recorded; GTS30 (a)), every part (GATE_ALL_PARTS=1, GTS19 (a)), Java's
+#                                   levels that consume the read's output on its cache alone
+#                                   (JAVA_CHECK_FORMS_ONLY=1: a miss fails, GTS41 (c)), each limited
+#                                   program's CPU time in .tmp/gate/NAME.cpu.tsv (GTS33 (a)); then its
+#                                   record test/gate/clean-TAG.edn (TAG default the short SHA,
+#                                   GATE_CLEAN_TAG) in this checkout, its logs in .tmp/gate-clean/SHA.logs/,
+#                                   its passes (:clean) into the store and, when it passed, its builds into
+#                                   ARBACE_GATE_EXES where absent (GATE_CLEAN_PUBLISH=0: not), the clone
+#                                   removed (kept on a failure, GATE_CLEAN_KEEP=1). A caller holding the
+#                                   big lock for the whole run sets GATE_HEAVY_CMD=env; the frozen jar is
+#                                   the main checkout's .tmp/oracle-frozen/ one (FROZEN_JAR), checked by its
+#                                   pin, else built in the clone from its tag
+#        bin/gate [--full] --clean --plan  the plan such a run makes (an empty store, every part)
+#        bin/gate --pins [FILE]     what a clean run takes from outside its clone, by its pins: TamaGo's go
+#                                   (seed/goroot.sha256), jdk26u's commit and its build tree's platform
+#                                   (jdk/javac/platform.sha256), the system JDK (javac 26), the frozen jar
+#                                   (test/oracle/frozen-jar.sha256, when FROZEN_JAR names it), the frozen
+#                                   tree's tag; $GOROOT/test's digest recorded (FILE: as a map)
+#        bin/gate --full --concurrent  (GTS37 (a)) --full's chains at once (GATE_FULL_PARALLEL=1) under the
+#                                   host's big lock taken once for the whole run (bin/heavy-lock;
+#                                   GATE_CONCURRENT_HELD=1: the caller holds it), its heavy steps and the
+#                                   tools' heavy processes serialized on a lock of its own
+#                                   (GATE_CONCURRENT_LOCK, default .tmp/gate-concurrent.lock)
 #        (GATE_STEPS: another table, GATE_PROG_UNITS, GATE_JAVAC_PROG_UNITS: the units given: the gate's
 #        own tests, a toy table)
 #   (default)  the essential gate:
@@ -267,13 +302,18 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 cd "$root"
 unset ARBACE_HOST_EXE J2G_GO_EXE REPR_GO_EXE
-usage() { echo "usage: bin/gate [--full] [--rerun] | bin/gate [--full] --plan | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run]" >&2; exit 2; }
-full= plan_only= why= rerun= audit= prune= dry=
-steps_arg=()
+usage() { echo "usage: bin/gate [--full] [--rerun] | bin/gate [--full] --plan [--builds] | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run] | bin/gate [--full] --clean [--tag TAG] [--plan] | bin/gate --pins [FILE] | bin/gate --full --concurrent" >&2; exit 2; }
+full= plan_only= why= rerun= audit= prune= dry= clean= clean_tag= pins= pins_out= concurrent= builds=
+steps_arg=() orig_args=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
     --full) full=1 ;;
     --plan) plan_only=1 ;;
+    --builds) builds=1 ;;
+    --clean) clean=1 ;;
+    --tag) [ $# -ge 2 ] || usage; clean_tag=$2; shift ;;
+    --pins) pins=1; if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then pins_out=$2; shift; fi ;;
+    --concurrent) concurrent=1; full=1 ;;
     --why) [ $# -ge 2 ] || usage; why=$2; full=1; shift ;;
     --rerun) rerun=1 ;;
     --audit) audit=1; full=1 ;;
@@ -285,9 +325,221 @@ while [ $# -gt 0 ]; do
   shift
 done
 mode=essential; [ -n "$full" ] && mode=full
+[ -n "$builds" ] && [ -z "$plan_only" ] && usage
+[ -n "$clean" ] && { [ -n "$concurrent$audit$why$prune" ] && usage; }
 . "$root/bin/lib/gate-run.bash"
 . "$root/bin/lib/tools.bash"
+
+# ---- GT7 (doc/GATE-SURVEY.md, §7, "As built: GT7 (tooling)"): the clean run at a tag, the pins of
+# what a clone cannot make fresh, the concurrent --full (GTS37 (a)). Here, not in bin/lib: none of it
+# decides a step's outcome (the runner's audit_all, audit_compare and the :clean mark are
+# bin/lib/gate-run.bash's), so no key holds it.
+
+# clean_pins [FILE]: what the clean run takes from outside its clone, checked by its pins (§7):
+# TamaGo's go (seed/goroot.sha256), jdk26u and the JDK build tree's platform (jdk/javac/platform.sha256),
+# the frozen jar (test/oracle/frozen-jar.sha256, when FROZEN_JAR gives it: else the clone builds it from
+# its tag and frozen_jar checks it), the system JDK (the reference javac, named by its version and its
+# release file), $GOROOT/test (unpinned: recorded); FILE gets them as a map. Exit 1 on a pin that fails
+clean_pins() {
+  local out=${1:-} st=0 g pv ph have gt jdk c jv jrel fj want got pd ft
+  . "$root/bin/lib/seed-go.bash"
+  g=$(seed_go_goroot)
+  ph=$(grep -v '^#' "$seed_go_pin" | awk 'NF {print $1; exit}'); pv=$(grep -v '^#' "$seed_go_pin" | awk 'NF {print $2; exit}')
+  have=$(seed_go_goroot_hash "$g") || have=none
+  if [ "$have" = "$ph" ] && [ "$(head -1 "$g/VERSION")" = "$pv" ]; then echo "pins: TamaGo's go $g, $pv, its sources $(echo "$have" | cut -c1-16): seed/goroot.sha256's"
+  else echo "pins: FAILED: TamaGo's go $g is $(head -1 "$g/VERSION" 2>"$TMPDIR/pins.err") with sources $have; seed/goroot.sha256 pins $pv, $ph"; st=1; fi
+  gt=$( (cd "$g" && find test -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64) 2>"$TMPDIR/pins.err")
+  echo "pins: \$GOROOT/test $gt ($(cd "$g" && find test -type f | wc -l) files; no pin: recorded)"
+  jdk=${JDK:-/root/jdk26u}
+  c=$(git -C "$jdk" rev-parse HEAD 2>"$TMPDIR/pins.err") || c=none
+  if grep -q "^# .* at $c," "$root/jdk/javac/platform.sha256" 2>"$TMPDIR/pins.err" || grep -q "$c" "$root/jdk/javac/platform.sha256"; then
+    echo "pins: jdk26u $jdk at $c: jdk/javac/platform.sha256's"
+  else echo "pins: FAILED: jdk26u $jdk at $c, not jdk/javac/platform.sha256's commit"; st=1; fi
+  pd=$root/.tmp/pins-platform
+  if "$root/bin/javac-vendor" platform "$pd" > "$TMPDIR/pins-platform.log" 2>&1; then
+    echo "pins: the JDK build tree's platform: its $(ls "$pd" | wc -l) modules jdk/javac/platform.sha256's"
+  else echo "pins: FAILED: the JDK build tree's platform ($TMPDIR/pins-platform.log):"; grep -m3 'javac-vendor' "$TMPDIR/pins-platform.log" | sed 's/^/   /'; st=1; fi
+  rm -rf "${pd:?}"
+  jv=none jrel=none
+  if c=$(command -v javac); then
+    jv=$(javac -version 2>&1 | head -1); c=$(readlink -f "$c")
+    [ -f "${c%/bin/javac}/release" ] && jrel=$(sha256sum < "${c%/bin/javac}/release" | cut -c1-64)
+    echo "pins: the system JDK (the reference javac): $jv, ${c%/bin/javac}, its release file $(echo "$jrel" | cut -c1-16)"
+    case $jv in "javac 26"*) ;; *) echo "pins: FAILED: the reference runs (test/java/ref-jdk26.edn) are JDK 26's, the system JDK is $jv"; st=1 ;; esac
+  else echo "pins: FAILED: no system JDK (javac on PATH): the reference javac"; st=1; fi
+  fj=none
+  if [ -n "${FROZEN_JAR:-}" ]; then
+    want=$(sed -n "s/^\([0-9a-f]\{64\}\)  $(basename "$FROZEN_JAR")\$/\1/p" "$root/test/oracle/frozen-jar.sha256")
+    got=$(sha256sum < "$FROZEN_JAR" 2>"$TMPDIR/pins.err" | cut -c1-64)
+    if [ -n "$want" ] && [ "$got" = "$want" ]; then fj=$FROZEN_JAR; echo "pins: the frozen jar $FROZEN_JAR: test/oracle/frozen-jar.sha256's"
+    else echo "pins: FAILED: the frozen jar $FROZEN_JAR is ${got:-missing}, pinned ${want:-nothing for its name}"; st=1; fi
+  else
+    fj=built; echo "pins: the frozen jar: built in the checkout from its tag, checked by frozen_jar against test/oracle/frozen-jar.sha256"
+  fi
+  ft=$(git -C "$root" rev-parse -q --verify 'refs/tags/arbace-for-java-26-v1^{commit}' 2>"$TMPDIR/pins.err") || ft=none
+  if [ "$ft" != none ]; then echo "pins: the frozen tree clojure/: arbace-for-java-26-v1 at $ft (extracted into .tmp/frozen by the checkout's git)"
+  else echo "pins: FAILED: no tag arbace-for-java-26-v1 (the frozen clojure/)"; st=1; fi
+  [ -n "$out" ] && printf '{:go {:goroot "%s" :version "%s" :sources-sha256 "%s"} :goroot-test-sha256 "%s"\n  :jdk26u {:dir "%s" :commit "%s"} :system-jdk {:version "%s" :release-sha256 "%s"}\n  :frozen-jar "%s" :frozen-tree "%s" :ok %s}\n' \
+    "$g" "$pv" "$have" "$gt" "$jdk" "$(git -C "$jdk" rev-parse HEAD 2>"$TMPDIR/pins.err")" "$jv" "$jrel" "$fj" "$ft" "$([ $st = 0 ] && echo true || echo false)" > "$out"
+  [ $st = 0 ] && echo "pins: ok" || echo "pins: FAILED"
+  return $st
+}
+
+# the main checkout (git's common directory), as gate_env finds it
+main_checkout() {
+  local common
+  common=$(git rev-parse --path-format=absolute --git-common-dir 2>"$TMPDIR/gate-git.err") && [ -d "$common" ] \
+    && [ "$(basename "$common")" = .git ] && dirname "$common" || echo "$root"
+}
+
+# clean_launch: bin/gate [--full] --clean in the invoking checkout. A fresh `git clone --shared` of HEAD's
+# commit in .tmp/gate-clean/SHA, its own empty .tmp/ and target/ and GOCACHE, the environment's Arbace
+# and gate variables dropped but the caller's lock options (ARBACE_HEAVY_LOCK, GATE_HEAVY_CMD,
+# ARBACE_HEAVY_HELD), GATE_TEST_JOBS, ARBACE_GOROOT and JDK; the clone's own bin/gate run in it with
+# GATE_CLEAN_INNER=1 (below); then its record copied to test/gate/clean-TAG.edn, its logs to
+# .tmp/gate-clean/SHA.logs/, its passes (marked :clean) into the store and its executables' directories
+# into ARBACE_GATE_EXES where absent (GATE_CLEAN_PUBLISH=0: not), and the clone removed (on a failure
+# kept, its Go cache removed; GATE_CLEAN_KEEP=1: kept)
+clean_launch() {
+  local sha tag main common dir base st v keep=() unset=() frozen out t0 n d e store_to exes_to
+  t0=$(date +%s)
+  sha=$(git rev-parse HEAD) || return 1
+  tag=${clean_tag:-${GATE_CLEAN_TAG:-$(git rev-parse --short=12 HEAD)}}
+  case $tag in */*|"") echo "gate --clean: a tag names a file (test/gate/clean-TAG.edn): $tag" >&2; return 2 ;; esac
+  [ -z "$(git status --porcelain --untracked-files=no 2>"$TMPDIR/gate-git.err")" ] \
+    || echo "gate --clean: warning: the checkout has uncommitted changes; the clean run tests the commit $sha alone"
+  main=$(main_checkout)
+  common=$(git rev-parse --path-format=absolute --git-common-dir)
+  base=${GATE_CLEAN_ROOT:-$root/.tmp/gate-clean}
+  dir=$base/$sha out=$base/$sha.logs
+  mkdir -p "$base" || return 1
+  [ -e "$dir" ] && { chmod -R u+w "$dir" 2>"$TMPDIR/gate-clean.err"; rm -rf "${dir:?}"; }
+  echo "== gate$( [ -n "$full" ] && echo ' --full') --clean: $(git log -1 --format='%h %s'), tag $tag, in $dir"
+  git clone -q --shared --no-checkout "$common" "$dir" && git -C "$dir" checkout -q --detach "$sha" \
+    || { echo "gate --clean: the clone failed" >&2; return 1; }
+  mkdir -p "$dir/.tmp/tmp" "$dir/.tmp/gocache"
+  # the frozen jar: the main checkout's (pinned: the clone's pins step checks it), else the clone builds it
+  frozen=${FROZEN_JAR:-$main/.tmp/oracle-frozen/arbace-for-java-26-v4.jar}
+  [ -f "$frozen" ] || frozen=
+  for v in $(compgen -e); do
+    case $v in
+      ARBACE_GOROOT|ARBACE_HEAVY_LOCK|ARBACE_HEAVY_HELD|GATE_HEAVY_CMD|GATE_TEST_JOBS) ;;
+      ARBACE_*|GATE_*|J2G_*|REPR_*|JAVA_CHECK_*|CLOJURE_TESTS_*|GOI_*|FROZEN_*|JAVAC_*|BOX_*|HEAVY_LOCK_*|TMPDIR|GOCACHE|GOFLAGS|GOROOT|GOOS|GOARCH|GOMEMLIMIT) unset+=(-u "$v") ;;
+    esac
+  done
+  env ${unset[@]+"${unset[@]}"} TMPDIR="$dir/.tmp/tmp" GOCACHE="$dir/.tmp/gocache" GATE_CLEAN_INNER=1 GATE_CLEAN_TAG="$tag" \
+      ARBACE_HEAVY_LOCK="${ARBACE_HEAVY_LOCK:-$main/.tmp/big.lock}" ${frozen:+FROZEN_JAR="$frozen"} \
+      "$dir/bin/gate" ${full:+--full} --clean 2>&1 | tee "$base/$sha.out"
+  st=${PIPESTATUS[0]}
+  rm -rf "${out:?}"; mkdir -p "$out"
+  cp -a "$dir/.tmp/gate" "$out/gate" 2>"$TMPDIR/gate-clean.err"
+  cp "$base/$sha.out" "$out/summary.txt"
+  if [ -f "$dir/.tmp/gate/clean-record.edn" ]; then
+    cp "$dir/.tmp/gate/clean-record.edn" "$root/test/gate/clean-$tag.edn"
+    echo "   the record: test/gate/clean-$tag.edn"
+  else
+    echo "gate --clean: no record (the run stopped before its end: $out)"; st=1
+  fi
+  echo "   the logs: ${out#$root/}/"
+  if [ "${GATE_CLEAN_PUBLISH:-1}" != 0 ]; then
+    # the passes (:clean) into the store the everyday gate reads, beside its own (none replaced); the
+    # executables and javac's tool, when the run passed, into the shared directory where absent
+    store_to=${ARBACE_GATE_STORE:-$main/.tmp/gate-pass} exes_to=${ARBACE_GATE_EXES:-$main/.tmp/gate-exe}
+    n=0
+    for d in "$dir/.tmp/gate-pass"/*/; do
+      [ -d "$d" ] || continue
+      mkdir -p "$store_to/$(basename "$d")" && cp -an "$d". "$store_to/$(basename "$d")/" && n=$((n + $(ls "$d" | grep -c '\.edn$')))
+    done
+    echo "   $n passes (:clean) published into $store_to"
+    if [ "$st" = 0 ]; then
+      for e in "$dir/.tmp/gate-exe"/*; do
+        [ -d "$e" ] || continue
+        if [ -e "$exes_to/$(basename "$e")" ]; then echo "   the executables $(basename "$e") kept in $exes_to (there already)"
+        else mkdir -p "$exes_to" && mv "$e" "$exes_to/" && echo "   the executables $(basename "$e") published into $exes_to"; fi
+      done
+    fi
+  fi
+  if [ "$st" = 0 ] && [ -z "${GATE_CLEAN_KEEP:-}" ]; then
+    chmod -R u+w "$dir" 2>"$TMPDIR/gate-clean.err"; rm -rf "${dir:?}"; echo "   the clone removed"
+  else
+    rm -rf "${dir:?}/.tmp/gocache"
+    echo "   the clone kept (its Go cache removed): $dir; rm -rf it when done"
+  fi
+  if [ "$st" = 0 ]; then echo "== gate --clean passed ($(secs "$t0"))"; else echo "== gate --clean FAILED ($(secs "$t0"))"; fi
+  return "$st"
+}
+
+# clean_record: the clean run's record (test/gate/clean-TAG.edn, the Clojure reader's format): the
+# commit, the pins, the hosts' identities, and each step's key, outcome, wall and CPU seconds, peaks,
+# lock waits, audit and the programs its limits measured (GTS33 (a))
+clean_record() {
+  local n st s a ex k cpus prog
+  echo ";; bin/gate$( [ -n "$full" ] && echo ' --full') --clean's record (doc/GATE-SURVEY.md, §7, GT7, \"As built: GT7 (tooling)\"):"
+  echo ";; a fresh clone of the commit, empty caches, every step run and audited; written by bin/gate."
+  printf '{:tag "%s"\n :commit "%s"\n :date "%s"\n :mode :%s\n :status :%s\n :wall-s %s\n' \
+    "${GATE_CLEAN_TAG:-}" "$commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$mode" "$([ "$status" = 0 ] && echo passed || echo failed)" $(( $(date +%s) - start ))
+  printf ' :host {:cpus %s :mem-kib %s :kernel "%s"}\n' "$(nproc)" "$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" "$(uname -r)"
+  printf ' :env {:all-parts true :forms-only true :heavy-cmd "%s"}\n' "$GATE_HEAVY_CMD"
+  printf ' :pins %s\n' "$(cat "$logs/pins.edn" 2>"$logs/count.err" || echo nil)"
+  printf ' :hosts %s\n' "$(cat "$logs/hosts.edn")"
+  printf ' :steps\n ['
+  local first=1
+  for n in pins "${order[@]}"; do
+    [ -f "$logs/$n.status" ] || continue
+    st=$(cat "$logs/$n.status"); ex=
+    case $st in 0) s=:pass ;; skip) s=:skip ;; none) s=:not-needed ;; notrun*) s=:not-run ;; *) s=:fail ex=" :exit $st" ;; esac
+    [ "$s" = :not-needed ] && continue
+    a=:none
+    if [ -f "$logs/$n.audit-status" ]; then
+      case $(cat "$logs/$n.audit-status") in ok) a=:ok ;; step-failed) a=:step-failed ;; *) a="\"$(cat "$logs/$n.audit-status")\"" ;; esac
+    fi
+    k=${key[$n]:-}; [ "$k" = - ] && k=
+    prog=
+    if [ -f "$logs/$n.cpu.tsv" ]; then
+      prog=$(awk -F'\t' '{n++; c += $3 + $4; if ($1 == 124 || $1 == 137 || $1 == 152) t++} END {printf " :programs %d :programs-cpu-s %.1f :programs-timeouts %d", n, c, t}' "$logs/$n.cpu.tsv")
+    fi
+    [ -n "$first" ] || printf '\n  '
+    first=
+    printf '{:step "%s" :kind :%s :status %s%s :key "%s" :wall-s %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s :wait-s %s :inner-wait-s %s :audit %s%s%s}' \
+      "$n" "${kind[$n]:-pre}" "$s" "$ex" "$k" "$(mem_of "$n" wall-s)" "$(mem_of "$n" cpu-s)" "$(mem_of "$n" maxrss-kib)" "$(mem_of "$n" tree-peak-kib)" \
+      "$(mem_of "$n" wait-s)" "$(mem_of "$n" inner-wait-s)" "$a" \
+      "$( [ -f "$logs/$n.audit-aborts" ] && echo " :audit-aborts $(cat "$logs/$n.audit-aborts")")" "$prog"
+  done
+  printf ']}\n'
+}
+
+if [ -n "$pins" ]; then clean_pins "$pins_out"; exit; fi
+if [ -n "$clean" ] && [ -z "${GATE_CLEAN_INNER:-}" ]; then
+  if [ -z "$plan_only" ]; then clean_launch; exit; fi
+  # --clean --plan: the plan a clean run makes (an empty store and executables' directory, every part,
+  # every check run), here, on this checkout's stage 0
+  export ARBACE_GATE_STORE=$root/.tmp/gate-clean-plan/store ARBACE_GATE_EXES=$root/.tmp/gate-clean-plan/exes GATE_ALL_PARTS=1
+  rm -rf "$root/.tmp/gate-clean-plan"; rerun=1
+fi
+# --concurrent (GTS37 (a)): --full's chains at once, the host's big lock held once from outside for the
+# whole run (bin/heavy-lock: in turn; GATE_CONCURRENT_HELD=1 when the caller holds it already), the
+# heavy steps and the tools' heavy processes serialized on a lock of the gate's own (GATE_CONCURRENT_LOCK,
+# default .tmp/gate-concurrent.lock): one heavy process at a time, the light work beside it
+if [ -n "$concurrent" ]; then
+  [ -n "$plan_only" ] && usage
+  if [ -z "${GATE_CONCURRENT_HELD:-}" ]; then
+    echo "== gate --full --concurrent: the host's big lock first (${ARBACE_HEAVY_LOCK:-$(main_checkout)/.tmp/big.lock}, in turn)"
+    exec "$root/bin/heavy-lock" env GATE_CONCURRENT_HELD=1 "$root/bin/gate" "${orig_args[@]}"
+  fi
+  unset ARBACE_HEAVY_HELD # the private lock below is the one the steps and the tools take
+  export GATE_FULL_PARALLEL=1
+  GATE_HEAVY_CMD="flock ${GATE_CONCURRENT_LOCK:-$root/.tmp/gate-concurrent.lock}"
+fi
 gate_env || { echo "gate: the environment failed" >&2; exit 1; }
+# the clean run itself (GATE_CLEAN_INNER=1, in the clone clean_launch made): passes not read (an empty
+# store, every check run: --rerun), serial, every step under the audit, every part (GTS19 (a)), Java's
+# levels on the read's cache forced (GTS41 (c)), the programs' CPU times measured (GTS33 (a))
+audit_all= serial=
+if [ -n "${GATE_CLEAN_INNER:-}" ]; then
+  rerun=1 audit_all=1 serial=1
+  export GATE_ALL_PARTS=1 JAVA_CHECK_FORMS_ONLY=1 GATE_CPU_LOG=1
+  unset GATE_FULL_PARALLEL
+fi
 
 if [ -n "$prune" ]; then gate_prune $dry; exit; fi
 if [ -n "$audit" ]; then
@@ -300,9 +552,23 @@ if [ -n "$plan_only$why" ]; then
   if [ -n "$why" ]; then
     run_plan "$d" > "$d.txt" 2>&1 || { cat "$d.txt"; exit 1; }
     arbace_tool -p "$root/test" -m gate.plan why "$root" "$d" "$store" "$why"
-  else
-    echo "== gate$( [ -n "$full" ] && echo ' --full') --plan: $(git log -1 --format='%h %s'), store $store"
+  elif [ -n "$builds" ]; then
+    # --plan --builds (GTS42 (a)'s demonstrations): the builds the plan needs (go-build, with --full
+    # javac-tool), run as the gate runs them, then the plan again on their program units
+    echo "== gate$( [ -n "$full" ] && echo ' --full') --plan --builds: $(git log -1 --format='%h %s'), store $store"
+    logs=$d
+    run_plan "$d" > "$d.first.txt" 2>&1 || { cat "$d.first.txt"; exit 1; }
+    load_plan
+    for n in "${order[@]}"; do
+      [ "${kind[$n]}" = build ] && [ "${dec[$n]}" = build ] || continue
+      run_one "$n"; report "$n"
+      ok_status "$n" || { tail -20 "$d/$n.log"; exit 1; }
+    done
+    rm -f "$d"/*.done
     run_plan "$d"
+  else
+    echo "== gate$( [ -n "$full" ] && echo ' --full')$( [ -n "$clean" ] && echo ' --clean') --plan: $(git log -1 --format='%h %s'), store $store"
+    run_plan "$d" ${rerun:+--rerun}
   fi
   exit
 fi
@@ -324,6 +590,11 @@ sampler &
 sampler_pid=$!
 trap 'kill "$sampler_pid" 2>"$logs/sampler.err"' EXIT
 
+# the clean run (GT7): first what it takes from outside the clone, by its pins; the audit's reducer
+if [ -n "${GATE_CLEAN_INNER:-}" ]; then
+  pre_step pins '^pins:' 12 "$root/bin/gate" --pins "$logs/pins.edn"
+  audit_reducer "$root/.tmp/gate-audit"
+fi
 # before the plan, one after the other: each needs the one before (steps.edn's :pre)
 pre_step makefile - 0 make -s check-makefile
 pre_step seed 'pinned' 1 bin/seed --check
@@ -364,9 +635,14 @@ fi
 # the essential checks, concurrently on the cached executables. The heavy ones (the whole-program
 # j2g runs, the suite's 12 processes) take the heavy lock each, one at a time (GT6: it replaces
 # bin/j2g's J2G_LOCK here), the light ones run beside them
-pids=()
-for c in $(chains_of essential); do run_chain essential "$c" & pids+=($!); done
-wait "${pids[@]}"
+if [ -n "$serial" ]; then
+  # the clean run: one after another in the table's order (§7)
+  for n in $(names_of essential); do run_one "$n"; done
+else
+  pids=()
+  for c in $(chains_of essential); do run_chain essential "$c" & pids+=($!); done
+  wait "${pids[@]}"
+fi
 for n in $(names_of essential); do [ "${kind[$n]}" = build ] || report "$n"; done
 
 if [ -n "$full" ]; then
@@ -389,5 +665,6 @@ done
 peak=$(awk -F'\t' '$2 == "gate" && $3 > m {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/count.err")
 low=$(awk -F'\t' '$2 == "MemAvailable" && (m == "" || $3 < m) {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/count.err")
 echo "   $ran steps run, $skipped skipped; the gate's processes at most $(gib "$peak"), the host's MemAvailable at least $(gib "$low") (.tmp/gate/mem.tsv)"
+[ -n "${GATE_CLEAN_INNER:-}" ] && clean_record > "$logs/clean-record.edn"
 if [ $status = 0 ]; then echo "== gate passed ($(secs "$start"))"; else echo "== gate FAILED ($(secs "$start"))"; fi
 exit $status

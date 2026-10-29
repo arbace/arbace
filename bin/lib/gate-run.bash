@@ -10,6 +10,12 @@
 #   record_pass, load_plan, run_one, report, pre_step, run_chain, chains_of, names_of
 #   gate_prune [--dry-run]  the store and the executables trimmed (GTS27 (a))
 #   gate_audit [STEP...] the strace audit of the declared inputs (GT4)
+#   audit_reducer DIR, audit_reduce FIFO, audit_compare NAME STATUS
+#                        the audit's reducer and comparison; with audit_all set (bin/gate --clean, GT7)
+#                        every step's own run is traced (step's audit_step) and compared: an undeclared
+#                        read fails it (NAME.audit, NAME.audit-status) and its pass is not recorded; a
+#                        pass of the clean run (GATE_CLEAN_INNER) is marked :clean; GATE_CPU_LOG: each
+#                        limited program's CPU time in NAME.cpu.tsv (ARBACE_CPU_LOG, bin/lib/limit.bash)
 #
 # The heavy lock (GT6, GTS25 (a); GT5, GTS31 (b), GTS32 (a)): a step the table marks :heavy true runs
 # under GATE_HEAVY_CMD, by default bin/heavy-lock (the host's big-job lock ARBACE_HEAVY_LOCK, by default
@@ -108,17 +114,34 @@ sampler() {
 }
 
 step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1); HEAVY yes: under the lock (GT6), inner: its tools lock (GT5)
-  local name=$1 hv=$2 t0 t0w t1 pid st pre=(); shift 2; t0=$(date +%s)
+  local name=$1 hv=$2 t0 t0w t1 pid st pre=() tr=() ae=() ap=; shift 2; t0=$(date +%s)
   [ "$hv" = yes ] || hv=
   rm -f "${logs:?}/${name:?}.start" "${logs:?}/${name:?}.waits"
   [ -n "$hv" ] && read -r -a pre <<< "$GATE_HEAVY_CMD"
+  # GT7: the step's own run under the audit (audit_step, bin/gate --clean): strace into a FIFO its
+  # reducer reads at once (NAME.paths), the namespaces loaded in NAME.loaded; the programs' CPU times
+  # (GTS33 (a), bin/lib/limit.bash) in NAME.cpu.tsv
+  if [ -n "${audit_step:-}" ]; then
+    rm -f "${logs:?}/$name.fifo" "${logs:?}/$name.paths" "${logs:?}/$name.loaded"; mkfifo "$logs/$name.fifo"
+    audit_reduce "$logs/$name.fifo" > "$logs/$name.paths" 2> "$logs/$name.reduce.err" &
+    ap=$!
+    tr=(strace -f -qq -y -s 4096 --seccomp-bpf -e "trace=${GATE_AUDIT_TRACE:-$audit_trace}" -o "$logs/$name.fifo")
+    ae=(ARBACE_LOADED_LOG="$logs/$name.loaded")
+  fi
+  [ -n "${GATE_CPU_LOG:-}" ] && { rm -f "${logs:?}/$name.cpu.tsv"; ae+=(ARBACE_CPU_LOG="$logs/$name.cpu.tsv"); }
   # the lock first, then the clock: the start file is written once the step holds the lock
   "${pre[@]}" bash -c 'date +%s > "$1"; shift; exec "$@"' gate-step "$logs/$name.start" \
-    env ${hv:+ARBACE_HEAVY_HELD=1} HEAVY_LOCK_WAITS="$logs/$name.waits" /usr/bin/time -v -o "$logs/$name.time" "$@" > "$logs/$name.log" 2>&1 &
+    env ${hv:+ARBACE_HEAVY_HELD=1} HEAVY_LOCK_WAITS="$logs/$name.waits" ${ae[@]+"${ae[@]}"} ${tr[@]+"${tr[@]}"} \
+    /usr/bin/time -v -o "$logs/$name.time" "$@" > "$logs/$name.log" 2>&1 &
   pid=$!
   echo "$pid" > "$logs/$name.pid"
   wait "$pid"; st=$?
   rm -f "${logs:?}/${name:?}.pid"
+  if [ -n "$ap" ]; then
+    # a reducer still waiting for strace to open the FIFO (the step failed before it ran) is released
+    kill -0 "$ap" 2>"$logs/$name.reduce.err2" && timeout 10 bash -c ': > "$1"' release "$logs/$name.fifo" 2>>"$logs/$name.reduce.err2"
+    wait "$ap"; rm -f "${logs:?}/$name.fifo"
+  fi
   t1=$(date +%s); t0w=$t0; [ -f "$logs/$name.start" ] && t0w=$(cat "$logs/$name.start")
   echo $st > "$logs/$name.status"; echo $(( t1 - t0w )) > "$logs/$name.secs"; echo $(( t0w - t0 )) > "$logs/$name.wait"
   local cpu rss tree
@@ -146,7 +169,10 @@ record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
   printf '{:step "%s" :key "%s" :commit "%s" :dirty %s :worktree "%s" :date "%s"\n :secs %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s\n :log-sha256 "%s"}\n' \
     "$name" "$k" "$commit" "$dirty" "$root" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat "$logs/$name.secs")" \
     "$(mem_of "$name" cpu-s)" "$(mem_of "$name" maxrss-kib)" "$(mem_of "$name" tree-peak-kib)" \
-    "$(sha256sum < "$logs/$name.log" | cut -c1-64)" > "$tmp" && mv "$tmp" "$d/$k.edn"
+    "$(sha256sum < "$logs/$name.log" | cut -c1-64)" > "$tmp" || return 1
+  # GT7: a pass of the clean run (bin/gate --clean) says so
+  [ -n "${GATE_CLEAN_INNER:-}" ] && sed -i '$ s/}$/ :clean true}/' "$tmp"
+  mv "$tmp" "$d/$k.edn"
 }
 
 # the plan's steps, from plan.tsv: NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM BUDGET
@@ -204,10 +230,24 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
     fi
     dec[$n]=run
   fi
-  if [ "${outputs[$n]}" = yes ]; then rm -rf "${logs:?}/out/$n"; mkdir -p "$logs/out/$n"; fi
-  GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out step "$n" "${heavy[$n]}" bash -c "${cmd[$n]}"; st=$?
+  local attempt aud=
+  [ -n "${audit_all:-}" ] && aud=1
+  for attempt in 1 2 3; do
+    if [ "${outputs[$n]}" = yes ]; then rm -rf "${logs:?}/out/$n"; mkdir -p "$logs/out/$n"; fi
+    audit_step=$aud GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out step "$n" "${heavy[$n]}" bash -c "${cmd[$n]}"; st=$?
+    # GT4: strace -f aborts (ptrace(PTRACE_LISTEN): I/O error) when a traced process dies in a group
+    # stop; an aborted trace is no audit and its run no run: again, twice at most
+    [ -n "$aud" ] && grep -q '^strace: ptrace' "$logs/$n.log" || break
+    echo "$attempt" > "$logs/$n.audit-aborts"
+    cp "$logs/$n.log" "$logs/$n.log.aborted$attempt"
+  done
+  [ -n "$aud" ] && audit_compare "$n" "$st"
   if [ $st = 0 ] && [ "${dec[$n]}" = run ]; then
-    record_pass "$n" || echo "gate: warning: the pass of $n was not recorded in $store" >&2
+    if [ -n "$aud" ] && [ "$(cat "$logs/$n.audit-status")" != ok ]; then
+      echo "gate: the pass of $n not recorded: its audit is $(cat "$logs/$n.audit-status")" >&2
+    else
+      record_pass "$n" || echo "gate: warning: the pass of $n was not recorded in $store" >&2
+    fi
   fi
   touch "$logs/$n.done"
   return $st
@@ -234,11 +274,21 @@ report() {  # report NAME: a step's outcome, times, memory and summary lines
   # GT6, GTS17 (a): a budget is a warning (three times the longest of its last passes), never a kill
   b=${budget[$n]:--}
   if [ "$b" != - ] && [ "$s" -gt "$b" ]; then w="$w; OVER ITS BUDGET of $(mmss "$b")"; fi
-  if [ "$st" = 0 ]; then
-    echo "   ok  $n ($w)"
-  else
-    echo "   FAILED  $n ($w; log $logs/$n.log)"; status=1
+  local au=
+  if [ -f "$logs/$n.audit-status" ]; then
+    case $(cat "$logs/$n.audit-status") in
+      ok) au=", audit ok" ;;
+      step-failed) au=", not audited (the step failed)" ;;
+      *) au=", AUDIT $(cat "$logs/$n.audit-status") ($logs/$n.audit)"; status=1 ;;
+    esac
   fi
+  if [ "$st" = 0 ]; then
+    echo "   ok  $n ($w$au)"
+  else
+    echo "   FAILED  $n ($w$au; log $logs/$n.log)"; status=1
+  fi
+  [ -f "$logs/$n.audit-status" ] && [ "$(cat "$logs/$n.audit-status")" != ok ] && [ "$st" = 0 ] \
+    && grep -A8 '^UNDECLARED' "$logs/$n.audit" | sed 's/^/     /' 
   [ "${sum_re[$n]:--}" = - ] || grep -E "${sum_re[$n]}" "$logs/$n.log" | tail -"${sum_n[$n]}" | sed 's/^/     /'
 }
 pre_step() {  # pre_step NAME REGEX LINES CMD...: before the plan, one after the other
@@ -304,6 +354,43 @@ gate_prune() {  # gate_prune [--dry-run]
   done
 }
 
+# the audit's reducer (GT5, GTS30 (a)): tools/gateaudit, the Go port of test/gate/audit.awk (23 times
+# faster, the same lines), built by TamaGo's go into DIR when its sources changed; GATE_AUDIT_AWK=1:
+# busybox awk. audit_reducer DIR sets red; audit_reduce FIFO prints the OP<TAB>PATH lines
+red=()
+audit_trace=open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,clone3,fork,vfork
+audit_reducer() {
+  local d=$1 tg=${ARBACE_GOROOT:-/root/tamago-go} rk
+  red=(); mkdir -p "$d"
+  [ -z "${GATE_AUDIT_AWK:-}" ] || return 0
+  rk=$(cat "$root"/tools/gateaudit/*.go "$root/tools/gateaudit/go.mod" "$tg/VERSION" | sha256sum | cut -c1-64)
+  if [ "$(cat "$d/gateaudit.key" 2>"$d/gateaudit.err")" != "$rk" ] || [ ! -x "$d/gateaudit" ]; then
+    (cd "$root/tools/gateaudit" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
+       "$tg/bin/go" build -trimpath -o "$d/gateaudit.new" .) > "$d/gateaudit.err" 2>&1 \
+      && mv -f "$d/gateaudit.new" "$d/gateaudit" && echo "$rk" > "$d/gateaudit.key"
+  fi
+  if [ -x "$d/gateaudit" ] && [ "$(cat "$d/gateaudit.key" 2>"$d/gateaudit.err")" = "$rk" ]; then red=("$d/gateaudit" -root "$root")
+  else echo "gate --audit: tools/gateaudit did not build ($d/gateaudit.err): busybox awk reduces" >&2; fi
+}
+audit_reduce() {  # audit_reduce FIFO
+  if [ ${#red[@]} -gt 0 ]; then "${red[@]}" ${GATE_AUDIT_SIGNALS:+-signals "$1.signals"} "$1"
+  else awk -v root="$root" -v dbg="${GATE_AUDIT_SIGNALS:+$1.signals}" -f "$root/test/gate/audit.awk" "$1"; fi
+}
+# audit_compare NAME STATUS (GT7: a step run under the audit, audit_all): its reads against its declared
+# inputs (gate.audit, the plan's files.sha256 in $logs); NAME.audit the report, NAME.audit-status ok,
+# "N undeclared", step-failed (what a failed step read is not an audit) or "error"
+audit_compare() {
+  local n=$1 st=$2 a
+  if [ "$st" != 0 ]; then echo step-failed > "$logs/$n.audit-status"; return 0; fi
+  [ -f "$logs/$n.loaded" ] && LC_ALL=C sort -u -o "$logs/$n.loaded" "$logs/$n.loaded"
+  arbace_tool -p "$root/test" -m gate.audit "$root" "$logs" "$n" "$logs/$n.paths" "$logs/$n.loaded" > "$logs/$n.audit" 2>&1; a=$?
+  case $a in
+    0) echo ok ;;
+    1) sed -n "s/^audit $n: \(.*\)$/\1/p" "$logs/$n.audit" | tail -1 | grep . || echo failed ;;
+    *) echo "error (exit $a)" ;;
+  esac > "$logs/$n.audit-status"
+}
+
 # GT4: the audit. A check's command run under strace (the opens, execve, readlink, clone, chdir;
 # --seccomp-bpf stops only on those, so a Go program runs near full speed; the stat calls are left
 # out, GATE_AUDIT_TRACE=%file puts them back: a Go build makes millions, and a stat reads no content),
@@ -313,19 +400,7 @@ gate_audit() {  # gate_audit [STEP...]: the checks named, else every check
   local d=${GATE_AUDIT_DIR:-$root/.tmp/gate-audit} n x names=("$@") st=0 t0 fifo hv=() ap
   command -v strace > "$d.which" || { echo "gate --audit: no strace" >&2; return 2; }
   rm -rf "${d:?}/plan"; mkdir -p "$d"
-  # the reducer (GT5, GTS30 (a)): tools/gateaudit, the Go port of test/gate/audit.awk (23 times faster,
-  # the same lines), built by TamaGo's go when its sources changed; GATE_AUDIT_AWK=1: busybox awk
-  local red=() tg=${ARBACE_GOROOT:-/root/tamago-go} rk
-  if [ -z "${GATE_AUDIT_AWK:-}" ]; then
-    rk=$(cat "$root"/tools/gateaudit/*.go "$root/tools/gateaudit/go.mod" "$tg/VERSION" | sha256sum | cut -c1-64)
-    if [ "$(cat "$d/gateaudit.key" 2>"$d/gateaudit.err")" != "$rk" ] || [ ! -x "$d/gateaudit" ]; then
-      (cd "$root/tools/gateaudit" && env -u GOOS -u GOARCH GOROOT="$tg" GOFLAGS= GOTOOLCHAIN=local CGO_ENABLED=0 \
-         "$tg/bin/go" build -trimpath -o "$d/gateaudit.new" .) > "$d/gateaudit.err" 2>&1 \
-        && mv -f "$d/gateaudit.new" "$d/gateaudit" && echo "$rk" > "$d/gateaudit.key"
-    fi
-    if [ -x "$d/gateaudit" ] && [ "$(cat "$d/gateaudit.key" 2>"$d/gateaudit.err")" = "$rk" ]; then red=("$d/gateaudit" -root "$root")
-    else echo "gate --audit: tools/gateaudit did not build ($d/gateaudit.err): busybox awk reduces" >&2; fi
-  fi
+  audit_reducer "$d"
   mode=full; logs=$d/plan
   run_plan "$d/plan" > "$d/plan.txt" 2>&1 || { cat "$d/plan.txt"; return 1; }
   load_plan
@@ -358,16 +433,12 @@ gate_audit() {  # gate_audit [STEP...]: the checks named, else every check
     rm -f "${d:?}/$n.loaded"
     for attempt in 1 2 3; do
       fifo=$d/$n.fifo; rm -f "${fifo:?}" "${d:?}/$n.paths"; mkfifo "$fifo"
-      if [ ${#red[@]} -gt 0 ]; then
-        "${red[@]}" ${GATE_AUDIT_SIGNALS:+-signals "$d/$n.signals"} "$fifo" > "$d/$n.paths" 2> "$d/$n.awk.err" &
-      else
-        awk -v root="$root" -v dbg="${GATE_AUDIT_SIGNALS:+$d/$n.signals}" -f "$root/test/gate/audit.awk" "$fifo" > "$d/$n.paths" 2> "$d/$n.awk.err" &
-      fi
+      audit_reduce "$fifo" > "$d/$n.paths" 2> "$d/$n.awk.err" &
       ap=$!
       hv=(); [ "${heavy[$n]}" = yes ] && read -r -a hv <<< "$GATE_HEAVY_CMD"
       t0=$(date +%s); rm -f "${d:?}/$n.start"
       # the clock starts once the step holds the lock (the start file, as step() does)
-      "${hv[@]}" strace -f $([ -n "${GATE_AUDIT_SIGNALS:-}" ] && echo -q || echo -qq) -y -s 4096 --seccomp-bpf -e "trace=${GATE_AUDIT_TRACE:-open,openat,openat2,execve,execveat,readlink,readlinkat,chdir,clone,clone3,fork,vfork}" -o "$fifo" \
+      "${hv[@]}" strace -f $([ -n "${GATE_AUDIT_SIGNALS:-}" ] && echo -q || echo -qq) -y -s 4096 --seccomp-bpf -e "trace=${GATE_AUDIT_TRACE:-$audit_trace}" -o "$fifo" \
         env $([ "${heavy[$n]}" = yes ] && echo ARBACE_HEAVY_HELD=1) ARBACE_LOADED_LOG="$d/$n.loaded" GATE_OUT="$logs/out/$n" GATE_OUTS="$logs/out" \
         bash -c 'date +%s > "$1"; exec bash -c "$2"' gate-audit "$d/$n.start" "$acmd_run" > "$d/$n.log" 2>&1
       echo $? > "$d/$n.status"; [ -f "$d/$n.start" ] && t0=$(cat "$d/$n.start"); echo $(( $(date +%s) - t0 )) > "$d/$n.secs"

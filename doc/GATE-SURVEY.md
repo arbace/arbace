@@ -1401,3 +1401,228 @@ The user's decisions, all as recommended:
   miss fails.
 - **GTS42 (a):** at GT7's clean run, the two demonstrations are repeated on its passes: a classes file, and a comment
   in j2g. `--full --plan` runs after the tool's rebuild, and the results go into the clean run's record.
+
+## As built: GT7 (tooling) (2026-10-29)
+
+Branch `gate-gt7`, from main `00ec2bf5` (REAP v2's second re-seed), main's `6ad08d82` merged (a fast-forward). Built: the tooling of GT7, the
+clean run at a tag (§7), with the decided GTS18 (a), GTS19 (a), GTS30 (a), GTS33 (a)'s measurement, GTS37 (a), GTS41 (c) and
+GTS42 (a); proved on the essential gate run clean. Not run here: the clean `--full` at `arbace-reaps-3-crops-v2` (GT7's exit
+criterion, `test/gate/clean-arbace-reaps-3-crops-v2.edn`), the concurrent `--full` and the `--full` demonstrations: the main
+session's, after the merge (the commands below). No shipped file changed.
+
+**`bin/gate [--full] --clean [--tag TAG]`** (`make gate-clean`, `make gate-full-clean TAG=...`). In the invoking checkout,
+`clean_launch` (in `bin/gate`, not `bin/lib`: nothing of it decides a step's outcome, so no key holds it):
+
+- *The clone*: `git clone --shared --no-checkout` of git's common directory into `.tmp/gate-clean/SHA`, HEAD's commit checked
+  out detached (an uncommitted change is warned of: the run tests the commit). Its `.tmp/` and `target/` are empty; `GOCACHE`
+  is its own `.tmp/gocache`, `TMPDIR` its `.tmp/tmp`. The clone's git directory is its own, so `gate_env` makes its store, its
+  `ARBACE_GATE_EXES` and `GATE_JAVA_FORMS` the clone's: no pass is read (an empty store, and `--rerun`), stage 0, the
+  executables (G1: the fixpoint's `--g1` takes the clone's own fresh build) and javac's tool are built fresh.
+- *The environment*: every `ARBACE_*`, `GATE_*`, `J2G_*`, `REPR_*`, `JAVA_CHECK_*`, `CLOJURE_TESTS_*`, `GOI_*`, `FROZEN_*`, `JAVAC_*`,
+  `BOX_*`, `HEAVY_LOCK_*` variable and `GOCACHE`, `GOFLAGS`, `GOROOT`, `GOOS`, `GOARCH`, `GOMEMLIMIT`, `TMPDIR` dropped, but the
+  caller's lock options (`ARBACE_HEAVY_LOCK`, by default the main checkout's `.tmp/big.lock`, `GATE_HEAVY_CMD`,
+  `ARBACE_HEAVY_HELD`), `GATE_TEST_JOBS`, `ARBACE_GOROOT` and `JDK`. A caller that holds the big lock for the whole run passes
+  `GATE_HEAVY_CMD=env` (serial: nothing beside it); by default the heavy steps take it in turn (`bin/heavy-lock`) as everyday.
+- *The clone's own `bin/gate`* runs with `GATE_CLEAN_INNER=1`: first the pre-step `pins` (below), then the gate as ever with
+  `--rerun`, serial (the essential phase too, in the table's order), every step under the audit (`audit_all`), `GATE_ALL_PARTS=1`
+  (GTS19 (a): 85 steps in `--full`'s plan), `JAVA_CHECK_FORMS_ONLY=1` (GTS41 (c)), `GATE_CPU_LOG=1` (GTS33 (a)), and at the end
+  the record `.tmp/gate/clean-record.edn`.
+- *Afterwards*: the record copied to `test/gate/clean-TAG.edn` (TAG `--tag`, `GATE_CLEAN_TAG`, else HEAD's short SHA), the logs to
+  `.tmp/gate-clean/SHA.logs/` (`gate/`: every step's log, `.mem`, `.audit`, `.paths`, `.loaded`, `.cpu.tsv`; `summary.txt`), the
+  passes (each marked `:clean true`) copied into the invoking checkout's store beside its own (none replaced) and, when the run
+  passed, the executables' and javac's tool's directories moved into the shared `ARBACE_GATE_EXES` where that key is absent
+  (`GATE_CLEAN_PUBLISH=0`: neither), so that the everyday gate and the demonstrations find the clean run's passes and builds; the
+  clone removed (on a failure kept without its Go cache; `GATE_CLEAN_KEEP=1` keeps it).
+- `bin/gate [--full] --clean --plan` prints the plan such a run makes (an empty store and executables' directory, every part,
+  every check run), on the invoking checkout's stage 0: `--full`'s is 85 steps, 3 always, 2 builds, 77 run, 3 after.
+
+**The audit of every step** (GTS30 (a), `bin/lib/gate-run.bash`). With `audit_all` set, `run_one` runs each step's own command
+(not its `:audit-cmd`: the full command, every corpus) under strace inside `step`, between the lock and busybox `time`: `env
+ARBACE_LOADED_LOG=NAME.loaded strace -f ... -o NAME.fifo /usr/bin/time -v ... CMD`, the FIFO read at once by the reducer
+(`audit_reducer`, `audit_reduce`: `tools/gateaudit`, built into the clone's `.tmp/gate-audit/`, the same code `--audit` uses since
+this branch), into `NAME.paths`; then `audit_compare` runs `gate.audit` against the plan's `files.sha256`: `NAME.audit`, and
+`NAME.audit-status` `ok`, `N undeclared`, `step-failed` (what a failed step read is not an audit) or an error. An undeclared read
+fails the gate (the summary's `AUDIT 3 undeclared (...)` with the files) and the step's pass is not recorded (its key is known to
+miss an input). A trace strace aborted (`ptrace(PTRACE_LISTEN)`) is run again, twice at most (`NAME.audit-aborts`). The builds
+(`go-build`, `javac-tool`) are audited too, against their hosts' keys (`gate_key`, `arbace_javac_key`): a read outside them is a
+build input the key misses. The pre steps are not (always run, never keyed). strace's cost lands in the step's wall time; its
+CPU and peak are not counted (time measures the command), so the record's CPU seconds and peaks are the steps'.
+
+**`bin/gate --pins [FILE]`** (`make gate-pins`), the clean run's first step: what the clone cannot make fresh, by its pins (§7):
+TamaGo's go against `seed/goroot.sha256` (its sources' hash, `bin/lib/seed-go.bash`), jdk26u's commit against
+`jdk/javac/platform.sha256`'s and the build tree's platform made and checked module by module (`bin/javac-vendor platform`, 9 s),
+the system JDK (the reference javac: `javac 26`, its `release` file's digest, the `:jdk` host's identity), the frozen jar against
+`test/oracle/frozen-jar.sha256` when `FROZEN_JAR` names it (the launcher passes the main checkout's
+`.tmp/oracle-frozen/arbace-for-java-26-v4.jar`; without it the clone builds it from its tag and `frozen_jar` checks it), the tag
+of the frozen tree `clojure/` (extracted by the clone's own git into its `.tmp/frozen`); `$GOROOT/test`'s digest is recorded,
+not checked (no pin covers it: GTS50). About 10 s; exit 1 on a pin that fails, which stops the clean run.
+
+**The record**, `test/gate/clean-TAG.edn` (the Clojure reader's format, written by `clean_record`): `:tag`, `:commit`, `:date`,
+`:mode`, `:status`, `:wall-s`, `:host` (CPUs, memory, kernel), `:env`, `:pins` (`--pins`'s map), `:hosts` (the hosts' identities
+of `hosts.edn`) and `:steps`, one map a step in the run's order: `:step`, `:kind`, `:status` (`:pass`, `:fail` with `:exit`,
+`:not-run`), `:key`, `:wall-s`, `:cpu-s`, `:maxrss-kib`, `:tree-peak-kib`, `:wait-s`, `:inner-wait-s`, `:audit` (`:ok`,
+`:step-failed`, `:none` for the pre steps, or the failure's text), and for a step whose programs run under `limited`
+`:programs`, `:programs-cpu-s`, `:programs-timeouts` (each program's line in its `.cpu.tsv`). `bin/gate-demos --record` adds
+`:demonstrations`.
+
+**GTS41 (c), `JAVA_CHECK_FORMS_ONLY=1`** (`bin/java-check`): a run without the read level (interp, compiled, print) takes each
+test's forms from the read's cache alone; a miss is not read but recorded (`WORK/forms-misses`, the test's result `fail the
+forms cache missed`) and fails the run (`java-check: FAILED: N tests' forms not in the read's cache`). A run with the read level
+(java-read, `--forms verify`) reads as ever, so the clean run exports it for the whole gate. A cached read failure is a hit (the
+read's own verdict). Not run here: javac's tool exists at no key yet (the clean `--full` makes it).
+
+**GTS33 (a)'s measurement** (`bin/lib/limit.bash`): with `ARBACE_CPU_LOG` set, `limited_cpu` runs the program under busybox time
+and appends its status, wall, user and system seconds and command to that file (a time killed by the wall cap writes no
+times); the status is the one a shell gives (time's signal number mapped back to 128+N: 137 and 152 still read as timeouts).
+The clean run sets it per step (`NAME.cpu.tsv`). Recording the limits from it is GTS51. (`bin/lib/limit.bash` is in `gate_key`:
+this change rebuilds the executables once.)
+
+**GTS37 (a), `bin/gate --full --concurrent`** (`make gate-full-concurrent`): the run re-executes itself under `bin/heavy-lock`
+(the host's big lock taken in turn, once, for the whole run; `GATE_CONCURRENT_HELD=1`: the caller holds it), drops the
+`ARBACE_HEAVY_HELD` that gives it, sets `GATE_FULL_PARALLEL=1` and `GATE_HEAVY_CMD="flock .tmp/gate-concurrent.lock"`
+(`GATE_CONCURRENT_LOCK`): the `:heavy true` steps and the `:inner` steps' heavy processes serialize on that private lock
+(`ARBACE_HEAVY_CMD`, `bin/lib/heavy.bash`), the light work beside them, the peaks in the `.mem` files and `mem.tsv` as ever. Tested
+on a toy table: a step's environment had `ARBACE_HEAVY_CMD=flock .../own.lock`, no `ARBACE_HEAVY_HELD`, the big lock the toy's.
+
+**GTS42 (a), `bin/gate-demos [--record FILE]`** (`make gate-demos RECORD=...`) and `bin/gate [--full] --plan --builds` (the builds
+the plan needs run as the gate runs them, then the plan on their units). In a scratch worktree of HEAD (`.tmp/gate-demos/SHA`, the
+store, the executables and the lock shared through git's common directory): the base plan; a comment line appended to
+`test/java/divergences.edn`, `--full --plan`; a comment line added to `arbace/j2g/out.ae`, `--full --plan --builds` (the
+executables and javac's tool at the changed key); each reverted. Each plan's steps by decision into
+`.tmp/gate-demos/SHA.edn` and, with `--record`, the clean run's record's `:demonstrations`; the j2g change's new builds removed.
+Plans and two builds (about 20 minutes and the lock), no check; `--essential`: the essential gate's plans, one build. The demos'
+plans run with `GATE_CANARY=0`.
+
+**The toy table** (`.tmp/gt7/toy/toy.edn`, `run.sh`: the inner mode on steps that read `gt7-toy/` files): a declared read
+`audit ok`; an undeclared one `AUDIT 1 undeclared` naming `gt7-toy/b.txt`, the gate failed and its pass not recorded; a failing
+step `not audited (the step failed)`; the build and the heavy step audited; a `limited` step's two programs in its `.cpu.tsv`;
+the passes `:clean true`; the record read back by the Clojure reader on stage 0.
+
+**The clean audit's findings** (the essential gate clean, three runs; every one fixed, the third passed with every audit ok):
+
+- *`go-build` read 2,160 files its key does not cover*: `tamago/goroot/` (2,152: the tamago configurations of goi's table, which
+  the executables embed, `bin/goi table --configs ...,tamago/amd64,tamago/arm64`) and `tools/godump/` (8: the key of the linux
+  std's read the table is made from). A change to either kept the gate's executables, their table stale: `gate_key`
+  (`bin/arbace-go`) and `arbace_javac_key` (`bin/lib/javac-key.bash`) now hash both, and `gate.audit`'s `:gate` and `:javac`
+  hosts cover them. GT4 never audited the builds; the clean run's audit of every step is what found it.
+- *`bin/heavy-lock`* in every `:inner` step (diffcheck, java-compiled, suite-aot-essential, programs, goi-aot-essential): the
+  tools' `ARBACE_HEAVY_CMD`, which takes the lock and decides nothing; `gate.audit` counts it with the gate's logic.
+- *`goi-aot-essential` loaded `arbace.j2g.zlib`*, one of its `:never-loads` (`arbace.j2g`): `arbace.go.table` compresses goi's
+  table with it, and a cold run makes the table (GT5's audit ran on a cached one). goi's four steps (goi-check,
+  goi-aot-essential, goi, goi-aot) now name j2g's other 19 namespaces one by one: a zlib change reruns them.
+- *`fixedbugs/issue21576.go` failed under gc and goi alike*: it runs `go run` within a minute, and found the host's Alpine go
+  1.27.2 on PATH (pinned by nothing), which with the clone's empty `GOCACHE` compiled std past the minute; the log's
+  timestamps then differed. `bin/goi check` puts TamaGo's `bin/` first on its programs' PATH (the 26 programs of
+  `$GOROOT/test` that run the go command run the pinned toolchain, whose cache the references warm); the gate-wide fix is GTS52.
+- *`gcgort.go` timed out* in the second run, alone too: 53 s of CPU (36 s of it system time) against `limited 10`'s 50, on a
+  loaded host (diffcheck took 23:50 in that run, 11:17 and 11:38 in the others). Its own limit is 20 s in
+  `test/goi/timeouts.txt` (100 s of CPU); its measured times are GTS51's data.
+
+**The runs** (`.tmp/heavy bin/gate --clean --tag gt7-essential` in this worktree; each built stage 0, the executables and the
+test build fresh in an empty `GOCACHE`; the logs and records in `.tmp/gt7/run{1,2,3}/`):
+
+| run | commit | result | time |
+|---|---|---|---:|
+| 1 | `ddc55365` | 4 checks' audits failed (heavy-lock), go-build's (2,160), goi-aot-essential's (zlib); goi-check failed (issue21576.go) | 76m42s |
+| 2 | `9961d166` (the fixes) | every audit ok; goi-check failed (gcgort.go's CPU limit) | 87m04s |
+| 3 | `97f8367c` (its limit) | **passed**, every step audited ok; 15 passes published, the executables published | 86m06s |
+
+The third run step by step (wall m:s, CPU minutes, the largest process's peak and the tree's, GiB), against the keyed essential
+gate's latest passes (main's, concurrent, warm caches, no audit):
+
+| step | clean | CPU | peak / tree | keyed | |
+|---|---:|---:|---:|---:|---|
+| pins | 0:05 | 0 | 0.1 | — | new |
+| stage0 | 2:28 | 14 | 9.3 / 9.2 | 0:00 | kept by its pins everyday |
+| go-build | 16:54 | 103 | 18.8 / 18.7 | 0:00-15:00 | one j2g run (the host's runtime the checkout's) |
+| go-smoke | 2:07 | 1 | 0.8 / 0.6 | 1:59 | |
+| suite-go | 3:26 | 21 | 9.4 / 12.7 | 2:01 | |
+| oracle-go | 1:24 | 2 | 0.8 / 3.2 | 1:08 | |
+| diffcheck | 11:38 | 128 | 26.2 / 26.2 | 9:55 | |
+| goi-check | 14:01 | 47 | 6.1 / 3.2 | 1:21 | gc's references and the corpora's reads made cold |
+| goi-aot-essential | 3:40 | 16 | 7.8 / 6.5 | 1:18 | |
+| java-check | 0:28 | 3 | 0.4 / 1.7 | 0:34 | |
+| java-check-judge | 0:02 | 0 | 0.3 | 0:02 | |
+| java-compiled | 13:16 | 63 | 18.9 / 18.9 | 5:14 | its program built cold |
+| suite-aot-essential | 10:11 | 40 | 18.1 / 18.1 | 6:31 | |
+| programs | 4:19 | 24 | 18.9 / 18.9 | 4:10 | |
+| generated | 0:04 | 0 | 0.4 | 0:03 | |
+| j2g-edge | 1:31 | 10 | 6.0 / 3.1 | 1:19 | |
+| reap, provenance | 0:02 | 0 | 0.3 | 0:02 | |
+| **total** | **86:06** | | gate tree 25.8 max | 56:56 (GT5's essential 2, every check run) | serial and audited against concurrent |
+
+The audit's cost is in the wall times only (strace traces the file calls and `clone`; the CPU and peaks are the commands'): the
+light steps moved by seconds, the heavy ones by their cold caches more than by the trace. The record (`.tmp/gt7/run3/
+clean-gt7-essential.edn`) reads back with the Clojure reader; it is not committed (the tag's is the exit criterion).
+
+**The demonstrations, on the essential gate** (`bin/gate-demos --essential --record`, after run 3, on its passes; `--essential`
+plans the essential gate, GT5's own criteria; `.tmp/gt7/demos-essential.txt`, the record with `:demonstrations` in
+`.tmp/gt7/demo-record.edn`): nothing changed, 14 of 15 checks skipped (the canary ran: `GATE_CANARY=0` in the demos' plans
+since); a classes file, `java-check-judge` and `reap` to run (and the canary), the other 12 skipped; a j2g comment, after the
+executables' rebuild (11:08, units differing in `arbace.j2g.out`), go-smoke, diffcheck, java-compiled, suite-aot-essential, programs,
+generated and j2g-edge to run, the five `:prog` checks (suite-go, oracle-go, goi-check, goi-aot-essential, java-check) skipped;
+the rebuilt directory removed. The `--full` demonstrations need the clean `--full`'s passes and javac's tool: the main session's.
+
+**`bin/gate --full --clean --plan`** here: 85 steps, 3 always, 2 builds, 77 run, 3 after (the 6 `:clean-only` parts of
+repr-go-native included; `.tmp/gt7/clean-plan-full.txt`).
+
+**For the main session** (after the merge; each from the main checkout, the quiet-host file up while the clean run runs):
+
+- the clean `--full` at the tag: `touch .tmp/gt7.quiet; .tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean
+  --tag arbace-reaps-3-crops-v2; rm .tmp/gt7.quiet` (the big lock held once from outside for the whole run; serial, so
+  nothing beside its steps), then commit `test/gate/clean-arbace-reaps-3-crops-v2.edn` with the tag's journal entry;
+- the demonstrations on its passes: `.tmp/heavy bin/gate-demos --record test/gate/clean-arbace-reaps-3-crops-v2.edn` (two builds,
+  the executables' and javac's tool's, under the lock; plans otherwise);
+- the concurrent `--full` (GTS37 (a)): `.tmp/heavy bin/gate --full --concurrent --rerun` (`--rerun`: every check runs, else the
+  clean run's passes skip them), its peaks in `.tmp/gate/*.mem` and `mem.tsv`.
+
+## Proposals (GTS50-GTS57)
+
+- **GTS50 `$GOROOT/test` pinned.**
+  - Options: (a) `seed/goroot.sha256`'s hash, or a second line of it, covers TamaGo's `test/` beside `VERSION` and `src/`,
+    checked by `--pins` and `bin/seed`; (b) as built: its digest recorded in the clean run's `:pins`, checked by nothing.
+  - *Recommended: (a)*: goi's checks, repr/go's corpora and `$GOROOT/test`'s references read it, and the steps declare
+    `seed/goroot.sha256` as its pin, which does not cover it; 3,516 files, a second of hashing.
+- **GTS51 The CPU limits recorded from the clean run (GTS33 (a)'s second half).**
+  - Options: (a) `bin/goi check --record-cpu` and `bin/java-check --record-cpu` read a clean run's `NAME.cpu.tsv`
+    (`.tmp/gate-clean/SHA.logs/gate/`), write each program's CPU seconds beside its reference (`test/goi/cpu-linux-amd64.tsv`,
+    `test/java/cpu-jdk26.tsv`), and `limited` takes three times the recorded time (at least the default's floor) where one is
+    recorded; (b) the same from a second, unaudited quiet run; (c) the factor of five kept.
+  - *Recommended: (a)*: the audit traces the file calls alone (`--seccomp-bpf`), which a program's CPU time barely sees; the
+    clean run is the quiet run the decision asked for, and its record names the commit the times belong to.
+- **GTS52 The host's `go` on PATH.**
+  - Options: (a) `gate_env` puts TamaGo's `bin/` first on every step's PATH (and `bin/lib/tmpdir.bash` for the scripts outside
+    the gate), so that a program or script that runs `go` runs the pinned toolchain; (b) per tool, as built for goi's check.
+  - *Recommended: (a)*: the clean run found `$GOROOT/test`'s programs that run the go command (26 of them) on the host's
+    Alpine go 1.27.2, pinned by nothing, and "no build may use the host's go"; one place covers every step.
+- **GTS53 Stage 0's key and audit.**
+  - Options: (a) stage 0 kept by its pins and by `bin/seed` and `bin/lib/seed-go.bash`'s digests, and audited at the clean run
+    against them; (b) as built: kept by the seed's and Go's pins alone, never audited (a `:pre` step).
+  - *Recommended: (a)*: a change to the scripts that build stage 0 keeps a stage 0 they no longer make; the cost is a second
+    of hashing.
+- **GTS54 The clean run's order.**
+  - Options: (a) serial, as §7 and as built (the quiet times calibrate the limits and the budgets); (b) by chain under the
+    audit, the heavy steps on a private lock (`--concurrent`'s protocol), its times then not quiet.
+  - *Recommended: (a)*: the essential gate took 77 minutes clean and serial with every step traced against 57 keyed and
+    concurrent with every check run (GT5's essential 2); the `--full` clean run is the tag's, once.
+- **GTS55 The clean run's passes published.**
+  - Options: (a) as built: its passes (`:clean`) into the shared store beside the everyday ones, its builds into the shared
+    executables' directory where absent, so that the next gates and the demonstrations start from them; (b) kept in the clone
+    (the record alone survives).
+  - *Recommended: (a)*: the passes are keyed by content like every other, and the demonstrations (GTS42 (a)) are to run on
+    them; `GATE_CLEAN_PUBLISH=0` keeps a run apart.
+- **GTS56 The frozen jar at the clean run.**
+  - Options: (a) as built: the main checkout's `.tmp/oracle-frozen/` jar, checked by its pin; (b) built in the clone from its tag
+    (the frozen branch's own build, a JVM build of minutes).
+  - *Recommended: (a)*: the pin is the jar's identity, and the jar's build belongs to the frozen branch's record, not the
+    commit's; (b) when no jar is there, as built.
+- **GTS57 A kept build that waits for the lock.**
+  - Options: (a) `go-build` and `javac-tool` look for their key's directory before the lock (`bin/arbace-go --gate-build
+    --check-cached`, `bin/javac-vendor tool --check`) and run without it on a hit; (b) as built: the whole step under the lock.
+  - *Recommended: (a)*: this branch's last essential gate skipped 14 checks on the clean run's passes and found the executables
+    the clean run published, and still waited 10m15s in the queue for a build of 0 seconds.
+
+**Slips.** Two commands redirected stderr to `/dev/null` (a check of the record and a loop over the store's passes, both
+read-only); `bin/gate-demos` was edited (by `sed -i`, a new file) while a run of it executed; the toy's first table named
+`bin/lib` in a `:cmd`, which the planner refused (a test file, fixed).
+
