@@ -335,3 +335,18 @@ git history:
 - The branch's gate after merging 9c89817d passed (27m38s). Main's gate on the merge passed from the store
   (6 s, 4 run).
 - Decided (the user): RPS160 (a), RPS161 (b) inside v2, RPS162 (a) as built. Scratch: `.tmp/rps97/`.
+
+## 2026-10-29: REAP v2's re-seed
+
+- `bin/arbace-go --fixpoint` on b6beefde. The fixpoint holds: G1 = G2 = G3 = a6a95bcb… (177,778,848 bytes), and the old
+  stage 0 (45df0046…) differs from G1 as expected.
+- G3 was packed by `ARBACE_SEED_GO_BUILD=target/arbace-go/fixpoint/g3 bin/seed --make` and committed as d173baf6. The
+  new seed is 19,004,276 bytes, 2,102 files, SHA-256 `ad1aeae893ef460937c7825a713497ab365ea95c47ccc2aeeb97315dbc00a949`.
+- It carries the shipped changes since the milestone v1's re-seed: JC4b and JC4c (names.ae among them), Clojure's
+  deferred cases, small-B's jrt module and module_table, JN9f (Compiler.ae, analyze.ae, interp.ae, jdk/forms), RPS150
+  (arbace/j2g/{out,main}.ae, arbace/classes/parse.ae) and C2's embedding list (arbace/j2g/embed.ae).
+- `bin/seed --verify` passed in 1,351 s: printed again at b6beefde, the same tar byte for byte (8207e64d…) and the same
+  archive, and stage 0 = G1 = G2 = G3.
+- The essential gate on d173baf6 passed: 26m49s, 18 run, at most 24.7 GiB.
+- GT5 changes a shipped file (arbace/lang/RT.ae, the loaded-namespaces log), so v2 re-seeds once more after GT5's merge.
+  Scratch: `.tmp/reseed/`.
