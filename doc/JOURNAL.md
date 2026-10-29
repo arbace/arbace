@@ -479,3 +479,24 @@ git history:
     Sonnet).
   - NH11 (b), not as recommended: the empty method sets investigated first (branch `nethttp-nh11`, Opus).
   - NH12 (a), NH13 (b), NH14 (a).
+
+## 2026-10-29: NH11 (b) built on its branch; NH15-NH18 decided (the user); the Makefile brought up to date
+
+- **NH11 (b)** (branch `nethttp-nh11`, on Opus; doc/go/NET-HTTP-SURVEY.md on the branch, "As built: NH11 (b)"). The empty
+  method sets were a goi bug, general to unlisted packages:
+  - A listed package's generic method (net/http's `atomic.Pointer[response].Store`) is built on its first call in that
+    package's build context, which re-gave the interned interpreted types their method sets with a `:method-cell` that
+    found no interpreted member. So the sets were empty.
+  - The fix is in `arbace/go/repl.ae`: the build contexts share the four lookups. Regression cases are in
+    `test/goi/repl.ae` and `test/goi/repl-pkgs/go/rt/atomicm`.
+  - The stub slots were too few, not leaking: in `go/arbace/gotable.edn`, Read/Write went to 128, SetDeadline to 64 and
+    Addr to 32, adding 32 KB.
+  - The interpreted corpus went from 10 to 56 of 60. Three classes remain, deferred to NH2.
+  - `bin/goi check` stays at 1,618+ with no regression.
+  - Its gate passed. It changes shipped files (repl.ae, gotable.edn), so it merges after the tag, with the batched
+    re-seed (NH6 (b)), so that the v2 seed stays the tagged sources'.
+- **Decided (the user):** NH15 (b) now and (a) at NH3 if load time matters; NH16 (a); NH17 (a); NH18 (c).
+- **The Makefile** (e49f48a8), on the user's request: new targets `java-forms-verify` and `java-forms-update`,
+  `suite-divergences`, `reap-record-native-check` and `repr-c-gcc-tests`. `make verify` gains `repr-java-nojavac-check`
+  and the forms' verify, and `.PHONY` gains `suite-aot` and `suite-aot-essential`. Six helper scripts stay without
+  targets, as they always were: `build-go`, `box-smoke`, `j2g-check`, `j2g-evalproof`, `jrt-coverage`, `net-check`.
