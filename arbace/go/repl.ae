@@ -381,6 +381,35 @@
   [path]
   (some-> (ck/ensure-package @digest-session path nil []) deref :scope-entries))
 
+(defn- gen-of
+  "The generation of named type nt: its checked type object's, else its package's state's, else 1."
+  [nt]
+  (let [i (t/info nt)]
+    (or (:goi/gen i) (when-let [ps (state-of-path (:pkg i))] (get-in @ps [:types (:name i) :gen])) 1)))
+
+(defn- func-cell
+  "The cell of interpreted function object x, by its package's state."
+  [x]
+  (let [ps (state-of-path (e/o x :pkg))]
+    (or (and ps (get-in @ps [:funcs (e/o x :name) :cell]))
+        (throw (ex-info (str "goi: no function " (e/o x :pkg) "." (e/o x :name)) {})))))
+
+(defn- method-cell
+  "The cell of interpreted method object m, by its package's state (a compiled package's method
+  has none: \"goi: no method\", which the builder takes for a method it has no cell for, GC30)."
+  [m]
+  (let [ps (state-of-path (e/o m :pkg))
+        k (method-name m)]
+    (or (and ps (get-in @ps [:methods k :cell]))
+        (throw (ex-info (str "goi: no method " (e/o m :pkg) "." k) {})))))
+
+(defn- global-cell
+  "The cell of interpreted package-level variable x, by its package's state."
+  [x]
+  (let [ps (state-of-path (e/o x :pkg))]
+    (or (and ps (get-in @ps [:globals (e/o x :name)]))
+        (throw (ex-info (str "goi: no variable " (e/o x :pkg) "." (e/o x :name)) {})))))
+
 (defn build-context
   "The builder's context for the package of state st."
   [st]
@@ -393,22 +422,10 @@
    :types (java.util.HashMap.)
    :methods-done (java.util.IdentityHashMap.)
    :lit-count (atom 0)
-   :gen (fn [nt]
-          (let [i (t/info nt)]
-            (or (:goi/gen i) (when-let [ps (state-of-path (:pkg i))] (get-in @ps [:types (:name i) :gen])) 1)))
-   :func-cell (fn [x]
-                (let [ps (state-of-path (e/o x :pkg))]
-                  (or (and ps (get-in @ps [:funcs (e/o x :name) :cell]))
-                      (throw (ex-info (str "goi: no function " (e/o x :pkg) "." (e/o x :name)) {})))))
-   :method-cell (fn [m]
-                  (let [ps (state-of-path (e/o m :pkg))
-                        k (method-name m)]
-                    (or (and ps (get-in @ps [:methods k :cell]))
-                        (throw (ex-info (str "goi: no method " (e/o m :pkg) "." k) {})))))
-   :global (fn [x]
-             (let [ps (state-of-path (e/o x :pkg))]
-               (or (and ps (get-in @ps [:globals (e/o x :name)]))
-                   (throw (ex-info (str "goi: no variable " (e/o x :pkg) "." (e/o x :name)) {})))))})
+   :gen gen-of
+   :func-cell func-cell
+   :method-cell method-cell
+   :global global-cell})
 
 (defonce ^{:private true :doc "The build contexts of compiled packages, for the instances of their
   generic declarations (§9.3): path -> context."} compiled-contexts (atom {}))
@@ -427,10 +444,17 @@
                  :types (java.util.HashMap.)
                  :methods-done (java.util.IdentityHashMap.)
                  :lit-count (atom 0)
-                 :gen (fn [nt] 1)
-                 :func-cell (fn [x] (throw (ex-info (str "goi: no function " (e/o x :pkg) "." (e/o x :name)) {})))
-                 :method-cell (fn [m] (throw (ex-info (str "goi: no method " (e/o m :pkg) "." (e/o m :name)) {})))
-                 :global (fn [x] (throw (ex-info (str "goi: no variable " (e/o x :pkg) "." (e/o x :name)) {})))}]
+                 ;; an interpreted type's generation as its package's context has it (NH11 (b):
+                 ;; was 1, an older type's descriptor for a type redefined at the REPL)
+                 :gen gen-of
+                 ;; an interpreted package's members by its state, as an interpreted package's
+                 ;; context finds them (NH11 (b)): an instance built here may describe an
+                 ;; interpreted type (atomic.Pointer[http.response] reaching *http.connReader
+                 ;; through its fields), whose method set is given by the cells of its methods;
+                 ;; the context threw for every one, so the set was given empty, over the right one
+                 :func-cell func-cell
+                 :method-cell method-cell
+                 :global global-cell}]
         (swap! compiled-contexts assoc path ctx)
         ctx)))
 
