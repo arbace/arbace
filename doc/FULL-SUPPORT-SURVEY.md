@@ -2923,6 +2923,67 @@ Java print 2,597 / 683 / 41 to 2,598 / 687 / 36 (TypedDeconstructionPatternExc, 
 What moved: `jdk/forms` 3 files, `jdk/javac/forms` 3, `test/repr/java/expected/jdk26u.sha256` 30 of 13,566, the
 essential tests' forms 1, 21 jtreg tests' forms; none regressed at the levels read, interp, compiled and print.
 
+## As built: RPS150 and JCS123 (b) (2026-10-28)
+
+Branch `v2-rps150`, from main `3aef964c`, for `arbace-reaps-3-crops-v2`: RPS150 (b) (decided "Decided (2026-10-28): RPS130-RPS134,
+RPS150-RPS154") and JCS123 (b) (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (2026-10-28): JCS120-JCS123").
+
+- *RPS150 (b), Module's support forms.* `out/support-forms` (arbace/j2g/out.ae) writes, beside `Class.getResourceAsStream`'s and
+  under the same conditions, two methods on jrt's `*Module`: `GetResourceAsStream_String__InputStream` (when `ByteArrayInputStream`
+  is translated: the name from the module's root, one leading `/` dropped, over `ResourceOrPath` as the embedded resources and
+  `ARBACE_PATH`, a `ByteArrayInputStream`; nil when absent) and `GetPackages__Set` (when `HashSet` is translated: a `HashSet` of
+  the packages of the registered classes whose `GetModule` is the module, and for a named module the packages of
+  module_table.ae; the unnamed package is not listed). `main.ae`: the scan registers both under `:methods "Module"`, and
+  `HashSet`'s `<init>` and `add` are roots when `HashSet` has Java forms. No manifest entry: `Class.getResourceAsStream` has none
+  either (an edge member jrt leaves undefined, j2g's support method), so the pattern is Class's exactly. Checked by a program
+  (`.tmp/rps150/prog`, `--build-program`, run: `.tmp/rps150/prog-run.out`): `String.class.getModule().getPackages()` holds
+  `java.lang` and `java.util` and not `hello`, the unnamed module's holds `hello` and not `java.lang`, a missing resource
+  (with or without `/`) is null; the print caches' `j2g_support.go` of the java-check runs compiled with it. No test of the
+  corpora calls either method (the sources searched), so no recorded result moves from this part.
+- *JCS123 (b), (i) getMethods' order.* `member-table-form` (out.ae) sorted a class's methods by name first; for an own interface
+  of a `--program` (`own` and `iface`) it now keeps declaration order, the order the JVM gives a class it loads in this
+  position (the edge's `:method-order` covers only archived JDK classes, whose order comes from the JVM and stays): t04530
+  (NonPublicStaticInitializer) passes compiled.
+- *JCS123 (b), (ii) the enum.* The cause was not the modifiers: the converter writes `V() {}` as `(V [])` (a constant with
+  arguments or a body is a list, a plain one a symbol), and `arbace.classes.parse` read a list without body forms as having no
+  body, so no `T8034044$En$1` existed and `En.V.getClass()` was `En`, which is static. `parse.ae` now reads `(V [])` with no
+  arguments and no pinned parameter tags as a constant with an empty body (a constant with arguments and no body is still
+  `(V [1])`, the shape of `V(1) {}` too: the forms cannot tell them apart, and the pinned empty-argument case with an empty
+  body stays without one). The anonymous class takes javac's InnerClasses flags (final, enum, not static): t05967 passes
+  compiled, interpreted as before. This is the Java forms' analysis, the executable's own: it moves the runtime of the re-seed,
+  and is not exercised by the host that runs j2g from the seed (the gate's build carries it). Not run: the whole compiled
+  level, so a test with an empty constant body beside others is checked only by the gate's subsets.
+- *The classes.* `:j2g-reflection` shrinks to t04863 (IllegalAccessInInvoke) and becomes `:design`: the Go build has no
+  run-time access checks, caller-sensitive checks left out by JCS123 (b).
+- *Numbers (`bin/reap`, before to after).* Java AOT 1,910 / 180 / 1,230 to 1,912 / 180 / 1,230 (t04530 and t05967 pass;
+  `levels-known.edn` loses both lines); read 7,740 / 3 / 93, eval 1,804 / 329 / 1,189 and print 2,597 / 683 / 41 unchanged
+  (the interpreted level already passed both); 12 of 12 cells, 0 problems. Records: `test/java/check-compiled.edn` (two
+  lines), `test/java/levels-known.edn`, `test/java/divergences.edn`.
+
+Shipped files changed (the re-seed): `arbace/j2g/out.ae`, `arbace/j2g/main.ae` (j2g's support forms and scan: they change the
+`j2g_support.go` of every program with `ByteArrayInputStream` or `HashSet` translated) and `arbace/classes/parse.ae` (the
+Java forms' analysis in the executable). No file of `go/`, `overlay/` or `jdk/`.
+
+Scratch (`.tmp/rps150/` of the worktree): `prog/` (the Module program) with `prog-build.log` and `prog-run.out`, `c4.log` to
+`c6.log` and `rec.log` (the java-check runs), `reap-after.log`, `gate-build.log`, `run-all.sh`, `record.sh`.
+
+**The checks.** The essential `bin/gate` at commit `80e7e678` passed (17 steps run, 11m27s of wall time on warm caches for its
+builds, the lock waited separately): oracle 22,688 of 22,740 as recorded, diffcheck 12,795 of 12,807 as recorded, goi's 801
+and 248, Java's essential 428 of 428 interpreted and 428 of 428 compiled, the AOT suite subset, the programs (3 of 3), the
+generated variants, j2g's edge, `bin/reap` 12 of 12 cells with 0 problems (Java AOT 1,912 / 180 / 1,230). Log:
+`.tmp/rps150/gate.log` of the worktree. The ad hoc runs used main's stale `arbace-javac` (`REPR_JAVA_STALE_OK=1`, read level
+only) and the gate's own executable and compiled namespaces (`.tmp/arbace-go-gate`) for the compiled level.
+
+**The full compiled level (before the re-seed).** `bin/java-check --levels compiled` (no `--record`, `--jobs 8`, the gate's
+executable and compiled namespaces, main's `arbace-javac` with `REPR_JAVA_STALE_OK=1`; `.tmp/rps150/full.log`,
+`full-results-compiled.tsv`): 3,322 tests, 1,913 pass (recorded 1,912), 968 refused, 395 fail, 23 timeout, 22 differ,
+1 unread; 3,315 as recorded. Five lines differ from `check-compiled.edn`, none about an enum constant: t04602 (recorded
+flaky) passes; t05565 (LockStep, recorded fail on ObjectOutputStream) passed in the full run and fails as recorded when run
+alone (the shard's world held the class); t05445 (HugeToString) timed out twice on the loaded host and passes alone
+(flaky by JCS71 (a)); t07649 (recorded timeout) is a differ with a long stdout, the same speed class; t08122 (Thread-4 against
+Thread-2 in the message) is the same failure. A rerun of t05445, t05565, t07649 and t04602 alone (`again.log`): 0 regressions.
+The parse.ae change produced no regression.
+
 ## REAP v2's divergences (DRAFT, 2026-10-28; to be refreshed at the tag `arbace-reaps-3-crops-v2`)
 
 **DRAFT.** The milestone's record as it stands on main `bf84a975`, modelled on "REAP v1's divergences" (REAP9 made that

@@ -13,7 +13,8 @@ covers what.
 
 - `arbace/`: the vendored Clojure in it (everything outside the tools `arbace/classes/`,
   `arbace/repr/`, `arbace/build/`, `arbace/j2g/` and `arbace/c2j/`, which are Arbace's own but
-  for repr/java's native lexer and parser, ports of jdk26u's javac, below) is
+  for repr/java's native lexer and parser, ports of jdk26u's javac, and repr/c's lexer and
+  preprocessor, ports of cc, below) is
   derived from Clojure, https://github.com/clojure/clojure at `98d735fab02f337cee654cb0629bddc09883a75a`,
   with ASM, https://gitlab.ow2.org/asm/asm at `0460f74ba64230e5b846967c81a52628b5dd0596`: the frozen tree `clojure/` that this repository
   held until the freeze (it remains on the branch `arbace-for-java-26`), renamed to `arbace.*`,
@@ -399,6 +400,18 @@ covers what.
   `baf63fb`, `src/java.base/share/classes/java/lang/FdLibm.java` (doc/go/JRT-NOTES.md, phase 1
   and "Phase 2B (step 5)"): Copyright (c) Oracle and/or its affiliates, under the GNU General
   Public License version 2 with the Classpath Exception (text below).
+- `arbace/repr/c/` (repr/c, C's bridge; doc/C23-SURVEY.md, "As built: C2"): `lex.ae` and `pp.ae`,
+  repr/c's lexer and preprocessor, are Arbace forms porting, function by function,
+  modernc.org/cc/v4 v4.29.7 as go-whim carries it, https://github.com/arbace/go-whim at
+  `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, `crefactor/cc/scanner.go`, `cpp.go` and the parts of
+  `etc.go` and `cc.go` they use: Copyright (c) 2014 The CC Authors, under the BSD 3-Clause License
+  ("cc (modernc.org/cc/v4) and go-whim's C23 delta" below; each file carries cc's notice); what
+  derives from go-whim's own C23 delta to cc (the scanner's digit separators and `u8'a'`, marked
+  `go-whim` there), licensed to Arbace by its author under the Eclipse Public License 1.0 (CS37 (a),
+  2026-10-28), and Arbace's changes (marked `Arbace:`) are under the Eclipse Public License 1.0. The
+  rest of `arbace/repr/c/` (`host.ae`, `ppcheck.ae`) and the helper `tools/ccdump/`, which imports
+  go-whim's cc (or upstream's, its build tag `upstream`) and copies none of it, are Arbace's own,
+  under the Eclipse Public License 1.0.
 - `arbace/repr/java/lex.ae` and `arbace/repr/java/parse.ae` (repr/java's native lexer and parser,
   doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"): Arbace forms porting, method by method,
   https://github.com/openjdk/jdk26u at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/`'s
@@ -853,6 +866,43 @@ copyright notice, this list of conditions and the following disclaimer
 in the documentation and/or other materials provided with the
 distribution.
    * Neither the name of Google LLC nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## cc (modernc.org/cc/v4) and go-whim's C23 delta: BSD 3-Clause License
+
+From the `LICENSE` of `crefactor/cc` in https://github.com/arbace/go-whim at
+`80c49bf53cd6340487ac623f3d6d135b77ac1db6` (upstream modernc.org/cc/v4 v4.29.7's, unchanged), covering
+what `arbace/repr/c/lex.ae` and `pp.ae` port from cc; go-whim's delta and Arbace's changes in them are
+under the Eclipse Public License 1.0 (above):
+
+```
+Copyright (c) 2014 The CC Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the names of the authors nor the names of the
 contributors may be used to endorse or promote products derived from
 this software without specific prior written permission.
 

@@ -1,0 +1,104 @@
+(ns arbace.repr.c.host
+  "The reference's configuration as repr/c's preprocessor reads with it (doc/c/SPEC.md §9.1;
+  doc/C23-SURVEY.md, \"As built: C2\"): gcc 15.2's answers recorded by `bin/repr-c host record` under
+  test/c/host/ (its predefined macros per standard with the date macros of the fixed epoch, CS43 (a);
+  its search list, gcc's include directory before musl's, CS32 (a); its answers to __has_attribute,
+  __has_c_attribute, __has_builtin, __has_feature), never asked at read time, and a file's own options
+  (a corpus file's dg-options: -std, -D, -U, -I, --embed-dir, -O) as the reference applies them."
+  (:require [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(def stds
+  "The standards whose predefined macros are recorded."
+  ["c89" "c94" "c99" "c11" "c17" "c23" "c2y" "gnu89" "gnu99" "gnu11" "gnu17" "gnu23" "gnu2y"])
+
+(def std-aliases
+  {"c90" "c89" "iso9899:1990" "c89" "iso9899:199409" "c94" "c9x" "c99" "iso9899:1999" "c99"
+   "iso9899:199x" "c99" "c1x" "c11" "iso9899:2011" "c11" "c18" "c17" "iso9899:2017" "c17"
+   "iso9899:2018" "c17" "c2x" "c23" "iso9899:2024" "c23" "gnu90" "gnu89" "gnu9x" "gnu99"
+   "gnu1x" "gnu11" "gnu18" "gnu17" "gnu2x" "gnu23"})
+
+(defn canonical-std
+  "A -std= value as one of `stds`, nil when gcc's C has no such standard."
+  [^String s]
+  (let [s (get std-aliases s s)] (when (some #{s} stds) s)))
+
+(defn- slurp-lines [^String f] (remove str/blank? (str/split-lines (slurp f))))
+
+(defn load-host
+  "The recorded host under `dir` (test/c/host): {:search [...] :predefined {std text} :has {[op
+  name] value} :epoch n}."
+  [^String dir]
+  (let [edn (read-string (slurp (str dir "/host.edn")))]
+    {:search (vec (slurp-lines (str dir "/search.txt")))
+     :predefined (into {} (for [s stds :let [f (java.io.File. (str dir "/predefined/" s ".h"))] :when (.exists f)]
+                            [s (slurp f)]))
+     :has (into {} (for [l (slurp-lines (str dir "/has.tsv"))
+                         :let [[op nm v] (str/split l #"\t")]]
+                     [[op nm] (Long/parseLong v)]))
+     :epoch (:epoch edn)
+     :edn edn}))
+
+;; ---------------------------------------------------------------------------------------------
+;; A file's options
+
+(defn- shell-words
+  "The words of a dg-options string (its quotes and braces as DejaGnu's Tcl reads the simple ones)."
+  [^String s]
+  (->> (str/split (str/trim s) #"\s+") (remove str/blank?) (map #(str/replace % "\\\"" "\""))))
+
+(defn dg-options
+  "The options of a gcc testsuite file's dg-options and dg-additional-options lines, in order: those
+  for C (a line whose selector is `{ target c++ }` skipped), ${srcdir} as the testsuite's root (\".\")."
+  [^String text]
+  (vec (mapcat (fn [[_ _ opts sel]]
+                 (when-not (and sel (re-find #"c\+\+" sel))
+                   (shell-words (str/replace opts "${srcdir}" "."))))
+               (re-seq #"\{\s*dg-(additional-)?options\s+\"((?:[^\"\\]|\\.)*)\"\s*(\{[^}]*\})?" text))))
+
+(defn file-config
+  "A file's configuration from `opts` (a compiler's options) and `default-std`: {:std :pre :inc
+  :embed-dirs :args}, :pre the lines its -D, -U and -O add to the predefined macros, :args the
+  options the reference is given to agree (the modelled ones)."
+  [opts ^String default-std]
+  (loop [os (seq opts) std default-std pre [] incs [] embed [] args []]
+    (if-let [^String o (first os)]
+      (let [more (next os)
+            arg (fn [^String flag] (if (= o flag) [(first more) (next more)] [(subs o (count flag)) more]))]
+        (cond
+          (.startsWith o "-std=")
+          (if-let [s (canonical-std (subs o 5))] (recur more s pre incs embed (conj args o)) (recur more std pre incs embed args))
+          (= o "-ansi") (recur more "c89" pre incs embed (conj args o))
+          (.startsWith o "-D")
+          (let [[v more] (arg "-D")
+                [n d] (let [i (.indexOf ^String v "=")] (if (neg? i) [v "1"] [(subs v 0 i) (subs v (inc i))]))]
+            (recur more std (conj pre (str "#define " n " " d)) incs embed (conj args (str "-D" v))))
+          (.startsWith o "-U")
+          (let [[v more] (arg "-U")] (recur more std (conj pre (str "#undef " v)) incs embed (conj args (str "-U" v))))
+          (.startsWith o "-I")
+          (let [[v more] (arg "-I")] (recur more std pre (conj incs v) embed (conj args (str "-I" v))))
+          (re-matches #"--?embed-dir(ectory)?(=.*)?" o)
+          (let [[v more] (if-let [[_ _ eq] (re-matches #"--?embed-dir(ectory)?(=.*)" o)]
+                           [(subs eq 1) more]
+                           [(first more) (next more)])]
+            (if v
+              (recur more std pre incs (conj embed v) (conj args (str "--embed-dir=" v)))
+              (recur more std pre incs embed args)))
+          (re-matches #"-O([1-3sgz]|fast)?" o)
+          (recur more std (conj pre "#undef __NO_INLINE__" "#define __OPTIMIZE__ 1") incs embed (conj args o))
+          (= o "-O0") (recur more std pre incs embed (conj args o))
+          :else (recur more std pre incs embed args)))
+      {:std std :pre (str/join (map #(str % "\n") pre)) :inc incs :embed-dirs embed :args args})))
+
+(defn config
+  "The preprocessor's configuration (arbace.repr.c.pp) for a file of configuration `fc` (file-config's)
+  read from `base`."
+  [host fc ^String base]
+  {:predefined (str (get (:predefined host) (:std fc)) (:pre fc))
+   :include (:inc fc)
+   :sys (:search host)
+   :std (keyword (:std fc))
+   :has (:has host)
+   :embed-dirs (:embed-dirs fc)
+   :base base})
