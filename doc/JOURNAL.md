@@ -350,3 +350,31 @@ git history:
 - The essential gate on d173baf6 passed: 26m49s, 18 run, at most 24.7 GiB.
 - GT5 changes a shipped file (arbace/lang/RT.ae, the loaded-namespaces log), so v2 re-seeds once more after GT5's merge.
   Scratch: `.tmp/reseed/`.
+
+## 2026-10-29: GT5 merged; GTS40-GTS42 decided (the user); C23's C3 started
+
+- GT5 (branch `gate-gt5`, on Opus; doc/GATE-SURVEY.md, "As built: GT5"):
+  - **Parts:** `:parts` gives one check per corpus.
+  - **Outputs and early cutoff:** `:outputs` keeps a step's output with its pass; `:uses` puts its producers' output
+    digests in the consumer's key.
+  - **Program hosts:** `:prog` and `:javac-prog` key a build by its units (j2g's Go forms by namespace,
+    `bin/lib/prog-units.bash`), less a step's `:never-loads`.
+  - **Java's check split per level:** `--save` runs the levels without judging and `--judge` only judges, so the
+    judgment is a step of its own.
+  - **The audit:** it logs the namespaces each step loads (`ARBACE_LOADED_LOG` in `RT.load`), and its reducer is
+    `tools/gateaudit`.
+  - **GTS31 (b):** the tools' own lock, `bin/lib/heavy.bash`.
+  - **GTS32 (a):** the FIFO ticket lock, `bin/heavy-lock`.
+  - **GTS34 (a):** `--prune` after every `--full`.
+  - **GTS35 (a):** atomic caches.
+  - **GTS36 (b):** `bin/j2g-edge update` rewrites `:jdk-edge`.
+- GT5's demonstrations:
+  - A classes file changed: only the judge and reap ran, 7 s.
+  - A comment in arbace/j2g/out.ae: only the `arbace.j2g.out` unit moved, and the gate took 14m57s against 56m56s with
+    every check run.
+- The merge was clean. Its only shipped change is arbace/lang/RT.ae.
+- Decided (the user): GTS40 (c), `go-build` and `fixpoint` are `:heavy true` again (50900e48); the per-process lock had
+  queued a build's four heavy processes, about three hours. GTS41 (c) at GT7, (a) until then. GTS42 (a), at GT7.
+- The essential gate on 50900e48 passed: 18m54s, 19 run, at most 45.0 GiB. Scratch: `.tmp/gt5/`.
+- C23's C3 started beside v2: repr/c's parser, with CS50 (a) and CS51 (a). Branch `c23-c3`, on Opus, the user's choice.
+  It changes no shipped file, stays light while `.tmp/gt7.quiet` exists, and merges after the tag.
