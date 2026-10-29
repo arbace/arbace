@@ -1688,3 +1688,8 @@ where stage 0 was kept), `--full`, the javac-tool path of GTS57 (the same code, 
   - Options: (a) a step key `:cached-cmd` (an unkeyed column of `plan.tsv`) in place of `build_cached`'s two cases; (b) as built.
   - *Recommended: (b)* while there are two builds: the command and its check live in the same two scripts; (a) when a third
     build step appears.
+
+## Decided (2026-10-29): GTS60-GTS61
+
+The user decided both as recommended: GTS60 (b), so `bin/lib/tmpdir.bash` puts TamaGo's `bin/` first on `PATH` at the
+next change that rekeys the executables anyway (NH11's merge after the tag is one); GTS61 (b), as built.

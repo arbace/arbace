@@ -500,3 +500,23 @@ git history:
   `suite-divergences`, `reap-record-native-check` and `repr-c-gcc-tests`. `make verify` gains `repr-java-nojavac-check`
   and the forms' verify, and `.PHONY` gains `suite-aot` and `suite-aot-essential`. Six helper scripts stay without
   targets, as they always were: `build-go`, `box-smoke`, `j2g-check`, `j2g-evalproof`, `jrt-coverage`, `net-check`.
+
+## 2026-10-29: GTS50, GTS52, GTS53 and GTS57 merged; GTS60-GTS61 decided (the user); GT7's clean run started
+
+- **GTS50, GTS52, GTS53 and GTS57** (branch `gate-gts5x`, on Sonnet; doc/GATE-SURVEY.md, "As built: GTS50, GTS52, GTS53,
+  GTS57"):
+  - GTS50: `seed/goroot-test.sha256` pins TamaGo's `test/` (3,516 files), and `bin/gate --pins` checks it. It is a file
+    of its own, so a test-only change does not rekey everything.
+  - GTS52: TamaGo's `bin/` comes first on `PATH` in every step (`gate_env`).
+  - GTS53: stage 0 is keyed on `bin/seed` and `bin/lib/seed-go.bash`, and audited; the first audit found the seed's tar,
+    now covered by its pin.
+  - GTS57: a build cached at its key takes no lock (`--gate-build --check-cached`; go-build 0 s, no wait, where the
+    previous gate waited 10m15s).
+  - The branch's run 2 failed on an empty `.tmp/repr-go/forms/linux-dirtest` that a killed run had left, which was stale
+    scratch; run 3 passed. The merge's one conflict was two appended sections in GATE-SURVEY.md; both kept. Main's gate
+    passed (38 s, from the branch's passes). Scratch: `.tmp/gts5x/`.
+- **Decided (the user):** GTS60 (b), `PATH` for scripts run by hand at the next rekey; GTS61 (b), as built.
+- **GT7's clean run** started on this commit:
+  `.tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean --tag arbace-reaps-3-crops-v2`. It holds
+  the big lock once for the whole run, with `.tmp/gt7.quiet` set. Two moderate agents may run beside it (the user): C3b
+  for now; NH11's branch waits for the tag.
