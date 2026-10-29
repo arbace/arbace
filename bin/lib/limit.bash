@@ -14,12 +14,28 @@
 #                        64-CPU host, 3.2 times its 10 s, so a CPU limit of twice the wall limit was too
 #                        tight (the first audit of goi-check) and five times holds the programs measured.
 #
+#   ARBACE_CPU_LOG       a file: each limited program's STATUS, WALL, USER, SYS seconds and command
+#                        appended to it, tab-separated (GTS33 (a): bin/gate --clean measures the quiet
+#                        CPU times its limits are to be recorded from)
+#
 # Callers read 124, 137 and 152 (SIGXCPU) as "timeout" and, where the check has one, take the quiet
 # retry (run alone, at the step's end) before they count it. Exported for the subshells and xargs that
 # run actions: `export -f limited limited_cpu` where they are set up.
 
 limited_cpu() {
   local cpu=$1 wall=$2; shift 2
+  if [ -n "${ARBACE_CPU_LOG:-}" ]; then
+    # GTS33 (a)'s measurement (bin/gate --clean): each program's status, wall, user and system seconds
+    # and command appended to ARBACE_CPU_LOG, one line each (a time killed by the wall cap writes none)
+    local tf=$ARBACE_CPU_LOG.$BASHPID st
+    timeout -k 5 "$wall" /usr/bin/time -f '%e %U %S' -o "$tf" bash -c 'ulimit -t "$1"; shift; exec "$@"' limited "$cpu" "$@"; st=$?
+    # time exits with the signal's number when the program was killed: the status a shell gives
+    local sig; sig=$(sed -n 's/^Command terminated by signal \([0-9]*\)$/\1/p' "$tf" 2>"$tf.err")
+    [ -n "$sig" ] && [ "$st" = "$sig" ] && st=$((128 + sig))
+    printf '%s\t%s\t%s\n' "$st" "$(tail -1 "$tf" 2>"$tf.err" | tr ' ' '\t')" "$*" >> "$ARBACE_CPU_LOG"
+    rm -f "$tf" "$tf.err"
+    return $st
+  fi
   timeout -k 5 "$wall" bash -c 'ulimit -t "$1"; shift; exec "$@"' limited "$cpu" "$@"
 }
 limited() {
