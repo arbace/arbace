@@ -1061,6 +1061,12 @@ back byte for byte (level 2):
 The exact encoding of these runs is C3b's to settle with the round trip over the corpora, as repr/go's
 `:full` got its "As built" (doc/go/SPEC.md §10.2); the rule it must keep is the first sentence above.
 
+**As built (C3b, 2026-10-29; doc/C23-SURVEY.md, "As built: C3b").** `:full` keeps the text per top-level item: each
+top-level form's `:c/text` is the main file's bytes from its first token to the next item's, and `c/file`'s `:c/head`
+the bytes before the first; the printer writes them in order (a form without `:c/text`, written or changed by hand, as
+`:lines` prints it). The finer encoding above (per token) is CS70's. C3b also departs from §3.2's N4 (`^:c/bare`, CS71),
+§5.6's keys (CS72), §4.3's units (CS74), §9.3 (CS75) and §7.9's asm (CS76), each a proposal of the survey.
+
 ### 10.3 Line directives
 
 `#line` is a directive form (§9.2); positions in the forms are the file's raw positions (as Go forms'

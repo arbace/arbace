@@ -33,7 +33,7 @@ Contents: Executive summary · 1 What parity means for C · 2 Prior art · 3 Mea
 5 repr/c: read and print · 6 eval: ci · 7 AOT · 8 The oracle and the corpora · 9 Licenses, the host,
 the box · 10 The fourth row · 11 Plan (C1-C9) · 12 Proposals (CS1-CS24) · 13 What the user decides
 first · 14 Risks · 15 Sources · Appendix A: the scratch · Decided (2026-10-28): CS1-CS24 · C1: the plan
-after CS4 (b) (with CS30-CS43).
+after CS4 (b) (with CS30-CS43) · As built: C2, C3, C3b (with CS50-CS51, CS60-CS63, CS70-CS83).
 
 ## Executive summary
 
@@ -1932,4 +1932,176 @@ each a proposal below where it departs from the spec's text:
 - `#embed` is read as the integers it expands to (its directive inside the initializer is `:full`'s), no `c/embed`
   form yet (CS75); inline `asm` is `(c/asm "TEXT")`, its tokens' text, not §7.9's structured operands (CS76).
 
-{{NUMBERS}}
+### C3b.2 The round trip's numbers
+
+`bin/repr-c roundtrip --record-gcc` over every corpus read in place (Lua's tarball not; `c23` is test/c/c23/), 6 threads,
+`GOMEMLIMIT=5GiB`, about 80 minutes; then the classes written (`--record`'s entries, classed by hand from each file's
+detail). Columns: files; pass; known; read ok / read error (an error the reference shares is a pass, below); level 1
+(the forms equal); level 2 (`:full` byte for byte); level 3 (the objects equal; in parentheses the files whose original
+gcc does not compile at its options, nothing to compare); level 4 (run the same / differently, the run corpora); the
+acceptance against gcc -fsyntax-only's recorded status (agree / both reject / gcc only rejects / the port only rejects):
+
+| corpus | files | pass | known | read ok / error | l1 | l2 | l3 (orig fails) | l4 same / differ | agree / both / gcc only / port only |
+|---|---:|---:|---:|---|---:|---:|---|---|---|
+| c23 | 62 | 62 | 0 | 62 / 0 | 62 | 62 | 62 (0) | — | 59 / 0 / 3 / 0 |
+| c23conf | 49 | 49 | 0 | 49 / 0 | 49 | 49 | 49 (0) | — | 49 / 0 / 0 / 0 |
+| torture-execute | 1672 | 1653 | 19 | 1660 / 7 | 1658 | 1660 | 1636 (12) | 1527 / 0 | 999 / 7 / 666 / 0 |
+| torture-execute-mirror | 1632 | 1614 | 18 | 1620 / 7 | 1618 | 1620 | 1599 (11) | 1595 / 1 | 961 / 7 / 664 / 0 |
+| torture-compile | 1791 | 1774 | 17 | 1781 / 8 | 1778 | 1776 | 1732 (44) | — | 1170 / 3 / 613 / 5 |
+| tcc-tests2 | 88 | 85 | 3 | 86 / 0 | 85 | 86 | 81 (4) | 79 / 0 | 84 / 0 / 4 / 0 |
+| tcc-pp | 22 | 20 | 2 | 3 / 19 | 3 | 3 | 2 (1) | — | 2 / 17 / 1 / 2 |
+| compcert | 24 | 24 | 0 | 24 / 0 | 24 | 24 | 24 (0) | 24 / 0 | 24 / 0 / 0 / 0 |
+| mir | 315 | 313 | 2 | 313 / 2 | 311 | 313 | 310 (1) | 310 / 2 | 305 / 2 / 8 / 0 |
+| cxgo | 88 | 88 | 0 | 88 / 0 | 88 | 88 | 87 (1) | 2 / 0 | 86 / 0 / 2 / 0 |
+| benchmarksgame | 52 | 48 | 4 | 45 / 7 | 45 | 41 | 40 (5) | 29 / 0 | 39 / 7 / 6 / 0 |
+| sqlite | 2 | 0 | 2 | 1 / 0 | 0 | 1 | 0 (0) | — | 1 / 0 / 1 / 0 |
+| zlib | 15 | 13 | 2 | 13 / 0 | 13 | 13 | 13 (0) | — | 15 / 0 / 0 / 0 |
+| quickjs | 10 | 7 | 3 | 3 / 4 | 3 | 3 | 3 (0) | — | 4 / 4 / 2 / 0 |
+| gcc-c23 | 270 | 224 | 46 | 218 / 47 | 208 | 218 | 156 (53) | — | 161 / 18 / 62 / 29 |
+| gcc-cpp-c23 | 16 | 14 | 2 | 7 / 9 | 7 | 7 | 5 (2) | — | 5 / 7 / 2 / 2 |
+| gcc-c23-sub | 30 | 22 | 8 | 22 / 6 | 22 | 22 | 21 (1) | — | 23 / 0 / 1 / 6 |
+| gcc-gnu23 | 51 | 45 | 6 | 42 / 9 | 42 | 42 | 29 (12) | — | 29 / 4 / 13 / 5 |
+| gcc-embed | 47 | 40 | 7 | 30 / 17 | 24 | 30 | 24 (0) | — | 30 / 16 / 0 / 1 |
+| gcc-va-opt | 12 | 12 | 0 | 7 / 5 | 7 | 7 | 7 (0) | — | 7 / 5 / 0 / 0 |
+| gcc-bitint | 201 | 186 | 15 | 198 / 2 | 198 | 198 | 179 (7) | — | 192 / 0 / 7 / 2 |
+| **total** | **6,449** | **6,293** | **156** | **6,272 / 149** | **6,245** | **6,263** | **6,059 (154)** | **3,566 / 3** | **4,245 / 97 / 2,055 / 52** |
+
+**No file fails**: every one passes every level it reaches or is known with its class. The known files, by class
+(`test/repr/c/roundtrip-known.edn`'s `:classes`): `:cc-grammar` 47 (the port only rejects: the files gcc 15.2 takes and
+cc's grammar does not, C23's newest attribute positions and literals, CS80), `:objects` 38 (the same program, gcc -O0's
+code location-dependent, CS81), `:eval-limits` 18 (CS60, CS78), `:print-grammar` 14, `:converter-gap` 12 (CS83),
+`:self-include` 11, `:macro-context` 6 (CS82), `:split-declaration` 5, `:reexpansion` 4, `:run-address` 1.
+
+- **E2's numbers on repr/c, no directive refused** (CS5 (a)): gcc 9.1's c-torture/execute, **1,527 programs run the same
+  from the `:lines` print, none differently**, against E2's 1,195 of 1,700 through cemit (its 323 directive refusals,
+  69 not fixpoints and 31 printer refusals gone); the later snapshot 1,595 the same and 1 differently (`return-addr.c`,
+  which prints an address, its objects equal: `:run-address`). Of torture's execute files, 1,636 give the original's
+  object file byte for byte. tcc's tests 79 the same (E2: 62), CompCert's 24 (E2: 7), MIR's 310 and 2 differently
+  (`:macro-context`: lacc's tests of macro expansion itself), the benchmarks game 29 (E2: 3). The runs not counted are
+  programs whose original gcc 15.2 does not build at the corpus's standard (the files' own `-std`, or C23 for the
+  torture files without options, where implicit declarations are errors) or does not link.
+- **The reference's acceptance (CS61 (a))**: `test/repr/c/parse-gcc.tsv`, gcc -fsyntax-only's status of all 6,449
+  files at their standards and options, gcc's include directory first. The reader agrees on 4,245 and both reject 97;
+  gcc alone rejects 2,055 (old C at C23 strictness: implicit `int` and declarations, and the error tests: the checker's,
+  C4); the reader alone rejects 52, every one classed (`:cc-grammar` 47, `:eval-limits` 5 through the evaluator's
+  depth).
+- **c23's judges** (`bin/repr-c check --c23`, CS38 (a)): of test/c/c23/'s 62 files, **59 pass all six judges, 3 are
+  expected failures** (`lib_memccpy.c`, `lib_strdup.c`, `lib_timegm.c`: musl 1.2.6's headers declare them only under
+  feature macros, CS32 (a)'s class `musl-1.2.6`), none fails; **the control's four wrong prints are refused**, their
+  objects alike or not as c23conf's TestControl says.
+
+### C3b.3 Speed and memory
+
+Evaluated on the tools' host (CS36 (a)), a file is read three times (the original, the print, `:full`): the corpora's
+forms took about 70 minutes on 6 threads (torture's execute files 645 s, torture's compile files about 25 minutes,
+SQLite's shell 244 s, the amalgamation past the budget), gcc's builds and runs some 10 minutes on 6 jobs. Peak RSS about
+9 GiB on 6 threads (one run's; `GOMEMLIMIT` 5-6 GiB). One bug made the converter quadratic: the placed directives were
+keyed in a `java.util.HashMap` by tree nodes, whose hash is the whole subtree's (an `IdentityHashMap` since; torture's
+`20001226-1.c` at a quarter of its size went from 95 s to 1.6 s).
+
+### C3b.4 What is left
+
+- The known classes' fixes: cc's grammar where gcc 15.2 is right (CS80), gcc -O0's location-dependent code (CS81),
+  macro context (CS82), the converter's gaps (CS83).
+- CS62 (the keywords by standard) and CS63 (C23's XID tables) were decided with C3's proposals and are not built: no
+  corpus file shows either (the round trip found none).
+- `:full` per token (CS70), header units nested (CS74), `c/embed` (CS75), structured asm (CS76), levels 3-4 as data
+  (CS77), a gate step (C8, CS19 (a)).
+
+### C3b.5 Proposals (CS70-CS83)
+
+Each with its options, the recommended one first.
+
+- **CS70 `:full`'s granularity.** C3b keeps `:full`'s text per top-level item (each form's `:c/text`, `c/file`'s
+  `:c/head`): byte for byte, every byte in one place (§10.2's rule), but a hand-changed item loses its text whole.
+  - Options: (a) keep the item granularity until a consumer edits forms read in `:full` (ci's REPL, C5), then refine;
+    (b) per token now (repr/go's `:full`: `:c/pos` on every list and symbol, spellings, the gaps' white space and
+    comments on `c/file`), the printer rebuilding the text from the forms; (c) per statement and declaration.
+  - *Recommended: (a)*: nothing reads `:full` but the round trip today, (b) is repr/go's whole GP-scale work, and
+    (a)'s rule already holds.
+- **CS71 Bodies' braces (N4).** gcc 15.2's -O0 code tells a braced body from a bare one (a block's end is a `nop`),
+  so §3.2's N4 does not hold at level 3; C3b writes `^:c/bare` (and `if`'s and `cond`'s sets of bare branches).
+  - Options: (a) amend doc/c/SPEC.md §3.2 and §7.3: N4 dropped, `:c/bare` the forms', the print braced where the
+    source was; (b) keep N4, the files whose objects differ by it classed `braces`.
+  - *Recommended: (a)*: level 3 is the read's judge (CS16 (a)), and the mark costs one key.
+- **CS72 Attributes' places.** §5.6 puts attributes on names with `:c/attrs-at :decl`; C3b keys them by cc's tree
+  places (`:c/attrs`, `:c/decl-attrs`, `:c/after-attrs`, `:c/list-attrs`, `:c/decl-end-attrs`, `:c/def-attrs`,
+  `:c/end-attrs`), a vector of C23 attributes and `(__attribute__ ...)` specifiers (GNU's and C23's can mix in one
+  place).
+  - Options: (a) amend §5.6 to C3b's keys; (b) map them back onto §5.6's two keys and `:c/attrs-at`, losing which
+    of GNU's places a specifier had (gcc's object code can tell: `aligned` on a type or a declarator).
+  - *Recommended: (a)*.
+- **CS73 Directives inside items.** A directive that is not between two items of one statement list (in an
+  initializer, a struct, an expression), and a conditional family split across lists, are left out of `:lines`
+  (`:full` keeps them); a `#define` so left out can change a later `#if`'s answer in the print (none found).
+  - Options: (a) as built, a file it changes classed; (b) such `#define`/`#undef`/`#pragma` hoisted before the item;
+    (c) directives placed among members, enumerators and initializer elements too (§9.2's full list).
+  - *Recommended: (a)* until a corpus file needs (c), which is the spec's and C5's.
+- **CS74 Header units' shape.** C3b's unit is every item the main-file `#include` brought in, flattened: no nested
+  `c/include`, no directive forms of the header (the layer records only the main file's), `:path` the first
+  inclusion's.
+  - Options: (a) keep it until ci reads headers (C5), then nest units by the layer's inclusions and record the
+    headers' directives; (b) nest now.
+  - *Recommended: (a)*: nothing evaluates a unit before C5, and the units' names already key their content.
+- **CS75 `#embed`'s form.** `#embed` reads as the integers it gives (its directive `:full`'s only); §9.3's
+  `(c/embed ...)` is not written.
+  - Options: (a) write `c/embed` in C5 with the directives among initializer elements (CS73 (c)); (b) now.
+  - *Recommended: (a)*.
+- **CS76 Inline asm.** `(c/asm "TEXT")`, the statement's tokens' text, not §7.9's operands.
+  - Options: (a) as built, asm out of eval and AOT anyway (§14); (b) §7.9's structured form.
+  - *Recommended: (a)*.
+- **CS77 Level 3 and 4 as data.** The round trip runs gcc for levels 3 and 4 at check time (CS14 (a) wants the
+  reference only to record).
+  - Options: (a) record the originals' object digests and runs (status, stdout digest) as data
+    (`test/repr/c/objects.sha256`, `runs.edn`, `--record`), gcc then needed only for the print's objects, which C6's
+    AOT replaces; (b) gcc at every check, as now.
+  - *Recommended: (a)*, at C8 when the fourth row's cells read the records.
+- **CS78 The evaluated reader's cost.** Three reads a file (the original, the print, `:full`) on the evaluated port
+  take 6 threads over an hour for the corpora, peak RSS about 9 GiB; one file (torture's `20001226-1.c`, 16,384
+  statements of one invocation) exceeds the 120 s budget, SQLite's amalgamation too.
+  - Options: (a) as CS60 (a): known (`:eval-cost`) until C5 compiles repr/c; (b) a faster evaluated path (`:full`
+    from the `:lines` read's tree instead of a third parse).
+  - *Recommended: (a)* and (b)'s cheap half: one parse for `:lines` and `:full` saves a third of the time.
+- **CS79 The c23 corpus's acceptance.** `bin/repr-c check --c23` asks gcc at every run (its judges 1 and 3), as
+  c23conf did.
+  - Options: (a) as CS77 (a); (b) as built.
+  - *Recommended: (a)* with CS77.
+- **CS80 cc's grammar where gcc is right.** 47 files gcc 15.2 accepts that the port (cc's parser) refuses: C23
+  attributes in positions cc lacks, `(static T){...}`'s parenthesized forms, `_Decimal64x`, `typeof` of a qualifier.
+  - Options: (a) the parser follows gcc for each (CS40 (a)'s rule), the trees then known against cc in the parse check
+    with a class `:gcc-grammar`, in C4 beside the checker; (b) leave them to C7's error tests.
+  - *Recommended: (a)*: the read's judge is the reference (CS16 (a)), and each is a production or two.
+- **CS81 gcc -O0's location-dependent code.** 38 files' prints are the same program but their objects differ: gcc emits
+  a `nop` at a body's end whose `}` is not on its last statement's line (a macro-made body's tokens share one place,
+  the print lays it out), and an asm label's section placement.
+  - Options: (a) the class, level 4 (the runs) the judge for them; (b) the print keeps a statement's line breaks where
+    the original had none (`:lines` laying out a macro-made body on one line); (c) recover the invocation (done for
+    whole definitions, C3b.1).
+  - *Recommended: (b)* for the bodies an invocation made, (a) for the rest: level 3 then holds for most.
+- **CS82 Macro context.** A recovered invocation's text, or a printed expansion, can mean another thing where the print
+  stands (a name a later function-like macro takes; an invocation's stringized escapes): 6 files.
+  - Options: (a) the class; (b) recover only invocations whose macro is defined at the print's point and whose
+    expansion names no later macro (the layer's definitions in order).
+  - *Recommended: (b)* in C5, with the layer's macro table; (a) until then.
+- **CS83 The converter's gaps.** 12 files: an octal `_BitInt` suffix, `d32` decimal suffixes, a definition through a
+  typedef or `auto`, `__declspec`, an attribute list after a declarator's comma lost, `nullptr` as a case's operand.
+  - Options: (a) fixed one by one with C4 (the checker reads the same forms); (b) now.
+  - *Recommended: (a)*.
+
+### C3b.6 Checks and scratch
+
+Run: `bin/repr-c roundtrip --record-gcc` over every corpus (C3b.2), `--record` and the judgment again (every corpus
+passes); `bin/repr-c check --c23` (passes, the control holds); the spec's six examples (§16) read, printed and read
+again, the forms equal; `make check-makefile`. Not run: the token and tree checks again (`pp.ae` and `parse.ae`
+changed only the layer, the literals' pieces and the budget, which no dump shows; their drivers' roots gained
+`:checkout` for c23conf's new place), anything of `--full` (repr/c has no gate step until C8), SQLite's amalgamation
+within the budget.
+
+Shipped files: none. The change is under `arbace/repr/c/` and `arbace/repr/c.ae` (no executable embeds them;
+`test/gate/steps.edn`'s `:tools` now names `!arbace/repr/c.ae` too, as `bin/lib/version.bash` and `arbace/j2g/embed.ae`
+already did), `bin/repr-c`, `bin/lib/repr-c/`, `test/c/`, `test/repr/c/`, the Makefile, LICENSE.md.
+
+The worktree's `.tmp/` (kept): `repr-c-roundtrip/` (each corpus's lists, `forms.tsv`, `obj.tsv`, `run.tsv`,
+`files.tsv`, `report.edn`, the prints under `print/`, the objects under `obj/`), `repr-c-c23/` (the c23 judges'
+`judges.tsv`, the control), `c3b/run5.log` (the final round trip), `run1.log`-`run4.log` (the runs that found C3b.1's
+bugs), `classes.json` and `classify.py` (the classes' first draft), `ex/` (the spec's examples).
