@@ -3531,3 +3531,16 @@ records, docs) are a repeated, mechanical shape that JC4b/JC4c set: **Sonnet**. 
     (d) keeps a hot runtime class (`ConcurrentHashMap` is used by `arbace/lang` itself) from becoming an interface call
     for one test: if it would, `BiggernYours` stays the one recorded case, its reason updated, and JCS120's rest
     (Provider and kin) goes ahead.
+
+## Decided (2026-10-29): JCS124-JCS125
+
+The user decided both as recommended:
+
+- **JCS124 (b):** measure before building. The executable's size is split with `go tool nm -size` first, and
+  JCS110 (c)'s shared dispatch is built only if the per-class methods and closures are at least a third of the 17.6 MB.
+- **JCS125 (a) with (d):** the classes listed are those a corpus test extends and that then pass, less any class over a
+  measured cost bound. If listing `ConcurrentHashMap` slows the runtime's own use of it, BiggernYours stays the one
+  recorded case and the `Provider` group goes ahead.
+- Also (2026-10-29): `:j2g-reflection` now comes before `:reflection` in `test/java/divergences.edn`, so t04863 falls
+  into its by-design class; JCS123 (b) intended this, and the v2 record's refresh found the slip. Java eval is now
+  1,807/330/1,185 and AOT 1,915/181/1,226.

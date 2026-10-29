@@ -6344,3 +6344,14 @@ worktrees, for part 1; parts 2 and 3 in worktrees merged into it (the rules: one
     alone and settles JFS131's size question before the split is begun; (c) later, after C23.
   - *Recommended: (b), then (a)'s parts 1 and 3*: the pack's size is the one number the decision rests on and it takes
     half a day to get; nothing in parts 1 and 3 depends on it.
+
+## Decided (2026-10-29): JFS135-JFS138
+
+The user decided all four as recommended:
+
+- **JFS135 (a):** the java.base pack is committed as `jdk/platform/java.base.decls`, deterministic, written by
+  `bin/repr-java platform-pack`.
+- **JFS136 (a):** the shipped program embeds the read closure only. The printer can be added later as a part of its own.
+- **JFS137 (b) for the gate, (a) at the tag:** the gate's executables are keyed without the closure, and the reader is
+  evaluated from the checkout. Releases and the tag embed it. If the audit rejects (b), (a) is used throughout.
+- **JFS138 (b) then (a):** part 2 (the pack) comes first as a small step to measure it, then parts 1 and 3.

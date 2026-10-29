@@ -398,3 +398,22 @@ git history:
   - GTS42 (a)'s demonstrations.
   It proves the tooling on a clean essential gate. The `--full --clean` run itself is main's, on a quiet host
   (`.tmp/gt7.quiet`).
+
+## 2026-10-29: JCS120 (b)'s and JN10's plans merged, JCS124-JCS125 and JFS135-JFS138 decided; the v2 record's draft refreshed; t04863 classed
+
+- Three light agents beside GT7's tooling (Sonnet, docs only, the user's choice):
+  - **JCS120 (b)'s plan** (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "JCS120 (b): the plan"): JCS110 (c)'s shared
+    dispatch first, then the classes listed by the corpora's demand. About 14 `:interp-protected` candidates. 6-8 days.
+  - **JN10's plan** (doc/classes/JAVA-FRONTEND-SURVEY.md, "JN10: the plan (JFS130-JFS132)"): the read closure apart
+    from javac, the platform as an interface with a committed java.base pack, the shipped read and the REPL's
+    `load-java`. 8 days, about 5.5 elapsed. The shipped program grows about 27 MB, so a re-seed is needed, batched
+    with C23's.
+  - **The v2 record's draft refreshed** (doc/FULL-SUPPORT-SURVEY.md): tables regenerated, the labels interp-clone,
+    thread-order, flaky-timeout and the "moved between classes" notes checked test by test against v1's check files,
+    and placeholders left for GT7. The refresh script moved to `.tmp/v2-record/`; the old one is kept in
+    `.tmp/v2-record.old/`. Scratch: `.tmp/v2-record2/`.
+- The record's finding: `:reflection`'s match took t04863 before the by-design `:j2g-reflection`. The user chose (b),
+  the class moved first. The gate passed (1m33s; only the judge, reap and the canary ran: GT5's early cutoff).
+  Java eval is now 1,807/330/1,185 and AOT 1,915/181/1,226.
+- Decided (the user), all as recommended: JCS124 (b), JCS125 (a) with (d); JFS135 (a), JFS136 (a), JFS137 (b) for the
+  gate and (a) at the tag, JFS138 (b) then (a).
