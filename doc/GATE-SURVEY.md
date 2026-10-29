@@ -1388,3 +1388,16 @@ cover; java-check-judge and reap (stage 0, no record before a re-seed) read no j
     hours of the host's lock beside the other agents); (c) the essential gate's and the toy table's demonstrations only.
   - *Recommended: (a)*: the passes a `--full` makes are the clean run's to make; the mechanisms are the same code as the
     essential gate's, which ran them on the real table.
+
+## Decided (2026-10-29): GTS40-GTS42
+
+The user's decisions, all as recommended:
+
+- **GTS40 (c) now, (a) if the everyday runs show it:** `go-build` and `fixpoint` are `:heavy true` again, so each holds
+  the lock once for the whole step (`test/gate/steps.edn`). A ticket that keeps its place between a step's heavy
+  processes (`bin/heavy-lock --hold`) waits until the everyday runs show it is needed.
+- **GTS41 (c) at GT7, (a) until then:** for now, a consumer's reads of its producers' inputs are covered and listed as
+  advisory. GT7's clean run runs Java's levels with the forms cache forced (`JAVA_CHECK_FORMS_ONLY=1`), where a cache
+  miss fails.
+- **GTS42 (a):** at GT7's clean run, the two demonstrations are repeated on its passes: a classes file, and a comment
+  in j2g. `--full --plan` runs after the tool's rebuild, and the results go into the clean run's record.
