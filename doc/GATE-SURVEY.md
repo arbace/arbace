@@ -1197,3 +1197,194 @@ Java's forms cache and the print cache written to a temporary and renamed when c
 hash checked by `bin/provenance-check`, and the writers' updates rewriting them in the same commit), GTS37 (a) (one
 concurrent `--full` holding `big.lock` from outside with a private lock for the heavy steps). GTS30, GTS33 and GTS37 are runs
 at GT7's time; GT5 builds GTS31, GTS32, GTS34, GTS35, GTS36 (b) and the tooling GTS30 needs.
+
+## As built: GT5 (2026-10-29)
+
+Branch `gate-gt5`, from main `8d5e06d3` (GT1-GT4, GT6, JC4c, JN9f, JFS133), main merged at `9c89817d` (the provenance
+files rewritten, RPS150, C23's C2: repr/c's scripts are out of the program host's rest and of the audit's `:gate` and `:prog`
+as they are out of gate_key). Built: GT5 (the inner keys: parts, outputs and
+early cutoffs, Java's check per level with its judgment apart, native-check and repr/java's tree checks per corpus, the
+program's digest and the per-step package sets with the audit's record of the namespaces loaded), and the decided GTS31 (b),
+GTS32 (a), GTS34 (a), GTS35 (a), GTS36 (b) and the tooling of GTS30 (a) (the audit over every step, its reducer a program).
+Not built: GT7 and the runs GTS30, GTS33 and GTS37 belong to.
+
+**The table's new fields** (`test/gate/steps.edn`'s header; the planner `test/gate/plan.ae`, the runner `bin/lib/gate-run.bash`):
+
+- *`:parts`* (survey §4.6): a step with parts is one check per part, `NAME.PART`, keyed alone: the step's inputs and the part's,
+  `{part}` in its command the part's name; a `:needs`, `:uses` or `:start-after` naming the step names its parts. A part
+  `:clean-only true` runs only with `GATE_ALL_PARTS=1` (GTS19 (a): the parked sub-projects' corpora, GT7's clean run). The
+  planner expands them before it validates (`expand-parts`; the audit expands the same way).
+- *`:outputs`, `:uses`* (the early cutoff of §4.2 (b) for a step's output): a step with `:outputs` writes into `$GATE_OUT`
+  (`.tmp/gate/out/NAME`), kept with its pass (`STORE/NAME/KEY.out/`, copied in and renamed) and put back when it is skipped. A
+  step's `:uses` (`"STEP"` or `"STEP/FILE"`) put the producers' outputs' digests in its key (lines `uses STEP/FILE SHA`: a file's
+  SHA-256, a directory's the SHA-256 of `sha256sum`'s lines of its files; `gate.plan/out-digest` and the runner's `out_sha`
+  compute them alike) and imply `:needs`. When every producer is skipped the plan computes the key from their passes'
+  outputs; when one runs the step's decision is `after`: the runner appends the lines once the producers ran, hashes, and
+  skips it on a pass at that key (`skipped NAME (cut off: its producers' outputs as at its pass; passed at ...)`). A producer
+  is never the canary (its consumers' decisions were made on its pass).
+- *The program hosts `:prog`, `:javac-prog`* (GTS4 (b), (c)): `--gate-build` (and `bin/javac-vendor tool`) write the
+  program's units beside the build, `units.tsv` (`bin/lib/prog-units.bash`): j2g's Go forms of the executable and of the test
+  build (`j2g/prog`, `j2g-tests/prog`: no version stamp, which the link adds) split by namespace, a namespace's unit its
+  compiled package `go/arbace/aot_NS` and its embedded source `cmd/arbace/res/PATH.ae.z`, every other file (the runtime's
+  classes, jrt, goi's table, the main package, the other resources) `-core`; each unit's SHA-256 over its files' digests. A
+  step on `:prog` is keyed by the units less those of its `:never-loads` and by `bin/arbace-go --gate-rest-key` (gate_key's
+  files less the program's sources, `arbace/`, `go/`, `jdk/`, `overlay/jdk/`, the fixtures' forms, which reach the
+  executables only through the units: the build's scripts, `bin/lib`, `overlay/go`, `x509roots`, the pins, Go's version);
+  `:javac-prog` the same of javac's tool (`arbace_javac_rest_key`). A step's `:never-loads` also take those namespaces'
+  sources out of its files (`:tools`' `arbace/j2g/`). Before the build exists the identity is pending: the step is planned to
+  run, and since GT5 the builds run before every check and the plan is made again after them (`plan1.tsv` kept); a build
+  kept from before the units has none, and the identity falls back to the source key.
+- *`:heavy :inner`* (GTS31 (b)): below.
+
+**The steps** (79 in the plan of `--full`, 85 with `GATE_ALL_PARTS=1`). Java's check: the essential `java-check` runs
+(`bin/java-check --essential --save`) and `java-check-judge` judges (`--judge --essential`); `--full`'s `java-check-full` is eight
+steps, `java-read` (its results and `forms.sha256`), `java-interp` and `java-compiled-full` (`:uses java-read/forms.sha256`:
+the read's forms in their key, not repr/java's sources), `java-classes`, `java-diagnostics`, `java-print`, `java-forms-verify`
+and `java-judge` (`:uses` the six levels' `results.tsv`; its inputs the group `:java-judge`: the classes, the records, the
+reference, `check.ae`; the runs' group `:java-run` leaves the classes and records out, but the two levels whose would-be
+regressions run again, interp and compiled, declare their `check-LEVEL.edn`). `bin/java-check --save DIR` runs the levels and
+judges nothing; `--judge RESULTS...` judges (seconds); `JAVA_CHECK_FORMS`, the read's cache, is the main checkout's for the
+gate's steps (`GATE_JAVA_FORMS`), so a level that runs where the read was skipped reads through it. Per corpus: `repr-go-native`
+22 parts (6 `:clean-only`: `goos-*`, `cmd-tamago-*`, `box`, `purego`; each its report `native-check-PART.report.edn`,
+`REPR_GO_NATIVE_REPORT`), `repr-java-parse` 7, `-front`, `-attr`, `-nojavac` 4 each, `repr-java-roundtrip` 3; each part
+declares its corpus's own data (`:corpus-samples`, `:corpus-jdk`, `:corpus-javac`), the common group `:repr-java-checks` leaves
+it out. On the program hosts with `:never-loads [arbace.j2g]`: suite-go, oracle-go, goi-check, goi-aot-essential, java-check,
+java-interp, goi, goi-aot (`:prog`); repr/java's tree checks and round trips, java-fixtures, javac-classes, java-read,
+java-classes, java-diagnostics, java-print, java-forms-verify (`:javac-prog`); the judgments and reap on stage 0 with
+`:never-loads` (`:tools` less j2g). On `:gate` or `:javac` still: what runs j2g (diffcheck, java-compiled, suite-aot*,
+programs*, fixpoint, java-compiled-full, javac-tool, j2g-edge, generated), the frozen JVM's (javac-verify, repr-java,
+jrt-convert) and go-smoke (below).
+
+**The audit's record of the namespaces loaded** (GTS4 (c)): `RT.load` appends each scriptbase to the file
+`ARBACE_LOADED_LOG` names (one write, `O_APPEND`: the step's processes share it; `arbace/lang/RT.ae`, shipped code: the
+executables and the tool built from this branch write it, stage 0 not until a re-seed); `bin/gate --audit` sets it per step,
+and `gate.audit` fails on a namespace of the step's `:never-loads` (stage 0's tools loaded from the checkout show as reads of
+their sources, which `:never-loads` took out of the declaration). The audit also covers a step's `:uses`' producers' inputs and
+lists the files it read only through them (advisory: sound when it reads them to make the producer's output again, as Java's
+levels read through the read's cache), and covers on `:prog` only the rest of the build's inputs.
+
+**GTS30's tooling.** `bin/gate --audit` with no step audits every check of the plan (as GT4 built it), now every part and level
+too. Its reducer is `tools/gateaudit` (Go, built by TamaGo's go into the audit's directory when its sources change;
+`GATE_AUDIT_AWK=1`: busybox awk): the port of `test/gate/audit.awk`, the same lines in the same order on two traces (240 and
+13,056 distinct pairs of 1,606 and 22,371 strace lines: the gate's own `--full --plan`), 23 times faster (0.09 s against 2.1).
+
+**GTS31 (b), the tools' own lock.** `bin/lib/heavy.bash`'s `heavy_run CMD`: under `ARBACE_HEAVY_CMD` when it is set and
+`ARBACE_HEAVY_HELD` is not, CMD's environment `ARBACE_HEAVY_HELD=1` either way. Wrapped: `bin/j2g` (j2g's process),
+repr/go's native reader and converter (`bin/repr-go`'s `native_run`, `convert_main`, through `repr_go_run`), repr/java's
+corpus reads (`read-jdk` at its five callers: `front-check`, `roundtrip` twice, `jrt-convert`, `javac-vendor convert`; not in
+`bin/repr-java` itself, which is in the reader's hash and so in the provenance files'). The protocol: the gate exports
+`ARBACE_HEAVY_CMD=$GATE_HEAVY_CMD`; a step `:heavy true` runs under the lock as a whole with `ARBACE_HEAVY_HELD=1` (its
+tools take none: no second flock by a child of the holder, which would wait for ever); a step `:heavy :inner` runs without
+it, its tools lock around their heavy process; a light step likewise (a heavy tool it starts still locks);
+`GATE_HEAVY_CMD=env` (the caller holds the lock) sets `ARBACE_HEAVY_HELD=1` for every step. Outside the gate
+`ARBACE_HEAVY_CMD` is unset and nothing locks: the agents' rule (`flock big.lock CMD`) is unchanged. The inner waits are
+summed per step (`HEAVY_LOCK_WAITS`, `.tmp/gate/NAME.waits`, `:inner-wait-s`) and the summary says `its tools waited`.
+`:inner` now: go-build, diffcheck, java-compiled, suite-aot-essential, programs, the repr/java tree checks' parts, the round
+trip's parts, java-compiled-full, the fixpoint, suite-aot, programs-full, repr-go-native's parts; `:heavy true` stays where
+the step's peak is not one tool's process (suite-go's 12 processes, repr-go's tree, the frozen JVM's steps, java-read and
+java-print, javac-tool).
+
+**GTS32 (a), the ticket lock.** `bin/heavy-lock CMD` (`GATE_HEAVY_CMD`'s default since GT5; `make gate-queue`: `--queue`):
+a ticket `LOCK.queue/NANOSECONDS-PID` (holding the process's start time, so that a reused PID is not taken for the waiter),
+a wait until no earlier ticket is live (the dead ones removed by the next waiter), then `flock LOCK`, CMD run with
+`ARBACE_HEAVY_HELD=1`, the ticket removed at its end. The lock is still the plain flock: an agent's `flock big.lock CMD`
+takes no ticket, never waits for the queue, and competes with its head alone (it may come before the head once, never
+before the rest). Tested (`.tmp/gt5/fifo-test.sh`): a plain holder, five ticket waiters 0.4 s apart, then a plain user: the
+waiters got the lock W1 to W5 in order, the plain user once between W1 and W2; a dead PID's ticket and a reused PID's (wrong
+start time) removed, the next waiter not held up.
+
+**GTS35 (a).** goi's references (`gcref`, `eref`, `earef`, `bin/goi`'s `ref_commit`): made in a temporary of their own
+(`REF.tmp.PID`, not the shared `REF.tmp` two jobs of one key could both write), renamed with `mv -T` once complete; a
+reference without its marker (an older run killed while writing) replaced; one another job completed first kept. Java's
+forms caches (`bin/java-check`: the read level's, `nread`'s, the print level's `print_read`): the result file renamed into
+place once written, and a read killed by a signal (status above 128) not cached at all (it was cached as a failure,
+`fail status 137`, for good). The print cache of `arbace.build.go` (`cache-texts!`, `write-index!`) already wrote a
+temporary and renamed it: unchanged.
+
+**GTS36 (b).** `bin/javac-vendor edge` rewrites `jdk/javac/provenance.edn`'s `:jdk-edge` with the edge it records (made
+less `jdk/edge.edn`); `bin/j2g-edge update`, when `jdk/edge.edn` changed, runs `bin/javac-vendor edge` (`J2G_EDGE_JAVAC=0`:
+not, and it says what to run). `bin/provenance-check` (GTS36 (a)) also compares each provenance file's `:jdk` with the
+platform's pin, and names each file's writer.
+
+**GTS34 (a).** Every `--full` ends with `gate_prune` (its last line in the summary; `.tmp/gate/prune.log`); the prune removes a
+pass's kept outputs with it.
+
+**The exit criteria.**
+
+- *On a toy table* (`.tmp/gt5/toy/toy.edn`, its runner `run.sh`, inputs under a scratch `gt5-toy/` of the checkout, its own
+  store and lock; every mechanism): run 1 all 13 checks ran; run 2 nothing changed, all skipped; run 3 one part's input changed:
+  that part alone ran; run 4 the "reader" changed but not its output: `toy-read` ran, `toy-interp` and `toy-judge` were cut off
+  (`skipped ... (cut off: its producers' outputs as at its pass; ...)`); run 5 the source changed: read, interp and judge ran;
+  run 6 the "classes" file changed: the judge alone ran; run 7 a j2g unit of `units.tsv` changed: the `:prog` step with
+  `:never-loads [arbace.j2g]` skipped, the one without ran; run 8 the core unit changed: both ran. The heavy protocol: two
+  `:inner` steps in two chains and a `:heavy true` one started their light halves in the same 30 ms, their heavy processes ran
+  one after another (the `:heavy true` step's tool, with `ARBACE_HEAVY_HELD=1`, did not lock again), `its tools waited 0m08s
+  for the lock`. The audit (`audit.sh`): a step that records `arbace/j2g/code` as loaded fails (`1 never-loads loaded`), a
+  consumer's read of its producer's input is covered and listed as advisory.
+- *A classes file changes, nothing reruns* (the real table, after the essential gate passed): a comment appended to
+  `test/java/divergences.edn`; `bin/gate --full --plan`: `java-check` skip, `java-check-judge` run (`changed since the pass at
+  ...: test/java/divergences.edn`), reap run (it judges the classes too); in `--full` the eight Java steps' runs are keyed
+  without it (`java-judge` alone names it), their passes not yet made on this branch. The essential gate: **7 seconds**, the two
+  judgments run, 13 checks skipped (`.tmp/gt5/demo-classes-gate.txt`); the comment reverted.
+- *A j2g change that leaves the translations alone reruns only j2g's steps* (the real table): a comment line added to
+  `arbace/j2g/out.ae` (shifting its lines); the essential gate rebuilt the executables (8m02s), whose units differed from the
+  previous build's in one, `arbace.j2g.out`; the second plan skipped suite-go, oracle-go, goi-check, goi-aot-essential,
+  java-check, java-check-judge, reap, provenance and go-smoke, and ran diffcheck, java-compiled, suite-aot-essential, programs,
+  generated and j2g-edge: **14m57s** against 56m56s for the same gate with every check run (`.tmp/gt5/demo-j2g-gate.txt`);
+  the comment reverted. The audit then moved go-smoke back to `:gate` (below): with it the same change reruns go-smoke's 2
+  minutes too. In `--full` the same holds for the `:javac-prog` steps once javac's tool is rebuilt (the units of the tool's
+  program less j2g's); not run here: no javac tool at this branch's key yet (a `--full`, GT7's).
+
+**Measurements.**
+
+| run | what | time | |
+|---|---|---:|---|
+| essential 1 (`903b053e`) | everything new: the build (two-pass, the runtime changed: RT.load), 14 checks | 275m56s | the build 13,276 s, of it about 3 hours waiting for the host's lock (other agents' 40-50 minute holds; each of the build's four heavy processes queued again); goi-check and goi-aot-essential failed (`ref_commit` not exported to the check's jobs, fixed), provenance failed (main's stale provenance, fixed by main's v2-prov) |
+| essential 2 (`e407f73a`, main merged) | every check run | 56m56s | passed; go-build 20m31s (8m54s waiting), the `:inner` steps' tools waited 20-29 minutes for the lock each while their light work ran |
+| essential, a classes file changed | the two judgments | 0m07s | passed |
+| essential, j2g changed | the build and j2g's 6 steps | 14m57s | passed |
+| the plan (`--full --plan`) | 79 steps, two plans | 2-3 s each | |
+
+Peaks as GT6 measured them (diffcheck 25.2 GiB, the j2g steps 18-19.5, suite-go 9.3 / 11.7 tree); the gate's tree at most
+43.2 GiB with the light steps beside one heavy process, the host's MemAvailable at least 17.6 GiB. The audit of the `:prog`
+steps (`.tmp/gt5/audit-prog.txt`): oracle-go, goi-check, goi-aot-essential, java-check, suite-go loaded 66, 51, 24, 854
+(the tests' own) and 153 namespaces, none of `arbace.j2g`, and read nothing the program host and their declarations do not
+cover; java-check-judge and reap (stage 0, no record before a re-seed) read no j2g source.
+
+**Slips and findings.**
+
+- go-smoke was put on `:prog` and its audit refused it: `bin/arbace-go --gate` computes gate_key on its way to the cached
+  build, which reads all 1,560 sources it hashes; back on `:gate`. A step's reads that only a key computation makes are reads
+  all the same to strace.
+- `ref_commit` (GTS35) was not in `bin/goi`'s `export -f` line: every error test's reference failed in the first gate; fixed.
+- The per-process lock (GTS31 (b)) under contention: a step's heavy processes queue one by one, and the build of essential 1
+  (four heavy processes, the runtime having changed) waited about three hours in all behind other agents' long holds, plain
+  `flock big.lock` users coming in between them (GTS40).
+- My first edit of the heavy lock went into `bin/repr-java`, which `repr_java_reader_hash` covers: it made the four provenance
+  files stale; reverted, the lock put at `read-jdk`'s five callers instead.
+- The coordinator's rule since the deadlock of 2026-10-29 (slot first, lock second: `.tmp/heavy flock big.lock CMD`) is what a
+  GT5 gate does: it runs under `.tmp/heavy` and takes the lock per step or per process.
+
+## Proposals (GTS40-GTS42)
+
+- **GTS40 The lock held across a step's heavy processes.**
+  - Options: (a) a step `:heavy :inner` whose tools lock per process keeps its ticket's place between them (bin/heavy-lock
+    `--hold DIR`: the first heavy process of the step takes the lock, the ticket stays at the head until the step ends or idles
+    for N seconds, its later heavy processes enter at once), so that a build's four processes queue once; (b) as built, one
+    queue per process; (c) the step-level lock back for the builds (`go-build`, `fixpoint`: `:heavy true`).
+  - *Recommended: (c) now, (a) if the everyday runs show it*: the builds are the steps whose heavy processes follow one
+    another with little light work between them (essential 1: about three hours of queueing for 25 minutes of work); the others'
+    light work (the shards' runs, the suite's runs) is what GTS31 meant to free, and it did (20-29 minutes waited beside it).
+- **GTS41 Reads through a producer.**
+  - Options: (a) as built: a consumer's reads of its `:uses` producers' inputs are covered and listed (advisory), the consumer
+    declared to read them only to make the producer's output again (Java's levels through the read's cache); (b) refused, every
+    such read declared (no cutoff for Java's levels, which read through `bin/repr-java read` on a cache miss); (c) the consumer
+    run with the cache forced (`JAVA_CHECK_FORMS_ONLY=1`: a miss fails), so that it never reads the producer's inputs.
+  - *Recommended: (c) at GT7, (a) until then*: (c) makes the claim checkable, a miss being a failure; it needs the read's
+    cache present where the level runs, which the shared `GATE_JAVA_FORMS` gives.
+- **GTS42 The essential gate's own exit criteria on `--full`.**
+  - Options: (a) at GT7's clean run, then the two demonstrations again on its passes (a classes file, a j2g comment) with
+    `--full --plan` after the tool's rebuild, recorded in the clean run's record; (b) a `--full` on this branch now (about five
+    hours of the host's lock beside the other agents); (c) the essential gate's and the toy table's demonstrations only.
+  - *Recommended: (a)*: the passes a `--full` makes are the clean run's to make; the mechanisms are the same code as the
+    essential gate's, which ran them on the real table.
