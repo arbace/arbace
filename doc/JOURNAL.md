@@ -302,3 +302,16 @@ git history:
   the gates of `gate-gt5` and `v2-prov`, and their heavy steps were waiting for big.lock. I found the holders through
   /proc/*/fd and killed the two waiting commands by PID. The rule is now slot first, lock second (`.tmp/heavy flock
   big.lock CMD`); a GT6 gate does this by itself.
+
+## 2026-10-29: C23's C2 merged; CS50-CS51 decided (the user)
+
+- C23's C2 (branch `c23-c2`, on Opus, commits 943d01ce, d6a5a978, fea742ec; doc/C23-SURVEY.md, "As built: C2"): repr/c's
+  lexer and preprocessor (`arbace.repr.c.lex`, `arbace.repr.c.pp`), ports of cc's, checked token for token against
+  `tools/ccdump` (`bin/repr-c check --tokens`; `--judge-all` against gcc -E). repr/c is kept out of the embedded tree
+  until C5 (CS36 (a), `arbace/j2g/embed.ae`). The ported lexer also reads digit separators in `#line`.
+- Merge conflicts with GT4/GT6: `bin/arbace-go`'s `gate_key` and steps.edn's `:tools` take both sides' exclusions.
+  GT4's removal of `arbace/lang/go/ns/` from `:tools` stays. GT4's planner then refused `!arbace/repr/c.ae`, which names
+  no file until C5, so only `!arbace/repr/c/` is kept (96fc2195).
+- The essential gate on merged main passed: 25m57s, 18 run, at most 23.8 GiB.
+- Decided (the user): CS50 (a), the port follows gcc in C3 (trigraphs, UCNs in identifiers); CS51 (a), gcc -E's digest
+  of every file recorded as data. Scratch: `.tmp/c2/`, `.tmp/repr-c-check/`.
