@@ -672,3 +672,168 @@ interpreted; NH4 chooses the subset); there is no AOT level yet (NH4).
     five timing-dependent programs from the gate's subset only.
   - *Recommended: (a) now, (b) at NH4*: no flake was seen in 8 gc runs of each program, 3 of them with 16 at
     once; the retry machinery belongs with the gate step, not the baseline.
+
+## As built: NH11 (b) (2026-10-29)
+
+The user chose NH11 (b): find the empty method sets in goi before `net/http` is listed. Branch `nethttp-nh11`
+(from main `abc1316c`). The cause is goi's, in the builder's context of a compiled package, and not specific to
+`net/http`; the fix is two lines of `arbace/go/repl.ae` in substance. With the method sets right, the stub slots
+became the next wall, measured and raised in the table.
+
+**The reduction.** NH0's `dbg` probe with a trace in `ensure-methods!` (`arbace.go.build`, the place every method
+set is given) showed `*http.response` given its 23 methods in the contexts of `net/http`, `net/http/httptest`
+and the program, and then **0 of 23 in the context of `sync/atomic`**, the same for `*http.connReader` (0 of
+11) and `*http.body` (0 of 8). The stack: `(*conn).serve` calls `c.curReq.Store(w)`; `curReq` is an
+`atomic.Pointer[response]`, a listed package's generic type; its method's instance is built on its first call
+(`instance-cell`, `lazily`) in **`sync/atomic`'s build context** (`compiled-context` in `arbace.go.repl`, §9.3:
+a listed package's generic declarations are interpreted from the digest). The instance's body describes
+`atomic.Pointer[response]` (its field `_ [0]*T`), so `*response`, and through `response`'s fields `*conn`,
+`*connReader`, `*body` and the rest. Each descriptor is interned (one `*goi.Type` per name and generation), but
+the "done" set of `ensure-methods!` is per context, so each new context gives each type's method set again.
+
+NH11's recommendation (a) assumed the cause was `net/http`'s and would go with the listing; it is goi's and general
+(NH18). None of the guesses of the brief was it: not the unexported type, the pointer receiver, the other file, the
+interface boundary or embedding. The smallest program is a package of its own, not `main` (a program's `main`
+is built eagerly, its instances described within the program's own outermost `desc`, which gives the method
+sets in the program's context), with a type whose field reaches a type with methods, held in an
+`atomic.Pointer`:
+
+```go
+package atomicm                       // test/goi/repl-pkgs/go/rt/atomicm (as Go forms)
+type Conn struct{ name string }
+func (c *Conn) String() string { return "conn " + c.name }
+type Req struct{ conn *Conn; n int }
+type Server struct{ cur atomic.Pointer[Req] }
+func Serve() string {
+	c := &Conn{"a"}; var s fmt.Stringer = c
+	before := fmt.Sprint(s)
+	srv := &Server{}
+	srv.cur.Store(&Req{c, 1})          // the instance's code built now, in sync/atomic's context
+	return fmt.Sprint(before, "; ", s) // goi: the type *atomicm.Conn has no method String
+}
+```
+
+**The cause.** `compiled-context`'s `:method-cell` threw `goi: no method ...` for every method, also an
+interpreted package's (it was written for a listed package's own members, which have no cells). `ensure-methods!`
+takes that message for "a method goi has no cell for (a compiled package's unexported type's, GC30)" and drops
+the entry, so `TSetMethods` gave the interned descriptor an **empty method set**:
+
+- given after the right one (`*http.connReader`, `*http.body`, the probe's `*Conn`): `Methods` replaced and `mver`
+  bumped, the runtime type's method table (fixed once, `setStubs`) still the right one, so compiled code's call
+  through a stub (`bufio.Reader.fill` calling `connReader.Read`) or goi's dispatch panics "has no method";
+- given first (`*http.response` in the server, a type the instance's code met before its own package's context
+  did): the runtime type's method table set **empty** for good, `reflect.TypeOf(w).NumMethod()` 0, `w.(http.Flusher)`
+  false, and later the right set in goi's map but not in the itabs.
+
+The same context's `:gen` was `(fn [nt] 1)`: every interpreted type of generation 1, so at the REPL an instance's
+code described an older generation of a type redefined since (`atomic.Pointer[G]` of a `G` whose method was added
+after its first definition: `*G` with 0 methods, printed `&{7}` for `g7`).
+
+**The fix** (`arbace/go/repl.ae`): the interpreted context's lookups are functions of their own (`func-cell`,
+`method-cell`, `global-cell`, `gen-of`: an object's package's state, its generation from the checked type's
+`:goi/gen`), and `compiled-context` uses them too. A listed package's own member still finds no state and throws as
+before, so GC30's case is unchanged. No change in `go/arbace/goi` (no build needed for this part). Left as is: the
+per-context re-giving of method sets (every interpreted package's context gives the types it describes their sets
+again, the same sets now; NH15).
+
+**The regression tests** (`test/goi/repl.ae`, the REPL's tests, `bin/goi test`): `go.rt.atomicm`, loaded from
+`test/goi/repl-pkgs` (a package loaded lazily, as an imported package is): `Serve` (the value in `fmt.Stringer`
+before and after the instance's first call), `ServeLate` (`*Late` first met by the instance's code: its method
+table, `NumMethod` 1, a `fmt.Stringer`), `Serve` again; and `go.rt.atomicg` at the REPL (the generation). On main's
+executable without the fix the four fail (`has no method String`, `0; not a Stringer`, `*atomicg.G 0 &{7}`); with
+it, `goi repl: 115 passed, 0 failed`.
+
+**The stub slots.** Not a leak: `setStubs` runs once per runtime type (`stubbed`), and the re-given sets take no
+slot. Each interpreted named type and pointer type takes a slot per method compiled code can call by its family's
+names (a value method in both tables, GC130), when its descriptor is made. A trace of `ensure-methods!` over
+`client_get`, `server_closures` and `stream_chunked` gives the same 474 interpreted types with methods in each
+(`net/http`, `httptest`, `httputil`, `cookiejar`, `httptrace`, `net/http/internal/...`, `mime`, `mime/multipart`,
+`net/textproto`, `internal/nettest`, `testing` and the program), and of the families that ran out:
+
+| family | names | slots (main) | takers | as built |
+|---|---|---:|---:|---:|
+| `func([]byte) (int, error)` | `Read`, `Write` | 64 | 100 (50 + 50) | 128 |
+| `func(time.Time) error` | `SetDeadline`, `SetReadDeadline`, `SetWriteDeadline` | 16 | 34 | 64 |
+| `func() net.Addr` | `Addr`, `LocalAddr`, `RemoteAddr` | 16 | 18 | 32 |
+
+The next fullest named families: `func() string` (`String` 81, `Error` 47 of 256), `func() error` (`Close` 48 of
+256), `func(string) error` (`flag.Value`'s `Set`, 16 of 16: full, a program's own `flag.Value` would get the panic
+stub; NH16). `go/arbace/gotable.edn`'s `:slots-of` gains the three sizes (+128 stubs on linux/amd64, about 29 KB);
+`bin/goi table --configs linux/amd64`: 122 families, 2,608 stubs.
+
+**Numbers** (`bin/goi check --corpus nethttp`, 60 programs, 4 at a time):
+
+| | pass | fail | error | unsupported | first cause of the non-passes |
+|---|---:|---:|---:|---:|---|
+| main (NH1's baseline) | 10 | 49 | 1 | 0 | 42 empty method sets, 4 stubs, 3 resets, 1 hang |
+| the method-set fix alone (main's executable, `ARBACE_PATH` the checkout) | 16 | 42 | 2 | 0 | 42 "no stub left", 2 timeouts (`stream_chunked`, `timeout_context`) |
+| as built (the gate's executable `.tmp/gate-exe/ee3f4cf75b39a30b8f35`, 177,811,616 bytes: +32,768 for the stubs) | **56** | 3 | 1 | 0 | 2 a first request slower than the deadline, 1 internal/nettrace twice, 1 `runtime.Caller`'s path |
+
+The 47 that pass now and did not on main (and `timeout_client`, which passed on main, now fails: 10 + 47 - 1 = 56): every server, mux, middleware, streaming, multipart, httputil, cookie
+and redirect program, `h2_basic` (HTTP/2 and its HTTP/1.1 half) and `h2c_protocols`, `hijack`, `responsecontroller`,
+`flusher_assertions` (the `ResponseWriter`'s interfaces), `concurrency_many` (200 concurrent requests), both
+`shutdown` programs. The reference `test/nethttp/check-linux-amd64.edn` is recorded from this run (269 s at 4 jobs)
+and `test/nethttp/divergences.edn` has the three classes left (NH1's four took nothing any more), all `:deferred`
+to NH2 (a):
+
+| class | programs | cause |
+|---|---|---|
+| `:first-request-slow` | `timeout_client`, `timeout_context` | the first request through a server path builds its functions (on first call, S18) and interprets them: `timeout_client`'s second GET takes 177 to 353 ms alone against its `Client.Timeout` of 100 ms (measured with a 10 s client in a copy of its forms), and `timeout_context`'s request does not reach the handler within 80 ms, so the program waits on the handler's channel until the 90 s cap. `timeout_client` passed on main: it is the one program that regresses, by getting further |
+| `:split-internal` | `httptrace_events` | `httptrace` (interpreted) puts its dial hooks under `internal/nettrace`'s `TraceKey`, and `internal/nettrace` is unlisted: an interpreted copy whose key type compiled `net`'s `Dialer` never looks up, so `ConnectStart`/`ConnectDone` are missing |
+| `:caller-paths` | `mux_precedence` | `ServeMux`'s conflict message names where the pattern was registered (`runtime.Caller`): goi's relative name of the forms for an interpreted caller, gc's absolute path (`test/goi/divergences.edn`'s `runtime.Caller` class) |
+
+A class can now name its programs (`:programs`, `test/goi/divergences.ae`'s `classify`): a reason as generic as a nil
+dereference is the class's only for the program whose cause was traced.
+
+**Checks.** The essential gate (`/root/arbace/.tmp/heavy bin/gate`, 19 steps run, passed in 36 min; its `goi-check`
+801 of 801, `goi-aot-essential` 248 of 248, the executable and the test build rebuilt for the table). `bin/goi
+test` on main's executable with the checkout's `arbace/go` (`ARBACE_PATH`): the checker's tests 22 assertions, the
+interpreter's programs 21 of 21, `std.ae` 185 of 185, the session as its transcript, and `repl.ae` 115 of 115 (a
+first run found the new section's missing `in-ns`). The full `bin/goi check --jobs 8` on the gate's executable:
+1,837 programs, 1,621 pass, 0 fail, 0 error, 138 unsupported, 60 known, 18 skipped, no regression (646 s; the three passes beyond the reference's 1,618 are the `:known` speed programs `abi/fibish.go`, `abi/fibish_closure.go` and `divmod.go` within 10 s on a quieter host, not recorded). `bin/goi divergences` and `--nethttp`: no problem.
+
+**Shipped files changed** (they join the next batched re-seed, NH6 (b)): `arbace/go/repl.ae` (evaluated from the
+checkout where it differs, so the fix works without a build), `go/arbace/gotable.edn` (the table's stubs: compiled
+into the executable). Tests: `test/goi/repl.ae`, `test/goi/repl-pkgs/go/rt/atomicm.ae`, `.../atomicm/a.ae`; the
+corpus's reference `test/nethttp/check-linux-amd64.edn` and classes `test/nethttp/divergences.edn`.
+
+**The scratch**: `.tmp/worktrees/nethttp-nh11/.tmp/nh11/` (`r1.ae`/`r2.ae`, the main-package attempts that do not
+show it; `reponly.ae`, the REPL cases alone; `build.dbg.ae`, the builder with the `GOI_DBG_METHODS` trace;
+`*.dbg.err` and `*.tsv`, the traces of three corpus programs and their method tables; `check1.log`, the fix alone;
+`gotable/`, the table with the new slots), `.tmp/dbg2.out` to `dbg4.out` (the probe's traces, the stack).
+
+### Proposals NH15 onward
+
+- **NH15 Method sets given again by every context.** Each interpreted package's build context (and each compiled
+  package's that builds an instance) gives the method sets of the types it describes again: the same sets now, but
+  new thunk cells each time and `mver` bumped (the stubs' cached entries looked up again). In `dbg`, 1,783 calls of
+  `ensure-methods!` for 474 types.
+  - Options: (a) give a descriptor's method set once (`TMethodsSet`, already in the registry, checked before
+    `ensure-methods!` builds the entries), the REPL's redefinitions unaffected since a changed method set is a new
+    generation and so a new descriptor (GC68); (b) leave: correct, its cost not measured; (c) one "done" set per
+    build rather than per context.
+  - *Recommended: (b) now, (a) at NH3 if its measurements show the load time*: the bug was a wrong set given again,
+    not the giving; (a) changes when a type's set can still change (a body redefined keeps its cell, but a thunk built
+    by an old context would stay), which wants the REPL tests' generations looked at first.
+- **NH16 The table's stub slots once net/http is listed.**
+  - Options: (a) keep 128/64/32 (about 29 KB): any large unlisted package with connections or streams needs them,
+    and `flag.Value`'s `Set` (16 of 16 taken by the interpreted `testing` that `net/http`'s closure pulls in) is the
+    next family to fill; (b) back to 64/16/16 when NH2 lists `net/http` (its types are compiled then and take no slot);
+    (c) raise `Set` to 32 too.
+  - *Recommended: (a)*, with NH7's measurement at NH3 deciding `ServeHTTP` and `Set`: 29 KB is 0.02% of the
+    executable, and a program interpreting its own copy of a big std package is the case GR8a made possible.
+- **NH17 The three classes left.**
+  - Options: (a) as recorded, `:deferred` to NH2 (a): with the package listed the first request is compiled code,
+    `httptrace` and `net` share the compiled `internal/nettrace`, and only `:caller-paths` may stay (by design: the
+    caller is the interpreted program); (b) list `internal/nettrace` now (a shipped table change for one program);
+    (c) give the timing programs longer deadlines (changes what they test).
+  - *Recommended: (a)*: each is a consequence of the package being interpreted, which NH2 ends.
+- **NH18 Unlisted packages and listed generics (beyond net/http).** The cause is general: any unlisted package
+  whose types reach a listed package's generic instance (`atomic.Pointer[T]`, `sync.OnceValue`, `slices`'s functions
+  over its types) lost its method sets before this fix.
+  - Options: (a) a goi test per listed generic family that std uses with interpreted types (`atomic.Pointer`,
+    `sync.OnceValue(s)`, `slices.SortFunc`), as `test/goi/repl.ae`'s NH11 cases; (b) rely on `bin/goi check`
+    and the corpus; (c) a check in `ensure-methods!` that fails loudly when a set is given smaller than one given
+    before for the same descriptor.
+  - *Recommended: (c)*: cheap, catches the class of bug rather than its instances; (a) only for the families a
+    failure shows.
