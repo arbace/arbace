@@ -1866,3 +1866,70 @@ mutants' sources), `.tmp/repr-c-check/` (the token check's, with gcc's outputs o
 The user decided all four as recommended: CS60 (a), the five `limits-*` files stay known until C5 compiles repr/c;
 CS61 (a), gcc -fsyntax-only's acceptance per file is recorded in C3b; CS62 (a), `typeof` and `asm` are keywords only
 where gcc treats them so; CS63 (a), C23's XID tables (annex D) for identifiers, as gcc.
+
+## As built: C3b (2026-10-29)
+
+C3b, repr/c's read and print, on the branch `c23-c3b` from main `bde8b0f0`, in about one day of work (against
+C1.2's 4-6). `arbace.repr.c.convert` turns the port's trees (C3) with the preprocessor's layer into C forms
+(doc/c/SPEC.md), `arbace.repr.c.print` prints them back in mode `:lines` (cemit's canonical spelling, CS23 (a))
+and gives a `:full` read back byte for byte, and `bin/repr-c read`, `print`, `roundtrip` and `check --c23` run
+them; `test/c/c23/` holds c23conf's 49 files and Arbace's 13 more, judged by its six judges re-made over the forms
+(CS38 (a)), and gcc -fsyntax-only's acceptance of every corpus file is recorded (CS61 (a)). Evaluated on the tools'
+host (CS36 (a)); no shipped file changed, no re-seed. Go only TamaGo's go1.27.1, no cgo.
+
+### C3b.1 What was built
+
+| Arbace | lines | what |
+|---|---:|---|
+| `arbace/repr/c/convert.ae` | 1,696 | the converter (`arbace.repr.c.convert`): cc's 85 node types into C forms case for case, after cemit's and clisp's rules (CS23 (a), CS37 (a)): specifiers and declarators read from the name outward (§5), declarations (`c/var`, `c/declare`, `c/defn`, `c/typedef`, `c/struct`, `c/group`, `^:c/grouped`, K&R's `^:c/kr`), statements with labels as items and a block's declarations as `let` (§7.2, §7.3), expressions (§7.4-§7.9, n-ary chains flattened, the source's parentheses kept, CS41 (a)), literals as values (§8: integer types by gcc's table at the file's standard, floats shortest, strings decoded from each concatenated literal's own text, `byte-string`, prefixed literals' `lit`), attributes (§5.6), the main file's directives placed between items (§9.2), macro invocations recovered (§9.4), header units (§4.3) |
+| `arbace/repr/c/print.ae` | 732 | the printer (`arbace.repr.c.print`): `:lines` in cemit's canonical spelling (one declarator a declaration, braces on every braced body, one statement a line, four spaces an indent; the parentheses the forms keep, and those C's grammar needs for forms written by hand), types printed as specifiers and declarators around the name; `:full` |
+| `arbace/repr/c/layout.ae` | 108 | the `.ae` writer: a form on one line with its metadata (sorted, `:line` out: the comparisons' and the units' digests' text), and a unit laid out on its C lines (§10.1) |
+| `arbace/repr/c.ae` | 147 | `arbace.repr.c`: `read-c` (the parse, the conversion, the `c/file` form; mode `:full`), `unit-texts`, `print-c`; `bin/repr-c read`, `print` |
+| `arbace/repr/c/rtcheck.ae` | 240 | the round trip's levels 1, 2 and the fixpoint per file, the judgment of all four levels and of the acceptance (CS61 (a)), `--record` |
+| `arbace/repr/c/c23check.ae` | 135 | c23conf's judges over the forms, the expected failures, the control (CS38 (a)) |
+| `bin/lib/repr-c/roundtrip`, `c23check` | 172 | the drivers: lists, gcc's -fsyntax-only (`--record-gcc`), the objects and runs (levels 3, 4), `--resume` |
+
+Changes to C2's and C3's code: `pp.ae`'s layer records each directive's offset and file and each inclusion
+(`enter`: the path, the includer, the offset), and `stream` returns the layer; `parse.ae` returns it with the tree,
+keeps the texts of the string literals a token was concatenated from (`strlit-pieces`, a weak identity map: cc's
+widened tail does not keep a hex escape's end), and gives up a parse past `*deadline*` (the round trip's budget per
+read, `REPR_C_READ_BUDGET`, 120 s). Neither changes a dump: the token and tree checks are unchanged. `test/c/corpora.edn`'s
+c23conf is read from `test/c/c23/` (the `:checkout` root, the token and tree checks' drivers know it) and a corpus
+`:c23` (the 62 files) is added.
+
+How the converter decides what the spec left to C3b (doc/c/SPEC.md §10.2's "the exact encoding ... is C3b's"),
+each a proposal below where it departs from the spec's text:
+
+- **Directives** (§9.2) are read from the main file's text by the port's lexer (every directive line, active or
+  not), the active ones known from the layer (a conditional family is active when its `#if` was evaluated); each is
+  placed in the gap between the items of the statement list it stands in (the top level, a compound statement's block
+  items, nested), by the items' first tokens' offsets. A conditional family whose lines do not all fall between the
+  items of one list is left out of `:lines` whole (its active group printed expanded), as is a directive inside an item
+  (CS73).
+- **Macro invocations** (§9.4): the expansion's tokens all carry the outermost invocation's position (cc's), so a run
+  of tokens at one offset that the source does not spell there is an invocation; its text is the source's, from the
+  macro's name through its argument list's `)`. A node whose tokens are exactly such a run gets `:c/macro` (a literal
+  its parent's `:c/amacro`), the outermost node of the extent claiming it; a statement or declaration whose run holds
+  its `;` gets `:c/macro-stmt`. Not recovered: an expansion holding `__LINE__`'s or `__COUNTER__`'s value (printed in
+  place, the invocation would give the print's line); cc's Builtin's own `__builtin_va_arg`, `__builtin_offsetof`,
+  `__builtin_types_compatible_p`, whose expansions are read back as `(va-arg ...)`, `(offsetof ...)`,
+  `(types-compatible? ...)` and printed as gcc's builtins; C23's `nullptr`, `true`, `false` (cc's Builtin's macros) are
+  `nil`, `true`, `false`.
+- **Header units** (§4.3): the items a main-file `#include` brought in (its file and the files they include, by the
+  layer's inclusions) are its unit, the digest of their forms its name; a unit holds no nested `c/include` and no
+  directive forms (CS74).
+- **Bodies' braces**: gcc's -O0 code tells `if (c) s;` from `if (c) { s; }` (a block's end is a `nop`: measured on 17
+  of torture's files whose objects differed), so N4 cannot hold at level 3: a form whose substatement was not braced is
+  `^:c/bare` (`if` and `cond`: the set of their unbraced branches' indices), and the print keeps it (CS71).
+- **Mode `:full`** keeps the text at the granularity of the top-level items: each top-level form's `:c/text` is the
+  main file's bytes from its first token to the next item's, `c/file`'s `:c/head` the bytes before the first; a form
+  without a `:c/text` (written or changed by hand) is printed as `:lines` prints it. Every byte of the main file is in
+  exactly one place (§10.2's rule), and the print is the original byte for byte; finer layers (per token) are CS70.
+- **Attributes** are kept by their place in cc's tree, a vector of C23 attributes and GNU specifiers
+  `(__attribute__ ...)` under a key of the place: `:c/attrs` (after the identifier), `:c/decl-attrs` (among the
+  specifiers), `:c/after-attrs` (after the declarator), `:c/list-attrs`, `:c/decl-end-attrs`, `:c/def-attrs`,
+  `:c/end-attrs` (after a struct's `}`) (CS72).
+- `#embed` is read as the integers it expands to (its directive inside the initializer is `:full`'s), no `c/embed`
+  form yet (CS75); inline `asm` is `(c/asm "TEXT")`, its tokens' text, not §7.9's structured operands (CS76).
+
+{{NUMBERS}}

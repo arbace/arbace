@@ -11,6 +11,7 @@
             [arbace.repr.c.host :as host]
             [arbace.repr.c.layout :as layout]
             [arbace.repr.c.lex :as lex]
+            [arbace.repr.c.parse :as parse]
             [arbace.string :as str])
   (:import [java.util.concurrent Executors Callable]))
 
@@ -69,12 +70,20 @@
         fc (:fc e)
         cfg (host/config h fc base)
         orig (lex/read-bytes (str base "/" nm))
-        rd (try (rc/read-c cfg fc nm false) (catch Throwable x {:crash (str x)}))]
+        budget (* 1000000000 (Long/parseLong (or (System/getenv "REPR_C_READ_BUDGET") "120")))
+        ;; the original read as its corpus names it (gcc's testsuite: absolute, as DejaGnu does), the print
+        ;; under its relative name
+        rn (or (:read e) nm)
+        rd (binding [parse/*deadline* (+ (System/nanoTime) budget)]
+             (try (rc/read-c cfg fc rn false)
+                  (catch Throwable x (if (:deadline (ex-data x)) {:timeout true} {:crash (str x)}))))]
     (cond
+      (:timeout rd) [nm "timeout" "-" "-" "the evaluated read's budget (REPR_C_READ_BUDGET s) spent"]
       (:crash rd) [nm "crash" "-" "-" (one-line (:crash rd))]
       (:error rd) [nm "error" "-" "-" (one-line (first (:error rd)))]
       (:refused rd) [nm (str "refused:" (name (:refused rd))) "-" "-" (one-line (:message rd))]
       :else
+      (binding [parse/*deadline* (+ (System/nanoTime) (* 2 budget))]
       (let [pr (try (rc/print-c (:file-form rd) (:forms rd)) (catch Throwable x (str "\u0000print-crash " x)))]
         (if (.startsWith ^String pr "\u0000")
           [nm "ok" "print-crash" "-" (one-line (subs pr 1))]
@@ -90,7 +99,7 @@
                                       (if (and (= a b) (= (set (keys (:units rd))) (set (keys (:units rd2)))))
                                         ["equal" nil]
                                         ["differ" (or (first-diff a b) "header units")])))
-                full (try (rc/read-c cfg fc nm true) (catch Throwable x {:crash (str x)}))
+                full (try (rc/read-c cfg fc rn true) (catch Throwable x {:crash (str x)}))
                 l2 (cond
                      (:crash full) "crash"
                      (:refused full) (str "refused:" (name (:refused full)))
@@ -100,7 +109,7 @@
                 fix (if (or (:crash rd2) (:error rd2) (:refused rd2))
                       "-"
                       (if (= pr (try (rc/print-c (:file-form rd2) (:forms rd2)) (catch Throwable _ nil))) "equal" "differ"))]
-            [nm "ok" l1 l2 (if detail (one-line detail) "") fix]))))))
+            [nm "ok" l1 l2 (if detail (one-line detail) "") fix])))))))
 
 (defn forms
   "Levels 1 and 2 of the corpus `id` under WORK (its lists made by arbace.repr.c.ppcheck/lists):
@@ -127,7 +136,7 @@
           (str/join (for [r ok
                           :let [e (first (filter #(= (:name %) (first r)) entries))
                                 fc (abs-incs (:fc e) base [])]]
-                      (str (first r) "\t" (:std fc) "\t" (str/join " " (:args fc)) "\t" base "\n"))))
+                      (str (first r) "\t" (:std fc) "\t" (str/join " " (:args fc)) "\t" base "\t" (or (:read e) (first r)) "\n"))))
     (println (str id ": " (count rs) " files, read " (pr-str (by 1)) ", level 1 " (pr-str (by 2)) ", level 2 " (pr-str (by 3))
                   ", " (Math/round (double secs)) " s"))))
 

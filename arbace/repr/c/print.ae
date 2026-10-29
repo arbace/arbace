@@ -163,12 +163,14 @@
   "An attribute vector's text: runs of C23 attributes as one [[...]], each GNU specifier as itself."
   ^String [v]
   (when (some? v)
+   (if (empty? v)
+    "[[]]"
     (let [parts (partition-by #(and (seq? %) (= (first %) '__attribute__)) v)]
       (str/join " " (mapcat (fn [run]
                               (if (and (seq? (first run)) (= (first (first run)) '__attribute__))
                                 (map #(str "__attribute__((" (str/join ", " (map attr-one (rest %))) "))") run)
                                 [(str "[[" (str/join ", " (map attr-one run)) "]]")]))
-                            parts)))))
+                            parts))))))
 
 (defn- join-sp ^String [& parts] (str/join " " (remove str/blank? (map str (remove nil? parts)))))
 
@@ -202,7 +204,7 @@
 (defn- spec-meta-str ^String [m]
   (when (seq m)
     (join-sp (attrs-str (:c/decl-attrs m))
-             (when-let [a (:c/alignas m)] (str "_Alignas(" (expr-str a 15 nil nil) ")"))
+             (when (contains? m :c/alignas) (str "_Alignas(" (expr-str (:c/alignas m) 15 nil nil) ")"))
              (when-let [a (:c/alignas-type m)] (str "_Alignas(" (type-name a) ")")))))
 
 (defn split-type
@@ -241,9 +243,20 @@
         [(join-sp (spec-meta-str (:c/spec m)) s) inner]))))
 
 (defn type-name
-  "A type form as a type name (a cast's, sizeof's)."
+  "A type form as a type name (a cast's, sizeof's): its specifiers' metadata (:c/spec) first."
   ^String [t]
-  (let [[s d] (split-type t "" nil)] (join-sp s d)))
+  (let [sm (when (instance? arbace.lang.IMeta t) (:c/spec (meta t)))
+        t (if sm (vary-meta t dissoc :c/spec) t)
+        [s d] (split-type t "" nil)]
+    (join-sp (spec-meta-str sm) s d)))
+
+(defn- implicit
+  "A declaration's specifiers, the int of an implicit int left out (its qualifiers kept)."
+  [^String s m]
+  (if (:c/implicit-int m)
+    (let [ws (str/split (str/trim (str s)) #" ")]
+      (str/join " " (if (= (last ws) "int") (butlast ws) ws)))
+    s))
 
 (declare decl-head)
 
@@ -259,7 +272,7 @@
                        (let [m (meta p)
                              nm (if (seq? p) (second p) (name p))
                              [s d] (split-type (:tag m) (str nm (when-let [a (:c/attrs m)] (str " " (attrs-str a)))) nil)]
-                         (join-sp (decl-head m) (when-not (:c/implicit-int m) s) d (attrs-str (:c/after-attrs m))))
+                         (join-sp (decl-head m) (implicit s m) d (attrs-str (:c/after-attrs m))))
                        :else (let [m (meta p)] (join-sp (decl-head (:c/spec m)) (type-name (if (:c/spec m) (vary-meta p dissoc :c/spec) p))))))
                    ps))))
 
@@ -463,12 +476,13 @@
   ^String [m]
   (when m
     (join-sp (attrs-str (:c/decl-attrs m))
-             (when-let [a (:c/alignas m)] (str "_Alignas(" (expr-str a 15 nil nil) ")"))
+             (when (contains? m :c/alignas) (str "_Alignas(" (expr-str (:c/alignas m) 15 nil nil) ")"))
              (when-let [a (:c/alignas-type m)] (str "_Alignas(" (type-name a) ")"))
              (when (:typedef m) "typedef")
              (when (:extern m) "extern") (when (:static m) "static") (when (:thread_local m) "_Thread_local")
              (when (:auto m) "auto") (when (:register m) "register") (when (:constexpr m) "constexpr")
-             (when (:inline m) "inline") (when (:noreturn m) "_Noreturn"))))
+             (when (:inline m) "inline") (when (:noreturn m) "_Noreturn")
+             (attrs-str (:c/list-attrs m)))))
 
 (defn- nm-str ^String [x] (if (seq? x) (second x) (name x)))
 
@@ -477,7 +491,7 @@
   [x base]
   (let [m (meta x)
         [s d] (split-type (:tag m) (str (nm-str x) (when-let [a (:c/attrs m)] (str " " (attrs-str a)))) base)]
-    [(join-sp (decl-head m) (when-not (:c/implicit-int m) s)) d]))
+    [(join-sp (decl-head m) (implicit s m)) d]))
 
 (defn- decl-tail ^String [m]
   (join-sp (:c/asm-label m) (attrs-str (:c/after-attrs m))))
@@ -501,7 +515,7 @@
                   (if ps
                     (let [x (vary-meta x assoc :tag (list 'fn ps (:tag (meta ps))))
                           [s d] (declarator-str x base)
-                          s (if (:c/implicit-int (meta ps)) (decl-head (meta x)) s)]
+                          s (implicit s (meta ps))]
                       [s (join-sp d (decl-tail (meta x)))])
                     (let [[s d] (declarator-str x base)] [s (join-sp d (decl-tail (meta x)))])))
       c/typedef (let [[_ x t] f
@@ -525,8 +539,8 @@
       :else
       (case (first f)
         (c/var c/declare c/typedef) (let [[s d] (var-str f nil)] (str (join-sp s d) (end-attrs m) ";"))
-        (c/struct c/union c/enum) (str (type-name (with-meta (cons (symbol (name (first f))) (rest f)) m)) (end-attrs m) ";")
-        c/declare-specs (str (join-sp (decl-head (assoc m :typedef (:c/typedef m))) (type-name (second f))) (end-attrs m) ";")
+        (c/struct c/union c/enum) (str (join-sp (decl-head m) (type-name (with-meta (cons (symbol (name (first f))) (rest f)) m))) (end-attrs m) ";")
+        c/declare-specs (str (join-sp (decl-head (assoc m :typedef (:c/typedef m))) (implicit (type-name (second f)) m)) (end-attrs m) ";")
         c/group (let [[_ base & fs] f
                       [bs _] (split-type base "" nil)
                       parts (map #(var-str % bs) fs)
@@ -653,7 +667,7 @@
                                (when (or (nil? nxt) (and (seq? nxt) (= 'let (first nxt)))) " ;")))
           default (outdent b (str attr "default:" (when (or (nil? nxt) (and (seq? nxt) (= 'let (first nxt)))) " ;")))
           goto (line b (str "goto " (name (first args)) ";"))
-          goto* (line b (str "goto *" (expr-str (first args) 2 m 1) ";"))
+          goto* (line b (str "goto *" (expr-str (first args) 3 m 1) ";"))
           break (line b "break;")
           continue (line b "continue;")
           return (line b (if (seq args) (str "return " (expr-str (first args) 16 m 1) ";") "return;"))
@@ -685,7 +699,7 @@
         pm (meta ps)
         t (list 'fn ps (:tag pm))
         [s d] (split-type t (str (nm-str x) (when-let [a (:c/attrs xm)] (str " " (attrs-str a)))) nil)
-        head (join-sp (decl-head xm) (when-not (:c/implicit-int pm) s))
+        head (join-sp (decl-head xm) (implicit s pm))
         b (StringBuilder.)]
     (when (seq head) (line b head))
     (line b (join-sp d (attrs-str (:c/def-attrs xm))))

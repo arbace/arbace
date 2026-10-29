@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
   program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-why gate-audit gate-prune gate-queue java-check-judge provenance-check reap suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-record-gcc repr-c-c23 goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
   check-makefile
 
 help: ## list the targets
@@ -220,6 +220,16 @@ repr-c-record: ## gcc -E on every corpus file, its digests (test/repr/c/pp-gcc.s
 	bin/repr-c check --tokens --record
 repr-c-parse-check: ## repr/c's tree check: every corpus file and 7,700 mutants parsed by the port and by cc, the trees equal node for node or known (bin/repr-c parse-check)
 	bin/repr-c parse-check
+repr-c-read: ## a C file's C forms, FILE=... (its .ae on the standard output; bin/repr-c read FILE)
+	bin/repr-c read $(FILE)
+repr-c-print: ## a C forms unit's C text, FILE=....ae (mode :lines, or the original for a unit read --full; bin/repr-c print FILE)
+	bin/repr-c print $(FILE)
+repr-c-roundtrip: ## repr/c's round trip: every corpus file read into C forms, printed and read again, :full byte for byte, the print's objects the original's and its runs too (bin/repr-c roundtrip)
+	bin/repr-c roundtrip
+repr-c-record-gcc: ## gcc -fsyntax-only's acceptance of every corpus file recorded (test/repr/c/parse-gcc.tsv, CS61 (a)), then the round trip (bin/repr-c roundtrip --record-gcc)
+	bin/repr-c roundtrip --record-gcc
+repr-c-c23: ## C23's conformance judges over test/c/c23/ and their control (bin/repr-c check --c23)
+	bin/repr-c check --c23
 goi-annotations: ## goi's checker over tamago/goroot, linux std, GOROOT/test: no error, every annotation verified (bin/goi annotations)
 	bin/goi annotations
 goi-test: ## goi's tests: the checker's (invalid forms with gc's messages, checked trees), the interpreter's programs against gc, Go forms at the REPL (bin/goi test --gc; after `make build`)
