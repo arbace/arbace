@@ -3414,6 +3414,20 @@ RPS160 (a) decided (the two compile steps stay separate); RPS161 (b) done inside
   checkout's) or the run stops; `CLOJURE_TESTS_AOT_EXES` (an explicit executables directory) skips it.
   Its executables stay the gate's, since only the gate's directory holds the test build `arbace-tests`.
 
+### Results
+
+On the branch before and after merging main (GT6, the provenance fix): `bin/clojure-tests --aot --essential` no
+regressions (7,273 assertions, 7,270 passing); `bin/java-check --essential-compiled` 423 of 423 (the base printed:
+`target/arbace-go/aot`, key the checkout's); full `bin/clojure-tests --aot` 78 namespaces, 20,580 assertions,
+20,576 passing, no regressions against `test/arbace-go-aot-results.edn`; full compiled level (no `--record`, the
+base from `program_base`, no `JAVA_CHECK_AOT`): 3,313 as recorded, 1 now passing, 1 regression, t05445
+(`HugeToString`, a timeout at 20 s and again at 40 s under the host's load; flaky in the previous run), which
+passed alone (`--only HugeToString`: 1 of 1 as recorded); `--build-program --check` 11 of 11; the essential gate
+(`.tmp/heavy bin/gate`, GT6) passed, 17 steps run, 1 skipped, 27m38s. The same compiled namespaces were used as
+with `JAVA_CHECK_AOT`, so no result moved because of the base's choice. (An earlier gate run of this task was
+killed: `flock big.lock .tmp/heavy` took the lock before a slot and deadlocked with other gates; the order is
+slot first.)
+
 ### Proposals (RPS162)
 
 - **RPS162 The suite's executables from the base.**
