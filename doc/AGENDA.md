@@ -133,7 +133,7 @@ The current state of the work. This file is rewritten as things change. For the 
     | | read | eval | AOT | print |
     |---|---|---|---|---|
     | Clojure | 908/2/0 | 21,052/81/1 | 809/29/0 | 1,031+/0/0 |
-    | Java | 7,740/3/93 | 1,807/329/1,186 | 1,915/180/1,227 | 2,598/687/36 |
+    | Java | 7,740/3/93 | 1,807/330/1,185 | 1,915/181/1,226 | 2,598/687/36 |
     | Go | 12,158/204/0 | 1,618/219/0 | 1,688/149/0 | 2,584+/141/0 |
 - **Next: C23 at parity with the three crops** (doc/C23-SURVEY.md; CS1-CS51 decided).
   - Done: C1, the spec (doc/c/SPEC.md, test/c/corpora.edn); C2, repr/c's lexer and preprocessor, ports of cc's, token
