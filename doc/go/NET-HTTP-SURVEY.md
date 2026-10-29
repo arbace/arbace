@@ -843,3 +843,86 @@ show it; `reponly.ae`, the REPL cases alone; `build.dbg.ae`, the builder with th
     before for the same descriptor.
   - *Recommended: (c)*: cheap, catches the class of bug rather than its instances; (a) only for the families a
     failure shows.
+
+## As built: NH12 (a), NH18 (c) (2026-10-29)
+
+Both on branch `nethttp-nh11`, on top of NH11 (b). Run on the gate's executable
+`.tmp/gate-exe/ee3f4cf75b39a30b8f35` with `ARBACE_PATH` the checkout (no build; GT7's quiet file existed: no gate, no
+heavy lock, GOMEMLIMIT 7 GiB, at most 4 threads).
+
+**NH18 (c): `ensure-methods!` fails loudly on a shrinking method set.** `arbace/go/build.ae`: every descriptor's
+given keys are remembered (`methods-given`, an identity map, as `:methods-done` is: descriptors are interned, one per
+type and generation, and a redefinition with another method set is a new one). `check-methods-kept!`, called just
+before `TSetMethods`, throws when the set about to be given lacks a key given before:
+
+```
+goi: internal error: the method set of type T would shrink from 3 to 0 methods (lost Close, Error, String): a build
+context found no cell for methods another one gave (NH18)
+```
+
+(the type is Go's text of the type, `{:goi/internal true :type ...}`). A set may grow (a later context finds more); the
+same set again is silent, as before. Regression case in `test/goi/repl.ae` (the NH11 section's end): the helper called
+on a fresh descriptor, the same set in another order, a larger one, another descriptor's empty one (all fine) and a
+smaller one (the message above, byte for byte). `bin/goi test` on the executable with the checkout's `arbace/go`: checker
+22 assertions, interpreter's programs 21 of 21, std 185 of 185, session as transcript, `repl.ae` 120 of 120 (115 + 5), 0
+failed. The check cost nothing visible in `bin/goi check --corpus nethttp` (56 of 60 again, 322 s at 4 jobs, no
+regression, classes as before) and fired nowhere in it: NH11's fix leaves no context giving a smaller set.
+
+**NH12 (a): the Arbace set, `test/nethttp/arbace/`.** Eight scripts (`NAME.ae`, run by the executable in their
+directory), each with `NAME.out` written by hand (gc cannot run them), `manifest.edn`, the reference
+`check-linux-amd64.edn` and the classes `divergences.edn`. Runner: `bin/goi check --corpus nethttp --arbace
+[--record] [--only REGEX]` (`check_nethttp_arbace`; status 0 and stdout byte for byte, the first panic or reify line
+of stderr is a non-pass's reason; then `bin/goi divergences --nethttp-arbace`, `test/goi/divergences.ae`); `make
+goi-check-nethttp-arbace`. A script is a `go.*` namespace: Go declarations for what needs types (`go/func`, `go/type`,
+`go/method`) and plain Arbace fns crossing in.
+
+| program | what | result |
+|---|---|---|
+| `handlerfunc` | an Arbace fn passed to a parameter of type `http.HandlerFunc`: headers, `WriteHeader`, query, a closure's atom, served by `httptest` | pass |
+| `roundtripper` | an Arbace fn as a named func type `RTF` with a `RoundTrip` method, the client's transport, no network: responses built by a Go helper, an error answer (`Get "...": boom`), the requests seen | pass |
+| `repl_handler` | a handler struct type with `ServeHTTP` defined at the REPL, its method redefined between two requests (`%T` `*replhandler.Hello`) | pass |
+| `refused_import` | `net/http/internal/http2`, `.../ascii`, `net/http/internal`, a vendor path refused (use of internal package ... not allowed), `net/http2` (no forms), `net/http/httptest` imported | pass |
+| `handler_reify` | `(reify go.net.http/Handler ...)` served | fail, `:reify-unlisted` |
+| `roundtripper_reify` | `(reify go.net.http/RoundTripper ...)` as the client's transport | fail, `:reify-unlisted` |
+| `handlerfunc_conv` | an Arbace fn to a parameter of the unnamed func type, `(conv http/HandlerFunc f)` in Go | fail, `:conv-of-arbace-fn` |
+| `repl_server_kept` | an `httptest.Server` started by one Go function and asked from others, the handler redefined between | fail, `:server-kept` |
+
+4 of 8 pass (100 s). The four non-passes are findings, each its class:
+
+- `:reify-unlisted` (deferred, NH2 (a)): reify takes listed interfaces only, `reify: http.Handler is not an interface
+  of a listed package`. Listing `net/http` is what makes them pass.
+- `:conv-of-arbace-fn` (open, NH19): `(conv HF f)` with `f` an Arbace fn given to a parameter of the unnamed func type
+  gives the Arbace fn back unnamed (`%T` `func(...)`, no `ServeHTTP`: the server panics). With a Go closure, or with
+  the parameter declared as the named type (`handlerfunc`'s way), it is right. Repro: `.tmp/nh12/p2.ae`.
+- `:server-kept` (open, NH20): a server returned from a Go function panics `goi: retyping a *http.connReader (8
+  bytes) as a io.Reader (16)` in its first request; the same code with start and request in one Go function passes
+  (`repl_handler`, `.tmp/nh12/p4.ae`), also with a handler by `NewHello` or a `Handler`-typed local (`.tmp/nh12/p3.ae`).
+  Not traced: the symptom of a type retyped in a context that does not know it, the family of NH11's bug.
+
+**Shipped files changed** (join the batched re-seed after the tag, with NH11): `arbace/go/build.ae` (this commit; it is
+evaluated from the checkout where it differs from the embedded copy) in addition to NH11's `arbace/go/repl.ae` and
+`go/arbace/gotable.edn`. Not shipped: `bin/goi`, `Makefile`, `test/goi/divergences.ae`, `test/goi/repl.ae`,
+`test/nethttp/arbace/*`.
+
+**The scratch**: `.tmp/worktrees/nethttp-nh11/.tmp/nh12/` (`p1.ae` to `p4.ae`, the probes; `corpus.log`,
+`essential.log`, `rec.log`; `*.got`, the programs' outputs).
+
+### Proposals NH19 onward
+
+- **NH19 A conversion of an Arbace fn to an interpreted named func type.**
+  - Options: (a) find it in `conv` for func types: an Arbace fn crossing into a Go func parameter is a callable the
+    conversion treats as already of the target's representation, so the named type is not attached; wrap it (as
+    `FromArbace` does for a typed param) to a Go func value first; (b) leave: use a parameter of the named type;
+    (c) document only.
+  - *Recommended: (a)*: a day at most, and `http.HandlerFunc(f)` is the idiom an Arbace user reaches for; (b) is the
+    workaround this set uses.
+- **NH20 The server returned from a Go function.**
+  - Options: (a) trace it now with `ensure-methods!`'s `GOI_DBG_METHODS` trace (NH11's), on `repl_server_kept`;
+    (b) wait for NH2 (a): with `net/http` and `httptest` compiled the retyped types are compiled and the path is not
+    interpreted; (c) leave.
+  - *Recommended: (b), then (a) only if it remains*: the cause is in the interpreted package's contexts, which the
+    listing removes; but run the set again at NH3 and keep `repl_server_kept` as the check.
+- **NH21 The set in the gate.**
+  - Options: (a) not now: 100 s and a loopback server, after NH2 (a) lists the package its reifies pass and the whole set
+    may join NH13's subset; (b) its four passing programs in the essential gate now; (c) `--full` only.
+  - *Recommended: (a)*: as NH13 decided for the corpus.
