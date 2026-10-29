@@ -672,3 +672,9 @@ interpreted; NH4 chooses the subset); there is no AOT level yet (NH4).
     five timing-dependent programs from the gate's subset only.
   - *Recommended: (a) now, (b) at NH4*: no flake was seen in 8 gc runs of each program, 3 of them with 16 at
     once; the retry machinery belongs with the gate step, not the baseline.
+
+## Decided (2026-10-29): NH11-NH14
+
+- **NH11 (b), not as recommended (the user):** the empty method sets of interpreted net/http's types are investigated
+  before the listing, since they may be a goi bug that hits other packages (branch `nethttp-nh11`).
+- NH12 (a), NH13 (b) and NH14 (a) as recommended.
