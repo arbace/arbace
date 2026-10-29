@@ -270,7 +270,7 @@ Prior art:
   `-main`; `:main-class CLASS`, its `main`; neither: `go/` a Go program, `arbace.build.go` alone),
   `src/`'s namespaces compiled by c2j and embedded (its `.clj` and `.cljc` translated into `.ae` by
   repr/clojure first, REAP7b), `java/`'s Java forms and the compiled namespaces translated by j2g with
-  the shipped build's compiled namespaces (reused when their `aot.key` is the checkout's: `aot.runtime` beside it names their runtime, and stage 0's `target/seed/aot`, which `bin/seed --build` makes, serves as a base; else a
+  the shipped build's compiled namespaces (the shared library `bin/lib/program.bash`, RPS97 (b); its `program_base` takes the first of `ARBACE_PROGRAM_BASE`, `target/arbace-go`, the gate's cache and stage 0's `target/seed`, which `bin/seed --build` makes, whose `aot.key` is the checkout's: `aot.runtime` beside it names their runtime; else stage 0's compiled again, else a
   `--build` first; j2g's `--entry`, `--entry-arg`, `--resources`, `--java-namespaces`: the packages'
   namespaces no-op loaders), `go/`'s Go packages compiled (a package goi's checker refuses is a build error, RPS102 (b); REAP7b: listed in a goi table of the
   program's own, `bin/goi table --program-list FILE --program-root DIR`, and printed into the module by
@@ -330,7 +330,7 @@ Prior art:
   `interp` (each package required file by file as the REPL loads it, `--load do` the one-`do` mode, and
   `main` run on the executable, `test/java/run.ae`; status and stdout's digest, also with identity hash
   codes masked, against the JDK's), `compiled` (JC2, "As built: JC2": the tests translated by j2g in
-  shards of programs, `bin/j2g --program` with the build's compiled namespaces and `bin/build-go`, a
+  shards of programs, `bin/j2g --program` with the build's compiled namespaces (`program_base`'s, RPS161 (b); `JAVA_CHECK_AOT` overrides) and `bin/build-go`, a
   test j2g refuses or whose Go does not compile taken out, each `main` run on its program) and `classes`
   (javac on Arbace's class files against the JDK javac's), results against `test/java/check-LEVEL.edn` (`--record`),
   every test not passing in a class of `test/java/divergences.edn`; the namespace `java.check`

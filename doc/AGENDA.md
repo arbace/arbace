@@ -107,17 +107,45 @@ The current state of the work. This file is rewritten as things change. For the 
   1,618/219/0, 1,685/149/3, 2,584+/141/0 (read, eval, AOT, print: pass/by design/deferred).
   `GATE_FULL_SERIAL=1 bin/gate --full` passed at `5cfb1f4a`; the seed `b4ac198d` verified. Its history: the
   journal at the tag.
-- **Now: the milestone `arbace-reaps-3-crops-v2`** (an annotated tag, the journal reset again). Done: the scripts'
-  sweep; the keyed gate GT1-GT3 (doc/GATE-SURVEY.md); the small leftovers A and B; JC4b and JC4c; Clojure's last
-  deferred cases (only `seq-and-transducer`, speed, left); JN9e; JN9f. Running: GT4 with GT6 (the audit, the gate's
-  own heavy lock and limits), RPS97 (b) (a shared program library), RPS150 with JCS123 (b). Then: GT5 (inner keys),
-  v2's re-seed, GT7's clean `bin/gate --full --clean`, the divergences' record, the tag. The matrix now: Clojure
-  908/2/0, 21,052/81/1, 809/29/0, 1,031+/0/0; Java 7,740/3/93, 1,807/329/1,186, 1,913/180/1,229, 2,598/687/36; Go
-  12,158/204/0, 1,618/219/0, 1,688/149/0, 2,584+/141/0.
-- **Next: C23 at parity with the three crops** (doc/C23-SURVEY.md, CS1-CS43 decided; C1, the spec, done 2026-10-28: doc/c/SPEC.md): C2-C9, cc
-  ported to Arbace (CS4 (b)), musl 1.2.6 as C forms (`long double` as `double`, CS35), gcc 15.2 the reference, the tag
-  `arbace-reaps-4-crops-v1`. Beside v2: JFS133 (a)'s 6 differences (then JN10, JFS130-JFS132, after v2).
-  Later: JCS120 (b), the deferred JDK areas (JCS90-JCS96), JC7.
+- **Now: the milestone `arbace-reaps-3-crops-v2`** (an annotated tag, then the journal starts over).
+  - Done:
+    - the scripts' sweep;
+    - the keyed gate's GT1-GT6 (doc/GATE-SURVEY.md): the audit, the canary, the gate's own heavy lock per step, the FIFO
+      lock `bin/heavy-lock`, CPU limits, inner keys, Java's check per level, the program hosts by unit;
+    - the small leftovers A and B;
+    - JC4b and JC4c;
+    - Clojure's last deferred cases (only `seq-and-transducer`, speed, left);
+    - JN9e and JN9f; JFS133 (a);
+    - RPS150 with JCS123 (b); RPS97 (b) with RPS161 (b);
+    - the provenance files rewritten;
+    - two re-seeds, both verified: the second, `73b0d637`, for GT5's RT.ae.
+  - Running:
+    - GT7's tooling, `bin/gate --clean`;
+    - the draft record's refresh.
+  - Then:
+    - GT7's run, `bin/gate --full --clean`, every step audited on a quiet host (`.tmp/gt7.quiet`), with GTS37's
+      concurrent `--full` and GTS42's demonstrations;
+    - its record `test/gate/clean-arbace-reaps-3-crops-v2.edn`;
+    - the divergences' record (doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences");
+    - the tag.
+  - The matrix now (pass/by design/deferred):
+
+    | | read | eval | AOT | print |
+    |---|---|---|---|---|
+    | Clojure | 908/2/0 | 21,052/81/1 | 809/29/0 | 1,031+/0/0 |
+    | Java | 7,740/3/93 | 1,807/330/1,185 | 1,915/181/1,226 | 2,598/687/36 |
+    | Go | 12,158/204/0 | 1,618/219/0 | 1,688/149/0 | 2,584+/141/0 |
+- **Next: C23 at parity with the three crops** (doc/C23-SURVEY.md; CS1-CS51 decided).
+  - Done: C1, the spec (doc/c/SPEC.md, test/c/corpora.edn); C2, repr/c's lexer and preprocessor, ports of cc's, token
+    for token against `tools/ccdump`.
+  - Running beside v2, light, merged after the tag: C3, the parser, with CS50 (a) (gcc's trigraphs and UCNs) and CS51
+    (a) (gcc -E's digests as data).
+  - Then C3b-C9: cc ported to Arbace (CS4 (b)); musl 1.2.6 as C forms (`long double` as `double`, CS35); gcc 15.2 as
+    the reference; the tag `arbace-reaps-4-crops-v1`.
+  - Also after v2:
+    - JN10 (JFS130-JFS132), its plan being written now;
+    - JCS120 (b), its plan being written now;
+    - later: the deferred JDK areas (JCS90-JCS96), JC7.
 - **Working rules added during REAP:** subagents on Sonnet for as much as possible, Opus for the hard parts
   (the user, 2026-10-25/26); one 20 GiB job at a time on the host; Go's build cache trimmed when the disk
   fills.

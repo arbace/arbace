@@ -181,6 +181,8 @@
 ;; the state's slots
 (def ^:const OFF 0) (def ^:const CH 1) (def ^:const CHSIZE 2) (def ^:const STATE 3)
 (def ^:const CLOSED 4) (def ^:const JOINED 5) (def ^:const SEP 6) (def ^:const SRC 7)
+;; Arbace (CS50 (a)): whether phase 1 replaces trigraphs, and whether the token being scanned holds one
+(def ^:const TRIGRAPHS 8) (def ^:const TRI 9)
 
 (def ^:const EOF -1)
 ;; cppScan's states
@@ -189,16 +191,19 @@
 (deftype Scanner [^CFile f ^bytes buf ^long len ^longs st eh])
 
 (defn scanner
-  "A scanner of `f`; `eh` is called with each error's message (a string)."
-  ^Scanner [^CFile f eh]
+  "A scanner of `f`; `eh` is called with each error's message (a string); `trigraphs?` (Arbace,
+  CS50 (a)): phase 1 replaces trigraphs, as gcc does at -std=c89 to c17 and with -trigraphs."
+  (^Scanner [^CFile f eh] (scanner f eh false))
+  (^Scanner [^CFile f eh trigraphs?]
   (let [^bytes buf (.-buf f)
-        st (long-array 8)
+        st (long-array 10)
         len (alength buf)]
     (aset st CH EOF)
+    (aset st TRIGRAPHS (if trigraphs? 1 0))
     (when (and (>= len 3) (= (aget buf 0) (unchecked-byte 0xef)) (= (aget buf 1) (unchecked-byte 0xbb))
                (= (aget buf 2) (unchecked-byte 0xbf)))
       (aset st OFF 3))
-    (Scanner. f buf len st eh)))
+    (Scanner. f buf len st eh))))
 
 (defmacro ^:private st [s k] (list 'aget (with-meta (list '.-st (vary-meta s assoc :tag 'arbace.repr.c.lex.Scanner)) {:tag 'longs}) k))
 (defmacro ^:private st! [s k v] (list 'aset (with-meta (list '.-st (vary-meta s assoc :tag 'arbace.repr.c.lex.Scanner)) {:tag 'longs}) k (list 'long v)))
@@ -240,6 +245,25 @@
                            (bit-shift-left (bit-and b2 0x3f) 6) (bit-and b3 0x3f)) 4]))
             :else [0xFFFD 1]))))))
 
+(defn- trigraph-char
+  "The character the trigraph ??c stands for (5.2.1.1), nil when ??c is none."
+  [^long c]
+  (case (int c) 61 35 40 91 47 92 41 93 39 94 60 123 33 124 62 125 45 126 nil))
+
+(defn replace-trigraphs
+  "Phase 1's trigraphs of `s` replaced, left to right (Arbace, CS50 (a))."
+  ^String [^String s]
+  (if (neg? (.indexOf s "??"))
+    s
+    (let [b (StringBuilder.) n (.length s)]
+      (loop [i 0]
+        (if (< i n)
+          (let [c (.charAt s i)]
+            (if-let [r (and (= c \?) (< (+ i 2) n) (= (.charAt s (inc i)) \?) (trigraph-char (long (int (.charAt s (+ i 2))))))]
+              (do (.append b (char (int r))) (recur (+ i 3)))
+              (do (.append b c) (recur (inc i)))))
+          (.toString b))))))
+
 (defn rune
   "scanner.rune: the rune at the offset, a line splice before it skipped (and the line added), -1
   at the end or when closed."
@@ -255,11 +279,23 @@
           (do (st! s JOINED 1) (st! s OFF (+ (st s OFF) 2)) (add-line (.-f s) (st s OFF)))
           (and (= (peek-byte s 1) 13) (= (peek-byte s 2) 10))
           (do (st! s JOINED 1) (st! s OFF (+ (st s OFF) 3)) (add-line (.-f s) (st s OFF)))))
+      ;; Arbace (CS50 (a)): ??/ is a backslash in phase 1, so ??/ before a new-line is a splice
+      (when (and (= (st s TRIGRAPHS) 1) (= (peek-byte s 0) 63) (= (peek-byte s 1) 63) (= (peek-byte s 2) 47))
+        (cond
+          (= (peek-byte s 3) 10)
+          (do (st! s JOINED 1) (st! s TRI 1) (st! s OFF (+ (st s OFF) 4)) (add-line (.-f s) (st s OFF)))
+          (and (= (peek-byte s 3) 13) (= (peek-byte s 4) 10))
+          (do (st! s JOINED 1) (st! s TRI 1) (st! s OFF (+ (st s OFF) 5)) (add-line (.-f s) (st s OFF)))))
       (let [off (st s OFF)
             buf ^bytes (.-buf s)
-            b0 (if (< off (.-len s)) (bit-and (long (aget buf off)) 0xff) -1)]
-        (if (and (>= b0 0) (< b0 0x80))
+            b0 (if (< off (.-len s)) (bit-and (long (aget buf off)) 0xff) -1)
+            tri (when (and (= b0 63) (= (st s TRIGRAPHS) 1) (= (peek-byte s 1) 63))
+                  (trigraph-char (peek-byte s 2)))]
+        (cond
+          tri (do (st! s CH tri) (st! s CHSIZE 3) (st! s TRI 1) (long tri))
+          (and (>= b0 0) (< b0 0x80))
           (do (st! s CH b0) (st! s CHSIZE 1) b0)
+          :else
           (let [[r n] (decode-rune buf off (.-len s))]
             (st! s CH r) (st! s CHSIZE n) (long r)))))))
 
@@ -291,8 +327,16 @@
         sep (st s SEP) src (st s SRC) off (st s OFF)
         stext (latin1 buf sep src)
         text (latin1 buf src off)]
-    (if (zero? (st s JOINED))
+    (cond
+      (not (zero? (st s TRI))) ; Arbace (CS50 (a)): phase 1's trigraphs, then the splices
+      (do (st! s JOINED 0) (st! s TRI 0)
+          (tok ch
+               (-> (replace-trigraphs text) (.replace "\\\n" "") (.replace "\\\r\n" ""))
+               (-> (replace-trigraphs stext) (.replace "\\\n" "") (.replace "\\\r\n" ""))
+               (.-f s) src))
+      (zero? (st s JOINED))
       (tok ch text stext (.-f s) src)
+      :else
       (do (st! s JOINED 0)
           (tok ch
                (-> text (.replace "\\\n" "") (.replace "\\\r\n" ""))
@@ -398,6 +442,17 @@
     (do (err s (str (pos-str s (st s SRC)) ": " what " not terminated"))
         (fail s))))
 
+(defn- ucn-length
+  "Arbace (CS50 (a)): the length of a universal character name at the offset (\\uXXXX, \\UXXXXXXXX,
+  6.4.3), which C allows in identifiers, 0 for none."
+  ^long [^Scanner s]
+  (if (and (= (rune s) 92) (or (= (peek-byte s 1) 117) (= (peek-byte s 1) 85)))
+    (let [n (if (= (peek-byte s 1) 117) 4 8)]
+      (if (every? #(hex-digit? (peek-byte s (+ 2 (long %)))) (range n)) (+ 2 n) 0))
+    0))
+
+(defn- skip-ucn [^Scanner s ^long n] (dotimes [_ n] (shift s)))
+
 (defn- ppnumber
   "scanner.ppnumber (A.1.9), with go-whim's digit separators."
   ^Tok [^Scanner s]
@@ -412,15 +467,18 @@
                      (do (shift s) (shift s) (recur))
                      (new-token s :PPNUMBER)))
         (or (digit? c) (letter? c) (= c 95)) (do (shift s) (recur))
+        ;; Arbace (CS50 (a)): a universal character name is an identifier-nondigit of a pp-number too
+        (and (= c 92) (pos? (ucn-length s))) (do (skip-ucn s (ucn-length s)) (recur))
         :else (new-token s :PPNUMBER)))))
 
 (defn- identifier ^Tok [^Scanner s]
-  (shift s)
+  (let [n (ucn-length s)] (if (pos? n) (skip-ucn s n) (shift s)))
   (loop []
     (let [c (rune s)]
-      (if (or (letter? c) (= c 95) (digit? c) (= c 36))
-        (do (shift s) (recur))
-        (new-token s :IDENTIFIER)))))
+      (cond
+        (or (letter? c) (= c 95) (digit? c) (= c 36)) (do (shift s) (recur))
+        (= c 92) (let [n (ucn-length s)] (if (pos? n) (do (skip-ucn s n) (recur)) (new-token s :IDENTIFIER)))
+        :else (new-token s :IDENTIFIER)))))
 
 (defn- op1
   "A one-rune token, or with a following `=` the kind `eq`."
@@ -486,7 +544,7 @@
           ;; and a constant; their kinds the wide ones (the prefix in the text tells them apart)
           (and (or (= c 117) (= c 85)) (= p1 39)) (do (shift s) (quoted s :LONGCHARCONST 39 "character constant"))
           (and (or (= c 117) (= c 85)) (= p1 34)) (do (shift s) (quoted s :LONGSTRINGLITERAL 34 "string literal"))
-          (or (letter? c) (= c 95) (= c 36)) (identifier s)
+          (or (letter? c) (= c 95) (= c 36) (pos? (ucn-length s))) (identifier s) ; Arbace: a UCN begins one too
           (and (>= c 48) (<= c 57)) (ppnumber s)
           :else (do (shift s) (new-token s (ch-of c))))))))
 
@@ -537,16 +595,17 @@
 (defn tokens
   "Every preprocessing token of `f` (a CFile) as cc's scanner gives them, and the errors:
   [tokens errors]."
-  [^CFile f]
+  ([^CFile f] (tokens f false))
+  ([^CFile f trigraphs?]
   (let [errs (java.util.ArrayList.)
-        s (scanner f (fn [m] (.add errs m)))
+        s (scanner f (fn [m] (.add errs m)) trigraphs?)
         out (java.util.ArrayList.)]
     (loop []
       (let [t (scan s)]
         (when-not (= (.-ch t) :eof)
           (.add out t)
           (recur))))
-    [(vec out) (vec errs)]))
+    [(vec out) (vec errs)])))
 
 (defn dump-line
   "A token's line in tools/ccdump's dump (mode lex without `macro?`): position, kind, source text,
@@ -564,13 +623,14 @@
 
 (defn dump
   "The lexer's dump of the file at `path` (named `name` in positions), tools/ccdump's mode lex."
-  ^String [^String name ^String path]
+  (^String [^String name ^String path] (dump name path false))
+  (^String [^String name ^String path trigraphs?]
   (let [f (new-file name (read-bytes path))
-        [ts errs] (tokens f)
+        [ts errs] (tokens f trigraphs?)
         b (StringBuilder.)]
     (doseq [t ts] (.append b (dump-line t false)) (.append b "\n"))
     (doseq [e errs] (.append b "#error\t") (.append b (esc e)) (.append b "\n"))
-    (.toString b)))
+    (.toString b))))
 
 (defn -main [& args]
   (doseq [a args] (print (dump a a)))

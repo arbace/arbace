@@ -202,6 +202,9 @@
 (def ^:const TOS 0) (def ^:const INCLUDED 1) (def ^:const EOFLINE 2) (def ^:const TOK 3)
 (def ^:const CLOSED 4) (def ^:const SOURCES 5) (def ^:const COUNTER 6) (def ^:const TOKENIZER 7)
 (def ^:const DEPTH 8) (def ^:const MAIN 9)
+;; Arbace (C3): whether the main file's groups were made, and whether cc's file set gained a file after
+;; them (an included file's groups, a _Pragma's text), which puts cc's eof token at no position
+(def ^:const MAIN-MADE 10) (def ^:const EOF-NOPOS 11)
 
 (deftype Cpp [cfg ^HashMap macros ^HashMap mstack ^HashMap groups ^HashSet undefs ^ArrayList stack
               ^objects o ^ArrayList errs ^ArrayList warns ^ArrayList layer ^HashMap files ^HashSet once])
@@ -363,14 +366,14 @@
 
 (defn- parse-file
   "The groups of `name` (read from `file`), and its errors."
-  [^String name ^java.io.File file]
+  [^String name ^java.io.File file trigraphs?]
   (.add ^java.util.Set opened (.getAbsolutePath file))
   (let [bs (lex/read-bytes (.getPath file))
-        key [name (java.util.Arrays/hashCode bs) (alength bs)]]
+        key [name (java.util.Arrays/hashCode bs) (alength bs) (boolean trigraphs?)]]
     (or (.get ^java.util.concurrent.ConcurrentHashMap file-cache key)
         (let [errs (ArrayList.)
               f (lex/new-file name bs)
-              p (Parser. (lex/scanner f (fn [m] (.add errs m))) (object-array 2) (fn [m] (.add errs m)))
+              p (Parser. (lex/scanner f (fn [m] (.add errs m)) trigraphs?) (object-array 2) (fn [m] (.add errs m)))
               g (p-group p false)
               r [g (vec errs)]]
           (.put ^java.util.concurrent.ConcurrentHashMap file-cache key r)
@@ -381,14 +384,16 @@
   when it cannot be read."
   [^Cpp c ^String name text]
   (or (.get ^HashMap (.-groups c) name)
-      (let [r (if text
+      (let [_ (when (slot c MAIN-MADE) (slot! c EOF-NOPOS true))
+            _ (when (= name (slot c MAIN)) (slot! c MAIN-MADE true))
+            r (if text
                 (let [errs (ArrayList.)
                       f (lex/new-file name (.getBytes ^String text "ISO-8859-1"))
-                      p (Parser. (lex/scanner f (fn [m] (.add errs m))) (object-array 2) (fn [m] (.add errs m)))]
+                      p (Parser. (lex/scanner f (fn [m] (.add errs m)) (:trigraphs (.-cfg c))) (object-array 2) (fn [m] (.add errs m)))]
                   [(p-group p false) (vec errs)])
                 (let [f (resolve-file c name)]
                   (when (and (.isFile f) (.canRead f))
-                    (parse-file name f))))]
+                    (parse-file name f (:trigraphs (.-cfg c))))))]
         (when r
           (doseq [e (r 1)] (eh c e))
           (.put ^HashMap (.-groups c) name (r 0))
@@ -864,6 +869,7 @@
             (ts-skip ts (inc (long skip)))
             (when-not (= (.-ch t3) \)) (eh c (str (pos-str t3) ": expected '('")))
             (let [s (-> (subs s 1 (dec (count s))) (.replace "\\\"" "\"") (.replace "\\\\" "\\"))
+                  _ (when (slot c MAIN-MADE) (slot! c EOF-NOPOS true))
                   f (lex/new-file "_Pragma_" (.getBytes ^String s "ISO-8859-1"))
                   sc (lex/scanner f (fn [m] (eh c m)))
                   line (loop [acc [(Tok. \# "#" "" (.-pf t) (.-po t) nil nil)
@@ -1576,7 +1582,7 @@
 ;; The stream (cpp.rune, cpp.shift, tokenizer.token; cc's Preprocess)
 
 (defn- new-cpp ^Cpp [cfg sources ^String main]
-  (let [o (object-array 10)]
+  (let [o (object-array 12)]
     (aset o SOURCES sources)
     (aset o DEPTH (Long/valueOf 0))
     (aset o MAIN main)
@@ -1653,3 +1659,26 @@
             (recur prev (next ts))
             (do (.append b (.-src t)) (recur k (next ts)))))))
     (.toString b)))
+
+(defn stream
+  "The translation unit of `sources` ([[name text-or-nil] ...], the main file `main`) as cc's parser
+  pulls it (cpp.rune and cpp.shift, for arbace.repr.c.parse): {:next f :errors list}, `f` giving the
+  next token of the stream each call (its `\\space` and `\\newline` tokens among them), the eof
+  repeatedly at the end; once a failed #include has closed the stream, an eof at the last token's
+  position (cc's shift keeps the token it invalidates). The errors are the preprocessor's list, which
+  the parser adds its own to, so that they keep cc's order."
+  [cfg sources ^String main]
+  (let [c (new-cpp cfg sources main)
+        last (object-array 1)]
+    {:errors (.-errs c)
+     :next (fn []
+             (if (slot c CLOSED)
+               (let [^Tok l (aget last 0)]
+                 (if l (Tok. :eof (.-src l) (.-sep l) (.-pf l) (.-po l) nil nil) lex/eof-tok))
+               (let [^Tok t (try (next-token c)
+                                 (catch StackOverflowError _ (throw (ex-info "stack overflow" {:panic true}))))
+                     ;; cc's eof is at the main file's end + 1 in its file set: the next file's first
+                     ;; position (none) when another file followed the main one
+                     t (if (and (= (.-ch t) :eof) (slot c EOF-NOPOS)) (Tok. :eof (.-src t) (.-sep t) nil 0 nil nil) t)]
+                 (aset last 0 t)
+                 t)))}))

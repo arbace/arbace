@@ -398,3 +398,53 @@ git history:
   - GTS42 (a)'s demonstrations.
   It proves the tooling on a clean essential gate. The `--full --clean` run itself is main's, on a quiet host
   (`.tmp/gt7.quiet`).
+
+## 2026-10-29: JCS120 (b)'s and JN10's plans merged, JCS124-JCS125 and JFS135-JFS138 decided; the v2 record's draft refreshed; t04863 classed
+
+- Three light agents beside GT7's tooling (Sonnet, docs only, the user's choice):
+  - **JCS120 (b)'s plan** (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "JCS120 (b): the plan"): JCS110 (c)'s shared
+    dispatch first, then the classes listed by the corpora's demand. About 14 `:interp-protected` candidates. 6-8 days.
+  - **JN10's plan** (doc/classes/JAVA-FRONTEND-SURVEY.md, "JN10: the plan (JFS130-JFS132)"): the read closure apart
+    from javac, the platform as an interface with a committed java.base pack, the shipped read and the REPL's
+    `load-java`. 8 days, about 5.5 elapsed. The shipped program grows about 27 MB, so a re-seed is needed, batched
+    with C23's.
+  - **The v2 record's draft refreshed** (doc/FULL-SUPPORT-SURVEY.md): tables regenerated, the labels interp-clone,
+    thread-order, flaky-timeout and the "moved between classes" notes checked test by test against v1's check files,
+    and placeholders left for GT7. The refresh script moved to `.tmp/v2-record/`; the old one is kept in
+    `.tmp/v2-record.old/`. Scratch: `.tmp/v2-record2/`.
+- The record's finding: `:reflection`'s match took t04863 before the by-design `:j2g-reflection`. The user chose (b),
+  the class moved first. The gate passed (1m33s; only the judge, reap and the canary ran: GT5's early cutoff).
+  Java eval is now 1,807/330/1,185 and AOT 1,915/181/1,226.
+- Decided (the user), all as recommended: JCS124 (b), JCS125 (a) with (d); JFS135 (a), JFS136 (a), JFS137 (b) for the
+  gate and (a) at the tag, JFS138 (b) then (a).
+
+## 2026-10-29: C23's C3 merged; the net/http survey; JCS124 measured; decisions (the user)
+
+- **C23's C3** (branch `c23-c3`, on Opus; doc/C23-SURVEY.md, "As built: C3"), merged before the tag because it changes
+  no shipped file:
+  - `arbace/repr/c/parse.ae` ports cc's parser and go-whim's `c23.go`; `tree.ae` holds cc's 85 node types.
+  - `parsecheck.ae` and `bin/repr-c parse-check`, in JN8.3's shape; `tools/ccdump`'s `tree` mode.
+  - The parse check: of 6,387 files, 6,300 equal and 87 known; of 7,724 mutants, 7,679 equal and 45 known; none fail.
+    Errors are compared in cc's order.
+  - CS50 (a): trigraphs, UCNs, gcc's identifier spelling.
+  - CS51 (a): `test/repr/c/pp-gcc.sha256`, gcc -E's digest of all 6,387 files. Judged by it: 6,349 agree, 31 both
+    reject, 7 known.
+  - The branch's gate passed at b2e3b763 (8m18s). Scratch: `.tmp/c3/`, `.tmp/repr-c-parse/`, `.tmp/repr-c-check/`.
+- **The net/http survey** (doc/go/NET-HTTP-SURVEY.md, on Sonnet, the user's "consider completing our Golang
+  implementation with net/http"):
+  - net/http already imports interpreted (GR8a).
+  - Listing it adds 19 packages, an estimated +4.6 to 5.4 MB. HTTP/2 is bundled in std.
+  - Interpreted handlers go through GR9's stubs.
+  - Plan NH0-NH5, 10-15 days. Scratch: `.tmp/nethttp/`.
+- **JCS124 (b) measured** (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As measured: JCS124 (b)"): the shared dispatch's
+  ceiling is 1.74 MB of 17.6, 9.9%, under the third, so it is not built. 97% of a DynSub type's 0.3 MB is Go's promoted
+  wrappers of `dynCore`'s about 1,440 methods. Scratch: `.tmp/jcs124/`.
+- **The docs sweep:** CLAUDE.md names RPS97 (b)'s `program_base` and RPS161 (b)'s base. Nothing else was stale.
+- **Decided (the user):**
+  - JCS126 (a): the cost accepted.
+  - Java's coverage by module (java.base and the language at the run levels) is enough for now; JCS90-JCS96 are on
+    hold.
+  - NH1-NH10 as recommended.
+  - CS60-CS63 as recommended.
+  - During GT7's clean run, moderate work is allowed: no lock, ticket, slot or gate; at most 8 GB and 8 threads each;
+    at most two agents. The clean run's wall times may run a little long, which its record will say.
