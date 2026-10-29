@@ -505,3 +505,170 @@ NH9 (a), NH10 (a). In short: client and server, the bundled HTTP/2, httptrace, h
 compiled in all four configurations, with a 6 MB budget recorded by `bin/goi table --size`. The new offline corpus
 comes first and std's small packages' tests later. Both fold into Go's eval and AOT cells. One re-seed carries JN10
 and the listing, ahead of C23.
+
+## As built: NH0 (2026-10-29)
+
+NH0 is the spike on what exists: no program change, no executable built. The executable is main's shipped build
+(`target/arbace-go/amd64/arbace`, 177,778,848 bytes, `arbace-reaps-3-crops-v1-158-g00ec2bf5`; the same size as
+stage 0 and the gate's), `net/http` interpreted from its embedded forms. The programs are Go modules read by
+`bin/repr-go read --goos linux --goarch amd64 ./...` and run by `arbace.go.run`; gc's runs of the same text are
+built with `/root/tamago-go/bin/go` (go1.27.1, `CGO_ENABLED=0`, `GOCACHE` under the worktree's `.tmp/`). Loopback
+only. The scratch is `.tmp/worktrees/nethttp-nh1/.tmp/nh0/` (the module `m/` with `loop`, `httptest`, `srv`, `h2`,
+`raw`, `cli`, `dbg`; `forms3/` their forms; `gcbin/` gc's builds).
+
+| probe | what | gc | goi (interpreted net/http) | result |
+|---|---|---:|---:|---|
+| `loop` | `net.Listen` and `net.Dial`, one line echoed | 7 ms | 1.2 s | works (`net` is listed: nothing of net/http is imported) |
+| `httptest` | `httptest.NewServer` with a `HandlerFunc`, client `http.Get` | 7 ms | 11.6 s | fails: the server's recover logs `goi: the type *http.response has no method Write`, the client gets `EOF` |
+| `srv` | `net.Listen`, an `http.Server` with a Go-forms `Handler` type (`*greeter`), three `Get`s, `Shutdown` | 8 ms | 10.1 s | fails: `the type *http.response has no method Header` |
+| `raw` | a `net.Listen` server answering with `http.ReadRequest` and `Response.Write`, 100 `Get`s | 19 ms | 9.6 s | fails: `compiled code called a method of an interpreted type whose signature has no stub left` |
+| `cli` | `http.Get` against a raw `net` server writing the response bytes | 6 ms | 10.0 s | fails: the same stub panic (`*http.bodyEOFSignal.Read`) |
+| `h2` | `httptest.NewUnstartedServer`, `EnableHTTP2`, `StartTLS`, `ts.Client().Get`: `HTTP/2.0` | 11 ms | 10.6 s | **works**: `200 HTTP/2.0 proto 2 tls true`, with two stub warnings at the REPL that the program did not reach |
+
+What the numbers say:
+
+- **Importing `net/http` costs 9.5 to 11.6 s** per program (the survey's 8.48 s at the REPL, plus the program's own
+  load); a program that imports only `net`, `mime`, `net/textproto` or `mime/multipart` costs 1.2 to 2.1 s. gc
+  runs every probe in 6 to 19 ms. Reading the probes into forms took 55 to 58 s each time (the converter prepares
+  the imported packages' declarations for the checker, 359 std packages when asked for `./...` from the wrong
+  directory: run the read inside the module).
+- **`Listen` and `Dial` work.** Loopback, accept and echo, 1.2 s in all.
+- **An interpreted `net/http` runs no HTTP/1.1 server and no client Get today.** Three causes, seen at the REPL
+  where goi warns (`printf "(require 'go.nh.srv)\n(@#'go.nh.srv/main)\n" | ARBACE_PATH=forms3 arbace`):
+  1. the families `func([]uint8) (int, error)` (`Read`), `func(time.Time) error` (`SetDeadline`) and
+     `func() net.Addr` (`Addr`) have 16 stub slots (`go/arbace/gotable.edn`, `:stubs`) and the interpreted
+     `*http.bodyEOFSignal`, `http.unencryptedNetConnInTLSConn` and `*nettest.Listener` take the last ones before
+     the program's own types do: a compiled caller (`io.ReadAll`, `tls`) then panics (`raw`, `cli`);
+  2. `*http.response`, `*http.body` and `*http.connReader` have an **empty method set** when interpreted code or
+     compiled `fmt` reaches them through an interface: `reflect.TypeOf(w).NumMethod()` is 0 for the
+     `*http.response` of the server (`dbg`), `w.(http.Flusher)` is false, and the handler's first `w.Header()` or
+     `fmt.Fprintf(w, ...)` panics with `goi: the type *http.response has no method Header` (`httptest`, `srv`).
+     The cause is not found (the interpreted dispatch finds the type not compiled and no method key in its map;
+     `TSetMethods` is called for the package's other types); with `net/http` listed (NH2 (a)) the type is
+     compiled and the question goes away, which is why no time was spent on it (NH11);
+  3. the server's recover logs the panic and resets the connection: the client sees `EOF` or a reset, never a
+     hang, except in programs that wait on a channel the lost handler would have sent on.
+- **The Go-forms handler through a compiled `http.Server`** (the question of §3.2) is not answered by this: the
+  stub of `ServeHTTP` is not involved while `net/http` is interpreted (interpreted calls interpreted), and the
+  interpreted server fails earlier. NH3 answers it on the listed package.
+- **HTTP/2 over TLS with `httptest`'s certificate works interpreted**: `h2` passes, and so do `h2_concurrent`
+  (60 concurrent streams, 11.6 s) and `h2_trailers_bodies` (a 40 KB body both ways, trailers, `Pusher`, 11.3 s) of
+  the corpus. The TLS and HTTP/2 code is `net/http/internal/http2` and `crypto/tls` (compiled); the handler is the
+  interpreted program's.
+- **Requests per second and threads were not measured**: the only interpreted programs that pass are those that
+  make one request or 60 streams on one connection. Thread adoption at 1,000 sequential and 200 concurrent
+  requests (§3.2's first row) is NH3's.
+
+Recommendation for NH2 stays (a): the status quo (b) is not an answer, the interpreted server does not serve.
+
+## As built: NH1 (2026-10-29)
+
+NH1 is the corpus and its check; no shipped file changes. Branch `nethttp-nh1` (from main `bde8b0f0`).
+
+**The corpus** (`test/nethttp/`): 60 programs, a Go module `nethttp` (`go.mod`, `go 1.27`), one `package main` in
+each directory `NAME/main.go`, standard library only, loopback only (`httptest`, `127.0.0.1:0`, `net.Pipe`), a
+deterministic transcript on standard output and nothing on standard error. Groups (`manifest.edn`: name, group,
+what, one line each): client 10, redirects 2, timeouts 5, cookies 3, server 13, mux 6, streaming 7, multipart 3,
+httputil 3, httptrace 1, http2 4, shutdown 2, concurrency 1. They cover §4.4's client, server, HTTP/2 and
+proxy lists: `Get`/`Post`/`PostForm`/`NewRequest`, headers, gzip, `*url.Error` and `net.OpError`, `Transport`
+connection counts, a streamed (chunked) request body, `RoundTripper` chains and stubs, `DialContext` over
+`net.Pipe`; redirects and `CheckRedirect`; `Client.Timeout`, context deadline and cancellation, the handler
+seeing a disconnect, `TimeoutHandler`, `ReadHeaderTimeout` and `IdleTimeout`; cookies and `cookiejar` (scoping,
+expiry, deletion); handlers as closures, method values and method expressions, Handler types, middleware chains
+with a wrapping `ResponseWriter`, recovery, `MaxBytesReader`, `ConnState`, panics with `ErrorLog`; the 1.22
+`ServeMux` (methods, wildcards, `{rest...}`, `{$}`, precedence, conflicts, 405, `StripPrefix`, host patterns);
+`FileServerFS` over `fstest.MapFS` and `ServeContent` (conditional requests, ranges); chunked streaming with
+`Flush`, server-sent events, trailers, a 300 KB body, `Hijacker`, the interfaces a `ResponseWriter` satisfies,
+`ResponseController`; multipart upload and streaming, `mime`, `quotedprintable`, `textproto`;
+`httputil.ReverseProxy` (`Rewrite`, `ModifyResponse`, `ErrorHandler`), `DumpRequest`/`DumpRequestOut`/
+`DumpResponse`; `httptrace` events across a new and a reused connection; HTTP/2 over TLS with `httptest`'s
+certificate (ALPN, `Proto`, the HTTP/1.1 fallback, 60 concurrent streams, trailers, `Pusher`) and h2c through
+`Protocols`; graceful `Shutdown` with an in-flight request, `Shutdown` with an expired context, `Close`;
+200 concurrent requests; `httptest.NewRecorder` and `NewRequest`. Not in the corpus: §4.4's *crossings* (an Arbace
+fn as a handler, a Clojure namespace serving) and *errors* (the refused import of `net/http/internal/http2`):
+gc cannot run them, so they are NH3's (NH12).
+
+Every program was run by gc 5 times alone and 3 times 16 at once: the transcripts are identical, status 0,
+standard error empty. Timing-dependent steps (100 to 150 ms timeouts, one 100 ms sleep) are bounded by a channel
+or a deadline on one side and only decide an outcome that has one answer.
+
+**The check** (`bin/goi check --corpus nethttp [--record] [--jobs N] [--only REGEX] [--gc-only] [--update-want]`,
+`make goi-check-nethttp`; `check_nethttp` in `bin/goi`, 4 programs at a time, `NETHTTP_JOBS`):
+
+1. the manifest and the program directories must name the same set;
+2. the gc level: the module built once by TamaGo's go, each program run alone; it passes when its status is 0, its
+   standard error empty and its standard output `NAME/want.out`, **gc's recorded run, committed** (`--update-want`
+   rewrites them); `test/nethttp/check-gc-linux-amd64.edn` (60 pass);
+3. goi's level: `bin/repr-go read --goos linux --goarch amd64 ./...` in `test/nethttp` once (cached by the
+   programs' and the converter's key in `.tmp/goi-check/nethttp/forms`), each program run by `arbace.go.run` in a
+   process of `GOI_RUN_EXE` (the program-mode run of the main check), compared with gc's fresh run as `check_one`
+   does (status, standard output byte for byte, standard error up to the traces); a program that does not finish
+   is cut at 90 s of wall time or 120 s of CPU (`NETHTTP_WALL`, `NETHTTP_CPU`); the result lines carry the first
+   panic or `goi:` line of standard error as the reason, without the log's time and ports, so a recorded reference
+   does not churn;
+4. `test/nethttp/check-linux-amd64.edn` is the reference in the main check's format (`pass fail error unsupported`,
+   with the reason): a program passing there and not now fails the check, `--record` writes it;
+5. after a whole check, `bin/goi divergences --nethttp` (`test/goi/divergences.ae`, which gained the option)
+   puts every non-pass in a class of `test/nethttp/divergences.edn` (the format of `test/goi/divergences.edn`):
+   here a class may take a fail or an error, which the main verb forbids, since this is a baseline; a program no
+   class takes is the failure.
+
+**The baseline** (the shipped executable, `net/http` interpreted): 60 programs, **10 pass, 49 fail, 1 error, 0
+unsupported**, in 4 classes (all `:deferred` to NH2/NH3):
+
+| class | programs | cause |
+|---|---:|---|
+| an interpreted `net/http` type has no methods when its value is called through an interface | 42 | NH0's cause 2 (`*http.response`, `*http.body`, `*http.connReader`) |
+| a compiled caller of an interpreted method with no stub left | 4 | NH0's cause 1 (`Read`, `SetDeadline`, `Addr` families) |
+| the client sees the connection reset by a server whose handler panicked | 3 | the same, seen from the client (`h2_basic`'s HTTP/1.1 half, `server_panic`, `server_timeouts`) |
+| a program that waits for a request that never arrived | 1 | `timeout_context`, cut at 90 s |
+
+The 10 that pass: `client_errors`, `cookiejar_scope`, `h2_concurrent`, `h2_trailers_bodies`, `listen_dial`,
+`mime_textproto`, `request_parsing`, `shutdown_deadline`, `timeout_client`, `transport_roundtripper` (programs with
+no interpreted server in the loop, or over HTTP/2 whose server types are not the failing ones). The check took
+about 4 minutes at 4 jobs once the forms were cached (the read took 1 to 2 minutes); times per passing program are
+9.5 to 11.6 s against 4 to 111 ms for gc.
+
+**Gate keys**: the change is `bin/goi` (the new function and option), `test/goi/divergences.ae` (the option), the
+`Makefile` target and `test/nethttp/`. `bin/goi` is in `test/gate/steps.edn`'s `:build` group (the build's
+scripts, `gate_key`) and in `bin/lib/javac-key.bash`'s key, so **the gate-build key and javac's tool key change
+once** (the executables are rebuilt by the next gate, about 8 minutes, and javac's tool at the next `--full`), and
+the goi steps (`:goi`: `bin/goi`, `test/goi/`) rerun. The runner could have been a script of its own to avoid it
+(`bin/goi` is where the survey put it); NH4 may split it out if the churn matters. No shipped file changed:
+nothing of `go/arbace/gotable.edn`, `arbace/lang`, `go/`, `overlay/` or `jdk/`.
+
+**Not done**: the corpus is not in `test/reap/cells.edn`, nor in the essential gate (the check takes minutes
+interpreted; NH4 chooses the subset); there is no AOT level yet (NH4).
+
+### Proposals NH11 to NH14
+
+- **NH11 The empty method sets of interpreted `net/http` types.**
+  - Options: (a) leave: NH2 (a) lists `net/http` compiled and the interpreted package stops being the way HTTP
+    runs; the repro (`.tmp/nh0/m/dbg`, `reflect.TypeOf(w).NumMethod()` is 0 in a handler) is kept in this record;
+    (b) find it now in goi's `TSetMethods`/`descOfRT` path (method sets of types of a lazily built package), since
+    any large unlisted package with unexported types reaching compiled std may do the same; (c) raise the three
+    families' slots in the table as a stopgap.
+  - *Recommended: (a)*: the listing is decided and removes both causes for `net/http`; (b) is worth a day only if
+    another unlisted package shows the symptom (the check would show it: it is a class of its own here);
+    (c) does not fix cause 2 and changes the shipped table for a package that is about to be compiled.
+- **NH12 The crossing and error programs.**
+  - Options: (a) a second, small set in NH3, run by goi's eval level only and judged against recorded
+    transcripts (an Arbace fn as `http.HandlerFunc`, as `RoundTripper`, a Clojure namespace serving, a Java forms
+    program calling a Go forms server, the refused `net/http/internal/http2` import), in `test/nethttp/arbace/`
+    in the oracle's format; (b) put them in `test/oracle/forms/go.ae` as the other cross-dialect cases; (c) leave
+    them to NH10's documentation.
+  - *Recommended: (a)*: they need the listed package to mean anything, have no gc reference, and (b)'s cases are
+    recorded by goi at every oracle run, which is the wrong cost for a server.
+- **NH13 The essential subset.**
+  - Options: (a) at NH4, a list `test/nethttp/essential.txt` of 6 to 8 programs that pass in a few seconds
+    each with the compiled package (not the timing ones: `timeout_client`, `timeout_context`, `server_timeouts`,
+    `shutdown_graceful`), run by `bin/goi check --corpus nethttp --essential` in the essential gate; (b) the whole
+    corpus in the essential gate (60 programs at about 0.1 to 0.5 s each compiled); (c) `--full` only.
+  - *Recommended: (b) if NH3 measures the whole corpus under a minute*, else (a): the point of a corpus
+    is that it runs; the baseline's 4 minutes are the interpreted package's.
+- **NH14 Flakiness of the timing programs.**
+  - Options: (a) as is (bounded waits, an outcome with one answer, no stderr); (b) a retry on the second run
+    for a program that fails alone at the end of the check, as the main check does for timeouts; (c) drop the
+    five timing-dependent programs from the gate's subset only.
+  - *Recommended: (a) now, (b) at NH4*: no flake was seen in 8 gc runs of each program, 3 of them with 16 at
+    once; the retry machinery belongs with the gate step, not the baseline.
