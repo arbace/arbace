@@ -339,17 +339,20 @@ mode=essential; [ -n "$full" ] && mode=full
 # TamaGo's go (seed/goroot.sha256), jdk26u and the JDK build tree's platform (jdk/javac/platform.sha256),
 # the frozen jar (test/oracle/frozen-jar.sha256, when FROZEN_JAR gives it: else the clone builds it from
 # its tag and frozen_jar checks it), the system JDK (the reference javac, named by its version and its
-# release file), $GOROOT/test (unpinned: recorded); FILE gets them as a map. Exit 1 on a pin that fails
+# release file), $GOROOT/test (seed/goroot-test.sha256, GTS50 (a)); FILE gets them as a map. Exit 1 on a pin that fails
 clean_pins() {
-  local out=${1:-} st=0 g pv ph have gt jdk c jv jrel fj want got pd ft
+  local out=${1:-} st=0 g pv ph have gt tp jdk c jv jrel fj want got pd ft
   . "$root/bin/lib/seed-go.bash"
   g=$(seed_go_goroot)
   ph=$(grep -v '^#' "$seed_go_pin" | awk 'NF {print $1; exit}'); pv=$(grep -v '^#' "$seed_go_pin" | awk 'NF {print $2; exit}')
   have=$(seed_go_goroot_hash "$g") || have=none
   if [ "$have" = "$ph" ] && [ "$(head -1 "$g/VERSION")" = "$pv" ]; then echo "pins: TamaGo's go $g, $pv, its sources $(echo "$have" | cut -c1-16): seed/goroot.sha256's"
   else echo "pins: FAILED: TamaGo's go $g is $(head -1 "$g/VERSION" 2>"$TMPDIR/pins.err") with sources $have; seed/goroot.sha256 pins $pv, $ph"; st=1; fi
-  gt=$( (cd "$g" && find test -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64) 2>"$TMPDIR/pins.err")
-  echo "pins: \$GOROOT/test $gt ($(cd "$g" && find test -type f | wc -l) files; no pin: recorded)"
+  # $GOROOT/test (GTS50 (a)): pinned by seed/goroot-test.sha256 (the steps that read it declare it)
+  gt=$(seed_go_test_hash "$g" 2>"$TMPDIR/pins.err") || gt=none
+  tp=$(grep -v '^#' "$root/seed/goroot-test.sha256" 2>"$TMPDIR/pins.err" | awk 'NF {print $1; exit}')
+  if [ -n "$tp" ] && [ "$gt" = "$tp" ]; then echo "pins: \$GOROOT/test $(echo "$gt" | cut -c1-16) ($(cd "$g" && find test -type f | wc -l) files): seed/goroot-test.sha256's"
+  else echo "pins: FAILED: \$GOROOT/test of $g is $gt; seed/goroot-test.sha256 pins ${tp:-nothing}"; st=1; fi
   jdk=${JDK:-/root/jdk26u}
   c=$(git -C "$jdk" rev-parse HEAD 2>"$TMPDIR/pins.err") || c=none
   if grep -q "^# .* at $c," "$root/jdk/javac/platform.sha256" 2>"$TMPDIR/pins.err" || grep -q "$c" "$root/jdk/javac/platform.sha256"; then
@@ -598,7 +601,7 @@ fi
 # before the plan, one after the other: each needs the one before (steps.edn's :pre)
 pre_step makefile - 0 make -s check-makefile
 pre_step seed 'pinned' 1 bin/seed --check
-pre_step stage0 'bin/seed: .*arbace|stage 0 in|stage 0 kept' 2 bin/seed --build --no-aot
+audit_step=${audit_all:+1} pre_step stage0 'bin/seed: .*arbace|stage 0 in|stage 0 kept' 2 bin/seed --build --no-aot
 # the plan (GT2): each step's key, run or skipped
 t0=$(date +%s)
 if ! run_plan "$logs" ${rerun:+--rerun} > "$logs/plan.log" 2>&1; then
@@ -606,6 +609,15 @@ if ! run_plan "$logs" ${rerun:+--rerun} > "$logs/plan.log" 2>&1; then
 fi
 load_plan
 echo "   ok  plan ($(secs "$t0"); store $store; .tmp/gate/plan.log)"
+# GTS53 (a): stage 0's own build, traced above (the clean run), against its declarations (the plan's files)
+if [ -n "$audit_all" ]; then
+  audit_compare stage0 0
+  if [ "$(cat "$logs/stage0.audit-status")" != ok ]; then
+    grep -A8 '^UNDECLARED' "$logs/stage0.audit" | sed 's/^/     /'
+    echo "== gate FAILED: stage0's audit is $(cat "$logs/stage0.audit-status") ($logs/stage0.audit)"; exit 1
+  fi
+  echo "   ok  stage0's audit"
+fi
 sed -n '1p' "$logs/plan.log" | sed 's/^/     /'
 
 # the builds (go-build; with --full javac-tool), one after the other, when needed: all of them before

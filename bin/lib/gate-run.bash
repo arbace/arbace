@@ -44,6 +44,9 @@ gate_env() {
   # GATE_HEAVY_CMD=env (the caller holds the lock): nothing locks again
   export ARBACE_HEAVY_CMD=$GATE_HEAVY_CMD
   [ "$GATE_HEAVY_CMD" = env ] && export ARBACE_HEAVY_HELD=1
+  # GTS52 (a): TamaGo's bin/ first on every step's PATH (and the tools'), so that a program or script
+  # that runs `go` runs the pinned toolchain, never the host's (no build may use the host's go)
+  PATH=${ARBACE_GOROOT:-/root/tamago-go}/bin:$PATH; export PATH
   exes=${ARBACE_GATE_EXES:-$main/.tmp/gate-exe}
   mkdir -p "$(dirname "$ARBACE_HEAVY_LOCK")" "$exes" || return 1
   # the executables and javac's tool by the key of what they are built from, one directory each,
@@ -78,7 +81,7 @@ plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
     printf ' :javac "%s"\n' "$jkey"
     printf ' :prog-units "%s" :prog-rest "%s"\n' "$pu" "$("$root/bin/arbace-go" --gate-rest-key)"
     printf ' :javac-prog-units "%s" :javac-prog-rest "%s"\n' "$ju" "$(arbace_javac_rest_key "$root")"
-    printf ' :stage0 "%s"\n' "$(cat seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 | sha256sum | cut -c1-64)"
+    printf ' :stage0 "%s"\n' "$(cat seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 bin/seed bin/lib/seed-go.bash | sha256sum | cut -c1-64)"
     printf ' :frozen "%s"\n' "$(sha256sum < test/oracle/frozen-jar.sha256 | cut -c1-64)"
     printf ' :jdk "%s"\n' "$rel"
     printf ' :go "%s"}\n' "$(sha256sum < "${ARBACE_GOROOT:-/root/tamago-go}/VERSION" | cut -c1-64)"; } > "$d/hosts.edn"
@@ -206,6 +209,14 @@ restore_out() {
   rm -rf "${logs:?}/out/$1"; mkdir -p "$logs/out"
   [ -d "$store/$1/${key[$1]}.out" ] && cp -a "$store/$1/${key[$1]}.out" "$logs/out/$1"
 }
+# build_cached NAME: a build step's directory exists at its key (GTS57 (a)); the scripts' own checks
+build_cached() {
+  case $1 in
+    go-build) "$root/bin/arbace-go" --gate-build --check-cached > "$logs/$1.cached" 2>&1 ;;
+    javac-tool) "$root/bin/javac-vendor" tool "$GATE_JAVAC_DIR" --check > "$logs/$1.cached" 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
 run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of the build phase is done)
   local n=$1 x st u p
   [ -f "$logs/$n.done" ] && return 0
@@ -230,11 +241,13 @@ run_one() {  # run_one NAME: a step of the plan, as decided (once: a build of th
     fi
     dec[$n]=run
   fi
-  local attempt aud=
+  local attempt aud= hv=${heavy[$n]}
   [ -n "${audit_all:-}" ] && aud=1
+  # GTS57 (a): a build kept at its key (a few seconds) takes no lock and queues for none
+  if [ "${kind[$n]}" = build ] && [ "$hv" = yes ] && build_cached "$n"; then hv=cached; fi
   for attempt in 1 2 3; do
     if [ "${outputs[$n]}" = yes ]; then rm -rf "${logs:?}/out/$n"; mkdir -p "$logs/out/$n"; fi
-    audit_step=$aud GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out step "$n" "${heavy[$n]}" bash -c "${cmd[$n]}"; st=$?
+    audit_step=$aud GATE_OUT=$logs/out/$n GATE_OUTS=$logs/out step "$n" "$hv" bash -c "${cmd[$n]}"; st=$?
     # GT4: strace -f aborts (ptrace(PTRACE_LISTEN): I/O error) when a traced process dies in a group
     # stop; an aborted trace is no audit and its run no run: again, twice at most
     [ -n "$aud" ] && grep -q '^strace: ptrace' "$logs/$n.log" || break
@@ -409,7 +422,7 @@ gate_audit() {  # gate_audit [STEP...]: the checks named, else every check
   fi
   for n in "${names[@]}"; do
     [ -n "${cmd[$n]:-}" ] || { echo "gate --audit: no step $n" >&2; st=1; continue; }
-    case ${dec[$n]} in skip|run) ;; *) echo "gate --audit: $n is not a check (${dec[$n]})"; continue ;; esac
+    case ${dec[$n]} in skip|run) ;; always) [ "$n" = stage0 ] || { echo "gate --audit: $n is not a check (${dec[$n]})"; continue; } ;; *) echo "gate --audit: $n is not a check (${dec[$n]})"; continue ;; esac
     for x in ${needs[$n]}; do
       [ "$x" = - ] && continue
       case $x in

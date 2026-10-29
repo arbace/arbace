@@ -51,6 +51,14 @@ seed_go_goroot_hash() {
   (cd "$g" && find VERSION src -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
 }
 
+# seed_go_test_hash GOROOT: the hash of GOROOT/test seed/goroot-test.sha256 pins (GTS50 (a)): sha256sum's lines
+# of every file under test/, in the C locale's byte order of their paths, hashed again (about 1 s for 3,516 files)
+seed_go_test_hash() {
+  local g=$1
+  [ -d "$g/test" ] || { echo "bin/seed: $g has no test/" >&2; return 1; }
+  (cd "$g" && find test -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
+}
+
 # seed_go_toolchain_check [SEED.EDN]: GOROOT is the pinned toolchain (seed/goroot.sha256), and
 # the one SEED.edn names when given; prints the hash
 seed_go_toolchain_check() {
