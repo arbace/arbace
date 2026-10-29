@@ -1,0 +1,98 @@
+#!/bin/bash
+# GTS42 (a)'s demonstrations (doc/GATE-SURVEY.md, "As built: GT5", "As built: GT7 (tooling)"): the essential
+# gate's exit criteria of GT5 shown again on --full's plan, over the passes of a clean run (bin/gate --full
+# --clean publishes them into the store, with its executables and javac's tool). Cheap: plans, and the
+# builds a plan needs; no check runs.
+#
+# Usage: bin/gate-demos [--essential] [--record FILE] [--keep]
+#   In a scratch worktree of HEAD (.tmp/gate-demos/SHA: the store, the executables' directory and the heavy
+#   lock are the main checkout's, found through git's common directory, as every worktree's), one after
+#   the other:
+#     base     nothing changed: bin/gate --full --plan
+#     classes  a comment line appended to test/java/divergences.edn (a classes file): bin/gate --full --plan;
+#              only the judgments (java-check-judge, java-judge) and reap are to run
+#     j2g      a comment line added to arbace/j2g/out.ae (j2g's code, its translations unchanged):
+#              bin/gate --full --plan --builds (the executables and javac's tool built at the changed key,
+#              then the plan on their units); only the steps on :gate and :javac (what runs j2g) are to run,
+#              the :prog and :javac-prog steps that never load arbace.j2g skipped
+#   each change reverted before the next. Each plan's steps by decision go to .tmp/gate-demos/SHA.edn
+#   (the Clojure reader's format), and with --record FILE (a clean run's test/gate/clean-TAG.edn) into
+#   FILE's map as :demonstrations. The executables' and javac's tool's directories the j2g change built
+#   are removed afterwards (a key no checkout has), the worktree too (--keep: kept). --essential: the
+#   essential gate's plans (the j2g change builds the executables alone), GT5's own demonstrations.
+# Environment: as bin/gate's (ARBACE_GATE_STORE, ARBACE_GATE_EXES, ARBACE_HEAVY_LOCK, GATE_HEAVY_CMD).
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
+cd "$root"
+record= keep= full=--full
+while [ $# -gt 0 ]; do
+  case $1 in
+    --record) record=$2; shift 2 ;;
+    --keep) keep=1; shift ;;
+    --essential) full=; shift ;;
+    *) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+case $record in ""|/*) ;; *) record=$root/$record ;; esac
+[ -z "$record" ] || [ -f "$record" ] || { echo "gate-demos: no record $record" >&2; exit 1; }
+sha=$(git rev-parse HEAD) || exit 1
+base=$root/.tmp/gate-demos
+wt=$base/$sha out=$base/$sha.edn
+mkdir -p "$base"
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+main=$root; [ "$(basename "$common")" = .git ] && main=$(dirname "$common")
+exes=${ARBACE_GATE_EXES:-$main/.tmp/gate-exe}
+git worktree remove --force "$wt" > "$base/discard" 2>&1; rm -rf "${wt:?}"
+git worktree add -q --detach "$wt" "$sha" || { echo "gate-demos: no worktree $wt" >&2; exit 1; }
+cleanup() { [ -n "$keep" ] || git -C "$root" worktree remove --force "$wt" > "$base/discard" 2>&1; }
+trap cleanup EXIT
+
+# plan_edn NAME TXT: the plan's printed lines (`   DECISION NAME WHY`) as {:demo NAME :run [...] ...}
+plan_edn() {
+  awk -v demo="$1" -v change="$2" '
+    /^gate plan \(/ { head = $0; next }
+    /^   (always|build|run|after|skip|-) +[a-z0-9.-]+ / { d = $1; n = $2; if (d == "-") d = "none"; s[d] = s[d] " \"" n "\""; c[d]++ }
+    END {
+      printf "{:demo \"%s\" :change \"%s\" :plan \"%s\"", demo, change, head
+      split("always build run after skip none", ks, " ")
+      for (i = 1; i <= 6; i++) { k = ks[i]; if (k == "skip" || k == "always" || k == "none") printf " :%s %d", k, c[k] + 0; else printf " :%s [%s]", k, substr(s[k], 2) }
+      printf "}"
+    }' "$3"
+}
+demo() {  # demo NAME CHANGE [--builds]: the plan of the worktree as it is
+  local n=$1 ch=$2 t0=$(date +%s); shift 2
+  echo "== gate-demos $n: $ch"
+  (cd "$wt" && GATE_CANARY=0 bin/gate $full --plan "$@") > "$base/$sha.$n.txt" 2>&1
+  local st=$?
+  grep -E '^gate plan \(|^   ok|^   FAILED' "$base/$sha.$n.txt" | sed 's/^/   /'
+  [ $st = 0 ] || { echo "gate-demos: the plan of $n failed ($base/$sha.$n.txt)"; tail -5 "$base/$sha.$n.txt"; return 1; }
+  awk '/^   (run|after|build) /' "$base/$sha.$n.txt" | sed 's/^/   /'
+  echo "   ($(( $(date +%s) - t0 )) s; $base/$sha.$n.txt)"
+  plan_edn "$n" "$ch" "$base/$sha.$n.txt" >> "$out.tmp"; echo >> "$out.tmp"
+}
+
+: > "$out.tmp"
+st=0
+demo base "nothing changed" || st=1
+echo ';; gate-demos' >> "$wt/test/java/divergences.edn"
+demo classes "a comment line appended to test/java/divergences.edn" || st=1
+git -C "$wt" checkout -q -- test/java/divergences.edn
+# j2g: the executables' and javac's tool's keys change; their directories, new, removed afterwards
+before=$(ls "$exes" 2>"$base/discard")
+sed -i '1i ;; gate-demos: a comment, the translations unchanged' "$wt/arbace/j2g/out.ae"
+demo j2g "a comment line added to arbace/j2g/out.ae (after the builds the plan needs: --builds)" --builds || st=1
+git -C "$wt" checkout -q -- arbace/j2g/out.ae
+for d in $(ls "$exes" 2>"$base/discard"); do
+  grep -qx "$d" <<< "$before" || { rm -rf "${exes:?}/$d"; echo "   removed the j2g change's build $exes/$d"; }
+done
+{ echo ";; bin/gate-demos at $sha (GTS42 (a)): each plan's steps by decision"; echo "["; cat "$out.tmp"; echo "]"; } > "$out"
+rm -f "$out.tmp"
+echo "== gate-demos: $out"
+if [ -n "$record" ]; then
+  # the record's map, its last line ending in "]}", gets :demonstrations before its closing brace
+  tmp=$record.tmp.$$
+  { sed '$ s/}$//' "$record"; echo; printf ' :demonstrations\n '; grep -v '^;;' "$out" | tr '\n' ' ' | sed 's/ *$//'; echo '}'; } > "$tmp" && mv "$tmp" "$record"
+  echo "   recorded in $record (:demonstrations)"
+fi
+exit $st

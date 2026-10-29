@@ -381,7 +381,17 @@ Prior art:
   `:never-loads` (`arbace.j2g`: a j2g change that leaves the translations alone reruns only j2g's steps), the
   builds all run before the checks and the plan is made again after them, `bin/gate --audit` records the
   namespaces a step loads (`ARBACE_LOADED_LOG`, RT.load) and fails on one of its `:never-loads`, its reducer
-  `tools/gateaudit` (Go, GTS30 (a)), and every `--full` ends with `--prune` (GTS34 (a)); the executables and javac's tool are kept by key in
+  `tools/gateaudit` (Go, GTS30 (a)), and every `--full` ends with `--prune` (GTS34 (a)); since GT7
+  (doc/GATE-SURVEY.md, "As built: GT7 (tooling)") `bin/gate [--full] --clean [--tag TAG]` (`make
+  gate-full-clean`) is the clean run at a tag: a fresh `git clone --shared` of HEAD's commit in
+  `.tmp/gate-clean/SHA` with its own empty `.tmp/`, `target/` and `GOCACHE`, stage 0, the executables and
+  javac's tool built fresh, no pass read, serial, every step run under the audit, every part, Java's levels
+  on the read's cache forced (`JAVA_CHECK_FORMS_ONLY=1`), the externals checked by their pins first (`bin/gate
+  --pins`), the record `test/gate/clean-TAG.edn` written into the invoking checkout and the passes (marked
+  `:clean`) and the builds published into the shared store and executables' directory; `--full
+  --concurrent` runs the chains at once under the big lock held once, the heavy steps on a lock of the
+  gate's own (GTS37 (a)); `bin/gate-demos` repeats GTS42 (a)'s two demonstrations as plans (`bin/gate
+  --full --plan --builds`); the executables and javac's tool are kept by key in
   `ARBACE_GATE_EXES` (default the main checkout's `.tmp/gate-exe`), shared by the worktrees;
   the programs of goi, Java's interpreted level, the suite and the oracle run under CPU-time limits with
   a wall cap and a quiet retry (`bin/lib/limit.bash`); the runner's logic is `bin/lib/gate-run.bash`, in

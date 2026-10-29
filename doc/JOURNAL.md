@@ -448,3 +448,75 @@ git history:
   - CS60-CS63 as recommended.
   - During GT7's clean run, moderate work is allowed: no lock, ticket, slot or gate; at most 8 GB and 8 threads each;
     at most two agents. The clean run's wall times may run a little long, which its record will say.
+
+## 2026-10-29: GT7's tooling merged; net/http's NH0 and NH1 merged; GTS50-GTS57 and NH11-NH14 decided (the user)
+
+- **GT7's tooling** (branch `gate-gt7`, on Opus; doc/GATE-SURVEY.md, "As built: GT7 (tooling)"):
+  - `bin/gate [--full] --clean [--tag TAG]`: a shared clone, empty caches, stage 0, the executables and the tool
+    built fresh, serial, every step under strace, all parts, `JAVA_CHECK_FORMS_ONLY=1`, the CPU log; the record
+    `test/gate/clean-TAG.edn`, and the passes published as `:clean`.
+  - `--pins`, `--full --concurrent` (GTS37 (a)), `--plan --builds`, `bin/gate-demos` (GTS42 (a)).
+  - Three clean essential runs. The first two found:
+    - 2,160 files `go-build` reads that no key covered (`tamago/goroot/`, `tools/godump/`, goi's table's inputs; now in
+      `gate_key` and the javac key);
+    - `bin/heavy-lock` read by every `:inner` step;
+    - `arbace.j2g.zlib` loaded by a goi step that declares it never loads j2g;
+    - `$GOROOT/test`'s go-command programs on the host's go 1.27.2 (now TamaGo's on PATH);
+    - `gcgort.go`'s CPU limit.
+
+    The third passed, 86m06s, every audit ok, at most 25.8 GiB.
+  - Main's gate on the merge passed (2m20s).
+  - Scratch: `.tmp/gt7/`.
+- **net/http's NH0 and NH1** (branch `nethttp-nh1`, on Sonnet; doc/go/NET-HTTP-SURVEY.md):
+  - NH0, net/http interpreted on the shipped build: HTTP/2 over TLS works (60 concurrent streams); HTTP/1.1 fails on
+    interpreted types' empty method sets and on exhausted stub slots. The import takes 9.5-11.6 s.
+  - NH1: `test/nethttp/`, 60 offline programs, gc's runs as the reference, `bin/goi check --corpus nethttp`.
+    gc passes 60; goi interpreted 10 pass, 49 fail, 1 error, in 4 deferred classes.
+  - Main's gate on the merge passed (14m27s; `bin/goi` changed, so the executables were rebuilt).
+  - Scratch: `.tmp/nh0/`, `.tmp/nh1/`, `.tmp/goi-check/nethttp/`.
+- **Decided (the user):**
+  - GTS50-GTS57 as recommended. GTS50, GTS52, GTS53 and GTS57 are built before the clean run (branch `gate-gts5x`,
+    Sonnet).
+  - NH11 (b), not as recommended: the empty method sets investigated first (branch `nethttp-nh11`, Opus).
+  - NH12 (a), NH13 (b), NH14 (a).
+
+## 2026-10-29: NH11 (b) built on its branch; NH15-NH18 decided (the user); the Makefile brought up to date
+
+- **NH11 (b)** (branch `nethttp-nh11`, on Opus; doc/go/NET-HTTP-SURVEY.md on the branch, "As built: NH11 (b)"). The empty
+  method sets were a goi bug, general to unlisted packages:
+  - A listed package's generic method (net/http's `atomic.Pointer[response].Store`) is built on its first call in that
+    package's build context, which re-gave the interned interpreted types their method sets with a `:method-cell` that
+    found no interpreted member. So the sets were empty.
+  - The fix is in `arbace/go/repl.ae`: the build contexts share the four lookups. Regression cases are in
+    `test/goi/repl.ae` and `test/goi/repl-pkgs/go/rt/atomicm`.
+  - The stub slots were too few, not leaking: in `go/arbace/gotable.edn`, Read/Write went to 128, SetDeadline to 64 and
+    Addr to 32, adding 32 KB.
+  - The interpreted corpus went from 10 to 56 of 60. Three classes remain, deferred to NH2.
+  - `bin/goi check` stays at 1,618+ with no regression.
+  - Its gate passed. It changes shipped files (repl.ae, gotable.edn), so it merges after the tag, with the batched
+    re-seed (NH6 (b)), so that the v2 seed stays the tagged sources'.
+- **Decided (the user):** NH15 (b) now and (a) at NH3 if load time matters; NH16 (a); NH17 (a); NH18 (c).
+- **The Makefile** (e49f48a8), on the user's request: new targets `java-forms-verify` and `java-forms-update`,
+  `suite-divergences`, `reap-record-native-check` and `repr-c-gcc-tests`. `make verify` gains `repr-java-nojavac-check`
+  and the forms' verify, and `.PHONY` gains `suite-aot` and `suite-aot-essential`. Six helper scripts stay without
+  targets, as they always were: `build-go`, `box-smoke`, `j2g-check`, `j2g-evalproof`, `jrt-coverage`, `net-check`.
+
+## 2026-10-29: GTS50, GTS52, GTS53 and GTS57 merged; GTS60-GTS61 decided (the user); GT7's clean run started
+
+- **GTS50, GTS52, GTS53 and GTS57** (branch `gate-gts5x`, on Sonnet; doc/GATE-SURVEY.md, "As built: GTS50, GTS52, GTS53,
+  GTS57"):
+  - GTS50: `seed/goroot-test.sha256` pins TamaGo's `test/` (3,516 files), and `bin/gate --pins` checks it. It is a file
+    of its own, so a test-only change does not rekey everything.
+  - GTS52: TamaGo's `bin/` comes first on `PATH` in every step (`gate_env`).
+  - GTS53: stage 0 is keyed on `bin/seed` and `bin/lib/seed-go.bash`, and audited; the first audit found the seed's tar,
+    now covered by its pin.
+  - GTS57: a build cached at its key takes no lock (`--gate-build --check-cached`; go-build 0 s, no wait, where the
+    previous gate waited 10m15s).
+  - The branch's run 2 failed on an empty `.tmp/repr-go/forms/linux-dirtest` that a killed run had left, which was stale
+    scratch; run 3 passed. The merge's one conflict was two appended sections in GATE-SURVEY.md; both kept. Main's gate
+    passed (38 s, from the branch's passes). Scratch: `.tmp/gts5x/`.
+- **Decided (the user):** GTS60 (b), `PATH` for scripts run by hand at the next rekey; GTS61 (b), as built.
+- **GT7's clean run** started on this commit:
+  `.tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean --tag arbace-reaps-3-crops-v2`. It holds
+  the big lock once for the whole run, with `.tmp/gt7.quiet` set. Two moderate agents may run beside it (the user): C3b
+  for now; NH11's branch waits for the tag.
