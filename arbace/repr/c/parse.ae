@@ -500,6 +500,11 @@ void __atomic_store();
       (and (>= l 3) (= (at (- l 3)) \\) (octal? (at (- l 2))) (octal? (at (dec l)))) (.insert b (int (- l 2)) "0")
       :else nil)))
 
+(def strlit-pieces
+  "Arbace (C3b): the texts of the string literals a concatenated token was made of (the converter decodes
+  each, since cc's widened tail does not keep a hex escape's end), by token (weak keys, identity)."
+  (java.util.Collections/synchronizedMap (java.util.WeakHashMap.)))
+
 (defn- sh
   "p.shift: the lookahead consumed, adjacent string literals concatenated into it (in builders: a
   macro may expand to a million literals, torture's pr46534.c)."
@@ -507,7 +512,9 @@ void __atomic_store();
   (^PTok [^Parser p ctn?]
    (let [r (shift0 p)
          concat! (fn [kinds]
-                   (let [sep (StringBuilder. ^String (.-sep r)) b (StringBuilder. ^String (.-src r))]
+                   (let [sep (StringBuilder. ^String (.-sep r)) b (StringBuilder. ^String (.-src r))
+                         pieces (ArrayList.)]
+                     (.add pieces (.-src r))
                      (loop []
                        (let [c (rn p)]
                          (if-let [skip (kinds c)]
@@ -515,8 +522,12 @@ void __atomic_store();
                              (.append sep ^String (.-sep t))
                              (canonicalize-tail! b)
                              (.append b (subs (.-src t) skip))
+                             (.add pieces (.-src t))
                              (recur))
-                           (tree/with-texts r (.toString sep) (.toString b)))))))
+                           (let [t (tree/with-texts r (.toString sep) (.toString b))]
+                             ;; Arbace (C3b): the literals' own texts, for the converter's values
+                             (.put ^java.util.Map strlit-pieces t (vec pieces))
+                             t))))))
          r (cond
              (and (= (ch r) :STRINGLITERAL) (= (rn p) :STRINGLITERAL)) (concat! {:STRINGLITERAL 1})
              (and (= (ch r) :LONGSTRINGLITERAL) (or (= (rn p) :LONGSTRINGLITERAL) (= (rn p) :STRINGLITERAL)))
@@ -2195,7 +2206,7 @@ void __atomic_store();
   `cfg` (arbace.repr.c.host/config's): {:tree TranslationUnit-or-nil :errors [...] :notree bool},
   or {:panic msg} where cc would panic."
   [cfg sources ^String main]
-  (let [{:keys [errors next]} (pp/stream cfg sources main)
+  (let [{:keys [errors next layer]} (pp/stream cfg sources main)
         st (object-array 9)
         _ (do (aset st SCOPE (new-scope* nil)) (aset st SEQ (Long/valueOf 0)) (aset st LDOK false))
         p (Parser. next errors (ArrayList.) (keywords (:predefined cfg)) st)]
@@ -2207,10 +2218,10 @@ void __atomic_store();
                      (let [x (first a)] (when (= (.get ^HashMap x :node) "Declarator") x)))
                 errs (dedupe-errors errors)
                 errs (if pd errs (conj errs "<bultin>: missing definition of '__predefined_declarator'"))]
-            {:tree tu :errors errs})
+            {:tree tu :errors errs :layer layer})
           (let [t (sh p)]
             (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected EOF"))
-            {:tree tu :errors (dedupe-errors errors) :notree true})))
+            {:tree tu :errors (dedupe-errors errors) :notree true :layer layer})))
       (catch StackOverflowError _ {:panic "stack overflow"})
       (catch Exception e
         (if (:panic (ex-data e)) {:panic (ex-message e)} (throw e))))))

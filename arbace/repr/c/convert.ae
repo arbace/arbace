@@ -1,0 +1,1696 @@
+;; repr/c's converter: cc's trees (arbace.repr.c.parse's port) into C forms (doc/c/SPEC.md §4-§11).
+;; Its rules are cemit's and clisp's (go-whim https://github.com/arbace/go-whim at
+;; 80c49bf53cd6340487ac623f3d6d135b77ac1db6, crefactor/cemit and crefactor/clisp: the case for case
+;; reading of cc's tree, the declarators read from the name outward, labels as items, the source's
+;; parentheses kept, macro invocations recovered from the source's text where a whole node came from
+;; one), licensed to Arbace under the EPL-1.0 (doc/C23-SURVEY.md, CS37 (a)); the rest is Arbace's own.
+
+(ns arbace.repr.c.convert
+  "C forms from a parse (doc/c/SPEC.md; doc/C23-SURVEY.md, \"As built: C3b\"): `convert` turns a
+  translation unit's tree (arbace.repr.c.parse) with its preprocessing layer into the main file's forms
+  and its header units (§4.3), the directives of the main file as forms between the items they stand
+  between (§9.2), the macro invocations that made a whole node recovered from the source (§9.4), and in
+  mode :full each item's text (§10.2). It writes what reading needs, never what checking derives (§11)."
+  (:require [arbace.repr.c.lex :as lex]
+            [arbace.repr.c.parse :as parse]
+            [arbace.repr.c.tree :as tree]
+            [arbace.string :as str])
+  (:import [arbace.repr.c.lex CFile Tok]
+           [arbace.repr.c.tree PTok]
+           [java.util ArrayList HashMap HashSet IdentityHashMap TreeMap]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; Refusals
+
+(defn refuse
+  "A construct the converter does not write: an error of class `cls` (a keyword the round trip's known
+  file classes), with the position of `at` when known."
+  [cls ^String msg & [at]]
+  (throw (ex-info (str "convert: " msg) {:c/refuse cls :at at})))
+
+;; ---------------------------------------------------------------------------------------------
+;; The tree
+
+(defn- g [n k] (when (instance? HashMap n) (.get ^HashMap n k)))
+(defn- cs [n] (g n :Case))
+(defn- nt [n] (g n :node))
+(defn- tsrc ^String [t] (when (instance? PTok t) (.-src ^PTok t)))
+(defn- tch [t] (when (instance? PTok t) (.-ch ^PTok t)))
+
+(defn- chain
+  "The elements of a cc list: `n` and the nodes its field `k` links, in order."
+  [n k]
+  (loop [n n out (transient [])]
+    (if (instance? HashMap n) (recur (g n k) (conj! out n)) (persistent! out))))
+
+;; The conversion's state
+(def ^:dynamic *cx* nil)
+(defn- cx [k] (get *cx* k))
+
+(defn- main-tok? [t] (and (instance? PTok t) (some? (.-pf ^PTok t)) (identical? (.-pf ^PTok t) (cx :main-file))))
+
+;; Each node's extent: [minSeq maxSeq minMainPo maxMainEnd main? other?] over its tokens (a token from a
+;; file other than the main one makes other? true), computed once, bottom up, with an explicit stack (cc's
+;; lists nest as deep as they are long).
+(def ^:private ^"[J" no-range (long-array [Long/MAX_VALUE Long/MIN_VALUE Long/MAX_VALUE Long/MIN_VALUE 0 0]))
+
+(defn- children [^HashMap n]
+  (let [[_ fields] (get tree/types (.get n :node))
+        out (ArrayList.)]
+    (doseq [f fields]
+      (let [v (.get n f)]
+        (if (vector? v) (doseq [x v] (.add out x)) (when v (.add out v)))))
+    (when-let [ds (.get n :declarationSpecifiers)] (.add out ds))
+    out))
+
+(defn- tok-range ^longs [^PTok t]
+  (let [s (.-seq t)
+        main (and (some? (.-pf t)) (identical? (.-pf t) (cx :main-file)))
+        po (.-po t)]
+    (long-array [s s (if main po Long/MAX_VALUE) (if main (inc po) Long/MIN_VALUE)
+                 (if main 1 0) (if (or main (nil? (.-pf t))) 0 1)])))
+
+(defn- merge-range! ^longs [^longs a ^longs b]
+  (aset a 0 (min (aget a 0) (aget b 0))) (aset a 1 (max (aget a 1) (aget b 1)))
+  (aset a 2 (min (aget a 2) (aget b 2))) (aset a 3 (max (aget a 3) (aget b 3)))
+  (aset a 4 (max (aget a 4) (aget b 4))) (aset a 5 (max (aget a 5) (aget b 5)))
+  a)
+
+(defn- compute-ranges!
+  "Every node's extent under `root` into the identity map `m`."
+  [^IdentityHashMap m root]
+  (let [stack (java.util.ArrayDeque.)]
+    (.push stack [root false])
+    (loop []
+      (when-not (.isEmpty stack)
+        (let [[n done] (.pop stack)]
+          (cond
+            (not (instance? HashMap n)) nil
+            (.containsKey m n) nil
+            done (let [r (aclone no-range)]
+                   (doseq [c (children n)]
+                     (cond
+                       (instance? PTok c) (merge-range! r (tok-range c))
+                       (instance? HashMap c) (when-let [cr (.get m c)] (merge-range! r cr))))
+                   (.put m n r))
+            :else (do (.push stack [n true])
+                      (doseq [c (children n)] (when (instance? HashMap c) (.push stack [c false]))))))
+        (recur)))))
+
+(defn- rng ^longs [n] (or (.get ^IdentityHashMap (cx :ranges) n) no-range))
+(defn- has-main? [n] (pos? (aget (rng n) 4)))
+(defn- has-other? [n] (pos? (aget (rng n) 5)))
+(defn- min-po ^long [n] (aget (rng n) 2))
+(defn- max-end ^long [n] (aget (rng n) 3))
+
+(defn- first-main-tok
+  "The first token of `n` in the main file (pre-order), or nil."
+  [n]
+  (let [stack (java.util.ArrayDeque.)]
+    (.push stack n)
+    (loop []
+      (when-not (.isEmpty stack)
+        (let [x (.pop stack)]
+          (cond
+            (instance? PTok x) (if (main-tok? x) x (recur))
+            (instance? HashMap x) (let [cs (children x)
+                                        cs (sort-by (fn [c] (if (instance? PTok c) (.-seq ^PTok c) (aget (rng c) 0))) cs)]
+                                    (doseq [c (reverse cs)] (.push stack c))
+                                    (recur))
+            :else (recur)))))))
+
+(defn- line-starts
+  "The offsets of the main file's lines (raw lines: a #line does not change the forms' lines, §10.3)."
+  ^"[J" [^bytes bs]
+  (let [a (java.util.ArrayList.)]
+    (.add a (long 0))
+    (dotimes [i (alength bs)] (when (= (aget bs i) (byte 10)) (.add a (long (inc i)))))
+    (long-array a)))
+
+(defn- line-of ^long [^long po]
+  (let [i (java.util.Arrays/binarySearch ^"[J" (cx :line-starts) po)]
+    (if (neg? i) (- (- i) 1) (inc i))))
+
+(defn- pos-of [n]
+  (when (has-main? n) [(line-of (min-po n)) 0]))
+
+;; ---------------------------------------------------------------------------------------------
+;; Forms with metadata; literals (which cannot carry it) give theirs to their parent
+
+(deftype Lit [v m]) ; a literal with the metadata its parent holds for it (:c/macro, :c/paren)
+
+(defn- iobj? [x] (instance? arbace.lang.IObj x))
+
+(defn addm
+  "`x` with the metadata `m` merged into its own (a literal wrapped in a Lit)."
+  [x m]
+  (cond
+    (empty? m) x
+    (instance? Lit x) (Lit. (.-v ^Lit x) (merge (.-m ^Lit x) m))
+    (iobj? x) (vary-meta x merge m)
+    :else (Lit. x m)))
+
+(defn- value [x] (if (instance? Lit x) (.-v ^Lit x) x))
+
+(defn- fold
+  "The values of `xs` and the parent's metadata for the literals among them: :c/amacro {index text},
+  :c/aparen #{index}, :c/aparen-outer #{index}."
+  [xs]
+  (loop [i 0 xs (seq xs) out (transient []) am {} ap #{} ao #{}]
+    (if xs
+      (let [x (first xs)]
+        (if (instance? Lit x)
+          (let [m (.-m ^Lit x)]
+            (recur (inc i) (next xs) (conj! out (.-v ^Lit x))
+                   (if-let [t (:c/macro m)] (assoc am i t) am)
+                   (if (:c/paren m) (conj ap i) ap)
+                   (if (:c/paren-outer m) (conj ao i) ao)))
+          (recur (inc i) (next xs) (conj! out x) am ap ao)))
+      [(persistent! out) (cond-> {} (seq am) (assoc :c/amacro am) (seq ap) (assoc :c/aparen ap) (seq ao) (assoc :c/aparen-outer ao))])))
+
+(defn L
+  "A list form of `xs` (literals' metadata on it)."
+  [& xs]
+  (let [[vs m] (fold xs)] (addm (apply list vs) m)))
+
+(defn- Lv [xs] (apply L xs))
+
+(defn V
+  "A vector form of `xs` (literals' metadata on it)."
+  [xs]
+  (let [[vs m] (fold xs)] (addm vs m)))
+
+(defn- at
+  "`form` with the line of `n`'s first main-file token (and in :full its :c/pos)."
+  [n form]
+  (if (and (iobj? form) (has-main? n))
+    (vary-meta form assoc :line (line-of (min-po n)))
+    form))
+
+(defn- sym ^arbace.lang.Symbol [^String s] (symbol s))
+
+(defn- utf8-decode
+  "A latin1 string (one char a byte) decoded as UTF-8 when it is valid UTF-8, else as it is."
+  ^String [^String s]
+  (if (every? #(< (int %) 0x80) s)
+    s
+    (let [bs (.getBytes s "ISO-8859-1")
+          u (String. bs "UTF-8")]
+      (if (java.util.Arrays/equals bs (.getBytes u "UTF-8")) u s))))
+
+(defn- ucn-decode
+  "An identifier's universal character names (\\uXXXX, \\UXXXXXXXX) as the characters they name."
+  ^String [^String s]
+  (if (neg? (.indexOf s "\\"))
+    s
+    (str/replace s #"\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})"
+                 (fn [[_ a b]] (String. (Character/toChars (Integer/parseInt (or a b) 16)))))))
+
+(def ^:private reader-words #{"nil" "true" "false" "_"})
+
+(defn ident
+  "A C identifier's form: its symbol, or (c/id \"...\") for one the reader reads otherwise (§4.4)."
+  [^String s]
+  (let [s (ucn-decode (utf8-decode s))]
+    (if (reader-words s) (list 'c/id s) (sym s))))
+
+(defn- ident-tok [t] (ident (tsrc t)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Literals (§8)
+
+(defn- digits-clean ^String [^String s] (.replace s "'" ""))
+
+(defn- int-suffix
+  "The suffix of an integer constant's text: [digits suffix-lowercased]."
+  [^String s]
+  (let [s (digits-clean s)
+        hex (or (.startsWith s "0x") (.startsWith s "0X"))
+        bin (or (.startsWith s "0b") (.startsWith s "0B"))
+        body-start (if (or hex bin) 2 0)
+        i (loop [i body-start]
+            (if (and (< i (count s))
+                     (let [c (.charAt s i)]
+                       (if hex (>= (Character/digit c 16) 0) (Character/isDigit c))))
+              (recur (inc i)) i))]
+    [(subs s 0 i) (str/lower-case (subs s i)) hex bin]))
+
+(def ^:private int-max 2147483647)
+(def ^:private uint-max 4294967295)
+(def ^:private long-max 9223372036854775807N)
+(def ^:private ulong-max 18446744073709551615N)
+(def ^:private max-of {'int int-max 'unsigned uint-max 'long long-max 'unsigned-long ulong-max
+                       'long-long long-max 'unsigned-long-long ulong-max
+                       '__int128 (dec (.shiftLeft (biginteger 1) 127)) 'unsigned-__int128 (dec (.shiftLeft (biginteger 1) 128))})
+
+(defn- c90? [] (#{:c89 :c94 :gnu89} (cx :std)))
+
+(defn- decimal-candidates []
+  (if (c90?) '[int long unsigned-long __int128 unsigned-__int128] '[int long __int128 unsigned-__int128]))
+
+(defn- candidates [suffix other-radix]
+  (case suffix
+    "" (if other-radix '[int unsigned long unsigned-long __int128 unsigned-__int128] (decimal-candidates))
+    ("u") '[unsigned unsigned-long unsigned-__int128]
+    ("l") (if (or other-radix (c90?)) '[long unsigned-long __int128 unsigned-__int128] '[long __int128 unsigned-__int128])
+    ("ul" "lu") '[unsigned-long unsigned-__int128]
+    ("ll") (if other-radix '[long-long unsigned-long-long] '[long-long __int128])
+    ("ull" "llu") '[unsigned-long-long]
+    nil))
+
+(defn- fits [t v] (<= (compare v (max-of t)) 0))
+
+(defn- num-form [v] (let [v (bigint v)] (if (<= (compare v long-max) 0) (long v) v)))
+
+(defn decimal-type
+  "The type of an unsuffixed decimal constant of value `v` at the file's standard."
+  [v]
+  (or (first (filter #(fits % v) (decimal-candidates))) 'unsigned-__int128))
+
+(defn- bits-for ^long [v signed]
+  (let [b (.bitLength (biginteger v))] (if signed (inc (max b 1)) (max b 1))))
+
+(defn int-literal
+  "An integer constant's form (§8.1): the value, or (lit T v) when its type is not the decimal default."
+  [^String text]
+  (let [[digits suffix hex bin] (int-suffix text)
+        imag (when (re-find #"[ij]" suffix) true)
+        suffix (str/replace suffix #"[ij]" "")
+        oct (and (not hex) (not bin) (> (count digits) 1) (.startsWith ^String digits "0"))
+        v (cond
+            hex (BigInteger. ^String (subs digits 2) 16)
+            bin (BigInteger. ^String (subs digits 2) 2)
+            oct (BigInteger. ^String (subs digits 1) 8)
+            :else (BigInteger. ^String digits))
+        form (cond
+               (#{"wb" "uwb" "wbu"} suffix)
+               (let [u (not= suffix "wb")]
+                 (list 'lit (list (if u 'unsigned-bit-int 'bit-int) (bits-for v (not u))) (num-form v)))
+               :else
+               (let [cands (or (candidates suffix (or hex bin oct)) (refuse :literal (str "integer suffix " suffix)))
+                     t (or (first (filter #(fits % v) cands)) (last cands))]
+                 (if (= t (decimal-type v)) (num-form v) (list 'lit t (num-form v)))))]
+    (if imag (list 'imaginary form) form)))
+
+(defn- shortest-double [^double d] (Double/parseDouble (Double/toString d)))
+
+(defn- exact-decimal
+  "The exact value of a floating constant's text (decimal or hexadecimal, no suffix) as a BigDecimal."
+  ^java.math.BigDecimal [^String s]
+  (if (or (.startsWith s "0x") (.startsWith s "0X"))
+    (let [[_ mant exp] (re-matches #"(?i)0x([0-9a-f]*\.?[0-9a-f]*)p([+-]?[0-9]+)" s)
+          [ip fp] (let [i (.indexOf ^String mant ".")] (if (neg? i) [mant ""] [(subs mant 0 i) (subs mant (inc i))]))
+          m (BigInteger. (let [x (str ip fp)] (if (empty? x) "0" x)) 16)
+          e (- (Long/parseLong exp) (* 4 (count fp)))]
+      (if (neg? e)
+        (.divide (java.math.BigDecimal. m) (java.math.BigDecimal. (.shiftLeft (biginteger 1) (int (- e)))))
+        (java.math.BigDecimal. (.shiftLeft m (int e)))))
+    (java.math.BigDecimal. s)))
+
+(def ^:private float-types
+  {"f" 'float "l" 'long-double "df" '_Decimal32 "dd" '_Decimal64 "dl" '_Decimal128
+   "f16" '_Float16 "f32" '_Float32 "f64" '_Float64 "f128" '_Float128 "f32x" '_Float32x "f64x" '_Float64x
+   "bf16" '__bf16 "q" '__float128 "w" '__float80})
+
+(defn float-literal
+  "A floating constant's form (§8.3)."
+  [^String text]
+  (let [s (digits-clean text)
+        hex (or (.startsWith s "0x") (.startsWith s "0X"))
+        [_ body suffix] (if hex
+                          (re-matches #"(?i)(0x[0-9a-f]*\.?[0-9a-f]*p[+-]?[0-9]+)([a-z0-9]*)" s)
+                          (re-matches #"(?i)([0-9]*\.?[0-9]*(?:e[+-]?[0-9]+)?)([a-z0-9]*)" s))
+        _ (when-not body (refuse :literal (str "floating constant " text)))
+        suffix (str/lower-case suffix)
+        imag (re-find #"[ij]" suffix)
+        suffix (str/replace suffix #"[ij]" "")
+        t (when (seq suffix) (or (float-types suffix) (refuse :literal (str "floating suffix " suffix))))
+        exact (exact-decimal body)
+        dec? (#{'_Decimal32 '_Decimal64 '_Decimal128} t)
+        v (cond
+            dec? (java.math.BigDecimal. ^String body)
+            (= t 'float) (let [f (Float/parseFloat (if hex (str body "") body))]
+                           (if (Float/isInfinite f) exact (Double/parseDouble (Float/toString f))))
+            :else (let [d (if hex (.doubleValue exact) (Double/parseDouble body))]
+                    (cond
+                      (Double/isInfinite d) exact
+                      (or (nil? t) ('#{_Float32 _Float64 _Float32x} t)) (shortest-double d)
+                      ;; long double and wider: the double when its shortest decimal is the constant's exact value
+                      (zero? (.compareTo (java.math.BigDecimal. (Double/toString d)) exact)) (shortest-double d)
+                      (and (not hex) (zero? (.compareTo (java.math.BigDecimal. (Double/toString d)) (java.math.BigDecimal. ^String body)))) (shortest-double d)
+                      :else exact)))
+        form (if t (list 'lit t v) v)]
+    (if imag (list 'imaginary form) form)))
+
+;; Character constants and string literals: their code units
+
+(defn- escape-units
+  "The values of the characters and escapes of a literal's body `s` (one char a byte): each source
+  character as `char-fn` decodes it, each escape its value. Returns a vector of longs; a UCN as
+  [:ucn cp] for the caller to encode."
+  [^String s utf8-chars]
+  (let [n (count s) out (ArrayList.)]
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt s i)]
+          (if (= c \\)
+            (let [d (.charAt s (inc i))]
+              (case d
+                \n (do (.add out 10) (recur (+ i 2)))
+                \t (do (.add out 9) (recur (+ i 2)))
+                \r (do (.add out 13) (recur (+ i 2)))
+                \a (do (.add out 7) (recur (+ i 2)))
+                \b (do (.add out 8) (recur (+ i 2)))
+                \f (do (.add out 12) (recur (+ i 2)))
+                \v (do (.add out 11) (recur (+ i 2)))
+                \e (do (.add out 27) (recur (+ i 2)))
+                \E (do (.add out 27) (recur (+ i 2)))
+                (\' \" \? \\) (do (.add out (long (int d))) (recur (+ i 2)))
+                \x (let [j (loop [j (+ i 2)] (if (and (< j n) (>= (Character/digit (.charAt s j) 16) 0)) (recur (inc j)) j))]
+                     (.add out (.longValue (BigInteger. (subs s (+ i 2) j) 16))) (recur j))
+                (\u \U) (let [k (if (= d \u) 4 8)
+                              cp (Long/parseLong (subs s (+ i 2) (+ i 2 k)) 16)]
+                          (.add out [:ucn cp]) (recur (+ i 2 k)))
+                (\{) (recur (+ i 2))
+                (if (and (>= (int d) (int \0)) (<= (int d) (int \7)))
+                  (let [j (loop [j (inc i)] (if (and (< j n) (< (- j i) 4) (<= (int \0) (int (.charAt s j)) (int \7))) (recur (inc j)) j))]
+                    (.add out (Long/parseLong (subs s (inc i) j) 8)) (recur j))
+                  (do (.add out (long (int d))) (recur (+ i 2))))))
+            (if utf8-chars
+              ;; a UTF-8 sequence as one code point
+              (let [b (int c)
+                    k (cond (< b 0x80) 1 (= (bit-and b 0xE0) 0xC0) 2 (= (bit-and b 0xF0) 0xE0) 3 (= (bit-and b 0xF8) 0xF0) 4 :else 1)
+                    k (min k (- n i))
+                    cp (if (= k 1)
+                         b
+                         (let [bs (.getBytes (subs s i (+ i k)) "ISO-8859-1")]
+                           (try (.codePointAt (String. bs "UTF-8") 0) (catch Exception _ b))))]
+                (.add out [:ucn cp]) (recur (+ i k)))
+              (do (.add out (long (int c))) (recur (inc i))))))))
+    (vec out)))
+
+(defn- utf8-bytes [^long cp] (vec (map #(bit-and (long %) 0xff) (.getBytes (String. (Character/toChars (int cp))) "UTF-8"))))
+
+(defn- prefix-of [^String s]
+  (cond (.startsWith s "u8") ["u8" (subs s 2)]
+        (.startsWith s "L") ["L" (subs s 1)]
+        (.startsWith s "u") ["u" (subs s 1)]
+        (.startsWith s "U") ["U" (subs s 1)]
+        :else ["" s]))
+
+(defn- char-form [^long v] (if (and (>= v 0) (< v 0xD800)) (char v) v))
+
+(defn char-literal
+  "A character constant's form (§8.2)."
+  [^String text]
+  (let [[pfx q] (prefix-of text)
+        body (subs q 1 (dec (count q)))]
+    (case pfx
+      ""  (let [us (escape-units body false)
+                bytes (mapcat #(if (vector? %) (utf8-bytes (second %)) [(bit-and (long %) 0xff)]) us)
+                bytes (vec bytes)]
+            (if (= 1 (count bytes))
+              (let [b (long (first bytes))] (if (< b 0x80) (char b) (- b 256)))
+              (let [v (reduce (fn [acc b] (bit-and (bit-or (bit-shift-left (long acc) 8) (long b)) 0xffffffff)) 0 bytes)]
+                (if (>= v 0x80000000) (- v 0x100000000) v))))
+      ("L" "u" "U" "u8")
+      (let [us (escape-units body true)
+            v (let [x (last us)] (if (vector? x) (second x) x))
+            v (long v)]
+        (case pfx
+          "L" (char-form v)
+          "u8" (list 'lit 'unsigned-char (if (< v 0x80) (char v) v))
+          "u" (list 'lit 'unsigned-short (char-form v))
+          "U" (list 'lit 'unsigned (char-form v)))))))
+
+(defn- valid-utf8-runs
+  "Bytes as Go forms' byte-string parts: maximal valid UTF-8 runs as strings, other bytes as integers."
+  [bytes]
+  (let [bs (byte-array (map unchecked-byte bytes))
+        n (alength bs)
+        out (ArrayList.)
+        run (java.io.ByteArrayOutputStream.)
+        flush! (fn [] (when (pos? (.size run)) (.add out (String. (.toByteArray run) "UTF-8")) (.reset run)))]
+    (loop [i 0]
+      (when (< i n)
+        (let [b (bit-and (aget bs i) 0xff)
+              k (cond (< b 0x80) 1 (= (bit-and b 0xE0) 0xC0) 2 (= (bit-and b 0xF0) 0xE0) 3 (= (bit-and b 0xF8) 0xF0) 4 :else 0)
+              ok (and (pos? k) (<= (+ i k) n)
+                      (every? #(= (bit-and (aget bs (int %)) 0xC0) 0x80) (range (inc i) (+ i k)))
+                      (let [s (String. bs (int i) (int k) "UTF-8")]
+                        (and (= 1 (.codePointCount s 0 (.length s)))
+                             (not= (.codePointAt s 0) 0xFFFD)
+                             (= (count (.getBytes s "UTF-8")) k))))]
+          (if ok
+            (do (.write run bs (int i) (int k)) (recur (+ i k)))
+            (do (flush!) (.add out b) (recur (inc i)))))))
+    (flush!)
+    (vec out)))
+
+(defn string-literal
+  "A string literal's form (§8.4), from the texts of the literals concatenated into it."
+  [pieces]
+  (let [parsed (map prefix-of pieces)
+        pfx (or (first (remove empty? (map first parsed))) "")
+        wide (#{"L" "u" "U"} pfx)
+        units (vec (mapcat (fn [[_ q]] (escape-units (subs q 1 (dec (count q))) wide)) parsed))]
+    (if wide
+      (let [cps (map #(if (vector? %) (second %) %) units)
+            bad (some #(or (> (long %) 0x10FFFF) (<= 0xD800 (long %) 0xDFFF)) cps)
+            s (when-not bad (let [b (StringBuilder.)] (doseq [cp cps] (.appendCodePoint b (int cp))) (str b)))]
+        (list 'lit ({"L" 'int "u" 'unsigned-short "U" 'unsigned} pfx)
+              (or s (cons 'code-units (vec cps)))))
+      (let [bytes (vec (mapcat #(if (vector? %) (utf8-bytes (second %)) [(bit-and (long %) 0xff)]) units))
+            parts (valid-utf8-runs bytes)
+            v (if (and (= 1 (count parts)) (string? (first parts))) (first parts)
+                  (if (empty? parts) "" (cons 'byte-string parts)))]
+        (if (and (= pfx "u8") (= (cx :std) :c23))
+          (list 'lit 'unsigned-char v)
+          v)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Macro invocations recovered from the source (cemit's recovery; §9.4)
+
+(defn- group-at
+  "The text of the invocation whose tokens are exactly `n`'s, when one is unclaimed."
+  [n]
+  (when-let [^HashMap groups (cx :groups)]
+    (when (and (instance? HashMap n) (has-main? n) (not (has-other? n)))
+      (let [r (rng n)
+            gr (.get groups (aget r 0))]
+        (when (and gr (= (:max gr) (aget r 1)) (not (.contains ^HashSet (cx :claimed) (aget r 0))))
+          (:text gr))))))
+
+(defn- group-of
+  "group-at, the group claimed (by the outermost node of its extent: nodes are claimed pre-order)."
+  [n]
+  (when-let [t (group-at n)]
+    (.add ^HashSet (cx :claimed) (aget (rng n) 0))
+    t))
+
+(def ^:private c23-constants {"nullptr" nil "true" true "false" false})
+
+(defn- recovered [n f]
+  (let [t (group-of n) form (f)]
+    (cond
+      (nil? t) form
+      ;; cc's Builtin's own macros the printer writes as gcc's builtins (va-arg, offsetof, ...)
+      (re-find #"^__builtin_(va_arg|offsetof|types_compatible_p)\b" t) form
+      ;; C23's constants, which cc's Builtin defines as macros (§8.5)
+      (and (contains? c23-constants t) (#{:c23 :gnu23 :c2y :gnu2y} (cx :std))) (get c23-constants t)
+      :else (addm form {:c/macro t}))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Attributes (§5.6): a vector of C23 attributes and GNU specifiers (__attribute__ attr...)
+
+(declare expr type-name-form)
+
+(defn- attr-value [av gnu]
+  (let [nm (let [p (g av :Prefix) t (g av :Token)]
+             (if p (sym (str (tsrc p) "/" (tsrc t))) (sym (tsrc t))))]
+    (case (cs av)
+      :AttributeValueIdent nm
+      :AttributeValueExpr
+      (if-let [bts (g av :BalancedTokenSequence)]
+        [nm (utf8-decode (str/join " " (map #(tsrc (g % :Token)) (chain bts :BalancedTokenSequence))))]
+        (V (into [nm] (map #(expr (g % :AssignmentExpression)) (chain (g av :ArgumentExpressionList) :ArgumentExpressionList))))))))
+
+(defn attrs
+  "An AttributeSpecifierList's attributes, or nil."
+  [asl]
+  (when asl
+    (vec (mapcat (fn [l]
+                   (let [as (g l :AttributeSpecifier)
+                         gnu (= (tch (g as :Token)) :ATTRIBUTE)
+                         vals (vec (keep #(when-let [av (g % :AttributeValue)] (attr-value av gnu))
+                                         (chain (g as :AttributeValueList) :AttributeValueList)))]
+                     (if gnu [(apply list '__attribute__ vals)] vals)))
+                 (chain asl :AttributeSpecifierList)))))
+
+(defn- with-attrs [x k asl] (if-let [a (attrs asl)] (addm x {k (into (or (get (meta x) k) []) a)}) x))
+
+;; ---------------------------------------------------------------------------------------------
+;; Types (§5): specifiers, declarators read from the name outward
+
+(def ^:private storage-keys
+  {:StorageClassSpecifierExtern :extern :StorageClassSpecifierStatic :static :StorageClassSpecifierAuto :auto
+   :StorageClassSpecifierRegister :register :StorageClassSpecifierThreadLocal :thread_local
+   :StorageClassSpecifierConstexpr :constexpr :StorageClassSpecifierTypedef :typedef})
+
+(def ^:private qual-syms {:CONST 'const :VOLATILE 'volatile :RESTRICT 'restrict :ATOMIC 'atomic :NONNULL '_Nonnull})
+
+(defn- wrap-quals [t quals] (reduce (fn [t q] (list q t)) t (reverse quals)))
+
+(declare struct-form enum-form type-of-name defines-type?)
+
+(defn- base-type
+  "The base type of a specifier list's type specifiers (N2: their order and words normalized)."
+  [specs at]
+  (let [k (frequencies (keep #(when (#{:TypeSpecifierVoid :TypeSpecifierChar :TypeSpecifierShort :TypeSpecifierInt
+                                        :TypeSpecifierLong :TypeSpecifierFloat :TypeSpecifierDouble :TypeSpecifierSigned
+                                        :TypeSpecifierUnsigned :TypeSpecifierBool :TypeSpecifierComplex :TypeSpecifierImaginary
+                                        :TypeSpecifierInt128 :TypeSpecifierUint128} (cs %)) (cs %)) specs))
+        other (first (remove #(contains? k (cs %)) specs))
+        has #(pos? (get k % 0))
+        uns (has :TypeSpecifierUnsigned)
+        sig (has :TypeSpecifierSigned)
+        longs (get k :TypeSpecifierLong 0)
+        scalar (cond
+                 other
+                 (case (cs other)
+                   :TypeSpecifierStructOrUnion (struct-form (g other :StructOrUnionSpecifier))
+                   :TypeSpecifierEnum (enum-form (g other :EnumSpecifier))
+                   :TypeSpecifierTypeName (ident-tok (g other :Token))
+                   :TypeSpecifierTypeofExpr (let [w (tsrc (g other :Token))]
+                                              (list (if (re-find #"unqual" w) 'typeof-unqual 'typeof) (expr (g other :ExpressionList))))
+                   :TypeSpecifierTypeofType (let [w (tsrc (g other :Token))]
+                                              (list (if (re-find #"unqual" w) 'typeof-unqual-type 'typeof-type) (type-name-form (g other :TypeName))))
+                   :TypeSpecifierAtomic (list 'atomic (type-name-form (g (g other :AtomicTypeSpecifier) :TypeName)))
+                   :TypeSpecifierBitInt (L (if uns 'unsigned-bit-int 'bit-int) (expr (g other :ExpressionList)))
+                   (sym (tsrc (g other :Token)))) ; _Float16 ... _Decimal128, __bf16
+                 (has :TypeSpecifierVoid) 'void
+                 (has :TypeSpecifierBool) '_Bool
+                 (has :TypeSpecifierImaginary) (refuse :imaginary "_Imaginary")
+                 (has :TypeSpecifierChar) (cond uns 'unsigned-char sig 'signed-char :else 'char)
+                 (has :TypeSpecifierShort) (if uns 'unsigned-short 'short)
+                 (has :TypeSpecifierUint128) 'unsigned-__int128
+                 (has :TypeSpecifierInt128) (if uns 'unsigned-__int128 '__int128)
+                 (has :TypeSpecifierFloat) 'float
+                 (has :TypeSpecifierDouble) (if (pos? longs) 'long-double 'double)
+                 (>= longs 2) (if uns 'unsigned-long-long 'long-long)
+                 (= longs 1) (if uns 'unsigned-long 'long)
+                 uns 'unsigned
+                 (or sig (has :TypeSpecifierInt)) 'int
+                 (has :TypeSpecifierComplex) nil
+                 :else nil)]
+    (if (has :TypeSpecifierComplex)
+      (list 'complex (or scalar 'double))
+      scalar)))
+
+(defn specifiers
+  "A declaration's specifiers (DeclarationSpecifiers or SpecifierQualifierList, or a vector of their
+  nodes): {:type T :meta {...} :implicit-int bool :typedef bool}."
+  [ds]
+  (let [els (cond (vector? ds) ds
+                  (= (nt ds) "DeclarationSpecifiers") (chain ds :DeclarationSpecifiers)
+                  :else (chain ds :SpecifierQualifierList))
+        tspecs (ArrayList.) quals (ArrayList.) m (HashMap.) at (ArrayList.)]
+    (doseq [e els]
+      (case (cs e)
+        :DeclarationSpecifiersStorage
+        (let [sc (g e :StorageClassSpecifier)]
+          (if (= (cs sc) :StorageClassSpecifierDeclspec)
+            (refuse :declspec "__declspec" sc)
+            (.put m (storage-keys (cs sc)) true)))
+        (:DeclarationSpecifiersTypeSpec :SpecifierQualifierListTypeSpec) (.add tspecs (g e :TypeSpecifier))
+        (:DeclarationSpecifiersTypeQual :SpecifierQualifierListTypeQual)
+        (let [q (g e :TypeQualifier)]
+          (if (= (cs q) :TypeQualifierAttr)
+            (.addAll at (attrs (g q :AttributeSpecifierList)))
+            (.add quals (qual-syms (tch (g q :Token))))))
+        :DeclarationSpecifiersFunc (.put m (if (= (cs (g e :FunctionSpecifier)) :FunctionSpecifierNoreturn) :noreturn :inline) true)
+        (:DeclarationSpecifiersAlignSpec :SpecifierQualifierListAlignSpec)
+        (let [a (g e :AlignmentSpecifier)]
+          (if (= (cs a) :AlignmentSpecifierType)
+            (.put m :c/alignas-type (type-name-form (g a :TypeName)))
+            (.put m :c/alignas (value (expr (g a :ConstantExpression))))))
+        :DeclarationSpecifiersAttr (.addAll at (attrs (g e :AttributeSpecifierList)))
+        nil))
+    (let [b (base-type (vec tspecs) ds)
+          typedef (.remove m :typedef)]
+      (when (seq at) (.put m :c/decl-attrs (vec at)))
+      {:type (wrap-quals (or b 'int) (vec quals))
+       :implicit-int (nil? b)
+       :typedef (boolean typedef)
+       :meta (into {} m)})))
+
+(defn- type-quals
+  "A TypeQualifiers list in written order: [qualifier symbols, attributes]."
+  [tq]
+  (let [qs (reverse (chain tq :TypeQualifiers))]
+    [(vec (keep #(let [q (g % :TypeQualifier)] (when-not (= (cs q) :TypeQualifierAttr) (qual-syms (tch (g q :Token))))) qs))
+     (vec (mapcat #(let [q (g % :TypeQualifier)] (when (= (cs q) :TypeQualifierAttr) (attrs (g q :AttributeSpecifierList)))) qs))]))
+
+(defn- pointer-type [t p]
+  (loop [t t p p]
+    (if (nil? p)
+      t
+      (do (when (= (cs p) :PointerBlock) (refuse :block-pointer "a block pointer (^)" p))
+          (let [[qs as] (type-quals (g p :TypeQualifiers))
+                pt (list '* t)
+                pt (if (seq as) (addm pt {:c/attrs as}) pt)]
+            (recur (wrap-quals pt qs) (g p :Pointer)))))))
+
+(declare params-vector)
+
+(defn- array-type [t dd size-field]
+  (let [[qs as] (type-quals (g dd :TypeQualifiers))
+        size (when-let [e (g dd size-field)] (expr e))
+        st (#{:DirectDeclaratorStaticArr :DirectDeclaratorArrStatic :DirectAbstractDeclaratorStaticArr} (cs dd))
+        st (or st (and (= (cs dd) :DirectAbstractDeclaratorArr) (= (tsrc (g dd :Token2)) "static")))
+        star (#{:DirectDeclaratorStar :DirectAbstractDeclaratorArrStar} (cs dd))
+        a (cond star (list 'array '* t)
+                size (L 'array size t)
+                :else (list 'array t))]
+    (addm a (cond-> {} (seq qs) (assoc :c/quals qs) st (assoc :c/static true)))))
+
+(defn declarator
+  "A declarator applied to the type `t`: [name-token type kr-names]; the name's attributes in :attrs."
+  [t d]
+  (loop [t (pointer-type t (g d :Pointer)) dd (g d :DirectDeclarator) out-attrs nil]
+    (case (cs dd)
+      :DirectDeclaratorIdent [(g dd :Token) t (attrs (g dd :AttributeSpecifierList))]
+      :DirectDeclaratorDecl (let [d2 (g dd :Declarator)]
+                              (recur (pointer-type t (g d2 :Pointer)) (g d2 :DirectDeclarator) out-attrs))
+      (:DirectDeclaratorArr :DirectDeclaratorStaticArr :DirectDeclaratorArrStatic :DirectDeclaratorStar)
+      (recur (array-type t dd :AssignmentExpression) (g dd :DirectDeclarator) out-attrs)
+      :DirectDeclaratorFuncParam (recur (list 'fn (params-vector (g dd :ParameterTypeList)) t) (g dd :DirectDeclarator) out-attrs)
+      :DirectDeclaratorFuncIdent
+      (recur (list 'fn (with-meta (mapv #(ident-tok (g % :Token2)) (chain (g dd :IdentifierList) :IdentifierList)) {:c/kr true}) t)
+             (g dd :DirectDeclarator) out-attrs)
+      (refuse :declarator (str "direct declarator " (cs dd)) dd))))
+
+(defn abstract
+  "An abstract declarator applied to the type `t`."
+  [t ad]
+  (if (nil? ad)
+    t
+    (loop [t (pointer-type t (g ad :Pointer)) dad (g ad :DirectAbstractDeclarator)]
+      (if (nil? dad)
+        t
+        (case (cs dad)
+          :DirectAbstractDeclaratorDecl (let [a2 (g dad :AbstractDeclarator)]
+                                          (if a2
+                                            (recur (pointer-type t (g a2 :Pointer)) (g a2 :DirectAbstractDeclarator))
+                                            t))
+          (:DirectAbstractDeclaratorArr :DirectAbstractDeclaratorStaticArr :DirectAbstractDeclaratorArrStar)
+          (recur (array-type t dad :AssignmentExpression) (g dad :DirectAbstractDeclarator))
+          :DirectAbstractDeclaratorFunc (recur (list 'fn (params-vector (g dad :ParameterTypeList)) t) (g dad :DirectAbstractDeclarator))
+          (refuse :declarator (str "direct abstract declarator " (cs dad)) dad))))))
+
+(defn type-name-form
+  "A TypeName's type form."
+  [tn]
+  (let [{type :type sm :meta} (specifiers (g tn :SpecifierQualifierList))
+        t (abstract type (g tn :AbstractDeclarator))]
+    (if (seq sm) (addm t {:c/spec sm}) t)))
+
+(defn- name-with
+  "The declared name's symbol with its type as the tag and `m` merged."
+  [name-tok t m]
+  (let [s (ident-tok name-tok)]
+    (if (seq? s) ; (c/id "...")
+      (addm s (assoc m :tag t))
+      (with-meta s (assoc m :tag t)))))
+
+(defn params-vector
+  "A ParameterTypeList as a parameter vector (§5.3)."
+  [ptl]
+  (if (nil? ptl)
+    []
+    (let [ps (mapv (fn [pl]
+                     (let [pd (g pl :ParameterDeclaration)
+                           {type :type sm :meta implicit-int :implicit-int} (specifiers (g pd :DeclarationSpecifiers))
+                           sm (cond-> sm implicit-int (assoc :c/implicit-int true))]
+                       (case (cs pd)
+                         :ParameterDeclarationDecl
+                         (let [[nt t as] (declarator type (g pd :Declarator))
+                               m (cond-> sm as (assoc :c/attrs as))
+                               x (name-with nt t m)]
+                           (with-attrs x :c/after-attrs (g pd :AttributeSpecifierList)))
+                         :ParameterDeclarationAbstract
+                         (let [t (abstract type (g pd :AbstractDeclarator))]
+                           (if (seq sm) (addm t {:c/spec sm}) t)))))
+                   (chain (g ptl :ParameterList) :ParameterList))]
+      (if (= (cs ptl) :ParameterTypeListVar) (conj ps '&) ps))))
+
+(defn- members [sdl]
+  (vec (mapcat
+         (fn [l]
+           (let [sd (g l :StructDeclaration)]
+             (case (cs sd)
+               :StructDeclarationAssert [((resolve 'arbace.repr.c.convert/static-assert-form) (g sd :StaticAssertDeclaration))]
+               :StructDeclarationDecl
+               (let [{type :type sm :meta} (specifiers (g sd :SpecifierQualifierList))
+                     decls (chain (g sd :StructDeclaratorList) :StructDeclaratorList)
+                     after (attrs (g sd :AttributeSpecifierList))
+                     group (and (> (count decls) 1) (defines-type? type))
+                     base (if group 'c/base type)
+                     forms (mapv (fn [sdl]
+                                   (let [sdr (g sdl :StructDeclarator)
+                                         bits (when (= (cs sdr) :StructDeclaratorBitField) (expr (g sdr :ConstantExpression)))]
+                                     (if-let [d (g sdr :Declarator)]
+                                       (let [[nt t as] (declarator base d)
+                                             m (cond-> sm as (assoc :c/attrs as))
+                                             nm (name-with nt t m)]
+                                         (if (some? bits)
+                                           (if (instance? Lit bits)
+                                             (addm nm {:c/bits (value bits) :c/bits-meta (.-m ^Lit bits)})
+                                             (addm nm {:c/bits bits}))
+                                           nm))
+                                       (L 'c/bits base bits))))
+                                 decls)
+                     forms (if (and (seq after) (seq forms))
+                             (conj (pop forms) (addm (peek forms) {:c/after-attrs after}))
+                             forms)]
+                 (cond
+                   (empty? decls) [(addm type (cond-> {} (seq sm) (assoc :c/spec sm) (seq after) (assoc :c/after-attrs after)))]
+                   group [(apply list 'c/group type forms)]
+                   :else forms)))))
+         (chain sdl :StructDeclarationList))))
+
+(defn struct-form
+  "A StructOrUnionSpecifier's type form (§5.4)."
+  [s]
+  (let [kw (if (= (cs (g s :StructOrUnion)) :StructOrUnionUnion) 'union 'struct)
+        tag (when-let [t (g s :Token)] (ident-tok t))
+        f (if (= (cs s) :StructOrUnionSpecifierDef)
+            (Lv (concat [kw] (when tag [tag]) [(members (g s :StructDeclarationList))]))
+            (list kw tag))]
+    (-> f (with-attrs :c/attrs (g s :AttributeSpecifierList)) (with-attrs :c/end-attrs (g s :AttributeSpecifierList2)))))
+
+(defn enum-form
+  "An EnumSpecifier's type form (§5.5)."
+  [e]
+  (let [tag (when-let [t (g e :Token2)] (ident-tok t))
+        under (when-let [ets (g e :EnumTypeSpecifier)] (:type (specifiers (g ets :SpecifierQualifierList))))
+        f (if (= (cs e) :EnumSpecifierDef)
+            (Lv (concat ['enum] (when tag [tag])
+                        [(mapv (fn [l]
+                                 (let [en (g l :Enumerator)
+                                       nm (ident-tok (g en :Token))
+                                       x (if (= (cs en) :EnumeratorExpr) (V [nm (expr (g en :ConstantExpression))]) nm)]
+                                   (with-attrs x :c/attrs (g en :AttributeSpecifierList))))
+                               (chain (g e :EnumeratorList) :EnumeratorList))]))
+            (list 'enum tag))
+        f (if under (addm f {:c/underlying under}) f)]
+    (with-attrs f :c/attrs (g e :AttributeSpecifierList))))
+
+(defn- defines-type?
+  "Whether a type form defines a struct, union or enum (its member list given)."
+  [t]
+  (let [t (loop [t t] (if (and (seq? t) ('#{const volatile restrict atomic _Nonnull} (first t))) (recur (second t)) t))]
+    (and (seq? t) ('#{struct union enum} (first t)) (vector? (last t)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Expressions (§7.4-§7.9)
+
+(def ^:private binary-fields
+  {"MultiplicativeExpression" [:MultiplicativeExpression :CastExpression]
+   "AdditiveExpression" [:AdditiveExpression :MultiplicativeExpression]
+   "ShiftExpression" [:ShiftExpression :AdditiveExpression]
+   "RelationalExpression" [:RelationalExpression :ShiftExpression]
+   "EqualityExpression" [:EqualityExpression :RelationalExpression]
+   "AndExpression" [:AndExpression :EqualityExpression]
+   "ExclusiveOrExpression" [:ExclusiveOrExpression :AndExpression]
+   "InclusiveOrExpression" [:InclusiveOrExpression :ExclusiveOrExpression]
+   "LogicalAndExpression" [:LogicalAndExpression :InclusiveOrExpression]
+   "LogicalOrExpression" [:LogicalOrExpression :LogicalAndExpression]})
+
+(def ^:private op-syms
+  {"*" '* "/" '/ "%" '% "+" '+ "-" '- "<<" '<< ">>" '>> "<" '< ">" '> "<=" '<= ">=" '>= "==" '== "!=" '!=
+   "&" 'bit-and "^" 'bit-xor "|" 'bit-or "&&" 'and "||" 'or})
+
+(def ^:private nary '#{+ - * / bit-and bit-or bit-xor and or comma})
+
+(defn- plain-list? [x head]
+  (and (seq? x) (= (first x) head) (> (count x) 2)
+       (empty? (dissoc (meta x) :line))))
+
+(defn- chain-op [op l r]
+  (if (and (nary op) (plain-list? (value l) op) (not (instance? Lit l)))
+    (Lv (concat (seq l) [r]))
+    (L op l r)))
+
+(def reserved-heads
+  "Heads of C context a callee named so would be read as (§15.4): its call is (c/call f args)."
+  '#{let do when if cond switch case default while do-while for label goto goto* break continue return
+     + - * / % << >> == != < <= > >= and or not bit-and bit-or bit-xor bit-not addr set! inc! dec! pre-inc!
+     pre-dec! aget aset -> conv sizeof sizeof-type alignof alignof-type generic ? comma compound-lit init at
+     stmt-expr label-addr real imag va-arg offsetof types-compatible? classify-type has-attribute?
+     convertvector bit-cast deref lit byte-string code-units imaginary quote var fn fn* def loop recur throw
+     try catch finally new monitor-enter monitor-exit letfn case* reify* deftype* import* . & _})
+
+(declare init-form compound-items)
+
+(defn- num-lit? [x] (or (instance? Long x) (instance? arbace.lang.BigInt x) (instance? Double x) (instance? java.math.BigDecimal x)
+                        (instance? BigInteger x) (char? x)))
+
+(defn- negate [x]
+  (cond
+    (char? x) (- (long (int x)))
+    (instance? Double x) (- (double x))
+    (instance? java.math.BigDecimal x) (.negate ^java.math.BigDecimal x)
+    :else (num-form (- (bigint x)))))
+
+(defn- id-name [x] (when (symbol? x) (name x)))
+
+(defn- va-arg-pattern
+  "cc's Builtin's __builtin_va_arg(va, type), (*(type*)__builtin_va_arg_impl(va)): (va-arg va T)."
+  [inner]
+  (when (and (= (cs inner) :UnaryExpressionDeref) (= (cs (g inner :CastExpression)) :CastExpressionCast))
+    (let [c (g inner :CastExpression)
+          call (g c :CastExpression)]
+      (when (and (= (cs call) :PostfixExpressionCall)
+                 (= "__builtin_va_arg_impl" (tsrc (g (g call :PostfixExpression) :Token))))
+        (let [t (type-name-form (g c :TypeName))]
+          (when (and (seq? t) (= (first t) '*))
+            (L 'va-arg (expr (g (g call :ArgumentExpressionList) :AssignmentExpression)) (second t))))))))
+
+(defn- offsetof-pattern
+  "cc's Builtin's __builtin_offsetof(type, member), ((__SIZE_TYPE__)&(((type*)0)->member)): (offsetof T path...)."
+  [inner]
+  (when (and (= (cs inner) :CastExpressionCast) (= (cs (g inner :CastExpression)) :UnaryExpressionAddrof))
+    (let [p0 (g (g inner :CastExpression) :CastExpression)
+          p (when (= (cs p0) :PrimaryExpressionExpr) (g p0 :ExpressionList))]
+      (loop [x p path ()]
+        (case (cs x)
+          :PostfixExpressionSelect (recur (g x :PostfixExpression) (conj path (keyword (tsrc (g x :Token2)))))
+          :PostfixExpressionIndex (recur (g x :PostfixExpression) (conj path (expr (g x :ExpressionList))))
+          :PostfixExpressionPSelect
+          (let [root (g x :PostfixExpression)
+                cast (when (= (cs root) :PrimaryExpressionExpr) (g root :ExpressionList))]
+            (when (and (= (cs cast) :CastExpressionCast) (= "0" (tsrc (g (g cast :CastExpression) :Token))))
+              (let [t (type-name-form (g cast :TypeName))]
+                (when (and (seq? t) (= (first t) '*))
+                  (Lv (concat ['offsetof (second t) (keyword (tsrc (g x :Token2)))] path))))))
+          nil)))))
+
+(defn- types-compatible-pattern [callee args]
+  (when (and (= "__ccgo__types_compatible_p" (tsrc (g callee :Token))) (= 2 (count args))
+             (every? #(and (= (cs %) :PostfixExpressionComplit) (nil? (g % :InitializerList))) args))
+    (L 'types-compatible? (type-name-form (g (first args) :TypeName)) (type-name-form (g (second args) :TypeName)))))
+
+(defn expr
+  "An expression node's form."
+  [n]
+  (if (or (nil? n) (= n :tnil))
+    nil
+    (recovered n
+      (fn []
+        (at n
+          (let [ty (nt n) c (cs n)]
+            (if-let [[lf rf] (binary-fields ty)]
+              (if (#{:MultiplicativeExpressionCast :AdditiveExpressionMul :ShiftExpressionAdd :RelationalExpressionShift
+                     :EqualityExpressionRel :AndExpressionEq :ExclusiveOrExpressionAnd :InclusiveOrExpressionXor
+                     :LogicalAndExpressionOr :LogicalOrExpressionLAnd} c)
+                (expr (g n rf))
+                (let [op (op-syms (tsrc (g n :Token)))
+                      l (expr (g n lf)) r (expr (g n rf))]
+                  (chain-op op l r)))
+              (case ty
+                "ExpressionList" (let [es (chain n :ExpressionList)]
+                                   (if (= 1 (count es)) (expr (g n :AssignmentExpression))
+                                       (Lv (cons 'comma (map #(expr (g % :AssignmentExpression)) es)))))
+                "ConstantExpression" (expr (g n :ConditionalExpression))
+                "AssignmentExpression"
+                (if (= c :AssignmentExpressionCond)
+                  (expr (g n :ConditionalExpression))
+                  (let [op (tsrc (g n :Token)) l (expr (g n :UnaryExpression)) r (expr (g n :AssignmentExpression))]
+                    (if (= op "=") (L 'set! l r) (L 'set! l (op-syms (subs op 0 (dec (count op)))) r))))
+                "ConditionalExpression"
+                (if (= c :ConditionalExpressionLOr)
+                  (expr (g n :LogicalOrExpression))
+                  (if-let [m (g n :ExpressionList)]
+                    (L '? (expr (g n :LogicalOrExpression)) (expr m) (expr (g n :ConditionalExpression)))
+                    (L '? (expr (g n :LogicalOrExpression)) (expr (g n :ConditionalExpression)))))
+                "CastExpression"
+                (if (= c :CastExpressionUnary)
+                  (expr (g n :UnaryExpression))
+                  (L 'conv (type-name-form (g n :TypeName)) (expr (g n :CastExpression))))
+                "UnaryExpression"
+                (case c
+                  :UnaryExpressionPostfix (expr (g n :PostfixExpression))
+                  :UnaryExpressionInc (L 'pre-inc! (expr (g n :UnaryExpression)))
+                  :UnaryExpressionDec (L 'pre-dec! (expr (g n :UnaryExpression)))
+                  :UnaryExpressionAddrof (L 'addr (expr (g n :CastExpression)))
+                  :UnaryExpressionDeref (L 'arbace.core/deref (expr (g n :CastExpression)))
+                  :UnaryExpressionPlus (L '+ (expr (g n :CastExpression)))
+                  :UnaryExpressionMinus (let [x (expr (g n :CastExpression))]
+                                          (if (num-lit? x) (negate x) (L '- x)))
+                  :UnaryExpressionCpl (L 'bit-not (expr (g n :CastExpression)))
+                  :UnaryExpressionNot (L 'not (expr (g n :CastExpression)))
+                  :UnaryExpressionSizeofExpr (L 'sizeof (expr (g n :UnaryExpression)))
+                  :UnaryExpressionSizeofType (L 'sizeof-type (type-name-form (g n :TypeName)))
+                  :UnaryExpressionAlignofExpr (L 'alignof (expr (g n :UnaryExpression)))
+                  :UnaryExpressionAlignofType (L 'alignof-type (type-name-form (g n :TypeName)))
+                  :UnaryExpressionLabelAddr (list 'label-addr (keyword (tsrc (g n :Token2))))
+                  :UnaryExpressionReal (L 'real (expr (g n :UnaryExpression)))
+                  :UnaryExpressionImag (L 'imag (expr (g n :UnaryExpression)))
+                  (refuse :expression (str "unary " c) n))
+                "PostfixExpression"
+                (case c
+                  :PostfixExpressionPrimary (expr (g n :PrimaryExpression))
+                  :PostfixExpressionIndex (L 'aget (expr (g n :PostfixExpression)) (expr (g n :ExpressionList)))
+                  :PostfixExpressionCall
+                  (let [callee (g n :PostfixExpression)
+                        args (mapv #(g % :AssignmentExpression) (chain (g n :ArgumentExpressionList) :ArgumentExpressionList))]
+                    (or (types-compatible-pattern callee args)
+                        (let [f (expr callee) as (map expr args)]
+                          (if (and (symbol? (value f)) (reserved-heads (value f)) (not (instance? Lit f)))
+                            (Lv (list* 'c/call f as))
+                            (Lv (cons f as))))))
+                  :PostfixExpressionSelect (L (sym (str ".-" (tsrc (g n :Token2)))) (expr (g n :PostfixExpression)))
+                  :PostfixExpressionPSelect
+                  (let [inner (expr (g n :PostfixExpression))
+                        m (sym (tsrc (g n :Token2)))]
+                    (if (and (seq? inner) (= (first inner) '->) (empty? (dissoc (meta inner) :line)))
+                      (Lv (concat inner [m]))
+                      (L '-> inner m)))
+                  :PostfixExpressionInc (L 'inc! (expr (g n :PostfixExpression)))
+                  :PostfixExpressionDec (L 'dec! (expr (g n :PostfixExpression)))
+                  :PostfixExpressionComplit
+                  (let [f (Lv (list* 'compound-lit (type-name-form (g n :TypeName)) (init-form (g n :InitializerList) true)))
+                        scs (keep #(storage-keys (cs %)) (g n :StorageClassSpecifiers))]
+                    (if (seq scs) (addm f (zipmap scs (repeat true))) f))
+                  (refuse :expression (str "postfix " c) n))
+                "PrimaryExpression"
+                (case c
+                  :PrimaryExpressionIdent (ident-tok (g n :Token))
+                  :PrimaryExpressionInt (int-literal (tsrc (g n :Token)))
+                  :PrimaryExpressionFloat (float-literal (tsrc (g n :Token)))
+                  (:PrimaryExpressionChar :PrimaryExpressionLChar) (char-literal (tsrc (g n :Token)))
+                  (:PrimaryExpressionString :PrimaryExpressionLString)
+                  (let [t (g n :Token)] (string-literal (or (.get ^java.util.Map (cx :pieces) t) [(tsrc t)])))
+                  :PrimaryExpressionExpr
+                  (let [inner (g n :ExpressionList)]
+                    (or (va-arg-pattern inner)
+                        (offsetof-pattern inner)
+                        (let [x (expr inner)
+                              m (if (instance? Lit x) (.-m ^Lit x) (meta x))]
+                          (if (:c/macro m) (addm x {:c/paren-outer true}) (addm x {:c/paren true})))))
+                  :PrimaryExpressionStmt (Lv (cons 'stmt-expr (compound-items (g n :CompoundStatement))))
+                  :PrimaryExpressionGeneric
+                  (let [gs (g n :GenericSelection)]
+                    (Lv (list* 'generic (expr (g gs :AssignmentExpression))
+                               (map (fn [l]
+                                      (let [a (g l :GenericAssociation)]
+                                        (if (= (cs a) :GenericAssociationDefault)
+                                          (V [:default (expr (g a :AssignmentExpression))])
+                                          (V [(type-name-form (g a :TypeName)) (expr (g a :AssignmentExpression))]))))
+                                    (chain (g gs :GenericAssociationList) :GenericAssociationList)))))
+                  (refuse :expression (str "primary " c) n))
+                (refuse :expression (str "node " ty) n)))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Initializers (§6.9)
+
+(defn- designators [dl]
+  (mapv (fn [l]
+          (let [d (g l :Designator)]
+            (case (cs d)
+              :DesignatorIndex (expr (g d :ConstantExpression))
+              :DesignatorIndex2 (V [(expr (g d :ConstantExpression)) (expr (g d :ConstantExpression2))])
+              :DesignatorField (keyword (tsrc (g d :Token2)))
+              :DesignatorField2 (keyword (tsrc (g d :Token))))))
+        (chain dl :DesignatorList)))
+
+(declare initializer)
+
+(defn init-form
+  "An InitializerList's elements (designations before their values)."
+  [il _]
+  (vec (mapcat (fn [l]
+                 (let [v (initializer (g l :Initializer))]
+                   (if-let [dn (g l :Designation)]
+                     (let [ds (designators (g dn :DesignatorList))
+                           field2 (= :DesignatorField2 (cs (g (g (g dn :DesignatorList) :Designator) :Designator)))]
+                       (if (and (= 1 (count ds)) (keyword? (first ds)))
+                         [(first ds) v]
+                         [(Lv (cons 'at ds)) v]))
+                     [v])))
+               (chain il :InitializerList))))
+
+(defn initializer [n]
+  (recovered n
+    (fn []
+      (case (cs n)
+        :InitializerExpr (expr (g n :AssignmentExpression))
+        :InitializerInitList (at n (Lv (cons 'init (init-form (g n :InitializerList) false))))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Declarations (§6)
+
+(defn static-assert-form [sa]
+  (let [e (expr (g sa :ConstantExpression))]
+    (if-let [m (g sa :Token4)]
+      (L 'c/static-assert e (string-literal (or (.get ^java.util.Map (cx :pieces) m) [(tsrc m)])))
+      (L 'c/static-assert e))))
+
+(defn- fn-type? [t] (and (seq? t) (= (first t) 'fn)))
+
+(defn- typedef-fn? [t] (and (symbol? t) (fn-type? (get @(cx :typedefs) t))))
+
+(defn- decl-form
+  "One declarator's form: c/typedef, c/declare, c/var."
+  [spec nt t m init asm]
+  (let [{:keys [typedef]} spec
+        nm (ident-tok nt)]
+    (cond
+      typedef (do (when (symbol? nm) (swap! (cx :typedefs) assoc nm t))
+                  (addm (L 'c/typedef (addm nm (dissoc m :tag)) t) {}))
+      (fn-type? t)
+      (let [[_ ps r] t]
+        (L 'c/declare (if (seq? nm) (addm nm m) (with-meta nm m)) (addm ps {:tag r})))
+      (typedef-fn? t)
+      (L 'c/declare (name-with nt t m))
+      :else
+      (let [x (name-with nt t m)
+            x (if asm (addm x {:c/asm-label asm}) x)]
+        (if (= init ::none) (L 'c/var x) (L 'c/var x init))))))
+
+(defn- asm-text [n] (when n (str/join " " (map tsrc (filter #(instance? PTok %) (tree-seq #(instance? HashMap %) children n))))))
+
+(defn- node-tokens
+  "The tokens of `n` in order."
+  [n]
+  (let [out (ArrayList.) stack (java.util.ArrayDeque.)]
+    (.push stack n)
+    (loop []
+      (when-not (.isEmpty stack)
+        (let [x (.pop stack)]
+          (cond
+            (instance? PTok x) (.add out x)
+            (instance? HashMap x) (doseq [c (children x)] (.push stack c))))
+        (recur)))
+    (vec (sort-by #(.-seq ^PTok %) out))))
+
+(defn- tokens-text ^String [ts]
+  (let [b (StringBuilder.)]
+    (doseq [[i ^PTok t] (map-indexed vector ts)]
+      (when (and (pos? i) (pos? (.length ^String (.-sep t)))) (.append b " "))
+      (.append b (.-src t)))
+    (utf8-decode (str b))))
+
+(defn declaration
+  "A Declaration's forms (§6.2-§6.8)."
+  [d]
+  (let [ff (case (cs d)
+             :DeclarationAssert [(static-assert-form (g d :StaticAssertDeclaration))]
+             :DeclarationAuto (let [[nt t] (declarator 'int (g d :Declarator))]
+                                [(L 'c/var (with-meta (ident-tok nt) {:c/auto-type true}) (initializer (g d :Initializer)))])
+             :DeclarationDecl
+             (let [spec (specifiers (g d :DeclarationSpecifiers))
+                   {type :type sm :meta implicit-int :implicit-int typedef :typedef} spec
+                   sm (cond-> sm implicit-int (assoc :c/implicit-int true))
+                   idls (chain (g d :InitDeclaratorList) :InitDeclaratorList)
+                   end (attrs (g d :AttributeSpecifierList))
+                   one (fn [idl i shared]
+                         (let [id (g idl :InitDeclarator)
+                               [nt t as] (declarator (if shared 'c/base type) (g id :Declarator))
+                               m (cond-> sm
+                                   as (assoc :c/attrs as)
+                                   (and (pos? i) (not shared)) (assoc :c/grouped true))
+                               m (if-let [a (attrs (g id :AttributeSpecifierList))] (assoc m :c/after-attrs a) m)
+                               m (if-let [a (attrs (g idl :AttributeSpecifierList))] (assoc m :c/list-attrs a) m)
+                               init (if (= (cs id) :InitDeclaratorInit) (initializer (g id :Initializer)) ::none)]
+                           (decl-form spec nt t m init (when-let [a (g id :Asm)] (tokens-text (node-tokens a))))))]
+               (cond
+                 ;; cc follows a file-scope static_assert with an empty declaration of its own
+                 (and (empty? idls) (nil? (g d :DeclarationSpecifiers))) []
+                 (empty? idls)
+                 (let [t (loop [t type] (if (and (seq? t) ('#{const volatile restrict atomic _Nonnull} (first t))) (recur (second t)) t))
+                       head (when (seq? t) (first t))]
+                   (if (and ('#{struct union enum} head) (= t type) (not typedef) (not implicit-int))
+                     [(addm (Lv (cons (sym (str "c/" head)) (rest t)))
+                            (cond-> (merge (meta t) (dissoc sm :c/implicit-int)) end (assoc :c/decl-end-attrs end)))]
+                     [(addm (L 'c/declare-specs type) (cond-> (assoc sm :c/typedef typedef) end (assoc :c/decl-end-attrs end)))]))
+                 (and (> (count idls) 1) (defines-type? type))
+                 (let [base (if typedef type type)]
+                   [(addm (Lv (list* 'c/group base (map-indexed (fn [i l] (one l i true)) idls)))
+                          (cond-> {} end (assoc :c/decl-end-attrs end)))])
+                 :else
+                 (let [fs (vec (map-indexed (fn [i l] (one l i false)) idls))]
+                   (if end (conj (pop fs) (addm (peek fs) {:c/decl-end-attrs end})) fs)))))]
+    ff))
+
+;; ---------------------------------------------------------------------------------------------
+;; Statements (§7.2, §7.3)
+
+(declare stmt-items function-definition)
+
+(defn- func-injected?
+  "Whether a block item is cc's __func__ declaration, injected at a function body's brace (parse.ae's
+  inject-func-tokens)."
+  [^HashMap bi lbrace]
+  (and lbrace (= (cs bi) :BlockItemDecl)
+       (let [d (g bi :Declaration)
+             toks (node-tokens d)]
+         (and (= 9 (count toks))
+              (= "__func__" (tsrc (nth toks 3)))
+              (every? #(and (identical? (.-pf ^PTok %) (.-pf ^PTok lbrace)) (= (.-po ^PTok %) (.-po ^PTok lbrace))) toks)))))
+
+(defn- item-kind [x] (cond (and (seq? x) (#{'c/var 'c/declare 'c/typedef 'c/struct 'c/union 'c/enum 'c/group 'c/static-assert
+                                             'c/defn 'c/local-labels 'c/declare-specs} (first x))) :decl
+                           :else :stmt))
+
+(defn- binding-elems
+  "A declaration form as a let's binding elements (§7.2): a name and its initializer, or the form."
+  [f]
+  (let [f (value f)]
+    (if (and (seq? f) (= (first f) 'c/var) (= 3 (count f))
+             (not (instance? Lit (nth f 2)))
+             (empty? (dissoc (meta f) :line))
+             (let [m (meta (second f))] (not (or (:static m) (:extern m) (:thread_local m)))))
+      [(second f) (nth f 2)]
+      [f])))
+
+(defn lets
+  "Block items ([:decl form] [:stmt form]) as a statement list, each run of declarations a let whose body
+  is the rest of the block."
+  [items]
+  (loop [items (seq items) out []]
+    (if-not items
+      out
+      (let [[k f] (first items)]
+        (if (= k :decl)
+          (let [[ds rest] (split-with #(= :decl (first %)) items)]
+            (conj out (let [l (Lv (list* 'let (V (mapcat #(binding-elems (second %)) ds)) (lets rest)))
+                            ln (some #(:line (meta (value (second %)))) ds)]
+                        (if ln (vary-meta l assoc :line ln) l))))
+          (recur (next items) (conj out f)))))))
+
+(defn- placed-at
+  "The directives placed before the item `i` of the statement list `owner`: [[offset form] ...]."
+  [owner i]
+  (when-let [^HashMap pl (cx :placed)]
+    (get (.get pl owner) (long i))))
+
+(defn- dirs-at [owner i] (map second (placed-at owner i)))
+
+(defn block-items
+  "A BlockItemList's items, with the directives placed among them."
+  [bil owner]
+  (let [lbrace (g owner :Token)
+        bis (vec (remove #(func-injected? % lbrace) (map #(g % :BlockItem) (chain bil :BlockItemList))))
+        own (when lbrace (.-pf ^PTok lbrace))
+        out (ArrayList.)]
+    (doseq [[i bi] (map-indexed vector bis)]
+      (doseq [df (dirs-at owner i)] (.add out [:stmt df]))
+      ;; an item an #include inside the body brought in is the directive's
+      (when (or (nil? own) (some #(identical? (.-pf ^PTok %) own) (take 64 (node-tokens bi))))
+        (case (cs bi)
+          :BlockItemDecl (let [d (g bi :Declaration)
+                               t (group-of d)
+                               fs (declaration d)]
+                           (doseq [f (if (and t (= 1 (count fs))) [(addm (first fs) {:c/macro-stmt t})] fs)]
+                             (.add out [:decl (at d f)])))
+          :BlockItemStmt (doseq [s (stmt-items (g bi :Statement))] (.add out [(if (and (seq? s) (= (first s) 'c/attr-decl)) :stmt :stmt) s]))
+          :BlockItemLabel (.add out [:decl (Lv (cons 'c/local-labels (map #(keyword (tsrc (g % :Token2))) (chain (g (g bi :LabelDeclaration) :IdentifierList) :IdentifierList))))])
+          :BlockItemFuncDef (.add out [:decl (function-definition (g bi :DeclarationSpecifiers) (g bi :Declarator) nil (g bi :CompoundStatement) nil bi)]))))
+    (doseq [df (dirs-at owner (count bis))] (.add out [:stmt df]))
+    (vec out)))
+
+(defn compound-items [cs]
+  (lets (block-items (g cs :BlockItemList) cs)))
+
+(defn- braced? [st] (and (= (cs st) :StatementCompound) (nil? (g st :AttributeSpecifierList)) (nil? (group-at st))))
+
+(defn- body
+  "A substatement's statement list (a compound statement's items, or the statement's)."
+  [st]
+  (if (braced? st)
+    (compound-items (g st :CompoundStatement))
+    (stmt-items st)))
+
+(defn- bare
+  "A form whose substatement was not a compound statement marked :c/bare (gcc -O0's code tells a body's
+  braces: a block's end is a nop)."
+  [form st]
+  (if (braced? st) form (addm form {:c/bare true})))
+
+(defn- branch
+  "An if's branch as one statement form: its one statement (not a label, a directive, a let or a do),
+  else (do items...) (N4: the print braces every branch)."
+  [st]
+  (let [items (body st)
+        x (first items)]
+    (if (and (= 1 (count items))
+             (not (and (seq? x) ('#{label case default c/directive c/define c/undef c/include c/pragma let do} (first x)))))
+      x
+      (Lv (cons 'do items)))))
+
+(defn- else-if [st]
+  (when (and st (= (cs st) :StatementSelection) (nil? (g st :AttributeSpecifierList)) (nil? (group-at st)))
+    (let [s (g st :SelectionStatement)]
+      (when (#{:SelectionStatementIf :SelectionStatementIfElse} (cs s)) s))))
+
+(defn- opt-expr [e] (if (nil? e) '_ (expr e)))
+
+(defn- expr-stmt [e]
+  (let [x (expr e)]
+    (cond
+      (and (seq? x) (= (first x) 'set!) (= 3 (count x)) (seq? (second x)) (= 'aget (first (second x)))
+           (empty? (dissoc (meta (second x)) :line)) (empty? (dissoc (meta x) :line)))
+      (with-meta (Lv (list* 'aset (concat (rest (second x)) [(nth x 2)]))) (meta x))
+      (instance? Lit x) (L 'c/expr x)
+      (not (iobj? x)) (list 'c/expr x)
+      :else x)))
+
+(defn stmt-items
+  "A Statement's items (labels are items before what they label)."
+  [st]
+  (let [t (group-of st)
+        items
+        (case (cs st)
+          :StatementLabeled
+          (let [ls (g st :LabeledStatement)
+                lbl (at ls (case (cs ls)
+                             :LabeledStatementLabel (list 'label (keyword (tsrc (g ls :Token))))
+                             :LabeledStatementCaseLabel (L 'case (expr (g ls :ConstantExpression)))
+                             :LabeledStatementRange (L 'case (expr (g ls :ConstantExpression)) (expr (g ls :ConstantExpression2)))
+                             :LabeledStatementDefault (list 'default)))
+                lbl (with-attrs lbl :c/attrs (g st :AttributeSpecifierList))]
+            (into [lbl] (when-let [s (g ls :Statement)] (stmt-items s))))
+          :StatementCompound [(at st (Lv (cons 'do (compound-items (g st :CompoundStatement)))))]
+          :StatementExpr
+          (let [es (g st :ExpressionStatement)
+                as (concat (attrs (g st :AttributeSpecifierList)) (attrs (g es :AttributeSpecifierList))
+                           (when-let [ds (g es :declarationSpecifiers)] (get-in (specifiers ds) [:meta :c/decl-attrs])))]
+            (cond
+              (g es :ExpressionList) [(at st (expr-stmt (g es :ExpressionList)))]
+              (seq as) [(at st (Lv (cons 'c/attr-decl as)))]
+              :else []))
+          :StatementSelection
+          (let [s (g st :SelectionStatement)]
+            [(at st
+               (case (cs s)
+                 :SelectionStatementIf (bare (Lv (list* 'when (expr (g s :ExpressionList)) (body (g s :Statement)))) (g s :Statement))
+                 :SelectionStatementIfElse
+                 (if (else-if (g s :Statement2))
+                   (let [bares (java.util.TreeSet.)
+                         clauses (loop [s s out []]
+                                   (when-not (braced? (g s :Statement)) (.add bares (long (+ 2 (count out)))))
+                                   (let [out (conj out (expr (g s :ExpressionList)) (branch (g s :Statement)))]
+                                     (if (= (cs s) :SelectionStatementIfElse)
+                                       (if-let [s2 (else-if (g s :Statement2))]
+                                         (recur s2 out)
+                                         (do (when-not (braced? (g s :Statement2)) (.add bares (long (+ 2 (count out)))))
+                                             (conj out :else (branch (g s :Statement2)))))
+                                       out)))]
+                     (addm (Lv (cons 'cond clauses)) (if (seq bares) {:c/bare (set bares)} {})))
+                   (addm (L 'if (expr (g s :ExpressionList)) (branch (g s :Statement)) (branch (g s :Statement2)))
+                         (let [b (cond-> #{} (not (braced? (g s :Statement))) (conj 2) (not (braced? (g s :Statement2))) (conj 3))]
+                           (if (seq b) {:c/bare b} {}))))
+                 :SelectionStatementSwitch (bare (Lv (list* 'switch (expr (g s :ExpressionList)) (body (g s :Statement)))) (g s :Statement))))])
+          :StatementIteration
+          (let [s (g st :IterationStatement)]
+            [(at st
+               (case (cs s)
+                 :IterationStatementWhile (bare (Lv (list* 'while (expr (g s :ExpressionList)) (body (g s :Statement)))) (g s :Statement))
+                 :IterationStatementDo (bare (Lv (list* 'do-while (expr (g s :ExpressionList)) (body (g s :Statement)))) (g s :Statement))
+                 :IterationStatementFor
+                 (bare (Lv (list* 'for (V (if-let [e (g s :ExpressionList)] [(expr e)] [])) (opt-expr (g s :ExpressionList2))
+                                  (opt-expr (g s :ExpressionList3)) (body (g s :Statement))))
+                       (g s :Statement))
+                 :IterationStatementForDecl
+                 (bare (Lv (list* 'for (V (mapcat binding-elems (declaration (g s :Declaration)))) (opt-expr (g s :ExpressionList))
+                                  (opt-expr (g s :ExpressionList2)) (body (g s :Statement))))
+                       (g s :Statement))))])
+          :StatementJump
+          (let [j (g st :JumpStatement)]
+            [(at st
+               (case (cs j)
+                 :JumpStatementGoto (list 'goto (keyword (tsrc (g j :Token2))))
+                 :JumpStatementGotoExpr (L 'goto* (expr (g j :ExpressionList)))
+                 :JumpStatementContinue (list 'continue)
+                 :JumpStatementBreak (list 'break)
+                 :JumpStatementReturn (if-let [e (g j :ExpressionList)] (L 'return (expr e)) (list 'return))))])
+          :StatementAsm [(at st (list 'c/asm (tokens-text (node-tokens (g (g st :AsmStatement) :Asm)))))]
+          (refuse :statement (str "statement " (cs st)) st))
+        items (if-let [as (and (not= (cs st) :StatementLabeled) (not= (cs st) :StatementExpr) (attrs (g st :AttributeSpecifierList)))]
+                (if (seq items) (assoc items 0 (addm (items 0) {:c/attrs as})) items)
+                items)]
+    (if (and t (= 1 (count items))) [(addm (items 0) {:c/macro-stmt t})] items)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Function definitions (§6.4)
+
+(defn function-definition
+  "A function definition's c/defn form."
+  [ds d dl cst def-attrs node]
+  (let [spec (specifiers ds)
+        {type :type sm :meta implicit-int :implicit-int} spec
+        [nt t as] (declarator type d)
+        _ (when-not (fn-type? t) (refuse :declarator "a function definition whose declarator is not a function's" d))
+        [_ ps r] t
+        kr (:c/kr (meta ps))
+        ps (if kr
+             (let [decls (into {} (for [l (chain dl :DeclarationList)
+                                        f (declaration (g l :Declaration))
+                                        :let [f (value f)]
+                                        :when (and (seq? f) (#{'c/var 'c/declare} (first f)))]
+                                    (let [x (second f)
+                                          x (if (= (first f) 'c/declare) (with-meta x (assoc (meta x) :tag (list 'fn (nth f 2) (:tag (meta (nth f 2)))))) x)]
+                                      [(name x) x])))]
+               (with-meta (mapv (fn [p] (or (when-let [x (get decls (name p))] (vary-meta x dissoc :c/grouped))
+                                            (with-meta p {:tag 'int :c/implicit-int true})))
+                                ps)
+                 {:c/kr true}))
+             ps)
+        m (cond-> sm as (assoc :c/attrs as) def-attrs (assoc :c/def-attrs def-attrs))
+        nm (ident-tok nt)
+        nm (if (seq? nm) (addm nm m) (with-meta nm m))
+        vm (cond-> (assoc (meta ps) :tag r) implicit-int (assoc :c/implicit-int true))]
+    (at node (Lv (list* 'c/defn nm (with-meta ps (if implicit-int (dissoc vm :tag) vm)) (compound-items cst))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The main file's directives (§9.2)
+
+(defn- directive-lines
+  "The main file's directive lines, active or not: [{:off :end :tokens}], each line's tokens (the port's
+  lexer, comments in the separators) from its # to its new-line."
+  []
+  (let [^CFile f (cx :main-file)
+        [ts _] (lex/tokens (lex/new-file "m" (cx :main-bytes)))
+        out (ArrayList.)]
+    (loop [ts (seq ts) start true cur nil]
+      (if-not ts
+        (when cur (.add out cur))
+        (let [^Tok t (first ts) c (.-ch t)]
+          (cond
+            (= c \newline) (do (when cur (.add out (assoc cur :end (inc (.-po t))))) (recur (next ts) true nil))
+            (and start (= c \#)) (recur (next ts) false {:off (.-po t) :tokens [t]})
+            cur (recur (next ts) false (update cur :tokens conj t))
+            :else (recur (next ts) false nil)))))
+    (vec out)))
+
+(defn- line-text ^String [toks]
+  (let [b (StringBuilder.)]
+    (doseq [[i ^Tok t] (map-indexed vector toks)]
+      (when (and (pos? i) (pos? (.length ^String (.-sep t)))) (.append b " "))
+      (.append b (.-src t)))
+    (utf8-decode (str b))))
+
+(defn- verb-of [d] (when-let [^Tok t (second (:tokens d))] (.-src t)))
+
+(defn- define-form [toks]
+  (let [[_ _ nm & body] toks
+        ^Tok nm nm
+        fnlike (and (seq body) (= (.-ch ^Tok (first body)) \() (zero? (.length ^String (.-sep ^Tok (first body)))))
+        [params body] (if fnlike
+                        (let [[ps more] (split-with #(not= (.-ch ^Tok %) \)) (rest body))]
+                          ;; GNU's named variadic parameter, x..., is & x
+                          [(loop [ps (seq ps) out []]
+                             (if-let [^Tok t (first ps)]
+                               (cond
+                                 (= (.-ch t) \,) (recur (next ps) out)
+                                 (and (= (.-ch t) :IDENTIFIER) (some-> ^Tok (second ps) .-ch (= :DDD)))
+                                 (recur (nnext ps) (conj out '& (sym (.-src t))))
+                                 (= (.-ch t) :DDD) (recur (next ps) (conj out '&))
+                                 :else (recur (next ps) (conj out (sym (.-src t)))))
+                               out))
+                           (rest more)])
+                        [nil body])
+        text (line-text body)]
+    (if params
+      (list 'c/define (sym (.-src nm)) params text)
+      (list 'c/define (sym (.-src nm)) text))))
+
+(defn- directive-form
+  "A directive line's form (§9.2)."
+  [d]
+  (let [toks (:tokens d)
+        verb (verb-of d)
+        text (str "#" (line-text (rest toks)))]
+    (case verb
+      "define" (if (> (count toks) 2) (define-form toks) (list 'c/directive text))
+      "undef" (if (> (count toks) 2) (list 'c/undef (sym (.-src ^Tok (nth toks 2)))) (list 'c/directive text))
+      ("include" "include_next")
+      (let [arg (line-text (drop 2 toks))
+            u (get (cx :unit-of-off) (:off d))]
+        (cond-> (list 'c/include arg)
+          (= verb "include_next") (concat [:next true])
+          u (concat [:unit (sym u)])
+          true (->> (apply list))))
+      "pragma" (list 'c/pragma (line-text (drop 2 toks)))
+      (list 'c/directive text))))
+
+(def ^:private cond-verbs #{"if" "ifdef" "ifndef" "elif" "elifdef" "elifndef" "else" "endif"})
+
+(defn- place-directives!
+  "Places the main file's active directives (those the preprocessor executed: the layer's offsets, and
+  every directive of an executed conditional family) between the items of the statement lists of `tu`
+  (the translation unit's top level and the function bodies): (cx :placed) maps a list's owner to
+  {item-index [forms]}. A conditional family that does not fall between the items of one list is left
+  out (:full keeps it); so is any directive inside an item."
+  [tu-items layer]
+  (let [dls (directive-lines)
+        executed (set (keep #(when (and (= (:file %) (cx :main-name)) (not= (:directive %) "enter")) (:off %)) layer))
+        ;; conditional families: the offsets of each family's lines, by nesting
+        fam (HashMap.) ; off -> family id
+        fam-lines (HashMap.)
+        _ (loop [ds (seq dls) stack () nid 0]
+            (when ds
+              (let [d (first ds) v (verb-of d)]
+                (cond
+                  (#{"if" "ifdef" "ifndef"} v) (do (.put fam (:off d) nid) (.put fam-lines nid [(:off d)]) (recur (next ds) (conj stack nid) (inc nid)))
+                  (and (#{"elif" "elifdef" "elifndef" "else" "endif"} v) (seq stack))
+                  (let [id (first stack)]
+                    (.put fam (:off d) id) (.put fam-lines id (conj (.get fam-lines id) (:off d)))
+                    (recur (next ds) (if (= v "endif") (rest stack) stack) nid))
+                  :else (recur (next ds) stack nid)))))
+        active (filter (fn [d]
+                         (if-let [id (.get fam (:off d))]
+                           (contains? executed (first (.get fam-lines id)))
+                           (contains? executed (:off d))))
+                       dls)
+        ;; inside an inactive group: a line between a family's line not taken and its next
+        inactive-ranges (let [taken (into {} (keep (fn [e] (when (contains? e :taken) [(:off e) (:taken e)])) layer))]
+                          (for [[id offs] fam-lines
+                                :when (contains? executed (first offs))
+                                [a b] (partition 2 1 offs)
+                                :when (not (get taken a))]
+                            [a b]))
+        active (remove (fn [d] (and (not (.get fam (:off d)))
+                                    (some (fn [[a b]] (< a (:off d) b)) inactive-ranges)))
+                       active)
+        placed (HashMap.)
+        where (HashMap.)
+        place! (fn [owner items d]
+                 ;; items: the list's nodes; d placed before the first item starting after it
+                 (let [off (:off d)
+                       idx (loop [i 0]
+                             (cond
+                               (>= i (count items)) i
+                               (not (has-main? (nth items i))) (recur (inc i))
+                               (> (min-po (nth items i)) off) i
+                               :else (recur (inc i))))
+                       ok (or (zero? idx)
+                              (let [prev (last (filter has-main? (take idx items)))]
+                                (or (nil? prev) (< (max-end prev) off))))]
+                   (when ok
+                     (.put where (:off d) [owner idx])
+                     true)))]
+    (letfn [(lists-of [owner items]
+              ;; directives inside an item go to its nested lists
+              (for [it items :when (has-main? it)
+                    sub (nested it)]
+                sub))
+            (nested [it]
+              ;; [owner items] of the statement lists inside a node
+              (let [out (ArrayList.)
+                    stack (java.util.ArrayDeque.)]
+                (.push stack it)
+                (loop []
+                  (when-not (.isEmpty stack)
+                    (let [x (.pop stack)]
+                      (when (instance? HashMap x)
+                        (if (= (nt x) "CompoundStatement")
+                          (.add out [x (vec (remove #(func-injected? % (g x :Token)) (map #(g % :BlockItem) (chain (g x :BlockItemList) :BlockItemList))))])
+                          (doseq [c (children x)] (when (instance? HashMap c) (.push stack c))))))
+                    (recur)))
+                (vec out)))
+            (place-in [owner items ds]
+              (doseq [d ds]
+                (let [off (:off d)
+                      inside (first (filter #(and (has-main? %) (<= (min-po %) off) (< off (max-end %))) items))]
+                  (if inside
+                    (let [subs (nested inside)
+                          sub (first (filter (fn [[o _]] (and (has-main? o) (<= (min-po o) off) (< off (max-end o)))) subs))]
+                      (when sub
+                        (place-in (first sub) (second sub) [d])))
+                    (place! owner items d)))))]
+      (place-in :top tu-items active))
+    ;; a conditional family's lines all in one list, else none of them
+    (let [drop (HashSet.)]
+      (doseq [[id offs] fam-lines]
+        (let [ws (map #(.get where %) offs)]
+          (when (or (some nil? ws) (not (apply = (map first ws))))
+            (doseq [o offs] (.add drop o)))))
+      (doseq [d active
+              :let [w (.get where (:off d))]
+              :when (and w (not (.contains drop (:off d))))]
+        (let [[owner idx] w
+              ^HashMap m (or (.get placed owner) (let [m (HashMap.)] (.put placed owner m) m))]
+          (.put m idx (conj (or (.get m idx) []) [(:off d) (vary-meta (directive-form d) assoc :line (line-of (:off d)))])))))
+    placed))
+
+;; ---------------------------------------------------------------------------------------------
+;; The groups of tokens a macro invocation made (§9.4)
+
+(defn- compute-groups!
+  "The invocations' token groups of the main file: (cx :groups) maps a group's first sequence number to
+  {:max last-seq :text invocation-text}."
+  [all-toks]
+  (let [^bytes src (cx :main-bytes)
+        n (alength src)
+        src-at (fn [^long po ^String s]
+                 (and (<= (+ po (count s)) n)
+                      (loop [i 0] (or (= i (count s)) (and (= (bit-and (aget src (int (+ po i))) 0xff) (int (.charAt s i))) (recur (inc i)))))))
+        [sts _] (lex/tokens (lex/new-file "m" src))
+        sts (vec (remove #(= (.-ch ^Tok %) \newline) sts))
+        starts (long-array (map #(.-po ^Tok %) sts))
+        groups (HashMap.)
+        ts (vec all-toks)
+        cnt (count ts)]
+    (loop [i 0]
+      (when (< i cnt)
+        (let [^PTok t (ts i)
+              po (.-po t)
+              j (loop [j (inc i)] (if (and (< j cnt) (= (.-po ^PTok (ts j)) po)) (recur (inc j)) j))
+              k (- j i)]
+          (when (and (or (> k 1) (not (src-at po (.-src t))))
+                     ;; an expansion holding __LINE__'s or __COUNTER__'s value is printed expanded: the
+                     ;; invocation would give the print's line
+                     (not (some (fn [x] (when-let [m (.-m ^PTok x)] (#{"__LINE__" "__COUNTER__"} (.-src ^Tok (:name m)))))
+                                (subvec ts i j))))
+            (let [q (if (< j cnt) (.-po ^PTok (ts j)) n)
+                  si (java.util.Arrays/binarySearch starts po)]
+              (when (and (>= si 0) (= (.-ch ^Tok (sts si)) :IDENTIFIER))
+                (let [nxt (inc si)
+                      end (if (and (< nxt (count sts)) (= (.-ch ^Tok (sts nxt)) \() (< (.-po ^Tok (sts nxt)) q))
+                            (loop [m nxt depth 0]
+                              (cond
+                                (>= m (count sts)) nil
+                                (= (.-ch ^Tok (sts m)) \() (recur (inc m) (inc depth))
+                                (= (.-ch ^Tok (sts m)) \)) (if (= depth 1) m (recur (inc m) (dec depth)))
+                                :else (recur (inc m) depth)))
+                            si)]
+                  (when (and end (or (= end si) (< (.-po ^Tok (sts end)) q)))
+                    (.put groups (.-seq t) {:max (.-seq ^PTok (ts (dec j)))
+                                            :text (line-text (subvec sts si (inc end)))}))))))
+          (recur j))))
+    groups))
+
+;; ---------------------------------------------------------------------------------------------
+;; The translation unit
+
+(defn- tu-tokens
+  "The main file's tokens of the tree, in order, each once (cc's __func__ tokens and a label's
+  synthesized ; left out)."
+  [root]
+  (let [seen (HashSet.) out (ArrayList.) stack (java.util.ArrayDeque.)]
+    (.push stack root)
+    (loop []
+      (when-not (.isEmpty stack)
+        (let [x (.pop stack)]
+          (cond
+            (instance? PTok x) (when (and (main-tok? x) (.add seen (.-seq ^PTok x))) (.add out x))
+            (instance? HashMap x)
+            (if (and (= (nt x) "CompoundStatement") (g x :Token))
+              (let [lb (g x :Token)]
+                (.push stack (g x :Token2))
+                (doseq [bi (map #(g % :BlockItem) (chain (g x :BlockItemList) :BlockItemList))
+                        :when (not (func-injected? bi lb))]
+                  (.push stack bi))
+                (.push stack lb))
+              (doseq [c (children x)] (.push stack c)))))
+        (recur)))
+    (vec (sort-by #(.-seq ^PTok %) out))))
+
+(defn- header-root
+  "The main-file #include that brought `file` in (the layer's entries), its offset, or nil."
+  [^String file]
+  (let [^HashMap from (cx :enter-from)]
+    (loop [f file seen #{}]
+      (when-let [[parent off] (.get from f)]
+        (cond
+          (= parent (cx :main-name)) off
+          (seen parent) nil
+          :else (recur parent (conj seen f)))))))
+
+(defn- item-file [n] (when-let [t (first (node-tokens n))] (when-let [^CFile f (.-pf ^PTok t)] (.-name f))))
+
+(defn sha16 ^String [^String s]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))]
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (take 8 d)))))
+
+(defn external
+  "An ExternalDeclaration's forms."
+  [ed]
+  (case (cs ed)
+    :ExternalDeclarationFuncDef
+    (let [fd (g ed :FunctionDefinition)]
+      [(function-definition (g fd :DeclarationSpecifiers) (g fd :Declarator) (g fd :DeclarationList) (g fd :CompoundStatement)
+                            (attrs (g fd :AttributeSpecifierList)) fd)])
+    :ExternalDeclarationDecl
+    (let [d (g ed :Declaration)
+          t (group-of d)
+          fs (mapv #(at d %) (declaration d))]
+      (if (and t (= 1 (count fs))) [(addm (first fs) {:c/macro-stmt t})] fs))
+    :ExternalDeclarationAsmStmt [(at ed (list 'c/asm (tokens-text (node-tokens (g (g ed :AsmStatement) :Asm)))))]
+    :ExternalDeclarationEmpty []
+    (refuse :declaration (str "external declaration " (cs ed)) ed)))
+
+(defn convert
+  "The forms of a parse `r` ({:tree :layer}, arbace.repr.c.parse) of the main file `main-name` (its bytes
+  `main-bytes`) read at the standard `std` (a keyword): {:forms [the main unit's forms], :units {ns
+  {:header raw :path p :forms [...]}}, :items [...]} (the main file's items with their extents, for
+  :full), or {:refused class :message m}."
+  [r ^String main-name ^bytes main-bytes std opts]
+  (try
+    (let [tree (:tree r)
+          eds (map #(g % :ExternalDeclaration) (chain tree :TranslationUnit))
+          ranges (IdentityHashMap.)
+          main-file (some (fn [ed] (some (fn [t] (when (and (instance? PTok t) (.-pf ^PTok t) (= (.-name ^CFile (.-pf ^PTok t)) main-name)) (.-pf ^PTok t)))
+                                         (node-tokens ed)))
+                          eds)
+          enter-from (HashMap.)
+          unit-of-off (HashMap.)]
+      (when (some #(and (= (:directive %) "enter") (= (:path %) main-name)) (:layer r))
+        (refuse :self-include "the main file includes itself: its tokens are the main file's twice"))
+      (doseq [e (:layer r) :when (= (:directive e) "enter")]
+        (when-not (.containsKey enter-from (:path e))
+          (.put enter-from (:path e) [(:from e) (:off e)])))
+      (binding [*cx* {:ranges ranges :main-file main-file :main-name main-name :main-bytes main-bytes :std std
+                      :pieces parse/strlit-pieces :typedefs (atom {}) :claimed (HashSet.)
+                      :enter-from enter-from :unit-of-off unit-of-off :line-starts (line-starts main-bytes)}]
+        (compute-ranges! ranges tree)
+        (let [groups (when main-file (compute-groups! (tu-tokens tree)))
+              eds (vec (remove #(contains? #{"<builtin>" "<predefined>"} (item-file %)) eds))
+              _ (doseq [ed eds]
+                  (when (and (has-other? ed) (has-main? ed))
+                    (refuse :split-declaration "a declaration that begins in one file and ends in another" ed)))
+              main-eds (vec (filter has-main? eds))
+              ;; header units first (their typedefs are the main file's too): each main-file include's
+              ;; items, by the include that brought their file in
+              hforms (java.util.LinkedHashMap.)
+              units (java.util.LinkedHashMap.)]
+          (doseq [ed eds :when (not (has-main? ed))]
+            (when-let [off (header-root (item-file ed))]
+              (let [^ArrayList a (or (.get hforms off) (let [a (ArrayList.)] (.put hforms off a) a))]
+                (.addAll a (external ed)))))
+          (doseq [e (:layer r) :when (and (= (:directive e) "enter") (= (:from e) main-name))]
+            (let [fs (vec (or (.get hforms (:off e)) []))
+                  ns (str "c.h." (sha16 (str/join "\n" (map #(binding [*print-meta* true] (pr-str %)) fs))))]
+              (.put unit-of-off (:off e) ns)
+              (.put units ns {:header (:raw e) :path (:path e) :forms fs})))
+          (binding [*cx* (assoc *cx* :groups groups)]
+            (let [placed (place-directives! main-eds (:layer r))]
+              (binding [*cx* (assoc *cx* :placed placed)]
+                (let [out (ArrayList.)
+                      items (ArrayList.)]
+                  (doseq [[i ed] (map-indexed vector main-eds)]
+                    (doseq [[off df] (placed-at :top i)] (.add out df) (.add items [off df]))
+                    (let [fs (external ed)]
+                      (doseq [f fs] (.add out f))
+                      (when (seq fs) (.add items [(min-po ed) (first fs)]))))
+                  (doseq [[off df] (placed-at :top (count main-eds))] (.add out df) (.add items [off df]))
+                  {:forms (vec out) :units (into {} units) :items (vec items)})))))))
+    (catch arbace.lang.ExceptionInfo e
+      (if-let [c (:c/refuse (ex-data e))]
+        {:refused c :message (ex-message e)}
+        (throw e)))))

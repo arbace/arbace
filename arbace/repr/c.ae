@@ -1,0 +1,147 @@
+(ns arbace.repr.c
+  "repr/c, C's bridge (doc/c/SPEC.md; doc/C23-SURVEY.md, \"As built: C3b\"): `read-c` reads a C file
+  into C forms (the port of cc's lexer, preprocessor and parser, arbace.repr.c.parse, and the converter,
+  arbace.repr.c.convert), `unit-texts` writes them as .ae text (arbace.repr.c.layout), `print-c` prints
+  forms back to C (arbace.repr.c.print): mode :lines, cemit's canonical spelling, and mode :full, the
+  original byte for byte. `-main` is bin/repr-c read and print."
+  (:require [arbace.repr.c.lex :as lex]
+            [arbace.repr.c.parse :as parse]
+            [arbace.repr.c.convert :as convert]
+            [arbace.repr.c.print :as print]
+            [arbace.repr.c.layout :as layout]
+            [arbace.repr.c.host :as host]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+(defn ns-name-of
+  "A translation unit's namespace (§4.1): its path relative to its root, / as ., the extension
+  dropped, a . inside a base name as _."
+  ^String [^String path]
+  (let [p (str/replace path #"^\./" "")
+        parts (str/split p #"/")
+        base (last parts)
+        base (let [i (.lastIndexOf ^String base ".")] (if (pos? i) (subs base 0 i) base))
+        parts (concat (butlast parts) [base])]
+    (str "c." (str/join "." (map #(str/replace % "." "_") parts)))))
+
+(defn- base-name ^String [^String p] (let [i (.lastIndexOf p "/")] (if (neg? i) p (subs p (inc i)))))
+
+(defn read-c
+  "Reads the C file `name` (relative to (:base cfg)) with the configuration `cfg`
+  (arbace.repr.c.host/config's) and the file configuration `fc`: {:ns :file-form :forms :units}, or
+  {:error [messages]} (the reference's rejection is the read's: cc's messages, §9.5) or {:refused class
+  :message m}. `full` reads mode :full: each top-level form holds its text (:c/text), c/file the text
+  before the first (:c/head)."
+  [cfg fc ^String name full]
+  (let [r (parse/parse cfg name)
+        path (if (.startsWith name "/") name (str (:base cfg) "/" name))
+        bytes (lex/read-bytes path)]
+    (cond
+      (:panic r) {:error [(str "panic: " (:panic r))] :class :panic}
+      (or (seq (:errors r)) (:notree r)) {:error (vec (:errors r))}
+      :else
+      (let [c (convert/convert r name bytes (keyword (:std fc)) {})]
+        (if (:refused c)
+          c
+          (let [file-form (cond-> (list 'c/file (base-name name) :std (keyword (:std fc)))
+                            (seq (:args fc)) (concat [:args (vec (:args fc))])
+                            (not= (ns-name-of name) (ns-name-of (base-name name))) (concat [:name name])
+                            full (concat [:positions :full])
+                            true (->> (apply list)))
+                forms (:forms c)]
+            (if-not full
+              (assoc c :ns (ns-name-of name) :file-form file-form)
+              (let [offs (java.util.IdentityHashMap.)
+                    _ (doseq [[off f] (:items c)] (.put offs f off))
+                    n (alength ^bytes bytes)
+                    text (String. ^bytes bytes "ISO-8859-1")
+                    starts (vec (keep #(.get offs %) forms))]
+                (if (not= starts (sort starts))
+                  {:refused :full-order :message "convert: the items' texts are not in the file's order"}
+                  (let [firsts (vec (keep-indexed (fn [i f] (when (.containsKey offs f) i)) forms))
+                        ends (assoc (zipmap firsts (concat (rest starts) [n])) nil nil)
+                        forms (vec (map-indexed (fn [i f]
+                                                  (if-let [o (.get offs f)]
+                                                    (vary-meta f assoc :c/text (subs text (int o) (int (get ends i))))
+                                                    (vary-meta f assoc :c/text "")))
+                                                forms))
+                        head (subs text 0 (int (or (first starts) n)))]
+                    (assoc c :ns (ns-name-of name) :forms forms
+                           :file-form (with-meta file-form {:c/head head}))))))))))))
+
+(defn unit-texts
+  "A read's .ae files: {relative-path text}, the main unit's NAME.ae and its header units' c/h/D.ae."
+  [rd ^String name]
+  (into {(str name ".ae") (layout/unit-text (str "(in-ns '" (:ns rd) ") " (layout/form-str (:file-form rd))) (:forms rd))}
+        (for [[ns u] (:units rd)]
+          [(str "c/h/" (subs ns 4) ".ae")
+           (str (str/join "\n" (cons (str "(in-ns '" ns ") " (layout/form-str (list 'c/header (:header u) :path (:path u))))
+                                     (map layout/form-str (:forms u))))
+                "\n")])))
+
+(defn read-unit-text
+  "The forms of an .ae text: [file-form forms] (its in-ns form left out)."
+  [^String text]
+  (let [r (arbace.lang.LineNumberingPushbackReader. (java.io.StringReader. text))
+        eof (Object.)
+        forms (loop [out []]
+                (let [x (read r false eof)]
+                  (if (identical? x eof) out (recur (conj out x)))))
+        forms (remove #(and (seq? %) (= (first %) 'in-ns)) forms)]
+    [(first forms) (vec (rest forms))]))
+
+(defn print-c
+  "A unit's C text: mode :full when its c/file form says :positions :full, else :lines."
+  ^String [file-form forms]
+  (if (some #{:full} file-form)
+    (print/print-full file-form forms)
+    (binding [print/*std* (second (drop-while #(not= % :std) file-form))]
+      (print/print-unit forms))))
+
+(defn- spit-latin1 [^String path ^String s]
+  (when-let [p (.getParentFile (java.io.File. path))] (.mkdirs p))
+  (java.nio.file.Files/write (.toPath (java.io.File. path)) (.getBytes s "ISO-8859-1")
+                             ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+(defn- opts-and-files [args]
+  (loop [as (seq args) out [] flags {}]
+    (if as
+      (let [a (first as)]
+        (cond
+          (= a "--std") (recur (nnext as) (conj out (str "-std=" (second as))) flags)
+          (= a "--full") (recur (next as) out (assoc flags :full true))
+          (= a "-o") (recur (nnext as) out (assoc flags :out (second as)))
+          :else (recur (next as) (conj out a) flags)))
+      (let [[opts files] (split-with #(.startsWith ^String % "-") out)]
+        [(vec opts) (vec files) flags]))))
+
+(defn -main
+  "bin/repr-c read [--full] [--std S] [OPTION...] [-o DIR] FILE...: each FILE's forms as FILE.ae (and
+  its header units' c/h/D.ae) under DIR (default: beside on the standard output);
+  bin/repr-c print FILE.ae...: each unit's C text on the standard output."
+  [host-dir verb & args]
+  (case verb
+    "read"
+    (let [h (host/load-host host-dir)
+          [opts files flags] (opts-and-files args)
+          fc (host/file-config opts "gnu23")
+          st (atom 0)]
+      (doseq [f files]
+        (let [rd (read-c (host/config h fc ".") fc f (:full flags))]
+          (cond
+            (:error rd) (do (binding [*out* *err*] (doseq [e (:error rd)] (println e))) (reset! st 1))
+            (:refused rd) (do (binding [*out* *err*] (println (str f ": refused (" (name (:refused rd)) "): " (:message rd)))) (reset! st 1))
+            :else
+            (let [ts (unit-texts rd f)]
+              (if-let [o (:out flags)]
+                (doseq [[p t] ts] (let [out (str o "/" p)] (.mkdirs (.getParentFile (java.io.File. out))) (spit out t)))
+                (print (get ts (str f ".ae"))))))))
+      (flush)
+      (System/exit @st))
+    "print"
+    (do (doseq [f args]
+          (let [[ff forms] (read-unit-text (slurp f))]
+            (.write ^java.io.Writer *out* (print-c ff forms))))
+        (flush))
+    (do (println "repr/c: read or print") (System/exit 2))))
