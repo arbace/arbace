@@ -1,0 +1,2241 @@
+;; Ported from modernc.org/cc/v4 v4.29.7 as go-whim carries it (https://github.com/arbace/go-whim at
+;; 80c49bf53cd6340487ac623f3d6d135b77ac1db6, crefactor/cc/parser.go and c23.go, with the parts of
+;; ast.go, ast2.go, cc.go and etc.go the parser uses: Scope, the declarators' names, the keywords,
+;; Builtin, canonicalizeStrlitTail, errors.err), whose notice follows (LICENSE.md, "cc
+;; (modernc.org/cc/v4) and go-whim's C23 delta"):
+;;
+;; Copyright 2021 The CC Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+;;
+;; go-whim's C23 delta (c23.go's productions and the hooks marked "go-whim" in parser.go, followed line
+;; for line here and marked so) is licensed to Arbace under the EPL-1.0 (doc/C23-SURVEY.md, CS37 (a));
+;; so are Arbace's own changes, each marked "Arbace:" below.
+
+(ns arbace.repr.c.parse
+  "C's parser, after cc's (modernc.org/cc/v4 parser.go with go-whim's C23 productions, c23.go;
+  doc/C23-SURVEY.md, \"As built: C3\"): the recursive descent over arbace.repr.c.pp's stream, pulled as
+  cc's parser pulls it (its lookahead, its sequence numbers, the typedef names told from identifiers by
+  the scopes it builds as it goes), giving cc's tree (arbace.repr.c.tree: each node a map of its type,
+  its case and its fields under cc's names) and cc's errors, in cc's order. `parse` reads a file;
+  `-main` is bin/repr-c parse."
+  (:require [arbace.repr.c.lex :as lex]
+            [arbace.repr.c.pp :as pp]
+            [arbace.repr.c.host :as host]
+            [arbace.repr.c.tree :as tree :refer [node]]
+            [arbace.string :as str])
+  (:import [arbace.repr.c.lex Tok]
+           [arbace.repr.c.tree PTok]
+           [java.util ArrayList HashMap]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; Keywords (parser.go's defaultKeywords, cc.go's c23Keywords)
+
+(def default-keywords
+  {"_Bool" :BOOL "_Complex" :COMPLEX "_Imaginary" :IMAGINARY "auto" :AUTO "break" :BREAK "case" :CASE
+   "char" :CHAR "const" :CONST "continue" :CONTINUE "default" :DEFAULT "do" :DO "double" :DOUBLE
+   "else" :ELSE "enum" :ENUM "extern" :EXTERN "float" :FLOAT "for" :FOR "goto" :GOTO "if" :IF
+   "inline" :INLINE "int" :INT "long" :LONG "register" :REGISTER "restrict" :RESTRICT "return" :RETURN
+   "short" :SHORT "signed" :SIGNED "sizeof" :SIZEOF "static" :STATIC "struct" :STRUCT "switch" :SWITCH
+   "typedef" :TYPEDEF "union" :UNION "unsigned" :UNSIGNED "void" :VOID "volatile" :VOLATILE "while" :WHILE
+   ;; C11
+   "_Alignas" :ALIGNAS "_Alignof" :ALIGNOF "_Atomic" :ATOMIC "_Generic" :GENERIC "_Noreturn" :NORETURN
+   "_Static_assert" :STATICASSERT "_Thread_local" :THREADLOCAL
+   ;; GCC/clang/other extensions
+   "_Decimal128" :DECIMAL128 "_Decimal32" :DECIMAL32 "_Decimal64" :DECIMAL64 "_Float128" :FLOAT128
+   "_Float128x" :FLOAT128X "_Float16" :FLOAT16 "__fp16" :FLOAT16 "_Float32" :FLOAT32 "_Float32x" :FLOAT32X
+   "_Float64" :FLOAT64 "_Float64x" :FLOAT64X "_Nonnull" :NONNULL "__alignof" :ALIGNOF "__alignof__" :ALIGNOF
+   "__asm" :ASM "__asm__" :ASM "__attribute" :ATTRIBUTE "__attribute__" :ATTRIBUTE "__auto_type" :AUTOTYPE
+   "__bf16" :BF16 "__complex" :COMPLEX "__complex__" :COMPLEX "__const" :CONST "__declspec" :DECLSPEC
+   "__float128" :FLOAT128 "__imag" :IMAG "__imag__" :IMAG "__inline" :INLINE "__inline__" :INLINE
+   "__int128" :INT128 "__int128_t" :INT128 "__label__" :LABEL "__real" :REAL "__real__" :REAL
+   "__restrict" :RESTRICT "__restrict__" :RESTRICT "__signed" :SIGNED "__signed__" :SIGNED
+   "__thread" :THREADLOCAL "__typeof" :TYPEOF "__typeof__" :TYPEOF "__uint128_t" :UINT128
+   "__volatile" :VOLATILE "__volatile__" :VOLATILE "asm" :ASM "typeof" :TYPEOF
+   "_BitInt" :BITINT}) ; go-whim: C23
+
+(def c23-keywords
+  {"alignas" :ALIGNAS "alignof" :ALIGNOF "bool" :BOOL "static_assert" :STATICASSERT
+   "thread_local" :THREADLOCAL
+   "constexpr" :CONSTEXPR "typeof_unqual" :TYPEOF}) ; go-whim
+
+(defn stdc-version
+  "cc.go's stdcVersion: __STDC_VERSION__'s value in the predefined text, 0 for none."
+  ^long [^String predefined]
+  (let [prefix "#define __STDC_VERSION__ "]
+    (or (some (fn [^String l]
+                (when (.startsWith l prefix)
+                  (let [s (str/trim (subs l (count prefix)))
+                        s (if (.endsWith s "L") (subs s 0 (dec (count s))) s)]
+                    (try (Long/parseLong s) (catch Exception _ 0)))))
+              (str/split-lines predefined))
+        0)))
+
+(defn keywords
+  "The keyword set cc's configuration gives for `predefined` (go-whim's presetConfig)."
+  [^String predefined]
+  (if (>= (stdc-version predefined) 202000) (merge default-keywords c23-keywords) default-keywords))
+
+;; cc.go's Builtin, the second source of every parse (go-whim's users and tools/ccdump pass it).
+(def builtin
+  "
+#define __extension__
+#define __restrict_arr restrict
+
+#if __STDC_VERSION__ >= 202000L
+/* C23 keywords, no longer defined as macros by <stdbool.h> and <stddef.h>. */
+#ifndef true
+#define true 1
+#endif
+#ifndef false
+#define false 0
+#endif
+#ifndef nullptr
+#define nullptr ((void*)0)
+#endif
+#endif
+
+#ifndef __builtin_va_list
+#define __builtin_va_list __builtin_va_list
+typedef void *__builtin_va_list;
+#endif
+
+#ifndef __builtin_va_arg
+#define __builtin_va_arg __builtin_va_arg
+#define __builtin_va_arg(va, type) (*(type*)__builtin_va_arg_impl(va))
+#endif
+
+#define __builtin_va_copy(dst, src) dst = src
+
+#define __builtin_offsetof(type, member) ((__SIZE_TYPE__)&(((type*)0)->member))
+#define __builtin_types_compatible_p(t1, t2) __ccgo__types_compatible_p((t1){}, (t2){})
+#define __builtin_bit_cast(type, expr) (((union { __typeof__(expr) __ccgo_from; type __ccgo_to; }){ .__ccgo_from = (expr) }).__ccgo_to)
+
+int __predefined_declarator;
+
+#ifdef __SIZE_TYPE__
+typedef __SIZE_TYPE__ __predefined_size_t;
+#endif
+
+#ifdef __WCHAR_TYPE__
+typedef __WCHAR_TYPE__ __predefined_wchar_t;
+#endif
+
+#ifdef __PTRDIFF_TYPE__
+typedef __PTRDIFF_TYPE__ __predefined_ptrdiff_t;
+#endif
+
+#define __FUNCTION__ __func__
+#define __PRETTY_FUNCTION__ __func__
+
+#ifdef __clang__
+#define __builtin_convertvector(src, type) ((type)(src))
+#endif
+
+#if sizeof(double) == sizeof(long double)
+#define __builtin_huge_vall(x) __builtin_huge_val(x)
+#endif
+
+__SIZE_TYPE__ __builtin_object_size(void *p, int i);
+__SIZE_TYPE__ __builtin_strcspn(const char *s, const char *reject);
+__SIZE_TYPE__ __builtin_strlen(const char *s);
+__SIZE_TYPE__ __builtin_strspn(const char *s, const char *accept);
+__UINT16_TYPE__ __builtin_bswap16 (__UINT16_TYPE__ x);
+__UINT32_TYPE__ __builtin_bswap32 (__UINT32_TYPE__ x);
+__UINT64_TYPE__ __builtin_bswap64 (__UINT64_TYPE__ x);
+char *__builtin___strcpy_chk(char *dest, const char *src, __SIZE_TYPE__ n);
+char *__builtin_strcasestr(const char *haystack, const char *needle);
+char *__builtin_strcat(char *dest, const char *src);
+char *__builtin_strcat_chk(char *dest, const char *src, __SIZE_TYPE__ n);
+char *__builtin_strchr(const char *s, int c);
+char *__builtin_strcpy(char *dest, const char *src);
+char *__builtin_strcpy_chk(char *dest, const char *src, __SIZE_TYPE__ n);
+char *__builtin_strncat(char *dest, const char *src, __SIZE_TYPE__ n);
+char *__builtin_strncpy(char *dest, const char *src, __SIZE_TYPE__ n);
+char *__builtin_strpbrk(const char *s, const char *accept);
+char *__builtin_strrchr(const char *s, int c);
+char *__builtin_strstr(const char *haystack, const char *needle);
+double __builtin_acos(double x);
+double __builtin_asin(double x);
+double __builtin_atan(double x);
+double __builtin_atan2(double y, double x);
+double __builtin_ceil(double x);
+double __builtin_copysign(double x, double y);
+double __builtin_cos(double x);
+double __builtin_cosh(double x);
+double __builtin_exp(double x);
+double __builtin_fabs(double x);
+double __builtin_floor(double x);
+double __builtin_fmod(double x, double y);
+double __builtin_frexp(double x, int *exp);
+double __builtin_huge_val();
+double __builtin_inf();
+double __builtin_ldexp(double x, int exp);
+double __builtin_log(double x);
+double __builtin_log10(double x);
+double __builtin_modf(double x, double *iptr);
+double __builtin_nan(char*);
+double __builtin_pow(double x, double y);
+double __builtin_sin(double x);
+double __builtin_sinh(double x);
+double __builtin_sqrt(double x);
+double __builtin_tan(double x);
+double __builtin_tanh(double x);
+float __builtin_acosf(float x);
+float __builtin_asinf(float x);
+float __builtin_atan2f(float y, float x);
+float __builtin_atanf(float x);
+float __builtin_ceilf(float x);
+float __builtin_copysignf(float x, float y);
+float __builtin_cosf(float x);
+float __builtin_coshf(float x);
+float __builtin_expf(float x);
+float __builtin_fabsf(float x);
+float __builtin_floorf(float x);
+float __builtin_fmodf(float x, float y);
+float __builtin_frexpf(float x, int *exp);
+float __builtin_huge_valf();
+float __builtin_inff();
+float __builtin_ldexpf(float x, int exp);
+float __builtin_log10f(float x);
+float __builtin_logf(float x);
+float __builtin_modff(float x, float *iptr);
+float __builtin_nanf(char*);
+float __builtin_powf(float x, float y);
+float __builtin_sinf(float x);
+float __builtin_sinhf(float x);
+float __builtin_sqrtf(float x);
+float __builtin_tanf(float x);
+float __builtin_tanhf(float x);
+int __builtin___snprintf_chk (char *s, __SIZE_TYPE__ maxlen, int flag, __SIZE_TYPE__ os, char *fmt, ...);
+int __builtin___sprintf_chk(char * str, int flag, __SIZE_TYPE__ strlen, char * format, ...);
+int __builtin___vsnprintf_chk(char * s, __SIZE_TYPE__ maxlen, int flag, __SIZE_TYPE__ slen, char * format, __builtin_va_list args);
+int __builtin_abs(int j);
+int __builtin_clz (unsigned int x);
+int __builtin_clzl (unsigned long x);
+int __builtin_ctz (unsigned int x);
+int __builtin_ctzl (unsigned long x);
+int __builtin_dprintf(int fd, const char *format, ...);
+int __builtin_fprintf(void *stream, const char *format, ...);
+int __builtin_fputc(int c, void *stream);
+int __builtin_fputs(const char *s, void *stream);
+int __builtin_fscanf(void *stream, const char *format, ...);
+int __builtin_isalnum(int c);
+int __builtin_isalpha(int c);
+int __builtin_isascii(int c);
+int __builtin_isblank(int c);
+int __builtin_iscntrl(int c);
+int __builtin_isdigit(int c);
+int __builtin_isgraph(int c);
+int __builtin_islower(int c);
+int __builtin_isprint(int c);
+int __builtin_ispunct(int c);
+int __builtin_isspace(int c);
+int __builtin_isunordered(double, double);
+int __builtin_isupper(int c);
+int __builtin_isxdigit(int c);
+int __builtin_memcmp(const void *s1, const void *s2, __SIZE_TYPE__ n);
+int __builtin_printf(const char *format, ...);
+int __builtin_putc(int c, void *stream);
+int __builtin_putchar(int c);
+int __builtin_puts(const char *s);
+int __builtin_scanf(const char *format, ...);
+int __builtin_snprintf(char *str, __SIZE_TYPE__ size, const char *format, ...);
+int __builtin_sprintf(char *str, const char *format, ...);
+int __builtin_sscanf(const char *str, const char *format, ...);
+int __builtin_strcmp(const char *s1, const char *s2);
+int __builtin_strncmp(const char *s1, const char *s2, __SIZE_TYPE__ n);
+int __builtin_tolower(int c);
+int __builtin_toupper(int c);
+int __ccgo__types_compatible_p();
+int __builtin_vdprintf(int fd, const char *format, __builtin_va_list ap);
+int __builtin_vfprintf(void *stream, const char *format, __builtin_va_list ap);
+int __builtin_vfscanf(void *stream, const char *format, __builtin_va_list ap);
+int __builtin_vprintf(const char *format, __builtin_va_list ap);
+int __builtin_vscanf(const char *format, __builtin_va_list ap);
+int __builtin_vsnprintf(char *str, __SIZE_TYPE__ size, const char *format, __builtin_va_list ap);
+int __builtin_vsprintf(char *str, const char *format, __builtin_va_list ap);
+int __builtin_vsscanf(const char *str, const char *format, __builtin_va_list ap);
+long __builtin_expect(long, long);
+long __builtin_labs(long j);
+long double __builtin_acosl(long double x);
+long double __builtin_asinl(long double x);
+long double __builtin_atan2l(long double y, long double x);
+long double __builtin_atanl( long double x);
+long double __builtin_atanl(long double x);
+long double __builtin_ceill(long double x);
+long double __builtin_copysignl(long double x, long double y);
+long double __builtin_coshl(long double x);
+long double __builtin_cosl(long double x);
+long double __builtin_expl(long double x);
+long double __builtin_fabsl(long double x);
+long double __builtin_floorl(long double x);
+long double __builtin_fmodl(long double x, long double y);
+long double __builtin_frexpl(long double x, int *exp);
+long double __builtin_infl();
+long double __builtin_ldexpl(long double x, int exp);
+long double __builtin_log10l(long double x);
+long double __builtin_logl(long double x);
+long double __builtin_modfl(long double x, long double *iptr);
+long double __builtin_nanl(char*);
+long double __builtin_powl(long double x, long double y);
+long double __builtin_sinhl(long double x);
+long double __builtin_sinl(long double x);
+long double __builtin_sqrtl(long double x);
+long double __builtin_tanhl(long double x);
+long double __builtin_tanl(long double x);
+long long __builtin_llabs(long long j);
+void *__builtin___memcpy_chk(void * dest, void * src, __SIZE_TYPE__ len, __SIZE_TYPE__ destlen);
+void *__builtin___memmove_chk(void * dest, void * src, __SIZE_TYPE__ len, __SIZE_TYPE__ destlen);
+void *__builtin___memset_chk(void * dest, int c, __SIZE_TYPE__ len, __SIZE_TYPE__ destlen);
+void *__builtin___strncpy_chk (char *dest, char *src, __SIZE_TYPE__ len, __SIZE_TYPE__ dstlen);
+void *__builtin__strncpy_chk (char *dest, char *src, __SIZE_TYPE__ len, __SIZE_TYPE__ dstlen);
+void *__builtin_alloca(__SIZE_TYPE__ size);
+void *__builtin_calloc(__SIZE_TYPE__ nmemb, __SIZE_TYPE__ size);
+void *__builtin_malloc(__SIZE_TYPE__ size);
+void *__builtin_memchr(const void *s, int c, __SIZE_TYPE__ n);
+void *__builtin_memcpy(void *dest, const void *src, __SIZE_TYPE__ n);
+void *__builtin_memrchr(const void *s, int c, __SIZE_TYPE__ n);
+void *__builtin_memset(void *s, int c, __SIZE_TYPE__ n);
+void *__builtin_rawmemchr(const void *s, int c);
+void *__builtin_realloc(void *ptr, __SIZE_TYPE__ size);
+void *__builtin_reallocarray(void *ptr, __SIZE_TYPE__ nmemb, __SIZE_TYPE__ size);
+void __builtin_abort(void);
+void __builtin_exit(int status);
+void __builtin_free(void *ptr);
+void __builtin_prefetch (void*, ...);
+void __builtin_unreachable();
+
+#ifdef __APPLE__
+#define __has_include(xxx) __has_include(xxx)
+#define __has_include_next(xxx) __has_include_next(xxx)
+int __darwin_check_fd_set_overflow(int, void *, int);
+#endif
+
+// stdatomic.h
+void __atomic_exchange();
+void __atomic_load();
+void __atomic_store();
+")
+
+;; ---------------------------------------------------------------------------------------------
+;; The parser's state
+
+(deftype Scope [parent ^HashMap nodes])
+
+(defn- new-scope* ^Scope [parent] (Scope. parent (HashMap.)))
+
+(def ^:const SCOPE 0) (def ^:const FNSCOPE 1) (def ^:const GOTOS 2) (def ^:const SWITCH 3)
+(def ^:const SEQ 4) (def ^:const LDOK 5) (def ^:const COMPLIT 6) (def ^:const ORDER 7) (def ^:const EOFERRS 8)
+
+(deftype Parser [nx ^ArrayList errs ^ArrayList toks kw ^objects st])
+
+(defn- slot [^Parser p k] (aget ^objects (.-st p) k))
+(defn- slot! [^Parser p k v] (aset ^objects (.-st p) k v))
+
+(defn- panic! [msg] (throw (ex-info msg {:panic true})))
+
+(defn- g
+  "A node's field, as Go's n.F: a panic when the node is nil."
+  [^HashMap n k]
+  (if (nil? n) (panic! "runtime error: invalid memory address or nil pointer dereference") (.get n k)))
+
+(defn- s!
+  "Sets a node's field, as Go's n.F = v (a nil v clears it): a panic when the node is nil."
+  [^HashMap n k v]
+  (if (nil? n) (panic! "runtime error: invalid memory address or nil pointer dereference")
+      (if (nil? v) (.remove n k) (.put n k v)))
+  v)
+
+(defn- case? [^HashMap n c] (= (.get n :Case) c))
+
+(defn- ch [^PTok t] (.-ch t))
+(defn- src ^String [^PTok t] (if t (.-src t) ""))
+(defn- tpos ^String [^PTok t] (tree/pos-string t))
+(defn- rname ^String [c] (tree/kind-name c))
+
+(def ^:const max-eof-errors
+  "Arbace: the errors at the end of the input after which a parse gives up, a panic. cc's error recovery
+  can loop there without consuming anything (a shift at eof leaves the eof), adding an error each time;
+  cc then runs until tools/ccdump's timeout, whose dump is a panic too."
+  100000)
+
+(defn- eh [^Parser p ^String msg]
+  (.add ^ArrayList (.-errs p) msg)
+  (let [^ArrayList ts (.-toks p)]
+    (when (and (pos? (.size ts)) (= (.-ch ^PTok (.get ts 0)) :eof))
+      (let [n (inc (long (or (aget ^objects (.-st p) EOFERRS) 0)))]
+        (aset ^objects (.-st p) EOFERRS n)
+        (when (> n max-eof-errors) (throw (ex-info "too many errors at the end (cc's recovery loops)" {:panic true})))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Scopes (parser.go's Scope)
+
+(defn- declare! [^Scope s ^String nm n]
+  (let [^HashMap m (.-nodes s)
+        ^ArrayList a (or (.get m nm) (let [a (ArrayList.)] (.put m nm a) a))]
+    (.add a n)))
+
+(defn- idents
+  "Scope.idents: the visible declarators, enumerators and parameters of t's name in the innermost scope
+  that has one."
+  [^Scope s ^PTok t]
+  (let [nm (.-src t) tseq (.-seq t)]
+    (loop [^Scope s s]
+      (when s
+        (let [r (when-let [^ArrayList a (.get ^HashMap (.-nodes s) nm)]
+                  (seq (filter (fn [^HashMap x]
+                                 (and (#{"Declarator" "Enumerator" "Parameter"} (.get x :node))
+                                      (>= tseq (long (or (.get x :visible) 0)))))
+                               a)))]
+          (or r (recur (.-parent s))))))))
+
+(defn- ident
+  "Scope.ident before the checker has typed anything: the first node idents gives (a parameter's
+  declarator when there are several)."
+  [^Scope s ^PTok t]
+  (let [a (idents s t)]
+    (cond
+      (nil? a) nil
+      (nil? (next a)) (first a)
+      ;; a parameter of an identifier list has no declarator: cc's ident returns a nil *Declarator,
+      ;; which checkTypeName dereferences (a panic)
+      (= (.get ^HashMap (first a) :node) "Parameter") (or (.get ^HashMap (first a) :Declarator) ::nil-declarator)
+      :else (first a))))
+
+(defn- new-scope! [^Parser p] (slot! p SCOPE (new-scope* (slot p SCOPE))))
+
+(declare rn)
+
+(defn- close-scope! [^Parser p]
+  (if-let [parent (.-parent ^Scope (slot p SCOPE))]
+    (slot! p SCOPE parent)
+    (do (rn p) (eh p (str (tpos (.get ^ArrayList (.-toks p) 0)) ": internal error (parser.go:)")))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Tokens (parser.go's next, rune, shift, peek, must)
+
+(defn- conv
+  "parser.tok: an identifier that is a keyword, a pp-number as INTCONST or FLOATCONST."
+  ^PTok [^Parser p ^Tok t ^String sep ^long seq]
+  (let [c (.-ch t) ^String s (.-src t)
+        c (case c
+            :IDENTIFIER (get (.-kw p) s :IDENTIFIER)
+            :PPNUMBER (cond
+                        (some #(>= (.indexOf s (int %)) 0) ".+-ijpIJP") :FLOATCONST
+                        (or (.startsWith s "0x") (.startsWith s "0X")) :INTCONST
+                        (or (>= (.indexOf s (int \E)) 0) (>= (.indexOf s (int \e)) 0)) :FLOATCONST
+                        :else :INTCONST)
+            c)]
+    (PTok. c s sep (.-pf t) (.-po t) (.-m t) seq)))
+
+(defn- next! [^Parser p]
+  (loop [^StringBuilder b nil]
+    (let [^Tok t ((.-nx p))
+          c (.-ch t)]
+      (cond
+        (= c \space) (recur b)
+        (= c \newline) (let [b (or b (StringBuilder.))] (.append b (.-sep t)) (.append b "\n") (recur b))
+        :else (let [seq (inc (long (slot p SEQ)))]
+                (slot! p SEQ seq)
+                (.add ^ArrayList (.-toks p) (conv p t (if (and b (pos? (.length b))) (str b (.-sep t)) (.-sep t)) seq)))))))
+
+(defn- typename-tok?
+  "checkTypeName: whether t, an identifier, names a typedef in the current scope."
+  [^Parser p ^PTok t]
+  (and (= (.-ch t) :IDENTIFIER)
+       (let [x (ident (slot p SCOPE) t)]
+         (when (= x ::nil-declarator) (panic! "runtime error: invalid memory address or nil pointer dereference"))
+         (and x (= (.get ^HashMap x :node) "Declarator") (.get ^HashMap x :isTypename)))))
+
+(defn- ctn ^PTok [^Parser p ^PTok t] (if (typename-tok? p t) (tree/with-ch t :TYPENAME) t))
+
+(defn- ctn0!
+  "checkTypeName(&p.toks[0]): the lookahead itself made a TYPENAME; whether it is one."
+  [^Parser p]
+  (let [^ArrayList ts (.-toks p) t (.get ts 0)]
+    (if (typename-tok? p t) (do (.set ts 0 (tree/with-ch t :TYPENAME)) true) false)))
+
+(defn- tok0 ^PTok [^Parser p] (.get ^ArrayList (.-toks p) 0))
+
+(defn rn
+  "p.rune: the lookahead's kind (checkTypeName on a copy when `ctn?`)."
+  ([^Parser p] (when (.isEmpty ^ArrayList (.-toks p)) (next! p)) (.-ch ^PTok (tok0 p)))
+  ([^Parser p ctn?] (if ctn? (do (rn p) (.-ch (ctn p (tok0 p)))) (rn p))))
+
+(defn- shift0 ^PTok [^Parser p]
+  (let [r (tok0 p)]
+    (when-not (= (.-ch r) :eof)
+      (.remove ^ArrayList (.-toks p) 0)
+      (rn p))
+    r))
+
+(defn- octal? [c] (and (>= (int c) (int \0)) (<= (int c) (int \7))))
+
+(defn canonicalize-strlit-tail
+  "etc.go's canonicalizeStrlitTail: a literal's text without its closing quote, its last escape
+  widened so that the next literal's text cannot extend it."
+  ^String [^String s]
+  (let [l (count s)]
+    (cond
+      (and (>= l 3) (= (.charAt s (- l 3)) \\) (= (.charAt s (- l 2)) \x))
+      (str (subs s 0 (dec l)) "0" (.charAt s (dec l)))
+      (and (>= l 2) (= (.charAt s (- l 2)) \\) (octal? (.charAt s (dec l))))
+      (str (subs s 0 (dec l)) "00" (.charAt s (dec l)))
+      (and (>= l 3) (= (.charAt s (- l 3)) \\) (octal? (.charAt s (- l 2))) (octal? (.charAt s (dec l))))
+      (str (subs s 0 (- l 2)) "0" (.charAt s (- l 2)) (.charAt s (dec l)))
+      :else s)))
+
+(defn- canonicalize-tail!
+  "canonicalizeStrlitTail on a builder: its closing quote dropped, its last escape widened."
+  [^StringBuilder b]
+  (.setLength b (max 0 (dec (.length b))))
+  (let [l (.length b)
+        at (fn [i] (.charAt b (int i)))]
+    (cond
+      (and (>= l 3) (= (at (- l 3)) \\) (= (at (- l 2)) \x)) (.insert b (int (dec l)) "0")
+      (and (>= l 2) (= (at (- l 2)) \\) (octal? (at (dec l)))) (.insert b (int (dec l)) "00")
+      (and (>= l 3) (= (at (- l 3)) \\) (octal? (at (- l 2))) (octal? (at (dec l)))) (.insert b (int (- l 2)) "0")
+      :else nil)))
+
+(defn- sh
+  "p.shift: the lookahead consumed, adjacent string literals concatenated into it (in builders: a
+  macro may expand to a million literals, torture's pr46534.c)."
+  (^PTok [^Parser p] (sh p false))
+  (^PTok [^Parser p ctn?]
+   (let [r (shift0 p)
+         concat! (fn [kinds]
+                   (let [sep (StringBuilder. ^String (.-sep r)) b (StringBuilder. ^String (.-src r))]
+                     (loop []
+                       (let [c (rn p)]
+                         (if-let [skip (kinds c)]
+                           (let [t (shift0 p)]
+                             (.append sep ^String (.-sep t))
+                             (canonicalize-tail! b)
+                             (.append b (subs (.-src t) skip))
+                             (recur))
+                           (tree/with-texts r (.toString sep) (.toString b)))))))
+         r (cond
+             (and (= (ch r) :STRINGLITERAL) (= (rn p) :STRINGLITERAL)) (concat! {:STRINGLITERAL 1})
+             (and (= (ch r) :LONGSTRINGLITERAL) (or (= (rn p) :LONGSTRINGLITERAL) (= (rn p) :STRINGLITERAL)))
+             (concat! {:LONGSTRINGLITERAL 2 :STRINGLITERAL 1})
+             :else r)]
+     (if ctn? (ctn p r) r))))
+
+(defn- pk
+  "p.peek: the lookahead token i."
+  (^PTok [^Parser p ^long i] (pk p i false))
+  (^PTok [^Parser p ^long i ctn?]
+   (let [^ArrayList ts (.-toks p)]
+     (loop [] (when (<= (.size ts) i) (next! p) (recur)))
+     (if ctn? (ctn p (.get ts i)) (.get ts i)))))
+
+(defn- pkc [^Parser p i] (ch (pk p i)))
+(defn- pkct [^Parser p i] (ch (pk p i true)))
+
+(defn- must ^PTok [^Parser p r]
+  (let [c (rn p) t (sh p)]
+    (when-not (= c r) (eh p (str (tpos t) ": unexpected " (rname c) ", expected " (rname r))))
+    t))
+
+(defn- unexpected
+  "The common error path: the lookahead consumed and reported, nil."
+  [^Parser p ^String what]
+  (let [t (sh p)] (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected " what)) nil))
+
+(defn- unexpected-eof [^Parser p] (eh p (str (tpos (tok0 p)) ": unexpected EOF")) nil)
+
+(defn- in? [c & set] (boolean (some #(= c %) set)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Classifiers
+
+(defn- expression? [c]
+  (in? c \! \& \( \* \+ \- \~ :ALIGNOF :ANDAND :CHARCONST :DEC :FLOATCONST :GENERIC :IDENTIFIER :IMAG :INC
+       :INTCONST :LONGCHARCONST :LONGSTRINGLITERAL :REAL :SIZEOF :STRINGLITERAL))
+
+(defn- statement? [c]
+  (in? c \( \* \; \{ :ASM :BREAK :CASE :CONTINUE :DEC :DEFAULT :DO :FOR :GOTO :IDENTIFIER :IF :INC
+       :LONGSTRINGLITERAL :RETURN :STRINGLITERAL :SWITCH :WHILE))
+
+(defn- type-qualifier? [c] (in? c :ATOMIC :CONST :NONNULL :RESTRICT :VOLATILE))
+
+(defn- storage-class-specifier? [c]
+  (in? c :AUTO :CONSTEXPR :DECLSPEC :EXTERN :REGISTER :STATIC :THREADLOCAL :TYPEDEF)) ; go-whim: CONSTEXPR
+
+(def ^:private type-specifiers
+  #{:BF16 :BITINT :BOOL :CHAR :COMPLEX :DECIMAL128 :DECIMAL32 :DECIMAL64 :DOUBLE :ENUM :FLOAT :FLOAT128
+    :FLOAT128X :FLOAT16 :FLOAT32 :FLOAT32X :FLOAT64 :FLOAT64X :IMAGINARY :INT :INT128 :LONG :SHORT :SIGNED
+    :STRUCT :TYPEOF :UINT128 :UNION :UNSIGNED :VOID}) ; go-whim: BITINT
+
+(defn- type-specifier? [c typename-ok]
+  (or (contains? type-specifiers c) (and typename-ok (= c :TYPENAME))))
+
+(defn- function-specifier? [c] (in? c :INLINE :NORETURN))
+
+(defn- declaration-specifier? [c typename-ok]
+  (or (type-specifier? c typename-ok) (type-qualifier? c) (storage-class-specifier? c)
+      (= c :ATTRIBUTE) (= c :ALIGNAS) (function-specifier? c)))
+
+(defn- specifier-qualifier? [c typename-ok] (or (type-specifier? c typename-ok) (type-qualifier? c)))
+
+(defn- keyword-tok? [^Parser p ^PTok t] (contains? (.-kw p) (.-src t)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Declarators' names (ast2.go)
+
+(defn- dd-name [^HashMap n]
+  (when n
+    (case (.get n :Case)
+      :DirectDeclaratorIdent n
+      :DirectDeclaratorDecl (dd-name (g (g n :Declarator) :DirectDeclarator))
+      (dd-name (.get n :DirectDeclarator)))))
+
+(defn decl-name ^String [^HashMap d]
+  (if (nil? d) "" (if-let [dn (dd-name (.get d :DirectDeclarator))] (src (.get ^HashMap dn :Token)) "")))
+
+(defn- decl-fn? [^HashMap d]
+  (boolean (when d (when-let [^HashMap dd (.get d :DirectDeclarator)]
+                     (#{:DirectDeclaratorFuncParam :DirectDeclaratorFuncIdent} (.get dd :Case))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Linked lists: cc's lists are chains of nodes, each holding the next under the type's own name.
+
+(defn- link! [prev ^HashMap n k] (when prev (s! prev k n)) n)
+
+;; ---------------------------------------------------------------------------------------------
+;; go-whim's C23 lookahead (c23.go)
+
+(defn- std-attr-at? [^Parser p i] (and (= (pkc p i) \[) (= (pkc p (inc (long i))) \[)))
+
+(defn- std-attrs-end ^long [^Parser p]
+  (loop [i 0 depth 0]
+    (if (or (pos? depth) (std-attr-at? p i))
+      (case (pkc p i)
+        :eof i
+        \[ (recur (inc i) (inc depth))
+        \] (recur (inc i) (dec depth))
+        (recur (inc i) depth))
+      i)))
+
+(declare declaration-specifiers declarator declaration function-definition attribute-specifier-list-opt
+         compound-statement statement expression assignment-expression constant-expression type-name
+         initializer initializer-list conditional-expression cast-expression unary-expression
+         postfix-expression primary-expression argument-expression-list-opt type-qualifier
+         type-qualifier-list pointer abstract-declarator direct-abstract-declarator
+         direct-abstract-declarator2 parameter-type-list-opt identifier-list specifier-qualifier-list
+         type-specifier storage-class-specifier attribute-specifier gnu-attribute-specifier-list-opt
+         declaration-list-opt asm-statement asm direct-declarator2 declarator-or-abstract-declarator
+         std-attribute-specifier enum-specifier block-item-list-opt labeled-statement
+         attributed-statement expression-statement)
+
+(defn- std-attrs-begin-declaration? [^Parser p]
+  (and (std-attr-at? p 0) (declaration-specifier? (pkct p (std-attrs-end p)) true)))
+
+;; ---------------------------------------------------------------------------------------------
+;; 6.9 External definitions
+
+(defn- external-declaration [^Parser p]
+  (loop []
+    (let [c (rn p)]
+      (cond
+        (= c :eof) nil
+        (= c :ASM) (node "ExternalDeclaration" :Case :ExternalDeclarationAsmStmt :AsmStatement (asm-statement p))
+        (in? c :STATICASSERT :AUTOTYPE) (node "ExternalDeclaration" :Case :ExternalDeclarationDecl :Declaration (declaration p nil nil false))
+        :else
+        (let [[ds ok] (declaration-specifiers p)]
+          (if-not ok
+            (recur)
+            (let [d (when-not (= (rn p) \;) (declarator p nil ds true))]
+              (if (std-attr-at? p 0) ; go-whim: C23 attributes after a declarator
+                (if (= (pkc p (std-attrs-end p)) \{)
+                  (let [attrs (attribute-specifier-list-opt p)
+                        fd (function-definition p ds d)]
+                    (s! fd :AttributeSpecifierList attrs)
+                    (node "ExternalDeclaration" :Case :ExternalDeclarationFuncDef :FunctionDefinition fd))
+                  (node "ExternalDeclaration" :Case :ExternalDeclarationDecl :Declaration (declaration p ds d true)))
+                (let [c (rn p)]
+                  (cond
+                    (in? c \, \; \= :ASM :ATTRIBUTE)
+                    (node "ExternalDeclaration" :Case :ExternalDeclarationDecl :Declaration (declaration p ds d true))
+                    (= c \{) (node "ExternalDeclaration" :Case :ExternalDeclarationFuncDef :FunctionDefinition (function-definition p ds d))
+                    (decl-fn? d) (node "ExternalDeclaration" :Case :ExternalDeclarationFuncDef :FunctionDefinition (function-definition p ds d))
+                    :else (unexpected p "external declaration")))))))))))
+
+(defn- translation-unit [^Parser p]
+  (loop [r nil prev nil]
+    (if (= (rn p) :eof)
+      r
+      (let [ed (external-declaration p)]
+        (if (nil? ed)
+          r
+          (let [tu (node "TranslationUnit" :ExternalDeclaration ed)]
+            (link! prev tu :TranslationUnit)
+            (recur (or r tu) tu)))))))
+
+(defn- function-definition [^Parser p ds ^HashMap d]
+  (s! d :isFuncDef true)
+  (let [r (node "FunctionDefinition" :DeclarationSpecifiers ds :Declarator d
+                :DeclarationList (declaration-list-opt p) :CompoundStatement (compound-statement p false true d))]
+    (.put r :scope (slot p FNSCOPE))
+    (slot! p FNSCOPE nil)
+    r))
+
+(defn- declaration-list-opt [^Parser p]
+  (loop [r nil prev nil]
+    (if (in? (rn p) \{ :eof)
+      r
+      (let [dl (node "DeclarationList" :Declaration (declaration p nil nil false))]
+        (link! prev dl :DeclarationList)
+        (recur (or r dl) dl)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; 6.8 Statements
+
+(defn- skip-attribute-specifiers ^long [^Parser p ^long i]
+  (loop [i i]
+    (if (= (pkc p i) :ATTRIBUTE)
+      (if-not (= (pkc p (inc i)) \()
+        i
+        (let [r (loop [i (+ i 2) depth 1]
+                  (if (zero? depth)
+                    [:ok i]
+                    (case (pkc p i)
+                      \( (recur (inc i) (inc depth))
+                      \) (recur (inc i) (dec depth))
+                      :eof [:eof (inc i)]
+                      (recur (inc i) depth))))]
+          ;; cc returns i at eof before the loop's increment; the post statement runs first
+          (if (= (first r) :eof) (dec (long (second r))) (recur (long (second r))))))
+      i)))
+
+(defn- synth-semi [^PTok colon] (tree/with-texts (tree/with-ch colon \;) "" ";"))
+
+(defn- labeled-statement-body [^Parser p decl-ok colon]
+  (if decl-ok
+    (let [i (skip-attribute-specifiers p 0)
+          c (pkct p i)]
+      (cond
+        (and (= c :TYPENAME) (= (pkc p (inc i)) \:))
+        (do (slot! p LDOK true) (statement p false))
+        (or (declaration-specifier? c true) (= c :STATICASSERT) (= c :AUTOTYPE) (= c \}))
+        (node "Statement" :Case :StatementExpr :ExpressionStatement (node "ExpressionStatement" :Token (synth-semi colon)))
+        :else (do (slot! p LDOK true) (statement p false))))
+    (statement p false)))
+
+(defn- inject-func-tokens [^Parser p ^PTok lbrace ^String nm]
+  (let [kinds [:STATIC :CONST :CHAR :IDENTIFIER \[ \] \= :STRINGLITERAL \;]
+        texts ["static" "const" "char" "__func__" "[" "]" "=" (str "\"" nm "\"") ";"]
+        fts (loop [i 0 seq (.-seq lbrace) out []]
+              (if (< i 9)
+                (recur (inc i) (inc seq) (conj out (tree/ptok (nth kinds i) (nth texts i) " " (.-pf lbrace) (.-po lbrace) nil (inc seq))))
+                out))
+        seq (+ (.-seq lbrace) 9)]
+    (rn p)
+    (let [^ArrayList ts (.-toks p)
+          seq (loop [i 0 seq seq]
+                (if (< i (.size ts))
+                  (do (.set ts i (tree/with-seq (.get ts i) (inc seq))) (recur (inc i) (inc seq)))
+                  seq))]
+      (slot! p SEQ (inc (long seq)))
+      (.addAll ts 0 fts))))
+
+(defn- resolve-gotos!
+  "compoundStatement's deferred check of a function's gotos: each label found in a scope from the
+  goto's outwards (not the file's), or an error."
+  [^Parser p ^HashMap r]
+  (doseq [^HashMap s (.get r :gotos)]
+    (when (case? s :JumpStatementGoto)
+      (let [nm (src (.get s :Token2))
+            found (loop [^Scope sc (.get s :scope)]
+                    (when (and sc (.-parent sc))
+                      (or (some (fn [^HashMap x]
+                                  (case (.get x :node)
+                                    "LabeledStatement" (= nm (src (.get x :Token)))
+                                    "LabelDeclaration" true
+                                    false))
+                                (.get ^HashMap (.-nodes sc) nm))
+                          (recur (.-parent sc)))))]
+        (when-not found (eh p (str (tpos (.get s :Token2)) ": label undefined: " nm)))))))
+
+(defn- compound-statement [^Parser p in-fresh-new-scope is-fn-scope ^HashMap d]
+  (when-not in-fresh-new-scope (new-scope! p))
+  (let [saved-gotos (slot p GOTOS)]
+    (when is-fn-scope
+      (slot! p FNSCOPE (slot p SCOPE))
+      (slot! p GOTOS [])
+      (when d
+        (loop [^HashMap dd (.get d :DirectDeclarator)]
+          (when dd
+            (when-let [^Scope s (.get dd :params)]
+              (doseq [[nm ^ArrayList ns] (.-nodes s)]
+                (doseq [n ns] (declare! (slot p SCOPE) nm n))))
+            (case (.get dd :Case)
+              :DirectDeclaratorIdent nil
+              :DirectDeclaratorDecl (recur (g (g dd :Declarator) :DirectDeclarator))
+              (recur (.get dd :DirectDeclarator)))))))
+    (let [lbrace (must p \{)
+          _ (when (and is-fn-scope d) (inject-func-tokens p lbrace (decl-name d)))
+          r (node "CompoundStatement" :Token lbrace :BlockItemList (block-item-list-opt p) :Token2 (must p \}))]
+      (.put r :scope (slot p SCOPE))
+      (when is-fn-scope
+        (.put r :gotos (slot p GOTOS))
+        (resolve-gotos! p r)
+        (slot! p GOTOS saved-gotos))
+      (when-not in-fresh-new-scope (close-scope! p))
+      r)))
+
+(defn- block-item-list-opt [^Parser p]
+  (loop [r nil prev nil]
+    (if (in? (rn p) \} :eof)
+      r
+      (let [bil (node "BlockItemList" :BlockItem ((resolve 'arbace.repr.c.parse/block-item) p))]
+        (link! prev bil :BlockItemList)
+        (recur (or r bil) bil)))))
+
+(declare label-declaration)
+
+(defn block-item [^Parser p]
+  (loop []
+    (let [c (rn p true)]
+      (cond
+        (or (statement? c) (expression? c) (and (= c :TYPENAME) (= (pkc p 1) \:)))
+        (do (slot! p LDOK true) (node "BlockItem" :Case :BlockItemStmt :Statement (statement p false)))
+        (or (declaration-specifier? c true) (std-attrs-begin-declaration? p)) ; go-whim
+        (let [r0 (rn p)
+              [ds ok] (declaration-specifiers p)]
+          (if-not ok
+            (recur)
+            (if (and (= r0 :ATTRIBUTE) (= (rn p) \;))
+              (let [es (node "ExpressionStatement")]
+                (.put es :declarationSpecifiers ds)
+                (s! es :AttributeSpecifierList (attribute-specifier-list-opt p))
+                (s! es :Token (sh p))
+                (node "BlockItem" :Case :BlockItemStmt :Statement (node "Statement" :Case :StatementExpr :ExpressionStatement es)))
+              (let [d (when-not (= (rn p) \;) (declarator p nil ds true))]
+                (if (= (rn p) \{)
+                  (node "BlockItem" :Case :BlockItemFuncDef :DeclarationSpecifiers ds :Declarator d :CompoundStatement (compound-statement p false true d))
+                  (node "BlockItem" :Case :BlockItemDecl :Declaration (declaration p ds d true)))))))
+        (= c :LABEL) (node "BlockItem" :Case :BlockItemLabel :LabelDeclaration (label-declaration p))
+        (std-attr-at? p 0) ; go-whim
+        (do (slot! p LDOK true) (node "BlockItem" :Case :BlockItemStmt :Statement (statement p false)))
+        (in? c :STATICASSERT :AUTOTYPE)
+        (let [d (declaration p nil nil false)]
+          (when (and (= c :STATICASSERT) d) (s! d :Token (must p \;))) ; go-whim
+          (node "BlockItem" :Case :BlockItemDecl :Declaration d))
+        :else (unexpected p "block item")))))
+
+(defn- label-declaration [^Parser p]
+  (let [r (node "LabelDeclaration" :Token (sh p) :IdentifierList (identifier-list p false) :Token2 (must p \;))]
+    (loop [^HashMap l (.get r :IdentifierList)]
+      (when l (declare! (slot p SCOPE) (src (.get l :Token2)) r) (recur (.get l :IdentifierList))))
+    r))
+
+(defn- statement [^Parser p new-block]
+  (let [label-decl-ok (slot p LDOK)]
+    (slot! p LDOK false)
+    (when new-block (new-scope! p))
+    (let [c (rn p)
+          r (cond
+              (= c :IDENTIFIER)
+              (if (= (pkc p 1) \:)
+                (node "Statement" :Case :StatementLabeled :LabeledStatement (labeled-statement p label-decl-ok))
+                (node "Statement" :Case :StatementExpr :ExpressionStatement (expression-statement p)))
+              (or (expression? c) (= c \;) (= c :ATTRIBUTE))
+              (node "Statement" :Case :StatementExpr :ExpressionStatement (expression-statement p))
+              (std-attr-at? p 0) (attributed-statement p label-decl-ok) ; go-whim
+              :else
+              (let [c (rn p true)]
+                (cond
+                  (= c :eof) (unexpected-eof p)
+                  (= c \{) (node "Statement" :Case :StatementCompound :CompoundStatement (compound-statement p new-block false nil))
+                  (= c :ASM) (node "Statement" :Case :StatementAsm :AsmStatement (asm-statement p))
+                  (in? c :DO :FOR :WHILE) (node "Statement" :Case :StatementIteration :IterationStatement ((resolve 'arbace.repr.c.parse/iteration-statement) p))
+                  (in? c :BREAK :CONTINUE :GOTO :RETURN) (node "Statement" :Case :StatementJump :JumpStatement ((resolve 'arbace.repr.c.parse/jump-statement) p))
+                  (in? c :IF :SWITCH) (node "Statement" :Case :StatementSelection :SelectionStatement ((resolve 'arbace.repr.c.parse/selection-statement) p))
+                  (in? c :CASE :DEFAULT) (node "Statement" :Case :StatementLabeled :LabeledStatement (labeled-statement p label-decl-ok))
+                  :else (unexpected p "statement"))))]
+      (when new-block (close-scope! p))
+      r)))
+
+(defn selection-statement [^Parser p]
+  (new-scope! p)
+  (let [r (case (rn p)
+            :eof (unexpected-eof p)
+            :IF (let [r (node "SelectionStatement" :Case :SelectionStatementIf :Token (sh p) :Token2 (must p \()
+                              :ExpressionList (expression p false) :Token3 (must p \)) :Statement (statement p true))]
+                  (.put r :scope (slot p SCOPE))
+                  (when (= (rn p) :ELSE)
+                    (s! r :Case :SelectionStatementIfElse)
+                    (s! r :Token4 (sh p))
+                    (s! r :Statement2 (statement p true)))
+                  r)
+            :SWITCH (let [r (node "SelectionStatement" :Case :SelectionStatementSwitch :Token (sh p) :Token2 (must p \()
+                                  :ExpressionList (expression p false) :Token3 (must p \)))
+                          ctx (slot p SWITCH)]
+                      (.put r :scope (slot p SCOPE))
+                      (slot! p SWITCH r)
+                      (try (s! r :Statement (statement p true)) (finally (slot! p SWITCH ctx)))
+                      r)
+            (unexpected p "selection statement"))]
+    (close-scope! p)
+    r))
+
+(defn jump-statement [^Parser p]
+  (let [sc #(do (.put ^HashMap % :scope (slot p SCOPE)) %)]
+    (case (rn p)
+      :eof (unexpected-eof p)
+      :BREAK (sc (node "JumpStatement" :Case :JumpStatementBreak :Token (sh p) :Token2 (must p \;)))
+      :CONTINUE (sc (node "JumpStatement" :Case :JumpStatementContinue :Token (sh p) :Token2 (must p \;)))
+      :GOTO (let [r (if (= (pkc p 1) \*)
+                      (node "JumpStatement" :Case :JumpStatementGotoExpr :Token (sh p) :Token2 (sh p) :ExpressionList (expression p false) :Token3 (must p \;))
+                      (node "JumpStatement" :Case :JumpStatementGoto :Token (sh p) :Token2 (must p :IDENTIFIER) :Token3 (must p \;)))]
+              (sc r)
+              (slot! p GOTOS (conj (or (slot p GOTOS) []) r))
+              r)
+      :RETURN (sc (node "JumpStatement" :Case :JumpStatementReturn :Token (sh p) :ExpressionList (expression p true) :Token2 (must p \;)))
+      (unexpected p "jump statement"))))
+
+(defn- labeled-statement [^Parser p decl-ok]
+  (let [r (case (rn p)
+            :eof (unexpected-eof p)
+            :CASE (let [r (node "LabeledStatement" :Token (sh p) :ConstantExpression (constant-expression p))]
+                    (if (= (rn p) :DDD)
+                      (do (s! r :Case :LabeledStatementRange)
+                          (s! r :Token2 (sh p))
+                          (s! r :ConstantExpression2 (constant-expression p))
+                          (s! r :Token3 (must p \:))
+                          (s! r :Statement (labeled-statement-body p decl-ok (.get r :Token3))))
+                      (do (s! r :Case :LabeledStatementCaseLabel)
+                          (s! r :Token2 (must p \:))
+                          (s! r :Statement (labeled-statement-body p decl-ok (.get r :Token2)))))
+                    r)
+            :DEFAULT (let [r (node "LabeledStatement" :Case :LabeledStatementDefault :Token (sh p) :Token2 (must p \:))]
+                       (s! r :Statement (labeled-statement-body p decl-ok (.get r :Token2)))
+                       r)
+            :IDENTIFIER (let [r (node "LabeledStatement" :Case :LabeledStatementLabel :Token (sh p) :Token2 (must p \:))]
+                          (s! r :Statement (labeled-statement-body p decl-ok (.get r :Token2)))
+                          (if (nil? (slot p FNSCOPE))
+                            (let [t (sh p)] (eh p (str (tpos t) ": unexpected label")))
+                            (declare! (slot p FNSCOPE) (src (.get r :Token)) r))
+                          r)
+            (unexpected p "labeled statement"))]
+    r))
+
+(defn iteration-statement [^Parser p]
+  (new-scope! p)
+  (let [r (case (rn p)
+            :WHILE (node "IterationStatement" :Case :IterationStatementWhile :Token (sh p) :Token2 (must p \() :ExpressionList (expression p false)
+                         :Token3 (must p \)) :Statement (statement p true))
+            :DO (node "IterationStatement" :Case :IterationStatementDo :Token (sh p) :Statement (statement p true) :Token2 (must p :WHILE)
+                      :Token3 (must p \() :ExpressionList (expression p false) :Token4 (must p \)) :Token5 (must p \;))
+            :FOR (if (declaration-specifier? (pkct p 2) true)
+                   (node "IterationStatement" :Case :IterationStatementForDecl :Token (sh p) :Token2 (must p \() :Declaration (declaration p nil nil true)
+                         :ExpressionList (expression p true) :Token3 (must p \;) :ExpressionList2 (expression p true) :Token4 (must p \))
+                         :Statement (statement p true))
+                   (node "IterationStatement" :Case :IterationStatementFor :Token (sh p) :Token2 (must p \() :ExpressionList (expression p true)
+                         :Token3 (must p \;) :ExpressionList2 (expression p true) :Token4 (must p \;) :ExpressionList3 (expression p true)
+                         :Token5 (must p \)) :Statement (statement p true)))
+            (unexpected p "iteration statement"))]
+    (when r (.put ^HashMap r :scope (slot p SCOPE)))
+    (close-scope! p)
+    r))
+
+(defn- expression-statement [^Parser p]
+  (when (= (rn p) :ATTRIBUTE) (gnu-attribute-specifier-list-opt p)) ; not supported yet, ignored (cc)
+  (node "ExpressionStatement" :ExpressionList (expression p true) :Token (must p \;)))
+
+;; asm
+
+(defn- asm-statement [^Parser p] (node "AsmStatement" :Asm (asm p) :Token (must p \;)))
+
+(defn- asm-qualifier [^Parser p]
+  (case (rn p)
+    :eof (unexpected-eof p)
+    :VOLATILE (node "AsmQualifier" :Case :AsmQualifierVolatile :Token (sh p))
+    :INLINE (node "AsmQualifier" :Case :AsmQualifierInline :Token (sh p))
+    :GOTO (node "AsmQualifier" :Case :AsmQualifierGoto :Token (sh p))
+    (unexpected p "asm qualifier")))
+
+(defn- asm-qualifier-list-opt [^Parser p]
+  (loop [r nil prev nil]
+    (case (rn p)
+      :eof (do (unexpected-eof p) r)
+      (:GOTO :INLINE :VOLATILE) (let [aql (node "AsmQualifierList" :AsmQualifier (asm-qualifier p))]
+                                  (link! prev aql :AsmQualifierList)
+                                  (recur (or r aql) aql))
+      r)))
+
+(defn- asm-index-opt [^Parser p]
+  (when (= (rn p) \[)
+    (node "AsmIndex" :Token (sh p) :ExpressionList (expression p false) :Token2 (must p \]))))
+
+(defn- asm-expression-list [^Parser p]
+  (let [r (node "AsmExpressionList" :AsmIndex (asm-index-opt p) :AssignmentExpression (assignment-expression p true))]
+    (loop [prev r]
+      (when (= (rn p) \,)
+        (let [ael (node "AsmExpressionList" :Token (sh p) :AsmIndex (asm-index-opt p) :AssignmentExpression (assignment-expression p true))]
+          (link! prev ael :AsmExpressionList)
+          (recur ael))))
+    r))
+
+(defn- asm-arg-list-opt [^Parser p]
+  (loop [r nil prev nil]
+    (if (= (rn p) \:)
+      (let [aal (if (in? (pkc p 1) \) \:)
+                  (node "AsmArgList" :Token (sh p))
+                  (node "AsmArgList" :Token (sh p) :AsmExpressionList (asm-expression-list p)))]
+        (link! prev aal :AsmArgList)
+        (recur (or r aal) aal))
+      r)))
+
+(defn- asm [^Parser p]
+  (node "Asm" :Token (must p :ASM) :AsmQualifierList (asm-qualifier-list-opt p) :Token2 (must p \() :Token3 (must p :STRINGLITERAL)
+        :AsmArgList (asm-arg-list-opt p) :Token4 (must p \))))
+
+;; ---------------------------------------------------------------------------------------------
+;; 6.5 Expressions
+
+(defn- expression [^Parser p opt]
+  (if (expression? (rn p))
+    (let [ae (assignment-expression p true)]
+      (if-not (= (rn p) \,)
+        ae
+        (let [r (node "ExpressionList" :AssignmentExpression ae)]
+          (loop [prev r]
+            (when (= (rn p) \,)
+              (let [el (node "ExpressionList" :Token (sh p) :AssignmentExpression (assignment-expression p true))]
+                (link! prev el :ExpressionList)
+                (recur el))))
+          r)))
+    (when-not opt (unexpected p "asm expression"))))
+
+(def ^:private assign-ops
+  {\= :AssignmentExpressionAssign :MULASSIGN :AssignmentExpressionMul :DIVASSIGN :AssignmentExpressionDiv
+   :MODASSIGN :AssignmentExpressionMod :ADDASSIGN :AssignmentExpressionAdd :SUBASSIGN :AssignmentExpressionSub
+   :LSHASSIGN :AssignmentExpressionLsh :RSHASSIGN :AssignmentExpressionRsh :ANDASSIGN :AssignmentExpressionAnd
+   :XORASSIGN :AssignmentExpressionXor :ORASSIGN :AssignmentExpressionOr})
+
+(defn- assignment-expression [^Parser p ctn?]
+  (let [[lhs u] (conditional-expression p ctn?)
+        c (rn p)]
+    (cond
+      (= c :eof) (unexpected-eof p)
+      (assign-ops c)
+      (let [r (node "AssignmentExpression" :Case (assign-ops c) :UnaryExpression u :Token (sh p)
+                    :AssignmentExpression (assignment-expression p ctn?))]
+        (when (nil? u) (eh p (str (tpos (.get r :Token)) ": LHS must be unary-expression")))
+        r)
+      :else lhs)))
+
+(defn- conditional-expression [^Parser p ctn?]
+  (let [[lhs u] ((resolve 'arbace.repr.c.parse/logical-or-expression) p ctn?)]
+    (case (rn p)
+      :eof (do (unexpected-eof p) [nil nil])
+      \? (let [r (node "ConditionalExpression" :Case :ConditionalExpressionCond :LogicalOrExpression lhs :Token (sh p)
+                       :ExpressionList (expression p true) :Token2 (must p \:))]
+           (s! r :ConditionalExpression (first (conditional-expression p ctn?)))
+           [r nil])
+      [lhs u])))
+
+(defmacro ^:private binary-level
+  "One of cc's left-associative binary levels: `name` over `sub`, the operators `ops` ({kind case}),
+  the node `type` holding the left operand under `left` and the right under `right`."
+  [name sub type left right ops]
+  `(defn ~name [^Parser p# ctn?#]
+     (let [[r# u#] (~sub p# ctn?#)]
+       (loop [r# r# u# u#]
+         (let [c# (rn p#)]
+           (cond
+             (= c# :eof) (do (unexpected-eof p#) [nil nil])
+             (contains? ~ops c#)
+             (let [s# (node ~type :Case (get ~ops c#) ~left r# :Token (sh p#))]
+               (s! s# ~right (first (~sub p# ctn?#)))
+               (recur s# nil))
+             :else [r# u#]))))))
+
+(declare multiplicative-expression)
+
+(binary-level additive-expression multiplicative-expression "AdditiveExpression" :AdditiveExpression :MultiplicativeExpression
+              {\+ :AdditiveExpressionAdd \- :AdditiveExpressionSub})
+(binary-level shift-expression additive-expression "ShiftExpression" :ShiftExpression :AdditiveExpression
+              {:LSH :ShiftExpressionLsh :RSH :ShiftExpressionRsh})
+(binary-level relational-expression shift-expression "RelationalExpression" :RelationalExpression :ShiftExpression
+              {\< :RelationalExpressionLt \> :RelationalExpressionGt :LEQ :RelationalExpressionLeq :GEQ :RelationalExpressionGeq})
+(binary-level equality-expression relational-expression "EqualityExpression" :EqualityExpression :RelationalExpression
+              {:EQ :EqualityExpressionEq :NEQ :EqualityExpressionNeq})
+(binary-level and-expression equality-expression "AndExpression" :AndExpression :EqualityExpression {\& :AndExpressionAnd})
+(binary-level exclusive-or-expression and-expression "ExclusiveOrExpression" :ExclusiveOrExpression :AndExpression {\^ :ExclusiveOrExpressionXor})
+(binary-level inclusive-or-expression exclusive-or-expression "InclusiveOrExpression" :InclusiveOrExpression :ExclusiveOrExpression {\| :InclusiveOrExpressionOr})
+(binary-level logical-and-expression inclusive-or-expression "LogicalAndExpression" :LogicalAndExpression :InclusiveOrExpression {:ANDAND :LogicalAndExpressionLAnd})
+(binary-level logical-or-expression logical-and-expression "LogicalOrExpression" :LogicalOrExpression :LogicalAndExpression {:OROR :LogicalOrExpressionLOr})
+
+(defn- compound-literal-storage [^Parser p ctn?] ; go-whim: C23 6.5.3.6
+  (let [lparen (sh p)
+        scs (loop [scs []] (if (storage-class-specifier? (rn p)) (recur (conj scs (storage-class-specifier p))) scs))
+        tn (type-name p)
+        rparen (must p \))]
+    (if-not (= (rn p) \{)
+      (unexpected p "'{'")
+      (do (slot! p COMPLIT scs)
+          (unary-expression p lparen tn rparen ctn?)))))
+
+(defn- cast-expression [^Parser p ctn?]
+  (case (rn p)
+    :eof (do (unexpected-eof p) [nil nil])
+    \( (let [c (pkct p 1)]
+         (cond
+           (storage-class-specifier? c) (let [u (compound-literal-storage p ctn?)] [u u]) ; go-whim
+           (or (specifier-qualifier? c true) (= c :ATTRIBUTE))
+           (let [lparen (sh p) tn (type-name p) rparen (must p \))]
+             (case (rn p)
+               :eof (do (unexpected-eof p) [nil nil])
+               \{ (let [u (unary-expression p lparen tn rparen ctn?)] [u u])
+               (let [r (node "CastExpression" :Case :CastExpressionCast :Token lparen :TypeName tn :Token2 rparen)]
+                 (s! r :CastExpression (first (cast-expression p ctn?)))
+                 [r nil])))
+           (or (expression? c) (= c \{)) (let [r (unary-expression p nil nil nil ctn?)] [r r])
+           :else (do (unexpected p "cast expression") [nil nil])))
+    (let [r (unary-expression p nil nil nil ctn?)] [r r])))
+
+(binary-level multiplicative-expression cast-expression "MultiplicativeExpression" :MultiplicativeExpression :CastExpression
+              {\* :MultiplicativeExpressionMul \/ :MultiplicativeExpressionDiv \% :MultiplicativeExpressionMod})
+
+(defn- type-name [^Parser p]
+  (node "TypeName" :SpecifierQualifierList (specifier-qualifier-list p) :AbstractDeclarator (abstract-declarator p nil true)))
+
+(defn- unary-op [^Parser p c ctn?]
+  (let [r (node "UnaryExpression" :Case c :Token (sh p))]
+    (s! r :CastExpression (first (cast-expression p ctn?)))
+    r))
+
+(defn- unary-expression [^Parser p lp tn rp ctn?]
+  (if tn
+    (postfix-expression p lp tn rp ctn?)
+    (case (rn p)
+      :eof (unexpected-eof p)
+      \& (unary-op p :UnaryExpressionAddrof ctn?)
+      \* (unary-op p :UnaryExpressionDeref ctn?)
+      \+ (unary-op p :UnaryExpressionPlus ctn?)
+      \- (unary-op p :UnaryExpressionMinus ctn?)
+      \~ (unary-op p :UnaryExpressionCpl ctn?)
+      \! (unary-op p :UnaryExpressionNot ctn?)
+      :SIZEOF (if (and (= (pkc p 1) \() (specifier-qualifier? (pkct p 2) true))
+                (let [sz (sh p) lp (sh p) tn (type-name p) rp (must p \))]
+                  (if (= (rn p) \{)
+                    (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token sz :UnaryExpression (unary-expression p lp tn rp ctn?))
+                    (node "UnaryExpression" :Case :UnaryExpressionSizeofType :Token sz :Token2 lp :TypeName tn :Token3 rp)))
+                (node "UnaryExpression" :Case :UnaryExpressionSizeofExpr :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?)))
+      (\( :CHARCONST :FLOATCONST :GENERIC :IDENTIFIER :INTCONST :LONGCHARCONST :LONGSTRINGLITERAL :STRINGLITERAL)
+      (postfix-expression p nil nil nil ctn?)
+      :INC (node "UnaryExpression" :Case :UnaryExpressionInc :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?))
+      :DEC (node "UnaryExpression" :Case :UnaryExpressionDec :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?))
+      :ALIGNOF (if (= (pkc p 1) \()
+                 (if (specifier-qualifier? (pkct p 2) true)
+                   (node "UnaryExpression" :Case :UnaryExpressionAlignofType :Token (sh p) :Token2 (sh p) :TypeName (type-name p) :Token3 (must p \)))
+                   (node "UnaryExpression" :Case :UnaryExpressionAlignofExpr :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?)))
+                 (unexpected p "unary expression or (type name)"))
+      :ANDAND (node "UnaryExpression" :Case :UnaryExpressionLabelAddr :Token (sh p) :Token2 (must p :IDENTIFIER))
+      :REAL (node "UnaryExpression" :Case :UnaryExpressionReal :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?))
+      :IMAG (node "UnaryExpression" :Case :UnaryExpressionImag :Token (sh p) :UnaryExpression (unary-expression p nil nil nil ctn?))
+      (unexpected p "unary expression"))))
+
+(defn- complit-tail!
+  "A compound literal's `, }` or `}`."
+  [^Parser p ^HashMap r0]
+  (case (rn p)
+    :eof (unexpected-eof p)
+    (do (when (= (rn p) \,) (s! r0 :Token4 (sh p)))
+        (s! r0 :Token5 (must p \}))
+        r0)))
+
+(defn- postfix-expression [^Parser p lp tn rp ctn?]
+  (let [r0 (if tn
+             (let [scs (slot p COMPLIT) ; go-whim
+                   _ (slot! p COMPLIT nil)
+                   r0 (node "PostfixExpression" :Case :PostfixExpressionComplit :Token lp :TypeName tn :Token2 rp :Token3 (must p \{)
+                            :InitializerList (initializer-list p nil) :StorageClassSpecifiers (when (seq scs) scs))]
+               (if (complit-tail! p r0) r0 :none))
+             (case (rn p)
+               :eof (do (unexpected-eof p) :none)
+               \( (let [c (pkct p 1)]
+                    (cond
+                      (or (expression? c) (= c \{)) (node "PostfixExpression" :Case :PostfixExpressionPrimary :PrimaryExpression (or (primary-expression p ctn?) :tnil))
+                      (specifier-qualifier? c true)
+                      (let [r0 (node "PostfixExpression" :Case :PostfixExpressionComplit :Token (sh p) :TypeName (type-name p) :Token2 (must p \))
+                                     :Token3 (must p \{) :InitializerList (initializer-list p nil))]
+                        [:return (complit-tail! p r0)])
+                      :else (do (unexpected p "postfix expression") :none)))
+               (node "PostfixExpression" :Case :PostfixExpressionPrimary :PrimaryExpression (or (primary-expression p ctn?) :tnil))))]
+    (cond
+      (= r0 :none) nil
+      (vector? r0) (second r0)
+      :else
+      (let [^HashMap r0 r0
+            r (if (and (case? r0 :PostfixExpressionPrimary) (.get r0 :PrimaryExpression)) (.get r0 :PrimaryExpression) r0)]
+        (loop [r r]
+          (case (rn p)
+            :eof (unexpected-eof p)
+            \[ (recur (node "PostfixExpression" :Case :PostfixExpressionIndex :PostfixExpression r :Token (sh p) :ExpressionList (expression p false) :Token2 (must p \])))
+            \( (let [c (pkct p 1)]
+                 (if (or (expression? c) (= c \)))
+                   (recur (node "PostfixExpression" :Case :PostfixExpressionCall :PostfixExpression r :Token (sh p)
+                                :ArgumentExpressionList (argument-expression-list-opt p true) :Token2 (must p \))))
+                   (do (unexpected p "postfix expression") (recur r))))
+            \. (recur (node "PostfixExpression" :Case :PostfixExpressionSelect :PostfixExpression r :Token (sh p) :Token2 (must p :IDENTIFIER)))
+            :ARROW (recur (node "PostfixExpression" :Case :PostfixExpressionPSelect :PostfixExpression r :Token (sh p) :Token2 (must p :IDENTIFIER)))
+            :INC (recur (node "PostfixExpression" :Case :PostfixExpressionInc :PostfixExpression r :Token (sh p)))
+            :DEC (recur (node "PostfixExpression" :Case :PostfixExpressionDec :PostfixExpression r :Token (sh p)))
+            r))))))
+
+(defn- argument-expression-list-opt [^Parser p ctn?]
+  (rn p)
+  (case (rn p)
+    :eof (unexpected-eof p)
+    \) nil
+    (let [r (node "ArgumentExpressionList" :AssignmentExpression (assignment-expression p ctn?))]
+      (loop [prev r]
+        (when (= (rn p) \,)
+          (let [ael (node "ArgumentExpressionList" :Token (sh p) :AssignmentExpression (assignment-expression p ctn?))]
+            (link! prev ael :ArgumentExpressionList)
+            (rn p)
+            (recur ael))))
+      (rn p)
+      r)))
+
+(declare generic-selection)
+
+(defn- primary-expression [^Parser p ctn?]
+  (case (rn p ctn?)
+    :eof (unexpected-eof p)
+    :CHARCONST (node "PrimaryExpression" :Case :PrimaryExpressionChar :Token (sh p))
+    :FLOATCONST (node "PrimaryExpression" :Case :PrimaryExpressionFloat :Token (sh p))
+    :IDENTIFIER (let [r (node "PrimaryExpression" :Case :PrimaryExpressionIdent :Token (sh p))] (.put r :scope (slot p SCOPE)) r)
+    :INTCONST (node "PrimaryExpression" :Case :PrimaryExpressionInt :Token (sh p))
+    :LONGCHARCONST (node "PrimaryExpression" :Case :PrimaryExpressionLChar :Token (sh p))
+    :LONGSTRINGLITERAL (node "PrimaryExpression" :Case :PrimaryExpressionLString :Token (sh p))
+    :STRINGLITERAL (node "PrimaryExpression" :Case :PrimaryExpressionString :Token (sh p))
+    \( (if (= (pkc p 1) \{)
+         (node "PrimaryExpression" :Case :PrimaryExpressionStmt :Token (sh p) :CompoundStatement (compound-statement p false false nil) :Token2 (must p \)))
+         (node "PrimaryExpression" :Case :PrimaryExpressionExpr :Token (sh p) :ExpressionList (expression p false) :Token2 (must p \))))
+    :GENERIC (node "PrimaryExpression" :Case :PrimaryExpressionGeneric :GenericSelection (generic-selection p))
+    (unexpected p "primary expression")))
+
+(defn- generic-association [^Parser p]
+  (if (= (rn p) :DEFAULT)
+    (node "GenericAssociation" :Case :GenericAssociationDefault :Token (sh p) :Token2 (must p \:) :AssignmentExpression (assignment-expression p true))
+    (node "GenericAssociation" :Case :GenericAssociationType :TypeName (type-name p) :Token (must p \:) :AssignmentExpression (assignment-expression p true))))
+
+(defn- generic-association-list [^Parser p]
+  (let [r (node "GenericAssociationList" :GenericAssociation (generic-association p))]
+    (loop [prev r]
+      (when (= (rn p) \,)
+        (let [gal (node "GenericAssociationList" :Token (sh p) :GenericAssociation (generic-association p))]
+          (link! prev gal :GenericAssociationList)
+          (recur gal))))
+    r))
+
+(defn- generic-selection [^Parser p]
+  (node "GenericSelection" :Token (must p :GENERIC) :Token2 (must p \() :AssignmentExpression (assignment-expression p true)
+        :Token3 (must p \,) :GenericAssociationList (generic-association-list p) :Token4 (must p \))))
+
+(defn- constant-expression [^Parser p]
+  (let [r (node "ConstantExpression")]
+    (s! r :ConditionalExpression (first (conditional-expression p true)))
+    r))
+
+;; ---------------------------------------------------------------------------------------------
+;; 6.7 Declarations
+
+(declare static-assert-declaration init-declarator-list-opt)
+
+(defn- declaration [^Parser p ds d declare]
+  (case (rn p)
+    :STATICASSERT (node "Declaration" :Case :DeclarationAssert :StaticAssertDeclaration (static-assert-declaration p))
+    :AUTOTYPE (let [nm (pk p 1 true)]
+                (if-not (= (ch nm) :IDENTIFIER)
+                  (do (eh p (str (tpos nm) ": unexpected " (rname (ch nm)) ", expected identifier")) (sh p) (sh p) nil)
+                  (let [r (node "Declaration" :Case :DeclarationAuto :Token (sh p) :Declarator (declarator p nil nil false))]
+                    (s! r :Token2 (must p \=))
+                    (s! r :Initializer (initializer p nil))
+                    (s! r :Token3 (must p \;))
+                    (.put ^HashMap (g r :Declarator) :visible (.-seq ^PTok (.get r :Token3)))
+                    (declare! (slot p SCOPE) (src nm) (.get r :Declarator))
+                    r)))
+    (let [[ds ok] (if ds [ds true] (declaration-specifiers p))]
+      (when ok
+        (node "Declaration" :Case :DeclarationDecl :DeclarationSpecifiers ds :InitDeclaratorList (init-declarator-list-opt p ds d declare)
+              :AttributeSpecifierList (attribute-specifier-list-opt p) :Token (must p \;))))))
+
+(defn- static-assert-declaration [^Parser p] ; go-whim: C23 6.7.12, the message is optional
+  (let [r (node "StaticAssertDeclaration" :Token (must p :STATICASSERT) :Token2 (must p \() :ConstantExpression (constant-expression p))]
+    (when (= (rn p) \,)
+      (s! r :Token3 (sh p))
+      (s! r :Token4 (must p :STRINGLITERAL)))
+    (s! r :Token5 (must p \)))
+    r))
+
+(defn- attribute-specifier-list-opt [^Parser p] ; go-whim: and C23's [[...]]
+  (when (or (= (rn p) :ATTRIBUTE) (std-attr-at? p 0))
+    (let [r (node "AttributeSpecifierList" :AttributeSpecifier (attribute-specifier p))]
+      (loop [prev r]
+        (when (or (= (rn p) :ATTRIBUTE) (std-attr-at? p 0))
+          (let [asl (node "AttributeSpecifierList" :AttributeSpecifier (attribute-specifier p))]
+            (link! prev asl :AttributeSpecifierList)
+            (recur asl))))
+      r)))
+
+(defn- gnu-attribute-specifier-list-opt [^Parser p] ; go-whim
+  (loop [r nil prev nil]
+    (if (= (rn p) :ATTRIBUTE)
+      (let [asl (node "AttributeSpecifierList" :AttributeSpecifier (attribute-specifier p))]
+        (link! prev asl :AttributeSpecifierList)
+        (recur (or r asl) asl))
+      r)))
+
+(declare attribute-value-list-opt std-attribute-list-opt)
+
+(defn- attribute-specifier [^Parser p]
+  (if (std-attr-at? p 0) ; go-whim
+    (std-attribute-specifier p)
+    (node "AttributeSpecifier" :Token (must p :ATTRIBUTE) :Token2 (must p \() :Token3 (must p \() :AttributeValueList (attribute-value-list-opt p)
+          :Token4 (must p \)) :Token5 (must p \)))))
+
+(declare attribute-value)
+
+(defn- attribute-value-list-opt [^Parser p]
+  (let [r (case (rn p)
+            :eof :return
+            :IDENTIFIER (node "AttributeValueList" :AttributeValue (attribute-value p))
+            \) :nil
+            (if (keyword-tok? p (tok0 p))
+              (node "AttributeValueList" :AttributeValue (attribute-value p))
+              (do (unexpected p "attribute value") nil)))]
+    (case r
+      :return nil
+      :nil nil
+      (do (loop [prev r]
+            (when (= (rn p) \,)
+              (let [avl (node "AttributeValueList" :Token (sh p) :AttributeValue (attribute-value p))]
+                (s! prev :AttributeValueList avl) ; go-whim: without it a third value replaced the second
+                (recur avl))))
+          r))))
+
+(defn- attribute-value [^Parser p]
+  (case (rn p)
+    :eof (unexpected-eof p)
+    :IDENTIFIER (if (= (pkc p 1) \()
+                  (node "AttributeValue" :Case :AttributeValueExpr :Token (sh p) :Token2 (sh p) :ArgumentExpressionList (argument-expression-list-opt p false)
+                        :Token3 (must p \)))
+                  (node "AttributeValue" :Case :AttributeValueIdent :Token (sh p)))
+    (if (keyword-tok? p (tok0 p))
+      (node "AttributeValue" :Case :AttributeValueIdent :Token (tree/with-ch (sh p) :IDENTIFIER))
+      (do (eh p (str (tpos (tok0 p)) ": unexpected " (rname (rn p)) ", expected identifier"))
+          (sh p)
+          nil))))
+
+;; go-whim: C23's attribute specifiers (c23.go)
+
+(defn- attribute-name [^Parser p]
+  (if (= (rn p) :IDENTIFIER)
+    (sh p)
+    (if (keyword-tok? p (tok0 p))
+      (tree/with-ch (sh p) :IDENTIFIER)
+      (let [t (sh p)] (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected attribute name")) t))))
+
+(defn- balanced-token-sequence-opt [^Parser p]
+  (loop [r nil prev nil open []]
+    (let [c (rn p)]
+      (cond
+        (= c :eof) r
+        (and (in? c \) \] \}) (empty? open)) r
+        (and (in? c \) \] \}) (not= (peek open) c))
+        (let [t (sh p)] (eh p (str (tpos t) ": unexpected " (rname (ch t)) " in an attribute's arguments")) r)
+        :else
+        (let [open (cond (in? c \( \[ \{) (conj open ({\( \) \[ \] \{ \}} c))
+                         (in? c \) \] \}) (pop open)
+                         :else open)
+              l (node "BalancedTokenSequence" :Token (sh p))]
+          (link! prev l :BalancedTokenSequence)
+          (recur (or r l) l open))))))
+
+(defn- std-attribute [^Parser p]
+  (let [r (node "AttributeValue" :Case :AttributeValueIdent)]
+    (when (and (= (pkc p 1) \:) (= (pkc p 2) \:))
+      (s! r :Prefix (attribute-name p))
+      (s! r :Colon (sh p))
+      (s! r :Colon2 (sh p)))
+    (s! r :Token (attribute-name p))
+    (when (= (rn p) \()
+      (s! r :Case :AttributeValueExpr)
+      (s! r :Token2 (sh p))
+      (if (#{"" "gnu" "__gnu__"} (src (.get r :Prefix)))
+        (s! r :ArgumentExpressionList (argument-expression-list-opt p false))
+        (s! r :BalancedTokenSequence (balanced-token-sequence-opt p)))
+      (s! r :Token3 (must p \))))
+    r))
+
+(defn- std-attribute-list-opt [^Parser p]
+  (let [present? #(let [c (rn p)] (not (in? c \, \] :eof)))]
+    (loop [r (when (present?) (node "AttributeValueList" :AttributeValue (std-attribute p)))
+           prev r]
+      (if (= (rn p) \,)
+        (let [l (node "AttributeValueList" :Token (sh p))]
+          (when (present?) (s! l :AttributeValue (std-attribute p)))
+          (link! prev l :AttributeValueList)
+          (recur (or r l) l))
+        r))))
+
+(defn- std-attribute-specifier [^Parser p]
+  (let [r (node "AttributeSpecifier" :Token (sh p) :Token2 (sh p))]
+    (s! r :AttributeValueList (std-attribute-list-opt p))
+    (s! r :Token4 (must p \]))
+    (s! r :Token5 (must p \]))
+    r))
+
+(defn- attributed-statement [^Parser p label-decl-ok]
+  (let [attrs (attribute-specifier-list-opt p)
+        c (rn p)]
+    (if (or (= c \;) (and (expression? c) (not (and (= c :IDENTIFIER) (= (pkc p 1) \:)))))
+      (node "Statement" :Case :StatementExpr
+            :ExpressionStatement (node "ExpressionStatement" :AttributeSpecifierList attrs :ExpressionList (expression p true) :Token (must p \;)))
+      (do (slot! p LDOK label-decl-ok)
+          (let [r (statement p false)]
+            (when r (s! r :AttributeSpecifierList attrs))
+            r)))))
+
+;; init declarators
+
+(declare init-declarator)
+
+(defn- init-declarator-list-opt [^Parser p ds d declare]
+  (let [d (if (nil? d)
+            (case (rn p)
+              :eof (do (unexpected-eof p) :return)
+              \; :return
+              (\( \* :IDENTIFIER) (declarator p nil ds declare)
+              (do (eh p (str (tpos (tok0 p)) ": unexpected " (rname (rn p)) ", expected direct-declarator")) (sh p) :return))
+            d)]
+    (when-not (= d :return)
+      (let [r (node "InitDeclaratorList" :InitDeclarator (init-declarator p ds d declare))]
+        (loop [prev r]
+          (when (= (rn p) \,)
+            (let [idl (node "InitDeclaratorList" :Token (sh p) :AttributeSpecifierList (attribute-specifier-list-opt p)
+                            :InitDeclarator (init-declarator p ds nil declare))]
+              (link! prev idl :InitDeclaratorList)
+              (recur idl))))
+        r))))
+
+(defn- init-declarator [^Parser p ds d declare]
+  (let [^HashMap d (or d (declarator p nil ds declare))
+        r (node "InitDeclarator" :Case :InitDeclaratorDecl :Declarator d)]
+    (when (= (rn p) :ASM) (s! r :Asm (asm p)))
+    (when (or (= (rn p) :ATTRIBUTE) (std-attr-at? p 0)) ; go-whim: C23's too
+      (s! r :AttributeSpecifierList (attribute-specifier-list-opt p)))
+    (when (= (rn p) \=)
+      (s! d :hasInitializer true)
+      (when (g d :isTypename) (eh p (str (tpos (tok0 p)) ": typedef '" (decl-name d) "' is initialized")))
+      (s! r :Case :InitDeclaratorInit)
+      (s! r :Token (sh p))
+      (s! r :Initializer (initializer p nil)))
+    r))
+
+;; 6.7.8 Initialization
+
+(declare designation)
+
+(defn- initializer [^Parser p parent]
+  (case (rn p)
+    :eof (unexpected-eof p)
+    \{ (let [r (node "Initializer" :Case :InitializerInitList :Token (sh p))]
+         (s! r :InitializerList (initializer-list p r))
+         (when (= (rn p) \,) (s! r :Token2 (sh p)))
+         (s! r :Token3 (must p \}))
+         r)
+    (node "Initializer" :Case :InitializerExpr :AssignmentExpression (assignment-expression p true))))
+
+(defn- initializer-list [^Parser p parent]
+  (let [r (case (rn p true)
+            :eof (do (unexpected-eof p) :return)
+            (\[ \.) (node "InitializerList" :Designation (designation p) :Initializer (initializer p parent))
+            :IDENTIFIER (if (= (pkc p 1) \:)
+                          (node "InitializerList" :Designation (designation p) :Initializer (initializer p parent))
+                          (node "InitializerList" :Initializer (initializer p parent)))
+            \{ (node "InitializerList" :Initializer (initializer p parent))
+            \} :return
+            (if (expression? (rn p true))
+              (node "InitializerList" :Initializer (initializer p parent))
+              (do (unexpected p "designation or initializer") nil)))]
+    (when-not (= r :return)
+      (loop [prev r]
+        (if (= (rn p) \,)
+          (let [c (pkct p 1)
+                il (cond
+                     (in? c \. \[) (node "InitializerList" :Token (sh p) :Designation (designation p) :Initializer (initializer p parent))
+                     (= c :IDENTIFIER) (if (= (pkc p 2) \:)
+                                         (node "InitializerList" :Token (sh p) :Designation (designation p) :Initializer (initializer p parent))
+                                         (node "InitializerList" :Token (sh p) :Initializer (initializer p parent)))
+                     (= c \}) :return
+                     :else (node "InitializerList" :Token (sh p) :Initializer (initializer p parent)))]
+            (when-not (= il :return)
+              (s! prev :InitializerList il)
+              (recur il)))
+          nil))
+      r)))
+
+(defn- designator [^Parser p]
+  (case (rn p true)
+    :eof (unexpected-eof p)
+    \[ (let [r (node "Designator" :Case :DesignatorIndex :Token (sh p) :ConstantExpression (constant-expression p))]
+         (if (= (rn p) :DDD)
+           (do (s! r :Case :DesignatorIndex2)
+               (s! r :Token2 (sh p))
+               (s! r :ConstantExpression2 (constant-expression p))
+               (s! r :Token3 (must p \])))
+           (s! r :Token2 (must p \])))
+         r)
+    \. (node "Designator" :Case :DesignatorField :Token (sh p) :Token2 (must p :IDENTIFIER))
+    :IDENTIFIER (if (= (pkc p 1) \:)
+                  (node "Designator" :Case :DesignatorField2 :Token (sh p) :Token2 (sh p))
+                  (unexpected p "designator"))
+    (unexpected p "designator")))
+
+(defn- designator-list [^Parser p]
+  (loop [r nil prev nil last nil]
+    (let [c (rn p true)
+          dl (cond
+               (= c :eof) :eof
+               (in? c \[ \.) (node "DesignatorList" :Designator (designator p))
+               (and (= c :IDENTIFIER) (= (pkc p 1) \:)) (node "DesignatorList" :Designator (designator p))
+               :else nil)]
+      (cond
+        (= dl :eof) (do (unexpected-eof p) [nil nil])
+        (nil? dl) [r last]
+        :else (let [last (g (.get ^HashMap dl :Designator) :Case)]
+                (link! prev dl :DesignatorList)
+                (recur (or r dl) dl last))))))
+
+(defn- designation [^Parser p]
+  (rn p)
+  (let [[dl last] (designator-list p)
+        r (node "Designation" :DesignatorList dl)]
+    (when-not (= last :DesignatorField2) (s! r :Token (must p \=)))
+    r))
+
+;; 6.7.6 Declarators
+
+(defn- declarator [^Parser p ptr ds declare]
+  (let [ptr (or ptr (pointer p true))
+        r (node "Declarator" :Pointer ptr :DirectDeclarator ((resolve 'arbace.repr.c.parse/direct-declarator) p declare))]
+    (.put r :scope (slot p SCOPE))
+    (when ds
+      (.put r :isTypename (boolean (.get ^HashMap ds :isTypedef)))
+      (.put r :externSpec (boolean (.get ^HashMap ds :externSpec))))
+    (when declare
+      (.put r :visible (slot p SEQ))
+      (declare! (slot p SCOPE) (decl-name r) r))
+    r))
+
+(defn direct-declarator [^Parser p declare]
+  (let [r (case (rn p)
+            :IDENTIFIER (let [r (node "DirectDeclarator" :Case :DirectDeclaratorIdent :Token (sh p))]
+                          (when (std-attr-at? p 0) (s! r :AttributeSpecifierList (attribute-specifier-list-opt p))) ; go-whim
+                          r)
+            \( (let [r (node "DirectDeclarator" :Case :DirectDeclaratorDecl :Token (sh p))]
+                 (gnu-attribute-specifier-list-opt p) ; not stored yet (cc)
+                 (s! r :Declarator (declarator p nil nil false))
+                 (s! r :Token2 (must p \)))
+                 r)
+            (unexpected p "direct declarator"))]
+    (direct-declarator2 p r declare)))
+
+(defn- direct-declarator2 [^Parser p dd declare]
+  (loop [r dd]
+    (case (rn p)
+      \( (let [r (do (new-scope! p)
+                     (let [r (if (= (pkct p 1) :IDENTIFIER)
+                               (node "DirectDeclarator" :Case :DirectDeclaratorFuncIdent :DirectDeclarator r :Token (sh p)
+                                     :IdentifierList (identifier-list p true) :Token2 (must p \)))
+                               (node "DirectDeclarator" :Case :DirectDeclaratorFuncParam :DirectDeclarator r :Token (sh p)
+                                     :ParameterTypeList (parameter-type-list-opt p) :Token2 (must p \))))]
+                       (.put r :params (slot p SCOPE))
+                       (close-scope! p)
+                       r))]
+           (recur r))
+      \[ (if (std-attr-at? p 0) ; go-whim: C23 attributes after the declarator, not an array
+           r
+           (let [c (pkct p 1)]
+             (cond
+               (expression? c)
+               (recur (node "DirectDeclarator" :Case :DirectDeclaratorArr :DirectDeclarator r :Token (sh p)
+                            :AssignmentExpression (assignment-expression p true) :Token2 (must p \])))
+               (type-qualifier? c)
+               (let [lbracket (sh p)
+                     tql (type-qualifier-list p false false)]
+                 (recur (case (rn p)
+                          :STATIC (node "DirectDeclarator" :Case :DirectDeclaratorArrStatic :DirectDeclarator r :Token lbracket :TypeQualifiers tql
+                                        :Token2 (sh p) :AssignmentExpression (assignment-expression p true) :Token3 (must p \]))
+                          \* (node "DirectDeclarator" :Case :DirectDeclaratorStar :DirectDeclarator r :Token lbracket :TypeQualifiers tql
+                                   :Token2 (sh p) :Token3 (must p \]))
+                          \] (node "DirectDeclarator" :Case :DirectDeclaratorArr :DirectDeclarator r :Token lbracket :TypeQualifiers tql :Token3 (must p \]))
+                          (node "DirectDeclarator" :Case :DirectDeclaratorArr :DirectDeclarator r :Token lbracket :TypeQualifiers tql
+                                :AssignmentExpression (assignment-expression p true) :Token3 (must p \])))))
+               (= c \]) (recur (node "DirectDeclarator" :Case :DirectDeclaratorArr :DirectDeclarator r :Token (sh p) :Token2 (sh p)))
+               (= c :STATIC) (recur (node "DirectDeclarator" :Case :DirectDeclaratorStaticArr :DirectDeclarator r :Token (sh p) :Token2 (sh p)
+                                          :TypeQualifiers (type-qualifier-list p true false) :AssignmentExpression (assignment-expression p true)
+                                          :Token3 (must p \])))
+               :else (do (unexpected p "direct declarator") (recur r)))))
+      r)))
+
+(defn- param! [^Parser p ^HashMap il ^PTok t ^HashMap r0]
+  (let [param (node "Parameter")]
+    (.put param :name t)
+    (.put param :visible (.-seq t))
+    (declare! (slot p SCOPE) (src t) param)))
+
+(defn- identifier-list [^Parser p declare]
+  (case (rn p true)
+    :eof (unexpected-eof p)
+    :IDENTIFIER (let [r (node "IdentifierList" :Token2 (sh p))]
+                  (when declare (param! p r (.get r :Token2) r))
+                  (loop [prev r]
+                    (when (= (rn p) \,)
+                      (let [il (node "IdentifierList" :Token (sh p) :Token2 (must p :IDENTIFIER))]
+                        (when declare (param! p il (.get il :Token2) r))
+                        (link! prev il :IdentifierList)
+                        (recur il))))
+                  r)
+    (unexpected p "identifier")))
+
+(declare parameter-list)
+
+(defn- parameter-type-list-opt [^Parser p]
+  (case (rn p)
+    :eof (unexpected-eof p)
+    \) nil
+    (let [pl (parameter-list p)]
+      (case (rn p)
+        :eof (unexpected-eof p)
+        \, (node "ParameterTypeList" :Case :ParameterTypeListVar :ParameterList pl :Token (sh p) :Token2 (must p :DDD))
+        (node "ParameterTypeList" :Case :ParameterTypeListList :ParameterList pl)))))
+
+(declare parameter-declaration)
+
+(defn- parameter-list [^Parser p]
+  (let [r (node "ParameterList" :ParameterDeclaration (parameter-declaration p))]
+    (loop [prev r]
+      (when (and (= (rn p) \,) (not= (pkc p 1) :DDD))
+        (let [pl (node "ParameterList" :Token (sh p) :ParameterDeclaration (parameter-declaration p))]
+          (link! prev pl :ParameterList)
+          (recur pl))))
+    r))
+
+(defn- parameter-declaration [^Parser p]
+  (let [[ds ok] (declaration-specifiers p)]
+    (when ok
+      (if (in? (rn p) \) \,)
+        (node "ParameterDeclaration" :Case :ParameterDeclarationAbstract :DeclarationSpecifiers ds)
+        (let [x (declarator-or-abstract-declarator p true)]
+          (case (when x (.get ^HashMap x :node))
+            "AbstractDeclarator" (node "ParameterDeclaration" :Case :ParameterDeclarationAbstract :DeclarationSpecifiers ds :AbstractDeclarator x)
+            "Declarator" (node "ParameterDeclaration" :Case :ParameterDeclarationDecl :DeclarationSpecifiers ds :Declarator x
+                               :AttributeSpecifierList (attribute-specifier-list-opt p))
+            (unexpected p "parameter declaration")))))))
+
+(defn- declare-declarator! [^Parser p ^HashMap r declare]
+  (when declare
+    (.put r :visible (slot p SEQ))
+    (declare! (slot p SCOPE) (decl-name r) r))
+  r)
+
+(defn- doad-unexpected [^Parser p] (unexpected p "declarator or abstract declarator"))
+
+(defn- declarator-or-abstract-declarator [^Parser p declare]
+  (let [ptr0 (pointer p true)]
+    (case (rn p)
+      (\) \,) (if ptr0 (node "AbstractDeclarator" :Case :AbstractDeclaratorPtr :Pointer ptr0) (doad-unexpected p))
+      \( (let [lparen (sh p)]
+           (gnu-attribute-specifier-list-opt p) ; not stored yet (cc)
+           (if (specifier-qualifier? (rn p true) true)
+             (let [dad (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorFunc :Token lparen
+                             :ParameterTypeList (parameter-type-list-opt p) :Token2 (must p \)))]
+               (if (in? (rn p) \, \))
+                 (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr0 :DirectAbstractDeclarator dad)
+                 (doad-unexpected p)))
+             (case (rn p true)
+               \) (let [dad (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorFunc :Token lparen :Token2 (sh p))]
+                    (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr0 :DirectAbstractDeclarator (direct-abstract-declarator2 p dad)))
+               \( (let [x (declarator-or-abstract-declarator p false)]
+                    (case (when x (.get ^HashMap x :node))
+                      "AbstractDeclarator"
+                      (let [dad (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorDecl :Token lparen :AbstractDeclarator x :Token2 (must p \)))]
+                        (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr0 :DirectAbstractDeclarator (direct-abstract-declarator2 p dad)))
+                      "Declarator"
+                      (let [dd (node "DirectDeclarator" :Case :DirectDeclaratorDecl :Token lparen :Declarator x :Token2 (must p \)))]
+                        (declare-declarator! p (node "Declarator" :Pointer ptr0 :DirectDeclarator (direct-declarator2 p dd declare)) declare))
+                      (doad-unexpected p)))
+               :IDENTIFIER (let [dd (direct-declarator p declare)]
+                             (if (= (rn p) \))
+                               (let [dd (node "DirectDeclarator" :Case :DirectDeclaratorDecl :Token lparen :Declarator (node "Declarator" :DirectDeclarator dd)
+                                              :Token2 (must p \)))]
+                                 (declare-declarator! p (node "Declarator" :Pointer ptr0 :DirectDeclarator (direct-declarator2 p dd declare)) declare))
+                               (doad-unexpected p)))
+               \* (let [ptr (pointer p false)]
+                    (case (rn p)
+                      (\) \[) (let [dad (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorDecl :Token lparen
+                                              :AbstractDeclarator (abstract-declarator p ptr false) :Token2 (must p \)))]
+                                (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr0 :DirectAbstractDeclarator (direct-abstract-declarator2 p dad)))
+                      :IDENTIFIER (let [dd (direct-declarator p declare)]
+                                    (if (= (rn p) \))
+                                      (let [dd (node "DirectDeclarator" :Case :DirectDeclaratorDecl :Token lparen
+                                                     :Declarator (node "Declarator" :Pointer ptr :DirectDeclarator dd) :Token2 (must p \)))]
+                                        (declare-declarator! p (node "Declarator" :Pointer ptr0 :DirectDeclarator (direct-declarator2 p dd declare)) declare))
+                                      (doad-unexpected p)))
+                      \( (let [x (declarator-or-abstract-declarator p false)]
+                           (if (= (when x (.get ^HashMap x :node)) "Declarator")
+                             (do (s! x :Pointer ptr)
+                                 (let [dd (node "DirectDeclarator" :Case :DirectDeclaratorDecl :Token lparen :Declarator x :Token2 (must p \)))]
+                                   (declare-declarator! p (node "Declarator" :Pointer ptr0 :DirectDeclarator dd) declare)))
+                             (doad-unexpected p)))
+                      (doad-unexpected p)))
+               \^ (let [ptr (pointer p false)]
+                    (case (rn p)
+                      \) (let [dad (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorDecl :Token lparen
+                                         :AbstractDeclarator (abstract-declarator p ptr false) :Token2 (must p \)))]
+                           (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr0 :DirectAbstractDeclarator (direct-abstract-declarator2 p dad)))
+                      :IDENTIFIER (let [dd (direct-declarator p declare)]
+                                    (if (= (rn p) \))
+                                      (let [dd (node "DirectDeclarator" :Case :DirectDeclaratorDecl :Token lparen
+                                                     :Declarator (node "Declarator" :Pointer ptr :DirectDeclarator dd) :Token2 (must p \)))]
+                                        (declare-declarator! p (node "Declarator" :Pointer ptr0 :DirectDeclarator (direct-declarator2 p dd declare)) declare))
+                                      (doad-unexpected p)))
+                      (doad-unexpected p)))
+               \[ (let [dad (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorDecl :Token lparen
+                                  :AbstractDeclarator (abstract-declarator p nil false) :Token2 (must p \)))]
+                    (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr0 :DirectAbstractDeclarator (direct-abstract-declarator2 p dad)))
+               (doad-unexpected p))))
+      \[ (abstract-declarator p ptr0 false)
+      :IDENTIFIER (declarator p ptr0 nil declare)
+      (doad-unexpected p))))
+
+;; 6.7.3 Type qualifiers
+
+(defn- type-qualifier-list [^Parser p opt accept-attributes]
+  (let [c (rn p true)
+        stop? (fn [c] (or (in? c \: \) \, \[ \] :STATIC) (expression? c) (= c :TYPENAME)))
+        r (cond
+            (type-qualifier? c) (node "TypeQualifiers" :Case :TypeQualifiersTypeQual :TypeQualifier (type-qualifier p false))
+            (and accept-attributes (std-attr-at? p 0)) ; go-whim
+            (node "TypeQualifiers" :Case :TypeQualifiersTypeQual :TypeQualifier (type-qualifier p true))
+            (stop? c) (if opt :return (unexpected p "type qualifier"))
+            (and (= c :ATTRIBUTE) accept-attributes) (node "TypeQualifiers" :Case :TypeQualifiersTypeQual :TypeQualifier (type-qualifier p true))
+            :else (unexpected p "type qualifier"))]
+    (if (= r :return)
+      nil
+      (loop [r r]
+        (let [c (rn p)]
+          (cond
+            (stop? c) r
+            (type-qualifier? c) (recur (node "TypeQualifiers" :Case :TypeQualifiersTypeQual :TypeQualifiers r :TypeQualifier (type-qualifier p accept-attributes)))
+            :else (do (unexpected p "type qualifier") (recur r))))))))
+
+(defn- pointer [^Parser p opt]
+  (let [r (case (rn p)
+            :eof (do (unexpected-eof p) :return)
+            \* (let [r (node "Pointer" :Case :PointerTypeQual :Token (sh p) :TypeQualifiers (type-qualifier-list p true true))]
+                 (.put r :scope (slot p SCOPE)) r)
+            \^ (let [r (node "Pointer" :Case :PointerBlock :Token (sh p) :TypeQualifiers (type-qualifier-list p true true))]
+                 (.put r :scope (slot p SCOPE)) [:return r])
+            (if opt :return (do (unexpected p "type pointer") nil)))]
+    (cond
+      (= r :return) nil
+      (vector? r) (second r)
+      :else (do (loop [prev r]
+                  (when (= (rn p) \*)
+                    (let [q (pointer p false)]
+                      (s! prev :Pointer q)
+                      (s! prev :Case :PointerPtr)
+                      (recur q))))
+                r))))
+
+;; 6.7 declaration specifiers
+
+(declare type-specifier alignment-specifier function-specifier)
+
+(defn- declaration-specifiers
+  "[ds ok]"
+  [^Parser p]
+  (loop [r nil prev nil typedef? false extern? false accept-type-name true]
+    (let [c (rn p)
+          [ds typedef? extern? accept-type-name]
+          (cond
+            (= c :eof) [:eof]
+            (type-specifier? c false) [(node "DeclarationSpecifiers" :Case :DeclarationSpecifiersTypeSpec :TypeSpecifier (type-specifier p)) typedef? extern? false]
+            (= c :IDENTIFIER) (if (or (not accept-type-name) (not (ctn0! p)))
+                                [:done]
+                                [(node "DeclarationSpecifiers" :Case :DeclarationSpecifiersTypeSpec :TypeSpecifier (type-specifier p)) typedef? extern? false])
+            (= c :ATOMIC) (if (= (pkc p 1) \()
+                            [(node "DeclarationSpecifiers" :Case :DeclarationSpecifiersTypeSpec :TypeSpecifier (type-specifier p)) typedef? extern? false]
+                            [(node "DeclarationSpecifiers" :Case :DeclarationSpecifiersTypeQual :TypeQualifier (type-qualifier p false)) typedef? extern? accept-type-name])
+            (or (= c :TYPEDEF) (storage-class-specifier? c))
+            [(node "DeclarationSpecifiers" :Case :DeclarationSpecifiersStorage :StorageClassSpecifier (storage-class-specifier p))
+             (or typedef? (= c :TYPEDEF)) (or extern? (= c :EXTERN)) accept-type-name]
+            (type-qualifier? c) [(node "DeclarationSpecifiers" :Case :DeclarationSpecifiersTypeQual :TypeQualifier (type-qualifier p false)) typedef? extern? accept-type-name]
+            (in? c :INLINE :NORETURN) [(node "DeclarationSpecifiers" :Case :DeclarationSpecifiersFunc :FunctionSpecifier (function-specifier p)) typedef? extern? accept-type-name]
+            (or (= c :ATTRIBUTE) (std-attr-at? p 0)) ; go-whim
+            [(node "DeclarationSpecifiers" :Case :DeclarationSpecifiersAttr :AttributeSpecifierList (attribute-specifier-list-opt p)) typedef? extern? accept-type-name]
+            (= c :ALIGNAS) [(node "DeclarationSpecifiers" :Case :DeclarationSpecifiersAlignSpec :AlignmentSpecifier (alignment-specifier p)) typedef? extern? accept-type-name]
+            :else [:done])]
+      (case ds
+        :eof (do (unexpected-eof p) [nil false])
+        :done [r true]
+        (let [r (or r ds)]
+          (link! prev ds :DeclarationSpecifiers)
+          (.put ^HashMap r :isTypedef typedef?)
+          (.put ^HashMap r :externSpec extern?)
+          (recur r ds typedef? extern? accept-type-name))))))
+
+(defn- alignment-specifier [^Parser p]
+  (let [c (pkct p 2)]
+    (cond
+      (type-specifier? c true) (node "AlignmentSpecifier" :Case :AlignmentSpecifierType :Token (must p :ALIGNAS) :Token2 (must p \() :TypeName (type-name p) :Token3 (must p \)))
+      (expression? c) (node "AlignmentSpecifier" :Case :AlignmentSpecifierExpr :Token (must p :ALIGNAS) :Token2 (must p \() :ConstantExpression (constant-expression p) :Token3 (must p \)))
+      :else (unexpected p "alignment specifier"))))
+
+(defn- function-specifier [^Parser p]
+  (case (rn p)
+    :eof (unexpected-eof p)
+    :INLINE (node "FunctionSpecifier" :Case :FunctionSpecifierInline :Token (sh p))
+    :NORETURN (node "FunctionSpecifier" :Case :FunctionSpecifierNoreturn :Token (sh p))
+    (unexpected p "function specifier")))
+
+(defn- type-qualifier [^Parser p accept-attributes]
+  (if (and accept-attributes (std-attr-at? p 0)) ; go-whim
+    (node "TypeQualifier" :Case :TypeQualifierAttr :AttributeSpecifierList (attribute-specifier-list-opt p))
+    (case (rn p)
+      :eof (unexpected-eof p)
+      :CONST (node "TypeQualifier" :Case :TypeQualifierConst :Token (sh p))
+      :RESTRICT (node "TypeQualifier" :Case :TypeQualifierRestrict :Token (sh p))
+      :VOLATILE (node "TypeQualifier" :Case :TypeQualifierVolatile :Token (sh p))
+      :ATOMIC (node "TypeQualifier" :Case :TypeQualifierAtomic :Token (sh p))
+      :NONNULL (node "TypeQualifier" :Case :TypeQualifierNonnull :Token (sh p))
+      :ATTRIBUTE (if accept-attributes
+                   (node "TypeQualifier" :Case :TypeQualifierAttr :AttributeSpecifierList (attribute-specifier-list-opt p))
+                   (unexpected p "type qualifier"))
+      (unexpected p "type qualifier"))))
+
+(defn- storage-class-specifier [^Parser p]
+  (case (rn p)
+    :eof (unexpected-eof p)
+    :AUTO (node "StorageClassSpecifier" :Case :StorageClassSpecifierAuto :Token (sh p))
+    :EXTERN (node "StorageClassSpecifier" :Case :StorageClassSpecifierExtern :Token (sh p))
+    :REGISTER (node "StorageClassSpecifier" :Case :StorageClassSpecifierRegister :Token (sh p))
+    :STATIC (node "StorageClassSpecifier" :Case :StorageClassSpecifierStatic :Token (sh p))
+    :TYPEDEF (node "StorageClassSpecifier" :Case :StorageClassSpecifierTypedef :Token (sh p))
+    :THREADLOCAL (node "StorageClassSpecifier" :Case :StorageClassSpecifierThreadLocal :Token (sh p))
+    :CONSTEXPR (node "StorageClassSpecifier" :Case :StorageClassSpecifierConstexpr :Token (sh p)) ; go-whim: C23 6.7.2
+    :DECLSPEC (let [r (node "StorageClassSpecifier" :Case :StorageClassSpecifierDeclspec :Token (sh p) :Token2 (must p \())
+                    specs (loop [lvl 0 out []]
+                            (let [c (rn p)]
+                              (cond
+                                (and (= c \)) (zero? lvl)) out
+                                (= c :eof) out
+                                :else (let [lvl (case c \( (inc lvl) \) (dec lvl) lvl)]
+                                        (recur lvl (conj out (sh p)))))))]
+                (when (seq specs) (s! r :Declspecs specs))
+                (s! r :Token3 (must p \)))
+                r)
+    (unexpected p "storage class specifier")))
+
+;; 6.7.2 Type specifiers
+
+(declare struct-or-union-specifier atomic-type-specifier)
+
+(def ^:private simple-type-specifiers
+  {:CHAR :TypeSpecifierChar :DOUBLE :TypeSpecifierDouble :FLOAT :TypeSpecifierFloat :INT :TypeSpecifierInt
+   :LONG :TypeSpecifierLong :SIGNED :TypeSpecifierSigned :SHORT :TypeSpecifierShort :UNSIGNED :TypeSpecifierUnsigned
+   :VOID :TypeSpecifierVoid :BOOL :TypeSpecifierBool :COMPLEX :TypeSpecifierComplex :IMAGINARY :TypeSpecifierImaginary
+   :FLOAT16 :TypeSpecifierFloat16 :BF16 :TypeSpecifierBFloat16 :FLOAT32 :TypeSpecifierFloat32 :FLOAT32X :TypeSpecifierFloat32x
+   :FLOAT64 :TypeSpecifierFloat64 :FLOAT64X :TypeSpecifierFloat64x :FLOAT128 :TypeSpecifierFloat128 :FLOAT128X :TypeSpecifierFloat128x
+   :UINT128 :TypeSpecifierUint128 :INT128 :TypeSpecifierInt128 :DECIMAL32 :TypeSpecifierDecimal32 :DECIMAL64 :TypeSpecifierDecimal64
+   :DECIMAL128 :TypeSpecifierDecimal128})
+
+(defn- type-specifier [^Parser p]
+  (let [c (rn p true)]
+    (cond
+      (= c :eof) (unexpected-eof p)
+      (simple-type-specifiers c) (node "TypeSpecifier" :Case (simple-type-specifiers c) :Token (sh p))
+      (= c :ENUM) (let [r (node "TypeSpecifier" :Case :TypeSpecifierEnum :EnumSpecifier (enum-specifier p))] (.put r :scope (slot p SCOPE)) r)
+      (= c :TYPENAME) (let [r (node "TypeSpecifier" :Case :TypeSpecifierTypeName :Token (sh p true))] (.put r :scope (slot p SCOPE)) r)
+      (in? c :STRUCT :UNION) (node "TypeSpecifier" :Case :TypeSpecifierStructOrUnion :StructOrUnionSpecifier (struct-or-union-specifier p))
+      (= c :ATOMIC) (node "TypeSpecifier" :Case :TypeSpecifierAtomic :AtomicTypeSpecifier (atomic-type-specifier p))
+      (= c :BITINT) (node "TypeSpecifier" :Case :TypeSpecifierBitInt :Token (sh p) :Token2 (must p \() :ExpressionList (constant-expression p) :Token3 (must p \))) ; go-whim
+      (= c :TYPEOF) (let [c (pkct p 2)]
+                      (cond
+                        (specifier-qualifier? c true) ; go-whim: a qualifier too
+                        (node "TypeSpecifier" :Case :TypeSpecifierTypeofType :Token (sh p) :Token2 (must p \() :TypeName (type-name p) :Token3 (must p \)))
+                        (expression? c)
+                        (node "TypeSpecifier" :Case :TypeSpecifierTypeofExpr :Token (sh p) :Token2 (must p \() :ExpressionList (expression p false) :Token3 (must p \)))
+                        :else (unexpected p "type specifier")))
+      :else (unexpected p "type specifier"))))
+
+(defn- atomic-type-specifier [^Parser p]
+  (node "AtomicTypeSpecifier" :Token (must p :ATOMIC) :Token2 (must p \() :TypeName (type-name p) :Token3 (must p \))))
+
+;; 6.7.2.2 Enumeration specifiers
+
+(declare enumerator-list enum-type-specifier)
+
+(defn- enum-visible! [^Parser p ^HashMap r]
+  (.put r :visible (inc (.-seq ^PTok (.get r :Token))))
+  (declare! (slot p SCOPE) (src (.get r :Token2)) r))
+
+(defn- enum-specifier-attributes [^Parser p] ; go-whim
+  (let [kw (sh p)
+        attrs (attribute-specifier-list-opt p)]
+    (.add ^ArrayList (.-toks p) 0 kw)
+    (let [r (enum-specifier p)]
+      (when r (s! r :AttributeSpecifierList attrs))
+      r)))
+
+(defn- enum-specifier [^Parser p]
+  (if (or (= (pkc p 1) :ATTRIBUTE) (std-attr-at? p 1)) ; go-whim
+    (enum-specifier-attributes p)
+    (let [r (case (pkc p 1)
+              :eof (do (unexpected-eof p) :return)
+              :IDENTIFIER (case (pkct p 2)
+                            \{ (let [r (node "EnumSpecifier" :Case :EnumSpecifierDef :Token (sh p) :Token2 (sh p) :Token3 (sh p) :EnumeratorList (enumerator-list p))]
+                                 (.put r :scope (slot p SCOPE))
+                                 (enum-visible! p r)
+                                 r)
+                            \: (let [r (node "EnumSpecifier" :Token (sh p) :Token2 (sh p) :EnumTypeSpecifier (enum-type-specifier p))]
+                                 (.put r :scope (slot p SCOPE))
+                                 (enum-visible! p r)
+                                 (if (= (rn p) \{)
+                                   (do (s! r :Case :EnumSpecifierDef)
+                                       (s! r :Token3 (sh p))
+                                       (s! r :EnumeratorList (enumerator-list p))
+                                       r)
+                                   (do (s! r :Case :EnumSpecifierTag) [:return r])))
+                            [:return (node "EnumSpecifier" :Case :EnumSpecifierTag :Token (sh p) :Token2 (sh p))])
+              \{ (node "EnumSpecifier" :Case :EnumSpecifierDef :Token (sh p) :Token3 (sh p) :EnumeratorList (enumerator-list p))
+              \: (let [r (node "EnumSpecifier" :Case :EnumSpecifierDef :Token (sh p) :EnumTypeSpecifier (enum-type-specifier p))]
+                   (if (= (rn p) \{)
+                     (do (s! r :Token3 (sh p)) (s! r :EnumeratorList (enumerator-list p)) r)
+                     [:return r]))
+              (do (unexpected p "enum specifier") :return))]
+      (cond
+        (= r :return) nil
+        (vector? r) (second r)
+        :else (case (rn p)
+                :eof (unexpected-eof p)
+                \, (do (s! r :Token4 (sh p)) (s! r :Token5 (must p \})) r)
+                \} (do (s! r :Token5 (sh p)) r)
+                (unexpected p "enum specifier"))))))
+
+(defn- enum-type-specifier [^Parser p]
+  (case (rn p)
+    :eof (unexpected-eof p)
+    \: (node "EnumTypeSpecifier" :Token (sh p) :SpecifierQualifierList (specifier-qualifier-list p))
+    (unexpected p "':'")))
+
+(declare enumerator)
+
+(defn- enumerator-list [^Parser p]
+  (let [r (node "EnumeratorList" :Enumerator (enumerator p))]
+    (loop [prev r]
+      (case (rn p)
+        :eof (unexpected-eof p)
+        \} r
+        \, (if (= (pkct p 1) :IDENTIFIER)
+             (let [e (node "EnumeratorList" :Token (sh p) :Enumerator (enumerator p))]
+               (link! prev e :EnumeratorList)
+               (recur e))
+             r)
+        (do (unexpected p "enumerator") (recur prev))))))
+
+(defn- enumerator [^Parser p]
+  (let [r (case (pkc p 1)
+            (\} \,) (node "Enumerator" :Case :EnumeratorIdent :Token (must p :IDENTIFIER))
+            \= (node "Enumerator" :Case :EnumeratorExpr :Token (must p :IDENTIFIER) :Token2 (sh p) :ConstantExpression (constant-expression p))
+            (:ATTRIBUTE \[) (let [t (must p :IDENTIFIER) ; go-whim: '[', C23's [[...]]
+                                  attrs (attribute-specifier-list-opt p)]
+                              (case (rn p)
+                                (\} \,) (node "Enumerator" :Case :EnumeratorIdent :Token t :AttributeSpecifierList attrs)
+                                \= (node "Enumerator" :Case :EnumeratorExpr :Token t :Token2 (sh p) :ConstantExpression (constant-expression p) :AttributeSpecifierList attrs)
+                                (unexpected p "enumerator")))
+            (unexpected p "enumerator"))]
+    (when r
+      (.put ^HashMap r :visible (inc (.-seq ^PTok (.get ^HashMap r :Token))))
+      (declare! (slot p SCOPE) (src (.get ^HashMap r :Token)) r))
+    r))
+
+;; 6.7.2.1 Structure and union specifiers
+
+(declare struct-declaration-list struct-or-union)
+
+(defn- struct-or-union-specifier [^Parser p]
+  (let [sou (struct-or-union p)
+        attrs (attribute-specifier-list-opt p)]
+    (case (rn p)
+      :eof (unexpected-eof p)
+      \{ (let [r (node "StructOrUnionSpecifier" :Case :StructOrUnionSpecifierDef :StructOrUnion sou :AttributeSpecifierList attrs :Token2 (sh p)
+                       :StructDeclarationList (struct-declaration-list p) :Token3 (must p \}) :AttributeSpecifierList2 (attribute-specifier-list-opt p))]
+           (.put r :scope (slot p SCOPE)) r)
+      :IDENTIFIER (let [r (node "StructOrUnionSpecifier" :StructOrUnion sou :AttributeSpecifierList attrs :Token (sh p))]
+                    (.put r :scope (slot p SCOPE))
+                    (.put r :visible (inc (.-seq ^PTok (.get r :Token))))
+                    (case (rn p)
+                      :eof (unexpected-eof p)
+                      \{ (do (declare! (slot p SCOPE) (src (.get r :Token)) r)
+                             (s! r :Case :StructOrUnionSpecifierDef)
+                             (s! r :Token2 (sh p))
+                             (s! r :StructDeclarationList (struct-declaration-list p))
+                             (s! r :Token3 (must p \}))
+                             (s! r :AttributeSpecifierList2 (attribute-specifier-list-opt p))
+                             r)
+                      (do (s! r :Case :StructOrUnionSpecifierTag) r)))
+      (unexpected p "struct or union specifier"))))
+
+(declare struct-declaration)
+
+(defn- struct-declaration-list [^Parser p]
+  (loop [r nil prev nil]
+    (case (rn p)
+      :eof (unexpected-eof p)
+      \} r
+      (let [sdl (node "StructDeclarationList" :StructDeclaration (struct-declaration p))]
+        (link! prev sdl :StructDeclarationList)
+        (recur (or r sdl) sdl)))))
+
+(declare struct-declarator-list-opt)
+
+(defn- struct-declaration [^Parser p]
+  (if (= (rn p) :STATICASSERT)
+    (let [r (node "StructDeclaration" :Case :StructDeclarationAssert :StaticAssertDeclaration (static-assert-declaration p))]
+      (if (= (rn p) \;)
+        (s! r :Token (sh p))
+        (let [t (tok0 p)] (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected ';'"))))
+      r)
+    (let [r (node "StructDeclaration" :Case :StructDeclarationDecl :SpecifierQualifierList (specifier-qualifier-list p)
+                  :StructDeclaratorList (struct-declarator-list-opt p) :AttributeSpecifierList (attribute-specifier-list-opt p))]
+      (case (rn p)
+        \; (s! r :Token (sh p))
+        \} nil
+        (let [t (tok0 p)] (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected ';'"))))
+      r)))
+
+(declare struct-declarator)
+
+(defn- struct-declarator-list-opt [^Parser p]
+  (case (rn p)
+    (\( \* \: :IDENTIFIER)
+    (let [r (node "StructDeclaratorList" :StructDeclarator (struct-declarator p))]
+      (loop [prev r]
+        (when (= (rn p) \,)
+          (let [sdl (node "StructDeclaratorList" :Token (sh p) :StructDeclarator (struct-declarator p))]
+            (link! prev sdl :StructDeclaratorList)
+            (recur sdl))))
+      r)
+    \; nil
+    (unexpected p "struct declarator list")))
+
+(defn- struct-declarator [^Parser p]
+  (case (rn p)
+    :eof (unexpected-eof p)
+    \: (node "StructDeclarator" :Case :StructDeclaratorBitField :Token (sh p) :ConstantExpression (constant-expression p))
+    (let [r (node "StructDeclarator" :Case :StructDeclaratorDecl :Declarator (declarator p nil nil false))]
+      (when (= (rn p) \:)
+        (s! r :Case :StructDeclaratorBitField)
+        (s! r :Token (sh p))
+        (s! r :ConstantExpression (constant-expression p)))
+      r)))
+
+(defn- struct-or-union [^Parser p]
+  (case (rn p)
+    :eof (unexpected-eof p)
+    :STRUCT (node "StructOrUnion" :Case :StructOrUnionStruct :Token (sh p))
+    :UNION (node "StructOrUnion" :Case :StructOrUnionUnion :Token (sh p))
+    (unexpected p "'struct' or 'union'")))
+
+;; 6.7.6 Type names: abstract declarators
+
+(defn- abstract-declarator [^Parser p ptr opt]
+  (let [ptr (or ptr (do (gnu-attribute-specifier-list-opt p) (pointer p true)))]
+    (if (nil? ptr)
+      (case (rn p)
+        (\) \:) (if opt nil (unexpected p "abstract declarator"))
+        \[ (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :DirectAbstractDeclarator (direct-abstract-declarator p))
+        \( (if (in? (pkct p 1) \* :ATTRIBUTE)
+             (node "AbstractDeclarator" :Case :AbstractDeclaratorPtr :DirectAbstractDeclarator (direct-abstract-declarator p))
+             (unexpected p "abstract declarator"))
+        (if (= (rn p true) :IDENTIFIER)
+          (let [t (sh p true)] (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected ';'")) nil)
+          (unexpected p "abstract declarator")))
+      (case (rn p)
+        (\) \:) (node "AbstractDeclarator" :Case :AbstractDeclaratorPtr :Pointer ptr)
+        \[ (node "AbstractDeclarator" :Case :AbstractDeclaratorDecl :Pointer ptr :DirectAbstractDeclarator (direct-abstract-declarator p))
+        \( (let [c (pkct p 1)]
+             (if (or (= c \*) (declaration-specifier? c true))
+               (node "AbstractDeclarator" :Case :AbstractDeclaratorPtr :Pointer ptr :DirectAbstractDeclarator (direct-abstract-declarator p))
+               (unexpected p "abstract declarator")))
+        (unexpected p "abstract declarator")))))
+
+(defn- dad-unexpected [^Parser p] (unexpected p "direct abstract declarator"))
+
+(defn- direct-abstract-declarator [^Parser p]
+  (let [r (case (rn p)
+            \[ (let [c (pkc p 1)]
+                 (cond
+                   (type-qualifier? c)
+                   (let [lbracket (sh p)
+                         tql (type-qualifier-list p false false)]
+                     (case (rn p)
+                       :eof (do (unexpected-eof p) :return)
+                       :INTCONST (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArr :Token lbracket :TypeQualifiers tql
+                                       :AssignmentExpression (assignment-expression p true) :Token2 (must p \]))
+                       :STATIC (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArr :Token lbracket :TypeQualifiers tql :Token2 (sh p)
+                                     :AssignmentExpression (assignment-expression p true) :Token3 (must p \]))
+                       (do (dad-unexpected p) :again)))
+                   (and (not= c \*) (expression? c))
+                   (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArr :Token (sh p) :AssignmentExpression (assignment-expression p true) :Token2 (must p \]))
+                   :else :again))
+            \( (let [c (pkct p 1)]
+                 (cond
+                   (in? c \* :ATTRIBUTE)
+                   (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorDecl :Token (sh p) :AbstractDeclarator (abstract-declarator p nil false) :Token2 (must p \)))
+                   (declaration-specifier? c true)
+                   (do (new-scope! p)
+                       (let [r (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorFunc :Token (sh p) :ParameterTypeList (parameter-type-list-opt p) :Token2 (must p \)))]
+                         (.put r :params (slot p SCOPE))
+                         (close-scope! p)
+                         r))
+                   :else (dad-unexpected p)))
+            (dad-unexpected p))
+        ;; cc's second switch, reached when the first matched no array form (the type qualifiers'
+        ;; error case falls through to it too)
+        r (if (= r :again)
+            (case (pkc p 1)
+              \] (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArr :Token (sh p) :Token2 (sh p))
+              :STATIC (let [lbracket (sh p)]
+                        (if (type-qualifier? (pkc p 1))
+                          (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorStaticArr :Token lbracket :Token2 (sh p)
+                                :TypeQualifiers (type-qualifier-list p false false) :AssignmentExpression (assignment-expression p true) :Token3 (must p \]))
+                          (dad-unexpected p)))
+              \* (if (= (pkc p 2) \])
+                   (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArrStar :Token (sh p) :Token2 (sh p) :Token3 (sh p))
+                   (dad-unexpected p))
+              (dad-unexpected p))
+            r)]
+    (if (= r :return) nil (direct-abstract-declarator2 p r))))
+
+(defn- direct-abstract-declarator2 [^Parser p dad]
+  (loop [r dad]
+    (case (rn p)
+      :eof (unexpected-eof p)
+      (\) \, \:) r
+      \( (recur (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorFunc :DirectAbstractDeclarator r :Token (sh p)
+                      :ParameterTypeList (parameter-type-list-opt p) :Token2 (must p \))))
+      \[ (let [c (pkct p 1)]
+           (cond
+             (= c \]) (recur (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArr :DirectAbstractDeclarator r :Token (sh p) :Token2 (must p \])))
+             (expression? c) (recur (node "DirectAbstractDeclarator" :Case :DirectAbstractDeclaratorArr :DirectAbstractDeclarator r :Token (sh p)
+                                          :AssignmentExpression (assignment-expression p true) :Token2 (must p \])))
+             :else (do (dad-unexpected p) (recur r))))
+      (do (dad-unexpected p) (recur r)))))
+
+(defn- specifier-qualifier-list [^Parser p]
+  (loop [r nil prev nil accept-type-name true]
+    (let [c (rn p)
+          [sql accept-type-name]
+          (cond
+            (= c :IDENTIFIER) (if (or (not accept-type-name) (not (ctn0! p)))
+                                [nil]
+                                [(node "SpecifierQualifierList" :Case :SpecifierQualifierListTypeSpec :TypeSpecifier (type-specifier p)) false])
+            (and (= c :ATOMIC) (= (pkc p 1) \())
+            [(node "SpecifierQualifierList" :Case :SpecifierQualifierListTypeSpec :TypeSpecifier (type-specifier p)) false]
+            (type-specifier? c false) [(node "SpecifierQualifierList" :Case :SpecifierQualifierListTypeSpec :TypeSpecifier (type-specifier p)) false]
+            (or (type-qualifier? c) (= c :ATTRIBUTE) (std-attr-at? p 0)) ; go-whim
+            [(node "SpecifierQualifierList" :Case :SpecifierQualifierListTypeQual :TypeQualifier (type-qualifier p true)) accept-type-name]
+            (= c :ALIGNAS) [(node "SpecifierQualifierList" :Case :SpecifierQualifierListAlignSpec :AlignmentSpecifier (alignment-specifier p)) accept-type-name]
+            :else [nil])]
+      (if (nil? sql)
+        r
+        (do (link! prev sql :SpecifierQualifierList)
+            (recur (or r sql) sql accept-type-name))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The parse
+
+(defn- extract-pos
+  "etc.go's extractPos: [file line] of an error's \"file:line:col: ...\", nil for none."
+  [^String s]
+  (let [[prefix s] (if (and (> (count s) 1) (= (.charAt s 1) \:)) [(subs s 0 2) (subs s 2)] ["" s])
+        a (str/split s #":" 4)]
+    (when (>= (count a) 3)
+      (try (let [line (Long/parseLong (nth a 1))]
+             (Long/parseLong (nth a 2))
+             [(str prefix (nth a 0)) line])
+           (catch Exception _ nil)))))
+
+(defn- dedupe-errors
+  "errors.err: an error dropped when the one before it is on the same line."
+  [errs]
+  (let [v (vec errs)]
+    (vec (keep-indexed (fn [i e]
+                         (when-not (and (pos? i)
+                                        (let [a (extract-pos (nth v (dec i))) b (extract-pos e)] (and a b (= a b))))
+                           e))
+                       v))))
+
+(defn parse-sources
+  "Parses the translation unit of `sources` ([[name text-or-nil] ...], `main` the main file) with
+  `cfg` (arbace.repr.c.host/config's): {:tree TranslationUnit-or-nil :errors [...] :notree bool},
+  or {:panic msg} where cc would panic."
+  [cfg sources ^String main]
+  (let [{:keys [errors next]} (pp/stream cfg sources main)
+        st (object-array 9)
+        _ (do (aset st SCOPE (new-scope* nil)) (aset st SEQ (Long/valueOf 0)) (aset st LDOK false))
+        p (Parser. next errors (ArrayList.) (keywords (:predefined cfg)) st)]
+    (try
+      (rn p)
+      (let [tu (translation-unit p)]
+        (if (= (rn p) :eof)
+          (let [pd (when-let [^ArrayList a (.get ^HashMap (.-nodes ^Scope (slot p SCOPE)) "__predefined_declarator")]
+                     (let [x (first a)] (when (= (.get ^HashMap x :node) "Declarator") x)))
+                errs (dedupe-errors errors)
+                errs (if pd errs (conj errs "<bultin>: missing definition of '__predefined_declarator'"))]
+            {:tree tu :errors errs})
+          (let [t (sh p)]
+            (eh p (str (tpos t) ": unexpected " (rname (ch t)) ", expected EOF"))
+            {:tree tu :errors (dedupe-errors errors) :notree true})))
+      (catch StackOverflowError _ {:panic "stack overflow"})
+      (catch Exception e
+        (if (:panic (ex-data e)) {:panic (ex-message e)} (throw e))))))
+
+(defn parse
+  "Parses the file `name` (read relative to (:base cfg)) as tools/ccdump's tree mode does: the
+  predefined macros, cc's Builtin, the file."
+  [cfg ^String name]
+  (parse-sources cfg [["<predefined>" (:predefined cfg)] ["<builtin>" builtin] [name nil]] name))
+
+(defn result-dump
+  "A parse's result as tools/ccdump's tree mode writes it; a tree only where cc returns one."
+  ^String [r]
+  (tree/dump (if (:notree r) (dissoc r :tree) r)))
+
+(defn -main
+  "bin/repr-c parse [--std S] [OPTION...] FILE...: each file's tree in tools/ccdump's tree format."
+  [host-dir & args]
+  (let [h (host/load-host host-dir)
+        args (loop [as (seq args) out []]
+               (if as
+                 (if (= (first as) "--std") (recur (nnext as) (conj out (str "-std=" (second as)))) (recur (next as) (conj out (first as))))
+                 out))
+        [opts files] (split-with #(.startsWith ^String % "-") args)
+        fc (host/file-config (vec opts) "gnu23")]
+    (doseq [f files]
+      (print (result-dump (parse (host/config h fc ".") f))))
+    (flush)))

@@ -1647,3 +1647,215 @@ The user decided both as recommended:
 - **CS51 (a):** gcc -E's digest of every file is recorded as data (`test/repr/c/pp-gcc.sha256`, written by `--record`).
   The check then judges the port against the reference everywhere without a compiler. cc's agreement becomes a second
   judge and stays the token-level oracle for kinds, separators and positions.
+
+## As built: C3 (2026-10-29)
+
+C3, the parser, on the branch `c23-c3` from main `50900e48`, in about one day of work (against C1.2's
+2-4). `arbace.repr.c.parse` ports cc's parser (go-whim `80c49bf5`, `crefactor/cc/parser.go`) and go-whim's
+C23 delta (`c23.go`'s productions and the hooks marked `go-whim` in `parser.go`, followed line for line,
+CS37 (a)) function by function; `arbace.repr.c.tree` holds cc's trees as data. `bin/repr-c parse-check`
+parses every file of the 20 corpora read in place and 7,724 mutants with the port and with cc (ccdump's new
+`tree` mode), and compares the dumps line for line: **every file gives cc's tree and errors line for line, or
+is known with its class (6,300 of 6,387 equal, 26 known, 61 known through the token check; 7,679 of 7,724
+mutants equal, 45 known)**. With it CS50 (a) (the lexer follows
+gcc: trigraphs, UCNs in identifiers, gcc's spelling of extended identifiers in the judge) and CS51 (a) (gcc
+-E's digest of every file recorded, `test/repr/c/pp-gcc.sha256`, the token check judging every file by it)
+are built: **every file's stream agrees with gcc's recorded digest, or both reject the file, or it is
+known (6,349, 31, 7)**. The port runs evaluated on the tools' host (CS36 (a)); no shipped file changed,
+no re-seed. Go only TamaGo's go1.27.1, no cgo.
+
+### C3.1 What was ported
+
+| Arbace | lines | ports (go-whim `crefactor/cc`) |
+|---|---:|---|
+| `arbace/repr/c/parse.ae` | 2,241 | `parser.go` (4,037) and `c23.go` (296): the recursive descent, its lookahead (`rune`, `peek`, `shift` with the string literals' concatenation and `canonicalizeStrlitTail`, `must`), the token sequence numbers and the scopes that tell a typedef name from an identifier (`Scope.declare`, `idents`, `ident` as they answer before the checker has typed anything), `__func__`'s injected tokens, the gotos' label check, the keyword sets (`defaultKeywords`, `c23Keywords` from `__STDC_VERSION__`), `Builtin` (the second source of every parse, as go-whim's tools and ccdump pass it), `errors.err`'s same-line dedupe |
+| `arbace/repr/c/tree.ae` | 236 | `ast.go`'s 85 node types and `c23.go`'s `BalancedTokenSequence` as a table (each type's first case, its exported fields in the struct's order), the kinds' names (`stringer.go`), the parser's token `PTok`, the dump |
+| `arbace/repr/c/parsecheck.ae` | 269 | Arbace's: the tree check, the mutants, `--record` |
+
+About 4,300 lines of Go into about 1,950 of Arbace for the parser (`Builtin`'s 240 lines of C apart), JN8's
+ratio. A node is a `java.util.HashMap` of `:node`, `:Case` (the zero case of a node made without one, as Go's
+zero value) and the fields under cc's names; the parser's own facts (`:isTypename`, `:visible`, `:params`,
+`:scope`, `:gotos`) are lower-case keys the dump does not write. Go's mutation of nodes after they are made
+(`r.Case = ...`, `prev.X = next`, `x.Pointer = ptr`) is kept as mutation; a field access through a nil node
+panics as Go's does (`g`, `s!`), so that a mutant that makes cc panic makes the port panic at the same
+place; a Go interface holding a nil `*PrimaryExpression` (cc's `postfixExpression` keeps it, and
+`assignmentExpression`'s "LHS must be unary-expression" does not fire for it) is the value `:tnil`. The
+parser pulls the stream lazily, as cc's does (`arbace.repr.c.pp/stream`): the preprocessor's errors and the
+parser's are one list in cc's order.
+
+cc's behaviour is kept where the corpora show it, its oddities included (each commented in the files): the
+eof token at no position when another file entered cc's file set after the main one (an included file, a
+`_Pragma`'s text; `pp.ae`'s `EOF-NOPOS`), which shows in the trees (an eof consumed by `must`) and in the
+errors' positions; the injected `__func__` tokens at the function's `{`; the typedef check on token copies
+and in place where cc does each; error recovery that does not consume the eof, where cc loops until
+ccdump's timeout and the port gives up after 100,000 errors (both dumps a panic).
+
+Arbace's changes for C3 outside the parser: the tree dump walks with an explicit stack (cc's lists nest as
+deep as they are long: torture's `limits-externalid.c` is a chain of 100,000 `TranslationUnit`s, deeper than
+the evaluator's 10,000 calls); string literals concatenate in builders (torture's `pr46534.c` concatenates a
+million literals).
+
+### C3.2 The oracle and the command
+
+- **ccdump's `tree` mode** (`tools/ccdump/tree.go`, 105 lines): `cc.Parse` through the exporter's new
+  `ArbaceParse` (it calls cc's `newParser` and `parse`, and returns cc's error list), the sources
+  `<predefined>`, `<builtin>` (cc's `Builtin`) and the file, the tree written by a reflection walk: one line a
+  node or token, pre-order, its depth first (a number: cc's lists nest), the field that holds it, the type and
+  case, a token's position, kind, text and separator; absent children and tokens not written; then the
+  errors, `#notree` when `Parse` gave none, `#panic` when cc panicked (`CCDUMP_STACK=1`: its stack on the
+  standard error, how the port's panics were placed). `-current FILE` lets runs in parallel mark the file they
+  are on. The upstream build (`--upstream`) builds the mode too. The port's `arbace.repr.c.tree/dump` writes the same format.
+- **`bin/repr-c parse [--std S] [OPTION...] FILE...`**: the port's tree of each file.
+- **`bin/repr-c parse-check [--corpus C,...] [--mutants N|--no-mutants] [--record]`**
+  (`bin/lib/repr-c/parse-check`, JN8.3's shape; Makefile `repr-c-parse-check`): each corpus's lists as the
+  token check makes them; ccdump in chunks of 50 files on `REPR_C_THREADS` (8) runs, resumed past a file it
+  hangs on; the port on as many threads; `files.tsv` (name, status, lines, errors, the first difference and
+  the first error of each), `report.edn`, both dumps of each file that is not equal under `diff/` (an equal
+  file's cc dump removed). Statuses: `equal`; `known` (`test/repr/c/parse-check-known.edn`, by corpus, with
+  the class); `pp-known` (the token check's known file lists the file at `:pp`, or, for a mutant, its
+  original is known at either level: the stream differs from cc's by design, and the tree with it); `differ`,
+  `crash`, `no-cc`, which fail. `--record` rewrites the known entries of the corpora from the differing
+  files, the classes kept or guessed.
+- **The mutants** (`parsecheck/mutants`, JN8.3's): 4,000 `.c` files of at most 64 KB drawn from the corpora
+  checked (seed 26), two mutants each of 4 edits at tokens off the directive lines (deleted, duplicated,
+  swapped with the next, a token of the file inserted), 7,724 kept (a file needs 9 tokens), each read with its
+  original's configuration and its original's directory first among the `-I` paths. A mutant passes when
+  its dump is cc's line for line: the same tree as far as each parser goes, the same errors in the same
+  order (stronger than C1.2's "the same first error position").
+
+### C3.3 The check's numbers
+
+| corpus | files | equal | known (class) | pp-known | port's seconds |
+|---|---:|---:|---|---:|---:|
+| c23conf | 49 | 49 |  |  | 4 |
+| torture-execute | 1,672 | 1,672 |  |  | 141 |
+| torture-execute-mirror | 1,632 | 1,632 |  |  | 133 |
+| torture-compile | 1,791 | 1,786 | 5 (`:eval-depth`) |  | 346 |
+| tcc-tests2 | 88 | 88 |  |  | 13 |
+| tcc-pp | 22 | 22 |  |  | 2 |
+| compcert | 24 | 24 |  |  | 5 |
+| mir | 315 | 314 | 1 (`:trigraphs`) |  | 27 |
+| cxgo | 88 | 88 |  |  | 8 |
+| benchmarksgame | 52 | 52 |  |  | 89 |
+| sqlite | 2 | 1 | 1 (`:pp-known`, `:has-gnu`) |  | 215 |
+| zlib | 15 | 15 |  |  | 7 |
+| quickjs | 10 | 10 |  |  | 81 |
+| gcc-c23 | 270 | 261 | 5 (`:pp-errors`) | 4 | 162 |
+| gcc-cpp-c23 | 16 | 5 | 5 (`:pp-errors` 2, `:ucn-identifier` 2, `:trigraphs` 1) | 6 | 2 |
+| gcc-c23-sub | 30 | 30 |  |  | 3 |
+| gcc-gnu23 | 51 | 51 |  |  | 4 |
+| gcc-embed | 47 | 1 | 1 (`:pp-errors`) | 45 | 14 |
+| gcc-va-opt | 12 | 5 | 1 (`:pp-errors`) | 6 | 1 |
+| gcc-bitint | 201 | 194 | 7 (`:pp-errors`) |  | 27 |
+| **total** | **6,387** | **6,300** | **26** | **61** | **1,284** |
+| mutants | 7,724 | 7,679 | 2 (`:invalid-paste`) | 43 | 767 |
+
+`bin/repr-c parse-check --record`, every corpus read in place (Lua's tarball not), 8 threads: **no file fails**.
+The dumps compared hold 62.4 million lines over the corpora (nodes and tokens, the headers' declarations
+included: each translation unit is parsed whole) and 48.5 million over the mutants; 145 corpus files and 7,536
+mutants have errors, the same as cc's in the same order. The known entries are 28 in six classes
+(`test/repr/c/parse-check-known.edn`'s `:classes`): `:pp-errors` 16 (the trees equal, the errors not: cc's
+preprocessor errors on `#if`'s binary constants and `wb` suffixes (`strconv.ParseUint`), on `__has_c_attribute`'s
+answers in `#error` tests, on `#elifdef`, a missing `#embed` resource, where the port follows gcc and the token
+check, which compares no error lines, found the streams equal), `:eval-depth` 5 (CS60), `:trigraphs` 2,
+`:ucn-identifier` 2, `:invalid-paste` 2 (mutants), `:pp-known` 1; the `pp-known` files (61 and 43 mutants) are
+those whose stream the token check knows to differ from cc's (`:embed`, `:va-opt`, `:u-prefix`, ...), or a
+mutant's whose original is known. The bugs the check found in the port, each fixed: cc's eof at no position
+after an included file (C3.1); the nil `*Declarator` an identifier list's parameter gives cc's `ident`
+(`checkTypeName` panics: seven mutants); Go's typed nil in `postfixExpression`; the dump's recursion and the
+literals' concatenation (C3.1); the errors' order with the preprocessor's (one list).
+
+### C3.4 CS50 and CS51
+
+- **CS50 (a)**: the lexer reads trigraphs in phase 1 when the file's configuration says so (`host.ae`:
+  `-std=c89`, `c94`, `c99`, `c11`, `c17`, or `-trigraphs`, as gcc does; the scanner's `TRIGRAPHS` slot,
+  `??/` before a new-line a splice, a token holding one has its texts replaced, `lex/replace-trigraphs`);
+  universal character names are part of identifiers (and of pp-numbers, as gcc lexes `0À`); the judge
+  writes each identifier's extended characters, UTF-8 or UCN, as gcc -E does, `\UXXXXXXXX`
+  (`ppcheck/norm-ident`, on both sides). C2.6's files: c23conf's `ident_utf8.c` and tcc's
+  `83_utf8_in_identifiers.c` agree with gcc by the normalization alone (cc lexes UTF-8 letters as the port
+  does: equal to cc at every level); gcc's `cpp/c23-ucnid-1.c` and `-2.c` (UCNs) are known at `lex` and
+  `pp` (`:ucn-identifier`), and `-2.c`, an error test, at `:gcc` (`:undiagnosed`); mir's `lacc/comment.c` and
+  gcc's `cpp/c23-trigraphs-2.c` are known at `lex`, `pp` and `parse` (`:trigraphs`) and agree with gcc. The
+  token check: **lex 6,337 equal, 50 known; pp 6,315 equal, 72 known (each with gcc's tokens)**, against
+  C2.3's 6,340 / 47 and 6,319 / 68.
+- **CS51 (a)**: `test/repr/c/pp-gcc.sha256`, a line a file (`DIGEST  CORPUS/NAME`, or `rejected` where gcc
+  -E fails), written by `bin/repr-c check --tokens --record`, which now runs gcc on every file (16 at a time;
+  Makefile `repr-c-record`); the check judges each file's stream by it (`files.tsv`'s fifth column: `agree`,
+  `both-reject`, `known`, `differ`, `unrecorded`, the last two failing) without a compiler; the known file
+  gains a `:gcc` level, the files whose stream is not gcc's, each with its class; a `:pp` entry whose stream is
+  neither cc's nor gcc's says `:gcc :differs`, its class at `:gcc`. Over the 6,387 files: **6,349 agree with
+  gcc, 31 both reject, 7 known** (`:undiagnosed` 4: gcc's error tests on UCNs not valid in C23 and on
+  `__VA_OPT__`'s misuse, which the port's preprocessor does not diagnose, C7's; `:xid-identifier` 1, CS63;
+  `:cc-panic` 1, tcc's `11.c`; `:assembler` 1, tcc's `13.S`), where C2.3 had 9 files differing besides the
+  error tests: the UTF-8 identifiers, the UCNs in identifiers and the trigraphs now agree.
+
+### C3.5 Speed
+
+Evaluated on the tools' host (stage 0, CS36 (a)), the port's side of the check (preprocessing, parsing and
+writing the dump of each translation unit, the headers included) took 1,284 s for the corpora's 6,387 files
+on 8 threads (torture-execute's 1,672 in 141 s, SQLite's amalgamation in 215 s, torture's `pr46534.c`, a
+million concatenated literals, about 100 s) and 767 s for the mutants; ccdump's side, in chunks of 50 on 8
+runs, minutes. A whole `parse-check` (lists, mutants, both sides) takes over an hour of wall time on the shared host;
+`--record` checks again after rewriting the known file. The parser costs about as much as the preprocessor
+(C2.5's 868 s for the token check's port side).
+
+### C3.6 What is left for C3b
+
+- The converter and the printer (C3b, C1.2), which now read the port's trees.
+- The reference at the parse level: gcc's acceptance of each file (CS61).
+- The keywords by standard (CS62), the extended characters gcc admits in identifiers (CS63), the
+  evaluator's depth (CS60).
+
+### C3.7 Proposals (CS60-CS63)
+
+- **CS60 The evaluator's call depth.** Five of torture's `limits-*.c` (`caselabels`, `declparen`, `exprparen`, `pointer`, `structnest`) nest deeper than the evaluator's
+  10,000 interpreted calls (`Compiler`'s `MAX_DEPTH`): the port panics where cc's Go stack grows.
+  - Options: (a) known (class `:eval-depth`) until C5 compiles repr/c into the program (CS36 (a)), where Go's
+    stack is the limit, the class then emptied; (b) the deep recursions rewritten with explicit stacks (the
+    expression levels, the declarators, the statements: much of the parser, unlike cc's shape); (c) a larger
+    `MAX_DEPTH` (a shipped change, a re-seed, and Go's stack would then overflow fatally first).
+  - *Recommended: (a)*: the files are limits tests, C5 removes the cause, and (b) would make the port harder
+    to review against cc.
+- **CS61 The reference at the parse level.** cc is the parse check's only judge; gcc's acceptance of each
+  file is not recorded.
+  - Options: (a) in C3b, `gcc -fsyntax-only`'s status of every file recorded (`test/repr/c/parse-gcc.edn`,
+    as CS51 (a) at `pp`), each file's acceptance by the port (no error) judged by it, the differences classed;
+    (b) now, at the tree level; (c) never: cc's trees are the parse's oracle, gcc judges the read (C3b) and the
+    runs.
+  - *Recommended: (a)*: at C3b the read has a checker's errors to compare too, and an error test needs the
+    checker (C4) more than the parser.
+- **CS62 The keywords by standard.** cc's keyword set is the same in every mode but C23's spellings: `typeof`
+  and `asm` are keywords even at `-std=c99`, where gcc reads them as identifiers (GNU's `__typeof__` and
+  `__asm__` stay).
+  - Options: (a) the reference's: `typeof` and `asm` keywords only in the GNU modes and C23 (`typeof`), each
+    file where it matters known with a class `:keywords`; (b) cc's set, a C3b read class.
+  - *Recommended: (a)*, CS40 (a)'s rule; no corpus file showed it yet.
+- **CS63 Extended characters in identifiers.** The lexer admits a character from 0x80 in an identifier when
+  Java's `Character.isLetter` says so (cc's `unicode.IsLetter`); gcc admits C23's set (UAX #31's XID_Start
+  and XID_Continue, N3220 annex D), so `x😀` is one identifier to gcc and two tokens to both cc and the port.
+  - Options: (a) the lexer follows gcc with annex D's ranges as a table, the files known with `:ucn-identifier`;
+    (b) cc's reading kept, a class.
+  - *Recommended: (a)*, CS50 (a)'s rule; no corpus file shows it.
+
+### C3.8 Checks and scratch
+
+Run: `bin/repr-c parse-check --record` (every corpus and the mutants, passing: C3.3; the earlier runs found
+the bugs C3.3 lists), `bin/repr-c check --tokens --record` (gcc on every file, `pp-gcc.sha256` written) and
+`bin/repr-c check --tokens` after it (every corpus, passing: C3.4), `ccdump-build` and `ccdump-build
+--upstream` (the upstream helper builds with the tree mode; its dumps not compared), `make check-makefile`,
+and the essential gate (GATE). Not run: anything of `--full` (nothing of it changed; repr/c has no gate step
+until C8, C2.8).
+
+Shipped files: none. The change is under `arbace/repr/c/` (excluded from the embedded tree, `gate_key` and
+`steps.edn`'s `:tools` by C2's rules, which cover the new `parse.ae`, `tree.ae`, `parsecheck.ae`), `bin/repr-c`,
+`bin/lib/repr-c/`, `tools/ccdump/`, `test/repr/c/`, the Makefile (`repr-c-record`, `repr-c-parse-check`),
+LICENSE.md and doc/ARBACE.md (the parser's origin).
+
+The worktree's `.tmp/c3/` (kept): `run4.log`, `run5.log` (the parse checks; `run5.log` the final one's first
+pass, which passed, its second pass stopped as redundant), `tok1.log` (the token check's record), `tok2.log`
+(the token check after it, passing), `run1.log`-`run3.log` (the runs that found C3.3's bugs), `t/` (the first
+comparisons: `a.c`, the string literals' `s.c`, the eof's `e1.c`-`e7.c`), `ucn/` (gcc -E on UTF-8 identifiers,
+UCNs and trigraphs), `cases.txt`, `fields.txt`, `table.txt` (ast.go's cases and fields, the tree table's
+source), `asbuilt.md`; `.tmp/repr-c-parse/` (each corpus's lists, `files.tsv`, `report.edn`, `diff/`, the
+mutants' sources), `.tmp/repr-c-check/` (the token check's, with gcc's outputs of every file).

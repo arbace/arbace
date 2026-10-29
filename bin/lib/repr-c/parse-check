@@ -1,0 +1,91 @@
+#!/bin/bash
+# repr/c's tree check (doc/C23-SURVEY.md, "As built: C3"; JN8.3's shape): every file of the corpora read
+# in place parsed by the port (arbace.repr.c.parse, evaluated on the tools' host) and by cc (tools/ccdump's
+# tree mode, built by bin/repr-c ccdump-build), the dumps compared line for line (arbace.repr.c.parsecheck):
+# the nodes and their cases, every token's position, kind, text and separator, the errors in cc's order; a
+# file whose dumps differ passes when test/repr/c/parse-check-known.edn lists it with its class. Then the
+# mutants: files of the corpora with tokens deleted, duplicated, swapped, inserted, which both must accept
+# or refuse alike (the same dumps, errors included). Run through bin/repr-c parse-check (from the
+# repository root); writes only under .tmp/repr-c-parse/ (REPR_C_PARSE_WORK).
+#
+# Usage: bin/repr-c parse-check [--corpus C,...] [--mutants N] [--no-mutants] [--record]
+#   --corpus     test/c/corpora.edn's ids (default: every corpus read in place, `all`; lua's tarball not)
+#   --mutants N  the mutants' files (default 4,000, two mutants of 4 edits each, seed 26), drawn from the
+#                corpora checked; --no-mutants none
+#   --record     the known file's entries of the corpora rewritten from the differing files (the classes
+#                kept or guessed), then the check again
+# Each corpus: WORK/CORPUS/list.jsonl, files.edn, base.txt (bin/repr-c check's lists), cc-tree/ (ccdump's
+# dumps, run in chunks of 50 on REPR_C_THREADS threads; an equal file's dump removed), files.tsv (name,
+# status: equal, known, differ, crash, no-cc; nodes, errors, the first difference), report.edn, diff/
+# (both dumps of each file that is not equal: NAME.tsv.cc, NAME.tsv.port).
+#   REPR_C_THREADS (default 8) the port's threads and ccdump's runs; REPR_C_CCDUMP_TIMEOUT (default 600 s)
+# Exit status: 0 when every corpus passes.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+
+all=c23conf,torture-execute,torture-execute-mirror,torture-compile,tcc-tests2,tcc-pp,compcert,mir,cxgo,benchmarksgame,sqlite,zlib,quickjs,gcc-c23,gcc-cpp-c23,gcc-c23-sub,gcc-gnu23,gcc-embed,gcc-va-opt,gcc-bitint
+corpora=$all nmut=4000 record=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --mutants) nmut=$2; shift 2 ;;
+    --no-mutants) nmut=0; shift ;;
+    --record) record=1; shift ;;
+    *) sed -n '11,17p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+[ "$corpora" = all ] && corpora=$all
+work=${REPR_C_PARSE_WORK:-$root/.tmp/repr-c-parse}
+threads=${REPR_C_THREADS:-8}
+mkdir -p "$work"
+gowhim=${GOWHIM:-$(cd "${root%%/.tmp/worktrees/*}/.." && pwd)/go-whim}
+modcache=$(GOFLAGS= "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOMODCACHE)
+
+ccdump=$(bin/repr-c ccdump-build) || { echo "parse-check: ccdump-build failed"; exit 1; }
+gccroot=
+case ,$corpora, in *,gcc-*) gccroot=$(bin/repr-c gcc-tests) || exit 1 ;; esac
+roots="{:gomodcache \"$modcache\" :go-whim \"$gowhim\" :gcc-15.2.0 \"$gccroot\"}"
+
+IFS=, read -r -a ids <<< "$corpora"
+for id in "${ids[@]}" mutants; do rm -rf "${work:?}/$id"; done
+arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "${ids[@]}" || exit 1
+if [ "$nmut" != 0 ]; then
+  arbace_tool -m arbace.repr.c.parsecheck mutants "$work" 26 "$nmut" 2 4 "${ids[@]}" || exit 1
+  ids+=(mutants)
+fi
+
+# one chunk of cc's dumps, a run resumed past a file it hangs on
+ccdump_chunk() { # DIR CHUNK
+  local d=$1 c=$2 st cur
+  while :; do
+    timeout "${REPR_C_CCDUMP_TIMEOUT:-600}" "$ccdump" -mode tree -host test/c/host -list "$c" \
+      -o "$d/cc-tree" -base "$(cat "$d/base.txt")" -skip-done -current "$c.current" > "$c.log" 2>&1
+    st=$?
+    [ $st = 0 ] && return 0
+    cur=$(cat "$c.current" 2>"$TMPDIR/repr-c-cur.$$.err") || return 1
+    mkdir -p "$(dirname "$d/cc-tree/$cur")"
+    if [ $st = 124 ]; then printf '#panic\ttimeout\n' > "$d/cc-tree/$cur"; else printf '#panic\tccdump exited %s\n' "$st" > "$d/cc-tree/$cur"; fi
+  done
+}
+export -f ccdump_chunk
+export ccdump TMPDIR
+
+status=0
+[ -n "$record" ] && export REPR_C_PARSE_KEEP=1 # the check runs again after the record
+for id in "${ids[@]}"; do
+  d=$work/$id
+  mkdir -p "$d/chunks"
+  split -l 50 -d -a 4 "$d/list.jsonl" "$d/chunks/c"
+  ls "$d"/chunks/c???? | xargs -P "$threads" -I{} bash -c 'ccdump_chunk "$1" "$2"' _ "$d" {} \
+    || { echo "$id: ccdump failed ($d/chunks/*.log)"; status=1; }
+done
+arbace_tool -m arbace.repr.c.parsecheck check "$work" "${ids[@]}" || status=1
+if [ -n "$record" ]; then
+  arbace_tool -m arbace.repr.c.parsecheck record "$work" "${ids[@]}" || exit 1
+  status=0
+  arbace_tool -m arbace.repr.c.parsecheck check "$work" "${ids[@]}" || status=1
+fi
+exit $status

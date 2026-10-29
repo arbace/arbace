@@ -3,7 +3,7 @@
 // (or, with the build tag upstream, modernc.org/cc/v4 v4.29.7) and copies none of it; bin/repr-c
 // ccdump-build builds it.
 //
-//	ccdump -mode lex|pp -host DIR -list FILE -o DIR [-base DIR] [-skip-done]
+//	ccdump -mode lex|pp|tree -host DIR -list FILE -o DIR [-base DIR] [-skip-done] [-current FILE]
 //
 // The list holds one JSON object a line: {"name": NAME, "std": STD, "pre": TEXT, "inc": [DIR...],
 // "out": PATH}: NAME the file (relative to -base, which is the working directory while it runs), STD
@@ -19,7 +19,8 @@
 // object-like macro whose expansion made it. Texts are escaped byte for byte: \\, \t, \n, \r and any
 // byte outside 0x20-0x7e as \xHH. Then "#error\tMSG" for each error, and "#panic\tMSG" when cc
 // panicked (the stream up to it kept). Before each file its output path is written to DIR/.current,
-// so that a driver can mark a file the helper hangs on and resume with -skip-done.
+// so that a driver can mark a file the helper hangs on and resume with -skip-done (-current FILE:
+// that file instead, for runs in parallel).
 package main
 
 import (
@@ -72,19 +73,23 @@ func esc(b []byte) string {
 }
 
 func main() {
-	mode := flag.String("mode", "pp", "lex or pp")
+	mode := flag.String("mode", "pp", "lex, pp or tree")
 	hostDir := flag.String("host", "", "the recorded host data (test/c/host)")
 	list := flag.String("list", "", "the files, JSON lines")
 	out := flag.String("o", "", "the output directory")
 	base := flag.String("base", "", "the working directory while reading")
 	skipDone := flag.Bool("skip-done", false, "skip the files whose dump exists (a run resumed)")
+	current := flag.String("current", "", "the file each output path is written to before its file (default DIR/.current)")
 	flag.Parse()
-	if *list == "" || *out == "" || (*mode == "pp" && *hostDir == "") {
-		fmt.Fprintln(os.Stderr, "usage: ccdump -mode lex|pp -host DIR -list FILE -o DIR [-base DIR]")
+	if *list == "" || *out == "" || (*mode != "lex" && *hostDir == "") {
+		fmt.Fprintln(os.Stderr, "usage: ccdump -mode lex|pp|tree -host DIR -list FILE -o DIR [-base DIR]")
 		os.Exit(2)
 	}
 	abs := func(p string) string { a, err := filepath.Abs(p); check(err); return a }
 	*list, *out = abs(*list), abs(*out)
+	if *current != "" {
+		*current = abs(*current)
+	}
 	check(os.MkdirAll(*out, 0o755))
 	var sys []string
 	predef := map[string]string{}
@@ -114,13 +119,17 @@ func main() {
 				continue
 			}
 		}
-		check(os.WriteFile(filepath.Join(*out, ".current"), []byte(e.Out), 0o644))
+		cur := *current
+		if cur == "" {
+			cur = filepath.Join(*out, ".current")
+		}
+		check(os.WriteFile(cur, []byte(e.Out), 0o644))
 		var buf bytes.Buffer
 		w := bufio.NewWriter(&buf)
 		switch *mode {
 		case "lex":
 			dumpLex(w, e)
-		case "pp":
+		case "pp", "tree":
 			p, ok := predef[e.Std]
 			if !ok {
 				b, err := os.ReadFile(filepath.Join(*hostDir, "predefined", e.Std+".h"))
@@ -128,9 +137,14 @@ func main() {
 				p = string(b)
 				predef[e.Std] = p
 			}
-			dumpPP(w, e, &host{predefined: p + e.Pre, include: e.Inc, sysInclude: sys})
+			h := &host{predefined: p + e.Pre, include: e.Inc, sysInclude: sys}
+			if *mode == "tree" {
+				dumpTree(w, e, h)
+			} else {
+				dumpPP(w, e, h)
+			}
 		default:
-			fmt.Fprintf(os.Stderr, "ccdump: mode lex or pp, not %s\n", *mode)
+			fmt.Fprintf(os.Stderr, "ccdump: mode lex, pp or tree, not %s\n", *mode)
 			os.Exit(2)
 		}
 		check(w.Flush())
