@@ -1,0 +1,577 @@
+;; Ported from modernc.org/cc/v4 v4.29.7 as go-whim carries it (https://github.com/arbace/go-whim at
+;; 80c49bf53cd6340487ac623f3d6d135b77ac1db6, crefactor/cc/scanner.go, with the parts of etc.go it
+;; uses), whose notice follows (LICENSE.md, "cc (modernc.org/cc/v4) and go-whim's C23 delta"):
+;;
+;; Copyright 2021 The CC Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+;;
+;; go-whim's C23 delta to the scanner (the digit separators of 6.4.8, u8'a' of 6.4.4.5) is licensed to
+;; Arbace under the EPL-1.0 (doc/C23-SURVEY.md, CS37 (a)); so are Arbace's own changes, each marked
+;; "Arbace:" below (CS40 (a): where cc is wrong, the reference's lexing).
+
+(ns arbace.repr.c.lex
+  "C's preprocessing tokens, after cc's scanner (modernc.org/cc/v4 scanner.go, go-whim's fork;
+  doc/C23-SURVEY.md, \"As built: C2\"): translation phases 1-3, the line splices joined, each token
+  with the white space and comments before it (its separator) and its source text, each line's
+  new-line a token. A file's text is held as its bytes; a token's texts are strings of one char a
+  byte (ISO-8859-1), so that every byte keeps its value. A token is a `Tok`: `ch` its kind (a
+  keyword named as cc's tokCh, :IDENTIFIER, :PPNUMBER, :STRINGLITERAL ..., or the character of a
+  one-character token, `\\newline` for a line's end, `\\space` for a separator the preprocessor
+  inserts), `src`, `sep`, `pf` and `po` the file and offset its position is computed from (cc's
+  token.Position, `#line` applied), `m` the object-like macro whose expansion made it, `hs` its
+  hide set. The preprocessor is arbace.repr.c.pp.")
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------
+;; Files and positions (modernc.org/token's File: the line table and the #line infos)
+
+(deftype CFile [^String name ^bytes buf ^long size ^java.util.ArrayList lines ^java.util.ArrayList infos])
+
+(defn new-file
+  "A source file of `bytes`, a new-line appended when it does not end in one (5.1.1.2, 2)."
+  ^CFile [^String name ^bytes bs]
+  (let [n (alength bs)
+        bs (if (and (pos? n) (not= (aget bs (dec n)) (byte 10)))
+             (let [b (java.util.Arrays/copyOf bs (inc n))] (aset b n (byte 10)) b)
+             bs)
+        lines (java.util.ArrayList.)]
+    (.add lines (long 0))
+    (CFile. name bs (alength ^bytes bs) lines (java.util.ArrayList.))))
+
+(defn add-line
+  "modernc.org/token's AddLine: a line starts at `off`, ignored unless after the last and before the
+  end."
+  [^CFile f ^long off]
+  (let [^java.util.ArrayList ls (.-lines f)
+        i (.size ls)]
+    (when (and (or (zero? i) (< (long (.get ls (dec i))) off)) (< off (.-size f)))
+      (.add ls off))))
+
+(defn add-line-info
+  "modernc.org/token's AddLineInfo: from `off` on, the positions are `filename`'s, from `line`."
+  [^CFile f ^long off ^String filename ^long line]
+  (let [^java.util.ArrayList is (.-infos f)
+        i (.size is)]
+    (when (or (zero? i) (and (< (long (nth (.get is (dec i)) 0)) off) (< off (.-size f))))
+      (.add is [off filename line]))))
+
+(defn- search-ints
+  "The index of the last element of `a` (ascending longs) not above `x`, -1 for none."
+  ^long [^java.util.ArrayList a ^long x]
+  (loop [i 0 j (.size a)]
+    (if (< i j)
+      (let [h (quot (+ i j) 2)]
+        (if (<= (long (.get a h)) x) (recur (inc h) j) (recur i h)))
+      (dec i))))
+
+(defn position
+  "The position of offset `off` of `f` as cc's token.Position gives it: [filename line column],
+  `#line`'s infos applied."
+  [^CFile f ^long off]
+  (let [^java.util.ArrayList ls (.-lines f)
+        i (search-ints ls off)
+        line (if (>= i 0) (inc i) 0)
+        col (if (>= i 0) (inc (- off (long (.get ls i)))) 0)
+        ^java.util.ArrayList is (.-infos f)]
+    (if (zero? (.size is))
+      [(.-name f) line col]
+      (let [j (loop [lo 0 hi (.size is)]
+                (if (< lo hi)
+                  (let [h (quot (+ lo hi) 2)]
+                    (if (> (long (nth (.get is h) 0)) off) (recur lo h) (recur (inc h) hi)))
+                  (dec lo)))]
+        (if (neg? j)
+          [(.-name f) line col]
+          (let [[aoff fname aline] (.get is j)
+                k (search-ints ls (long aoff))]
+            (if (>= k 0)
+              (let [d (- line (inc k))]
+                [fname (+ (long aline) d) (if (zero? d) (inc (- off (long aoff))) col)])
+              [fname line col])))))))
+
+(defn position-string
+  "token.Position's String: file:line:column, file:line, file, or -."
+  ^String [[fname line col]]
+  (let [^String fname fname
+        line (long line) col (long col)]
+    (if (pos? line)
+      (str (when (seq fname) (str fname ":")) line (when-not (zero? col) (str ":" col)))
+      (if (seq fname) fname "-"))))
+
+;; ---------------------------------------------------------------------------------------------
+;; Tokens
+
+(deftype Tok [ch ^String src ^String sep pf ^long po m hs])
+
+(defn tok
+  "A token of kind `ch` with texts `src` and `sep`, positioned at offset `po` of file `pf`."
+  ^Tok [ch src sep pf po]
+  (Tok. ch src sep pf po nil nil))
+
+(defn with-texts ^Tok [^Tok t ch src sep] (Tok. ch src sep (.-pf t) (.-po t) (.-m t) (.-hs t)))
+(defn with-hs ^Tok [^Tok t hs] (Tok. (.-ch t) (.-src t) (.-sep t) (.-pf t) (.-po t) (.-m t) hs))
+(defn with-pos ^Tok [^Tok t ^Tok at] (Tok. (.-ch t) (.-src t) (.-sep t) (.-pf at) (.-po at) (.-m t) (.-hs t)))
+(defn with-pos-m ^Tok [^Tok t ^Tok at m] (Tok. (.-ch t) (.-src t) (.-sep t) (.-pf at) (.-po at) m (.-hs t)))
+
+(defn tok-position
+  "A token's position, [filename line column], or nil for one made without a source (cc's zero
+  Position)."
+  [^Tok t]
+  (when-let [f (.-pf t)] (position f (.-po t))))
+
+(def eof-tok (Tok. :eof "" "" nil 0 nil nil))
+
+;; cc's names of the named kinds (stringer.go's, scanner.go's line comments)
+(def kind-names
+  {:ADDASSIGN "'+='" :ANDAND "'&&'" :ANDASSIGN "'&='" :ARROW "'->'" :CHARCONST "character constant"
+   :DDD "'...'" :DEC "'--'" :DIVASSIGN "'/='" :EQ "'=='" :GEQ "'>='" :HEADER_NAME "<header-name>"
+   :IDENTIFIER "identifier" :INC "'++'" :LEQ "'<='" :LONGCHARCONST "long character constant"
+   :LONGSTRINGLITERAL "long string literal" :LSH "'<<'" :LSHASSIGN "'<<='" :MODASSIGN "'%='"
+   :MULASSIGN "'*='" :NEQ "'!='" :ORASSIGN "'|='" :OROR "'||'" :PPNUMBER "preprocessing number"
+   :PPPASTE "'##'" :RSH "'>>'" :RSHASSIGN "'>>='" :STRINGLITERAL "string literal" :SUBASSIGN "'-='"
+   :XORASSIGN "'^='" :eof "<EOF>"})
+
+(defn quote-rune-ascii
+  "Go's strconv.QuoteRuneToASCII (fmt's %+q of a rune)."
+  ^String [^long r]
+  (str "'"
+       (cond
+         (= r 7) "\\a" (= r 8) "\\b" (= r 12) "\\f" (= r 10) "\\n" (= r 13) "\\r" (= r 9) "\\t"
+         (= r 11) "\\v" (= r 92) "\\\\" (= r 39) "\\'"
+         (and (>= r 0x20) (< r 0x7f)) (str (char r))
+         (< r 0x80) (format "\\x%02x" r)
+         (< r 0x10000) (format "\\u%04x" r)
+         :else (format "\\U%08x" r))
+       "'"))
+
+(defn kind-name
+  "cc's runeName of a token's kind: the tokCh's name, the character quoted, <EOF>."
+  ^String [ch]
+  (cond
+    (keyword? ch) (or (kind-names ch) (name ch))
+    (char? ch) (quote-rune-ascii (long (int ch)))
+    :else (quote-rune-ascii (long ch))))
+
+(defn esc
+  "A token's text in a dump: byte for byte, \\\\, \\t, \\n, \\r and any byte outside 0x20-0x7e as \\xHH
+  (tools/ccdump's escaping)."
+  ^String [^String s]
+  (let [n (.length s)]
+    (if (loop [i 0] (cond (>= i n) true
+                          (let [c (int (.charAt s i))] (or (< c 0x20) (> c 0x7e) (= c 92))) false
+                          :else (recur (inc i))))
+      s
+      (let [b (StringBuilder.)]
+        (dotimes [i n]
+          (let [c (int (.charAt s i))]
+            (cond
+              (= c 92) (.append b "\\\\")
+              (= c 9) (.append b "\\t")
+              (= c 10) (.append b "\\n")
+              (= c 13) (.append b "\\r")
+              (or (< c 0x20) (> c 0x7e)) (.append b (format "\\x%02x" c))
+              :else (.append b (char c)))))
+        (.toString b)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; The scanner (scanner.go's scanner): phases 1-3 over a file's bytes
+
+;; the state's slots
+(def ^:const OFF 0) (def ^:const CH 1) (def ^:const CHSIZE 2) (def ^:const STATE 3)
+(def ^:const CLOSED 4) (def ^:const JOINED 5) (def ^:const SEP 6) (def ^:const SRC 7)
+
+(def ^:const EOF -1)
+;; cppScan's states
+(def ^:const AT-LINE-START 0) (def ^:const HASH 1) (def ^:const OTHER 2) (def ^:const HEADER-NAME 3)
+
+(deftype Scanner [^CFile f ^bytes buf ^long len ^longs st eh])
+
+(defn scanner
+  "A scanner of `f`; `eh` is called with each error's message (a string)."
+  ^Scanner [^CFile f eh]
+  (let [^bytes buf (.-buf f)
+        st (long-array 8)
+        len (alength buf)]
+    (aset st CH EOF)
+    (when (and (>= len 3) (= (aget buf 0) (unchecked-byte 0xef)) (= (aget buf 1) (unchecked-byte 0xbb))
+               (= (aget buf 2) (unchecked-byte 0xbf)))
+      (aset st OFF 3))
+    (Scanner. f buf len st eh)))
+
+(defmacro ^:private st [s k] (list 'aget (with-meta (list '.-st (vary-meta s assoc :tag 'arbace.repr.c.lex.Scanner)) {:tag 'longs}) k))
+(defmacro ^:private st! [s k v] (list 'aset (with-meta (list '.-st (vary-meta s assoc :tag 'arbace.repr.c.lex.Scanner)) {:tag 'longs}) k (list 'long v)))
+
+(defn- peek-byte
+  "scanner.peek: the byte `d` after the offset, or -1 past the end."
+  ^long [^Scanner s ^long d]
+  (let [i (+ (st s OFF) d)]
+    (if (< i (.-len s)) (bit-and (long (aget ^bytes (.-buf s) i)) 0xff) EOF)))
+
+(defn decode-rune
+  "Go's utf8.DecodeRune of `buf` from `i` to `end`: [rune size], (0xFFFD 1) for an invalid
+  sequence, (0xFFFD 0) at the end."
+  [^bytes buf ^long i ^long end]
+  (if (>= i end)
+    [0xFFFD 0]
+    (let [b0 (bit-and (long (aget buf i)) 0xff)]
+      (if (< b0 0x80)
+        [b0 1]
+        (let [cont (fn ^long [^long k ^long lo ^long hi]
+                     (if (< (+ i k) end)
+                       (let [b (bit-and (long (aget buf (+ i k))) 0xff)] (if (and (>= b lo) (<= b hi)) b -1))
+                       -1))]
+          (cond
+            (and (>= b0 0xc2) (<= b0 0xdf))
+            (let [b1 (cont 1 0x80 0xbf)]
+              (if (neg? b1) [0xFFFD 1] [(bit-or (bit-shift-left (bit-and b0 0x1f) 6) (bit-and b1 0x3f)) 2]))
+            (and (>= b0 0xe0) (<= b0 0xef))
+            (let [b1 (cont 1 (case b0 0xe0 0xa0 0x80) (case b0 0xed 0x9f 0xbf))
+                  b2 (if (neg? b1) -1 (cont 2 0x80 0xbf))]
+              (if (neg? b2) [0xFFFD 1]
+                  [(bit-or (bit-shift-left (bit-and b0 0x0f) 12) (bit-shift-left (bit-and b1 0x3f) 6) (bit-and b2 0x3f)) 3]))
+            (and (>= b0 0xf0) (<= b0 0xf4))
+            (let [b1 (cont 1 (case b0 0xf0 0x90 0x80) (case b0 0xf4 0x8f 0xbf))
+                  b2 (if (neg? b1) -1 (cont 2 0x80 0xbf))
+                  b3 (if (neg? b2) -1 (cont 3 0x80 0xbf))]
+              (if (neg? b3) [0xFFFD 1]
+                  [(bit-or (bit-shift-left (bit-and b0 0x07) 18) (bit-shift-left (bit-and b1 0x3f) 12)
+                           (bit-shift-left (bit-and b2 0x3f) 6) (bit-and b3 0x3f)) 4]))
+            :else [0xFFFD 1]))))))
+
+(defn rune
+  "scanner.rune: the rune at the offset, a line splice before it skipped (and the line added), -1
+  at the end or when closed."
+  ^long [^Scanner s]
+  (cond
+    (not (zero? (st s CLOSED))) EOF
+    (and (neg? (st s CH)) (>= (st s OFF) (.-len s))) (do (st! s CLOSED 1) EOF)
+    :else
+    (do
+      (when (= (peek-byte s 0) 92)
+        (cond
+          (= (peek-byte s 1) 10)
+          (do (st! s JOINED 1) (st! s OFF (+ (st s OFF) 2)) (add-line (.-f s) (st s OFF)))
+          (and (= (peek-byte s 1) 13) (= (peek-byte s 2) 10))
+          (do (st! s JOINED 1) (st! s OFF (+ (st s OFF) 3)) (add-line (.-f s) (st s OFF)))))
+      (let [off (st s OFF)
+            buf ^bytes (.-buf s)
+            b0 (if (< off (.-len s)) (bit-and (long (aget buf off)) 0xff) -1)]
+        (if (and (>= b0 0) (< b0 0x80))
+          (do (st! s CH b0) (st! s CHSIZE 1) b0)
+          (let [[r n] (decode-rune buf off (.-len s))]
+            (st! s CH r) (st! s CHSIZE n) (long r)))))))
+
+(defn shift
+  "scanner.shift: past the rune, the next rune (-1 at the end)."
+  ^long [^Scanner s]
+  (if (or (not (zero? (st s CLOSED))) (neg? (st s CH)))
+    EOF
+    (let [prev (st s CH)]
+      (st! s OFF (+ (st s OFF) (st s CHSIZE)))
+      (st! s CH EOF)
+      (let [r (rune s)]
+        (when (= prev 10) (add-line (.-f s) (st s OFF)))
+        r))))
+
+(defn- latin1 ^String [^bytes buf ^long from ^long to]
+  (String. buf (int from) (int (- to from)) "ISO-8859-1"))
+
+(defn- ch-of
+  "A token kind from a rune: the character (a long beyond the BMP)."
+  [^long c]
+  (if (< c 0x10000) (char c) c))
+
+(defn new-token
+  "scanner.newToken: the token from the separator's start and the source's to the offset, line
+  splices taken out of both texts."
+  ^Tok [^Scanner s ch]
+  (let [buf ^bytes (.-buf s)
+        sep (st s SEP) src (st s SRC) off (st s OFF)
+        stext (latin1 buf sep src)
+        text (latin1 buf src off)]
+    (if (zero? (st s JOINED))
+      (tok ch text stext (.-f s) src)
+      (do (st! s JOINED 0)
+          (tok ch
+               (-> text (.replace "\\\n" "") (.replace "\\\r\n" ""))
+               (-> stext (.replace "\\\n" "") (.replace "\\\r\n" ""))
+               (.-f s) src)))))
+
+(defn- err [^Scanner s msg] ((.-eh s) msg))
+
+(defn- pos-str [^Scanner s ^long off] (position-string (position (.-f s) off)))
+
+(defn- fail
+  "scanner.fail: an error at the offset, the scanner closed, an EOF token."
+  ^Tok [^Scanner s]
+  (err s (str (pos-str s (st s OFF)) ": unexpected rune: " (kind-name (ch-of (max 0 (rune s))))))
+  (st! s CLOSED 1)
+  (tok :eof "" "" (.-f s) (st s OFF)))
+
+(defn- letter? [^long c]
+  (if (< c 0x80)
+    (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90)))
+    (and (not= c 0xFFFD) (Character/isLetter (int c)))))
+
+(defn- digit? [^long c]
+  (if (< c 0x80) (and (>= c 48) (<= c 57)) (Character/isDigit (int c))))
+
+(defn- block-comment
+  "scanner.comment: to the end of a /* comment, its / consumed."
+  [^Scanner s ^long start]
+  (shift s)
+  (loop []
+    (let [c (rune s)]
+      (cond
+        (= c EOF) (err s (str (pos-str s start) ": comment not terminated"))
+        (= c 42) (if (= (shift s) 47) (do (shift s) nil) (recur))
+        :else (do (shift s) (recur))))))
+
+(defn- line-comment
+  [^Scanner s]
+  (shift s)
+  (loop []
+    (let [c (rune s)]
+      (when-not (or (= c EOF) (= c 10)) (shift s) (recur)))))
+
+(defn scan-sep
+  "scanner.scanSep: the separator's start set, its white space and comments skipped."
+  [^Scanner s]
+  (st! s SEP (st s OFF))
+  (loop []
+    (let [c (rune s)]
+      (case (int c)
+        (32 9 12 11 13) (do (shift s) (recur))
+        47 (let [o (st s OFF)]
+             (case (int (shift s))
+               42 (do (block-comment s o) (recur))
+               47 (line-comment s)
+               (do (st! s OFF o) (st! s CH EOF))))
+        nil))))
+
+(defn- hex-digit? [^long c]
+  (or (and (>= c 48) (<= c 57)) (and (>= c 97) (<= c 102)) (and (>= c 65) (<= c 70))))
+
+(defn- hexadecimal-digit [^Scanner s] (if (hex-digit? (rune s)) (do (shift s) true) false))
+
+(defn- hex-quad [^Scanner s]
+  (loop [i 0 r false]
+    (if (< i 4)
+      (if (hexadecimal-digit s)
+        (recur (inc i) true)
+        (do (err s (str (pos-str s (st s OFF)) ": expected hexadecimal digit")) r))
+      r)))
+
+(defn- escape-sequence
+  "scanner.escapeSequence, its backslash consumed."
+  [^Scanner s]
+  (let [c (rune s)]
+    (cond
+      (contains? #{39 34 63 92 97 98 101 102 110 114 116 118} c) (do (shift s) true)
+      (and (>= c 48) (<= c 55)) (do (loop [] (let [c (rune s)] (when (and (>= c 48) (<= c 55)) (shift s) (recur)))) true)
+      (or (= c 120) (= c 88))
+      (do (shift s)
+          (when-not (loop [ok false] (if (hexadecimal-digit s) (recur true) ok))
+            (err s (str (pos-str s (st s OFF)) ": expected hexadecimal digit")))
+          true)
+      (= c 117) (do (shift s) (hex-quad s) true)
+      (= c 85) (do (shift s) (when (hex-quad s) (hex-quad s)) true)
+      :else (not= (shift s) EOF))))
+
+(defn- quoted
+  "scanner.characterConstant and stringLiteral: to the closing quote `q`; `what` names it in the
+  error."
+  ^Tok [^Scanner s kind ^long q ^String what]
+  (shift s)
+  (loop []
+    (let [c (rune s)]
+      ;; Arbace: the end of the text ends the loop (cc's loops forever there)
+      (when-not (or (= c q) (= c 10) (= c EOF))
+        (if (= c 92)
+          (do (shift s) (escape-sequence s))
+          (shift s))
+        (recur))))
+  (if (= (rune s) q)
+    (do (shift s) (new-token s kind))
+    (do (err s (str (pos-str s (st s SRC)) ": " what " not terminated"))
+        (fail s))))
+
+(defn- ppnumber
+  "scanner.ppnumber (A.1.9), with go-whim's digit separators."
+  ^Tok [^Scanner s]
+  (shift s)
+  (loop []
+    (let [c (rune s)]
+      (cond
+        (= c 46) (do (shift s) (recur))
+        (contains? #{101 69 112 80} c) (do (shift s) (let [c (rune s)] (when (or (= c 43) (= c 45)) (shift s))) (recur))
+        (= c 39) (let [c2 (peek-byte s 1)]
+                   (if (or (and (>= c2 48) (<= c2 57)) (and (>= c2 97) (<= c2 122)) (and (>= c2 65) (<= c2 90)) (= c2 95))
+                     (do (shift s) (shift s) (recur))
+                     (new-token s :PPNUMBER)))
+        (or (digit? c) (letter? c) (= c 95)) (do (shift s) (recur))
+        :else (new-token s :PPNUMBER)))))
+
+(defn- identifier ^Tok [^Scanner s]
+  (shift s)
+  (loop []
+    (let [c (rune s)]
+      (if (or (letter? c) (= c 95) (digit? c) (= c 36))
+        (do (shift s) (recur))
+        (new-token s :IDENTIFIER)))))
+
+(defn- op1
+  "A one-rune token, or with a following `=` the kind `eq`."
+  ^Tok [^Scanner s c eq]
+  (if (= (shift s) 61) (do (shift s) (new-token s eq)) (new-token s c)))
+
+(defn scan0
+  "scanner.cppScan0: the next preprocessing token (6.4); an :eof token at the end."
+  ^Tok [^Scanner s]
+  (scan-sep s)
+  (st! s SRC (st s OFF))
+  (let [c (rune s)]
+    (case (int c)
+      (40 41 44 58 59 63 91 10 93 123 125 126) (do (shift s) (new-token s (char c)))
+      42 (op1 s \* :MULASSIGN)
+      61 (op1 s \= :EQ)
+      94 (op1 s \^ :XORASSIGN)
+      37 (op1 s \% :MODASSIGN)
+      47 (op1 s \/ :DIVASSIGN)
+      33 (op1 s \! :NEQ)
+      43 (case (int (shift s))
+           61 (do (shift s) (new-token s :ADDASSIGN))
+           43 (do (shift s) (new-token s :INC))
+           (new-token s \+))
+      38 (case (int (shift s))
+           61 (do (shift s) (new-token s :ANDASSIGN))
+           38 (do (shift s) (new-token s :ANDAND))
+           (new-token s \&))
+      45 (case (int (shift s))
+           61 (do (shift s) (new-token s :SUBASSIGN))
+           45 (do (shift s) (new-token s :DEC))
+           62 (do (shift s) (new-token s :ARROW))
+           (new-token s \-))
+      124 (case (int (shift s))
+            61 (do (shift s) (new-token s :ORASSIGN))
+            124 (do (shift s) (new-token s :OROR))
+            (new-token s \|))
+      35 (if (= (shift s) 35) (do (shift s) (new-token s :PPPASTE)) (new-token s \#))
+      60 (case (int (shift s))
+           60 (if (= (shift s) 61) (do (shift s) (new-token s :LSHASSIGN)) (new-token s :LSH))
+           61 (do (shift s) (new-token s :LEQ))
+           (new-token s \<))
+      62 (case (int (shift s))
+           62 (if (= (shift s) 61) (do (shift s) (new-token s :RSHASSIGN)) (new-token s :RSH))
+           61 (do (shift s) (new-token s :GEQ))
+           (new-token s \>))
+      46 (if (and (= (peek-byte s 1) 46) (= (peek-byte s 2) 46))
+           (do (shift s) (shift s) (shift s) (new-token s :DDD))
+           (do (shift s)
+               (let [c2 (rune s)]
+                 (if (and (>= c2 48) (<= c2 57)) (ppnumber s) (new-token s \.)))))
+      34 (quoted s :STRINGLITERAL 34 "string literal")
+      39 (quoted s :CHARCONST 39 "character constant")
+      -1 (do (st! s CLOSED 1) (new-token s :eof))
+      (let [p1 (peek-byte s 1) p2 (peek-byte s 2)]
+        (cond
+          (and (= c 76) (= p1 39)) (do (shift s) (quoted s :LONGCHARCONST 39 "character constant"))
+          (and (= c 76) (= p1 34)) (do (shift s) (quoted s :LONGSTRINGLITERAL 34 "string literal"))
+          (and (= c 117) (= p1 56) (= p2 34)) (do (shift s) (shift s) (quoted s :STRINGLITERAL 34 "string literal"))
+          ;; go-whim: C23 6.4.4.5, u8'a'
+          (and (= c 117) (= p1 56) (= p2 39)) (do (shift s) (shift s) (quoted s :CHARCONST 39 "character constant"))
+          ;; Arbace: C11's u'a', U'a', u"a", U"a" (6.4.4.5, 6.4.5), which cc scans as an identifier
+          ;; and a constant; their kinds the wide ones (the prefix in the text tells them apart)
+          (and (or (= c 117) (= c 85)) (= p1 39)) (do (shift s) (quoted s :LONGCHARCONST 39 "character constant"))
+          (and (or (= c 117) (= c 85)) (= p1 34)) (do (shift s) (quoted s :LONGSTRINGLITERAL 34 "string literal"))
+          (or (letter? c) (= c 95) (= c 36)) (identifier s)
+          (and (>= c 48) (<= c 57)) (ppnumber s)
+          :else (do (shift s) (new-token s (ch-of c))))))))
+
+(defn- header-name
+  "scanner.headerName (A.1.8): a <...> or \"...\" after #include, else the next token (whose
+  separator cc loses: its scan starts after the one skipped here)."
+  ^Tok [^Scanner s]
+  (scan-sep s)
+  (st! s SRC (st s OFF))
+  (let [c (rune s)]
+    (if (or (= c 60) (= c 34))
+      (let [close (if (= c 60) 62 34)]
+        (loop []
+          (let [c (shift s)]
+            (cond
+              (= c close) (do (shift s) (st! s STATE OTHER) (new-token s :HEADER_NAME))
+              (or (= c 10) (= c EOF)) (do (st! s STATE AT-LINE-START) (fail s))
+              :else (recur)))))
+      (scan0 s))))
+
+(def ^:private header-verbs
+  ;; Arbace: C23's #embed takes a header name as #include does (6.10.4)
+  #{"include" "include_next" "embed"})
+
+(defn scan
+  "scanner.cppScan: the next preprocessing token, a header name where #include expects one."
+  ^Tok [^Scanner s]
+  (let [state (st s STATE)]
+    (cond
+      (= state AT-LINE-START)
+      (let [t (scan0 s)]
+        (st! s STATE (cond (= (.-ch t) \newline) AT-LINE-START (= (.-ch t) \#) HASH :else OTHER))
+        t)
+      (= state HASH)
+      (let [t (scan0 s)]
+        (st! s STATE (if (and (= (.-ch t) :IDENTIFIER) (contains? header-verbs (.-src t))) HEADER-NAME OTHER))
+        t)
+      (= state HEADER-NAME)
+      (do (st! s STATE OTHER) (header-name s))
+      :else
+      (let [t (scan0 s)]
+        (when (= (.-ch t) \newline) (st! s STATE AT-LINE-START))
+        t))))
+
+(defn read-bytes ^bytes [^String path]
+  (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))))
+
+(defn tokens
+  "Every preprocessing token of `f` (a CFile) as cc's scanner gives them, and the errors:
+  [tokens errors]."
+  [^CFile f]
+  (let [errs (java.util.ArrayList.)
+        s (scanner f (fn [m] (.add errs m)))
+        out (java.util.ArrayList.)]
+    (loop []
+      (let [t (scan s)]
+        (when-not (= (.-ch t) :eof)
+          (.add out t)
+          (recur))))
+    [(vec out) (vec errs)]))
+
+(defn dump-line
+  "A token's line in tools/ccdump's dump (mode lex without `macro?`): position, kind, source text,
+  separator [, the macro's name]."
+  ^String [^Tok t macro?]
+  (let [b (StringBuilder.)]
+    (.append b (if (= (.-ch t) \space) "-" (position-string (or (tok-position t) ["" 0 0]))))
+    (.append b "\t") (.append b (kind-name (.-ch t)))
+    (.append b "\t") (.append b (esc (.-src t)))
+    (.append b "\t") (.append b (esc (.-sep t)))
+    (when macro?
+      (.append b "\t")
+      (when-let [^Tok m (.-m t)] (.append b (.-src m))))
+    (.toString b)))
+
+(defn dump
+  "The lexer's dump of the file at `path` (named `name` in positions), tools/ccdump's mode lex."
+  ^String [^String name ^String path]
+  (let [f (new-file name (read-bytes path))
+        [ts errs] (tokens f)
+        b (StringBuilder.)]
+    (doseq [t ts] (.append b (dump-line t false)) (.append b "\n"))
+    (doseq [e errs] (.append b "#error\t") (.append b (esc e)) (.append b "\n"))
+    (.toString b)))
+
+(defn -main [& args]
+  (doseq [a args] (print (dump a a)))
+  (flush))

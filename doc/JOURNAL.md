@@ -272,3 +272,46 @@ git history:
 - The big-job lock: GT4/GT6's audit held it for one block of every remaining step (2 h 14 min, under strace),
   queuing main's gate and two agents; on my request it stopped the block, but its children kept the lock's fd until
   killed by PID; the audits now take the lock one step per hold.
+
+## 2026-10-29: GT4 and GT6, JFS133 (a), RPS150 (b) with JCS123 (b) merged; the provenance files rewritten; a deadlock between the two host locks
+
+- The gate's GT4 and GT6 (branch `gate-gt4-6`, merge 980d457d; doc/GATE-SURVEY.md, "As built: GT4, GT6"): the audit under
+  strace, the canary, the runner library `bin/lib/gate-run.bash`, the heavy lock taken per `:heavy` step by the gate itself
+  (`GATE_HEAVY_CMD`), measured peaks, CPU-time limits (`bin/lib/limit.bash`), `--prune`, the shared executables
+  `ARBACE_GATE_EXES`, the essential step `provenance` (`bin/provenance-check`). Proposals GTS30-GTS37, which the user
+  decided as recommended. GT5's branch records them in doc/GATE-SURVEY.md, "Decided (2026-10-28): GTS30-GTS37".
+  The bin/java-check merge conflict was resolved by keeping both sides' functions in its `export -f` line.
+  Scratch: `.tmp/gt4-6/`.
+- JFS133 (a) (branch `java-jfs133`, merge 8d5e06d3, on Sonnet): the six differences of the read without javac, fixed.
+  The nread count went from 3,276/38/6 to 3,282/39/0. Scratch: `.tmp/jfs133/`.
+- RPS150 (b) and JCS123 (b) (branch `v2-rps150`, merge 8851006d): Module's getResourceAsStream and getPackages are now j2g
+  support forms; an own interface's getMethods returns its methods in declaration order; an enum constant's empty body
+  is read as a body. `:j2g-reflection` is by design. Shipped files for the re-seed: arbace/j2g/{out,main}.ae,
+  arbace/classes/parse.ae. The conflict in FULL-SUPPORT-SURVEY.md was resolved by placing "As built: RPS150 and JCS123
+  (b)" before the v2 record's draft. Scratch: `.tmp/rps150/`.
+- Main's first gate on the three merges failed only at `provenance`. JFS133 had edited repr/java, so the four
+  provenance files' reader hash was stale (5ec458cd against the reader's 0832ab00), and JC4c's `bin/j2g-edge update` had
+  left `jdk/javac/provenance.edn`'s `:jdk-edge` stale (625ff84a against babddce8). This is the slip GTS36 (b) removes.
+  Branch `v2-prov` (Sonnet, 25f3ee1c, merge d819e179) ran the writers' updates: a new javac tool (the old one's key
+  predated JFS133), `bin/javac-vendor convert`, `bin/jrt-convert update`, `bin/clojure-tests --java-fixtures update`,
+  `bin/java-check --forms update`. Only the four provenance files changed; no forms did. Scratch: `.tmp/prov/`.
+- The essential gate on merged main d819e179 passed: 35m12s, 18 run, at most 25.2 GiB. The matrix is 12 of 12 cells with 0
+  problems. Java AOT is 1,915/180/1,227; the other cells are as on 2026-10-28.
+- A deadlock, 00:09 to 01:28. The RPS97 agent's branch predates GT6, and it ran `flock big.lock .tmp/heavy CMD` as the
+  agent rules then said. That held big.lock while waiting for one of `.tmp/heavy`'s two slots. Both slots were held by
+  the gates of `gate-gt5` and `v2-prov`, and their heavy steps were waiting for big.lock. I found the holders through
+  /proc/*/fd and killed the two waiting commands by PID. The rule is now slot first, lock second (`.tmp/heavy flock
+  big.lock CMD`); a GT6 gate does this by itself.
+
+## 2026-10-29: C23's C2 merged; CS50-CS51 decided (the user)
+
+- C23's C2 (branch `c23-c2`, on Opus, commits 943d01ce, d6a5a978, fea742ec; doc/C23-SURVEY.md, "As built: C2"): repr/c's
+  lexer and preprocessor (`arbace.repr.c.lex`, `arbace.repr.c.pp`), ports of cc's, checked token for token against
+  `tools/ccdump` (`bin/repr-c check --tokens`; `--judge-all` against gcc -E). repr/c is kept out of the embedded tree
+  until C5 (CS36 (a), `arbace/j2g/embed.ae`). The ported lexer also reads digit separators in `#line`.
+- Merge conflicts with GT4/GT6: `bin/arbace-go`'s `gate_key` and steps.edn's `:tools` take both sides' exclusions.
+  GT4's removal of `arbace/lang/go/ns/` from `:tools` stays. GT4's planner then refused `!arbace/repr/c.ae`, which names
+  no file until C5, so only `!arbace/repr/c/` is kept (96fc2195).
+- The essential gate on merged main passed: 25m57s, 18 run, at most 23.8 GiB.
+- Decided (the user): CS50 (a), the port follows gcc in C3 (trigraphs, UCNs in identifiers); CS51 (a), gcc -E's digest
+  of every file recorded as data. Scratch: `.tmp/c2/`, `.tmp/repr-c-check/`.
