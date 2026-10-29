@@ -378,3 +378,23 @@ git history:
 - The essential gate on 50900e48 passed: 18m54s, 19 run, at most 45.0 GiB. Scratch: `.tmp/gt5/`.
 - C23's C3 started beside v2: repr/c's parser, with CS50 (a) and CS51 (a). Branch `c23-c3`, on Opus, the user's choice.
   It changes no shipped file, stays light while `.tmp/gt7.quiet` exists, and merges after the tag.
+
+## 2026-10-29: REAP v2's second re-seed; GT7's tooling started
+
+- GT5 changed a shipped file, arbace/lang/RT.ae (the loaded-namespaces log), so v2 re-seeded a second time.
+  - `bin/arbace-go --fixpoint` on c560b8ec: G1 = G2 = G3 = 9b117777… (177,778,848 bytes); the host, the first re-seed's
+    stage 0 (a6a95bcb…), differs from G1.
+  - The new seed (00ec2bf5) is 19,006,840 bytes, SHA-256
+    `73b0d6372d651aa703931214600be44a8df5a285c3e140d85604528c4914cb40`.
+  - `bin/seed --verify` passed in 1,412 s: the tar printed again at c560b8ec byte for byte (4aad6d0f…), the same archive,
+    and stage 0 = G1 = G2 = G3.
+  - The essential gate passed: 15m12s, 19 run, at most 36.5 GiB. Both re-seeds took the lock through `bin/heavy-lock`.
+    Scratch: `.tmp/reseed2/`.
+- GT7's tooling started: `bin/gate --clean` did not exist yet. Branch `gate-gt7`, on Opus, builds:
+  - the clone with empty caches, every step audited, all parts (§7, GTS18 (a), GTS30 (a), GTS19 (a));
+  - Java's levels with the forms cache forced (GTS41 (c));
+  - the record `test/gate/clean-TAG.edn`;
+  - GTS37 (a)'s concurrent `--full`;
+  - GTS42 (a)'s demonstrations.
+  It proves the tooling on a clean essential gate. The `--full --clean` run itself is main's, on a quiet host
+  (`.tmp/gt7.quiet`).
