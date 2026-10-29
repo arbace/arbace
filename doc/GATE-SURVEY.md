@@ -1626,3 +1626,58 @@ repr-go-native included; `.tmp/gt7/clean-plan-full.txt`).
 read-only); `bin/gate-demos` was edited (by `sed -i`, a new file) while a run of it executed; the toy's first table named
 `bin/lib` in a `:cmd`, which the planner refused (a test file, fixed).
 
+## As built: GTS50, GTS52, GTS53, GTS57 (2026-10-29)
+
+Branch `gate-gts5x`, from main `abc1316c`. Built before GT7's `bin/gate --full --clean` run, which is to prove the first
+three; the four decided as recommended (GTS50-GTS57). No shipped file changed (the seed, `arbace/`, `go/`, `overlay/`,
+`jdk/`, `tamago/` are as they were). The scripts `bin/seed`, `bin/arbace-go` and `bin/lib/seed-go.bash` are in `gate_key`:
+the first gate on this branch builds the executables once (and javac's tool once, in `--full`).
+
+- **GTS50 (a), `$GOROOT/test` pinned.** `seed/goroot-test.sha256` ("`<SHA-256>  go1.27.1`": sha256sum's lines of every file
+  under TamaGo's `test/` in the C locale, hashed again: 3,516 files, a second), `seed_go_test_hash` in `bin/lib/seed-go.bash`.
+  `bin/gate --pins` checks it (`pins: $GOROOT/test ...: seed/goroot-test.sha256's`; a changed digest fails, tested) and no
+  longer only records it. Deviation from the proposal's wording: a file of its own, not a second line of
+  `seed/goroot.sha256`, which is in `gate_key`, in stage 0's identity and in the pins of every step on `:go`: a change to `test/`
+  would have reran what never reads it. The six steps that declare `seed/goroot.sha256` as the pin of `$GOROOT/test` (goi,
+  goi-aot, goi-check, goi-aot-essential, repr-go, repr-go-native) declare the new file beside it.
+- **GTS52 (a), the host's `go`.** `gate_env` (`bin/lib/gate-run.bash`) puts `${ARBACE_GOROOT:-/root/tamago-go}/bin` first on
+  `PATH`: every step, the tools and the audit inherit it. `bin/lib/tmpdir.bash` (the scripts run by hand) is not changed: it is
+  in `gate_key` and would rebuild the executables for nothing the gate needs (GTS60).
+- **GTS53 (a), stage 0's key and audit.** `bin/seed --build`'s pins file (`target/seed/pins`) holds the digest of `bin/seed` and
+  `bin/lib/seed-go.bash` (a change to either builds stage 0 again, 15 s warm, 2.5 minutes cold), and `hosts.edn`'s `:stage0`
+  (`plan_inputs`) the same digest: every step on `:stage0` is rekeyed by a change to either script, as it already was by the seed's
+  and Go's pins. The `stage0` step declares `:hosts [:stage0] :inputs [:lib-base]` and an `:audit-cmd` that forces the build
+  (`ARBACE_SEED_FORCE=1`); `audit.ae`'s `:stage0` host covers the seed's tar (held by its pinned hash), `bin/seed` and
+  `bin/lib/seed-go.bash`. Audited by `bin/gate --audit stage0` (now allowed for this one `:always` step: 7 declared files, 0
+  undeclared after the tar was declared, which the first audit found) and by the clean run: `bin/gate --clean`'s inner gate
+  runs the pre step `stage0` under strace and compares it with the plan's files once the plan exists (`stage0's audit`; an
+  undeclared read fails the gate; `stage0.audit-status` reaches the record's `:audit`). Tested on a toy table in inner mode
+  (`ok  stage0's audit`; stage 0 kept there: a real clone builds it).
+- **GTS57 (a), a kept build and the lock.** `bin/arbace-go --gate-build --check-cached` and `bin/javac-vendor tool DIR --check`
+  say, with their own key test, whether the build is there (exit 0); `run_one` asks (`build_cached`, keyed on the step's name)
+  for a `:heavy true` `:kind :build` step and runs it without the lock on a hit (the command then only prints that it is
+  cached). A miss goes through the lock as before.
+
+**Runs** (this worktree; the logs `.tmp/gate-run{1,2,3}.log`). `bin/gate --pins` ok (`$GOROOT/test` 812ac548..., a wrong digest
+fails); `bin/gate --full --clean --plan` 85 steps (3 always, 2 builds, 77 run, 3 after), as before; `bin/gate --audit stage0`
+ok (7 declared files, 0 undeclared; 19 s); `make check-makefile` ok. The essential gate: run 1 built the executables (go-build
+11m08s, 89m CPU, 19.2 GiB) and then waited hours in the lock's queue behind another agent's `repr-c` job (the run was lost before
+its end; a killed run left an empty `.tmp/repr-go/forms/linux-dirtest`, which made goi-check and goi-aot-essential fail with
+"no forms of a main package" in run 2: scratch, removed); run 2 (11m01s) ran diffcheck, java-compiled, suite-aot-essential and
+programs; run 3 passed (2m52s: goi-check and goi-aot-essential again, the rest at their passes). **GTS57**: in runs 2 and 3
+`go-build` was `ok (0m00s ...)`, its `.cached` file "the cached executables (their inputs unchanged, key d24c0b71ce32)", its
+wait 0, no ticket in the lock's queue (the previous essential gate waited 10m15s for the same). Not run: the clean essential
+gate (about 90 minutes; the stage 0 audit of a real build is proved by `--audit stage0`, the inner mode's glue on a toy table
+where stage 0 was kept), `--full`, the javac-tool path of GTS57 (the same code, `bin/javac-vendor tool DIR --check`, not exercised).
+
+**Proposals.**
+
+- **GTS60 `PATH` for the scripts run by hand.**
+  - Options: (a) `bin/lib/tmpdir.bash` puts TamaGo's `bin/` first on `PATH` too; (b) the same change at the next change that
+    rekeys the executables anyway; (c) as built: the gate's steps alone.
+  - *Recommended: (b)*: nothing in the gate reaches the host's `go` any more; `tmpdir.bash` is in `gate_key`, so (a) now costs an
+    8 minute build and a rerun of the keyed checks on this branch for a convenience outside the gate.
+- **GTS61 The kept-build check as data.**
+  - Options: (a) a step key `:cached-cmd` (an unkeyed column of `plan.tsv`) in place of `build_cached`'s two cases; (b) as built.
+  - *Recommended: (b)* while there are two builds: the command and its check live in the same two scripts; (a) when a third
+    build step appears.
