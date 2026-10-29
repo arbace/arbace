@@ -1123,7 +1123,12 @@
                                        ;; JCS62 (a), MultiLevelOuterInstance)
                                        (if-let [[_ f2 b2] (when (prologue-class? o)
                                                             (prologue-ctor (:creation-frame @(:state d))))]
-                                         (recur b2 (:outer (decl! (:class f2))) [])
+                                         ;; which captures it itself, as javac's Lower gives
+                                         ;; it a proxy: the classes nested in it read it
+                                         ;; through their enclosing instances (this$0.val$x;
+                                         ;; JCS113 (a), "As built: JC4c")
+                                         (do (add-capture! {:kind :class :class o} b2)
+                                             (recur b2 (:outer (decl! (:class f2))) []))
                                          (no))))))]
         {:op :outer-param-path :base (local-ref actx b) :path hops :type (t/internal->desc target)})
       (outer-this-node* actx target))))
@@ -3889,6 +3894,10 @@
             (fail (str "for-each over a value of type " (pr-str ct) ", neither an array nor Iterable")))
         tag (:tag (meta sym))
         bt (cond tag (actx-desc actx tag) array? (t/elem-type ct) :else t/object-desc)
+        ;; ^{:box C}: a primitive binding over an Iterable whose element is another primitive's box
+        ;; (for (float f : Iterable<Integer>)): the element cast to C, unboxed, then widened, as
+        ;; javac's Lower casts it to the erased type argument (JCS115 (a), the converter's mark)
+        box (when-let [b (:box (meta sym))] (actx-desc actx b))
         aux (fn [nm ty] (make-binding actx (gensym nm) ty))
         hidden (if array?
                  {:arr (aux "arr$" ct) :len (aux "len$" "I") :i (aux "i$" "I")}
@@ -3908,7 +3917,8 @@
                 :args [] :type t/object-desc})
         elem (cond
                (or array? (= bt t/object-desc)) (convert-node elem bt :what "for-each element")
-               (t/prim? bt) (convert-node {:op :cast :class (boxed-desc bt) :expr elem :type (boxed-desc bt)} bt)
+               (t/prim? bt) (let [c (if (and box (not array?)) box (boxed-desc bt))]
+                              (convert-node {:op :cast :class c :expr elem :type c} bt))
                :else {:op :cast :class bt :expr elem :type bt})
         bactx (cond-> (-> actx (with-local b) (assoc :loop target :break-target target) (dissoc :label-loop))
                 (:label-loop actx) (assoc-in [:labels (:label-loop actx) :loop] target))
@@ -4248,7 +4258,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; patterns and switch (§5.8)
 ;;
-;; pattern: {:kind :type :class desc :b binding-or-nil :test bool}
+;; pattern: {:kind :type :class desc :b binding-or-nil :test bool :cast bool}
 ;;          {:kind :record :class desc :comps [{:accessor method :pattern p}]}
 
 (defn- enum-class? [d]
@@ -4266,11 +4276,21 @@
                    :else (fail (str "A type pattern needs a type: " form)))
           unnamed (= "_" (name form))
           b (when-not unnamed (make-binding actx form ty :mutable (boolean (:mutable (meta form)))))
-          test (not (or (= ty st) (and (t/ref? ty) (t/ref? st) (env/assignable? st ty))
-                        (and (t/prim? ty) (= ty st))))]
+          ;; ^:unconditional: a record component's type pattern javac's attribution found
+          ;; unconditional by the record pattern's type arguments (Box<String>(String s) of a
+          ;; Box<T>, whose component's erased type is Object): not tested, so it matches null, as
+          ;; javac's TransPatterns lets it (JCS114 (a), the converter's mark); its binding is cast
+          ;; instead (:cast), javac's checkcast of the erased component, so that a heap-polluted
+          ;; component (a Pair<Integer,Integer> as a Pair<String,Integer>) throws
+          ;; ClassCastException (TypedDeconstructionPatternExc, JN9f)
+          static-ok (or (= ty st) (and (t/ref? ty) (t/ref? st) (env/assignable? st ty))
+                        (and (t/prim? ty) (= ty st)))
+          unconditional (and component (t/ref? ty) (:unconditional (meta form)))
+          test (not (or static-ok unconditional))
+          cast (boolean (and b unconditional (not static-ok)))]
       (when (and (t/prim? ty) (not= ty st))
         (fail (str "Primitive pattern of type " ty " for a value of type " st " is not supported")))
-      [{:kind :type :class ty :b b :test test} (if b (with-local actx b) actx)])
+      [(cond-> {:kind :type :class ty :b b :test test} cast (assoc :cast true)) (if b (with-local actx b) actx)])
 
     (and (seq? form) (symbol? (first form)))
     (let [rn (or (resolve-class actx (first form)) (fail (str "Unknown record " (first form))))

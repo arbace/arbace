@@ -4823,3 +4823,11 @@ the box's check at the next `--full`).
 
 This language's cells of the REAP matrix at the tag `arbace-reaps-3-crops-v1`, with every class by name, are
 in doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences".
+
+## REAP v2 (DRAFT, 2026-10-28)
+
+**DRAFT**, refreshed at the tag `arbace-reaps-3-crops-v2`. This language's cells of the REAP matrix on main `bf84a975`,
+with every class by name, are in doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences (DRAFT ...)". Since v1 one cell
+moved: AOT 1,685 / 149 / 3 to 1,688 / 149 / 0 (RPS32 (a): repr/go prints the three invalid programs as written, the
+class `printer-invalid` removed; doc/FULL-SUPPORT-SURVEY.md, "As built: v2 small leftovers A"). Read, eval and print are
+as at v1 (12,158 / 204 / 0, 1,618 / 219 / 0, 2,584+ / 141 / 0).

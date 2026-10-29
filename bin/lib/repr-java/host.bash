@@ -23,7 +23,22 @@
 #                      interfaces tree and attr (JFS66 (b)) and model (JFS75 (b)),
 #                      javac, jtypes, resolve, forms, names, layout, full) and bin/repr-java; not the
 #                      printer or the round trip's comparator, which change no forms (PRINTER-NOTES.md,
-#                      JP1)
+#                      JP1); since JN9f (JFS120 (b)) also the native front end the vendoring tools read
+#                      with (the parser and lexer, the native provider and its tiers, the class file
+#                      reader, the read without javac's split)
+#   repr_java_vendor_read
+#                      the vendoring tools' read (JFS120 (b), doc/classes/JAVA-FRONTEND-SURVEY.md, "As
+#                      built: JN9f"): native (the default), bin/repr-java read --no-javac, the native
+#                      parser's trees and the native provider's answers, a file that meets what only
+#                      javac answers read again by javac (the fallback, counted); javac
+#                      (REPR_JAVA_VENDOR_READ=javac), javac's attributed trees, as before JN9f. The
+#                      provenance files name it (:read)
+#   repr_java_vendor_read_opts
+#                      bin/repr-java read's options for that read (--no-javac, or none)
+#   repr_java_nojavac_take OUT DEST
+#                      a read without javac's report, OUT/repr-java-nojavac.edn, moved to DEST (so that
+#                      the forms' directory holds forms alone; the read's log has its line, "no javac:
+#                      N files, N native, N fallbacks to javac; {reason n}"); nothing for javac's read
 
 repr_java_host() {
   local e k
@@ -49,6 +64,29 @@ repr_java_provenance_same() {
 }
 
 repr_java_reader_hash() {
-  (cd "$root" && for f in arbace/repr/java.ae arbace/repr/java/{attr,convert,forms,full,javac,jtypes,layout,model,names,resolve,tree}.ae bin/repr-java; do
+  (cd "$root" && for f in arbace/repr/java.ae arbace/repr/java/{attr,convert,forms,full,javac,jtypes,layout,model,names,resolve,tree}.ae \
+                          arbace/repr/java/{classfile,decls,expr,infer,lex,nattr,overload,parse,scope,sym,types}.ae bin/repr-java; do
      echo "$f"; done | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-64)
+}
+
+repr_java_vendor_read() {
+  case ${REPR_JAVA_VENDOR_READ:-native} in
+    native|javac) echo "${REPR_JAVA_VENDOR_READ:-native}" ;;
+    *) echo "repr_java_vendor_read: REPR_JAVA_VENDOR_READ is native or javac, not $REPR_JAVA_VENDOR_READ" >&2; return 1 ;;
+  esac
+}
+
+repr_java_vendor_read_opts() {
+  local r
+  r=$(repr_java_vendor_read) || return 1
+  [ "$r" = native ] && echo --no-javac
+  return 0
+}
+
+repr_java_nojavac_take() {
+  local out=$1 dest=$2 f
+  f=$out/repr-java-nojavac.edn
+  [ -f "$f" ] || return 0
+  mkdir -p "$dest"
+  mv "$f" "$dest/repr-java-nojavac.edn"
 }

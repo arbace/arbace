@@ -2912,6 +2912,429 @@ keeps a constant's widening, in JN9f: the 5 deferred `:print-forms` tests), RPS1
 `:print-erasure` by design), RPS153 (an enum constant with arguments and an empty body by design for now), RPS154
 (no other consumer of the module table).
 
+## As built: RPS151 (a) in JN9f (2026-10-28)
+
+Built in repr/java's JN9f (doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9f", JN9f.7): the converter writes a
+`long` constant's widening to `float` or `double`, boxes a `long` constant into a reference other than `Long`, and
+boxes a primitive conditional with a literal branch into a reference whole (SPEC.md §5.5). The five tests of
+`:print-forms` pass the forms step: TargetType05 passes whole, Tester (cr6714694), TestStoreSunkToOuterLoop,
+DeconstructionDesugaring and BackEnds fall to the classes step (`:print-classes`, by design); the class is removed.
+Java print 2,597 / 683 / 41 to 2,598 / 687 / 36 (TypedDeconstructionPatternExc, JCS114's, now in `:print-erasure`).
+What moved: `jdk/forms` 3 files, `jdk/javac/forms` 3, `test/repr/java/expected/jdk26u.sha256` 30 of 13,566, the
+essential tests' forms 1, 21 jtreg tests' forms; none regressed at the levels read, interp, compiled and print.
+
+## As built: RPS150 and JCS123 (b) (2026-10-28)
+
+Branch `v2-rps150`, from main `3aef964c`, for `arbace-reaps-3-crops-v2`: RPS150 (b) (decided "Decided (2026-10-28): RPS130-RPS134,
+RPS150-RPS154") and JCS123 (b) (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "Decided (2026-10-28): JCS120-JCS123").
+
+- *RPS150 (b), Module's support forms.* `out/support-forms` (arbace/j2g/out.ae) writes, beside `Class.getResourceAsStream`'s and
+  under the same conditions, two methods on jrt's `*Module`: `GetResourceAsStream_String__InputStream` (when `ByteArrayInputStream`
+  is translated: the name from the module's root, one leading `/` dropped, over `ResourceOrPath` as the embedded resources and
+  `ARBACE_PATH`, a `ByteArrayInputStream`; nil when absent) and `GetPackages__Set` (when `HashSet` is translated: a `HashSet` of
+  the packages of the registered classes whose `GetModule` is the module, and for a named module the packages of
+  module_table.ae; the unnamed package is not listed). `main.ae`: the scan registers both under `:methods "Module"`, and
+  `HashSet`'s `<init>` and `add` are roots when `HashSet` has Java forms. No manifest entry: `Class.getResourceAsStream` has none
+  either (an edge member jrt leaves undefined, j2g's support method), so the pattern is Class's exactly. Checked by a program
+  (`.tmp/rps150/prog`, `--build-program`, run: `.tmp/rps150/prog-run.out`): `String.class.getModule().getPackages()` holds
+  `java.lang` and `java.util` and not `hello`, the unnamed module's holds `hello` and not `java.lang`, a missing resource
+  (with or without `/`) is null; the print caches' `j2g_support.go` of the java-check runs compiled with it. No test of the
+  corpora calls either method (the sources searched), so no recorded result moves from this part.
+- *JCS123 (b), (i) getMethods' order.* `member-table-form` (out.ae) sorted a class's methods by name first; for an own interface
+  of a `--program` (`own` and `iface`) it now keeps declaration order, the order the JVM gives a class it loads in this
+  position (the edge's `:method-order` covers only archived JDK classes, whose order comes from the JVM and stays): t04530
+  (NonPublicStaticInitializer) passes compiled.
+- *JCS123 (b), (ii) the enum.* The cause was not the modifiers: the converter writes `V() {}` as `(V [])` (a constant with
+  arguments or a body is a list, a plain one a symbol), and `arbace.classes.parse` read a list without body forms as having no
+  body, so no `T8034044$En$1` existed and `En.V.getClass()` was `En`, which is static. `parse.ae` now reads `(V [])` with no
+  arguments and no pinned parameter tags as a constant with an empty body (a constant with arguments and no body is still
+  `(V [1])`, the shape of `V(1) {}` too: the forms cannot tell them apart, and the pinned empty-argument case with an empty
+  body stays without one). The anonymous class takes javac's InnerClasses flags (final, enum, not static): t05967 passes
+  compiled, interpreted as before. This is the Java forms' analysis, the executable's own: it moves the runtime of the re-seed,
+  and is not exercised by the host that runs j2g from the seed (the gate's build carries it). Not run: the whole compiled
+  level, so a test with an empty constant body beside others is checked only by the gate's subsets.
+- *The classes.* `:j2g-reflection` shrinks to t04863 (IllegalAccessInInvoke) and becomes `:design`: the Go build has no
+  run-time access checks, caller-sensitive checks left out by JCS123 (b).
+- *Numbers (`bin/reap`, before to after).* Java AOT 1,910 / 180 / 1,230 to 1,912 / 180 / 1,230 (t04530 and t05967 pass;
+  `levels-known.edn` loses both lines); read 7,740 / 3 / 93, eval 1,804 / 329 / 1,189 and print 2,597 / 683 / 41 unchanged
+  (the interpreted level already passed both); 12 of 12 cells, 0 problems. Records: `test/java/check-compiled.edn` (two
+  lines), `test/java/levels-known.edn`, `test/java/divergences.edn`.
+
+Shipped files changed (the re-seed): `arbace/j2g/out.ae`, `arbace/j2g/main.ae` (j2g's support forms and scan: they change the
+`j2g_support.go` of every program with `ByteArrayInputStream` or `HashSet` translated) and `arbace/classes/parse.ae` (the
+Java forms' analysis in the executable). No file of `go/`, `overlay/` or `jdk/`.
+
+Scratch (`.tmp/rps150/` of the worktree): `prog/` (the Module program) with `prog-build.log` and `prog-run.out`, `c4.log` to
+`c6.log` and `rec.log` (the java-check runs), `reap-after.log`, `gate-build.log`, `run-all.sh`, `record.sh`.
+
+**The checks.** The essential `bin/gate` at commit `80e7e678` passed (17 steps run, 11m27s of wall time on warm caches for its
+builds, the lock waited separately): oracle 22,688 of 22,740 as recorded, diffcheck 12,795 of 12,807 as recorded, goi's 801
+and 248, Java's essential 428 of 428 interpreted and 428 of 428 compiled, the AOT suite subset, the programs (3 of 3), the
+generated variants, j2g's edge, `bin/reap` 12 of 12 cells with 0 problems (Java AOT 1,912 / 180 / 1,230). Log:
+`.tmp/rps150/gate.log` of the worktree. The ad hoc runs used main's stale `arbace-javac` (`REPR_JAVA_STALE_OK=1`, read level
+only) and the gate's own executable and compiled namespaces (`.tmp/arbace-go-gate`) for the compiled level.
+
+**The full compiled level (before the re-seed).** `bin/java-check --levels compiled` (no `--record`, `--jobs 8`, the gate's
+executable and compiled namespaces, main's `arbace-javac` with `REPR_JAVA_STALE_OK=1`; `.tmp/rps150/full.log`,
+`full-results-compiled.tsv`): 3,322 tests, 1,913 pass (recorded 1,912), 968 refused, 395 fail, 23 timeout, 22 differ,
+1 unread; 3,315 as recorded. Five lines differ from `check-compiled.edn`, none about an enum constant: t04602 (recorded
+flaky) passes; t05565 (LockStep, recorded fail on ObjectOutputStream) passed in the full run and fails as recorded when run
+alone (the shard's world held the class); t05445 (HugeToString) timed out twice on the loaded host and passes alone
+(flaky by JCS71 (a)); t07649 (recorded timeout) is a differ with a long stdout, the same speed class; t08122 (Thread-4 against
+Thread-2 in the message) is the same failure. A rerun of t05445, t05565, t07649 and t04602 alone (`again.log`): 0 regressions.
+The parse.ae change produced no regression.
+
+## REAP v2's divergences (DRAFT, 2026-10-28; to be refreshed at the tag `arbace-reaps-3-crops-v2`)
+
+**DRAFT.** The milestone's record as it stands on main `bf84a975`, modelled on "REAP v1's divergences" (REAP9 made that
+one: `bin/reap`'s output at the tag, the classes files read cell by cell, each class with its kind and where it was
+decided). The rule is v1's: none fails, every non-pass in a recorded class, by design or deferred and named, each citing
+where it was decided. The tables between the markers below are generated; the text around them is by hand and is
+refreshed at the tag.
+
+**Refreshing it** (one command, seconds, no builds; it runs `bin/reap`, which judges recorded results only):
+
+```
+ARBACE_HOST_EXE=/path/to/stage0/arbace .tmp/v2-record/refresh.sh
+```
+
+The script (`.tmp/v2-record/refresh.sh`, plain shell and awk, not tracked: `.tmp/` is the scratch; copy it with its
+`changes.tsv`, the hand-kept notes on what changed and where it was decided, from the worktree `v2-record`) reads
+`bin/reap`'s output, the classes files it names (`test/reap/cells.edn`) and v1's section from the tag, and rewrites
+everything between `<!-- v2-record:begin -->` and `<!-- v2-record:end -->`. `REAP_OUT=FILE` uses a saved
+`bin/reap` output instead of running it. At the tag: refresh, then rewrite the title (drop DRAFT), the date and the
+two hand-written lists below.
+
+Counts are cases, as in v1 (a case counted once per source naming it). "v1" is the count in v1's section (by design
+classes were listed there by name only: `-`). "Since v1" is computed (new, removed, shrunk, grew, reclassified) and
+carries, where changes.tsv has it, the section that made the change.
+
+<!-- v2-record:begin (generated by .tmp/v2-record/refresh.sh from bin/reap's output of 2026-10-28; do not edit between the markers) -->
+
+Now (`bin/reap`; pass / by design / deferred), with v1's beside it:
+
+| | read | eval | AOT | print |
+|---|---|---|---|---|
+| Clojure | 908 / 2 / 0 | 21,052 / 81 / 1 | 809 / 29 / 0 | 1,031+ / 0 / 0 |
+| Java | 7,740 / 3 / 93 | 1,807 / 329 / 1,186 | 1,913 / 180 / 1,229 | 2,598 / 687 / 36 |
+| Go | 12,158 / 204 / 0 | 1,618 / 219 / 0 | 1,688 / 149 / 0 | 2,584+ / 141 / 0 |
+
+| v1 (the tag) | read | eval | AOT | print |
+|---|---|---|---|---|
+| Clojure | 908 / 2 / 0 | 21,049 / 80 / 5 | 804 / 28 / 6 | 1,031+ / 0 / 0 |
+| Java | 7,738 / 3 / 93 | 1,683 / 325 / 1,312 | 1,869 / 181 / 1,270 | 2,584 / 637 / 99 |
+| Go | 12,158 / 204 / 0 | 1,618 / 219 / 0 | 1,685 / 149 / 3 | 2,584+ / 141 / 0 |
+
+Its last line: `reap: 12 of 12 cells checked, 0 with no check yet; 0 problems`.
+
+**Clojure read** (classes file `test/clojure/divergences-read.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `one-way-rules`: repr/clojure's one-way rules: a .cljc's conditionals, SecurityManager's spelling | by design | 2 | - | unchanged | doc/REPR-CLOJURE.md, "The one-way rules" |
+
+
+**Clojure eval** (classes file `test/clojure/divergences.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `locales`: locale data: root and English only | by design | 42 | - | unchanged | the user, 2026-10-11; doc/go/JRT-NOTES.md, "Text and locales", TM4, TL5 |
+| `out-for-good`: XML (SAX), gen-class, Java serialization, Swing/AWT, classes from jars | by design | 23 | - | unchanged | doc/go/B1-PLAN.md D6, "Not to be done (the user, 2026-10-10)"; doc/go/EVAL-NOTES.md, "The suite's last fail... |
+| `q1-boxed-prims`: the evaluator's fns are boxed (Q1): no primitive interfaces | by design | 5 | - | unchanged | doc/go/EVAL-PLAN.md, Q1 (a) (the user, 2026-10-09) |
+| `class-files`: class files: the Go build writes and reads none | by design | 2 | - | unchanged | doc/STANDALONE-SURVEY.md D13; doc/VENDOR-NOTES.md, hand change 23 |
+| `main-since-v4`: main's divergences from the frozen reference (v4) | by design | 2 | - | unchanged | doc/STANDALONE-NOTES.md, "S4: the oracle's reference"; commit ac8b9718; the .ae rename (2026-10-11) |
+| `javadoc-url`: java.javadoc's javadoc-url-test: java.sql.Connection is not in the Go build | by design | 1 | - | unchanged | doc/go/B1-PLAN.md D6; RPS55 (a): the java.sql assertion by design |
+| `xml-stream`: javax.xml.stream (reflect's invoke-checks-accessibility) | by design | 1 | 1 | reclassified deferred to by design: RPS134 (b) ("Decided (2026-10-28): RPS130-RPS134, RPS150-RPS154": java.xml out of the shipped world, the SAX cut) | RPS134 (b), doc/FULL-SUPPORT-SURVEY.md, Decided (2026-10-28) |
+| `identity-hash`: identity hashes (not reproducible) | by design | 1 | - | unchanged | doc/go/EVAL-NOTES.md, phase 2B (as decided for #object printing) |
+| `method-invoke-message`: a message's wording: Method.invoke on a receiver of another class | by design | 1 | - | unchanged | RPS19 (a), by design |
+| `security-manager`: java.lang.SecurityManager not in the world | by design | 1 | - | unchanged | doc/VENDOR-NOTES.md, hand change 11 |
+| `security-providers`: security providers: SUN and SunJCE only | by design | 1 | - | unchanged | doc/go/JRT-NOTES.md, "Security", SC4 |
+| `serialization`: Java serialization | by design | 1 | - | unchanged | doc/go/B1-PLAN.md D6, "Not to be done (the user, 2026-10-10)"; doc/go/ORACLE.md, Exclusions |
+| `seq-and-transducer`: speed: transducers' seq-and-transducer (200,000 test.check trials) | deferred | 1 | 1 | unchanged: stays deferred, a speed matter (RPS134 (b)) | RPS5 (a), doc/FULL-SUPPORT-SURVEY.md (deferred: speed); doc/go/SPEED-NOTES.md, EC7 |
+| `fiprims`: FIPrims through interfaces definterface makes at run time | (deferred in v1) | 0 | 2 | removed: RPS54 (b), FIPrims through Clojure's adapter (same section) | (removed) |
+| `trace-lines`: the evaluator's stack traces: lines of field accesses, assignments, IFn casts | (deferred in v1) | 0 | 1 | removed: RPS53 (b), the evaluator's lines (FULL-SUPPORT-SURVEY.md, "As built: Clojure's deferred cases") | (removed) |
+
+
+**Clojure AOT** (classes file `test/clojure/divergences-aot.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `out-for-good`: XML (SAX), gen-class, Java serialization, Swing/AWT, classes from jars | by design | 23 | - | unchanged | doc/go/B1-PLAN.md D6, "Not to be done (the user, 2026-10-10)"; doc/go/EVAL-NOTES.md, "The suite's last fail... |
+| `interned-at-load`: compiled code interns the vars it names when its namespace's loader starts | by design | 4 | - | unchanged | RPS20 (a), by design as the JVM's AOT |
+| `q1-compiled-prims`: compiled fns are primitive where the evaluator's are not (Q1) | by design | 3 | - | unchanged | doc/go/EVAL-PLAN.md, Q1 (a) (the user, 2026-10-09) |
+| `class-files`: class files: the Go build writes and reads none | by design | 2 | - | unchanged | doc/STANDALONE-SURVEY.md D13; doc/VENDOR-NOTES.md, hand change 23 |
+| `q1-evaluated`: code the tests evaluate at run time: the evaluator's fns are boxed (Q1) | by design | 2 | - | unchanged | doc/go/EVAL-PLAN.md, Q1 (a) (the user, 2026-10-09) |
+| `javadoc-url`: java.javadoc's javadoc-url-test: java.sql.Connection is not in the Go build | by design | 1 | - | unchanged | doc/go/B1-PLAN.md D6; RPS55 (a): the java.sql assertion by design |
+| `xml-stream`: javax.xml.stream (reflect's invoke-checks-accessibility) | by design | 1 | 1 | reclassified deferred to by design: RPS134 (b) ("Decided (2026-10-28)") | RPS134 (b), doc/FULL-SUPPORT-SURVEY.md, Decided (2026-10-28) |
+| `compiled-loader-line`: Compiler/LINE in a compiled loader | by design | 1 | - | unchanged | RPS20 (a), by design |
+| `identity-hash`: identity hashes (not reproducible) | by design | 1 | - | unchanged | doc/go/EVAL-NOTES.md, phase 2B (as decided for #object printing) |
+| `shared-symbols`: symbols shared in a compiled class's constant pool | by design | 1 | - | unchanged | doc/FUTAMURA-SURVEY.md, F3.3 (a) (the user, 2026-10-17) |
+| `fiprims`: FIPrims through interfaces definterface makes at run time | (deferred in v1) | 0 | 2 | removed: RPS54 (b) ("As built: Clojure's deferred cases") | (removed) |
+| `fn-fields`: a compiled fn's closed-over values are its code object's fields, not its class's | (deferred in v1) | 0 | 2 | removed: RPS41 (b), a compiled fn's fields reflected (same section) | (removed) |
+| `compiled-trace-lines`: compiled frames' lines: an unboxed field access or method call, field assignm... | (deferred in v1) | 0 | 1 | removed: RPS42 (b), the compiled frames' lines (same section) | (removed) |
+
+
+**Clojure print** (classes file `test/clojure/divergences-print.edn`)
+
+No class: nothing to record at this cell.
+
+
+**Java read** (classes file `test/java/divergences.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `classloading`: class loading (ClassLoader's members, defineClass, ServiceLoader, modules, Cl... | by design | 3 | - | unchanged | J2G-SPEC §12 |
+| `diag-release`: javac on Arbace: --release N, any N (no ct.sym in its platform) | deferred | 44 | 44 | unchanged | JCS50 (a), with (b) first: deferred, --release 26 as -source/-target 26, then the pinned ct.sym served as J... |
+| `diag-processors`: javac on Arbace: annotation processors from class files ("Could not instantia... | deferred | 25 | 25 | unchanged | JCS51 (a): deferred, processors given as sources defined by the interpreter and handed to javac as instances |
+| `diag-doclint`: javac on Arbace: -Xdoclint (compiler.warn.doclint.not.available) | deferred | 8 | 8 | unchanged | JCS52 (a): deferred, jdk.javadoc's doclint added to javac's world |
+| `diag-file-manager`: javac on Arbace's file manager (jdk.internal.jrt.javac.FileManager, not javac... | deferred | 8 | 8 | unchanged | JCS53 (a): deferred, Arbace's Main calling javac's Main.compile with Arbace's file manager, file objects as... |
+| `diag-command-line`: javac on Arbace's command line (jdk.internal.jrt.javac.Main, javac's API unde... | deferred | 4 | 4 | unchanged | JCS53 (a): deferred |
+| `read-platform`: javac on Arbace: options its platform lacks (--release N without ct.sym, the ... | deferred | 3 | 3 | unchanged | survey §5.5, JC3 |
+| `diag-closed-world`: javac on Arbace: a JDK class outside javac's closed world reached (java.lang.... | deferred | 1 | 1 | unchanged | As built: JC3 (deferred, JCS9 (b): JC6 ranks the world's classes) |
+
+
+**Java eval** (classes file `test/java/divergences.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `serialization`: serialization (ObjectInputStream, ObjectOutputStream, Externalizable) | by design | 168 | - | unchanged | J2G-SPEC §12 (2026-10-10) |
+| `speed`: speed: beyond the check's limit (20 s an action, the definition included) | by design | 91 | - | unchanged | survey §6.1, JCS10 (a) |
+| `xml`: XML (javax.xml, the XML signature API, Properties in XML) | by design | 22 | - | unchanged | J2G-SPEC §12 (2026-10-10) |
+| `classfile`: java.lang.classfile, java.lang.constant | by design | 14 | - | unchanged | JCS9 (b), JC6; JCS95 (a): by design |
+| `classloading`: class loading (ClassLoader's members, defineClass, ServiceLoader, modules, Cl... | by design | 13 | - | unchanged | J2G-SPEC §12 |
+| `foreign`: the foreign function and memory API (java.lang.foreign: Arena, MemorySegment;... | by design | 8 | - | unchanged | JCS95 (a): by design, FFM |
+| `flaky-timeout`: a timeout on the loaded host that passed when run again (JCS71 (a)), at any l... | by design | 5 | - | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
+| `jdi`: the debugger interface (com.sun.jdi) | by design | 4 | - | unchanged | JCS97 (a): by design, no JVM to debug |
+| `smartcardio`: javax.smartcardio (PC/SC smart card readers) | by design | 2 | - | unchanged | JCS97 (a): by design, no card reader in the sandbox |
+| `desktop`: AWT, Swing (java.desktop) | by design | 1 | - | unchanged | J2G-SPEC §12 |
+| `zip`: the jrt: URL (the run-time image's file system; zip, jar and the jar: URL are... | by design | 1 | - | unchanged | JCS106 (a): by design, no run-time image |
+| `security`: security (KeyStore, certificates, providers, permissions, key generators) | deferred | 361 | 361 | unchanged | JCS9 (b), JC6; JCS90 (b): deferred |
+| `net`: networking (datagrams, multicast, NIO channels and selectors, URL protocols, ... | deferred | 233 | 232 | grew by 1 (the levels re-recorded by JC4b, JC4c, JN9f: tests moved between classes) | JCS9 (b), JC6; JCS91 (b): deferred |
+| `nio`: NIO buffers, files and charsets' coders (direct buffers, FileChannel, FileTim... | deferred | 93 | 93 | unchanged | JCS9 (b), JC6; JCS92 (b): deferred |
+| `reflection`: annotations and reflection's types and metadata (getAnnotation, getTypeParame... | deferred | 81 | 81 | grew: jrt's missing Field.getInt (the Nestmates privateFields tests, which JC4c lets reach it) | JCS9 (b), JC6; JCS94 (b): deferred, its own amendment (it reverses J2G-SPEC's R16) |
+| `management`: java.lang.management, JMX | deferred | 65 | 65 | unchanged | JCS9 (b), JC6; JCS95: java.lang.management's MXBeans deferred (b), JMX by design (a) |
+| `tls`: TLS (javax.net.ssl, javax.net socket factories, HTTPS) | deferred | 58 | 58 | unchanged | JCS90 (b): deferred, providers into the closure first, then TLS over Go's crypto/tls |
+| `invoke`: java.lang.invoke (MethodHandle, MethodHandles, CallSite, LambdaConversionExce... | deferred | 41 | 41 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred |
+| `javac-api`: javac's API (com.sun.tools.javac.Main, javax.tools, com.sun.source): javac's ... | deferred | 39 | 39 | unchanged | JCS9 (b), JC6; JCS95: deferred (not run on arbace-javac before the milestone) |
+| `logging`: java.util.logging, System.Logger | deferred | 28 | 28 | unchanged | JCS9 (b), JC6; JCS95: deferred (not built before the milestone) |
+| `threads`: threads and concurrency's members jrt lacks (thread groups, platform threads,... | deferred | 26 | 25 | grew by 1 (the levels re-recorded by JC4b, JC4c, JN9f: tests moved between classes) | JCS9 (b), JC6; JCS96 (b): deferred |
+| `charsets-locales`: charsets and locales (UTF-16LE's and UTF-32's coders, EUC-JP, US-ASCII's alia... | deferred | 20 | 20 | unchanged | JCS9 (b), JC6; JCS92 (b): deferred |
+| `interp-protected`: a protected member of a world class that is not an extendable class's instanc... | deferred | 19 | 41 | shrunk: JC4b B, then JC4c JCS112 (protected statics); the rest JCS120 or by design | survey §6.1, JC4; JCS98 (a) built in JC4b, JCS112 (a) in JC4c (the protected static methods in the member ... |
+| `references`: references, finalization, collection (PhantomReference, Cleaner, runFinalizat... | deferred | 16 | 16 | unchanged | JCS9 (b), JC6; JCS96 (b): deferred |
+| `jrt-dates`: jrt's dates: Date, Calendar, GregorianCalendar, TimeZone and DateFormat behav... | deferred | 13 | 10 | grew by 3 (the levels re-recorded by JC4b, JC4c, JN9f: tests moved between classes) | JCS96 (b): deferred |
+| `scripting`: javax.script (ScriptEngineManager, ScriptEngine, Invocable) | deferred | 12 | 12 | unchanged | JCS97 (b): deferred |
+| `util-classes`: java.util and java.lang members jrt lacks: Scanner, Calendar.Builder, Propert... | deferred | 10 | 10 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `repl-sibling`: the REPL's model: a class of the do used before it is defined, a test's class... | deferred | 9 | 9 | unchanged | survey §6.1, JCS8 (b), JC4 |
+| `stack`: StackWalker, stack traces and their line numbers | deferred | 9 | 9 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred |
+| `naming`: JNDI (javax.naming: InitialContext, LdapName, Rdn, directory attributes) | deferred | 8 | 8 | unchanged | JCS91 (b): deferred, JNDI 1-2 days |
+| `system-properties`: the JVM's identifying system properties (java.version, java.vm.specification.... | deferred | 7 | 6 | grew by 1 (the levels re-recorded by JC4b, JC4c, JN9f: tests moved between classes) | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `random`: java.util.random (RandomGeneratorFactory and the algorithms by name) | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `jrt-strings`: jrt's StringBuffer: its capacity, its synchronized methods and an append's bo... | deferred | 4 | 3 | grew by 1 (the levels re-recorded by JC4b, JC4c, JN9f: tests moved between classes) | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `sql`: JDBC beyond the Go build's java.sql (javax.sql.rowset, java.sql.Time) | deferred | 4 | 4 | unchanged | JCS97 (b): deferred |
+| `identity`: stdout prints identity hash codes or traces (Object.toString, a stack trace t... | deferred | 3 | 3 | unchanged | As built: JC1 |
+| `jvm-tools`: a JDK tool the test runs or its jtreg actions ran: the java launcher (java.ho... | deferred | 3 | 3 | unchanged | JCS103 (a): the JDK's own tools a test runs, a harness class |
+| `text-data`: java.text's data jrt lacks: Bidi's (ICU's ubidi data), collation rules of oth... | deferred | 3 | 3 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `interp-clone`: the interpreter: clone() of an interpreted Cloneable class | deferred | 2 | - | new at this level: no case in v1; two tests since, once JC4b made their superclasses extendable and re-recorded the level | survey §6.2, JC4 |
+| `jrt-streams`: jrt's own streams otherwise than the JDK's: a closed DataInputStream over a F... | deferred | 2 | 1 | grew by 1 (the levels re-recorded by JC4b, JC4c, JN9f: tests moved between classes) | JCS101: jrt flushing its streams at exit by design (a); the other behaviours deferred with JCS96 (b) |
+| `url-headers`: URLConnection's headers jrt answers otherwise: no MIME type (getFileNameMap h... | deferred | 2 | 2 | unchanged | JCS105 (b): deferred with JCS96 |
+| `interp-world-limits`: the interpreter's known limits: a run-time class extending java.io.StringRead... | deferred | 2 | 2 | unchanged | - |
+| `clock`: stdout names the run's clock (a file's last-modified time made by the run) | deferred | 1 | 1 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
+| `identity-sum`: stdout prints sums of identity hash codes (Test6909839's ((c) ? a : b).hashCo... | deferred | 1 | 1 | unchanged | As built: JC1 (:identity, JCS17 (b): hash codes after an @ masked); the sums cannot be masked; JCS99 (a), (c) |
+| `interp-extends`: a superclass the Java forms cannot extend yet: a class of the world not liste... | deferred | 1 | 105 | shrunk: JC4b A, then JC4c JCS111 (jrt's leaves extendable); the rest is JCS120 (b), after the tag | survey §6.1, JC4/JC6; JCS98 (a) built in JC4b, JCS111 (a) in JC4c |
+| `interp-jls`: the interpreter: the JLS corpus's finding: finally's return swallowing an exc... | deferred | 1 | 1 | unchanged | As built: JC1, JC4, JC5 |
+| `interp-synchronized`: two threads' interleaving in synchronized methods printed (Test8267042: read(... | deferred | 1 | 1 | reclassified to the harness (the interleaving of two threads): JC4b G ("As built: JC4b") | JCS98 (a): built in JC4b; the interleaving is JCS71 (a)'s kind |
+| `jrt-io`: jrt's FileInputStream.skip of a negative count | deferred | 1 | 1 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `jrt-math`: jrt's Math.pow at large exponents | deferred | 1 | 1 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `read-failed`: not interpreted or compiled: the read level failed (the test's class at that ... | deferred | 1 | 1 | unchanged | As built: JC1 |
+| `thread-order`: the order of two threads' output lines: a thread started and the starting thr... | deferred | 1 | - | new at the interp level: JC4b ("As built: JC4b": `:thread-order` takes the interp level too) | JCS104 (b): the two threads' output order recorded status-only |
+| `class-init`: class initialization of interfaces (JLS 12.4.1: an interface with default met... | (deferred in v1) | 0 | 3 | removed: JC4b C, the superinterfaces' initialization ("As built: JC4b") | (removed) |
+| `lambda-bridges`: a lambda's bridges in reflection (getDeclaredMethods lists one m) | (deferred in v1) | 0 | 2 | removed: JC4c JCS116 (a) ("As built: JC4c") | (removed) |
+| `boxed-foreach`: for-each over an Iterable<Float> into a float with an int's arithmetic (Boxed... | (deferred in v1) | 0 | 1 | removed: JN9f, JCS115 (a), a primitive for-each binding over another primitive's box ("As built: JCS114 (a), JCS115 (a) in JN9f") | (removed) |
+| `bridge-order`: a generic method's bridges with reordered bounds (ReorderedBoundsTest) | (deferred in v1) | 0 | 1 | removed: JC4b ("As built: JC4b") | (removed) |
+| `interp-default-method`: the interpreter: a default method inherited through a superclass and an inter... | (deferred in v1) | 0 | 1 | removed: JC4b F, the most specific default (JAVA-CONFORMANCE-SURVEY.md, "As built: JC4b") | (removed) |
+| `interp-thread-local`: the interpreter: ThreadLocal.initialValue overridden by an interpreted subcla... | (deferred in v1) | 0 | 1 | removed: JC4b A, the superclasses of the world ("As built: JC4b") | (removed) |
+| `local-class-names`: two local classes of one name in one method, one inside an anonymous class (N... | (deferred in v1) | 0 | 1 | removed: JC4b H ("As built: JC4b") | (removed) |
+| `record-pattern-null`: a record pattern over a null component (DeconstructionDesugaring: MatchExcept... | (deferred in v1) | 0 | 1 | removed: JC4b ("As built: JC4b") | (removed) |
+
+
+**Java AOT** (classes file `test/java/divergences.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `serialization`: serialization (ObjectInputStream, ObjectOutputStream, Externalizable) | by design | 117 | - | unchanged | J2G-SPEC §12 (2026-10-10) |
+| `speed`: speed: beyond the check's limit (20 s an action, the definition included) | by design | 23 | - | unchanged | survey §6.1, JCS10 (a) |
+| `classloading`: class loading (ClassLoader's members, defineClass, ServiceLoader, modules, Cl... | by design | 18 | - | unchanged | J2G-SPEC §12 |
+| `jforms-corpus-own`: diffcheck's exclusions: the Java forms compiler's corpus's own classes that f... | by design | 12 | - | unchanged | - |
+| `classfile`: java.lang.classfile, java.lang.constant | by design | 10 | - | unchanged | JCS9 (b), JC6; JCS95 (a): by design |
+| `foreign`: the foreign function and memory API (java.lang.foreign: Arena, MemorySegment;... | by design | 6 | - | unchanged | JCS95 (a): by design, FFM |
+| `xml`: XML (javax.xml, the XML signature API, Properties in XML) | by design | 4 | - | unchanged | J2G-SPEC §12 (2026-10-10) |
+| `desktop`: AWT, Swing (java.desktop) | by design | 1 | - | unchanged | J2G-SPEC §12 |
+| `zip`: the jrt: URL (the run-time image's file system; zip, jar and the jar: URL are... | by design | 1 | - | unchanged | JCS106 (a): by design, no run-time image |
+| `flaky-timeout`: flaky-timeout | (by design in v1) | 0 | - | removed at this level: no case since the compiled level was re-recorded (JC4b, JC4c); the timing cases are `flaky` | (removed) |
+| `j2g-unresolved`: j2g: a class whose analysis stops at a type the world does not have (Cannot c... | deferred | 305 | 305 | unchanged | JCS69 (a), then (b): the world, until JCS44 (a)'s messages name the class, then the analysis failing at the... |
+| `security`: security (KeyStore, certificates, providers, permissions, key generators) | deferred | 242 | 242 | unchanged | JCS9 (b), JC6; JCS90 (b): deferred |
+| `net`: networking (datagrams, multicast, NIO channels and selectors, URL protocols, ... | deferred | 156 | 156 | unchanged | JCS9 (b), JC6; JCS91 (b): deferred |
+| `j2g-world`: j2g: a JDK class outside the closed world named by the test whose package the... | deferred | 95 | 95 | unchanged | JCS9 (b), JC6; JCS44 (a): after the world classes |
+| `nio`: NIO buffers, files and charsets' coders (direct buffers, FileChannel, FileTim... | deferred | 88 | 88 | unchanged | JCS9 (b), JC6; JCS92 (b): deferred |
+| `reflection`: annotations and reflection's types and metadata (getAnnotation, getTypeParame... | deferred | 75 | 72 | grew: jrt's missing Field.getInt (the Nestmates privateFields tests, which JC4c lets reach it) | JCS9 (b), JC6; JCS94 (b): deferred, its own amendment (it reverses J2G-SPEC's R16) |
+| `management`: java.lang.management, JMX | deferred | 45 | 45 | unchanged | JCS9 (b), JC6; JCS95: java.lang.management's MXBeans deferred (b), JMX by design (a) |
+| `invoke`: java.lang.invoke (MethodHandle, MethodHandles, CallSite, LambdaConversionExce... | deferred | 36 | 36 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred |
+| `charsets-locales`: charsets and locales (UTF-16LE's and UTF-32's coders, EUC-JP, US-ASCII's alia... | deferred | 22 | 22 | unchanged | JCS9 (b), JC6; JCS92 (b): deferred |
+| `j2g-edge`: j2g: a JDK class's facts the edge does not record (generic signatures, enum c... | deferred | 22 | 30 | shrunk by 8 (the levels re-recorded by JC4b, JC4c, JN9f: tests moved between classes) | survey §7.3, JCS9 (b), JC6 |
+| `threads`: threads and concurrency's members jrt lacks (thread groups, platform threads,... | deferred | 21 | 21 | unchanged | JCS9 (b), JC6; JCS96 (b): deferred |
+| `javac-api`: javac's API (com.sun.tools.javac.Main, javax.tools, com.sun.source): javac's ... | deferred | 17 | 17 | unchanged | JCS9 (b), JC6; JCS95: deferred (not run on arbace-javac before the milestone) |
+| `logging`: java.util.logging, System.Logger | deferred | 16 | 16 | unchanged | JCS9 (b), JC6; JCS95: deferred (not built before the milestone) |
+| `jrt-dates`: jrt's dates: Date, Calendar, GregorianCalendar, TimeZone and DateFormat behav... | deferred | 13 | 13 | unchanged | JCS96 (b): deferred |
+| `references`: references, finalization, collection (PhantomReference, Cleaner, runFinalizat... | deferred | 9 | 9 | unchanged | JCS9 (b), JC6; JCS96 (b): deferred |
+| `interp-protected`: a protected member of a world class that is not an extendable class's instanc... | deferred | 8 | 8 | shrunk: JC4b B, then JC4c JCS112 (protected statics); the rest JCS120 or by design | survey §6.1, JC4; JCS98 (a) built in JC4b, JCS112 (a) in JC4c (the protected static methods in the member ... |
+| `stack`: StackWalker, stack traces and their line numbers | deferred | 8 | 8 | unchanged | JCS9 (b), JC6; JCS94 (b): deferred |
+| `random`: java.util.random (RandomGeneratorFactory and the algorithms by name) | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `system-properties`: the JVM's identifying system properties (java.version, java.vm.specification.... | deferred | 6 | 6 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `util-classes`: java.util and java.lang members jrt lacks: Scanner, Calendar.Builder, Propert... | deferred | 4 | 4 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `jforms-namespace-body`: diffcheck's exclusions: Clojure in a class body naming the namespace's vars o... | deferred | 4 | 4 | unchanged | - |
+| `flaky`: flaky: the result depends on the threads' timing or a Random's draw; passed w... | deferred | 3 | 1 | grew by 2 (the levels re-recorded by JC4b, JC4c, JN9f: tests moved between classes) | JCS71 (a) |
+| `identity`: stdout prints identity hash codes or traces (Object.toString, a stack trace t... | deferred | 3 | 3 | unchanged | As built: JC1 |
+| `jrt-strings`: jrt's StringBuffer: its capacity, its synchronized methods and an append's bo... | deferred | 3 | 3 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `jvm-tools`: a JDK tool the test runs or its jtreg actions ran: the java launcher (java.ho... | deferred | 3 | 3 | unchanged | JCS103 (a): the JDK's own tools a test runs, a harness class |
+| `text-data`: java.text's data jrt lacks: Bidi's (ICU's ubidi data), collation rules of oth... | deferred | 3 | 3 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `j2g-go`: j2g: Go that does not compile (a local class's captured values missing from i... | deferred | 2 | 2 | unchanged | JCS42 (b): fixed in JC5 |
+| `j2g-pp-override`: j2g: a package-private method redeclared by a class of another package (Go wo... | deferred | 2 | 2 | retitled: names the renaming j2g lacks (JCS122 (b): left) | J2G-SPEC §4.4, As built: JC2; JCS118 (a): not built in JC4c, JCS122 |
+| `j2g-reflection`: j2g's reflection: what the program's own classes' member tables do not give (... | deferred | 2 | 15 | shrunk: JC4c JCS117 (a), a program's own members; the rest is JCS123 (b), still to land | JCS98 (a), JCS117 (a) built in JC4c; the rest JCS123 |
+| `jrt-streams`: jrt's own streams otherwise than the JDK's: a closed DataInputStream over a F... | deferred | 2 | 2 | unchanged | JCS101: jrt flushing its streams at exit by design (a); the other behaviours deferred with JCS96 (b) |
+| `tls`: TLS (javax.net.ssl, javax.net socket factories, HTTPS) | deferred | 2 | 2 | unchanged | JCS90 (b): deferred, providers into the closure first, then TLS over Go's crypto/tls |
+| `url-headers`: URLConnection's headers jrt answers otherwise: no MIME type (getFileNameMap h... | deferred | 2 | 2 | unchanged | JCS105 (b): deferred with JCS96 |
+| `clock`: stdout names the run's clock (a file's last-modified time made by the run) | deferred | 1 | 1 | unchanged | JCS99 (a): as built, these tests' digests recorded as "-" (c) |
+| `identity-sum`: stdout prints sums of identity hash codes (Test6909839's ((c) ? a : b).hashCo... | deferred | 1 | 2 | shrunk by 1 (the levels re-recorded by JC4b, JC4c, JN9f: tests moved between classes) | As built: JC1 (:identity, JCS17 (b): hash codes after an @ masked); the sums cannot be masked; JCS99 (a), (c) |
+| `j2g-deep-stack`: j2g: a StackOverflowError expected of unbounded recursion (LambdaTest5's a3 =... | deferred | 1 | 1 | retitled: names V1 (JCS121 (c): kept) | JCS98 (a), JCS118 (a): found in JC4c to be V1, not a limit |
+| `jrt-io`: jrt's FileInputStream.skip of a negative count | deferred | 1 | 1 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `jrt-math`: jrt's Math.pow at large exponents | deferred | 1 | 1 | unchanged | JCS96 (b): deferred (the small members batch not built before the milestone) |
+| `read-failed`: not interpreted or compiled: the read level failed (the test's class at that ... | deferred | 1 | 1 | unchanged | As built: JC1 |
+| `sql`: JDBC beyond the Go build's java.sql (javax.sql.rowset, java.sql.Time) | deferred | 1 | 1 | unchanged | JCS97 (b): deferred |
+| `thread-order`: the order of two threads' output lines: a thread started and the starting thr... | deferred | 1 | 2 | shrunk by 1 (the levels re-recorded by JC4b, JC4c, JN9f: tests moved between classes) | JCS104 (b): the two threads' output order recorded status-only |
+| `j2g-findings`: j2g's translation found wrong: an intersection's lambda cast (IntersectionOrd... | (deferred in v1) | 0 | 7 | removed: JC4c JCS114, JCS118; JCS114 and JCS115 finished in JN9f ("As built: JC4c", "As built: JN9f") | (removed) |
+| `class-init`: class initialization of interfaces (JLS 12.4.1: an interface with default met... | (deferred in v1) | 0 | 3 | removed: JC4b C, the superinterfaces' initialization ("As built: JC4b") | (removed) |
+| `j2g-outer-super`: j2g: Outer.super.m() (javac's access$N01 with an invokespecial) | (deferred in v1) | 0 | 3 | removed: JC4b D, Outer.super.m() in j2g ("As built: JC4b") | (removed) |
+| `j2g-pattern-label`: j2g: a constant label in a pattern switch (case E.A on another type, Java 21) | (deferred in v1) | 0 | 2 | removed: JC4b E, constant labels over a box ("As built: JC4b") | (removed) |
+| `lambda-bridges`: a lambda's bridges in reflection (getDeclaredMethods lists one m) | (deferred in v1) | 0 | 2 | removed: JC4c JCS116 (a) ("As built: JC4c") | (removed) |
+| `boxed-foreach`: for-each over an Iterable<Float> into a float with an int's arithmetic (Boxed... | (deferred in v1) | 0 | 1 | removed: JN9f, JCS115 (a), a primitive for-each binding over another primitive's box ("As built: JCS114 (a), JCS115 (a) in JN9f") | (removed) |
+| `bridge-order`: a generic method's bridges with reordered bounds (ReorderedBoundsTest) | (deferred in v1) | 0 | 1 | removed: JC4b ("As built: JC4b") | (removed) |
+| `j2g-capture-names`: j2g: the outer instance two levels out in a constructor's prologue (MultiLeve... | (deferred in v1) | 0 | 1 | removed: JC4c JCS113 (a), the capture chain (JAVA-CONFORMANCE-SURVEY.md, "As built: JC4c") | (removed) |
+| `j2g-coercion`: j2g: a lambda's return of an Object to an int (SamConversion's test3) | (deferred in v1) | 0 | 1 | removed: JC4c JCS118 ("As built: JC4c") | (removed) |
+| `local-class-names`: two local classes of one name in one method, one inside an anonymous class (N... | (deferred in v1) | 0 | 1 | removed: JC4b H ("As built: JC4b") | (removed) |
+| `record-pattern-null`: a record pattern over a null component (DeconstructionDesugaring: MatchExcept... | (deferred in v1) | 0 | 1 | removed: JC4b ("As built: JC4b") | (removed) |
+
+
+**Java print** (classes file `test/java/divergences.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `print-classes`: print: the printed Java's class files differ from the original's by what the ... | by design | 653 | - | grew: 13 tests fall from the forms step to the classes step (RPS64) and 4 more with RPS151 (a) | RPS9 (a): print's class files against the original's under bin/repr-java roundtrip's classes |
+| `print-erasure`: print: the printed Java is read to forms with the casts and tags of Java's ty... | by design | 17 | - | new, by design: RPS64's 16, with JCS114's TypedDeconstructionPatternExc (RPS152 (a); "As built: v2 small leftovers B", "As built: JCS114 (a), JCS115 (a) in JN9f") | RPS9 (a), RPS64 (a): type arguments are not in the forms until JFS75 (b)'s model carries them |
+| `print-shapes`: print: the printed Java is read to another shape of the same Java (a when for... | by design | 17 | - | new, by design: RPS64's 17 (RPS152 (a), "Decided (2026-10-28)") | RPS64 (a): restructurings by design, the temporaries' names with them |
+| `print-type-arguments`: print: javac rejects the printed Java for want of Java's type arguments in co... | deferred | 32 | 32 | unchanged | RPS9 (a): deferred until JFS75 (b)'s model carries type arguments |
+| `print-release`: print: javac on Arbace refuses --release N (no ct.sym in its platform), as fo... | deferred | 2 | 2 | unchanged | JCS50 (a) |
+| `print-overload-cast`: print: the forms lose a cast that chooses an overload (v((Object) "s") read a... | deferred | 1 | - | unchanged class; in v1's counts its test sat under the first matching class, print-forms (a test in two classes counts once) | RPS65 (a): deferred to JC5, the converter keeping a cast that changes javac's overload choice |
+| `read-failed`: not interpreted or compiled: the read level failed (the test's class at that ... | deferred | 1 | 1 | unchanged | As built: JC1 |
+| `print-forms`: print: the printed Java read again gives other forms (a literal's sign, width... | (deferred in v1) | 0 | 64 | removed: RPS64 (the 47 by kind, FULL-SUPPORT-SURVEY.md "As built: v2 small leftovers B") and RPS151 (a) (the last 5, "As built: RPS151 (a) in JN9f") | (removed) |
+
+
+**Go read** (classes file `test/repr/go/divergences-read.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `parser-rejects`: files go/parser rejects | by design | 73 | - | unchanged | doc/go/GO-PARSER-SURVEY.md, GPS9, "As built: GP6" |
+| `goos-other-boards`: TamaGo's goos packages for other boards and architectures | by design | 67 | - | unchanged | doc/go/GO-PARSER-SURVEY.md, "As built: GP3", GPS17 |
+| `invalid-programs`: invalid programs the converter cannot convert (raw forms only) | by design | 64 | - | unchanged | GC47 (a); doc/go/GO-PARSER-SURVEY.md, GPS9, "As built: GP3" |
+
+
+**Go eval** (classes file `test/goi/divergences.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `gc-flags`: gc's optimizer diagnostics and flags | by design | 111 | - | unchanged | §1.1, GC46 |
+| `frames`: runtime.Caller, runtime.Callers, FuncForPC and traces naming goi's frames | by design | 21 | - | unchanged | §1.1, §10.6 |
+| `memory`: finalizer timing, escape analysis, memory statistics, heap profiles | by design | 17 | - | unchanged | §1.1 |
+| `gc-phases`: errors of gc's phases after type checking | by design | 13 | - | unchanged | GC46, GPS41 (c) |
+| `foreign-code`: assembly, cgo, go:linkname | by design | 9 | - | unchanged | §1.1 |
+| `spellings`: message spellings, columns and lines the forms do not keep | by design | 9 | - | unchanged | GC49, SPEC.md §6.4, §10.1 |
+| `gc-std`: gc compiling std or the runtime | by design | 7 | - | unchanged | §1.1, GC46 |
+| `line-directives`: line directives | by design | 7 | - | unchanged | GC46 |
+| `speed`: speed: programs beyond the check's 10 s | by design | 6 | - | unchanged | §11.1, GR3's criterion |
+| `race`: -race | by design | 5 | - | unchanged | §1.1, GC46 |
+| `no-forms`: syntax errors gc's types2 reports on syntax's tree | by design | 4 | - | unchanged | GC47, G1, GPS9, GPS43 |
+| `gc-reference`: gc's own errors no longer pass the test | by design | 3 | - | unchanged | GR7b |
+| `toolchain`: runs of the go command and the toolchain's root | by design | 3 | - | unchanged | §1.1, GR4 |
+| `unsafe-layout`: unsafe layout and memory order gc decides | by design | 2 | - | unchanged | §1.1, §5.4 |
+| `call-depth`: S23's call depth | by design | 1 | - | unchanged | S23 |
+| `std-out-of-scope`: standard packages out of goi's scope | by design | 1 | - | unchanged | GR8a |
+
+
+**Go AOT** (classes file `test/goi/divergences-aot.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `no-forms`: invalid programs without forms | by design | 137 | - | unchanged | GC47, G1, GPS9, GPS43 |
+| `gc-reference`: gc's own errors no longer pass the test | by design | 4 | - | unchanged | GR7b |
+| `positions`: positions mode :lines does not keep: expressions' line breaks, //line directives | by design | 3 | - | unchanged | RPS17 (a), SPEC.md §10.1 |
+| `toolchain`: runs of the go command and the toolchain's root | by design | 3 | - | unchanged | §1.1, GR4; BUILD.md (-trimpath) |
+| `go-build-complete`: go build's -complete | by design | 1 | - | unchanged | RPS31 (a), by design |
+| `spellings`: the forms of invalid programs that say another program | by design | 1 | - | unchanged | GC49, SPEC.md §6.4 |
+| `printer-invalid`: the printer refusing the forms of invalid programs | (deferred in v1) | 0 | 3 | removed: RPS32 (a), repr/go prints the three invalid programs as written (FULL-SUPPORT-SURVEY.md, "As built: v2 small leftovers A") | (removed) |
+
+
+**Go print** (classes file `test/repr/go/divergences-print.edn`)
+
+| class | kind | cases | v1 | since v1 | decision |
+|---|---|---:|---:|---|---|
+| `compile-only-dirtests`: directory tests that only compile: no run level | by design | 127 | - | unchanged | doc/go/ROUNDTRIP.md, "Directory tests"; test/repr/go/roundtrip-dirtest-known.edn |
+| `tests-embed-sources`: TamaGo's tests embed their package's own sources | by design | 9 | - | unchanged | doc/go/ROUNDTRIP.md, "Known gaps"; test/repr/go/roundtrip-tests-known.edn |
+| `empty-decl-group`: an empty declaration group (import ( ), a local var ()) | by design | 3 | - | unchanged | doc/go/PRINTER-NOTES.md, G2F6 (the user, 2026-10-17); doc/go/SPEC.md §10.2 |
+| `unsafe`: unsafe has no export data or code | by design | 2 | - | unchanged | doc/go/ROUNDTRIP.md, "The corpus and the configuration" |
+
+<!-- v2-record:end -->
+
+### What changed since v1, in brief
+
+The work so far: the scripts' sweep (no cell: tooling), GT1-GT3 (the keyed gate, doc/GATE-SURVEY.md, "As built:
+GT1-GT3": no cell), v2's small leftovers A and B, JC4b, JC4c, Clojure's deferred cases, JN9e (no cell: repr/java reads
+without javac), JN9f, and RPS134 (b).
+
+- **Clojure** (eval 21,049 / 80 / 5 to 21,052 / 81 / 1; AOT 804 / 28 / 6 to 809 / 29 / 0): deferred classes `trace-lines`,
+  `fiprims` (eval) and `fiprims`, `compiled-trace-lines`, `fn-fields` (AOT) removed by RPS41 (b), RPS42 (b), RPS53 (b),
+  RPS54 (b) ("As built: Clojure's deferred cases"); `xml-stream` from deferred to by design in both, RPS134 (b)
+  ("Decided (2026-10-28): RPS130-RPS134, RPS150-RPS154"). What is deferred is `seq-and-transducer` (speed, eval).
+  Read and print unchanged.
+- **Java** (read 7,738 / 3 / 93 to 7,740 / 3 / 93; eval 1,683 / 325 / 1,312 to 1,807 / 329 / 1,186; AOT 1,869 / 181 /
+  1,270 to 1,913 / 180 / 1,229; print 2,584 / 637 / 99 to 2,598 / 687 / 36):
+  - JC4b ("As built: JC4b", JAVA-CONFORMANCE-SURVEY.md) removed `interp-default-method`, `interp-thread-local`,
+    `class-init`, `local-class-names`, `record-pattern-null`, `bridge-order`, `j2g-outer-super`, `j2g-pattern-label`,
+    shrank `interp-extends` (42 more world classes extendable) and `interp-protected`, and moved `interp-synchronized` to the
+    harness;
+  - JC4c ("As built: JC4c") removed `j2g-capture-names`, `lambda-bridges`, `j2g-coercion` and `j2g-findings`, shrank
+    `interp-extends`, `interp-protected` and `j2g-reflection`;
+  - JN9f ("As built: JCS114 (a), JCS115 (a) in JN9f") removed `boxed-foreach` (the last of JC4b's one-test classes);
+  - small leftovers B (RPS64, RPS86 (b)) and RPS151 (a) in JN9f split and emptied `print-forms` (64 deferred): `print-shapes`
+    and `print-erasure` are new, by design (RPS152 (a)); print deferred 99 to 36;
+  - JN9f's level `nread` adds five classes (`nread-*`, 44 tests, deferred) beside the matrix: they are not a cell's source
+    (JFS123 (b)); JFS133 (a) lists them as the next ports.
+- **Go** (AOT 1,685 / 149 / 3 to 1,688 / 149 / 0): `printer-invalid` removed by RPS32 (a) ("As built: v2 small
+  leftovers A"); the other cells are as at v1. Go's read, eval and print: unchanged.
+- **Reclassified**: Clojure's `xml-stream` (deferred to by design, both levels); Java's `interp-synchronized` (to the
+  harness, JC4b G).
+- **Not a cell**: RPS102 (b) (a refused Go package is a build error), RPS95 (b), JCS76 (a), RPS80 (b) (the module table:
+  `Class.getModule` in javac's tool world), JN9e.
+
+### Still to land before the tag
+
+| work | what | cells it should move |
+|---|---|---|
+| RPS150 with JCS123 (b) | `Module.getPackages` and `getResourceAsStream` as j2g support forms (RPS150, after JC4c); j2g's `getMethods` order of an interface's abstract methods and a local class's modifiers from InnerClasses flags (JCS123 (b)) | Java AOT: `j2g-reflection` (2 cases, NonPublicStaticInitializer and T8034044 compiled) to none; RPS150 moves no class |
+| RPS97 (b) | `bin/clojure-tests --aot` and `bin/java-check`'s compiled level on the program library (`bin/lib/program.bash`) | none expected (Clojure AOT and Java AOT must stay as recorded); a check that the harnesses still pass |
+| GT4-GT6 | the audit, inner keys, scheduling and limits (doc/GATE-SURVEY.md) | none; GT6's per-program CPU limits may move Java's `speed` and `flaky-timeout` (by design) in eval and AOT |
+| GT5 | inner keys (a classes-file change reruns nothing; a j2g change that leaves the translations alone reruns only j2g's steps) | none |
+| JFS133 (a)'s 6 | the six tests the native read answers otherwise than javac (`nread-differ`) | `nread-differ` 6 to 0 (beside the matrix); Java read unchanged |
+| the re-seed | `bin/seed --make` and `--verify` carrying every runtime change since `b4ac198d` (JC4b's and JC4c's j2g and analysis changes, Clojure's deferred cases, RPS80 (b), RPS150, JCS123 (b)) | the compiled numbers recorded on branch executables (JC4b, JC4c) become the seed's: Java AOT and, with `bin/clojure-tests --aot`, Clojure AOT re-recorded and read again |
+| GT7 | the clean `bin/gate --full --clean` at the tag (the clone, empty caches, the audit, the record in `test/gate/clean-arbace-reaps-3-crops-v2.edn`) | none; a failure or a flake there reopens the class it names |
 ## As built: RPS97 (b) (2026-10-28)
 
 RPS97 (b), decided by the user: `bin/clojure-tests --aot` and `bin/java-check`'s compiled level call
@@ -2973,3 +3396,28 @@ Behaviour unchanged, on the worktree of this change:
   - *Recommended: (b)*, in a change of its own: it would let a fresh clone run the compiled levels
     without a `--build`, but the suite also needs the gate's test build, and the lookups' errors are the
     gate's messages today.
+
+## As built: RPS161 (b) (2026-10-28)
+
+RPS160 (a) decided (the two compile steps stay separate); RPS161 (b) done inside v2.
+
+- `bin/java-check`'s compiled level (`compiled_level`) and `--essential-compiled` set their compiled namespaces
+  with `java_check_base`: `JAVA_CHECK_AOT` when set (an explicit override, kept), else `program_base`
+  (`ARBACE_PROGRAM_BASE`, `target/arbace-go`, the gate's cache, stage 0's `target/seed`, the first whose `aot.key`
+  and executable's runtime are the checkout's; else stage 0's compiled again; else a `--build`). The two private
+  lookups (`target/arbace-go/aot`; the gate's, then `target/arbace-go/aot`) are gone, and so is the need
+  for the `JAVA_CHECK_AOT` workaround on a worktree with a gate build only. `java-check` defines the few globals
+  the base uses (`dir`, `programs`, `discard`, `since`, and `build` as `bin/arbace-go --build`).
+- `bin/clojure-tests --aot` does not use a base's compiled namespaces as an input (it compiles the runtime's
+  namespaces and the suite afresh on the gate's test build), so what it takes from the base is the test:
+  after `--gate-build`, `program_aot_current "$exes/aot"` must hold (the build's compiled namespaces are the
+  checkout's) or the run stops; `CLOJURE_TESTS_AOT_EXES` (an explicit executables directory) skips it.
+  Its executables stay the gate's, since only the gate's directory holds the test build `arbace-tests`.
+
+### Proposals (RPS162)
+
+- **RPS162 The suite's executables from the base.**
+  - Options: (a) as built: the gate's executables (a test build is only there); (b) `program_base`'s executable
+    as j2g's host, the test build beside it when present, else `--build-tests`.
+  - *Recommended: (a)*: (b) would let a fresh clone run the suite's AOT level from stage 0 alone, but the
+    suite needs the test build anyway, and a different host binary gains nothing.

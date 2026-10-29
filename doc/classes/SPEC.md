@@ -831,6 +831,15 @@ where Arbace converts exactly as javac does, and are explicit elsewhere.
   bounds the operand is not known to have.
 - Boxing calls `valueOf` of the matching wrapper, as javac does. Clojure today boxes a `long` with
   `Numbers.num`, which returns the same `Long`; only the call changes, not the meaning.
+- **Constants the printed Java would retype** (RPS151 (a), doc/FULL-SUPPORT-SURVEY.md; "As built: JN9f").
+  Where the analysis would convert implicitly but Java's literal for the form is another type's, the
+  converter writes the conversion: a `long` constant widened to `float` or `double` as an `int`
+  constant's widening is written (`f3 += -2061721519L`: `(unchecked-add-float f3 (float
+  -2.061721519E9))`; `double d = 3858573493713776640L`: `(double 3858573493713776640)`), a `long`
+  constant into a reference other than `Long` boxed (`new R6(0L, 0)` of `R6(Object, Object)`:
+  `(R6. (Long/valueOf 0) (Integer/valueOf 0))`), and a primitive conditional with a literal branch
+  into a reference boxed whole (`return c ? 1 : x;` of an `Integer` method: `(Integer/valueOf (if c 1
+  x))`, javac's Lower boxing the conditional).
 - **Erasure casts.** javac inserts a `checkcast` where an erased generic type is used at a more
   specific type. Arbace does not know generic types in code, so the converter writes the casts
   javac's `TransTypes` inserts:
@@ -942,7 +951,10 @@ their Clojure meaning. New:
 - **`for-each`** is Java's enhanced `for`. On an array it loops over the array with an index; on
   an `Iterable` it calls `iterator()`, `hasNext()` and `next()`, casting each element to the
   binding's type if that is not `Object`, as javac does. A primitive binding over an `Iterable`
-  (`for (int x : ints)`) casts to the wrapper (`Integer`) and unboxes. (`doseq` stays Clojure's
+  (`for (int x : ints)`) casts to the wrapper (`Integer`) and unboxes; over the box of another
+  primitive (`for (float f : Iterable<Integer>)`, javac's cast to the erased type argument, then
+  unboxing and widening) the binding names that box, `(for-each [^float ^{:box Integer} f xs] ...)`
+  (JCS115 (a), "As built: JN9f"). (`doseq` stays Clojure's
   seq loop.)
 - In class bodies `loop` and `try` in expression position compile inline. (Clojure wraps them in
   a `fn` there; Java code has no such classes.)
@@ -975,7 +987,14 @@ label   = constant | (constant+) | [pattern] | [pattern :when guard] | nil | (ni
   value (`-2147483648`, not `(unchecked-int 0x80000000)`).
 - **Patterns** are vectors: `^T x` is a type pattern, `_` (alone or `^T _`) an unnamed one,
   `(R p*)` a record pattern with nested patterns, and an untyped symbol in a record pattern is
-  Java's `var`. `:when` adds a guard.
+  Java's `var`. `:when` adds a guard. A nested type pattern marked `^:unconditional` matches its
+  component without a test, `null` included: javac found it unconditional by the record pattern's
+  type arguments (`(Box ^String ^:unconditional s)` for `Box<String>(String s)` of a `record
+  Box<T>(T t)`, whose component's erased type is `Object`); the converter writes the mark where the
+  component's declared erasure alone would make it a test. A non-null component of another class
+  (heap pollution: a `Box<Integer>` passed as a `Box<String>`) throws `ClassCastException` at the
+  binding, javac's checkcast of the erased component (JCS114 (a),
+  doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4b"; JAVA-FRONTEND-SURVEY.md, "As built: JN9f").
 - Without a default nothing happens when nothing matches, and the value is `nil`. Where Java
   requires exhaustiveness (switch expressions, pattern switches), javac adds a default that
   throws `MatchException`; the converter writes it:

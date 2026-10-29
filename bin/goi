@@ -185,6 +185,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash" # TMPDIR: .tmp/tmp when unset
 . "$root/bin/lib/renamed-env.bash"
 . "$root/bin/lib/tools.bash"
+. "$root/bin/lib/limit.bash" # limited: CPU-time limits with a wall cap (GT6)
 cd "$root"
 
 goroot=${ARBACE_GOROOT:-/root/tamago-go}
@@ -424,7 +425,9 @@ gc_ref() {
   if ! (cd "$(dirname "$g")" && env $(gc_env) "$goroot/bin/go" build ${bflags[@]+"${bflags[@]}"} -o "$ref.tmp/exe" "${files[@]}") > "$ref.tmp/build.log" 2>&1; then
     printf '%s\terror\tgc reference: the original'"'"'s build failed: %s\n' "$p" "$(head -1 "$ref.tmp/build.log" | cut -c1-200)"; return 1
   fi
-  gst=0; (cd "$goroot/test" && timeout $((tmo * 3)) "$ref.tmp/exe" ${args[@]+"${args[@]}"} > "$ref.tmp/out" 2> "$ref.tmp/err.raw" < "$empty") || gst=$?
+  gst=0; (cd "$goroot/test" && limited $((tmo * 3)) "$ref.tmp/exe" ${args[@]+"${args[@]}"} > "$ref.tmp/out" 2> "$ref.tmp/err.raw" < "$empty") || gst=$?
+  # a reference that timed out is no reference (GT6: it was cached as gc's status 124 and judged every later run)
+  case $gst in 124|137|152) rm -rf "$ref.tmp"; printf '%s\terror\tgc reference: the original timed out\n' "$p"; return 1 ;; esac
   stderr_head "$ref.tmp/err.raw" > "$ref.tmp/err"
   echo $gst > "$ref.tmp/exit"
   if [ -f "$goroot/test/${p%.go}.out" ]; then
@@ -500,18 +503,18 @@ check_one() {
     if ! aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
       printf '%s\terror\tthe AOT build failed: %s\n' "$p" "$(grep -v '^$' "$r.build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"; return
     fi
-    (cd "$goroot/test" && timeout "$tmo" "$r.exe" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
+    (cd "$goroot/test" && limited "$tmo" "$r.exe" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
     rm -rf "$r.exe" "$r.src"
   elif [ -n "${box:-}" ]; then
     box_run "$cforms" "$tmo" "$ns" "${f#$cforms/}" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" || st=$?
   else
-    (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
+    (cd "$goroot/test" && limited "$tmo" "$rexe" -m arbace.go.run "$cforms" "$ns" ${args[@]+"${args[@]}"} > "$r.out" 2> "$r.err.raw" < "$empty") || st=$?
   fi
   stderr_head "$r.err.raw" > "$r.err"
   case $st in
     125) [ -z "${aot:-}" ] && { printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.err.raw" | head -1)"; return; } ;;
     126) [ -z "${aot:-}" ] && { printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.err.raw" | head -1 | cut -c1-300)"; return; } ;;
-    124) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
+    124|137|152) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
   esac
   if [ -n "${box:-}" ]; then
     # the box's console: TamaGo writes a Go program's file descriptors 1 and 2 to it, and the
@@ -683,17 +686,17 @@ check_dir() {
     if ! aot_build "$r.src" "$r.exe" "$r.build.log" ${bflags[@]+"${bflags[@]}"}; then
       printf '%s\terror\tthe AOT build failed: %s\n' "$p" "$(grep -v '^$' "$r.build.log" | head -2 | tr '\n' ' ' | cut -c1-240)"; return
     fi
-    (cd "$goroot/test" && timeout "$tmo" "$r.exe" > "$r.out" 2>&1 < "$empty") || st=$?
+    (cd "$goroot/test" && limited "$tmo" "$r.exe" > "$r.out" 2>&1 < "$empty") || st=$?
     rm -rf "$r.exe" "$r.src"
   elif [ -n "${box:-}" ]; then
     box_run "$dforms" "$tmo" "$ns" "${f#$dforms/}" "${base#$dforms/}" "${base#$dforms/}.ae" > "$r.out" 2>&1 || st=$?
   else
-    (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run "$dforms" "$ns" > "$r.out" 2>&1 < "$empty") || st=$?
+    (cd "$goroot/test" && limited "$tmo" "$rexe" -m arbace.go.run "$dforms" "$ns" > "$r.out" 2>&1 < "$empty") || st=$?
   fi
   case $st in
     125) [ -z "${aot:-}" ] && { printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.out" | head -1)"; return; } ;;
     126) [ -z "${aot:-}" ] && { printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.out" | head -1 | cut -c1-300)"; return; } ;;
-    124) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
+    124|137|152) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
   esac
   if [ "$st" = 0 ] && { if [ -f "$want" ]; then cmp -s "$r.out" "$want"; else [ ! -s "$r.out" ]; fi; }; then
     printf '%s\tpass\t\n' "$p"
@@ -752,9 +755,10 @@ check_err() {
   ref=$gcwork/eref/$key
   if [ ! -f "$ref/judge" ]; then
     rm -rf "$ref.tmp"; mkdir -p "$ref.tmp"
-    st=0; (cd "$ref.tmp" && env $(gc_env) timeout $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
+    st=0; (cd "$ref.tmp" && export $(gc_env) && limited $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
             -importcfg="$gcwork/importcfg" -o a.o ${goflags[@]+"${goflags[@]}"} -d=ssa/check/on "$g" > out 2>&1 < "$empty") || st=$?
     rm -f "$ref.tmp/a.o"
+    case $st in 124|137|152) rm -rf "$ref.tmp"; printf '%s\terror\tgc reference: the compile timed out\n' "$p"; return ;; esac
     echo $st > "$ref.tmp/exit"
     "$gocmp" errorcheck $auto "$g" "$ref.tmp/out" > "$ref.tmp/judge" 2>&1 || true
     if [ -n "$want" ] && [ "$st" = 0 ]; then echo "fail: compilation succeeded unexpectedly" > "$ref.tmp/judge"; fi
@@ -794,14 +798,14 @@ check_err() {
   dump=$edumps/$p.edn
   types=0
   [ -f "$dump" ] && types=$("$gocmp" errorcheck -dump-errors "$dump" 2> "$r.types.err" | grep -c . || true)
-  st=0; (cd "$goroot/test" && timeout "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} ${maxerr:+--max-errors "$maxerr"} $raw --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
-  if [ "$st" = 124 ] && [ "$types" = 0 ] && [ -n "$want" ]; then
+  st=0; (cd "$goroot/test" && limited "$tmo" "$rexe" -m arbace.go.run --errorcheck ${lang:+--lang "$lang"} ${maxerr:+--max-errors "$maxerr"} $raw --gc-front "$g" "$froot" "$ns" > "$r.out" 2> "$r.err" < "$empty") || st=$?
+  if { [ "$st" = 124 ] || [ "$st" = 137 ] || [ "$st" = 152 ]; } && [ "$types" = 0 ] && [ -n "$want" ]; then
     printf '%s\tunsupported\terrors of gc'"'"'s phases after type checking (go/types reports none; goi'"'"'s check over %s s)\n' "$p" "$tmo"; return
   fi
   case $st in
     125) printf '%s\tunsupported\t%s\n' "$p" "$(sed -n 's/^goi: unsupported: //p' "$r.err" | head -1)"; return ;;
     126) printf '%s\terror\t%s\n' "$p" "$(sed -n 's/^goi: error: //p' "$r.err" | head -1 | cut -c1-300)"; return ;;
-    124) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
+    124|137|152) printf '%s\terror\ttimeout (%s s)\n' "$p" "$tmo"; return ;;
     0|1) ;;
     *) printf '%s\terror\tstatus %s: %s\n' "$p" "$st" "$(head -1 "$r.err" | cut -c1-200)"; return ;;
   esac
@@ -852,9 +856,10 @@ check_err_aot() {
   ref=$gcwork/earef/$key
   if [ ! -f "$ref/judge" ]; then
     rm -rf "$ref.tmp"; mkdir -p "$ref.tmp"
-    st=0; (cd "$ref.tmp" && env $(gc_env) GOEXPERIMENT="$goexp" timeout $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
+    st=0; (cd "$ref.tmp" && export $(gc_env) GOEXPERIMENT="$goexp" && limited $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
             -importcfg="$gcwork/importcfg" -o a.o "${goflags[@]}" "$g" > out 2>&1 < "$empty") || st=$?
     rm -f "$ref.tmp/a.o"
+    case $st in 124|137|152) rm -rf "$ref.tmp"; printf '%s\terror\tgc reference: the compile timed out\n' "$p"; return ;; esac
     echo $st > "$ref.tmp/exit"
     "$gocmp" errorcheck $auto "$g" "$ref.tmp/out" > "$ref.tmp/judge" 2>&1 || true
     if [ -n "$want" ] && [ "$st" = 0 ]; then echo "fail: compilation succeeded unexpectedly" > "$ref.tmp/judge"; fi
@@ -876,10 +881,10 @@ check_err_aot() {
   fi
   local files=()
   for x in "$r.d/src"/*.go; do files+=("$(basename "$x")"); done
-  st=0; (cd "$r.d/src" && env $(gc_env) GOEXPERIMENT="$goexp" timeout $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
+  st=0; (cd "$r.d/src" && export $(gc_env) GOEXPERIMENT="$goexp" && limited $((tmo * 3)) "$goroot/bin/go" tool compile -p=p -d=panic -C -e \
           -importcfg="$gcwork/importcfg" -o ../a.o "${goflags[@]}" "${files[@]}" > "$r.out" 2>&1 < "$empty") || st=$?
   rm -rf "$r.d"
-  [ "$st" = 124 ] && { printf '%s\terror\ttimeout (%s s)\n' "$p" "$((tmo * 3))"; return; }
+  case $st in 124|137|152) printf '%s\terror\ttimeout (%s s)\n' "$p" "$((tmo * 3))"; return ;; esac
   if "$gocmp" errorcheck $auto "$g" "$r.out" > "$r.judge" 2>&1 && { [ -z "$want" ] || [ "$st" != 0 ]; } && { [ -n "$want" ] || [ "$st" = 0 ]; }; then
     printf '%s\tpass\t\n' "$p"; return
   fi
@@ -1092,7 +1097,7 @@ check() {
   fi
   rm -f "$list.err"
   echo "== goi check: $(wc -l < "$list") programs, $jobs at a time" >&2
-  export -f check_one check_dir check_err check_err_aot action_of action_words gc_ref aot_build aot_dir_root stderr_head gc_env box_run box_input
+  export -f limited limited_cpu check_one check_dir check_err check_err_aot action_of action_words gc_ref aot_build aot_dir_root stderr_head gc_env box_run box_input
   export root goroot rexe hexe cforms dforms cwork gcwork empty box bundle aot eforms efull edumps etsv gocmp esyntax eraw
   local t0=$SECONDS
   xargs -a "$list" -P "$jobs" -I{} bash -c 'case $(action_of "$goroot/test/$1") in errorcheck*) if [ -n "$aot" ]; then check_err_aot "$1"; else check_err "$1"; fi ;; *dir|*"dir "*) dirtest=1 check_dir "$1" ;; *) check_one "$1" ;; esac' _ {} \

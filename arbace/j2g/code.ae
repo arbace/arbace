@@ -815,10 +815,14 @@
                      (v (list 'conv 'int32 (list 'len (list '.-A (:x a)))) "I"))
           :java-str (java-str-val node)
           :null-checked (let [x (expr (:expr node))]
-                          (v (if (m/pointer-desc? (:t x))
-                               (list (jsym "NN") (:x x))
-                               (list (list 'inst (jsym "J2g_NotNull") (gotype (:t x))) (:x x)))
-                             (:t x) :nn true))
+                          ;; javac's synthetic check is Objects.requireNonNull, whose frame an
+                          ;; NPE's stack trace shows (TestSyntheticNullChecks; JCS118 (a), "As
+                          ;; built: JC4c"): j2g's helpers call it on null (out/support-forms)
+                          (let [rnn (m/translated? "java/util/Objects")]
+                            (v (if (m/pointer-desc? (:t x))
+                                 (list (jsym (if rnn "J2g_RequireNonNullP" "NN")) (:x x))
+                                 (list (list 'inst (jsym (if rnn "J2g_RequireNonNull" "J2g_NotNull")) (gotype (:t x))) (:x x)))
+                               (:t x) :nn true)))
           (:new-array :array-init) (array-val node)
           :lambda (lambda-val node)
           :fi-adapter (fi-adapter-val node)
@@ -841,8 +845,15 @@
   value is nil: javac's Resolve.onDemandImportScopeRecovery's lambda) is a statement, then nil
   of type `to`: its temporary would be Object's, any, which no other interface takes."
   [node to]
-  (if (and (= :null (vt node)) (not (#{:const :local} (:op node))) to (not= to "V") (not (t/prim? to)))
+  (cond
+    (and (= :null (vt node)) (not (#{:const :local} (:op node))) to (not= to "V") (not (t/prim? to)))
     (do (stmt! node) (coerce nil :null to false))
+    ;; a node that completes abruptly (a lambda's body that throws, SamConversion's
+    ;; n -> {throw new Exception();} of an int method: JCS118 (a), "As built: JC4c"): a
+    ;; statement, then the zero of `to`, never reached
+    (and (= :none (vt node)) to (not= to "V"))
+    (do (stmt! node) (if (t/prim? to) (zero-of to) (coerce nil :null to false)))
+    :else
   (let [x (expr node)]
     (if (and (:missing x) to (not= to "V")) (missing-expr (:missing x) to) (coerce (:x x) (:t x) to (:nn x))))))
 
@@ -2274,6 +2285,12 @@
     (and (nil? x) (not (t/prim? from)) (not (t/prim? to))) nil
     (and (t/prim? from) (t/prim? to)) (prim-convert x from to)
     (t/prim? from) (coerce (box-val x from) (str "L" (t/box-of from) ";") to true)
+    ;; from a type that is not a wrapper (a generic T): the value's own wrapper unboxed and
+    ;; widened, LambdaMetafactory's return conversion (a Short as an int: the interpreter's
+    ;; value-convert; MethodReferenceGenericTarget, JCS118 (a), "As built: JC4c")
+    (and (t/prim? to) (not= "Z" to) (nil? (t/unbox-of from)) (not (env/assignable? from (str "L" (t/box-of to) ";"))))
+    (list (list 'inst (jsym "J2g_UnboxWiden") (gotype to)) (jsym (str "Prim_" (t/prim-desc->name to)))
+          (class-val (str "L" (t/box-of to) ";")) (coerce x from "Ljava/lang/Object;" false))
     (t/prim? to) (let [w (str "L" (t/box-of to) ";")
                        cx (if (env/assignable? from w) x (list (csym (t/box-of to) "_Cast") (coerce x from "Ljava/lang/Object;" false)))]
                    (:x (convert-val {:from w :to to :expr {:op ::go :x cx :t w}})))

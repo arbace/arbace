@@ -20,12 +20,28 @@
 # .tmp/gate/NAME.mem, beside the 5 s sampler's .tmp/gate/mem.tsv (the host's MemAvailable, the
 # gate's processes' RSS, each running step's), whose per-step peak the .mem file holds too.
 #
+# Since GT4-GT6 (doc/GATE-SURVEY.md, "As built: GT4, GT6") what decides a step's outcome is the runner
+# library bin/lib/gate-run.bash (with the planner, the only gate logic in a key, GTS22 (a): this file's
+# header, summary and option parsing are not); the heavy steps (:heavy, with their measured :mem-gib)
+# run under GATE_HEAVY_CMD, by default the host's big-job lock ARBACE_HEAVY_LOCK, the gate itself not
+# (GTS25 (a)); the gate's executables and javac's tool are kept by their keys in ARBACE_GATE_EXES
+# (default the main checkout's .tmp/gate-exe), shared by the worktrees (GTS24 (a)); a step over three
+# times its latest passes' time is flagged in the summary (GTS17 (a)).
+#
 # Usage: bin/gate [--full] [--rerun]
 #        bin/gate [--full] --plan   the plan alone: each step, run, skipped, built or not needed,
 #                                   and why (the inputs changed since its latest pass); stage 0
 #                                   first when missing
 #        bin/gate --why STEP        STEP's material (its key's inputs but the files), its passes,
 #                                   and every line changed since the latest one (--full's plan)
+#        bin/gate --audit [STEP...] each check named (default every check, --full's table) run under
+#                                   strace; the files it reads under the checkout against its declared
+#                                   inputs: an undeclared read fails the audit and names the file
+#                                   (GT4; needs the executables and javac's tool built: bin/gate
+#                                   --full first; a heavy step takes the lock; .tmp/gate-audit/)
+#        bin/gate --prune [--dry-run]  the store of passes trimmed: per step the last 5 and every pass
+#                                   younger than 30 days kept; the executables' directories but the
+#                                   newest 3 of each, older than a day, removed (GTS27)
 #        --rerun                    every check runs (and records its pass), as at a clean run
 #   (default)  the essential gate:
 #                0. makefile      make check-makefile: every bin/ script the Makefile (the
@@ -142,6 +158,10 @@
 #                                     without javac, each fact equal to javac on Arbace's, the forms
 #                                     still javac's trees', over the same corpora, against
 #                                     test/repr/java/attr-check-known.edn; "As built: JN9a", JFS74)
+#                       repr-java-nojavac bin/repr-java nojavac-check (the read without javac:
+#                                     every corpus read by javac's trees and by read --no-javac, the
+#                                     forms equal file for file, the fallbacks counted, against
+#                                     test/repr/java/nojavac-check-known.edn; "As built: JN9f", JFS121)
 #                       java-check-full  bin/java-check --levels read,interp,classes,compiled,diagnostics,print
 #                                     (Java's conformance check, every corpus: jdk26u's jtreg run tests
 #                                     read on the tool, interpreted on the gate's executable, compiled
@@ -220,7 +240,9 @@
 # ARBACE_GOCACHE_KEEP_MIN). ARBACE_HOST_EXE is ignored: the gate's host is stage 0.
 # Logs go to .tmp/gate/NAME.log (NAME.status, .secs, .time, .mem; plan.tsv, plan/NAME.inputs,
 # mem.tsv); the summary prints each step's outcome, wall and CPU time and peak memory.
-# Environment: GATE_TEST_JOBS, the suite's parallel processes (default 12); ARBACE_GATE_STORE, the
+# Environment: ARBACE_HEAVY_LOCK (the host's big-job lock: default the main checkout's .tmp/big.lock),
+# GATE_HEAVY_CMD (the command a heavy step runs under: default `flock $ARBACE_HEAVY_LOCK`; `env` when
+# the caller holds the lock already), ARBACE_GATE_EXES (the executables' root), GATE_TEST_JOBS, the suite's parallel processes (default 12); ARBACE_GATE_STORE, the
 # store of passes; GATE_FULL_PARALLEL=1: --full's chains concurrently, the java chain after
 # javac-tool (serial is the default since GT3, GTS13 (a): the chains at once overload a 62 GB host,
 # 20 GiB j2g runs, repr-go-native's reads, REAP9, 2026-10-26; GATE_FULL_SERIAL is accepted, a
@@ -234,57 +256,36 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/renamed-env.bash" # stops on a stale G2A_*, J2A_*, A2G_* or C2A_*
 cd "$root"
 unset ARBACE_HOST_EXE J2G_GO_EXE REPR_GO_EXE
-usage() { echo "usage: bin/gate [--full] [--rerun] | bin/gate [--full] --plan | bin/gate --why STEP" >&2; exit 2; }
-full= plan_only= why= rerun=
+usage() { echo "usage: bin/gate [--full] [--rerun] | bin/gate [--full] --plan | bin/gate --why STEP | bin/gate --audit [STEP...] | bin/gate --prune [--dry-run]" >&2; exit 2; }
+full= plan_only= why= rerun= audit= prune= dry=
+steps_arg=()
 while [ $# -gt 0 ]; do
   case $1 in
     --full) full=1 ;;
     --plan) plan_only=1 ;;
     --why) [ $# -ge 2 ] || usage; why=$2; full=1; shift ;;
     --rerun) rerun=1 ;;
-    *) usage ;;
+    --audit) audit=1; full=1 ;;
+    --prune) prune=1 ;;
+    --dry-run) dry=--dry-run ;;
+    -*) usage ;;
+    *) [ -n "$audit" ] || usage; steps_arg+=("$1") ;;
   esac
   shift
 done
 mode=essential; [ -n "$full" ] && mode=full
-# the store of passes (GTS6 (a)): the main checkout's .tmp/gate-pass/ by default, shared by its
-# worktrees (git's common directory is the main checkout's .git)
-if [ -z "${ARBACE_GATE_STORE:-}" ]; then
-  common=$(git rev-parse --path-format=absolute --git-common-dir 2>"$TMPDIR/gate-git.err") && [ -d "$common" ] \
-    && [ "$(basename "$common")" = .git ] && ARBACE_GATE_STORE=$(dirname "$common")/.tmp/gate-pass \
-    || ARBACE_GATE_STORE=$root/.tmp/gate-pass
-fi
-store=$ARBACE_GATE_STORE
-# the planner's view of the checkout: its files' digests, the hosts' identities (GTS2 (a))
-export GATE_CACHE=$root/.tmp/arbace-go-gate GATE_JAVAC_DIR=$root/.tmp/gate-javac
-export GATE_EXE=$GATE_CACHE/amd64/arbace GATE_TESTS=$GATE_CACHE/amd64/arbace-tests
-export GATE_JAVAC=$GATE_JAVAC_DIR/arbace-javac GATE_JOBS=${GATE_TEST_JOBS:-12}
+. "$root/bin/lib/gate-run.bash"
 . "$root/bin/lib/tools.bash"
-plan_inputs() {  # plan_inputs DIR: DIR/files.sha256 and DIR/hosts.edn
-  local d=$1 jdk rel
-  mkdir -p "$d"
-  find . \( -path ./.git -o -path ./.tmp -o -path ./target -o -path ./.claude \) -prune -o -type f -printf '%P\n' \
-    | LC_ALL=C sort | xargs -d '\n' sha256sum > "$d/files.sha256" || return 1
-  . "$root/bin/lib/javac-key.bash"
-  rel=none
-  jdk=$(command -v javac) && jdk=$(readlink -f "$jdk") && [ -f "${jdk%/bin/javac}/release" ] \
-    && rel=$(sha256sum < "${jdk%/bin/javac}/release" | cut -c1-64)
-  { printf '{:gate "%s"\n' "$(bin/arbace-go --gate-key)"
-    printf ' :javac "%s"\n' "$(arbace_javac_key "$root")"
-    printf ' :stage0 "%s"\n' "$(cat seed/arbace-seed-go.tar.xz.sha256 seed/goroot.sha256 | sha256sum | cut -c1-64)"
-    printf ' :frozen "%s"\n' "$(sha256sum < test/oracle/frozen-jar.sha256 | cut -c1-64)"
-    printf ' :jdk "%s"\n' "$rel"
-    printf ' :go "%s"}\n' "$(sha256sum < "${ARBACE_GOROOT:-/root/tamago-go}/VERSION" | cut -c1-64)"; } > "$d/hosts.edn"
-}
-run_plan() {  # run_plan DIR [--rerun]: the plan into DIR (plan.tsv, plan/), printed
-  local d=$1; shift
-  plan_inputs "$d" || { echo "gate: the plan's inputs failed" >&2; return 1; }
-  arbace_tool -p "$root/test" -m gate.plan plan "$root" "$d" "$store" "$mode" "$@"
-}
+gate_env || { echo "gate: the environment failed" >&2; exit 1; }
 
+if [ -n "$prune" ]; then gate_prune $dry; exit; fi
+if [ -n "$audit" ]; then
+  bin/seed --build --no-aot > "$root/.tmp/gate-audit-stage0.log" 2>&1 || { tail -5 "$root/.tmp/gate-audit-stage0.log"; exit 1; }
+  gate_audit "${steps_arg[@]}"; exit
+fi
 if [ -n "$plan_only$why" ]; then
   d=$root/.tmp/gate-plan
-  rm -rf "$d"
+  rm -rf "${d:?}"
   if [ -n "$why" ]; then
     run_plan "$d" > "$d.txt" 2>&1 || { cat "$d.txt"; exit 1; }
     arbace_tool -p "$root/test" -m gate.plan why "$root" "$d" "$store" "$why"
@@ -296,11 +297,9 @@ if [ -n "$plan_only$why" ]; then
 fi
 
 logs=$root/.tmp/gate
-rm -rf "$logs"
+rm -rf "${logs:?}"
 mkdir -p "$logs"
 start=$(date +%s)
-secs() { local s=$(( $(date +%s) - $1 )); printf '%dm%02ds' $((s / 60)) $((s % 60)); }
-mmss() { printf '%dm%02ds' $(($1 / 60)) $(($1 % 60)); }
 status=0
 commit=$(git rev-parse HEAD 2>"$TMPDIR/gate-git.err" || echo unknown)
 dirty=false; [ -z "$(git status --porcelain --untracked-files=no 2>"$TMPDIR/gate-git.err")" ] || dirty=true
@@ -310,115 +309,9 @@ echo "== gate$( [ -n "$full" ] && echo ' --full'): $(git log -1 --format='%h %s'
 . "$root/bin/lib/gocache.bash"
 gocache_trim
 
-# GT1: the memory sampler, every 5 s: the host's MemAvailable, the gate's processes' RSS and each
-# running step's (its process tree's, from its NAME.pid), in KiB, to mem.tsv (TIME WHAT KIB)
-sampler() {
-  local t steps f
-  while :; do
-    t=$(date +%s) steps=
-    for f in "$logs"/*.pid; do [ -f "$f" ] && steps="$steps $(basename "$f" .pid):$(cat "$f" 2>"$logs/sampler.err")"; done
-    awk -v t="$t" -v gate="$$" -v steps="$steps" '
-      FILENAME == "/proc/meminfo" { if ($1 == "MemAvailable:") print t "\tMemAvailable\t" $2; next }
-      FNR == 1 { s = $0; i = index(s, ")"); while ((j = index(substr(s, i + 1), ")")) > 0) i += j
-                 pid = $1; n = split(substr(s, i + 2), f, " "); ppid[pid] = f[2]; rss[pid] = f[22] * 4
-                 kids[f[2]] = kids[f[2]] " " pid }
-      function tree(p,   k, a, n, sum) { sum = rss[p]; n = split(kids[p], a, " "); for (k = 1; k <= n; k++) sum += tree(a[k]); return sum }
-      END { print t "\tgate\t" tree(gate)
-            n = split(steps, st, " "); for (k = 1; k <= n; k++) { split(st[k], q, ":"); if (q[2] in rss) print t "\t" q[1] "\t" tree(q[2]) } }
-    ' /proc/meminfo /proc/[0-9]*/stat >> "$logs/mem.tsv" 2>>"$logs/sampler.err"
-    sleep 5
-  done
-}
 sampler &
 sampler_pid=$!
 trap 'kill "$sampler_pid" 2>"$logs/sampler.err"' EXIT
-
-step() {  # step NAME COMMAND...: one step, logged, timed (GT1); its status, seconds and memory recorded
-  local name=$1 t0 pid st; shift; t0=$(date +%s)
-  /usr/bin/time -v -o "$logs/$name.time" "$@" > "$logs/$name.log" 2>&1 &
-  pid=$!
-  echo "$pid" > "$logs/$name.pid"
-  wait "$pid"; st=$?
-  rm -f "$logs/$name.pid"
-  echo $st > "$logs/$name.status"; echo $(( $(date +%s) - t0 )) > "$logs/$name.secs"
-  local cpu rss tree
-  cpu=$(awk -F': ' '/User time|System time/ {s += $2} END {printf "%.1f", s}' "$logs/$name.time" 2>"$logs/$name.time.err")
-  rss=$(awk -F': ' '/Maximum resident set size/ {print $2}' "$logs/$name.time" 2>"$logs/$name.time.err")
-  tree=$(awk -F'\t' -v n="$name" '$2 == n && $3 > m {m = $3} END {print m + 0}' "$logs/mem.tsv" 2>"$logs/$name.time.err")
-  printf '{:step "%s" :wall-s %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s}\n' \
-    "$name" "$(cat "$logs/$name.secs")" "${cpu:-0}" "${rss:-0}" "${tree:-0}" > "$logs/$name.mem"
-  return $st
-}
-mem_of() {  # mem_of NAME FIELD: a number of NAME.mem
-  sed -n "s/.*:$2 \([0-9.]*\).*/\1/p" "$logs/$1.mem" 2>"$logs/mem-of.err"
-}
-gib() { awk -v k="${1:-0}" 'BEGIN {printf "%.1f GiB", k / 1048576}'; }
-record_pass() {  # record_pass NAME: its pass in the store at its key (GTS7 (a))
-  local name=$1 k=${key[$1]} d=$store/$1 tmp
-  mkdir -p "$d" || return 1
-  tmp=$d/.$k.$$
-  cp "$logs/$name.log" "$d/$k.log" && cp "$logs/plan/$name.inputs" "$d/$k.inputs" || return 1
-  printf '{:step "%s" :key "%s" :commit "%s" :dirty %s :worktree "%s" :date "%s"\n :secs %s :cpu-s %s :maxrss-kib %s :tree-peak-kib %s\n :log-sha256 "%s"}\n' \
-    "$name" "$k" "$commit" "$dirty" "$root" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(cat "$logs/$name.secs")" \
-    "$(mem_of "$name" cpu-s)" "$(mem_of "$name" maxrss-kib)" "$(mem_of "$name" tree-peak-kib)" \
-    "$(sha256sum < "$logs/$name.log" | cut -c1-64)" > "$tmp" && mv "$tmp" "$d/$k.edn"
-}
-
-# the plan's steps, from plan.tsv
-order=()
-declare -A dec key phase chain needs after sum_n sum_re why cmd
-load_plan() {
-  local n d k p c ne a sn sre w cm
-  while IFS=$'\t' read -r n d k p c ne a sn sre w cm; do
-    order+=("$n"); dec[$n]=$d key[$n]=$k phase[$n]=$p chain[$n]=$c needs[$n]=${ne//,/ } after[$n]=$a
-    sum_n[$n]=$sn sum_re[$n]=$sre why[$n]=$w cmd[$n]=$cm
-  done < "$logs/plan.tsv"
-}
-ok_status() { [ -f "$logs/$1.status" ] && case $(cat "$logs/$1.status") in 0|skip) return 0 ;; esac; return 1; }
-run_one() {  # run_one NAME: a step of the plan, as decided
-  local n=$1 x st
-  case ${dec[$n]} in
-    skip|none) echo "${dec[$n]}" > "$logs/$n.status"; touch "$logs/$n.done"; return 0 ;;
-  esac
-  for x in ${needs[$n]}; do
-    [ "$x" = - ] && continue
-    ok_status "$x" || { echo "notrun $x" > "$logs/$n.status"; touch "$logs/$n.done"; return 1; }
-  done
-  step "$n" bash -c "${cmd[$n]}"; st=$?
-  if [ $st = 0 ] && [ "${dec[$n]}" = run ]; then
-    record_pass "$n" || echo "gate: warning: the pass of $n was not recorded in $store" >&2
-  fi
-  touch "$logs/$n.done"
-  return $st
-}
-report() {  # report NAME: a step's outcome, times, memory and summary lines
-  local n=$1 s w st
-  if [ ! -f "$logs/$n.status" ]; then
-    echo "   FAILED  $n (not run: an earlier step failed)"; status=1; return
-  fi
-  st=$(cat "$logs/$n.status")
-  case $st in
-    skip) echo "   skipped  $n (${why[$n]})"; return ;;
-    none) echo "   -  $n (not needed: no step that runs needs it)"; return ;;
-    notrun*) echo "   FAILED  $n (not run: ${st#notrun } did not pass)"; status=1; return ;;
-  esac
-  s=$(cat "$logs/$n.secs"); w=$(mmss "$s")
-  local c; c=$(mem_of "$n" cpu-s); c=${c%.*}
-  w="$w, cpu $(mmss "${c:-0}"), peak $(gib "$(mem_of "$n" maxrss-kib)") (tree $(gib "$(mem_of "$n" tree-peak-kib)"))"
-  if [ "$st" = 0 ]; then
-    echo "   ok  $n ($w)"
-  else
-    echo "   FAILED  $n ($w; log $logs/$n.log)"; status=1
-  fi
-  [ "${sum_re[$n]:--}" = - ] || grep -E "${sum_re[$n]}" "$logs/$n.log" | tail -"${sum_n[$n]}" | sed 's/^/     /'
-}
-pre_step() {  # pre_step NAME REGEX LINES CMD...: before the plan, one after the other
-  local name=$1 re=$2 nl=$3; shift 3
-  step "$name" "$@"; sum_re[$name]=$re sum_n[$name]=$nl; report "$name"
-  if [ "$(cat "$logs/$name.status")" != 0 ]; then
-    tail -20 "$logs/$name.log"; echo "== gate FAILED ($(secs "$start"))"; exit 1
-  fi
-}
 
 # before the plan, one after the other: each needs the one before (steps.edn's :pre)
 pre_step makefile - 0 make -s check-makefile
@@ -442,34 +335,12 @@ for n in "${order[@]}"; do
   fi
 done
 
-run_chain() {  # run_chain PHASE CHAIN: its steps one after the other (after its :start-after)
-  local n first=1
-  for n in "${order[@]}"; do
-    [ "${phase[$n]}" = "$1" ] && [ "${chain[$n]}" = "$2" ] || continue
-    if [ -n "$first" ] && [ "${after[$n]}" != - ]; then
-      while [ ! -f "$logs/${after[$n]}.done" ]; do sleep 5; done
-    fi
-    first=
-    run_one "$n"
-  done
-}
-chains_of() {  # chains_of PHASE: its chains, in the order of their first step
-  local n seen=" "
-  for n in "${order[@]}"; do
-    [ "${phase[$n]}" = "$1" ] || continue
-    case $seen in *" ${chain[$n]} "*) ;; *) seen="$seen${chain[$n]} "; echo "${chain[$n]}" ;; esac
-  done
-}
-names_of() { local n; for n in "${order[@]}"; do [ "${phase[$n]}" = "$1" ] && echo "$n"; done; }
-
-# the essential checks, concurrently on the cached executables; the whole-program j2g runs
-# (diffcheck's, java-compiled's, suite-aot-essential's, programs') one at a time, each taking up to
-# GOMEMLIMIT (REAP8; bin/j2g's J2G_LOCK)
-export J2G_LOCK=$root/.tmp/gate-j2g.lock
+# the essential checks, concurrently on the cached executables. The heavy ones (the whole-program
+# j2g runs, the suite's 12 processes) take the heavy lock each, one at a time (GT6: it replaces
+# bin/j2g's J2G_LOCK here), the light ones run beside them
 pids=()
 for c in $(chains_of essential); do run_chain essential "$c" & pids+=($!); done
 wait "${pids[@]}"
-unset J2G_LOCK
 for n in $(names_of essential); do report "$n"; done
 
 if [ -n "$full" ]; then

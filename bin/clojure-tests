@@ -188,6 +188,7 @@ suite=$src
 [ -n "$rename" ] && suite=$work/suite
 . "$root/bin/lib/tools.bash"
 . "$root/bin/lib/host.bash"
+. "$root/bin/lib/limit.bash" # limited: CPU-time limits with a wall cap (GT6)
 # repr_clojure ARGS... (bin/repr-clojure read ARGS...), on the tools' host
 repr_clojure() { arbace_tool "${repr_clojure_sources[@]}" -m arbace.repr.clojure read "$@"; }
 # Translate a tree in place for the Clojure under test: the suite's and libraries' files keep
@@ -259,7 +260,7 @@ go_path() { local cp; cp=$(libcp); echo "$cp$suite/test:$root/test/suite-go"; }
 go_run() {
   local t=$1; shift
   # shellcheck disable=SC2086
-  (cd "$suite" && ARBACE_PATH=$(go_path) TMPDIR=$work/tmp GOGC=${GOGC:-400} timeout "$t" $go_exe "$@")
+  (cd "$suite" && ARBACE_PATH=$(go_path) TMPDIR=$work/tmp GOGC=${GOGC:-400} limited_cpu $((t * 2)) $((t * 4)) $go_exe "$@")
 }
 # host_run ARG...: the tools' host (bin/lib/host.bash), in the suite, on the suite's ARBACE_PATH:
 # the listing and the report with the Go build, whatever the build under test
@@ -359,10 +360,15 @@ if [ -n "$java_fixtures$fixtures_mode" ]; then
   rm -rf "$java_fixtures"
   # javac's class path: the Clojure under test (the fixtures name arbace.lang.IFn and the
   # Java API): the runtime's declarations by default
-  "$root/bin/repr-java" read \
+  # the read (JFS120 (b), doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN9f"): without javac by
+  # default, a file that falls back read by javac (counted in the log's "no javac:" line)
+  ro=$(repr_java_vendor_read_opts) || exit 1
+  "$root/bin/repr-java" read $ro \
     --javac -cp --javac "$clojure_src" "$java_fixtures" "$suite/test/java" > "$work/java-fixtures.log" 2>&1 \
     || { cat "$work/java-fixtures.log"; exit 1; }
   grep -q ' 0 failed, 0 javac errors' "$work/java-fixtures.log" || { cat "$work/java-fixtures.log"; exit 1; }
+  repr_java_nojavac_take "$java_fixtures" "$work/java-fixtures.log.d"
+  grep '^no javac: ' "$work/java-fixtures.log"
   tail -1 "$work/java-fixtures.log"
   # the first line's source: clojure/clojure's path of the file (as repr/java's --origins does for
   # bin/jrt-convert), not the renamed scratch copy's under $suite
@@ -377,6 +383,7 @@ if [ -n "$java_fixtures$fixtures_mode" ]; then
     echo "{:clojure {:repo \"https://github.com/clojure/clojure\" :commit \"$rev\" :path \"test/java\"}"
     echo " :jdk \"$(repr_java_platform)\""
     echo " :converter {:repr-java \"$(repr_java_reader_hash)\""
+    echo "             :read :$(repr_java_vendor_read)"
     echo "             :repr-clojure \"$(cd "$root" && find arbace/repr/clojure.ae arbace/repr/clojure -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-64)\""
     echo "             :host \"$(repr_java_host)\"}"
     echo " :files {:sources $(find "$suite/test/java" -name '*.java' | wc -l) :forms $(find "$java_fixtures" -name '*.ae' | wc -l)}}"
@@ -442,7 +449,7 @@ aot_build() {
   if [ -z "$exes" ]; then
     (cd "$root" && bin/arbace-go --gate-build) > "$ab/gate-build.log" 2>&1 \
       || { tail -20 "$ab/gate-build.log"; echo "clojure-tests --aot: bin/arbace-go --gate-build failed" >&2; return 1; }
-    exes=$root/.tmp/arbace-go-gate/amd64
+    exes=${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate}/amd64
     # the build's compiled namespaces are the checkout's (bin/lib/program.bash's test, the base's, RPS161 (b))
     program_aot_current "$exes/aot" \
       || { echo "clojure-tests --aot: $exes/aot is not the checkout's compiled namespaces (key $(cat "$exes/aot.key" 2>/dev/null))" >&2; return 1; }
@@ -582,6 +589,15 @@ fi
 step "[$run] run $(wc -l < "$work/selected.txt") test namespaces, $jobs at a time (logs in $work/out)$([ -n "$go_exe" ] && echo ", on $go_exe")"
 export CLOJURE_SRC=$clojure_src CLOJURE_TESTS_RUN=$run CLOJURE_TESTS_TIMEOUT=$timeout_s
 xargs -P "$jobs" -n 1 "$0" --run-one < "$work/selected.txt" | grep -v ' exit 0$' || true
+# a namespace that timed out among the others (its CPU limit or its wall cap, GT6: bin/lib/limit.bash)
+# runs again alone, the second run standing (GTS16 (a): the quiet retry)
+if [ -n "$go_exe" ]; then
+  cat "$work"/out/*.time 2> "$root/.tmp/clojure-tests.err" | awk '$2 == "exit" && ($3 == 124 || $3 == 137 || $3 == 152) { print $1 }' > "$work/timeouts.again"
+  if [ -s "$work/timeouts.again" ]; then
+    step "[$run] $(wc -l < "$work/timeouts.again") timed out, run again one at a time: $(tr '\n' ' ' < "$work/timeouts.again")"
+    xargs -P 1 -n 1 "$0" --run-one < "$work/timeouts.again" | grep -v ' exit 0$' || true
+  fi
+fi
 
 # 6. gen
 if [ $generative = 1 ] && [ ${#only[@]} -eq 0 ]; then

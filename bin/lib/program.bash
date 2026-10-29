@@ -109,7 +109,7 @@ host_arch() { case $(uname -m) in aarch64) echo arm64 ;; *) echo amd64 ;; esac; 
 program_base() {
   local k rk c e
   k=$(aot_key); rk=$(arbace_runtime_key "$root")
-  for c in ${ARBACE_PROGRAM_BASE:-} "$dir" "$root/.tmp/arbace-go-gate/amd64" "$root/target/seed"; do
+  for c in ${ARBACE_PROGRAM_BASE:-} "$dir" "${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate}/amd64" "$root/target/seed"; do
     e=$c/$(host_arch)/arbace; [ -x "$e" ] || e=$c/arbace
     [ -x "$e" ] && program_aot_current "$c/aot" || continue
     mkdir -p "$programs"

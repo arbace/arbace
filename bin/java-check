@@ -15,6 +15,12 @@
 #                                 (REPR_JAVA_EXE, bin/repr-java), every file converted (cached in
 #                                 .tmp/java-check/forms by the sources, javac's options, the reader's
 #                                 sources and the tool's key)
+#                        nread    the read without javac (JFS123 (b), doc/classes/JAVA-FRONTEND-SURVEY.md,
+#                                 "As built: JN9f"): bin/repr-java read --no-javac of the same sources
+#                                 (cached in .tmp/java-check/forms-nojavac by the read's key), its forms
+#                                 against the read level's byte for byte: pass, fallback (equal, but
+#                                 files met what only javac answers and were read by javac: the reasons
+#                                 counted), differ, fail; unread when javac's read failed
 #                        interp   each main action of the test interpreted (arbace.classes.interp) on
 #                                 the executable (JAVA_CHECK_EXE, else the gate's
 #                                 .tmp/arbace-go-gate/amd64/arbace, else target/arbace-go/amd64/arbace):
@@ -59,7 +65,7 @@
 #                                 output equals F line by line, trailing white space dropped (the
 #                                 JDK javac's does: a test whose JDK output differs is not checked);
 #                                 fail (a status), differ (an output: its first differing line)
-#                      The run tests are the levels read, interp, classes, compiled and print's, the
+#                      The run tests are the levels read, nread, interp, classes, compiled and print's, the
 #                      golden-diagnostics tests diagnostics'. Results in .tmp/java-check/results.tsv,
 #                      against test/java/check-LEVEL.edn (as recorded, new, now passing; a test
 #                      passing there and not now fails the check), every test not passing in a class
@@ -119,6 +125,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/renamed-env.bash"
 . "$root/bin/lib/tools.bash"
 . "$root/bin/lib/program.bash" # the compiled level's j2g and build-go calls, as --build-program's (RPS97 (b))
+. "$root/bin/lib/limit.bash" # limited: CPU-time limits with a wall cap (GT6)
 cd "$root"
 
 jdk=${JDK:-/root/jdk26u}
@@ -392,7 +399,7 @@ check_diag() {
 
 run_exe() {
   local e
-  for e in "${JAVA_CHECK_EXE:-}" "$root/.tmp/arbace-go-gate/amd64/arbace" "$root/target/arbace-go/amd64/arbace"; do
+  for e in "${JAVA_CHECK_EXE:-}" "${ARBACE_GATE_CACHE:-$root/.tmp/arbace-go-gate}/amd64/arbace" "$root/target/arbace-go/amd64/arbace"; do
     [ -n "$e" ] && [ -x "$e" ] && { echo "$e"; return 0; }
   done
   echo "java-check: no executable (JAVA_CHECK_EXE, bin/arbace-go --gate-build or --build)" >&2; return 1
@@ -422,7 +429,7 @@ read_opts() {
 # (mask_dirs, run_actions' w and tmp: JCS70 (a)), as the reference's
 judge() {
   local st=$1 out=$2 err=$3 sha len msha want
-  if [ "$st" = 124 ] || [ "$st" = 137 ]; then printf 'timeout\t%s s\n' "$timeout"; return 0; fi
+  if [ "$st" = 124 ] || [ "$st" = 137 ] || [ "$st" = 152 ]; then printf 'timeout\t%s s\n' "$timeout"; return 0; fi
   # the reason: stderr's first line, and its root cause when it has one (the last "Caused by:"
   # line: an ExceptionInInitializerError's, a wrapping RuntimeException's), so that the classes
   # take the cause (JC6, the catch-alls named)
@@ -452,7 +459,7 @@ run_actions() {
     # moved the tests near the limit between runs)
     for lim in "$timeout" "$((timeout * 2))"; do
       rm -rf "$w" "$tmp"; mkdir -p "$w" "$tmp"
-      st=0; (cd "$w" && env TMPDIR="$tmp" ${fdir:+ARBACE_PATH=$fdir} timeout -k 5 "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
+      st=0; (cd "$w" && export TMPDIR="$tmp" && { [ -z "$fdir" ] || export ARBACE_PATH=$fdir; } && limited "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
                -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" -Djava.io.tmpdir="$tmp" -- "${x[@]:9}" \
                < "$work/empty" > "$p/out$i" 2> "$p/err$i") || st=$?
       if [ "$st" = 126 ] && grep -q '^java-check: load-failed: ' "$p/err$i"; then
@@ -688,7 +695,7 @@ check_one() {
     done < "$p/plan.tsv"
   fi
   case ",$levels," in
-    *,read,*|*,interp,*|*,compiled,*|*,print,*)
+    *,read,*|*,nread,*|*,interp,*|*,compiled,*|*,print,*)
       if [ -z "$from_committed" ]; then
         ro=()
         while IFS= read -r k; do [ -n "$k" ] && ro+=("$k"); done <<< "$(read_opts ${opts[@]+"${opts[@]}"})"
@@ -713,6 +720,7 @@ check_one() {
         case ",$levels," in *,read,*) printf '%s\tread\t%s\n' "$id" "$(cat "$forms.result")" | sed -e "s|$p|RUN|g" -e "s|$root|.|g" ;; esac
       fi ;;
   esac
+  case ",$levels," in *,nread,*) [ -z "$from_committed" ] && nread_one "$id" "$p" "$key" "$forms" ;; esac
   case ",$levels," in
     *,interp,*)
       if [ -z "$from_committed" ] && ! grep -q '^pass' "$forms.result"; then
@@ -738,6 +746,43 @@ check_one() {
   esac
 }
 
+# nread_one ID P KEY FORMS: the level nread (JFS123 (b), doc/classes/JAVA-FRONTEND-SURVEY.md, "As built:
+# JN9f"): the test's sources read without javac (bin/repr-java read --no-javac: the native parser's trees
+# and the native provider's answers alone, a file that meets what only javac answers read again by javac,
+# the fallback), cached in WORK/forms-nojavac by the read level's key, its forms against the read level's
+# (javac's, FORMS) byte for byte. Prints ID nread RESULT REASON: pass (every file read natively, the forms
+# javac's), fallback (the forms javac's, but N files fell back: the reasons, \"no javac:\"'s map), differ
+# (a forms file differs: its path), fail (the read failed), unread (javac's read failed)
+nread_one() {
+  local id=$1 p=$2 key=$3 forms=$4 nf st reason d
+  if ! grep -q '^pass' "$forms.result"; then printf '%s\tnread\tunread\tthe read failed\n' "$id"; return 0; fi
+  mkdir -p "$work/forms-nojavac"
+  nf=$work/forms-nojavac/$key
+  exec 6> "$nf.lock"; flock 6
+  if [ ! -f "$nf.result" ]; then
+    rm -rf "$nf" "$nf.tmp"
+    st=0
+    (cd "$root" && bin/repr-java read --no-javac ${ro[@]+"${ro[@]}"} "$nf.tmp" "$p/src") > "$nf.log" 2>&1 || st=$?
+    if [ "$st" != 0 ] || ! grep -q ' converted, 0 failed, 0 javac errors' "$nf.log"; then
+      reason=$( { grep -m1 '^FAILED ' "$nf.log" | sed 's|^FAILED [^ ]* ||'; grep -m1 -E 'error|Exception|failed' "$nf.log"; } | head -1 | tr '\t' ' ' | cut -c1-300)
+      printf 'fail\t%s\n' "${reason:-status $st}" > "$nf.result"
+    # (each file's first line names the source it was read from: the test whose read filled the cache)
+    elif ! diff -r -x 'repr-java-*.edn' -I '^;; Converted from ' "$forms" "$nf.tmp" > "$nf.diff" 2>&1; then
+      d=$( { grep -m1 '^diff ' "$nf.diff" | awk '{print $NF}'; grep -m1 '^Only in ' "$nf.diff"; } | head -1 | sed "s|$nf.tmp/||; s|$forms/||" | cut -c1-200)
+      printf 'differ\tthe forms differ from the read level'"'"'s: %s\n' "$d" > "$nf.result"
+    elif grep -q '^no javac: .* [1-9][0-9]* fallbacks to javac' "$nf.log"; then
+      # the reasons: the "no javac:" line's map, {"reason" n, ...}, as "reason n; reason n"
+      reason=$(grep -m1 '^no javac: ' "$nf.log" | sed -e 's/^[^{]*{//' -e 's/}$//' -e 's/" \([0-9][0-9]*\)\(, \)\{0,1\}/ \1; /g' -e 's/"//g' -e 's/; $//' | tr '\t' ' ' | cut -c1-300)
+      printf 'fallback\t%s\n' "$reason" > "$nf.result"
+    else
+      printf 'pass\t\n' > "$nf.result"
+    fi
+    rm -rf "$nf.tmp"
+  fi
+  flock -u 6; exec 6>&-
+  printf '%s\tnread\t%s\n' "$id" "$(cat "$nf.result")" | sed -e "s|$p|RUN|g" -e "s|$root|.|g"
+}
+
 check() {
   local only="" corpus="" record="" essential=""
   jobs=8 t0=$SECONDS shard_size=${JAVA_CHECK_SHARD_SIZE:-500} shard_only=""
@@ -757,7 +802,8 @@ check() {
       *) echo "java-check: unknown option $1 (bin/java-check --help)" >&2; return 2 ;;
     esac
   done
-  rexe=$(run_exe) || return 1
+  # the executable interprets and hosts j2g: the levels read, nread, classes, print and diagnostics need none
+  case ",$levels," in *,interp,*|*,compiled,*) rexe=$(run_exe) || return 1 ;; *) rexe=none ;; esac
   mkdir -p "$work/forms"; : > "$work/empty"
   rm -rf "$work/run"
   local pargs=()
@@ -768,7 +814,7 @@ check() {
     pargs+=(--list "$root/test/java/essential.txt")
   else
     check_pin
-    case ",$levels," in *,read,*|*,interp,*|*,classes,*|*,compiled,*|*,diagnostics,*|*,print,*)
+    case ",$levels," in *,read,*|*,nread,*|*,interp,*|*,classes,*|*,compiled,*|*,diagnostics,*|*,print,*)
       . "$root/bin/lib/repr-java/host.bash"
       reader_key="$(repr_java_reader_hash) $(repr_java_host)" || return 1 ;;
     esac
@@ -776,7 +822,7 @@ check() {
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe)" >&2
-  export -f check_one read_opts first_line root_cause classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
+  export -f limited limited_cpu check_one nread_one read_opts first_line root_cause classes_sha judge run_actions run_dirs mask_hashes mask_dirs test_dir check_diag diag_actions diag_root diag_norm diag_first_diff
   export root work jdktest levels timeout from_committed load rexe reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} | LC_ALL=C sort > "$work/results.tsv"
   case ",$levels," in *,interp,*) export -f again interp_one; export jobs; again interp "$work/results.tsv" interp_one ;; esac
@@ -898,16 +944,24 @@ print_level() {
 forms_cmd() {
   local mode=${1:?usage: bin/java-check --forms verify|update} out=$root/test/java/forms id f n=0
   check_pin
+  mkdir -p "$work"
   . "$root/bin/lib/repr-java/host.bash"
   reader_key="$(repr_java_reader_hash) $(repr_java_host)" || return 1
-  check --levels read --only "^($(grep -v '^#' "$root/test/java/essential.txt" | awk '{print $1}' | paste -sd'|')) " > "$work/forms-read.txt" 2>&1 || true
+  local rst=0
+  check --levels read --only "^($(grep -v '^#' "$root/test/java/essential.txt" | awk '{print $1}' | paste -sd'|')) " > "$work/forms-read.txt" 2>&1 || rst=$?
   tail -3 "$work/forms-read.txt"
   rm -rf "$work/forms-new"; mkdir -p "$work/forms-new"
   grep -v '^#' "$root/test/java/essential.txt" | awk 'NF{print $1}' > "$work/essential.list"
   local key
   while read -r id; do
-    key=$(cat "$work/run/$id/forms.key" 2>&1)
-    [ -d "$work/forms/$key" ] || { echo "java-check --forms: $id was not read ($work/forms/$key.log)" >&2; return 1; }
+    key=
+    [ ! -f "$work/run/$id/forms.key" ] || key=$(cat "$work/run/$id/forms.key")
+    if [ -z "$key" ] || [ ! -d "$work/forms/$key" ]; then
+      # the read did not reach the test: say why (javac's tool missing or stale, the read's own failure)
+      echo "java-check --forms: $id was not read (the read level exited $rst; ${key:+$work/forms/$key.log, }$work/forms-read.txt):" >&2
+      grep -E 'java-check|repr_java_host|rebuild|error|no javac tool' "$work/forms-read.txt" | head -5 >&2
+      return 1
+    fi
     cp -r "$work/forms/$key" "$work/forms-new/$id"
     n=$((n + 1))
   done < "$work/essential.list"
@@ -1013,7 +1067,7 @@ essential_compiled() {
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f compiled_one run_actions judge first_line root_cause mask_hashes mask_dirs run_dirs test_dir
+  export -f limited limited_cpu compiled_one run_actions judge first_line root_cause mask_hashes mask_dirs run_dirs test_dir
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"
   # a timeout runs again once, alone, with twice the limit (JCS47 (a)): beside the gate's other

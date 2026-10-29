@@ -1532,3 +1532,12 @@ H. Hinnant, "chrono-Compatible Low-Level Date Algorithms" (civil-from-days, days
 
 This language's cells of the REAP matrix at the tag `arbace-reaps-3-crops-v1`, with every class by name, are
 in doc/FULL-SUPPORT-SURVEY.md, "REAP v1's divergences".
+
+## REAP v2 (DRAFT, 2026-10-28)
+
+**DRAFT**, refreshed at the tag `arbace-reaps-3-crops-v2`. This language's cells of the REAP matrix on main `bf84a975`,
+with every class by name, are in doc/FULL-SUPPORT-SURVEY.md, "REAP v2's divergences (DRAFT ...)". Since v1: eval
+21,049 / 80 / 5 to 21,052 / 81 / 1 and AOT 804 / 28 / 6 to 809 / 29 / 0, read and print unchanged. The classes
+`trace-lines`, `fiprims` (eval) and `fiprims`, `compiled-trace-lines`, `fn-fields` (AOT) are gone (RPS41 (b), RPS42 (b),
+RPS53 (b), RPS54 (b); doc/FULL-SUPPORT-SURVEY.md, "As built: Clojure's deferred cases"), and `xml-stream` is by design
+in both (RPS134 (b)); `seq-and-transducer` (speed, eval) is the one deferred case.

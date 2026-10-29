@@ -248,7 +248,10 @@
             ;; a constructor's outer instance parameter (a capture of it by a lambda or a
             ;; prologue's class, analyze/outer-this-node): the receiver's this$0, which the
             ;; interpreter sets before the constructor runs
-            (and (:outer-param b) k (>= (:self ctx) 0) (get (:field-index (.-info k)) "this$0"))
+            (and (:outer-param b) k (>= (:self ctx) 0) (get (:field-index (.-info k)) "this$0")
+                 ;; (of this class's constructor: another's, captured by an enclosing local or
+                 ;; anonymous class, is read through the enclosing instances below, JCS113)
+                 (let [fc (some-> (:frame b) :class)] (or (nil? fc) (= fc (.-iname k)))))
             (arbace.lang.Compiler$CF$SelfField. (char (tc ty)) (int (:self ctx)) (int (get (:field-index (.-info k)) "this$0")))
             :else
             ;; a member class of a local class (or of its subclass) reads the local class's
@@ -815,6 +818,7 @@
   (let [pt (arbace.lang.Compiler$CF$Pat.)
         cd (:class p)]
     (set! (.-test pt) (boolean (:test p)))
+    (set! (.-checked pt) (boolean (:cast p)))
     (when (t/class-desc? cd)
       (set! (.-c pt) (desc->class cd))
       (set! (.-k pt) (klass (t/desc->internal cd))))
@@ -1311,9 +1315,22 @@
   (vtable! k)
   (.put (.-methods k) (.key mt) mt)
   (.put (.-vtable k) (.key mt) mt)
-  ;; the SAM's bridges (another erased descriptor of the method: arbace.classes.analyze/find-sam)
+  ;; the SAM's bridges (another erased descriptor of the method: arbace.classes.analyze/find-sam),
+  ;; each a method of its own descriptor running the SAM's body, published with it, so that
+  ;; reflection lists them as LambdaMetafactory's FLAG_BRIDGES methods (JCS63 (a), JCS116 (a))
   (doseq [d bridges]
-    (.put (.-vtable k) (str (.-name mt) d) mt))
+    (let [b (arbace.lang.Compiler$CF$Meth. k (.-name mt) d (int 1))
+          [ps r] (t/parse-method-desc d)]
+      (set! (.-self b) (.-self mt))
+      (set! (.-pslots b) (.-pslots mt))
+      (set! (.-ptypes b) (char-array (map tc ps)))
+      (set! (.-ret b) (char (tc r)))
+      (set! (.-cslots b) (.-cslots mt))
+      (set! (.-ctypes b) (.-ctypes mt))
+      (set! (.-builder b) (fn [b] (.ensure mt) (set! (.-body b) (.-body mt))
+                            (set! (.-nr b) (.-nr mt)) (set! (.-np b) (.-np mt))))
+      (.put (.-methods k) (.key b) b)
+      (.put (.-vtable k) (.key b) b)))
   (set! (.-cls k) (.define (host) k))
   (publish! k)
   k)
@@ -1449,6 +1466,22 @@
         (.clearMembers (host) k)
         (publish! k)))))
 
+(defn- dispatch-only
+  "A copy of method m (an interface's default) flagged dispatch only (bit 30), running m's body."
+  ^arbace.lang.Compiler$CF$Meth [^arbace.lang.Compiler$CF$Meth m]
+  (let [d (arbace.lang.Compiler$CF$Meth. (.-k m) (.-name m) (.-desc m) (int (bit-or (.-flags m) 0x40000000)))]
+    (set! (.-params d) (.-params m))
+    (set! (.-retClass d) (.-retClass m))
+    (set! (.-self d) (.-self m))
+    (set! (.-ptypes d) (.-ptypes m))
+    (set! (.-pslots d) (.-pslots m))
+    (set! (.-ret d) (.-ret m))
+    (set! (.-builder d) (fn [d] (.ensure m)
+                          (set! (.-body d) (.-body m)) (set! (.-nr d) (.-nr m)) (set! (.-np d) (.-np m))
+                          (set! (.-self d) (.-self m)) (set! (.-pslots d) (.-pslots m))
+                          (set! (.-cslots d) (.-cslots m)) (set! (.-ctypes d) (.-ctypes m))))
+    d))
+
 (defn- publish-members!
   [^arbace.lang.Compiler$CF$Klass k]
   (let [h (host)
@@ -1457,7 +1490,13 @@
             :when (.add seen key)
             :when (not= key "doInvoke")]
       (meth-classes m)
-      (.method h k m))
+      (if (and (:lambda (.-info k)) (not (identical? (.-k m) k)))
+        ;; a lambda's class inherits its interfaces' default methods (javac's bridges in an
+        ;; interface among them) for dispatch only: getDeclaredMethods lists its method and its
+        ;; bridges, as LambdaMetafactory's class (bit 30, not the JVM's: the host's slot without
+        ;; a member table entry, arbace.j2g.dyncf; JCS116 (a), "As built: JC4c")
+        (.method h k (dispatch-only m))
+        (.method h k m)))
     (doseq [[_ ^arbace.lang.Compiler$CF$Meth m] (.-ctors k)]
       (meth-classes m)
       (.ctor h k m))

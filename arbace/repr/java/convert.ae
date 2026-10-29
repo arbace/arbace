@@ -403,6 +403,12 @@
   (note! :conv/cast)
   (list (h env 'cast) (erased-form env t) form))
 
+(defn- literal-branch?
+  "Is `form` a conditional (if) one of whose branches is a number, or such a conditional?"
+  [form]
+  (and (seq? form) (symbol? (first form)) (= "if" (name (first form))) (= 4 (count form))
+       (boolean (some #(or (number? %) (literal-branch? %)) (drop 2 form)))))
+
 (defn coerce
   "Convert result `x` to the erased target type `target` as javac's TransTypes and Lower do
   in assignment contexts, writing out what Arbace does not do implicitly (§5.5, §7.4).
@@ -428,6 +434,17 @@
          (prim? t)
          (cond
            (same? t target) form
+           ;; a long constant widened to float or double (f3 += -2061721519L; double d =
+           ;; 3858573493713776640L): written widened, as an int constant is, so that the printed
+           ;; Java's literal (an int's when it is in int's range) reads back to the same forms
+           ;; (RPS151 (a), doc/FULL-SUPPORT-SURVEY.md): to float its double's value when the double
+           ;; holds the long exactly (else the long's own conversion), to double the double itself
+           ;; in int's range (an int literal's widening) and the long's conversion beyond it
+           (and (not explicit?) (integer? form) (= "LONG" (tag-name t)) (#{"FLOAT" "DOUBLE"} (tag-name target)))
+           (let [v (long form)]
+             (if (= "FLOAT" (tag-name target))
+               (if (== v (long (double v))) (list 'float (double v)) (list 'float form))
+               (if (<= Integer/MIN_VALUE v Integer/MAX_VALUE) (double v) (list 'double form))))
            (m/widens? t target) (if explicit? (list (widen-op (tag-name target)) form) form)
            ;; constant narrowing
            :else (list (narrow-op (tag-name target)) form))
@@ -461,6 +478,17 @@
                        (box-call env (list (if (m/widens? t u) (widen-op (tag-name u)) (narrow-op (tag-name u))) form) u)
                        ;; a number written as a literal (+43) is a long to the analysis
                        (or explicit? (and (number? form) (not (#{"LONG" "DOUBLE"} (tag-name t)))))
+                       (box-call env form t)
+                       ;; a long constant into a reference other than Long (new R6(0L, 0) of
+                       ;; R6(Object, Object)): boxed in the forms, since its printed literal is
+                       ;; an int's (RPS151 (a))
+                       (and (integer? form) (= "LONG" (tag-name t)) (not (same? target (m/boxed t))))
+                       (box-call env form t)
+                       ;; a conditional with a literal branch into a reference (return c ? 1 :
+                       ;; x; of an Integer method): boxed whole, as javac's Lower boxes it, since
+                       ;; the printer writes a tail conditional as an if whose branches' returns
+                       ;; box the literal alone (RPS151 (a))
+                       (and (literal-branch? form) (let [u (m/unboxed target)] (or (nil? u) (same? u t))))
                        (box-call env form t)
                        :else form))
          ;; a conditional or switch of javac's intersection type (the lub of classes sharing
@@ -1462,6 +1490,18 @@
       (type-annotated? target) (r (list (h env 'cast) (code-type-form env target) (:f x)) te)
       :else (r (cast-form env (:f x) te) te))))
 
+(defn- unconditional-by-args?
+  "Is nested type pattern `np` of a record pattern unconditional for its component (it matches null:
+  TransPatterns' allowNull, the component's full type at the pattern's type a subtype of the
+  pattern's type, boxed) where the component's declared type, which the Java forms' analysis knows
+  erased, is not (Box<String>(String s) of a record Box<T>)? `comp` is attr/record-components' [full
+  declared] for it. The form then says so, ^:unconditional, and the analysis does not test it (JCS114
+  (a), doc/classes/JAVA-CONFORMANCE-SURVEY.md, \"As built: JC4b\"; JN9f)."
+  [[full declared] np]
+  (let [bt (erasure (m/stype (attr/sym (tr/f np :var) :binding)))
+        bt (if (m/prim? bt) (m/boxed bt) bt)]
+    (and (m/subtype? full bt) (not (m/subtype? declared bt)))))
+
 (defn- pattern-form
   "The form of pattern tree `p`, adding its bindings to the env atom `penv`."
   [env penv p]
@@ -1483,10 +1523,16 @@
           (not (m/object? (erasure (m/stype sym)))) (tag s (erased-form env (erasure (m/stype sym))))
           :else s)))
     (tr/is? p :RECORDPATTERN)
-    (let [rp p]
+    (let [rp p
+          comps (delay (attr/record-components rp))]
       (note! :form/record-pattern)
       (apply list (class-ref env (m/tsym (attr/type-of rp :names/record-pattern)))
-             (map #(pattern-form env penv %) (tr/f rp :nested))))
+             (map-indexed (fn [i np]
+                            (let [f (pattern-form env penv np)]
+                              (if (and (tr/is? np :BINDINGPATTERN) (unconditional-by-args? (nth @comps i) np))
+                                (m+ f :unconditional)
+                                f)))
+                          (tr/f rp :nested))))
     :else (throw (ex-info "unknown pattern" {}))))
 
 (declare pattern-instanceof?)
@@ -2410,6 +2456,15 @@
                                  (when-not (and (m/object? vt) (empty? (f/items tf)))
                                    [[:tag tf]]))))
         et (attr/type-of (tr/f t :expr) :types/expr)
+        ;; a primitive binding over an Iterable of another primitive's box (for (float f :
+        ;; Iterable<Integer>)): the element is cast to that box before its unboxing, as javac's
+        ;; Lower casts it to the erased type argument; the analysis would cast to the binding's own
+        ;; box (JCS115 (a)): ^{:box C}
+        sf (or (when (and (prim? vt) (not (m/array? et)))
+                 (when-let [b (m/iterable-arg et)]
+                   (when (and (m/unboxed b) (not (same? b (m/boxed vt))))
+                     (m+ sf [:box (type-form env b)]))))
+               sf)
         coll (coerce env (ex env (tr/f t :expr)) (erasure et))
         ;; a type variable whose erasure (its first bound) is not Iterable, iterated by another
         ;; bound (<T extends A & B<String>>, B an Iterable): cast to that bound, as TransTypes
