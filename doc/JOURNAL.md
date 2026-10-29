@@ -448,3 +448,34 @@ git history:
   - CS60-CS63 as recommended.
   - During GT7's clean run, moderate work is allowed: no lock, ticket, slot or gate; at most 8 GB and 8 threads each;
     at most two agents. The clean run's wall times may run a little long, which its record will say.
+
+## 2026-10-29: GT7's tooling merged; net/http's NH0 and NH1 merged; GTS50-GTS57 and NH11-NH14 decided (the user)
+
+- **GT7's tooling** (branch `gate-gt7`, on Opus; doc/GATE-SURVEY.md, "As built: GT7 (tooling)"):
+  - `bin/gate [--full] --clean [--tag TAG]`: a shared clone, empty caches, stage 0, the executables and the tool
+    built fresh, serial, every step under strace, all parts, `JAVA_CHECK_FORMS_ONLY=1`, the CPU log; the record
+    `test/gate/clean-TAG.edn`, and the passes published as `:clean`.
+  - `--pins`, `--full --concurrent` (GTS37 (a)), `--plan --builds`, `bin/gate-demos` (GTS42 (a)).
+  - Three clean essential runs. The first two found:
+    - 2,160 files `go-build` reads that no key covered (`tamago/goroot/`, `tools/godump/`, goi's table's inputs; now in
+      `gate_key` and the javac key);
+    - `bin/heavy-lock` read by every `:inner` step;
+    - `arbace.j2g.zlib` loaded by a goi step that declares it never loads j2g;
+    - `$GOROOT/test`'s go-command programs on the host's go 1.27.2 (now TamaGo's on PATH);
+    - `gcgort.go`'s CPU limit.
+
+    The third passed, 86m06s, every audit ok, at most 25.8 GiB.
+  - Main's gate on the merge passed (2m20s).
+  - Scratch: `.tmp/gt7/`.
+- **net/http's NH0 and NH1** (branch `nethttp-nh1`, on Sonnet; doc/go/NET-HTTP-SURVEY.md):
+  - NH0, net/http interpreted on the shipped build: HTTP/2 over TLS works (60 concurrent streams); HTTP/1.1 fails on
+    interpreted types' empty method sets and on exhausted stub slots. The import takes 9.5-11.6 s.
+  - NH1: `test/nethttp/`, 60 offline programs, gc's runs as the reference, `bin/goi check --corpus nethttp`.
+    gc passes 60; goi interpreted 10 pass, 49 fail, 1 error, in 4 deferred classes.
+  - Main's gate on the merge passed (14m27s; `bin/goi` changed, so the executables were rebuilt).
+  - Scratch: `.tmp/nh0/`, `.tmp/nh1/`, `.tmp/goi-check/nethttp/`.
+- **Decided (the user):**
+  - GTS50-GTS57 as recommended. GTS50, GTS52, GTS53 and GTS57 are built before the clean run (branch `gate-gts5x`,
+    Sonnet).
+  - NH11 (b), not as recommended: the empty method sets investigated first (branch `nethttp-nh11`, Opus).
+  - NH12 (a), NH13 (b), NH14 (a).

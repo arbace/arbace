@@ -15,7 +15,8 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-why gate-audit gate-prune gate-queue gate-clean gate-full-clean gate-clean-plan gate-pins gate-full-concurrent gate-demos java-check-judge provenance-check reap suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
-  check-makefile
+  suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
+  repr-c-gcc-tests check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -117,12 +118,16 @@ provenance-check: ## the provenance files' repr/java hash equals the reader's (b
 	bin/provenance-check
 reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go from the checks' recorded results; every non-pass in a class, by design or deferred (bin/reap; no runs, seconds)
 	bin/reap
+reap-record-native-check: ## Go's read level's numbers, test/repr/go/native-check-results.edn, from bin/repr-go native-check's report (bin/reap record-native-check [REPORT=...])
+	bin/reap record-native-check $(REPORT)
 suite: ## Clojure's suite on the test build (bin/clojure-tests, CLOJURE_TESTS_GO)
 	CLOJURE_TESTS_GO=$(CLOJURE_TESTS_GO) bin/clojure-tests
 suite-aot: ## Clojure's suite compiled by c2j into its own program, against its reference and the eval level's (bin/clojure-tests --aot; heavy: j2g's whole-program run)
 	bin/clojure-tests --aot
 suite-aot-essential: ## its essential subset, as bin/gate runs it: test/clojure/essential-aot.txt's namespaces compiled alone into their own program (bin/clojure-tests --aot --essential -j 8)
 	bin/clojure-tests --aot --essential -j 8
+suite-divergences: ## the suite's results judged per test against the Clojure classes (bin/clojure-tests --divergences [RESULTS=...])
+	bin/clojure-tests --divergences $(RESULTS)
 oracle: ## the executable against the frozen JVM's results (bin/oracle check)
 	bin/oracle check 'target/arbace-go/amd64/arbace -' --timeout 900 \
 	  --expected test/oracle/known-go-amd64-frozen.edn
@@ -133,7 +138,7 @@ generated-check: ## the generated files as their generators write them: arbace/l
 	bin/generated-check
 
 ## Vendored trees and recorded data, converted or recorded afresh and compared byte for byte
-VERIFY := jdk-verify edge-verify javac-verify javac-classes repr-java-check repr-java-parse-check repr-java-front-check repr-java-attr-check fixtures-verify tamago-verify toolchain-verify \
+VERIFY := jdk-verify edge-verify javac-verify javac-classes repr-java-check repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check fixtures-verify java-forms-verify tamago-verify toolchain-verify \
   box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-java-roundtrip repr-java-text \
   repr-clojure-roundtrip
 verify: $(VERIFY) ## all of the below, one after another
@@ -230,6 +235,8 @@ repr-c-check: ## repr/c's token check: every corpus file read in place lexed and
 	bin/repr-c check --tokens
 repr-c-record: ## gcc -E on every corpus file, its digests (test/repr/c/pp-gcc.sha256) and the token check's known file rewritten (bin/repr-c check --tokens --record)
 	bin/repr-c check --tokens --record
+repr-c-gcc-tests: ## gcc 15.2's tarball checked against its pin and its testsuite extracted into .tmp/repr-c/ (bin/repr-c gcc-tests)
+	bin/repr-c gcc-tests
 repr-c-parse-check: ## repr/c's tree check: every corpus file and 7,700 mutants parsed by the port and by cc, the trees equal node for node or known (bin/repr-c parse-check)
 	bin/repr-c parse-check
 goi-annotations: ## goi's checker over tamago/goroot, linux std, GOROOT/test: no error, every annotation verified (bin/goi annotations)
@@ -260,6 +267,10 @@ java-check-judge: ## its judgment of saved runs alone (seconds): RESULTS=... (bi
 	bin/java-check --judge $(RESULTS)
 java-check-essential: ## its essential subset: test/java/essential.txt's tests interpreted from their committed forms (bin/java-check --essential, as bin/gate)
 	bin/java-check --essential
+java-forms-verify: ## the essential tests' committed forms (test/java/forms/) read afresh on javac's tool executable, byte for byte (bin/java-check --forms verify; --full's)
+	bin/java-check --forms verify
+java-forms-update: ## the essential tests' forms written again, with their provenance (bin/java-check --forms update; after a change to repr/java)
+	bin/java-check --forms update
 java-check-diagnostics: ## its diagnostics level: langtools' golden-diagnostics tests compiled by javac on Arbace in place, the output against the golden files as jtreg compares them (bin/java-check --levels diagnostics; after `make build-java`)
 	bin/java-check --levels diagnostics
 java-check-ref: ## Java's conformance check's reference recorded afresh with the JDK: jtreg's tags scanned, the source sets, the JDK's javac and two runs (bin/java-check --record-ref)

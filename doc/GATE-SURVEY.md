@@ -1626,3 +1626,9 @@ repr-go-native included; `.tmp/gt7/clean-plan-full.txt`).
 read-only); `bin/gate-demos` was edited (by `sed -i`, a new file) while a run of it executed; the toy's first table named
 `bin/lib` in a `:cmd`, which the planner refused (a test file, fixed).
 
+
+## Decided (2026-10-29): GTS50-GTS57
+
+The user decided all eight as recommended. GTS50 (a), GTS52 (a) and GTS53 (a) are built before GT7's `--full
+--clean` run, so that the run proves them, and GTS57 (a) with them (branch `gate-gts5x`). GTS51 (a) comes after the
+clean run, from its CPU log. GTS54 (a), GTS55 (a) and GTS56 (a) are as built.
