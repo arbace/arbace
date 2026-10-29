@@ -1860,3 +1860,9 @@ comparisons: `a.c`, the string literals' `s.c`, the eof's `e1.c`-`e7.c`), `ucn/`
 UCNs and trigraphs), `cases.txt`, `fields.txt`, `table.txt` (ast.go's cases and fields, the tree table's
 source), `asbuilt.md`; `.tmp/repr-c-parse/` (each corpus's lists, `files.tsv`, `report.edn`, `diff/`, the
 mutants' sources), `.tmp/repr-c-check/` (the token check's, with gcc's outputs of every file).
+
+## Decided (2026-10-29): CS60-CS63
+
+The user decided all four as recommended: CS60 (a), the five `limits-*` files stay known until C5 compiles repr/c;
+CS61 (a), gcc -fsyntax-only's acceptance per file is recorded in C3b; CS62 (a), `typeof` and `asm` are keywords only
+where gcc treats them so; CS63 (a), C23's XID tables (annex D) for identifiers, as gcc.

@@ -3637,3 +3637,13 @@ builds; and one `cp ... /dev/null` while looking at the key file, against the ru
     about ten classes, and (d) buys 5% of what it was thought to; (b) is a real design change with an open question
     (interfaces added at run time) and deserves a spike only when the list is long. This leaves the plan's step 2 out
     and the days saved (the plan's "three days if JCS124 (b) applies") are the schedule.
+
+## Decided (2026-10-29): JCS126; Java's run-level coverage as it stands
+
+- **JCS126 (a):** the cost is accepted. Classes are listed by demand (JCS125) at about 0.3 MB a class; shorter type
+  names, (c), come only if size matters later.
+- **The user (2026-10-29), on Java's coverage by module:** satisfied with the coverage as it stands, "no need to grow
+  it for now". Run-level coverage is java.base plus the language: of the 3,322 jtreg tests the JDK passes, java.base
+  passes 732 interpreted and 766 compiled of 1,807; the VM's 619/692 of 752; the language's 440 of 515; the other
+  modules about 0, since they are not in the runtime. The deferred JDK areas (JCS90-JCS96) are on hold. JCS120 (b) and
+  JC7 stay as planned.

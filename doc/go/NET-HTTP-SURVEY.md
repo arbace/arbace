@@ -497,3 +497,11 @@ over each package's GoFiles), `probe-base/`, `probe-use/`, `probe-api/`, `probe-
 `probe-sub/` (their programs) and `s-*.bin` (the stripped binaries of §2.1: base 3,510,432; h2none 4,206,752;
 core 7,868,576; sub 8,024,224; api 8,143,008; use 7,590,048 bytes), `probe-*.log` (build times and memory).
 Every build: `CGO_ENABLED=0 GOCACHE=$PWD/gocache /root/tamago-go/bin/go build -ldflags='-s -w'`.
+
+## Decided (2026-10-29): NH1-NH10
+
+The user decided all ten as recommended: NH1 (a), NH2 (a), NH3 (c), NH4 (a), NH5 (a), NH6 (b), NH7 (a), NH8 (a),
+NH9 (a), NH10 (a). In short: client and server, the bundled HTTP/2, httptrace, httputil, cookiejar and httptest, listed
+compiled in all four configurations, with a 6 MB budget recorded by `bin/goi table --size`. The new offline corpus
+comes first and std's small packages' tests later. Both fold into Go's eval and AOT cells. One re-seed carries JN10
+and the listing, ahead of C23.
