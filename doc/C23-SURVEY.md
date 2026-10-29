@@ -1844,7 +1844,8 @@ Run: `bin/repr-c parse-check --record` (every corpus and the mutants, passing: C
 the bugs C3.3 lists), `bin/repr-c check --tokens --record` (gcc on every file, `pp-gcc.sha256` written) and
 `bin/repr-c check --tokens` after it (every corpus, passing: C3.4), `ccdump-build` and `ccdump-build
 --upstream` (the upstream helper builds with the tree mode; its dumps not compared), `make check-makefile`,
-and the essential gate (GATE). Not run: anything of `--full` (nothing of it changed; repr/c has no gate step
+and the essential gate at `b2e3b763` (main `fdf939b5` merged): 9 steps run (`java-compiled`, `suite-aot-essential`,
+`j2g-edge`, `reap` and the canary among them), 10 skipped at their keys, passed in 8 minutes (`.tmp/c3/gate.log`). Not run: anything of `--full` (nothing of it changed; repr/c has no gate step
 until C8, C2.8).
 
 Shipped files: none. The change is under `arbace/repr/c/` (excluded from the embedded tree, `gate_key` and
