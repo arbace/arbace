@@ -11,6 +11,7 @@ type (
 	Token  = cc.Token
 	Config = cc.Config
 	Source = cc.Source
+	AST    = cc.AST
 )
 
 const flavor = "upstream"
@@ -18,6 +19,8 @@ const flavor = "upstream"
 var (
 	arbaceLex        = cc.ArbaceLex
 	arbacePreprocess = cc.ArbacePreprocess
+	arbaceParse      = cc.ArbaceParse
+	builtin          = cc.Builtin
 )
 
 func newConfig(h *host) (*Config, error) {

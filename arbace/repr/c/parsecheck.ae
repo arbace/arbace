@@ -1,0 +1,269 @@
+(ns arbace.repr.c.parsecheck
+  "repr/c's tree check (doc/C23-SURVEY.md, \"As built: C3\"; bin/repr-c parse-check, its driver
+  bin/lib/repr-c/parse-check): the corpora of test/c/corpora.edn read in place (their lists made by
+  arbace.repr.c.ppcheck/lists), each file parsed by arbace.repr.c.parse and by cc (tools/ccdump's tree
+  mode, the oracle), the dumps compared line for line: the nodes with their cases, every token's
+  position, kind, text and separator, the errors in cc's order; a file whose dumps differ passes when
+  test/repr/c/parse-check-known.edn lists it with its class. Also the mutants (JN8.3's): files of the
+  corpora with tokens deleted, duplicated, swapped and inserted, accepted or refused alike."
+  (:require [arbace.repr.c.lex :as lex]
+            [arbace.repr.c.parse :as parse]
+            [arbace.repr.c.host :as host]
+            [arbace.repr.c.ppcheck :as ppcheck]
+            [arbace.string :as str])
+  (:import [arbace.repr.c.lex Tok CFile]
+           [java.util.concurrent Executors Callable]))
+
+(set! *warn-on-reflection* true)
+
+(def known-file "test/repr/c/parse-check-known.edn")
+
+(defn- slurp-latin1 ^String [^String path] (String. (lex/read-bytes path) "ISO-8859-1"))
+(defn- read-or-nil ^String [^String p] (let [f (java.io.File. p)] (when (.exists f) (slurp-latin1 p))))
+
+(defn- spit-latin1 [^String path ^String s]
+  (.mkdirs (.getParentFile (java.io.File. path)))
+  (java.nio.file.Files/write (.toPath (java.io.File. path)) (.getBytes s "ISO-8859-1")
+                             ^"[Ljava.nio.file.OpenOption;" (make-array java.nio.file.OpenOption 0)))
+
+(defn- norm
+  "A dump's lines as compared: a panic's message dropped (each implementation's)."
+  [^String s]
+  (mapv #(if (.startsWith ^String % "#panic") "#panic" %) (str/split-lines s)))
+
+(defn- first-diff [a b]
+  (let [n (max (count a) (count b))]
+    (first (for [i (range n) :when (not= (get a i) (get b i))] [(inc i) (get a i) (get b i)]))))
+
+(defn first-error
+  "The position of a dump's first error (\"file:line:col\"), :panic, or nil when it has none."
+  [lines]
+  (some (fn [^String l]
+          (cond
+            (.startsWith l "#error\t") (let [m (subs l 7)] (or (second (re-find #"^(.*?:\d+:\d+):" m)) m))
+            (.startsWith l "#panic") :panic))
+        lines))
+
+(defn check-file
+  "One file: [name status nodes errors detail]; status equal, known, differ, crash, no-cc."
+  [^String work ^String id host ^String base known e]
+  (let [nm (:name e)
+        d (str work "/" id)
+        cfg (host/config host (:fc e) base)
+        mine (try (parse/result-dump (parse/parse cfg (:read e)))
+                  (catch Throwable x (str "#crash\t" (lex/esc (str x)) "\n")))
+        ccp (str d "/cc-tree/" (:out e))
+        cc (read-or-nil ccp)
+        a (when cc (norm cc))
+        b (norm mine)
+        nodes (count (remove #(.startsWith ^String % "#") b))
+        errs (count (filter #(.startsWith ^String % "#error") b))
+        k (get known nm)
+        ;; a mutant's original known (its corpus's known entry or its stream's at :pp): the mutant may
+        ;; differ by it too
+        from (when-let [^String fr (:from e)] (let [i (.indexOf fr "/")] [(keyword (subs fr 0 i)) (subs fr (inc i))]))
+        ppk (if from
+              (or (get-in (:parse-known-all host) [:parse (first from) (second from)])
+                  (get-in (:pp-known-all host) [:pp (first from) (second from)]))
+              (get (:pp-known host) nm))
+        st (cond
+             (and cc (= a b)) "equal"
+             k "known"
+             ppk "pp-known"
+             (.startsWith ^String mine "#crash") "crash"
+             (nil? cc) "no-cc"
+             :else "differ")]
+    (when-not (= st "equal")
+      (spit-latin1 (str d "/diff/" (:out e) ".port") mine)
+      (when cc (spit-latin1 (str d "/diff/" (:out e) ".cc") cc)))
+    (when (and (= st "equal") (not (System/getenv "REPR_C_PARSE_KEEP"))) (.delete (java.io.File. ccp)))
+    [nm st nodes errs
+     (case st
+       "equal" ""
+       "no-cc" ""
+       "crash" (str/trim (subs mine 7))
+       "known" (str "class " (:class k))
+       "pp-known" (str (if from "the original's class " "pp's class ") (:class ppk))
+       (let [[n x y] (first-diff a b)]
+         (str "line " n ": cc " (pr-str x) " port " (pr-str y)
+              (let [fa (first-error a) fb (first-error b)]
+                (str "; first error cc " (pr-str fa) " port " (pr-str fb))))))]))
+
+(defn check
+  "The tree check of the corpus `id` under WORK: WORK/ID/files.tsv (name, status, nodes, errors,
+  the first difference), report.edn, both dumps of each differing file under diff/; its summary line."
+  [^String work ^String id]
+  (let [d (str work "/" id)
+        base (str/trim (slurp (str d "/base.txt")))
+        entries (read-string (slurp (str d "/files.edn")))
+        known-all (read-string (slurp known-file))
+        known (get-in known-all [:parse (keyword id)] {})
+        unclassed (for [[nm e] known :when (not (contains? (:classes known-all) (:class e)))] nm)
+        h (assoc (host/load-host "test/c/host")
+                 :pp-known-all (read-string (slurp "test/repr/c/pp-check-known.edn"))
+                 :parse-known-all (read-string (slurp known-file)))
+        h (assoc h :pp-known (get-in (:pp-known-all h) [:pp (keyword id)] {}))
+        threads (Integer/parseInt (or (System/getenv "REPR_C_THREADS") "8"))
+        pool (Executors/newFixedThreadPool threads)
+        t0 (System/nanoTime)
+        futs (mapv (fn [e] (.submit pool ^Callable (fn [] (check-file work id h base known e)))) entries)
+        rs (mapv #(.get ^java.util.concurrent.Future %) futs)
+        secs (/ (- (System/nanoTime) t0) 1e9)
+        _ (.shutdown pool)
+        by (frequencies (map second rs))
+        failing (filter #(#{"differ" "crash" "no-cc"} (second %)) rs)
+        stale (for [[nm _] known :when (not (some (fn [[n st]] (and (= n nm) (= st "known"))) rs))] nm)
+        bytes (reduce + (map #(.length (java.io.File. (str base "/" (:name %)))) entries))
+        report {:corpus id :files (count rs) :bytes bytes :seconds (Math/round (double secs)) :threads threads
+                :status by :lines (reduce + (map #(nth % 2) rs)) :with-errors (count (filter #(pos? (long (nth % 3))) rs))
+                :failing (count failing) :stale-known (vec stale) :no-class (vec unclassed)}]
+    (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" (map str %)) "\n") rs)))
+    (spit (str d "/report.edn") (pr-str report))
+    (println (str id ": " (count rs) " files, " (pr-str by) ", " (:lines report) " lines, "
+                  (:with-errors report) " with errors, " (:seconds report) " s"
+                  (when (seq failing) (str "; " (count failing) " failing"))
+                  (when (seq stale) (str "; " (count stale) " known entries stale"))
+                  (when (seq unclassed) (str "; " (count unclassed) " known entries of no defined class"))))
+    (if (or (seq failing) (seq stale) (seq unclassed)) 1 0)))
+
+;; ---------------------------------------------------------------------------------------------
+;; Mutants (JN8.3's): a file's tokens deleted, duplicated, swapped with the next, a token inserted
+
+(defn- directive-lines
+  "The offsets' lines that are directives: a set of the line-start offsets of lines whose first token
+  is #."
+  [ts]
+  (let [out (java.util.HashSet.)]
+    (loop [ts (seq ts) at-start true dir false]
+      (when ts
+        (let [^Tok t (first ts) c (.-ch t)]
+          (cond
+            (= c \newline) (recur (next ts) true false)
+            at-start (let [dir (= c \#)] (when dir (.add out (.-po t))) (recur (next ts) false dir))
+            :else (do (when dir (.add out (.-po t))) (recur (next ts) false dir))))))
+    out))
+
+(defn mutate-text
+  "`text` (one char a byte) with `edits` random edits at tokens off the directive lines; nil when it
+  has too few."
+  ^String [^String text ^java.util.Random rnd ^long edits]
+  (let [f (lex/new-file "m" (.getBytes text "ISO-8859-1"))
+        [ts _] (lex/tokens f)
+        ^java.util.HashSet dirs (directive-lines ts)
+        cand (vec (filter (fn [^Tok t] (and (not= (.-ch t) \newline) (not (.contains dirs (.-po t)))
+                                           (pos? (.length ^String (.-src t)))))
+                          ts))
+        n (count cand)]
+    (when (> n 8)
+      (let [picks (sort (distinct (repeatedly edits #(.nextInt rnd (dec n)))))
+            ;; each edit [offset length replacement], applied from the end
+            eds (for [i picks]
+                  (let [^Tok t (nth cand i) ^Tok u (nth cand (inc i))
+                        o (.-po t) l (.length ^String (.-src t))]
+                    (case (.nextInt rnd 4)
+                      0 [o l ""]
+                      1 [o l (str (.-src t) " " (.-src t))]
+                      2 (if (< (+ o l) (.-po u)) ; swapped with the next token: both texts replaced
+                          [o (- (+ (.-po u) (.length ^String (.-src u))) o) (str (.-src u) (subs text (+ o l) (.-po u)) (.-src t))]
+                          [o l (.-src t)])
+                      [o 0 (str (.-src ^Tok (nth cand (.nextInt rnd n))) " ")])))
+            ;; overlapping edits dropped (a swap covers the next token)
+            eds (loop [eds (sort-by first eds) out [] end -1]
+                  (if-let [[o l :as e] (first eds)]
+                    (if (>= (long o) end) (recur (rest eds) (conj out e) (+ (long o) (long l))) (recur (rest eds) out end))
+                    out))]
+        (reduce (fn [^String s [o l r]] (str (subs s 0 o) r (subs s (+ (long o) (long l)))))
+                text (reverse eds))))))
+
+(defn mutants
+  "Writes the corpus `mutants` under WORK: `per` mutants of `edits` edits each for `nfiles` files of the
+  corpora `ids` (their lists made; files of at most 64 KB; a shuffle seeded by `seed`), each mutant
+  read with its original's configuration and its directory first among the -I paths."
+  [^String work ids seed nfiles per edits]
+  (let [pool (vec (for [id ids
+                        :let [d (str work "/" id)
+                              base (str/trim (slurp (str d "/base.txt")))]
+                        e (read-string (slurp (str d "/files.edn")))
+                        :let [path (str base "/" (:name e))]
+                        :when (< (.length (java.io.File. path)) 65536)
+                        :when (re-find #"\.c$" (:name e))]
+                    (assoc e :path path :corpus id)))
+        rnd (java.util.Random. (long seed))
+        shuffled (let [a (java.util.ArrayList. ^java.util.Collection pool)] (java.util.Collections/shuffle a rnd) (vec a))
+        picked (take nfiles shuffled)
+        d (str work "/mutants")
+        src (str d "/src")
+        entries (vec (for [[i e] (map-indexed vector picked)
+                           j (range per)
+                           :let [text (mutate-text (slurp-latin1 (:path e)) rnd edits)]
+                           :when text
+                           :let [nm (format "m%05d-%d.c" i j)
+                                 dir (.getParent (java.io.File. ^String (:path e)))]]
+                       (do (spit-latin1 (str src "/" nm) text)
+                           {:name nm :read nm :out (str nm ".tsv") :from (str (:corpus e) "/" (:name e))
+                            :fc (update (:fc e) :inc #(into [dir] %))})))]
+    (spit (str d "/base.txt") src)
+    (spit (str d "/files.edn") (pr-str entries))
+    (spit (str d "/list.jsonl")
+          (str/join (for [e entries]
+                      (str "{\"name\":" (pr-str (:read e)) ",\"std\":" (pr-str (:std (:fc e)))
+                           ",\"pre\":" (#'ppcheck/json-str (:pre (:fc e)))
+                           ",\"inc\":[" (str/join "," (map #(#'ppcheck/json-str %) (:inc (:fc e)))) "]"
+                           ",\"out\":" (pr-str (:out e)) "}\n"))))
+    (println (str "mutants: " (count entries) " of " (count picked) " files (seed " seed ", " edits " edits each)"))))
+
+(defn- guess-class
+  "A new known entry's class: the trees equal but for the errors (:pp-errors: the preprocessor's
+  errors, where the port follows gcc), or what the file uses that cc lacks."
+  [^String d ^String out ^String path]
+  (let [cc (some-> (read-or-nil (str d "/diff/" out ".cc")) norm)
+        port (some-> (read-or-nil (str d "/diff/" out ".port")) norm)
+        tree-only (fn [ls] (remove #(.startsWith ^String % "#error") ls))
+        text (slurp-latin1 path)]
+    (cond
+      (and cc port (= (tree-only cc) (tree-only port))) :pp-errors
+      (re-find #"\?\?[=(/)'<!>-]" text) :trigraphs
+      (re-find #"\\[uU][0-9a-fA-F]{4}" text) :ucn-identifier
+      :else (ppcheck/classify path))))
+
+(defn record
+  "Rewrites test/repr/c/parse-check-known.edn's entries of the corpora `ids` from WORK: each file whose
+  dumps differ (and that the token check's known file does not account for) with its class, kept or
+  guessed."
+  [^String work ids]
+  (let [known (read-string (slurp known-file))
+        known (reduce
+                (fn [known id]
+                  (let [d (str work "/" id)
+                        base (str/trim (slurp (str d "/base.txt")))
+                        old (get-in known [:parse (keyword id)] {})
+                        rows (map #(str/split % #"\t") (str/split-lines (slurp (str d "/files.tsv"))))
+                        es (into (sorted-map)
+                                 (keep (fn [[nm st]]
+                                         (when (#{"differ" "known" "crash"} st)
+                                           [nm (or (get old nm) {:class (guess-class d (str nm ".tsv") (str base "/" nm))})])))
+                                 rows)]
+                    (if (seq es) (assoc-in known [:parse (keyword id)] es) (update known :parse dissoc (keyword id)))))
+                known ids)]
+    (spit known-file
+          (str ";; The files of the tree check (bin/repr-c parse-check; doc/C23-SURVEY.md, \"As built: C3\") whose dumps are\n"
+               ";; known to differ from cc's, by corpus, each with its class (the classes below); a file the token check's\n"
+               ";; known file lists at :pp (test/repr/c/pp-check-known.edn) is known here too. Written by bin/repr-c\n"
+               ";; parse-check --record, the classes kept. Read with the Clojure reader.\n"
+               "{:classes\n {" (str/join "\n  " (for [[k v] (:classes known)] (str k " " (pr-str v)))) "}\n"
+               " :parse\n {"
+               (str/join "\n  " (for [[c es] (sort (:parse known))]
+                                  (str c "\n  {" (str/join "\n   " (for [[f e] es] (str (pr-str f) " " (pr-str e)))) "}")))
+               "}}\n"))
+    (println "recorded" known-file)))
+
+(defn -main [cmd & args]
+  (case cmd
+    "check" (let [[work & ids] args
+                  st (reduce max 0 (map #(check work %) ids))]
+              (shutdown-agents)
+              (System/exit st))
+    "record" (let [[work & ids] args] (record work ids))
+    "mutants" (let [[work seed nfiles per edits & ids] args]
+                (mutants work ids (Long/parseLong seed) (Long/parseLong nfiles) (Long/parseLong per) (Long/parseLong edits)))
+    (do (println "parsecheck: check or mutants") (System/exit 2))))

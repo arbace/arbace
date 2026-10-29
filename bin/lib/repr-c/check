@@ -3,22 +3,25 @@
 # place lexed and preprocessed by the port (arbace.repr.c.lex, arbace.repr.c.pp, evaluated on the tools'
 # host) and by cc (tools/ccdump, built by bin/repr-c ccdump-build), the dumps compared line for line
 # (arbace.repr.c.ppcheck); a file whose dumps differ passes when test/repr/c/pp-check-known.edn lists it
-# with its class and the port's tokens are gcc -E's (the digest it records). Run through
+# with its class and the port's tokens are gcc -E's (the digest it records); and every file's stream is
+# judged by the reference too (CS51 (a), "As built: C3"): its tokens' digest gcc -E's recorded one
+# (test/repr/c/pp-gcc.sha256), or both reject the file, or the known file's :gcc level lists it. Run through
 # bin/repr-c check (from the repository root); writes only under .tmp/repr-c-check/ (REPR_C_CHECK_WORK).
 #
 # Usage: bin/repr-c check --tokens [--corpus C,...] [--level lex,pp] [--record] [--judge-all]
 #   --corpus   test/c/corpora.edn's ids (default: every corpus read in place, `all`; lua's tarball not)
 #   --level    lex (each file's own tokens), pp (the preprocessed stream); default both
-#   --record   gcc -E -P run on each file whose pp dump differs (SOURCE_DATE_EPOCH at the host's epoch,
-#              the file's modelled options, gcc's include directory first), and the known file
-#              rewritten from what agrees with it (bin/repr-c's record; the classes kept or guessed),
-#              then the check again
+#   --record   gcc -E -P run on every file (SOURCE_DATE_EPOCH at the host's epoch, the file's modelled
+#              options, gcc's include directory first, 16 at a time), test/repr/c/pp-gcc.sha256 rewritten
+#              for the corpora (CS51 (a): the reference's digest of every file, which the check judges
+#              each file's stream by without a compiler) and the known file from what agrees with it
+#              (the classes kept or guessed), then the check again
 #   --judge-all  the reference on every file too, not only where cc differs: gcc -E -P run on each
 #              (16 at a time), its tokens against the port's, WORK/CORPUS/gcc-agree.tsv and a summary
 #              (where the port follows cc and cc is wrong: informative, the check's status unchanged)
 # Each corpus: WORK/CORPUS/list.jsonl, files.edn, cc-lex/, cc-pp/ (ccdump's dumps), port-lex/,
 # port-pp/ (the port's), files.tsv (name, lex, pp: equal, gcc, differ, crash, the port's tokens'
-# digest), differ.txt (the failing files and their first differing line), report.edn, missing.tsv
+# digest, gcc: agree, both-reject, known, differ, unrecorded), differ.txt (the failing files and their first differing line), report.edn, missing.tsv
 # (the __has answers not recorded: bin/repr-c host record adds them), headers.txt.
 #   REPR_C_THREADS (default 8) the port's threads; REPR_C_CCDUMP_TIMEOUT (default 600 s) a ccdump run's
 #   time before the file it hangs on is marked and the run resumed
@@ -38,7 +41,7 @@ while [ $# -gt 0 ]; do
     --level) levels=$2; shift 2 ;;
     --record) record=1; shift ;;
     --judge-all) judge_all=1; shift ;;
-    *) sed -n '9,19p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '11,21p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 [ -n "$tokens" ] || { echo "check: --tokens (the only level of C2)" >&2; exit 2; }
@@ -93,24 +96,23 @@ gcc_run() {
 export -f gcc_run
 export epoch gi
 
-if [ -n "$judge_all" ]; then
+gcc_all() {
   for id in "${ids[@]}"; do
     d=$work/$id
     # the fields separated by \037 (a tab is white space to read, and an empty field would vanish)
     awk -F'\t' -v d="$d" '{print d "\037" $1 "\037" $2 "\037" $3 "\037" $4}' "$d/gcc.list" | tr '\n' '\0' \
       | xargs -0 -P 16 -I{} bash -c 'IFS=$'"'"'\037'"'"' read -r d f std args rd <<< "$1"; gcc_run "$d" "$f" "$std" "$args" "$rd"' _ {}
   done
+}
+
+if [ -n "$judge_all" ]; then
+  gcc_all
   arbace_tool -m arbace.repr.c.ppcheck agree "$work" "${ids[@]}" || status=1
 fi
 
 if [ -n "$record" ]; then
-  for id in "${ids[@]}"; do
-    d=$work/$id
-    awk -F'\t' '$3 == "differ" || $3 == "gcc" {print $1}' "$d/files.tsv" | while read -r f; do
-      line=$(awk -F'\t' -v f="$f" '$1 == f' "$d/gcc.list")
-      gcc_run "$d" "$f" "$(echo "$line" | cut -f2)" "$(echo "$line" | cut -f3)" "$(echo "$line" | cut -f4)"
-    done
-  done
+  # CS51 (a): gcc on every file, its digests recorded (test/repr/c/pp-gcc.sha256)
+  [ -n "$judge_all" ] || gcc_all
   arbace_tool -m arbace.repr.c.ppcheck record "$work" "${ids[@]}" || exit 1
   status=0
   arbace_tool -m arbace.repr.c.ppcheck check "$work" "$levels" "${ids[@]}" || status=1

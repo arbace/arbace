@@ -47,3 +47,21 @@ func ArbacePreprocess(cfg *Config, sources []Source, f func(t Token, macro strin
 		f(t, m)
 	}
 }
+
+// ArbaceParse parses a translation unit as Parse does (cc's parser over its preprocessor) and returns
+// the tree with the parser's errors one a string (cc's own list, its same-line duplicates dropped), so
+// that the helper can print them apart from the tree.
+func ArbaceParse(cfg *Config, sources []Source) (ast *AST, errs []string, err error) {
+	p, err := newParser(cfg, newFset(), sources)
+	if err != nil {
+		return nil, nil, err
+	}
+	ast, err = p.parse()
+	if err != nil {
+		if e, ok := err.(errors); ok {
+			return ast, []string(e), nil
+		}
+		return ast, []string{err.Error()}, nil
+	}
+	return ast, nil, nil
+}

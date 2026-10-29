@@ -411,7 +411,12 @@ covers what.
   2026-10-28), and Arbace's changes (marked `Arbace:`) are under the Eclipse Public License 1.0. The
   rest of `arbace/repr/c/` (`host.ae`, `ppcheck.ae`) and the helper `tools/ccdump/`, which imports
   go-whim's cc (or upstream's, its build tag `upstream`) and copies none of it, are Arbace's own,
-  under the Eclipse Public License 1.0.
+  under the Eclipse Public License 1.0. Since C3 (doc/C23-SURVEY.md, "As built: C3"), `parse.ae`,
+  repr/c's parser, ports likewise `crefactor/cc/parser.go` with go-whim's `c23.go` (its productions
+  followed line for line, marked `go-whim`, Eclipse Public License 1.0 by CS37 (a)) and the parts of
+  `ast.go`, `ast2.go`, `cc.go` (`Builtin`) and `etc.go` the parser uses; `tree.ae` holds the node types'
+  table derived from cc's generated `ast.go` and the kinds' names of `stringer.go` (BSD 3-Clause, cc's
+  notice), the rest of it Arbace's; `parsecheck.ae` is Arbace's own (Eclipse Public License 1.0).
 - `arbace/repr/java/lex.ae` and `arbace/repr/java/parse.ae` (repr/java's native lexer and parser,
   doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN8"): Arbace forms porting, method by method,
   https://github.com/openjdk/jdk26u at `baf63fb`, `src/jdk.compiler/share/classes/com/sun/tools/javac/`'s

@@ -125,8 +125,33 @@
       (.update md (byte-array [10])))
     (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (.digest md)))))
 
+(defn norm-ident
+  "An identifier's text in gcc -E's spelling (CS50 (a)): each character outside the basic set, written
+  in UTF-8 or as a universal character name, as \\UXXXXXXXX."
+  ^String [^String s]
+  (if (and (neg? (.indexOf s "\\")) (every? #(< (int %) 0x80) s))
+    s
+    (let [bs (.getBytes s "ISO-8859-1") n (alength bs) b (StringBuilder.)]
+      (loop [i 0]
+        (if (< i n)
+          (let [c (bit-and (long (aget bs i)) 0xff)]
+            (cond
+              (and (= c 92) (< (inc i) n) (#{117 85} (bit-and (long (aget bs (inc i))) 0xff)))
+              (let [k (if (= 117 (bit-and (long (aget bs (inc i))) 0xff)) 4 8)
+                    hex (String. bs (int (+ i 2)) (int (min k (- n i 2))) "ISO-8859-1")]
+                (.append b (format "\\U%08x" (Long/parseLong hex 16)))
+                (recur (+ i 2 k)))
+              (>= c 0x80)
+              (let [[r sz] (lex/decode-rune bs i n)]
+                (.append b (format "\\U%08x" (long r)))
+                (recur (+ i (max 1 (long sz)))))
+              :else (do (.append b (char c)) (recur (inc i)))))
+          (.toString b))))))
+
+(defn- tok-text ^String [^Tok t] (if (= (.-ch t) :IDENTIFIER) (norm-ident (.-src t)) (.-src t)))
+
 (defn port-texts [r]
-  (keep (fn [^Tok t] (when-not (#{\space \newline} (.-ch t)) (.-src t))) (:tokens r)))
+  (keep (fn [^Tok t] (when-not (#{\space \newline} (.-ch t)) (tok-text t))) (:tokens r)))
 
 (defn- base64-bytes [^String s] (.decode (java.util.Base64/getDecoder) s))
 
@@ -152,7 +177,7 @@
           ;; lexed after a token of its own, so that a line beginning with #include is not a directive's
           (let [f (lex/new-file "gcc" (.getBytes (str "x " l "\n") "ISO-8859-1"))
                 [ts _] (lex/tokens f)]
-            (doseq [^Tok x (rest ts)] (when-not (= (.-ch x) \newline) (.add out (.-src x))))))))
+            (doseq [^Tok x (rest ts)] (when-not (= (.-ch x) \newline) (.add out (tok-text x))))))))
     (vec out)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -173,36 +198,68 @@
   (let [n (max (count a) (count b))]
     (first (for [i (range n) :when (not= (get a i) (get b i))] [(inc i) (get a i) (get b i)]))))
 
+(def gcc-file
+  "gcc -E's digest of every file (CS51 (a)): a line a file, the SHA-256 of its tokens as `gcc-texts`
+  gives them (identifiers in gcc's spelling, norm-ident) or `rejected`, two spaces, CORPUS/NAME."
+  "test/repr/c/pp-gcc.sha256")
+
+(defn load-gcc
+  "The recorded digests: {\"CORPUS/NAME\" digest-or-:rejected}."
+  []
+  (let [f (java.io.File. ^String gcc-file)]
+    (if (.exists f)
+      (into {} (for [l (str/split-lines (slurp f)) :when (seq l)
+                     :let [i (.indexOf ^String l "  ")]]
+                 [(subs l (+ i 2)) (let [d (subs l 0 i)] (if (= d "rejected") :rejected d))]))
+      {})))
+
+(defn- gcc-status
+  "The reference's judgment of a file (CS51 (a)): agree (gcc -E's tokens), both-reject (gcc rejects
+  it and the port reports an error), known (the known file's :gcc level lists it), unrecorded, differ."
+  [host ^String id ^String nm ^String dg errors?]
+  (let [g (get (:gcc-db host) (str id "/" nm))]
+    (cond
+      (nil? g) "unrecorded"
+      (= g dg) "agree"
+      (and (= g :rejected) errors?) "both-reject"
+      (contains? (get-in (:known-gcc host) [(keyword id)]) nm) "known"
+      :else "differ")))
+
 (defn check-file
-  "One file of a corpus: [name lex-status pp-status port-digest detail]."
+  "One file of a corpus: [name lex-status pp-status port-digest detail gcc-status]."
   [^String work ^String id host ^String base levels known e]
   (let [nm (:name e)
         d (str work "/" id)
         cfg (assoc (host/config host (:fc e) base) :missing (:missing host))
         lex-st (when (levels "lex")
-                 (let [mine (try (lex/dump (:read e) (str base "/" nm)) (catch Throwable x (str "#panic\t" x "\n")))
+                 (let [mine (try (lex/dump (:read e) (str base "/" nm) (:trigraphs cfg)) (catch Throwable x (str "#panic\t" x "\n")))
                        _ (write-utf8 (str d "/port-lex/" (:out e)) mine)
                        cc (read-or-nil (str d "/cc-lex/" (:out e)))]
                    (cond (nil? cc) "no-cc"
                          (= (norm mine) (norm cc)) "equal"
                          :else "differ")))
-        [pp-st digest detail]
+        [pp-st digest detail gst]
         (when (levels "pp")
           (let [r (try (pp/preprocess cfg (:read e)) (catch Throwable x {:tokens [] :errors [(str x)] :panic true :crash (str x)}))
                 mine (pp/dump r)
                 _ (write-utf8 (str d "/port-pp/" (:out e)) mine)
                 cc (read-or-nil (str d "/cc-pp/" (:out e)))
                 dg (tokens-digest (port-texts r))
-                k (get known nm)]
-            (cond
-              (:crash r) ["crash" dg (:crash r)]
-              (nil? cc) ["no-cc" dg nil]
-              (= (norm mine) (norm cc)) ["equal" dg nil]
-              (and k (= (:gcc k) dg)) ["gcc" dg nil]
-              ;; the reference rejects the file (an error test): the port must report an error too
-              (and k (= (:gcc k) :rejected) (seq (:errors r))) ["gcc" dg nil]
-              :else ["differ" dg (pr-str (first-diff (norm cc) (norm mine)))])))]
-    [nm (or lex-st "-") (or pp-st "-") (or digest "-") detail]))
+                k (get known nm)
+                gst (gcc-status host id nm dg (seq (:errors r)))]
+            (conj
+              (cond
+                (:crash r) ["crash" dg (:crash r)]
+                (nil? cc) ["no-cc" dg nil]
+                (= (norm mine) (norm cc)) ["equal" dg nil]
+                (and k (= (:gcc k) dg)) ["gcc" dg nil]
+                ;; the reference rejects the file (an error test): the port must report an error too
+                (and k (= (:gcc k) :rejected) (seq (:errors r))) ["gcc" dg nil]
+                ;; the port's stream is not gcc's either: the known file's :gcc level classes it
+                (and k (= (:gcc k) :differs) (contains? (get-in (:known-gcc host) [(keyword id)]) nm)) ["gcc" dg nil]
+                :else ["differ" dg (pr-str (first-diff (norm cc) (norm mine)))])
+              gst)))]
+    [nm (or lex-st "-") (or pp-st "-") (or digest "-") detail (or gst "-")]))
 
 (defn check
   "The check of the corpus `id` under WORK (its lists and cc's dumps made): WORK/ID/files.tsv (name,
@@ -215,7 +272,8 @@
         known (get-in known-all [:pp (keyword id)] {})
         known-lex (get-in known-all [:lex (keyword id)] {})
         missing (java.util.concurrent.ConcurrentHashMap/newKeySet)
-        h (assoc (host/load-host "test/c/host") :missing missing)
+        h (assoc (host/load-host "test/c/host") :missing missing :gcc-db (load-gcc) :known-gcc (:gcc known-all))
+        known-gcc (get-in known-all [:gcc (keyword id)] {})
         threads (Integer/parseInt (or (System/getenv "REPR_C_THREADS") "8"))
         pool (Executors/newFixedThreadPool threads)
         t0 (System/nanoTime)
@@ -227,28 +285,35 @@
         lex-known-ok (fn [[nm ls]] (or (not= ls "differ") (contains? known-lex nm)))
         pp-fail (filter (fn [[_ _ ps]] (#{"differ" "crash" "no-cc"} ps)) rs)
         lex-fail (remove lex-known-ok rs)
+        gcc-fail (filter (fn [r] (#{"differ" "unrecorded"} (nth r 5))) rs)
         stale (concat (for [[nm _] known :when (not (some (fn [[n _ ps]] (and (= n nm) (= ps "gcc"))) rs))] [:pp nm])
-                      (for [[nm _] known-lex :when (not (some (fn [[n ls]] (and (= n nm) (= ls "differ"))) rs))] [:lex nm]))
+                      (for [[nm _] known-lex :when (not (some (fn [[n ls]] (and (= n nm) (= ls "differ"))) rs))] [:lex nm])
+                      (for [[nm _] known-gcc :when (not (some (fn [r] (and (= (first r) nm) (= (nth r 5) "known"))) rs))] [:gcc nm]))
         bytes (reduce + (map #(.length (java.io.File. (str base "/" (:name %)))) entries))]
-    (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" (map str (take 4 %))) "\n") rs)))
+    (spit (str d "/files.tsv") (str/join (map #(str (str/join "\t" (map str (concat (take 4 %) [(nth % 5)]))) "\n") rs)))
     (spit (str d "/differ.txt") (str/join (map #(str (first %) "\t" (nth % 2) "\t" (nth % 4) "\n") pp-fail)))
     (spit (str d "/missing.tsv") (str/join (map #(str (first %) "\t" (second %) "\n") (sort missing))))
     (spit (str d "/headers.txt")
           (str/join (map #(str % "\n") (sort (filter (fn [^String p] (some #(.startsWith p (str % "/")) (:search h)))
                                                      pp/opened)))))
     (let [report {:corpus id :files (count rs) :bytes bytes :seconds (Math/round (double secs)) :threads threads
-                  :lex (by 1) :pp (by 2) :lex-unknown (count lex-fail) :pp-failing (count pp-fail)
+                  :lex (by 1) :pp (by 2) :gcc (by 5) :lex-unknown (count lex-fail) :pp-failing (count pp-fail)
+                  :gcc-failing (count gcc-fail)
                   :stale-known (vec stale) :missing-has (count missing)}]
       (spit (str d "/report.edn") (pr-str report))
-      (println (str id ": " (count rs) " files, lex " (pr-str (by 1)) ", pp " (pr-str (by 2))
+      (println (str id ": " (count rs) " files, lex " (pr-str (by 1)) ", pp " (pr-str (by 2)) ", gcc " (pr-str (by 5))
                     ", " (Math/round (double secs)) " s"
                     (when (seq lex-fail) (str "; " (count lex-fail) " lex differences not known"))
                     (when (seq pp-fail) (str "; " (count pp-fail) " pp files failing"))
+                    (when (seq gcc-fail) (str "; " (count gcc-fail) " files not judged by gcc's digest: "
+                                              (str/join " " (map first (take 5 gcc-fail)))))
                     (when (seq stale) (str "; " (count stale) " known entries stale"))
                     (when (seq missing) (str "; " (count missing) " __has answers not recorded"))))
       ;; a missing __has answer is reported, not failed: the names gcc itself rejects (an error test's
       ;; __has_c_attribute(0)) have none to record
-      (if (or (seq pp-fail) (seq lex-fail) (seq stale)) 1 0))))
+      (if (or (seq pp-fail) (seq lex-fail) (seq gcc-fail) (seq stale)) 1 0))))
+
+(declare get-gcc-digest)
 
 (defn record
   "Rewrites test/repr/c/pp-check-known.edn's entries of the corpora `ids` from WORK: each file whose
@@ -280,31 +345,81 @@
                                                        [nm {:class (cls nm old-pp) :gcc gd}]
                                                        :else
                                                        (do (println (str id ": " nm ": the port's stream is not gcc's either"
-                                                                         (when-not g " (no gcc output)")))
-                                                           nil))))))
+                                                                         (when-not g " (no gcc output)") ": its class at :gcc"))
+                                                           [nm {:class (cls nm old-pp) :gcc :differs}]))))))
                                          rows)
                         lex-entries (into (sorted-map)
                                           (keep (fn [[nm ls]] (when (= ls "differ") [nm {:class (cls nm old-lex)}])))
+                                          rows)
+                        ;; CS51 (a): the files whose stream is not gcc's, nor rejected by both
+                        old-gcc (get-in known [:gcc (keyword id)] {})
+                        gcc-entries (into (sorted-map)
+                                          (keep (fn [[nm _ _ dg]]
+                                                  (let [g (get-gcc-digest d nm)
+                                                        port-errs (some #(.startsWith ^String % "#error")
+                                                                        (str/split-lines (or (read-or-nil (str d "/port-pp/" nm ".tsv")) "")))]
+                                                    (when-not (or (= g dg) (and (= g :rejected) port-errs))
+                                                      [nm {:class (or (:class (get old-gcc nm)) :unclassified)}]))))
                                           rows)]
                     (-> known
                         (assoc-in [:pp (keyword id)] pp-entries)
-                        (assoc-in [:lex (keyword id)] lex-entries))))
+                        (assoc-in [:lex (keyword id)] lex-entries)
+                        (assoc-in [:gcc (keyword id)] gcc-entries))))
                 known ids)]
     (spit known-file
           (str ";; The files of the token check (bin/repr-c check --tokens; doc/C23-SURVEY.md, \"As built: C2\") whose\n"
                ";; dumps are known to differ from cc's, by level and corpus (CS40 (a)): at :pp each with its class\n"
                ";; and :gcc, the SHA-256 of gcc -E -P's tokens (one a line, no separators), which the port's stream\n"
-               ";; must give: the reference is the judge where cc is wrong; at :lex each with its class. Written by\n"
+               ";; must give: the reference is the judge where cc is wrong; at :lex each with its class; at :gcc (CS51\n"
+               ";; (a)) each file whose stream is not gcc -E's (test/repr/c/pp-gcc.sha256) with its class. Written by\n"
                ";; bin/repr-c check --tokens --record, the classes kept. Read with the Clojure reader.\n"
                "{:classes\n {" (str/join "\n  " (for [[k v] (sort (:classes known))] (str k " " (pr-str v)))) "}\n"
                (str/join
-                 (for [level [:pp :lex]]
+                 (for [level [:pp :lex :gcc]]
                    (str " " level "\n {"
                         (str/join "\n  "
                                   (for [[k v] (sort (get known level)) :when (seq v)]
                                     (str k "\n  {" (str/join "\n   " (map (fn [[f e]] (str (pr-str f) " " (pr-str e))) v)) "}")))
-                        "}" (if (= level :lex) "}" "") "\n")))))
+                        "}" (if (= level :gcc) "}" "") "\n")))))
     (println "recorded" known-file)))
+
+(defn- get-gcc-digest
+  "gcc -E's digest of a file of WORK/ID (WORK/ID/gcc/NAME.i and .status), :rejected, or nil when gcc
+  did not run."
+  [^String d ^String nm]
+  (let [g (read-or-nil (str d "/gcc/" nm ".i"))
+        gst (str/trim (or (read-or-nil (str d "/gcc/" nm ".status")) "?"))]
+    (cond (nil? g) nil
+          (not= gst "0") :rejected
+          :else (tokens-digest (gcc-texts g)))))
+
+(defn- digest-file
+  "gcc -E's digests of the files of WORK/ID, in parallel: {name digest-or-:rejected}."
+  [^String d names]
+  (let [pool (Executors/newFixedThreadPool (Integer/parseInt (or (System/getenv "REPR_C_THREADS") "8")))
+        futs (mapv (fn [nm] [nm (.submit pool ^Callable (fn [] (get-gcc-digest d nm)))]) names)
+        r (into {} (for [[nm f] futs] [nm (.get ^java.util.concurrent.Future f)]))]
+    (.shutdown pool)
+    r))
+
+(defn record-gcc
+  "Rewrites test/repr/c/pp-gcc.sha256's lines of the corpora `ids` from gcc's runs under WORK (CS51 (a)),
+  the other corpora's kept."
+  [^String work ids]
+  (let [old (load-gcc)
+        ids (set ids)
+        kept (remove (fn [[k _]] (ids (subs k 0 (.indexOf ^String k "/")))) old)
+        new (for [id ids
+                  :let [d (str work "/" id)
+                        names (map #(first (str/split % #"\t")) (str/split-lines (slurp (str d "/files.tsv"))))
+                        gs (digest-file d names)]
+                  nm names
+                  :let [g (gs nm)]
+                  :when g]
+              [(str id "/" nm) g])
+        all (sort-by first (concat kept new))]
+    (spit gcc-file (str/join (for [[k g] all] (str (if (= g :rejected) "rejected" g) "  " k "\n"))))
+    (println (str "recorded " gcc-file ": " (count all) " files (" (count new) " of " (count ids) " corpora run)"))))
 
 (defn agree
   "The reference on every file (bin/repr-c check --judge-all): each file's port stream against gcc -E
@@ -343,6 +458,8 @@
       (re-find #"#\s*pragma\s+once" s) :pragma-once
       (re-find #"__(BASE_FILE|INCLUDE_LEVEL|FILE_NAME|TIMESTAMP)__" s) :gnu-builtin-macro
       (re-find #"(?m)^\s*#\s*if.*\b(true|false)\b" s) :c23-if-true
+      (re-find #"\?\?[=(/)'<!>-]" s) :trigraphs
+      (re-find #"\\[uU][0-9a-fA-F]{4}" s) :ucn-identifier
       :else :unclassified)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -373,6 +490,6 @@
                   st (reduce max 0 (map #(check work % (set (str/split levels #","))) ids))]
               (shutdown-agents)
               (System/exit st))
-    "record" (let [[work & ids] args] (record work ids))
+    "record" (let [[work & ids] args] (record work ids) (record-gcc work ids))
     "agree" (let [[work & ids] args] (agree work ids))
     (do (println "ppcheck: pp, lists, check or record") (System/exit 2))))
