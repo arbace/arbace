@@ -2092,9 +2092,10 @@ Each with its options, the recommended one first.
 
 Run: `bin/repr-c roundtrip --record-gcc` over every corpus (C3b.2), `--record` and the judgment again (every corpus
 passes); `bin/repr-c check --c23` (passes, the control holds); the spec's six examples (§16) read, printed and read
-again, the forms equal; `make check-makefile`. Not run: the token and tree checks again (`pp.ae` and `parse.ae`
-changed only the layer, the literals' pieces and the budget, which no dump shows; their drivers' roots gained
-`:checkout` for c23conf's new place), anything of `--full` (repr/c has no gate step until C8), SQLite's amalgamation
+again, the forms equal; `make check-makefile`; the token check over c23conf and tcc's tests and the tree check over
+c23conf, tcc's tests and CompCert's (no mutants), all equal to cc's (c23conf now read from `test/c/c23/`). Not run: the
+token and tree checks over every corpus (`pp.ae` and `parse.ae` changed only the layer, the literals' pieces and the
+budget, which no dump shows), anything of `--full` (repr/c has no gate step until C8), SQLite's amalgamation
 within the budget.
 
 Shipped files: none. The change is under `arbace/repr/c/` and `arbace/repr/c.ae` (no executable embeds them;
