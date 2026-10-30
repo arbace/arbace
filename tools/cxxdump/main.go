@@ -622,7 +622,7 @@ func main() {
 			os.Exit(1)
 		}
 		st.cache = map[bool]string{true: "hit", false: "miss"}[hit]
-		if line, err := os.ReadFile(filepath.Join(*cacheDir, st.key+".stats")); hit && err == nil {
+		if line, err := os.ReadFile(filepath.Join(*cacheDir, st.key[:2], st.key+".stats")); hit && err == nil {
 			// the numbers of the run that made the entry, marked as a hit
 			l := strings.Replace(strings.TrimSpace(string(line)), `:cache "miss"`, `:cache "hit"`, 1)
 			if *statsName == "" {

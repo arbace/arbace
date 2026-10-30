@@ -507,7 +507,11 @@ func cached(dir string, j job, outName string) (stats, bool, error) {
 	if err != nil {
 		return st, false, err
 	}
-	base := filepath.Join(dir, k)
+	// 256 subdirectories by the key's first byte: a flat directory of some 80,000 entries makes ext4 refuse a rename (ENOSPC)
+	if err := os.MkdirAll(filepath.Join(dir, k[:2]), 0o755); err != nil {
+		return st, false, err
+	}
+	base := filepath.Join(dir, k[:2], k)
 	st.key = k
 	if status, err := os.ReadFile(base + ".status"); err == nil && depsValid(base+".deps") {
 		st.status = strings.TrimSpace(string(status))
