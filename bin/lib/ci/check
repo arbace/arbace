@@ -14,7 +14,8 @@
 #   --record   test/c/check-linux-amd64.edn rewritten from the run (the other corpora's lines kept)
 #   --judge    the last run judged again (its results against the classes), nothing run
 #   --resume   node programs already built kept
-#   CI_THREADS (default 3): the builder's threads; CI_JOBS (default 4): the runs'
+#   CI_THREADS (default 3): the builder's threads; CI_JOBS (default 4): the runs'; CI_KEEP_NODES: keep every
+#   node program (by default only those of a run that did not exit 0)
 # Writes under .tmp/ci-check/ (CI_CHECK_WORK): CORPUS/list.tsv, CORPUS/nodes/ID.nodes, nodes.tsv, run.tsv,
 # results.edn. Exit status 0 when nothing fails.
 set -uo pipefail
@@ -58,13 +59,14 @@ if [ -z "$judge" ]; then
     fi
     base=$(cat "$d/base.txt")
     # ID BASE STD ARGS READNAME, the programs gcc built
-    awk -F'\t' -v c="$id" -v b="$base" '{print c "/" $1 "\t" b "\t" $2 "\t" $3 "\t" $4}' "$d/gcc.list" \
-      | while IFS=$'\t' read -r i b s a r; do
-          [ -n "$only" ] && ! grep -qxF "$i" "$only" && continue
-          [ -n "$resume" ] && [ -s "$work/$i.nodes" ] && continue
-          grep -qF "{:id \"$i\" :status :no-build" test/c/ref-gcc15.edn && continue
-          printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$b" "$s" "$a" "$r"
-        done > "$d/list.tsv"
+    grep -o '{:id "[^"]*" :status :no-build' test/c/ref-gcc15.edn | cut -d'"' -f2 > "$d/no-build.txt"
+    : > "$d/done.txt"
+    if [ -n "$resume" ] && [ -f "$d/run.tsv" ]; then cut -f1 "$d/run.tsv" > "$d/done.txt"; fi
+    awk -F'\t' -v c="$id" -v b="$base" -v only="${only:-}" -v nb="$d/no-build.txt" -v done="$d/done.txt" '
+      BEGIN { while ((getline l < nb) > 0) skip[l] = 1; while ((getline l < done) > 0) skip[l] = 1
+              if (only != "") { while ((getline l < only) > 0) want[l] = 1 } }
+      { i = c "/" $1; if (i in skip) next; if (only != "" && !(i in want)) next
+        print i "\t" b "\t" $2 "\t" $3 "\t" $4 }' "$d/gcc.list" > "$d/list.tsv"
     if [ -s "$d/list.tsv" ]; then
       (cd "$root" && arbace_tool -m arbace.c.run test/c/host nodes-list "$work" "$d/list.tsv" "$threads") > "$d/nodes.log" 2>&1
       [ -f "$work/nodes.tsv" ] && cat "$work/nodes.tsv" >> "$d/nodes.tsv" && rm -f "$work/nodes.tsv"
@@ -78,6 +80,8 @@ if [ -z "$judge" ]; then
       sum=$(sha256sum < "$rd/out" | cut -d' ' -f1); bytes=$(wc -c < "$rd/out")
       printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$st" "$sum" "$bytes" "$(grep -m1 '^cirun: fault' "$rd/err" | cut -c1-200 | tr '\t' ' ')"
       rm -rf "$rd"
+      # the disk: a node program holds musl's linked part (about 0.4 MB); kept when it did not exit 0
+      [ -n "${CI_KEEP_NODES:-}" ] || [ "$st" != 0 ] || rm -f "$f"
     }
     export -f run1; export work cirun
     awk -F'\t' '$2 == "ok" {print $1}' "$d/nodes.tsv" | xargs -P "$jobs" -I{} bash -c 'run1 "$1"' _ {} > "$d/run.tsv"

@@ -15,6 +15,18 @@
 
 (def ^:dynamic *musl* nil) ; the musl library (arbace.c.musl/library), when linked
 
+(defn uses-long-double?
+  "Whether a program's main-file forms declare or convert to a long double type (SPEC §12.5's rule for the
+  class long-double): the type symbol anywhere in the forms or their metadata."
+  [forms]
+  (letfn [(walk [x]
+            (or (= 'long-double x)
+                (and (seq? x) (= 'lit (first x)) (= 'long-double (second x)))
+                (and (or (seq? x) (vector? x)) (some walk x))
+                (and (map? x) (some walk (vals x)))
+                (when-let [m (and (instance? arbace.lang.IObj x) (meta x))] (some walk (vals (dissoc m :line :column))))))]
+    (boolean (some walk forms))))
+
 (defn check-read
   "A read checked for ci: {:rd :results :std :unsigned-char :errors}."
   [h fc rd]
@@ -30,7 +42,9 @@
     (cond
       (:error rd) {:status :read-error :message (str/join "; " (take 3 (:error rd)))}
       (:refused rd) {:status :read-refused :message (str (name (:refused rd)) ": " (:message rd))}
-      :else (let [u (check-read h fc rd)]
+      :else (let [u (check-read h fc rd)
+                  ;; the reference builds with -fpermissive (gcc 15's implicit declarations a warning there)
+                  u (update u :errors (fn [es] (vec (remove #(re-find #"implicit declaration of function" %) es))))]
               (if (seq (:errors u))
                 (assoc u :status :check-error :message (str/join "; " (take 3 (:errors u))))
                 (assoc u :status :ok))))))
@@ -84,6 +98,7 @@
         corpora (remove #{"--record" ""} more)
         refs (into {} (map (juxt :id identity) (read-all-forms reff)))
         classes (read-string (slurp divf))
+        known (let [f (java.io.File. "test/c/check-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
         klass (fn [[_ r reason]]
                 (let [s (str (name r) " " reason)]
                   (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
@@ -91,7 +106,12 @@
                         :let [nodes (into {} (map (juxt first identity) (tsv (str work "/" c "/nodes.tsv"))))
                               runs (into {} (map (juxt first identity) (tsv (str work "/" c "/run.tsv"))))]
                         [id] (tsv (str work "/" c "/list.tsv"))]
-                    (let [row (result id (get refs id) (get nodes id) (get runs id))]
+                    (let [row (result id (get refs id) (get nodes id) (get runs id))
+                          ;; the mirror's copies of the torture tests share their entries
+                          kr (or (get known id) (get known (str/replace id "torture-execute-mirror/" "torture-execute/")))
+                          row (if (and (not= :pass (second row)) kr)
+                                [id :fail (str "known " kr " (" (nth row 2) ")")]
+                                row)]
                       (if (= :pass (second row)) row (conj row (klass row))))))
         failing (filter #(and (not= :pass (second %)) (nil? (nth % 3 nil))) rows)]
     (spit (str work "/results.edn") (str "[\n" (str/join "\n" (map pr-str rows)) "\n]\n"))
@@ -156,7 +176,7 @@
                                        (if (not= :ok (:status u))
                                          [(name (:status u)) "" (:message u)]
                                          (let [n (binding [*musl* lib] (nodes [u]))
-                                               ld (if (contains? (set ((requiring-resolve 'arbace.c.musl/refs) (:forms (:rd u)))) "long-double") "long-double" "")]
+                                               ld (if (uses-long-double? (:forms (:rd u))) "long-double" "")]
                                            (if (= :ok (:status n))
                                              (let [f (java.io.File. (str work "/" id ".nodes"))]
                                                (.mkdirs (.getParentFile f))
@@ -175,6 +195,7 @@
     (let [[resf divf] args
           rows (read-string (slurp resf))
           classes (read-string (slurp divf))
+        known (let [f (java.io.File. "test/c/check-known.edn")] (if (.exists f) (read-string (slurp f)) {}))
           klass (fn [[_ r reason]]
                   (let [s (str (name r) " " reason)]
                     (some (fn [c] (when (some #(re-find % s) (:match c)) (:id c))) classes)))
