@@ -146,6 +146,11 @@
      (gap (keyword why) (str "no form for " why ", and its text is not plain")))))
 
 
+(defn- whole-macro?
+  "A node whose first and last tokens come from one macro expansion (a compound statement the macro's body writes with its braces)."
+  [n] (let [r (:range n) b (:begin r) e (:end r)]
+        (boolean (and (macro-loc? b) (macro-loc? e) (:expansionLoc b) (= (:expansionLoc b) (:expansionLoc e))))))
+
 (def ^:dynamic *in-macro* "true while a macro node's own AST is converted (CP41 (b)): its nodes are not macro texts again" false)
 
 (defn macro-form
@@ -392,7 +397,7 @@
   {"-" '- "+" '+ "!" 'not "~" 'bit-not "&" 'addr "*" 'deref "__real" 'real "__imag" 'imag "__extension__" 'cpp/extension
    "co_await" 'co-await})
 
-(declare ex stmt-items block-forms compound-forms decl-forms var-form local-decl params-of type-for)
+(declare exs ex stmt-items block-forms compound-forms decl-forms var-form local-decl params-of type-for)
 
 (def ^:private transparent
   #{"ImplicitCastExpr" "MaterializeTemporaryExpr" "CXXBindTemporaryExpr" "ExprWithCleanups" "ConstantExpr" "FullExpr"
@@ -435,8 +440,27 @@
         s (when a (strip a))]
     (if (and (:list n) (= 1 (count as)) (= (kind s) "InitListExpr")
              (let [e1 (get-in n [:range :end :offset]) e2 (get-in s [:range :end :offset])] (and e1 (= e1 e2))))
-      (map ex (kids s))
-      (map ex as))))
+      (exs (kids s))
+      (exs as))))
+
+(defn exs
+  "The forms of expression nodes `ns`; where consecutive ones come from one macro invocation (the elements an invocation like
+  LOG_TAGS(x) expands to) the first carries its text and the others an empty one (CP41 (b): the printer writes the text once)."
+  [ns]
+  (loop [ns (seq ns) out [] lmx nil]
+    (if-not ns
+      out
+      (let [n (first ns)
+            mx (when (macro-node? n) (macro-extent n))
+            f (ex n)
+            sib? (and mx (= mx lmx))
+            f (cond
+                (not sib?) f
+                (and (seq? f) (= (first f) 'cpp/macro)) (list 'cpp/macro "" (nth f 2))
+                (and (instance? arbace.lang.IObj f) (:cpp/macro (meta f))) (vary-meta f assoc :cpp/macro "")
+                :else f)
+            carries? (or (and (seq? f) (= (first f) 'cpp/macro)) (and (instance? arbace.lang.IObj f) (:cpp/macro (meta f))))]
+        (recur (next ns) (conj out f) (when (and mx carries?) mx))))))
 
 (defn- init-list [n]
   ;; an InitListExpr's written elements (the trailing value-initialized ones are the oracle's)
@@ -445,7 +469,7 @@
         ks (loop [ks ks] (if (and (seq ks) (#{"ImplicitValueInitExpr" "CXXDefaultInitExpr"} (kind (peek ks)))) (recur (pop ks)) ks))]
     (when (some #(= (kind %) "ImplicitValueInitExpr") ks) (gap :init "value-initialized elements inside a list"))
     (when (:array_filler n) (when (some #(= (kind %) "DesignatedInitExpr") ks) (gap :init "designators")))
-    (map ex ks)))
+    (exs ks)))
 
 (defn- callee-form [f args] (apply mk (if (or (symbol? f) (seq? f)) f (list 'c/call f)) args))
 
@@ -594,13 +618,13 @@
                      (= (get-in sf [:range :end :offset]) (get-in (first (kids sf)) [:range :end :offset])))
               ;; an implicit conversion through a conversion function: the object as written
               (ex (first (kids sf)))
-              (callee-form (ex f) (map ex (args-of as)))))
+              (callee-form (ex f) (exs (args-of as)))))
           "CXXOperatorCallExpr"
           (let [op (operator-of n)
                 as (vec (args-of (rest (kids n))))
                 a (fn [i] (ex (as i)))]
             (cond
-              (= op "()") (callee-form (a 0) (map ex (rest as)))
+              (= op "()") (callee-form (a 0) (exs (rest as)))
               (= op "[]") (apply mk 'aget (map ex as))
               (= op "=") (mk 'set! (a 0) (a 1))
               (and (#{"+=" "-=" "*=" "/=" "%=" "<<=" ">>=" "&=" "|=" "^="} op) (= 2 (count as)))
@@ -642,7 +666,7 @@
             (let [ks (kids n)
                 lst (and (= 1 (count ks)) (= "InitListExpr" (kind (strip (first ks)))))]
               (apply mk (if (.endsWith ^String (str/trim t) "}") 'cpp/brace 'cpp/construct) (type-of (qt n))
-                     (if lst (init-list (strip (first ks))) (map ex ks)))))
+                     (if lst (init-list (strip (first ks))) (exs ks)))))
           "CXXTemporaryObjectExpr"
           (apply mk (if (:list n) 'cpp/brace 'cpp/construct) (type-of (qt n)) (construct-args n))
           "CXXScalarValueInitExpr" (mk 'cpp/construct (type-of (qt n)))
@@ -653,7 +677,7 @@
               (= 1 (count as)) (ex (first as))
               :else (gap :construct "an implicit construction")))
           "InitListExpr" (apply mk 'cpp/init-list (init-list n))
-          "ParenListExpr" (apply mk 'cpp/paren (map ex (kids n)))
+          "ParenListExpr" (apply mk 'cpp/paren (exs (kids n)))
           "CXXNewExpr"
           (let [pt (type-of (qt n))
                 _ (when-not (and (seq? pt) (= (first pt) '*)) (gap :new "the allocated type"))
@@ -675,7 +699,7 @@
                        "call" (let [x (strip (first ks))]
                                 (apply mk 'cpp/paren (case (kind x)
                                                        "CXXConstructExpr" (construct-args x)
-                                                       "ParenListExpr" (map ex (kids x))
+                                                       "ParenListExpr" (exs (kids x))
                                                        [(ex (first ks))])))
                        "list" (let [x (strip (first ks))]
                                 (apply mk 'cpp/brace (if (= (kind x) "InitListExpr") (init-list x) (construct-args x))))
@@ -785,8 +809,8 @@
   "A statement's items (a label or case is an item before the statement it labels)."
   [n]
   (let [k (kind n)]
-    (if (and (macro-node? n) (not *in-macro*) (not (#{"CompoundStmt" "DeclStmt"} k)))
-      (macro-form n "macro" true #(stmt-items n))
+    (if (and (macro-node? n) (not *in-macro*) (not (= k "DeclStmt")) (or (not (= k "CompoundStmt")) (whole-macro? n)))
+      (macro-form n "macro" (not (= k "CompoundStmt")) #(stmt-items n))
     (try
       (case k
         "AttributedStmt" (let [as (filter #(and (.endsWith ^String (kind %) "Attr") (not= (kind %) "LoopHintAttr")) (kids n)) ; a loop hint is a #pragma, a directive of the body
@@ -894,11 +918,24 @@
     (cons (vary-meta (first fs) assoc :cpp/macro "") (rest fs))
     fs))
 
+(defn- covered
+  "CP73/CP41 slip found in HotSpot (for_each_stack_value): a macro whose expansion is a declaration and a `for` whose body follows
+  the invocation. The `for`'s text begins where the declaration's does and is longer, it holds the declaration's: the declaration's text is
+  written by the `for` alone, the first form of `fs` is silent."
+  [fs n more]
+  (if (and (seq fs) (:cpp/macro (meta (first fs))) (macro-node? n))
+    (let [[b e] (macro-extent n)]
+      (if (some (fn [m] (and (macro-node? m) (let [[b2 e2] (macro-extent m)] (and (= b b2) (> (long e2) (long e)))))) (take 4 more))
+        (cons (vary-meta (first fs) assoc :cpp/macro "") (rest fs))
+        fs))
+    fs))
+
 (defn block-forms
   "A block's items: its declarations as a let around the items after them; the pending directives between them."
   ([ns] (block-forms ns nil))
-  ([ns lmx]
-   (loop [ns (seq ns) out [] lmx lmx]
+  ([ns lmx] (block-forms ns lmx false))
+  ([ns lmx lsemi0]
+   (loop [ns (seq ns) out [] lmx lmx lsemi lsemi0 lci nil]
      (if-not ns
        out
        (let [n (first ns)
@@ -907,13 +944,41 @@
            (let [[ds more] (split-with #(= (kind %) "DeclStmt") ns)
                  [binds lmx] (reduce (fn [[bs lmx] d]
                                        (let [mx (when (macro-node? d) (macro-extent d))
-                                             fs (vec (sibling (local-decl d) mx lmx))]
+                                             fs (vec (covered (sibling (local-decl d) mx lmx) d (concat (rest (drop-while #(not (identical? % d)) ds)) more)))]
                                          [(into bs fs) (when (and mx (seq fs) (:cpp/macro (meta (first fs)))) mx)]))
                                      [[] lmx] ds)]
-             (conj out (apply list 'let binds (block-forms more lmx))))
-           (let [mx (when (macro-node? n) (macro-extent n))
-                 fs (vec (sibling (stmt-items n) mx lmx))]
-             (recur (next ns) (into out fs) (when (and mx (seq fs) (:cpp/macro (meta (first fs)))) mx)))))))))
+             ;; statements of the invocation the last binding came from that do not nest in it (Klass* k = f(a, CHECK);: the if
+             ;; and the cast CHECK expands to) are absorbed: the binding carries the union of the texts, they none
+             (let [lci (last (keep-indexed (fn [i f] (when (seq (:cpp/macro (meta f))) i)) binds))
+                   [binds lmx absorbed more]
+                   (loop [binds binds lmx lmx absorbed [] more more]
+                     (let [n2 (first more)
+                           mx2 (when (and n2 lmx lci (not= (kind n2) "DeclStmt") (macro-node? n2)) (macro-extent n2))]
+                       (if (and mx2 (not= mx2 lmx) (< (long (first mx2)) (long (second lmx))) (< (long (first lmx)) (long (second mx2))))
+                         (let [b (min (long (first lmx)) (long (first mx2))) e0 (max (long (second lmx)) (long (second mx2)))
+                               ut (utf8 (close-split (text-at b (semi-end e0))))
+                               fs (vec (stmt-items n2))]
+                           (recur (assoc binds lci (vary-meta (nth binds lci) assoc :cpp/macro ut)) [b e0]
+                                  (into absorbed (cons (vary-meta (first fs) assoc :cpp/macro "") (rest fs))) (rest more)))
+                         [binds lmx absorbed more])))
+                   ls (boolean (when lmx (let [ts (keep #(let [t (:cpp/macro (meta %))] (when (seq t) t)) binds)] (and (seq ts) (str/ends-with? (last ts) ";")))))]
+               (conj out (apply list 'let binds (concat absorbed (block-forms more lmx ls))))))
+           (if (and lmx lsemi (= (kind n) "NullStmt") (when-let [[b _] (extent n)] (< (long b) (long (semi-end (second lmx))))))
+             (recur (next ns) out lmx lsemi lci) ; the ; the previous macro's text ends with: its text already holds this null statement
+             (let [mx (when (macro-node? n) (macro-extent n))
+                   fs (vec (covered (sibling (stmt-items n) mx lmx) n (next ns)))
+                   t (when (seq fs) (:cpp/macro (meta (first fs))))
+                   ov? (and mx t lmx lci (not= mx lmx) (< (long (first mx)) (long (second lmx))) (< (long (first lmx)) (long (second mx))))]
+               (if ov?
+                 ;; statements of one invocation whose expansion does not nest (f(a, CHECK): the call, the if and the cast CHECK
+                 ;; expands to): the first carries the union of the texts, the others none
+                 (let [b (min (long (first lmx)) (long (first mx))) e0 (max (long (second lmx)) (long (second mx)))
+                       ut (utf8 (close-split (text-at b (semi-end e0))))
+                       out (assoc out lci (vary-meta (nth out lci) assoc :cpp/macro ut))]
+                   (recur (next ns) (into out (cons (vary-meta (first fs) assoc :cpp/macro "") (rest fs))) [b e0] (str/ends-with? ut ";") lci))
+                 (recur (next ns) (into out fs) (when (and mx t) mx)
+                        (cond (nil? t) false (= t "") lsemi :else (str/ends-with? t ";"))
+                        (cond (nil? t) nil (= t "") lci :else (count out))))))))))))
 
 (defn compound-forms
   "A compound statement's items, the directives that stand inside it between its statements among them (CP45)."
@@ -1024,7 +1089,7 @@
       "call" (cond
                (and (= sk "CXXConstructExpr") (empty? (args-of (kids s)))) ::none
                (= sk "CXXConstructExpr") (apply mk 'cpp/paren (construct-args s))
-               (= sk "ParenListExpr") (apply mk 'cpp/paren (map ex (kids s)))
+               (= sk "ParenListExpr") (apply mk 'cpp/paren (exs (kids s)))
                :else (mk 'cpp/paren (ex x)))
       "list" (cond
                (= sk "InitListExpr") (apply mk 'cpp/brace (init-list s))
@@ -1071,7 +1136,8 @@
   (let [ps (filter #(= (kind %) "ParmVarDecl") (kids n))
         ft (try (type-of (qt n)) (catch arbace.lang.ExceptionInfo _ nil))]
     (cond-> (mapv (fn [p]
-                    (let [dflt (when (:init p) (first (remove #(.endsWith ^String (kind %) "Attr") (kids p))))
+                    (let [dflt (when (and (:init p) (let [t (ntext p)] (or (nil? t) (str/includes? t "=")))) ; not one inherited from the declaration in the class (a template's out-of-class member)
+                                (first (remove #(.endsWith ^String (kind %) "Attr") (kids p))))
                           t (or (written-param-type p dflt) (type-for p))
                           m (cond-> (merge {:tag t} (attrs-of p)) dflt (assoc :cpp/default (ex dflt)))]
                       (if (:name p) (addm (ident (:name p)) m) (if dflt (gap :param "an unnamed parameter with a default") t))))
@@ -1098,7 +1164,7 @@
       (= (kind s) "InitListExpr") (vary-meta (apply mk who (init-list s)) assoc :brace true)
       (and (= (kind s) "CXXConstructExpr") (:list s)) (vary-meta (apply mk who (construct-args s)) assoc :brace true)
       (= (kind s) "CXXConstructExpr") (apply mk who (construct-args s))
-      (= (kind s) "ParenListExpr") (apply mk who (map ex (kids s)))
+      (= (kind s) "ParenListExpr") (apply mk who (exs (kids s)))
       (= (kind s) "ImplicitValueInitExpr") (list who)
       :else (mk who (ex x)))))
 

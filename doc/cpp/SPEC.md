@@ -420,7 +420,25 @@ base = Name | ^:public Name | ^:private Name | ^:protected Name | ^:virtual Name
 
 A class in a type position is a type form `(cpp/struct Name [...] ...)`, as C's `(struct s [...])`; a class declared
 and a variable of its type in one declaration is a `c/group` (C's §6.7). A class template or a specialization is a
-`cpp/template` around the class head (§8). A member class is a member (nested). A local class is a binding in a `let`.
+`cpp/template` around the class head (§8).
+
+**Declaration groups (CP75 (b)).** C++'s counterpart of C's `c/group` is `(cpp/group head declarator*)`: a class or enum definition (or an
+elaborated forward declaration, `struct A *p;`) and the variables and typedefs declared with it in one declaration. `head` is the class
+form, unnamed or named; each declarator is a `c/var` or `c/typedef` whose type names the head as `c/base` (`c/base`, `(* c/base)`,
+`(const c/base)`). The printer writes the head in place of `c/base` in the declarators' common specifiers and the declarators after it,
+separated by commas; a local group is a binding of a `let`, a member group a member. The unnamed class thereby has one definition, as in the
+source, and the AST of the print is the original's:
+
+```clojure
+(cpp/group (cpp/struct [] (c/var ^int a)) (c/typedef T1 c/base))                         ; typedef struct { int a; } T1;
+(cpp/group (cpp/struct S2 [] (c/var ^int a)) (c/typedef S2 c/base) (c/typedef PS2 (* c/base)))
+(cpp/group (cpp/enum E3 [e1]) (c/var ^c/base ev))                                         ; enum E3 { e1 } ev;
+(cpp/group (cpp/struct A [] (c/var ^long-long a)) (c/var ^c/base x (cpp/paren 65535)))   ; struct A {...} x(65535);
+```
+
+The reader makes a group when the oracle's declaration of the class overlaps the extent of a variable, field or typedef (clang lists them
+one after the other); where a declarator's type cannot be rewritten the union of the extents is `(cpp/text ...)` as before. CP65 (c)'s
+normal form (template parameters' names) is not built: the print names an unnamed template parameter by what the converter has. A member class is a member (nested). A local class is a binding in a `let`.
 
 ### 7.2 Members
 
@@ -659,7 +677,9 @@ CS70 (a)). Additions: the comment forms of C++ (`//` and `/* */` and doc comment
 raw strings' text; `export`/`module`/`import` lines as items; the items of a class body are items of their own (a member
 function's text is its item's); alternative tokens (N7) as `:c/ops`. Sub-item layers (per token) are not v1. A macro invocation that stands for declarations, statements or an expression is the form of what it expands to,
 with the invocation as written in the metadata, `^{:cpp/macro "ASSERT (x);" :cpp/line 12}` (`:cpp/line`: the line it stood at,
-for `__LINE__`): the printer writes the text; the nodes of one invocation after the first carry `:cpp/macro ""`. Where the expansion
+for `__LINE__`): the printer writes the text; the nodes of one invocation after the first carry `:cpp/macro ""`. A value that cannot carry metadata (a number, `nullptr`
+as `nil`, a boolean: `INT_MAX`, `NULL`, `SIGSEGV`) is wrapped, `(cpp/macro "INT_MAX" 2147483647)`: the printer writes the text (an operand of
+precedence 0), the forms keep the value (CP73 (c)); the wrapper is only for expressions. Where the expansion
 cannot be converted the invocation is `(cpp/text "...")`. The
 oracle's `range`s (begin and end offsets with macro-expansion pairs) place each node among the lexer's tokens.
 
