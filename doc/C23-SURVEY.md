@@ -33,7 +33,8 @@ Contents: Executive summary · 1 What parity means for C · 2 Prior art · 3 Mea
 5 repr/c: read and print · 6 eval: ci · 7 AOT · 8 The oracle and the corpora · 9 Licenses, the host,
 the box · 10 The fourth row · 11 Plan (C1-C9) · 12 Proposals (CS1-CS24) · 13 What the user decides
 first · 14 Risks · 15 Sources · Appendix A: the scratch · Decided (2026-10-28): CS1-CS24 · C1: the plan
-after CS4 (b) (with CS30-CS43) · As built: C2, C3, C3b (with CS50-CS51, CS60-CS63, CS70-CS83).
+after CS4 (b) (with CS30-CS43) · As built: C2, C3, C3b, C4 (with CS50-CS51, CS60-CS63, CS70-CS83, CS90-CS95) ·
+As built: C5 (write-ahead) (with CS100-CS111).
 
 ## Executive summary
 
@@ -2299,3 +2300,251 @@ The worktree's `.tmp/` (kept): `ci-annot/` (each corpus's lists, `cc/` and `port
 and `lj/` the judge's files, `sum.py` the table, `lay.c`, `lay2.c`, `u.c` the layout probes, `a.c`, `b.c`, `c.c`, `i.c`
 the first probes, `cmp.sh`), `repr-c/` (ccdump's build, gcc 15.2's tarball and testsuite).
 
+
+### Decided (CS90-CS95; the user, 2026-10-30)
+
+The user decided C4's six proposals as recommended (relayed by the coordinator, 2026-10-30): **CS90 (a)**, the checker
+`arbace.c.check` in `arbace/c/`, embedded and compiled with ci (moved in C5); **CS91 (a)**, layouts judged by gcc's recorded
+sizes, alignments and offsets; **CS92 (a)**, C4 diagnosing C4.4's errors only, the rest judged by C7's error tests; **CS93
+(a)**, the checker's 13 own differences recorded and fixed in C5 as ci meets them; **CS94 (a)**, CS80's grammar left to C7;
+**CS95 (a)**, the types kept inside the checker, `check-unit` returning each form's result to C5's builder, the annotations a
+view of them.
+
+## As built: C5 (write-ahead) (2026-10-30)
+
+C5, ci, on the branch `c23-c5` from `c23-c4` (`c55aedac`), in the light tier (the user, 2026-10-30: under 2 GB, at
+most 4 threads, no gate, no build of Arbace's executables, no lock), so **write-ahead**: ci's back end is written as the
+Go forms the shipped executable will compile in (`go/arbace/crt`, `go/arbace/ci`, `go/arbace/cinterp`) and tested
+outside it, by repr/go printing the two packages and TamaGo's go building them with a small runner of Arbace's own
+(`tools/cirun`, std only); its Arbace side (`arbace.c`, `arbace.c.build`, `arbace.c.run`, `arbace.c.musl`,
+`arbace.c.repl`) runs evaluated from the checkout on stage 0. What needs an executable built with ci is the heavy
+list (C5.7). Go only TamaGo's go1.27.1, no cgo.
+
+### C5.1 What was built
+
+| part | where | lines | what |
+|---|---|---:|---|
+| crt: memory (CS9 (a)) | `go/arbace/crt/mem.ae` | 375 | one flat 64-bit little-endian address space per program, made of slabs (Go `[]byte`): nothing below `Text` (functions are addresses `Text + 16·i`, labels `LabelBase + code`), read-only data (string literals, `const` statics: a store traps once the static initializers have run), static data, the heap (`brk`), `mmap`'s mappings (anonymous, `MAP_FIXED`, partial `munmap`), the 8 MiB stack below `StackTop`; loads and stores by `encoding/binary`'s little-endian functions behind a two-entry cache of slabs; a load or store with no slab, a store into read-only data are `SIGSEGV` (`crt.Fault`), the program's end `crt.Exit` |
+| crt: wide integers (CS35) | `go/arbace/crt/wide.ae` | 385 | `__int128` and `_BitInt(N)` beyond 64 bits as 64-bit limbs (`crt.Wide`, `crt.WType`): the operators, shifts, comparisons, conversions to and from 64-bit integers and `double`, decimal text, memory at the psABI's sizes; written by a Sonnet subagent against `math/big` |
+| crt: the syscall layer (§6.5) | `go/arbace/crt/syscall.ae` | 1,211 | the Linux x86-64 system calls musl 1.2.6 makes, over Go's `os` and `syscall` (`crt.Sys.Syscall`: read, write, writev, open/openat, close, lseek, fstat/newfstatat, mmap, munmap, mremap, brk, rt_sigaction, rt_sigprocmask, kill/tkill/tgkill with pending signals and the default actions, ioctl's `TIOCGWINSZ` as `ENOTTY`, clock_gettime, uname, getrandom, futex for one thread, arch_prctl, exit_group, ...; `-ENOSYS` for the rest), a bad pointer argument `-EFAULT`; written by a Sonnet subagent |
+| ci: nodes, frames, calls | `go/arbace/ci/{prog,expr,stmt,call}.ae` | 1,591 | goi's shape (GOI-SPEC §4.2-§4.6): typed Go closures over a frame, `I` (integers of up to 64 bits, pointers, bool: normalized), `F` (float rounded to float, double, long double as double), `W` (wide), `E` (effects); a frame's slots (`I`, `F`) for the scalar locals whose address is not taken, its memory in the C stack for the rest (aggregates, wide integers, address-taken locals, temporaries, the varargs area); statements return a `Ctl`; labels are codes and a statement list, loop, `if` or `switch` holding a label can be **entered** at it (`Stmt.Enter`), so C's gotos into blocks, loops and switches (Duff's device) and `switch`'s cases need no state machine; a call evaluates its arguments right to left (CS31 (a)), passes them as values, an aggregate by its bytes, an aggregate result through a hidden address; varargs in an 8-byte-slot area after the frame, `va_list` a pointer to the next slot (cc's `__builtin_va_list` is `void *`); `alloca`, VLAs on the C stack; the machine's arithmetic of gcc `-O0` (SPEC §13.1: wrapping, shift counts masked, `SIGFPE` on division by zero and `MIN / -1`, `cvttsd2si`'s conversions) |
+| ci: `setjmp`, natives | `go/arbace/ci/{natives,builtins}.ae` | 319 | `setjmp` is legal only as (part of) a whole controlling expression or expression statement (7.13.1.1), so the builder wraps such a statement (`SjStmt`): `longjmp` is a Go panic the statement of the frame that set the `jmp_buf` recovers, running the statement again with `setjmp` returning the value; the natives of musl's assembly (the `__syscall0`-`6` entry, `__get_tp`, `__set_thread_area`, `__syscall_cp_asm`, `setjmp`/`longjmp` and their aliases) and of `arch/x86_64/atomic_arch.h`'s inline functions for one thread; gcc's bit and classification builtins (`__builtin_clz` ... `__builtin_fpclassify`) |
+| ci: the registry | `go/arbace/ci/load.ae` | 559 | the node program (below) made into functions, statics and nodes, from data or from its text (`ci.Parse`) |
+| cinterp | `go/arbace/cinterp{.ae,/natives.ae}` | 49 | arbace.lang.CInterp's native `runNodes` (a node program run in the process on its standard streams), importing jrt; not built (C5.7) |
+| tools/cirun | `tools/cirun/main.go` | 50 | the light path's runner: a node program's text loaded and run, `CI_STRACE` and `CI_CALLTRACE` tracing system calls and interpreted calls; `bin/ci cirun-build` prints `go/arbace/crt` and `go/arbace/ci` with repr/go and builds it into `.tmp/ci/cirun` |
+| the builder | `arbace/c/build.ae` (`arbace.c.build`) | 1,708 | the checked forms into a node program: slots and the frame's memory, label codes, the conversions' nodes (6.3), places (names, `@p`, `aget`, `.-f`, `->`'s paths, bit-fields through their unit), assignments (the right operand evaluated before the left one's load, as gcc `-O0`), `++`/`--`, pointer arithmetic, `?:`, comma, statement expressions, compound literals, string literals (merged, read-only), initializers by 6.7.11 (designators, brace elision, strings for character arrays), static initializers run before the program starts, `_Generic` by the checker's choice, the builtins in scope (`__builtin_expect`, the `va_` ones, `alloca`, the overflow builtins in 128 bits, `__builtin_classify_type`, `__builtin_frame_address`, the library's `__builtin_X` as `X`), complex arithmetic of the floating types (in memory, gcc's formulas), gcc's bit-fields wider than `int` at their width (`pr32244-1`), GNU's cast to a union; a refusal (SPEC §14's by design, or deferred) as a class |
+| the linker | `arbace/c/build.ae`, `arbace/c/musl.ae` | | static linking by name: external functions and objects across the units, a strong definition over a weak one, `alias` attributes (musl's `weak_alias`), an undefined weak object at address 0, a function whose body is inline assembly a native |
+| musl (CS11 (a), CS12 (a), CS35) | `arbace/c/musl.ae` (`arbace.c.musl`), `bin/lib/ci/musl` | 306 | musl 1.2.6's tarball (pinned) extracted and configured into `.tmp/ci-musl/`, read by repr/c in Arbace's configuration (gcc's c99 macros with `__STDC_HOSTED__` 0, `__SIZEOF_LONG_DOUBLE__` 8, `__LDBL_*` as double's, musl's `arch/arm/bits/float.h` before `arch/x86_64`'s: `LDBL_MANT_DIG` 53; musl's own include path and `-D_XOPEN_SOURCE=700`), its generic C sources (1,335 of the static libc's 1,340; the generic stubs of what x86_64 writes in assembly left out for natives); the forms cache (`.tmp/ci-musl/forms`, 15 MB) with an index of each unit's definitions (weak ones and aliases marked) and the names its code references; a program links the units that define what it still needs, as `ld` pulls archive members, each unit checked once per process |
+| ci's programs | `arbace/c/run.ae` (`arbace.c.run`) | 208 | a program's units read, checked (long double as double; the reference's `-fpermissive` makes implicit declarations no error), linked and built; `nodes`, `nodes-list` (a corpus's programs in threads), `judge`, `divergences` |
+| the REPL | `arbace/c.ae` (`arbace.c`), `arbace/c/repl.ae` (`arbace.c.repl`) | 174 | §6.6: the macros of C forms, a unit a namespace, declarations entered (a redefinition replaces), `c/include` at the REPL, `c/run-main` (exit and abort end the run, not the REPL); its back end `*run-nodes*`: tools/cirun on the light path, CInterp on the executable (C5.7) |
+| the checker (CS90 (a), CS95 (a)) | `arbace/c/check.ae` (`arbace.c.check`, moved from `arbace/repr/c/`) | | `check-unit :results true` returns an identity map from each expression form to its result (type, value, lvalue, bit-field, member), each declarator's symbol to its entry (with an identity, `:id`, and its name), each `_Generic`'s chosen association; two own differences ci met fixed (CS93 (a)): an integer constant converted to `float` rounded to float (`16777217 != (float)16777217e0`), and `{ (lit T 42) }` no longer taken for `{ "string" }` in an array's size |
+| the commands | `bin/ci run`, `nodes`, `check`, `divergences`, `repl-session`, `musl prepare|read`, `cirun-build`, `record-ref` (`bin/lib/ci/`); the C4 verb `check` renamed `diagnose` | | the Makefile's `ci-*` targets |
+| the data | `test/c/ref-gcc15.edn`, `test/c/check-linux-amd64.edn`, `test/c/divergences.edn`, `test/c/check-known.edn`, `test/c/repl/letters.ae`, `letters.out` | | gcc 15.2's runs (3,879 files of seven corpora: status, stdout's SHA-256, its first line, -O2's agreement; a Sonnet subagent's `bin/lib/ci/record-ref`); the check's results; the classes; the REPL session |
+
+The **node program** is the builder's output and the back end's input: a vector of commands, `(fn ID NAME)`,
+`(native ID NAME NATIVE)`, `(static IDX SIZE ALIGN RO NAME)`, `(data IDX OFF HEX)`, `(at IDX ADDR)`, `(alias IDX OF OFF)`,
+`(fnalias ID TARGET)`, `(code ID NI NF FRAME VARIADIC RETF32 PARAMS BODY)`, `(init STMT)`, `(start LIBC MAIN)`, nodes as
+lists (`(bin "add" "i32" (il 0) (i 1))`, `(ld "u8" (adds (g 3) (il 2) 1))`, `(call (fnref 7) [(ai ...)])`), floating
+constants as their bits. Its text is what crosses on both paths (CS103).
+
+### C5.2 The check's numbers
+
+`bin/ci check --record` over the seven single-file run corpora gcc 15.2's runs were recorded for (C5.1's data; 3,879 files,
+3,582 of them programs gcc builds and runs), on stage 0 with tools/cirun, at most 4 threads (37 minutes):
+
+| corpus | programs | pass | by-design | long-double | speed | vla | read | complex-int | other classes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| torture-execute | 1,532 | 1,430 | 71 | 6 | 0 | 13 | 5 | 4 | gcc-builtin 1, checker 1, wide 1 |
+| torture-execute-mirror | 1,601 | 1,494 | 76 | 6 | 0 | 13 | 5 | 4 | gcc-builtin 1, checker 1, wide 1 |
+| tcc-tests2 | 82 | 77 | 1 | 0 | 0 | 1 | 2 | 0 | abi 1 |
+| compcert | 24 | 16 | 0 | 0 | 8 | 0 | 0 | 0 | |
+| mir | 312 | 309 | 0 | 1 | 0 | 0 | 0 | 0 | ub 2 |
+| cxgo | 2 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | |
+| benchmarksgame | 29 | 22 | 5 | 0 | 1 | 0 | 0 | 0 | threads 1 |
+| **total** | **3,582** | **3,350** | **153** | **13** | **9** | **27** | **12** | **8** | ub 2, gcc-builtin 2, checker 2, wide 2, abi 1, threads 1 |
+
+(`bin/ci divergences` on the record: 3,350 pass, every other program in a class.) The first full run, before the fixes C5.3
+names, passed 3,330.
+
+**No program fails**: every one that does not pass is in a class of `test/c/divergences.edn`, by design (`by-design` 153,
+`long-double` 13, `speed` 9, `ub` 2, `gcc-builtin` 2, `abi` 1) or deferred (`vla` 27, `read` 12, `complex-int` 8, `checker`
+2, `wide` 2, `threads` 1), 34 of them by `test/c/check-known.edn`'s entries (the mirror's copies of the torture tests share
+theirs). The classes
+`long-double` (CS35, by design, the class SPEC §12.5 records: every program in it declares or converts to `long double`), and
+`by-design` (SPEC §14) hold most; the deferred ones name the proposal that would build them.
+
+Not in the check (C5.7's): the program corpora (SQLite, Lua, zlib, QuickJS: several units and their tests), gcc 15.2's
+`dg-do run` tests (C7's), cxgo's 86 fragments without `main` (gcc does not link them: no reference).
+
+### C5.3 What ci met in musl and in the checker
+
+- musl 1.2.6 runs as C forms from its own start: `__libc_start_main` (with an initial stack of argc, argv, an empty
+  environment and the auxiliary vector), `__init_libc`, `__init_tls` (no TLS segment: the builtin TLS), stdio (vfprintf's
+  `%f` and `%e` through musl's `fmt_fp` in double, CS35), mallocng over `brk` and `mmap` (its guard page put with
+  `MAP_FIXED` at the heap's start, which made crt's `brk` extend the slab ending at the old break), `exit` flushing
+  through `__stdio_exit` (pulled by `__towrite`'s strong reference, the weak alias in `exit.c` overridden: the linker's
+  strong-over-weak rule, and a weak alias of an object another unit defines not taken).
+- The checker's own differences ci met and C5 fixed (CS93 (a)): an integer or double constant converted to `float` was
+  not rounded to float (`16777217L != (float)16777217e0`, `3.14 == 3.14f`); `(lit float x)` likewise; `{ (lit unsigned 42) }`
+  counted as `{ "string" }` for an array's size (`pr31448.c`); an implicitly declared function's entry had no name. One is
+  known: `__alignof__` of a function declared `aligned(256)` (`align-3.c`).
+
+### C5.4 Speed and memory
+
+The builder reads, checks, links and builds a corpus's programs at about 3 programs a second with 3 threads (each
+program's musl part, about 70 units for `printf`, checked once per process and built again: a node program is about
+0.4 MB of text); the runs, 4 at a time, take seconds. The interpreter: `fib(30)`'s node program (no libc) runs in 0.61 s
+(gcc's -O0 code under 0.01 s); CompCert's `binarytrees.c`, whose time is mostly musl's mallocng interpreted, 14 s (gcc's 0.05 s). The Arbace process stays under its `GOMEMLIMIT` of 1.8 GiB;
+cirun's runs under 100 MB. The whole check took 37 minutes at 4 threads.
+
+### C5.5 Proposals (CS100-CS111)
+
+Each with its options, the recommended one first. CS90-CS95 (C4's), decided by the user as recommended (above), are followed: CS90 (a) the checker moved to
+`arbace/c/check.ae` as `arbace.c.check` (its requirers and doc/ARBACE.md follow; it is in the embedded tree with ci's
+namespaces, CS100), CS91 (a) not built (gcc's layouts as data: ci met no layout difference; C7 with the error tests),
+CS92 (a) (C7's), CS93 (a) (four of the checker's own differences ci met fixed, one known), CS94 (a) (C7's), CS95 (a) (built).
+
+- **CS100 Where ci's Arbace namespaces wait for the heavy window.** `arbace/c.ae` and `arbace/c/` (the checker among them
+  since CS90 (a)) are in the embedded tree (only `arbace/repr/c` is excluded, CS36 (a)), and they require `arbace.repr.c.*`: an executable built from this
+  branch before the heavy window would embed namespaces whose requires it does not hold.
+  - Options: (a) the branch is merged in the heavy window only, with `arbace/j2g/embed.ae`'s exclusion of `arbace/repr/c`
+    dropped (CS36 (a)'s C5 change) and the checker moved (CS90 (a)) in the same change; (b) `embed.ae` excludes `arbace/c.ae`
+    and `arbace/c/` now (a one-line shipped change), the branch mergeable before the window, ci evaluated from the checkout
+    until then; (c) the namespaces moved under `arbace/repr/c/` until then.
+  - *Recommended: (b)*: the branch's light work (the check, the REPL session) then lands without a re-seed, and the window's
+    change is the exclusion's removal; (a) holds the work back, (c) renames twice.
+- **CS101 ci's Go sources.** `go/arbace/crt` and `go/arbace/ci` were written as Go text in the scratch and converted by
+  repr/go's native reader (`bin/repr-go read --goos linux`), the forms committed; their unit tests (`wide_test.go`,
+  `syscall_test.go`, against `math/big` and a temporary directory) were not converted.
+  - Options: (a) the forms are the source from now, edited as forms, the tests converted with `--tests` into
+    `:test-files` (goi does not load them, GOI-SPEC S45; `go test` on the printed packages runs them); (b) the forms the
+    source, the tests dropped, ci's check their judge; (c) the Go text kept under `tools/` as the source and the forms
+    generated (a generated-check step).
+  - *Recommended: (a)*: Arbace keeps Go as forms (CLAUDE.md), and the tests are cheap evidence for the limbs and the
+    syscall layer, which the corpora exercise only in part.
+- **CS102 musl's forms.** SPEC §6.1 puts musl's C forms in `c/musl/`; C5 keeps them in a cache (`.tmp/ci-musl/forms`,
+  15 MB, 1,335 units and their header units, read in 12.5 minutes at 4 threads), made by `bin/ci musl read` from the
+  pinned tarball.
+  - Options: (a) the cache until C6, then the forms committed under `c/musl/` with a provenance file (the tarball's pin,
+    the reader's digest) and `bin/ci musl verify` (read afresh, byte for byte) as `jdk/` is, when ci's executable embeds
+    them; (b) committed now; (c) always the cache.
+  - *Recommended: (a)*: no consumer needs them committed before the executable embeds ci, and 15 MB is the disk's.
+- **CS103 What crosses into ci's back end.** The builder makes a node program as data; on the light path its text runs
+  in tools/cirun; arbace.lang.CInterp's one native takes the same text.
+  - Options: (a) the text, one native (`runNodes`), as written (the REPL's state is the forms, rebuilt for each run);
+    (b) goi's way, a native per node (`CInterp.node(kind, args)`), the program kept in the process between evaluations
+    (a REPL whose C globals keep their values between `c/run-main`s, `c/eval` of an expression);
+    (c) (a) now, (b) when `c/eval` is built.
+  - *Recommended: (c)*: (a) is enough for §6.6's session and shares the light path's loader; values crossing (SPEC §12.4)
+    need (b)'s persistent program.
+- **CS104 musl's five unread units.** `iswalpha.c`, `iswpunct.c`, `wcwidth.c`, `strerror.c` and `iconv.c` include a table
+  inside an initializer (`static const unsigned char table[] = { #include "alpha.h" };`); the converter refuses a
+  declaration that begins in one file and ends in another (`split-declaration`, SPEC §4.3).
+  - Options: (a) the converter keeps such a declaration whole in the including unit (the included tokens part of its
+    initializer, the layer's `c/include` inside the `init` as §9.2 allows), in C6; (b) the five functions written as C forms
+    by hand; (c) their natives.
+  - *Recommended: (a)*: the same rule serves tcc's `18_include.c` and C7's tests; `strerror` is the one the corpora call.
+- **CS105 GNU's complex integer types.** `_Complex int` (and `__real__`/`__imag__`, SPEC §14) are refused; the floating
+  complex types are built (gcc's formulas, not its `__muldc3`/`__divdc3` handling of infinities).
+  - Options: (a) complex integers deferred to C7 with GNU's extensions, the class `complex-int`; (b) now; (c) by design.
+  - *Recommended: (a)*.
+- **CS106 Variably modified types.** Built: a block's VLA on the C stack, `sizeof` of a VLA object. Not: VLAs in structs,
+  `sizeof` of a variably modified type name, parameters' array sizes evaluated at entry (side effects), a VLA's storage
+  freed when its scope is left (a loop re-entering the declaration grows the stack: `20040811-1.c` overflows 8 MiB).
+  - Options: (a) in C6 with AOT, which needs the same (a VLA's size slot per declaration, its stack pointer restored at
+    the scope's exit), the class `vla` until then; (b) now; (c) by design.
+  - *Recommended: (a)*.
+- **CS107 The check's speed.** The interpreter runs about 100 to 300 times slower than gcc's -O0 code (C5.4); 10 s per
+  program puts 9 programs in the class `speed` (8 of CompCert's benchmarks, the benchmarks game's spectral-norm).
+  - Options: (a) the class, by design (goi's), and a profile-guided pass over the hot nodes in C6 (frames from a thread's
+    stack instead of allocated, as goi's S21; fused load-op-store nodes); (b) a longer limit for the check; (c) AOT the
+    judge for them.
+  - *Recommended: (a)*.
+- **CS108 The checked mode.** SPEC §12.1's block table (a load or store outside a live block, a bad `free`, the C
+  position) is not built: the memory checks are the slabs' (a fault at an unmapped address, a store into read-only data).
+  - Options: (a) at the REPL's in-process back end (CS103 (b)), hooking musl's malloc and free as natives that record
+    blocks; (b) now on the light path; (c) dropped, the slabs' faults the checked mode.
+  - *Recommended: (a)*.
+- **CS109 Signals and the REPL.** `raise`, `abort` and a fault end the run with 128 + the signal (musl's own `raise` over
+  `tkill`); a handler installed by `signal` runs for `raise`/`kill` of a handled signal, not for a fault (`SIGSEGV`,
+  `SIGFPE` from the machine).
+  - Options: (a) as built until a corpus program needs a fault's handler (none of the run corpora's passing ones); (b) a
+    fault delivered to an installed handler, `longjmp` out of it allowed.
+  - *Recommended: (a)*.
+- **CS110 The REPL's back end on the light path.** `*run-nodes*` runs tools/cirun as a process; on the executable it is
+  CInterp's native.
+  - Options: (a) both, the session's test (`bin/ci repl-session`) on the light one until the window, then on both;
+    (b) the executable's only.
+  - *Recommended: (a)*.
+- **CS111 gcc's -fpermissive.** The reference builds the corpora with `-fpermissive` (gcc 15 rejects implicit
+  declarations at C99 and later otherwise); ci's reads drop the checker's implicit-declaration errors for them.
+  - Options: (a) as built, a corpus file's `:args` naming it (test/c/corpora.edn) as C7 records the error tests' own;
+    (b) the checker's error kept and the files classed.
+  - *Recommended: (a)*.
+
+### C5.7 The heavy list (the window after the tag)
+
+What C5 still needs that the light tier does not allow, in order:
+
+1. **The embedded tree** (CS100, CS36 (a)): `arbace/j2g/embed.ae` drops the exclusion of `arbace/repr/c.ae` and
+   `arbace/repr/c/` (and `bin/lib/version.bash`'s and `test/gate/steps.edn`'s `!arbace/repr/c` entries follow it), so
+   `arbace.c` and `arbace.c.*` (the checker, moved by CS90 (a)) embed and compile with repr/c, c2j's first compile of
+   them (evaluated only so far).
+2. **CInterp** (CS103): `arbace/lang/CInterp.ae`, one static native whose Go side is `go/arbace/cinterp`'s
+   `CInterp_RunNodes_String_String1__I_native`:
+
+   ```clojure
+   (in-ns 'arbace.lang)
+   (defclass ^:public ^:final CInterp
+     (constructor ^:private [this])
+     ;; runs the node program text (arbace.c.build/program-text's) with the command line argv: its status
+     (method ^:public ^:static ^:native runNodes ^int [^String text ^String/1 argv]))
+   ```
+
+    j2g's rule that its natives are `arbace/cinterp`'s
+   (`arbace/j2g/decls.ae`, beside GoInterp's: `(= n "arbace/lang/CInterp") (symbol "cinterp" fname)`) and its copy of
+   `go/arbace/crt`, `go/arbace/ci`, `go/arbace/cinterp` into the program (`arbace/j2g/main.ae`, beside goi's, J2G-SPEC
+   §9.1's amendment as S32's); `arbace.c.repl/*run-nodes*` bound to it on the executable.
+3. **The build**: `bin/arbace-go --build` (heavy lock), `bin/goi` untouched; the smoke test; `go/arbace/cinterp`'s Go
+   forms compiled for the first time (they were not: they import jrt).
+4. **The re-seed** the embedded namespaces need (C5's, with C6's if batched, C1.2).
+5. **ci on the executable**: `bin/ci check` with `CI_EXE` (each node program run in the process by CInterp) over every run
+   corpus, against the light path's results (equal by construction: one loader); `bin/ci repl-session` on it.
+6. **The full corpora** beyond the light tier's: SQLite, Lua, zlib, QuickJS (programs of several units with their tests:
+   `bin/ci check` gains program corpora), gcc 15.2's `dg-do run` tests of the `gcc-*` groups (C7's, their references
+   recorded with `bin/ci record-ref --corpus gcc-c23,...`).
+7. **The gate**: the essential gate in this worktree (not run: the light tier), and C8's essential subsets
+   (`test/c/essential*.txt`) as gate steps; `make check-makefile` passes.
+8. **`bin/ci annotations`** again (C4's check, 31-43 minutes at 8 threads): the checker changed (CS95 (a)'s results,
+   three own differences fixed), its known file's `checker-gap` entries removed as they pass (CS93 (a)).
+
+### C5.6 What is left
+
+C5's exit is met on the light path for the single-file run corpora: `bin/ci check` none failing, every non-pass in a class
+(`long-double` recorded, 13 programs), and the REPL session of §6.6 (`bin/ci repl-session`, `test/c/repl/letters.ae`: a unit typed at
+the REPL with musl's `<stdio.h>`, run, a function redefined and seen by the next run, `exit` and `abort` ending the run and
+not the REPL). Left: the heavy list (C5.7) and CS100-CS111.
+
+### C5.8 Checks and scratch
+
+Run: `bin/ci check --record` over the seven corpora (C5.2) and the runs before it that found the bugs above; `bin/ci
+repl-session`; `bin/ci record-ref` (by a Sonnet subagent, 2 min 18 s at 4 jobs); `bin/ci musl prepare` and `read`; `bin/ci
+cirun-build` from the committed forms and the printed packages' build; `go vet` and `go test` of crt (its limbs against
+`math/big`, the syscall layer) on the Go text before conversion; repr/go's read of the two packages (`0 failed, 0 did not
+read back`) and the print back, built, running a node program the same; `make check-makefile`. Not run: anything of C5.7,
+the essential gate (the light tier), `bin/ci annotations` (C4's check: the checker changed, C5.7's item 8), the token,
+tree and round-trip checks (repr/c's reader unchanged).
+
+Shipped files: `go/arbace/crt.ae`, `go/arbace/crt/`, `go/arbace/ci.ae`, `go/arbace/ci/`, `go/arbace/cinterp.ae`,
+`go/arbace/cinterp/` (new packages nothing imports yet: inert in a build until C5.7's item 2); `arbace/c.ae` and `arbace/c/`
+(new namespaces in the embedded tree, the checker moved there: CS100). Not shipped:
+`bin/ci`, `bin/lib/ci/`, `tools/cirun/`, `test/c/`, the Makefile.
+
+The worktree's `.tmp/` (kept): `ci-musl/` (the extracted and configured release, `ldbl53/bits/float.h`, the forms cache
+`forms/` with `index.edn`), `ci-check/` (each corpus's `list.tsv`, `nodes.tsv`, `run.tsv`, the node programs of the runs
+that did not exit 0, `results.edn`), `ci-ref/` (record-ref's lists), `ci/` (the printed packages and `cirun`), `cigo/` (the
+Go text the forms were converted from, with `crt`'s tests), `c5/` (the probes `s0.c`, `s1.c`, `h1.c`, `h2.c`, `m1.c`, `si*.c`,
+the logs `te1.log`, `others1.log`, `all1.log`, `final.log`, `final2.log` (the recorded run), this section's draft).
+
+Rule slips: two waiting loops used `pgrep` (stopped once noticed), one probe redirected to `/dev/null`, and the judge of one
+check run loaded `arbace/c/build.ae` while it was being edited (the run's judgment was repeated).

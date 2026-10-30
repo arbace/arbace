@@ -55,8 +55,10 @@ code. Three kinds of things live here:
   `repr/c.ae` and `repr/c/convert.ae`, `print.ae`, `layout.ae`, `rtcheck.ae`, `c23check.ae`, the converter, the
   printer and the round trip, whose converting and printing rules port those of go-whim's `crefactor/cemit` and
   `crefactor/clisp` at the same commit (read and ported, nothing copied; EPL-1.0 by CS37 (a)), the rest Arbace's;
-  since C4 (2026-10-30, "As built: C4") `repr/c/check.ae` and `annot.ae`, the checker over C forms and its check,
-  Arbace's own, cc's checker only its oracle), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
+  since C4 (2026-10-30, "As built: C4") `repr/c/annot.ae` and the checker over C forms, Arbace's own, cc's checker only its
+  oracle, `c/check.ae` (`arbace.c.check`) since C5 (CS90 (a)); since C5 ("As built: C5 (write-ahead)") `c.ae` and `c/`, ci's
+  macros, REPL, builder, linker and musl's reading (`arbace.c`, `arbace.c.*`), Arbace's own, the C side of
+  `go/arbace/crt` and `go/arbace/ci`, Arbace's own Go forms), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
   `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
   `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,
   `arbace.build.go`; doc/go/BUILD.md; until 2026-10-17 j2a, g2a and `arbace.g2a.build`) and
