@@ -1,0 +1,203 @@
+;; si's runtime: the reader's tests.
+(in-ns 'go.arbace.scm)
+
+(go/file "reader_test.go" :imports [[testing "testing"] [os "os"] [strings "strings"] [strconv "strconv"] [fmt "fmt"]])
+
+(go/func rdDump "rdDump is x spelled structurally.\n" ^string [^any x]
+  (type-switch [v x]
+    (case [int64] (return (strconv/FormatInt v 10)))
+    (case [bool] (if v (return "#t") (return "#f")))
+    (case [Char] (return (+ "#\\U+" (strconv/FormatInt (conv int64 v) 16))))
+    (case [(* Symbol)] (return (+ "'" (.-Name v))))
+    (case [(* String)] (return (strconv/Quote (conv string (.-R v)))))
+    (case [(* Special)] (return (.-Name v)))
+    (case [(* Vector)]
+      (let [parts (make (slice string) 0)]
+        (for [i 0] (< i (len (.-V v))) (inc! i)
+          (set! parts (append parts (rdDump (aget (.-V v) i)))))
+        (return (+ "#(" (strings/Join parts " ") ")"))))
+    (case [(* Bytevector)]
+      (let [parts (make (slice string) 0)]
+        (for [i 0] (< i (len (.-B v))) (inc! i)
+          (set! parts (append parts (strconv/Itoa (conv int (aget (.-B v) i))))))
+        (return (+ "#vu8(" (strings/Join parts " ") ")"))))
+    (case [(* Pair)]
+      (let [parts (make (slice string) 0)
+            ^any l x]
+        (while true
+          (let [(values p ok) (assert (* Pair) l)]
+            (when (not ok)
+              (break))
+            (set! parts (append parts (rdDump (.-Car p))))
+            (set! l (.-Cdr p))))
+        (when (!= l (conv any Null))
+          (set! parts (append parts "." (rdDump l))))
+        (return (+ "(" (strings/Join parts " ") ")")))))
+  (fmt/Sprintf "?%T" x))
+
+(go/func rdRun "rdRun reads the first datum of s into *out as a dump, or the error's." [^string s ^{:tag (* string)} out]
+  (defer ((fn []
+            (let [e (recover)]
+              (when (!= e nil)
+                (let [(values r ok) (assert (* Raise) e)]
+                  (if (not ok)
+                    (set! (deref out) (fmt/Sprint "PANIC " e))
+                    (let [(values c ok2) (assert (* Compound) (.-Obj r))
+                          ^string msg ""]
+                      (when ok2
+                        (for [i 0] (< i (len (.-Parts c))) (inc! i)
+                          (let [p (aget (.-Parts c) i)]
+                            (when (== (.-RTD p) CondIrritants)
+                              (let [(values items _) (ListSlice (aget (.-F p) 0))]
+                                (set! msg (+ (rdDump (aget items 0)) " " (rdDump (aget items 1)))))))))
+                      (set! (deref out) (+ "ERR " msg))))))))))
+  (set! (deref out) (rdDump (ReadDatum (NewStringSource s)))))
+
+(go/func rdTry "rdTry reads the first datum of s: its dump, or ERR and the message with its arguments.\n" ^string [^string s]
+  (let [^string out ""]
+    (rdRun s (addr out))
+    out))
+
+(go/func rdCheck [^{:tag (* testing/T)} t ^string in ^string want]
+  (let [got (rdTry in)]
+    (when (!= got want)
+      (.Errorf t "read %q: got %s, want %s" in got want))))
+
+(go/func TestReadBasic [^{:tag (* testing/T)} t]
+  (rdCheck t "a" "'a")
+  (rdCheck t "abc-d?" "'abc-d?")
+  (rdCheck t "a\\x41;b" "'aAb")
+  (rdCheck t "\\x41;bc" "'Abc")
+  (rdCheck t "..." "'...")
+  (rdCheck t "->x" "'->x")
+  (rdCheck t "+" "'+")
+  (rdCheck t "-" "'-")
+  (rdCheck t "(a b)" "('a 'b)")
+  (rdCheck t "[a b]" "('a 'b)")
+  (rdCheck t "(a . b)" "('a . 'b)")
+  (rdCheck t "(a b . c)" "('a 'b . 'c)")
+  (rdCheck t "(a . (b c))" "('a 'b 'c)")
+  (rdCheck t "()" "()")
+  (rdCheck t "#(1 2)" "#(1 2)")
+  (rdCheck t "#vu8(1 2)" "#vu8(1 2)")
+  (rdCheck t "#vu8()" "#vu8()")
+  (rdCheck t "#t" "#t")
+  (rdCheck t "#true" "#t")
+  (rdCheck t "#f" "#f")
+  (rdCheck t "#false" "#f")
+  (rdCheck t "'x" "('quote 'x)")
+  (rdCheck t "`x" "('quasiquote 'x)")
+  (rdCheck t ",x" "('unquote 'x)")
+  (rdCheck t ",@x" "('unquote-splicing 'x)")
+  (rdCheck t "#'x" "('syntax 'x)")
+  (rdCheck t "#`x" "('quasisyntax 'x)")
+  (rdCheck t "#,x" "('unsyntax 'x)")
+  (rdCheck t "#,@x" "('unsyntax-splicing 'x)")
+  (rdCheck t "(a .'b)" "('a 'quote 'b)")
+  (rdCheck t "\"a\\x41;b\"" "\"aAb\"")
+  (rdCheck t "\"a\\\n   b\"" "\"ab\"")
+  (rdCheck t "\"a\\tb\\n\\\\\\\"\"" "\"a\\tb\\n\\\\\\\"\"")
+  (rdCheck t "#\\x41" "#\\U+41")
+  (rdCheck t "#\\x" "#\\U+78")
+  (rdCheck t "#\\a" "#\\U+61")
+  (rdCheck t "#\\(" "#\\U+28")
+  (rdCheck t "#\\space" "#\\U+20")
+  (rdCheck t "#\\newline" "#\\U+a")
+  (rdCheck t "#\\nul" "#\\U+0")
+  (rdCheck t "#\\delete" "#\\U+7f")
+  (rdCheck t "#;a b" "'b")
+  (rdCheck t "#;(a b) c" "'c")
+  (rdCheck t "#| x #| y |# z |# q" "'q")
+  (rdCheck t "; c\n q" "'q")
+  (rdCheck t "#!r6rs q" "'q")
+  (rdCheck t "#!fold-case ABC" "'abc")
+  (rdCheck t "ABC" "'ABC")
+  (rdCheck t "#!fold-case #!no-fold-case ABC" "'ABC")
+  (rdCheck t "#!fold-case #\\SPACE" "#\\U+20")
+  (rdCheck t "#x1F" "31")
+  
+  (rdCheck t "42" "42")
+  (rdCheck t "-42" "-42")
+  (rdCheck t "(a #;b c)" "('a 'c)")
+  (rdCheck t "(a #;b)" "('a)"))
+
+(go/func TestReadErrors [^{:tag (* testing/T)} t]
+  (rdCheck t ")" "ERR \"unexpected close parenthesis\" ()")
+  (rdCheck t "1+" "ERR \"~a syntax is not allowed in #!r6rs mode\" (\"1+ symbol\")")
+  (rdCheck t "+a" "ERR \"~a syntax is not allowed in #!r6rs mode\" (\"+a symbol\")")
+  (rdCheck t "{" "ERR \"~a syntax is not allowed in #!r6rs mode\" (\"open brace\")")
+  (rdCheck t "(a" "ERR \"unexpected end-of-file reading ~a\" (\"list\")")
+  (rdCheck t "(a . b c)" "ERR \"more than one item found after dot (.)\" ()")
+  (rdCheck t "#vu8(a)" "ERR \"invalid value ~:[~s~;~a~] found in bytevector\" (#f 'a)")
+  (rdCheck t "#\\foo" "ERR \"invalid character name #\\\\~a\" (\"foo\")")
+  (rdCheck t "\"a\\qb\"" "ERR \"invalid string character \\\\~c\" (#\\U+71)")
+  (rdCheck t "#!eof" "ERR \"invalid syntax #!~a\" (\"eof\")")
+  (rdCheck t "'" "ERR \"unexpected end-of-file reading ~a\" (\"quote\")")
+  (rdCheck t "\"abc" "ERR \"unexpected end-of-file reading ~a\" (\"string\")"))
+
+(go/func TestReadEof [^{:tag (* testing/T)} t]
+  (rdCheck t "" "#!eof")
+  (rdCheck t "  ; x\n #| y |# " "#!eof")
+  (let [ds (ReadAllString "a (b) #(c) \"d\" ; e\n f")]
+    (when (!= (len ds) 5)
+      (.Errorf t "ReadAllString: %d data" (len ds)))))
+
+(go/func TestIdentTables [^{:tag (* testing/T)} t]
+  (let [yes (lit (slice rune) \a \Z \! \_ 0xe9 0x3bb 0x4e2d 0x2603)
+        no (lit (slice rune) \0 \+ \- \. \@ \# \( 0xa0)]
+    (for [i 0] (< i (len yes)) (inc! i)
+      (when (not (IsIdentInitial (aget yes i)))
+        (.Errorf t "initial %x" (aget yes i)))
+      (when (not (IsIdentSubsequent (aget yes i)))
+        (.Errorf t "subsequent %x" (aget yes i))))
+    (for [i 0] (< i (len no)) (inc! i)
+      (when (IsIdentInitial (aget no i))
+        (.Errorf t "not initial %x" (aget no i))))
+    (when (not (IsIdentSubsequent \5))
+      (.Error t "5"))
+    (when (IsIdentInitial \5)
+      (.Error t "5 initial"))
+    (when (not (IsIdentSubsequent 0x300))
+      (.Error t "U+300 subsequent"))
+    (when (not (IsIdentInitial 0x300))
+      (.Error t "U+300 initial in Chez's table"))))
+
+(go/func readAll [^string src ^{:tag (* int)} n ^{:tag (* string)} msg]
+  (defer ((fn []
+            (let [e (recover)]
+              (when (!= e nil)
+                (set! (deref n) -1)
+                (let [(values r ok) (assert (* Raise) e)]
+                  (if ok
+                    (let [(values items _) (ListSlice (aget (.-F (aget (.-Parts ((inst As (* Compound)) (.-Obj r))) 2)) 0))]
+                      (set! (deref msg) (+ (rdDump (aget items 0)) (rdDump (aget items 1)) (strconv/Itoa (conv int (As2 (aget items 2)))))))
+                    (set! (deref msg) (fmt/Sprint e)))))))))
+  (set! (deref n) (len (ReadAllString src))))
+
+(go/func readCount "readCount is the number of data of src, or -1 and the error's dump.\n" [^string src] :results [int string]
+  (let [^int n 0
+        ^string msg ""]
+    (readAll src (addr n) (addr msg))
+    (return n msg)))
+
+(go/func TestReadCorpora [^{:tag (* testing/T)} t]
+  (let [root (os/Getenv "SI_TEST_ROOT")
+        (values data err) (os/ReadFile (+ root "/test/scheme/si/read-counts.tsv"))]
+    (when (or (== root "") (!= err nil))
+      (.Skip t "SI_TEST_ROOT unset or no counts: the corpus test needs the checkout and the fetched corpora")
+      (return))
+    (let [lines (strings/Split (strings/TrimSpace (conv string data)) "\n")
+          bad 0]
+      (for [i 0] (< i (len lines)) (inc! i)
+        (let [f (strings/Split (aget lines i) "\t")
+              (values want _) (strconv/Atoi (aget f 1))
+              (values src err2) (os/ReadFile (+ root "/.tmp/scheme/corpora/" (aget f 0)))]
+          (when (and (== err2 nil) (>= want 0))
+            (let [(values got msg) (readCount (conv string src))]
+              (when (!= got want)
+                (inc! bad)
+                (.Errorf t "%s: %d data, want %d %s" (aget f 0) got want msg))))))
+      (.Logf t "%d files, %d bad" (len lines) bad))))
+
+
+(go/func As2 ^int64 [^any x] ((inst As int64) x))

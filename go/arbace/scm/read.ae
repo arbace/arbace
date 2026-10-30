@@ -1,0 +1,545 @@
+;; si's runtime: the reader, R6RS's lexical syntax as Chez Scheme 10.3.0 reads it in #!r6rs mode (a port of
+;; arbace.repr.scheme.read, checked equal to Chez on 1,325 files), text to runtime values.
+(in-ns 'go.arbace.scm)
+
+(go/file "read.go"
+  :imports [[strconv "strconv"] [strings "strings"] [unicode "unicode"]])
+
+(go/type CharSource "CharSource is what the reader reads: characters, false at the end.\n"
+  (interface (ReadChar [] :results [rune bool]) (PeekChar [] :results [rune bool])))
+
+(go/type FoldState "FoldState is what a CharSource may also implement to keep #!fold-case between reads.\n"
+  (interface (FoldCase [] :results [bool]) (SetFoldCase [^bool b])))
+
+(go/type StringSource "StringSource is a CharSource over a string's characters.\n"
+  (struct ^{:tag (slice rune)} s ^int i ^bool fold))
+
+(go/func NewStringSource "NewStringSource is a source over the characters of s.\n" ^{:tag (* StringSource)} [^string s]
+  (addr (lit StringSource :s (conv (slice rune) s))))
+
+(go/method ReadChar [^{:tag (* StringSource)} p] :results [rune bool]
+  (when (>= (.-i p) (len (.-s p)))
+    (return 0 false))
+  (let [c (aget (.-s p) (.-i p))]
+    (inc! (.-i p))
+    (return c true)))
+
+(go/method PeekChar [^{:tag (* StringSource)} p] :results [rune bool]
+  (when (>= (.-i p) (len (.-s p)))
+    (return 0 false))
+  (return (aget (.-s p) (.-i p)) true))
+
+(go/method FoldCase ^bool [^{:tag (* StringSource)} p] (.-fold p))
+(go/method SetFoldCase [^{:tag (* StringSource)} p ^bool b] (set! (.-fold p) b))
+
+(go/type reader "reader is the state of one read.\n"
+  (struct ^CharSource src ^{:tag (slice rune)} buf ^int pos ^bool fold ^FoldState fs))
+
+(go/method next [^{:tag (* reader)} r] :results [rune bool]
+  (when (> (len (.-buf r)) 0)
+    (let [c (aget (.-buf r) 0)]
+      (set! (.-buf r) (subslice (.-buf r) 1))
+      (inc! (.-pos r))
+      (return c true)))
+  (let [(values c ok) (.ReadChar (.-src r))]
+    (when ok
+      (inc! (.-pos r)))
+    (return c ok)))
+
+(go/method peek [^{:tag (* reader)} r] :results [rune bool]
+  (when (> (len (.-buf r)) 0)
+    (return (aget (.-buf r) 0) true))
+  (.PeekChar (.-src r)))
+
+(go/method peek2 "peek2 is the character after the next one.\n" [^{:tag (* reader)} r] :results [rune bool]
+  (when (== (len (.-buf r)) 0)
+    (let [(values c ok) (.ReadChar (.-src r))]
+      (when (not ok)
+        (return 0 false))
+      (set! (.-buf r) (append (.-buf r) c))))
+  (when (>= (len (.-buf r)) 2)
+    (return (aget (.-buf r) 1) true))
+  (.PeekChar (.-src r)))
+
+(go/method setFold [^{:tag (* reader)} r ^bool b]
+  (set! (.-fold r) b)
+  (when (!= (.-fs r) nil)
+    (.SetFoldCase (.-fs r) b)))
+
+;; ---------------------------------------------------------------------------------------
+;; Errors
+
+(go/method readFail "readFail raises Chez's read error: &lexical, &message and &irritants (format, arguments, position, port).\n"
+  ^any [^{:tag (* reader)} r ^string format & ^{:tag (slice any)} args]
+  (RaiseObj (addr (lit Compound :Parts (lit (slice (* Record))
+                                          (MakeSimple CondLexical)
+                                          (MakeSimple CondMessage (Str "~? at char ~a of ~s"))
+                                          (MakeSimple CondIrritants (List (Str format) (ListTail args Null) (conv int64 (.-pos r)) false))))))
+  nil)
+
+(go/method readEof ^any [^{:tag (* reader)} r ^string what]
+  (.readFail r "unexpected end-of-file reading ~a" (Str what)))
+
+;; ---------------------------------------------------------------------------------------
+;; Characters
+
+(go/func isWS "isWS is whether c is whitespace (report 4.2.1: tab, line feed, line tab, form feed, return, next line, Zs, Zl, Zp).\n"
+  ^bool [^rune c]
+  (or (== c 32) (and (>= c 9) (<= c 13)) (== c 0x85)
+      (and (> c 127) (unicode/In c unicode/Zs unicode/Zl unicode/Zp))))
+
+(go/func isDelim "isDelim is whether c ends a token (whitespace, ( ) [ ] \" ; and #).\n" ^bool [^rune c]
+  (or (isWS c) (== c \() (== c \)) (== c \[) (== c \]) (== c \") (== c 59) (== c \#)))
+
+(go/func isHex ^bool [^rune c]
+  (or (and (>= c \0) (<= c \9)) (and (>= c \a) (<= c \f)) (and (>= c \A) (<= c \F))))
+
+(go/func isScalar ^bool [^int64 v]
+  (and (>= v 0) (<= v 0x10FFFF) (not (and (>= v 0xD800) (<= v 0xDFFF)))))
+
+(go/func isDigit ^bool [^rune c] (and (>= c \0) (<= c \9)))
+
+(go/func hexValue "hexValue is the value of the hex digits ds, ok false when it is no scalar value.\n"
+  [^{:tag (slice rune)} ds] :results [int64 bool]
+  (let [(values v err) (strconv/ParseInt (conv string ds) 16 64)]
+    (when (!= err nil)
+      (return 0 false))
+    (return v (isScalar v))))
+
+(go/func isIntra "isIntra is whether c is intraline whitespace (tab or Zs).\n" ^bool [^rune c]
+  (or (== c 9) (and (>= c 32) (unicode/Is unicode/Zs c))))
+
+(go/func isLineEnd ^bool [^rune c]
+  (or (== c 10) (== c 13) (== c 0x85) (== c 0x2028) (== c 0x2029)))
+
+;; ---------------------------------------------------------------------------------------
+;; Atmosphere
+
+(go/method skipBlock "skipBlock skips a nested block comment, the #| consumed.\n" [^{:tag (* reader)} r]
+  (let [depth 1]
+    (while (> depth 0)
+      (let [(values c ok) (.next r)]
+        (when (not ok)
+          (.readEof r "block comment"))
+        (let [(values d ok2) (.peek r)]
+          (when (and ok2 (== c \|) (== d \#))
+            (.next r)
+            (dec! depth))
+          (when (and ok2 (== c \#) (== d \|))
+            (.next r)
+            (inc! depth)))))))
+
+(go/method token "token reads the characters up to the next delimiter; an inline hex escape \\x41; is part of it. hashOK: a # does not end it.\n"
+  ^{:tag (slice rune)} [^{:tag (* reader)} r ^bool hashOK]
+  (let [^{:tag (slice rune)} out nil]
+    (while true
+      (let [(values c ok) (.peek r)]
+        (when (not ok)
+          (break))
+        (when (and (isDelim c) (not (and hashOK (== c \#))))
+          (break))
+        (when (and (== (len out) 1) (== (aget out 0) \.) (or (== c \') (== c \`) (== c \,)))
+          (break))
+        (.next r)
+        (set! out (append out c))
+        (when (== c \\)
+          (let [(values x ok2) (.peek r)]
+            (when (and ok2 (== x \x))
+              (.next r)
+              (set! out (append out x))
+              (let [n 0]
+                (while true
+                  (let [(values h ok3) (.peek r)]
+                    (when (or (not ok3) (not (isHex h)))
+                      (break))
+                    (.next r)
+                    (set! out (append out h))
+                    (inc! n)))
+                (let [(values sc ok4) (.peek r)]
+                  (when (and (> n 0) ok4 (== sc 59))
+                    (.next r)
+                    (set! out (append out sc))))))))))
+    out))
+
+(go/method skipAtmosphere "skipAtmosphere skips whitespace, comments, directives and datum comments.\n" [^{:tag (* reader)} r]
+  (while true
+    (let [(values c ok) (.peek r)]
+      (when (not ok)
+        (return))
+      (cond
+        (isWS c) (.next r)
+        (== c 59)
+        (while true
+          (let [(values d ok2) (.peek r)]
+            (when (or (not ok2) (isLineEnd d))
+              (break))
+            (.next r)))
+        (== c \#)
+        (let [(values d ok2) (.peek2 r)]
+          (when (not ok2)
+            (return))
+          (cond
+            (== d \|) (do (.next r) (.next r) (.skipBlock r))
+            (== d 59) (do (.next r) (.next r) (.datum r "datum"))
+            (== d \!)
+            (do (.next r) (.next r)
+                (let [tok (.token r false)
+                      (values _ more) (.peek r)]
+                  (when (and (== (len tok) 0) (not more))
+                    (.readEof r "#! syntax"))
+                  (let [name (conv string tok)]
+                    (switch name
+                      (case ["r6rs"])
+                      (case ["fold-case"] (.setFold r true))
+                      (case ["no-fold-case"] (.setFold r false))
+                      (default (.readFail r "invalid syntax #!~a" (Str name)))))))
+            :else (return)))
+        :else (return)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Strings, characters, identifiers
+
+(go/method readString "readString reads a string literal, the opening quote consumed.\n" ^any [^{:tag (* reader)} r]
+  (let [^{:tag (slice rune)} out nil]
+    (while true
+      (let [(values c ok) (.next r)]
+        (when (not ok)
+          (return (.readEof r "string")))
+        (when (== c \")
+          (break))
+        (when (!= c \\)
+          (set! out (append out c))
+          (continue))
+        (let [(values d ok2) (.next r)]
+          (when (not ok2)
+            (return (.readEof r "string")))
+          (switch d
+            (case [\a] (set! out (append out 7)))
+            (case [\b] (set! out (append out 8)))
+            (case [\t] (set! out (append out 9)))
+            (case [\n] (set! out (append out 10)))
+            (case [\v] (set! out (append out 11)))
+            (case [\f] (set! out (append out 12)))
+            (case [\r] (set! out (append out 13)))
+            (case [\"] (set! out (append out \")))
+            (case [\\] (set! out (append out \\)))
+            (case [\x]
+              (let [^{:tag (slice rune)} ds nil]
+                (while true
+                  (let [(values h ok3) (.peek r)]
+                    (when (or (not ok3) (not (isHex h)))
+                      (break))
+                    (.next r)
+                    (set! ds (append ds h))))
+                (let [(values sc ok4) (.next r)]
+                  (when (not ok4)
+                    (return (.readEof r "string")))
+                  (when (or (== (len ds) 0) (!= sc 59))
+                    (return (.readFail r "invalid string hex escape")))
+                  (let [(values v good) (hexValue ds)]
+                    (when (not good)
+                      (return (.readFail r "invalid code point in string hex escape")))
+                    (set! out (append out (conv rune v)))))))
+            (default
+              (let [cur d]
+                (while (isIntra cur)
+                  (let [(values e ok5) (.next r)]
+                    (when (not ok5)
+                      (return (.readEof r "string")))
+                    (set! cur e)))
+                (when (not (or (== cur 10) (== cur 13) (== cur 0x85) (== cur 0x2028)))
+                  (return (.readFail r "invalid string character \\~c" (conv Char d))))
+                (when (== cur 13)
+                  (let [(values e ok6) (.peek r)]
+                    (when (and ok6 (== e 10))
+                      (.next r))))
+                (while true
+                  (let [(values e ok7) (.peek r)]
+                    (when (or (not ok7) (not (isIntra e)))
+                      (break))
+                    (.next r)))))))))
+    (addr (lit String :R out))))
+
+(go/func charNameValue "charNameValue is the character of a name, ok false if it names none.\n" [^string name] :results [rune bool]
+  (switch name
+    (case ["nul"] (return 0 true))
+    (case ["alarm"] (return 7 true))
+    (case ["backspace"] (return 8 true))
+    (case ["tab"] (return 9 true))
+    (case ["linefeed" "newline"] (return 10 true))
+    (case ["vtab"] (return 11 true))
+    (case ["page"] (return 12 true))
+    (case ["return"] (return 13 true))
+    (case ["esc"] (return 27 true))
+    (case ["space"] (return 32 true))
+    (case ["delete"] (return 127 true)))
+  (return 0 false))
+
+(go/method readChar "readChar reads a character literal, the #\\ consumed.\n" ^any [^{:tag (* reader)} r]
+  (let [(values cp ok) (.next r)]
+    (when (not ok)
+      (return (.readEof r "character")))
+    (let [tail (.token r false)]
+      (when (== (len tail) 0)
+        (return (conv Char cp)))
+      (let [name (+ (conv string (lit (slice rune) cp)) (conv string tail))
+            key name]
+        (when (.-fold r)
+          (set! key (strings/ToLower name)))
+        (let [(values v found) (charNameValue key)]
+          (when found
+            (return (conv Char v))))
+        (when (== cp \x)
+          (let [all true]
+            (for [i 0] (< i (len tail)) (inc! i)
+              (when (not (isHex (aget tail i)))
+                (set! all false)))
+            (when all
+              (let [(values v good) (hexValue tail)]
+                (when good
+                  (return (conv Char (conv rune v))))))))
+        (.readFail r "invalid character name #\\~a" (Str name))))))
+
+(go/func isPeculiar "isPeculiar is whether the identifier token starting with + - . or a digit is one R6RS admits.\n" ^bool [^string t]
+  (or (== t "+") (== t "-") (== t "...") (strings/HasPrefix t "->")))
+
+(go/method identifier "identifier is the symbol named by token tok (hex escapes resolved).\n" ^any [^{:tag (* reader)} r ^{:tag (slice rune)} tok]
+  (let [t (conv string tok)
+        first (not (isPeculiar t))
+        ^{:tag (slice rune)} out nil
+        i 0]
+    (while (< i (len tok))
+      (let [c (aget tok i)]
+        (cond
+          (== c \\)
+          (let [j (+ i 2)]
+            (while (and (< j (len tok)) (isHex (aget tok j)))
+              (inc! j))
+            (when (not (and (< (+ i 1) (len tok)) (== (aget tok (+ i 1)) \x) (< j (len tok)) (> j (+ i 2)) (== (aget tok j) 59)))
+              (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str (+ t " symbol")))))
+            (let [(values v good) (hexValue (subslice tok (+ i 2) j))]
+              (when (not good)
+                (return (.readFail r "invalid code point in symbol hex escape")))
+              (set! out (append out (conv rune v)))
+              (set! i (+ j 1))
+              (set! first false)))
+          (or (== c \') (== c \`) (== c \,) (== c \{) (== c \}) (== c \|))
+          (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str (+ t " symbol"))))
+          :else
+          (do
+            (when (not (or (and first (IsIdentInitial c)) (and (not first) (IsIdentSubsequent c))))
+              (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str (+ t " symbol")))))
+            (set! out (append out c))
+            (set! first false)
+            (inc! i)))))
+    (let [name (conv string out)]
+      (when (.-fold r)
+        (set! name (strings/ToLower name)))
+      (Intern name))))
+
+(go/method classify "classify is the datum of an identifier or number token.\n" ^any [^{:tag (* reader)} r ^{:tag (slice rune)} tok]
+  (let [c (aget tok 0)
+        t (conv string tok)]
+    (when (or (isDigit c) (== c \+) (== c \-) (== c \.))
+      (let [v (StringToNumber t 10)]
+        (when (!= v false)
+          (return v)))
+      (when (== t ".")
+        (return (.readFail r "unexpected dot (.)")))
+      (when (not (isPeculiar t))
+        (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str (+ t " symbol"))))))
+    (.identifier r tok)))
+
+;; ---------------------------------------------------------------------------------------
+;; Data
+
+(go/method seq "seq reads the data of a list, vector or bytevector up to the closer: the items, the tail after a dot (nil if none).\n"
+  [^{:tag (* reader)} r ^bool vector ^string what] :results [(slice any) any]
+  (let [^{:tag (slice any)} items nil
+        ^any tail nil
+        seen false]
+    (while true
+      (.skipAtmosphere r)
+      (let [(values c ok) (.peek r)]
+        (when (not ok)
+          (.readEof r what))
+        (when (or (== c \)) (== c \]))
+          (.next r)
+          (when (and seen (== tail nil))
+            (.readFail r "expected one item after dot (.)"))
+          (return items tail))
+        (let [dot false]
+          (when (== c \.)
+            (let [(values d ok2) (.peek2 r)]
+              (when (or (not ok2) (isDelim d) (== d \') (== d \`) (== d \,))
+                (set! dot true))))
+          (cond
+            dot
+            (do
+              (when (or vector seen (== (len items) 0))
+                (.readFail r "unexpected dot (.)"))
+              (.next r)
+              (.skipAtmosphere r)
+              (let [(values c2 ok3) (.peek r)]
+                (when (not ok3)
+                  (.readEof r what))
+                (when (or (== c2 \)) (== c2 \]))
+                  (.readFail r "expected one item after dot (.)"))
+                (set! tail (.datum r what))
+                (set! seen true)))
+            :else
+            (do
+              (when seen
+                (.readFail r "more than one item found after dot (.)"))
+              (set! items (append items (.datum r what))))))))
+    (return items tail)))
+
+(go/method prefixed "prefixed reads a quote form: the prefix of n characters consumed, then the datum; (sym datum).\n"
+  ^any [^{:tag (* reader)} r ^string sym ^int n]
+  (for [i 0] (< i n) (inc! i)
+    (.next r))
+  (List (Intern sym) (.datum r sym)))
+
+(go/func inPrefixSet ^bool [^rune c]
+  (strings/ContainsRune "xbodeiXBODEI" c))
+
+(go/method hash "hash reads the datum that starts with #.\n" ^any [^{:tag (* reader)} r]
+  (.next r)
+  (let [(values d ok) (.peek r)]
+    (when (not ok)
+      (return (.readEof r "# prefix")))
+    (switch d
+      (case [\(]
+        (.next r)
+        (let [(values items _) (.seq r true "vector")]
+          (return (NewVector items))))
+      (case [\\]
+        (.next r)
+        (return (.readChar r)))
+      (case [\']
+        (return (.prefixed r "syntax" 1)))
+      (case [\`]
+        (return (.prefixed r "quasisyntax" 1)))
+      (case [\,]
+        (let [(values e ok2) (.peek2 r)]
+          (when (and ok2 (== e \@))
+            (return (.prefixed r "unsyntax-splicing" 2)))
+          (return (.prefixed r "unsyntax" 1)))))
+    (let [^{:tag (slice rune)} prefix nil]
+      (while true
+        (let [(values p ok2) (.peek r)]
+          (when (not (and ok2 (inPrefixSet p)))
+            (break))
+          (.next r)
+          (set! prefix (append prefix \# p))
+          (let [(values h ok3) (.peek r)]
+            (when (not (and ok3 (== h \#)))
+              (break))
+            (let [(values g ok4) (.peek2 r)]
+              (when (not (and ok4 (inPrefixSet g)))
+                (break)))
+            (.next r))))
+      (when (> (len prefix) 0)
+        (let [rest (.token r true)
+              (values _ more) (.peek r)]
+          (when (== (len rest) 0)
+            (when (not more)
+              (return (.readEof r "number")))
+            (return (.readFail r "invalid number syntax ~a" (Str (conv string prefix)))))
+          (for [i 0] (< i (len rest)) (inc! i)
+            (set! prefix (append prefix (aget rest i))))
+          (let [tok (conv string prefix)
+                v (StringToNumber tok 10)]
+            (when (== v false)
+              (return (.readFail r "invalid number syntax ~a" (Str tok))))
+            (return v)))))
+    (let [tok (conv string (.token r false))
+          l (strings/ToLower tok)]
+      (when (== tok "vu8")
+        (let [(values p ok2) (.peek r)]
+          (when (and ok2 (== p \())
+            (.next r)
+            (let [(values items _) (.seq r true "bytevector")
+                  bs (make (slice byte) 0 (len items))]
+              (for [i 0] (< i (len items)) (inc! i)
+                (let [(values n isInt) (assert int64 (aget items i))]
+                  (when (or (not isInt) (< n 0) (> n 255))
+                    (return (.readFail r "invalid value ~:[~s~;~a~] found in bytevector" false (aget items i))))
+                  (set! bs (append bs (conv byte n)))))
+              (return (addr (lit Bytevector :B bs)))))))
+      (switch l
+        (case ["t" "true"] (return true))
+        (case ["f" "false"] (return false)))
+      (.readFail r "invalid syntax #~a" (Str tok)))))
+
+(go/method datum "datum reads one datum, end of text an error (reading what).\n" ^any [^{:tag (* reader)} r ^string what]
+  (.skipAtmosphere r)
+  (let [(values c ok) (.peek r)]
+    (when (not ok)
+      (return (.readEof r what)))
+    (switch c
+      (case [\( \[]
+        (.next r)
+        (let [(values items tail) (.seq r false "list")]
+          (let [^any end (conv any Null)]
+            (when (!= tail nil)
+              (set! end tail))
+            (return (ListTail items end)))))
+      (case [\) \]]
+        (return (.readFail r "unexpected close parenthesis")))
+      (case [\"]
+        (.next r)
+        (return (.readString r)))
+      (case [\']
+        (return (.prefixed r "quote" 1)))
+      (case [\`]
+        (return (.prefixed r "quasiquote" 1)))
+      (case [\,]
+        (let [(values d ok2) (.peek2 r)]
+          (when (and ok2 (== d \@))
+            (return (.prefixed r "unquote-splicing" 2)))
+          (return (.prefixed r "unquote" 1))))
+      (case [\{]
+        (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str "open brace"))))
+      (case [\}]
+        (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str "close brace"))))
+      (case [\|]
+        (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str "|...| symbol escape"))))
+      (case [\#]
+        (return (.hash r))))
+    (let [tok (.token r false)
+          (values _ more) (.peek r)]
+      (when (not more)
+        ;; an incomplete \x hex escape at the end of the text
+        (let [j (len tok)]
+          (while (and (> j 0) (isHex (aget tok (- j 1))))
+            (dec! j))
+          (when (and (>= j 2) (== (aget tok (- j 1)) \x) (== (aget tok (- j 2)) \\))
+            (return (.readEof r "symbol")))))
+      (.classify r tok))))
+
+;; ---------------------------------------------------------------------------------------
+;; The entry points
+
+(go/func ReadDatum "ReadDatum reads one datum from src: Eof at the end; errors raise &lexical (Chez's read errors).\n"
+  ^any [^CharSource src]
+  (let [r (addr (lit reader :src src))
+        (values fs ok) (assert FoldState src)]
+    (when ok
+      (set! (.-fs r) fs)
+      (set! (.-fold r) (.FoldCase fs)))
+    (.skipAtmosphere r)
+    (let [(values _ more) (.peek r)]
+      (when (not more)
+        (return Eof)))
+    (.datum r "datum")))
+
+(go/func ReadAllString "ReadAllString is every datum of text s.\n" ^{:tag (slice any)} [^string s]
+  (let [src (NewStringSource s)
+        ^{:tag (slice any)} out nil]
+    (while true
+      (let [d (ReadDatum src)]
+        (when (== d (conv any Eof))
+          (break))
+        (set! out (append out d))))
+    out))

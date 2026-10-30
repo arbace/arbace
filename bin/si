@@ -12,11 +12,24 @@
 #                                        (scheme/psyntax/patches.edn), psyntax on Chez (tools/psyntax/) expands
 #                                        them into scheme/psyntax/psyntax.pp.ae; --check: into .tmp and compared
 #   bin/si expand [--lib DIR]... FILE... each file's programs and libraries expanded to core forms (SPEC 5)
+#   bin/si test --si                     the same cases run on si (the light driver), judged the same way
 #   bin/si test [--record]               the expander's own tests (test/scheme/expand/): each case expanded
 #                                        and run on the bootstrap host, against Chez's runs recorded in
 #                                        test/scheme/expand/ref-chez.edn (--record: run Chez, rewrite it)
 #   bin/si fixpoint                      psyntax on Arbace expands psyntax's sources (as boot prints them): the
 #                                        core forms of psyntax.pp.ae, up to gensyms' names (no Chez)
+#   bin/si unit [GO-TEST-FLAGS...]      si's runtime's unit tests: go/arbace/scm printed by repr/go and go test (TamaGo's go)
+#   bin/si light                         the light driver (test/scheme/si-driver: arbace/scm alone, no Arbace build)
+#                                        built into .tmp/si/si-light, psyntax.pp printed as Scheme text beside it
+#   bin/si run [--lib DIR]... FILE [ARG]...  a top-level program run on si (the light driver): psyntax on si
+#                                        expands it, si evaluates it; the status and output are the program's
+#   bin/si check [--record-ref] [--record] [--only ID]...
+#                                        si's check: test/scheme/si/programs.edn's programs (Racket's R6RS suite's
+#                                        run programs, Larceny's, si's own) run on si and judged against Chez's
+#                                        recorded runs (test/scheme/si/ref-chez.edn; --record-ref: run Chez first and
+#                                        rewrite it), every non-pass in a class of test/scheme/divergences.edn
+#                                        (--record: write test/scheme/check-linux-amd64.edn)
+#   bin/si divergences [RESULTS]         the recorded check's non-pass items by class
 #   bin/si check-suite                   Racket's R6RS suite's libraries and programs expanded (the corpus of
 #                                        test/scheme/corpora.edn), its &syntax cases (test/scheme/expand/suite-syntax.edn)
 set -euo pipefail
@@ -44,6 +57,54 @@ boot() {
   fi
 }
 
+light_dir=$root/.tmp/si
+si_light=$light_dir/si-light
+light() {
+  mkdir -p "$light_dir"
+  "$root/bin/repr-scheme" print "$root/scheme/psyntax/psyntax.pp.ae" > "$light_dir/psyntax.pp.ss"
+  si_print_build build
+}
+# si_print_build test|build ARGS: go/arbace/scm (and the driver) printed by repr/go, then go test or go build
+si_print_build() {
+  local what=$1; shift
+  local out=$light_dir/print src=$light_dir/print-root
+  rm -rf "$out" "$src"; mkdir -p "$src/go/arbace"
+  ln -s "$root/go/arbace/scm.ae" "$root/go/arbace/scm" "$root/test/scheme/si-driver/go/arbace/sidriver.ae" \
+    "$root/test/scheme/si-driver/go/arbace/sidriver" "$src/go/arbace/"
+  "$root/bin/build-go" --print-only --tests --module arbace --work "$out" "$src" >&2
+  local goroot=${ARBACE_GOROOT:-/root/tamago-go}
+  (cd "$out/mod" && export GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GOWORK=off GO111MODULE=on GOPROXY=off CGO_ENABLED=0 \
+     GOCACHE="${SI_GOCACHE:-$light_dir/gocache}" GOMAXPROCS=${GOMAXPROCS:-4} SI_TEST_ROOT="$root" &&
+     case $what in
+       test) "$goroot/bin/go" test -p 2 "$@" ./scm/ ;;
+       build) "$goroot/bin/go" build -p 2 -trimpath -o "$si_light" ./sidriver/ ;;
+     esac)
+}
+# si_exec [--lib DIR]... FILE ARGS: the light driver, under the light tier's memory and threads
+si_exec() { GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" "$@"; }
+
+# check_runs IMPL DIR [IDS...]: each program of programs.edn run by IMPL (si or chez) in its file's directory,
+# its stdin the :input file, into DIR/ID.out, .err, .rc
+check_runs() {
+  local impl=$1 dir=$2; shift 2
+  local corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
+  mkdir -p "$dir" "$root/.tmp/si/suite-lib"; ln -sfn "$corpora/racket-r6rs" "$root/.tmp/si/suite-lib/tests"
+  arbace_tool -e '(doseq [p (:programs (read-string (slurp "'"$root"'/test/scheme/si/programs.edn")))] (println (str (:id p) "\t" (if (:corpus p) "c" "r") "\t" (:file p) "\t" (or (:input p) ""))))' > "$dir/list.tsv"
+  local id kind file input base d f
+  while IFS=$'\t' read -r id kind file input; do
+    if [ $# -gt 0 ]; then case " $* " in *" $id "*) ;; *) continue ;; esac; fi
+    base=$root; [ "$kind" = c ] && base=$corpora
+    f=$base/$file; d=$(dirname "$f")
+    local o=$dir/${id//\//__} in=$dir/empty.in
+    : > "$in"; [ -n "$input" ] && in=$corpora/$input
+    case $impl in
+      chez) (cd "$d" && timeout "${SI_TIMEOUT:-600}" "$CHEZ" --libdirs "$root/.tmp/si/suite-lib" --program "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
+      si) (cd "$d" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/.tmp/si/suite-lib" "$(basename "$f")" < "$in" > "$o.out" 2> "$o.err"; echo $? > "$o.rc") || true ;;
+    esac
+    echo "$impl $id: status $(cat "$o.rc")" >&2
+  done < "$dir/list.tsv"
+}
+
 cmd=${1:-}; [ $# -eq 0 ] || shift
 case $cmd in
   vendor)
@@ -67,11 +128,37 @@ case $cmd in
     mkdir -p "$root/.tmp/si/suite-lib"; ln -sfn "$corpus" "$root/.tmp/si/suite-lib/tests"
     arbace_tool -m arbace.scheme.expand check-suite "$corpus" "$root/.tmp/si/suite-lib" ;;
   test)
+    if [ "${1:-}" = --si ]; then
+      light; d=$light_dir/test-si; rm -rf "$d"; mkdir -p "$d"; : > "$d/empty.in"
+      for c in "$root"/test/scheme/expand/cases/*.sps; do
+        n=$(basename "$c" .sps)
+        (cd "$(dirname "$c")" && timeout "${SI_TIMEOUT:-120}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+           "$si_light" --pp "$light_dir/psyntax.pp.ss" --case "$n.sps" < "$d/empty.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      done
+      arbace_tool -m arbace.scheme.expand test --si "$d"; exit $?
+    fi
     if [ "${1:-}" = --record ]; then
       "$CHEZ" --script "$root/tools/psyntax/run.ss" "$root"/test/scheme/expand/cases/*.sps > "$root/test/scheme/expand/ref-chez.edn"
       echo "recorded $(wc -l < "$root/test/scheme/expand/ref-chez.edn") runs of Chez into test/scheme/expand/ref-chez.edn"
     fi
     arbace_tool -m arbace.scheme.expand test ;;
+  unit) si_print_build test "$@" ;;
+  light) light ;;
+  run) [ -x "$si_light" ] || light; si_exec "$@" ;;
+  check)
+    rec_ref=0 rec=() only=()
+    while [ $# -gt 0 ]; do
+      case $1 in --record-ref) rec_ref=1; shift ;; --record) rec=(--record); shift ;; --only) only+=("$2"); shift 2 ;; *) echo "check: $1?" >&2; exit 2 ;; esac
+    done
+    mkdir -p "$light_dir"; "$root/bin/repr-scheme" corpus fetch racket-r6rs larceny-r6rs > "$light_dir/fetch.log"
+    if [ $rec_ref = 1 ]; then
+      rm -rf "$root/.tmp/si/ref"; check_runs chez "$root/.tmp/si/ref" ${only[@]+"${only[@]}"}
+      arbace_tool -m arbace.scheme.check record-ref "$root/.tmp/si/ref"
+    fi
+    light
+    rm -rf "$root/.tmp/si/runs"; check_runs si "$root/.tmp/si/runs" ${only[@]+"${only[@]}"}
+    arbace_tool -m arbace.scheme.check judge "$root/.tmp/si/runs" ${rec[@]+"${rec[@]}"} ;;
+  divergences) arbace_tool -m arbace.scheme.check divergences "$@" ;;
   expand|fixpoint) arbace_tool -m arbace.scheme.expand "$cmd" "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

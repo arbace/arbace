@@ -1,0 +1,270 @@
+;; si's runtime: the numeric tower (doc/scheme/SCHEME-SURVEY.md §5.4; SC7 (a): no complex numbers, a recorded
+;; class). Exact integers are int64 (Chez's fixnums are the 61-bit ones among them: IsFixnum) or *big.Int
+;; when they do not fit int64; exact non-integer rationals *big.Rat; inexact reals float64. Every result
+;; is normalized (Norm*): a *big.Int never fits int64, a *big.Rat is never an integer.
+(in-ns 'go.arbace.scm)
+
+(go/file "number.go"
+  :imports [[math "math"] [big "math/big"] [bits "math/bits"]])
+
+(go/const [^{:tag int64 :doc "FixMax is Chez's greatest fixnum on ta6le (2^60 - 1).\n"} FixMax (- (<< 1 60) 1)]
+          [^{:tag int64 :doc "FixMin is Chez's least fixnum (-2^60).\n"} FixMin (- (<< 1 60))])
+
+(go/type Complex
+  "Complex is a non-real number as the reader or string->number gives it (SC7 (a): complex arithmetic is
+deferred, a recorded class): it is written back as read, and an operation on it raises an
+&implementation-restriction. Polar: Re is the magnitude, Im the angle.\n"
+  (struct ^any Re ^any Im ^bool Polar))
+
+(go/method String ^string [^{:tag (* Complex)} z]
+  (let [im (NumberToString (.-Im z) 10)]
+    (when (.-Polar z)
+      (return (+ (NumberToString (.-Re z) 10) "@" im)))
+    (when (and (!= (aget im 0) \-) (!= (aget im 0) \+))
+      (set! im (+ "+" im)))
+    (when (== im "+1") (set! im "+"))
+    (when (== im "-1") (set! im "-"))
+    (when (IsExactZero (.-Re z))
+      (return (+ im "i")))
+    (+ (NumberToString (.-Re z) 10) im "i")))
+
+(go/func IsFixnum ^bool [^int64 n] (and (>= n FixMin) (<= n FixMax)))
+
+(go/func NormInt "NormInt is b as int64 when it fits, else b.\n" ^any [^{:tag (* big/Int)} b]
+  (when (.IsInt64 b)
+    (return (.Int64 b)))
+  b)
+
+(go/func NormRat "NormRat is r as an exact integer when it is one, else r.\n" ^any [^{:tag (* big/Rat)} r]
+  (when (.IsInt r)
+    (return (NormInt (.Set (new big/Int) (.Num r)))))
+  r)
+
+(go/func IsNumber ^bool [^any x]
+  (type-switch x
+    (case [int64 float64 (* big/Int) (* big/Rat) (* Complex)] (return true)))
+  false)
+
+(go/func IsExact "IsExact is whether number x is exact.\n" ^bool [^any x]
+  (type-switch x
+    (case [int64 (* big/Int) (* big/Rat)] (return true)))
+  false)
+
+(go/func IsExactInteger ^bool [^any x]
+  (type-switch x
+    (case [int64 (* big/Int)] (return true)))
+  false)
+
+(go/func IsInteger "IsInteger is integer?: an exact integer or an integral finite flonum.\n" ^bool [^any x]
+  (type-switch [v x]
+    (case [int64 (* big/Int)] (return true))
+    (case [float64] (return (and (not (math/IsInf v 0)) (not (math/IsNaN v)) (== v (math/Trunc v))))))
+  false)
+
+(go/func IsRational "IsRational is rational?: exact, or a finite flonum.\n" ^bool [^any x]
+  (type-switch [v x]
+    (case [int64 (* big/Int) (* big/Rat)] (return true))
+    (case [float64] (return (and (not (math/IsInf v 0)) (not (math/IsNaN v))))))
+  false)
+
+(go/func toBig "toBig is exact integer x as a *big.Int (a new one for int64).\n" ^{:tag (* big/Int)} [^any x]
+  (type-switch [v x]
+    (case [int64] (return (big/NewInt v)))
+    (case [(* big/Int)] (return v)))
+  nil)
+
+(go/func toRat "toRat is exact x as a *big.Rat.\n" ^{:tag (* big/Rat)} [^any x]
+  (type-switch [v x]
+    (case [int64] (return (big/NewRat v 1)))
+    (case [(* big/Int)] (return (.SetInt (new big/Rat) v)))
+    (case [(* big/Rat)] (return v)))
+  nil)
+
+(go/func ToFloat "ToFloat is real x as a float64 (exact ones rounded to nearest).\n" ^float64 [^any x]
+  (type-switch [v x]
+    (case [int64] (return (conv float64 v)))
+    (case [float64] (return v))
+    (case [(* big/Int)] (let [(values f _) (.Float64 (.SetInt (new big/Float) v))] (return f)))
+    (case [(* big/Rat)] (let [(values f _) (.Float64 v)] (return f))))
+  (math/NaN))
+
+;; The rank of a number in an operation: 0 int64, 1 *big.Int, 2 *big.Rat, 3 float64, -1 not a number.
+(go/func rank ^int [^any x]
+  (type-switch x
+    (case [int64] (return 0))
+    (case [(* big/Int)] (return 1))
+    (case [(* big/Rat)] (return 2))
+    (case [float64] (return 3)))
+  -1)
+
+(go/func argNum ^int [^string who ^any x]
+  (let [r (rank x)]
+    (when (< r 0)
+      (let [(values _ isC) (assert (* Complex) x)]
+        (when isC
+          (Unimplemented who "complex numbers (SC7)")))
+      (NotA who "number" x))
+    r))
+
+(go/func Add "Add is a + b.\n" ^any [^any a ^any b]
+  (let [(values x ok1) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok1 ok2)
+      (let [s (+ x y)]
+        (when (>= (bit-and (bit-xor s x) (bit-xor s y)) 0)
+          (return s))
+        (return (NormInt (.Add (new big/Int) (big/NewInt x) (big/NewInt y))))))
+    (arith "+" \+ a b)))
+
+(go/func Sub "Sub is a - b.\n" ^any [^any a ^any b]
+  (let [(values x ok1) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok1 ok2)
+      (let [s (- x y)]
+        (when (>= (bit-and (bit-xor x y) (bit-xor s x)) 0)
+          (return s))
+        (return (NormInt (.Sub (new big/Int) (big/NewInt x) (big/NewInt y))))))
+    (arith "-" \- a b)))
+
+(go/func Mul "Mul is a * b.\n" ^any [^any a ^any b]
+  (let [(values x ok1) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok1 ok2)
+      (let [(values hi lo) (bits/Mul64 (conv uint64 (absI x)) (conv uint64 (absI y)))]
+        (when (and (== hi 0) (< lo (<< 1 63)) (!= x math/MinInt64) (!= y math/MinInt64))
+          (if (== (< x 0) (< y 0))
+            (return (conv int64 lo))
+            (return (- (conv int64 lo)))))
+        (return (NormInt (.Mul (new big/Int) (big/NewInt x) (big/NewInt y))))))
+    (arith "*" \* a b)))
+
+(go/func absI ^int64 [^int64 x]
+  (when (< x 0)
+    (return (- x)))
+  x)
+
+(go/func Div "Div is a / b (exact division by exact 0 raises).\n" ^any [^any a ^any b]
+  (arith "/" \/ a b))
+
+(go/func arith "arith is a op b at the higher rank of the two.\n" ^any [^string who ^rune op ^any a ^any b]
+  (let [ra (argNum who a)
+        rb (argNum who b)
+        r (max ra rb)]
+    (when (and (== op \/) (IsExactZero b))
+      (Violation CondAssertion "/" "undefined for ~s" (conv int64 0)))
+    (when (and (== op \/) (< r 2))
+      (set! r 2))
+    (switch r
+      (case [0 1]
+        (let [x (toBig a) y (toBig b) z (new big/Int)]
+          (switch op
+            (case [\+] (.Add z x y))
+            (case [\-] (.Sub z x y))
+            (case [\*] (.Mul z x y)))
+          (return (NormInt z))))
+      (case [2]
+        (let [x (toRat a) y (toRat b) z (new big/Rat)]
+          (switch op
+            (case [\+] (.Add z x y))
+            (case [\-] (.Sub z x y))
+            (case [\*] (.Mul z x y))
+            (case [\/] (.Quo z x y)))
+          (return (NormRat z)))))
+    ;; Chez's exact zero: (* 0 1.5) is 0, (+ 0 x) and (- x 0) are x, (- 0 x) is (- x)
+    (when (and (== op \*) (or (IsExactZero a) (IsExactZero b)))
+      (return (conv int64 0)))
+    (when (and (or (== op \+) (== op \-)) (IsExactZero b))
+      (return a))
+    (when (and (== op \+) (IsExactZero a))
+      (return b))
+    (when (and (== op \-) (IsExactZero a))
+      (return (- (ToFloat b))))
+    (let [x (ToFloat a) y (ToFloat b)]
+      (switch op
+        (case [\+] (return (+ x y)))
+        (case [\-] (return (- x y)))
+        (case [\*] (return (* x y))))
+      (/ x y))))
+
+(go/func IsExactZero ^bool [^any x]
+  (let [(values n ok) (assert int64 x)]
+    (and ok (== n 0))))
+
+(go/func Neg ^any [^any a] (Sub (conv int64 0) a))
+
+(go/func Cmp
+  "Cmp compares reals a and b: -1, 0, 1; 2 when either is a NaN. Exact and inexact are compared exactly
+(as Chez does for =, < ...).\n"
+  ^int [^string who ^any a ^any b]
+  (let [ra (argNum who a)
+        rb (argNum who b)]
+    (when (and (== ra 0) (== rb 0))
+      (let [x ((inst As int64) a) y ((inst As int64) b)]
+        (cond (< x y) (return -1) (> x y) (return 1) :else (return 0))))
+    (when (or (== ra 3) (== rb 3))
+      (let [x (ToFloat a) y (ToFloat b)]
+        (when (or (math/IsNaN x) (math/IsNaN y))
+          (return 2))
+        (when (and (== ra 3) (== rb 3))
+          (cond (< x y) (return -1) (> x y) (return 1) :else (return 0)))
+        ;; one exact: infinities compare by sign, else exactly
+        (when (math/IsInf x 0)
+          (if (> x 0) (return 1) (return -1)))
+        (when (math/IsInf y 0)
+          (if (> y 0) (return -1) (return 1)))
+        (let [p (.SetFloat64 (new big/Rat) x) q (.SetFloat64 (new big/Rat) y)]
+          (when (!= ra 3) (set! p (toRat a)))
+          (when (!= rb 3) (set! q (toRat b)))
+          (return (.Cmp p q)))))
+    (.Cmp (toRat a) (toRat b))))
+
+(go/func As "As is v as X (the zero X when v is not one).\n" :type-params [X] ^X [^any v]
+  (let [(values x _) (assert X v)]
+    x))
+
+(go/func Sign "Sign is -1, 0 or 1 for real x (0 for a NaN).\n" ^int [^string who ^any x]
+  (type-switch [v x]
+    (case [int64] (cond (< v 0) (return -1) (> v 0) (return 1) :else (return 0)))
+    (case [(* big/Int)] (return (.Sign v)))
+    (case [(* big/Rat)] (return (.Sign v)))
+    (case [float64] (cond (< v 0) (return -1) (> v 0) (return 1) :else (return 0))))
+  (NotA who "real number" x)
+  0)
+
+(go/func Exact "Exact is exact: x exact (a flonum's exact value; infinities and NaNs raise).\n" ^any [^any x]
+  (type-switch [v x]
+    (case [float64]
+      (when (or (math/IsInf v 0) (math/IsNaN v))
+        (Violation CondAssertion "exact" "no exact representation for ~s" v))
+      (when (and (== v (math/Trunc v)) (< (math/Abs v) 9e18))
+        (return (conv int64 v)))
+      (return (NormRat (.SetFloat64 (new big/Rat) v)))))
+  (argNum "exact" x)
+  x)
+
+(go/func Inexact "Inexact is inexact: x as a flonum.\n" ^any [^any x]
+  (argNum "inexact" x)
+  (ToFloat x))
+
+;; Integer division (Chez's quotient, remainder, modulo; R6RS's div, mod, div0, mod0 in prim_number).
+
+(go/func IntQuoRem
+  "IntQuoRem is the truncated quotient and remainder of exact integers a and b (b not zero).\n"
+  [^any a ^any b] :results [any any]
+  (let [(values x ok1) (assert int64 a)
+        (values y ok2) (assert int64 b)]
+    (when (and ok1 ok2 (not (and (== x math/MinInt64) (== y -1))))
+      (return (/ x y) (% x y)))
+    (let [q (new big/Int) r (new big/Int)]
+      (.QuoRem q (toBig a) (toBig b) r)
+      (return (NormInt q) (NormInt r)))))
+
+(go/func IntDivMod
+  "IntDivMod is R6RS's div and mod of exact integers a and b (b not zero): 0 <= mod < |b|.\n"
+  [^any a ^any b] :results [any any]
+  (let [(values q r) (IntQuoRem a b)]
+    (when (< (Sign "div" r) 0)
+      (if (> (Sign "div" b) 0)
+        (do (set! q (Sub q (conv int64 1))) (set! r (Add r b)))
+        (do (set! q (Add q (conv int64 1))) (set! r (Sub r b)))))
+    (return q r)))

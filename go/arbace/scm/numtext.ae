@@ -1,0 +1,391 @@
+;; si's runtime: numbers as text, number->string and string->number as Chez Scheme 10.3.0 does.
+;; Flonums are printed by Burger and Dybvig's free-format algorithm in the output radix (Chez's own:
+;; shortest digits that read back, a tie rounded up), laid out positionally for a scientific exponent
+;; from -3 to 9 (always in radix 16, whose digits include e) and else as d.ddde<exponent in the radix>;
+;; a subnormal ends in | and the bits of its mantissa. Integers and ratios use upper case digits.
+(in-ns 'go.arbace.scm)
+
+(go/file "numtext.go"
+  :imports [[math "math"] [big "math/big"] [bits "math/bits"] [strconv "strconv"] [strings "strings"]])
+
+(go/func checkRadix ^int [^string who ^int radix]
+  (when (not (or (== radix 2) (== radix 8) (== radix 10) (== radix 16)))
+    (Violation CondAssertion who "~s is not a valid radix" (conv int64 radix)))
+  radix)
+
+(go/func NumberToString "NumberToString is number x in radix (2, 8, 10 or 16) as Chez writes it.\n" ^string [^any x ^int radix]
+  (checkRadix "number->string" radix)
+  (type-switch [v x]
+    (case [int64] (return (strings/ToUpper (strconv/FormatInt v radix))))
+    (case [(* big/Int)] (return (strings/ToUpper (.Text v radix))))
+    (case [(* big/Rat)]
+      (return (+ (strings/ToUpper (.Text (.Num v) radix)) "/" (strings/ToUpper (.Text (.Denom v) radix)))))
+    (case [float64] (return (flonumText v radix))))
+  (NotA "number->string" "number" x)
+  "")
+
+(go/func zeros ^string [^int n]
+  (when (<= n 0)
+    (return ""))
+  (strings/Repeat "0" n))
+
+(go/func flonumText "flonumText is flonum v in radix as Chez prints it.\n" ^string [^float64 v ^int radix]
+  (when (math/IsNaN v)
+    (return "+nan.0"))
+  (when (math/IsInf v 1)
+    (return "+inf.0"))
+  (when (math/IsInf v -1)
+    (return "-inf.0"))
+  (when (== v 0)
+    (when (math/Signbit v)
+      (return "-0.0"))
+    (return "0.0"))
+  (let [a (math/Abs v)
+        (values ds k) (flonumDigits a radix)
+        x (- k 1)
+        n (len ds)
+        ^strings/Builder sb (zero strings/Builder)
+        ^string alpha "0123456789ABCDEF"
+        ^{:tag (slice byte)} txt (make (slice byte) n)]
+    (range [i d ds]
+      (aset txt i (aget alpha d)))
+    (when (math/Signbit v)
+      (.WriteByte (addr sb) (conv byte \-)))
+    (if (or (== radix 16) (and (>= x -3) (< x 10)))
+      (cond
+        (< x 0)
+        (do (.WriteString (addr sb) "0.")
+            (.WriteString (addr sb) (zeros (- (- x) 1)))
+            (.WriteString (addr sb) (conv string txt)))
+        (<= n (+ x 1))
+        (do (.WriteString (addr sb) (conv string txt))
+            (.WriteString (addr sb) (zeros (- (+ x 1) n)))
+            (.WriteString (addr sb) ".0"))
+        :else
+        (do (.WriteString (addr sb) (conv string (subslice txt 0 (+ x 1))))
+            (.WriteString (addr sb) ".")
+            (.WriteString (addr sb) (conv string (subslice txt (+ x 1) n)))))
+      (do (.WriteByte (addr sb) (aget txt 0))
+          (when (> n 1)
+            (.WriteString (addr sb) ".")
+            (.WriteString (addr sb) (conv string (subslice txt 1 n))))
+          (.WriteString (addr sb) "e")
+          (.WriteString (addr sb) (strconv/FormatInt (conv int64 x) radix))))
+    (when (< a 2.2250738585072014e-308)
+      (let [m (bit-and (math/Float64bits a) (- (<< 1 52) 1))]
+        (.WriteString (addr sb) "|")
+        (.WriteString (addr sb) (strconv/Itoa (- 64 (bits/LeadingZeros64 m))))))
+    (.String sb)))
+
+(go/func bigPow ^{:tag (* big/Int)} [^int b ^int k]
+  (.Exp (new big/Int) (big/NewInt (conv int64 b)) (big/NewInt (conv int64 k)) nil))
+
+(go/func flonumDigits
+  "flonumDigits is the shortest digits (values 0 to radix-1) of the positive finite v in base B, and k such
+that v is 0.d1d2... times B^k (Burger and Dybvig's free-format algorithm; a tie rounds up).\n"
+  [^float64 v ^int B] :results [(slice byte) int]
+  (let [fb (math/Float64bits v)
+        be (conv int (bit-and (>> fb 52) 2047))
+        ^uint64 f (bit-and fb (- (<< 1 52) 1))
+        ^int e -1074
+        ^uint64 hidden (<< 1 52)]
+    (if (== be 0)
+      (set! e -1074)
+      (do (set! f (bit-or f hidden))
+          (set! e (- be 1075))))
+    (let [^{:tag (* big/Int)} r (new big/Int)
+          ^{:tag (* big/Int)} s (new big/Int)
+          ^{:tag (* big/Int)} mp (new big/Int)
+          ^{:tag (* big/Int)} mm (new big/Int)
+          bigf (.SetUint64 (new big/Int) f)
+          equal (or (!= f hidden) (== e -1074))]
+      (cond
+        (and (>= e 0) equal)
+        (do (set! mp (.Lsh (new big/Int) (big/NewInt 1) (conv uint e)))
+            (set! mm (.Set (new big/Int) mp))
+            (set! r (.Lsh (new big/Int) bigf (conv uint (+ e 1))))
+            (set! s (big/NewInt 2)))
+        (>= e 0)
+        (do (set! mp (.Lsh (new big/Int) (big/NewInt 1) (conv uint (+ e 1))))
+            (set! mm (.Lsh (new big/Int) (big/NewInt 1) (conv uint e)))
+            (set! r (.Lsh (new big/Int) bigf (conv uint (+ e 2))))
+            (set! s (big/NewInt 4)))
+        equal
+        (do (set! mp (big/NewInt 1))
+            (set! mm (big/NewInt 1))
+            (set! r (.Lsh (new big/Int) bigf 1))
+            (set! s (.Lsh (new big/Int) (big/NewInt 1) (conv uint (+ (- e) 1)))))
+        :else
+        (do (set! mp (big/NewInt 2))
+            (set! mm (big/NewInt 1))
+            (set! r (.Lsh (new big/Int) bigf 2))
+            (set! s (.Lsh (new big/Int) (big/NewInt 1) (conv uint (+ (- e) 2))))))
+      (let [okEnds (== (bit-and f 1) 0)
+            bb (big/NewInt (conv int64 B))
+            ^float64 lg (math/Log v)
+            ^int k 0]
+        (when (< v 1e-300)
+          (set! lg (- (math/Log (* v 1.6069380442589903e60)) 138.62943611198907)))
+        (set! k (conv int (math/Ceil (- (/ lg (math/Log (conv float64 B))) 1e-10))))
+        (if (>= k 0)
+          (set! s (.Mul (new big/Int) s (bigPow B k)))
+          (let [sc (bigPow B (- k))]
+            (set! r (.Mul (new big/Int) r sc))
+            (set! mp (.Mul (new big/Int) mp sc))
+            (set! mm (.Mul (new big/Int) mm sc))))
+        ;; fixup: the estimate may be one too low
+        (let [top (.Add (new big/Int) r mp)
+              c (.Cmp top s)]
+          (if (or (> c 0) (and okEnds (== c 0)))
+            (set! k (+ k 1))
+            (do (set! r (.Mul (new big/Int) r bb))
+                (set! mp (.Mul (new big/Int) mp bb))
+                (set! mm (.Mul (new big/Int) mm bb)))))
+        (let [^{:tag (slice byte)} out nil
+              ^{:tag (* big/Int)} d (new big/Int)]
+          (while true
+            (.QuoRem d r s r)
+            (let [dv (conv byte (.Int64 d))
+                  c1 (.Cmp r mm)
+                  tc1 (or (< c1 0) (and okEnds (== c1 0)))
+                  c2 (.Cmp (.Add (new big/Int) r mp) s)
+                  tc2 (or (> c2 0) (and okEnds (== c2 0)))]
+              (cond
+                (and (not tc1) (not tc2))
+                (do (set! out (append out dv))
+                    (set! r (.Mul (new big/Int) r bb))
+                    (set! mp (.Mul (new big/Int) mp bb))
+                    (set! mm (.Mul (new big/Int) mm bb)))
+                (and tc1 (not tc2))
+                (do (set! out (append out dv))
+                    (return out k))
+                (and (not tc1) tc2)
+                (do (set! out (append out (+ dv 1)))
+                    (return out k))
+                :else
+                (do (if (< (.Cmp (.Lsh (new big/Int) r 1) s) 0)
+                      (set! out (append out dv))
+                      (set! out (append out (+ dv 1))))
+                    (return out k)))))
+          (return out k))))))
+
+;; ---------------------------------------------------------------------------------------
+;; string->number
+
+(go/func lowerB ^byte [^byte c]
+  (when (and (>= c \A) (<= c \Z))
+    (return (+ c 32)))
+  c)
+
+(go/func digitVal ^int [^byte c]
+  (when (and (>= c \0) (<= c \9))
+    (return (conv int (- c \0))))
+  (when (and (>= c \a) (<= c \z))
+    (return (+ 10 (conv int (- c \a)))))
+  (when (and (>= c \A) (<= c \Z))
+    (return (+ 10 (conv int (- c \A)))))
+  99)
+
+(go/func allDigits "allDigits is whether s is nonempty and all digits of radix rad.\n" ^bool [^string s ^int rad]
+  (when (== (len s) 0)
+    (return false))
+  (for [i 0] (< i (len s)) (inc! i)
+    (when (>= (digitVal (aget s i)) rad)
+      (return false)))
+  true)
+
+(go/func parseBig ^{:tag (* big/Int)} [^string s ^int rad]
+  (let [(values z _) (.SetString (new big/Int) s rad)]
+    z))
+
+(go/func negNum ^any [^any x ^bool neg]
+  (when neg
+    (type-switch [v x]
+      (case [float64] (return (- v)))
+      (case [int64 (* big/Int) (* big/Rat)] (return (Sub (conv int64 0) x)))))
+  x)
+
+(go/func StringToNumber "StringToNumber is the number s denotes in default radix radix, or false.\n" ^any [^string s ^int radix]
+  (checkRadix "string->number" radix)
+  (let [^int exact 0
+        ^int rad 0
+        ^int i 0]
+    (while (and (< (+ i 1) (len s)) (== (aget s i) \#))
+      (let [c (lowerB (aget s (+ i 1)))]
+        (switch c
+          (case [\x] (when (!= rad 0) (return false)) (set! rad 16))
+          (case [\b] (when (!= rad 0) (return false)) (set! rad 2))
+          (case [\o] (when (!= rad 0) (return false)) (set! rad 8))
+          (case [\d] (when (!= rad 0) (return false)) (set! rad 10))
+          (case [\e] (when (!= exact 0) (return false)) (set! exact 1))
+          (case [\i] (when (!= exact 0) (return false)) (set! exact 2))
+          (default (return false)))
+        (set! i (+ i 2))))
+    (when (== rad 0)
+      (set! rad radix))
+    (parseComplex (subslice s i) rad exact)))
+
+(go/func isExactZero2 ^bool [^any x]
+  (let [(values n ok) (assert int64 x)]
+    (and ok (== n 0))))
+
+(go/func parseComplex ^any [^string b ^int rad ^int exact]
+  (let [(values v ok) (parseReal b rad exact)]
+    (when ok
+      (return v)))
+  (when (== (len b) 0)
+    (return false))
+  (let [last (lowerB (aget b (- (len b) 1)))]
+    (when (and (== last \i) (< rad 19))
+      (let [body (subslice b 0 (- (len b) 1))]
+        (for [j 0] (< j (len body)) (inc! j)
+          (when (or (== (aget body j) \+) (== (aget body j) \-))
+            (let [im (subslice body j)
+                  ^any re (conv int64 0)
+                  reok true]
+              (when (> j 0)
+                (let [(values rv rok) (parseReal (subslice body 0 j) rad exact)]
+                  (set! re rv)
+                  (set! reok rok)))
+              (when reok
+                (let [^any imv 0
+                      ^bool imok false]
+                  (if (== (len im) 1)
+                    (do (set! imv (conv int64 1)) (set! imok true))
+                    (let [(values iv iok) (parseReal im rad exact)]
+                      (set! imv iv)
+                      (set! imok iok)))
+                  (when imok
+                    (when (isExactZero2 imv)
+                      (return re))
+                    (return (addr (lit Complex :Re re :Im imv)))))))))))
+    (let [at (strings/IndexByte b \@)]
+      (when (> at 0)
+        (let [(values mv mok) (parseReal (subslice b 0 at) rad exact)
+              (values av aok) (parseReal (subslice b (+ at 1)) rad exact)]
+          (when (and mok aok)
+            (when (isExactZero2 av)
+              (return mv))
+            (return (addr (lit Complex :Re mv :Im av :Polar true))))))))
+  false)
+
+(go/func parseReal "parseReal is the real number b denotes (exact: 0 as written, 1 #e, 2 #i), ok false if none.\n"
+  ^any [^string b ^int rad ^int exact] :results [any bool]
+  (when (== (len b) 0)
+    (return false false))
+  (let [^bool neg false
+        ^bool signed false
+        ^string rest b]
+    (when (or (== (aget b 0) \+) (== (aget b 0) \-))
+      (set! neg (== (aget b 0) \-))
+      (set! signed true)
+      (set! rest (subslice b 1)))
+    (when (== (len rest) 0)
+      (return false false))
+    (when (and signed (== (len rest) 5) (== (lowerB (aget rest 3)) \.) (== (aget rest 4) \0))
+      (let [w (strings/ToLower (subslice rest 0 3))]
+        (when (== exact 1)
+          (return false false))
+        (when (== w "inf")
+          (if neg (return (math/Inf -1) true) (return (math/Inf 1) true)))
+        (when (== w "nan")
+          (return (math/NaN) true))))
+    (let [^bool width false
+          ^int wbits -1]
+      (let [bar (strings/IndexByte rest \|)]
+        (when (>= bar 0)
+          (when (not (allDigits (subslice rest (+ bar 1)) 10))
+            (return false false))
+          (let [(values wv werr) (strconv/Atoi (subslice rest (+ bar 1)))]
+            (if (!= werr nil) (set! wbits 1000) (set! wbits wv)))
+          (set! rest (subslice rest 0 bar))
+          (set! width true)))
+      (let [slash (strings/IndexByte rest \/)]
+        (when (>= slash 0)
+          (when width
+            (return false false))
+          (let [ns (subslice rest 0 slash)
+                ds (subslice rest (+ slash 1))]
+            (when (or (not (allDigits ns rad)) (not (allDigits ds rad)))
+              (return false false))
+            (let [n (parseBig ns rad)
+                  d (parseBig ds rad)]
+              (when (== (.Sign d) 0)
+                (when (== exact 2)
+                  (if (== (.Sign n) 0)
+                    (return (math/NaN) true)
+                    (if neg (return (math/Inf -1) true) (return (math/Inf 1) true))))
+                (return false false))
+              (let [q (NormRat (newRat n d))]
+                (if (== exact 2)
+                  (return (negNum (ToFloat q) neg) true)
+                  (return (negNum q neg) true))))))
+        (when (allDigits rest rad)
+          (let [q (NormInt (parseBig rest rad))]
+            (if (or (== exact 2) (and width (!= exact 1)))
+              (return (negNum (roundWidth (ToFloat q) wbits) neg) true)
+              (return (negNum q neg) true))))
+        (when (!= rad 10)
+          (return false false))
+        (parseDecimal rest neg exact wbits)))))
+
+(go/func roundWidth "roundWidth is f rounded to w significant bits (w < 0: not at all).\n" ^float64 [^float64 f ^int w]
+  (when (or (< w 0) (>= w 53) (== f 0) (math/IsInf f 0) (math/IsNaN f))
+    (return f))
+  (when (== w 0)
+    (return 0.0))
+  (let [(values fr ex) (math/Frexp f)
+        sc (math/Ldexp 1.0 w)]
+    (math/Ldexp (/ (math/RoundToEven (* fr sc)) sc) ex)))
+
+(go/func newRat ^{:tag (* big/Rat)} [^{:tag (* big/Int)} n ^{:tag (* big/Int)} d]
+  (.SetFrac (new big/Rat) n d))
+
+(go/func parseDecimal ^any [^string rest ^bool neg ^int exact ^int wbits] :results [any bool]
+  (let [^int i 0
+        ^int nd 0]
+    (while (and (< i (len rest)) (>= (digitVal (aget rest i)) 0) (< (digitVal (aget rest i)) 10))
+      (inc! i) (inc! nd))
+    (let [ip (subslice rest 0 i)
+          ^string fp ""]
+      (when (and (< i (len rest)) (== (aget rest i) \.))
+        (inc! i)
+        (let [st i]
+          (while (and (< i (len rest)) (< (digitVal (aget rest i)) 10))
+            (inc! i) (inc! nd))
+          (set! fp (subslice rest st i))))
+      (when (== nd 0)
+        (return false false))
+      (let [^int ex 0
+            ^string exs ""]
+        (when (< i (len rest))
+          (let [m (lowerB (aget rest i))]
+            (when (not (or (== m \e) (== m \d) (== m \f) (== m \s) (== m \l)))
+              (return false false))
+            (inc! i)
+            (set! exs (subslice rest i))
+            (when (and (> (len exs) 0) (or (== (aget exs 0) \+) (== (aget exs 0) \-)))
+              (set! exs (subslice exs 1)))
+            (when (not (allDigits exs 10))
+              (return false false))
+            (let [(values ev err) (strconv/Atoi (subslice rest i))]
+              (if (!= err nil)
+                (if (== (aget rest i) \-) (set! ex -100000000) (set! ex 100000000))
+                (set! ex ev)))))
+        (if (== exact 1)
+          (do (when (or (> ex 1000000) (< ex -1000000))
+                (return false false))
+              (let [mant (parseBig (+ ip fp) 10)
+                    sc (- ex (len fp))
+                    q (new big/Rat)]
+                (.SetInt q mant)
+                (if (>= sc 0)
+                  (.Mul q q (.SetInt (new big/Rat) (bigPow 10 sc)))
+                  (.Quo q q (.SetInt (new big/Rat) (bigPow 10 (- sc)))))
+                (return (negNum (NormRat q) neg) true)))
+          (let [^string ip2 ip
+                ^string fp2 fp]
+            (when (== ip "") (set! ip2 "0"))
+            (when (== fp "") (set! fp2 "0"))
+            (let [(values f _) (strconv/ParseFloat (+ ip2 "." fp2 "e" (strconv/Itoa ex)) 64)]
+              (return (negNum (roundWidth f wbits) neg) true))))))))

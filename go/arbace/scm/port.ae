@@ -1,0 +1,402 @@
+;; si's runtime: ports (textual and binary; console, string, bytevector and file), transcoders as far as
+;; R6RS's basic ones go (utf-8, latin-1 and utf-16 codecs, eol styles, error-handling modes).
+;;
+;; Memory model: a bytevector port and a file port hold their bytes in Data with a position Pos; a file
+;; port reads the file whole when opened and writes the bytes changed since its last flush (Low on) back at
+;; flush and close (and at FlushAll), so input, output and input/output ports and port positions are one
+;; code path. A string port holds runes. The console is stdin (read through bufio, stdout flushed first) and
+;; stdout (buffered, flushed by FlushAll, before reading stdin and before stderr is written).
+(in-ns 'go.arbace.scm)
+
+(go/file "port.go"
+  :imports [[bufio "bufio"] [fmt "fmt"] [os "os"] [strings "strings"] [utf8 "unicode/utf8"]])
+
+(go/const [^{:tag uint8} pConsole iota] [pString] [pMem])
+
+(go/type Codec "Codec is a transcoder's codec: utf-8, latin-1 or utf-16.\n" (struct ^string Name))
+
+(go/type Transcoder "Transcoder is a codec, an eol style (none, lf, cr, crlf, nel, crnel, ls) and an error-handling mode (ignore, raise, replace).\n"
+  (struct ^{:tag (* Codec)} Codec ^string Eol ^string Mode))
+
+(go/var ^{:tag (* Codec)} codecUTF8 (addr (lit Codec :Name "utf-8")))
+(go/var ^{:tag (* Codec)} codecLatin1 (addr (lit Codec :Name "latin-1")))
+(go/var ^{:tag (* Codec)} codecUTF16 (addr (lit Codec :Name "utf-16")))
+
+(go/method String ^string [^{:tag (* Codec)} c] (+ "#<codec " (.-Name c) ">"))
+(go/method String ^string [^{:tag (* Transcoder)} t]
+  (+ "#<transcoder " (.-Name (.-Codec t)) " " (.-Eol t) " " (.-Mode t) ">"))
+
+(go/type FileOptions "FileOptions is a file-options object: the options named (no-create, no-fail, no-truncate).\n"
+  (struct ^bool NoCreate ^bool NoFail ^bool NoTruncate ^{:tag (slice (* Symbol))} Names))
+
+(go/method String ^string [^{:tag (* FileOptions)} o] "#<enum-set>")
+
+(go/type Port "Port is a Scheme port (see the file's header).\n"
+  (struct ^uint8 Kind ^bool In ^bool Out ^bool Binary ^bool Closed ^bool Err
+          ^string Name ^{:tag (* Transcoder)} Tr ^string BufMode
+          ^{:tag (slice rune)} runes ^int rpos
+          ^{:tag (slice byte)} data ^int pos
+          ^{:tag (* os/File)} f ^int low ^bool dirty
+          ^bool bomDone ^bool le ^bool bomWritten))
+
+(go/method String "String is Chez's write of a port: #<input port string>, #<binary output port /tmp/x>, ...\n" ^string [^{:tag (* Port)} p]
+  (let [s "#<"]
+    (when (.-Binary p)
+      (set! s (+ s "binary ")))
+    (cond (and (.-In p) (.-Out p)) (set! s (+ s "input/output port "))
+          (.-In p) (set! s (+ s "input port "))
+          :else (set! s (+ s "output port ")))
+    (+ s (.-Name p) ">")))
+
+;; ---------------------------------------------------------------------------------------
+;; The console and the current ports
+
+(go/var ^{:tag (* bufio/Writer)} stdoutW (bufio/NewWriterSize os/Stdout 65536))
+(go/var ^{:tag (* bufio/Reader)} stdinR (bufio/NewReader os/Stdin))
+(go/var ^{:tag (* Port)} consolePort (addr (lit Port :Kind pConsole :In true :Out true :Name "stdin/out" :BufMode "none")))
+(go/var ^{:tag (* Port)} errorPort (addr (lit Port :Kind pConsole :Out true :Err true :Name "stderr" :BufMode "none")))
+(go/var ^{:tag (* Port)} curIn consolePort)
+(go/var ^{:tag (* Port)} curOut consolePort)
+(go/var ^{:tag (* Port)} curErr errorPort)
+(go/var ^{:tag (map (* Port) bool)} openFiles (make (map (* Port) bool)))
+
+(go/func CurrentInput ^{:tag (* Port)} [] curIn)
+(go/func CurrentOutput ^{:tag (* Port)} [] curOut)
+(go/func CurrentError ^{:tag (* Port)} [] curErr)
+
+(go/func FlushAll "FlushAll flushes every output port (at exit).\n" []
+  (.Flush stdoutW)
+  (range [p _ openFiles]
+    (flushFile p)))
+
+(go/func flushFile [^{:tag (* Port)} p]
+  (when (and (!= (.-f p) nil) (.-dirty p) (not (.-Closed p)))
+    (when (< (.-low p) (len (.-data p)))
+      (.WriteAt (.-f p) (subslice (.-data p) (.-low p)) (conv int64 (.-low p))))
+    (set! (.-low p) (len (.-data p)))
+    (set! (.-dirty p) false)))
+
+;; ---------------------------------------------------------------------------------------
+;; Errors
+
+(go/func ioCondition "ioCondition is a compound condition: the head parts, then &who, &message and &irritants.\n"
+  ^any [^{:tag (slice (* Record))} head ^string who ^string msg ^{:tag (slice any)} irritants]
+  (let [cs head]
+    (when (!= who "")
+      (set! cs (append cs (MakeSimple CondWho (Intern who)))))
+    (set! cs (append cs (MakeSimple CondMessage (Str msg)) (MakeSimple CondIrritants (ListTail irritants Null))))
+    (addr (lit Compound :Parts cs))))
+
+(go/func capitalize ^string [^string s]
+  (when (== (len s) 0)
+    (return ""))
+  (+ (strings/ToUpper (subslice s _ 1)) (subslice s 1)))
+
+(go/func FileError "FileError raises Chez's error for a failed file operation (plain: only &i/o-filename).\n"
+  [^string who ^string name ^error err ^bool plain]
+  (let [reason (.Error err)
+        i (strings/LastIndex reason ": ")]
+    (when (>= i 0)
+      (set! reason (subslice reason (+ i 2))))
+    (let [kind CondIOFilename]
+      (when (not plain)
+        (cond (os/IsNotExist err) (set! kind CondIOFileDoesNotExist)
+              (os/IsExist err) (set! kind CondIOFileAlreadyExists)
+              (os/IsPermission err) (set! kind CondIOFileProtection)))
+      (RaiseObj (ioCondition (lit (slice (* Record)) (MakeSimple kind (Str name))) who "failed for ~a: ~(~a~)"
+                  (lit (slice any) (Str name) (Str (capitalize reason))))))))
+
+(go/func portError "portError raises an I/O error of kind about port p.\n"
+  [^{:tag (* RTD)} kind ^{:tag (* Port)} p ^string who ^string msg & ^{:tag (slice any)} irritants]
+  (RaiseObj (ioCondition (lit (slice (* Record)) (MakeSimple kind p)) who msg irritants)))
+
+(go/func checkOpen [^string who ^{:tag (* Port)} p]
+  (when (.-Closed p)
+    (AssertionViolation who "not permitted on closed port ~s" p)))
+
+(go/func ArgPort ^{:tag (* Port)} [^string who ^any x]
+  (let [(values p ok) (assert (* Port) x)]
+    (when (not ok)
+      (NotA who "port" x))
+    p))
+
+(go/func ArgTextIn ^{:tag (* Port)} [^string who ^any x]
+  (let [(values p ok) (assert (* Port) x)]
+    (when (or (not ok) (not (.-In p)) (.-Binary p))
+      (NotA who "textual input port" x))
+    (checkOpen who p)
+    p))
+
+(go/func ArgTextOut ^{:tag (* Port)} [^string who ^any x]
+  (let [(values p ok) (assert (* Port) x)]
+    (when (or (not ok) (not (.-Out p)) (.-Binary p))
+      (NotA who "textual output port" x))
+    (checkOpen who p)
+    p))
+
+(go/func ArgBinIn ^{:tag (* Port)} [^string who ^any x]
+  (let [(values p ok) (assert (* Port) x)]
+    (when (or (not ok) (not (.-In p)) (not (.-Binary p)))
+      (NotA who "binary input port" x))
+    (checkOpen who p)
+    p))
+
+(go/func ArgBinOut ^{:tag (* Port)} [^string who ^any x]
+  (let [(values p ok) (assert (* Port) x)]
+    (when (or (not ok) (not (.-Out p)) (not (.-Binary p)))
+      (NotA who "binary output port" x))
+    (checkOpen who p)
+    p))
+
+(go/func ArgInPort ^{:tag (* Port)} [^string who ^any x]
+  (let [(values p ok) (assert (* Port) x)]
+    (when (or (not ok) (not (.-In p)))
+      (NotA who "input port" x))
+    p))
+
+(go/func ArgOutPort ^{:tag (* Port)} [^string who ^any x]
+  (let [(values p ok) (assert (* Port) x)]
+    (when (or (not ok) (not (.-Out p)))
+      (NotA who "output port" x))
+    p))
+
+;; ---------------------------------------------------------------------------------------
+;; Constructors
+
+(go/func NativeTranscoder ^{:tag (* Transcoder)} []
+  (addr (lit Transcoder :Codec codecUTF8 :Eol "none" :Mode "replace")))
+
+(go/func NewStringInput "NewStringInput is a string input port over runes.\n" ^{:tag (* Port)} [^{:tag (slice rune)} rs]
+  (addr (lit Port :Kind pString :In true :Name "string" :runes rs)))
+
+(go/func NewStringOutput "NewStringOutput is an empty string output port.\n" ^{:tag (* Port)} []
+  (addr (lit Port :Kind pString :Out true :Name "string")))
+
+(go/func NewBytesInput ^{:tag (* Port)} [^{:tag (slice byte)} b ^{:tag (* Transcoder)} tr]
+  (addr (lit Port :Kind pMem :In true :Binary (== tr nil) :Name "bytevector" :Tr tr :data b)))
+
+(go/func NewBytesOutput ^{:tag (* Port)} [^{:tag (* Transcoder)} tr]
+  (addr (lit Port :Kind pMem :Out true :Binary (== tr nil) :Name "bytevector" :Tr tr)))
+
+;; ---------------------------------------------------------------------------------------
+;; Decoding
+
+(go/func checkBOM [^{:tag (* Port)} p]
+  (when (and (not (.-bomDone p)) (== (.-Codec (.-Tr p)) codecUTF16))
+    (set! (.-bomDone p) true)
+    (let [d (.-data p)]
+      (when (and (== (.-pos p) 0) (>= (len d) 2))
+        (cond (and (== (aget d 0) 254) (== (aget d 1) 255)) (do (set! (.-pos p) 2) (set! (.-le p) false))
+              (and (== (aget d 0) 255) (== (aget d 1) 254)) (do (set! (.-pos p) 2) (set! (.-le p) true)))))))
+
+(go/func u16 "u16 is the 16-bit unit of d at i in the port's byte order.\n" ^int [^{:tag (* Port)} p ^{:tag (slice byte)} d ^int i]
+  (when (.-le p)
+    (return (bit-or (conv int (aget d i)) (<< (conv int (aget d (+ i 1))) 8))))
+  (bit-or (conv int (aget d (+ i 1))) (<< (conv int (aget d i)) 8)))
+
+(go/func decodeRaw "decodeRaw decodes one character of the port's bytes at pos: rune, bytes consumed, ok false at the end.\n"
+  [^{:tag (* Port)} p ^string who ^int pos] :results [rune int bool]
+  (let [d (.-data p)
+        start pos]
+    (while true
+      (when (>= pos (len d))
+        (return 0 (- pos start) false))
+      (let [^rune r 0
+            n 1
+            bad false
+            c (.-Codec (.-Tr p))]
+        (cond
+          (== c codecLatin1) (set! r (conv rune (aget d pos)))
+          (== c codecUTF8)
+          (do (let [(values r2 n2) (utf8/DecodeRune (subslice d pos))]
+                (set! r r2)
+                (set! n n2)
+                (when (and (== r2 utf8/RuneError) (<= n2 1))
+                  (set! bad true)
+                  (set! n 1))))
+          :else
+          (if (>= (+ pos 1) (len d))
+            (do (set! bad true) (set! n (- (len d) pos)))
+            (let [u (u16 p d pos)]
+              (set! n 2)
+              (cond
+                (and (>= u 0xD800) (<= u 0xDBFF))
+                (if (and (< (+ pos 3) (len d)) (>= (u16 p d (+ pos 2)) 0xDC00) (<= (u16 p d (+ pos 2)) 0xDFFF))
+                  (do (set! r (conv rune (+ 0x10000 (<< (- u 0xD800) 10) (- (u16 p d (+ pos 2)) 0xDC00)))) (set! n 4))
+                  (set! bad true))
+                (and (>= u 0xDC00) (<= u 0xDFFF)) (set! bad true)
+                :else (set! r (conv rune u))))))
+        (if bad
+          (switch (.-Mode (.-Tr p))
+            (case ["ignore"] (set! pos (+ pos n)))
+            (case ["raise"]
+              (if (== c codecUTF8)
+                (portError CondIODecoding p who "invalid utf-8 encoding #x~2,'0x~{, ~a~}" (conv int64 (aget d pos)) Null)
+                (portError CondIODecoding p who "invalid ~a encoding" (Str (.-Name c)))))
+            (default (return 0xFFFD (+ (- pos start) n) true)))
+          (return r (+ (- pos start) n) true)))))
+  (return 0 0 false))
+
+(go/func isNewline ^bool [^rune r] (or (== r 0x85) (== r 0x2028)))
+
+;; nextRune reads (commit) or peeks the next character of textual input port p.
+(go/func nextRune [^{:tag (* Port)} p ^string who ^bool commit] :results [rune bool]
+  (switch (.-Kind p)
+    (case [pString]
+      (when (>= (.-rpos p) (len (.-runes p)))
+        (return 0 false))
+      (let [r (aget (.-runes p) (.-rpos p))]
+        (when commit
+          (inc! (.-rpos p)))
+        (return r true)))
+    (case [pConsole]
+      (.Flush stdoutW)
+      (let [(values r _ err) (.ReadRune stdinR)]
+        (when (!= err nil)
+          (return 0 false))
+        (when (not commit)
+          (.UnreadRune stdinR))
+        (return r true))))
+  (checkBOM p)
+  (let [(values r n ok) (decodeRaw p who (.-pos p))]
+    (when (not ok)
+      (when commit
+        (set! (.-pos p) (+ (.-pos p) n)))
+      (return 0 false))
+    (when (!= (.-Eol (.-Tr p)) "none")
+      (cond
+        (== r \return)
+        (do (let [(values r2 n2 ok2) (decodeRaw p who (+ (.-pos p) n))]
+              (when (and ok2 (or (== r2 \newline) (== r2 0x85)))
+                (set! n (+ n n2))))
+            (set! r \newline))
+        (isNewline r) (set! r \newline)))
+    (when commit
+      (set! (.-pos p) (+ (.-pos p) n)))
+    (return r true)))
+
+(go/method ReadChar "ReadChar reads a character (the reader's CharSource).\n" [^{:tag (* Port)} p] :results [rune bool]
+  (nextRune p "read" true))
+
+(go/method PeekChar "PeekChar peeks a character (the reader's CharSource).\n" [^{:tag (* Port)} p] :results [rune bool]
+  (nextRune p "read" false))
+
+;; Binary input: a byte or -1 at the end.
+(go/func nextByte ^int [^{:tag (* Port)} p ^bool commit]
+  (when (== (.-Kind p) pConsole)
+    (.Flush stdoutW)
+    (when commit
+      (let [(values b err) (.ReadByte stdinR)]
+        (when (!= err nil)
+          (return -1))
+        (return (conv int b))))
+    (let [(values bs err) (.Peek stdinR 1)]
+      (when (!= err nil)
+        (return -1))
+      (return (conv int (aget bs 0)))))
+  (when (>= (.-pos p) (len (.-data p)))
+    (return -1))
+  (let [b (aget (.-data p) (.-pos p))]
+    (when commit
+      (inc! (.-pos p)))
+    (conv int b)))
+
+;; ---------------------------------------------------------------------------------------
+;; Encoding and output
+
+(go/func eolRunes ^string [^string style]
+  (switch style
+    (case ["lf"] (return "\n"))
+    (case ["cr"] (return "\r"))
+    (case ["crlf"] (return "\r\n"))
+    (case ["nel"] (return "\u0085"))
+    (case ["crnel"] (return "\r\u0085"))
+    (case ["ls"] (return " ")))
+  "\n")
+
+(go/func encodeRunes "encodeRunes is the bytes of rs written to textual byte port p (eol style, codec, mode).\n"
+  ^{:tag (slice byte)} [^{:tag (* Port)} p ^string who ^{:tag (slice rune)} rs]
+  (let [tr (.-Tr p)
+        ^{:tag (slice byte)} out nil
+        c (.-Codec tr)]
+    (when (and (== c codecUTF16) (not (.-bomWritten p)))
+      (set! (.-bomWritten p) true)
+      (set! out (append out (conv byte 254) (conv byte 255))))
+    (range [_ r0 rs]
+      (let [rr (lit (slice rune) r0)]
+        (when (and (== r0 \newline) (!= (.-Eol tr) "none"))
+          (set! rr (conv (slice rune) (eolRunes (.-Eol tr)))))
+        (range [_ r rr]
+          (cond
+            (== c codecUTF8) (set! out (utf8/AppendRune out r))
+            (== c codecLatin1)
+            (if (<= r 255)
+              (set! out (append out (conv byte r)))
+              (switch (.-Mode tr)
+                (case ["replace"] (set! out (append out (conv byte \?))))
+                (case ["raise"]
+                  (portError CondIOEncoding p who (fmt/Sprintf "latin-1 codec cannot encode #\\x%x" (conv int r)) (conv Char r)))))
+            :else
+            (if (>= r 0x10000)
+              (let [v (- (conv int r) 0x10000)
+                    hi (+ 0xD800 (>> v 10))
+                    lo (+ 0xDC00 (bit-and v 0x3FF))]
+                (set! out (append out (conv byte (>> hi 8)) (conv byte (bit-and hi 255)) (conv byte (>> lo 8)) (conv byte (bit-and lo 255)))))
+              (set! out (append out (conv byte (>> (conv int r) 8)) (conv byte (bit-and (conv int r) 255)))))))))
+    out))
+
+(go/func writeBytes "writeBytes writes b at the position of memory port p.\n" [^{:tag (* Port)} p ^{:tag (slice byte)} b]
+  (let [pos (.-pos p)
+        end (+ pos (len b))]
+    (cond
+      (== pos (len (.-data p))) (set! (.-data p) (append (.-data p) (spread b)))
+      :else
+      (do (when (> end (len (.-data p)))
+            (let [nd (make (slice byte) end)]
+              (copy nd (.-data p))
+              (set! (.-data p) nd)))
+          (copy (subslice (.-data p) pos) b)))
+    (set! (.-pos p) end)
+    (when (!= (.-f p) nil)
+      (when (< pos (.-low p))
+        (set! (.-low p) pos))
+      (set! (.-dirty p) true)
+      (when (== (.-BufMode p) "none")
+        (flushFile p)))))
+
+(go/func consoleWrite [^{:tag (* Port)} p ^string s]
+  (when (.-Err p)
+    (.Flush stdoutW)
+    (.WriteString os/Stderr s)
+    (return))
+  (.WriteString stdoutW s))
+
+(go/method putRunes "putRunes writes characters to textual output port p.\n" [^{:tag (* Port)} p ^string who ^{:tag (slice rune)} rs]
+  (switch (.-Kind p)
+    (case [pString] (set! (.-runes p) (append (.-runes p) (spread rs))))
+    (case [pConsole] (consoleWrite p (conv string rs)))
+    (default (writeBytes p (encodeRunes p who rs)))))
+
+(go/method putGo "putGo writes Go string s to textual output port p.\n" [^{:tag (* Port)} p ^string who ^string s]
+  (when (== (.-Kind p) pConsole)
+    (consoleWrite p s)
+    (return))
+  (.putRunes p who (conv (slice rune) s)))
+
+(go/func WriteString "WriteString writes s to textual output port p (#t: the current output port).\n" [^any p ^string s]
+  (when (== p (conv any true))
+    (.putGo curOut "write" s)
+    (return))
+  (.putGo (ArgTextOut "write" p) "write" s))
+
+;; ---------------------------------------------------------------------------------------
+;; Closing
+
+(go/func closePort [^{:tag (* Port)} p]
+  (when (or (.-Closed p) (== (.-Kind p) pConsole))
+    (return))
+  (flushFile p)
+  (set! (.-Closed p) true)
+  (when (!= (.-f p) nil)
+    (.Close (.-f p))
+    (delete openFiles p)))

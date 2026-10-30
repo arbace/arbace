@@ -1,0 +1,156 @@
+;; si's runtime: the printer, write and display of every value as Chez Scheme 10.3.0 prints it (in its
+;; R6RS mode, as the test suites run it: quote forms are not abbreviated, (quote x) stays so). Strings
+;; escape \a \b \t \n \v \f \r, " and \, and \xHEX; for the other controls, 127, U+85 and U+2028;
+;; characters are named (#\nul #\alarm ... #\space #\delete) or #\xHEX for those same controls, else
+;; themselves; symbols escape what is no identifier character as \xHEX; (peculiar ones: + - ... and
+;; ->x); a gensym is #{NAME UID}.
+(in-ns 'go.arbace.scm)
+
+(go/file "write.go"
+  :imports [[fmt "fmt"] [big "math/big"] [strconv "strconv"] [strings "strings"]])
+
+(go/func WriteTo "WriteTo writes v to b as write does (display: as display does).\n"
+  [^{:tag (* strings/Builder)} b ^any v ^bool display]
+  (type-switch [x v]
+    (case [nil] (.WriteString b "#<nil>"))
+    (case [bool]
+      (if x (.WriteString b "#t") (.WriteString b "#f")))
+    (case [int64 float64 (* big/Int) (* big/Rat)] (.WriteString b (NumberToString v 10)))
+    (case [Char]
+      (if display (.WriteRune b (conv rune x)) (writeChar b (conv rune x))))
+    (case [(* String)]
+      (if display (.WriteString b (conv string (.-R x))) (writeString b (.-R x))))
+    (case [(* Symbol)]
+      (cond display (.WriteString b (.-Name x))
+            (.-Gensym x) (do (.WriteString b "#{") (.WriteString b (.-Name x)) (.WriteString b " ") (.WriteString b (.-Uid x)) (.WriteString b "}"))
+            :else (writeSymbol b (.-Name x))))
+    (case [(* Special)] (.WriteString b (.-Name x)))
+    (case [(* Pair)]
+      (.WriteString b "(")
+      (WriteTo b (.-Car x) display)
+      (let [^any t (.-Cdr x)]
+        (while true
+          (let [(values p ok) (assert (* Pair) t)]
+            (if ok
+              (do (.WriteString b " ")
+                  (WriteTo b (.-Car p) display)
+                  (set! t (.-Cdr p)))
+              (do (when (!= t (conv any Null))
+                    (.WriteString b " . ")
+                    (WriteTo b t display))
+                  (break))))))
+      (.WriteString b ")"))
+    (case [(* Vector)]
+      (.WriteString b "#(")
+      (range [i e (.-V x)]
+        (when (> i 0) (.WriteString b " "))
+        (WriteTo b e display))
+      (.WriteString b ")"))
+    (case [(* Bytevector)]
+      (.WriteString b "#vu8(")
+      (range [i e (.-B x)]
+        (when (> i 0) (.WriteString b " "))
+        (.WriteString b (strconv/Itoa (conv int e))))
+      (.WriteString b ")"))
+    (case [(* Values)]
+      (range [i e (.-V x)]
+        (when (> i 0) (.WriteString b " "))
+        (WriteTo b e display)))
+    (case [(* Prim)] (.WriteString b (+ "#<procedure " (.-Name x) ">")))
+    (case [(* Closure)]
+      (if (== (.-Name (.-L x)) "")
+        (.WriteString b "#<procedure>")
+        (.WriteString b (+ "#<procedure " (.-Name (.-L x)) ">"))))
+    (case [(* Cont)] (.WriteString b "#<continuation>"))
+    (case [(* RTD)]
+      (.WriteString b "#<record type ")
+      (let [(values u isSym) (assert (* Symbol) (.-Uid x))]
+        (if isSym
+          (.WriteString b (.-Name u))
+          (.WriteString b (.-Name (.-Name x)))))
+      (.WriteString b ">"))
+    (case [(* RCD)] (.WriteString b "#<record constructor descriptor>"))
+    (case [(* Compound)] (.WriteString b "#<compound condition>"))
+    (case [(* Record)]
+      (cond
+        (.Is (.-RTD x) CondCondition)
+        (do (.WriteString b "#<condition ") (.WriteString b (.-Name (.-Name (.-RTD x)))) (.WriteString b ">"))
+        (.-Opaque (.-RTD x))
+        (do (.WriteString b "#<") (.WriteString b (.-Name (.-Name (.-RTD x)))) (.WriteString b ">"))
+        :else
+        (do (.WriteString b "#[")
+            (.WriteString b (.-Name (.-Name (.-RTD x))))
+            (range [_ e (.-F x)]
+              (.WriteString b " ")
+              (WriteTo b e display))
+            (.WriteString b "]"))))
+    (case [fmt/Stringer] (.WriteString b (.String x)))
+    (default
+      (let [n (strings/ToLower (fmt/Sprintf "%T" v))]
+        (set! n (strings/TrimPrefix n "*"))
+        (set! n (strings/TrimPrefix n "scm."))
+        (.WriteString b (+ "#<" n ">"))))))
+
+(go/func WriteValue "WriteValue is v as write prints it (display: as display does).\n" ^string [^any v ^bool display]
+  (let [^strings/Builder b (zero strings/Builder)]
+    (WriteTo (addr b) v display)
+    (.String b)))
+
+(go/func hexUp ^string [^rune r]
+  (strings/ToUpper (strconv/FormatInt (conv int64 r) 16)))
+
+(go/func writeChar [^{:tag (* strings/Builder)} b ^rune r]
+  (.WriteString b "#\\")
+  (switch r
+    (case [0] (.WriteString b "nul") (return))
+    (case [7] (.WriteString b "alarm") (return))
+    (case [8] (.WriteString b "backspace") (return))
+    (case [9] (.WriteString b "tab") (return))
+    (case [10] (.WriteString b "newline") (return))
+    (case [11] (.WriteString b "vtab") (return))
+    (case [12] (.WriteString b "page") (return))
+    (case [13] (.WriteString b "return") (return))
+    (case [27] (.WriteString b "esc") (return))
+    (case [32] (.WriteString b "space") (return))
+    (case [127] (.WriteString b "delete") (return)))
+  (if (or (< r 32) (== r 133) (== r 8232))
+    (do (.WriteString b "x") (.WriteString b (hexUp r)))
+    (.WriteRune b r)))
+
+(go/func writeString [^{:tag (* strings/Builder)} b ^{:tag (slice rune)} s]
+  (.WriteByte b (conv byte 34))
+  (range [_ r s]
+    (switch r
+      (case [34] (.WriteString b "\\\""))
+      (case [92] (.WriteString b "\\\\"))
+      (case [7] (.WriteString b "\\a"))
+      (case [8] (.WriteString b "\\b"))
+      (case [9] (.WriteString b "\\t"))
+      (case [10] (.WriteString b "\\n"))
+      (case [11] (.WriteString b "\\v"))
+      (case [12] (.WriteString b "\\f"))
+      (case [13] (.WriteString b "\\r"))
+      (default
+        (if (or (< r 32) (== r 127) (== r 133) (== r 8232))
+          (do (.WriteString b "\\x") (.WriteString b (hexUp r)) (.WriteString b ";"))
+          (.WriteRune b r)))))
+  (.WriteByte b (conv byte 34)))
+
+(go/func writeSymbol "writeSymbol writes the symbol named name as write does.\n"
+  [^{:tag (* strings/Builder)} b ^string name]
+  (when (== name "")
+    (.WriteString b "||")
+    (return))
+  (when (or (== name "+") (== name "-") (== name "..."))
+    (.WriteString b name)
+    (return))
+  (let [arrow (strings/HasPrefix name "->")
+        ^bool first true]
+    (range [_ r name]
+      (let [^bool ok (IsIdentSubsequent r)]
+        (when (and first (not arrow))
+          (set! ok (IsIdentInitial r)))
+        (if ok
+          (.WriteRune b r)
+          (do (.WriteString b "\\x") (.WriteString b (hexUp r)) (.WriteString b ";"))))
+      (set! first false))))

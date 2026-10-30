@@ -172,8 +172,8 @@
       (some #{"&syntax"} (:kinds cref))
       (let [c (:condition ours)]
         (cond (not (some #{'&syntax} (:kinds c))) :not-syntax
-              (= (sp/write-form (:form c)) (:form cref)) :pass
-              (= (sp/write-form (:subform c)) (:form cref)) :pass-subform
+              (= (or (:form-text c) (sp/write-form (:form c))) (:form cref)) :pass
+              (= (or (:subform-text c) (sp/write-form (:subform c))) (:form cref)) :pass-subform
               :else :form-differs))
       :else :pass)))
 
@@ -246,15 +246,30 @@
           :when (not= theirs ::unreadable)]
       {:case file :same (= ours theirs) :ours ours :theirs theirs})))
 
+(defn- si-case
+  "One test case as si ran it (bin/si test --si: the light driver's --case run in DIR, NAME.out, .err, .rc):
+  the shape run-case gives."
+  [dir n]
+  (let [f (fn [ext] (let [x (java.io.File. (str dir "/" n "." ext))] (if (.exists x) (slurp x) "")))
+        err (f "err") out (f "out")
+        ran (boolean (re-find #"(?m)^SI-RUN$" err))
+        raise (when-let [m (re-find #"(?m)^SI-RAISE (.*)$" err)] (read-string (second m)))
+        c (when raise (cond-> {:kinds (mapv symbol (:kinds raise))}
+                        (:form raise) (assoc :form-text (:form raise) :subform-text (:subform raise))))]
+    (cond
+      (and (not ran) raise) {:expanded false :condition c}
+      (not ran) {:expanded false :condition {:kinds [] :crash (str/trim err)}}
+      :else (cond-> {:expanded true :out out} raise (assoc :run-condition c)))))
+
 (defn- cmd-test [args]
-  (boot-default!)
+  (when (not= (first args) "--si") (boot-default!))
   (let [dir (str (root) "/test/scheme/expand")
         refs (into {} (map (juxt :file identity) (read-ae-forms (slurp (str dir "/ref-chez.edn")))))
         known (read-string (slurp (str dir "/known.edn")))
         files (sort (filter #(.endsWith ^String % ".sps") (map str (.list (java.io.File. (str dir "/cases"))))))
         results (vec (for [f files
                            :let [n (subs f 0 (- (count f) 4))
-                                 ours (run-case (str dir "/cases/" f))
+                                 ours (if (= (first args) "--si") (si-case (second args) n) (run-case (str dir "/cases/" f)))
                                  v (if-let [ref (refs n)] (judge ours ref) :no-reference)]]
                        (do (println (name v) n
                                     (if (#{:pass :pass-subform} v) "" (pr-str (dissoc ours :expanded))))
@@ -265,9 +280,10 @@
     (println (count (filter pass? results)) "of" (count results) "pass ("
              (count (filter #(= :pass-subform (:verdict %)) results)) "with Chez's form our subform);"
              (count (filter known? results)) "known;" (count bad) "failing")
-    (let [cmp (vec (compare-with-chez dir))]
+    (when-not (= (first args) "--si")
+     (let [cmp (vec (compare-with-chez dir))]
       (println "against Chez's expand, normalized:" (count (filter :same cmp)) "of" (count cmp) "the same:"
-               (str/join " " (map :case (filter :same cmp)))))
+               (str/join " " (map :case (filter :same cmp))))))
     (if (seq bad) 1 0)))
 
 (defn- cmd-check-suite [args]

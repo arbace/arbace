@@ -1,0 +1,116 @@
+;; Tests of ports and hashtables (ports agent).
+(in-ns 'go.arbace.scm)
+
+(go/file "ports_test.go" :imports [[testing "testing"]])
+
+(go/func callP ^any [^string name & ^{:tag (slice any)} args]
+  (let [p (LookupPrim name)]
+    (when (== p nil)
+      (panic (+ "no primitive " name)))
+    (.call p args)))
+
+(go/func str ^any [^string s] (NewString s))
+
+(go/func TestStringPorts [^{:tag (* testing/T)} t]
+  (let [p (callP "open-string-input-port" (str "ab\ncd\r\nef"))]
+    (when (!= (callP "get-char" p) (conv any (conv Char \a)))
+      (.Fatal t "get-char"))
+    (when (!= (callP "lookahead-char" p) (conv any (conv Char \b)))
+      (.Fatal t "lookahead-char"))
+    (when (!= (.String (assert (* String) (callP "get-line" p))) "b")
+      (.Fatal t "get-line 1"))
+    (when (!= (.String (assert (* String) (callP "get-line" p))) "cd\r")
+      (.Fatal t "get-line 2"))
+    (when (!= (.String (assert (* String) (callP "get-string-n" p (conv int64 5)))) "ef")
+      (.Fatal t "get-string-n"))
+    (when (!= (callP "get-line" p) (conv any Eof))
+      (.Fatal t "get-line eof"))
+    (when (!= (.String (assert (* Port) p)) "#<input port string>")
+      (.Fatal t (.String (assert (* Port) p))))))
+
+(go/func TestStringOutput [^{:tag (* testing/T)} t]
+  (let [v (assert (* Values) (callP "open-string-output-port"))
+        p (aget (.-V v) 0)
+        ext (assert (* Prim) (aget (.-V v) 1))]
+    (callP "put-string" p (str "abcd") (conv int64 1) (conv int64 2))
+    (callP "put-char" p (conv any (conv Char \z)))
+    (callP "display" (str "q") p)
+    (callP "newline" p)
+    (when (!= (.String (assert (* String) (.call ext nil))) "bczq\n")
+      (.Fatal t "output"))
+    (when (!= (.String (assert (* String) (.call ext nil))) "")
+      (.Fatal t "emptied"))))
+
+(go/func TestUTF16 [^{:tag (* testing/T)} t]
+  (let [tr (callP "make-transcoder" (callP "utf-16-codec"))
+        bv (assert (* Bytevector) (callP "string->bytevector" (str "apλe") tr))]
+    (when (!= (conv string (.-B bv)) (conv string (lit (slice byte) 254 255 0 97 0 112 3 187 0 101)))
+      (.Fatal t "utf-16 bytes"))
+    (let [s (assert (* String) (callP "bytevector->string" bv tr))]
+      (when (!= (.String s) "apλe")
+        (.Fatal t "decode"))))
+  (let [tr (callP "make-transcoder" (callP "utf-8-codec") (Intern "lf"))
+        bv (addr (lit Bytevector :B (lit (slice byte) 97 10 98 13 99 13 10 100 194 133 101)))
+        s (assert (* String) (callP "bytevector->string" bv tr))]
+    (when (!= (.String s) "a\nb\nc\nd\ne")
+      (.Fatal t (.String s))))
+  (let [tr (callP "make-transcoder" (callP "latin-1-codec") (Intern "none") (Intern "raise"))]
+    (callP "string->bytevector" (str "aé") tr)))
+
+(go/func TestHashtables [^{:tag (* testing/T)} t]
+  (let [h (callP "make-eqv-hashtable")]
+    (callP "hashtable-set!" h (conv int64 1) (str "one"))
+    (callP "hashtable-set!" h 2.5 (str "flo"))
+    (callP "hashtable-set!" h (Intern "k") (str "sym"))
+    (when (!= (callP "hashtable-size" h) (conv any (conv int64 3)))
+      (.Fatal t "size"))
+    (when (!= (.String (assert (* String) (callP "hashtable-ref" h 2.5 false))) "flo")
+      (.Fatal t "flonum key"))
+    (callP "hashtable-delete!" h (conv int64 1))
+    (when (!= (callP "hashtable-contains?" h (conv int64 1)) (conv any false))
+      (.Fatal t "delete"))
+    (let [ks (assert (* Vector) (callP "hashtable-keys" h))]
+      (when (or (!= (len (.-V ks)) 2) (!= (aget (.-V ks) 0) (conv any 2.5)))
+        (.Fatal t "insertion order")))
+    (let [c (callP "hashtable-copy" h)]
+      (when (!= (callP "hashtable-mutable?" c) (conv any false))
+        (.Fatal t "immutable copy")))))
+
+(go/func TestEqualTable [^{:tag (* testing/T)} t]
+  (let [h (callP "make-hashtable" (conv any (LookupPrim "equal-hash")) (conv any (addr (lit Prim :Name "equal?" :Min 2 :Max 2 :F2 (fn ^any [^any a ^any b] (Equal a b))))))]
+    (callP "hashtable-set!" h (List (conv int64 1) (str "a")) (conv int64 10))
+    (when (!= (callP "hashtable-ref" h (List (conv int64 1) (str "a")) false) (conv any (conv int64 10)))
+      (.Fatal t "equal key"))
+    (when (!= (callP "equal-hash" (str "a")) (callP "equal-hash" (str "a")))
+      (.Fatal t "equal-hash"))
+    (when (!= (callP "equal-hash" (conv int64 1024)) (callP "equal-hash" (conv int64 1024)))
+      (.Fatal t "equal-hash int"))))
+
+(go/func TestFilePorts [^{:tag (* testing/T)} t]
+  (let [name (+ (.TempDir t) "/f.txt")
+        out (callP "open-output-file" (str name))]
+    (callP "display" (str "hello \u03bb") out)
+    (callP "newline" out)
+    (callP "close-port" out)
+    (let [in (callP "open-input-file" (str name))]
+      (when (!= (.String (assert (* String) (callP "get-line" in))) "hello \u03bb")
+        (.Fatal t "file line"))
+      (callP "close-port" in))
+    (when (!= (callP "file-exists?" (str name)) (conv any true))
+      (.Fatal t "exists"))
+    (callP "delete-file" (str name))
+    (when (!= (callP "file-exists?" (str name)) (conv any false))
+      (.Fatal t "deleted"))))
+
+(go/func TestBinary [^{:tag (* testing/T)} t]
+  (let [p (callP "open-bytevector-input-port" (addr (lit Bytevector :B (lit (slice byte) 0 1 2 3))))]
+    (when (!= (callP "get-u8" p) (conv any (conv int64 0)))
+      (.Fatal t "u8"))
+    (when (!= (callP "lookahead-u8" p) (conv any (conv int64 1)))
+      (.Fatal t "lookahead"))
+    (let [bv (assert (* Bytevector) (callP "get-bytevector-n" p (conv int64 2)))]
+      (when (!= (len (.-B bv)) 2)
+        (.Fatal t "n")))
+    (callP "get-u8" p)
+    (when (!= (callP "get-u8" p) (conv any Eof))
+      (.Fatal t "eof"))))

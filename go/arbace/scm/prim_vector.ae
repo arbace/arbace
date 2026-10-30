@@ -1,0 +1,502 @@
+;; si's runtime: vectors and bytevectors (R6RS (rnrs base) vectors and (rnrs bytevectors)), with Chez 10.3.0's
+;; conditions and messages (probed on Chez).
+(in-ns 'go.arbace.scm)
+
+(go/file "prim_vector.go"
+  :imports [[big "math/big"] [math "math"] [strconv "strconv"]])
+
+;; ---------------------------------------------------------------------------------------
+;; Vectors
+
+(go/func dvLength "dvLength is length x (a vector or bytevector length) as an int, else Chez's error.\n"
+  ^int [^string who ^string what ^any x]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (< n 0) (> n 2147483647))
+      (Violation CondAssertion who (+ "~s is not a valid " what " length") x))
+    (conv int n)))
+
+(go/func dvMakeVector ^any [^{:tag (slice any)} a]
+  (let [n (dvLength "make-vector" "vector" (aget a 0))
+        v (make (slice any) n)
+        ^any fill (conv int64 0)]
+    (when (== (len a) 2)
+      (set! fill (aget a 1)))
+    (range [i _ v]
+      (aset v i fill))
+    (NewVector v)))
+
+(go/func dvVector ^any [^{:tag (slice any)} a]
+  (let [v (make (slice any) (len a))]
+    (copy v a)
+    (NewVector v)))
+
+(go/func dvVectorLength ^any [^any x]
+  (conv int64 (len (.-V (ArgVector "vector-length" x)))))
+
+(go/func dvVectorRef ^any [^any x ^any i]
+  (let [v (ArgVector "vector-ref" x)
+        k (ArgIndex "vector-ref" i x)]
+    (when (>= k (len (.-V v)))
+      (BadIndex "vector-ref" i x))
+    (aget (.-V v) k)))
+
+(go/func dvMutVector ^{:tag (* Vector)} [^string who ^any x]
+  (let [(values v ok) (assert (* Vector) x)]
+    (when (not ok)
+      (NotA who "mutable vector" x))
+    v))
+
+(go/func dvVectorSet ^any [^any x ^any i ^any e]
+  (let [v (dvMutVector "vector-set!" x)
+        k (ArgIndex "vector-set!" i x)]
+    (when (>= k (len (.-V v)))
+      (BadIndex "vector-set!" i x))
+    (aset (.-V v) k e)
+    Unspec))
+
+(go/func dvVectorToList ^any [^any x]
+  (ListTail (.-V (ArgVector "vector->list" x)) Null))
+
+(go/func dvListToVector ^any [^any x]
+  (let [xs (dlElems "list->vector" x)]
+    (NewVector xs)))
+
+(go/func dvVectorFill ^any [^any x ^any e]
+  (let [v (dvMutVector "vector-fill!" x)]
+    (range [i _ (.-V v)]
+      (aset (.-V v) i e))
+    Unspec))
+
+;; ---------------------------------------------------------------------------------------
+;; Bytevectors: arguments
+
+(go/func dvMutBV ^{:tag (* Bytevector)} [^string who ^any x]
+  (let [(values v ok) (assert (* Bytevector) x)]
+    (when (not ok)
+      (NotA who "mutable bytevector" x))
+    v))
+
+;; dvByte is x as a byte: -128..255 when anySign, else 0..255 (or -128..127 when signed), else "invalid value".
+(go/func dvByte ^byte [^string who ^any x ^int lo ^int hi]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (< n (conv int64 lo)) (> n (conv int64 hi)))
+      (Violation CondAssertion who "invalid value ~s" x))
+    (conv byte n)))
+
+(go/func dvFill ^byte [^string who ^any x]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (< n -128) (> n 255))
+      (Violation CondAssertion who "~s is not a valid fill value" x))
+    (conv byte n)))
+
+;; dvEndian is whether endianness x is little; else Chez's "unrecognized endianness ~s" (or msg).
+(go/func dvEndianMsg ^bool [^string who ^string msg ^any x]
+  (let [(values s ok) (assert (* Symbol) x)]
+    (when ok
+      (when (== (.-Name s) "little")
+        (return true))
+      (when (== (.-Name s) "big")
+        (return false)))
+    (Violation CondAssertion who msg x)
+    false))
+
+(go/func dvEndian ^bool [^string who ^any x]
+  (dvEndianMsg who "unrecognized endianness ~s" x))
+
+(go/func dvMakeBV ^any [^{:tag (slice any)} a]
+  (let [n (dvLength "make-bytevector" "bytevector" (aget a 0))
+        b (make (slice byte) n)]
+    (when (== (len a) 2)
+      (let [f (dvFill "make-bytevector" (aget a 1))]
+        (range [i _ b]
+          (aset b i f))))
+    (addr (lit Bytevector :B b))))
+
+(go/func dvBytevector ^any [^{:tag (slice any)} a]
+  (let [b (make (slice byte) (len a))]
+    (range [i x a]
+      (aset b i (dvByte "bytevector" x -128 255)))
+    (addr (lit Bytevector :B b))))
+
+(go/func dvBVLength ^any [^any x]
+  (conv int64 (len (.-B (ArgBytevector "bytevector-length" x)))))
+
+;; dvByteIdx is the index i of a byte of bv (BadIndex otherwise).
+(go/func dvByteIdx ^int [^string who ^{:tag (* Bytevector)} b ^any i]
+  (let [k (ArgIndex who i b)]
+    (when (>= k (len (.-B b)))
+      (BadIndex who i b))
+    k))
+
+(go/func dvU8Ref ^any [^any x ^any i]
+  (let [b (ArgBytevector "bytevector-u8-ref" x)]
+    (conv int64 (aget (.-B b) (dvByteIdx "bytevector-u8-ref" b i)))))
+
+(go/func dvS8Ref ^any [^any x ^any i]
+  (let [b (ArgBytevector "bytevector-s8-ref" x)]
+    (conv int64 (conv int8 (aget (.-B b) (dvByteIdx "bytevector-s8-ref" b i))))))
+
+(go/func dvU8Set ^any [^any x ^any i ^any v]
+  (let [b (dvMutBV "bytevector-u8-set!" x)
+        k (dvByteIdx "bytevector-u8-set!" b i)]
+    (aset (.-B b) k (dvByte "bytevector-u8-set!" v 0 255))
+    Unspec))
+
+(go/func dvS8Set ^any [^any x ^any i ^any v]
+  (let [b (dvMutBV "bytevector-s8-set!" x)
+        k (dvByteIdx "bytevector-s8-set!" b i)]
+    (aset (.-B b) k (dvByte "bytevector-s8-set!" v -128 127))
+    Unspec))
+
+(go/func dvBVCopy ^any [^any x]
+  (let [b (ArgBytevector "bytevector-copy" x)
+        c (make (slice byte) (len (.-B b)))]
+    (copy c (.-B b))
+    (addr (lit Bytevector :B c))))
+
+(go/func dvStart ^int [^string who ^any x]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (< n 0) (> n 2147483647))
+      (Violation CondAssertion who "invalid start value ~s" x))
+    (conv int n)))
+
+(go/func dvBVCopyTo ^any [^{:tag (slice any)} a]
+  (let [src (ArgBytevector "bytevector-copy!" (aget a 0))
+        ss (dvStart "bytevector-copy!" (aget a 1))
+        dst (dvMutBV "bytevector-copy!" (aget a 2))
+        ds (dvStart "bytevector-copy!" (aget a 3))
+        (values n ok) (assert int64 (aget a 4))]
+    (when (or (not ok) (< n 0) (> n 2147483647))
+      (Violation CondAssertion "bytevector-copy!" "invalid count value ~s" (aget a 4)))
+    (when (> (+ ss (conv int n)) (len (.-B src)))
+      (Violation CondAssertion "bytevector-copy!" "index ~s + count ~s is beyond the end of ~s" (aget a 1) (aget a 4) src))
+    (when (> (+ ds (conv int n)) (len (.-B dst)))
+      (Violation CondAssertion "bytevector-copy!" "index ~s + count ~s is beyond the end of ~s" (aget a 3) (aget a 4) dst))
+    (copy (subslice (.-B dst) ds (+ ds (conv int n))) (subslice (.-B src) ss (+ ss (conv int n))))
+    Unspec))
+
+(go/func dvBVEq ^any [^any x ^any y]
+  (let [a (ArgBytevector "bytevector=?" x)
+        b (ArgBytevector "bytevector=?" y)]
+    (== (conv string (.-B a)) (conv string (.-B b)))))
+
+(go/func dvBVFill ^any [^any x ^any v]
+  (let [b (dvMutBV "bytevector-fill!" x)
+        f (dvFill "bytevector-fill!" v)]
+    (range [i _ (.-B b)]
+      (aset (.-B b) i f))
+    Unspec))
+
+(go/func dvBVToList ^any [^any x]
+  (let [b (ArgBytevector "bytevector->u8-list" x)
+        ^any res Null]
+    (for [i (- (len (.-B b)) 1)] (>= i 0) (dec! i)
+      (set! res (Cons (conv int64 (aget (.-B b) i)) res)))
+    res))
+
+(go/func dvListToBV ^any [^any x]
+  (let [xs (dlElems "u8-list->bytevector" x)
+        b (make (slice byte) (len xs))]
+    (range [i e xs]
+      (aset b i (dvByte "u8-list->bytevector" e 0 255)))
+    (addr (lit Bytevector :B b))))
+
+;; ---------------------------------------------------------------------------------------
+;; Bytevectors: fixed-size integers and floats
+
+;; dvField checks that a size-byte field at idx fits bytevector b and returns its position.
+(go/func dvField ^int [^string who ^{:tag (* Bytevector)} b ^any idx ^int size]
+  (let [n (len (.-B b))]
+    (when (< n size)
+      (Violation CondAssertion who "invalid size ~s for bytevector ~s" (conv int64 size) b))
+    (let [(values i ok) (assert int64 idx)]
+      (when (or (not ok) (< i 0) (>= i (conv int64 n)))
+        (Violation CondAssertion who "invalid index ~s for bytevector ~s" idx b))
+      (when (> i (conv int64 (- n size)))
+        (Violation CondAssertion who "invalid index ~s for ~s-byte field of bytevector ~s" idx (conv int64 size) b))
+      (conv int i))))
+
+;; dvNative is dvField for the native variants: the index must be a multiple of size.
+(go/func dvNative ^int [^string who ^{:tag (* Bytevector)} b ^any idx ^int size]
+  (let [n (len (.-B b))
+        (values i ok) (assert int64 idx)]
+    (when (or (not ok) (< i 0) (!= (% i (conv int64 size)) 0) (> (+ i (conv int64 size)) (conv int64 n)))
+      (Violation CondAssertion who "invalid index ~s for bytevector ~s" idx b))
+    (conv int i)))
+
+(go/func dvGet ^uint64 [^{:tag (slice byte)} b ^int i ^int size ^bool little]
+  (let [^uint64 v 0]
+    (for [k 0] (< k size) (inc! k)
+      (if little
+        (set! v (bit-or v (<< (conv uint64 (aget b (+ i k))) (* 8 k))))
+        (set! v (bit-or (<< v 8) (conv uint64 (aget b (+ i k)))))))
+    v))
+
+(go/func dvPut [^{:tag (slice byte)} b ^int i ^int size ^bool little ^uint64 v]
+  (for [k 0] (< k size) (inc! k)
+    (if little
+      (aset b (+ i k) (conv byte (>> v (* 8 k))))
+      (aset b (- (+ i size) 1 k) (conv byte (>> v (* 8 k)))))))
+
+(go/func dvResult ^any [^uint64 v ^int size ^bool signed]
+  (when signed
+    (let [sh (conv uint (- 64 (* 8 size)))]
+      (return (conv int64 (>> (conv int64 (<< v sh)) sh)))))
+  (when (<= v 9223372036854775807)
+    (return (conv int64 v)))
+  (NormInt (.SetUint64 (new big/Int) v)))
+
+;; dvBits is x as the bits of a size-byte integer, ok false when it is not one in range.
+(go/func dvBits [^any x ^int size ^bool signed] :results [uint64 bool]
+  (type-switch [v x]
+    (case [int64]
+      (when signed
+        (when (< size 8)
+          (let [lim (<< (conv int64 1) (- (* 8 size) 1))]
+            (when (or (< v (- lim)) (>= v lim))
+              (return 0 false))))
+        (return (conv uint64 v) true))
+      (when (< v 0)
+        (return 0 false))
+      (when (and (< size 8) (>= v (<< (conv int64 1) (* 8 size))))
+        (return 0 false))
+      (return (conv uint64 v) true))
+    (case [(* big/Int)]
+      (when (and (not signed) (== size 8) (> (.Sign v) 0) (<= (.BitLen v) 64))
+        (return (.Uint64 v) true))))
+  (return 0 false))
+
+(go/func dvName ^string [^bool signed ^int size ^string suffix]
+  (let [c "u"]
+    (when signed
+      (set! c "s"))
+    (+ "bytevector-" c (strconv/Itoa (* 8 size)) suffix)))
+
+(go/func dvMkRef ^{:tag (func [any any any] [any])} [^string who ^int size ^bool signed]
+  (fn ^any [^any b ^any i ^any e]
+    (let [bv (ArgBytevector who b)
+          k (dvField who bv i size)
+          little (dvEndian who e)]
+      (dvResult (dvGet (.-B bv) k size little) size signed))))
+
+(go/func dvMkNativeRef ^{:tag (func [any any] [any])} [^string who ^int size ^bool signed]
+  (fn ^any [^any b ^any i]
+    (let [bv (ArgBytevector who b)
+          k (dvNative who bv i size)]
+      (dvResult (dvGet (.-B bv) k size true) size signed))))
+
+(go/func dvMkSet ^{:tag (func [(slice any)] [any])} [^string who ^int size ^bool signed]
+  (fn ^any [^{:tag (slice any)} a]
+    (let [bv (dvMutBV who (aget a 0))
+          k (dvField who bv (aget a 1) size)
+          (values v ok) (dvBits (aget a 2) size signed)]
+      (when (not ok)
+        (Violation CondAssertion who "invalid value ~s" (aget a 2)))
+      (let [little (dvEndian who (aget a 3))]
+        (dvPut (.-B bv) k size little v)
+        Unspec))))
+
+(go/func dvMkNativeSet ^{:tag (func [any any any] [any])} [^string who ^int size ^bool signed]
+  (fn ^any [^any b ^any i ^any x]
+    (let [bv (dvMutBV who b)
+          k (dvNative who bv i size)
+          (values v ok) (dvBits x size signed)]
+      (when (not ok)
+        (Violation CondAssertion who "invalid value ~s" x))
+      (dvPut (.-B bv) k size true v)
+      Unspec)))
+
+;; ---------------------------------------------------------------------------------------
+;; Bytevectors: integers of any size
+
+(go/func dvSize ^int [^string who ^any x]
+  (let [(values n ok) (assert int64 x)]
+    (when (or (not ok) (< n 1))
+      (Violation CondAssertion who "invalid size ~s" x))
+    (when (> n 2147483647)
+      (Violation CondAssertion who "invalid size ~s" x))
+    (conv int n)))
+
+;; dvReadBig is the integer of bytes b (n of them) in the given order.
+(go/func dvReadBig ^any [^{:tag (slice byte)} b ^bool little ^bool signed]
+  (let [n (len b)
+        be (make (slice byte) n)]
+    (range [i x b]
+      (if little
+        (aset be (- n 1 i) x)
+        (aset be i x)))
+    (let [v (.SetBytes (new big/Int) be)]
+      (when (and signed (!= (bit-and (aget be 0) 128) 0))
+        (.Sub v v (.Lsh (new big/Int) (big/NewInt 1) (conv uint (* 8 n)))))
+      (NormInt v))))
+
+;; dvWriteBig stores integer x in the n bytes at b in the given order, ok false when out of range.
+(go/func dvWriteBig ^bool [^{:tag (slice byte)} b ^any x ^bool little ^bool signed]
+  (let [n (len b)
+        v (new big/Int)]
+    (type-switch [i x]
+      (case [int64] (.SetInt64 v i))
+      (case [(* big/Int)] (.Set v i))
+      (default (return false)))
+    (let [mod (.Lsh (new big/Int) (big/NewInt 1) (conv uint (* 8 n)))]
+      (if signed
+        (let [half (.Rsh (new big/Int) mod 1)]
+          (when (or (>= (.Cmp v half) 0) (< (.Cmp v (.Neg (new big/Int) half)) 0))
+            (return false))
+          (when (< (.Sign v) 0)
+            (.Add v v mod)))
+        (when (or (< (.Sign v) 0) (>= (.Cmp v mod) 0))
+          (return false))))
+    (let [be (make (slice byte) n)]
+      (.FillBytes v be)
+      (range [i x be]
+        (if little
+          (aset b (- n 1 i) x)
+          (aset b i x))))
+    true))
+
+(go/func dvMkUintRef ^{:tag (func [(slice any)] [any])} [^string who ^bool signed]
+  (fn ^any [^{:tag (slice any)} a]
+    (let [bv (ArgBytevector who (aget a 0))
+          size (dvSize who (aget a 3))]
+      (when (> size (len (.-B bv)))
+        (Violation CondAssertion who "invalid size ~s for bytevector ~s" (aget a 3) bv))
+      (let [k (dvField who bv (aget a 1) size)
+            little (dvEndian who (aget a 2))]
+        (dvReadBig (subslice (.-B bv) k (+ k size)) little signed)))))
+
+(go/func dvMkUintSet ^{:tag (func [(slice any)] [any])} [^string who ^bool signed]
+  (fn ^any [^{:tag (slice any)} a]
+    (let [bv (dvMutBV who (aget a 0))
+          size (dvSize who (aget a 4))]
+      (when (> size (len (.-B bv)))
+        (Violation CondAssertion who "invalid size ~s for bytevector ~s" (aget a 4) bv))
+      (let [k (dvField who bv (aget a 1) size)
+            tmp (make (slice byte) size)]
+        ;; the value is checked before the endianness
+        (when (not (dvWriteBig tmp (aget a 2) true signed))
+          (Violation CondAssertion who "invalid value ~s" (aget a 2)))
+        (let [little (dvEndian who (aget a 3))]
+          (dvWriteBig (subslice (.-B bv) k (+ k size)) (aget a 2) little signed)
+          Unspec)))))
+
+(go/func dvMkToList ^{:tag (func [any any any] [any])} [^string who ^bool signed]
+  (fn ^any [^any x ^any e ^any s]
+    (let [bv (ArgBytevector who x)
+          size (dvSize who s)
+          little (dvEndian who e)
+          n (len (.-B bv))]
+      (when (!= (% n size) 0)
+        (Violation CondAssertion who "bytevector length ~s is not a multiple of size ~s" (conv int64 n) s))
+      (let [^any res Null]
+        (for [k (- n size)] (>= k 0) (set! k (- k size))
+          (set! res (Cons (dvReadBig (subslice (.-B bv) k (+ k size)) little signed) res)))
+        res))))
+
+(go/func dvMkFromList ^{:tag (func [any any any] [any])} [^string who ^bool signed]
+  (fn ^any [^any l ^any e ^any s]
+    (let [size (dvSize who s)
+          xs (dlElems who l)
+          little (dvEndian who e)
+          b (make (slice byte) (* size (len xs)))]
+      (range [i x xs]
+        (when (not (dvWriteBig (subslice b (* i size) (* (+ i 1) size)) x little signed))
+          (Violation CondAssertion who "invalid value ~s" x)))
+      (addr (lit Bytevector :B b)))))
+
+;; ---------------------------------------------------------------------------------------
+;; Bytevectors: IEEE floats
+
+(go/func dvFloatRef ^{:tag (func [any any any] [any])} [^string who ^int size]
+  (fn ^any [^any b ^any i ^any e]
+    (let [bv (ArgBytevector who b)
+          k (dvField who bv i size)
+          little (dvEndian who e)
+          v (dvGet (.-B bv) k size little)]
+      (when (== size 4)
+        (return (conv float64 (math/Float32frombits (conv uint32 v)))))
+      (math/Float64frombits v))))
+
+(go/func dvFloatNativeRef ^{:tag (func [any any] [any])} [^string who ^int size]
+  (fn ^any [^any b ^any i]
+    (let [bv (ArgBytevector who b)
+          k (dvNative who bv i size)
+          v (dvGet (.-B bv) k size true)]
+      (when (== size 4)
+        (return (conv float64 (math/Float32frombits (conv uint32 v)))))
+      (math/Float64frombits v))))
+
+(go/func dvRealArg ^float64 [^string who ^any x]
+  (when (not (IsNumber x))
+    (NotA who "real number" x))
+  (ToFloat x))
+
+(go/func dvFloatBits ^uint64 [^float64 f ^int size]
+  (when (== size 4)
+    (return (conv uint64 (math/Float32bits (conv float32 f)))))
+  (math/Float64bits f))
+
+(go/func dvFloatSet ^{:tag (func [(slice any)] [any])} [^string who ^int size]
+  (fn ^any [^{:tag (slice any)} a]
+    (let [bv (dvMutBV who (aget a 0))
+          k (dvField who bv (aget a 1) size)
+          f (dvRealArg who (aget a 2))
+          little (dvEndian who (aget a 3))]
+      (dvPut (.-B bv) k size little (dvFloatBits f size))
+      Unspec)))
+
+(go/func dvFloatNativeSet ^{:tag (func [any any any] [any])} [^string who ^int size]
+  (fn ^any [^any b ^any i ^any x]
+    (let [bv (dvMutBV who b)
+          k (dvNative who bv i size)
+          f (dvRealArg who x)]
+      (dvPut (.-B bv) k size true (dvFloatBits f size))
+      Unspec)))
+
+(go/func init []
+  (Def1 "vector?" (inst dlIs (* Vector)))
+  (Def "make-vector" 1 2 dvMakeVector)
+  (Def "vector" 0 -1 dvVector)
+  (Def1 "vector-length" dvVectorLength)
+  (Def2 "vector-ref" dvVectorRef)
+  (Def3 "vector-set!" dvVectorSet)
+  (Def1 "vector->list" dvVectorToList)
+  (Def1 "list->vector" dvListToVector)
+  (Def2 "vector-fill!" dvVectorFill)
+  (Def1 "bytevector?" (inst dlIs (* Bytevector)))
+  (Def "make-bytevector" 1 2 dvMakeBV)
+  (Def "bytevector" 0 -1 dvBytevector)
+  (Def1 "bytevector-length" dvBVLength)
+  (Def2 "bytevector-u8-ref" dvU8Ref)
+  (Def2 "bytevector-s8-ref" dvS8Ref)
+  (Def3 "bytevector-u8-set!" dvU8Set)
+  (Def3 "bytevector-s8-set!" dvS8Set)
+  (Def1 "bytevector-copy" dvBVCopy)
+  (Def "bytevector-copy!" 5 5 dvBVCopyTo)
+  (Def2 "bytevector=?" dvBVEq)
+  (Def2 "bytevector-fill!" dvBVFill)
+  (Def1 "bytevector->u8-list" dvBVToList)
+  (Def1 "u8-list->bytevector" dvListToBV)
+  (Def "native-endianness" 0 0 (fn ^any [^{:tag (slice any)} a] (Intern "little")))
+  (range [_ size (lit (slice int) 2 4 8)]
+    (range [_ signed (lit (slice bool) false true)]
+      (Def3 (dvName signed size "-ref") (dvMkRef (dvName signed size "-ref") size signed))
+      (Def2 (dvName signed size "-native-ref") (dvMkNativeRef (dvName signed size "-native-ref") size signed))
+      (Def (dvName signed size "-set!") 4 4 (dvMkSet (dvName signed size "-set!") size signed))
+      (Def3 (dvName signed size "-native-set!") (dvMkNativeSet (dvName signed size "-native-set!") size signed))))
+  (Def "bytevector-uint-ref" 4 4 (dvMkUintRef "bytevector-uint-ref" false))
+  (Def "bytevector-sint-ref" 4 4 (dvMkUintRef "bytevector-sint-ref" true))
+  (Def "bytevector-uint-set!" 5 5 (dvMkUintSet "bytevector-uint-set!" false))
+  (Def "bytevector-sint-set!" 5 5 (dvMkUintSet "bytevector-sint-set!" true))
+  (Def3 "bytevector->uint-list" (dvMkToList "bytevector->uint-list" false))
+  (Def3 "bytevector->sint-list" (dvMkToList "bytevector->sint-list" true))
+  (Def3 "uint-list->bytevector" (dvMkFromList "uint-list->bytevector" false))
+  (Def3 "sint-list->bytevector" (dvMkFromList "sint-list->bytevector" true))
+  (Def3 "bytevector-ieee-single-ref" (dvFloatRef "bytevector-ieee-single-ref" 4))
+  (Def3 "bytevector-ieee-double-ref" (dvFloatRef "bytevector-ieee-double-ref" 8))
+  (Def2 "bytevector-ieee-single-native-ref" (dvFloatNativeRef "bytevector-ieee-single-native-ref" 4))
+  (Def2 "bytevector-ieee-double-native-ref" (dvFloatNativeRef "bytevector-ieee-double-native-ref" 8))
+  (Def "bytevector-ieee-single-set!" 4 4 (dvFloatSet "bytevector-ieee-single-set!" 4))
+  (Def "bytevector-ieee-double-set!" 4 4 (dvFloatSet "bytevector-ieee-double-set!" 8))
+  (Def3 "bytevector-ieee-single-native-set!" (dvFloatNativeSet "bytevector-ieee-single-native-set!" 4))
+  (Def3 "bytevector-ieee-double-native-set!" (dvFloatNativeSet "bytevector-ieee-double-native-set!" 8)))

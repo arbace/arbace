@@ -1,0 +1,121 @@
+(ns arbace.scheme.check
+  "si's check (doc/scheme/SCHEME-SURVEY.md, \"As built: SM5 (write-ahead)\"): the run programs of
+  test/scheme/si/programs.edn run on si and judged against Chez Scheme 10.3.0's runs recorded in
+  test/scheme/si/ref-chez.edn (status and stdout byte for byte; for the R6RS suites' programs, test by
+  test). Every non-pass is an item \"KIND PROGRAM DETAIL\" and must fall in a class of
+  test/scheme/divergences.edn (goi's format: the first class whose :match finds the item). bin/si runs
+  the programs (si and Chez) into a directory of ID.out, ID.err, ID.rc; this namespace records and judges.
+
+    record-ref DIR             Chez's runs in DIR into test/scheme/si/ref-chez.edn
+    judge DIR [--record]       si's runs in DIR judged; --record writes test/scheme/check-linux-amd64.edn
+    divergences [RESULTS]      the recorded results' items by class (none unclassified)"
+  (:require [arbace.string :as str]))
+
+(defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
+(defn- path [& xs] (apply str (root) "/" xs))
+
+(defn programs [] (:programs (read-string (slurp (path "test/scheme/si/programs.edn")))))
+
+(defn- fid [id] (str/replace (str id) "/" "__"))
+
+(defn- run-of [dir id]
+  (let [f (fn [ext] (let [x (java.io.File. (str dir "/" (fid id) "." ext))] (when (.exists x) (slurp x))))]
+    (when-let [rc (f "rc")]
+      {:status (Long/parseLong (str/trim rc)) :out (or (f "out") "") :err (or (f "err") "")})))
+
+(defn- first-line [s] (first (str/split-lines (or s ""))))
+
+(defn- cmd-record-ref [[dir]]
+  (let [runs (vec (for [{:keys [id]} (programs) :let [r (run-of dir id)] :when r]
+                    {:id id :status (:status r) :out (:out r) :err (first-line (:err r))}))]
+    (spit (path "test/scheme/si/ref-chez.edn")
+          (str ";; Chez Scheme 10.3.0's runs of si's check programs (bin/si check --record-ref); generated.\n"
+               "[\n" (str/join "" (map #(str (pr-str %) "\n") runs)) "]\n"))
+    (println "recorded" (count runs) "runs of Chez into test/scheme/si/ref-chez.edn")
+    0))
+
+;;; The suites' output: a header, then "N tests passed" or the failures, each "Expression:\n EXPR\nResult:...".
+
+(defn suite-failures
+  "The failing tests of a Racket R6RS suite run's output, as a map from the expression's text to the
+  whole block; nil when the output has no test report."
+  [^String out]
+  (when (re-find #"(?m)^\d+ (tests passed|of \d+ tests failed\.)$" out)
+    (into {} (for [[_ e res] (re-seq #"(?s)Expression:\n (.*?)\nResult:(.*?)\nExpected:" out)]
+               [e (str/trim res)]))))
+
+(defn- items-of
+  "The non-pass items of program id: ours r against the reference ref."
+  [{:keys [id suite]} r ref]
+  (cond
+    (nil? ref) [(str "no-reference " id)]
+    (nil? r) [(str "not-run " id)]
+    (and (= (:status r) (:status ref)) (= (:out r) (:out ref))) []
+    :else
+    (let [ours (suite-failures (:out r)) theirs (suite-failures (:out ref))
+          crash (fn [] (str "crash " id " status " (:status r) ": " (first-line (:err r))))]
+      (if (and suite ours theirs (= (:status r) (:status ref)))
+        (concat
+          (for [[e b] (sort ours) :when (not (contains? theirs e))]
+            (str "fails " id " " e " => " (str/replace b "\n" " ")))
+          (for [[e _] (sort theirs) :when (not (contains? ours e))]
+            (str "passes " id " " e)))
+        (if (not= (:status r) (:status ref))
+          [(crash)]
+          (let [ol (str/split-lines (:out r)) tl (str/split-lines (:out ref))
+                i (count (take-while true? (map = ol tl)))]
+            [(str "differs " id " line " (inc i) ": " (pr-str (nth ol i nil)) " for " (pr-str (nth tl i nil)))]))))))
+
+(defn load-classes [] (read-string (slurp (path "test/scheme/divergences.edn"))))
+
+(defn class-of [classes item]
+  (:id (first (filter (fn [c] (some #(re-find % item) (:match c))) classes))))
+
+(defn- judge [dir]
+  (let [refs (into {} (map (juxt :id identity) (read-string (slurp (path "test/scheme/si/ref-chez.edn")))))
+        classes (load-classes)]
+    (vec (for [p (programs)
+               :let [r (run-of dir (:id p))
+                     items (vec (items-of p r (refs (:id p))))]]
+           {:id (:id p) :verdict (if (empty? items) :pass :non-pass)
+            :items (mapv (fn [i] {:item i :class (class-of classes i)}) items)}))))
+
+(defn- summary [results]
+  (let [items (mapcat :items results)
+        bad (remove :class items)]
+    (println (count (filter #(= :pass (:verdict %)) results)) "of" (count results) "programs pass;"
+             (count items) "non-pass items," (count bad) "failing (in no class)")
+    (doseq [[c n] (sort-by str (frequencies (keep :class items)))] (println " " n (name c)))
+    (doseq [i bad] (println "  FAILING" (:item i)))
+    (if (seq bad) 1 0)))
+
+(defn- write-results [results]
+  (spit (path "test/scheme/check-linux-amd64.edn")
+        (str ";; si's check (bin/si check --record): each program's verdict and non-pass items with their classes\n"
+             ";; (test/scheme/divergences.edn); generated.\n[\n"
+             (str/join "" (map #(str (pr-str %) "\n") results)) "]\n")))
+
+(defn- cmd-judge [[dir & opts]]
+  (let [results (judge dir)]
+    (doseq [{:keys [id verdict items]} results]
+      (println (name verdict) id (if (seq items) (str "(" (count items) " items)") "")))
+    (when (some #{"--record"} opts) (write-results results) (println "wrote test/scheme/check-linux-amd64.edn"))
+    (summary results)))
+
+(defn- cmd-divergences [[file]]
+  (let [results (read-string (slurp (or file (path "test/scheme/check-linux-amd64.edn"))))
+        classes (load-classes)
+        items (for [r results i (:items r)] (assoc i :class (class-of classes (:item i))))]
+    (doseq [c classes :let [is (filter #(= (:id c) (:class %)) items)] :when (seq is)]
+      (println (str (name (:id c)) " (" (name (:kind c)) ", " (count is) "): " (:title c)))
+      (doseq [i is] (println "   " (:item i))))
+    (summary (map (fn [r] (assoc r :items (filter #(= (:item %) (:item %)) (map (fn [i] (assoc i :class (class-of classes (:item i)))) (:items r))))) results))))
+
+(defn -main [& [cmd & args]]
+  (let [rc (case cmd
+             "record-ref" (cmd-record-ref args)
+             "judge" (cmd-judge args)
+             "divergences" (cmd-divergences args)
+             (do (println "usage: arbace.scheme.check record-ref DIR | judge DIR [--record] | divergences [RESULTS]") 2))]
+    (shutdown-agents)
+    (System/exit rc)))
