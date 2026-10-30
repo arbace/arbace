@@ -699,3 +699,16 @@ Each with options, the recommended one first.
 testsuite's extract: `gcc-15.2.0/gcc/testsuite/g++.dg`, `libstdc++-v3/testsuite`), `c23b.md` (C23-SURVEY on `c23-c3b`). Counts of §8: by
 `awk` over `l2.txt` (the tarball's listing) and `grep -l` over `x/`: `dg-do run` 1,811, `dg-do compile` 10,899, `dg-do link` 163,
 `dg-do preprocess` 71, `dg-error` 4,762 files of `g++.dg`.
+
+## Decided (2026-10-30): CP1-CP14
+
+The user decided all fourteen as recommended. In short:
+- v1 is C++23 as g++ 15 and clang 23 accept it: read and print cover the whole language but named-module BMIs; eval
+  and AOT cover single-TU hosted programs over libstdc++ 15.2.0.
+- clang is the oracle through a filtering helper (`tools/cxxdump`), and the reader is oracle-fed.
+- Eval is clang's IR read as LLVM forms, lowered to C forms and run by C23's interpreter and AOT. "The oracle
+  compiles, Arbace runs", accepted.
+- Templates are instantiated by the oracle.
+- Exceptions use a pending-exception flag.
+- The corpora start with the pinned gcc tarball, wpp and HotSpot.
+- C23 comes first. The crop order against OCaml and Scheme is left for later.
