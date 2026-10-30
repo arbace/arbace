@@ -466,7 +466,9 @@
   [^Scanner s kind ^long q]
   (if (cfeat? s F-UDL)
     (let [c (rune s)]
-      (if (or (letter? c) (= c 95) (pos? (long (ucn-length s))))
+      ;; clang's rule (the token-level oracle): the suffix begins with an underscore or a non-ASCII character
+      ;; (libcpp reads `"s"x` as a literal too, as ill-formed; their outputs print it the same)
+      (if (or (= c 95) (>= c 0x80) (pos? (long (ucn-length s))))
         (do (loop []
               (let [c (rune s)]
                 (cond
@@ -489,8 +491,12 @@
           (do (shift s) (escape-sequence s))
           (shift s))
         (recur))))
-  (if (= (rune s) q)
-    (do (shift s) (new-token s (udl-suffix s kind q)))
+  (cond
+    (= (rune s) q) (do (shift s) (new-token s (udl-suffix s kind q)))
+    ;; Arbace (CX2): libcpp's and clang's way (C++): an unterminated literal is one token, :OTHER, to the end of the
+    ;; line (a warning, no error; the line goes on being a line); cc's: an error that ends the unit
+    (cxx? s) (new-token s :OTHER)
+    :else
     (do (err s (str (pos-str s (st s SRC)) ": " what " not terminated"))
         (fail s))))
 
@@ -561,7 +567,11 @@
                         (+ j dl 2)
                         :else (recur (inc j))))]
             (if (neg? end)
-              (do (err s (str (pos-str s start) ": unterminated raw string")) (fail s))
+              ;; an error, and clang's token: the rest of the file
+              (do (err s (str (pos-str s start) ": unterminated raw string"))
+                  (loop [j q] (when (< j len) (when (= (aget buf j) 10) (add-line (.-f s) (inc j))) (recur (inc j))))
+                  (st! s OFF len) (st! s CH EOF) (st! s JOINED 0) (st! s TRI 0)
+                  (new-token s :OTHER))
               (do (loop [j q] (when (< j end) (when (= (aget buf j) 10) (add-line (.-f s) (inc j))) (recur (inc j))))
                   (st! s OFF end) (st! s CH EOF) (st! s JOINED 0) (st! s TRI 0)
                   (rune s)

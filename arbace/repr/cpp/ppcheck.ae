@@ -104,8 +104,20 @@
         (let [^Tok t (first ts)]
           (cond
             (= (.-ch t) \newline) (recur (next ts) true)
-            (and bol (= (.-ch t) \#))
-            (recur (drop-while #(not= (.-ch ^Tok %) \newline) (next ts)) true)
+            (and bol (= (.-ch t) \#) (zero? (.length ^String (.-sep t))))
+            (let [line (take-while #(not= (.-ch ^Tok %) \newline) (next ts))]
+              ;; #embed lines (-P keeps the resource as __base64__ strings): the integers they stand for, as C's check reads them
+              (when (and (seq line) (= (.-src ^Tok (first line)) "embed"))
+                (let [strs (loop [xs (drop-while #(not= (.-src ^Tok %) "__base64__") line) acc []]
+                             (if-let [^Tok x (first xs)]
+                               (recur (next xs) (if (#{:STRINGLITERAL} (.-ch x)) (conj acc (let [q (.-src x)] (subs q 1 (dec (count q))))) acc))
+                               acc))
+                      bs (when (seq strs) (.decode (java.util.Base64/getDecoder) ^String (apply str strs)))]
+                  (when bs
+                    (doseq [[i b] (map-indexed vector bs)]
+                      (when (pos? i) (.add out ","))
+                      (.add out (str (bit-and (long b) 0xff)))))))
+              (recur (drop (count line) (next ts)) true))
             :else (do (.add out (if (= (.-ch t) :IDENTIFIER) (cpc/norm-ident (.-src t)) (.-src t)))
                       (recur (next ts) false))))))
     (vec out)))
@@ -128,7 +140,7 @@
                              (and (>= o 3) (= (aget bs (dec o)) 10) (= (aget bs (- o 2)) 13) (= (aget bs (- o 3)) 92)) (recur (- o 3))
                              :else o))
                       [_ l c] (lex/position f po)]
-                  (recur (conj! acc (str l ":" c "\t" (.-src t))))))))))
+                  (recur (conj! acc (str l ":" c "\t" (-> ^String (.-src t) (.replace "\\\n" "") (.replace "\\\r\n" "")))))))))))
 
 (defn- unescape
   "clang's escaping of a token's text (\\\" \\\\ \\n \\t and octal bytes) undone."
@@ -327,11 +339,14 @@
     (println (str "recorded " gxx-file ": " (count gxx) " files, " clang-file ": " (count clang) " files"))))
 
 (defn classify
-  "A difference's class from the file's text: the feature that explains it."
-  [^String path ^String what]
+  "A difference's class from the file's text and the compilers' statuses: the feature that explains it."
+  [^String path ^String what ^String d ^String nm]
   (let [s (slurp-latin1 path)]
     (cond
       (re-find #"fmodules" s) :modules-ts
+      (re-find #"#\s*embed|__has_embed" s) :embed
+      (re-find #"-march=|-mcpu=|-mtune=|-m(32|x32|avx|sse)" s) :target-option
+      (and (= what "pp") (not= (status-of d (str "gxx/" nm)) "0")) :gxx-rejects
       (re-find #"(?m)^\s*(export\s+)?(import|module)\b" s) :modules
       (re-find #"__has_cpp_attribute|__has_attribute|__has_builtin|__has_include" s) :has-answer
       (re-find #"R\"[^(\s]*\(" s) :raw-string
@@ -355,7 +370,7 @@
                                     (into (sorted-map)
                                           (keep (fn [r] (when (#{"differ" "known"} (nth r idx))
                                                           [(first r) {:class (or (:class (get old (first r)))
-                                                                                 (classify (str base "/" (first r)) (name level)))}])))
+                                                                                 (classify (str base "/" (first r)) (name level) d (first r)))}])))
                                           rows)))]
                     (-> known
                         (assoc-in [:pp (keyword id)] (entries :pp 2))

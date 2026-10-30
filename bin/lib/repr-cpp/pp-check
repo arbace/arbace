@@ -9,11 +9,13 @@
 # Run through bin/repr-cpp pp-check (from the repository root); writes only under .tmp/repr-cpp-check/ (REPR_CPP_CHECK_WORK).
 #
 # Usage: bin/repr-cpp pp-check [--corpus C,...] [--sample N] [--level lex,pp] [--record] [--record-known]
-#   --corpus   test/cpp/corpora.edn's ids (default gxx-dg,libstdcxx-headers; `all`: every corpus that is read in place from gcc's tarball)
+#   --corpus   test/cpp/corpora.edn's ids (default cpp-lexical,gxx-dg,libstdcxx-headers; `all`: every corpus that is read in place from gcc's tarball)
 #   --sample   every Nth file of each corpus (default 1: all)
 #   --level    lex (the raw tokens against clang's), pp (the stream against g++'s); default both
 #   --record   g++ -E -P and clang's raw-token dump run on every file (4 at a time, nice), the digests of the
 #              corpora rewritten (the other corpora's lines kept), then the check again
+#   --add-missing   the __has_* names the check found missing (WORK/CORPUS/missing.tsv) asked of g++ and clang and appended to
+#              test/cpp/host/has-extra.tsv (bin/repr-cpp has-add), then the check again
 #   --record-known  the known file's entries of the corpora rewritten from the check's result (classes kept)
 # gcc 15.2.0's tarball is extracted by `bin/repr-cpp pp-check` into .tmp/cpp-gcc/ (the corpora's directories), after its SHA-256 is checked
 # against the pin (REPR_CPP_GCC_TARBALL names another copy). REPR_CPP_THREADS (default 4) the port's threads; the light tier:
@@ -24,7 +26,7 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tools.bash"
 cd "$root"
 
-corpora=gxx-dg,libstdcxx-headers levels=lex,pp record= recknown= sample=1
+corpora=cpp-lexical,gxx-dg,libstdcxx-headers levels=lex,pp record= recknown= sample=1 addmissing=
 while [ $# -gt 0 ]; do
   case $1 in
     --corpus) corpora=$2; shift 2 ;;
@@ -32,10 +34,11 @@ while [ $# -gt 0 ]; do
     --level) levels=$2; shift 2 ;;
     --record) record=1; shift ;;
     --record-known) recknown=1; shift ;;
-    *) sed -n '14,21p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    --add-missing) addmissing=1; shift ;;
+    *) sed -n '14,24p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
-[ "$corpora" = all ] && corpora=gxx-dg,gxx-old-deja,c-c++-common,libstdcxx-testsuite,libstdcxx-headers
+[ "$corpora" = all ] && corpora=cpp-lexical,gxx-dg,gxx-old-deja,c-c++-common,libstdcxx-testsuite,libstdcxx-headers
 export GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}
 export REPR_CPP_THREADS=${REPR_CPP_THREADS:-4}
 work=${REPR_CPP_CHECK_WORK:-$root/.tmp/repr-cpp-check}
@@ -70,11 +73,11 @@ gxx_run() {
   base=$(cat "$d/base.txt")
   mkdir -p "$(dirname "$d/gxx/$f.i")" "$(dirname "$d/clang/$f.raw")"
   # shellcheck disable=SC2086
-  (cd "$base" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C timeout 120 g++ -std=$std $args -E -P "$rd") > "$d/gxx/$f.i" 2> "$d/gxx/$f.err"
+  (cd "$base" && SOURCE_DATE_EPOCH=$epoch LC_ALL=C timeout 120 g++ -x c++ -std=$std $args -E -P "$rd") > "$d/gxx/$f.i" 2> "$d/gxx/$f.err"
   echo $? > "$d/gxx/$f.status"
   cargs=${cargs//-fmodules-ts/}; cargs=${cargs//-fmodules/}
   # shellcheck disable=SC2086
-  (cd "$base" && LC_ALL=C timeout 60 clang++ -std=$std $cargs -fsyntax-only -Xclang -dump-raw-tokens "$rd") > "$d/clang/$f.raw.out" 2> "$d/clang/$f.raw"
+  (cd "$base" && LC_ALL=C timeout 60 clang++ -x c++ -std=$std $cargs -fsyntax-only -Xclang -dump-raw-tokens "$rd") > "$d/clang/$f.raw.out" 2> "$d/clang/$f.raw"
   echo $? > "$d/clang/$f.status"
 }
 export -f gxx_run
@@ -112,10 +115,21 @@ if [ -n "$record" ]; then
   done
   arbace_tool -m arbace.repr.cpp.ppcheck record "$work" "${ids[@]}" || exit 1
 fi
-arbace_tool -m arbace.repr.cpp.ppcheck check "$work" "$levels" "${ids[@]}" || status=1
+# one process a corpus: the preprocessor keeps the headers it has read, which the next corpus need not carry
+check_all() { local id; for id in "${ids[@]}"; do arbace_tool -m arbace.repr.cpp.ppcheck check "$work" "$levels" "$id" || status=1; done; }
+check_all
+if [ -n "$addmissing" ]; then
+  miss=$(for id in "${ids[@]}"; do awk -F'\t' '{print $1 ":" $2}' "$work/$id/missing.tsv" 2>"$TMPDIR/repr-cpp-miss.err"; done | sort -u)
+  if [ -n "$miss" ]; then
+    # shellcheck disable=SC2086
+    "$root/bin/repr-cpp" has-add $miss
+    status=0
+    check_all
+  fi
+fi
 if [ -n "$recknown" ]; then
   arbace_tool -m arbace.repr.cpp.ppcheck record-known "$work" "${ids[@]}" || exit 1
   status=0
-  arbace_tool -m arbace.repr.cpp.ppcheck check "$work" "$levels" "${ids[@]}" || status=1
+  check_all
 fi
 exit $status
