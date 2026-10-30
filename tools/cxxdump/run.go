@@ -21,7 +21,7 @@ import (
 )
 
 // version is part of every cache key: a change of the filter's output changes it.
-const version = "cxxdump-4"
+const version = "cxxdump-5"
 
 type countReader struct {
 	r io.Reader
@@ -139,6 +139,9 @@ func (j job) do(out io.Writer, depfile string, errw io.Writer) (stats, error) {
 			st.layoutErr = err.Error()
 		}
 	}
+	if !j.opts.norm && j.opts.edn {
+		j.directivesPass(bw, errw) // a unit the preprocessor refuses has no executed set: the converter keeps the outer directives
+	}
 	st.status = "ok"
 	err = bw.Flush()
 	st.out = cw.n
@@ -193,6 +196,65 @@ func baseName(typ string) string {
 		t = t[i+2:]
 	}
 	return strings.TrimSpace(t)
+}
+
+// directivesPass writes {:executed [LINE ...]}: the lines of the main file's directives the preprocessor executed
+// (#define, #undef, #include, #pragma inside a group that was taken), from clang -E -dD -dI, whose line markers
+// give the main file's lines (doc/cpp/CPP-SURVEY.md, CP45 (a)).
+func (j job) directivesPass(w io.Writer, errw io.Writer) error {
+	full := append([]string{"-E", "-dD", "-dI", "-o", "-"}, j.args...)
+	cmd := exec.Command(j.clang, full...)
+	var eb bytes.Buffer
+	cmd.Stderr = &eb
+	p, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	sc := bufio.NewScanner(p)
+	sc.Buffer(make([]byte, 1<<20), 1<<28)
+	marker := regexp.MustCompile(`^# (\d+) "([^"]*)"`)
+	in := false
+	line := 0
+	var lines []int
+	seen := map[int]bool{}
+	for sc.Scan() {
+		t := sc.Text()
+		if m := marker.FindStringSubmatch(t); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			line = n - 1
+			in = m[2] == j.opts.main
+			line++
+			continue
+		}
+		if !in {
+			continue
+		}
+		// the line this output line stands for: markers count the next line
+		cur := line
+		line++
+		if strings.HasPrefix(t, "#define ") || strings.HasPrefix(t, "#undef ") || strings.HasPrefix(t, "#include") || strings.HasPrefix(t, "#pragma") {
+			if !seen[cur] {
+				seen[cur] = true
+				lines = append(lines, cur)
+			}
+		}
+	}
+	io.Copy(io.Discard, p)
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("the directives pass: %v", err)
+	}
+	fmt.Fprint(w, "{:executed [")
+	for i, l := range lines {
+		if i > 0 {
+			fmt.Fprint(w, " ")
+		}
+		fmt.Fprint(w, l)
+	}
+	fmt.Fprintln(w, "]}")
+	return nil
 }
 
 func (j job) layoutPass(w io.Writer, errw io.Writer) (int, error) {

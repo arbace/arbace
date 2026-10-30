@@ -47,24 +47,29 @@
     (when (and b e (<= (long (:offset b)) (long (:offset e))))
       [(long (:offset b)) (+ (long (:offset e)) (long (:tokLen e)))])))
 
-(defn extent
-  "A node's extent in the main file, macro locations at their expansions: [begin end) or nil."
-  [n]
-  (let [r (:range n) b (exp-loc (:begin r)) e (exp-loc (:end r))]
-    (when (and b e (<= (long (:offset b)) (long (:offset e))))
-      [(long (:offset b)) (+ (long (:offset e)) (long (:tokLen e)))])))
-
-(defn- text-at ^String [b e]
-  (when (> (long b) (long e)) (gap :text "a range that ends before it begins"))
-  (subs ^String *src* (int b) (int e)))
-
 (defn- macro-loc? [l] (and (map? l) (or (:expansionLoc l) (:spellingLoc l))))
 
 (defn macro-node?
   "A node whose first or last token comes from a macro expansion."
   [n] (let [r (:range n)] (or (macro-loc? (:begin r)) (macro-loc? (:end r)))))
 
-(defn- macro-extent
+(declare macro-extent)
+
+(defn extent
+  "A node's extent in the main file, macro locations at their expansions (an invocation's argument list included):
+  [begin end) or nil."
+  [n]
+  (if (macro-node? n)
+    (macro-extent n)
+    (let [r (:range n) b (exp-loc (:begin r)) e (exp-loc (:end r))]
+      (when (and b e (<= (long (:offset b)) (long (:offset e))))
+        [(long (:offset b)) (+ (long (:offset e)) (long (:tokLen e)))]))))
+
+(defn- text-at ^String [b e]
+  (when (> (long b) (long e)) (gap :text "a range that ends before it begins"))
+  (subs ^String *src* (int b) (int e)))
+
+(defn macro-extent
   "A macro node's text in the main file: from its first token's expansion to its last's, an invocation's argument
   list included (the expansion location is the macro's name: a ( after it opens the arguments)."
   [n]
@@ -794,7 +799,8 @@
       "c" (cond
             (= sk "InitListExpr") (vary-meta (apply mk 'cpp/brace (init-list s)) assoc :cpp/copy true)
             (and (= sk "CXXConstructExpr") (:list s)) (vary-meta (apply mk 'cpp/brace (construct-args s)) assoc :cpp/copy true)
-            :else (ex x))
+            :else (let [e (ex x)]
+                    (if (and (seq? e) (#{'cpp/brace 'cpp/paren} (first e))) (vary-meta e assoc :cpp/expr true) e)))
       "call" (cond
                (and (= sk "CXXConstructExpr") (empty? (args-of (kids s)))) ::none
                (= sk "CXXConstructExpr") (apply mk 'cpp/paren (construct-args s))
@@ -856,7 +862,7 @@
   "A function's qualifiers from its type: const, volatile, the ref-qualifier, noexcept, the trailing return."
   [ft] (select-keys (meta ft) [:const :volatile :cpp/ref :noexcept :cpp/throw :cpp/trailing]))
 
-(defn- meminit [i]
+(defn- meminit* [i]
   (let [x (first (kids i))
         s (when x (strip x))
         who (cond (:anyInit i) (ident (get-in i [:anyInit :name]))
@@ -875,6 +881,14 @@
       (= (kind s) "ParenListExpr") (apply mk who (map ex (kids s)))
       (= (kind s) "ImplicitValueInitExpr") (list who)
       :else (mk who (ex x)))))
+
+(defn- meminit [i]
+  (let [r (meminit* i)
+        x (first (kids i))
+        pack (when (and r x)
+               (when-let [[_ e] (rng x)]
+                 (re-find #"^\s*\.\.\." (subs ^String *src* e (min (count ^String *src*) (+ e 8))))))]
+    (if (and r pack) (vary-meta r assoc :pack true) r)))
 
 (defn- fn-body [n]
   (let [b (first (filter #(#{"CompoundStmt" "CXXTryStmt" "CoroutineBodyStmt"} (kind %)) (kids n)))
@@ -1267,12 +1281,19 @@
 
 (defn active-directives
   "The directives the print keeps: those outside every conditional group, and those inside an executed one that are
-  not conditionals themselves (`executed`, the offsets the preprocessor's layer recorded, or nil)."
+  not conditionals themselves (`executed`, the lines of the main file's directives the preprocessor executed, as
+  tools/cxxdump's `{:executed [...]}` gives them, or nil). CP45 (a)."
   [^String s executed]
-  (vec (for [d (directive-lines s)
-             :when (not (#{"if" "ifdef" "ifndef" "elif" "elifdef" "elifndef" "else" "endif"} (:verb d)))
-             :when (or (zero? (long (:depth d))) (and executed (contains? executed (:off d))))]
-         (assoc d :form (directive-form d)))))
+  (let [starts (let [v (java.util.ArrayList.)]
+                 (.add v (int 0))
+                 (dotimes [i (.length s)] (when (= \newline (.charAt s i)) (.add v (int (inc i)))))
+                 v)
+        line-of (fn [off] (let [i (java.util.Collections/binarySearch starts (int off))]
+                            (if (neg? i) (- (- i) 1) (inc i))))]
+    (vec (for [d (directive-lines s)
+               :when (not (#{"if" "ifdef" "ifndef" "elif" "elifdef" "elifndef" "else" "endif"} (:verb d)))
+               :when (or (zero? (long (:depth d))) (and executed (contains? executed (long (line-of (:off d))))))]
+           (assoc d :form (directive-form d))))))
 
 (defn convert
   "The main file's forms from the kept declarations `nodes` (tools/cxxdump's lines after its header) and the file's
