@@ -1351,3 +1351,14 @@ includes `arbace/`).
 - Threads: the C check ran with 2 threads beside nothing else; the libstdc++ list was made with 2 threads while it ran. No run beyond 4.
 - The scratch the numbers come from: `.tmp/cx/g-dg`, `g-samples`, `g-wpp`, `g-lt` (`results.tsv`, `read.tsv`, `summary.edn`), `.tmp/cx/l88.tsv` (the 88),
   `.tmp/cx/lt.list` (the libstdc++ list); copy them before the worktree is removed.
+
+### Decided (CP20-CP50, CP60-CP66; the user, 2026-10-30)
+
+- CP20-CP35 as recommended: CP20-CP30, CP34 (a); CP23 (a) with g++'s recorded; CP24 (a) for CX3; CP31 (a) for the check and
+  (b) for the converter; CP32 (a) for the token check and (c) in the converter; CP33 (c) when a file depends on it; CP35 (a)
+  now, (c) when the preprocessor is compiled into the tool executable. CP25: no libTooling packages.
+- CP40-CP50 as recommended: CP40, CP43, CP45, CP46, CP47, CP49, CP50 (a); CP41 (a) now, (b) at CX5 with the directives
+  layer; CP42 (c) for the destructor, (a) for the constructor until then; CP44 (b) at CX5, (a) until then; CP48 (a) and (b)
+  at CX5. CP47: no libTooling dumper, the JSON route stays.
+- CP60-CP66 as recommended: CP60, CP63 (a); CP61 (a) now, (d) at CX5; CP62 (a) while the oracle is clang, (b) at CX5 if a
+  g++-judged level needs it; CP64 (a) with (c) past 2 GB; CP65 (b) and (c) at CX5; CP66 (b).
