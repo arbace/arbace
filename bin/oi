@@ -1,0 +1,350 @@
+#!/bin/bash
+# oi, the interpreter of OCaml's Lambda (doc/ocaml/OCAML-SURVEY.md, O5; "As built: O5 (write-ahead)"):
+# the package arbace/oi (go/arbace/oi.ae, go/arbace/oi/*.ae: Go forms) runs the Lambda dumps of
+# tools/ocdump (the oracle's bytecode translation, simplified as ocamlc compiles it: OC52, OC60),
+# the stdlib's own Lambda first (built in dependency order, OC51 (c)). Until the package is listed in
+# goi's table and the shipped program carries it (the heavy list), its driver is a small Go program
+# built from the forms printed by repr/go with TamaGo's go (test/ocaml/oi/cmd.ae, OC62).
+#
+#   bin/oi stdlib                  the stdlib of the pinned tarball (bin/repr-ocaml corpus fetch) built by
+#                                  ocamlc in dependency order with its own flags (stdlib/Makefile,
+#                                  Compflags) and its Lambda dumped, into .tmp/oi/lib/ (order.txt the link
+#                                  order); the testsuite's lib/testing too (.tmp/oi/testlib/)
+#   bin/oi build                   the driver: go/arbace/oi's forms and test/ocaml/oi/cmd.ae printed by
+#                                  repr/go and built by TamaGo's go into .tmp/oi/bin/oi (kept by the forms'
+#                                  hash); OI_GO_SRC=DIR builds from a Go tree instead (development)
+#   bin/oi test                    go vet and go test on the printed package (its _test files' forms; the golden
+#                                  data in test/ocaml/oi/testdata/)
+#   bin/oi run FILE.ml [ARG...]    FILE's Lambda dumped and run on oi with the stdlib
+#   bin/oi repl                    the toplevel: phrases on stdin, each typed and lowered by the oracle,
+#                                  run on oi, its values printed with their types (OC12 (a))
+#   bin/oi repl-check              test/ocaml/oi/session.ml through the toplevel, the output equal to the ocaml
+#                                  toplevel's recorded in test/ocaml/oi/session.ref
+#   bin/oi corpus                  the run corpus: the testsuite's .ml files with a .reference, each
+#                                  header read (bin/lib/oi/header.awk): run, or a class (.tmp/oi/corpus.tsv)
+#   bin/oi record-ref [--jobs N] [--only RE]
+#                                  ocamlc's runs of the run corpus recorded as data: status and the
+#                                  output's digest (stdout and stderr in one file, as ocamltest), and
+#                                  whether it equals the .reference, and ocamlopt's beside it
+#                                  (test/ocaml/ref-ocaml55.edn)
+#   bin/oi check [--record] [--jobs N] [--only RE]
+#                                  every program of the run corpus run on oi against the recorded runs:
+#                                  pass, or fail with a reason; judged against test/ocaml/check-oi.edn
+#                                  (--record rewrites it) and test/ocaml/divergences.edn (every non-pass
+#                                  in a class) by test/ocaml/oi_check.ae on stage 0
+#   bin/oi divergences             the recorded results judged against the classes alone (no runs)
+#
+# Environment: OI_JOBS (default 3), OI_TIMEOUT (seconds a program, default 120), OI_GOMEMLIMIT (default
+# 400MiB: the light tier), ARBACE_HOST_EXE (stage 0 for the judgment and repr/go's print).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+
+OI_DIR=$root/.tmp/oi
+OCD=$root/.tmp/ocdump/ocdump
+TOP=$root/.tmp/repr-ocaml/ocaml-5.5.0
+LIB=$OI_DIR/lib
+TESTLIB=$OI_DIR/testlib
+EXE=$OI_DIR/bin/oi
+TESTS=$TOP/testsuite/tests
+REFS=$root/test/ocaml/ref-ocaml55.edn
+RESULTS=$root/test/ocaml/check-oi.edn
+CLASSES=$root/test/ocaml/divergences.edn
+GO=${ARBACE_GOROOT:-/root/tamago-go}/bin/go
+JOBS=${OI_JOBS:-3}
+TIMEOUT=${OI_TIMEOUT:-120}
+export GOMEMLIMIT=${OI_GOMEMLIMIT:-400MiB}
+# the light tier: one thread of Go a program (JOBS programs at once)
+export GOMAXPROCS=${OI_GOMAXPROCS:-1}
+
+die() { echo "oi: $*" >&2; exit 2; }
+
+arbace_exe() {
+  if [ -n "${ARBACE_HOST_EXE:-}" ]; then echo "$ARBACE_HOST_EXE"; return; fi
+  local arch main
+  case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) arch=$(uname -m) ;; esac
+  if [ -x "$root/target/seed/$arch/arbace" ]; then echo "$root/target/seed/$arch/arbace"; return; fi
+  main=$(cd "$(git -C "$root" rev-parse --git-common-dir)/.." && pwd)
+  if [ -x "$main/target/seed/$arch/arbace" ]; then echo "$main/target/seed/$arch/arbace"; return; fi
+  die "no stage 0 (bin/seed --build, or ARBACE_HOST_EXE)"
+}
+
+need_tree() {
+  "$root/bin/repr-ocaml" ocdump-build > "$OI_DIR/ocdump-build.log" 2>&1 || { cat "$OI_DIR/ocdump-build.log" >&2; die "ocdump"; }
+  "$root/bin/repr-ocaml" corpus fetch > "$OI_DIR/fetch.log" 2>&1 || { cat "$OI_DIR/fetch.log" >&2; die "corpus fetch"; }
+}
+
+# ---- the stdlib ----
+
+# the flags stdlib/Compflags gives a target (those that change the typing or the translation)
+stdlib_flags() {
+  case $1 in
+    stdlib.*) echo "-nopervasives -no-alias-deps" ;;
+    camlinternalFormatBasics*) echo "-nopervasives" ;;
+    *Labels.cm[ox]|stdlib__Float.cm[ox]) echo "-nolabels -no-alias-deps" ;;
+    stdlib__Oo.cmi) echo "-no-principal" ;;
+    *) echo "" ;;
+  esac
+}
+
+stdlib_key() {
+  { cat "$OI_DIR/../ocdump/key" 2>&1; sha256sum "$TOP/stdlib/"*.ml "$TOP/stdlib/"*.mli "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli"; cat "$0"; } | sha256sum | cut -d' ' -f1
+}
+
+cmd_stdlib() {
+  mkdir -p "$OI_DIR"; need_tree
+  local key; key=$(stdlib_key)
+  if [ -f "$LIB/key" ] && [ "$(cat "$LIB/key")" = "$key" ]; then echo "oi: stdlib up to date ($LIB)"; return 0; fi
+  local b=$OI_DIR/stdlib-build
+  rm -rf "$b" "$LIB" "$TESTLIB"; mkdir -p "$b" "$LIB" "$TESTLIB"
+  cp "$TOP"/stdlib/*.ml "$TOP"/stdlib/*.mli "$TOP"/stdlib/expand_module_aliases.awk "$b/"
+  sed -e 's/@configure_input@/generated by bin\/oi stdlib from sys.ml.in/' -e 's/@VERSION@/5.5.0/' \
+      -e 's/@OCAML_DEVELOPMENT_VERSION@/false/' -e 's/@OCAML_VERSION_MAJOR@/5/' -e 's/@OCAML_VERSION_MINOR@/5/' \
+      -e 's/@OCAML_VERSION_PATCHLEVEL@/0/' -e 's/@OCAML_RELEASE_EXTRA@/None/' "$TOP/stdlib/sys.ml.in" > "$b/sys.ml"
+  (cd "$b" && for f in stdlib.ml stdlib.mli *Labels.mli; do awk -f expand_module_aliases.awk "$f" > "$f.pp" && mv "$f.pp" "$f"; done)
+  # the link order: stdlib/StdlibModules' STDLIB_MODULE_BASENAMES, then std_exit
+  local mods
+  mods=$(sed -n '/^STDLIB_MODULE_BASENAMES = /,/^$/p' "$TOP/stdlib/StdlibModules" | tr -d '\\' | tail -n +2)
+  : > "$b/order.txt"
+  local m p
+  for m in $mods; do
+    case $m in stdlib|camlinternal*) p=$m ;; *) p=stdlib__$(echo "${m:0:1}" | tr a-z A-Z)${m:1} ;; esac
+    echo "$m $p" >> "$b/order.txt"
+  done
+  # compile in passes until every interface and implementation compiles (the .cmi the dumps type against)
+  local pass left log=$b/compile.log
+  : > "$log"
+  for pass in 1 2 3 4 5 6 7 8; do
+    left=0
+    while read -r m p; do
+      if [ -f "$b/$m.mli" ] && [ ! -f "$b/$p.cmi" ]; then
+        (cd "$b" && ocamlc -strict-sequence -absname -w -a -nostdlib -principal $(stdlib_flags "$p.cmi") -I . -o "$p.cmi" -c "$m.mli") >> "$log" 2>&1 || left=$((left + 1))
+      fi
+      if [ ! -f "$b/$p.cmo" ]; then
+        if [ ! -f "$b/$m.mli" ] || [ -f "$b/$p.cmi" ]; then
+          (cd "$b" && ocamlc -strict-sequence -absname -w -a -nostdlib -principal $(stdlib_flags "$p.cmo") -I . -o "$p.cmo" -c "$m.ml") >> "$log" 2>&1 || left=$((left + 1))
+        else
+          left=$((left + 1))
+        fi
+      fi
+    done < "$b/order.txt"
+    [ "$left" = 0 ] && break
+  done
+  [ "$left" = 0 ] || { tail -20 "$log" >&2; die "stdlib: $left files do not compile"; }
+  # the Lambda dumps, by unit name (Stdlib, Stdlib__List, CamlinternalFormat ...)
+  : > "$LIB/order.txt"
+  while read -r m p; do
+    local u
+    case $p in stdlib) u=Stdlib ;; stdlib__*) u=Stdlib__${p#stdlib__} ;; camlinternal*) u=Camlinternal${p#camlinternal} ;; esac
+    (cd "$b" && "$OCD" --mode lambda --simplify -nostdlib -principal -strict-sequence $(stdlib_flags "$p.cmo") -I . --prefix "$p" --file "$m.ml" "$m.ml") > "$LIB/$u.ae"
+    if grep -q '^(ocaml/error' "$LIB/$u.ae"; then cat "$LIB/$u.ae" >&2; die "stdlib: the dump of $m.ml is an error"; fi
+    echo "$u" >> "$LIB/order.txt"
+  done < "$b/order.txt"
+  # std_exit (linked last by ocamlc): its init is do_at_exit, which oi runs itself after the program
+  # the testsuite's lib/testing, against the installed stdlib (as the programs are)
+  cp "$TOP/testsuite/lib/testing.ml" "$TOP/testsuite/lib/testing.mli" "$TESTLIB/"
+  (cd "$TESTLIB" && ocamlc -w -a -c testing.mli testing.ml && "$OCD" --mode lambda --simplify -I . --prefix testing --file testing.ml testing.ml > Testing.ae)
+  echo "$key" > "$LIB/key"
+  echo "oi: stdlib: $(wc -l < "$LIB/order.txt") units, $(du -sh "$LIB" | cut -f1) of Lambda, in $LIB"
+}
+
+# ---- the driver ----
+
+forms_key() {
+  if [ -n "${OI_GO_SRC:-}" ]; then
+    find "$OI_GO_SRC" -name '*.go' -not -name '*_test.go' | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1
+  else
+    { find "$root/go/arbace/oi" "$root/test/ocaml/oi" -type f | LC_ALL=C sort | xargs sha256sum; sha256sum "$root/go/arbace/oi.ae"; } | sha256sum | cut -d' ' -f1
+  fi
+}
+
+cmd_build() {
+  mkdir -p "$OI_DIR/bin"
+  local key; key=$(forms_key)
+  if [ -x "$EXE" ] && [ "$(cat "$OI_DIR/bin/key" 2>&1)" = "$key" ]; then return 0; fi
+  local mod=$OI_DIR/mod
+  rm -rf "$mod"; mkdir -p "$mod/oi/cmd/oi"
+  printf 'module arbace\n\ngo 1.27\n' > "$mod/go.mod"
+  if [ -n "${OI_GO_SRC:-}" ]; then
+    cp "$OI_GO_SRC"/oi/*.go "$mod/oi/"; rm -f "$mod"/oi/*_test.go
+    cp "$OI_GO_SRC"/oi/cmd/oi/*.go "$mod/oi/cmd/oi/"
+  else
+    local exe; exe=$(arbace_exe)
+    ARBACE_HOST_EXE=$exe GOMAXPROCS=4 "$root/bin/repr-go" print "$root/go/arbace/oi.ae" "$mod/oi" > "$OI_DIR/print.log" 2>&1 || { cat "$OI_DIR/print.log" >&2; die "print go/arbace/oi"; }
+    ARBACE_HOST_EXE=$exe GOMAXPROCS=4 "$root/bin/repr-go" print "$root/test/ocaml/oi/cmd.ae" "$mod/oi/cmd/oi" >> "$OI_DIR/print.log" 2>&1 || { cat "$OI_DIR/print.log" >&2; die "print the driver"; }
+  fi
+  mkdir -p "$mod/oi/testdata"; cp "$root/test/ocaml/oi/testdata/"* "$mod/oi/testdata/"
+  (cd "$mod" && GOCACHE=$OI_DIR/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off "$GO" build -trimpath -o "$EXE" ./oi/cmd/oi) || die "go build"
+  echo "$key" > "$OI_DIR/bin/key"
+}
+
+# the package's own tests (its _test files' forms), go vet and go test on the printed package
+cmd_test() {
+  cmd_build
+  (cd "$OI_DIR/mod" && GOCACHE=$OI_DIR/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off "$GO" vet ./oi/... && \
+    GOCACHE=$OI_DIR/gocache GOFLAGS=-p=4 GOMAXPROCS=4 CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off "$GO" test ./oi)
+}
+
+# dump OUT FILE.ml [FLAGS...]: FILE's Lambda as ocamlc would compile it with FLAGS
+dump() {
+  local out=$1 file=$2; shift 2
+  (cd "$(dirname "$file")" && "$OCD" --mode lambda --simplify "$@" --prefix "$(basename "$file" .ml)" --file "$(basename "$file")" "$(basename "$file")") > "$out"
+}
+
+cmd_run() {
+  [ $# -ge 1 ] || die "usage: bin/oi run FILE.ml [ARG...]"
+  local file=$1; shift
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
+  local d; d=$(mktemp -d "$OI_DIR/run.XXXXXX")
+  local u; u=$(basename "$file" .ml); u=$(echo "${u:0:1}" | tr a-z A-Z)${u:1}
+  dump "$d/$u.ae" "$(cd "$(dirname "$file")" && pwd)/$(basename "$file")" -I .
+  if grep -q '^(ocaml/error' "$d/$u.ae"; then cat "$d/$u.ae" >&2; rm -rf "$d"; exit 2; fi
+  local st=0
+  "$EXE" run "$LIB" "$d/$u.ae" -- "$@" || st=$?
+  rm -rf "$d"
+  exit $st
+}
+
+# the recorded session: test/ocaml/oi/session.ml through the toplevel, its output against the ocaml
+# toplevel's (test/ocaml/oi/session.ref, recorded by ocaml -noprompt -nopromptcont, the banner left out)
+cmd_repl_check() {
+  local out=$OI_DIR/session.out
+  "$0" repl < "$root/test/ocaml/oi/session.ml" > "$out" 2>&1 || true
+  if cmp -s "$out" "$root/test/ocaml/oi/session.ref"; then
+    echo "oi: repl-check: $(grep -c ';;' "$root/test/ocaml/oi/session.ml") phrases, the output equal to the ocaml toplevel's"
+  else
+    diff "$root/test/ocaml/oi/session.ref" "$out" | head -40 || true; die "repl-check: the output differs from test/ocaml/oi/session.ref"
+  fi
+}
+
+cmd_repl() {
+  cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build
+  local w; w=$(mktemp -d "$OI_DIR/repl.XXXXXX")
+  local st=0
+  "$EXE" repl "$LIB" "$w" "$root/bin/lib/oi/phrase" || st=$?
+  rm -rf "$w"
+  exit $st
+}
+
+# ---- the corpus ----
+
+cmd_corpus() {
+  mkdir -p "$OI_DIR"; need_tree
+  local out=$OI_DIR/corpus.tsv r b h
+  : > "$out"
+  for r in $(cd "$TESTS" && find . -name '*.reference' | LC_ALL=C sort); do
+    b=${r#./}; b=${b%.reference}
+    [ -f "$TESTS/$b.ml" ] || continue
+    h=$(awk -f "$root/bin/lib/oi/header.awk" "$TESTS/$b.ml")
+    printf '%s\t%s\n' "$b" "$h" >> "$out"
+  done
+  echo "oi: corpus: $(wc -l < "$out") programs with a .reference, $(cut -f2 "$out" | grep -c '^run$' || true) run, $(cut -f2 "$out" | grep -c '^class$' || true) classed by their header ($out)"
+}
+
+opts() {
+  ONLY=""; RECORD=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --jobs) JOBS=$2; shift 2 ;;
+      --only) ONLY=$2; shift 2 ;;
+      --record) RECORD=1; shift ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+}
+
+selected() {
+  if [ -n "$ONLY" ]; then grep -E "^[^	]*($ONLY)" "$OI_DIR/corpus.tsv" || true; else cat "$OI_DIR/corpus.tsv"; fi
+}
+
+# ref_one ID FLAGS INCS ARGS ENV: compile and run the original with ocamlc and ocamlopt
+ref_one() {
+  local id=$1 flags=$2 incs=$3 args=$4 env=$5
+  local d=$OI_DIR/ref/$id src=$TESTS/$id.ml
+  rm -rf "$d"; mkdir -p "$d"
+  cp "$src" "$d/"
+  local base; base=$(basename "$id")
+  local libs="" olibs=""
+  if [ -n "$incs" ]; then libs="-I $TESTLIB $TESTLIB/testing.cmo"; olibs="-I $TESTLIB $TESTLIB/testing.ml"; fi
+  local line=""
+  for c in ocamlc ocamlopt; do
+    local ext=byte cst=0 st=0 extra=$libs
+    [ $c = ocamlopt ] && { ext=opt; extra=$olibs; }
+    if [ $c = ocamlopt ] && [ -n "$incs" ]; then mkdir -p "$d/optlib" && cp "$TESTLIB/testing.ml" "$TESTLIB/testing.mli" "$d/optlib/" && extra="-I $d/optlib $d/optlib/testing.mli $d/optlib/testing.ml"; fi
+    (cd "$d" && $c -w -a $flags $extra "$base.ml" -o "$base.$ext") > "$d/$c.log" 2>&1 || cst=$?
+    if [ $cst != 0 ]; then line="$line	compile-error	-	0"; continue; fi
+    (cd "$d" && env $env timeout "$TIMEOUT" "./$base.$ext" $args > "$d/$ext.out" 2>&1) || st=$?
+    line="$line	$st	$(sha256sum < "$d/$ext.out" | cut -d' ' -f1)	$(wc -c < "$d/$ext.out")"
+  done
+  local same=false
+  cmp -s "$d/byte.out" "$TESTS/$id.reference" && same=true
+  printf '%s%s\t%s\n' "$id" "$line" "$same"
+}
+
+cmd_record_ref() {
+  opts "$@"; cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"
+  export -f ref_one; export OI_DIR TESTS TESTLIB TIMEOUT
+  local out=$OI_DIR/ref.tsv
+  selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' | xargs -0 -n 5 -P "$JOBS" bash -c 'ref_one "$@"' _ > "$out.new"
+  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
+  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" record-ref "$out" "$OI_DIR/corpus.tsv" "$REFS"
+}
+
+# oi_one ID FLAGS INCS ARGS ENV: dump and run on oi; "ID<TAB>STATUS<TAB>SHA<TAB>BYTES<TAB>SECONDS<TAB>NOTE"
+oi_one() {
+  local id=$1 flags=$2 incs=$3 args=$4 env=$5
+  local d=$OI_DIR/run/$id src=$TESTS/$id.ml
+  rm -rf "$d"; mkdir -p "$d"
+  local base; base=$(basename "$id")
+  local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
+  local units=""
+  [ -n "$incs" ] && units="$TESTLIB/Testing.ae"
+  local I=""; [ -n "$incs" ] && I="-I $TESTLIB"
+  cp "$src" "$d/"
+  (cd "$d" && "$OCD" --mode lambda --simplify $flags $I --prefix "$base" --file "$base.ml" "$base.ml" > "$u.ae")
+  if grep -q '^(ocaml/error' "$d/$u.ae"; then
+    printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(head -c 200 "$d/$u.ae" | tr '\n\t' '  ')"; return
+  fi
+  local st=0 t0 t1
+  t0=$(date +%s.%N)
+  (cd "$d" && env $env timeout "$TIMEOUT" "$EXE" run "$LIB" $units "$u.ae" -- $args > "$d/oi.out" 2>&1) || st=$?
+  t1=$(date +%s.%N)
+  local note=""
+  note=$(grep -a -m1 -o 'oi: .*' "$d/oi.out" | head -c 300 | tr '\t' ' ' || true)
+  [ "$st" = 124 ] && note="timeout ${TIMEOUT}s"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/oi.out" | cut -d' ' -f1)" "$(wc -c < "$d/oi.out")" "$(echo "$t1 - $t0" | bc)" "$note"
+  # keep the outputs that differ, drop the dump (large)
+  rm -f "$d/$u.ae"
+}
+
+cmd_check() {
+  opts "$@"; cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_corpus > "$OI_DIR/corpus.log"; cmd_build
+  export -f oi_one; export OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT
+  local out=$OI_DIR/check.tsv
+  selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' | xargs -0 -n 5 -P "$JOBS" bash -c 'oi_one "$@"' _ > "$out.new"
+  LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
+  local mode=judge; [ "$RECORD" = 1 ] && mode=record
+  [ -n "$ONLY" ] && mode=$mode-only
+  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" "$mode" "$out" "$OI_DIR/corpus.tsv" "$REFS" "$RESULTS" "$CLASSES"
+}
+
+cmd_divergences() {
+  "$(arbace_exe)" "$root/test/ocaml/oi_check.ae" divergences "$RESULTS" "$CLASSES"
+}
+
+cmd=${1:-}
+[ -n "$cmd" ] || { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2; }
+shift
+case $cmd in
+  stdlib) cmd_stdlib ;;
+  build) cmd_build ;;
+  test) cmd_test ;;
+  run) cmd_run "$@" ;;
+  repl) cmd_repl ;;
+  repl-check) cmd_repl_check ;;
+  corpus) cmd_corpus ;;
+  record-ref) cmd_record_ref "$@" ;;
+  check) cmd_check "$@" ;;
+  divergences) cmd_divergences ;;
+  *) die "unknown command $cmd" ;;
+esac

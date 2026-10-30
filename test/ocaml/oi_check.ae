@@ -1,0 +1,139 @@
+;; The judgment half of bin/oi (doc/ocaml/OCAML-SURVEY.md, "As built: O5 (write-ahead)"), on stage 0:
+;;
+;;   record-ref REF.tsv CORPUS.tsv REFS.edn
+;;       the reference runs (ocamlc's and ocamlopt's, bin/oi record-ref) written as data
+;;   judge|record|judge-only|record-only CHECK.tsv CORPUS.tsv REFS.edn RESULTS.edn CLASSES.edn
+;;       oi's runs against the references: each program of the corpus a result, pass, or a non-pass
+;;       with its reason ("RESULT REASON" is what a class's :match regexes see); every non-pass must
+;;       fall in a class of CLASSES.edn (else it is failing); judge compares with the recorded
+;;       RESULTS.edn and fails on a change, record rewrites it (-only: a subset, merged)
+;;   divergences RESULTS.edn CLASSES.edn
+;;       the recorded results against the classes alone
+(require '[arbace.string :as str])
+
+(defn tsv [path]
+  (->> (str/split-lines (slurp path))
+       (remove str/blank?)
+       (map #(str/split % #"\t" -1))))
+
+(defn corpus [path]
+  (into (sorted-map)
+        (for [[id kind & more] (tsv path)]
+          [id (if (= kind "run") {:kind :run} {:kind :class :reason (first more)})])))
+
+(defn refs [path] (into {} (for [r (read-string (slurp path))] [(:test r) r])))
+
+(defn write-refs [ref-tsv corpus-tsv out]
+  (let [rows (for [[id cs csha cbytes os osha obytes same] (tsv ref-tsv)]
+               {:test id
+                :ocamlc {:status cs :sha256 csha :bytes (parse-long cbytes)}
+                :ocamlopt {:status os :sha256 osha :bytes (parse-long obytes)}
+                :reference (= same "true")})
+        text (str ";; ocamlc's and ocamlopt's runs of oi's run corpus (bin/oi record-ref; doc/ocaml/OCAML-SURVEY.md,\n"
+                  ";; \"As built: O5 (write-ahead)\"): the testsuite's .ml files with a .reference that bin/lib/oi/header.awk\n"
+                  ";; reads as one program, each compiled by the host's OCaml 5.5.0 and run, stdout and stderr in one\n"
+                  ";; file as ocamltest runs them: the status (compile-error when it does not compile), the output's\n"
+                  ";; SHA-256 and size, and whether ocamlc's output equals the .reference. oi is judged against\n"
+                  ";; ocamlc's run (the bytecode translation's semantics, OC53 (a)). Read with the Clojure reader.\n"
+                  "[\n"
+                  (apply str (for [r (sort-by :test rows)] (str " " (pr-str r) "\n")))
+                  "]\n")]
+    (spit out text)
+    (println (str "oi: refs: " (count rows) " programs, " (count (filter :reference rows))
+                  " with ocamlc's output equal to the .reference, "
+                  (count (filter #(not= (get-in % [:ocamlc :sha256]) (get-in % [:ocamlopt :sha256])) rows))
+                  " where ocamlopt's output differs; " out))))
+
+(defn known-of [path]
+  (if (.exists (java.io.File. path)) (into {} (read-string (slurp path))) {}))
+
+(def ^:dynamic *known* {})
+
+(defn with-known [id [res reason :as r]]
+  (if-let [k (get *known* id)]
+    (if (= res "fail") ["fail" (str "known " k " (" reason ")")] r)
+    r))
+
+(defn result-of [id c refs runs]
+  (if (= (:kind c) :class)
+    ["class" (:reason c)]
+    (let [r (get refs id) run (get runs id)]
+      (cond
+        (nil? r) ["no-ref" "not in the references"]
+        (nil? run) ["not-run" "no run of oi"]
+        (= (get-in r [:ocamlc :status]) "compile-error") ["ref" "ocamlc does not compile it"]
+        :else
+        (let [[_ st sha bytes secs note] run
+              want (:ocamlc r)]
+          (cond
+            (str/starts-with? (or note "") "dump: ") ["dump" (subs note 6)]
+            (and (= st (:status want)) (= sha (:sha256 want))) ["pass" ""]
+            (= st "124") ["fail" note]
+            (seq note) ["fail" note]
+            (not= st (:status want)) ["fail" (str "status " st ", ocamlc " (:status want))]
+            :else ["fail" (str "output differs (" bytes " bytes, ocamlc " (:bytes want) ")")]))))))
+
+(defn classes [path] (read-string (slurp path)))
+
+(defn class-of [cls [result reason]]
+  (when (not= result "pass")
+    (let [line (str result " " reason)]
+      (first (for [c cls :when (some #(re-find % line) (:match c))] (:id c))))))
+
+(defn results-text [rows]
+  (str ";; oi's results over its run corpus (bin/oi check --record; doc/ocaml/OCAML-SURVEY.md, \"As built: O5\n"
+       ";; (write-ahead)\"): [PROGRAM RESULT REASON], RESULT pass, fail (judged by test/ocaml/divergences.edn's\n"
+       ";; classes), class (its header puts it outside the run corpus), dump (the oracle refuses it), ref (ocamlc\n"
+       ";; does not compile it). Read with the Clojure reader.\n"
+       "[\n"
+       (apply str (for [[id res reason] rows] (str " " (pr-str [id res reason]) "\n")))
+       "]\n"))
+
+(defn summary [rows cls]
+  (let [by (frequencies (map second rows))
+        classed (for [[id res reason] rows :when (not= res "pass")] [id (class-of cls [res reason])])
+        unclassed (filter (comp nil? second) classed)]
+    (println (str "oi: " (count rows) " programs: " (pr-str (into (sorted-map) by))))
+    (println (str "oi: classes: " (pr-str (into (sorted-map) (frequencies (keep second classed))))))
+    (doseq [[id _] unclassed]
+      (let [[_ res reason] (first (filter #(= (first %) id) rows))]
+        (println (str "FAILING " id ": " res " " reason))))
+    (println (str "oi: " (count (filter #(= "pass" (second %)) rows)) " pass, " (count unclassed) " failing (not in a class)"))
+    (empty? unclassed)))
+
+(defn judge [mode check-tsv corpus-tsv refs-edn results-edn classes-edn]
+  (let [corp (corpus corpus-tsv)
+        rf (refs refs-edn)
+        runs (into {} (for [row (tsv check-tsv)] [(first row) row]))
+        only? (str/ends-with? mode "-only")
+        ids (if only? (filter #(or (contains? runs %) (= :class (:kind (corp %)))) (keys runs)) (keys corp))
+        ids (if only? (keys runs) ids)
+        known (known-of (str (.getParent (java.io.File. results-edn)) "/oi-known.edn"))
+        rows (binding [*known* known]
+               (vec (for [id ids] (into [id] (with-known id (result-of id (corp id) rf runs))))))
+        _ (doseq [[id res] rows :when (and (= res "pass") (contains? known id))]
+            (println (str "STALE " id ": passes, but test/ocaml/oi-known.edn lists it")))
+        old (when (.exists (java.io.File. results-edn)) (read-string (slurp results-edn)))
+        merged (if only?
+                 (let [m (into (sorted-map) (for [[id & r] old] [id (vec r)]))]
+                   (vec (for [[id r] (reduce (fn [m [id & r]] (assoc m id (vec r))) m rows)] (into [id] r))))
+                 rows)
+        cls (classes classes-edn)
+        ok (summary rows cls)]
+    (doseq [[id r t s] rows]
+      (when (= r "fail") nil))
+    (if (str/starts-with? mode "record")
+      (do (spit results-edn (results-text merged)) (println (str "oi: recorded " results-edn)))
+      (let [oldm (into {} (for [[id & r] old] [id (vec r)]))
+            changes (for [[id & r] rows :when (not= (vec r) (get oldm id))] [id (get oldm id) (vec r)])]
+        (doseq [[id was now] changes] (println (str "CHANGED " id ": " (pr-str was) " -> " (pr-str now))))
+        (when (seq changes) (println (str "oi: " (count changes) " results differ from " results-edn)))
+        (when (seq changes) (System/exit 1))))
+    (when-not ok (System/exit 1))))
+
+(let [[mode & args] *command-line-args*]
+  (case mode
+    "record-ref" (apply write-refs args)
+    "divergences" (let [[results-edn classes-edn] args]
+                    (when-not (summary (read-string (slurp results-edn)) (classes classes-edn)) (System/exit 1)))
+    (apply judge mode args)))

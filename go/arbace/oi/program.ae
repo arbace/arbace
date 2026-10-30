@@ -1,0 +1,186 @@
+(in-ns 'go.arbace.oi) (go/file "program.go" :imports [
+
+
+    ^{:line 4} [errors "errors"]
+    ^{:line 5} [fmt "fmt"]
+    ^{:line 6} [sync "sync"]])
+
+
+;; A program: its units' globals (each unit's module block, set by its setglobal), the named
+;; values (caml_register_named_value), and the externals.
+
+(go/type global (struct
+    ^{:line 13 :tag Value} V
+    ^{:line 14 :tag bool} set))
+
+
+
+(go/type Program "Program is one OCaml program's state.\n" (struct
+    ^{:line 19 :tag (map string (* global))} globals
+    ^{:line 20 :tag (map string int)} Missing
+    ^{:line 21 :tag (slice string)} Argv))
+
+
+
+(go/var "The process's program: OCaml's runtime has one, and the externals reach it.\n"
+  ^{:line 26} [^{:tag (* Program)} current]
+  ^{:line 27} [named (lit (map string Value))]
+  ^{:line 28} [^sync/Mutex namedMu])
+
+
+
+^{:go/end 39} (go/func NewProgram "NewProgram is an empty program, the current one.\n" ^{:tag (* Program)} [^{:tag (slice string)} argv]
+  (let [p (addr (lit Program :globals (lit (map string (* global))) :Missing (lit (map string int)) :Argv argv))]
+    (set! current p)
+    (.Lock namedMu)
+    (set! named (lit (map string Value)))
+    (.Unlock namedMu)
+    ^{:line 38} p))
+
+
+
+^{:go/end 42} (go/func CurrentProgram "CurrentProgram is the program the externals act for.\n" ^{:tag (* Program)} [] current)
+
+^{:go/end 51} (go/method global ^{:tag (* global)} [^{:tag (* Program)} p ^string name]
+  (let [(values g ok) (aget (.-globals p) name)]
+    (when (not ok)
+      (set! g (addr (lit global)))
+      (aset (.-globals p) name g))
+
+    ^{:line 50} g))
+
+
+
+^{:go/end 60} (go/method Global "Global is the module block of unit name, if it was initialised.\n" [^{:tag (* Program)} p ^string name] :results [Value bool]
+  (let [(values g ok) (aget (.-globals p) name)]
+    (when (or (not ok) (not (.-set g)))
+      (return nil false))
+
+    (return (.-V g) true)))
+
+
+
+^{:go/end 67} (go/func RegisterNamed "RegisterNamed is caml_register_named_value.\n" [^string name ^Value v]
+  (.Lock namedMu)
+  (aset named name v)
+  (.Unlock namedMu))
+
+
+
+^{:go/end 75} (go/func NamedValue "NamedValue is caml_named_value.\n" [^string name] :results [Value bool]
+  (.Lock namedMu)
+  (defer (.Unlock namedMu))
+  (let [(values v ok) (aget named name)]
+    (return v ok)))
+
+
+
+(go/type CompUnit "CompUnit is a unit's Lambda program as the dump gives it.\n" (struct
+    ^{:line 79 :tag string} Module ; the unit's identifier ("Stdlib__List_0")
+    ^{:line 80 :tag string} Name ; its global ("Stdlib__List")
+    ^{:line 81 :tag int} Size ; its module block's size
+    ^{:line 82 :tag (slice string)} Required ; the units whose initialisation must have run
+    ^{:line 83 :tag any} Code ; the root node's form
+    ^{:line 84 :tag (slice string)} Refs)) ; the globals its code names
+
+
+
+
+^{:go/end 132} (go/func ParseUnit "ParseUnit reads a Lambda dump: (ocaml/lambda (lambda-program MODULE SIZE [REQUIRED...] CODE) {...}),\nor an (ocaml/error ...) form as an error.\n" [^{:tag (slice byte)} src] :results [(* CompUnit) error]
+  (let [(values forms err) (ReadForms src)]
+    (when (!= err nil)
+      (return nil err))
+
+    (when (!= (len forms) 1)
+      (return nil (errors/New "a Lambda dump is one form")))
+
+    (let [(values top ok) (assert SList (aget forms 0))]
+      (when (or (not ok) (< (len top) 2))
+        (return nil (errors/New "not a Lambda dump")))
+
+      (when [(values h _) (assert Sym (aget top 0))] (== h "ocaml/error")
+        (return nil (fmt/Errorf "the dump is an error: %v" (subslice top 1))))
+
+      (when [(values h _) (assert Sym (aget top 0))] (!= h "ocaml/lambda")
+        (return nil (fmt/Errorf "not a Lambda dump: %v" (aget top 0))))
+
+      (let [lp (assert SList (aget top 1))
+          ^{:line 108} u (addr (lit CompUnit :Module (assert string (aget lp 1)) :Size (assert int (aget lp 2)) :Code (aget lp 4)))]
+        (range [_ r (assert SVec (aget lp 3))]
+          (set! (.-Required u) (append (.-Required u) (assert string r))))
+
+        (when [(values _ root) (head (.-Code u))] true
+          (set! _ root))
+
+        (let [(values h a) (head (.-Code u))]
+          (when (== h "prim")
+            (when [(values n ok) (assert string (aget a 0))] (and ok (> (len n) (len "setglobal ")) (== (subslice n _ (len "setglobal ")) "setglobal "))
+              (set! (.-Name u) (globalName (subslice n (len "setglobal "))))))
+
+
+          (when (== (.-Name u) "")
+            (return nil (errors/New "the unit's code is not a setglobal")))
+
+          (let [seen (lit (map string bool))]
+            (collectGlobals (.-Code u) ^{:go/end 130} (fn [^string n]
+                (when (and (not (aget seen n)) (!= n (.-Name u)))
+                  (aset seen n true)
+                  (set! (.-Refs u) (append (.-Refs u) n)))))
+
+
+            (return u nil)))))))
+
+
+^{:go/end 155} (go/func collectGlobals [^any f ^{:tag (func [string])} add]
+  (type-switch [x f]
+    (case [SList]
+      (when (>= (len x) 2)
+        (when [(values h ok) (assert Sym (aget x 0))] (and ok (== h "prim"))
+          (when [(values n ok) (assert string (aget x 1))] (and ok (> (len n) 7) (== (subslice n _ 7) "global "))
+            (let [g (globalName (subslice n 7))]
+              (when [(values _ pre) (aget Predefs g)] (not pre)
+                (add g))))))
+
+
+
+
+      (range [_ y x]
+        (collectGlobals y add)))
+
+    (case [SVec]
+      (range [_ y x]
+        (collectGlobals y add)))))
+
+
+
+
+
+^{:go/end 167} (go/method Compile "Compile compiles a unit's code: a node that, run, initialises its module block.\n" [^{:tag (* Program)} p ^{:tag (* CompUnit)} u] :results [(* Code) error]
+  (let [^{:tag (* Code)} code (zero (* Code))
+      ^{:line 160} err (catchInternal ^{:go/end 165} (fn []
+          (let [c (addr (lit Compiler :P p :Unit (.-Name u) :Missing (.-Missing p)))
+              ^{:line 162} s (.newScope c nil "init")
+              ^{:line 163} body (.expr s (.-Code u) false)]
+            (set! code (addr (lit Code :NSlots (.-nslots s) :Body body :Name (+ (.-Name u) ".init")))))))]
+
+    (return code err)))
+
+
+^{:go/breaks [7] :go/end 181} (go/func catchInternal [^{:tag (func [])} f] :results [^error err]
+  (defer (^{:go/end 178} (fn []
+        (when [r (recover)] (!= r nil)
+          (when [(values ie ok) (assert (* InternalError) r)] ok
+            (set! err ie)
+            (return))
+
+          (panic r)))))
+
+
+  (f)
+  nil)
+
+
+
+^{:go/end 187} (go/method RunInit "RunInit runs a unit's initialisation on th.\n" ^Value [^{:tag (* Program)} p ^{:tag (* Thread)} th ^{:tag (* Code)} code]
+  (let [fr (addr (lit Frame :S (make (slice Value) (.-NSlots code)) :Th th))]
+    ((.-Body code) fr)))

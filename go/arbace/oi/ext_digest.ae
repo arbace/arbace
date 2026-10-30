@@ -1,0 +1,510 @@
+(in-ns 'go.arbace.oi) (go/file "ext_digest.go" :imports [
+
+
+    ^{:line 4} [md5 "crypto/md5"]
+    ^{:line 5} [binary "encoding/binary"]
+    ^{:line 6} [bits "math/bits"]])
+
+
+;; Digests (md5.c, blake2.c), Random's LXM generator (prng.c) and the minimal Bigarray it needs
+;; (bigarray.c): a bigarray here is a custom block "_bigarr02" over a Go slice of OCaml values.
+
+
+(go/type bigarray "bigarray is the value of a Bigarray.\n" (struct
+    ^{:line 14 :tag int} kind ^int layout ; kind as bigarray.h's enumeration; layout 0 (C) or 1 (Fortran)
+    ^{:line 15 :tag (slice int)} dims
+    ^{:line 16 :tag (slice Value)} data))
+
+
+(go/const
+  ^{:line 20} [^{:val 0} baFloat32 iota]
+  ^{:line 21} [^{:val 1} baFloat64]
+  ^{:line 22} [^{:val 2} baSint8]
+  ^{:line 23} [^{:val 3} baUint8]
+  ^{:line 24} [^{:val 4} baSint16]
+  ^{:line 25} [^{:val 5} baUint16]
+  ^{:line 26} [^{:val 6} baInt32]
+  ^{:line 27} [^{:val 7} baInt64]
+  ^{:line 28} [^{:val 8} baCamlInt]
+  ^{:line 29} [^{:val 9} baNativeInt]
+  ^{:line 30} [^{:val 10} baComplex32]
+  ^{:line 31} [^{:val 11} baComplex64]
+  ^{:line 32} [^{:val 12} baChar]
+  ^{:line 33} [^{:val 13} baFloat16])
+
+
+^{:go/breaks [5] :go/end 49} (go/func bigInt ^int [^Value v]
+  (type-switch [x v]
+    (case [int]
+      (return x))
+    (case [int32]
+      (return (conv int x)))
+    (case [int64]
+      (return (conv int x)))
+    (case [Nativeint]
+      (return (conv int x))))
+
+  (Internalf "not an integer element: %s" (Describe v))
+  0)
+
+
+^{:go/breaks [[4 64]] :go/end 65} (go/func baZero ^Value [^int kind]
+  (switch kind
+    (case [baFloat32 baFloat64 baFloat16]
+      (return 0.0))
+    (case [baInt32]
+      (return (conv int32 0)))
+    (case [baInt64]
+      (return (conv int64 0)))
+    (case [baNativeInt]
+      (return (conv Nativeint 0)))
+    (case [baComplex32 baComplex64]
+      (return (addr (lit FloatArray :F (lit (slice float64) 0 0))))))
+
+  0)
+
+
+
+^{:go/end 98} (go/func baCoerce "baCoerce converts v to what an element of the kind holds (as the C store does).\n" ^Value [^int kind ^Value v]
+  (switch kind
+    (case [baFloat32]
+      (return (conv float64 (conv float32 (AsFloat v)))))
+    (case [baFloat64 baFloat16]
+      (return (AsFloat v)))
+    (case [baSint8]
+      (return (conv int (conv int8 (AsInt v)))))
+    (case [baUint8 baChar]
+      (return (bit-and (AsInt v) 0xff)))
+    (case [baSint16]
+      (return (conv int (conv int16 (AsInt v)))))
+    (case [baUint16]
+      (return (bit-and (AsInt v) 0xffff)))
+    (case [baInt32]
+      (return (assert int32 v)))
+    (case [baInt64]
+      (return (assert int64 v)))
+    (case [baCamlInt]
+      (return (AsInt v)))
+    (case [baNativeInt]
+      (return (assert Nativeint v)))
+    (case [baComplex32]
+      (let [f (.-F (assert (* FloatArray) v))]
+        (return (addr (lit FloatArray :F (lit (slice float64) (conv float64 (conv float32 (aget f 0))) (conv float64 (conv float32 (aget f 1)))))))))
+    (case [baComplex64]
+      (let [f (.-F (assert (* FloatArray) v))]
+        (return (addr (lit FloatArray :F (lit (slice float64) (aget f 0) (aget f 1))))))))
+
+  ^{:line 97} v)
+
+
+^{:go/breaks [5] :go/end 108} (go/func baOf ^{:tag (* bigarray)} [^Value v]
+  (when [(values c ok) (assert (* Custom) v)] ok
+    (when [(values b ok) (assert (* bigarray) (.-V c))] ok
+      (return b)))
+
+
+  (Internalf "not a bigarray: %s" (Describe v))
+  nil)
+
+
+^{:go/end 128} (go/func newBigarray ^Value [^int kind ^int layout ^{:tag (slice int)} dims]
+  (let [n 1]
+    (range [_ d dims]
+      (when (< d 0)
+        (InvalidArg "Bigarray.create: negative dimension"))
+
+      (set! n * d))
+
+    (let [data (make (slice Value) n)
+        ^{:line 119} z (baZero kind)]
+      (range [i data]
+        (if [(values fa ok) (assert (* FloatArray) z)] ok
+          (aset data i (addr (lit FloatArray :F (append (conv (slice float64) nil) (spread (.-F fa))))))
+
+          (aset data i z)))
+
+
+      (addr (lit Custom :Name "_bigarr02" :V (addr (lit bigarray :kind kind :layout layout :dims dims :data data)))))))
+
+
+^{:go/end 153} (go/method offset ^int [^{:tag (* bigarray)} b ^{:tag (slice Value)} idx]
+  (when (!= (len idx) (len (.-dims b)))
+    (InvalidArg "Bigarray.get/set: wrong number of indices"))
+
+  (let [off 0]
+    (if (== (.-layout b) 0)
+      (range [i d (.-dims b)]
+        (let [j (AsInt (aget idx i))]
+          (when (or (< j 0) (>= j d))
+            (InvalidArg "index out of bounds"))
+
+          (set! off (+ (* off d) j))))
+
+
+      (for [i (- (len (.-dims b)) 1)] (>= i 0) (dec! i)
+        (let [j (- (AsInt (aget idx i)) 1)]
+          (when (or (< j 0) (>= j (aget (.-dims b) i)))
+            (InvalidArg "index out of bounds"))
+
+          (set! off (+ (* off (aget (.-dims b) i)) j)))))
+
+
+    ^{:line 152} off))
+
+
+
+^{:go/end 163} (go/func baIndices "indices reads the index arguments of a get or set: either an OCaml int array or the ints.\n" ^{:tag (slice Value)} [^{:tag (slice Value)} a]
+  (when (== (len a) 1)
+    (when [(values b ok) (assert (* Block) (aget a 0))] ok
+      (return (.-F b))))
+
+
+  ^{:line 162} a)
+
+
+^{:go/end 171} (go/method get ^Value [^{:tag (* bigarray)} b ^{:tag (slice Value)} idx]
+  (let [v (aget (.-data b) (.offset b idx))]
+    (when [(values fa ok) (assert (* FloatArray) v)] ok
+      (return (addr (lit FloatArray :F (append (conv (slice float64) nil) (spread (.-F fa)))))))
+
+    ^{:line 170} v))
+
+
+^{:go/end 175} (go/method set [^{:tag (* bigarray)} b ^{:tag (slice Value)} idx ^Value v]
+  (aset (.-data b) (.offset b idx) (baCoerce (.-kind b) v)))
+
+
+^{:go/end 179} (go/method wrap ^Value [^{:tag (* bigarray)} b ^{:tag (slice Value)} data ^{:tag (slice int)} dims]
+  (addr (lit Custom :Name "_bigarr02" :V (addr (lit bigarray :kind (.-kind b) :layout (.-layout b) :dims dims :data data)))))
+
+
+^{:go/end 187} (go/func product ^int [^{:tag (slice int)} d]
+  (let [n 1]
+    (range [_ x d]
+      (set! n * x))
+
+    ^{:line 186} n))
+
+
+^{:go/end 196} (go/func intsOf ^{:tag (slice int)} [^Value v]
+  (let [b (AsBlock v)
+      ^{:line 191} out (make (slice int) (len (.-F b)))]
+    (range [i x (.-F b)]
+      (aset out i (AsInt x)))
+
+    ^{:line 195} out))
+
+
+
+^{:go/end 203} (go/func regIfAbsent "regIfAbsent registers an external unless another file already did.\n" [^string name ^Ext f]
+  (when [(values _ dup) (aget Externals name)] (not dup)
+    (RegisterExt name f)))
+
+
+
+;; BLAKE2b (blake2.c)
+
+(go/var blake2IV ^{:go/breaks [2 6]} (lit (array 8 uint64)
+    0x6a09e667f3bcc908 0xbb67ae8584caa73b 0x3c6ef372fe94f82b 0xa54ff53a5f1d36f1
+    0x510e527fade682d1 0x9b05688c2b3e6c1f 0x1f83d9abfb41bd6b 0x5be0cd19137e2179))
+
+
+(go/var blake2Sigma (lit (array 12 (array 16 uint8))
+    (lit _ 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+    (lit _ 14 10 4 8 9 15 13 6 1 12 0 2 11 7 5 3)
+    (lit _ 11 8 12 0 5 2 15 13 10 14 3 6 7 1 9 4)
+    (lit _ 7 9 3 1 13 12 11 14 2 6 5 10 4 0 15 8)
+    (lit _ 9 0 5 7 2 4 10 15 14 1 11 12 6 8 3 13)
+    (lit _ 2 12 6 10 0 11 8 3 4 13 7 5 15 14 1 9)
+    (lit _ 12 5 1 15 14 13 4 10 0 7 6 3 9 2 8 11)
+    (lit _ 13 11 7 14 12 1 3 9 5 0 15 4 8 6 2 10)
+    (lit _ 6 15 14 9 11 3 0 8 12 2 13 7 1 4 10 5)
+    (lit _ 10 2 8 4 7 6 1 5 15 11 9 14 3 12 13 0)
+    (lit _ 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+    (lit _ 14 10 4 8 9 15 13 6 1 12 0 2 11 7 5 3)))
+
+
+(go/const ^{:val 128} blake2Block 128)
+
+(go/type blake2Ctx (struct
+    ^{:line 230 :tag (array 8 uint64)} h
+    ^{:line 231 :tag (array 2 uint64)} length
+    ^{:line 232 :tag (array blake2Block byte)} buffer
+    ^{:line 233 :tag int} numbytes))
+
+
+^{:go/end 245} (go/func blake2Mix [^{:tag (* (array 16 uint64))} v ^int a ^int b ^int c ^int d ^uint64 x ^uint64 y]
+  (set! (aget v a) + (+ (aget v b) x))
+  (aset v d (bits/RotateLeft64 (bit-xor (aget v d) (aget v a)) -32))
+  (set! (aget v c) + (aget v d))
+  (aset v b (bits/RotateLeft64 (bit-xor (aget v b) (aget v c)) -24))
+  (set! (aget v a) + (+ (aget v b) y))
+  (aset v d (bits/RotateLeft64 (bit-xor (aget v d) (aget v a)) -16))
+  (set! (aget v c) + (aget v d))
+  (aset v b (bits/RotateLeft64 (bit-xor (aget v b) (aget v c)) -63)))
+
+
+^{:go/end 278} (go/method compress [^{:tag (* blake2Ctx)} s ^{:tag (slice byte)} data ^int numbytes ^bool last]
+  (set! (aget (.-length s) 0) + (conv uint64 numbytes))
+  (when (< (aget (.-length s) 0) (conv uint64 numbytes))
+    (inc! (aget (.-length s) 1)))
+
+  (let [^{:tag (array 16 uint64)} v (zero (array 16 uint64))]
+    (copy (subslice v _ 8) (subslice (.-h s)))
+    (copy (subslice v 8) (subslice blake2IV))
+    (set! (aget v 12) bit-xor (aget (.-length s) 0))
+    (set! (aget v 13) bit-xor (aget (.-length s) 1))
+    (when last
+      (aset v 14 (bit-not (aget v 14))))
+
+    (let [^{:tag (array 16 uint64)} m (zero (array 16 uint64))]
+      (range [i m]
+        (aset m i (.Uint64 binary/LittleEndian (subslice data (* i 8)))))
+
+      (for [i 0] (< i 12) (inc! i)
+        (let [sg (addr (aget blake2Sigma i))]
+          (blake2Mix (addr v) 0 4 8 12 (aget m (aget sg 0)) (aget m (aget sg 1)))
+          (blake2Mix (addr v) 1 5 9 13 (aget m (aget sg 2)) (aget m (aget sg 3)))
+          (blake2Mix (addr v) 2 6 10 14 (aget m (aget sg 4)) (aget m (aget sg 5)))
+          (blake2Mix (addr v) 3 7 11 15 (aget m (aget sg 6)) (aget m (aget sg 7)))
+          (blake2Mix (addr v) 0 5 10 15 (aget m (aget sg 8)) (aget m (aget sg 9)))
+          (blake2Mix (addr v) 1 6 11 12 (aget m (aget sg 10)) (aget m (aget sg 11)))
+          (blake2Mix (addr v) 2 7 8 13 (aget m (aget sg 12)) (aget m (aget sg 13)))
+          (blake2Mix (addr v) 3 4 9 14 (aget m (aget sg 14)) (aget m (aget sg 15)))))
+
+      (for [i 0] (< i 8) (inc! i)
+        (set! (aget (.-h s) i) bit-xor (bit-xor (aget v i) (aget v (+ i 8))))))))
+
+
+
+^{:go/end 295} (go/func newBlake2 ^{:tag (* blake2Ctx)} [^int hashlen ^{:tag (slice byte)} key]
+  (let [s (addr (lit blake2Ctx :h blake2IV))
+      ^{:line 282} keylen (len key)]
+    (set! (aget (.-h s) 0) bit-xor (bit-or 0x01010000 (<< (conv uint64 keylen) 8) (conv uint64 hashlen)))
+    (when (> keylen 0)
+      (when (> keylen 64)
+        (set! keylen 64))
+
+      (copy (subslice (.-buffer s)) (subslice key _ keylen))
+      (for [i keylen] (< i blake2Block) (inc! i)
+        (aset (.-buffer s) i 0))
+
+      (set! (.-numbytes s) blake2Block))
+
+    ^{:line 294} s))
+
+
+^{:go/end 315} (go/method update [^{:tag (* blake2Ctx)} s ^{:tag (slice byte)} data]
+  (when (> (.-numbytes s) 0)
+    (let [n (- blake2Block (.-numbytes s))]
+      (when (<= (len data) n)
+        (copy (subslice (.-buffer s) (.-numbytes s)) data)
+        (set! (.-numbytes s) + (len data))
+        (return))
+
+      (copy (subslice (.-buffer s) (.-numbytes s)) (subslice data _ n))
+      (.compress s (subslice (.-buffer s)) blake2Block false)
+      (set! data (subslice data n))))
+
+  (while (> (len data) blake2Block)
+    (.compress s data blake2Block false)
+    (set! data (subslice data blake2Block)))
+
+  (copy (subslice (.-buffer s)) data)
+  (set! (.-numbytes s) (len data)))
+
+
+^{:go/end 327} (go/method final ^{:tag (slice byte)} [^{:tag (* blake2Ctx)} s ^int hashlen]
+  (for [i (.-numbytes s)] (< i blake2Block) (inc! i)
+    (aset (.-buffer s) i 0))
+
+  (.compress s (subslice (.-buffer s)) (.-numbytes s) true)
+  (let [out (make (slice byte) hashlen)]
+    (range [i out]
+      (aset out i (conv byte (>> (aget (.-h s) (/ i 8)) (* 8 (% i 8))))))
+
+    ^{:line 326} out))
+
+
+^{:go/end 512} (go/func init []
+  (let [r RegisterExt
+      ;; md5.c
+      ^{:line 332} md5of ^{:go/end 336} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [b (bytesRange (aget a 0) (AsInt (aget a 1)) (AsInt (aget a 2)))
+            ^{:line 334} s (md5/Sum b)]
+          (addr (lit Bytes :B (subslice s)))))]
+
+    (r "caml_md5_string" md5of)
+    (r "caml_md5_bytes" md5of)
+    (r "caml_md5_chan" ^{:go/end 367} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [c (ChannelOf (aget a 0))
+            ^{:line 341} toread (AsInt (aget a 1))
+            ^{:line 342} h (md5/New)
+            ^{:line 343} buf (make (slice byte) 4096)]
+          (if (< toread 0)
+            (while true
+              (let [n (.getblock c buf)]
+                (when (== n 0)
+                  (break))
+
+                (.Write h (subslice buf _ n))))
+
+
+            (while (> toread 0)
+              (let [want (len buf)]
+                (when (< toread want)
+                  (set! want toread))
+
+                (let [n (.getblock c (subslice buf _ want))]
+                  (when (== n 0)
+                    (RaiseEndOfFile))
+
+                  (.Write h (subslice buf _ n))
+                  (set! toread - n)))))
+
+
+          (addr (lit Bytes :B (.Sum h nil))))))
+
+
+    ;; blake2.c
+    (r "caml_blake2_create" ^{:go/end 372} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (addr (lit Custom :Name "_blake2" :V (newBlake2 (AsInt (aget a 0)) (.-B (AsBytes (aget a 1))))))))
+
+    (r "caml_blake2_update" ^{:go/end 376} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (.update (assert (* blake2Ctx) (.-V (assert (* Custom) (aget a 0)))) (bytesRange (aget a 1) (AsInt (aget a 2)) (AsInt (aget a 3))))
+        ^{:line 375} Unit))
+
+    (r "caml_blake2_final" ^{:go/end 379} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (addr (lit Bytes :B (.final (assert (* blake2Ctx) (.-V (assert (* Custom) (aget a 0)))) (AsInt (aget a 1)))))))
+
+    (let [b2 ^{:go/end 385} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [n (AsInt (aget a 0))
+              ^{:line 382} s (newBlake2 n (.-B (AsBytes (aget a 1))))]
+            (.update s (bytesRange (aget a 2) (AsInt (aget a 3)) (AsInt (aget a 4))))
+            (addr (lit Bytes :B (.final s n)))))]
+
+      (r "caml_blake2_string" b2)
+      (r "caml_blake2_bytes" b2)
+
+      ;; prng.c: the L64X128 member of the LXM family over a 4-element int64 bigarray
+      (r "caml_lxm_next" ^{:go/end 405} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [st (.-data (baOf (aget a 0)))
+              (values sa ss) (values (conv uint64 (assert int64 (aget st 0))) (conv uint64 (assert int64 (aget st 1))))
+              (values q0 q1) (values (conv uint64 (assert int64 (aget st 2))) (conv uint64 (assert int64 (aget st 3))))
+              ^{:line 394} z (+ ss q0)]
+            (set! z (* (bit-xor z (>> z 32)) 0xdaba0b6eb09322e3))
+            (set! z (* (bit-xor z (>> z 32)) 0xdaba0b6eb09322e3))
+            (set! z bit-xor (>> z 32))
+            (set! ss (+ (* ss 0xd1342543de82ef95) sa))
+            (set! q1 bit-xor q0)
+            (set! q0 (bits/RotateLeft64 q0 24))
+            (set! q0 (bit-xor q0 q1 (<< q1 16)))
+            (set! q1 (bits/RotateLeft64 q1 37))
+            (set! (values (aget st 1) (aget st 2) (aget st 3)) (values (conv int64 ss) (conv int64 q0) (conv int64 q1)))
+            (conv int64 z))))
+
+
+      ;; bigarray.c (minimal, for Random's state and the channels' bigarray I/O)
+      (regIfAbsent "caml_ba_create" ^{:go/end 410} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (newBigarray (AsInt (aget a 0)) (AsInt (aget a 1)) (intsOf (aget a 2)))))
+
+      (let [getGen ^{:go/end 411} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.get (baOf (aget a 0)) (baIndices (subslice a 1))))
+          ^{:line 412} setGen ^{:go/end 416} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [n (len a)]
+              (.set (baOf (aget a 0)) (baIndices (subslice a 1 (- n 1))) (aget a (- n 1)))
+              ^{:line 415} Unit))]
+
+        (range [_ n (lit (slice string) "caml_ba_get_generic" "caml_ba_get_1" "caml_ba_get_2" "caml_ba_get_3")]
+          (regIfAbsent n getGen))
+
+        (range [_ n (lit (slice string) "caml_ba_set_generic" "caml_ba_set_1" "caml_ba_set_2" "caml_ba_set_3")]
+          (regIfAbsent n setGen))
+
+        (regIfAbsent "caml_ba_dim" ^{:go/end 429} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [(values b i) (values (baOf (aget a 0)) (AsInt (aget a 1)))]
+              (when (or (< i 0) (>= i (len (.-dims b))))
+                (InvalidArg "Bigarray.dim"))
+
+              (aget (.-dims b) i))))
+
+        (for [i 1] (<= i 3) (inc! i)
+          (let [i i]
+            (regIfAbsent (+ "caml_ba_dim_" (conv string (conv rune (+ \0 i)))) ^{:go/end 438} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                (let [b (baOf (aget a 0))]
+                  (when (> i (len (.-dims b)))
+                    (InvalidArg "Bigarray.dim"))
+
+                  (aget (.-dims b) (- i 1)))))))
+
+
+        (regIfAbsent "caml_ba_num_dims" ^{:go/end 440} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (len (.-dims (baOf (aget a 0))))))
+        (regIfAbsent "caml_ba_kind" ^{:go/end 441} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.-kind (baOf (aget a 0)))))
+        (regIfAbsent "caml_ba_layout" ^{:go/end 442} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (.-layout (baOf (aget a 0)))))
+        (regIfAbsent "caml_ba_fill" ^{:go/end 449} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [b (baOf (aget a 0))]
+              (range [i (.-data b)]
+                (aset (.-data b) i (baCoerce (.-kind b) (aget a 1))))
+
+              ^{:line 448} Unit)))
+
+        (regIfAbsent "caml_ba_blit" ^{:go/end 467} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [(values src dst) (values (baOf (aget a 0)) (baOf (aget a 1)))]
+              (when (or (!= (.-kind src) (.-kind dst)) (!= (.-layout src) (.-layout dst)) (!= (len (.-dims src)) (len (.-dims dst))))
+                (InvalidArg "Bigarray.blit: dimension mismatch"))
+
+              (range [i (.-dims src)]
+                (when (!= (aget (.-dims src) i) (aget (.-dims dst) i))
+                  (InvalidArg "Bigarray.blit: dimension mismatch")))
+
+
+              (range [i v (.-data src)]
+                (when [(values fa ok) (assert (* FloatArray) v)] ok
+                  (set! v (addr (lit FloatArray :F (append (conv (slice float64) nil) (spread (.-F fa)))))))
+
+                (aset (.-data dst) i v))
+
+              ^{:line 466} Unit)))
+
+        (regIfAbsent "caml_ba_sub" ^{:go/end 477} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [b (baOf (aget a 0))
+                (values ofs n) (values (AsInt (aget a 1)) (AsInt (aget a 2)))]
+              (when (or (== (len (.-dims b)) 0) (< ofs 0) (< n 0) (> (+ ofs n) (aget (.-dims b) 0)))
+                (InvalidArg "Bigarray.sub: bad sub-array"))
+
+              (let [stride (product (subslice (.-dims b) 1))
+                  ^{:line 475} dims (append (lit (slice int) n) (spread (subslice (.-dims b) 1)))]
+                (.wrap b (subslice (.-data b) (* ofs stride) (* (+ ofs n) stride)) dims)))))
+
+        (regIfAbsent "caml_ba_slice" ^{:go/end 495} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [b (baOf (aget a 0))
+                ^{:line 480} idx (.-F (assert (* Block) (aget a 1)))]
+              (when (>= (len idx) (len (.-dims b)))
+                (InvalidArg "Bigarray.slice: too many indices"))
+
+              (let [off 0]
+                (range [i x idx]
+                  (let [j (AsInt x)]
+                    (when (or (< j 0) (>= j (aget (.-dims b) i)))
+                      (InvalidArg "Bigarray.slice: index out of bounds"))
+
+                    (set! off (+ (* off (aget (.-dims b) i)) j))))
+
+                (let [rest (subslice (.-dims b) (len idx))
+                    ^{:line 493} n (product rest)]
+                  (.wrap b (subslice (.-data b) (* off n) (* (+ off 1) n)) (append (conv (slice int) nil) (spread rest))))))))
+
+        (regIfAbsent "caml_ba_reshape" ^{:go/end 503} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [b (baOf (aget a 0))
+                ^{:line 498} dims (intsOf (aget a 1))]
+              (when (!= (product dims) (len (.-data b)))
+                (InvalidArg "Bigarray.reshape: size mismatch"))
+
+              (.wrap b (.-data b) dims))))
+
+        (regIfAbsent "caml_ba_change_layout" ^{:go/end 511} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [b (baOf (aget a 0))
+                ^{:line 506} nb (addr (lit bigarray :kind (.-kind b) :layout (AsInt (aget a 1)) :data (.-data b)))]
+              (for [i (- (len (.-dims b)) 1)] (>= i 0) (dec! i)
+                (set! (.-dims nb) (append (.-dims nb) (aget (.-dims b) i))))
+
+              (addr (lit Custom :Name "_bigarr02" :V nb)))))))))

@@ -1,0 +1,197 @@
+(in-ns 'go.arbace.oi) (go/file "run.go" :imports [
+
+
+    ^{:line 4} [fmt "fmt"]
+    ^{:line 5} [io "io"]
+    ^{:line 6} [os "os"]
+    ^{:line 7} [sort "sort"]])
+
+
+;; Running a program as ocamlc's executable does: the library's units the program needs (by the
+;; globals their code names and their required globals, transitively) in the library's order,
+;; then the program's units, each unit's initialisation in turn, then std_exit's do_at_exit.
+;; An uncaught exception is reported as runtime/printexc.c's caml_fatal_uncaught_exception
+;; does (Printexc's handler when the program linked Printexc), status 2; Stdlib.exit's status is
+;; the run's; oi's own failures (an external not implemented) are status 125.
+
+
+(go/const ^{:val 125 :doc "StatusInternal is the status of a run oi could not complete.\n"} StatusInternal 125)
+
+
+^{:go/end 67} (go/func Link "Link is the library units prog needs, in the library's order, then prog.\n" [^{:tag (slice (* CompUnit))} lib ^{:tag (slice (* CompUnit))} prog] :results [(slice (* CompUnit)) error]
+  (let [byName (lit (map string (* CompUnit)))
+      ^{:line 23} order (lit (map string int))]
+    (range [i u lib]
+      (aset byName (.-Name u) u)
+      (aset order (.-Name u) i))
+
+    (let [need (lit (map string bool))
+        ^{:line 29 :tag (func [^string name] [error])} visit (zero (func [^string name] [error]))]
+      (set! visit ^{:go/end 45} (fn ^error [^string name]
+          (when (aget need name)
+            (return nil))
+
+          ^{:go/breaks [[5 44]]} (let [(values u ok) (aget byName name)]
+            (when (not ok)
+              (return (fmt/Errorf "no unit %s in the library" name)))
+
+            (aset need name true)
+            (range [_ r (append (append (lit (slice string)) (spread (.-Required u))) (spread (.-Refs u)))]
+              (when [err (visit r)] (!= err nil)
+                (return err)))
+
+
+            nil)))
+
+      (let [progNames (lit (map string bool))]
+        (range [_ u prog]
+          (aset progNames (.-Name u) true))
+
+        (range [_ u prog]
+          (range [_ r (append (append (lit (slice string)) (spread (.-Required u))) (spread (.-Refs u)))]
+            (when (aget progNames r)
+              (continue))
+
+            (when [err (visit r)] (!= err nil)
+              (return nil (fmt/Errorf "%s: %v" (.-Name u) err)))))
+
+
+
+        ;; Std_exit is linked last by ocamlc, after the program; its init is do_at_exit
+        (let [^{:tag (slice (* CompUnit))} units (zero (slice (* CompUnit)))]
+          (range [n need]
+            (set! units (append units (aget byName n))))
+
+          (sort/Slice units ^{:go/end 65} (fn ^bool [^int i ^int j] (< (aget order (.-Name (aget units i))) (aget order (.-Name (aget units j))))))
+          (return (append units (spread prog)) nil))))))
+
+
+
+
+^{:go/end 90} (go/func RunProgram "RunProgram links and runs prog against lib with the arguments argv; it returns the exit\nstatus. The program's own output goes through its channels; oi's reports go to stderr.\n" ^int [^{:tag (slice (* CompUnit))} lib ^{:tag (slice (* CompUnit))} prog ^{:tag (slice string)} argv ^io/Writer stderr]
+  (let [p (NewProgram argv)
+      (values units err) (Link lib prog)]
+    (when (!= err nil)
+      (fmt/Fprintf stderr "oi: link: %v\n" err)
+      (return StatusInternal))
+
+    (let [codes (make (slice (* Code)) (len units))]
+      (range [i u units]
+        (let [(values c err) (.Compile p u)]
+          (when (!= err nil)
+            (fmt/Fprintf stderr "oi: compile %s: %v\n" (.-Name u) err)
+            (return StatusInternal))
+
+          (aset codes i c)))
+
+      (let [th (NewThread)]
+        (defer (Release))
+        (.runInits p th units codes stderr)))))
+
+
+^{:go/end 110} (go/method runInits [^{:tag (* Program)} p ^{:tag (* Thread)} th ^{:tag (slice (* CompUnit))} units ^{:tag (slice (* Code))} codes ^io/Writer stderr] :results [^int status]
+  (set! status 0)
+  (let [ok (protect th stderr (addr status) ^{:go/end 99} (fn []
+          (range [_ c codes]
+            (set! (.-cur th) c)
+            (.RunInit p th c))))]
+
+
+    (when (not ok)
+      (return status))
+
+    ;; std_exit
+    (protect th stderr (addr status) ^{:go/end 108} (fn []
+        (when [(values f ok) (NamedValue "Pervasives.do_at_exit")] ok
+          (.Apply th f Unit))))
+
+
+    ^{:line 109} status))
+
+
+
+
+^{:go/breaks [8] :go/end 148} (go/func protect "protect runs f; it reports an uncaught exception, an exit or an internal error and sets\n*status; it is false when f did not complete.\n" [^{:tag (* Thread)} th ^io/Writer stderr ^{:tag (* int)} status ^{:tag (func [])} f] :results [^bool ok]
+  (defer (^{:go/end 145} (fn []
+        (when [r (recover)] (!= r nil)
+          (set! ok false)
+          (type-switch [x r]
+            (case [(* ExitSignal)]
+              (set! @status (.-Code x)))
+            (case [(* FatalError)]
+              (set! @status (.-Code x))
+              (fmt/Fprintf stderr "%s\n" (.-Msg x)))
+            (case [(* Exn)]
+              (set! @status (fatalUncaught th (.-V x) stderr)))
+            (case [(* InternalError)]
+              (set! @status StatusInternal)
+              (flushStdQuiet)
+              (let [where ""]
+                (when (!= (.-cur th) nil)
+                  (set! where (+ " (in " (.-Name (.-cur th)) ")")))
+
+                (fmt/Fprintf stderr "%v%s\n" x where)))
+            (default
+              ;; a Go runtime error in oi (a representation it did not expect)
+              (set! @status StatusInternal)
+              (flushStdQuiet)
+              (let [where ""]
+                (when (!= (.-cur th) nil)
+                  (set! where (+ " (in " (.-Name (.-cur th)) ")")))
+
+                (fmt/Fprintf stderr "oi: go panic: %v%s\n" r where))))))))
+
+
+
+  (f)
+  true)
+
+
+
+
+(go/var ^{:tag (func []) :doc "FlushHook flushes the program's standard channels before oi writes a report of its own\n(ext_io's FlushStd once the channels are linked in).\n"} FlushHook)
+
+^{:go/end 161} (go/func flushStdQuiet []
+  (when (!= FlushHook nil)
+    (^{:go/end 159} (fn []
+        (defer (^{:go/end 157} (fn [] (recover))))
+        (FlushHook)))))
+
+
+
+
+
+^{:go/end 198} (go/func fatalUncaught "fatalUncaught is runtime/printexc.c's caml_fatal_uncaught_exception.\n" [^{:tag (* Thread)} th ^Value exn ^io/Writer stderr] :results [^int status]
+  (set! status 2)
+  (defer (^{:go/end 181} (fn []
+        (when [r (recover)] (!= r nil)
+          (when [(values ie ok) (assert (* InternalError) r)] ok
+            (fmt/Fprintf stderr "%v\n" ie)
+            (return))
+
+          (when [(values _ ok) (assert (* Exn) r)] ok
+            (return))
+
+          (when [(values e ok) (assert (* ExitSignal) r)] ok
+            (set! status (.-Code e))
+            (return))
+
+          (panic r)))))
+
+
+  (when [(values h ok) (NamedValue "Printexc.handle_uncaught_exception")] ok
+    (.Apply th h exn 0)
+    (return 2))
+
+  ^{:go/breaks [5]} (let [msg (FormatException exn)]
+    (when [(values f ok) (NamedValue "Pervasives.do_at_exit")] ok
+      (^{:go/end 191} (fn []
+          (defer (^{:go/end 189} (fn [] (recover))))
+          (.Apply th f Unit))))
+
+
+    (when (== stderr nil)
+      (set! stderr os/Stderr))
+
+    (fmt/Fprintf stderr "Fatal error: exception %s\n" msg)
+    2))

@@ -840,7 +840,22 @@ let () =
       ("--width", Arg.Set_int width, "N pretty-printing width");
       ("-I", Arg.String (fun d -> includes := d :: !includes), "DIR where the compiled interfaces of other units are (types, lambda; as ocamlc -I)");
       ("--prefix", Arg.String (fun d -> prefix_opt := Some d), "P types, lambda: type the file in place (FILE, its .mli beside it found) with output prefix P, where ocamlc -o P.cmo put the unit's .cmi (a weak type is checked against it)");
-      ("--simplify", Arg.Set simplify, " lambda: after Simplif.simplify_lambda, what ocamlc -dlambda prints") ]
+      ("--simplify", Arg.Set simplify, " lambda: after Simplif.simplify_lambda, what ocamlc -dlambda prints");
+      (* the compiler's flags the stdlib's own build passes (stdlib/Makefile, Compflags; O5, OC51 (c)) *)
+      ("-nostdlib", Arg.Set Clflags.no_std_include, " types, lambda: as ocamlc -nostdlib");
+      ("-nopervasives", Arg.Set Clflags.nopervasives, " types, lambda: as ocamlc -nopervasives");
+      ("-no-alias-deps", Arg.Set Clflags.no_alias_deps, " types, lambda: as ocamlc -no-alias-deps");
+      ("-nolabels", Arg.Set Clflags.classic, " types, lambda: as ocamlc -nolabels");
+      ("-principal", Arg.Set Clflags.principal, " types, lambda: as ocamlc -principal");
+      ("-no-principal", Arg.Clear Clflags.principal, " types, lambda: as ocamlc -no-principal");
+      ("-strict-sequence", Arg.Set Clflags.strict_sequence, " types, lambda: as ocamlc -strict-sequence");
+      ("-open", Arg.String (fun m -> Clflags.open_modules := m :: !Clflags.open_modules), "M types, lambda: as ocamlc -open M");
+      (* the flags of the testsuite's run programs (bin/oi's corpus, O5) *)
+      ("-unsafe", Arg.Set Clflags.unsafe, " types, lambda: as ocamlc -unsafe");
+      ("-rectypes", Arg.Set Clflags.recursive_types, " types, lambda: as ocamlc -rectypes");
+      ("-no-strict-formats", Arg.Clear Clflags.strict_formats, " types, lambda: as ocamlc -no-strict-formats");
+      ("-strict-formats", Arg.Set Clflags.strict_formats, " types, lambda: as ocamlc -strict-formats");
+      ("-g", Arg.Set Clflags.debug, " types, lambda: as ocamlc -g") ]
     (fun f -> file := Some f)
     "ocdump [options] [FILE]";
   let src, path =

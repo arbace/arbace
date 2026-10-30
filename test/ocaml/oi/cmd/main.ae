@@ -1,0 +1,118 @@
+;; Command oi is the light driver of arbace/oi (bin/oi's, until the package is listed in goi's
+;; table and the shipped program runs it, doc/ocaml/OCAML-SURVEY.md "As built: O5"): it runs a
+;; program's Lambda dumps against the library's, and the toplevel.
+;;
+;;	oi run LIBDIR UNIT.ae... [-- ARG...]   run the units (in order) with the library of LIBDIR
+;;	                                       (LIBDIR/order.txt: the library's units in link order,
+;;	                                       one name a line, each LIBDIR/NAME.ae)
+;;	oi repl LIBDIR WORKDIR ORACLE          the toplevel (phrases on stdin; ORACLE the command that
+;;	                                       compiles a phrase, bin/oi's)
+(in-ns 'go.arbace.oi.cmd.oi) (go/file "main.go" :doc "Command oi is the light driver of arbace/oi (bin/oi's, until the package is listed in goi's\ntable and the shipped program runs it, doc/ocaml/OCAML-SURVEY.md \"As built: O5\"): it runs a\nprogram's Lambda dumps against the library's, and the toplevel.\n\n\toi run LIBDIR UNIT.ae... [-- ARG...]   run the units (in order) with the library of LIBDIR\n\t                                       (LIBDIR/order.txt: the library's units in link order,\n\t                                       one name a line, each LIBDIR/NAME.ae)\n\toi repl LIBDIR WORKDIR ORACLE          the toplevel (phrases on stdin; ORACLE the command that\n\t                                       compiles a phrase, bin/oi's)\n" :imports [
+
+
+    ^{:line 13} [bufio "bufio"]
+    ^{:line 14} [fmt "fmt"]
+    ^{:line 15} [os "os"]
+    ^{:line 16} [filepath "path/filepath"]
+    ^{:line 17} [debug "runtime/debug"]
+    ^{:line 18} [pprof "runtime/pprof"]
+    ^{:line 19} [strings "strings"]
+
+    ^{:line 21} [oi "arbace/oi"]])
+
+
+^{:go/end 44} (go/func main []
+  (when (< (len os/Args) 2)
+    (usage))
+
+  (debug/SetMaxStack (<< 1 30))
+  (debug/SetGCPercent 400)
+  (when [p (os/Getenv "OI_CPUPROFILE")] (!= p "")
+    (let [(values f err) (os/Create p)]
+      (when (== err nil)
+        (pprof/StartCPUProfile f)
+        (set! exitHook ^{:go/end 34} (fn [] (pprof/StopCPUProfile) (.Close f))))))
+
+
+  (switch (aget os/Args 1)
+    (case ["run"]
+      (exit (run (subslice os/Args 2))))
+    (case ["repl"]
+      (exit (repl (subslice os/Args 2)))))
+
+  (usage))
+
+
+(go/var exitHook ^{:go/end 46} (fn []))
+
+^{:go/end 51} (go/func exit [^int code]
+  (exitHook)
+  (os/Exit code))
+
+
+^{:go/end 56} (go/func usage []
+  (fmt/Fprintln os/Stderr "usage: oi run LIBDIR UNIT.ae... [-- ARG...] | oi repl LIBDIR WORKDIR ORACLE")
+  (os/Exit 2))
+
+
+
+^{:go/end 79} (go/func loadLibrary "LoadLibrary reads LIBDIR/order.txt and the units it names.\n" [^string dir] :results [(slice (* oi/CompUnit)) error]
+  (let [(values f err) (os/Open (filepath/Join dir "order.txt"))]
+    (when (!= err nil)
+      (return nil err))
+
+    (defer (.Close f))
+    (let [^{:tag (slice (* oi/CompUnit))} lib (zero (slice (* oi/CompUnit)))
+        ^{:line 66} sc (bufio/NewScanner f)]
+      (while (.Scan sc)
+        (let [name (strings/TrimSpace (.Text sc))]
+          (when (== name "")
+            (continue))
+
+          (let [(values u err) (loadUnit (filepath/Join dir (+ name ".ae")))]
+            (when (!= err nil)
+              (return nil (fmt/Errorf "%s: %v" name err)))
+
+            (set! lib (append lib u)))))
+
+      (return lib (.Err sc)))))
+
+
+^{:go/end 87} (go/func loadUnit [^string path] :results [(* oi/CompUnit) error]
+  (let [(values b err) (os/ReadFile path)]
+    (when (!= err nil)
+      (return nil err))
+
+    (oi/ParseUnit b)))
+
+
+^{:go/end 119} (go/func run ^int [^{:tag (slice string)} args]
+  (when (< (len args) 2)
+    (usage))
+
+  (let [(values lib err) (loadLibrary (aget args 0))]
+    (when (!= err nil)
+      (fmt/Fprintf os/Stderr "oi: library: %v\n" err)
+      (return oi/StatusInternal))
+
+    (let [^{:tag (slice (* oi/CompUnit))} prog (zero (slice (* oi/CompUnit)))
+        ^{:line 99} argv (lit (slice string))
+        ^{:line 100} rest (subslice args 1)]
+      (range [i a rest]
+        (when (== a "--")
+          (set! argv (append argv (spread (subslice rest (+ i 1)))))
+          (break))
+
+        (let [(values u err) (loadUnit a)]
+          (when (!= err nil)
+            (fmt/Fprintf os/Stderr "oi: %s: %v\n" a err)
+            (return oi/StatusInternal))
+
+          (set! prog (append prog u))))
+
+      (let [name "a.out"]
+        (when (> (len prog) 0)
+          (set! name (strings/ToLower (.-Name (aget prog (- (len prog) 1))))))
+
+        (set! argv (append (lit (slice string) name) (spread argv)))
+        (oi/RunProgram lib prog argv os/Stderr)))))

@@ -1,0 +1,637 @@
+(in-ns 'go.arbace.oi) (go/file "ext_sys.go" :imports [
+
+
+    ^{:line 4} [bytes "bytes"]
+    ^{:line 5} [rand "crypto/rand"]
+    ^{:line 6} [fmt "fmt"]
+    ^{:line 7} [os "os"]
+    ^{:line 8} [exec "os/exec"]
+    ^{:line 9} [runtime "runtime"]
+    ^{:line 10} [syscall "syscall"]
+    ^{:line 11} [time "time"]
+    ^{:line 12} [unsafe "unsafe"]])
+
+
+;; The system interface of OCaml's runtime: sys.c, signals.c, gc_ctrl.c, backtrace.c, weak.c,
+;; finalise.c, memprof.c, domain.c's non-locking parts.
+
+
+^{:go/end 19} (go/func cSafe "cSafe is caml_string_is_c_safe: no NUL byte.\n" ^bool [^Value v] (< (bytes/IndexByte (.-B (AsBytes v)) 0) 0))
+
+
+^{:go/end 27} (go/func checkPath "checkPath is caml_sys_check_path.\n" ^string [^Value v]
+  (when (not (cSafe v))
+    (raiseSysError syscall/ENOENT (GoString v) true))
+
+  (GoString v))
+
+
+
+^{:go/end 37} (go/func sysCall "sysCall runs f outside the interpreter's lock and returns its errno (0 on success).\n" ^syscall/Errno [^{:tag (func [] [error])} f]
+  (let [^error err (zero error)]
+    (Blocking ^{:go/end 32} (fn [] (set! err (f))))
+    (when (== err nil)
+      (return 0))
+
+    (errnoOf err)))
+
+
+
+^{:go/end 50} (go/func fileMode "fileMode is caml_sys_file_mode.\n" [^Value name] :results [uint32 bool]
+  (when (not (cSafe name))
+    (return 0 false))
+
+  (let [^syscall/Stat_t st (zero syscall/Stat_t)
+      ^{:line 45} e (sysCall ^{:go/end 45} (fn ^error [] (syscall/Stat (GoString name) (addr st))))]
+    (when (!= e 0)
+      (return 0 false))
+
+    (return (.-Mode st) true)))
+
+
+^{:go/end 62} (go/func listToSlice ^{:tag (slice Value)} [^Value l]
+  (let [^{:tag (slice Value)} out (zero (slice Value))]
+    (while true
+      (let [(values b ok) (assert (* Block) l)]
+        (when (not ok)
+          (return out))
+
+        (set! out (append out (aget (.-F b) 0)))
+        (set! l (aget (.-F b) 1))))))
+
+
+
+(go/var openFlags (lit (slice int) syscall/O_RDONLY syscall/O_WRONLY (bit-or syscall/O_APPEND syscall/O_WRONLY)
+    ^{:line 65} syscall/O_CREAT syscall/O_TRUNC syscall/O_EXCL 0 0 syscall/O_NONBLOCK))
+
+(go/var ^{:tag (array 65 (struct ^int act ^Value handler))} signalStates)
+
+
+
+
+
+(go/var ^{:doc "posixSignals are signals.c's posix_signals for Linux.\n"} posixSignals ^{:go/breaks [24]} (lit (slice int) 6 14 8 1 4 2 9 13 3 11 15 10 12 17 18 19 20 21 22 26 27 7
+    29 31 5 23 24 25 29 28))
+
+^{:go/end 81} (go/func convertSignal ^int [^int n]
+  (when (and (< n 0) (>= n (- (len posixSignals))))
+    (return (aget posixSignals (- (- n) 1))))
+
+  ^{:line 80} n)
+
+
+^{:go/end 90} (go/func revConvertSignal ^int [^int n]
+  (range [i s posixSignals]
+    (when (== n s)
+      (return (- (- i) 1))))
+
+
+  ^{:line 89} n)
+
+
+(go/var
+  ^{:line 93} [^bool runtimeWarnings]
+  ^{:line 94} [^bool backtraceActive]
+  ^{:line 95} [^bool parserTraceFlag]
+  ^{:line 96} [^bool memprofSampling]
+  ^{:line 97} [gcControl (lit (slice Value) 262144 0 120 0 0 134217728 0 0 44 100 8192)]
+  ^{:line 98} [gcTweaks (lit (slice (struct
+          ^{:line 99 :tag string} name
+          ^{:line 100 :tag int} v ^int init))
+      (lit _ "mark_stack_prune_factor" 32 32) (lit _ "small_heap_limit" 128 128))]
+  ^{:line 102} [^int forcedMajorCount])
+
+
+^{:go/end 109} (go/func memStats ^{:tag (* runtime/MemStats)} []
+  (let [^runtime/MemStats m (zero runtime/MemStats)]
+    (runtime/ReadMemStats (addr m))
+    (addr m)))
+
+
+^{:go/end 120} (go/func gcStat ^Value []
+  (let [m (memStats)
+      ^{:line 113} words ^{:go/end 113} (fn ^int [^uint64 b] (conv int (/ b 8)))]
+    (addr (lit Block :Tag 0 :F (lit (slice Value)
+          ^{:line 115} allocWords (conv float64 0) (conv float64 0)
+          (conv int (.-NumGC m)) (conv int (.-NumGC m))
+          (words (.-HeapSys m)) 1 (words (.-HeapAlloc m)) (conv int (- (.-Mallocs m) (.-Frees m)))
+          (words (.-HeapIdle m)) 0 0 0 0 (words (.-HeapSys m)) 0 forcedMajorCount 0)))))
+
+
+
+^{:go/end 125} (go/func errnoStat [^{:tag (func [(* syscall/Stat_t)] [error])} f] :results [^syscall/Stat_t st ^syscall/Errno e]
+  (set! e (sysCall ^{:go/end 123} (fn ^error [] (f (addr st)))))
+  (return))
+
+
+^{:go/end 134} (go/func rusageSeconds ^float64 [^int who]
+  (let [^syscall/Rusage ru (zero syscall/Rusage)]
+    (when (!= (syscall/Getrusage who (addr ru)) nil)
+      (return 0))
+
+    (let [tv ^{:go/end 132} (fn ^float64 [^syscall/Timeval t] (+ (conv float64 (.-Sec t)) (/ (conv float64 (.-Usec t)) 1000000.0)))]
+      (+ (tv (.-Utime ru)) (tv (.-Stime ru))))))
+
+
+^{:go/breaks [[4 140]] :go/end 141} (go/func argv0 ^string []
+  (when [p (CurrentProgram)] (and (!= p nil) (> (len (.-Argv p)) 0))
+    (return (aget (.-Argv p) 0)))
+
+  "")
+
+
+^{:go/end 143} (go/func ephLen ^int [^Value e] (len (.-F (AsBlock e))))
+
+^{:go/end 151} (go/func ephCopy ^Value [^Value v]
+  (type-switch [x v]
+    (case [(* Block) (* FloatArray) (* Bytes)]
+      (return (Dup x))))
+
+  ^{:line 150} v)
+
+
+(go/var ^Value ephNone (addr (lit Block :Tag TagAbstract)))
+
+^{:go/end 164} (go/func ephGet ^Value [^Value e ^int off ^bool cp]
+  (let [v (aget (.-F (AsBlock e)) off)]
+    (when (== v ephNone)
+      (return None))
+
+    (when cp
+      (set! v (ephCopy v)))
+
+    (Some v)))
+
+
+^{:go/end 172} (go/func ephKeyOffset ^int [^Value e ^Value n ^string msg]
+  (let [off (+ (AsInt n) 2)]
+    (when (or (< off 2) (>= off (ephLen e)))
+      (InvalidArg msg))
+
+    ^{:line 171} off))
+
+
+^{:go/end 185} (go/func ephCreate ^Value [^int n]
+  (let [size (+ n 2)]
+    (when (or (< size 2) (> n (>> MaxInt 8)))
+      (InvalidArg "Weak.create"))
+
+    (let [f (make (slice Value) size)]
+      (range [i f]
+        (aset f i ephNone))
+
+      (aset f 0 0)
+      (addr (lit Block :Tag TagAbstract :F f)))))
+
+
+^{:go/end 194} (go/func ephBlit ^Value [^Value es ^Value ofs ^Value ed ^Value ofd ^Value n]
+  (let [(values os_ od l) (values (+ (AsInt ofs) 2) (+ (AsInt ofd) 2) (AsInt n))]
+    (when (or (< os_ 2) (< l 0) (> (+ os_ l) (ephLen es)) (< od 2) (> (+ od l) (ephLen ed)))
+      (InvalidArg "Weak.blit"))
+
+    (copy (subslice (.-F (AsBlock ed)) od (+ od l)) (subslice (.-F (AsBlock es)) os_ (+ os_ l)))
+    ^{:line 193} Unit))
+
+
+^{:go/end 631} (go/func init []
+  (let [r RegisterExt]
+    ;; sys.c
+    (r "caml_sys_exit" ^{:go/end 199} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (panic (addr (lit ExitSignal :Code (AsInt (aget a 0)))))))
+    (r "caml_sys_open" ^{:go/end 212} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [path (checkPath (aget a 0))
+            ^{:line 202} flags syscall/O_CLOEXEC]
+          (range [_ f (listToSlice (aget a 1))]
+            (set! flags bit-or (aget openFlags (AsInt f))))
+
+          (let [^int fd (zero int)
+              ^{:line 207} e (sysCall ^{:go/end 207} (fn [] :results [^error err] (set! (values fd err) (syscall/Open path flags (conv uint32 (AsInt (aget a 2))))) (return)))]
+            (when (!= e 0)
+              (raiseSysError e path true))
+
+            ^{:line 211} fd))))
+
+    (r "caml_sys_close" ^{:go/end 218} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (when [e (sysCall ^{:go/end 214} (fn ^error [] (syscall/Close (AsInt (aget a 0)))))] (!= e 0)
+          (raiseSysError e "" false))
+
+        ^{:line 217} Unit))
+
+    (r "caml_sys_file_exists" ^{:go/end 219} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (let [(values _ ok) (fileMode (aget a 0))] (Bool ok))))
+    (let [modeTest ^{:go/end 232} (fn ^Ext [^uint32 kind]
+          ^{:go/end 231} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [(values m ok) (fileMode (aget a 0))]
+              (when (not ok)
+                (let [e syscall/ENOENT]
+                  (when (cSafe (aget a 0))
+                    (set! (values _ e) (errnoStat ^{:go/end 226} (fn ^error [^{:tag (* syscall/Stat_t)} st] (syscall/Stat (GoString (aget a 0)) st)))))
+
+                  (raiseSysError e (GoString (aget a 0)) true)))
+
+              (Bool (== (bit-and m syscall/S_IFMT) kind)))))]
+
+
+      (r "caml_sys_is_directory" (modeTest syscall/S_IFDIR))
+      (r "caml_sys_is_regular_file" (modeTest syscall/S_IFREG))
+      (r "caml_sys_remove" ^{:go/end 241} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [p (checkPath (aget a 0))]
+            (when [e (sysCall ^{:go/end 237} (fn ^error [] (syscall/Unlink p)))] (!= e 0)
+              (raiseSysError e p true))
+
+            ^{:line 240} Unit)))
+
+      (r "caml_sys_rename" ^{:go/end 248} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [(values o n) (values (checkPath (aget a 0)) (checkPath (aget a 1)))]
+            (when [e (sysCall ^{:go/end 244} (fn ^error [] (syscall/Rename o n)))] (!= e 0)
+              (raiseSysError e "" false))
+
+            ^{:line 247} Unit)))
+
+      (r "caml_sys_chdir" ^{:go/end 255} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [p (checkPath (aget a 0))]
+            (when [e (sysCall ^{:go/end 251} (fn ^error [] (syscall/Chdir p)))] (!= e 0)
+              (raiseSysError e p true))
+
+            ^{:line 254} Unit)))
+
+      (r "caml_sys_mkdir" ^{:go/end 262} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [p (checkPath (aget a 0))]
+            (when [e (sysCall ^{:go/end 258} (fn ^error [] (syscall/Mkdir p (conv uint32 (AsInt (aget a 1))))))] (!= e 0)
+              (raiseSysError e p true))
+
+            ^{:line 261} Unit)))
+
+      (r "caml_sys_rmdir" ^{:go/end 269} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [p (checkPath (aget a 0))]
+            (when [e (sysCall ^{:go/end 265} (fn ^error [] (syscall/Rmdir p)))] (!= e 0)
+              (raiseSysError e p true))
+
+            ^{:line 268} Unit)))
+
+      (r "caml_sys_getcwd" ^{:go/end 276} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [(values d err) (syscall/Getwd)]
+            (when (!= err nil)
+              (raiseSysError (errnoOf err) "" false))
+
+            (Str d))))
+
+      (let [getenv ^{:go/end 282} (fn [^Value v] :results [string bool]
+            (when (not (cSafe v))
+              (return "" false))
+
+            (os/LookupEnv (GoString v)))]
+
+        (r "caml_sys_getenv" ^{:go/end 289} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [(values s ok) (getenv (aget a 0))]
+              (when (not ok)
+                (RaiseNotFound))
+
+              (Str s))))
+
+        (r "caml_sys_unsafe_getenv" (aget Externals "caml_sys_getenv"))
+        (r "caml_sys_getenv_opt" ^{:go/end 297} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+            (let [(values s ok) (getenv (aget a 0))]
+              (when (not ok)
+                (return None))
+
+              (Some (Str s)))))
+
+        (let [mainArgv ^{:go/end 306} (fn ^Value []
+              (let [^{:tag (slice Value)} args (zero (slice Value))]
+                (when [p (CurrentProgram)] (!= p nil)
+                  (range [_ s (.-Argv p)]
+                    (set! args (append args (Str s)))))
+
+
+                (addr (lit Block :Tag 0 :F args))))]
+
+          (r "caml_sys_argv" ^{:go/end 307} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (mainArgv)))
+          (r "caml_sys_get_argv" ^{:go/end 310} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (addr (lit Block :Tag 0 :F (lit (slice Value) (Str (argv0)) (mainArgv))))))
+
+          (r "caml_sys_executable_name" ^{:go/end 311} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Str (argv0))))
+          (r "caml_sys_proc_self_exe" ^{:go/end 317} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (when (== (argv0) "")
+                (return None))
+
+              (Some (Str (argv0)))))
+
+          (r "caml_sys_system_command" ^{:go/end 341} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (when (not (cSafe (aget a 0)))
+                (raiseSysError syscall/EINVAL (GoString (aget a 0)) true))
+
+              (let [code 255
+                  ^{:line 323 :tag error} err (zero error)]
+                (Blocking ^{:go/end 336} (fn []
+                    (let [cmd (exec/Command "/bin/sh" "-c" (GoString (aget a 0)))]
+                      (set! (values (.-Stdin cmd) (.-Stdout cmd) (.-Stderr cmd)) (values os/Stdin os/Stdout os/Stderr))
+                      (set! err (.Run cmd))
+                      (if (== err nil)
+                        (set! code 0)
+                        (when [(values ee ok) (assert (* exec/ExitError) err)] ok
+                          (when [c ^{:go/via [ProcessState]} (.ExitCode ee)] (>= c 0)
+                            (set! code c))
+
+                          (set! err nil))))))
+
+
+                (when (!= err nil)
+                  (raiseSysError (errnoOf err) (GoString (aget a 0)) true))
+
+                ^{:line 340} code)))
+
+          (r "caml_sys_time" ^{:go/end 342} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (rusageSeconds syscall/RUSAGE_SELF)))
+          (r "caml_sys_time_include_children" ^{:go/end 349} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (let [t (rusageSeconds syscall/RUSAGE_SELF)]
+                (when (Truth (aget a 0))
+                  (set! t + (rusageSeconds syscall/RUSAGE_CHILDREN)))
+
+                ^{:line 348} t)))
+
+          (r "caml_sys_random_seed" ^{:go/end 363} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (let [^{:tag (array 12 byte)} buf (zero (array 12 byte))
+                  (values n _) (rand/Read (subslice buf))
+                  ^{:line 353 :tag (slice Value)} f (zero (slice Value))]
+                (if (== n (len buf))
+                  (for [i (- n 1)] (>= i 0) (dec! i)
+                    (set! f (append f (conv int (aget buf i)))))
+
+
+                  (let [now (time/Now)]
+                    (set! f (lit (slice Value) (/ (.Nanosecond now) 1000) (conv int (.Unix now)) (os/Getpid) (os/Getppid)))))
+
+                (addr (lit Block :Tag 0 :F f)))))
+
+          (r "caml_sys_get_config" ^{:go/end 364} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Tuple (Str "Unix") 64 0)))
+          (r "caml_sys_read_directory" ^{:go/end 385} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (let [p (checkPath (aget a 0))
+                  ^{:line 367 :tag (slice string)} names (zero (slice string))
+                  ^{:line 368} e (sysCall ^{:go/end 376} (fn ^error []
+                      (let [(values f err) (os/Open p)]
+                        (when (!= err nil)
+                          (return err))
+
+                        (defer (.Close f))
+                        (set! (values names err) (.Readdirnames f -1))
+                        ^{:line 375} err)))]
+
+                (when (!= e 0)
+                  (raiseSysError e p true))
+
+                (let [f (make (slice Value) (len names))]
+                  (range [i n names]
+                    (aset f i (Str n)))
+
+                  (addr (lit Block :Tag 0 :F f))))))
+
+          (r "caml_sys_isatty" ^{:go/end 390} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (let [^syscall/Termios t (zero syscall/Termios)
+                  (values _ _ e) (syscall/Syscall syscall/SYS_IOCTL (conv uintptr (.-fd (ChannelOf (aget a 0)))) (conv uintptr syscall/TCGETS) (conv uintptr (conv unsafe/Pointer (addr t))))]
+                (Bool (== e 0)))))
+
+          (r "caml_xdg_defaults" ^{:go/end 391} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
+          (r "caml_sys_temp_dir_name" ^{:go/end 392} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Str "")))
+          (r "caml_sys_io_buffer_size" ^{:go/end 393} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] IOBufferSize))
+          (r "caml_sys_const_big_endian" ^{:go/end 394} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
+          (r "caml_sys_const_word_size" ^{:go/end 395} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 64))
+          (r "caml_sys_const_int_size" ^{:go/end 396} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 63))
+          (r "caml_sys_const_max_wosize" ^{:go/end 397} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (- (<< 1 54) 1)))
+          (r "caml_sys_const_ostype_unix" ^{:go/end 398} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 1))
+          (r "caml_sys_const_ostype_win32" ^{:go/end 399} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
+          (r "caml_sys_const_ostype_cygwin" ^{:go/end 400} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
+          (r "caml_sys_const_backend_type" ^{:go/end 401} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] BackendType))
+
+          ;; signals.c: handlers are recorded, no real signal is delivered
+          (r "caml_sys_convert_signal_number" ^{:go/end 404} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (convertSignal (AsInt (aget a 0)))))
+          (r "caml_sys_rev_convert_signal_number" ^{:go/end 405} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (revConvertSignal (AsInt (aget a 0)))))
+          (r "caml_install_signal_handler" ^{:go/end 434} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (let [sig (convertSignal (AsInt (aget a 0)))]
+                (when (or (<= sig 0) (>= sig (len signalStates)))
+                  (InvalidArg "Sys.signal: unavailable signal"))
+
+                (when (or (== sig (conv int syscall/SIGKILL)) (== sig (conv int syscall/SIGSTOP)))
+                  (raiseSysError syscall/EINVAL "" false))
+
+                (let [act 2]
+                  (switch (aget a 1)
+                    (case [(conv Value 0)]
+                      (set! act 0))
+                    (case [(conv Value 1)]
+                      (set! act 1)))
+
+                  (let [st (addr (aget signalStates sig))
+                      ^{:line 422 :tag Value} res (zero Value)]
+                    (switch (.-act st)
+                      (case [2]
+                        (set! res (addr (lit Block :Tag 0 :F (lit (slice Value) (.-handler st))))))
+                      (default
+                        (set! res (.-act st))))
+
+                    (set! (.-act st) act)
+                    (when [(values b ok) (assert (* Block) (aget a 1))] ok
+                      (set! (.-handler st) (aget (.-F b) 0)))
+
+                    ^{:line 433} res)))))
+
+
+          ;; gc_ctrl.c, gc_stats.c
+          (r "caml_gc_stat" ^{:go/end 437} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (gcStat)))
+          (r "caml_gc_quick_stat" ^{:go/end 438} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (gcStat)))
+          (r "caml_gc_counters" ^{:go/end 442} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (let [w allocWords]
+                (Tuple w 0.0 0.0))))
+
+          (r "caml_gc_minor_words" ^{:go/end 443} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] allocWords))
+          (r "caml_gc_get" ^{:go/end 444} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag 0 :F (append (conv (slice Value) nil) (spread gcControl))))))
+          (r "caml_gc_set" ^{:go/end 453} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (let [b (AsBlock (aget a 0))]
+                (range [i gcControl]
+                  (when (< i (len (.-F b)))
+                    (aset gcControl i (aget (.-F b) i))))
+
+
+                ^{:line 452} Unit)))
+
+          (r "caml_gc_minor" ^{:go/end 454} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+          (r "caml_gc_major" ^{:go/end 455} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+          (r "caml_gc_full_major" ^{:go/end 456} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (inc! forcedMajorCount) Unit))
+          (r "caml_gc_compaction" ^{:go/end 457} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+          (r "caml_gc_major_slice" ^{:go/end 458} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
+          (r "caml_get_minor_free" ^{:go/end 459} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 262144))
+          (r "caml_gc_tweak_get" ^{:go/breaks [4] :go/end 468} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (range [_ t gcTweaks]
+                (when (== (.-name t) (GoString (aget a 0)))
+                  (return (.-v t))))
+
+
+              (InvalidArg "Gc.Tweak: parameter not found")
+              nil))
+
+          (r "caml_gc_tweak_set" ^{:go/breaks [4] :go/end 478} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (range [i gcTweaks]
+                (when (== (.-name (aget gcTweaks i)) (GoString (aget a 0)))
+                  (set! (.-v (aget gcTweaks i)) (AsInt (aget a 1)))
+                  (return Unit)))
+
+
+              (InvalidArg "Gc.Tweak: parameter not found")
+              nil))
+
+          (r "caml_gc_tweak_list_active" ^{:go/end 487} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (let [^Value l 0]
+                (for [i (- (len gcTweaks) 1)] (>= i 0) (dec! i)
+                  (when [t (aget gcTweaks i)] (!= (.-v t) (.-init t))
+                    (set! l (addr (lit Block :Tag 0 :F (lit (slice Value) (Tuple (Str (.-name t)) (.-v t)) l))))))
+
+
+                ^{:line 486} l)))
+
+          (r "caml_runtime_variant" ^{:go/end 488} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Str "")))
+          (r "caml_runtime_parameters" ^{:go/end 503} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (let [(values b p w) (values 0 0 0)]
+                (when backtraceActive
+                  (set! b 1))
+
+                (when parserTraceFlag
+                  (set! p 1))
+
+                (when runtimeWarnings
+                  (set! w 1))
+
+                (Str (fmt/Sprintf "b=%d,c=0,e=16,l=%d,M=%d,m=%d,n=%d,o=%d,p=%d,s=%d,t=0,v=%d,V=0,W=%d"
+                    ^{:line 501} b (AsInt (aget gcControl 5)) (AsInt (aget gcControl 8)) (AsInt (aget gcControl 9)) (AsInt (aget gcControl 10))
+                    (AsInt (aget gcControl 2)) p (AsInt (aget gcControl 0)) (AsInt (aget gcControl 3)) w)))))
+
+          (r "caml_ml_enable_runtime_warnings" ^{:go/end 504} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (set! runtimeWarnings (Truth (aget a 0))) Unit))
+          (r "caml_ml_runtime_warnings_enabled" ^{:go/end 505} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool runtimeWarnings)))
+          (r "caml_ml_gc_ramp_up" ^{:go/end 509} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a]
+              (let [v (.Apply th (aget a 0) Unit)]
+                (Tuple v 0))))
+
+          (r "caml_ml_gc_ramp_down" ^{:go/end 510} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+
+          ;; finalise.c: finalisers are accepted and never called
+          (let [fin ^{:go/end 518} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                (when [(values _ ok) (assert int (aget a 1))] ok
+                  (InvalidArg "Gc.finalise"))
+
+                ^{:line 517} Unit)]
+
+            (r "caml_final_register" fin)
+            (r "caml_final_register_called_without_value" fin)
+            (r "caml_final_release" ^{:go/end 521} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+
+            ;; weak.c: ephemerons and weak arrays as strong blocks [| link; data; key0; key1; ... |]
+            (r "caml_ephe_create" ^{:go/end 524} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephCreate (AsInt (aget a 0)))))
+            (r "caml_weak_create" ^{:go/end 525} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephCreate (AsInt (aget a 0)))))
+            (let [setKey ^{:go/end 530} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                  (let [off (ephKeyOffset (aget a 0) (aget a 1) "Weak.set")]
+                    (aset (.-F (AsBlock (aget a 0))) off (aget a 2))
+                    ^{:line 529} Unit))]
+
+              (r "caml_ephe_set_key" setKey)
+              (r "caml_ephe_unset_key" ^{:go/end 536} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                  (let [off (ephKeyOffset (aget a 0) (aget a 1) "Weak.set")]
+                    (aset (.-F (AsBlock (aget a 0))) off ephNone)
+                    ^{:line 535} Unit)))
+
+              (r "caml_weak_set" ^{:go/end 545} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                  (let [off (ephKeyOffset (aget a 0) (aget a 1) "Weak.set")]
+                    (if [(values b ok) (assert (* Block) (aget a 2))] (and ok (!= (aget a 2) ephNone))
+                      (aset (.-F (AsBlock (aget a 0))) off (aget (.-F b) 0))
+
+                      (aset (.-F (AsBlock (aget a 0))) off ephNone))
+
+                    ^{:line 544} Unit)))
+
+              (r "caml_ephe_set_data" ^{:go/end 546} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (aset (.-F (AsBlock (aget a 0))) 1 (aget a 1)) Unit))
+              (r "caml_ephe_unset_data" ^{:go/end 547} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (aset (.-F (AsBlock (aget a 0))) 1 ephNone) Unit))
+              (let [getKey ^{:go/end 552} (fn ^Ext [^bool cp]
+                    ^{:go/end 551} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                      (ephGet (aget a 0) (ephKeyOffset (aget a 0) (aget a 1) "Weak.get") cp)))]
+
+
+                (r "caml_ephe_get_key" (getKey false))
+                (r "caml_weak_get" (getKey false))
+                (r "caml_ephe_get_key_copy" (getKey true))
+                (r "caml_weak_get_copy" (getKey true))
+                (r "caml_ephe_get_data" ^{:go/end 557} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephGet (aget a 0) 1 false)))
+                (r "caml_ephe_get_data_copy" ^{:go/end 558} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephGet (aget a 0) 1 true)))
+                (let [checkKey ^{:go/end 562} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                      (let [off (ephKeyOffset (aget a 0) (aget a 1) "Weak.check")]
+                        (Bool (!= (aget (.-F (AsBlock (aget a 0))) off) ephNone))))]
+
+                  (r "caml_ephe_check_key" checkKey)
+                  (r "caml_weak_check" checkKey)
+                  (r "caml_ephe_check_data" ^{:go/end 565} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (!= (aget (.-F (AsBlock (aget a 0))) 1) ephNone))))
+                  (r "caml_ephe_blit_key" ^{:go/end 566} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephBlit (aget a 0) (aget a 1) (aget a 2) (aget a 3) (aget a 4))))
+                  (r "caml_weak_blit" ^{:go/end 567} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephBlit (aget a 0) (aget a 1) (aget a 2) (aget a 3) (aget a 4))))
+                  (r "caml_ephe_blit_data" ^{:go/end 571} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                      (aset (.-F (AsBlock (aget a 1))) 1 (aget (.-F (AsBlock (aget a 0))) 1))
+                      ^{:line 570} Unit))
+
+
+                  ;; backtrace.c: no backtraces are recorded
+                  (r "caml_record_backtrace" ^{:go/end 574} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (set! backtraceActive (Truth (aget a 0))) Unit))
+                  (r "caml_backtrace_status" ^{:go/end 575} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool backtraceActive)))
+                  (r "caml_ml_debug_info_status" ^{:go/end 576} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 0))
+                  (let [empty ^{:go/end 577} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (addr (lit Block :Tag 0)))]
+                    (r "caml_get_exception_raw_backtrace" empty)
+                    (r "caml_get_exception_backtrace" ^{:go/end 579} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] None))
+                    (r "caml_get_current_callstack" empty)
+                    (r "caml_restore_raw_backtrace" ^{:go/end 581} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+                    (r "caml_raw_backtrace_length" ^{:go/end 582} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (len (.-F (AsBlock (aget a 0))))))
+                    (r "caml_convert_raw_backtrace" ^{:go/end 588} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                        (when (> (len (.-F (AsBlock (aget a 0)))) 0)
+                          (Failwith "No debug information available"))
+
+                        (addr (lit Block :Tag 0))))
+
+                    (r "caml_convert_raw_backtrace_slot" ^{:go/breaks [3] :go/end 592} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                        (Failwith "No debug information available")
+                        nil))
+
+                    (r "caml_raw_backtrace_slot" ^{:go/end 600} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                        (let [i (AsInt (aget a 1))
+                            ^{:line 595} b (AsBlock (aget a 0))]
+                          (when (or (< i 0) (>= i (len (.-F b))))
+                            (InvalidArg "Printexc.get_raw_backtrace_slot: index out of bounds"))
+
+                          (aget (.-F b) i))))
+
+                    (r "caml_raw_backtrace_next_slot" ^{:go/end 601} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] None))
+
+                    ;; memprof.c: sampling never fires
+                    (r "caml_memprof_start" ^{:go/end 614} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                        (let [(values lambda ok) (assert float64 (aget a 0))]
+                          (when (or (not ok) (< (AsInt (aget a 1)) 0) (not (and (>= lambda 0) (<= lambda 1))))
+                            (InvalidArg "Gc.Memprof.start"))
+
+                          (when memprofSampling
+                            (Failwith "Gc.Memprof.start: profile already running."))
+
+                          (set! memprofSampling true)
+                          (addr (lit Custom :Name "_memprof")))))
+
+                    (r "caml_memprof_is_sampling" ^{:go/end 615} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool memprofSampling)))
+                    (r "caml_memprof_stop" ^{:go/end 622} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+                        (when (not memprofSampling)
+                          (Failwith "Gc.Memprof.stop: no profile running."))
+
+                        (set! memprofSampling false)
+                        ^{:line 621} Unit))
+
+                    (r "caml_memprof_discard" ^{:go/end 623} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] Unit))
+
+                    ;; domain.c
+                    (r "caml_ml_domain_id" ^{:go/end 626} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.-ID (.-Dom th))))
+                    (r "caml_ml_domain_index" ^{:go/end 627} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.-ID (.-Dom th))))
+                    (r "caml_recommended_domain_count" ^{:go/end 628} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] 1))
+                    (r "caml_domain_count" ^{:go/end 629} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (+ 1 (conv int (.Load domainsRun)))))
+                    (r "caml_ml_domain_cpu_relax" ^{:go/end 630} (fn ^Value [^{:tag (* Thread)} th ^{:tag (slice Value)} a] (.Yield th) Unit))))))))))))
+
+
+
+
+
+
+(go/const ^{:val 0.0 :doc "allocWords is the words allocated as Gc's counters give them: oi does not count an OCaml\nprogram's allocations (its values are Go's, with Go's sizes and escape analysis), so the\ncounters stay at zero: a program that checks that a computation does not allocate sees none, one\nthat measures an allocation sees none either (a class, OC64).\n"} allocWords (conv float64 0))

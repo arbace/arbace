@@ -1,0 +1,684 @@
+(in-ns 'go.arbace.oi) (go/file "ext_test.go" :imports [
+
+
+    ^{:line 4} [md5 "crypto/md5"]
+    ^{:line 5} [binary "encoding/binary"]
+    ^{:line 6} [hex "encoding/hex"]
+    ^{:line 7} [fmt "fmt"]
+    ^{:line 8} [os "os"]
+    ^{:line 9} [filepath "path/filepath"]
+    ^{:line 10} [strconv "strconv"]
+    ^{:line 11} [strings "strings"]
+    ^{:line 12} [testing "testing"]])
+
+
+(go/var ^{:tag (* Thread)} testTh)
+
+^{:go/end 21} (go/func TestMain [^{:tag (* testing/M)} m]
+  (NewProgram (lit (slice string) "prog" "a1"))
+  (set! testTh (NewThread))
+  (os/Exit (.Run m)))
+
+
+^{:go/end 29} (go/func sysxCall ^Value [^string name & ^{:tag (slice Value)} args]
+  (let [(values f ok) (aget Externals name)]
+    (when (not ok)
+      (panic (+ "no external " name)))
+
+    (f testTh args)))
+
+
+
+^{:go/breaks [8] :go/end 44} (go/func exnOf "exnOf runs f and returns the OCaml exception it raised, or nil.\n" [^{:tag (func [])} f] :results [^Value exn]
+  (defer (^{:go/end 41} (fn []
+        (when [r (recover)] (!= r nil)
+          (when [(values e ok) (assert (* Exn) r)] ok
+            (set! exn (.-V e))
+            (return))
+
+          (panic r)))))
+
+
+  (f)
+  nil)
+
+
+^{:go/end 54} (go/func sysErrorText ^string [^{:tag (* testing/T)} t ^{:tag (func [])} f]
+  ^{:go/via [common]} (.Helper t)
+  (let [e (exnOf f)
+      (values b ok) (assert (* Block) e)]
+    (when (or (not ok) (!= (aget (.-F b) 0) (conv Value ExnSysError)))
+      ^{:go/via [common]} (.Fatalf t "expected Sys_error, got %v" e))
+
+    (GoString (aget (.-F b) 1))))
+
+
+^{:go/end 62} (go/func fileSize ^int [^{:tag (* testing/T)} t ^string p]
+  (let [(values st err) (os/Stat p)]
+    (when (!= err nil)
+      ^{:go/via [common]} (.Fatal t err))
+
+    (conv int (.Size st))))
+
+
+^{:go/end 67} (go/func openOut ^Value [^{:tag (* testing/T)} t ^string p]
+  (let [fd (sysxCall "caml_sys_open" (Str p) (List 1 3 4) 0644)]
+    (sysxCall "caml_ml_open_descriptor_out" fd)))
+
+
+^{:go/end 72} (go/func openIn ^Value [^{:tag (* testing/T)} t ^string p]
+  (let [fd (sysxCall "caml_sys_open" (Str p) (List 0) 0)]
+    (sysxCall "caml_ml_open_descriptor_in" fd)))
+
+
+^{:go/end 76} (go/func outStr [^Value ch ^string s]
+  (sysxCall "caml_ml_output_bytes" ch (Str s) 0 (len s)))
+
+
+^{:go/end 131} (go/func TestChannelBuffering [^{:tag (* testing/T)} t]
+  (let [p (filepath/Join ^{:go/via [common]} (.TempDir t) "f")
+      ^{:line 80} ch (openOut t p)]
+    (outStr ch "hello\nworld\n")
+    (when [n (fileSize t p)] (!= n 0)
+      ^{:go/via [common]} (.Fatalf t "data reached the file before the flush: %d" n))
+
+    (sysxCall "caml_ml_output_int" ch 0x01020304)
+    (sysxCall "caml_ml_output_char" ch (conv int \x))
+    (when [pos (sysxCall "caml_ml_pos_out" ch)] (!= pos 17)
+      ^{:go/via [common]} (.Fatalf t "pos_out %v" pos))
+
+    (sysxCall "caml_ml_flush" ch)
+    (when [n (fileSize t p)] (!= n 17)
+      ^{:go/via [common]} (.Fatalf t "flushed size %d" n))
+
+    (sysxCall "caml_ml_close_channel" ch)
+    (sysxCall "caml_ml_flush" ch) ; a closed channel flushes quietly
+    (when [s (sysErrorText t ^{:go/end 96} (fn [] (outStr ch "a")))] (!= s "Bad file descriptor")
+      ^{:go/via [common]} (.Fatalf t "write to closed channel: %q" s))
+
+    (sysxCall "caml_ml_close_channel" ch) ; idempotent
+
+    ;; a big write: whole buffers go out, the rest stays
+    (set! ch (openOut t p))
+    (outStr ch (strings/Repeat "a" 200000))
+    (when [n (fileSize t p)] (!= n (* 3 IOBufferSize))
+      ^{:go/via [common]} (.Fatalf t "size after a big write %d" n))
+
+    (sysxCall "caml_ml_set_buffered" ch 0)
+    (when [n (fileSize t p)] (!= n 200000)
+      ^{:go/via [common]} (.Fatalf t "size after set_buffered false %d" n))
+
+    (when (!= (sysxCall "caml_ml_is_buffered" ch) (conv Value 0))
+      ^{:go/via [common]} (.Fatal t "is_buffered"))
+
+    (outStr ch "zz")
+    (when [n (fileSize t p)] (!= n 200002)
+      ^{:go/via [common]} (.Fatalf t "unbuffered write %d" n))
+
+    (when [got (sysxCall "caml_ml_channel_size" ch)] (!= got 200002)
+      ^{:go/via [common]} (.Fatalf t "channel_size %v" got))
+
+    (when [got (sysxCall "caml_ml_pos_out_64" ch)] (!= got (conv int64 200002))
+      ^{:go/via [common]} (.Fatalf t "pos_out_64 %v" got))
+
+    (sysxCall "caml_ml_seek_out" ch 5)
+    (outStr ch "B")
+    (sysxCall "caml_ml_close_channel" ch)
+    (let [(values data _) (os/ReadFile p)]
+      (when (or (!= (aget data 5) \B) (!= (aget data 4) \a) (!= (len data) 200002))
+        ^{:go/via [common]} (.Fatal t "seek_out")))))
+
+
+
+^{:go/end 201} (go/func TestChannelInput [^{:tag (* testing/T)} t]
+  (let [p (filepath/Join ^{:go/via [common]} (.TempDir t) "f")]
+    (os/WriteFile p (conv (slice byte) (byte-string "hello\nworld\n\u0001\u0002\u0003\u0004" 0xff "xtail")) 0644)
+    (let [ch (openIn t p)]
+      (when [n (sysxCall "caml_ml_input_scan_line" ch)] (!= n 6)
+        ^{:go/via [common]} (.Fatalf t "scan_line %v" n))
+
+      (let [buf (addr (lit Bytes :B (make (slice byte) 10)))]
+        (when [n (sysxCall "caml_ml_input" ch buf 2 6)] (or (!= n 6) (!= (conv string (subslice (.-B buf) 2 8)) "hello\n"))
+          ^{:go/via [common]} (.Fatalf t "input %v %q" n (.-B buf)))
+
+        (when [n (sysxCall "caml_ml_input_scan_line" ch)] (!= n 6)
+          ^{:go/via [common]} (.Fatalf t "scan_line 2 %v" n))
+
+        (sysxCall "caml_ml_input" ch buf 0 6)
+        (when [v (sysxCall "caml_ml_input_int" ch)] (!= v 0x01020304)
+          ^{:go/via [common]} (.Fatalf t "input_int %v" v))
+
+        (when [v (sysxCall "caml_ml_input_char" ch)] (!= v 0xff)
+          ^{:go/via [common]} (.Fatalf t "input_char %v" v))
+
+        (when [pos (sysxCall "caml_ml_pos_in" ch)] (!= pos 17)
+          ^{:go/via [common]} (.Fatalf t "pos_in %v" pos))
+
+        (when [n (sysxCall "caml_ml_input_scan_line" ch)] (!= n -5)
+          ^{:go/via [common]} (.Fatalf t "partial line %v" n))
+
+        (sysxCall "caml_ml_seek_in" ch 2)
+        (when [v (sysxCall "caml_ml_input_char" ch)] (!= v (conv int \l))
+          ^{:go/via [common]} (.Fatalf t "after seek %v" v))
+
+        (sysxCall "caml_ml_seek_in_64" ch (conv int64 17))
+        (when [v (sysxCall "caml_ml_input_char" ch)] (!= v (conv int \x))
+          ^{:go/via [common]} (.Fatalf t "after seek 64 %v" v))
+
+        (when [v (sysxCall "caml_ml_channel_size_64" ch)] (!= v (conv int64 22))
+          ^{:go/via [common]} (.Fatalf t "size %v" v))
+
+        (when [n (sysxCall "caml_ml_pos_in" ch)] (!= n 18)
+          ^{:go/via [common]} (.Fatalf t "pos after size %v" n))
+
+        (let [c (ChannelOf ch)]
+          (when [e (exnOf ^{:go/end 175} (fn [] (.ReadFull c 100)))] (!= e (conv Value ExnEndOfFile))
+            ^{:go/via [common]} (.Fatalf t "ReadFull past the end: %v" e))
+
+          (when [e (exnOf ^{:go/end 178} (fn [] (sysxCall "caml_ml_input_char" ch)))] (!= e (conv Value ExnEndOfFile))
+            ^{:go/via [common]} (.Fatalf t "input_char at the end: %v" e))
+
+          (when [n (sysxCall "caml_ml_input" ch buf 0 3)] (!= n 0)
+            ^{:go/via [common]} (.Fatalf t "input at the end %v" n))
+
+          (sysxCall "caml_ml_seek_in" ch 0)
+          (when [got (conv string (.ReadFull c 5))] (!= got "hello")
+            ^{:go/via [common]} (.Fatalf t "ReadFull %q" got))
+
+          ;; md5 of a number of bytes and of the rest
+          (let [sum (md5/Sum (conv (slice byte) "\nworl"))]
+            (when [got (.-B (assert (* Bytes) (sysxCall "caml_md5_chan" ch 5)))] (!= (conv string got) (conv string (subslice sum)))
+              ^{:go/via [common]} (.Fatal t "md5_chan 5"))
+
+            (let [rest (md5/Sum (conv (slice byte) (byte-string "d\n\u0001\u0002\u0003\u0004" 0xff "xtail")))]
+              (when [got (.-B (assert (* Bytes) (sysxCall "caml_md5_chan" ch -1)))] (!= (conv string got) (conv string (subslice rest)))
+                ^{:go/via [common]} (.Fatal t "md5_chan -1"))
+
+              (sysxCall "caml_ml_close_channel" ch)
+              (when [s (sysErrorText t ^{:go/end 198} (fn [] (sysxCall "caml_ml_input_char" ch)))] (!= s "Bad file descriptor")
+                ^{:go/via [common]} (.Fatalf t "read on closed channel: %q" s)))))))))
+
+
+
+^{:go/end 229} (go/func TestOutChannelsList [^{:tag (* testing/T)} t]
+  (let [d ^{:go/via [common]} (.TempDir t)
+      ^{:line 205} c1 (openOut t (filepath/Join d "1"))
+      ^{:line 206} c2 (openOut t (filepath/Join d "2"))
+      ^{:line 207} c3 (openOut t (filepath/Join d "3"))
+      ^{:line 208} in (openIn t (filepath/Join d "1"))]
+    (sysxCall "caml_ml_close_channel" c2)
+    (let [l (listToSlice (sysxCall "caml_ml_out_channels_list"))
+        ^{:line 211} pos (lit (map Value int))]
+      (range [i v l]
+        (aset pos v i))
+
+      (when [(values _ ok) (aget pos c2)] ok
+        ^{:go/via [common]} (.Fatal t "closed channel listed"))
+
+      (when [(values _ ok) (aget pos in)] ok
+        ^{:go/via [common]} (.Fatal t "input channel listed"))
+
+      (when (not (< (aget pos c3) (aget pos c1)))
+        ^{:go/via [common]} (.Fatalf t "not newest first: %v %v" (aget pos c3) (aget pos c1)))
+
+      (outStr c3 "pending")
+      (FlushStd)
+      (when (!= (fileSize t (filepath/Join d "3")) 7)
+        ^{:go/via [common]} (.Fatal t "FlushStd")))))
+
+
+
+^{:go/end 255} (go/func TestSysErrors [^{:tag (* testing/T)} t]
+  (let [d ^{:go/via [common]} (.TempDir t)
+      ^{:line 233} p (filepath/Join d "nope")]
+    (when [s (sysErrorText t ^{:go/end 234} (fn [] (sysxCall "caml_sys_open" (Str p) (List 0) 0)))] (!= s (+ p ": No such file or directory"))
+      ^{:go/via [common]} (.Fatalf t "open: %q" s))
+
+    (when [s (sysErrorText t ^{:go/end 237} (fn [] (sysxCall "caml_sys_is_directory" (Str p))))] (!= s (+ p ": No such file or directory"))
+      ^{:go/via [common]} (.Fatalf t "is_directory: %q" s))
+
+    (when [s (sysErrorText t ^{:go/end 240} (fn [] (sysxCall "caml_sys_remove" (Str p))))] (!= s (+ p ": No such file or directory"))
+      ^{:go/via [common]} (.Fatalf t "remove: %q" s))
+
+    (when [s (sysErrorText t ^{:go/end 243} (fn [] (sysxCall "caml_sys_rename" (Str p) (Str (+ p "2")))))] (!= s "No such file or directory")
+      ^{:go/via [common]} (.Fatalf t "rename: %q" s))
+
+    (when [s (sysErrorText t ^{:go/end 246} (fn [] (sysxCall "caml_sys_open" (Str d) (List 1) 0)))] (!= s (+ d ": Is a directory"))
+      ^{:go/via [common]} (.Fatalf t "open dir: %q" s))
+
+    (when [s (sysErrorText t ^{:go/end 249} (fn [] (sysxCall "caml_sys_open" (Str "a\u0000b") (List 0) 0)))] (!= s "a\u0000b: No such file or directory")
+      ^{:go/via [common]} (.Fatalf t "open nul: %q" s))
+
+    (when [s (sysErrorText t ^{:go/end 252} (fn [] (sysxCall "caml_sys_close" 9999)))] (!= s "Bad file descriptor")
+      ^{:go/via [common]} (.Fatalf t "close: %q" s))))
+
+
+
+^{:go/end 289} (go/func TestSysFiles [^{:tag (* testing/T)} t]
+  (let [d ^{:go/via [common]} (.TempDir t)
+      ^{:line 259} sub (filepath/Join d "sub")]
+    (sysxCall "caml_sys_mkdir" (Str sub) 0755)
+    (when (or (!= (sysxCall "caml_sys_is_directory" (Str sub)) (conv Value 1)) (!= (sysxCall "caml_sys_is_regular_file" (Str sub)) (conv Value 0)))
+      ^{:go/via [common]} (.Fatal t "kinds"))
+
+    (let [f (filepath/Join sub "f")]
+      (os/WriteFile f nil 0644)
+      (let [g (filepath/Join sub "g")]
+        (sysxCall "caml_sys_rename" (Str f) (Str g))
+        (when (or (!= (sysxCall "caml_sys_file_exists" (Str f)) (conv Value 0)) (!= (sysxCall "caml_sys_file_exists" (Str g)) (conv Value 1)))
+          ^{:go/via [common]} (.Fatal t "rename"))
+
+        (when (!= (sysxCall "caml_sys_is_regular_file" (Str g)) (conv Value 1))
+          ^{:go/via [common]} (.Fatal t "regular"))
+
+        (let [names (assert (* Block) (sysxCall "caml_sys_read_directory" (Str sub)))]
+          (when (or (!= (len (.-F names)) 1) (!= (GoString (aget (.-F names) 0)) "g"))
+            ^{:go/via [common]} (.Fatalf t "readdir %v" (.-F names)))
+
+          (when [s (sysErrorText t ^{:go/end 278} (fn [] (sysxCall "caml_sys_rmdir" (Str sub))))] (!= s (+ sub ": Directory not empty"))
+            ^{:go/via [common]} (.Fatalf t "rmdir: %q" s))
+
+          (sysxCall "caml_sys_remove" (Str g))
+          (sysxCall "caml_sys_rmdir" (Str sub))
+          (let [old (GoString (sysxCall "caml_sys_getcwd"))]
+            (sysxCall "caml_sys_chdir" (Str d))
+            (when [got (GoString (sysxCall "caml_sys_getcwd"))] (!= got d)
+              ^{:go/via [common]} (.Fatalf t "getcwd %q" got))
+
+            (sysxCall "caml_sys_chdir" (Str old))))))))
+
+
+^{:go/end 373} (go/func TestSysMisc [^{:tag (* testing/T)} t]
+  (os/Setenv "OI_TEST_VAR" "v1")
+  (when (!= (GoString (sysxCall "caml_sys_getenv" (Str "OI_TEST_VAR"))) "v1")
+    ^{:go/via [common]} (.Fatal t "getenv"))
+
+  (when [e (exnOf ^{:go/end 296} (fn [] (sysxCall "caml_sys_getenv" (Str "OI_NO_SUCH_VAR"))))] (!= e (conv Value ExnNotFound))
+    ^{:go/via [common]} (.Fatalf t "getenv missing: %v" e))
+
+  (when (!= (sysxCall "caml_sys_getenv_opt" (Str "OI_NO_SUCH_VAR")) (conv Value None))
+    ^{:go/via [common]} (.Fatal t "getenv_opt"))
+
+  (when [code (sysxCall "caml_sys_system_command" (Str "exit 3"))] (!= code 3)
+    ^{:go/via [common]} (.Fatalf t "system %v" code))
+
+  (when [code (sysxCall "caml_sys_system_command" (Str "kill -9 $$"))] (!= code 255)
+    ^{:go/via [common]} (.Fatalf t "system killed %v" code))
+
+  (when (< (assert float64 (sysxCall "caml_sys_time")) 0)
+    ^{:go/via [common]} (.Fatal t "time"))
+
+  (let [cfg (assert (* Block) (sysxCall "caml_sys_get_config"))]
+    (when (or (!= (GoString (aget (.-F cfg) 0)) "Unix") (!= (aget (.-F cfg) 1) (conv Value 64)) (!= (aget (.-F cfg) 2) (conv Value 0)))
+      ^{:go/via [common]} (.Fatal t "config"))
+
+    (when (!= (GoString (sysxCall "caml_sys_executable_name")) "prog")
+      ^{:go/via [common]} (.Fatal t "executable_name"))
+
+    (when [av (assert (* Block) (sysxCall "caml_sys_argv"))] (!= (len (.-F av)) 2)
+      ^{:go/via [common]} (.Fatal t "argv"))
+
+    (^{:go/end 329} (fn []
+        (defer (^{:go/end 327} (fn []
+              (let [r (recover)]
+                (when [(values es ok) (assert (* ExitSignal) r)] (or (not ok) (!= (.-Code es) 7))
+                  ^{:go/via [common]} (.Fatalf t "exit: %v" r))))))
+
+
+        (sysxCall "caml_sys_exit" 7)))
+
+    (when (or (!= (sysxCall "caml_sys_convert_signal_number" -1) 6) (!= (sysxCall "caml_sys_rev_convert_signal_number" 6) -1)
+        (!= (sysxCall "caml_sys_convert_signal_number" 40) 40))
+      ^{:go/via [common]} (.Fatal t "signal numbers"))
+
+    (when (!= (sysxCall "caml_install_signal_handler" -6 1) (conv Value 0)) ; sigint ignore
+      ^{:go/via [common]} (.Fatal t "install 1"))
+
+    (let [h (addr (lit Block :Tag 0 :F (lit (slice Value) "handler")))]
+      (when (!= (sysxCall "caml_install_signal_handler" -6 h) (conv Value 1))
+        ^{:go/via [common]} (.Fatal t "install 2"))
+
+      (when [old (assert (* Block) (sysxCall "caml_install_signal_handler" -6 0))] (!= (aget (.-F old) 0) "handler")
+        ^{:go/via [common]} (.Fatal t "install 3"))
+
+      (when [e (exnOf ^{:go/end 344} (fn [] (sysxCall "caml_install_signal_handler" 99 0)))] (== e nil)
+        ^{:go/via [common]} (.Fatal t "bad signal accepted"))
+
+      (when (or (!= (sysxCall "caml_ml_domain_id") 0) (!= (sysxCall "caml_domain_count") 1))
+        ^{:go/via [common]} (.Fatal t "domain"))
+
+      (when [n (len (.-F (assert (* Block) (sysxCall "caml_gc_stat"))))] (!= n 18)
+        ^{:go/via [common]} (.Fatalf t "gc stat has %d fields" n))
+
+      (when [n (len (.-F (assert (* Block) (sysxCall "caml_gc_get"))))] (!= n 11)
+        ^{:go/via [common]} (.Fatalf t "gc control has %d fields" n))
+
+      (when (not (strings/HasPrefix (GoString (sysxCall "caml_runtime_parameters")) "b=0,c=0,"))
+        ^{:go/via [common]} (.Fatal t "runtime_parameters"))
+
+      (when [e (exnOf ^{:go/end 359} (fn [] (sysxCall "caml_gc_tweak_get" (Str "nope"))))] (== e nil)
+        ^{:go/via [common]} (.Fatal t "tweak"))
+
+      (sysxCall "caml_gc_tweak_set" (Str "small_heap_limit") 5)
+      (when [l (listToSlice (sysxCall "caml_gc_tweak_list_active"))] (!= (len l) 1)
+        ^{:go/via [common]} (.Fatal t "tweak list"))
+
+      (when [e (exnOf ^{:go/end 366} (fn [] (sysxCall "caml_final_register" nil 3)))] (== e nil)
+        ^{:go/via [common]} (.Fatal t "finalise of an immediate"))
+
+      (let [seed (assert (* Block) (sysxCall "caml_sys_random_seed"))]
+        (when (!= (len (.-F seed)) 12)
+          ^{:go/via [common]} (.Fatal t "seed"))))))
+
+
+
+^{:go/end 417} (go/func TestWeak [^{:tag (* testing/T)} t]
+  (let [w (sysxCall "caml_weak_create" 3)]
+    (when (!= (Size w) 5)
+      ^{:go/via [common]} (.Fatalf t "weak size %d" (Size w)))
+
+    (when (or (!= (sysxCall "caml_weak_get" w 1) (conv Value None)) (!= (sysxCall "caml_weak_check" w 1) (conv Value 0)))
+      ^{:go/via [common]} (.Fatal t "empty"))
+
+    (let [k (addr (lit Block :Tag 0 :F (lit (slice Value) 1 2)))]
+      (sysxCall "caml_ephe_set_key" w 1 k)
+      (let [got (assert (* Block) (sysxCall "caml_weak_get" w 1))]
+        (when (or (!= (aget (.-F got) 0) (conv Value k)) (!= (sysxCall "caml_weak_check" w 1) (conv Value 1)))
+          ^{:go/via [common]} (.Fatal t "set/get"))
+
+        (let [cp (assert (* Block) (aget (.-F (assert (* Block) (sysxCall "caml_weak_get_copy" w 1))) 0))]
+          (when (or (== cp k) (!= (len (.-F cp)) 2))
+            ^{:go/via [common]} (.Fatal t "get_copy"))
+
+          (let [w2 (sysxCall "caml_weak_create" 3)]
+            (sysxCall "caml_weak_blit" w 0 w2 1 2)
+            (when (or (!= (sysxCall "caml_weak_check" w2 2) (conv Value 1)) (!= (sysxCall "caml_weak_check" w2 1) (conv Value 0)))
+              ^{:go/via [common]} (.Fatal t "blit"))
+
+            (sysxCall "caml_ephe_unset_key" w 1)
+            (when (!= (sysxCall "caml_weak_check" w 1) (conv Value 0))
+              ^{:go/via [common]} (.Fatal t "unset"))
+
+            (when [e (exnOf ^{:go/end 402} (fn [] (sysxCall "caml_weak_get" w 3)))] (!= (ExnName e) "Invalid_argument")
+              ^{:go/via [common]} (.Fatalf t "range: %v" e))
+
+            (when [e (exnOf ^{:go/end 405} (fn [] (sysxCall "caml_weak_blit" w 2 w2 0 5)))] (!= (ExnName e) "Invalid_argument")
+              ^{:go/via [common]} (.Fatal t "blit range"))
+
+            (sysxCall "caml_ephe_set_data" w 42)
+            (when (or (!= (sysxCall "caml_ephe_check_data" w) (conv Value 1)) (!= (aget (.-F (assert (* Block) (sysxCall "caml_ephe_get_data" w))) 0) (conv Value 42)))
+              ^{:go/via [common]} (.Fatal t "data"))
+
+            (sysxCall "caml_ephe_blit_data" w w2)
+            (sysxCall "caml_ephe_unset_data" w)
+            (when (or (!= (sysxCall "caml_ephe_check_data" w) (conv Value 0)) (!= (sysxCall "caml_ephe_check_data" w2) (conv Value 1)))
+              ^{:go/via [common]} (.Fatal t "blit data"))))))))
+
+
+
+^{:go/end 444} (go/func TestDigests [^{:tag (* testing/T)} t]
+  (when [got (hex/EncodeToString (.-B (assert (* Bytes) (sysxCall "caml_md5_string" (Str "xhelloy") 1 5))))] (!= got "5d41402abc4b2a76b9719d911017c592")
+    ^{:go/via [common]} (.Fatalf t "md5 %s" got))
+
+  (let [b2 ^{:go/end 425} (fn ^string [^int n ^string key ^string s]
+        (hex/EncodeToString (.-B (assert (* Bytes) (sysxCall "caml_blake2_string" n (Str key) (Str s) 0 (len s))))))]
+
+    (when [got (b2 64 "" "hello")] (!= got "e4cfa39a3d37be31c59609e807970799caa68a19bfaa15135f165085e01d41a65ba1e1b146aeb6bd0092b49eac214c103ccfa3a365954bbbe52f74a2b3620c94")
+      ^{:go/via [common]} (.Fatalf t "blake512 %s" got))
+
+    (when [got (b2 32 "" (strings/Repeat "x" 300))] (!= got "5aa7fbbf37986bb2a5d547c0d3c4d4326a24d786e7d57bf93fc784176e38b33d")
+      ^{:go/via [common]} (.Fatalf t "blake256 %s" got))
+
+    (when [got (b2 16 "" (strings/Repeat "y" 128))] (!= got "ecaaf4a7e55c8dacadb2769cf8264a31")
+      ^{:go/via [common]} (.Fatalf t "blake128 %s" got))
+
+    ;; incremental updates give the same digest
+    (let [s (strings/Repeat "x" 300)
+        ^{:line 437} ctx (sysxCall "caml_blake2_create" 32 (Str ""))]
+      (range [_ part (lit (slice string) (subslice s _ 1) (subslice s 1 129) (subslice s 129 130) (subslice s 130))]
+        (sysxCall "caml_blake2_update" ctx (Str part) 0 (len part)))
+
+      (when [got (hex/EncodeToString (.-B (assert (* Bytes) (sysxCall "caml_blake2_final" ctx 32))))] (!= got "5aa7fbbf37986bb2a5d547c0d3c4d4326a24d786e7d57bf93fc784176e38b33d")
+        ^{:go/via [common]} (.Fatalf t "incremental blake %s" got)))))
+
+
+
+
+^{:go/end 471} (go/func randState "randState builds Random.State.make [|seed...|] as stdlib/random.ml does.\n" ^Value [^{:tag (slice int)} seed]
+  (let [st (sysxCall "caml_ba_create" baInt64 0 (addr (lit Block :Tag 0 :F (lit (slice Value) 4))))
+      ^{:line 449} b (make (slice byte) (+ (* (len seed) 8) 1))]
+    (range [i s seed]
+      (.PutUint64 binary/LittleEndian (subslice b (* i 8)) (conv uint64 s)))
+
+    (aset b (* (len seed) 8) 1)
+    (let [d1 (md5/Sum b)]
+      (aset b (* (len seed) 8) 2)
+      (let [d2 (md5/Sum b)
+          ^{:line 457} ws (lit (slice int64)
+            (conv int64 (bit-or (.Uint64 binary/LittleEndian (subslice d1 0)) 1)) (conv int64 (.Uint64 binary/LittleEndian (subslice d1 8)))
+            (conv int64 (.Uint64 binary/LittleEndian (subslice d2 0))) (conv int64 (.Uint64 binary/LittleEndian (subslice d2 8))))]
+
+        (when (== (aget ws 2) 0)
+          (aset ws 2 1))
+
+        (when (== (aget ws 3) 0)
+          (aset ws 3 2))
+
+        (range [i w ws]
+          (sysxCall "caml_ba_set_generic" st i w))
+
+        ^{:line 470} st))))
+
+
+^{:go/end 501} (go/func TestRandomLXM [^{:tag (* testing/T)} t]
+  (let [st (randState (lit (slice int) 42))
+      ^{:line 475 :tag (slice int)} got (zero (slice int))]
+    (while (< (len got) 5) ; Random.int 1000: draw 30 bits, reject the biased tail (bound 1000 < 2^30)
+      (let [r (bit-and (conv int (assert int64 (sysxCall "caml_lxm_next" st))) 0x3FFFFFFF)
+          ^{:line 478} v (% r 1000)]
+        (when (> (- r v) (+ (- 0x3FFFFFFF 1000) 1))
+          (continue))
+
+        (set! got (append got v))))
+
+    (when (!= (fmt/Sprint got) "[864 320 147 296 351]")
+      ^{:go/via [common]} (.Fatalf t "Random.int 1000 after init 42: %v" got))
+
+    (when [v (sysxCall "caml_ba_get_generic" st (addr (lit Block :Tag 0 :F (lit (slice Value) 0))))] (== v nil)
+      ^{:go/via [common]} (.Fatal t "get"))
+
+    (when [e (exnOf ^{:go/end 490} (fn [] (sysxCall "caml_ba_get_generic" st 4)))] (!= (ExnName e) "Invalid_argument")
+      ^{:go/via [common]} (.Fatalf t "ba bounds: %v" e))
+
+    (when (or (!= (sysxCall "caml_ba_dim_1" st) 4) (!= (sysxCall "caml_ba_num_dims" st) 1) (!= (sysxCall "caml_ba_kind" st) baInt64))
+      ^{:go/via [common]} (.Fatal t "ba shape"))
+
+    (let [st2 (sysxCall "caml_ba_create" baInt64 0 (addr (lit Block :Tag 0 :F (lit (slice Value) 4))))]
+      (sysxCall "caml_ba_blit" st st2)
+      (when (!= (sysxCall "caml_lxm_next" st) (sysxCall "caml_lxm_next" st2))
+        ^{:go/via [common]} (.Fatal t "blit copy diverges")))))
+
+
+
+^{:go/end 509} (go/func fromHex ^{:tag (* Bytes)} [^string s]
+  (let [(values b err) (hex/DecodeString s)]
+    (when (!= err nil)
+      (panic err))
+
+    (addr (lit Bytes :B b))))
+
+
+^{:go/end 539} (go/func runLexer [^{:tag (* testing/T)} t ^string tablesHex ^string trace ^bool newEngine]
+  (let [^{:tag (slice Value)} tbl (zero (slice Value))]
+    (range [_ h (strings/Fields tablesHex)]
+      (set! tbl (append tbl (fromHex h))))
+
+    (let [tables (addr (lit Block :Tag 0 :F tbl))
+        ^{:line 517} input (fromHex lexInputHex)
+        ^{:line 518} lb (addr (lit Block :Tag 0 :F (lit (slice Value) 0 input (len (.-B input)) 0 0 0 0 0 1 (addr (lit Block :Tag 0)) 0 0)))
+        ^{:line 519} name "caml_lex_engine"]
+      (when newEngine
+        (set! name "caml_new_lex_engine"))
+
+      (let [lines (strings/Split (strings/TrimSpace trace) "\n")]
+        (range [i line lines]
+          (aset (.-F lb) lbMem (addr (lit Block :Tag 0 :F (lit (slice Value) -1 -1))))
+          (when (not newEngine)
+            (aset (.-F lb) lbMem (addr (lit Block :Tag 0))))
+
+          (let [a (sysxCall name tables 0 lb)
+              ^{:line 530 :tag (slice string)} mem (zero (slice string))]
+            (range [_ m (.-F (assert (* Block) (aget (.-F lb) lbMem)))]
+              (set! mem (append mem (strconv/Itoa (assert int m)))))
+
+            (let [got (fmt/Sprintf "%d %d %d [%s]" a (aget (.-F lb) lbStartPos) (aget (.-F lb) lbCurrPos) (strings/Join mem ","))]
+              (when (!= got line)
+                ^{:go/via [common]} (.Fatalf t "token %d: got %q, OCaml gave %q" i got line)))))))))
+
+
+
+
+^{:go/end 544} (go/func TestLexEngines [^{:tag (* testing/T)} t]
+  (runLexer t lexTablesHex lexTrace true)
+  (runLexer t lexTablesHexOld lexTraceOld false))
+
+
+^{:go/end 562} (go/func TestLexRefill [^{:tag (* testing/T)} t]
+  ;; an empty-token failure and the refill protocol: with eof not reached the engine asks for more
+  (let [^{:tag (slice Value)} tbl (zero (slice Value))]
+    (range [_ h (strings/Fields lexTablesHexOld)]
+      (set! tbl (append tbl (fromHex h))))
+
+    (let [tables (addr (lit Block :Tag 0 :F tbl))
+        ^{:line 553} lb (addr (lit Block :Tag 0 :F (lit (slice Value) 0 (addr (lit Bytes :B (conv (slice byte) "12"))) 2 0 0 0 0 0 0 (addr (lit Block :Tag 0)) 0 0)))
+        ^{:line 554} r (assert int (sysxCall "caml_lex_engine" tables 0 lb))]
+      (when (>= r 0)
+        ^{:go/via [common]} (.Fatalf t "expected a refill request, got %d" r))
+
+      (aset (.-F lb) lbEOFReached 1)
+      (when [a (sysxCall "caml_lex_engine" tables r lb)] (!= a 1)
+        ^{:go/via [common]} (.Fatalf t "after refill: %v" a)))))
+
+
+
+^{:go/end 687} (go/func TestParseEngine [^{:tag (* testing/T)} t]
+  (let [fields (strings/Fields parseTablesHex)
+      ^{:line 566 :tag (array 11 (* Bytes))} ts (zero (array 11 (* Bytes)))]
+    (range [i ts]
+      (aset ts i (fromHex (aget fields i))))
+
+    (let [^int size (zero int)
+        (values ^string tc ^string tb) (zero string)]
+      (fmt/Sscanf parseSizes "%d %s %s" (addr size) (addr tc) (addr tb))
+      (let [arr ^{:go/end 580} (fn ^Value [^string s]
+            (let [b (addr (lit Block :Tag 0))]
+              (range [_ x (strings/Split s ",")]
+                (let [(values n _) (strconv/Atoi x)]
+                  (set! (.-F b) (append (.-F b) n))))
+
+              ^{:line 579} b))
+
+          ^{:line 581} tables (addr (lit Block :Tag 0 :F ^{:go/breaks [15]} (lit (slice Value)
+                (addr (lit Block :Tag 0)) (arr tc) (arr tb) (aget ts 0) (aget ts 1) (aget ts 2) (aget ts 3) (aget ts 4) (aget ts 5) (aget ts 6) size (aget ts 7) (aget ts 8)
+                0 (aget ts 9) (aget ts 10))))]
+
+        (let-type [token (struct
+              ^{:line 586 :tag int} tag ; -1 for constants
+              ^{:line 587 :tag int} v)]
+
+          (let [
+              (values ^:const ^{:val 0} plus ^:const ^{:val 1} times ^:const ^{:val 2} lp ^:const ^{:val 3} rp ^:const ^{:val 4} eof) (values 0 1 2 3 4)
+
+              ^{:line 592} mk ^{:go/end 602} (fn ^{:tag (slice Value)} [& ^{:tag (slice int)} vs] ; positive: constants as 100+k, negative -n: INT n
+                (let [^{:tag (slice Value)} out (zero (slice Value))]
+                  (range [_ v vs]
+                    (if (>= v 100)
+                      (set! out (append out (- v 100)))
+
+                      (set! out (append out (addr (lit Block :Tag 0 :F (lit (slice Value) v)))))))
+
+
+                  ^{:line 601} out))
+
+              (values P T L R E) (values (+ 100 plus) (+ 100 times) (+ 100 lp) (+ 100 rp) (+ 100 eof))
+              ^{:line 604} cases (lit (slice (slice Value))
+                (mk 1 P 2 T 3 E)
+                (mk L 1 P 2 R T 3 E)
+                (mk 1 P E)
+                (mk L P R E)
+                (mk L 1 P R P 5 E)
+                (mk 7 8 E)
+                (mk L L L L L 4 R R R R R E))]
+
+            (range [ci toks cases]
+              (let [newStack ^{:go/end 620} (fn ^{:tag (* Block)} [^int n ^{:tag (func [] [Value])} f]
+                    (let [b (addr (lit Block :Tag 0 :F (make (slice Value) n)))]
+                      (range [i (.-F b)]
+                        (aset (.-F b) i (f)))
+
+                      ^{:line 619} b))
+
+                  ^{:line 621} env (addr (lit Block :Tag 0 :F (make (slice Value) 16)))]
+                (aset (.-F env) peSStack (newStack 100 ^{:go/end 622} (fn ^Value [] 0)))
+                (aset (.-F env) peVStack (newStack 100 ^{:go/end 623} (fn ^Value [] 0)))
+                (aset (.-F env) peSymbStartStack (newStack 100 ^{:go/end 624} (fn ^Value [] 0)))
+                (aset (.-F env) peSymbEndStack (newStack 100 ^{:go/end 625} (fn ^Value [] 0)))
+                (range [_ i (lit (slice int) peSymbStart peSymbEnd peAsp peRuleLen peRuleNumber peSp peState peErrflag peLval)]
+                  (aset (.-F env) i 0))
+
+                (aset (.-F env) peStacksize 100)
+                (aset (.-F env) peStackbase 1)
+                (aset (.-F env) peCurrChar 1) ; start: the entry point's token code
+                (let [(values cmd arg) (values pStart (conv Value 0))
+                    ^{:line 633} result ""]
+                  (for [steps 0] _ (inc! steps)
+                    (when (> steps 10000)
+                      ^{:go/via [common]} (.Fatal t "parser loops"))
+
+                    (let [out (assert int (sysxCall "caml_parse_engine" tables env cmd arg))]
+                      (switch out
+                        (case [pReadToken]
+                          (set! arg 0)
+                          (if (> (len toks) 0)
+                            (set! (values arg toks) (values (aget toks 0) (subslice toks 1)))
+
+                            (set! arg eof))
+
+                          (set! cmd pTokenRead))
+                        (case [pRaiseParseError]
+                          (set! result "parse_error"))
+                        (case [pGrowStacks1 pGrowStacks2]
+                          ^{:go/via [common]} (.Fatal t "stack growth not expected"))
+                        (case [pCallErrorFunction]
+                          (set! (values cmd arg) (values pErrorDetected 0)))
+                        (case [pComputeSemanticAction]
+                          (let [asp (assert int (aget (.-F env) peAsp))
+                              ^{:line 656} v (.-F (assert (* Block) (aget (.-F env) peVStack)))
+                              ^{:line 657} peek ^{:go/end 657} (fn ^int [^int n] (assert int (aget v (- asp n))))
+                              ^{:line 658 :tag int} val (zero int)]
+                            (switch (assert int (aget (.-F env) peRuleNumber))
+                              (case [1]
+                                (set! val (peek 1)))
+                              (case [2]
+                                (set! val (peek 0)))
+                              (case [3]
+                                (set! val (+ (peek 2) (peek 0))))
+                              (case [4]
+                                (set! val (* (peek 2) (peek 0))))
+                              (case [5]
+                                (set! val (peek 1)))
+                              (case [6]
+                                (set! val -1))
+                              (case [7]
+                                (set! result (strconv/Itoa (peek 0))))
+                              (default
+                                ^{:go/via [common]} (.Fatal t "rule")))
+
+                            (set! (values cmd arg) (values pSemanticActionComputed val)))))
+
+                      (when (!= result "")
+                        (break))))
+
+
+                  (when (!= result (aget parseResults ci))
+                    ^{:go/via [common]} (.Fatalf t "case %d: got %s, OCaml gave %s" ci result (aget parseResults ci))))))))))))

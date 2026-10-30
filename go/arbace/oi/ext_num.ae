@@ -1,0 +1,938 @@
+(in-ns 'go.arbace.oi) (go/file "ext_num.go" :imports [
+
+    ;; The externals for numbers: runtime/ints.c, runtime/floats.c.
+
+
+    ^{:line 6} [math "math"]
+    ^{:line 7} [bits "math/bits"]
+    ^{:line 8} [strconv "strconv"]
+    ^{:line 9} [strings "strings"]])
+
+
+
+(go/type cspec "cspec is a parsed C printf conversion specification.\n" (struct
+    ^{:line 14 :tag bool} minus ^bool plus ^bool space ^bool alt ^bool zero
+    ^{:line 15 :tag int} width ^int prec ; prec -1: none
+    ^{:line 16 :tag byte} conv))
+
+
+
+
+
+^{:go/end 61} (go/func parseCSpec "parseCSpec parses the specification starting after the '%' at s[i], skipping the length\nmodifiers (OCaml's l, n, L and C's h, ll) as ints.c's parse_format does. It returns the\nspecification and the index after the conversion letter.\n" [^string s ^int i] :results [cspec int]
+  (let [sp (lit cspec :prec -1)]
+    (label :loop
+      (for [] (< i (len s)) (inc! i)
+        (switch (aget s i)
+          (case [\-]
+            (set! (.-minus sp) true))
+          (case [\+]
+            (set! (.-plus sp) true))
+          (case [\space]
+            (set! (.-space sp) true))
+          (case [\#]
+            (set! (.-alt sp) true))
+          (case [\0]
+            (set! (.-zero sp) true))
+          (default
+            (break :loop)))))
+
+
+    (while (and (< i (len s)) (>= (aget s i) \0) (<= (aget s i) \9))
+      (set! (.-width sp) (+ (* (.-width sp) 10) (conv int (- (aget s i) \0))))
+      (inc! i))
+
+    (when (and (< i (len s)) (== (aget s i) \.))
+      (inc! i)
+      (set! (.-prec sp) 0)
+      (while (and (< i (len s)) (>= (aget s i) \0) (<= (aget s i) \9))
+        (set! (.-prec sp) (+ (* (.-prec sp) 10) (conv int (- (aget s i) \0))))
+        (inc! i)))
+
+
+    (while (and (< i (len s)) (>= (strings/IndexByte "lnLhqjzt" (aget s i)) 0))
+      (inc! i))
+
+    (when (< i (len s))
+      (set! (.-conv sp) (aget s i))
+      (inc! i))
+
+    (return sp i)))
+
+
+
+^{:go/end 77} (go/method pad "pad applies the width: sign/prefix, then digits, zero padded when asked.\n" ^string [^cspec sp ^string prefix ^string body ^bool zeroOK]
+  (let [n (+ (len prefix) (len body))]
+    (when (>= n (.-width sp))
+      (return (+ prefix body)))
+
+    (let [k (- (.-width sp) n)]
+      (switch
+        (case [(.-minus sp)]
+          (return (+ prefix body (strings/Repeat " " k))))
+        (case [(and (.-zero sp) zeroOK)]
+          (return (+ prefix (strings/Repeat "0" k) body))))
+
+      (+ (strings/Repeat " " k) prefix body))))
+
+
+
+^{:go/end 129} (go/func formatCInt "formatCInt is C's printf of an integer conversion (d i u x X o c) of the value neg/mag.\n" ^string [^cspec sp ^bool neg ^uint64 mag]
+  (let [(values ^string body ^string prefix) (zero string)]
+    (switch (.-conv sp)
+      (case [\d \i]
+        (set! body (strconv/FormatUint mag 10))
+        (switch
+          (case [neg]
+            (set! prefix "-"))
+          (case [(.-plus sp)]
+            (set! prefix "+"))
+          (case [(.-space sp)]
+            (set! prefix " "))))
+
+      (case [\u]
+        (set! body (strconv/FormatUint mag 10)))
+      (case [\x]
+        (set! body (strconv/FormatUint mag 16)))
+      (case [\X]
+        (set! body (strings/ToUpper (strconv/FormatUint mag 16))))
+      (case [\o]
+        (set! body (strconv/FormatUint mag 8)))
+      (case [\c]
+        (return (.pad sp "" (conv string (lit (slice byte) (conv byte mag))) false)))
+      (default
+        (Failwith "format_int: bad format")))
+
+    (when (and (== (.-prec sp) 0) (== mag 0))
+      (set! body ""))
+
+    (when (> (.-prec sp) (len body))
+      (set! body (+ (strings/Repeat "0" (- (.-prec sp) (len body))) body)))
+
+    (when (.-alt sp)
+      (switch (.-conv sp)
+        (case [\x]
+          (when (!= mag 0)
+            (set! prefix "0x")))
+
+        (case [\X]
+          (when (!= mag 0)
+            (set! prefix "0X")))
+
+        (case [\o]
+          (when (not (strings/HasPrefix body "0"))
+            (set! body (+ "0" body))))))
+
+
+
+    (.pad sp prefix body (< (.-prec sp) 0))))
+
+
+
+
+
+^{:go/end 166} (go/func formatInteger "formatInteger is caml_alloc_sprintf(format, arg) for the integer formats of ints.c: signed\nis the value as a signed integer, bitsN its width (the unsigned conversions see it as that\nmany bits; for the tagged int, 63).\n" ^{:tag (* Bytes)} [^string format ^int64 signed ^int nbits]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (for [i 0] (< i (len format)) _
+      (let [c (aget format i)]
+        (when (!= c \%)
+          (.WriteByte sb c)
+          (inc! i)
+          (continue))
+
+        (when (and (< (+ i 1) (len format)) (== (aget format (+ i 1)) \%))
+          (.WriteByte sb \%)
+          (set! i + 2)
+          (continue))
+
+        (let [(values sp j) (parseCSpec format (+ i 1))]
+          (set! i j)
+          (switch (.-conv sp)
+            (case [\u \x \X \o]
+              (let [u (conv uint64 signed)]
+                (when (< nbits 64)
+                  (set! u bit-and (- ^uint64 (<< 1 (conv uint nbits)) 1)))
+
+                (.WriteString sb (formatCInt sp false u))))
+            (default
+              (if (< signed 0)
+                (.WriteString sb (formatCInt sp true (conv uint64 (- signed))))
+
+                (.WriteString sb (formatCInt sp false (conv uint64 signed)))))))))
+
+
+
+    (Str (.String sb))))
+
+
+
+^{:go/end 242} (go/func formatCFloat "formatCFloat is C's printf of one floating conversion (f F e E g G a A) of d.\n" ^string [^cspec sp ^float64 d]
+  (let [neg (math/Signbit d)
+      ^{:line 171} abs (math/Abs d)
+      ^{:line 172 :tag string} prefix (zero string)]
+    (switch
+      (case [neg]
+        (set! prefix "-"))
+      (case [(.-plus sp)]
+        (set! prefix "+"))
+      (case [(.-space sp)]
+        (set! prefix " ")))
+
+    (let [upper (or (== (.-conv sp) \F) (== (.-conv sp) \E) (== (.-conv sp) \G) (== (.-conv sp) \A))]
+      (when (or (math/IsInf d 0) (math/IsNaN d))
+        (let [body "inf"]
+          (when (math/IsNaN d)
+            (set! body "nan"))
+
+          (when upper
+            (set! body (strings/ToUpper body)))
+
+          (return (.pad sp prefix body false))))
+
+      (let [prec (.-prec sp)
+          ^{:line 193 :tag string} body (zero string)]
+        (switch (.-conv sp)
+          (case [\f \F]
+            (when (< prec 0)
+              (set! prec 6))
+
+            (set! body (strconv/FormatFloat abs \f prec 64))
+            (when (and (== prec 0) (.-alt sp))
+              (set! body + ".")))
+
+          (case [\e \E]
+            (when (< prec 0)
+              (set! prec 6))
+
+            (set! body (cExp abs prec (.-alt sp))))
+          (case [\g \G]
+            (when (< prec 0)
+              (set! prec 6))
+
+            (when (== prec 0)
+              (set! prec 1))
+
+            (let [e (strconv/FormatFloat abs \e (- prec 1) 64)
+                (values x _) (strconv/Atoi (subslice e (+ (strings/IndexByte e \e) 1)))]
+              (if (or (< x -4) (>= x prec)) (do
+                  (set! body (cExp abs (- prec 1) (.-alt sp)))
+                  (when (not (.-alt sp))
+                    (let [k (strings/IndexByte body \e)]
+                      (set! body (+ (stripZeros (subslice body _ k)) (subslice body k))))))
+
+                (do
+                  (set! body (strconv/FormatFloat abs \f (- prec 1 x) 64))
+                  (if (.-alt sp)
+                    (when (not (strings/Contains body "."))
+                      (set! body + "."))
+
+
+                    (set! body (stripZeros body)))))))
+
+
+          (case [\a \A]
+            (set! body (cHexFloat abs prec (.-alt sp))))
+          (default
+            (Failwith "format_float: bad format")))
+
+        (when upper
+          (set! body (strings/ToUpper body)))
+
+        (.pad sp prefix body true)))))
+
+
+
+^{:go/end 251} (go/func stripZeros "stripZeros removes trailing zeros of a fraction, and a bare point.\n" ^string [^string s]
+  (when (strings/Contains s ".")
+    (set! s (strings/TrimRight s "0"))
+    (set! s (strings/TrimSuffix s ".")))
+
+  ^{:line 250} s)
+
+
+
+^{:go/end 261} (go/func cExp "cExp is %e of a non-negative finite number: Go's 'e' format has C's two-digit exponent.\n" ^string [^float64 abs ^int prec ^bool alt]
+  (let [s (strconv/FormatFloat abs \e prec 64)]
+    (when (and (== prec 0) alt)
+      (let [k (strings/IndexByte s \e)]
+        (set! s (+ (subslice s _ k) "." (subslice s k)))))
+
+    ^{:line 260} s))
+
+
+
+^{:go/end 311} (go/func cHexFloat "cHexFloat is glibc's %a of a non-negative finite number.\n" ^string [^float64 abs ^int prec ^bool alt]
+  (let [b (math/Float64bits abs)
+      ^{:line 266} exp (conv int (bit-and (>> b 52) 0x7ff))
+      ^{:line 267} m (bit-and b (- (<< 1 52) 1))]
+    (if (== exp 0)
+      (when (!= m 0)
+        (set! exp -1022))
+
+      (do
+        (set! exp - 1023)
+        (set! m bit-or (<< 1 52))))
+
+    (when (and (>= prec 0) (< prec 13))
+      (let [i (conv uint (- 52 (* prec 4)))
+          ^{:line 278} unit (<< (conv uint64 1) i)
+          ^{:line 279} half (>> unit 1)
+          ^{:line 280} frac (bit-and m (- unit 1))]
+        (set! m bit-and-not (- unit 1))
+        (when (or (> frac half) ^:go/paren (and (== frac half) (!= (bit-and m unit) 0)))
+          (set! m + unit))))
+
+
+    (let [^strings/Builder sb (zero strings/Builder)]
+      (.WriteString sb "0x")
+      (.WriteByte sb (conv byte (+ \0 (>> m 52))))
+      (set! m (bit-and (<< m 4) (- (<< 1 56) 1)))
+      (let [n prec
+          ^{:line 291} digits ^{:go/end 296} (fn ^bool []
+            (when (>= n 0)
+              (return (> n 0)))
+
+            (!= m 0))]
+
+        (when (or (digits) alt)
+          (.WriteByte sb \.))
+
+        (while (digits)
+          (.WriteByte sb (aget "0123456789abcdef" (>> m 52)))
+          (set! m (bit-and (<< m 4) (- (<< 1 56) 1)))
+          (dec! n))
+
+        (.WriteString sb "p")
+        (when (>= exp 0)
+          (.WriteString sb "+"))
+
+        (.WriteString sb (strconv/Itoa exp))
+        (.String sb)))))
+
+
+
+^{:go/end 333} (go/func formatFloatC "formatFloatC is caml_alloc_sprintf(format, d) of floats.c's caml_format_float.\n" ^{:tag (* Bytes)} [^string format ^float64 d]
+  (let [^strings/Builder sb (zero strings/Builder)]
+    (for [i 0] (< i (len format)) _
+      (let [c (aget format i)]
+        (when (!= c \%)
+          (.WriteByte sb c)
+          (inc! i)
+          (continue))
+
+        (when (and (< (+ i 1) (len format)) (== (aget format (+ i 1)) \%))
+          (.WriteByte sb \%)
+          (set! i + 2)
+          (continue))
+
+        (let [(values sp j) (parseCSpec format (+ i 1))]
+          (set! i j)
+          (.WriteString sb (formatCFloat sp d)))))
+
+    (Str (.String sb))))
+
+
+
+^{:go/end 359} (go/func hexstringOfFloat "hexstringOfFloat is caml_hexstring_of_float.\n" ^{:tag (* Bytes)} [^float64 d ^int prec ^int style]
+  (let [b (math/Float64bits d)
+      ^{:line 338 :tag strings/Builder} sb (zero strings/Builder)]
+    (if (!= (>> b 63) 0)
+      (.WriteByte sb \-)
+
+      (switch style
+        (case [\+]
+          (.WriteByte sb \+))
+        (case [\space]
+          (.WriteByte sb \space))))
+
+
+    (when (== (bit-and (>> b 52) 0x7ff) 0x7ff)
+      (if (== (bit-and b (- (<< 1 52) 1)) 0)
+        (.WriteString sb "infinity")
+
+        (.WriteString sb "nan"))
+
+      (return (Str (.String sb))))
+
+    (.WriteString sb (cHexFloat (math/Abs d) prec false))
+    (Str (.String sb))))
+
+
+;; ---- parsing
+
+^{:go/breaks [[4 372]] :go/end 373} (go/func parseDigit ^int [^byte c]
+  (switch
+    (case [(and (>= c \0) (<= c \9))]
+      (return (conv int (- c \0))))
+    (case [(and (>= c \A) (<= c \F))]
+      (return (+ (conv int (- c \A)) 10)))
+    (case [(and (>= c \a) (<= c \f))]
+      (return (+ (conv int (- c \a)) 10))))
+
+  -1)
+
+
+
+^{:go/end 446} (go/func parseIntnat "parseIntnat is ints.c's parse_intnat.\n" ^int64 [^string s ^int nbits ^string errmsg]
+  (let [at ^{:go/breaks [[3 381]] :go/end 382} (fn ^byte [^int i]
+        (when (< i (len s))
+          (return (aget s i)))
+
+        0)
+
+      ^{:line 383} p 0
+      ^{:line 384} sign 1]
+    (cond (== (at p) \-) (do
+        (set! sign -1)
+        (inc! p))
+      (== (at p) \+)
+      (inc! p))
+
+    (let [(values base signedness) (values (conv uint64 10) true)]
+      (when (== (at p) \0)
+        (switch (at (+ p 1))
+          (case [\x \X]
+            (set! (values base signedness p) (values 16 false (+ p 2))))
+          (case [\o \O]
+            (set! (values base signedness p) (values 8 false (+ p 2))))
+          (case [\b \B]
+            (set! (values base signedness p) (values 2 false (+ p 2))))
+          (case [\u \U]
+            (set! (values signedness p) (values false (+ p 2))))))
+
+
+      (let [threshold (/ math/MaxUint64 base)
+          ^{:line 405} d (parseDigit (at p))]
+        (when (or (< d 0) (>= (conv uint64 d) base))
+          (Failwith errmsg))
+
+        (let [res (conv uint64 d)]
+          (for [(inc! p)] _ (inc! p)
+            (let [c (at p)]
+              (when (and (== c \_) (< p (len s)))
+                (continue))
+
+              (set! d (parseDigit c))
+              (when (or (< d 0) (>= (conv uint64 d) base) (>= p (len s)))
+                (break))
+
+              (when (> res threshold)
+                (Failwith errmsg))
+
+              (set! res (+ (* base res) (conv uint64 d)))
+              (when (< res (conv uint64 d))
+                (Failwith errmsg))))
+
+
+          (when (!= p (len s))
+            (Failwith errmsg))
+
+          (cond signedness
+            (let [lim (<< (conv uint64 1) (conv uint (- nbits 1)))]
+              (cond (>= sign 0)
+                (when (>= res lim)
+                  (Failwith errmsg))
+
+                (> res lim)
+                (Failwith errmsg)))
+
+            (and (< nbits 64) (>= res (<< (conv uint64 1) (conv uint nbits))))
+            (Failwith errmsg))
+
+          (when (< sign 0)
+            (return (- (conv int64 res))))
+
+          (conv int64 res))))))
+
+
+
+^{:go/end 542} (go/func floatOfHex "floatOfHex is floats.c's caml_float_of_hex over s (after \"0x\"); ok false on malformed.\n" [^string s] :results [float64 bool]
+  (let [^int64 m (zero int64)
+      (values nBits mBits xBits) (values 0 0 0)
+      ^{:line 452} decPoint -1
+      ^{:line 453} exp 0]
+    (for [i 0] (< i (len s)) _
+      (let [c (aget s i)]
+        (inc! i)
+        (switch c
+          (case [\.]
+            (when (>= decPoint 0)
+              (return 0 false))
+
+            (set! decPoint nBits))
+          (case [\p \P]
+            (let [rest (subslice s i)]
+              (when (== rest "")
+                (return 0 false))
+
+              ;; strtol: optional white space, sign, digits; must consume all.
+              (let [k 0]
+                (while (and (< k (len rest)) ^:go/paren (or (== (aget rest k) \space) ^:go/paren (and (>= (aget rest k) \tab) (<= (aget rest k) \return))))
+                  (inc! k))
+
+                (let [st k]
+                  (when (and (< k (len rest)) ^:go/paren (or (== (aget rest k) \+) (== (aget rest k) \-)))
+                    (inc! k))
+
+                  (let [ds k]
+                    (while (and (< k (len rest)) (>= (aget rest k) \0) (<= (aget rest k) \9))
+                      (inc! k))
+
+                    (when (or (== k ds) (!= k (len rest)))
+                      (return 0 false))
+
+                    (let [(values e err) (strconv/ParseInt (subslice rest st k) 10 64)]
+                      (when (!= err nil)
+                        (if (== (aget rest st) \-)
+                          (set! e math/MinInt64)
+
+                          (set! e math/MaxInt64)))
+
+
+                      (cond (<= e math/MinInt32)
+                        (return 0 true)
+                        (>= e math/MaxInt32) (do
+                          (when (== m 0)
+                            (return 0 true))
+
+                          (return (math/Inf 1) true)))
+
+                      (set! exp (conv int e))
+                      (set! i (len s))))))))
+          (default
+            (let [d (parseDigit c)]
+              (when (< d 0)
+                (return 0 false))
+
+              (set! nBits + 4)
+              (when (and (== d 0) (== m 0))
+                (break))
+
+              (if (< mBits 60) (do
+                  (set! m (+ (<< m 4) (conv int64 d)))
+                  (set! mBits + 4))
+                (do
+                  (when (!= d 0)
+                    (set! m bit-or 1))
+
+                  (set! xBits + 4))))))))
+
+
+
+    (when (== nBits 0)
+      (return 0 false))
+
+    (let [f (conv float64 m)
+        ^{:line 526} adj xBits]
+      (when (>= decPoint 0)
+        (set! adj + (- decPoint nBits)))
+
+      (switch
+        (case [(and (> adj 0) (> exp (- math/MaxInt32 adj)))]
+          (set! exp math/MaxInt32))
+        (case [(and (< adj 0) (< exp (- math/MinInt32 adj)))]
+          (set! exp math/MinInt32))
+        (default
+          (set! exp + adj)))
+
+      (when (!= exp 0)
+        (set! f (math/Ldexp f exp)))
+
+      (return f true))))
+
+
+
+
+^{:go/end 617} (go/func strtodAll "strtodAll is strtod's parse of the whole of s (decimal, inf, infinity, nan, nan(chars)),\nwith leading white space allowed; ok false when strtod would stop before the end.\n" [^string s] :results [float64 bool]
+  (let [i 0]
+    (while (and (< i (len s)) ^:go/paren (or (== (aget s i) \space) ^:go/paren (and (>= (aget s i) \tab) (<= (aget s i) \return))))
+      (inc! i))
+
+    (let [t (subslice s i)
+        ^{:line 552} body t]
+      (when (and (!= body "") ^:go/paren (or (== (aget body 0) \+) (== (aget body 0) \-)))
+        (set! body (subslice body 1)))
+
+      (let [low (strings/ToLower body)]
+        (switch
+          (case [(or (== low "inf") (== low "infinity"))])
+          (case [(strings/HasPrefix low "nan")]
+            (let [rest (subslice low 3)]
+              (when (!= rest "")
+                (when (or (!= (aget rest 0) \() (!= (aget rest (- (len rest) 1)) \)))
+                  (return 0 false))
+
+                (range [_ c (subslice rest 1 (- (len rest) 1))]
+                  (when (not (or (== c \_) (and (>= c \0) (<= c \9)) (and (>= c \a) (<= c \z))))
+                    (return 0 false))))
+
+
+
+              (when (== (aget t 0) \-)
+                (return (math/Copysign (math/NaN) -1) true))
+
+              (return (math/NaN) true)))
+          (default
+            (let [k 0
+                ^{:line 577} nd 0]
+              (while (and (< k (len body)) (>= (aget body k) \0) (<= (aget body k) \9))
+                (inc! k)
+                (inc! nd))
+
+              (when (and (< k (len body)) (== (aget body k) \.))
+                (inc! k)
+                (while (and (< k (len body)) (>= (aget body k) \0) (<= (aget body k) \9))
+                  (inc! k)
+                  (inc! nd)))
+
+
+              (when (== nd 0)
+                (return 0 false))
+
+              (when (and (< k (len body)) ^:go/paren (or (== (aget body k) \e) (== (aget body k) \E)))
+                (inc! k)
+                (when (and (< k (len body)) ^:go/paren (or (== (aget body k) \+) (== (aget body k) \-)))
+                  (inc! k))
+
+                (let [ed 0]
+                  (while (and (< k (len body)) (>= (aget body k) \0) (<= (aget body k) \9))
+                    (inc! k)
+                    (inc! ed))
+
+                  (when (== ed 0)
+                    (return 0 false))))
+
+
+              (when (!= k (len body))
+                (return 0 false)))))
+
+
+        (let [(values f err) (strconv/ParseFloat t 64)]
+          (when (!= err nil)
+            (when [(values ne ok) (assert (* strconv/NumError) err)] (or (not ok) (!= (.-Err ne) strconv/ErrRange))
+              (return 0 false)))
+
+
+          (return f true))))))
+
+
+
+^{:go/end 648} (go/func floatOfString "floatOfString is caml_float_of_string.\n" ^float64 [^string s]
+  (set! s (strings/ReplaceAll s "_" ""))
+  (when (== s "")
+    (Failwith "float_of_string"))
+
+  (let [src s
+      ^{:line 626} sign 1.0]
+    (cond (== (aget src 0) \-) (do
+        (set! sign -1)
+        (set! src (subslice src 1)))
+      (== (aget src 0) \+)
+      (set! src (subslice src 1)))
+
+    (when (and (>= (len src) 2) (== (aget src 0) \0) ^:go/paren (or (== (aget src 1) \x) (== (aget src 1) \X)))
+      (let [(values d ok) (floatOfHex (subslice src 2))]
+        (when (not ok)
+          (Failwith "float_of_string"))
+
+        (return (* sign d))))
+
+    (when (>= (strings/IndexByte s 0) 0)
+      (Failwith "float_of_string"))
+
+    (let [(values d ok) (strtodAll s)]
+      (when (not ok)
+        (Failwith "float_of_string"))
+
+      ^{:line 647} d)))
+
+
+;; ---- conversions with C's amd64 semantics
+
+^{:go/end 657} (go/func f2i32 ^int32 [^float64 f]
+  (when (or (math/IsNaN f) (>= f 2147483648) (<= f -2147483649))
+    (return math/MinInt32))
+
+  (conv int32 f))
+
+
+^{:go/end 664} (go/func f2i64 ^int64 [^float64 f]
+  (when (or (math/IsNaN f) (>= f 9223372036854775807.0M) (< f -9223372036854775808.0M))
+    (return math/MinInt64))
+
+  (conv int64 f))
+
+
+^{:go/breaks [[4 670]] :go/end 671} (go/func b2i ^int [^bool b]
+  (when b
+    (return 1))
+
+  0)
+
+
+^{:go/end 673} (go/func cmp3 :type-params [^{:tag (| int int32 int64 Nativeint)} T] ^int [^T x ^:go/grouped ^T y] (- (b2i (> x y)) (b2i (< x y))))
+
+^{:go/end 939} (go/func init []
+  (let [r RegisterExt]
+
+    ;; formatting (ints.c, floats.c)
+    (r "caml_format_int" ^{:go/end 682} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (let [x (AsInt (aget a 1))]
+          (formatInteger (GoString (aget a 0)) (conv int64 x) 63))))
+
+    (r "caml_int32_format" ^{:go/end 683} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (formatInteger (GoString (aget a 0)) (conv int64 (assert int32 (aget a 1))) 32)))
+    (r "caml_int64_format" ^{:go/end 684} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (formatInteger (GoString (aget a 0)) (assert int64 (aget a 1)) 64)))
+    (r "caml_nativeint_format" ^{:go/end 687} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (formatInteger (GoString (aget a 0)) (conv int64 (assert Nativeint (aget a 1))) 64)))
+
+    (r "caml_format_float" ^{:go/end 688} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (formatFloatC (GoString (aget a 0)) (AsFloat (aget a 1)))))
+    (r "caml_hexstring_of_float" ^{:go/end 691} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (hexstringOfFloat (AsFloat (aget a 0)) (AsInt (aget a 1)) (AsInt (aget a 2)))))
+
+
+    ;; parsing (ints.c, floats.c)
+    (r "caml_int_of_string" ^{:go/end 696} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (Int (conv int (parseIntnat (GoString (aget a 0)) 63 "int_of_string")))))
+
+    (r "caml_int32_of_string" ^{:go/end 699} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (conv int32 (parseIntnat (GoString (aget a 0)) 32 "Int32.of_string"))))
+
+    (r "caml_int64_of_string" ^{:go/end 700} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (parseIntnat (GoString (aget a 0)) 64 "Int64.of_string")))
+    (r "caml_nativeint_of_string" ^{:go/end 703} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+        (conv Nativeint (parseIntnat (GoString (aget a 0)) 64 "Nativeint.of_string"))))
+
+    (r "caml_float_of_string" ^{:go/end 704} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (floatOfString (GoString (aget a 0)))))
+
+    ;; float arithmetic and comparison (floats.c)
+    (let [f1 ^{:go/end 709} (fn [^string name ^{:tag (func [float64] [float64])} f]
+          (r name ^{:go/end 708} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (f (AsFloat (aget a 0))))))
+
+        ^{:line 710} f2 ^{:go/end 712} (fn [^string name ^{:tag (func [^float64 x ^float64 y] [float64])} f]
+          (r name ^{:go/end 711} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (f (AsFloat (aget a 0)) (AsFloat (aget a 1))))))
+
+        ^{:line 713} fc ^{:go/end 715} (fn [^string name ^{:tag (func [^float64 x ^float64 y] [bool])} f]
+          (r name ^{:go/end 714} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (f (AsFloat (aget a 0)) (AsFloat (aget a 1)))))))]
+
+      (f1 "caml_neg_float" ^{:go/end 716} (fn ^float64 [^float64 x] (- x)))
+      (f1 "caml_abs_float" math/Abs)
+      (f2 "caml_add_float" ^{:go/end 718} (fn ^float64 [^float64 x ^float64 y] (+ x y)))
+      (f2 "caml_sub_float" ^{:go/end 719} (fn ^float64 [^float64 x ^float64 y] (- x y)))
+      (f2 "caml_mul_float" ^{:go/end 720} (fn ^float64 [^float64 x ^float64 y] (* x y)))
+      (f2 "caml_div_float" ^{:go/end 721} (fn ^float64 [^float64 x ^float64 y] (/ x y)))
+      (fc "caml_eq_float" ^{:go/end 722} (fn ^bool [^float64 x ^float64 y] (== x y)))
+      (fc "caml_neq_float" ^{:go/end 723} (fn ^bool [^float64 x ^float64 y] (!= x y)))
+      (fc "caml_lt_float" ^{:go/end 724} (fn ^bool [^float64 x ^float64 y] (< x y)))
+      (fc "caml_le_float" ^{:go/end 725} (fn ^bool [^float64 x ^float64 y] (<= x y)))
+      (fc "caml_gt_float" ^{:go/end 726} (fn ^bool [^float64 x ^float64 y] (> x y)))
+      (fc "caml_ge_float" ^{:go/end 727} (fn ^bool [^float64 x ^float64 y] (>= x y)))
+      (r "caml_float_compare" ^{:go/end 728} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (CompareFloats (AsFloat (aget a 0)) (AsFloat (aget a 1)))))
+      (r "caml_int_of_float" ^{:go/end 729} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (FloatToInt (AsFloat (aget a 0)))))
+      (r "caml_float_of_int" ^{:go/end 730} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv float64 (AsInt (aget a 0)))))
+      (f1 "caml_exp_float" math/Exp)
+      (f1 "caml_exp2_float" math/Exp2)
+      (f1 "caml_trunc_float" math/Trunc)
+      (f1 "caml_round_float" math/Round)
+      (f1 "caml_floor_float" math/Floor)
+      (f1 "caml_ceil_float" math/Ceil)
+      (f2 "caml_nextafter_float" math/Nextafter)
+      (r "caml_fma_float" ^{:go/end 738} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (math/FMA (AsFloat (aget a 0)) (AsFloat (aget a 1)) (AsFloat (aget a 2)))))
+      (f2 "caml_fmod_float" math/Mod)
+      (r "caml_frexp_float" ^{:go/end 743} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [(values f e) (math/Frexp (AsFloat (aget a 0)))]
+            (Tuple f e))))
+
+      (r "caml_ldexp_float" ^{:go/end 744} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (math/Ldexp (AsFloat (aget a 0)) (AsInt (aget a 1)))))
+      (r "caml_modf_float" ^{:go/end 757} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [x (AsFloat (aget a 0))
+              (values ^float64 i ^float64 f) (zero float64)]
+            (switch
+              (case [(math/IsInf x 0)]
+                (set! (values i f) (values x (math/Copysign 0 x))))
+              (case [(math/IsNaN x)]
+                (set! (values i f) (values x x)))
+              (default
+                (set! (values i f) (math/Modf x))))
+
+            (Tuple f i))))
+
+      (f1 "caml_log_float" math/Log)
+      (f1 "caml_log10_float" math/Log10)
+      (f1 "caml_log2_float" math/Log2)
+      (f1 "caml_sqrt_float" math/Sqrt)
+      (f1 "caml_cbrt_float" math/Cbrt)
+      (f2 "caml_power_float" math/Pow)
+      (f1 "caml_sin_float" math/Sin)
+      (f1 "caml_sinh_float" math/Sinh)
+      (f1 "caml_cos_float" math/Cos)
+      (f1 "caml_cosh_float" math/Cosh)
+      (f1 "caml_tan_float" math/Tan)
+      (f1 "caml_tanh_float" math/Tanh)
+      (f1 "caml_asin_float" math/Asin)
+      (f1 "caml_asinh_float" math/Asinh)
+      (f1 "caml_acos_float" math/Acos)
+      (f1 "caml_acosh_float" math/Acosh)
+      (f1 "caml_atan_float" math/Atan)
+      (f1 "caml_atanh_float" math/Atanh)
+      (f2 "caml_atan2_float" math/Atan2)
+      (f2 "caml_hypot_float" math/Hypot)
+      (f1 "caml_expm1_float" math/Expm1)
+      (f1 "caml_log1p_float" math/Log1p)
+      (f1 "caml_erf_float" math/Erf)
+      (f1 "caml_erfc_float" math/Erfc)
+      (f2 "caml_copysign_float" math/Copysign)
+      (r "caml_signbit_float" ^{:go/end 783} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Bool (math/Signbit (AsFloat (aget a 0))))))
+      (r "caml_classify_float" ^{:go/end 797} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          ^{:go/breaks [[3 796]]} (let [x (AsFloat (aget a 0))]
+            (switch
+              (case [(math/IsNaN x)]
+                (return 4))
+              (case [(math/IsInf x 0)]
+                (return 3))
+              (case [(== x 0)]
+                (return 2))
+              (case [(< (math/Abs x) 1/44942328371557897693232629769725618340449424473557664318357520289433168951375240783177119330601884005280028469967848339414697442203604155623211857659868531094441973356216371319075554900311523529863270738021251442209537670585615720368478277635206809290837627671146574559986811484619929076208839082406056034304)]
+                (return 1)))
+
+            0)))
+
+
+      ;; ints.c: the tagged int
+      (r "caml_int_compare" ^{:go/end 800} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (^{:inst [int]} cmp3 (AsInt (aget a 0)) (AsInt (aget a 1)))))
+      (r "caml_bswap16" ^{:go/end 804} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [x (AsInt (aget a 0))]
+            (Int (bit-or (<< (bit-and x 0xFF) 8) (>> (bit-and x 0xFF00) 8))))))
+
+
+      ;; ints.c: int32
+      (r "caml_int32_neg" ^{:go/end 807} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (- (assert int32 (aget a 0)))))
+      (r "caml_int32_add" ^{:go/end 808} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (+ (assert int32 (aget a 0)) (assert int32 (aget a 1)))))
+      (r "caml_int32_sub" ^{:go/end 809} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (- (assert int32 (aget a 0)) (assert int32 (aget a 1)))))
+      (r "caml_int32_mul" ^{:go/end 810} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (* (assert int32 (aget a 0)) (assert int32 (aget a 1)))))
+      (r "caml_int32_div" ^{:go/end 820} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [(values x y) (values (assert int32 (aget a 0)) (assert int32 (aget a 1)))]
+            (when (== y 0)
+              (RaiseDivisionByZero))
+
+            (when (== y -1)
+              (return (- x)))
+
+            (/ x y))))
+
+      (r "caml_int32_mod" ^{:go/end 830} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [(values x y) (values (assert int32 (aget a 0)) (assert int32 (aget a 1)))]
+            (when (== y 0)
+              (RaiseDivisionByZero))
+
+            (when (== y -1)
+              (return (conv int32 0)))
+
+            (% x y))))
+
+      (r "caml_int32_and" ^{:go/end 831} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (bit-and (assert int32 (aget a 0)) (assert int32 (aget a 1)))))
+      (r "caml_int32_or" ^{:go/end 832} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (bit-or (assert int32 (aget a 0)) (assert int32 (aget a 1)))))
+      (r "caml_int32_xor" ^{:go/end 833} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (bit-xor (assert int32 (aget a 0)) (assert int32 (aget a 1)))))
+      (r "caml_int32_shift_left" ^{:go/end 834} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (<< (assert int32 (aget a 0)) (bit-and (conv uint (AsInt (aget a 1))) 31))))
+      (r "caml_int32_shift_right" ^{:go/end 835} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (>> (assert int32 (aget a 0)) (bit-and (conv uint (AsInt (aget a 1))) 31))))
+      (r "caml_int32_shift_right_unsigned" ^{:go/end 838} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (conv int32 (>> (conv uint32 (assert int32 (aget a 0))) (bit-and (conv uint (AsInt (aget a 1))) 31)))))
+
+      (r "caml_int32_bswap" ^{:go/end 839} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int32 (bits/ReverseBytes32 (conv uint32 (assert int32 (aget a 0)))))))
+      (r "caml_int32_of_int" ^{:go/end 840} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int32 (AsInt (aget a 0)))))
+      (r "caml_int32_to_int" ^{:go/end 841} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int (assert int32 (aget a 0)))))
+      (r "caml_int32_of_float" ^{:go/end 842} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (f2i32 (AsFloat (aget a 0)))))
+      (r "caml_int32_to_float" ^{:go/end 843} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv float64 (assert int32 (aget a 0)))))
+      (r "caml_int32_compare" ^{:go/end 844} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (^{:inst [int32]} cmp3 (assert int32 (aget a 0)) (assert int32 (aget a 1)))))
+      (r "caml_int32_bits_of_float" ^{:go/end 845} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int32 (math/Float32bits (conv float32 (AsFloat (aget a 0)))))))
+      (r "caml_int32_float_of_bits" ^{:go/end 848} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (conv float64 (math/Float32frombits (conv uint32 (assert int32 (aget a 0)))))))
+
+
+      ;; ints.c: int64
+      (r "caml_int64_neg" ^{:go/end 851} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (- (assert int64 (aget a 0)))))
+      (r "caml_int64_add" ^{:go/end 852} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (+ (assert int64 (aget a 0)) (assert int64 (aget a 1)))))
+      (r "caml_int64_sub" ^{:go/end 853} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (- (assert int64 (aget a 0)) (assert int64 (aget a 1)))))
+      (r "caml_int64_mul" ^{:go/end 854} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (* (assert int64 (aget a 0)) (assert int64 (aget a 1)))))
+      (r "caml_int64_div" ^{:go/end 864} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [(values x y) (values (assert int64 (aget a 0)) (assert int64 (aget a 1)))]
+            (when (== y 0)
+              (RaiseDivisionByZero))
+
+            (when (== y -1)
+              (return (- x)))
+
+            (/ x y))))
+
+      (r "caml_int64_mod" ^{:go/end 874} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [(values x y) (values (assert int64 (aget a 0)) (assert int64 (aget a 1)))]
+            (when (== y 0)
+              (RaiseDivisionByZero))
+
+            (when (== y -1)
+              (return (conv int64 0)))
+
+            (% x y))))
+
+      (r "caml_int64_and" ^{:go/end 875} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (bit-and (assert int64 (aget a 0)) (assert int64 (aget a 1)))))
+      (r "caml_int64_or" ^{:go/end 876} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (bit-or (assert int64 (aget a 0)) (assert int64 (aget a 1)))))
+      (r "caml_int64_xor" ^{:go/end 877} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (bit-xor (assert int64 (aget a 0)) (assert int64 (aget a 1)))))
+      (r "caml_int64_shift_left" ^{:go/end 878} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (<< (assert int64 (aget a 0)) (bit-and (conv uint (AsInt (aget a 1))) 63))))
+      (r "caml_int64_shift_right" ^{:go/end 879} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (>> (assert int64 (aget a 0)) (bit-and (conv uint (AsInt (aget a 1))) 63))))
+      (r "caml_int64_shift_right_unsigned" ^{:go/end 882} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (conv int64 (>> (conv uint64 (assert int64 (aget a 0))) (bit-and (conv uint (AsInt (aget a 1))) 63)))))
+
+      (r "caml_int64_bswap" ^{:go/end 883} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int64 (bits/ReverseBytes64 (conv uint64 (assert int64 (aget a 0)))))))
+      (r "caml_int64_of_int" ^{:go/end 884} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int64 (AsInt (aget a 0)))))
+      (r "caml_int64_to_int" ^{:go/end 885} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Int (conv int (assert int64 (aget a 0))))))
+      (r "caml_int64_of_float" ^{:go/end 886} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (f2i64 (AsFloat (aget a 0)))))
+      (r "caml_int64_to_float" ^{:go/end 887} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv float64 (assert int64 (aget a 0)))))
+      (r "caml_int64_of_int32" ^{:go/end 888} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int64 (assert int32 (aget a 0)))))
+      (r "caml_int64_to_int32" ^{:go/end 889} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int32 (assert int64 (aget a 0)))))
+      (r "caml_int64_of_nativeint" ^{:go/end 890} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int64 (assert Nativeint (aget a 0)))))
+      (r "caml_int64_to_nativeint" ^{:go/end 891} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv Nativeint (assert int64 (aget a 0)))))
+      (r "caml_int64_compare" ^{:go/end 892} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (^{:inst [int64]} cmp3 (assert int64 (aget a 0)) (assert int64 (aget a 1)))))
+      (r "caml_int64_bits_of_float" ^{:go/end 893} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int64 (math/Float64bits (AsFloat (aget a 0))))))
+      (r "caml_int64_float_of_bits" ^{:go/end 894} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (math/Float64frombits (conv uint64 (assert int64 (aget a 0))))))
+
+      ;; ints.c: nativeint
+      (r "caml_nativeint_neg" ^{:go/end 897} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (- (assert Nativeint (aget a 0)))))
+      (r "caml_nativeint_add" ^{:go/end 898} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (+ (assert Nativeint (aget a 0)) (assert Nativeint (aget a 1)))))
+      (r "caml_nativeint_sub" ^{:go/end 899} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (- (assert Nativeint (aget a 0)) (assert Nativeint (aget a 1)))))
+      (r "caml_nativeint_mul" ^{:go/end 900} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (* (assert Nativeint (aget a 0)) (assert Nativeint (aget a 1)))))
+      (r "caml_nativeint_div" ^{:go/end 910} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [(values x y) (values (assert Nativeint (aget a 0)) (assert Nativeint (aget a 1)))]
+            (when (== y 0)
+              (RaiseDivisionByZero))
+
+            (when (== y -1)
+              (return (- x)))
+
+            (/ x y))))
+
+      (r "caml_nativeint_mod" ^{:go/end 920} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (let [(values x y) (values (assert Nativeint (aget a 0)) (assert Nativeint (aget a 1)))]
+            (when (== y 0)
+              (RaiseDivisionByZero))
+
+            (when (== y -1)
+              (return (conv Nativeint 0)))
+
+            (% x y))))
+
+      (r "caml_nativeint_and" ^{:go/end 921} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (bit-and (assert Nativeint (aget a 0)) (assert Nativeint (aget a 1)))))
+      (r "caml_nativeint_or" ^{:go/end 922} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (bit-or (assert Nativeint (aget a 0)) (assert Nativeint (aget a 1)))))
+      (r "caml_nativeint_xor" ^{:go/end 923} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (bit-xor (assert Nativeint (aget a 0)) (assert Nativeint (aget a 1)))))
+      (r "caml_nativeint_shift_left" ^{:go/end 924} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (<< (assert Nativeint (aget a 0)) (bit-and (conv uint (AsInt (aget a 1))) 63))))
+      (r "caml_nativeint_shift_right" ^{:go/end 925} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (>> (assert Nativeint (aget a 0)) (bit-and (conv uint (AsInt (aget a 1))) 63))))
+      (r "caml_nativeint_shift_right_unsigned" ^{:go/end 928} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (conv Nativeint (>> (conv uint64 (assert Nativeint (aget a 0))) (bit-and (conv uint (AsInt (aget a 1))) 63)))))
+
+      (r "caml_nativeint_bswap" ^{:go/end 931} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+          (conv Nativeint (bits/ReverseBytes64 (conv uint64 (assert Nativeint (aget a 0)))))))
+
+      (r "caml_nativeint_of_int" ^{:go/end 932} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv Nativeint (AsInt (aget a 0)))))
+      (r "caml_nativeint_to_int" ^{:go/end 933} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Int (conv int (assert Nativeint (aget a 0))))))
+      (r "caml_nativeint_of_float" ^{:go/end 934} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv Nativeint (f2i64 (AsFloat (aget a 0))))))
+      (r "caml_nativeint_to_float" ^{:go/end 935} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv float64 (assert Nativeint (aget a 0)))))
+      (r "caml_nativeint_of_int32" ^{:go/end 936} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv Nativeint (assert int32 (aget a 0)))))
+      (r "caml_nativeint_to_int32" ^{:go/end 937} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (conv int32 (assert Nativeint (aget a 0)))))
+      (r "caml_nativeint_compare" ^{:go/end 938} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (^{:inst [Nativeint]} cmp3 (assert Nativeint (aget a 0)) (assert Nativeint (aget a 1))))))))

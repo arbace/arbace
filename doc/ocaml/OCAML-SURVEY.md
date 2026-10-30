@@ -1009,3 +1009,174 @@ memory); `bin/gate --audit` for a future `repr-ocaml` step (the new `dumps` verb
 was stopped by its task ID; the file was deleted at once (disk was 86% used and went back). The first background `dumps` run was started with a pipe through `tail` in the foreground, so the harness moved it to the
 background: harmless. No script was edited while a run that loaded it was executing (the Makefile, which no run reads, was edited during one). Scratch the survey cites: `.tmp/repr-ocaml/ty/CORPUS/` (the compilable
 list `compilable`, the compile logs `log.*`, the outputs `cmi/`, `types.1/`, `lambda.1/`), `.tmp/o4-run{1,2,3}.log` (run 3 is the final one), in the worktree `.tmp/worktrees/ocaml-o1`.
+
+## As built: O5 (write-ahead) (2026-10-30)
+
+Milestone O5, oi, the interpreter of Lambda, built on the branch `ocaml-o1` on top of O4 (`f35047f5`), under the light tier (no
+gate, no build of Arbace's executables, no lock: at most 4 threads, under 2 GB; oi's runs one Go thread each, three at once,
+`GOMEMLIMIT` 400MiB each). **Write-ahead**: `go/arbace/oi` is Go forms, but nothing lists it in goi's table yet, so no shipped program
+carries it; it was tested by printing the forms with repr/go (on stage 0) and building and testing the printed package with
+TamaGo's go (a small build of one package), and every check below ran on that build. The proposals OC20-OC56 are not decided;
+the work followed their recommendations (OC4 (a), OC5 (a), OC6 (a), OC11 (a), OC12 (a), OC20/OC50 (a), OC21 (a), OC51 (c), OC52
+(c), resolved by OC60, OC53 (a), OC55 (a)).
+
+**What is in the tree**
+
+- `go/arbace/oi.ae`, `go/arbace/oi/*.ae` (the package `arbace/oi`, 24 files of Go forms, 7 of tests; 11,875 lines of forms with
+  the driver, 2,661 of them tests): converted from Go by repr/go's native reader (`bin/repr-go read --tests`, 42 s), so the forms
+  are the converter's (`:lines`, comments kept), not hand-styled as goi's (OC70). The parts:
+  - **values** (`value.ae`): `Value` is Go's `any`; an int is Go's `int` (63-bit, `Int` wraps), a float `float64`, strings and
+    bytes one type `*Bytes`, blocks `*Block{Tag, F}`, flat float arrays and float records `*FloatArray`, the boxed integers
+    Go's `int32`/`int64` and `Nativeint`, closures `*Closure`, other custom blocks `*Custom`, an effect's stack `*Fiber`; the
+    interfaces of -1,024 to 65,535 are kept ready (Go's own cache stops at 255);
+  - **the compiler** (`compile.ae`, `prim.ae`): the Lambda forms of SPEC §11.2 read by the package's own reader (`sexp.ae`)
+    into closures over frames: a function's variables are slots, the enclosing functions' captured by value into the
+    closure's environment (a `mutlet` is a Cell); arguments evaluated right to left, then the function, as bytegen does; every
+    primitive of `Printlambda.primitive` parsed once (OC21 (a)'s text), the frequent ones with nodes of their own;
+    `staticraise` returns a mark to its `staticcatch` (a panic only when it is not in the catch's tail);
+  - **calls and tail calls** (`apply.ae`): curried application by arity (partial applications, over-applications), an
+    application in tail position returns a mark and the call's loop makes it, reusing the frame (proper tail calls: the
+    testsuite's `basic/tailcalls` runs 10^7-deep loops in constant stack); a depth limit of 200,000 calls raises
+    `Stack_overflow` (OC69);
+  - **exceptions** (`exn.ae`): Go panics of `*Exn`, `trywith` a recover; the predefined exceptions; the runtime's
+    `caml_format_exception` and uncaught-exception path (`run.ae`: Printexc's handler when linked, `do_at_exit`, status 2);
+  - **effects** (`thread.ae`, OC6 (a)): a stack is a goroutine, `perform` sends the effect and the continuation to the
+    parent and waits, `resume` sends the function and its argument and waits for the next message, `reperform` forwards
+    and resumes the original performer, all as tail calls of the handler's thread; one-shot continuations
+    (`Continuation_already_resumed`), `Effect.Unhandled`; domains are goroutines under one interpreter lock (released when
+    a thread blocks, and every 4,096 calls or loop turns, 128 while other domains run), mutexes and conditions waiting on it;
+  - **externals** (444 registered; all 271 that the stdlib declares): the core's (`ext.ae`, `ext_domain.ae`: Obj, lazy
+    values, objects' method lookup, recursive values' dummies, effects, atomics, domain-local storage, mutexes, conditions,
+    `Domain.spawn`), and three Sonnet subagents' ports of the C runtime (each in a sandbox copy, tested against the host's
+    OCaml): numbers and strings (`ext_num.ae`, `ext_str.ae`: formats, parsing, floats, boxed integers; 1,140 cases from the
+    host's `ocaml`), polymorphic compare, `caml_hash` (bit-exact: Hashtbl's order), arrays and Marshal (`compare.ae`,
+    `hash.ae`, `ext_array.ae`, `marshal.ae`: Marshal's bytes equal to OCaml's for 60 values), channels with io.c's buffering,
+    the system, the GC's stubs, weak arrays and ephemerons, MD5 and BLAKE2, the LXM generator and a minimal bigarray, and
+    the lexing and parsing engines (`ext_io.ae`, `ext_sys.ae`, `ext_digest.ae`, `ext_lex.ae`);
+  - **the toplevel** (`toplevel.ae`, OC12 (a)): a phrase is a unit the oracle typed and lowered (its earlier units opened),
+    run in the session's program; its signature printed as the ocaml toplevel prints it, each value by its type's text
+    (base types, lists, arrays, options, refs, results, tuples, functions, the session's variants and records).
+- `test/ocaml/oi/cmd.ae`, `cmd/main.ae`, `cmd/repl.ae`: the light driver (`oi run`, `oi repl`), a main package outside `go/`
+  (OC62); `test/ocaml/oi/testdata/`: the golden data of the package's tests.
+- `bin/oi`: `stdlib` (the stdlib of the pinned tarball built by `ocamlc` in dependency order with its Makefile's and
+  Compflags' flags, 71 units, its simplified Lambda dumped, 5.4 MB, `.tmp/oi/lib/`; the testsuite's `lib/testing` too),
+  `build` (the forms printed by repr/go, built by TamaGo's go, kept by the forms' hash), `test` (go vet and go test on the
+  printed package), `run FILE.ml`, `repl`, `repl-check`, `corpus`, `record-ref`, `check [--record]`, `divergences`;
+  `bin/lib/oi/header.awk` (an ocamltest header read: run, or a class), `bin/lib/oi/phrase` (the toplevel's oracle);
+  `test/ocaml/oi_check.ae` (the judgment, on stage 0). Makefile `oi-stdlib`, `oi-build`, `oi-check`, `oi-divergences`,
+  `oi-record-ref`, `oi-repl`.
+- `tools/ocdump/ocdump.ml`: the compiler's flags the stdlib's build and the testsuite pass (`-nostdlib`, `-nopervasives`,
+  `-no-alias-deps`, `-nolabels`, `-principal`, `-no-principal`, `-strict-sequence`, `-open`, `-unsafe`, `-rectypes`,
+  `-no-strict-formats`, `-strict-formats`, `-g`).
+- Records: `test/ocaml/ref-ocaml55.edn` (ocamlc's and ocamlopt's runs of the run corpus as data), `test/ocaml/check-oi.edn`
+  (oi's results), `test/ocaml/divergences.edn` (the classes, goi's format), `test/ocaml/oi-known.edn` (the known non-passes by
+  program, the classes' reasons), `test/ocaml/oi/session.ml` and `session.ref` (the REPL session and the ocaml toplevel's
+  output). `LICENSE.md`: the externals' ports are the OCaml Core System's runtime, LGPL-2.1 with the linking exception (its
+  text added).
+
+**The numbers**
+
+| | |
+|---|---|
+| the run corpus: the testsuite's `.ml` with a `.reference` | 556 |
+| read by their header as one program oi runs (bin/lib/oi/header.awk) | 309 |
+| ocamlc's output equal to the `.reference` / ocamlopt's output differing from ocamlc's | 302 / 4 |
+| **oi: pass** (status and output, stdout and stderr in one file, equal to ocamlc's run) | **273 of 309** |
+| oi: non-pass, every one in a class | 36 (backtraces 3, gc-and-memory 28, obj-representation 2, bigarray 3) |
+| classed by their header (outside the run corpus: OC61, OC63) | 247 (multi-file 93, libraries 90, tools-and-targets 36, runtime-parameters 23, header-none 3, header-flags 2) |
+| **failing (not in a class)** | **0** |
+| the REPL session (`bin/oi repl-check`) | 24 phrases, the output equal to the ocaml toplevel's byte for byte |
+| the check's wall time (3 programs at once, one thread each) | 7 min 3 s; the programs' 1,017 s summed |
+| speed: a tail-recursive loop of 10^7 steps | 0.9 s (ocamlc's bytecode 0.16 s, ocamlopt's 0.02 s); the first build 5.9 s; a phrase or a hello world 0.1 s |
+
+Every effect test of the testsuite's `effects/` (21) and the `parallel/` programs that are single files pass (O5b's content,
+done in O5). The 36 non-passes are by design but the 3 of bigarray (deferred, OC63): backtraces (no debug events in Lambda,
+OC68), the collector (finalisers not run, weak pointers and ephemerons strong, the allocation counters at zero, Gc.Memprof
+silent: OC64, OC68), Obj's view of the heap.
+
+**Checks run** (all light): `bin/oi check --record` (above, from the forms' build), `bin/oi repl-check`, `bin/oi divergences`,
+`bin/oi test` (the package's tests on the printed package: vet clean, `ok`), `bin/oi record-ref` (ocamlc and ocamlopt over the
+309), `bin/oi stdlib`, `make check-makefile`. **Not run**: the gate (essential or full), any build of Arbace's executables,
+goi interpreting the package on stage 0 (the printed package built by TamaGo's go was the test instead: goi's run of 9,000 lines
+of Go with goroutines would be minutes a program), the other `bin/repr-ocaml` checks but spec-check (218 of 218; only ocdump's option list changed).
+
+**The heavy list (for the window after the tag)**
+
+1. `go/arbace/gotable.edn` lists `arbace/oi` (and a size line), `bin/goi table` regenerated, the shipped executable built with
+   it (`bin/arbace-go --build`), its key moves: a **re-seed** (batched with OC30's `embed.ae` change and C5/C6's, survey §11).
+2. An Arbace namespace `arbace.ocaml.oi` (the REPL and `run` on the shipped program: the dumps read by the package, the toplevel
+   through `arbace/oi`'s `Toplevel` from Arbace), and `bin/oi` running on the shipped program instead of the light driver
+   (OC62 (a)'s end).
+3. Build constraints for tamago: `ext_sys.ae` and `ext_io.ae` use `syscall` (ioctl, getrusage, file descriptors); the box's
+   guest build (parked) needs a tamago variant of them or the package excluded from the guest's table.
+4. A gate step `oi` (`--full`: `bin/oi check`, about 7 minutes at 3 jobs, 1.2 GB; essential: `bin/oi test`, `repl-check` and a
+   subset of the check, OC67), with its inputs (`go/arbace/oi*`, `test/ocaml/`, `bin/oi`, `bin/lib/oi/`, `tools/ocdump/`, the host
+   pins on ocamlc and compiler-libs), `bin/gate --audit` for it.
+5. `bin/gate` essential and `--full` on the branch (nothing they run changed but the Makefile's targets and `LICENSE.md`).
+
+**Shipped files changed**: `go/arbace/oi.ae` and `go/arbace/oi/` are new under `go/` (the program's Go forms: j2g's `--program`
+copies `go/`; no package imports `arbace/oi`, so a build in between prints it and compiles nothing of it, but `gate_key` and the
+runtime key cover `go/`, so the executables' keys move with this branch). Nothing else shipped changed (`arbace/`, `overlay/`,
+`jdk/`, `seed/` untouched).
+
+**Proposals** (OC60 onward; each with options and the recommended one first)
+
+- **OC60 Which Lambda oi interprets** (OC52 decided by measuring). (a) the simplified translation (`--simplify`: what ocamlc compiles,
+  `Simplif.simplify_lambda` after the translation), as built; (b) the raw translation. *Recommended: (a)*: `Simplif` is where the
+  tail-modulo-cons rewriting (`Tmc.rewrite`) runs, so the stdlib's `List.map` and friends are tail recursive only there, and the
+  reference runs are ocamlc's; raw Lambda would overflow the stack on the testsuite's long lists.
+- **OC61 The run corpus** (OC10 for eval). (a) as built: the testsuite's `.ml` with a `.reference` whose ocamltest header is one
+  program (the default actions, `include testing`, the flags ocdump takes, `arguments`, `set`): 309 of 556, the others classed by
+  their header's first statement outside that set; (b) ocamltest's actions in bin/oi (modules, C stubs, scripts, toplevel and expect
+  tests: O7's work); (c) only `(* TEST *)`. *Recommended: (a)* until O7, which owns ocamltest's actions.
+- **OC62 Where oi's driver lives until the shipped program carries it.** (a) as built: a main package's Go forms in
+  `test/ocaml/oi/` (outside `go/`, so no shipped tree holds it), printed and built by `bin/oi build` with TamaGo's go; (b) in
+  `go/arbace/oi/cmd/oi` (shipped tree, printed with the program); (c) none: oi run by goi from stage 0 (interpreting the
+  interpreter). *Recommended: (a)*, replaced by the shipped program at the heavy list's item 2.
+- **OC63 The libraries outside the stdlib** (unix, threads, str, dynlink, runtime_events, compiler-libs: 90 programs) and bigarray.
+  (a) a class until a milestone ports their C stubs as externals (unix's and str's are self-contained; systhreads map onto
+  domains' goroutines; bigarray.c's kinds and layouts), the order: unix and str, then bigarray, then systhreads; (b) port them in
+  O5's tail now; (c) never (the libraries as a permanent class). *Recommended: (a)*: their stubs are a few thousand lines of C
+  each and none of O5's exit needs them.
+- **OC64 Gc's counters.** (a) the allocated words stay at zero, as built (a program checking that a computation does not allocate
+  sees none; one measuring an allocation sees none either, classed); (b) Go's `runtime.MemStats` (stops the world at every
+  call, counts Go's bytes, not OCaml's words); (c) an approximate count of OCaml's words in oi's allocating nodes. *Recommended:
+  (a)*: (b) made 4 tests fail that (a) passes (basic/tuple_match, lib-set/testset, testmap, match-exception/allocation) and none pass that (a) fails; (c) is cost on every allocation for a statistic.
+- **OC65 The value representation.** (a) Go's `any` with the small integers cached, as built (6 times ocamlc's bytecode on a
+  loop); (b) a two-word value (an int and a pointer) so that no int allocates; (c) unboxed specialization by Lambda's value kinds
+  (`[int]`, `[float]`). *Recommended: (a)* for O5; (b) or (c) with O6's AOT, which wants the same decision for its Java forms.
+- **OC66 The reference runs.** (a) ocamlc's (bytecode), as built, ocamlopt's recorded beside (4 programs differ between them);
+  (b) ocamlopt's (the survey's §1 table said ocamlopt). *Recommended: (a)*: oi interprets the bytecode translation (OC53 (a)), so
+  ocamlc's is the same semantics (`Sys.backend_type` is `Bytecode` in oi too); ocamlopt's stays the AOT level's reference (O6).
+- **OC67 The essential subset for the gate.** (a) `bin/oi test`, `repl-check` and the effects and basic directories of the check
+  (about 90 programs, a minute); (b) the whole check in the essential gate (7 minutes); (c) only `test`. *Recommended: (a)*, with
+  the whole check in `--full`.
+- **OC68 Weak pointers, ephemerons, finalisers, backtraces.** (a) a class, as built (weak and ephemerons strong, finalisers
+  accepted and never run, raw backtraces empty); (b) Go's `weak.Pointer` and `runtime.AddCleanup` for weak arrays, ephemerons
+  and `Gc.finalise` (a collection's timing would still be Go's), and backtraces from the Lambda's positions (`--loc`) on a
+  shadow stack; (c) (b)'s weak part only. *Recommended: (a)* now, (b) when a corpus program needs it: the 28 programs observe the
+  collector itself.
+- **OC69 The call depth.** (a) 200,000 interpreted calls, then `Stack_overflow`, as built (`debug.SetMaxStack` 1 GiB; Go's stack
+  overflow is fatal, so the limit keeps oi's below it); (b) the limit from `OCAMLRUNPARAM`'s `l` (the stack's words) scaled; (c)
+  no limit. *Recommended: (a)*, with (b) when the `ocamlrunparam` programs join the corpus.
+- **OC70 How oi's Go forms are written.** (a) as built: written as Go, read into forms by repr/go's native reader, the forms
+  committed and from then the source (edited as forms, printed and built by `bin/oi build`); (b) hand-written forms in goi's style
+  (`go/arbace/goi`); (c) Go sources committed beside the forms. *Recommended: (a)*: the reader's forms print back to a package that
+  builds and passes its tests, so the write-ahead could be tested without Arbace's build; (b)'s style is a later, cosmetic pass.
+- **OC71 The toplevel's oracle.** (a) as built: each phrase a unit compiled by the host's `ocamlc -c` against the earlier phrases'
+  `.cmi` (opened), its Lambda and signature dumped by ocdump; an expression phrase compiled as `let it__ = (...)`; (b) a
+  long-running ocdump that keeps the toplevel's environment (`Toploop`'s typing) and answers phrase by phrase (no `ocamlc`, no
+  files, the ocaml toplevel's exact behaviour for directives); (c) the Typedtree checker (OC4 (b)). *Recommended: (b)* next: (a)
+  costs two processes a phrase (0.1 s) and does not take directives (`#use`, `#show`), which (b) gets from `Toploop` itself.
+
+**Rule slips**: (1) my first `bin/repr-go read` probe ran without `ARBACE_HOST_EXE`, so the script started building stage 0 in the
+worktree (`bin/seed --build`: a build of Arbace's executable, against the light tier) for about three minutes before I stopped it by
+its task ID and deleted its partial `target/`; (2) the next probe's `repr-go read` ran with 32 threads for 22 s (REPR_GO_JOBS unset;
+the later conversion set `REPR_GO_JOBS=4 GOMAXPROCS=4`); (3) the first full check ran oi's programs without `GOMAXPROCS`, so Go's
+collector used up to 9 cores for 2 minutes (fixed in bin/oi: `GOMAXPROCS=1` a program); (4) three commands named `/dev/null`
+(`2>/dev/null` in the first stdlib compile loop, `2>/dev/null` in a `cat`, `>/dev/null` in a probe); (5) a few early `go vet` runs used
+the default `GOCACHE` (`~/.cache/go-build`) instead of a private one; (6) I edited `test/ocaml/oi/cmd/repl.ae` while the last check
+ran on the executable built from it before the edit (the run used the built binary; the edit only added a newline at the REPL's end
+of input, and repl-check ran on the rebuilt one). Scratch the survey cites: `.tmp/oi/` in the worktree (`lib/` the stdlib's dumps,
+`stdlib-build/`, `testlib/`, `ref/` and `run/` the programs' outputs, `check.tsv`, `ref.tsv`, `corpus.tsv`, `check8.log` the recorded
+run, `src/` the Go the forms were read from, `sub/` the subagents' sandboxes, `API.md` their brief).
