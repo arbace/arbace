@@ -865,3 +865,134 @@ Each with options, the recommended one first; the spec's choices stand until the
 - The tarball (179 MB) and the APKBUILD are in the worktree's `.tmp/llvm/` and `.tmp/cpp-pins/` (the scratch the pins check reads; copy it before the worktree is removed);
   the gcc tarball and stage 0 were read from the main checkout, read-only.
 - The first draft of the stage 0 call used `/dev/null` in a probe of `cxxdump` (`-o /dev/null`): a slip of the rule against `/dev/null`; the output was a file elsewhere in the next runs.
+
+## As built: CX2 (2026-10-30)
+
+CX2, the shared lexer and preprocessor, on the branch `cpp-cx2` (from `c23-c3b`, which holds repr/c's `arbace.repr.c.lex` and `.pp`, with `cpp-cx1` merged in), in
+one working day (against 4-6 days). GT7's clean run was going: the light tier of `.tmp/agent-rules.md` held for the work (the port's runs at 4 threads, g++ and
+clang at 4 at a time under `nice`, no gate, no Arbace build, no lock), with one exception, a memory peak above 2 GB, in §CX2.7. The proposals CP20-CP29
+are undecided; the recommendations were followed (CP23: the preprocessor reads g++'s host data when it is judged by g++, clang's when it serves the AST, a
+parameter of `host/load-host`).
+
+### CX2.1 What was built
+
+- **The lexer, `arbace.repr.c.lex`, in C++ mode.** A scanner takes a feature mask (`F-CXX` and the bits below; a boolean for C, as before, so C's lexing is
+  untouched): `::`, `->*`, `.*`, `<=>` (C++20), the digraphs `<: :> <% %> %: %:%:` (`%:` is `#` and starts a directive), `<::` as `<` and `::` unless a `:` or `>` follows
+  (C++11, the digraph `<:` before), raw string literals `R"d(...)d"` with the prefixes `LR`, `uR`, `UR`, `u8R` (C++11; the characters taken as they stand in the file, lines
+  counted, an unterminated one an error and one token to the end of the file as clang gives it), user-defined literals (C++11; kinds `:UDLSTRING`, `:UDLCHAR`; a suffix
+  begins with an underscore or a non-ASCII character, as clang's raw lexer reads it: libcpp reads any identifier, the outputs print the same text), the literal prefixes by
+  standard (`u"` `U"` `u8"` `u'` from C++11, `u8'` from C++17; before them an identifier and a literal), digit separators from C++14, an unterminated `'` or `"` one `:OTHER`
+  token to the end of the line (libcpp's and clang's way; C's: an error that ends the unit), combining marks inside identifiers, and `import <h>;`, `export import "h";`
+  at a line's start lexed with a header name (`F-MODULES`, only with `-fmodules-ts`: without it g++ reads them as ordinary tokens, probe).
+  The feature mask of a standard is `arbace.repr.cpp.host/feature-mask` (libcpp's `lang_defaults`: trigraphs in the ISO modes up to C++14, raw strings from C++11 in all modes
+  but with g++ not in `-std=gnu++98`, probe).
+- **The preprocessor, `arbace.repr.c.pp`.** `:cxx` in the configuration: `true` and `false` are 1 and 0 in `#if` at every standard; the alternative tokens (`and or not xor bitand bitor compl
+  not_eq and_eq or_eq xor_eq`) are the operators in `#if`, and an error as a macro name in `#define`, `#undef`, `#ifdef` and `defined`; a user-defined literal whose suffix is a macro's
+  name is split into the literal and the macro (`is_macro_not_literal_suffix`, `"s"FOO`), also in a macro's body at its definition; a user-defined literal is escaped by `#` as a string
+  is; a paste gives whatever the lexer reads the text as; `#include_next` finds the entry of the search list after the current file's directory with the entries cleaned (libstdc++'s list
+  has `..` in it; the C list never did: a recursion to depth 200 before the fix). `__has_cpp_attribute` and `__has_include_next` were there; `__cplusplus` is the host's.
+  C's results do not change: `bin/repr-c check --tokens` on c23conf (49 files: lex 49 equal, pp 49 equal, gcc 49 agree) and tcc-tests2 (88: 88, 88, 88), the numbers of C3b, before and after.
+- **`arbace.repr.cpp.host`** (`arbace/repr/cpp/host.ae`): `load-host DIR "gxx"|"clang"` over `test/cpp/host/` (the predefined macros of the sixteen standards, the search list with the
+  compiler's directory last, the `__has_*` answers, `has-extra.tsv`, the option deltas), the standards and their aliases (`c++2a`...), `dg-options` (the options of a g++.dg file that
+  carry no selector), `file-config`, `feature-mask`, `config`.
+- **`arbace.repr.cpp.ppcheck`** and `bin/repr-cpp pp-check` (`bin/lib/repr-cpp/pp-check`): the token check. Each file of the corpora is read in place, lexed (the raw tokens: position and text) and preprocessed by the
+  port and judged by two recorded answers, as C's CS51 (a) judges by gcc -E: the **stream's** tokens against **g++ -E -P**'s (`test/repr/cpp/pp-gxx.sha256`: the SHA-256 of the tokens as
+  C's, or `rejected`; g++'s output lexed by the same lexer with the user-defined literals off, its `#pragma` lines dropped, its `#embed` lines decoded), or both reject the file (g++'s status
+  not 0 and an error of the port's), or the known file lists it; the **raw tokens** against **clang's `-Xclang -dump-raw-tokens`** (`test/repr/cpp/lex-clang.sha256`: line, column and text of each token but
+  comments and white space; clang places a token at the line splices before it, the port's positions are moved to match; the escapes of clang's dump undone). Known classes:
+  `test/repr/cpp/pp-check-known.edn`. Also `bin/repr-cpp pp FILE...` and `lex FILE...`, `pp-diff`-like debugging commands in the namespace (`diff`, `lexdiff`), `has-add` (the `__has_*` names a check found
+  missing, asked of both compilers: `test/cpp/host/has-extra.tsv`, 65 names after the sample runs) and the Makefile's `repr-cpp-pp-check`, `repr-cpp-pp-record`.
+- **Option deltas** (`test/cpp/host/opt-deltas-gxx.edn`, 324 option lists): a g++.dg file's options change the predefined macros in ways the port does not model (`-O2` adds `_FORTIFY_SOURCE 2` on Alpine,
+  which musl's fortify headers act on; `-fcontracts`, `-fopenmp`, `-fconcepts`, `-fno-exceptions`...). The recorder asks g++ for the macros under each (standard, options) list and stores the lines to add
+  and the `#undef`s; the port applies them (else its own `-D`, `-U`, `-O` model). Recorded, not modelled, so that no flag list goes out of date.
+- **`test/cpp/lexical/`** (19 files, the corpus `:cpp-lexical` of `test/cpp/corpora.edn`): Arbace's own cases, each with its `dg-options`: punctuators and digraphs at C++98, 11 and 20, raw strings, user-defined literals (with a
+  macro suffix), literal prefixes at C++14 and 23, `#if` with the alternative tokens, `true`, `__has_cpp_attribute`, `__has_include`, `#include_next` through libstdc++ and musl's fortify wrappers, module directives with and without
+  `-fmodules-ts`, pragmas and `_Pragma`, `__VA_OPT__`, pastes that make the new tokens, two rejected files.
+
+### CX2.2 The probes settled
+
+- **Raw strings.** g++ does not read them in `-std=c++98`, `c++03` and the `gnu++` ones of those either (`R"x(FOO ")x"` is a macro-expanded `R` and an unterminated string); clang reads them in every GNU mode,
+  so the raw-token check differs there, and the cases are two files of the lexical corpus with the recorded clang digest of their own standard.
+- **User-defined literals and macros.** g++ at C++11 and later lexes `"s"FOO` as a literal with a suffix, unless `FOO` is a macro, and then warns (`C++11 requires a space between literal and string macro`) and expands it; it prints a
+  space after a string, none after a character literal. clang's raw lexer: a suffix not beginning with `_` is a separate identifier (`"s"x` is two tokens), a UTF-8 suffix is part of the literal. The port follows clang at the lexer and
+  libcpp at the preprocessor (the split by macro name), and the judged output is the same in all cases probed.
+- **Trigraphs** are on for the ISO standards up to `c++14` (not `c++17`: g++ 15 turns them off there), as `-trigraphs` says.
+- **`-O` and Alpine.** `-O1` and up define `__OPTIMIZE__` and `_FORTIFY_SOURCE 2` (an Alpine patch), `-Os` also `__OPTIMIZE_SIZE__`, `-Ofast` `__FAST_MATH__`, `-O0` `__NO_INLINE__`; `__GNUC_STDC_INLINE__` always. This was the cause of the
+  first real difference (the fortify header chain of a `-O2` file): the deltas of §CX2.1.
+- **`-fmodules-ts`.** `g++ -E -fmodules-ts` looks the imported header units and modules up and fails when there is no compiled module (`failed to read compiled module`), and rewrites `import <h>;` to `import "/abs/path";`
+  where it succeeds. 20 of the 1,807 sampled files are of this kind; they are a class (`modules-ts`), not a lexical question. Without the option g++ reads `import <vector>;` as `< vector >`.
+- **`#embed` in C++.** g++ supports it at every standard, as C does; its `-E -P` output keeps long resources as `#embed ... __base64__(...)` lines, which the judge decodes as C's does.
+- **An unterminated `'` or `"`** is a warning in g++ and clang and one token to the end of the line (`CPP_OTHER`); `1'000` at C++11 is `1` and `'000;` there.
+- **`#include_next` through libstdc++.** `<stdlib.h>`, `<math.h>`, `<string.h>` of libstdc++ reach musl's through `/usr/include/fortify/` by `#include_next`; the search list's entries must be compared cleaned.
+- **A file with no known extension** (`c/cstdarg`) is a linker input to g++ and clang; the recorder passes `-x c++`.
+- **`__has_builtin`, `__has_attribute`, `__has_cpp_attribute` answers differ by standard** only for the C++ attributes (`likely`, `assume`, ...); the host table is recorded at `c++23`. Over the samples no file disagreed for that reason (the
+  names asked came from libstdc++'s `__has_builtin` and `__has_attribute` tests). Proposal CP33.
+- **Speed.** The shared preprocessor is C's and was made for C: libstdc++'s `<vector>` takes 28 s the first time in a process (the headers' groups are parsed and kept) and about 3 s a translation unit after that; a g++.dg file
+  averages 0.3 s at 4 threads (509 s for 1,807), a libstdc++ header as a main file 3.8 s (407 s for 108). Resident set at the end of the sample runs: 1.4 to 1.8 GB.
+
+### CX2.3 Numbers
+
+Samples (the light tier; the whole is the heavy list, §CX2.5): every 10th file of `g++.dg` (sorted), every 8th of the libstdc++ headers in the tarball's `include/`, all of the lexical corpus.
+
+| corpus | files | lex: agree / known | pp: agree / both reject / known | time (4 threads) |
+|---|---|---|---|---|
+| `cpp-lexical` | 19 | 19 / 0 | 14 / 4 / 1 | 15 s |
+| `gxx-dg` (every 10th of 18,066) | 1,807 | 1,806 / 1 | 1,735 / 44 / 28 | 507 s |
+| `libstdcxx-headers` (every 8th of 862) | 108 | 107 / 1 | 103 / 5 / 0 | 407 s |
+
+(Final runs, after the last edit of the lexer and preprocessor.) The known entries: `modules-ts` 20 (the lexical corpus' one included), `gxx-rejects` 7 (pedantic or character-set errors, a header unit), `target-option` 2 (`-march=...`),
+lexical `named-ucn` 1 (C++23's `\N{...}` in an identifier) and `not-cxx` 1 (libstdc++'s `Makefile.am`). g++ rejects 82 of the 1,934 recorded files; on 53 of them the port reports an error too (the sample's both-reject column). The recorded data:
+`pp-gxx.sha256` (1,934 lines, 178 KB), `lex-clang.sha256` (1,934 lines, 183 KB), `opt-deltas-gxx.edn` (324 lists, 26 KB), `has-extra.tsv` (65 names).
+
+### CX2.4 Checks
+
+Run (all light): `bin/repr-cpp pp-check --corpus cpp-lexical --record --add-missing`, then `--record-known`, then plain (the recorded answers alone, no compiler needed); `--corpus gxx-dg --sample 10 --record --add-missing`, `--redigest` after the last lexer fix, and then plain;
+`--corpus libstdcxx-headers --sample 8 --record --add-missing` and then plain; `bin/repr-c check --tokens --corpus c23conf,tcc-tests2` before the first edit and after the last (identical); the lexer's directed cases by hand against clang's raw dump
+(`import <vector>;` with the modules bit, the combining marks); `make check-makefile`.
+**Not run:** `bin/gate` in any form; any Arbace build; the other eighteen corpora of C's token check; `bin/repr-c parse-check` and `roundtrip` (C's parser and converter use the same lexer and preprocessor: the lexer's C path is the old code
+and `bin/repr-c check --tokens` is the direct check); `bin/repr-cpp host check` (nothing under the recorded files but the new `has-extra.tsv` and `opt-deltas-gxx.edn` was written there); the full `g++.dg`, `g++.old-deja`, `c-c++-common`, the libstdc++ testsuite
+and all 862 headers (§CX2.5).
+
+### CX2.5 The heavy list (for a window after the tag)
+
+1. `bin/gate` (essential) in the worktree; the files changed under `arbace/` change the gate's key (`arbace/` less repr/java, haskell, rust), so the executable and test build rebuild. `arbace/repr/c/lex.ae` and `pp.ae` are repr/c's:
+   run C's `bin/repr-c check --tokens` (all twenty corpora), `parse-check`, `roundtrip` and `bin/gate --full`'s repr/c steps; the lexer's C path has no behavioral change by construction (the new branches test `cxx?`), but only those checks say so.
+2. The whole `gxx-dg` (18,066 files): about 85 minutes of the port at 4 threads (509 s for a tenth) and about 30 minutes of g++ and clang to record (167 s for a tenth); `bin/repr-cpp pp-check --corpus gxx-dg --record --add-missing`. At 8 threads about half. Memory 1.8 GB at 4
+   threads for a tenth, to be measured for the whole (the header cache grows): run it under the big lock or in shards (`--sample` takes every Nth, no offset: add one if shards are wanted).
+3. The other corpora: `libstdcxx-headers` (862: about 55 minutes), `gxx-old-deja` (3,229), `c-c++-common` (3,251 `.c` read as C++), `libstdcxx-testsuite` (9,726; its harness' include path is added by DejaGnu, the script adds `testsuite/util` only if the corpus' entry is extended) with `--record`;
+   the lexical and header corpora's `Makefile.am`-like files may need `not-cxx` entries.
+4. `test/gate/steps.edn`: the steps `repr-cpp pp-check` (recorded answers only, a sample or the lexical corpus) with their inputs (`arbace/repr/c/lex.ae`, `pp.ae`, `arbace/repr/cpp/*`, `test/repr/cpp/*`, `test/cpp/*`, `bin/lib/repr-cpp/pp-check`, the gcc tarball's pin).
+5. The hotspot corpus through `pp-check` (`/root/jdk26u` and its build flags) and the wpp corpus (go-whim): not in CX2's exit.
+6. `bin/repr-cpp host record` on another host, then `has-add` for the names the checks found (a host with another Alpine needs both).
+
+### CX2.6 Proposals (CP30-CP35)
+
+- **CP30 The user-defined literal suffix rule.**
+  - Options: (a) clang's at the lexer (an underscore or a non-ASCII start), libcpp's macro split at the preprocessor (built); (b) libcpp's everywhere (any identifier is a suffix unless it is a macro: `"s"x` is one token, `"s"FOO` two);
+    (c) clang's everywhere (no macro split: `"s"_FOO` stays one token when `_FOO` is a macro).
+  - *Recommended: (a).* The lexer is checked against clang's raw tokens (the converter's oracle), the preprocessor against g++'s output; the two disagree only on programs the standards call ill-formed or reserved (a suffix without an underscore), and (a) agrees with each judge where it judges.
+- **CP31 Option-dependent predefined macros.**
+  - Options: (a) recorded deltas per (standard, option list) from g++ (built, 324 lists in the sample); (b) a model of a fixed set of flags (`-O`, `-D`, `-U`, `-std`, `-fno-exceptions`, `-fno-rtti`, `-fopenmp`, `-fconcepts`...); (c) refuse the files whose options are not modelled.
+  - *Recommended: (a) for the check, (b) for the converter* (CX4): the converter's units come with clang's flags, few, and clang's own delta for them can be recorded the same way (`opt-deltas-clang.edn` is read when it exists: `load-host` already looks for it).
+- **CP32 `-fmodules-ts` files.**
+  - Options: (a) a known class (built: g++ -E needs compiled modules, its output is its own rewriting); (b) model g++'s rewriting (`import <h>;` to `import "abs-path";` and the failures); (c) judge them against clang's preprocessor (`clang -E -std=c++20` with its header unit rules) instead of g++'s.
+  - *Recommended: (a)* for the token check; (c) at CX3 for modules in the converter, where clang is the oracle.
+- **CP33 The `__has_*` table by standard.**
+  - Options: (a) one table at `c++23` plus `has-add` for names (built); (b) a table per standard (16 files, the attribute names a check asks: about 30); (c) only for `__has_cpp_attribute` (the one that varies).
+  - *Recommended: (c)* when the full run finds a file that depends on it; none of the 1,934 recorded files did. `has-add` would take a standard and write `has-STD.tsv`.
+- **CP34 Unterminated literals as tokens.**
+  - Options: (a) in C++ mode a `:OTHER` token to the end of the line, as libcpp and clang (built); (b) cc's error that ends the unit, as C's; (c) also in C mode (a change to C's results: C's check would show it, CS-class files).
+  - *Recommended: (a);* (c) is for the C side to decide (gcc's C preprocessor does the same).
+- **CP35 The cost of the preprocessor on libstdc++.**
+  - Options: (a) as it is (28 s for a first include of `<vector>`, 3 s after, per process); (b) cache the parsed groups of the system headers on disk (keyed by digest, the host's `headers.sha256`); (c) a faster scanner (the evaluator's cost, c2j-compiled tools).
+  - *Recommended: (a) now, (c) when the preprocessor is compiled into the tool executable* (S6 does this for the other tools: repr/c is evaluated from the checkout, CS36 (a); the compiled build would take the evaluator out). (b) changes what a run is a function of.
+
+### CX2.7 Rule slips and notes
+
+- **Stage 0 was built in the worktree twice.** The first `bin/repr-c check` (the C baseline) and one `bin/repr-cpp pp-check` run in a shell that had lost `ARBACE_HOST_EXE` started `bin/seed --build` (a Go build of Arbace's stage 0, and once a `--compile-aot` pass of `bin/arbace-go`); I stopped each within two minutes by its process group (`kill -- -PGID`) and removed `target/`. Everything after ran on `/root/arbace/target/seed/amd64/arbace`.
+- **Memory above 2 GB once:** the second sample run (`gxx-dg` and 44 headers in one process) peaked at 2.23 GB resident. The script now runs one process per corpus (peaks 1.8 and 1.65 GB). The thread count was 4 throughout; g++ and clang ran 4 at a time under `nice` while the port was not running.
+- **Sources edited while a run was going:** `bin/lib/repr-cpp/pp-check` once (bash read a changed script at its end: an error message after the results), `arbace/repr/cpp/ppcheck.ae`, `lex.ae` and `pp.ae` several times (the Arbace process had loaded the sources at its start; a later process of the same chain loaded
+  the new ones, which were the intended ones). The final numbers are from runs started after the last edit of `lex.ae` and `pp.ae`.
+- **`/dev/null`** appeared in four of my read-only probe commands (`awk ... /dev/null`, `sed ... /dev/null`, `grep -c . /dev/null`): a slip of the rule; nothing was written there.
+- `sleep` inside `timeout bash -c 'until ...'` loops to wait for a background run (the tool blocks a bare foreground `sleep`).
+- The gcc tarball was extracted into the worktree's `.tmp/cpp-gcc/` (g++.dg, g++.old-deja, c-c++-common, libstdc++-v3's include and testsuite), after its SHA-256 was checked against the pin; the scratch (`.tmp/cpp-gcc/`, `.tmp/repr-cpp-check/`) is the sample runs' work directory.
