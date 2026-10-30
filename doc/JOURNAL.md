@@ -598,3 +598,11 @@ git history:
   `.tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean --tag arbace-reaps-3-crops-v2 --only
   failed,changed`. It reruns 67 checks and keeps 13 at their clean passes, about 11 hours, with `.tmp/gt7.quiet` set.
   C3b and NH11's branch wait for the tag, since their merges would rekey steps.
+
+## 2026-10-30: the crop order: C++23 after C23 (the user)
+
+- **Decided (the user):** C++23 is the next crop after C23 (doc/cpp/CPP-SURVEY.md, "Decided (2026-10-30): the crop
+  order"). Its read and print (CX1-CX5) overlap C23's C5-C9, and its eval and AOT (CX6-CX8) follow C6. OCaml (O1 and O2
+  built on branch `ocaml-o1`) and Scheme (SM1-SM3 on `scheme-sm1`) fill the gaps, their order still open.
+- The branches built today at light load, waiting for the post-tag window: `c23-c3b`, `c23-c4`, `nethttp-nh11`,
+  `nethttp-nh2`, `java-jn10`, `ocaml-o1`, `scheme-sm1`, `cpp-cx1`, `cpp-cx2`.

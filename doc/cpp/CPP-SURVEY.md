@@ -712,3 +712,10 @@ The user decided all fourteen as recommended. In short:
 - Exceptions use a pending-exception flag.
 - The corpora start with the pinned gcc tarball, wpp and HotSpot.
 - C23 comes first. The crop order against OCaml and Scheme is left for later.
+
+## Decided (2026-10-30): the crop order
+
+The user decided that C++23 is the next crop after C23. Its read and print (CX1-CX5) run beside C23's C5-C9, and its
+eval and AOT (CX6-CX8) start once C6 exists, since CP4 (a) runs C++ through C23's back end. OCaml's and Scheme's light
+milestones fill the gaps beside the heavy C work, their own order still open. This answers CP9 and the "decide later"
+of OC15 and SC13.
