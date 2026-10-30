@@ -48,6 +48,9 @@
 #                                        libraries of scheme/lib/scheme and (chibi test): one result a test, the failing ones in classes
 #                                        (test/scheme/divergences-corpora.edn), --record: test/scheme/check-r7rs-linux-amd64.edn
 #   bin/si ecraven [--count N] [--record] [NAME...]  ecraven's r7rs-benchmarks on si, repetition count N (default 1), SI_TIMEOUT s each
+#   bin/si ecraven --chez [--count N] [--record] [NAME...]  the same on Chez through the R7RS libraries' Chez variants
+#                                        (scheme/lib/**/NAME.chezscheme.sls, SM8b): the reference's answers and times,
+#                                        test/scheme/ref-ecraven-chez.edn
 #   bin/si mats [--record] [FILE.ms...]  Chez's mats on si: each mat one body in an R6RS environment (test/scheme/mats/run.sps)
 #   bin/si corpora files|divergences     every file of the three corpora in a result or a class; the recorded items by class
 #   bin/si divergences [RESULTS]         the recorded check's non-pass items by class
@@ -103,6 +106,16 @@ si_print_build() {
 }
 # si_exec [--lib DIR]... FILE ARGS: the light driver, under the light tier's memory and threads
 si_exec() { GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$@"; }
+
+# chez_libdir: scheme/lib as Chez finds it (SM8b, SC113 (b)): Chez names (srfi :N ...)'s files srfi/:N/..., si
+# srfi/%3aN/... (psyntax's encoding), so .tmp/si/chez-lib links each; Chez takes NAME.chezscheme.sls before NAME.sls
+chez_lib=$light_dir/chez-lib
+chez_libdir() {
+  rm -rf "$chez_lib"; mkdir -p "$chez_lib/srfi"
+  local x
+  for x in "$root"/scheme/lib/scheme "$root"/scheme/lib/chibi; do ln -s "$x" "$chez_lib/"; done
+  for x in "$root"/scheme/lib/srfi/%3a*; do b=$(basename "$x"); ln -s "$x" "$chez_lib/srfi/:${b#%3a}"; done
+}
 
 # check_runs IMPL DIR [IDS...]: each program of programs.edn run by IMPL (si or chez) in its file's directory,
 # its stdin the :input file, into DIR/ID.out, .err, .rc
@@ -394,7 +407,7 @@ case $cmd in
     done
     echo "srfi: $ran programs"; exit $rc ;;
   r7rs)
-    # bin/si r7rs [--record]: Chibi's r7rs-tests.scm (the corpus chibi-r7rs) run on si in R7RS mode (--r7rs) with the
+    # bin/si r7rs [--record]: Chibi's r7rs-tests.scm (the corpus chibi-r7rs) run on si in R7RS mode (its own, SM8b) with the
     # R7RS libraries of scheme/lib/scheme and (chibi test): one result a test (SM8), judged by the file's own pass/fail,
     # every failing test in a class of test/scheme/divergences-corpora.edn; --record: test/scheme/check-r7rs-linux-amd64.edn
     rec=(); [ "${1:-}" = --record ] && rec=(--record)
@@ -404,33 +417,39 @@ case $cmd in
     corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
     d=$light_dir/r7rs; rm -rf "$d"; mkdir -p "$d"
     (cd "$corpora/chibi-r7rs" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
-       "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" --r7rs r7rs-tests.scm < "$light_dir/empty.in" > "$d/out" 2> "$d/err"; echo $? > "$d/rc") || true
+       "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" r7rs-tests.scm < "$light_dir/empty.in" > "$d/out" 2> "$d/err"; echo $? > "$d/rc") || true
     arbace_tool -m arbace.scheme.corpora r7rs "$d" ${rec[@]+"${rec[@]}"} ;;
   ecraven)
-    # bin/si ecraven [--count N] [--record] [NAME...]: ecraven's r7rs-benchmarks run on si in R7RS mode: each benchmark's
+    # bin/si ecraven [--count N] [--record] [NAME...]: ecraven's r7rs-benchmarks run on si in R7RS mode (their own): each benchmark's
     # source with common.scm appended (as ecraven's Makefile does) and its inputs/NAME.input on stdin with the repetition
     # count replaced by N (default 1); a benchmark checks its own result (the CSVLINE with a time, or INCORRECT);
     # SI_TIMEOUT seconds a benchmark (default 60). Judged by test/scheme/divergences-corpora.edn;
     # --record: test/scheme/check-ecraven-linux-amd64.edn
     mkdir -p "$light_dir"; : > "$light_dir/empty.in"
-    count=1; rec=(); names=()
-    while [ $# -gt 0 ]; do case $1 in --count) count=$2; shift 2 ;; --record) rec=(--record); shift ;; *) names+=("$1"); shift ;; esac; done
+    count=1; rec=(); names=(); impl=si
+    while [ $# -gt 0 ]; do case $1 in --count) count=$2; shift 2 ;; --record) rec=(--record); shift ;; --chez) impl=chez; shift ;; *) names+=("$1"); shift ;; esac; done
     "$root/bin/repr-scheme" corpus fetch ecraven-r7rs > "$light_dir/fetch.log"
-    [ -x "$si_light" ] || light
     corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}; ec=$corpora/ecraven-r7rs
-    d=$light_dir/ecraven; mkdir -p "$d" "$ec/outputs"   # slatex writes outputs/z0.scm
+    if [ $impl = chez ]; then d=$light_dir/ecraven-chez; chez_libdir; else [ -x "$si_light" ] || light; d=$light_dir/ecraven; fi
+    mkdir -p "$d" "$ec/outputs"   # slatex writes outputs/z0.scm
     if [ ${#names[@]} -eq 0 ]; then rm -rf "$d"; mkdir -p "$d"; for f in "$ec"/inputs/*.input; do names+=("$(basename "$f" .input)"); done; fi
     for n in "${names[@]}"; do
       [ -f "$ec/src/$n.scm" ] || { echo "no benchmark $n" >&2; continue; }
-      { cat "$ec/src/$n.scm"; echo; cat "$ec/src/common.scm"; echo '(define (this-scheme-implementation-name) "si")'; cat "$ec/src/common-postlude.scm"; } > "$d/$n.sps"
+      # Chez reads a program in R6RS's mode: #!chezscheme takes its own lexical syntax, --program the R7RS program's scope
+      { [ $impl = chez ] && echo '#!chezscheme'; cat "$ec/src/$n.scm"; echo; cat "$ec/src/common.scm"; echo "(define (this-scheme-implementation-name) \"$impl\")"; cat "$ec/src/common-postlude.scm"; } > "$d/$n.sps"
       # the input: the file with its first number (the count) replaced
       awk -v c="$count" 'BEGIN{done=0} { if (!done && match($0, /^[ \t]*[0-9]+/)) { sub(/^[ \t]*[0-9]+/, c); done=1 } print }' "$ec/inputs/$n.input" > "$d/$n.in"
       s=$(date +%s)
-      (cd "$ec" && timeout "${SI_TIMEOUT:-60}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
-         "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" --r7rs "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      if [ $impl = chez ]; then
+        (cd "$ec" && timeout "${SI_TIMEOUT:-60}" "$CHEZ" --libdirs "$chez_lib" --program "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      else
+        (cd "$ec" && timeout "${SI_TIMEOUT:-60}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
+           "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      fi
       echo "$n: rc $(cat "$d/$n.rc") $(( $(date +%s) - s )) s: $(grep -h 'CSVLINE' "$d/$n.out" | head -1)"
     done
-    [ -z "${ARBACE_ECRAVEN_NOJUDGE:-}" ] && arbace_tool -m arbace.scheme.corpora ecraven "$d" ${rec[@]+"${rec[@]}"} ;;
+    if [ $impl = chez ]; then arbace_tool -m arbace.scheme.corpora ecraven-chez "$d" ${rec[@]+"${rec[@]}"}
+    elif [ -z "${ARBACE_ECRAVEN_NOJUDGE:-}" ]; then arbace_tool -m arbace.scheme.corpora ecraven "$d" ${rec[@]+"${rec[@]}"}; fi ;;
   mats)
     # bin/si mats [--record] [FILE...]: Chez's mats (the corpus chez-mats) on si: each (mat NAME e ...) of a .ms file
     # evaluated as one body in an R6RS environment of the whole of (rnrs) beside the mat harness (scheme/lib/mats.sls),

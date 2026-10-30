@@ -12,10 +12,10 @@
   (interface (FoldCase [] :results [bool]) (SetFoldCase [^bool b])))
 
 (go/type StringSource "StringSource is a CharSource over a string's characters.\n"
-  (struct ^{:tag (slice rune)} s ^int i ^bool fold))
+  (struct ^{:tag (slice rune)} s ^int i ^bool fold ^bool r7rs))
 
-(go/func NewStringSource "NewStringSource is a source over the characters of s.\n" ^{:tag (* StringSource)} [^string s]
-  (addr (lit StringSource :s (conv (slice rune) s))))
+(go/func NewStringSource "NewStringSource is a source over the characters of s, in the default lexical mode (R7RS).\n" ^{:tag (* StringSource)} [^string s]
+  (addr (lit StringSource :s (conv (slice rune) s) :r7rs R7RS)))
 
 (go/method ReadChar [^{:tag (* StringSource)} p] :results [rune bool]
   (when (>= (.-i p) (len (.-s p)))
@@ -31,11 +31,20 @@
 
 (go/method FoldCase ^bool [^{:tag (* StringSource)} p] (.-fold p))
 (go/method SetFoldCase [^{:tag (* StringSource)} p ^bool b] (set! (.-fold p) b))
+(go/method R7RSMode ^bool [^{:tag (* StringSource)} p] (.-r7rs p))
+(go/method SetR7RSMode [^{:tag (* StringSource)} p ^bool b] (set! (.-r7rs p) b))
 
-(go/var ^{:tag bool :doc "R7RS makes the reader accept R7RS's lexical syntax beyond R6RS's: #u8( bytevectors, |...| identifiers and the other identifier characters R6RS leaves out (the driver's --r7rs; SM8).\n"} R7RS)
+(go/var ^{:tag bool :doc "R7RS is the lexical mode of a source that has none of its own (a string, a port before #!r7rs or #!r6rs): R7RS's lexical syntax beyond R6RS's, #u8( bytevectors, |...| identifiers, the other identifier characters R6RS leaves out and datum labels (SM8; since SM8b set from the program's mode, ReadProgram, SC106 (b)).\n"} R7RS)
+
+(go/type ModeState "ModeState is what a CharSource may also implement to keep its lexical mode (#!r7rs, #!r6rs) between reads (SC106 (b)).\n"
+  (interface (R7RSMode [] :results [bool]) (SetR7RSMode [^bool b])))
 
 (go/type reader "reader is the state of one read.\n"
-  (struct ^CharSource src ^{:tag (slice rune)} buf ^int pos ^bool fold ^FoldState fs ^bool gensyms))
+  (struct ^CharSource src ^{:tag (slice rune)} buf ^int pos ^bool fold ^FoldState fs ^bool gensyms
+          ^bool r7rs ^ModeState ms ^{:tag (map int64 (* labelRef))} labels))
+
+(go/type labelRef "labelRef is datum label N of one read (R7RS 2.4, #N= and #N#): its datum once read, a placeholder until then.\n"
+  (struct ^int64 n ^any v ^bool set))
 
 (go/method next [^{:tag (* reader)} r] :results [rune bool]
   (when (> (len (.-buf r)) 0)
@@ -62,6 +71,11 @@
   (when (>= (len (.-buf r)) 2)
     (return (aget (.-buf r) 1) true))
   (.PeekChar (.-src r)))
+
+(go/method setR7RS [^{:tag (* reader)} r ^bool b]
+  (set! (.-r7rs r) b)
+  (when (!= (.-ms r) nil)
+    (.SetR7RSMode (.-ms r) b)))
 
 (go/method setFold [^{:tag (* reader)} r ^bool b]
   (set! (.-fold r) b)
@@ -191,7 +205,8 @@
                     (.readEof r "#! syntax"))
                   (let [name (conv string tok)]
                     (switch name
-                      (case ["r6rs"])
+                      (case ["r6rs"] (.setR7RS r false))
+                      (case ["r7rs" "chezscheme"] (.setR7RS r true))
                       (case ["fold-case"] (.setFold r true))
                       (case ["no-fold-case"] (.setFold r false))
                       (default (.readFail r "invalid syntax #!~a" (Str name)))))))
@@ -209,6 +224,17 @@
           (return (.readEof r "string")))
         (when (== c \")
           (break))
+        ;; a line ending in a string is read as a linefeed (R6RS 4.2.7, R7RS 6.7; Chez's reader): CR, CR LF,
+        ;; NEL, CR NEL and LS (SC102 (b), read0's cases)
+        (when (== c 13)
+          (let [(values e ok6) (.peek r)]
+            (when (and ok6 (or (== e 10) (== e 0x85)))
+              (.next r)))
+          (set! out (append out 10))
+          (continue))
+        (when (or (== c 0x85) (== c 0x2028))
+          (set! out (append out 10))
+          (continue))
         (when (!= c \\)
           (set! out (append out c))
           (continue))
@@ -225,7 +251,7 @@
             (case [\r] (set! out (append out 13)))
             (case [\"] (set! out (append out \")))
             (case [\\] (set! out (append out \\)))
-            (case [\|] (if R7RS (set! out (append out \|)) (return (.readFail r "invalid string character \\~c" (conv Char d)))))
+            (case [\|] (if (.-r7rs r) (set! out (append out \|)) (return (.readFail r "invalid string character \\~c" (conv Char d)))))
             (case [\x]
               (let [^{:tag (slice rune)} ds nil]
                 (while true
@@ -254,7 +280,7 @@
                   (return (.readFail r "invalid string character \\~c" (conv Char d))))
                 (when (== cur 13)
                   (let [(values e ok6) (.peek r)]
-                    (when (and ok6 (== e 10))
+                    (when (and ok6 (or (== e 10) (== e 0x85)))
                       (.next r))))
                 (while true
                   (let [(values e ok7) (.peek r)]
@@ -263,7 +289,7 @@
                     (.next r)))))))))
     (addr (lit String :R out))))
 
-(go/func charNameValue "charNameValue is the character of a name, ok false if it names none.\n" [^string name] :results [rune bool]
+(go/func charNameValue "charNameValue is the character of a name, ok false if it names none.\n" [^string name ^bool r7rs] :results [rune bool]
   (switch name
     (case ["nul"] (return 0 true))
     (case ["alarm"] (return 7 true))
@@ -276,7 +302,7 @@
     (case ["esc"] (return 27 true))
     (case ["space"] (return 32 true))
     (case ["delete"] (return 127 true)))
-  (when R7RS
+  (when r7rs
     (switch name
       (case ["null"] (return 0 true))
       (case ["escape"] (return 27 true))))
@@ -293,7 +319,7 @@
             key name]
         (when (.-fold r)
           (set! key (strings/ToLower name)))
-        (let [(values v found) (charNameValue key)]
+        (let [(values v found) (charNameValue key (.-r7rs r))]
           (when found
             (return (conv Char v))))
         (when (== cp \x)
@@ -330,7 +356,7 @@
               (set! out (append out (conv rune v)))
               (set! i (+ j 1))
               (set! first false)))
-          R7RS
+          (.-r7rs r)
           (do (set! out (append out c)) (set! first false) (inc! i))
           (or (== c \') (== c \`) (== c \,) (== c \{) (== c \}) (== c \|))
           (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str (+ t " symbol"))))
@@ -392,7 +418,7 @@
           (return v)))
       (when (== t ".")
         (return (.readFail r "unexpected dot (.)")))
-      (when (and (not R7RS) (not (isPeculiar t)))
+      (when (and (not (.-r7rs r)) (not (isPeculiar t)))
         (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str (+ t " symbol"))))))
     (.identifier r tok)))
 
@@ -455,15 +481,40 @@
     (when (not ok)
       (return (.readEof r "# prefix")))
     ;; Chez's #%name and #N%name (a primitive at optimize level N): in R7RS mode the plain symbol (SM8)
-    (when (and R7RS (== d \%))
+    (when (and (.-r7rs r) (== d \%))
       (.next r)
       (return (.identifier r (.token r false))))
-    (when (and R7RS (isDigit d))
-      (let [(values e ok2) (.peek2 r)]
-        (when (and ok2 (== e \%))
-          (.next r)
-          (.next r)
-          (return (.identifier r (.token r false))))))
+    ;; R7RS's datum labels #N= and #N# (2.4; SC102 (b)), and Chez's #N%name
+    (when (and (.-r7rs r) (isDigit d))
+      (let [n (conv int64 0)]
+        (while true
+          (let [(values e ok2) (.peek r)]
+            (when (not (and ok2 (isDigit e)))
+              (break))
+            (.next r)
+            (set! n (+ (* n 10) (conv int64 (- e \0))))))
+        (let [(values e ok2) (.next r)]
+          (when (not ok2)
+            (return (.readEof r "datum label")))
+          (switch e
+            (case [\%] (return (.identifier r (.token r false))))
+            (case [\#]
+              (let [l (aget (.-labels r) n)]
+                (when (== l nil)
+                  (return (.readFail r "undefined datum label #~a#" n)))
+                (when (.-set l)
+                  (return (.-v l)))
+                (return l)))
+            (case [\=]
+              (when (== (.-labels r) nil)
+                (set! (.-labels r) (make (map int64 (* labelRef)))))
+              (let [l (addr (lit labelRef :n n))]
+                (aset (.-labels r) n l)
+                (let [v (.datum r "datum label")]
+                  (set! (.-v l) v)
+                  (set! (.-set l) true)
+                  (return (patchLabels v (make (map any bool)))))))
+            (default (return (.readFail r "invalid syntax #~a~c" n (conv Char e))))))))
     (switch d
       (case [\{]
         (when (.-gensyms r)
@@ -514,7 +565,7 @@
             (return v)))))
     (let [tok (conv string (.token r false))
           l (strings/ToLower tok)]
-      (when (or (== tok "vu8") (and R7RS (== tok "u8")))
+      (when (or (== tok "vu8") (and (.-r7rs r) (== tok "u8")))
         (let [(values p ok2) (.peek r)]
           (when (and ok2 (== p \())
             (.next r)
@@ -563,7 +614,7 @@
       (case [\}]
         (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str "close brace"))))
       (case [\|]
-        (when R7RS
+        (when (.-r7rs r)
           (.next r)
           (return (.readBarSymbol r)))
         (return (.readFail r "~a syntax is not allowed in #!r6rs mode" (Str "|...| symbol escape"))))
@@ -590,6 +641,11 @@
     (when ok
       (set! (.-fs r) fs)
       (set! (.-fold r) (.FoldCase fs)))
+    (set! (.-r7rs r) R7RS)
+    (let [(values ms ok2) (assert ModeState src)]
+      (when ok2
+        (set! (.-ms r) ms)
+        (set! (.-r7rs r) (.R7RSMode ms))))
     (.skipAtmosphere r)
     (let [(values _ more) (.peek r)]
       (when (not more)
@@ -607,42 +663,94 @@
     out))
 
 
-(go/func SelfEvalForms "SelfEvalForms is datum d with each vector and bytevector literal outside a quotation written (quote v): R7RS lets them evaluate to themselves, R6RS's expander does not. The program's forms are walked once after they are read (quote stops the walk, quasiquote continues under its unquotes); SM8.\n" ^any [^any d]
-  (return (selfEval d 0)))
+(go/func patchLabels "patchLabels is datum v with each placeholder of a datum label replaced by its datum, in place (cycles kept; seen: the pairs and vectors walked).\n"
+  ^any [^any v ^{:tag (map any bool)} seen]
+  (type-switch [x v]
+    (case [(* labelRef)]
+      (when (.-set x)
+        (return (.-v x)))
+      (return v))
+    (case [(* Pair)]
+      (when (aget seen v)
+        (return v))
+      (aset seen v true)
+      (set! (.-Car x) (patchLabels (.-Car x) seen))
+      (set! (.-Cdr x) (patchLabels (.-Cdr x) seen))
+      (return v))
+    (case [(* Vector)]
+      (when (aget seen v)
+        (return v))
+      (aset seen v true)
+      (range [i e (.-V x)]
+        (aset (.-V x) i (patchLabels e seen)))
+      (return v))
+    (default (return v))))
+
+(go/func isR7RSImport "isR7RSImport is whether datum d is an import form naming an R7RS library: (scheme ...), or a library name with a number (srfi 1); or (chezscheme).\n"
+  ^bool [^any d]
+  (let [(values p ok) (assert (* Pair) d)]
+    (when (or (not ok) (!= (headName (.-Car p)) "import"))
+      (return false))
+    (let [specs (.-Cdr p)]
+      (while true
+        (let [(values q ok2) (assert (* Pair) specs)]
+          (when (not ok2)
+            (return false))
+          (when (r7rsName (.-Car q))
+            (return true))
+          (set! specs (.-Cdr q)))))
+    (return false)))
+
+(go/func r7rsName "r7rsName is whether import set s names an R7RS library (under only, except, prefix and rename too).\n" ^bool [^any s]
+  (let [(values p ok) (assert (* Pair) s)]
+    (when (not ok)
+      (return false))
+    (let [h (headName (.-Car p))]
+      (when (or (== h "only") (== h "except") (== h "prefix") (== h "rename"))
+        (let [(values q ok2) (assert (* Pair) (.-Cdr p))]
+          (when ok2
+            (return (r7rsName (.-Car q))))
+          (return false)))
+      ;; (chezscheme) too: Chez's lexical extensions (1+, #%name) are in R7RS's mode (SM8b, SC110 (b))
+      (when (or (== h "scheme") (and (== h "chezscheme") (== (.-Cdr p) (conv any Null))))
+        (return true))
+      (let [l (.-Cdr p)]
+        (while true
+          (let [(values q ok3) (assert (* Pair) l)]
+            (when (not ok3)
+              (return false))
+            (when (isExactInt (.-Car q))
+              (return true))
+            (set! l (.-Cdr q)))))
+      (return false))))
+
+(go/func isExactInt ^bool [^any d]
+  (let [(values _ ok) (assert int64 d)]
+    ok))
+
+(go/func ReadProgram "ReadProgram is every datum of a program's text and its lexical mode (SC106 (b)): R7RS when the text says #!r7rs before its first datum, or its first datum imports an R7RS library ((scheme ...), (srfi 1)), or the default R7RS is set; R6RS otherwise. The R7RS default follows it, so the program's ports read as it does.\n"
+  ^{:tag (slice any)} [^string s] :results [(slice any) bool]
+  (let [r7 R7RS]
+    (when (not r7)
+      (let [src (NewStringSource s)
+            first (ReadFirst src)]
+        (set! r7 (or (.-r7rs src) (isR7RSImport first)))))
+    (let [save R7RS]
+      (set! R7RS r7)
+      (let [forms (ReadAllString s)]
+        (when (not r7)
+          (set! R7RS save))
+        (return forms r7)))))
+
+(go/func ReadFirst "ReadFirst is the first datum of src, false when it cannot be read (or none).\n" ^any [^CharSource src]
+  (let [^any d false]
+    ((fn []
+       (defer ((fn [] (recover))))
+       (set! d (ReadDatum src))))
+    d))
 
 (go/func headName "headName is the name of the symbol d, \"\" if d is none.\n" ^string [^any d]
   (let [(values sym ok) (assert (* Symbol) d)]
     (when ok
       (return (.-Name sym)))
     (return "")))
-
-(go/func selfEval ^any [^any d ^int level]
-  (type-switch [v d]
-    (case [(* Vector)] (return (List (Intern "quote") d)))
-    (case [(* Bytevector)] (return (List (Intern "quote") d)))
-    (case [(* Pair)]
-      (let [h (headName (.-Car v))]
-        (when (== h "quote")
-          (return d))
-        (when (== h "quasiquote")
-          (return (addr (lit Pair :Car (.-Car v) :Cdr (selfEvalQQ (.-Cdr v) 1)))))
-        (return (addr (lit Pair :Car (selfEval (.-Car v) 0) :Cdr (selfEvalTail (.-Cdr v)))))))
-    (default (return d))))
-
-(go/func selfEvalTail ^any [^any d]
-  (type-switch [v d]
-    (case [(* Pair)] (return (addr (lit Pair :Car (selfEval (.-Car v) 0) :Cdr (selfEvalTail (.-Cdr v))))))
-    (default (return d))))
-
-(go/func selfEvalQQ ^any [^any d ^int level]
-  (type-switch [v d]
-    (case [(* Pair)]
-      (let [(values head isSym) (assert (* Symbol) (.-Car v))]
-        (when (and isSym (== (.-Name head) "quasiquote"))
-          (return (addr (lit Pair :Car (.-Car v) :Cdr (selfEvalQQ (.-Cdr v) (+ level 1))))))
-        (when (and isSym (or (== (.-Name head) "unquote") (== (.-Name head) "unquote-splicing")))
-          (if (== level 1)
-            (return (addr (lit Pair :Car (.-Car v) :Cdr (selfEvalTail (.-Cdr v)))))
-            (return (addr (lit Pair :Car (.-Car v) :Cdr (selfEvalQQ (.-Cdr v) (- level 1)))))))
-        (return (addr (lit Pair :Car (selfEvalQQ (.-Car v) level) :Cdr (selfEvalQQ (.-Cdr v) level))))))
-    (default (return d))))

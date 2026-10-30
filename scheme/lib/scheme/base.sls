@@ -5,8 +5,8 @@
 ;;;; the range arguments of string and vector procedures, member and assoc with a predicate, bytevector-copy!,
 ;;;; parameter objects, promises, ports) this library defines the R7RS one; the rest is (rnrs) re-exported.
 ;;;; si's own string and bytevector port procedures come from (psyntax system $all).
-;;;; Not provided: include, include-ci, define-library (R6RS libraries only), syntax-rules with a custom ellipsis
-;;;; (SM8's classes, SC100).
+;;;; Not provided: include and include-ci as expressions (define-library's include declarations are read by the
+;;;; host, SM8b, SC107 (b)).
 (library (scheme base)
   (export
     => ... _ * + - / < <= = > >= abs and append apply assoc assq assv begin binary-port? boolean=? boolean?
@@ -36,10 +36,10 @@
     ;; used by (scheme lazy), (scheme r5rs) and the other R7RS libraries
     delay delay-force make-promise promise? force)
   (import (except (rnrs)
-                  map for-each string-for-each vector-for-each error define-record-type syntax-rules let-syntax letrec-syntax let*-values case string-copy string->list vector->list string-fill! vector-fill!
+                  map for-each string-for-each vector-for-each error define-record-type let-syntax letrec-syntax let*-values case string-copy string->list vector->list string-fill! vector-fill!
                   member assoc bytevector-copy bytevector-copy! utf8->string string->utf8 vector-map close-port close-input-port close-output-port
                   call-with-port exact-integer-sqrt)
-          (prefix (only (rnrs) map for-each string-for-each vector-for-each define-record-type syntax-rules let-syntax letrec-syntax let*-values) r6:)
+          (prefix (only (rnrs) map for-each string-for-each vector-for-each define-record-type let-syntax letrec-syntax let*-values) r6:)
           (rnrs mutable-pairs)
           (only (rnrs r5rs) quotient remainder modulo)
           (except (rnrs mutable-strings) string-fill!)
@@ -55,43 +55,7 @@
 
   ;; ---------------------------------------------------------------------------------------- syntax
 
-;; syntax-rules with R7RS's optional ellipsis identifier: (syntax-rules ell (literal ...) (pattern template) ...) is
-  ;; rewritten to R6RS's, ell replaced by ... and a literal ... in a template written (... ...)
-  (define-syntax syntax-rules
-    (lambda (stx)
-      ;; R6RS's expander refuses _ and ... among the literals, R7RS lets them be literals (SC100: they act as before)
-      (define (drop-special l)
-        (let loop ((l l))
-          (syntax-case l ()
-            ((a . d) (if (or (and (identifier? #'a) (free-identifier=? #'a #'_)) (and (identifier? #'a) (free-identifier=? #'a #'(... ...)))) (loop #'d) (cons #'a (loop #'d))))
-            (_ '()))))
-      (syntax-case stx ()
-        ((_ (lit ...) clause ...)
-         (with-syntax (((l ...) (drop-special #'(lit ...))))
-           #'(r6:syntax-rules (l ...) clause ...)))
-        ((_ ell (lit ...) clause ...)
-         (identifier? #'ell)
-         (let* ((dots (datum->syntax #'ell '...))
-                (lit-dots? (exists (lambda (l) (and (identifier? l) (free-identifier=? l dots)))
-                                   (let loop ((l #'(lit ...)))
-                                     (syntax-case l () ((a . d) (cons #'a (loop #'d))) (_ '()))))))
-           (define (conv x tmpl?)
-             (syntax-case x ()
-               ((a . d) (cons (conv #'a tmpl?) (conv #'d tmpl?)))
-               (id (identifier? #'id)
-                (cond ((and lit-dots? tmpl? (free-identifier=? #'id dots)) (list dots dots))
-                      ((bound-identifier=? #'id #'ell) dots)
-                      ((and tmpl? (free-identifier=? #'id dots)) (list dots dots))
-                      (else #'id)))
-               (#(v ...) (list->vector (r6:map (lambda (e) (conv e tmpl?)) #'(v ...))))
-               (other #'other)))
-           (with-syntax (((c ...) (r6:map (lambda (cl)
-                                         (syntax-case cl ()
-                                           ((pat tmpl) (list (conv #'pat #f) (conv #'tmpl #t)))))
-                                       (let loop ((l #'(clause ...)))
-                                         (syntax-case l () ((a . d) (cons #'a (loop #'d))) (_ '()))))))
-             (with-syntax (((l ...) (drop-special #'(lit ...))))
-               #'(r6:syntax-rules (l ...) c ...))))))))
+  ;; syntax-rules is psyntax's, R7RS's since SM8b (SC100 (b): a custom ellipsis, _ and ... as literals)
 
   ;; R7RS's let-syntax and letrec-syntax and let*-values open a scope (psyntax's splice a body's definitions)
   (define-syntax let-syntax

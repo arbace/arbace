@@ -7,7 +7,7 @@
 (in-ns 'go.arbace.scm)
 
 (go/file "system.go"
-  :imports [[fmt "fmt"] [os "os"] [strconv "strconv"] [strings "strings"]])
+  :imports [[fmt "fmt"] [os "os"] [filepath "path/filepath"] [strconv "strconv"] [strings "strings"]])
 
 (go/func ArgSymbolLoc ^{:tag (* Symbol)} [^string who ^any x] (ArgSymbol who x))
 
@@ -102,10 +102,7 @@ the message formatted with the irritants when it has directives, else followed b
           (values text err) (os/ReadFile name)]
       (when (!= err nil)
         (Violation CondIOFileDoesNotExist "read-library-source-file" "failed to open ~s" f))
-      (let [xs (ReadAllString (conv string text))]
-        (when (== (len xs) 0)
-          (return Eof))
-        (aget xs 0)))))
+      (ReadLibrarySource name (conv string text)))))
   (Def "format" 1 -1 (fn ^any [^{:tag (slice any)} a]
     (let [(values s ok) (assert (* String) (aget a 0))]
       (when ok
@@ -117,6 +114,93 @@ the message formatted with the irritants when it has directives, else followed b
           (return (Str text)))
         (WriteString (aget a 0) text)
         Unspec)))))
+
+(go/func ReadLibrarySource
+  "ReadLibrarySource is the library form of a library file's text (psyntax's read-library-source-file; SC106 (b),
+SC107 (b)): read in R7RS's lexical mode when the file is a .sld, says #!r7rs, or holds a define-library (R6RS's
+otherwise, unless the default R7RS is set); a define-library's include, include-ci and include-library-declarations
+are replaced by the files' data (begin and the declarations), relative to the file's directory. Eof when empty.\n"
+  ^any [^string name ^string text]
+  (let [src (NewStringSource text)]
+    (when (strings/HasSuffix name ".sld")
+      (set! (.-r7rs src) true))
+    (let [^any d false
+          failed true]
+      ((fn []
+         (defer ((fn [] (recover))))
+         (set! d (ReadDatum src))
+         (set! failed false)))
+      ;; read again in R7RS's mode: a define-library read in R6RS's, or a text R6RS's refuses (raised again if
+      ;; R7RS's refuses it too)
+      (when (or failed (and (not (.-r7rs src)) (== (headName (pairCar d)) "define-library")))
+        (let [again (NewStringSource text)]
+          (set! (.-r7rs again) true)
+          (set! d (ReadDatum again))))
+      (when (== (headName (pairCar d)) "define-library")
+        (let [(values p _) (assert (* Pair) d)
+              (values q ok) (assert (* Pair) (.-Cdr p))]
+          (when ok
+            (return (addr (lit Pair :Car (.-Car p) :Cdr (addr (lit Pair :Car (.-Car q) :Cdr (includeDecls (.-Cdr q) (filepath/Dir name))))))))))
+      d)))
+
+(go/func pairCar ^any [^any d]
+  (let [(values p ok) (assert (* Pair) d)]
+    (when ok
+      (return (.-Car p)))
+    (return false)))
+
+(go/func readIncluded "readIncluded is every datum of an included file (R7RS's lexical mode; include-ci folds case).\n"
+  ^{:tag (slice any)} [^any f ^string dir ^bool fold]
+  (let [file (.String (ArgString "include" f))]
+    (when (not (filepath/IsAbs file))
+      (set! file (filepath/Join dir file)))
+    (let [(values text err) (os/ReadFile file)]
+      (when (!= err nil)
+        (Violation CondIOFileDoesNotExist "include" "failed to open ~s" f))
+      (let [src (NewStringSource (conv string text))
+            ^{:tag (slice any)} out nil]
+        (set! (.-r7rs src) true)
+        (set! (.-fold src) fold)
+        (while true
+          (let [x (ReadDatum src)]
+            (when (== x (conv any Eof))
+              (break))
+            (set! out (append out x))))
+        out))))
+
+(go/func includeDecls "includeDecls is a define-library's declarations with its includes read (inside cond-expand's clauses too).\n"
+  ^any [^any decls ^string dir]
+  (let [(values ds ok) (ListSlice decls)]
+    (when (not ok)
+      (return decls))
+    (let [^{:tag (slice any)} out nil]
+      (range [_ d ds]
+        (let [(values p isPair) (assert (* Pair) d)
+              h (headName (pairCar d))]
+          (cond
+            (not isPair) (set! out (append out d))
+            (or (== h "include") (== h "include-ci"))
+            (let [(values fs _) (ListSlice (.-Cdr p))
+                  ^{:tag (slice any)} body nil]
+              (range [_ f fs]
+                (set! body (append body (spread (readIncluded f dir (== h "include-ci"))))))
+              (set! out (append out (addr (lit Pair :Car (Intern "begin") :Cdr (ListTail body Null))))))
+            (== h "include-library-declarations")
+            (let [(values fs _) (ListSlice (.-Cdr p))]
+              (range [_ f fs]
+                (let [(values more _) (ListSlice (includeDecls (ListTail (readIncluded f dir false) Null) dir))]
+                  (set! out (append out (spread more))))))
+            (== h "cond-expand")
+            (let [(values cls _) (ListSlice (.-Cdr p))
+                  ^{:tag (slice any)} ncls nil]
+              (range [_ c cls]
+                (let [(values cp isCl) (assert (* Pair) c)]
+                  (if isCl
+                    (set! ncls (append ncls (addr (lit Pair :Car (.-Car cp) :Cdr (includeDecls (.-Cdr cp) dir)))))
+                    (set! ncls (append ncls c)))))
+              (set! out (append out (addr (lit Pair :Car (.-Car p) :Cdr (ListTail ncls Null))))))
+            :else (set! out (append out d)))))
+      (ListTail out Null))))
 
 (go/method Psyntax "Psyntax is psyntax's procedure exported as name (its primitive location's value).\n"
   ^any [^{:tag (* M)} m ^string name]

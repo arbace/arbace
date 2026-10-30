@@ -1811,3 +1811,226 @@ after I started (`/usr/bin/chibi-scheme`, the coordinator's message); I used it 
 - SC104 (a) now, (b) once `define-library` exists.
 - SC108 (b), SC109 (b) in the window after the tag, SC110 (b) then (c), SC111 (b), SC113 (b).
 - SC112 (a) once `go/arbace/scm` is in the shipped executable, (c) until then; SC114 (b) with the re-seed.
+
+## As built: SM8b (write-ahead) (2026-10-30)
+
+Branch `scheme-sm1`, on `73dadabb`. The light items of SC100-SC114 as decided (the user, 2026-10-30), built
+**write-ahead** in the light tier beside GT7's clean run: no gate, no build of Arbace's executables or javac's tool,
+no lock, no `.tmp/heavy` slot, every run on stage 0 (`ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace`) or the
+light driver (`.tmp/si/si-light`, TamaGo's go, `-p 2`), `GOMEMLIMIT` 1000-1500 MiB and one run at a time (two only
+for Chez's light benchmark runs beside the mats). `bin/si boot` needs only Chez and stage 0, so the boot batch is done
+here, not on the heavy list. Done: SC100 (b), SC101 (b) (corrected, SC115), SC102 (b), SC103 (b), SC105 (b), SC106
+(c) with (b), SC107 (b), SC108 (b), SC110 (b) then (c), SC111 (b), SC113 (b); SC104 (a) stays and its (b) is not done
+(SC118); SC109, SC112, SC114 are for after the tag.
+
+### What was built
+
+- **The boot batch** (`scheme/psyntax/patches.edn`, nine new patches; `tools/psyntax/boot.ss`; `bin/si boot` on Chez
+  10.3.0 and stage 0, 45-60 s, no Arbace build: light work after all, so it is done here and not on the heavy list):
+  - *SC100 (b)* psyntax's `syntax-rules` is R7RS's (4.3.2): `(syntax-rules ELL (LIT ...) CLAUSE ...)` names a custom
+    ellipsis (the clauses rewritten to `...`, and a `...` of a template escaped as `(... ...)`, so nested macros each
+    keep their own: `be-like-begin3`); `_` and `...` may be literals and match literally (the `syntax-case` it expands
+    into takes them from `syntax-rules` alone, by a marker object at the head of its literals, so R6RS's `syntax-case`
+    still refuses them as Chez does; `convert-pattern` puts a literal before an ellipsis); an ellipsis that is a
+    literal, or a custom one, leaves `...` ordinary in the templates (`elli-lit-1`). The R6RS form is unchanged.
+    `(scheme base)`'s rewriting `syntax-rules` (SM8's stopgap) is gone: base exports psyntax's.
+  - *SC106 (c)* a vector evaluates to itself (`self-evaluating?`, R7RS 4.1.2, as Chez; psyntax already took
+    bytevectors); the driver's walk that quoted them (`SelfEvalForms`) is gone.
+  - *SC107 (b)* numbers in library names: `(srfi 1)` is SRFI 97's `(srfi :1)`, in a library's own name and in
+    imports (both of psyntax's `parse-library-name`s); `define-library` (R7RS 5.6.1) is a library to
+    `parse-library`: `export` (R7RS's `(rename a b)` made R6RS's `(rename (a b))`), `import`, `begin` gathered in
+    order, `cond-expand`'s chosen declarations spliced (the features are `(scheme base)`'s; `(library NAME)` is met
+    when the library is found); `.sld` is a library extension (after `.sls`). `include`, `include-ci` and
+    `include-library-declarations` are read by the host (`go/arbace/scm/system.ae`, `ReadLibrarySource`, below).
+  - *SC105 (b)* `(psyntax system $all)` lists si's own primitives (`boot.ss`'s `si-primitives`, in an invisible
+    library `(psyntax system si)`): `real-time`, `cpu-time` (Chez's, milliseconds), `current-microseconds`, the
+    watchdog (`watchdog`, SC111), R7RS's printer (`r7rs-write`, `r7rs-display`, `r7rs-write-shared`,
+    `r7rs-write-simple`, SC103) and psyntax's own `module` and `import` keywords (for `(chezscheme)`).
+    `go/arbace/scm/clock.ae` (+ `clock_linux.ae`, getrusage; `clock_other.ae`, the box: time since start) defines
+    the clock; `(scheme time)` is over `current-microseconds` (SM8's read `/proc`).
+- **Lexical mode per source** (*SC106 (b)*; `go/arbace/scm/read.ae`): the reader's mode is the source's (`ModeState`,
+  kept by string sources and ports between reads): `#!r7rs` (and Chez's `#!chezscheme`) sets R7RS's, `#!r6rs`
+  R6RS's; a source without one takes the default `scm.R7RS`. `ReadProgram` reads a program in R7RS's mode when it
+  says `#!r7rs` or its first datum imports an R7RS library (`(scheme ...)`, a name with a number such as `(srfi 1)`,
+  or `(chezscheme)`), and sets the default from it, so the program's string ports read as it does (Chibi's
+  `(read (open-input-string "#0=(1 . #0#)"))`). `ReadLibrarySource` (psyntax's `read-library-source-file`) reads a
+  library file in R7RS's mode when it is a `.sld`, says so, or holds a `define-library`, and replaces its includes
+  by the files' data (relative to the file, inside `cond-expand` too). The driver reads with `ReadProgram`; its
+  `--r7rs` only forces the default (the mats' run keeps it, for Chez's lexical extensions); `bin/si r7rs` and
+  `bin/si ecraven` no longer pass it.
+- **Datum labels and line endings** (*SC102 (b)*): in R7RS's mode `#N=` and `#N#` (a table per read, the cycle patched
+  in place: `patchLabels`); Chez's `#N%name` kept. A line ending inside a string is read as a linefeed (CR, CR LF,
+  NEL, CR NEL, LS: R6RS 4.2.7, R7RS 6.7, Chez's reader), and `\` before CR NEL continues the line: read0's four
+  string cases now pass (below for why read0 still says INCORRECT).
+- **R7RS's printer** (*SC103 (b)*; `go/arbace/scm/write.ae`, `WriteR7RS`): labels for cycles (`write`, `display`) or for
+  every shared pair and vector (`write-shared`), none for `write-simple`; symbols between bars when they would not
+  read back (empty, `.`, a character outside R7RS's identifier characters, one that reads as a number or begins
+  like one, Chibi's rule: `|+NaN.0abc|`, `|1+|`, `|.5a|`); R7RS's string escapes; `#u8(`; `#\null`, `#\escape`.
+  `(scheme write)` is the four primitives (SM8's eq-hashtable walk of every `write` is gone).
+- **sqrt on the branch cut** (*SC101 (b)*, with a correction): SM8's proposal said Chez agrees with R7RS; it does not:
+  Chez 10.3.0's `(sqrt -1.0-0.0i)` is `0.0-1.0i`, as si's and C99's `csqrt` (the sign of the zero kept), and only
+  Chibi gives `0.0+1.0i` (continuous with quadrant II). So si's R6RS `sqrt` stays Chez's and `(scheme inexact)`'s
+  `sqrt` takes the R7RS reading (a negative real part with a `-0.0` imaginary part as `+0.0`), SC115.
+- **`(chezscheme)`** (*SC110 (b)*; `scheme/lib/chezscheme.sls`, read in `#!chezscheme` mode): the 702 names of (rnrs),
+  (rnrs eval), (rnrs mutable-pairs), (rnrs mutable-strings) and (rnrs r5rs) (the list is Chez's `library-exports` of
+  them) and 99 Chez extensions written for Arbace from Chez's User's Guide: the fixnum and flonum comparisons of one
+  or more arguments (`fx=` ... `fl>=`), `fx1+`, `1+`, `add1` and relatives, `void`, `iota`, `list-head`, `last-pair`,
+  `sort`, `sort!`, `merge`, `list*`, `make-list`, `errorf`, `warningf`, `open-input-string`, `open-output-string`,
+  `get-output-string`, `with-output-to-string`, `bytevector`, `ash` and the `log*` operations, `random` (xorshift,
+  not Chez's sequence), `nonnegative?`, `gensym`, `rec`, `fluid-let`, `printf`, `fprintf`, `format` (si's
+  directives), `pretty-print` (as `write`), `andmap`, `ormap`, the fixnum bounds and shifts, `integer-length`,
+  `bignum?`, `ratnum?`, boxes, `append!`, `reverse!`, `list-copy`, `atom?`, `char-`, `enumerate`,
+  `exact-nonnegative-integer?`, `fxnonnegative?`, the `subst` family, `remq!` and relatives, `call/1cc`, `exclusive-cond`, `define-values`, SRFI 39's parameters, psyntax's `module` and `import` (Chez's internal modules
+  work), `real-time`, `cpu-time`. Not provided: Chez's further `format` directives, `define-record`,
+  `define-ftype` and the foreign interface, the compiler's parameters, threads.
+- **The mats' harness** (`test/scheme/mats/run.sps`, `scheme/lib/si/mats.sls`): the environment is `(chezscheme)` and
+  `(si mats)`, whose helpers are now those the mats take from Chez's `mat.ss` (`==`, `fl~=`, `~=`, `nan`, `pi`,
+  `+pi` ..., written for Arbace from their use); every mat and prelude definition runs under the watchdog
+  (`SI_MAT_MS`, 20 s); a mat that does not expand has its clauses run one by one with the prelude (*SC110 (c)*,
+  `CLAUSES NAME P F N`, summed per file in the result's `:clauses-alone`); error messages are written by R7RS's
+  writer (a cyclic irritant has labels, so the harness does not loop printing it).
+- **The watchdog** (*SC111 (b)*; `clock.ae`, `eval.ae`): `(watchdog MS)` arms a timer whose firing sets a flag that
+  the machine's loop looks at every 4,096 steps (`watchdogTick`) and raises an `&error` (who `watchdog`) in the
+  running program; `(watchdog 0)` disarms it. A Scheme loop ends as a failing mat; a loop inside a Go primitive is
+  not reached by it, so the file-level skip-and-rerun of SM8 stays as the fallback. Three such loops are fixed:
+  `ListSlice` (`apply` and every list argument) and `memq`/`memv`/`member`/`assq`/`assv`/`assoc` detect a circular
+  list (Chez's "circular list" error), and `list-ref`/`list-tail` on a circular list reduce the index modulo the
+  cycle (Chez's rule: `(list-ref cyclic (expt 2 1000))`).
+- **Chez through the same libraries** (*SC113 (b)*): `scheme/lib/scheme/{base,write,time,file}.chezscheme.sls`
+  (Chez takes `NAME.chezscheme.sls` before `NAME.sls`): SM8's `(scheme base)` with its `syntax-rules` rewrite (Chez's
+  is R6RS's) and SM8's Scheme printer for `(scheme write)`, the clock over Chez's `current-time`; `bin/si ecraven
+  --chez` runs each assembled benchmark by `chez --script` with `.tmp/si/chez-lib` (links: Chez names
+  `(srfi :39 ...)`'s files `srfi/:39/...`, psyntax `srfi/%3a39/...`), judged by `arbace.scheme.corpora
+  ecraven-chez` into `test/scheme/ref-ecraven-chez.edn`; si's result now carries its seconds and Chez's verdict and
+  seconds per benchmark. Makefile targets `si-ecraven-chez`, `si-ecraven-chez-record`.
+- **ecraven's two inputs** (*SC108 (b)*): `inputs/bib` (4,460,056 bytes, SHA-256 `2994b446...b8d3`) and
+  `inputs/sum1.data` (1,100,000 bytes, `afb59ec8...c0dc`) fetched from raw.githubusercontent.com at the pinned commit
+  `85f6acdc` and pinned in `test/scheme/corpora.edn` (173 files, 7,099,555 bytes); the license question stays open,
+  recorded there (nobody contacted).
+
+### The checks, numbers (after the last change)
+
+- **Chibi's R7RS suite on si: 1,225 tests, 1,216 pass (SM8: 1,211), 9 fail**, all `r7rs-float-printing` (SC22); the
+  four classes of SM8's other five failures are gone (`_` literal, sqrt's cut, `#0=` in `read` twice, `|+NaN.0abc|`).
+  The suite runs in its own R7RS mode (no `--r7rs`), 6.5 s. `test/scheme/check-r7rs-linux-amd64.edn`.
+- **ecraven's benchmarks on si: 58, 54 right (SM8: 50)**: `cat`, `tail`, `wc`, `sum1` run on the fetched inputs and
+  pass; `earley`, `takl`, `ntakl` past 300 s at count 1 (`ecraven-too-slow`, SC109); `read0` INCORRECT by construction
+  (SC120). si's 54 take 1,153 s against Chez's 88 s on the same 54 (the interpreter at count 1; fib 40: 71 s against
+  0.92 s, tak 163 s against 1.78 s, ack 153 s against 1.41 s). `test/scheme/check-ecraven-linux-amd64.edn` now holds
+  si's seconds and Chez's verdict and seconds per benchmark.
+- **ecraven's benchmarks on Chez through the same libraries (SC113 (b)): 57 of 58 right**, 102 s in all; `read0` is not
+  read by Chez (`#\null`). `test/scheme/ref-ecraven-chez.edn`. Chibi (SM8's runs) and Chez now agree with si on
+  every answer si gives.
+- **Chez's mats on si: 908 mats (SM8 885: datum labels read 23 more), 220 pass (SM8: 113), 119 fail, 558 do not run,
+  11 skipped**; 946 non-pass items, 0 in no class: `mats-chez-identifier` 589 (SM8 720; the commonest left:
+  `test-cp0-expansion` 60, `$v1` 29, `equivalent-expansion?` 24, `cfl~=` 14, `define-ftype` 12, `define-record` 10),
+  `mats-chez-reader` 228, `mats-format` 49, `mats-arity-one` 15, `mats-numeric` 14 (new: run since `(chezscheme)`),
+  `mats-error-checks` 12 (new: Chez raises, si loops or returns; the watchdog ends the loops), `mats-chezscheme-subset`
+  11 (new), `mats-parameters` 11, `mats-chez-checks` 5, `mats-eq-identity` 4, `mats-chez-module` 4 (new),
+  `mats-hang` 1 (SM8: 7), `mats-toplevel` 1. **The clauses of the 558 that do not expand, run alone (SC110 (c)):
+  3,512 pass, 3,303 fail, 7,964 do not run.** The run took one file rerun in all (`5_3.ms`, a clause of `/` run alone
+  that loops in a Go primitive: six skips, then its timeout; SC119); `5_2.ms`, SM8's slowest, now ends on its own.
+  `test/scheme/check-mats-linux-amd64.edn` (with `:clauses-alone` per file).
+- **Every corpus file in a result or a class**: `bin/si corpora files`: 220 files (ecraven's 173 with the two inputs),
+  0 in neither.
+- **No regression**: `bin/si check` **46 of 47**, 1 in a class (`chez-conditions`), 0 failing (as SM8; recorded);
+  `bin/si check --aot` **44 of 47**, 3 non-pass (`chez-conditions`, 2 `syntax-constants`), 0 failing, 45 of 47 compiled runs the same as the interpreted (as SM8; psyntax recompiled from the new boot; recorded); `bin/si srfi` 11 of 11; `bin/si test --si` 61 of 64, 3 known, 0 failing; `bin/si
+  test` (the bootstrap host) 60 of 64, 4 known, 0 failing, 31 of 39 the same as Chez's `expand`; `bin/si check-suite`
+  27 of 27 libraries, `run.sps` expanded; `bin/si fixpoint` 6 of 6 (psyntax on Arbace expands the patched psyntax as
+  Chez does); `bin/si boot --check` gives the committed `psyntax.pp.ae`; `bin/si unit` ok (new `TestReadProgram`,
+  labels, line endings); `make check-makefile` rc 0.
+### Proposals (SC115 onward)
+
+- **SC115 sqrt's branch cut, R6RS against R7RS.** SC101 (b) was decided on SM8's claim that Chez agrees with R7RS; it
+  does not (Chez 10.3.0: `(sqrt -1.0-0.0i)` is `0.0-1.0i`, as si and C99's `csqrt`; Chibi 0.12.0: `0.0+1.0i`).
+  - Options: (a) as built: si's `sqrt` stays Chez's, `(scheme inexact)`'s `sqrt` reads a `-0.0` imaginary part on the
+    negative real axis as `+0.0` (R7RS's suite passes, the R6RS checks against Chez stay as they are); (b) si's own
+    `sqrt` changed for both standards (the R6RS checks would differ from Chez); (c) back to the class.
+  - *Recommended: (a)*: each standard's reference holds in its own mode, in one place each.
+- **SC116 `(srfi 1)` beside `(scheme base)`.** `(import (scheme base) (srfi 1))`, the commonest R7RS import, fails:
+  "two imports with different bindings" for `map`, `member`, `assoc`, `make-list` and `list-copy` (`(srfi :1)`'s own
+  against base's R7RS ones; psyntax refuses, as R7RS says it is an error).
+  - Options: (a) as built: R7RS programs write `(only (srfi 1) ...)` or `except`; (b) `(scheme base)` takes those five
+    from `(srfi :1 lists)` (the same bindings; SRFI 1's load in every R7RS program); (c) `(srfi 1)`, the R7RS
+    spelling, names an R7RS library `srfi/1.sld` that re-exports `(srfi :1 lists)` with base's five (R6RS's
+    `(srfi :1)` unchanged), so the psyntax patch maps `(srfi N)` to `(srfi :N)` only when no `.sld` of that name
+    exists.
+  - *Recommended: (c)*: R7RS code imports both, and the five agree in meaning (SRFI 1's map stops at the shortest list
+    as R7RS's does).
+- **SC117 Chez as the reference for Chibi's suite.** Chez reads neither `#u8(` nor (in `--program` or `--script`) a
+  vector literal outside a quotation, so it cannot run `r7rs-tests.scm`; it runs ecraven's benchmarks (57 of 58).
+  - Options: (a) as built: Chibi for the suite (to line 801), Chez for the benchmarks; (b) a lexical rewrite of a copy
+    for Chez (`#u8(` as `#vu8(`, the vectors quoted: SM8's `SelfEvalForms` as a tool), each test's answer recorded;
+    (c) a newer Chibi that reads `1.0+nan.0i`.
+  - *Recommended: (b)*: the rewrite is mechanical and gives a second answer for all 1,225 tests.
+- **SC118 Chibi's `(chibi test)`** (SC104 (b), the user: once `define-library` exists). `define-library` exists now, but
+  the library needs `(chibi diff)`, `(chibi term ansi)` and `(chibi optional)` (Chibi 0.12.0's
+  `/usr/share/chibi/chibi/`, BSD-3-Clause), `(srfi 1)` beside `(scheme base)` (SC116) and a `define` directly in a
+  `cond-expand` clause of `define-library` (Chibi takes it; R7RS's grammar does not).
+  - Options: (a) SM8's `(chibi test)` stays; (b) after SC116, vendor the four libraries (`.sld` and their `.scm`
+    includes, LICENSE.md, the journal) and accept a definition in a library declaration's `cond-expand` as body;
+    (c) vendor with the `cond-expand`s rewritten.
+  - *Recommended: (b)*, after SC116; not done here (optional, and it needs SC116 first).
+- **SC119 Loops inside Go primitives.** The watchdog is the machine's: a loop in a Go primitive does not reach it, so
+  `bin/si mats` keeps SM8's skip-and-rerun of a file (none was needed on the final run: the four circular-list loops
+  that hung `5_2.ms` are fixed).
+  - Options: (a) as built; (b) `watchdogTick` in every Go loop over a list, string or vector argument (the walkers of
+    `prim_list`, `prim_vector`, `prim_char`); (c) each mat on a goroutine abandoned at its timeout.
+  - *Recommended: (b)*: one call per loop, and Chez's own circularity errors where Chez has them.
+- **SC120 read0.** read0's `dotest` of an `'error` case compares the parse with the symbol `error` (its `mustfail`
+  branch is disabled by `(and #f ...)`), so each of its 13 error cases is recorded as a failure on every
+  implementation and its final check `(null? failed-inputs)` is false: Chibi prints INCORRECT too, and Chez does not
+  read it (`#\null`).
+  - Options: (a) as built: the class `ecraven-read0-incorrect-everywhere`, with si's answers to read0's non-error
+    cases all right; (b) a patched copy with `mustfail` enabled, judged; (c) drop read0.
+  - *Recommended: (a)*; (b) if the reader's error cases are wanted as tests (they are in Larceny's own suite, SM2).
+- **SC121 Definitions inside a mat's clauses.** Chez evaluates a clause at its top level, so `(begin (define $v1 ...)
+  ...)` in one clause is seen by the next (25 `$v1` items, `bytevector.ms`); the harness runs each clause in its own
+  body.
+  - Options: (a) as built: classed; (b) hoist a clause's top-level `define`s to the mat's body (`(define x #f)`, the
+    clause's `define` a `set!`); (c) run a mat's clauses in one interaction environment (psyntax's
+    `new-interaction-environment`).
+  - *Recommended: (c)*: it is Chez's model, and psyntax has it.
+- **SC122 What stays out of `(chezscheme)`.** The remaining identifiers are Chez's compiler and system: `test-cp0-expansion`
+  and `equivalent-expansion?` (cp0), `define-ftype` and `foreign-procedure`, `define-record`, `enable-cp0`,
+  `separate-compile`, `machine-type`, threads, engines, guardians, `format`'s directives.
+  - Options: (a) classed as Chez's own (as built); (b) `format`'s directives in si's `format` (48 mats of `format.ms`);
+    (c) `define-record` (10).
+  - *Recommended: (a), then (b)*: `format` is the one a portable program uses.
+
+### Rule slips
+
+- I rewrote `bin/si` (Chez's `--program` for `ecraven --chez`) while a `bin/si mats --record` started from it was
+  running; bash had parsed the whole `case`, and that run was stopped and rerun from the start anyway (for the
+  circular-list fixes), so no recorded result comes from it.
+- Two mats runs were stopped by their process groups (found with `ps -eo pid,pgid,sid,args` and `awk` on the
+  session, not `pgrep`); a third time a `timeout` child kept its own group and was killed by that group.
+- Chez's benchmark run (`bin/si ecraven --chez`, single-threaded, small) ran beside a mats run (`GOMEMLIMIT` 1000 MiB).
+- The disk stood at 90% (other worktrees' work); I trimmed Go's cache of entries older than 30 minutes (to no visible
+  effect) and kept my own `.tmp` at 0.7 GB.
+
+### The heavy list (needs Arbace's executables or the lock), and checks not run
+
+1. **Shipping, with the batched re-seed after `arbace-reaps-3-crops-v2`**: `go/arbace/scm` changed (`clock*.ae` new,
+   `read.ae`, `write.ae`, `system.ae`, `eval.ae`, `value.ae`, `prim_io.ae`, `prim_list.ae`) and `psyntax.pp.ae`
+   (booted); the gate's first run on this branch and `bin/gate --audit` for the new inputs (`scheme/lib/**` with the
+   `.chezscheme.sls` variants and `chezscheme.sls`, `test/scheme/ref-ecraven-chez.edn`, the result files), then
+   SC112's steps once `go/arbace/scm` is shipped.
+2. ecraven at full size, compiled (SC109), now with Chez's reference times to set them against.
+3. Not run: the essential gate; arm64 (the box parked; `clock_other.ae` is the box's clock, built only there); the
+   AOT of the R7RS programs (`bin/si aot` reads programs as the driver does, so `ReadProgram`'s mode applies, but the
+   ecraven programs were not compiled).
+
+### Shipped files changed
+
+`go/arbace/scm.ae`, `go/arbace/scm/{clock,clock_linux,clock_other}.ae` (new), `go/arbace/scm/{eval,prim_io,prim_list,
+read,system,value,write}.ae`, `scheme/psyntax/psyntax.pp.ae` (with `scheme/psyntax/patches.edn` and
+`tools/psyntax/boot.ss`, its inputs). Not shipped (test and data): `scheme/lib/**`, `test/scheme/**`, `bin/si`,
+`arbace/scheme/corpora.ae`, the Makefile.
+
+### Scratch cited
+
+`.tmp/sm8b/` in this worktree: `mats4.log` (the recorded mats run), `ecraven.log` and `ecraven-chez.log`,
+`check2.log`, `aot.log`, `fixpoint.log`, `check-suite.log`, `test-host.log`, `rnrs-names.txt` (Chez's export list
+of the five R6RS libraries, the input of `chezscheme.sls`'s export list), the probes `t3.scm` ... `t9.ss`;
+`.tmp/si/mats`, `.tmp/si/ecraven`, `.tmp/si/ecraven-chez`, `.tmp/si/r7rs` (the runs judged).

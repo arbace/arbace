@@ -154,8 +154,40 @@ non-pair), 2 circular.\n"
     (Violation CondAssertion who "index ~s is out of range for list ~s" idx lst)
     (Violation CondAssertion who "index ~s reaches a non-pair in ~s" idx lst)))
 
+(go/func dlCycleIndex
+  "dlCycleIndex is the index of list-ref and list-tail on lst: on a circular list (Chez's rule, SM8b) an index past
+the cycle's start is reduced modulo the cycle's length, so a bignum index ends; else dlIndex's.\n"
+  ^int64 [^string who ^any lst ^any idx]
+  (let [n (dlIndex who idx)
+        (values _ st) (dlWalk lst)]
+    (when (!= st 2)
+      (return n))
+    ;; Floyd: mu, the cycle's start; lambda, its length
+    (let [slow (dlCdrOf lst) fast (dlCdrOf (dlCdrOf lst))]
+      (while (!= slow fast)
+        (set! slow (dlCdrOf slow))
+        (set! fast (dlCdrOf (dlCdrOf fast))))
+      (let [mu (conv int64 0) a lst]
+        (while (!= a slow)
+          (set! a (dlCdrOf a))
+          (set! slow (dlCdrOf slow))
+          (inc! mu))
+        (let [lam (conv int64 1) b (dlCdrOf a)]
+          (while (!= b a)
+            (set! b (dlCdrOf b))
+            (inc! lam))
+          (let [k (new big/Int)]
+            (type-switch [v idx]
+              (case [int64] (.SetInt64 k v))
+              (case [(* big/Int)] (.Set k v)))
+            (when (< (.Cmp k (big/NewInt mu)) 0)
+              (return (.Int64 k)))
+            (.Sub k k (big/NewInt mu))
+            (.Mod k k (big/NewInt lam))
+            (+ mu (.Int64 k))))))))
+
 (go/func dlListTail ^any [^any lst ^any idx]
-  (let [n (dlIndex "list-tail" idx)
+  (let [n (dlCycleIndex "list-tail" lst idx)
         cur lst]
     (for [i (conv int64 0)] (< i n) (inc! i)
       (let [(values p ok) (assert (* Pair) cur)]
@@ -165,7 +197,7 @@ non-pair), 2 circular.\n"
     cur))
 
 (go/func dlListRef ^any [^any lst ^any idx]
-  (let [n (dlIndex "list-ref" idx)
+  (let [n (dlCycleIndex "list-ref" lst idx)
         cur lst]
     (for [i (conv int64 0)] (< i n) (inc! i)
       (let [(values p ok) (assert (* Pair) cur)]
@@ -185,7 +217,7 @@ non-pair), 2 circular.\n"
   (Equal a b))
 
 (go/func dlMem ^any [^string who ^int mode ^any x ^any lst]
-  (let [l lst]
+  (let [l lst slow lst n 0]
     (while true
       (let [(values p ok) (assert (* Pair) l)]
         (when (not ok)
@@ -194,11 +226,17 @@ non-pair), 2 circular.\n"
           (Violation CondAssertion who "improper list ~s" lst))
         (when (dlSame mode x (.-Car p))
           (return l))
-        (set! l (.-Cdr p))))
+        (set! l (.-Cdr p))
+        ;; a circular list raises, as Chez's (SM8b)
+        (inc! n)
+        (when (== (% n 2) 0)
+          (set! slow (dlCdrOf slow))
+          (when (== slow l)
+            (Violation CondAssertion who "circular list ~s" lst)))))
     false))
 
 (go/func dlAss ^any [^string who ^int mode ^any x ^any lst]
-  (let [l lst]
+  (let [l lst slow lst n 0]
     (while true
       (let [(values p ok) (assert (* Pair) l)]
         (when (not ok)
@@ -210,7 +248,12 @@ non-pair), 2 circular.\n"
             (Violation CondAssertion who "improperly formed alist ~s" lst))
           (when (dlSame mode x (.-Car e))
             (return e)))
-        (set! l (.-Cdr p))))
+        (set! l (.-Cdr p))
+        (inc! n)
+        (when (== (% n 2) 0)
+          (set! slow (dlCdrOf slow))
+          (when (== slow l)
+            (Violation CondAssertion who "circular list ~s" lst)))))
     false))
 
 (go/func dlRemove ^any [^string who ^int mode ^any x ^any lst]

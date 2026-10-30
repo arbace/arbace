@@ -1,17 +1,21 @@
-;;;; bin/si mats' harness (SM8): runs the mats of one Chez .ms file (argv: FILE [SKIPFILE]) on si, in R7RS reading mode.
-;;;; Per top-level datum of the file: a (mat NAME CLAUSE ...) is run as one body, in an R6RS environment of (rnrs),
-;;;; (rnrs eval), (rnrs r5rs), (rnrs mutable-pairs), (rnrs mutable-strings) and (si mats), after the file's
-;;;; definitions above it (define, define-syntax, define-record-type, define-values, each checked alone first);
-;;;; a clause (error? E) must raise, any other clause must return #t. Output, one line a result, flushed:
+;;;; bin/si mats' harness (SM8, SM8b): runs the mats of one Chez .ms file (argv: FILE [SKIPFILE]) on si, in R7RS reading mode.
+;;;; Per top-level datum of the file: a (mat NAME CLAUSE ...) is run as one body, in an environment of (chezscheme)
+;;;; (si's subset of Chez's library, SC110 (b)) and (si mats), after the file's definitions above it (define,
+;;;; define-syntax, define-record-type, define-values, each checked alone first), under si's watchdog (SC111 (b): a
+;;;; mat that runs past SI_MAT_MS milliseconds, default 20000, fails); a clause (error? E) must raise, any other clause
+;;;; must return #t. A mat that does not expand has its clauses run one by one (SC110 (c)), each with the prelude, so
+;;;; Chez-specific clauses do not hide the portable ones. Output, one line a result, flushed:
 ;;;;   BEGIN NAME                 before a mat
 ;;;;   MAT NAME PASS N            all N clauses ran as they should
 ;;;;   MAT NAME FAIL N DETAIL     the clause DETAIL ("K: why") failed
 ;;;;   MAT NAME NOTRUN WHY        the mat did not expand or run: WHY is the expander's message
+;;;;   CLAUSES NAME P F N         after a NOTRUN: its clauses run alone, P passed, F failed, N did not run
 ;;;;   MAT NAME SKIP WHY          a form the harness does not run (parameters, mat/cf, a name in SKIPFILE)
 ;;;;   READ POSITION WHY          a top-level datum the reader refuses (its text is skipped)
 ;;;;   DEF NAME NOTRUN WHY        a definition that does not expand alone (left out)
 ;;;;   FILE N-datums M-mats       at the end
-(import (rnrs) (rnrs eval) (rnrs mutable-pairs) (si mats))
+(import (rnrs) (rnrs eval) (rnrs mutable-pairs) (si mats) (only (srfi :98) get-environment-variable)
+        (only (psyntax system $all) r7rs-write))
 
 (define argv (cdr (command-line)))
 (define path (car argv))
@@ -88,8 +92,10 @@
         ((char=? (string-ref s j) #\|) (+ j 1))
         (else (bar-end s (+ j 1) n))))
 
-(define env
-  (environment '(rnrs) '(rnrs eval) '(rnrs r5rs) '(rnrs mutable-pairs) '(rnrs mutable-strings) '(srfi :39 parameters) '(si mats)))
+(define env (environment '(chezscheme) '(si mats)))
+(define mat-ms
+  (let ((v (get-environment-variable "SI_MAT_MS"))) (or (and v (string->number v)) 20000)))
+(set-clause-ms! mat-ms)
 
 (define (message-of e)
   (let ((s (cond ((and (condition? e) (message-condition? e))
@@ -106,7 +112,8 @@
     (list->string (map (lambda (c) (if (char=? c #\newline) #\space c)) (string->list s)))))
 (define (show x)
   (call-with-values open-string-output-port
-    (lambda (port extract) (write x port) (let ((s (extract))) (if (> (string-length s) 160) (substring s 0 160) s)))))
+    ;; R7RS's write: a cyclic irritant is written with labels, not without end
+    (lambda (port extract) (r7rs-write x port) (let ((s (extract))) (if (> (string-length s) 160) (substring s 0 160) s)))))
 
 (define (def-form? d)
   (and (pair? d) (memq (car d) '(define define-syntax define-record-type define-values define-structure))))
@@ -133,7 +140,7 @@
     (else
      (set-evaluator! (lambda (expr) (eval `(let () ,@(reverse prelude) ,expr) env)))
      (let ((form `(let () ,@(reverse prelude) (run-mat ',name (list ,@(map chez-clause clauses))))))
-       (let ((r (guard (e (#t (cons 'notrun e))) (cons 'ok (eval form env)))))
+       (let ((r (timed (lambda () (guard (e (#t (cons 'notrun e))) (cons 'ok (eval form env)))))))
          (display "MAT ") (write name)
          (if (eq? (car r) 'notrun)
              (begin (display " NOTRUN ") (display (message-of (cdr r))))
@@ -141,13 +148,34 @@
                (if (eq? (car res) 'pass)
                    (begin (display " PASS ") (display (cadr res)))
                    (begin (display " FAIL ") (display (cadr res)) (display " ") (display (caddr res))))))
-         (newline)))))
+         (newline)
+         (when (eq? (car r) 'notrun) (line) (run-clauses name clauses))))))
   (line))
 
+;; the watchdog around a thunk
+(define (timed thunk)
+  (watchdog mat-ms)
+  (let ((v (guard (e (#t (watchdog 0) (raise e))) (thunk))))
+    (watchdog 0)
+    v))
+
+;; a mat that does not expand: each clause alone (SC110 (c))
+(define (run-clauses name clauses)
+  (let loop ((cs clauses) (p 0) (f 0) (n 0))
+    (if (null? cs)
+        (begin (display "CLAUSES ") (write name) (display " ") (display p) (display " ") (display f) (display " ")
+               (display n) (newline))
+        (let* ((form `(let () ,@(reverse prelude) (run-mat ',name (list ,(chez-clause (car cs))))))
+               (r (timed (lambda () (guard (e (#t (cons 'notrun e))) (cons 'ok (eval form env)))))))
+          (cond ((eq? (car r) 'notrun) (loop (cdr cs) p f (+ n 1)))
+                ((eq? (cadr r) 'pass) (loop (cdr cs) (+ p 1) f n))
+                (else (loop (cdr cs) p (+ f 1) n)))))))
+
 (define (add-def! d)
-  (let ((r (guard (e (#t (cons 'notrun e)))
-             (eval `(let () ,@(reverse prelude) ,d (if #f #f)) env)
-             (cons 'ok #f))))
+  (let ((r (timed (lambda ()
+             (guard (e (#t (cons 'notrun e)))
+               (eval `(let () ,@(reverse prelude) ,d (if #f #f)) env)
+               (cons 'ok #f))))))
     (if (eq? (car r) 'notrun)
         (begin (display "DEF ") (write (if (pair? (cdr d)) (let ((n (cadr d))) (if (pair? n) (car n) n)) d))
                (display " NOTRUN ") (display (message-of (cdr r))) (newline) (line))

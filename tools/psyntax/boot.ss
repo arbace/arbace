@@ -78,6 +78,14 @@
   '(void gensym symbol-value set-symbol-value! eval-core label-binding set-label-binding!
     remove-location format read-library-source-file set-primitive-locations!))
 
+;;; si's own primitives beyond R6RS's, in $all for the libraries of scheme/lib (SC105 (b), doc/scheme/SCHEME-SURVEY.md,
+;;; "As built: SM8b"): Chez's real-time and cpu-time (milliseconds), a microsecond clock (since the epoch), and
+;;; R7RS's printer for (scheme write) (SC103 (b)).
+(define si-primitives
+  '(real-time cpu-time current-microseconds watchdog r7rs-write r7rs-display r7rs-write-shared r7rs-write-simple
+    ;; psyntax's own keywords beyond R6RS's, for (chezscheme) (SC110 (b)): Chez's internal modules
+    module import))
+
 (define (sort-symbols ls) (list-sort (lambda (a b) (string<? (symbol->string a) (symbol->string b))) ls))
 
 ;;; R5RS's environments (SC63 (a), SM6): (null-environment 5) and (scheme-report-environment 5) are the libraries
@@ -108,7 +116,8 @@
     (map (lambda (n) (list n (sort-symbols (library-exports n)) #t)) r6rs-libraries)
     (list (list '(psyntax null-environment-5) r5rs-null-names #f)
           (list '(psyntax scheme-report-environment-5) r5rs-report-names #f)
-          (list '(psyntax system $bootstrap) bootstrap-exports #f))))
+          (list '(psyntax system $bootstrap) bootstrap-exports #f)
+          (list '(psyntax system si) si-primitives #f))))
 
 (define all-names
   (let f ((ls (apply append (map cadr library-legend))) (seen '()))
@@ -138,7 +147,8 @@
                 (guard (e (#t #f)) (chez:eval x (chez:environment '(rnrs) '(rnrs eval) '(rnrs r5rs)
                                                        '(rnrs mutable-pairs) '(rnrs mutable-strings)))
                   #t)
-                (memq x bootstrap-exports))
+                (memq x bootstrap-exports)
+                (memq x si-primitives))
       (error 'boot "a keyword of the reference psyntax has no binding for" x)))
   all-names)
 
