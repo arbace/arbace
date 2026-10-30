@@ -924,7 +924,7 @@ Only `arbace/go/build.ae` changed (evaluated from the checkout where it differs 
 compiled `go/arbace/goi` file changed, so no build is needed. A converted closure is now a Go func in the frame
 (calls through it work as for any Go func).
 
-**Numbers.** `bin/goi check --corpus nethttp --arbace`: 5 of 8 pass (was 4), `handlerfunc_conv` passes, its class removed from `divergences.edn` (3 classes, 3 non-passes), recorded; `--corpus nethttp` 56 of 60 as before; `--essential` 801 of 801; `bin/goi test` all pass.
+**Numbers.** `bin/goi check --corpus nethttp --arbace`: 5 of 8 pass (was 4), `handlerfunc_conv` passes, its class removed from `divergences.edn` (2 classes, 3 non-passes), recorded; `--corpus nethttp` 56 of 60 as before; `--essential` 801 of 801; `bin/goi test` all pass.
 
 **Test.** `test/goi/repl.ae` (package `go.rt.fnconv`): `%T` of the converted value, its method called on an Arbace fn
 and on a Go closure literal, and a converted nil func still `== nil`. Probe: `.tmp/nh12/p2.ae` (A, D now `p2.HF`).
