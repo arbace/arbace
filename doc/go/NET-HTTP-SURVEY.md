@@ -1122,3 +1122,7 @@ The scratch: `.tmp/worktrees/nethttp-nh2/.tmp/nh2/` (`gotable-{linux,tamago}-{am
     feature; (c) both, (b) only if NH3 finds a method (a) missed.
   - *Recommended: (c)*: (b) is general but makes slots for interfaces no interpreted type implements; the stub
     warning names any miss.
+
+### Decided (NH22-NH26; the user, 2026-10-30)
+
+- NH22 (a), NH23 (a), NH24 (a), NH25 (a), NH26 (c), as recommended.
