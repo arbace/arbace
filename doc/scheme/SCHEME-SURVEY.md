@@ -708,7 +708,7 @@ host: no gate, no Arbace build, no lock; every run on stage 0 (`target/seed/amd6
   mantissa-width rules), `forms` (the spellings, `tree=`), `print` (Chez's `write`), `unicode` (Chez's identifier
   tables), `check`, and the command line (`read`, `print`, `prepare`, `check-dumps`, `spec-check`). About 1,000 lines.
 - **`bin/repr-scheme`**: `corpus fetch|list`, `dump`, `read`, `print`, `spec-check`, `check [--quick] [--record]`.
-  Makefile targets `repr-scheme-fetch`, `-check`, `-check-quick`, `-record`, `-spec`; `make check-makefile` passes.
+  Makefile targets `repr-scheme-fetch`, `-check`, `-check-quick`, `-record`, `-spec`; `make check-makefile` passes (rc 0).
 - **Gate bookkeeping**: `arbace/repr/scheme.ae` and `arbace/repr/scheme/` are out of `test/gate/steps.edn`'s
   `:tools`, of `test/gate/audit.ae`'s `:gate` host and of `bin/lib/version.bash`'s `arbace_embedded_sources` (so out
   of `gate_key`, as repr/haskell's and repr/c's are). The planner (`gate.plan plan`, run directly on stage 0)
@@ -832,7 +832,7 @@ line waits for the re-seed batch, (SC25 a) corpora fetched, (SC26 a) the new che
   under the first, vectors and bytevectors of atoms fill, quote forms abbreviated. whimsical's `editor.ss`
   (3 MB) becomes 76,045 lines.
 - **`bin/repr-scheme read --full`, `print --full|--layout`, `roundtrip`** (needs no Chez); Makefile target
-  `repr-scheme-roundtrip`. `make check-makefile` passes.
+  `repr-scheme-roundtrip`. `make check-makefile` passes (rc 0).
 - `doc/scheme/SPEC.md` section 11.
 
 ### The check, numbers
@@ -860,7 +860,7 @@ and byte for byte equal to the file (`cmp`), `print --layout` 19 s; its `.ae` is
 - **SC31 Spellings kept by exception.**
   - Options: (a) as built: a spelling stored only where the token is not Chez's `write` of the form (most atoms
     store nothing); (b) every token's text stored (simpler printer, about 2x the layer).
-  - *Recommended: (a)*: the check proves it; the layer for `editor.ss` is 4.9 MB beside 3 MB of forms in (a).
+  - *Recommended: (a)*: the check proves it; the layer for `editor.ss` is 5.9 MB beside 2.0 MB of forms in (a), and (b) would be larger still.
 - **SC32 The layout's conventions.**
   - Options: (a) as built: a table of 30 heads (`body-forms`), 80 columns, abbreviated quotes, `[ ]` never
     written (the forms do not keep them), no comments (`:lines` has none); (b) keep `[ ]` and comments in `:lines`
