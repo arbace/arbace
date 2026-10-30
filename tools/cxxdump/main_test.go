@@ -47,3 +47,41 @@ func TestEdn(t *testing.T) {
 		t.Fatalf("ednString: %s", got)
 	}
 }
+
+// A header's node whose inner nodes carry the location changes: skipped as it streams, the main file's node after it
+// still gets its absolute file and line.
+const dump2 = `{"id":"0x1","kind":"TranslationUnitDecl","loc":{},"range":{"begin":{},"end":{}},"inner":[
+{"id":"0x2","kind":"FunctionDecl","loc":{"offset":10,"file":"/h/a.h","line":3,"col":1,"tokLen":1},"name":"h","inner":[
+ {"id":"0x3","kind":"CompoundStmt","range":{"begin":{"offset":12,"file":"m.cpp","line":9,"col":1,"tokLen":1},"end":{"offset":13,"col":2,"tokLen":1}}}]},
+{"id":"0x4","kind":"ClassTemplateDecl","loc":{"offset":40,"line":6,"col":5,"tokLen":1},"name":"W","inner":[
+ {"id":"0x5","kind":"CXXRecordDecl","loc":{"offset":40,"col":5,"tokLen":1},"name":"W"},
+ {"id":"0x6","kind":"ClassTemplateSpecializationDecl","loc":{"offset":40,"col":5,"tokLen":1},"name":"W","inner":[
+  {"kind":"TemplateArgument","type":{"qualType":"int"},"inner":[{"id":"0x7","kind":"BuiltinType","type":{"qualType":"int"}}]},
+  {"id":"0x8","kind":"FieldDecl","loc":{"offset":44,"col":9,"tokLen":1},"name":"v"}]}]}]}`
+
+func TestSkipAndSummary(t *testing.T) {
+	var out bytes.Buffer
+	if _, _, err := runOpts(strings.NewReader(dump2), &out, options{main: "m.cpp", implicit: true, edn: false}); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	if strings.Contains(s, `"name":"h"`) {
+		t.Fatalf("the header's node was kept:\n%s", s)
+	}
+	if !strings.Contains(s, `"line":6`) || !strings.Contains(s, `"file":"m.cpp"`) {
+		t.Fatalf("the location after a skipped node is not absolute:\n%s", s)
+	}
+	if strings.Contains(s, "FieldDecl") || strings.Contains(s, "BuiltinType") || !strings.Contains(s, "TemplateArgument") {
+		t.Fatalf("the instantiation is not summarized:\n%s", s)
+	}
+}
+
+func TestNorm(t *testing.T) {
+	var out bytes.Buffer
+	if _, _, err := runOpts(strings.NewReader(dump2), &out, options{main: "m.cpp", implicit: true, edn: true, norm: true}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), ":id ") || strings.Contains(out.String(), ":loc ") {
+		t.Fatalf("norm kept ids or locations:\n%s", out.String())
+	}
+}
