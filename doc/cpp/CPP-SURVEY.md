@@ -1229,3 +1229,125 @@ Each with options, the recommended one marked, and why; the built choice stands 
 - The scratch the numbers come from: `.tmp/cx/f-samples/`, `.tmp/cx/f-wpp/`, `.tmp/cx/f-dg/` (`results.tsv`, `read.tsv`, `classes.tsv`,
   `summary.edn`), `.tmp/cx/dg/` (cxxdump-check's numbers), `.tmp/sub/` (the subagent's rounds), the cxxdump cache `.tmp/repr-cpp/cxxdump-cache/`;
   copy them before the worktree is removed.
+
+## As built: CX4b, CX5a (2026-10-30, the same day)
+
+The fix round after CX4 and the first step of CX5, on the branch `cpp-cx2` (on top of `bff81261`), in the light tier again (4 threads, under
+2 GB, stage 0 `/root/arbace/target/seed/amd64/arbace` with `ARBACE_HOST_EXE` set, no gate, no Arbace build, no lock). Proposals
+CP20-CP50 are still undecided; the recommendations were followed where they bind (CP45 (a), CP48 (b) in part). New proposals CP60-CP66
+below. No shipped file changed (tools' namespaces, the Go helper, the known file, the spec and survey).
+
+### CX4b.1 What changed
+
+| area | change |
+|---|---|
+| directives (CP45 (a)) | `tools/cxxdump` runs a third pass, `clang -E -dD -dI`, and writes `{:executed [LINE ...]}`: the lines of the main file's `#define`, `#undef`, `#include`, `#pragma` that were executed (a group that was taken). The converter keeps them, unconditionally, between the items of the top level and of classes and namespaces, **and between the statements of a compound statement** (`compound-forms`); the printer writes them at column 0 in a body. The conditional lines themselves are not forms: the print holds the executed branch only. A `#pragma` that clang reads as a loop hint (`LoopHintAttr`) is the directive, not `[[unroll 8]]` |
+| macro invocations | `extent` of a macro node is now the invocation with its argument list (`macro-extent`); before, the overlap merge of several declarations from one `CHECK_CAST(static);` kept the macro's name only. A statement or a declaration that is a macro text carries `^{:cpp/line N}` (the line as the compiler counts it, a `#line` before it honoured) and the printer writes `#line N` before it, so `__LINE__` inside the expansion (`VERIFY`, `assert`) gives the original's number; the original's own `#line` directives are not kept as forms |
+| forms for what was text | partial specializations `(cpp/template [params] (cpp/struct (<> V T *) ...))` (the template-id from the text, outer headers wrapped), explicit instantiations `(cpp/instantiate decl)` with `^:extern`, placement new `:place [p*]` (the placement arguments are the last children, as many as `operator new` takes after the size), structured bindings `(cpp/structured ^{:tag auto} [a b] init)`, dependent constructions `(cpp/construct T a)` / `(cpp/brace T a)`; spec §18.3 |
+| converter fixes | a copy-initializer that is a typed brace (`int c = int{i};`, `^:cpp/expr`); pack expansions of member initializers (`T(args)...`); `decltype(auto)`; operator names (`operator/=`); a glued `>=` in a re-tokenized array bound; the closing `>>` token of `vt<T>>` in a text; nested namespaces' `inline` parts (`A::inline B::C`); abbreviated function templates (the invented parameters are not forms); members of anonymous unions and structs (`b.m_1`, not `b.<anon>.m_1`); `cv` qualifiers in one order (`const volatile`); a variadic `...` in a function type; `new T()` of a dependent type; `friend` texts; a destructor's `noexcept(false)` behind a `{` in a comment; `BindingDecl` nodes left to their `DecompositionDecl` |
+| `tools/cxxdump` | version 7; the AST normal form drops `isReferenced` (CP60); a key clang writes twice (`UsingType`'s `type`) is written `type`, `type-2`; the cache is sharded in 256 subdirectories (see the slip below) |
+
+### CX4b.2 Numbers
+
+Same runs as CX4.3, all with objects (g++ and clang), after the last edit of the converter and printer:
+
+| corpus | files | oracle rejects | read | text-free | l1 | l3 | l4 g++ (orig fails) | l4 clang (orig fails) | pass | known | failing |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `test/cpp/samples/` | 8 | 0 | 8 | 6 | 8 | 8 | 7 (0) | 8 (0) | 7 | 1 | 0 |
+| whim++ (`80c49bf5`) | 10 | 0 | 10 | 6 | 10 | 10 | 10 (0) | 10 (0) | **10** | 0 | 0 |
+| `g++.dg`, every 10th file | 1,807 | 747 | 1,060 | 759 | 1,041 | 1,020 | 961 (34) | 1,039 (3) | **972** | 88 | **0** |
+| libstdc++'s testsuite, every 40th file (CX5a) | 244 | 32 | 212 | 99 | 202 | 203 | 195 | 196 | **193** | 19 | 0 |
+
+- **g++.dg**: 918 passing and 142 known became 972 and 88; the 88 open converter and printer cases (41 print rejected, 34 AST differs, 14
+  forms differ, 1 objects differ) are now 41 (9 print rejected, 21 AST differs, 10 forms differ, 1 objects differ), and 47 are `gxx-objects-location` (CP48). No file fails.
+- **Text forms** in the g++.dg sample: 2,300 in 357 files became 2,031 in 301 (the macro invocations, 1,354 before, stay text by CP41; the
+  structured forms took partial specializations, placement `new`, structured bindings, dependent constructions and most explicit instantiations).
+  What is text now, by kind: macro invocations about 1,350, overlapping declaration groups 189, `FunctionDecl` types 33, init-capture lambdas 30, explicit instantiations clang gives no declaration for 29, `EmptyDecl` 26.
+- **The 88 cases**: 49 closed by the directive layer (`#define` under `#ifndef`, inside a function, `#pragma`), the macro extents, the typed
+  braces, the pack expansions and the normal form; the rest are classed again by the first level that fails, in the known file
+  (`test/repr/cpp/roundtrip-known.edn`, rewritten from the 1,807 files' results).
+- **Speed**: the g++.dg sample 8.5 minutes (4 jobs); the 88 cases 9 seconds; the libstdc++ sample 3 minutes (4 jobs).
+- **C's results unchanged**: `bin/repr-c roundtrip --corpus c23conf,tcc-tests2` (2 threads): c23conf 49 pass, tcc-tests2 85 pass and 3 known (no file under
+  `arbace/repr/c/` changed).
+
+### CX5a Libstdc++'s testsuite (the widening, first step)
+
+`arbace.repr.cpp.ppcheck lists` makes the list (`libstdcxx-testsuite`, every 40th of 9,725 `.cc` files: 244); the round trip needs
+`-I testsuite/util -I testsuite` added to the compilers' arguments (the list's fields 3 and 5: the DejaGnu harness' own `-I`, not
+in `dg-options`; `testsuite_hooks.h` is 121 of the first 165 rejections). Of 244 files the oracle accepts 212 (32 rejected: library features
+the host's libstdc++ or clang lacks, `mallinfo`, `<chrono>` time zones). The first pass gave 96 passing; **the macro texts' `#line`** (every
+`VERIFY(...)` expands `__LINE__`) took it to 181, UsingType's repeated key and the instantiation names to 193. The 19 left are in the known
+file: 9 print rejected (library spellings `using namespace std` hides, `ranges`, an `A` of a pstl test), 7 objects differ, 2 g++-location, 1 forms differ. The `:full` mode, the item-granular text, the header units and the other corpora (HotSpot, the old g++.dg directories,
+libstdc++'s headers as sources) are CX5's: not started.
+
+### CX4b.3 Checks
+
+Run (all light): `bin/repr-cpp roundtrip` on the samples, whim++, the g++.dg sample and the libstdc++ sample (above); the 88 cases
+in a loop of 9 seconds on stage 0; `go vet`/`gofmt`/`go test` of `tools/cxxdump` (five tests, one new: the repeated key); `bin/repr-c
+roundtrip` on c23conf and tcc-tests2; `make check-makefile`. **Not run:** `bin/gate` in any form; any Arbace build; `bin/repr-cpp
+pp-check` and `spec-check` (the lexer and the preprocessor did not change; §18.3's added list has no `clojure` block); the whole g++.dg
+or libstdc++ testsuite (CX4.7); `host check`.
+
+### CX4b.4 What is left
+
+- Classes the 51 open g++.dg cases and the libstdc++ failures fall into: `__LINE__` inside an expression-level macro text (the `#line`
+  works at statement and declaration level only), unnamed template parameters (`type-parameter-0-0` has no name to give back), a
+  parenthesized type (`int (T::*)`), deduction guides and CTAD, conversion functions to a function reference, `nullptr_t` and other
+  library spellings that `using namespace std` hides, a `friend` template header, `#embed`, GNU `__inline`/attribute order.
+- Text forms left by kind (macro invocations about 1,350, overlapping declaration groups 189, `FunctionDecl` types 33, init-capture lambdas 30, explicit instantiations clang gives no declaration for 29, `EmptyDecl` 26): the macro invocations by CP41 (a); init-capture lambdas, `asm`, type traits, `EmptyDecl`.
+
+### CX4b.5 Proposals (CP60-CP66)
+
+- **CP60 `isReferenced` in the AST normal form.**
+  - Options: (a) dropped from the normal form (built): it is clang's bookkeeping of lookups (an injected class name, a typedef used inside a
+    text form), the references themselves (`DeclRefExpr`, `TemplateSpecializationType`) are compared; (b) kept, and the converter learns to
+    reproduce it (write `S9` or `S9<T>` as the source wrote them, everywhere); (c) kept, the files classed.
+  - *Recommended: (a).* 11 of the 34 `ast-differs` cases differed only there; (b) needs the written spelling of every injected class name.
+- **CP61 `#line` before macro texts.**
+  - Options: (a) `#line N` before a statement or declaration that is a macro invocation's text (built); (b) before every item and statement whose
+    line differs from the print's (the printer tracks its line; exact for any `__LINE__`); (c) refuse files that use `__LINE__`; (d) `:full`
+    (CX5) keeps every line where it was, so no `#line`.
+  - *Recommended: (a) now, (d) at CX5:* (a) closed 7 g++.dg cases and took the libstdc++ sample from 96 to 181; `:full` makes it unnecessary.
+- **CP62 Executed directives from a third clang pass.**
+  - Options: (a) `clang -E -dD -dI` in the helper, `{:executed [...]}` (built; clang's answer, one process more, 0.1 s a file); (b) the shared
+    preprocessor's layer (CX2/C3b's `:off`s, g++'s predefined macros: the same answer the host's g++ would give, 28 s for a first `<vector>`);
+    (c) both, compared.
+  - *Recommended: (a) while the oracle is clang; (b) at CX5* if a g++-judged level needs the other compiler's executed set.
+- **CP63 A repeated key in clang's JSON.**
+  - Options: (a) `type`, `type-2`, ... (built); (b) a vector of the values under the first key; (c) drop the later ones.
+  - *Recommended: (a).* The values differ in meaning (`UsingType`: the type as written and the underlying one); both are kept, readable.
+- **CP64 The cxxdump cache layout.**
+  - Options: (a) 256 subdirectories by the key's first byte (built); (b) one SQLite or tar file; (c) a bound on entries with eviction.
+  - *Recommended: (a) with (c)* when the cache passes 2 GB: a flat directory of 83,000 entries made ext4 refuse `rename` with ENOSPC on
+    an 83% full disk with 18 GB free (see the slips).
+- **CP65 Written types for injected class names (and unnamed template parameters).**
+  - Options: (a) clang's printed type (built: `S9<T> &` for `S9 &`, `type-parameter-0-0` for an unnamed parameter); (b) the written text for a
+    declaration's return and member-initializer types when the printed one is the injected class's template-id; (c) name unnamed parameters
+    in the print (`T0`).
+  - *Recommended: (b) and (c) at CX5:* (b) matters once `isReferenced` is kept (CP60 (b)); (c) changes the AST (a parameter gets a name), so it
+    needs a normal form that drops the names of template parameters.
+- **CP66 The libstdc++ testsuite's harness arguments.**
+  - Options: (a) the list takes `-I testsuite/util -I testsuite` (built, by the caller for now); (b) `ppcheck lists` adds them for the corpus
+    (the harness' `libstdc++-v3/testsuite/lib` knows more: `-D_GLIBCXX_ASSERT`, the `dg-options` variants); (c) the corpus' tests are read as
+    DejaGnu runs.
+  - *Recommended: (b).* The corpus entry owns its include paths, as g++.dg owns `-iquote`.
+
+### CX4b.6 The heavy list (for a window after the tag)
+
+CX4.7's list stands, with: the whole libstdc++ testsuite (9,725 files, about 2 hours at 4 jobs; the converter's process holds a corpus'
+reads: shard by directory); `bin/repr-cpp roundtrip` of the g++.dg sample in the gate's light steps; `bin/gate` essential (the gate's key
+includes `arbace/`).
+
+### CX4b.7 Rule slips and notes
+
+- **The disk**: the g++.dg run died at about 1,400 files with `rename ...: no space left on device` from cxxdump while `df` showed 18 GB free:
+  ext4 refuses a rename in a directory with some 80,000 entries (the cache, 83,237 files). 46 files showed as failing; I deleted the cache (1.2 GB,
+  regenerable), sharded it (CP64) and ran the sample again whole. The disk was 85% at the start; I removed `.tmp/sub`, the CX3 round trips'
+  work directories and a 122 MB JSON dump I had left in `.tmp/cx/a.json` (the rule: no JSON dumps on disk outside the streaming filter) and kept the
+  worktree's `.tmp` under 2 GB (cxxdump cache about 1 GB at the end).
+- The wait for the other agent's processes: my own waiting shell held the worktree as its cwd, so the check saw itself; I read the process
+  list by hand.
+- No source was edited while a run that loaded it executed (the edits waited for the runs; the doc was written during runs).
+- Threads: the C check ran with 2 threads beside nothing else; the libstdc++ list was made with 2 threads while it ran. No run beyond 4.
+- The scratch the numbers come from: `.tmp/cx/g-dg`, `g-samples`, `g-wpp`, `g-lt` (`results.tsv`, `read.tsv`, `summary.edn`), `.tmp/cx/l88.tsv` (the 88),
+  `.tmp/cx/lt.list` (the libstdc++ list); copy them before the worktree is removed.
