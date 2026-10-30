@@ -158,12 +158,16 @@
         fs (try (binding [*in-macro* true] (vec (conv)))
                 (catch arbace.lang.ExceptionInfo e
                   (if (:cpp/gap (ex-data e)) (do (reset! why (str @why "/" (name (:cpp/gap (ex-data e))))) nil) (throw e))))]
+    (if (and (not semi) (= 1 (count fs)) (not (instance? arbace.lang.IObj (first fs))))
+      ;; CP73 (c): a value that cannot carry metadata (a number from INT_MAX or NULL, true) is wrapped: (cpp/macro "text" value)
+      (do (when *texts* (swap! *texts* update :macro-form (fnil inc 0)))
+          [(list 'cpp/macro (second tf) (first fs))])
     (if (and (seq fs) (every? #(instance? arbace.lang.IObj %) fs))
       (let [m (meta tf)]
         (when *texts* (swap! *texts* update :macro-form (fnil inc 0)))
         (into [(vary-meta (first fs) assoc :cpp/macro (second tf) :cpp/line (:cpp/line m))]
               (map #(vary-meta % assoc :cpp/macro "") (rest fs))))
-      (do (when *texts* (swap! *texts* update (keyword @why) (fnil inc 0))) [tf]))))
+      (do (when *texts* (swap! *texts* update (keyword @why) (fnil inc 0))) [tf])))))
 
 (defmacro ^:private or-text
   "The body's form, or on a gap the node's text."
@@ -240,12 +244,25 @@
                  (fn [[m d i]] (let [nm (get-in *tparams* [(Long/parseLong d) (Long/parseLong i)])] (if (seq nm) nm m))))
     s))
 
+(def ^:dynamic *grp* "CP75 (b): inside a declaration group, a regex over the spellings of the group's class type (nil elsewhere)" nil)
+
+(defn- grp-sub
+  "The spellings of the group's class type in a type string replaced by one identifier (renamed c/base in the form)."
+  [^String s]
+  (if (and *grp* s) (str/replace s *grp* "c_base__") s))
+
+(defn- rename-base [x]
+  (cond (= x 'c_base__) 'c/base
+        (seq? x) (with-meta (apply list (map rename-base x)) (meta x))
+        (vector? x) (with-meta (mapv rename-base x) (meta x))
+        :else x))
+
 (defn- type-of
   "A type string as a type form."
   [^String s0]
-  (let [s (subst-tparams s0)]
+  (let [s (grp-sub (subst-tparams s0))]
   (when (or (nil? s) (re-find #"\((lambda|unnamed|anonymous) " s)) (gap :type (str "an unwritable type " s)))
-  (esc-name (ty/parse-type s))))
+  (let [t (esc-name (ty/parse-type s))] (if *grp* (rename-base t) t))))
 
 (defn- name-of
   "A written name (a text) as a name form, or nil."
@@ -921,7 +938,7 @@
   they deduced); an array's type as written (clang prints its bound's value, not the name that gave it)."
   [n]
   (let [ws (prefix-words n)
-        t (qt n)]
+        t (grp-sub (qt n))]
     (cond
       (and t (str/includes? t "[") (#{"VarDecl" "FieldDecl"} (kind n)) (not (contains? ws "auto"))
            (written-param-type n (first (remove #(.endsWith ^String (kind %) "Attr") (kids n)))))
@@ -1469,15 +1486,62 @@
         (catch arbace.lang.ExceptionInfo e
           (if (:cpp/gap (ex-data e)) [(text-form n (str k "/" (name (:cpp/gap (ex-data e)))) true)] (throw e))))))))
 
+(defn- has-base? [x]
+  (or (= x 'c/base)
+      (and (instance? arbace.lang.IMeta x) (some? (meta x)) (has-base? (:tag (meta x))))
+      (and (coll? x) (boolean (some has-base? x)))))
+
+(defn- grp-pattern [names]
+  (let [kw "(?:struct|class|union|enum)"
+        unnamed (str "(?:" kw " )?\\((?:unnamed|anonymous)(?: " kw ")? at [^)]*\\)")
+        nm (when (seq names) (str "(?:" kw "\\s+)?\\b(?:" (str/join "|" (map #(java.util.regex.Pattern/quote ^String %) names)) ")\\b"))]
+    (re-pattern (str/join "|" (remove nil? [unnamed nm])))))
+
+(defn- grp-names
+  "The names the class `rn` is spelled with: its own, or the typedef names (for linkage) of the declarations of `ns` over its extent."
+  [rn ns]
+  (let [[b e] (extent rn)]
+    (vec (distinct (remove str/blank?
+                           (cons (:name rn)
+                                 (when (and b e) (for [d ns :when (= (kind d) "TypedefDecl")
+                                                       :let [[db de] (extent d)]
+                                                       :when (and db (< (long db) (long e)) (> (long de) (long b)))]
+                                                   (:name d)))))))))
+
+(defn- group-with
+  "CP75 (b): the declarator node `n`'s forms with the type of the class `rn` (spelled `names`) as c/base, or nil when it gaps
+  or is no plain variable or typedef."
+  [names n ctx]
+  (try (binding [*grp* (grp-pattern names)]
+         (let [fs (vec (decl-forms n ctx))]
+           (when (and (seq fs) (every? #(and (seq? %) (#{'c/var 'c/typedef} (first %)) (not (:cpp/macro (meta %)))) fs) (some has-base? fs))
+             fs)))
+       (catch arbace.lang.ExceptionInfo e (if (:cpp/gap (ex-data e)) nil (throw e)))))
+
+(defn- group-of
+  "A DeclStmt's declarations `ds` (a class or enum definition and the declarators of its type) as one (cpp/group head declarator*), or nil."
+  [ds ctx]
+  (let [rn (first ds)]
+    (when (and (#{"CXXRecordDecl" "EnumDecl"} (kind rn)) (not (macro-node? rn))
+               (every? #(and (#{"VarDecl" "TypedefDecl"} (kind %)) (not (macro-node? %))) (rest ds)))
+      (let [hs (decl-forms rn ctx)
+            names (grp-names rn ds)
+            gs (map #(group-with names % ctx) (rest ds))]
+        (when (and (= 1 (count hs)) (seq? (first hs)) (not= (ffirst hs) 'cpp/text) (not (:cpp/macro (meta (first hs)))) (every? some? gs))
+          (when *texts* (swap! *texts* update :group (fnil inc 0)))
+          (apply list 'cpp/group (first hs) (apply concat gs)))))))
+
 (defn local-decl
   "A DeclStmt's binding forms: one declaration, or (cpp/decls ...) for several in one statement."
   [n]
   (let [ds (kids n)
         fs (vec (mapcat #(decl-forms % :local) ds))]
     (if (> (count ds) 1)
+      (if-let [g (group-of ds :local)]
+        [g]
       (if (or (some #(#{"CXXRecordDecl" "EnumDecl"} (kind %)) ds) (some #(or (and (seq? %) (= (first %) 'cpp/text)) (:cpp/macro (meta %))) fs))
         [(text-form n "DeclStmt/record" true)]
-        [(apply list 'cpp/decls fs)])
+        [(apply list 'cpp/decls fs)]))
       fs)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1498,8 +1562,17 @@
       (if-not rs
         out
         (let [[e fs n] (first rs)
-              prev (peek out)]
+              prev (peek out)
+              gfs (when (and prev e (:e prev) (:rn prev) (not (:text? prev)) (< (long (first e)) (long (second (:e prev))))
+                             (#{"VarDecl" "TypedefDecl" "FieldDecl"} (kind n)) (not (macro-node? n)))
+                    (group-with (:names prev) n ctx))]
           (cond
+           gfs ; CP75 (b): the class and the declarators of its type, one group
+           (let [b (min (long (first (:e prev))) (long (first e))) en (semi-end (max (long (second (:e prev))) (long (second e))))
+                 g (first (:fs prev))
+                 g (if (:group? prev) (apply list (concat g gfs)) (apply list 'cpp/group g gfs))]
+             (when *texts* (swap! *texts* update :group (fnil inc 0)))
+             (recur (next rs) (conj (pop out) (assoc prev :e [b en] :fs [g] :group? true))))
            (and prev e (= e (:raw prev)) (:mac? prev) (:cpp/macro (meta (first fs))))
            ;; the nodes of one macro invocation: the text once, on the first
            (recur (next rs) (conj (pop out) (update prev :fs into (cons (vary-meta (first fs) assoc :cpp/macro "") (rest fs)))))
@@ -1513,7 +1586,11 @@
             :else
             (recur (next rs) (conj out {:e (if (:cpp/macro (meta (first fs))) [(first e) (semi-end (second e))] e) :raw e :fs fs :text? (boolean (some #(or (and (seq? %) (= (first %) 'cpp/text)) (:cpp/macro (meta %))) fs))
                                         :mac? (boolean (:cpp/macro (meta (first fs))))
-                                        :unnamed? (boolean (#{"CXXRecordDecl" "EnumDecl"} (kind n)))}))))))))
+                                        :unnamed? (boolean (#{"CXXRecordDecl" "EnumDecl"} (kind n)))
+                                        :rn (when (and (#{"CXXRecordDecl" "EnumDecl"} (kind n)) (= 1 (count fs)) (seq? (first fs)) (not= (ffirst fs) 'cpp/text)
+                                                       (not (:cpp/macro (meta (first fs)))))
+                                              n)
+                                        :names (when (#{"CXXRecordDecl" "EnumDecl"} (kind n)) (grp-names n ns))}))))))))
 
 (defn- place-offs
   "The items with the directives that stand between them, in the file's order (a directive inside an item is that
