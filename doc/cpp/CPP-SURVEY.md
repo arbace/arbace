@@ -1418,3 +1418,58 @@ Unchanged from CX4b/CX5a except level 5. `bin/repr-c roundtrip` untouched (no fi
 ### Decided (CP70-CP72; the user, 2026-10-30)
 
 - CP70 (a), CP71 item-granular until an editor needs finer cuts, CP72 (a): kept as built.
+
+## As built: CX5c (2026-10-30)
+
+On `cpp-cx2` (light tier: stage 0 by `ARBACE_HOST_EXE`, 4 jobs, no gate, no build, no lock). Done: CP41 (b), a part of the text-form shrinking, CP65 (b), six of the known
+cases, the spec lines. **Not done**: CP65 (c), the 84 and 13 known cases beyond those, `asm`/type traits/`PredefinedExpr` as forms.
+
+### CX5c.1 Numbers (level 5 required for a pass; same samples)
+
+| corpus | files | read | l1 | l3 | l4 g++ | l4 clang | l5 `:full` | pass | known | failing | files without a text form |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| samples | 8 | 8 | 8 | 8 | 7 | 8 | 8 | 7 | 1 | 0 | 6 |
+| whim++ | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 0 | 0 | 6 |
+| g++.dg every 10th | 1,807 (747 rejected) | 1,060 | 1,044 | 1,024 | 964 | 1,043 | 1,060 | **976** (was 972) | **84** (88) | 0 | **804** (759) |
+| libstdc++ every 40th | 244 (32 rejected) | 212 | 208 | 209 | 201 | 202 | 212 | **199** (193) | **13** (19) | 0 | 103 |
+
+`bin/repr-c roundtrip` (c23conf 49 of 49 pass; tcc-tests2 85 pass, 3 known, as before): C is unchanged (nothing under `arbace/repr/c/` changed).
+`bin/repr-cpp spec-check`: 12 blocks, 0 unreadable.
+
+### CX5c.2 What changed
+
+- **CP41 (b), macro forms.** At the three sites that made a macro node a text (`ex`, `stmt-items`, `decl-forms`) the node's own AST is converted with `*in-macro*`
+  set (`macro-form`) and the first form carries `^{:cpp/macro "invocation text" :cpp/line N}` (the text exactly as the text form had it: `;` included for statements and
+  declarations, `:cpp/line` for `__LINE__`). The printer writes the text (`item!`, `stmt!`, `let` bindings, `expr` as one operand), so levels 3 and 4 see the same bytes as
+  before. Siblings of one invocation (same extent) carry `:cpp/macro ""` after the first and print nothing (`items-of` merges them into one item, `block-forms` tracks the
+  previous extent across statements and local declarations); an item that overlaps another without being its sibling is the union text as before. A macro item's
+  extent includes its `;` so an `EmptyDecl` after it joins. A conversion that gaps, and forms that cannot carry metadata (a number from `INT_MAX`, `NULL`), stay `(cpp/text ...)`:
+  g++.dg: 861 invocations are forms, 528 stay text (nearly all numeric literals). A `:c/paren` of a macro `ParenExpr` is dropped (the text holds the parentheses).
+- **Init-capture lambdas** `[x = e]`, `[&y = e]` as spec §9.5's `(= x e)` / `(& y e)`: the initializer is the lambda's middle child; captures are split outside brackets. The 30 text lambdas are 28 now (the rest are generic lambdas).
+- **Explicit instantiations** of template-ids (`template void f<S>(int);`, `template Dest foo<int>();`, `template const int c <0>;`, `Derived<char>::f<int>`): the declarator-id is cut out
+  (`split-id`), the rest parsed, the id read as a name; parameter names come from the dump's `ParmVarDecl`s; the return type is on the parameter vector. 29 text forms gone.
+- **`EmptyDecl`** is `(c/null)` as an item (was text, 26).
+- **Conversion functions** `operator const Matrix()`: the name is `(operator conv R)` from the function type (clang's name drops the qualifiers).
+- **CP65 (b)**: a return type printed as the injected class's template-id is the written bare name (`written-ret`, in-class declarations only).
+- Known cases that now pass: `conversion/ref12.C`, `cpp0x/rv-func2.C`, `lto/20101010-2_0.C`, `template/friend74.C` (removed from `test/repr/cpp/roundtrip-known.edn`) and two in libstdc++.
+- **Spec**: §6.3 `(operator "/=")`, §11 the macro form, the attribute encoding next to §5.6's paragraph.
+- `rtcheck`'s "text forms" count leaves out `:macro-form`; the `.tsv` detail shows it.
+
+### CX5c.3 Not done, and why
+
+- **CP65 (c)** (name unnamed template parameters in the print): it changes the AST, so it needs a normal form that drops template parameter names; no case of the sample depends on it alone.
+- **Overlapping declaration groups** (77) stay union texts: they hold unnamed classes and typedef-of-struct declarations that clang gives two declarations for; a structured form needs the declaration-group form of spec §6 for `typedef struct {...} T;`.
+- **The known cases**: the 47 `gxx-objects-location` stay classed. Of the rest: print-rejected 6 (`#embed`, `int [1]{42}`, a concept that fails, `export` outside a module, `friend struct A<T>::B`, `__va_list_tag`: none a converter fault), forms-differ 10 (an attribute before `extern` not read back, a `typedef` with an attribute as text, alias declarations of `#pragma weak`, comment lines as text), ast-differs 20 (canonical template arguments' `isUsed`/implicit members, `__LINE__`, reversed operators), objects-differ 1 (+7 in libstdc++: wrapped locale and `values.cc`, g++ objects of the original and of the print differ in a way the class files do not explain; not looked at).
+
+### CX5c.4 Proposals (CP73-CP75)
+
+- **CP73 Numeric literals from macros.** Options: (a) text forms, as built (528 in the sample); (b) `(c/lit 5)`-like form that can carry the metadata; (c) metadata on a wrapper `(cpp/macro "NULL" 0)`. *Recommended: (c)*: it keeps the value and the invocation as data and needs no metadata on numbers. Not built because it changes the expression grammar.
+- **CP74 Macro forms' inner nodes.** Options: (a) the inner forms are informational (built; the printer writes the text); (b) check them: the print of the inner forms must equal the invocation's expansion (`g++ -E`'s text, compared token by token). *Recommended: (b) as a gate check later*; (a) is safe for the round trip because the text is the source.
+- **CP75 Declaration groups with unnamed classes.** Options: (a) union text (built); (b) a group form `(cpp/group decl*)` printed in one statement. *Recommended: (b)* with CP65 (c): both need the normal form to drop what the print names.
+
+### CX5c.5 Heavy list, slips, shipped files, scratch
+
+- Heavy (after the tag): the whole libstdc++ testsuite and the g++.dg sample with the new forms; `bin/gate` essential (the key includes `arbace/`); `bin/repr-cpp pp-check` was not run.
+- Slips: I used a process substitution `<(...)` in four commands (harmless diffs and a join, no process left) and one background launch with `nohup ... &` inside a `&&` chain that died with the tool call (no process left); a first commit attempt printed an ignored-path hint but committed. Disk 85% throughout; no Go cache trim needed.
+- Shipped files changed (tools' namespaces; re-seed relevant if embedded): `arbace/repr/cpp/convert.ae`, `print.ae`, `rtcheck.ae`; data `test/repr/cpp/roundtrip-known.edn`; doc `doc/cpp/SPEC.md`.
+- Scratch: `.tmp/cx/j-samples`, `j-wpp`, `j-lt`, `j-dg` (results.tsv, read.tsv, summary.edn), `.tmp/cx/j-*.log`, `.tmp/cx/runall6.sh`, `.tmp/cx/repr-c-rt2.log`, `.tmp/cx/k41.list` (the 41 non-location known cases).
