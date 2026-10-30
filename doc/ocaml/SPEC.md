@@ -2,7 +2,7 @@
 
 Status: draft for the user's review, 2026-10-30: milestone O1 of the OCaml crop
 ([OCAML-SURVEY.md](OCAML-SURVEY.md) §11, "As built: O1"), bound by the survey's decisions OC1-OC16 (its section
-"Decided (2026-10-30)"). The choices made while writing it are S1-S29 (§13.1); the open questions are the
+"Decided (2026-10-30)"). The choices made while writing it are S1-S31 (§13.1); the open questions are the
 proposals OC20 onward of the survey. Nothing in it is a shipped file; the helper `tools/ocdump`, the script
 `bin/repr-ocaml` and the data of `test/ocaml/` are the first code of the crop.
 
@@ -1267,8 +1267,25 @@ expression of `let _ = f x` read at the file's second column is, e.g.,
   (always on for `types`; with `--loc` for `lambda`) are `:loc` metadata. Effects are ordinary calls into
   the `Stdlib__Effect` global's fields in the sample's Lambda: `Effect.perform` is a library function over the
   runtime's primitives, so O5 meets them as `external` calls.
-- **`tokens`** (O3's input): the lexer's token stream with the comments, `(ocaml/tokens [(tok "text" LOC)...])`, `LOC`
-  `nil` without `--loc`. Text is the lexeme as written.
+- **`tokens`** (O3): the whole text of the file as `(ocaml/layout [GAP ITEM GAP ... ITEM GAP] {...})`, an odd number of
+  entries, a gap (a string: the white space and line directives between two items, possibly empty) on both sides of every
+  item. An item is a token's text as a string (the source between the lexer's offsets, so `0x1F`, `begin`, `;;`,
+  a quoted string `{|..|}` with its delimiters, a string literal with its escapes, as written), `(comment "(* .. *)")`
+  or `(doc "(** .. *)")` (a docstring; the lexer's `DOCSTRING`, `(**/**)` too). The concatenation of all entries (the
+  items' strings and the comments' and docstrings' text) is the file byte for byte. The lexer's end-of-line tokens are
+  not items (they are in the gaps). A file that is not valid UTF-8 is `(ocaml/error :encoding "...")` (the dump is text
+  Arbace reads; a recorded class). A lexer error is `(ocaml/error :lexer ...)` as in `parse`.
+
+### 11.1 Mode `:full` (O3)
+
+The forms of mode `:full` are the forms of `:lines` (§1-§9, positions removed) with two keys added to the top form's
+metadata map: `:mode :full` and `:layout`, the vector of the `tokens` dump (the entries above, in the file's order,
+comments and docstrings as `(comment TEXT)` and `(doc TEXT)`, S30). Printing in `:full` is the concatenation of the
+entries; printing in `:lines` ignores the layout. `bin/repr-ocaml read --full` writes them; the check is `roundtrip
+--text`: the text printed from the forms read back from their `.ae` equals the original file byte for byte (`cmp`), and
+`--cmi` compiles the original and the print with `ocamlc -c` and compares the `.cmi` bytes (the signature, its
+locations, its CRC). Positions of tree nodes are not in the forms (S16): the layout is not anchored to the tree by
+node; it is a second view of the same file (survey, OC40).
 
 ## 12. The checklist
 
@@ -1383,7 +1400,7 @@ above (their attributes and positions in the item's map).
 
 ## 13. Decisions and open questions
 
-### 13.1 Choices made while writing (S1-S29)
+### 13.1 Choices made while writing (S1-S31)
 
 - **S1** The forms are the Parsetree's vocabulary (OC8 (a)): heads from constructor names, so the helper writes forms
   directly and the converter of O2 stays near the identity.
@@ -1401,7 +1418,7 @@ above (their attributes and positions in the item's map).
 - **S9** Indexing is the parser's desugaring (`Array.get`, `String.get`, `.%()`), kept.
 - **S10** A constrained binding is the Parsetree's: a plain pattern and `pvb_constraint`, not a constrained pattern.
 - **S11** The top-level forms are `ocaml/impl`, `ocaml/intf`, `ocaml/toplevel`, `ocaml/error`, `ocaml/typed`,
-  `ocaml/lambda`, `ocaml/tokens`.
+  `ocaml/lambda`, `ocaml/layout` (O3; `ocaml/tokens` before it).
 - **S12** Docstrings are attributes (`ocaml.doc`, `ocaml.text`), not comments.
 - **S13** Attributes live in the node's metadata map, not in a field.
 - **S14** Items are not wrapped in a `structure-item` record: the item's form carries its positions.
@@ -1425,6 +1442,9 @@ above (their attributes and positions in the item's map).
 - **S28** Names in forms are never split from their locations except through `at` (§10).
 - **S29** The head `var` is a special form's name and Arbace's printer writes `(var x)` as `#'x` (it reads back as
   `(var x)`); the spec and the helper write the long form, and the converter's writer must too.
+- **S30** (O3) Mode `:full` keeps the file's text as a `:layout` vector in the top form's metadata (the helper's `tokens`
+  dump: gaps, tokens, `(comment ..)`, `(doc ..)`), beside the unchanged tree (§11.1, OC40 (a)).
+- **S31** (O3) `ocaml/tokens` is renamed `ocaml/layout`: it carries the text, not only the tokens.
 
 ### 13.2 Open questions
 

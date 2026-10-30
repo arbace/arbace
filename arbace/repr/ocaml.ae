@@ -9,6 +9,15 @@
     print [-o DIR] FORMS.ae...      the printer (arbace.repr.ocaml.print): one file under DIR (default
                                     .tmp/repr-ocaml/printed) named as the forms file less its .ae
     print --root DIR -o OUT         every forms file under DIR, OUT/REL
+    print --full ...                forms in mode :full (the metadata's :layout): the original text, byte for byte
+    full --src DIR --parse DIR --layout DIR --out DIR [--forms DIR] [--known FILE] [--record]
+                                    mode :full (O3): for each PARSE/REL.ae (the helper's parse dump) and
+                                    LAYOUT/REL.ae (its token and comment dump) the forms in mode :full
+                                    (OUT-FORMS/REL.ae, written and read back), the text printed from the
+                                    forms read back to OUT/REL, and equal to SRC/REL byte for byte; a file
+                                    the helper rejects (parse or layout) is classed against FILE
+                                    (test/ocaml/full-known.edn: :not-utf8 only; parse rejections are
+                                    roundtrip-known.edn's)
     compare --orig DIR --cand DIR [--printed DIR] [--known FILE] [--record] [--report FILE]
                                     the round trip's tree level: for each ORIG/REL.ae (the helper's dump
                                     of the original) the dump of the printed file CAND/REL.ae equal
@@ -82,7 +91,7 @@
           (let [x (read-string (slurp f))]
             (if (cv/error-form? x)
               (swap! skipped inc)
-              (spit-mk (str out "/" r) (pr/print-file x))))
+              (spit-mk (str out "/" r) (if (get opts "--full") (cv/full-text x) (pr/print-file x)))))
           (catch Throwable t
             (swap! bad inc)
             (println "FAIL" r (.getMessage t))))))
@@ -149,7 +158,8 @@
           gone (remove (fn [[r _]] (or (contains? @rejects r) (contains? @diffs r))) known)
           n (count files)]
       (doseq [[r m] @fails] (println "FAIL" r m))
-      (doseq [[r v] unexpected-rej] (println "UNEXPECTED REJECT" r (pr-str v)))
+      (when-not (get opts "--record")
+        (doseq [[r v] unexpected-rej] (println "UNEXPECTED REJECT" r (pr-str v))))
       (doseq [[r v] unexpected-diff] (println "DIFF" r (pr-str v)))
       (doseq [[r _] gone] (println "GONE (listed, no longer occurs)" r))
       (println (str "compare: " n " files: " @ok " equal, " (count @rejects) " rejected by the helper ("
@@ -161,7 +171,58 @@
       (when (get opts "--record")
         (spit-mk known-file (str ";; recorded by `bin/repr-ocaml roundtrip --record`: the files the helper rejects (class, kind, message) and the differences\n"
                                  (str "{" (str/join "\n " (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) (into (sorted-map) (merge (apply dissoc known-all names) @rejects @diffs)))) "}") "\n")))
-      (System/exit (if (and (empty? @fails) (empty? unexpected-rej) (empty? unexpected-diff) (empty? gone) (zero? @unstable)) 0 1)))))
+      (System/exit (if (or (get opts "--record")
+                           (and (empty? @fails) (empty? unexpected-rej) (empty? unexpected-diff) (empty? gone) (zero? @unstable)))
+                     0 1)))))
+
+;; ---- full ----
+
+(defn- do-full [{:keys [opts]}]
+  (let [src (get opts "--src") parse (get opts "--parse") layout (get opts "--layout") out (get opts "--out")
+        forms (get opts "--forms") known-file (get opts "--known")
+        rt-known (if-let [f (get opts "--rt-known")] (read-string (slurp f)) {})
+        known-all (if (and known-file (.exists (File. ^String known-file))) (read-string (slurp known-file)) {})
+        files (files-under parse ".ae")
+        names (set (map #(strip-ae (rel parse %)) files))
+        known (if (get opts "--record") {} (select-keys known-all names))
+        ok (atom 0) rejects (atom {}) fails (atom {})]
+    (doseq [f files]
+      (let [r (strip-ae (rel parse f))
+            lf (str layout "/" r ".ae")]
+        (try
+          (let [ptext (slurp f)
+                ltext (slurp lf)
+                x (cv/convert-full ptext ltext)]
+            (if (cv/error-form? x)
+              (let [[_ kind msg] x]
+                (if (contains? rt-known r)
+                  (swap! rejects assoc r {:class :helper-rejected :kind kind})
+                  (swap! rejects assoc r {:class (if (= kind :encoding) :not-utf8 (reject-class r kind)) :kind kind :message msg})))
+              (let [text (cv/write-forms x)
+                    _ (cv/read-check text x)
+                    back (read-string text)
+                    printed (cv/full-text back)
+                    orig (slurp (str src "/" r))]
+                (when forms (spit-mk (str forms "/" r ".ae") text))
+                (spit-mk (str out "/" r) printed)
+                (if (= printed orig)
+                  (swap! ok inc)
+                  (swap! fails assoc r {:class :text :message (str "text differs, lengths " (count printed) " and " (count orig))})))))
+          (catch Throwable t
+            (swap! fails assoc r {:class :error :message (str (.getMessage t))})))))
+    (let [counted (into {} (remove (fn [[_ v]] (= :helper-rejected (:class v))) @rejects))
+          unexpected-rej (remove (fn [[r v]] (= (select-keys (get known r) [:class :kind :message]) (select-keys v [:class :kind :message]))) counted)
+          gone (remove (fn [[r _]] (or (contains? counted r) (contains? @fails r))) known)]
+      (doseq [[r v] unexpected-rej] (println "UNEXPECTED REJECT" r (pr-str v)))
+      (doseq [[r v] @fails] (println "FAIL" r (pr-str v)))
+      (doseq [[r _] gone] (println "GONE (listed, no longer occurs)" r))
+      (println (str "full: " (count files) " files: " @ok " text equal, "
+                    (count (filter #(= :helper-rejected (:class %)) (vals @rejects))) " rejected by the parse (the round trip's classes), "
+                    (count counted) " classed here " (pr-str (frequencies (map :class (vals counted)))) ", " (count @fails) " failures"))
+      (when (get opts "--record")
+        (spit-mk known-file (str ";; recorded by `bin/repr-ocaml roundtrip --text --record`: the files mode :full classes (layout dump rejected)\n"
+                                 (str "{" (str/join "\n " (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) (into (sorted-map) (merge (apply dissoc known-all names) counted)))) "}") "\n")))
+      (System/exit (if (and (empty? @fails) (empty? unexpected-rej) (empty? gone)) 0 1)))))
 
 (defn -main [& args]
   (let [[verb & more] args
@@ -169,5 +230,6 @@
     (case verb
       "read" (do-read (pa #{"-o" "--root"}))
       "print" (do-print (pa #{"-o" "--root"}))
+      "full" (do-full (pa #{"--src" "--parse" "--layout" "--out" "--forms" "--known" "--rt-known"}))
       "compare" (do-compare (pa #{"--orig" "--cand" "--printed" "--known" "--report"}))
       (do (println "usage: -m arbace.repr.ocaml read|print|compare ...") (System/exit 2)))))

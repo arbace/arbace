@@ -20,7 +20,7 @@
          apply-unit module modsubst recmodule modbind moddecl modtype modtypesubst include class-type
          typesubst attr ext str sig typ pat eval binding def directive bool int char string float name
          ldot lapply at binding coercion
-         ocaml/impl ocaml/intf ocaml/toplevel ocaml/error]))
+         ocaml/impl ocaml/intf ocaml/toplevel ocaml/error comment doc]))
 
 (def position-keys #{:loc :ghost :stack :content-loc})
 
@@ -56,6 +56,52 @@
     (when-not (seq? x) (throw (ex-info "the dump is not a form" {})))
     (when-not (= 'ocaml/error (first x)) (check-heads x))
     x))
+
+;; ---- mode :full (O3) ----
+
+(declare error-form?)
+
+(defn- layout-items
+  "The layout dump's vector, checked: gap item gap ... item gap, a gap a string, an item a string or
+  (comment TEXT) or (doc TEXT)"
+  [x]
+  (when-not (and (seq? x) (= 'ocaml/layout (first x)) (vector? (second x)))
+    (throw (ex-info "the layout dump is not (ocaml/layout [...])" {})))
+  (let [v (second x)]
+    (when-not (odd? (count v)) (throw (ex-info "the layout has an even number of entries" {})))
+    (doseq [[i e] (map-indexed vector v)]
+      (when-not (if (even? i)
+                  (string? e)
+                  (or (string? e) (and (seq? e) (#{'comment 'doc} (first e)) (= 2 (count e)) (string? (second e)))))
+        (throw (ex-info (str "bad layout entry " i) {:entry (pr-str e)}))))
+    v))
+
+(defn convert-full
+  "The forms in mode :full: the parse dump converted (as convert) and the layout dump (the file's text as gaps
+  and tokens, comments and docstrings as (comment TEXT) and (doc TEXT), in the source's order, OC22 (a)) in the
+  metadata map's :layout, with :mode :full.  An error dump of either is returned as it is."
+  [parse-text layout-text]
+  (let [t (convert parse-text)
+        l (read-string layout-text)]
+    (cond
+      (error-form? t) t
+      (error-form? l) l
+      :else (let [v (layout-items l)
+                  m (last t)
+                  base (if (map? m) m {})
+                  body (if (map? m) (butlast t) t)]
+              (apply list (concat body [(assoc base :mode :full :layout v)]))))))
+
+(defn full-text
+  "The file's text of forms in mode :full: the layout's entries, concatenated"
+  [x]
+  (let [m (last x)]
+    (when-not (and (map? m) (= :full (:mode m)) (vector? (:layout m)))
+      (throw (ex-info "not forms in mode :full (no :layout)" {})))
+    (let [sb (StringBuilder.)]
+      (doseq [e (layout-items (list 'ocaml/layout (:layout m)))]
+        (.append sb ^String (if (string? e) e (second e))))
+      (str sb))))
 
 (defn error-form? [x] (and (seq? x) (= 'ocaml/error (first x))))
 
@@ -98,6 +144,23 @@
             (recur (next kvs) (conj acc (if (= acc ["{"]) "" " ") ks " " vs) (- left (count ks) (count vs) 2))))))
     :else (let [s (atom-text x)] (when (<= (count s) limit) s))))
 
+(defn- write-fill
+  "A vector of atoms and small forms, as many to a line as fit"
+  [^StringBuilder sb v indent width]
+  (let [pad (apply str (repeat (inc indent) \space))]
+    (.append sb "[")
+    (loop [xs (seq v) col (inc indent) first? true]
+      (when xs
+        (let [s (or (flat (first xs) 1000000000) "")
+              n (count s)]
+          (cond
+            first? (do (.append sb ^String s) (recur (next xs) (+ col n) false))
+            (> (+ col 1 n) width) (do (.append sb "\n") (.append sb pad) (.append sb ^String s)
+                                      (recur (next xs) (+ indent 1 n) false))
+            :else (do (.append sb " ") (.append sb ^String s) (recur (next xs) (+ col 1 n) false))))))
+    (.append sb "]")))
+
+(declare write-to)
 (defn- write-to [^StringBuilder sb x indent width]
   (if-let [s (flat x (- width indent))]
     (.append sb ^String s)
@@ -126,7 +189,9 @@
                   (when-not first? (.append sb "\n") (.append sb pad))
                   (write-to sb k (inc indent) width)
                   (.append sb " ")
-                  (write-to sb v (+ indent 2) width))
+                  (if (and (= k :layout) (vector? v))
+                    (write-fill sb v (+ indent 2) width)
+                    (write-to sb v (+ indent 2) width)))
                 (recur (next kvs) false)))
             (.append sb "}"))
         :else (.append sb ^String (atom-text x))))))

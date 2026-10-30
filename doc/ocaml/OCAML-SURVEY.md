@@ -813,3 +813,96 @@ and the round trip of the generated `boot/menhir/parser.ml` (67k lines; OC24 (a)
 testsuite was run again afterwards on the final sources); one placeholder subagent was launched by mistake (no tools, no effect). No `/dev/null` in a
 command line.
 Scratch the survey cites: `.tmp/repr-ocaml/rt/NAME/` (orig dumps, printed files, cand dumps, `report.edn`) in the worktree `.tmp/worktrees/ocaml-o1`.
+
+## As built: O3 (2026-10-30)
+
+Milestone O3, repr/ocaml in mode `:full` and the `.cmi` level, built on the branch `ocaml-o1` on top of O2 (`20d28dd5`), under the light tier
+(no gate, no Arbace build, no lock, at most 4 threads, under 2 GB: `GOMEMLIMIT` 1500MiB on every Arbace run and none ran out; the helper and
+`ocamlc` at 4 processes). The proposals OC20-OC34 are not decided yet; the work followed the recommendations (OC22 (a), OC24 (a), OC26 (c),
+OC27 (a), OC30 (a), OC32 (a), OC33 (a), OC34 (a)). Nothing shipped changed (`arbace/j2g/embed.ae` and the gate's data untouched; no re-seed).
+
+**What is in the tree**
+
+- `tools/ocdump/ocdump.ml`, mode `tokens`, rewritten: the file's whole text as `(ocaml/layout [GAP ITEM GAP ... ITEM GAP] {...})`, an item a
+  token's text (the source between the lexer's offsets), `(comment "..")` or `(doc "..")` (docstrings); the gaps the white space and line
+  directives between (SPEC §11, §11.1). The concatenation is the file byte for byte. A file that is not valid UTF-8 is
+  `(ocaml/error :encoding ..)`. (The O1 dump took `Lexing.lexeme`, which is the last piece of a comment or a string, not its text.)
+- `arbace/repr/ocaml/convert.ae`: `convert-full` (the parse dump and the layout dump in one top form: the metadata map gets `:mode :full` and
+  `:layout`), `full-text` (the concatenation); the writer fills `:layout` many entries to a line. `arbace/repr/ocaml.ae`: the verb `full` and
+  `print --full`. `bin/repr-ocaml`: `read --full`, `print --full`, `roundtrip --text` (the layout dumps, `full`, then `cmp` of every printed file
+  with the original, beside Arbace's own compare), `--cmi` (the `.cmi` level), `--cmi-lines`; Makefile targets `repr-ocaml-text`, `repr-ocaml-cmi`
+  (`make check-makefile` passes). `test/ocaml/full-known.edn` (empty: no readable file is rejected by the layout dump).
+- The printer's gaps OC32 (a) assigned to O3, all fixed (and the `source.ml` ones the O2 list did not name):
+  raw identifiers as labels (`~\#let:`, `?\#and:`), as polymorphic variant tags, type variables (`'\#let`), locally abstract types, `inherit .. as`,
+  record fields and type, class, module type names that are infix keywords (`\#mod`, not `( mod )`); a structure `val x : t` (a primitive with no
+  strings, which a docstring test carries) printed as `val`, not `external`; `(p : 'a. 'a -> 'a)` (poly in a pattern constraint); `[ <m : int> ] c` (a
+  space after `[` of class arguments); `[ | u ]` (a variant type of one inherited row); `class type%foo`/`class%foo` extension and attributes after
+  the keyword; `let [%%foo] [@@bar] in` and `let [@@@a] in` (let-items that are not `let module%foo`); a self type or pattern with attributes
+  (`object (_ [@foo]) end`). The attribute placement: attributes of a pattern, module expression, module type, class expression or class type
+  whose node ends in an open-ended part go outside the parentheses of the node, `((_, a, b) [@a])`, `((functor (X : S) -> M) [@inline])`, and the
+  attributes of a package type are printed after the package in `(module M : T [@a])`.
+
+**The checks** (all light; `bin/repr-ocaml roundtrip --record --cmi samples stdlib compiler-sources compiler-backend whiml testsuite --spec`, then
+`--cmi-lines` over the four big ones)
+
+| corpus | files | :lines equal | helper rejects | :full text equal (cmp) | `.cmi` compiled alone, equal (full print) | `.cmi` of the :lines print, `-no-keep-locs` |
+|---|---:|---:|---:|---:|---|---|
+| stdlib | 150 | 148 | 2 | 148 of 148 | 115, 115 | 115, 115 |
+| compiler-sources | 248 | 248 | 0 | 248 of 248 | 136, 136 | 136, 136 |
+| compiler-backend | 346 | 346 | 0 | 346 of 346 | 20, 20 | 20, 20 |
+| whiml | 8 | 8 | 0 | 8 of 8 | 7, 7 | 7, 7 |
+| testsuite | 1,862 | 1,800 | 61 | 1,801 of 1,801 | 1,057, 1,057 | 1,057, 1,057 |
+| samples | 8 | 8 | 0 | 8 of 8 | 1, 1 | 1, 1 |
+| spec's examples | 218 | 218 | 0 | 218 of 218 | 93, 93 | (not run) |
+
+The exit criterion holds: the stdlib, the compiler's sources, whiml and every readable `.ml`/`.mli` of the testsuite (1,801 of 1,862; the other 61 are
+the helper's rejects, 56 syntax errors and 5 lexer errors, in `roundtrip-known.edn`) print back byte for byte from the forms read back from their
+`.ae`, and the `.cmi` bytes are equal for every file `ocamlc -c` compiles alone, 1,336 files in all, none differing. Of the 11 recorded testsuite
+non-passes of O2, 10 now round trip in `:lines`; the 11th, `lexing/newlines.ml` (a quoted string whose value has CR before LF), stays recorded
+(OC44), and its `:full` text is exact. The `-no-keep-locs` level is the stronger one for the canonical print: its layout and positions differ from
+the original's, and the signatures (with the docstrings as attributes) still hash to the same bytes.
+
+Seconds, sequential on a loaded host (load 13): per corpus `:full` 15 s (stdlib), 36 s (compiler-sources), 19 s (compiler-backend), 39 s (whiml, 58k
+lines in one file), 59 s (testsuite), beside the layout dump 1-6 s; the `.cmi` level 1 to 4 minutes a corpus (one `ocamlc` process a file, passes
+until no new file compiles, 2 to 6 passes).
+
+**Not covered, and why.** Files `ocamlc` does not compile alone are counted (1,336 compiled of 2,622 files in the table; `cmi/skipped.txt` has the first
+error of each): the compiler's modules need the generated `parser.ml`, `lexer.ml`, `config.ml`, the testsuite's programs need ocamltest's environment
+or expect a failure, the samples are not all well typed. The `:full` level has no such limit. The 56 syntax-error and 5 lexer-error files could be
+given a `:full` text from the layout dump alone (the lexer reads all but the lexer errors), but they have no tree to hold it; they stay classes.
+
+**Checks run**: the ones above, `bin/repr-ocaml spec-check` (218 of 218 after the SPEC edit), `samples`, `make check-makefile`. **Not run**: the gate,
+any Arbace build, `corpus check` (unchanged), `make gate-audit`. **The heavy list** (the window after the tag), besides O2's: `bin/gate` essential
+and `--full` (nothing in them changed; OC31's step, when added, runs `roundtrip --text --cmi-lines`, about 25 minutes serial on a loaded host, 2 GB);
+`bin/gate --audit` for the step; the round trip of `boot/menhir/parser.ml` in `:full` (OC24); a `.cmi` run with the compiler built in dependency order
+(OC41 (b)).
+
+**Proposals** (OC40 onward; each with options and the recommended one first)
+
+- **OC40 The form of `:full`.** (a) the text as a `:layout` vector of gaps, tokens and comments beside the unchanged tree (as built; the printed text
+  is the vector's concatenation, so the check proves the vector is exact and that the tree, printed in `:lines`, is the same program, but an edit to the
+  tree does not reach the `:full` print); (b) the tree-driven printer: the printer emits tokens, the layout's gaps and comments are anchored to tree nodes
+  by position (OC27 (b) would keep offsets in the forms) and woven in; an edited tree reprints with its comments; (c) a native lexer and parser first
+  (O6a) with positions in the tree. *Recommended: (a)* for v1, which is what the exit criterion asks and what repr/go's `:full` is for round trips;
+  (b) when a consumer edits forms and wants the comments (the REPL printing a definition back), which needs the offsets in the forms (decide with OC27);
+  (c) only with O6a.
+- **OC41 The `.cmi` level's reach.** (a) as built: every file `ocamlc -c` compiles alone, in passes, plus the `-no-keep-locs` check of the `:lines`
+  print (1,336 files); (b) build the stdlib and the compiler in dependency order with their generated sources (`ocamllex` and the committed
+  `boot/menhir/parser.ml`, `config.mlp`) so that nearly every file compiles; (c) only the stdlib's `.mli`. *Recommended: (a)*, (b) in the window if
+  the user wants a number near 100%; the files that do not compile are not a printer risk, since `:full` is exact.
+- **OC42 The gate step for `:full` and `.cmi`** (extends OC31). (a) one step `repr-ocaml` in `--full` only: `bin/repr-ocaml roundtrip --text
+  --cmi-lines` over the default corpora and the spec's examples, `:mem-gib 2`, inputs as OC31 plus `test/ocaml/` and the host pin on `ocamlc`;
+  the testsuite and whiml by hand (`roundtrip-all` plus `--text --cmi`); (b) two steps (text, cmi); (c) none. *Recommended: (a)*: one entry, the
+  checks share their dumps.
+- **OC43 Files that are not UTF-8.** (a) a class `:not-utf8` in `full-known.edn` (built; no readable file of the corpora is one: the lexer-error
+  files are the Latin-1 ones); (b) escape the bytes in the layout (`\xNN` is not Clojure reader syntax, so a vector of byte strings or a base64 entry).
+  *Recommended: (a)* until a corpus has one.
+- **OC44 `lexing/newlines.ml` in `:lines`.** (a) leave it recorded (a quoted string with CR LF in its value cannot be printed, the lexer folds the
+  CRLF; `:full` prints it exactly); (b) print such a value as an ordinary string with the escapes, accepting that the delimiter in the tree is
+  lost (the tree compare then fails on the delimiter, so (b) needs the compare to ignore it). *Recommended: (a)*.
+
+**Rule slips**: The first `--record` run died at once on a syntax error I had left in a comment line of `bin/repr-ocaml` (a no-op; I had run `bash -n` before a later edit, not after) and was started again. No source was
+edited while a run that loaded it was executing: the three long runs (`.tmp/rt-o3a.log`, `rt-o3b.log`, `rt-o3c.log`) finished before the next edit, and
+`ocaml.ae`/`bin/repr-ocaml` were edited between them. `compare --record` printed "UNEXPECTED REJECT" lines and exited 1 (a quirk of O2, fixed: a
+recording run reports nothing unexpected and exits 0). Scratch the survey cites: `.tmp/repr-ocaml/rt/NAME/` (orig dumps, layout dumps, `full/`, `full-forms/`,
+`cmi/`) and `.tmp/rt-o3{a,b,c}.log` in the worktree `.tmp/worktrees/ocaml-o1`.

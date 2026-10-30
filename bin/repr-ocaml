@@ -32,6 +32,17 @@
 #                                 run per step, GOMEMLIMIT 1500MiB
 #   bin/repr-ocaml roundtrip --spec   the same over the spec's worked examples (doc/ocaml/SPEC.md)
 #   bin/repr-ocaml check          the round trip over the default corpora and the spec's examples
+#   bin/repr-ocaml read --full [-o DIR] FILE...   mode :full (O3): the forms with the file's text in the metadata's
+#                                 :layout (the helper's token and comment dump, OC22 (a)); `print --full FORMS.ae...` prints
+#                                 the original back, byte for byte
+#   bin/repr-ocaml roundtrip --text [CORPUS...]   O3: after the O2 check, the :full forms written and read back, the
+#                                 text printed from them equal to the original (cmp, and Arbace's compare); files the
+#                                 layout dump rejects are classed in test/ocaml/full-known.edn
+#   bin/repr-ocaml roundtrip --cmi [CORPUS...]    O3: and the .cmi level: each file compiled by ocamlc -c from the original's
+#                                 directory and from the print's, the .cmi bytes equal (a file the original does not compile
+#                                 alone is counted: its first error is in .tmp/repr-ocaml/rt/NAME/cmi/skipped.txt)
+#   bin/repr-ocaml roundtrip --cmi-lines [CORPUS...]  and the :lines print's .cmi with -no-keep-locs equal to the original's
+#                                 with -no-keep-locs
 # The checks of O1 run on small inputs, in seconds (corpus fetch: one 4.7 MB download).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -238,6 +249,22 @@ cmd_read() {
 
 cmd_print() { rt_arbace print "$@"; }
 
+# read --full: forms in mode :full (O3): the parse dump and the layout dump (ocdump --mode tokens) converted together
+cmd_read_full() {
+  need_ocdump
+  local out="$root/.tmp/repr-ocaml/forms-full" tmp="$root/.tmp/repr-ocaml/read-full" f b flag
+  if [ "${1:-}" = "-o" ]; then out=$2; shift 2; fi
+  rm -rf "$tmp"; mkdir -p "$tmp/src" "$tmp/parse" "$tmp/layout"
+  for f in "$@"; do
+    b=$(basename "$f"); flag=""; case $b in *.mli) flag=--intf ;; esac
+    cp "$f" "$tmp/src/$b"
+    "$OCD" $flag --file "$b" "$f" > "$tmp/parse/$b.ae"
+    "$OCD" --mode tokens --file "$b" "$f" > "$tmp/layout/$b.ae"
+  done
+  rt_arbace full --src "$tmp/src" --parse "$tmp/parse" --layout "$tmp/layout" --out "$tmp/printed" --forms "$out" \
+    --rt-known "$root/test/ocaml/roundtrip-known.edn"
+}
+
 # corpus_list ID: the corpus's files, one path per line relative to its base; sets CORPUS_BASE
 corpus_list() {
   local id=$1 cid f ml mli l pin paths base
@@ -273,7 +300,113 @@ rt_one() {
   rt_arbace compare --orig "$w/orig" --cand "$w/cand" --printed "$w/printed" --known "$root/test/ocaml/roundtrip-known.edn" \
     --report "$w/report.edn" "${extra[@]}" || rc=$?
   echo "  $name: dump $((t1 - t0)) s, print $((t2 - t1)) s, redump $((t3 - t2)) s"
+  if [ -n "${TEXT:-}" ]; then rt_text "$name" "$base" "$list" || rc=1; fi
+  if [ -n "${CMI:-}" ]; then rt_cmi "$name" "$base" "$list" || rc=1; fi
   return $rc
+}
+
+# layout_one REL: the helper's token and comment dump of one file (mode :full's layout)
+layout_one() {
+  local rel=$1
+  mkdir -p "$OUT/$(dirname "$rel")"
+  "$OCD" --mode tokens --file "$rel" "$BASE/$rel" > "$OUT/$rel.ae"
+}
+export -f layout_one
+
+# rt_text NAME BASE LISTFILE: mode :full (O3), after rt_one: the layout dumps, the forms in mode :full written
+# and read back, the text printed from them equal to the original byte for byte (cmp, beside Arbace's own compare)
+rt_text() {
+  local name=$1 base=$2 list=$3 jobs=${REPR_OCAML_JOBS:-4} w="$root/.tmp/repr-ocaml/rt/$1" rc=0 t0=$SECONDS
+  export OCD
+  BASE="$base" OUT="$w/layout" xargs -a "$list" -P "$jobs" -n 1 bash -c 'layout_one "$0"'
+  local t1=$SECONDS
+  rm -rf "$w/full" "$w/full-forms"
+  local extra=(); [ -n "${RECORD:-}" ] && extra+=(--record)
+  rt_arbace full --src "$base" --parse "$w/orig" --layout "$w/layout" --out "$w/full" --forms "$w/full-forms" \
+    --known "$root/test/ocaml/full-known.edn" --rt-known "$root/test/ocaml/roundtrip-known.edn" "${extra[@]}" || rc=1
+  local n=0 bad=0 rel
+  while read -r rel; do
+    [ -f "$w/full/$rel" ] || continue
+    n=$((n + 1))
+    cmp -s "$base/$rel" "$w/full/$rel" || { echo "  CMP differs: $rel"; bad=$((bad + 1)); }
+  done < "$list"
+  echo "  $name text: layout $((t1 - t0)) s, full $((SECONDS - t1)) s; cmp: $n printed files, $bad differ"
+  [ $bad = 0 ] || rc=1
+  return $rc
+}
+
+# cmi_compile BASE REL OUT [ALL]: ocamlc -c on the file named REL from BASE, the output under OUT (REL's directory),
+# found again by -I (ALL: every directory of OUT, for the compiler's and the stdlib's sources, whose files need one
+# another); the exit status says whether it compiled
+cmi_compile() {
+  local base=$1 rel=$2 out=$3 all=${4:-} flags=(-w -a ${CMI_FLAGS:-}) d
+  mkdir -p "$out/$(dirname "$rel")"
+  if [ -n "$all" ]; then
+    while read -r d; do flags+=(-I "$d"); done < <(find "$out" -type d)
+  else
+    flags+=(-I "$out/$(dirname "$rel")")
+  fi
+  case $rel in
+    *.mli) (cd "$base" && ocamlc -c "${flags[@]}" -o "$out/${rel%.mli}.cmi" "$rel") ;;
+    *) (cd "$base" && ocamlc -c "${flags[@]}" -o "$out/${rel%.ml}.cmo" "$rel") ;;
+  esac
+}
+
+# rt_cmi NAME BASE LISTFILE: the .cmi level, after rt_text: each file compiled by ocamlc from the original's directory
+# and from the print's (mode :full), same relative name, in passes (a file whose dependencies are not compiled yet waits
+# for the next pass; the corpora of sources, not the testsuite, see each other's outputs), the .cmi bytes equal; a file the original does not compile alone is counted, with its first error line in cmi/skipped.txt
+rt_cmi() {
+  local name=$1 base=$2 list=$3 w="$root/.tmp/repr-ocaml/rt/$1" n=0 same=0 diff=0 f b pass progress all=""
+  case $name in testsuite|samples|whiml) ;; *) all=1 ;; esac
+  rm -rf "$w/cmi"; mkdir -p "$w/cmi/orig" "$w/cmi/print"; : > "$w/cmi/done"
+  { grep '\.mli$' "$list"; grep -v '\.mli$' "$list"; } > "$w/cmi/pending"
+  for pass in 1 2 3 4 5 6 7 8; do
+    progress=0; : > "$w/cmi/next"
+    while read -r f; do
+      [ -f "$w/full/$f" ] || continue
+      case $f in *.mli) b="${f%.mli}.cmi" ;; *) b="${f%.ml}.cmi" ;; esac
+      if cmi_compile "$base" "$f" "$w/cmi/orig" $all > "$w/cmi/orig.log" 2>&1 && [ -f "$w/cmi/orig/$b" ]; then
+        n=$((n + 1)); progress=1; echo "$f" >> "$w/cmi/done"
+        if cmi_compile "$w/full" "$f" "$w/cmi/print" $all > "$w/cmi/print.log" 2>&1 && cmp -s "$w/cmi/orig/$b" "$w/cmi/print/$b"; then
+          same=$((same + 1))
+        else
+          diff=$((diff + 1)); echo "  CMI differs: $f"
+        fi
+      else
+        echo "$f" >> "$w/cmi/next"
+        echo "$f: $(grep -m1 -i '^Error' "$w/cmi/orig.log" || head -c 100 "$w/cmi/orig.log")" > "$w/cmi/err.$(echo "$f" | tr / _)"
+      fi
+    done < "$w/cmi/pending"
+    mv "$w/cmi/next" "$w/cmi/pending"
+    [ $progress = 1 ] || break
+  done
+  cat "$w"/cmi/err.* > "$w/cmi/skipped.txt" 2>/dev/null || : > "$w/cmi/skipped.txt"
+  local skip; skip=$(wc -l < "$w/cmi/pending")
+  echo "  $name cmi: $n compiled alone ($pass passes), $same cmi equal, $diff differ, $skip not compiled alone by the original"
+  local rc=0; [ $diff = 0 ] || rc=1
+  if [ -n "${CMI_LINES:-}" ]; then rt_cmi_lines "$name" "$base" "$all" || rc=1; fi
+  return $rc
+}
+
+# rt_cmi_lines NAME BASE ALL: the same files (those rt_cmi compiled, in its order) with -no-keep-locs (the .cmi without
+# locations) from the original and from the :lines print (the canonical layout, positions differ): the .cmi bytes equal
+rt_cmi_lines() {
+  local name=$1 base=$2 all=$3 w="$root/.tmp/repr-ocaml/rt/$1" n=0 same=0 f b
+  rm -rf "$w/cmi/orig-nk" "$w/cmi/lines"; mkdir -p "$w/cmi/orig-nk" "$w/cmi/lines"
+  while read -r f; do
+    case $f in *.mli) b="${f%.mli}.cmi" ;; *) b="${f%.ml}.cmi" ;; esac
+    [ -f "$w/printed/$f" ] || continue
+    n=$((n + 1))
+    if CMI_FLAGS=-no-keep-locs cmi_compile "$base" "$f" "$w/cmi/orig-nk" $all > "$w/cmi/orig.log" 2>&1 \
+       && CMI_FLAGS=-no-keep-locs cmi_compile "$w/printed" "$f" "$w/cmi/lines" $all > "$w/cmi/print.log" 2>&1 \
+       && cmp -s "$w/cmi/orig-nk/$b" "$w/cmi/lines/$b"; then
+      same=$((same + 1))
+    else
+      echo "  CMI (:lines, -no-keep-locs) differs: $f"
+    fi
+  done < "$w/cmi/done"
+  echo "  $name cmi of the :lines print (-no-keep-locs): $n files, $same equal"
+  [ $n = $same ]
 }
 
 cmd_roundtrip() {
@@ -284,6 +417,9 @@ cmd_roundtrip() {
       --record) RECORD=1 ;;
       --jobs) shift; REPR_OCAML_JOBS=$1 ;;
       --spec) spec=1 ;;
+      --text) TEXT=1 ;;
+      --cmi) TEXT=1; CMI=1 ;;
+      --cmi-lines) TEXT=1; CMI=1; CMI_LINES=1 ;;
       *) ids+=("$1") ;;
     esac
     shift
@@ -316,7 +452,7 @@ cmd_roundtrip() {
 }
 
 case "${1:-}" in
-  read) shift; cmd_read "$@" ;;
+  read) shift; if [ "${1:-}" = "--full" ]; then shift; cmd_read_full "$@"; else cmd_read "$@"; fi ;;
   print) shift; cmd_print "$@" ;;
   roundtrip) shift; cmd_roundtrip "$@" ;;
   check) cmd_roundtrip && cmd_roundtrip --spec ;;
@@ -327,9 +463,9 @@ case "${1:-}" in
       fetch) cmd_corpus_fetch ;;
       count) cmd_corpus_count_or_check count ;;
       check) cmd_corpus_count_or_check check ;;
-      *) sed -n '2,25p' "$0"; exit 2 ;;
+      *) sed -n '2,40p' "$0"; exit 2 ;;
     esac ;;
   samples) cmd_samples ;;
   spec-check) cmd_spec_check ;;
-  *) sed -n '2,25p' "$0"; exit 2 ;;
+  *) sed -n '2,40p' "$0"; exit 2 ;;
 esac

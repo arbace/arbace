@@ -754,24 +754,44 @@ let error_form exn =
       L ([ A "ocaml/error"; kw kind; Str msg ] @ (if m = [] then [] else [ M m ]))
   | _ -> L [ A "ocaml/error"; kw "exception"; Str (Printexc.to_string exn) ]
 
-(* ---- the tokens (SPEC §9; O3 will weave them) ---- *)
+(* ---- the tokens (SPEC §9; O3: the layout of mode :full) ---- *)
 
-let tokens_form lexbuf =
+(* The whole text as alternating gaps and items: gap0 item1 gap2 ... itemN gapN, a gap the text between two items
+   (white space; line directives), an item a token's text, [(comment "text")] or [(doc "text")] (a docstring).
+   Every item's text is the source between its offsets, so the concatenation is the file byte for byte. *)
+let tokens_form src lexbuf =
   Lexer.init ();
-  let toks = ref [] in
+  let items = ref [] in
+  let prev = ref 0 in
+  let n = String.length src in
   let rec go () =
     let t = Lexer.token_with_comments lexbuf in
-    let s = lexbuf.Lexing.lex_start_p and e = lexbuf.Lexing.lex_curr_p in
-    let loc = { Location.loc_start = s; loc_end = e; loc_ghost = false } in
-    let text = Lexing.lexeme lexbuf in
     if t = Parser.EOF then ()
+    else if t = Parser.EOL then go ()
     else begin
-      toks := L [ A "tok"; Str text; (if !with_loc then pos_vec loc else nil) ] :: !toks;
+      let s, e, kind =
+        match t with
+        | Parser.COMMENT (_, loc) -> (loc.Location.loc_start.Lexing.pos_cnum, loc.Location.loc_end.Lexing.pos_cnum, `Comment)
+        | Parser.DOCSTRING d ->
+            let loc = Docstrings.docstring_loc d in
+            (loc.Location.loc_start.Lexing.pos_cnum, loc.Location.loc_end.Lexing.pos_cnum, `Doc)
+        | _ -> (lexbuf.Lexing.lex_start_p.Lexing.pos_cnum, lexbuf.Lexing.lex_curr_p.Lexing.pos_cnum, `Tok)
+      in
+      if s < !prev || e < s || e > n then failwith (Printf.sprintf "token offsets %d-%d after %d" s e !prev);
+      let gap = String.sub src !prev (s - !prev) and text = String.sub src s (e - s) in
+      items :=
+        (match kind with
+         | `Tok -> Str text
+         | `Comment -> L [ A "comment"; Str text ]
+         | `Doc -> L [ A "doc"; Str text ])
+        :: Str gap :: !items;
+      prev := e;
       go ()
     end
   in
   go ();
-  V (List.rev !toks)
+  items := Str (String.sub src !prev (n - !prev)) :: !items;
+  V (List.rev !items)
 
 (* ---- main ---- *)
 
@@ -807,7 +827,10 @@ let () =
   let out =
     try
       match !mode with
-      | "tokens" -> L [ A "ocaml/tokens"; tokens_form lexbuf; top_meta ]
+      | "tokens" ->
+          if not (valid_utf8 src) then
+            L [ A "ocaml/error"; kw "encoding"; Str "the file is not valid UTF-8" ]
+          else L [ A "ocaml/layout"; tokens_form src lexbuf; top_meta ]
       | "parse" ->
           if !use_file then
             L [ A "ocaml/toplevel"; vec phrase (Parse.use_file lexbuf); top_meta ]
