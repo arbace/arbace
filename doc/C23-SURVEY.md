@@ -2548,3 +2548,10 @@ the logs `te1.log`, `others1.log`, `all1.log`, `final.log`, `final2.log` (the re
 
 Rule slips: two waiting loops used `pgrep` (stopped once noticed), one probe redirected to `/dev/null`, and the judge of one
 check run loaded `arbace/c/build.ae` while it was being edited (the run's judgment was repeated).
+
+### Decided (CS100-CS111; the user, 2026-10-30)
+
+- CS100 (b): `arbace/c.ae` and `arbace/c/` excluded from the embedded tree (`arbace/j2g/embed.ae`, `bin/lib/version.bash`'s
+  `arbace_embedded_sources`, `test/gate/steps.edn`'s `:tools`) beside repr/c, so the branch lands before the heavy window;
+  the window removes both exclusions together (C5.7, item 1).
+- CS101, CS102, CS104-CS111 (a); CS103 (c), as recommended.
