@@ -6578,3 +6578,136 @@ In this order, on the branch merged with main after the tag, under the rules of 
   `fields.py`, `fields.json`, `fields.edn`, `gen_order.ae`, `order.out` (the field order), `tree.orig.ae` (tree.ae before
   the split, javac_tree's source), `java.base.decls` (the pack written twice), `run-pack.log`, `run-check.log`,
   `run-check2.log`, `run-decls.log`, `run-decls2.log`, `verbs.bash`.
+
+## As built: JN10 part 1 (2026-10-30)
+
+JN10's part 1 (JFS130 (a)) finished in the light tier, on `java-jn10` after `43eebd12`, and part 3's light parts (JFS132
+(a): the read without javac's tool, `arbace.repr.java.load`). Every run was on stage 0 (`target/seed/amd64/arbace`,
+`GOMAXPROCS=4 GOMEMLIMIT=1500MiB`, evaluated from the worktree, one thread); nothing ran on javac's tool, so every check of
+javac's branches is in JN10p.5's list. **The read closure names no javac class**: `bin/repr-java closure-check` counted
+717 sites in 7 files before (java.ae 17, attr 144, convert 108, expr 23, model 249, nattr 133, resolve 43) and 0 after,
+`test/repr/java/closure-known.edn` is `{}`, and the closure's 24 namespaces (with `load`) load in one stage 0 process.
+**The read without javac runs on a program without javac**: on stage 0, with no platform directory (java.base from the
+pack, JFS131 (b)), the samples (11 files) and the module sample (4) read natively to the committed expected forms byte for
+byte (`test/repr/java/expected/{java,module}`), and the baseline (183 files) to `baseline.sha256`'s hashes for all 187
+class files; its one fallback, `clojure/lang/XMLHandler.java` (its superclass is java.xml's, not in the pack), is reported
+as "javac's tool needed" and the run exits 1 with the rest written (224 s, 1.45 GB peak).
+
+### JN10p.1 What was built
+
+| file | what |
+|---|---|
+| `arbace/repr/java/javac_hook.ae` | javac's predicates `jsym?`, `jmethod-sym?`, `jclass-sym?`, `jvar-sym?`, `jtype?`, `jattribute?` (the entries `:javac/NAME?`, false when not installed), `javac-classes?` (by name), `try-load-javac-half!` keyed on `:read/convert-units` (so an installed tree half alone does not stop javac-read's load) and locked |
+| `arbace/repr/java.ae` | `convert-one`, `native-units`, `convert-units` moved to `javac_read.ae`; `convert-units` is the hook's `:read/convert-units`, else the error "repr/java: read needs javac's tool (use --no-javac, or javac's tool executable)"; `convert-units-nojavac`'s fallback goes to javac only when its half loads, else each fallback is a failure "javac's tool needed: REASON" (`:javac-needed`) and the native files are still written; `-main` loads javac's half once before any thread reads, and exits 1 after the report when a file needed javac's tool; `registry-units` public; requires no javac namespace |
+| `arbace/repr/java/javac_read.ae` (new) | the three functions verbatim (`rj/registry-units`, `rj/rename-fn`, `f/*rename*`), requiring every part of javac's half, installed as `:read/convert-units` |
+| `arbace/repr/java/forms.ae`, `jtypes.ae` | `*rename*` is forms' (the closure binds it without javac); jtypes' `binary-name` and `package-name` read it |
+| `arbace/repr/java/attr.ae`, `javac_attr.ae` (new) | `index`, `sym-class`, `javac-sym`, `local-sym?`, `generic-type?`, `own-type-params?`, `anon-super-ctor*` moved verbatim; each fact's javac delay calls one entry (`:attr/field j K`: the attributed field of javac's node, a `case` of the old expressions; `:attr/tree-symbol`, `:attr/type-expr?`, `:attr/record-components`, `:attr/package-data`, `:attr/declared-varargs-element?`, `:attr/generic-sym-type?`, `:attr/array-class-member?`, `:attr/prim?`); `twin`, `as-asker`, `native?` test `tr/jc?` |
+| `arbace/repr/java/nattr.ae`, `javac_nattr.ae` (new) | the 24 functions over javac's objects (jtype, jdata, jcompound, jcid, jmethod-id, jmembers-data, rl-class, rl-method, rl-local, rl-field, ...) moved verbatim, a stub of each public one left calling `:nattr/NAME` (their nil tests kept in the stub); `provider`'s walk of the twins is `:nattr/sym->native` (only with twins); `canon`, `check-members!` test `jsym?`, `jclass-sym?`; the masks and `twin-of` public; javac_nattr installs the predicates |
+| `arbace/repr/java/model.ae`, `javac_model.ae` (new) | every javac branch of the model's 80-odd reads an entry `:model/NAME` (most a `fn` of the old expression in the install map; `m-local?`, `m-tparam-names`, `m-pkg-class-names`, `m-nativize` as functions); `instance? Type/Symbol/Attribute` tests are the predicates, in the same places; `canon` and the read counts (`rd`) stay in the closure around each call, so the counts are as before; `prim-rank` model's own |
+| `arbace/repr/java/expr.ae`, `resolve.ae`, `convert.ae` (their javac sections in `javac_model.ae`) | expr: `nmethod`, `erased-key`, `javac-method-of`, `javac-ctor-of` (lean! stays in the closure); resolve: javac's class infos (`method-flags`, `module-of`, `canonical`, `find-class`, `registry`, `class-of-type`, `outer-class`, `completed?`, `class-info`) and `internal`'s, `desc`'s and `choice`'s javac parts, `*module*` public in the closure; convert: `kind-of`, `count-kinds!`, `type-decls`, Symtab's four types, the javac unit's text, end positions and name (`:convert/unit-info`), the 100-odd unused imports dropped |
+| `arbace/repr/java/tree.ae` | the dispatch is `jc?` first (javac's `instance? JCTree`), as the unsplit functions tested: the write-ahead's `map?`-first test sent a value of neither kind (a label's key `[:body t]`, which `tag` answers nil) to javac's half, so the first read without javac on stage 0 fell back on every loop (JFS149) |
+| `arbace/repr/java/javac_tree.ae` | `class-kind`'s native branch reads decls' `d/ANNOTATION`, `d/INTERFACE`, `d/ENUM`, `d/RECORD` (tree.ae's private constants were unqualified: the file would not have compiled on the tool; found by the static check below) |
+| `arbace/repr/java/load.ae` (new, `arbace.repr.java.load`, in the closure) | `read-java` (paths read by `convert-units-nojavac` into a scratch directory, the source path each file's source root: its directory less its package's segments) and `load-java` (the packages defined as the interpreted level's `--load do` defines them, `test/java/run.ae`: namespace forms, then the class files' forms and every defclass of a package in one `do`, packages in import order); a fallback or a parse failure is an ex-info "load-java: javac's tool needed: REASON (FILE)" with `:file` `:reason` |
+| `test/repr/java/closure.ae` | the half adds `javac-attr`, `javac-nattr`; the closure's roots are `arbace.repr.java` and `arbace.repr.java.load` |
+| `bin/lib/repr-java/host.bash` | `repr_java_reader_hash` covers `javac_attr`, `javac_nattr`, `javac_model`, `javac_read` |
+
+The half is five namespaces (javac-tree, javac-attr, javac-nattr, javac-model, javac-read: JFS148), each requiring the
+closure namespaces whose javac branches it holds; `arbace.repr.java.javac` and `jtypes` still load javac-tree, and
+javac-read loads the rest. On javac's tool every closure function either answers a native value as before or hands javac's
+value to the code it ran before, moved without change (the claim of part 1, to be proved by JN10p.5's checks).
+
+### JN10p.2 Checks run (stage 0, light)
+
+- `bin/repr-java closure-check`: 0 sites, 24 namespaces loaded (`.tmp/jn10/cc3.log`); `--update` wrote `{}`.
+- A static check of javac's half (`.tmp/jn10/halfcheck.ae`, it cannot load without javac's classes): every alias-qualified
+  symbol names a public var of the closure namespace, no alias is missing, no moved code calls a closure function
+  unqualified (the remaining hits are locals: `p`, `canon`, `r`, `f`, `field`, a quoted list), and every short class
+  name is imported (`.tmp/jn10/py/`). It found javac_tree's unqualified flags.
+- `read --no-javac --check` without a platform directory: samples 11/11 native, the forms the committed ones byte for
+  byte; module 4/4, the same; baseline 182/183 native, 187 class files' hashes `baseline.sha256`'s, `clojure/lang.ae`
+  different only by XMLHandler's load, which needs java.xml (`.tmp/jn10/nj-*.log`, `nj-baseline.sha256`).
+- `bin/repr-java parse` of Features, PrintSyntax and module-info: the same 3,725 lines from the worktree and from HEAD
+  `43eebd12`'s tree (`.tmp/jn10/parse-{old,new}.txt`).
+- `load-java` (`.tmp/jn10/lj/t.ae`, `t2.ae`): two packages of a source tree defined in import order and `demo.Main/main`
+  run ("Hello, n0! Hello, n1! Hello, n2!"); a file extending java.xml's DefaultHandler the ex-info "javac's tool needed".
+- Not run: anything on javac's tool, the gate, the provenance writers, builds (the light tier).
+
+### JN10p.3 Reflection
+
+Loading the closure on stage 0 warns at `decls.ae:1016-1018` (as before), `nattr.ae:79` (`provider-of`'s WeakReference
+`.get`) and `expr.ae:1510` (`HashSet.` of a lazy seq); the last two are unchanged lines that stage 0 could not load
+before (their namespaces required jtypes). JN10.9's risk 4 (zero warnings in the closure) is for the embedding step: two
+hints, `^java.util.Collection` and the WeakReference's, then.
+
+### JN10p.4 Shipped files
+
+None that a program embeds: `arbace/repr/java` is still excluded (`arbace/j2g/embed.ae`, `arbace_embedded_sources`), so
+`arbace_runtime_key` and `gate_key`'s inputs are as after the write-ahead. What moves: `arbace_javac_key` (it hashes
+`arbace/`), the reader's key and `repr_java_reader_hash` (the four provenance files stale, `REPR_JAVA_STALE_OK=1`). The files
+that join the batched re-seed at the embedding (JN10.6): the closure's 24 namespaces (now with `load.ae`),
+`jdk/platform/java.base.decls`, `embed.ae`, `version.bash`, `bin/arbace-go`.
+
+### JN10p.5 Heavy checks for the post-tag window (JN10w.7, updated)
+
+In this order, on the branch merged with main after the tag:
+
+1. `bin/repr-java closure-check` (seconds; `{}` expected).
+2. `bin/javac-vendor build` (javac's tool, two builds; big lock, about 40 minutes each). The first test is that
+   `arbace.repr.java.javac-read` loads on it (`-m arbace.repr.java read` loads it before reading): javac-tree's
+   `field-order-check` and `flags-check`, and every `:attr/`, `:nattr/`, `:model/`, `:expr/`, `:resolve/`, `:convert/`
+   entry compiled by c2j on the tool (a wrong hint or arity in a moved line fails here, not later).
+3. `REPR_JAVA_STALE_OK=1 bin/repr-java parse-check --corpus samples,baseline`, `front-check --corpus samples,baseline`,
+   `attr-check --corpus samples,baseline`, `nojavac-check --corpus samples,baseline` (the dispatch through the hooks:
+   facts, model reads and forms unchanged; attr-check's `:model` read counts unchanged too), then the full corpora
+   `parse-check`, `front-check`, `attr-check`, `nojavac-check` (big lock; `test/repr/java/*-check-known.edn` unchanged).
+4. `bin/repr-java check --suite` and `check --jdk` (`test/repr/java/expected/jdk26u.sha256`: no forms file moves).
+5. Part 2's (b): `REPR_JAVA_PACK=1 bin/repr-java attr-check` and `nojavac-check`, the known files unchanged.
+6. `bin/repr-java platform-check` and its one-off over the 68 modules.
+7. Speed (JN10.9 risk 3): `bin/repr-java parse --javac --time`, nojavac-check's total against JN9f's 540 s and attr-check's
+   (the javac branches now pay a hook lookup and a call each: budget 5%).
+8. The provenance writers in JN10.7's order on the final tool (`bin/jrt-convert update`, `bin/javac-vendor convert`,
+   `bin/clojure-tests --java-fixtures update`, `bin/java-check --forms update`; each forms tree unchanged), then
+   `bin/provenance-check`.
+9. `bin/java-check --levels read,nread` (3,282 / 39 / 0, `test/java/check-nread.edn`).
+10. `bin/gate --audit repr-java-closure provenance`, the essential `bin/gate`, `bin/gate --full --plan`, and `bin/gate
+    --full` at JN10's merge.
+11. Part 3 on the tool and the gate's executable, once the closure is embedded: `shipped-check` (JN10.5), the sample program
+    calling `load-java`, the smoke script's `(require 'arbace.repr.java)`.
+
+### JN10p.6 Proposals
+
+- **JFS148 The layout of javac's half.**
+  - Options: (a) one namespace of the half per group of closure namespaces, as built (javac-tree, javac-attr, javac-nattr,
+    javac-model for model, expr, resolve and convert, javac-read); (b) one per closure namespace (eight); (c) one namespace.
+  - *Recommended: (a)*: the moved functions keep their names without collisions (attr's and nattr's `local-sym?` are two),
+    each half requires only what its code calls, and the small sections (expr, resolve, convert) are a screen each in
+    javac-model; (b) adds three files of a few functions, (c) needs renames in moved code, which the claim (moved without
+    change) argues against.
+- **JFS149 How the closure tells javac's values.**
+  - Options: (a) javac's own predicates through the hook (`jc?`, `jsym?`, `jtype?`, `jattribute?`, ...), tested where the
+    old code tested `instance?`, as built; (b) native-first tests (`map?`, `nsym?`, `ntype?`), anything else javac's.
+  - *Recommended: (a)*: it is the old dispatch exactly, so on the tool no branch moves; (b) was the write-ahead's tree.ae
+    and was wrong for values of neither kind (a label key, a marker keyword): found by the first read without javac.
+- **JFS150 Where `load-java` is entered.**
+  - Options: (a) `arbace.repr.java.load/load-java` alone, as built; (b) also an `arbace.core`-level `load-java` (or a `user`
+    referral) when the closure is embedded, resolving the namespace lazily; (c) the REPL's `:load` of a `.java` path.
+  - *Recommended: (a) now, (b) at the embedding*: (b) changes the runtime's key and so belongs to the re-seed batch
+    (JN10.6); (c) is a convenience over (b).
+- **JFS151 A read without javac's tool that meets a fallback.**
+  - Options: (a) as built: the native files written, each fallback listed with its reason as a failure, exit status 1;
+    (b) the whole read refused; (c) the fallback files' forms omitted silently.
+  - *Recommended: (a)*: JN10.5's behaviour; a corpus with one file needing javac (the baseline's XMLHandler) is still
+    read, and the status says it was not complete; (c) hides it.
+- **JFS152 Modules beyond java.base for the shipped reader.**
+  - Options: (a) java.base's pack only, as decided (JFS131 (b)), a class of another module "javac's tool needed"; (b) a
+    second pack of the modules the corpora's fallbacks name (java.xml first), measured like java.base's; (c) every module.
+  - *Recommended: (a) until part 3's shipped-check counts the fallbacks by module*: the baseline's one fallback is java.xml;
+    if the jdk corpus's and the samples' are a few modules, (b) for those, at a measured size.
+
+### JN10p.7 Sources and scratch
+
+- The worktree's `.tmp/jn10/` (not tracked): `model.orig.ae` (model.ae before this part), `py/forms.py` (top-level forms),
+  `py/model_edit.py` (the model's replacements), `expr-half.txt`, `resolve-moved.txt`, `nattr-moved.txt`,
+  `attr-moved.txt`, `half-{model,expr,resolve,convert}.ae` (javac-model's sections), `halfcheck.ae`, `hc.log`, `cc1.log`
+  to `cc3.log`, `nj-sample*`, `nj-module*`, `nj-baseline*`, `parse-{old,new}.txt`, `head/` (HEAD's tree), `lj/` (load-java's
+  probes); `javac-sites.txt` was regenerated by `inv.py` over the new tree (the write-ahead's inventory is gone from it).
