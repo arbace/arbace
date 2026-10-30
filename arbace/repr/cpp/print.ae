@@ -250,6 +250,8 @@
       (let [p (:c/paren m) n (if (true? p) 1 (long p))
             [s _] (expr (vary-meta x dissoc :c/paren))]
         [(str (apply str (repeat n "(")) s (apply str (repeat n ")"))) 0])
+      (if-let [mt (:cpp/macro m)] ; a macro invocation (CP41 (b)): its text, as one operand
+       [mt 0]
       (if-let [l (literal-text x)]
         [l (if (and (number? x) (neg? x)) 2 0)]
         (cond
@@ -322,7 +324,7 @@
                 [(str (a 1 1) "." (subs (name h) 2)) 1]
                 (and (seq? h) (= (first h) 'cpp/brace) (= 2 (count x)) false) nil
                 :else [(str (a 0 1) "(" (str/join ", " (map #(a % 16) (range 1 (count x)))) ")") 1])))
-          :else (fail "an expression" x))))))
+          :else (fail "an expression" x)))))))
 
 (defn expr-str
   "The text of `x`, child `i` of a form of metadata `pm`, parenthesized when looser than `need`."
@@ -512,11 +514,18 @@
 
 (defn- tag-def? [f] (and (seq? f) ('#{cpp/struct cpp/class cpp/union} (first f)) (or (vector? (second f)) (vector? (nth f 2 nil)))))
 
+(defn- macro! 
+  "A macro invocation's text (CP41 (b)): once, on the first form of its nodes; the others print nothing."
+  [^StringBuilder b f]
+  (let [t (:cpp/macro (meta f))]
+    (when (seq t) (line-directive! b f) (line b t))))
+
 (defn item!
   "A declaration or directive at the current indent."
   [^StringBuilder b f]
   (let [m (meta f)]
     (cond
+      (:cpp/macro m) (macro! b f)
       (not (seq? f)) (fail "an item" f)
       :else
       (case (first f)
@@ -629,11 +638,13 @@
 (declare stmt!*)
 
 (defn- stmt! [^StringBuilder b s nxt]
+  (if (:cpp/macro (when (instance? arbace.lang.IMeta s) (meta s)))
+    (macro! b s)
   (if-let [as (:cpp/attrs (when (instance? arbace.lang.IMeta s) (meta s)))]
     (let [ib (StringBuilder.)]
       (stmt!* ib (vary-meta s dissoc :cpp/attrs) nxt)
       (.append b (str (pad) (str/join " " (map #(str "[[" (attr-str %) "]]") as)) " " (str/triml (str ib)))))
-    (stmt!* b s nxt)))
+    (stmt!* b s nxt))))
 
 (defn- stmt!* [^StringBuilder b s nxt]
   (let [m (meta s)]
@@ -647,7 +658,7 @@
           c/directive (.append b (str (first args) "\n"))
           do (block! b args)
           let (do (doseq [f (first args)]
-                    (if (and (seq? f) (or (tag-def? f) (#{'c/defn 'cpp/template 'cpp/text} (first f))))
+                    (if (or (:cpp/macro (meta f)) (and (seq? f) (or (tag-def? f) (#{'c/defn 'cpp/template 'cpp/text} (first f)))))
                       (item! b f)
                       (line b (or (decl-str f) (fail "a local declaration" f)))))
                   (stmts! b (rest args)))

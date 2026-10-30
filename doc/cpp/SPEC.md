@@ -382,6 +382,8 @@ The operator forms follow C's names for the operators C writes with words or oth
 `operator++`/`operator--` (the postfix overload has an `int` parameter, as the standard says); the others are the symbols
 `+ - * / % << >> == != < <= > >= <=> -> ->* = += -= ...`. A compound assignment operator is the symbol with `=`:
 `(operator +=)`, `(operator <<=)`.
+An operator whose spelling is no symbol is a string, as `new[]` is: `(operator "/=")` (`/=` would read as a symbol and a number
+in one; the reader's tokens end at `/`), the same for any spelling the reader cannot read back as one symbol.
 
 ### 6.4 Enumerations
 
@@ -655,7 +657,10 @@ The C forms' §10 holds: `:lines` (positions off; comments as `;` comments, lost
 layer, **item-granular text** as built by C3b: each top-level item's text from its first token to the next item's,
 CS70 (a)). Additions: the comment forms of C++ (`//` and `/* */` and doc comments `///`, `/** */` kept as data in `:full`);
 raw strings' text; `export`/`module`/`import` lines as items; the items of a class body are items of their own (a member
-function's text is its item's); alternative tokens (N7) as `:c/ops`. Sub-item layers (per token) are not v1. The
+function's text is its item's); alternative tokens (N7) as `:c/ops`. Sub-item layers (per token) are not v1. A macro invocation that stands for declarations, statements or an expression is the form of what it expands to,
+with the invocation as written in the metadata, `^{:cpp/macro "ASSERT (x);" :cpp/line 12}` (`:cpp/line`: the line it stood at,
+for `__LINE__`): the printer writes the text; the nodes of one invocation after the first carry `:cpp/macro ""`. Where the expansion
+cannot be converted the invocation is `(cpp/text "...")`. The
 oracle's `range`s (begin and end offsets with macro-expansion pairs) place each node among the lexer's tokens.
 
 ## 12. The oracle's facts
@@ -1132,6 +1137,10 @@ departures and additions, each a proposal of the survey (CP40 and on) until the 
   (`[[...]]`), `:c/gnu-attrs ["noinline"]` (`__attribute__((...))`), `:cpp/alignas ["alignas(16)"]`; on a statement
   `:cpp/attrs` on its form (`[[fallthrough]];`); `override` and `final` are `^:override`, `^:final`. Printed before the
   declaration (§5.6 of the C forms places them; CP44).
+  **As built (CP44 (b))**, the attribute encoding: each attribute is `name`, `ns/name` (`gnu::cold` is `gnu/cold`) or `[name arg*]`
+  for one with arguments (an argument: an integer, an identifier, a plain string, else `(cpp/text "...")`; `[name]` for `name()`), in
+  the vectors `:cpp/attrs` (`[[...]]`) and `:c/gnu-attrs` (`__attribute__((...))`); `alignas(N)` is `:cpp/alignas N` (integers) and
+  its text otherwise; what is none of these is `(cpp/text "...")`. Inherited and implicit attributes are the oracle's.
 - **User-defined literals** are `(cpp/udl "LITERAL" "SUFFIX")`, the literal part's spelling and the suffix (§9.4's value
   form waits for the literal operator's fact). **Literals** otherwise follow the C forms: an `int` is a number, another
   integer type `(lit unsigned 3)`, `(lit long 3)`; a `char` a character or `(lit char 200)`, the others `(lit wchar_t 65)`,

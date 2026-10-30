@@ -145,6 +145,24 @@
            f)))
      (gap (keyword why) (str "no form for " why ", and its text is not plain")))))
 
+
+(def ^:dynamic *in-macro* "true while a macro node's own AST is converted (CP41 (b)): its nodes are not macro texts again" false)
+
+(defn macro-form
+  "CP41 (b): the node's own forms (`conv`, a thunk, run with the macro check off) with the invocation's text on the first as
+  `:cpp/macro` (and `:cpp/line`): the printer writes the text. A conversion that gaps, or forms that cannot carry
+  metadata, are the node's text form as before. `semi`: a statement's or a declaration's text, the ; included."
+  [n why semi conv]
+  (let [tf (binding [*texts* nil] (text-form n why semi))
+        fs (try (binding [*in-macro* true] (vec (conv)))
+                (catch arbace.lang.ExceptionInfo e (if (:cpp/gap (ex-data e)) nil (throw e))))]
+    (if (and (seq fs) (every? #(instance? arbace.lang.IObj %) fs))
+      (let [m (meta tf)]
+        (when *texts* (swap! *texts* update :macro-form (fnil inc 0)))
+        (into [(vary-meta (first fs) assoc :cpp/macro (second tf) :cpp/line (:cpp/line m))]
+              (map #(vary-meta % assoc :cpp/macro "") (rest fs))))
+      (do (when *texts* (swap! *texts* update (keyword why) (fnil inc 0))) [tf]))))
+
 (defmacro ^:private or-text
   "The body's form, or on a gap the node's text."
   [n why & body]
@@ -458,7 +476,7 @@
   (let [k (kind n)]
     (cond
       (none? n) (gap :empty "an expression the dump does not hold")
-      (and (macro-node? n) (not (contains? transparent k))) (text-form n "macro")
+      (and (macro-node? n) (not *in-macro*) (not (contains? transparent k))) (first (macro-form n "macro" false #(vector (let [x (ex n)] (if (instance? arbace.lang.IObj x) (vary-meta x dissoc :c/paren) x)))))
       (contains? transparent k)
       (ex (first (kids n)))
       :else
@@ -698,9 +716,9 @@
   "A statement's items (a label or case is an item before the statement it labels)."
   [n]
   (let [k (kind n)]
+    (if (and (macro-node? n) (not *in-macro*) (not (#{"CompoundStmt" "DeclStmt"} k)))
+      (macro-form n "macro" true #(stmt-items n))
     (try
-      (when (and (macro-node? n) (not (#{"CompoundStmt" "DeclStmt"} k)))
-        (gap :macro "a statement from a macro"))
       (case k
         "AttributedStmt" (let [as (filter #(and (.endsWith ^String (kind %) "Attr") (not= (kind %) "LoopHintAttr")) (kids n)) ; a loop hint is a #pragma, a directive of the body
                                st (first (remove #(.endsWith ^String (kind %) "Attr") (kids n)))
@@ -786,7 +804,7 @@
           [(expr-stmt (ex n))]
           [(text-form n k true)]))
       (catch arbace.lang.ExceptionInfo e
-        (if (:cpp/gap (ex-data e)) [(text-form n (str k "/" (name (:cpp/gap (ex-data e)))) true)] (throw e))))))
+        (if (:cpp/gap (ex-data e)) [(text-form n (str k "/" (name (:cpp/gap (ex-data e)))) true)] (throw e)))))))
 
 (declare ^:dynamic *directives*)
 (def ^:dynamic *pending* "the directives of the compound statement being converted that no statement holds: an atom of a sorted vector" nil)
@@ -800,19 +818,33 @@
       (mapv :form mine))
     []))
 
+(defn- sibling
+  "The forms of a node whose macro invocation is the previous node's (`mx` = `lmx`): the text once, on the first."
+  [fs mx lmx]
+  (if (and mx (= mx lmx) (seq fs) (:cpp/macro (meta (first fs))))
+    (cons (vary-meta (first fs) assoc :cpp/macro "") (rest fs))
+    fs))
+
 (defn block-forms
   "A block's items: its declarations as a let around the items after them; the pending directives between them."
-  [ns]
-  (loop [ns (seq ns) out []]
-    (if-not ns
-      out
-      (let [n (first ns)
-            out (into out (flush-before (first (extent n))))]
-        (if (= (kind n) "DeclStmt")
-          (let [[ds more] (split-with #(= (kind %) "DeclStmt") ns)
-                binds (vec (mapcat local-decl ds))]
-            (conj out (apply list 'let binds (block-forms more))))
-          (recur (next ns) (into out (stmt-items n))))))))
+  ([ns] (block-forms ns nil))
+  ([ns lmx]
+   (loop [ns (seq ns) out [] lmx lmx]
+     (if-not ns
+       out
+       (let [n (first ns)
+             out (into out (flush-before (first (extent n))))]
+         (if (= (kind n) "DeclStmt")
+           (let [[ds more] (split-with #(= (kind %) "DeclStmt") ns)
+                 [binds lmx] (reduce (fn [[bs lmx] d]
+                                       (let [mx (when (macro-node? d) (macro-extent d))
+                                             fs (vec (sibling (local-decl d) mx lmx))]
+                                         [(into bs fs) (when (and mx (seq fs) (:cpp/macro (meta (first fs)))) mx)]))
+                                     [[] lmx] ds)]
+             (conj out (apply list 'let binds (block-forms more lmx))))
+           (let [mx (when (macro-node? n) (macro-extent n))
+                 fs (vec (sibling (stmt-items n) mx lmx))]
+             (recur (next ns) (into out fs) (when (and mx (seq fs) (:cpp/macro (meta (first fs)))) mx)))))))))
 
 (defn compound-forms
   "A compound statement's items, the directives that stand inside it between its statements among them (CP45)."
@@ -1230,9 +1262,10 @@
       (none? n) []
       (implicit? n) []
       (contains? n :TemplateInstantiationPattern) []
+      (and (macro-node? n) (not *in-macro*) (not (#{"NamespaceDecl" "LinkageSpecDecl"} k)))
+      (macro-form n "macro" true #(decl-forms n ctx outer?))
       :else
       (try
-        (when (and (macro-node? n) (not (#{"NamespaceDecl" "LinkageSpecDecl"} k))) (gap :macro "a declaration from a macro"))
         (case k
           "VarDecl" (with-headers n outer? #(var-form n ctx))
           "FieldDecl" (var-form n ctx)
@@ -1359,7 +1392,7 @@
   (let [ds (kids n)
         fs (vec (mapcat #(decl-forms % :local) ds))]
     (if (> (count ds) 1)
-      (if (or (some #(#{"CXXRecordDecl" "EnumDecl"} (kind %)) ds) (some #(and (seq? %) (= (first %) 'cpp/text)) fs))
+      (if (or (some #(#{"CXXRecordDecl" "EnumDecl"} (kind %)) ds) (some #(or (and (seq? %) (= (first %) 'cpp/text)) (:cpp/macro (meta %))) fs))
         [(text-form n "DeclStmt/record" true)]
         [(apply list 'cpp/decls fs)])
       fs)))
@@ -1383,14 +1416,20 @@
         out
         (let [[e fs n] (first rs)
               prev (peek out)]
-          (if (and prev e (:e prev) (< (long (first e)) (long (second (:e prev))))
-                   (or (some #(and (seq? %) (= (first %) 'cpp/text)) fs) (:text? prev) (:unnamed? prev)))
+          (cond
+           (and prev e (= e (:raw prev)) (:mac? prev) (:cpp/macro (meta (first fs))))
+           ;; the nodes of one macro invocation: the text once, on the first
+           (recur (next rs) (conj (pop out) (update prev :fs into (cons (vary-meta (first fs) assoc :cpp/macro "") (rest fs)))))
+           (and prev e (:e prev) (< (long (first e)) (long (second (:e prev))))
+                   (or (some #(and (seq? %) (= (first %) 'cpp/text)) fs) (:cpp/macro (meta (first fs))) (:text? prev) (:unnamed? prev)))
             ;; overlapping and not both structured: the union as one text
             (let [b (min (long (first (:e prev))) (long (first e))) en (semi-end (max (long (second (:e prev))) (long (second e))))
                   t (list 'cpp/text (utf8 (text-at b en)))]
               (when *texts* (swap! *texts* update :overlap (fnil inc 0)))
               (recur (next rs) (conj (pop out) {:e [b en] :fs [t] :text? true})))
-            (recur (next rs) (conj out {:e e :fs fs :text? (some #(and (seq? %) (= (first %) 'cpp/text)) fs)
+            :else
+            (recur (next rs) (conj out {:e (if (:cpp/macro (meta (first fs))) [(first e) (semi-end (second e))] e) :raw e :fs fs :text? (boolean (some #(or (and (seq? %) (= (first %) 'cpp/text)) (:cpp/macro (meta %))) fs))
+                                        :mac? (boolean (:cpp/macro (meta (first fs))))
                                         :unnamed? (boolean (#{"CXXRecordDecl" "EnumDecl"} (kind n)))}))))))))
 
 (defn- place-offs
