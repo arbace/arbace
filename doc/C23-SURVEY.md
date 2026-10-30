@@ -2106,3 +2106,9 @@ The worktree's `.tmp/` (kept): `repr-c-roundtrip/` (each corpus's lists, `forms.
 `files.tsv`, `report.edn`, the prints under `print/`, the objects under `obj/`), `repr-c-c23/` (the c23 judges'
 `judges.tsv`, the control), `c3b/run5.log` (the final round trip), `run1.log`-`run4.log` (the runs that found C3b.1's
 bugs), `classes.json` and `classify.py` (the classes' first draft), `ex/` (the spec's examples).
+
+## Decided (2026-10-30): CS70-CS83
+
+The user decided all fourteen as recommended: CS70 (a), CS71 (a), CS72 (a), CS73 (a), CS74 (a), CS75 (a), CS76 (a),
+CS77 (a), CS78 (a) with (b)'s cheap half, CS79 (a), CS80 (a), CS81 (b) for the bodies an invocation made and (a) for
+the rest, CS82 (b) in C5 and (a) until then, CS83 (a).
