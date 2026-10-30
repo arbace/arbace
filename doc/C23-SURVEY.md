@@ -2112,3 +2112,190 @@ bugs), `classes.json` and `classify.py` (the classes' first draft), `ex/` (the s
 The user decided all fourteen as recommended: CS70 (a), CS71 (a), CS72 (a), CS73 (a), CS74 (a), CS75 (a), CS76 (a),
 CS77 (a), CS78 (a) with (b)'s cheap half, CS79 (a), CS80 (a), CS81 (b) for the bodies an invocation made and (a) for
 the rest, CS82 (b) in C5 and (a) until then, CS83 (a).
+
+## As built: C4 (2026-10-30)
+
+C4, the checker over C forms, on the branch `c23-c4` from `c23-c3b` (`f04f9886`; `b11b0cef`, CS70-CS83 decided, and
+main `6b53ec03` merged), in about one day of work (against C1.2's 5-8). `arbace.repr.c.check` checks a read's C forms
+(doc/c/SPEC.md §11.2): every expression's type and integer value, the conversions, constant expressions, layout, linkage,
+`_BitInt`, `constexpr`, `typeof`, `auto` and `__auto_type`, `_Generic`; `bin/ci annotations` compares its annotations with
+cc's checker's (tools/ccdump's new `types` mode, `cc.Translate`) item by item over every corpus, and judges its errors by
+gcc 15.2's recorded acceptance (`test/repr/c/parse-gcc.tsv`, CS61 (a)). Evaluated on the tools' host (CS36 (a)): **no
+shipped file changed**, no re-seed. Go only TamaGo's go1.27.1, no cgo.
+
+### C4.1 What was built
+
+| Arbace | lines | what |
+|---|---:|---|
+| `arbace/repr/c/check.ae` | 1,579 | the checker (`arbace.repr.c.check`, Arbace's own, CS8 (a)): types as data (the base types, `_BitInt(N)`, complex, pointers, arrays with VLAs, functions with or without prototypes, struct/union/enum records, `nullptr_t`, GNU's vector types), qualifiers; the integer promotions (bit-fields by width, as gcc), the usual arithmetic conversions (ranks, `_BitInt`'s, complex and floating), decay, null pointer constants, the conditional's type (C23's qualifiers of pointed-to arrays, `_Atomic` dropped); constant folding of integers (BigInteger, wrapped to the type) and floating values; scopes (ordinary identifiers, tags), linkage (6.2.2, inherited from a visible declaration), composite types of redeclarations, arrays completed by their initializers (brace elision counted, designators, strings, prefixed strings), parameters adjusted and in scope for the later parameters' types; layout by gcc 15.2's rules on x86-64 (bit-fields in a window of their type's size on their type's alignment, which gives `_BitInt(N > 64)` fields gcc's places; zero-width fields; packed, aligned, `alignas`, `#pragma pack`, `mode(QI...TI)`, `vector_size`; `long double` 16 by default, 8 for ci's configuration, CS35); enumerated types (gcc's compatible type from the values; C23's fixed underlying types; C23's constant types during and after the definition); `_Generic`'s selection; `typeof`/`typeof_unqual`, C23 `auto`, `__auto_type`; `constexpr` objects' values; cc's `Builtin` declarations read as forms (the `<builtin>` source every read sees), an undeclared library function resolved to its `__builtin_` declaration as gcc and cc do; the errors gcc gives that the checker diagnoses (C4.4) |
+| `arbace/repr/c/annot.ae` | 308 | the check (`arbace.repr.c.annot`): the dumps (the checker's in ccdump's format, each item's features), the comparison item by item as sets of lines, the classes of cc's gaps, the judge, `--record`; `bin/ci check`, `annot` |
+| `tools/ccdump/types.go` (and `types_upstream.go`, `overlay/export.go`'s `ArbaceRawLine`) | 389 | ccdump's `types` mode: `cc.Translate`, one block an external declaration of the main file (its first token's raw line, `#line` not applied: `overlay/export.go`'s `ArbaceRawLine`), its declarators (name, linkage, type), its expressions (type decayed, integer value), its structs' layouts (size, alignment, members' offsets, bit-fields' bit positions and widths), its enumerators' values, written by a reflection walk; types without qualifiers (cc's keep none) |
+| `bin/ci`, `bin/lib/repr-c/annotations` | 124 | the command (`check`, `annot`, `annotations`) and the check's driver (lists as the token check's, ccdump in chunks of 50, the checker on `REPR_C_THREADS`, `--resume`, `--judge`, `--record`) |
+| `test/repr/c/annot-known.edn` | | the files no automatic class explains, each with its class (C4.3) |
+
+The annotation format (one line an annotation, an item a block `@LINE`; compared as multisets, so the two walks' orders
+do not matter): `d NAME LINKAGE TYPE`, `e TYPE [= VALUE]`, `s TYPE SIZE ALIGN`, `m STRUCT NAME OFFSET - TYPE` or
+`m STRUCT NAME @BITPOS BITS TYPE` for a bit-field, `n NAME VALUE`. Where cc's tree is not the forms' shape the checker's
+dump writes what cc's tree has, so that the two compare: the expansions of cc's `Builtin` macros (`va_arg` as
+`(*(T*)__builtin_va_arg_impl(ap))`, `types_compatible_p` as a call of two compound literals), an assignment's and a comma's
+value when cc gives one (written, never folded: `:av`), attribute arguments typed as expressions (an identifier that names
+nothing `int`), a bit-field's access typed by its promotion, the injected `__func__` and member declarators left out on cc's side.
+
+### C4.2 The check's numbers
+
+`bin/ci annotations` over every corpus read in place (Lua's tarball not; `c23` is test/c/c23/), 8 threads,
+`GOMEMLIMIT=6GiB`, 31-43 minutes a run (the read is C3b's evaluated reader; ccdump's side minutes). A file passes when
+every item's annotations equal cc's, or every differing item is explained by a class of cc's gaps (C4.3), or cc does not
+translate it (no comparison: `cc.Translate` fails, cc's gaps `_BitInt`, `constexpr`, VLAs' `= {}`, C23's newest syntax), and
+when the checker gives no error on a file gcc 15.2 accepts; a file that does not pass is in `test/repr/c/annot-known.edn`
+with its class, or is a pp-known file (its stream differs from cc's by the token check's known file) or one gcc rejects.
+
+| corpus | files | pass | known | equal | classed (cc's gaps) | cc does not translate | not read | errors: agree / both reject / gcc only rejects / false |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| c23conf | 49 | 49 | 0 | 34 | 10 | 5 | 0 | 49 / 0 / 0 / 0 |
+| c23 | 62 | 60 | 2 | 41 | 11 | 8 | 0 | 59 / 3 / 0 / 0 |
+| torture-execute | 1672 | 1653 | 19 | 1398 | 243 | 0 | 12 | 994 / 641 / 25 / 0 |
+| torture-execute-mirror | 1632 | 1612 | 20 | 1363 | 236 | 1 | 12 | 956 / 640 / 24 / 0 |
+| torture-compile | 1791 | 1759 | 32 | 1625 | 123 | 0 | 11 | 1168 / 259 / 353 / 0 |
+| tcc-tests2 | 88 | 88 | 0 | 79 | 7 | 0 | 2 | 82 / 0 / 4 / 0 |
+| tcc-pp | 22 | 22 | 0 | 2 | 0 | 1 | 19 | 2 / 0 / 1 / 0 |
+| compcert | 24 | 24 | 0 | 24 | 0 | 0 | 0 | 24 / 0 / 0 / 0 |
+| mir | 315 | 313 | 2 | 283 | 27 | 1 | 2 | 305 / 4 / 4 / 0 |
+| cxgo | 88 | 88 | 0 | 85 | 2 | 1 | 0 | 86 / 1 / 1 / 0 |
+| benchmarksgame | 52 | 52 | 0 | 31 | 10 | 4 | 7 | 39 / 5 / 1 / 0 |
+| sqlite | 2 | 2 | 0 | 0 | 1 | 0 | 1 | 0 / 1 / 0 / 0 |
+| zlib | 15 | 13 | 2 | 8 | 3 | 0 | 2 | 13 / 0 / 0 / 0 |
+| quickjs | 10 | 10 | 0 | 1 | 2 | 0 | 7 | 3 / 0 / 0 / 0 |
+| gcc-c23 | 270 | 262 | 8 | 118 | 29 | 63 | 52 | 160 / 5 / 53 / 0 |
+| gcc-cpp-c23 | 16 | 16 | 0 | 3 | 0 | 4 | 9 | 5 / 0 / 2 / 0 |
+| gcc-c23-sub | 30 | 30 | 0 | 17 | 2 | 3 | 8 | 21 / 0 / 1 / 0 |
+| gcc-gnu23 | 51 | 48 | 3 | 23 | 8 | 8 | 9 | 29 / 0 / 13 / 0 |
+| gcc-embed | 47 | 36 | 11 | 0 | 0 | 19 | 17 | 30 / 0 / 0 / 0 |
+| gcc-va-opt | 12 | 12 | 0 | 1 | 0 | 6 | 5 | 7 / 0 / 0 / 0 |
+| gcc-bitint | 201 | 201 | 0 | 1 | 0 | 197 | 3 | 191 / 0 / 7 / 0 |
+| **total** | **6449** | **6350** | **99** | **5137** | **714** | **321** | **178** | **4223 / 1559 / 489 / 0** |
+
+**No file fails, and the checker gives no error on any file gcc 15.2 accepts** (4,223 accepted files without an error;
+1,559 of the 2,152 files gcc rejects get an error of the checker's, 489 none: C7's error tests). Of the 5,950 files read
+and translated by cc too, **5,137 give cc's annotations line for line**, 714 differ only in items a class of cc's gaps
+explains, and 99 are known: `gcc-rejects` 31 (an error test: no reference for its annotations), `pp-known` 12,
+`checker-gap` 12, `cc-layout` 11, `converter-gap` 7, `layout-unjudged` 5, `cc-empty-init` 4, `cc-redeclared` 3,
+`vector-types` 3, `item-placement` 3, `cc-preprocessor` 2, `cc-attr-mode` 2, `enum-range` 2, `cc-c23-constants` 1,
+`checker-layout` 1. The 321 files cc does not translate are not compared: the checker's annotations of them have no
+oracle but gcc's acceptance (the 197 of gcc-bitint among them: cc parses `_BitInt` and does not type it).
+
+### C4.3 The classes of cc's gaps
+
+The checker records, per item, the features it met that cc's checker is known not to handle as gcc does; a differing item is
+classed by the first of them (`arbace.repr.c.annot/gap-classes`), or by what cc's lines show. The files whose differing items
+all have a class, by their classes (a file can have several): `cc-undeclared-builtin` 185 (a builtin cc's Builtin does not
+declare, typed by cc as an implicit `int` function: `va_start`, `__builtin_trap`, ...), `asm` 142 (cc types an `asm`'s
+operands, which `(c/asm "TEXT")` does not structure, CS76 (a)), `vector-types` 91, `cc-attr-layout` 90 (packed, aligned,
+`alignas`, `#pragma pack` in a layout), `cc-folds` 54 (cc gives a value the standard does not make constant: address
+arithmetic on 0, a string's element), `cc-redeclared` 34, `cc-invalid` 33 (cc wrote `?`, an invalid type, or a size of -1),
+`cc-enum-type` 19 (gcc's `unsigned int` compatible type, C23's enumerated constants), `cc-float-fold` 17, `cc-c23-constants` 16,
+`cc-addr-array` 15 (`&a` as `**T`), `cc-builtin-macro` 12 (`offsetof`'s expansion), `cc-bitfield-promotion` 11 (a bit-field
+wider than `int`), `cc-builtin-types` 10, `cc-attr-mode` 9, `cc-int128-fold` 9, `cc-prefixed-string` 8 (C23's `u8` strings'
+type), `cc-bitfield-layout` 5 (unnamed and zero-width bit-fields), `cc-builtin-fold` 4, `cc-auto` 3, `cc-constexpr` 2, `cc-linkage` 2.
+
+A feature is evidence, not proof, that the difference is cc's: an item with an `asm` statement and another difference of the
+checker's is classed `asm` too. Where cc and the checker disagree on a layout, gcc was asked once (`.tmp/c4/layout_judge.py`:
+the checker's sizes, alignments and offsets as static assertions appended to the original, `gcc -fsyntax-only`): of the 17
+files whose remaining differences are layouts gcc agreed with the checker on 11 (`cc-layout`), refused it on 1
+(`checker-layout`: `gnu23-tag-alias-8.c`, a struct with a variably modified member, GNU's), and 5 could not be asked
+(`layout-unjudged`: anonymous or block-scope records). An earlier round of the judge found the checker wrong once more (a
+typedef's `aligned` raising a member's alignment, `pr40233.c`), fixed. The layouts probed by hand against gcc while building (`.tmp/c4/lay.c`, `lay2.c`: packed members and
+unions, `aligned` after the brace, zero-width and unnamed bit-fields, `alignas` members, packed bit-fields) all agreed with the
+checker, none with cc where they parted.
+
+### C4.4 The checker's errors
+
+The errors are the ones gcc 15.2 gives as errors that the checker can diagnose without guessing: an undeclared identifier,
+an unknown type name, an implicit declaration of a function from C99 on (gcc 15's default error; a library builtin
+resolved to its `__builtin_` type first), a member not in its struct, a member of something not a struct, an invalid use
+of an incomplete type, a call of a non-function, `*` of a non-pointer, invalid operands (a struct in arithmetic,
+`%` and the bit operators on floating values, a shift of a pointer), a unary operator's wrong operand, an assignment to a
+`const` place, a failed `static_assert`. The judge found every false error of the first runs (vector types, a function's
+struct return type defined in its declaration, parameters adjusted, `static_assert`s on gcc's `_BitInt` bit-field layout,
+C23's enumerated constants' types, the conditional's qualifiers, tag compatibility in C23) and they were fixed; `_Generic`
+without a match is no error (a controlling type of an unknown builtin's).
+
+### C4.5 CS80 and CS83
+
+CS80 (a) (the parser following gcc where cc's grammar lacks C23's productions) is not built: it changes repr/c's reader,
+whose token, tree and round-trip checks would run again (over an hour each on the evaluated port), and the 47 files are
+those cc does not translate, where the checker has no oracle anyway (CS94). Of CS83 (a)'s converter gaps one is fixed: a
+`u8` string literal in a `gnu23` (or `c2y`, `gnu2y`) file is `(lit unsigned-char ...)`, as in `c23` (it was a `char`
+string, which made gcc's `gnu23-utf8str-type.c` fail its `static_assert` under the checker); the round trip was not run
+again for it (the forms of such files change, their print does not). Found and not fixed: an imaginary constant's `f`
+suffix lost (`(imaginary x)` for `xif`, 7 files, `converter-gap`).
+
+### C4.6 What is left
+
+- `checker-gap`'s 12 files and the layout judge as a step (CS91, CS93); the attribute appertainment rules, `[[deprecated]]`
+  and the other diagnostics only attributes give; `#pragma pack` inside a function; the checker's errors widened to C7's
+  error tests (CS92).
+- ci's configuration: `long double` as `double` (8, 8; CS35) is a parameter of `check-unit` (`:ldouble-size`), not yet a
+  host configuration; musl's headers under it are C5's.
+- The checker as `arbace.c.check` (CS90), C5's builder over its results (types on the forms' nodes: the checker returns only
+  annotations and errors today, CS95).
+
+### C4.7 Proposals (CS90-CS95)
+
+Each with its options, the recommended one first.
+
+- **CS90 The checker's namespace.** The spec (§6.1) names it `arbace.c.check` in `arbace/c/`, embedded and compiled with ci;
+  C4 put it in `arbace/repr/c/` as `arbace.repr.c.check`, since a new tree `arbace/c/` would have to be excluded from the
+  embedded tree in `arbace/j2g/embed.ae`, a shipped file (CS36 (a): nothing shipped before C5).
+  - Options: (a) move it to `arbace/c/check.ae` as `arbace.c.check` in C5, when ci's namespaces are embedded anyway (the
+    re-seed C5 needs); (b) move it now with `embed.ae`'s exclusion (a shipped change, the next re-seed carries it);
+    (c) keep `arbace.repr.c.check`.
+  - *Recommended: (a)*: no shipped change before C5, and the name the spec gives once ci needs it.
+- **CS91 Layouts judged by gcc.** cc's `abi.go` parts from gcc on packed, aligned and bit-field layouts; the one-off judge of
+  C4.3 asked gcc for 17 files' layouts.
+  - Options: (a) record gcc's sizes, alignments and members' offsets of every main-file tagged struct and union as data
+    (`test/repr/c/layout-gcc.tsv`, `bin/ci annotations --record-gcc`: the static assertions compiled per file, CS14 (a)'s
+    rule), the check judging every layout by it and cc only where the record has none; (b) keep cc the oracle, layouts
+    classed by hand; (c) judge only the differing files at check time, as the one-off did.
+  - *Recommended: (a)*: the reference is the judge (CS40 (a)), layout is what ci's memory (CS9) depends on, and cc is
+    known to be wrong there.
+- **CS92 The checker's errors.** C4 diagnoses the errors of C4.4 only; gcc rejects 2,152 corpus files and the checker
+  gives an error on 1,559.
+  - Options: (a) widened by C7's error tests, each error judged by line and kind against gcc's `dg-error` (§5.5); (b) now,
+    the constraints of clause 6 one by one; (c) keep the checker permissive (ci runs what gcc accepts).
+  - *Recommended: (a)*: C7 has the judge (the error tests' lines), and C4's exit is no false error.
+- **CS93 The checker's own differences.** 12 files `checker-gap` and 1 `checker-layout`, each a difference no class of cc's
+  explains.
+  - Options: (a) fixed in C5 as ci meets them (the builder reads the same types), the known entries removed as they pass;
+    (b) now.
+  - *Recommended: (a)*: none is an error and none is in a run corpus's program that C5 runs first.
+- **CS94 CS80 (cc's grammar where gcc is right).** Decided for C4, not built (C4.5).
+  - Options: (a) in C7, with the C23 corpus's error tests, the parse check's known file gaining `:gcc-grammar`; (b) a
+    C4b now, the reader's three checks run again.
+  - *Recommended: (a)*: the 47 files are C23's newest productions in gcc's own tests, which C7 judges.
+- **CS95 Types on the forms.** The checker computes every node's type but returns only the annotations and the errors.
+  - Options: (a) `check-unit` returns an identity map from each form to its result (type, value, lvalue, bit-field) for C5's
+    builder, with the scopes' declarations; (b) the builder calls the checker per node; (c) the types written on the forms'
+    metadata (CS8 (a) forbids the converter's doing so, not a consumer's).
+  - *Recommended: (a)*: one pass, no change to the forms, and the annotations become a view of it.
+
+### C4.8 Checks and scratch
+
+Run: `bin/ci annotations` over every corpus (the final run, `--resume` of the run before it, cc's dumps kept: C4.2), and
+`--judge` after the known file was written (every corpus passes); the earlier runs that found the bugs above (`.tmp/c4/
+all1.log`-`all7.log`); `bin/repr-c ccdump-build` (and its types mode by hand on the probes); the one-off layout judge;
+gcc on the layout probes; `make check-makefile`. Not run: the token, tree and round-trip checks (C2-C3b's; only the
+converter's `u8` rule changed, C4.5), `bin/repr-c check --c23`, ccdump's upstream build's types mode (it has none: the
+upstream build writes `#notree`), anything of `--full`, and the essential gate before handing back (GT7's clean rerun holds
+the host: `.tmp/gt7.quiet`; the coordinator's instruction is to run it once the file is gone).
+
+Shipped files: none. The change is under `arbace/repr/c/` (`check.ae`, `annot.ae` new; `convert.ae`'s `u8` rule), already
+outside the embedded tree, `gate_key` and `steps.edn`'s `:tools`; `bin/ci`, `bin/lib/repr-c/annotations`, `tools/ccdump/`
+(`types.go`, `types_upstream.go`, `main.go`, `overlay/export.go`), `test/repr/c/annot-known.edn`, the Makefile
+(`ci-check`, `ci-annot`, `ci-annotations`, `ci-annotations-record`), LICENSE.md and doc/ARBACE.md.
+
+The worktree's `.tmp/` (kept): `ci-annot/` (each corpus's lists, `cc/` and `port/` dumps, `port.tsv`, `files.tsv`,
+`report.edn`), `c4/` (`all1.log`-`all7.log` the runs, `fail.tsv`, `classes.tsv`, `classify.py`, `layout_judge.py`, `lj.tsv`
+and `lj/` the judge's files, `sum.py` the table, `lay.c`, `lay2.c`, `u.c` the layout probes, `a.c`, `b.c`, `c.c`, `i.c`
+the first probes, `cmp.sh`), `repr-c/` (ccdump's build, gcc 15.2's tarball and testsuite).
+

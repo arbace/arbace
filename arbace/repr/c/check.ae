@@ -36,7 +36,10 @@
   "An annotation line of the item being checked (when annotating)."
   [^String s]
   (when-let [^ArrayList a (cx :annot)]
-    (when @(cx :annotating) (.add a s))))
+    (when @(cx :annotating)
+      ;; GNU's vector types (cc's checker reads them as their elements)
+      (when (.contains s "vector(") (when-let [^java.util.Set fs (cx :feats)] (.add fs :vector-types)))
+      (.add a s))))
 
 (defn- feat!
   "A feature of the item being checked that cc's checker is known not to handle as gcc does (the classes
@@ -177,8 +180,14 @@
     (:struct :union) (let [^HashMap r (:rec t)] (when (.get r :complete) (.get r :size)))
     nil))
 
+(declare align-of*)
+
 (defn align-of
-  "A type's alignment."
+  "A type's alignment (a typedef's aligned attribute's when it has one)."
+  ^long [t]
+  (if-let [a (:talign t)] (long a) (align-of* t)))
+
+(defn- align-of*
   ^long [t]
   (case (:k t)
     (:array) (align-of (:of t))
@@ -405,6 +414,11 @@
         (or (number? a) (string? a) (char? a) (seq? a)) (ex a)
         :else nil))))
 
+(defn- assoc-in-mode
+  "A type made by GNU's mode attribute, marked (its uses are cc's gap :cc-attr-mode too)."
+  [t]
+  (assoc t :attr-mode true))
+
 (defn- vectorize
   "A type whose attributes in `m` hold GNU's vector_size(N): the vector type of N bytes (read and checked,
   out of eval and AOT by design, doc/c/SPEC.md §14)."
@@ -415,14 +429,15 @@
             (let [md (str/replace (str (first args)) #"^__|__$" "")
                   [_ signed] (if (int-type? (unq t)) (int-bits (unq t)) [0 true])]
               (feat! :cc-attr-mode)
-              (case md
+              (assoc-in-mode
+               (case md
                 ("QI" "byte") (if signed {:k :schar} {:k :uchar})
                 "HI" (if signed {:k :short} {:k :ushort})
                 ("SI" "word") (if signed t-int t-uint)
                 ("DI" "pointer") (if signed t-long t-ulong)
                 "TI" (if signed {:k :int128} {:k :uint128})
                 "SF" t-float "DF" t-double
-                t))
+                t)))
             t)]
     (if-let [[_ args] (first (filter #(= "vector_size" (first %)) as))]
       (let [n (const-int (first args))]
@@ -937,6 +952,8 @@
       (= :enumconst (:kind e)) (do (when (= :enum (:k (:t e))) (feat! :cc-enum-type)) (res (:t e) :v (:v e)))
       (= :typedef (:kind e)) (do (err! (str "unexpected type name '" n "'")) (res t-invalid))
       :else (do (when (some? (:v e)) (feat! :cc-constexpr))
+                (when (:attr-mode (:t e)) (feat! :cc-attr-mode))
+                (when (and (= :fn (:kind e)) (lookup (str "__builtin_" n))) (feat! :cc-builtin-types))
                 (res (:t e) :lv (not= :fn (:kind e)) :v (:v e) :entry e)))))
 
 (defn- deref-type [t]
@@ -953,7 +970,8 @@
           (if-let [mm (member t m)]
             (let [q (quals (if arrow (:to (decay (unq (:t r)))) (:t r)))
                   mt (if (seq q) (reduce qual (:t mm) q) (:t mm))]
-              (res mt :lv true :bits (:bits mm) :malign (:align mm)))
+              (do (when (:attr-mode (:t mm)) (feat! :cc-attr-mode))
+                  (res mt :lv true :bits (:bits mm) :malign (:align mm))))
             (do (err! (str "no member named '" m "' in '" (tstr t) "'")) (res t-invalid)))))
       (do (when-not (= :invalid (:k t)) (err! (str "request for member '" m "' in something not a structure or union"))) (res t-invalid)))))
 
@@ -1050,6 +1068,11 @@
   [et init]
   (cond
     (string? init) (inc (alength (.getBytes ^String init "UTF-8")))
+    (and (seq? init) (= 'byte-string (first init))) (inc (byte-string-len (rest init)))
+    ;; { "abc" } for a character array: the string's
+    (and (seq? init) (= 'init (first init)) (= 2 (count init)) (#{:char :schar :uchar :int :uint :ushort} (:k (unq et)))
+         (let [x (second init)] (or (string? x) (and (seq? x) ('#{byte-string lit} (first x))))))
+    (init-count et (second init))
     (and (seq? init) (= 'init (first init)))
     (let [els (rest init)
           per (fn per [t] (case (:k t)
