@@ -424,6 +424,10 @@ covers what.
   source where it made a whole node) and `crefactor/clisp` (declarators read from the name outward, labels
   as items), at the same commit, licensed to Arbace by their author under the Eclipse Public License 1.0
   (CS37 (a), 2026-10-28); the rest of them is Arbace's own, under the Eclipse Public License 1.0.
+  Since C4 (doc/C23-SURVEY.md, "As built: C4"), `check.ae` and `annot.ae` (the checker over C forms and its
+  check against cc's checker, `bin/ci`) are Arbace's own (CS8 (a): written from N3220 and gcc 15.2's
+  behaviour, nothing of cc's `check.go`, `type.go`, `value.go` or `abi.go` ported), under the Eclipse Public
+  License 1.0, as is `tools/ccdump/types.go`, which imports cc.
 - `test/c/c23/` (C23's conformance files, doc/C23-SURVEY.md, "As built: C3b", CS38 (a)): the 49 files of
   go-whim's `crefactor/c23conf/testdata/` at `80c49bf53cd6340487ac623f3d6d135b77ac1db6`, copied unchanged
   (each file's git blob as `test/c/corpora.edn` records it), licensed to Arbace by their author under the

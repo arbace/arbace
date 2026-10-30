@@ -65,3 +65,17 @@ func ArbaceParse(cfg *Config, sources []Source) (ast *AST, errs []string, err er
 	}
 	return ast, nil, nil
 }
+
+// ArbaceRawLine reports the file a token was scanned from and its line there, #line directives not applied
+// (the types mode's items are by the main file's own lines, as the forms' :line).
+func ArbaceRawLine(t Token) (name string, line int) {
+	if t.s == nil || t.s.file == nil {
+		return "", 0
+	}
+	f := t.s.file
+	p := t.Position()
+	if p.Offset < 0 || p.Offset > f.Size() {
+		return f.Name(), 0
+	}
+	return f.Name(), f.PositionFor(f.Pos(p.Offset), false).Line
+}

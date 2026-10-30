@@ -54,7 +54,9 @@ code. Three kinds of things live here:
   the oracle is the helper `tools/ccdump/`, which imports cc; since C3b (2026-10-29, "As built: C3b")
   `repr/c.ae` and `repr/c/convert.ae`, `print.ae`, `layout.ae`, `rtcheck.ae`, `c23check.ae`, the converter, the
   printer and the round trip, whose converting and printing rules port those of go-whim's `crefactor/cemit` and
-  `crefactor/clisp` at the same commit (read and ported, nothing copied; EPL-1.0 by CS37 (a)), the rest Arbace's), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
+  `crefactor/clisp` at the same commit (read and ported, nothing copied; EPL-1.0 by CS37 (a)), the rest Arbace's;
+  since C4 (2026-10-30, "As built: C4") `repr/c/check.ae` and `annot.ae`, the checker over C forms and its check,
+  Arbace's own, cc's checker only its oracle), `repr/go.ae` and `repr/go/` (repr/go, Go to Go forms and back,
   `arbace.repr.go` and `arbace.repr.go.*`, with its Go helpers under `tools/godump/` and
   `tools/gocmp/`; doc/go/), `build/go.ae` (the build of a program held as Go forms,
   `arbace.build.go`; doc/go/BUILD.md; until 2026-10-17 j2a, g2a and `arbace.g2a.build`) and

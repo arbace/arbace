@@ -1,0 +1,97 @@
+#!/bin/bash
+# The checker's check (doc/C23-SURVEY.md, "As built: C4"; bin/ci annotations): every file of the corpora read in
+# place by repr/c into C forms and checked by arbace.repr.c.check (evaluated on the tools' host), its annotations
+# (every main-file item's declarators with their linkage and type, its expressions' types and integer values,
+# the structs' and unions' layouts, the enumerators' values; tools/ccdump's types format) compared item by item
+# with cc's checker's (tools/ccdump's types mode, cc.Translate, built by bin/repr-c ccdump-build), and the
+# checker's errors judged by the reference's acceptance (gcc 15.2 -fsyntax-only's recorded status,
+# test/repr/c/parse-gcc.tsv): a file passes when its annotations equal cc's (or cc does not translate it: cc's
+# gaps, not compared) and the checker gives no error on a file gcc accepts; else test/repr/c/annot-known.edn lists
+# it with its class, or it fails (arbace.repr.c.annot). Writes only under .tmp/ci-annot/ (CI_ANNOT_WORK).
+#
+# Usage: bin/ci annotations [--corpus C,...] [--record] [--resume] [--judge]
+#   --corpus   test/c/corpora.edn's ids (default every corpus read in place, `all`; lua's tarball not)
+#   --record   the known file's entries of the corpora rewritten from the files that do not pass, then judged again
+#   --resume   a corpus whose lists and cc's dumps a run left keeps them (the checker's side run again)
+#   --judge    the corpora's port.tsv judged again, nothing run
+# Each corpus: WORK/CORPUS/list.jsonl, files.edn, base.txt (bin/repr-c check's lists), cc/ (ccdump's dumps, in
+# chunks of 50 on REPR_C_THREADS runs), port/ (the checker's dumps), port.tsv (name, annotations: equal, differ,
+# no-cc, cc-fails, read-error, ...; the checker's errors; detail), files.tsv (name, status: pass, known, fail;
+# annotations, errors against gcc: agree, false-error, both-reject, gcc-only-rejects; class, detail), report.edn.
+#   REPR_C_THREADS (default 6) the checker's threads and ccdump's runs; GOMEMLIMIT (default 6GiB)
+# Exit status: 0 when every corpus passes.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+cd "$root"
+
+all=c23conf,c23,torture-execute,torture-execute-mirror,torture-compile,tcc-tests2,tcc-pp,compcert,mir,cxgo,benchmarksgame,sqlite,zlib,quickjs,gcc-c23,gcc-cpp-c23,gcc-c23-sub,gcc-gnu23,gcc-embed,gcc-va-opt,gcc-bitint
+corpora=$all record= resume= judge_only=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --corpus) corpora=$2; shift 2 ;;
+    --record) record=1; shift ;;
+    --resume) resume=1; shift ;;
+    --judge) judge_only=1; shift ;;
+    *) sed -n '11,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+[ "$corpora" = all ] && corpora=$all
+work=${CI_ANNOT_WORK:-$root/.tmp/ci-annot}
+threads=${REPR_C_THREADS:-6}
+export REPR_C_THREADS=$threads GOMEMLIMIT=${GOMEMLIMIT:-6GiB}
+mkdir -p "$work"
+gowhim=${GOWHIM:-$(cd "${root%%/.tmp/worktrees/*}/.." && pwd)/go-whim}
+modcache=$(GOFLAGS= "${ARBACE_GOROOT:-/root/tamago-go}/bin/go" env GOMODCACHE)
+
+ccdump=$(GOMAXPROCS=$threads bin/repr-c ccdump-build) || { echo "annotations: ccdump-build failed"; exit 1; }
+gccroot=
+case ,$corpora, in *,gcc-*) gccroot=$(bin/repr-c gcc-tests) || exit 1 ;; esac
+roots="{:gomodcache \"$modcache\" :go-whim \"$gowhim\" :gcc-15.2.0 \"$gccroot\" :checkout \"$root\"}"
+
+IFS=, read -r -a ids <<< "$corpora"
+todo=() fresh=()
+for id in "${ids[@]}"; do
+  [ -n "$judge_only" ] && continue
+  todo+=("$id")
+  if [ -n "$resume" ] && [ -s "$work/$id/list.jsonl" ] && [ -d "$work/$id/cc" ]; then continue; fi
+  rm -rf "${work:?}/$id"; fresh+=("$id")
+done
+[ ${#fresh[@]} = 0 ] || arbace_tool -m arbace.repr.c.ppcheck lists "$work" "$roots" "${fresh[@]}" || exit 1
+
+# one chunk of cc's dumps, a run resumed past a file it hangs on
+ccdump_chunk() { # DIR CHUNK
+  local d=$1 c=$2 st cur
+  while :; do
+    GOMAXPROCS=2 timeout "${REPR_C_CCDUMP_TIMEOUT:-600}" "$ccdump" -mode types -host test/c/host -list "$c" \
+      -o "$d/cc" -base "$(cat "$d/base.txt")" -skip-done -current "$c.current" > "$c.log" 2>&1
+    st=$?
+    [ $st = 0 ] && return 0
+    cur=$(cat "$c.current" 2>"$TMPDIR/ci-cur.$$.err") || return 1
+    mkdir -p "$(dirname "$d/cc/$cur")"
+    if [ $st = 124 ]; then printf '#panic\ttimeout\n' > "$d/cc/$cur"; else printf '#panic\tccdump exited %s\n' "$st" > "$d/cc/$cur"; fi
+  done
+}
+export -f ccdump_chunk
+export ccdump TMPDIR
+
+status=0
+for id in "${todo[@]}"; do
+  d=$work/$id
+  if [[ " ${fresh[*]} " == *" $id "* ]]; then
+    mkdir -p "$d/chunks"
+    split -l 50 -d -a 4 "$d/list.jsonl" "$d/chunks/c"
+    ls "$d"/chunks/c???? | xargs -P "$threads" -I{} bash -c 'ccdump_chunk "$1" "$2"' _ "$d" {} \
+      || { echo "$id: ccdump failed ($d/chunks/*.log)"; status=1; }
+  fi
+  rm -rf "$d/port"
+  arbace_tool -m arbace.repr.c.annot run "$work" "$id" 2> "$d/run.err" || { echo "$id: the checker's run failed ($d/run.err)"; status=1; }
+done
+arbace_tool -m arbace.repr.c.annot judge "$work" "${ids[@]}" 2> "$work/judge.err" || status=1
+if [ -n "$record" ]; then
+  arbace_tool -m arbace.repr.c.annot record "$work" "${ids[@]}" 2> "$work/record.err" || exit 1
+  status=0
+  arbace_tool -m arbace.repr.c.annot judge "$work" "${ids[@]}" 2> "$work/judge.err" || status=1
+fi
+exit $status
