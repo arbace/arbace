@@ -1,0 +1,8 @@
+(library (lib names)
+  (export (rename (internal-f f)) g)
+  (import (rnrs))
+  (define (internal-f) 'f)
+  (define (g) 'g))
+(import (rnrs) (prefix (lib names) n:) (rename (only (rnrs) list) (list l)))
+(write (l (n:f) (n:g)))
+(newline)

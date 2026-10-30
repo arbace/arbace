@@ -708,6 +708,16 @@ covers what.
   first line names its source), under the GNU General Public License version 2 (the text below,
   "OpenJDK (jdk26u)"), without the Classpath Exception, which jdk26u's `test/` does not carry.
   They are inputs of the check, in no executable.
+- `scheme/psyntax/` (Scheme's expander, doc/scheme/SCHEME-SURVEY.md, "As built: SM4"; origins in
+  `scheme/provenance.edn`): `expander.ae`, `library-manager.ae`, `builders.ae` and `config.ae` are
+  psyntax, the R6RS library and syntax-case system of Abdulaziz Ghuloum and R. Kent Dybvig, as Ikarus
+  Scheme carried it (https://github.com/lambdaconservatory/ikarus at
+  `1f2b250ed9e8cb1c2466c939a9a305461db71739`, `scheme/psyntax.*.ss`, each file's notice kept), as Scheme
+  forms; `psyntax.pp.ae` is generated from them (psyntax expanded by itself), and `tools/psyntax/boot.ss`
+  follows the structure of `psyntax-buildscript.ss` of the portable psyntax-r6rs (revision 4, 2007, by the
+  same authors): all under the MIT License below ("psyntax"). `compat.ae`, `internal.ae`, `patches.edn`,
+  `tools/psyntax/chez/`, `tools/psyntax/run.ss` and `tools/psyntax/expand.ss` are Arbace's own, under the
+  Eclipse Public License 1.0 (Ikarus's own `psyntax.compat.ss`, under the GPL version 3, is not vendored).
 - `seed/arbace-seed-go.tar.xz` (since S4, 2026-10-13; doc/STANDALONE-NOTES.md, "S4: the
   Go-source seed"): the seed of the bootstrap, Arbace's Go program as the Go-hosted fixpoint
   printed it, the source of the Go build's executables (above): the main package with its
@@ -922,6 +932,36 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## psyntax: MIT License
+
+From the head of each file of psyntax in https://github.com/lambdaconservatory/ikarus at
+`1f2b250ed9e8cb1c2466c939a9a305461db71739` (`scheme/psyntax.expander.ss`, `psyntax.library-manager.ss`,
+`psyntax.builders.ss`, `psyntax.config.ss`), the same as the `README.txt` of psyntax-r6rs revision 4; it covers
+`scheme/psyntax/expander.ae`, `library-manager.ae`, `builders.ae`, `config.ae`, `psyntax.pp.ae` and
+`tools/psyntax/boot.ss` (above):
+
+```
+Copyright (c) 2006, 2007 Abdulaziz Ghuloum and Kent Dybvig
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ## TamaGo's goos module: BSD 3-Clause License

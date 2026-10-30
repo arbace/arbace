@@ -1,0 +1,5 @@
+(import (rnrs))
+(define-syntax def-const (syntax-rules () ((_ name val) (define-syntax name (syntax-rules () ((_) val))))))
+(def-const five 5)
+(let ((val 'not-this)) (write (five)))
+(newline)

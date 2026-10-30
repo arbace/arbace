@@ -1,0 +1,5 @@
+(import (rnrs))
+(define-syntax def-tail (syntax-rules () ((_ name) (define-syntax name (syntax-rules () ((_ x (... ...)) (list x (... ...))))))))
+(def-tail tail)
+(write (tail 1 2 3))
+(newline)

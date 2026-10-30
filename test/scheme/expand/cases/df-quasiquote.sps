@@ -1,0 +1,7 @@
+(import (rnrs))
+(write `(list ,(+ 1 2) 4))
+(write (let ((name 'a)) `(list ,name ',name)))
+(write `(a `(b ,(c ,(+ 1 2)))))
+(write `(1 ,@(list 2 3) . 4))
+(write `#(1 ,(+ 1 1) ,@(list 3 4)))
+(newline)

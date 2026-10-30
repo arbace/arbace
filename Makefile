@@ -16,7 +16,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
-  repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip check-makefile
+  repr-c-gcc-tests repr-scheme-fetch repr-scheme-check repr-scheme-check-quick repr-scheme-record repr-scheme-spec repr-scheme-roundtrip si-vendor-verify si-boot si-boot-check si-test si-test-record si-check-suite check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -297,6 +297,18 @@ repr-scheme-spec: ## doc/scheme/SPEC.md's examples: the Scheme text read, equal 
 	bin/repr-scheme spec-check
 repr-scheme-roundtrip: ## repr/scheme's :full and layout printer: every corpus file and probe printed back byte for byte, the layout read back equal (bin/repr-scheme roundtrip)
 	bin/repr-scheme roundtrip
+si-vendor-verify: ## Scheme's expander: the vendored psyntax's forms (scheme/psyntax/) printed back to their pinned originals, byte for byte (bin/si vendor verify)
+	bin/si vendor verify
+si-boot: ## psyntax's bootstrap on Chez 10.3.0: scheme/psyntax/psyntax.pp.ae made again from the forms and the patches (bin/si boot)
+	bin/si boot
+si-boot-check: ## the same into .tmp/si/boot, compared with the committed psyntax.pp.ae (bin/si boot --check)
+	bin/si boot --check
+si-test: ## the expander's own tests (test/scheme/expand/): expanded and run on the bootstrap host against Chez's recorded runs, and against Chez's expand (bin/si test)
+	bin/si test
+si-test-record: ## the same, recording Chez's runs first (bin/si test --record)
+	bin/si test --record
+si-check-suite: ## Racket's R6RS suite: every library and run.sps expanded by psyntax on Arbace (bin/si check-suite)
+	bin/si check-suite
 check-makefile: ## every bin/ script this Makefile's recipes run exists and is executable
 	@missing=0; for s in $$(grep -E '^[[:space:]]' $(firstword $(MAKEFILE_LIST)) | grep -oE '(^|[[:space:]=])bin/[a-z0-9-]+' \
 	    | grep -oE 'bin/[a-z0-9-]+' | sort -u); do \

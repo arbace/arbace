@@ -1,0 +1,75 @@
+#!/bin/bash
+# si, Scheme's evaluator (doc/scheme/SCHEME-SURVEY.md), so far its expander (SM4, "As built: SM4"): the vendored
+# psyntax (scheme/psyntax/, Ikarus's psyntax as Scheme forms, scheme/provenance.edn) booted from its expanded
+# form (scheme/psyntax/psyntax.pp.ae) on the bootstrap host, Arbace (arbace.scheme.rt, .core, .expand),
+# evaluated on the tools' host. Chez Scheme 10.3.0 (/usr/bin/chez; CHEZ names another) is needed only to
+# bootstrap (boot) and to record the reference (record).
+#
+#   bin/si vendor fetch|convert|verify   psyntax's originals fetched at their pins into .tmp/si/vendor, converted
+#                                        to scheme/psyntax/*.ae (mode :full), or the forms printed back and
+#                                        compared with the pins byte for byte
+#   bin/si boot [--check]                the bootstrap: the sources printed from the forms with the patches
+#                                        (scheme/psyntax/patches.edn), psyntax on Chez (tools/psyntax/) expands
+#                                        them into scheme/psyntax/psyntax.pp.ae; --check: into .tmp and compared
+#   bin/si expand [--lib DIR]... FILE... each file's programs and libraries expanded to core forms (SPEC 5)
+#   bin/si test [--record]               the expander's own tests (test/scheme/expand/): each case expanded
+#                                        and run on the bootstrap host, against Chez's runs recorded in
+#                                        test/scheme/expand/ref-chez.edn (--record: run Chez, rewrite it)
+#   bin/si check-suite                   Racket's R6RS suite's libraries and programs expanded (the corpus of
+#                                        test/scheme/corpora.edn), its &syntax cases (test/scheme/expand/suite-syntax.edn)
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+. "$root/bin/lib/tools.bash"
+export ARBACE_ROOT=$root
+CHEZ=${CHEZ:-chez}
+vendor=$root/.tmp/si/vendor
+
+prov() { arbace_tool -e "(let [p (:psyntax (read-string (slurp \"$root/scheme/provenance.edn\")))] (doseq [f (:files p)] (println (str (:url-prefix p) (:path f) \"\t\" (:path f) \"\t\" (:sha256 f)))))"; }
+
+boot() {
+  local check=0 out=$root/.tmp/si/boot pp=$root/scheme/psyntax/psyntax.pp.ae
+  [ "${1:-}" = --check ] && check=1
+  rm -rf "$out"; mkdir -p "$out"
+  arbace_tool -m arbace.scheme.psyntax sources "$out"
+  cp "$root"/tools/psyntax/chez/psyntax/compat.ss "$root"/tools/psyntax/chez/psyntax/internal.ss "$out/stage/psyntax/"
+  (cd "$out" && "$CHEZ" --libdirs stage --script "$root/tools/psyntax/boot.ss" src psyntax.pp)
+  if [ $check = 1 ]; then
+    arbace_tool -m arbace.scheme.psyntax pp-forms "$out/psyntax.pp" "$out/psyntax.pp.ae"
+    cmp "$out/psyntax.pp.ae" "$pp" && echo "psyntax.pp.ae: the bootstrap gives the committed file"
+  else
+    arbace_tool -m arbace.scheme.psyntax pp-forms "$out/psyntax.pp" "$pp"
+  fi
+}
+
+cmd=${1:-}; [ $# -eq 0 ] || shift
+case $cmd in
+  vendor)
+    sub=${1:-}; [ $# -eq 0 ] || shift
+    case $sub in
+      fetch)
+        while IFS=$'\t' read -r url path sha; do
+          mkdir -p "$(dirname "$vendor/$path")"
+          curl -sfL --max-time 120 -o "$vendor/$path" "$url"
+          [ "$(sha256sum < "$vendor/$path" | cut -c1-64)" = "$sha" ] || { echo "SHA-256 of $url differs from the pin" >&2; exit 1; }
+          echo "fetched $path"
+        done < <(prov) ;;
+      convert) arbace_tool -m arbace.scheme.psyntax convert "$vendor" ;;
+      verify) arbace_tool -m arbace.scheme.psyntax verify ;;
+      *) echo "usage: bin/si vendor fetch|convert|verify" >&2; exit 2 ;;
+    esac ;;
+  boot) boot "$@" ;;
+  check-suite)
+    "$root/bin/repr-scheme" corpus fetch racket-r6rs >/dev/null
+    corpus=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}/racket-r6rs
+    mkdir -p "$root/.tmp/si/suite-lib"; ln -sfn "$corpus" "$root/.tmp/si/suite-lib/tests"
+    arbace_tool -m arbace.scheme.expand check-suite "$corpus" "$root/.tmp/si/suite-lib" ;;
+  test)
+    if [ "${1:-}" = --record ]; then
+      "$CHEZ" --script "$root/tools/psyntax/run.ss" "$root"/test/scheme/expand/cases/*.sps > "$root/test/scheme/expand/ref-chez.edn"
+      echo "recorded $(wc -l < "$root/test/scheme/expand/ref-chez.edn") runs of Chez into test/scheme/expand/ref-chez.edn"
+    fi
+    arbace_tool -m arbace.scheme.expand test ;;
+  expand) arbace_tool -m arbace.scheme.expand expand "$@" ;;
+  *) sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

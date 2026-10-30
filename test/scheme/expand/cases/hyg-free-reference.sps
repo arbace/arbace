@@ -1,0 +1,5 @@
+(import (rnrs))
+(let ((x 'outer))
+  (let-syntax ((m (syntax-rules () ((_) x))))
+    (let ((x 'inner)) (write (m)))))
+(newline)
