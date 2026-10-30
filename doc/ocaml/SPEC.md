@@ -1287,6 +1287,66 @@ entries; printing in `:lines` ignores the layout. `bin/repr-ocaml read --full` w
 locations, its CRC). Positions of tree nodes are not in the forms (S16): the layout is not anchored to the tree by
 node; it is a second view of the same file (survey, OC40).
 
+### 11.2 The typed and Lambda dumps as forms (O4)
+
+`bin/repr-ocaml types|lambda|dumps` run `ocdump --mode types|lambda` over a corpus's compilable files (§14.3); this section is
+the forms' definition, `arbace.repr.ocaml.lambda` (`check-typed`, `check-lambda`) is their checker, and every dump of every
+corpus passes it. Both are **data for the tools and for O5, not a second source language**: they are never printed back to OCaml
+text.
+
+**The typed dump** (OC20 (a)): `(ocaml/typed SIGNATURE [ANNOTATION...] {:file F :ocaml V})`. `SIGNATURE` is one string, the
+inferred interface as `Printtyp.signature` prints it (one `val`/`type`/`module` item to a line, `\n` between). An annotation is
+`(expr TYPE {:loc POS})` or `(pat TYPE {:loc POS})`: the node's type, printed in the node's own environment with `Printtyp.type_scheme`
+(so `'a`, `_weak1` and the abbreviations are as the compiler shows them), and `POS` the six numbers of §2 (`[line col end-line
+end-col offset end-offset]`; always present in this mode). The order is the Tast iterator's: a node before its children, the
+children in the source order. Ghost nodes are left out. Two annotations can share a position (a constructor's expression and its
+application); the pair (position, kind) is not a key. For an interface (`.mli`, `--intf`) the dump has the signature and no annotations:
+`(ocaml/typed "val ..." [] {...})`. A file the compiler rejects is `(ocaml/error :other MESSAGE ...)`.
+Where a unit has a `.mli`, the typing is checked against it (`--prefix`, below), as `ocamlc -c` does.
+
+**The Lambda dump**: `(ocaml/lambda (lambda-program MODULE SIZE [REQUIRED...] CODE) {:file F :ocaml V})`, `MODULE` the unit's identifier
+(`"Core_0"`: a persistent identifier's unique name), `SIZE` the module block's size, `REQUIRED` the units whose initialisation must
+have run (the `required_globals`), `CODE` the root node: `(prim "setglobal M!" [BODY])` whose `BODY` ends in the module's
+`makeblock`. In the table `L` is a Lambda node, `ID` a string (`Ident.unique_name`: `x_274`; `"*match*_279"` for the compiler's), `VK`
+a string (the value kind as `Printlambda.value_kind` prints it: `"[int]"`, `""` for the generic one, `"[floatarray]"`), `[X...]` a vector.
+Any node's form may end with a metadata map `{:loc POS}` (with `--loc`, only the nodes that carry a location: `apply`, `function`,
+`prim`, `switch`, `stringswitch`, `send`, `event`).
+
+| form | meaning (Lambda constructor) |
+|---|---|
+| `(var ID)`, `(mutvar ID)` | `Lvar`, `Lmutvar` |
+| `(const C)` | `Lconst` |
+| `(apply L [L...])` | `Lapply` (the application's function and arguments; the inlining and tailcall attributes are dropped) |
+| `(function KIND [[ID VK]...] VK BODY)` | `Lfunction`: `KIND` `:curried` or `:tupled`, parameters with their kinds, the return kind |
+| `(let LETKIND VK ID DEF BODY)` | `Llet`: `LETKIND` `:strict`, `:alias`, `:strictopt` |
+| `(mutlet VK ID DEF BODY)` | `Lmutlet` |
+| `(letrec [[ID FN]...] BODY)` | `Lletrec`: each `FN` is a `(function ...)` node |
+| `(prim NAME [L...])` | `Lprim`: `NAME` the primitive as `Printlambda.primitive` prints it (OC21 (a)): `"makeblock 0"`, `"field_imm 2"`, `"+"`, `"setfield_ptr 1"`, `"caml_ml_output"` (an external as its C name), `"setglobal M!"` |
+| `(switch L NC [[N L]...] NB [[N L]...] FAIL)` | `Lswitch`: `NC` the number of constant constructors, then the constant cases; `NB` the block constructors, then the block cases; `FAIL` a node or `nil` |
+| `(stringswitch L [[S L]...] DEFAULT)` | `Lstringswitch` (`S` a string, or a vector of byte values when it is not UTF-8) |
+| `(staticraise N [L...])`, `(staticcatch BODY [N [[ID VK]...]] HANDLER)` | `Lstaticraise`, `Lstaticcatch` (the exit number, the handler's variables) |
+| `(trywith BODY ID HANDLER)` | `Ltrywith` |
+| `(ifthenelse C T F)`, `(sequence A B)`, `(while C B)` | `Lifthenelse`, `Lsequence`, `Lwhile` |
+| `(for ID LO HI DIR BODY)` | `Lfor`: `DIR` `:to` or `:downto` |
+| `(assign ID L)` | `Lassign` |
+| `(send KIND M O [L...])` | `Lsend`: `KIND` `:self`, `:public`, `:cached` |
+| `(event L)`, `(ifused ID L)` | `Levent` (only with `-g`; the dump has none), `Lifused` |
+
+Constants: `(int N)`, `(char N)` (the code), `(float "t")`, `(int32 "N")`, `(int64 "N")`, `(nativeint "N")`, `(block TAG [C...])`,
+`(float-array ["t"...])`, `(immstring "S")` (a string, or a vector of bytes). Every head is one the checker knows; a
+node of another head, an arity that is not the table's or a position that is not six integers is a failure.
+
+**The translation** (S20, S32): the raw bytecode translation `Translmod.transl_implementation` with `Clflags.native_code := false`,
+before `Simplif` (what `ocamlc -drawlambda` prints); `--simplify` applies `Simplif.simplify_lambda` after it (`-dlambda`'s;
+`let r = ref ..` that does not escape becomes `mutlet`/`mutvar`, aliases and exits are simplified). The two differ in size
+(`list.ml`: 494,061 bytes raw, 450,390 simplified) and in nothing O5 needs semantically.
+
+**Where the dump needs a context** (S33): a unit that names other units is typed against their `.cmi`, as `ocamlc` is: `ocdump -I DIR`
+(repeated) puts DIR on the load path, and `--prefix P` types FILE in place with output prefix P, so that the unit's own `.mli` (beside
+FILE) and its compiled interface `P.cmi` (what `ocamlc -c -o P.cmo` wrote) are found; without `--prefix` the dump works on a copy and
+looks for neither (a unit with a hidden weak type is then a typing error). `bin/repr-ocaml` supplies both from the `.cmi` level's
+output (§14.3).
+
 ## 12. The checklist
 
 Every constructor of `parsing/parsetree.mli` and `parsing/asttypes.mli` of the pinned 5.5.0, with its form. A
@@ -1446,6 +1506,14 @@ above (their attributes and positions in the item's map).
   dump: gaps, tokens, `(comment ..)`, `(doc ..)`), beside the unchanged tree (§11.1, OC40 (a)).
 - **S31** (O3) `ocaml/tokens` is renamed `ocaml/layout`: it carries the text, not only the tokens.
 
+- **S32** (O4) Lambda is the raw bytecode translation (before `Simplif`) by default; `--simplify` adds `Simplif.simplify_lambda`
+  (§11.2). Locations are off in the Lambda dump by default (size), on with `--loc`; the typed dump always has them.
+- **S33** (O4) A typed or Lambda dump of a unit with dependencies takes `-I DIR` and `--prefix P` (§11.2); a unit's dump is the one
+  `ocamlc -c` would typecheck, including against its own `.mli`.
+- **S34** (O4) A dump read back by Arbace's reader is checked against the node table of §11.2 (heads, arities, constants,
+  positions) by `arbace.repr.ocaml.lambda`; there is no converter between the helper's dump and the stored forms, the dump is the
+  forms (the helper writes the final vocabulary directly, OC8 (a)).
+
 ### 13.2 Open questions
 
 They are the survey's proposals OC20 onward ("As built: O1"): the shape of the Typedtree dump (OC20), structured Lambda
@@ -1462,6 +1530,13 @@ and `.mll`/`.mly` sources (OC24).
 - `samples`: `test/ocaml/samples/` read by the helper without error and the dumps read by Arbace's reader; the typed
   samples typed and lowered.
 - `corpus check`: the corpora's counts and the pins of `test/ocaml/corpora.edn`.
+
+### 14.3 What O4 checks (`bin/repr-ocaml types|lambda|dumps`)
+
+For each corpus: the files `ocamlc -c` compiles alone (the `.cmi` level's passes: a file whose dependencies are not compiled yet
+waits for the next pass; the outputs under `.tmp/repr-ocaml/ty/CORPUS/cmi`), each dumped by `ocdump --mode types` (and `lambda`
+for the `.ml` files) twice; every dump read by Arbace's reader and shaped by §11.2's table; the second run byte for byte the first;
+a compiler error on a file `ocamlc` compiled is a failure unless classed in `test/ocaml/dumps-known.edn`.
 
 ### 14.2 What comes after (the plan, survey §11)
 

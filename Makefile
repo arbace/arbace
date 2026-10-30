@@ -16,7 +16,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
-  repr-c-gcc-tests repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi check-makefile
+  repr-c-gcc-tests repr-ocaml-ocdump repr-ocaml-spec-check repr-ocaml-samples repr-ocaml-corpus repr-ocaml-corpus-count repr-ocaml-roundtrip repr-ocaml-roundtrip-all repr-ocaml-check repr-ocaml-text repr-ocaml-cmi repr-ocaml-dumps check-makefile
 
 help: ## list the targets
 	@awk 'BEGIN {FS = ":.*## "} /^## / {printf "\n%s\n", substr($$0, 4)} \
@@ -299,6 +299,8 @@ repr-ocaml-text: ## O3: mode :full over the default corpora: the text printed fr
 	bin/repr-ocaml roundtrip --text
 repr-ocaml-cmi: ## O3: and the .cmi level: ocamlc -c on the original and on the print, the .cmi bytes equal; the :lines print's with -no-keep-locs too (bin/repr-ocaml roundtrip --cmi-lines)
 	bin/repr-ocaml roundtrip --cmi-lines
+repr-ocaml-dumps: ## O4: the typed and Lambda dumps of every file ocamlc compiles alone, read by Arbace's reader and shaped by SPEC 11.2, stable across two runs; sizes and seconds (bin/repr-ocaml dumps)
+	bin/repr-ocaml dumps
 repr-ocaml-check: ## O2's check: the round trip over the default corpora and over the spec's worked examples (bin/repr-ocaml check)
 	bin/repr-ocaml check
 

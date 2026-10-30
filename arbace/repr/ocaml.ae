@@ -18,6 +18,13 @@
                                     the helper rejects (parse or layout) is classed against FILE
                                     (test/ocaml/full-known.edn: :not-utf8 only; parse rejections are
                                     roundtrip-known.edn's)
+    dumps --mode types|lambda --root DIR [--again DIR] [--known FILE] [--times SECONDS]
+                                    O4: each ROOT/REL.MODE.ae (ocdump --mode MODE) read by Arbace's reader and
+                                    checked against the spec's shapes (arbace.repr.ocaml.lambda: heads, arities,
+                                    constants, positions); with --again the second run's file must be byte for
+                                    byte the same; a compiler error form is classed against FILE
+                                    (test/ocaml/dumps-known.edn, a map REL -> class, per mode); prints the
+                                    sizes, node counts and the speed (--times: the helper's seconds)
     compare --orig DIR --cand DIR [--printed DIR] [--known FILE] [--record] [--report FILE]
                                     the round trip's tree level: for each ORIG/REL.ae (the helper's dump
                                     of the original) the dump of the printed file CAND/REL.ae equal
@@ -26,6 +33,7 @@
                                     roundtrip-known.edn), a printed file the helper rejects is a failure;
                                     with --printed the forms of CAND printed again equal the printed text"
   (:require [arbace.repr.ocaml.convert :as cv]
+            [arbace.repr.ocaml.lambda :as lm]
             [arbace.repr.ocaml.print :as pr]
             [arbace.string :as str])
   (:import [java.io File]))
@@ -224,6 +232,45 @@
                                  (str "{" (str/join "\n " (map (fn [[k v]] (str (pr-str k) " " (pr-str v))) (into (sorted-map) (merge (apply dissoc known-all names) counted)))) "}") "\n")))
       (System/exit (if (and (empty? @fails) (empty? unexpected-rej) (empty? gone)) 0 1)))))
 
+;; ---- the typed and Lambda dumps (O4) ----
+
+(defn- do-dumps [{:keys [opts]}]
+  (let [mode (get opts "--mode") root (get opts "--root") again (get opts "--again")
+        known (when-let [k (get opts "--known")] (get (read-string (slurp k)) (keyword mode) {}))
+        suffix (str "." mode ".ae")
+        files (files-under root suffix)
+        st (atom {:ok 0 :err 0 :bytes 0 :nodes 0 :unstable 0 :classed 0 :counts {}})
+        bad (atom [])]
+    (doseq [f files]
+      (let [r (subs (rel root f) 0 (- (count (rel root f)) (count suffix)))
+            text (slurp f)]
+        (swap! st update :bytes + (count (.getBytes ^String text "UTF-8")))
+        (try
+          (let [res (lm/check-dump mode text)]
+            (if-let [e (:error res)]
+              (if (contains? known r)
+                (swap! st update :classed inc)
+                (do (swap! st update :err inc) (swap! bad conj (str r ": " e))))
+              (do (swap! st update :ok inc)
+                  (swap! st update :nodes + (reduce + (vals (:counts res))))
+                  (swap! st update :counts #(merge-with + % (:counts res))))))
+          (catch Throwable t
+            (swap! st update :err inc)
+            (swap! bad conj (str r ": " (.getMessage t) " " (ex-data t)))))
+        (when again
+          (let [g (str again "/" r suffix)]
+            (when-not (and (.exists (File. ^String g)) (= text (slurp g)))
+              (swap! st update :unstable inc)
+              (swap! bad conj (str r ": differs in the second run")))))))
+    (let [{:keys [ok err bytes nodes unstable classed counts]} @st
+          secs (some-> (get opts "--times") parse-double)]
+      (doseq [b (take 30 @bad)] (println "FAIL" b))
+      (println (str "dumps " mode ": " (count files) " files, " ok " read and shaped, " classed " classed errors, "
+                    err " failures, " unstable " unstable; " bytes " bytes, " nodes " nodes"
+                    (when (and secs (pos? secs)) (str "; " (format "%.1f" secs) " s, " (long (/ bytes secs)) " bytes/s"))))
+      (println " heads:" (pr-str (into (sorted-map) (map (fn [[k v]] [(str k) v]) counts))))
+      (System/exit (if (and (zero? err) (zero? unstable)) 0 1)))))
+
 (defn -main [& args]
   (let [[verb & more] args
         pa (fn [wv] (parse-args more wv))]
@@ -231,5 +278,6 @@
       "read" (do-read (pa #{"-o" "--root"}))
       "print" (do-print (pa #{"-o" "--root"}))
       "full" (do-full (pa #{"--src" "--parse" "--layout" "--out" "--forms" "--known" "--rt-known"}))
+      "dumps" (do-dumps (pa #{"--mode" "--root" "--again" "--known" "--times"}))
       "compare" (do-compare (pa #{"--orig" "--cand" "--printed" "--known" "--report"}))
       (do (println "usage: -m arbace.repr.ocaml read|print|compare ...") (System/exit 2)))))

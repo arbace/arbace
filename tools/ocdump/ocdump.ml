@@ -96,10 +96,35 @@ and seq b l =
 let flat_string x = let b = Buffer.create 64 in flat b x; Buffer.contents b
 
 (* pretty: a list that does not fit in the width breaks after its head, one child a line *)
+(* flat_within x n: Some (the flat text) when it is at most n bytes, else None, without flattening the rest
+   (a deep tree would cost its size at every level: O4's editor.ml) *)
+exception Too_long
+let flat_within x n =
+  let b = Buffer.create 64 in
+  let rec go = function
+    | A a -> Buffer.add_string b a; chk ()
+    | Str x -> Buffer.add_char b '"'; escape b x; Buffer.add_char b '"'; chk ()
+    | L l -> Buffer.add_char b '('; sq l; Buffer.add_char b ')'
+    | V l -> Buffer.add_char b '['; sq l; Buffer.add_char b ']'
+    | M kvs ->
+        Buffer.add_char b '{';
+        List.iteri (fun i (k, v) ->
+            if i > 0 then Buffer.add_char b ' ';
+            Buffer.add_string b (":" ^ k); Buffer.add_char b ' '; go v) kvs;
+        Buffer.add_char b '}'; chk ()
+  and sq l = List.iteri (fun i x -> if i > 0 then Buffer.add_char b ' '; go x) l
+  and chk () = if Buffer.length b > n then raise Too_long in
+  try go x; Some (Buffer.contents b) with Too_long -> None
+
+(* the indentation stops growing at [max_indent]: a chain of 10,000 nested lets would otherwise cost 10,000 spaces a line *)
+let max_indent = 60
+
 let rec pretty b ind width x =
-  let f = flat_string x in
-  if ind + String.length f <= width then Buffer.add_string b f
-  else
+  let ind = min ind max_indent in
+  match (match x with A _ | Str _ -> Some (flat_string x) | _ -> flat_within x (width - ind)) with
+  | Some f -> Buffer.add_string b f
+  | None ->
+    let f = "" in
     match x with
     | L (h :: rest) ->
         Buffer.add_char b '(';
@@ -805,13 +830,17 @@ let read_all ic =
 let () =
   let intf = ref false and use_file = ref false and mode = ref "parse" in
   let file = ref None and fname = ref None and width = ref 100 in
+  let includes = ref [] and simplify = ref false and prefix_opt = ref None in
   Arg.parse
     [ ("--loc", Arg.Set with_loc, " positions: :loc metadata and (at ...) names");
       ("--intf", Arg.Set intf, " read an interface (.mli)");
       ("--use-file", Arg.Set use_file, " read toplevel phrases (#use files)");
       ("--mode", Arg.Set_string mode, "M parse | types | lambda | tokens");
       ("--file", Arg.String (fun s -> fname := Some s), "NAME the file name to record");
-      ("--width", Arg.Set_int width, "N pretty-printing width") ]
+      ("--width", Arg.Set_int width, "N pretty-printing width");
+      ("-I", Arg.String (fun d -> includes := d :: !includes), "DIR where the compiled interfaces of other units are (types, lambda; as ocamlc -I)");
+      ("--prefix", Arg.String (fun d -> prefix_opt := Some d), "P types, lambda: type the file in place (FILE, its .mli beside it found) with output prefix P, where ocamlc -o P.cmo put the unit's .cmi (a weak type is checked against it)");
+      ("--simplify", Arg.Set simplify, " lambda: after Simplif.simplify_lambda, what ocamlc -dlambda prints") ]
     (fun f -> file := Some f)
     "ocdump [options] [FILE]";
   let src, path =
@@ -841,15 +870,25 @@ let () =
           Clflags.native_code := false;
           if !mode = "types" then with_loc := true;
           Clflags.dont_write_files := true;
+          Clflags.include_dirs := List.rev !includes;
           ignore (Warnings.parse_options false "-a");
           let tmpdir = Filename.temp_dir "ocdump" "" in
-          let tmp = Filename.concat tmpdir (Filename.basename (if Filename.check_suffix name ".ml" then name else "stdin.ml")) in
-          let oc = open_out_bin tmp in
-          output_string oc src; close_out oc;
-          let prefix = Filename.remove_extension tmp in
-          let ui = Unit_info.make ~source_file:tmp Unit_info.Impl prefix in
+          let base = Filename.basename name in
+          let tmp = Filename.concat tmpdir (if Filename.check_suffix name ".ml" || Filename.check_suffix name ".mli" then base else if !intf then "stdin.mli" else "stdin.ml") in
+          let in_place = !prefix_opt <> None && !file <> None in
+          if not in_place then (let oc = open_out_bin tmp in output_string oc src; close_out oc);
+          let prefix = match !prefix_opt with Some p -> p | None -> Filename.remove_extension tmp in
+          let kind = if Filename.check_suffix tmp ".mli" then Unit_info.Intf else Unit_info.Impl in
+          let source_file = if in_place then (match !file with Some f -> f | None -> tmp) else tmp in
+          let ui = Unit_info.make ~source_file kind prefix in
           let result =
             Compile_common.with_info ~native:false ~tool_name:"ocdump" ~dump_ext:"" ui (fun info ->
+                if kind = Unit_info.Intf then begin
+                  if !mode = "lambda" then failwith "lambda of an interface";
+                  let ast = Compile_common.parse_intf info in
+                  let (_, sg) = Compile_common.typecheck_intf info ast in
+                  L [ A "ocaml/typed"; Str (Format.asprintf "%a" Printtyp.signature sg.Typedtree.sig_type); V []; top_meta ]
+                end else begin
                 let ast = Compile_common.parse_impl info in
                 let impl = Compile_common.typecheck_impl info ast in
                 if !mode = "types" then
@@ -859,7 +898,9 @@ let () =
                     Translmod.transl_implementation (Unit_info.modname info.target)
                       (impl.structure, impl.coercion)
                   in
-                  L [ A "ocaml/lambda"; lambda_program prog; top_meta ])
+                  let prog = if !simplify then { prog with Lambda.code = Simplif.simplify_lambda prog.Lambda.code } else prog in
+                  L [ A "ocaml/lambda"; lambda_program prog; top_meta ]
+                end)
           in
           (try Sys.remove tmp with _ -> ()); (try Sys.rmdir tmpdir with _ -> ());
           result

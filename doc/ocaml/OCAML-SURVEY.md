@@ -906,3 +906,106 @@ edited while a run that loaded it was executing: the three long runs (`.tmp/rt-o
 `ocaml.ae`/`bin/repr-ocaml` were edited between them. `compare --record` printed "UNEXPECTED REJECT" lines and exited 1 (a quirk of O2, fixed: a
 recording run reports nothing unexpected and exits 0). Scratch the survey cites: `.tmp/repr-ocaml/rt/NAME/` (orig dumps, layout dumps, `full/`, `full-forms/`,
 `cmi/`) and `.tmp/rt-o3{a,b,c}.log` in the worktree `.tmp/worktrees/ocaml-o1`.
+
+## As built: O4 (2026-10-30)
+
+Milestone O4, types and Lambda from the oracle (OC4 (a), OC20 (a), OC21 (a)), built on the branch `ocaml-o1` on top of O3 (`0aba6074`), under the light tier
+(no gate, no Arbace build, no lock, at most 4 threads: the helper and `ocamlc` at 4 processes, the Arbace checks on stage 0 `target/seed/amd64/arbace`
+with `GOMEMLIMIT` 1500MiB; the helper's peak was 524 MB, on `editor.ml`). The proposals OC20-OC44 are not decided; the work followed the
+recommendations (OC20 (a), OC21 (a), OC26 (c), OC27 (a), OC41 (a)). Nothing shipped changed (`arbace/j2g/embed.ae` and the gate's data untouched; no re-seed;
+the new namespace `arbace.repr.ocaml.lambda` is a tool's namespace, evaluated from the checkout).
+
+**What is in the tree**
+
+- `tools/ocdump/ocdump.ml`: `-I DIR` (the load path of the compiled interfaces, as `ocamlc -I`), `--prefix P` (type FILE in place with output prefix P: its
+  `.mli` beside it and its `P.cmi` are found, so a unit with a weak type is checked against its interface as `ocamlc -c -o P.cmo` does), `--simplify` (Lambda after
+  `Simplif.simplify_lambda`), interfaces in `types` mode (`.mli`: the signature and no annotations). The pretty-printer was rewritten to be linear and to stop
+  indenting at 60 columns: go-whim's `editor.ml` lambda dump was **1,588,379,647 bytes** with the indentation growing one space per nesting level (a chain
+  of thousands of nested `let`s costs the depth in spaces a line, and every level re-flattened its subtree), it is now **34 MB** in 3.4 s. (The layout of the
+  parse dumps changes only for trees deeper than 60 levels; spec-check 218 of 218 and samples still pass.)
+- `arbace/repr/ocaml/lambda.ae`, `arbace.repr.ocaml.lambda`: `check-typed`, `check-lambda`, `check-dump`: a dump read back by Arbace's reader and validated
+  against SPEC §11.2's table (every head, arity, the kinds, the constants, the positions as six integers), the heads counted. `arbace/repr/ocaml.ae`: the verb
+  `dumps --mode types|lambda --root DIR [--again DIR] [--known FILE] [--times S]`. These are also the shapes O5's interpreter reads.
+- `bin/repr-ocaml types|lambda|dumps [--jobs N] [--loc] [--simplify] [CORPUS...]`, Makefile `repr-ocaml-dumps`: per corpus, the files `ocamlc -c` compiles alone (the
+  `.cmi` level's passes, four files at a time, up to 12 passes), each dumped twice, every dump checked by the verb, the two runs byte for byte equal;
+  sizes, node counts and seconds printed. `test/ocaml/dumps-known.edn`: the classed errors (one).
+- `doc/ocaml/SPEC.md`: §11.2 (the typed and Lambda forms, the node table, the translation, the context), §14.3 (the check), S32-S34.
+
+**The numbers** (`bin/repr-ocaml dumps`, 4 processes, a loaded host; the run is 2 min 30 s with the `ocamlc` passes and the Arbace checks)
+
+| corpus | files | compile alone | `ocamlc` passes (s) | types: files, bytes, nodes, s | lambda: files, bytes, nodes, s |
+|---|---:|---:|---:|---|---|
+| samples | 8 | 1 | 0 | 1, 4,549, 77, 0.0 | 1, 5,296, 140, 0.0 |
+| stdlib | 150 | 116 | 2 | 116, 2,797,592, 38,492, 1.1 | 41, 3,074,348, 40,012, 0.5 |
+| compiler-sources | 248 | 136 | 11 | 136, 6,060,296, 83,209, 1.6 | 62, 8,753,902, 102,990, 1.0 |
+| compiler-backend | 346 | 20 | 4 | 20, 168,447, 2,393, 0.1 | 3, 227,044, 3,112, 0.1 |
+| whiml | 8 | 7 | 6 | 7, 21,499,748, 353,340, 4.7 | 6, 34,761,432, 329,932, 3.6 |
+| testsuite | 1,862 | 1,057 | 30 | 1,057, 13,183,368, 230,161, 7.0 | 973, 18,394,552, 256,176, 6.5 |
+| **all** | 2,622 | **1,337** | 53 | **1,337, 43.7 MB, 707,672 nodes, 14.5 s** | **1,086 files, 65.2 MB, 732,362 nodes, 11.7 s** |
+
+All 1,337 compilable files have a types dump and all 1,086 compilable `.ml` files a Lambda dump (the 251 others are `.mli`, which have no Lambda); every dump read
+by Arbace's reader and shaped, none unstable across the two runs, one classed error (below). The speed: 3.0 MB/s of types dump and 5.6 MB/s of Lambda dump at 4
+processes, about 11 ms a file; the largest file, `editor.ml` (57k lines): types 4.6 s and 524 MB, Lambda 3.4 s and 422 MB, alone. The Lambda dump is 1.5 times
+the types dump in bytes and about as many nodes. Variants on compiler-sources' 62 `.ml`: raw 8.75 MB / 102,990 nodes, `--simplify` 6.99 MB / 88,913 nodes (-14%
+nodes), raw with `--loc` 13.3 MB. The compilable count is 1,337, one more than O3's 1,336: stdlib compiles 116 alone here, 115 there (the passes run four files at a time
+here, so a different file is first); the set is the same up to that file.
+
+The one classed error: `testsuite/tests/backtrace/backtrace2.ml` is typed by `ocamlc` before `backtrace/lazy.ml` (a unit named `Lazy` without `force`) is compiled, and by the
+dump after, with the testsuite directory's `.cmi`s on the load path, where `lazy.cmi` shadows the stdlib's (`:shadowed`, an artifact of the order; OC51 (b) removes it).
+
+**The Lambda for O5: is the bytecode translation the right one?** (the task's question, OC5 (a) interprets Lambda.) Yes, for the interpreter. The native translation
+(`transl_store_implementation`, and the closed-module translation of flambda) cannot be had here (it asserts without flambda, E5), and the bytecode one is what an
+interpreter wants anyway: (1) the unit is one `setglobal M!` of its module block with the list of required globals, a linking model of "evaluate units in order"
+with no store slots or symbols; (2) it does not apply the native-only transformations that serve a code generator: `max_arity` is 126 native and unbounded in bytecode
+(`lambda.ml`), so no function is split at 126 parameters; a function over a tuple pattern is not turned into a tupled-arity function (`translcore.ml:775`, native only);
+the class method cache (`translobj.ml`) is native only, so object code is the plain `Lsend`; (3) it is exactly `ocamlc -drawlambda`, a stable, documented and testable
+artifact, and the testsuite's `.reference` files come from running programs, whose behaviour the two translations share. The costs: tuple-pattern functions allocate
+the tuple (slower, not wrong), and the raw form is before `Simplif`, so `ref`s that do not escape are still `makemutable` blocks (`--simplify` gives them as `mutlet`; OC52).
+Programs that depend on native-only behaviour (arity limits, `[@unrolled]`/`[@specialise]` attributes honoured only by flambda, the float-array flat representation
+choices fixed at configure time) are the classes of O5's divergences, not a reason for another translation. The translation also fixes the primitives' set: the externals
+appear as `"caml_..."` C names (`Pccall`), which O5 must implement as the runtime's primitives list (OC21).
+
+**Checks run** (all light): `bin/repr-ocaml dumps` over all six corpora (above; the final run 2 min 30 s, exit 0), `types` and `lambda` and the `--simplify`/`--loc` variants on
+compiler-sources, `bin/repr-ocaml spec-check` (218 of 218, the checklist complete), `samples` (20 outputs read), `make check-makefile`. **Not run**: the essential gate (the light
+tier), `roundtrip --text --cmi-lines` again (nothing of the printer or converter changed; `convert.ae` and `print.ae` are untouched, `ocamlc` and the helper's parse dumps are the
+same except the pretty layout of trees deeper than 60 levels, which the converter reads as data), `bin/repr-ocaml check`.
+
+**The heavy list (for the window after the tag)**: `bin/gate` essential and `--full` (no step was added, OC26 (c)/OC31/OC42/OC56 say when); `bin/repr-ocaml roundtrip --record --text
+--cmi-lines` over all corpora once more (the pretty layout change touches the parse dumps' text, not their data); a dependency-order build for OC51 (b) (an hour of `ocamlc`, no heavy
+memory); `bin/gate --audit` for a future `repr-ocaml` step (the new `dumps` verb reads `.tmp/` files and `test/ocaml/dumps-known.edn`).
+
+**Proposals** (OC50 onward; each with options and the recommended one first)
+
+- **OC50 The Typedtree's form, decided again at O4** (extends OC20). (a) annotations only, as built: the signature text and one `(expr "type" loc)`/`(pat "type" loc)` per node, 707,672
+  of them over the corpora, 43.7 MB; (b) the Typedtree as a tree of forms (about 100 constructors; types as the printer's text or as `Types` data), several times the size and the entry
+  to a checker (OC4 (b)); (c) (a) plus the tree for the toplevel value items only. *Recommended: (a)*: nothing in O5 asks for the tree (Lambda is the interpreter's input and the toplevel's
+  value printing needs the type of the value, which the annotation at the binding's position gives); (b) pays only with a checker.
+- **OC51 The dumps' reach** (extends OC41; the dumps are 1,337 of 2,622 files). (a) as built: what `ocamlc -c` compiles alone, in passes; (b) a dependency-order build, per corpus, with the flags the
+  corpus is built with: the stdlib with `-nostdlib -nopervasives` where it needs them and its own `Stdlib__X` aliasing (the 34 stdlib files that do not compile alone fail with "The implementation does
+  not match its interface" because the installed `Stdlib__X` interfaces are found beside the units' own; `stdlib.ml` needs `-nopervasives`), the compiler with `config.ml` from `config.mlp`, `lexer.ml` from
+  `ocamllex` and the committed `boot/menhir/parser.ml` (the measured gap: compiler-sources 136 of 248, compiler-backend 20 of 346, all blocked on those and on one another), the testsuite
+  in each test's directory; (c) the stdlib only, as the part O5 needs first. *Recommended: (c) now, in the window (b)*: O5 must run the stdlib's Lambda (116 of 150 files here, 41 of 71 `.ml`: the other 30
+  `.ml` are the ones O5 cannot do without), the compiler's own Lambda is the gate of O7/O8's self-hosting; the testsuite's 1,057 are already enough to start.
+- **OC52 Raw or simplified Lambda for O5.** (a) raw (before `Simplif`), as built: the translation as `-drawlambda` prints it; (b) simplified (`-dlambda`): non-escaping `ref`s as `mutlet`/`mutvar`,
+  aliases and exits simplified, 14% fewer nodes; (c) both through the flag, the default raw for the checks and the interpreter's choice taken at O5 by measuring. *Recommended: (c)*: the
+  interpreter's speed is O5's number, `--simplify` is built, and the raw form stays the one the spec's examples and the equality checks use.
+- **OC53 The Lambda translation** (the judgment above). (a) the bytecode translation, as built, for O5 and AOT; (b) the native translation on a flambda host (apk `ocaml5` is built without flambda;
+  a host with `--enable-flambda` would give the closed-module form `transl_implementation_flambda`), as a second dump mode for O9's AOT only if code generation wants arities and the method cache;
+  (c) patching the helper to run the native non-flambda store translation (`Clflags.native_code := true` with a stubbed `transl_label_init_flambda` assertion). *Recommended: (a)*; (b) and (c) are
+  later work for AOT's speed, not for O5.
+- **OC54 Where the dependencies' `.cmi` come from.** (a) as built: `ocamlc -c` writes them, the helper reads them with `-I`/`--prefix`, so each file is compiled twice (the passes took 53 s of
+  the 2.5 minutes); (b) the helper writes the `.cmi` itself (`Clflags.dont_write_files := false`, `Compile_common.implementation`'s own save of the signature), one process per file, no `ocamlc`
+  in the dumps' path; (c) a native `.cmi` reader and writer (O6's checker). *Recommended: (b)* when OC51 (b)/(c) starts: it removes the order artifact (`:shadowed`) by building the load path of exactly the
+  units a file's dependencies name, and halves the cost.
+- **OC55 Where the dumps live and their size.** (a) generated under `.tmp/repr-ocaml/ty/` by the script, not committed (109 MB for the corpora, `editor.ml`'s alone 34+22 MB), as built; (b) commit
+  the dumps of an essential list (the testsuite's run programs with a `.reference`, about 556, plus the stdlib's), as `test/ocaml/forms/` the way `test/java/forms/` does, once O5 has a list; (c)
+  compress or drop the positions of the Lambda dump (`--loc` is already off by default; the types dump's positions are its content). *Recommended: (a) now, (b) at O5*: a committed record is
+  O5's essential gate input, and sizing it needs O5's list.
+- **OC56 The gate step for the dumps** (extends OC31, OC42). (a) fold into the one `repr-ocaml` step of OC42 (a), in `--full` only: `bin/repr-ocaml dumps samples stdlib compiler-sources compiler-backend whiml
+  testsuite` (2.5 minutes, under 1 GiB, 4 processes), inputs as OC42 plus `test/ocaml/dumps-known.edn`; (b) a step of its own; (c) none until a record is committed (OC55 (b)). *Recommended: (a)*:
+  the checks share the build of `ocdump` and the corpus fetch, and one step is one entry in the store of passes.
+
+**Rule slips**: none of the rules' letter that I know of; two to name. A first corpus run (`dumps ... whiml testsuite`) wrote a 1.6 GB Lambda dump of `editor.ml` into `.tmp/` before I saw it (the indentation, above) and
+was stopped by its task ID; the file was deleted at once (disk was 86% used and went back). The first background `dumps` run was started with a pipe through `tail` in the foreground, so the harness moved it to the
+background: harmless. No script was edited while a run that loaded it was executing (the Makefile, which no run reads, was edited during one). Scratch the survey cites: `.tmp/repr-ocaml/ty/CORPUS/` (the compilable
+list `compilable`, the compile logs `log.*`, the outputs `cmi/`, `types.1/`, `lambda.1/`), `.tmp/o4-run{1,2,3}.log` (run 3 is the final one), in the worktree `.tmp/worktrees/ocaml-o1`.

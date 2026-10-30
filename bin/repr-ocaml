@@ -43,6 +43,13 @@
 #                                 alone is counted: its first error is in .tmp/repr-ocaml/rt/NAME/cmi/skipped.txt)
 #   bin/repr-ocaml roundtrip --cmi-lines [CORPUS...]  and the :lines print's .cmi with -no-keep-locs equal to the original's
 #                                 with -no-keep-locs
+#   bin/repr-ocaml types|lambda|dumps [--jobs N] [--loc] [--simplify] [CORPUS...]
+#                                 O4: the typed (Typedtree annotations + signature) and Lambda (the bytecode translation,
+#                                 --simplify: after Simplif) dumps of every file ocamlc -c compiles alone (passes, as the
+#                                 .cmi level), run twice; each dump read by Arbace's reader and checked against SPEC §11.2's
+#                                 shapes, the two runs byte for byte equal; sizes, node counts and seconds printed
+#                                 (default corpora: samples stdlib compiler-sources compiler-backend whiml testsuite;
+#                                 outputs under .tmp/repr-ocaml/ty/CORPUS/{types,lambda}.1)
 # The checks of O1 run on small inputs, in seconds (corpus fetch: one 4.7 MB download).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -409,6 +416,94 @@ rt_cmi_lines() {
   [ $n = $same ]
 }
 
+# ---- O4: the typed and Lambda dumps over the corpora ----
+
+# ty_try REL: ocamlc -c on REL (the .cmi level of O3 into $W/cmi, found again by -I), the result in the pass's files
+ty_try() {
+  local rel=$1 out="$W/cmi"
+  if cmi_compile "$BASE" "$rel" "$out" $ALL > "$W/log.$(echo "$rel" | tr / _)" 2>&1; then
+    echo "$rel" >> "$W/pass.ok"
+  else
+    echo "$rel" >> "$W/pass.next"
+  fi
+}
+export -f ty_try cmi_compile
+
+# ty_one MODE REL: ocdump --mode MODE on REL from $BASE, with -I as ocamlc had them, into $OUT/REL.MODE.ae
+ty_one() {
+  local mode=$1 rel=$2 flag="" inc=() d
+  case $rel in *.mli) flag=--intf; [ "$mode" = lambda ] && return 0 ;; esac
+  if [ -n "$ALL" ]; then
+    while read -r d; do inc+=(-I "$d"); done < <(find "$W/cmi" -type d)
+  else
+    inc+=(-I "$W/cmi/$(dirname "$rel")")
+  fi
+  mkdir -p "$OUT/$(dirname "$rel")"
+  local pre="$W/cmi/${rel%.ml*}"
+  (cd "$BASE" && "$OCD" --mode "$mode" $flag ${DUMP_FLAGS:-} "${inc[@]}" --prefix "$pre" --file "$rel" "$rel") > "$OUT/$rel.$mode.ae" 2>> "$W/stderr.log"
+}
+export -f ty_one
+
+now() { date +%s.%N; }
+
+# dumps_corpus ID MODES: the compilable files of corpus ID (what ocamlc -c compiles alone, in passes), dumped in each
+# mode (types, lambda) twice, timed, checked by Arbace (arbace.repr.ocaml dumps)
+dumps_corpus() {
+  local id=$1 modes=$2 jobs=${REPR_OCAML_JOBS:-4} list pass t0 t1 t2 m n
+  list="$root/.tmp/repr-ocaml/rt-$id.list"; mkdir -p "$(dirname "$list")"
+  corpus_list "$id" > "$list"
+  export OCD BASE="$CORPUS_BASE" ALL="" W="$root/.tmp/repr-ocaml/ty/$id"
+  case $id in testsuite|samples|whiml) ;; *) ALL=1 ;; esac
+  rm -rf "$W"; mkdir -p "$W/cmi"
+  { grep '\.mli$' "$list" || true; grep -v '\.mli$' "$list" || true; } > "$W/pending"
+  : > "$W/done"
+  t0=$(now)
+  for pass in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    : > "$W/pass.ok"; : > "$W/pass.next"
+    xargs -a "$W/pending" -P "$jobs" -n 1 bash -c 'ty_try "$0"'
+    cat "$W/pass.ok" >> "$W/done"
+    [ -s "$W/pass.ok" ] || break
+    LC_ALL=C sort "$W/pass.next" > "$W/pending"
+  done
+  LC_ALL=C sort "$W/done" > "$W/compilable"
+  n=$(wc -l < "$W/compilable")
+  t1=$(now)
+  echo "== $id: $(wc -l < "$list") files, $n compile alone ($pass passes, $(awk "BEGIN{printf \"%.0f\", $t1 - $t0}") s)"
+  for m in $modes; do
+    local lst="$W/compilable"
+    [ "$m" = lambda ] && { grep -v '\.mli$' "$W/compilable" > "$W/compilable.ml" || true; lst="$W/compilable.ml"; }
+    t0=$(now)
+    OUT="$W/$m.1" xargs -a "$lst" -P "$jobs" -n 1 bash -c 'ty_one '"$m"' "$0"'
+    t1=$(now)
+    OUT="$W/$m.2" xargs -a "$lst" -P "$jobs" -n 1 bash -c 'ty_one '"$m"' "$0"'
+    t2=$(now)
+    rt_arbace dumps --mode "$m" --root "$W/$m.1" --again "$W/$m.2" --known "$root/test/ocaml/dumps-known.edn" \
+      --times "$(awk "BEGIN{printf \"%.2f\", $t1 - $t0}")" || DUMPS_BAD=1
+    echo "   $m: first run $(awk "BEGIN{printf \"%.1f\", $t1 - $t0}") s, second $(awk "BEGIN{printf \"%.1f\", $t2 - $t1}") s ($jobs processes)"
+    [ -n "${KEEP_ALL:-}" ] || rm -rf "$W/$m.2"
+  done
+}
+
+# cmd_dumps MODES [--jobs N] [--loc] [--simplify] [CORPUS...]
+cmd_dumps() {
+  need_ocdump; cmd_corpus_fetch >/dev/null
+  local modes=$1 ids=(); shift
+  DUMPS_BAD=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --jobs) shift; REPR_OCAML_JOBS=$1 ;;
+      --loc) DUMP_FLAGS="${DUMP_FLAGS:-} --loc"; export DUMP_FLAGS ;;
+      --simplify) DUMP_FLAGS="${DUMP_FLAGS:-} --simplify"; export DUMP_FLAGS ;;
+      *) ids+=("$1") ;;
+    esac
+    shift
+  done
+  [ ${#ids[@]} = 0 ] && ids=(samples stdlib compiler-sources compiler-backend whiml testsuite)
+  local id
+  for id in "${ids[@]}"; do dumps_corpus "$id" "$modes"; done
+  [ -z "$DUMPS_BAD" ]
+}
+
 cmd_roundtrip() {
   need_ocdump; cmd_corpus_fetch >/dev/null
   local spec="" ids=() bad=0 id list
@@ -455,6 +550,9 @@ case "${1:-}" in
   read) shift; if [ "${1:-}" = "--full" ]; then shift; cmd_read_full "$@"; else cmd_read "$@"; fi ;;
   print) shift; cmd_print "$@" ;;
   roundtrip) shift; cmd_roundtrip "$@" ;;
+  types) shift; cmd_dumps "types" "$@" ;;
+  lambda) shift; cmd_dumps "lambda" "$@" ;;
+  dumps) shift; cmd_dumps "types lambda" "$@" ;;
   check) cmd_roundtrip && cmd_roundtrip --spec ;;
   ocdump-build) cmd_ocdump_build ;;
   dump) shift; cmd_dump "$@" ;;
