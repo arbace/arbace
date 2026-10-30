@@ -1,0 +1,197 @@
+(ns arbace.repr.java.javac-attr
+  "javac's half of arbace.repr.java.attr (doc/classes/JAVA-FRONTEND-SURVEY.md, JN10 part 1, JFS130 (a); \"As
+  built: JN10 part 1\"): the pairing of native nodes with javac's attributed nodes (`index`) and every
+  reading of javac's nodes, symbols and types that attr.ae's facts make (their javac answers, which the
+  native provider's answers are checked against, or which answer a fact the provider declines), moved here
+  from attr.ae verbatim, installed into arbace.repr.java.javac-hook as the entries :attr/NAME. attr.ae's
+  javac answers are delays that call them, so a read without javac (the shipped program) never reaches
+  them. Loaded only where javac's classes are (javac's tool executable, by arbace.repr.java.javac-read);
+  names javac's classes freely."
+  (:require [arbace.repr.java.tree :as tr]
+            [arbace.repr.java.attr :as attr]
+            [arbace.repr.java.jtypes :as jt]
+            [arbace.repr.java.javac-hook :as hook])
+  (:import [com.sun.tools.javac.tree JCTree TreeInfo JCTree$JCIdent JCTree$JCFieldAccess
+            JCTree$JCVariableDecl JCTree$JCMethodDecl JCTree$JCClassDecl JCTree$JCMemberReference
+            JCTree$JCModuleDecl JCTree$JCNewClass JCTree$JCMethodInvocation JCTree$JCLambda
+            JCTree$JCBinary JCTree$JCAssignOp JCTree$JCUnary JCTree$JCBreak JCTree$JCContinue
+            JCTree$JCYield JCTree$JCSwitch JCTree$JCSwitchExpression JCTree$JCCase JCTree$JCAnnotation
+            JCTree$JCCompilationUnit JCTree$JCExpressionStatement JCTree$JCPackageDecl
+            JCTree$JCFunctionalExpression JCTree$JCAssign JCTree$JCRecordPattern]
+           [com.sun.tools.javac.code Symbol Symbol$VarSymbol Symbol$MethodSymbol Symbol$ClassSymbol
+            Symbol$PackageSymbol Type Type$ArrayType]
+           [java.util IdentityHashMap HashSet]))
+
+;;; ------------------------------------------------------------------------------------------
+;;; Moved from attr.ae verbatim (index's local jlist is attr.ae's)
+
+(defn- index
+  "Pair the native compilation unit `n` (arbace.repr.java.parse's data) with javac's attributed unit
+  `j` of the same text: {:twins {native javac} :natives {javac native} (IdentityHashMaps), :nodes,
+  :misses (native nodes without a javac node of their tag and position), :synthetic (javac's nodes
+  attribution added, skipped), :dropped (the native annotations javac took off the modifiers),
+  :flags (modifiers whose flags javac changed)}."
+  [n ^JCTree j]
+  (let [tw (IdentityHashMap.) nat (IdentityHashMap.) dropped (IdentityHashMap.)
+        nodes (volatile! 0) misses (volatile! []) synthetic (volatile! 0) flags (volatile! 0)
+        same? (fn [nt ^JCTree jt] (and (instance? JCTree jt) (identical? (tr/tag nt) (tr/tag jt))
+                                       (= (long (:pos nt)) (.-pos jt))))]
+    (letfn [(walk [nt ^JCTree jt]
+              (vswap! nodes inc)
+              (.put tw nt jt)
+              (.put nat jt nt)
+              (when (and (identical? :MODIFIERS (:tag nt)) (not= (long (:flags nt)) (long (tr/f jt :flags))))
+                (vswap! flags inc))
+              (doseq [k (get tr/tree-fields (:tag nt))]
+                (let [nv (get nt k) jv (tr/f jt k)
+                      at [(:tag nt) k]]
+                  (cond
+                    (map? nv) (if (same? nv jv) (walk nv jv) (miss at nv jv))
+                    (and (vector? nv) (= k :dimAnnotations))
+                    (doseq [[a b] (map vector nv (concat (attr/jlist jv) (repeat nil)))] (align at a (attr/jlist b)))
+                    (vector? nv) (align at nv (attr/jlist jv))
+                    (nil? nv) (when (some? jv) (vswap! synthetic inc))))))
+            (align [at nvs jvs]
+              (loop [[nt & nmore :as ns] (seq nvs) jvs (seq jvs)]
+                (when ns
+                  (let [hit (drop-while #(not (same? nt %)) jvs)]
+                    (cond
+                      (seq hit)
+                      (do (vswap! synthetic + (- (count jvs) (count hit)))
+                          (walk nt (first hit))
+                          (recur nmore (next hit)))
+                      ;; Annotate's `value = x` for an annotation's single argument x
+                      (and (#{[:ANNOTATION :args] [:TYPE_ANNOTATION :args]} at) (instance? JCTree$JCAssign (first jvs))
+                           (same? nt (.-rhs ^JCTree$JCAssign (first jvs))))
+                      (do (vswap! synthetic inc)
+                          (walk nt (.-rhs ^JCTree$JCAssign (first jvs)))
+                          (recur nmore (next jvs)))
+                      ;; an annotation javac's attribution took off the modifiers (a record
+                      ;; component's annotation that does not apply to its field: TypeEnter)
+                      (= at [:MODIFIERS :annotations])
+                      (do (.put dropped nt true) (recur nmore jvs))
+                      :else (do (miss at nt (first jvs)) (recur nmore jvs)))))))
+            (miss [at nt jt]
+              (vswap! misses conj [at (:tag nt) (:pos nt) (when (instance? JCTree jt) [(tr/tag jt) (.-pos ^JCTree jt)])]))]
+      (if (same? n j) (walk n j) (miss [:TOPLEVEL] n j)))
+    {:twins tw :natives nat :dropped dropped :nodes @nodes :misses @misses :synthetic @synthetic :flags @flags}))
+
+(defn- sym-class
+  "The class of a fact that is symbol `s`: a local variable :scope, a declaration's :enter, a
+  field, class or package :names, a method :overload."
+  [^Symbol s decl?]
+  (cond
+    (nil? s) "names"
+    (instance? Symbol$MethodSymbol s) (if decl? "enter" "overload")
+    (instance? Symbol$VarSymbol s)
+    (let [ok (str (.kind (.owner s)))]
+      (if (or (= "MTH" ok) (= "VAR" ok) (not (#{"TYP" "PCK"} ok))) "scope" (if decl? "enter" "names")))
+    :else (if decl? "enter" "names")))
+
+(defn- javac-sym ^Symbol [j]
+  (condp instance? j
+    JCTree$JCIdent (.-sym ^JCTree$JCIdent j)
+    JCTree$JCFieldAccess (.-sym ^JCTree$JCFieldAccess j)
+    JCTree$JCVariableDecl (.-sym ^JCTree$JCVariableDecl j)
+    JCTree$JCMethodDecl (.-sym ^JCTree$JCMethodDecl j)
+    JCTree$JCClassDecl (.-sym ^JCTree$JCClassDecl j)
+    JCTree$JCMemberReference (.-sym ^JCTree$JCMemberReference j)
+    JCTree$JCModuleDecl (.-sym ^JCTree$JCModuleDecl j)
+    (throw (ex-info (str "repr/java attr: no sym in " (class j)) {}))))
+
+(defn- local-sym? [^Symbol s]
+  (and (instance? Symbol$VarSymbol s)
+       (let [ok (str (.kind (.owner s)))]
+         (or (= "MTH" ok) (= "VAR" ok) (not (#{"TYP" "PCK"} ok))))))
+
+(defn- generic-type? [^Type t] (not (.isSameType jt/*types* t (.erasure jt/*types* t))))
+
+(defn- own-type-params? "Has javac's method symbol `s` type parameters of its own?" [^Symbol s] (boolean (seq (.getTypeArguments (.type s)))))
+
+(defn- anon-super-ctor*
+  "javac's superclass constructor the anonymous class constructor of javac's class declaration `j`
+  (attr.ae's (twin cd)) calls, or nil."
+  [j]
+  (some (fn [d]
+              (when (and (instance? JCTree$JCMethodDecl d) (= "<init>" (str (.-name ^JCTree$JCMethodDecl d)))
+                         (.-body ^JCTree$JCMethodDecl d))
+                (some (fn [st]
+                        (when (instance? JCTree$JCExpressionStatement st)
+                          (let [e (.-expr ^JCTree$JCExpressionStatement st)]
+                            (when (instance? JCTree$JCMethodInvocation e)
+                              (let [s (TreeInfo/symbol (.-meth ^JCTree$JCMethodInvocation e))]
+                                (when (and (instance? Symbol$MethodSymbol s) (= "<init>" (str (.-name ^Symbol s))))
+                                  s))))))
+                      (.-stats (.-body ^JCTree$JCMethodDecl d)))))
+            (.-defs ^JCTree$JCClassDecl j)))
+
+;;; ------------------------------------------------------------------------------------------
+;;; The javac answers of attr.ae's facts (each the expression attr.ae's delay held, javac's node `j`
+;;; its (twin t))
+
+(defn- prim? "jtypes/prim? (note-result!'s test of javac's type)." [t] (jt/prim? t))
+
+(defn- type-expr? "type-expr?'s: does javac's node `j` name a type or a package (TreeInfo.symbol's kind)?" [j]
+  (let [s (TreeInfo/symbol j)] (boolean (and s (#{"TYP" "PCK"} (str (.kind s)))))))
+
+(defn- array-class-member? "native-method's: is javac's symbol `s` a member of Symtab's arrayClass?" [s]
+  (identical? (.-owner ^Symbol s) (.-arrayClass jt/*syms*)))
+
+(defn- tree-symbol "TreeInfo.symbol of javac's node `j`." [j] (TreeInfo/symbol j))
+
+(defn- field
+  "The attribution's field `k` of javac's node `j` (attr.ae's facts' delays)."
+  [j k]
+  (case k
+    :type (.-type ^JCTree j)
+    :constructor (.-constructor ^JCTree$JCNewClass j)
+    :constructorType (.-constructorType ^JCTree$JCNewClass j)
+    :varargsElement (condp instance? j
+                      JCTree$JCMethodInvocation (.-varargsElement ^JCTree$JCMethodInvocation j)
+                      JCTree$JCNewClass (.-varargsElement ^JCTree$JCNewClass j)
+                      JCTree$JCMemberReference (.-varargsElement ^JCTree$JCMemberReference j))
+    :target (.-target ^JCTree$JCFunctionalExpression j)
+    :operator (condp instance? j
+                JCTree$JCBinary (.-operator ^JCTree$JCBinary j)
+                JCTree$JCAssignOp (.-operator ^JCTree$JCAssignOp j)
+                JCTree$JCUnary (.-operator ^JCTree$JCUnary j))
+    :ref-kind (.-kind ^JCTree$JCMemberReference j)
+    :jump-target (condp instance? j
+                   JCTree$JCBreak (.-target ^JCTree$JCBreak j)
+                   JCTree$JCContinue (.-target ^JCTree$JCContinue j)
+                   JCTree$JCYield (.-target ^JCTree$JCYield j))
+    :patternSwitch (if (instance? JCTree$JCSwitch j) (.-patternSwitch ^JCTree$JCSwitch j) (.-patternSwitch ^JCTree$JCSwitchExpression j))
+    :hasUnconditionalPattern (if (instance? JCTree$JCSwitch j) (.-hasUnconditionalPattern ^JCTree$JCSwitch j)
+                                 (.-hasUnconditionalPattern ^JCTree$JCSwitchExpression j))
+    :isExhaustive (.-isExhaustive ^JCTree$JCSwitch j)
+    :completesNormally (.-completesNormally ^JCTree$JCCase j)
+    :attribute (.-attribute ^JCTree$JCAnnotation j)
+    :packge (.-packge ^JCTree$JCCompilationUnit j)))
+
+(defn- generic-sym-type? "instantiation-fact's: is the type of javac's method symbol `s` generic?" [^Symbol s]
+  (generic-type? (.type s)))
+
+(defn- declared-varargs-element?
+  "varargs-element's: is the last parameter of javac's method symbol `s` an array of a type that is not
+  generic?"
+  [^Symbol s]
+  (let [ps (.getParameterTypes (.type s))
+        l (when (seq ps) (last ps))]
+    (and (instance? Type$ArrayType l) (not (generic-type? (.-elemtype ^Type$ArrayType l))))))
+
+(defn- record-components "record-components' javac answer of javac's RECORDPATTERN `j`." [j]
+  (let [^JCTree$JCRecordPattern j j
+        ^Type rt (.-type j)]
+    (vec (for [^Symbol rc (.getRecordComponents ^Symbol$ClassSymbol (.-record j))]
+           [(jt/erasure (.memberType jt/*types* rt rc)) (jt/erasure (.-type rc))]))))
+
+(defn- package-data "packge's data of javac's package symbol `s`." [s]
+  [:package (str (.getQualifiedName ^Symbol$PackageSymbol s))])
+
+(hook/install!
+ {:attr/index index :attr/sym-class sym-class :attr/javac-sym javac-sym :attr/local-sym? local-sym?
+  :attr/generic-type? generic-type? :attr/own-type-params? own-type-params? :attr/anon-super-ctor anon-super-ctor*
+  :attr/prim? prim? :attr/type-expr? type-expr? :attr/array-class-member? array-class-member?
+  :attr/tree-symbol tree-symbol :attr/field field :attr/generic-sym-type? generic-sym-type?
+  :attr/declared-varargs-element? declared-varargs-element? :attr/record-components record-components
+  :attr/package-data package-data})

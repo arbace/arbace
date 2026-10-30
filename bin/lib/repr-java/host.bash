@@ -27,7 +27,8 @@
 #                      with (the parser and lexer, the native provider and its tiers, the class file
 #                      reader, the read without javac's split); since JN10 (write-ahead) the platform
 #                      interface and the java.base pack it reads (platform, jdk/platform/java.base.decls)
-#                      and javac's door and tree half (javac_hook, javac_tree)
+#                      and javac's door and tree half (javac_hook, javac_tree); since JN10 part 1 the rest of
+#                      javac's half (javac_attr, javac_nattr, javac_model, javac_read)
 #   repr_java_vendor_read
 #                      the vendoring tools' read (JFS120 (b), doc/classes/JAVA-FRONTEND-SURVEY.md, "As
 #                      built: JN9f"): native (the default), bin/repr-java read --no-javac, the native
@@ -68,7 +69,8 @@ repr_java_provenance_same() {
 repr_java_reader_hash() {
   (cd "$root" && for f in arbace/repr/java.ae arbace/repr/java/{attr,convert,forms,full,javac,jtypes,layout,model,names,resolve,tree}.ae \
                           arbace/repr/java/{classfile,decls,expr,infer,lex,nattr,overload,parse,scope,sym,types}.ae \
-                          arbace/repr/java/{platform,javac_hook,javac_tree}.ae jdk/platform/java.base.decls bin/repr-java; do
+                          arbace/repr/java/{platform,javac_hook,javac_tree,javac_attr,javac_nattr,javac_model,javac_read}.ae \
+                          jdk/platform/java.base.decls bin/repr-java; do
      echo "$f"; done | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-64)
 }
 

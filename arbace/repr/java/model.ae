@@ -49,20 +49,15 @@
   as javac's ClassFinder lists them) asks javac's symbol of the same declaration (`javac-of`: by its
   declaration's twin, or by name), a bridge. With the native provider each read is counted by its
   name and how it was answered (:native, :javac, :bridge; nattr/read!), for attr-check's share."
-  (:require [arbace.repr.java.jtypes :as jt]
-            [arbace.repr.java.decls :as d]
+  (:require [arbace.repr.java.decls :as d]
+            [arbace.repr.java.forms :as f]
+            [arbace.repr.java.javac-hook :as hook]
             [arbace.repr.java.attr :as attr]
             [arbace.repr.java.nattr :as na]
             [arbace.repr.java.expr :as ex]
             [arbace.repr.java.overload :as ov]
             [arbace.string :as str])
-  (:import [arbace.repr.java.sym Sym]
-           [com.sun.tools.javac.code Type Type$ArrayType Type$ClassType Type$WildcardType Type$TypeVar
-            Type$IntersectionClassType Type$UnionClassType Type$MethodType Type$CapturedType Symbol
-            Symbol$ClassSymbol Symbol$MethodSymbol Symbol$VarSymbol Symbol$PackageSymbol Attribute
-            Attribute$Constant Attribute$Class Attribute$Enum Attribute$Array Attribute$Compound
-            Attribute$Error BoundKind]
-           [com.sun.tools.javac.tree JCTree$JCVariableDecl JCTree$JCClassDecl JCTree$JCMethodDecl]))
+  (:import [arbace.repr.java.sym Sym]))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; The models
@@ -97,7 +92,7 @@
   [s]
   (if-let [pr (p)] (na/canon pr s) s))
 
-(defn- reg [] (:reg (p)))
+(defn reg [] (:reg (p)))
 
 (defn javac-of
   "javac's symbol of the declaration of native symbol `s` (a bridge): by its declaration's twin, else
@@ -182,7 +177,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; Symbols
 
-(defn sym? [x] (or (instance? Symbol x) (nsym? x)))
+(defn sym? [x] (or (hook/jsym? x) (nsym? x)))
 
 (defn kind
   "The symbol's kind as javac's Kinds.Kind names it: VAR, MTH, TYP, PCK, ..."
@@ -190,10 +185,10 @@
   (if (nsym? s)
     (do (rd :model/kind :native)
         (case (:sk s) (:local :field) "VAR" :method "MTH" (:class :tvar) "TYP" :package "PCK" :module "MDL" "NIL"))
-    (do (rd :model/kind :javac) (jt/kind s))))
+    (do (rd :model/kind :javac) (hook/call-fixed! :model/kind s))))
 
 (defn sname "The symbol's name (a string)." [s]
-  (if (nsym? s) (do (rd :model/name :native) (:name s)) (do (rd :model/name :javac) (str (.name ^Symbol s)))))
+  (if (nsym? s) (do (rd :model/name :native) (:name s)) (do (rd :model/name :javac) (hook/call-fixed! :model/sname s))))
 
 (defn sstr "The symbol as javac's toString gives it (a package's full name)." [s]
   (if (nsym? s) (do (rd :model/name :native) (:name s)) (do (rd :model/name :javac) (str s))))
@@ -211,7 +206,7 @@
           :method (d/method-flags s)
           :class (d/class-flags s)
           0))
-    (do (rd :model/flags :javac) (jt/flags-of s))))
+    (do (rd :model/flags :javac) (long (hook/call-fixed! :model/flags s)))))
 
 (defn has-flag? [s flag] (not (zero? (bit-and (flags s) (long flag)))))
 
@@ -235,7 +230,7 @@
         (or (d/has? (flags s) d/STATIC)
             (let [o (nowner s)]
               (and (nsym? o) (= :class (:sk o)) (d/interface? o) (not= :method (:sk s)) (not= "this" (:name s))))))
-    (do (rd :model/static :javac) (jt/static? s))))
+    (do (rd :model/static :javac) (hook/call-fixed! :model/static? s))))
 
 (defn owner
   "The symbol's owner (a field's or a method's class; a member class's outer class)."
@@ -244,14 +239,14 @@
     (let [o (nowner s)]
       (if (nsym? o)
         (do (rd :model/owner :native) o)
-        (do (rd :model/owner :bridge) (canon (.-owner ^Symbol (javac-of s))))))
-    (do (rd :model/owner :javac) (canon (.-owner ^Symbol s)))))
+        (do (rd :model/owner :bridge) (canon (hook/call-fixed! :model/owner (javac-of s))))))
+    (do (rd :model/owner :javac) (canon (hook/call-fixed! :model/owner s)))))
 
 (defn class-sym? [s]
-  (if (or (nil? s) (nsym? s)) (do (rd :model/class? :native) (= :class (:sk s))) (do (rd :model/class? :javac) (jt/class-sym? s))))
+  (if (or (nil? s) (nsym? s)) (do (rd :model/class? :native) (= :class (:sk s))) (do (rd :model/class? :javac) (hook/call-fixed! :model/class-sym? s))))
 
 (defn method-sym? [s]
-  (if (or (nil? s) (nsym? s)) (do (rd :model/class? :native) (= :method (:sk s))) (do (rd :model/class? :javac) (instance? Symbol$MethodSymbol s))))
+  (if (or (nil? s) (nsym? s)) (do (rd :model/class? :native) (= :method (:sk s))) (do (rd :model/class? :javac) (hook/jmethod-sym? s))))
 
 (defn local?
   "Is the symbol a local variable (or parameter, pattern variable): a variable owned by a method or
@@ -259,22 +254,19 @@
   [s]
   (if (nsym? s)
     (do (rd :model/local? :native) (= :local (:sk s)))
-    (do (rd :model/local? :javac)
-        (and (= "VAR" (jt/kind s))
-             (let [ok (str (.kind (.-owner ^Symbol s)))]
-               (or (= "MTH" ok) (= "VAR" ok) (not (#{"TYP" "PCK"} ok))))))))
+    (do (rd :model/local? :javac) (hook/call-fixed! :model/local? s))))
 
 (defn anonymous? [c]
-  (if (nsym? c) (do (rd :model/anonymous? :native) (boolean (:anon? c))) (do (rd :model/anonymous? :javac) (jt/anonymous? c))))
+  (if (nsym? c) (do (rd :model/anonymous? :native) (boolean (:anon? c))) (do (rd :model/anonymous? :javac) (hook/call-fixed! :model/anonymous? c))))
 
 (defn local-class? [c]
-  (if (nsym? c) (do (rd :model/local-class? :native) (d/local-class? c)) (do (rd :model/local-class? :javac) (jt/local-class? c))))
+  (if (nsym? c) (do (rd :model/local-class? :native) (d/local-class? c)) (do (rd :model/local-class? :javac) (hook/call-fixed! :model/local-class? c))))
 
 (defn interface? [c]
-  (if (nsym? c) (do (rd :model/interface? :native) (d/interface? c)) (do (rd :model/interface? :javac) (.isInterface ^Symbol c))))
+  (if (nsym? c) (do (rd :model/interface? :native) (d/interface? c)) (do (rd :model/interface? :javac) (hook/call-fixed! :model/interface? c))))
 
 (defn simple-name "The symbol's simple name (getSimpleName; an anonymous class's \"\")." [s]
-  (if (nsym? s) (do (rd :model/simple-name :native) (:name s)) (do (rd :model/simple-name :javac) (str (.getSimpleName ^Symbol s)))))
+  (if (nsym? s) (do (rd :model/simple-name :native) (:name s)) (do (rd :model/simple-name :javac) (hook/call-fixed! :model/simple-name s))))
 
 (defn- local-flat
   "A local class's flat name as javac numbers it (arbace.repr.java.expr/local-flat, JFS91 (b)),
@@ -291,7 +283,7 @@
             (na/record! (p) :names/local-class :native (:tree c) nn nil)
             (locking m (.put m c r) (.put ^java.util.Map (:flat-locals (p)) nn c))
             r))
-        (let [jn (str (.flatName ^Symbol$ClassSymbol (javac-of c)))
+        (let [jn (hook/call-fixed! :model/flat-name (javac-of c))
               nn (try (ex/local-flat (p) c) (catch Throwable e (if (:arbace.repr.java.decls/decline (ex-data e)) nil (throw e))))
               r (cond (nil? nn) [:bridge jn] (= nn jn) [:native nn] :else [:bridge jn])]
           (na/record! (p) :names/local-class (case (first r) :native :equal :bridge (if nn :differ :declined))
@@ -304,9 +296,9 @@
   [c]
   (if (nsym? c)
     (if (d/local-class? c)
-      (let [[k n] (local-flat c)] (rd :model/binary-name k) (jt/*rename* n))
-      (do (rd :model/binary-name :native) (jt/*rename* (:flat c))))
-    (do (rd :model/binary-name :javac) (jt/binary-name c))))
+      (let [[k n] (local-flat c)] (rd :model/binary-name k) (f/*rename* n))
+      (do (rd :model/binary-name :native) (f/*rename* (:flat c))))
+    (do (rd :model/binary-name :javac) (hook/call-fixed! :model/binary-name c))))
 
 (defn flat-name
   "The flat name of class `c`, not renamed (resolution's names; a local class's local-flat)."
@@ -315,28 +307,28 @@
     (if (d/local-class? c)
       (let [[k n] (local-flat c)] (rd :model/binary-name k) n)
       (do (rd :model/binary-name :native) (:flat c)))
-    (do (rd :model/binary-name :javac) (str (.flatName ^Symbol$ClassSymbol c)))))
+    (do (rd :model/binary-name :javac) (hook/call-fixed! :model/flat-name c))))
 
 (defn package-name
   "The renamed name of the package of class `c`, or of package `c`."
   [c]
   (if (nsym? c)
-    (do (rd :model/package :native) (jt/*rename* (if (= :package (:sk c)) (:name c) (:pkg (if (= :class (:sk c)) c (:owner c))))))
-    (do (rd :model/package :javac) (jt/package-name c))))
+    (do (rd :model/package :native) (f/*rename* (if (= :package (:sk c)) (:name c) (:pkg (if (= :class (:sk c)) c (:owner c))))))
+    (do (rd :model/package :javac) (hook/call-fixed! :model/package-name c))))
 
 (defn package-of
   "The name of the package of symbol `s` (not renamed)."
   [s]
   (if (nsym? s)
     (do (rd :model/package :native) (:pkg (if (= :class (:sk s)) s (:owner s))))
-    (do (rd :model/package :javac) (str (.getQualifiedName (.packge ^Symbol s))))))
+    (do (rd :model/package :javac) (hook/call-fixed! :model/package-of s))))
 
 (defn outermost
   "Symbol.outermostClass: the top-level class enclosing the symbol."
   [s]
   (if (nsym? s)
     (do (rd :model/outermost :native) (d/outermost (if (= :class (:sk s)) s (:owner s))))
-    (do (rd :model/outermost :javac) (canon (.outermostClass ^Symbol s)))))
+    (do (rd :model/outermost :javac) (canon (hook/call-fixed! :model/outermost s)))))
 
 ;;; Variables
 
@@ -356,19 +348,19 @@
                ;; upper bound of its alternatives, a var's of a poly initializer: javac's
                (if (and t (not= :union (:k t)))
                  (do (rd :model/type :native) t)
-                 (do (rd :model/type :bridge) (.-type ^Symbol (javac-of s)))))
+                 (do (rd :model/type :bridge) (hook/call-fixed! :model/stype (javac-of s)))))
       :field (do (rd :model/type :native) (d/field-type s))
       :class (do (rd :model/type :native) (d/this-type s))
       (throw (ex-info (str "repr/java model: no type of " s) {})))
-    (do (rd :model/type :javac) (.-type ^Symbol s))))
+    (do (rd :model/type :javac) (hook/call-fixed! :model/stype s))))
 
 (defn verasure
   "The erasure of variable `s`'s type (`.erasure`)."
   [s]
   (if (nsym? s)
     (let [t (stype s)]
-      (if (instance? Type t) (jt/erasure t) (nerasure t)))
-    (do (rd :model/erasure :javac) (.erasure ^Symbol s jt/*types*))))
+      (if (hook/jtype? t) (hook/call-fixed! :model/erasure t) (nerasure t)))
+    (do (rd :model/erasure :javac) (hook/call-fixed! :model/verasure s))))
 
 (defn- var-constant
   "The constant value of `var` local entry `e` (d/local-constant's at its inferred type), or nil."
@@ -393,7 +385,7 @@
           d/*no-javac* (if (identical? nv ::declined)
                          (d/javac-needed! "declined :types/var-constant")
                          (do (rd :model/const-value :native) (na/record! (p) :types/var-constant :native (:decl s) nil nil) nv))
-          :else (let [jv (.getConstValue ^Symbol$VarSymbol (javac-of s))]
+          :else (let [jv (hook/call-fixed! :model/const-value (javac-of s))]
                   (cond
                     (identical? nv ::declined) (do (rd :model/const-value :bridge)
                                                    (na/record! (p) :types/var-constant :declined (:decl s) "a var's type" nil))
@@ -401,7 +393,7 @@
                     :else (do (rd :model/const-value :bridge) (na/record! (p) :types/var-constant :differ (:decl s) (pr-str nv) (pr-str jv))))
                   jv)))
       (do (rd :model/const-value :native) (second (d/local-constant s))))
-    (do (rd :model/const-value :javac) (.getConstValue ^Symbol$VarSymbol s))))
+    (do (rd :model/const-value :javac) (hook/call-fixed! :model/const-value s))))
 
 ;;; Methods
 
@@ -409,30 +401,29 @@
 
 (defn mparams "The declared parameter types of method `m` (`.type`'s)." [m]
   (if (nsym? m) (do (rd :model/method-type :native) (:params (nmtype m)))
-      (do (rd :model/method-type :javac) (vec (.getParameterTypes (.-type ^Symbol m))))))
+      (do (rd :model/method-type :javac) (hook/call-fixed! :model/mparams m))))
 
 (defn mret "The declared return type of method `m`." [m]
   (if (nsym? m) (do (rd :model/method-type :native) (:ret (nmtype m)))
-      (do (rd :model/method-type :javac) (.getReturnType (.-type ^Symbol m)))))
+      (do (rd :model/method-type :javac) (hook/call-fixed! :model/mret m))))
 
 (defn mtparam-names "The names of method `m`'s type parameters." [m]
   (if (nsym? m) (do (rd :model/method-type :native) (mapv :name (:tparams (nmtype m))))
-      (do (rd :model/method-type :javac)
-          (vec (for [^Type tv (.getTypeArguments (.-type ^Symbol m))] (str (.getSimpleName (.-tsym tv))))))))
+      (do (rd :model/method-type :javac) (hook/call-fixed! :model/tparam-names m))))
 
 (defn erased-params "The erased parameter types of method `m` (`.erasure`'s)." [m]
   (if (nsym? m) (do (rd :model/erasure :native) (mapv nerasure (:params (nmtype m))))
-      (do (rd :model/erasure :javac) (vec (.getParameterTypes (.erasure ^Symbol m jt/*types*))))))
+      (do (rd :model/erasure :javac) (hook/call-fixed! :model/erased-params m))))
 
 (defn erased-ret "The erased return type of method `m`." [m]
   (if (nsym? m) (do (rd :model/erasure :native) (nerasure (:ret (nmtype m))))
-      (do (rd :model/erasure :javac) (.getReturnType (.erasure ^Symbol m jt/*types*)))))
+      (do (rd :model/erasure :javac) (hook/call-fixed! :model/erased-ret m))))
 
 (defn param-syms "Method `m`'s parameters' symbols (`.params`; a compact constructor's too)." [m]
   (if (nsym? m)
     (do (rd :model/params :native)
         (vec (for [pd (:params (:tree m))] (:local (na/answer (p) pd)))))
-    (do (rd :model/params :javac) (mapv canon (.-params ^Symbol$MethodSymbol m)))))
+    (do (rd :model/params :javac) (mapv canon (hook/call-fixed! :model/params m)))))
 
 (defn default-value
   "An annotation element method's default value (an annotation value of its model), or nil."
@@ -441,7 +432,7 @@
     (do (rd :model/default-value :native)
         (when-let [dv (:defaultValue (:tree m))]
           (d/annotation-value (d/method-env m) (:ret (nmtype m)) dv)))
-    (do (rd :model/default-value :javac) (.-defaultValue ^Symbol$MethodSymbol m))))
+    (do (rd :model/default-value :javac) (hook/call-fixed! :model/default-value m))))
 
 (defn sig-poly?
   "Types.isSignaturePolymorphic of the method's base symbol: a native method of MethodHandle or
@@ -456,34 +447,29 @@
                         (= 1 (count ps))
                         (= :array (:k (first ps)))
                         (let [e (:e (first ps))] (and (nclass? e) (= "java.lang.Object" (:flat (:c e)))))))))
-    (do (rd :model/sig-poly :javac)
-        (.isSignaturePolymorphic jt/*types* ^Symbol$MethodSymbol (.baseSymbol ^Symbol m)))))
+    (do (rd :model/sig-poly :javac) (hook/call-fixed! :model/sig-poly? m))))
 
 ;;; Classes
 
 (defn member-classes "Class `c`'s member classes (its members that are classes)." [c]
   (if (nsym? c)
     (do (rd :model/members :native) (vec (vals (:classes (d/members c)))))
-    (do (rd :model/members :javac)
-        (vec (for [^Symbol s (.getSymbols (.members ^Symbol c)) :when (jt/class-sym? s)] (canon s))))))
+    (do (rd :model/members :javac) (mapv canon (hook/call-fixed! :model/member-classes c)))))
 
 (defn field-names "The names of class `c`'s fields." [c]
   (if (nsym? c)
     (do (rd :model/members :native) (mapv :name (:fields (d/members c))))
-    (do (rd :model/members :javac)
-        (vec (for [^Symbol s (.getSymbols (.members ^Symbol c)) :when (= "VAR" (jt/kind s))] (str (.name s)))))))
+    (do (rd :model/members :javac) (hook/call-fixed! :model/field-names c))))
 
 (defn has-field? "Does class `c` declare a field named `n`?" [c n]
   (if (nsym? c)
     (do (rd :model/members :native) (boolean (seq (d/fields-named c n))))
-    (do (rd :model/members :javac)
-        (boolean (some #(= "VAR" (jt/kind %)) (.getSymbolsByName (.members ^Symbol c) (jt/jname n)))))))
+    (do (rd :model/members :javac) (hook/call-fixed! :model/has-field? c n))))
 
 (defn tparam-names "The names of class `c`'s type parameters." [c]
   (if (nsym? c)
     (do (rd :model/tparams :native) (mapv :name (d/class-tparams c)))
-    (do (rd :model/tparams :javac)
-        (vec (for [^Type tv (.getTypeArguments (.-type ^Symbol c))] (str (.getSimpleName (.-tsym tv))))))))
+    (do (rd :model/tparams :javac) (hook/call-fixed! :model/tparam-names c))))
 
 (defn- anon-of-diamond?
   "A native anonymous class of a diamond (its supertype inferred)?"
@@ -498,8 +484,8 @@
   (if (nsym? c)
     (if-let [x (try (d/class-interfaces c) (catch Throwable e (if (:arbace.repr.java.decls/decline (ex-data e)) nil (throw e))))]
       (do (rd :model/supertypes :native) x)
-      (do (rd :model/supertypes :bridge) (vec (.getInterfaces ^Symbol$ClassSymbol (javac-of c)))))
-    (do (rd :model/supertypes :javac) (vec (.getInterfaces ^Symbol$ClassSymbol c)))))
+      (do (rd :model/supertypes :bridge) (hook/call-fixed! :model/class-interfaces (javac-of c))))
+    (do (rd :model/supertypes :javac) (hook/call-fixed! :model/class-interfaces c))))
 
 (defn class-superclass
   "Class `c`'s superclass type (getSuperclass; an anonymous class of a diamond's inferred, JN9d)."
@@ -508,19 +494,16 @@
     (let [x (try [(d/class-supertype c)] (catch Throwable e (if (:arbace.repr.java.decls/decline (ex-data e)) nil (throw e))))]
       (if x
         (do (rd :model/supertypes :native) (first x))
-        (do (rd :model/supertypes :bridge) (.getSuperclass ^Symbol$ClassSymbol (javac-of c)))))
-    (do (rd :model/supertypes :javac) (.getSuperclass ^Symbol$ClassSymbol c))))
+        (do (rd :model/supertypes :bridge) (hook/call-fixed! :model/class-superclass (javac-of c)))))
+    (do (rd :model/supertypes :javac) (hook/call-fixed! :model/class-superclass c))))
 
 (defn iterable-arg
   "The erasure of the type argument of type `t`'s Iterable supertype (Lower.visitIterableForeachLoop's
   iteratorTarget: asSuper of its upper bound, the argument erased), nil when it has none (raw): what
   javac casts a for-each's element to before a primitive binding's unboxing (JCS115 (a), JN9f)."
   [t]
-  (if (instance? Type t)
-    (do (rd :model/supertypes :javac)
-        (let [ty jt/*types*
-              ^Type it (.asSuper ty (.cvarUpperBound ty ^Type t) (.-tsym (.iterableType jt/*syms*)))]
-          (when-let [a (some-> it .getTypeArguments seq first)] (jt/erasure a))))
+  (if (hook/jtype? t)
+    (do (rd :model/supertypes :javac) (hook/call-fixed! :model/iterable-arg t))
     (do (rd :model/supertypes :native)
         (when-let [a (some-> (d/as-super t (d/class-named (reg) "java.lang.Iterable")) :args first)]
           (d/erasure a)))))
@@ -532,8 +515,7 @@
     (do (rd :model/members :native)
         (let [comps (filter #(and (= :VARDEF (:tag %)) (d/has? (get-in % [:mods :flags]) d/RECORD)) (:defs (:tree c)))]
           (boolean (some-> (last comps) (get-in [:mods :flags]) (d/has? d/VARARGS)))))
-    (do (rd :model/members :javac)
-        (boolean (some-> (last (seq (.getRecordComponents ^Symbol$ClassSymbol c))) (.isVarargs))))))
+    (do (rd :model/members :javac) (hook/call-fixed! :model/record-varargs? c))))
 
 (declare javac-pkg-class-names)
 
@@ -558,27 +540,22 @@
   "pkg-class-names by javac's ClassFinder (its package symbol, or a native package's of the run's
   module)."
   [pkg]
-  (let [^Symbol$PackageSymbol jp
-        (if (nsym? pkg)
-          (do
-              (.getPackage jt/*syms* (if-let [m (:module (reg))] (.getModule jt/*syms* (jt/jname m)) (.-unnamedModule jt/*syms*))
-                           (jt/jname (:name pkg))))
-          (do (rd :model/package-members :javac) pkg))]
-    (set (for [^Symbol s (.getSymbols (.members jp)) :when (jt/class-sym? s)] (str (.getSimpleName s))))))
+  (when-not (nsym? pkg) (rd :model/package-members :javac))
+  (hook/call-fixed! :model/pkg-class-names pkg (when (nsym? pkg) (:module (reg)))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Types
 
 (defn type? "A type of either model (not the converter's markers :lit-int, :null, :type)." [t]
-  (or (instance? Type t) (and (not (identical? t :null)) (ntype? t))))
+  (or (hook/jtype? t) (and (not (identical? t :null)) (ntype? t))))
 
 (defn tag-name
   "The type's tag as javac's TypeTag names it (INT, CLASS, ARRAY, TYPEVAR, WILDCARD, BOT, VOID, ...)."
   [t]
   (cond
     (and (map? t) (identical? :ctype (:k t))) (tag-name (:t t))
-    (instance? Type t)
-    (do (rd :model/tag :javac) (jt/tag-name t))
+    (hook/jtype? t)
+    (do (rd :model/tag :javac) (hook/call-fixed! :model/tag-name t))
     :else
     (do (rd :model/tag :native)
         (if (keyword? t)
@@ -587,111 +564,101 @@
             (:class :inter :union) "CLASS" :array "ARRAY" :tvar "TYPEVAR" :wild "WILDCARD" :null "BOT" "NONE")))))
 
 (defn prim? [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (jt/prim? t))
+  (if (hook/jtype? t) (do (rd :model/tag :javac) (hook/call-fixed! :model/prim? t))
       (do (rd :model/tag :native) (and (contains? prim-kws t) (not (identical? t :void))))))
 
 (defn void? [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (jt/void? t)) (do (rd :model/tag :native) (identical? t :void))))
+  (if (hook/jtype? t) (do (rd :model/tag :javac) (hook/call-fixed! :model/void? t)) (do (rd :model/tag :native) (identical? t :void))))
 
 (defn array? [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (instance? Type$ArrayType t)) (do (rd :model/tag :native) (and (map? t) (= :array (:k t))))))
+  (if (hook/jtype? t) (do (rd :model/tag :javac) (hook/call-fixed! :model/array? t)) (do (rd :model/tag :native) (and (map? t) (= :array (:k t))))))
 
 (defn elemtype [t]
-  (if (instance? Type t) (do (rd :model/elemtype :javac) (.-elemtype ^Type$ArrayType t)) (do (rd :model/elemtype :native) (:e t))))
+  (if (hook/jtype? t) (do (rd :model/elemtype :javac) (hook/call-fixed! :model/elemtype t)) (do (rd :model/elemtype :native) (:e t))))
 
 (defn class-type?
   "A class type (javac's ClassType: intersections and unions too)?"
   [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (instance? Type$ClassType t))
+  (if (hook/jtype? t) (do (rd :model/tag :javac) (hook/call-fixed! :model/class-type? t))
       (do (rd :model/tag :native) (and (map? t) (contains? #{:class :inter :union} (:k t))))))
 
 (defn tvar? "A type variable (a captured one too)?" [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (instance? Type$TypeVar t)) (do (rd :model/tag :native) (and (map? t) (= :tvar (:k t))))))
+  (if (hook/jtype? t) (do (rd :model/tag :javac) (hook/call-fixed! :model/tvar? t)) (do (rd :model/tag :native) (and (map? t) (= :tvar (:k t))))))
 
 (defn captured? [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (instance? Type$CapturedType t))
+  (if (hook/jtype? t) (do (rd :model/tag :javac) (hook/call-fixed! :model/captured? t))
       (do (rd :model/tag :native) (boolean (and (map? t) (= :tvar (:k t)) (:captured (:tv t)))))))
 
 (defn wildcard? [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (instance? Type$WildcardType t)) (do (rd :model/tag :native) (and (map? t) (= :wild (:k t))))))
+  (if (hook/jtype? t) (do (rd :model/tag :javac) (hook/call-fixed! :model/wildcard? t)) (do (rd :model/tag :native) (and (map? t) (= :wild (:k t))))))
 
 (defn wild-kind "A wildcard's bound kind: :unbound, :extends, :super." [t]
-  (if (instance? Type t)
-    (do (rd :model/wildcard :javac)
-        (condp = (.-kind ^Type$WildcardType t) BoundKind/UNBOUND :unbound BoundKind/EXTENDS :extends BoundKind/SUPER :super))
+  (if (hook/jtype? t)
+    (do (rd :model/wildcard :javac) (hook/call-fixed! :model/wild-kind t))
     (do (rd :model/wildcard :native) (:bk t))))
 
 (defn wild-bound "A wildcard's bound (`.type`)." [t]
-  (if (instance? Type t) (do (rd :model/wildcard :javac) (.-type ^Type$WildcardType t)) (do (rd :model/wildcard :native) (:t t))))
+  (if (hook/jtype? t) (do (rd :model/wildcard :javac) (hook/call-fixed! :model/wild-bound t)) (do (rd :model/wildcard :native) (:t t))))
 
 (defn components "The components of an intersection type, else nil." [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (jt/components t))
+  (if (hook/jtype? t) (do (rd :model/tag :javac) (hook/call-fixed! :model/components t))
       (do (rd :model/tag :native) (when (and (map? t) (= :inter (:k t))) (seq (:ts t))))))
 
 (defn tsym
   "The type's symbol (`.tsym`): a class type's class, a type variable's symbol; nil for a native
   primitive or array type."
   [t]
-  (if (instance? Type t)
-    (do (rd :model/tsym :javac) (canon (.-tsym ^Type t)))
+  (if (hook/jtype? t)
+    (do (rd :model/tsym :javac) (canon (hook/call-fixed! :model/tsym t)))
     (do (rd :model/tsym :native) (when (map? t) (case (:k t) :class (:c t) :tvar (:tv t) nil)))))
 
 (defn type-args "A class type's type arguments." [t]
-  (if (instance? Type t) (do (rd :model/type-args :javac) (seq (.getTypeArguments ^Type t)))
+  (if (hook/jtype? t) (do (rd :model/type-args :javac) (hook/call-fixed! :model/type-args t))
       (do (rd :model/type-args :native) (seq (:args t)))))
 
 (defn enclosing-type
   "A class type's enclosing type (an inner class's), nil (javac's noType) when none."
   [t]
-  (if (instance? Type t)
-    (do (rd :model/type-args :javac) (let [o (.getEnclosingType ^Type t)] (when (instance? Type$ClassType o) o)))
+  (if (hook/jtype? t)
+    (do (rd :model/type-args :javac) (hook/call-fixed! :model/enclosing-type t))
     (do (rd :model/type-args :native) (when (nclass? t) (:outer t)))))
 
 (defn allparams?
   "Has class type `t` type arguments, its own or its enclosing types' (`.allparams` not empty)?"
   [t]
-  (if (instance? Type t)
-    (do (rd :model/type-args :javac) (boolean (seq (.allparams ^Type t))))
+  (if (hook/jtype? t)
+    (do (rd :model/type-args :javac) (hook/call-fixed! :model/allparams? t))
     (do (rd :model/type-args :native) (loop [t t] (cond (not (nclass? t)) false (seq (:args t)) true :else (recur (:outer t)))))))
 
 (defn type-anns "The type's type annotations (javac's TypeCompounds or native compounds)." [t]
-  (if (instance? Type t)
-    (do (rd :model/type-anns :javac) (seq (.getAnnotationMirrors ^Type t)))
+  (if (hook/jtype? t)
+    (do (rd :model/type-anns :javac) (hook/call-fixed! :model/type-anns t))
     (do (rd :model/type-anns :native) (when (map? t) (seq (:anns t))))))
 
 (defn own-type?
   "Is class type `t` its class's own type, the class's type variables its arguments
   (Types.isSameType with `.type` of its symbol)?"
   [t]
-  (if (instance? Type t)
-    (do (rd :model/same-type :javac) (.isSameType jt/*types* t (.-type (.-tsym ^Type t))))
+  (if (hook/jtype? t)
+    (do (rd :model/same-type :javac) (hook/call-fixed! :model/own-type? t))
     (do (rd :model/same-type :native)
         (= (na/ntype (na/strip-anns t)) (na/ntype (d/this-type (:c t)))))))
 
 (defn erasure "The type's erasure (Types.erasure)." [t]
   (cond
-    (instance? Type t) (do (rd :model/erasure :javac) (jt/erasure t))
+    (hook/jtype? t) (do (rd :model/erasure :javac) (hook/call-fixed! :model/erasure t))
     (ntype? t) (do (rd :model/erasure :native) (nerasure t))
-    :else (jt/erasure t)))
+    :else (hook/call-fixed! :model/erasure t)))
 
-(defn- mixed? [a b] (not= (instance? Type a) (instance? Type b)))
+(defn- mixed? [a b] (not= (hook/jtype? a) (hook/jtype? b)))
 
 (defn nativize
   "Erased javac type `t` as an erased native type (its classes named in the native registry: the
   unit's by their declarations' twins, the others by flat name), nil when the registry has none."
   [t]
-  (if-not (instance? Type t)
+  (if-not (hook/jtype? t)
     t
-    (do (rd :model/nativize :native)
-        (case (jt/tag-name t)
-          ("BYTE" "SHORT" "CHAR" "INT" "LONG" "FLOAT" "DOUBLE" "BOOLEAN" "VOID") (keyword (str/lower-case (jt/tag-name t)))
-          "BOT" :null
-          "ARRAY" (when-let [e (nativize (.-elemtype ^Type$ArrayType t))] (d/array-of e))
-          "CLASS" (let [c (canon (.-tsym ^Type t))]
-                    (if (nsym? c)
-                      (d/ctype c)
-                      (when-let [nc (d/class-named (reg) (str (.flatName ^Symbol$ClassSymbol c)))] (d/ctype nc))))
-          nil))))
+    (do (rd :model/nativize :native) (hook/call-fixed! :model/nativize t))))
 
 (defn same?
   "Are the erasures of types `a` and `b` the same (javac's types, or native: a javac operand named in
@@ -699,9 +666,9 @@
   [a b]
   (cond
     (not (and (type? a) (type? b))) false
-    (not (or (ntype? a) (ntype? b))) (do (rd :model/same :javac) (jt/same? a b))
-    :else (let [na (nativize (if (instance? Type a) (jt/erasure a) (nerasure a)))
-                nb (nativize (if (instance? Type b) (jt/erasure b) (nerasure b)))]
+    (not (or (ntype? a) (ntype? b))) (do (rd :model/same :javac) (hook/call-fixed! :model/same? a b))
+    :else (let [na (nativize (if (hook/jtype? a) (hook/call-fixed! :model/erasure a) (nerasure a)))
+                nb (nativize (if (hook/jtype? b) (hook/call-fixed! :model/erasure b) (nerasure b)))]
             (rd :model/same :native)
             (boolean (and na nb (nsame-erased? na nb))))))
 
@@ -710,9 +677,9 @@
   [a b]
   (cond
     (not (and (type? a) (type? b))) false
-    (not (or (ntype? a) (ntype? b))) (do (rd :model/subtype :javac) (jt/subtype? a b))
-    :else (let [na (nativize (if (instance? Type a) (jt/erasure a) (nerasure a)))
-                nb (nativize (if (instance? Type b) (jt/erasure b) (nerasure b)))]
+    (not (or (ntype? a) (ntype? b))) (do (rd :model/subtype :javac) (hook/call-fixed! :model/subtype? a b))
+    :else (let [na (nativize (if (hook/jtype? a) (hook/call-fixed! :model/erasure a) (nerasure a)))
+                nb (nativize (if (hook/jtype? b) (hook/call-fixed! :model/erasure b) (nerasure b)))]
             (rd :model/subtype :native)
             (boolean (and na nb (nsubtype-erased? na nb))))))
 
@@ -723,13 +690,13 @@
 (def ^:private unbox-names (into {} (for [[k v] box-names :when (not= k :void)] [(str "java.lang." v) k])))
 
 (defn boxed "The class type primitive `t` boxes to." [t]
-  (if (instance? Type t)
-    (do (rd :model/box :javac) (jt/boxed t))
+  (if (hook/jtype? t)
+    (do (rd :model/box :javac) (hook/call-fixed! :model/boxed t))
     (do (rd :model/box :native) (d/ctype (d/lang (reg) (box-names t))))))
 
 (defn unboxed "The primitive type wrapper type `t` unboxes to, or nil." [t]
   (cond
-    (instance? Type t) (do (rd :model/box :javac) (jt/unboxed t))
+    (hook/jtype? t) (do (rd :model/box :javac) (hook/call-fixed! :model/unboxed t))
     (ntype? t) (do (rd :model/box :native)
                    (let [t (if (= :tvar (:k t)) (nerasure t) t)]
                      (when (nclass? t) (unbox-names (:flat (:c t))))))
@@ -738,27 +705,31 @@
 (defn object? "Is the erasure of `t` Object?" [t]
   (if (ntype? t)
     (do (rd :model/same :native) (let [e (nerasure t)] (and (nclass? e) (= "java.lang.Object" (:flat (:c e))))))
-    (do (rd :model/same :javac) (jt/object? t))))
+    (do (rd :model/same :javac) (hook/call-fixed! :model/object? t))))
 
 (defn string-type? "Is the erasure of `t` String?" [t]
   (if (ntype? t)
     (do (rd :model/same :native) (let [e (nerasure t)] (and (nclass? e) (string-class? (:c e)))))
-    (do (rd :model/same :javac) (jt/string-type? t))))
+    (do (rd :model/same :javac) (hook/call-fixed! :model/string-type? t))))
 
 (defn prim-sym [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (jt/prim-sym t)) (do (rd :model/tag :native) (symbol (name t)))))
+  (if (hook/jtype? t) (do (rd :model/tag :javac) (hook/call-fixed! :model/prim-sym t)) (do (rd :model/tag :native) (symbol (name t)))))
+
+(def ^:private prim-rank
+  "The widening order of the primitive types' tags (arbace.repr.java.jtypes' prim-rank)."
+  {"BYTE" 1 "SHORT" 2 "CHAR" 2 "INT" 3 "LONG" 4 "FLOAT" 5 "DOUBLE" 6})
 
 (defn widens? "Java's widening primitive conversion from `a` to `b` (or identity)." [a b]
   (let [ta (tag-name a) tb (tag-name b)]
     (or (= ta tb)
-        (and (jt/prim-rank ta) (jt/prim-rank tb)
-             (< (jt/prim-rank ta) (jt/prim-rank tb))
+        (and (prim-rank ta) (prim-rank tb)
+             (< (prim-rank ta) (prim-rank tb))
              (not (and (= ta "CHAR") (#{"SHORT"} tb)))
              (not (and (#{"BYTE" "SHORT"} ta) (= tb "CHAR")))))))
 
 (defn enum-type? "Is `t` a type whose class is an enum?" [t]
   (cond
-    (instance? Type t) (do (rd :model/flags :javac) (boolean (and (.-tsym ^Type t) (jt/has-flag? (.-tsym ^Type t) d/ENUM))))
+    (hook/jtype? t) (do (rd :model/flags :javac) (hook/call-fixed! :model/enum-type? t))
     (nclass? t) (do (rd :model/flags :native) (d/has? (d/class-flags (:c t)) d/ENUM))
     :else false))
 
@@ -766,9 +737,8 @@
   "The classes of the supertypes of type `t` (Types.closure: itself, its superclasses and their
   interfaces; an interface's Object)."
   [t]
-  (if (instance? Type t)
-    (do (rd :model/closure :javac)
-        (vec (for [^Type ty (.closure jt/*types* t) :when (instance? Type$ClassType ty)] (canon (.-tsym ty)))))
+  (if (hook/jtype? t)
+    (do (rd :model/closure :javac) (mapv canon (hook/call-fixed! :model/closure-classes t)))
     (do (rd :model/closure :native)
         (let [seen (java.util.LinkedHashSet.)]
           (letfn [(walk [t] (when (and (nclass? t) (.add seen (:c t)))
@@ -780,7 +750,7 @@
 (defn object-type-of
   "The type Object of the model of `t`."
   [t]
-  (if (ntype? t) (d/object-type (reg)) (jt/object-type)))
+  (if (ntype? t) (d/object-type (reg)) (hook/call-fixed! :model/object-type)))
 
 ;;; Members by name
 
@@ -790,13 +760,12 @@
   (if (nsym? c)
     (do (rd :model/members :native)
         (vec (for [m (:methods (d/members c)) :when (= n (:name m))] m)))
-    (do (rd :model/members :javac)
-        (vec (for [^Symbol s (.getSymbolsByName (.members ^Symbol c) (jt/jname n)) :when (= "MTH" (jt/kind s))] (canon s))))))
+    (do (rd :model/members :javac) (mapv canon (hook/call-fixed! :model/methods-named c n)))))
 
 (defn type-str
   "The erased type `t` as javac's toString gives it (java.util.Map.Entry, int[])."
   [t]
-  (if (instance? Type t)
+  (if (hook/jtype? t)
     (do (rd :model/type-str :javac) (str t))
     (do (rd :model/type-str :native)
         (letfn [(qn [c] (if-let [o (d/outer c)] (str (qn o) "." (:name c)) (if (:local? c) (:name c) (:flat c))))
@@ -818,42 +787,36 @@
     (and (nsym? s) (= :method (:sk s)) (nsym? c))
     (do (rd :model/member-of :native) (na/method-member-of? s c))
     ;; a javac method (the overload tier's answer) of a native class: the method in the native model
-    (and (instance? Symbol$MethodSymbol s) (nsym? c) (ex/nmethod (p) canon s))
+    (and (hook/jmethod-sym? s) (nsym? c) (ex/nmethod (p) canon s))
     (do (rd :model/member-of :native) (na/method-member-of? (ex/nmethod (p) canon s) c))
     (or (nsym? s) (nsym? c))
     (do (rd :model/member-of :bridge)
-        (.isMemberOf ^Symbol (if (nsym? s) (javac-of s) s)
-                     ^com.sun.tools.javac.code.Symbol$TypeSymbol (if (nsym? c) (javac-of c) c) jt/*types*))
-    :else (do (rd :model/member-of :javac) (.isMemberOf ^Symbol s ^com.sun.tools.javac.code.Symbol$TypeSymbol c jt/*types*))))
+        (hook/call-fixed! :model/member-of? (if (nsym? s) (javac-of s) s) (if (nsym? c) (javac-of c) c)))
+    :else (do (rd :model/member-of :javac) (hook/call-fixed! :model/member-of? s c))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Annotations: compounds and values
 
 (defn compound-class "Annotation `c`'s class." [c]
-  (if (instance? Attribute c) (do (rd :model/annotation :javac) (canon (.-tsym (.-type ^Attribute$Compound c))))
+  (if (hook/jattribute? c) (do (rd :model/annotation :javac) (canon (hook/call-fixed! :model/compound-class c)))
       (do (rd :model/annotation :native) (:c c))))
 
 (defn compound-values "Annotation `c`'s values: [[name value] ...]." [c]
-  (if (instance? Attribute c)
-    (do (rd :model/annotation :javac)
-        (vec (for [^com.sun.tools.javac.util.Pair pr (.-values ^Attribute$Compound c)]
-               [(str (.-name ^Symbol (.-fst pr))) (.-snd pr)])))
+  (if (hook/jattribute? c)
+    (do (rd :model/annotation :javac) (hook/call-fixed! :model/compound-values c))
     (do (rd :model/annotation :native) (:values c))))
 
 (defn retention
   "The retention of annotation `c`'s class as Types.getRetention gives it: \"SOURCE\", \"CLASS\"
   (the default), \"RUNTIME\"."
   [c]
-  (if (instance? Attribute c)
-    (do (rd :model/retention :javac) (str (.getRetention jt/*types* ^Attribute$Compound c)))
+  (if (hook/jattribute? c)
+    (do (rd :model/retention :javac) (hook/call-fixed! :model/retention c))
     (do (rd :model/retention :native) (na/retention (:c c)))))
 
 (defn value-kind "An annotation value's kind: :const, :class, :enum, :array, :compound, :error." [v]
-  (if (instance? Attribute v)
-    (do (rd :model/annotation :javac)
-        (cond (instance? Attribute$Constant v) :const (instance? Attribute$Class v) :class
-              (instance? Attribute$Enum v) :enum (instance? Attribute$Array v) :array
-              (instance? Attribute$Compound v) :compound :else :error))
+  (if (hook/jattribute? v)
+    (do (rd :model/annotation :javac) (hook/call-fixed! :model/value-kind v))
     (do (rd :model/annotation :native)
         (cond (:const v) :const (:class v) :class (:enum v) :enum (:array v) :array (:compound v) :compound :else :error))))
 
@@ -861,26 +824,26 @@
   "A constant annotation value: [tag-name value], value as javac's constValue (an int for a char, a
   boolean, a byte or a short)."
   [v]
-  (if (instance? Attribute v)
-    (do (rd :model/annotation :javac) [(jt/tag-name (.-type ^Attribute v)) (.getValue ^Attribute$Constant v)])
+  (if (hook/jattribute? v)
+    (do (rd :model/annotation :javac) (hook/call-fixed! :model/const-of v))
     (do (rd :model/annotation :native)
         (let [[k x] (:const v)] [(if (= k :string) "CLASS" (str/upper-case (name k))) x]))))
 
 (defn class-of "A class annotation value's type." [v]
-  (if (instance? Attribute v) (do (rd :model/annotation :javac) (.getValue ^Attribute$Class v))
+  (if (hook/jattribute? v) (do (rd :model/annotation :javac) (hook/call-fixed! :model/class-of v))
       (do (rd :model/annotation :native) (:class v))))
 
 (defn enum-of "An enum annotation value: [class constant-name]." [v]
-  (if (instance? Attribute v)
-    (do (rd :model/annotation :javac) [(canon (.-tsym (.-type ^Attribute v))) (str (.-value ^Attribute$Enum v))])
+  (if (hook/jattribute? v)
+    (do (rd :model/annotation :javac) (let [[c n] (hook/call-fixed! :model/enum-of v)] [(canon c) n]))
     (do (rd :model/annotation :native) [(:enum v) (:name v)])))
 
 (defn array-of "An array annotation value's values." [v]
-  (if (instance? Attribute v) (do (rd :model/annotation :javac) (vec (.-values ^Attribute$Array v)))
+  (if (hook/jattribute? v) (do (rd :model/annotation :javac) (hook/call-fixed! :model/array-of v))
       (do (rd :model/annotation :native) (:values v))))
 
 (defn nested-of "A nested annotation value's compound." [v]
-  (if (instance? Attribute v) (do (rd :model/annotation :javac) v) (do (rd :model/annotation :native) (:compound v))))
+  (if (hook/jattribute? v) (do (rd :model/annotation :javac) v) (do (rd :model/annotation :native) (:compound v))))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; The higher tiers' types (javac's: instantiated method types, qualifiers' types, functional
@@ -893,28 +856,26 @@
   [t]
   (if (nmtype? t)
     (do (rd :model/method-type :native) true)
-    (do (rd :model/method-type :javac) (and (instance? Type t) (instance? Type$MethodType (.asMethodType ^Type t))))))
+    (do (rd :model/method-type :javac) (and (hook/jtype? t) (hook/call-fixed! :model/method-type? t)))))
 
 (defn mt-params "An instantiated method type's parameter types." [t]
   (if (nmtype? t) (do (rd :model/method-type :native) (:params t))
-      (do (rd :model/method-type :javac) (vec (.getParameterTypes ^Type t)))))
+      (do (rd :model/method-type :javac) (hook/call-fixed! :model/mt-params t))))
 
 (defn mt-ret "An instantiated method type's return type." [t]
   (if (nmtype? t) (do (rd :model/method-type :native) (:ret t))
-      (do (rd :model/method-type :javac) (.getReturnType ^Type t))))
+      (do (rd :model/method-type :javac) (hook/call-fixed! :model/mt-ret t))))
 
 (defn without-first-param
   "Method type `t` without its first parameter (an inner class's creation's outer instance)."
   [t]
   (if (nmtype? t)
     (do (rd :model/method-type :native) (assoc t :params (vec (rest (:params t)))))
-    (do (rd :model/method-type :javac)
-        (let [ct ^Type t]
-          (Type$MethodType. (.tail (.getParameterTypes ct)) (.getReturnType ct) (.getThrownTypes ct) (.-tsym ct))))))
+    (do (rd :model/method-type :javac) (hook/call-fixed! :model/without-first-param t))))
 
 (defn skip-type-vars "Types.skipTypeVars (no capture)." [t]
-  (if (instance? Type t)
-    (do (rd :model/skip-type-vars :javac) (.skipTypeVars jt/*types* t false))
+  (if (hook/jtype? t)
+    (do (rd :model/skip-type-vars :javac) (hook/call-fixed! :model/skip-type-vars t))
     (do (rd :model/skip-type-vars :native)
         (loop [t t]
           (if (and (map? t) (= :tvar (:k t)))
@@ -922,18 +883,18 @@
             t)))))
 
 (defn compound? "An intersection type (Type.isCompound)?" [t]
-  (if (instance? Type t) (do (rd :model/tag :javac) (.isCompound ^Type t))
+  (if (hook/jtype? t) (do (rd :model/tag :javac) (hook/call-fixed! :model/compound? t))
       (do (rd :model/tag :native) (and (map? t) (= :inter (:k t))))))
 
 (defn array-type "The array type of element type `t`." [t]
-  (if (instance? Type t) (do (rd :model/array-type :javac) (.makeArrayType jt/*types* ^Type t))
+  (if (hook/jtype? t) (do (rd :model/array-type :javac) (hook/call-fixed! :model/array-type t))
       (do (rd :model/array-type :native) (d/array-of t))))
 
 (defn unboxed-type
   "Types.unboxedType: the primitive type a wrapper unboxes to, else a type that is not primitive (nil
   for a native one)."
   [t]
-  (if (instance? Type t) (do (rd :model/box :javac) (.unboxedType jt/*types* ^Type t)) (unboxed t)))
+  (if (hook/jtype? t) (do (rd :model/box :javac) (hook/call-fixed! :model/unboxed-type t)) (unboxed t)))
 
 (defn type-const
   "An expression type's constant value (`.constValue`; a native constant expression's type
@@ -941,7 +902,7 @@
   char or boolean)."
   [t]
   (cond
-    (instance? Type t) (do (rd :model/type-const :javac) (.constValue ^Type t))
+    (hook/jtype? t) (do (rd :model/type-const :javac) (hook/call-fixed! :model/type-const t))
     (nil? t) nil
     :else (do (rd :model/type-const :native)
               (when (and (map? t) (identical? :ctype (:k t)))
@@ -957,8 +918,8 @@
   "The functional descriptor of functional interface type `t` (Types.findDescriptorType; a native
   type's the inference tier's, arbace.repr.java.overload's, JN9d)."
   [t]
-  (if (instance? Type t)
-    (do (rd :model/descriptor :javac) (.findDescriptorType jt/*types* ^Type t))
+  (if (hook/jtype? t)
+    (do (rd :model/descriptor :javac) (hook/call-fixed! :model/descriptor-type t))
     (do (rd :model/descriptor :native)
         (let [mt (ov/descriptor-type (:reg attr/*provider*) t)]
           (assoc mt :k :mtype)))))
@@ -967,10 +928,10 @@
   "The method of the functional descriptor of erased functional interface type `t`
   (Types.findDescriptorSymbol of its class)."
   [t]
-  (if (instance? Type t)
-    (do (rd :model/descriptor :javac) (.findDescriptorSymbol jt/*types* (.-tsym ^Type t)))
+  (if (hook/jtype? t)
+    (do (rd :model/descriptor :javac) (hook/call-fixed! :model/descriptor-sym t))
     (do (rd :model/descriptor :native) (ov/find-descriptor (:reg attr/*provider*) (:c t)))))
 
 (defn pkg-name "Package `pkg`'s name (not renamed)." [pkg]
   (if (nsym? pkg) (do (rd :model/package :native) (:name pkg))
-      (do (rd :model/package :javac) (str (.getQualifiedName ^Symbol$PackageSymbol pkg)))))
+      (do (rd :model/package :javac) (hook/call-fixed! :model/pkg-name pkg))))

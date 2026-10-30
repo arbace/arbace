@@ -7,39 +7,12 @@
   (:require [arbace.repr.java.forms :as f :refer [m+ tag member cref]]
             [arbace.repr.java.tree :as tr]
             [arbace.repr.java.attr :as attr]
-            [arbace.repr.java.jtypes :as jt]
+            [arbace.repr.java.javac-hook :as hook]
             [arbace.repr.java.model :as m :refer [erasure prim? same? subtype? tag-name]]
             [arbace.repr.java.resolve :as res]
             [arbace.repr.java.decls :as d]
             [arbace.string :as str])
   (:import [arbace.repr.java.forms CRef]
-           [com.sun.tools.javac.tree JCTree JCTree$JCCompilationUnit JCTree$JCClassDecl
-            JCTree$JCMethodDecl JCTree$JCVariableDecl JCTree$JCBlock JCTree$JCExpressionStatement
-            JCTree$JCIf JCTree$JCWhileLoop JCTree$JCDoWhileLoop JCTree$JCForLoop
-            JCTree$JCEnhancedForLoop JCTree$JCLabeledStatement JCTree$JCSwitch JCTree$JCCase
-            JCTree$JCSwitchExpression JCTree$JCSynchronized JCTree$JCTry JCTree$JCCatch
-            JCTree$JCConditional JCTree$JCBreak JCTree$JCYield JCTree$JCContinue JCTree$JCReturn
-            JCTree$JCThrow JCTree$JCAssert JCTree$JCMethodInvocation JCTree$JCNewClass
-            JCTree$JCNewArray JCTree$JCLambda JCTree$JCParens JCTree$JCAssign JCTree$JCAssignOp
-            JCTree$JCUnary JCTree$JCBinary JCTree$JCTypeCast JCTree$JCInstanceOf
-            JCTree$JCAnyPattern JCTree$JCBindingPattern JCTree$JCDefaultCaseLabel
-            JCTree$JCConstantCaseLabel JCTree$JCPatternCaseLabel JCTree$JCRecordPattern
-            JCTree$JCArrayAccess JCTree$JCFieldAccess JCTree$JCMemberReference JCTree$JCIdent
-            JCTree$JCLiteral JCTree$JCAnnotation JCTree$JCModifiers JCTree$JCSkip
-            JCTree$JCPackageDecl JCTree$JCImport JCTree$JCModuleDecl JCTree$JCRequires
-            JCTree$JCExports JCTree$JCOpens JCTree$JCProvides JCTree$JCUses JCTree$JCStatement
-            JCTree$JCExpression JCTree$Tag JCTree$JCTypeParameter JCTree$JCAnnotatedType
-            JCTree$JCLambda$ParameterKind TreeInfo JCTree$JCMemberReference$ReferenceKind
-            JCTree$JCPattern JCTree$JCCaseLabel]
-           [com.sun.tools.javac.code Type Type$ArrayType Type$ClassType Type$WildcardType
-            Type$TypeVar Type$MethodType Type$IntersectionClassType Types Symtab Symbol
-            Symbol$ClassSymbol Symbol$MethodSymbol Symbol$VarSymbol Symbol$TypeSymbol
-            Symbol$PackageSymbol Attribute Attribute$Constant Attribute$Class
-            Attribute$Enum Attribute$Array Attribute$Compound Attribute$Error BoundKind
-            TypeTag Kinds$Kind Scope$LookupKind Type$CapturedType Directive$RequiresDirective
-            Directive$ExportsDirective Directive$OpensDirective Directive$ProvidesDirective
-            Directive$UsesDirective]
-           [com.sun.source.tree CaseTree$CaseKind Tree$Kind]
            [java.lang.annotation RetentionPolicy]))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -49,9 +22,9 @@
 
 (defn note! [k] (when *stats* (swap! *stats* update k (fnil inc 0))))
 
-(defn- kind-of [t]
+(defn kind-of [t]
   (if (tr/jc? t)
-    (try (str (.getKind ^JCTree t)) (catch AssertionError _ (.getSimpleName (class t))))
+    (hook/call-fixed! :convert/kind-of t)
     (tr/tag-name t)))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -342,9 +315,9 @@
 
 (defn- r [f t] {:f f :t t})
 
-(defn- int-type [] (if attr/*provider* :int (.intType jt/*syms*)))
-(defn- bool-type [] (if attr/*provider* :boolean (.booleanType jt/*syms*)))
-(defn- object-type [] (if attr/*provider* (d/object-type (:reg attr/*provider*)) (jt/object-type)))
+(defn- int-type [] (if attr/*provider* :int (hook/call-fixed! :convert/javac-type :int)))
+(defn- bool-type [] (if attr/*provider* :boolean (hook/call-fixed! :convert/javac-type :boolean)))
+(defn- object-type [] (if attr/*provider* (d/object-type (:reg attr/*provider*)) (hook/call-fixed! :convert/javac-type :object)))
 
 (defn atype
   "The Arbace type of result `x` as a javac type (int for :lit-int, nil for :null)."
@@ -2469,7 +2442,7 @@
         ;; a type variable whose erasure (its first bound) is not Iterable, iterated by another
         ;; bound (<T extends A & B<String>>, B an Iterable): cast to that bound, as TransTypes
         ;; does (JCS66 (a))
-        coll (let [it (if attr/*provider* (d/ctype (d/class-named (:reg attr/*provider*) "java.lang.Iterable")) (.iterableType jt/*syms*))]
+        coll (let [it (if attr/*provider* (d/ctype (d/class-named (:reg attr/*provider*) "java.lang.Iterable")) (hook/call-fixed! :convert/javac-type :iterable))]
                (if-let [b (when (and (m/tvar? et) (not (subtype? (erasure et) it)))
                             (some #(when (subtype? % it) (erasure %)) (m/components (m/skip-type-vars et))))]
                  (cast-form env coll b)
@@ -3255,20 +3228,15 @@
    :lbl (atom {}) :counter (atom 0)})
 
 (defn- count-kinds!
-  "Count the tree kinds of javac's tree `t` (for the coverage report)."
-  [^JCTree t]
-  (when *stats*
-    (letfn [(walk [x]
-              (when (instance? JCTree x)
-                (when-not (instance? com.sun.tools.javac.tree.JCTree$TypeBoundKind x) (note! (keyword "kind" (kind-of x))))
-                (run! walk (tree-children x))))]
-      (walk t))))
+  "Count the tree kinds of javac's tree `t` (for the coverage report; javac's half's walk, JN10)."
+  [t]
+  (when *stats* (hook/call-fixed! :convert/count-kinds! t)))
 
 (defn- type-decls
   "The unit's declarations after its package, imports and module (JCCompilationUnit.getTypeDecls)."
   [u]
   (if (tr/jc? u)
-    (.getTypeDecls ^JCTree$JCCompilationUnit u)
+    (hook/call-fixed! :convert/type-decls u)
     (drop-while #(#{:MODULEDEF :PACKAGEDEF :IMPORT :MODULEIMPORT} (tr/tag %)) (tr/f u :defs))))
 
 (defn- module-decl "JCCompilationUnit.getModuleDecl." [u]
@@ -3293,14 +3261,16 @@
   "Convert compilation unit `cu`, javac's attributed one; with (:tree opts) the native parser's tree
   of the same text instead, its attribution javac's by position ((:index opts), attr/index). Returns
   {:package p :forms [..] :file name :classes [names]} (with attr/*measure* also :split)."
-  [^JCTree$JCCompilationUnit cu opts]
+  [cu opts]
   (when cu (count-kinds! cu))
   (let [u (or (:tree opts) cu)
-        idx (:index opts)]
+        idx (:index opts)
+        ;; javac's unit's text, end positions and source name (javac's half's, JN10)
+        ju (when cu (hook/call-fixed! :convert/unit-info cu))]
     ;; without javac (cu nil, a read without javac, JFS111 (b)): the native tree, its text and source
-    (binding [*text* (if cu (str (.getCharContent (.getSourceFile cu) true)) (:text opts))
+    (binding [*text* (if cu (:text ju) (:text opts))
               *full* (when (:full opts) (atom 0))
-              tr/*end-positions* (when cu (.endPositions cu))
+              tr/*end-positions* (when cu (:end-positions ju))
               attr/*twins* (:twins idx)
               attr/*natives* (:natives idx)
               attr/*dropped* (:dropped idx)
@@ -3315,7 +3285,7 @@
         (let [env (base-env opts)
               pkg (attr/packge u)
               pkg-name (if pkg (m/package-name pkg) "")
-              file (.getName (java.io.File. (if cu (.getName (.getSourceFile cu)) ^String (:source opts))))
+              file (.getName (java.io.File. ^String (if cu (:source ju) (:source opts))))
               forms (vec (for [d (type-decls u)
                                :when (not (tr/is? d :SKIP))]
                            (case (tr/tag d)

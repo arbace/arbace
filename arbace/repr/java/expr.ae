@@ -62,12 +62,10 @@
             [arbace.repr.java.infer :as inf]
             [arbace.repr.java.scope :as sc]
             [arbace.repr.java.nattr :as na]
-            [arbace.repr.java.jtypes :as jt]
             [arbace.repr.java.parse :as parse]
+            [arbace.repr.java.javac-hook :as hook]
             [arbace.string :as str])
-  (:import [com.sun.tools.javac.tree JCTree TreeInfo]
-           [com.sun.tools.javac.code Symbol Symbol$MethodSymbol Symbol$ClassSymbol Type Type$ArrayType]
-           [java.util IdentityHashMap]))
+  (:import [java.util IdentityHashMap]))
 
 (set! *warn-on-reflection* true)
 
@@ -85,7 +83,7 @@
 
 (defn- ans [p t] (na/answer p t))
 
-(defn- reg [p] (:reg p))
+(defn reg [p] (:reg p))
 
 (defn- skip-parens [t] (if (= :PARENS (:tag t)) (recur (:expr t)) t))
 
@@ -328,17 +326,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; The method a call chose (overload resolution's, javac's until JN9c)
 
-(defn- erased-key
-  "A key of erased javac type `t`: a primitive's tag, an array's element's key with [], a class's
-  flat name."
-  [^Type t]
-  (let [tg (str (.getTag t))]
-    (case tg
-      "ARRAY" (str (erased-key (.-elemtype ^Type$ArrayType t)) "[]")
-      "CLASS" (str (.flatName ^Symbol$ClassSymbol (.-tsym t)))
-      (str/lower-case tg))))
-
-(defn- nerased-key [t]
+(defn nerased-key [t]
   (let [t (d/erasure t)]
     (cond
       (keyword? t) (name t)
@@ -348,7 +336,7 @@
 
 (def ^:private ^java.util.Map array-clones (java.util.concurrent.ConcurrentHashMap.))
 
-(defn- array-clone
+(defn array-clone
   "Symtab's arrayCloneMethod: an array's clone(), of javac's array class (Array): ()Object (one per
   registry)."
   [reg]
@@ -364,49 +352,22 @@
 (defn nmethod
   "The native method symbol of javac's method symbol `js` (a method of a class the native registry
   holds, found by owner, name and erased parameter types), or nil. `canon` maps javac's symbols of the
-  unit's declarations to their native twins."
-  [p canon ^Symbol js]
-  (let [c (canon js)]
-    (if (and (map? (:memo c)) (= :method (:sk c)))
-      c
-      (let [o (.-owner js)]
-        (when (instance? Symbol$ClassSymbol o)
-          (let [oc (let [x (canon o)] (if (= :class (:sk x)) x (d/class-named (reg p) (str (.flatName ^Symbol$ClassSymbol o)))))
-                n (str (.-name js))
-                want (mapv erased-key (.getParameterTypes (.erasure js jt/*types*)))]
-            (cond
-              (identical? o (.-arrayClass jt/*syms*)) (when (= "clone" n) (array-clone (reg p)))
-              oc
-              (or (first (filter (fn [m] (and (= n (:name m))
-                                              (= want (mapv nerased-key (:params (d/method-type m))))))
-                                 (:methods (d/members oc))))
-                  ;; a method of a supertype with oc as owner: javac's clone of it (MethodSymbol.clone,
-                  ;; Resolve's: a static import's inherited method, an interface's Object method)
-                  (when-let [om (some (fn [c] (first (filter (fn [m] (and (= n (:name m))
-                                                                          (= want (mapv nerased-key (:params (d/method-type m))))))
-                                                             (:methods (d/members c)))))
-                                      (rest (ty/erased-supers (d/this-type oc))))]
-                    (d/member-clone om oc)))
-              :else nil)))))))
+  unit's declarations to their native twins. javac's half's (arbace.repr.java.javac-model, JN10)."
+  [p canon js]
+  (hook/call-fixed! :expr/nmethod p canon js))
 
 (defn- javac-method-of
   "The native method symbol of javac's choice for call APPLY `t`, marked in *leaned*; declined when the
-  native model does not hold it."
+  native model does not hold it (javac's half's reading of javac's node, JN10)."
   [p t]
   (lean!)
-  (let [^JCTree j (.get ^IdentityHashMap (:twins p) (:meth t))
-        js (when j (TreeInfo/symbol j))]
-    (or (when (instance? Symbol$MethodSymbol js) (nmethod p #(na/canon p %) js))
-        (d/decline! (str "the call's method is not in the native model: " (some-> js .-owner) "." js)))))
+  (hook/call-fixed! :expr/javac-method-of p t))
 
 (defn- javac-ctor-of
   "The native method symbol of javac's constructor for NEWCLASS `t`, marked in *leaned*."
   [p t]
   (lean!)
-  (let [^com.sun.tools.javac.tree.JCTree$JCNewClass j (.get ^IdentityHashMap (:twins p) t)
-        js (when j (.-constructor j))]
-    (or (when (instance? Symbol$MethodSymbol js) (nmethod p #(na/canon p %) js))
-        (d/decline! (str "the call's method is not in the native model: " (some-> js .-owner) "." js)))))
+  (hook/call-fixed! :expr/javac-ctor-of p t))
 
 ;;; The overload tier (JN9c): the native choice
 

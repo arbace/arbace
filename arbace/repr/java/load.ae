@@ -1,0 +1,135 @@
+(ns arbace.repr.java.load
+  "Java source loaded at the REPL without javac (doc/classes/JAVA-FRONTEND-SURVEY.md, JN10 part 3, JFS132 (a);
+  \"As built: JN10 part 1\", its part 3's light parts): `(load-java PATH...)` reads the .java files (a file, or
+  every one under a directory) with repr/java's read without javac (arbace.repr.java/convert-units-nojavac:
+  the native parser, the native provider's answers, java.base from the embedded pack, JFS131 (b)), writes
+  their Java forms under a scratch directory and defines them as the REPL defines Java forms (SPEC §9.2, 2:
+  per package its namespace, then its classes in one top-level `do`, the packages in the order of their
+  imports of each other, as bin/java-check's interpreted level's `--load do`, test/java/run.ae). A file
+  whose read meets what only javac answers is an error (ex-info \"javac's tool needed: REASON\", its
+  :file and :reason), and nothing is defined; so is a file the native parser rejects.
+
+  The source path of the read (javac's -sourcepath) is each file's source root: its directory less the
+  package's segments (a file of package p.q in .../src/p/q has .../src), so that sibling sources of the
+  same tree are found as javac finds them; `:source-path` names it instead. Part of the read closure:
+  names no javac class (bin/repr-java closure-check)."
+  (:require [arbace.repr.java :as rj]
+            [arbace.repr.java.parse :as parse]
+            [arbace.repr.java.decls :as decls]
+            [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import [java.io File PushbackReader]))
+
+(defn- package-of
+  "The package a Java file declares (\"\" for none), by the native parser; nil when it does not parse."
+  [^String path]
+  (try
+    (let [t (parse/parse (slurp path :encoding "UTF-8") path)
+          pd (first (filter #(= :PACKAGEDEF (:tag %)) (:defs t)))]
+      (if pd (decls/tree-name-of (:pid pd)) ""))
+    (catch Throwable _ nil)))
+
+(defn source-root
+  "The source root of Java file `path`: its directory less its package's segments (its own directory
+  when they do not end it)."
+  ^String [^String path]
+  (let [dir (.getParentFile (.getCanonicalFile (io/file path)))
+        pkg (package-of path)
+        segs (if (seq pkg) (str/split pkg #"\.") [])]
+    (loop [^File d dir [s & more :as ss] (reverse segs)]
+      (cond
+        (empty? ss) (.getPath d)
+        (and d (= s (.getName d))) (recur (.getParentFile d) more)
+        :else (.getPath dir)))))
+
+(defn- read-all [^File f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (binding [*read-eval* false]
+      (loop [acc []]
+        (let [x (read {:eof ::eof} r)]
+          (if (= x ::eof) acc (recur (conj acc x))))))))
+
+(defn- head [x] (when (seq? x) (first x)))
+
+(defn- defclass? [x] (contains? '#{defclass defclasses} (head x)))
+
+(defn- packages
+  "The written packages under `root`: [ns-symbol namespace-forms class-files], every PKG.ae whose first
+  form is an ns form, its class files in the order of its loads (test/java/run.ae's)."
+  [^File root]
+  (let [files (filter #(and (.isFile ^File %) (str/ends-with? (.getName ^File %) ".ae")) (file-seq root))]
+    (for [^File f (sort-by #(.getPath ^File %) files)
+          :let [forms (read-all f) n (first forms)]
+          :when (= 'ns (head n))]
+      [(second n) forms
+       (for [l forms :when (= 'load (head l)) :let [p (str (second l))]]
+         (if (str/starts-with? p "/") (File. root (str (subs p 1) ".ae")) (File. (.getParentFile f) (str p ".ae"))))])))
+
+(defn- imports-of [class-forms]
+  (set (for [x class-forms :when (= 'import (head x))
+             spec (rest x)
+             :let [s (if (and (seq? spec) (= 'quote (first spec))) (second spec) spec)
+                   p (cond (sequential? s) (str (first s))
+                           (symbol? s) (let [t (str s) i (.lastIndexOf t ".")] (when (pos? i) (subs t 0 i))))]
+             :when p]
+         p)))
+
+(defn- order
+  "Packages in dependency order: one that another imports before it; ties by name."
+  [pkgs]
+  (let [by (into {} (for [[n :as p] pkgs] [(str n) p]))
+        deps (into {} (for [[n _ cfs] pkgs]
+                        [(str n) (disj (set (filter by (imports-of (mapcat read-all cfs)))) (str n))]))]
+    (loop [done [] left (sort (keys by))]
+      (if (empty? left)
+        (map by done)
+        (let [ready (filter #(every? (set done) (deps %)) left)
+              nxt (or (first ready) (first left))]
+          (recur (conj done nxt) (remove #{nxt} left)))))))
+
+(defn- define!
+  "Define the packages: per package its namespace forms (not its loads), each class file's other forms,
+  then every defclass of the package in one do (SPEC §9.2, 2)."
+  [pkgs]
+  (doseq [[n ns-forms cfs] (order pkgs)]
+    (binding [*ns* *ns*]
+      (doseq [x ns-forms :when (not= 'load (head x))] (eval x))
+      (let [classes (vec (for [cf cfs
+                               x (read-all cf)
+                               :let [_ (when-not (defclass? x) (eval x))]
+                               :when (defclass? x)]
+                           x))]
+        (in-ns n)
+        (when (seq classes) (eval (cons 'do classes))))))
+  (mapv first (order pkgs)))
+
+(defn- scratch-dir ^File []
+  (let [base (io/file (or (System/getenv "TMPDIR") (System/getProperty "java.io.tmpdir") ".tmp"))
+        d (io/file base (str "repr-java-load-" (System/nanoTime)))]
+    (.mkdirs d)
+    d))
+
+(defn read-java
+  "Read the Java files of `paths` (files or directories) without javac into Java forms under directory
+  `out` (a scratch directory when nil): {:out dir :files [...] :written [...]}; an error naming the first
+  file that needs javac's tool or that does not parse."
+  [paths & {:keys [source-path out]}]
+  (let [files (rj/java-files paths)
+        _ (when (empty? files) (throw (ex-info (str "load-java: no .java files in " (pr-str (vec paths))) {:paths paths})))
+        sp (or source-path (str/join File/pathSeparator (distinct (map source-root files))))
+        r (rj/convert-units-nojavac files ["-sourcepath" sp] {} false false)
+        bad (first (concat (:fallbacks (:nojavac r)) (:failures r)))]
+    (when bad
+      (let [why (or (:fallback bad) (:javac-needed bad) (:error bad))]
+        (throw (ex-info (str "load-java: javac's tool needed: " why " (" (:source bad) ")")
+                        {:file (:source bad) :reason why}))))
+    (let [^File o (if out (io/file out) (scratch-dir))]
+      {:out (.getPath o) :files files :written (mapv :path (rj/write-output (.getPath o) (:units r)))})))
+
+(defn load-java
+  "Load Java source at the REPL: the .java files of `paths` (files or directories) read without javac and
+  their classes defined (the package namespaces in import order). Returns the namespaces defined. An
+  ex-info when a file needs javac's tool (its :file, :reason) or does not parse."
+  [& paths]
+  (let [{:keys [out]} (read-java paths)]
+    (define! (packages (io/file out)))))
