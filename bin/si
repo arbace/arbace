@@ -44,6 +44,12 @@
 #                                        suite's programs, wall seconds on si, compiled (compile time apart) and on Chez,
 #                                        one after another: a TSV (program, si_s, aot_s, chez_s, compile_s) and a total
 #                                        line, also in .tmp/si/aot/bench.tsv
+#   bin/si r7rs [--record]               SM8: Chibi's R7RS suite (corpus chibi-r7rs) on si in R7RS mode (--r7rs), with the R7RS-small
+#                                        libraries of scheme/lib/scheme and (chibi test): one result a test, the failing ones in classes
+#                                        (test/scheme/divergences-corpora.edn), --record: test/scheme/check-r7rs-linux-amd64.edn
+#   bin/si ecraven [--count N] [--record] [NAME...]  ecraven's r7rs-benchmarks on si, repetition count N (default 1), SI_TIMEOUT s each
+#   bin/si mats [--record] [FILE.ms...]  Chez's mats on si: each mat one body in an R6RS environment (test/scheme/mats/run.sps)
+#   bin/si corpora files|divergences     every file of the three corpora in a result or a class; the recorded items by class
 #   bin/si divergences [RESULTS]         the recorded check's non-pass items by class
 #   bin/si check-suite                   Racket's R6RS suite's libraries and programs expanded (the corpus of
 #                                        test/scheme/corpora.edn), its &syntax cases (test/scheme/expand/suite-syntax.edn)
@@ -387,6 +393,75 @@ case $cmd in
       if [ "$st" = 0 ] && [ "$fails" = 0 ]; then echo "pass $b: $(tail -1 "$o.out")"; else echo "FAIL $b: status $st, $fails FAIL lines ($o.out, $o.err)"; rc=1; fi
     done
     echo "srfi: $ran programs"; exit $rc ;;
+  r7rs)
+    # bin/si r7rs [--record]: Chibi's r7rs-tests.scm (the corpus chibi-r7rs) run on si in R7RS mode (--r7rs) with the
+    # R7RS libraries of scheme/lib/scheme and (chibi test): one result a test (SM8), judged by the file's own pass/fail,
+    # every failing test in a class of test/scheme/divergences-corpora.edn; --record: test/scheme/check-r7rs-linux-amd64.edn
+    rec=(); [ "${1:-}" = --record ] && rec=(--record)
+    mkdir -p "$light_dir"; : > "$light_dir/empty.in"
+    "$root/bin/repr-scheme" corpus fetch chibi-r7rs > "$light_dir/fetch.log"
+    [ -x "$si_light" ] || light
+    corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}
+    d=$light_dir/r7rs; rm -rf "$d"; mkdir -p "$d"
+    (cd "$corpora/chibi-r7rs" && timeout "${SI_TIMEOUT:-600}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-4} \
+       "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" --r7rs r7rs-tests.scm < "$light_dir/empty.in" > "$d/out" 2> "$d/err"; echo $? > "$d/rc") || true
+    arbace_tool -m arbace.scheme.corpora r7rs "$d" ${rec[@]+"${rec[@]}"} ;;
+  ecraven)
+    # bin/si ecraven [--count N] [--record] [NAME...]: ecraven's r7rs-benchmarks run on si in R7RS mode: each benchmark's
+    # source with common.scm appended (as ecraven's Makefile does) and its inputs/NAME.input on stdin with the repetition
+    # count replaced by N (default 1); a benchmark checks its own result (the CSVLINE with a time, or INCORRECT);
+    # SI_TIMEOUT seconds a benchmark (default 60). Judged by test/scheme/divergences-corpora.edn;
+    # --record: test/scheme/check-ecraven-linux-amd64.edn
+    mkdir -p "$light_dir"; : > "$light_dir/empty.in"
+    count=1; rec=(); names=()
+    while [ $# -gt 0 ]; do case $1 in --count) count=$2; shift 2 ;; --record) rec=(--record); shift ;; *) names+=("$1"); shift ;; esac; done
+    "$root/bin/repr-scheme" corpus fetch ecraven-r7rs > "$light_dir/fetch.log"
+    [ -x "$si_light" ] || light
+    corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}; ec=$corpora/ecraven-r7rs
+    d=$light_dir/ecraven; mkdir -p "$d" "$ec/outputs"   # slatex writes outputs/z0.scm
+    if [ ${#names[@]} -eq 0 ]; then rm -rf "$d"; mkdir -p "$d"; for f in "$ec"/inputs/*.input; do names+=("$(basename "$f" .input)"); done; fi
+    for n in "${names[@]}"; do
+      [ -f "$ec/src/$n.scm" ] || { echo "no benchmark $n" >&2; continue; }
+      { cat "$ec/src/$n.scm"; echo; cat "$ec/src/common.scm"; echo '(define (this-scheme-implementation-name) "si")'; cat "$ec/src/common-postlude.scm"; } > "$d/$n.sps"
+      # the input: the file with its first number (the count) replaced
+      awk -v c="$count" 'BEGIN{done=0} { if (!done && match($0, /^[ \t]*[0-9]+/)) { sub(/^[ \t]*[0-9]+/, c); done=1 } print }' "$ec/inputs/$n.input" > "$d/$n.in"
+      s=$(date +%s)
+      (cd "$ec" && timeout "${SI_TIMEOUT:-60}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1500MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
+         "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" --r7rs "$d/$n.sps" < "$d/$n.in" > "$d/$n.out" 2> "$d/$n.err"; echo $? > "$d/$n.rc") || true
+      echo "$n: rc $(cat "$d/$n.rc") $(( $(date +%s) - s )) s: $(grep -h 'CSVLINE' "$d/$n.out" | head -1)"
+    done
+    [ -z "${ARBACE_ECRAVEN_NOJUDGE:-}" ] && arbace_tool -m arbace.scheme.corpora ecraven "$d" ${rec[@]+"${rec[@]}"} ;;
+  mats)
+    # bin/si mats [--record] [FILE...]: Chez's mats (the corpus chez-mats) on si: each (mat NAME e ...) of a .ms file
+    # evaluated as one body in an R6RS environment of the whole of (rnrs) beside the mat harness (scheme/lib/mats.sls),
+    # one result a mat; a mat that does not run (an identifier of Chez's own, a syntax si's reader does not read)
+    # is classed by its error; judged by test/scheme/divergences-corpora.edn;
+    # --record: test/scheme/check-mats-linux-amd64.edn
+    mkdir -p "$light_dir"; : > "$light_dir/empty.in"
+    rec=(); files=()
+    while [ $# -gt 0 ]; do case $1 in --record) rec=(--record); shift ;; *) files+=("$1"); shift ;; esac; done
+    "$root/bin/repr-scheme" corpus fetch chez-mats > "$light_dir/fetch.log"
+    [ -x "$si_light" ] || light
+    corpora=${ARBACE_SCHEME_CORPORA:-$root/.tmp/scheme/corpora}; mt=$corpora/chez-mats/mats
+    d=$light_dir/mats; mkdir -p "$d"
+    if [ ${#files[@]} -eq 0 ]; then rm -rf "$d"; mkdir -p "$d"; for f in "$mt"/*.ms; do files+=("$(basename "$f")"); done; fi
+    for f in "${files[@]}"; do
+      b=${f%.ms}
+      # a mat that hangs (a cyclic list, a thread, a wait) is skipped on the next run of the file: its name goes in
+      # $d/$b.skip, up to six times, and the rc of the last run stands (a hung mat is an item "crash ... in mat NAME")
+      : > "$d/$b.skip"; tries=0
+      while :; do
+        (cd "$mt" && timeout "${SI_TIMEOUT:-120}" env GOMEMLIMIT=${SI_GOMEMLIMIT:-1000MiB} GOMAXPROCS=${GOMAXPROCS:-2} \
+           "$si_light" --pp "$light_dir/psyntax.pp.ss" --lib "$root/scheme/lib" --r7rs "$root/test/scheme/mats/run.sps" "$mt/$f" "$d/$b.skip" < "$light_dir/empty.in" > "$d/$b.out" 2> "$d/$b.err"; echo $? > "$d/$b.rc") || true
+        [ "$(cat "$d/$b.rc")" = 124 ] && [ $tries -lt 6 ] || break
+        tries=$((tries+1))
+        awk '/^BEGIN /{b=substr($0,7)} /^MAT /{b=""} END{if (b!="") print b}' "$d/$b.out" >> "$d/$b.skip"
+        echo "  $f: timeout, skipping mat $(tail -1 "$d/$b.skip") and running again"
+      done
+      echo "$f: rc $(cat "$d/$b.rc") $(grep -c '^MAT ' "$d/$b.out") mats"
+    done
+    arbace_tool -m arbace.scheme.corpora mats "$d" ${rec[@]+"${rec[@]}"} ;;
+  corpora) arbace_tool -m arbace.scheme.corpora "$@" ;;
   divergences) arbace_tool -m arbace.scheme.check divergences "$@" ;;
   expand|fixpoint) arbace_tool -m arbace.scheme.expand "$cmd" "$@" ;;
   *) sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;

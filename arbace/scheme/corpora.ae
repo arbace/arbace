@@ -1,0 +1,213 @@
+(ns arbace.scheme.corpora
+  "The corpora of SM8 (doc/scheme/SCHEME-SURVEY.md, \"As built: SM8\") judged: Chibi's R7RS suite, ecraven's
+  r7rs-benchmarks and Chez's mats, run by bin/si (r7rs, ecraven, mats) into a directory of outputs; this namespace
+  reads them, makes the items, classes them (test/scheme/divergences-corpora.edn, goi's format: the first class whose
+  :match finds the item) and writes the results. Every file of the three corpora (test/scheme/corpora.edn) is
+  in a result or a class: `files` checks it.
+
+    r7rs DIR [--record]      DIR/out, DIR/rc: Chibi's r7rs-tests.scm run on si: one result a test;
+                             --record writes test/scheme/check-r7rs-linux-amd64.edn
+    ecraven DIR [--record]   DIR/NAME.{out,err,rc}: one result a benchmark; test/scheme/check-ecraven-linux-amd64.edn
+    mats DIR [--record]      DIR/FILE.{out,err,rc}: one result a mat; test/scheme/check-mats-linux-amd64.edn
+    files                    the files of the corpora against the recorded results and classes
+    divergences              the recorded items by class"
+  (:require [arbace.string :as str]))
+
+(defn- root [] (or (System/getenv "ARBACE_ROOT") "."))
+(defn- path [& xs] (apply str (root) "/" xs))
+(defn- slurp-or [f] (let [x (java.io.File. ^String f)] (when (.exists x) (slurp x))))
+(defn- classes [] (vec (read-string (slurp (path "test/scheme/divergences-corpora.edn")))))
+(defn- class-of [cs item] (:id (first (filter (fn [c] (some #(re-find % item) (:match c))) cs))))
+(defn- first-line [s] (first (str/split-lines (or s ""))))
+(defn- clip [s n] (if (> (count s) n) (str (subs s 0 n) "...") s))
+
+(defn- write-results [file header results]
+  (spit (path file) (str header "\n[\n" (str/join "" (map #(str (pr-str %) "\n") results)) "]\n"))
+  (println "wrote" (path file)))
+
+(defn- summary [results]
+  (let [items (mapcat :items results) bad (remove :class items)]
+    (println (count (filter #(= :pass (:verdict %)) results)) "of" (count results) "results pass;"
+             (count items) "non-pass items," (count bad) "failing (in no class)")
+    (doseq [[c n] (sort-by str (frequencies (keep :class items)))] (println " " n (name c)))
+    (doseq [i (take 40 bad)] (println "  FAILING" (:item i)))
+    (if (seq bad) 1 0)))
+
+;; ------------------------------------------------------------------------------------------ R7RS (Chibi's suite)
+
+(defn- parse-r7rs [out]
+  (loop [ls (str/split-lines out) tests [] sections [] cur nil]
+    (if-let [l (first ls)]
+      (if-let [[_ n st what] (re-find #"^TEST (\d+) (PASS|FAIL) (.*)$" l)]
+        (let [detail (take-while #(str/starts-with? % "  ") (rest ls))]
+          (recur (drop (inc (count detail)) ls)
+                 (conj tests {:n (Long/parseLong n) :status (if (= st "PASS") :pass :fail) :what what
+                              :detail (mapv str/trim detail)})
+                 sections cur))
+        (if-let [[_ name p f] (re-find #"^END (.*) (\d+) (\d+)$" l)]
+          (recur (rest ls) tests (conj sections {:section name :pass (Long/parseLong p) :fail (Long/parseLong f)}) cur)
+          (recur (rest ls) tests sections cur)))
+      {:tests tests :sections sections})))
+
+(defn- cmd-r7rs [[dir & opts]]
+  (let [out (or (slurp-or (str dir "/out")) "") rc (str/trim (or (slurp-or (str dir "/rc")) "?"))
+        {:keys [tests sections]} (parse-r7rs out)
+        cs (classes)
+        items (vec (concat
+                     (for [t tests :when (= :fail (:status t))
+                           :let [item (str "fails r7rs/chibi " (:what t) " => " (str/join " " (:detail t)))]]
+                       {:item item :class (class-of cs item)})
+                     (when-not (= rc "0") [(let [i (str "crash r7rs/chibi status " rc ": " (first-line (slurp-or (str dir "/err"))))]
+                                             {:item i :class (class-of cs i)})])))
+        total (count tests) pass (count (filter #(= :pass (:status %)) tests))
+        top (last sections)
+        result {:id "r7rs/chibi" :corpus :chibi-r7rs :verdict (if (empty? items) :pass :non-pass)
+                :tests total :pass pass :fail (- total pass)
+                :sections (vec (butlast sections)) :items items
+                :per-test (mapv (fn [t] [(:n t) (:status t) (clip (:what t) 70)]) tests)}]
+    (println "r7rs: status" rc "-" total "tests," pass "pass," (- total pass) "fail")
+    (when (some #{"--record"} opts)
+      (write-results "test/scheme/check-r7rs-linux-amd64.edn"
+                     ";; Chibi's r7rs-tests.scm on si (bin/si r7rs --record): the result of each test (number, status, the expression),\n;; the sections' counts and the failing tests' items with their classes (test/scheme/divergences-corpora.edn); generated."
+                     [result]))
+    (summary [result])))
+
+;; ------------------------------------------------------------------------------------------ ecraven's benchmarks
+
+(defn- bench-item [name out err rc]
+  (cond
+    (re-find #"INCORRECT" out) (str "fails ecraven/" name " returned an incorrect result")
+    (re-find #"CSVLINE!\+si,[^,]*,[0-9.]+" out) nil
+    (= rc "124") (str "crash ecraven/" name " timeout")
+    :else (str "crash ecraven/" name " status " rc ": " (clip (or (first-line err) "") 160))))
+
+(defn- cmd-ecraven [[dir & opts]]
+  (let [cs (classes)
+        names (sort (map #(second (re-find #"^(.*)\.rc$" (.getName ^java.io.File %))) (filter #(str/ends-with? (.getName ^java.io.File %) ".rc") (.listFiles (java.io.File. ^String dir)))))
+        results (vec (for [n names
+                           :let [out (or (slurp-or (str dir "/" n ".out")) "") err (or (slurp-or (str dir "/" n ".err")) "")
+                                 rc (str/trim (slurp (str dir "/" n ".rc")))
+                                 it (bench-item n out err rc)]]
+                       {:id (str "ecraven/" n) :corpus :ecraven-r7rs
+                        :verdict (if it :non-pass :pass)
+                        :items (if it [{:item it :class (class-of cs it)}] [])}))]
+    (when (some #{"--record"} opts)
+      (write-results "test/scheme/check-ecraven-linux-amd64.edn"
+                     ";; ecraven's r7rs-benchmarks on si (bin/si ecraven --record, repetition count 1): each benchmark's verdict (its own\n;; check of its result) and non-pass items with their classes (test/scheme/divergences-corpora.edn); generated."
+                     results))
+    (summary results)))
+
+;; ------------------------------------------------------------------------------------------ Chez's mats
+
+(defn- parse-mats [out]
+  (for [l (str/split-lines out)
+        :let [m (re-find #"^MAT (.*?) (PASS|FAIL|NOTRUN|SKIP)(?: (.*))?$" l)]
+        :when m]
+    (let [[_ name st rest] m] {:name name :status (keyword (str/lower-case st)) :rest (or rest "")})))
+
+(defn- mat-file-items [file out err rc]
+  (let [mats (parse-mats out)
+        lines (str/split-lines out)
+        reads (for [l lines :when (str/starts-with? l "READ ")] (str "notrun mats/" file " read: " (clip (subs l 5) 160)))
+        defs (for [l lines :when (str/starts-with? l "DEF ")] (str "notrun mats/" file " definition " (clip (subs l 4) 160)))
+        ms (for [{:keys [name status rest]} mats :when (not= status :pass)]
+             (case status
+               :fail (str "fails mats/" file " mat " name ": " (clip rest 160))
+               :notrun (str "notrun mats/" file " mat " name ": " (clip rest 160))
+               :skip (str "skip mats/" file " mat " name ": " (clip rest 160))))
+        done (set (map :name mats))
+        hung (last (remove done (keep #(when (str/starts-with? % "BEGIN ") (subs % 6)) lines)))
+        crash (when (and (not= rc "0")) [(str "crash mats/" file " status " rc (when hung (str " in mat " hung)) ": " (clip (or (first-line err) "") 120))])]
+    {:mats mats :items (vec (concat reads defs ms crash))}))
+
+(defn- cmd-mats [[dir & opts]]
+  (let [cs (classes)
+        files (sort (map #(second (re-find #"^(.*)\.rc$" (.getName ^java.io.File %))) (filter #(str/ends-with? (.getName ^java.io.File %) ".rc") (.listFiles (java.io.File. ^String dir)))))
+        results (vec (for [b files
+                           :let [file (str b ".ms")
+                                 out (or (slurp-or (str dir "/" b ".out")) "") err (or (slurp-or (str dir "/" b ".err")) "")
+                                 rc (str/trim (slurp (str dir "/" b ".rc")))
+                                 {:keys [mats items]} (mat-file-items file out err rc)
+                                 fr (frequencies (map :status mats))]]
+                       {:id (str "mats/" file) :corpus :chez-mats
+                        :verdict (if (empty? items) :pass :non-pass)
+                        :mats (count mats) :pass (get fr :pass 0) :fail (get fr :fail 0) :notrun (get fr :notrun 0) :skip (get fr :skip 0)
+                        :items (mapv (fn [i] {:item i :class (class-of cs i)}) items)}))]
+    (let [t (fn [k] (reduce + (map k results)))]
+      (println "mats:" (count results) "files," (t :mats) "mats:" (t :pass) "pass," (t :fail) "fail," (t :notrun) "not run," (t :skip) "skipped"))
+    (when (some #{"--record"} opts)
+      (write-results "test/scheme/check-mats-linux-amd64.edn"
+                     ";; Chez's mats on si (bin/si mats --record): per .ms file the mats' counts (pass, fail, not run, skipped) and the items\n;; of every mat that does not pass, with their classes (test/scheme/divergences-corpora.edn); generated."
+                     results))
+    (summary results)))
+
+;; ------------------------------------------------------------------------------------------ every file
+
+(defn- corpus [id] (first (filter #(= id (:id %)) (:corpora (read-string (slurp (path "test/scheme/corpora.edn")))))))
+
+(defn- ecraven-role [f inputs]
+  (let [n (second (re-find #"^src/(.*)\.scm$" f))]
+    (cond
+      (and n (contains? inputs n)) [:benchmark n]
+      (#{"src/common.scm" "src/common-postlude.scm"} f) [:part nil]
+      (and n (re-find #"-(prelude|postlude)$" n)) [:other-implementation nil]
+      (str/starts-with? f "inputs/") [:input nil]
+      :else [:build nil])))
+
+(defn- cmd-files []
+  (let [res (fn [f] (let [x (slurp-or (path f))] (when x (read-string x))))
+        r7 (res "test/scheme/check-r7rs-linux-amd64.edn")
+        ec (into {} (map (juxt :id identity) (res "test/scheme/check-ecraven-linux-amd64.edn")))
+        mt (into {} (map (juxt :id identity) (res "test/scheme/check-mats-linux-amd64.edn")))
+        cs (classes)
+        cc (corpus :ecraven-r7rs) cm (corpus :chez-mats)
+        inputs (set (keep #(second (re-find #"^inputs/(.*)\.input$" %)) (keys (:files cc))))
+        rows (concat
+              (for [f (sort (keys (:files cc)))
+                    :let [[role n] (ecraven-role f inputs)]]
+                [:ecraven-r7rs f role
+                 (case role
+                   :benchmark (let [r (ec (str "ecraven/" n))]
+                                (cond (nil? r) nil
+                                      (= :pass (:verdict r)) :result
+                                      (every? :class (:items r)) :class
+                                      :else nil))
+                   :part :result :input :result :other-implementation :class :build :class)])
+              (for [f (sort (keys (:files cm)))
+                    :let [b (second (re-find #"^mats/(.*)\.ms$" f))]]
+                [:chez-mats f (if b :mats :support)
+                 (if b
+                   (let [r (mt (str "mats/" b ".ms"))]
+                     (cond (nil? r) nil (every? #(or (= :pass (:verdict r)) (:class %)) (:items r)) :result :else nil))
+                   :class)])
+              [[:chibi-r7rs "r7rs-tests.scm" :suite
+                (let [r (first r7)] (cond (nil? r) nil (every? :class (:items r)) :result :else nil))]])
+        missing (filter #(nil? (nth % 3)) rows)
+        by (frequencies (map (fn [[c _ role how]] [c role how]) rows))]
+    (doseq [[k n] (sort-by str by)] (println " " n (pr-str k)))
+    (println (count rows) "files;" (count missing) "in neither a result nor a class")
+    (doseq [m (take 30 missing)] (println "  MISSING" (pr-str (take 3 m))))
+    (if (seq missing) 1 0)))
+
+(defn- cmd-divergences []
+  (let [cs (classes)
+        all (concat (read-string (slurp (path "test/scheme/check-r7rs-linux-amd64.edn")))
+                    (read-string (slurp (path "test/scheme/check-ecraven-linux-amd64.edn")))
+                    (read-string (slurp (path "test/scheme/check-mats-linux-amd64.edn"))))
+        items (for [r all i (:items r)] (assoc i :class (class-of cs (:item i))))]
+    (doseq [c cs :let [is (filter #(= (:id c) (:class %)) items)] :when (seq is)]
+      (println (str (name (:id c)) " (" (name (:kind c)) ", " (count is) "): " (:title c)))
+      (doseq [i (take 6 is)] (println "   " (clip (:item i) 150)))
+      (when (> (count is) 6) (println "    ...")))
+    (summary (map (fn [r] (assoc r :items (map #(assoc % :class (class-of cs (:item %))) (:items r)))) all))))
+
+(defn -main [& [cmd & args]]
+  (let [rc (case cmd
+             "r7rs" (cmd-r7rs args)
+             "ecraven" (cmd-ecraven args)
+             "mats" (cmd-mats args)
+             "files" (cmd-files)
+             "divergences" (cmd-divergences)
+             (do (println "usage: arbace.scheme.corpora r7rs DIR | ecraven DIR | mats DIR [--record] | files | divergences") 2))]
+    (shutdown-agents)
+    (System/exit rc)))
