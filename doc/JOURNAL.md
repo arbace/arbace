@@ -558,3 +558,11 @@ git history:
   parts are the expander, re-entrant `call/cc` on Go, and the numeric tower.
 - **Decided (the user):** OC1-OC16 and SC1-SC14 as recommended. The order of the two crops after C23 is left for later.
   Scratch: `.tmp/ocaml/`, `.tmp/scheme/`.
+
+## 2026-10-30: ocaml5-compiler-libs installed (the user)
+
+- The user installed Alpine's `ocaml5-compiler-libs`, which the OCaml survey's OC3 (a) helper needs: 594 files in
+  `/usr/lib/ocaml/compiler-libs`, among them `ocamlcommon.cmxa`, `ocamloptcomp.cmxa` and `ocamltoplevel.cmxa`.
+- A probe compiled by `ocamlopt -I +compiler-libs ocamlcommon.cmxa` parsed a definition with `Parse.implementation` and
+  printed its Parsetree with `Printast`, positions included. The future `tools/ocdump` can be built without ocamlfind,
+  which is not installed. doc/ALPINE.md's list gains the package when O1 adds the helper.
