@@ -129,7 +129,9 @@
   ;; javac's tool, built once per arbace_javac_key (GTS11 (a)) and kept in ARBACE_GATE_EXES/javac-KEY
   {:name javac-tool :heavy true :mem-gib 26 :phase :full :chain go :kind :build :needs [go-build]
    :cmd "bin/javac-vendor tool \"$GATE_JAVAC_DIR\" --host \"$GATE_EXE\" --aot-base \"$GATE_CACHE/amd64\""
-   :hosts [:javac] :summary ["^javac-vendor tool" 2]}
+   ;; GT7's fix round: the clean audit found the build reads bin/javac-vendor (its own command), which
+   ;; arbace_javac_key does not hash: a known gap, reported by the audit, not failing it, until GTS72 decides
+   :hosts [:javac] :audit-known ["bin/javac-vendor"] :summary ["^javac-vendor tool" 2]}
 
   ;; goi's steps never load j2g but its zlib (arbace.j2g.zlib: arbace.go.table compresses goi's table with it;
 ;; GT7's clean audit found goi-aot-essential loading it when the table is made cold): their :never-loads
@@ -238,7 +240,9 @@
   {:name java-fixtures :mem-gib 1 :phase :full :chain java :needs [javac-tool]
    :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/clojure-tests --java-fixtures verify"
    :hosts [:javac-prog :stage0] :never-loads [arbace.j2g] :pins ["jdk/javac/platform.sha256"]
-   :inputs [:tools :repr-java :suite "bin/javac-vendor" "test/java-fixtures/provenance.edn"]
+   ;; arbace/lang/: bin/repr-java declarations reads the runtime's Java forms (javac's class path for the fixtures;
+   ;; GT7's fix round's audit)
+   :inputs [:tools :repr-java :suite "bin/javac-vendor" "test/java-fixtures/provenance.edn" "arbace/lang/"]
    :summary ["^verify:" 1]}
   {:name repr-java-parse :mem-gib 2 :phase :full :chain java :needs [javac-tool]
    :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" bin/repr-java parse-check --corpus {part}"
@@ -301,12 +305,12 @@
   {:name java-print :heavy true :mem-gib 12 :phase :full :chain java :needs [javac-tool] :outputs true
    :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --levels print --save \"$GATE_OUT\""
    :audit-cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --levels print --only 'test/java/jls/(Lambdas|Nested)|jdk/java/lang/Boolean' --save \"$GATE_OUT\""
-   :hosts [:javac-prog :stage0] :never-loads [arbace.j2g] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :java-run :repr-java]
+   :hosts [:javac-prog :stage0] :never-loads [arbace.j2g] :pins ["jdk/javac/platform.sha256"] :inputs [:tools :java-run :repr-java "test/jrt/classfile.ae"]
    :summary ["^java-check:" 2]}
   {:name java-forms-verify :mem-gib 2 :phase :full :chain java :needs [javac-tool]
    :cmd "env REPR_JAVA_EXE=\"$GATE_JAVAC\" JAVA_CHECK_FORMS=\"$GATE_JAVA_FORMS\" bin/java-check --forms verify"
    :hosts [:javac-prog :stage0] :never-loads [arbace.j2g] :pins ["jdk/javac/platform.sha256"]
-   :inputs [:tools :java-run :repr-java "test/java/essential.txt" "test/java/forms/"]
+   :inputs [:tools :java-run :repr-java "test/java/essential.txt" "test/java/forms/" "test/java/check-read.edn" "test/java/divergences.edn"]
    :summary ["^verify:" 1]}
   {:name java-judge :mem-gib 2 :phase :full :chain java
    :uses ["java-read/results.tsv" "java-interp/results.tsv" "java-classes/results.tsv" "java-diagnostics/results.tsv"
@@ -324,13 +328,19 @@
    :summary ["TOTAL|regressions|^levels:" 3]}
   {:name programs-full :heavy :inner :mem-gib 19 :phase :full :chain go :needs [go-build]
    :cmd "env ARBACE_PROGRAM_BASE=\"$GATE_CACHE/amd64\" bin/arbace-go --build-program --check"
-   :hosts [:gate :stage0 :go] :inputs [:tools :build "test/programs/" "test/programs-fail/" "tamago/goroot/" "tools/godump/"]
+   :hosts [:gate :stage0 :go] :inputs [:tools :build "test/programs/" "test/programs-fail/" "tamago/goroot/" "tools/godump/" "bin/repr-clojure"]
    :summary ["^arbace-go --build-program --check:|FAIL|warning" 4]}
   ;; repr/go's round trips, its native reader's check per corpus (GT5), goi
+;; repr-go under the audit (GT7's fix round): its tens of concurrent Go builds and gocmp runs (GOMAXPROCS 64 each)
+  ;; preempt their threads by SIGURG, each signal a ptrace stop strace serves alone: the first clean run's step made no
+  ;; progress for hours, and a traced roundtrip amd64 did 73 of 2,080 packages in 100 minutes. GODEBUG=asyncpreemptoff=1
+  ;; (cooperative preemption only; the tools' outputs do not depend on it): the traced roundtrip amd64 in 20 minutes.
+  ;; tamago/goroot/go/go/: go/parser, go/scanner, go/ast and go/token's forms, which stage 0's goi interprets for the
+  ;; native reader until the re-seed that carries GP7
   {:name repr-go :heavy true :mem-gib 27 :phase :full :chain repr-go
-   :cmd "bin/repr-go roundtrip amd64 && bin/repr-go roundtrip linux/amd64 && bin/repr-go roundtrip --text amd64 && bin/repr-go roundtrip --dirs amd64 && bin/repr-go roundtrip --dirs linux/amd64 && bin/repr-go roundtrip --text --dirs amd64 && bin/x509roots-vendor verify && bin/x509roots-vendor check"
-   :audit-cmd "bin/repr-go roundtrip --dirs amd64 && bin/x509roots-vendor verify && bin/x509roots-vendor check"
-   :hosts [:stage0 :go] :pins ["seed/goroot.sha256" "seed/goroot-test.sha256"] :inputs [:lib :tools :repr-go :build "bin/x509roots-vendor"]
+   :cmd "export GODEBUG=asyncpreemptoff=1; bin/repr-go roundtrip amd64 && bin/repr-go roundtrip linux/amd64 && bin/repr-go roundtrip --text amd64 && bin/repr-go roundtrip --dirs amd64 && bin/repr-go roundtrip --dirs linux/amd64 && bin/repr-go roundtrip --text --dirs amd64 && bin/x509roots-vendor verify && bin/x509roots-vendor check"
+   :audit-cmd "export GODEBUG=asyncpreemptoff=1; bin/repr-go roundtrip --dirs amd64 && bin/x509roots-vendor verify && bin/x509roots-vendor check"
+   :hosts [:stage0 :go] :pins ["seed/goroot.sha256" "seed/goroot-test.sha256"] :inputs [:lib :tools :repr-go :build "bin/x509roots-vendor" "tamago/goroot/go/go/"]
    :summary ["^package|^test |regressions|FAIL|^ok" 8]}
   ;; GTS19 (a): the parked sub-projects' corpora (TamaGo's configurations of the toolchain's tree, the box's
   ;; trees) at the clean run only (GATE_ALL_PARTS=1), cmd-linux-amd64 every day
@@ -346,7 +356,7 @@
            {:part cmd-linux-amd64 :inputs ["tamago/cmd/"]}
            {:part cmd-tamago-amd64 :inputs ["tamago/cmd/"] :clean-only true}
            {:part cmd-tamago-arm64 :inputs ["tamago/cmd/"] :clean-only true}
-           {:part box :inputs ["box/" "bin/box-vendor"] :clean-only true}
+           {:part box :inputs ["box/" "bin/box-vendor" "bin/build-go"] :clean-only true}
            {:part purego :inputs ["bin/box-vendor"] :clean-only true}
            {:part x509roots :inputs ["x509roots/" "bin/x509roots-vendor"]}]
    :summary ["^E-tree:|DIFF|FAIL" 4]}

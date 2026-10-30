@@ -520,3 +520,81 @@ git history:
   `.tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean --tag arbace-reaps-3-crops-v2`. It holds
   the big lock once for the whole run, with `.tmp/gt7.quiet` set. Two moderate agents may run beside it (the user): C3b
   for now; NH11's branch waits for the tag.
+
+## 2026-10-30: GT7's first clean run; the Scheme and OCaml surveys started
+
+- **GT7's first clean run**, `bin/gate --full --clean --tag arbace-reaps-3-crops-v2` at 68b2bba6, ran from
+  2026-10-29 16:58 to 2026-10-30 06:30: 812 minutes, 85 steps, at most 40.5 GiB. 63 steps passed clean and audited,
+  published as `:clean`. Not yet a pass:
+  - **Failed (7):**
+    - `goi-check`, `goi`, `goi-aot`: CPU-limit timeouts under the audit (gcgort, issue13160, issue13169, gc2,
+      heapsampling).
+    - `repr-go`: the audit's reducer `tools/gateaudit` deadlocked at 00:42, and strace blocked on its full FIFO. I
+      stopped the reducer and strace by PID at 04:08.
+    - `repr-java`: the baseline's converted forms against their hashes.
+    - `repr-java-roundtrip.jdk`: 39 files at the javac level.
+    - `java-judge`: the levels' disagreements.
+  - **Passed with undeclared reads, so not recorded (10):** eight Java `--full` steps (about 2,600 files each, the inputs
+    of javac's tool), `java-compiled-full` (19), `programs-full` (1), `javac-tool` (2), `repr-go-native.box` (1).
+  - The record is kept as `.tmp/gt7-full/clean-run1.edn`, the clone at `.tmp/gate-clean/68b2bba6…/`.
+  - GT7's fix round (branch `gate-gt7fix`, on Opus, started during the run) fixes them, and adds `bin/gate --clean --only
+    STEPS` so that the rerun covers only those steps.
+  - During the run, at moderate load as the user allowed: C3b finished its work and C4 (the checker) started; NH18, NH12
+    and NH19 were built on NH11's branch.
+- **The Scheme and OCaml surveys** (the user: "run surveys on future crops concurrently ... two more languages in
+  ../go-whim"). go-whim translates its editor core into nine languages. The two that Arbace does not yet have, besides
+  C++ (`wpp/`), are Scheme (`whimsical/`, R6RS on Chez Scheme 10) and OCaml (`whiml/`, OCaml 5.5.0). Both toolchains
+  are on the host. Surveys `doc/scheme/SCHEME-SURVEY.md` and `doc/ocaml/OCAML-SURVEY.md` are being written (Sonnet,
+  light work).
+
+## 2026-10-30: the OCaml and Scheme surveys merged and decided (the user)
+
+- **doc/ocaml/OCAML-SURVEY.md** (Sonnet): OCaml 5.5.0 on the host (Alpine `ocaml5-5.5.0-r0`). compiler-libs is not
+  installed (`ocaml5-compiler-libs`, 70 MiB), and no stdlib or testsuite sources are on the host, so the corpus is
+  ocaml/ocaml's tag `5.5.0`. The Parsetree drops comments, so `:full` needs the token stream. go-whim's `whiml/` is
+  58,346 lines, mostly generated. The plan is O1-O9, 37-63 days.
+- **doc/scheme/SCHEME-SURVEY.md** (Sonnet): Chez Scheme 10.3.0 (R6RS only: `#vu8(`, no `(scheme base)`).
+  go-whim's `whimsical/` is 54,257 lines of R6RS with `(chezscheme)` extras. The plan is SM1-SM9, 44-75 days. The hard
+  parts are the expander, re-entrant `call/cc` on Go, and the numeric tower.
+- **Decided (the user):** OC1-OC16 and SC1-SC14 as recommended. The order of the two crops after C23 is left for later.
+  Scratch: `.tmp/ocaml/`, `.tmp/scheme/`.
+
+## 2026-10-30: ocaml5-compiler-libs installed (the user)
+
+- The user installed Alpine's `ocaml5-compiler-libs`, which the OCaml survey's OC3 (a) helper needs: 594 files in
+  `/usr/lib/ocaml/compiler-libs`, among them `ocamlcommon.cmxa`, `ocamloptcomp.cmxa` and `ocamltoplevel.cmxa`.
+- A probe compiled by `ocamlopt -I +compiler-libs ocamlcommon.cmxa` parsed a definition with `Parse.implementation` and
+  printed its Parsetree with `Printast`, positions included. The future `tools/ocdump` can be built without ocamlfind,
+  which is not installed. doc/ALPINE.md's list gains the package when O1 adds the helper.
+
+## 2026-10-30: GT7's fix round merged; CP1-CP14 and GTS70-GTS78 decided (the user); GT7's clean rerun started
+
+- **The C++ survey** (doc/cpp/CPP-SURVEY.md, Sonnet, the user's "survey even the last crop from go-whim"):
+  - A native C++ Sema is out of scale: gcc's `cp/` alone is 288k lines.
+  - clang's JSON AST is huge (608 MB for a 4-line program with `<iostream>`), while its `-O0` IR is about 4,000 times
+    smaller and holds templates, destructors and exceptions compiled in.
+  - go-whim's `wpp/` is C-with-classes, 75,292 lines.
+  - The plan is CX1-CX10, 55-91 days on top of C23.
+  - Decided (the user): CP1-CP14 as recommended. Eval is clang's IR as LLVM forms, lowered to C forms and run by C23's
+    eval and AOT.
+- **GT7's fix round** (branch `gate-gt7fix`, on Opus; doc/GATE-SURVEY.md, "As built: GT7's fix round"):
+  - goi's timeouts: ptrace costs these programs 3-6 times their CPU. Per-program limits in `test/goi/timeouts.txt`.
+  - repr-go, two causes:
+    - The reducer stopped reading its FIFO. It now reads with a blocking descriptor, with a watchdog process,
+      `tools/gateaudit/watch.go`, that fails the step after 10 minutes stale.
+    - Under strace, the Go processes' SIGURG preemption storms slowed it 50-fold. Now `GODEBUG=asyncpreemptoff=1` in
+      its `:cmd`.
+  - The eight Java steps' 2,600 reads were `sha256sum` hashing javac's tool's sources for its freshness check. The
+    reducer marks hashed-only reads, and `gate.audit` covers them by the host's key. java-fixtures' 140 real reads of
+    `arbace/lang/` are declared.
+  - Smaller undeclared reads are declared. `bin/javac-vendor` is an `:audit-known` gap until the next full rekey.
+  - Records rewritten from the clean run: the baseline's `Range.ae` (stale since RPS151); jdk's round trip's
+    `^Long` tag (known, GTS75); Java's level records, after GT6's CPU limits turned 437 compiled and 253 interp
+    timeouts into passes.
+  - `bin/gate --clean --only failed,changed`, with the record merged per run (`test/gate/clean.ae`).
+  - No shipped file changed. Main's gate passed (1m18s).
+  - Decided (the user): GTS70-GTS78 as recommended; t03447 in `:print-shapes`. Scratch: `.tmp/gt7fix/`.
+- **GT7's clean rerun** started:
+  `.tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean --tag arbace-reaps-3-crops-v2 --only
+  failed,changed`. It reruns 67 checks and keeps 13 at their clean passes, about 11 hours, with `.tmp/gt7.quiet` set.
+  C3b and NH11's branch wait for the tag, since their merges would rekey steps.

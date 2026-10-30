@@ -1,0 +1,146 @@
+(ns gate.clean
+  "bin/gate --clean --only's selection and its record's merge (doc/GATE-SURVEY.md, \"As built: GT7's fix
+  round\"). Not in any key: what it decides is which steps a clean run reruns and how its record reads,
+  never a step's outcome.
+
+  select ROOT LOGS BASE-RECORD LOGS-ROOT ONLY MODE
+      the steps a clean rerun runs, from the plan in LOGS (plan.tsv, plan/NAME.inputs), the base record
+      (test/gate/clean-TAG.edn as the earlier runs left it) and their logs under LOGS-ROOT (each run's
+      :logs, .tmp/gate-clean/SHA.logs: gate/plan/NAME.inputs, the material each step's key was the hash
+      of). ONLY: comma-separated tokens, a step (a step with parts names its parts), failed (the base
+      record's steps that did not pass clean with their audit ok, and those it does not hold), changed
+      (the steps whose material differs from the base run's, the producers' output digests aside). The
+      selection is closed over :uses both ways (a producer's output is made in the fresh clone only by
+      running it; a consumer of a rerun producer is keyed by what it makes again). MODE builds: a line
+      per build, run (a selected check needs it) or none; MODE checks: a line per check, run or skip
+      with the base pass it stands on, and exit 1 when a check not selected has changed material (its
+      key is not the one it passed clean at: it must be rerun). Prints DECISION<TAB>NAME<TAB>WHY.
+
+  merge BASE-RECORD NEW-RECORD ONLY LOGS OUT
+      the record of every run: the base's steps with the rerun's in their place (the steps it ran: not
+      :skip, :not-needed), each step marking the run it passed at (:run, an index of :runs, which names
+      each run's commit, date, mode, status, ONLY and logs); :status passed when every step passed
+      with its audit ok; :commit the latest run's."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [gate.plan :as plan])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-file [^String f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (read r)))
+
+(defn- plan-rows
+  "plan.tsv's rows: NAME DECISION KEY PHASE CHAIN NEEDS START-AFTER HEAVY MEM BUDGET SUMMARY-N SUMMARY-RE
+  WHY AUDIT-CMD OUTPUTS USES KIND CMD"
+  [logs]
+  (for [l (str/split-lines (slurp (str logs "/plan.tsv")))
+        :when (not (str/blank? l))
+        :let [f (str/split l #"\t" -1)]]
+    {:name (nth f 0) :dec (nth f 1) :needs (remove #{"-" ""} (str/split (nth f 5) #","))
+     :uses (remove #{"-" ""} (str/split (nth f 15) #",")) :kind (nth f 16)}))
+
+(defn- runs-of
+  "the record's runs: :runs, or the one run a first record is"
+  [rec]
+  (or (:runs rec) [{:commit (:commit rec) :date (:date rec) :mode (:mode rec) :status (:status rec)
+                    :wall-s (:wall-s rec) :only "all" :logs (str (:commit rec) ".logs")}]))
+
+(defn- material
+  "a step's key material without the producers' output digests (uses lines), or nil"
+  [^String f]
+  (when (.isFile (File. f))
+    (vec (remove #(str/starts-with? % "uses ") (str/split-lines (slurp f))))))
+
+(defn- passed? [e]
+  (and (= :pass (:status e)) (contains? #{:ok :none} (:audit e))))
+
+(defn- select [root logs base-file logs-root only mode]
+  (let [rows (plan-rows logs)
+        checks (filter #(= "check" (:kind %)) (remove #(= "always" (:dec %)) rows))
+        names (set (map :name checks))
+        base (read-file base-file)
+        runs (runs-of base)
+        entries (into {} (map (juxt :step identity) (:steps base)))
+        base-material (fn [n]
+                        (when-let [e (entries n)]
+                          (material (str logs-root "/" (:logs (nth runs (or (:run e) 0))) "/gate/plan/" n ".inputs"))))
+        changed? (fn [n] (not= (base-material n) (material (str logs "/plan/" n ".inputs"))))
+        toks (remove str/blank? (str/split only #","))
+        named (fn [t] (filter #(or (= % t) (str/starts-with? % (str t "."))) names))
+        bad (remove #(or (#{"failed" "changed"} %) (seq (named %))) toks)
+        _ (when (seq bad)
+            (println (str "error\t-\tgate --only: no step " (str/join ", " bad)))
+            (System/exit 2))
+        why (atom {})
+        pick (fn [ns w] (doseq [n ns] (swap! why update n #(or % w))))
+        _ (doseq [t toks]
+            (case t
+              "failed" (pick (filter #(not (some-> (entries %) passed?)) names) "failed or not run clean at the base")
+              "changed" (pick (filter changed? names) "its material changed since its clean pass")
+              (pick (named t) "named")))
+        by-name (into {} (map (juxt :name identity) checks))
+        producer (fn [u] (let [p (first (str/split u #"/" 2))] (filter #(or (= % p) (str/starts-with? % (str p "."))) names)))
+        closure (loop [s (set (keys @why))]
+                  (let [up (mapcat #(mapcat producer (:uses (by-name %))) s)
+                        down (for [c names :when (some (fn [u] (some s (producer u))) (:uses (by-name c)))] c)
+                        s2 (into s (concat up down))]
+                    (if (= s s2) s (do (pick (remove s up) "a producer of a step rerun")
+                                       (pick (remove s down) "a consumer of a step rerun")
+                                       (recur s2)))))]
+    (case mode
+      "builds" (doseq [r rows :when (= "build" (:kind r))]
+                 (println (str (if (some #(some #{(:name r)} (:needs (by-name %))) closure) "run" "none")
+                               "\t" (:name r) "\t-")))
+      "checks" (let [stale (sort (filter #(and (not (closure %)) (changed? %)) names))]
+                 (doseq [c checks :let [n (:name c)]]
+                   (if (closure n)
+                     (println (str "run\t" n "\t" (@why n)))
+                     (let [e (entries n) r (nth runs (or (:run e) 0))]
+                       (println (str "skip\t" n "\tpassed clean at " (subs (str (:commit r)) 0 (min 8 (count (str (:commit r)))))
+                                     ", its key unchanged (" (:only r) " run of " (:date r) ")")))))
+                 (when (seq stale)
+                   (println (str "error\t-\tgate --only: " (count stale) " steps not selected have changed since their clean pass, "
+                                 "their keys not the ones they passed at: " (str/join " " stale) " (add them, or: changed)"))
+                   (System/exit 1))))))
+
+(defn- edn-str [x] (binding [*print-namespace-maps* false] (pr-str x)))
+
+(defn- merge-records [base-file new-file only logs out]
+  (let [base (read-file base-file)
+        new (read-file new-file)
+        runs (runs-of base)
+        i (count runs)
+        run {:commit (:commit new) :date (:date new) :mode (:mode new) :status (:status new) :wall-s (:wall-s new)
+             :only only :logs logs :pins (:pins new) :hosts (:hosts new)}
+        runs (conj (vec (map-indexed (fn [k r] (cond-> r (and (zero? k) (not (:runs base)))
+                                                  (assoc :pins (:pins base) :hosts (:hosts base))))
+                                     runs))
+                   run)
+        ran (filter #(not (#{:skip :not-needed} (:status %))) (:steps new))
+        ran-names (set (map :step ran))
+        old (map #(if (:run %) % (assoc % :run 0)) (:steps base))
+        steps (concat (map #(if (ran-names (:step %)) (assoc (first (filter (fn [r] (= (:step r) (:step %))) ran)) :run i) %) old)
+                      (for [r ran :when (not (some #(= (:step %) (:step r)) old))] (assoc r :run i)))
+        ok (every? passed? steps)]
+    (spit out
+          (str ";; bin/gate --clean's record (doc/GATE-SURVEY.md, §7, GT7, \"As built: GT7 (tooling)\", \"As built: GT7's fix round\"):\n"
+               ";; every step run in a fresh clone with empty caches and audited. A step passed clean in the run its :run\n"
+               ";; names (an index of :runs: that run's commit, date and selection); a rerun (bin/gate --clean --only) ran\n"
+               ";; the steps that failed or changed, at a commit where every other step's key is the one it passed at\n"
+               ";; (the selection checked it). :status passed: every step passed clean, some at a later run. Written by bin/gate.\n"
+               "{:tag " (edn-str (:tag base)) "\n :commit " (edn-str (:commit new)) "\n :date " (edn-str (:date new))
+               "\n :mode " (edn-str (:mode new)) "\n :status " (if ok ":passed" ":failed")
+               "\n :host " (edn-str (:host new)) "\n :env " (edn-str (:env new))
+               "\n :runs\n [" (str/join "\n  " (map edn-str runs)) "]"
+               "\n :steps\n [" (str/join "\n  " (map edn-str steps)) "]}\n"))
+    (println (str "gate --only: the record merged: " (count ran) " steps of this run, " (- (count steps) (count ran))
+                  " of earlier runs; " (if ok "every step passed clean" (str (count (remove passed? steps)) " steps not passed clean"))))
+    (System/exit (if ok 0 1))))
+
+(defn -main [cmd & args]
+  (case cmd
+    "select" (let [[root logs base logs-root only mode] args] (select root logs base logs-root only mode))
+    "merge" (let [[base new only logs out] args] (merge-records base new only logs out)))
+  (shutdown-agents)
+  (System/exit 0))
