@@ -566,3 +566,35 @@ git history:
 - A probe compiled by `ocamlopt -I +compiler-libs ocamlcommon.cmxa` parsed a definition with `Parse.implementation` and
   printed its Parsetree with `Printast`, positions included. The future `tools/ocdump` can be built without ocamlfind,
   which is not installed. doc/ALPINE.md's list gains the package when O1 adds the helper.
+
+## 2026-10-30: GT7's fix round merged; CP1-CP14 and GTS70-GTS78 decided (the user); GT7's clean rerun started
+
+- **The C++ survey** (doc/cpp/CPP-SURVEY.md, Sonnet, the user's "survey even the last crop from go-whim"):
+  - A native C++ Sema is out of scale: gcc's `cp/` alone is 288k lines.
+  - clang's JSON AST is huge (608 MB for a 4-line program with `<iostream>`), while its `-O0` IR is about 4,000 times
+    smaller and holds templates, destructors and exceptions compiled in.
+  - go-whim's `wpp/` is C-with-classes, 75,292 lines.
+  - The plan is CX1-CX10, 55-91 days on top of C23.
+  - Decided (the user): CP1-CP14 as recommended. Eval is clang's IR as LLVM forms, lowered to C forms and run by C23's
+    eval and AOT.
+- **GT7's fix round** (branch `gate-gt7fix`, on Opus; doc/GATE-SURVEY.md, "As built: GT7's fix round"):
+  - goi's timeouts: ptrace costs these programs 3-6 times their CPU. Per-program limits in `test/goi/timeouts.txt`.
+  - repr-go, two causes:
+    - The reducer stopped reading its FIFO. It now reads with a blocking descriptor, with a watchdog process,
+      `tools/gateaudit/watch.go`, that fails the step after 10 minutes stale.
+    - Under strace, the Go processes' SIGURG preemption storms slowed it 50-fold. Now `GODEBUG=asyncpreemptoff=1` in
+      its `:cmd`.
+  - The eight Java steps' 2,600 reads were `sha256sum` hashing javac's tool's sources for its freshness check. The
+    reducer marks hashed-only reads, and `gate.audit` covers them by the host's key. java-fixtures' 140 real reads of
+    `arbace/lang/` are declared.
+  - Smaller undeclared reads are declared. `bin/javac-vendor` is an `:audit-known` gap until the next full rekey.
+  - Records rewritten from the clean run: the baseline's `Range.ae` (stale since RPS151); jdk's round trip's
+    `^Long` tag (known, GTS75); Java's level records, after GT6's CPU limits turned 437 compiled and 253 interp
+    timeouts into passes.
+  - `bin/gate --clean --only failed,changed`, with the record merged per run (`test/gate/clean.ae`).
+  - No shipped file changed. Main's gate passed (1m18s).
+  - Decided (the user): GTS70-GTS78 as recommended; t03447 in `:print-shapes`. Scratch: `.tmp/gt7fix/`.
+- **GT7's clean rerun** started:
+  `.tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean --tag arbace-reaps-3-crops-v2 --only
+  failed,changed`. It reruns 67 checks and keeps 13 at their clean passes, about 11 hours, with `.tmp/gt7.quiet` set.
+  C3b and NH11's branch wait for the tag, since their merges would rekey steps.

@@ -1874,3 +1874,9 @@ with the tag's journal entry. A selection refused names the steps whose keys mov
 own store; each run trimmed Go's shared build cache as every gate run does); I executed javac's tool copied out of the
 running clone's `.tmp/gate-exe/` (a copy, read only); the first traced repr-go ran 100 minutes under the big lock
 before I killed its process group.
+
+## Decided (2026-10-30): GTS70-GTS78
+
+The user decided all nine as recommended. GTS72 (`bin/javac-vendor` into `arbace_javac_key`), GTS75 (the converter's tag
+fix) and GTS78's second half (GTS51's recorded CPU times) come at the next change that rekeys everything; the rest are
+as built. Test t03447's class `:print-shapes` (a constant printed as `0` against `(float 0.0)`) is confirmed by the user.
