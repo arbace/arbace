@@ -152,22 +152,27 @@ A nested datum's position is SM3's (`:full`).
 
 ## 5. The core language as forms
 
-The expander (SM4) produces, and the evaluator (SM5) and the AOT (SM7) consume, forms of the core language: the
-output of Chez's expander (`Lsrc`) with R6RS's names. They are forms like any other; this section only fixes the
-shapes, so that examples and tests can be written now.
+The expander (SM4) produces, and the evaluator (SM5) and the AOT (SM7) consume, forms of the core language. Since
+SM4 they are what psyntax's builders build (`scheme/psyntax/builders.ae` with Arbace's options, `config.ae` and
+`patches.edn`: no annotations, `case-lambda` for every procedure, `letrec*`, no `library-letrec*`, no global
+`define`), as `bin/si expand` prints them; doc/scheme/SCHEME-SURVEY.md, "As built: SM4".
 
 | core form | shape |
 |---|---|
-| constant | a self-evaluating datum, or `(quote d)` |
-| reference | a symbol |
-| `lambda` | `(lambda FORMALS body ...)`, FORMALS a symbol, a list of symbols or `(scm/dot (a b) rest)` |
-| `case-lambda` | `(case-lambda (FORMALS body ...) ...)` |
-| `if` | `(if test then)` or `(if test then else)` |
-| `set!` | `(set! id expr)` |
+| constant | `(quote d)` (psyntax quotes every constant; a self-evaluating datum unquoted is a constant too) |
+| reference | a symbol: a lexical variable when a binder above binds it, else a location (a library's global) |
+| primitive | `(primitive name)`: the procedure the host's runtime provides as `name` (`car`, `+`, `make-record-type-descriptor`) |
+| `case-lambda` | `(case-lambda (FORMALS body) ...)`, FORMALS a list of symbols, a symbol or `(scm/dot (a b) rest)`; also each `lambda` |
+| `if` | `(if test then else)` |
+| `set!` | `(set! id expr)`, a lexical variable or a location |
 | `begin` | `(begin expr ...)` |
-| `letrec*` | `(letrec* ((id init) ...) body ...)` |
+| `letrec`, `letrec*` | `(letrec ((id init) ...) body)`, `(letrec* ...)` |
 | application | `(operator operand ...)` |
-| primitive | a reference to a symbol of a library (`car`, `+`) |
+
+The unspecified value is `((primitive void))`. A top-level program is one `letrec*` whose bindings are its
+definitions and, for each expression between them, a binding of a fresh variable (`dummy.N`); a library's invoke
+code binds its definitions by `letrec*` and assigns each export's location by `set!`. Lexical variables are
+gensyms, printed `NAME.N` (numbered in the order met, never the name of a free symbol of the form; SC43).
 
 A top-level program is `(import ...)` then body forms; a library is `(library (name version?) (export ...)
 (import ...) body ...)`, with the report's export and import specs (`rename`, `only`, `prefix`, `for`). Derived

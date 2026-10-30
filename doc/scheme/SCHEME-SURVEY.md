@@ -896,3 +896,195 @@ background past the tool's 120 s limit; neither exceeded 1.4 GB or 4 threads.)
    `bin/gate --audit`, the scans of `bin/repr-scheme check` (full, 2 m 30 s) rerun on the final tree, and `bin/repr-scheme
    roundtrip` under the real executable with the table of item 1 (a) if chosen. Chez was present, so nothing about
    the oracle was skipped.
+
+## As built: SM4 (2026-10-30)
+
+Branch `scheme-sm1`, on `29bf25a0`. SM4 (the expander) is built with the light tier beside GT7's clean run: no
+gate, no Arbace build, no lock; every Arbace run on stage 0 (`target/seed/amd64/arbace` of the main checkout,
+`ARBACE_HOST_EXE`) under `GOMEMLIMIT=1500MiB`, `GOMAXPROCS=4`, peaks under 0.61 GB; Chez single-threaded. No
+shipped file changed. SC20-SC26 and SC30-SC33 are undecided and I followed their recommendations (SC24 (a):
+the new namespaces stay out of the executable's keys, the `embed.ae` line waits for the re-seed batch; SC33 (b):
+nothing compiled before SM5).
+
+### The license, settled
+
+SC5 (a) asked for psyntax with an acceptable license. What exists:
+
+| candidate | where | license | verdict |
+|---|---|---|---|
+| the portable psyntax-r6rs (Ghuloum and Dybvig, the reference implementation of implicitly phased libraries), revision 4, 2007-10-28 | `https://www.cs.indiana.edu/~aghuloum/r6rs-libraries/psyntax-r6rs-rev4.tgz`, gone from IU; fetched from the Wayback Machine (`web.archive.org/web/20071216195415id_/...`), SHA-256 `5cad95d0...5242` | MIT (`README.txt` and every file: "Copyright (c) 2006, 2007 Abdulaziz Ghuloum and Kent Dybvig") | acceptable; but 2007's: no `syntax-violation`, `&syntax` raised as `error`, fewer R6RS fixes. Studied: its `psyntax-buildscript.ss` is the model of `tools/psyntax/boot.ss` |
+| Ikarus's psyntax (the same code, maintained to 2010) | `https://github.com/lambdaconservatory/ikarus` (a git checkout of Ikarus's Bazaar trunk) at `1f2b250ed9e8cb1c2466c939a9a305461db71739` (2010-01-26), `scheme/psyntax.{expander,library-manager,builders,config,internal}.ss` | the same MIT notice in each of these files; Ikarus itself is GPL-3.0, and so is its `psyntax.compat.ss` (Ikarus's header) | **vendored**: the four MIT files; the compat and internal libraries are Arbace's own with Ikarus's interface (the GPL file is not used or copied) |
+| Chez Scheme's expander | `https://github.com/cisco/ChezScheme` `v10.3.0` `s/syntax.ss` (10,520 lines) | Apache-2.0 (with the 1992-2002 Cadence notice of the portable psyntax inside) | acceptable, but it is Chez's internals throughout (`$sc-put-cte`, compile-time records, `#%$` primitives): not portable without a rewrite |
+| Mosh's and IronScheme's forks | `higepon/mosh` `boot/runtimes/psyntax-mosh/psyntax/`, `IronScheme/IronScheme` `IronScheme.Console/psyntax/` | the same MIT notice (their own changes under their projects' terms) | not needed; Mosh's imports `(mosh)` and `(system)` internals |
+
+So the license is MIT, an acceptable one: `LICENSE.md` gains the section "psyntax: MIT License" (the notice's
+text) and the bullet for `scheme/psyntax/`; the origins are in `scheme/provenance.edn` (repository, commit,
+paths, SHA-256 of each file, the rev4 tarball's pin as studied).
+
+### What was built
+
+- **`scheme/psyntax/`**: psyntax as Scheme forms in mode `:full` (repr/scheme, SM3): `expander.ae`,
+  `library-manager.ae`, `builders.ae`, `config.ae` (Ikarus's, 4,865 lines, 191,650 bytes, printed back byte for
+  byte: `bin/si vendor verify`), and Arbace's own `compat.ae` (`define-record` as R6RS records, `make-parameter`,
+  `parameterize` by `dynamic-wind`, the host's store, gensym and `eval-core` from `(psyntax system $bootstrap)`) and
+  `internal.ae`; `patches.edn`, ten textual patches applied to the printed sources, each with its reason: the
+  `(rnrs)` import's `except` list (Ikarus excepted names R6RS's `(rnrs)` does not export), the drivers' entry points
+  exported (`top-level-expander`, `library-expander`, a new `program-expander` that does not export a program's
+  top-level bindings: `top-level-expander`'s export of all of them is quadratic in the imports, 5.4 s for
+  `(import (rnrs))` on the bootstrap host against 0.35 s), no annotations in the core forms (two), `assert`'s value
+  (R6RS 11.17; psyntax returned the unspecified value), and `config`'s options (no Ikarus `define-record` or
+  `define-struct`, no `library-letrec*`, the interaction environment's base `(rnrs)`).
+- **The bootstrap** (`bin/si boot`, `tools/psyntax/`): the sources printed from the forms with the patches;
+  psyntax loaded into Chez 10.3.0 as R6RS libraries with a compat library for Chez (`tools/psyntax/chez/psyntax/`:
+  deterministic gensyms `NAME$N`, an `eval-core` that rewrites the core forms into Chez's), and `boot.ss`, after
+  rev4's buildscript: the system's libraries (R6RS's 26, with Chez's `library-exports` as their export lists, each
+  name a psyntax keyword or a primitive of the host, every keyword of the reference checked to have a psyntax
+  binding), psyntax's own sources expanded by it, the system's install-library calls fabricated, primlocs for
+  psyntax's procedures (R6RS's names and a library `(psyntax arbace)` of the driver's), written as
+  `scheme/psyntax/psyntax.pp.ae`: 7 core forms, 459 KB, committed, generated (MIT notice in its header). 33 s.
+  `bin/si boot --check` makes it again into `.tmp/si/boot` and compares: identical.
+- **The bootstrap host** (`arbace/scheme/rt.ae`, `core.ae`; evaluated, not embedded): Scheme values in Arbace
+  (mutable pairs as a `deftype`, interned symbols so `eq?` is `identical?`, gensyms as symbols of the namespace
+  `scm.gensym`, vectors as ArrayLists, R6RS records and conditions by the procedural layer with protocols and
+  parents, the standard condition types, `raise`/`with-exception-handler` in the raise's dynamic context,
+  hashtables, promises, string ports, `format`) and about 200 primitives; the evaluator of core forms translates a
+  core form into a Clojure form (locals as Clojure locals, assigned and `letrec` ones as boxes, locations as boxes
+  of the store embedded as constants, `case-lambda` as a multi-arity `fn` or a dispatch on the count, a dozen
+  primitives inlined) and lets Arbace evaluate it. Not si: `call/cc` escapes only, no proper tail calls, no
+  complex arithmetic, strings immutable. psyntax boots on it in about 1.3 s.
+- **The driver** (`arbace/scheme/expand.ae`, `bin/si expand`): programs (`program-expander`), libraries
+  (`library-expander`, installed in the session; imported libraries found by psyntax's file locator through
+  `library-path`), expressions (`core-expand` in `(environment ...)`), `eval` and `environment` as psyntax's own;
+  core forms printed with gensyms renamed `NAME.N` (SC43); a raise as data: the condition's types, who, message,
+  irritants, `&syntax`'s form and subform as forms. `doc/scheme/SPEC.md` 5 now states the core language as built.
+- **`bin/si`** (`vendor fetch|convert|verify`, `boot [--check]`, `expand`, `test [--record]`, `fixpoint`,
+  `check-suite`), the namespace `arbace.scheme.psyntax` (vendoring and the bootstrap's file work), Makefile targets
+  `si-vendor-verify`, `si-boot`, `si-boot-check`, `si-test`, `si-test-record`, `si-check-suite`, `si-fixpoint`
+  (`make check-makefile` passes). Gate bookkeeping as SM2's: `arbace/scheme/` out of `arbace_embedded_sources`,
+  `test/gate/steps.edn`'s `:tools` and `test/gate/audit.ae`'s `:gate` host.
+
+### The checks, numbers
+
+- **The expander's own tests** (`bin/si test`; `test/scheme/expand/`): 64 cases, R6RS programs (some with their
+  own libraries): 18 of Dybvig's hygiene cases (Dybvig, Hieb and Bruggeman 1992; TSPL4 8: `my-or`'s `t` and a
+  shadowed `if`, a free reference from a macro, `swap!`'s `tmp`, a keyword shadowed by a variable, `=>` shadowed,
+  literals, macro-defining macros, `letrec-syntax`, `loop`/`break` by `datum->syntax`, `bound-identifier=?`,
+  `free-identifier=?`, `generate-temporaries`, nested ellipses and `(... ...)`, internal defines shadowing), 12 of
+  the report's examples (11.19 `be-like-begin`, `p.car` by `identifier-syntax` with `set!`, `ten`, 12's `rec`,
+  `while`, `make-variable-transformer`, `quasisyntax`, fenders, `define-record-type` with parent and protocol), 11
+  derived forms, 4 libraries with phases (`(for L expand)`, `rename`, `prefix`, `only`, `except`, an exported macro
+  whose helper is not captured), `eval` with `environment`, and 19 error cases (6 of them the `&syntax` checks of
+  Racket's suite, which it leaves commented as "not a runtime test": `(set! p.car 15)`, `(rec 5 ...)`, a duplicate
+  `let` binding, `else` shadowed in `case`, `(color purpel)`). Each case is expanded by psyntax on Arbace and, when
+  it expands, run on the bootstrap host; Chez's run of the original is recorded (`tools/psyntax/run.ss`,
+  `ref-chez.edn`: output, or the raised condition with `&syntax`'s form). **60 of 64 pass** (output equal, or both
+  raise `&syntax` with the same form; one where Chez's form is psyntax's subform), **4 known**
+  (`test/scheme/expand/known.edn`): 3 by design (psyntax names the identifier defined twice where Chez names the
+  body, twice, and the `cond` form where Chez names the misplaced `else`), 1 deferred (enum sets are the runtime's,
+  SM6), **0 failing**. 54 s, 0.54 GB.
+- **Against Chez's `expand`** (`tools/psyntax/expand.ss`, `expand-chez.edn`): each program that has no library,
+  `(let () BODY ...)` expanded by both, normalized (`lambda` and `let` as `case-lambda`, `($primitive 2 x)` as
+  `(primitive x)`, self-evaluating quotes, `(let () ...)` and singleton `begin`s dropped, bound variables numbered
+  in binding order): **31 of 39 the same, all 18 hygiene cases among them**; the 8 others differ by the derived
+  forms' strategies (`do` ends with `(if #f #f)`, `cond`'s `=>`, `and`/`or`, `quasiquote`, `let-values`, `assert`,
+  `delay`), and 2 more are not comparable (Chez writes record descriptors as `#!base-rtd`).
+- **The suite's syntax** (`bin/si check-suite`): Racket's R6RS suite (`racket-r6rs`, SM1's pin) read from its
+  files by psyntax's library manager, `run.sps` expanded with every library it imports: **27 of 27 libraries
+  expanded and installed** (base, syntax-case, records, conditions, exceptions, enums, eval, io, arithmetic, ...),
+  `run.sps` expanded. 99 s of expansion, 103 s in all, 0.58 GB.
+- **The fixpoint** (`bin/si fixpoint`): psyntax on Arbace expands psyntax's own six libraries (the bootstrap's
+  inputs) to **the same core forms as psyntax on Chez, 6 of 6** (up to gensyms' names; the seventh form, the
+  system's libraries, is boot.ss's own). 47 s, 0.60 GB. So Chez is needed only for boot.ss's library table
+  (SC41).
+- `bin/si vendor verify`: 4 of 4 byte for byte; `bin/si boot --check`: identical; `bin/repr-scheme spec-check`:
+  9 of 9 (SPEC 5 changed); `make check-makefile`: rc 0.
+
+What psyntax gives, against the survey's SM4 row: libraries with versions, imports (`only`, `except`, `prefix`,
+`rename`, `for`), exports (`rename`) and phases in psyntax's implicit phasing (SC45); `syntax-rules`,
+`syntax-case`, `datum->syntax`, `syntax->datum`, `identifier-syntax`, `make-variable-transformer`,
+`with-syntax`, `quasisyntax`, `generate-temporaries`, the identifier predicates, `syntax-violation`; the derived
+forms of R6RS (`let*`, named `let`, `letrec`, `do`, `case`, `cond`, `when`, `unless`, `let-values`,
+`let*-values`, `case-lambda`, `define-record-type`, `define-enumeration`, `define-condition-type`, `guard`,
+`parameterize`, `quasiquote`, `delay`, `assert`); `eval`, `environment`, `null-environment`,
+`scheme-report-environment`; the core language of SPEC 5. SC5's route is (a) from the start: psyntax itself, not
+(c)'s non-hygienic `syntax-rules` first, because the bootstrap host made it run on Arbace in this milestone.
+
+### Proposals (SC40 onward)
+
+- **SC40 Where the expander runs after SM4.**
+  - Options: (a) psyntax's `psyntax.pp.ae` evaluated by si from SM5 (the bootstrap host retired as psyntax's runtime,
+    kept as a second evaluator of core forms for diffcheck-like checks of si on the expander's tests), compiled by
+    SM7's AOT into the program so `eval` works compiled; (b) keep the bootstrap host as the expander's runtime for
+    good (Arbace-evaluated, fast enough: 0.35 s a program) and si only for programs; (c) port psyntax to Arbace's
+    Clojure.
+  - *Recommended: (a)*: SC4 (a) and SC5 (a) say Scheme's own expander on Scheme's evaluator; the host proved the
+    forms and the core language, and is the oracle si's evaluator can be checked against.
+- **SC41 Chez in the bootstrap.**
+  - Options: (a) as built: `bin/si boot` needs Chez (psyntax runs on Chez to expand itself; the library table is
+    Chez's `library-exports`), the check needs none, `bin/si fixpoint` shows Arbace gives the same six libraries;
+    (b) the table recorded as data (`scheme/psyntax/libraries.edn`, from Chez once) and boot.ss's last steps ported
+    to the driver, so the bootstrap runs on Arbace alone and Chez only records; (c) both, (b) checked against (a).
+  - *Recommended: (b) at SM5*, when si runs boot.ss's work at speed; (a) until then (the fixpoint already holds).
+- **SC42 Which psyntax.**
+  - Options: (a) Ikarus's at `1f2b250e` (as built: MIT files, maintained to 2010, `syntax-violation`, R6RS's
+    conditions); (b) psyntax-r6rs rev4 (2007, the reference implementation; no `syntax-violation`); (c) Chez's
+    `s/syntax.ss` (Apache-2.0, the reference's own expander, Chez internals throughout); (d) Mosh's fork.
+  - *Recommended: (a)*: the most complete MIT psyntax; rev4's buildscript was enough to bootstrap it.
+- **SC43 Gensyms in core forms.**
+  - Options: (a) as built: plain symbols `NAME.N`, numbered per form in the order met and never the name of a free
+    symbol of the form (Chez's `print-gensym pretty/suffix` spelling); (b) a new form `(scm/gensym "NAME" N)` (SPEC 1's
+    closed list grows by one); (c) Chez's `#{NAME UID}` (not R6RS's lexical syntax).
+  - *Recommended: (a)*: core forms stay Scheme data a reader reads, the renaming is checked free of capture by
+    construction, and the normalized comparison with Chez's `expand` reads both alike.
+- **SC44 Patching vendored code.**
+  - Options: (a) as built: the vendored forms byte-identical to upstream (`vendor verify`), Arbace's changes as
+    textual patches with reasons in `patches.edn`, applied when the sources are printed for the bootstrap; (b) edit
+    the forms in place and pin the patched text.
+  - *Recommended: (a)*: upstream stays checkable and each change is named; ten patches, none large.
+- **SC45 Phases.**
+  - Options: (a) psyntax's implicit phasing (as built; Chez's as well): `(for L (meta n))` accepted, a library
+    visited or invoked when a phase needs it; (b) explicit phase separation (Racket's), refusing a phase-0 binding
+    used at phase 1 without `for`.
+  - *Recommended: (a)*: R6RS permits it, the reference does it, and a program that runs on Chez must run here.
+- **SC46 Judging `&syntax` errors.**
+  - Options: (a) as built: both raise `&syntax`, and Chez's form equals psyntax's form or its subform; else a known
+    class; (b) patch psyntax to report Chez's forms; (c) `&syntax` alone.
+  - *Recommended: (a)*: the reported form is each expander's choice (R6RS does not fix it); three cases differ, by
+    design.
+- **SC47 Running expanded code before si.**
+  - Options: (a) as built: the bootstrap host runs what it can (escape-only `call/cc`, so `guard`'s expansion, which
+    calls its continuation after `call/cc` returned, does not run; no enum sets, bytevector or port libraries), a
+    case it cannot run is `:host-limit`; (b) one-shot re-entry for `guard`'s pattern in the host.
+  - *Recommended: (a)*: si (SM5) is where continuations are built (SC6 (a)); the expander is judged by its forms.
+- **SC48 The checks in the gates.**
+  - Options: (a) none in the essential gate until SM9; then `bin/si test` (54 s, 0.54 GB, no Chez) and `vendor
+    verify` essential, `fixpoint` (47 s) and `check-suite` (103 s) in `--full`, `boot --check` by hand (needs Chez);
+    (b) `bin/si test` essential now.
+  - *Recommended: (a)*, with SC26.
+- **SC49 The new namespaces and the executable.**
+  - Options: (a) with SC24 (a): add `"arbace/scheme/"` to `arbace/j2g/embed.ae`'s `excluded` at the re-seed batch;
+    (b) embed and compile `arbace.scheme.*` from SM5, when `eval` inside programs needs the expander (then the keys'
+    exclusions of this milestone go away, as SC33 (a)'s).
+  - *Recommended: decide at SM5 with SC33*; until then (a)'s bookkeeping as built.
+- **SC50 `assert-syntax-violation`.**
+  - Options: (a) fetch a suite that has such checks at SC3's next stage (Larceny's R7RS/R6RS test libraries, to
+    verify, or Chez's mats' error tests, `mats/` of `v10.3.0`), each made a case; (b) the hand cases and Racket's
+    commented checks suffice.
+  - *Recommended: (a) with SM8*: none of the pinned corpora (Racket's, Larceny's benchmarks, Chibi's) has an
+    `assert-syntax-violation`; Racket's suite leaves its `&syntax` checks commented, and they are cases here.
+
+### Rule slips
+
+- Arbace runs started directly (not through `bin/`) left error reports in `/tmp` (TMPDIR unset) while I debugged:
+  twelve `arbace-*.edn` files, removed by name; the `bin/si` runs put theirs in `.tmp/tmp`.
+- Several foreground runs went past the tool's 120 s limit (the suite's, 103 s, with its prelude); one Chez probe
+  was stopped by task id. None exceeded 0.61 GB or 4 threads.
+
+### Heavy checks left, and checks not run
+
+1. The essential gate in this branch (`/root/arbace/.tmp/heavy bin/gate`): `bin/lib/version.bash` changed again
+   (the exclusion of `arbace/scheme/`), so the first run rebuilds the executables once.
+2. `bin/gate --audit` of the steps whose inputs name `:tools`, as SM2's item 2, now with `!arbace/scheme/`.
+3. The re-seed batch: SC24/SC49's `embed.ae` line (or SM5's embedding), `bin/generated-check`, `bin/j2g-edge verify`.
+4. Not run: the bootstrap host's results on an executable other than stage 0; `bin/si boot` on a host whose Chez
+   is not 10.3.0; Racket's suite run (not only expanded: SM5's).
