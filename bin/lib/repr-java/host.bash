@@ -25,7 +25,9 @@
 #                      printer or the round trip's comparator, which change no forms (PRINTER-NOTES.md,
 #                      JP1); since JN9f (JFS120 (b)) also the native front end the vendoring tools read
 #                      with (the parser and lexer, the native provider and its tiers, the class file
-#                      reader, the read without javac's split)
+#                      reader, the read without javac's split); since JN10 (write-ahead) the platform
+#                      interface and the java.base pack it reads (platform, jdk/platform/java.base.decls)
+#                      and javac's door and tree half (javac_hook, javac_tree)
 #   repr_java_vendor_read
 #                      the vendoring tools' read (JFS120 (b), doc/classes/JAVA-FRONTEND-SURVEY.md, "As
 #                      built: JN9f"): native (the default), bin/repr-java read --no-javac, the native
@@ -65,7 +67,8 @@ repr_java_provenance_same() {
 
 repr_java_reader_hash() {
   (cd "$root" && for f in arbace/repr/java.ae arbace/repr/java/{attr,convert,forms,full,javac,jtypes,layout,model,names,resolve,tree}.ae \
-                          arbace/repr/java/{classfile,decls,expr,infer,lex,nattr,overload,parse,scope,sym,types}.ae bin/repr-java; do
+                          arbace/repr/java/{classfile,decls,expr,infer,lex,nattr,overload,parse,scope,sym,types}.ae \
+                          arbace/repr/java/{platform,javac_hook,javac_tree}.ae jdk/platform/java.base.decls bin/repr-java; do
      echo "$f"; done | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-64)
 }
 

@@ -302,3 +302,168 @@
         ret (any-type r)
         th (loop [out []] (if (= \^ (peekc r)) (do (nextc r) (recur (conj out (any-type r)))) out))]
     {:tparams tps :params ps :ret ret :throws th}))
+
+;; ---------------------------------------------------------------------------------------
+;; strip: a class file with only what parse reads (JN10 part 2, JFS131 (b), JFS135 (a))
+
+(def kept-attributes
+  "The attributes parse reads, by where they are: a class's, a field's, a method's. Every other one
+  (Code and what it holds, SourceFile, Deprecated, NestHost, NestMembers, BootstrapMethods,
+  MethodParameters, the type annotations, Module and its kin, ...) strip drops."
+  {:class #{"Signature" "InnerClasses" "RuntimeVisibleAnnotations" "RuntimeInvisibleAnnotations" "Record"
+            "PermittedSubclasses"}
+   :field #{"Signature" "RuntimeVisibleAnnotations" "RuntimeInvisibleAnnotations" "ConstantValue"}
+   :method #{"Signature" "RuntimeVisibleAnnotations" "RuntimeInvisibleAnnotations" "Exceptions"}})
+
+(defn- pool-spans
+  "The constant pool's entries as [tag start end] by index (the entry's bytes, its tag included; nil at 0
+  and after a long or a double), and the offset after the pool."
+  [^bytes b]
+  (let [n (u2 b 8)
+        out (object-array n)]
+    (loop [k 1 i 10]
+      (if (>= k n)
+        [out i]
+        (let [tag (u1 b i)
+              len (long (case (int tag)
+                          1 (+ 3 (u2 b (inc i)))
+                          (3 4) 5
+                          (5 6) 9
+                          (7 8 16 19 20) 3
+                          15 4
+                          (9 10 11 12 17 18) 5
+                          (throw (ex-info (str "class file: constant pool tag " tag " at " i) {:tag tag :offset i}))))]
+          (aset out k [tag i (+ i len)])
+          (recur (if (#{5 6} tag) (+ k 2) (inc k)) (+ i len)))))))
+
+(deftype Out [^java.io.ByteArrayOutputStream bs]
+  arbace.lang.IFn
+  (invoke [this n v]
+    ;; v as n big-endian bytes
+    (loop [s (* 8 (dec (long n)))]
+      (when (>= s 0)
+        (.write bs (int (bit-and (bit-shift-right (long v) s) 0xff)))
+        (recur (- s 8))))
+    this))
+
+(defn strip
+  "The class file in bytes `b` with only what `parse` reads (kept-attributes): its constant pool rebuilt of
+  the entries those parts name, numbered in the order first named (so the result depends on `b` alone); a
+  Record attribute kept with no components (parse asks only whether there is one). (parse (strip b))
+  equals (parse b) (bin/repr-java platform-check)."
+  ^bytes [^bytes b]
+  (when-not (= (u4 b 0) 0xcafebabe)
+    (throw (ex-info "not a class file" {})))
+  (let [[^objects spans pend] (pool-spans b)
+        remap (java.util.HashMap.)              ; old index -> new index
+        pool (java.io.ByteArrayOutputStream.)
+        po (Out. pool)
+        nextk (long-array [1])
+        intern (fn intern [^long k]
+                 (if (zero? k)
+                   0
+                   (if-let [nk (.get remap k)]
+                     (long nk)
+                     (let [[tag s e] (aget spans k)
+                           tag (long tag) s (long s) e (long e)
+                           ;; a class or a string names its utf8 first
+                           sub (when (#{7 8} tag) (intern (u2 b (inc s))))
+                           nk (aget nextk 0)]
+                       (.put remap k nk)
+                       (aset nextk 0 (+ nk (if (#{5 6} tag) 2 1)))
+                       (case (int tag)
+                         (7 8) (do (po 1 tag) (po 2 sub))
+                         (1 3 4 5 6) (.write pool b (int s) (int (- e s)))
+                         (throw (ex-info (str "strip: constant pool tag " tag " named") {:tag tag})))
+                       nk))))
+        utf-of (fn [^long k]
+                 (let [[_ s _] (aget spans k) s (long s)] (mutf8 b (+ s 3) (u2 b (inc s)))))
+        ;; an annotation (JVMS 4.7.16) at i written to o with its indexes renamed; the offset after it
+        copy-annotation (fn copy-annotation [o ^long i]
+                          (letfn [(value [^long i]
+                                    (let [t (char (u1 b i))]
+                                      (o 1 (u1 b i))
+                                      (case t
+                                        (\B \C \D \F \I \J \S \Z \s \c) (do (o 2 (intern (u2 b (inc i)))) (+ i 3))
+                                        \e (do (o 2 (intern (u2 b (inc i)))) (o 2 (intern (u2 b (+ i 3)))) (+ i 5))
+                                        \@ (copy-annotation o (inc i))
+                                        \[ (let [n (u2 b (inc i))]
+                                             (o 2 n)
+                                             (loop [k 0 j (+ i 3)] (if (= k n) j (recur (inc k) (long (value j)))))))))]
+                            (o 2 (intern (u2 b i)))
+                            (let [n (u2 b (+ i 2))]
+                              (o 2 n)
+                              (loop [k 0 j (+ i 4)]
+                                (if (= k n)
+                                  j
+                                  (do (o 2 (intern (u2 b j)))
+                                      (recur (inc k) (long (value (+ j 2))))))))))
+        ;; the attribute `nm` whose info is at s, its info written to o
+        copy-info (fn [o nm ^long s]
+                    (case nm
+                      ("Signature" "ConstantValue") (o 2 (intern (u2 b s)))
+                      ("Exceptions" "PermittedSubclasses")
+                      (let [m (u2 b s)]
+                        (o 2 m)
+                        (dotimes [j m] (o 2 (intern (u2 b (+ s 2 (* 2 j)))))))
+                      "InnerClasses"
+                      (let [m (u2 b s)]
+                        (o 2 m)
+                        (dotimes [j m]
+                          (let [e (+ s 2 (* 8 j))]
+                            (o 2 (intern (u2 b e))) (o 2 (intern (u2 b (+ e 2))))
+                            (o 2 (intern (u2 b (+ e 4)))) (o 2 (u2 b (+ e 6))))))
+                      "Record" (o 2 0)
+                      ("RuntimeVisibleAnnotations" "RuntimeInvisibleAnnotations")
+                      (let [m (u2 b s)]
+                        (o 2 m)
+                        (loop [k 0 j (+ s 2)] (when (< k m) (recur (inc k) (long (copy-annotation o j))))))))
+        ;; the attributes at i of which those in `kept` written to o; the offset after all of them
+        copy-attributes (fn [o ^long i kept]
+                          (let [n (u2 b i)
+                                [as after] (loop [k 0 i (+ i 2) out []]
+                                             (if (= k n)
+                                               [out i]
+                                               (let [len (u4 b (+ i 2))
+                                                     nm (utf-of (u2 b i))]
+                                                 (recur (inc k) (long (+ (+ i 6) len))
+                                                        (if (contains? kept nm) (conj out [nm (u2 b i) (+ i 6)]) out)))))]
+                            (o 2 (count as))
+                            (doseq [[nm nk s] as]
+                              (o 2 (intern nk))
+                              (let [sub (java.io.ByteArrayOutputStream.)]
+                                (copy-info (Out. sub) nm s)
+                                (o 4 (.size sub))
+                                (.writeTo sub ^java.io.ByteArrayOutputStream (.-bs ^Out o))))
+                            (long after)))
+        body (java.io.ByteArrayOutputStream.)
+        o (Out. body)
+        i (long pend)
+        ni (u2 b (+ i 6))
+        members (fn [^long i kept]
+                  (let [n (u2 b i)]
+                    (o 2 n)
+                    (loop [k 0 j (+ i 2)]
+                      (if (= k n)
+                        j
+                        (do (o 2 (u2 b j))
+                            (o 2 (intern (u2 b (+ j 2))))
+                            (o 2 (intern (u2 b (+ j 4))))
+                            (recur (inc k) (long (copy-attributes o (+ j 6) kept))))))))]
+    (o 2 (u2 b i))
+    (o 2 (intern (u2 b (+ i 2))))
+    (o 2 (intern (u2 b (+ i 4))))
+    (o 2 ni)
+    (dotimes [j ni] (o 2 (intern (u2 b (+ i 8 (* 2 j))))))
+    (let [j (members (+ i 8 (* 2 ni)) (:field kept-attributes))
+          j (members j (:method kept-attributes))]
+      (copy-attributes o j (:class kept-attributes)))
+    (let [out (java.io.ByteArrayOutputStream.)
+          oo (Out. out)]
+      (oo 4 0xcafebabe)
+      (oo 2 (u2 b 4))
+      (oo 2 (u2 b 6))
+      (oo 2 (aget nextk 0))
+      (.writeTo pool out)
+      (.writeTo body out)
+      (.toByteArray out))))

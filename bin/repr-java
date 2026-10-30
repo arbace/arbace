@@ -50,6 +50,24 @@
 #                       corpora samples, baseline, jdk, javac, jdk26u, mutants and tests parsed by
 #                       javac on Arbace and natively, the trees equal, positions included, against
 #                       test/repr/java/parse-check-known.edn
+#   bin/repr-java platform-pack [OUT]
+#                       the java.base pack (arbace.repr.java.platform, doc/classes/JAVA-FRONTEND-SURVEY.md,
+#                       JN10 part 2, JFS131 (b), JFS135 (a)): java.base's class files of the platform
+#                       jdk/javac/platform.sha256 pins (REPR_JAVA_PLATFORM, else bin/javac-vendor platform's
+#                       .tmp/repr-java-platform) stripped to what arbace.repr.java.classfile's parse reads,
+#                       one deterministic file, jdk/platform/java.base.decls (and its provenance,
+#                       jdk/platform/provenance.edn), on the tools' host; no javac's tool
+#   bin/repr-java platform-check [PACK]
+#                       the pack's proof: for every java.base class (parse (strip b)) = (parse b), the
+#                       pack equal to a fresh one byte for byte and, read as a platform, the directory's
+#                       modules, packages, names and classes; its hash and strip's sources the provenance's
+#   bin/repr-java closure-check [--known FILE] [--update]
+#                       the guard of JN10 (doc/classes/JAVA-FRONTEND-SURVEY.md, "JN10: the plan"), on the
+#                       tools' host, no javac: repr/java's read closure (arbace.repr.java and what it
+#                       requires, less javac's half) counted per file for the javac classes it names,
+#                       against test/repr/java/closure-known.edn (a ratchet: no file over its count, a
+#                       file not in it clean), and the clean namespaces required in one process;
+#                       --update rewrites the known file (FILE relative to the checkout's root)
 #   bin/repr-java front-check [--corpus C,...]
 #                       the converter on the native parser's trees (bin/lib/repr-java/front-check, its
 #                       header; doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JFS66 (b)"): the
@@ -91,7 +109,9 @@
 # platform of jdk/javac/platform.sha256 (bin/javac-vendor platform, made once into
 # .tmp/repr-java-platform); REPR_JAVA_CP, javac's class path for the classes the sources name when
 # read's --javac -cp gives none; REPR_JAVA_THREADS, read-jdk's parallel chunks (default 12);
-# REPR_JAVA_PATCH_ALL, REPR_JAVA_DEBUG (arbace.repr.java). REPR_JAVA_HOST: unset or arbace; jvm, the
+# REPR_JAVA_PATCH_ALL, REPR_JAVA_DEBUG (arbace.repr.java); REPR_JAVA_PACK=1, the native provider's
+# java.base from the pack jdk/platform/java.base.decls and the other modules from REPR_JAVA_PLATFORM's
+# directory (arbace.repr.java.platform's default-platform; JN10 part 2). REPR_JAVA_HOST: unset or arbace; jvm, the
 # frozen JVM's read, left with JN6 (JFS36, JFS38).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -103,10 +123,54 @@ case $cmd in
   read|read-jdk) set -- -m arbace.repr.java "$cmd" "$@" ;;
   coverage) set -- -m arbace.repr.java.coverage "$@" ;;
   check) exec "$root/bin/lib/repr-java/check" "$@" ;;
+  closure-check) . "$root/bin/lib/tools.bash"
+                 cd "$root" && arbace_tool -p "$root/test" -m repr.java.closure "$@"; exit $? ;;
   parse-check) exec "$root/bin/lib/repr-java/parse-check" "$@" ;;
   front-check) exec "$root/bin/lib/repr-java/front-check" "$@" ;;
   attr-check) exec "$root/bin/lib/repr-java/front-check" --attr native "$@" ;;
   nojavac-check) exec "$root/bin/lib/repr-java/front-check" --no-javac "$@" ;;
+  platform-pack|platform-check)
+         # JN10 part 2 (JFS131 (b), JFS135 (a)): the java.base pack, on the tools' host, from the platform
+         # at jdk/javac/platform.sha256's pin (REPR_JAVA_PLATFORM, else .tmp/repr-java-platform made by
+         # bin/javac-vendor platform); no javac's tool
+         . "$root/bin/lib/tools.bash"; . "$root/bin/lib/repr-java/host.bash"
+         plat=${REPR_JAVA_PLATFORM:-$root/.tmp/repr-java-platform}
+         if [ -z "${REPR_JAVA_PLATFORM:-}" ] && ! cmp -s "$root/jdk/javac/platform.sha256" "$plat/.pin"; then
+           made=$("$root/bin/javac-vendor" platform "$plat") && [ "$made" = "$plat" ] || { echo "repr-java: no platform (bin/javac-vendor platform)" >&2; exit 1; }
+           cp "$root/jdk/javac/platform.sha256" "$plat/.pin"
+         fi
+         pin=$(grep '  java\.base$' "$root/jdk/javac/platform.sha256" | cut -c1-64)
+         have=$( (cd "$plat/java.base" && find -L . -type f ! -name '_the.*' | LC_ALL=C sort | xargs -d '\n' sha256sum) | sha256sum | cut -c1-64)
+         [ -n "$pin" ] && [ "$pin" = "$have" ] || echo "repr-java: warning: $plat/java.base is not the pin's ($have, pinned $pin)" >&2
+         pack=$root/jdk/platform/java.base.decls prov=$root/jdk/platform/provenance.edn
+         strip_hash() { (cd "$root" && sha256sum arbace/repr/java/classfile.ae arbace/repr/java/platform.ae | sha256sum | cut -c1-64); }
+         if [ "$cmd" = platform-pack ]; then
+           out=${1:-$pack}
+           arbace_tool -m arbace.repr.java.platform pack "$plat" "$out" java.base || exit 1
+           if [ "$out" = "$pack" ]; then
+             printf '%s\n' ";; jdk/platform/java.base.decls: java.base's declarations-only class files (doc/classes/JAVA-FRONTEND-SURVEY.md," \
+               ";; JN10 part 2, JFS131 (b), JFS135 (a)), written by bin/repr-java platform-pack from the platform" \
+               ";; jdk/javac/platform.sha256 pins; bin/repr-java platform-check proves it, bin/provenance-check checks the hash" \
+               "{:pack \"jdk/platform/java.base.decls\"" \
+               " :sha256 \"$(sha256sum < "$pack" | cut -c1-64)\"" \
+               " :bytes $(stat -c %s "$pack")" \
+               " :jdk \"$(repr_java_platform)\"" \
+               " :java.base \"$pin\"" \
+               " :writer \"bin/repr-java platform-pack\"" \
+               " :strip \"$(strip_hash)\"}" > "$prov"
+           fi
+           exit 0
+         else
+           st=0
+           arbace_tool -m arbace.repr.java.platform check "$plat" "${1:-$pack}" java.base || st=1
+           want=$(sed -n 's/.*:sha256 "\([0-9a-f]*\)".*/\1/p' "$prov")
+           [ "$want" = "$(sha256sum < "${1:-$pack}" | cut -c1-64)" ] && echo "platform-check: the pack's hash is the provenance's" \
+             || { echo "platform-check: the pack's hash is not $prov's (bin/repr-java platform-pack)"; st=1; }
+           ws=$(sed -n 's/.*:strip "\([0-9a-f]*\)".*/\1/p' "$prov")
+           [ "$ws" = "$(strip_hash)" ] && echo "platform-check: strip's sources are the provenance's" \
+             || { echo "platform-check: classfile.ae or platform.ae changed since the pack was written (bin/repr-java platform-pack)"; st=1; }
+           exit $st
+         fi ;;
   parse) if [ "${1:-}" = --javac ]; then
            shift
            if [ "${1:-}" = --time ]; then shift; set -- -m arbace.repr.java.jtree time "$@"

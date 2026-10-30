@@ -30,13 +30,16 @@
 # not the program's, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN2"), Go's runtime
 # patches, the roots and Go's pin; nor jdk/provenance.edn (since GT2: what repr/java wrote the forms
 # with, its sources' hash and the tool, not the runtime; gate_key leaves it out likewise, so that
-# a provenance rewritten keeps the gate's executables and their runtime the checkout's). Two programs of one runtime key
+# a provenance rewritten keeps the gate's executables and their runtime the checkout's); nor jdk/platform/ (JN10
+# part 2, the java.base pack of repr/java's shipped reader: no program embeds it until the read closure is
+# embedded, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN10 (write-ahead)", JFS147). Two programs of one runtime key
 # analyze a checkout's namespaces alike, so a build's host of that key compiles them (one j2g
 # run).
 arbace_runtime_key() {
   local discard=${TMPDIR:-$1/.tmp/tmp}/version.discard
   mkdir -p "${discard%/*}"
   (cd "$1" && find arbace/lang go overlay/jdk jdk -type f ! -path jdk/edge.edn ! -path 'jdk/javac/*' ! -path jdk/provenance.edn \
+       ! -path 'jdk/platform/*' \
        ! -path 'overlay/jdk/javac/*' 2>"$discard" \
      | LC_ALL=C sort | xargs -d '\n' sha256sum | sha256sum | cut -c1-64)
 }

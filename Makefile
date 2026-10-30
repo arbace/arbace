@@ -14,7 +14,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
   program programs-check programs-essential gate gate-full gate-full-parallel gate-plan gate-why gate-audit gate-prune gate-queue gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-demos java-check-judge provenance-check reap suite oracle diffcheck generated-check verify jdk-verify edge-verify javac-verify javac-classes fixtures-verify tamago-verify \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
-  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
+  repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-divergences goi-divergences-aot java-check java-check-compiled java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check clean \
   suite-aot suite-aot-essential suite-divergences java-forms-verify java-forms-update reap-record-native-check \
   repr-c-gcc-tests check-makefile
 
@@ -165,6 +165,12 @@ repr-java-attr-check: ## repr/java's native attribution provider: the scope and 
 	bin/repr-java attr-check
 repr-java-nojavac-check: ## repr/java's read without javac: every corpus read by the native parser and the native provider alone (a file that meets what only javac answers read again with javac, counted), its forms equal to javac's, file for file, with its fallbacks, time and memory (bin/repr-java nojavac-check)
 	bin/repr-java nojavac-check
+repr-java-closure-check: ## repr/java's read closure names no javac class, as a ratchet (test/repr/java/closure-known.edn), its clean namespaces loaded in one process; light, no javac (bin/repr-java closure-check)
+	bin/repr-java closure-check
+repr-java-platform-pack: ## the java.base pack for the shipped reader, jdk/platform/java.base.decls and its provenance, deterministic (JN10 part 2, JFS135 (a); bin/repr-java platform-pack)
+	bin/repr-java platform-pack
+repr-java-platform-check: ## the pack's proof: (parse (strip b)) = (parse b) over java.base, the pack a fresh one's, its hash the provenance's (bin/repr-java platform-check)
+	bin/repr-java platform-check
 fixtures-verify: ## the suite's Java fixtures, on javac's tool executable (bin/clojure-tests --java-fixtures verify)
 	bin/clojure-tests --java-fixtures verify
 tamago-verify: ## tamago/goroot and goos; the guest from them (bin/tamago-vendor verify, check)

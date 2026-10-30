@@ -1,0 +1,188 @@
+(ns repr.java.closure
+  "bin/repr-java closure-check (doc/classes/JAVA-FRONTEND-SURVEY.md, \"JN10: the plan\", JN10.3 step 1):
+  the guard that repr/java's read closure names no javac class, as a ratchet. The closure is the set
+  of namespaces arbace.repr.java requires transitively (each file's ns form read with the reader),
+  less javac's half (arbace.repr.java.javac, jtree, jtypes, javac-tree, javac-model, javac-read).
+  Per closure file the javac-naming sites are counted, every symbol occurrence once (all forms and
+  their metadata walked): a symbol that names a class of com.sun.tools.javac, com.sun.source,
+  javax.tools or javax.lang.model in full, one whose class part is a short name the file imports
+  from those packages, one whose namespace is an alias of javac's half, and each require of a
+  namespace of the half. The counts are compared with test/repr/java/closure-known.edn, a map
+  {\"arbace/repr/java/x.ae\" count}: a file over its known count, or with sites and not in the map,
+  is a problem. Then every closure namespace that is clean and whose own requires (within
+  arbace.repr.java) are all clean is required in this process; a failure to load is a problem.
+
+    closure-check [--known FILE] [--update]
+        --update rewrites FILE (default test/repr/java/closure-known.edn) with the current counts.
+  Run from the checkout's root (bin/repr-java does)."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]))
+
+(def half '#{arbace.repr.java.javac arbace.repr.java.jtree arbace.repr.java.jtypes
+             arbace.repr.java.javac-tree arbace.repr.java.javac-model arbace.repr.java.javac-read})
+
+(def javac-prefixes ["com.sun.tools.javac." "com.sun.source." "javax.tools." "javax.lang.model."])
+
+(defn- javac-package? [s] (boolean (some #(str/starts-with? s %) javac-prefixes)))
+
+(defn ns-file [ns-sym]
+  (if (= ns-sym 'arbace.repr.java)
+    "arbace/repr/java.ae"
+    (str "arbace/repr/java/"
+         (str/replace (subs (str ns-sym) (count "arbace.repr.java.")) "-" "_")
+         ".ae")))
+
+(declare requires)
+
+(defn read-forms
+  "every form of the file. Auto-resolved keywords (::alias/k) need the aliases of the file's own ns
+  form: read in a scratch namespace aliasing them (to empty namespaces, nothing is loaded)."
+  [path]
+  (let [tmp (create-ns (symbol (str "closure-reader." (str/replace path #"[^\w]" "_"))))]
+    (with-open [r (java.io.PushbackReader. (java.io.FileReader. ^String path))]
+      (binding [*read-eval* false *ns* tmp]
+        (loop [acc []]
+          (let [f (read {:eof ::eof} r)]
+            (when (and (empty? acc) (seq? f) (= 'ns (first f)))
+              (doseq [[n a] (requires [f]) :when a]
+                (alias a (create-ns n))))
+            (if (= f ::eof) acc (recur (conj acc f)))))))))
+
+(defn- our-ns? [s] (let [n (str s)] (or (= n "arbace.repr.java") (str/starts-with? n "arbace.repr.java."))))
+
+(defn ns-clauses [forms]
+  (let [nf (first (filter #(and (seq? %) (= 'ns (first %))) forms))]
+    (->> (rest nf) (filter seq?) (group-by first))))
+
+(defn requires [forms]
+  "[[required-ns alias-or-nil] ...] of the ns form's :require clauses."
+  (vec (for [c (get (ns-clauses forms) :require)
+             spec (rest c)
+             :let [spec (if (symbol? spec) [spec] spec)]
+             :when (vector? spec)]
+         [(first spec) (second (drop-while #(not= % :as) spec))])))
+
+(defn imports [forms]
+  "short name -> full name, of the ns form's :import clauses."
+  (into {} (for [c (get (ns-clauses forms) :import)
+                 spec (rest c)
+                 [short full] (if (symbol? spec)
+                                [[(symbol (last (str/split (str spec) #"\."))) (str spec)]]
+                                (for [k (rest spec)] [k (str (first spec) "." k)]))]
+             [(str short) full])))
+
+(defn all-symbols
+  "every symbol occurrence in form, metadata of symbols and collections included."
+  [form]
+  (let [m (meta form)
+        from-meta (when m (mapcat all-symbols (concat (keys m) (vals m))))]
+    (concat from-meta
+            (cond
+              (symbol? form) [form]
+              (map? form) (mapcat all-symbols (mapcat identity form))
+              (coll? form) (mapcat all-symbols form)
+              :else nil))))
+
+(defn- class-part [sym]
+  (let [c (or (namespace sym) (name sym))
+        c (if (str/ends-with? c ".") (subs c 0 (dec (count c))) c)]
+    (first (str/split c #"[$.]"))))
+
+(defn sites
+  "the javac-naming symbols of a file: a vector of [kind text]."
+  [forms]
+  (let [imps (imports forms)
+        jimps (into #{} (comp (filter (fn [[_ full]] (javac-package? full))) (map first)) imps)
+        reqs (requires forms)
+        halfals (into #{} (comp (filter (fn [[n a]] (and a (half n)))) (map (comp str second))) reqs)
+        syms (mapcat all-symbols forms)]
+    (vec (concat
+          (for [[n _] reqs :when (half n)] [:require-half (str n)])
+          (for [s syms
+                :let [t (str s) ns (namespace s)]
+                :let [kind (cond
+                             (javac-package? t) :full
+                             (and ns (halfals ns)) :alias
+                             (and (not (javac-package? t)) (jimps (class-part s))
+                                  ;; a plain local or var never has an imported class's name
+                                  true) :imported)]
+                :when kind]
+            [kind t])))))
+
+(defn closure
+  "{ns-sym forms} of arbace.repr.java and what it requires, less the half; {ns-sym #{required in closure}}"
+  []
+  (loop [todo ['arbace.repr.java] seen {} deps {}]
+    (if-let [n (first todo)]
+      (if (or (seen n) (half n))
+        (recur (rest todo) seen deps)
+        (let [forms (read-forms (ns-file n))
+              rs (->> (requires forms) (map first) (filter our-ns?) (remove half) (remove #{n}))]
+          (recur (concat (rest todo) rs) (assoc seen n forms) (assoc deps n (set rs)))))
+      [seen deps])))
+
+(defn- parse-args [args]
+  (loop [a args o {:known "test/repr/java/closure-known.edn"}]
+    (if-let [x (first a)]
+      (case x
+        "--update" (recur (rest a) (assoc o :update true))
+        "--known" (recur (drop 2 a) (assoc o :known (second a)))
+        (throw (ex-info (str "closure-check: unknown option " x) {})))
+      o)))
+
+(defn- read-known [path]
+  (if (.exists (java.io.File. ^String path))
+    (with-open [r (java.io.PushbackReader. (java.io.FileReader. ^String path))] (read r))
+    {}))
+
+(defn- write-known [path counts]
+  (spit path (str "{" (str/join "\n " (for [[f c] (sort counts)] (str (pr-str f) " " c))) "}\n")))
+
+(defn run [args]
+  (let [{:keys [known update]} (parse-args args)
+        [forms deps] (closure)
+        files (into (sorted-map) (for [[n fs] forms] [(ns-file n) n]))
+        counts (into (sorted-map) (for [[f n] files] [f (count (sites (forms n)))]))
+        kn (read-known known)
+        problems (atom 0)
+        problem! (fn [& s] (swap! problems inc) (println " problem:" (apply str s)))]
+    (println (str "closure: " (count files) " files"))
+    (doseq [[f c] counts]
+      (let [k (get kn f)]
+        (println (str f "\t" (cond (zero? c) "clean" k (str c " sites (known " k ")") :else (str c " sites (not known)"))))
+        (cond
+          (or update (zero? c)) nil
+          (nil? k) (problem! f " names javac (" c " sites) and is not in the known file")
+          (> c k) (problem! f " has " c " sites, over its known " k))))
+    (doseq [f (sort (remove counts (keys kn)))]
+      (println (str f "\tin the known file, no longer in the closure")))
+    (doseq [f (sort (keys counts)) :let [k (get kn f)] :when (and k (< (counts f) k) (not update))]
+      (println (str f "\tbelow its known count (" k "): --update ratchets it")))
+    (when update
+      (write-known known (into {} (remove (comp zero? val)) counts))
+      (println (str "wrote " known)))
+    ;; the load step
+    (let [clean? (fn [n] (zero? (counts (ns-file n))))
+          clean-all? (fn clean-all? [n seen]
+                       (and (clean? n)
+                            (every? #(or (seen %) (clean-all? % (conj seen n))) (deps n))))
+          ;; transitive: n and everything it reaches within the closure are clean
+          reach (fn [n] (loop [todo [n] seen #{}]
+                          (if-let [x (first todo)]
+                            (if (seen x) (recur (rest todo) seen) (recur (concat (rest todo) (deps x)) (conj seen x)))
+                            seen)))
+          loadable (sort (filter #(every? clean? (reach %)) (keys forms)))
+          fails (atom [])]
+      (doseq [n loadable]
+        (try (require n)
+             (catch Throwable e (swap! fails conj [n (str e (when-let [c (.getCause e)] (str " / " c)))]))))
+      (println (str "loads: " (- (count loadable) (count @fails)) " namespaces"))
+      (doseq [[n e] @fails] (problem! "load of " n " failed: " e)))
+    (println (if (zero? @problems) "closure-check: passed" (str "closure-check: " @problems " problems")))
+    (zero? @problems)))
+
+(defn -main [& args]
+  (let [ok (try (run args) (catch Throwable e (println (str "closure-check: " e)) false))]
+    (flush)
+    (shutdown-agents)
+    (System/exit (if ok 0 1))))
