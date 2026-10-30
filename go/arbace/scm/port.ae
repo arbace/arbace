@@ -11,7 +11,7 @@
 (go/file "port.go"
   :imports [[bufio "bufio"] [fmt "fmt"] [os "os"] [strings "strings"] [utf8 "unicode/utf8"]])
 
-(go/const [^{:tag uint8} pConsole iota] [pString] [pMem])
+(go/const [^{:tag uint8} pConsole iota] [pString] [pMem] [pCustom])
 
 (go/type Codec "Codec is a transcoder's codec: utf-8, latin-1 or utf-16.\n" (struct ^string Name))
 
@@ -26,18 +26,17 @@
 (go/method String ^string [^{:tag (* Transcoder)} t]
   (+ "#<transcoder " (.-Name (.-Codec t)) " " (.-Eol t) " " (.-Mode t) ">"))
 
-(go/type FileOptions "FileOptions is a file-options object: the options named (no-create, no-fail, no-truncate).\n"
-  (struct ^bool NoCreate ^bool NoFail ^bool NoTruncate ^{:tag (slice (* Symbol))} Names))
-
-(go/method String ^string [^{:tag (* FileOptions)} o] "#<enum-set>")
-
 (go/type Port "Port is a Scheme port (see the file's header).\n"
   (struct ^uint8 Kind ^bool In ^bool Out ^bool Binary ^bool Closed ^bool Err
           ^string Name ^{:tag (* Transcoder)} Tr ^string BufMode
           ^{:tag (slice rune)} runes ^int rpos
           ^{:tag (slice byte)} data ^int pos
           ^{:tag (* os/File)} f ^int low ^bool dirty
-          ^bool bomDone ^bool le ^bool bomWritten))
+          ^bool bomDone ^bool le ^bool bomWritten
+          ^{:tag (* customPort)} cu))
+
+(go/type customPort "customPort is a custom port's procedures (#f when not given) and its output buffers.\n"
+  (struct ^any Rd ^any Wr ^any Gp ^any Sp ^any Cl ^{:tag (slice byte)} obytes ^{:tag (slice rune)} orunes))
 
 (go/method String "String is Chez's write of a port: #<input port string>, #<binary output port /tmp/x>, ...\n" ^string [^{:tag (* Port)} p]
   (let [s "#<"]
@@ -70,6 +69,10 @@
     (flushFile p)))
 
 (go/func flushFile [^{:tag (* Port)} p]
+  (when (== (.-Kind p) pCustom)
+    (when (and (.-Out p) (not (.-Closed p)))
+      (flushCustom p))
+    (return))
   (when (and (!= (.-f p) nil) (.-dirty p) (not (.-Closed p)))
     (when (< (.-low p) (len (.-data p)))
       (.WriteAt (.-f p) (subslice (.-data p) (.-low p)) (conv int64 (.-low p))))
@@ -242,7 +245,9 @@
 ;; nextRune reads (commit) or peeks the next character of textual input port p.
 (go/func nextRune [^{:tag (* Port)} p ^string who ^bool commit] :results [rune bool]
   (switch (.-Kind p)
-    (case [pString]
+    (case [pString pCustom]
+      (when (== (.-Kind p) pCustom)
+        (customFillRunes p))
       (when (>= (.-rpos p) (len (.-runes p)))
         (return 0 false))
       (let [r (aget (.-runes p) (.-rpos p))]
@@ -294,6 +299,8 @@
       (when (!= err nil)
         (return -1))
       (return (conv int (aget bs 0)))))
+  (when (== (.-Kind p) pCustom)
+    (customFillBytes p))
   (when (>= (.-pos p) (len (.-data p)))
     (return -1))
   (let [b (aget (.-data p) (.-pos p))]
@@ -346,6 +353,9 @@
     out))
 
 (go/func writeBytes "writeBytes writes b at the position of memory port p.\n" [^{:tag (* Port)} p ^{:tag (slice byte)} b]
+  (when (== (.-Kind p) pCustom)
+    (set! (.-obytes (.-cu p)) (append (.-obytes (.-cu p)) (spread b)))
+    (return))
   (let [pos (.-pos p)
         end (+ pos (len b))]
     (cond
@@ -375,6 +385,7 @@
   (switch (.-Kind p)
     (case [pString] (set! (.-runes p) (append (.-runes p) (spread rs))))
     (case [pConsole] (consoleWrite p (conv string rs)))
+    (case [pCustom] (set! (.-orunes (.-cu p)) (append (.-orunes (.-cu p)) (spread rs))))
     (default (writeBytes p (encodeRunes p who rs)))))
 
 (go/method putGo "putGo writes Go string s to textual output port p.\n" [^{:tag (* Port)} p ^string who ^string s]
@@ -397,6 +408,54 @@
     (return))
   (flushFile p)
   (set! (.-Closed p) true)
+  (when (and (!= (.-cu p) nil) (!= (.-Cl (.-cu p)) (conv any false)))
+    (CallProc (.-Cl (.-cu p))))
   (when (!= (.-f p) nil)
     (.Close (.-f p))
     (delete openFiles p)))
+
+;; ---------------------------------------------------------------------------------------
+;; Custom ports: input is read in chunks into Data / runes (the position the port reports is the
+;; user's get-position less what is buffered); output is buffered and written by write! at flush.
+
+(go/func customFillBytes [^{:tag (* Port)} p]
+  (let [c (.-cu p)]
+    (when (or (< (.-pos p) (len (.-data p))) (== (.-Rd c) (conv any false)))
+      (return))
+    (let [bv (addr (lit Bytevector :B (make (slice byte) 4096)))
+          r (CallProc (.-Rd c) bv (conv int64 0) (conv int64 4096))
+          (values n ok) (assert int64 r)]
+      (when (or (not ok) (< n 0) (> n 4096))
+        (AssertionViolation "read!" "invalid result ~s from custom port read!" r))
+      (set! (.-data p) (subslice (.-B bv) _ (conv int n)))
+      (set! (.-pos p) 0))))
+
+(go/func customFillRunes [^{:tag (* Port)} p]
+  (let [c (.-cu p)]
+    (when (or (< (.-rpos p) (len (.-runes p))) (== (.-Rd c) (conv any false)))
+      (return))
+    (let [s (addr (lit String :R (make (slice rune) 4096)))
+          r (CallProc (.-Rd c) s (conv int64 0) (conv int64 4096))
+          (values n ok) (assert int64 r)]
+      (when (or (not ok) (< n 0) (> n 4096))
+        (AssertionViolation "read!" "invalid result ~s from custom port read!" r))
+      (set! (.-runes p) (subslice (.-R s) _ (conv int n)))
+      (set! (.-rpos p) 0))))
+
+(go/func flushCustom [^{:tag (* Port)} p]
+  (let [c (.-cu p)]
+    (while (or (> (len (.-obytes c)) 0) (> (len (.-orunes c)) 0))
+      (let [^int total 0
+            ^any buf nil]
+        (if (.-Binary p)
+          (do (set! total (len (.-obytes c)))
+              (set! buf (addr (lit Bytevector :B (.-obytes c)))))
+          (do (set! total (len (.-orunes c)))
+              (set! buf (addr (lit String :R (.-orunes c))))))
+        (let [r (CallProc (.-Wr c) buf (conv int64 0) (conv int64 total))
+              (values n ok) (assert int64 r)]
+          (when (or (not ok) (< n 1) (> n (conv int64 total)))
+            (AssertionViolation "write!" "invalid result ~s from custom port write!" r))
+          (if (.-Binary p)
+            (set! (.-obytes c) (append (make (slice byte) 0) (spread (subslice (.-obytes c) (conv int n)))))
+            (set! (.-orunes c) (append (make (slice rune) 0) (spread (subslice (.-orunes c) (conv int n)))))))))))

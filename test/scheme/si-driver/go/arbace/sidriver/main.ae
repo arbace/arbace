@@ -2,10 +2,13 @@
 
 (go/file "main.go"
   :doc "Command sidriver runs Scheme programs on si: psyntax booted from its expanded system, then each
-program expanded by psyntax on si and run.\n\n    sidriver --pp PSYNTAX.ss [--lib DIR]... [--core|--case] FILE [ARG...]\n\nFILE's leading library forms are installed first. --core runs FILE's core forms directly (no psyntax);
---case marks the end of the expansion on stderr (SI-RUN) and reports an uncaught raise as data (SI-RAISE). The status is the program's (exit), 255 for an
-uncaught raise (reported on stderr as Chez reports it), 0 otherwise.\n"
-  :imports [[fmt "fmt"] [os "os"] [scm "arbace/scm"]])
+program expanded by psyntax on si and run.\n\n    sidriver --pp PSYNTAX.ss [--lib DIR]... [--core|--case] FILE [ARG...]\n\n--core
+runs FILE's core forms directly (no psyntax); --case installs FILE's leading library forms first (as the
+expander's test cases hold them), marks the end of the expansion on stderr (SI-RUN) and reports an
+uncaught raise as data (SI-RAISE). The status is the program's (exit), 255 for an uncaught raise
+(reported on stderr as Chez reports it), 0 otherwise. SI_CPUPROFILE names a CPU profile to write; GOGC
+defaults to 400\n"
+  :imports [[fmt "fmt"] [os "os"] [debug "runtime/debug"] [pprof "runtime/pprof"] [scm "arbace/scm"]])
 
 (go/func readFile ^string [^string name]
   (let [(values b err) (os/ReadFile name)]
@@ -18,6 +21,7 @@ uncaught raise (reported on stderr as Chez reports it), 0 otherwise.\n"
   (let [pp ""
         ^{:tag (slice string)} libs nil
         core false
+        cases false
         args (subslice os/Args 1)]
     (while (and (> (len args) 0) (> (len (aget args 0)) 1) (== (aget (aget args 0) 0) \-))
       (switch (aget args 0)
@@ -26,6 +30,7 @@ uncaught raise (reported on stderr as Chez reports it), 0 otherwise.\n"
         (case ["--core"] (set! core true) (set! args (subslice args 1)))
         (case ["--case"]
           (set! scm/ReportData true)
+          (set! cases true)
           (set! scm/OnRun (fn [] (scm/FlushAll) (fmt/Fprintln os/Stderr "SI-RUN")))
           (set! args (subslice args 1)))
         (default (fmt/Fprintln os/Stderr "sidriver: unknown option" (aget args 0)) (os/Exit 2))))
@@ -33,6 +38,15 @@ uncaught raise (reported on stderr as Chez reports it), 0 otherwise.\n"
       (fmt/Fprintln os/Stderr "usage: sidriver --pp PSYNTAX.ss [--lib DIR]... [--core] FILE [ARG...]")
       (os/Exit 2))
     (set! scm/CommandLine args)
+    ;; si allocates a frame and an environment a call over a small live heap: Go's default GOGC of 100
+    ;; spends half the time collecting (fib: 2.0 s against 1.45 s at 400)
+    (when (== (os/Getenv "GOGC") "")
+      (debug/SetGCPercent 400))
+    (when (!= (os/Getenv "SI_CPUPROFILE") "")
+      (let [(values f err) (os/Create (os/Getenv "SI_CPUPROFILE"))]
+        (when (== err nil)
+          (pprof/StartCPUProfile f)
+          (set! scm/AtExit (fn [] (pprof/StopCPUProfile))))))
     (let [m (scm/NewM)
           status (scm/Report (fn []
                    (when (not core)
@@ -42,5 +56,7 @@ uncaught raise (reported on stderr as Chez reports it), 0 otherwise.\n"
                      (if core
                        (range [_ f forms]
                          (.Eval m f))
-                       (.RunFile m forms)))))]
+                       (if cases (.RunFile m forms) (.RunProgram m forms))))))]
+      (when (!= scm/AtExit nil)
+        (scm/AtExit))
       (os/Exit status))))

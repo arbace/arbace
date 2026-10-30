@@ -2,7 +2,7 @@
 (in-ns 'go.arbace.scm)
 
 (go/file "prim_io.go"
-  :imports [[os "os"]])
+  :imports [[os "os"] [strings "strings"]])
 
 (go/func charOrEof ^any [^rune r ^bool ok]
   (when ok
@@ -47,12 +47,12 @@
       (AssertionViolation who "~s is not a valid buffer mode" (aget a i)))
     s))
 
-(go/func optFileOptions ^{:tag (* FileOptions)} [^string who ^{:tag (slice any)} a ^int i]
+(go/func optFileOptions ^{:tag (* EnumSet)} [^string who ^{:tag (slice any)} a ^int i]
   (when (<= (len a) i)
-    (return (addr (lit FileOptions))))
-  (let [(values o ok) (assert (* FileOptions) (aget a i))]
-    (when (not ok)
-      (NotA who "file-options object" (aget a i)))
+    (return (newEnumSet fileOptionsType)))
+  (let [(values o ok) (assert (* EnumSet) (aget a i))]
+    (when (or (not ok) (!= (.-T o) fileOptionsType))
+      (AssertionViolation who "~s is not a file-options object" (aget a i)))
     o))
 
 (go/func ArgFileName ^string [^string who ^any x]
@@ -108,18 +108,6 @@
 
 ;; Files
 
-(go/func fileOptionsFrom ^any [^any l]
-  (let [o (addr (lit FileOptions))
-        xs (ArgList "make-file-options" l)]
-    (range [_ x xs]
-      (let [s (ArgSymbol "make-file-options" x)]
-        (set! (.-Names o) (append (.-Names o) s))
-        (switch (.-Name s)
-          (case ["no-create"] (set! (.-NoCreate o) true))
-          (case ["no-fail"] (set! (.-NoFail o) true))
-          (case ["no-truncate"] (set! (.-NoTruncate o) true)))))
-    o))
-
 (go/func openFileIn "openFileIn opens file name for input (a memory port over its bytes).\n"
   ^{:tag (* Port)} [^string who ^string name ^{:tag (* Transcoder)} tr ^string buf]
   (let [(values b err) (os/ReadFile name)]
@@ -128,14 +116,14 @@
     (addr (lit Port :Kind pMem :In true :Binary (== tr nil) :Name name :Tr tr :BufMode buf :data b))))
 
 (go/func openFileOut "openFileOut opens file name for output (and input when in) as file-options o say.\n"
-  ^{:tag (* Port)} [^string who ^string name ^{:tag (* FileOptions)} o ^bool in ^string buf ^{:tag (* Transcoder)} tr]
+  ^{:tag (* Port)} [^string who ^string name ^{:tag (* EnumSet)} o ^bool in ^string buf ^{:tag (* Transcoder)} tr]
   (let [(values _ serr) (os/Stat name)
         exists (== serr nil)
         flags (bit-or os/O_RDWR os/O_CREATE)
-        truncate (not (.-NoTruncate o))]
-    (when (and (.-NoCreate o) (not exists))
+        truncate (not (.Has o "no-truncate"))]
+    (when (and (.Has o "no-create") (not exists))
       (FileError who name serr false))
-    (when (and (not (.-NoCreate o)) exists (not (.-NoFail o)))
+    (when (and (not (.Has o "no-create")) exists (not (.Has o "no-fail")))
       (FileError who name os/ErrExist false))
     (when truncate
       (set! flags (bit-or flags os/O_TRUNC)))
@@ -206,7 +194,18 @@
       (when (.-In p)
         (return (conv int64 (.-rpos p))))
       (return (conv int64 (len (.-runes p)))))
-    (case [pMem] (return (conv int64 (.-pos p)))))
+    (case [pMem] (return (conv int64 (.-pos p))))
+    (case [pCustom]
+      (when (== (.-Gp (.-cu p)) (conv any false))
+        (AssertionViolation who "~s does not support port-position" p))
+      (let [r (CallProc (.-Gp (.-cu p)))
+            (values n ok) (assert int64 r)]
+        (when (not ok)
+          (AssertionViolation who "invalid result ~s from get-position" r))
+        (if (.-Binary p)
+          (set! n (+ (- n (conv int64 (- (len (.-data p)) (.-pos p)))) (conv int64 (len (.-obytes (.-cu p))))))
+          (set! n (+ (- n (conv int64 (- (len (.-runes p)) (.-rpos p)))) (conv int64 (len (.-orunes (.-cu p)))))))
+        (return n))))
   (AssertionViolation who "~s does not support port-position" p)
   nil)
 
@@ -228,10 +227,23 @@
           (RaiseObj (ioCondition (lit (slice (* Record)) (MakeSimple CondIOInvalidPosition pos) (MakeSimple CondIOPort p))
                       "set-port-position!" "failed for position ~s on ~s: ~(~a~)" (lit (slice any) pos p (Str "out of range")))))
         (set! (.-pos p) (conv int n)))
+      (case [pCustom]
+        (when (== (.-Sp (.-cu p)) (conv any false))
+          (AssertionViolation "set-port-position!" "~s does not support set-port-position!" p))
+        (flushCustom p)
+        (set! (.-data p) nil)
+        (set! (.-pos p) 0)
+        (set! (.-runes p) nil)
+        (set! (.-rpos p) 0)
+        (CallProc (.-Sp (.-cu p)) pos))
       (default (AssertionViolation "set-port-position!" "~s does not support set-port-position!" p)))))
 
-(go/func hasPosition ^bool [^any x]
+(go/func hasPosition ^bool [^any x ^bool set]
   (let [(values p ok) (assert (* Port) x)]
+    (when (and ok (== (.-Kind p) pCustom))
+      (if set
+        (return (!= (.-Sp (.-cu p)) (conv any false)))
+        (return (!= (.-Gp (.-cu p)) (conv any false)))))
     (and ok (!= (.-Kind p) pConsole))))
 
 (go/func isOctets ^bool [^any x] (let [(values _ ok) (assert (* Bytevector) x)] ok))
@@ -240,8 +252,6 @@
   (let [(values _ err) (os/Stat name)]
     (== err nil)))
 
-(go/func customPort [^string who]
-  (Unimplemented who "custom ports (SM6)"))
 
 (go/func init []
   ;; ----- the current ports, eof
@@ -496,11 +506,11 @@
       (when (!= err nil)
         (FileError "delete-file" name err true))
       Unspec)))
-  (Def1 "make-file-options" (fn ^any [^any l] (fileOptionsFrom l)))
+  (Def1 "make-file-options" (fn ^any [^any l] (enumConstruct "make-file-options" fileOptionsType l)))
   (Def1 "open-input-file" (fn ^any [^any x]
     (openFileIn "open-input-file" (ArgFileName "open-input-file" x) (NativeTranscoder) "block")))
   (Def "open-output-file" 1 2 (fn ^any [^{:tag (slice any)} a]
-    (openFileOut "open-output-file" (ArgFileName "open-output-file" (aget a 0)) (addr (lit FileOptions)) false "block" (NativeTranscoder))))
+    (openFileOut "open-output-file" (ArgFileName "open-output-file" (aget a 0)) (newEnumSet fileOptionsType) false "block" (NativeTranscoder))))
   (DefCtl "call-with-input-file" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
     (let [name (ArgFileName "call-with-input-file" (aget a 0))
           proc (ArgProc "call-with-input-file" (aget a 1))]
@@ -508,7 +518,7 @@
   (DefCtl "call-with-output-file" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
     (let [name (ArgFileName "call-with-output-file" (aget a 0))
           proc (ArgProc "call-with-output-file" (aget a 1))]
-      (return (callWith m (openFileOut "call-with-output-file" name (addr (lit FileOptions)) false "block" (NativeTranscoder)) proc true)))))
+      (return (callWith m (openFileOut "call-with-output-file" name (newEnumSet fileOptionsType) false "block" (NativeTranscoder)) proc true)))))
   (DefCtl "with-input-from-file" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
     (let [name (ArgFileName "with-input-from-file" (aget a 0))
           thunk (ArgProc "with-input-from-file" (aget a 1))]
@@ -516,7 +526,7 @@
   (DefCtl "with-output-to-file" 2 2 (fn [^{:tag (* M)} m ^{:tag (slice any)} a] :results [any bool]
     (let [name (ArgFileName "with-output-to-file" (aget a 0))
           thunk (ArgProc "with-output-to-file" (aget a 1))]
-      (return (withCurrent m (openFileOut "with-output-to-file" name (addr (lit FileOptions)) false "block" (NativeTranscoder)) true thunk)))))
+      (return (withCurrent m (openFileOut "with-output-to-file" name (newEnumSet fileOptionsType) false "block" (NativeTranscoder)) true thunk)))))
   (Def "open-file-input-port" 1 4 (fn ^any [^{:tag (slice any)} a]
     (let [name (ArgFileName "open-file-input-port" (aget a 0))]
       (optFileOptions "open-file-input-port" a 1)
@@ -541,8 +551,8 @@
     (addr (lit Port :Kind pConsole :Out true :Err true :Binary true :Name "stderr"))))
 
   ;; ----- positions
-  (Def1 "port-has-port-position?" (fn ^any [^any x] (ArgPort "port-has-port-position?" x) (hasPosition x)))
-  (Def1 "port-has-set-port-position!?" (fn ^any [^any x] (ArgPort "port-has-set-port-position!?" x) (hasPosition x)))
+  (Def1 "port-has-port-position?" (fn ^any [^any x] (ArgPort "port-has-port-position?" x) (hasPosition x false)))
+  (Def1 "port-has-set-port-position!?" (fn ^any [^any x] (ArgPort "port-has-set-port-position!?" x) (hasPosition x true)))
   (Def1 "port-position" (fn ^any [^any x]
     (let [p (ArgPort "port-position" x)]
       (checkOpen "port-position" p)
@@ -603,8 +613,31 @@
           p (NewBytesOutput tr)]
       (addr (lit Bytevector :B (append (make (slice byte) 0) (spread (encodeRunes p "string->bytevector" (.-R str)))))))))
 
-  ;; ----- custom ports (SM6)
-  (range [_ name (lit (slice string) "make-custom-binary-input-port" "make-custom-binary-output-port" "make-custom-textual-input-port"
-                      "make-custom-textual-output-port" "make-custom-binary-input/output-port" "make-custom-textual-input/output-port")]
-    (let [nm name]
-      (Def nm 0 -1 (fn ^any [^{:tag (slice any)} a] (customPort nm) Unspec)))))
+  ;; ----- custom ports
+  (range [_ spec (lit (slice string) "binary-input" "binary-output" "textual-input" "textual-output" "binary-input/output" "textual-input/output")]
+    (let [sp spec
+          name (+ "make-custom-" sp "-port")
+          bin (strings/HasPrefix sp "binary")
+          in (strings/HasSuffix sp "input")
+          both (strings/HasSuffix sp "input/output")
+          ^int n 5]
+      (when both (set! n 6))
+      (Def name n n (fn ^any [^{:tag (slice any)} a]
+        (let [idArg (ArgString name (aget a 0))
+              c (addr (lit customPort))
+              k 1]
+          (when (or in both)
+            (set! (.-Rd c) (ArgProc name (aget a k)))
+            (inc! k))
+          (when (or (not in) both)
+            (set! (.-Wr c) (ArgProc name (aget a k)))
+            (inc! k))
+          (set! (.-Gp c) (aget a k))
+          (set! (.-Sp c) (aget a (+ k 1)))
+          (set! (.-Cl c) (aget a (+ k 2)))
+          (range [_ x (lit (slice any) (.-Gp c) (.-Sp c) (.-Cl c))]
+            (when (!= x (conv any false))
+              (ArgProc name x)))
+          (when (== (.-Rd c) nil) (set! (.-Rd c) (conv any false)))
+          (when (== (.-Wr c) nil) (set! (.-Wr c) (conv any false)))
+          (addr (lit Port :Kind pCustom :In (or in both) :Out (or (not in) both) :Binary bin :Name (.String idArg) :cu c))))))))

@@ -1088,3 +1088,199 @@ forms of R6RS (`let*`, named `let`, `letrec`, `do`, `case`, `cond`, `when`, `unl
 3. The re-seed batch: SC24/SC49's `embed.ae` line (or SM5's embedding), `bin/generated-check`, `bin/j2g-edge verify`.
 4. Not run: the bootstrap host's results on an executable other than stage 0; `bin/si boot` on a host whose Chez
    is not 10.3.0; Racket's suite run (not only expanded: SM5's).
+
+## As built: SM5 (write-ahead) (2026-10-30)
+
+Branch `scheme-sm1`, on `d9660be4`. SM5 (the runtime and si) is built **write-ahead** in the light tier beside GT7's
+clean run: no gate, no build of Arbace's executables, no lock; under 2 GB and 4 threads. SC4 (a) makes the evaluator
+an interpreter in Go forms (`go/arbace/scm`), which the shipped executable would need a build to compile in; so the
+package is written as Go forms, printed by repr/go (on stage 0, about a second) and built with TamaGo's go alone,
+outside Arbace, into a *light driver* that runs Scheme programs; everything that needs the executable built with
+`scm` listed is on the heavy list below. Decided and followed: SC4 (a), SC6 (a), SC7 (a). Undecided and taken as
+recommended: SC40 (a) (psyntax runs on si: its `psyntax.pp.ae` is si's first program), SC41 (a) until SM6 (the boot
+still needs Chez), SC47 (a) (the bootstrap host stays as `bin/si test`'s default and the fixpoint's), SC48 (a)
+(nothing of si in the gates), SC33 (b) and SC49 (decided at the re-seed: nothing embedded yet). Sonnet subagents
+wrote the printer and number text, the reader and identifier tables, the data primitives, the number primitives,
+the ports and hashtables, custom ports and enum sets (each in a private copy of the package, merged here); the
+values, the tower's core, the evaluator, the control primitives, records and conditions, psyntax's host, the driver
+and the check are Opus's.
+
+### What was built
+
+- **`go/arbace/scm`** (package `arbace/scm`, std only; 29 `.ae` files, 12,979 lines with the tests; listed nowhere
+  yet, so not shipped: j2g copies only the packages it names, `arbace/j2g/main.ae`):
+  - `value.ae`: the values of §5.1: exact integers `int64` or `*big.Int` (normalized), `*big.Rat`, `float64`; `bool`;
+    `Char` (a scalar value); `*String` (runes, mutable: SC8 (a)); `*Symbol` (interned; gensyms not); `*Pair`; `Null`,
+    `Unspec`, `Eof` singletons; `*Vector`, `*Bytevector`, `*Values`; `eq?`, `eqv?`, `equal?` (on cyclic data too: a
+    bounded walk, then a bisimulation over the pairs met, R6RS 11.5).
+  - `number.ae`, `numtext.ae`, `prim_number.ae`: the tower (SC7 (a): no complex arithmetic; a complex literal reads
+    as a `*Complex` that prints back and is `eqv?` by parts, and any operation on it or a non-real result raises
+    `&implementation-restriction` "complex numbers (SC7)"), Chez's 61-bit fixnum boundary, Chez's exact-zero rules
+    (`(* 0 1.5)` is 0, `(/ 1.0 0)` raises), `number->string` by Burger-Dybvig free-format digits in radix 2, 8, 10, 16
+    with Chez's layout and uppercase hex, `string->number` over R6RS's grammar with Chez's extensions; every
+    procedure of (rnrs base)'s arithmetic, (rnrs r5rs), (rnrs arithmetic fixnums|flonums|bitwise), transcendentals
+    in 200-bit `big.Float` (correctly rounded; Chez's libm is one ulp off in 0.5% of random cases).
+  - `eval.ae`: **the evaluator** (§5.2, SC6 (a)). A core form (a Scheme value) is compiled to nodes over lexical
+    frames (`Env`: a lambda's or a letrec's values, addressed by depth and index; letrec variables checked before
+    their init); the machine runs nodes against an explicit continuation, a linked list of heap frames (`K`). A tail
+    call sets the next node and pushes nothing (proper tail calls: the 10^7 loop in constant space); a non-tail
+    call pushes one frame, so depth is bounded by memory (10^6 deep recursion, 0.7 GB); `call/cc` captures the frame
+    list with the wind list and the handler stack (O(1), re-entrant, multi-shot); a frame shared by a re-entered
+    continuation copies what it would change (`Used`). Nodes without control effects (constants, variables,
+    `lambda`, plain primitives applied to such nodes) are evaluated directly in Go (`Simple`), so the machine sees
+    only calls of procedures and control primitives. `dynamic-wind`'s wind list is unwound and rewound by depth to
+    the common ancestor (the report's reference); `with-exception-handler` runs the handler in the raise's dynamic
+    environment minus itself, `raise` raises `&non-continuable` when it returns, `raise-continuable` returns its
+    value; a Go primitive's error is a Go panic turned into a Scheme raise at the primitive's dynamic context. Go
+    code that must call a Scheme procedure (a sort's comparison, a record protocol, a custom hash or port) does so
+    by a nested run behind a barrier frame; an escape out of it unwinds the Go stack to the run that owns the target;
+    re-entering a continuation captured inside such a callback after it returned raises
+    `&implementation-restriction` (SC65).
+  - `prim_control.ae`: `call/cc`, `dynamic-wind`, `values`, `call-with-values`, `apply`, the handlers and raises,
+    `error`, `assertion-violation`, `exit`, `eval-core`, promises, and the higher-order procedures (`map`, `for-each`,
+    `for-all`, `exists`, `filter`, `partition`, `remp`, `find`, `memp`, `assp`, `fold-left`, `fold-right`,
+    `vector-map`, `vector-for-each`, `string-for-each`) written on the machine: each call of the argument is a
+    machine call with a Go frame waiting, each step's state immutable, so continuations captured inside re-enter
+    correctly (`map` re-entered keeps its earlier result) and `for-all`'s and `exists`'s last calls are tail calls;
+    `list-sort`, `vector-sort(!)` stable merge sorts.
+  - `cond.ae`, `prim_record.ae`: records (procedural and inspection layers, protocols level by level up the
+    parents, nongenerative uids), conditions (the 28 standard types with their makers, predicates, accessors and the
+    `&NAME-rtd`/`&NAME-rcd` values psyntax's condition keywords name: `DefValue`, primitives that are values).
+  - `prim_list.ae`, `prim_char.ae`, `prim_vector.ae`: pairs and lists, symbols, characters and strings (case mapping
+    with Chez's special casing and folding tables dumped from Chez; final sigma; Go's Unicode tables for the
+    categories), vectors, bytevectors with every typed accessor and the UTF-8/16/32 codecs with Chez's BOM and
+    replacement rules; `prim_hash.ae`: hashtables (eq, eqv, equal, string, custom by nested calls; insertion order);
+    `port.ae`, `prim_io.ae`: textual and binary ports over the console, strings, bytevectors, files (held in memory)
+    and custom procedures, transcoders (UTF-8, Latin-1, UTF-16; eol styles; error modes), (rnrs io simple), most of
+    (rnrs io ports), (rnrs files); `prim_enum.ae`: (rnrs enums), file-options as enum sets.
+  - `read.ae`, `unicode.ae`: si's reader, the port of `arbace.repr.scheme.read` to runtime values (R6RS mode,
+    Chez's error messages as `&lexical` conditions), over Chez's identifier tables; `write.ae`: `write` and `display`
+    as Chez prints (no quote abbreviations in R6RS mode, `a\x20;b`, `#{name uid}` gensyms, `#[name f ...]` records,
+    `#<record type uid>` for a nongenerative type).
+  - `system.ae`: psyntax's host (the store of locations and labels, `set-primitive-locations!`, `eval-core`, `format`,
+    `read-library-source-file`), booting psyntax (`Boot`: the 7 core forms of `psyntax.pp`, printed as Scheme text by
+    repr/scheme), `RunProgram` (psyntax's `program-expander`, the libraries invoked, the core form evaluated),
+    `RunFile` (leading library forms installed: the expander's test cases), and Chez's report of an uncaught raise
+    ("Exception in WHO: MESSAGE", formatted or "with irritants (...)"; status 255).
+  - 622 primitives and 63 primitive values: every procedure of Chez's (rnrs ...) export lists (614 names) but the
+    eleven psyntax provides (`eval`, `environment`, `syntax->datum` ...), plus psyntax's host and Chez extras.
+  - Unit tests (`go test` on the printed package, `bin/si unit`): the reader (the corpora's datum counts against
+    Chez's), the printer (27,091 flonum lines and 692 `string->number` lines recorded from Chez with
+    `PRINTER_NUMS`/`PRINTER_S2N`, 160 embedded), about 2,900 number cases from Chez, the data and port and enum
+    primitives' cases.
+- **The light driver** `test/scheme/si-driver/` (Go forms, a main package over `arbace/scm` alone; not shipped):
+  `sidriver --pp PSYNTAX.ss [--lib DIR]... [--core|--case] FILE`; GOGC 400 by default (GC was half the time at 100).
+- **`bin/si`**: `unit`, `light` (prints `psyntax.pp.ae` to `.tmp/si/psyntax.pp.ss`, builds the driver into
+  `.tmp/si/si-light`), `run`, `check [--record-ref] [--record] [--only ID]...`, `divergences`, and `test --si` (the
+  expander's 64 cases run on si, judged as SM4's). Makefile targets `si-unit`, `si-light`, `si-test-si`, `si-check`,
+  `si-check-record-ref`, `si-divergences`; `make check-makefile` rc 0.
+- **The check** (`arbace.scheme.check`, evaluated on stage 0): `test/scheme/si/programs.edn` (46 programs: Racket's
+  R6RS suite's 26 run programs `:suite`, Larceny's 14 with their input files, si's own 6 in
+  `test/scheme/si/programs/`: the 10^7 tail loop and mutual recursion, 10^6 deep recursion, generators and
+  same-fringe and `map` re-entry by `call/cc`, `amb` with two puzzles, `dynamic-wind` re-entry and escapes with
+  handlers and `guard`, and records, conditions, hashtables, strings, numbers and string ports); each run in its
+  file's directory, stdin its input; Chez's runs recorded once (`--record-ref`, `test/scheme/si/ref-chez.edn`:
+  status, stdout, stderr's first line); judged on status and stdout byte for byte, a suite program test by test
+  (its "Expression:" blocks: a test si fails and Chez passes is `fails`, the converse `passes`); every non-pass item
+  must match a class of `test/scheme/divergences.edn` (goi's format); results `test/scheme/check-linux-amd64.edn`.
+
+### The checks, numbers
+
+- **`bin/si check`: 42 of 46 programs pass, 13 non-pass items, 0 failing** (every one in a class), 1 m 45 s, peak
+  0.99 GB (the stage-0 judge included). Passing in full: Racket's base-less 21 of 26 (arithmetic fixnums 4,372 tests,
+  flonums 367, bitwise 235, bytevectors 469, hashtables 249, io/ports 397 of 399 as Chez (Chez's own 2 failures
+  given the same), io/simple 56, syntax-case 102, records, conditions 131, exceptions, enums 26, eval, lists, sorting,
+  control, mutable pairs and strings, programs, reader 70, contrib, and `run.sps`/`test.sps`, which Chez refuses as
+  si does); Larceny's 13 of 14 (fib 40 in 70 s against Chez's 0.86 s, earley and nboyer refused as Chez refuses a
+  library in a program, grabbag, cpointR6, regression, hello, cmdline); si's 6 of 6 (tail loop 1.5 s; deep recursion
+  1.8 s, 0.73 GB). The classes: `:complex` 1 (Racket's base ends at its first `test/approx` of a complex result, the
+  suite's framework not catching it: (log -inf.0)), `:normalization` 8 (unicode's `string-normalize-nf*`, SM6),
+  `:r5rs-environments` 3 (r5rs's `(scheme-report-environment 5)`, SC63), `:chez-conditions` 1 (Larceny's
+  exceptions.sch prints Chez's own `&format` and `&continuation` parts).
+- **`bin/si test --si`: 61 of 64 pass, 3 known (the SM4 by-design form classes), 0 failing**, 12 s (54 s on the
+  bootstrap host, where `df-define-enumeration` is still `:host-limit`).
+- `bin/si unit`: pass. `bin/si test` (the bootstrap host; `arbace/scheme/expand.ae` changed for `--si`): 60 of 64 as at
+  SM4, 4 known, 0 failing; 31 of 39 the same as Chez's `expand`. `make check-makefile`: rc 0.
+- psyntax on si: boot and `(import (rnrs))` expanded in 0.1 s; Racket's base suite (its 27 libraries' expansion and
+  2,000 tests run) in 3.2 s; Chez is not needed by any si run, only by `--record-ref` and `bin/si boot`.
+
+### Proposals (SC60 onward)
+
+- **SC60 Where core forms are compiled.**
+  - Options: (a) as built: in Go, `arbace/scm`'s `Compile` (core value → nodes), so `eval-core` (psyntax's macro
+    transformers, `eval`) compiles at run time with no Arbace in the loop; (b) an Arbace-side builder over
+    factories, as goi's (GOI-SPEC §4.1), the Go side only nodes.
+  - *Recommended: (a)*: Scheme's core is ten forms whose meaning needs no checker, `eval` must work in compiled
+    programs (SM7) and in the box, and goi's split exists because Go needs type checking first.
+- **SC61 si's entry from Arbace (the heavy list's item 1).**
+  - Options: (a) natives `arbace.lang.SchemeInterp` as `GoInterp` is goi's: forms (SPEC 1) → values directly, `scm/eval`
+    and `scm/run` macros in `arbace.scheme`, psyntax booted once per process from an embedded `psyntax.pp`; (b) Arbace
+    runs the driver's code path only (files of Scheme text), no forms boundary.
+  - *Recommended: (a)*: the forms are the crop's interface (SC11's `(scm/eval forms env)`); (b) is what the light driver
+    already proves.
+- **SC62 The light driver after the listing.**
+  - Options: (a) keep `test/scheme/si-driver` and `bin/si --light` (no Arbace build needed to test si) beside the
+    shipped path, `bin/si check` judging both until the tag; (b) remove it once `scm` is listed.
+  - *Recommended: (a)*: it is 70 lines, builds in seconds, and keeps si testable in the light tier.
+- **SC63 R5RS's environments.**
+  - Options: (a) `tools/psyntax/boot.ss` fabricates the libraries `(psyntax null-environment-5)` and
+    `(psyntax scheme-report-environment-5)` (R5RS's names, from Chez's `(rnrs r5rs)` plus base), `bin/si boot` again;
+    (b) leave them a deferred class.
+  - *Recommended: (a)* with SC41 (b) at SM6 (the boot's library table as data); three tests.
+- **SC64 Higher-order procedures.**
+  - Options: (a) as built: Go control primitives with immutable step state on the machine; (b) a Scheme prelude
+    compiled at boot; (c) Go loops with nested calls (re-entry lost).
+  - *Recommended: (a)*: re-entry and the report's tail calls hold, no second source to keep; (b) if SM7's AOT wants
+    them as Scheme.
+- **SC65 Go callbacks.**
+  - Options: (a) as built: nested runs (sorts, protocols, custom hashes and ports), an escape unwinding by panic,
+    a re-entry after the callback returned an `&implementation-restriction` (no test meets it); (b) every such
+    primitive on the machine as in SC64.
+  - *Recommended: (a)*, a recorded limit; (b) per primitive when a program needs it.
+- **SC66 Complex numbers and Racket's base suite.**
+  - Options: (a) keep SC7 (a): the base suite stops at its first complex `test/approx`, one class item hiding the
+    tests after it; (b) build the complex part of the tower first thing in SM6 (exact as `big.Rat` pairs, inexact
+    `complex128`, Chez's printing and branch cuts classed per function); (c) judge a derived copy of `base.sls`
+    without its complex tests.
+  - *Recommended: (b)*: it unblocks the largest suite file; (c) only as a stopgap, since it changes the corpus.
+- **SC67 Hashtable order.**
+  - Options: (a) as built: insertion order (deterministic), Chez's order a class where a program prints it; (b)
+    reproduce Chez's hashing.
+  - *Recommended: (a)*: no program of the check prints an order.
+- **SC68 Judging runs.**
+  - Options: (a) as built: status and stdout byte for byte, the suites test by test, stderr recorded (first line) but
+    not judged (si's messages for psyntax's raises differ from Chez's own expander's); (b) judge stderr's first token.
+  - *Recommended: (a)*, as goi judges gc.
+- **SC69 Speed.**
+  - Options: (a) accept the interpreter's speed until SM7's AOT (fib 40 70 s, Chez 0.86 s; about 5 M calls a second);
+    (b) a bounded pass at SM6 (fixed-arity call nodes without the operand slice, small exact integers preallocated,
+    frames for `Simple` operands avoided), measured on ecraven's benchmarks (SM8's corpus) under
+    `bin/lib/limit.bash`'s CPU limits.
+  - *Recommended: (b)*, after the shipped path exists, since the executable's GC settings differ from the driver's.
+- **SC70 Source style of the agents' files.**
+  - Options: (a) keep as written: most files hand-written forms, `prim_number.ae` written as Go and converted by
+    `bin/repr-go read` (its forms in the converter's style, `(when [init] cond ...)`, positions stripped); (b) rewrite
+    it by hand.
+  - *Recommended: (a)*: forms are forms; the printer and `go vet` accept both.
+
+### Rule slips
+
+- One probe was written to `/tmp/claude-0/g1.sps` (outside `.tmp/`); removed with the session's scratch.
+- For a few minutes two si runs went at once (a timing loop beside the check: 8 threads); I stopped the timing loop.
+- `bin/si`'s existing `check-suite` keeps its `>/dev/null` (SM4's line); the new verbs write to `.tmp/si/` instead.
+- Each subagent ran its own `go test` in its own copy (at most one build each, `-p 2`, GOMAXPROCS 4); up to five
+  agents were light at once.
+
+### The heavy list (needs Arbace's executables), and checks not run
+
+1. **The listing** (SC61): `go/arbace/scm` copied into the program by j2g (`arbace/j2g/main.ae`'s package list, as
+   `go/arbace/goi`), natives `arbace.lang.SchemeInterp`, `arbace.scheme`'s `scm/eval` over forms, psyntax.pp embedded;
+   goi's table entry if Go forms are to call `arbace/scm` (GOI-SPEC §6.6); `bin/arbace-go --build`, the smoke test.
+   From then `go/arbace/scm` is shipped (a re-seed carries it, with SM3's reader per SC33).
+2. **`bin/si` on the shipped program**: `run`, `check` and `test --si` on the executable, against the same records.
+3. **The AOT path** (SM7): core forms → Go forms, `bin/si check --aot`.
+4. **The gate**: `go/` is in `gate_key` and `arbace_runtime_key`, so this branch's first gate rebuilds the
+   executables (about 8 minutes) and stage 0's compiled namespaces are stale for it (`bin/seed: stage 0 keeps no
+   compiled namespaces` is printed by the tools meanwhile; they run evaluated); then `bin/gate --audit`, and the
+   SM1-SM4 items above. `bin/generated-check`, `bin/j2g-edge verify` at the re-seed.
+5. Not run: the essential gate in this branch; si under `bin/lib/limit.bash`'s CPU limits; si on arm64.
