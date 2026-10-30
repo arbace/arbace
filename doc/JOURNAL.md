@@ -520,3 +520,29 @@ git history:
   `.tmp/heavy bin/heavy-lock env GATE_HEAVY_CMD=env bin/gate --full --clean --tag arbace-reaps-3-crops-v2`. It holds
   the big lock once for the whole run, with `.tmp/gt7.quiet` set. Two moderate agents may run beside it (the user): C3b
   for now; NH11's branch waits for the tag.
+
+## 2026-10-30: GT7's first clean run; the Scheme and OCaml surveys started
+
+- **GT7's first clean run**, `bin/gate --full --clean --tag arbace-reaps-3-crops-v2` at 68b2bba6, ran from
+  2026-10-29 16:58 to 2026-10-30 06:30: 812 minutes, 85 steps, at most 40.5 GiB. 63 steps passed clean and audited,
+  published as `:clean`. Not yet a pass:
+  - **Failed (7):**
+    - `goi-check`, `goi`, `goi-aot`: CPU-limit timeouts under the audit (gcgort, issue13160, issue13169, gc2,
+      heapsampling).
+    - `repr-go`: the audit's reducer `tools/gateaudit` deadlocked at 00:42, and strace blocked on its full FIFO. I
+      stopped the reducer and strace by PID at 04:08.
+    - `repr-java`: the baseline's converted forms against their hashes.
+    - `repr-java-roundtrip.jdk`: 39 files at the javac level.
+    - `java-judge`: the levels' disagreements.
+  - **Passed with undeclared reads, so not recorded (10):** eight Java `--full` steps (about 2,600 files each, the inputs
+    of javac's tool), `java-compiled-full` (19), `programs-full` (1), `javac-tool` (2), `repr-go-native.box` (1).
+  - The record is kept as `.tmp/gt7-full/clean-run1.edn`, the clone at `.tmp/gate-clean/68b2bba6…/`.
+  - GT7's fix round (branch `gate-gt7fix`, on Opus, started during the run) fixes them, and adds `bin/gate --clean --only
+    STEPS` so that the rerun covers only those steps.
+  - During the run, at moderate load as the user allowed: C3b finished its work and C4 (the checker) started; NH18, NH12
+    and NH19 were built on NH11's branch.
+- **The Scheme and OCaml surveys** (the user: "run surveys on future crops concurrently ... two more languages in
+  ../go-whim"). go-whim translates its editor core into nine languages. The two that Arbace does not yet have, besides
+  C++ (`wpp/`), are Scheme (`whimsical/`, R6RS on Chez Scheme 10) and OCaml (`whiml/`, OCaml 5.5.0). Both toolchains
+  are on the host. Surveys `doc/scheme/SCHEME-SURVEY.md` and `doc/ocaml/OCAML-SURVEY.md` are being written (Sonnet,
+  light work).
