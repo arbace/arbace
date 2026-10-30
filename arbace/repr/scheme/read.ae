@@ -17,6 +17,19 @@
 (defn- fail [kind msg ^long at]
   (throw (ex-info msg {:class kind :at at})))
 
+;; :full (SPEC 11): when bound to {:canon f :out (volatile! nil)}, the reader also records the layer, a tree of
+;; nodes parallel to the forms: [pre sp] an atom (sp its spelling when f of the form gives another text, else
+;; nil), [pre :q prefix inner] a quote form, [pre :l open kids close-pre close] a list, vector or bytevector,
+;; [pre :d open kids dot-pre tail close-pre close] a dotted list; pre is the atmosphere (whitespace, comments,
+;; directives) before the node. The node of the datum just read is left in :out.
+(def ^:dynamic *full* nil)
+
+(defn- set-node! [node] (when-let [f *full*] (vreset! (:out f) node)))
+(defn- got [] (deref (:out *full*)))
+(defn- with-pre [pre node]
+  (if (= pre "") node (assoc node 0 (str pre (nth node 0)))))
+(defn- atm-text [^String s ^long p0 ^longs st] (subs s p0 (aget st 0)))
+
 ;; the reader's state: [pos fold-case r6rs] as a long array, :chez for the mode of Chez's default (r6rs 0)
 (defmacro ^:private pos [st] `(aget ~(with-meta st {:tag "[J"}) 0))
 
@@ -58,7 +71,7 @@
 
 (defn- scalar? [^long cp] (and (>= cp 0) (<= cp 0x10FFFF) (not (and (>= cp 0xD800) (<= cp 0xDFFF)))))
 
-(declare read-datum skip-atmosphere read-token-body)
+(declare read-datum read-datum* skip-atmosphere read-token-body)
 
 (defn- read-token
   "The text from `i` to the next delimiter, as [end token]; an inline hex escape \\x41; is part of it (its
@@ -238,34 +251,71 @@
           (fm/sym (identifier t at (== (aget st 1) 1))))))))
 
 (defn- read-seq
-  "The data of a list or vector from after the opener to the closer: [items tail] (tail nil unless a dot)."
-  [^String s ^longs st mode ^long start what vector?]
-  (let [n (.length s)]
-    (loop [items (transient []) tail nil seen-dot false]
-      (skip-atmosphere s st mode)
-      (let [i (aget st 0)]
+  "The data of a list or vector from after the opener to the closer: [items tail dot? node] (tail nil unless a
+  dot; node the layer's, in :full mode)."
+  [^String s ^longs st mode ^long start what vector? open]
+  (let [n (.length s)
+        full *full*]
+    (loop [items (transient []) kids (transient []) tail nil seen-dot false dpre nil tnode nil]
+      (let [p0 (aget st 0)
+            _ (skip-atmosphere s st mode)
+            pre (when full (atm-text s p0 st))
+            i (aget st 0)]
         (when (>= i n) (eof what start))
         (let [c (.charAt s i)]
           (cond
             (or (= c \)) (= c \]))
             (do (when (and seen-dot (nil? tail)) (fail :bad-dot "expected one item after dot (.)" i))
                 (aset st 0 (long (inc i)))
-                [(persistent! items) tail seen-dot])
+                [(persistent! items) tail seen-dot
+                 (when full
+                   (if seen-dot
+                     ["" :d open (persistent! kids) dpre tnode pre (str c)]
+                     ["" :l open (persistent! kids) pre (str c)]))])
             (and (= c \.) (or (>= (inc i) n) (delimiter? (.charAt s (inc i))) (contains? #{\' \` \,} (.charAt s (inc i)))))
             (do (when (or vector? seen-dot (zero? (count items))) (fail :bad-dot "unexpected dot (.)" i))
                 (aset st 0 (long (inc i)))
-                (skip-atmosphere s st mode)
-                (let [j (aget st 0)]
+                (let [q0 (aget st 0)
+                      _ (skip-atmosphere s st mode)
+                      post (when full (atm-text s q0 st))
+                      j (aget st 0)]
                   (when (>= j n) (eof what start))
                   (when (contains? #{\) \]} (.charAt s j)) (fail :bad-dot "expected one item after dot (.)" j))
                   (let [d (read-datum s st mode false)]
-                    (recur items d true))))
+                    (recur items kids d true pre (when full (with-pre post (got)))))))
             :else
             (do (when seen-dot (fail :bad-dot "unexpected dot (.)" i))
                 (let [d (read-datum s st mode false)]
-                  (recur (conj! items d) tail seen-dot)))))))))
+                  (recur (conj! items d) (if full (conj! kids (with-pre pre (got))) kids) tail seen-dot dpre tnode)))))))))
+
+(defn- read-prefixed
+  "A quote form: the prefix of `len` characters at `i`, then the datum; the form (sym datum)."
+  [^String s ^longs st mode ^long i ^long len sym]
+  (aset st 0 (long (+ i len)))
+  (let [d (read-datum s st mode false)]
+    (when *full* (set-node! ["" :q (subs s i (+ i len)) (got)]))
+    (list sym d)))
 
 (defn- read-datum
+  "The datum at the state's position, the position after it left in the state; in :full mode its layer node in
+  *full*'s :out."
+  [^String s ^longs st mode in-comment]
+  (if-let [full *full*]
+    (let [p0 (aget st 0)
+          _ (skip-atmosphere s st mode)
+          pre (atm-text s p0 st)
+          i (aget st 0)
+          _ (vreset! (:out full) ::none)
+          form (read-datum* s st mode in-comment)
+          o (got)]
+      (set-node! (if (identical? o ::none)
+                   (let [raw (subs s i (aget st 0))]
+                     [pre (when-not (= raw ((:canon full) form)) raw)])
+                   (with-pre pre o)))
+      form)
+    (read-datum* s st mode in-comment)))
+
+(defn- read-datum*
   "The datum at the state's position (after the atmosphere is skipped here), the position after it left in the
   state. `in-comment`: reading under #; (end of text there is an error as everywhere)."
   [^String s ^longs st mode in-comment]
@@ -277,16 +327,17 @@
       (cond
         (or (= c \() (= c \[))
         (do (aset st 0 (long (inc i)))
-            (let [[items tail dot?] (read-seq s st mode i "list" false)]
+            (let [[items tail dot? node] (read-seq s st mode i "list" false (str c))]
+              (set-node! node)
               (cond dot? (fm/dotted items tail)
                     :else (apply list items))))
         (or (= c \)) (= c \])) (fail :unexpected-close "unexpected close parenthesis" i)
         (= c \") (read-string-lit s st)
-        (= c \') (do (aset st 0 (long (inc i))) (list 'quote (read-datum s st mode false)))
-        (= c \`) (do (aset st 0 (long (inc i))) (list 'quasiquote (read-datum s st mode false)))
+        (= c \') (read-prefixed s st mode i 1 'quote)
+        (= c \`) (read-prefixed s st mode i 1 'quasiquote)
         (= c \,) (if (and (< (inc i) n) (= (.charAt s (inc i)) \@))
-                    (do (aset st 0 (long (+ i 2))) (list 'unquote-splicing (read-datum s st mode false)))
-                    (do (aset st 0 (long (inc i))) (list 'unquote (read-datum s st mode false))))
+                    (read-prefixed s st mode i 2 'unquote-splicing)
+                    (read-prefixed s st mode i 1 'unquote))
         (or (= c \{) (= c \})) (fail :bad-symbol "brace syntax is not allowed in #!r6rs mode" i)
         (= c \|) (fail :bad-symbol "|...| symbol escape syntax is not allowed in #!r6rs mode" i)
         (= c \#)
@@ -294,16 +345,17 @@
             (let [d (.charAt s (inc i))]
               (cond
                 (= d \() (do (aset st 0 (long (+ i 2)))
-                              (let [[items] (read-seq s st mode i "vector" true)] (vec items)))
+                              (let [[items _ _ node] (read-seq s st mode i "vector" true "#(")] (set-node! node) (vec items)))
                 (= d \\) (read-char-lit s st)
-                (= d \') (do (aset st 0 (long (+ i 2))) (list 'syntax (read-datum s st mode false)))
-                (= d \`) (do (aset st 0 (long (+ i 2))) (list 'quasisyntax (read-datum s st mode false)))
+                (= d \') (read-prefixed s st mode i 2 'syntax)
+                (= d \`) (read-prefixed s st mode i 2 'quasisyntax)
                 (= d \,) (if (and (< (+ i 2) n) (= (.charAt s (+ i 2)) \@))
-                            (do (aset st 0 (long (+ i 3))) (list 'unsyntax-splicing (read-datum s st mode false)))
-                            (do (aset st 0 (long (+ i 2))) (list 'unsyntax (read-datum s st mode false))))
+                            (read-prefixed s st mode i 3 'unsyntax-splicing)
+                            (read-prefixed s st mode i 2 'unsyntax))
                 (and (= d \v) (.startsWith s "vu8(" (+ i 1)))
                 (do (aset st 0 (long (+ i 5)))
-                    (let [[items] (read-seq s st mode i "bytevector" true)]
+                    (let [[items _ _ node] (read-seq s st mode i "bytevector" true "#vu8(")]
+                      (set-node! node)
                       (doseq [x items]
                         (when-not (and (integer? x) (<= 0 x 255)) (fail :bad-bytevector "invalid value in bytevector" i)))
                       (apply list fm/bytevector-tag items)))
@@ -353,25 +405,34 @@
 
 (defn read-all
   "Every top-level datum of `s`: {:data [{:off [start end] :form f}] :error nil-or-{:class :message :at}}.
-  opts: :mode :r6rs (default; the text is read as after #!r6rs) or :chez."
+  opts: :mode :r6rs (default; the text is read as after #!r6rs) or :chez; :full (a function from a form to the
+  text of its canonical spelling, arbace.repr.scheme.print's write-form): also :layer, {:nodes [node ...]
+  :end text} (the nodes of *full*'s description, one a datum, and the text after the last datum, which holds
+  what follows an error), data and text then rebuilt by arbace.repr.scheme.full."
   [^String s opts]
   (let [st (long-array [0 0 (if (= (:mode opts :r6rs) :r6rs) 1 0)])
         mode (:mode opts :r6rs)
         off (offsets s)
-        n (.length s)]
-    (loop [acc (transient [])]
-      (let [res (try
-                  (skip-atmosphere s st mode)
-                  (let [i (aget st 0)]
-                    (if (>= i n)
-                      :done
-                      (let [d (read-datum s st mode false)]
-                        {:off [(off i) (off (aget st 0))] :form d})))
-                  (catch arbace.lang.ExceptionInfo e
-                    (let [m (ex-data e)]
-                      (if (:class m)
-                        {:error {:class (:class m) :message (ex-message e) :at (off (:at m))}}
-                        (throw e)))))]
-        (cond (= res :done) {:data (persistent! acc) :error nil}
-              (:error res) {:data (persistent! acc) :error (:error res)}
-              :else (recur (conj! acc res)))))))
+        n (.length s)
+        canon (:full opts)]
+    (binding [*full* (when canon {:canon canon :out (volatile! nil)})]
+      (loop [acc (transient []) nodes (transient []) last-end 0]
+        (let [res (try
+                    (let [p0 (aget st 0)
+                          _ (skip-atmosphere s st mode)
+                          pre (when canon (atm-text s p0 st))
+                          i (aget st 0)]
+                      (if (>= i n)
+                        :done
+                        (let [d (read-datum s st mode false)]
+                          {:off [(off i) (off (aget st 0))] :form d :node (when canon (with-pre pre (got))) :end (aget st 0)})))
+                    (catch arbace.lang.ExceptionInfo e
+                      (let [m (ex-data e)]
+                        (if (:class m)
+                          {:error {:class (:class m) :message (ex-message e) :at (off (:at m))}}
+                          (throw e)))))
+              fin (fn [r] (cond-> (assoc r :data (persistent! acc))
+                            canon (assoc :layer {:nodes (persistent! nodes) :end (subs s last-end)})))]
+          (cond (= res :done) (fin {:error nil})
+                (:error res) (fin {:error (:error res)})
+                :else (recur (conj! acc (select-keys res [:off :form])) (if canon (conj! nodes (:node res)) nodes) (long (:end res)))))))))

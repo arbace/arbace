@@ -1,0 +1,76 @@
+(ns arbace.repr.scheme.full
+  "repr/scheme's :full (doc/scheme/SPEC.md, 11): the forms of a Scheme text and the layer that prints the text
+  back byte for byte. The layer is a tree of nodes parallel to the forms (arbace.repr.scheme.read's *full*):
+  the atmosphere before each datum (whitespace, comments, directives, datum comments, as text), the spelling of
+  an atom whose text is not the canonical `write` of its form, the brackets, the dot, the quote prefixes, and
+  the text after the last datum (which is all of an unreadable remainder).
+
+    (let [{:keys [data layer]} (read-full \"; c\\n(a  .  b)\")]
+      (print-full (map :form data) layer))   =>  \"; c\\n(a  .  b)\"
+
+  The `.ae` text of a text in :full is the forms (as :lines has them), one a line, then a last line
+  `#_(scm/layer {...})` that the Clojure reader skips."
+  (:require [arbace.string :as str]
+            [arbace.repr.scheme.forms :as fm]
+            [arbace.repr.scheme.read :as rd]
+            [arbace.repr.scheme.print :as pr]))
+
+(defn read-full
+  "{:data [{:off :form}] :error E :layer {:nodes [...] :end TEXT}} of the text."
+  [^String text]
+  (rd/read-all text {:full pr/write-form}))
+
+(declare emit)
+
+(defn- emit-items [^StringBuilder sb items kids]
+  (when-not (= (count items) (count kids))
+    (throw (ex-info "the layer does not fit the forms" {:items (count items) :kids (count kids)})))
+  (doseq [[x k] (map vector items kids)] (emit sb x k)))
+
+(defn- emit [^StringBuilder sb form node]
+  (.append sb ^String (nth node 0))
+  (let [k (nth node 1)]
+    (cond
+      (not (keyword? k)) (.append sb ^String (or k (pr/write-form form)))
+      (= k :q) (do (.append sb ^String (nth node 2)) (emit sb (second form) (nth node 3)))
+      (= k :l) (let [open (nth node 2)]
+                 (.append sb ^String open)
+                 (emit-items sb (if (= open "#vu8(") (rest form) (seq form)) (nth node 3))
+                 (.append sb ^String (nth node 4)) (.append sb ^String (nth node 5)))
+      (= k :d)
+      (let [open (nth node 2) kids (nth node 3) n (count kids)
+            dot? (= (first form) fm/dot-tag)
+            items (seq (if dot? (second form) form))
+            remaining (if dot?
+                        (if (> (count items) n) (list fm/dot-tag (apply list (drop n items)) (nth form 2)) (nth form 2))
+                        (apply list (drop n items)))]
+        (.append sb ^String open)
+        (emit-items sb (take n items) kids)
+        (.append sb ^String (nth node 4)) (.append sb ".")
+        (emit sb remaining (nth node 5))
+        (.append sb ^String (nth node 6)) (.append sb ^String (nth node 7))))))
+
+(defn print-full
+  "The text of the forms `forms` with their layer."
+  [forms layer]
+  (let [sb (StringBuilder.)]
+    (emit-items sb forms (:nodes layer))
+    (.append sb ^String (:end layer))
+    (.toString sb)))
+
+(defn ae-text
+  "The `.ae` text of the forms and the layer."
+  [forms layer]
+  (str (str/join "" (map #(str (pr-str %) "\n") forms))
+       "#_(scm/layer " (pr-str layer) ")\n"))
+
+(defn parse-ae
+  "[forms layer] of an `.ae` text written by `ae-text`."
+  [^String text]
+  (let [k (.lastIndexOf text "\n#_(scm/layer ")
+        k (if (and (neg? k) (.startsWith text "#_(scm/layer ")) 0 (inc k))
+        _ (when (neg? k) (throw (ex-info "no layer in the forms file" {})))
+        rdr (java.io.PushbackReader. (java.io.StringReader. (subs text 0 k)))
+        forms (loop [acc []] (let [x (read {:eof ::eof} rdr)] (if (= x ::eof) acc (recur (conj acc x)))))
+        layer (second (read-string (subs text (+ k 2))))]
+    [forms layer]))

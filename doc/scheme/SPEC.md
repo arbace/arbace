@@ -223,7 +223,7 @@ Chez's by an exhaustive scan of the scalar values (9).
 ## 7. The printer, `:lines`
 
 `repr/scheme print` writes forms as Scheme text: Chez's `write` of each datum, one datum a line, with no layout of
-its own (SM3b may add one). Chez's choices, which the check compares to the byte:
+its own; `--layout` (11) lays them out. Chez's choices, which the check compares to the byte:
 
 - strings: `\"` `\\` and the escapes `\a \b \t \n \v \f \r`; every other character below U+20, U+7F, U+85 and U+2028 as
   `\xHEX;` (upper case); everything else as it is;
@@ -267,3 +267,37 @@ of refusals, and SM8's suite) and go-whim's whimsical (read in place, pinned by 
 SHA-256; fetched by `bin/repr-scheme corpus fetch` into `.tmp/scheme/corpora/`. The probes
 (`test/scheme/probes.edn`): SCHEME-SURVEY 2.4's, batteries of tokens (prefixes by bodies of numbers, the report's
 character names, delimiters, comments, dots), 3,000 random numbers and exhaustive character classes.
+
+## 11. `:full` and the layout printer
+
+**`:full`** keeps what the forms leave out, so that the text prints back byte for byte. The forms are those of
+`:lines` (1-3); beside them is the *layer*, a tree of nodes parallel to the forms, one per datum, `(arbace.repr.scheme.read/*full*)`:
+
+| node | for | holds |
+|---|---|---|
+| `[pre sp]` | an atom (symbol, number, boolean, character, string) | `pre`, the atmosphere before it; `sp`, its spelling when that is not Chez's `write` of the form (`#true`, `#\x41`, `1.50`, `"s\x41;t"`, `Foo` under `#!fold-case`), else `nil` |
+| `[pre :q prefix inner]` | a quote form | the prefix text (`'` `` ` `` `,` `,@` `#'` `` #` `` `#,` `#,@`), the node of the datum after it |
+| `[pre :l open kids close-pre close]` | a list, vector or bytevector | `open` is `(`, `[`, `#(` or `#vu8(`; `kids`, one node a datum; the atmosphere before the closer and the closer |
+| `[pre :d open kids dot-pre tail close-pre close]` | a dotted list | the nodes before the dot, the atmosphere before the dot, the node of what follows it (a list, when the tail was spliced: `(a . (b c))`), the closer |
+
+*Atmosphere* is the text between data: whitespace, `;` comments, nested `#| |#` comments, `#;` with the datum it
+comments out, and the directives `#!r6rs`, `#!fold-case`, `#!no-fold-case`, all as text. The layer ends with the
+text after the last datum: all of the remainder when the reader stopped at an error, so a refused text also prints
+back. Printing walks the forms and the layer together: atmosphere, then the spelling or `write` of the atom, then
+the brackets, and for a dotted node the remaining items rebuilt as the reader would have formed them.
+
+The `.ae` file of a text in `:full` is its forms, one a line as `read` writes them, then one last line
+`#_(scm/layer {:nodes [...] :end "..."})`, which the Clojure reader skips: a file in `:full` reads as the `:lines`
+forms. `read --full`, `print --full`.
+
+**The layout printer** (`print --layout`) writes forms as a person writes Scheme, with no comments. A datum that
+fits in 80 columns is one line; quote forms are abbreviated (`'x` `` `x `` `,x` `,@x` `#'x`), which reads back as
+the same forms. A datum that does not fit is broken by its head: `define`, `lambda`, `let` (two arguments for a named
+let), `let*`, `letrec`, `letrec*`, `let-values`, `when`, `unless`, `case`, `guard`, `parameterize`, `do` (two),
+`syntax-case` (two), `library`, `define-syntax`, `define-record-type`, `syntax-rules` and the others of
+`arbace.repr.scheme.layout/body-forms` keep that many arguments on the line and indent the rest by two; any other
+call with a symbol head up to 18 characters aligns its arguments under the first one (longer: indented by two); a
+list headed by a non-symbol aligns its items under its first; a vector or bytevector of atoms is filled to the
+width. A dotted tail is a line of its own, `. tail`. Top-level data are separated by a newline, and a blank line
+when either takes more than one line. The reading of the layout is the same forms (`tree=`), and the layout of
+those forms is the same text (idempotent): both are checked by `roundtrip`.

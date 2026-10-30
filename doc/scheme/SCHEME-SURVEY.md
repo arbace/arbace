@@ -807,3 +807,92 @@ two digits where one suffices (`4.9e-324`); subnormals print with `|` and their 
 3. `bin/repr-scheme check` once under the big lock's quiet host (it is light, but its first run in a clean
    checkout fetches 76 files; Chez's presence is a precondition, `apk add chez-scheme`).
 4. The re-seed batch (SM3 on): SC24's `embed.ae` line; `bin/generated-check`, `bin/j2g-edge verify` after it.
+
+## As built: SM3 (2026-10-30)
+
+Branch `scheme-sm1`, on `ca825c21`. SM3 (`:full` and the layout printer) is done, built with the light tier in
+GT7's quiet host (no gate, no Arbace build, no lock; every run on stage 0, `GOMEMLIMIT=1500MiB`,
+`GOMAXPROCS=4`). No shipped file changed; the proposals SC20-SC26 are undecided, and I followed their
+recommendations: (SC20 a) R6RS mode only, (SC24 a) repr/scheme stays out of the executable and the `embed.ae`
+line waits for the re-seed batch, (SC25 a) corpora fetched, (SC26 a) the new check not in the essential gate.
+
+### What was built
+
+- **`:full`** (`arbace.repr.scheme.full`, and `*full*` in `read.ae`): the reader, when asked (`read-all` with
+  `:full write-form`), records a *layer*, a tree of nodes parallel to the forms (SPEC 11): the atmosphere before
+  each datum as text (whitespace, `;`, nested `#| |#`, `#;` with its datum, `#!r6rs`, `#!fold-case`), the
+  spelling of an atom only where it is not Chez's `write` of its form (`#true`, `#\x41`, `1.50`, `"s\x41;t"`,
+  a folded symbol), the bracket kind, `#(` and `#vu8(`, the quote prefixes, the dot with its atmosphere on both
+  sides (and a spliced tail `(a . (b c))` as the dotted node it was), the closer, and the text after the last
+  datum (all of the remainder after a refusal, so refused texts print back too). Printing (`print-full`) walks
+  forms and layer together. The `.ae` file of `read --full` is the `:lines` forms and a last line
+  `#_(scm/layer {...})`, which the Clojure reader skips (so a `:full` file is read by `print` as it was).
+- **The layout printer** (`arbace.repr.scheme.layout`, `print --layout`): 80 columns, fit-or-break by head
+  (SPEC 11): special forms keep their first arguments on the line and indent the body by two, calls align arguments
+  under the first, vectors and bytevectors of atoms fill, quote forms abbreviated. whimsical's `editor.ss`
+  (3 MB) becomes 76,045 lines.
+- **`bin/repr-scheme read --full`, `print --full|--layout`, `roundtrip`** (needs no Chez); Makefile target
+  `repr-scheme-roundtrip`. `make check-makefile` passes.
+- `doc/scheme/SPEC.md` section 11.
+
+### The check, numbers
+
+`bin/repr-scheme roundtrip`: 1,325 files (76 corpus files, whimsical's six, and the 1,249 probes), 3,504,117
+bytes, **0 failing**, 128 s, peak 1.40 GB resident. Per file: (1) text to forms and layer to `.ae` text, parsed
+back, printed: equal to the text byte for byte; the forms read back from the `.ae` `tree=` the originals; (2) the
+forms laid out, read again: `tree=` the forms; (3) the layout of those forms is the same text (idempotent). The
+712 probes and Chibi's R7RS file that Chez refuses print back byte for byte too (the remainder is in the layer). The
+reader changed, so `bin/repr-scheme check --quick` was run again: 1,325 of 1,325 equal to Chez, the symbol rule
+24,864 names with no bad one, `spec-check` 9 of 9 (54 s, 0.80 GB). The scans were not rerun (the predicates did not
+change). whimsical's `editor.ss` alone: `read --full` 41 s and 1.27 GB (`read` 34 s, 0.58 GB), `print --full` 12 s
+and byte for byte equal to the file (`cmp`), `print --layout` 19 s; its `.ae` is 7.9 MB.
+
+### Proposals (SC30 onward)
+
+- **SC30 Where the layer lives.**
+  - Options: (a) as built: in the forms file, a last line `#_(scm/layer {...})`, one file a text, forms still
+    readable alone; (b) a second file `FILE.layer` beside the `.ae`; (c) metadata on the forms (positions and
+    atmosphere as `^{...}` on each form) as SC12 left open.
+  - *Recommended: (a)*: one file, no pairing to keep, `print` unchanged, the Clojure reader skips it; (c) costs
+    memory on the 3 MB datum for what a parallel tree holds more cheaply, and the forms stay values in (a). A
+    consumer that wants the layer beside a node (the evaluator's `&syntax` positions, SM4) can use the `:off`
+    offsets of `read-all`, which are kept.
+- **SC31 Spellings kept by exception.**
+  - Options: (a) as built: a spelling stored only where the token is not Chez's `write` of the form (most atoms
+    store nothing); (b) every token's text stored (simpler printer, about 2x the layer).
+  - *Recommended: (a)*: the check proves it; the layer for `editor.ss` is 4.9 MB beside 3 MB of forms in (a).
+- **SC32 The layout's conventions.**
+  - Options: (a) as built: a table of 30 heads (`body-forms`), 80 columns, abbreviated quotes, `[ ]` never
+    written (the forms do not keep them), no comments (`:lines` has none); (b) keep `[ ]` and comments in `:lines`
+    (that is `:full`); (c) Racket's/Chez's pretty printer's rules in full (`pretty-print` can be called from
+    Chez as a reference, but is not the reader's check).
+  - *Recommended: (a)*: the layout is judged by reading back equal and idempotence, not by a reference text; a
+    tweak to a head's indent changes no data. (c) only if the user wants the output to match Chez's `pretty-print`.
+- **SC33 Compiling the reader (the re-seed).**
+  - Options: (a) the SM3 row as written: list `arbace.repr.scheme.*` in goi's table and compile it into the
+    executable at the next re-seed (with SM5's), which reverses SC24 (a) (the namespaces are then embedded, so
+    the `excluded` line of `embed.ae` goes away instead of being added); (b) keep it evaluated until SM5, where the
+    expander and `eval` need the reader inside the program anyway, and decide then; keep SC24's `embed.ae` line
+    for the re-seeds in between.
+  - *Recommended: (b)*: nothing needs a compiled reader before SM5, and the reader's speed (34 s for 3 MB) is
+    fine for the corpora; one re-seed rather than two. If the user wants the row as written, (a) is the heavy
+    list's items 1 and 2 below.
+
+### Rule slips
+
+None this time. (`bin/repr-scheme roundtrip` and `check --quick` were launched in the foreground and went to the
+background past the tool's 120 s limit; neither exceeded 1.4 GB or 4 threads.)
+
+### Heavy list for the re-seed batch (SM3 on), and checks not run
+
+1. The `embed.ae` line (SC24 a): add `"arbace/repr/scheme.ae" "arbace/repr/scheme/"` to
+   `arbace/j2g/embed.ae`'s `excluded` at the batch's first shipped change. Or, if SC33 (a) is chosen, the
+   opposite: do not add it, list `arbace.repr.scheme`, `.read`, `.number`, `.unicode`, `.forms`, `.print`, `.full`,
+   `.layout` in goi's table (the generator `arbace.go.table` and the table's tests), put the files back into
+   `arbace_embedded_sources`, `test/gate/steps.edn`'s `:tools` and `test/gate/audit.ae`'s host, and compile with
+   the re-seed (`bin/seed --make`, `--verify`).
+2. After the re-seed: `bin/generated-check`, `bin/j2g-edge verify`, the essential gate, `bin/seed --verify`.
+3. Not run (SM1-SM2's list still stands): the essential gate in this branch (`/root/arbace/.tmp/heavy bin/gate`),
+   `bin/gate --audit`, the scans of `bin/repr-scheme check` (full, 2 m 30 s) rerun on the final tree, and `bin/repr-scheme
+   roundtrip` under the real executable with the table of item 1 (a) if chosen. Chez was present, so nothing about
+   the oracle was skipped.
